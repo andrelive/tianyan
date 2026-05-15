@@ -211,15 +211,24 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use crate::executor::types::{Action, StepResult};
-use crate::executor::{Executor, ExecutorTrait};
+use serde_json::Value;
+use tokio::task::JoinSet;
+
+use crate::executor::types::ExecutorError;
+use crate::executor::{
+    execute_command_action, execute_read_file, execute_run_tests, execute_search_code,
+    execute_verify_build, execute_write_file,
+};
 use crate::model::ChatCompletionRequest;
 use crate::model::ModelService;
 use crate::planner::config::PlannerConfig;
-use crate::planner::types::PlannerError;
-use crate::planner::types::{Plan, PlannerContext, PlannerMutation, PlannerOutput};
-use crate::skills::SkillExecutor;
+use crate::planner::types::{
+    Action, FailureHandling, Plan, PlannerContext, PlannerError, PlannerMutation, PlannerOutput,
+    Step, StepResult,
+};
+use crate::skills::{SkillExecutionRequest, SkillExecutor};
 
 pub mod config;
 pub mod context;
@@ -266,7 +275,6 @@ pub trait PlannerTrait: Send {
 pub struct Planner {
     depth: usize,
     config: PlannerConfig,
-    executor: Arc<dyn ExecutorTrait>,
     model_service: Arc<dyn ModelService>,
     skill_executor: Option<Arc<SkillExecutor>>,
 }
@@ -280,7 +288,6 @@ impl Planner {
     pub fn new(depth: usize, model_service: Arc<dyn ModelService>, config: PlannerConfig) -> Self {
         Self {
             depth,
-            executor: Arc::new(Executor::new(config.executor_max_concurrency)),
             config,
             model_service,
             skill_executor: None,
@@ -289,9 +296,6 @@ impl Planner {
 
     /// 设置技能执行器。
     pub fn with_skill_executor(mut self, skill_executor: Arc<SkillExecutor>) -> Self {
-        let executor = Executor::new(self.config.executor_max_concurrency)
-            .with_skill_executor(skill_executor.clone());
-        self.executor = Arc::new(executor);
         self.skill_executor = Some(skill_executor);
         self
     }
@@ -330,14 +334,14 @@ impl Planner {
                 PlannerOutput::Answer(answer) => StepResult {
                     step_id: 0,
                     success: true,
-                    output: serde_json::Value::String(answer),
+                    output: Value::String(answer),
                     error: None,
                     actual_importance: None,
                 },
                 PlannerOutput::Clarification { questions, .. } => StepResult {
                     step_id: 0,
                     success: false,
-                    output: serde_json::Value::Null,
+                    output: Value::Null,
                     error: Some(format!(
                         "子 Planner 需要追问: {}",
                         questions
@@ -352,7 +356,7 @@ impl Planner {
             Err(e) => StepResult {
                 step_id: 0,
                 success: false,
-                output: serde_json::Value::Null,
+                output: Value::Null,
                 error: Some(format!("子 Planner 执行失败: {}", e)),
                 actual_importance: Some(0.1),
             },
@@ -458,13 +462,11 @@ impl Planner {
                         .iter()
                         .partition(|s| matches!(s.action, Action::SubPlanner { .. }));
 
-                    // 执行普通步骤（通过 Executor）
+                    // 执行普通步骤
                     let mut results = if normal_steps.is_empty() {
                         vec![]
                     } else {
-                        self.executor
-                            .execute_steps(normal_steps.into_iter().cloned().collect())
-                            .await
+                        self.execute_steps(normal_steps.into_iter().cloned().collect()).await
                     };
 
                     // 执行子 Planner 步骤（Planner 自身处理）
@@ -575,6 +577,141 @@ impl Planner {
         );
 
         self.call_llm(&prompt).await
+    }
+
+    async fn execute_steps(&self, steps: Vec<Step>) -> Vec<StepResult> {
+        let planner = self.clone();
+        let max_concurrency = self.config.executor_max_concurrency;
+        let mut results = Vec::with_capacity(steps.len());
+        let mut join_set: JoinSet<StepResult> = JoinSet::new();
+
+        for step in steps {
+            let planner_clone = planner.clone();
+            join_set.spawn(async move { planner_clone.execute_step(step).await });
+
+            if join_set.len() >= max_concurrency {
+                match join_set.join_next().await {
+                    Some(Ok(result)) => results.push(result),
+                    Some(Err(e)) => tracing::error!("步骤任务异常: {}", e),
+                    None => {}
+                }
+            }
+        }
+
+        while let Some(result) = join_set.join_next().await {
+            match result {
+                Ok(r) => results.push(r),
+                Err(e) => tracing::error!("步骤任务异常: {}", e),
+            }
+        }
+
+        results.sort_by_key(|r| r.step_id);
+        results
+    }
+
+    async fn execute_step(&self, step: Step) -> StepResult {
+        let mut retries = 0;
+        let max_retries = match &step.on_failure {
+            FailureHandling::Retry { max_retries } => *max_retries,
+            _ => 0,
+        };
+
+        loop {
+            match self.execute_action(&step.action).await {
+                Ok(output) => {
+                    return StepResult {
+                        step_id: step.step_id,
+                        success: true,
+                        output,
+                        error: None,
+                        actual_importance: None,
+                    };
+                }
+                Err(e) => {
+                    retries += 1;
+                    match &step.on_failure {
+                        FailureHandling::Ignore => {
+                            return StepResult {
+                                step_id: step.step_id,
+                                success: false,
+                                output: Value::Null,
+                                error: Some(e.to_string()),
+                                actual_importance: Some(0.1),
+                            };
+                        }
+                        FailureHandling::Abort { error_message } => {
+                            return StepResult {
+                                step_id: step.step_id,
+                                success: false,
+                                output: Value::Null,
+                                error: Some(format!("{}: {}", error_message, e)),
+                                actual_importance: Some(0.1),
+                            };
+                        }
+                        FailureHandling::Retry { .. } => {
+                            if retries > max_retries {
+                                return StepResult {
+                                    step_id: step.step_id,
+                                    success: false,
+                                    output: Value::Null,
+                                    error: Some(format!("重试 {} 次后仍失败: {}", retries, e)),
+                                    actual_importance: Some(0.1),
+                                };
+                            }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn execute_action(&self, action: &Action) -> Result<Value, ExecutorError> {
+        match action {
+            Action::ReadFile { path } => execute_read_file(path).await,
+            Action::WriteFile { path, content } => execute_write_file(path, content).await,
+            Action::ExecuteCommand { command, cwd, timeout_secs } => {
+                execute_command_action(command, cwd.as_deref(), *timeout_secs).await
+            }
+            Action::SearchCode { query, scope } => {
+                execute_search_code(query, scope.as_deref()).await
+            }
+            Action::CallSkill { skill_id, parameters } => {
+                if let Some(ref skill_executor) = self.skill_executor {
+                    let params: std::collections::HashMap<String, Value> = parameters.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    let request = SkillExecutionRequest::new(skill_id.clone(), params);
+                    match skill_executor.execute(request).await {
+                        Ok(result) => {
+                            let mut data = std::collections::HashMap::new();
+                            if let Some(output) = result.output {
+                                data.insert("output".to_string(), Value::String(output));
+                            }
+                            if let Some(error) = result.error {
+                                data.insert("error".to_string(), Value::String(error));
+                            }
+                            if let Some(exit_code) = result.exit_code {
+                                data.insert("exit_code".to_string(), Value::Number(exit_code.into()));
+                            }
+                            data.insert("execution_time_ms".to_string(), Value::Number(result.execution_time_ms.into()));
+                            data.insert("success".to_string(), Value::Bool(result.success));
+                            Ok(Value::Object(data.into_iter().collect()))
+                        }
+                        Err(e) => Err(ExecutorError::SkillExecution(e.to_string())),
+                    }
+                } else {
+                    Err(ExecutorError::SkillExecution("SkillExecutor 未配置，无法执行 CallSkill".to_string()))
+                }
+            }
+            Action::RunTests { command, cwd, timeout_secs } => {
+                execute_run_tests(command, cwd.as_deref(), *timeout_secs).await
+            }
+            Action::VerifyBuild { command, cwd, timeout_secs } => {
+                execute_verify_build(command, cwd.as_deref(), *timeout_secs).await
+            }
+            Action::SubPlanner { .. } => {
+                Err(ExecutorError::Internal("SubPlanner 动作不应传入 execute_steps，应由 Planner 预处理".to_string()))
+            }
+        }
     }
 }
 

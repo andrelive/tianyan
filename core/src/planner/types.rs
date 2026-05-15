@@ -1,11 +1,63 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::time::Instant;
 
 use crate::common::types::Message;
 use crate::context::types::ContextWindow;
 
 // 从 executor 层导入执行契约类型（依赖反转）
-pub use crate::executor::{Action, FailureHandling, Step, StepResult};
+pub use crate::executor::Action;
+
+/// 执行步骤
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Step {
+    /// 步骤 ID（在同轮计划中唯一）
+    pub step_id: usize,
+    /// 步骤描述（给 LLM 看的，帮助理解这个步骤的目的）
+    pub description: String,
+    /// 具体执行的动作
+    pub action: Action,
+    /// 失败处理策略
+    pub on_failure: FailureHandling,
+    /// Planner 预判的重要性（0-1）
+    pub expected_importance: f32,
+}
+
+/// 失败处理策略
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum FailureHandling {
+    /// 忽略，继续执行
+    #[serde(rename = "Ignore")]
+    Ignore,
+    /// 报错，终止执行
+    #[serde(rename = "Abort")]
+    Abort {
+        #[serde(rename = "error_message")]
+        error_message: String,
+    },
+    /// 重试
+    #[serde(rename = "Retry")]
+    Retry {
+        #[serde(rename = "max_retries")]
+        max_retries: usize,
+    },
+}
+
+/// 步骤执行结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepResult {
+    /// 对应的步骤 ID
+    pub step_id: usize,
+    /// 是否执行成功
+    pub success: bool,
+    /// 执行结果（JSON 格式）
+    pub output: Value,
+    /// 错误信息（如果执行失败）
+    pub error: Option<String>,
+    /// 实际重要性（可选，用于 Executor 修正）
+    pub actual_importance: Option<f32>,
+}
 
 /// Planner 运行的输出结果。
 ///
@@ -110,8 +162,8 @@ impl PlannerContext {
     /// 构建执行上下文摘要（JSON 格式）。
     ///
     /// - returns: 执行历史摘要
-    pub fn build_execution_summary(&self) -> serde_json::Value {
-        let turns: Vec<serde_json::Value> = self
+    pub fn build_execution_summary(&self) -> Value {
+        let turns: Vec<Value> = self
             .execution_turns
             .iter()
             .map(|t| {
@@ -128,7 +180,7 @@ impl PlannerContext {
                 })
             })
             .collect();
-        serde_json::Value::Array(turns)
+        Value::Array(turns)
     }
 }
 

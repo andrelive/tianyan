@@ -1,14 +1,10 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::task::JoinSet;
 
-use super::traits::ExecutorTrait;
 use super::types::ExecutorError;
-use super::types::{Action, FailureHandling, Step, StepResult};
-use crate::skills::{SkillExecutionRequest, SkillExecutor};
+use crate::skills::SkillExecutor;
 
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 
@@ -69,9 +65,7 @@ impl SecurityPolicy {
     /// 检查命令是否被允许执行。
     pub fn check_command(&self, command: &str) -> Result<(), ExecutorError> {
         let cmd_name = command.split_whitespace().next().unwrap_or(command);
-
         let pure_name = extract_command_base(cmd_name);
-
         let interpreters = ["cmd", "powershell", "pwsh", "bash", "sh", "wsl", "wsl.exe"];
         if interpreters.contains(&pure_name.as_str()) {
             return Err(ExecutorError::SecurityViolation(format!(
@@ -79,7 +73,6 @@ impl SecurityPolicy {
                 cmd_name
             )));
         }
-
         for blocked in &self.blocked_commands {
             let blocked_lower = blocked.to_lowercase();
             if pure_name == blocked_lower {
@@ -89,7 +82,6 @@ impl SecurityPolicy {
                 )));
             }
         }
-
         if let Some(allowed) = &self.allowed_commands {
             let is_allowed = allowed.iter().any(|a| a.to_lowercase() == pure_name);
             if !is_allowed {
@@ -99,7 +91,6 @@ impl SecurityPolicy {
                 )));
             }
         }
-
         Ok(())
     }
 
@@ -115,255 +106,31 @@ impl SecurityPolicy {
     }
 }
 
-/// Executor 结构体。
-///
-/// 负责机械地执行 Planner 生成的步骤，无思考能力。
-/// 支持并行执行、失败重试、超时控制等功能。
-///
-/// 注意：SubPlanner 类型的 Action 不应传入 Executor。
-/// Planner 应在调用 Executor 之前自行处理 SubPlanner 动作。
+/// Executor 结构体（已废弃）。
+#[deprecated(since = "0.2.0", note = "Use ToolRegistry instead")]
 pub struct Executor {
     max_concurrency: usize,
     skill_executor: Option<Arc<SkillExecutor>>,
 }
 
+#[allow(deprecated)]
 impl Executor {
-    /// 创建新的 Executor。
+    /// 创建新的 Executor（已废弃）。
+    #[deprecated(since = "0.2.0", note = "Use ToolRegistry::new instead")]
     pub fn new(max_concurrency: usize) -> Self {
-        Self {
-            max_concurrency,
-            skill_executor: None,
-        }
+        Self { max_concurrency, skill_executor: None }
     }
 
-    /// 设置技能执行器。
+    /// 设置技能执行器（已废弃）。
+    #[deprecated(since = "0.2.0", note = "Use ToolRegistry::with_skill_executor instead")]
     pub fn with_skill_executor(mut self, skill_executor: Arc<SkillExecutor>) -> Self {
         self.skill_executor = Some(skill_executor);
         self
     }
-
-    /// 执行步骤（并行）。
-    ///
-    /// - `steps` - 要执行的步骤列表（不应包含 SubPlanner 动作）
-    /// - returns: 按 step_id 排序的执行结果列表
-    pub async fn execute_steps(&self, steps: Vec<Step>) -> Vec<StepResult> {
-        let executor = Arc::new(Self {
-            max_concurrency: self.max_concurrency,
-            skill_executor: self.skill_executor.clone(),
-        });
-        let mut results = Vec::with_capacity(steps.len());
-
-        let mut join_set: JoinSet<StepResult> = JoinSet::new();
-
-        for step in steps {
-            let executor_clone = executor.clone();
-            join_set.spawn(async move { executor_clone.execute_step(step).await });
-
-            if join_set.len() >= self.max_concurrency {
-                match join_set.join_next().await {
-                    Some(Ok(result)) => results.push(result),
-                    Some(Err(e)) => {
-                        tracing::error!("步骤任务异常: {}", e);
-                    }
-                    None => {}
-                }
-            }
-        }
-
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok(r) => results.push(r),
-                Err(e) => {
-                    tracing::error!("步骤任务异常: {}", e);
-                }
-            }
-        }
-
-        results.sort_by_key(|r| r.step_id);
-        results
-    }
-
-    /// 执行单个步骤。
-    async fn execute_step(&self, step: Step) -> StepResult {
-        let mut retries = 0;
-        let max_retries = match &step.on_failure {
-            FailureHandling::Retry { max_retries } => *max_retries,
-            _ => 0,
-        };
-
-        loop {
-            match self.execute_action(&step.action).await {
-                Ok(output) => {
-                    return StepResult {
-                        step_id: step.step_id,
-                        success: true,
-                        output,
-                        error: None,
-                        actual_importance: None,
-                    };
-                }
-                Err(e) => {
-                    retries += 1;
-
-                    match &step.on_failure {
-                        FailureHandling::Ignore => {
-                            return StepResult {
-                                step_id: step.step_id,
-                                success: false,
-                                output: Value::Null,
-                                error: Some(e.to_string()),
-                                actual_importance: Some(0.1),
-                            };
-                        }
-                        FailureHandling::Abort { error_message } => {
-                            return StepResult {
-                                step_id: step.step_id,
-                                success: false,
-                                output: Value::Null,
-                                error: Some(format!("{}: {}", error_message, e)),
-                                actual_importance: Some(0.1),
-                            };
-                        }
-                        FailureHandling::Retry { .. } => {
-                            if retries > max_retries {
-                                return StepResult {
-                                    step_id: step.step_id,
-                                    success: false,
-                                    output: Value::Null,
-                                    error: Some(format!("重试 {} 次后仍失败: {}", retries, e)),
-                                    actual_importance: Some(0.1),
-                                };
-                            }
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// 执行具体动作。
-    ///
-    /// 注意：SubPlanner 动作不应到达此方法。
-    /// Planner 应在调用 execute_steps 之前预处理 SubPlanner 步骤。
-    async fn execute_action(&self, action: &Action) -> Result<Value, ExecutorError> {
-        match action {
-            Action::ReadFile { path } => execute_read_file(path).await,
-            Action::WriteFile { path, content } => execute_write_file(path, content).await,
-            Action::ExecuteCommand {
-                command,
-                cwd,
-                timeout_secs,
-            } => execute_command_action(command, cwd.as_deref(), *timeout_secs).await,
-            Action::SearchCode { query, scope } => {
-                execute_search_code(query, scope.as_deref()).await
-            }
-            Action::CallSkill {
-                skill_id,
-                parameters,
-            } => {
-                if let Some(ref skill_executor) = self.skill_executor {
-                    let params: HashMap<String, Value> = parameters
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    let request = SkillExecutionRequest::new(skill_id.clone(), params);
-                    match skill_executor.execute(request).await {
-                        Ok(result) => {
-                            let mut data = HashMap::new();
-                            if let Some(output) = result.output {
-                                data.insert("output".to_string(), Value::String(output));
-                            }
-                            if let Some(error) = result.error {
-                                data.insert("error".to_string(), Value::String(error));
-                            }
-                            if let Some(exit_code) = result.exit_code {
-                                data.insert(
-                                    "exit_code".to_string(),
-                                    Value::Number(exit_code.into()),
-                                );
-                            }
-                            data.insert(
-                                "execution_time_ms".to_string(),
-                                Value::Number(result.execution_time_ms.into()),
-                            );
-                            data.insert("success".to_string(), Value::Bool(result.success));
-                            Ok(Value::Object(data.into_iter().collect()))
-                        }
-                        Err(e) => Err(ExecutorError::SkillExecution(e.to_string())),
-                    }
-                } else {
-                    Err(ExecutorError::SkillExecution(
-                        "SkillExecutor 未配置，无法执行 CallSkill".to_string(),
-                    ))
-                }
-            }
-            Action::RunTests {
-                command,
-                cwd,
-                timeout_secs,
-            } => {
-                let output = run_command(command, cwd.as_deref(), *timeout_secs).await?;
-                let stdout = output["stdout"].as_str().unwrap_or("");
-                let stderr = output["stderr"].as_str().unwrap_or("");
-                let exit_code = output["exit_code"].as_i64().unwrap_or(-1);
-
-                let passed = count_test_passed(stdout);
-                let failures: Vec<String> = extract_test_failures(stdout, stderr);
-
-                Ok(json!({
-                    "success": exit_code == 0,
-                    "passed": passed,
-                    "failed": failures.len(),
-                    "failures": failures,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "exit_code": exit_code,
-                }))
-            }
-            Action::VerifyBuild {
-                command,
-                cwd,
-                timeout_secs,
-            } => {
-                let output = run_command(command, cwd.as_deref(), *timeout_secs).await?;
-                let stdout = output["stdout"].as_str().unwrap_or("");
-                let stderr = output["stderr"].as_str().unwrap_or("");
-                let exit_code = output["exit_code"].as_i64().unwrap_or(-1);
-
-                let errors: Vec<String> = extract_build_errors(stdout, stderr);
-
-                Ok(json!({
-                    "success": exit_code == 0,
-                    "error_count": errors.len(),
-                    "errors": errors,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "exit_code": exit_code,
-                }))
-            }
-            Action::SubPlanner { .. } => {
-                // SubPlanner 应由 Planner 在调用 execute_steps 之前预处理。
-                // 如果到达此处，说明 Planner 没有正确处理，返回明确错误。
-                Err(ExecutorError::Internal(
-                    "SubPlanner 动作不应传入 Executor.execute_steps，应由 Planner 预处理"
-                        .to_string(),
-                ))
-            }
-        }
-    }
-
-}
-
-#[async_trait::async_trait]
-impl ExecutorTrait for Executor {
-    async fn execute_steps(&self, steps: Vec<Step>) -> Vec<StepResult> {
-        self.execute_steps(steps).await
-    }
 }
 
 /// 执行 ExecuteCommand 动作（无安全策略依赖，纯函数）。
-async fn execute_command_action(
+pub async fn execute_command_action(
     command: &str,
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
@@ -437,15 +204,6 @@ async fn execute_command_action(
     }
 }
 
-/// 运行命令并返回结构化输出。
-async fn run_command(
-    command: &str,
-    cwd: Option<&str>,
-    timeout_secs: Option<u64>,
-) -> Result<Value, ExecutorError> {
-    execute_command_action(command, cwd, timeout_secs).await
-}
-
 /// 从 cargo test 输出中统计通过的测试数。
 fn count_test_passed(stdout: &str) -> usize {
     for line in stdout.lines().rev() {
@@ -511,14 +269,14 @@ fn extract_build_errors(stdout: &str, stderr: &str) -> Vec<String> {
     errors
 }
 
-pub(crate) async fn execute_read_file(path: &str) -> Result<Value, ExecutorError> {
+pub async fn execute_read_file(path: &str) -> Result<Value, ExecutorError> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| ExecutorError::FileError(e.to_string()))?;
     Ok(Value::String(content))
 }
 
-pub(crate) async fn execute_write_file(
+pub async fn execute_write_file(
     path: &str,
     content: &str,
 ) -> Result<Value, ExecutorError> {
@@ -528,7 +286,7 @@ pub(crate) async fn execute_write_file(
     Ok(Value::String("写入成功".to_string()))
 }
 
-pub(crate) async fn execute_search_code(
+pub async fn execute_search_code(
     query: &str,
     scope: Option<&str>,
 ) -> Result<Value, ExecutorError> {
@@ -587,10 +345,56 @@ pub(crate) async fn execute_search_code(
     }))
 }
 
+pub async fn execute_run_tests(
+    command: &str,
+    cwd: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> Result<Value, ExecutorError> {
+    let output = execute_command_action(command, cwd, timeout_secs).await?;
+    let stdout = output["stdout"].as_str().unwrap_or("");
+    let stderr = output["stderr"].as_str().unwrap_or("");
+    let exit_code = output["exit_code"].as_i64().unwrap_or(-1);
+
+    let passed = count_test_passed(stdout);
+    let failures: Vec<String> = extract_test_failures(stdout, stderr);
+
+    Ok(json!({
+        "success": exit_code == 0,
+        "passed": passed,
+        "failed": failures.len(),
+        "failures": failures,
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit_code": exit_code,
+    }))
+}
+
+pub async fn execute_verify_build(
+    command: &str,
+    cwd: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> Result<Value, ExecutorError> {
+    let output = execute_command_action(command, cwd, timeout_secs).await?;
+    let stdout = output["stdout"].as_str().unwrap_or("");
+    let stderr = output["stderr"].as_str().unwrap_or("");
+    let exit_code = output["exit_code"].as_i64().unwrap_or(-1);
+
+    let errors: Vec<String> = extract_build_errors(stdout, stderr);
+
+    Ok(json!({
+        "success": exit_code == 0,
+        "error_count": errors.len(),
+        "errors": errors,
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit_code": exit_code,
+    }))
+}
+
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
-    use crate::executor::types::{Action, FailureHandling, Step};
 
     #[tokio::test]
     async fn test_executor_new() {
@@ -599,205 +403,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_steps_empty() {
-        let executor = Executor::new(5);
-        let steps: Vec<Step> = vec![];
-        let results = executor.execute_steps(steps).await;
-        assert!(results.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_execute_read_file() {
-        let executor = Executor::new(5);
-        let step = Step {
-            step_id: 1,
-            description: "测试读取文件".to_string(),
-            action: Action::ReadFile {
-                path: "Cargo.toml".to_string(),
-            },
-            on_failure: FailureHandling::Ignore,
-            expected_importance: 0.8,
-        };
-
-        let results = executor.execute_steps(vec![step]).await;
-        assert_eq!(results.len(), 1);
-        assert!(results[0].success);
+        let result = execute_read_file("Cargo.toml").await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_execute_write_file() {
-        let executor = Executor::new(5);
         let temp_path = format!(
             "{}/test_executor_{}.txt",
             std::env::temp_dir().display(),
             std::process::id()
         );
-
-        let step = Step {
-            step_id: 1,
-            description: "测试写入文件".to_string(),
-            action: Action::WriteFile {
-                path: temp_path.clone(),
-                content: "测试内容".to_string(),
-            },
-            on_failure: FailureHandling::Ignore,
-            expected_importance: 0.8,
-        };
-
-        let results = executor.execute_steps(vec![step]).await;
-        assert_eq!(results.len(), 1);
-        assert!(results[0].success);
-
+        let result = execute_write_file(&temp_path, "测试内容").await;
+        assert!(result.is_ok());
         let _ = std::fs::remove_file(temp_path);
     }
 
     #[tokio::test]
     async fn test_execute_command() {
-        let executor = Executor::new(5);
-        let step = Step {
-            step_id: 1,
-            description: "测试执行命令".to_string(),
-            action: Action::ExecuteCommand {
-                command: "echo Hello".to_string(),
-                cwd: None,
-                timeout_secs: Some(5),
-            },
-            on_failure: FailureHandling::Ignore,
-            expected_importance: 0.8,
-        };
-
-        let results = executor.execute_steps(vec![step]).await;
-        assert_eq!(results.len(), 1);
-        assert!(results[0].success);
-    }
-
-    #[tokio::test]
-    async fn test_execute_steps_concurrent() {
-        let executor = Executor::new(2);
-
-        let steps = vec![
-            Step {
-                step_id: 1,
-                description: "任务 1".to_string(),
-                action: Action::ExecuteCommand {
-                    command: "echo 1".to_string(),
-                    cwd: None,
-                    timeout_secs: None,
-                },
-                on_failure: FailureHandling::Ignore,
-                expected_importance: 0.5,
-            },
-            Step {
-                step_id: 2,
-                description: "任务 2".to_string(),
-                action: Action::ExecuteCommand {
-                    command: "echo 2".to_string(),
-                    cwd: None,
-                    timeout_secs: None,
-                },
-                on_failure: FailureHandling::Ignore,
-                expected_importance: 0.5,
-            },
-            Step {
-                step_id: 3,
-                description: "任务 3".to_string(),
-                action: Action::ExecuteCommand {
-                    command: "echo 3".to_string(),
-                    cwd: None,
-                    timeout_secs: None,
-                },
-                on_failure: FailureHandling::Ignore,
-                expected_importance: 0.5,
-            },
-        ];
-
-        let results = executor.execute_steps(steps).await;
-        assert_eq!(results.len(), 3);
-        assert_eq!(results[0].step_id, 1);
-        assert_eq!(results[1].step_id, 2);
-        assert_eq!(results[2].step_id, 3);
-    }
-
-    #[tokio::test]
-    async fn test_failure_handling_ignore() {
-        let executor = Executor::new(5);
-        let step = Step {
-            step_id: 1,
-            description: "测试失败处理".to_string(),
-            action: Action::ReadFile {
-                path: "不存在的文件.txt".to_string(),
-            },
-            on_failure: FailureHandling::Ignore,
-            expected_importance: 0.8,
-        };
-
-        let results = executor.execute_steps(vec![step]).await;
-        assert_eq!(results.len(), 1);
-        assert!(!results[0].success);
-        assert!(results[0].error.is_some());
-        assert_eq!(results[0].actual_importance, Some(0.1));
-    }
-
-    #[tokio::test]
-    async fn test_failure_handling_abort() {
-        let executor = Executor::new(5);
-        let step = Step {
-            step_id: 1,
-            description: "测试终止处理".to_string(),
-            action: Action::ReadFile {
-                path: "不存在的文件.txt".to_string(),
-            },
-            on_failure: FailureHandling::Abort {
-                error_message: "关键文件缺失".to_string(),
-            },
-            expected_importance: 0.9,
-        };
-
-        let results = executor.execute_steps(vec![step]).await;
-        assert_eq!(results.len(), 1);
-        assert!(!results[0].success);
-        assert!(results[0].error.as_ref().unwrap().contains("关键文件缺失"));
-    }
-
-    #[tokio::test]
-    async fn test_failure_handling_retry() {
-        let executor = Executor::new(5);
-        let step = Step {
-            step_id: 1,
-            description: "测试重试处理".to_string(),
-            action: Action::ReadFile {
-                path: "不存在的文件.txt".to_string(),
-            },
-            on_failure: FailureHandling::Retry { max_retries: 2 },
-            expected_importance: 0.8,
-        };
-
-        let results = executor.execute_steps(vec![step]).await;
-        assert_eq!(results.len(), 1);
-        assert!(!results[0].success);
-        assert!(results[0].error.as_ref().unwrap().contains("重试"));
-    }
-
-    #[tokio::test]
-    async fn test_sub_planner_rejected() {
-        let executor = Executor::new(5);
-        let step = Step {
-            step_id: 1,
-            description: "子规划器".to_string(),
-            action: Action::SubPlanner {
-                task: "分析代码".to_string(),
-            },
-            on_failure: FailureHandling::Ignore,
-            expected_importance: 0.8,
-        };
-
-        let results = executor.execute_steps(vec![step]).await;
-        assert_eq!(results.len(), 1);
-        assert!(!results[0].success);
-        assert!(results[0]
-            .error
-            .as_ref()
-            .unwrap()
-            .contains("Planner 预处理"));
+        let result = execute_command_action("echo Hello", None, Some(5)).await;
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output["stdout"].as_str().unwrap_or("").contains("Hello"));
     }
 }
