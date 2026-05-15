@@ -12,7 +12,6 @@ fn make_test_config() -> TianyanConfig {
         models: vec!["test-model".to_string()],
         service_type: Default::default(),
         timeout: 30,
-        max_retries: 2,
         enabled: true,
         priority: 0,
         headers: std::collections::HashMap::new(),
@@ -41,34 +40,9 @@ async fn test_config_save_and_reload_roundtrip() {
 }
 
 #[tokio::test]
-async fn test_config_validate_rejects_zero_max_iterations() {
-    let mut config = make_test_config();
-    config.planner.max_iterations = 0;
-    let result = config.validate();
-    assert!(result.is_err(), "零迭代应失败");
-    assert!(
-        result.unwrap_err().contains("max_iterations"),
-        "错误应提及 max_iterations"
-    );
-}
-
-#[tokio::test]
-async fn test_config_validate_rejects_high_max_retries() {
-    let mut config = make_test_config();
-    config.models.services[0].max_retries = 100;
-    let result = config.validate();
-    assert!(result.is_err(), "max_retries > 10 应失败");
-    assert!(
-        result.unwrap_err().contains("重试次数"),
-        "错误应提及重试次数"
-    );
-}
-
-#[tokio::test]
 async fn test_config_defaults_are_reasonable() {
     let config = make_test_config();
     assert_eq!(config.agent.default_top_k, 5);
-    assert_eq!(config.planner.max_iterations, 10);
     assert_eq!(config.memory.consolidation_interval, 3600);
     assert_eq!(config.retrieval.default_top_k, 10);
     assert_eq!(config.summary_service.scan_interval_secs, 300);

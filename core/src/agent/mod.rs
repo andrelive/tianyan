@@ -16,10 +16,15 @@ mod tools;
 mod types;
 
 pub use crate::config::AgentConfig;
-pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopError, AgentLoopResult};
 pub use builder::AgentBuilder;
 pub use coordinator::{Agent, AgentCoordinator};
+pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopError, AgentLoopResult};
 pub use session_state::{SessionState, SessionStateManager};
+pub use tool_params::{
+    AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams,
+    ReadFileParams, RunTestsParams, SearchCodeParams, VerifyBuildParams, WriteFileParams,
+};
+pub use tool_registry::{ToolExecutionError, ToolRegistry};
 pub use tools::{AgentTool, ToolResult};
 pub use types::{
     AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
