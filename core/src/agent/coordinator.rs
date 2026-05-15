@@ -517,7 +517,7 @@ impl Clone for Agent {
 
 /// 格式化追问问题为用户友好的文本
 fn format_clarification_questions(
-    questions: &[crate::planner::types::ClarificationQuestion],
+    questions: &[crate::agent::types::ClarificationQuestion],
 ) -> String {
     let mut content = String::from("为了更好帮助您，需要以下信息：\n\n");
 
@@ -553,7 +553,7 @@ fn extract_skill_calls_from_turns(_turns: &[String]) -> Vec<SkillCallInfo> {
 mod tests {
     #[test]
     fn test_format_clarification_questions() {
-        use crate::planner::types::{ClarificationQuestion, QuestionType};
+        use crate::agent::types::{ClarificationQuestion, QuestionType};
 
         let questions = vec![
             ClarificationQuestion {

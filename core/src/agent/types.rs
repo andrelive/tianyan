@@ -9,6 +9,25 @@ use crate::common::error::Result;
 use crate::common::types::TokenUsage;
 use crate::context::RetrievalTrace;
 
+/// 追问问题
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClarificationQuestion {
+    pub question: String,
+    pub question_type: QuestionType,
+    pub options: Option<Vec<String>>,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum QuestionType {
+    #[serde(rename = "OpenEnded")]
+    OpenEnded,
+    #[serde(rename = "Choice")]
+    Choice,
+    #[serde(rename = "Confirmation")]
+    Confirmation,
+}
+
 /// 用于跟踪执行状态的智能体状态。
 #[derive(Debug, Clone, Default)]
 pub struct AgentState {
@@ -123,8 +142,7 @@ pub struct AgentStreamChunk {
     pub skill_calls: Option<Vec<SkillCallInfo>>,
 }
 
-/// 追问问题类型。
-pub use crate::planner::types::ClarificationQuestion;
+
 
 /// 流式事件发送器（用于在Planner-Executor循环中实时推送事件）。
 #[derive(Clone)]

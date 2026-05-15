@@ -22,5 +22,6 @@ pub use coordinator::{Agent, AgentCoordinator};
 pub use session_state::{SessionState, SessionStateManager};
 pub use tools::{AgentTool, ToolResult};
 pub use types::{
-    AgentResponse, AgentState, AgentStreamChunk, SkillCallInfo, StreamChunkType, StreamEventSender,
+    AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
+    SkillCallInfo, StreamChunkType, StreamEventSender,
 };
