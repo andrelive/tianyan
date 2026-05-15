@@ -248,25 +248,15 @@ impl Executor {
     /// Planner 应在调用 execute_steps 之前预处理 SubPlanner 步骤。
     async fn execute_action(&self, action: &Action) -> Result<Value, ExecutorError> {
         match action {
-            Action::ReadFile { path } => {
-                let content = tokio::fs::read_to_string(path)
-                    .await
-                    .map_err(|e| ExecutorError::FileError(e.to_string()))?;
-                Ok(Value::String(content))
-            }
-            Action::WriteFile { path, content } => {
-                tokio::fs::write(path, content)
-                    .await
-                    .map_err(|e| ExecutorError::FileError(e.to_string()))?;
-                Ok(Value::String("写入成功".to_string()))
-            }
+            Action::ReadFile { path } => execute_read_file(path).await,
+            Action::WriteFile { path, content } => execute_write_file(path, content).await,
             Action::ExecuteCommand {
                 command,
                 cwd,
                 timeout_secs,
             } => execute_command_action(command, cwd.as_deref(), *timeout_secs).await,
             Action::SearchCode { query, scope } => {
-                self.execute_search_code(query, scope.as_deref()).await
+                execute_search_code(query, scope.as_deref()).await
             }
             Action::CallSkill {
                 skill_id,
@@ -363,66 +353,6 @@ impl Executor {
         }
     }
 
-    /// 执行代码搜索。
-    async fn execute_search_code(
-        &self,
-        query: &str,
-        scope: Option<&str>,
-    ) -> Result<Value, ExecutorError> {
-        let mut cmd = tokio::process::Command::new("rg");
-        cmd.arg("--json")
-            .arg("--line-number")
-            .arg("--max-count")
-            .arg("20")
-            .arg(query);
-
-        if let Some(dir) = scope {
-            cmd.current_dir(dir);
-        }
-
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| ExecutorError::SearchError(format!("执行 ripgrep 失败：{}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("no matches found") || stderr.is_empty() {
-                return Ok(json!({
-                    "query": query,
-                    "scope": scope,
-                    "results": [],
-                    "count": 0
-                }));
-            }
-            return Err(ExecutorError::SearchError(format!(
-                "ripgrep 执行失败：{}",
-                stderr
-            )));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut results = Vec::new();
-
-        for line in stdout.lines() {
-            if let Ok(json_value) = serde_json::from_str::<Value>(line) {
-                if let Some(data) = json_value.get("data") {
-                    results.push(json!({
-                        "path": data.get("path").map(|p| p.as_str().unwrap_or("")),
-                        "line_number": data.get("line_number").map(|n| n.as_u64().unwrap_or(0)),
-                        "text": data.get("text").map(|t| t.as_str().unwrap_or("")),
-                    }));
-                }
-            }
-        }
-
-        Ok(json!({
-            "query": query,
-            "scope": scope,
-            "results": results,
-            "count": results.len()
-        }))
-    }
 }
 
 #[async_trait::async_trait]
@@ -579,6 +509,82 @@ fn extract_build_errors(stdout: &str, stderr: &str) -> Vec<String> {
     }
 
     errors
+}
+
+pub(crate) async fn execute_read_file(path: &str) -> Result<Value, ExecutorError> {
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| ExecutorError::FileError(e.to_string()))?;
+    Ok(Value::String(content))
+}
+
+pub(crate) async fn execute_write_file(
+    path: &str,
+    content: &str,
+) -> Result<Value, ExecutorError> {
+    tokio::fs::write(path, content)
+        .await
+        .map_err(|e| ExecutorError::FileError(e.to_string()))?;
+    Ok(Value::String("写入成功".to_string()))
+}
+
+pub(crate) async fn execute_search_code(
+    query: &str,
+    scope: Option<&str>,
+) -> Result<Value, ExecutorError> {
+    let mut cmd = tokio::process::Command::new("rg");
+    cmd.arg("--json")
+        .arg("--line-number")
+        .arg("--max-count")
+        .arg("20")
+        .arg(query);
+
+    if let Some(dir) = scope {
+        cmd.current_dir(dir);
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| ExecutorError::SearchError(format!("执行 ripgrep 失败：{}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("no matches found") || stderr.is_empty() {
+            return Ok(json!({
+                "query": query,
+                "scope": scope,
+                "results": [],
+                "count": 0
+            }));
+        }
+        return Err(ExecutorError::SearchError(format!(
+            "ripgrep 执行失败：{}",
+            stderr
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut results = Vec::new();
+
+    for line in stdout.lines() {
+        if let Ok(json_value) = serde_json::from_str::<Value>(line) {
+            if let Some(data) = json_value.get("data") {
+                results.push(json!({
+                    "path": data.get("path").map(|p| p.as_str().unwrap_or("")),
+                    "line_number": data.get("line_number").map(|n| n.as_u64().unwrap_or(0)),
+                    "text": data.get("text").map(|t| t.as_str().unwrap_or("")),
+                }));
+            }
+        }
+    }
+
+    Ok(json!({
+        "query": query,
+        "scope": scope,
+        "results": results,
+        "count": results.len()
+    }))
 }
 
 #[cfg(test)]
