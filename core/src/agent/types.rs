@@ -142,8 +142,6 @@ pub struct AgentStreamChunk {
     pub skill_calls: Option<Vec<SkillCallInfo>>,
 }
 
-
-
 /// 流式事件发送器（用于在Planner-Executor循环中实时推送事件）。
 #[derive(Clone)]
 pub struct StreamEventSender {

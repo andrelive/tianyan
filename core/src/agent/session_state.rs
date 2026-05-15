@@ -58,7 +58,13 @@ impl SessionState {
     }
 
     pub fn recent_messages(&self, n: usize) -> Vec<Message> {
-        self.conversation.iter().rev().take(n).rev().cloned().collect()
+        self.conversation
+            .iter()
+            .rev()
+            .take(n)
+            .rev()
+            .cloned()
+            .collect()
     }
 
     pub fn message_count(&self) -> usize {
@@ -94,14 +100,19 @@ impl SessionState {
         if self.conversation.len() <= MAX_CONVERSATION_MESSAGES {
             return;
         }
-        let has_system_msg = !self.conversation.is_empty() && self.conversation[0].role == MessageRole::System;
+        let has_system_msg =
+            !self.conversation.is_empty() && self.conversation[0].role == MessageRole::System;
         let start = if has_system_msg {
             let keep_from = self.conversation.len().saturating_sub(KEEP_RECENT_MESSAGES);
-            if keep_from <= 1 { return; }
+            if keep_from <= 1 {
+                return;
+            }
             1
         } else {
             let keep_from = self.conversation.len().saturating_sub(KEEP_RECENT_MESSAGES);
-            if keep_from == 0 { return; }
+            if keep_from == 0 {
+                return;
+            }
             0
         };
         let keep_from = self.conversation.len().saturating_sub(KEEP_RECENT_MESSAGES);
@@ -122,18 +133,26 @@ pub struct SessionStateManager {
 
 impl SessionStateManager {
     pub fn new() -> Self {
-        Self { states: Arc::new(RwLock::new(HashMap::new())) }
+        Self {
+            states: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     pub async fn with_state<F, R>(&self, session_id: &str, f: F) -> R
-    where F: FnOnce(&mut SessionState) -> R {
+    where
+        F: FnOnce(&mut SessionState) -> R,
+    {
         let mut states = self.states.write().await;
-        let state = states.entry(session_id.to_string()).or_insert_with(|| SessionState::new(session_id));
+        let state = states
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionState::new(session_id));
         f(state)
     }
 
     pub async fn with_state_read<F, R>(&self, session_id: &str, f: F) -> Option<R>
-    where F: FnOnce(&SessionState) -> R {
+    where
+        F: FnOnce(&SessionState) -> R,
+    {
         let states = self.states.read().await;
         states.get(session_id).map(f)
     }
@@ -156,7 +175,9 @@ impl SessionStateManager {
 }
 
 impl Default for SessionStateManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -207,7 +228,9 @@ mod tests {
     #[tokio::test]
     async fn test_session_state_manager() {
         let manager = SessionStateManager::new();
-        let session_id = manager.with_state("session1", |state| state.session_id.clone()).await;
+        let session_id = manager
+            .with_state("session1", |state| state.session_id.clone())
+            .await;
         assert_eq!(session_id, "session1");
         let exists = manager.with_state_read("session1", |_| true).await;
         assert!(exists.is_some());

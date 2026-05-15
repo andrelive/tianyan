@@ -4,15 +4,40 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action_type")]
 pub enum Action {
-    ReadFile { path: String },
-    WriteFile { path: String, content: String },
-    ExecuteCommand { command: String, cwd: Option<String>, timeout_secs: Option<u64> },
-    SearchCode { query: String, scope: Option<String> },
+    ReadFile {
+        path: String,
+    },
+    WriteFile {
+        path: String,
+        content: String,
+    },
+    ExecuteCommand {
+        command: String,
+        cwd: Option<String>,
+        timeout_secs: Option<u64>,
+    },
+    SearchCode {
+        query: String,
+        scope: Option<String>,
+    },
     #[serde(skip)]
-    SubPlanner { task: String },
-    CallSkill { skill_id: String, parameters: serde_json::Map<String, Value> },
-    RunTests { command: String, cwd: Option<String>, timeout_secs: Option<u64> },
-    VerifyBuild { command: String, cwd: Option<String>, timeout_secs: Option<u64> },
+    SubPlanner {
+        task: String,
+    },
+    CallSkill {
+        skill_id: String,
+        parameters: serde_json::Map<String, Value>,
+    },
+    RunTests {
+        command: String,
+        cwd: Option<String>,
+        timeout_secs: Option<u64>,
+    },
+    VerifyBuild {
+        command: String,
+        cwd: Option<String>,
+        timeout_secs: Option<u64>,
+    },
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -49,7 +74,9 @@ mod tests {
 
     #[test]
     fn test_action_serialization() {
-        let action = Action::ReadFile { path: "test.txt".to_string() };
+        let action = Action::ReadFile {
+            path: "test.txt".to_string(),
+        };
         let json = serde_json::to_string(&action).unwrap();
         assert!(json.contains("ReadFile"));
     }

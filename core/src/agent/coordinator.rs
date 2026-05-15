@@ -249,7 +249,10 @@ impl Agent {
         }
 
         // 注入系统提示词
-        let system_prompt = state.context_window.as_ref().map(|w| w.system_prompt.clone());
+        let system_prompt = state
+            .context_window
+            .as_ref()
+            .map(|w| w.system_prompt.clone());
         if let Some(prompt) = system_prompt {
             if let Some(first) = state.conversation.first_mut() {
                 if first.role == MessageRole::System {
@@ -302,10 +305,15 @@ impl Agent {
             let agent_clone = self.clone();
             let state_clone = state.clone();
             let handle = tokio::spawn(async move {
-                if let Err(e) = agent_clone.extract_memories_from_session(&state_clone).await {
+                if let Err(e) = agent_clone
+                    .extract_memories_from_session(&state_clone)
+                    .await
+                {
                     tracing::warn!(error = %e, "记忆提取后台任务失败");
                 }
-                agent_clone.scan_and_promote_rules(&state_clone.session_id).await;
+                agent_clone
+                    .scan_and_promote_rules(&state_clone.session_id)
+                    .await;
                 if let Err(e) = agent_clone.learn_skills_from_session(&state_clone).await {
                     tracing::warn!(error = %e, "技能学习后台任务失败");
                 }
@@ -430,7 +438,10 @@ impl AgentCoordinator for Agent {
         }
 
         // 注入系统提示词
-        let system_prompt = state.context_window.as_ref().map(|w| w.system_prompt.clone());
+        let system_prompt = state
+            .context_window
+            .as_ref()
+            .map(|w| w.system_prompt.clone());
         if let Some(prompt) = system_prompt {
             if let Some(first) = state.conversation.first_mut() {
                 if first.role == MessageRole::System {
@@ -483,10 +494,15 @@ impl AgentCoordinator for Agent {
             let agent_clone = self.clone();
             let state_clone = state.clone();
             let handle = tokio::spawn(async move {
-                if let Err(e) = agent_clone.extract_memories_from_session(&state_clone).await {
+                if let Err(e) = agent_clone
+                    .extract_memories_from_session(&state_clone)
+                    .await
+                {
                     tracing::warn!(error = %e, "记忆提取后台任务失败");
                 }
-                agent_clone.scan_and_promote_rules(&state_clone.session_id).await;
+                agent_clone
+                    .scan_and_promote_rules(&state_clone.session_id)
+                    .await;
                 if let Err(e) = agent_clone.learn_skills_from_session(&state_clone).await {
                     tracing::warn!(error = %e, "技能学习后台任务失败");
                 }
@@ -525,7 +541,11 @@ impl AgentCoordinator for Agent {
                         .filter(|l| l.starts_with("- [") && l.contains("来源会话"))
                         .count();
                     if injected_rules > 0 {
-                        self_clone.harness.metrics.record_rule_hit(injected_rules).await;
+                        self_clone
+                            .harness
+                            .metrics
+                            .record_rule_hit(injected_rules)
+                            .await;
                     }
                     state_clone.context_window = Some(window);
                 }
@@ -536,7 +556,10 @@ impl AgentCoordinator for Agent {
             }
 
             // 注入系统提示词
-            let system_prompt = state_clone.context_window.as_ref().map(|w| w.system_prompt.clone());
+            let system_prompt = state_clone
+                .context_window
+                .as_ref()
+                .map(|w| w.system_prompt.clone());
             if let Some(prompt) = system_prompt {
                 if let Some(first) = state_clone.conversation.first_mut() {
                     if first.role == MessageRole::System {
@@ -568,11 +591,15 @@ impl AgentCoordinator for Agent {
                     let agent_clone2 = self_clone.clone();
                     let state_clone2 = state_clone.clone();
                     let handle = tokio::spawn(async move {
-                        if let Err(e) = agent_clone2.extract_memories_from_session(&state_clone2).await
+                        if let Err(e) = agent_clone2
+                            .extract_memories_from_session(&state_clone2)
+                            .await
                         {
                             tracing::warn!(error = %e, "记忆提取后台任务失败");
                         }
-                        agent_clone2.scan_and_promote_rules(&state_clone2.session_id).await;
+                        agent_clone2
+                            .scan_and_promote_rules(&state_clone2.session_id)
+                            .await;
                         if let Err(e) = agent_clone2.learn_skills_from_session(&state_clone2).await
                         {
                             tracing::warn!(error = %e, "技能学习后台任务失败");
@@ -669,9 +696,7 @@ impl Clone for Agent {
 }
 
 /// 格式化追问问题为用户友好的文本
-fn format_clarification_questions(
-    questions: &[ClarificationQuestion],
-) -> String {
+fn format_clarification_questions(questions: &[ClarificationQuestion]) -> String {
     let mut content = String::from("为了更好帮助您，需要以下信息：\n\n");
 
     for (i, q) in questions.iter().enumerate() {

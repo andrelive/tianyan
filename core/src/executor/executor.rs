@@ -118,11 +118,17 @@ impl Executor {
     /// 创建新的 Executor（已废弃）。
     #[deprecated(since = "0.2.0", note = "Use ToolRegistry::new instead")]
     pub fn new(max_concurrency: usize) -> Self {
-        Self { max_concurrency, skill_executor: None }
+        Self {
+            max_concurrency,
+            skill_executor: None,
+        }
     }
 
     /// 设置技能执行器（已废弃）。
-    #[deprecated(since = "0.2.0", note = "Use ToolRegistry::with_skill_executor instead")]
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use ToolRegistry::with_skill_executor instead"
+    )]
     pub fn with_skill_executor(mut self, skill_executor: Arc<SkillExecutor>) -> Self {
         self.skill_executor = Some(skill_executor);
         self
@@ -276,20 +282,14 @@ pub async fn execute_read_file(path: &str) -> Result<Value, ExecutorError> {
     Ok(Value::String(content))
 }
 
-pub async fn execute_write_file(
-    path: &str,
-    content: &str,
-) -> Result<Value, ExecutorError> {
+pub async fn execute_write_file(path: &str, content: &str) -> Result<Value, ExecutorError> {
     tokio::fs::write(path, content)
         .await
         .map_err(|e| ExecutorError::FileError(e.to_string()))?;
     Ok(Value::String("写入成功".to_string()))
 }
 
-pub async fn execute_search_code(
-    query: &str,
-    scope: Option<&str>,
-) -> Result<Value, ExecutorError> {
+pub async fn execute_search_code(query: &str, scope: Option<&str>) -> Result<Value, ExecutorError> {
     let mut cmd = tokio::process::Command::new("rg");
     cmd.arg("--json")
         .arg("--line-number")

@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use crate::config::{
     AgentConfig, LoggingConfig, MemoryConfig, ModelServiceConfig, ModelServiceType, ModelsConfig,
-    RetrievalConfig, SecurityConfig, StorageConfig, SummaryServiceConfig,
-    TianyanConfig, VectorStorageConfig,
+    RetrievalConfig, SecurityConfig, StorageConfig, SummaryServiceConfig, TianyanConfig,
+    VectorStorageConfig,
 };
 
 /// 配置状态响应。

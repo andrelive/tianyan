@@ -2,9 +2,9 @@
 
 use tianyan::agent::AgentConfig;
 use tianyan::config::{
-    LoggingConfig, MemoryConfig, ModelServiceConfig, ModelServiceType,
-    ModelsConfig, RetrievalConfig, SecurityConfig, StorageConfig,
-    SummaryServiceConfig, TianyanConfig, VectorStorageConfig,
+    LoggingConfig, MemoryConfig, ModelServiceConfig, ModelServiceType, ModelsConfig,
+    RetrievalConfig, SecurityConfig, StorageConfig, SummaryServiceConfig, TianyanConfig,
+    VectorStorageConfig,
 };
 
 pub fn test_agent_config() -> AgentConfig {

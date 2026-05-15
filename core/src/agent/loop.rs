@@ -15,7 +15,10 @@ pub struct AgentLoopConfig {
 
 impl Default for AgentLoopConfig {
     fn default() -> Self {
-        Self { max_turns: 20, model: "default".to_string() }
+        Self {
+            max_turns: 20,
+            model: "default".to_string(),
+        }
     }
 }
 
@@ -48,7 +51,11 @@ impl AgentLoop {
         tool_registry: ToolRegistry,
         config: AgentLoopConfig,
     ) -> Self {
-        Self { model_service, tool_registry, config }
+        Self {
+            model_service,
+            tool_registry,
+            config,
+        }
     }
 
     pub async fn run(
@@ -76,10 +83,10 @@ impl AgentLoop {
 
             // Check for ask_user before adding to history
             if let Some(ref tool_calls) = assistant_msg.tool_calls {
-                if let Some(ask_call) = tool_calls.iter().find(|tc| tc.function.name == "ask_user") {
-                    let params: AskUserParams =
-                        serde_json::from_str(&ask_call.function.arguments)
-                            .map_err(|e| AgentLoopError::LlmCallFailed(e.to_string()))?;
+                if let Some(ask_call) = tool_calls.iter().find(|tc| tc.function.name == "ask_user")
+                {
+                    let params: AskUserParams = serde_json::from_str(&ask_call.function.arguments)
+                        .map_err(|e| AgentLoopError::LlmCallFailed(e.to_string()))?;
                     return Ok(AgentLoopResult::NeedsClarification {
                         question: params.question,
                     });
@@ -97,7 +104,9 @@ impl AgentLoop {
             if let Some(ref tool_calls) = assistant_msg.tool_calls {
                 if let Some(ref sender) = stream_sender {
                     for tc in tool_calls {
-                        sender.send_tool_call(&format!("\u{8c03}\u{7528}: {}", tc.function.name)).await;
+                        sender
+                            .send_tool_call(&format!("\u{8c03}\u{7528}: {}", tc.function.name))
+                            .await;
                     }
                 }
 

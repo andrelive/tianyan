@@ -74,8 +74,10 @@ mod tests {
 
     #[test]
     fn test_read_file_params_schema() {
-        let def =
-            crate::model::FunctionDefinition::from_schema::<ReadFileParams>("read_file", "Read a file");
+        let def = crate::model::FunctionDefinition::from_schema::<ReadFileParams>(
+            "read_file",
+            "Read a file",
+        );
         assert_eq!(def.name, "read_file");
         assert!(def.parameters.get("properties").is_some());
     }

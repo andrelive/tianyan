@@ -162,8 +162,7 @@ impl ToolRegistry {
         parameters: &HashMap<String, serde_json::Value>,
     ) -> Result<serde_json::Value, ToolExecutionError> {
         if let Some(ref skill_executor) = self.skill_executor {
-            let request =
-                SkillExecutionRequest::new(skill_id.to_string(), parameters.clone());
+            let request = SkillExecutionRequest::new(skill_id.to_string(), parameters.clone());
             match skill_executor.execute(request).await {
                 Ok(result) => {
                     let mut data = HashMap::new();
@@ -183,7 +182,10 @@ impl ToolRegistry {
                         "execution_time_ms".to_string(),
                         serde_json::Value::Number(result.execution_time_ms.into()),
                     );
-                    data.insert("success".to_string(), serde_json::Value::Bool(result.success));
+                    data.insert(
+                        "success".to_string(),
+                        serde_json::Value::Bool(result.success),
+                    );
                     Ok(serde_json::Value::Object(data.into_iter().collect()))
                 }
                 Err(e) => Err(ToolExecutionError::ExecutionFailed(e.to_string())),
@@ -196,60 +198,69 @@ impl ToolRegistry {
     }
 
     fn register_builtin_tools(&mut self) {
-        self.definitions.push(ToolDefinition::function(
-            FunctionDefinition::from_schema::<ReadFileParams>(
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                ReadFileParams,
+            >(
                 "read_file",
                 "Read the full text content of a file from the given path.",
-            ),
-        ));
-        self.definitions.push(ToolDefinition::function(
-            FunctionDefinition::from_schema::<WriteFileParams>(
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                WriteFileParams,
+            >(
                 "write_file",
                 "Write content to a file at the given path.",
-            ),
-        ));
-        self.definitions.push(ToolDefinition::function(
-            FunctionDefinition::from_schema::<ExecuteCommandParams>(
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                ExecuteCommandParams,
+            >(
                 "execute_command",
                 "Execute a shell command with optional working directory and timeout.",
-            ),
-        ));
-        self.definitions.push(ToolDefinition::function(
-            FunctionDefinition::from_schema::<SearchCodeParams>(
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                SearchCodeParams,
+            >(
                 "search_code",
                 "Search for code patterns using ripgrep.",
-            ),
-        ));
-        self.definitions.push(ToolDefinition::function(
-            FunctionDefinition::from_schema::<CallSkillParams>(
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                CallSkillParams,
+            >(
                 "call_skill",
                 "Call a registered skill by ID with parameters.",
-            ),
-        ));
-        self.definitions.push(ToolDefinition::function(
-            FunctionDefinition::from_schema::<RunTestsParams>(
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                RunTestsParams,
+            >(
                 "run_tests",
                 "Run a test command (e.g. cargo test) and return results.",
-            ),
-        ));
-        self.definitions.push(ToolDefinition::function(
-            FunctionDefinition::from_schema::<VerifyBuildParams>(
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                VerifyBuildParams,
+            >(
                 "verify_build",
                 "Run a build verification command (e.g. cargo check) and return results.",
-            ),
-        ));
-        self.definitions.push(ToolDefinition::function(
-            FunctionDefinition::from_schema::<AskUserParams>(
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                AskUserParams,
+            >(
                 "ask_user",
                 "Ask the user a question when more information is needed to proceed.",
-            ),
-        ));
-        self.definitions.push(ToolDefinition::function(
-            FunctionDefinition::from_schema::<crate::agent::tool_params::DelegateToAgentParams>(
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                crate::agent::tool_params::DelegateToAgentParams,
+            >(
                 "delegate_to_agent",
                 "Delegate a sub-task to an isolated sub-agent with its own context.",
-            ),
-        ));
+            )));
     }
 }
 

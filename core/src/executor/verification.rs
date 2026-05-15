@@ -36,16 +36,33 @@ pub struct VerificationGate {
 
 impl VerificationGate {
     pub fn new(project_root: impl Into<std::path::PathBuf>) -> Self {
-        Self { enabled: true, fast_checks: vec![FastCheck::CompileCheck], project_root: project_root.into(), loop_count: 0 }
+        Self {
+            enabled: true,
+            fast_checks: vec![FastCheck::CompileCheck],
+            project_root: project_root.into(),
+            loop_count: 0,
+        }
     }
 
-    pub fn with_enabled(mut self, enabled: bool) -> Self { self.enabled = enabled; self }
-    pub fn with_checks(mut self, checks: Vec<FastCheck>) -> Self { self.fast_checks = checks; self }
-    pub fn is_enabled(&self) -> bool { self.enabled }
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+    pub fn with_checks(mut self, checks: Vec<FastCheck>) -> Self {
+        self.fast_checks = checks;
+        self
+    }
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
 
     pub async fn run_fast(&mut self) -> Result<VerificationReport> {
         if !self.enabled {
-            return Ok(VerificationReport { passed: true, issues: vec![], summary: "验证门控未启用".to_string() });
+            return Ok(VerificationReport {
+                passed: true,
+                issues: vec![],
+                summary: "验证门控未启用".to_string(),
+            });
         }
         let mut all_issues = Vec::new();
         let mut all_passed = true;
@@ -54,15 +71,29 @@ impl VerificationGate {
                 FastCheck::CompileCheck => self.run_cargo_check().await,
                 FastCheck::ClippyCheck => self.run_cargo_clippy().await,
             };
-            if !success { all_passed = false; }
+            if !success {
+                all_passed = false;
+            }
             all_issues.extend(issues);
         }
-        let summary = if all_passed { "所有验证通过".to_string() } else { format!("发现 {} 个问题", all_issues.len()) };
-        Ok(VerificationReport { passed: all_passed, issues: all_issues, summary })
+        let summary = if all_passed {
+            "所有验证通过".to_string()
+        } else {
+            format!("发现 {} 个问题", all_issues.len())
+        };
+        Ok(VerificationReport {
+            passed: all_passed,
+            issues: all_issues,
+            summary,
+        })
     }
 
-    pub fn should_continue(&self) -> bool { self.loop_count < MAX_LOOP_ITERATIONS }
-    pub fn increment_loop(&mut self) { self.loop_count += 1; }
+    pub fn should_continue(&self) -> bool {
+        self.loop_count < MAX_LOOP_ITERATIONS
+    }
+    pub fn increment_loop(&mut self) {
+        self.loop_count += 1;
+    }
 
     async fn run_cargo_check(&self) -> (bool, Vec<VerificationIssue>) {
         let output = Command::new("cargo")
