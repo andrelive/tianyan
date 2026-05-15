@@ -33,6 +33,9 @@ pub struct AgentConfig {
     /// system prompt 中 learned rules 段的最大 token 估算上限。
     #[serde(default = "default_learned_rules_max_tokens")]
     pub learned_rules_max_tokens: usize,
+    /// Agent Loop 最大轮次。
+    #[serde(default = "default_max_turns")]
+    pub max_turns: usize,
 }
 
 impl Default for AgentConfig {
@@ -46,6 +49,7 @@ impl Default for AgentConfig {
             enable_verification: default_enable_verification(),
             learned_rules_top_k: default_learned_rules_top_k(),
             learned_rules_max_tokens: default_learned_rules_max_tokens(),
+            max_turns: default_max_turns(),
         }
     }
 }
@@ -113,6 +117,10 @@ fn default_learned_rules_top_k() -> usize {
 
 fn default_learned_rules_max_tokens() -> usize {
     800
+}
+
+fn default_max_turns() -> usize {
+    20
 }
 
 #[cfg(test)]

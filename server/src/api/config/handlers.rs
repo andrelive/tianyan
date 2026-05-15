@@ -68,7 +68,6 @@ pub async fn get_config_section(
         "security" => serde_json::to_value(&config.security).unwrap_or(Value::Null),
         "memory" => serde_json::to_value(&config.memory).unwrap_or(Value::Null),
         "retrieval" => serde_json::to_value(&config.retrieval).unwrap_or(Value::Null),
-        "planner" => serde_json::to_value(&config.planner).unwrap_or(Value::Null),
         "summary_service" => serde_json::to_value(&config.summary_service).unwrap_or(Value::Null),
         _ => {
             warn!("未知配置节: {}", section);

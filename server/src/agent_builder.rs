@@ -74,7 +74,6 @@ impl AgentBuilderFactory {
 
         let agent = AgentBuilder::new()
             .with_config(config.agent.clone())
-            .with_planner_config(config.planner.clone())
             .with_model_service(model_services.chat)
             .with_vfs(vfs)
             .with_retriever(Arc::new(retriever))

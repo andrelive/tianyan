@@ -4,36 +4,11 @@
 //!
 //! # 架构设计
 //!
-//! AgentCoordinator 是 Planner-Executor 架构的对外接口，负责：
+//! AgentCoordinator 是 AgentLoop 架构的对外接口，负责：
 //! - 管理会话状态（SessionState）
-//! - 调用 Planner 进行任务规划
+//! - 调用 AgentLoop 进行推理与工具执行
 //! - 处理追问（Clarification）
 //! - 集成 VFS、检索器、技能执行器等组件
-//!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                    AgentCoordinator                          │
-//! │  (对外接口，管理会话状态)                                      │
-//! └───────────────────────────┬─────────────────────────────────┘
-//!                             │
-//!                             ▼
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                      Planner                                 │
-//! │  (LLM 驱动，负责意图理解、信息收集、计划生成)                   │
-//! └───────────────────────────┬─────────────────────────────────┘
-//!                             │
-//!                             ▼
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │                     Executor                                 │
-//! │  (纯机械执行，无思考能力)                                      │
-//! └───────────────────────────┬─────────────────────────────────┘
-//!                             │
-//!         ┌───────────────────┼───────────────────┐
-//!         ▼                   ▼                   ▼
-//!   ┌──────────┐       ┌──────────┐       ┌──────────┐
-//!   │   VFS    │       │Retriever │       │  Skills  │
-//!   └──────────┘       └──────────┘       └──────────┘
-//! ```
 //!
 //! # 使用示例
 //!
@@ -52,7 +27,7 @@
 //!
 //! ## 处理追问流程
 //!
-//! 当 Planner 信息不足时，会返回追问：
+//! 当 AgentLoop 信息不足时，会返回追问：
 //!
 //! ```rust,ignore
 //! use tianyan::agent::{Agent, AgentCoordinator, SessionState};
@@ -80,32 +55,22 @@
 //! }
 //! ```
 //!
-//! ## Planner-Executor 迭代循环
+//! ## AgentLoop 迭代循环
 //!
-//! Coordinator 自动管理 Planner-Executor 迭代循环：
+//! Coordinator 自动管理 AgentLoop 迭代循环：
 //!
 //! ```text
 //! 用户输入 → Coordinator.process_message()
 //!              │
 //!              ├─→ SessionState.add_user_message()
 //!              │
-//!              ├─→ Planner.run(input, state)
-//!              │       │
-//!              │       ├─→ 第 1 轮：Plan::Steps([...])
-//!              │       │       │
-//!              │       │       └─→ Executor.execute_steps()
-//!              │       │               │
-//!              │       │               └─→ SessionState.add_turn()
-//!              │       │
-//!              │       ├─→ 第 2 轮：Plan::Steps([...])
-//!              │       │       │
-//!              │       │       └─→ Executor.execute_steps()
-//!              │       │
-//!              │       └─→ 第 3 轮：Plan::DirectAnswer(...)
+//!              ├─→ context_pipeline.run()
 //!              │
-//!              └─→ SessionState.add_assistant_message()
+//!              └─→ AgentLoop.run(messages)
 //!                      │
-//!                      └─→ 返回给用户
+//!                      ├─→ LLM 调用 → 工具调用 → 执行 → 循环
+//!                      │
+//!                      └─→ Answer / NeedsClarification
 //! ```
 //!
 //! ## 会话状态管理
@@ -141,10 +106,10 @@
 //!
 //! Coordinator 统一处理各种错误情况：
 //!
-//! - **Planner 错误**：转换为 AgentResponse 错误消息
+//! - **AgentLoop 错误**：转换为 AgentResponse 错误消息
 //! - **追问处理**：返回 `needs_clarification: true` 的响应
 //! - **执行失败**：记录日志并返回友好的错误消息
-//! - **资源限制**：当达到最大迭代次数时生成部分总结
+//! - **资源限制**：当达到最大迭代次数时生成错误响应
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -154,28 +119,25 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{info, instrument};
 
 use crate::agent::harness::AgentHarness;
+use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
 use crate::agent::skill_subsystem::AgentSkills;
 use crate::agent::types::{
-    AgentResponse, AgentState, AgentStreamChunk, SkillCallInfo, StreamChunkType, StreamEventSender,
+    AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
+    StreamChunkType, StreamEventSender,
 };
 use crate::common::error::Result;
+use crate::common::types::{Message, MessageRole};
 use crate::config::AgentConfig;
 use crate::context::{ContextPipeline, FailureKind};
 use crate::executor::{LlmJudge, VerificationGate};
 use crate::model::ModelService;
-use crate::skills::learning::{ExecutionHistory, ExecutionStep};
-use crate::skills::Skill;
 use crate::storage::{MemoryExtractionTrait, VirtualFileSystem};
 
 /// 智能体协调器 trait。
 #[async_trait]
 pub trait AgentCoordinator: Send + Sync {
     /// 处理用户消息。
-    ///
-    /// - `state` - 会话状态
-    /// - `message` - 用户消息
-    /// - returns: 智能体响应
     async fn process_message(
         &self,
         state: &mut SessionState,
@@ -183,16 +145,6 @@ pub trait AgentCoordinator: Send + Sync {
     ) -> Result<AgentResponse>;
 
     /// 处理用户消息（流式响应）。
-    ///
-    /// 支持真正的阶段性流式响应：
-    /// - Thought: 思考过程
-    /// - ToolCall: 工具/技能调用
-    /// - Observation: 执行结果观察
-    /// - Answer: 最终回答
-    ///
-    /// - `state` - 会话状态
-    /// - `message` - 用户消息
-    /// - returns: 流式响应接收端
     async fn process_message_stream(
         &self,
         state: &mut SessionState,
@@ -200,10 +152,6 @@ pub trait AgentCoordinator: Send + Sync {
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
 
     /// 处理用户对追问的回答。
-    ///
-    /// - `state` - 会话状态
-    /// - `answers` - 用户回答
-    /// - returns: 智能体响应
     async fn handle_clarification(
         &self,
         state: &mut SessionState,
@@ -228,13 +176,11 @@ pub struct Agent {
     background_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     verification_gate: VerificationGate,
     llm_judge: Option<LlmJudge>,
+    agent_loop: AgentLoop,
 }
 
 impl Agent {
     /// 创建新的 Agent 实例。
-    ///
-    /// 所有子组件应由 AgentBuilder 预构建后传入。
-    /// 不建议直接调用此构造函数，请使用 AgentBuilder::build()。
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: AgentConfig,
@@ -246,6 +192,7 @@ impl Agent {
         memory_extractor: Option<Arc<dyn MemoryExtractionTrait + Send + Sync>>,
         verification_gate: VerificationGate,
         llm_judge: Option<LlmJudge>,
+        agent_loop: AgentLoop,
     ) -> Self {
         Self {
             config,
@@ -259,17 +206,11 @@ impl Agent {
             background_tasks: Arc::new(Mutex::new(Vec::new())),
             verification_gate,
             llm_judge,
+            agent_loop,
         }
     }
 
     /// 处理用户对追问的回答。
-    ///
-    /// - `state` - 会话状态
-    /// - `clarification_answers` - 用户对追问的回答
-    /// - returns: 处理后的响应
-    ///
-    /// # Errors
-    /// 返回处理过程中的错误
     async fn handle_clarification_response(
         &self,
         state: &mut SessionState,
@@ -291,7 +232,6 @@ impl Agent {
             .await
         {
             Ok(window) => {
-                // 统计本次注入的 learned rules 数量
                 let injected_rules = window
                     .system_prompt
                     .lines()
@@ -308,17 +248,78 @@ impl Agent {
             }
         }
 
-        // TODO: 重构后恢复 Planner 调用
-        let mut response = AgentResponse::simple("追问回答已收到，继续处理中...".to_string());
+        // 注入系统提示词
+        let system_prompt = state.context_window.as_ref().map(|w| w.system_prompt.clone());
+        if let Some(prompt) = system_prompt {
+            if let Some(first) = state.conversation.first_mut() {
+                if first.role == MessageRole::System {
+                    first.content = prompt;
+                } else {
+                    state.conversation.insert(0, Message::system(&prompt));
+                }
+            } else {
+                state.conversation.push(Message::system(&prompt));
+            }
+        }
 
-        response.processing_time_ms = start.elapsed().as_millis() as u64;
+        let loop_result = self.agent_loop.run(&mut state.conversation, None).await;
+
+        let response = match loop_result {
+            Ok(AgentLoopResult::Answer(content)) => {
+                let mut resp = AgentResponse::simple(content);
+                resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                self.harness.metrics.record_execution(true).await;
+                resp
+            }
+            Ok(AgentLoopResult::NeedsClarification { question }) => {
+                let question_obj = ClarificationQuestion {
+                    question,
+                    question_type: QuestionType::OpenEnded,
+                    options: None,
+                    required: true,
+                };
+                state.pending_clarification = Some(vec![question_obj.clone()]);
+                let formatted = format_clarification_questions(&[question_obj.clone()]);
+                let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
+                resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                resp
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "AgentLoop 执行失败");
+                self.harness.metrics.record_execution(false).await;
+                let mut resp = AgentResponse::error(format!("处理失败：{}", e));
+                resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                resp
+            }
+        };
+
+        {
+            let mut st = self.state.write().await;
+            st.conversations_processed += 1;
+        }
+
+        if response.is_complete && !response.needs_clarification {
+            let agent_clone = self.clone();
+            let state_clone = state.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = agent_clone.extract_memories_from_session(&state_clone).await {
+                    tracing::warn!(error = %e, "记忆提取后台任务失败");
+                }
+                agent_clone.scan_and_promote_rules(&state_clone.session_id).await;
+                if let Err(e) = agent_clone.learn_skills_from_session(&state_clone).await {
+                    tracing::warn!(error = %e, "技能学习后台任务失败");
+                }
+            });
+            self.background_tasks.lock().await.push(handle);
+        }
+
         Ok(response)
     }
 
     /// 在会话结束后提取和保存记忆。
     async fn extract_memories_from_session(&self, state: &SessionState) -> Result<()> {
         if let Some(ref extractor) = self.memory_extractor {
-            let turn_threshold = 3; // 最小对话轮数
+            let turn_threshold = 3;
             if state.conversation.len() >= turn_threshold * 2 {
                 let conversation: String = state
                     .conversation
@@ -397,7 +398,6 @@ impl AgentCoordinator for Agent {
             .await
         {
             Ok(window) => {
-                // 统计本次注入的 learned rules 数量
                 let injected_rules = window
                     .system_prompt
                     .lines()
@@ -410,7 +410,6 @@ impl AgentCoordinator for Agent {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "上下文管线执行失败");
-                // 管线失败接入 RuleRecorder（系统级失败）
                 self.harness.metrics.record_pipeline_failure().await;
                 let session_id = state.session_id.clone();
                 let error_msg = format!("{}", e);
@@ -430,9 +429,71 @@ impl AgentCoordinator for Agent {
             }
         }
 
-        // TODO: 重构后恢复 Planner 调用
-        let mut response = AgentResponse::simple(message);
-        response.processing_time_ms = start.elapsed().as_millis() as u64;
+        // 注入系统提示词
+        let system_prompt = state.context_window.as_ref().map(|w| w.system_prompt.clone());
+        if let Some(prompt) = system_prompt {
+            if let Some(first) = state.conversation.first_mut() {
+                if first.role == MessageRole::System {
+                    first.content = prompt;
+                } else {
+                    state.conversation.insert(0, Message::system(&prompt));
+                }
+            } else {
+                state.conversation.push(Message::system(&prompt));
+            }
+        }
+
+        let loop_result = self.agent_loop.run(&mut state.conversation, None).await;
+
+        let response = match loop_result {
+            Ok(AgentLoopResult::Answer(content)) => {
+                let mut resp = AgentResponse::simple(content);
+                resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                self.harness.metrics.record_execution(true).await;
+                resp
+            }
+            Ok(AgentLoopResult::NeedsClarification { question }) => {
+                let question_obj = ClarificationQuestion {
+                    question,
+                    question_type: QuestionType::OpenEnded,
+                    options: None,
+                    required: true,
+                };
+                state.pending_clarification = Some(vec![question_obj.clone()]);
+                let formatted = format_clarification_questions(&[question_obj.clone()]);
+                let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
+                resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                resp
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "AgentLoop 执行失败");
+                self.harness.metrics.record_execution(false).await;
+                let mut resp = AgentResponse::error(format!("处理失败：{}", e));
+                resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                resp
+            }
+        };
+
+        {
+            let mut st = self.state.write().await;
+            st.conversations_processed += 1;
+        }
+
+        if response.is_complete && !response.needs_clarification {
+            let agent_clone = self.clone();
+            let state_clone = state.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = agent_clone.extract_memories_from_session(&state_clone).await {
+                    tracing::warn!(error = %e, "记忆提取后台任务失败");
+                }
+                agent_clone.scan_and_promote_rules(&state_clone.session_id).await;
+                if let Err(e) = agent_clone.learn_skills_from_session(&state_clone).await {
+                    tracing::warn!(error = %e, "技能学习后台任务失败");
+                }
+            });
+            self.background_tasks.lock().await.push(handle);
+        }
+
         Ok(response)
     }
 
@@ -449,10 +510,102 @@ impl AgentCoordinator for Agent {
         let stream_sender = StreamEventSender::new(tx.clone());
 
         tokio::spawn(async move {
-            // TODO: 重构后恢复流式 Planner 调用
-            stream_sender
-                .send_complete(&message, StreamChunkType::Answer, None)
+            state_clone.add_user_message(&message);
+
+            // 运行上下文管线
+            match self_clone
+                .context_pipeline
+                .run(&message, &mut state_clone.conversation)
+                .await
+            {
+                Ok(window) => {
+                    let injected_rules = window
+                        .system_prompt
+                        .lines()
+                        .filter(|l| l.starts_with("- [") && l.contains("来源会话"))
+                        .count();
+                    if injected_rules > 0 {
+                        self_clone.harness.metrics.record_rule_hit(injected_rules).await;
+                    }
+                    state_clone.context_window = Some(window);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "流式上下文管线执行失败");
+                    self_clone.harness.metrics.record_pipeline_failure().await;
+                }
+            }
+
+            // 注入系统提示词
+            let system_prompt = state_clone.context_window.as_ref().map(|w| w.system_prompt.clone());
+            if let Some(prompt) = system_prompt {
+                if let Some(first) = state_clone.conversation.first_mut() {
+                    if first.role == MessageRole::System {
+                        first.content = prompt;
+                    } else {
+                        state_clone.conversation.insert(0, Message::system(&prompt));
+                    }
+                } else {
+                    state_clone.conversation.push(Message::system(&prompt));
+                }
+            }
+
+            let loop_result = self_clone
+                .agent_loop
+                .run(&mut state_clone.conversation, Some(stream_sender.clone()))
                 .await;
+
+            match loop_result {
+                Ok(AgentLoopResult::Answer(content)) => {
+                    stream_sender
+                        .send_complete(&content, StreamChunkType::Answer, None)
+                        .await;
+                    {
+                        let mut st = self_clone.state.write().await;
+                        st.conversations_processed += 1;
+                    }
+                    self_clone.harness.metrics.record_execution(true).await;
+
+                    let agent_clone2 = self_clone.clone();
+                    let state_clone2 = state_clone.clone();
+                    let handle = tokio::spawn(async move {
+                        if let Err(e) = agent_clone2.extract_memories_from_session(&state_clone2).await
+                        {
+                            tracing::warn!(error = %e, "记忆提取后台任务失败");
+                        }
+                        agent_clone2.scan_and_promote_rules(&state_clone2.session_id).await;
+                        if let Err(e) = agent_clone2.learn_skills_from_session(&state_clone2).await
+                        {
+                            tracing::warn!(error = %e, "技能学习后台任务失败");
+                        }
+                    });
+                    self_clone.background_tasks.lock().await.push(handle);
+                }
+                Ok(AgentLoopResult::NeedsClarification { question }) => {
+                    let question_obj = ClarificationQuestion {
+                        question,
+                        question_type: QuestionType::OpenEnded,
+                        options: None,
+                        required: true,
+                    };
+                    let formatted = format_clarification_questions(&[question_obj.clone()]);
+                    stream_sender
+                        .send_complete(&formatted, StreamChunkType::Clarification, None)
+                        .await;
+                    {
+                        let mut st = self_clone.state.write().await;
+                        st.conversations_processed += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "AgentLoop 流式执行失败");
+                    self_clone.harness.metrics.record_execution(false).await;
+                    stream_sender.send_error(&format!("处理失败：{}", e)).await;
+                    {
+                        let mut st = self_clone.state.write().await;
+                        st.conversations_processed += 1;
+                    }
+                }
+            }
         });
 
         Ok(rx)
@@ -468,7 +621,7 @@ impl AgentCoordinator for Agent {
     }
 
     async fn initialize(&self) -> Result<()> {
-        info!("Agent initialized with Planner architecture");
+        info!("Agent initialized with AgentLoop architecture");
         Ok(())
     }
 
@@ -479,7 +632,6 @@ impl AgentCoordinator for Agent {
     async fn shutdown(&self) -> Result<()> {
         info!("Shutting down agent");
 
-        // 等待后台任务完成（最多 5 秒）
         let mut tasks = self.background_tasks.lock().await;
         let mut pending = Vec::new();
         std::mem::swap(&mut pending, &mut tasks);
@@ -511,13 +663,14 @@ impl Clone for Agent {
             background_tasks: self.background_tasks.clone(),
             verification_gate: self.verification_gate.clone(),
             llm_judge: self.llm_judge.clone(),
+            agent_loop: self.agent_loop.clone(),
         }
     }
 }
 
 /// 格式化追问问题为用户友好的文本
 fn format_clarification_questions(
-    questions: &[crate::agent::types::ClarificationQuestion],
+    questions: &[ClarificationQuestion],
 ) -> String {
     let mut content = String::from("为了更好帮助您，需要以下信息：\n\n");
 
@@ -542,19 +695,12 @@ fn format_clarification_questions(
     content
 }
 
-/// 从执行历史轮次中提取 SkillCall 信息。
-#[allow(dead_code)]
-fn extract_skill_calls_from_turns(_turns: &[String]) -> Vec<SkillCallInfo> {
-    // TODO: 重构后恢复
-    Vec::new()
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::agent::types::{ClarificationQuestion, QuestionType};
+
     #[test]
     fn test_format_clarification_questions() {
-        use crate::agent::types::{ClarificationQuestion, QuestionType};
-
         let questions = vec![
             ClarificationQuestion {
                 question: "您想创建什么类型的项目？".to_string(),

@@ -3,7 +3,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::agent::harness::AgentHarness;
+use crate::agent::r#loop::{AgentLoop, AgentLoopConfig};
 use crate::agent::skill_subsystem::AgentSkills;
+use crate::agent::tool_registry::ToolRegistry;
 use crate::common::error::{Result, TianyanError};
 use crate::config::AgentConfig;
 use crate::context::compression::{CompressionConfig, ContextCompressor};
@@ -12,6 +14,7 @@ use crate::context::rule_recorder::RuleRecorder;
 use crate::context::rule_suggester::RuleSuggester;
 use crate::context::ContextRetriever;
 use crate::executor::verification::VerificationGate;
+use crate::executor::SecurityPolicy;
 use crate::model::ModelService;
 use crate::observability::AgentMetrics;
 use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
@@ -99,6 +102,22 @@ impl AgentBuilder {
             .skill_registry
             .unwrap_or_else(|| Arc::new(RwLock::new(SkillRegistry::new())));
 
+        let tool_registry = ToolRegistry::new(SecurityPolicy::default());
+        let tool_registry = if let Some(ref executor) = self.skill_executor {
+            tool_registry.with_skill_executor(executor.clone())
+        } else {
+            tool_registry
+        };
+
+        let agent_loop = AgentLoop::new(
+            model_service.clone(),
+            tool_registry,
+            AgentLoopConfig {
+                max_turns: self.config.max_turns,
+                model: "default".to_string(),
+            },
+        );
+
         // 构建上下文管线
         let context_pipeline = ContextPipeline::new(
             vfs.clone(),
@@ -173,6 +192,7 @@ impl AgentBuilder {
             memory_extractor,
             verification_gate,
             llm_judge,
+            agent_loop,
         ))
     }
 }

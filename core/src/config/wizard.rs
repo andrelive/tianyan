@@ -295,6 +295,7 @@ impl WizardConfig {
             enable_verification: false,
             learned_rules_top_k: 5,
             learned_rules_max_tokens: 800,
+            ..Default::default()
         }
     }
 
