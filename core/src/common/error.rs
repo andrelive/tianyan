@@ -395,12 +395,6 @@ impl From<config::ConfigError> for TianyanError {
     }
 }
 
-impl From<crate::planner::types::PlannerError> for TianyanError {
-    fn from(err: crate::planner::types::PlannerError) -> Self {
-        TianyanError::Planning(err.to_string())
-    }
-}
-
 impl From<crate::executor::types::ExecutorError> for TianyanError {
     fn from(err: crate::executor::types::ExecutorError) -> Self {
         TianyanError::Execution(err.to_string())

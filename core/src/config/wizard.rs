@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::config::{
     AgentConfig, LoggingConfig, MemoryConfig, ModelServiceConfig, ModelServiceType, ModelsConfig,
-    PlannerConfig, RetrievalConfig, SecurityConfig, StorageConfig, SummaryServiceConfig,
+    RetrievalConfig, SecurityConfig, StorageConfig, SummaryServiceConfig,
     TianyanConfig, VectorStorageConfig,
 };
 
@@ -282,7 +282,6 @@ impl WizardConfig {
             memory: MemoryConfig::default(),
             retrieval: RetrievalConfig::default(),
             summary_service: SummaryServiceConfig::default(),
-            planner: PlannerConfig::default(),
         }
     }
 

@@ -5,13 +5,11 @@
 
 use crate::common::types::Message;
 use crate::context::types::ContextWindow;
-use crate::planner::types::Turn;
 
 /// 从 ContextWindow 和会话状态中的动态数据构建最终 prompt。
 pub fn assemble_prompt(
     window: &ContextWindow,
     conversation: &[Message],
-    turns: &[Turn],
     current_input: &str,
 ) -> String {
     let mut prompt = String::new();
@@ -29,23 +27,6 @@ pub fn assemble_prompt(
                 crate::common::types::MessageRole::Tool => "工具",
             };
             prompt.push_str(&format!("{}: {}\n\n", role, msg.content));
-        }
-        prompt.push_str("---\n\n");
-    }
-
-    if !turns.is_empty() {
-        prompt.push_str("## 历史执行记录\n\n");
-        for turn in turns {
-            prompt.push_str(&format!("### 轮次 {}\n", turn.turn_id));
-            for result in &turn.results {
-                prompt.push_str(&format!(
-                    "步骤 {}: {} => {}\n",
-                    result.step_id,
-                    if result.success { "成功" } else { "失败" },
-                    result.output
-                ));
-            }
-            prompt.push('\n');
         }
         prompt.push_str("---\n\n");
     }

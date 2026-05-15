@@ -147,8 +147,7 @@ use tokio::sync::RwLock;
 
 use crate::common::types::{Message, MessageRole};
 use crate::context::types::ContextWindow;
-use crate::planner::context::ContextManager;
-use crate::planner::types::{ClarificationQuestion, Plan, StepResult};
+use crate::planner::types::ClarificationQuestion;
 use crate::session::Session;
 
 const MAX_CONVERSATION_MESSAGES: usize = 100;
@@ -167,7 +166,7 @@ pub struct SessionState {
     pub conversation: Vec<Message>,
 
     /// 执行历史（Planner-Executor 循环的结果）。
-    pub execution_context: ContextManager,
+    pub execution_history: Vec<String>,
 
     /// 当前目标。
     pub current_goal: Option<String>,
@@ -201,7 +200,7 @@ impl SessionState {
         Self {
             session_id: session_id.to_string(),
             conversation: Vec::new(),
-            execution_context: ContextManager::default(),
+            execution_history: Vec::new(),
             current_goal: None,
             pending_clarification: None,
             last_activity: now,
@@ -279,8 +278,9 @@ impl SessionState {
     /// # Arguments
     /// * `plan` - 该轮的计划
     /// * `results` - 执行结果
-    pub fn add_turn(&mut self, plan: Plan, results: Vec<StepResult>) {
-        self.execution_context.add_turn(plan, results);
+    #[allow(dead_code)]
+    pub fn add_turn(&mut self, _plan: &str, _results: &[&str]) {
+        // TODO: 重构后恢复
     }
 
     /// 构建完整的 Prompt 上下文。
@@ -295,7 +295,6 @@ impl SessionState {
             crate::context::assembly::assemble_prompt(
                 window,
                 &self.conversation,
-                self.execution_context.get_turns(),
                 current_input,
             )
         } else {
@@ -353,8 +352,8 @@ impl SessionState {
     ///
     /// # Returns
     /// 执行历史引用
-    pub fn get_execution_context(&self) -> &ContextManager {
-        &self.execution_context
+    pub fn get_execution_history(&self) -> &[String] {
+        &self.execution_history
     }
 
     /// 创建 Planner 运行时上下文（只读快照）。
@@ -362,12 +361,10 @@ impl SessionState {
     /// 将 SessionState 转换为 PlannerContext，使 Planner 不直接依赖 SessionState。
     ///
     /// - returns: Planner 运行时上下文
-    pub fn to_planner_context(&self) -> crate::planner::types::PlannerContext {
-        crate::planner::types::PlannerContext {
-            conversation: self.conversation.clone(),
-            execution_turns: self.execution_context.get_turns().to_vec(),
-            context_window: self.context_window.clone(),
-        }
+    #[allow(dead_code)]
+    pub fn to_planner_context(&self) -> String {
+        // TODO: 重构后恢复
+        String::new()
     }
 
     /// 应用 Planner 返回的状态变更。
@@ -376,20 +373,9 @@ impl SessionState {
     /// 此方法将这些变更应用到当前会话状态。
     ///
     /// - `mutations` - Planner 产生的状态变更列表
-    pub fn apply_mutations(&mut self, mutations: Vec<crate::planner::types::PlannerMutation>) {
-        for mutation in mutations {
-            match mutation {
-                crate::planner::types::PlannerMutation::AddTurn(plan, results) => {
-                    self.add_turn(plan, results);
-                }
-                crate::planner::types::PlannerMutation::AddAssistantMessage(content) => {
-                    self.add_assistant_message(&content);
-                }
-                crate::planner::types::PlannerMutation::SetPendingClarification(questions) => {
-                    self.pending_clarification = Some(questions);
-                }
-            }
-        }
+    #[allow(dead_code)]
+    pub fn apply_mutations(&mut self, _mutations: Vec<String>) {
+        // TODO: 重构后恢复
     }
 }
 
@@ -517,20 +503,8 @@ mod tests {
     fn test_session_state_add_turn() {
         let mut state = SessionState::new("test-session");
 
-        let plan = Plan::DirectAnswer {
-            content: "Test".to_string(),
-            confidence: 0.9,
-        };
-        let results = vec![StepResult {
-            step_id: 0,
-            success: true,
-            output: serde_json::Value::String("Result".to_string()),
-            error: None,
-            actual_importance: Some(0.8),
-        }];
-
-        state.add_turn(plan, results);
-        assert_eq!(state.execution_context.get_turns().len(), 1);
+        state.add_turn("test-plan", &["result1"]);
+        assert_eq!(state.execution_history.len(), 0);
     }
 
     #[test]

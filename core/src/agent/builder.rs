@@ -14,8 +14,6 @@ use crate::context::ContextRetriever;
 use crate::executor::verification::VerificationGate;
 use crate::model::ModelService;
 use crate::observability::AgentMetrics;
-use crate::planner::config::PlannerConfig;
-use crate::planner::Planner;
 use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
 use crate::skills::{SkillExecutor, SkillRegistry};
 use crate::storage::{MemoryExtractionService, MemoryExtractionTrait, VirtualFileSystem};
@@ -30,7 +28,6 @@ pub struct AgentBuilder {
     vfs: Option<Arc<dyn VirtualFileSystem>>,
     skill_executor: Option<Arc<SkillExecutor>>,
     skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
-    planner_config: Option<PlannerConfig>,
     memory_extractor: Option<Arc<dyn MemoryExtractionTrait + Send + Sync>>,
 }
 
@@ -43,7 +40,6 @@ impl AgentBuilder {
             vfs: None,
             skill_executor: None,
             skill_registry: None,
-            planner_config: None,
             memory_extractor: None,
         }
     }
@@ -78,11 +74,6 @@ impl AgentBuilder {
         self
     }
 
-    pub fn with_planner_config(mut self, config: PlannerConfig) -> Self {
-        self.planner_config = Some(config);
-        self
-    }
-
     pub fn with_memory_extractor(
         mut self,
         extractor: Arc<dyn MemoryExtractionTrait + Send + Sync>,
@@ -104,17 +95,9 @@ impl AgentBuilder {
             .vfs
             .ok_or_else(|| TianyanError::Internal("需要虚拟文件系统".to_string()))?;
 
-        let planner_config = self.planner_config.unwrap_or_default();
-
         let skill_registry = self
             .skill_registry
             .unwrap_or_else(|| Arc::new(RwLock::new(SkillRegistry::new())));
-
-        // 构建 Planner
-        let mut planner = Planner::new(0, model_service.clone(), planner_config.clone());
-        if let Some(ref se) = self.skill_executor {
-            planner = planner.with_skill_executor(se.clone());
-        }
 
         // 构建上下文管线
         let context_pipeline = ContextPipeline::new(
@@ -187,7 +170,6 @@ impl AgentBuilder {
             context_pipeline,
             harness,
             skills,
-            Box::new(planner),
             memory_extractor,
             verification_gate,
             llm_judge,

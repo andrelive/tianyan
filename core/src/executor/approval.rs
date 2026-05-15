@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, RwLock};
 
-use crate::planner::types::Action;
+use crate::executor::Action;
 
 /// 操作风险等级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
