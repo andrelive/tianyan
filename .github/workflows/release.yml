@@ -1,0 +1,181 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-release:
+    name: Build Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: tianyan
+            asset_name: tianyan-x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: tianyan
+            asset_name: tianyan-aarch64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: tianyan.exe
+            asset_name: tianyan-x86_64-pc-windows-msvc
+            archive_ext: zip
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: tianyan
+            asset_name: tianyan-x86_64-apple-darwin
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: tianyan
+            asset_name: tianyan-aarch64-apple-darwin
+            archive_ext: tar.gz
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-release-
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Prepare release archive (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          mkdir -p release-package
+          cp ${{ matrix.artifact_name }} release-package/
+          cp -r ${{ github.workspace }}/README.md release-package/ 2>/dev/null || true
+          cp -r ${{ github.workspace }}/LICENSE release-package/ 2>/dev/null || true
+          cp -r ${{ github.workspace }}/config.example.toml release-package/ 2>/dev/null || true
+          tar -czvf ${{ matrix.asset_name }}.${{ matrix.archive_ext }} -C release-package .
+
+      - name: Prepare release archive (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          mkdir release-package
+          copy ${{ matrix.artifact_name }} release-package/
+          copy "${{ github.workspace }}\README.md" release-package/ 2>$null
+          copy "${{ github.workspace }}\LICENSE" release-package/ 2>$null
+          copy "${{ github.workspace }}\config.example.toml" release-package/ 2>$null
+          Compress-Archive -Path release-package\* -DestinationPath ${{ matrix.asset_name }}.${{ matrix.archive_ext }}
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.asset_name }}.${{ matrix.archive_ext }}
+
+  create-release:
+    name: Create Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ steps.get_version.outputs.VERSION }}
+          body: |
+            ## Changes
+            
+            See [CHANGELOG.md](./CHANGELOG.md) for details.
+            
+            ## Downloads
+            
+            | Platform | Architecture | Download |
+            |----------|--------------|----------|
+            | Linux | x86_64 | `tianyan-x86_64-unknown-linux-gnu.tar.gz` |
+            | Linux | ARM64 | `tianyan-aarch64-unknown-linux-gnu.tar.gz` |
+            | Windows | x86_64 | `tianyan-x86_64-pc-windows-msvc.zip` |
+            | macOS | x86_64 (Intel) | `tianyan-x86_64-apple-darwin.tar.gz` |
+            | macOS | ARM64 (Apple Silicon) | `tianyan-aarch64-apple-darwin.tar.gz` |
+            
+            ## Installation
+            
+            ### Linux/macOS
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/tianyan/tianyan/main/scripts/install.sh | bash
+            ```
+            
+            ### Windows (PowerShell)
+            ```powershell
+            irm https://raw.githubusercontent.com/tianyan/tianyan/main/scripts/install.ps1 | iex
+            ```
+            
+            ## Verification
+            
+            After installation, verify with:
+            ```bash
+            tianyan --version
+            ```
+          files: |
+            artifacts/**/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-crates:
+    name: Publish to Crates.io
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true

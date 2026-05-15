@@ -1,27 +1,14 @@
-use async_trait::async_trait;
 use async_openai::types::chat::{
-    ChatCompletionMessageToolCall,
-    ChatCompletionMessageToolCalls,
-    ChatCompletionNamedToolChoice,
-    ChatCompletionRequestAssistantMessage,
-    ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestSystemMessageContent,
-    ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent,
-    ChatCompletionTool,
-    ChatCompletionTools,
-    ChatCompletionToolChoiceOption,
-    CreateChatCompletionRequestArgs,
-    FunctionCall as OaFunctionCall,
-    FunctionName,
-    FunctionObject,
-    Role as OaRole,
-    ToolChoiceOptions,
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, ChatCompletionNamedToolChoice,
+    ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
+    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionTool, ChatCompletionToolChoiceOption,
+    ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall as OaFunctionCall,
+    FunctionName, FunctionObject, Role as OaRole, ToolChoiceOptions,
 };
+use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -30,7 +17,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{Message, MessageRole, TokenUsage};
 use crate::model::traits::ModelService;
 use crate::model::types::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatChoice, ChunkChoice,
+    ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChunkChoice,
     DeltaContent, ToolCall, ToolCallType, ToolChoice,
 };
 
@@ -96,7 +83,10 @@ impl ModelService for AsyncOpenAIClient {
                         tool_calls,
                         tool_call_id: None,
                     },
-                    finish_reason: c.finish_reason.as_ref().map(|r| super::finish_reason_str(r).to_string()),
+                    finish_reason: c
+                        .finish_reason
+                        .as_ref()
+                        .map(|r| super::finish_reason_str(r).to_string()),
                 }
             })
             .collect();
@@ -227,12 +217,8 @@ impl AsyncOpenAIClient {
         }
         if let Some(ref tool_choice) = request.tool_choice {
             let oa_choice = match tool_choice {
-                ToolChoice::Auto => {
-                    ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::Auto)
-                }
-                ToolChoice::None => {
-                    ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::None)
-                }
+                ToolChoice::Auto => ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::Auto),
+                ToolChoice::None => ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::None),
                 ToolChoice::Function { function } => {
                     ChatCompletionToolChoiceOption::Function(ChatCompletionNamedToolChoice {
                         function: FunctionName {

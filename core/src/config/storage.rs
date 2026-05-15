@@ -1,0 +1,130 @@
+//! 存储配置模块。
+
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+/// 存储配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    /// 数据存储的根目录。
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    /// 最大存储大小（字节，0 = 无限制）。
+    #[serde(default)]
+    pub max_storage_size: u64,
+    /// 启用旧数据自动清理。
+    #[serde(default = "default_true")]
+    pub auto_cleanup: bool,
+    /// 清理前数据保留天数。
+    #[serde(default = "default_cleanup_days")]
+    pub cleanup_days: u32,
+    /// 向量存储配置（仅支持 Qdrant）。
+    #[serde(default)]
+    pub vector: VectorStorageConfig,
+}
+
+/// 向量存储配置（仅支持 Qdrant）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorStorageConfig {
+    /// Qdrant 服务 URL。
+    #[serde(default = "default_qdrant_url")]
+    pub url: String,
+    /// 集合名称。
+    #[serde(default = "default_qdrant_collection")]
+    pub collection_name: String,
+    /// 向量维度。
+    #[serde(default = "default_vector_dimension")]
+    pub vector_dimension: usize,
+}
+
+fn default_data_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("tianyan")
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_cleanup_days() -> u32 {
+    365
+}
+
+fn default_qdrant_url() -> String {
+    "http://localhost:6334".to_string()
+}
+
+fn default_qdrant_collection() -> String {
+    "tianyan_contexts".to_string()
+}
+
+fn default_vector_dimension() -> usize {
+    1536
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+            max_storage_size: 0,
+            auto_cleanup: true,
+            cleanup_days: 365,
+            vector: VectorStorageConfig::default(),
+        }
+    }
+}
+
+impl Default for VectorStorageConfig {
+    fn default() -> Self {
+        Self {
+            url: default_qdrant_url(),
+            collection_name: default_qdrant_collection(),
+            vector_dimension: default_vector_dimension(),
+        }
+    }
+}
+
+impl StorageConfig {
+    /// 验证存储配置。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.cleanup_days == 0 {
+            return Err("cleanup_days 必须大于 0".to_string());
+        }
+
+        if self.vector.vector_dimension == 0 {
+            return Err("vector_dimension 必须大于 0".to_string());
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_storage_config() {
+        let config = StorageConfig::default();
+        assert!(!config.data_dir.as_os_str().is_empty());
+        assert_eq!(config.cleanup_days, 365);
+        assert!(config.auto_cleanup);
+        assert_eq!(config.vector.url, "http://localhost:6334");
+        assert_eq!(config.vector.collection_name, "tianyan_contexts");
+        assert_eq!(config.vector.vector_dimension, 1536);
+    }
+
+    #[test]
+    fn test_storage_validation() {
+        let mut config = StorageConfig::default();
+        assert!(config.validate().is_ok());
+
+        config.cleanup_days = 0;
+        assert!(config.validate().is_err());
+
+        config.cleanup_days = 365;
+        config.vector.vector_dimension = 0;
+        assert!(config.validate().is_err());
+    }
+}

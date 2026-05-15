@@ -421,10 +421,7 @@ impl Planner {
 
             match plan {
                 Plan::DirectAnswer { ref content, .. } => {
-                    mutations.push(PlannerMutation::AddTurn(
-                        plan.clone(),
-                        vec![],
-                    ));
+                    mutations.push(PlannerMutation::AddTurn(plan.clone(), vec![]));
                     mutations.push(PlannerMutation::AddAssistantMessage(content.clone()));
                     return Ok((PlannerOutput::Answer(content.clone()), mutations));
                 }
@@ -433,10 +430,13 @@ impl Planner {
                     ref missing_info,
                 } => {
                     mutations.push(PlannerMutation::SetPendingClarification(questions.clone()));
-                    return Ok((PlannerOutput::Clarification {
-                        questions: questions.clone(),
-                        missing_info: missing_info.clone(),
-                    }, mutations));
+                    return Ok((
+                        PlannerOutput::Clarification {
+                            questions: questions.clone(),
+                            missing_info: missing_info.clone(),
+                        },
+                        mutations,
+                    ));
                 }
                 Plan::Steps(ref steps) => {
                     if let Some(ref sender) = stream_sender {
@@ -462,7 +462,9 @@ impl Planner {
                     let mut results = if normal_steps.is_empty() {
                         vec![]
                     } else {
-                        self.executor.execute_steps(normal_steps.into_iter().cloned().collect()).await
+                        self.executor
+                            .execute_steps(normal_steps.into_iter().cloned().collect())
+                            .await
                     };
 
                     // 执行子 Planner 步骤（Planner 自身处理）

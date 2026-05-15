@@ -82,9 +82,7 @@ impl FunctionDefinition {
         Self {
             name: name.into(),
             description: description.into(),
-            parameters: serde_json::to_value(&schema).unwrap_or_else(|_| {
-                serde_json::json!({})
-            }),
+            parameters: serde_json::to_value(&schema).unwrap_or_else(|_| serde_json::json!({})),
         }
     }
 }
@@ -185,10 +183,7 @@ mod tests {
 
     #[test]
     fn test_function_definition_from_schema() {
-        let func = FunctionDefinition::from_schema::<TestParams>(
-            "search",
-            "Search for items",
-        );
+        let func = FunctionDefinition::from_schema::<TestParams>("search", "Search for items");
         assert_eq!(func.name, "search");
         assert_eq!(func.description, "Search for items");
         let params = func.parameters;

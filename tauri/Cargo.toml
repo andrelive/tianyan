@@ -1,0 +1,49 @@
+[package]
+name = "tianyan-tauri"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Tauri desktop application for Tianyan"
+
+[build-dependencies]
+tauri-build = { version = "2.2", features = [] }
+
+[dependencies]
+tianyan-core = { path = "../core" }
+tianyan-server = { path = "../server" }
+
+# Tauri framework
+tauri = { version = "2.2", features = ["tray-icon", "devtools"] }
+tauri-plugin-shell = "2.2"
+
+# HTTP server
+axum = { version = "0.8", features = ["multipart"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower = { version = "0.5", features = ["util"] }
+
+# Core dependencies
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+# Utilities
+reqwest = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+dirs = "5.0"
+
+[lints]
+workspace = true
+
+[lib]
+name = "tianyan_tauri_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tianyan-tauri"
+path = "src/main.rs"

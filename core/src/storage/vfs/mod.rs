@@ -1,0 +1,945 @@
+//! 虚拟文件系统实现。
+
+use async_trait::async_trait;
+use std::sync::Arc;
+
+use crate::common::error::{Result, TianyanError};
+use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
+use crate::model::EmbeddingService;
+use crate::storage::traits::{ContentLoader, StorageBackend, VectorStorage, VirtualFileSystem};
+use crate::storage::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
+
+use crate::config::StorageConfig;
+
+/// 虚拟文件系统实现。
+pub struct VirtualFileSystemImpl {
+    storage: Arc<dyn StorageBackend>,
+    vector_storage: Arc<dyn VectorStorage>,
+    config: StorageConfig,
+    embedding_service: Option<Arc<dyn EmbeddingService>>,
+    embedding_model: Option<String>,
+}
+
+impl VirtualFileSystemImpl {
+    /// 创建新的虚拟文件系统。
+    pub fn new(
+        storage: Arc<dyn StorageBackend>,
+        vector_storage: Arc<dyn VectorStorage>,
+        config: StorageConfig,
+    ) -> Self {
+        Self {
+            storage,
+            vector_storage,
+            config,
+            embedding_service: None,
+            embedding_model: None,
+        }
+    }
+
+    /// 使用默认配置创建虚拟文件系统。
+    pub fn with_defaults(
+        storage: Arc<dyn StorageBackend>,
+        vector_storage: Arc<dyn VectorStorage>,
+    ) -> Self {
+        Self::new(storage, vector_storage, StorageConfig::default())
+    }
+
+    /// 设置嵌入服务。
+    pub fn with_embedding_service(
+        mut self,
+        service: Arc<dyn EmbeddingService>,
+        model: impl Into<String>,
+    ) -> Self {
+        self.embedding_service = Some(service);
+        self.embedding_model = Some(model.into());
+        self
+    }
+
+    /// 设置嵌入服务（可变引用版本）。
+    pub fn set_embedding_service(
+        &mut self,
+        service: Arc<dyn EmbeddingService>,
+        model: impl Into<String>,
+    ) {
+        self.embedding_service = Some(service);
+        self.embedding_model = Some(model.into());
+    }
+
+    /// 获取存储配置。
+    pub fn config(&self) -> &StorageConfig {
+        &self.config
+    }
+
+    /// 从上下文条目生成向量点。
+    fn create_vector_point(&self, entry: &ContextEntry) -> VectorPoint {
+        VectorPoint::from_entry(entry)
+    }
+
+    /// 为内容生成嵌入向量并存储到向量数据库。
+    ///
+    /// 此方法会调用嵌入服务为指定内容生成向量，然后更新向量存储。
+    /// 如果嵌入服务不可用，会记录警告但不会失败。
+    async fn generate_and_store_embedding(
+        &self,
+        uri: &TianyanUri,
+        level: ContentLevel,
+        content: &str,
+    ) -> Result<()> {
+        if content.trim().is_empty() {
+            tracing::trace!("内容为空，跳过向量生成 {} {:?}", uri, level);
+            return Ok(());
+        }
+
+        let (Some(service), Some(model)) = (&self.embedding_service, &self.embedding_model) else {
+            tracing::warn!("嵌入服务未配置，跳过向量生成: {} {:?}", uri, level);
+            return Ok(());
+        };
+
+        let vector_type = match level {
+            ContentLevel::Abstract => VectorType::Abstract,
+            ContentLevel::Overview => VectorType::Overview,
+            ContentLevel::Detail => {
+                tracing::trace!("Detail 层级不生成向量 {}", uri);
+                return Ok(());
+            }
+        };
+
+        tracing::debug!("开始为 {} {:?} 生成向量", uri, level);
+
+        let dimensions = self.config.vector.vector_dimension;
+
+        match service
+            .embed_single_with_dimensions(model, content, dimensions)
+            .await
+        {
+            Ok(embedding) => {
+                let vector = embedding.vector.clone();
+
+                if let Err(e) = self
+                    .vector_storage
+                    .update_vector(uri, vector_type, &vector)
+                    .await
+                {
+                    tracing::error!("更新向量失败: {} {:?} - {}", uri, level, e);
+                    return Err(e);
+                }
+
+                tracing::info!("向量生成成功: {} {:?} (维度: {})", uri, level, vector.len());
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!("向量生成失败: {} {:?} - {}", uri, level, e);
+                Err(e)
+            }
+        }
+    }
+
+    /// 将条目同步到向量存储。
+    async fn sync_to_vector_storage(&self, entry: &ContextEntry) -> Result<()> {
+        let point = self.create_vector_point(entry);
+        self.vector_storage.upsert_point(&point).await
+    }
+
+    /// 从向量存储中删除条目。
+    async fn remove_from_vector_storage(&self, uri: &TianyanUri) -> Result<()> {
+        let id = uri.to_point_id();
+        self.vector_storage.delete_point(&id).await
+    }
+
+    /// 通过视觉嵌入搜索（用于图像相似度搜索）。
+    pub async fn find_by_visual_embedding(
+        &self,
+        query_embedding: &[f32],
+        scope: Option<&TianyanUri>,
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let query = VectorSearchQuery {
+            vector: query_embedding.to_vec(),
+            vector_type: VectorType::Visual,
+            limit: top_k,
+            category_filter: scope.map(|s| s.namespace().to_string()),
+            min_score: None,
+        };
+
+        let results = self.vector_storage.search(query).await?;
+
+        Ok(results
+            .into_iter()
+            .map(|r| SearchResult {
+                uri: r.payload.uri.clone(),
+                score: r.score,
+                matched_level: ContentLevel::Abstract,
+                content: None,
+            })
+            .collect())
+    }
+
+    /// 递归收集指定 URI 下的所有 URI。
+    pub async fn collect_all_uris(&self, uri: &TianyanUri) -> Result<Vec<TianyanUri>> {
+        let mut uris = Vec::new();
+        self.collect_uris_recursive(uri, &mut uris).await?;
+        Ok(uris)
+    }
+
+    async fn collect_uris_recursive(
+        &self,
+        uri: &TianyanUri,
+        uris: &mut Vec<TianyanUri>,
+    ) -> Result<()> {
+        if !self.storage.exists(uri).await? {
+            return Ok(());
+        }
+
+        let entry = self.storage.read_entry(uri).await?;
+        if entry.is_directory() {
+            let children = self.storage.list_directory(uri).await?;
+            for child in children {
+                Box::pin(self.collect_uris_recursive(child.uri(), uris)).await?;
+            }
+        } else {
+            uris.push(uri.clone());
+        }
+
+        Ok(())
+    }
+
+    /// 获取条目的总大小（包括目录的子条目）。
+    pub async fn get_entry_size(&self, uri: &TianyanUri) -> Result<u64> {
+        let entry = self.storage.read_entry(uri).await?;
+        if entry.is_directory() {
+            let children = self.storage.list_directory(uri).await?;
+            let mut total_size = 0u64;
+            for child in children {
+                total_size += Box::pin(self.get_entry_size(child.uri())).await?;
+            }
+            Ok(total_size)
+        } else {
+            Ok(entry.metadata.file_size.unwrap_or(0))
+        }
+    }
+
+    /// 检查 URI 是否有效。
+    pub fn validate_uri(uri: &TianyanUri) -> Result<()> {
+        if uri.path().is_empty() {
+            return Ok(());
+        }
+
+        for segment in uri.path() {
+            if segment.is_empty() {
+                return Err(TianyanError::InvalidUri(format!(
+                    "URI 中存在空段： {}",
+                    uri
+                )));
+            }
+            if segment.contains("..") || segment.contains('\\') || segment.contains('\0') {
+                return Err(TianyanError::InvalidUri(format!(
+                    "URI '{}' 中存在无效段 '{}'",
+                    uri, segment
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl VirtualFileSystem for VirtualFileSystemImpl {
+    async fn initialize(&self) -> Result<()> {
+        self.storage.initialize().await?;
+        self.vector_storage.initialize().await?;
+        tracing::info!("虚拟文件系统已初始化");
+        Ok(())
+    }
+
+    async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
+        self.storage.exists(uri).await
+    }
+
+    async fn get_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+        Self::validate_uri(uri)?;
+        self.storage.read_entry(uri).await
+    }
+
+    async fn create_directory(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+        Self::validate_uri(uri)?;
+
+        if self.storage.exists(uri).await? {
+            return Err(TianyanError::EntryAlreadyExists(uri.to_string()));
+        }
+
+        if let Some(parent) = uri.parent() {
+            if !self.storage.exists(&parent).await? {
+                self.create_directory(&parent).await?;
+            }
+        }
+
+        let entry = ContextEntry::new_directory(uri.clone());
+        self.storage.write_entry(&entry).await?;
+
+        tracing::debug!("已创建目录： {}", uri);
+        Ok(entry)
+    }
+
+    async fn create_file(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+        Self::validate_uri(uri)?;
+
+        if self.storage.exists(uri).await? {
+            return Err(TianyanError::EntryAlreadyExists(uri.to_string()));
+        }
+
+        if let Some(parent) = uri.parent() {
+            if !self.storage.exists(&parent).await? {
+                self.create_directory(&parent).await?;
+            }
+        }
+
+        let entry = ContextEntry::new_file(uri.clone());
+        self.storage.write_entry(&entry).await?;
+
+        tracing::debug!("已创建文件： {}", uri);
+        Ok(entry)
+    }
+
+    async fn write_content(&self, uri: &TianyanUri, content: &str) -> Result<()> {
+        Self::validate_uri(uri)?;
+
+        if !self.storage.exists(uri).await? {
+            self.create_file(uri).await?;
+        }
+
+        let level = ContentLevel::Detail;
+        self.storage.write_content(uri, level, content).await?;
+
+        let mut entry = self.storage.read_entry(uri).await?;
+        entry.metadata.touch();
+        entry.set_content(level, content.to_string());
+
+        let token_count = estimate_token_count(content);
+        entry.token_counts.set(level, token_count);
+
+        self.storage.write_entry(&entry).await?;
+
+        tracing::trace!("已写入 {:?} 内容： {}", level, uri);
+        Ok(())
+    }
+
+    async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+        Self::validate_uri(uri)?;
+
+        let content = self.storage.read_content(uri, level).await?;
+
+        Ok(content)
+    }
+
+    async fn append_content(&self, uri: &TianyanUri, content: &str) -> Result<()> {
+        Self::validate_uri(uri)?;
+
+        if !self.storage.exists(uri).await? {
+            self.create_file(uri).await?;
+        }
+
+        let level = ContentLevel::Detail;
+        self.storage.append_content(uri, level, content).await?;
+
+        let mut entry = self.storage.read_entry(uri).await?;
+        entry.metadata.touch();
+
+        let appended_token_count = estimate_token_count(content);
+        let current_count = entry.token_counts.get(level).unwrap_or(0);
+        entry
+            .token_counts
+            .set(level, current_count + appended_token_count);
+
+        self.storage.write_entry(&entry).await?;
+
+        tracing::trace!("已追加 {:?} 内容： {}", level, uri);
+        Ok(())
+    }
+
+    /// 更新向量库中的元数据。
+    ///
+    /// 此方法由上层业务模块调用，将自定义元数据写入向量库。
+    /// 不写入文件系统，只更新向量库 payload。
+    ///
+    /// # 参数
+    /// - `uri`: 条目 URI
+    /// - `importance`: 重要性评分
+    /// - `custom`: 自定义元数据字段
+    ///
+    /// # 返回
+    /// - `Ok(())`: 更新成功
+    /// - `Err`: 更新失败
+    async fn update_metadata(
+        &self,
+        uri: &TianyanUri,
+        importance: f32,
+        custom: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<()> {
+        Self::validate_uri(uri)?;
+
+        if !self.storage.exists(uri).await? {
+            return Err(TianyanError::EntryNotFound(uri.to_string()));
+        }
+
+        let point_id = uri.to_point_id();
+        let mut point = match self.vector_storage.get_point(&point_id).await? {
+            Some(p) => p,
+            None => {
+                let entry = self.storage.read_entry(uri).await?;
+                self.create_vector_point(&entry)
+            }
+        };
+
+        point.payload.importance = importance;
+        point.payload.updated_at = chrono::Utc::now();
+
+        for (key, value) in custom {
+            point.payload.custom.insert(key, value);
+        }
+
+        self.vector_storage.upsert_point(&point).await?;
+
+        tracing::debug!("已更新向量库元数据： {}", uri);
+        Ok(())
+    }
+
+    async fn delete(&self, uri: &TianyanUri) -> Result<()> {
+        Self::validate_uri(uri)?;
+
+        if !self.storage.exists(uri).await? {
+            return Err(TianyanError::EntryNotFound(uri.to_string()));
+        }
+
+        let entry = self.storage.read_entry(uri).await?;
+        if entry.is_directory() {
+            let children = self.storage.list_directory(uri).await?;
+            for child in children {
+                Box::pin(self.delete(child.uri())).await?;
+            }
+        }
+
+        self.storage.delete_entry(uri).await?;
+
+        self.remove_from_vector_storage(uri).await?;
+
+        tracing::debug!("已删除： {}", uri);
+        Ok(())
+    }
+
+    async fn list(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
+        Self::validate_uri(uri)?;
+        self.storage.list_directory(uri).await
+    }
+
+    async fn move_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()> {
+        Self::validate_uri(source)?;
+        Self::validate_uri(destination)?;
+
+        if !self.storage.exists(source).await? {
+            return Err(TianyanError::EntryNotFound(source.to_string()));
+        }
+
+        if self.storage.exists(destination).await? {
+            return Err(TianyanError::EntryAlreadyExists(destination.to_string()));
+        }
+
+        let entry = self.storage.read_entry(source).await?;
+
+        let mut new_entry = ContextEntry::new_file(destination.clone());
+        new_entry.metadata = entry.metadata.clone();
+        new_entry.metadata.uri = destination.clone();
+        new_entry.abstract_content = entry.abstract_content;
+        new_entry.overview_content = entry.overview_content;
+        new_entry.detail_content = entry.detail_content;
+        new_entry.token_counts = entry.token_counts;
+
+        self.storage.write_entry(&new_entry).await?;
+
+        if let Ok(content) = self
+            .storage
+            .read_content(source, ContentLevel::Detail)
+            .await
+        {
+            self.storage
+                .write_content(destination, ContentLevel::Detail, &content)
+                .await?;
+        }
+
+        self.storage.delete_entry(source).await?;
+
+        self.remove_from_vector_storage(source).await?;
+        self.sync_to_vector_storage(&new_entry).await?;
+
+        tracing::debug!("已将 {} 移动到 {}", source, destination);
+        Ok(())
+    }
+
+    async fn copy_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()> {
+        Self::validate_uri(source)?;
+        Self::validate_uri(destination)?;
+
+        if !self.storage.exists(source).await? {
+            return Err(TianyanError::EntryNotFound(source.to_string()));
+        }
+
+        if self.storage.exists(destination).await? {
+            return Err(TianyanError::EntryAlreadyExists(destination.to_string()));
+        }
+
+        let entry = self.storage.read_entry(source).await?;
+
+        let mut new_entry = ContextEntry::new_file(destination.clone());
+        new_entry.metadata = entry.metadata.clone();
+        new_entry.metadata.uri = destination.clone();
+        new_entry.metadata.created_at = chrono::Utc::now();
+        new_entry.metadata.updated_at = chrono::Utc::now();
+        new_entry.abstract_content = entry.abstract_content;
+        new_entry.overview_content = entry.overview_content;
+        new_entry.detail_content = entry.detail_content;
+        new_entry.token_counts = entry.token_counts;
+
+        self.storage.write_entry(&new_entry).await?;
+
+        if let Ok(content) = self
+            .storage
+            .read_content(source, ContentLevel::Detail)
+            .await
+        {
+            self.storage
+                .write_content(destination, ContentLevel::Detail, &content)
+                .await?;
+        }
+
+        self.sync_to_vector_storage(&new_entry).await?;
+
+        tracing::debug!("已将 {} 复制到 {}", source, destination);
+        Ok(())
+    }
+
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let mut results = Vec::new();
+
+        for namespace in [
+            ContextNamespace::User,
+            ContextNamespace::Session,
+            ContextNamespace::Memory,
+            ContextNamespace::Knowledge,
+            ContextNamespace::Agent,
+            ContextNamespace::Skill,
+        ] {
+            let root_uri = TianyanUri::new(namespace, vec![]);
+            self.search_recursive(&root_uri, query, &mut results, limit)
+                .await?;
+
+            if results.len() >= limit {
+                break;
+            }
+        }
+
+        results.truncate(limit);
+        Ok(results)
+    }
+
+    fn storage_backend(&self) -> &dyn StorageBackend {
+        self.storage.as_ref()
+    }
+
+    fn vector_storage(&self) -> &dyn VectorStorage {
+        self.vector_storage.as_ref()
+    }
+
+    fn get_vector_storage(&self) -> Arc<dyn VectorStorage> {
+        self.vector_storage.clone()
+    }
+
+    async fn write_abstract(&self, uri: &TianyanUri, content: &str) -> Result<()> {
+        Self::validate_uri(uri)?;
+
+        if !self.storage.exists(uri).await? {
+            self.create_file(uri).await?;
+        }
+
+        let level = ContentLevel::Abstract;
+        self.storage.write_content(uri, level, content).await?;
+
+        let mut entry = self.storage.read_entry(uri).await?;
+        entry.metadata.touch();
+        entry.set_content(level, content.to_string());
+
+        let token_count = estimate_token_count(content);
+        entry.token_counts.set(level, token_count);
+
+        self.storage.write_entry(&entry).await?;
+
+        tracing::trace!("已写入 {:?} 内容： {}", level, uri);
+        Ok(())
+    }
+
+    async fn write_overview(&self, uri: &TianyanUri, content: &str) -> Result<()> {
+        Self::validate_uri(uri)?;
+
+        if !self.storage.exists(uri).await? {
+            self.create_file(uri).await?;
+        }
+
+        let level = ContentLevel::Overview;
+        self.storage.write_content(uri, level, content).await?;
+
+        let mut entry = self.storage.read_entry(uri).await?;
+        entry.metadata.touch();
+        entry.set_content(level, content.to_string());
+
+        let token_count = estimate_token_count(content);
+        entry.token_counts.set(level, token_count);
+
+        self.storage.write_entry(&entry).await?;
+
+        tracing::trace!("已写入 {:?} 内容： {}", level, uri);
+        Ok(())
+    }
+
+    async fn update_summary_vectors(
+        &self,
+        uri: &TianyanUri,
+        abstract_content: &str,
+        overview_content: &str,
+    ) -> Result<()> {
+        Self::validate_uri(uri)?;
+
+        if !self.storage.exists(uri).await? {
+            return Err(TianyanError::EntryNotFound(uri.to_string()));
+        }
+
+        let mut tasks = Vec::new();
+
+        if !abstract_content.trim().is_empty() {
+            tasks.push(self.generate_and_store_embedding(
+                uri,
+                ContentLevel::Abstract,
+                abstract_content,
+            ));
+        }
+
+        if !overview_content.trim().is_empty() {
+            tasks.push(self.generate_and_store_embedding(
+                uri,
+                ContentLevel::Overview,
+                overview_content,
+            ));
+        }
+
+        for task in tasks {
+            task.await?;
+        }
+
+        tracing::debug!("已更新摘要和概览向量：{}", uri);
+        Ok(())
+    }
+
+    async fn has_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<bool> {
+        if !self.storage.exists(uri).await? {
+            return Ok(false);
+        }
+
+        let entry = self.storage.read_entry(uri).await?;
+        Ok(entry.has_content(level))
+    }
+
+    async fn get_content_metadata(
+        &self,
+        uri: &TianyanUri,
+        level: ContentLevel,
+    ) -> Result<Option<crate::storage::traits::ContentMetadata>> {
+        if !self.storage.exists(uri).await? {
+            return Ok(None);
+        }
+
+        let entry = self.storage.read_entry(uri).await?;
+
+        if !entry.has_content(level) {
+            return Ok(None);
+        }
+
+        let content = self.storage.read_content(uri, level).await?;
+
+        Ok(Some(crate::storage::traits::ContentMetadata {
+            size: content.len() as u64,
+            created_at: entry.metadata.created_at,
+            updated_at: entry.metadata.updated_at,
+        }))
+    }
+
+    async fn get_all_content_metadata(
+        &self,
+        uri: &TianyanUri,
+    ) -> Result<
+        std::collections::HashMap<ContentLevel, Option<crate::storage::traits::ContentMetadata>>,
+    > {
+        use std::collections::HashMap;
+
+        let mut metadata_map = HashMap::new();
+
+        if !self.storage.exists(uri).await? {
+            for level in [
+                ContentLevel::Abstract,
+                ContentLevel::Overview,
+                ContentLevel::Detail,
+            ] {
+                metadata_map.insert(level, None);
+            }
+            return Ok(metadata_map);
+        }
+
+        let entry = self.storage.read_entry(uri).await?;
+
+        for level in [
+            ContentLevel::Abstract,
+            ContentLevel::Overview,
+            ContentLevel::Detail,
+        ] {
+            if entry.has_content(level) {
+                let content = self.storage.read_content(uri, level).await?;
+                metadata_map.insert(
+                    level,
+                    Some(crate::storage::traits::ContentMetadata {
+                        size: content.len() as u64,
+                        created_at: entry.metadata.created_at,
+                        updated_at: entry.metadata.updated_at,
+                    }),
+                );
+            } else {
+                metadata_map.insert(level, None);
+            }
+        }
+
+        Ok(metadata_map)
+    }
+
+    async fn search_by_namespace(
+        &self,
+        namespace: ContextNamespace,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let root_uri = TianyanUri::new(namespace, vec![]);
+        let mut results = Vec::new();
+
+        self.search_recursive(&root_uri, query, &mut results, limit)
+            .await?;
+
+        results.truncate(limit);
+        Ok(results)
+    }
+
+    async fn search_session(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.search_by_namespace(ContextNamespace::Session, query, limit)
+            .await
+    }
+
+    async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.search_by_namespace(ContextNamespace::Memory, query, limit)
+            .await
+    }
+
+    async fn search_knowledge(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.search_by_namespace(ContextNamespace::Knowledge, query, limit)
+            .await
+    }
+
+    async fn search_skill(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.search_by_namespace(ContextNamespace::Skill, query, limit)
+            .await
+    }
+
+    async fn read_file(&self, uri: &TianyanUri, filename: &str) -> Result<String> {
+        let child_uri = uri.append(filename);
+        self.read_content(&child_uri, ContentLevel::Detail).await
+    }
+
+    async fn write_file(&self, uri: &TianyanUri, filename: &str, content: &str) -> Result<()> {
+        let child_uri = uri.append(filename);
+        if !self.storage.exists(&child_uri).await? {
+            self.create_file(&child_uri).await?;
+        }
+        self.write_content(&child_uri, content).await
+    }
+
+    async fn file_exists(&self, uri: &TianyanUri, filename: &str) -> Result<bool> {
+        let child_uri = uri.append(filename);
+        self.storage.exists(&child_uri).await
+    }
+
+    async fn list_files(&self, uri: &TianyanUri) -> Result<Vec<String>> {
+        let entries = self.storage.list_directory(uri).await?;
+        Ok(entries
+            .into_iter()
+            .filter(|e| !e.is_directory())
+            .filter_map(|e| e.uri().path().last().cloned())
+            .collect())
+    }
+
+    async fn read_abstract(&self, uri: &TianyanUri) -> Result<String> {
+        self.read_content(uri, ContentLevel::Abstract).await
+    }
+
+    async fn read_overview(&self, uri: &TianyanUri) -> Result<String> {
+        self.read_content(uri, ContentLevel::Overview).await
+    }
+
+    async fn regenerate_metadata(&self, uri: &TianyanUri) -> Result<()> {
+        if !self.storage.exists(uri).await? {
+            return Err(TianyanError::EntryNotFound(uri.to_string()));
+        }
+
+        let mut entry = self.storage.read_entry(uri).await?;
+        entry.metadata.touch();
+        self.storage.write_entry(&entry).await?;
+
+        self.sync_to_vector_storage(&entry).await?;
+
+        tracing::debug!("已重新生成元数据：{}", uri);
+        Ok(())
+    }
+
+    async fn list_all_uris(&self) -> Result<Vec<TianyanUri>> {
+        let mut all_uris = Vec::new();
+
+        for namespace in [
+            ContextNamespace::User,
+            ContextNamespace::Session,
+            ContextNamespace::Memory,
+            ContextNamespace::Knowledge,
+            ContextNamespace::Agent,
+            ContextNamespace::Skill,
+        ] {
+            let root_uri = TianyanUri::new(namespace, vec![]);
+            self.collect_uris_recursive(&root_uri, &mut all_uris)
+                .await?;
+        }
+
+        Ok(all_uris)
+    }
+}
+
+impl VirtualFileSystemImpl {
+    /// 递归搜索匹配查询的条目。
+    async fn search_recursive(
+        &self,
+        uri: &TianyanUri,
+        query: &str,
+        results: &mut Vec<SearchResult>,
+        limit: usize,
+    ) -> Result<()> {
+        if results.len() >= limit {
+            return Ok(());
+        }
+
+        if !self.storage.exists(uri).await? {
+            return Ok(());
+        }
+
+        let entry = self.storage.read_entry(uri).await?;
+
+        if entry.is_directory() {
+            let query_lower = query.to_lowercase();
+            let mut score = 0.0f32;
+
+            if let Some(ref content) = entry.detail_content {
+                if content.to_lowercase().contains(&query_lower) {
+                    score += 0.5;
+                }
+            }
+
+            if let Some(ref content) = entry.overview_content {
+                if content.to_lowercase().contains(&query_lower) {
+                    score += 0.3;
+                }
+            }
+
+            if let Some(ref content) = entry.abstract_content {
+                if content.to_lowercase().contains(&query_lower) {
+                    score += 0.2;
+                }
+            }
+
+            if score > 0.0 {
+                results.push(SearchResult {
+                    uri: entry.metadata.uri.clone(),
+                    score,
+                    matched_level: ContentLevel::Detail,
+                    content: entry.detail_content.clone(),
+                });
+            }
+
+            let children = self.storage.list_directory(uri).await?;
+            for child in children {
+                Box::pin(self.search_recursive(child.uri(), query, results, limit)).await?;
+                if results.len() >= limit {
+                    return Ok(());
+                }
+            }
+        } else {
+            let query_lower = query.to_lowercase();
+            let mut score = 0.0f32;
+
+            if let Some(ref content) = entry.detail_content {
+                if content.to_lowercase().contains(&query_lower) {
+                    score += 0.5;
+                }
+            }
+
+            if let Some(ref content) = entry.overview_content {
+                if content.to_lowercase().contains(&query_lower) {
+                    score += 0.3;
+                }
+            }
+
+            if let Some(ref content) = entry.abstract_content {
+                if content.to_lowercase().contains(&query_lower) {
+                    score += 0.2;
+                }
+            }
+
+            if score > 0.0 {
+                results.push(SearchResult {
+                    uri: entry.metadata.uri.clone(),
+                    score,
+                    matched_level: ContentLevel::Detail,
+                    content: entry.detail_content.clone(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ContentLoader for VirtualFileSystemImpl {
+    async fn load_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+        self.read_content(uri, level).await
+    }
+
+    async fn load_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+        self.get_entry(uri).await
+    }
+
+    async fn has_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<bool> {
+        if !self.storage.exists(uri).await? {
+            return Ok(false);
+        }
+
+        let entry = self.storage.read_entry(uri).await?;
+        Ok(entry.has_content(level))
+    }
+}
+
+/// 估算字符串的 token 数量。
+fn estimate_token_count(text: &str) -> usize {
+    let char_count = text.chars().count();
+    char_count.div_ceil(3)
+}
+
+pub mod builder;
+pub use builder::{ensure_vfs_structure, initialize_vfs, VirtualFileSystemBuilder};

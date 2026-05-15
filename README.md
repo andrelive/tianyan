@@ -1,0 +1,447 @@
+# Tianyan（天演）
+
+一个基于大语言模型的本地智能代理系统。
+
+[![CI](https://github.com/tianyan/tianyan/workflows/CI/badge.svg)](https://github.com/tianyan/tianyan/actions/workflows/ci.yml)
+[![Release](https://github.com/tianyan/tianyan/workflows/Release/badge.svg)](https://github.com/tianyan/tianyan/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+
+## 概述
+
+Tianyan（天演）是一个本地智能代理系统，旨在通过自然语言交互帮助用户完成各种任务。它以大语言模型（LLM）为核心智能引擎，实现了统一的上下文管理架构。
+
+### 核心特性
+
+- **统一上下文架构**：所有上下文（用户偏好、记忆、知识库、技能）通过统一的 URI 系统管理
+- **三层摘要结构**：L0/L1/L2 分层结构，实现高效的上下文加载和 Token 优化
+- **OpenAI API 标准**：统一支持所有兼容 OpenAI API 的模型服务
+- **本地优先**：数据本地存储，确保隐私和离线能力
+- **GUI 桌面应用**：基于 Tauri + Yew + Axum 的跨平台桌面应用
+- **可扩展技能**：内置文件操作、系统命令等技能
+- **记忆自迭代**：自动从交互中学习和改进
+
+## 项目架构
+
+Tianyan 采用 Workspace 多 Crate 架构：
+
+```
+tianyan/
+├── Cargo.toml              # Workspace 根配置
+├── core/                   # 核心库（原 src/ 迁移至此）
+│   ├── Cargo.toml          # 库名: tianyan
+│   └── src/
+│       ├── lib.rs          # 核心模块导出
+│       ├── agent/          # Agent 协调器
+│       ├── config/         # 配置管理
+│       ├── context/        # 上下文管理
+│       ├── memory/         # 记忆系统
+│       ├── model/          # 模型路由
+│       ├── vfs/            # 虚拟文件系统
+│       └── ...
+├── server/                 # Axum HTTP 后端服务
+│   ├── Cargo.toml          # 库名: tianyan-server
+│   └── src/
+│       ├── lib.rs          # 暴露 start_server()
+│       ├── main.rs         # 独立运行入口
+│       └── api/            # HTTP API 路由
+│           ├── chat.rs     # 对话接口（含 SSE 流式）
+│           ├── sessions.rs # 会话管理
+│           ├── ingest.rs   # 知识导入
+│           ├── search.rs   # 知识搜索
+│           ├── skills.rs   # 技能管理
+│           └── config.rs   # 配置管理
+├── gui/                    # Yew WASM 前端
+│   ├── Cargo.toml          # 库名: tianyan-gui
+│   ├── index.html          # Trunk 入口
+│   └── src/
+│       ├── main.rs         # Yew 应用入口
+│       └── components/     # UI 组件
+│           ├── chat/       # 聊天面板
+│           ├── sidebar/    # 侧边栏
+│           └── settings/   # 设置面板
+└── tauri/                  # Tauri 桌面包装
+    ├── Cargo.toml          # 库名: tianyan-tauri
+    ├── tauri.conf.json     # Tauri 配置
+    ├── build.rs            # 构建脚本
+    ├── icons/              # 应用图标
+    └── src/
+        ├── lib.rs          # Tauri 库入口
+        ├── main.rs         # 桌面应用入口
+        └── server.rs       # 内嵌服务器启动
+```
+
+### 技术栈
+
+| 组件 | 版本 | 说明 |
+|-----|------|------|
+| **Rust** | 1.75+ | 2021 Edition |
+| **Yew** | 0.22 | WASM 前端框架 |
+| **Axum** | 0.8 | HTTP 后端框架 |
+| **Tauri** | 2.2+ | 桌面应用包装 |
+| **Tokio** | 1.35+ | 异步运行时 |
+| **gloo-net** | 0.6 | WASM HTTP 客户端 |
+| **Qdrant** | 1.17+ | 向量数据库 |
+
+## 安装
+
+### 前置要求
+
+- **Rust** 1.75 或更高版本
+- **Node.js** 18+（用于 Tauri 构建）
+- **Qdrant** 向量数据库（外部部署）
+- **Trunk**: `cargo install trunk`（Yew 构建工具）
+- **Tauri CLI**: `cargo install tauri-cli`
+- **Windows**: Microsoft Edge WebView2 Runtime
+
+### 快速安装
+
+**Linux/macOS：**
+```bash
+curl -fsSL https://raw.githubusercontent.com/tianyan/tianyan/main/scripts/install.sh | bash
+```
+
+**Windows (PowerShell)：**
+```powershell
+irm https://raw.githubusercontent.com/tianyan/tianyan/main/scripts/install.ps1 | iex
+```
+
+### 从源码构建
+
+```bash
+# 克隆仓库
+git clone https://github.com/tianyan/tianyan.git
+cd tianyan
+
+# 构建整个 Workspace
+cargo build --release
+```
+
+### GUI 桌面应用构建
+
+**快速构建（推荐）：**
+
+```bash
+# Linux/macOS
+./scripts/build.sh
+
+# Windows PowerShell
+.\scripts\build.ps1
+```
+
+**手动构建：**
+
+```bash
+# 1. 构建前端 (Yew/WASM)
+cd gui
+trunk build --release
+cd ..
+
+# 2. 构建 Tauri 桌面应用
+cd tauri
+cargo tauri build
+
+# 安装包输出位置：
+# Windows: tauri/target/release/bundle/msi/
+# Linux:   tauri/target/release/bundle/deb/ 或 appimage/
+# macOS:   tauri/target/release/bundle/dmg/
+```
+
+**开发模式：**
+
+```bash
+# 完整开发模式（热重载）
+cd tauri && cargo tauri dev
+
+# 仅后端服务
+cargo run -p tianyan-server
+
+# 仅前端（需要后端已启动）
+cd gui && trunk serve
+```
+
+### 从 Crates.io 安装
+
+```bash
+cargo install tianyan
+```
+
+## 快速开始
+
+### 1. 启动 GUI 桌面应用
+
+构建完成后，运行安装包或直接启动：
+
+```bash
+# Windows
+.\tauri\target\release\tianyan-tauri.exe
+
+# Linux
+./tauri/target/release/tianyan-tauri
+
+# macOS
+open ./tauri/target/release/tianyan-tauri.app
+```
+
+启动流程：
+1. Tauri 启动
+2. 内嵌 Axum 服务器启动（127.0.0.1:3000）
+3. Yew 前端加载
+4. 显示主界面
+
+### 2. 初始化配置
+
+首次启动后，在设置面板中配置：
+
+- **API 密钥**：OpenAI / Anthropic / DeepSeek 等
+- **模型选择**：GPT-4、Claude 3、DeepSeek 等
+- **知识库路径**：文档存储位置
+
+或通过 CLI 初始化：
+
+```bash
+# 初始化配置目录
+cargo run -p tianyan-core -- init
+
+# 或使用旧版 CLI（如果已安装）
+tianyan init
+```
+
+### 3. 配置 API 密钥
+
+**环境变量方式：**
+
+```bash
+# Linux/macOS
+export OPENAI_API_KEY='your-api-key'
+
+# Windows (PowerShell)
+$env:OPENAI_API_KEY = 'your-api-key'
+```
+
+**配置文件方式：**
+
+```bash
+# 生成默认配置
+cargo run -p tianyan-core -- config generate --output ~/.config/tianyan/tianyan.toml
+
+# 编辑配置文件并添加你的 API 密钥
+```
+
+## 基础用法
+
+### GUI 桌面应用
+
+启动后，你可以：
+
+- **对话聊天**：在主界面输入消息，支持 Markdown 渲染
+- **会话管理**：左侧边栏查看历史会话，点击切换
+- **知识导入**：设置面板中导入文档到知识库
+- **实时流式**：对话响应实时显示，支持打字机效果
+- **设置管理**：模型配置、API 密钥、界面主题
+
+### CLI 模式（Core Crate）
+
+```bash
+# 交互式对话会话
+cargo run -p tianyan-core -- chat
+
+# 使用特定模型
+cargo run -p tianyan-core -- chat --model gpt-4-turbo
+
+# 发送单条消息
+cargo run -p tianyan-core -- chat -m "用简单的术语解释量子计算"
+```
+
+### 知识管理
+
+```bash
+# 将文档导入知识库
+cargo run -p tianyan-core -- ingest --path ./documents
+
+# 按特定类别导入
+cargo run -p tianyan-core -- ingest --path ./api-docs --category technical
+
+# 搜索知识库
+cargo run -p tianyan-core -- search "API 认证" --limit 5
+```
+
+### 记忆管理
+
+```bash
+# 列出最近会话
+cargo run -p tianyan-core -- memory list-sessions --limit 10
+
+# 显示特定会话
+cargo run -p tianyan-core -- memory show --session-id <id>
+
+# 清理旧记忆
+cargo run -p tianyan-core -- memory clear --older-than 30
+
+# 导出记忆
+cargo run -p tianyan-core -- memory export --output memories.json --format json
+```
+
+### 技能
+
+```bash
+# 列出可用技能
+cargo run -p tianyan-core -- skill list
+
+# 显示技能详情
+cargo run -p tianyan-core -- skill show file_operations
+
+# 执行技能
+cargo run -p tianyan-core -- skill execute file_operations --params '{"action": "read", "path": "./test.txt"}'
+```
+
+### 独立 API 服务
+
+```bash
+# 启动 HTTP API 服务
+cargo run -p tianyan-server -- --host 127.0.0.1 --port 3000
+
+# 或使用发布版本
+./target/release/tianyan-server --host 127.0.0.1 --port 3000
+```
+
+API 端点：
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/health` | GET | 健康检查 |
+| `/api/chat` | POST | 对话请求 |
+| `/api/chat/stream` | POST | 流式对话（SSE） |
+| `/api/sessions` | GET/POST | 会话管理 |
+| `/api/ingest` | POST | 文档导入 |
+| `/api/search` | POST | 知识搜索 |
+| `/api/skills` | GET | 技能列表 |
+| `/api/config` | GET/PUT | 配置管理 |
+
+## 配置
+
+Tianyan 按以下顺序查找配置文件：
+
+1. `./tianyan.toml`（当前目录）
+2. `~/.config/tianyan/tianyan.toml`（用户配置）
+3. `~/.tianyan/tianyan.toml`（备用位置）
+
+详见 [config.example.toml](./config.example.toml) 获取完整示例。
+
+### 环境变量
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `TIANYAN_CONFIG` | 配置文件路径 | - |
+| `TIANYAN_DATA_DIR` | 数据存储目录 | `~/.local/share/tianyan` |
+| `TIANYAN_LOG_LEVEL` | 日志级别 | `info` |
+| `TIANYAN_LOG_FORMAT` | 日志格式 (text/json) | `text` |
+| `OPENAI_API_KEY` | OpenAI API 密钥 | - |
+| `ANTHROPIC_API_KEY` | Anthropic API 密钥 | - |
+| `DEEPSEEK_API_KEY` | DeepSeek API 密钥 | - |
+
+详见 [.env.example](./.env.example) 获取更多选项。
+
+## 架构
+
+Tianyan 使用统一上下文架构和三层摘要结构：
+
+```
+tianyan://
+├── user/           # 用户信息
+│   ├── profile/    # 用户画像
+│   ├── preferences/# 用户偏好
+│   └── entities/   # 实体记忆
+├── memory/         # 记忆系统
+│   ├── sessions/   # 会话记忆（短期）
+│   ├── events/     # 事件记录
+│   └── cases/      # 学习案例
+├── knowledge/      # 知识库
+│   ├── documents/  # 文档知识
+│   ├── images/     # 图片知识
+│   ├── code/       # 代码知识
+│   └── projects/   # 项目知识
+└── agent/          # 代理自身
+    ├── skills/     # 技能定义
+    ├── patterns/   # 学习模式
+    └── config/     # 配置
+```
+
+### 三层摘要
+
+每个上下文条目有三个层级：
+
+| 层级 | Token 数 | 用途 |
+|------|----------|------|
+| L0 摘要 | ~100 | 向量检索、快速过滤 |
+| L1 概览 | ~2K | 内容导航、重新排序 |
+| L2 详情 | 无限制 | 完整内容，按需加载 |
+
+### 通信架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  Tauri 桌面应用（单安装包）                    │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │              Yew 前端（WASM）                          │  │
+│  │  - 通过 HTTP 调用后端                                 │  │
+│  └───────────────────────┬───────────────────────────────┘  │
+│                          │ HTTP (localhost:3000)            │
+│  ┌───────────────────────┴───────────────────────────────┐  │
+│  │              Axum 后端服务（随 Tauri 启动）             │  │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐     │  │
+│  │  │  Agent  │ │ 模型路由 │ │ 双层检索 │ │ 记忆协调 │     │  │
+│  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘     │  │
+│  └───────────────────────┬───────────────────────────────┘  │
+│                          │                                  │
+│  ┌───────────────────────┴───────────────────────────────┐  │
+│  │              存储层（VFS + Qdrant）                    │  │
+│  │  • VFS: tianyan://memory/sessions/ 等                │  │
+│  │  • Qdrant: L0/L1 向量检索                            │  │
+│  │  ❌ 不使用 SQLite                                    │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## 文档
+
+- [配置指南](./docs/configuration.md)
+- [开发指南](./docs/development.md)
+- [GUI 迁移计划](./docs/serve-gui-migration-plan.md)
+- [更新日志](./CHANGELOG.md)
+
+## 支持的模型
+
+| 提供商 | 模型 | 状态 |
+|--------|------|------|
+| OpenAI | GPT-4, GPT-4 Turbo, GPT-3.5 | 支持 |
+| Anthropic | Claude 3 Opus, Claude 3 Sonnet | 支持（OpenAI 兼容接口） |
+| DeepSeek | DeepSeek Chat, DeepSeek Coder | 支持 |
+| 自定义 | OpenAI 兼容 API | 支持 |
+
+## 项目状态
+
+Tianyan 正在积极开发中。详见 [项目计划](./rust_local_agent_plan.md) 了解架构和路线图详情。
+
+### 已完成的迁移
+
+- ✅ Workspace 多 Crate 架构
+- ✅ Core 库迁移（原 src/ → core/src/）
+- ✅ Axum HTTP 后端服务
+- ✅ Yew WASM 前端
+- ✅ Tauri 桌面包装
+- ✅ SSE 流式对话支持
+- ✅ 完整 API 端点实现
+
+## 贡献
+
+欢迎贡献！详见 [开发指南](./docs/development.md)。
+
+## 许可证
+
+本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件。
+
+## 致谢
+
+- 灵感来源于 OpenViking 的统一文件系统范式
+- 使用 Rust 和优秀的开源社区构建

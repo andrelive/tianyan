@@ -120,7 +120,7 @@ pub struct ChatChoice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::types::{FunctionDefinition, ToolDefinition, ToolChoice};
+    use crate::model::types::{FunctionDefinition, ToolChoice, ToolDefinition};
 
     #[test]
     fn test_request_with_tools() {
