@@ -9,6 +9,8 @@ mod builder;
 mod coordinator;
 pub mod harness;
 pub mod skill_subsystem;
+mod tool_params;
+mod tool_registry;
 mod tools;
 mod types;
 
