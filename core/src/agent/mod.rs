@@ -10,11 +10,13 @@ mod coordinator;
 pub mod harness;
 pub mod skill_subsystem;
 mod tool_params;
+mod r#loop;
 mod tool_registry;
 mod tools;
 mod types;
 
 pub use crate::config::AgentConfig;
+pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopError, AgentLoopResult};
 pub use builder::AgentBuilder;
 pub use coordinator::{Agent, AgentCoordinator};
 pub use session_state::{SessionState, SessionStateManager};
