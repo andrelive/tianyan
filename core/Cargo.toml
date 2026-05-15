@@ -1,0 +1,110 @@
+[package]
+name = "tianyan-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core library for Tianyan - A local intelligent agent system powered by large language models"
+readme = "../README.md"
+keywords = ["agent", "ai", "llm", "assistant"]
+categories = ["development-tools"]
+
+[lib]
+name = "tianyan"
+path = "src/lib.rs"
+
+[dependencies]
+# Core dependencies
+tokio = { workspace = true }
+once_cell = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+config = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Vector and math
+ndarray = { workspace = true }
+
+# File system
+ignore = { workspace = true }
+
+# System information
+sysinfo = { workspace = true }
+
+# Cryptography
+ring = { workspace = true }
+
+# JSON Schema generation
+schemars = { workspace = true }
+
+# Token counting
+tiktoken-rs = { workspace = true }
+
+# Vector database
+qdrant-client = { workspace = true }
+
+# Document processing
+pulldown-cmark = { workspace = true }
+pdf-extract = { workspace = true }
+docx-rs = { workspace = true }
+
+# Image processing
+image = { workspace = true }
+kamadak-exif = { workspace = true }
+
+# Data processing
+csv = { workspace = true }
+calamine = { workspace = true }
+
+# Async utilities
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# OpenAI API client
+async-openai = { workspace = true }
+
+# Time handling
+chrono = { workspace = true }
+
+# UUID generation
+uuid = { workspace = true }
+
+# URL parsing
+url = { workspace = true }
+
+# TOML parsing
+toml = { workspace = true }
+
+# Directory handling
+dirs = { workspace = true }
+
+# Base64 encoding
+base64 = { workspace = true }
+
+# Hex encoding
+hex = { workspace = true }
+
+
+
+# Regular expressions
+regex = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []
+ocr = []
+code-analysis = []
+
+[[test]]
+name = "structural"
+path = "tests/structural.rs"
