@@ -1,11 +1,26 @@
 use async_trait::async_trait;
 use async_openai::types::chat::{
-    ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, CreateChatCompletionRequestArgs,
+    ChatCompletionMessageToolCall,
+    ChatCompletionMessageToolCalls,
+    ChatCompletionNamedToolChoice,
+    ChatCompletionRequestAssistantMessage,
+    ChatCompletionRequestAssistantMessageContent,
+    ChatCompletionRequestMessage,
+    ChatCompletionRequestSystemMessage,
+    ChatCompletionRequestSystemMessageContent,
+    ChatCompletionRequestToolMessage,
+    ChatCompletionRequestToolMessageContent,
+    ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent,
+    ChatCompletionTool,
+    ChatCompletionTools,
+    ChatCompletionToolChoiceOption,
+    CreateChatCompletionRequestArgs,
+    FunctionCall as OaFunctionCall,
+    FunctionName,
+    FunctionObject,
     Role as OaRole,
+    ToolChoiceOptions,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -16,7 +31,7 @@ use crate::common::types::{Message, MessageRole, TokenUsage};
 use crate::model::traits::ModelService;
 use crate::model::types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatChoice, ChunkChoice,
-    DeltaContent,
+    DeltaContent, ToolCall, ToolCallType, ToolChoice,
 };
 
 use super::client::AsyncOpenAIClient;
@@ -57,12 +72,28 @@ impl ModelService for AsyncOpenAIClient {
             .into_iter()
             .map(|c| {
                 let msg = c.message;
+                let tool_calls = msg.tool_calls.map(|calls| {
+                    calls
+                        .into_iter()
+                        .filter_map(|tc| match tc {
+                            ChatCompletionMessageToolCalls::Function(f) => Some(ToolCall {
+                                id: f.id,
+                                call_type: ToolCallType::Function,
+                                function: crate::model::types::FunctionCall {
+                                    name: f.function.name,
+                                    arguments: f.function.arguments,
+                                },
+                            }),
+                            _ => None,
+                        })
+                        .collect()
+                });
                 ChatChoice {
                     index: c.index as usize,
                     message: Message {
                         role: convert_role(&msg.role),
                         content: msg.content.unwrap_or_default(),
-                        tool_calls: None,
+                        tool_calls,
                         tool_call_id: None,
                     },
                     finish_reason: c.finish_reason.as_ref().map(|r| super::finish_reason_str(r).to_string()),
@@ -178,6 +209,40 @@ impl AsyncOpenAIClient {
         if let Some(frequency_penalty) = request.frequency_penalty {
             builder.frequency_penalty(frequency_penalty);
         }
+        if let Some(ref tools) = request.tools {
+            let oa_tools: Vec<ChatCompletionTools> = tools
+                .iter()
+                .map(|t| {
+                    ChatCompletionTools::Function(ChatCompletionTool {
+                        function: FunctionObject {
+                            name: t.function.name.clone(),
+                            description: Some(t.function.description.clone()),
+                            parameters: Some(t.function.parameters.clone()),
+                            strict: None,
+                        },
+                    })
+                })
+                .collect();
+            builder.tools(oa_tools);
+        }
+        if let Some(ref tool_choice) = request.tool_choice {
+            let oa_choice = match tool_choice {
+                ToolChoice::Auto => {
+                    ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::Auto)
+                }
+                ToolChoice::None => {
+                    ChatCompletionToolChoiceOption::Mode(ToolChoiceOptions::None)
+                }
+                ToolChoice::Function { function } => {
+                    ChatCompletionToolChoiceOption::Function(ChatCompletionNamedToolChoice {
+                        function: FunctionName {
+                            name: function.name.clone(),
+                        },
+                    })
+                }
+            };
+            builder.tool_choice(oa_choice);
+        }
     }
 }
 
@@ -198,21 +263,41 @@ fn convert_messages(messages: &[Message]) -> Vec<ChatCompletionRequestMessage> {
                 })
             }
             MessageRole::Assistant => {
+                let tool_calls = m.tool_calls.as_ref().map(|calls| {
+                    calls
+                        .iter()
+                        .map(|c| {
+                            ChatCompletionMessageToolCalls::Function(
+                                ChatCompletionMessageToolCall {
+                                    id: c.id.clone(),
+                                    function: OaFunctionCall {
+                                        name: c.function.name.clone(),
+                                        arguments: c.function.arguments.clone(),
+                                    },
+                                },
+                            )
+                        })
+                        .collect()
+                });
                 ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-                    content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                        m.content.clone(),
-                    )),
+                    content: if m.content.is_empty() {
+                        None
+                    } else {
+                        Some(ChatCompletionRequestAssistantMessageContent::Text(
+                            m.content.clone(),
+                        ))
+                    },
                     refusal: None,
                     name: None,
                     audio: None,
-                    tool_calls: None,
+                    tool_calls,
                     function_call: None,
                 })
             }
             MessageRole::Tool => {
                 ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
                     content: ChatCompletionRequestToolMessageContent::Text(m.content.clone()),
-                    tool_call_id: String::new(),
+                    tool_call_id: m.tool_call_id.clone().unwrap_or_default(),
                 })
             }
         })
@@ -226,5 +311,50 @@ fn convert_role(role: &OaRole) -> MessageRole {
         OaRole::Assistant => MessageRole::Assistant,
         OaRole::Tool => MessageRole::Tool,
         OaRole::Function => MessageRole::Assistant,
+    }
+}
+
+#[cfg(test)]
+mod convert_tests {
+    use super::*;
+    use crate::common::types::{Message, MessageRole};
+    use crate::model::types::{FunctionCall, ToolCall, ToolCallType};
+
+    #[test]
+    fn test_convert_system_message() {
+        let msg = Message::system("You are a helpful assistant");
+        let converted = convert_messages(&[msg]);
+        assert_eq!(converted.len(), 1);
+    }
+
+    #[test]
+    fn test_convert_user_message() {
+        let msg = Message::user("Hello");
+        let converted = convert_messages(&[msg]);
+        assert_eq!(converted.len(), 1);
+    }
+
+    #[test]
+    fn test_convert_assistant_with_tools() {
+        let msg = Message::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "call_abc".to_string(),
+                call_type: ToolCallType::Function,
+                function: FunctionCall {
+                    name: "search".to_string(),
+                    arguments: r#"{"q":"test"}"#.to_string(),
+                },
+            }],
+        );
+        let converted = convert_messages(&[msg]);
+        assert_eq!(converted.len(), 1);
+    }
+
+    #[test]
+    fn test_convert_tool_message_with_id() {
+        let msg = Message::tool("call_abc", r#"{"result":"ok"}"#);
+        let converted = convert_messages(&[msg]);
+        assert_eq!(converted.len(), 1);
     }
 }
