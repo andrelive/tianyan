@@ -3,9 +3,9 @@ use std::sync::Arc;
 use crate::common::error::Result;
 use crate::model::traits::{ChatService, EmbeddingService, VlmService};
 
+use super::config::ModelConfig;
 use super::provider::middleware::{LoggedEmbeddingService, LoggedService, LoggedVlmService};
 use super::provider::AsyncOpenAIClient;
-use super::config::ModelConfig;
 
 /// 一组已构建的模型服务。
 ///
@@ -47,7 +47,8 @@ impl ModelServices {
             let client = AsyncOpenAIClient::new(config.clone())?;
 
             let chat: Arc<dyn ChatService> = Arc::new(LoggedService(client.clone()));
-            let embedding: Arc<dyn EmbeddingService> = Arc::new(LoggedEmbeddingService(client.clone()));
+            let embedding: Arc<dyn EmbeddingService> =
+                Arc::new(LoggedEmbeddingService(client.clone()));
             let vision: Arc<dyn VlmService> = Arc::new(LoggedVlmService(client));
 
             if first_chat.is_none() {

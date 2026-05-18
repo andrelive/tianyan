@@ -8,9 +8,9 @@
 
 mod chat;
 mod client;
-pub(crate) mod middleware;
 mod discovery;
 mod embedding;
+pub(crate) mod middleware;
 pub(crate) mod vision;
 
 pub use client::AsyncOpenAIClient;

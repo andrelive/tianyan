@@ -151,10 +151,9 @@ impl ChatService for AsyncOpenAIClient {
                                         role: c.delta.role.as_ref().map(|r| convert_role(r)),
                                         content: c.delta.content,
                                     },
-                                    finish_reason: c
-                                        .finish_reason
-                                        .as_ref()
-                                        .map(|r| AsyncOpenAIClient::finish_reason_str(r).to_string()),
+                                    finish_reason: c.finish_reason.as_ref().map(|r| {
+                                        AsyncOpenAIClient::finish_reason_str(r).to_string()
+                                    }),
                                 })
                                 .collect(),
                         };

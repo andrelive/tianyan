@@ -20,7 +20,7 @@ use tianyan::context::DualLayerRetriever;
 use tianyan::model::types::ModelProvider;
 use tianyan::model::{ModelConfig, ModelServices};
 use tianyan::skills::{SkillExecutor, SkillRegistry};
-use tianyan::storage::VirtualFileSystem;
+use tianyan::storage::VirtualFileSystemImpl;
 use tianyan::{Result as TianyanResult, TianyanError};
 
 /// 根据配置创建模型服务。
@@ -63,7 +63,7 @@ impl AgentBuilderFactory {
     /// 构建 Agent 实例
     pub async fn build_agent(
         config: &TianyanConfig,
-        vfs: Arc<dyn VirtualFileSystem>,
+        vfs: Arc<VirtualFileSystemImpl>,
         skill_registry: Arc<RwLock<SkillRegistry>>,
         skill_executor: Arc<SkillExecutor>,
     ) -> TianyanResult<Agent> {
@@ -71,7 +71,7 @@ impl AgentBuilderFactory {
 
         let model_services = create_model_services(config).await?;
 
-        let retriever = DualLayerRetriever::new(vfs.get_vector_storage());
+        let retriever = DualLayerRetriever::new(vfs.clone());
 
         let agent = AgentBuilder::new()
             .with_config(config.agent.clone())
@@ -95,7 +95,7 @@ impl AgentBuilderFactory {
     /// 构建 Agent 或降级为 WizardMode
     pub async fn build_agent_or_wizard(
         config: &TianyanConfig,
-        vfs: Arc<dyn VirtualFileSystem>,
+        vfs: Arc<VirtualFileSystemImpl>,
         skill_registry: Arc<RwLock<SkillRegistry>>,
         skill_executor: Arc<SkillExecutor>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {

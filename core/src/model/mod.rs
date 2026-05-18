@@ -45,12 +45,12 @@ pub mod types;
 pub use traits::{ChatService, EmbeddingService, ServiceDiscovery, VisionEncoder, VlmService};
 
 pub use types::{
-    ApiError, ApiErrorResponse, ChatChoice, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChunkChoice, ContentPart, DeltaContent, EmbeddingData, EmbeddingInput,
-    EmbeddingRequest, EmbeddingResponse, FunctionCall, FunctionDefinition, ImageUrl,
-    ModelCapability, ModelInfo, ModelProvider, ModelType, ToolCall, ToolCallType, ToolChoice,
-    ToolChoiceFunction, ToolDefinition, ToolType, VisionChoice, VisionContent, VisionMessage,
-    VisionRequest, VisionResponse, embedding_dimension,
+    embedding_dimension, ApiError, ApiErrorResponse, ChatChoice, ChatCompletionChunk,
+    ChatCompletionRequest, ChatCompletionResponse, ChunkChoice, ContentPart, DeltaContent,
+    EmbeddingData, EmbeddingInput, EmbeddingRequest, EmbeddingResponse, FunctionCall,
+    FunctionDefinition, ImageUrl, ModelCapability, ModelInfo, ModelProvider, ModelType, ToolCall,
+    ToolCallType, ToolChoice, ToolChoiceFunction, ToolDefinition, ToolType, VisionChoice,
+    VisionContent, VisionMessage, VisionRequest, VisionResponse,
 };
 
 pub use config::ModelConfig;

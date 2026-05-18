@@ -10,11 +10,9 @@ use tracing::{debug, info, instrument};
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
-use crate::context::types::{compute_freshness, RetrievalResult, DEFAULT_FRESHNESS_HALF_LIFE_DAYS};
+use crate::context::types::RetrievalResult;
 use crate::model::EmbeddingService;
-use crate::storage::{
-    ContentLoader, VectorSearchQuery, VectorSearchResult, VectorStorage, VectorType,
-};
+use crate::storage::{ContentLoader, VfsFacade};
 
 use super::intent::{Intent, IntentAnalyzer};
 use super::loader::{ContentLoadStrategy, TokenBudget};
@@ -32,26 +30,6 @@ fn compute_combined_score(semantic_score: f32, freshness_score: f32) -> f32 {
 }
 
 impl RetrievalResult {
-    /// 从向量搜索结果创建。
-    pub fn from_search_result(result: VectorSearchResult) -> Self {
-        let uri = result.payload.uri.clone();
-        let category = uri.namespace().to_string();
-        let source_updated_at = Some(result.payload.updated_at);
-        let age_days = (chrono::Utc::now() - result.payload.updated_at).num_days();
-        let freshness_score = compute_freshness(age_days, DEFAULT_FRESHNESS_HALF_LIFE_DAYS);
-        Self {
-            uri,
-            score: result.score,
-            content: None,
-            content_level: ContentLevel::Abstract,
-            token_count: 0,
-            category,
-            tags: result.payload.tags.clone(),
-            source_updated_at,
-            freshness_score,
-        }
-    }
-
     /// 设置内容。
     pub fn with_content(mut self, content: String, level: ContentLevel) -> Self {
         self.token_count = estimate_tokens(&content);
@@ -92,10 +70,8 @@ pub trait ContextRetriever: Send + Sync {
 /// 此检索器使用 RRF 算法融合多个命名向量的搜索结果，
 /// 提供更准确和全面的检索能力。
 pub struct DualLayerRetriever {
-    /// 用于相似性搜索的向量存储。
-    vector_storage: Arc<dyn VectorStorage>,
-    /// 用于查询向量化的嵌入服务。
-    embedding_service: Option<Arc<dyn EmbeddingService>>,
+    /// VFS 实例，提供搜索和内容加载。
+    vfs: Arc<dyn VfsFacade>,
     /// 用于加载结果内容的内容加载器。
     content_loader: Option<Arc<dyn ContentLoader>>,
     /// 意图分析器。
@@ -112,10 +88,9 @@ pub struct DualLayerRetriever {
 
 impl DualLayerRetriever {
     /// 创建新的融合检索器。
-    pub fn new(vector_storage: Arc<dyn VectorStorage>) -> Self {
+    pub fn new(vfs: Arc<dyn VfsFacade>) -> Self {
         Self {
-            vector_storage,
-            embedding_service: None,
+            vfs,
             content_loader: None,
             intent_analyzer: IntentAnalyzer::new(),
             embedding_model: "text-embedding-3-small".to_string(),
@@ -125,9 +100,8 @@ impl DualLayerRetriever {
         }
     }
 
-    /// 设置嵌入服务。
+    /// 设置嵌入服务（仅用于配置意图分析器）。
     pub fn with_embedding_service(mut self, service: Arc<dyn EmbeddingService>) -> Self {
-        self.embedding_service = Some(service.clone());
         self.intent_analyzer =
             IntentAnalyzer::new().with_embedding_service(service, &self.embedding_model);
         self
@@ -168,22 +142,21 @@ impl DualLayerRetriever {
     pub async fn retrieve(&self, query: &str, top_k: usize) -> Result<Vec<RetrievalResult>> {
         let mut trace_builder = RetrievalTraceBuilder::new(query);
 
-        // 步骤 1：意图分。
+        // 步骤 1：意图分析。
         let intent = self.analyze_intent(query).await?;
         trace_builder.add_intent_analysis(intent.token_count);
 
-        // 步骤 2：获取查询向。
-        let query_vector = self.get_query_vector(&intent).await?;
-
-        // 步骤 3：融合搜索（abstract + overview 向量。
-        let results = self.fused_search(&query_vector, top_k, &intent).await?;
+        // 步骤 2：融合搜索（VFS 内部处理嵌入）。
+        let results = self
+            .fused_search(&intent.original_query, top_k, &intent)
+            .await?;
         debug!("Fused search returned {} results", results.len());
 
         for result in &results {
             trace_builder.add_l1_search(result.uri.clone(), result.score, 0);
         }
 
-        // 步骤 4：加载内。
+        // 步骤 3：加载内容。
         let results = self.load_content_for_results(results).await?;
         for result in &results {
             if result.has_content() {
@@ -191,7 +164,7 @@ impl DualLayerRetriever {
             }
         }
 
-        // 构建最终追踪记。
+        // 构建最终追踪记录。
         let trace = trace_builder.build();
         info!(
             query = %query,
@@ -210,8 +183,9 @@ impl DualLayerRetriever {
         intent: &Intent,
         top_k: usize,
     ) -> Result<Vec<RetrievalResult>> {
-        let query_vector = self.get_query_vector(intent).await?;
-        let results = self.fused_search(&query_vector, top_k, intent).await?;
+        let results = self
+            .fused_search(&intent.original_query, top_k, intent)
+            .await?;
         self.load_content_for_results(results).await
     }
 
@@ -223,10 +197,11 @@ impl DualLayerRetriever {
         budget: usize,
     ) -> Result<Vec<RetrievalResult>> {
         let intent = self.analyze_intent(query).await?;
-        let query_vector = self.get_query_vector(&intent).await?;
-        let results = self.fused_search(&query_vector, top_k, &intent).await?;
+        let results = self
+            .fused_search(&intent.original_query, top_k, &intent)
+            .await?;
 
-        // 带预算加载内。
+        // 带预算加载内容。
         self.load_content_with_budget(results, budget).await
     }
 
@@ -235,53 +210,31 @@ impl DualLayerRetriever {
         self.intent_analyzer.analyze(query).await
     }
 
-    /// 获取查询向量。
-    async fn get_query_vector(&self, intent: &Intent) -> Result<Vec<f32>> {
-        if let Some(ref vector) = intent.query_vector {
-            return Ok(vector.clone());
-        }
-
-        if let Some(ref service) = self.embedding_service {
-            let embedding = service
-                .embed_single(&self.embedding_model, &intent.original_query)
-                .await?;
-            return Ok(embedding.vector);
-        }
-
-        Err(TianyanError::Retrieval(
-            "没有可用的嵌入服务且无预计算向量".to_string(),
-        ))
-    }
-
-    /// 执行融合搜索（abstract + overview 向量）。
+    /// 执行融合搜索。
     ///
-    /// 使用 RRF 算法融合 abstract 和 overview 两个向量的搜索结果。
+    /// VFS 内部负责文本嵌入和 RRF 融合。
     async fn fused_search(
         &self,
-        query_vector: &[f32],
+        query: &str,
         top_k: usize,
         intent: &Intent,
     ) -> Result<Vec<RetrievalResult>> {
-        let results = self
-            .vector_storage
-            .search_abstract_and_overview(query_vector.to_vec(), top_k, intent.category_filter())
-            .await?;
+        let namespace = intent.target_scope.as_ref().map(|s| s.category_enum());
+        let results = self.vfs.search(query, top_k, namespace).await?;
 
         let mut results: Vec<RetrievalResult> = results
             .into_iter()
-            .map(RetrievalResult::from_search_result)
+            .map(|sr| RetrievalResult::new(sr.uri, sr.score))
             .collect();
 
         // Memory namespace 结果获得分数偏置，确保记忆优先于通用知识
-        // 偏置随记忆年龄衰减（来自 MemoryConfig.decay_rate）
         for result in &mut results {
-            if result.category == "memory" {
-                let bias = self.memory_bias;
-                result.score *= bias;
+            if result.uri.namespace().to_string() == "memory" {
+                result.score *= self.memory_bias;
             }
         }
 
-        // 将新鲜度评分融入最终分数
+        // 将新鲜度评分融入最终分数（VFS 搜索结果不含时间戳，默认为 1.0）
         for result in &mut results {
             result.score = compute_combined_score(result.score, result.freshness_score);
         }
@@ -292,6 +245,7 @@ impl DualLayerRetriever {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        results.truncate(top_k);
         Ok(results)
     }
 
@@ -300,17 +254,13 @@ impl DualLayerRetriever {
         &self,
         results: Vec<RetrievalResult>,
     ) -> Result<Vec<RetrievalResult>> {
-        let Some(loader) = &self.content_loader else {
-            return Ok(results);
-        };
-
         let mut loaded_results = Vec::with_capacity(results.len());
 
         for mut result in results {
             let strategy = ContentLoadStrategy::from_score(result.score);
             let level = strategy.to_content_level();
 
-            match loader.load_content(&result.uri, level).await {
+            match self.vfs.read(&result.uri, level).await {
                 Ok(content) => {
                     result.content = Some(content.clone());
                     result.content_level = level;
@@ -318,11 +268,9 @@ impl DualLayerRetriever {
                 }
                 Err(e) => {
                     tracing::warn!(uri = %result.uri, error = %e, "加载内容失败");
-                    // 尝试加载摘要作为回退
                     if level != ContentLevel::Abstract {
-                        if let Ok(content) = loader
-                            .load_content(&result.uri, ContentLevel::Abstract)
-                            .await
+                        if let Ok(content) =
+                            self.vfs.read(&result.uri, ContentLevel::Abstract).await
                         {
                             result.content = Some(content.clone());
                             result.content_level = ContentLevel::Abstract;
@@ -344,10 +292,6 @@ impl DualLayerRetriever {
         results: Vec<RetrievalResult>,
         budget: usize,
     ) -> Result<Vec<RetrievalResult>> {
-        let Some(loader) = &self.content_loader else {
-            return Ok(results);
-        };
-
         let mut token_budget = TokenBudget::new(budget);
         let mut loaded_results = Vec::new();
 
@@ -355,7 +299,7 @@ impl DualLayerRetriever {
             let strategy = ContentLoadStrategy::from_score_and_budget(result.score, &token_budget);
             let level = strategy.to_content_level();
 
-            match loader.load_content(&result.uri, level).await {
+            match self.vfs.read(&result.uri, level).await {
                 Ok(content) => {
                     let tokens = estimate_tokens(&content);
                     if token_budget.can_afford(tokens) {
@@ -378,11 +322,7 @@ impl DualLayerRetriever {
 
     /// 加载特定 URI 的内容。
     pub async fn load_content(&self, uri: &TianyanUri) -> Result<String> {
-        let Some(loader) = &self.content_loader else {
-            return Err(TianyanError::Retrieval("内容加载器不可用".to_string()));
-        };
-
-        loader.load_content(uri, ContentLevel::Overview).await
+        self.vfs.read(uri, ContentLevel::Overview).await
     }
 
     /// 加载特定层级的内容。
@@ -391,11 +331,7 @@ impl DualLayerRetriever {
         uri: &TianyanUri,
         level: ContentLevel,
     ) -> Result<String> {
-        let Some(loader) = &self.content_loader else {
-            return Err(TianyanError::Retrieval("内容加载器不可用".to_string()));
-        };
-
-        loader.load_content(uri, level).await
+        self.vfs.read(uri, level).await
     }
 
     /// 通过视觉嵌入搜索（用于图像相似性搜索）。
@@ -404,26 +340,12 @@ impl DualLayerRetriever {
         visual_vector: &[f32],
         top_k: usize,
     ) -> Result<Vec<RetrievalResult>> {
-        let query = VectorSearchQuery {
-            vector: visual_vector.to_vec(),
-            vector_type: VectorType::Visual,
-            limit: top_k,
-            category_filter: None,
-            min_score: None,
-        };
-
-        let results = self.vector_storage.search(query).await?;
-        let results = results
+        let results = self.vfs.search_by_visual(visual_vector, top_k).await?;
+        let results: Vec<RetrievalResult> = results
             .into_iter()
-            .map(RetrievalResult::from_search_result)
+            .map(|sr| RetrievalResult::new(sr.uri, sr.score))
             .collect();
-
         self.load_content_for_results(results).await
-    }
-
-    /// 获取向量存储。
-    pub fn vector_storage(&self) -> &dyn VectorStorage {
-        self.vector_storage.as_ref()
     }
 
     /// 获取默认 Token 预算。
@@ -485,32 +407,36 @@ impl ContextRetriever for DualLayerRetriever {
 
 /// 用于创建融合检索器实例的构建器。
 pub struct DualLayerRetrieverBuilder {
-    vector_storage: Option<Arc<dyn VectorStorage>>,
+    vfs: Option<Arc<dyn VfsFacade>>,
     embedding_service: Option<Arc<dyn EmbeddingService>>,
     content_loader: Option<Arc<dyn ContentLoader>>,
     embedding_model: Option<String>,
     default_token_budget: Option<usize>,
+    memory_bias: Option<f32>,
+    memory_decay_rate: Option<f32>,
 }
 
 impl DualLayerRetrieverBuilder {
     /// 创建新的构建器。
     pub fn new() -> Self {
         Self {
-            vector_storage: None,
+            vfs: None,
             embedding_service: None,
             content_loader: None,
             embedding_model: None,
             default_token_budget: None,
+            memory_bias: None,
+            memory_decay_rate: None,
         }
     }
 
-    /// 设置向量存储（必需）。
-    pub fn with_vector_storage(mut self, storage: Arc<dyn VectorStorage>) -> Self {
-        self.vector_storage = Some(storage);
+    /// 设置 VFS（必需）。
+    pub fn with_vfs(mut self, vfs: Arc<dyn VfsFacade>) -> Self {
+        self.vfs = Some(vfs);
         self
     }
 
-    /// 设置嵌入服务。
+    /// 设置嵌入服务（仅用于配置意图分析器）。
     pub fn with_embedding_service(mut self, service: Arc<dyn EmbeddingService>) -> Self {
         self.embedding_service = Some(service);
         self
@@ -534,13 +460,25 @@ impl DualLayerRetrieverBuilder {
         self
     }
 
+    /// 设置 Memory 命名空间的分数偏置倍数。
+    pub fn with_memory_bias(mut self, bias: f32) -> Self {
+        self.memory_bias = Some(bias);
+        self
+    }
+
+    /// 设置记忆衰减率（每日）。
+    pub fn with_memory_decay_rate(mut self, rate: f32) -> Self {
+        self.memory_decay_rate = Some(rate);
+        self
+    }
+
     /// 构建检索器。
     pub fn build(self) -> Result<DualLayerRetriever> {
-        let vector_storage = self
-            .vector_storage
-            .ok_or_else(|| TianyanError::Internal("向量存储不可用".to_string()))?;
+        let vfs = self
+            .vfs
+            .ok_or_else(|| TianyanError::Internal("VFS 不可用".to_string()))?;
 
-        let mut retriever = DualLayerRetriever::new(vector_storage);
+        let mut retriever = DualLayerRetriever::new(vfs);
 
         if let Some(service) = self.embedding_service {
             retriever = retriever.with_embedding_service(service);
@@ -558,6 +496,14 @@ impl DualLayerRetrieverBuilder {
             retriever = retriever.with_token_budget(budget);
         }
 
+        if let Some(bias) = self.memory_bias {
+            retriever = retriever.with_memory_bias(bias);
+        }
+
+        if let Some(rate) = self.memory_decay_rate {
+            retriever = retriever.with_memory_decay_rate(rate);
+        }
+
         Ok(retriever)
     }
 }
@@ -571,12 +517,15 @@ impl Default for DualLayerRetrieverBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::ContextNamespace;
+    use crate::common::types::{ContextNamespace, SearchResult};
     use crate::model::{EmbeddingData, EmbeddingRequest, EmbeddingResponse};
     use crate::storage::{
-        ContextEntry, VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType,
+        ContentMetadata, ContentStore, ContextEntry, VectorPoint, VectorSearchQuery,
+        VectorSearchResult, VectorStorage, VectorType, VfsCore, VfsMetadata, VfsSearch,
     };
     use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     /// Mock embedding service for testing.
     struct MockEmbeddingService;
@@ -598,10 +547,6 @@ mod tests {
 
         fn embedding_dimension(&self, _model: &str) -> usize {
             768
-        }
-
-        fn service_name(&self) -> &str {
-            "mock"
         }
     }
 
@@ -629,15 +574,13 @@ mod tests {
 
     /// Mock in-memory vector storage for testing.
     pub struct InMemoryVectorStorage {
-        points: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, VectorPoint>>>,
+        points: Arc<tokio::sync::RwLock<HashMap<String, VectorPoint>>>,
     }
 
     impl InMemoryVectorStorage {
         pub fn new() -> Self {
             Self {
-                points: std::sync::Arc::new(tokio::sync::RwLock::new(
-                    std::collections::HashMap::new(),
-                )),
+                points: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             }
         }
     }
@@ -678,17 +621,14 @@ mod tests {
                         VectorType::Visual => point.visual_vector.as_ref()?,
                     };
 
-                    // Apply category filter
                     if let Some(ref filter) = query.category_filter {
                         if point.payload.category.as_ref() != Some(filter) {
                             return None;
                         }
                     }
 
-                    // Calculate cosine similarity
                     let score = cosine_similarity(&query.vector, vector);
 
-                    // Apply minimum score filter
                     if let Some(min_score) = query.min_score {
                         if score < min_score {
                             return None;
@@ -703,14 +643,12 @@ mod tests {
                 })
                 .collect();
 
-            // Sort by score descending
             results.sort_by(|a, b| {
                 b.score
                     .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
 
-            // Limit results
             results.truncate(query.limit);
 
             Ok(results)
@@ -794,15 +732,157 @@ mod tests {
         dot_product / (norm_a * norm_b)
     }
 
+    /// Test VFS that delegates to in-memory vector storage and mock content loader.
+    struct TestVfs {
+        vector_storage: Arc<InMemoryVectorStorage>,
+        embedding_service: Arc<MockEmbeddingService>,
+        content_loader: MockContentLoader,
+    }
+
+    impl TestVfs {
+        fn new(
+            vector_storage: Arc<InMemoryVectorStorage>,
+            embedding_service: Arc<MockEmbeddingService>,
+        ) -> Self {
+            Self {
+                vector_storage,
+                embedding_service,
+                content_loader: MockContentLoader,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl VfsCore for TestVfs {
+        async fn initialize(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn exists(&self, _uri: &TianyanUri) -> Result<bool> {
+            Ok(true)
+        }
+        async fn delete(&self, _uri: &TianyanUri) -> Result<()> {
+            Ok(())
+        }
+        async fn list(&self, _uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
+            Ok(vec![])
+        }
+        async fn move_entry(&self, _source: &TianyanUri, _destination: &TianyanUri) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ContentStore for TestVfs {
+        async fn write(
+            &self,
+            _uri: &TianyanUri,
+            _level: ContentLevel,
+            _content: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn read(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+            self.content_loader.load_content(uri, level).await
+        }
+        async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn has_content(&self, _uri: &TianyanUri, _level: ContentLevel) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    #[async_trait]
+    impl VfsSearch for TestVfs {
+        async fn search(
+            &self,
+            query: &str,
+            limit: usize,
+            namespace: Option<ContextNamespace>,
+        ) -> Result<Vec<SearchResult>> {
+            let embedding = self.embedding_service.embed_single("test", query).await?;
+            let query_obj = VectorSearchQuery {
+                vector: embedding.vector,
+                vector_type: VectorType::Abstract,
+                limit,
+                category_filter: namespace.map(|ns| ns.dir_name().to_string()),
+                min_score: None,
+            };
+            let results = self.vector_storage.search(query_obj).await?;
+            Ok(results
+                .into_iter()
+                .map(|r| SearchResult {
+                    uri: r.payload.uri.clone(),
+                    score: r.score,
+                    matched_level: ContentLevel::Abstract,
+                    content: None,
+                })
+                .collect())
+        }
+
+        async fn search_by_visual(
+            &self,
+            visual_vector: &[f32],
+            top_k: usize,
+        ) -> Result<Vec<SearchResult>> {
+            let query = VectorSearchQuery {
+                vector: visual_vector.to_vec(),
+                vector_type: VectorType::Visual,
+                limit: top_k,
+                category_filter: None,
+                min_score: None,
+            };
+            let results = self.vector_storage.search(query).await?;
+            Ok(results
+                .into_iter()
+                .map(|r| SearchResult {
+                    uri: r.payload.uri.clone(),
+                    score: r.score,
+                    matched_level: ContentLevel::Abstract,
+                    content: None,
+                })
+                .collect())
+        }
+
+        async fn update_summary_vectors(
+            &self,
+            _uri: &TianyanUri,
+            _abstract_content: &str,
+            _overview_content: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl VfsMetadata for TestVfs {
+        async fn update_metadata(
+            &self,
+            _uri: &TianyanUri,
+            _importance: f32,
+            _custom: HashMap<String, serde_json::Value>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn get_all_content_metadata(
+            &self,
+            _uri: &TianyanUri,
+        ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
+            Ok(HashMap::new())
+        }
+    }
+
+    impl VfsFacade for TestVfs {}
+
     async fn create_test_retriever() -> DualLayerRetriever {
-        let vector_storage: Arc<dyn crate::storage::VectorStorage> =
-            Arc::new(InMemoryVectorStorage::new());
+        let vector_storage = Arc::new(InMemoryVectorStorage::new());
         vector_storage.initialize().await.unwrap();
+        let vfs: Arc<dyn VfsFacade> =
+            Arc::new(TestVfs::new(vector_storage, Arc::new(MockEmbeddingService)));
 
         DualLayerRetrieverBuilder::new()
-            .with_vector_storage(vector_storage)
+            .with_vfs(vfs)
             .with_embedding_service(Arc::new(MockEmbeddingService))
-            .with_content_loader(Arc::new(MockContentLoader))
             .build()
             .unwrap()
     }
@@ -811,14 +891,11 @@ mod tests {
         let vector_storage = Arc::new(InMemoryVectorStorage::new());
         vector_storage.initialize().await.unwrap();
 
-        // Add some test data
         for i in 0..5 {
             let uri = TianyanUri::new(
                 ContextNamespace::Knowledge,
                 vec!["documents".to_string(), format!("doc_{}", i)],
             );
-            // Note: category_filter checks payload.category, so we set it to "knowledge"
-            // to match the URI's category for the filter to work
             let payload = crate::common::types::EntryMetadata::new(uri.clone(), "unknown")
                 .with_category("knowledge")
                 .with_importance(0.5 + (i as f32 * 0.1))
@@ -834,10 +911,14 @@ mod tests {
             vector_storage.upsert_point(&point).await.unwrap();
         }
 
+        let vfs: Arc<dyn VfsFacade> = Arc::new(TestVfs::new(
+            vector_storage.clone(),
+            Arc::new(MockEmbeddingService),
+        ));
+
         let retriever = DualLayerRetrieverBuilder::new()
-            .with_vector_storage(vector_storage.clone())
+            .with_vfs(vfs)
             .with_embedding_service(Arc::new(MockEmbeddingService))
-            .with_content_loader(Arc::new(MockContentLoader))
             .build()
             .unwrap();
 
@@ -865,39 +946,17 @@ mod tests {
     }
 
     #[test]
-    fn test_retrieval_result_from_search_result() {
-        let uri = TianyanUri::new(ContextNamespace::Memory, vec!["session".to_string()]);
-        let payload = crate::common::types::EntryMetadata::new(uri.clone(), "unknown")
-            .with_category("memory")
-            .with_importance(0.7)
-            .with_tags(vec!["test".to_string()]);
-        let search_result = crate::storage::VectorSearchResult {
-            id: "test_id".to_string(),
-            score: 0.85,
-            payload,
-        };
-
-        let result = RetrievalResult::from_search_result(search_result);
-        assert_eq!(result.uri, uri);
-        assert!((result.score - 0.85).abs() < 0.001);
-        assert_eq!(result.category, "memory");
-    }
-
-    #[test]
     fn test_retrieval_result_content_levels() {
         let uri = TianyanUri::new(ContextNamespace::User, vec!["test".to_string()]);
 
-        // Test with abstract level
         let result_abstract = RetrievalResult::new(uri.clone(), 0.8)
             .with_content("Abstract".to_string(), ContentLevel::Abstract);
         assert_eq!(result_abstract.content_level, ContentLevel::Abstract);
 
-        // Test with overview level
         let result_overview = RetrievalResult::new(uri.clone(), 0.9)
             .with_content("Overview".to_string(), ContentLevel::Overview);
         assert_eq!(result_overview.content_level, ContentLevel::Overview);
 
-        // Test with detail level
         let result_detail = RetrievalResult::new(uri, 0.95)
             .with_content("Detail".to_string(), ContentLevel::Detail);
         assert_eq!(result_detail.content_level, ContentLevel::Detail);
@@ -915,11 +974,12 @@ mod tests {
     async fn test_dual_layer_retriever_builder_with_options() {
         let vector_storage = Arc::new(InMemoryVectorStorage::new());
         vector_storage.initialize().await.unwrap();
+        let vfs: Arc<dyn VfsFacade> =
+            Arc::new(TestVfs::new(vector_storage, Arc::new(MockEmbeddingService)));
 
         let retriever = DualLayerRetrieverBuilder::new()
-            .with_vector_storage(vector_storage)
+            .with_vfs(vfs)
             .with_embedding_service(Arc::new(MockEmbeddingService))
-            .with_content_loader(Arc::new(MockContentLoader))
             .with_embedding_model("custom-model")
             .with_token_budget(8192)
             .build()
@@ -938,19 +998,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_query_vector() {
-        let retriever = create_test_retriever().await;
-        let intent = retriever.analyze_intent("test query").await.unwrap();
-        let vector = retriever.get_query_vector(&intent).await.unwrap();
-        assert_eq!(vector.len(), 768);
-    }
-
-    #[tokio::test]
     async fn test_fused_search_empty() {
         let retriever = create_test_retriever().await;
         let intent = retriever.analyze_intent("test").await.unwrap();
-        let vector = retriever.get_query_vector(&intent).await.unwrap();
-        let results = retriever.fused_search(&vector, 10, &intent).await.unwrap();
+        let results = retriever
+            .fused_search(&intent.original_query, 10, &intent)
+            .await
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -958,10 +1012,11 @@ mod tests {
     async fn test_fused_search_with_data() {
         let (retriever, _) = create_test_retriever_with_data().await;
         let intent = retriever.analyze_intent("documents").await.unwrap();
-        let vector = retriever.get_query_vector(&intent).await.unwrap();
-        let results = retriever.fused_search(&vector, 10, &intent).await.unwrap();
+        let results = retriever
+            .fused_search(&intent.original_query, 10, &intent)
+            .await
+            .unwrap();
 
-        // Should return results from the test data
         assert!(!results.is_empty());
         assert!(results.len() <= 10);
     }
@@ -970,19 +1025,17 @@ mod tests {
     async fn test_fused_search_with_category_filter() {
         let (retriever, _) = create_test_retriever_with_data().await;
 
-        // Create intent with category filter
-        let intent = crate::context::retrieval::intent::Intent::new("documents")
-            .with_vector(vec![0.1; 768])
-            .with_scope(crate::context::retrieval::intent::TargetScope::new(
-                ContextNamespace::Knowledge,
-            ));
+        let intent = Intent::new("documents").with_scope(
+            crate::context::retrieval::intent::TargetScope::new(ContextNamespace::Knowledge),
+        );
 
-        let vector = retriever.get_query_vector(&intent).await.unwrap();
-        let results = retriever.fused_search(&vector, 10, &intent).await.unwrap();
+        let results = retriever
+            .fused_search(&intent.original_query, 10, &intent)
+            .await
+            .unwrap();
 
-        // All results should be in the knowledge category
         for result in &results {
-            assert_eq!(result.category, "knowledge");
+            assert_eq!(result.uri.namespace().to_string(), "knowledge");
         }
     }
 
@@ -1030,7 +1083,6 @@ mod tests {
         let (retriever, _) = create_test_retriever_with_data().await;
         let results = retriever.retrieve("documents", 5).await.unwrap();
 
-        // Should return results with content loaded
         for result in &results {
             assert!(result.has_content());
         }
@@ -1044,16 +1096,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Results should respect token budget
         let total_tokens: usize = results.iter().map(|r| r.token_count).sum();
         assert!(total_tokens <= 1000 || results.is_empty());
     }
 
     #[tokio::test]
     async fn test_search_by_visual() {
-        let (retriever, _) = create_test_retriever_with_data().await;
+        let (retriever, vector_storage) = create_test_retriever_with_data().await;
 
-        // Add a point with visual vector
         let uri = TianyanUri::new(
             ContextNamespace::Knowledge,
             vec!["images".to_string(), "img_1".to_string()],
@@ -1070,13 +1120,8 @@ mod tests {
             visual_vector: Some(vec![0.5; 512]),
             payload,
         };
-        retriever
-            .vector_storage()
-            .upsert_point(&point)
-            .await
-            .unwrap();
+        vector_storage.upsert_point(&point).await.unwrap();
 
-        // Search by visual vector
         let visual_query = vec![0.5; 512];
         let results = retriever.search_by_visual(&visual_query, 10).await.unwrap();
 
@@ -1088,14 +1133,14 @@ mod tests {
     #[test]
     fn test_builder_defaults() {
         let builder = DualLayerRetrieverBuilder::new();
-        assert!(builder.vector_storage.is_none());
+        assert!(builder.vfs.is_none());
         assert!(builder.embedding_service.is_none());
     }
 
     #[test]
     fn test_builder_default() {
         let builder = DualLayerRetrieverBuilder::default();
-        assert!(builder.vector_storage.is_none());
+        assert!(builder.vfs.is_none());
     }
 
     // ==================== Token Estimation Tests ====================

@@ -51,7 +51,7 @@ pub enum AgentLoopError {
 /// Agent 迭代循环。
 #[derive(Clone)]
 pub struct AgentLoop {
-        model_service: Arc<dyn ChatService>,
+    model_service: Arc<dyn ChatService>,
     tool_registry: ToolRegistry,
     config: AgentLoopConfig,
 }
@@ -59,7 +59,7 @@ pub struct AgentLoop {
 impl AgentLoop {
     /// 创建新的 AgentLoop。
     pub fn new(
-    model_service: Arc<dyn ChatService>,
+        model_service: Arc<dyn ChatService>,
         tool_registry: ToolRegistry,
         config: AgentLoopConfig,
     ) -> Self {

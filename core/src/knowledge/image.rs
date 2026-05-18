@@ -479,8 +479,8 @@ impl<'a, V: VlmService, E: VisionEncoder> ImageAnalyzer<'a, V, E> {
                       5. 图像类型（screenshot、photo、diagram、chart、code、document、icon、illustration 或 other）\n\
                       请以 JSON 格式返回，包含以下键：description、key_elements（数组）、extracted_text、tags（数组）、image_type、confidence（0-1）";
 
-        let description = analyze_image_base64(self.vlm_service, &self.model, image_data, prompt)
-            .await?;
+        let description =
+            analyze_image_base64(self.vlm_service, &self.model, image_data, prompt).await?;
 
         // 解析响应
         self.parse_analysis_response(&description)

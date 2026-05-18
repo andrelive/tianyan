@@ -145,7 +145,9 @@ mod tests {
     #[tokio::test]
     async fn test_full_workflow() {
         let vfs = create_test_vfs().await;
-        vfs.initialize().await.unwrap();
+        <VirtualFileSystemImpl as VirtualFileSystem>::initialize(&vfs)
+            .await
+            .unwrap();
 
         // 创建文件
         let uri = TianyanUri::new(
@@ -167,14 +169,22 @@ mod tests {
         assert!(entry.has_content(ContentLevel::Detail));
 
         // 删除
-        vfs.delete(&uri).await.unwrap();
-        assert!(!vfs.exists(&uri).await.unwrap());
+        <VirtualFileSystemImpl as VirtualFileSystem>::delete(&vfs, &uri)
+            .await
+            .unwrap();
+        assert!(
+            !<VirtualFileSystemImpl as VirtualFileSystem>::exists(&vfs, &uri)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
     async fn test_directory_operations() {
         let vfs = create_test_vfs().await;
-        vfs.initialize().await.unwrap();
+        <VirtualFileSystemImpl as VirtualFileSystem>::initialize(&vfs)
+            .await
+            .unwrap();
 
         // 创建嵌套目录
         let parent_uri = TianyanUri::new(ContextNamespace::User, vec!["preferences".to_string()]);
@@ -190,12 +200,20 @@ mod tests {
         }
 
         // 列出目录
-        let entries = vfs.list(&parent_uri).await.unwrap();
+        let entries = <VirtualFileSystemImpl as VirtualFileSystem>::list(&vfs, &parent_uri)
+            .await
+            .unwrap();
         assert_eq!(entries.len(), 3);
 
         // 删除目录（应删除所有子条目）
-        vfs.delete(&parent_uri).await.unwrap();
-        assert!(!vfs.exists(&parent_uri).await.unwrap());
+        <VirtualFileSystemImpl as VirtualFileSystem>::delete(&vfs, &parent_uri)
+            .await
+            .unwrap();
+        assert!(
+            !<VirtualFileSystemImpl as VirtualFileSystem>::exists(&vfs, &parent_uri)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

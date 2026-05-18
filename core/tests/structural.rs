@@ -95,5 +95,3 @@ fn test_storage_does_not_depend_on_agent() {
         violations.join("\n")
     );
 }
-
-

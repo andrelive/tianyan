@@ -5,9 +5,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri};
+use crate::common::types::{
+    ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
+};
 use crate::model::EmbeddingService;
-use crate::storage::traits::{ContentLoader, ContentMetadata, ContentStore, StorageBackend, VectorStorage, VfsCore, VfsFacade, VfsMetadata, VfsSearch, VirtualFileSystem};
+use crate::storage::traits::{
+    ContentLoader, ContentMetadata, ContentStore, StorageBackend, VectorStorage, VfsCore,
+    VfsFacade, VfsMetadata, VfsSearch, VirtualFileSystem,
+};
 use crate::storage::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
 
 use crate::config::StorageConfig;
@@ -967,9 +972,15 @@ impl VfsCore for VirtualFileSystemImpl {
     }
 
     async fn move_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()> {
-        for level in &[ContentLevel::Abstract, ContentLevel::Overview, ContentLevel::Detail] {
+        for level in &[
+            ContentLevel::Abstract,
+            ContentLevel::Overview,
+            ContentLevel::Detail,
+        ] {
             if let Ok(content) = self.storage.read_content(source, *level).await {
-                self.storage.write_content(destination, *level, &content).await?;
+                self.storage
+                    .write_content(destination, *level, &content)
+                    .await?;
             }
         }
         let src_entry = self.storage.read_entry(source).await?;
@@ -1067,14 +1078,14 @@ impl VfsSearch for VirtualFileSystemImpl {
         limit: usize,
         namespace: Option<ContextNamespace>,
     ) -> Result<Vec<SearchResult>> {
-        let embedding_service = self
-            .embedding_service
-            .as_ref()
-            .ok_or_else(|| {
-                TianyanError::Retrieval("VFS 未配置嵌入服务，无法进行向量搜索".to_string())
-            })?;
+        let embedding_service = self.embedding_service.as_ref().ok_or_else(|| {
+            TianyanError::Retrieval("VFS 未配置嵌入服务，无法进行向量搜索".to_string())
+        })?;
 
-        let model = self.embedding_model.as_deref().unwrap_or("text-embedding-3-small");
+        let model = self
+            .embedding_model
+            .as_deref()
+            .unwrap_or("text-embedding-3-small");
 
         let embedding = embedding_service.embed_single(model, query).await?;
         let query_vector = embedding.vector;
@@ -1132,14 +1143,19 @@ impl VfsSearch for VirtualFileSystemImpl {
         let embedding_service = self
             .embedding_service
             .as_ref()
-            .ok_or_else(|| {
-                TianyanError::Retrieval("VFS 未配置嵌入服务".to_string())
-            })?;
+            .ok_or_else(|| TianyanError::Retrieval("VFS 未配置嵌入服务".to_string()))?;
 
-        let model = self.embedding_model.as_deref().unwrap_or("text-embedding-3-small");
+        let model = self
+            .embedding_model
+            .as_deref()
+            .unwrap_or("text-embedding-3-small");
 
-        let abstract_embedding = embedding_service.embed_single(model, abstract_content).await?;
-        let overview_embedding = embedding_service.embed_single(model, overview_content).await?;
+        let abstract_embedding = embedding_service
+            .embed_single(model, abstract_content)
+            .await?;
+        let overview_embedding = embedding_service
+            .embed_single(model, overview_content)
+            .await?;
 
         let point_id = uri.to_string().replace("://", "_").replace('/', "_");
         let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string());
@@ -1177,11 +1193,8 @@ impl VfsMetadata for VirtualFileSystemImpl {
                 p
             }
             None => {
-                let payload = EntryMetadata::new(
-                    uri.clone(),
-                    uri.namespace().to_string(),
-                )
-                .with_importance(importance);
+                let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string())
+                    .with_importance(importance);
                 VectorPoint {
                     schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
                     id: point_id,
@@ -1203,7 +1216,11 @@ impl VfsMetadata for VirtualFileSystemImpl {
         let entry = self.storage.read_entry(uri).await?;
         let mut result = HashMap::new();
 
-        for level in [ContentLevel::Abstract, ContentLevel::Overview, ContentLevel::Detail] {
+        for level in [
+            ContentLevel::Abstract,
+            ContentLevel::Overview,
+            ContentLevel::Detail,
+        ] {
             if entry.has_content(level) {
                 if let Ok(content) = self.storage.read_content(uri, level).await {
                     result.insert(

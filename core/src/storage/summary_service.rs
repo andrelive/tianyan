@@ -183,10 +183,7 @@ impl SummaryService {
     ///
     /// # 返回
     /// 修改后的服务实例（用于链式调用）
-    pub fn with_memory_extractor_from_model(
-        mut self,
-        model_service: Arc<dyn ChatService>,
-    ) -> Self {
+    pub fn with_memory_extractor_from_model(mut self, model_service: Arc<dyn ChatService>) -> Self {
         let extractor = Arc::new(MemoryExtractionService::new(
             model_service,
             self.vfs.clone(),

@@ -92,8 +92,8 @@ impl Message {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::tool::{FunctionCall, ToolCallType};
+    use super::*;
 
     #[test]
     fn test_message_creation() {

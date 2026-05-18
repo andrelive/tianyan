@@ -337,7 +337,11 @@ mod tests {
         async fn chat_completion_stream(
             &self,
             _request: crate::model::ChatCompletionRequest,
-        ) -> crate::common::error::Result<tokio::sync::mpsc::Receiver<crate::common::error::Result<crate::model::ChatCompletionChunk>>> {
+        ) -> crate::common::error::Result<
+            tokio::sync::mpsc::Receiver<
+                crate::common::error::Result<crate::model::ChatCompletionChunk>,
+            >,
+        > {
             unimplemented!()
         }
     }

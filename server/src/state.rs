@@ -18,7 +18,10 @@ use tianyan::session::{PersistentSessionManager, SessionManager};
 use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
 };
-use tianyan::storage::{MemoryExtractionService, SummaryEngine, SummaryService, VirtualFileSystem};
+use tianyan::storage::{
+    MemoryExtractionService, SummaryEngine, SummaryService, VirtualFileSystem,
+    VirtualFileSystemImpl,
+};
 use tianyan::{Result as TianyanResult, TianyanError};
 
 use crate::agent_builder::{create_model_services, AgentBuilderFactory};
@@ -49,7 +52,7 @@ pub struct AppState {
     /// 待处理任务信号量（控制并发数）
     pending_tasks: Arc<Semaphore>,
     /// 虚拟文件系统（所有组件共享）
-    vfs: Arc<dyn VirtualFileSystem>,
+    vfs: Arc<VirtualFileSystemImpl>,
     /// 摘要服务（可选）
     summary_service: Option<Arc<SummaryService>>,
     /// 技能注册表
@@ -68,7 +71,7 @@ pub struct AppState {
 /// * `TianyanResult<Option<Arc<SummaryService>>>` - 成功返回摘要服务，失败返回错误
 fn create_summary_service(
     config: &TianyanConfig,
-    vfs: Arc<dyn VirtualFileSystem>,
+    vfs: Arc<VirtualFileSystemImpl>,
 ) -> TianyanResult<Option<Arc<SummaryService>>> {
     let model_services = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async { create_model_services(config).await })
@@ -111,7 +114,7 @@ impl AppState {
     /// * Agent 构建失败时返回 AgentCreation 错误
     pub async fn new(
         config: TianyanConfig,
-        vfs: Arc<dyn VirtualFileSystem>,
+        vfs: Arc<VirtualFileSystemImpl>,
     ) -> TianyanResult<Self> {
         // 创建摘要服务
         let summary_service = create_summary_service(&config, vfs.clone())?;
@@ -225,8 +228,8 @@ impl AppState {
     /// 获取虚拟文件系统
     ///
     /// # Returns
-    /// * `Arc<dyn VirtualFileSystem>` - VFS 实例
-    pub fn vfs(&self) -> Arc<dyn VirtualFileSystem> {
+    /// * `Arc<VirtualFileSystemImpl>` - VFS 实例
+    pub fn vfs(&self) -> Arc<VirtualFileSystemImpl> {
         self.vfs.clone()
     }
 
