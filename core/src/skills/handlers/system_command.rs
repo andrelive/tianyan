@@ -10,11 +10,13 @@ use crate::common::error::{Result, TianyanError};
 use crate::skills::definition::SkillHandler;
 use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 
+/// 系统命令处理器。
 pub struct SystemCommandHandler {
     blocked_commands: Vec<String>,
 }
 
 impl SystemCommandHandler {
+    /// 创建新的系统命令处理器。
     pub fn new(blocked_commands: Vec<String>) -> Self {
         Self { blocked_commands }
     }

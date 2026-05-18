@@ -4,49 +4,32 @@ use tracing::{error, info};
 
 use crate::common::error::Result;
 use crate::common::types::Message;
-use crate::model::traits::{ModelService, ServiceDiscovery};
+use crate::model::traits::{ChatService, EmbeddingService, VlmService};
 use crate::model::types::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ModelInfo,
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, EmbeddingRequest,
+    EmbeddingResponse, VisionRequest, VisionResponse,
 };
 
-/// 日志装饰器：为每次调用添加 tracing 日志。
-pub struct LoggedService<T: ModelService>(pub T);
+pub struct LoggedService<T: ChatService>(pub T);
 
 #[async_trait]
-impl<T: ModelService> ServiceDiscovery for LoggedService<T> {
-    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        self.0.list_models().await
-    }
-
-    async fn is_available(&self) -> bool {
-        self.0.is_available().await
-    }
-
-    fn service_name(&self) -> &str {
-        self.0.service_name()
-    }
-}
-
-#[async_trait]
-impl<T: ModelService> ModelService for LoggedService<T> {
+impl<T: ChatService> ChatService for LoggedService<T> {
     async fn chat_completion(
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
         info!(
-            service_name = %self.0.service_name(),
             model = %request.model,
             "chat_completion called"
         );
         let result = self.0.chat_completion(request).await;
         match &result {
             Ok(resp) => info!(
-                service_name = %self.0.service_name(),
+                model = %resp.model,
                 choices = resp.choices.len(),
                 "chat_completion succeeded"
             ),
             Err(e) => error!(
-                service_name = %self.0.service_name(),
                 error = %e,
                 "chat_completion failed"
             ),
@@ -59,7 +42,6 @@ impl<T: ModelService> ModelService for LoggedService<T> {
         request: ChatCompletionRequest,
     ) -> Result<mpsc::Receiver<Result<ChatCompletionChunk>>> {
         info!(
-            service_name = %self.0.service_name(),
             model = %request.model,
             "chat_completion_stream called"
         );
@@ -68,10 +50,63 @@ impl<T: ModelService> ModelService for LoggedService<T> {
 
     async fn chat(&self, model: &str, messages: Vec<Message>) -> Result<String> {
         info!(
-            service_name = %self.0.service_name(),
             model = %model,
             "chat called"
         );
         self.0.chat(model, messages).await
+    }
+}
+
+pub struct LoggedEmbeddingService<T: EmbeddingService>(pub T);
+
+#[async_trait]
+impl<T: EmbeddingService> EmbeddingService for LoggedEmbeddingService<T> {
+    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
+        info!(
+            model = %request.model,
+            "embed called"
+        );
+        let result = self.0.embed(request).await;
+        match &result {
+            Ok(resp) => info!(
+                model = %resp.model,
+                count = resp.data.len(),
+                "embed succeeded"
+            ),
+            Err(e) => error!(
+                error = %e,
+                "embed failed"
+            ),
+        }
+        result
+    }
+
+    fn embedding_dimension(&self, model: &str) -> usize {
+        self.0.embedding_dimension(model)
+    }
+}
+
+pub struct LoggedVlmService<T: VlmService>(pub T);
+
+#[async_trait]
+impl<T: VlmService> VlmService for LoggedVlmService<T> {
+    async fn analyze_image(&self, request: VisionRequest) -> Result<VisionResponse> {
+        info!(
+            model = %request.model,
+            "analyze_image called"
+        );
+        let result = self.0.analyze_image(request).await;
+        match &result {
+            Ok(resp) => info!(
+                model = %resp.model,
+                choices = resp.choices.len(),
+                "analyze_image succeeded"
+            ),
+            Err(e) => error!(
+                error = %e,
+                "analyze_image failed"
+            ),
+        }
+        result
     }
 }

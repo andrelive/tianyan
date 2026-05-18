@@ -12,6 +12,7 @@ use super::handlers::{
 };
 use super::types::{SecurityLevel, SkillCategory};
 
+/// 创建内置技能列表。
 pub fn create_builtin_skills() -> Vec<Skill> {
     vec![
         Skill::new("file_read", "Read File", "Read the contents of a file")
@@ -131,6 +132,7 @@ pub fn create_builtin_skills() -> Vec<Skill> {
     ]
 }
 
+/// 注册内置技能到注册表。
 pub fn register_builtin_skills(registry: &mut SkillRegistry, config: &ExecutorConfig) {
     for skill in create_builtin_skills() {
         registry.register(skill);

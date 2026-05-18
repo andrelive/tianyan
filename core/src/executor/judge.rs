@@ -1,7 +1,7 @@
 //! LLM-as-Judge：在 Agent 返回最终答案前进行独立质量评判。
 
 use crate::common::error::Result;
-use crate::model::ModelService;
+use crate::model::ChatService;
 use std::sync::Arc;
 
 /// Judge 验证结果。
@@ -18,7 +18,7 @@ pub struct JudgeVerdict {
 /// 默认关闭，通过 AgentConfig 显式启用。
 #[derive(Clone)]
 pub struct LlmJudge {
-    model_service: Arc<dyn ModelService>,
+    model_service: Arc<dyn ChatService>,
     model_name: String,
     enabled: bool,
 }
@@ -44,7 +44,7 @@ const JUDGE_PROMPT: &str = r#"评估以下 AI 助手对用户任务的完成情�
 "#;
 
 impl LlmJudge {
-    pub fn new(model_service: Arc<dyn ModelService>, model_name: impl Into<String>) -> Self {
+    pub fn new(model_service: Arc<dyn ChatService>, model_name: impl Into<String>) -> Self {
         Self {
             model_service,
             model_name: model_name.into(),

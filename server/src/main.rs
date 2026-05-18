@@ -1,3 +1,5 @@
+//! 服务器二进制入口。
+
 use tianyan_server::start_server_default;
 
 #[tokio::main]

@@ -1,7 +1,8 @@
+use async_openai::types::chat::FinishReason;
 use async_openai::{config::OpenAIConfig, Client};
 
 use crate::common::error::{Result, TianyanError};
-use crate::model::types::ModelConfig;
+use crate::model::config::ModelConfig;
 
 /// 基于 async-openai 的模型服务客户端。
 #[derive(Debug, Clone)]
@@ -40,5 +41,15 @@ impl AsyncOpenAIClient {
     /// 获取服务名称。
     pub fn service_name(&self) -> &str {
         &self.service_name
+    }
+
+    pub(crate) fn finish_reason_str(reason: &FinishReason) -> &'static str {
+        match reason {
+            FinishReason::Stop => "stop",
+            FinishReason::Length => "length",
+            FinishReason::ToolCalls => "tool_calls",
+            FinishReason::ContentFilter => "content_filter",
+            FinishReason::FunctionCall => "function_call",
+        }
     }
 }

@@ -1,6 +1,5 @@
 mod api_error;
 mod chat;
-mod config;
 mod embedding;
 mod model_info;
 mod streaming;
@@ -9,7 +8,6 @@ mod vision;
 
 pub use api_error::{ApiError, ApiErrorResponse};
 pub use chat::{ChatChoice, ChatCompletionRequest, ChatCompletionResponse};
-pub use config::ModelConfig;
 pub use embedding::{
     embedding_dimension, EmbeddingData, EmbeddingInput, EmbeddingRequest, EmbeddingResponse,
 };

@@ -69,8 +69,4 @@ futures = "0.3"
 [lints]
 workspace = true
 
-[profile.release]
-opt-level = "z"
-lto = true
-codegen-units = 1
-strip = true
+

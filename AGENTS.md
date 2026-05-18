@@ -55,8 +55,9 @@ The project follows a harness pattern: components should **fail fast and transpa
 
 ```
 core/src/model/
-├── traits.rs         ← ServiceDiscovery (base), ModelService, EmbeddingService, VlmService
-├── types/            ← ChatCompletionRequest, ModelConfig, ModelInfo, etc.
+├── traits.rs         ← ServiceDiscovery (base), ChatService, EmbeddingService, VlmService
+├── types/            ← ChatCompletionRequest, ModelInfo, etc.
+├── config.rs         ← ModelConfig
 ├── provider/         ← AsyncOpenAIClient + trait impls (+ LoggedService decorator)
 └── services.rs       ← ModelServices: simple container to build services from config
 ```
@@ -64,19 +65,19 @@ core/src/model/
 Trait dependency:
 ```
 ServiceDiscovery: Send + Sync  ← list_models(), is_available(), service_name()
-  └── ModelService: ServiceDiscovery  ← chat_completion(), chat_completion_stream(), chat()
-EmbeddingService: Send + Sync  ← independent
-VlmService: Send + Sync        ← independent
+ChatService: Send + Sync      ← chat_completion(), chat_completion_stream(), chat()
+EmbeddingService: Send + Sync ← embed(), service_name()
+VlmService: Send + Sync       ← analyze_image(), service_name()
 ```
 
-`ModelServices` is a plain struct that bundles `Arc<dyn ModelService>`, `Arc<dyn EmbeddingService>`, and `Arc<dyn VlmService>`. No routing, no failover, no health tracking — the harness philosophy is "fail fast, let the caller decide."
+`ModelServices` is a plain struct that bundles `Arc<dyn ChatService>`, `Arc<dyn EmbeddingService>`, and `Arc<dyn VlmService>`. No routing, no failover, no health tracking — the harness philosophy is "fail fast, let the caller decide."
 
 ### Provider Module (`core/src/model/provider/`)
 
-- `client.rs` — `AsyncOpenAIClient` struct wrapping `async-openai`
-- `chat_service.rs`, `embedding_service.rs`, `vision_service.rs`, `discovery_service.rs` — trait impls on `AsyncOpenAIClient`
+- `client.rs` — `AsyncOpenAIClient` struct wrapping `async-openai` + `finish_reason_str()`
+- `chat.rs`, `embedding.rs`, `vision.rs`, `discovery.rs` — trait impls on `AsyncOpenAIClient`
 - `middleware.rs` — `LoggedService<T>` decorator (pub(crate), only used internally)
-- `mod.rs` — `pub(crate) fn finish_reason_str()`
+- `mod.rs` — crate-visible re-exports
 
 **Do NOT add retry logic to provider.** Retry was intentionally removed. Logging is done through `LoggedService` wrapping in `ModelServices::from_configs()`.
 
@@ -86,7 +87,7 @@ VlmService: Send + Sync        ← independent
 
 ```rust
 let svc = create_model_services(config).await?;
-let chat = svc.chat;           // Arc<dyn ModelService>
+let chat = svc.chat;           // Arc<dyn ChatService>
 let embed = svc.embedding;     // Arc<dyn EmbeddingService>
 // call with embed.embed(...)
 ```

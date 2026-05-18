@@ -13,7 +13,7 @@
 - [3. 系统初始化流程](#3-系统初始化流程)
 - [4. 模型路由系统](#4-模型路由系统)
 - [5. 双层检索流程 (L0 + L1)](#5-双层检索流程-l0--l1)
-- [6. Planner-Executor 架构](#6-planner-executor-架构)
+- [6. Agent Loop 架构](#6-agent-loop-架构)
 - [7. 技能执行系统](#7-技能执行系统)
 - [8. 存储架构](#8-存储架构)
 - [9. 记忆管理系统](#9-记忆管理系统)
@@ -26,7 +26,7 @@
 
 天演 (Tianyan) 是一个基于 Rust 开发的本地 AI 助手桌面应用，采用 **Tauri v2 + Yew + Axum** 技术栈，支持：
 
-- **Planner-Executor 架构**：基于会话状态的多轮迭代规划和执行
+- **Agent Loop 架构**：基于原生 Tool Call 的 LLM-in-the-loop 迭代执行，支持并行工具调用和追问中断
 - **双层向量检索**：基于摘要和概览向量的快速过滤 + 精确重排序
 - **多模型路由**：支持 OpenAI 和 OpenAI Compatible API 的智能路由与故障转移
 - **技能系统**：可扩展的工具执行能力（文件操作、HTTP 请求、系统命令等）
@@ -64,7 +64,7 @@
 │                            ↓ Rust Calls                     │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │              Core Library (core/)                     │  │
-│  │  • Agent 协调器 (Planner-Executor 模式)                 │  │
+│  │  • Agent 协调器 (Agent Loop 模式)                       │  │
 │  │  • AgentHarness (失败驱动规则增强)                      │  │
 │  │  • AgentSkills (技能执行 + GEPA 进化学习)               │  │
 │  │  • ContextPipeline (统一上下文管线)                     │  │
@@ -84,11 +84,11 @@
 ```
 tianyan/
 ├── core/           # 核心库 (AI Agent, 模型，记忆，检索)
-│   ├── agent/      # Agent 协调器 + Harness/Skills 子系统 + 会话状态
+│   ├── agent/      # Agent 协调器 + AgentLoop + ToolRegistry + Harness/Skills + 会话状态
 │   ├── config/     # 配置管理（包含向导、验证）
 │   ├── common/     # 通用类型（types/ 按领域拆分为 9 个子模块）、错误处理、日志
 │   ├── context/    # 上下文工程（检索 + 压缩 + 规则记录/建议）
-│   ├── executor/   # 步骤执行器 + 审批工作流 + 验证门控 + LLM-as-Judge
+│   ├── executor/   # 独立执行函数 + Action/ExecutorError + 审批工作流 + 验证门控
 │   ├── knowledge/  # 知识库导入和解析
 │   │   ├── chunker/  # 文档分块 (mod.rs + types.rs)
 │   │   ├── image.rs  # 图像处理
@@ -101,11 +101,7 @@ tianyan/
 │   │   ├── openai/      # OpenAI 客户端 (mod|config|client|chat|embedding|vision|stream)
 │   │   └── router/      # 模型路由器 (mod.rs + builder.rs + trait_impls.rs)
 │   ├── observability/ # 可观测性（AgentMetrics，Agent 自省）
-│   ├── planner/    # Planner 实现（支持流式）
-│   │   ├── mod.rs       # Planner 核心实现 + PlannerTrait
-│   │   ├── config.rs    # Planner 配置
-│   │   ├── context.rs   # 上下文管理器
-│   │   └── types.rs     # 类型定义（含合并后的 PlannerError）
+│   ├── planner/    # 已废弃：仅 ClarificationQuestion 类型导出壳
 │   ├── scheduler/  # 定时任务调度器
 │   ├── session/    # 会话管理
 │   ├── skills/     # 技能定义、执行和学习（GEPA 进化引擎）
@@ -360,9 +356,9 @@ pub fn run() {
 
 ---
 
-## 6. Planner-Executor 架构
+## 6. Agent Loop 架构
 
-天演采用 **Planner-Executor** 模式实现智能体循环，支持多轮迭代规划和工具执行。
+天演采用 **Agent Loop** 模式实现智能体循环。LLM 在循环中自主决定调用工具或直接回答，工具由 `ToolRegistry` 并行执行，执行结果作为 `Message::tool` 回传对话历史，进入下一轮迭代。
 
 ### 6.1 核心组件
 
@@ -381,38 +377,30 @@ pub fn run() {
 │    │     ├── SkillExecutor（参数验证 + 安全检查）             │
 │    │     ├── SkillRegistry（技能注册表）                     │
 │    │     └── SkillLearningEngine（GEPA 进化学习）             │
+│    ├── AgentLoop（智能体循环）                               │
+│    │     ├── ToolRegistry（工具注册表 + 并行执行）            │
+│    │     ├── max_turns 循环控制                              │
+│    │     └── ask_user 追问中断                               │
 │    ├── VerificationGate（验证门控）                          │
 │    └── LlmJudge（LLM-as-Judge 语义验证）                     │
 │                                                             │
 │         ↓                                                   │
-│  Planner (决策层)                                           │
-│    - 已与 SessionState 解耦                                 │
-│    - 通过 PlannerContext（只读快照）接收输入               │
-│    - 通过 PlannerMutation 返回状态变更                    │
-│    - 多轮迭代循环                                            │
-│    - 生成计划 (DirectAnswer / Clarification / Steps)        │
-│    - 支持 run_with_stream 流式输出                           │
-│    - 依赖 Arc<dyn ExecutorTrait>（接口抽象）                 │
-│                                                             │
-│         ↓                                                   │
-│  Executor (执行层)                                          │
-│    - 纯机械执行，无思考能力                                  │
-│    - 通过 ExecutorTrait 接口对外暴露                         │
-│    - Action/Step/StepResult 定义于此层（依赖反转）           │
-│    - 并行执行步骤                                            │
-│    - 失败处理策略 (Ignore / Abort / Retry)                  │
+│  ToolRegistry (工具层)                                      │
+│    - 维护 ToolDefinition[]（JSON Schema）                    │
+│    - 并行执行 tool_calls                                     │
 │    - 安全策略 + 审批工作流                                   │
-│    - 验证门控（VerificationGate）                            │
-│    - LLM-as-Judge 语义验证                                   │
+│    - 内置工具：read_file / write_file / execute_command      │
+│              / search_code / call_skill / run_tests          │
+│              / verify_build / ask_user / delegate_to_agent   │
 │                                                             │
 │         ↓                                                   │
-│  VFS / Skills (工具层)                                      │
+│  VFS / Skills (底层能力)                                    │
 │    - 文件操作、代码搜索、命令执行等                          │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 6.2 Planner-Executor 循环流程
+### 6.2 Agent Loop 循环流程
 
 ```
 用户输入
@@ -420,8 +408,7 @@ pub fn run() {
 AgentCoordinator.process_message(session_id, message)
   ↓
 获取或创建 SessionState
-  ├── conversation: Vec<Message> (对话历史)
-  ├── execution_context: ContextManager (执行历史，跨轮次保持)
+  ├── conversation: Vec<Message> (对话历史，唯一真相源)
   ├── context_window: Option<ContextWindow> (上下文窗口)
   └── pending_memories: Vec<MemoryEntry> (待持久化记忆)
   ↓
@@ -431,17 +418,15 @@ ContextPipeline.run(message, &mut conversation)
   ├── 压缩：ContextCompressor → Token 预算管理
   └── 输出：ContextWindow { system_prompt, messages, token_usage }
   ↓
-Planner.run_with_stream(input, &ctx)
-  ├── PlannerContext::build_prompt()
-  ├── LLM 决策（看到完整上下文）
-  ├── SubPlanner 步骤：Planner 自行递归执行
-  ├── 普通步骤：委托 ExecutorTrait::execute_steps()
-  └── 返回 (PlannerOutput, Vec<PlannerMutation>)
-  ↓
-SessionState::apply_mutations() 应用 Planner 变更
-  ├── AddTurn → state.add_turn()
-  ├── AddAssistantMessage → state.add_assistant_message()
-  └── SetPendingClarification → state.pending_clarification
+AgentLoop.run(messages, stream_sender)
+  ├── ChatCompletionRequest::new(model, messages)
+  │     .with_tools(ToolRegistry.definitions())
+  ├── LLM 决策（看到完整上下文 + 可用工具 Schema）
+  ├── 若返回 tool_calls → ToolRegistry.execute_parallel(tool_calls)
+  │     ├── 执行工具（文件读写、命令执行、代码搜索等）
+  │     └── 将结果作为 Message::tool 追加到 messages
+  ├── 若调用 ask_user → 返回 NeedsClarification，中断循环
+  └── 若返回 content → 返回 Answer，循环结束
   ↓
 后台任务（异步，不阻塞响应）：
   ├── MemoryExtractionService::extract_from_session()
@@ -453,13 +438,12 @@ state.cleanup() (防止无限增长)
 
 ### 6.3 会话状态管理（SessionState）
 
-**SessionState** 是统一管理会话所有状态的核心容器。
+**SessionState** 是统一管理会话所有状态的核心容器。重构后 `conversation` 成为唯一真相源，不再维护独立的执行历史。
 
 ```rust
 pub struct SessionState {
     pub session_id: String,
-    pub conversation: Vec<Message>,
-    pub execution_context: ContextManager,
+    pub conversation: Vec<Message>,   // 对话历史（含 user/assistant/tool 消息）
     pub current_goal: Option<String>,
     pub pending_clarification: Option<Vec<ClarificationQuestion>>,
     pub last_activity: Instant,
@@ -557,23 +541,26 @@ ContextPipeline.run(message, conversation)
 | `remove(id)` | 删除会话状态 |
 | `cleanup_expired(secs)` | 清理过期会话（超过指定秒数不活动） |
 
-### 6.5 Prompt 构建模块
+### 6.5 ToolRegistry 实现
 
-Prompt 模块位于 `core/src/agent/prompt.rs`，负责从对话历史和执行历史构建完整的 Prompt 上下文。LLM 输出通过 `parse_llm_output` 解析为 `Plan` 类型。
+`ToolRegistry` 维护所有可用工具的 JSON Schema 定义，并提供并行执行能力。
 
-### 6.6 Executor 实现
+- **工具定义**：每个工具通过 `#[derive(JsonSchema)]` 参数结构体自动生成 JSON Schema，注册为 `ToolDefinition`
+- **并行执行**：`execute_parallel(tool_calls)` 使用 tokio JoinSet 同时执行多个 tool_call
+- **安全策略**：`SecurityPolicy` 控制命令白名单/黑名单，WriteFile 前检查 `check_file_write()`
+- **审批工作流**：`ApprovalWorkflow` 五级风险（Safe/Low/Medium/High/Critical），支持自动/手动审批
+- **验证门控**：`VerificationGate` 控制是否对执行结果进行自动验证
+- **LLM-as-Judge**：`LlmJudge` 对执行结果进行语义验证
+- **追问工具**：`ask_user` 工具被特殊处理——AgentLoop 检测到该工具调用时立即返回 `NeedsClarification`，中断循环
+- **子 Agent 委托**：`delegate_to_agent` 工具用于创建完全隔离的子 Agent（Agent-as-Tool 模式，待实现）
 
-Executor 通过 `ExecutorTrait` 对外暴露抽象接口，支持：
+### 6.6 已废弃组件（保留用于向后兼容）
 
-- **接口抽象**：`#[async_trait] ExecutorTrait { async fn execute_steps(&self, steps: Vec<Step>) -> Vec<StepResult> }`，便于 mock 测试
-- **依赖反转**：`Action`、`Step`、`StepResult`、`FailureHandling` 等共享类型定义在 executor 层（`executor/types.rs`），planner 反向引用
-- **并行执行**：使用 tokio JoinSet 管理并发
-- **重试机制**：支持 Retry 策略
-- **安全策略**：SecurityPolicy 控制命令白名单/黑名单
-- **审批工作流**：五级风险（Safe/Low/Medium/High/Critical），支持自动/手动审批
-- **验证门控**：VerificationGate 控制是否对执行结果进行自动验证
-- **LLM-as-Judge**：通过 LlmJudge 对执行结果进行语义验证，补充确定性验证工具无法覆盖的场景
-- **SubPlanner 隔离**：Executor 将 Action::SubPlanner 步骤拦截返回错误，确保 SubPlanner 由 Planner 自身递归处理
+以下组件已被 Agent Loop 架构取代，保留空壳或 deprecated 标记以维持向后兼容：
+
+- **`planner/` 模块**：原 Planner-Executor 批量规划架构。现为 `ClarificationQuestion` 类型的导出壳
+- **`Executor` 结构体**：标记 `#[deprecated]`，功能迁移至 `ToolRegistry`
+- **`Action::SubPlanner`**：标记 `#[serde(skip)]`，子任务分解改为 `delegate_to_agent` 工具
 
 ---
 
@@ -646,12 +633,12 @@ Axum Server (chat_stream_handler)
 AppState.agent().process_message_stream()
          ↓
 SessionState (内存中)
-         ├─ conversation: Vec<Message>
-         └─ execution_context: ContextManager
+         └─ conversation: Vec<Message> (唯一真相源)
          ↓
-Planner-Executor 迭代循环
-         ↓
-VFS / Skills (工具调用)
+AgentLoop 迭代循环 (LLM + ToolRegistry)
+         ├─ LLM 看到 tools 定义 → 决定 tool_call 或直接回答
+         ├─ ToolRegistry.execute_parallel(tool_calls) → 结果回传
+         └─ 重复直到 Answer 或 NeedsClarification
          ↓
 SSE 流式响应 (含 chunk_type 区分: Thought/ToolCall/Observation/Answer/Error)
          ↓ HTTP Response
@@ -713,15 +700,16 @@ TianyanConfig
 | `core/src/agent/skill_subsystem.rs` | AgentSkills，封装 SkillExecutor + SkillRegistry + LearningEngine |
 | `core/src/agent/types.rs` | AgentResponse、AgentStreamChunk、StreamChunkType、StreamEventSender |
 | `core/src/agent/session_state.rs` | SessionState + SessionStateManager，统一会话状态管理 |
-| `core/src/agent/prompt.rs` | Prompt 构建和 LLM 输出解析 |
+| `core/src/agent/loop.rs` | AgentLoop，LLM 工具调用迭代循环 |
+| `core/src/agent/tool_registry.rs` | ToolRegistry，工具注册表 + 并行执行 |
+| `core/src/agent/tool_params.rs` | 工具参数结构体（#[derive(JsonSchema)]） |
 | `core/src/context/pipeline.rs` | ContextPipeline，统一上下文管线（检索 + 规则注入 + 压缩） |
 | `core/src/context/rule_recorder.rs` | RuleRecorder，失败驱动规则记录 |
 | `core/src/context/rule_suggester.rs` | RuleSuggester，记忆聚类规则提炼 |
 | `core/src/observability/mod.rs` | AgentMetrics，可观测性存储和 Agent 自省接口 |
-| `core/src/planner/mod.rs` | Planner 实现（含 PlannerTrait, run_with_stream 流式支持） |
-| `core/src/executor/executor.rs` | Executor 实现，纯机械执行 + 安全策略 |
-| `core/src/executor/traits.rs` | ExecutorTrait 抽象接口定义 |
-| `core/src/executor/types.rs` | Action/Step/StepResult/ExecutorError 共享类型（含合并的 error） |
+| `core/src/planner/mod.rs` | Planner 模块（已废弃，仅导出 ClarificationQuestion） |
+| `core/src/executor/executor.rs` | 独立执行函数（execute_read_file 等）+ 废弃的 Executor 壳 |
+| `core/src/executor/types.rs` | Action / ExecutorError（Step/StepResult/FailureHandling 已移除） |
 | `core/src/model/traits.rs` | ModelService/EmbeddingService/VlmService 核心 trait |
 | `core/src/model/router/mod.rs` | ModelRouter 核心路由逻辑 |
 | `core/src/model/router/builder.rs` | ModelRouter 构建器 |
@@ -783,6 +771,18 @@ TianyanConfig
 - **统一 LLM 调用**：Planner 改用 `ModelService` trait（已有完整实现）
 - **享受路由能力**：Planner 现在可以享受 ModelRouter 的故障转移、多模型路由
 - **Prompt 模块迁移**：从 `planner/llm.rs` 移动到 `agent/prompt.rs`
+
+### 2026-05：Agent Loop 架构重构
+
+- **移除 Planner-Executor 批量规划架构**：删除 `Plan`、`Step`、`Turn`、`PlannerContext`、`PlannerMutation`、`PlannerError`、`PlannerOutput`、`PlannerTrait`、`ExecutorTrait`
+- **引入 AgentLoop**：LLM 在循环中自主决定调用工具或直接回答，工具结果回传为 `Message::tool`，进入下一轮迭代
+- **ToolRegistry 替代 Executor**：维护 `ToolDefinition[]`（JSON Schema），并行执行 `tool_calls`，内置 9 个工具
+- **ToolParams 强类型参数**：每个工具定义 `#[derive(JsonSchema)]` 参数结构体，自动生成 JSON Schema
+- **ask_user 工具替代 Clarification Plan**：LLM 调用 `ask_user` 工具时 AgentLoop 返回 `NeedsClarification`，中断循环
+- **SessionState 简化**：移除 `execution_context: ContextManager`，`conversation` 成为唯一真相源
+- **ClarificationQuestion 迁移**：从 `planner/types.rs` 迁移至 `agent/types.rs`
+- **SubPlanner → delegate_to_agent**：子任务分解改为 Agent-as-Tool 模式（`delegate_to_agent` 工具，待实现）
+- **向后兼容**：`planner/` 模块保留为 `ClarificationQuestion` 导出壳，`Executor` 标记 `#[deprecated]`
 
 ### 2026-03：Planner-Executor 架构
 

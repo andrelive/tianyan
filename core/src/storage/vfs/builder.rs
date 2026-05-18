@@ -6,6 +6,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::config::StorageConfig;
 use crate::model::EmbeddingService;
+#[allow(unused_imports)]
 use crate::storage::traits::{ContentLoader, StorageBackend, VectorStorage, VirtualFileSystem};
 
 use super::VirtualFileSystemImpl;

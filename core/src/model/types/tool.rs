@@ -1,21 +1,16 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// A tool definition passed to the model in a chat completion request.
-///
-/// Describes a callable function including its name, description, and
-/// JSON Schema parameters.
+pub use crate::common::types::tool::{FunctionCall, ToolCall, ToolCallType};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
-    /// The type of tool. Currently only `Function` is supported.
     #[serde(rename = "type")]
     pub tool_type: ToolType,
-    /// Function definition for this tool.
     pub function: FunctionDefinition,
 }
 
 impl ToolDefinition {
-    /// Create a tool definition from a function definition.
     pub fn function(function: FunctionDefinition) -> Self {
         Self {
             tool_type: ToolType::Function,
@@ -24,26 +19,20 @@ impl ToolDefinition {
     }
 }
 
-/// Supported tool types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolType {
     Function,
 }
 
-/// Definition of a callable function.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDefinition {
-    /// The name of the function to be called.
     pub name: String,
-    /// A description of what the function does, used by the model to choose when and how to call it.
     pub description: String,
-    /// The parameters the function accepts, described as a JSON Schema object.
     pub parameters: serde_json::Value,
 }
 
 impl FunctionDefinition {
-    /// Create a function definition with explicit JSON Schema parameters.
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -56,24 +45,6 @@ impl FunctionDefinition {
         }
     }
 
-    /// Create a function definition deriving JSON Schema from a Rust type.
-    ///
-    /// The type must implement [`schemars::JsonSchema`].
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// #[derive(schemars::JsonSchema)]
-    /// struct SearchParams {
-    ///     query: String,
-    ///     scope: Option<String>,
-    /// }
-    ///
-    /// let def = FunctionDefinition::from_schema::<SearchParams>(
-    ///     "vfs_search",
-    ///     "Search files in the virtual file system"
-    /// );
-    /// ```
     pub fn from_schema<T: JsonSchema>(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -87,66 +58,28 @@ impl FunctionDefinition {
     }
 }
 
-/// A tool call produced by the model in an assistant message.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ToolCall {
-    /// The ID of the tool call.
-    pub id: String,
-    /// The type of tool call. Currently only `function`.
-    #[serde(rename = "type")]
-    pub call_type: ToolCallType,
-    /// The function call details.
-    pub function: FunctionCall,
-}
-
-/// Type of a tool call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ToolCallType {
-    Function,
-}
-
-/// A function call issued by the model.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct FunctionCall {
-    /// The name of the function to call.
-    pub name: String,
-    /// The arguments to pass to the function, as a JSON string.
-    ///
-    /// Note: the model may generate invalid JSON; callers must validate before parsing.
-    pub arguments: String,
-}
-
-/// Controls which (if any) tool the model should call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolChoice {
-    /// The model can pick between generating a message or calling one or more tools.
     Auto,
-    /// The model will not call any tool and instead generates a message.
     None,
-    /// The model is forced to call a specific tool.
     Function { function: ToolChoiceFunction },
 }
 
-/// Specifies a tool by name for [`ToolChoice::Function`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolChoiceFunction {
     pub name: String,
 }
 
 impl ToolChoice {
-    /// Create a `ToolChoice::Auto` variant.
     pub fn auto() -> Self {
         Self::Auto
     }
 
-    /// Create a `ToolChoice::None` variant.
     pub fn none() -> Self {
         Self::None
     }
 
-    /// Create a `ToolChoice::Function` variant forcing a named tool.
     pub fn function(name: impl Into<String>) -> Self {
         Self::Function {
             function: ToolChoiceFunction { name: name.into() },

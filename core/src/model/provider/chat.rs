@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{Message, MessageRole, TokenUsage};
-use crate::model::traits::ModelService;
+use crate::model::traits::ChatService;
 use crate::model::types::{
     ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChunkChoice,
     DeltaContent, ToolCall, ToolCallType, ToolChoice,
@@ -24,7 +24,7 @@ use crate::model::types::{
 use super::client::AsyncOpenAIClient;
 
 #[async_trait]
-impl ModelService for AsyncOpenAIClient {
+impl ChatService for AsyncOpenAIClient {
     async fn chat_completion(
         &self,
         request: ChatCompletionRequest,
@@ -86,7 +86,7 @@ impl ModelService for AsyncOpenAIClient {
                     finish_reason: c
                         .finish_reason
                         .as_ref()
-                        .map(|r| super::finish_reason_str(r).to_string()),
+                        .map(|r| AsyncOpenAIClient::finish_reason_str(r).to_string()),
                 }
             })
             .collect();
@@ -154,7 +154,7 @@ impl ModelService for AsyncOpenAIClient {
                                     finish_reason: c
                                         .finish_reason
                                         .as_ref()
-                                        .map(|r| super::finish_reason_str(r).to_string()),
+                                        .map(|r| AsyncOpenAIClient::finish_reason_str(r).to_string()),
                                 })
                                 .collect(),
                         };
@@ -273,11 +273,8 @@ fn convert_messages(messages: &[Message]) -> Vec<ChatCompletionRequestMessage> {
                             m.content.clone(),
                         ))
                     },
-                    refusal: None,
-                    name: None,
-                    audio: None,
                     tool_calls,
-                    function_call: None,
+                    ..Default::default()
                 })
             }
             MessageRole::Tool => {

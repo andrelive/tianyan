@@ -62,8 +62,4 @@ impl EmbeddingService for AsyncOpenAIClient {
     fn embedding_dimension(&self, model: &str) -> usize {
         crate::model::types::embedding_dimension(model)
     }
-
-    fn service_name(&self) -> &str {
-        &self.service_name
-    }
 }

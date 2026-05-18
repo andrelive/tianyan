@@ -9,11 +9,13 @@ use crate::common::error::{Result, TianyanError};
 use crate::skills::definition::SkillHandler;
 use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 
+/// HTTP 请求处理器。
 pub struct HttpRequestHandler {
     client: reqwest::Client,
 }
 
 impl HttpRequestHandler {
+    /// 创建新的 HTTP 请求处理器。
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))

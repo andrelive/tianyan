@@ -160,7 +160,8 @@ impl ConfigWizardService {
         api_key: &str,
         model: &str,
     ) -> anyhow::Result<Vec<String>> {
-        use tianyan::model::{ChatCompletionRequest, ModelService};
+        use tianyan::model::types::ChatCompletionRequest;
+        use tianyan::model::ChatService;
         use tianyan::Message;
 
         // 创建临时客户端

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::common::error::Result;
 use crate::common::types::Message;
-use crate::model::ModelService;
+use crate::model::ChatService;
 
 /// 摘要配置。
 #[derive(Debug, Clone)]
@@ -47,13 +47,13 @@ const DEFAULT_SUMMARY_PROMPT: &str = r#"请将以下对话历史压缩为简洁�
 /// 对话摘要生成器。
 #[derive(Clone)]
 pub struct ConversationSummarizer {
-    model_service: Arc<dyn ModelService>,
+    model_service: Arc<dyn ChatService>,
     config: SummaryConfig,
 }
 
 impl ConversationSummarizer {
     /// 创建新的摘要生成器。
-    pub fn new(model_service: Arc<dyn ModelService>, config: SummaryConfig) -> Self {
+    pub fn new(model_service: Arc<dyn ChatService>, config: SummaryConfig) -> Self {
         Self {
             model_service,
             config,

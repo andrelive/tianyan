@@ -57,7 +57,7 @@ impl VlmService for AsyncOpenAIClient {
                     },
                     finish_reason: choice
                         .finish_reason
-                        .map(|fr| super::finish_reason_str(&fr).to_string()),
+                        .map(|fr| AsyncOpenAIClient::finish_reason_str(&fr).to_string()),
                 }
             })
             .collect();
@@ -79,10 +79,6 @@ impl VlmService for AsyncOpenAIClient {
             choices,
             usage,
         })
-    }
-
-    fn service_name(&self) -> &str {
-        &self.service_name
     }
 }
 
@@ -185,5 +181,22 @@ fn map_image_detail(detail: Option<String>) -> ImageDetail {
         Some("high") => ImageDetail::High,
         Some("auto") => ImageDetail::Auto,
         _ => ImageDetail::Auto,
+    }
+}
+
+/// 根据图片字节数据推断 MIME 类型
+pub(crate) fn infer_mime_type(data: &[u8]) -> &str {
+    if data.len() >= 3 && &data[0..3] == b"\xFF\xD8\xFF" {
+        "image/jpeg"
+    } else if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1A\n" {
+        "image/png"
+    } else if data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") {
+        "image/gif"
+    } else if data.len() >= 2 && &data[0..2] == b"BM" {
+        "image/bmp"
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "image/png" // safe fallback
     }
 }

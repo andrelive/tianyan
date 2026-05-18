@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::common::error::Result;
 use crate::common::types::{ContextNamespace, TianyanUri};
-use crate::model::ModelService;
+use crate::model::ChatService;
 use crate::storage::VirtualFileSystem;
 
 use generator::{build_skill_generation_prompt, parse_generated_skill};
@@ -14,12 +14,18 @@ pub use types::{
     ExecutionHistory, ExecutionStep, GeneratedSkill, SkillAction, SkillEvaluation, SkillParameter,
 };
 
+/// 技能学习配置。
 #[derive(Debug, Clone)]
 pub struct SkillLearningConfig {
+    /// 是否启用自动学习。
     pub enable_auto_learning: bool,
+    /// 成功阈值。
     pub success_threshold: usize,
+    /// 最小历史长度。
     pub min_history_length: usize,
+    /// 生成模型名称。
     pub generation_model: String,
+    /// 技能存储前缀。
     pub skill_storage_prefix: String,
 }
 
@@ -35,16 +41,18 @@ impl Default for SkillLearningConfig {
     }
 }
 
+/// GEPA 技能进化引擎。
 #[derive(Clone)]
 pub struct SkillLearningEngine {
-    model_service: Arc<dyn ModelService>,
+    model_service: Arc<dyn ChatService>,
     vfs: Arc<dyn VirtualFileSystem>,
     config: SkillLearningConfig,
 }
 
 impl SkillLearningEngine {
+    /// 创建新的技能学习引擎。
     pub fn new(
-        model_service: Arc<dyn ModelService>,
+        model_service: Arc<dyn ChatService>,
         vfs: Arc<dyn VirtualFileSystem>,
         config: SkillLearningConfig,
     ) -> Self {
@@ -55,6 +63,7 @@ impl SkillLearningEngine {
         }
     }
 
+    /// 从历史执行记录中学习生成新技能。
     pub async fn learn_from_history(
         &self,
         history: &[ExecutionHistory],
@@ -276,7 +285,7 @@ mod tests {
     #[test]
     fn test_categorize_task() {
         let engine = SkillLearningEngine::new(
-            Arc::new(MockModelService),
+            Arc::new(MockChatService),
             Arc::new(MockVfs),
             SkillLearningConfig::default(),
         );
@@ -290,7 +299,7 @@ mod tests {
     #[test]
     fn test_skill_evaluation() {
         let engine = SkillLearningEngine::new(
-            Arc::new(MockModelService),
+            Arc::new(MockChatService),
             Arc::new(MockVfs),
             SkillLearningConfig::default(),
         );
@@ -309,21 +318,9 @@ mod tests {
         assert_eq!(eval.recommended_action, SkillAction::Improve);
     }
 
-    struct MockModelService;
+    struct MockChatService;
     #[async_trait::async_trait]
-    impl crate::model::ServiceDiscovery for MockModelService {
-        async fn list_models(&self) -> crate::common::error::Result<Vec<crate::model::ModelInfo>> {
-            Ok(vec![])
-        }
-        async fn is_available(&self) -> bool {
-            true
-        }
-        fn service_name(&self) -> &str {
-            "mock"
-        }
-    }
-    #[async_trait::async_trait]
-    impl crate::model::ModelService for MockModelService {
+    impl crate::model::ChatService for MockChatService {
         async fn chat(
             &self,
             _model: &str,
@@ -335,6 +332,12 @@ mod tests {
             &self,
             _request: crate::model::ChatCompletionRequest,
         ) -> crate::common::error::Result<crate::model::ChatCompletionResponse> {
+            unimplemented!()
+        }
+        async fn chat_completion_stream(
+            &self,
+            _request: crate::model::ChatCompletionRequest,
+        ) -> crate::common::error::Result<tokio::sync::mpsc::Receiver<crate::common::error::Result<crate::model::ChatCompletionChunk>>> {
             unimplemented!()
         }
     }

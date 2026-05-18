@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, TianyanUri};
-use crate::model::{EmbeddingService, ModelService};
+use crate::model::{ChatService, EmbeddingService};
 use crate::storage::traits::StorageBackend;
 use crate::storage::types::ContextEntry;
 
 /// 不同内容级别的 token 限制。
 pub const ABSTRACT_TOKEN_LIMIT: usize = 100;
+/// Overview 级别 token 限制。
 pub const OVERVIEW_TOKEN_LIMIT: usize = 2000;
 
 /// 摘要级别枚举。
@@ -141,7 +142,7 @@ impl Default for TokenCounter {
 
 /// 用于生成分层摘要的摘要引擎。
 pub struct SummaryEngine {
-    model_service: Arc<dyn ModelService>,
+    model_service: Arc<dyn ChatService>,
     embedding_service: Arc<dyn EmbeddingService>,
     token_counter: TokenCounter,
     model_name: String,
@@ -151,7 +152,7 @@ pub struct SummaryEngine {
 impl SummaryEngine {
     /// 创建新的摘要引擎。
     pub fn new(
-        model_service: Arc<dyn ModelService>,
+        model_service: Arc<dyn ChatService>,
         embedding_service: Arc<dyn EmbeddingService>,
         model_name: impl Into<String>,
         embedding_model_name: impl Into<String>,

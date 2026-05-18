@@ -426,7 +426,7 @@ AgentHarness {
 
 ```
                         ┌───────────────────────┐
-1. 执行失败              │ Planner/Executor 失败  │
+1. 执行失败              │ AgentLoop/ToolRegistry 失败 │
                         └───────────┬───────────┘
                                     │
 2. RuleRecorder.record()            ▼

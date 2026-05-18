@@ -17,7 +17,8 @@ use tianyan::agent::{
 };
 use tianyan::config::{ModelServiceType, TianyanConfig};
 use tianyan::context::DualLayerRetriever;
-use tianyan::model::{ModelConfig, ModelProvider, ModelServices};
+use tianyan::model::types::ModelProvider;
+use tianyan::model::{ModelConfig, ModelServices};
 use tianyan::skills::{SkillExecutor, SkillRegistry};
 use tianyan::storage::VirtualFileSystem;
 use tianyan::{Result as TianyanResult, TianyanError};

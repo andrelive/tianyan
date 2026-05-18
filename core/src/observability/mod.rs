@@ -12,29 +12,43 @@ use tokio::sync::RwLock;
 /// 单次执行的 token 消耗记录。
 #[derive(Debug, Clone)]
 pub struct TokenRecord {
+    /// 会话 ID。
     pub session_id: String,
+    /// 记录时间戳。
     pub timestamp: DateTime<Utc>,
+    /// 总 token 数。
     pub total_tokens: usize,
+    /// 系统提示 token 数。
     pub system_prompt_tokens: usize,
+    /// 检索上下文 token 数。
     pub retrieved_tokens: usize,
+    /// 是否成功。
     pub success: bool,
 }
 
 /// 步骤失败统计。
 #[derive(Debug, Clone)]
 pub struct FailureStats {
+    /// 步骤描述。
     pub step_description: String,
+    /// 失败次数。
     pub failure_count: usize,
+    /// 最后一次失败时间。
     pub last_failure: DateTime<Utc>,
+    /// 最后一次错误信息。
     pub last_error: String,
 }
 
 /// 规则命中记录。
 #[derive(Debug, Clone)]
 pub struct RuleHitRecord {
+    /// 规则 ID。
     pub rule_id: String,
+    /// 会话 ID。
     pub session_id: String,
+    /// 记录时间戳。
     pub timestamp: DateTime<Utc>,
+    /// 是否相关。
     pub was_relevant: bool,
 }
 
@@ -50,6 +64,7 @@ pub struct AgentMetrics {
 }
 
 impl AgentMetrics {
+    /// 创建新的 AgentMetrics 实例。
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             token_history: RwLock::new(Vec::new()),

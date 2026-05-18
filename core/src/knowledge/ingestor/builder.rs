@@ -1,5 +1,5 @@
 use crate::common::error::{Result, TianyanError};
-use crate::model::{EmbeddingService, ModelService, VisionEncoder, VlmService};
+use crate::model::{ChatService, EmbeddingService, VisionEncoder, VlmService};
 use crate::storage::{StorageBackend, VectorStorage};
 
 use super::{IngestorConfig, KnowledgeIngestor};
@@ -7,7 +7,7 @@ use super::{IngestorConfig, KnowledgeIngestor};
 /// 创建知识导入器的构建器。
 pub struct KnowledgeIngestorBuilder<M, E, V, VE, S, VS>
 where
-    M: ModelService,
+    M: ChatService,
     E: EmbeddingService,
     V: VlmService,
     VE: VisionEncoder,
@@ -25,7 +25,7 @@ where
 
 impl<M, E, V, VE, S, VS> KnowledgeIngestorBuilder<M, E, V, VE, S, VS>
 where
-    M: ModelService + 'static,
+    M: ChatService + 'static,
     E: EmbeddingService + 'static,
     V: VlmService,
     VE: VisionEncoder,
@@ -122,7 +122,7 @@ where
 
 impl<M, E, V, VE, S, VS> Default for KnowledgeIngestorBuilder<M, E, V, VE, S, VS>
 where
-    M: ModelService + 'static,
+    M: ChatService + 'static,
     E: EmbeddingService + 'static,
     V: VlmService,
     VE: VisionEncoder,

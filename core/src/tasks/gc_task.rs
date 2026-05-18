@@ -30,6 +30,7 @@ pub struct GcTask {
 }
 
 impl GcTask {
+    /// 创建新的 GC 任务。
     pub fn new() -> Self {
         Self {
             auto_cleanup: true,

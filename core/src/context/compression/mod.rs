@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use crate::common::error::Result;
 use crate::common::types::Message;
-use crate::model::ModelService;
+use crate::model::ChatService;
 
 pub mod estimator;
 pub mod summarizer;
@@ -134,7 +134,7 @@ pub struct ContextCompressor {
 
 impl ContextCompressor {
     /// 创建新的上下文压缩器。
-    pub fn new(model_service: Arc<dyn ModelService>, config: CompressionConfig) -> Self {
+    pub fn new(model_service: Arc<dyn ChatService>, config: CompressionConfig) -> Self {
         let summarizer = ConversationSummarizer::new(
             model_service,
             SummaryConfig {

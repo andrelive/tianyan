@@ -85,12 +85,19 @@
                 │   AgentSkills)        │
                 └──────────┬───────────┘
                            │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-        ┌──────────┐ ┌──────────┐ ┌────────────────┐
-        │ planner  │ │ executor │ │    skills       │
-        │ 任务规划  │ │ 步骤执行  │ │ 技能系统(GEPA)  │
-        └──────────┘ └──────────┘ └────────────────┘
+               ┌────────────────────────────────┐
+               │                                │
+               ▼                                ▼
+         ┌──────────────────┐      ┌──────────────────┐
+         │   AgentLoop      │      │     skills        │
+         │  (agent/loop.rs) │      │  技能系统(GEPA)   │
+         └──────────┬───────┘      └──────────────────┘
+                    │
+                    ▼
+         ┌──────────────────┐
+         │   ToolRegistry   │
+         │ (agent/tool_*.rs)│
+         └──────────────────┘
 
    ┌──────────────┐ ┌──────────┐
    │observability │ │  tasks   │
@@ -173,21 +180,19 @@ Agent::process_message_stream()           [core/src/agent/coordinator.rs]
     │     ├─ DualLayerRetriever::retrieve()（L0+L1 RRF 融合）
     │     └─ ContextCompressor::compress()（Token 预算管理）
     │
-    ├─ SessionState::to_planner_context() 构建只读上下文快照
-    │
-    ├─ Planner::run_with_stream()         [core/src/planner/mod.rs]
-    │     ├─ PlannerContext::build_prompt()
+    ├─ AgentLoop::run()                   [core/src/agent/loop.rs]
+    │     ├─ ChatCompletionRequest::new(model, messages)
+    │     │     .with_tools(ToolRegistry.definitions())
     │     ├─ ModelService::chat_completion_stream() [通过 ModelRouter 路由]
-    │     ├─ parse_llm_output() → Plan
-    │     ├─ SubPlanner 步骤由 Planner 自行递归执行
-    │     ├─ 普通步骤委托 ExecutorTrait::execute_steps()
-    │     └─ 返回 (PlannerOutput, Vec<PlannerMutation>)
-    │
-    ├─ SessionState::apply_mutations()    将 Planner 变更写回会话状态
+    │     ├─ LLM 返回 tool_calls → ToolRegistry::execute_parallel()
+    │     │     ├─ 并行执行工具（文件读写、命令执行、代码搜索等）
+    │     │     └─ 结果作为 Message::tool 追加到 messages
+    │     ├─ LLM 返回 content → 返回 Answer，循环结束
+    │     └─ 调用 ask_user → 返回 NeedsClarification，中断循环
     │
     ├─ 失败时 → RuleRecorder::record() [Failures → Rules → VFS]
     │
-    ├─ SessionState::add_turn() + cleanup()
+    ├─ SessionState::cleanup() (防止无限增长)
     │
     ├─ 后台异步（不阻塞响应）:
     │     ├─ MemoryExtractionTrait::extract_and_store()
@@ -298,12 +303,10 @@ Yew Frontend 按 chunk_type 差异化渲染
   → [Rust] → ChatService (持久化 + 标题生成)
   → [Trait] → AgentCoordinator::process_message_stream()
   → [Rust] → ContextPipeline::run()（规则注入 → 检索 → 压缩）
-  → [Rust] → SessionState → PlannerContext（上下文转换）
-  → [Trait] → PlannerTrait::run()（接收 PlannerContext，返回 PlannerMutation[]）
+  → [Rust] → AgentLoop::run()（LLM + ToolRegistry 迭代循环）
   → [Trait] → ModelService::chat_completion()
   → [Rust] → ModelRouter::route() → OpenAIClient
-  → [Trait] → ExecutorTrait::execute_steps()
-  → [Rust] → SessionState::apply_mutations()（应用 Planner 状态变更）
+  → [Rust] → ToolRegistry::execute_parallel()（并行工具执行）
   → [Rust] → AgentStreamChunk (含 chunk_type)
   → [Rust] → ChatStreamEvent (透传 chunk_type)
   → [HTTP SSE] → Frontend 按 chunk_type 差异化渲染
@@ -318,14 +321,14 @@ Yew Frontend 按 chunk_type 差异化渲染
 | Trait | 定义位置 | 实现者 | 消费者 |
 |-------|---------|--------|--------|
 | `AgentCoordinator` | core/src/agent/coordinator.rs | `Agent`, `WizardModeAgent` | server/state.rs, server/api/chat/services.rs |
-| `ModelService` | core/src/model/traits.rs | `OpenAIClient`, `OpenAICompatibleClient`, `ModelRouter` | agent/coordinator.rs, planner/mod.rs |
+| `ModelService` | core/src/model/traits.rs | `OpenAIClient`, `OpenAICompatibleClient`, `ModelRouter` | agent/coordinator.rs, agent/loop.rs |
 | `EmbeddingService` | core/src/model/traits.rs | `OpenAIClient`, `OpenAICompatibleClient`, `ModelRouter` | storage/vfs/mod.rs, storage/summary.rs |
 | `VirtualFileSystem` | core/src/storage/traits.rs | `VirtualFileSystemImpl` | server/state.rs, agent/coordinator.rs |
 | `StorageBackend` | core/src/storage/traits.rs | `LocalStorageBackend` | storage/vfs/mod.rs |
 | `VectorStorage` | core/src/storage/traits.rs | `QdrantVectorStore` | storage/vfs/mod.rs, context/retrieval/ |
 | `MemoryExtractionTrait` | core/src/storage/extractor.rs | `MemoryExtractionService` | agent/coordinator.rs (依赖注入) |
-| `PlannerTrait` | core/src/planner/mod.rs | `Planner` | agent/coordinator.rs |
-| `ExecutorTrait` | core/src/executor/traits.rs | `Executor` | agent/coordinator.rs, planner/mod.rs |
+| `PlannerTrait` | ~~core/src/planner/mod.rs~~ | ~~`Planner`~~ | ~~已废弃~~ |
+| `ExecutorTrait` | ~~core/src/executor/traits.rs~~ | ~~`Executor`~~ | ~~已废弃~~ |
 | `SessionManager` | core/src/session/manager.rs | `PersistentSessionManager`, `PlaceholderSessionManager` | server/state.rs, server/api/sessions/services.rs |
 | `SkillExecutor` | core/src/skills/executor.rs | `SkillExecutor` | agent/skill_subsystem.rs, server/api/skills/services.rs |
 
@@ -398,15 +401,17 @@ Yew Frontend 按 chunk_type 差异化渲染
 | 2026-05 | skills in Agent | Agent 持有 executor 但未使用 | ✅ AgentSkills 子系统封装，GEPA 进化引擎集成 |
 | 2026-05 | 双层检索未接入 | `retrieve_context` 未调用 | ✅ ContextPipeline 完整集成 |
 | 2026-05 | 可观测性缺失 | 无可观测性模块 | ✅ observability 模块 + AgentMetrics |
-| 2026-05 | Planner 不支持流式 | 仅 run() | ✅ PlannerTrait::run_with_stream() |
+| 2026-05 | ~~Planner 不支持流式~~ | ~~仅 run()~~ | ~~⚠️ 已废弃：PlannerTrait::run_with_stream 已移除~~ |
 | 2026-05 | 验证门控缺失 | 无执行结果验证 | ✅ VerificationGate + LlmJudge |
 | 2026-05 | 失败驱动学习缺失 | 失败无反馈 | ✅ AgentHarness（RuleRecorder + RuleSuggester） |
 | 2026-05 | common/types.rs 巨型文件 | 单文件 ~1350 行 | ✅ 拆分为 9 个领域子模块（uri/namespace/content/metadata/embedding/search/message/token/memory） |
-| 2026-05 | Planner 直接依赖 SessionState | `run(&mut self, input, &mut SessionState)` | ✅ PlannerContext + PlannerMutation 解耦，PlannerTrait 不依赖 SessionState |
+| 2026-05 | ~~Planner 直接依赖 SessionState~~ | ~~`run(&mut self, input, &mut SessionState)`~~ | ~~⚠️ 已废弃：Planner-Executor 架构整体移除~~ |
+| 2026-05 | ~~Executor 无 trait 抽象~~ | ~~Agent 直接依赖 `Arc<Executor>`~~ | ~~⚠️ 已废弃：ExecutorTrait 已移除~~ |
+| 2026-05 | ~~Planner-Executor 依赖方向错误~~ | ~~`Action/Step` 定义于 planner~~ | ~~⚠️ 已废弃：Step/Action 迁移为 ToolDefinition/ToolParams~~ |
+| 2026-05 | ~~Planner 不支持流式~~ | ~~仅 run()~~ | ~~⚠️ 已废弃：PlannerTrait::run_with_stream 已移除~~ |
 | 2026-05 | learned_rules_* 硬编码常量 | `LEARNED_RULES_TOP_K` / `LEARNED_RULES_MAX_TOKENS` 模块级常量 | ✅ 迁移为 AgentConfig 可配置字段 |
-| 2026-05 | Executor 无 trait 抽象 | Agent 直接依赖 `Arc<Executor>` | ✅ 提取 ExecutorTrait，Planner 依赖 `Arc<dyn ExecutorTrait>` |
-| 2026-05 | Planner-Executor 依赖方向错误 | `Action/Step` 定义于 planner | ✅ 类型下移至 executor/types.rs，依赖反转 |
 | 2026-05 | 测试基础设施薄弱 | 缺少工厂函数和集成测试 | ✅ factory.rs + 10 个 planner_decoupling 集成测试 |
+| 2026-05 | Planner-Executor 架构过时 | 批量规划与工具调用语义不匹配 | ✅ 重构为 Agent Loop（AgentLoop + ToolRegistry + ToolParams） |
 
 ---
 

@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-use crate::model::ModelService;
+use crate::model::ChatService;
 use crate::storage::types::ContextEntry;
 use crate::storage::{
     ExtractionConfig, MemoryExtractionService, MemoryExtractionTrait, SummaryEngine,
@@ -185,7 +185,7 @@ impl SummaryService {
     /// 修改后的服务实例（用于链式调用）
     pub fn with_memory_extractor_from_model(
         mut self,
-        model_service: Arc<dyn ModelService>,
+        model_service: Arc<dyn ChatService>,
     ) -> Self {
         let extractor = Arc::new(MemoryExtractionService::new(
             model_service,

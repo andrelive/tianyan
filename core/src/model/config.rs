@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::error::{Result, TianyanError};
 
-use super::model_info::ModelProvider;
+use super::types::ModelProvider;
 
 fn default_timeout() -> u64 {
     60

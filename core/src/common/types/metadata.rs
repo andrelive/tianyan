@@ -199,9 +199,7 @@ impl EntryMetadata {
     }
 
     /// 从 Qdrant Payload 解析。
-    pub fn from_qdrant_payload(
-        payload: &HashMap<String, qdrant_client::qdrant::Value>,
-    ) -> error::Result<Self> {
+    pub fn from_qdrant_payload(payload: &HashMap<String, Value>) -> error::Result<Self> {
         fn get_string(value: &Value) -> Option<String> {
             match &value.kind {
                 Some(Kind::StringValue(s)) => Some(s.clone()),

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 use crate::common::error::Result;
 use crate::common::types::{ContentLevel, MemoryCategory, MemoryEntry, TianyanUri};
-use crate::model::ModelService;
+use crate::model::ChatService;
 use crate::storage::VirtualFileSystem;
 
 /// 默认记忆提取服务使用的模型。
@@ -107,7 +107,7 @@ const DEFAULT_EXTRACTION_PROMPT: &str = r#"分析以下对话，提取值得长�
 ///
 /// 使用 LLM 分析对话内容，自动提取结构化记忆，并通过 VFS 持久化。
 pub struct MemoryExtractionService {
-    model_service: Arc<dyn ModelService>,
+    model_service: Arc<dyn ChatService>,
     vfs: Arc<dyn VirtualFileSystem>,
     config: ExtractionConfig,
 }
@@ -115,7 +115,7 @@ pub struct MemoryExtractionService {
 impl MemoryExtractionService {
     /// 创建新的记忆提取服务。
     pub fn new(
-        model_service: Arc<dyn ModelService>,
+        model_service: Arc<dyn ChatService>,
         vfs: Arc<dyn VirtualFileSystem>,
         config: ExtractionConfig,
     ) -> Self {
@@ -128,7 +128,7 @@ impl MemoryExtractionService {
 
     /// 使用默认配置创建服务。
     pub fn with_defaults(
-        model_service: Arc<dyn ModelService>,
+        model_service: Arc<dyn ChatService>,
         vfs: Arc<dyn VirtualFileSystem>,
     ) -> Self {
         Self::new(model_service, vfs, ExtractionConfig::default())

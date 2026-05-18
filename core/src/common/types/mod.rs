@@ -12,6 +12,7 @@ mod metadata;
 mod namespace;
 mod search;
 mod token;
+pub(crate) mod tool;
 mod uri;
 
 pub use content::{ContentLevel, ContentSource, EntryType};
@@ -22,4 +23,5 @@ pub use metadata::EntryMetadata;
 pub use namespace::ContextNamespace;
 pub use search::SearchResult;
 pub use token::TokenUsage;
+pub use tool::{FunctionCall, ToolCall, ToolCallType};
 pub use uri::{AgentPath, TianyanUri, TIANYAN_URI_SCHEME};

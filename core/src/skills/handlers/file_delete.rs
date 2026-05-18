@@ -11,11 +11,13 @@ use crate::skills::definition::SkillHandler;
 use crate::skills::executor::validate_path;
 use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 
+/// 文件删除处理器。
 pub struct FileDeleteHandler {
     allowed_paths: Vec<PathBuf>,
 }
 
 impl FileDeleteHandler {
+    /// 创建新的文件删除处理器。
     pub fn new(allowed_paths: Vec<PathBuf>) -> Self {
         Self { allowed_paths }
     }

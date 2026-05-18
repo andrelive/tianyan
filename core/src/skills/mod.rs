@@ -30,7 +30,9 @@
 
 mod definition;
 mod executor;
+/// 内置技能处理器。
 pub mod handlers;
+/// 技能学习引擎（GEPA）。
 pub(crate) mod learning;
 mod manager;
 mod registry;

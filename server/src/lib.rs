@@ -1,3 +1,5 @@
+//! Tianyan HTTP 服务器。
+
 use axum::{extract::DefaultBodyLimit, response::Json, routing::get, Router};
 use serde::Serialize;
 use std::net::SocketAddr;

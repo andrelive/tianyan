@@ -11,7 +11,7 @@ use ring::digest::{Context, SHA256};
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContextNamespace, TianyanUri};
-use crate::model::{EmbeddingService, ModelService, VisionEncoder, VlmService};
+use crate::model::{ChatService, EmbeddingService, VisionEncoder, VlmService};
 use crate::storage::{
     ContextEntry, StorageBackend, SummaryEngine, TokenCounter, VectorPoint, VectorStorage,
     CURRENT_SCHEMA_VERSION,
@@ -92,7 +92,7 @@ impl IngestorConfig {
 #[allow(dead_code)]
 pub struct KnowledgeIngestor<M, E, V, VE, S, VS>
 where
-    M: ModelService,
+    M: ChatService,
     E: EmbeddingService,
     V: VlmService,
     VE: VisionEncoder,
@@ -114,7 +114,7 @@ where
 
 impl<M, E, V, VE, S, VS> KnowledgeIngestor<M, E, V, VE, S, VS>
 where
-    M: ModelService + 'static,
+    M: ChatService + 'static,
     E: EmbeddingService + 'static,
     V: VlmService,
     VE: VisionEncoder,

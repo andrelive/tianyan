@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::common::error::Result;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-use crate::model::ModelService;
+use crate::model::ChatService;
 use crate::storage::VirtualFileSystem;
 
 use super::rule_recorder::{FailureKind, RuleRecorder};
@@ -37,11 +37,11 @@ const MIN_OCCURRENCES: usize = 2;
 #[derive(Clone)]
 pub struct RuleSuggester {
     vfs: Arc<dyn VirtualFileSystem>,
-    model_service: Arc<dyn ModelService>,
+    model_service: Arc<dyn ChatService>,
 }
 
 impl RuleSuggester {
-    pub fn new(vfs: Arc<dyn VirtualFileSystem>, model_service: Arc<dyn ModelService>) -> Self {
+    pub fn new(vfs: Arc<dyn VirtualFileSystem>, model_service: Arc<dyn ChatService>) -> Self {
         Self { vfs, model_service }
     }
 

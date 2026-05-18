@@ -49,7 +49,8 @@ pub use summary::{
 };
 pub use summary_service::{SummaryService, SummaryServiceConfig};
 pub use traits::{
-    ContentLoader, ContentMetadata, StorageBackend, VectorStorage, VirtualFileSystem,
+    ContentLoader, ContentMetadata, ContentStore, StorageBackend, VectorStorage, VfsCore,
+    VfsFacade, VfsMetadata, VfsSearch, VirtualFileSystem,
 };
 pub use types::{
     CategoryStats, ContextEntry, DirectoryIndex, DirectoryStats, IndexEntry, StorageStats,
@@ -82,6 +83,7 @@ mod tests {
     pub struct MockVectorStorage;
 
     impl MockVectorStorage {
+        /// 创建新的 Mock 向量存储。
         pub fn new() -> Self {
             Self
         }

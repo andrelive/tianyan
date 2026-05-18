@@ -1,3 +1,5 @@
+//! GUI 前端入口。
+
 mod api;
 mod components;
 mod state;

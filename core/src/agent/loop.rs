@@ -4,12 +4,15 @@ use crate::agent::tool_params::AskUserParams;
 use crate::agent::tool_registry::ToolRegistry;
 use crate::agent::types::StreamEventSender;
 use crate::common::types::{Message, MessageRole};
-use crate::model::ChatCompletionRequest;
-use crate::model::ModelService;
+use crate::model::types::ChatCompletionRequest;
+use crate::model::ChatService;
 
+/// Agent 循环配置。
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {
+    /// 最大轮数。
     pub max_turns: usize,
+    /// 使用的模型。
     pub model: String,
 }
 
@@ -22,32 +25,41 @@ impl Default for AgentLoopConfig {
     }
 }
 
+/// Agent 循环结果。
 #[derive(Debug, Clone)]
 pub enum AgentLoopResult {
+    /// 直接回答。
     Answer(String),
+    /// 需要追问。
     NeedsClarification { question: String },
 }
 
+/// Agent 循环错误。
 #[derive(thiserror::Error, Debug)]
 pub enum AgentLoopError {
+    /// 达到最大轮数。
     #[error("Reached maximum turns: {0}")]
     MaxTurnsReached(usize),
+    /// LLM 调用失败。
     #[error("LLM call failed: {0}")]
     LlmCallFailed(String),
+    /// 空响应。
     #[error("Empty response from LLM")]
     EmptyResponse,
 }
 
+/// Agent 迭代循环。
 #[derive(Clone)]
 pub struct AgentLoop {
-    model_service: Arc<dyn ModelService>,
+        model_service: Arc<dyn ChatService>,
     tool_registry: ToolRegistry,
     config: AgentLoopConfig,
 }
 
 impl AgentLoop {
+    /// 创建新的 AgentLoop。
     pub fn new(
-        model_service: Arc<dyn ModelService>,
+    model_service: Arc<dyn ChatService>,
         tool_registry: ToolRegistry,
         config: AgentLoopConfig,
     ) -> Self {
@@ -58,6 +70,7 @@ impl AgentLoop {
         }
     }
 
+    /// 运行迭代循环直到回答或追问。
     pub async fn run(
         &self,
         messages: &mut Vec<Message>,

@@ -291,6 +291,93 @@ fn fuse_results_rrf(
     fused
 }
 
+/// 虚拟文件系统核心操作 —— 条目生命周期管理。
+#[async_trait]
+pub trait VfsCore: Send + Sync {
+    /// 初始化文件系统和向量存储。
+    async fn initialize(&self) -> Result<()>;
+
+    /// 检查条目是否存在。
+    async fn exists(&self, uri: &TianyanUri) -> Result<bool>;
+
+    /// 递归删除条目及其子条目，同时清理向量库。
+    async fn delete(&self, uri: &TianyanUri) -> Result<()>;
+
+    /// 列出指定 URI 前缀下的所有条目。
+    async fn list(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>>;
+
+    /// 移动条目及其子条目到新位置。
+    async fn move_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()>;
+}
+
+/// 分层内容读写 —— L0 Abstract / L1 Overview / L2 Detail。
+#[async_trait]
+pub trait ContentStore: Send + Sync {
+    /// 写入指定层级的内容。条目不存在则自动创建。
+    async fn write(&self, uri: &TianyanUri, level: ContentLevel, content: &str) -> Result<()>;
+
+    /// 读取指定层级的内容。
+    async fn read(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String>;
+
+    /// 追加内容到 Detail 层级末尾。用于会话消息持续写入。
+    async fn append(&self, uri: &TianyanUri, content: &str) -> Result<()>;
+
+    /// 检查条目在指定层级是否已有内容。
+    async fn has_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<bool>;
+}
+
+/// 向量检索 —— 查询文本先 embed 再通过 RRF 融合 Abstract+Overview 向量搜索。
+#[async_trait]
+pub trait VfsSearch: Send + Sync {
+    /// 用 EmbeddingService 将查询文本转为向量，进行 Abstract + Overview 双向量 RRF 融合检索。
+    /// `namespace` 为 `None` 时搜索全部命名空间。
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        namespace: Option<ContextNamespace>,
+    ) -> Result<Vec<SearchResult>>;
+
+    /// 通过视觉向量搜索（用于图像相似性检索）。
+    async fn search_by_visual(
+        &self,
+        visual_vector: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>>;
+
+    /// 将 Abstract 和 Overview 文本 embed 为向量，存入向量库。
+    async fn update_summary_vectors(
+        &self,
+        uri: &TianyanUri,
+        abstract_content: &str,
+        overview_content: &str,
+    ) -> Result<()>;
+}
+
+/// 元数据管理 —— 重要性评分与自定义标签。
+#[async_trait]
+pub trait VfsMetadata: Send + Sync {
+    /// 更新条目的重要性评分和自定义键值标签。
+    async fn update_metadata(
+        &self,
+        uri: &TianyanUri,
+        importance: f32,
+        custom: HashMap<String, serde_json::Value>,
+    ) -> Result<()>;
+
+    /// 批量获取所有层级的内容元数据。
+    async fn get_all_content_metadata(
+        &self,
+        uri: &TianyanUri,
+    ) -> Result<HashMap<ContentLevel, ContentMetadata>>;
+}
+
+/// 组合超 trait —— 提供统一的 VirtualFileSystem 接口。
+///
+/// 任何同时实现了上述四个子 trait 的类型自动实现本 trait。
+#[async_trait]
+pub trait VfsFacade: VfsCore + ContentStore + VfsSearch + VfsMetadata {}
+
 /// 虚拟文件系统 trait。
 ///
 /// 此 trait 定义了提供所有上下文条目统一视图的虚拟文件系统接口。

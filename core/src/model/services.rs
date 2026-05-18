@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use crate::common::error::Result;
-use crate::model::traits::{EmbeddingService, ModelService, VlmService};
+use crate::model::traits::{ChatService, EmbeddingService, VlmService};
 
-use super::provider::middleware::LoggedService;
+use super::provider::middleware::{LoggedEmbeddingService, LoggedService, LoggedVlmService};
 use super::provider::AsyncOpenAIClient;
-use super::types::ModelConfig;
+use super::config::ModelConfig;
 
 /// 一组已构建的模型服务。
 ///
@@ -13,10 +13,10 @@ use super::types::ModelConfig;
 /// 替代了原来的 ModelRouter 路由中间层。
 pub struct ModelServices {
     /// 聊天补全服务（含日志装饰）。
-    pub chat: Arc<dyn ModelService>,
-    /// 文本嵌入服务。
+    pub chat: Arc<dyn ChatService>,
+    /// 文本嵌入服务（含日志装饰）。
     pub embedding: Arc<dyn EmbeddingService>,
-    /// 视觉分析服务。
+    /// 视觉分析服务（含日志装饰）。
     pub vision: Arc<dyn VlmService>,
     /// 默认聊天模型名。
     pub chat_model: String,
@@ -32,7 +32,7 @@ impl ModelServices {
     /// 每个配置创建一个 `AsyncOpenAIClient`，
     /// 第一次调用的配置会被设为默认值。
     pub async fn from_configs(configs: Vec<ModelConfig>) -> Result<Self> {
-        let mut first_chat: Option<Arc<dyn ModelService>> = None;
+        let mut first_chat: Option<Arc<dyn ChatService>> = None;
         let mut first_embedding: Option<Arc<dyn EmbeddingService>> = None;
         let mut first_vision: Option<Arc<dyn VlmService>> = None;
         let mut chat_model = String::new();
@@ -46,9 +46,9 @@ impl ModelServices {
 
             let client = AsyncOpenAIClient::new(config.clone())?;
 
-            let chat: Arc<dyn ModelService> = Arc::new(LoggedService(client.clone()));
-            let embedding: Arc<dyn EmbeddingService> = Arc::new(client.clone());
-            let vision: Arc<dyn VlmService> = Arc::new(client);
+            let chat: Arc<dyn ChatService> = Arc::new(LoggedService(client.clone()));
+            let embedding: Arc<dyn EmbeddingService> = Arc::new(LoggedEmbeddingService(client.clone()));
+            let vision: Arc<dyn VlmService> = Arc::new(LoggedVlmService(client));
 
             if first_chat.is_none() {
                 first_chat = Some(chat.clone());

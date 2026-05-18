@@ -40,18 +40,20 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。无外部�
 
 ### 1.2 agent 子模块
 
-**职责**：Planner-Executor 架构的对外接口层，管理会话状态、调用 Planner 规划、处理追问，支持流式与非流式两种对话模式。内部封装 ContextPipeline、AgentHarness 和 AgentSkills 三个子系统。
+**职责**：Agent Loop 架构的对外接口层，管理会话状态、执行 AgentLoop 迭代循环、处理追问，支持流式与非流式两种对话模式。内部封装 ContextPipeline、AgentHarness、AgentSkills 和 AgentLoop 四个子系统。
 
 **核心类型**：
 
 | 类型 | 说明 |
 |------|------|
-| `Agent` | `AgentCoordinator` 的默认实现，持有 ModelService、VFS、ContextPipeline、AgentHarness、AgentSkills 等组件 |
+| `Agent` | `AgentCoordinator` 的默认实现，持有 ModelService、VFS、ContextPipeline、AgentHarness、AgentSkills、AgentLoop、ToolRegistry 等组件 |
 | `AgentCoordinator` (trait) | 智能体协调器接口，定义 `process_message`、`process_message_stream`、`handle_clarification`、`initialize`、`shutdown` |
-| `AgentBuilder` | 构建器模式创建 Agent |
+| `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry） |
 | `AgentHarness` | Harness 工程子系统，封装 RuleRecorder + RuleSuggester + AgentMetrics |
 | `AgentSkills` | 技能子系统，封装 SkillExecutor + SkillRegistry + SkillLearningEngine |
-| `SessionState` | 会话状态容器（对话历史、执行历史、上下文窗口、待持久化记忆） |
+| `AgentLoop` | 智能体迭代循环（LLM 工具调用循环） |
+| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls |
+| `SessionState` | 会话状态容器（对话历史为唯一真相源，上下文窗口、待持久化记忆） |
 | `SessionStateManager` | 多会话状态管理器（线程安全，Arc<RwLock<HashMap>>） |
 | `AgentResponse` | 智能体响应（内容、追问、Token 使用量、技能调用信息、处理时间） |
 | `AgentStreamChunk` | 流式响应块（含 chunk_type 区分 6 种类型） |
@@ -62,9 +64,9 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。无外部�
 | `AgentState` | Agent 执行状态（initialized、conversations_processed、total_tokens、retrievals_performed、skills_executed） |
 
 **关键流程**：
-- `process_message` → 获取/创建 SessionState → ContextPipeline.run → Planner::run → 处理结果 → 后台异步提取记忆/技能学习/规则提炼
-- `process_message_stream` → 流式执行 Planner（run_with_stream）→ 通过 mpsc 通道逐块输出 AgentStreamChunk
-- `handle_clarification` → 检查 pending_clarification → 重新运行 Planner
+- `process_message` → 获取/创建 SessionState → ContextPipeline.run → AgentLoop::run → 处理结果 → 后台异步提取记忆/技能学习/规则提炼
+- `process_message_stream` → 流式执行 AgentLoop（run 带 StreamEventSender）→ 通过 mpsc 通道逐块输出 AgentStreamChunk
+- `handle_clarification` → 检查 pending_clarification → 重新运行 AgentLoop
 
 **Agent 结构**：
 ```rust
@@ -76,8 +78,7 @@ pub struct Agent {
     harness: AgentHarness,
     skills: AgentSkills,
     state: Arc<RwLock<AgentState>>,
-    planner_config: PlannerConfig,
-    planner: Arc<Mutex<Box<dyn PlannerTrait + Send>>>,
+    agent_loop: AgentLoop,
     memory_extractor: Option<Arc<dyn MemoryExtractionTrait + Send + Sync>>,
     background_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     verification_gate: VerificationGate,
@@ -136,38 +137,25 @@ pub struct Agent {
 | `SummaryService` | 摘要生成服务（定时任务使用） |
 | `UriMapper` | URI 到文件系统路径映射 |
 
-### 1.5 planner 子模块
+### 1.5 planner 子模块（已废弃）
 
-**职责**：基于 LLM 的任务规划器，负责意图理解、信息收集和计划生成。**已与 SessionState 完全解耦**：通过 `PlannerContext`（只读快照）和 `PlannerMutation`（状态变更）进行数据交换，Planner 自身零依赖 SessionState。
+**职责**：原基于 LLM 的批量任务规划器（Planner-Executor 架构），已废弃。现为 `ClarificationQuestion` 类型的导出壳，保留该模块以维持向后兼容。
 
 **核心类型**：
 
 | 类型 | 说明 |
 |------|------|
-| `Planner` | 规划器，持有 ModelService 和 Executor（通过 `Arc<dyn ExecutorTrait>`） |
-| `PlannerTrait` (trait) | Planner 抽象接口，接收 `&PlannerContext`，返回 `(PlannerOutput, Vec<PlannerMutation>)` |
-| `PlannerContext` | Plangent 运行时上下文（只读快照），包含 conversation、execution_turns、context_window |
-| `PlannerMutation` | Planner 状态变更枚举：AddTurn / AddAssistantMessage / SetPendingClarification |
-| `Plan` | 计划类型（DirectAnswer / Clarification / Steps） |
-| `Step` | 执行步骤（step_id、description、action、failure_handling） |
-| `Action` | 动作类型（ReadFile / WriteFile / ExecuteCommand / SearchCode / SubPlanner / CallSkill / RunTests / VerifyBuild）— 定义于 executor/types.rs（依赖反转） |
-| `PlannerConfig` | 规划器配置（max_iterations、max_depth、enable_recovery、max_recovery_attempts） |
-| `ContextManager` | 执行上下文管理器（权重衰减、上下文构建） |
+| `ClarificationQuestion` | 追问问题（question、reason、optional）— 唯一保留的类型 |
 
-**关键设计决策**：
-- **依赖反转**：`Action`、`Step`、`StepResult` 等共享类型定义于 `executor/types.rs`，planner 通过 `pub use` 引用
-- **接口抽象**：Planner 通过 `Arc<dyn ExecutorTrait>` 依赖 Executor，而非具体类型
-- **SessionState 解耦**：Planner 不直接读写 SessionState，改为接收 `PlannerContext` + 返回 `PlannerMutation[]`
-- **SessionState 桥接**：`to_planner_context()` 和 `apply_mutations()` 提供双向转换
+**已移除类型**：`Planner`、`PlannerTrait`、`PlannerContext`、`PlannerMutation`、`Plan`、`Step`、`Turn`、`PlannerConfig`、`ContextManager`
 
-### 1.6 executor 子模块
+### 1.6 executor 子模块（已重构）
 
-**职责**：纯机械执行 Planner 生成的步骤，无思考能力。共享类型（`Action`、`Step`、`StepResult`）定义于此层以实现依赖反转（planner 依赖 executor 的类型，而非相反）。包含安全策略、审批工作流和验证门控。
+**职责**：原纯机械执行 Planner 生成步骤的执行器（ExecutorTrait 模式），已重构。现在提供独立的工具执行函数（`execute_read_file`、`execute_write_file`、`execute_search_code` 等），供 `ToolRegistry` 调用。仍保留 `Action` 和 `ExecutorError` 类型供 `ApprovalWorkflow` 使用。
 
 **模块组织**：
-- `executor/executor.rs` — Executor 核心实现（通过 `#[async_trait] impl ExecutorTrait`）
-- `executor/traits.rs` — `ExecutorTrait` 抽象接口定义
-- `executor/types.rs` — 共享类型（Action, Step, StepResult, ExecutorError、FailureHandling），合并了原 `executor/error.rs`
+- `executor/executor.rs` — 独立执行函数（`execute_read_file`、`execute_write_file` 等）+ 标记 `#[deprecated]` 的 `Executor` 壳结构体
+- `executor/types.rs` — `Action` 和 `ExecutorError`（`Step`、`StepResult`、`FailureHandling` 已移除）
 - `executor/approval.rs` — 审批工作流
 - `executor/verification.rs` — 验证门控
 - `executor/judge.rs` — LLM-as-Judge 语义验证
@@ -176,17 +164,14 @@ pub struct Agent {
 
 | 类型 | 说明 |
 |------|------|
-| `Executor` | 执行器（max_concurrency），通过 `#[async_trait] impl ExecutorTrait` |
-| `ExecutorTrait` (trait) | 执行器抽象接口，`async fn execute_steps(steps: Vec<Step>) -> Vec<StepResult>` |
-| `ExecutorError` | 执行器错误类型，合并自原 `executor/error.rs` |
-| `Action` | 动作定义（ReadFile / WriteFile / ExecuteCommand / SearchCode / SubPlanner / CallSkill / RunTests / VerifyBuild），含 serde 标签 |
-| `Step` | 执行步骤（step_id、description、action、on_failure: FailureHandling） |
-| `StepResult` | 步骤执行结果（step_id、success、output、error、actual_importance） |
-| `FailureHandling` | 失败处理策略（Ignore / Abort / Retry { max_retries }） |
+| `Action` | 动作定义（ReadFile / WriteFile / ExecuteCommand / SearchCode），保留供 `ApprovalWorkflow` 使用 |
+| `ExecutorError` | 执行器错误类型 |
 | `SecurityPolicy` | 安全策略（命令白名单/黑名单、目录限制、command_timeout） |
 | `ApprovalWorkflow` | 审批工作流（Safe/Low/Medium/High/Critical 五级风险） |
 | `VerificationGate` | 验证门控（执行后自动运行 cargo check/测试验证产出） |
 | `LlmJudge` | LLM-as-Judge（语义判断，解析 `-- JUDGMENT: PASS/FAIL/NEEDS_CHANGES`） |
+
+**已移除类型**：`Executor`、`ExecutorTrait`、`Step`、`StepResult`、`FailureHandling`
 
 ### 1.7 context 子模块
 
@@ -289,10 +274,10 @@ pub struct Agent {
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| agent | ✅ 完整集成 | Agent、Harness、Skills、SessionState、ContextPipeline 全部集成 |
+| agent | ✅ 完整集成 | Agent、Harness、Skills、AgentLoop、ToolRegistry、SessionState、ContextPipeline 全部集成 |
 | model | ✅ 完整集成 | ModelRouter + OpenAI 已集成 |
-| planner | ✅ 完整集成 | 支持 run() 和 run_with_stream() |
-| executor | ✅ 完整集成 | 支持审批工作流、验证门控、LLM-as-Judge |
+| planner | ⚠️ 已废弃 | 仅保留 `ClarificationQuestion` 类型导出壳 |
+| executor | ⚠️ 已重构 | 独立执行函数 + `Action`/`ExecutorError`，`ExecutorTrait`/`Step`/`StepResult` 已移除 |
 | context | ✅ 完整集成 | ContextPipeline 在 Agent 中完整集成 |
 | skills | ✅ 完整集成 | 含 GEPA 进化引擎 |
 | observability | ✅ 完整集成 | AgentMetrics 作为 AgentHarness 的一部分 |

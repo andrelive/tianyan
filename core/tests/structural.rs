@@ -96,13 +96,4 @@ fn test_storage_does_not_depend_on_agent() {
     );
 }
 
-/// executor 模块不得依赖 planner 模块。
-#[test]
-fn test_executor_does_not_depend_on_planner() {
-    let violations = grep_in_dir("use crate::planner", &format!("{}/executor", CORE_SRC));
-    assert!(
-        violations.is_empty(),
-        "executor 模块不得依赖 planner 模块（verification.rs 除外，仅通过类型引用）:\n{}",
-        violations.join("\n")
-    );
-}
+

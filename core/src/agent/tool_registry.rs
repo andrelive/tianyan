@@ -6,23 +6,30 @@ use crate::agent::tool_params::{
     SearchCodeParams, VerifyBuildParams, WriteFileParams,
 };
 use crate::executor::SecurityPolicy;
-use crate::model::{FunctionDefinition, ToolCall, ToolDefinition};
+use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition};
 use crate::skills::{SkillExecutionRequest, SkillExecutor};
 
+/// 工具执行错误。
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum ToolExecutionError {
+    /// 未知工具。
     #[error("Unknown tool: {0}")]
     UnknownTool(String),
+    /// 参数无效。
     #[error("Invalid parameters: {0}")]
     InvalidParams(String),
+    /// 执行失败。
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
+    /// 安全违规。
     #[error("Security violation: {0}")]
     SecurityViolation(String),
+    /// 需要追问。
     #[error("Ask user: {0}")]
     AskUser(String),
 }
 
+/// 工具注册表，维护工具定义并并行执行 tool_calls。
 #[derive(Clone)]
 pub struct ToolRegistry {
     security_policy: SecurityPolicy,
@@ -31,6 +38,7 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    /// 创建新的注册表并注册内置工具。
     pub fn new(security_policy: SecurityPolicy) -> Self {
         let mut registry = Self {
             security_policy,
@@ -41,15 +49,18 @@ impl ToolRegistry {
         registry
     }
 
+    /// 设置技能执行器。
     pub fn with_skill_executor(mut self, executor: Arc<SkillExecutor>) -> Self {
         self.skill_executor = Some(executor);
         self
     }
 
+    /// 获取所有工具定义。
     pub fn definitions(&self) -> &[ToolDefinition] {
         &self.definitions
     }
 
+    /// 并行执行多个 tool_call。
     pub async fn execute_parallel(
         &self,
         calls: &[ToolCall],

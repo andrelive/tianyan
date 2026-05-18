@@ -15,7 +15,7 @@ use crate::context::rule_suggester::RuleSuggester;
 use crate::context::ContextRetriever;
 use crate::executor::verification::VerificationGate;
 use crate::executor::SecurityPolicy;
-use crate::model::ModelService;
+use crate::model::ChatService;
 use crate::observability::AgentMetrics;
 use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
 use crate::skills::{SkillExecutor, SkillRegistry};
@@ -26,7 +26,7 @@ use super::coordinator::Agent;
 /// 用于创建智能体的构建器。
 pub struct AgentBuilder {
     config: AgentConfig,
-    model_service: Option<Arc<dyn ModelService>>,
+    model_service: Option<Arc<dyn ChatService>>,
     retriever: Option<Arc<dyn ContextRetriever>>,
     vfs: Option<Arc<dyn VirtualFileSystem>>,
     skill_executor: Option<Arc<SkillExecutor>>,
@@ -52,7 +52,7 @@ impl AgentBuilder {
         self
     }
 
-    pub fn with_model_service(mut self, service: Arc<dyn ModelService>) -> Self {
+    pub fn with_model_service(mut self, service: Arc<dyn ChatService>) -> Self {
         self.model_service = Some(service);
         self
     }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::model::ToolCall;
+use super::tool::ToolCall;
 
 /// 对话中的消息角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +93,7 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::tool::{FunctionCall, ToolCallType};
 
     #[test]
     fn test_message_creation() {
@@ -135,8 +136,8 @@ mod tests {
             "",
             vec![ToolCall {
                 id: "call_123".to_string(),
-                call_type: crate::model::ToolCallType::Function,
-                function: crate::model::FunctionCall {
+                call_type: ToolCallType::Function,
+                function: FunctionCall {
                     name: "search".to_string(),
                     arguments: r#"{"q":"hello"}"#.to_string(),
                 },

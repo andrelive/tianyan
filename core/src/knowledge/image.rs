@@ -10,6 +10,7 @@ use image::ImageFormat;
 use serde::{Deserialize, Serialize};
 
 use crate::common::error::{Result, TianyanError};
+use crate::model::types::{ContentPart, ImageUrl, VisionContent, VisionMessage, VisionRequest};
 use crate::model::{VisionEncoder, VlmService};
 
 /// 支持的图像格式。
@@ -478,9 +479,7 @@ impl<'a, V: VlmService, E: VisionEncoder> ImageAnalyzer<'a, V, E> {
                       5. 图像类型（screenshot、photo、diagram、chart、code、document、icon、illustration 或 other）\n\
                       请以 JSON 格式返回，包含以下键：description、key_elements（数组）、extracted_text、tags（数组）、image_type、confidence（0-1）";
 
-        let description = self
-            .vlm_service
-            .analyze_image_base64(&self.model, image_data, prompt)
+        let description = analyze_image_base64(self.vlm_service, &self.model, image_data, prompt)
             .await?;
 
         // 解析响应
@@ -555,6 +554,53 @@ impl<'a, V: VlmService, E: VisionEncoder> ImageAnalyzer<'a, V, E> {
     pub fn create_unified_text(&self, analysis: &ImageAnalysis) -> UnifiedTextRepresentation {
         UnifiedTextRepresentation::new(analysis)
     }
+}
+
+async fn analyze_image_base64<V: VlmService>(
+    vlm: &V,
+    model: &str,
+    image_data: &[u8],
+    prompt: &str,
+) -> Result<String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let base64_data = STANDARD.encode(image_data);
+    let mime_type = crate::model::provider::vision::infer_mime_type(image_data);
+    let data_url = format!("data:{};base64,{}", mime_type, base64_data);
+
+    let message = VisionMessage {
+        role: "user".to_string(),
+        content: VisionContent::MultiPart(vec![
+            ContentPart {
+                content_type: "text".to_string(),
+                text: Some(prompt.to_string()),
+                image_url: None,
+            },
+            ContentPart {
+                content_type: "image_url".to_string(),
+                text: None,
+                image_url: Some(ImageUrl {
+                    url: data_url,
+                    detail: None,
+                }),
+            },
+        ]),
+    };
+
+    let request = VisionRequest::new(model, vec![message]);
+    let response = vlm.analyze_image(request).await?;
+    Ok(response
+        .choices
+        .first()
+        .map(|c| match &c.message.content {
+            VisionContent::Text(text) => text.clone(),
+            VisionContent::MultiPart(parts) => parts
+                .iter()
+                .filter_map(|p| p.text.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        })
+        .unwrap_or_default())
 }
 
 #[cfg(test)]

@@ -11,11 +11,13 @@ use crate::skills::definition::SkillHandler;
 use crate::skills::executor::validate_path;
 use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 
+/// 文件列表处理器。
 pub struct FileListHandler {
     allowed_paths: Vec<PathBuf>,
 }
 
 impl FileListHandler {
+    /// 创建新的文件列表处理器。
     pub fn new(allowed_paths: Vec<PathBuf>) -> Self {
         Self { allowed_paths }
     }

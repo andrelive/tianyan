@@ -131,7 +131,7 @@ use crate::common::types::{Message, MessageRole};
 use crate::config::AgentConfig;
 use crate::context::{ContextPipeline, FailureKind};
 use crate::executor::{LlmJudge, VerificationGate};
-use crate::model::ModelService;
+use crate::model::ChatService;
 use crate::storage::{MemoryExtractionTrait, VirtualFileSystem};
 
 /// 智能体协调器 trait。
@@ -166,7 +166,7 @@ pub trait AgentCoordinator: Send + Sync {
 /// 智能体协调器的默认实现。
 pub struct Agent {
     config: AgentConfig,
-    model_service: Arc<dyn ModelService>,
+    model_service: Arc<dyn ChatService>,
     vfs: Arc<dyn VirtualFileSystem>,
     context_pipeline: ContextPipeline,
     harness: AgentHarness,
@@ -184,7 +184,7 @@ impl Agent {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: AgentConfig,
-        model_service: Arc<dyn ModelService>,
+        model_service: Arc<dyn ChatService>,
         vfs: Arc<dyn VirtualFileSystem>,
         context_pipeline: ContextPipeline,
         harness: AgentHarness,
