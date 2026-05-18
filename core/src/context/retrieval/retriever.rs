@@ -12,7 +12,7 @@ use crate::common::types::{ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
 use crate::context::types::RetrievalResult;
 use crate::model::EmbeddingService;
-use crate::storage::{ContentLoader, VfsFacade};
+use crate::storage::VirtualFileSystem;
 
 use super::intent::{Intent, IntentAnalyzer};
 use super::loader::{ContentLoadStrategy, TokenBudget};
@@ -71,9 +71,7 @@ pub trait ContextRetriever: Send + Sync {
 /// 提供更准确和全面的检索能力。
 pub struct DualLayerRetriever {
     /// VFS 实例，提供搜索和内容加载。
-    vfs: Arc<dyn VfsFacade>,
-    /// 用于加载结果内容的内容加载器。
-    content_loader: Option<Arc<dyn ContentLoader>>,
+    vfs: Arc<dyn VirtualFileSystem>,
     /// 意图分析器。
     intent_analyzer: IntentAnalyzer,
     /// 使用的嵌入模型。
@@ -88,10 +86,9 @@ pub struct DualLayerRetriever {
 
 impl DualLayerRetriever {
     /// 创建新的融合检索器。
-    pub fn new(vfs: Arc<dyn VfsFacade>) -> Self {
+    pub fn new(vfs: Arc<dyn VirtualFileSystem>) -> Self {
         Self {
             vfs,
-            content_loader: None,
             intent_analyzer: IntentAnalyzer::new(),
             embedding_model: "text-embedding-3-small".to_string(),
             default_token_budget: 4096,
@@ -104,12 +101,6 @@ impl DualLayerRetriever {
     pub fn with_embedding_service(mut self, service: Arc<dyn EmbeddingService>) -> Self {
         self.intent_analyzer =
             IntentAnalyzer::new().with_embedding_service(service, &self.embedding_model);
-        self
-    }
-
-    /// 设置内容加载器。
-    pub fn with_content_loader(mut self, loader: Arc<dyn ContentLoader>) -> Self {
-        self.content_loader = Some(loader);
         self
     }
 
@@ -407,9 +398,8 @@ impl ContextRetriever for DualLayerRetriever {
 
 /// 用于创建融合检索器实例的构建器。
 pub struct DualLayerRetrieverBuilder {
-    vfs: Option<Arc<dyn VfsFacade>>,
+    vfs: Option<Arc<dyn VirtualFileSystem>>,
     embedding_service: Option<Arc<dyn EmbeddingService>>,
-    content_loader: Option<Arc<dyn ContentLoader>>,
     embedding_model: Option<String>,
     default_token_budget: Option<usize>,
     memory_bias: Option<f32>,
@@ -422,7 +412,6 @@ impl DualLayerRetrieverBuilder {
         Self {
             vfs: None,
             embedding_service: None,
-            content_loader: None,
             embedding_model: None,
             default_token_budget: None,
             memory_bias: None,
@@ -431,7 +420,7 @@ impl DualLayerRetrieverBuilder {
     }
 
     /// 设置 VFS（必需）。
-    pub fn with_vfs(mut self, vfs: Arc<dyn VfsFacade>) -> Self {
+    pub fn with_vfs(mut self, vfs: Arc<dyn VirtualFileSystem>) -> Self {
         self.vfs = Some(vfs);
         self
     }
@@ -439,12 +428,6 @@ impl DualLayerRetrieverBuilder {
     /// 设置嵌入服务（仅用于配置意图分析器）。
     pub fn with_embedding_service(mut self, service: Arc<dyn EmbeddingService>) -> Self {
         self.embedding_service = Some(service);
-        self
-    }
-
-    /// 设置内容加载器。
-    pub fn with_content_loader(mut self, loader: Arc<dyn ContentLoader>) -> Self {
-        self.content_loader = Some(loader);
         self
     }
 
@@ -482,10 +465,6 @@ impl DualLayerRetrieverBuilder {
 
         if let Some(service) = self.embedding_service {
             retriever = retriever.with_embedding_service(service);
-        }
-
-        if let Some(loader) = self.content_loader {
-            retriever = retriever.with_content_loader(loader);
         }
 
         if let Some(model) = self.embedding_model {
@@ -547,28 +526,6 @@ mod tests {
 
         fn embedding_dimension(&self, _model: &str) -> usize {
             768
-        }
-    }
-
-    /// Mock content loader for testing.
-    struct MockContentLoader;
-
-    #[async_trait]
-    impl ContentLoader for MockContentLoader {
-        async fn load_content(&self, _uri: &TianyanUri, level: ContentLevel) -> Result<String> {
-            Ok(match level {
-                ContentLevel::Abstract => "Abstract content".to_string(),
-                ContentLevel::Overview => "Overview content".to_string(),
-                ContentLevel::Detail => "Detail content".to_string(),
-            })
-        }
-
-        async fn load_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
-            Ok(ContextEntry::new_file(uri.clone()))
-        }
-
-        async fn has_content(&self, _uri: &TianyanUri, _level: ContentLevel) -> Result<bool> {
-            Ok(true)
         }
     }
 
@@ -732,11 +689,10 @@ mod tests {
         dot_product / (norm_a * norm_b)
     }
 
-    /// Test VFS that delegates to in-memory vector storage and mock content loader.
+    /// Test VFS that delegates to in-memory vector storage.
     struct TestVfs {
         vector_storage: Arc<InMemoryVectorStorage>,
         embedding_service: Arc<MockEmbeddingService>,
-        content_loader: MockContentLoader,
     }
 
     impl TestVfs {
@@ -747,7 +703,6 @@ mod tests {
             Self {
                 vector_storage,
                 embedding_service,
-                content_loader: MockContentLoader,
             }
         }
     }
@@ -759,6 +714,21 @@ mod tests {
         }
         async fn exists(&self, _uri: &TianyanUri) -> Result<bool> {
             Ok(true)
+        }
+        async fn get_entry(&self, _uri: &TianyanUri) -> Result<ContextEntry> {
+            Ok(ContextEntry::new_file(_uri.clone()))
+        }
+        async fn create_directory(
+            &self,
+            _uri: &TianyanUri,
+        ) -> Result<ContextEntry> {
+            Ok(ContextEntry::new_directory(_uri.clone()))
+        }
+        async fn create_file(
+            &self,
+            _uri: &TianyanUri,
+        ) -> Result<ContextEntry> {
+            Ok(ContextEntry::new_file(_uri.clone()))
         }
         async fn delete(&self, _uri: &TianyanUri) -> Result<()> {
             Ok(())
@@ -781,8 +751,12 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
-        async fn read(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
-            self.content_loader.load_content(uri, level).await
+        async fn read(&self, _uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+            Ok(match level {
+                ContentLevel::Abstract => "Abstract content".to_string(),
+                ContentLevel::Overview => "Overview content".to_string(),
+                ContentLevel::Detail => "Detail content".to_string(),
+            })
         }
         async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> {
             Ok(())
@@ -872,12 +846,12 @@ mod tests {
         }
     }
 
-    impl VfsFacade for TestVfs {}
+    impl VirtualFileSystem for TestVfs {}
 
     async fn create_test_retriever() -> DualLayerRetriever {
         let vector_storage = Arc::new(InMemoryVectorStorage::new());
         vector_storage.initialize().await.unwrap();
-        let vfs: Arc<dyn VfsFacade> =
+        let vfs: Arc<dyn VirtualFileSystem> =
             Arc::new(TestVfs::new(vector_storage, Arc::new(MockEmbeddingService)));
 
         DualLayerRetrieverBuilder::new()
@@ -911,7 +885,7 @@ mod tests {
             vector_storage.upsert_point(&point).await.unwrap();
         }
 
-        let vfs: Arc<dyn VfsFacade> = Arc::new(TestVfs::new(
+        let vfs: Arc<dyn VirtualFileSystem> = Arc::new(TestVfs::new(
             vector_storage.clone(),
             Arc::new(MockEmbeddingService),
         ));
@@ -974,7 +948,7 @@ mod tests {
     async fn test_dual_layer_retriever_builder_with_options() {
         let vector_storage = Arc::new(InMemoryVectorStorage::new());
         vector_storage.initialize().await.unwrap();
-        let vfs: Arc<dyn VfsFacade> =
+        let vfs: Arc<dyn VirtualFileSystem> =
             Arc::new(TestVfs::new(vector_storage, Arc::new(MockEmbeddingService)));
 
         let retriever = DualLayerRetrieverBuilder::new()

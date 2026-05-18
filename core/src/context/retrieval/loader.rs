@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
-use crate::storage::ContentLoader;
+use crate::storage::ContentStore;
 
 /// 内容加载 Token 预算。
 #[derive(Debug, Clone)]
@@ -148,8 +148,8 @@ impl ContentLoadStrategy {
 
 /// 带有 Token 预算管理的内容加载器实现。
 pub struct ContentLoaderImpl {
-    /// 内部内容加载器（通常为 VirtualFileSystem）。
-    inner: Arc<dyn ContentLoader>,
+    /// 内部内容存储（通常为 VirtualFileSystem）。
+    vfs: Arc<dyn ContentStore>,
     /// Token 预算。
     budget: TokenBudget,
     /// 用于估算 Token 数量的计数器。
@@ -187,18 +187,18 @@ impl Default for TokenCounter {
 
 impl ContentLoaderImpl {
     /// 创建新的内容加载器。
-    pub fn new(inner: Arc<dyn ContentLoader>) -> Self {
+    pub fn new(vfs: Arc<dyn ContentStore>) -> Self {
         Self {
-            inner,
+            vfs,
             budget: TokenBudget::default(),
             token_counter: Some(TokenCounter::new()),
         }
     }
 
     /// 创建带有特定 Token 预算的内容加载器。
-    pub fn with_budget(inner: Arc<dyn ContentLoader>, budget: TokenBudget) -> Self {
+    pub fn with_budget(vfs: Arc<dyn ContentStore>, budget: TokenBudget) -> Self {
         Self {
-            inner,
+            vfs,
             budget,
             token_counter: Some(TokenCounter::new()),
         }
@@ -221,7 +221,7 @@ impl ContentLoaderImpl {
         strategy: ContentLoadStrategy,
     ) -> Result<LoadedContent> {
         let level = strategy.to_content_level();
-        let content = self.inner.load_content(uri, level).await?;
+        let content = self.vfs.read(uri, level).await?;
 
         // 处理空内容
         if content.trim().is_empty() {
@@ -301,7 +301,7 @@ impl ContentLoaderImpl {
 
     /// 检查特定层级的内容是否存在。
     pub async fn has_content_level(&self, uri: &TianyanUri, level: ContentLevel) -> Result<bool> {
-        self.inner.has_content(uri, level).await
+        self.vfs.has_content(uri, level).await
     }
 
     /// 获取 URI 的最佳可用内容层级。
@@ -311,14 +311,14 @@ impl ContentLoaderImpl {
         preferred_level: ContentLevel,
     ) -> Result<ContentLevel> {
         // 检查首选层级是否可用
-        if self.inner.has_content(uri, preferred_level).await? {
+        if self.vfs.has_content(uri, preferred_level).await? {
             return Ok(preferred_level);
         }
 
         // 回退到较低层级
         match preferred_level {
             ContentLevel::Detail => {
-                if self.inner.has_content(uri, ContentLevel::Overview).await? {
+                if self.vfs.has_content(uri, ContentLevel::Overview).await? {
                     Ok(ContentLevel::Overview)
                 } else {
                     Ok(ContentLevel::Abstract)
@@ -382,15 +382,23 @@ impl LoadedContent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::ContextEntry;
     use async_trait::async_trait;
 
-    /// Mock content loader for testing.
-    struct MockContentLoader;
+    /// Mock content store for testing.
+    struct MockContentStore;
 
     #[async_trait]
-    impl ContentLoader for MockContentLoader {
-        async fn load_content(&self, _uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+    impl ContentStore for MockContentStore {
+        async fn write(
+            &self,
+            _uri: &TianyanUri,
+            _level: ContentLevel,
+            _content: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn read(&self, _uri: &TianyanUri, level: ContentLevel) -> Result<String> {
             Ok(match level {
                 ContentLevel::Abstract => "Abstract content".to_string(),
                 ContentLevel::Overview => "Overview content with more details".to_string(),
@@ -398,8 +406,8 @@ mod tests {
             })
         }
 
-        async fn load_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
-            Ok(ContextEntry::new_file(uri.clone()))
+        async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> {
+            Ok(())
         }
 
         async fn has_content(&self, _uri: &TianyanUri, _level: ContentLevel) -> Result<bool> {
@@ -481,8 +489,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_content_loader_impl() {
-        let inner = Arc::new(MockContentLoader);
-        let mut loader = ContentLoaderImpl::with_budget(inner, TokenBudget::new(1000));
+        let store = Arc::new(MockContentStore);
+        let mut loader = ContentLoaderImpl::with_budget(store, TokenBudget::new(1000));
 
         let uri = TianyanUri::new(
             crate::common::types::ContextNamespace::User,
@@ -500,9 +508,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_content_loader_batch() {
-        let inner = Arc::new(MockContentLoader);
+        let store = Arc::new(MockContentStore);
         let mut loader = ContentLoaderImpl::with_budget(
-            inner,
+            store,
             TokenBudget::new(50), // Small budget
         );
 

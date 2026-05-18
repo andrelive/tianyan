@@ -132,7 +132,7 @@ fn initialize_vfs_for_app(
         .build()
         .map_err(|e| anyhow::anyhow!("VFS 构建失败：{}", e))?;
 
-    use tianyan::storage::VirtualFileSystem;
+    use tianyan::storage::VfsCore;
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async { vfs.initialize().await })
     })?;

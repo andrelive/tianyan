@@ -492,32 +492,22 @@ impl SummaryService {
         let metadata = self.vfs.get_all_content_metadata(entry.uri()).await?;
 
         let detail_meta = match metadata.get(&ContentLevel::Detail) {
-            Some(Some(m)) => m,
+            Some(m) => m,
             _ => return Ok(false),
         };
 
-        let has_abstract = metadata
-            .get(&ContentLevel::Abstract)
-            .is_some_and(|m| m.is_some());
-        let has_overview = metadata
-            .get(&ContentLevel::Overview)
-            .is_some_and(|m| m.is_some());
+        let has_abstract = metadata.get(&ContentLevel::Abstract).is_some();
+        let has_overview = metadata.get(&ContentLevel::Overview).is_some();
 
         if !has_abstract || !has_overview {
             return Ok(true);
         }
 
-        let abstract_meta = match metadata
-            .get(&ContentLevel::Abstract)
-            .and_then(|m| m.as_ref())
-        {
+        let abstract_meta = match metadata.get(&ContentLevel::Abstract) {
             Some(m) => m,
             None => return Ok(true),
         };
-        let overview_meta = match metadata
-            .get(&ContentLevel::Overview)
-            .and_then(|m| m.as_ref())
-        {
+        let overview_meta = match metadata.get(&ContentLevel::Overview) {
             Some(m) => m,
             None => return Ok(true),
         };

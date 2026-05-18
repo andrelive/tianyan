@@ -6,8 +6,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::config::StorageConfig;
 use crate::model::EmbeddingService;
-#[allow(unused_imports)]
-use crate::storage::traits::{ContentLoader, StorageBackend, VectorStorage, VirtualFileSystem};
+use crate::storage::traits::{StorageBackend, VectorStorage, VfsCore, VirtualFileSystem};
 
 use super::VirtualFileSystemImpl;
 
@@ -157,7 +156,7 @@ mod tests {
     use super::*;
     use crate::common::types::ContextNamespace;
     use crate::storage::local::LocalStorageBackend;
-    use crate::storage::traits::VectorStorage;
+    use crate::storage::traits::{ContentStore, VectorStorage};
     use crate::storage::types::{VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType};
     use tempfile::tempdir;
 
@@ -348,17 +347,10 @@ mod tests {
         vfs.create_file(&uri).await.unwrap();
         vfs.write_content(&uri, "测试内容").await.unwrap();
 
-        let content_loader: &dyn ContentLoader = &vfs;
-        let content = content_loader
-            .load_content(&uri, ContentLevel::Detail)
-            .await
-            .unwrap();
+        let content = vfs.read_content(&uri, ContentLevel::Detail).await.unwrap();
         assert_eq!(content, "测试内容");
 
-        let has_content = content_loader
-            .has_content(&uri, ContentLevel::Detail)
-            .await
-            .unwrap();
+        let has_content = vfs.has_content(&uri, ContentLevel::Detail).await.unwrap();
         assert!(has_content);
     }
 

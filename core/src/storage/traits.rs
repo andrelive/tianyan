@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::common::error::Result;
 use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
@@ -300,6 +299,15 @@ pub trait VfsCore: Send + Sync {
     /// 检查条目是否存在。
     async fn exists(&self, uri: &TianyanUri) -> Result<bool>;
 
+    /// 获取条目。
+    async fn get_entry(&self, uri: &TianyanUri) -> Result<ContextEntry>;
+
+    /// 创建目录。
+    async fn create_directory(&self, uri: &TianyanUri) -> Result<ContextEntry>;
+
+    /// 创建文件。
+    async fn create_file(&self, uri: &TianyanUri) -> Result<ContextEntry>;
+
     /// 递归删除条目及其子条目，同时清理向量库。
     async fn delete(&self, uri: &TianyanUri) -> Result<()>;
 
@@ -324,6 +332,21 @@ pub trait ContentStore: Send + Sync {
 
     /// 检查条目在指定层级是否已有内容。
     async fn has_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<bool>;
+
+    /// 写入 Detail 层级内容（便捷方法）。
+    async fn write_content(&self, uri: &TianyanUri, content: &str) -> Result<()> {
+        self.write(uri, ContentLevel::Detail, content).await
+    }
+
+    /// 写入 Abstract 层级内容（便捷方法）。
+    async fn write_abstract(&self, uri: &TianyanUri, content: &str) -> Result<()> {
+        self.write(uri, ContentLevel::Abstract, content).await
+    }
+
+    /// 写入 Overview 层级内容（便捷方法）。
+    async fn write_overview(&self, uri: &TianyanUri, content: &str) -> Result<()> {
+        self.write(uri, ContentLevel::Overview, content).await
+    }
 }
 
 /// 向量检索 —— 查询文本先 embed 再通过 RRF 融合 Abstract+Overview 向量搜索。
@@ -376,168 +399,108 @@ pub trait VfsMetadata: Send + Sync {
 ///
 /// 任何同时实现了上述四个子 trait 的类型自动实现本 trait。
 #[async_trait]
-pub trait VfsFacade: VfsCore + ContentStore + VfsSearch + VfsMetadata {}
+pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch + VfsMetadata {
+    /// 读取指定层级的内容（便捷方法，委托给 ContentStore::read）。
+    async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+        ContentStore::read(self, uri, level).await
+    }
 
-/// 虚拟文件系统 trait。
-///
-/// 此 trait 定义了提供所有上下文条目统一视图的虚拟文件系统接口。
-#[async_trait]
-pub trait VirtualFileSystem: Send + Sync {
-    /// 初始化文件系统。
-    async fn initialize(&self) -> Result<()>;
+    /// 追加内容到 Detail 层级末尾（便捷方法，委托给 ContentStore::append）。
+    async fn append_content(&self, uri: &TianyanUri, content: &str) -> Result<()> {
+        ContentStore::append(self, uri, content).await
+    }
 
-    /// 检查条目是否存在。
-    async fn exists(&self, uri: &TianyanUri) -> Result<bool>;
+    /// 读取 Abstract 层级内容。
+    async fn read_abstract(&self, uri: &TianyanUri) -> Result<String> {
+        self.read_content(uri, ContentLevel::Abstract).await
+    }
 
-    /// 获取条目。
-    async fn get_entry(&self, uri: &TianyanUri) -> Result<ContextEntry>;
+    /// 读取 Overview 层级内容。
+    async fn read_overview(&self, uri: &TianyanUri) -> Result<String> {
+        self.read_content(uri, ContentLevel::Overview).await
+    }
 
-    /// 创建目录。
-    async fn create_directory(&self, uri: &TianyanUri) -> Result<ContextEntry>;
+    /// 读取子文件内容。
+    async fn read_file(&self, uri: &TianyanUri, filename: &str) -> Result<String> {
+        let child_uri = uri.append(filename);
+        self.read_content(&child_uri, ContentLevel::Detail).await
+    }
 
-    /// 创建文件。
-    async fn create_file(&self, uri: &TianyanUri) -> Result<ContextEntry>;
+    /// 写入子文件内容。
+    async fn write_file(&self, uri: &TianyanUri, filename: &str, content: &str) -> Result<()> {
+        let child_uri = uri.append(filename);
+        if !self.exists(&child_uri).await? {
+            self.create_file(&child_uri).await?;
+        }
+        self.write_content(&child_uri, content).await
+    }
 
-    /// 写入条目内容。
-    async fn write_content(&self, uri: &TianyanUri, content: &str) -> Result<()>;
+    /// 检查子文件是否存在。
+    async fn file_exists(&self, uri: &TianyanUri, filename: &str) -> Result<bool> {
+        let child_uri = uri.append(filename);
+        self.exists(&child_uri).await
+    }
 
-    /// 读取条目内容。
-    async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String>;
-
-    /// 追加内容到文件末尾。
-    ///
-    /// 此方法用于需要持续追加的场景（如会话消息记录）。
-    /// 实现应该调用底层存储的真正追加方法。
-    ///
-    /// # 参数
-    /// - `uri`: 条目 URI
-    /// - `content`: 要追加的内容
-    ///
-    /// # 返回
-    /// - `Ok(())`: 追加成功
-    /// - `Err`: 追加失败（如文件不存在、权限问题等）。
-    async fn append_content(&self, uri: &TianyanUri, content: &str) -> Result<()>;
-
-    /// 更新条目元数据。
-    async fn update_metadata(
-        &self,
-        uri: &TianyanUri,
-        importance: f32,
-        custom: HashMap<String, serde_json::Value>,
-    ) -> Result<()>;
-
-    /// 删除条目。
-    async fn delete(&self, uri: &TianyanUri) -> Result<()>;
-
-    /// 列出目录中的条目。
-    async fn list(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>>;
-
-    /// 移动条目。
-    async fn move_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()>;
-
-    /// 复制条目。
-    async fn copy_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()>;
-
-    /// 搜索条目。
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;
-
-    /// 获取存储后端。
-    fn storage_backend(&self) -> &dyn StorageBackend;
-
-    /// 获取向量存储。
-    fn vector_storage(&self) -> &dyn VectorStorage;
-
-    /// 获取向量存储（Arc 版本，供 Agent 使用）。
-    fn get_vector_storage(&self) -> Arc<dyn VectorStorage>;
-
-    /// 写入摘要内容（Abstract 层级）。
-    async fn write_abstract(&self, uri: &TianyanUri, content: &str) -> Result<()>;
-
-    /// 写入概览内容（Overview 层级）。
-    async fn write_overview(&self, uri: &TianyanUri, content: &str) -> Result<()>;
-
-    /// 更新条目的摘要和概览向量
-    async fn update_summary_vectors(
-        &self,
-        uri: &TianyanUri,
-        abstract_content: &str,
-        overview_content: &str,
-    ) -> Result<()>;
-
-    /// 检查特定层级是否存在内容。
-    async fn has_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<bool>;
-
-    /// 获取特定层级内容的元数据
-    async fn get_content_metadata(
-        &self,
-        uri: &TianyanUri,
-        level: ContentLevel,
-    ) -> Result<Option<ContentMetadata>>;
-
-    /// 批量获取所有层级的内容元数据（优化扫描）。
-    async fn get_all_content_metadata(
-        &self,
-        uri: &TianyanUri,
-    ) -> Result<HashMap<ContentLevel, Option<ContentMetadata>>>;
+    /// 列出子文件名。
+    async fn list_files(&self, uri: &TianyanUri) -> Result<Vec<String>> {
+        let entries = self.list(uri).await?;
+        Ok(entries
+            .into_iter()
+            .filter(|e| !e.is_directory())
+            .filter_map(|e| e.uri().path().last().cloned())
+            .collect())
+    }
 
     /// 按命名空间搜索。
     async fn search_by_namespace(
         &self,
-        namespace: ContextNamespace,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<SearchResult>>;
+        _namespace: ContextNamespace,
+        _query: &str,
+        _limit: usize,
+    ) -> Result<Vec<SearchResult>> {
+        Ok(vec![])
+    }
 
-    /// 搜索会话
-    async fn search_session(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;
+    /// 搜索会话。
+    async fn search_session(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.search_by_namespace(ContextNamespace::Session, query, limit)
+            .await
+    }
 
-    /// 搜索记忆
-    async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;
+    /// 搜索记忆。
+    async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.search_by_namespace(ContextNamespace::Memory, query, limit)
+            .await
+    }
 
-    /// 搜索知识
-    async fn search_knowledge(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;
+    /// 搜索知识。
+    async fn search_knowledge(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.search_by_namespace(ContextNamespace::Knowledge, query, limit)
+            .await
+    }
 
-    /// 搜索技能
-    async fn search_skill(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;
+    /// 搜索技能。
+    async fn search_skill(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.search_by_namespace(ContextNamespace::Skill, query, limit)
+            .await
+    }
 
-    /// 读取文件。
-    async fn read_file(&self, uri: &TianyanUri, filename: &str) -> Result<String>;
-
-    /// 写入文件。
-    async fn write_file(&self, uri: &TianyanUri, filename: &str, content: &str) -> Result<()>;
-
-    /// 检查文件是否存在。
-    async fn file_exists(&self, uri: &TianyanUri, filename: &str) -> Result<bool>;
-
-    /// 列出文件。
-    async fn list_files(&self, uri: &TianyanUri) -> Result<Vec<String>>;
-
-    /// 读取摘要内容。
-    async fn read_abstract(&self, uri: &TianyanUri) -> Result<String>;
-
-    /// 读取概览内容。
-    async fn read_overview(&self, uri: &TianyanUri) -> Result<String>;
+    /// 复制条目。
+    async fn copy_entry(&self, _source: &TianyanUri, _destination: &TianyanUri) -> Result<()> {
+        Err(crate::common::error::TianyanError::Internal(
+            "copy_entry not implemented".to_string(),
+        ))
+    }
 
     /// 重新生成元数据。
-    async fn regenerate_metadata(&self, uri: &TianyanUri) -> Result<()>;
+    async fn regenerate_metadata(&self, _uri: &TianyanUri) -> Result<()> {
+        Ok(())
+    }
 
     /// 列出所有 URI。
-    async fn list_all_uris(&self) -> Result<Vec<TianyanUri>>;
-}
-
-/// 内容加载 trait。
-///
-/// 此 trait 定义了从存储加载内容的接口，供检索层使用。
-#[async_trait]
-pub trait ContentLoader: Send + Sync {
-    /// 加载特定层级的内容。
-    async fn load_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String>;
-
-    /// 加载条目。
-    async fn load_entry(&self, uri: &TianyanUri) -> Result<ContextEntry>;
-
-    /// 检查特定层级是否存在内容。
-    async fn has_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<bool>;
+    async fn list_all_uris(&self) -> Result<Vec<TianyanUri>> {
+        Ok(vec![])
+    }
 }
 
 #[cfg(test)]

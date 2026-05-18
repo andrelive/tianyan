@@ -49,8 +49,8 @@ pub use summary::{
 };
 pub use summary_service::{SummaryService, SummaryServiceConfig};
 pub use traits::{
-    ContentLoader, ContentMetadata, ContentStore, StorageBackend, VectorStorage, VfsCore,
-    VfsFacade, VfsMetadata, VfsSearch, VirtualFileSystem,
+    ContentMetadata, ContentStore, StorageBackend, VectorStorage, VfsCore, VfsMetadata, VfsSearch,
+    VirtualFileSystem,
 };
 pub use types::{
     CategoryStats, ContextEntry, DirectoryIndex, DirectoryStats, IndexEntry, StorageStats,
@@ -145,9 +145,7 @@ mod tests {
     #[tokio::test]
     async fn test_full_workflow() {
         let vfs = create_test_vfs().await;
-        <VirtualFileSystemImpl as VirtualFileSystem>::initialize(&vfs)
-            .await
-            .unwrap();
+        vfs.initialize().await.unwrap();
 
         // 创建文件
         let uri = TianyanUri::new(
@@ -169,22 +167,14 @@ mod tests {
         assert!(entry.has_content(ContentLevel::Detail));
 
         // 删除
-        <VirtualFileSystemImpl as VirtualFileSystem>::delete(&vfs, &uri)
-            .await
-            .unwrap();
-        assert!(
-            !<VirtualFileSystemImpl as VirtualFileSystem>::exists(&vfs, &uri)
-                .await
-                .unwrap()
-        );
+        vfs.delete(&uri).await.unwrap();
+        assert!(!vfs.exists(&uri).await.unwrap());
     }
 
     #[tokio::test]
     async fn test_directory_operations() {
         let vfs = create_test_vfs().await;
-        <VirtualFileSystemImpl as VirtualFileSystem>::initialize(&vfs)
-            .await
-            .unwrap();
+        vfs.initialize().await.unwrap();
 
         // 创建嵌套目录
         let parent_uri = TianyanUri::new(ContextNamespace::User, vec!["preferences".to_string()]);
@@ -200,20 +190,12 @@ mod tests {
         }
 
         // 列出目录
-        let entries = <VirtualFileSystemImpl as VirtualFileSystem>::list(&vfs, &parent_uri)
-            .await
-            .unwrap();
+        let entries = vfs.list(&parent_uri).await.unwrap();
         assert_eq!(entries.len(), 3);
 
         // 删除目录（应删除所有子条目）
-        <VirtualFileSystemImpl as VirtualFileSystem>::delete(&vfs, &parent_uri)
-            .await
-            .unwrap();
-        assert!(
-            !<VirtualFileSystemImpl as VirtualFileSystem>::exists(&vfs, &parent_uri)
-                .await
-                .unwrap()
-        );
+        vfs.delete(&parent_uri).await.unwrap();
+        assert!(!vfs.exists(&parent_uri).await.unwrap());
     }
 
     #[tokio::test]

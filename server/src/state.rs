@@ -19,8 +19,7 @@ use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
 };
 use tianyan::storage::{
-    MemoryExtractionService, SummaryEngine, SummaryService, VirtualFileSystem,
-    VirtualFileSystemImpl,
+    MemoryExtractionService, SummaryEngine, SummaryService, VirtualFileSystemImpl,
 };
 use tianyan::{Result as TianyanResult, TianyanError};
 

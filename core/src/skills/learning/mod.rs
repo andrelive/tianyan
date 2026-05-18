@@ -346,220 +346,113 @@ mod tests {
         }
     }
 
+    use crate::common::error::Result;
+    use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
+    use crate::storage::{
+        ContentMetadata, ContentStore, ContextEntry, VfsCore, VfsMetadata, VfsSearch,
+        VirtualFileSystem,
+    };
+    use std::collections::HashMap;
+
     struct MockVfs;
+
     #[async_trait::async_trait]
-    impl crate::storage::VirtualFileSystem for MockVfs {
-        async fn initialize(&self) -> crate::common::error::Result<()> {
+    impl VfsCore for MockVfs {
+        async fn initialize(&self) -> Result<()> {
             Ok(())
         }
-        async fn exists(&self, _uri: &TianyanUri) -> crate::common::error::Result<bool> {
+        async fn exists(&self, _uri: &TianyanUri) -> Result<bool> {
             Ok(false)
         }
-        async fn get_entry(
-            &self,
-            _uri: &TianyanUri,
-        ) -> crate::common::error::Result<crate::storage::ContextEntry> {
+        async fn get_entry(&self, _uri: &TianyanUri) -> Result<ContextEntry> {
             unimplemented!()
         }
-        async fn create_directory(
-            &self,
-            _uri: &TianyanUri,
-        ) -> crate::common::error::Result<crate::storage::ContextEntry> {
+        async fn create_directory(&self, _uri: &TianyanUri) -> Result<ContextEntry> {
             unimplemented!()
         }
-        async fn create_file(
-            &self,
-            _uri: &TianyanUri,
-        ) -> crate::common::error::Result<crate::storage::ContextEntry> {
+        async fn create_file(&self, _uri: &TianyanUri) -> Result<ContextEntry> {
             unimplemented!()
         }
-        async fn write_content(
-            &self,
-            _uri: &TianyanUri,
-            _content: &str,
-        ) -> crate::common::error::Result<()> {
+        async fn delete(&self, _uri: &TianyanUri) -> Result<()> {
             Ok(())
         }
-        async fn read_content(
-            &self,
-            _uri: &TianyanUri,
-            _level: crate::common::types::ContentLevel,
-        ) -> crate::common::error::Result<String> {
-            Ok("".to_string())
-        }
-        async fn append_content(
-            &self,
-            _uri: &TianyanUri,
-            _content: &str,
-        ) -> crate::common::error::Result<()> {
-            Ok(())
-        }
-        async fn delete(&self, _uri: &TianyanUri) -> crate::common::error::Result<()> {
-            Ok(())
-        }
-        async fn list(
-            &self,
-            _uri: &TianyanUri,
-        ) -> crate::common::error::Result<Vec<crate::storage::ContextEntry>> {
+        async fn list(&self, _uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
             Ok(vec![])
         }
         async fn move_entry(
             &self,
             _source: &TianyanUri,
             _destination: &TianyanUri,
-        ) -> crate::common::error::Result<()> {
+        ) -> Result<()> {
             Ok(())
         }
-        async fn copy_entry(
+    }
+
+    #[async_trait::async_trait]
+    impl ContentStore for MockVfs {
+        async fn write(
             &self,
-            _source: &TianyanUri,
-            _destination: &TianyanUri,
-        ) -> crate::common::error::Result<()> {
+            _uri: &TianyanUri,
+            _level: ContentLevel,
+            _content: &str,
+        ) -> Result<()> {
             Ok(())
         }
+        async fn read(&self, _uri: &TianyanUri, _level: ContentLevel) -> Result<String> {
+            Ok("".to_string())
+        }
+        async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn has_content(&self, _uri: &TianyanUri, _level: ContentLevel) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl VfsSearch for MockVfs {
         async fn search(
             &self,
             _query: &str,
             _limit: usize,
-        ) -> crate::common::error::Result<Vec<crate::common::types::SearchResult>> {
+            _namespace: Option<ContextNamespace>,
+        ) -> Result<Vec<SearchResult>> {
             Ok(vec![])
         }
-        async fn search_by_namespace(
+        async fn search_by_visual(
             &self,
-            _namespace: crate::common::types::ContextNamespace,
-            _query: &str,
-            _limit: usize,
-        ) -> crate::common::error::Result<Vec<crate::common::types::SearchResult>> {
+            _visual_vector: &[f32],
+            _top_k: usize,
+        ) -> Result<Vec<SearchResult>> {
             Ok(vec![])
-        }
-        async fn search_session(
-            &self,
-            _query: &str,
-            _limit: usize,
-        ) -> crate::common::error::Result<Vec<crate::common::types::SearchResult>> {
-            Ok(vec![])
-        }
-        async fn search_memory(
-            &self,
-            _query: &str,
-            _limit: usize,
-        ) -> crate::common::error::Result<Vec<crate::common::types::SearchResult>> {
-            Ok(vec![])
-        }
-        async fn search_knowledge(
-            &self,
-            _query: &str,
-            _limit: usize,
-        ) -> crate::common::error::Result<Vec<crate::common::types::SearchResult>> {
-            Ok(vec![])
-        }
-        async fn search_skill(
-            &self,
-            _query: &str,
-            _limit: usize,
-        ) -> crate::common::error::Result<Vec<crate::common::types::SearchResult>> {
-            Ok(vec![])
-        }
-        async fn read_file(
-            &self,
-            _uri: &TianyanUri,
-            _filename: &str,
-        ) -> crate::common::error::Result<String> {
-            Ok("".to_string())
-        }
-        async fn write_file(
-            &self,
-            _uri: &TianyanUri,
-            _filename: &str,
-            _content: &str,
-        ) -> crate::common::error::Result<()> {
-            Ok(())
-        }
-        async fn file_exists(
-            &self,
-            _uri: &TianyanUri,
-            _filename: &str,
-        ) -> crate::common::error::Result<bool> {
-            Ok(false)
-        }
-        async fn list_files(&self, _uri: &TianyanUri) -> crate::common::error::Result<Vec<String>> {
-            Ok(vec![])
-        }
-        async fn read_abstract(&self, _uri: &TianyanUri) -> crate::common::error::Result<String> {
-            Ok("".to_string())
-        }
-        async fn read_overview(&self, _uri: &TianyanUri) -> crate::common::error::Result<String> {
-            Ok("".to_string())
-        }
-        async fn write_abstract(
-            &self,
-            _uri: &TianyanUri,
-            _content: &str,
-        ) -> crate::common::error::Result<()> {
-            Ok(())
-        }
-        async fn write_overview(
-            &self,
-            _uri: &TianyanUri,
-            _content: &str,
-        ) -> crate::common::error::Result<()> {
-            Ok(())
         }
         async fn update_summary_vectors(
             &self,
             _uri: &TianyanUri,
             _abstract_content: &str,
             _overview_content: &str,
-        ) -> crate::common::error::Result<()> {
+        ) -> Result<()> {
             Ok(())
         }
-        async fn has_content(
-            &self,
-            _uri: &TianyanUri,
-            _level: crate::common::types::ContentLevel,
-        ) -> crate::common::error::Result<bool> {
-            Ok(false)
-        }
-        async fn get_content_metadata(
-            &self,
-            _uri: &TianyanUri,
-            _level: crate::common::types::ContentLevel,
-        ) -> crate::common::error::Result<Option<crate::storage::ContentMetadata>> {
-            Ok(None)
-        }
-        async fn get_all_content_metadata(
-            &self,
-            _uri: &TianyanUri,
-        ) -> crate::common::error::Result<
-            std::collections::HashMap<
-                crate::common::types::ContentLevel,
-                Option<crate::storage::ContentMetadata>,
-            >,
-        > {
-            Ok(std::collections::HashMap::new())
-        }
-        async fn regenerate_metadata(&self, _uri: &TianyanUri) -> crate::common::error::Result<()> {
-            Ok(())
-        }
-        async fn list_all_uris(&self) -> crate::common::error::Result<Vec<TianyanUri>> {
-            Ok(vec![])
-        }
+    }
+
+    #[async_trait::async_trait]
+    impl VfsMetadata for MockVfs {
         async fn update_metadata(
             &self,
             _uri: &TianyanUri,
             _importance: f32,
-            _custom: std::collections::HashMap<String, serde_json::Value>,
-        ) -> crate::common::error::Result<()> {
+            _custom: HashMap<String, serde_json::Value>,
+        ) -> Result<()> {
             Ok(())
         }
-        fn storage_backend(&self) -> &dyn crate::storage::StorageBackend {
-            unimplemented!()
-        }
-        fn vector_storage(&self) -> &dyn crate::storage::VectorStorage {
-            unimplemented!()
-        }
-        fn get_vector_storage(&self) -> Arc<dyn crate::storage::VectorStorage> {
-            unimplemented!()
+        async fn get_all_content_metadata(
+            &self,
+            _uri: &TianyanUri,
+        ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
+            Ok(HashMap::new())
         }
     }
+
+    impl VirtualFileSystem for MockVfs {}
 }
