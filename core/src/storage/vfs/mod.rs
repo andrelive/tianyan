@@ -1,12 +1,13 @@
 //! 虚拟文件系统实现。
 
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
+use crate::common::types::{ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri};
 use crate::model::EmbeddingService;
-use crate::storage::traits::{ContentLoader, StorageBackend, VectorStorage, VirtualFileSystem};
+use crate::storage::traits::{ContentLoader, ContentMetadata, ContentStore, StorageBackend, VectorStorage, VfsCore, VfsFacade, VfsMetadata, VfsSearch, VirtualFileSystem};
 use crate::storage::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
 
 use crate::config::StorageConfig;
@@ -415,7 +416,7 @@ impl VirtualFileSystem for VirtualFileSystemImpl {
         if entry.is_directory() {
             let children = self.storage.list_directory(uri).await?;
             for child in children {
-                Box::pin(self.delete(child.uri())).await?;
+                Box::pin(VirtualFileSystem::delete(self, child.uri())).await?;
             }
         }
 
@@ -934,6 +935,294 @@ impl ContentLoader for VirtualFileSystemImpl {
         Ok(entry.has_content(level))
     }
 }
+
+#[async_trait]
+impl VfsCore for VirtualFileSystemImpl {
+    async fn initialize(&self) -> Result<()> {
+        self.storage.initialize().await?;
+        self.vector_storage.initialize().await?;
+        tracing::info!("虚拟文件系统已初始化");
+        Ok(())
+    }
+
+    async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
+        self.storage.exists(uri).await
+    }
+
+    async fn delete(&self, uri: &TianyanUri) -> Result<()> {
+        Self::validate_uri(uri)?;
+        if !self.storage.exists(uri).await? {
+            return Err(TianyanError::EntryNotFound(uri.to_string()));
+        }
+        self.storage.delete_entry(uri).await?;
+        let point_id = uri.to_string().replace("://", "_").replace('/', "_");
+        let _ = self.vector_storage.delete_point(&point_id).await;
+        tracing::debug!("已删除条目： {}", uri);
+        Ok(())
+    }
+
+    async fn list(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
+        Self::validate_uri(uri)?;
+        self.storage.list_directory(uri).await
+    }
+
+    async fn move_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()> {
+        for level in &[ContentLevel::Abstract, ContentLevel::Overview, ContentLevel::Detail] {
+            if let Ok(content) = self.storage.read_content(source, *level).await {
+                self.storage.write_content(destination, *level, &content).await?;
+            }
+        }
+        let src_entry = self.storage.read_entry(source).await?;
+        let mut dst_entry = src_entry.clone();
+        dst_entry.metadata.uri = destination.clone();
+        dst_entry.metadata.touch();
+        self.storage.write_entry(&dst_entry).await?;
+        self.storage.delete_entry(source).await?;
+        let point_id = source.to_string().replace("://", "_").replace('/', "_");
+        let _ = self.vector_storage.delete_point(&point_id).await;
+        tracing::debug!("已移动条目： {} -> {}", source, destination);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ContentStore for VirtualFileSystemImpl {
+    async fn write(&self, uri: &TianyanUri, level: ContentLevel, content: &str) -> Result<()> {
+        Self::validate_uri(uri)?;
+
+        if !self.storage.exists(uri).await? {
+            if let Some(parent) = uri.parent() {
+                if !self.storage.exists(&parent).await? {
+                    self.storage
+                        .write_entry(&ContextEntry::new_directory(parent.clone()))
+                        .await?;
+                }
+            }
+            self.storage
+                .write_entry(&ContextEntry::new_file(uri.clone()))
+                .await?;
+        }
+
+        self.storage.write_content(uri, level, content).await?;
+
+        let mut entry = self.storage.read_entry(uri).await?;
+        entry.metadata.touch();
+        entry.set_content(level, content.to_string());
+        let token_count = estimate_token_count(content);
+        entry.token_counts.set(level, token_count);
+        self.storage.write_entry(&entry).await?;
+
+        tracing::trace!("已写入 {:?} 内容： {}", level, uri);
+        Ok(())
+    }
+
+    async fn read(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+        Self::validate_uri(uri)?;
+        self.storage.read_content(uri, level).await
+    }
+
+    async fn append(&self, uri: &TianyanUri, content: &str) -> Result<()> {
+        Self::validate_uri(uri)?;
+
+        if !self.storage.exists(uri).await? {
+            if let Some(parent) = uri.parent() {
+                if !self.storage.exists(&parent).await? {
+                    self.storage
+                        .write_entry(&ContextEntry::new_directory(parent.clone()))
+                        .await?;
+                }
+            }
+            self.storage
+                .write_entry(&ContextEntry::new_file(uri.clone()))
+                .await?;
+        }
+
+        let level = ContentLevel::Detail;
+        self.storage.append_content(uri, level, content).await?;
+
+        let mut entry = self.storage.read_entry(uri).await?;
+        entry.metadata.touch();
+        let existing = entry.get_content(level).unwrap_or("").to_string();
+        let combined = format!("{}{}", existing, content);
+        entry.set_content(level, combined);
+        let token_count = estimate_token_count(content);
+        entry.token_counts.set(level, token_count);
+        self.storage.write_entry(&entry).await?;
+
+        tracing::trace!("已追加内容： {}", uri);
+        Ok(())
+    }
+
+    async fn has_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<bool> {
+        let entry = self.storage.read_entry(uri).await?;
+        Ok(entry.has_content(level))
+    }
+}
+
+#[async_trait]
+impl VfsSearch for VirtualFileSystemImpl {
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        namespace: Option<ContextNamespace>,
+    ) -> Result<Vec<SearchResult>> {
+        let embedding_service = self
+            .embedding_service
+            .as_ref()
+            .ok_or_else(|| {
+                TianyanError::Retrieval("VFS 未配置嵌入服务，无法进行向量搜索".to_string())
+            })?;
+
+        let model = self.embedding_model.as_deref().unwrap_or("text-embedding-3-small");
+
+        let embedding = embedding_service.embed_single(model, query).await?;
+        let query_vector = embedding.vector;
+
+        let category_filter = namespace.map(|ns| ns.to_string());
+        let results = self
+            .vector_storage
+            .search_abstract_and_overview(query_vector, limit * 2, category_filter.as_deref())
+            .await?;
+
+        let results: Vec<SearchResult> = results
+            .into_iter()
+            .map(|vsr| SearchResult {
+                uri: vsr.payload.uri.clone(),
+                score: vsr.score,
+                matched_level: ContentLevel::Abstract,
+                content: None,
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    async fn search_by_visual(
+        &self,
+        visual_vector: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let query = VectorSearchQuery {
+            vector: visual_vector.to_vec(),
+            vector_type: VectorType::Visual,
+            limit: top_k,
+            category_filter: None,
+            min_score: None,
+        };
+        let results = self.vector_storage.search(query).await?;
+        let results: Vec<SearchResult> = results
+            .into_iter()
+            .map(|vsr| SearchResult {
+                uri: vsr.payload.uri.clone(),
+                score: vsr.score,
+                matched_level: ContentLevel::Abstract,
+                content: None,
+            })
+            .collect();
+        Ok(results)
+    }
+
+    async fn update_summary_vectors(
+        &self,
+        uri: &TianyanUri,
+        abstract_content: &str,
+        overview_content: &str,
+    ) -> Result<()> {
+        let embedding_service = self
+            .embedding_service
+            .as_ref()
+            .ok_or_else(|| {
+                TianyanError::Retrieval("VFS 未配置嵌入服务".to_string())
+            })?;
+
+        let model = self.embedding_model.as_deref().unwrap_or("text-embedding-3-small");
+
+        let abstract_embedding = embedding_service.embed_single(model, abstract_content).await?;
+        let overview_embedding = embedding_service.embed_single(model, overview_content).await?;
+
+        let point_id = uri.to_string().replace("://", "_").replace('/', "_");
+        let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string());
+        let point = VectorPoint {
+            schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
+            id: point_id,
+            abstract_vector: Some(abstract_embedding.vector),
+            overview_vector: Some(overview_embedding.vector),
+            visual_vector: None,
+            payload,
+        };
+        self.vector_storage.upsert_point(&point).await?;
+
+        tracing::debug!("已更新向量：{}", uri);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl VfsMetadata for VirtualFileSystemImpl {
+    async fn update_metadata(
+        &self,
+        uri: &TianyanUri,
+        importance: f32,
+        custom: HashMap<String, serde_json::Value>,
+    ) -> Result<()> {
+        let point_id = uri.to_string().replace("://", "_").replace('/', "_");
+
+        let point = match self.vector_storage.get_point(&point_id).await? {
+            Some(mut p) => {
+                p.payload.importance = importance;
+                for (k, v) in custom {
+                    p.payload.custom.insert(k, v);
+                }
+                p
+            }
+            None => {
+                let payload = EntryMetadata::new(
+                    uri.clone(),
+                    uri.namespace().to_string(),
+                )
+                .with_importance(importance);
+                VectorPoint {
+                    schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
+                    id: point_id,
+                    abstract_vector: None,
+                    overview_vector: None,
+                    visual_vector: None,
+                    payload,
+                }
+            }
+        };
+
+        self.vector_storage.upsert_point(&point).await
+    }
+
+    async fn get_all_content_metadata(
+        &self,
+        uri: &TianyanUri,
+    ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
+        let entry = self.storage.read_entry(uri).await?;
+        let mut result = HashMap::new();
+
+        for level in [ContentLevel::Abstract, ContentLevel::Overview, ContentLevel::Detail] {
+            if entry.has_content(level) {
+                if let Ok(content) = self.storage.read_content(uri, level).await {
+                    result.insert(
+                        level,
+                        ContentMetadata {
+                            size: content.len() as u64,
+                            created_at: entry.metadata.created_at,
+                            updated_at: entry.metadata.updated_at,
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+impl VfsFacade for VirtualFileSystemImpl {}
 
 /// 估算字符串的 token 数量。
 fn estimate_token_count(text: &str) -> usize {
