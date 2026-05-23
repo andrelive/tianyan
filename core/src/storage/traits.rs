@@ -451,40 +451,6 @@ pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch + VfsMetadata {
             .collect())
     }
 
-    /// 按命名空间搜索。
-    async fn search_by_namespace(
-        &self,
-        _namespace: ContextNamespace,
-        _query: &str,
-        _limit: usize,
-    ) -> Result<Vec<SearchResult>> {
-        Ok(vec![])
-    }
-
-    /// 搜索会话。
-    async fn search_session(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.search_by_namespace(ContextNamespace::Session, query, limit)
-            .await
-    }
-
-    /// 搜索记忆。
-    async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.search_by_namespace(ContextNamespace::Memory, query, limit)
-            .await
-    }
-
-    /// 搜索知识。
-    async fn search_knowledge(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.search_by_namespace(ContextNamespace::Knowledge, query, limit)
-            .await
-    }
-
-    /// 搜索技能。
-    async fn search_skill(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.search_by_namespace(ContextNamespace::Skill, query, limit)
-            .await
-    }
-
     /// 复制条目。
     async fn copy_entry(&self, _source: &TianyanUri, _destination: &TianyanUri) -> Result<()> {
         Err(crate::common::error::TianyanError::Internal(

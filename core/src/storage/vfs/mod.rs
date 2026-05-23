@@ -249,99 +249,6 @@ impl VirtualFileSystemImpl {
     }
 }
 
-impl VirtualFileSystemImpl {
-    /// 递归搜索匹配查询的条目。
-    async fn search_recursive(
-        &self,
-        uri: &TianyanUri,
-        query: &str,
-        results: &mut Vec<SearchResult>,
-        limit: usize,
-    ) -> Result<()> {
-        if results.len() >= limit {
-            return Ok(());
-        }
-
-        if !self.storage.exists(uri).await? {
-            return Ok(());
-        }
-
-        let entry = self.storage.read_entry(uri).await?;
-
-        if entry.is_directory() {
-            let query_lower = query.to_lowercase();
-            let mut score = 0.0f32;
-
-            if let Some(ref content) = entry.detail_content {
-                if content.to_lowercase().contains(&query_lower) {
-                    score += 0.5;
-                }
-            }
-
-            if let Some(ref content) = entry.overview_content {
-                if content.to_lowercase().contains(&query_lower) {
-                    score += 0.3;
-                }
-            }
-
-            if let Some(ref content) = entry.abstract_content {
-                if content.to_lowercase().contains(&query_lower) {
-                    score += 0.2;
-                }
-            }
-
-            if score > 0.0 {
-                results.push(SearchResult {
-                    uri: entry.metadata.uri.clone(),
-                    score,
-                    matched_level: ContentLevel::Detail,
-                    content: entry.detail_content.clone(),
-                });
-            }
-
-            let children = self.storage.list_directory(uri).await?;
-            for child in children {
-                Box::pin(self.search_recursive(child.uri(), query, results, limit)).await?;
-                if results.len() >= limit {
-                    return Ok(());
-                }
-            }
-        } else {
-            let query_lower = query.to_lowercase();
-            let mut score = 0.0f32;
-
-            if let Some(ref content) = entry.detail_content {
-                if content.to_lowercase().contains(&query_lower) {
-                    score += 0.5;
-                }
-            }
-
-            if let Some(ref content) = entry.overview_content {
-                if content.to_lowercase().contains(&query_lower) {
-                    score += 0.3;
-                }
-            }
-
-            if let Some(ref content) = entry.abstract_content {
-                if content.to_lowercase().contains(&query_lower) {
-                    score += 0.2;
-                }
-            }
-
-            if score > 0.0 {
-                results.push(SearchResult {
-                    uri: entry.metadata.uri.clone(),
-                    score,
-                    matched_level: ContentLevel::Detail,
-                    content: entry.detail_content.clone(),
-                });
-            }
-        }
-
-        Ok(())
-    }
-}
-
 #[async_trait]
 impl VfsCore for VirtualFileSystemImpl {
     async fn initialize(&self) -> Result<()> {
@@ -465,8 +372,6 @@ impl ContentStore for VirtualFileSystemImpl {
         let mut entry = self.storage.read_entry(uri).await?;
         entry.metadata.touch();
         entry.set_content(level, content.to_string());
-        let token_count = estimate_token_count(content);
-        entry.token_counts.set(level, token_count);
         self.storage.write_entry(&entry).await?;
 
         tracing::trace!("已写入 {:?} 内容： {}", level, uri);
@@ -502,8 +407,6 @@ impl ContentStore for VirtualFileSystemImpl {
         let existing = entry.get_content(level).unwrap_or("").to_string();
         let combined = format!("{}{}", existing, content);
         entry.set_content(level, combined);
-        let token_count = estimate_token_count(content);
-        entry.token_counts.set(level, token_count);
         self.storage.write_entry(&entry).await?;
 
         tracing::trace!("已追加内容： {}", uri);
@@ -687,20 +590,6 @@ impl VfsMetadata for VirtualFileSystemImpl {
 
 #[async_trait]
 impl VirtualFileSystem for VirtualFileSystemImpl {
-    async fn search_by_namespace(
-        &self,
-        namespace: ContextNamespace,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<SearchResult>> {
-        let root_uri = TianyanUri::new(namespace, vec![]);
-        let mut results = Vec::new();
-        self.search_recursive(&root_uri, query, &mut results, limit)
-            .await?;
-        results.truncate(limit);
-        Ok(results)
-    }
-
     async fn copy_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()> {
         Self::validate_uri(source)?;
         Self::validate_uri(destination)?;
@@ -723,7 +612,6 @@ impl VirtualFileSystem for VirtualFileSystemImpl {
         new_entry.abstract_content = entry.abstract_content;
         new_entry.overview_content = entry.overview_content;
         new_entry.detail_content = entry.detail_content;
-        new_entry.token_counts = entry.token_counts;
 
         self.storage.write_entry(&new_entry).await?;
 
@@ -744,11 +632,8 @@ impl VirtualFileSystem for VirtualFileSystemImpl {
     }
 }
 
-/// 估算字符串的 token 数量。
-fn estimate_token_count(text: &str) -> usize {
-    let char_count = text.chars().count();
-    char_count.div_ceil(3)
-}
-
 pub mod builder;
+#[cfg(test)]
+mod tests;
+
 pub use builder::{ensure_vfs_structure, initialize_vfs, VirtualFileSystemBuilder};
