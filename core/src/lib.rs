@@ -39,6 +39,7 @@ pub mod context;
 /// 执行器（独立执行函数 + Action / ExecutorError）。
 pub mod executor;
 pub mod knowledge;
+pub mod memory;
 pub mod model;
 pub mod observability;
 pub mod scheduler;
