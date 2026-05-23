@@ -28,26 +28,24 @@
 //! }
 //! ```
 
-mod extractor;
-mod local;
-mod qdrant;
+mod backend;
 mod summary;
-mod summary_service;
 mod traits;
 mod types;
 mod uri_mapper;
+mod vector;
 mod vfs;
+
+#[cfg(test)]
+mod test_utils;
 
 // 重新导出公共 API
 pub use crate::config::StorageConfig;
-pub use extractor::{ExtractionConfig, MemoryExtractionService, MemoryExtractionTrait};
-pub use local::LocalStorageBackend;
-pub use qdrant::{QdrantVectorStore, QdrantVectorStoreBuilder};
+pub use backend::LocalStorageBackend;
 pub use summary::{
-    MockSummaryEngine, SummaryEngine, SummaryGenerator, SummaryLevel, TokenCounter,
-    ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
+    MockSummaryEngine, SummaryEngine, SummaryLevel, SummaryService, SummaryServiceConfig,
+    TokenCounter, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
 };
-pub use summary_service::{SummaryService, SummaryServiceConfig};
 pub use traits::{
     ContentMetadata, ContentStore, StorageBackend, VectorStorage, VfsCore, VfsMetadata, VfsSearch,
     VirtualFileSystem,
@@ -58,6 +56,7 @@ pub use types::{
     CURRENT_SCHEMA_VERSION,
 };
 pub use uri_mapper::UriMapper;
+pub use vector::{QdrantVectorStore, QdrantVectorStoreBuilder};
 pub use vfs::{
     ensure_vfs_structure, initialize_vfs, VirtualFileSystemBuilder, VirtualFileSystemImpl,
 };
@@ -68,79 +67,17 @@ pub use vfs::{
 pub type SharedVfs = std::sync::Arc<dyn VirtualFileSystem>;
 
 #[cfg(test)]
-pub use tests::MockVectorStorage;
+pub use test_utils::MockVectorStorage;
 
 #[cfg(test)]
 mod tests {
+    use super::test_utils::{create_test_vfs, MockVectorStorage};
     use super::*;
     use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
     use crate::storage::types::{VectorPoint, VectorSearchQuery, VectorSearchResult};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::tempdir;
-
-    /// Mock 向量存储实现，用于单元测试。
-    pub struct MockVectorStorage;
-
-    impl MockVectorStorage {
-        /// 创建新的 Mock 向量存储。
-        pub fn new() -> Self {
-            Self
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl VectorStorage for MockVectorStorage {
-        async fn initialize(&self) -> crate::common::error::Result<()> {
-            Ok(())
-        }
-
-        async fn upsert_point(&self, _point: &VectorPoint) -> crate::common::error::Result<()> {
-            Ok(())
-        }
-
-        async fn delete_point(&self, _id: &str) -> crate::common::error::Result<()> {
-            Ok(())
-        }
-
-        async fn search(
-            &self,
-            _query: VectorSearchQuery,
-        ) -> crate::common::error::Result<Vec<VectorSearchResult>> {
-            Ok(vec![])
-        }
-
-        async fn get_point(&self, _id: &str) -> crate::common::error::Result<Option<VectorPoint>> {
-            Ok(None)
-        }
-
-        async fn update_vector(
-            &self,
-            _uri: &TianyanUri,
-            _vector_type: VectorType,
-            _vector: &[f32],
-        ) -> crate::common::error::Result<()> {
-            Ok(())
-        }
-
-        async fn count_points(&self) -> crate::common::error::Result<usize> {
-            Ok(0)
-        }
-
-        async fn clear(&self) -> crate::common::error::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// 创建测试 VFS 的辅助函数。
-    async fn create_test_vfs() -> VirtualFileSystemImpl {
-        let dir = tempdir().unwrap();
-        let mut config = StorageConfig::default();
-        config.data_dir = dir.path().into();
-        let storage = Arc::new(LocalStorageBackend::new(config.clone()));
-        let vector_storage: Arc<dyn VectorStorage> = Arc::new(MockVectorStorage::new());
-        VirtualFileSystemImpl::new(storage, vector_storage, config)
-    }
 
     #[tokio::test]
     async fn test_full_workflow() {
