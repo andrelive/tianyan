@@ -5,4 +5,4 @@
 
 mod extractor;
 
-pub use extractor::{ExtractionConfig, MemoryExtractor, DEFAULT_EXTRACTION_PROMPT};
+pub use extractor::{format_memory_as_markdown, ExtractionConfig, MemoryExtractor, DEFAULT_EXTRACTION_PROMPT};
