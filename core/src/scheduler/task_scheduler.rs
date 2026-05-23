@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::config::TianyanConfig;
-use crate::storage::{MemoryExtractionTrait, SummaryEngine, VirtualFileSystem};
+use crate::memory::MemoryExtractor;
+use crate::storage::{SummaryEngine, VirtualFileSystem};
 
 /// 任务优先级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -66,7 +67,7 @@ pub struct TaskContext {
     /// 摘要引擎。
     pub summary_engine: Arc<SummaryEngine>,
     /// 记忆提取器。
-    pub memory_extractor: Arc<dyn MemoryExtractionTrait + Send + Sync>,
+    pub memory_extractor: Arc<MemoryExtractor>,
     /// 配置。
     pub config: Arc<TianyanConfig>,
 }
@@ -76,7 +77,7 @@ impl TaskContext {
     pub fn new(
         vfs: Arc<dyn VirtualFileSystem>,
         summary_engine: Arc<SummaryEngine>,
-        memory_extractor: Arc<dyn MemoryExtractionTrait + Send + Sync>,
+        memory_extractor: Arc<MemoryExtractor>,
         config: Arc<TianyanConfig>,
     ) -> Self {
         Self {
