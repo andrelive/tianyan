@@ -18,9 +18,8 @@ use tianyan::session::{PersistentSessionManager, SessionManager};
 use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
 };
-use tianyan::storage::{
-    MemoryExtractionService, SummaryEngine, SummaryService, VirtualFileSystemImpl,
-};
+use tianyan::memory::{ExtractionConfig, MemoryExtractor};
+use tianyan::storage::{SummaryEngine, SummaryService, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
 use crate::agent_builder::{create_model_services, AgentBuilderFactory};
@@ -285,10 +284,10 @@ impl AppState {
     /// 创建记忆提取器
     ///
     /// # Returns
-    /// * `TianyanResult<Arc<dyn MemoryExtractionTrait>>` - 记忆提取器实例
+    /// * `TianyanResult<Arc<MemoryExtractor>>` - 记忆提取器实例
     pub fn create_memory_extractor(
         &self,
-    ) -> TianyanResult<Arc<dyn tianyan::storage::MemoryExtractionTrait + Send + Sync>> {
+    ) -> TianyanResult<Arc<MemoryExtractor>> {
         let config = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async { self.config.read().await.clone() })
         });
@@ -299,11 +298,7 @@ impl AppState {
         })
         .map_err(|e| TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
 
-        let extractor = MemoryExtractionService::new(
-            model_services.chat,
-            self.vfs.clone(),
-            tianyan::storage::ExtractionConfig::default(),
-        );
+        let extractor = MemoryExtractor::new(model_services.chat, ExtractionConfig::default());
         Ok(Arc::new(extractor))
     }
 

@@ -637,7 +637,6 @@ impl Clone for Agent {
             harness: self.harness.clone(),
             skills: self.skills.clone(),
             state: self.state.clone(),
-            memory_extractor: self.memory_extractor.clone(),
             background_tasks: self.background_tasks.clone(),
             verification_gate: self.verification_gate.clone(),
             llm_judge: self.llm_judge.clone(),
