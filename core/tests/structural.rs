@@ -95,3 +95,14 @@ fn test_storage_does_not_depend_on_agent() {
         violations.join("\n")
     );
 }
+
+/// memory 模块不得依赖 storage 模块 — 提取逻辑应独立于存储层。
+#[test]
+fn test_memory_does_not_depend_on_storage() {
+    let violations = grep_in_dir("use crate::storage", &format!("{}/memory", CORE_SRC));
+    assert!(
+        violations.is_empty(),
+        "memory 模块不得依赖 storage 模块:\n{}",
+        violations.join("\n")
+    );
+}
