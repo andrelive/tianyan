@@ -132,7 +132,7 @@ use crate::config::AgentConfig;
 use crate::context::{ContextPipeline, FailureKind};
 use crate::executor::{LlmJudge, VerificationGate};
 use crate::model::ChatService;
-use crate::storage::{MemoryExtractionTrait, VirtualFileSystem};
+use crate::storage::VirtualFileSystem;
 
 /// 智能体协调器 trait。
 #[async_trait]
@@ -172,7 +172,6 @@ pub struct Agent {
     harness: AgentHarness,
     skills: AgentSkills,
     state: Arc<RwLock<AgentState>>,
-    memory_extractor: Option<Arc<dyn MemoryExtractionTrait + Send + Sync>>,
     background_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     verification_gate: VerificationGate,
     llm_judge: Option<LlmJudge>,
@@ -189,7 +188,6 @@ impl Agent {
         context_pipeline: ContextPipeline,
         harness: AgentHarness,
         skills: AgentSkills,
-        memory_extractor: Option<Arc<dyn MemoryExtractionTrait + Send + Sync>>,
         verification_gate: VerificationGate,
         llm_judge: Option<LlmJudge>,
         agent_loop: AgentLoop,
@@ -202,7 +200,6 @@ impl Agent {
             harness,
             skills,
             state: Arc::new(RwLock::new(AgentState::default())),
-            memory_extractor,
             background_tasks: Arc::new(Mutex::new(Vec::new())),
             verification_gate,
             llm_judge,
@@ -305,12 +302,6 @@ impl Agent {
             let agent_clone = self.clone();
             let state_clone = state.clone();
             let handle = tokio::spawn(async move {
-                if let Err(e) = agent_clone
-                    .extract_memories_from_session(&state_clone)
-                    .await
-                {
-                    tracing::warn!(error = %e, "记忆提取后台任务失败");
-                }
                 agent_clone
                     .scan_and_promote_rules(&state_clone.session_id)
                     .await;
@@ -322,34 +313,6 @@ impl Agent {
         }
 
         Ok(response)
-    }
-
-    /// 在会话结束后提取和保存记忆。
-    async fn extract_memories_from_session(&self, state: &SessionState) -> Result<()> {
-        if let Some(ref extractor) = self.memory_extractor {
-            let turn_threshold = 3;
-            if state.conversation.len() >= turn_threshold * 2 {
-                let conversation: String = state
-                    .conversation
-                    .iter()
-                    .map(|m| format!("{}: {}", m.role, m.content))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                match extractor
-                    .extract_and_store(&conversation, &state.session_id)
-                    .await
-                {
-                    Ok(memories) => {
-                        tracing::info!(count = memories.len(), session_id = %state.session_id, "记忆提取完成");
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, session_id = %state.session_id, "记忆提取失败");
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 
     /// 从会话执行历史中自动学习新技能（GEPA 进化引擎）。
@@ -494,12 +457,6 @@ impl AgentCoordinator for Agent {
             let agent_clone = self.clone();
             let state_clone = state.clone();
             let handle = tokio::spawn(async move {
-                if let Err(e) = agent_clone
-                    .extract_memories_from_session(&state_clone)
-                    .await
-                {
-                    tracing::warn!(error = %e, "记忆提取后台任务失败");
-                }
                 agent_clone
                     .scan_and_promote_rules(&state_clone.session_id)
                     .await;
@@ -591,12 +548,6 @@ impl AgentCoordinator for Agent {
                     let agent_clone2 = self_clone.clone();
                     let state_clone2 = state_clone.clone();
                     let handle = tokio::spawn(async move {
-                        if let Err(e) = agent_clone2
-                            .extract_memories_from_session(&state_clone2)
-                            .await
-                        {
-                            tracing::warn!(error = %e, "记忆提取后台任务失败");
-                        }
                         agent_clone2
                             .scan_and_promote_rules(&state_clone2.session_id)
                             .await;

@@ -19,7 +19,7 @@ use crate::model::ChatService;
 use crate::observability::AgentMetrics;
 use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
 use crate::skills::{SkillExecutor, SkillRegistry};
-use crate::storage::{MemoryExtractionService, MemoryExtractionTrait, VirtualFileSystem};
+use crate::storage::VirtualFileSystem;
 
 use super::coordinator::Agent;
 
@@ -31,7 +31,6 @@ pub struct AgentBuilder {
     vfs: Option<Arc<dyn VirtualFileSystem>>,
     skill_executor: Option<Arc<SkillExecutor>>,
     skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
-    memory_extractor: Option<Arc<dyn MemoryExtractionTrait + Send + Sync>>,
 }
 
 impl AgentBuilder {
@@ -43,7 +42,6 @@ impl AgentBuilder {
             vfs: None,
             skill_executor: None,
             skill_registry: None,
-            memory_extractor: None,
         }
     }
 
@@ -74,14 +72,6 @@ impl AgentBuilder {
 
     pub fn with_skill_registry(mut self, registry: Arc<RwLock<SkillRegistry>>) -> Self {
         self.skill_registry = Some(registry);
-        self
-    }
-
-    pub fn with_memory_extractor(
-        mut self,
-        extractor: Arc<dyn MemoryExtractionTrait + Send + Sync>,
-    ) -> Self {
-        self.memory_extractor = Some(extractor);
         self
     }
 
@@ -171,17 +161,6 @@ impl AgentBuilder {
         // LLM-as-Judge 默认关闭，需要时通过 AgentConfig 显式创建
         let llm_judge = None;
 
-        // 处理记忆提取器：优先使用注入的实例，否则按配置自动创建
-        let memory_extractor = self.memory_extractor.or_else(|| {
-            if self.config.enable_memory {
-                let extractor =
-                    MemoryExtractionService::with_defaults(model_service.clone(), vfs.clone());
-                Some(Arc::new(extractor) as Arc<dyn MemoryExtractionTrait + Send + Sync>)
-            } else {
-                None
-            }
-        });
-
         Ok(Agent::new(
             self.config,
             model_service,
@@ -189,7 +168,6 @@ impl AgentBuilder {
             context_pipeline,
             harness,
             skills,
-            memory_extractor,
             verification_gate,
             llm_judge,
             agent_loop,
