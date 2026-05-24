@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-use std::path::Path;
 
 use crate::common::error::Result;
 use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
@@ -92,12 +91,6 @@ pub trait StorageBackend: Send + Sync {
 
     /// 获取存储统计信息。
     async fn get_stats(&self) -> Result<StorageStats>;
-
-    /// 获取存储根路径。
-    fn root_path(&self) -> &Path;
-
-    /// 将 URI 转换为文件系统路径。
-    fn uri_to_path(&self, uri: &TianyanUri) -> std::path::PathBuf;
 }
 
 /// 向量存储后端 trait。

@@ -421,14 +421,6 @@ impl StorageBackend for LocalStorageBackend {
 
         Ok(stats)
     }
-
-    fn root_path(&self) -> &Path {
-        &self.config.data_dir
-    }
-
-    fn uri_to_path(&self, uri: &TianyanUri) -> std::path::PathBuf {
-        self.mapper.uri_to_path(uri)
-    }
 }
 
 #[cfg(test)]
