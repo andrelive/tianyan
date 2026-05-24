@@ -43,8 +43,8 @@ mod test_utils;
 pub use crate::config::StorageConfig;
 pub use backend::LocalStorageBackend;
 pub use summary::{
-    MockSummaryEngine, SummaryEngine, SummaryLevel, SummaryService, SummaryServiceConfig,
-    TokenCounter, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
+    MockSummaryEngine, SummaryEngine, SummaryLevel, TokenCounter, ABSTRACT_TOKEN_LIMIT,
+    OVERVIEW_TOKEN_LIMIT,
 };
 pub use traits::{
     ContentMetadata, ContentStore, StorageBackend, VectorStorage, VfsCore, VfsMetadata, VfsSearch,
@@ -52,8 +52,7 @@ pub use traits::{
 };
 pub use types::{
     CategoryStats, ContextEntry, DirectoryIndex, DirectoryStats, IndexEntry, StorageStats,
-    TokenCounts, VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType,
-    CURRENT_SCHEMA_VERSION,
+    VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType, CURRENT_SCHEMA_VERSION,
 };
 pub use uri_mapper::UriMapper;
 pub use vector::{QdrantVectorStore, QdrantVectorStoreBuilder};

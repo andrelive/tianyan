@@ -27,8 +27,7 @@ pub struct ContextEntry {
     pub detail_content: Option<String>,
     /// 此条目的元数据（包含 URI 和 is_directory）
     pub metadata: EntryMetadata,
-    /// 各层级的 token 计数
-    pub token_counts: TokenCounts,
+
 }
 
 impl ContextEntry {
@@ -41,7 +40,6 @@ impl ContextEntry {
             overview_content: None,
             detail_content: None,
             metadata,
-            token_counts: TokenCounts::default(),
         }
     }
 
@@ -54,7 +52,6 @@ impl ContextEntry {
             overview_content: None,
             detail_content: None,
             metadata,
-            token_counts: TokenCounts::default(),
         }
     }
 
@@ -92,37 +89,6 @@ impl ContextEntry {
             ContentLevel::Abstract => self.abstract_content.is_some(),
             ContentLevel::Overview => self.overview_content.is_some(),
             ContentLevel::Detail => self.detail_content.is_some(),
-        }
-    }
-}
-
-/// 不同内容层级的 token 计数。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TokenCounts {
-    /// 抽象内容的 token 计数
-    pub abstract_tokens: Option<usize>,
-    /// 概览内容的 token 计数
-    pub overview_tokens: Option<usize>,
-    /// 详情内容的 token 计数
-    pub detail_tokens: Option<usize>,
-}
-
-impl TokenCounts {
-    /// 获取特定层级的 token 计数
-    pub fn get(&self, level: ContentLevel) -> Option<usize> {
-        match level {
-            ContentLevel::Abstract => self.abstract_tokens,
-            ContentLevel::Overview => self.overview_tokens,
-            ContentLevel::Detail => self.detail_tokens,
-        }
-    }
-
-    /// 设置特定层级的 token 计数
-    pub fn set(&mut self, level: ContentLevel, count: usize) {
-        match level {
-            ContentLevel::Abstract => self.abstract_tokens = Some(count),
-            ContentLevel::Overview => self.overview_tokens = Some(count),
-            ContentLevel::Detail => self.detail_tokens = Some(count),
         }
     }
 }
@@ -312,10 +278,4 @@ mod tests {
         assert_eq!(entry.metadata.content_type, "directory");
     }
 
-    #[test]
-    fn test_token_counts() {
-        let mut counts = TokenCounts::default();
-        counts.set(ContentLevel::Abstract, 100);
-        assert_eq!(counts.get(ContentLevel::Abstract), Some(100));
-    }
 }
