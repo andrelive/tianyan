@@ -15,7 +15,6 @@ mod storage;
 pub mod validation;
 pub mod wizard;
 
-pub use crate::storage::SummaryServiceConfig;
 pub use agent::AgentConfig;
 pub use logging::LoggingConfig;
 pub use memory::MemoryConfig;
@@ -56,9 +55,6 @@ pub struct TianyanConfig {
     /// 检索配置。
     #[serde(default)]
     pub retrieval: RetrievalConfig,
-    /// 摘要服务配置。
-    #[serde(default)]
-    pub summary_service: SummaryServiceConfig,
 }
 
 impl TianyanConfig {
@@ -179,7 +175,6 @@ impl TianyanConfig {
         self.security.validate()?;
         self.memory.validate()?;
         self.retrieval.validate()?;
-        // summary_service 配置由 SummaryServiceConfig::validate() 单独验证
         Ok(())
     }
 
