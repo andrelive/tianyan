@@ -11,10 +11,11 @@ use crate::common::types::{
 use crate::model::EmbeddingService;
 use crate::vfs::backend::LocalFileBackend;
 use crate::vfs::traits::{
-    ContentMetadata, ContentStore, VectorStorage, VfsCore, VfsMetadata, VfsSearch,
+    ContentMetadata, ContentStore, VfsCore, VfsMetadata, VfsSearch,
     VirtualFileSystem,
 };
 use crate::vfs::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
+use crate::vfs::vector::VectorStorage;
 
 use crate::config::StorageConfig;
 

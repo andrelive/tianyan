@@ -46,7 +46,7 @@ pub use summary::{
     MockSummaryEngine, SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
 };
 pub use traits::{
-    ContentMetadata, ContentStore, VectorStorage, VfsCore, VfsMetadata, VfsSearch,
+    ContentMetadata, ContentStore, VfsCore, VfsMetadata, VfsSearch,
     VirtualFileSystem,
 };
 pub use types::{
@@ -54,7 +54,7 @@ pub use types::{
     VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType, CURRENT_SCHEMA_VERSION,
 };
 pub use uri_mapper::UriMapper;
-pub use vector::{QdrantVectorStore, QdrantVectorStoreBuilder};
+pub use vector::{VectorStorage, QdrantVectorStore, QdrantVectorStoreBuilder};
 pub use vfs_impl::{
     ensure_vfs_structure, initialize_vfs, VirtualFileSystemBuilder, VirtualFileSystemImpl,
 };

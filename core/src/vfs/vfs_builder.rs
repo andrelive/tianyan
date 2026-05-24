@@ -7,7 +7,8 @@ use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::config::StorageConfig;
 use crate::model::EmbeddingService;
 use crate::vfs::backend::LocalFileBackend;
-use crate::vfs::traits::{VectorStorage, VfsCore, VirtualFileSystem};
+use crate::vfs::traits::{VfsCore, VirtualFileSystem};
+use crate::vfs::vector::VectorStorage;
 
 use super::VirtualFileSystemImpl;
 
