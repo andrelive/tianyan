@@ -102,8 +102,8 @@ fn get_static_dir() -> std::path::PathBuf {
 /// 创建并初始化单一的 VFS 实例，供整个应用使用
 fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
-) -> anyhow::Result<Arc<tianyan::storage::VirtualFileSystemImpl>> {
-    use tianyan::storage::{
+) -> anyhow::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
+    use tianyan::vfs::{
         LocalStorageBackend, QdrantVectorStore, VectorStorage, VirtualFileSystemBuilder,
     };
 
@@ -132,14 +132,14 @@ fn initialize_vfs_for_app(
         .build()
         .map_err(|e| anyhow::anyhow!("VFS 构建失败：{}", e))?;
 
-    use tianyan::storage::VfsCore;
+    use tianyan::vfs::VfsCore;
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async { vfs.initialize().await })
     })?;
 
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current()
-            .block_on(async { tianyan::storage::ensure_vfs_structure(&vfs).await })
+            .block_on(async { tianyan::vfs::ensure_vfs_structure(&vfs).await })
     })?;
 
     Ok(Arc::new(vfs))

@@ -19,7 +19,7 @@ use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
 };
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
-use tianyan::storage::{SummaryEngine, VirtualFileSystemImpl};
+use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
 use crate::agent_builder::{create_model_services, AgentBuilderFactory};

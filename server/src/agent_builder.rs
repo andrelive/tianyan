@@ -20,7 +20,7 @@ use tianyan::context::DualLayerRetriever;
 use tianyan::model::types::ModelProvider;
 use tianyan::model::{ModelConfig, ModelServices};
 use tianyan::skills::{SkillExecutor, SkillRegistry};
-use tianyan::storage::VirtualFileSystemImpl;
+use tianyan::vfs::VirtualFileSystemImpl;
 use tianyan::{Result as TianyanResult, TianyanError};
 
 /// 根据配置创建模型服务。
