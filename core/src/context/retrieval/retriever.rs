@@ -12,7 +12,7 @@ use crate::common::types::{ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
 use crate::context::types::RetrievalResult;
 use crate::model::EmbeddingService;
-use crate::storage::VirtualFileSystem;
+use crate::vfs::VirtualFileSystem;
 
 use super::intent::{Intent, IntentAnalyzer};
 use super::loader::{ContentLoadStrategy, TokenBudget};
@@ -498,7 +498,7 @@ mod tests {
     use super::*;
     use crate::common::types::{ContextNamespace, SearchResult};
     use crate::model::{EmbeddingData, EmbeddingRequest, EmbeddingResponse};
-    use crate::storage::{
+    use crate::vfs::{
         ContentMetadata, ContentStore, ContextEntry, VectorPoint, VectorSearchQuery,
         VectorSearchResult, VectorStorage, VectorType, VfsCore, VfsMetadata, VfsSearch,
     };
@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::storage::VectorStorage for InMemoryVectorStorage {
+    impl crate::vfs::VectorStorage for InMemoryVectorStorage {
         async fn initialize(&self) -> Result<()> {
             Ok(())
         }
@@ -635,7 +635,7 @@ mod tests {
                 let payload = crate::common::types::EntryMetadata::new(uri.clone(), "unknown");
 
                 let point = VectorPoint {
-                    schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
+                    schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
                     id: id.clone(),
                     abstract_vector: if vector_type == VectorType::Abstract {
                         Some(vector.to_vec())
@@ -869,7 +869,7 @@ mod tests {
                 .with_importance(0.5 + (i as f32 * 0.1))
                 .with_tags(vec![format!("tag_{}", i)]);
             let point = VectorPoint {
-                schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
+                schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
                 id: format!("doc_{}", i),
                 abstract_vector: Some(vec![0.1 + (i as f32 * 0.01); 768]),
                 overview_vector: Some(vec![0.2 + (i as f32 * 0.01); 768]),
@@ -1081,7 +1081,7 @@ mod tests {
             .with_importance(0.8)
             .with_tags(vec!["image".to_string()]);
         let point = VectorPoint {
-            schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
+            schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
             id: "img_1".to_string(),
             abstract_vector: Some(vec![0.1; 768]),
             overview_vector: Some(vec![0.2; 768]),

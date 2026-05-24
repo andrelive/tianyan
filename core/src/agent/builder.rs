@@ -19,7 +19,7 @@ use crate::model::ChatService;
 use crate::observability::AgentMetrics;
 use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
 use crate::skills::{SkillExecutor, SkillRegistry};
-use crate::storage::VirtualFileSystem;
+use crate::vfs::VirtualFileSystem;
 
 use super::coordinator::Agent;
 

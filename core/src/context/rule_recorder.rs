@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::common::error::Result;
 use crate::common::types::{AgentPath, ContentLevel};
-use crate::storage::VirtualFileSystem;
+use crate::vfs::VirtualFileSystem;
 
 /// 失败类型分类。
 ///

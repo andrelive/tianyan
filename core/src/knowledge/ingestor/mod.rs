@@ -12,7 +12,7 @@ use ring::digest::{Context, SHA256};
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContextNamespace, TianyanUri};
 use crate::model::{ChatService, EmbeddingService, VisionEncoder, VlmService};
-use crate::storage::{
+use crate::vfs::{
     ContextEntry, StorageBackend, SummaryEngine, VectorPoint, VectorStorage,
     CURRENT_SCHEMA_VERSION,
 };

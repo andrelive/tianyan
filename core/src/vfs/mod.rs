@@ -34,7 +34,7 @@ mod traits;
 mod types;
 mod uri_mapper;
 mod vector;
-mod vfs;
+mod vfs_impl;
 
 #[cfg(test)]
 mod test_utils;
@@ -55,7 +55,7 @@ pub use types::{
 };
 pub use uri_mapper::UriMapper;
 pub use vector::{QdrantVectorStore, QdrantVectorStoreBuilder};
-pub use vfs::{
+pub use vfs_impl::{
     ensure_vfs_structure, initialize_vfs, VirtualFileSystemBuilder, VirtualFileSystemImpl,
 };
 
@@ -72,7 +72,7 @@ mod tests {
     use super::test_utils::{create_test_vfs, MockVectorStorage};
     use super::*;
     use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-    use crate::storage::types::{VectorPoint, VectorSearchQuery, VectorSearchResult};
+    use crate::vfs::types::{VectorPoint, VectorSearchQuery, VectorSearchResult};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::tempdir;

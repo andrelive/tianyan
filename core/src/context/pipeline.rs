@@ -10,7 +10,7 @@ use crate::common::types::{AgentPath, ContentLevel, ContextNamespace, Message};
 use crate::context::compression::{estimate_tokens, ContextCompressor};
 use crate::context::retrieval::ContextRetriever;
 use crate::context::types::{ContextTokenUsage, ContextWindow, RetrievalResult};
-use crate::storage::VirtualFileSystem;
+use crate::vfs::VirtualFileSystem;
 
 /// 上下文工程管线。
 #[derive(Clone)]

@@ -1,7 +1,7 @@
 use super::VirtualFileSystemImpl;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-use crate::storage::test_utils::create_test_vfs;
-use crate::storage::{ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
+use crate::vfs::test_utils::create_test_vfs;
+use crate::vfs::{ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
 
 #[tokio::test]
 async fn test_vfs_initialize() {

@@ -4,8 +4,8 @@ use async_trait::async_trait;
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{EntryMetadata, TianyanUri};
-use crate::storage::traits::VectorStorage;
-use crate::storage::types::{
+use crate::vfs::traits::VectorStorage;
+use crate::vfs::types::{
     VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType, CURRENT_SCHEMA_VERSION,
 };
 

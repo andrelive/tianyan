@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, TianyanUri};
 use crate::model::{ChatService, EmbeddingService};
-use crate::storage::traits::StorageBackend;
-use crate::storage::types::ContextEntry;
+use crate::vfs::traits::StorageBackend;
+use crate::vfs::types::ContextEntry;
 
 /// 不同内容级别的 token 限制。
 pub const ABSTRACT_TOKEN_LIMIT: usize = 100;

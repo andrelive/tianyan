@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
-use crate::storage::ContentStore;
+use crate::vfs::ContentStore;
 
 /// 内容加载 Token 预算。
 #[derive(Debug, Clone)]

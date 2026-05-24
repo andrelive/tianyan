@@ -1,6 +1,6 @@
 use crate::common::error::{Result, TianyanError};
 use crate::model::{ChatService, EmbeddingService, VisionEncoder, VlmService};
-use crate::storage::{StorageBackend, VectorStorage};
+use crate::vfs::{StorageBackend, VectorStorage};
 
 use super::{IngestorConfig, KnowledgeIngestor};
 

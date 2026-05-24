@@ -45,7 +45,7 @@ pub mod observability;
 pub mod scheduler;
 pub mod session;
 pub mod skills;
-pub mod storage;
+pub mod vfs;
 pub mod tasks;
 
 // 重新导出常用类型

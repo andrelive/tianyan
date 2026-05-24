@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{Message, TianyanUri};
-use crate::storage::VirtualFileSystem;
+use crate::vfs::VirtualFileSystem;
 
 /// 每个会话加载的最大消息数量（保护内存和性能）
 const MAX_SESSION_MESSAGES: usize = 100;

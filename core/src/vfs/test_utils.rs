@@ -11,10 +11,10 @@ use tempfile::tempdir;
 
 use crate::common::types::TianyanUri;
 use crate::config::StorageConfig;
-use crate::storage::backend::LocalStorageBackend;
-use crate::storage::traits::VectorStorage;
-use crate::storage::types::{VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType};
-use crate::storage::vfs::VirtualFileSystemImpl;
+use crate::vfs::backend::LocalStorageBackend;
+use crate::vfs::traits::VectorStorage;
+use crate::vfs::types::{VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType};
+use crate::vfs::vfs::VirtualFileSystemImpl;
 
 /// Mock 向量存储实现，用于单元测试。
 pub struct MockVectorStorage;

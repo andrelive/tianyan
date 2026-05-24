@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::config::TianyanConfig;
 use crate::memory::MemoryExtractor;
-use crate::storage::{SummaryEngine, VirtualFileSystem};
+use crate::vfs::{SummaryEngine, VirtualFileSystem};
 
 /// 任务优先级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]

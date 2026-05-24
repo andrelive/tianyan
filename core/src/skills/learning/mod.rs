@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::common::error::Result;
 use crate::common::types::{ContextNamespace, TianyanUri};
 use crate::model::ChatService;
-use crate::storage::VirtualFileSystem;
+use crate::vfs::VirtualFileSystem;
 
 use generator::{build_skill_generation_prompt, parse_generated_skill};
 pub use types::{
@@ -348,7 +348,7 @@ mod tests {
 
     use crate::common::error::Result;
     use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
-    use crate::storage::{
+    use crate::vfs::{
         ContentMetadata, ContentStore, ContextEntry, VfsCore, VfsMetadata, VfsSearch,
         VirtualFileSystem,
     };

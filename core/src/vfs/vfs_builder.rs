@@ -6,7 +6,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::config::StorageConfig;
 use crate::model::EmbeddingService;
-use crate::storage::traits::{StorageBackend, VectorStorage, VfsCore, VirtualFileSystem};
+use crate::vfs::traits::{StorageBackend, VectorStorage, VfsCore, VirtualFileSystem};
 
 use super::VirtualFileSystemImpl;
 
@@ -116,7 +116,7 @@ pub async fn ensure_vfs_structure(vfs: &dyn VirtualFileSystem) -> Result<()> {
         .await
         .unwrap_or(false)
     {
-        let default_prompt = include_str!("../../agent/default_soul.md");
+        let default_prompt = include_str!("../agent/default_soul.md");
         vfs.create_file(&soul_uri).await?;
         vfs.write(&soul_uri, ContentLevel::Detail, default_prompt)
             .await?;

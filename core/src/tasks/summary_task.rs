@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
-use crate::storage::{ContextEntry, ABSTRACT_TOKEN_LIMIT};
+use crate::vfs::{ContextEntry, ABSTRACT_TOKEN_LIMIT};
 
 /// 摘要生成任务。
 ///

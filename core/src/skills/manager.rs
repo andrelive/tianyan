@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::common::error::Result;
 use crate::common::types::{ContextNamespace, TianyanUri};
-use crate::storage::VirtualFileSystem;
+use crate::vfs::VirtualFileSystem;
 
 /// 技能摘要信息。
 #[derive(Debug, Clone)]

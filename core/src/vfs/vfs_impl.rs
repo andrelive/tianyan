@@ -9,11 +9,11 @@ use crate::common::types::{
     ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
 };
 use crate::model::EmbeddingService;
-use crate::storage::traits::{
+use crate::vfs::traits::{
     ContentMetadata, ContentStore, StorageBackend, VectorStorage, VfsCore, VfsMetadata, VfsSearch,
     VirtualFileSystem,
 };
-use crate::storage::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
+use crate::vfs::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
 
 use crate::config::StorageConfig;
 
@@ -509,7 +509,7 @@ impl VfsSearch for VirtualFileSystemImpl {
         let point_id = uri.to_string().replace("://", "_").replace('/', "_");
         let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string());
         let point = VectorPoint {
-            schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
+            schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
             id: point_id,
             abstract_vector: Some(abstract_embedding.vector),
             overview_vector: Some(overview_embedding.vector),
@@ -545,7 +545,7 @@ impl VfsMetadata for VirtualFileSystemImpl {
                 let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string())
                     .with_importance(importance);
                 VectorPoint {
-                    schema_version: crate::storage::CURRENT_SCHEMA_VERSION,
+                    schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
                     id: point_id,
                     abstract_vector: None,
                     overview_vector: None,
@@ -632,8 +632,10 @@ impl VirtualFileSystem for VirtualFileSystemImpl {
     }
 }
 
+#[path = "vfs_builder.rs"]
 pub mod builder;
 #[cfg(test)]
+#[path = "vfs_tests.rs"]
 mod tests;
 
 pub use builder::{ensure_vfs_structure, initialize_vfs, VirtualFileSystemBuilder};

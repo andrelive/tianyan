@@ -132,7 +132,7 @@ use crate::config::AgentConfig;
 use crate::context::{ContextPipeline, FailureKind};
 use crate::executor::{LlmJudge, VerificationGate};
 use crate::model::ChatService;
-use crate::storage::VirtualFileSystem;
+use crate::vfs::VirtualFileSystem;
 
 /// 智能体协调器 trait。
 #[async_trait]

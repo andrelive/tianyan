@@ -9,13 +9,13 @@ use tokio::sync::Mutex;
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-use crate::storage::traits::StorageBackend;
-use crate::storage::types::{
+use crate::vfs::traits::StorageBackend;
+use crate::vfs::types::{
     CategoryStats, ContextEntry, DirectoryIndex, DirectoryStats, IndexEntry, StorageStats,
 };
 
 use crate::config::StorageConfig;
-use crate::storage::uri_mapper::UriMapper;
+use crate::vfs::uri_mapper::UriMapper;
 
 /// 本地文件系统存储后端。
 pub struct LocalStorageBackend {
@@ -189,7 +189,7 @@ impl LocalStorageBackend {
 
         let total_entries = entries.len();
         Ok(DirectoryIndex {
-            schema_version: crate::storage::types::CURRENT_SCHEMA_VERSION,
+            schema_version: crate::vfs::types::CURRENT_SCHEMA_VERSION,
             updated_at: chrono::Utc::now(),
             entries,
             stats: DirectoryStats {
@@ -272,7 +272,7 @@ impl StorageBackend for LocalStorageBackend {
         metadata.is_directory = is_directory;
 
         Ok(ContextEntry {
-            schema_version: crate::storage::types::CURRENT_SCHEMA_VERSION,
+            schema_version: crate::vfs::types::CURRENT_SCHEMA_VERSION,
             abstract_content,
             overview_content,
             detail_content,
