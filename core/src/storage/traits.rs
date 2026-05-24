@@ -164,33 +164,7 @@ pub trait VectorStorage: Send + Sync {
         category_filter: Option<&str>,
         min_score: Option<f32>,
     ) -> Result<Vec<VectorSearchResult>> {
-        // 默认实现：对每个向量类型分别搜索，然后手动融合
-        let mut all_results: Vec<(String, VectorSearchResult)> = Vec::new();
-
-        for vector_name in vector_names {
-            let vector_type = match *vector_name {
-                "abstract" => VectorType::Abstract,
-                "overview" => VectorType::Overview,
-                "visual" => VectorType::Visual,
-                _ => continue,
-            };
-
-            let query = VectorSearchQuery {
-                vector: query_vector.clone(),
-                vector_type,
-                limit: top_k * 2,
-                category_filter: category_filter.map(|s| s.to_string()),
-                min_score,
-            };
-
-            let results = self.search(query).await?;
-            for result in results {
-                all_results.push((vector_name.to_string(), result));
-            }
-        }
-
-        // 使用 RRF 算法融合结果
-        Ok(fuse_results_rrf(all_results, top_k))
+        Ok(vec![])
     }
 
     /// 使用摘要和概览向量进行融合搜索。
@@ -212,75 +186,6 @@ pub trait VectorStorage: Send + Sync {
         )
         .await
     }
-}
-
-/// 使用 RRF (Reciprocal Rank Fusion) 算法融合搜索结果。
-///
-/// RRF 公式: score(d) = sum(1 / (k + rank(d))) for each query
-/// 其中 k 是一个常数（通常为 60）。
-pub(crate) fn fuse_results_rrf(
-    results: Vec<(String, VectorSearchResult)>,
-    top_k: usize,
-) -> Vec<VectorSearchResult> {
-    use std::collections::HashMap;
-
-    /// RRF 常数。
-    const RRF_K: f32 = 60.0;
-
-    // 按向量名称分组并排序
-    let mut by_vector: HashMap<String, Vec<VectorSearchResult>> = HashMap::new();
-    for (vector_name, result) in results {
-        by_vector.entry(vector_name).or_default().push(result);
-    }
-
-    // 对每个向量类型的结果按分数排序
-    for results in by_vector.values_mut() {
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-    }
-
-    // 计算每个 URI 的 RRF 分数
-    let mut uri_scores: HashMap<String, (f32, VectorSearchResult)> = HashMap::new();
-
-    for results in by_vector.values() {
-        for (rank, result) in results.iter().enumerate() {
-            let rrf_score = 1.0 / (RRF_K + (rank + 1) as f32);
-            let uri = result.uri().to_string();
-
-            uri_scores
-                .entry(uri.clone())
-                .and_modify(|(score, existing)| {
-                    *score += rrf_score;
-                    // 保留分数更高的原始结果
-                    if result.score > existing.score {
-                        *existing = result.clone();
-                    }
-                })
-                .or_insert_with(|| (rrf_score, result.clone()));
-        }
-    }
-
-    // 按 RRF 分数排序并返回 top_k
-    let mut fused: Vec<VectorSearchResult> = uri_scores
-        .into_values()
-        .map(|(rrf_score, mut result)| {
-            // 用 RRF 分数替换原始分数
-            result.score = rrf_score;
-            result
-        })
-        .collect();
-
-    fused.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    fused.truncate(top_k);
-
-    fused
 }
 
 /// 虚拟文件系统核心操作 —— 条目生命周期管理。
@@ -464,78 +369,6 @@ pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch + VfsMetadata {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn make_result(uri_str: &str, score: f32) -> VectorSearchResult {
-        let uri = crate::common::types::TianyanUri::parse(uri_str).unwrap();
-        VectorSearchResult {
-            id: uri_str.to_string(),
-            score,
-            payload: crate::common::types::EntryMetadata::new(uri, "test"),
-        }
-    }
-
-    #[test]
-    fn test_fuse_empty() {
-        let results: Vec<(String, VectorSearchResult)> = vec![];
-        let fused = fuse_results_rrf(results, 5);
-        assert!(fused.is_empty());
-    }
-
-    #[test]
-    fn test_fuse_single_vector_single_result() {
-        let r = make_result("tianyan://user/test", 0.9);
-        let results = vec![("abstract".to_string(), r.clone())];
-        let fused = fuse_results_rrf(results, 5);
-        assert_eq!(fused.len(), 1);
-        assert_eq!(fused[0].uri().to_string(), "tianyan://user/test");
-    }
-
-    #[test]
-    fn test_fuse_same_uri_across_vectors() {
-        let r1 = make_result("tianyan://user/a", 0.9);
-        let r2 = make_result("tianyan://user/a", 0.8);
-        let results = vec![
-            ("abstract".to_string(), r1),
-            ("overview".to_string(), r2),
-        ];
-        let fused = fuse_results_rrf(results, 5);
-        assert_eq!(fused.len(), 1);
-        assert_eq!(fused[0].uri().to_string(), "tianyan://user/a");
-    }
-
-    #[test]
-    fn test_fuse_top_k_truncation() {
-        let mut results = Vec::new();
-        for i in 0..10 {
-            let uri = format!("tianyan://user/item_{}", i);
-            results.push(("abstract".to_string(), make_result(&uri, 0.9 - i as f32 * 0.01)));
-        }
-        let fused = fuse_results_rrf(results, 3);
-        assert_eq!(fused.len(), 3);
-    }
-
-    #[test]
-    fn test_fuse_cross_vector_ranking() {
-        let r1_abstract = make_result("tianyan://user/a", 0.95);
-        let r1_overview = make_result("tianyan://user/a", 0.85);
-        let r2_abstract = make_result("tianyan://user/b", 0.50);
-        let r2_overview = make_result("tianyan://user/b", 0.60);
-
-        let results = vec![
-            ("abstract".to_string(), r1_abstract),
-            ("overview".to_string(), r1_overview),
-            ("abstract".to_string(), r2_abstract),
-            ("overview".to_string(), r2_overview),
-        ];
-        let fused = fuse_results_rrf(results, 5);
-        // URI "a" appears in both vectors, should rank higher than "b" which also appears in both
-        let uris: Vec<String> = fused.iter().map(|r| r.uri().to_string()).collect();
-        assert_eq!(uris.len(), 2);
-        assert_eq!(uris[0], "tianyan://user/a");
-        assert_eq!(uris[1], "tianyan://user/b");
-    }
-
     #[test]
     fn test_traits_defined() {
         assert!(true);
