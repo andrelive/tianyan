@@ -36,16 +36,7 @@ impl SummaryTask {
         ctx: &TaskContext,
     ) -> crate::common::error::Result<Vec<TianyanUri>> {
         let mut missing = Vec::new();
-        let categories = vec![
-            ContextNamespace::User,
-            ContextNamespace::Session,
-            ContextNamespace::Memory,
-            ContextNamespace::Knowledge,
-            ContextNamespace::Agent,
-            ContextNamespace::Skill,
-        ];
-
-        for category in categories {
+        for &category in ContextNamespace::ALL {
             let root_uri = TianyanUri::new(category, vec![]);
             self.scan_directory_recursive(ctx, &root_uri, &mut missing)
                 .await?;

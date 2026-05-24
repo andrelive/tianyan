@@ -19,6 +19,16 @@ pub enum ContextNamespace {
 }
 
 impl ContextNamespace {
+    /// 所有命名空间的列表。
+    pub const ALL: &[ContextNamespace] = &[
+        ContextNamespace::User,
+        ContextNamespace::Session,
+        ContextNamespace::Memory,
+        ContextNamespace::Knowledge,
+        ContextNamespace::Agent,
+        ContextNamespace::Skill,
+    ];
+
     /// 获取此命名空间的目录名。
     pub fn dir_name(&self) -> &'static str {
         match self {

@@ -102,16 +102,7 @@ pub async fn initialize_vfs(
 
 /// 确保 VFS 目录结构和默认文件存在。
 pub async fn ensure_vfs_structure(vfs: &dyn VirtualFileSystem) -> Result<()> {
-    let namespaces = [
-        ContextNamespace::User,
-        ContextNamespace::Session,
-        ContextNamespace::Memory,
-        ContextNamespace::Knowledge,
-        ContextNamespace::Agent,
-        ContextNamespace::Skill,
-    ];
-
-    for ns in namespaces {
+    for &ns in ContextNamespace::ALL {
         let uri = TianyanUri::new(ns, vec![]);
         if !vfs.exists(&uri).await? {
             vfs.create_directory(&uri).await?;
