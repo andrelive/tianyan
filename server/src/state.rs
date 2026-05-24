@@ -19,7 +19,7 @@ use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
 };
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
-use tianyan::storage::{SummaryEngine, SummaryService, VirtualFileSystemImpl};
+use tianyan::storage::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
 use crate::agent_builder::{create_model_services, AgentBuilderFactory};
@@ -51,47 +51,10 @@ pub struct AppState {
     pending_tasks: Arc<Semaphore>,
     /// 虚拟文件系统（所有组件共享）
     vfs: Arc<VirtualFileSystemImpl>,
-    /// 摘要服务（可选）
-    summary_service: Option<Arc<SummaryService>>,
     /// 技能注册表
     skill_registry: Arc<RwLock<SkillRegistry>>,
     /// 技能执行器
     skill_executor: Arc<SkillExecutor>,
-}
-
-/// 创建摘要服务
-///
-/// # Arguments
-/// * `config` - 应用配置
-/// * `vfs` - 虚拟文件系统实例
-///
-/// # Returns
-/// * `TianyanResult<Option<Arc<SummaryService>>>` - 成功返回摘要服务，失败返回错误
-fn create_summary_service(
-    config: &TianyanConfig,
-    vfs: Arc<VirtualFileSystemImpl>,
-) -> TianyanResult<Option<Arc<SummaryService>>> {
-    let model_services = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async { create_model_services(config).await })
-    })
-    .map_err(|e| TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
-
-    // 创建 SummaryEngine
-    let summary_engine = SummaryEngine::new(
-        model_services.chat,
-        model_services.embedding,
-        &config.models.default_chat_model,
-        &config.models.default_embedding_model,
-    )?;
-
-    // 创建 SummaryService
-    let summary_service = Arc::new(SummaryService::new(
-        vfs,
-        Arc::new(summary_engine),
-        config.summary_service.clone(),
-    ));
-
-    Ok(Some(summary_service))
 }
 
 impl AppState {
@@ -114,8 +77,6 @@ impl AppState {
         config: TianyanConfig,
         vfs: Arc<VirtualFileSystemImpl>,
     ) -> TianyanResult<Self> {
-        // 创建摘要服务
-        let summary_service = create_summary_service(&config, vfs.clone())?;
 
         // 初始化技能注册表和执行器
         let mut skill_registry = SkillRegistry::new();
@@ -155,18 +116,9 @@ impl AppState {
             session_manager,
             pending_tasks,
             vfs,
-            summary_service,
             skill_registry,
             skill_executor,
         })
-    }
-
-    /// 获取摘要服务
-    ///
-    /// # Returns
-    /// * `Option<Arc<SummaryService>>` - 摘要服务实例（如果已创建）
-    pub fn summary_service(&self) -> Option<Arc<SummaryService>> {
-        self.summary_service.clone()
     }
 
     /// 获取当前 Agent 实例

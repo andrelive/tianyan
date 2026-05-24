@@ -3,7 +3,7 @@
 use tianyan::agent::AgentConfig;
 use tianyan::config::{
     LoggingConfig, MemoryConfig, ModelServiceConfig, ModelServiceType, ModelsConfig,
-    RetrievalConfig, SecurityConfig, StorageConfig, SummaryServiceConfig, TianyanConfig,
+    RetrievalConfig, SecurityConfig, StorageConfig, TianyanConfig,
     VectorStorageConfig,
 };
 
@@ -68,6 +68,5 @@ pub fn test_tianyan_config() -> TianyanConfig {
         security: SecurityConfig::default(),
         memory: MemoryConfig::default(),
         retrieval: RetrievalConfig::default(),
-        summary_service: SummaryServiceConfig::default(),
     }
 }

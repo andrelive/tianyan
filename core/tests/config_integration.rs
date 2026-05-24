@@ -45,7 +45,6 @@ async fn test_config_defaults_are_reasonable() {
     assert_eq!(config.agent.default_top_k, 5);
     assert_eq!(config.memory.consolidation_interval, 3600);
     assert_eq!(config.retrieval.default_top_k, 10);
-    assert_eq!(config.summary_service.scan_interval_secs, 300);
 }
 
 #[tokio::test]
