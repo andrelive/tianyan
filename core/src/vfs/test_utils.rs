@@ -11,10 +11,10 @@ use tempfile::tempdir;
 
 use crate::common::types::TianyanUri;
 use crate::config::StorageConfig;
-use crate::vfs::backend::LocalStorageBackend;
+use crate::vfs::backend::LocalFileBackend;
 use crate::vfs::traits::VectorStorage;
 use crate::vfs::types::{VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType};
-use crate::vfs::vfs::VirtualFileSystemImpl;
+use crate::vfs::vfs_impl::VirtualFileSystemImpl;
 
 /// Mock 向量存储实现，用于单元测试。
 pub struct MockVectorStorage;
@@ -77,7 +77,7 @@ pub async fn create_test_vfs() -> VirtualFileSystemImpl {
     let dir = tempdir().unwrap();
     let mut config = StorageConfig::default();
     config.data_dir = dir.path().into();
-    let storage = Arc::new(LocalStorageBackend::new(config.clone()));
+    let storage = Arc::new(LocalFileBackend::new(config.clone()));
     let vector_storage: Arc<dyn VectorStorage> = Arc::new(MockVectorStorage::new());
     VirtualFileSystemImpl::new(storage, vector_storage, config)
 }

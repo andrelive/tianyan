@@ -104,11 +104,11 @@ fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
 ) -> anyhow::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
     use tianyan::vfs::{
-        LocalStorageBackend, QdrantVectorStore, VectorStorage, VirtualFileSystemBuilder,
+        LocalFileBackend, QdrantVectorStore, VectorStorage, VirtualFileSystemBuilder,
     };
 
     // 1. 创建存储后端
-    let storage = Arc::new(LocalStorageBackend::new(config.storage.clone()));
+    let storage = Arc::new(LocalFileBackend::new(config.storage.clone()));
     let vector_storage = Arc::new(QdrantVectorStore::new(&config.storage)?);
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async { vector_storage.initialize().await })

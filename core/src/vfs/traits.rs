@@ -8,8 +8,7 @@ use crate::common::error::Result;
 use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
 
 use super::types::{
-    ContextEntry, DirectoryIndex, StorageStats, VectorPoint, VectorSearchQuery, VectorSearchResult,
-    VectorType,
+    ContextEntry, VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType,
 };
 
 /// 内容元数据。
@@ -21,76 +20,6 @@ pub struct ContentMetadata {
     pub created_at: DateTime<Utc>,
     /// 更新时间
     pub updated_at: DateTime<Utc>,
-}
-
-/// 存储后端 trait。
-///
-/// 此 trait 定义了持久化上下文条目及其元数据的存储后端接口。
-#[async_trait]
-pub trait StorageBackend: Send + Sync {
-    /// 初始化存储后端。
-    async fn initialize(&self) -> Result<()>;
-
-    /// 检查给定 URI 处是否存在条目。
-    async fn exists(&self, uri: &TianyanUri) -> Result<bool>;
-
-    /// 从存储读取条目。
-    async fn read_entry(&self, uri: &TianyanUri) -> Result<ContextEntry>;
-
-    /// 将条目写入存储。
-    async fn write_entry(&self, entry: &ContextEntry) -> Result<()>;
-
-    /// 从存储删除条目。
-    async fn delete_entry(&self, uri: &TianyanUri) -> Result<()>;
-
-    /// 列出目录中的条目。
-    async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>>;
-
-    /// 读取特定层级的内容。
-    async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String>;
-
-    /// 写入特定层级的内容。
-    async fn write_content(
-        &self,
-        uri: &TianyanUri,
-        level: ContentLevel,
-        content: &str,
-    ) -> Result<()>;
-
-    /// 追加内容到特定层级的文件末尾。
-    ///
-    /// 此方法用于需要持续追加的场景（如会话消息记录）。
-    /// 如果底层存储支持真正的追加写入，实现应该使用它；
-    /// 否则使用默认实现（读取 + 合并 + 写入）。
-    ///
-    /// # 参数
-    /// - `uri`: 条目 URI
-    /// - `level`: 内容层级
-    /// - `content`: 要追加的内容
-    ///
-    /// # 返回
-    /// - `Ok(())`: 追加成功
-    /// - `Err`: 追加失败
-    async fn append_content(
-        &self,
-        uri: &TianyanUri,
-        level: ContentLevel,
-        content: &str,
-    ) -> Result<()> {
-        // 默认实现：读取 + 合并 + 写入
-        let existing = self.read_content(uri, level).await.unwrap_or_default();
-        let combined = format!("{}{}", existing, content);
-        self.write_content(uri, level, &combined).await
-    }
-
-    /// 获取目录索引。
-    async fn get_directory_index(&self, uri: &TianyanUri) -> Result<DirectoryIndex>;
-
-    /// 更新目录索引。
-    async fn update_directory_index(&self, uri: &TianyanUri, index: &DirectoryIndex) -> Result<()>;
-
-    /// 获取存储统计信息。
-    async fn get_stats(&self) -> Result<StorageStats>;
 }
 
 /// 向量存储后端 trait。

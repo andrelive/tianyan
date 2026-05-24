@@ -13,7 +13,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContextNamespace, TianyanUri};
 use crate::model::{ChatService, EmbeddingService, VisionEncoder, VlmService};
 use crate::vfs::{
-    ContextEntry, StorageBackend, SummaryEngine, VectorPoint, VectorStorage,
+    backend::LocalFileBackend, ContextEntry, SummaryEngine, VectorPoint, VectorStorage,
     CURRENT_SCHEMA_VERSION,
 };
 
@@ -94,13 +94,12 @@ impl IngestorConfig {
 
 /// 协调文档处理的知识导入器。
 #[allow(dead_code)]
-pub struct KnowledgeIngestor<M, E, V, VE, S, VS>
+pub struct KnowledgeIngestor<M, E, V, VE, VS>
 where
     M: ChatService,
     E: EmbeddingService,
     V: VlmService,
     VE: VisionEncoder,
-    S: StorageBackend,
     VS: VectorStorage,
 {
     config: IngestorConfig,
@@ -111,18 +110,17 @@ where
     embedding_service: Arc<E>,
     vlm_service: V,
     vision_encoder: VE,
-    storage: S,
+        storage: LocalFileBackend,
     vector_storage: VS,
     summary_engine: SummaryEngine,
 }
 
-impl<M, E, V, VE, S, VS> KnowledgeIngestor<M, E, V, VE, S, VS>
+impl<M, E, V, VE, VS> KnowledgeIngestor<M, E, V, VE, VS>
 where
     M: ChatService + 'static,
     E: EmbeddingService + 'static,
     V: VlmService,
     VE: VisionEncoder,
-    S: StorageBackend,
     VS: VectorStorage,
 {
     /// 创建新的知识导入器。
@@ -132,7 +130,7 @@ where
         embedding_service: E,
         vlm_service: V,
         vision_encoder: VE,
-        storage: S,
+    storage: LocalFileBackend,
         vector_storage: VS,
     ) -> Result<Self> {
         let parser = CompositeParser::new();

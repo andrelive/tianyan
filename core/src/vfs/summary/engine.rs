@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, TianyanUri};
 use crate::model::{ChatService, EmbeddingService};
-use crate::vfs::traits::StorageBackend;
+use crate::vfs::backend::LocalFileBackend;
 use crate::vfs::types::ContextEntry;
 
 /// 不同内容级别的 token 限制。
@@ -154,7 +154,7 @@ impl SummaryEngine {
     /// 更新条目的摘要。
     pub async fn update_entry_summaries(
         &self,
-        storage: &dyn StorageBackend,
+        storage: &LocalFileBackend,
         uri: &TianyanUri,
     ) -> Result<ContextEntry> {
         // 读取当前条目
@@ -193,7 +193,7 @@ impl SummaryEngine {
     /// 通过聚合子条目摘要来更新父目录摘要。
     pub async fn update_parent_summaries(
         &self,
-        storage: &dyn StorageBackend,
+        storage: &LocalFileBackend,
         uri: &TianyanUri,
     ) -> Result<()> {
         let mut current_uri = uri.clone();

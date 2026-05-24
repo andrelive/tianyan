@@ -1,6 +1,5 @@
 //! 本地文件系统存储后端实现。
 
-use async_trait::async_trait;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -9,7 +8,6 @@ use tokio::sync::Mutex;
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-use crate::vfs::traits::StorageBackend;
 use crate::vfs::types::{
     CategoryStats, ContextEntry, DirectoryIndex, DirectoryStats, IndexEntry, StorageStats,
 };
@@ -18,14 +16,14 @@ use crate::config::StorageConfig;
 use crate::vfs::uri_mapper::UriMapper;
 
 /// 本地文件系统存储后端。
-pub struct LocalStorageBackend {
+pub struct LocalFileBackend {
     config: StorageConfig,
     mapper: UriMapper,
     /// 文件路径级别的写入锁，防止并发追加导致内容交错。
     write_locks: Arc<Mutex<std::collections::HashMap<std::path::PathBuf, Arc<Mutex<()>>>>>,
 }
 
-impl LocalStorageBackend {
+impl LocalFileBackend {
     /// 创建新的本地存储后端。
     pub fn new(config: StorageConfig) -> Self {
         let mapper = UriMapper::new(config.clone());
@@ -235,9 +233,8 @@ impl LocalStorageBackend {
     }
 }
 
-#[async_trait]
-impl StorageBackend for LocalStorageBackend {
-    async fn initialize(&self) -> Result<()> {
+impl LocalFileBackend {
+    pub async fn initialize(&self) -> Result<()> {
         self.ensure_dir(&self.config.data_dir)?;
 
         for &namespace in ContextNamespace::ALL {
@@ -250,12 +247,12 @@ impl StorageBackend for LocalStorageBackend {
         Ok(())
     }
 
-    async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
+    pub async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
         let path = self.mapper.uri_to_path(uri);
         Ok(path.exists())
     }
 
-    async fn read_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+    pub async fn read_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
         let path = self.mapper.uri_to_path(uri);
 
         if !path.exists() {
@@ -280,7 +277,7 @@ impl StorageBackend for LocalStorageBackend {
         })
     }
 
-    async fn write_entry(&self, entry: &ContextEntry) -> Result<()> {
+    pub async fn write_entry(&self, entry: &ContextEntry) -> Result<()> {
         let path = self.mapper.uri_to_path(entry.uri());
 
         self.ensure_dir(&path)?;
@@ -304,7 +301,7 @@ impl StorageBackend for LocalStorageBackend {
         Ok(())
     }
 
-    async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
+    pub async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
         let path = self.mapper.uri_to_path(uri);
 
         if !path.exists() {
@@ -317,7 +314,7 @@ impl StorageBackend for LocalStorageBackend {
         Ok(())
     }
 
-    async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
+    pub async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
         let path = self.mapper.uri_to_path(uri);
 
         if !path.exists() || !path.is_dir() {
@@ -347,11 +344,11 @@ impl StorageBackend for LocalStorageBackend {
         Ok(entries)
     }
 
-    async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+    pub async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
         self.read_content_sync(uri, level)
     }
 
-    async fn write_content(
+    pub async fn write_content(
         &self,
         uri: &TianyanUri,
         level: ContentLevel,
@@ -368,7 +365,7 @@ impl StorageBackend for LocalStorageBackend {
         Ok(())
     }
 
-    async fn append_content(
+    pub async fn append_content(
         &self,
         uri: &TianyanUri,
         level: ContentLevel,
@@ -385,11 +382,11 @@ impl StorageBackend for LocalStorageBackend {
         Ok(())
     }
 
-    async fn get_directory_index(&self, uri: &TianyanUri) -> Result<DirectoryIndex> {
+    pub async fn get_directory_index(&self, uri: &TianyanUri) -> Result<DirectoryIndex> {
         self.generate_directory_index_sync(uri)
     }
 
-    async fn update_directory_index(
+    pub async fn update_directory_index(
         &self,
         _uri: &TianyanUri,
         _index: &DirectoryIndex,
@@ -397,7 +394,7 @@ impl StorageBackend for LocalStorageBackend {
         Ok(())
     }
 
-    async fn get_stats(&self) -> Result<StorageStats> {
+    pub async fn get_stats(&self) -> Result<StorageStats> {
         let mut stats = StorageStats::default();
 
         for &namespace in ContextNamespace::ALL {
@@ -434,7 +431,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = StorageConfig::default();
         config.data_dir = dir.path().into();
-        let storage = LocalStorageBackend::new(config);
+        let storage = LocalFileBackend::new(config);
 
         storage.initialize().await.unwrap();
 
@@ -451,7 +448,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = StorageConfig::default();
         config.data_dir = dir.path().into();
-        let storage = LocalStorageBackend::new(config);
+        let storage = LocalFileBackend::new(config);
         storage.initialize().await.unwrap();
 
         let uri = TianyanUri::new(
@@ -478,7 +475,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = StorageConfig::default();
         config.data_dir = dir.path().into();
-        let storage = LocalStorageBackend::new(config);
+        let storage = LocalFileBackend::new(config);
         storage.initialize().await.unwrap();
 
         let uri = TianyanUri::new(
@@ -500,7 +497,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut config = StorageConfig::default();
         config.data_dir = dir.path().into();
-        let storage = LocalStorageBackend::new(config);
+        let storage = LocalFileBackend::new(config);
         storage.initialize().await.unwrap();
 
         for i in 0..3 {

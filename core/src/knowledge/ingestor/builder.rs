@@ -1,17 +1,16 @@
 use crate::common::error::{Result, TianyanError};
 use crate::model::{ChatService, EmbeddingService, VisionEncoder, VlmService};
-use crate::vfs::{StorageBackend, VectorStorage};
+use crate::vfs::{backend::LocalFileBackend, VectorStorage};
 
 use super::{IngestorConfig, KnowledgeIngestor};
 
 /// 创建知识导入器的构建器。
-pub struct KnowledgeIngestorBuilder<M, E, V, VE, S, VS>
+pub struct KnowledgeIngestorBuilder<M, E, V, VE, VS>
 where
     M: ChatService,
     E: EmbeddingService,
     V: VlmService,
     VE: VisionEncoder,
-    S: StorageBackend,
     VS: VectorStorage,
 {
     config: IngestorConfig,
@@ -19,17 +18,16 @@ where
     embedding_service: Option<E>,
     vlm_service: Option<V>,
     vision_encoder: Option<VE>,
-    storage: Option<S>,
+    storage: Option<LocalFileBackend>,
     vector_storage: Option<VS>,
 }
 
-impl<M, E, V, VE, S, VS> KnowledgeIngestorBuilder<M, E, V, VE, S, VS>
+impl<M, E, V, VE, VS> KnowledgeIngestorBuilder<M, E, V, VE, VS>
 where
     M: ChatService + 'static,
     E: EmbeddingService + 'static,
     V: VlmService,
     VE: VisionEncoder,
-    S: StorageBackend,
     VS: VectorStorage,
 {
     /// 创建新的构建器。
@@ -76,7 +74,7 @@ where
     }
 
     /// 设置存储后端。
-    pub fn with_storage(mut self, storage: S) -> Self {
+    pub fn with_storage(mut self, storage: LocalFileBackend) -> Self {
         self.storage = Some(storage);
         self
     }
@@ -88,7 +86,7 @@ where
     }
 
     /// 构建导入器。
-    pub fn build(self) -> Result<KnowledgeIngestor<M, E, V, VE, S, VS>> {
+    pub fn build(self) -> Result<KnowledgeIngestor<M, E, V, VE, VS>> {
         let model_service = self
             .model_service
             .ok_or_else(|| TianyanError::Config("模型服务是必需的".to_string()))?;
@@ -120,13 +118,12 @@ where
     }
 }
 
-impl<M, E, V, VE, S, VS> Default for KnowledgeIngestorBuilder<M, E, V, VE, S, VS>
+impl<M, E, V, VE, VS> Default for KnowledgeIngestorBuilder<M, E, V, VE, VS>
 where
     M: ChatService + 'static,
     E: EmbeddingService + 'static,
     V: VlmService,
     VE: VisionEncoder,
-    S: StorageBackend,
     VS: VectorStorage,
 {
     fn default() -> Self {

@@ -18,17 +18,17 @@
 //! ```no_run
 //! use std::sync::Arc;
 //! use tianyan::config::StorageConfig;
-//! use tianyan::storage::{LocalStorageBackend, QdrantVectorStore, VirtualFileSystemImpl};
+//! use tianyan::vfs::{LocalFileBackend, QdrantVectorStore, VirtualFileSystemImpl};
 //!
 //! async fn setup_storage() {
 //!     let config = StorageConfig::default();
-//!     let storage = Arc::new(LocalStorageBackend::new(config.clone()));
+//!     let storage = Arc::new(LocalFileBackend::new(config.clone()));
 //!     let vector_storage = Arc::new(QdrantVectorStore::new(&config).unwrap());
 //!     let vfs = VirtualFileSystemImpl::new(storage, vector_storage, config);
 //! }
 //! ```
 
-mod backend;
+pub mod backend;
 mod summary;
 mod traits;
 mod types;
@@ -41,12 +41,12 @@ mod test_utils;
 
 // 重新导出公共 API
 pub use crate::config::StorageConfig;
-pub use backend::LocalStorageBackend;
+pub use backend::LocalFileBackend;
 pub use summary::{
     MockSummaryEngine, SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
 };
 pub use traits::{
-    ContentMetadata, ContentStore, StorageBackend, VectorStorage, VfsCore, VfsMetadata, VfsSearch,
+    ContentMetadata, ContentStore, VectorStorage, VfsCore, VfsMetadata, VfsSearch,
     VirtualFileSystem,
 };
 pub use types::{
