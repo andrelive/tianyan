@@ -42,9 +42,6 @@ ring = { workspace = true }
 # JSON Schema generation
 schemars = { workspace = true }
 
-# Token counting
-tiktoken-rs = { workspace = true }
-
 # Vector database
 qdrant-client = { workspace = true }
 

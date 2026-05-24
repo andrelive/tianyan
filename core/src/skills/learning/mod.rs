@@ -379,11 +379,7 @@ mod tests {
         async fn list(&self, _uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
             Ok(vec![])
         }
-        async fn move_entry(
-            &self,
-            _source: &TianyanUri,
-            _destination: &TianyanUri,
-        ) -> Result<()> {
+        async fn move_entry(&self, _source: &TianyanUri, _destination: &TianyanUri) -> Result<()> {
             Ok(())
         }
     }

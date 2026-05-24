@@ -43,8 +43,7 @@ mod test_utils;
 pub use crate::config::StorageConfig;
 pub use backend::LocalStorageBackend;
 pub use summary::{
-    MockSummaryEngine, SummaryEngine, SummaryLevel, TokenCounter, ABSTRACT_TOKEN_LIMIT,
-    OVERVIEW_TOKEN_LIMIT,
+    MockSummaryEngine, SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
 };
 pub use traits::{
     ContentMetadata, ContentStore, StorageBackend, VectorStorage, VfsCore, VfsMetadata, VfsSearch,
@@ -167,20 +166,6 @@ mod tests {
 
         let detail_path = mapper.get_detail_path(&uri);
         assert!(detail_path.ends_with("content.md"));
-    }
-
-    #[test]
-    fn test_token_counter() {
-        let counter = TokenCounter::new().unwrap();
-
-        let text = "Hello, world! This is a test.";
-        let count = counter.count_tokens(text);
-        assert!(count > 0);
-
-        // 测试截断
-        let long_text = "word ".repeat(200);
-        let truncated = counter.truncate_to_limit(&long_text, 50);
-        assert!(counter.count_tokens(&truncated) <= 50);
     }
 
     #[test]

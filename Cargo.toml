@@ -36,9 +36,6 @@ sysinfo = "0.29"
 # Cryptography
 ring = "0.17"
 
-# Token counting
-tiktoken-rs = "0.5"
-
 # Vector database
 qdrant-client = "1.17"
 

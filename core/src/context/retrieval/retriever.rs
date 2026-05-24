@@ -718,16 +718,10 @@ mod tests {
         async fn get_entry(&self, _uri: &TianyanUri) -> Result<ContextEntry> {
             Ok(ContextEntry::new_file(_uri.clone()))
         }
-        async fn create_directory(
-            &self,
-            _uri: &TianyanUri,
-        ) -> Result<ContextEntry> {
+        async fn create_directory(&self, _uri: &TianyanUri) -> Result<ContextEntry> {
             Ok(ContextEntry::new_directory(_uri.clone()))
         }
-        async fn create_file(
-            &self,
-            _uri: &TianyanUri,
-        ) -> Result<ContextEntry> {
+        async fn create_file(&self, _uri: &TianyanUri) -> Result<ContextEntry> {
             Ok(ContextEntry::new_file(_uri.clone()))
         }
         async fn delete(&self, _uri: &TianyanUri) -> Result<()> {

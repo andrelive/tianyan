@@ -135,17 +135,11 @@ impl SummaryTask {
                 ))
             })?;
 
-        let token_count = ctx
-            .summary_engine
-            .token_counter()
-            .count_tokens(&detail_content);
-
-        // 生成摘要
-        let (abstract_content, overview_content) = if token_count < ABSTRACT_TOKEN_LIMIT {
-            tracing::debug!("短内容直接用作摘要：{} ({} tokens)", uri, token_count);
+        let (abstract_content, overview_content) = if detail_content.len() < ABSTRACT_TOKEN_LIMIT * 4 {
+            tracing::debug!("短内容直接用作摘要：{}", uri);
             (detail_content.clone(), detail_content)
         } else {
-            tracing::debug!("长内容生成摘要：{} ({} tokens)", uri, token_count);
+            tracing::debug!("长内容生成摘要：{}", uri);
             ctx.summary_engine
                 .generate_summaries(&detail_content)
                 .await?
@@ -166,7 +160,7 @@ impl SummaryTask {
             processed.insert(uri.to_string());
         }
 
-        tracing::info!("摘要生成完成：{} ({} tokens)", uri, token_count);
+        tracing::info!("摘要生成完成：{}", uri);
         Ok(())
     }
 }

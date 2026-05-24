@@ -8,39 +8,32 @@ pub use types::*;
 use std::collections::HashMap;
 
 use crate::common::error::Result;
-use crate::storage::TokenCounter;
 
 use super::parser::ParsedDocument;
+
+fn estimate_tokens(text: &str) -> usize {
+    text.len() / 4
+}
 
 /// 文档分块器，用于将文档分割成可管理的片段。
 pub struct DocumentChunker {
     config: ChunkingConfig,
-    token_counter: TokenCounter,
 }
 
 impl DocumentChunker {
     /// 创建新的文档分块器。
-    pub fn new(config: ChunkingConfig) -> Result<Self> {
-        let token_counter = TokenCounter::new()?;
-        Ok(Self {
-            config,
-            token_counter,
-        })
+    pub fn new(config: ChunkingConfig) -> Self {
+        Self { config }
     }
 
     /// 使用默认配置创建分块器。
-    pub fn with_defaults() -> Result<Self> {
+    pub fn with_defaults() -> Self {
         Self::new(ChunkingConfig::default())
-    }
-
-    /// 获取 token 计数器。
-    pub fn token_counter(&self) -> &TokenCounter {
-        &self.token_counter
     }
 
     /// 对解析后的文档进行分块。
     pub fn chunk_document(&self, doc: &ParsedDocument, doc_id: &str) -> Result<Vec<DocumentChunk>> {
-        let total_tokens = self.token_counter.count_tokens(&doc.text);
+        let total_tokens = estimate_tokens(&doc.text);
 
         if total_tokens <= self.config.chunk_size {
             return Ok(vec![DocumentChunk {
@@ -87,7 +80,7 @@ impl DocumentChunker {
                 &text[section.start..]
             };
 
-            let section_tokens = self.token_counter.count_tokens(section_text);
+            let section_tokens = estimate_tokens(section_text);
 
             if section_tokens <= self.config.chunk_size {
                 chunks.push(DocumentChunk {
@@ -182,8 +175,8 @@ impl DocumentChunker {
         let mut paragraph_start = 0;
 
         for (i, paragraph) in paragraphs.iter().enumerate() {
-            let paragraph_tokens = self.token_counter.count_tokens(paragraph);
-            let current_tokens = self.token_counter.count_tokens(&current_chunk);
+            let paragraph_tokens = estimate_tokens(paragraph);
+            let current_tokens = estimate_tokens(&current_chunk);
 
             if current_tokens + paragraph_tokens > self.config.chunk_size
                 && !current_chunk.is_empty()
@@ -193,7 +186,7 @@ impl DocumentChunker {
                     id: format!("{}-{}", doc_id, chunk_index),
                     index: chunk_index,
                     text: trimmed.to_string(),
-                    token_count: self.token_counter.count_tokens(trimmed),
+                    token_count: estimate_tokens(trimmed),
                     start_position: base_position + current_start,
                     end_position: base_position + current_start + trimmed.len(),
                     section: Some(section_title.to_string()),
@@ -225,7 +218,7 @@ impl DocumentChunker {
                 id: format!("{}-{}", doc_id, chunk_index),
                 index: chunk_index,
                 text: trimmed.to_string(),
-                token_count: self.token_counter.count_tokens(trimmed),
+                token_count: estimate_tokens(trimmed),
                 start_position: base_position + current_start,
                 end_position: base_position + current_start + trimmed.len(),
                 section: Some(section_title.to_string()),
@@ -259,8 +252,8 @@ impl DocumentChunker {
         let mut char_position = 0;
 
         for sentence in sentences {
-            let sentence_tokens = self.token_counter.count_tokens(sentence);
-            let current_tokens = self.token_counter.count_tokens(&current_chunk);
+            let sentence_tokens = estimate_tokens(sentence);
+            let current_tokens = estimate_tokens(&current_chunk);
 
             if current_tokens + sentence_tokens > self.config.chunk_size
                 && !current_chunk.is_empty()
@@ -270,7 +263,7 @@ impl DocumentChunker {
                     id: format!("{}-{}", doc_id, chunk_index),
                     index: chunk_index,
                     text: trimmed.to_string(),
-                    token_count: self.token_counter.count_tokens(trimmed),
+                    token_count: estimate_tokens(trimmed),
                     start_position: current_start,
                     end_position: current_start + trimmed.len(),
                     section: None,
@@ -300,7 +293,7 @@ impl DocumentChunker {
                 id: format!("{}-{}", doc_id, chunk_index),
                 index: chunk_index,
                 text: trimmed.to_string(),
-                token_count: self.token_counter.count_tokens(trimmed),
+                token_count: estimate_tokens(trimmed),
                 start_position: current_start,
                 end_position: (current_start + trimmed.len()).min(total_len),
                 section: None,
@@ -371,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_small_document_single_chunk() {
-        let chunker = DocumentChunker::with_defaults().unwrap();
+        let chunker = DocumentChunker::with_defaults();
         let doc = create_test_document("This is a small document.", vec![]);
         let chunks = chunker.chunk_document(&doc, "test").unwrap();
 
@@ -396,7 +389,7 @@ mod tests {
         let config = ChunkingConfig::new()
             .with_chunk_size(20)
             .with_semantic_chunking(false);
-        let chunker = DocumentChunker::new(config).unwrap();
+        let chunker = DocumentChunker::new(config);
 
         let long_text = "This is sentence one. This is sentence two. This is sentence three. This is sentence four. This is sentence five. This is sentence six. This is sentence seven. This is sentence eight. This is sentence nine. This is sentence ten.";
         let doc = create_test_document(long_text, vec![]);
@@ -418,7 +411,7 @@ mod tests {
         let config = ChunkingConfig::new()
             .with_chunk_size(50)
             .with_semantic_chunking(true);
-        let chunker = DocumentChunker::new(config).unwrap();
+        let chunker = DocumentChunker::new(config);
 
         let text = "# Chapter 1\n\nThis is the first chapter with some content.\n\n# Chapter 2\n\nThis is the second chapter with more content.";
         let toc = vec![
@@ -450,7 +443,7 @@ mod tests {
 
     #[test]
     fn test_chunk_positions() {
-        let chunker = DocumentChunker::with_defaults().unwrap();
+        let chunker = DocumentChunker::with_defaults();
         let doc = create_test_document("Hello world", vec![]);
         let chunks = chunker.chunk_document(&doc, "test").unwrap();
 

@@ -13,13 +13,17 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContextNamespace, TianyanUri};
 use crate::model::{ChatService, EmbeddingService, VisionEncoder, VlmService};
 use crate::storage::{
-    ContextEntry, StorageBackend, SummaryEngine, TokenCounter, VectorPoint, VectorStorage,
+    ContextEntry, StorageBackend, SummaryEngine, VectorPoint, VectorStorage,
     CURRENT_SCHEMA_VERSION,
 };
 
 use super::chunker::{ChunkingConfig, DocumentChunker};
 use super::image::{ImageAnalyzer, ImageProcessor, ImageProcessorConfig};
 use super::parser::CompositeParser;
+
+fn count_tokens(text: &str) -> usize {
+    text.len() / 4
+}
 use super::types::{
     DocumentType, IngestionRequest, IngestionResult, KnowledgeCategory, KnowledgeMetadata,
 };
@@ -132,7 +136,7 @@ where
         vector_storage: VS,
     ) -> Result<Self> {
         let parser = CompositeParser::new();
-        let chunker = DocumentChunker::new(config.chunking.clone())?;
+        let chunker = DocumentChunker::new(config.chunking.clone());
         let image_processor = ImageProcessor::new(config.image.clone());
 
         let model_service_arc = Arc::new(model_service);
@@ -143,7 +147,7 @@ where
             embedding_service_arc.clone(),
             config.summary_model.clone(),
             config.embedding_model.clone(),
-        )?;
+        );
 
         Ok(Self {
             config,
@@ -268,7 +272,7 @@ where
             }
         }
 
-        let tokens_processed = self.chunker.token_counter().count_tokens(&text_content);
+        let tokens_processed = count_tokens(&text_content);
 
         Ok(IngestionResult {
             document_id: doc_id,
@@ -317,7 +321,7 @@ where
             } else {
                 Some(chunks.len())
             },
-            total_tokens: self.chunker.token_counter().count_tokens(&parsed.text),
+            total_tokens: count_tokens(&parsed.text),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             importance: 0.5,
@@ -363,10 +367,7 @@ where
             tags: [request.tags.clone(), analysis.tags.clone()].concat(),
             language: None,
             chunk_count: None,
-            total_tokens: self
-                .chunker
-                .token_counter()
-                .count_tokens(&unified.combined_text),
+            total_tokens: count_tokens(&unified.combined_text),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             importance: 0.5,
@@ -475,11 +476,6 @@ where
         context.update(content);
         let digest = context.finish();
         hex::encode(digest.as_ref())
-    }
-
-    /// 获取 token 计数器。
-    pub fn token_counter(&self) -> &TokenCounter {
-        self.chunker.token_counter()
     }
 }
 

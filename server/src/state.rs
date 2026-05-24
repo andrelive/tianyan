@@ -228,7 +228,7 @@ impl AppState {
             model_services.embedding,
             &config.models.default_chat_model,
             &config.models.default_embedding_model,
-        )?;
+        );
 
         Ok(Arc::new(summary_engine))
     }
