@@ -46,6 +46,20 @@ pub trait VfsCore: Send + Sync {
 
     /// 移动条目及其子条目到新位置。
     async fn move_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()>;
+
+    /// 更新条目的重要性评分和自定义键值标签。
+    async fn update_metadata(
+        &self,
+        uri: &TianyanUri,
+        importance: f32,
+        custom: HashMap<String, serde_json::Value>,
+    ) -> Result<()>;
+
+    /// 批量获取所有层级的内容元数据。
+    async fn get_all_content_metadata(
+        &self,
+        uri: &TianyanUri,
+    ) -> Result<HashMap<ContentLevel, ContentMetadata>>;
 }
 
 /// 分层内容读写 —— L0 Abstract / L1 Overview / L2 Detail。
@@ -107,29 +121,11 @@ pub trait VfsSearch: Send + Sync {
     ) -> Result<()>;
 }
 
-/// 元数据管理 —— 重要性评分与自定义标签。
-#[async_trait]
-pub trait VfsMetadata: Send + Sync {
-    /// 更新条目的重要性评分和自定义键值标签。
-    async fn update_metadata(
-        &self,
-        uri: &TianyanUri,
-        importance: f32,
-        custom: HashMap<String, serde_json::Value>,
-    ) -> Result<()>;
-
-    /// 批量获取所有层级的内容元数据。
-    async fn get_all_content_metadata(
-        &self,
-        uri: &TianyanUri,
-    ) -> Result<HashMap<ContentLevel, ContentMetadata>>;
-}
-
 /// 组合超 trait —— 提供统一的 VirtualFileSystem 接口。
 ///
-/// 任何同时实现了上述四个子 trait 的类型自动实现本 trait。
+/// 任何同时实现了上述三个子 trait 的类型自动实现本 trait。
 #[async_trait]
-pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch + VfsMetadata {
+pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch {
     /// 读取指定层级的内容（便捷方法，委托给 ContentStore::read）。
     async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
         ContentStore::read(self, uri, level).await
@@ -181,22 +177,6 @@ pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch + VfsMetadata {
             .collect())
     }
 
-    /// 复制条目。
-    async fn copy_entry(&self, _source: &TianyanUri, _destination: &TianyanUri) -> Result<()> {
-        Err(crate::common::error::TianyanError::Internal(
-            "copy_entry not implemented".to_string(),
-        ))
-    }
-
-    /// 重新生成元数据。
-    async fn regenerate_metadata(&self, _uri: &TianyanUri) -> Result<()> {
-        Ok(())
-    }
-
-    /// 列出所有 URI。
-    async fn list_all_uris(&self) -> Result<Vec<TianyanUri>> {
-        Ok(vec![])
-    }
 }
 
 #[cfg(test)]

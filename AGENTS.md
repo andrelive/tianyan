@@ -6,25 +6,31 @@
 # Quick compile check (run before claiming success)
 cargo check --workspace
 
-# Full lint pass (fmt + clippy)
+# Format check
 cargo fmt --all -- --check
+cargo fmt --all             # auto-fix in place
+
+# Clippy (expect failures due to missing_docs; see Lint section)
 cargo clippy --workspace -- -D warnings
 
-# Unit tests (lib only)
-cargo test --workspace --lib -- --nocapture
+# Run tests for a single crate
+cargo test -p tianyan-core --lib -- --nocapture
+cargo test -p tianyan-server --lib -- --nocapture
 
-# Integration tests
-cargo test --workspace --test '*' -- --nocapture
+# Run a specific test module
+cargo test -p tianyan-core vfs::backend::local -- --nocapture
 
 # All-in-one script
-.\scripts\test.ps1               # all checks + tests
-.\scripts\test.ps1 lint          # fmt + clippy only
+.\scripts\test.ps1 lint          # fmt + clippy
 .\scripts\test.ps1 unit          # unit tests only
+.\scripts\test.ps1 integration   # integration tests
+.\scripts\test.ps1 e2e           # E2E tests
+.\scripts\test.ps1 all           # lint + unit + integration + e2e + bench
 ```
 
 ## Workspace Structure
 
-4 crates, all under single `Cargo.toml` workspace (resolver = "2"):
+4 crates under single `Cargo.toml` workspace (resolver = "2"):
 
 | Crate | Package | Type |
 |-------|---------|------|
@@ -43,15 +49,13 @@ Workspace-level lints in `Cargo.toml`:
 - `unused_qualifications = "warn"` — don't write `crate::foo::Bar` when `Bar` alone resolves
 - Clippy: `unwrap_used`, `expect_used`, `unwrap_in_result` are all `warn`
 
-**Do NOT add comments to code** unless asked. The codebase uses Rust doc comments (`///`, `//!`) for public API docs, but inline `//` comments are kept minimal.
+**`cargo clippy -- -D warnings` will fail** due to the large number of pre-existing `missing_docs` violations. For PR-level lint, run clippy without `-D warnings` and focus on new issues in changed files.
 
-## Key Architecture Decisions
+**Do NOT add inline `//` comments** unless asked. Use Rust doc comments (`///`, `//!`) for public API docs. Inline comments are kept minimal.
 
-### Harness Engineering Philosophy
+## Key Architecture
 
-The project follows a harness pattern: components should **fail fast and transparently** rather than silently retry or paper over errors. The router/harness layer (`ModelRouter`) handles failover and health decisions; individual providers should not retry, add backoff, or mask failures. This was an explicit design decision made to remove `RetryService` from the model provider layer.
-
-### Model Layer Hierarchy
+### Model Layer
 
 ```
 core/src/model/
@@ -59,65 +63,99 @@ core/src/model/
 ├── types/            ← ChatCompletionRequest, ModelInfo, etc.
 ├── config.rs         ← ModelConfig
 ├── provider/         ← AsyncOpenAIClient + trait impls (+ LoggedService decorator)
-└── services.rs       ← ModelServices: simple container to build services from config
+└── services.rs       ← ModelServices: bundles Arc<dyn ChatService>, EmbeddingService, VlmService
 ```
 
-Trait dependency:
+- `ModelServices` (NOT `ModelRouter` — that was replaced) is a plain container. No routing, no failover, no health tracking.
+- Failover belongs at the caller/harness layer. Providers should **fail fast**, not retry or backoff.
+- `RetryService` was intentionally removed. Do not reintroduce.
+- Conversion from TOML config: `server/src/agent_builder.rs::create_model_services()`.
+- `model/provider/` uses `pub(crate)` for internal items; external code goes through `ModelServices`.
+- `ServiceDiscovery::is_available()` is `async` — don't forget `await`.
+
+### VFS Module
+
 ```
-ServiceDiscovery: Send + Sync  ← list_models(), is_available(), service_name()
-ChatService: Send + Sync      ← chat_completion(), chat_completion_stream(), chat()
-EmbeddingService: Send + Sync ← embed(), service_name()
-VlmService: Send + Sync       ← analyze_image(), service_name()
+core/src/vfs/
+├── traits.rs         ← VfsCore, ContentStore, VfsSearch, VirtualFileSystem (super-trait)
+├── types.rs          ← ContextEntry, VectorPoint, etc.
+├── vfs_impl.rs       ← VirtualFileSystemImpl (the main implementation)
+├── backend/
+│   ├── traits.rs     ← StorageBackend trait (9 methods)
+│   └── local.rs      ← LocalFileBackend (filesystem adapter)
+├── vector/
+│   ├── traits.rs     ← VectorStorage trait (12 methods)
+│   └── qdrant.rs     ← QdrantVectorStore (Qdrant adapter)
+└── summary/
+    └── engine.rs     ← SummaryEngine (LLM-based summary generation)
 ```
 
-`ModelServices` is a plain struct that bundles `Arc<dyn ChatService>`, `Arc<dyn EmbeddingService>`, and `Arc<dyn VlmService>`. No routing, no failover, no health tracking — the harness philosophy is "fail fast, let the caller decide."
+**Trait implementation rules for backends:**
+- Implement trait methods **directly** in the `impl Trait for Struct` block. Do NOT define inherent methods that the trait impl delegates to. This avoids ~40% duplication.
+- `LocalFileBackend` has one `impl LocalFileBackend` block (constructors + private helpers) and one `impl StorageBackend for LocalFileBackend` block (real implementations). No second inherent block.
+- Same pattern applies to `QdrantVectorStore` / `VectorStorage`.
+- Pass-through wrappers like `fn foo(x) -> X { x.bar() }` are waste — call the underlying method directly.
 
-### Provider Module (`core/src/model/provider/`)
+**VirtualFileSystem trait hierarchy:**
+- `VfsCore` (entry lifecycle + metadata), `ContentStore` (layered I/O), `VfsSearch` (vector search)
+- `VirtualFileSystem` is an auto-implemented super-trait: any type implementing all three sub-traits gets it.
+- Consumers should prefer `Arc<dyn VirtualFileSystem>` injection.
 
-- `client.rs` — `AsyncOpenAIClient` struct wrapping `async-openai` + `finish_reason_str()`
-- `chat.rs`, `embedding.rs`, `vision.rs`, `discovery.rs` — trait impls on `AsyncOpenAIClient`
-- `middleware.rs` — `LoggedService<T>` decorator (pub(crate), only used internally)
-- `mod.rs` — crate-visible re-exports
+### Scheduler & Tasks
 
-**Do NOT add retry logic to provider.** Retry was intentionally removed. Logging is done through `LoggedService` wrapping in `ModelServices::from_configs()`.
-
-### Service Initialization
-
-`server/src/agent_builder.rs::create_model_services()` converts TOML config into `ModelServices`. Callers extract what they need:
-
-```rust
-let svc = create_model_services(config).await?;
-let chat = svc.chat;           // Arc<dyn ChatService>
-let embed = svc.embedding;     // Arc<dyn EmbeddingService>
-// call with embed.embed(...)
 ```
+core/src/scheduler/
+├── mod.rs             ← re-exports TaskScheduler, TaskHandler, TaskContext, etc.
+├── task_scheduler.rs  ← TaskScheduler, TaskHandler trait, TaskContext, TaskDefinition, TaskResult
+└── tasks/
+    ├── mod.rs         ← re-exports GcTask, MemoryTask, SummaryTask
+    ├── gc_task.rs     ← GcTask (garbage collection, stale rule/memory cleanup)
+    ├── memory_task.rs ← MemoryTask (session memory extraction)
+    └── summary_task.rs← SummaryTask (VFS summary generation)
+```
+
+- `tasks/` was merged into `scheduler/` as a submodule. Import paths:
+  - `tianyan::scheduler::{TaskScheduler, TaskHandler, TaskContext, ...}`
+  - `tianyan::scheduler::tasks::{GcTask, MemoryTask, SummaryTask}`
+- There is no `tianyan::tasks` — it was removed.
 
 ### Config System
 
 Two config types exist (known duplication, not yet unified):
-- `config/model.rs::ModelServiceConfig` — external TOML layer (`TianyanConfig.models.services`)
-- `model/types/config.rs::ModelConfig` — internal provider/router layer
+- `config/model.rs::ModelServiceConfig` — TOML layer (`TianyanConfig.models.services`)
+- `model/config.rs::ModelConfig` — internal provider layer
 
-Conversion happens in `server/src/agent_builder.rs::build_model_router()`. No `max_retries` field — it was removed.
+No `max_retries` field — it was removed.
 
 ### Error Types
 
-All errors use `TianyanError` enum from `core/src/common/error.rs`. Key variants:
-- `Config(String)`, `ModelService(String)`, `EmbeddingService(String)`, `VlmService(String)`
-- `Io(std::io::Error)`, `JsonError(serde_json::Error)`, `TomlError(toml::de::Error)`
-
-Never introduce new error types; extend `TianyanError` if needed.
+All errors use `TianyanError` enum from `core/src/common/error.rs`. Extend `TianyanError` if needed; never introduce new error types.
 
 ## Testing
 
 - Unit tests: `#[cfg(test)] mod tests { ... }` inline in source files (preferred)
 - Integration tests: `tests/` directories under each crate
-- Run single crate: `cargo test -p tianyan-core --lib`
 - CI matrix runs on ubuntu, windows, macos with `--nocapture`
+- The test suite expects no external services — `MockVectorStorage` and temp directories are used for isolation
 
 ## Common Pitfalls
 
 - `tianyan` and `tianyan-core` refer to the same package (lib name `tianyan`). Imports use `tianyan::...`.
-- The `model/provider/` submodule uses `pub(crate)` visibility for internal items; external code should go through `ModelRouter`.
+- `model/provider/` uses `pub(crate)` visibility; go through `ModelServices` from outside.
 - `ServiceDiscovery::is_available()` is `async` — don't forget `await`.
 - Config file search order: `./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml`.
+
+### VFS Initialization Split
+
+Application bootstrap logic lives in the server crate, NOT in core VFS:
+
+- `VfsCore::initialize()` (`core/src/vfs/vfs_impl.rs`) handles pure infrastructure: storage + vector init + creating namespace root directories for each `ContextNamespace`.
+- `bootstrap_app_vfs()` in `server/src/lib.rs` handles application content: default soul.md, learned directory, user profile stub. This is where `AgentPath`, `DEFAULT_SOUL`, and user-facing content belong.
+
+When adding VFS init logic, decide: is it infrastructure (put it in `initialize()`) or application content (put it in server's `bootstrap_app_vfs`)?
+
+### Design Principles
+
+- **One adapter = hypothetical seam. Two adapters = real seam.** Don't introduce a trait solely for testability or future flexibility. Extract a trait only when a second adapter exists or is being built right now.
+- `SummaryEngine` (`core/src/vfs/summary/engine.rs`) is a concrete struct for good reason — no second summary strategy exists. Mock dependencies (`ChatService`, `EmbeddingService`) which already have traits instead.
+- `DEFAULT_SOUL` constant lives at `core/src/agent/mod.rs` (built via `include_str!`). Use it instead of reaching for the raw file.

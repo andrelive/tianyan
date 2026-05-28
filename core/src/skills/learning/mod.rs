@@ -349,7 +349,7 @@ mod tests {
     use crate::common::error::Result;
     use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
     use crate::vfs::{
-        ContentMetadata, ContentStore, ContextEntry, VfsCore, VfsMetadata, VfsSearch,
+        ContentMetadata, ContentStore, ContextEntry, VfsCore, VfsSearch,
         VirtualFileSystem,
     };
     use std::collections::HashMap;
@@ -381,6 +381,20 @@ mod tests {
         }
         async fn move_entry(&self, _source: &TianyanUri, _destination: &TianyanUri) -> Result<()> {
             Ok(())
+        }
+        async fn update_metadata(
+            &self,
+            _uri: &TianyanUri,
+            _importance: f32,
+            _custom: HashMap<String, serde_json::Value>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn get_all_content_metadata(
+            &self,
+            _uri: &TianyanUri,
+        ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
+            Ok(HashMap::new())
         }
     }
 
@@ -429,24 +443,6 @@ mod tests {
             _overview_content: &str,
         ) -> Result<()> {
             Ok(())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl VfsMetadata for MockVfs {
-        async fn update_metadata(
-            &self,
-            _uri: &TianyanUri,
-            _importance: f32,
-            _custom: HashMap<String, serde_json::Value>,
-        ) -> Result<()> {
-            Ok(())
-        }
-        async fn get_all_content_metadata(
-            &self,
-            _uri: &TianyanUri,
-        ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
-            Ok(HashMap::new())
         }
     }
 

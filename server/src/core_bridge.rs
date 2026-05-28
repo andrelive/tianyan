@@ -42,6 +42,7 @@ pub fn convert_message(msg: &crate::api::ChatMessage) -> Message {
         content: msg.content.clone(),
         tool_calls: None,
         tool_call_id: None,
+        reasoning_content: None,
     }
 }
 

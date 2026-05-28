@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use crate::common::error::{Result, TianyanError};
 use crate::model::{ChatService, EmbeddingService, VisionEncoder, VlmService};
-use crate::vfs::{backend::LocalFileBackend, VectorStorage};
+use crate::vfs::{backend::StorageBackend, VectorStorage};
 
 use super::{IngestorConfig, KnowledgeIngestor};
 
@@ -18,7 +20,7 @@ where
     embedding_service: Option<E>,
     vlm_service: Option<V>,
     vision_encoder: Option<VE>,
-    storage: Option<LocalFileBackend>,
+    storage: Option<Arc<dyn StorageBackend>>,
     vector_storage: Option<VS>,
 }
 
@@ -74,7 +76,7 @@ where
     }
 
     /// 设置存储后端。
-    pub fn with_storage(mut self, storage: LocalFileBackend) -> Self {
+    pub fn with_storage(mut self, storage: Arc<dyn StorageBackend>) -> Self {
         self.storage = Some(storage);
         self
     }

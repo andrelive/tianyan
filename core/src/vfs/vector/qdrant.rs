@@ -45,8 +45,7 @@ impl QdrantVectorStore {
     pub fn with_url(config: &StorageConfig, url: &str) -> Result<Self> {
         let client = qdrant_client::Qdrant::from_url(url).build().map_err(|e| {
             TianyanError::VectorDatabase(format!(
-                "创建 Qdrant 客户端失。
- {}",
+                "创建 Qdrant 客户端失败：{}",
                 e
             ))
         })?;
@@ -77,14 +76,6 @@ impl QdrantVectorStore {
     /// 获取集合名称。
     pub fn collection_name(&self) -> &str {
         &self.collection_name
-    }
-
-    /// 将 URI 转换为 Qdrant 点 ID。
-    ///
-    /// Qdrant 要求点 ID 必须是有效的 UUID 格式或无符号整数。
-    /// 使用 TianyanUri::to_point_id() 生成确定性 UUID。
-    fn uri_to_point_id(uri: &TianyanUri) -> String {
-        uri.to_point_id()
     }
 
     /// 如果集合不存在则创建。
@@ -176,7 +167,7 @@ impl QdrantVectorStore {
     ) -> Result<()> {
         use qdrant_client::qdrant::{NamedVectors, PointVectors, UpdatePointVectorsBuilder};
 
-        let id = Self::uri_to_point_id(uri);
+        let id = uri.to_point_id();
 
         let named_vectors = NamedVectors::default().add_vector("visual", visual_embedding.to_vec());
 
@@ -203,7 +194,7 @@ impl QdrantVectorStore {
         vector_name: &str,
         vector: &[f32],
     ) -> Result<()> {
-        let id = Self::uri_to_point_id(uri);
+        let id = uri.to_point_id();
 
         let existing_point = self.get_point(&id).await?;
 
@@ -260,170 +251,6 @@ impl QdrantVectorStore {
         Ok(())
     }
 
-    /// 使用多向量融合搜索（RRF 算法）。
-    ///
-    /// 使用 Qdrant Query API，通过 prefetch + fusion 实现
-    /// 多个命名向量的融合搜索，使用 RRF (Reciprocal Rank Fusion) 算法。
-    ///
-    /// # 参数
-    /// - `query_vector`: 查询向量
-    /// - `vector_names`: 要搜索的命名向量列表（如 ["abstract", "overview"]）
-    /// - `top_k`: 返回结果数量
-    /// - `category_filter`: 可选的类别过滤
-    /// - `min_score`: 可选的最低分数阈值
-    ///
-    /// # 返回
-    /// 融合后的搜索结果列表
-    pub async fn search_fused(
-        &self,
-        query_vector: Vec<f32>,
-        vector_names: &[&str],
-        top_k: usize,
-        category_filter: Option<&str>,
-        min_score: Option<f32>,
-    ) -> Result<Vec<VectorSearchResult>> {
-        use qdrant_client::qdrant::{
-            Condition, Filter, Fusion, PrefetchQueryBuilder, Query, QueryPointsBuilder,
-        };
-
-        // 构建多个 prefetch 查询
-        let mut prefetch_queries: Vec<qdrant_client::qdrant::PrefetchQuery> = Vec::new();
-
-        for vector_name in vector_names {
-            let prefetch = PrefetchQueryBuilder::default()
-                .query(query_vector.clone())
-                .using(vector_name.to_string())
-                .limit((top_k * 2) as u64) // 每个向量获取更多候选
-                .build();
-            prefetch_queries.push(prefetch);
-        }
-
-        // 构建 Query 请求，使用 RRF 融合
-        let mut query_builder = QueryPointsBuilder::new(&self.collection_name)
-            .query(Query::new_fusion(Fusion::Rrf))
-            .prefetch(prefetch_queries)
-            .limit(top_k as u64)
-            .with_payload(true);
-
-        // 添加类别过滤
-        if let Some(cat) = category_filter {
-            query_builder = query_builder.filter(Filter::must([Condition::matches(
-                "namespace",
-                cat.to_string(),
-            )]));
-        }
-
-        // 添加分数阈值
-        if let Some(score) = min_score {
-            query_builder = query_builder.score_threshold(score);
-        }
-
-        let results = self
-            .client
-            .query(query_builder)
-            .await
-            .map_err(|e| TianyanError::VectorDatabase(format!("融合搜索失败: {}", e)))?;
-
-        Ok(results
-            .result
-            .into_iter()
-            .map(|r| {
-                let payload = EntryMetadata::from_qdrant_payload(&r.payload)
-                    .unwrap_or_else(|_| EntryMetadata::default());
-                VectorSearchResult {
-                    id: format!("{:?}", r.id),
-                    score: r.score,
-                    payload,
-                }
-            })
-            .collect())
-    }
-
-    /// 使用摘要和概览向量进行融合搜索。
-    ///
-    /// 这是一个便捷方法，使用相同的查询向量同时搜索
-    /// abstract 和 overview 两个命名向量，并通过 RRF 算法融合结果。
-    ///
-    /// # 参数
-    /// - `query_vector`: 查询向量
-    /// - `top_k`: 返回结果数量
-    /// - `category_filter`: 可选的类别过滤
-    ///
-    /// # 返回
-    /// 融合后的搜索结果列表
-    pub async fn search_abstract_and_overview(
-        &self,
-        query_vector: Vec<f32>,
-        top_k: usize,
-        category_filter: Option<&str>,
-    ) -> Result<Vec<VectorSearchResult>> {
-        self.search_fused(
-            query_vector,
-            &["abstract", "overview"],
-            top_k,
-            category_filter,
-            Some(L1_MIN_SCORE),
-        )
-        .await
-    }
-
-    /// 通用搜索方法。
-    async fn search(
-        &self,
-        query_vector: Vec<f32>,
-        vector_type: VectorType,
-        top_k: usize,
-        category_filter: Option<&str>,
-        min_score: Option<f32>,
-    ) -> Result<Vec<VectorSearchResult>> {
-        use qdrant_client::qdrant::{Condition, Filter, SearchPointsBuilder};
-
-        let vector_name = match vector_type {
-            VectorType::Abstract => "abstract",
-            VectorType::Overview => "overview",
-            VectorType::Visual => "visual",
-        };
-
-        // 构建搜索请求
-        let mut search_builder =
-            SearchPointsBuilder::new(&self.collection_name, query_vector, top_k as u64)
-                .vector_name(vector_name)
-                .with_payload(true);
-
-        // 如果指定了类别则添加过滤
-        if let Some(cat) = category_filter {
-            search_builder = search_builder.filter(Filter::must([Condition::matches(
-                "namespace",
-                cat.to_string(),
-            )]));
-        }
-
-        // 如果指定了分数阈值则添加
-        if let Some(score) = min_score {
-            search_builder = search_builder.score_threshold(score);
-        }
-
-        let results = self
-            .client
-            .search_points(search_builder)
-            .await
-            .map_err(|e| TianyanError::VectorDatabase(format!("搜索失败: {}", e)))?;
-
-        Ok(results
-            .result
-            .into_iter()
-            .map(|r| {
-                let payload = EntryMetadata::from_qdrant_payload(&r.payload)
-                    .unwrap_or_else(|_| EntryMetadata::default());
-                VectorSearchResult {
-                    id: format!("{:?}", r.id),
-                    score: r.score,
-                    payload,
-                }
-            })
-            .collect())
-    }
-
     /// 将 VectorPoint 转换为 Qdrant 负载
     fn point_to_payload(&self, point: &VectorPoint) -> qdrant_client::Payload {
         let mut payload = point.payload.to_qdrant_payload();
@@ -448,7 +275,7 @@ impl VectorStorage for QdrantVectorStore {
     }
 
     async fn upsert_point(&self, point: &VectorPoint) -> Result<()> {
-        let id = Self::uri_to_point_id(point.uri());
+        let id = point.uri().to_point_id();
         let payload = self.point_to_payload(point);
 
         self.upsert_vectors(
@@ -475,14 +302,49 @@ impl VectorStorage for QdrantVectorStore {
     }
 
     async fn search(&self, query: VectorSearchQuery) -> Result<Vec<VectorSearchResult>> {
-        self.search(
-            query.vector,
-            query.vector_type,
-            query.limit,
-            query.category_filter.as_deref(),
-            query.min_score,
-        )
-        .await
+        use qdrant_client::qdrant::{Condition, Filter, SearchPointsBuilder};
+
+        let vector_name = match query.vector_type {
+            VectorType::Abstract => "abstract",
+            VectorType::Overview => "overview",
+            VectorType::Visual => "visual",
+        };
+
+        let mut search_builder =
+            SearchPointsBuilder::new(&self.collection_name, query.vector, query.limit as u64)
+                .vector_name(vector_name)
+                .with_payload(true);
+
+        if let Some(ref cat) = query.category_filter {
+            search_builder = search_builder.filter(Filter::must([Condition::matches(
+                "namespace",
+                cat.to_string(),
+            )]));
+        }
+
+        if let Some(score) = query.min_score {
+            search_builder = search_builder.score_threshold(score);
+        }
+
+        let results = self
+            .client
+            .search_points(search_builder)
+            .await
+            .map_err(|e| TianyanError::VectorDatabase(format!("搜索失败: {}", e)))?;
+
+        Ok(results
+            .result
+            .into_iter()
+            .map(|r| {
+                let payload = EntryMetadata::from_qdrant_payload(&r.payload)
+                    .unwrap_or_else(|_| EntryMetadata::default());
+                VectorSearchResult {
+                    id: format!("{:?}", r.id),
+                    score: r.score,
+                    payload,
+                }
+            })
+            .collect())
     }
 
     async fn get_point(&self, id: &str) -> Result<Option<VectorPoint>> {
@@ -599,14 +461,57 @@ impl VectorStorage for QdrantVectorStore {
         category_filter: Option<&str>,
         min_score: Option<f32>,
     ) -> Result<Vec<VectorSearchResult>> {
-        self.search_fused(
-            query_vector,
-            vector_names,
-            top_k,
-            category_filter,
-            min_score,
-        )
-        .await
+        use qdrant_client::qdrant::{
+            Condition, Filter, Fusion, PrefetchQueryBuilder, Query, QueryPointsBuilder,
+        };
+
+        let mut prefetch_queries: Vec<qdrant_client::qdrant::PrefetchQuery> = Vec::new();
+
+        for vector_name in vector_names {
+            let prefetch = PrefetchQueryBuilder::default()
+                .query(query_vector.clone())
+                .using(vector_name.to_string())
+                .limit((top_k * 2) as u64)
+                .build();
+            prefetch_queries.push(prefetch);
+        }
+
+        let mut query_builder = QueryPointsBuilder::new(&self.collection_name)
+            .query(Query::new_fusion(Fusion::Rrf))
+            .prefetch(prefetch_queries)
+            .limit(top_k as u64)
+            .with_payload(true);
+
+        if let Some(cat) = category_filter {
+            query_builder = query_builder.filter(Filter::must([Condition::matches(
+                "namespace",
+                cat.to_string(),
+            )]));
+        }
+
+        if let Some(score) = min_score {
+            query_builder = query_builder.score_threshold(score);
+        }
+
+        let results = self
+            .client
+            .query(query_builder)
+            .await
+            .map_err(|e| TianyanError::VectorDatabase(format!("融合搜索失败: {}", e)))?;
+
+        Ok(results
+            .result
+            .into_iter()
+            .map(|r| {
+                let payload = EntryMetadata::from_qdrant_payload(&r.payload)
+                    .unwrap_or_else(|_| EntryMetadata::default());
+                VectorSearchResult {
+                    id: format!("{:?}", r.id),
+                    score: r.score,
+                    payload,
+                }
+            })
+            .collect())
     }
 
     /// 使用 Qdrant 原生的融合搜索能力。
@@ -616,8 +521,14 @@ impl VectorStorage for QdrantVectorStore {
         top_k: usize,
         category_filter: Option<&str>,
     ) -> Result<Vec<VectorSearchResult>> {
-        self.search_abstract_and_overview(query_vector, top_k, category_filter)
-            .await
+        self.search_fused(
+            query_vector,
+            &["abstract", "overview"],
+            top_k,
+            category_filter,
+            Some(L1_MIN_SCORE),
+        )
+        .await
     }
 }
 
@@ -707,7 +618,7 @@ mod tests {
             crate::common::types::ContextNamespace::User,
             vec!["profile".to_string(), "basic_info".to_string()],
         );
-        let id = QdrantVectorStore::uri_to_point_id(&uri);
+        let id = uri.to_point_id();
 
         // 验证 ID 是有效的标准 UUID 格式：36 字符，8-4-4-4-12
         assert_eq!(id.len(), 36);
@@ -730,7 +641,7 @@ mod tests {
             .all(|part| part.chars().all(|c| c.is_ascii_hexdigit())));
 
         // 验证相同 URI 产生相同 ID（确定性）
-        let id2 = QdrantVectorStore::uri_to_point_id(&uri);
+        let id2 = uri.to_point_id();
         assert_eq!(id, id2);
 
         // 验证不同 URI 产生不同 ID
@@ -738,7 +649,7 @@ mod tests {
             crate::common::types::ContextNamespace::Memory,
             vec!["session1".to_string()],
         );
-        let id3 = QdrantVectorStore::uri_to_point_id(&uri2);
+        let id3 = uri2.to_point_id();
         assert_ne!(id, id3);
     }
 

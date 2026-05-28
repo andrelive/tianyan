@@ -1,7 +1,7 @@
 use super::VirtualFileSystemImpl;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::vfs::test_utils::create_test_vfs;
-use crate::vfs::{ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
+use crate::vfs::{ContentStore, VfsCore, VfsSearch};
 
 #[tokio::test]
 async fn test_vfs_initialize() {
@@ -99,28 +99,6 @@ async fn test_vfs_move() {
     vfs.move_entry(&source, &dest).await.unwrap();
 
     assert!(!vfs.exists(&source).await.unwrap());
-    assert!(vfs.exists(&dest).await.unwrap());
-
-    let content = vfs.read(&dest, ContentLevel::Detail).await.unwrap();
-    assert_eq!(content, "测试内容");
-}
-
-#[tokio::test]
-async fn test_vfs_copy() {
-    let vfs = create_test_vfs().await;
-    vfs.initialize().await.unwrap();
-
-    let source = TianyanUri::new(ContextNamespace::User, vec!["source".to_string()]);
-    let dest = TianyanUri::new(ContextNamespace::User, vec!["dest".to_string()]);
-
-    vfs.create_file(&source).await.unwrap();
-    vfs.write(&source, ContentLevel::Detail, "测试内容")
-        .await
-        .unwrap();
-
-    vfs.copy_entry(&source, &dest).await.unwrap();
-
-    assert!(vfs.exists(&source).await.unwrap());
     assert!(vfs.exists(&dest).await.unwrap());
 
     let content = vfs.read(&dest, ContentLevel::Detail).await.unwrap();

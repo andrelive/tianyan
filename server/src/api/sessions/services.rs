@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tracing::{debug, info};
 
+use tianyan::common::types::Part;
 use tianyan::session::SessionManager;
 
 use crate::api::sessions::types::{
@@ -90,7 +91,9 @@ impl SessionService {
             .into_iter()
             .map(|m| ChatMessage {
                 role: m.role.into(),
-                content: m.content,
+                content: m.parts.iter().filter_map(|p| {
+                    if let Part::Text { text, .. } = p { Some(text.clone()) } else { None }
+                }).collect::<Vec<_>>().join("\n"),
                 timestamp: None,
             })
             .collect();

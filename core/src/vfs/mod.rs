@@ -41,12 +41,12 @@ mod test_utils;
 
 // 重新导出公共 API
 pub use crate::config::StorageConfig;
-pub use backend::LocalFileBackend;
+pub use backend::{LocalFileBackend, StorageBackend};
 pub use summary::{
     MockSummaryEngine, SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
 };
 pub use traits::{
-    ContentMetadata, ContentStore, VfsCore, VfsMetadata, VfsSearch,
+    ContentMetadata, ContentStore, VfsCore, VfsSearch,
     VirtualFileSystem,
 };
 pub use types::{
@@ -56,7 +56,7 @@ pub use types::{
 pub use uri_mapper::UriMapper;
 pub use vector::{VectorStorage, QdrantVectorStore, QdrantVectorStoreBuilder};
 pub use vfs_impl::{
-    ensure_vfs_structure, initialize_vfs, VirtualFileSystemBuilder, VirtualFileSystemImpl,
+    VirtualFileSystemBuilder, VirtualFileSystemImpl,
 };
 
 /// 虚拟文件系统的共享引用类型别名。

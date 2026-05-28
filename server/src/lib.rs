@@ -10,7 +10,7 @@ use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
-use tianyan::tasks::{MemoryTask, SummaryTask};
+use tianyan::scheduler::tasks::{MemoryTask, SummaryTask};
 
 use crate::agent_builder::create_model_services;
 
@@ -104,7 +104,8 @@ fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
 ) -> anyhow::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
     use tianyan::vfs::{
-        LocalFileBackend, QdrantVectorStore, VectorStorage, VirtualFileSystemBuilder,
+        LocalFileBackend, QdrantVectorStore, VectorStorage,
+        VirtualFileSystemBuilder,
     };
 
     // 1. 创建存储后端
@@ -139,10 +140,40 @@ fn initialize_vfs_for_app(
 
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current()
-            .block_on(async { tianyan::vfs::ensure_vfs_structure(&vfs).await })
+            .block_on(async { bootstrap_app_vfs(&vfs).await })
     })?;
 
     Ok(Arc::new(vfs))
+}
+
+async fn bootstrap_app_vfs(
+    vfs: &tianyan::vfs::VirtualFileSystemImpl,
+) -> Result<(), tianyan::common::error::TianyanError> {
+    use tianyan::agent::DEFAULT_SOUL;
+    use tianyan::common::types::{AgentPath, ContentLevel, ContextNamespace, TianyanUri};
+    use tianyan::vfs::{ContentStore, VfsCore};
+
+    let soul_uri = AgentPath::Soul.uri();
+    if !vfs.has_content(&soul_uri, ContentLevel::Detail).await.unwrap_or(false) {
+        vfs.create_file(&soul_uri).await?;
+        vfs.write(&soul_uri, ContentLevel::Detail, DEFAULT_SOUL).await?;
+        tracing::info!("已创建默认核心提示词： tianyan://agent/soul");
+    }
+
+    let learned_uri = AgentPath::Learned.uri();
+    if !vfs.exists(&learned_uri).await? {
+        vfs.create_directory(&learned_uri).await?;
+        tracing::info!("已创建学习规则目录： tianyan://agent/learned");
+    }
+
+    let user_uri = TianyanUri::new(ContextNamespace::User, vec![]);
+    if !vfs.has_content(&user_uri, ContentLevel::Detail).await.unwrap_or(false) {
+        vfs.write(&user_uri, ContentLevel::Detail, "# 用户档案\n\n").await?;
+        tracing::info!("已创建默认用户档案： tianyan://user");
+    }
+
+    tracing::info!("VFS 目录结构初始化完成");
+    Ok(())
 }
 
 /// Create the application router with configuration

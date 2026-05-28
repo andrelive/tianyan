@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 use tianyan::agent::{AgentCoordinator, SessionState};
+use tianyan::common::types::Part;
 use tianyan::session::SessionManager;
 
 use crate::api::chat::types::{
@@ -82,7 +83,7 @@ impl ChatService {
 
         let mut state = SessionState::new(session_id);
         for msg in messages {
-            state.add_message(convert_message(msg));
+            state.add_user_message(msg.content.clone());
         }
 
         if let Some(last_msg) = messages.last() {
@@ -266,7 +267,9 @@ impl ChatService {
             .iter()
             .map(|m| ChatMessage {
                 role: m.role.into(),
-                content: m.content.clone(),
+                content: m.parts.iter().filter_map(|p| {
+                    if let Part::Text { text, .. } = p { Some(text.clone()) } else { None }
+                }).collect::<Vec<_>>().join("\n"),
                 timestamp: None,
             })
             .collect();
@@ -319,7 +322,12 @@ impl ChatService {
             return Err(anyhow::anyhow!("只能编辑用户消息"));
         }
 
-        session.messages[request.message_index].content = request.new_content.clone();
+        for part in &mut session.messages[request.message_index].parts {
+            if let Part::Text { text, .. } = part {
+                *text = request.new_content.clone();
+                break;
+            }
+        }
         session.messages.truncate(request.message_index + 1);
 
         if let Err(e) = self.session_manager.update_session(&session).await {
@@ -332,7 +340,9 @@ impl ChatService {
             .iter()
             .map(|m| ChatMessage {
                 role: m.role.into(),
-                content: m.content.clone(),
+                content: m.parts.iter().filter_map(|p| {
+                    if let Part::Text { text, .. } = p { Some(text.clone()) } else { None }
+                }).collect::<Vec<_>>().join("\n"),
                 timestamp: None,
             })
             .collect();

@@ -13,7 +13,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContextNamespace, TianyanUri};
 use crate::model::{ChatService, EmbeddingService, VisionEncoder, VlmService};
 use crate::vfs::{
-    backend::LocalFileBackend, ContextEntry, SummaryEngine, VectorPoint, VectorStorage,
+    backend::StorageBackend, ContextEntry, SummaryEngine, VectorPoint, VectorStorage,
     CURRENT_SCHEMA_VERSION,
 };
 
@@ -110,7 +110,7 @@ where
     embedding_service: Arc<E>,
     vlm_service: V,
     vision_encoder: VE,
-        storage: LocalFileBackend,
+    storage: Arc<dyn StorageBackend>,
     vector_storage: VS,
     summary_engine: SummaryEngine,
 }
@@ -130,7 +130,7 @@ where
         embedding_service: E,
         vlm_service: V,
         vision_encoder: VE,
-    storage: LocalFileBackend,
+        storage: Arc<dyn StorageBackend>,
         vector_storage: VS,
     ) -> Result<Self> {
         let parser = CompositeParser::new();

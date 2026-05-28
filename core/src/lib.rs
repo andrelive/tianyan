@@ -46,7 +46,6 @@ pub mod scheduler;
 pub mod session;
 pub mod skills;
 pub mod vfs;
-pub mod tasks;
 
 // 重新导出常用类型
 pub use common::error::{Result, TianyanError};

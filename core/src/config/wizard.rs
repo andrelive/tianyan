@@ -200,7 +200,7 @@ fn default_max_context_tokens() -> usize {
 }
 
 fn default_system_prompt() -> String {
-    include_str!("../agent/default_soul.md").to_string()
+    crate::agent::DEFAULT_SOUL.to_string()
 }
 
 fn default_retrieval_top_k() -> usize {

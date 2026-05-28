@@ -9,9 +9,9 @@ use crate::common::types::{
     ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
 };
 use crate::model::EmbeddingService;
-use crate::vfs::backend::LocalFileBackend;
+use crate::vfs::backend::StorageBackend;
 use crate::vfs::traits::{
-    ContentMetadata, ContentStore, VfsCore, VfsMetadata, VfsSearch,
+    ContentMetadata, ContentStore, VfsCore, VfsSearch,
     VirtualFileSystem,
 };
 use crate::vfs::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
@@ -21,7 +21,7 @@ use crate::config::StorageConfig;
 
 /// 虚拟文件系统实现。
 pub struct VirtualFileSystemImpl {
-    storage: Arc<LocalFileBackend>,
+    storage: Arc<dyn StorageBackend>,
     vector_storage: Arc<dyn VectorStorage>,
     config: StorageConfig,
     embedding_service: Option<Arc<dyn EmbeddingService>>,
@@ -31,7 +31,7 @@ pub struct VirtualFileSystemImpl {
 impl VirtualFileSystemImpl {
     /// 创建新的虚拟文件系统。
     pub fn new(
-        storage: Arc<LocalFileBackend>,
+        storage: Arc<dyn StorageBackend>,
         vector_storage: Arc<dyn VectorStorage>,
         config: StorageConfig,
     ) -> Self {
@@ -46,7 +46,7 @@ impl VirtualFileSystemImpl {
 
     /// 使用默认配置创建虚拟文件系统。
     pub fn with_defaults(
-        storage: Arc<LocalFileBackend>,
+        storage: Arc<dyn StorageBackend>,
         vector_storage: Arc<dyn VectorStorage>,
     ) -> Self {
         Self::new(storage, vector_storage, StorageConfig::default())
@@ -81,65 +81,6 @@ impl VirtualFileSystemImpl {
     /// 从上下文条目生成向量点。
     fn create_vector_point(&self, entry: &ContextEntry) -> VectorPoint {
         VectorPoint::from_entry(entry)
-    }
-
-    /// 为内容生成嵌入向量并存储到向量数据库。
-    ///
-    /// 此方法会调用嵌入服务为指定内容生成向量，然后更新向量存储。
-    /// 如果嵌入服务不可用，会记录警告但不会失败。
-    async fn generate_and_store_embedding(
-        &self,
-        uri: &TianyanUri,
-        level: ContentLevel,
-        content: &str,
-    ) -> Result<()> {
-        if content.trim().is_empty() {
-            tracing::trace!("内容为空，跳过向量生成 {} {:?}", uri, level);
-            return Ok(());
-        }
-
-        let (Some(service), Some(model)) = (&self.embedding_service, &self.embedding_model) else {
-            tracing::warn!("嵌入服务未配置，跳过向量生成: {} {:?}", uri, level);
-            return Ok(());
-        };
-
-        let vector_type = match level {
-            ContentLevel::Abstract => VectorType::Abstract,
-            ContentLevel::Overview => VectorType::Overview,
-            ContentLevel::Detail => {
-                tracing::trace!("Detail 层级不生成向量 {}", uri);
-                return Ok(());
-            }
-        };
-
-        tracing::debug!("开始为 {} {:?} 生成向量", uri, level);
-
-        let dimensions = self.config.vector.vector_dimension;
-
-        match service
-            .embed_single_with_dimensions(model, content, dimensions)
-            .await
-        {
-            Ok(embedding) => {
-                let vector = embedding.vector.clone();
-
-                if let Err(e) = self
-                    .vector_storage
-                    .update_vector(uri, vector_type, &vector)
-                    .await
-                {
-                    tracing::error!("更新向量失败: {} {:?} - {}", uri, level, e);
-                    return Err(e);
-                }
-
-                tracing::info!("向量生成成功: {} {:?} (维度: {})", uri, level, vector.len());
-                Ok(())
-            }
-            Err(e) => {
-                tracing::warn!("向量生成失败: {} {:?} - {}", uri, level, e);
-                Err(e)
-            }
-        }
     }
 
     /// 将条目同步到向量存储。
@@ -256,6 +197,15 @@ impl VfsCore for VirtualFileSystemImpl {
     async fn initialize(&self) -> Result<()> {
         self.storage.initialize().await?;
         self.vector_storage.initialize().await?;
+
+        for &ns in ContextNamespace::ALL {
+            let uri = TianyanUri::new(ns, vec![]);
+            if !self.storage.exists(&uri).await? {
+                self.create_directory(&uri).await?;
+                tracing::debug!("已创建 VFS 命名空间： {}", uri);
+            }
+        }
+
         tracing::info!("虚拟文件系统已初始化");
         Ok(())
     }
@@ -315,7 +265,7 @@ impl VfsCore for VirtualFileSystemImpl {
             return Err(TianyanError::EntryNotFound(uri.to_string()));
         }
         self.storage.delete_entry(uri).await?;
-        let point_id = uri.to_string().replace("://", "_").replace('/', "_");
+        let point_id = uri.to_point_id();
         let _ = self.vector_storage.delete_point(&point_id).await;
         tracing::debug!("已删除条目： {}", uri);
         Ok(())
@@ -344,10 +294,72 @@ impl VfsCore for VirtualFileSystemImpl {
         dst_entry.metadata.touch();
         self.storage.write_entry(&dst_entry).await?;
         self.storage.delete_entry(source).await?;
-        let point_id = source.to_string().replace("://", "_").replace('/', "_");
+        let point_id = source.to_point_id();
         let _ = self.vector_storage.delete_point(&point_id).await;
         tracing::debug!("已移动条目： {} -> {}", source, destination);
         Ok(())
+    }
+
+    async fn update_metadata(
+        &self,
+        uri: &TianyanUri,
+        importance: f32,
+        custom: HashMap<String, serde_json::Value>,
+    ) -> Result<()> {
+        let point_id = uri.to_point_id();
+
+        let point = match self.vector_storage.get_point(&point_id).await? {
+            Some(mut p) => {
+                p.payload.importance = importance;
+                for (k, v) in custom {
+                    p.payload.custom.insert(k, v);
+                }
+                p
+            }
+            None => {
+                let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string())
+                    .with_importance(importance);
+                VectorPoint {
+                    schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
+                    id: point_id,
+                    abstract_vector: None,
+                    overview_vector: None,
+                    visual_vector: None,
+                    payload,
+                }
+            }
+        };
+
+        self.vector_storage.upsert_point(&point).await
+    }
+
+    async fn get_all_content_metadata(
+        &self,
+        uri: &TianyanUri,
+    ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
+        let entry = self.storage.read_entry(uri).await?;
+        let mut result = HashMap::new();
+
+        for level in [
+            ContentLevel::Abstract,
+            ContentLevel::Overview,
+            ContentLevel::Detail,
+        ] {
+            if entry.has_content(level) {
+                if let Ok(content) = self.storage.read_content(uri, level).await {
+                    result.insert(
+                        level,
+                        ContentMetadata {
+                            size: content.len() as u64,
+                            created_at: entry.metadata.created_at,
+                            updated_at: entry.metadata.updated_at,
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(result)
     }
 }
 
@@ -370,11 +382,6 @@ impl ContentStore for VirtualFileSystemImpl {
         }
 
         self.storage.write_content(uri, level, content).await?;
-
-        let mut entry = self.storage.read_entry(uri).await?;
-        entry.metadata.touch();
-        entry.set_content(level, content.to_string());
-        self.storage.write_entry(&entry).await?;
 
         tracing::trace!("已写入 {:?} 内容： {}", level, uri);
         Ok(())
@@ -403,13 +410,6 @@ impl ContentStore for VirtualFileSystemImpl {
 
         let level = ContentLevel::Detail;
         self.storage.append_content(uri, level, content).await?;
-
-        let mut entry = self.storage.read_entry(uri).await?;
-        entry.metadata.touch();
-        let existing = entry.get_content(level).unwrap_or("").to_string();
-        let combined = format!("{}{}", existing, content);
-        entry.set_content(level, combined);
-        self.storage.write_entry(&entry).await?;
 
         tracing::trace!("已追加内容： {}", uri);
         Ok(())
@@ -508,7 +508,7 @@ impl VfsSearch for VirtualFileSystemImpl {
             .embed_single(model, overview_content)
             .await?;
 
-        let point_id = uri.to_string().replace("://", "_").replace('/', "_");
+        let point_id = uri.to_point_id();
         let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string());
         let point = VectorPoint {
             schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
@@ -525,114 +525,7 @@ impl VfsSearch for VirtualFileSystemImpl {
     }
 }
 
-#[async_trait]
-impl VfsMetadata for VirtualFileSystemImpl {
-    async fn update_metadata(
-        &self,
-        uri: &TianyanUri,
-        importance: f32,
-        custom: HashMap<String, serde_json::Value>,
-    ) -> Result<()> {
-        let point_id = uri.to_string().replace("://", "_").replace('/', "_");
-
-        let point = match self.vector_storage.get_point(&point_id).await? {
-            Some(mut p) => {
-                p.payload.importance = importance;
-                for (k, v) in custom {
-                    p.payload.custom.insert(k, v);
-                }
-                p
-            }
-            None => {
-                let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string())
-                    .with_importance(importance);
-                VectorPoint {
-                    schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
-                    id: point_id,
-                    abstract_vector: None,
-                    overview_vector: None,
-                    visual_vector: None,
-                    payload,
-                }
-            }
-        };
-
-        self.vector_storage.upsert_point(&point).await
-    }
-
-    async fn get_all_content_metadata(
-        &self,
-        uri: &TianyanUri,
-    ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
-        let entry = self.storage.read_entry(uri).await?;
-        let mut result = HashMap::new();
-
-        for level in [
-            ContentLevel::Abstract,
-            ContentLevel::Overview,
-            ContentLevel::Detail,
-        ] {
-            if entry.has_content(level) {
-                if let Ok(content) = self.storage.read_content(uri, level).await {
-                    result.insert(
-                        level,
-                        ContentMetadata {
-                            size: content.len() as u64,
-                            created_at: entry.metadata.created_at,
-                            updated_at: entry.metadata.updated_at,
-                        },
-                    );
-                }
-            }
-        }
-
-        Ok(result)
-    }
-}
-
-#[async_trait]
-impl VirtualFileSystem for VirtualFileSystemImpl {
-    async fn copy_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()> {
-        Self::validate_uri(source)?;
-        Self::validate_uri(destination)?;
-
-        if !self.storage.exists(source).await? {
-            return Err(TianyanError::EntryNotFound(source.to_string()));
-        }
-
-        if self.storage.exists(destination).await? {
-            return Err(TianyanError::EntryAlreadyExists(destination.to_string()));
-        }
-
-        let entry = self.storage.read_entry(source).await?;
-
-        let mut new_entry = ContextEntry::new_file(destination.clone());
-        new_entry.metadata = entry.metadata.clone();
-        new_entry.metadata.uri = destination.clone();
-        new_entry.metadata.created_at = chrono::Utc::now();
-        new_entry.metadata.updated_at = chrono::Utc::now();
-        new_entry.abstract_content = entry.abstract_content;
-        new_entry.overview_content = entry.overview_content;
-        new_entry.detail_content = entry.detail_content;
-
-        self.storage.write_entry(&new_entry).await?;
-
-        if let Ok(content) = self
-            .storage
-            .read_content(source, ContentLevel::Detail)
-            .await
-        {
-            self.storage
-                .write_content(destination, ContentLevel::Detail, &content)
-                .await?;
-        }
-
-        self.sync_to_vector_storage(&new_entry).await?;
-
-        tracing::debug!("已将 {} 复制到 {}", source, destination);
-        Ok(())
-    }
-}
+impl VirtualFileSystem for VirtualFileSystemImpl {}
 
 #[path = "vfs_builder.rs"]
 pub mod builder;
@@ -640,4 +533,4 @@ pub mod builder;
 #[path = "vfs_tests.rs"]
 mod tests;
 
-pub use builder::{ensure_vfs_structure, initialize_vfs, VirtualFileSystemBuilder};
+pub use builder::VirtualFileSystemBuilder;

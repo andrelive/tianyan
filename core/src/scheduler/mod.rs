@@ -12,6 +12,7 @@
 //! - [`TaskResult`][]: 任务执行结果。
 
 mod task_scheduler;
+pub mod tasks;
 
 pub use task_scheduler::{
     TaskContext, TaskDefinition, TaskHandler, TaskPriority, TaskResult, TaskScheduler,

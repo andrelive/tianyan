@@ -500,7 +500,7 @@ mod tests {
     use crate::model::{EmbeddingData, EmbeddingRequest, EmbeddingResponse};
     use crate::vfs::{
         ContentMetadata, ContentStore, ContextEntry, VectorPoint, VectorSearchQuery,
-        VectorSearchResult, VectorStorage, VectorType, VfsCore, VfsMetadata, VfsSearch,
+        VectorSearchResult, VectorStorage, VectorType, VfsCore, VfsSearch,
     };
     use async_trait::async_trait;
     use std::collections::HashMap;
@@ -733,6 +733,20 @@ mod tests {
         async fn move_entry(&self, _source: &TianyanUri, _destination: &TianyanUri) -> Result<()> {
             Ok(())
         }
+        async fn update_metadata(
+            &self,
+            _uri: &TianyanUri,
+            _importance: f32,
+            _custom: HashMap<String, serde_json::Value>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn get_all_content_metadata(
+            &self,
+            _uri: &TianyanUri,
+        ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
+            Ok(HashMap::new())
+        }
     }
 
     #[async_trait]
@@ -819,24 +833,6 @@ mod tests {
             _overview_content: &str,
         ) -> Result<()> {
             Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl VfsMetadata for TestVfs {
-        async fn update_metadata(
-            &self,
-            _uri: &TianyanUri,
-            _importance: f32,
-            _custom: HashMap<String, serde_json::Value>,
-        ) -> Result<()> {
-            Ok(())
-        }
-        async fn get_all_content_metadata(
-            &self,
-            _uri: &TianyanUri,
-        ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
-            Ok(HashMap::new())
         }
     }
 

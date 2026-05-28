@@ -3,11 +3,9 @@
 use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::config::StorageConfig;
 use crate::model::EmbeddingService;
-use crate::vfs::backend::LocalFileBackend;
-use crate::vfs::traits::{VfsCore, VirtualFileSystem};
+use crate::vfs::backend::StorageBackend;
 use crate::vfs::vector::VectorStorage;
 
 use super::VirtualFileSystemImpl;
@@ -15,7 +13,7 @@ use super::VirtualFileSystemImpl;
 /// 用于创建虚拟文件系统实例的构建器。
 pub struct VirtualFileSystemBuilder {
     config: Option<StorageConfig>,
-    storage: Option<Arc<LocalFileBackend>>,
+    storage: Option<Arc<dyn StorageBackend>>,
     vector_storage: Option<Arc<dyn VectorStorage>>,
     embedding_service: Option<Arc<dyn EmbeddingService>>,
     embedding_model: Option<String>,
@@ -40,7 +38,7 @@ impl VirtualFileSystemBuilder {
     }
 
     /// 设置存储后端。
-    pub fn with_storage(mut self, storage: Arc<LocalFileBackend>) -> Self {
+    pub fn with_storage(mut self, storage: Arc<dyn StorageBackend>) -> Self {
         self.storage = Some(storage);
         self
     }
@@ -86,62 +84,4 @@ impl Default for VirtualFileSystemBuilder {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// 初始化 VFS 并确保目录结构存在。
-pub async fn initialize_vfs(
-    storage: Arc<LocalFileBackend>,
-    vector_storage: Arc<dyn VectorStorage>,
-    config: StorageConfig,
-) -> Result<Arc<dyn VirtualFileSystem>> {
-    let vfs = VirtualFileSystemImpl::new(storage, vector_storage, config);
-
-    vfs.initialize().await?;
-    ensure_vfs_structure(&vfs).await?;
-
-    Ok(Arc::new(vfs))
-}
-
-/// 确保 VFS 目录结构和默认文件存在。
-pub async fn ensure_vfs_structure(vfs: &dyn VirtualFileSystem) -> Result<()> {
-    for &ns in ContextNamespace::ALL {
-        let uri = TianyanUri::new(ns, vec![]);
-        if !vfs.exists(&uri).await? {
-            vfs.create_directory(&uri).await?;
-            tracing::debug!("已创建 VFS 命名空间： {}", uri);
-        }
-    }
-
-    let soul_uri = crate::common::types::AgentPath::Soul.uri();
-    if !vfs
-        .has_content(&soul_uri, ContentLevel::Detail)
-        .await
-        .unwrap_or(false)
-    {
-        let default_prompt = include_str!("../agent/default_soul.md");
-        vfs.create_file(&soul_uri).await?;
-        vfs.write(&soul_uri, ContentLevel::Detail, default_prompt)
-            .await?;
-        tracing::info!("已创建默认核心提示词： tianyan://agent/soul");
-    }
-
-    let learned_uri = crate::common::types::AgentPath::Learned.uri();
-    if !vfs.exists(&learned_uri).await? {
-        vfs.create_directory(&learned_uri).await?;
-        tracing::info!("已创建学习规则目录： tianyan://agent/learned");
-    }
-
-    let user_uri = TianyanUri::new(ContextNamespace::User, vec![]);
-    if !vfs
-        .has_content(&user_uri, ContentLevel::Detail)
-        .await
-        .unwrap_or(false)
-    {
-        vfs.write(&user_uri, ContentLevel::Detail, "# 用户档案\n\n")
-            .await?;
-        tracing::info!("已创建默认用户档案： tianyan://user");
-    }
-
-    tracing::info!("VFS 目录结构初始化完成");
-    Ok(())
 }

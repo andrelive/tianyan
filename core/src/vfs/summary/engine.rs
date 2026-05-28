@@ -2,11 +2,8 @@
 
 use std::sync::Arc;
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::types::{ContentLevel, TianyanUri};
+use crate::common::error::Result;
 use crate::model::{ChatService, EmbeddingService};
-use crate::vfs::backend::LocalFileBackend;
-use crate::vfs::types::ContextEntry;
 
 /// 不同内容级别的 token 限制。
 pub const ABSTRACT_TOKEN_LIMIT: usize = 100;
@@ -149,94 +146,6 @@ impl SummaryEngine {
         let abstract_embedding = self.generate_embedding(abstract_content).await?;
         let overview_embedding = self.generate_embedding(overview_content).await?;
         Ok((abstract_embedding, overview_embedding))
-    }
-
-    /// 更新条目的摘要。
-    pub async fn update_entry_summaries(
-        &self,
-        storage: &LocalFileBackend,
-        uri: &TianyanUri,
-    ) -> Result<ContextEntry> {
-        // 读取当前条目
-        let mut entry = storage.read_entry(uri).await?;
-
-        // 获取详细内容
-        let detail_content = match &entry.detail_content {
-            Some(content) => content.clone(),
-            None => {
-                // 尝试从存储中读取
-                match storage.read_content(uri, ContentLevel::Detail).await {
-                    Ok(content) => content,
-                    Err(_) => {
-                        return Err(TianyanError::SummaryGeneration(format!(
-                            "{} 没有可用的详细内容",
-                            uri
-                        )));
-                    }
-                }
-            }
-        };
-
-        // 生成摘要
-        let (abstract_content, overview_content) = self.generate_summaries(&detail_content).await?;
-
-        // 更新条目
-        entry.abstract_content = Some(abstract_content);
-        entry.overview_content = Some(overview_content);
-
-        // 写入更新后的条目
-        storage.write_entry(&entry).await?;
-
-        Ok(entry)
-    }
-
-    /// 通过聚合子条目摘要来更新父目录摘要。
-    pub async fn update_parent_summaries(
-        &self,
-        storage: &LocalFileBackend,
-        uri: &TianyanUri,
-    ) -> Result<()> {
-        let mut current_uri = uri.clone();
-
-        while let Some(parent_uri) = current_uri.parent() {
-            // 获取所有子条目
-            let children = storage.list_directory(&parent_uri).await?;
-
-            if children.is_empty() {
-                current_uri = parent_uri;
-                continue;
-            }
-
-            // 合并子条目的摘要
-            let combined_abstracts: Vec<String> = children
-                .iter()
-                .filter_map(|c| c.abstract_content.as_ref())
-                .cloned()
-                .collect();
-
-            if combined_abstracts.is_empty() {
-                current_uri = parent_uri;
-                continue;
-            }
-
-            let combined_text = combined_abstracts.join("\n\n");
-
-            // 生成父条目摘要
-            let (abstract_content, overview_content) =
-                self.generate_summaries(&combined_text).await?;
-
-            // 更新父条目
-            let mut parent_entry = storage.read_entry(&parent_uri).await?;
-            parent_entry.abstract_content = Some(abstract_content);
-            parent_entry.overview_content = Some(overview_content);
-            parent_entry.metadata.touch();
-
-            storage.write_entry(&parent_entry).await?;
-
-            current_uri = parent_uri;
-        }
-
-        Ok(())
     }
 
     /// 为图片描述生成摘要。
