@@ -121,7 +121,6 @@ impl AgentBuilder {
             ),
             self.config.default_top_k,
             self.config.learned_rules_top_k,
-            self.config.learned_rules_max_tokens,
         );
 
         // 构建规则记录器

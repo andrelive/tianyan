@@ -1,15 +1,15 @@
 //! 上下文工程管线。
 //!
 //! 将上下文装配的完整流程封装为可复用、可测试的管线：
-//! load_system_prompt → search → compress → build ContextWindow
+//! load soul → load rules → load memories → compress → build InjectableContext
 
 use std::sync::Arc;
 
+use crate::agent::session_state::InjectableContext;
 use crate::common::error::Result;
 use crate::common::types::{AgentPath, ContentLevel, ContextNamespace, Message};
-use crate::context::compression::{estimate_tokens, ContextCompressor};
+use crate::context::compression::ContextCompressor;
 use crate::context::retrieval::ContextRetriever;
-use crate::context::types::{ContextTokenUsage, ContextWindow, RetrievalResult};
 use crate::vfs::VirtualFileSystem;
 
 /// 上下文工程管线。
@@ -20,7 +20,6 @@ pub struct ContextPipeline {
     compressor: ContextCompressor,
     default_top_k: usize,
     learned_rules_top_k: usize,
-    learned_rules_max_tokens: usize,
 }
 
 impl ContextPipeline {
@@ -31,14 +30,12 @@ impl ContextPipeline {
     /// - `compressor` - 压缩器
     /// - `default_top_k` - 默认检索结果数
     /// - `learned_rules_top_k` - learned rules 注入 Top-K
-    /// - `learned_rules_max_tokens` - learned rules 段最大 token 数
     pub fn new(
         vfs: Arc<dyn VirtualFileSystem>,
         retriever: Arc<dyn ContextRetriever>,
         compressor: ContextCompressor,
         default_top_k: usize,
         learned_rules_top_k: usize,
-        learned_rules_max_tokens: usize,
     ) -> Self {
         Self {
             vfs,
@@ -46,7 +43,6 @@ impl ContextPipeline {
             compressor,
             default_top_k,
             learned_rules_top_k,
-            learned_rules_max_tokens,
         }
     }
 
@@ -54,65 +50,38 @@ impl ContextPipeline {
     ///
     /// - `query` - 用户查询（用于检索和规则匹配）
     /// - `conversation` - 当前对话历史（可变引用，压缩可能修改）
-    pub async fn run(&self, query: &str, conversation: &mut Vec<Message>) -> Result<ContextWindow> {
-        let system_prompt = self.load_system_prompt(query).await?;
-        let retrieved = self.search(query).await?;
-        let summary = self.compress_if_needed(conversation).await?;
-
-        let mut token_usage = ContextTokenUsage::default();
-        token_usage.system_prompt_tokens = estimate_tokens(&system_prompt);
-        token_usage.retrieved_tokens = retrieved.iter().map(|r| r.token_count).sum();
-
-        if let Some(ref s) = summary {
-            token_usage.summary_tokens = estimate_tokens(s);
-        }
-
-        Ok(ContextWindow {
-            system_prompt,
-            summary,
-            retrieved,
-            token_usage,
-        })
-    }
-
-    /// 加载系统提示词：soul（完整） + learned rules（渐进式披露）。
     ///
-    /// Soul 永远完整注入。Learned rules 通过 retriever 按 query 语义搜索，
-    /// 仅注入 Top-K 条相关性最高的规则，实现渐进式披露。
-    async fn load_system_prompt(&self, query: &str) -> Result<String> {
-        let mut prompt = String::new();
+    /// 返回 InjectableContext（soul + rules + memories）和压缩摘要。
+    pub async fn run(
+        &self,
+        query: &str,
+        conversation: &mut Vec<Message>,
+    ) -> Result<(InjectableContext, Option<String>)> {
+        let mut injectable = InjectableContext::new();
 
+        // Load soul
         let soul_uri = AgentPath::Soul.uri();
         match self.vfs.read_content(&soul_uri, ContentLevel::Detail).await {
             Ok(content) => {
-                prompt.push_str(&content);
-                prompt.push_str("\n\n");
+                injectable.soul = content;
             }
             Err(e) => {
                 tracing::warn!(error = %e, uri = %soul_uri, "加载核心提示词失败");
             }
         }
 
-        // 渐进式披露：用 retriever 搜索与当前 query 最相关的 learned rules
+        // Load learned rules and experiences
         let rules = self.load_relevant_rules(query).await;
-        if !rules.is_empty() {
-            let mut rule_section = String::from("---\n");
-            rule_section.push_str("## 相关经验教训\n\n");
-            let mut token_budget = self.learned_rules_max_tokens;
+        injectable.rules_and_experiences = rules;
 
-            for rule in &rules {
-                let line = format!("- {}\n", rule.trim());
-                let line_tokens = estimate_tokens(&line);
-                if line_tokens > token_budget {
-                    break;
-                }
-                token_budget = token_budget.saturating_sub(line_tokens);
-                rule_section.push_str(&line);
-            }
-            prompt.push_str(&rule_section);
-        }
+        // Load memories
+        let memories = self.load_memories(query).await;
+        injectable.memories = memories;
 
-        Ok(prompt)
+        // Compression
+        let summary = self.compress_if_needed(conversation).await?;
+
+        Ok((injectable, summary))
     }
 
     /// 使用 retriever 渐进式检索与当前 query 最相关的 learned rules。
@@ -165,12 +134,23 @@ impl ContextPipeline {
         rules
     }
 
-    /// 统一检索（Memory + Knowledge 一次搜索），带 Token 预算控制。
-    async fn search(&self, query: &str) -> Result<Vec<RetrievalResult>> {
-        let budget = self.retriever.default_token_budget();
-        self.retriever
-            .retrieve_with_budget(query, self.default_top_k, budget)
+    /// 检索相关记忆。
+    async fn load_memories(&self, query: &str) -> Vec<String> {
+        match self
+            .retriever
+            .retrieve_by_namespace(query, self.default_top_k, ContextNamespace::Memory)
             .await
+        {
+            Ok(results) => results
+                .into_iter()
+                .filter_map(|r| r.content)
+                .filter(|c| !c.trim().is_empty())
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "记忆检索失败");
+                Vec::new()
+            }
+        }
     }
 
     /// 如需压缩则执行压缩，返回摘要文本。
