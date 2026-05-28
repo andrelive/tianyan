@@ -3,18 +3,22 @@
 //! 本模块提供会话创建、维护、关键信息提取和摘要生成功能。
 
 use async_trait::async_trait;
+use chrono::Utc;
 use serde_json;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{Message, TianyanUri};
+use crate::common::types::{
+    DetailedTokenUsage, Message, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
+    TianyanUri,
+};
 use crate::vfs::VirtualFileSystem;
 
 /// 每个会话加载的最大消息数量（保护内存和性能）
 const MAX_SESSION_MESSAGES: usize = 100;
 
-use super::types::{MessageRecord, Session};
+use super::types::Session;
 
 /// 会话管理操作 trait。
 #[async_trait]
@@ -81,9 +85,9 @@ impl PersistentSessionManager {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<MessageRecord>(line) {
-                Ok(record) => {
-                    session.add_message(record.to_message());
+            match serde_json::from_str::<StructuredMessage>(line) {
+                Ok(msg) => {
+                    session.add_structured_message(msg);
                 }
                 Err(e) => {
                     tracing::warn!("解析消息记录失败：{} - {}", uri, e);
@@ -110,9 +114,8 @@ impl PersistentSessionManager {
     }
 
     /// 追加消息到 VFS。
-    async fn append_message_to_vfs(&self, uri: &TianyanUri, message: &Message) -> Result<()> {
-        let record = MessageRecord::from_message(message);
-        let json_line = serde_json::to_string(&record)
+    async fn append_message_to_vfs(&self, uri: &TianyanUri, msg: &StructuredMessage) -> Result<()> {
+        let json_line = serde_json::to_string(msg)
             .map_err(|e| TianyanError::Serialization(e.to_string()))?;
         let jsonl_line = format!("{}\n", json_line);
         self.vfs.append_content(uri, &jsonl_line).await?;
@@ -148,8 +151,27 @@ impl PersistentSessionManager {
 #[async_trait]
 impl SessionManager for PersistentSessionManager {
     async fn create_session(&self, id: &str, message: Message) -> Result<Session> {
+        let now_ms = Utc::now().timestamp_millis();
+        let sm = StructuredMessage {
+            id: format!("msg_{}", now_ms),
+            parent_id: None,
+            role: message.role,
+            parts: vec![Part::Text {
+                text: message.content.clone(),
+                time: PartTime::default(),
+            }],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime {
+                created: now_ms,
+                completed: now_ms,
+            },
+            session_id: id.to_string(),
+            finish: None,
+        };
         let mut session = Session::new(id);
-        session.add_message(message.clone());
+        session.add_structured_message(sm.clone());
 
         let uri = session.uri();
 
@@ -165,7 +187,7 @@ impl SessionManager for PersistentSessionManager {
             .map_err(|e| TianyanError::MemorySystem(format!("会话创建失败：{} ({})", id, e)))?;
 
         // 追加第一条消息到 VFS
-        self.append_message_to_vfs(&uri, &message).await?;
+        self.append_message_to_vfs(&uri, &sm).await?;
 
         // 更新元数据
         self.update_session_metadata(&session).await?;
@@ -211,8 +233,28 @@ impl SessionManager for PersistentSessionManager {
             )));
         }
 
+        let now_ms = Utc::now().timestamp_millis();
+        let sm = StructuredMessage {
+            id: format!("msg_{}", now_ms),
+            parent_id: None,
+            role: message.role,
+            parts: vec![Part::Text {
+                text: message.content.clone(),
+                time: PartTime::default(),
+            }],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime {
+                created: now_ms,
+                completed: now_ms,
+            },
+            session_id: session_id.to_string(),
+            finish: None,
+        };
+
         // 追加消息到 VFS
-        self.append_message_to_vfs(&uri, &message).await?;
+        self.append_message_to_vfs(&uri, &sm).await?;
 
         Ok(())
     }

@@ -6,59 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::common::types::{Message, MessageRole, TianyanUri};
-
-/// JSONL 格式的消息记录，用于会话持久化。
-///
-/// 此结构体专门用于 JSONL 文件格式，支持高效的追加写入。
-/// 每条记录占一行，便于流式读取和写入。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageRecord {
-    /// 消息发送者的角色。
-    pub role: MessageRole,
-    /// 消息内容。
-    pub content: String,
-    /// 消息时间戳。
-    pub timestamp: DateTime<Utc>,
-}
-
-impl MessageRecord {
-    /// 创建新的消息记录。
-    pub fn new(role: MessageRole, content: impl Into<String>) -> Self {
-        Self {
-            role,
-            content: content.into(),
-            timestamp: Utc::now(),
-        }
-    }
-
-    /// 从 Message 转换为 MessageRecord。
-    pub fn from_message(message: &Message) -> Self {
-        Self {
-            role: message.role,
-            content: message.content.clone(),
-            timestamp: Utc::now(),
-        }
-    }
-
-    /// 转换为 Message 类型。
-    pub fn to_message(&self) -> Message {
-        Message {
-            role: self.role,
-            content: self.content.clone(),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        }
-    }
-
-    /// 序列化为 JSONL 行（带换行符）。
-    pub fn to_jsonl_line(&self) -> Result<String, serde_json::Error> {
-        let mut json = serde_json::to_string(self)?;
-        json.push('\n');
-        Ok(json)
-    }
-}
+use crate::common::types::{DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage, TianyanUri};
 
 /// 表示对话或交互的记忆会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +18,7 @@ pub struct Session {
     /// 会话结束时间戳（如果已结束）。
     pub ended_at: Option<DateTime<Utc>>,
     /// 会话中的消息。
-    pub messages: Vec<Message>,
+    pub messages: Vec<StructuredMessage>,
     /// 会话摘要（会话结束后生成）。
     pub summary: Option<String>,
     /// 会话标题（可选）。
@@ -96,24 +44,9 @@ impl Session {
         Self::new(id)
     }
 
-    /// 向会话添加消息。
-    pub fn add_message(&mut self, message: Message) {
-        self.messages.push(message);
-    }
-
-    /// 添加用户消息。
-    pub fn add_user_message(&mut self, content: impl Into<String>) {
-        self.messages.push(Message::user(content));
-    }
-
-    /// 添加助手消息。
-    pub fn add_assistant_message(&mut self, content: impl Into<String>) {
-        self.messages.push(Message::assistant(content));
-    }
-
-    /// 添加系统消息。
-    pub fn add_system_message(&mut self, content: impl Into<String>) {
-        self.messages.push(Message::system(content));
+    /// 向会话添加结构化消息。
+    pub fn add_structured_message(&mut self, msg: StructuredMessage) {
+        self.messages.push(msg);
     }
 
     /// 结束会话。
@@ -231,9 +164,22 @@ mod tests {
     #[test]
     fn test_session_messages() {
         let mut session = Session::new("test-session");
-        session.add_user_message("你好");
-        session.add_assistant_message("你好！");
-        assert_eq!(session.message_count(), 2);
+        session.add_structured_message(StructuredMessage {
+            id: "msg_1".to_string(),
+            parent_id: None,
+            role: MessageRole::User,
+            parts: vec![Part::Text {
+                text: "你好".to_string(),
+                time: PartTime::default(),
+            }],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime::default(),
+            session_id: "test-session".to_string(),
+            finish: None,
+        });
+        assert_eq!(session.message_count(), 1);
     }
 
     #[test]
@@ -242,14 +188,6 @@ mod tests {
         session.end();
         assert!(session.is_ended());
         assert!(session.duration_seconds().is_some());
-    }
-
-    #[test]
-    fn test_message_record() {
-        let msg = Message::user("测试消息");
-        let record = MessageRecord::from_message(&msg);
-        assert_eq!(record.role, MessageRole::User);
-        assert_eq!(record.content, "测试消息");
     }
 
     #[test]

@@ -41,8 +41,7 @@ mod types;
 
 // 重新导出类型
 pub use types::{
-    ExtractedDecision, ExtractedEntity, ExtractedPreference, KeyInfo, MessageRecord, Session,
-    SessionMetadata,
+    ExtractedDecision, ExtractedEntity, ExtractedPreference, KeyInfo, Session, SessionMetadata,
 };
 
 // 重新导出管理层
