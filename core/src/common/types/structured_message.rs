@@ -29,14 +29,18 @@ pub struct CacheUsage {
 /// Part 级别的时间戳（毫秒）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartTime {
+    #[serde(default)]
     pub start: i64,
+    #[serde(default)]
     pub end: i64,
 }
 
 /// Message 级别的时间戳。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessageTime {
+    #[serde(default)]
     pub created: i64,
+    #[serde(default)]
     pub completed: i64,
 }
 
