@@ -7,7 +7,7 @@
 ## Motivation
 
 1. **统计与查询**：存储层包含 token 用量、费用、缓存命中率、时间戳等结构化元数据，支持会话级别的成本分析和使用统计
-2. **DeepSeek 前缀缓存优化**：将易变内容（检索结果）从 system prompt 前缀中移除，改为末尾"注入窗"模式，使稳定的历史消息前缀最大化缓存命中率
+2. **DeepSeek 前缀缓存优化**：将知识检索从上下文注入改为工具调用，由 LLM 按需自行检索，消除每轮变化的注入内容，使消息前缀全程稳定
 3. **存储/传输解耦**：存储格式不再绑定 OpenAI 消息格式，为后续适配不同模型的消息格式留出空间
 
 ## Chapter 1: Architecture Overview
@@ -30,7 +30,7 @@
 │  + Part JSONL        │  │        + injectable_context         │
 │                      │  │        + current_input              │
 │                      │  │                                    │
-│                      │  │  Output: Vec<Message> (cache-optimized)│
+│                      │  │  Output: Vec<Message> (for LLM)                   │
 └──────────────────────┘  └──────────────┬─────────────────────┘
                                          │
                                          ▼
@@ -145,6 +145,8 @@ messages[5]:   Asst    ← structured_messages[3] parts::Text
 messages[N-1]: User   ← current_input (changes every turn)
 ```
 
+Knowledge retrieval is NOT injected as text. Instead, a `search_knowledge` tool is registered with the LLM, letting it decide when and what to search. This eliminates per-turn injection variability — the entire message prefix (positions 0 through N-2) stays stable, with only the final `current_input` changing.
+
 ### StructuredMessage → Vec<Message> Conversion
 
 One `StructuredMessage` may produce 1~N transmission `Message`s:
@@ -231,9 +233,10 @@ user input → construct StructuredMessage(User) → append to state.structured_
 ### ContextPipeline Simplification
 
 - **Keep**: load soul → populate `injectable_context.soul`
-- **Keep**: vector retrieval → populate `injectable_context.memories` and `injectable_context.rules_and_experiences`
+- **Keep**: vector retrieval of rules/memories → populate `injectable_context.rules_and_experiences` and `injectable_context.memories`
 - **Keep**: conversation compression → return compressed text → populate `injectable_context`
 - **Remove**: system prompt injection into conversation
+- **Remove**: knowledge retrieval injection — replaced by `search_knowledge` tool registered with LLM
 
 ---
 
