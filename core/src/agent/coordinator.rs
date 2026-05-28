@@ -127,9 +127,9 @@ use crate::agent::types::{
     StreamChunkType, StreamEventSender,
 };
 use crate::common::error::Result;
-use crate::common::types::{Message, MessageRole};
+use crate::common::types::{Message, MessageRole, StructuredMessage};
 use crate::config::AgentConfig;
-use crate::context::{ContextPipeline, FailureKind};
+use crate::context::{ContextAssembler, ContextPipeline};
 use crate::executor::{LlmJudge, VerificationGate};
 use crate::model::ChatService;
 use crate::vfs::VirtualFileSystem;
@@ -223,46 +223,37 @@ impl Agent {
         state.pending_clarification.take();
 
         // 运行上下文管线
-        match self
-            .context_pipeline
-            .run(clarification_answers, &mut state.conversation)
-            .await
-        {
-            Ok(window) => {
-                let injected_rules = window
-                    .system_prompt
-                    .lines()
-                    .filter(|l| l.starts_with("- [") && l.contains("来源会话"))
-                    .count();
-                if injected_rules > 0 {
-                    self.harness.metrics.record_rule_hit(injected_rules).await;
-                }
-                state.context_window = Some(window);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "追问上下文管线执行失败");
-                self.harness.metrics.record_pipeline_failure().await;
-            }
-        }
+        let mut conversation: Vec<Message> = state
+            .structured_messages
+            .iter()
+            .flat_map(|sm| ContextAssembler::structured_to_messages(sm))
+            .collect();
 
-        // 注入系统提示词
-        let system_prompt = state
-            .context_window
-            .as_ref()
-            .map(|w| w.system_prompt.clone());
-        if let Some(prompt) = system_prompt {
-            if let Some(first) = state.conversation.first_mut() {
-                if first.role == MessageRole::System {
-                    first.content = prompt;
-                } else {
-                    state.conversation.insert(0, Message::system(&prompt));
+        let injectable =
+            match self
+                .context_pipeline
+                .run(clarification_answers, &mut conversation)
+                .await
+            {
+                Ok((ctx, _summary)) => {
+                    state.injectable_context = ctx.clone();
+                    ctx
                 }
-            } else {
-                state.conversation.push(Message::system(&prompt));
-            }
-        }
+                Err(e) => {
+                    tracing::warn!(error = %e, "追问上下文管线执行失败");
+                    self.harness.metrics.record_pipeline_failure().await;
+                    state.injectable_context.clone()
+                }
+            };
 
-        let loop_result = self.agent_loop.run(&mut state.conversation, None).await;
+        // 组装消息
+        let mut messages = ContextAssembler::assemble(
+            &state.structured_messages,
+            &injectable,
+            "",
+        );
+
+        let loop_result = self.agent_loop.run(&mut messages, None).await;
 
         let response = match loop_result {
             Ok(AgentLoopResult::Answer(content)) => {
@@ -362,65 +353,65 @@ impl AgentCoordinator for Agent {
 
         state.add_user_message(&message);
 
-        // 运行上下文管线
-        match self
-            .context_pipeline
-            .run(&message, &mut state.conversation)
-            .await
-        {
-            Ok(window) => {
-                let injected_rules = window
-                    .system_prompt
-                    .lines()
-                    .filter(|l| l.starts_with("- [") && l.contains("来源会话"))
-                    .count();
+        // 将结构化消息转换为 Vec<Message> 以供管线压缩
+        let mut conversation: Vec<Message> = state
+            .structured_messages
+            .iter()
+            .flat_map(|sm| ContextAssembler::structured_to_messages(sm))
+            .collect();
+
+        // 运行上下文管线，填充可注入上下文，并尝试压缩
+        let injectable = match self.context_pipeline.run(&message, &mut conversation).await {
+            Ok((ctx, summary)) => {
+                let injected_rules = ctx.rules_and_experiences.len();
                 if injected_rules > 0 {
                     self.harness.metrics.record_rule_hit(injected_rules).await;
                 }
-                state.context_window = Some(window);
+
+                if summary.is_some() && conversation.len() < state.structured_messages.len() {
+                    let parent_id = state.structured_messages.last().map(|m| m.id.as_str());
+                    let new_structured: Vec<StructuredMessage> = conversation
+                        .iter()
+                        .map(|m| {
+                            ContextAssembler::message_to_structured(
+                                m,
+                                &state.session_id,
+                                parent_id,
+                            )
+                        })
+                        .collect();
+                    state.structured_messages = new_structured;
+                }
+
+                state.injectable_context = ctx.clone();
+                ctx
             }
             Err(e) => {
                 tracing::warn!(error = %e, "上下文管线执行失败");
                 self.harness.metrics.record_pipeline_failure().await;
-                let session_id = state.session_id.clone();
-                let error_msg = format!("{}", e);
-                let _ = self
-                    .harness
-                    .rule_recorder
-                    .record_with_kind(
-                        &format!("上下文管线失败：{}", error_msg),
-                        &format!(
-                            "# Pipeline 失败\n\n会话: {}\n错误: {}\n建议: 检查 VFS / 检索 / 压缩子系统的可用性",
-                            session_id, error_msg
-                        ),
-                        &session_id,
-                        FailureKind::System,
-                    )
-                    .await;
+                state.injectable_context.clone()
             }
-        }
+        };
 
-        // 注入系统提示词
-        let system_prompt = state
-            .context_window
-            .as_ref()
-            .map(|w| w.system_prompt.clone());
-        if let Some(prompt) = system_prompt {
-            if let Some(first) = state.conversation.first_mut() {
-                if first.role == MessageRole::System {
-                    first.content = prompt;
-                } else {
-                    state.conversation.insert(0, Message::system(&prompt));
-                }
-            } else {
-                state.conversation.push(Message::system(&prompt));
-            }
-        }
+        // 组装消息
+        let mut messages = ContextAssembler::assemble(
+            &state.structured_messages,
+            &injectable,
+            "",
+        );
 
-        let loop_result = self.agent_loop.run(&mut state.conversation, None).await;
+        let loop_result = self.agent_loop.run(&mut messages, None).await;
 
         let response = match loop_result {
             Ok(AgentLoopResult::Answer(content)) => {
+                let parent_id = state.structured_messages.last().map(|m| m.id.as_str());
+                let sm = ContextAssembler::message_to_structured(
+                    &Message::assistant(&content),
+                    &state.session_id,
+                    parent_id,
+                );
+                state.add_structured_message(sm);
+
                 let mut resp = AgentResponse::simple(content);
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
                 self.harness.metrics.record_execution(true).await;
@@ -485,53 +476,38 @@ impl AgentCoordinator for Agent {
         tokio::spawn(async move {
             state_clone.add_user_message(&message);
 
-            // 运行上下文管线
-            match self_clone
+            let mut conversation: Vec<Message> = state_clone
+                .structured_messages
+                .iter()
+                .flat_map(|sm| ContextAssembler::structured_to_messages(sm))
+                .collect();
+
+            let injectable = match self_clone
                 .context_pipeline
-                .run(&message, &mut state_clone.conversation)
+                .run(&message, &mut conversation)
                 .await
             {
-                Ok(window) => {
-                    let injected_rules = window
-                        .system_prompt
-                        .lines()
-                        .filter(|l| l.starts_with("- [") && l.contains("来源会话"))
-                        .count();
-                    if injected_rules > 0 {
-                        self_clone
-                            .harness
-                            .metrics
-                            .record_rule_hit(injected_rules)
-                            .await;
-                    }
-                    state_clone.context_window = Some(window);
+                Ok((ctx, _summary)) => {
+                    state_clone.injectable_context = ctx.clone();
+                    ctx
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "流式上下文管线执行失败");
                     self_clone.harness.metrics.record_pipeline_failure().await;
+                    state_clone.injectable_context.clone()
                 }
-            }
+            };
 
-            // 注入系统提示词
-            let system_prompt = state_clone
-                .context_window
-                .as_ref()
-                .map(|w| w.system_prompt.clone());
-            if let Some(prompt) = system_prompt {
-                if let Some(first) = state_clone.conversation.first_mut() {
-                    if first.role == MessageRole::System {
-                        first.content = prompt;
-                    } else {
-                        state_clone.conversation.insert(0, Message::system(&prompt));
-                    }
-                } else {
-                    state_clone.conversation.push(Message::system(&prompt));
-                }
-            }
+            // 组装消息
+            let mut messages = ContextAssembler::assemble(
+                &state_clone.structured_messages,
+                &injectable,
+                "",
+            );
 
             let loop_result = self_clone
                 .agent_loop
-                .run(&mut state_clone.conversation, Some(stream_sender.clone()))
+                .run(&mut messages, Some(stream_sender.clone()))
                 .await;
 
             match loop_result {

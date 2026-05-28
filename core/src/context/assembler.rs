@@ -64,7 +64,7 @@ impl ContextAssembler {
     }
 
     /// 将单个 StructuredMessage 转换为 1~N 条传输层 Message。
-    fn structured_to_messages(sm: &StructuredMessage) -> Vec<Message> {
+    pub(crate) fn structured_to_messages(sm: &StructuredMessage) -> Vec<Message> {
         let mut messages = Vec::new();
 
         match sm.role {
