@@ -112,6 +112,7 @@ impl AgentLoop {
                 content: assistant_msg.content.clone(),
                 tool_calls: assistant_msg.tool_calls.clone(),
                 tool_call_id: None,
+                reasoning_content: None,
             });
 
             if let Some(ref tool_calls) = assistant_msg.tool_calls {

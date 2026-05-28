@@ -82,6 +82,7 @@ impl ChatService for AsyncOpenAIClient {
                         content: msg.content.unwrap_or_default(),
                         tool_calls,
                         tool_call_id: None,
+                        reasoning_content: None,
                     },
                     finish_reason: c
                         .finish_reason

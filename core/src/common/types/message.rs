@@ -38,6 +38,10 @@ pub struct Message {
     /// 当 role 为 Tool 时，对应哪个 tool_call 的 ID。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tool_call_id: Option<String>,
+    /// 模型推理内容（reasoning_content），仅 DeepSeek 等支持思维链的模型使用。
+    /// 上一轮 assistant 含 tool_calls 时，下一轮必须原样保留。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reasoning_content: Option<String>,
 }
 
 impl Message {
@@ -48,6 +52,7 @@ impl Message {
             content: content.into(),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -73,6 +78,7 @@ impl Message {
             content: content.into(),
             tool_calls: Some(tool_calls),
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -86,6 +92,7 @@ impl Message {
             content: content.into(),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            reasoning_content: None,
         }
     }
 }
