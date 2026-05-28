@@ -2,6 +2,7 @@
 //!
 //! 本模块提供上下文工程能力，包括统一的上下文存储和检索系统。
 
+pub mod assembler;
 pub mod assembly;
 pub mod compression;
 pub mod pipeline;
@@ -25,4 +26,5 @@ pub use retrieval::{
     RetrievalStep, RetrievalStepType, RetrievalTrace, RetrievalTraceBuilder, TokenBudget,
     TokenPercentages, TokenStats,
 };
+pub use assembler::ContextAssembler;
 pub use types::*;
