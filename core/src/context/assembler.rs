@@ -214,3 +214,227 @@ impl ContextAssembler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::session_state::InjectableContext;
+    use crate::common::types::{
+        DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
+    };
+
+    fn make_text_msg(id: &str, role: MessageRole, text: &str, session_id: &str) -> StructuredMessage {
+        StructuredMessage {
+            id: id.to_string(),
+            parent_id: None,
+            role,
+            parts: vec![Part::Text {
+                text: text.to_string(),
+                time: PartTime::default(),
+            }],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime::default(),
+            session_id: session_id.to_string(),
+            finish: None,
+        }
+    }
+
+    #[test]
+    fn test_assemble_empty_session() {
+        let injectable = InjectableContext {
+            soul: "You are a helpful assistant.".to_string(),
+            ..Default::default()
+        };
+        let messages = ContextAssembler::assemble(&[], &injectable, "Hello");
+        assert_eq!(messages.len(), 2); // soul + current input
+        assert_eq!(messages[0].role, MessageRole::System);
+        assert_eq!(messages[0].content, "You are a helpful assistant.");
+        assert_eq!(messages[1].role, MessageRole::User);
+        assert_eq!(messages[1].content, "Hello");
+    }
+
+    #[test]
+    fn test_assemble_with_history() {
+        let injectable = InjectableContext::default();
+        let sm = make_text_msg("msg_1", MessageRole::User, "Hi", "ses_1");
+        let messages = ContextAssembler::assemble(&[sm], &injectable, "Hello again");
+        // 1 user history + 1 current input (no injectable, so no system messages)
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(messages[0].content, "Hi");
+        assert_eq!(messages[1].content, "Hello again");
+    }
+
+    #[test]
+    fn test_structured_to_messages_reasoning_with_tool_call() {
+        let sm = StructuredMessage {
+            id: "msg_1".to_string(),
+            parent_id: None,
+            role: MessageRole::Assistant,
+            parts: vec![
+                Part::Reasoning {
+                    text: "I need to read the file first".to_string(),
+                    time: PartTime::default(),
+                },
+                Part::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path":"foo.rs"}"#.to_string(),
+                    time: PartTime::default(),
+                },
+            ],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime::default(),
+            session_id: "ses_1".to_string(),
+            finish: None,
+        };
+        let messages = ContextAssembler::structured_to_messages(&sm);
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.role, MessageRole::Assistant);
+        assert!(msg.tool_calls.is_some());
+        assert!(msg.reasoning_content.is_some());
+        assert_eq!(
+            msg.reasoning_content.as_ref().unwrap(),
+            "I need to read the file first"
+        );
+    }
+
+    #[test]
+    fn test_structured_to_messages_reasoning_without_tool_call_is_discarded() {
+        let sm = StructuredMessage {
+            id: "msg_1".to_string(),
+            parent_id: None,
+            role: MessageRole::Assistant,
+            parts: vec![
+                Part::Reasoning {
+                    text: "The answer is 42".to_string(),
+                    time: PartTime::default(),
+                },
+                Part::Text {
+                    text: "42".to_string(),
+                    time: PartTime::default(),
+                },
+            ],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime::default(),
+            session_id: "ses_1".to_string(),
+            finish: None,
+        };
+        let messages = ContextAssembler::structured_to_messages(&sm);
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.role, MessageRole::Assistant);
+        assert_eq!(msg.content, "42");
+        assert!(msg.reasoning_content.is_none());
+        assert!(msg.tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_message_to_structured_roundtrip() {
+        let msg = Message {
+            role: MessageRole::Assistant,
+            content: "Hello".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        };
+        let sm = ContextAssembler::message_to_structured(&msg, "ses_1", None);
+        assert_eq!(sm.role, MessageRole::Assistant);
+        assert_eq!(sm.session_id, "ses_1");
+        assert!(sm.parts.iter().any(|p| matches!(p, Part::Text { .. })));
+    }
+
+    #[test]
+    fn test_assemble_with_rules_and_memories() {
+        let injectable = InjectableContext {
+            soul: "You are helpful.".to_string(),
+            rules_and_experiences: vec!["Always read before writing.".to_string()],
+            memories: vec!["User prefers Result style.".to_string()],
+            ..Default::default()
+        };
+        let messages = ContextAssembler::assemble(&[], &injectable, "Test");
+        // soul + (rules+memories merged) + current input
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, MessageRole::System);
+        assert!(messages[0].content.contains("helpful"));
+        assert_eq!(messages[1].role, MessageRole::System);
+        assert!(messages[1].content.contains("Always read"));
+        assert!(messages[1].content.contains("Result style"));
+    }
+
+    #[test]
+    fn test_structured_to_messages_tool_result() {
+        let sm = StructuredMessage {
+            id: "msg_tool".to_string(),
+            parent_id: None,
+            role: MessageRole::Tool,
+            parts: vec![Part::ToolResult {
+                tool_call_id: "call_1".to_string(),
+                content: r#"{"result":"ok"}"#.to_string(),
+                time: PartTime::default(),
+            }],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime::default(),
+            session_id: "ses_1".to_string(),
+            finish: None,
+        };
+        let messages = ContextAssembler::structured_to_messages(&sm);
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.role, MessageRole::Tool);
+        assert_eq!(msg.tool_call_id.as_ref().unwrap(), "call_1");
+    }
+
+    #[test]
+    fn test_empty_injectable_skips_system_messages() {
+        let injectable = InjectableContext::default();
+        let sm = make_text_msg("msg_1", MessageRole::User, "Hi", "ses_1");
+        let messages = ContextAssembler::assemble(&[sm], &injectable, "Hello");
+        // Only user history + current input, no system messages
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(messages[1].role, MessageRole::User);
+    }
+
+    #[test]
+    fn test_empty_current_input_no_extra_message() {
+        let injectable = InjectableContext {
+            soul: "You are helpful.".to_string(),
+            ..Default::default()
+        };
+        let messages = ContextAssembler::assemble(&[], &injectable, "");
+        // Only soul, no current input appended
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, MessageRole::System);
+    }
+
+    #[test]
+    fn test_message_to_structured_tool_role_creates_tool_result_part() {
+        let msg = Message {
+            role: MessageRole::Tool,
+            content: r#"{"result":"ok"}"#.to_string(),
+            tool_calls: None,
+            tool_call_id: Some("call_1".to_string()),
+            reasoning_content: None,
+        };
+        let sm = ContextAssembler::message_to_structured(&msg, "ses_1", None);
+        assert_eq!(sm.role, MessageRole::Tool);
+        assert_eq!(sm.parts.len(), 1);
+        match &sm.parts[0] {
+            Part::ToolResult { tool_call_id, content, .. } => {
+                assert_eq!(tool_call_id, "call_1");
+                assert_eq!(content, r#"{"result":"ok"}"#);
+            }
+            _ => panic!("expected ToolResult part"),
+        }
+    }
+}
