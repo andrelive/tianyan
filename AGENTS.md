@@ -127,6 +127,34 @@ Two config types exist (known duplication, not yet unified):
 
 No `max_retries` field — it was removed.
 
+### Session Context Layer
+
+```
+core/src/common/types/
+├── message.rs              ← Message (传输层, 含 reasoning_content)
+├── structured_message.rs   ← StructuredMessage, Part, DetailedTokenUsage (存储层)
+└── ...
+
+core/src/context/
+├── assembler.rs            ← ContextAssembler: 存储层 → 传输层转换 (纯函数)
+├── assembly.rs             ← assemble_prompt (旧文本拼接路径, 逐步废弃)
+├── pipeline.rs             ← ContextPipeline: 填充 InjectableContext + 压缩
+└── ...
+
+core/src/agent/
+├── session_state.rs        ← SessionState (structured_messages + injectable_context)
+└── ...
+```
+
+- **Storage/transmission separation**: `StructuredMessage` (含 `Part: Text|Reasoning|ToolCall|ToolResult`, token stats, cost) 用于持久化; `Message` 仅用于 LLM 传输. 通过 `ContextAssembler` 转换.
+- **`SessionState.conversation: Vec<Message>` is replaced** by `structured_messages: Vec<StructuredMessage>` + `injectable_context: InjectableContext`. Direct `state.conversation` access is a compile error.
+- **`MessageRecord` is removed** — JSONL persistence uses `StructuredMessage` directly.
+- **`Message.reasoning_content: Option<String>`** added for DeepSeek reasoning chain passthrough. Only retained when the assistant message contains tool calls.
+- **`ContextPipeline::run()`** returns `(InjectableContext, Option<String>)` — not `ContextWindow`. The assembler (not the pipeline) injects context into messages.
+- **`ContextAssembler::assemble()`** builds `Vec<Message>` in cache-optimal order: soul → rules+memories → history → current input. Knowledge retrieval is a tool call (not injected), so the prefix stays stable.
+- **`InjectableContext`** lives in `agent/session_state.rs` (not `context/`). Fields: `soul`, `rules_and_experiences`, `memories`, `last_updated`.
+- **`ContextAssembler::message_to_structured()`** derives role from `msg.role` — no separate `role` parameter.
+
 ### Error Types
 
 All errors use `TianyanError` enum from `core/src/common/error.rs`. Extend `TianyanError` if needed; never introduce new error types.
