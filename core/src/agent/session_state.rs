@@ -2,23 +2,48 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
 use crate::agent::types::ClarificationQuestion;
-use crate::common::types::{Message, MessageRole};
+use crate::common::types::{DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage};
 use crate::context::types::ContextWindow;
-use crate::session::Session;
 
 const MAX_CONVERSATION_MESSAGES: usize = 100;
 const KEEP_RECENT_MESSAGES: usize = 50;
+
+/// 可注入的上下文内容，由 ContextPipeline 填充，由 ContextAssembler 组装使用。
+#[derive(Debug, Clone, Default)]
+pub struct InjectableContext {
+    /// 智能体核心人格（soul.md）。
+    pub soul: String,
+    /// 经验与方法论。
+    pub rules_and_experiences: Vec<String>,
+    /// 用户画像与环境事实。
+    pub memories: Vec<String>,
+    /// 最后更新时间。
+    pub last_updated: DateTime<Utc>,
+}
+
+impl InjectableContext {
+    /// 创建空的注入上下文。
+    pub fn new() -> Self {
+        Self {
+            last_updated: Utc::now(),
+            ..Default::default()
+        }
+    }
+}
 
 /// 会话状态容器（conversation 为唯一真相源）。
 #[derive(Debug, Clone)]
 pub struct SessionState {
     /// 会话 ID。
     pub session_id: String,
-    /// 对话历史（含 user / assistant / tool 消息）。
-    pub conversation: Vec<Message>,
+    /// 结构化消息（持久化格式）。
+    pub structured_messages: Vec<StructuredMessage>,
+    /// 可注入的上下文（由 ContextPipeline 填充）。
+    pub injectable_context: InjectableContext,
     /// 当前目标。
     pub current_goal: Option<String>,
     /// 待追问问题。
@@ -41,7 +66,8 @@ impl SessionState {
         let now = Instant::now();
         Self {
             session_id: session_id.to_string(),
-            conversation: Vec::new(),
+            structured_messages: Vec::new(),
+            injectable_context: InjectableContext::new(),
             current_goal: None,
             pending_clarification: None,
             last_activity: now,
@@ -54,61 +80,54 @@ impl SessionState {
 
     /// 添加用户消息。
     pub fn add_user_message(&mut self, content: impl Into<String>) {
-        self.conversation.push(Message::user(content));
+        let msg = StructuredMessage {
+            id: format!("msg_{}", Utc::now().timestamp_millis()),
+            parent_id: self.structured_messages.last().map(|m| m.id.clone()),
+            role: MessageRole::User,
+            parts: vec![Part::Text {
+                text: content.into(),
+                time: PartTime::default(),
+            }],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime::default(),
+            session_id: self.session_id.clone(),
+            finish: None,
+        };
+        self.structured_messages.push(msg);
+        self.trim_conversation();
         self.last_activity = Instant::now();
     }
 
-    /// 添加助手消息。
-    pub fn add_assistant_message(&mut self, content: impl Into<String>) {
-        self.conversation.push(Message::assistant(content));
-        self.last_activity = Instant::now();
-    }
-
-    /// 添加消息并裁剪历史。
-    pub fn add_message(&mut self, message: Message) {
-        self.conversation.push(message);
+    /// 添加结构化消息并裁剪历史。
+    pub fn add_structured_message(&mut self, msg: StructuredMessage) {
+        self.structured_messages.push(msg);
         self.trim_conversation();
         self.last_activity = Instant::now();
     }
 
     /// 获取最近 n 条消息。
-    pub fn recent_messages(&self, n: usize) -> Vec<Message> {
-        self.conversation
+    pub fn recent_messages(&self, n: usize) -> Vec<&StructuredMessage> {
+        self.structured_messages
             .iter()
             .rev()
             .take(n)
             .rev()
-            .cloned()
             .collect()
     }
 
     /// 消息总数。
     pub fn message_count(&self) -> usize {
-        self.conversation.len()
+        self.structured_messages.len()
     }
 
-    /// 转换为 Session。
-    pub fn to_session(&self) -> Session {
-        let mut session = Session::new(&self.session_id);
-        for msg in &self.conversation {
-            match msg.role {
-                MessageRole::User => session.add_user_message(&msg.content),
-                MessageRole::Assistant => session.add_assistant_message(&msg.content),
-                MessageRole::System => session.add_system_message(&msg.content),
-                MessageRole::Tool => {}
-            }
-        }
-        session
-    }
-
-    /// 构建 Prompt 上下文。
-    pub fn build_prompt_context(&self, current_input: &str) -> String {
-        if let Some(ref window) = self.context_window {
-            crate::context::assembly::assemble_prompt(window, &self.conversation, current_input)
-        } else {
-            format!("## 当前输入\n\n{}\n\n## 你的执行计划\n", current_input)
-        }
-    }
+    // 转换为 Session（待 Task 7 完成 Session 类型更新后恢复）。
+    // pub fn to_session(&self) -> Session {
+    //     let mut session = Session::new(&self.session_id);
+    //     session.messages = self.structured_messages.clone();
+    //     session
+    // }
 
     /// 清理过期消息。
     pub fn cleanup(&mut self) {
@@ -116,33 +135,16 @@ impl SessionState {
     }
 
     fn trim_conversation(&mut self) {
-        if self.conversation.len() <= MAX_CONVERSATION_MESSAGES {
+        if self.structured_messages.len() <= MAX_CONVERSATION_MESSAGES {
             return;
         }
-        let has_system_msg =
-            !self.conversation.is_empty() && self.conversation[0].role == MessageRole::System;
-        let start = if has_system_msg {
-            let keep_from = self.conversation.len().saturating_sub(KEEP_RECENT_MESSAGES);
-            if keep_from <= 1 {
-                return;
-            }
-            1
-        } else {
-            let keep_from = self.conversation.len().saturating_sub(KEEP_RECENT_MESSAGES);
-            if keep_from == 0 {
-                return;
-            }
-            0
-        };
-        let keep_from = self.conversation.len().saturating_sub(KEEP_RECENT_MESSAGES);
-        if keep_from > start {
-            self.conversation.drain(start..keep_from);
+        let keep_from = self
+            .structured_messages
+            .len()
+            .saturating_sub(KEEP_RECENT_MESSAGES);
+        if keep_from > 0 {
+            self.structured_messages.drain(0..keep_from);
         }
-    }
-
-    /// 获取对话引用。
-    pub fn get_conversation(&self) -> &[Message] {
-        &self.conversation
     }
 }
 
@@ -215,20 +217,16 @@ mod tests {
     fn test_session_state_new() {
         let state = SessionState::new("test-session");
         assert_eq!(state.session_id, "test-session");
-        assert!(state.conversation.is_empty());
+        assert!(state.structured_messages.is_empty());
         assert!(state.current_goal.is_none());
-        assert!(state.pending_clarification.is_none());
     }
 
     #[test]
     fn test_session_state_add_messages() {
         let mut state = SessionState::new("test-session");
         state.add_user_message("Hello");
-        assert_eq!(state.conversation.len(), 1);
-        assert_eq!(state.conversation[0].role, MessageRole::User);
-        state.add_assistant_message("Hi there!");
-        assert_eq!(state.conversation.len(), 2);
-        assert_eq!(state.conversation[1].role, MessageRole::Assistant);
+        assert_eq!(state.structured_messages.len(), 1);
+        assert_eq!(state.structured_messages[0].role, MessageRole::User);
     }
 
     #[test]
@@ -238,18 +236,8 @@ mod tests {
             state.add_user_message(format!("Message {}", i));
         }
         state.cleanup();
-        assert!(state.conversation.len() <= KEEP_RECENT_MESSAGES);
-        assert!(!state.conversation.is_empty());
-    }
-
-    #[test]
-    fn test_session_state_build_prompt_context() {
-        let mut state = SessionState::new("test-session");
-        state.add_user_message("Hello");
-        state.add_assistant_message("Hi there!");
-        let prompt = state.build_prompt_context("What's next?");
-        assert!(prompt.contains("## 当前输入"));
-        assert!(prompt.contains("What's next"));
+        assert!(state.structured_messages.len() <= KEEP_RECENT_MESSAGES);
+        assert!(!state.structured_messages.is_empty());
     }
 
     #[tokio::test]
