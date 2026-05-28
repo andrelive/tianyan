@@ -144,43 +144,56 @@ impl ContextAssembler {
     }
 
     /// 将 LLM 返回的传输层 Message 转回 StructuredMessage（用于持久化）。
+    ///
+    /// 角色从 `msg.role` 直接派生。对于 Tool 消息，生成 `Part::ToolResult`；
+    /// 对于其他角色，分别提取 reasoning content、text content 和 tool calls。
     pub fn message_to_structured(
         msg: &Message,
-        role: MessageRole,
         session_id: &str,
         parent_id: Option<&str>,
     ) -> StructuredMessage {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let default_time = PartTime::default();
-
         let id = format!("msg_{}", now_ms);
+        let role = msg.role;
 
         let mut parts = Vec::new();
 
-        if let Some(ref reasoning) = msg.reasoning_content {
-            if !reasoning.is_empty() {
-                parts.push(Part::Reasoning {
-                    text: reasoning.clone(),
-                    time: default_time.clone(),
+        match role {
+            MessageRole::Tool => {
+                parts.push(Part::ToolResult {
+                    tool_call_id: msg.tool_call_id.clone().unwrap_or_default(),
+                    content: msg.content.clone(),
+                    time: default_time,
                 });
             }
-        }
+            _ => {
+                if let Some(ref reasoning) = msg.reasoning_content {
+                    if !reasoning.is_empty() {
+                        parts.push(Part::Reasoning {
+                            text: reasoning.clone(),
+                            time: default_time.clone(),
+                        });
+                    }
+                }
 
-        if !msg.content.is_empty() {
-            parts.push(Part::Text {
-                text: msg.content.clone(),
-                time: default_time.clone(),
-            });
-        }
+                if !msg.content.is_empty() {
+                    parts.push(Part::Text {
+                        text: msg.content.clone(),
+                        time: default_time.clone(),
+                    });
+                }
 
-        if let Some(ref tool_calls) = msg.tool_calls {
-            for tc in tool_calls {
-                parts.push(Part::ToolCall {
-                    id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    arguments: tc.function.arguments.clone(),
-                    time: default_time.clone(),
-                });
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    for tc in tool_calls {
+                        parts.push(Part::ToolCall {
+                            id: tc.id.clone(),
+                            name: tc.function.name.clone(),
+                            arguments: tc.function.arguments.clone(),
+                            time: default_time.clone(),
+                        });
+                    }
+                }
             }
         }
 
@@ -197,7 +210,7 @@ impl ContextAssembler {
                 completed: now_ms,
             },
             session_id: session_id.to_string(),
-            finish: Some("stop".to_string()),
+            finish: None,
         }
     }
 }
