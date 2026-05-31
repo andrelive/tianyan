@@ -17,6 +17,7 @@ use crate::executor::verification::VerificationGate;
 use crate::executor::SecurityPolicy;
 use crate::model::ChatService;
 use crate::observability::AgentMetrics;
+use crate::session::SessionManager;
 use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
 use crate::skills::{SkillExecutor, SkillRegistry};
 use crate::vfs::VirtualFileSystem;
@@ -31,6 +32,7 @@ pub struct AgentBuilder {
     vfs: Option<Arc<dyn VirtualFileSystem>>,
     skill_executor: Option<Arc<SkillExecutor>>,
     skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
+    session_manager: Option<Arc<dyn SessionManager>>,
 }
 
 impl AgentBuilder {
@@ -42,6 +44,7 @@ impl AgentBuilder {
             vfs: None,
             skill_executor: None,
             skill_registry: None,
+            session_manager: None,
         }
     }
 
@@ -75,6 +78,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn with_session_manager(mut self, session_manager: Arc<dyn SessionManager>) -> Self {
+        self.session_manager = Some(session_manager);
+        self
+    }
+
     pub fn build(self) -> Result<Agent> {
         let model_service = self
             .model_service
@@ -92,6 +100,10 @@ impl AgentBuilder {
             .skill_registry
             .unwrap_or_else(|| Arc::new(RwLock::new(SkillRegistry::new())));
 
+        let session_manager = self
+            .session_manager
+            .ok_or_else(|| TianyanError::Internal("需要会话管理器".to_string()))?;
+
         let tool_registry = ToolRegistry::new(SecurityPolicy::default());
         let tool_registry = if let Some(ref executor) = self.skill_executor {
             tool_registry.with_skill_executor(executor.clone())
@@ -102,6 +114,7 @@ impl AgentBuilder {
         let agent_loop = AgentLoop::new(
             model_service.clone(),
             tool_registry,
+            session_manager.clone(),
             AgentLoopConfig {
                 max_turns: self.config.max_turns,
                 model: "default".to_string(),
@@ -160,6 +173,7 @@ impl AgentBuilder {
             verification_gate,
             llm_judge,
             agent_loop,
+            session_manager,
         ))
     }
 }
