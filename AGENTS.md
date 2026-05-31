@@ -132,39 +132,62 @@ Two config types exist (known duplication, not yet unified):
 
 No `max_retries` field — it was removed.
 
-### Session Context Layer
+### Session & Context Layer
 
 ```
 core/src/common/types/
 ├── message.rs              ← Message (传输层, 含 reasoning_content)
-├── structured_message.rs   ← StructuredMessage, Part, DetailedTokenUsage (存储层)
+├── structured_message.rs   ← StructuredMessage (存储层, 含 compression_marker 字段)
 └── ...
 
 core/src/context/
 ├── assembler.rs            ← ContextAssembler: 存储层 → 传输层转换 (纯函数)
-├── compression/            ← ContextCompressor, TokenEstimator
-├── pipeline.rs             ← ContextPipeline: 填充 InjectableContext + 压缩
+├── compression/            ← ContextCompressor (含 cached_summary 增量摘要), TokenEstimator
+├── pipeline.rs             ← ContextPipeline: load_injectable() + compress_if_needed()
 └── retrieval/
-    ├── types.rs            ← RetrievalResult, RetrievalStep, RetrievalTrace (检索域类型)
+    ├── types.rs            ← RetrievalResult, RetrievalStep, RetrievalTrace
     ├── retriever.rs        ← DualLayerRetriever (持有 vfs, intent_analyzer)
-    ├── loader.rs           ← TokenBudget, ContentLoadStrategy (预算 + 加载策略)
+    ├── loader.rs           ← ContentLoadStrategy (TokenBudget 已删除)
     ├── intent.rs           ← IntentAnalyzer, Intent, QueryType
     └── trace.rs            ← RetrievalTraceBuilder
 
 core/src/agent/
+├── coordinator.rs          ← Agent: 自闭环管理 session (加载→执行→持久化→压缩)
+├── loop.rs                 ← AgentLoop: 持有 SessionManager，实时持久化每条消息
 ├── session_state.rs        ← SessionState (structured_messages + injectable_context)
 └── ...
 ```
 
-- **Storage/transmission separation**: `StructuredMessage` (含 `Part: Text|Reasoning|ToolCall|ToolResult`, token stats, cost) 用于持久化; `Message` 仅用于 LLM 传输. 通过 `ContextAssembler` 转换.
-- **`SessionState.conversation: Vec<Message>` is replaced** by `structured_messages: Vec<StructuredMessage>` + `injectable_context: InjectableContext`. Direct `state.conversation` access is a compile error.
-- **`MessageRecord` is removed** — JSONL persistence uses `StructuredMessage` directly.
-- **`ContextPipeline::run()`** returns `(InjectableContext, Option<String>)`. Pipeline 直接持有 `Arc<DualLayerRetriever>` — `ContextRetriever` trait 已删除（单一适配器，违反"两个适配器才是真正的 seam"）。
-- **`ContextAssembler::assemble()`** builds `Vec<Message>` in cache-optimal order: soul → rules+memories → history → current input. Knowledge retrieval is a tool call (not injected), so the prefix stays stable.
-- **`InjectableContext`** lives in `agent/session_state.rs` (not `context/`). Fields: `soul`, `rules_and_experiences`, `memories`, `last_updated`.
-- **`ContextAssembler::message_to_structured()`** derives role from `msg.role` — no separate `role` parameter.
-- **Retrieval types** (`RetrievalResult`, `RetrievalStep`, `RetrievalTrace`) live in `retrieval/types.rs` — not in a top-level `context/types.rs` (that file was deleted as dead code).
-- **`ContentLoaderImpl` / `LoadedContent` / `TokenCounter`** were removed from `loader.rs`. Only `ContentLoadStrategy` and `TokenBudget` remain, used by `DualLayerRetriever`.
+#### Data flow (updated)
+
+```
+Server: agent.process_message(session_id, msg)  ← 传入 session_id, 非 SessionState
+  │
+  └─ Agent:
+       1. session_manager.get_session(session_id) → 构建 SessionState (marker 截断)
+       2. prepare_context() → Vec<Message> (soul 首次加载后缓存)
+       3. agent_loop.run(&mut messages, session_id, parent_id)
+            → loop 内每产生一条消息，实时调 session_manager.add_structured_message()
+            → 工具调用消息不丢弃，全部持久化
+       4. maybe_compress_and_persist()
+            → 从后向前扫描 compression_marker
+            → marker 后消息量 > 6 → LLM 摘要 → StructuredMessage { compression_marker: true }
+            → 持久化到 session 文件
+```
+
+#### Key design points
+
+- **Storage/transmission separation**: `StructuredMessage` (含 `Part: Text|Reasoning|ToolCall|ToolResult`, `compression_marker`, token stats, cost) 用于持久化; `Message` 仅用于 LLM 传输. 通过 `ContextAssembler` 转换.
+- **`compression_marker` 字段**: `StructuredMessage` 上的 `bool` 标记。压缩产生的摘要 System Message 设为 `true`。加载 session 时从后向前扫描找到最近 marker，只加载 marker 及之后的消息（旧消息在文件中保留但不加载）。
+- **`SessionManager::add_structured_message()`**: 直接持久化 `StructuredMessage`（不经过 `Message` 转换）。AgentLoop 用此方法实时落盘。
+- **`Agent::process_message(session_id, msg)`**: Agent 持 `Arc<dyn SessionManager>`，自闭环：加载 session → 构建状态 → 执行 loop → 持久化所有消息 → 压缩 → 返回响应。Server 不再需要 `bootstrap_session` 或手动持久化。
+- **`AgentLoop` 实时持久化**: 持有 `SessionManager`，loop 中每条 assistant/tool_result/answer 消息在 push 到内存后立刻调 `add_structured_message()` 落盘。持久化失败仅 `tracing::warn`，不中断 loop。
+- **`ContextPipeline` 拆分**: `load_injectable(query)` 加载 soul+rules+memories（soul 内部缓存，一次会话只读一次）；`compress_if_needed(conversation)` 独立执行压缩；`compress_for_session(messages, session_id)` 返回带 `compression_marker` 的 `StructuredMessage`。`run()` 保留为便捷方法（测试使用）。
+- **`cached_summary` 增量摘要现在可用**: `ContextCompressor` 通过 `Arc<TokioMutex<ContextCompressor>>` 共享，`compress_if_needed` 不再 clone 导致状态丢失。`incremental_summarize` 路径可达。
+- **`ContextAssembler::assemble()`** builds `Vec<Message>` in cache-optimal order: soul → rules+memories → history → current input.
+- **`InjectableContext`** lives in `agent/session_state.rs`. Fields: `soul`, `rules_and_experiences`, `memories`, `last_updated`.
+- **`TokenBudget` 已删除**: `loader.rs` 只保留 `ContentLoadStrategy`，`from_score` 是唯一入口。`retrieve_with_budget` / `load_content_with_budget` / `TokenLimitExceeded` 均已删除。
+- **Compress 简化**: `preserve_recent_messages` 分割逻辑已移除。`compress()` 对所有传入消息做全量/增量摘要，不再保留最近 N 条。
 
 ### Error Types
 
