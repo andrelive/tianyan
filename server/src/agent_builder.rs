@@ -13,12 +13,12 @@ use tokio::sync::{mpsc, RwLock};
 // 内部 crate
 use tianyan::agent::{
     Agent, AgentBuilder, AgentCoordinator, AgentResponse, AgentState, AgentStreamChunk,
-    SessionState,
 };
 use tianyan::config::{ModelServiceType, TianyanConfig};
 use tianyan::context::DualLayerRetriever;
 use tianyan::model::types::ModelProvider;
 use tianyan::model::{ModelConfig, ModelServices};
+use tianyan::session::PersistentSessionManager;
 use tianyan::skills::{SkillExecutor, SkillRegistry};
 use tianyan::vfs::VirtualFileSystemImpl;
 use tianyan::{Result as TianyanResult, TianyanError};
@@ -76,10 +76,11 @@ impl AgentBuilderFactory {
         let agent = AgentBuilder::new()
             .with_config(config.agent.clone())
             .with_model_service(model_services.chat)
-            .with_vfs(vfs)
+            .with_vfs(vfs.clone())
             .with_retriever(Arc::new(retriever))
             .with_skill_executor(skill_executor)
             .with_skill_registry(skill_registry)
+            .with_session_manager(Arc::new(PersistentSessionManager::new(vfs)))
             .build()
             .map_err(|e| TianyanError::Internal(format!("Agent 构建失败：{}", e)))?;
 
@@ -172,7 +173,7 @@ pub struct WizardModeAgent;
 impl AgentCoordinator for WizardModeAgent {
     async fn process_message(
         &self,
-        _state: Arc<RwLock<SessionState>>,
+        _session_id: &str,
         _message: &str,
     ) -> TianyanResult<AgentResponse> {
         Err(TianyanError::ModelService(
@@ -182,7 +183,7 @@ impl AgentCoordinator for WizardModeAgent {
 
     async fn process_message_stream(
         &self,
-        _state: Arc<RwLock<SessionState>>,
+        _session_id: &str,
         _message: &str,
     ) -> TianyanResult<mpsc::Receiver<TianyanResult<AgentStreamChunk>>> {
         Err(TianyanError::ModelService(
@@ -192,7 +193,7 @@ impl AgentCoordinator for WizardModeAgent {
 
     async fn handle_clarification(
         &self,
-        _state: Arc<RwLock<SessionState>>,
+        _session_id: &str,
         _answers: &str,
     ) -> TianyanResult<AgentResponse> {
         Err(TianyanError::ModelService(
