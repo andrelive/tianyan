@@ -8,8 +8,7 @@ use std::time::Instant;
 
 use crate::common::types::TianyanUri;
 
-// 从 types.rs 重新导出以保持向后兼容。
-pub use crate::context::types::{RetrievalStep, RetrievalStepType, RetrievalTrace};
+use super::types::{RetrievalStep, RetrievalStepType, RetrievalTrace};
 
 /// 用于创建检索追踪记录的构建器。
 #[derive(Debug)]

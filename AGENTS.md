@@ -1,5 +1,7 @@
 # AGENTS.md
 
+**代码是唯一事实来源。** `docs/` 中的文档提供架构引导和设计意图，但可能过时。当文档与代码冲突时，以代码为准。文档的价值是指向正确方向——实际结构请用 `grep` / `glob` 验证。
+
 ## Build & Check Commands
 
 ```powershell
@@ -108,15 +110,18 @@ core/src/scheduler/
 ├── mod.rs             ← re-exports TaskScheduler, TaskHandler, TaskContext, etc.
 ├── task_scheduler.rs  ← TaskScheduler, TaskHandler trait, TaskContext, TaskDefinition, TaskResult
 └── tasks/
-    ├── mod.rs         ← re-exports GcTask, MemoryTask, SummaryTask
+    ├── mod.rs         ← re-exports GcTask, MemoryTask, RuleTask, SummaryTask
     ├── gc_task.rs     ← GcTask (garbage collection, stale rule/memory cleanup)
     ├── memory_task.rs ← MemoryTask (session memory extraction)
+    ├── rule_task.rs   ← RuleTask (scheduled cron shell for rule pipeline)
+    ├── rule_suggester.rs ← RuleSuggester: scan patterns/failed_tasks, LLM cluster → promote
+    ├── rule_recorder.rs  ← RuleRecorder: dedup + write learned rules with version metadata
     └── summary_task.rs← SummaryTask (VFS summary generation)
 ```
 
 - `tasks/` was merged into `scheduler/` as a submodule. Import paths:
   - `tianyan::scheduler::{TaskScheduler, TaskHandler, TaskContext, ...}`
-  - `tianyan::scheduler::tasks::{GcTask, MemoryTask, SummaryTask}`
+  - `tianyan::scheduler::tasks::{GcTask, MemoryTask, RuleTask, SummaryTask}`
 - There is no `tianyan::tasks` — it was removed.
 
 ### Config System
@@ -137,9 +142,14 @@ core/src/common/types/
 
 core/src/context/
 ├── assembler.rs            ← ContextAssembler: 存储层 → 传输层转换 (纯函数)
-├── assembly.rs             ← assemble_prompt (旧文本拼接路径, 逐步废弃)
+├── compression/            ← ContextCompressor, TokenEstimator
 ├── pipeline.rs             ← ContextPipeline: 填充 InjectableContext + 压缩
-└── ...
+└── retrieval/
+    ├── types.rs            ← RetrievalResult, RetrievalStep, RetrievalTrace (检索域类型)
+    ├── retriever.rs        ← DualLayerRetriever (持有 vfs, intent_analyzer)
+    ├── loader.rs           ← TokenBudget, ContentLoadStrategy (预算 + 加载策略)
+    ├── intent.rs           ← IntentAnalyzer, Intent, QueryType
+    └── trace.rs            ← RetrievalTraceBuilder
 
 core/src/agent/
 ├── session_state.rs        ← SessionState (structured_messages + injectable_context)
@@ -149,11 +159,12 @@ core/src/agent/
 - **Storage/transmission separation**: `StructuredMessage` (含 `Part: Text|Reasoning|ToolCall|ToolResult`, token stats, cost) 用于持久化; `Message` 仅用于 LLM 传输. 通过 `ContextAssembler` 转换.
 - **`SessionState.conversation: Vec<Message>` is replaced** by `structured_messages: Vec<StructuredMessage>` + `injectable_context: InjectableContext`. Direct `state.conversation` access is a compile error.
 - **`MessageRecord` is removed** — JSONL persistence uses `StructuredMessage` directly.
-- **`Message.reasoning_content: Option<String>`** added for DeepSeek reasoning chain passthrough. Only retained when the assistant message contains tool calls.
-- **`ContextPipeline::run()`** returns `(InjectableContext, Option<String>)` — not `ContextWindow`. The assembler (not the pipeline) injects context into messages.
+- **`ContextPipeline::run()`** returns `(InjectableContext, Option<String>)`. Pipeline 直接持有 `Arc<DualLayerRetriever>` — `ContextRetriever` trait 已删除（单一适配器，违反"两个适配器才是真正的 seam"）。
 - **`ContextAssembler::assemble()`** builds `Vec<Message>` in cache-optimal order: soul → rules+memories → history → current input. Knowledge retrieval is a tool call (not injected), so the prefix stays stable.
 - **`InjectableContext`** lives in `agent/session_state.rs` (not `context/`). Fields: `soul`, `rules_and_experiences`, `memories`, `last_updated`.
 - **`ContextAssembler::message_to_structured()`** derives role from `msg.role` — no separate `role` parameter.
+- **Retrieval types** (`RetrievalResult`, `RetrievalStep`, `RetrievalTrace`) live in `retrieval/types.rs` — not in a top-level `context/types.rs` (that file was deleted as dead code).
+- **`ContentLoaderImpl` / `LoadedContent` / `TokenCounter`** were removed from `loader.rs`. Only `ContentLoadStrategy` and `TokenBudget` remain, used by `DualLayerRetriever`.
 
 ### Error Types
 
@@ -185,5 +196,9 @@ When adding VFS init logic, decide: is it infrastructure (put it in `initialize(
 ### Design Principles
 
 - **One adapter = hypothetical seam. Two adapters = real seam.** Don't introduce a trait solely for testability or future flexibility. Extract a trait only when a second adapter exists or is being built right now.
-- `SummaryEngine` (`core/src/vfs/summary/engine.rs`) is a concrete struct for good reason — no second summary strategy exists. Mock dependencies (`ChatService`, `EmbeddingService`) which already have traits instead.
+  - `ContextRetriever` trait was removed — `DualLayerRetriever` is the only adapter; callers use the concrete type.
+  - `SummaryEngine` (`core/src/vfs/summary/engine.rs`) is a concrete struct for good reason — no second summary strategy exists. Mock dependencies (`ChatService`, `EmbeddingService`) which already have traits instead.
+  - `ConversationSummarizer` was removed — it was a shallow wrapper (15 lines of logic) over `ChatService` with zero external callers. The LLM summary calls were inlined into `ContextCompressor`.
 - `DEFAULT_SOUL` constant lives at `core/src/agent/mod.rs` (built via `include_str!`). Use it instead of reaching for the raw file.
+- **Rule pipeline** (`RuleTask → RuleSuggester → RuleRecorder`) lives entirely in `scheduler/tasks/`. It was moved out of `context/` because it's a scheduled cron task (every 15 min, after `MemoryTask`), not context-assembly logic.
+- **`AgentHarness`** (`agent/harness.rs`) is minimal — only holds `AgentMetrics`. Rule recording happens exclusively through the scheduler's `RuleTask`, not from the agent loop.

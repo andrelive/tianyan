@@ -7,7 +7,6 @@ use tokio::sync::RwLock;
 
 use crate::agent::types::ClarificationQuestion;
 use crate::common::types::{DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage};
-use crate::context::types::ContextWindow;
 
 const MAX_CONVERSATION_MESSAGES: usize = 100;
 const KEEP_RECENT_MESSAGES: usize = 50;
@@ -50,8 +49,6 @@ pub struct SessionState {
     pub pending_clarification: Option<Vec<ClarificationQuestion>>,
     /// 最后活动时间。
     pub last_activity: Instant,
-    /// 上下文窗口。
-    pub context_window: Option<ContextWindow>,
     /// 待持久化记忆。
     pub pending_memories: Vec<crate::common::types::MemoryEntry>,
     /// 总 token 数。
@@ -71,7 +68,6 @@ impl SessionState {
             current_goal: None,
             pending_clarification: None,
             last_activity: now,
-            context_window: None,
             pending_memories: Vec::new(),
             total_tokens: 0,
             start_time: now,
@@ -94,6 +90,7 @@ impl SessionState {
             time: MessageTime::default(),
             session_id: self.session_id.clone(),
             finish: None,
+            compression_marker: false,
         };
         self.structured_messages.push(msg);
         self.trim_conversation();

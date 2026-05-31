@@ -184,10 +184,6 @@ pub enum TianyanError {
     #[error("Token 计数错误：{0}")]
     TokenCounting(String),
 
-    /// Token 限制超出
-    #[error("Token 限制超出：当前：{current}，限制：{limit}")]
-    TokenLimitExceeded { current: usize, limit: usize },
-
     /// 摘要生成错误
     #[error("摘要生成错误：{0}")]
     SummaryGeneration(String),
@@ -305,7 +301,7 @@ impl TianyanError {
                 ErrorCategory::Http
             }
 
-            TianyanError::TokenCounting(_) | TianyanError::TokenLimitExceeded { .. } => {
+            TianyanError::TokenCounting(_) => {
                 ErrorCategory::Token
             }
 

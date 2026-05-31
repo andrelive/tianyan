@@ -26,7 +26,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。无外部�
 | `agent` | 智能体协调器 + Harness/Skills 子系统 + 会话状态 | coordinator.rs, session_state.rs, prompt.rs, tools.rs, harness.rs, skill_subsystem.rs, types.rs | ✅ 已集成 |
 | `common` | 通用类型（按领域拆分为子模块）、错误处理、日志 | error.rs, types/ (9个子模块), logging.rs | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs, storage.rs | ✅ 已集成 |
-| `context` | 上下文工程（检索 + 压缩 + 规则记录/建议 + 上下文管线） | pipeline.rs, retrieval/, compression/, rule_recorder.rs, rule_suggester.rs, assembly.rs | ✅ 已集成 |
+| `context` | 上下文工程（检索 + 压缩 + 上下文管线） | pipeline.rs, retrieval/, compression/ | ✅ 已集成 |
 | `executor` | 步骤执行器 + 审批工作流 + 验证门控 + LLM-as-Judge | executor.rs, approval.rs, traits.rs, types.rs, judge.rs, verification.rs | ✅ 已集成 |
 | `knowledge` | 知识库管理（解析、分块、导入） | parser.rs, chunker/ (mod.rs, types.rs), ingestor/ (mod.rs, builder.rs), image.rs, types.rs | ❌ 未集成 |
 | `model` | 模型服务（OpenAI、兼容 API、路由器） | traits.rs, types/ (chat, embedding, vision, model_info, config, service, streaming, api_error, anthropic), openai/ (mod.rs, config.rs, client.rs, chat.rs, embedding.rs, vision.rs, stream.rs), router/ (mod.rs, builder.rs, trait_impls.rs) | ✅ 已集成 |
@@ -49,7 +49,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。无外部�
 | `Agent` | `AgentCoordinator` 的默认实现，持有 ModelService、VFS、ContextPipeline、AgentHarness、AgentSkills、AgentLoop、ToolRegistry 等组件 |
 | `AgentCoordinator` (trait) | 智能体协调器接口，定义 `process_message`、`process_message_stream`、`handle_clarification`、`initialize`、`shutdown` |
 | `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry） |
-| `AgentHarness` | Harness 工程子系统，封装 RuleRecorder + RuleSuggester + AgentMetrics |
+| `AgentHarness` | Harness 工程子系统，封装 AgentMetrics |
 | `AgentSkills` | 技能子系统，封装 SkillExecutor + SkillRegistry + SkillLearningEngine |
 | `AgentLoop` | 智能体迭代循环（LLM 工具调用循环） |
 | `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls |
@@ -72,15 +72,13 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。无外部�
 ```rust
 pub struct Agent {
     config: AgentConfig,
-    model_service: Arc<dyn ModelService>,
+    model_service: Arc<dyn ChatService>,
     vfs: Arc<dyn VirtualFileSystem>,
     context_pipeline: ContextPipeline,
     harness: AgentHarness,
     skills: AgentSkills,
     state: Arc<RwLock<AgentState>>,
     agent_loop: AgentLoop,
-    memory_extractor: Option<Arc<dyn MemoryExtractionTrait + Send + Sync>>,
-    background_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     verification_gate: VerificationGate,
     llm_judge: Option<LlmJudge>,
 }
@@ -175,16 +173,13 @@ pub struct Agent {
 
 ### 1.7 context 子模块
 
-**职责**：上下文工程系统，包括双层检索、对话压缩、规则记录/建议和统一上下文管线。
+**职责**：上下文工程系统，包括双层检索、对话压缩和统一上下文管线。
 
 **子模块组织**：
-- `context/retrieval/` — 意图分析、双层向量检索（RRF 融合）、内容加载（Token 预算）、检索追踪
+- `context/retrieval/` — 意图分析、双层向量检索、内容加载（Token 预算）、检索追踪
 - `context/compression/` — 对话摘要压缩（分层策略）、Token 估算
 - `context/pipeline.rs` — `ContextPipeline`，统一上下文管线（规则注入 → 检索 → 压缩）
-- `context/rule_recorder.rs` — `RuleRecorder`，失败驱动规则记录（FailureKind: System / Logic / Safety）
-- `context/rule_suggester.rs` — `RuleSuggester`，扫描记忆聚类自动提炼规则
-- `context/assembly.rs` — `assemble_prompt`，组装最终 Prompt
-- `context/types.rs` — `ContextWindow`（system_prompt + messages + token_usage）
+- `context/assembler.rs` — `ContextAssembler`，纯函数：存储层 `StructuredMessage` → 传输层 `Message`
 
 **核心类型**：
 
@@ -193,12 +188,15 @@ pub struct Agent {
 | `ContextPipeline` | 统一上下文管线，封装检索→规则注入→压缩的完整流程 |
 | `ContextCompressor` | 对话压缩器，保留最近消息 + 分层压缩策略 |
 | `CompressionConfig` | 压缩配置（preserve_recent_messages 默认 6） |
-| `ContextWindow` | 上下文窗口（system_prompt、messages、token_usage） |
-| `RuleRecorder` | 规则记录器，将失败转化为 learned rules 写入 VFS |
-| `RuleSuggester` | 规则建议器，扫描记忆聚类并 promote_to_rule |
-| `FailureKind` | 失败类型：System / Logic / Safety |
-| `DualLayerRetriever` | L0+L1 双层向量检索器 |
-| `TokenBudget` | Token 预算管理（按比例分配 L0/L1/L2） |
+| `ContextAssembler` | 存储层/传输层消息格式转换（纯函数） |
+| `DualLayerRetriever` | 双层向量检索器（Intent 分析 + 向量搜索 + 内容加载） |
+| `TokenBudget` | Token 预算管理（按比例分配各内容层） |
+| `ContentLoadStrategy` | 基于分数和预算的内容加载策略 |
+
+**规则管线**：规则记录/提炼逻辑已从 `context/` 移至 `scheduler/tasks/`，通过 Scheduler 定时运行：
+- `RuleTask` (`scheduler/tasks/rule_task.rs`) — 规则提炼的 cron 壳
+- `RuleSuggester` (`scheduler/tasks/rule_suggester.rs`) — 扫描聚类 + LLM 提炼
+- `RuleRecorder` (`scheduler/tasks/rule_recorder.rs`) — 去重 + 写入 learned rule
 
 **集成状态**：`ContextPipeline` 在 Agent 的 `process_message` 和 `process_message_stream` 中完整集成。每次处理消息时自动执行规则注入→检索→压缩流程。
 
@@ -267,8 +265,7 @@ pub struct Agent {
 | `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager` | 会话管理，支持 VFS 持久化 |
 | `storage` | `VirtualFileSystem`, `VirtualFileSystemBuilder`, `LocalStorageBackend`, `QdrantStorage`, `MemoryExtractionTrait`, `StorageBackend` (trait), `VectorStorage` (trait) | 存储后端、VFS（vfs/ 拆分为 mod + builder）和记忆提取 trait。local/ 拆分为 mod + tests |
 | `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `DocumentChunker`, `ChunkingConfig`, `ImageProcessor` | 知识库导入（完全未集成，API 端点使用独立逻辑）。chunker/ 拆分为 mod + types，ingestor/ 拆分为 mod + builder |
-| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext` | 定时任务调度框架 |
-| `tasks` | `SummaryTask`, `MemoryTask` | 后台任务实现 |
+| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `RuleTask`, `GcTask`, `MemoryTask`, `SummaryTask`, `RuleRecorder`, `RuleSuggester` | 定时任务调度框架 + 所有任务实现 |
 
 ## 2. 集成状态汇总
 
@@ -282,8 +279,8 @@ pub struct Agent {
 | skills | ✅ 完整集成 | 含 GEPA 进化引擎 |
 | observability | ✅ 完整集成 | AgentMetrics 作为 AgentHarness 的一部分 |
 | storage | ✅ 完整集成 | VFS + Local + Qdrant 多后端 |
-| tasks | ✅ 完整集成 | SummaryTask + MemoryTask 定时执行 |
-| scheduler | ✅ 完整集成 | TaskScheduler 定时调度 |
+| tasks | ✅ 完整集成 | 已合并到 scheduler/tasks/ |
+| scheduler | ✅ 完整集成 | TaskScheduler + RuleTask + MemoryTask + SummaryTask + GcTask |
 | config | ✅ 完整集成 | 配置加载器和验证器 |
 | common | ✅ 完整集成 | 错误类型和通用工具 |
 | session | ⚠️ 占位实现 | 会话持久化尚未完全实现 |
@@ -494,5 +491,5 @@ Tauri lib.rs::run()
 
 ---
 
-**文档版本**: 2026-04-27
-**最后更新**: 2026-04-27（前后端接口对齐：chunk_type、regenerate/edit、错误格式、类型字段）
+**文档版本**: 2026-05-30
+**最后更新**: 2026-05-30（规则管线重构：RuleRecorder/RuleSuggester 移至 scheduler/tasks/，新增 RuleTask，AgentHarness 精简为仅 AgentMetrics，删除 background_tasks，移除 context/types.rs 和 compression/summarizer.rs）

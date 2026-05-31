@@ -141,9 +141,6 @@ impl From<TianyanError> for ApiError {
             TianyanError::Network(msg) | TianyanError::HttpRequest(msg) => ApiError::Internal(msg),
             TianyanError::Timeout(msg) => ApiError::GatewayTimeout(msg),
             TianyanError::TokenCounting(msg) => ApiError::Internal(msg),
-            TianyanError::TokenLimitExceeded { current, limit } => ApiError::PayloadTooLarge(
-                format!("Token 限制超出：当前 {}，限制 {}", current, limit),
-            ),
             TianyanError::SummaryGeneration(msg) => ApiError::Internal(msg),
             TianyanError::Cli(msg) => ApiError::Internal(msg),
             TianyanError::NotImplemented(feature) => {

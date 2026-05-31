@@ -169,6 +169,7 @@ impl SessionManager for PersistentSessionManager {
             },
             session_id: id.to_string(),
             finish: None,
+            compression_marker: false,
         };
         let mut session = Session::new(id);
         session.add_structured_message(sm.clone());
@@ -251,6 +252,7 @@ impl SessionManager for PersistentSessionManager {
             },
             session_id: session_id.to_string(),
             finish: None,
+            compression_marker: false,
         };
 
         // 追加消息到 VFS

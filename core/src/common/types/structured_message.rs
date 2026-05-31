@@ -96,4 +96,6 @@ pub struct StructuredMessage {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub finish: Option<String>,
+    #[serde(default)]
+    pub compression_marker: bool,
 }

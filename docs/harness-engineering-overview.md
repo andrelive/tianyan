@@ -384,114 +384,108 @@ Harness Engineering 不是凭空出现的。它是智能体开发方法的第三
 
 ## 十三、天演中的 Harness 实现映射
 
-天演项目中，Harness Engineering 的核心概念已在 `core/src/agent/harness.rs` 中实现为 `AgentHarness` 结构体。以下是理论到代码的映射关系。
+天演项目中，Harness Engineering 的核心概念已实现为多个松散耦合的模块。以下是理论到代码的映射关系。
 
 ### 13.1 组件映射
 
 | 理论概念 | 天演实现 | 位置 | 状态 |
 |---------|---------|------|:---:|
-| 隐性提示（失败 → 规则） | `RuleRecorder` | `core/src/context/rule_recorder.rs` | ✅ 已实现 |
-| 记忆聚类 → 规则提炼 | `RuleSuggester` | `core/src/context/rule_suggester.rs` | ✅ 已实现 |
+| 隐性提示（失败 → 规则） | `RuleRecorder` | `core/src/scheduler/tasks/rule_recorder.rs` | ✅ 已实现 |
+| 记忆聚类 → 规则提炼 | `RuleSuggester` | `core/src/scheduler/tasks/rule_suggester.rs` | ✅ 已实现 |
+| 规则定时调度 | `RuleTask` | `core/src/scheduler/tasks/rule_task.rs` | ✅ 已实现 |
 | 可观测性（Metrics） | `AgentMetrics` | `core/src/observability/mod.rs` | ✅ 已实现 |
-| 上下文工程 | `ContextPipeline` | `core/src/context/pipeline.rs` | ✅ 已实现（learned_rules_top_k/max_tokens 由 AgentConfig 配置） |
-| Sensors（反馈控制） | `VerificationGate` + `LlmJudge` | `core/src/executor/` (Agent 集成) | ✅ 已实现 |
+| 上下文工程 | `ContextPipeline` | `core/src/context/pipeline.rs` | ✅ 已实现 |
+| Sensors（反馈控制） | `VerificationGate` + `LlmJudge` | `core/src/executor/` | ✅ 已实现 |
 | 技能定义 + 学习 | `AgentSkills` (含 GEPA 引擎) | `core/src/agent/skill_subsystem.rs` | ✅ 已实现 |
-| GC / 熵减 | `CleanupExpired` + `RuleSuggester.scan()` | scheduler + harness | ✅ 已实现 |
+| GC / 熵减 | `GcTask` | `core/src/scheduler/tasks/gc_task.rs` | ✅ 已实现 |
 | 架构约束 | 待实现（linter + 结构测试） | — | ❌ 未实现 |
 
-### 13.2 AgentHarness 架构
+### 13.2 规则管线架构
+
+规则提炼链路已从 Agent 的同步后台任务重构为 Scheduler 的 cron 定时任务：
+
+```
+TaskScheduler (每 15 分钟)
+  └── RuleTask (TaskHandler)
+        └── RuleSuggester
+              ├── scan()  → 扫描 patterns/ + failed_tasks/
+              └── promote_to_rule()  → LLM 聚类 → RuleRecorder
+                                           └── record_with_kind()  → VFS agent/learned/
+```
+
+数据源：`MemoryTask`（定时）→ `MemoryExtractor`(LLM) → 分类记忆写入 VFS：
+- `MemoryCategory::Pattern` → `agent/patterns/`
+- `MemoryCategory::FailedCase` → `memory/cases/failed_tasks/`
+
+### 13.3 AgentHarness 架构
+
+`AgentHarness` 已精简，仅持有可观测性指标。规则记录不再通过 Agent 的即时路径，而是通过 Scheduler 的 `RuleTask`：
 
 ```
 AgentHarness {
-    rule_recorder: RuleRecorder,
-    rule_suggester: RuleSuggester,
-    metrics: AgentMetrics,
-    vfs: Arc<dyn VirtualFileSystem>,
+    metrics: Arc<AgentMetrics>,
 }
-  │
-  ├── record_failure(failure_kind, context, error)
-  │     将失败记录为 learned rules（写入 tianyan://agent/learned/）
-  │
-  ├── record_execution(record: ExecutionRecord)
-  │     记录执行指标到 AgentMetrics
-  │
-  ├── record_rule_hit()
-  │     记录规则命中，追踪规则有效性
-  │
-  └── suggest_rules()
-        后台任务：扫描记忆聚类 → 自动提炼规则
 ```
 
-### 13.3 失败驱动增强闭环
+- `metrics.record_execution(success)` — 记录每次 AgentLoop 执行结果
+- `metrics.record_pipeline_failure()` — 记录管线失败
+- `metrics.record_rule_hit()` / `metrics.record_rule_injection()` — 追踪规则有效性
+
+### 13.4 失败驱动增强闭环
 
 ```
                         ┌───────────────────────┐
-1. 执行失败              │ AgentLoop/ToolRegistry 失败 │
+1. 执行失败              │ AgentLoop 失败 + MemoryTask 提取记忆 │
                         └───────────┬───────────┘
                                     │
-2. RuleRecorder.record()            ▼
-   FailureKind:                    ┌───────────────────┐
-   - System (网络/超时)            │ 转化为 learned     │
-   - Logic (参数/策略错误)          │ rule 写入 VFS      │
-   - Safety (安全策略违反)         │ tianyan://agent/   │
-                                    │ learned/          │
+2. MemoryTask (scheduler)           ▼
+   MemoryCategory::                 ┌───────────────────┐
+   FailedCase / Pattern             │ 写入 VFS           │
+                                    │ patterns/         │
+                                    │ failed_tasks/     │
                                     └─────────┬─────────┘
                                               │
-3. 下次消息                                  ▼
-                                    ┌───────────────────────────────┐
-                                    │ ContextPipeline（规则注入阶段） │
-                                    │ 按 learned_rules_top_k 加载     │
-                                    │ 按 learned_rules_max_tokens     │
-                                    │ 控制注入 prompt 的 token 预算   │
-                                    └─────────────┬─────────────────┘
+3. RuleTask (scheduler, 每15分钟)             ▼
+   RuleSuggester.scan()           ┌───────────────────┐
+   → LLM 聚类                     │ 跨会话模式识别      │
+   → RuleRecorder.record_with_kind│ 去重 + 写入        │
+                                    │ agent/learned/     │
+                                    └─────────┬─────────┘
                                               │
-4. AgentMetrics.record_rule_hit()           ▼
-                                    ┌───────────────────┐
-                                    │ 规则命中追踪       │
-                                    │ 统计有效性          │
-                                    └───────────────────┘
+4. ContextPipeline.run()                     ▼
+   (下次对话时)                   ┌───────────────────┐
+   → load_relevant_rules()       │ 规则注入 prompt     │
+                                    └─────────┬─────────┘
                                               │
-5. RuleSuggester.scan_and_promote()          ▼ (异步)
-                                    ┌───────────────────┐
-                                    │ 记忆聚类分析       │
-                                    │ 跨会话模式识别     │
-                                    │ promote_to_rule()  │
+5. AgentMetrics                              ▼
+   record_rule_injection()       ┌───────────────────┐
+   record_rule_hit()             │ 追踪规则有效性      │
                                     └───────────────────┘
 ```
 
-### 13.4 AgentMetrics 可观测性接口
-
-AgentMetrics 实现了 Birgitta Böckeler 的 Sensors（反馈控制）理念中的可观测性部分：
+### 13.5 FailureKind 类型
 
 ```rust
-pub struct AgentMetrics {
-    pub execution_history: Vec<ExecutionRecord>,
-    pub token_usage: Vec<TokenUsage>,
-    pub rule_hits: u64,
-    pub rule_injections: u64,
+pub enum FailureKind {
+    Transient,  // 瞬态错误，不记录
+    Logic,      // 逻辑错误，记录为 learned rule
+    Input,      // 用户输入错误，不记录
+    System,     // 系统级错误，记录并告警
 }
 ```
 
-| 查询方法 | Harness 概念映射 | 返回值 |
-|---------|----------------|--------|
-| `query_token_summary()` | Context Engineering 监控 | Token 消耗总结 |
-| `query_success_rate()` | Sensors（反馈控制） | 执行成功率 |
-| `query_rule_effectiveness()` | 隐性提示有效性 | 规则注入 vs 命中 |
-| `query_common_failures()` | 失败分析 | Top-10 常见失败 |
-| `query_harness_health()` | Harness 健康评估 | 综合健康摘要 |
-
-### 13.5 与理论框架的对应
+### 13.6 与理论框架的对应
 
 | 理论框架 | 天演等价实现 | 说明 |
 |---------|------------|------|
 | Guides（前馈） | `ContextPipeline`（检索 + 规则注入 + 压缩） | 在生成前提供正确信息 |
 | Sensors（反馈） | `VerificationGate` + `LlmJudge` + `AgentMetrics` | 生成后验证与记录 |
-| 失败即信号 | `RuleRecorder.record()`（FailureKind） | 失败转化为永久环境增强 |
+| 失败即信号 | `RuleRecorder.record_with_kind()` | 失败转化为永久环境增强 |
 | 约束即乘数 | `VerificationGate` + 审批工作流 | 安全级别自动审批/拒绝 |
 | 渐进式披露 | `ContextPipeline.run()` + `ContextCompressor` | Token 预算 + 分层压缩 |
-| 垃圾回收 | `SessionStateManager.cleanup_expired()` + `RuleSuggester` | 周期清理 + 模式提炼 |
+| 垃圾回收 | `GcTask` (cron 定时) | 周期清理 + 文档漂移检测 |
 
 ---
 
-**文档版本**: 2026-05-10
-**最后更新**: 2026-05-10（新增 learned_rules_top_k/max_tokens 可配置参数说明、ContextPipeline 规则注入流程细化）
+**文档版本**: 2026-05-30
+**最后更新**: 2026-05-30（规则管线重构：RuleRecorder/RuleSuggester 移至 scheduler/tasks/，新增 RuleTask，AgentHarness 精简，FailureKind 类型更新）

@@ -10,17 +10,13 @@ mod intent;
 mod loader;
 mod retriever;
 mod trace;
+mod types;
 
-pub use crate::context::types::RetrievalResult;
 pub use intent::{Intent, IntentAnalyzer, QueryType, TargetScope};
-pub use loader::{
-    ContentLoadStrategy, ContentLoaderImpl, LoadedContent, TokenBudget, TokenCounter,
-};
-pub use retriever::{ContextRetriever, DualLayerRetriever, DualLayerRetrieverBuilder};
-pub use trace::{
-    RetrievalStep, RetrievalStepType, RetrievalTrace, RetrievalTraceBuilder, TokenPercentages,
-    TokenStats,
-};
+pub use loader::ContentLoadStrategy;
+pub use retriever::{DualLayerRetriever, DualLayerRetrieverBuilder};
+pub use trace::{RetrievalTraceBuilder, TokenPercentages, TokenStats};
+pub use types::{RetrievalResult, RetrievalStep, RetrievalStepType, RetrievalTrace};
 
 #[cfg(test)]
 mod tests {
@@ -30,7 +26,6 @@ mod tests {
     fn test_module_exports() {
         // 验证所有公共类型可访问
         let _ = QueryType::Search("test".to_string());
-        let _ = TokenBudget::new(1000);
         let _ = ContentLoadStrategy::from_score(0.8);
     }
 }

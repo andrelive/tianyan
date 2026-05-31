@@ -10,7 +10,7 @@ use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
-use tianyan::scheduler::tasks::{MemoryTask, SummaryTask};
+use tianyan::scheduler::tasks::{MemoryTask, RuleTask, SummaryTask};
 
 use crate::agent_builder::create_model_services;
 
@@ -265,7 +265,7 @@ pub async fn start_server(
     let app_config = Arc::new(state.config().read().await.clone());
 
     let task_ctx = Arc::new(TaskContext::new(
-        vfs,
+        vfs.clone(),
         summary_engine,
         memory_extractor,
         app_config,
@@ -290,6 +290,23 @@ pub async fn start_server(
             Arc::new(MemoryTask::new()),
         ))
         .await?;
+
+    // 注册规则提炼任务（每 15 分钟，在记忆提取之后运行）
+    {
+        let config_lock = state.config();
+        let config_guard = config_lock.read().await;
+        let model_services =
+            create_model_services(&config_guard).await
+                .map_err(|e| anyhow::anyhow!("模型服务创建失败：{}", e))?;
+        task_scheduler
+            .register_task(TaskDefinition::new(
+                "rule_extraction",
+                "规则提炼",
+                "30 */15 * * * *",
+                Arc::new(RuleTask::new(vfs, model_services.chat)),
+            ))
+            .await?;
+    }
 
     // 启动任务调度器
     TaskScheduler::start_with_scheduler(task_scheduler.clone(), task_ctx.clone()).await?;

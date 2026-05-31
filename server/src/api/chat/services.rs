@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info};
 
 use tianyan::agent::{AgentCoordinator, SessionState};
@@ -75,16 +75,19 @@ impl ChatService {
         &self,
         session_id: &str,
         messages: &[ChatMessage],
-    ) -> (String, SessionState) {
+    ) -> (String, Arc<RwLock<SessionState>>) {
         let last_message = messages
             .last()
             .map(|m| m.content.clone())
             .unwrap_or_default();
 
-        let mut state = SessionState::new(session_id);
-        for msg in messages {
-            state.add_user_message(msg.content.clone());
-        }
+        let state = {
+            let mut s = SessionState::new(session_id);
+            for msg in messages {
+                s.add_user_message(msg.content.clone());
+            }
+            Arc::new(RwLock::new(s))
+        };
 
         if let Some(last_msg) = messages.last() {
             let msg = convert_message(last_msg);
@@ -117,11 +120,11 @@ impl ChatService {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("session_id 是必填字段"))?;
 
-        let (last_message, mut state) = self.bootstrap_session(session_id, &request.messages).await;
+        let (last_message, state) = self.bootstrap_session(session_id, &request.messages).await;
 
         let response = self
             .agent
-            .process_message(&mut state, &last_message)
+            .process_message(state, &last_message)
             .await?;
 
         let chat_response = ChatResponse {
@@ -168,11 +171,11 @@ impl ChatService {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("session_id 是必填字段"))?;
 
-        let (last_message, mut state) = self.bootstrap_session(session_id, &request.messages).await;
+        let (last_message, state) = self.bootstrap_session(session_id, &request.messages).await;
 
         let mut stream = self
             .agent
-            .process_message_stream(&mut state, &last_message)
+            .process_message_stream(state, &last_message)
             .await?;
 
         let mut chunk_id = 0;

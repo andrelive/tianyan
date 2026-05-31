@@ -178,6 +178,7 @@ mod tests {
             time: MessageTime::default(),
             session_id: "test-session".to_string(),
             finish: None,
+            compression_marker: false,
         });
         assert_eq!(session.message_count(), 1);
     }

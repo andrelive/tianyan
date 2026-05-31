@@ -27,10 +27,8 @@ use crate::common::types::Message;
 use crate::model::ChatService;
 
 pub mod estimator;
-pub mod summarizer;
 
 pub use estimator::{estimate_tokens, TokenEstimator};
-pub use summarizer::{ConversationSummarizer, SummaryConfig};
 
 /// 压缩策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +77,8 @@ pub struct CompressionConfig {
     pub summary_model: String,
     /// 最小压缩消息数。
     pub min_messages_to_compress: usize,
+    /// 最大摘要长度（token 数）。
+    pub max_summary_tokens: usize,
 }
 
 impl Default for CompressionConfig {
@@ -90,6 +90,7 @@ impl Default for CompressionConfig {
             preserve_recent_messages: DEFAULT_PRESERVE_RECENT,
             summary_model: "gpt-4o-mini".to_string(),
             min_messages_to_compress: DEFAULT_MIN_MESSAGES_TO_COMPRESS,
+            max_summary_tokens: 500,
         }
     }
 }
@@ -120,12 +121,44 @@ impl CompressionResult {
     }
 }
 
+/// 默认摘要提示词模板。
+const DEFAULT_SUMMARY_PROMPT: &str = r#"请将以下对话历史压缩为简洁的摘要。要求：
+
+1. 保留所有重要的事实、决策和结论
+2. 保留用户明确表达的需求和偏好
+3. 保留已完成的任务和取得的结果
+4. 保留遇到的错误和解决方案
+5. 删除重复信息和闲聊内容
+6. 使用第三人称客观描述
+
+对话历史：
+{conversation}
+
+请输出简洁的结构化摘要（不超过 500 字）："#;
+
+/// 增量摘要提示词模板。
+const INCREMENTAL_SUMMARY_PROMPT: &str = r#"请将以下新对话内容合并到已有摘要中，生成更新后的摘要。
+
+已有摘要：
+{existing_summary}
+
+新对话内容：
+{new_conversation}
+
+要求：
+1. 保留已有摘要中的所有重要信息
+2. 将新对话中的关键信息合并进去
+3. 删除重复内容
+4. 保持简洁，不超过 {max_tokens} 字
+
+请输出更新后的摘要："#;
+
 /// 上下文压缩器。
 ///
 /// 负责监控上下文大小并在必要时执行智能压缩。
 #[derive(Clone)]
 pub struct ContextCompressor {
-    summarizer: ConversationSummarizer,
+    model_service: Arc<dyn ChatService>,
     estimator: TokenEstimator,
     config: CompressionConfig,
     /// 缓存的上次摘要，用于增量压缩。
@@ -135,17 +168,10 @@ pub struct ContextCompressor {
 impl ContextCompressor {
     /// 创建新的上下文压缩器。
     pub fn new(model_service: Arc<dyn ChatService>, config: CompressionConfig) -> Self {
-        let summarizer = ConversationSummarizer::new(
-            model_service,
-            SummaryConfig {
-                model: config.summary_model.clone(),
-                ..Default::default()
-            },
-        );
         let estimator = TokenEstimator::new();
 
         Self {
-            summarizer,
+            model_service,
             estimator,
             config,
             cached_summary: None,
@@ -219,13 +245,9 @@ impl ContextCompressor {
     ) -> Result<(Vec<Message>, String)> {
         // 如果有缓存摘要，使用增量摘要；否则全量摘要
         let summary = if let Some(ref cached) = self.cached_summary {
-            let new_summary = self
-                .summarizer
-                .incremental_summarize(cached, messages)
-                .await?;
-            new_summary
+            self.incremental_summarize(cached, messages).await?
         } else {
-            self.summarizer.summarize(messages).await?
+            self.summarize(messages).await?
         };
 
         self.cached_summary = Some(summary.clone());
@@ -236,6 +258,57 @@ impl ContextCompressor {
         ));
 
         Ok((vec![summary_message], summary))
+    }
+
+    /// LLM 全量摘要。
+    async fn summarize(&self, messages: &[Message]) -> Result<String> {
+        if messages.is_empty() {
+            return Ok(String::new());
+        }
+
+        let conversation = messages
+            .iter()
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = DEFAULT_SUMMARY_PROMPT.replace("{conversation}", &conversation);
+
+        let response = self
+            .model_service
+            .chat(&self.config.summary_model, vec![Message::user(prompt)])
+            .await?;
+
+        Ok(response.trim().to_string())
+    }
+
+    /// LLM 增量摘要。
+    async fn incremental_summarize(
+        &self,
+        existing_summary: &str,
+        new_messages: &[Message],
+    ) -> Result<String> {
+        if new_messages.is_empty() {
+            return Ok(existing_summary.to_string());
+        }
+
+        let new_conversation = new_messages
+            .iter()
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = INCREMENTAL_SUMMARY_PROMPT
+            .replace("{existing_summary}", existing_summary)
+            .replace("{new_conversation}", &new_conversation)
+            .replace("{max_tokens}", &self.config.max_summary_tokens.to_string());
+
+        let response = self
+            .model_service
+            .chat(&self.config.summary_model, vec![Message::user(prompt)])
+            .await?;
+
+        Ok(response.trim().to_string())
     }
 
     /// 通过选择压缩（保留重要消息）。
@@ -278,11 +351,10 @@ impl ContextCompressor {
             let to_preserve = &messages[summary_point..];
 
             let summary = if let Some(ref cached) = self.cached_summary {
-                self.summarizer
-                    .incremental_summarize(cached, to_summarize)
+                self.incremental_summarize(cached, to_summarize)
                     .await?
             } else {
-                self.summarizer.summarize(to_summarize).await?
+                self.summarize(to_summarize).await?
             };
 
             self.cached_summary = Some(summary.clone());
@@ -359,6 +431,47 @@ impl std::fmt::Display for CompressionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use crate::common::error::Result;
+    use crate::model::types::{ChatCompletionRequest, ChatCompletionResponse, ChatChoice, ChatCompletionChunk};
+    use crate::model::ChatService;
+
+    struct MockChatService {
+        response: String,
+    }
+
+    impl MockChatService {
+        fn new(response: impl Into<String>) -> Self {
+            Self {
+                response: response.into(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChatService for MockChatService {
+        async fn chat_completion(&self, _request: ChatCompletionRequest) -> Result<ChatCompletionResponse> {
+            Ok(ChatCompletionResponse {
+                id: "mock".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant(self.response.clone()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Default::default(),
+            })
+        }
+
+        async fn chat_completion_stream(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<Result<ChatCompletionChunk>>> {
+            unimplemented!("stream not used in compression tests")
+        }
+    }
 
     #[test]
     fn test_compression_config_default() {
@@ -394,5 +507,166 @@ mod tests {
         let display = format!("{}", status);
         assert!(display.contains("50000"));
         assert!(display.contains("128000"));
+    }
+
+    fn make_compressor(strategy: CompressionStrategy) -> ContextCompressor {
+        let config = CompressionConfig {
+            strategy,
+            preserve_recent_messages: 3,
+            min_messages_to_compress: 3,
+            ..CompressionConfig::default()
+        };
+        let mock: Arc<dyn ChatService> = Arc::new(MockChatService::new("ok"));
+        ContextCompressor::new(mock, config)
+    }
+
+    fn make_compressor_with_threshold(
+        strategy: CompressionStrategy,
+        context_window: usize,
+        compression_threshold: f32,
+        min_msgs: usize,
+    ) -> ContextCompressor {
+        let config = CompressionConfig {
+            strategy,
+            preserve_recent_messages: 3,
+            min_messages_to_compress: min_msgs,
+            context_window,
+            compression_threshold,
+            ..CompressionConfig::default()
+        };
+        let mock: Arc<dyn ChatService> = Arc::new(MockChatService::new("ok"));
+        ContextCompressor::new(mock, config)
+    }
+
+    fn msg_user(text: &str) -> Message {
+        Message::user(text.to_string())
+    }
+
+    fn msg_assistant(text: &str) -> Message {
+        Message::assistant(text.to_string())
+    }
+
+    // ── should_compress ─────────────────────────────────────────────
+
+    #[test]
+    fn test_should_compress_below_min_messages() {
+        let compressor = make_compressor(CompressionStrategy::Select);
+        let msgs = vec![msg_user("hi"), msg_assistant("hello")];
+        assert!(!compressor.should_compress(&msgs));
+    }
+
+    #[test]
+    fn test_should_compress_below_threshold() {
+        let compressor = make_compressor(CompressionStrategy::Select);
+        let msgs = vec![msg_user("a"), msg_assistant("b"), msg_user("c")];
+        assert!(!compressor.should_compress(&msgs));
+    }
+
+    #[test]
+    fn test_should_compress_above_threshold() {
+        // Use very low threshold so even a few messages trigger compression
+        let compressor = make_compressor_with_threshold(
+            CompressionStrategy::Select,
+            100,
+            0.05,
+            3,
+        );
+        let msgs = vec![
+            msg_user("trigger compression"),
+            msg_assistant("response text"),
+            msg_user("more content"),
+        ];
+        assert!(compressor.should_compress(&msgs));
+    }
+
+    // ── compress_by_selection ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_selection_keeps_first_and_last() {
+        let compressor = make_compressor(CompressionStrategy::Select);
+        let msgs = vec![
+            msg_assistant("middle A"),
+            msg_assistant("middle B"),
+            msg_assistant("middle C"),
+            msg_assistant("middle D"),
+        ];
+        let (selected, _summary) = compressor.compress_by_selection(&msgs).await.unwrap();
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].content, "middle A");
+        assert_eq!(selected[1].content, "middle D");
+    }
+
+    #[tokio::test]
+    async fn test_selection_keeps_user_messages() {
+        let compressor = make_compressor(CompressionStrategy::Select);
+        let msgs = vec![
+            msg_assistant("sys A"),
+            msg_user("user question"),
+            msg_assistant("sys B"),
+        ];
+        let (selected, _summary) = compressor.compress_by_selection(&msgs).await.unwrap();
+        assert_eq!(selected.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_selection_keeps_keyword_messages() {
+        let compressor = make_compressor(CompressionStrategy::Select);
+        let msgs = vec![
+            msg_user("start"),
+            msg_assistant("中间无关内容"),
+            msg_assistant("发现了一个重要错误需要修复"),
+            msg_user("end"),
+        ];
+        let (selected, _summary) = compressor.compress_by_selection(&msgs).await.unwrap();
+        assert!(selected.iter().any(|m| m.content.contains("错误")));
+    }
+
+    // ── compress (integration) ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_compress_noop_when_below_preserve_recent() {
+        let config = CompressionConfig {
+            strategy: CompressionStrategy::Select,
+            preserve_recent_messages: 5,
+            min_messages_to_compress: 3,
+            ..CompressionConfig::default()
+        };
+        let mock: Arc<dyn ChatService> = Arc::new(MockChatService::new("ok"));
+        let mut compressor = ContextCompressor::new(mock, config);
+        let msgs = vec![msg_user("a"), msg_assistant("b")];
+        let result = compressor.compress(&msgs).await.unwrap();
+        assert_eq!(result.compressed_count, 0);
+        assert_eq!(result.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_compress_with_selection_strategy() {
+        let config = CompressionConfig {
+            strategy: CompressionStrategy::Select,
+            preserve_recent_messages: 1,
+            min_messages_to_compress: 2,
+            ..CompressionConfig::default()
+        };
+        let mock: Arc<dyn ChatService> = Arc::new(MockChatService::new("ok"));
+        let mut compressor = ContextCompressor::new(mock, config);
+        let msgs = vec![
+            msg_user("first"),
+            msg_assistant("middle"),
+            msg_user("recent"),
+        ];
+        let result = compressor.compress(&msgs).await.unwrap();
+        assert_eq!(result.compressed_count, 2);
+    }
+
+    // ── get_status ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_status_reflects_messages() {
+        let compressor = make_compressor(CompressionStrategy::Select);
+        let msgs = vec![msg_user("hello world"), msg_assistant("response text")];
+        let status = compressor.get_status(&msgs);
+        assert_eq!(status.message_count, 2);
+        // 2 short messages < 64000 threshold — should not trigger compression
+        assert!(!status.should_compress);
     }
 }

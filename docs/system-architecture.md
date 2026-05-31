@@ -370,8 +370,6 @@ pub fn run() {
 │    │     ├── ContextCompressor（对话压缩 + Token 预算）       │
 │    │     └── VFS 集成                                       │
 │    ├── AgentHarness（Harness 工程子系统）                    │
-│    │     ├── RuleRecorder（失败 → 规则持久化）               │
-│    │     ├── RuleSuggester（记忆聚类 → 规则提炼）             │
 │    │     └── AgentMetrics（可观测性指标）                     │
 │    ├── AgentSkills（技能子系统）                             │
 │    │     ├── SkillExecutor（参数验证 + 安全检查）             │
@@ -431,7 +429,7 @@ AgentLoop.run(messages, stream_sender)
 后台任务（异步，不阻塞响应）：
   ├── MemoryExtractionService::extract_from_session()
   ├── SkillLearningEngine::learn_from_history()（GEPA 进化）
-  └── RuleSuggester::scan_and_promote()（记忆聚类 → 规则）
+  └── RuleTask (scheduler): RuleSuggester.scan() → LLM 聚类 → 写 learned rule
   ↓
 state.cleanup() (防止无限增长)
 ```
@@ -486,19 +484,17 @@ ContextPipeline.run(message, conversation)
 
 | 组件 | 职责 | 触发时机 |
 |------|------|---------|
-| `RuleRecorder` | 将失败转化为 learned rules，写入 VFS | Planner/Executor 失败、Pipeline 失败 |
-| `RuleSuggester` | 扫描记忆聚类，自动提炼为规则 | 后台任务，会话结束后 |
+| `RuleRecorder` | 去重 + 写入 learned rule（含版本元数据） | Scheduler RuleTask → RuleSuggester → RuleRecorder |
+| `RuleSuggester` | 扫描记忆聚类 + LLM 提炼为规则 | RuleTask 定时触发 |
 | `AgentMetrics` | 记录 Token 消耗、成功率、规则命中率 | 每次执行 |
 
 **失败驱动增强闭环**：
 ```
-1. 执行失败 → RuleRecorder.record() → 写入 tianyan://agent/learned/
-                                          ↓
-2. 下次消息 → ContextPipeline → 加载 learned rules → 注入 system_prompt
-                                          ↓
-3. 规则命中 → AgentMetrics.record_rule_hit() → 统计有效性
-                                          ↓
-4. 记忆聚类 → RuleSuggester.scan() → 跨会话模式识别 → promote_to_rule()
+1. 会话 → MemoryTask(定时) → MemoryExtractor(LLM) → 分类记忆写入 VFS (patterns/ + failed_tasks/)
+2. RuleTask(定时) → RuleSuggester.scan() → LLM 聚类分析 → RuleRecorder.record_with_kind()
+3. RuleRecorder 去重检查 → 写入 VFS agent/learned/
+4. 下次对话时 ContextPipeline 加载 learned rules 注入 prompt
+5. AgentMetrics 追踪规则命中和注入次数
 ```
 
 #### 6.4.3 AgentSkills（技能子系统）
@@ -614,7 +610,7 @@ ContextPipeline.run(message, conversation)
 - **MemoryEntry**：记忆条目（id、content、category、importance、access_count）
 - **MemoryCategory**：记忆类别 — Preference / Decision / SuccessfulCase / FailedCase / Pattern / Entity / Fact
 - **Agent 集成**：Agent 持有 `Option<Arc<dyn MemoryExtractionTrait>>`，会话结束后异步提取记忆
-- **RuleSuggester**：扫描记忆聚类，自动提炼为 learned rules
+- **RuleTask / RuleSuggester**：定时扫描记忆聚类，用 LLM 提炼为 learned rules
 - **MemoryTask**：定时后台任务，周期性扫描新会话并提取结构化记忆
 
 > 注意：当前 server 层使用 `PlaceholderMemoryCoordinator` 空实现，记忆处理功能尚未完全接入。Agent 中的 `memory_extractor` 参数支持依赖注入。
@@ -696,7 +692,7 @@ TianyanConfig
 | 文件路径 | 功能描述 |
 |---------|---------|
 | `core/src/agent/coordinator.rs` | AgentCoordinator 实现，含 ContextPipeline/AgentHarness/AgentSkills 集成 |
-| `core/src/agent/harness.rs` | AgentHarness，封装 RuleRecorder + RuleSuggester + AgentMetrics |
+| `core/src/agent/harness.rs` | AgentHarness，封装 AgentMetrics |
 | `core/src/agent/skill_subsystem.rs` | AgentSkills，封装 SkillExecutor + SkillRegistry + LearningEngine |
 | `core/src/agent/types.rs` | AgentResponse、AgentStreamChunk、StreamChunkType、StreamEventSender |
 | `core/src/agent/session_state.rs` | SessionState + SessionStateManager，统一会话状态管理 |
@@ -704,8 +700,9 @@ TianyanConfig
 | `core/src/agent/tool_registry.rs` | ToolRegistry，工具注册表 + 并行执行 |
 | `core/src/agent/tool_params.rs` | 工具参数结构体（#[derive(JsonSchema)]） |
 | `core/src/context/pipeline.rs` | ContextPipeline，统一上下文管线（检索 + 规则注入 + 压缩） |
-| `core/src/context/rule_recorder.rs` | RuleRecorder，失败驱动规则记录 |
-| `core/src/context/rule_suggester.rs` | RuleSuggester，记忆聚类规则提炼 |
+| `core/src/scheduler/tasks/rule_task.rs` | RuleTask，规则提炼的 cron 壳 |
+| `core/src/scheduler/tasks/rule_suggester.rs` | RuleSuggester，扫描聚类 + LLM 提炼 |
+| `core/src/scheduler/tasks/rule_recorder.rs` | RuleRecorder，去重 + 写入 learned rule |
 | `core/src/observability/mod.rs` | AgentMetrics，可观测性存储和 Agent 自省接口 |
 | `core/src/planner/mod.rs` | Planner 模块（已废弃，仅导出 ClarificationQuestion） |
 | `core/src/executor/executor.rs` | 独立执行函数（execute_read_file 等）+ 废弃的 Executor 壳 |
@@ -749,7 +746,7 @@ TianyanConfig
 
 ### 2026-05：Harness 工程子系统与可观测性
 
-- **AgentHarness 子系统**：封装 RuleRecorder（失败驱动规则记录）、RuleSuggester（记忆聚类规则提炼）、AgentMetrics（可观测性指标）
+- **AgentHarness 子系统**：封装 AgentMetrics（可观测性指标）。规则记录通过 Scheduler RuleTask 定时运行，不再内嵌于 Agent。
 - **AgentSkills 子系统**：封装 SkillExecutor、SkillRegistry、SkillLearningEngine（GEPA 进化引擎），统一技能生命周期管理
 - **ContextPipeline**：引入统一上下文管线，标准化"规则注入 → 检索 → 压缩"的处理流程
 - **可观测性（observability 模块）**：新增 AgentMetrics 存储，支持 Agent 自省（Token 消耗、成功率、规则有效性、Harness 健康摘要）
@@ -803,6 +800,6 @@ TianyanConfig
 
 ---
 
-**文档版本**: 2026-05-10
-**最后更新**: 2026-05-10（全模块目录拆分重构：model/types/openai/router、skills/executor/learning、storage/vfs/local、knowledge/chunker/ingestor 目录化拆分 + error 合并）  
+**文档版本**: 2026-05-30
+**最后更新**: 2026-05-30（规则管线重构：RuleRecorder/RuleSuggester 移至 scheduler/tasks/，新增 RuleTask，AgentHarness 精简）
 **维护者**: 天演团队

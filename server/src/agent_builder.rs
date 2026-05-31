@@ -172,7 +172,7 @@ pub struct WizardModeAgent;
 impl AgentCoordinator for WizardModeAgent {
     async fn process_message(
         &self,
-        _state: &mut SessionState,
+        _state: Arc<RwLock<SessionState>>,
         _message: &str,
     ) -> TianyanResult<AgentResponse> {
         Err(TianyanError::ModelService(
@@ -182,7 +182,7 @@ impl AgentCoordinator for WizardModeAgent {
 
     async fn process_message_stream(
         &self,
-        _state: &mut SessionState,
+        _state: Arc<RwLock<SessionState>>,
         _message: &str,
     ) -> TianyanResult<mpsc::Receiver<TianyanResult<AgentStreamChunk>>> {
         Err(TianyanError::ModelService(
@@ -192,7 +192,7 @@ impl AgentCoordinator for WizardModeAgent {
 
     async fn handle_clarification(
         &self,
-        _state: &mut SessionState,
+        _state: Arc<RwLock<SessionState>>,
         _answers: &str,
     ) -> TianyanResult<AgentResponse> {
         Err(TianyanError::ModelService(

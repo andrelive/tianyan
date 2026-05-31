@@ -10,12 +10,12 @@ use tracing::{debug, info, instrument};
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
-use crate::context::types::RetrievalResult;
+use super::types::RetrievalResult;
 use crate::model::EmbeddingService;
 use crate::vfs::VirtualFileSystem;
 
 use super::intent::{Intent, IntentAnalyzer};
-use super::loader::{ContentLoadStrategy, TokenBudget};
+use super::loader::ContentLoadStrategy;
 use super::trace::RetrievalTraceBuilder;
 
 /// 融合语义相关性分数与新鲜度分数的组合评分。
@@ -29,42 +29,6 @@ fn compute_combined_score(semantic_score: f32, freshness_score: f32) -> f32 {
     semantic_score * (1.0 - DEFAULT_FRESHNESS_WEIGHT) + freshness_score * DEFAULT_FRESHNESS_WEIGHT
 }
 
-impl RetrievalResult {
-    /// 设置内容。
-    pub fn with_content(mut self, content: String, level: ContentLevel) -> Self {
-        self.token_count = estimate_tokens(&content);
-        self.content = Some(content);
-        self.content_level = level;
-        self
-    }
-}
-
-/// 上下文检索器的抽象 trait。
-///
-/// 使 Agent 和 ContextPipeline 可以依赖 trait 而非具体 `DualLayerRetriever` 类型，
-/// 便于单元测试 mock 和未来的检索器替代实现。
-#[async_trait::async_trait]
-pub trait ContextRetriever: Send + Sync {
-    /// 获取默认 Token 预算。
-    fn default_token_budget(&self) -> usize;
-
-    /// 带 Token 预算的检索。
-    async fn retrieve_with_budget(
-        &self,
-        query: &str,
-        top_k: usize,
-        budget: usize,
-    ) -> Result<Vec<RetrievalResult>>;
-
-    /// 按命名空间过滤检索。
-    async fn retrieve_by_namespace(
-        &self,
-        query: &str,
-        top_k: usize,
-        namespace: crate::common::types::ContextNamespace,
-    ) -> Result<Vec<RetrievalResult>>;
-}
-
 /// 用于基于向量的内容检索的融合检索器。
 ///
 /// 此检索器使用 RRF 算法融合多个命名向量的搜索结果，
@@ -76,8 +40,6 @@ pub struct DualLayerRetriever {
     intent_analyzer: IntentAnalyzer,
     /// 使用的嵌入模型。
     embedding_model: String,
-    /// 默认 Token 预算。
-    default_token_budget: usize,
     /// Memory 命名空间的分数偏置倍数。
     memory_bias: f32,
     /// 记忆衰减率（每日，0.0-1.0），越旧的记忆偏置越低。
@@ -91,7 +53,6 @@ impl DualLayerRetriever {
             vfs,
             intent_analyzer: IntentAnalyzer::new(),
             embedding_model: "text-embedding-3-small".to_string(),
-            default_token_budget: 4096,
             memory_bias: 1.15,
             memory_decay_rate: 0.01,
         }
@@ -107,12 +68,6 @@ impl DualLayerRetriever {
     /// 设置嵌入模型。
     pub fn with_embedding_model(mut self, model: impl Into<String>) -> Self {
         self.embedding_model = model.into();
-        self
-    }
-
-    /// 设置默认 Token 预算。
-    pub fn with_token_budget(mut self, budget: usize) -> Self {
-        self.default_token_budget = budget;
         self
     }
 
@@ -178,22 +133,6 @@ impl DualLayerRetriever {
             .fused_search(&intent.original_query, top_k, intent)
             .await?;
         self.load_content_for_results(results).await
-    }
-
-    /// 带有 Token 预算的检索。
-    pub async fn retrieve_with_budget(
-        &self,
-        query: &str,
-        top_k: usize,
-        budget: usize,
-    ) -> Result<Vec<RetrievalResult>> {
-        let intent = self.analyze_intent(query).await?;
-        let results = self
-            .fused_search(&intent.original_query, top_k, &intent)
-            .await?;
-
-        // 带预算加载内容。
-        self.load_content_with_budget(results, budget).await
     }
 
     /// 分析查询意图。
@@ -277,40 +216,6 @@ impl DualLayerRetriever {
         Ok(loaded_results)
     }
 
-    /// 带有 Token 预算加载内容。
-    async fn load_content_with_budget(
-        &self,
-        results: Vec<RetrievalResult>,
-        budget: usize,
-    ) -> Result<Vec<RetrievalResult>> {
-        let mut token_budget = TokenBudget::new(budget);
-        let mut loaded_results = Vec::new();
-
-        for mut result in results {
-            let strategy = ContentLoadStrategy::from_score_and_budget(result.score, &token_budget);
-            let level = strategy.to_content_level();
-
-            match self.vfs.read(&result.uri, level).await {
-                Ok(content) => {
-                    let tokens = estimate_tokens(&content);
-                    if token_budget.can_afford(tokens) {
-                        token_budget.use_tokens(tokens)?;
-                        result.content = Some(content);
-                        result.content_level = level;
-                        result.token_count = tokens;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(uri = %result.uri, error = %e, "加载内容失败");
-                }
-            }
-
-            loaded_results.push(result);
-        }
-
-        Ok(loaded_results)
-    }
-
     /// 加载特定 URI 的内容。
     pub async fn load_content(&self, uri: &TianyanUri) -> Result<String> {
         self.vfs.read(uri, ContentLevel::Overview).await
@@ -339,11 +244,6 @@ impl DualLayerRetriever {
         self.load_content_for_results(results).await
     }
 
-    /// 获取默认 Token 预算。
-    pub fn default_token_budget(&self) -> usize {
-        self.default_token_budget
-    }
-
     /// 使用命名空间过滤器检索内容。
     ///
     /// 先执行标准检索，然后过滤结果只保留满足条件的命名空间。
@@ -351,6 +251,17 @@ impl DualLayerRetriever {
     /// - `query` - 查询内容
     /// - `top_k` - 返回数量限制
     /// - `filter` - 命名空间过滤函数
+    pub async fn retrieve_by_namespace(
+        &self,
+        query: &str,
+        top_k: usize,
+        namespace: crate::common::types::ContextNamespace,
+    ) -> Result<Vec<RetrievalResult>> {
+        self.retrieve_with_namespace_filter(query, top_k, |ns| ns == namespace)
+            .await
+    }
+
+    /// 使用命名空间过滤器检索内容。
     pub async fn retrieve_with_namespace_filter<F>(
         &self,
         query: &str,
@@ -370,38 +281,11 @@ impl DualLayerRetriever {
     }
 }
 
-#[async_trait::async_trait]
-impl ContextRetriever for DualLayerRetriever {
-    fn default_token_budget(&self) -> usize {
-        self.default_token_budget
-    }
-
-    async fn retrieve_with_budget(
-        &self,
-        query: &str,
-        top_k: usize,
-        budget: usize,
-    ) -> Result<Vec<RetrievalResult>> {
-        self.retrieve_with_budget(query, top_k, budget).await
-    }
-
-    async fn retrieve_by_namespace(
-        &self,
-        query: &str,
-        top_k: usize,
-        namespace: crate::common::types::ContextNamespace,
-    ) -> Result<Vec<RetrievalResult>> {
-        self.retrieve_with_namespace_filter(query, top_k, |ns| ns == namespace)
-            .await
-    }
-}
-
 /// 用于创建融合检索器实例的构建器。
 pub struct DualLayerRetrieverBuilder {
     vfs: Option<Arc<dyn VirtualFileSystem>>,
     embedding_service: Option<Arc<dyn EmbeddingService>>,
     embedding_model: Option<String>,
-    default_token_budget: Option<usize>,
     memory_bias: Option<f32>,
     memory_decay_rate: Option<f32>,
 }
@@ -413,7 +297,6 @@ impl DualLayerRetrieverBuilder {
             vfs: None,
             embedding_service: None,
             embedding_model: None,
-            default_token_budget: None,
             memory_bias: None,
             memory_decay_rate: None,
         }
@@ -434,12 +317,6 @@ impl DualLayerRetrieverBuilder {
     /// 设置嵌入模型。
     pub fn with_embedding_model(mut self, model: impl Into<String>) -> Self {
         self.embedding_model = Some(model.into());
-        self
-    }
-
-    /// 设置默认 Token 预算。
-    pub fn with_token_budget(mut self, budget: usize) -> Self {
-        self.default_token_budget = Some(budget);
         self
     }
 
@@ -469,10 +346,6 @@ impl DualLayerRetrieverBuilder {
 
         if let Some(model) = self.embedding_model {
             retriever = retriever.with_embedding_model(model);
-        }
-
-        if let Some(budget) = self.default_token_budget {
-            retriever = retriever.with_token_budget(budget);
         }
 
         if let Some(bias) = self.memory_bias {
@@ -945,12 +818,10 @@ mod tests {
             .with_vfs(vfs)
             .with_embedding_service(Arc::new(MockEmbeddingService))
             .with_embedding_model("custom-model")
-            .with_token_budget(8192)
             .build()
             .unwrap();
 
         assert_eq!(retriever.embedding_model, "custom-model");
-        assert_eq!(retriever.default_token_budget, 8192);
     }
 
     #[tokio::test]
@@ -1050,18 +921,6 @@ mod tests {
         for result in &results {
             assert!(result.has_content());
         }
-    }
-
-    #[tokio::test]
-    async fn test_retrieve_with_budget() {
-        let (retriever, _) = create_test_retriever_with_data().await;
-        let results = retriever
-            .retrieve_with_budget("documents", 10, 1000)
-            .await
-            .unwrap();
-
-        let total_tokens: usize = results.iter().map(|r| r.token_count).sum();
-        assert!(total_tokens <= 1000 || results.is_empty());
     }
 
     #[tokio::test]

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use tokio::sync::Mutex as TokioMutex;
+
 use tokio::sync::RwLock;
 
 use crate::agent::harness::AgentHarness;
@@ -10,9 +12,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::config::AgentConfig;
 use crate::context::compression::{CompressionConfig, ContextCompressor};
 use crate::context::pipeline::ContextPipeline;
-use crate::context::rule_recorder::RuleRecorder;
-use crate::context::rule_suggester::RuleSuggester;
-use crate::context::ContextRetriever;
+use crate::context::DualLayerRetriever;
 use crate::executor::verification::VerificationGate;
 use crate::executor::SecurityPolicy;
 use crate::model::ChatService;
@@ -27,7 +27,7 @@ use super::coordinator::Agent;
 pub struct AgentBuilder {
     config: AgentConfig,
     model_service: Option<Arc<dyn ChatService>>,
-    retriever: Option<Arc<dyn ContextRetriever>>,
+    retriever: Option<Arc<DualLayerRetriever>>,
     vfs: Option<Arc<dyn VirtualFileSystem>>,
     skill_executor: Option<Arc<SkillExecutor>>,
     skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
@@ -55,7 +55,7 @@ impl AgentBuilder {
         self
     }
 
-    pub fn with_retriever(mut self, retriever: Arc<dyn ContextRetriever>) -> Self {
+    pub fn with_retriever(mut self, retriever: Arc<DualLayerRetriever>) -> Self {
         self.retriever = Some(retriever);
         self
     }
@@ -112,32 +112,22 @@ impl AgentBuilder {
         let context_pipeline = ContextPipeline::new(
             vfs.clone(),
             retriever.clone(),
-            ContextCompressor::new(
+            Arc::new(TokioMutex::new(ContextCompressor::new(
                 model_service.clone(),
                 CompressionConfig {
                     preserve_recent_messages: 6,
                     ..CompressionConfig::default()
                 },
-            ),
+            ))),
             self.config.default_top_k,
             self.config.learned_rules_top_k,
         );
-
-        // 构建规则记录器
-        let rule_recorder = RuleRecorder::new(vfs.clone());
-
-        // 构建规则建议器（扫描记忆聚类）
-        let rule_suggester = if self.config.enable_memory {
-            Some(RuleSuggester::new(vfs.clone(), model_service.clone()))
-        } else {
-            None
-        };
 
         // 构建可观测性指标
         let metrics = AgentMetrics::new();
 
         // 组装 Harness 子系统
-        let harness = AgentHarness::new(rule_recorder, rule_suggester, metrics);
+        let harness = AgentHarness::new(metrics);
 
         // 构建技能学习引擎
         let learning_engine = if self.config.enable_skills {

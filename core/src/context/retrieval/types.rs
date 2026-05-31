@@ -1,25 +1,10 @@
-//! 上下文类型定义。
+//! 检索结果类型定义。
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::common::types::{ContentLevel, TianyanUri};
-
-/// 默认新鲜度半衰期（天）。每过此天数，新鲜度减半。
-pub const DEFAULT_FRESHNESS_HALF_LIFE_DAYS: f64 = 30.0;
-
-/// 半衰期新鲜度衰减。
-/// 每过半衰期天数，新鲜度减半。
-///
-/// - `age_days`: 距今天数
-/// - `half_life_days`: 半衰期（默认 30 天）
-/// - `returns`: 0.0~1.0 的新鲜度评分
-pub fn compute_freshness(age_days: i64, half_life_days: f64) -> f32 {
-    if age_days <= 0 {
-        return 1.0;
-    }
-    (0.5_f64).powf(age_days as f64 / half_life_days) as f32
-}
+use crate::context::compression::estimate_tokens;
 
 /// 带有内容的检索结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +48,14 @@ impl RetrievalResult {
     /// 检查是否已加载内容。
     pub fn has_content(&self) -> bool {
         self.content.is_some()
+    }
+
+    /// 设置内容。
+    pub fn with_content(mut self, content: String, level: ContentLevel) -> Self {
+        self.token_count = estimate_tokens(&content);
+        self.content = Some(content);
+        self.content_level = level;
+        self
     }
 }
 
@@ -139,53 +132,27 @@ impl RetrievalTrace {
     }
 }
 
-/// 统一上下文窗口，聚合所有注入 prompt 的上下文。
-#[derive(Debug, Clone)]
-pub struct ContextWindow {
-    /// 系统提示词（从 VFS Agent 命名空间加载）。
-    pub system_prompt: String,
-    /// 压缩后的对话摘要。
-    pub summary: Option<String>,
-    /// 检索结果（含 URI、内容、分数、层级、类别）。
-    pub retrieved: Vec<RetrievalResult>,
-    /// Token 使用统计。
-    pub token_usage: ContextTokenUsage,
-}
-
-impl ContextWindow {
-    /// 创建空的上下文窗口。
-    pub fn new(system_prompt: String) -> Self {
-        Self {
-            system_prompt,
-            summary: None,
-            retrieved: Vec::new(),
-            token_usage: ContextTokenUsage::default(),
-        }
-    }
-
-    /// 计算总 token 数。
-    pub fn total_tokens(&self) -> usize {
-        self.token_usage.total()
-    }
-}
-
-/// 上下文窗口的 token 使用统计。
-#[derive(Debug, Clone, Default)]
-pub struct ContextTokenUsage {
-    pub system_prompt_tokens: usize,
-    pub summary_tokens: usize,
-    pub retrieved_tokens: usize,
-}
-
-impl ContextTokenUsage {
-    pub fn total(&self) -> usize {
-        self.system_prompt_tokens + self.summary_tokens + self.retrieved_tokens
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_retrieval_result() {
+        let uri = TianyanUri::parse("tianyan://user/profile").unwrap();
+        let result = RetrievalResult::new(uri.clone(), 0.9);
+        assert_eq!(result.uri, uri);
+        assert_eq!(result.score, 0.9);
+        assert!(!result.has_content());
+    }
+
+    #[test]
+    fn test_retrieval_result_with_content() {
+        let uri = TianyanUri::parse("tianyan://user/profile").unwrap();
+        let result =
+            RetrievalResult::new(uri, 0.9).with_content("Test".to_string(), ContentLevel::Overview);
+        assert!(result.has_content());
+        assert!(result.token_count > 0);
+    }
 
     #[test]
     fn test_retrieval_trace() {

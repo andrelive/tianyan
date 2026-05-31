@@ -115,8 +115,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use tokio::sync::{mpsc, Mutex, RwLock};
-use tracing::{info, instrument};
+use tokio::sync::{mpsc, RwLock};
+use tracing::info;
 
 use crate::agent::harness::AgentHarness;
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
@@ -127,7 +127,7 @@ use crate::agent::types::{
     StreamChunkType, StreamEventSender,
 };
 use crate::common::error::Result;
-use crate::common::types::{Message, MessageRole, StructuredMessage};
+use crate::common::types::{Message, StructuredMessage};
 use crate::config::AgentConfig;
 use crate::context::{ContextAssembler, ContextPipeline};
 use crate::executor::{LlmJudge, VerificationGate};
@@ -140,21 +140,21 @@ pub trait AgentCoordinator: Send + Sync {
     /// 处理用户消息。
     async fn process_message(
         &self,
-        state: &mut SessionState,
+        state: Arc<RwLock<SessionState>>,
         message: &str,
     ) -> Result<AgentResponse>;
 
     /// 处理用户消息（流式响应）。
     async fn process_message_stream(
         &self,
-        state: &mut SessionState,
+        state: Arc<RwLock<SessionState>>,
         message: &str,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
 
     /// 处理用户对追问的回答。
     async fn handle_clarification(
         &self,
-        state: &mut SessionState,
+        state: Arc<RwLock<SessionState>>,
         answers: &str,
     ) -> Result<AgentResponse>;
 
@@ -172,7 +172,6 @@ pub struct Agent {
     harness: AgentHarness,
     skills: AgentSkills,
     state: Arc<RwLock<AgentState>>,
-    background_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     verification_gate: VerificationGate,
     llm_judge: Option<LlmJudge>,
     agent_loop: AgentLoop,
@@ -200,63 +199,118 @@ impl Agent {
             harness,
             skills,
             state: Arc::new(RwLock::new(AgentState::default())),
-            background_tasks: Arc::new(Mutex::new(Vec::new())),
             verification_gate,
             llm_judge,
             agent_loop,
         }
     }
 
+    /// 准备当前轮次的上下文消息。
+    ///
+    /// 执行：写入用户消息 → 检查会话缓存 → 按需加载 injectable → 压缩 → 组装。
+    /// soul/rules/memories 仅会话首次加载，后续轮次复用缓存，
+    /// 确保 system prompt 前缀稳定以命中 DeepSeek 前缀缓存。
+    async fn prepare_context(
+        &self,
+        state: &Arc<RwLock<SessionState>>,
+        query: &str,
+    ) -> Vec<Message> {
+        state.write().await.add_user_message(query);
+
+        // 会话级缓存：soul 非空表示已加载过，跳过 I/O
+        let cached = {
+            let s = state.read().await;
+            s.injectable_context.clone()
+        };
+
+        let injectable = if cached.soul.is_empty() {
+            match self.context_pipeline.load_injectable(query).await {
+                Ok(ctx) => {
+                    let injected_rules = ctx.rules_and_experiences.len();
+                    if injected_rules > 0 {
+                        self.harness.metrics.record_rule_hit(injected_rules).await;
+                    }
+                    state.write().await.injectable_context = ctx.clone();
+                    ctx
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "加载可注入上下文失败");
+                    self.harness.metrics.record_pipeline_failure().await;
+                    cached
+                }
+            }
+        } else {
+            cached
+        };
+
+        // 压缩对话历史（每轮独立执行，不影响前缀稳定性）
+        {
+            let s = state.read().await;
+            let mut conversation: Vec<Message> = s
+                .structured_messages
+                .iter()
+                .flat_map(|sm| ContextAssembler::structured_to_messages(sm))
+                .collect();
+
+            if let Ok(summary) = self.context_pipeline.compress_if_needed(&mut conversation).await {
+                if summary.is_some() && conversation.len() < s.structured_messages.len() {
+                    drop(s);
+                    let (session_id, parent_id) = {
+                        let s = state.read().await;
+                        (s.session_id.clone(), s.structured_messages.last().map(|m| m.id.clone()))
+                    };
+                    let new_structured: Vec<StructuredMessage> = conversation
+                        .iter()
+                        .map(|m| {
+                            ContextAssembler::message_to_structured(
+                                m,
+                                &session_id,
+                                parent_id.as_deref(),
+                            )
+                        })
+                        .collect();
+                    state.write().await.structured_messages = new_structured;
+                }
+            }
+        }
+
+        let s = state.read().await;
+        ContextAssembler::assemble(&s.structured_messages, &injectable, "")
+    }
+
     /// 处理用户对追问的回答。
     async fn handle_clarification_response(
         &self,
-        state: &mut SessionState,
+        state: &Arc<RwLock<SessionState>>,
         clarification_answers: &str,
     ) -> Result<AgentResponse> {
         let start = Instant::now();
 
-        if state.pending_clarification.is_none() {
-            return Ok(AgentResponse::simple("当前没有待处理的追问".to_string()));
+        {
+            let s = state.read().await;
+            if s.pending_clarification.is_none() {
+                return Ok(AgentResponse::simple("当前没有待处理的追问".to_string()));
+            }
         }
+        state.write().await.pending_clarification = None;
 
-        state.add_user_message(clarification_answers);
-        state.pending_clarification.take();
-
-        // 运行上下文管线
-        let mut conversation: Vec<Message> = state
-            .structured_messages
-            .iter()
-            .flat_map(|sm| ContextAssembler::structured_to_messages(sm))
-            .collect();
-
-        let injectable =
-            match self
-                .context_pipeline
-                .run(clarification_answers, &mut conversation)
-                .await
-            {
-                Ok((ctx, _summary)) => {
-                    state.injectable_context = ctx.clone();
-                    ctx
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "追问上下文管线执行失败");
-                    self.harness.metrics.record_pipeline_failure().await;
-                    state.injectable_context.clone()
-                }
-            };
-
-        // 组装消息
-        let mut messages = ContextAssembler::assemble(
-            &state.structured_messages,
-            &injectable,
-            "",
-        );
+        let mut messages = self.prepare_context(state, clarification_answers).await;
 
         let loop_result = self.agent_loop.run(&mut messages, None).await;
 
         let response = match loop_result {
             Ok(AgentLoopResult::Answer(content)) => {
+                let parent_id = {
+                    let s = state.read().await;
+                    s.structured_messages.last().map(|m| m.id.clone())
+                };
+                let sm = ContextAssembler::message_to_structured(
+                    &Message::assistant(&content),
+                    &state.read().await.session_id,
+                    parent_id.as_deref(),
+                );
+                state.write().await.add_structured_message(sm);
+
                 let mut resp = AgentResponse::simple(content);
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
                 self.harness.metrics.record_execution(true).await;
@@ -269,7 +323,7 @@ impl Agent {
                     options: None,
                     required: true,
                 };
-                state.pending_clarification = Some(vec![question_obj.clone()]);
+                state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
                 let formatted = format_clarification_questions(&[question_obj.clone()]);
                 let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
@@ -287,20 +341,6 @@ impl Agent {
         {
             let mut st = self.state.write().await;
             st.conversations_processed += 1;
-        }
-
-        if response.is_complete && !response.needs_clarification {
-            let agent_clone = self.clone();
-            let state_clone = state.clone();
-            let handle = tokio::spawn(async move {
-                agent_clone
-                    .scan_and_promote_rules(&state_clone.session_id)
-                    .await;
-                if let Err(e) = agent_clone.learn_skills_from_session(&state_clone).await {
-                    tracing::warn!(error = %e, "技能学习后台任务失败");
-                }
-            });
-            self.background_tasks.lock().await.push(handle);
         }
 
         Ok(response)
@@ -312,105 +352,34 @@ impl Agent {
         // TODO: 重构后恢复
         Ok(())
     }
-
-    /// 扫描记忆聚类并自动提炼为规则（后台任务）。
-    async fn scan_and_promote_rules(&self, session_id: &str) {
-        if let Some(ref suggester) = self.harness.rule_suggester {
-            match suggester.scan().await {
-                Ok(suggestions) => {
-                    for suggestion in suggestions {
-                        if suggestion.source_count >= 2 {
-                            tracing::info!(
-                                category = %suggestion.source_category,
-                                count = suggestion.source_count,
-                                "检测到记忆聚类，尝试提炼规则"
-                            );
-                            if let Err(e) = suggester.promote_to_rule(&suggestion, session_id).await
-                            {
-                                tracing::warn!(error = %e, "规则提炼失败");
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "记忆聚类扫描失败");
-                }
-            }
-        }
-    }
 }
 
 #[async_trait]
 impl AgentCoordinator for Agent {
-    #[instrument(skip(self, state), fields(session_id = %state.session_id))]
     async fn process_message(
         &self,
-        state: &mut SessionState,
+        state: Arc<RwLock<SessionState>>,
         message: &str,
     ) -> Result<AgentResponse> {
         let start = Instant::now();
         let message = message.to_string();
 
-        state.add_user_message(&message);
-
-        // 将结构化消息转换为 Vec<Message> 以供管线压缩
-        let mut conversation: Vec<Message> = state
-            .structured_messages
-            .iter()
-            .flat_map(|sm| ContextAssembler::structured_to_messages(sm))
-            .collect();
-
-        // 运行上下文管线，填充可注入上下文，并尝试压缩
-        let injectable = match self.context_pipeline.run(&message, &mut conversation).await {
-            Ok((ctx, summary)) => {
-                let injected_rules = ctx.rules_and_experiences.len();
-                if injected_rules > 0 {
-                    self.harness.metrics.record_rule_hit(injected_rules).await;
-                }
-
-                if summary.is_some() && conversation.len() < state.structured_messages.len() {
-                    let parent_id = state.structured_messages.last().map(|m| m.id.as_str());
-                    let new_structured: Vec<StructuredMessage> = conversation
-                        .iter()
-                        .map(|m| {
-                            ContextAssembler::message_to_structured(
-                                m,
-                                &state.session_id,
-                                parent_id,
-                            )
-                        })
-                        .collect();
-                    state.structured_messages = new_structured;
-                }
-
-                state.injectable_context = ctx.clone();
-                ctx
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "上下文管线执行失败");
-                self.harness.metrics.record_pipeline_failure().await;
-                state.injectable_context.clone()
-            }
-        };
-
-        // 组装消息
-        let mut messages = ContextAssembler::assemble(
-            &state.structured_messages,
-            &injectable,
-            "",
-        );
+        let mut messages = self.prepare_context(&state, &message).await;
 
         let loop_result = self.agent_loop.run(&mut messages, None).await;
 
         let response = match loop_result {
             Ok(AgentLoopResult::Answer(content)) => {
-                let parent_id = state.structured_messages.last().map(|m| m.id.as_str());
+                let parent_id = {
+                    let s = state.read().await;
+                    s.structured_messages.last().map(|m| m.id.clone())
+                };
                 let sm = ContextAssembler::message_to_structured(
                     &Message::assistant(&content),
-                    &state.session_id,
-                    parent_id,
+                    &state.read().await.session_id,
+                    parent_id.as_deref(),
                 );
-                state.add_structured_message(sm);
+                state.write().await.add_structured_message(sm);
 
                 let mut resp = AgentResponse::simple(content);
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
@@ -424,7 +393,7 @@ impl AgentCoordinator for Agent {
                     options: None,
                     required: true,
                 };
-                state.pending_clarification = Some(vec![question_obj.clone()]);
+                state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
                 let formatted = format_clarification_questions(&[question_obj.clone()]);
                 let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
@@ -444,74 +413,39 @@ impl AgentCoordinator for Agent {
             st.conversations_processed += 1;
         }
 
-        if response.is_complete && !response.needs_clarification {
-            let agent_clone = self.clone();
-            let state_clone = state.clone();
-            let handle = tokio::spawn(async move {
-                agent_clone
-                    .scan_and_promote_rules(&state_clone.session_id)
-                    .await;
-                if let Err(e) = agent_clone.learn_skills_from_session(&state_clone).await {
-                    tracing::warn!(error = %e, "技能学习后台任务失败");
-                }
-            });
-            self.background_tasks.lock().await.push(handle);
-        }
-
         Ok(response)
     }
-
-    #[instrument(skip(self, state), fields(session_id = %state.session_id))]
     async fn process_message_stream(
         &self,
-        state: &mut SessionState,
+        state: Arc<RwLock<SessionState>>,
         message: &str,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
         let (tx, rx) = mpsc::channel(100);
         let self_clone = Arc::new(self.clone());
-        let mut state_clone = state.clone();
         let message = message.to_string();
         let stream_sender = StreamEventSender::new(tx.clone());
 
         tokio::spawn(async move {
-            state_clone.add_user_message(&message);
-
-            let mut conversation: Vec<Message> = state_clone
-                .structured_messages
-                .iter()
-                .flat_map(|sm| ContextAssembler::structured_to_messages(sm))
-                .collect();
-
-            let injectable = match self_clone
-                .context_pipeline
-                .run(&message, &mut conversation)
-                .await
-            {
-                Ok((ctx, _summary)) => {
-                    state_clone.injectable_context = ctx.clone();
-                    ctx
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "流式上下文管线执行失败");
-                    self_clone.harness.metrics.record_pipeline_failure().await;
-                    state_clone.injectable_context.clone()
-                }
-            };
-
-            // 组装消息
-            let mut messages = ContextAssembler::assemble(
-                &state_clone.structured_messages,
-                &injectable,
-                "",
-            );
+            let messages = self_clone.prepare_context(&state, &message).await;
 
             let loop_result = self_clone
                 .agent_loop
-                .run(&mut messages, Some(stream_sender.clone()))
+                .run(&mut messages.clone(), Some(stream_sender.clone()))
                 .await;
 
             match loop_result {
                 Ok(AgentLoopResult::Answer(content)) => {
+                    let parent_id = {
+                        let s = state.read().await;
+                        s.structured_messages.last().map(|m| m.id.clone())
+                    };
+                    let sm = ContextAssembler::message_to_structured(
+                        &Message::assistant(&content),
+                        &state.read().await.session_id,
+                        parent_id.as_deref(),
+                    );
+                    state.write().await.add_structured_message(sm);
+
                     stream_sender
                         .send_complete(&content, StreamChunkType::Answer, None)
                         .await;
@@ -520,19 +454,6 @@ impl AgentCoordinator for Agent {
                         st.conversations_processed += 1;
                     }
                     self_clone.harness.metrics.record_execution(true).await;
-
-                    let agent_clone2 = self_clone.clone();
-                    let state_clone2 = state_clone.clone();
-                    let handle = tokio::spawn(async move {
-                        agent_clone2
-                            .scan_and_promote_rules(&state_clone2.session_id)
-                            .await;
-                        if let Err(e) = agent_clone2.learn_skills_from_session(&state_clone2).await
-                        {
-                            tracing::warn!(error = %e, "技能学习后台任务失败");
-                        }
-                    });
-                    self_clone.background_tasks.lock().await.push(handle);
                 }
                 Ok(AgentLoopResult::NeedsClarification { question }) => {
                     let question_obj = ClarificationQuestion {
@@ -541,6 +462,7 @@ impl AgentCoordinator for Agent {
                         options: None,
                         required: true,
                     };
+                    state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
                     let formatted = format_clarification_questions(&[question_obj.clone()]);
                     stream_sender
                         .send_complete(&formatted, StreamChunkType::Clarification, None)
@@ -565,13 +487,12 @@ impl AgentCoordinator for Agent {
         Ok(rx)
     }
 
-    #[instrument(skip(self, state), fields(session_id = %state.session_id))]
     async fn handle_clarification(
         &self,
-        state: &mut SessionState,
+        state: Arc<RwLock<SessionState>>,
         answers: &str,
     ) -> Result<AgentResponse> {
-        self.handle_clarification_response(state, answers).await
+        self.handle_clarification_response(&state, answers).await
     }
 
     async fn initialize(&self) -> Result<()> {
@@ -585,20 +506,6 @@ impl AgentCoordinator for Agent {
 
     async fn shutdown(&self) -> Result<()> {
         info!("Shutting down agent");
-
-        let mut tasks = self.background_tasks.lock().await;
-        let mut pending = Vec::new();
-        std::mem::swap(&mut pending, &mut tasks);
-        drop(tasks);
-
-        if !pending.is_empty() {
-            tracing::info!(count = pending.len(), "等待后台任务完成");
-            let timeout = tokio::time::Duration::from_secs(5);
-            for handle in pending {
-                let _ = tokio::time::timeout(timeout, handle).await;
-            }
-        }
-
         Ok(())
     }
 }
@@ -613,7 +520,6 @@ impl Clone for Agent {
             harness: self.harness.clone(),
             skills: self.skills.clone(),
             state: self.state.clone(),
-            background_tasks: self.background_tasks.clone(),
             verification_gate: self.verification_gate.clone(),
             llm_judge: self.llm_judge.clone(),
             agent_loop: self.agent_loop.clone(),

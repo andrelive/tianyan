@@ -211,6 +211,7 @@ impl ContextAssembler {
             },
             session_id: session_id.to_string(),
             finish: None,
+            compression_marker: false,
         }
     }
 }
@@ -238,6 +239,7 @@ mod tests {
             time: MessageTime::default(),
             session_id: session_id.to_string(),
             finish: None,
+            compression_marker: false,
         }
     }
 
@@ -291,6 +293,7 @@ mod tests {
             time: MessageTime::default(),
             session_id: "ses_1".to_string(),
             finish: None,
+            compression_marker: false,
         };
         let messages = ContextAssembler::structured_to_messages(&sm);
         assert_eq!(messages.len(), 1);
@@ -326,6 +329,7 @@ mod tests {
             time: MessageTime::default(),
             session_id: "ses_1".to_string(),
             finish: None,
+            compression_marker: false,
         };
         let messages = ContextAssembler::structured_to_messages(&sm);
         assert_eq!(messages.len(), 1);
@@ -386,6 +390,7 @@ mod tests {
             time: MessageTime::default(),
             session_id: "ses_1".to_string(),
             finish: None,
+            compression_marker: false,
         };
         let messages = ContextAssembler::structured_to_messages(&sm);
         assert_eq!(messages.len(), 1);

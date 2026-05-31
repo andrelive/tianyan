@@ -3,23 +3,27 @@
 //! 将上下文装配的完整流程封装为可复用、可测试的管线：
 //! load soul → load rules → load memories → compress → build InjectableContext
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::agent::session_state::InjectableContext;
 use crate::common::error::Result;
 use crate::common::types::{AgentPath, ContentLevel, ContextNamespace, Message};
 use crate::context::compression::ContextCompressor;
-use crate::context::retrieval::ContextRetriever;
+use crate::context::retrieval::DualLayerRetriever;
 use crate::vfs::VirtualFileSystem;
 
 /// 上下文工程管线。
 #[derive(Clone)]
 pub struct ContextPipeline {
     vfs: Arc<dyn VirtualFileSystem>,
-    retriever: Arc<dyn ContextRetriever>,
-    compressor: ContextCompressor,
+    retriever: Arc<DualLayerRetriever>,
+    compressor: Arc<TokioMutex<ContextCompressor>>,
     default_top_k: usize,
     learned_rules_top_k: usize,
+    /// 已缓存的 soul（首次加载后复用，避免每轮从 VFS 重复读取）
+    cached_soul: Arc<StdMutex<Option<String>>>,
 }
 
 impl ContextPipeline {
@@ -32,8 +36,8 @@ impl ContextPipeline {
     /// - `learned_rules_top_k` - learned rules 注入 Top-K
     pub fn new(
         vfs: Arc<dyn VirtualFileSystem>,
-        retriever: Arc<dyn ContextRetriever>,
-        compressor: ContextCompressor,
+        retriever: Arc<DualLayerRetriever>,
+        compressor: Arc<TokioMutex<ContextCompressor>>,
         default_top_k: usize,
         learned_rules_top_k: usize,
     ) -> Self {
@@ -43,30 +47,33 @@ impl ContextPipeline {
             compressor,
             default_top_k,
             learned_rules_top_k,
+            cached_soul: Arc::new(StdMutex::new(None)),
         }
     }
 
-    /// 执行完整上下文管线。
+    /// 加载可注入上下文（soul + rules + memories）。
     ///
-    /// - `query` - 用户查询（用于检索和规则匹配）
-    /// - `conversation` - 当前对话历史（可变引用，压缩可能修改）
-    ///
-    /// 返回 InjectableContext（soul + rules + memories）和压缩摘要。
-    pub async fn run(
-        &self,
-        query: &str,
-        conversation: &mut Vec<Message>,
-    ) -> Result<(InjectableContext, Option<String>)> {
+    /// soul 通过 VFS 读取（有内部缓存），rules 和 memories 通过向量检索。
+    /// 此方法有 I/O 开销，调用方应在会话级缓存结果。
+    pub async fn load_injectable(&self, query: &str) -> Result<InjectableContext> {
         let mut injectable = InjectableContext::new();
 
-        // Load soul
-        let soul_uri = AgentPath::Soul.uri();
-        match self.vfs.read_content(&soul_uri, ContentLevel::Detail).await {
-            Ok(content) => {
-                injectable.soul = content;
+        // Load soul — 仅首次加载，后续复用缓存
+        {
+            if let Some(soul) = self.cached_soul.lock().unwrap().as_ref() {
+                injectable.soul = soul.clone();
             }
-            Err(e) => {
-                tracing::warn!(error = %e, uri = %soul_uri, "加载核心提示词失败");
+        }
+        if injectable.soul.is_empty() {
+            let soul_uri = AgentPath::Soul.uri();
+            match self.vfs.read_content(&soul_uri, ContentLevel::Detail).await {
+                Ok(content) => {
+                    *self.cached_soul.lock().unwrap() = Some(content.clone());
+                    injectable.soul = content;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, uri = %soul_uri, "加载核心提示词失败");
+                }
             }
         }
 
@@ -78,10 +85,48 @@ impl ContextPipeline {
         let memories = self.load_memories(query).await;
         injectable.memories = memories;
 
-        // Compression
-        let summary = self.compress_if_needed(conversation).await?;
+        Ok(injectable)
+    }
 
+    /// 执行完整上下文管线（加载 + 压缩便捷方法。
+    ///
+    /// - `query` - 用户查询（用于检索和规则匹配）
+    /// - `conversation` - 当前对话历史（可变引用，压缩可能修改）
+    ///
+    /// 返回 InjectableContext（soul + rules + memories）和压缩摘要。
+    pub async fn run(
+        &self,
+        query: &str,
+        conversation: &mut Vec<Message>,
+    ) -> Result<(InjectableContext, Option<String>)> {
+        let injectable = self.load_injectable(query).await?;
+        let summary = self.compress_if_needed(conversation).await?;
         Ok((injectable, summary))
+    }
+
+    /// 如需压缩则执行压缩，返回摘要文本。
+    pub async fn compress_if_needed(&self, conversation: &mut Vec<Message>) -> Result<Option<String>> {
+        let mut compressor = self.compressor.lock().await;
+        if !compressor.should_compress(conversation) {
+            return Ok(None);
+        }
+
+        let result = compressor.compress(conversation).await?;
+        let summary = if result.summary.is_empty() {
+            None
+        } else {
+            Some(result.summary)
+        };
+
+        *conversation = result.messages;
+        tracing::info!(
+            compressed = result.compressed_count,
+            original_tokens = result.original_tokens,
+            compressed_tokens = result.compressed_tokens,
+            "上下文压缩完成"
+        );
+
+        Ok(summary)
     }
 
     /// 使用 retriever 渐进式检索与当前 query 最相关的 learned rules。
@@ -98,7 +143,6 @@ impl ContextPipeline {
                 .collect(),
             Err(e) => {
                 tracing::warn!(error = %e, query = %query, "learned rules 检索失败，回退到全量列表");
-                // 回退：兼容向量存储中暂无 Agent 命名空间数据的情况
                 self.fallback_load_rules().await
             }
         }
@@ -125,7 +169,6 @@ impl ContextPipeline {
             }
         }
 
-        // 回退时最多保留 learned_rules_top_k * 2 条（无相关性排序）
         let fallback_limit = self.learned_rules_top_k * 2;
         if rules.len() > fallback_limit {
             rules.truncate(fallback_limit);
@@ -152,29 +195,428 @@ impl ContextPipeline {
             }
         }
     }
+}
 
-    /// 如需压缩则执行压缩，返回摘要文本。
-    async fn compress_if_needed(&self, conversation: &mut Vec<Message>) -> Result<Option<String>> {
-        let mut compressor = self.compressor.clone();
-        if !compressor.should_compress(conversation) {
-            return Ok(None);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+
+    use crate::common::error::TianyanError;
+    use crate::common::types::{ContentLevel, ContextNamespace, Message, MessageRole, SearchResult, TianyanUri};
+    use crate::context::compression::CompressionConfig;
+    use crate::context::retrieval::{DualLayerRetriever, RetrievalResult};
+    use crate::model::types::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatChoice};
+    use crate::model::ChatService;
+    use crate::vfs::{
+        ContentMetadata, ContentStore, ContextEntry, VirtualFileSystem, VfsCore, VfsSearch,
+    };
+
+    /// Mock VFS that returns configurable content and search results.
+    struct MockVfs {
+        content: HashMap<(String, ContentLevel), String>,
+        entries: HashMap<String, Vec<ContextEntry>>,
+        search_results: Vec<SearchResult>,
+        search_error: Option<String>,
+    }
+
+    impl MockVfs {
+        fn new() -> Self {
+            Self {
+                content: HashMap::new(),
+                entries: HashMap::new(),
+                search_results: vec![],
+                search_error: None,
+            }
         }
 
-        let result = compressor.compress(conversation).await?;
-        let summary = if result.summary.is_empty() {
-            None
-        } else {
-            Some(result.summary)
-        };
+        fn with_content(mut self, uri: &TianyanUri, level: ContentLevel, text: &str) -> Self {
+            self.content
+                .insert((uri.to_string(), level), text.to_string());
+            self
+        }
 
-        *conversation = result.messages;
-        tracing::info!(
-            compressed = result.compressed_count,
-            original_tokens = result.original_tokens,
-            compressed_tokens = result.compressed_tokens,
-            "上下文压缩完成"
+        fn with_entries(mut self, uri: &TianyanUri, entries: Vec<ContextEntry>) -> Self {
+            self.entries.insert(uri.to_string(), entries);
+            self
+        }
+
+        fn with_search_results(mut self, results: Vec<SearchResult>) -> Self {
+            self.search_results = results;
+            self
+        }
+
+        fn with_search_error(mut self, msg: &str) -> Self {
+            self.search_error = Some(msg.to_string());
+            self
+        }
+    }
+
+    #[async_trait]
+    impl VfsCore for MockVfs {
+        async fn initialize(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn exists(&self, _uri: &TianyanUri) -> Result<bool> {
+            Ok(true)
+        }
+        async fn get_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+            Ok(ContextEntry::new_file(uri.clone()))
+        }
+        async fn create_directory(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+            Ok(ContextEntry::new_directory(uri.clone()))
+        }
+        async fn create_file(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+            Ok(ContextEntry::new_file(uri.clone()))
+        }
+        async fn delete(&self, _uri: &TianyanUri) -> Result<()> {
+            Ok(())
+        }
+        async fn list(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
+            Ok(self.entries.get(&uri.to_string()).cloned().unwrap_or_default())
+        }
+        async fn move_entry(
+            &self,
+            _source: &TianyanUri,
+            _destination: &TianyanUri,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn update_metadata(
+            &self,
+            _uri: &TianyanUri,
+            _importance: f32,
+            _custom: HashMap<String, serde_json::Value>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn get_all_content_metadata(
+            &self,
+            _uri: &TianyanUri,
+        ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
+            Ok(HashMap::new())
+        }
+    }
+
+    #[async_trait]
+    impl ContentStore for MockVfs {
+        async fn write(
+            &self,
+            _uri: &TianyanUri,
+            _level: ContentLevel,
+            _content: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn read(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+            self.content
+                .get(&(uri.to_string(), level))
+                .cloned()
+                .ok_or_else(|| {
+                    crate::common::error::TianyanError::EntryNotFound(format!(
+                        "not found: {} @ {:?}",
+                        uri, level
+                    ))
+                })
+        }
+        async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn has_content(&self, _uri: &TianyanUri, _level: ContentLevel) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    #[async_trait]
+    impl VfsSearch for MockVfs {
+        async fn search(
+            &self,
+            _query: &str,
+            _limit: usize,
+            _namespace: Option<ContextNamespace>,
+        ) -> Result<Vec<SearchResult>> {
+            if let Some(ref e) = self.search_error {
+                Err(TianyanError::Internal(e.clone()))
+            } else {
+                Ok(self.search_results.clone())
+            }
+        }
+        async fn search_by_visual(
+            &self,
+            _visual_vector: &[f32],
+            _top_k: usize,
+        ) -> Result<Vec<SearchResult>> {
+            Ok(vec![])
+        }
+        async fn update_summary_vectors(
+            &self,
+            _uri: &TianyanUri,
+            _abstract_content: &str,
+            _overview_content: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl VirtualFileSystem for MockVfs {}
+
+    /// Mock chat service that returns a canned summary.
+    struct MockChatService {
+        response: String,
+    }
+
+    #[async_trait]
+    impl ChatService for MockChatService {
+        async fn chat_completion(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Result<ChatCompletionResponse> {
+            Ok(ChatCompletionResponse {
+                id: "mock".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant(self.response.clone()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Default::default(),
+            })
+        }
+
+        async fn chat_completion_stream(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<Result<ChatCompletionChunk>>> {
+            unimplemented!("stream not used in pipeline tests")
+        }
+    }
+
+    fn make_uri(namespace: ContextNamespace, path: &[&str]) -> TianyanUri {
+        TianyanUri::new(namespace, path.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn make_search_result(uri: &TianyanUri, score: f32) -> SearchResult {
+        SearchResult {
+            uri: uri.clone(),
+            score,
+            matched_level: ContentLevel::Abstract,
+            content: None,
+        }
+    }
+
+    fn make_pipeline(
+        vfs: Arc<MockVfs>,
+    ) -> (ContextPipeline, Arc<MockVfs>) {
+        let retriever = Arc::new(DualLayerRetriever::new(vfs.clone() as Arc<dyn VirtualFileSystem>));
+        let compressor = Arc::new(TokioMutex::new(ContextCompressor::new(
+            Arc::new(MockChatService { response: String::new() }),
+            CompressionConfig::default(),
+        )));
+        let pipeline = ContextPipeline::new(
+            vfs.clone() as Arc<dyn VirtualFileSystem>,
+            retriever,
+            compressor,
+            10,
+            5,
+        );
+        (pipeline, vfs)
+    }
+
+    fn make_pipeline_with_compressor(
+        vfs: Arc<MockVfs>,
+        compressor: ContextCompressor,
+    ) -> ContextPipeline {
+        let retriever = Arc::new(DualLayerRetriever::new(vfs.clone() as Arc<dyn VirtualFileSystem>));
+        ContextPipeline::new(vfs as Arc<dyn VirtualFileSystem>, retriever, Arc::new(TokioMutex::new(compressor)), 10, 5)
+    }
+
+    // ── Soul loading ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_loads_soul() {
+        let soul_uri = AgentPath::Soul.uri();
+        let vfs = Arc::new(
+            MockVfs::new().with_content(&soul_uri, ContentLevel::Detail, "You are a helpful AI."),
+        );
+        let (pipeline, _) = make_pipeline(vfs);
+        let mut conversation = vec![];
+
+        let (ctx, _summary) = pipeline.run("test", &mut conversation).await.unwrap();
+
+        assert_eq!(ctx.soul, "You are a helpful AI.");
+    }
+
+    #[tokio::test]
+    async fn test_run_soul_load_failure_does_not_crash() {
+        let vfs = Arc::new(MockVfs::new());
+        let (pipeline, _) = make_pipeline(vfs);
+        let mut conversation = vec![];
+
+        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+        assert!(ctx.soul.is_empty());
+    }
+
+    // ── Rules loading ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_loads_rules() {
+        let soul_uri = AgentPath::Soul.uri();
+        let rule_uri = make_uri(ContextNamespace::Agent, &["learned", "rule1"]);
+        let vfs = Arc::new(
+            MockVfs::new()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .with_content(&rule_uri, ContentLevel::Detail, "Always be concise.")
+                .with_search_results(vec![make_search_result(&rule_uri, 0.9)]),
+        );
+        let (pipeline, _) = make_pipeline(vfs);
+        let mut conversation = vec![];
+
+        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+
+        assert_eq!(ctx.rules_and_experiences, vec!["Always be concise."]);
+    }
+
+    #[tokio::test]
+    async fn test_run_rules_empty_results() {
+        let soul_uri = AgentPath::Soul.uri();
+        let vfs = Arc::new(
+            MockVfs::new().with_content(&soul_uri, ContentLevel::Detail, "soul"),
+        );
+        let (pipeline, _) = make_pipeline(vfs);
+        let mut conversation = vec![];
+
+        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+
+        assert!(ctx.rules_and_experiences.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_rules_retrieval_error_falls_back() {
+        let soul_uri = AgentPath::Soul.uri();
+        let learned_uri = AgentPath::Learned.uri();
+        let rule_uri = make_uri(ContextNamespace::Agent, &["learned", "rule1.md"]);
+        let vfs = Arc::new(
+            MockVfs::new()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .with_content(&rule_uri, ContentLevel::Abstract, "Fallback rule content.")
+                .with_entries(&learned_uri, vec![ContextEntry::new_file(rule_uri.clone())])
+                .with_search_error("vector store unavailable"),
+        );
+        let (pipeline, _) = make_pipeline(vfs);
+        let mut conversation = vec![];
+
+        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+
+        assert_eq!(ctx.rules_and_experiences, vec!["Fallback rule content."]);
+    }
+
+    #[tokio::test]
+    async fn test_run_rules_fallback_empty_dir() {
+        let soul_uri = AgentPath::Soul.uri();
+        let learned_uri = AgentPath::Learned.uri();
+        let vfs = Arc::new(
+            MockVfs::new()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .with_entries(&learned_uri, vec![])
+                .with_search_error("vector store unavailable"),
+        );
+        let (pipeline, _) = make_pipeline(vfs);
+        let mut conversation = vec![];
+
+        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+
+        assert!(ctx.rules_and_experiences.is_empty());
+    }
+
+    // ── Memories loading ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_loads_memories() {
+        let soul_uri = AgentPath::Soul.uri();
+        let mem_uri = make_uri(ContextNamespace::Memory, &["mem1"]);
+        let vfs = Arc::new(
+            MockVfs::new()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .with_content(&mem_uri, ContentLevel::Detail, "User prefers dark mode.")
+                .with_search_results(vec![make_search_result(&mem_uri, 0.9)]),
+        );
+        let (pipeline, _) = make_pipeline(vfs);
+        let mut conversation = vec![];
+
+        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+
+        assert_eq!(ctx.memories, vec!["User prefers dark mode."]);
+    }
+
+    #[tokio::test]
+    async fn test_run_memories_retrieval_error_returns_empty() {
+        let soul_uri = AgentPath::Soul.uri();
+        let vfs = Arc::new(
+            MockVfs::new()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .with_search_error("vector store unavailable"),
+        );
+        let (pipeline, _) = make_pipeline(vfs);
+        let mut conversation = vec![];
+
+        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+
+        assert!(ctx.memories.is_empty());
+    }
+
+    // ── Compression ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_run_no_compression_for_few_messages() {
+        let soul_uri = AgentPath::Soul.uri();
+        let vfs = Arc::new(
+            MockVfs::new().with_content(&soul_uri, ContentLevel::Detail, "soul"),
+        );
+        let (pipeline, _) = make_pipeline(vfs);
+        let mut conversation = vec![
+            Message::user("hello"),
+            Message::assistant("hi"),
+        ];
+
+        let (_, summary) = pipeline.run("test", &mut conversation).await.unwrap();
+
+        assert!(summary.is_none(), "compression should not trigger with 2 messages");
+    }
+
+    #[tokio::test]
+    async fn test_run_compression_triggers_with_many_messages() {
+        let soul_uri = AgentPath::Soul.uri();
+        let vfs = Arc::new(
+            MockVfs::new().with_content(&soul_uri, ContentLevel::Detail, "soul"),
         );
 
-        Ok(summary)
+        let config = CompressionConfig {
+            context_window: 100,
+            min_messages_to_compress: 3,
+            preserve_recent_messages: 2,
+            ..Default::default()
+        };
+        let compressor = ContextCompressor::new(
+            Arc::new(MockChatService { response: "Summarized conversation.".to_string() }),
+            config,
+        );
+        let pipeline = make_pipeline_with_compressor(vfs, compressor);
+
+        let mut conversation = vec![
+            Message::user("What is the weather?"),
+            Message::assistant("It is sunny."),
+            Message::user("And tomorrow?"),
+            Message::assistant("Rainy."),
+            Message::user("Thanks."),
+            Message::assistant("You're welcome."),
+        ];
+
+        let (_, summary) = pipeline.run("test", &mut conversation).await.unwrap();
+
+        assert!(summary.is_some(), "compression should trigger with 6 messages and 100 token window");
+        assert!(conversation.len() < 6);
     }
 }
