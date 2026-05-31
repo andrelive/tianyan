@@ -4,8 +4,10 @@ use crate::agent::tool_params::AskUserParams;
 use crate::agent::tool_registry::ToolRegistry;
 use crate::agent::types::StreamEventSender;
 use crate::common::types::{Message, MessageRole};
+use crate::context::ContextAssembler;
 use crate::model::types::ChatCompletionRequest;
 use crate::model::ChatService;
+use crate::session::SessionManager;
 
 /// Agent 循环配置。
 #[derive(Debug, Clone)]
@@ -53,6 +55,7 @@ pub enum AgentLoopError {
 pub struct AgentLoop {
     model_service: Arc<dyn ChatService>,
     tool_registry: ToolRegistry,
+    session_manager: Arc<dyn SessionManager>,
     config: AgentLoopConfig,
 }
 
@@ -61,11 +64,13 @@ impl AgentLoop {
     pub fn new(
         model_service: Arc<dyn ChatService>,
         tool_registry: ToolRegistry,
+        session_manager: Arc<dyn SessionManager>,
         config: AgentLoopConfig,
     ) -> Self {
         Self {
             model_service,
             tool_registry,
+            session_manager,
             config,
         }
     }
@@ -75,7 +80,10 @@ impl AgentLoop {
         &self,
         messages: &mut Vec<Message>,
         stream_sender: Option<StreamEventSender>,
+        session_id: &str,
+        initial_parent_id: Option<&str>,
     ) -> Result<AgentLoopResult, AgentLoopError> {
+        let mut current_parent_id = initial_parent_id.map(|s| s.to_string());
         for _turn in 0..self.config.max_turns {
             let request = ChatCompletionRequest::new(&self.config.model, messages.clone())
                 .with_tools(self.tool_registry.definitions().to_vec());
@@ -115,6 +123,23 @@ impl AgentLoop {
                 reasoning_content: assistant_msg.reasoning_content.clone(),
             });
 
+            // Persist assistant message via SessionManager
+            let assistant_for_persist = ContextAssembler::message_to_structured(
+                &Message {
+                    role: MessageRole::Assistant,
+                    content: assistant_msg.content.clone(),
+                    tool_calls: assistant_msg.tool_calls.clone(),
+                    tool_call_id: None,
+                    reasoning_content: assistant_msg.reasoning_content.clone(),
+                },
+                session_id,
+                current_parent_id.as_deref(),
+            );
+            current_parent_id = Some(assistant_for_persist.id.clone());
+            if let Err(e) = self.session_manager.add_structured_message(session_id, assistant_for_persist).await {
+                tracing::warn!(error = %e, "持久化 assistant 消息失败");
+            }
+
             if let Some(ref tool_calls) = assistant_msg.tool_calls {
                 if let Some(ref sender) = stream_sender {
                     for tc in tool_calls {
@@ -132,13 +157,34 @@ impl AgentLoop {
                         Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
                     };
 
-                    messages.push(Message::tool(&call_id, &content));
+                    // Persist tool result
+                    let tool_msg = Message::tool(&call_id, &content);
+                    let tool_for_persist = ContextAssembler::message_to_structured(
+                        &tool_msg,
+                        session_id,
+                        current_parent_id.as_deref(),
+                    );
+                    current_parent_id = Some(tool_for_persist.id.clone());
+                    if let Err(e) = self.session_manager.add_structured_message(session_id, tool_for_persist).await {
+                        tracing::warn!(error = %e, "持久化 tool result 消息失败");
+                    }
+
+                    messages.push(tool_msg);
 
                     if let Some(ref sender) = stream_sender {
                         sender.send_observation(&content).await;
                     }
                 }
             } else {
+                // Persist the final answer before returning
+                let answer_for_persist = ContextAssembler::message_to_structured(
+                    &Message::assistant(&assistant_msg.content),
+                    session_id,
+                    current_parent_id.as_deref(),
+                );
+                if let Err(e) = self.session_manager.add_structured_message(session_id, answer_for_persist).await {
+                    tracing::warn!(error = %e, "持久化 assistant answer 失败");
+                }
                 return Ok(AgentLoopResult::Answer(assistant_msg.content));
             }
         }
@@ -150,6 +196,22 @@ impl AgentLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use crate::common::error::Result;
+    use crate::common::types::StructuredMessage;
+    use crate::session::Session;
+
+    struct MockSessionManager;
+    #[async_trait]
+    impl SessionManager for MockSessionManager {
+        async fn add_structured_message(&self, _session_id: &str, _msg: StructuredMessage) -> Result<()> { Ok(()) }
+        async fn add_message(&self, _session_id: &str, _message: Message) -> Result<()> { Ok(()) }
+        async fn create_session(&self, _id: &str, _message: Message) -> Result<Session> { unimplemented!() }
+        async fn get_session(&self, _id: &str) -> Result<Option<Session>> { unimplemented!() }
+        async fn update_session(&self, _session: &Session) -> Result<()> { unimplemented!() }
+        async fn list_sessions(&self) -> Result<Vec<Session>> { unimplemented!() }
+        async fn delete_session(&self, _id: &str) -> Result<()> { unimplemented!() }
+    }
 
     #[test]
     fn test_agent_loop_config_default() {
