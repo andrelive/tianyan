@@ -195,43 +195,32 @@ impl ContextCompressor {
     ///
     /// - `messages` - 原始消息列表
     pub async fn compress(&mut self, messages: &[Message]) -> Result<CompressionResult> {
-        if messages.len() <= self.config.preserve_recent_messages {
+        if messages.is_empty() {
+            let zero = self.estimator.estimate_messages(messages);
             return Ok(CompressionResult {
-                messages: messages.to_vec(),
+                messages: vec![],
                 compressed_count: 0,
                 summary: String::new(),
-                original_tokens: self.estimator.estimate_messages(messages),
-                compressed_tokens: self.estimator.estimate_messages(messages),
+                original_tokens: zero,
+                compressed_tokens: zero,
             });
         }
 
         let original_tokens = self.estimator.estimate_messages(messages);
 
-        // 分割：保留的最近消息 + 需要压缩的早期消息
-        let split_point = messages
-            .len()
-            .saturating_sub(self.config.preserve_recent_messages);
-        let early_messages = &messages[..split_point];
-        let recent_messages = &messages[split_point..];
-
-        // 根据策略执行压缩
-        let (compressed_early, summary) = match self.config.strategy {
+        let (compressed_messages, summary) = match self.config.strategy {
             CompressionStrategy::Summarize => {
-                self.compress_by_summarization(early_messages).await?
+                self.compress_by_summarization(messages).await?
             }
-            CompressionStrategy::Select => self.compress_by_selection(early_messages).await?,
-            CompressionStrategy::Hybrid => self.compress_hybrid(early_messages).await?,
+            CompressionStrategy::Select => self.compress_by_selection(messages).await?,
+            CompressionStrategy::Hybrid => self.compress_hybrid(messages).await?,
         };
 
-        // 合并：压缩后的早期消息 + 保留的最近消息
-        let mut result_messages = compressed_early;
-        result_messages.extend_from_slice(recent_messages);
-
-        let compressed_tokens = self.estimator.estimate_messages(&result_messages);
+        let compressed_tokens = self.estimator.estimate_messages(&compressed_messages);
 
         Ok(CompressionResult {
-            messages: result_messages,
-            compressed_count: early_messages.len(),
+            messages: compressed_messages,
+            compressed_count: messages.len(),
             summary,
             original_tokens,
             compressed_tokens,
@@ -624,7 +613,7 @@ mod tests {
     // ── compress (integration) ──────────────────────────────────────
 
     #[tokio::test]
-    async fn test_compress_noop_when_below_preserve_recent() {
+    async fn test_compress_with_few_messages() {
         let config = CompressionConfig {
             strategy: CompressionStrategy::Select,
             preserve_recent_messages: 5,
@@ -635,7 +624,7 @@ mod tests {
         let mut compressor = ContextCompressor::new(mock, config);
         let msgs = vec![msg_user("a"), msg_assistant("b")];
         let result = compressor.compress(&msgs).await.unwrap();
-        assert_eq!(result.compressed_count, 0);
+        assert_eq!(result.compressed_count, 2);
         assert_eq!(result.messages.len(), 2);
     }
 
@@ -655,7 +644,8 @@ mod tests {
             msg_user("recent"),
         ];
         let result = compressor.compress(&msgs).await.unwrap();
-        assert_eq!(result.compressed_count, 2);
+        assert_eq!(result.compressed_count, 3);
+        assert_eq!(result.messages.len(), 2);
     }
 
     // ── get_status ──────────────────────────────────────────────────

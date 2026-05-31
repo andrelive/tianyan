@@ -42,6 +42,9 @@ pub trait SessionManager: Send + Sync {
     /// 向会话添加消息。
     async fn add_message(&self, session_id: &str, message: Message) -> Result<()>;
 
+    /// 直接持久化 StructuredMessage（不经过 Message 转换）。
+    async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()>;
+
     /// 列出所有会话。
     async fn list_sessions(&self) -> Result<Vec<Session>>;
 
@@ -95,7 +98,20 @@ impl PersistentSessionManager {
             }
         }
 
-        // 限制加载的消息数量，保留最近的 MAX_SESSION_MESSAGES 条
+        // 从后向前扫描 compression_marker，只保留 marker 及之后的消息
+        if let Some(marker_pos) = session.messages.iter().rposition(|m| m.compression_marker) {
+            if marker_pos > 0 {
+                let skipped = marker_pos;
+                session.messages = session.messages.split_off(skipped);
+                tracing::info!(
+                    skipped_messages = skipped,
+                    session_id = %id,
+                    "按 compression_marker 截断会话至工作集"
+                );
+            }
+        }
+
+        // 限制加载的消息数量，保留最近的 MAX_SESSION_MESSAGES 条（安全上限）
         if session.messages.len() > MAX_SESSION_MESSAGES {
             let skipped = session.messages.len() - MAX_SESSION_MESSAGES;
             session.messages = session.messages.split_off(skipped);
@@ -258,6 +274,28 @@ impl SessionManager for PersistentSessionManager {
         // 追加消息到 VFS
         self.append_message_to_vfs(&uri, &sm).await?;
 
+        Ok(())
+    }
+
+    async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()> {
+        use crate::ContentLevel;
+
+        let uri = TianyanUri::parse(&format!("tianyan://session/{}", session_id))
+            .map_err(|e| TianyanError::MemorySystem(format!("无效的 session URI: {}", e)))?;
+
+        if self
+            .vfs
+            .read_content(&uri, ContentLevel::Detail)
+            .await
+            .is_err()
+        {
+            return Err(TianyanError::MemorySystem(format!(
+                "会话未找到：{}",
+                session_id
+            )));
+        }
+
+        self.append_message_to_vfs(&uri, &msg).await?;
         Ok(())
     }
 
