@@ -5,11 +5,15 @@
 
 use std::sync::{Arc, Mutex as StdMutex};
 
+use chrono;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::agent::session_state::InjectableContext;
 use crate::common::error::Result;
-use crate::common::types::{AgentPath, ContentLevel, ContextNamespace, Message};
+use crate::common::types::{
+    AgentPath, ContentLevel, ContextNamespace, DetailedTokenUsage, Message, MessageRole,
+    MessageTime, Part, PartTime, StructuredMessage,
+};
 use crate::context::compression::ContextCompressor;
 use crate::context::retrieval::DualLayerRetriever;
 use crate::vfs::VirtualFileSystem;
@@ -127,6 +131,41 @@ impl ContextPipeline {
         );
 
         Ok(summary)
+    }
+
+    /// 压缩对话并生成带 compression_marker 的摘要 StructuredMessage。
+    /// 返回 None 如果不需要压缩或压缩结果为空。
+    pub async fn compress_for_session(
+        &self,
+        messages: &[Message],
+        session_id: &str,
+    ) -> Option<StructuredMessage> {
+        let mut conversation = messages.to_vec();
+        let summary = self.compress_if_needed(&mut conversation).await.ok()??;
+
+        if summary.is_empty() {
+            return None;
+        }
+
+        Some(StructuredMessage {
+            id: format!("cmp_{}", chrono::Utc::now().timestamp_millis()),
+            parent_id: None,
+            role: MessageRole::System,
+            parts: vec![Part::Text {
+                text: format!("[对话摘要] 以下是对历史对话的摘要：\n{}\n[摘要结束]", summary),
+                time: PartTime::default(),
+            }],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime {
+                created: chrono::Utc::now().timestamp_millis(),
+                completed: chrono::Utc::now().timestamp_millis(),
+            },
+            session_id: session_id.to_string(),
+            finish: None,
+            compression_marker: true,
+        })
     }
 
     /// 使用 retriever 渐进式检索与当前 query 最相关的 learned rules。
