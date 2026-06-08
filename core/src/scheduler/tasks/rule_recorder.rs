@@ -19,12 +19,15 @@ use crate::vfs::VirtualFileSystem;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
     /// 瞬态错误（网络超时、临时服务不可用），不应记录为规则。
+    #[allow(dead_code)]
     Transient,
     /// 逻辑错误（Planner 误判、Executor 执行失败），值得记录为规则。
     Logic,
     /// 用户输入错误（模糊指令、信息不足），记录但不作为失败规则。
+    #[allow(dead_code)]
     Input,
     /// 系统级错误（配置缺失、存储损坏），记录并升级告警。
+    #[allow(dead_code)]
     System,
 }
 

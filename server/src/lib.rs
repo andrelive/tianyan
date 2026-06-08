@@ -1,5 +1,6 @@
 //! Tianyan HTTP 服务器。
 
+use axum::http::HeaderValue;
 use axum::{extract::DefaultBodyLimit, response::Json, routing::get, Router};
 use serde::Serialize;
 use std::net::SocketAddr;
@@ -7,10 +8,11 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
+use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
-use tianyan::scheduler::tasks::{MemoryTask, RuleTask, SummaryTask};
+use tianyan::scheduler::tasks::{GcTask, MemoryTask, RuleTask, SummaryTask};
 
 use crate::agent_builder::create_model_services;
 
@@ -61,12 +63,16 @@ impl ServerConfig {
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: String,
+    pub version: String,
 }
 
 /// Health check handler
 async fn health_check() -> Json<HealthResponse> {
+    let version = env!("CARGO_PKG_VERSION").to_string();
+
     Json(HealthResponse {
         status: "ok".to_string(),
+        version,
     })
 }
 
@@ -102,7 +108,7 @@ fn get_static_dir() -> std::path::PathBuf {
 /// 创建并初始化单一的 VFS 实例，供整个应用使用
 fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
-) -> anyhow::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
+) -> tianyan::common::error::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
     use tianyan::vfs::{
         LocalFileBackend, QdrantVectorStore, VectorStorage,
         VirtualFileSystemBuilder,
@@ -119,7 +125,7 @@ fn initialize_vfs_for_app(
     let model_services = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async { create_model_services(config).await })
     })
-    .map_err(|e| anyhow::anyhow!("模型服务创建失败：{}", e))?;
+    .map_err(|e| tianyan::TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
 
     let embedding_service = model_services.embedding;
     let embedding_model = config.models.default_embedding_model.clone();
@@ -131,7 +137,7 @@ fn initialize_vfs_for_app(
         .with_config(config.storage.clone())
         .with_embedding_service(embedding_service, embedding_model)
         .build()
-        .map_err(|e| anyhow::anyhow!("VFS 构建失败：{}", e))?;
+        .map_err(|e| tianyan::TianyanError::VirtualFileSystem(format!("VFS 构建失败：{}", e)))?;
 
     use tianyan::vfs::VfsCore;
     tokio::task::block_in_place(|| {
@@ -176,12 +182,21 @@ async fn bootstrap_app_vfs(
     Ok(())
 }
 
+/// 允许的 CORS 来源（编译期常量，避免运行时 parse panic）。
+const ALLOWED_ORIGINS: [HeaderValue; 5] = [
+    HeaderValue::from_static("http://localhost:3000"),
+    HeaderValue::from_static("http://localhost:1420"),
+    HeaderValue::from_static("http://127.0.0.1:3000"),
+    HeaderValue::from_static("http://127.0.0.1:1420"),
+    HeaderValue::from_static("tauri://localhost"),
+];
+
 /// Create the application router with configuration
 ///
 /// 支持无配置启动，用于配置向导模式
 ///
 /// 返回 (Router, AppState) 元组，以便在关闭时访问 AppState
-fn create_app(config: tianyan::config::TianyanConfig) -> anyhow::Result<(Router, Arc<AppState>)> {
+fn create_app(config: tianyan::config::TianyanConfig) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
     // 在应用层初始化 VFS（单一实例）
     let vfs = initialize_vfs_for_app(&config)?;
 
@@ -195,13 +210,7 @@ fn create_app(config: tianyan::config::TianyanConfig) -> anyhow::Result<(Router,
 
     // Configure CORS - 仅允许本地来源访问
     let cors = CorsLayer::new()
-        .allow_origin([
-            "http://localhost:3000".parse().unwrap(),
-            "http://localhost:1420".parse().unwrap(),
-            "http://127.0.0.1:3000".parse().unwrap(),
-            "http://127.0.0.1:1420".parse().unwrap(),
-            "tauri://localhost".parse().unwrap(),
-        ])
+        .allow_origin(ALLOWED_ORIGINS)
         .allow_methods(Any)
         .allow_headers(Any);
 
@@ -220,6 +229,7 @@ fn create_app(config: tianyan::config::TianyanConfig) -> anyhow::Result<(Router,
             .merge(api_router)
             .fallback_service(static_service)
             .layer(cors)
+            .layer(TraceLayer::new_for_http())
             .layer(DefaultBodyLimit::max(50 * 1024 * 1024)), // 50MB 请求体限制
         state,
     ))
@@ -243,16 +253,16 @@ fn create_app(config: tianyan::config::TianyanConfig) -> anyhow::Result<(Router,
 /// use tianyan::config::get_config;
 ///
 /// #[tokio::main]
-/// async fn main() -> anyhow::Result<()> {
+/// async fn main() -> tianyan::common::error::Result<()> {
 ///     let server_config = ServerConfig::with_port(3000);
-///     let tianyan_config = get_config()?.clone();
+///     let tianyan_config = get_config().clone();
 ///     start_server(server_config, tianyan_config).await
 /// }
 /// ```
 pub async fn start_server(
     config: ServerConfig,
     tianyan_config: tianyan::config::TianyanConfig,
-) -> anyhow::Result<()> {
+) -> tianyan::common::error::Result<()> {
     let (app, state) = create_app(tianyan_config)?;
 
     // 创建任务调度器
@@ -297,7 +307,7 @@ pub async fn start_server(
         let config_guard = config_lock.read().await;
         let model_services =
             create_model_services(&config_guard).await
-                .map_err(|e| anyhow::anyhow!("模型服务创建失败：{}", e))?;
+                .map_err(|e| tianyan::TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
         task_scheduler
             .register_task(TaskDefinition::new(
                 "rule_extraction",
@@ -308,19 +318,29 @@ pub async fn start_server(
             .await?;
     }
 
+    // 注册垃圾回收任务（每 6 小时，清理低效规则和检测文档漂移）
+    task_scheduler
+        .register_task(TaskDefinition::new(
+            "garbage_collection",
+            "垃圾回收",
+            "0 0 */6 * * *",
+            Arc::new(GcTask::new()),
+        ))
+        .await?;
+
     // 启动任务调度器
     TaskScheduler::start_with_scheduler(task_scheduler.clone(), task_ctx.clone()).await?;
     info!("任务调度器已启动");
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid address: {}", e))?;
+        .map_err(|e| tianyan::TianyanError::Config(format!("无效地址: {}", e)))?;
 
     info!("Starting Tianyan server on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
         error!("Failed to bind to address {}: {}", addr, e);
-        anyhow::anyhow!("Failed to bind to address: {}", e)
+        tianyan::TianyanError::Network(format!("Failed to bind to address: {}", e))
     })?;
 
     info!("Server is ready to accept connections");
@@ -471,10 +491,8 @@ pub async fn start_server(
 ///
 /// This is a convenience function that starts the server with default settings
 /// (host: 127.0.0.1, port: 3000)
-pub async fn start_server_default() -> anyhow::Result<()> {
-    let tianyan_config = tianyan::config::get_config()
-        .map_err(|e| anyhow::anyhow!("加载配置失败：{}", e))?
-        .clone();
+pub async fn start_server_default() -> tianyan::common::error::Result<()> {
+    let tianyan_config = tianyan::config::get_config().clone();
     start_server(ServerConfig::default(), tianyan_config).await
 }
 

@@ -1484,3 +1484,82 @@ button {
     padding: 10px 16px;
   }
 }
+
+/* ==================== Toast 通知 ==================== */
+.toast {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  cursor: pointer;
+  animation: toast-slide-in 0.3s ease;
+  max-width: 480px;
+}
+.toast-error { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+.toast-success { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+.toast-info { background: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe; }
+.toast-close {
+  background: none; border: none; cursor: pointer;
+  font-size: 14px; opacity: 0.6; padding: 2px 6px;
+}
+.toast-close:hover { opacity: 1; }
+
+@keyframes toast-slide-in {
+  from { transform: translateX(-50%) translateY(-20px); opacity: 0; }
+  to { transform: translateX(-50%) translateY(0); opacity: 1; }
+}
+
+/* ==================== 字号设置 ==================== */
+.font-small { --font-size-base: 13px; --font-size-sm: 11px; --font-size-lg: 15px; }
+.font-medium { --font-size-base: 14px; --font-size-sm: 12px; --font-size-lg: 16px; }
+.font-large { --font-size-base: 16px; --font-size-sm: 14px; --font-size-lg: 18px; }
+
+/* ==================== 主题覆写 ==================== */
+.theme-dark { color-scheme: dark; }
+.theme-light { color-scheme: light; }
+.theme-system { color-scheme: light dark; }
+
+/* ==================== 加载指示器 ==================== */
+.loading-spinner-small {
+  display: inline-block;
+  width: 16px; height: 16px;
+  border: 2px solid var(--border-color, #e5e7eb);
+  border-top-color: var(--accent-color, #3b82f6);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+.sidebar-loading {
+  display: flex; justify-content: center; align-items: center;
+  padding: 24px 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ==================== Markdown 内容样式 ==================== */
+.markdown-content { line-height: 1.7; word-wrap: break-word; overflow-wrap: break-word; }
+.markdown-content h1, .markdown-content h2, .markdown-content h3, .markdown-content h4 { margin: 1.2em 0 0.6em 0; font-weight: 600; }
+.markdown-content h1 { font-size: 1.5em; border-bottom: 1px solid var(--border-color, #e5e7eb); padding-bottom: 0.3em; }
+.markdown-content h2 { font-size: 1.3em; }
+.markdown-content h3 { font-size: 1.15em; }
+.markdown-content p { margin: 0.6em 0; }
+.markdown-content ul, .markdown-content ol { padding-left: 1.5em; margin: 0.5em 0; }
+.markdown-content li { margin: 0.3em 0; }
+.markdown-content blockquote { border-left: 3px solid var(--accent-color, #3b82f6); padding: 0.5em 1em; margin: 0.8em 0; background: var(--bg-muted, #f9fafb); border-radius: 0 4px 4px 0; }
+.markdown-content a { color: var(--accent-color, #3b82f6); text-decoration: underline; }
+.markdown-content a:hover { text-decoration: none; }
+.markdown-content table { border-collapse: collapse; width: 100%; margin: 0.8em 0; font-size: 0.9em; }
+.markdown-content th, .markdown-content td { border: 1px solid var(--border-color, #e5e7eb); padding: 0.5em 0.8em; text-align: left; }
+.markdown-content th { background: var(--bg-muted, #f9fafb); font-weight: 600; }
+.markdown-content tr:nth-child(even) { background: var(--bg-muted, #f9fafb); }
+.markdown-content code { background: var(--bg-muted, #f3f4f6); padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; }
+.markdown-content pre { background: #1e293b; color: #e2e8f0; padding: 1em; border-radius: 6px; overflow-x: auto; margin: 0.8em 0; }
+.markdown-content pre code { background: none; padding: 0; border-radius: 0; font-size: 0.85em; color: inherit; }
+.markdown-content hr { border: none; border-top: 1px solid var(--border-color, #e5e7eb); margin: 1.2em 0; }
+.markdown-content img { max-width: 100%; border-radius: 4px; margin: 0.5em 0; }

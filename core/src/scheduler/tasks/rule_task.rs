@@ -51,7 +51,7 @@ impl RuleTask {
 
 #[async_trait]
 impl TaskHandler for RuleTask {
-    async fn execute(&self, ctx: &TaskContext) -> TaskResult {
+    async fn execute(&self, _ctx: &TaskContext) -> TaskResult {
         tracing::info!("开始执行规则提炼任务...");
 
         let suggestions = match self.suggester.scan().await {

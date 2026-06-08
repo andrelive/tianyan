@@ -16,7 +16,7 @@ use crate::state::AppState;
 
 /// 处理文件上传和摄入
 pub async fn ingest_handler(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Result<Json<IngestResponse>, ApiError> {
     info!("收到文件摄入请求");
@@ -73,7 +73,9 @@ pub async fn ingest_handler(
         }
     }
 
-    let service = KnowledgeService::new();
+    let ingestor = state.create_knowledge_ingestor()?;
+    let vfs = state.vfs();
+    let service = KnowledgeService::new(Arc::new(ingestor), vfs);
     let request = metadata.unwrap_or(IngestRequest {
         source_type: None,
         tags: None,
@@ -94,35 +96,18 @@ pub async fn ingest_handler(
         })
 }
 
-/// 获取摄入任务状态
-pub async fn get_ingest_status(
-    State(_state): State<Arc<AppState>>,
-    axum::extract::Path(job_id): axum::extract::Path<String>,
-) -> Result<Json<IngestStatusResponse>, ApiError> {
-    info!("获取摄入任务状态: {}", job_id);
-
-    let service = KnowledgeService::new();
-
-    service
-        .get_ingest_status(&job_id)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            error!("获取摄入状态失败: {}", e);
-            ApiError::Internal(format!("获取摄入状态失败: {}", e))
-        })
-}
-
 /// 执行检索
 pub async fn search_handler(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     if let Err(e) = query.validate() {
         return Err(ApiError::BadRequest(e));
     }
 
-    let service = KnowledgeService::new();
+    let ingestor = state.create_knowledge_ingestor()?;
+    let vfs = state.vfs();
+    let service = KnowledgeService::new(Arc::new(ingestor), vfs);
 
     service.search(query).await.map(Json).map_err(|e| {
         error!("搜索失败: {}", e);
@@ -132,14 +117,16 @@ pub async fn search_handler(
 
 /// 获取检索建议
 pub async fn search_suggestions_handler(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchSuggestionsResponse>, ApiError> {
     if let Err(e) = query.validate() {
         return Err(ApiError::BadRequest(e));
     }
 
-    let service = KnowledgeService::new();
+    let ingestor = state.create_knowledge_ingestor()?;
+    let vfs = state.vfs();
+    let service = KnowledgeService::new(Arc::new(ingestor), vfs);
 
     service
         .get_search_suggestions(&query.q)

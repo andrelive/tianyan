@@ -1,9 +1,9 @@
 //! 本地文件系统存储后端实现。
 
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::fs::{self, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use crate::common::error::{Result, TianyanError};
@@ -38,9 +38,12 @@ impl LocalFileBackend {
     }
 
     /// 确保目录存在，如需要则创建。
-    fn ensure_dir(&self, path: &Path) -> Result<()> {
-        if !path.exists() {
-            fs::create_dir_all(path).map_err(|e| {
+    async fn ensure_dir(&self, path: &Path) -> Result<()> {
+        if !fs::try_exists(path)
+            .await
+            .map_err(|e| TianyanError::StorageBackend(format!("检查目录 {:?} 失败: {}", path, e)))?
+        {
+            fs::create_dir_all(path).await.map_err(|e| {
                 TianyanError::StorageBackend(format!("创建目录 {:?} 失败: {}", path, e))
             })?;
         }
@@ -48,26 +51,28 @@ impl LocalFileBackend {
     }
 
     /// 读取文件内容为字符串。
-    fn read_file(&self, path: &Path) -> Result<String> {
-        let mut file = fs::File::open(path).map_err(|e| {
+    async fn read_file(&self, path: &Path) -> Result<String> {
+        let mut file = fs::File::open(path).await.map_err(|e| {
             TianyanError::StorageBackend(format!("打开文件 {:?} 失败: {}", path, e))
         })?;
         let mut content = String::new();
-        file.read_to_string(&mut content).map_err(|e| {
+        file.read_to_string(&mut content).await.map_err(|e| {
             TianyanError::StorageBackend(format!("读取文件 {:?} 失败: {}", path, e))
         })?;
         Ok(content)
     }
 
-    /// 将字符串内容写入文件。
-    fn write_file(&self, path: &Path, content: &str) -> Result<()> {
+    /// 将字符串内容写入文件（使用写入锁防止并发写入交错）。
+    async fn write_file(&self, path: &Path, content: &str) -> Result<()> {
         if let Some(parent) = path.parent() {
-            self.ensure_dir(parent)?;
+            self.ensure_dir(parent).await?;
         }
-        let mut file = fs::File::create(path).map_err(|e| {
+        let lock = self.acquire_write_lock(path).await;
+        let _guard = lock.lock().await;
+        let mut file = fs::File::create(path).await.map_err(|e| {
             TianyanError::StorageBackend(format!("创建文件 {:?} 失败: {}", path, e))
         })?;
-        file.write_all(content.as_bytes()).map_err(|e| {
+        file.write_all(content.as_bytes()).await.map_err(|e| {
             TianyanError::StorageBackend(format!("写入文件 {:?} 失败: {}", path, e))
         })?;
         Ok(())
@@ -85,7 +90,7 @@ impl LocalFileBackend {
     /// 追加内容到文件（如文件不存在则创建）。
     async fn append_file_locked(&self, path: &Path, content: &str) -> Result<()> {
         if let Some(parent) = path.parent() {
-            self.ensure_dir(parent)?;
+            self.ensure_dir(parent).await?;
         }
 
         let lock = self.acquire_write_lock(path).await;
@@ -95,47 +100,60 @@ impl LocalFileBackend {
             .create(true)
             .append(true)
             .open(path)
+            .await
             .map_err(|e| {
                 TianyanError::StorageBackend(format!("打开文件 {:?} 用于追加失败: {}", path, e))
             })?;
-        file.write_all(content.as_bytes()).map_err(|e| {
+        file.write_all(content.as_bytes()).await.map_err(|e| {
             TianyanError::StorageBackend(format!("追加写入文件 {:?} 失败: {}", path, e))
         })?;
         Ok(())
     }
 
     /// 删除文件或目录。
-    fn delete_path(&self, path: &Path) -> Result<()> {
-        if path.is_dir() {
-            fs::remove_dir_all(path).map_err(|e| {
-                TianyanError::StorageBackend(format!("删除目录 {:?} 失败: {}", path, e))
-            })?;
-        } else if path.exists() {
-            fs::remove_file(path).map_err(|e| {
-                TianyanError::StorageBackend(format!("删除文件 {:?} 失败: {}", path, e))
-            })?;
+    async fn delete_path(&self, path: &Path) -> Result<()> {
+        match fs::metadata(path).await {
+            Ok(m) if m.is_dir() => {
+                fs::remove_dir_all(path).await.map_err(|e| {
+                    TianyanError::StorageBackend(format!("删除目录 {:?} 失败: {}", path, e))
+                })?;
+            }
+            Ok(_) => {
+                fs::remove_file(path).await.map_err(|e| {
+                    TianyanError::StorageBackend(format!("删除文件 {:?} 失败: {}", path, e))
+                })?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(TianyanError::StorageBackend(format!(
+                    "访问 {:?} 失败: {}",
+                    path, e
+                )));
+            }
         }
         Ok(())
     }
 
-    /// 同步读取内容（内部辅助方法）。
-    fn read_content_sync(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+    /// 读取内容（内部辅助方法）。
+    async fn read_content_sync(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
         let path = match level {
             ContentLevel::Abstract => self.mapper.get_abstract_path(uri),
             ContentLevel::Overview => self.mapper.get_overview_path(uri),
             ContentLevel::Detail => self.mapper.get_detail_path(uri),
         };
 
-        if !path.exists() {
+        if !fs::try_exists(&path)
+            .await
+            .map_err(|e| TianyanError::StorageBackend(format!("访问 {:?} 失败: {}", path, e)))?
+        {
             return Err(TianyanError::EntryNotFound(format!(
                 "{} 无 {:?} 层级内容",
                 uri, level
             )));
         }
 
-        self.read_file(&path)
+        self.read_file(&path).await
     }
-
 }
 
 use crate::vfs::backend::traits::StorageBackend;
@@ -143,28 +161,32 @@ use crate::vfs::backend::traits::StorageBackend;
 #[async_trait::async_trait]
 impl StorageBackend for LocalFileBackend {
     async fn initialize(&self) -> Result<()> {
-        self.ensure_dir(&self.config.data_dir)?;
+        self.ensure_dir(&self.config.data_dir).await?;
         tracing::info!("已在 {:?} 初始化本地存储", self.config.data_dir);
         Ok(())
     }
 
     async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
         let path = self.mapper.uri_to_path(uri);
-        Ok(path.exists())
+        Ok(fs::try_exists(path).await.unwrap_or(false))
     }
 
     async fn read_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
         let path = self.mapper.uri_to_path(uri);
 
-        if !path.exists() {
-            return Err(TianyanError::EntryNotFound(uri.to_string()));
-        }
+        let meta = fs::metadata(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                TianyanError::EntryNotFound(uri.to_string())
+            } else {
+                TianyanError::StorageBackend(format!("访问 {:?} 失败: {}", path, e))
+            }
+        })?;
 
-        let is_directory = path.is_dir();
+        let is_directory = meta.is_dir();
 
-        let abstract_content = self.read_content_sync(uri, ContentLevel::Abstract).ok();
-        let overview_content = self.read_content_sync(uri, ContentLevel::Overview).ok();
-        let detail_content = self.read_content_sync(uri, ContentLevel::Detail).ok();
+        let abstract_content = self.read_content_sync(uri, ContentLevel::Abstract).await.ok();
+        let overview_content = self.read_content_sync(uri, ContentLevel::Overview).await.ok();
+        let detail_content = self.read_content_sync(uri, ContentLevel::Detail).await.ok();
 
         let mut metadata = crate::common::types::EntryMetadata::new(uri.clone(), "unknown");
         metadata.is_directory = is_directory;
@@ -181,7 +203,7 @@ impl StorageBackend for LocalFileBackend {
     async fn write_entry(&self, entry: &ContextEntry) -> Result<()> {
         let path = self.mapper.uri_to_path(entry.uri());
 
-        self.ensure_dir(&path)?;
+        self.ensure_dir(&path).await?;
 
         if let Some(ref content) = entry.abstract_content {
             self.write_content(entry.uri(), ContentLevel::Abstract, content)
@@ -205,11 +227,14 @@ impl StorageBackend for LocalFileBackend {
     async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
         let path = self.mapper.uri_to_path(uri);
 
-        if !path.exists() {
+        if !fs::try_exists(&path)
+            .await
+            .map_err(|e| TianyanError::StorageBackend(format!("访问 {:?} 失败: {}", path, e)))?
+        {
             return Err(TianyanError::EntryNotFound(uri.to_string()));
         }
 
-        self.delete_path(&path)?;
+        self.delete_path(&path).await?;
 
         tracing::debug!("已删除 {:?} 处的条目", path);
         Ok(())
@@ -218,18 +243,29 @@ impl StorageBackend for LocalFileBackend {
     async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
         let path = self.mapper.uri_to_path(uri);
 
-        if !path.exists() || !path.is_dir() {
+        let meta = fs::metadata(&path).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                TianyanError::DirectoryNotFound(path.clone())
+            } else {
+                TianyanError::StorageBackend(format!("访问 {:?} 失败: {}", path, e))
+            }
+        })?;
+
+        if !meta.is_dir() {
             return Err(TianyanError::DirectoryNotFound(path));
         }
 
+        let mut read_dir = fs::read_dir(&path)
+            .await
+            .map_err(|e| TianyanError::StorageBackend(format!("读取目录 {:?} 失败: {}", path, e)))?;
+
         let mut entries = Vec::new();
 
-        for entry in fs::read_dir(&path)
-            .map_err(|e| TianyanError::StorageBackend(format!("读取目录 {:?} 失败: {}", path, e)))?
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(|e| TianyanError::StorageBackend(format!("读取目录条目失败: {}", e)))?
         {
-            let entry = entry
-                .map_err(|e| TianyanError::StorageBackend(format!("读取目录条目失败: {}", e)))?;
-
             let name = entry.file_name().to_string_lossy().to_string();
 
             if UriMapper::is_special_file(&entry.path()) {
@@ -246,7 +282,7 @@ impl StorageBackend for LocalFileBackend {
     }
 
     async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
-        self.read_content_sync(uri, level)
+        self.read_content_sync(uri, level).await
     }
 
     async fn write_content(
@@ -261,7 +297,7 @@ impl StorageBackend for LocalFileBackend {
             ContentLevel::Detail => self.mapper.get_detail_path(uri),
         };
 
-        self.write_file(&path, content)?;
+        self.write_file(&path, content).await?;
         tracing::trace!("已写入 {} 的 {:?} 内容", uri, level);
         Ok(())
     }
@@ -298,9 +334,9 @@ mod tests {
         config.data_dir = sub.clone();
         let storage = LocalFileBackend::new(config);
 
-        assert!(!sub.exists());
+        assert!(!fs::try_exists(&sub).await.unwrap_or(false));
         storage.initialize().await.unwrap();
-        assert!(sub.exists());
+        assert!(fs::try_exists(&sub).await.unwrap_or(false));
     }
 
     #[tokio::test]

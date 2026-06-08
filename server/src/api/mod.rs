@@ -52,10 +52,10 @@ pub fn create_api_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// 创建无状态的路由（用于组合）
+/// 创建无状态的路由（用于测试/组合）
 ///
-/// 本函数创建所有可嵌套到父路由器的 API 路由。
-/// 状态通过 `with_state` 单独提供。
+/// 本函数创建所有可嵌套到父路由器的 API 路由，仅含常规路由不含向导路由。
+/// 向导路由单独挂载在 /api 下（见 create_api_router）。
 pub fn create_routes() -> Router<Arc<AppState>> {
     Router::new()
         .merge(chat::routes())
@@ -63,7 +63,6 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .merge(knowledge::routes())
         .merge(skills::routes())
         .merge(config::routes())
-        .merge(config::wizard_routes::routes())
 }
 
 /// 创建不包含配置向导的路由（用于 /api/v1 前缀）

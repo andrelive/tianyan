@@ -10,8 +10,9 @@ use image::ImageFormat;
 use serde::{Deserialize, Serialize};
 
 use crate::common::error::{Result, TianyanError};
+use crate::common::types::Embedding;
 use crate::model::types::{ContentPart, ImageUrl, VisionContent, VisionMessage, VisionRequest};
-use crate::model::{VisionEncoder, VlmService};
+use crate::model::{EmbeddingService, VlmService};
 
 /// 支持的图像格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,7 +444,9 @@ impl ImageProcessor {
                 exif::Tag::Software => {
                     exif.software = Some(field.display_value().to_string());
                 }
-                _ => {}
+                _ => {
+                    tracing::debug!(?field.tag, "EXIF parser: unhandled tag (skipping)");
+                }
             }
         }
 
@@ -452,18 +455,22 @@ impl ImageProcessor {
 }
 
 /// 使用 VLM 的图像分析器。
-pub struct ImageAnalyzer<'a, V: VlmService, E: VisionEncoder> {
-    vlm_service: &'a V,
-    vision_encoder: &'a E,
+pub struct ImageAnalyzer<'a> {
+    vlm_service: &'a dyn VlmService,
+    embedding_service: &'a dyn EmbeddingService,
     model: String,
 }
 
-impl<'a, V: VlmService, E: VisionEncoder> ImageAnalyzer<'a, V, E> {
+impl<'a> ImageAnalyzer<'a> {
     /// 创建新的图像分析器。
-    pub fn new(vlm_service: &'a V, vision_encoder: &'a E, model: impl Into<String>) -> Self {
+    pub fn new(
+        vlm_service: &'a dyn VlmService,
+        embedding_service: &'a dyn EmbeddingService,
+        model: impl Into<String>,
+    ) -> Self {
         Self {
             vlm_service,
-            vision_encoder,
+            embedding_service,
             model: model.into(),
         }
     }
@@ -542,22 +549,24 @@ impl<'a, V: VlmService, E: VisionEncoder> ImageAnalyzer<'a, V, E> {
         })
     }
 
-    /// 为图像生成视觉嵌入向量。
-    pub async fn generate_visual_embedding(
-        &self,
-        image_data: &[u8],
-    ) -> Result<crate::common::types::Embedding> {
-        self.vision_encoder.encode_image(image_data).await
-    }
-
     /// 创建统一文本表示。
     pub fn create_unified_text(&self, analysis: &ImageAnalysis) -> UnifiedTextRepresentation {
         UnifiedTextRepresentation::new(analysis)
     }
+
+    /// 为图像生成视觉嵌入向量（通过多模态嵌入模型）。
+    pub async fn generate_visual_embedding(
+        &self,
+        image_data: &[u8],
+    ) -> Result<Embedding> {
+        self.embedding_service
+            .embed_image(&self.model, image_data)
+            .await
+    }
 }
 
-async fn analyze_image_base64<V: VlmService>(
-    vlm: &V,
+async fn analyze_image_base64(
+    vlm: &dyn VlmService,
     model: &str,
     image_data: &[u8],
     prompt: &str,

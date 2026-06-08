@@ -159,13 +159,14 @@ impl ConfigWizardService {
         endpoint: &str,
         api_key: &str,
         model: &str,
-    ) -> anyhow::Result<Vec<String>> {
+    ) -> std::result::Result<Vec<String>, String> {
         use tianyan::model::types::ChatCompletionRequest;
         use tianyan::model::ChatService;
         use tianyan::Message;
 
         // 创建临时客户端
-        let client = crate::core_bridge::create_model_client(endpoint, api_key)?;
+        let client = crate::core_bridge::create_model_client(endpoint, api_key)
+            .map_err(|e| format!("创建客户端失败: {}", e))?;
 
         // 构建一个简单的测试请求
         let request = ChatCompletionRequest::new(
@@ -180,22 +181,18 @@ impl ConfigWizardService {
         // 尝试发送请求
         match client.chat_completion(request).await {
             Ok(_) => {
-                // 连接成功，返回可用模型列表
-                // 这里我们假设用户提供的模型是可用的
-                // 实际应用中可以通过 API 获取可用模型列表
                 Ok(vec![model.to_string()])
             }
             Err(e) => {
-                // 检查是否是认证错误
                 let error_msg = e.to_string();
                 if error_msg.contains("401") || error_msg.contains("unauthorized") {
-                    Err(anyhow::anyhow!("API 密钥无效或已过期"))
+                    Err("API 密钥无效或已过期".to_string())
                 } else if error_msg.contains("404") {
-                    Err(anyhow::anyhow!("模型不存在，请检查模型名称"))
+                    Err("模型不存在，请检查模型名称".to_string())
                 } else if error_msg.contains("timeout") {
-                    Err(anyhow::anyhow!("连接超时，请检查网络或 API 端点"))
+                    Err("连接超时，请检查网络或 API 端点".to_string())
                 } else {
-                    Err(anyhow::anyhow!("连接失败: {}", error_msg))
+                    Err(format!("连接失败: {}", error_msg))
                 }
             }
         }

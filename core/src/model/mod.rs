@@ -6,7 +6,7 @@
 //!
 //! 模型服务层组织如下：
 //!
-//! - [`traits`]: 核心服务 trait（ChatService, EmbeddingService, VlmService, VisionEncoder）
+//! - [`traits`]: 核心服务 trait（ChatService, EmbeddingService, VlmService）
 //! - [`types`]: 请求和响应的类型定义
 //! - [`config`]: 模型服务配置（ModelConfig）
 //! - [`provider`]: 基于 async-openai 的 OpenAI 兼容 API 客户端实现
@@ -42,7 +42,7 @@ mod services;
 mod traits;
 pub mod types;
 
-pub use traits::{ChatService, EmbeddingService, ServiceDiscovery, VisionEncoder, VlmService};
+pub use traits::{ChatService, EmbeddingService, ServiceDiscovery, VlmService};
 
 pub use types::{
     embedding_dimension, ApiError, ApiErrorResponse, ChatChoice, ChatCompletionChunk,

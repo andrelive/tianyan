@@ -20,10 +20,6 @@ pub enum Action {
         query: String,
         scope: Option<String>,
     },
-    #[serde(skip)]
-    SubPlanner {
-        task: String,
-    },
     CallSkill {
         skill_id: String,
         parameters: serde_json::Map<String, Value>,
@@ -48,8 +44,6 @@ pub enum ExecutorError {
     CommandError(String),
     #[error("搜索失败：{0}")]
     SearchError(String),
-    #[error("子 Planner 失败：{0}")]
-    SubPlannerError(String),
     #[error("执行超时")]
     Timeout,
     #[error("安全策略违规：{0}")]

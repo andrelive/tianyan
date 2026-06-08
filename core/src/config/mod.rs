@@ -1,7 +1,7 @@
 //! Tianyan 代理系统的配置管理。
 //!
 //! 本模块提供整个应用程序的配置结构和加载机制。
-//! 使用 once_cell 实现全局静态配置访问。
+//! 使用 std::sync::OnceLock 实现全局静态配置访问。
 
 use serde::{Deserialize, Serialize};
 
@@ -199,31 +199,31 @@ impl TianyanConfig {
 
 /// 全局静态配置实例。
 ///
-/// 使用 once_cell::sync::OnceCell 实现延迟加载，配置只在首次访问时加载。
-/// 与 Lazy 不同，OnceCell 允许加载失败时返回错误而非 panic。
-static CONFIG: once_cell::sync::OnceCell<TianyanConfig> = once_cell::sync::OnceCell::new();
+/// 使用 `std::sync::OnceLock` 实现延迟加载，配置只在首次访问时加载。
+/// 通过 `get_or_init` 保证线程安全的单次初始化，消除 TOCTOU 竞态条件。
+static CONFIG: std::sync::OnceLock<TianyanConfig> = std::sync::OnceLock::new();
 
 /// 获取全局配置的引用。
 ///
-/// - returns: 全局配置的静态引用
+/// 使用 `OnceLock::get_or_init` 保证线程安全的延迟初始化，
+/// 消除 TOCTOU 竞态条件。配置加载失败视为致命错误。
 ///
-/// # Errors
-/// - `TianyanError::Config` - 配置文件未找到或格式无效
+/// # Panics
+/// - 配置文件未找到或格式无效时 panic
 ///
 /// # 示例
 ///
 /// ```rust,ignore
 /// use tianyan::config::get_config;
 ///
-/// fn example() -> tianyan::common::error::Result<()> {
-///     let config = get_config()?;
+/// fn example() {
+///     let config = get_config();
 ///     println!("数据目录：{:?}", config.storage.data_dir);
-///     Ok(())
 /// }
 /// ```
-pub fn get_config() -> crate::common::error::Result<&'static TianyanConfig> {
-    CONFIG.get_or_try_init(|| {
-        TianyanConfig::load().map_err(crate::common::error::TianyanError::Config)
+pub fn get_config() -> &'static TianyanConfig {
+    CONFIG.get_or_init(|| {
+        TianyanConfig::load().expect("Failed to load tianyan configuration")
     })
 }
 

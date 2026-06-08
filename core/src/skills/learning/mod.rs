@@ -296,21 +296,18 @@ mod tests {
         assert_eq!(engine.categorize_task("分析项目结构"), "analysis_operation");
     }
 
-    #[test]
-    fn test_skill_evaluation() {
+    #[tokio::test]
+    async fn test_skill_evaluation() {
         let engine = SkillLearningEngine::new(
             Arc::new(MockChatService),
             Arc::new(MockVfs),
             SkillLearningConfig::default(),
         );
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let eval = rt.block_on(async {
-            engine
-                .evaluate_skill("test-skill", &[true, true, true, false])
-                .await
-                .unwrap()
-        });
+        let eval = engine
+            .evaluate_skill("test-skill", &[true, true, true, false])
+            .await
+            .unwrap();
 
         assert_eq!(eval.total_uses, 4);
         assert_eq!(eval.successful_uses, 3);

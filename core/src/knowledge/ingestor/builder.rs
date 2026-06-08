@@ -1,37 +1,22 @@
 use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
-use crate::model::{ChatService, EmbeddingService, VisionEncoder, VlmService};
+use crate::model::{ChatService, EmbeddingService, VlmService};
 use crate::vfs::{backend::StorageBackend, VectorStorage};
 
 use super::{IngestorConfig, KnowledgeIngestor};
 
 /// 创建知识导入器的构建器。
-pub struct KnowledgeIngestorBuilder<M, E, V, VE, VS>
-where
-    M: ChatService,
-    E: EmbeddingService,
-    V: VlmService,
-    VE: VisionEncoder,
-    VS: VectorStorage,
-{
+pub struct KnowledgeIngestorBuilder {
     config: IngestorConfig,
-    model_service: Option<M>,
-    embedding_service: Option<E>,
-    vlm_service: Option<V>,
-    vision_encoder: Option<VE>,
+    model_service: Option<Arc<dyn ChatService>>,
+    embedding_service: Option<Arc<dyn EmbeddingService>>,
+    vlm_service: Option<Arc<dyn VlmService>>,
     storage: Option<Arc<dyn StorageBackend>>,
-    vector_storage: Option<VS>,
+    vector_storage: Option<Arc<dyn VectorStorage>>,
 }
 
-impl<M, E, V, VE, VS> KnowledgeIngestorBuilder<M, E, V, VE, VS>
-where
-    M: ChatService + 'static,
-    E: EmbeddingService + 'static,
-    V: VlmService,
-    VE: VisionEncoder,
-    VS: VectorStorage,
-{
+impl KnowledgeIngestorBuilder {
     /// 创建新的构建器。
     pub fn new() -> Self {
         Self {
@@ -39,7 +24,6 @@ where
             model_service: None,
             embedding_service: None,
             vlm_service: None,
-            vision_encoder: None,
             storage: None,
             vector_storage: None,
         }
@@ -52,26 +36,20 @@ where
     }
 
     /// 设置模型服务。
-    pub fn with_model_service(mut self, service: M) -> Self {
+    pub fn with_model_service(mut self, service: Arc<dyn ChatService>) -> Self {
         self.model_service = Some(service);
         self
     }
 
     /// 设置嵌入服务。
-    pub fn with_embedding_service(mut self, service: E) -> Self {
+    pub fn with_embedding_service(mut self, service: Arc<dyn EmbeddingService>) -> Self {
         self.embedding_service = Some(service);
         self
     }
 
     /// 设置 VLM 服务。
-    pub fn with_vlm_service(mut self, service: V) -> Self {
+    pub fn with_vlm_service(mut self, service: Arc<dyn VlmService>) -> Self {
         self.vlm_service = Some(service);
-        self
-    }
-
-    /// 设置视觉编码器。
-    pub fn with_vision_encoder(mut self, encoder: VE) -> Self {
-        self.vision_encoder = Some(encoder);
         self
     }
 
@@ -82,13 +60,13 @@ where
     }
 
     /// 设置向量存储。
-    pub fn with_vector_storage(mut self, storage: VS) -> Self {
+    pub fn with_vector_storage(mut self, storage: Arc<dyn VectorStorage>) -> Self {
         self.vector_storage = Some(storage);
         self
     }
 
     /// 构建导入器。
-    pub fn build(self) -> Result<KnowledgeIngestor<M, E, V, VE, VS>> {
+    pub fn build(self) -> Result<KnowledgeIngestor> {
         let model_service = self
             .model_service
             .ok_or_else(|| TianyanError::Config("模型服务是必需的".to_string()))?;
@@ -98,9 +76,6 @@ where
         let vlm_service = self
             .vlm_service
             .ok_or_else(|| TianyanError::Config("VLM 服务是必需的".to_string()))?;
-        let vision_encoder = self
-            .vision_encoder
-            .ok_or_else(|| TianyanError::Config("视觉编码器是必需的".to_string()))?;
         let storage = self
             .storage
             .ok_or_else(|| TianyanError::Config("存储后端是必需的".to_string()))?;
@@ -108,26 +83,18 @@ where
             .vector_storage
             .ok_or_else(|| TianyanError::Config("向量存储是必需的".to_string()))?;
 
-        KnowledgeIngestor::new(
+        Ok(KnowledgeIngestor::new(
             self.config,
             model_service,
             embedding_service,
             vlm_service,
-            vision_encoder,
             storage,
             vector_storage,
-        )
+        ))
     }
 }
 
-impl<M, E, V, VE, VS> Default for KnowledgeIngestorBuilder<M, E, V, VE, VS>
-where
-    M: ChatService + 'static,
-    E: EmbeddingService + 'static,
-    V: VlmService,
-    VE: VisionEncoder,
-    VS: VectorStorage,
-{
+impl Default for KnowledgeIngestorBuilder {
     fn default() -> Self {
         Self::new()
     }

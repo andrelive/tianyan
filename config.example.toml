@@ -20,12 +20,6 @@ stream_responses = true
 # 默认：false
 enable_thinking = false
 
-# ReAct 配置
-[agent.react]
-# ReAct 最大迭代次数
-# 默认：10
-max_iterations = 10
-
 # 默认检索 top-k 值
 # 默认：5
 default_top_k = 5
@@ -108,10 +102,6 @@ models = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
 # 默认：60
 timeout = 60
 
-# 最大重试次数
-# 默认：3
-max_retries = 3
-
 # 是否启用此服务
 # 默认：true
 enabled = true
@@ -136,26 +126,6 @@ timeout = 60
 max_retries = 3
 enabled = true
 priority = 1
-
-# 模型路由配置
-[models.routing]
-# 启用自动故障转移
-# 默认：true
-auto_failover = true
-
-# 启用负载均衡
-# 默认：false
-load_balancing = false
-
-# 按任务类型的路由规则
-[[models.routing.rules]]
-# 任务类型：chat, embedding, vision
-task_type = "chat"
-# 首选模型
-model = "openai/gpt-4"
-# 备用模型
-fallbacks = ["deepseek/deepseek-chat"]
-
 
 # ==================== 日志配置 ====================
 [logging]

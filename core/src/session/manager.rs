@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
-    DetailedTokenUsage, Message, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
+    DetailedTokenUsage, Message, MessageTime, Part, PartTime, StructuredMessage,
     TianyanUri,
 };
 use crate::vfs::VirtualFileSystem;
@@ -339,11 +339,147 @@ impl SessionManager for PersistentSessionManager {
 mod tests {
     use super::*;
 
-    // 注意：这些测试需要 Mock VFS 实现
-    // 暂时只保留编译测试
+    use crate::common::types::{ContentLevel, MessageRole};
+    use crate::test_utils::MockVfs;
+    use crate::vfs::{ContentStore, VfsCore};
 
-    #[test]
-    fn test_persistent_session_manager_creation() {
-        // 编译时测试
+    /// Helper to create a mock VFS with pre-existing session directory.
+    async fn setup_session(vfs: &MockVfs, id: &str) {
+        let uri = TianyanUri::parse(&format!("tianyan://session/{}", id)).unwrap();
+        vfs.create_directory(&uri).await.unwrap();
+    }
+
+    /// Helper to write JSONL content to a session.
+    async fn write_jsonl(vfs: &MockVfs, id: &str, jsonl: &str) {
+        let uri = TianyanUri::parse(&format!("tianyan://session/{}", id)).unwrap();
+        vfs.write(&uri, ContentLevel::Detail, jsonl).await.unwrap();
+    }
+
+    /// Helper to make a simple StructuredMessage.
+    fn make_msg(id: &str, session_id: &str, role: MessageRole, text: &str, compression_marker: bool) -> StructuredMessage {
+        let now = Utc::now().timestamp_millis();
+        StructuredMessage {
+            id: id.to_string(),
+            parent_id: None,
+            role,
+            parts: vec![Part::Text { text: text.to_string(), time: PartTime::default() }],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime { created: now, completed: now },
+            session_id: session_id.to_string(),
+            finish: None,
+            compression_marker,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_and_get_session_roundtrip() {
+        let vfs = Arc::new(MockVfs::new());
+        setup_session(&vfs, "test-1").await;
+        let mgr = PersistentSessionManager::new(vfs.clone());
+
+        // Create session with first message
+        let msg = Message::user("Hello");
+        let session = mgr.create_session("test-1", msg).await.unwrap();
+
+        assert_eq!(session.session_id, "test-1");
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].role, MessageRole::User);
+
+        // Verify persistence: read it back
+        let loaded = mgr.get_session("test-1").await.unwrap().unwrap();
+        assert_eq!(loaded.session_id, "test-1");
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_nonexistent_session_returns_none() {
+        let vfs = Arc::new(MockVfs::new());
+        let mgr = PersistentSessionManager::new(vfs);
+
+        let result = mgr.get_session("no-such").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_add_structured_message_persists() {
+        let vfs = Arc::new(MockVfs::new());
+        let id = "test-2";
+        setup_session(&vfs, id).await;
+        let mgr = PersistentSessionManager::new(vfs.clone());
+
+        // First create session with user message
+        let msg = Message::user("Hi");
+        mgr.create_session(id, msg).await.unwrap();
+
+        // Add assistant message via add_structured_message
+        let sm = make_msg("assist-1", id, MessageRole::Assistant, "Hello there!", false);
+        mgr.add_structured_message(id, sm).await.unwrap();
+
+        // Load and verify both messages exist
+        let session = mgr.get_session(id).await.unwrap().unwrap();
+        assert_eq!(session.messages.len(), 2, "should have 2 messages after adding");
+        assert_eq!(session.messages[1].role, MessageRole::Assistant);
+    }
+
+    #[tokio::test]
+    async fn test_compression_marker_truncation() {
+        let vfs = Arc::new(MockVfs::new());
+        let id = "test-3";
+        setup_session(&vfs, id).await;
+
+        // Write directly: 2 messages before marker, 1 marker, 2 after
+        let msgs = vec![
+            make_msg("m1", id, MessageRole::User, "old msg 1", false),
+            make_msg("m2", id, MessageRole::Assistant, "old reply 1", false),
+            make_msg("cmp", id, MessageRole::System, "summary", true),   // ← marker
+            make_msg("m3", id, MessageRole::User, "recent 1", false),
+            make_msg("m4", id, MessageRole::Assistant, "recent reply", false),
+        ];
+        let lines: Vec<String> = msgs.iter()
+            .map(|m| serde_json::to_string(m).unwrap())
+            .collect();
+        write_jsonl(&vfs, id, &lines.join("\n")).await;
+
+        let mgr = PersistentSessionManager::new(vfs);
+        let session = mgr.get_session(id).await.unwrap().unwrap();
+
+        // Should only have marker + messages after it = 3 messages
+        assert_eq!(session.messages.len(), 3, "should skip pre-marker messages");
+        assert!(session.messages[0].compression_marker, "first should be the marker");
+        assert_eq!(session.messages[1].id, "m3");
+        assert_eq!(session.messages[2].id, "m4");
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions() {
+        let vfs = Arc::new(MockVfs::new());
+        let mgr = PersistentSessionManager::new(vfs.clone());
+
+        // Create 2 sessions
+        for id in &["s-a", "s-b"] {
+            setup_session(&vfs, id).await;
+            let msg = Message::user("start");
+            mgr.create_session(id, msg).await.unwrap();
+        }
+
+        let sessions = mgr.list_sessions().await.unwrap();
+        assert_eq!(sessions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_session() {
+        let vfs = Arc::new(MockVfs::new());
+        let id = "test-del";
+        setup_session(&vfs, id).await;
+        let mgr = PersistentSessionManager::new(vfs.clone());
+
+        let msg = Message::user("bye");
+        mgr.create_session(id, msg).await.unwrap();
+
+        mgr.delete_session(id).await.unwrap();
+        let result = mgr.get_session(id).await.unwrap();
+        assert!(result.is_none(), "session should be gone after delete");
     }
 }

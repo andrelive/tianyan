@@ -11,6 +11,7 @@ use crate::api::skills::types::{
     ExecuteSkillRequest, ExecuteSkillResponse, ListSkillsResponse, Skill, SkillExecutionStatus,
     SkillParameter,
 };
+use crate::api::shared::error::ApiError;
 
 /// 技能服务，管理和执行技能
 pub struct SkillService {
@@ -25,7 +26,7 @@ impl SkillService {
     }
 
     /// 列出所有可用技能
-    pub async fn list_skills(&self) -> anyhow::Result<ListSkillsResponse> {
+    pub async fn list_skills(&self) -> Result<ListSkillsResponse, ApiError> {
         info!("列出所有技能");
 
         let registry = self.registry.read().await;
@@ -43,7 +44,7 @@ impl SkillService {
         &self,
         skill_id: &str,
         request: ExecuteSkillRequest,
-    ) -> anyhow::Result<ExecuteSkillResponse> {
+    ) -> Result<ExecuteSkillResponse, ApiError> {
         info!("执行技能: {}", skill_id);
         debug!("参数: {:?}", request.parameters);
 
@@ -137,7 +138,7 @@ impl SkillService {
         &self,
         skill_id: &str,
         job_id: &str,
-    ) -> anyhow::Result<SkillExecutionStatus> {
+    ) -> Result<SkillExecutionStatus, ApiError> {
         info!("获取技能 {} 任务 {} 的状态", skill_id, job_id);
 
         // 当前执行器是同步完成的，直接返回完成状态

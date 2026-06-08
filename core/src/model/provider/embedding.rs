@@ -47,9 +47,12 @@ impl EmbeddingService for AsyncOpenAIClient {
             })
             .collect();
 
+        // Embedding API 总 token = prompt_tokens（无 completion），
+        // 使用 saturating_sub 防止因 API 返回异常值导致下溢 panic。
         let prompt_tokens = response.usage.prompt_tokens as usize;
         let total_tokens = response.usage.total_tokens as usize;
-        let usage = TokenUsage::new(prompt_tokens, total_tokens - prompt_tokens);
+        let completion_tokens = total_tokens.saturating_sub(prompt_tokens);
+        let usage = TokenUsage::new(prompt_tokens, completion_tokens);
 
         Ok(EmbeddingResponse {
             object: response.object,

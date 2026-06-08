@@ -21,18 +21,7 @@
 //! use tianyan::common::types::Message;
 //!
 //! async fn example() {
-//!     // 创建会话管理器（需要 VFS 实例）
-//!     // let vfs = Arc::new(...);
-//!     // let manager = Arc::new(PersistentSessionManager::new(vfs));
-//!     
-//!     // 创建新会话（带第一条消息）
-//!     // let session = manager.create_session("session-123", Message::user("你好")).await.unwrap();
-//!     
-//!     // 添加更多消息
-//!     // manager.add_message(&session.session_id, Message::assistant("你好！有什么可以帮你的吗？")).await.unwrap();
-//!     
-//!     // 列出所有会话
-//!     // let sessions = manager.list_sessions().await.unwrap();
+
 //! }
 //! ```
 

@@ -3,7 +3,7 @@
 //! 将上下文装配的完整流程封装为可复用、可测试的管线：
 //! load soul → load rules → load memories → compress → build InjectableContext
 
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
 use chrono;
 use tokio::sync::Mutex as TokioMutex;
@@ -27,7 +27,7 @@ pub struct ContextPipeline {
     default_top_k: usize,
     learned_rules_top_k: usize,
     /// 已缓存的 soul（首次加载后复用，避免每轮从 VFS 重复读取）
-    cached_soul: Arc<StdMutex<Option<String>>>,
+    cached_soul: Arc<TokioMutex<Option<String>>>,
 }
 
 impl ContextPipeline {
@@ -51,7 +51,7 @@ impl ContextPipeline {
             compressor,
             default_top_k,
             learned_rules_top_k,
-            cached_soul: Arc::new(StdMutex::new(None)),
+            cached_soul: Arc::new(TokioMutex::new(None)),
         }
     }
 
@@ -64,7 +64,8 @@ impl ContextPipeline {
 
         // Load soul — 仅首次加载，后续复用缓存
         {
-            if let Some(soul) = self.cached_soul.lock().unwrap().as_ref() {
+            let soul_guard = self.cached_soul.lock().await;
+            if let Some(soul) = soul_guard.as_ref() {
                 injectable.soul = soul.clone();
             }
         }
@@ -72,7 +73,7 @@ impl ContextPipeline {
             let soul_uri = AgentPath::Soul.uri();
             match self.vfs.read_content(&soul_uri, ContentLevel::Detail).await {
                 Ok(content) => {
-                    *self.cached_soul.lock().unwrap() = Some(content.clone());
+                    *self.cached_soul.lock().await = Some(content.clone());
                     injectable.soul = content;
                 }
                 Err(e) => {

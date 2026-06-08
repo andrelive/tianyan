@@ -3,7 +3,7 @@
 use tianyan_server::start_server_default;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> tianyan::common::error::Result<()> {
     tracing_subscriber::fmt::init();
 
     start_server_default().await

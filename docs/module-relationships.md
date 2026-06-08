@@ -22,8 +22,8 @@
 ┌──────────────────────┐  ┌──────────────────────────────────────┐
 │ server (tianyan-     │  │ core (tianyan-core)                  │
 │   server)            │  │  无外部项目依赖                        │
-│ 依赖：tianyan-core   │  │ 职责：AI Agent 核心、模型路由、        │
-│ 职责：HTTP API、     │──│   存储、记忆、检索、规划、执行          │
+│ 依赖：tianyan-core   │  │ 职责：AI Agent 核心、VFS 存储、        │
+│ 职责：HTTP API、     │──│   会话管理、上下文管线、技能系统        │
 │   应用状态管理       │  │                                      │
 └──────────────────────┘  └──────────────────────────────────────┘
               ┌────────────────────────┐
@@ -49,68 +49,77 @@
 
 ## 2. Core 内部模块依赖关系
 
-### 2.1 模块依赖图
+### 2.1 模块目录结构
 
 ```
-                         ┌─────────────┐
-                         │   config    │  配置管理（被所有模块依赖）
-                         └──────┬──────┘
-                                │
-                         ┌──────┴──────┐
-                         │   common    │  通用类型、错误处理
-                         └──────┬──────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              ▼                 ▼                   ▼
-        ┌──────────┐    ┌────────────┐      ┌────────────┐
-        │  model   │    │  storage   │      │  session   │
-        │ 模型服务  │    │ 存储与 VFS │      │ 会话管理   │
-        └────┬─────┘    └─────┬──────┘      └─────┬──────┘
-             │                │                    │
-             │    ┌───────────┼────────────┐       │
-             │    ▼           ▼            ▼       │
-             │ ┌────────┐ ┌─────────┐ ┌─────────┐ │
-             │ │context │ │ storing │ │knowledge│ │
-             │ │检索/   │ │ 显提取  │ │知识管理 │ │
-             │ │管线/   │ │ trait   │ │         │ │
-             │ │规则    │ │         │ │         │ │
-             │ └───┬────┘ └─────────┘ └─────────┘ │
-             │     │                               │
-             │     ▼                               │
-             │  ┌──────────────────────┐            │
-             └──│       agent          │────────────┘
-                │  智能体协调器         │
-                │  (ContextPipeline/   │
-                │   AgentHarness/       │
-                │   AgentSkills)        │
-                └──────────┬───────────┘
-                           │
-               ┌────────────────────────────────┐
-               │                                │
-               ▼                                ▼
-         ┌──────────────────┐      ┌──────────────────┐
-         │   AgentLoop      │      │     skills        │
-         │  (agent/loop.rs) │      │  技能系统(GEPA)   │
-         └──────────┬───────┘      └──────────────────┘
-                    │
-                    ▼
-         ┌──────────────────┐
-         │   ToolRegistry   │
-         │ (agent/tool_*.rs)│
-         └──────────────────┘
-
-   ┌──────────────┐ ┌──────────┐
-   │observability │ │  tasks   │
-   │ AgentMetrics │ │ 后台任务  │
-   └──────────────┘ └──────────┘
-              │           │
-              └─────┬─────┘
-                    ▼
-            ┌──────────┐
-            │ scheduler│
-            │ 任务调度器│
-            └──────────┘
+core/src/
+├── agent/       (coordinator, loop, session_state, tool_registry, tools, types, builder)
+├── common/      (error, types/ 子模块)
+├── config/      (TOML 配置)
+├── context/     (pipeline, assembler, compression/, retrieval/)
+├── executor/    (deprecated Executor + types, judge, approval, verification)
+├── knowledge/   (parser, image, ingestor/, types)
+├── memory/      (extractor.rs)
+├── model/       (traits, services.rs, provider/)
+├── observability/ (空壳)
+├── scheduler/   (task_scheduler, tasks/)
+├── session/     (manager, types)
+├── skills/      (definition, executor, manager, handlers/, learning/, registry, types)
+├── vfs/         (traits, vfs_impl, backend/, vector/, summary/)
+└── lib.rs
 ```
+
+### 2.2 模块依赖图
+
+```
+                        ┌──────────────┐
+                        │   config     │  配置管理
+                        └──────┬───────┘
+                               │
+                        ┌──────┴───────┐
+                        │   common     │  通用类型、错误处理
+                        └──────┬───────┘
+                               │
+          ┌────────────────────┼────────────────────┐
+          ▼                    ▼                     ▼
+    ┌───────────┐      ┌─────────────┐       ┌──────────────┐
+    │   model   │      │     vfs     │       │   session    │
+    │ 模型服务   │      │ 虚拟文件系统 │       │  会话管理    │
+    └─────┬─────┘      └──────┬──────┘       └──────┬───────┘
+          │                   │                     │
+          │        ┌──────────┼──────────┐          │
+          │        ▼          ▼           ▼          │
+          │  ┌─────────┐ ┌────────┐ ┌─────────┐     │
+          │  │ context │ │ memory │ │knowledge│     │
+          │  │管线/    │ │ 提取器  │ │知识管理 │     │
+          │  │组装/    │ │        │ │         │     │
+          │  │检索     │ │        │ │         │     │
+          │  └────┬────┘ └────────┘ └─────────┘     │
+          │       │                                 │
+          │       ▼                                 │
+          │  ┌──────────────────────────┐           │
+          └──│          agent           │───────────┘
+             │     AgentCoordinator     │
+             │  (ContextPipeline/       │
+             │   AgentLoop/             │
+             │   ToolRegistry)          │
+             └────────────┬─────────────┘
+                          │
+         ┌────────────────┼────────────────┐
+         ▼                                  ▼
+   ┌───────────┐                     ┌────────────┐
+   │  skills   │                     │ scheduler  │
+   │ 技能系统   │                     │ 定时任务    │
+   │ (GEPA)    │                     │ 调度器      │
+   └───────────┘                     └────────────┘
+```
+
+**依赖方向说明**：
+- `common` → 所有模块的基础层（类型、错误）
+- `model / vfs / session` → 中坚层，分别提供 LLM 服务、存储、会话管理
+- `context` → 依赖 vfs 和 model，提供检索+组装+压缩管线
+- `agent` → 协调者，聚合 context、model、session、vfs
+- `skills / scheduler` → 被 agent 调用，scheduler 独立运行后台任务
 
 ---
 
@@ -132,7 +141,7 @@ Tauri App 启动
     │     ├─ 3.1 initialize_vfs_for_app()   [server/src/lib.rs]
     │     │     ├─ LocalStorageBackend::new()
     │     │     ├─ QdrantVectorStore::new() + initialize()
-    │     │     ├─ ModelRouter::with_defaults() + register_services()
+    │     │     ├─ ModelServices::from_configs() — 替代旧 ModelRouter
     │     │     └─ VirtualFileSystemBuilder::build() + initialize()
     │     │
     │     ├─ 3.2 AppState::new(config, vfs) [server/src/state.rs]
@@ -140,7 +149,7 @@ Tauri App 启动
     │     │     ├─ create_skill_registry/executor()
     │     │     └─ AgentBuilderFactory::build_agent_or_wizard()
     │     │         ├─ validate_config()
-    │     │         ├─ ModelRouter::register_services()
+    │     │         ├─ ModelServices::from_configs()
     │     │         ├─ DualLayerRetriever::new()
     │     │         └─ AgentBuilder::build()
     │     │
@@ -168,36 +177,33 @@ Axum chat_stream_handler                  [server/src/api/chat/handlers.rs]
     ▼ ChatService::process_message_stream()  [server/src/api/chat/services.rs]
     │  ├─ 持久化用户消息（SessionManager）
     │  ├─ 自动生成会话标题
-    │  └─ AgentCoordinator::process_message_stream()
+    │  └─ AgentCoordinator::process_message()
     │
-Agent::process_message_stream()           [core/src/agent/coordinator.rs]
+Agent::process_message()                  [core/src/agent/coordinator.rs]
     │
     ├─ SessionStateManager::with_state() 获取/创建 SessionState
     ├─ SessionState::add_user_message()
     │
     ├─ ContextPipeline::run()             [core/src/context/pipeline.rs]
+    │     ├─ 加载 soul（首次缓存）
     │     ├─ 加载 learned rules（tianyan://agent/learned/）
     │     ├─ DualLayerRetriever::retrieve()（L0+L1 RRF 融合）
-    │     └─ ContextCompressor::compress()（Token 预算管理）
+    │     └─ ContextCompressor::compress_if_needed()
     │
     ├─ AgentLoop::run()                   [core/src/agent/loop.rs]
     │     ├─ ChatCompletionRequest::new(model, messages)
     │     │     .with_tools(ToolRegistry.definitions())
-    │     ├─ ModelService::chat_completion_stream() [通过 ModelRouter 路由]
+    │     ├─ ChatService::chat_completion_stream()
     │     ├─ LLM 返回 tool_calls → ToolRegistry::execute_parallel()
     │     │     ├─ 并行执行工具（文件读写、命令执行、代码搜索等）
     │     │     └─ 结果作为 Message::tool 追加到 messages
     │     ├─ LLM 返回 content → 返回 Answer，循环结束
     │     └─ 调用 ask_user → 返回 NeedsClarification，中断循环
     │
-    ├─ 失败时 → RuleRecorder::record() [Failures → Rules → VFS]
-    │
-    ├─ SessionState::cleanup() (防止无限增长)
+    ├─ SessionState::cleanup()（防止无限增长）
     │
     ├─ 后台异步（不阻塞响应）:
-    │     ├─ MemoryExtractionTrait::extract_and_store()
-    │     ├─ SkillLearningEngine::learn_from_history()（GEPA 进化）
-    │     └─ RuleSuggester::scan_and_promote()（记忆聚类 → 规则）
+    │     └─ SkillLearningEngine::learn_from_history()（GEPA 进化）
     │
     └─ AgentStreamChunk 通过 mpsc 通道逐块输出
           │ 每个 chunk 含 chunk_type (Thought/ToolCall/Observation/Answer/Error)
@@ -207,6 +213,9 @@ Agent::process_message_stream()           [core/src/agent/coordinator.rs]
           ▼ SSE 流式响应
 Yew Frontend 按 chunk_type 差异化渲染
 ```
+
+> **注意**：RuleRecorder/RuleSuggester 已移至 `scheduler/tasks/`，作为定时任务独立运行；
+> MemoryExtraction 由 `scheduler/tasks/memory_task.rs` 定时触发。
 
 ### 3.3 消息编辑/重新生成流程
 
@@ -225,41 +234,43 @@ Yew Frontend 按 chunk_type 差异化渲染
 ### 3.4 VFS 数据交互流程
 
 ```
-                    ┌──────────────────────────────────┐
-                    │    VirtualFileSystem (trait)       │
-                    │  统一接口：CRUD + 搜索 + 摘要      │
-                    └───────────┬──────────────────────┘
-                                │
-                    ┌───────────┴───────────┐
-                    ▼                       ▼
-        ┌───────────────────┐   ┌───────────────────────┐
-        │  StorageBackend   │   │   VectorStorage        │
-        │  (本地文件系统)    │   │   (Qdrant 向量数据库)  │
-        └───────────────────┘   └───────────────────────┘
-                    │                       │
-                    ▼                       ▼
-        ┌───────────────────┐   ┌───────────────────────┐
-        │  UriMapper        │   │  EmbeddingService      │
-        │  URI ↔ 文件路径   │   │  (ModelRouter 实现)    │
-        └───────────────────┘   └───────────────────────┘
+                    ┌──────────────────────────────────────┐
+                    │        VirtualFileSystem (trait)       │
+                    │  聚合 VfsCore + ContentStore +         │
+                    │        VfsSearch                      │
+                    │  位置：core/src/vfs/traits.rs          │
+                    └───────────────┬──────────────────────┘
+                                    │
+                ┌───────────────────┼───────────────────┐
+                ▼                   ▼                    ▼
+    ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐
+    │  StorageBackend  │  │   ContentStore   │  │    VfsSearch     │
+    │  (本地文件系统)   │  │  L0/L1/L2 读写   │  │  RRF 融合检索    │
+    └────────┬────────┘  └────────┬────────┘  └────────┬─────────┘
+             │                    │                     │
+             ▼                    ▼                     ▼
+    ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐
+    │  backend/local/  │  │  summary/       │  │  vector/qdrant.rs │
+    │  UriMapper       │  │  SummaryEngine  │  │  QdrantVectorStore │
+    └─────────────────┘  └─────────────────┘  └──────────────────┘
 ```
 
-### 3.5 记忆持久化流程
+### 3.5 记忆持久化流程（定时任务）
 
 ```
-会话结束 / 定时任务触发
+TaskScheduler 触发
     │
-    ├─ MemoryTask::handle()               [core/src/tasks/memory_task.rs]
-    │     └─ MemoryExtractionService::extract_from_session()
-    │           ├─ ModelService::chat_completion() (提取记忆)
-    │           └─ VFS::write_content() (持久化到 tianyan://memory/)
+    ├─ MemoryTask::handle()               [core/src/scheduler/tasks/memory_task.rs]
+    │     └─ MemoryExtractor::extract_from_text()
+    │           ├─ ChatService::chat_completion()（提取记忆）
+    │           └─ 返回 Vec<MemoryEntry>
+    │           └─ VFS::write() 持久化到 tianyan://memory/
     │
-    └─ SummaryTask::handle()              [core/src/tasks/summary_task.rs]
-          └─ SummaryService::process_all()
-                ├─ VFS::list_all_uris() (扫描条目)
-                ├─ VFS::read_content() (读取原始内容)
-                ├─ SummaryEngine::generate_abstract/overview()
-                │     └─ ModelService::chat_completion()
+    └─ SummaryTask::handle()              [core/src/scheduler/tasks/summary_task.rs]
+          └─ SummaryEngine::process_all()
+                ├─ VFS::list()（扫描条目）
+                ├─ VFS::read()（读取原始内容）
+                ├─ LLM 生成 L0/L1 摘要
                 ├─ VFS::write_abstract/overview()
                 └─ VFS::update_summary_vectors()
                       └─ EmbeddingService::embed_single()
@@ -295,20 +306,19 @@ Yew Frontend 按 chunk_type 差异化渲染
 | **API 路径** | 基地址 `http://localhost:3000/api/v1`，向导用 `/api`（无版本） |
 | **错误处理** | 统一解析后端 `ErrorResponse { error: String }` 格式 |
 
-### 4.4 关键数据流路径
+### 4.4 关键数据流路径（一图流）
 
 ```
 用户输入
   → [HTTP] → Server API Handler
-  → [Rust] → ChatService (持久化 + 标题生成)
-  → [Trait] → AgentCoordinator::process_message_stream()
-  → [Rust] → ContextPipeline::run()（规则注入 → 检索 → 压缩）
+  → [Rust] → ChatService（持久化 + 标题生成）
+  → [Trait] → AgentCoordinator::process_message()
+  → [Rust] → ContextPipeline::run()（soul → rules → retrieval → compression）
   → [Rust] → AgentLoop::run()（LLM + ToolRegistry 迭代循环）
-  → [Trait] → ModelService::chat_completion()
-  → [Rust] → ModelRouter::route() → OpenAIClient
+  → [Trait] → ChatService::chat_completion_stream()
   → [Rust] → ToolRegistry::execute_parallel()（并行工具执行）
   → [Rust] → AgentStreamChunk (含 chunk_type)
-  → [Rust] → ChatStreamEvent (透传 chunk_type)
+  → [Rust] → ChatStreamEvent（透传 chunk_type）
   → [HTTP SSE] → Frontend 按 chunk_type 差异化渲染
 ```
 
@@ -320,17 +330,21 @@ Yew Frontend 按 chunk_type 差异化渲染
 
 | Trait | 定义位置 | 实现者 | 消费者 |
 |-------|---------|--------|--------|
-| `AgentCoordinator` | core/src/agent/coordinator.rs | `Agent`, `WizardModeAgent` | server/state.rs, server/api/chat/services.rs |
-| `ModelService` | core/src/model/traits.rs | `OpenAIClient`, `OpenAICompatibleClient`, `ModelRouter` | agent/coordinator.rs, agent/loop.rs |
-| `EmbeddingService` | core/src/model/traits.rs | `OpenAIClient`, `OpenAICompatibleClient`, `ModelRouter` | storage/vfs/mod.rs, storage/summary.rs |
-| `VirtualFileSystem` | core/src/storage/traits.rs | `VirtualFileSystemImpl` | server/state.rs, agent/coordinator.rs |
-| `StorageBackend` | core/src/storage/traits.rs | `LocalStorageBackend` | storage/vfs/mod.rs |
-| `VectorStorage` | core/src/storage/traits.rs | `QdrantVectorStore` | storage/vfs/mod.rs, context/retrieval/ |
-| `MemoryExtractionTrait` | core/src/storage/extractor.rs | `MemoryExtractionService` | agent/coordinator.rs (依赖注入) |
-| `PlannerTrait` | ~~core/src/planner/mod.rs~~ | ~~`Planner`~~ | ~~已废弃~~ |
-| `ExecutorTrait` | ~~core/src/executor/traits.rs~~ | ~~`Executor`~~ | ~~已废弃~~ |
-| `SessionManager` | core/src/session/manager.rs | `PersistentSessionManager`, `PlaceholderSessionManager` | server/state.rs, server/api/sessions/services.rs |
-| `SkillExecutor` | core/src/skills/executor.rs | `SkillExecutor` | agent/skill_subsystem.rs, server/api/skills/services.rs |
+| `AgentCoordinator` | `core/src/agent/coordinator.rs` | `Agent` | `server/state.rs`, `server/api/chat/services.rs` |
+| `ChatService` | `core/src/model/traits.rs` | `AsyncOpenAIClient`（经 `LoggedService` 装饰） | `agent/coordinator.rs`, `agent/loop.rs` |
+| `EmbeddingService` | `core/src/model/traits.rs` | `AsyncOpenAIClient`（经 `LoggedEmbeddingService` 装饰） | `vfs/vfs_impl.rs`, `context/retrieval/` |
+| `VlmService` | `core/src/model/traits.rs` | `AsyncOpenAIClient`（经 `LoggedVlmService` 装饰） | `knowledge/image/` |
+| `ServiceDiscovery` | `core/src/model/traits.rs` | `AsyncOpenAIClient` | `server/state.rs`（健康检查） |
+| `VfsCore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `context/pipeline.rs` |
+| `ContentStore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `scheduler/tasks/` |
+| `VfsSearch` | `core/src/vfs/traits.rs` | `VfsImpl` | `context/retrieval/retriever.rs` |
+| `VirtualFileSystem` | `core/src/vfs/traits.rs` | 实现 VfsCore+ContentStore+VfsSearch 的类型自动获得 | `server/state.rs`, `agent/coordinator.rs`, `session/manager.rs` |
+| `StorageBackend` | `core/src/vfs/backend/` | `LocalStorageBackend` | `vfs/vfs_impl.rs` |
+| `VectorStorage` | `core/src/vfs/vector/traits.rs` | `QdrantVectorStore` | `vfs/vfs_impl.rs`, `context/retrieval/` |
+| `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`, `PlaceholderSessionManager` | `server/state.rs`, `agent/coordinator.rs` |
+| `SkillExecutor` | `core/src/skills/executor.rs` | `SkillExecutor` | `agent/tool_registry.rs`（通过 call_skill 工具桥接） |
+
+> **注意**：`ModelServices` 不是 trait，是 `core/src/model/services.rs` 中的 struct，聚合 `Arc<dyn ChatService>` + `Arc<dyn EmbeddingService>` + `Arc<dyn VlmService>`。
 
 ### 5.2 HTTP API 契约
 
@@ -368,54 +382,57 @@ Yew Frontend 按 chunk_type 差异化渲染
 
 ## 6. 架构偏差分析
 
-以下为架构文档描述与实际代码实现的偏差：
+以下为当前与理想架构仍存在的偏差：
 
 | 偏差项 | 描述 | 实际状态 | 影响 |
 |--------|------|---------|------|
 | SessionManager | VFS 持久化会话管理 | `PlaceholderSessionManager`（空实现） | 会话不持久化 |
-| knowledge 模块 | 文档导入到知识库 | 后端有 API，但 core 模块未被 server 集成 | 知识管理功能不完整 |
-| 前端 Knowledge UI | 知识管理面板 | 无前端 UI 对应 | 后端 4 个端点闲置 |
+| 前端 Knowledge UI | 知识管理面板 | 无前端 UI 对应 | 后端端点只被 API 工具使用 |
 | 前端 Runtime Config UI | 运行时配置面板 | 无前端 UI 对应 | 后端 3 个端点闲置 |
-
-### 已修复的偏差
-
-| 修复时间 | 修复项 | 修复前 | 修复后 |
-|---------|--------|-------|--------|
-| 2026-05 | `model/types.rs` 单文件 783 行 | 单文件包含 9 种类型域 | ✅ 拆分为 `model/types/` 9 个子模块 |
-| 2026-05 | `model/openai.rs` 单文件 860 行 | 单一文件处理所有 OpenAI 功能 | ✅ 拆分为 `model/openai/` 7 文件（config/client/chat/embedding/vision/stream） |
-| 2026-05 | `model/router.rs` 单文件 820 行 | 单一文件包含路由、trait impl、builder、测试 | ✅ 拆分为 `model/router/`（mod + builder + trait_impls） |
-| 2026-05 | `skills/executor.rs` 单文件 964 行 | 技能执行与内置处理器混合 | ✅ 拆分为 `skills/handlers/`（6 处理器）+ `skills/registry.rs`（注册表工厂），executor 留存核心 |
-| 2026-05 | `skills/learning.rs` 单文件 733 行 | GEPA 引擎类型与逻辑混合 | ✅ 拆分为 `skills/learning/`（mod + types + generator） |
-| 2026-05 | `storage/vfs.rs` 单文件 1417 行 | VFS 实现与 Builder 混合 | ✅ 拆分为 `storage/vfs/`（mod + builder） |
-| 2026-05 | `storage/local.rs` 单文件 564 行 | 实现与测试混合 | ✅ 拆分为 `storage/local/`（mod + tests） |
-| 2026-05 | `knowledge/chunker.rs` 单文件 579 行 | 分块器类型与逻辑混合 | ✅ 拆分为 `knowledge/chunker/`（mod + types） |
-| 2026-05 | `knowledge/ingestor.rs` 单文件 683 行 | 导入器与 Builder 混合 | ✅ 拆分为 `knowledge/ingestor/`（mod + builder） |
-| 2026-05 | `executor/error.rs` 独立错误文件 | `ExecutorError` 定义在独立文件 | ✅ 合并到 `executor/types.rs` |
-| 2026-05 | `planner/error.rs` 独立错误文件 | `PlannerError` 定义在独立文件 | ✅ 合并到 `planner/types.rs` |
-| 2026-04 | `ChatStreamEvent.chunk_type` | 后端缺失 | ✅ 后端透传 |
-| 2026-04 | regenerate/edit 闭环 | 仅前端本地处理 | ✅ 前后端协同 |
-| 2026-04 | `/sessions/{id}/title` | 端点缺失 | ✅ 已添加 |
-| 2026-04 | Error 格式不一致 | 前后端格式不同 | ✅ 统一适配 |
-| 2026-04 | 类型字段缺失 | 前端缺 total/metadata 等 | ✅ 已补齐 |
-| 2026-05 | 记忆模块独立存在 | `memory/` 顶层模块 | ✅ 重构为 `storage::MemoryExtractionTrait`，Agent 依赖注入 |
-| 2026-05 | skills in Agent | Agent 持有 executor 但未使用 | ✅ AgentSkills 子系统封装，GEPA 进化引擎集成 |
-| 2026-05 | 双层检索未接入 | `retrieve_context` 未调用 | ✅ ContextPipeline 完整集成 |
-| 2026-05 | 可观测性缺失 | 无可观测性模块 | ✅ observability 模块 + AgentMetrics |
-| 2026-05 | ~~Planner 不支持流式~~ | ~~仅 run()~~ | ~~⚠️ 已废弃：PlannerTrait::run_with_stream 已移除~~ |
-| 2026-05 | 验证门控缺失 | 无执行结果验证 | ✅ VerificationGate + LlmJudge |
-| 2026-05 | 失败驱动学习缺失 | 失败无反馈 | ✅ AgentHarness（RuleRecorder + RuleSuggester） |
-| 2026-05 | common/types.rs 巨型文件 | 单文件 ~1350 行 | ✅ 拆分为 9 个领域子模块（uri/namespace/content/metadata/embedding/search/message/token/memory） |
-| 2026-05 | ~~Planner 直接依赖 SessionState~~ | ~~`run(&mut self, input, &mut SessionState)`~~ | ~~⚠️ 已废弃：Planner-Executor 架构整体移除~~ |
-| 2026-05 | ~~Executor 无 trait 抽象~~ | ~~Agent 直接依赖 `Arc<Executor>`~~ | ~~⚠️ 已废弃：ExecutorTrait 已移除~~ |
-| 2026-05 | ~~Planner-Executor 依赖方向错误~~ | ~~`Action/Step` 定义于 planner~~ | ~~⚠️ 已废弃：Step/Action 迁移为 ToolDefinition/ToolParams~~ |
-| 2026-05 | ~~Planner 不支持流式~~ | ~~仅 run()~~ | ~~⚠️ 已废弃：PlannerTrait::run_with_stream 已移除~~ |
-| 2026-05 | learned_rules_* 硬编码常量 | `LEARNED_RULES_TOP_K` / `LEARNED_RULES_MAX_TOKENS` 模块级常量 | ✅ 迁移为 AgentConfig 可配置字段 |
-| 2026-05 | 测试基础设施薄弱 | 缺少工厂函数和集成测试 | ✅ factory.rs + 10 个 planner_decoupling 集成测试 |
-| 2026-05 | Planner-Executor 架构过时 | 批量规划与工具调用语义不匹配 | ✅ 重构为 Agent Loop（AgentLoop + ToolRegistry + ToolParams） |
 
 ---
 
-## 7. 已知待办事项
+## 7. 核心架构决策与模块关系
+
+以下 4 个架构决策决定了模块间的职责划分和依赖方向：
+
+### 决策 1：VFS 双层摘要索引 — 底层基础
+
+`vfs/` 是统一存储与检索层。所有上下文（知识库、记忆、技能、规则）通过 VFS 管理，采用三层内容 + 双向量 RRF 融合：
+
+| 层级 | Token | 向量 | 用途 |
+|------|-------|------|------|
+| L0 Abstract | ~100 | `abstract_vector` | 向量搜索、快速过滤 |
+| L1 Overview | ~2K | `overview_vector` | 内容导航、重排序 |
+| L2 Detail | 无限制 | — | 完整内容，按需加载 |
+
+**模块影响**：`context/retrieval/` 依赖 `vfs::VfsSearch` 做双层检索；`scheduler/tasks/summary_task.rs` 定时生成 L0/L1 摘要。
+
+### 决策 2：StructuredMessage — 单一真相源
+
+`common/types/structured_message.rs` 定义 `StructuredMessage`，贯穿持久化 → 会话组装 → 跟踪 → 统计全流程。`compression_marker` 字段标记压缩锚点。
+
+**模块影响**：`session/manager.rs` 持久化 StructuredMessage；`context/assembler.rs` 将其转为 LLM 传输格式；`agent/loop.rs` 每轮生成后实时写入。
+
+### 决策 3：组件工具化
+
+`agent/tool_registry.rs` 注册 9 个工具（`read_file`、`write_file`、`execute_command`、`search_code`、`call_skill`、`run_tests`、`verify_build`、`ask_user`、`delegate_to_agent`），其中 `call_skill` 桥接到 `skills/executor.rs`。
+
+**模块影响**：`agent/tool_registry.rs` 依赖 `skills::SkillExecutor` 实现 call_skill 工具，形成 agent → skills 单向依赖。
+
+### 决策 4：前缀匹配缓存顺序
+
+`context/assembler.rs` 的 `assemble()` 严格遵循固定前缀 → 可变后缀：
+
+```
+soul → rules+memories → history(from compression_marker) → current input
+```
+
+**模块影响**：soul 首次加载后缓存（`context/pipeline.rs` 中的 `cached_soul`）；compression_marker 由 `context/compression/` 模块管理；顺序不可变更以保证 LLM 前缀缓存命中率。
+
+---
+
+## 8. 已知待办事项
 
 | 位置 | 内容 | 优先级 |
 |------|------|:---:|
@@ -424,9 +441,9 @@ Yew Frontend 按 chunk_type 差异化渲染
 | config/services.rs | TODO: 与核心配置存储集成 (2处) | 🔴 |
 | gui 知识管理面板 | 前端无 Knowledge UI，后端端点闲置 | 🟡 |
 | gui 运行时配置 | 前端无 Runtime Config UI | 🟡 |
-| 记忆持久化 | MemoryExtractionTrait 已就绪，server 层接入待实现 | 🟡 |
+| 记忆持久化 | MemoryExtractor 已就绪，server 层接入待实现 | 🟡 |
 
 ---
 
-**文档版本**: 2026-05-10
-**最后更新**: 2026-05-10（新增模块目录拆分历史记录：model/types/openai/router、skills/executor/learning、storage/vfs/local、knowledge/chunker/ingestor 目录化拆分 + error 合并修复清单）
+**文档版本**: 2026-06-04
+**最后更新**: 2026-06-04（全面修正：移除不存在模块、更新 trait 契约、修剪历史偏差、新增架构决策章节）

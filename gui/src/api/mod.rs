@@ -108,15 +108,17 @@ where
 {
     let url = format!("{}{}", get_api_base(), path);
 
-    let response = Request::get(&url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| ApiError {
-            message: format!("请求失败: {}", e),
-            code: None,
-        })?;
+    let response = with_timeout(
+        Request::get(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .send(),
+    )
+    .await
+    .map_err(|e| ApiError {
+        message: format!("请求失败: {}", e),
+        code: None,
+    })?;
 
     handle_response(response).await
 }
@@ -128,20 +130,22 @@ where
 {
     let url = format!("{}{}", get_api_base(), path);
 
-    let response = Request::post(&url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .json(body)
-        .map_err(|e| ApiError {
-            message: format!("序列化请求失败: {}", e),
-            code: None,
-        })?
-        .send()
-        .await
-        .map_err(|e| ApiError {
-            message: format!("请求失败: {}", e),
-            code: None,
-        })?;
+    let response = with_timeout(
+        Request::post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .json(body)
+            .map_err(|e| ApiError {
+                message: format!("序列化请求失败: {}", e),
+                code: None,
+            })?
+            .send(),
+    )
+    .await
+    .map_err(|e| ApiError {
+        message: format!("请求失败: {}", e),
+        code: None,
+    })?;
 
     handle_response(response).await
 }
@@ -152,16 +156,39 @@ where
 {
     let url = format!("{}{}", get_api_base(), path);
 
-    let response = Request::delete(&url)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| ApiError {
-            message: format!("请求失败: {}", e),
-            code: None,
-        })?;
+    let response = with_timeout(
+        Request::delete(&url)
+            .header("Accept", "application/json")
+            .send(),
+    )
+    .await
+    .map_err(|e| ApiError {
+        message: format!("请求失败: {}", e),
+        code: None,
+    })?;
 
     handle_response(response).await
+}
+
+/// 为 WASM HTTP 请求添加超时控制。
+/// 使用 gloo_timers 的 TimeoutFuture + futures::future::select 实现。
+async fn with_timeout<F, T>(fut: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, gloo_net::Error>> + 'static,
+    T: 'static,
+{
+    let result = futures::future::select(
+        Box::pin(fut),
+        Box::pin(async {
+            gloo_timers::future::TimeoutFuture::new(DEFAULT_TIMEOUT_SECS * 1000).await;
+            Err::<T, String>("请求超时".to_string())
+        }),
+    )
+    .await;
+    match result {
+        futures::future::Either::Left((resp, _)) => resp.map_err(|e| e.to_string()),
+        futures::future::Either::Right((err, _)) => err,
+    }
 }
 
 /// 为 SSE 流请求添加超时控制。
@@ -181,11 +208,42 @@ pub(super) fn create_abort_controller_with_timeout(
 
     web_sys::window().and_then(|w| {
         w.set_timeout_with_callback_and_timeout_and_arguments_0(
-            closure.as_ref().dyn_ref().unwrap(),
+            closure
+                .as_ref()
+                .dyn_ref::<js_sys::Function>()
+                .expect("closure should be castable to js_sys::Function"),
             timeout_ms as i32,
         )
         .ok()
     });
 
     (controller, signal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_api_error_display() {
+        let err = ApiError {
+            message: "测试错误".to_string(),
+            status: 400,
+        };
+        assert_eq!(err.status, 400);
+        assert!(err.message.contains("测试错误"));
+    }
+
+    #[test]
+    fn test_get_api_base_default() {
+        // 在 WASM 外，thread_local 应能工作
+        let base = get_api_base();
+        assert!(!base.is_empty());
+    }
+
+    #[test]
+    fn test_default_api_base() {
+        assert_eq!(DEFAULT_API_BASE, "http://localhost:3000/api/v1");
+        assert_eq!(DEFAULT_TIMEOUT_SECS, 60);
+    }
 }

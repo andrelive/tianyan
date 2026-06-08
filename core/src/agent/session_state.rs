@@ -122,7 +122,7 @@ impl SessionState {
     // 转换为 Session（待 Task 7 完成 Session 类型更新后恢复）。
     // pub fn to_session(&self) -> Session {
     //     let mut session = Session::new(&self.session_id);
-    //     session.messages = self.structured_messages.clone();
+
     //     session
     // }
 
@@ -135,13 +135,27 @@ impl SessionState {
         if self.structured_messages.len() <= MAX_CONVERSATION_MESSAGES {
             return;
         }
+        // 优先找到最近的 compression_marker 位置，避免截断标记
+        let last_marker_pos = self
+            .structured_messages
+            .iter()
+            .rposition(|m| m.compression_marker);
         let keep_from = self
             .structured_messages
             .len()
             .saturating_sub(KEEP_RECENT_MESSAGES);
-        if keep_from > 0 {
-            self.structured_messages.drain(0..keep_from);
+        if keep_from == 0 {
+            return;
         }
+        // 如果有 compression_marker，只截断到 marker 之前，保留 marker 及之后所有消息
+        if let Some(marker_pos) = last_marker_pos {
+            if marker_pos < keep_from {
+                self.structured_messages.drain(0..=marker_pos);
+                return;
+            }
+        }
+        // 无 marker 或 marker 在保留范围内：正常截断
+        self.structured_messages.drain(0..keep_from);
     }
 }
 

@@ -59,7 +59,7 @@ pub fn convert_token_usage(usage: tianyan::TokenUsage) -> crate::api::TokenUsage
 pub fn create_model_client(
     endpoint: &str,
     api_key: &str,
-) -> anyhow::Result<tianyan::model::AsyncOpenAIClient> {
+) -> tianyan::common::error::Result<tianyan::model::AsyncOpenAIClient> {
     let config =
         tianyan::model::ModelConfig::new(tianyan::model::types::ModelProvider::OpenAI, api_key)
             .with_name("test-connection")
@@ -67,5 +67,5 @@ pub fn create_model_client(
             .with_chat_model("test")
             .with_timeout(30);
 
-    tianyan::model::AsyncOpenAIClient::new(config).map_err(|e| anyhow::anyhow!("{}", e))
+    tianyan::model::AsyncOpenAIClient::new(config)
 }

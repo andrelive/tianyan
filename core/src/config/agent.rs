@@ -24,9 +24,6 @@ pub struct AgentConfig {
     /// 默认检索结果数量。
     #[serde(default = "default_default_top_k")]
     pub default_top_k: usize,
-    /// 是否启用验证门控（Agent 产出后自动 cargo check）。
-    #[serde(default = "default_enable_verification")]
-    pub enable_verification: bool,
     /// 上下文管线注入的 learned rules 默认 Top-K。
     #[serde(default = "default_learned_rules_top_k")]
     pub learned_rules_top_k: usize,
@@ -46,7 +43,6 @@ impl Default for AgentConfig {
             stream_responses: default_stream_responses(),
             enable_thinking: default_enable_thinking(),
             default_top_k: default_default_top_k(),
-            enable_verification: default_enable_verification(),
             learned_rules_top_k: default_learned_rules_top_k(),
             learned_rules_max_tokens: default_learned_rules_max_tokens(),
             max_turns: default_max_turns(),
@@ -105,10 +101,6 @@ fn default_enable_thinking() -> bool {
 
 fn default_default_top_k() -> usize {
     5
-}
-
-fn default_enable_verification() -> bool {
-    false
 }
 
 fn default_learned_rules_top_k() -> usize {

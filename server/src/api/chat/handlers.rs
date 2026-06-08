@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     extract::{Json, State},
@@ -15,6 +16,9 @@ use crate::api::chat::types::{
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
+
+/// SSE 流式通道缓冲区大小。
+const SSE_CHANNEL_BUFFER: usize = 100;
 
 /// 对话完成处理器（非流式）
 pub async fn chat_handler(
@@ -48,7 +52,7 @@ pub async fn chat_stream_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
-    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(100);
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
 
     if let Err(e) = request.validate() {
         let tx_clone = tx.clone();
@@ -62,9 +66,8 @@ pub async fn chat_stream_handler(
 
     let session_id = request
         .session_id
-        .as_ref()
-        .map(|s| s.clone())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .clone()
+        .unwrap_or_else(|| format!("session-{}", uuid::Uuid::new_v4().to_string()));
 
     info!(
         "流式对话请求: 会话={}, 消息数={}",
@@ -72,7 +75,7 @@ pub async fn chat_stream_handler(
         request.messages.len()
     );
 
-    let (event_tx, mut event_rx) = mpsc::channel::<ChatStreamEvent>(100);
+    let (event_tx, mut event_rx) = mpsc::channel::<ChatStreamEvent>(SSE_CHANNEL_BUFFER);
 
     let agent = state.agent().await;
     let session_manager = state.session_manager();
@@ -86,20 +89,37 @@ pub async fn chat_stream_handler(
         }
     });
 
-    // 转发事件到 SSE
+    // 转发事件到 SSE，同时发送 15 秒间隔心跳防止连接超时
     let tx_clone = tx.clone();
+    let ping_tx = tx.clone();
     tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&event) {
-                let sse_event = Event::default().data(json);
-                if tx_clone.send(Ok(sse_event)).await.is_err() {
-                    break;
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            tokio::select! {
+                event = event_rx.recv() => {
+                    match event {
+                        Some(event) => {
+                            if let Ok(json) = serde_json::to_string(&event) {
+                                if tx_clone.send(Ok(Event::default().data(json))).await.is_err() {
+                                    break;
+                                }
+                            }
+                            // finish_reason 非空表示流结束
+                            if event.finish_reason.is_some() {
+                                let _ = tx_clone.send(Ok(Event::default().data("[DONE]"))).await;
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = interval.tick() => {
+                    if ping_tx.send(Ok(Event::default().data(":ping"))).await.is_err() {
+                        break;
+                    }
                 }
             }
         }
-
-        // 发送流结束标记
-        let _ = tx_clone.send(Ok(Event::default().data("[DONE]"))).await;
     });
 
     Sse::new(ReceiverStream::new(rx))

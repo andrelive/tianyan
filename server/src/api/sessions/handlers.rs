@@ -8,8 +8,8 @@ use tracing::{error, info};
 
 use crate::api::sessions::services::SessionService;
 use crate::api::sessions::types::{
-    CreateSessionRequest, CreateSessionResponse, DeleteSessionResponse, ListSessionsResponse,
-    Session, SessionDetail, SessionMessagesResponse, UpdateTitleRequest,
+    DeleteSessionResponse, ListSessionsResponse, Session, SessionDetail, SessionMessagesResponse,
+    UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
@@ -26,29 +26,6 @@ pub async fn list_sessions(
         error!("列出会话失败: {}", e);
         ApiError::Internal(format!("列出会话失败: {}", e))
     })
-}
-
-/// 创建新会话
-pub async fn create_session(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<CreateSessionRequest>,
-) -> Result<Json<CreateSessionResponse>, ApiError> {
-    if let Err(e) = request.validate() {
-        return Err(ApiError::BadRequest(e));
-    }
-
-    info!("创建新会话，标题: {}", request.title);
-
-    let service = SessionService::new(state.session_manager());
-
-    service
-        .create_session(request)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            error!("创建会话失败: {}", e);
-            ApiError::Internal(format!("创建会话失败: {}", e))
-        })
 }
 
 /// 获取会话详情

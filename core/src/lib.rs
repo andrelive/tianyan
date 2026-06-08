@@ -25,10 +25,9 @@
 //! ```rust,ignore
 //! use tianyan::config::get_config;
 //!
-//! fn example() -> tianyan::common::error::Result<()> {
-//!     let config = get_config()?;
+//! fn example() {
+//!     let config = get_config();
 //!     println!("数据目录：{:?}", config.storage.data_dir);
-//!     Ok(())
 //! }
 //! ```
 
@@ -47,6 +46,10 @@ pub mod session;
 pub mod skills;
 pub mod vfs;
 
+/// 测试工具（仅在 cfg(test) 时编译）。
+#[cfg(test)]
+pub mod test_utils;
+
 // 重新导出常用类型
 pub use common::error::{Result, TianyanError};
 pub use common::types::{
@@ -61,13 +64,13 @@ pub const NAME: &str = env!("CARGO_PKG_NAME");
 
 /// 初始化库。
 ///
-/// - returns: 初始化结果
+/// # Panics
+/// - 配置加载失败时 panic
 ///
 /// # Errors
-/// - `TianyanError::Config` - 配置加载失败
 /// - `TianyanError::Io` - 日志初始化失败
 pub fn init() -> Result<()> {
-    let config = config::get_config()?;
+    let config = config::get_config();
 
     common::logging::init_logging(&config.logging)?;
 

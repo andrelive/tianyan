@@ -27,6 +27,12 @@ impl AsyncOpenAIClient {
 
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(config.timeout))
+            // 连接超时：默认 30 秒，防止 DNS/连接挂起
+            .connect_timeout(std::time::Duration::from_secs(30))
+            // 连接池：每主机最大空闲连接数 5，防止高频调用时重复建连
+            .pool_max_idle_per_host(5)
+            // 连接池：空闲连接超时 90 秒后关闭
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
             .map_err(|e| TianyanError::Config(format!("构建 HTTP 客户端失败: {}", e)))?;
 

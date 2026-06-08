@@ -64,11 +64,11 @@ pub trait VectorStorage: Send + Sync {
     /// 默认实现使用两次单独搜索然后手动融合。
     async fn search_fused(
         &self,
-        query_vector: Vec<f32>,
-        vector_names: &[&str],
-        top_k: usize,
-        category_filter: Option<&str>,
-        min_score: Option<f32>,
+        _query_vector: Vec<f32>,
+        _vector_names: &[&str],
+        _top_k: usize,
+        _category_filter: Option<&str>,
+        _min_score: Option<f32>,
     ) -> Result<Vec<VectorSearchResult>> {
         Ok(vec![])
     }

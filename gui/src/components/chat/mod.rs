@@ -562,7 +562,7 @@ fn message_bubble(props: &MessageBubbleProps) -> Html {
                     }
                 } else {
                     html! {
-                        <div class="message-text">
+                        <div class="message-text markdown-content">
                             { if props.message.content.is_empty() && props.is_streaming && !is_stream_message {
                                 html! { <span class="typing-indicator">{"●●●"}</span> }
                             } else {
@@ -646,38 +646,42 @@ fn message_bubble(props: &MessageBubbleProps) -> Html {
 }
 
 fn format_message(content: &str) -> Html {
-    // Simple markdown-like formatting
-    let lines: Vec<&str> = content.lines().collect();
-    let mut result = Vec::new();
+    use pulldown_cmark::{html, CodeBlockKind, CowStr, Event, Options, Parser, Tag};
 
-    for (idx, line) in lines.iter().enumerate() {
-        if line.starts_with("```") {
-            // Code block - simplified handling
-            result.push(html! {
-                <pre key={idx}><code>{line.trim_start_matches("```")}</code></pre>
-            });
-        } else if let Some(stripped) = line.strip_prefix("# ") {
-            result.push(html! {
-                <h1 key={idx}>{stripped}</h1>
-            });
-        } else if let Some(stripped) = line.strip_prefix("## ") {
-            result.push(html! {
-                <h2 key={idx}>{stripped}</h2>
-            });
-        } else if let Some(stripped) = line.strip_prefix("- ") {
-            result.push(html! {
-                <li key={idx}>{stripped}</li>
-            });
-        } else if line.starts_with("**") && line.ends_with("**") {
-            result.push(html! {
-                <strong key={idx}>{&line[2..line.len()-2]}</strong>
-            });
-        } else {
-            result.push(html! {
-                <p key={idx}>{*line}</p>
-            });
-        }
-    }
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
 
-    html! { <>{ for result }</> }
+    let parser = Parser::new_ext(content, options);
+
+    // Wrap code blocks with language class for syntax highlighting
+    let processed: Vec<Event> = parser
+        .map(|event| match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(lang))) => {
+                let lang_str = lang.to_string();
+                if lang_str.is_empty() {
+                    Event::Html(CowStr::Boxed("<pre><code>".into()))
+                } else {
+                    Event::Html(CowStr::Boxed(
+                        format!("<pre><code class=\"language-{}\">", lang_str).into(),
+                    ))
+                }
+            }
+            Event::End(Tag::CodeBlock(_)) => {
+                Event::Html(CowStr::Boxed("</code></pre>".into()))
+            }
+            _ => event,
+        })
+        .collect();
+
+    let mut body = String::new();
+    html::push_html(&mut body, processed.into_iter());
+
+    // 将生成的 HTML 转为 Yew VNode
+    let div = gloo_utils::document()
+        .create_element("div")
+        .expect("DOM createElement('div') should be available in all browsers");
+    div.set_inner_html(&body);
+    let node = yew::virtual_dom::VNode::VRef(div.into());
+    node
 }

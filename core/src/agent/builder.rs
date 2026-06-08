@@ -4,16 +4,13 @@ use tokio::sync::Mutex as TokioMutex;
 
 use tokio::sync::RwLock;
 
-use crate::agent::harness::AgentHarness;
 use crate::agent::r#loop::{AgentLoop, AgentLoopConfig};
-use crate::agent::skill_subsystem::AgentSkills;
 use crate::agent::tool_registry::ToolRegistry;
 use crate::common::error::{Result, TianyanError};
 use crate::config::AgentConfig;
 use crate::context::compression::{CompressionConfig, ContextCompressor};
 use crate::context::pipeline::ContextPipeline;
 use crate::context::DualLayerRetriever;
-use crate::executor::verification::VerificationGate;
 use crate::executor::SecurityPolicy;
 use crate::model::ChatService;
 use crate::observability::AgentMetrics;
@@ -104,7 +101,13 @@ impl AgentBuilder {
             .session_manager
             .ok_or_else(|| TianyanError::Internal("需要会话管理器".to_string()))?;
 
-        let tool_registry = ToolRegistry::new(SecurityPolicy::default());
+        // 构建可观测性指标（tool_registry 依赖）
+        let metrics = AgentMetrics::new();
+
+        let tool_registry = ToolRegistry::new(SecurityPolicy::default())
+            .with_vfs(vfs.clone())
+            .with_model_service(model_service.clone())
+            .with_metrics(metrics.clone());
         let tool_registry = if let Some(ref executor) = self.skill_executor {
             tool_registry.with_skill_executor(executor.clone())
         } else {
@@ -136,14 +139,8 @@ impl AgentBuilder {
             self.config.learned_rules_top_k,
         );
 
-        // 构建可观测性指标
-        let metrics = AgentMetrics::new();
-
-        // 组装 Harness 子系统
-        let harness = AgentHarness::new(metrics);
-
         // 构建技能学习引擎
-        let learning_engine = if self.config.enable_skills {
+        let skill_learning_engine = if self.config.enable_skills {
             Some(SkillLearningEngine::new(
                 model_service.clone(),
                 vfs.clone(),
@@ -153,25 +150,15 @@ impl AgentBuilder {
             None
         };
 
-        // 组装技能子系统
-        let skills = AgentSkills::new(self.skill_executor, skill_registry, learning_engine);
-
-        // 构建验证门控
-        let verification_gate =
-            VerificationGate::new(".").with_enabled(self.config.enable_verification);
-
-        // LLM-as-Judge 默认关闭，需要时通过 AgentConfig 显式创建
-        let llm_judge = None;
-
         Ok(Agent::new(
             self.config,
             model_service,
             vfs,
             context_pipeline,
-            harness,
-            skills,
-            verification_gate,
-            llm_judge,
+            metrics,
+            self.skill_executor,
+            skill_registry,
+            skill_learning_engine,
             agent_loop,
             session_manager,
         ))

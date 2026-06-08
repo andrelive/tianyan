@@ -118,22 +118,24 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, RwLock};
 use tracing::info;
 
-use crate::agent::harness::AgentHarness;
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
-use crate::agent::skill_subsystem::AgentSkills;
 use crate::agent::types::{
     AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
     StreamChunkType, StreamEventSender,
 };
-use crate::common::error::Result;
-use crate::common::types::{Message, StructuredMessage};
+use crate::common::error::{Result, TianyanError};
+use crate::common::types::{Message, StructuredMessage, TokenUsage};
 use crate::config::AgentConfig;
 use crate::context::{ContextAssembler, ContextPipeline};
-use crate::executor::{LlmJudge, VerificationGate};
 use crate::model::ChatService;
+use crate::observability::AgentMetrics;
 use crate::session::{Session, SessionManager};
+use crate::skills::{SkillExecutor, SkillLearningEngine, SkillRegistry};
 use crate::vfs::VirtualFileSystem;
+
+/// compression_marker 之后至少积累多少条消息才触发压缩。
+const MIN_MESSAGES_BEFORE_COMPRESSION: usize = 6;
 
 /// 智能体协调器 trait。
 #[async_trait]
@@ -170,11 +172,11 @@ pub struct Agent {
     model_service: Arc<dyn ChatService>,
     vfs: Arc<dyn VirtualFileSystem>,
     context_pipeline: ContextPipeline,
-    harness: AgentHarness,
-    skills: AgentSkills,
+    metrics: Arc<AgentMetrics>,
+    skill_executor: Option<Arc<SkillExecutor>>,
+    skill_registry: Arc<RwLock<SkillRegistry>>,
+    skill_learning_engine: Option<SkillLearningEngine>,
     state: Arc<RwLock<AgentState>>,
-    verification_gate: VerificationGate,
-    llm_judge: Option<LlmJudge>,
     agent_loop: AgentLoop,
     session_manager: Arc<dyn SessionManager>,
 }
@@ -187,10 +189,10 @@ impl Agent {
         model_service: Arc<dyn ChatService>,
         vfs: Arc<dyn VirtualFileSystem>,
         context_pipeline: ContextPipeline,
-        harness: AgentHarness,
-        skills: AgentSkills,
-        verification_gate: VerificationGate,
-        llm_judge: Option<LlmJudge>,
+        metrics: Arc<AgentMetrics>,
+        skill_executor: Option<Arc<SkillExecutor>>,
+        skill_registry: Arc<RwLock<SkillRegistry>>,
+        skill_learning_engine: Option<SkillLearningEngine>,
         agent_loop: AgentLoop,
         session_manager: Arc<dyn SessionManager>,
     ) -> Self {
@@ -199,11 +201,11 @@ impl Agent {
             model_service,
             vfs,
             context_pipeline,
-            harness,
-            skills,
+            metrics,
+            skill_executor,
+            skill_registry,
+            skill_learning_engine,
             state: Arc::new(RwLock::new(AgentState::default())),
-            verification_gate,
-            llm_judge,
             agent_loop,
             session_manager,
         }
@@ -222,29 +224,32 @@ impl Agent {
         state.write().await.add_user_message(query);
 
         // 会话级缓存：soul 非空表示已加载过，跳过 I/O
-        let cached = {
+        // 先检查 soul 是否已加载（避免克隆整个 InjectableContext）
+        let soul_loaded = {
             let s = state.read().await;
-            s.injectable_context.clone()
+            !s.injectable_context.soul.is_empty()
         };
 
-        let injectable = if cached.soul.is_empty() {
+        let injectable = if !soul_loaded {
             match self.context_pipeline.load_injectable(query).await {
                 Ok(ctx) => {
                     let injected_rules = ctx.rules_and_experiences.len();
                     if injected_rules > 0 {
-                        self.harness.metrics.record_rule_hit(injected_rules).await;
+                        self.metrics.record_rule_hit(injected_rules).await;
                     }
-                    state.write().await.injectable_context = ctx.clone();
-                    ctx
+                    state.write().await.injectable_context = ctx;
+                    // 加载后只需 clone 一次供 assemble 使用
+                    state.read().await.injectable_context.clone()
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "加载可注入上下文失败");
-                    self.harness.metrics.record_pipeline_failure().await;
-                    cached
+                    self.metrics.record_pipeline_failure().await;
+                    state.read().await.injectable_context.clone()
                 }
             }
         } else {
-            cached
+            let s = state.read().await;
+            s.injectable_context.clone()
         };
 
         let s = state.read().await;
@@ -265,7 +270,7 @@ impl Agent {
             s.structured_messages[start_idx..].to_vec()
         };
 
-        if messages_since_marker.len() < 6 {
+        if messages_since_marker.len() < MIN_MESSAGES_BEFORE_COMPRESSION {
             return;
         }
 
@@ -307,25 +312,20 @@ impl Agent {
         };
         let loop_result = self.agent_loop.run(&mut messages, None, &session_id, parent_id.as_deref()).await;
 
+        let mut clarification_tokens: Option<TokenUsage> = None;
         let response = match loop_result {
-            Ok(AgentLoopResult::Answer(content)) => {
-                let parent_id = {
-                    let s = state.read().await;
-                    s.structured_messages.last().map(|m| m.id.clone())
-                };
-                let sm = ContextAssembler::message_to_structured(
-                    &Message::assistant(&content),
-                    &state.read().await.session_id,
-                    parent_id.as_deref(),
-                );
-                state.write().await.add_structured_message(sm);
+            Ok(AgentLoopResult::Answer { content, total_tokens, persisted_message, .. }) => {
+                // 复用 AgentLoop 已持久化的消息，避免重复创建
+                state.write().await.add_structured_message(persisted_message);
 
                 let mut resp = AgentResponse::simple(content);
+                resp.token_usage = total_tokens.clone();
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                self.harness.metrics.record_execution(true).await;
+                self.metrics.record_execution(true).await;
+                clarification_tokens = Some(total_tokens);
                 resp
             }
-            Ok(AgentLoopResult::NeedsClarification { question }) => {
+            Ok(AgentLoopResult::NeedsClarification { question, total_tokens, .. }) => {
                 let question_obj = ClarificationQuestion {
                     question,
                     question_type: QuestionType::OpenEnded,
@@ -335,12 +335,14 @@ impl Agent {
                 state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
                 let formatted = format_clarification_questions(&[question_obj.clone()]);
                 let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
+                resp.token_usage = total_tokens.clone();
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                clarification_tokens = Some(total_tokens);
                 resp
             }
             Err(e) => {
                 tracing::warn!(error = %e, "AgentLoop 执行失败");
-                self.harness.metrics.record_execution(false).await;
+                self.metrics.record_execution(false).await;
                 let mut resp = AgentResponse::error(format!("处理失败：{}", e));
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
                 resp
@@ -350,16 +352,40 @@ impl Agent {
         {
             let mut st = self.state.write().await;
             st.conversations_processed += 1;
+            if let Some(ref tokens) = clarification_tokens {
+                st.total_tokens.input += tokens.prompt_tokens;
+                st.total_tokens.output += tokens.completion_tokens;
+                st.total_tokens.total += tokens.total_tokens;
+            }
         }
 
         Ok(response)
     }
 
     /// 从会话执行历史中自动学习新技能（GEPA 进化引擎）。
-    #[allow(dead_code)]
-    async fn learn_skills_from_session(&self, _state: &SessionState) -> Result<()> {
-        // TODO: 重构后恢复
-        Ok(())
+    async fn learn_skills_from_session(&self, session_id: &str) {
+        if let Some(ref engine) = self.skill_learning_engine {
+            // 从 ToolRegistry 排空执行轨迹
+            let history = self.agent_loop.tool_registry().drain_execution_history().await;
+            if history.is_empty() {
+                return;
+            }
+            match engine.learn_from_history(&history).await {
+                Ok(skills) => {
+                    if !skills.is_empty() {
+                        tracing::info!(
+                            session_id = %session_id,
+                            count = skills.len(),
+                            history_len = history.len(),
+                            "GEPA 引擎生成新技能"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(session_id = %session_id, error = %e, "GEPA 学习跳过（历史不足或未启用）");
+                }
+            }
+        }
     }
 }
 
@@ -395,6 +421,7 @@ impl AgentCoordinator for Agent {
             &Message::user(&message),
             session_id,
             parent_id.as_deref(),
+            None,
         );
         if let Err(e) = self.session_manager.add_structured_message(session_id, user_sm).await {
             tracing::warn!(error = %e, "持久化用户消息失败");
@@ -417,23 +444,21 @@ impl AgentCoordinator for Agent {
         ).await;
 
         // 6. Handle loop result
+        let mut loop_tokens: Option<TokenUsage> = None;
         let response = match loop_result {
-            Ok(AgentLoopResult::Answer(content)) => {
-                {
-                    let sm = ContextAssembler::message_to_structured(
-                        &Message::assistant(&content),
-                        session_id,
-                        None,
-                    );
-                    state.write().await.add_structured_message(sm);
-                }
+            Ok(AgentLoopResult::Answer { content, total_tokens: tokens, persisted_message, .. }) => {
+                // AgentLoop 已持久化 answer（含正确 parent_id 和 token_usage），
+                // coordinator 直接复用该消息加入内存状态，不再重复创建。
+                state.write().await.add_structured_message(persisted_message);
 
                 let mut resp = AgentResponse::simple(content);
+                resp.token_usage = tokens.clone();
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                self.harness.metrics.record_execution(true).await;
+                self.metrics.record_execution(true).await;
+                loop_tokens = Some(tokens);
                 resp
             }
-            Ok(AgentLoopResult::NeedsClarification { question }) => {
+            Ok(AgentLoopResult::NeedsClarification { question, total_tokens: tokens, .. }) => {
                 let question_obj = ClarificationQuestion {
                     question,
                     question_type: QuestionType::OpenEnded,
@@ -443,12 +468,14 @@ impl AgentCoordinator for Agent {
                 state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
                 let formatted = format_clarification_questions(&[question_obj.clone()]);
                 let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
+                resp.token_usage = tokens.clone();
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                loop_tokens = Some(tokens);
                 resp
             }
             Err(e) => {
                 tracing::warn!(error = %e, "AgentLoop 执行失败");
-                self.harness.metrics.record_execution(false).await;
+                self.metrics.record_execution(false).await;
                 let mut resp = AgentResponse::error(format!("处理失败：{}", e));
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
                 resp
@@ -462,6 +489,20 @@ impl AgentCoordinator for Agent {
         {
             let mut st = self.state.write().await;
             st.conversations_processed += 1;
+            if let Some(ref tokens) = loop_tokens {
+                st.total_tokens.input += tokens.prompt_tokens;
+                st.total_tokens.output += tokens.completion_tokens;
+                st.total_tokens.total += tokens.total_tokens;
+            }
+        }
+
+        // 8. Background: GEPA skill learning
+        {
+            let agent = self.clone();
+            let sid = session_id.to_string();
+            tokio::spawn(async move {
+                agent.learn_skills_from_session(&sid).await;
+            });
         }
 
         Ok(response)
@@ -496,21 +537,13 @@ impl AgentCoordinator for Agent {
             };
             let loop_result = self_clone
                 .agent_loop
-                .run(&mut messages.clone(), Some(stream_sender.clone()), &session_id_str, parent_id.as_deref())
+                .run_stream(&mut messages.clone(), stream_sender.clone(), &session_id_str, parent_id.as_deref())
                 .await;
 
             match loop_result {
-                Ok(AgentLoopResult::Answer(content)) => {
-                    let parent_id = {
-                        let s = state_clone.read().await;
-                        s.structured_messages.last().map(|m| m.id.clone())
-                    };
-                    let sm = ContextAssembler::message_to_structured(
-                        &Message::assistant(&content),
-                        &state_clone.read().await.session_id,
-                        parent_id.as_deref(),
-                    );
-                    state_clone.write().await.add_structured_message(sm);
+                Ok(AgentLoopResult::Answer { content, total_tokens, persisted_message, .. }) => {
+                    // 复用 AgentLoop 已持久化的消息，避免重复创建和 parent_id/token_usage 丢失
+                    state_clone.write().await.add_structured_message(persisted_message);
 
                     stream_sender
                         .send_complete(&content, StreamChunkType::Answer, None)
@@ -518,10 +551,13 @@ impl AgentCoordinator for Agent {
                     {
                         let mut st = self_clone.state.write().await;
                         st.conversations_processed += 1;
+                        st.total_tokens.input += total_tokens.prompt_tokens;
+                        st.total_tokens.output += total_tokens.completion_tokens;
+                        st.total_tokens.total += total_tokens.total_tokens;
                     }
-                    self_clone.harness.metrics.record_execution(true).await;
+                    self_clone.metrics.record_execution(true).await;
                 }
-                Ok(AgentLoopResult::NeedsClarification { question }) => {
+                Ok(AgentLoopResult::NeedsClarification { question, total_tokens, .. }) => {
                     let question_obj = ClarificationQuestion {
                         question,
                         question_type: QuestionType::OpenEnded,
@@ -536,11 +572,14 @@ impl AgentCoordinator for Agent {
                     {
                         let mut st = self_clone.state.write().await;
                         st.conversations_processed += 1;
+                        st.total_tokens.input += total_tokens.prompt_tokens;
+                        st.total_tokens.output += total_tokens.completion_tokens;
+                        st.total_tokens.total += total_tokens.total_tokens;
                     }
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "AgentLoop 流式执行失败");
-                    self_clone.harness.metrics.record_execution(false).await;
+                    self_clone.metrics.record_execution(false).await;
                     stream_sender.send_error(&format!("处理失败：{}", e)).await;
                     {
                         let mut st = self_clone.state.write().await;
@@ -548,6 +587,9 @@ impl AgentCoordinator for Agent {
                     }
                 }
             }
+
+            // Background: GEPA skill learning
+            self_clone.learn_skills_from_session(&session_id_str).await;
         });
 
         Ok(rx)
@@ -559,7 +601,7 @@ impl AgentCoordinator for Agent {
         answers: &str,
     ) -> Result<AgentResponse> {
         let session = self.session_manager.get_session(session_id).await?
-            .unwrap_or_else(|| Session::new(session_id));
+            .ok_or_else(|| TianyanError::MemorySystem(format!("会话未找到：{}", session_id)))?;
         let state = Arc::new(RwLock::new(SessionState::new(session_id)));
         {
             let mut s = state.write().await;
@@ -592,11 +634,11 @@ impl Clone for Agent {
             model_service: self.model_service.clone(),
             vfs: self.vfs.clone(),
             context_pipeline: self.context_pipeline.clone(),
-            harness: self.harness.clone(),
-            skills: self.skills.clone(),
+            metrics: self.metrics.clone(),
+            skill_executor: self.skill_executor.clone(),
+            skill_registry: self.skill_registry.clone(),
+            skill_learning_engine: self.skill_learning_engine.clone(),
             state: self.state.clone(),
-            verification_gate: self.verification_gate.clone(),
-            llm_judge: self.llm_judge.clone(),
             agent_loop: self.agent_loop.clone(),
             session_manager: self.session_manager.clone(),
         }

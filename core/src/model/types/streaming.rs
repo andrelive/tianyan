@@ -2,7 +2,34 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::types::{Message, MessageRole};
+use crate::common::types::{Message, MessageRole, TokenUsage};
+
+/// 流式 tool call 函数增量。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallFunctionDelta {
+    /// 函数名称。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 函数参数（增量）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+/// 流式 tool call 增量。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallDelta {
+    /// tool call 在本次响应中的索引。
+    pub index: usize,
+    /// tool call ID（首次出现时设置）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// tool call 类型。
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub call_type: Option<String>,
+    /// 函数调用增量。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<ToolCallFunctionDelta>,
+}
 
 /// 流式聊天补全响应块。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,6 +44,9 @@ pub struct ChatCompletionChunk {
     pub model: String,
     /// 选择列表。
     pub choices: Vec<ChunkChoice>,
+    /// Token 用量（仅在最后一个 chunk 中提供）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
 }
 
 /// 单个流式选择项。
@@ -39,6 +69,9 @@ pub struct DeltaContent {
     /// 文本内容（可选）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// 流式 tool calls 增量。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
 impl ChatCompletionChunk {

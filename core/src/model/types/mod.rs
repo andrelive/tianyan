@@ -12,7 +12,7 @@ pub use embedding::{
     embedding_dimension, EmbeddingData, EmbeddingInput, EmbeddingRequest, EmbeddingResponse,
 };
 pub use model_info::{ModelCapability, ModelInfo, ModelProvider, ModelType};
-pub use streaming::{ChatCompletionChunk, ChunkChoice, DeltaContent};
+pub use streaming::{ChatCompletionChunk, ChunkChoice, DeltaContent, ToolCallDelta, ToolCallFunctionDelta};
 pub use tool::{
     FunctionCall, FunctionDefinition, ToolCall, ToolCallType, ToolChoice, ToolChoiceFunction,
     ToolDefinition, ToolType,

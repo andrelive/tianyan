@@ -11,9 +11,7 @@ pub mod session_state;
 
 mod builder;
 mod coordinator;
-pub mod harness;
 mod r#loop;
-pub mod skill_subsystem;
 mod tool_params;
 mod tool_registry;
 mod tools;
@@ -26,7 +24,8 @@ pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopError, AgentLoopResult};
 pub use session_state::{SessionState, SessionStateManager};
 pub use tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, ReadFileParams,
-    RunTestsParams, SearchCodeParams, VerifyBuildParams, WriteFileParams,
+    RunTestsParams, SearchCodeParams, SearchKnowledgeParams, SelfCheckParams, VerifyBuildParams,
+    VfsListParams, VfsReadParams, WriteFileParams,
 };
 pub use tool_registry::{ToolExecutionError, ToolRegistry};
 pub use tools::{AgentTool, ToolResult};

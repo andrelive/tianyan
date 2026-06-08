@@ -205,7 +205,7 @@ pub struct ApprovalWorkflow {
 struct PendingApproval {
     request: ApprovalRequest,
     response_tx: oneshot::Sender<ApprovalResponse>,
-    created_at: Instant,
+    _created_at: Instant,
 }
 
 impl ApprovalWorkflow {
@@ -256,7 +256,6 @@ impl ApprovalWorkflow {
                     RiskLevel::Low
                 }
             }
-            Action::SubPlanner { .. } => RiskLevel::Medium,
             Action::CallSkill { skill_id, .. } => {
                 let dangerous_skills = ["shell", "exec", "delete", "remove"];
                 if dangerous_skills
@@ -351,7 +350,7 @@ impl ApprovalWorkflow {
                 PendingApproval {
                     request: request.clone(),
                     response_tx: tx,
-                    created_at: Instant::now(),
+                    _created_at: Instant::now(),
                 },
             );
         }

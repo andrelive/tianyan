@@ -18,7 +18,7 @@ use crate::common::types::{Message, MessageRole, TokenUsage};
 use crate::model::traits::ChatService;
 use crate::model::types::{
     ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChunkChoice,
-    DeltaContent, ToolCall, ToolCallType, ToolChoice,
+    DeltaContent, ToolCall, ToolCallDelta, ToolCallFunctionDelta, ToolCallType, ToolChoice,
 };
 
 use super::client::AsyncOpenAIClient;
@@ -151,12 +151,28 @@ impl ChatService for AsyncOpenAIClient {
                                     delta: DeltaContent {
                                         role: c.delta.role.as_ref().map(|r| convert_role(r)),
                                         content: c.delta.content,
+                                        tool_calls: c.delta.tool_calls.map(|tcs| {
+                                            tcs.into_iter().map(|tc| ToolCallDelta {
+                                                index: tc.index as usize,
+                                                id: tc.id,
+                                                call_type: tc.r#type.map(|_| "function".to_string()),
+                                                function: tc.function.map(|f| ToolCallFunctionDelta {
+                                                    name: f.name,
+                                                    arguments: f.arguments,
+                                                }),
+                                            }).collect()
+                                        }),
                                     },
                                     finish_reason: c.finish_reason.as_ref().map(|r| {
                                         AsyncOpenAIClient::finish_reason_str(r).to_string()
                                     }),
                                 })
                                 .collect(),
+                            usage: oa_chunk.usage.map(|u| TokenUsage {
+                                prompt_tokens: u.prompt_tokens as usize,
+                                completion_tokens: u.completion_tokens as usize,
+                                total_tokens: u.total_tokens as usize,
+                            }),
                         };
                         if tx.send(Ok(chunk)).await.is_err() {
                             return;

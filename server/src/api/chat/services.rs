@@ -6,12 +6,15 @@ use tracing::{debug, error, info};
 use tianyan::agent::AgentCoordinator;
 use tianyan::common::types::Part;
 use tianyan::session::SessionManager;
+use tianyan::Message as CoreMessage;
+use tianyan::MessageRole as CoreMessageRole;
 
 use crate::api::chat::types::{
     ChatRequest, ChatResponse, ChatStreamEvent, EditMessageRequest, RegenerateRequest,
     SkillCallInfo,
 };
 use crate::api::shared::short_uuid;
+use crate::api::shared::error::ApiError;
 use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
 
 /// 对话服务，处理对话逻辑
@@ -31,29 +34,29 @@ impl ChatService {
 
     /// 处理对话消息（非流式）
     ///
-    /// # Errors
-    ///
-    /// - 如果 `session_id` 未提供，返回错误
-    pub async fn process_message(&self, request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        let session_id = request
-            .session_id
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("session_id 是必填字段"))?;
-
+    /// 如果 `session_id` 未提供，会自动创建新会话。
+    pub async fn process_message(&self, request: ChatRequest) -> Result<ChatResponse, ApiError> {
         let last_message = request
             .messages
             .last()
             .map(|m| m.content.clone())
             .unwrap_or_default();
 
+        let session_id = resolve_or_create_session(
+            self.session_manager.as_ref(),
+            request.session_id.as_deref(),
+            &last_message,
+        )
+        .await?;
+
         let response = self
             .agent
-            .process_message(session_id, &last_message)
+            .process_message(&session_id, &last_message)
             .await?;
 
         let chat_response = ChatResponse {
             id: format!("chatcmpl-{}", short_uuid()),
-            session_id: session_id.clone(),
+            session_id,
             message: ChatMessage {
                 role: MessageRole::Assistant,
                 content: response.content,
@@ -71,28 +74,28 @@ impl ChatService {
 
     /// 处理对话消息（流式响应）
     ///
-    /// # Errors
-    ///
-    /// - 如果 `session_id` 未提供，返回错误
+    /// 如果 `session_id` 未提供，会自动创建新会话。
     pub async fn process_message_stream(
         &self,
         request: ChatRequest,
         tx: mpsc::Sender<ChatStreamEvent>,
-    ) -> anyhow::Result<()> {
-        let session_id = request
-            .session_id
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("session_id 是必填字段"))?;
-
+    ) -> Result<(), ApiError> {
         let last_message = request
             .messages
             .last()
             .map(|m| m.content.clone())
             .unwrap_or_default();
 
+        let session_id = resolve_or_create_session(
+            self.session_manager.as_ref(),
+            request.session_id.as_deref(),
+            &last_message,
+        )
+        .await?;
+
         let mut stream = self
             .agent
-            .process_message_stream(session_id, &last_message)
+            .process_message_stream(&session_id, &last_message)
             .await?;
 
         let mut chunk_id = 0;
@@ -148,25 +151,25 @@ impl ChatService {
     pub async fn regenerate_message(
         &self,
         request: RegenerateRequest,
-    ) -> anyhow::Result<ChatResponse> {
+    ) -> Result<ChatResponse, ApiError> {
         let session_id = &request.session_id;
 
         let session = self
             .session_manager
             .get_session(session_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("会话未找到: {}", session_id))?;
+            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
 
         let target_msg = session
             .messages
             .get(request.message_index)
-            .ok_or_else(|| anyhow::anyhow!("消息索引超出范围"))?;
+            .ok_or_else(|| ApiError::BadRequest("消息索引超出范围".to_string()))?;
 
         if !matches!(
             target_msg.role,
             tianyan::common::types::MessageRole::User
         ) {
-            return Err(anyhow::anyhow!("只能重新生成用户消息之后的回复"));
+            return Err(ApiError::BadRequest("只能重新生成用户消息之后的回复".to_string()));
         }
 
         let last_message: String = target_msg
@@ -204,24 +207,24 @@ impl ChatService {
     }
 
     /// 编辑用户消息并重新生成回复
-    pub async fn edit_message(&self, request: EditMessageRequest) -> anyhow::Result<ChatResponse> {
+    pub async fn edit_message(&self, request: EditMessageRequest) -> Result<ChatResponse, ApiError> {
         let session_id = &request.session_id;
 
         let mut session = self
             .session_manager
             .get_session(session_id)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("会话未找到: {}", session_id))?;
+            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
 
         if request.message_index >= session.messages.len() {
-            return Err(anyhow::anyhow!("消息索引超出范围"));
+            return Err(ApiError::BadRequest("消息索引超出范围".to_string()));
         }
 
         if !matches!(
             session.messages[request.message_index].role,
             tianyan::common::types::MessageRole::User
         ) {
-            return Err(anyhow::anyhow!("只能编辑用户消息"));
+            return Err(ApiError::BadRequest("只能编辑用户消息".to_string()));
         }
 
         for part in &mut session.messages[request.message_index].parts {
@@ -234,7 +237,7 @@ impl ChatService {
 
         if let Err(e) = self.session_manager.update_session(&session).await {
             error!("更新会话失败: {}", e);
-            return Err(anyhow::anyhow!("更新会话失败: {}", e));
+            return Err(ApiError::Internal(format!("更新会话失败: {}", e)));
         }
 
         let response = self
@@ -274,6 +277,28 @@ fn convert_skill_calls(calls: Vec<tianyan::agent::SkillCallInfo>) -> Vec<SkillCa
             }
         })
         .collect()
+}
+
+/// 根据请求中的 session_id 决定复用已有会话还是创建新会话。
+///
+/// 如果 `session_id` 为 `None`，生成新 UUID 并通过 SessionManager 创建会话。
+async fn resolve_or_create_session(
+    session_manager: &dyn SessionManager,
+    session_id: Option<&str>,
+    initial_message: &str,
+) -> Result<String, ApiError> {
+    if let Some(sid) = session_id {
+        if !sid.is_empty() {
+            return Ok(sid.to_string());
+        }
+    }
+    let new_id = format!("session-{}", crate::api::shared::short_uuid());
+    let msg = CoreMessage::new(CoreMessageRole::User, initial_message);
+    session_manager
+        .create_session(&new_id, msg)
+        .await
+        .map_err(|e| ApiError::Internal(format!("创建会话失败: {}", e)))?;
+    Ok(new_id)
 }
 
 #[cfg(test)]

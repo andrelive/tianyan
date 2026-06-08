@@ -34,6 +34,7 @@ pub struct AppState {
     pub settings: Settings,
     pub skills: Vec<Skill>,
     pub current_skill_id: Option<String>,
+    pub toast: Option<(String, ToastType)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +70,7 @@ impl Default for AppState {
             settings: Settings::default(),
             skills: Vec::new(),
             current_skill_id: None,
+            toast: None,
         }
     }
 }
@@ -103,6 +105,15 @@ pub enum AppAction {
     RegenerateFrom(usize),
     EditMessage { index: usize, new_content: String },
     DeleteMessagesFrom(usize),
+    ShowToast { message: String, toast_type: ToastType },
+    HideToast,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToastType {
+    Error,
+    Success,
+    Info,
 }
 
 impl Reducible for AppState {
@@ -188,6 +199,12 @@ impl Reducible for AppState {
                 if index < new_state.messages.len() {
                     new_state.messages.truncate(index);
                 }
+            }
+            AppAction::ShowToast { message, toast_type } => {
+                new_state.toast = Some((message, toast_type));
+            }
+            AppAction::HideToast => {
+                new_state.toast = None;
             }
         }
 

@@ -183,9 +183,11 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .setup(|_app| {
             info!("Tauri setup completed, frontend loaded from gui/dist");
-            // 启用开发者工具（即使在发布版本）
-            let window = _app.get_webview_window("main").unwrap();
-            window.open_devtools();
+            // 仅在 debug 构建时打开开发者工具
+            #[cfg(debug_assertions)]
+            if let Some(window) = _app.get_webview_window("main") {
+                window.open_devtools();
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

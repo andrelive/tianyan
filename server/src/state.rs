@@ -18,6 +18,7 @@ use tianyan::session::{PersistentSessionManager, SessionManager};
 use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
 };
+use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
 use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
@@ -252,6 +253,35 @@ impl AppState {
 
         let extractor = MemoryExtractor::new(model_services.chat, ExtractionConfig::default());
         Ok(Arc::new(extractor))
+    }
+
+    /// 创建知识导入器。
+    pub fn create_knowledge_ingestor(&self) -> TianyanResult<KnowledgeIngestor> {
+        let config = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async { self.config.read().await.clone() })
+        });
+
+        let model_services = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { create_model_services(&config).await })
+        })
+        .map_err(|e| TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
+
+        let vfs = &self.vfs;
+        let storage = vfs.storage_backend();
+        let vector_storage = vfs.vector_storage_backend();
+
+        let ingestor = KnowledgeIngestor::new(
+            IngestorConfig::new()
+                .with_embedding_model(&config.models.default_embedding_model)
+                .with_summary_model(&config.models.default_chat_model),
+            model_services.chat,
+            model_services.embedding,
+            model_services.vision,
+            storage,
+            vector_storage,
+        );
+        Ok(ingestor)
     }
 
     /// 优雅关闭应用

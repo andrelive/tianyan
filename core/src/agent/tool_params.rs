@@ -84,6 +84,31 @@ pub struct AskUserParams {
     pub question: String,
 }
 
+/// 搜索知识库参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SearchKnowledgeParams {
+    /// 检索查询（自然语言）。
+    pub query: String,
+    /// 返回结果数量上限。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<usize>,
+}
+
+/// 读取 VFS 条目参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VfsReadParams {
+    /// VFS URI（如 tianyan://knowledge/doc.md）。
+    pub uri: String,
+}
+
+/// 列出 VFS 目录参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VfsListParams {
+    /// VFS URI（如 tianyan://knowledge/），默认列出根目录。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+}
+
 /// 委托子 Agent 参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DelegateToAgentParams {
@@ -95,6 +120,20 @@ pub struct DelegateToAgentParams {
     /// 最大轮数。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
+}
+
+/// 自我检查参数（无参数 — Agent 自省查询内部指标）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SelfCheckParams {}
+
+/// 知识导入参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct KnowledgeIngestParams {
+    /// 要导入的文件或目录路径。
+    pub path: String,
+    /// 可选的分类（如 technical, business, references, screenshots, photos, diagrams, code, data, projects, external）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 #[cfg(test)]

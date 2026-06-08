@@ -114,6 +114,17 @@ pub trait EmbeddingService: Send + Sync {
 
     /// 获取模型的默认嵌入维度。
     fn embedding_dimension(&self, model: &str) -> usize;
+
+    /// 将图像编码为嵌入向量（用于视觉相似性搜索）。
+    ///
+    /// 默认实现将图像编码为 base64 data URL，通过多模态嵌入模型生成向量。
+    /// 适用于支持图像输入的嵌入模型（如 CLIP-based API）。
+    async fn embed_image(&self, model: &str, image_data: &[u8]) -> Result<Embedding> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let base64_data = STANDARD.encode(image_data);
+        let data_url = format!("data:image/jpeg;base64,{}", base64_data);
+        self.embed_single(model, &data_url).await
+    }
 }
 
 /// 视觉语言模型（VLM）服务 trait。
@@ -125,35 +136,19 @@ pub trait VlmService: Send + Sync {
     async fn analyze_image(&self, request: VisionRequest) -> Result<VisionResponse>;
 }
 
-/// 视觉编码器 trait。
-///
-/// 此 trait 定义了将图像转换为向量表示以进行相似度搜索的视觉编码器接口。
-#[async_trait]
-pub trait VisionEncoder: Send + Sync {
-    /// 将图像编码为向量表示。
-    async fn encode_image(&self, image_data: &[u8]) -> Result<Embedding>;
-
-    /// 将多个图像编码为向量表示。
-    async fn encode_images(&self, images: &[&[u8]]) -> Result<Vec<Embedding>> {
-        let mut embeddings = Vec::with_capacity(images.len());
-        for image in images {
-            embeddings.push(self.encode_image(image).await?);
-        }
-        Ok(embeddings)
-    }
-
-    /// 获取输出嵌入的维度。
-    fn embedding_dimension(&self) -> usize;
-
-    /// 获取编码器名称。
-    fn encoder_name(&self) -> &str;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
 
-    #[allow(dead_code)]
+    use crate::common::error::Result;
+    use crate::common::types::Message;
+    use crate::model::types::{
+        ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatChoice,
+        EmbeddingRequest, EmbeddingResponse, ModelCapability, ModelInfo, ModelType,
+        VisionChoice, VisionContent, VisionMessage, VisionRequest, VisionResponse,
+    };
+
     struct MockChatService;
 
     #[async_trait]
@@ -178,6 +173,55 @@ mod tests {
         ) -> Result<mpsc::Receiver<Result<ChatCompletionChunk>>> {
             let (tx, rx) = mpsc::channel(100);
             Ok(rx)
+        }
+    }
+
+    /// MockVlmService: 用于测试的 VlmService 实现。
+    pub(crate) struct MockVlmService;
+
+    #[async_trait]
+    impl VlmService for MockVlmService {
+        async fn analyze_image(&self, _request: VisionRequest) -> Result<VisionResponse> {
+            Ok(VisionResponse {
+                id: "mock-vision".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock-vision".to_string(),
+                choices: vec![VisionChoice {
+                    index: 0,
+                    message: VisionMessage {
+                        role: "assistant".to_string(),
+                        content: VisionContent::Text("模拟图像描述".to_string()),
+                    },
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: crate::common::types::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// MockServiceDiscovery: 用于测试的 ServiceDiscovery 实现。
+    pub(crate) struct MockServiceDiscovery;
+
+    #[async_trait]
+    impl ServiceDiscovery for MockServiceDiscovery {
+        async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+            Ok(vec![ModelInfo {
+                id: "mock-model".to_string(),
+                name: "Mock Model".to_string(),
+                provider: "mock".to_string(),
+                model_type: ModelType::Chat,
+                max_context_length: 4096,
+                capabilities: vec![ModelCapability::Chat, ModelCapability::Streaming],
+            }])
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        fn service_name(&self) -> &str {
+            "mock-discovery"
         }
     }
 }

@@ -16,7 +16,6 @@ path = "src/lib.rs"
 [dependencies]
 # Core dependencies
 tokio = { workspace = true }
-once_cell = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -26,15 +25,6 @@ tracing-subscriber = { workspace = true }
 config = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-
-# Vector and math
-ndarray = { workspace = true }
-
-# File system
-ignore = { workspace = true }
-
-# System information
-sysinfo = { workspace = true }
 
 # Cryptography
 ring = { workspace = true }
@@ -83,9 +73,6 @@ dirs = { workspace = true }
 # Base64 encoding
 base64 = { workspace = true }
 
-# Hex encoding
-hex = { workspace = true }
-
 
 
 # Regular expressions
@@ -99,8 +86,6 @@ tempfile = { workspace = true }
 
 [features]
 default = []
-ocr = []
-code-analysis = []
 
 [[test]]
 name = "structural"

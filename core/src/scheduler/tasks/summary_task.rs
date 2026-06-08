@@ -11,13 +11,16 @@ use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
 use crate::vfs::{ContextEntry, ABSTRACT_TOKEN_LIMIT};
 
+/// 已处理 URI 缓存的最大容量，超过后清理最旧的记录防止内存泄漏。
+const PROCESSED_CACHE_LIMIT: usize = 10000;
+
 /// 摘要生成任务。
 ///
 /// 扫描 VFS 中缺少摘要的内容并自动生成摘要。
 pub struct SummaryTask {
     /// 待处理 URI 队列。
     queue: RwLock<VecDeque<TianyanUri>>,
-    /// 已处理 URI 缓存。
+    /// 已处理 URI 缓存（有容量上限，防止内存泄漏）。
     processed: RwLock<std::collections::HashSet<String>>,
 }
 
@@ -154,10 +157,14 @@ impl SummaryTask {
             .update_summary_vectors(uri, &abstract_content, &overview_content)
             .await?;
 
-        // 标记为已处理
+        // 标记为已处理（带容量限制）
         {
             let mut processed = self.processed.write().await;
             processed.insert(uri.to_string());
+            if processed.len() > PROCESSED_CACHE_LIMIT {
+                processed.clear();
+                tracing::info!("已处理 URI 缓存达到上限，已清空重建");
+            }
         }
 
         tracing::info!("摘要生成完成：{}", uri);

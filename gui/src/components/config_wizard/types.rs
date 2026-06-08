@@ -169,8 +169,6 @@ pub struct ModelServiceConfig {
     pub models: Vec<String>,
     /// 超时时间（秒）
     pub timeout: u64,
-    /// 最大重试次数
-    pub max_retries: u32,
     /// 是否启用
     pub enabled: bool,
     /// 优先级
@@ -191,7 +189,6 @@ impl Default for ModelServiceConfig {
             default_model: String::new(),
             models: Vec::new(),
             timeout: 60,
-            max_retries: 3,
             enabled: true,
             priority: 0,
             show_advanced: false,
@@ -264,7 +261,6 @@ pub struct ModelServiceData {
     pub default_model: String,
     pub models: Vec<String>,
     pub timeout: u64,
-    pub max_retries: u32,
     pub enabled: bool,
     pub priority: u32,
 }
@@ -344,7 +340,6 @@ impl WizardState {
                             default_model: s.default_model.clone(),
                             models: s.models.clone(),
                             timeout: s.timeout,
-                            max_retries: s.max_retries,
                             enabled: s.enabled,
                             priority: s.priority,
                         })

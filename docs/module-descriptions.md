@@ -1,6 +1,6 @@
 # 天演模块功能说明
 
-> 本文档详细描述天演项目各模块的功能职责、公开 API 和关键实现。
+> 本文档描述天演项目各模块的功能职责、公开 API 和关键实现。
 >
 > **相关文档**：[模块关系图](./module-relationships.md) | [系统架构文档](./system-architecture.md)
 
@@ -19,43 +19,41 @@
 
 ### 1.1 模块总览
 
-Core 是天演的核心库，提供 AI Agent 的全部基础能力。无外部项目依赖，被 server 和 tauri 两个 crate 依赖。
+Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate workspace（resolver = "2"），无外部项目依赖。
 
 | 子模块 | 职责 | 关键文件 | 集成状态 |
 |--------|------|---------|---------|
-| `agent` | 智能体协调器 + Harness/Skills 子系统 + 会话状态 | coordinator.rs, session_state.rs, prompt.rs, tools.rs, harness.rs, skill_subsystem.rs, types.rs | ✅ 已集成 |
-| `common` | 通用类型（按领域拆分为子模块）、错误处理、日志 | error.rs, types/ (9个子模块), logging.rs | ✅ 已集成 |
-| `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs, storage.rs | ✅ 已集成 |
-| `context` | 上下文工程（检索 + 压缩 + 上下文管线） | pipeline.rs, retrieval/, compression/ | ✅ 已集成 |
-| `executor` | 步骤执行器 + 审批工作流 + 验证门控 + LLM-as-Judge | executor.rs, approval.rs, traits.rs, types.rs, judge.rs, verification.rs | ✅ 已集成 |
-| `knowledge` | 知识库管理（解析、分块、导入） | parser.rs, chunker/ (mod.rs, types.rs), ingestor/ (mod.rs, builder.rs), image.rs, types.rs | ❌ 未集成 |
-| `model` | 模型服务（OpenAI、兼容 API、路由器） | traits.rs, types/ (chat, embedding, vision, model_info, config, service, streaming, api_error, anthropic), openai/ (mod.rs, config.rs, client.rs, chat.rs, embedding.rs, vision.rs, stream.rs), router/ (mod.rs, builder.rs, trait_impls.rs) | ✅ 已集成 |
+| `agent` | Agent 协调器 + AgentLoop 迭代循环 + 会话状态 | coordinator.rs, builder.rs, session_state.rs, loop.rs, tool_registry.rs, tools.rs, types.rs | ✅ 已集成 |
+| `common` | 通用类型（按领域拆分）、错误处理 | error.rs, types/ | ✅ 已集成 |
+| `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
+| `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
+| `executor` | 独立工具执行函数 + 审批工作流 + 验证门控 | executor.rs, approval.rs, types.rs, judge.rs, verification.rs | ⚠️ Executor 壳已废弃 |
+| `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image.rs, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
+| `memory` | 长期记忆提取 | extractor.rs | ✅ 已集成 |
+| `model` | 模型服务（provider 实现 + 服务容器） | traits.rs, types/, provider/, services.rs | ✅ 已集成 |
 | `observability` | 可观测性存储（AgentMetrics，Agent 自省） | mod.rs | ✅ 已集成 |
-| `planner` | 任务规划器（LLM 驱动的计划生成，支持流式） | mod.rs, config.rs, context.rs, types.rs | ✅ 已集成 |
-| `scheduler` | 定时任务调度器 | task_scheduler.rs | ✅ 已集成 |
-| `session` | 会话管理（创建、持久化、消息记录） | manager.rs, types.rs | ⚠️ 占位实现 |
-| `skills` | 技能定义、执行和学习（GEPA 进化引擎） | definition.rs, executor.rs, manager.rs, types.rs, handlers/ (6 handler 文件), registry.rs, learning/ (mod.rs, types.rs, generator.rs) | ✅ 已集成 |
-| `storage` | 存储后端、VFS 和记忆提取 trait | traits.rs, types.rs, vfs/ (mod.rs, builder.rs), local/ (mod.rs, tests.rs), qdrant.rs, summary.rs, summary_service.rs, uri_mapper.rs, extractor.rs | ✅ 已集成 |
-| `tasks` | 后台任务（摘要生成、记忆提取） | summary_task.rs, memory_task.rs | ✅ 已集成 |
+| `scheduler` | 定时任务调度器 + 任务实现 | task_scheduler.rs, tasks/ | ✅ 已集成 |
+| `session` | 会话管理（创建、持久化、消息记录） | manager.rs, types.rs | ✅ 已集成 |
+| `skills` | 技能定义、执行和学习（GEPA 进化引擎） | definition.rs, executor.rs, manager.rs, handlers/, registry.rs, learning/ | ✅ 已集成 |
+| `vfs` | 虚拟文件系统、存储后端、向量存储、摘要引擎 | traits.rs, types.rs, vfs_impl.rs, vfs_builder.rs, backend/, vector/, summary/, uri_mapper.rs | ✅ 已集成 |
 
 ### 1.2 agent 子模块
 
-**职责**：Agent Loop 架构的对外接口层，管理会话状态、执行 AgentLoop 迭代循环、处理追问，支持流式与非流式两种对话模式。内部封装 ContextPipeline、AgentHarness、AgentSkills 和 AgentLoop 四个子系统。
+**职责**：Agent Loop 架构的对外接口层，管理会话状态、执行 AgentLoop 迭代循环、处理追问，支持流式与非流式两种对话模式。内部封装 ContextPipeline、AgentLoop 和 ToolRegistry 三个子系统。
 
 **核心类型**：
 
 | 类型 | 说明 |
 |------|------|
-| `Agent` | `AgentCoordinator` 的默认实现，持有 ModelService、VFS、ContextPipeline、AgentHarness、AgentSkills、AgentLoop、ToolRegistry 等组件 |
-| `AgentCoordinator` (trait) | 智能体协调器接口，定义 `process_message`、`process_message_stream`、`handle_clarification`、`initialize`、`shutdown` |
+| `Agent` | `AgentCoordinator` 的默认实现，持有 ModelService、VFS、ContextPipeline、AgentLoop、ToolRegistry 等组件 |
+| `AgentCoordinator` (trait) | Agent 协调器接口，定义 `process_message`、`process_message_stream`、`handle_clarification`、`initialize`、`shutdown` |
 | `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry） |
-| `AgentHarness` | Harness 工程子系统，封装 AgentMetrics |
-| `AgentSkills` | 技能子系统，封装 SkillExecutor + SkillRegistry + SkillLearningEngine |
-| `AgentLoop` | 智能体迭代循环（LLM 工具调用循环） |
-| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls |
+| `AgentLoop` | Agent 迭代循环（LLM 工具调用循环） |
+| `AgentLoopConfig` | AgentLoop 配置（loop_limit 默认 50） |
+| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls；注册 13 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、delegate_to_agent |
 | `SessionState` | 会话状态容器（对话历史为唯一真相源，上下文窗口、待持久化记忆） |
 | `SessionStateManager` | 多会话状态管理器（线程安全，Arc<RwLock<HashMap>>） |
-| `AgentResponse` | 智能体响应（内容、追问、Token 使用量、技能调用信息、处理时间） |
+| `AgentResponse` | Agent 响应（内容、追问、Token 使用量、技能调用信息、处理时间） |
 | `AgentStreamChunk` | 流式响应块（含 chunk_type 区分 6 种类型） |
 | `StreamChunkType` | 流式块类型：Thought / ToolCall / Observation / Answer / Error / Clarification |
 | `StreamEventSender` | 便捷构造各类 AgentStreamChunk 的辅助发送器 |
@@ -68,92 +66,91 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。无外部�
 - `process_message_stream` → 流式执行 AgentLoop（run 带 StreamEventSender）→ 通过 mpsc 通道逐块输出 AgentStreamChunk
 - `handle_clarification` → 检查 pending_clarification → 重新运行 AgentLoop
 
-**Agent 结构**：
-```rust
-pub struct Agent {
-    config: AgentConfig,
-    model_service: Arc<dyn ChatService>,
-    vfs: Arc<dyn VirtualFileSystem>,
-    context_pipeline: ContextPipeline,
-    harness: AgentHarness,
-    skills: AgentSkills,
-    state: Arc<RwLock<AgentState>>,
-    agent_loop: AgentLoop,
-    verification_gate: VerificationGate,
-    llm_judge: Option<LlmJudge>,
-}
-```
+**核心架构决策集成**：
+
+1. **StructuredMessage 持久化**：AgentLoop 每产生一条消息，实时调 `SessionManager::add_structured_message()` 落盘，工具调用消息全部持久化。
+2. **压缩锚点**：`StructuredMessage.compression_marker` 标记压缩产生的摘要消息，加载会话时反向扫描到最近 marker。
+3. **组件工具化**：`ToolRegistry` 注册 13 个 OpenAI function calling 兼容工具，`call_skill` 桥接到 `SkillExecutor`。
 
 ### 1.3 model 子模块
 
-**职责**：提供统一的模型服务接口，支持多模型路由和故障转移。
+**职责**：提供统一的模型服务接口，`ModelServices` 是 `Arc<dyn ChatService/EmbeddingService/VlmService>` 的容器，不路由、不重试。
 
 **模块组织**：
-- `model/traits.rs` — 核心服务 trait（ModelService, EmbeddingService, VlmService, VisionEncoder）
-- `model/types/` — 请求、响应和配置的类型定义，拆分为 9 个子模块（chat, embedding, vision, model_info, config, service, streaming, api_error, anthropic）
-- `model/openai/` — OpenAI 兼容 API 客户端，拆分为 6 个文件（mod.rs, config.rs, client.rs, chat.rs, embedding.rs, vision.rs, stream.rs）
-- `model/router/` — 智能模型路由器，拆分为 3 个文件（mod.rs, builder.rs, trait_impls.rs）
+- `model/traits.rs` — 核心服务 trait（ChatService, EmbeddingService, VlmService）
+- `model/types/` — 请求、响应和配置的类型定义
+- `model/provider/` — OpenAI 兼容 API 客户端实现，`pub(crate)` 访问，外部通过 `ModelServices` 使用
+- `model/services.rs` — `ModelServices`，从配置构建一组已包装（日志）服务的容器，替代旧 `ModelRouter`
 
 **核心类型**：
 
 | 类型 | 说明 |
 |------|------|
-| `ModelService` (trait) | 聊天补全服务接口 |
-| `EmbeddingService` (trait) | 文本嵌入服务接口 |
-| `VlmService` (trait) | 视觉语言模型服务接口 |
-| `VisionEncoder` (trait) | 视觉编码器接口 |
-| `ModelRouter` | 智能路由器，同时实现 ModelService + EmbeddingService + VlmService |
-| `ModelRouterBuilder` | ModelRouter 的构建器模式实现 |
-| `OpenAIClient` | OpenAI API 客户端（默认使用阿里 DashScope qwen3.5-plus） |
-| `OpenAICompatibleClient` | OpenAI 兼容 API 客户端 |
+| `ChatService` (trait) | 聊天补全服务接口（1 生产 + 5 测试 mock → 真实 seam） |
+| `EmbeddingService` (trait) | 文本嵌入服务接口（1 生产 + 1 测试 mock → 真实 seam） |
+| `VlmService` (trait) | 视觉语言模型服务接口（1 生产 + 0 测试 mock → 假设性 seam） |
+| `ModelServices` | 服务容器，打包 chat/embedding/vision 三种服务 |
+| `AsyncOpenAIClient` | OpenAI 兼容 API 客户端 |
 | `ChatCompletionRequest/Response` | 聊天补全请求和响应类型 |
 | `EmbeddingRequest/Response` | 嵌入请求和响应类型 |
+| `SharedChatService` | `Arc<dyn ChatService>` 类型别名 |
 
-### 1.4 storage 子模块
+### 1.4 vfs 子模块
 
-**职责**：提供统一的虚拟文件系统（VFS），支持分层内容存储（Abstract/Overview/Detail）和向量检索。
+**职责**：提供统一的虚拟文件系统（VFS），所有上下文（知识库、记忆、技能、规则）的统一存储与检索层。**这是天演项目的基础机制，其他设计必须妥协于它。**
 
 **模块组织**：
-- `storage/traits.rs` — 核心 trait 定义（VirtualFileSystem, StorageBackend, VectorStorage, ContentLoader）
-- `storage/types.rs` — 存储相关类型定义
-- `storage/vfs/` — 虚拟文件系统实现，拆分为 mod.rs（VirtualFileSystemImpl）和 builder.rs（VirtualFileSystemBuilder）
-- `storage/local/` — 本地文件系统存储后端，拆分为 mod.rs 和 tests.rs
-- `storage/qdrant.rs` — Qdrant 向量数据库实现
+- `vfs/traits.rs` — 核心 trait 定义（VfsCore, ContentStore, VfsSearch）
+- `vfs/types.rs` — 存储相关类型定义
+- `vfs/vfs_impl.rs` — `VirtualFileSystemImpl` 实现 + `initialize()` 基础设施初始化
+- `vfs/vfs_builder.rs` — `VirtualFileSystemBuilder` 构建器
+- `vfs/backend/traits.rs` — `StorageBackend` trait
+- `vfs/backend/local.rs` — 本地文件系统存储后端
+- `vfs/vector/qdrant.rs` — Qdrant 向量数据库实现（RRF 融合搜索）
+- `vfs/summary/engine.rs` — `SummaryEngine` 分层摘要生成
+- `vfs/uri_mapper.rs` — URI 到文件系统路径映射
 
 **核心类型**：
 
 | 类型 | 说明 |
 |------|------|
-| `VirtualFileSystem` (trait) | VFS 统一接口（CRUD、搜索、摘要） |
+| `VfsCore` (trait) | VFS 核心操作（CRUD、元数据） |
+| `ContentStore` (trait) | 分层内容读写（L0 Abstract / L1 Overview / L2 Detail） |
+| `VfsSearch` (trait) | 向量检索：查询 embed → Qdrant RRF 融合 abstract_vector + overview_vector |
 | `VirtualFileSystemImpl` | VFS 默认实现 |
 | `VirtualFileSystemBuilder` | VFS 构建器 |
-| `StorageBackend` (trait) | 存储后端接口 | 
-| `LocalStorageBackend` | 本地文件系统存储实现 |
-| `VectorStorage` (trait) | 向量存储接口 |
+| `StorageBackend` (trait) | 存储后端接口 |
+| `LocalFileBackend` | 本地文件系统存储实现 |
 | `QdrantVectorStore` | Qdrant 向量数据库实现（支持多点向量、RRF 融合搜索） |
-| `SummaryEngine` | 分层摘要生成引擎（L0: ~100 tokens, L1: ~500 tokens） |
-| `SummaryService` | 摘要生成服务（定时任务使用） |
+| `SummaryEngine` | 分层摘要生成引擎（L0: ~100 tokens, L1: ~2K tokens） |
 | `UriMapper` | URI 到文件系统路径映射 |
 
-### 1.5 planner 子模块（已废弃）
+**核心架构决策——VFS 双层摘要索引**：
 
-**职责**：原基于 LLM 的批量任务规划器（Planner-Executor 架构），已废弃。现为 `ClarificationQuestion` 类型的导出壳，保留该模块以维持向后兼容。
+采用**三层内容 + 双向量 RRF 融合**：
 
-**核心类型**：
+| 层级 | 名称 | Token | 向量 | 用途 |
+|------|------|-------|------|------|
+| L0 | Abstract | ~100 | `abstract_vector` | 向量搜索、快速过滤 |
+| L1 | Overview | ~2K | `overview_vector` | 内容导航、重排序 |
+| L2 | Detail | 无限制 | — | 完整内容，按需加载 |
 
-| 类型 | 说明 |
-|------|------|
-| `ClarificationQuestion` | 追问问题（question、reason、optional）— 唯一保留的类型 |
+`SummaryEngine` 通过 LLM 为每条 VFS 条目生成 L0/L1 摘要。检索时：查询文本 → embed → Qdrant RRF 融合搜索 `abstract_vector` + `overview_vector` → `ContentLoadStrategy::from_score()` 按分数分层加载（大于0.85→L2, 大于0.6→L1, 其他→L0）。
 
-**已移除类型**：`Planner`、`PlannerTrait`、`PlannerContext`、`PlannerMutation`、`Plan`、`Step`、`Turn`、`PlannerConfig`、`ContextManager`
+**对子系统的约束**：
+- **知识库不做 chunk**：文档完整解析后直接写入 VFS L2 Detail，SummaryEngine 生成 L0/L1 摘要，双层检索自然替代 chunk-based RAG。`Chunker` 已移除。
+- **技能渐进式披露**：技能存于 `tianyan://skill/` 命名空间。L0 Abstract 用于快速发现（`SkillManager::list_available_skills()` 读取所有技能的 abstract），L2 Detail 按需加载完整定义。
+- **图像双通道**：VLM 生成文本描述 → 文本 embedding 用于 L0/L1 检索，同时 `embed_image()` 生成 `visual_vector` 用于视觉相似度搜索。
 
-### 1.6 executor 子模块（已重构）
+### 1.5 executor 子模块（部分废弃）
 
-**职责**：原纯机械执行 Planner 生成步骤的执行器（ExecutorTrait 模式），已重构。现在提供独立的工具执行函数（`execute_read_file`、`execute_write_file`、`execute_search_code` 等），供 `ToolRegistry` 调用。仍保留 `Action` 和 `ExecutorError` 类型供 `ApprovalWorkflow` 使用。
+**职责**：独立的工具执行函数（`execute_read_file`、`execute_write_file`、`execute_search_code`、`execute_command_action`、`execute_run_tests`、`execute_verify_build`），供 `ToolRegistry` 调用。保留 `Action` 和 `ExecutorError` 类型供 `ApprovalWorkflow` 使用。
+
+> ⚠️ `Executor` 壳结构体已标记 `#[deprecated]`。`Step`、`StepResult`、`FailureHandling`、`ExecutorTrait` 等旧 Planner-Executor 架构类型已移除。
 
 **模块组织**：
-- `executor/executor.rs` — 独立执行函数（`execute_read_file`、`execute_write_file` 等）+ 标记 `#[deprecated]` 的 `Executor` 壳结构体
-- `executor/types.rs` — `Action` 和 `ExecutorError`（`Step`、`StepResult`、`FailureHandling` 已移除）
+- `executor/executor.rs` — 独立执行函数 + `#[deprecated]` 的 `Executor` 壳
+- `executor/types.rs` — `Action` 和 `ExecutorError`
 - `executor/approval.rs` — 审批工作流
 - `executor/verification.rs` — 验证门控
 - `executor/judge.rs` — LLM-as-Judge 语义验证
@@ -162,22 +159,20 @@ pub struct Agent {
 
 | 类型 | 说明 |
 |------|------|
-| `Action` | 动作定义（ReadFile / WriteFile / ExecuteCommand / SearchCode），保留供 `ApprovalWorkflow` 使用 |
+| `Action` | 动作定义（ReadFile / WriteFile / ExecuteCommand / SearchCode） |
 | `ExecutorError` | 执行器错误类型 |
 | `SecurityPolicy` | 安全策略（命令白名单/黑名单、目录限制、command_timeout） |
 | `ApprovalWorkflow` | 审批工作流（Safe/Low/Medium/High/Critical 五级风险） |
 | `VerificationGate` | 验证门控（执行后自动运行 cargo check/测试验证产出） |
 | `LlmJudge` | LLM-as-Judge（语义判断，解析 `-- JUDGMENT: PASS/FAIL/NEEDS_CHANGES`） |
 
-**已移除类型**：`Executor`、`ExecutorTrait`、`Step`、`StepResult`、`FailureHandling`
+### 1.6 context 子模块
 
-### 1.7 context 子模块
-
-**职责**：上下文工程系统，包括双层检索、对话压缩和统一上下文管线。
+**职责**：上下文工程系统，包括双层检索、对话压缩、统一上下文管线和消息组装。
 
 **子模块组织**：
-- `context/retrieval/` — 意图分析、双层向量检索、内容加载（Token 预算）、检索追踪
-- `context/compression/` — 对话摘要压缩（分层策略）、Token 估算
+- `context/retrieval/` — 意图分析、双层向量检索（DualLayerRetriever）、内容加载（ContentLoadStrategy）、检索追踪
+- `context/compression/` — 对话压缩（ContextCompressor）、Token 估算
 - `context/pipeline.rs` — `ContextPipeline`，统一上下文管线（规则注入 → 检索 → 压缩）
 - `context/assembler.rs` — `ContextAssembler`，纯函数：存储层 `StructuredMessage` → 传输层 `Message`
 
@@ -190,17 +185,27 @@ pub struct Agent {
 | `CompressionConfig` | 压缩配置（preserve_recent_messages 默认 6） |
 | `ContextAssembler` | 存储层/传输层消息格式转换（纯函数） |
 | `DualLayerRetriever` | 双层向量检索器（Intent 分析 + 向量搜索 + 内容加载） |
-| `TokenBudget` | Token 预算管理（按比例分配各内容层） |
-| `ContentLoadStrategy` | 基于分数和预算的内容加载策略 |
+| `ContentLoadStrategy` (enum) | 基于分数的内容加载策略：Full(大于0.85→L2) / Overview(0.6~0.85→L1) / Abstract(小于等于0.6→L0) |
+| `IntentAnalyzer` | 意图分析器：LLM 分析查询意图 + 目标命名空间 |
 
-**规则管线**：规则记录/提炼逻辑已从 `context/` 移至 `scheduler/tasks/`，通过 Scheduler 定时运行：
+**核心架构决策——前缀匹配原则**：
+
+`ContextAssembler::assemble()` 拼装顺序严格固定，不可变更：
+
+```
+soul → rules+memories → history(from compression_marker) → current input
+```
+
+- **固定前缀（soul + rules + memories）**：会话期间不变化，利用 LLM Provider 前缀匹配缓存，只计算一次
+- **可变后缀（history）**：compression_marker 决定拼接起点，最近 marker 之后的消息
+- **绝对禁止**：把 soul/rules/memories 放在 history 之后——破坏前缀缓存，每次请求重新计算全部 token
+
+**规则管线**：规则记录/提炼逻辑通过 Scheduler 定时运行：
 - `RuleTask` (`scheduler/tasks/rule_task.rs`) — 规则提炼的 cron 壳
 - `RuleSuggester` (`scheduler/tasks/rule_suggester.rs`) — 扫描聚类 + LLM 提炼
 - `RuleRecorder` (`scheduler/tasks/rule_recorder.rs`) — 去重 + 写入 learned rule
 
-**集成状态**：`ContextPipeline` 在 Agent 的 `process_message` 和 `process_message_stream` 中完整集成。每次处理消息时自动执行规则注入→检索→压缩流程。
-
-### 1.8 skills 子模块
+### 1.7 skills 子模块
 
 **职责**：管理 Agent 可调用的技能，包括技能定义、执行、注册、发现和学习（GEPA 进化引擎）。
 
@@ -208,20 +213,20 @@ pub struct Agent {
 - `skills/definition.rs` + `skills/types.rs` — 技能定义、参数模式和注册表
 - `skills/executor.rs` — 技能执行器（参数验证 + 安全检查 + 执行监控）
 - `skills/manager.rs` — 技能管理器
-- `skills/handlers/` — 6 个内置技能处理文件（file_read, file_write, file_delete, file_list, system_command, http_request），从原 `executor.rs` 分离
-- `skills/registry.rs` — 技能注册表工厂（`create_builtin_skills`, `register_builtin_skills`），从原 `executor.rs` 分离
-- `skills/learning/` — GEPA 进化引擎，拆分为 mod.rs（核心引擎）、types.rs（类型定义）、generator.rs（技能生成逻辑）
+- `skills/handlers/` — 6 个内置技能处理文件（file_read, file_write, file_delete, file_list, system_command, http_request）
+- `skills/registry.rs` — 技能注册表工厂（`create_builtin_skills`, `register_builtin_skills`）
+- `skills/learning/` — GEPA 进化引擎（mod.rs 核心引擎、types.rs 类型定义、generator.rs 技能生成逻辑）
 
 **核心类型**：
 
 | 类型 | 说明 |
 |------|------|
-| `SkillDefinition` | 技能定义（id、name、description、parameters、executor） |
-| `SkillExecutor` | 技能执行接口 |
+| `Skill` | 技能定义（id、name、description、parameters、handler） |
 | `SkillRegistry` | 技能注册表，支持运行时动态注册/发现/执行 |
-| `SkillType` | 技能类型：BuiltIn / Custom / Generated |
+| `SkillExecutor` | 技能执行器（参数验证 + 安全检查 + 执行监控） |
+| `SkillManager` | 技能管理器，`list_available_skills()` 读取所有技能的 abstract |
+| `SkillHandler` | 技能处理器 trait |
 | `SkillLearningEngine` | GEPA 进化引擎，从执行历史中自动提取可复用技能 |
-| `SkillExecutionResult` | 技能执行结果（success、output、error、duration） |
 | `ExecutionHistory` | 执行历史记录，用于 GEPA 引擎 |
 | `GeneratedSkill` | GEPA 引擎生成的技能 |
 
@@ -231,20 +236,18 @@ pub struct Agent {
 - **P**erfect：通过多次使用优化参数模板
 - **A**dapt：根据上下文自动调整技能执行策略
 
-### 1.9 observability 子模块
+### 1.8 observability 子模块
 
-**职责**：Agent 的可观测性存储，记录执行指标并支持 Agent 自省查询。
+**职责**：Agent 的可观测性存储，记录执行指标并支持 Agent 自省查询。模块仅一个 `mod.rs` 文件（244 行），功能自包含。
 
 **核心类型**：
 
 | 类型 | 说明 |
 |------|------|
 | `AgentMetrics` | 可观测性存储，记录 Token 消耗、成功率、规则有效性 |
-| `ExecutionRecord` | 单次执行记录（timestamp、step_name、success、error、tokens、skills_called） |
-| `TokenSummary` | Token 消耗汇总（total_input、total_output、avg_per_conversation） |
-| `SuccessRateSummary` | 成功率汇总（total_executions、successes、rate_pct） |
-| `RuleEffectivenessSummary` | 规则有效性汇总（total_injections、total_hits、relevance_pct） |
-| `HarnessHealth` | Harness 健康摘要（executions、success_rate、rule_hits、pipeline_failures） |
+| `TokenRecord` | 单次执行的 Token 消耗记录 |
+| `FailureStats` | 步骤失败统计（step_description、failure_count、last_error） |
+| `RuleHitRecord` | 规则命中记录 |
 
 **Agent 自省接口**：
 - `query_token_summary()` — Token 消耗历史和平均值
@@ -252,50 +255,49 @@ pub struct Agent {
 - `query_rule_effectiveness()` — 规则注入总数、命中数、相关性百分比
 - `query_common_failures()` — Top-10 常见失败步骤及错误信息
 - `query_harness_health()` — Harness 健康摘要
-- `record_execution()` — 记录单次执行
-- `record_rule_hit()` — 记录规则命中
-- `record_harness_failure()` — 记录 Pipeline 失败
+- `record_token_usage()` / `record_failure()` / `record_execution()` / `record_rule_hit()` — 记录接口
 
-### 1.10 其他子模块
+### 1.9 其他子模块
 
 | 子模块 | 核心类型 | 说明 |
 |--------|---------|------|
-| `config` | `TianyanConfig`, `AgentConfig`, `StorageConfig`, `ModelsConfig`, `ConfigStatus`, `WizardConfig` | 全局配置管理，支持 TOML + env，含配置向导。`AgentConfig` 含 `learned_rules_top_k`(默认5) 和 `learned_rules_max_tokens`(默认800) 字段 |
-| `common` | `TianyanError`, `ErrorCategory`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `MemoryEntry`, `AgentPath` | 通用错误（含 `ErrorCategory` 分类：is_retryable/is_user_facing/error_code）、URI、向量、消息、记忆类型。`types/` 拆分为 9 个领域子模块（uri, namespace, content, metadata, embedding, search, message, token, memory） |
-| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager` | 会话管理，支持 VFS 持久化 |
-| `storage` | `VirtualFileSystem`, `VirtualFileSystemBuilder`, `LocalStorageBackend`, `QdrantStorage`, `MemoryExtractionTrait`, `StorageBackend` (trait), `VectorStorage` (trait) | 存储后端、VFS（vfs/ 拆分为 mod + builder）和记忆提取 trait。local/ 拆分为 mod + tests |
-| `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `DocumentChunker`, `ChunkingConfig`, `ImageProcessor` | 知识库导入（完全未集成，API 端点使用独立逻辑）。chunker/ 拆分为 mod + types，ingestor/ 拆分为 mod + builder |
-| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `RuleTask`, `GcTask`, `MemoryTask`, `SummaryTask`, `RuleRecorder`, `RuleSuggester` | 定时任务调度框架 + 所有任务实现 |
+| `config` | `TianyanConfig`, `AgentConfig`, `ModelsConfig`, `ConfigStatus` | 全局配置管理，支持 TOML + env。查找顺序：`./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml` |
+| `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage` | 通用错误（禁止引入新错误类型）、URI、向量、消息、记忆类型 |
+| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager` | 会话管理，支持 VFS 持久化；`load_session_from_vfs()` 用 `compression_marker` 截断 |
+| `memory` | `MemoryExtractor`, `ExtractionConfig` | 从会话文本中提取结构化记忆的纯功能，与调度/持久化解耦 |
+| `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（代码编写完成，但未在 Agent 流程中使用）。ingestor/ 拆分为 mod + builder |
+| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `RuleTask`, `GcTask`, `MemoryTask`, `SummaryTask`, `RuleRecorder`, `RuleSuggester` | 定时任务调度框架 + 所有任务实现，位于 `scheduler/tasks/` |
+
+---
 
 ## 2. 集成状态汇总
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| agent | ✅ 完整集成 | Agent、Harness、Skills、AgentLoop、ToolRegistry、SessionState、ContextPipeline 全部集成 |
-| model | ✅ 完整集成 | ModelRouter + OpenAI 已集成 |
-| planner | ⚠️ 已废弃 | 仅保留 `ClarificationQuestion` 类型导出壳 |
-| executor | ⚠️ 已重构 | 独立执行函数 + `Action`/`ExecutorError`，`ExecutorTrait`/`Step`/`StepResult` 已移除 |
-| context | ✅ 完整集成 | ContextPipeline 在 Agent 中完整集成 |
-| skills | ✅ 完整集成 | 含 GEPA 进化引擎 |
-| observability | ✅ 完整集成 | AgentMetrics 作为 AgentHarness 的一部分 |
-| storage | ✅ 完整集成 | VFS + Local + Qdrant 多后端 |
-| tasks | ✅ 完整集成 | 已合并到 scheduler/tasks/ |
+| agent | ✅ 完整集成 | Agent、AgentLoop、ToolRegistry、SessionState、ContextPipeline 全部集成 |
+| model | ✅ 完整集成 | ModelServices + AsyncOpenAIClient 已集成；原 ModelRouter 已移除 |
+| context | ✅ 完整集成 | ContextPipeline + DualLayerRetriever + ContextAssembler 在 Agent 中完整集成 |
+| skills | ✅ 完整集成 | 含 GEPA 进化引擎，通过 call_skill 工具桥接 |
+| vfs | ✅ 完整集成 | VirtualFileSystemImpl + LocalFileBackend + QdrantVectorStore；双层摘要索引 |
 | scheduler | ✅ 完整集成 | TaskScheduler + RuleTask + MemoryTask + SummaryTask + GcTask |
 | config | ✅ 完整集成 | 配置加载器和验证器 |
 | common | ✅ 完整集成 | 错误类型和通用工具 |
-| session | ⚠️ 占位实现 | 会话持久化尚未完全实现 |
-| knowledge | ❌ 未集成 | 代码编写完成，但未在 Agent 中使用 |
+| session | ✅ 已集成 | `PersistentSessionManager` 持久化到 VFS |
+| memory | ✅ 已集成 | `MemoryExtractor` 提取结构化记忆 |
+| observability | ✅ 已集成 | AgentMetrics 提供可观测性存储和自省接口 |
+| executor | ⚠️ 部分废弃 | 独立执行函数正常使用；`Executor` 壳结构体已标记 `#[deprecated]` |
+| knowledge | ❌ 未集成 | ingestor 代码编写完成，但未在 Agent 流程中使用 |
 
-**文档版本**: 2026-05-10
-**最后更新**: 2026-05-10（全模块目录拆分：model/types → 9 子模块, model/openai → 6 文件, model/router → 3 文件, skills/executor → handlers + registry, skills/learning → 3 文件, storage/vfs → mod + builder, storage/local → mod + tests, knowledge/chunker → mod + types, knowledge/ingestor → mod + builder, executor/error → 合并到 types, planner/error → 合并到 types）
+**已删除模块**：`planner/`（Planner-Executor 架构已废弃，仅保留 `ClarificationQuestion` 类型在 agent 中导出）
+**已删除类型**：`ModelRouter`、`TokenBudget`、`DocumentChunker`、`ChunkingConfig`、`ConversationSummarizer`、`VisionEncoder`、`AgentHarness`（wrapper struct）、`AgentSkills`（wrapper struct）、`MemoryExtractionTrait`、`ContextRetriever` (trait)
 
 ---
 
-## 2. Server 模块 (tianyan-server)
+## 3. Server 模块 (tianyan-server)
 
-### 2.1 模块总览
+### 3.1 模块总览
 
-Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE 流式传输和静态文件服务。采用领域驱动设计（DDD），每个领域包含 routes/handlers/services/types 四层。
+Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE 流式传输和静态文件服务。
 
 | 子模块 | 职责 | 关键文件 |
 |--------|------|---------|
@@ -310,9 +312,9 @@ Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE �
 | `agent_builder` | Agent 构建工厂（构建 + 验证 + 降级） | agent_builder.rs |
 | `core_bridge` | Core 类型转换桥接 | core_bridge.rs |
 
-### 2.2 API 端点清单
+### 3.2 API 端点清单
 
-#### 配置向导（/api，无版本前缀）
+#### 配置向导（没有版本前缀）
 
 | 端点 | 方法 | 功能 | 前端状态 |
 |------|------|------|:---:|
@@ -365,12 +367,11 @@ Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE �
 | `/config` | PUT | 更新运行时配置 | ❌ |
 | `/config/{section}` | GET | 获取配置片段 | ❌ |
 
-### 2.3 关键组件
+### 3.3 关键组件
 
 **AppState** (`state.rs`)：
 - 持有 `Agent`、`Config`、`VFS`、`SessionManager`、`SkillRegistry`、`SkillExecutor`、`SummaryService`
-- 使用 `PlaceholderMemoryCoordinator` 和 `PlaceholderSessionManager`（标记 TODO 待与核心存储集成）
-- 支持配置热重载（`update_config` → `reload_agent`）
+- VFS 初始化分离：基础设施 → `VFS::initialize()`；应用内容（soul.md、learned 目录）→ `server/src/lib.rs::bootstrap_app_vfs()`
 
 **AgentBuilderFactory** (`agent_builder.rs`)：
 - 静态工厂类，负责 Agent 实例的创建和配置验证
@@ -383,13 +384,12 @@ Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE �
 **错误处理** (`shared/error.rs`)：
 - `ApiError` 统一错误类型（NotFound / BadRequest / Internal / Config / Agent）
 - `ErrorResponse { error: String }` 统一错误响应格式
-- 前端已适配此格式进行错误解析
 
 ---
 
-## 3. GUI 模块 (tianyan-gui)
+## 4. GUI 模块 (tianyan-gui)
 
-### 3.1 模块总览
+### 4.1 模块总览
 
 GUI 是天演的 Yew (Rust WASM) 前端，编译为 WebAssembly 在浏览器中运行，采用 Yew Reducible 模式管理全局状态。
 
@@ -405,7 +405,7 @@ GUI 是天演的 Yew (Rust WASM) 前端，编译为 WebAssembly 在浏览器中�
 | `components/config_wizard` | 配置向导组件（六步向导） | mod.rs, api.rs, types.rs |
 | `state` | 全局状态管理（Yew Reducible） | mod.rs |
 
-### 3.2 前端 API 覆盖情况
+### 4.2 前端 API 覆盖情况
 
 | 后端功能域 | 前端 API 模块 | 状态 |
 |-----------|-------------|------|
@@ -416,9 +416,9 @@ GUI 是天演的 Yew (Rust WASM) 前端，编译为 WebAssembly 在浏览器中�
 | 运行时配置 | - | ❌ 未实现 |
 | 配置向导 | `config_wizard/api` | ✅ 完整实现 |
 
-### 3.3 状态管理
+### 4.3 状态管理
 
-**AppState** 使用 Yew 的 `use_reducer` 模式，包含 14 种 Action：
+**AppState** 使用 Yew 的 `use_reducer` 模式，包含多种 Action：
 
 | Action | 说明 | 使用状态 |
 |--------|------|:---:|
@@ -430,7 +430,7 @@ GUI 是天演的 Yew (Rust WASM) 前端，编译为 WebAssembly 在浏览器中�
 | `SetMessages` | 设置消息列表 | ✅ |
 | `AddMessage` | 追加消息 | ✅ |
 | `UpdateLastMessage` | 追增最后一条消息内容 | ✅ |
-| `AppendStreamMessage` | 追加流式过程消息（Thought/ToolCall/Observation） | ✅ |
+| `AppendStreamMessage` | 追加流式过程消息 | ✅ |
 | `AppendSkillCalls` | 附加技能调用信息 | ✅ |
 | `SetStreamStatus` | 设置流状态（Idle/Streaming/Error） | ✅ |
 | `ToggleSidebar` | 切换侧边栏 | ✅ |
@@ -441,24 +441,24 @@ GUI 是天演的 Yew (Rust WASM) 前端，编译为 WebAssembly 在浏览器中�
 | `EditMessage` | 编辑指定消息内容 | ✅ |
 | `DeleteMessagesFrom` | 删除指定索引之后的消息 | ✅ |
 
-### 3.4 流式响应处理
+### 4.4 流式响应处理
 
-前端 `StreamHandler` 通过 `ReadableStream` API 处理 SSE 流式响应，支持：
+前端通过 `ReadableStream` API 处理 SSE 流式响应，支持：
 
 - **6 种 chunk_type 差异化渲染**：
-  - `Thought` → 独立消息气泡，💭 图标，"思考中"标签
-  - `ToolCall` → 独立消息气泡，🔧 图标，"工具调用"标签
-  - `Observation` → 独立消息气泡，👁️ 图标，"观察结果"标签
+  - `Thought` → 独立消息气泡，思考中标签
+  - `ToolCall` → 独立消息气泡，工具调用标签
+  - `Observation` → 独立消息气泡，观察结果标签
   - `Answer` / `Clarification` → 追加到最后一条助手消息
   - `Error` → 错误内容追加
-- **可中断**：通过 `AbortController` 实现"停止生成"
+- **可中断**：通过 `AbortController` 实现停止生成
 - **技能调用**：skill_calls 附加为调用卡片
 
 ---
 
-## 4. Tauri 模块 (tianyan-tauri)
+## 5. Tauri 模块 (tianyan-tauri)
 
-### 4.1 模块总览
+### 5.1 模块总览
 
 Tauri 是天演的桌面应用壳，负责窗口管理和服务器生命周期。
 
@@ -468,7 +468,7 @@ Tauri 是天演的桌面应用壳，负责窗口管理和服务器生命周期�
 | `server.rs` | 服务器启动封装：`start_axum_server` 和 `start_axum_server_blocking` |
 | `main.rs` | 二进制入口：调用 `tianyan_tauri_lib::run()` |
 
-### 4.2 启动参数
+### 5.2 启动参数
 
 | 参数 | 值 | 说明 |
 |------|---|------|
@@ -477,19 +477,19 @@ Tauri 是天演的桌面应用壳，负责窗口管理和服务器生命周期�
 | 健康检查间隔 | 500 毫秒 | `HEALTH_CHECK_INTERVAL` |
 | 日志目录 | `%APPDATA%/com.tianyan.app/logs/` | Windows 默认路径 |
 
-### 4.3 与其他模块的交互
+### 5.3 与其他模块的交互
 
 ```
 Tauri lib.rs::run()
     │
     ├─→ tianyan::config::TianyanConfig  (读取配置)
     ├─→ tianyan_server::start_server()  (启动 HTTP 服务器)
-    │     └─ initialize_vfs_for_app → AppState::new → axum::serve
+    │     └─ bootstrap_app_vfs → AppState::new → axum::serve
     ├─→ reqwest GET /health             (健康检查)
     └─→ Tauri WebView → gui/dist/       (加载前端)
 ```
 
 ---
 
-**文档版本**: 2026-05-30
-**最后更新**: 2026-05-30（规则管线重构：RuleRecorder/RuleSuggester 移至 scheduler/tasks/，新增 RuleTask，AgentHarness 精简为仅 AgentMetrics，删除 background_tasks，移除 context/types.rs 和 compression/summarizer.rs）
+**文档版本**: 2026-06-04
+**最后更新**: 2026-06-04（重构：storage→vfs，移除 planner/chunker/ModelRouter/TokenBudget/ConversationSummarizer/VisionEncoder/AgentHarness/AgentSkills wrapper，修正 ContentLoadStrategy→enum、L1 tokens→~2K、MemoryExtractionTrait→MemoryExtractor，反映 4 项核心架构决策，model/router+openai→provider，tasks→scheduler/tasks，executor 标注废弃，knowledge 确认未集成，session 确认已集成）

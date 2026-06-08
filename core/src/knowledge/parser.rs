@@ -177,7 +177,9 @@ impl DocumentParser for DocxParser {
                         text.push('\n');
                     }
                 }
-                _ => {}
+                _ => {
+                    tracing::debug!("DOCX parser: unhandled XML event (skipping)");
+                }
             }
         }
 
@@ -261,7 +263,9 @@ impl DocumentParser for MarkdownParser {
                     }
                     in_heading = false;
                 }
-                _ => {}
+                _ => {
+                    tracing::debug!("Markdown parser: unhandled pulldown-cmark event (skipping)");
+                }
             }
         }
 
@@ -379,6 +383,8 @@ impl CompositeParser {
             Box::new(MarkdownParser::new()),
             Box::new(TextParser::new()),
             Box::new(CodeParser::new("auto")),
+            Box::new(CsvParser::new()),
+            Box::new(XlsxParser::new()),
         ];
         Self { parsers }
     }
@@ -430,6 +436,131 @@ impl CompositeParser {
 impl Default for CompositeParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// CSV 文档解析器。
+pub struct CsvParser;
+
+impl CsvParser {
+    /// 创建新的 CSV 解析器。
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl DocumentParser for CsvParser {
+    fn parse(&self, content: &[u8], _filename: &str) -> Result<ParsedDocument> {
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(content);
+
+        let headers: Vec<String> = reader
+            .headers()
+            .map_err(|e| TianyanError::DocumentProcessing(format!("CSV 解析失败: {}", e)))?
+            .iter()
+            .map(|h| h.to_string())
+            .collect();
+
+        let mut text = String::new();
+        // 写入表头
+        text.push_str(&headers.join("\t"));
+        text.push('\n');
+
+        // 写入每行数据
+        for result in reader.records() {
+            let record = result
+                .map_err(|e| TianyanError::DocumentProcessing(format!("CSV 行解析失败: {}", e)))?;
+            let line: Vec<&str> = record.iter().collect();
+            text.push_str(&line.join("\t"));
+            text.push('\n');
+        }
+
+        Ok(ParsedDocument {
+            text,
+            doc_type: DocumentType::Data,
+            page_count: None,
+            language: None,
+            toc: vec![],
+            metadata: DocumentMetadata::default(),
+        })
+    }
+
+    fn supports_extension(&self, ext: &str) -> bool {
+        ext.eq_ignore_ascii_case("csv")
+    }
+
+    fn document_type(&self) -> DocumentType {
+        DocumentType::Data
+    }
+}
+
+/// XLSX 文档解析器。
+pub struct XlsxParser;
+
+impl XlsxParser {
+    /// 创建新的 XLSX 解析器。
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl DocumentParser for XlsxParser {
+    fn parse(&self, content: &[u8], _filename: &str) -> Result<ParsedDocument> {
+        use calamine::{open_workbook_from_rs, DataType, Reader, Xlsx};
+
+        let mut workbook: Xlsx<_> = open_workbook_from_rs(std::io::Cursor::new(content))
+            .map_err(|e| TianyanError::DocumentProcessing(format!("XLSX 打开失败: {}", e)))?;
+
+        let mut text = String::new();
+
+        // 获取工作表名称列表
+        let sheet_names = workbook.sheet_names().to_vec();
+        for sheet_name in &sheet_names {
+            if let Some(Ok(range)) = workbook.worksheet_range(sheet_name) {
+                if !text.is_empty() {
+                    text.push_str("\n---\n");
+                }
+                text.push_str(&format!("[工作表: {}]\n", sheet_name));
+
+                for row in range.rows() {
+                    let cells: Vec<String> = row
+                        .iter()
+                        .map(|cell| match cell {
+                            DataType::String(s) => s.clone(),
+                            DataType::Float(f) => f.to_string(),
+                            DataType::Int(i) => i.to_string(),
+                            DataType::Bool(b) => b.to_string(),
+                            DataType::DateTime(d) => d.to_string(),
+                            DataType::Empty => String::new(),
+                            DataType::Duration(d) => format!("{}秒", d),
+                            DataType::DateTimeIso(s) => s.clone(),
+                            DataType::DurationIso(s) => s.clone(),
+                            DataType::Error(e) => format!("[错误: {}]", e),
+                        })
+                        .collect();
+                    text.push_str(&cells.join("\t"));
+                    text.push('\n');
+                }
+            }
+        }
+
+        Ok(ParsedDocument {
+            text,
+            doc_type: DocumentType::Spreadsheet,
+            page_count: None,
+            language: None,
+            toc: vec![],
+            metadata: DocumentMetadata::default(),
+        })
+    }
+
+    fn supports_extension(&self, ext: &str) -> bool {
+        ext.eq_ignore_ascii_case("xlsx") || ext.eq_ignore_ascii_case("xls")
+    }
+
+    fn document_type(&self) -> DocumentType {
+        DocumentType::Spreadsheet
     }
 }
 

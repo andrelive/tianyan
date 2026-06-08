@@ -242,3 +242,130 @@ impl Default for AgentMetrics {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_token_record(session: &str, tokens: usize, success: bool) -> TokenRecord {
+        TokenRecord {
+            session_id: session.to_string(),
+            timestamp: Utc::now(),
+            total_tokens: tokens,
+            system_prompt_tokens: 100,
+            retrieved_tokens: 200,
+            success,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_success_rate_empty() {
+        let metrics = AgentMetrics::new();
+        let result = metrics.query_success_rate().await;
+        assert_eq!(result["total_executions"], 0);
+        assert_eq!(result["successful"], 0);
+        assert_eq!(result["success_rate_percent"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_record_execution_and_query_success_rate() {
+        let metrics = AgentMetrics::new();
+        metrics.record_execution(true).await;
+        metrics.record_execution(true).await;
+        metrics.record_execution(false).await;
+        metrics.record_execution(true).await;
+
+        let result = metrics.query_success_rate().await;
+        assert_eq!(result["total_executions"], 4);
+        assert_eq!(result["successful"], 3);
+        let rate = result["success_rate_percent"].as_f64().unwrap();
+        assert!((rate - 75.0).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn test_record_failure_and_query_common_failures() {
+        let metrics = AgentMetrics::new();
+        metrics.record_failure("read_file failed", "not found").await;
+        metrics.record_failure("read_file failed", "not found again").await;
+        metrics.record_failure("write failed", "permission denied").await;
+
+        let result = metrics.query_common_failures().await;
+        let failures = result["common_failures"].as_array().unwrap();
+        assert_eq!(failures.len(), 2);
+        assert_eq!(failures[0]["description"], "read_file failed");
+        assert_eq!(failures[0]["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_record_token_usage_and_query_summary() {
+        let metrics = AgentMetrics::new();
+        metrics.record_token_usage(make_token_record("s1", 1000, true)).await;
+        metrics.record_token_usage(make_token_record("s2", 2000, true)).await;
+        metrics.record_token_usage(make_token_record("s3", 3000, false)).await;
+
+        let result = metrics.query_token_summary().await;
+        assert_eq!(result["total_executions"], 3);
+        assert_eq!(result["total_tokens"], 6000);
+        assert_eq!(result["average_tokens_per_execution"], 2000);
+    }
+
+    #[tokio::test]
+    async fn test_token_history_truncation_at_1000() {
+        let metrics = AgentMetrics::new();
+        for i in 0..1100 {
+            metrics.record_token_usage(make_token_record("s", 1, true)).await;
+        }
+        let result = metrics.query_token_summary().await;
+        assert_eq!(result["total_executions"], 1000);
+    }
+
+    #[tokio::test]
+    async fn test_record_rule_hit_and_query_effectiveness() {
+        let metrics = AgentMetrics::new();
+        metrics.record_rule_hit(5).await;
+        metrics.record_rule_hit(3).await;
+
+        let result = metrics.query_rule_effectiveness().await;
+        assert_eq!(result["relevant_hits"], 8);
+        assert_eq!(result["irrelevant_misses"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_record_pipeline_failure() {
+        let metrics = AgentMetrics::new();
+        metrics.record_pipeline_failure().await;
+        metrics.record_pipeline_failure().await;
+
+        let health = metrics.query_harness_health().await;
+        assert_eq!(health["pipeline_failures"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_query_harness_health_aggregate() {
+        let metrics = AgentMetrics::new();
+        metrics.record_execution(true).await;
+        metrics.record_execution(true).await;
+        metrics.record_execution(false).await;
+        metrics.record_rule_hit(10).await;
+        metrics.record_token_usage(make_token_record("s1", 5000, true)).await;
+        metrics.record_pipeline_failure().await;
+
+        let health = metrics.query_harness_health().await;
+        assert_eq!(health["harness_version"], 1);
+        assert_eq!(health["executions"], 3);
+        let sr = health["success_rate_percent"].as_f64().unwrap();
+        assert!((sr - 66.666).abs() < 1.0);
+        assert_eq!(health["rules_injected"], 10);
+        assert_eq!(health["pipeline_failures"], 1);
+        assert_eq!(health["total_tokens_consumed"], 5000);
+        assert_eq!(health["avg_tokens_per_execution"], 5000);
+    }
+
+    #[tokio::test]
+    async fn test_query_common_failures_empty() {
+        let metrics = AgentMetrics::new();
+        let result = metrics.query_common_failures().await;
+        let failures = result["common_failures"].as_array().unwrap();
+        assert!(failures.is_empty());
+    }
+}

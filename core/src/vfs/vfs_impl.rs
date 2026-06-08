@@ -78,6 +78,21 @@ impl VirtualFileSystemImpl {
         &self.config
     }
 
+    /// 获取存储后端引用。
+    pub fn storage_backend(&self) -> Arc<dyn StorageBackend> {
+        self.storage.clone()
+    }
+
+    /// 获取向量存储引用。
+    pub fn vector_storage_backend(&self) -> Arc<dyn VectorStorage> {
+        self.vector_storage.clone()
+    }
+
+    /// 获取嵌入服务引用。
+    pub fn embedding_service_ref(&self) -> Option<Arc<dyn EmbeddingService>> {
+        self.embedding_service.clone()
+    }
+
     /// 从上下文条目生成向量点。
     fn create_vector_point(&self, entry: &ContextEntry) -> VectorPoint {
         VectorPoint::from_entry(entry)
@@ -196,7 +211,17 @@ impl VirtualFileSystemImpl {
 impl VfsCore for VirtualFileSystemImpl {
     async fn initialize(&self) -> Result<()> {
         self.storage.initialize().await?;
-        self.vector_storage.initialize().await?;
+
+        // 若 vector_storage 初始化失败，明确记录错误并终止启动
+        // storage.initialize() 通常仅创建目录，回滚反而复杂且危险
+        // 让调用方感知初始化失败比部分初始化更安全
+        if let Err(e) = self.vector_storage.initialize().await {
+            tracing::error!(
+                error = %e,
+                "向量存储初始化失败 —— VFS 初始化未完成，请检查 Qdrant 服务是否可达"
+            );
+            return Err(e);
+        }
 
         for &ns in ContextNamespace::ALL {
             let uri = TianyanUri::new(ns, vec![]);
@@ -264,10 +289,23 @@ impl VfsCore for VirtualFileSystemImpl {
         if !self.storage.exists(uri).await? {
             return Err(TianyanError::EntryNotFound(uri.to_string()));
         }
-        self.storage.delete_entry(uri).await?;
+
+        // 先递归收集所有子 URI（包括目录自身），统一清理向量库
+        let all_uris = self.collect_all_uris(uri).await?;
+        for child_uri in &all_uris {
+            let point_id = child_uri.to_point_id();
+            if let Err(e) = self.vector_storage.delete_point(&point_id).await {
+                tracing::warn!(error = %e, uri = %child_uri, "删除向量点失败");
+            }
+        }
+        // 删除目录自身向量
         let point_id = uri.to_point_id();
-        let _ = self.vector_storage.delete_point(&point_id).await;
-        tracing::debug!("已删除条目： {}", uri);
+        if let Err(e) = self.vector_storage.delete_point(&point_id).await {
+            tracing::warn!(error = %e, uri = %uri, "删除目录向量点失败");
+        }
+
+        self.storage.delete_entry(uri).await?;
+        tracing::debug!("已删除条目及其子条目： {}", uri);
         Ok(())
     }
 
@@ -294,8 +332,14 @@ impl VfsCore for VirtualFileSystemImpl {
         dst_entry.metadata.touch();
         self.storage.write_entry(&dst_entry).await?;
         self.storage.delete_entry(source).await?;
-        let point_id = source.to_point_id();
-        let _ = self.vector_storage.delete_point(&point_id).await;
+        // 清理源向量
+        let src_point_id = source.to_point_id();
+        let _ = self.vector_storage.delete_point(&src_point_id).await;
+        // 为目标创建向量点（使用 dst_entry 的 metadata 重建）
+        let dst_point = self.create_vector_point(&dst_entry);
+        if let Err(e) = self.vector_storage.upsert_point(&dst_point).await {
+            tracing::warn!(error = %e, destination = %destination, "创建目标向量点失败");
+        }
         tracing::debug!("已移动条目： {} -> {}", source, destination);
         Ok(())
     }
@@ -509,13 +553,16 @@ impl VfsSearch for VirtualFileSystemImpl {
             .await?;
 
         let point_id = uri.to_point_id();
+        // 保留已有的 visual_vector（图像搜索用），避免被 None 覆盖
+        let existing_visual = self.vector_storage.get_point(&point_id).await.ok()
+            .and_then(|p| p.and_then(|pt| pt.visual_vector));
         let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string());
         let point = VectorPoint {
             schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
             id: point_id,
             abstract_vector: Some(abstract_embedding.vector),
             overview_vector: Some(overview_embedding.vector),
-            visual_vector: None,
+            visual_vector: existing_visual,
             payload,
         };
         self.vector_storage.upsert_point(&point).await?;

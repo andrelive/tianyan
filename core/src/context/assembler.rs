@@ -6,7 +6,7 @@
 use crate::agent::session_state::InjectableContext;
 use crate::common::types::{
     DetailedTokenUsage, FunctionCall, Message, MessageRole, MessageTime, Part, PartTime,
-    StructuredMessage, ToolCall as CoreToolCall, ToolCallType,
+    StructuredMessage, TokenUsage, ToolCall as CoreToolCall, ToolCallType,
 };
 
 /// 上下文组装器——纯函数，无副作用。
@@ -147,10 +147,12 @@ impl ContextAssembler {
     ///
     /// 角色从 `msg.role` 直接派生。对于 Tool 消息，生成 `Part::ToolResult`；
     /// 对于其他角色，分别提取 reasoning content、text content 和 tool calls。
+    /// `token_usage` 来自 LLM 响应的实际 token 统计，为 `None` 时使用默认值。
     pub fn message_to_structured(
         msg: &Message,
         session_id: &str,
         parent_id: Option<&str>,
+        token_usage: Option<TokenUsage>,
     ) -> StructuredMessage {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let default_time = PartTime::default();
@@ -202,7 +204,12 @@ impl ContextAssembler {
             parent_id: parent_id.map(|s| s.to_string()),
             role,
             parts,
-            tokens: DetailedTokenUsage::default(),
+            tokens: token_usage.map(|tu| DetailedTokenUsage {
+                input: tu.prompt_tokens,
+                output: tu.completion_tokens,
+                total: tu.total_tokens,
+                ..Default::default()
+            }).unwrap_or_default(),
             cost: 0.0,
             model_id: None,
             time: MessageTime {
@@ -349,7 +356,7 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
         };
-        let sm = ContextAssembler::message_to_structured(&msg, "ses_1", None);
+        let sm = ContextAssembler::message_to_structured(&msg, "ses_1", None, None);
         assert_eq!(sm.role, MessageRole::Assistant);
         assert_eq!(sm.session_id, "ses_1");
         assert!(sm.parts.iter().any(|p| matches!(p, Part::Text { .. })));
@@ -431,7 +438,7 @@ mod tests {
             tool_call_id: Some("call_1".to_string()),
             reasoning_content: None,
         };
-        let sm = ContextAssembler::message_to_structured(&msg, "ses_1", None);
+        let sm = ContextAssembler::message_to_structured(&msg, "ses_1", None, None);
         assert_eq!(sm.role, MessageRole::Tool);
         assert_eq!(sm.parts.len(), 1);
         match &sm.parts[0] {

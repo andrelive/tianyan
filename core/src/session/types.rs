@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::common::types::{DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage, TianyanUri};
+use crate::common::types::{StructuredMessage, TianyanUri};
 
 /// 表示对话或交互的记忆会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +152,9 @@ pub struct SessionMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::types::{
+        DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime,
+    };
 
     #[test]
     fn test_session_creation() {

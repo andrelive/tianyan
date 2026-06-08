@@ -291,7 +291,6 @@ impl WizardConfig {
             stream_responses: self.agent.stream_responses,
             enable_thinking: self.agent.enable_thinking,
             default_top_k: self.agent.retrieval_top_k,
-            enable_verification: false,
             learned_rules_top_k: 5,
             learned_rules_max_tokens: 800,
             ..Default::default()

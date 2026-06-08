@@ -136,7 +136,7 @@ impl UriMapper {
             return Err(TianyanError::InvalidPath("无法从路径确定分段".to_string()));
         }
 
-        let category_str = segments.first().unwrap();
+        let category_str = &segments[0];
         let path_segments: Vec<String> = segments[1..].to_vec();
 
         let uri_str = if path_segments.is_empty() {

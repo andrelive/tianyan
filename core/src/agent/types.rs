@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::common::error::Result;
-use crate::common::types::TokenUsage;
+use crate::common::types::{DetailedTokenUsage, TokenUsage};
 use crate::context::RetrievalTrace;
 
 /// 追问问题
@@ -33,7 +33,8 @@ pub enum QuestionType {
 pub struct AgentState {
     pub initialized: bool,
     pub conversations_processed: usize,
-    pub total_tokens: usize,
+    /// Token 使用详情（含 input/output/reasoning/cache 明细）。
+    pub total_tokens: DetailedTokenUsage,
     pub retrievals_performed: usize,
     pub skills_executed: usize,
 }
@@ -240,5 +241,356 @@ impl StreamEventSender {
                 skill_calls: None,
             }))
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── AgentState ──────────────────────────────────────────────
+
+    #[test]
+    fn agent_state_default() {
+        let state = AgentState::default();
+        assert!(!state.initialized, "initialized 默认应为 false");
+        assert_eq!(state.conversations_processed, 0);
+        assert_eq!(state.total_tokens.total, 0);
+        assert_eq!(state.retrievals_performed, 0);
+        assert_eq!(state.skills_executed, 0);
+    }
+
+    // ── StreamChunkType ─────────────────────────────────────────
+
+    #[test]
+    fn stream_chunk_type_default_is_answer() {
+        assert_eq!(StreamChunkType::default(), StreamChunkType::Answer);
+    }
+
+    #[test]
+    fn stream_chunk_type_serde_roundtrip() {
+        let variants = [
+            StreamChunkType::Thought,
+            StreamChunkType::ToolCall,
+            StreamChunkType::Observation,
+            StreamChunkType::Answer,
+            StreamChunkType::Error,
+            StreamChunkType::Clarification,
+        ];
+        for variant in variants {
+            let json = serde_json::to_string(&variant).unwrap();
+            let deserialized: StreamChunkType = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, variant, "序列化/反序列化不匹配: {json}");
+        }
+    }
+
+    #[test]
+    fn stream_chunk_type_serialized_names() {
+        assert_eq!(
+            serde_json::to_value(StreamChunkType::Thought).unwrap(),
+            serde_json::json!("Thought")
+        );
+        assert_eq!(
+            serde_json::to_value(StreamChunkType::ToolCall).unwrap(),
+            serde_json::json!("ToolCall")
+        );
+        assert_eq!(
+            serde_json::to_value(StreamChunkType::Answer).unwrap(),
+            serde_json::json!("Answer")
+        );
+        assert_eq!(
+            serde_json::to_value(StreamChunkType::Clarification).unwrap(),
+            serde_json::json!("Clarification")
+        );
+    }
+
+    // ── AgentStreamChunk ────────────────────────────────────────
+
+    #[test]
+    fn agent_stream_chunk_creation_answer() {
+        let chunk = AgentStreamChunk {
+            delta: "你好".to_string(),
+            is_complete: false,
+            token_usage: None,
+            chunk_type: StreamChunkType::Answer,
+            skill_calls: None,
+        };
+        assert_eq!(chunk.delta, "你好");
+        assert!(!chunk.is_complete);
+        assert!(chunk.token_usage.is_none());
+        assert_eq!(chunk.chunk_type, StreamChunkType::Answer);
+        assert!(chunk.skill_calls.is_none());
+    }
+
+    #[test]
+    fn agent_stream_chunk_with_skill_calls() {
+        let calls = vec![SkillCallInfo {
+            skill_id: "test_skill".to_string(),
+            success: true,
+            execution_time_ms: 42,
+            error: None,
+        }];
+        let chunk = AgentStreamChunk {
+            delta: "调用技能".to_string(),
+            is_complete: true,
+            token_usage: Some(TokenUsage::new(10, 20)),
+            chunk_type: StreamChunkType::ToolCall,
+            skill_calls: Some(calls.clone()),
+        };
+        assert_eq!(chunk.delta, "调用技能");
+        assert!(chunk.is_complete);
+        assert_eq!(chunk.token_usage.unwrap().total_tokens, 30);
+        assert_eq!(chunk.chunk_type, StreamChunkType::ToolCall);
+        assert_eq!(chunk.skill_calls.unwrap()[0].skill_id, "test_skill");
+    }
+
+    #[test]
+    fn agent_stream_chunk_serde_roundtrip() {
+        let chunk = AgentStreamChunk {
+            delta: "思考中...".to_string(),
+            is_complete: false,
+            token_usage: None,
+            chunk_type: StreamChunkType::Thought,
+            skill_calls: None,
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.delta, "思考中...");
+        assert!(!deserialized.is_complete);
+        assert_eq!(deserialized.chunk_type, StreamChunkType::Thought);
+        assert!(deserialized.skill_calls.is_none());
+    }
+
+    #[test]
+    fn agent_stream_chunk_serde_omits_skill_calls_when_none() {
+        let chunk = AgentStreamChunk {
+            delta: "no calls".to_string(),
+            is_complete: false,
+            token_usage: None,
+            chunk_type: StreamChunkType::Answer,
+            skill_calls: None,
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        // skill_calls 为 None 时不应出现在 JSON 中
+        assert!(!json.contains("skill_calls"), "JSON 不应包含 skill_calls: {json}");
+    }
+
+    // ── AgentResponse ───────────────────────────────────────────
+
+    #[test]
+    fn agent_response_simple_creation() {
+        let resp = AgentResponse::simple("回答内容".to_string());
+        assert_eq!(resp.content, "回答内容");
+        assert!(resp.is_complete);
+        assert!(resp.retrieval_trace.is_none());
+        assert!(resp.context_uris.is_empty());
+        assert_eq!(resp.token_usage.total_tokens, 0);
+        assert!(resp.skill_calls.is_empty());
+        assert_eq!(resp.processing_time_ms, 0);
+        assert!(!resp.needs_clarification);
+        assert!(resp.clarification_questions.is_empty());
+    }
+
+    #[test]
+    fn agent_response_clarification_creation() {
+        let questions = vec![ClarificationQuestion {
+            question: "你是？".to_string(),
+            question_type: QuestionType::OpenEnded,
+            options: None,
+            required: true,
+        }];
+        let resp = AgentResponse::clarification(questions.clone(), "追问内容".to_string());
+        assert_eq!(resp.content, "追问内容");
+        assert!(resp.is_complete);
+        assert!(resp.needs_clarification);
+        assert_eq!(resp.clarification_questions.len(), 1);
+        assert_eq!(resp.clarification_questions[0].question, "你是？");
+        assert_eq!(resp.clarification_questions[0].required, true);
+    }
+
+    #[test]
+    fn agent_response_error_creation() {
+        let resp = AgentResponse::error("出错了".to_string());
+        assert_eq!(resp.content, "出错了");
+        assert!(resp.is_complete);
+        assert!(!resp.needs_clarification);
+        assert!(resp.clarification_questions.is_empty());
+    }
+
+    #[test]
+    fn agent_response_serde_roundtrip() {
+        let resp = AgentResponse::simple("测试".to_string());
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: AgentResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.content, "测试");
+        assert!(deserialized.is_complete);
+    }
+
+    // ── SkillCallInfo ───────────────────────────────────────────
+
+    #[test]
+    fn skill_call_info_serde_roundtrip() {
+        let info = SkillCallInfo {
+            skill_id: "file_ops".to_string(),
+            success: true,
+            execution_time_ms: 123,
+            error: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let deserialized: SkillCallInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.skill_id, "file_ops");
+        assert!(deserialized.success);
+        assert_eq!(deserialized.execution_time_ms, 123);
+        assert!(deserialized.error.is_none());
+    }
+
+    #[test]
+    fn skill_call_info_with_error() {
+        let info = SkillCallInfo {
+            skill_id: "fail_skill".to_string(),
+            success: false,
+            execution_time_ms: 0,
+            error: Some("权限不足".to_string()),
+        };
+        assert!(!info.success);
+        assert_eq!(info.error.unwrap(), "权限不足");
+    }
+
+    // ── ClarificationQuestion ───────────────────────────────────
+
+    #[test]
+    fn clarification_question_serde_all_types() {
+        let types = [
+            (QuestionType::OpenEnded, "OpenEnded"),
+            (QuestionType::Choice, "Choice"),
+            (QuestionType::Confirmation, "Confirmation"),
+        ];
+        for (ty, expected) in types {
+            let q = ClarificationQuestion {
+                question: "test".to_string(),
+                question_type: ty,
+                options: None,
+                required: false,
+            };
+            let json = serde_json::to_string(&q).unwrap();
+            assert!(
+                json.contains(expected),
+                "JSON {json} 应包含序列化名称 {expected}"
+            );
+            // 反序列化后检查 JSON value 中的字段（QuestionType 没有 PartialEq）
+            let deserialized: ClarificationQuestion = serde_json::from_str(&json).unwrap();
+            let serialized_again = serde_json::to_string(&deserialized).unwrap();
+            assert_eq!(
+                json, serialized_again,
+                "反序列化再序列化应得到相同 JSON"
+            );
+        }
+    }
+
+    #[test]
+    fn clarification_question_with_options() {
+        let q = ClarificationQuestion {
+            question: "选择？".to_string(),
+            question_type: QuestionType::Choice,
+            options: Some(vec!["A".to_string(), "B".to_string()]),
+            required: true,
+        };
+        let json = serde_json::to_string(&q).unwrap();
+        let deserialized: ClarificationQuestion = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.options.unwrap().len(), 2);
+        assert!(deserialized.required);
+    }
+
+    // ── StreamEventSender ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stream_event_sender_send_answer_delta() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let sender = StreamEventSender::new(tx);
+
+        sender.send_answer_delta("hello").await;
+        let msg = rx.recv().await.unwrap().unwrap();
+        assert_eq!(msg.delta, "hello");
+        assert!(!msg.is_complete);
+        assert_eq!(msg.chunk_type, StreamChunkType::Answer);
+    }
+
+    #[tokio::test]
+    async fn stream_event_sender_send_thought() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let sender = StreamEventSender::new(tx);
+
+        sender.send_thought("thinking...").await;
+        let msg = rx.recv().await.unwrap().unwrap();
+        assert_eq!(msg.delta, "thinking...");
+        assert_eq!(msg.chunk_type, StreamChunkType::Thought);
+    }
+
+    #[tokio::test]
+    async fn stream_event_sender_send_tool_call() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let sender = StreamEventSender::new(tx);
+
+        sender.send_tool_call("calling tool").await;
+        let msg = rx.recv().await.unwrap().unwrap();
+        assert_eq!(msg.delta, "calling tool");
+        assert_eq!(msg.chunk_type, StreamChunkType::ToolCall);
+    }
+
+    #[tokio::test]
+    async fn stream_event_sender_send_observation() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let sender = StreamEventSender::new(tx);
+
+        sender.send_observation("observed").await;
+        let msg = rx.recv().await.unwrap().unwrap();
+        assert_eq!(msg.delta, "observed");
+        assert_eq!(msg.chunk_type, StreamChunkType::Observation);
+    }
+
+    #[tokio::test]
+    async fn stream_event_sender_send_error() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let sender = StreamEventSender::new(tx);
+
+        sender.send_error("error!").await;
+        let msg = rx.recv().await.unwrap().unwrap();
+        assert_eq!(msg.delta, "error!");
+        assert!(msg.is_complete);
+        assert_eq!(msg.chunk_type, StreamChunkType::Error);
+    }
+
+    #[tokio::test]
+    async fn stream_event_sender_send_complete() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let sender = StreamEventSender::new(tx);
+
+        let calls = Some(vec![SkillCallInfo {
+            skill_id: "s1".to_string(),
+            success: true,
+            execution_time_ms: 10,
+            error: None,
+        }]);
+
+        sender
+            .send_complete("finished", StreamChunkType::Answer, calls)
+            .await;
+        let msg = rx.recv().await.unwrap().unwrap();
+        assert_eq!(msg.delta, "finished");
+        assert!(msg.is_complete);
+        assert_eq!(msg.chunk_type, StreamChunkType::Answer);
+        assert!(msg.skill_calls.is_some());
+    }
+
+    #[tokio::test]
+    async fn stream_event_sender_dropped_receiver() {
+        let (tx, rx) = mpsc::channel(8);
+        let sender = StreamEventSender::new(tx);
+        // 丢弃接收端
+        drop(rx);
+
+        // send 不应 panic（忽略发送错误）
+        sender.send_answer_delta("test").await;
+        // 测试通过即可
     }
 }

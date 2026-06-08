@@ -9,8 +9,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::common::error::Result;
-use crate::common::types::{AgentPath, ContextNamespace, TianyanUri};
+use crate::common::types::{AgentPath, ContentLevel, ContextNamespace, TianyanUri};
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
+use crate::vfs::VirtualFileSystem;
 
 /// 规则过时的默认天数阈值。
 const DEFAULT_RULE_STALE_DAYS: u32 = 30;
@@ -199,12 +200,14 @@ impl GcTask {
             total_docs_checked: 0,
         };
 
+        // VFS 迁移说明：docs/ 和 core/src/ 是项目源代码路径，由文件系统直接管理，
+        // 不属于 VFS 管理的应用层内容（记忆、知识库条目、技能等）。
+        // 文档扫描需要读取项目级 Markdown 文件并验证源文件是否存在，
+        // 这些操作保持使用 std::fs 访问本地文件系统。
         let docs_dir = "docs";
         let src_dir = "core/src";
 
-        // 扫描 docs/ 目录
-        let _docs_uri = TianyanUri::new(ContextNamespace::Knowledge, vec![]);
-        // 直接读取文件系统
+        // 扫描 docs/ 目录（使用 std::fs 而非 VFS，因为 docs/ 是项目源代码目录）
         match std::fs::read_dir(docs_dir) {
             Ok(entries) => {
                 for entry in entries.flatten() {
@@ -258,14 +261,14 @@ impl GcTask {
         Ok(report)
     }
 
-    /// 将质量评分写入 docs/quality/domain-grades.md。
-    async fn write_quality_report(&self, _ctx: &TaskContext) -> Result<()> {
-        let quality_dir = std::path::Path::new("docs/quality");
-        if !quality_dir.exists() {
-            std::fs::create_dir_all(quality_dir).ok();
+    /// 将质量评分写入 VFS Knowledge 命名空间下的 quality 报告中。
+    async fn write_quality_report(&self, ctx: &TaskContext) -> Result<()> {
+        let quality_uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["quality".to_string()]);
+        if !ctx.vfs.exists(&quality_uri).await.unwrap_or(false) {
+            ctx.vfs.create_directory(&quality_uri).await.ok();
         }
 
-        let report_path = quality_dir.join("domain-grades.md");
+        let report_uri = quality_uri.append("domain-grades.md");
         let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         let content = format!(
@@ -289,8 +292,8 @@ impl GcTask {
             now, now
         );
 
-        std::fs::write(&report_path, content).ok();
-        tracing::info!(path = %report_path.display(), "质量报告已更新");
+        ctx.vfs.write(&report_uri, ContentLevel::Detail, &content).await.ok();
+        tracing::info!(path = %report_uri, "质量报告已更新");
 
         Ok(())
     }

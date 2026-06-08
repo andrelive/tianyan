@@ -135,9 +135,15 @@ impl DualLayerRetriever {
         self.load_content_for_results(results).await
     }
 
-    /// 分析查询意图。
+    /// 分析查询意图，失败时返回默认意图（无 namespace 过滤的 Search 类型）。
     async fn analyze_intent(&self, query: &str) -> Result<Intent> {
-        self.intent_analyzer.analyze(query).await
+        match self.intent_analyzer.analyze(query).await {
+            Ok(intent) => Ok(intent),
+            Err(e) => {
+                tracing::warn!(error = %e, query = %query, "意图分析失败，使用默认意图回退");
+                Ok(Intent::new(query))
+            }
+        }
     }
 
     /// 执行融合搜索。

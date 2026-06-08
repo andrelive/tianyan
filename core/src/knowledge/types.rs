@@ -92,8 +92,6 @@ pub struct IngestionResult {
     pub document_id: String,
     /// 文档 URI。
     pub uri: TianyanUri,
-    /// 创建的分块数量。
-    pub chunks_created: usize,
     /// 处理的 token 数量。
     pub tokens_processed: usize,
     /// 处理时间（毫秒）。
@@ -206,8 +204,6 @@ pub struct IngestionRequest {
     pub tags: Vec<String>,
     /// 是否生成嵌入向量。
     pub generate_embeddings: bool,
-    /// 是否对长文档进行分块。
-    pub chunk_long_documents: bool,
 }
 
 impl IngestionRequest {
@@ -220,7 +216,6 @@ impl IngestionRequest {
             category: None,
             tags: Vec::new(),
             generate_embeddings: true,
-            chunk_long_documents: true,
         }
     }
 
@@ -264,8 +259,6 @@ pub struct KnowledgeMetadata {
     pub tags: Vec<String>,
     /// 语言（用于代码）。
     pub language: Option<String>,
-    /// 分块数量（如果已分块）。
-    pub chunk_count: Option<usize>,
     /// 总 token 数量。
     pub total_tokens: usize,
     /// 创建时间戳。
@@ -322,7 +315,6 @@ mod tests {
             content_hash: "abc123".to_string(),
             tags: vec!["api".to_string()],
             language: None,
-            chunk_count: Some(3),
             total_tokens: 500,
             created_at: Utc::now(),
             updated_at: Utc::now(),

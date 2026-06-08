@@ -1,10 +1,8 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use super::types::ExecutorError;
-use crate::skills::SkillExecutor;
 
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 
@@ -106,36 +104,9 @@ impl SecurityPolicy {
     }
 }
 
-/// Executor 结构体（已废弃）。
-#[deprecated(since = "0.2.0", note = "Use ToolRegistry instead")]
-pub struct Executor {
-    max_concurrency: usize,
-    skill_executor: Option<Arc<SkillExecutor>>,
-}
-
-#[allow(deprecated)]
-impl Executor {
-    /// 创建新的 Executor（已废弃）。
-    #[deprecated(since = "0.2.0", note = "Use ToolRegistry::new instead")]
-    pub fn new(max_concurrency: usize) -> Self {
-        Self {
-            max_concurrency,
-            skill_executor: None,
-        }
-    }
-
-    /// 设置技能执行器（已废弃）。
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use ToolRegistry::with_skill_executor instead"
-    )]
-    pub fn with_skill_executor(mut self, skill_executor: Arc<SkillExecutor>) -> Self {
-        self.skill_executor = Some(skill_executor);
-        self
-    }
-}
-
 /// 执行 ExecuteCommand 动作（无安全策略依赖，纯函数）。
+///
+/// 跨平台：Unix (Linux/macOS) 用 `sh -c`，Windows 用 `cmd /C`。
 pub async fn execute_command_action(
     command: &str,
     cwd: Option<&str>,
@@ -143,9 +114,16 @@ pub async fn execute_command_action(
 ) -> Result<Value, ExecutorError> {
     let timeout = timeout_secs.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS);
 
-    let mut cmd = tokio::process::Command::new("cmd");
-    cmd.arg("/C")
-        .arg(command)
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = tokio::process::Command::new("cmd");
+        c.arg("/C");
+        c
+    } else {
+        let mut c = tokio::process::Command::new("sh");
+        c.arg("-c");
+        c
+    };
+    cmd.arg(command)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -392,15 +370,8 @@ pub async fn execute_verify_build(
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_executor_new() {
-        let executor = Executor::new(5);
-        assert_eq!(executor.max_concurrency, 5);
-    }
 
     #[tokio::test]
     async fn test_execute_read_file() {
