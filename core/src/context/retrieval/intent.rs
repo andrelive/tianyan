@@ -344,7 +344,7 @@ impl IntentAnalyzer {
     }
 
     /// 分析查询并创建意图。
-    pub async fn analyze(&self, query: impl Into<String>) -> Result<Intent> {
+    pub(crate) async fn analyze(&self, query: impl Into<String>) -> Result<Intent> {
         let query = query.into();
         let mut intent = Intent::new(&query);
 
@@ -367,7 +367,7 @@ impl IntentAnalyzer {
     }
 
     /// 使用预计算向量分析查询。
-    pub fn analyze_with_vector(&self, query: impl Into<String>, vector: Vec<f32>) -> Intent {
+    pub(crate) fn analyze_with_vector(&self, query: impl Into<String>, vector: Vec<f32>) -> Intent {
         let query = query.into();
         let mut intent = Intent::new(&query);
 

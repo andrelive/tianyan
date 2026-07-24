@@ -3,12 +3,39 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// 安全模式 — 决定如何处理危险操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafetyMode {
+    /// 严格模式（默认）：对危险操作硬阻断，必须通过审批。
+    #[serde(alias = "deny")]
+    Strict,
+    /// 转换模式：将危险命令自动重写为安全等价操作
+    /// （例如 rm → mv 到回收站目录，del → move 到回收站）。
+    Transform,
+    /// 宽松模式：允许所有操作（用户自行承担风险）。
+    Permissive,
+}
+
+impl Default for SafetyMode {
+    fn default() -> Self {
+        Self::Strict
+    }
+}
+
 /// 安全配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
     /// 启用安全功能。
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// 安全模式。
+    #[serde(default)]
+    pub safety_mode: SafetyMode,
+    /// 回收站目录（SafetyMode::Transform 时使用）。
+    /// 默认为 `~/.tianyan/trash`。
+    #[serde(default = "default_trash_dir")]
+    pub trash_directory: PathBuf,
     /// 文件操作允许的目录。
     #[serde(default)]
     pub allowed_directories: Vec<PathBuf>,
@@ -30,6 +57,27 @@ pub struct SecurityConfig {
     /// 启用审计日志。
     #[serde(default = "default_true")]
     pub audit_logging: bool,
+    /// 文件读取技能最大大小（字节），默认 50MB。
+    #[serde(default = "default_skill_read_max_size")]
+    pub skill_file_read_max_size: u64,
+    /// 文件读取技能超时（秒），默认 30。
+    #[serde(default = "default_skill_read_timeout")]
+    pub skill_file_read_timeout_secs: u64,
+    /// 文件写入技能最大大小（字节），默认 10MB。
+    #[serde(default = "default_skill_write_max_size")]
+    pub skill_file_write_max_size: u64,
+    /// 文件写入技能超时（秒），默认 30。
+    #[serde(default = "default_skill_write_timeout")]
+    pub skill_file_write_timeout_secs: u64,
+    /// 文件列表技能最大条目数，默认 10000。
+    #[serde(default = "default_skill_list_max")]
+    pub skill_file_list_max_entries: usize,
+    /// HTTP 请求技能超时（秒），默认 60。
+    #[serde(default = "default_skill_http_timeout")]
+    pub skill_http_timeout_secs: u64,
+    /// 系统命令技能超时（秒），默认 300。
+    #[serde(default = "default_skill_command_timeout")]
+    pub skill_command_timeout_secs: u64,
 }
 
 fn default_true() -> bool {
@@ -40,10 +88,47 @@ fn default_max_file_size() -> u64 {
     100 * 1024 * 1024 // 100 MB
 }
 
+fn default_trash_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".tianyan")
+        .join("trash")
+}
+
+fn default_skill_read_max_size() -> u64 {
+    50 * 1024 * 1024 // 50 MB
+}
+
+fn default_skill_read_timeout() -> u64 {
+    30
+}
+
+fn default_skill_write_max_size() -> u64 {
+    10 * 1024 * 1024 // 10 MB
+}
+
+fn default_skill_write_timeout() -> u64 {
+    30
+}
+
+fn default_skill_list_max() -> usize {
+    10000
+}
+
+fn default_skill_http_timeout() -> u64 {
+    60
+}
+
+fn default_skill_command_timeout() -> u64 {
+    300
+}
+
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            safety_mode: SafetyMode::default(),
+            trash_directory: default_trash_dir(),
             allowed_directories: Vec::new(),
             blocked_directories: Vec::new(),
             allowed_commands: Vec::new(),
@@ -51,6 +136,13 @@ impl Default for SecurityConfig {
             confirm_commands: true,
             max_file_size: default_max_file_size(),
             audit_logging: true,
+            skill_file_read_max_size: default_skill_read_max_size(),
+            skill_file_read_timeout_secs: default_skill_read_timeout(),
+            skill_file_write_max_size: default_skill_write_max_size(),
+            skill_file_write_timeout_secs: default_skill_write_timeout(),
+            skill_file_list_max_entries: default_skill_list_max(),
+            skill_http_timeout_secs: default_skill_http_timeout(),
+            skill_command_timeout_secs: default_skill_command_timeout(),
         }
     }
 }

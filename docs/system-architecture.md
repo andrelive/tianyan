@@ -19,7 +19,7 @@
 
 ## 1. 系统概述
 
-天演 (Tianyan) 是一个基于 Rust 开发的本地 AI 助手桌面应用，采用 **Tauri v2 + Yew + Axum** 技术栈。
+天演 (Tianyan) 是一个基于 Rust 开发的本地 AI 助手桌面应用，采用 **Tauri v2 + React/TypeScript + Axum** 技术栈。
 
 **核心能力**：
 
@@ -43,7 +43,7 @@
 ┌─────────────────────────────────────────────────────────────┐
 │                    Tauri Desktop App                        │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │              Yew Frontend (gui/)                      │  │
+│  │              React Frontend (gui-vite/)                      │  │
 │  │  chat / sidebar / skills / settings / config_wizard   │  │
 │  └───────────────────────┬───────────────────────────────┘  │
 │                          ↓ HTTP + SSE                       │
@@ -86,11 +86,11 @@ tianyan/
 │       ├── state.rs        # AppState（持有 Agent、VFS、SessionManager）
 │       ├── agent_builder.rs # Agent 构建工厂
 │       └── lib.rs          # bootstrap_app_vfs() + 服务器启动
-├── gui/            # Yew WASM 前端
+├── gui-vite/            # React TypeScript 前端
 │   └── src/
 │       ├── api/            # API 客户端
 │       ├── components/     # UI 组件（chat/sidebar/skills/settings/config_wizard）
-│       └── state/          # Yew Reducible 全局状态
+│       └── state/          # Zustand 全局状态
 ├── tauri/          # Tauri 桌面包装
 │   └── src/
 │       ├── lib.rs          # 入口：日志→配置→启动服务器→健康检查→Tauri 窗口
@@ -135,7 +135,7 @@ VFS 是所有上下文（知识库、记忆、技能、规则）的统一存储�
 | L1 | Overview | ~2K | `overview_vector` | 内容导航、重排序 |
 | L2 | Detail | 无限制 | — | 完整内容，按需加载 |
 
-**检索流程**：查询文本 → embed → Qdrant RRF 融合搜索 `abstract_vector` + `overview_vector` → `ContentLoadStrategy::from_score()` 按分数分层加载（>0.85→L2, >0.6→L1, 其他→L0）。
+**检索流程**：查询文本 → embed → LanceDB RRF 融合搜索 `abstract_vector` + `overview_vector` → `ContentLoadStrategy::from_score()` 按分数分层加载（>0.85→L2, >0.6→L1, 其他→L0）。
 
 **此机制是项目底层基础**，其他设计必须妥协于它：
 
@@ -144,7 +144,7 @@ VFS 是所有上下文（知识库、记忆、技能、规则）的统一存储�
 - **图像双通道**：VLM 生成文本描述 → 文本 embedding 用于 L0/L1，同时 `embed_image()` 生成 `visual_vector` 用于视觉相似度搜索。
 - 所有命名空间（User、Session、Memory、Knowledge、Agent、Skill）共享同一套机制。
 
-关键文件：`core/src/vfs/traits.rs`（`VfsSearch` trait）、`core/src/vfs/vfs_impl.rs`（`search()`）、`core/src/vfs/vector/qdrant.rs`（RRF 融合）、`core/src/context/retrieval/retriever.rs`（`DualLayerRetriever`）。
+关键文件：`core/src/vfs/traits.rs`（`VfsSearch` trait）、`core/src/vfs/vfs_impl.rs`（`search()`）、`core/src/vfs/vector/lancedb.rs`（RRF 融合）、`core/src/context/retrieval/retriever.rs`（`DualLayerRetriever`）。
 
 ### 3.2 决策 2: StructuredMessage —— 核心数据结构
 
@@ -246,7 +246,7 @@ Agent :: process_message(session_id, msg)
 ### 5.1 用户对话数据流
 
 ```
-用户输入 (Yew Frontend)
+用户输入 (React Frontend)
          ↓ HTTP POST /api/v1/chat/stream (SSE)
 Axum Server → AppState.agent().process_message()
          ↓
@@ -260,7 +260,7 @@ AgentLoop 迭代循环
   └─ 重复直到 Answer 或 NeedsClarification
          ↓
 SSE stream: 6 种 chunk_type 差异化渲染
-→ Yew Frontend 展示
+→ React Frontend 展示
 ```
 
 ### 5.2 记忆持久化流程
@@ -277,10 +277,10 @@ Scheduler 定时触发
 ```
 文档/内容 → KnowledgeIngestor (解析) → SummaryEngine (L0+L1 摘要)
   → VFS write (L0/L1/L2) → EmbeddingService (向量化)
-  → Qdrant upsert (abstract_vector + overview_vector + visual_vector)
+  → LanceDB upsert (abstract_vector + overview_vector + visual_vector)
 
 查询 → EmbeddingService (embed) → VfsSearch::search()
-  → Qdrant RRF fusion (abstract + overview)
+  → LanceDB RRF fusion (abstract + overview)
   → ContentLoadStrategy::from_score() → L0/L1/L2 分层加载
 ```
 

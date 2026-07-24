@@ -10,6 +10,7 @@ use crate::model::types::{
     EmbeddingResponse, VisionRequest, VisionResponse,
 };
 
+/// 带日志记录的聊天服务包装。
 pub struct LoggedService<T: ChatService>(pub T);
 
 #[async_trait]
@@ -57,6 +58,7 @@ impl<T: ChatService> ChatService for LoggedService<T> {
     }
 }
 
+/// 带日志记录的嵌入服务包装。
 pub struct LoggedEmbeddingService<T: EmbeddingService>(pub T);
 
 #[async_trait]
@@ -111,7 +113,10 @@ impl<T: EmbeddingService> EmbeddingService for LoggedEmbeddingService<T> {
             text_len = text.len(),
             "embed_single_with_dimensions called"
         );
-        let result = self.0.embed_single_with_dimensions(model, text, dimensions).await;
+        let result = self
+            .0
+            .embed_single_with_dimensions(model, text, dimensions)
+            .await;
         match &result {
             Ok(_) => info!(model = %model, "embed_single_with_dimensions succeeded"),
             Err(e) => error!(error = %e, "embed_single_with_dimensions failed"),
@@ -152,6 +157,7 @@ impl<T: EmbeddingService> EmbeddingService for LoggedEmbeddingService<T> {
     }
 }
 
+/// 带日志记录的 VLM 服务包装。
 pub struct LoggedVlmService<T: VlmService>(pub T);
 
 #[async_trait]

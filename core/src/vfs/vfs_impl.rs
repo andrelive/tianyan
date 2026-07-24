@@ -9,11 +9,8 @@ use crate::common::types::{
     ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
 };
 use crate::model::EmbeddingService;
-use crate::vfs::backend::StorageBackend;
-use crate::vfs::traits::{
-    ContentMetadata, ContentStore, VfsCore, VfsSearch,
-    VirtualFileSystem,
-};
+use crate::vfs::backend::LocalFileBackend;
+use crate::vfs::traits::{ContentMetadata, ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
 use crate::vfs::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
 use crate::vfs::vector::VectorStorage;
 
@@ -21,7 +18,7 @@ use crate::config::StorageConfig;
 
 /// 虚拟文件系统实现。
 pub struct VirtualFileSystemImpl {
-    storage: Arc<dyn StorageBackend>,
+    storage: Arc<LocalFileBackend>,
     vector_storage: Arc<dyn VectorStorage>,
     config: StorageConfig,
     embedding_service: Option<Arc<dyn EmbeddingService>>,
@@ -31,7 +28,7 @@ pub struct VirtualFileSystemImpl {
 impl VirtualFileSystemImpl {
     /// 创建新的虚拟文件系统。
     pub fn new(
-        storage: Arc<dyn StorageBackend>,
+        storage: Arc<LocalFileBackend>,
         vector_storage: Arc<dyn VectorStorage>,
         config: StorageConfig,
     ) -> Self {
@@ -46,7 +43,7 @@ impl VirtualFileSystemImpl {
 
     /// 使用默认配置创建虚拟文件系统。
     pub fn with_defaults(
-        storage: Arc<dyn StorageBackend>,
+        storage: Arc<LocalFileBackend>,
         vector_storage: Arc<dyn VectorStorage>,
     ) -> Self {
         Self::new(storage, vector_storage, StorageConfig::default())
@@ -78,40 +75,13 @@ impl VirtualFileSystemImpl {
         &self.config
     }
 
-    /// 获取存储后端引用。
-    pub fn storage_backend(&self) -> Arc<dyn StorageBackend> {
-        self.storage.clone()
-    }
-
-    /// 获取向量存储引用。
-    pub fn vector_storage_backend(&self) -> Arc<dyn VectorStorage> {
-        self.vector_storage.clone()
-    }
-
-    /// 获取嵌入服务引用。
-    pub fn embedding_service_ref(&self) -> Option<Arc<dyn EmbeddingService>> {
-        self.embedding_service.clone()
-    }
-
     /// 从上下文条目生成向量点。
     fn create_vector_point(&self, entry: &ContextEntry) -> VectorPoint {
         VectorPoint::from_entry(entry)
     }
 
-    /// 将条目同步到向量存储。
-    async fn sync_to_vector_storage(&self, entry: &ContextEntry) -> Result<()> {
-        let point = self.create_vector_point(entry);
-        self.vector_storage.upsert_point(&point).await
-    }
-
-    /// 从向量存储中删除条目。
-    async fn remove_from_vector_storage(&self, uri: &TianyanUri) -> Result<()> {
-        let id = uri.to_point_id();
-        self.vector_storage.delete_point(&id).await
-    }
-
     /// 通过视觉嵌入搜索（用于图像相似度搜索）。
-    pub async fn find_by_visual_embedding(
+    pub(crate) async fn find_by_visual_embedding(
         &self,
         query_embedding: &[f32],
         scope: Option<&TianyanUri>,
@@ -139,7 +109,7 @@ impl VirtualFileSystemImpl {
     }
 
     /// 递归收集指定 URI 下的所有 URI。
-    pub async fn collect_all_uris(&self, uri: &TianyanUri) -> Result<Vec<TianyanUri>> {
+    pub(crate) async fn collect_all_uris(&self, uri: &TianyanUri) -> Result<Vec<TianyanUri>> {
         let mut uris = Vec::new();
         self.collect_uris_recursive(uri, &mut uris).await?;
         Ok(uris)
@@ -168,7 +138,7 @@ impl VirtualFileSystemImpl {
     }
 
     /// 获取条目的总大小（包括目录的子条目）。
-    pub async fn get_entry_size(&self, uri: &TianyanUri) -> Result<u64> {
+    pub(crate) async fn get_entry_size(&self, uri: &TianyanUri) -> Result<u64> {
         let entry = self.storage.read_entry(uri).await?;
         if entry.is_directory() {
             let children = self.storage.list_directory(uri).await?;
@@ -183,7 +153,7 @@ impl VirtualFileSystemImpl {
     }
 
     /// 检查 URI 是否有效。
-    pub fn validate_uri(uri: &TianyanUri) -> Result<()> {
+    pub(crate) fn validate_uri(uri: &TianyanUri) -> Result<()> {
         if uri.path().is_empty() {
             return Ok(());
         }
@@ -218,7 +188,7 @@ impl VfsCore for VirtualFileSystemImpl {
         if let Err(e) = self.vector_storage.initialize().await {
             tracing::error!(
                 error = %e,
-                "向量存储初始化失败 —— VFS 初始化未完成，请检查 Qdrant 服务是否可达"
+                "向量存储初始化失败 —— VFS 初始化未完成，请检查向量存储初始化（LanceDB 路径或权限）"
             );
             return Err(e);
         }
@@ -334,7 +304,9 @@ impl VfsCore for VirtualFileSystemImpl {
         self.storage.delete_entry(source).await?;
         // 清理源向量
         let src_point_id = source.to_point_id();
-        let _ = self.vector_storage.delete_point(&src_point_id).await;
+        if let Err(e) = self.vector_storage.delete_point(&src_point_id).await {
+            tracing::warn!(error = %e, source = %source, "清理源向量点失败");
+        }
         // 为目标创建向量点（使用 dst_entry 的 metadata 重建）
         let dst_point = self.create_vector_point(&dst_entry);
         if let Err(e) = self.vector_storage.upsert_point(&dst_point).await {
@@ -535,39 +507,64 @@ impl VfsSearch for VirtualFileSystemImpl {
         abstract_content: &str,
         overview_content: &str,
     ) -> Result<()> {
+        let point_id = uri.to_point_id();
+        // 保留已有的 visual_vector（图像搜索用），避免被 None 覆盖
+        let existing_visual = self
+            .vector_storage
+            .get_point(&point_id)
+            .await
+            .ok()
+            .and_then(|p| p.and_then(|pt| pt.visual_vector));
+
+        let embedding_model = self
+            .embedding_model
+            .as_deref()
+            .unwrap_or("text-embedding-3-small");
+        let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string());
+        self.index_entry(
+            uri,
+            abstract_content,
+            overview_content,
+            existing_visual,
+            payload,
+            embedding_model,
+        )
+        .await
+    }
+
+    async fn index_entry(
+        &self,
+        uri: &TianyanUri,
+        abstract_content: &str,
+        overview_content: &str,
+        visual_vector: Option<Vec<f32>>,
+        payload: EntryMetadata,
+        embedding_model: &str,
+    ) -> Result<()> {
         let embedding_service = self
             .embedding_service
             .as_ref()
             .ok_or_else(|| TianyanError::Retrieval("VFS 未配置嵌入服务".to_string()))?;
 
-        let model = self
-            .embedding_model
-            .as_deref()
-            .unwrap_or("text-embedding-3-small");
-
         let abstract_embedding = embedding_service
-            .embed_single(model, abstract_content)
+            .embed_single(embedding_model, abstract_content)
             .await?;
         let overview_embedding = embedding_service
-            .embed_single(model, overview_content)
+            .embed_single(embedding_model, overview_content)
             .await?;
 
         let point_id = uri.to_point_id();
-        // 保留已有的 visual_vector（图像搜索用），避免被 None 覆盖
-        let existing_visual = self.vector_storage.get_point(&point_id).await.ok()
-            .and_then(|p| p.and_then(|pt| pt.visual_vector));
-        let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string());
         let point = VectorPoint {
             schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
             id: point_id,
             abstract_vector: Some(abstract_embedding.vector),
             overview_vector: Some(overview_embedding.vector),
-            visual_vector: existing_visual,
+            visual_vector,
             payload,
         };
         self.vector_storage.upsert_point(&point).await?;
 
-        tracing::debug!("已更新向量：{}", uri);
+        tracing::debug!("已创建索引条目：{}", uri);
         Ok(())
     }
 }

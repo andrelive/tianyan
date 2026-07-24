@@ -18,19 +18,16 @@ pub struct StorageConfig {
     /// 清理前数据保留天数。
     #[serde(default = "default_cleanup_days")]
     pub cleanup_days: u32,
-    /// 向量存储配置（仅支持 Qdrant）。
+    /// 向量存储配置（嵌入式向量存储）。
     #[serde(default)]
     pub vector: VectorStorageConfig,
 }
 
-/// 向量存储配置（仅支持 Qdrant）。
+/// 向量存储配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorStorageConfig {
-    /// Qdrant 服务 URL。
-    #[serde(default = "default_qdrant_url")]
-    pub url: String,
-    /// 集合名称。
-    #[serde(default = "default_qdrant_collection")]
+    /// 向量集合/表名。
+    #[serde(default = "default_collection_name")]
     pub collection_name: String,
     /// 向量维度。
     #[serde(default = "default_vector_dimension")]
@@ -51,12 +48,8 @@ fn default_cleanup_days() -> u32 {
     365
 }
 
-fn default_qdrant_url() -> String {
-    "http://localhost:6334".to_string()
-}
-
-fn default_qdrant_collection() -> String {
-    "tianyan_contexts".to_string()
+fn default_collection_name() -> String {
+    "tianyan_data".to_string()
 }
 
 fn default_vector_dimension() -> usize {
@@ -78,8 +71,7 @@ impl Default for StorageConfig {
 impl Default for VectorStorageConfig {
     fn default() -> Self {
         Self {
-            url: default_qdrant_url(),
-            collection_name: default_qdrant_collection(),
+            collection_name: default_collection_name(),
             vector_dimension: default_vector_dimension(),
         }
     }
@@ -110,8 +102,7 @@ mod tests {
         assert!(!config.data_dir.as_os_str().is_empty());
         assert_eq!(config.cleanup_days, 365);
         assert!(config.auto_cleanup);
-        assert_eq!(config.vector.url, "http://localhost:6334");
-        assert_eq!(config.vector.collection_name, "tianyan_contexts");
+        assert_eq!(config.vector.collection_name, "tianyan_data");
         assert_eq!(config.vector.vector_dimension, 1536);
     }
 

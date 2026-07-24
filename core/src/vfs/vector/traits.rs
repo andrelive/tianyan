@@ -80,7 +80,13 @@ pub trait VectorStorage: Send + Sync {
         top_k: usize,
         category_filter: Option<&str>,
     ) -> Result<Vec<VectorSearchResult>> {
-        self.search_fused(query_vector, &["abstract", "overview"], top_k, category_filter, Some(0.5))
-            .await
+        self.search_fused(
+            query_vector,
+            &["abstract", "overview"],
+            top_k,
+            category_filter,
+            Some(0.5),
+        )
+        .await
     }
 }

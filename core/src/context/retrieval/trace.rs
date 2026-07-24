@@ -302,10 +302,15 @@ impl TokenStats {
 /// Token 消耗百分比。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenPercentages {
+    /// 意图分析占比。
     pub intent_analysis: f32,
+    /// L0 搜索占比。
     pub l0_search: f32,
+    /// L1 搜索占比。
     pub l1_search: f32,
+    /// 内容加载占比。
     pub content_load: f32,
+    /// 聚合步骤占比。
     pub aggregation: f32,
 }
 

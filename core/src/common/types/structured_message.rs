@@ -5,14 +5,19 @@ use super::message::MessageRole;
 /// Token 使用详情，含缓存命中信息。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DetailedTokenUsage {
+    /// 输入 Token 数。
     #[serde(default)]
     pub input: usize,
+    /// 输出 Token 数。
     #[serde(default)]
     pub output: usize,
+    /// 推理 Token 数。
     #[serde(default)]
     pub reasoning: usize,
+    /// 缓存命中统计。
     #[serde(default)]
     pub cache: CacheUsage,
+    /// 总 Token 数。
     #[serde(default)]
     pub total: usize,
 }
@@ -20,8 +25,10 @@ pub struct DetailedTokenUsage {
 /// 缓存 Token 统计。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CacheUsage {
+    /// 读取缓存 Token 数。
     #[serde(default)]
     pub read: usize,
+    /// 写入缓存 Token 数。
     #[serde(default)]
     pub write: usize,
 }
@@ -29,8 +36,10 @@ pub struct CacheUsage {
 /// Part 级别的时间戳（毫秒）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartTime {
+    /// 开始时间（毫秒）。
     #[serde(default)]
     pub start: i64,
+    /// 结束时间（毫秒）。
     #[serde(default)]
     pub end: i64,
 }
@@ -38,8 +47,10 @@ pub struct PartTime {
 /// Message 级别的时间戳。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessageTime {
+    /// 创建时间戳。
     #[serde(default)]
     pub created: i64,
+    /// 完成时间戳。
     #[serde(default)]
     pub completed: i64,
 }
@@ -48,30 +59,45 @@ pub struct MessageTime {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Part {
+    /// 文本内容。
     #[serde(rename = "text")]
     Text {
+        /// 文本内容。
         text: String,
+        /// 时间戳。
         #[serde(default)]
         time: PartTime,
     },
+    /// 推理内容。
     #[serde(rename = "reasoning")]
     Reasoning {
+        /// 推理文本。
         text: String,
+        /// 时间戳。
         #[serde(default)]
         time: PartTime,
     },
+    /// 工具调用。
     #[serde(rename = "tool_call")]
     ToolCall {
+        /// 调用 ID。
         id: String,
+        /// 工具名称。
         name: String,
+        /// 调用参数。
         arguments: String,
+        /// 时间戳。
         #[serde(default)]
         time: PartTime,
     },
+    /// 工具执行结果。
     #[serde(rename = "tool_result")]
     ToolResult {
+        /// 对应的工具调用 ID。
         tool_call_id: String,
+        /// 执行结果内容。
         content: String,
+        /// 时间戳。
         #[serde(default)]
         time: PartTime,
     },
@@ -80,22 +106,33 @@ pub enum Part {
 /// 面向持久化的结构化消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StructuredMessage {
+    /// 消息唯一 ID。
     pub id: String,
+    /// 父消息 ID。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub parent_id: Option<String>,
+    /// 消息角色。
     pub role: MessageRole,
+    /// 内容块列表。
     pub parts: Vec<Part>,
+    /// Token 使用详情。
     #[serde(default)]
     pub tokens: DetailedTokenUsage,
+    /// 成本（美元）。
     #[serde(default)]
     pub cost: f64,
+    /// 模型 ID。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub model_id: Option<String>,
+    /// 时间戳信息。
     #[serde(default)]
     pub time: MessageTime,
+    /// 会话 ID。
     pub session_id: String,
+    /// 完成原因。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub finish: Option<String>,
+    /// 会话压缩标记。
     #[serde(default)]
     pub compression_marker: bool,
 }
@@ -111,13 +148,29 @@ mod tests {
             parent_id: Some("msg-0".to_string()),
             role: MessageRole::Assistant,
             parts: vec![
-                Part::Reasoning { text: "I need to read the file".to_string(), time: PartTime::default() },
-                Part::ToolCall { id: "call-1".to_string(), name: "read_file".to_string(), arguments: r#"{"path":"foo.rs"}"#.to_string(), time: PartTime::default() },
+                Part::Reasoning {
+                    text: "I need to read the file".to_string(),
+                    time: PartTime::default(),
+                },
+                Part::ToolCall {
+                    id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path":"foo.rs"}"#.to_string(),
+                    time: PartTime::default(),
+                },
             ],
-            tokens: DetailedTokenUsage { input: 100, output: 50, total: 150, ..Default::default() },
+            tokens: DetailedTokenUsage {
+                input: 100,
+                output: 50,
+                total: 150,
+                ..Default::default()
+            },
             cost: 0.001,
             model_id: Some("gpt-4".to_string()),
-            time: MessageTime { created: 1000, completed: 2000 },
+            time: MessageTime {
+                created: 1000,
+                completed: 2000,
+            },
             session_id: "ses-1".to_string(),
             finish: Some("stop".to_string()),
             compression_marker: false,
@@ -143,7 +196,10 @@ mod tests {
     fn test_compression_marker_default_false() {
         let json = r#"{"id":"m1","role":"user","parts":[],"session_id":"s1"}"#;
         let sm: StructuredMessage = serde_json::from_str(json).unwrap();
-        assert!(!sm.compression_marker, "compression_marker should default to false");
+        assert!(
+            !sm.compression_marker,
+            "compression_marker should default to false"
+        );
     }
 
     #[test]
@@ -152,7 +208,10 @@ mod tests {
             id: "cmp-1".to_string(),
             parent_id: None,
             role: MessageRole::System,
-            parts: vec![Part::Text { text: "Summary".to_string(), time: PartTime::default() }],
+            parts: vec![Part::Text {
+                text: "Summary".to_string(),
+                time: PartTime::default(),
+            }],
             tokens: DetailedTokenUsage::default(),
             cost: 0.0,
             model_id: None,
@@ -169,7 +228,10 @@ mod tests {
 
     #[test]
     fn test_part_text_serialization() {
-        let part = Part::Text { text: "Hello".to_string(), time: PartTime::default() };
+        let part = Part::Text {
+            text: "Hello".to_string(),
+            time: PartTime::default(),
+        };
         let json = serde_json::to_string(&part).unwrap();
         assert!(json.contains("\"type\":\"text\""));
         assert!(json.contains("\"text\":\"Hello\""));
@@ -192,7 +254,12 @@ mod tests {
         assert!(json.contains("\"type\":\"tool_call\""));
         let restored: Part = serde_json::from_str(&json).unwrap();
         match restored {
-            Part::ToolCall { id, name, arguments, .. } => {
+            Part::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } => {
                 assert_eq!(id, "tc-1");
                 assert_eq!(name, "execute_command");
                 assert_eq!(arguments, r#"{"cmd":"ls"}"#);
@@ -212,7 +279,11 @@ mod tests {
         assert!(json.contains("\"type\":\"tool_result\""));
         let restored: Part = serde_json::from_str(&json).unwrap();
         match restored {
-            Part::ToolResult { tool_call_id, content, .. } => {
+            Part::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } => {
                 assert_eq!(tool_call_id, "tc-1");
                 assert_eq!(content, "result data");
             }

@@ -14,12 +14,12 @@ use tokio::time::timeout;
 // 内部 crate
 use tianyan::agent::AgentCoordinator;
 use tianyan::config::TianyanConfig;
+use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
+use tianyan::memory::{ExtractionConfig, MemoryExtractor};
 use tianyan::session::{PersistentSessionManager, SessionManager};
 use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
 };
-use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
-use tianyan::memory::{ExtractionConfig, MemoryExtractor};
 use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
@@ -78,10 +78,20 @@ impl AppState {
         config: TianyanConfig,
         vfs: Arc<VirtualFileSystemImpl>,
     ) -> TianyanResult<Self> {
-
         // 初始化技能注册表和执行器
         let mut skill_registry = SkillRegistry::new();
-        let skill_config = ExecutorConfig::new();
+        let skill_config = {
+            let sec = &config.security;
+            let mut cfg = ExecutorConfig::new();
+            cfg.skill_file_read_max_size = sec.skill_file_read_max_size;
+            cfg.skill_file_read_timeout_secs = sec.skill_file_read_timeout_secs;
+            cfg.skill_file_write_max_size = sec.skill_file_write_max_size;
+            cfg.skill_file_write_timeout_secs = sec.skill_file_write_timeout_secs;
+            cfg.skill_file_list_max_entries = sec.skill_file_list_max_entries;
+            cfg.skill_http_timeout_secs = sec.skill_http_timeout_secs;
+            cfg.skill_command_timeout_secs = sec.skill_command_timeout_secs;
+            cfg
+        };
         register_builtin_skills(&mut skill_registry, &skill_config);
         let skill_registry = Arc::new(RwLock::new(skill_registry));
         let skill_executor = Arc::new(SkillExecutor::new(skill_registry.clone(), skill_config));
@@ -223,12 +233,23 @@ impl AppState {
         })
         .map_err(|e| TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
 
+        let chat_model = config
+            .models
+            .resolve(tianyan::config::ModelCapability::Chat)
+            .map(|r| r.model)
+            .unwrap_or_default();
+        let embedding_model = config
+            .models
+            .resolve(tianyan::config::ModelCapability::TextEmbedding)
+            .map(|r| r.model)
+            .unwrap_or_default();
+
         // 创建 SummaryEngine
         let summary_engine = SummaryEngine::new(
             model_services.chat,
             model_services.embedding,
-            &config.models.default_chat_model,
-            &config.models.default_embedding_model,
+            &chat_model,
+            &embedding_model,
         );
 
         Ok(Arc::new(summary_engine))
@@ -238,9 +259,7 @@ impl AppState {
     ///
     /// # Returns
     /// * `TianyanResult<Arc<MemoryExtractor>>` - 记忆提取器实例
-    pub fn create_memory_extractor(
-        &self,
-    ) -> TianyanResult<Arc<MemoryExtractor>> {
+    pub fn create_memory_extractor(&self) -> TianyanResult<Arc<MemoryExtractor>> {
         let config = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async { self.config.read().await.clone() })
         });
@@ -251,7 +270,19 @@ impl AppState {
         })
         .map_err(|e| TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
 
-        let extractor = MemoryExtractor::new(model_services.chat, ExtractionConfig::default());
+        let chat_model = config
+            .models
+            .resolve(tianyan::config::ModelCapability::Chat)
+            .map(|r| r.model)
+            .unwrap_or_default();
+
+        let extractor = MemoryExtractor::new(
+            model_services.chat,
+            ExtractionConfig {
+                model: chat_model,
+                ..ExtractionConfig::default()
+            },
+        );
         Ok(Arc::new(extractor))
     }
 
@@ -267,19 +298,34 @@ impl AppState {
         })
         .map_err(|e| TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
 
-        let vfs = &self.vfs;
-        let storage = vfs.storage_backend();
-        let vector_storage = vfs.vector_storage_backend();
+        let vfs: Arc<dyn tianyan::vfs::VirtualFileSystem> = self.vfs.clone();
+
+        let chat_model = config
+            .models
+            .resolve(tianyan::config::ModelCapability::Chat)
+            .map(|r| r.model)
+            .unwrap_or_default();
+        let embedding_model = config
+            .models
+            .resolve(tianyan::config::ModelCapability::TextEmbedding)
+            .or_else(|| config.models.resolve(tianyan::config::ModelCapability::MultimodalEmbedding))
+            .map(|r| r.model)
+            .unwrap_or_default();
+        let vision_model = config
+            .models
+            .resolve(tianyan::config::ModelCapability::Vision)
+            .map(|r| r.model)
+            .unwrap_or_default();
 
         let ingestor = KnowledgeIngestor::new(
             IngestorConfig::new()
-                .with_embedding_model(&config.models.default_embedding_model)
-                .with_summary_model(&config.models.default_chat_model),
+                .with_embedding_model(&embedding_model)
+                .with_summary_model(&chat_model)
+                .with_vision_model(&vision_model),
             model_services.chat,
             model_services.embedding,
             model_services.vision,
-            storage,
-            vector_storage,
+            vfs,
         );
         Ok(ingestor)
     }

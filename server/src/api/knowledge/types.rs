@@ -5,10 +5,13 @@ use serde_json::Value;
 #[derive(Debug, Deserialize)]
 pub struct IngestRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 来源类型
     pub source_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 标签列表
     pub tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 附加元数据
     pub metadata: Option<Value>,
 }
 
@@ -43,46 +46,65 @@ impl IngestRequest {
 /// 摄入文件响应
 #[derive(Debug, Serialize)]
 pub struct IngestResponse {
+    /// 是否成功
     pub success: bool,
+    /// 任务标识
     pub job_id: String,
+    /// 响应消息
     pub message: String,
+    /// 文件处理结果列表
     pub files: Vec<FileIngestResult>,
 }
 
 /// 单个文件摄入结果
 #[derive(Debug, Serialize)]
 pub struct FileIngestResult {
+    /// 文件名
     pub filename: String,
+    /// 处理状态
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 错误信息
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 文档标识
     pub document_id: Option<String>,
 }
 
 /// 摄入状态响应
 #[derive(Debug, Serialize)]
 pub struct IngestStatusResponse {
+    /// 任务标识
     pub job_id: String,
+    /// 任务状态
     pub status: String,
+    /// 处理进度百分比
     pub progress: f32,
+    /// 总文件数
     pub total_files: u32,
+    /// 已处理文件数
     pub processed_files: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 错误信息
     pub error: Option<String>,
 }
 
 /// 检索请求查询参数
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
+    /// 搜索查询字符串
     pub q: String,
     #[serde(default = "default_limit")]
+    /// 返回结果数量上限
     pub limit: usize,
     #[serde(default)]
+    /// 偏移量
     pub offset: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 过滤条件
     pub filter: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 会话标识
     pub session_id: Option<String>,
 }
 
@@ -110,21 +132,31 @@ impl SearchQuery {
 /// 检索响应
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
+    /// 搜索查询字符串
     pub query: String,
+    /// 搜索结果列表
     pub results: Vec<SearchResult>,
+    /// 结果总数
     pub total: usize,
+    /// 返回数量上限
     pub limit: usize,
+    /// 偏移量
     pub offset: usize,
 }
 
 /// 单个检索结果
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
+    /// 文档标识
     pub id: String,
+    /// 匹配内容
     pub content: String,
+    /// 来源信息
     pub source: String,
+    /// 相关性评分
     pub score: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 结果元数据
     pub metadata: Option<SearchResultMetadata>,
 }
 
@@ -132,19 +164,25 @@ pub struct SearchResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResultMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 文档标题
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 文档 URL
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 时间戳
     pub timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 标签列表
     pub tags: Option<Vec<String>>,
 }
 
 /// 检索建议响应
 #[derive(Debug, Serialize)]
 pub struct SearchSuggestionsResponse {
+    /// 搜索查询字符串
     pub query: String,
+    /// 建议列表
     pub suggestions: Vec<String>,
 }
 

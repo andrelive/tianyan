@@ -2,73 +2,51 @@
 //!
 //! 提供配置验证功能，用于配置向导和配置状态检测。
 
-use crate::config::{AgentConfig, ModelServiceConfig, ModelsConfig, StorageConfig};
-
-/// 配置验证错误。
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConfigValidationError {
-    /// 配置文件不存在。
-    ConfigNotFound,
-    /// 缺少必要字段。
-    MissingField(String),
-    /// 字段值无效。
-    InvalidValue(String, String),
-    /// 模型服务配置错误。
-    ModelServiceError(String),
-    /// 存储配置错误。
-    StorageError(String),
-    /// 智能体配置错误。
-    AgentError(String),
-}
-
-impl std::fmt::Display for ConfigValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigValidationError::ConfigNotFound => write!(f, "未找到配置文件"),
-            ConfigValidationError::MissingField(field) => write!(f, "缺少必要字段：{}", field),
-            ConfigValidationError::InvalidValue(field, reason) => {
-                write!(f, "字段 '{}' 的值无效：{}", field, reason)
-            }
-            ConfigValidationError::ModelServiceError(msg) => write!(f, "模型服务配置错误：{}", msg),
-            ConfigValidationError::StorageError(msg) => write!(f, "存储配置错误：{}", msg),
-            ConfigValidationError::AgentError(msg) => write!(f, "智能体配置错误：{}", msg),
-        }
-    }
-}
-
-impl std::error::Error for ConfigValidationError {}
+use crate::common::error::TianyanError;
+use crate::config::{AgentConfig, ModelsConfig, ProviderConfig, StorageConfig};
 
 /// 配置验证结果。
-pub type ValidationResult = Result<(), Vec<ConfigValidationError>>;
+pub type ValidationResult = Result<(), Vec<TianyanError>>;
 
 /// 验证完整的模型配置。
 pub fn validate_models_config(config: &ModelsConfig) -> ValidationResult {
     let mut errors = Vec::new();
 
-    // 检查是否有模型服务
-    if config.services.is_empty() {
-        errors.push(ConfigValidationError::ModelServiceError(
-            "至少需要配置一个模型服务".to_string(),
+    // 检查是否有模型提供商
+    if config.providers.is_empty() {
+        errors.push(TianyanError::ModelService(
+            "至少需要配置一个模型提供商".to_string(),
         ));
     }
 
-    // 验证每个服务
-    for (idx, service) in config.services.iter().enumerate() {
-        if let Err(e) = validate_model_service(service) {
-            errors.push(ConfigValidationError::ModelServiceError(format!(
-                "服务 {} ({}): {}",
-                idx + 1,
-                service.name,
-                e
+    // 验证每个提供商
+    for provider in &config.providers {
+        if let Err(e) = validate_provider(provider) {
+            errors.push(TianyanError::ModelService(format!(
+                "提供商 '{}': {}",
+                provider.name, e
             )));
         }
     }
 
-    // 检查默认聊天模型是否设置
-    if config.default_chat_model.is_empty() {
-        errors.push(ConfigValidationError::MissingField(
-            "models.default_chat_model".to_string(),
-        ));
+    // 检查 preferences 引用的 provider + model 是否有效
+    for (label, pref) in [
+        ("chat", &config.preferences.chat),
+        ("embedding", &config.preferences.embedding),
+        ("vision", &config.preferences.vision),
+    ] {
+        if let Some(r) = pref {
+            if !config
+                .providers
+                .iter()
+                .any(|p| p.name == r.provider && p.models.iter().any(|m| m.name == r.model))
+            {
+                errors.push(TianyanError::ModelService(format!(
+                    "preferences.{} 引用的模型 '{}' (提供商 '{}') 不存在",
+                    label, r.model, r.provider
+                )));
+            }
+        }
     }
 
     if errors.is_empty() {
@@ -78,9 +56,9 @@ pub fn validate_models_config(config: &ModelsConfig) -> ValidationResult {
     }
 }
 
-/// 验证单个模型服务配置（委托给 ModelServiceConfig::validate）。
-pub fn validate_model_service(service: &ModelServiceConfig) -> Result<(), String> {
-    service.validate()
+/// 验证单个模型提供商配置（委托给 ProviderConfig::validate）。
+pub fn validate_provider(provider: &ProviderConfig) -> Result<(), String> {
+    provider.validate()
 }
 
 /// 验证存储配置。
@@ -89,29 +67,25 @@ pub fn validate_storage_config(config: &StorageConfig) -> ValidationResult {
 
     // 检查数据目录
     if config.data_dir.as_os_str().is_empty() {
-        errors.push(ConfigValidationError::MissingField(
-            "storage.data_dir".to_string(),
-        ));
+        errors.push(TianyanError::InvalidConfig {
+            key: "storage.data_dir".to_string(),
+            message: "缺少必要字段".to_string(),
+        });
     }
 
     // 检查向量存储配置
-    if config.vector.url.is_empty() {
-        errors.push(ConfigValidationError::MissingField(
-            "storage.vector.url".to_string(),
-        ));
-    }
-
     if config.vector.collection_name.is_empty() {
-        errors.push(ConfigValidationError::MissingField(
-            "storage.vector.collection_name".to_string(),
-        ));
+        errors.push(TianyanError::InvalidConfig {
+            key: "storage.vector.collection_name".to_string(),
+            message: "缺少必要字段".to_string(),
+        });
     }
 
     if config.vector.vector_dimension == 0 {
-        errors.push(ConfigValidationError::InvalidValue(
-            "storage.vector.vector_dimension".to_string(),
-            "必须大于 0".to_string(),
-        ));
+        errors.push(TianyanError::InvalidConfig {
+            key: "storage.vector.vector_dimension".to_string(),
+            message: "必须大于 0".to_string(),
+        });
     }
 
     if errors.is_empty() {
@@ -125,7 +99,7 @@ pub fn validate_storage_config(config: &StorageConfig) -> ValidationResult {
 pub fn validate_agent_config(config: &AgentConfig) -> ValidationResult {
     let mut errors = Vec::new();
     if let Err(e) = config.validate() {
-        errors.push(ConfigValidationError::AgentError(e));
+        errors.push(TianyanError::Config(format!("智能体配置错误：{}", e)));
     }
     if errors.is_empty() {
         Ok(())
@@ -135,97 +109,86 @@ pub fn validate_agent_config(config: &AgentConfig) -> ValidationResult {
 }
 
 /// 将验证错误转换为字符串列表。
-pub fn validation_errors_to_strings(errors: Vec<ConfigValidationError>) -> Vec<String> {
+pub fn validation_errors_to_strings(errors: Vec<TianyanError>) -> Vec<String> {
     errors.iter().map(|e| e.to_string()).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ModelServiceConfig, ModelServiceType};
-    use std::collections::HashMap;
+    use crate::config::{ModelCapability, ModelEntry};
+
+    fn make_model(name: &str, caps: Vec<ModelCapability>) -> ModelEntry {
+        ModelEntry {
+            name: name.to_string(),
+            capabilities: caps,
+        }
+    }
 
     #[test]
-    fn test_validate_model_service_valid() {
-        let service = ModelServiceConfig {
+    fn test_validate_provider_valid() {
+        let provider = ProviderConfig {
             name: "test".to_string(),
-            service_type: ModelServiceType::OpenAI,
             endpoint: "https://api.example.com".to_string(),
             api_key: Some("sk-test".to_string()),
-            default_model: "gpt-4".to_string(),
-            models: vec!["gpt-4".to_string()],
+            models: vec![make_model("gpt-4", vec![ModelCapability::Chat])],
             timeout: 60,
             enabled: true,
-            priority: 0,
-            headers: HashMap::new(),
+            headers: std::collections::HashMap::new(),
         };
-
-        assert!(validate_model_service(&service).is_ok());
+        assert!(validate_provider(&provider).is_ok());
     }
 
     #[test]
-    fn test_validate_model_service_empty_name() {
-        let service = ModelServiceConfig {
+    fn test_validate_provider_empty_name() {
+        let provider = ProviderConfig {
             name: "".to_string(),
-            service_type: ModelServiceType::OpenAI,
             endpoint: "https://api.example.com".to_string(),
             api_key: None,
-            default_model: "gpt-4".to_string(),
-            models: vec![],
+            models: vec![make_model("gpt-4", vec![ModelCapability::Chat])],
             timeout: 60,
             enabled: true,
-            priority: 0,
-            headers: HashMap::new(),
+            headers: std::collections::HashMap::new(),
         };
-
-        assert!(validate_model_service(&service).is_err());
+        assert!(validate_provider(&provider).is_err());
     }
 
     #[test]
-    fn test_validate_model_service_invalid_url() {
-        let service = ModelServiceConfig {
+    fn test_validate_provider_no_models() {
+        let provider = ProviderConfig {
             name: "test".to_string(),
-            service_type: ModelServiceType::OpenAI,
-            endpoint: "ftp://api.example.com".to_string(),
+            endpoint: "https://api.example.com".to_string(),
             api_key: None,
-            default_model: "gpt-4".to_string(),
             models: vec![],
             timeout: 60,
             enabled: true,
-            priority: 0,
-            headers: HashMap::new(),
+            headers: std::collections::HashMap::new(),
         };
-
-        assert!(validate_model_service(&service).is_err());
+        assert!(validate_provider(&provider).is_err());
     }
 
     #[test]
-    fn test_validate_models_config_empty_services() {
+    fn test_validate_models_config_empty_providers() {
         let config = ModelsConfig {
-            default_chat_model: "gpt-4".to_string(),
-            default_embedding_model: "".to_string(),
-            default_vision_model: "".to_string(),
-            services: vec![],
+            providers: vec![],
+            preferences: Default::default(),
         };
-
         let result = validate_models_config(&config);
         assert!(result.is_err());
-        let errors = result.unwrap_err();
-        assert!(errors
-            .iter()
-            .any(|e| matches!(e, ConfigValidationError::ModelServiceError(_))));
     }
 
     #[test]
     fn test_validation_errors_to_strings() {
         let errors = vec![
-            ConfigValidationError::ConfigNotFound,
-            ConfigValidationError::MissingField("test".to_string()),
+            TianyanError::Config("未找到配置文件".to_string()),
+            TianyanError::InvalidConfig {
+                key: "test".to_string(),
+                message: "缺少必要字段".to_string(),
+            },
         ];
-
         let strings = validation_errors_to_strings(errors);
         assert_eq!(strings.len(), 2);
-        assert_eq!(strings[0], "未找到配置文件");
-        assert_eq!(strings[1], "缺少必要字段：test");
+        assert_eq!(strings[0], "配置错误：未找到配置文件");
+        assert_eq!(strings[1], "'test' 的配置值无效：缺少必要字段");
     }
 }

@@ -2,6 +2,6 @@
 
 mod engine;
 
-pub use engine::{
-    MockSummaryEngine, SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
-};
+#[cfg(test)]
+pub use engine::MockSummaryEngine;
+pub use engine::{SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT};

@@ -124,12 +124,13 @@ use crate::agent::types::{
     AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
     StreamChunkType, StreamEventSender,
 };
-use crate::common::error::{Result, TianyanError};
+use crate::common::error::Result;
 use crate::common::types::{Message, StructuredMessage, TokenUsage};
 use crate::config::AgentConfig;
 use crate::context::{ContextAssembler, ContextPipeline};
 use crate::model::ChatService;
 use crate::observability::AgentMetrics;
+use crate::observability::TokenRecord;
 use crate::session::{Session, SessionManager};
 use crate::skills::{SkillExecutor, SkillLearningEngine, SkillRegistry};
 use crate::vfs::VirtualFileSystem;
@@ -141,34 +142,35 @@ const MIN_MESSAGES_BEFORE_COMPRESSION: usize = 6;
 #[async_trait]
 pub trait AgentCoordinator: Send + Sync {
     /// 处理用户消息。
-    async fn process_message(
-        &self,
-        session_id: &str,
-        message: &str,
-    ) -> Result<AgentResponse>;
+    /// - `model` — 可选指定模型，None 时使用默认配置。
+    async fn process_message(&self, session_id: &str, message: &str, model: Option<&str>) -> Result<AgentResponse>;
 
     /// 处理用户消息（流式响应）。
+    /// - `model` — 可选指定模型，None 时使用默认配置。
     async fn process_message_stream(
         &self,
         session_id: &str,
         message: &str,
+        model: Option<&str>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
 
     /// 处理用户对追问的回答。
-    async fn handle_clarification(
-        &self,
-        session_id: &str,
-        answers: &str,
-    ) -> Result<AgentResponse>;
+    async fn handle_clarification(&self, session_id: &str, answers: &str) -> Result<AgentResponse>;
 
+    /// 初始化智能体。
     async fn initialize(&self) -> Result<()>;
+    /// 获取智能体状态。
     async fn get_state(&self) -> AgentState;
+    /// 关闭智能体。
     async fn shutdown(&self) -> Result<()>;
 }
 
 /// 智能体协调器的默认实现。
+#[derive(Clone)]
 pub struct Agent {
     config: AgentConfig,
+    /// 默认对话模型名（配置中指定，未被请求级 model 覆盖时使用）。
+    default_model: String,
     model_service: Arc<dyn ChatService>,
     vfs: Arc<dyn VirtualFileSystem>,
     context_pipeline: ContextPipeline,
@@ -183,9 +185,12 @@ pub struct Agent {
 
 impl Agent {
     /// 创建新的 Agent 实例。
+    ///
+    /// 此构造函数由 AgentBuilder::build() 调用，外部应通过 Builder 创建 Agent。
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         config: AgentConfig,
+        default_model: String,
         model_service: Arc<dyn ChatService>,
         vfs: Arc<dyn VirtualFileSystem>,
         context_pipeline: ContextPipeline,
@@ -198,6 +203,7 @@ impl Agent {
     ) -> Self {
         Self {
             config,
+            default_model,
             model_service,
             vfs,
             context_pipeline,
@@ -209,6 +215,27 @@ impl Agent {
             agent_loop,
             session_manager,
         }
+    }
+
+    /// 从持久化存储加载会话并构建 SessionState。
+    async fn load_and_build_state(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<RwLock<SessionState>>> {
+        let session = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .unwrap_or_else(|| Session::new(session_id));
+
+        let state = Arc::new(RwLock::new(SessionState::new(session_id)));
+        {
+            let mut s = state.write().await;
+            for sm in &session.messages {
+                s.add_structured_message(sm.clone());
+            }
+        }
+        Ok(state)
     }
 
     /// 准备当前轮次的上下文消息。
@@ -264,7 +291,9 @@ impl Agent {
     ) {
         let messages_since_marker: Vec<StructuredMessage> = {
             let s = state.read().await;
-            let marker_pos = s.structured_messages.iter()
+            let marker_pos = s
+                .structured_messages
+                .iter()
                 .rposition(|m| m.compression_marker);
             let start_idx = marker_pos.unwrap_or(0);
             s.structured_messages[start_idx..].to_vec()
@@ -276,11 +305,19 @@ impl Agent {
 
         let conversation: Vec<Message> = messages_since_marker
             .iter()
-            .flat_map(|sm| ContextAssembler::structured_to_messages(sm))
+            .flat_map(ContextAssembler::structured_to_messages)
             .collect();
 
-        if let Some(summary_sm) = self.context_pipeline.compress_for_session(&conversation, session_id).await {
-            if let Err(e) = self.session_manager.add_structured_message(session_id, summary_sm.clone()).await {
+        if let Some(summary_sm) = self
+            .context_pipeline
+            .compress_for_session(&conversation, session_id)
+            .await
+        {
+            if let Err(e) = self
+                .session_manager
+                .add_structured_message(session_id, summary_sm.clone())
+                .await
+            {
                 tracing::warn!(error = %e, "持久化压缩摘要失败");
             } else {
                 state.write().await.add_structured_message(summary_sm);
@@ -308,15 +345,29 @@ impl Agent {
 
         let (session_id, parent_id) = {
             let s = state.read().await;
-            (s.session_id.clone(), s.structured_messages.last().map(|m| m.id.clone()))
+            (
+                s.session_id.clone(),
+                s.structured_messages.last().map(|m| m.id.clone()),
+            )
         };
-        let loop_result = self.agent_loop.run(&mut messages, None, &session_id, parent_id.as_deref()).await;
+        let loop_result = self
+            .agent_loop
+            .run(&mut messages, None, &session_id, parent_id.as_deref(), &self.default_model)
+            .await;
 
         let mut clarification_tokens: Option<TokenUsage> = None;
         let response = match loop_result {
-            Ok(AgentLoopResult::Answer { content, total_tokens, persisted_message, .. }) => {
+            Ok(AgentLoopResult::Answer {
+                content,
+                total_tokens,
+                persisted_message,
+                ..
+            }) => {
                 // 复用 AgentLoop 已持久化的消息，避免重复创建
-                state.write().await.add_structured_message(persisted_message);
+                state
+                    .write()
+                    .await
+                    .add_structured_message(persisted_message);
 
                 let mut resp = AgentResponse::simple(content);
                 resp.token_usage = total_tokens.clone();
@@ -325,7 +376,11 @@ impl Agent {
                 clarification_tokens = Some(total_tokens);
                 resp
             }
-            Ok(AgentLoopResult::NeedsClarification { question, total_tokens, .. }) => {
+            Ok(AgentLoopResult::NeedsClarification {
+                question,
+                total_tokens,
+                ..
+            }) => {
                 let question_obj = ClarificationQuestion {
                     question,
                     question_type: QuestionType::OpenEnded,
@@ -349,15 +404,12 @@ impl Agent {
             }
         };
 
-        {
-            let mut st = self.state.write().await;
-            st.conversations_processed += 1;
-            if let Some(ref tokens) = clarification_tokens {
-                st.total_tokens.input += tokens.prompt_tokens;
-                st.total_tokens.output += tokens.completion_tokens;
-                st.total_tokens.total += tokens.total_tokens;
-            }
-        }
+        self.update_agent_metrics(
+            &session_id,
+            clarification_tokens.as_ref(),
+            clarification_tokens.is_some(),
+        )
+        .await;
 
         Ok(response)
     }
@@ -366,7 +418,11 @@ impl Agent {
     async fn learn_skills_from_session(&self, session_id: &str) {
         if let Some(ref engine) = self.skill_learning_engine {
             // 从 ToolRegistry 排空执行轨迹
-            let history = self.agent_loop.tool_registry().drain_execution_history().await;
+            let history = self
+                .agent_loop
+                .tool_registry()
+                .drain_execution_history()
+                .await;
             if history.is_empty() {
                 return;
             }
@@ -387,69 +443,100 @@ impl Agent {
             }
         }
     }
-}
 
-#[async_trait]
-impl AgentCoordinator for Agent {
-    async fn process_message(
+    /// 更新全局 Agent 指标（对话计数、token 统计）。
+    async fn update_agent_metrics(
         &self,
         session_id: &str,
-        message: &str,
-    ) -> Result<AgentResponse> {
-        let start = Instant::now();
-        let message = message.to_string();
-
-        // 1. Load session from persistence
-        let session = self.session_manager.get_session(session_id).await?
-            .unwrap_or_else(|| Session::new(session_id));
-
-        // 2. Build SessionState from loaded messages
-        let state = Arc::new(RwLock::new(SessionState::new(session_id)));
-        {
-            let mut s = state.write().await;
-            for sm in &session.messages {
-                s.add_structured_message(sm.clone());
-            }
+        loop_tokens: Option<&TokenUsage>,
+        success: bool,
+    ) {
+        let mut st = self.state.write().await;
+        st.conversations_processed += 1;
+        if let Some(tokens) = loop_tokens {
+            st.total_tokens.input += tokens.prompt_tokens;
+            st.total_tokens.output += tokens.completion_tokens;
+            st.total_tokens.total += tokens.total_tokens;
+            // Record per-session token usage for self_check tool / observability.
+            // system_prompt_tokens and retrieved_tokens would require pipeline
+            // instrumentation for accurate values; recorded as 0 for now.
+            self.metrics
+                .record_token_usage(TokenRecord {
+                    session_id: session_id.to_string(),
+                    timestamp: chrono::Utc::now(),
+                    total_tokens: tokens.total_tokens,
+                    system_prompt_tokens: 0,
+                    retrieved_tokens: 0,
+                    success,
+                })
+                .await;
         }
+    }
 
-        // 3. Persist current user message
+    /// 持久化当前用户消息到 SessionManager。
+    async fn persist_user_message(&self, session_id: &str, state: &Arc<RwLock<SessionState>>, message: &str) {
         let parent_id = {
             let s = state.read().await;
             s.structured_messages.last().map(|m| m.id.clone())
         };
         let user_sm = ContextAssembler::message_to_structured(
-            &Message::user(&message),
+            &Message::user(message),
             session_id,
             parent_id.as_deref(),
             None,
         );
-        if let Err(e) = self.session_manager.add_structured_message(session_id, user_sm).await {
+        if let Err(e) = self
+            .session_manager
+            .add_structured_message(session_id, user_sm)
+            .await
+        {
             tracing::warn!(error = %e, "持久化用户消息失败");
         }
+    }
+}
 
-        // 4. Prepare context
+#[async_trait]
+impl AgentCoordinator for Agent {
+    async fn process_message(&self, session_id: &str, message: &str, model: Option<&str>) -> Result<AgentResponse> {
+        let start = Instant::now();
+        let message = message.to_string();
+
+        // Resolve model: caller-specified > Agent default config
+        let model = model.unwrap_or(&self.default_model);
+
+        // 1. Load session and build state
+        let state = self.load_and_build_state(session_id).await?;
+
+        // 2. Persist current user message
+        self.persist_user_message(session_id, &state, &message).await;
+
+        // 3. Prepare context
         let messages = self.prepare_context(&state, &message).await;
 
-        // 5. Run agent loop (internal persistence in AgentLoop)
+        // 4. Run agent loop (internal persistence in AgentLoop)
         let parent_id = {
             let s = state.read().await;
             s.structured_messages.last().map(|m| m.id.clone())
         };
         let mut messages = messages;
-        let loop_result = self.agent_loop.run(
-            &mut messages,
-            None,
-            session_id,
-            parent_id.as_deref(),
-        ).await;
+        let loop_result = self
+            .agent_loop
+            .run(&mut messages, None, session_id, parent_id.as_deref(), model)
+            .await;
 
-        // 6. Handle loop result
+        // 5. Handle loop result
         let mut loop_tokens: Option<TokenUsage> = None;
         let response = match loop_result {
-            Ok(AgentLoopResult::Answer { content, total_tokens: tokens, persisted_message, .. }) => {
-                // AgentLoop 已持久化 answer（含正确 parent_id 和 token_usage），
-                // coordinator 直接复用该消息加入内存状态，不再重复创建。
-                state.write().await.add_structured_message(persisted_message);
+            Ok(AgentLoopResult::Answer {
+                content,
+                total_tokens: tokens,
+                persisted_message,
+                ..
+            }) => {
+                state
+                    .write()
+                    .await
+                    .add_structured_message(persisted_message);
 
                 let mut resp = AgentResponse::simple(content);
                 resp.token_usage = tokens.clone();
@@ -458,7 +545,11 @@ impl AgentCoordinator for Agent {
                 loop_tokens = Some(tokens);
                 resp
             }
-            Ok(AgentLoopResult::NeedsClarification { question, total_tokens: tokens, .. }) => {
+            Ok(AgentLoopResult::NeedsClarification {
+                question,
+                total_tokens: tokens,
+                ..
+            }) => {
                 let question_obj = ClarificationQuestion {
                     question,
                     question_type: QuestionType::OpenEnded,
@@ -482,19 +573,12 @@ impl AgentCoordinator for Agent {
             }
         };
 
-        // 7. Compression check and persist
+        // 6. Compression check and persist
         self.maybe_compress_and_persist(&state, session_id).await;
 
-        // 8. Update agent metrics
-        {
-            let mut st = self.state.write().await;
-            st.conversations_processed += 1;
-            if let Some(ref tokens) = loop_tokens {
-                st.total_tokens.input += tokens.prompt_tokens;
-                st.total_tokens.output += tokens.completion_tokens;
-                st.total_tokens.total += tokens.total_tokens;
-            }
-        }
+        // 7. Update agent metrics
+        self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
+            .await;
 
         // 8. Background: GEPA skill learning
         {
@@ -507,20 +591,15 @@ impl AgentCoordinator for Agent {
 
         Ok(response)
     }
+
     async fn process_message_stream(
         &self,
         session_id: &str,
         message: &str,
+        model: Option<&str>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
-        let session = self.session_manager.get_session(session_id).await?
-            .unwrap_or_else(|| Session::new(session_id));
-        let state = Arc::new(RwLock::new(SessionState::new(session_id)));
-        {
-            let mut s = state.write().await;
-            for sm in &session.messages {
-                s.add_structured_message(sm.clone());
-            }
-        }
+        let state = self.load_and_build_state(session_id).await?;
+        let model = model.unwrap_or(&self.default_model).to_string();
 
         let (tx, rx) = mpsc::channel(100);
         let self_clone = Arc::new(self.clone());
@@ -533,58 +612,86 @@ impl AgentCoordinator for Agent {
 
             let (session_id_str, parent_id) = {
                 let s = state_clone.read().await;
-                (s.session_id.clone(), s.structured_messages.last().map(|m| m.id.clone()))
+                (
+                    s.session_id.clone(),
+                    s.structured_messages.last().map(|m| m.id.clone()),
+                )
             };
+
+            // 持久化用户消息（和非流式路径对齐）
+            let user_sm = ContextAssembler::message_to_structured(
+                &Message::user(&message),
+                &session_id_str,
+                parent_id.as_deref(),
+                None,
+            );
+            if let Err(e) = self_clone
+                .session_manager
+                .add_structured_message(&session_id_str, user_sm)
+                .await
+            {
+                tracing::warn!(error = %e, "持久化用户消息失败");
+            }
+
             let loop_result = self_clone
                 .agent_loop
-                .run_stream(&mut messages.clone(), stream_sender.clone(), &session_id_str, parent_id.as_deref())
+                .run_stream(
+                    &mut messages.clone(),
+                    stream_sender.clone(),
+                    &session_id_str,
+                    parent_id.as_deref(),
+                    &model,
+                )
                 .await;
 
             match loop_result {
-                Ok(AgentLoopResult::Answer { content, total_tokens, persisted_message, .. }) => {
-                    // 复用 AgentLoop 已持久化的消息，避免重复创建和 parent_id/token_usage 丢失
-                    state_clone.write().await.add_structured_message(persisted_message);
+                Ok(AgentLoopResult::Answer {
+                    total_tokens,
+                    persisted_message,
+                    ..
+                }) => {
+                    state_clone
+                        .write()
+                        .await
+                        .add_structured_message(persisted_message);
 
+                    // run_stream 已逐 chunk 流式推完内容，这里只发结束标记
                     stream_sender
-                        .send_complete(&content, StreamChunkType::Answer, None)
+                        .send_complete("", StreamChunkType::Answer, None)
                         .await;
-                    {
-                        let mut st = self_clone.state.write().await;
-                        st.conversations_processed += 1;
-                        st.total_tokens.input += total_tokens.prompt_tokens;
-                        st.total_tokens.output += total_tokens.completion_tokens;
-                        st.total_tokens.total += total_tokens.total_tokens;
-                    }
+                    self_clone
+                        .update_agent_metrics(&session_id_str, Some(&total_tokens), true)
+                        .await;
                     self_clone.metrics.record_execution(true).await;
                 }
-                Ok(AgentLoopResult::NeedsClarification { question, total_tokens, .. }) => {
+                Ok(AgentLoopResult::NeedsClarification {
+                    question,
+                    total_tokens,
+                    ..
+                }) => {
                     let question_obj = ClarificationQuestion {
                         question,
                         question_type: QuestionType::OpenEnded,
                         options: None,
                         required: true,
                     };
-                    state_clone.write().await.pending_clarification = Some(vec![question_obj.clone()]);
+                    state_clone.write().await.pending_clarification =
+                        Some(vec![question_obj.clone()]);
                     let formatted = format_clarification_questions(&[question_obj.clone()]);
                     stream_sender
                         .send_complete(&formatted, StreamChunkType::Clarification, None)
                         .await;
-                    {
-                        let mut st = self_clone.state.write().await;
-                        st.conversations_processed += 1;
-                        st.total_tokens.input += total_tokens.prompt_tokens;
-                        st.total_tokens.output += total_tokens.completion_tokens;
-                        st.total_tokens.total += total_tokens.total_tokens;
-                    }
+                    self_clone
+                        .update_agent_metrics(&session_id_str, Some(&total_tokens), true)
+                        .await;
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "AgentLoop 流式执行失败");
                     self_clone.metrics.record_execution(false).await;
                     stream_sender.send_error(&format!("处理失败：{}", e)).await;
-                    {
-                        let mut st = self_clone.state.write().await;
-                        st.conversations_processed += 1;
-                    }
+                    self_clone
+                        .update_agent_metrics(&session_id_str, None, false)
+                        .await;
                 }
             }
 
@@ -595,20 +702,8 @@ impl AgentCoordinator for Agent {
         Ok(rx)
     }
 
-    async fn handle_clarification(
-        &self,
-        session_id: &str,
-        answers: &str,
-    ) -> Result<AgentResponse> {
-        let session = self.session_manager.get_session(session_id).await?
-            .ok_or_else(|| TianyanError::MemorySystem(format!("会话未找到：{}", session_id)))?;
-        let state = Arc::new(RwLock::new(SessionState::new(session_id)));
-        {
-            let mut s = state.write().await;
-            for sm in &session.messages {
-                s.add_structured_message(sm.clone());
-            }
-        }
+    async fn handle_clarification(&self, session_id: &str, answers: &str) -> Result<AgentResponse> {
+        let state = self.load_and_build_state(session_id).await?;
         self.handle_clarification_response(&state, answers).await
     }
 
@@ -624,24 +719,6 @@ impl AgentCoordinator for Agent {
     async fn shutdown(&self) -> Result<()> {
         info!("Shutting down agent");
         Ok(())
-    }
-}
-
-impl Clone for Agent {
-    fn clone(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            model_service: self.model_service.clone(),
-            vfs: self.vfs.clone(),
-            context_pipeline: self.context_pipeline.clone(),
-            metrics: self.metrics.clone(),
-            skill_executor: self.skill_executor.clone(),
-            skill_registry: self.skill_registry.clone(),
-            skill_learning_engine: self.skill_learning_engine.clone(),
-            state: self.state.clone(),
-            agent_loop: self.agent_loop.clone(),
-            session_manager: self.session_manager.clone(),
-        }
     }
 }
 

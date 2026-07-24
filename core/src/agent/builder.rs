@@ -8,10 +8,15 @@ use crate::agent::r#loop::{AgentLoop, AgentLoopConfig};
 use crate::agent::tool_registry::ToolRegistry;
 use crate::common::error::{Result, TianyanError};
 use crate::config::AgentConfig;
+use crate::config::SecurityConfig;
 use crate::context::compression::{CompressionConfig, ContextCompressor};
 use crate::context::pipeline::ContextPipeline;
 use crate::context::DualLayerRetriever;
+use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
 use crate::executor::SecurityPolicy;
+use crate::executor::{LlmJudge, VerificationGate};
+use crate::scheduler::tasks::RuleRecorder;
+use crate::knowledge::KnowledgeIngestor;
 use crate::model::ChatService;
 use crate::observability::AgentMetrics;
 use crate::session::SessionManager;
@@ -24,62 +29,96 @@ use super::coordinator::Agent;
 /// 用于创建智能体的构建器。
 pub struct AgentBuilder {
     config: AgentConfig,
+    /// 默认聊天模型（用于 AgentLoop 和委托子 Agent）。
+    model: Option<String>,
     model_service: Option<Arc<dyn ChatService>>,
     retriever: Option<Arc<DualLayerRetriever>>,
     vfs: Option<Arc<dyn VirtualFileSystem>>,
     skill_executor: Option<Arc<SkillExecutor>>,
     skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
     session_manager: Option<Arc<dyn SessionManager>>,
+    knowledge_ingestor: Option<Arc<KnowledgeIngestor>>,
+    security_config: Option<SecurityConfig>,
 }
 
 impl AgentBuilder {
+    /// 创建默认构建器。
     pub fn new() -> Self {
         Self {
             config: AgentConfig::default(),
+            model: None,
             model_service: None,
             retriever: None,
             vfs: None,
             skill_executor: None,
             skill_registry: None,
             session_manager: None,
+            knowledge_ingestor: None,
+            security_config: None,
         }
     }
 
+    /// 设置 Agent 配置。
     pub fn with_config(mut self, config: AgentConfig) -> Self {
         self.config = config;
         self
     }
 
+    /// 设置默认聊天模型（用于 AgentLoop 和 delegate_to_agent）。
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// 设置聊天模型服务。
     pub fn with_model_service(mut self, service: Arc<dyn ChatService>) -> Self {
         self.model_service = Some(service);
         self
     }
 
+    /// 设置双层检索器。
     pub fn with_retriever(mut self, retriever: Arc<DualLayerRetriever>) -> Self {
         self.retriever = Some(retriever);
         self
     }
 
+    /// 设置虚拟文件系统。
     pub fn with_vfs(mut self, vfs: Arc<dyn VirtualFileSystem>) -> Self {
         self.vfs = Some(vfs);
         self
     }
 
+    /// 设置技能执行器。
     pub fn with_skill_executor(mut self, executor: Arc<SkillExecutor>) -> Self {
         self.skill_executor = Some(executor);
         self
     }
 
+    /// 设置技能注册表。
     pub fn with_skill_registry(mut self, registry: Arc<RwLock<SkillRegistry>>) -> Self {
         self.skill_registry = Some(registry);
         self
     }
 
+    /// 设置会话管理器。
     pub fn with_session_manager(mut self, session_manager: Arc<dyn SessionManager>) -> Self {
         self.session_manager = Some(session_manager);
         self
     }
 
+    /// 设置知识导入器（knowledge_ingest 工具依赖）。
+    pub fn with_knowledge_ingestor(mut self, ingestor: Arc<KnowledgeIngestor>) -> Self {
+        self.knowledge_ingestor = Some(ingestor);
+        self
+    }
+
+    /// 设置安全配置（控制命令黑名单、安全模式等）。
+    pub fn with_security_config(mut self, config: SecurityConfig) -> Self {
+        self.security_config = Some(config);
+        self
+    }
+
+    /// 构建 Agent 实例。
     pub fn build(self) -> Result<Agent> {
         let model_service = self
             .model_service
@@ -104,15 +143,40 @@ impl AgentBuilder {
         // 构建可观测性指标（tool_registry 依赖）
         let metrics = AgentMetrics::new();
 
-        let tool_registry = ToolRegistry::new(SecurityPolicy::default())
+        // 构建审批工作流（write_file / execute_command 危险操作门控）
+        let approval = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+
+        let chat_model = self.model.clone().unwrap_or_else(|| "default".to_string());
+
+        // 构建 LLM-as-Judge 语义验证（verify_build 质量门控）
+        let verification = Arc::new(VerificationGate::new(Some(LlmJudge::new(
+            model_service.clone(),
+            &chat_model,
+        ))));
+
+        // 构建规则记录器（工具执行失败时自动学习，供 GEPA 和 RuleSuggester 消费）
+        let rule_recorder = Arc::new(RuleRecorder::new(vfs.clone()));
+
+        // Build security policy from user config (or defaults)
+        let security_config = self
+            .security_config
+            .unwrap_or_else(SecurityConfig::default);
+        let security_policy = SecurityPolicy::from_config(&security_config);
+
+        let mut tool_registry = ToolRegistry::new(security_policy)
             .with_vfs(vfs.clone())
             .with_model_service(model_service.clone())
-            .with_metrics(metrics.clone());
-        let tool_registry = if let Some(ref executor) = self.skill_executor {
-            tool_registry.with_skill_executor(executor.clone())
-        } else {
-            tool_registry
-        };
+            .with_model(&chat_model)
+            .with_metrics(metrics.clone())
+            .with_approval_workflow(approval)
+            .with_verification_gate(verification)
+            .with_rule_recorder(rule_recorder);
+        if let Some(ref executor) = self.skill_executor {
+            tool_registry = tool_registry.with_skill_executor(executor.clone());
+        }
+        if let Some(ref ingestor) = self.knowledge_ingestor {
+            tool_registry = tool_registry.with_knowledge_ingestor(ingestor.clone());
+        }
 
         let agent_loop = AgentLoop::new(
             model_service.clone(),
@@ -120,7 +184,6 @@ impl AgentBuilder {
             session_manager.clone(),
             AgentLoopConfig {
                 max_turns: self.config.max_turns,
-                model: "default".to_string(),
             },
         );
 
@@ -132,6 +195,7 @@ impl AgentBuilder {
                 model_service.clone(),
                 CompressionConfig {
                     preserve_recent_messages: 6,
+                    summary_model: chat_model.clone(),
                     ..CompressionConfig::default()
                 },
             ))),
@@ -144,7 +208,10 @@ impl AgentBuilder {
             Some(SkillLearningEngine::new(
                 model_service.clone(),
                 vfs.clone(),
-                SkillLearningConfig::default(),
+                SkillLearningConfig {
+                    generation_model: chat_model.clone(),
+                    ..SkillLearningConfig::default()
+                },
             ))
         } else {
             None
@@ -152,6 +219,7 @@ impl AgentBuilder {
 
         Ok(Agent::new(
             self.config,
+            chat_model,
             model_service,
             vfs,
             context_pipeline,

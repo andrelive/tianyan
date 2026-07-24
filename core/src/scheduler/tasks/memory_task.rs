@@ -52,11 +52,7 @@ impl MemoryTask {
         session_uri: &TianyanUri,
     ) -> Option<SessionExtractionState> {
         let state_uri = session_uri.append("_metadata");
-        match ctx
-            .vfs
-            .read_content(&state_uri, ContentLevel::Detail)
-            .await
-        {
+        match ctx.vfs.read_content(&state_uri, ContentLevel::Detail).await {
             Ok(json) => match serde_json::from_str::<SessionExtractionState>(&json) {
                 Ok(state) => Some(state),
                 Err(e) => {
@@ -170,11 +166,7 @@ impl MemoryTask {
     }
 
     /// 处理单个会话：提取并持久化记忆。
-    async fn process_session(
-        &self,
-        ctx: &TaskContext,
-        session_uri: &TianyanUri,
-    ) -> Result<usize> {
+    async fn process_session(&self, ctx: &TaskContext, session_uri: &TianyanUri) -> Result<usize> {
         let conversation = ctx
             .vfs
             .read_content(session_uri, ContentLevel::Detail)

@@ -36,7 +36,7 @@ impl ChatService for AsyncOpenAIClient {
         builder.messages(messages);
         builder.stream(false);
         if let Some(n) = request.n {
-            builder.n(n as u8);
+            builder.n(n.min(u8::MAX as usize) as u8);
         }
         Self::apply_shared_params(&mut builder, &request);
 
@@ -149,18 +149,24 @@ impl ChatService for AsyncOpenAIClient {
                                 .map(|c| ChunkChoice {
                                     index: c.index as usize,
                                     delta: DeltaContent {
-                                        role: c.delta.role.as_ref().map(|r| convert_role(r)),
+                                        role: c.delta.role.as_ref().map(convert_role),
                                         content: c.delta.content,
                                         tool_calls: c.delta.tool_calls.map(|tcs| {
-                                            tcs.into_iter().map(|tc| ToolCallDelta {
-                                                index: tc.index as usize,
-                                                id: tc.id,
-                                                call_type: tc.r#type.map(|_| "function".to_string()),
-                                                function: tc.function.map(|f| ToolCallFunctionDelta {
-                                                    name: f.name,
-                                                    arguments: f.arguments,
-                                                }),
-                                            }).collect()
+                                            tcs.into_iter()
+                                                .map(|tc| ToolCallDelta {
+                                                    index: tc.index as usize,
+                                                    id: tc.id,
+                                                    call_type: tc
+                                                        .r#type
+                                                        .map(|_| "function".to_string()),
+                                                    function: tc.function.map(|f| {
+                                                        ToolCallFunctionDelta {
+                                                            name: f.name,
+                                                            arguments: f.arguments,
+                                                        }
+                                                    }),
+                                                })
+                                                .collect()
                                         }),
                                     },
                                     finish_reason: c.finish_reason.as_ref().map(|r| {
@@ -179,9 +185,12 @@ impl ChatService for AsyncOpenAIClient {
                         }
                     }
                     Err(e) => {
-                        let _ = tx
+                        if let Err(send_err) = tx
                             .send(Err(TianyanError::ModelService(format!("流错误：{}", e))))
-                            .await;
+                            .await
+                        {
+                            tracing::warn!(error = %send_err, "流错误通知发送失败");
+                        }
                         return;
                     }
                 }
@@ -198,7 +207,7 @@ impl AsyncOpenAIClient {
         request: &ChatCompletionRequest,
     ) {
         if let Some(max_tokens) = request.max_tokens {
-            builder.max_tokens(max_tokens as u32);
+            builder.max_completion_tokens(max_tokens as u32);
         }
         if let Some(temperature) = request.temperature {
             builder.temperature(temperature);

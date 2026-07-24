@@ -33,7 +33,7 @@ impl LocalFileBackend {
     }
 
     /// 创建具有默认配置的本地存储后端。
-    pub fn with_defaults() -> Self {
+    pub(crate) fn with_defaults() -> Self {
         Self::new(StorageConfig::default())
     }
 
@@ -87,7 +87,9 @@ impl LocalFileBackend {
             .clone()
     }
 
-    /// 追加内容到文件（如文件不存在则创建）。
+    /// 追加内容到文件。
+    ///
+    /// 自动创建父目录和文件（如不存在），无需调用方预检查。
     async fn append_file_locked(&self, path: &Path, content: &str) -> Result<()> {
         if let Some(parent) = path.parent() {
             self.ensure_dir(parent).await?;
@@ -156,22 +158,19 @@ impl LocalFileBackend {
     }
 }
 
-use crate::vfs::backend::traits::StorageBackend;
-
-#[async_trait::async_trait]
-impl StorageBackend for LocalFileBackend {
-    async fn initialize(&self) -> Result<()> {
+impl LocalFileBackend {
+    pub async fn initialize(&self) -> Result<()> {
         self.ensure_dir(&self.config.data_dir).await?;
         tracing::info!("已在 {:?} 初始化本地存储", self.config.data_dir);
         Ok(())
     }
 
-    async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
+    pub async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
         let path = self.mapper.uri_to_path(uri);
         Ok(fs::try_exists(path).await.unwrap_or(false))
     }
 
-    async fn read_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+    pub async fn read_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
         let path = self.mapper.uri_to_path(uri);
 
         let meta = fs::metadata(&path).await.map_err(|e| {
@@ -184,8 +183,14 @@ impl StorageBackend for LocalFileBackend {
 
         let is_directory = meta.is_dir();
 
-        let abstract_content = self.read_content_sync(uri, ContentLevel::Abstract).await.ok();
-        let overview_content = self.read_content_sync(uri, ContentLevel::Overview).await.ok();
+        let abstract_content = self
+            .read_content_sync(uri, ContentLevel::Abstract)
+            .await
+            .ok();
+        let overview_content = self
+            .read_content_sync(uri, ContentLevel::Overview)
+            .await
+            .ok();
         let detail_content = self.read_content_sync(uri, ContentLevel::Detail).await.ok();
 
         let mut metadata = crate::common::types::EntryMetadata::new(uri.clone(), "unknown");
@@ -200,7 +205,7 @@ impl StorageBackend for LocalFileBackend {
         })
     }
 
-    async fn write_entry(&self, entry: &ContextEntry) -> Result<()> {
+    pub async fn write_entry(&self, entry: &ContextEntry) -> Result<()> {
         let path = self.mapper.uri_to_path(entry.uri());
 
         self.ensure_dir(&path).await?;
@@ -224,7 +229,7 @@ impl StorageBackend for LocalFileBackend {
         Ok(())
     }
 
-    async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
+    pub async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
         let path = self.mapper.uri_to_path(uri);
 
         if !fs::try_exists(&path)
@@ -240,7 +245,7 @@ impl StorageBackend for LocalFileBackend {
         Ok(())
     }
 
-    async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
+    pub async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
         let path = self.mapper.uri_to_path(uri);
 
         let meta = fs::metadata(&path).await.map_err(|e| {
@@ -255,9 +260,9 @@ impl StorageBackend for LocalFileBackend {
             return Err(TianyanError::DirectoryNotFound(path));
         }
 
-        let mut read_dir = fs::read_dir(&path)
-            .await
-            .map_err(|e| TianyanError::StorageBackend(format!("读取目录 {:?} 失败: {}", path, e)))?;
+        let mut read_dir = fs::read_dir(&path).await.map_err(|e| {
+            TianyanError::StorageBackend(format!("读取目录 {:?} 失败: {}", path, e))
+        })?;
 
         let mut entries = Vec::new();
 
@@ -281,11 +286,11 @@ impl StorageBackend for LocalFileBackend {
         Ok(entries)
     }
 
-    async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+    pub async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
         self.read_content_sync(uri, level).await
     }
 
-    async fn write_content(
+    pub async fn write_content(
         &self,
         uri: &TianyanUri,
         level: ContentLevel,
@@ -302,7 +307,7 @@ impl StorageBackend for LocalFileBackend {
         Ok(())
     }
 
-    async fn append_content(
+    pub async fn append_content(
         &self,
         uri: &TianyanUri,
         level: ContentLevel,

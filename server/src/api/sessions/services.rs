@@ -90,7 +90,7 @@ impl SessionService {
                 .to_rfc3339(),
             message_count: core_session.messages.len() as u32,
             metadata: Some(SessionMetadata {
-                model: None,  // 模型由实际执行任务的 Agent 根据配置设置，不在创建层硬编码
+                model: None, // 模型由实际执行任务的 Agent 根据配置设置，不在创建层硬编码
                 tags: None,
             }),
         };
@@ -115,15 +115,23 @@ impl SessionService {
                 let content = m.parts.iter().fold(String::new(), |mut acc, p| {
                     match p {
                         Part::Text { text, .. } => {
-                            if !acc.is_empty() { acc.push('\n'); }
+                            if !acc.is_empty() {
+                                acc.push('\n');
+                            }
                             acc.push_str(text);
                         }
                         Part::Reasoning { text, .. } => {
-                            if !acc.is_empty() { acc.push('\n'); }
+                            if !acc.is_empty() {
+                                acc.push('\n');
+                            }
                             acc.push_str(&format!("[思考] {}", text));
                         }
-                        Part::ToolCall { name, arguments, .. } => {
-                            if !acc.is_empty() { acc.push('\n'); }
+                        Part::ToolCall {
+                            name, arguments, ..
+                        } => {
+                            if !acc.is_empty() {
+                                acc.push('\n');
+                            }
                             let truncated_args = if arguments.len() > 200 {
                                 format!("{}...", &arguments[..200])
                             } else {
@@ -131,8 +139,14 @@ impl SessionService {
                             };
                             acc.push_str(&format!("[调用工具: {}({})]", name, truncated_args));
                         }
-                        Part::ToolResult { tool_call_id, content, .. } => {
-                            if !acc.is_empty() { acc.push('\n'); }
+                        Part::ToolResult {
+                            tool_call_id,
+                            content,
+                            ..
+                        } => {
+                            if !acc.is_empty() {
+                                acc.push('\n');
+                            }
                             let truncated = if content.len() > 500 {
                                 format!("{}...", &content[..500])
                             } else {
@@ -164,7 +178,10 @@ impl SessionService {
     }
 
     /// 获取会话消息
-    pub async fn get_messages(&self, session_id: &str) -> Result<SessionMessagesResponse, ApiError> {
+    pub async fn get_messages(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionMessagesResponse, ApiError> {
         info!("获取会话消息: {}", session_id);
 
         let detail = self.get_session_detail(session_id).await?;
@@ -176,7 +193,10 @@ impl SessionService {
     }
 
     /// 删除会话
-    pub async fn delete_session(&self, session_id: &str) -> Result<DeleteSessionResponse, ApiError> {
+    pub async fn delete_session(
+        &self,
+        session_id: &str,
+    ) -> Result<DeleteSessionResponse, ApiError> {
         info!("删除会话: {}", session_id);
 
         self.session_manager.delete_session(session_id).await?;

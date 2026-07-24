@@ -10,29 +10,47 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 pub enum AgentTool {
+    /// 在 VFS 中搜索内容。
     VfsSearch {
+        /// 搜索查询。
         query: String,
+        /// 搜索范围。
         scope: Option<String>,
+        /// 返回结果数量。
         top_k: Option<usize>,
     },
+    /// 读取 VFS 条目。
     VfsRead {
+        /// 目标 URI。
         uri: String,
     },
+    /// 列出 VFS 目录。
     VfsList {
+        /// 目录 URI。
         uri: String,
     },
+    /// 写入 VFS 内容。
     VfsWrite {
+        /// 目标 URI。
         uri: String,
+        /// 写入内容。
         content: String,
     },
+    /// 删除 VFS 条目。
     VfsDelete {
+        /// 目标 URI。
         uri: String,
     },
+    /// 创建 VFS 目录。
     VfsMkdir {
+        /// 目录 URI。
         uri: String,
     },
+    /// 调用技能。
     Skill {
+        /// 技能 ID。
         skill_id: String,
+        /// 技能参数。
         #[serde(default)]
         params: HashMap<String, serde_json::Value>,
     },
@@ -41,12 +59,16 @@ pub enum AgentTool {
 /// 工具执行结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// 是否成功。
     pub success: bool,
+    /// 执行结果内容。
     pub content: String,
+    /// 相关 URI 列表。
     pub related_uris: Vec<String>,
 }
 
 impl AgentTool {
+    /// 解析工具调用。
     pub fn parse(output: &str) -> Option<Self> {
         if let Ok(tool) = serde_json::from_str(output) {
             return Some(tool);
@@ -167,6 +189,7 @@ impl AgentTool {
         Some(params)
     }
 
+    /// 转换为可读描述。
     pub fn to_description(&self) -> String {
         match self {
             AgentTool::VfsSearch {

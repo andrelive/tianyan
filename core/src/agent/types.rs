@@ -12,18 +12,26 @@ use crate::context::RetrievalTrace;
 /// 追问问题
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClarificationQuestion {
+    /// 问题内容。
     pub question: String,
+    /// 问题类型。
     pub question_type: QuestionType,
+    /// 可选答案列表。
     pub options: Option<Vec<String>>,
+    /// 是否必填。
     pub required: bool,
 }
 
+/// 追问问题类型。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QuestionType {
+    /// 开放性问题。
     #[serde(rename = "OpenEnded")]
     OpenEnded,
+    /// 选择题。
     #[serde(rename = "Choice")]
     Choice,
+    /// 确认性问题。
     #[serde(rename = "Confirmation")]
     Confirmation,
 }
@@ -31,25 +39,38 @@ pub enum QuestionType {
 /// 用于跟踪执行状态的智能体状态。
 #[derive(Debug, Clone, Default)]
 pub struct AgentState {
+    /// 是否已初始化。
     pub initialized: bool,
+    /// 已处理的对话数。
     pub conversations_processed: usize,
     /// Token 使用详情（含 input/output/reasoning/cache 明细）。
     pub total_tokens: DetailedTokenUsage,
+    /// 检索执行次数。
     pub retrievals_performed: usize,
+    /// 技能执行次数。
     pub skills_executed: usize,
 }
 
 /// 智能体的响应。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentResponse {
+    /// 响应内容。
     pub content: String,
+    /// 是否完成。
     pub is_complete: bool,
+    /// 检索追踪信息。
     pub retrieval_trace: Option<RetrievalTrace>,
+    /// 上下文 URI 列表。
     pub context_uris: Vec<String>,
+    /// Token 使用情况。
     pub token_usage: TokenUsage,
+    /// 技能调用列表。
     pub skill_calls: Vec<SkillCallInfo>,
+    /// 处理时间（毫秒）。
     pub processing_time_ms: u64,
+    /// 是否需要追问。
     pub needs_clarification: bool,
+    /// 追问问题列表。
     pub clarification_questions: Vec<ClarificationQuestion>,
 }
 
@@ -113,32 +134,47 @@ impl AgentResponse {
 /// 技能调用信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillCallInfo {
+    /// 技能 ID。
     pub skill_id: String,
+    /// 是否成功。
     pub success: bool,
+    /// 执行时间（毫秒）。
     pub execution_time_ms: u64,
+    /// 错误信息。
     pub error: Option<String>,
 }
 
 /// 流式响应块的类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum StreamChunkType {
+    /// 思考过程。
     Thought,
+    /// 工具调用。
     ToolCall,
+    /// 观察结果。
     Observation,
+    /// 回答内容。
     #[default]
     Answer,
+    /// 错误信息。
     Error,
+    /// 追问需求。
     Clarification,
 }
 
 /// 流式响应块。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentStreamChunk {
+    /// 增量内容。
     pub delta: String,
+    /// 是否完成。
     pub is_complete: bool,
+    /// Token 使用情况。
     pub token_usage: Option<TokenUsage>,
+    /// 块类型。
     #[serde(default)]
     pub chunk_type: StreamChunkType,
+    /// 技能调用信息。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_calls: Option<Vec<SkillCallInfo>>,
 }
@@ -150,6 +186,7 @@ pub struct StreamEventSender {
 }
 
 impl StreamEventSender {
+    /// 创建流式事件发送器。
     pub fn new(tx: mpsc::Sender<Result<AgentStreamChunk>>) -> Self {
         Self { tx }
     }
@@ -372,7 +409,10 @@ mod tests {
         };
         let json = serde_json::to_string(&chunk).unwrap();
         // skill_calls 为 None 时不应出现在 JSON 中
-        assert!(!json.contains("skill_calls"), "JSON 不应包含 skill_calls: {json}");
+        assert!(
+            !json.contains("skill_calls"),
+            "JSON 不应包含 skill_calls: {json}"
+        );
     }
 
     // ── AgentResponse ───────────────────────────────────────────
@@ -480,10 +520,7 @@ mod tests {
             // 反序列化后检查 JSON value 中的字段（QuestionType 没有 PartialEq）
             let deserialized: ClarificationQuestion = serde_json::from_str(&json).unwrap();
             let serialized_again = serde_json::to_string(&deserialized).unwrap();
-            assert_eq!(
-                json, serialized_again,
-                "反序列化再序列化应得到相同 JSON"
-            );
+            assert_eq!(json, serialized_again, "反序列化再序列化应得到相同 JSON");
         }
     }
 

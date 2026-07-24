@@ -27,7 +27,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `common` | 通用类型（按领域拆分）、错误处理 | error.rs, types/ | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
 | `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
-| `executor` | 独立工具执行函数 + 审批工作流 + 验证门控 | executor.rs, approval.rs, types.rs, judge.rs, verification.rs | ⚠️ Executor 壳已废弃 |
+| `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控） | actions.rs, approval.rs, types.rs, judge.rs, verification.rs | ✅ 正常使用 |
 | `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image.rs, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
 | `memory` | 长期记忆提取 | extractor.rs | ✅ 已集成 |
 | `model` | 模型服务（provider 实现 + 服务容器） | traits.rs, types/, provider/, services.rs | ✅ 已集成 |
@@ -104,9 +104,8 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `vfs/types.rs` — 存储相关类型定义
 - `vfs/vfs_impl.rs` — `VirtualFileSystemImpl` 实现 + `initialize()` 基础设施初始化
 - `vfs/vfs_builder.rs` — `VirtualFileSystemBuilder` 构建器
-- `vfs/backend/traits.rs` — `StorageBackend` trait
-- `vfs/backend/local.rs` — 本地文件系统存储后端
-- `vfs/vector/qdrant.rs` — Qdrant 向量数据库实现（RRF 融合搜索）
+- `vfs/backend/local.rs` — 本地文件系统存储后端（具体类型）
+- `vfs/vector/lancedb.rs` — LanceDB 嵌入式向量数据库实现（RRF 融合搜索）
 - `vfs/summary/engine.rs` — `SummaryEngine` 分层摘要生成
 - `vfs/uri_mapper.rs` — URI 到文件系统路径映射
 
@@ -116,12 +115,11 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 |------|------|
 | `VfsCore` (trait) | VFS 核心操作（CRUD、元数据） |
 | `ContentStore` (trait) | 分层内容读写（L0 Abstract / L1 Overview / L2 Detail） |
-| `VfsSearch` (trait) | 向量检索：查询 embed → Qdrant RRF 融合 abstract_vector + overview_vector |
+| `VfsSearch` (trait) | 向量检索：查询 embed → LanceDB RRF 融合 abstract_vector + overview_vector |
 | `VirtualFileSystemImpl` | VFS 默认实现 |
 | `VirtualFileSystemBuilder` | VFS 构建器 |
-| `StorageBackend` (trait) | 存储后端接口 |
-| `LocalFileBackend` | 本地文件系统存储实现 |
-| `QdrantVectorStore` | Qdrant 向量数据库实现（支持多点向量、RRF 融合搜索） |
+| `LocalFileBackend` | 本地文件系统存储实现（具体类型，非 trait） |
+| `LanceDbVectorStore` | LanceDB 嵌入式向量数据库实现（支持多点向量、RRF 融合搜索） |
 | `SummaryEngine` | 分层摘要生成引擎（L0: ~100 tokens, L1: ~2K tokens） |
 | `UriMapper` | URI 到文件系统路径映射 |
 
@@ -135,22 +133,22 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | L1 | Overview | ~2K | `overview_vector` | 内容导航、重排序 |
 | L2 | Detail | 无限制 | — | 完整内容，按需加载 |
 
-`SummaryEngine` 通过 LLM 为每条 VFS 条目生成 L0/L1 摘要。检索时：查询文本 → embed → Qdrant RRF 融合搜索 `abstract_vector` + `overview_vector` → `ContentLoadStrategy::from_score()` 按分数分层加载（大于0.85→L2, 大于0.6→L1, 其他→L0）。
+`SummaryEngine` 通过 LLM 为每条 VFS 条目生成 L0/L1 摘要。检索时：查询文本 → embed → LanceDB RRF 融合搜索 `abstract_vector` + `overview_vector` → `ContentLoadStrategy::from_score()` 按分数分层加载（大于0.85→L2, 大于0.6→L1, 其他→L0）。
 
 **对子系统的约束**：
 - **知识库不做 chunk**：文档完整解析后直接写入 VFS L2 Detail，SummaryEngine 生成 L0/L1 摘要，双层检索自然替代 chunk-based RAG。`Chunker` 已移除。
 - **技能渐进式披露**：技能存于 `tianyan://skill/` 命名空间。L0 Abstract 用于快速发现（`SkillManager::list_available_skills()` 读取所有技能的 abstract），L2 Detail 按需加载完整定义。
 - **图像双通道**：VLM 生成文本描述 → 文本 embedding 用于 L0/L1 检索，同时 `embed_image()` 生成 `visual_vector` 用于视觉相似度搜索。
 
-### 1.5 executor 子模块（部分废弃）
+### 1.5 executor 子模块
 
-**职责**：独立的工具执行函数（`execute_read_file`、`execute_write_file`、`execute_search_code`、`execute_command_action`、`execute_run_tests`、`execute_verify_build`），供 `ToolRegistry` 调用。保留 `Action` 和 `ExecutorError` 类型供 `ApprovalWorkflow` 使用。
+**职责**：独立的工具执行函数（`execute_read_file`、`execute_write_file`、`execute_search_code`、`execute_command_action`、`execute_run_tests`、`execute_verify_build`），供 `ToolRegistry` 调用。`Action`、`ExecutorError`、`ApprovalWorkflow`、`LlmJudge`、`VerificationGate` 类型被 `agent/build.rs` 和 `agent/tool_registry.rs` 使用。
 
-> ⚠️ `Executor` 壳结构体已标记 `#[deprecated]`。`Step`、`StepResult`、`FailureHandling`、`ExecutorTrait` 等旧 Planner-Executor 架构类型已移除。
+> `Executor` trait 壳、`Step`、`StepResult`、`FailureHandling`、`ExecutorTrait` 等旧 Planner-Executor 架构类型已移除。
 
 **模块组织**：
-- `executor/executor.rs` — 独立执行函数 + `#[deprecated]` 的 `Executor` 壳
-- `executor/types.rs` — `Action` 和 `ExecutorError`
+- `executor/actions.rs` — 独立执行函数（`execute_read_file`、`execute_write_file` 等）
+- `executor/types.rs` — `Action` 枚举和 `ExecutorError`
 - `executor/approval.rs` — 审批工作流
 - `executor/verification.rs` — 验证门控
 - `executor/judge.rs` — LLM-as-Judge 语义验证
@@ -278,14 +276,14 @@ soul → rules+memories → history(from compression_marker) → current input
 | model | ✅ 完整集成 | ModelServices + AsyncOpenAIClient 已集成；原 ModelRouter 已移除 |
 | context | ✅ 完整集成 | ContextPipeline + DualLayerRetriever + ContextAssembler 在 Agent 中完整集成 |
 | skills | ✅ 完整集成 | 含 GEPA 进化引擎，通过 call_skill 工具桥接 |
-| vfs | ✅ 完整集成 | VirtualFileSystemImpl + LocalFileBackend + QdrantVectorStore；双层摘要索引 |
+| vfs | ✅ 完整集成 | VirtualFileSystemImpl + LocalFileBackend + LanceDbVectorStore；双层摘要索引 |
 | scheduler | ✅ 完整集成 | TaskScheduler + RuleTask + MemoryTask + SummaryTask + GcTask |
 | config | ✅ 完整集成 | 配置加载器和验证器 |
 | common | ✅ 完整集成 | 错误类型和通用工具 |
 | session | ✅ 已集成 | `PersistentSessionManager` 持久化到 VFS |
 | memory | ✅ 已集成 | `MemoryExtractor` 提取结构化记忆 |
 | observability | ✅ 已集成 | AgentMetrics 提供可观测性存储和自省接口 |
-| executor | ⚠️ 部分废弃 | 独立执行函数正常使用；`Executor` 壳结构体已标记 `#[deprecated]` |
+| executor | ✅ 正常使用 | 独立执行函数、审批工作流、验证门控均被 agent 模块使用 |
 | knowledge | ❌ 未集成 | ingestor 代码编写完成，但未在 Agent 流程中使用 |
 
 **已删除模块**：`planner/`（Planner-Executor 架构已废弃，仅保留 `ClarificationQuestion` 类型在 agent 中导出）
@@ -391,7 +389,7 @@ Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE �
 
 ### 4.1 模块总览
 
-GUI 是天演的 Yew (Rust WASM) 前端，编译为 WebAssembly 在浏览器中运行，采用 Yew Reducible 模式管理全局状态。
+GUI 是天演的 React TypeScript 前端，采用 Zustand 模式管理全局状态。
 
 | 子模块 | 职责 | 关键文件 |
 |--------|------|---------|
@@ -403,7 +401,7 @@ GUI 是天演的 Yew (Rust WASM) 前端，编译为 WebAssembly 在浏览器中�
 | `components/skills` | 技能中心面板（技能列表、参数输入、执行、结果展示） | mod.rs |
 | `components/settings` | 设置面板组件（主题、字号、API 地址） | mod.rs |
 | `components/config_wizard` | 配置向导组件（六步向导） | mod.rs, api.rs, types.rs |
-| `state` | 全局状态管理（Yew Reducible） | mod.rs |
+| `state` | 全局状态管理（Zustand） | mod.rs |
 
 ### 4.2 前端 API 覆盖情况
 
@@ -418,7 +416,7 @@ GUI 是天演的 Yew (Rust WASM) 前端，编译为 WebAssembly 在浏览器中�
 
 ### 4.3 状态管理
 
-**AppState** 使用 Yew 的 `use_reducer` 模式，包含多种 Action：
+**AppState** 使用 Zustand store，包含多种 Action：
 
 | Action | 说明 | 使用状态 |
 |--------|------|:---:|

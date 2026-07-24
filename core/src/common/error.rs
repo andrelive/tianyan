@@ -19,7 +19,12 @@ pub enum TianyanError {
 
     /// 无效的配置
     #[error("'{key}' 的配置值无效：{message}")]
-    InvalidConfig { key: String, message: String },
+    InvalidConfig {
+        /// 配置键名。
+        key: String,
+        /// 错误消息。
+        message: String,
+    },
 
     /// IO 相关错误
     #[error("IO 错误：{0}")]
@@ -60,13 +65,18 @@ pub enum TianyanError {
     /// URI 解析错误
     #[error("URI 解析错误：{source}")]
     UriParseError {
+        /// 无效的 URI。
         uri: String,
+        /// 解析错误来源。
         source: url::ParseError,
     },
 
     /// 不支持的 URI 方案
     #[error("不支持的 URI 方案 '{scheme}'。预期使用 'tianyan://'")]
-    UnsupportedUriScheme { scheme: String },
+    UnsupportedUriScheme {
+        /// URI 方案。
+        scheme: String,
+    },
 
     /// 模型服务错误
     #[error("模型服务错误：{0}")]
@@ -87,10 +97,6 @@ pub enum TianyanError {
     /// VLM（视觉语言模型）服务错误
     #[error("VLM 服务错误：{0}")]
     VlmService(String),
-
-    /// 视觉编码器错误
-    #[error("视觉编码器错误：{0}")]
-    VisionEncoder(String),
 
     /// 存储后端错误
     #[error("存储后端错误：{0}")]
@@ -154,7 +160,12 @@ pub enum TianyanError {
 
     /// 无效的技能参数
     #[error("'{skill}' 的技能参数无效：{message}")]
-    InvalidSkillParameters { skill: String, message: String },
+    InvalidSkillParameters {
+        /// 技能名称。
+        skill: String,
+        /// 错误消息。
+        message: String,
+    },
 
     /// 安全相关错误
     #[error("安全错误：{0}")]
@@ -210,7 +221,12 @@ pub enum TianyanError {
 
     /// 无效参数
     #[error("无效参数 '{arg}'：{message}")]
-    InvalidArgument { arg: String, message: String },
+    InvalidArgument {
+        /// 参数名称。
+        arg: String,
+        /// 错误消息。
+        message: String,
+    },
 
     /// 内部错误（正常操作中不应发生）
     #[error("内部错误：{0}")]
@@ -274,8 +290,7 @@ impl TianyanError {
             | TianyanError::ModelNotFound(_)
             | TianyanError::ModelRequestFailed(_)
             | TianyanError::EmbeddingService(_)
-            | TianyanError::VlmService(_)
-            | TianyanError::VisionEncoder(_) => ErrorCategory::Model,
+            | TianyanError::VlmService(_) => ErrorCategory::Model,
 
             TianyanError::StorageBackend(_)
             | TianyanError::VirtualFileSystem(_)
@@ -301,9 +316,7 @@ impl TianyanError {
                 ErrorCategory::Http
             }
 
-            TianyanError::TokenCounting(_) => {
-                ErrorCategory::Token
-            }
+            TianyanError::TokenCounting(_) => ErrorCategory::Token,
 
             TianyanError::Planning(_)
             | TianyanError::Execution(_)
@@ -394,6 +407,43 @@ impl From<config::ConfigError> for TianyanError {
 impl From<crate::executor::types::ExecutorError> for TianyanError {
     fn from(err: crate::executor::types::ExecutorError) -> Self {
         TianyanError::Execution(err.to_string())
+    }
+}
+
+impl From<crate::agent::AgentLoopError> for TianyanError {
+    fn from(err: crate::agent::AgentLoopError) -> Self {
+        match err {
+            crate::agent::AgentLoopError::MaxTurnsReached(n) => {
+                TianyanError::Execution(format!("Reached maximum turns: {}", n))
+            }
+            crate::agent::AgentLoopError::LlmCallFailed(msg) => TianyanError::ModelService(msg),
+            crate::agent::AgentLoopError::EmptyResponse => {
+                TianyanError::ModelRequestFailed("Empty response from LLM".to_string())
+            }
+        }
+    }
+}
+
+impl From<crate::agent::ToolExecutionError> for TianyanError {
+    fn from(err: crate::agent::ToolExecutionError) -> Self {
+        match err {
+            crate::agent::ToolExecutionError::UnknownTool(name) => {
+                TianyanError::SkillNotFound(name)
+            }
+            crate::agent::ToolExecutionError::InvalidParams(msg) => {
+                TianyanError::InvalidSkillParameters {
+                    skill: "unknown".to_string(),
+                    message: msg,
+                }
+            }
+            crate::agent::ToolExecutionError::ExecutionFailed(msg) => {
+                TianyanError::SkillExecution(msg)
+            }
+            crate::agent::ToolExecutionError::SecurityViolation(msg) => TianyanError::Security(msg),
+            crate::agent::ToolExecutionError::AskUser(msg) => {
+                TianyanError::Other(format!("需要用户输入：{}", msg))
+            }
+        }
     }
 }
 

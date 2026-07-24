@@ -29,7 +29,7 @@
               ┌────────────────────────┐
               │ gui (tianyan-gui)      │
               │  无 Rust 层项目依赖     │
-              │ 职责：Yew WASM 前端    │
+              │ 职责：React TypeScript 前端    │
               │ 通过 HTTP 与 server 通信│
               └────────────────────────┘
 ```
@@ -57,7 +57,7 @@ core/src/
 ├── common/      (error, types/ 子模块)
 ├── config/      (TOML 配置)
 ├── context/     (pipeline, assembler, compression/, retrieval/)
-├── executor/    (deprecated Executor + types, judge, approval, verification)
+├── executor/    (工具执行：Action、审批、LLM-as-Judge、验证门控)
 ├── knowledge/   (parser, image, ingestor/, types)
 ├── memory/      (extractor.rs)
 ├── model/       (traits, services.rs, provider/)
@@ -139,8 +139,8 @@ Tauri App 启动
     ├─ 3. start_axum_server(config)         [tauri/src/server.rs → server/src/lib.rs]
     │     │
     │     ├─ 3.1 initialize_vfs_for_app()   [server/src/lib.rs]
-    │     │     ├─ LocalStorageBackend::new()
-    │     │     ├─ QdrantVectorStore::new() + initialize()
+     │     │     ├─ LocalFileBackend::new()
+    │     │     ├─ LanceDbVectorStore::new() + initialize()
     │     │     ├─ ModelServices::from_configs() — 替代旧 ModelRouter
     │     │     └─ VirtualFileSystemBuilder::build() + initialize()
     │     │
@@ -169,7 +169,7 @@ Tauri App 启动
 ### 3.2 聊天请求流程
 
 ```
-用户输入 (Yew Frontend)
+用户输入 (React Frontend)
     │
     ▼ HTTP POST /api/v1/chat/stream
 Axum chat_stream_handler                  [server/src/api/chat/handlers.rs]
@@ -211,7 +211,7 @@ Agent::process_message()                  [core/src/agent/coordinator.rs]
           ▼ ChatService 构造 ChatStreamEvent (含 chunk_type)
           │
           ▼ SSE 流式响应
-Yew Frontend 按 chunk_type 差异化渲染
+React Frontend 按 chunk_type 差异化渲染
 ```
 
 > **注意**：RuleRecorder/RuleSuggester 已移至 `scheduler/tasks/`，作为定时任务独立运行；
@@ -244,14 +244,14 @@ Yew Frontend 按 chunk_type 差异化渲染
                 ┌───────────────────┼───────────────────┐
                 ▼                   ▼                    ▼
     ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐
-    │  StorageBackend  │  │   ContentStore   │  │    VfsSearch     │
-    │  (本地文件系统)   │  │  L0/L1/L2 读写   │  │  RRF 融合检索    │
+     │  LocalFileBackend  │  │   ContentStore   │  │    VfsSearch     │
+     │  (本地文件系统)   │  │  L0/L1/L2 读写   │  │  RRF 融合检索    │
     └────────┬────────┘  └────────┬────────┘  └────────┬─────────┘
              │                    │                     │
              ▼                    ▼                     ▼
     ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐
-    │  backend/local/  │  │  summary/       │  │  vector/qdrant.rs │
-    │  UriMapper       │  │  SummaryEngine  │  │  QdrantVectorStore │
+│  backend/local/  │  │  summary/       │  │  vector/lancedb.rs │
+│  UriMapper       │  │  SummaryEngine  │  │  LanceDbVectorStore │
     └─────────────────┘  └─────────────────┘  └──────────────────┘
 ```
 
@@ -339,8 +339,8 @@ TaskScheduler 触发
 | `ContentStore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `scheduler/tasks/` |
 | `VfsSearch` | `core/src/vfs/traits.rs` | `VfsImpl` | `context/retrieval/retriever.rs` |
 | `VirtualFileSystem` | `core/src/vfs/traits.rs` | 实现 VfsCore+ContentStore+VfsSearch 的类型自动获得 | `server/state.rs`, `agent/coordinator.rs`, `session/manager.rs` |
-| `StorageBackend` | `core/src/vfs/backend/` | `LocalStorageBackend` | `vfs/vfs_impl.rs` |
-| `VectorStorage` | `core/src/vfs/vector/traits.rs` | `QdrantVectorStore` | `vfs/vfs_impl.rs`, `context/retrieval/` |
+| `LocalFileBackend` | `core/src/vfs/backend/local.rs` | 本地文件系统存储（具体类型） | `vfs/vfs_impl.rs` |
+| `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore` | `vfs/vfs_impl.rs`, `context/retrieval/` |
 | `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`, `PlaceholderSessionManager` | `server/state.rs`, `agent/coordinator.rs` |
 | `SkillExecutor` | `core/src/skills/executor.rs` | `SkillExecutor` | `agent/tool_registry.rs`（通过 call_skill 工具桥接） |
 

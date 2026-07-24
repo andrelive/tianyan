@@ -5,12 +5,18 @@ use crate::api::shared::types::ChatMessage;
 /// 会话信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
+    /// 会话标识
     pub id: String,
+    /// 会话标题
     pub title: String,
+    /// 创建时间
     pub created_at: String,
+    /// 更新时间
     pub updated_at: String,
+    /// 消息数量
     pub message_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 会话元数据
     pub metadata: Option<SessionMetadata>,
 }
 
@@ -18,8 +24,10 @@ pub struct Session {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 使用的模型名称
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 标签列表
     pub tags: Option<Vec<String>>,
 }
 
@@ -27,8 +35,10 @@ pub struct SessionMetadata {
 #[derive(Debug, Deserialize)]
 pub struct CreateSessionRequest {
     #[serde(default = "default_session_title")]
+    /// 会话标题
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 初始消息
     pub initial_message: Option<String>,
 }
 
@@ -58,43 +68,56 @@ impl CreateSessionRequest {
 /// 创建会话响应
 #[derive(Debug, Serialize)]
 pub struct CreateSessionResponse {
+    /// 创建的会话
     pub session: Session,
 }
 
 /// 列出会话响应
 #[derive(Debug, Serialize)]
 pub struct ListSessionsResponse {
+    /// 会话列表
     pub sessions: Vec<Session>,
+    /// 会话总数
     pub total: usize,
 }
 
 /// 会话消息响应
 #[derive(Debug, Serialize)]
 pub struct SessionMessagesResponse {
+    /// 会话标识
     pub session_id: String,
+    /// 消息列表
     pub messages: Vec<ChatMessage>,
 }
 
 /// 会话详情响应
 #[derive(Debug, Serialize)]
 pub struct SessionDetail {
+    /// 会话标识
     pub id: String,
+    /// 会话标题
     pub title: String,
+    /// 创建时间
     pub created_at: String,
+    /// 更新时间
     pub updated_at: String,
+    /// 消息列表
     pub messages: Vec<ChatMessage>,
 }
 
 /// 删除会话响应
 #[derive(Debug, Serialize)]
 pub struct DeleteSessionResponse {
+    /// 是否成功
     pub success: bool,
+    /// 响应消息
     pub message: String,
 }
 
 /// 更新标题请求
 #[derive(Debug, Deserialize)]
 pub struct UpdateTitleRequest {
+    /// 新标题
     pub title: String,
 }
 

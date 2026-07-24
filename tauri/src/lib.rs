@@ -134,11 +134,8 @@ pub fn run() {
     info!("Starting Tianyan Tauri application...");
 
     // 检查配置状态
-    let config_status = tianyan::config::TianyanConfig::check_config_status();
-    info!(
-        "Configuration status: configured={}, path={:?}",
-        config_status.configured, config_status.config_path
-    );
+    let configured = tianyan::config::TianyanConfig::config_exists();
+    info!("Configuration status: configured={}", configured);
 
     // 尝试加载配置，如果失败则使用默认配置
     let tianyan_config = match tianyan::config::TianyanConfig::load() {

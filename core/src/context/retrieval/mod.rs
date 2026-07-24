@@ -14,7 +14,7 @@ mod types;
 
 pub use intent::{Intent, IntentAnalyzer, QueryType, TargetScope};
 pub use loader::ContentLoadStrategy;
-pub use retriever::{DualLayerRetriever, DualLayerRetrieverBuilder};
+pub use retriever::DualLayerRetriever;
 pub use trace::{RetrievalTraceBuilder, TokenPercentages, TokenStats};
 pub use types::{RetrievalResult, RetrievalStep, RetrievalStepType, RetrievalTrace};
 

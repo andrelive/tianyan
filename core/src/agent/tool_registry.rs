@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use tokio::sync::Mutex;
 
 use crate::agent::tool_params::{
@@ -8,9 +9,15 @@ use crate::agent::tool_params::{
     KnowledgeIngestParams, ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams,
     SelfCheckParams, VerifyBuildParams, VfsListParams, VfsReadParams, WriteFileParams,
 };
-use crate::common::types::{ContentLevel, ContentSource, ContextNamespace, Message, SearchResult, TianyanUri};
-use crate::knowledge::{IngestionRequest, KnowledgeCategory, KnowledgeIngestor};
+use crate::common::types::{
+    ContentLevel, ContentSource, ContextNamespace, Message, SearchResult, TianyanUri,
+};
+use crate::executor::approval::{ApprovalDecision, ApprovalWorkflow};
 use crate::executor::SecurityPolicy;
+use crate::executor::Action;
+use crate::executor::VerificationGate;
+use crate::scheduler::tasks::RuleRecorder;
+use crate::knowledge::{IngestionRequest, KnowledgeCategory, KnowledgeIngestor};
 use crate::model::types::{ChatCompletionRequest, FunctionDefinition, ToolCall, ToolDefinition};
 use crate::model::ChatService;
 use crate::observability::AgentMetrics;
@@ -46,7 +53,15 @@ pub struct ToolRegistry {
     knowledge_ingestor: Option<Arc<KnowledgeIngestor>>,
     vfs: Option<Arc<dyn VirtualFileSystem>>,
     model_service: Option<Arc<dyn ChatService>>,
+    /// 委托子 Agent 时使用的模型名称。
+    model: String,
     metrics: Option<Arc<AgentMetrics>>,
+    /// 审批工作流（write_file / execute_command 危险操作门控）。
+    approval_workflow: Option<Arc<ApprovalWorkflow>>,
+    /// 语义验证门控（verify_build 工具的 LLM-as-Judge 支持）。
+    verification_gate: Option<Arc<VerificationGate>>,
+    /// 规则记录器（工具执行失败时自动学习规则，供 GEPA 进化引擎消费）。
+    rule_recorder: Option<Arc<RuleRecorder>>,
     definitions: Vec<ToolDefinition>,
     /// 执行轨迹（GEPA 引擎消费）。
     execution_history: Arc<Mutex<Vec<ExecutionHistory>>>,
@@ -61,7 +76,11 @@ impl ToolRegistry {
             knowledge_ingestor: None,
             vfs: None,
             model_service: None,
+            model: "default".to_string(),
             metrics: None,
+            approval_workflow: None,
+            verification_gate: None,
+            rule_recorder: None,
             definitions: Vec::new(),
             execution_history: Arc::new(Mutex::new(Vec::new())),
         };
@@ -93,9 +112,33 @@ impl ToolRegistry {
         self
     }
 
+    /// 设置委托子 Agent 使用的模型名称。
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
+        self
+    }
+
     /// 设置可观测性指标（self_check 工具依赖）。
     pub fn with_metrics(mut self, metrics: Arc<AgentMetrics>) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// 设置审批工作流（write_file / execute_command 危险操作门控）。
+    pub fn with_approval_workflow(mut self, workflow: Arc<ApprovalWorkflow>) -> Self {
+        self.approval_workflow = Some(workflow);
+        self
+    }
+
+    /// 设置语义验证门控（verify_build 工具的 LLM-as-Judge 支持）。
+    pub fn with_verification_gate(mut self, gate: Arc<VerificationGate>) -> Self {
+        self.verification_gate = Some(gate);
+        self
+    }
+
+    /// 设置规则记录器（工具执行失败时自动学习规则）。
+    pub fn with_rule_recorder(mut self, recorder: Arc<RuleRecorder>) -> Self {
+        self.rule_recorder = Some(recorder);
         self
     }
 
@@ -143,6 +186,9 @@ impl ToolRegistry {
             "read_file" => {
                 let params: ReadFileParams = serde_json::from_str(arguments)
                     .map_err(|e| ToolExecutionError::InvalidParams(e.to_string()))?;
+                self.security_policy
+                    .check_path(std::path::Path::new(&params.path))
+                    .map_err(|e| ToolExecutionError::SecurityViolation(e.to_string()))?;
                 crate::executor::execute_read_file(&params.path)
                     .await
                     .map_err(|e| ToolExecutionError::ExecutionFailed(e.to_string()))
@@ -153,16 +199,95 @@ impl ToolRegistry {
                 self.security_policy
                     .check_file_write()
                     .map_err(|e| ToolExecutionError::SecurityViolation(e.to_string()))?;
+                self.security_policy
+                    .check_path(std::path::Path::new(&params.path))
+                    .map_err(|e| ToolExecutionError::SecurityViolation(e.to_string()))?;
+                self.security_policy
+                    .check_file_size(params.content.len() as u64)
+                    .map_err(|e| ToolExecutionError::SecurityViolation(e.to_string()))?;
+                // Approval workflow check — auto-approve safe paths,
+                // deny critical paths (e.g. /etc/, .env), request human
+                // approval for Medium/High risk paths.
+                if let Some(ref approval) = self.approval_workflow {
+                    let action = Action::WriteFile {
+                        path: params.path.clone(),
+                        content: params.content.clone(),
+                    };
+                    let resp = approval
+                        .request_approval("tool-execution", &action)
+                        .await
+                        .map_err(|e| {
+                            ToolExecutionError::ExecutionFailed(format!(
+                                "审批工作流错误: {}",
+                                e
+                            ))
+                        })?;
+                    if resp.decision != ApprovalDecision::Approve {
+                        return Err(ToolExecutionError::SecurityViolation(format!(
+                            "操作被审批工作流拒绝: {}",
+                            resp.reason.unwrap_or_default()
+                        )));
+                    }
+                }
                 crate::executor::execute_write_file(&params.path, &params.content)
                     .await
                     .map_err(|e| ToolExecutionError::ExecutionFailed(e.to_string()))
             }
             "execute_command" => {
-                let params: ExecuteCommandParams = serde_json::from_str(arguments)
+                let mut params: ExecuteCommandParams = serde_json::from_str(arguments)
                     .map_err(|e| ToolExecutionError::InvalidParams(e.to_string()))?;
-                self.security_policy
-                    .check_command(&params.command)
-                    .map_err(|e| ToolExecutionError::SecurityViolation(e.to_string()))?;
+
+                // Check command against security policy.
+                // If blocked but safety_mode is Transform, try rewriting to a safe equivalent.
+                if let Err(security_err) = self.security_policy.check_command(&params.command) {
+                    if let Some(transformed) =
+                        self.security_policy.transform_command(&params.command)
+                    {
+                        tracing::info!(
+                            original = %params.command,
+                            transformed = %transformed,
+                            "命令已由安全策略自动重写"
+                        );
+                        params.command = transformed;
+                    } else {
+                        return Err(ToolExecutionError::SecurityViolation(
+                            security_err.to_string(),
+                        ));
+                    }
+                }
+
+                // Path sandbox for working directory
+                if let Some(ref cwd) = params.cwd {
+                    self.security_policy
+                        .check_path(std::path::Path::new(cwd))
+                        .map_err(|e| ToolExecutionError::SecurityViolation(e.to_string()))?;
+                }
+
+                // Approval workflow check — auto-approve safe commands,
+                // auto-deny critical commands (rm, format, dd), request
+                // human approval for Medium/High risk commands.
+                if let Some(ref approval) = self.approval_workflow {
+                    let action = Action::ExecuteCommand {
+                        command: params.command.clone(),
+                        cwd: params.cwd.clone(),
+                        timeout_secs: params.timeout_secs,
+                    };
+                    let resp = approval
+                        .request_approval("tool-execution", &action)
+                        .await
+                        .map_err(|e| {
+                            ToolExecutionError::ExecutionFailed(format!(
+                                "审批工作流错误: {}",
+                                e
+                            ))
+                        })?;
+                    if resp.decision != ApprovalDecision::Approve {
+                        return Err(ToolExecutionError::SecurityViolation(format!(
+                            "操作被审批工作流拒绝: {}",
+                            resp.reason.unwrap_or_default()
+                        )));
+                    }
+                }
                 crate::executor::execute_command_action(
                     &params.command,
                     params.cwd.as_deref(),
@@ -187,14 +312,12 @@ impl ToolRegistry {
             "vfs_read" => {
                 let params: VfsReadParams = serde_json::from_str(arguments)
                     .map_err(|e| ToolExecutionError::InvalidParams(e.to_string()))?;
-                self.execute_vfs_read(&params.uri)
-                    .await
+                self.execute_vfs_read(&params.uri).await
             }
             "vfs_list" => {
                 let params: VfsListParams = serde_json::from_str(arguments)
                     .map_err(|e| ToolExecutionError::InvalidParams(e.to_string()))?;
-                self.execute_vfs_list(params.uri.as_deref())
-                    .await
+                self.execute_vfs_list(params.uri.as_deref()).await
             }
             "call_skill" => {
                 let params: CallSkillParams = serde_json::from_str(arguments)
@@ -216,23 +339,36 @@ impl ToolRegistry {
             "verify_build" => {
                 let params: VerifyBuildParams = serde_json::from_str(arguments)
                     .map_err(|e| ToolExecutionError::InvalidParams(e.to_string()))?;
-                crate::executor::execute_verify_build(
-                    &params.command,
-                    params.cwd.as_deref(),
-                    params.timeout_secs,
-                )
-                .await
-                .map_err(|e| ToolExecutionError::ExecutionFailed(e.to_string()))
+                // Use semantic verification if available, otherwise fall back
+                // to exit code + pattern matching.
+                if let Some(ref gate) = self.verification_gate {
+                    let result = gate
+                        .verify_build(
+                            &params.command,
+                            params.cwd.as_deref(),
+                            params.timeout_secs,
+                        )
+                        .await
+                        .map_err(|e| {
+                            ToolExecutionError::ExecutionFailed(e.to_string())
+                        })?;
+                    Ok(serde_json::Value::from(result))
+                } else {
+                    crate::executor::execute_verify_build(
+                        &params.command,
+                        params.cwd.as_deref(),
+                        params.timeout_secs,
+                    )
+                    .await
+                    .map_err(|e| ToolExecutionError::ExecutionFailed(e.to_string()))
+                }
             }
             "ask_user" => {
                 let params: AskUserParams = serde_json::from_str(arguments)
                     .map_err(|e| ToolExecutionError::InvalidParams(e.to_string()))?;
                 Err(ToolExecutionError::AskUser(params.question))
             }
-            "self_check" => {
-                self.execute_self_check()
-                    .await
-            }
+            "self_check" => self.execute_self_check().await,
             "knowledge_ingest" => {
                 let params: KnowledgeIngestParams = serde_json::from_str(arguments)
                     .map_err(|e| ToolExecutionError::InvalidParams(e.to_string()))?;
@@ -242,9 +378,9 @@ impl ToolRegistry {
             "delegate_to_agent" => {
                 let params: DelegateToAgentParams = serde_json::from_str(arguments)
                     .map_err(|e| ToolExecutionError::InvalidParams(e.to_string()))?;
-                self.execute_delegate_to_agent(&params.task, params.system_prompt.as_deref(), params.max_turns)
+                self.execute_delegate_to_agent(&params.task, params.system_prompt.as_deref())
                     .await
-            },
+            }
             _ => Err(ToolExecutionError::UnknownTool(call.function.name.clone())),
         };
 
@@ -269,6 +405,38 @@ impl ToolRegistry {
                 vec![]
             },
         });
+
+        // Record tool failures as learned rules for GEPA evolution.
+        // Only Logic/System failures are persisted; Transient errors (e.g.,
+        // network timeouts) are skipped by RuleRecorder::record_with_kind.
+        if !success {
+            if let Some(ref recorder) = self.rule_recorder {
+                let tool_name = &call.function.name;
+                let err_msg = result.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+                let abstract_text = format!("{} 工具执行失败", tool_name);
+                let detail_text = format!(
+                    "工具: {}\n参数: {}\n错误: {}\n",
+                    tool_name, arguments, err_msg
+                );
+                // Use a fixed session_id — recordings are later aggregated
+                // by RuleSuggester across all sessions.
+                if let Err(e) = recorder
+                    .record_with_kind(
+                        &abstract_text,
+                        &detail_text,
+                        "tool-execution",
+                        crate::scheduler::tasks::rule_recorder::FailureKind::Logic,
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        tool = %tool_name,
+                        error = %e,
+                        "RuleRecorder 记录失败（将被 RuleSuggester 后续聚合）"
+                    );
+                }
+            }
+        }
 
         result
     }
@@ -319,12 +487,11 @@ impl ToolRegistry {
         query: &str,
         top_k: Option<usize>,
     ) -> Result<serde_json::Value, ToolExecutionError> {
-        let vfs = self
-            .vfs
-            .as_ref()
-            .ok_or_else(|| ToolExecutionError::ExecutionFailed(
+        let vfs = self.vfs.as_ref().ok_or_else(|| {
+            ToolExecutionError::ExecutionFailed(
                 "VFS not configured for knowledge search".to_string(),
-            ))?;
+            )
+        })?;
         let limit = top_k.unwrap_or(5);
         let results: Vec<SearchResult> = vfs
             .search(query, limit, None)
@@ -355,16 +522,11 @@ impl ToolRegistry {
         }))
     }
 
-    async fn execute_vfs_read(
-        &self,
-        uri: &str,
-    ) -> Result<serde_json::Value, ToolExecutionError> {
+    async fn execute_vfs_read(&self, uri: &str) -> Result<serde_json::Value, ToolExecutionError> {
         let vfs = self
             .vfs
             .as_ref()
-            .ok_or_else(|| ToolExecutionError::ExecutionFailed(
-                "VFS not configured".to_string(),
-            ))?;
+            .ok_or_else(|| ToolExecutionError::ExecutionFailed("VFS not configured".to_string()))?;
         let parsed = TianyanUri::parse(uri)
             .map_err(|e| ToolExecutionError::InvalidParams(format!("无效 URI: {}", e)))?;
         // 加载三层内容，让 LLM 按需使用
@@ -388,9 +550,7 @@ impl ToolRegistry {
         let vfs = self
             .vfs
             .as_ref()
-            .ok_or_else(|| ToolExecutionError::ExecutionFailed(
-                "VFS not configured".to_string(),
-            ))?;
+            .ok_or_else(|| ToolExecutionError::ExecutionFailed("VFS not configured".to_string()))?;
         let target_uri = match uri {
             Some(s) => TianyanUri::parse(s)
                 .map_err(|e| ToolExecutionError::InvalidParams(format!("无效 URI: {}", e)))?,
@@ -416,15 +576,10 @@ impl ToolRegistry {
         }))
     }
 
-    async fn execute_self_check(
-        &self,
-    ) -> Result<serde_json::Value, ToolExecutionError> {
-        let metrics = self
-            .metrics
-            .as_ref()
-            .ok_or_else(|| ToolExecutionError::ExecutionFailed(
-                "AgentMetrics not configured".to_string(),
-            ))?;
+    async fn execute_self_check(&self) -> Result<serde_json::Value, ToolExecutionError> {
+        let metrics = self.metrics.as_ref().ok_or_else(|| {
+            ToolExecutionError::ExecutionFailed("AgentMetrics not configured".to_string())
+        })?;
         Ok(metrics.query_harness_health().await)
     }
 
@@ -433,15 +588,13 @@ impl ToolRegistry {
         path: &str,
         category: Option<&str>,
     ) -> Result<serde_json::Value, ToolExecutionError> {
-        let ingestor = self
-            .knowledge_ingestor
-            .as_ref()
-            .ok_or_else(|| ToolExecutionError::ExecutionFailed(
-                "KnowledgeIngestor not configured".to_string(),
-            ))?;
+        let ingestor = self.knowledge_ingestor.as_ref().ok_or_else(|| {
+            ToolExecutionError::ExecutionFailed("KnowledgeIngestor not configured".to_string())
+        })?;
 
-        let meta = std::fs::metadata(path)
-            .map_err(|e| ToolExecutionError::ExecutionFailed(format!("无法访问路径 '{}': {}", path, e)))?;
+        let meta = std::fs::metadata(path).map_err(|e| {
+            ToolExecutionError::ExecutionFailed(format!("无法访问路径 '{}': {}", path, e))
+        })?;
 
         if meta.is_dir() {
             self.ingest_directory(ingestor, path, category).await
@@ -457,17 +610,17 @@ impl ToolRegistry {
         path: &str,
         category: Option<&str>,
     ) -> Result<serde_json::Value, ToolExecutionError> {
-        let content = tokio::fs::read(path)
-            .await
-            .map_err(|e| ToolExecutionError::ExecutionFailed(format!("读取文件失败 '{}': {}", path, e)))?;
+        let content = tokio::fs::read(path).await.map_err(|e| {
+            ToolExecutionError::ExecutionFailed(format!("读取文件失败 '{}': {}", path, e))
+        })?;
 
         let filename = std::path::Path::new(path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string());
 
-        let mut req = IngestionRequest::new(content, &filename)
-            .with_source(ContentSource::UserUpload);
+        let mut req =
+            IngestionRequest::new(content, &filename).with_source(ContentSource::UserUpload);
 
         if let Some(cat) = category {
             if let Some(kc) = KnowledgeCategory::parse(cat) {
@@ -498,16 +651,21 @@ impl ToolRegistry {
         category: Option<&str>,
     ) -> Result<serde_json::Value, ToolExecutionError> {
         let mut entries = Vec::new();
-        let mut dir = tokio::fs::read_dir(path)
-            .await
-            .map_err(|e| ToolExecutionError::ExecutionFailed(format!("读取目录失败 '{}': {}", path, e)))?;
+        let mut dir = tokio::fs::read_dir(path).await.map_err(|e| {
+            ToolExecutionError::ExecutionFailed(format!("读取目录失败 '{}': {}", path, e))
+        })?;
 
         while let Some(entry) = dir
             .next_entry()
             .await
             .map_err(|e| ToolExecutionError::ExecutionFailed(format!("读取目录条目失败: {}", e)))?
         {
-            if entry.file_type().await.map(|t| t.is_file()).unwrap_or(false) {
+            if entry
+                .file_type()
+                .await
+                .map(|t| t.is_file())
+                .unwrap_or(false)
+            {
                 entries.push(entry.path().to_string_lossy().to_string());
             }
         }
@@ -542,68 +700,106 @@ impl ToolRegistry {
         }))
     }
 
-    async fn execute_delegate_to_agent(
-        &self,
-        task: &str,
-        system_prompt: Option<&str>,
-        max_turns: Option<usize>,
-    ) -> Result<serde_json::Value, ToolExecutionError> {
-        let model_service = self
-            .model_service
-            .clone()
-            .ok_or_else(|| ToolExecutionError::ExecutionFailed(
-                "ModelService not configured for delegation".to_string(),
-            ))?;
+    /// Execute a sub-task delegation loop.
+    ///
+    /// The LLM drives the loop: each turn it can either return a final answer
+    /// or request tool calls.  When tools are requested, they are executed and
+    /// results are fed back into the next turn so the LLM can see them and
+    /// decide what to do next — the tool facilitates the mechanics, the LLM
+    /// owns the decisions.
+    ///
+    /// This is intentionally a bounded loop (max 200 turns) to prevent
+    /// runaway delegation.
+    ///
+    /// Returns `BoxFuture` to break async recursion with `execute_single`.
+    fn execute_delegate_to_agent<'a>(
+        &'a self,
+        task: &'a str,
+        system_prompt: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<serde_json::Value, ToolExecutionError>> {
+        Box::pin(async move {
+            const MAX_DELEGATION_TURNS: usize = 200;
 
-        let mut sub_messages: Vec<Message> = Vec::new();
-        if let Some(prompt) = system_prompt {
-            if !prompt.is_empty() {
-                sub_messages.push(Message::system(prompt));
+            let model_service = self.model_service.clone().ok_or_else(|| {
+                ToolExecutionError::ExecutionFailed(
+                    "ModelService not configured for delegation".to_string(),
+                )
+            })?;
+
+            let mut sub_messages: Vec<Message> = Vec::new();
+            if let Some(prompt) = system_prompt {
+                if !prompt.is_empty() {
+                    sub_messages.push(Message::system(prompt));
+                }
             }
-        }
-        sub_messages.push(Message::user(task));
+            sub_messages.push(Message::user(task));
 
-        let max_turns = max_turns.unwrap_or(5);
-        let mut total_tokens: usize = 0;
+            let mut total_tokens: usize = 0;
 
-        for _turn in 0..max_turns {
-            let request = ChatCompletionRequest::new("default", sub_messages.clone());
-            let response = model_service
-                .chat_completion(request)
-                .await
-                .map_err(|e| ToolExecutionError::ExecutionFailed(e.to_string()))?;
+            for _turn in 0..MAX_DELEGATION_TURNS {
+                let request = ChatCompletionRequest::new(&self.model, sub_messages.clone());
+                let response = model_service
+                    .chat_completion(request)
+                    .await
+                    .map_err(|e| ToolExecutionError::ExecutionFailed(e.to_string()))?;
 
-            total_tokens += response.usage.total_tokens;
-            let choice = response
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| ToolExecutionError::ExecutionFailed("Empty response".to_string()))?;
+                total_tokens += response.usage.total_tokens;
+                let choice = response.choices.into_iter().next().ok_or_else(|| {
+                    ToolExecutionError::ExecutionFailed("Empty response".to_string())
+                })?;
 
-            let content = choice.message.content;
-            if content.is_empty() && choice.message.tool_calls.is_some() {
-                // Sub-task has tool calls — cannot execute them in isolated context,
-                // pass through the call request as result
-                let tc_names: Vec<String> = choice.message.tool_calls.as_ref()
-                    .map(|tcs| tcs.iter().map(|tc| tc.function.name.clone()).collect())
-                    .unwrap_or_default();
-                return Ok(serde_json::json!({
-                    "status": "tool_calls_required",
-                    "requested_tools": tc_names,
-                    "total_tokens": total_tokens,
-                }));
+                let assistant_msg = choice.message;
+                if assistant_msg.content.is_empty() {
+                    if let Some(ref tool_calls) = assistant_msg.tool_calls {
+                        // LLM requested tools — execute them in parallel, feed results back.
+
+                        // Record the assistant's tool-call request in the history.
+                        sub_messages.push(Message::assistant_with_tools(
+                            String::new(),
+                            tool_calls.clone(),
+                        ));
+
+                        // Filter out nested delegation (breaks async recursion).
+                        let (allowed, denied): (Vec<_>, Vec<_>) = tool_calls
+                            .iter()
+                            .cloned()
+                            .partition(|tc| tc.function.name != "delegate_to_agent");
+
+                        if !allowed.is_empty() {
+                            let results = self.execute_parallel(&allowed).await;
+                            for (call_id, result) in results {
+                                let content = match result {
+                                    Ok(val) => val.to_string(),
+                                    Err(e) => format!("Error: {}", e),
+                                };
+                                sub_messages.push(Message::tool(call_id, content));
+                            }
+                        }
+                        for tc in denied {
+                            sub_messages.push(Message::tool(
+                                &tc.id,
+                                "Error: nested delegation is not supported",
+                            ));
+                        }
+                        continue;
+                    }
+                } else {
+                    // LLM provided a final answer — record it and return.
+                    sub_messages.push(Message::assistant(
+                        assistant_msg.content.clone(),
+                    ));
+                    return Ok(serde_json::json!({
+                        "result": assistant_msg.content,
+                        "total_tokens": total_tokens,
+                    }));
+                }
             }
 
-            return Ok(serde_json::json!({
-                "result": content,
+            Ok(serde_json::json!({
+                "result": "sub-task reached max turns without final answer",
                 "total_tokens": total_tokens,
-            }));
-        }
-
-        Ok(serde_json::json!({
-            "result": "sub-task reached max turns without final answer",
-            "total_tokens": total_tokens,
-        }))
+            }))
+        })
     }
 
     fn register_builtin_tools(&mut self) {

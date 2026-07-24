@@ -7,9 +7,13 @@
 //! - 删除会话
 //! - 会话持久化
 
+/// 会话请求处理函数
 pub mod handlers;
+/// 会话路由定义
 pub mod routes;
+/// 会话业务逻辑
 pub mod services;
+/// 会话类型定义
 pub mod types;
 
 pub use routes::routes;

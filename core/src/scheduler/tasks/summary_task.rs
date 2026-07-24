@@ -138,15 +138,16 @@ impl SummaryTask {
                 ))
             })?;
 
-        let (abstract_content, overview_content) = if detail_content.len() < ABSTRACT_TOKEN_LIMIT * 4 {
-            tracing::debug!("短内容直接用作摘要：{}", uri);
-            (detail_content.clone(), detail_content)
-        } else {
-            tracing::debug!("长内容生成摘要：{}", uri);
-            ctx.summary_engine
-                .generate_summaries(&detail_content)
-                .await?
-        };
+        let (abstract_content, overview_content) =
+            if detail_content.len() < ABSTRACT_TOKEN_LIMIT * 4 {
+                tracing::debug!("短内容直接用作摘要：{}", uri);
+                (detail_content.clone(), detail_content)
+            } else {
+                tracing::debug!("长内容生成摘要：{}", uri);
+                ctx.summary_engine
+                    .generate_summaries(&detail_content)
+                    .await?
+            };
 
         // 写入摘要
         ctx.vfs.write_abstract(uri, &abstract_content).await?;

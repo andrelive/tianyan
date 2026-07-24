@@ -44,6 +44,26 @@ pub trait ChatService: Send + Sync {
     }
 }
 
+#[cfg(test)]
+mockall::mock! {
+    /// ChatService 的 mockall 自动生成 mock。
+    /// 使用 `MockChatService::new()` 创建，`expect_*().returning()` 配置行为。
+    pub ChatService {}
+
+    #[async_trait]
+    impl ChatService for ChatService {
+        async fn chat_completion(
+            &self,
+            request: ChatCompletionRequest,
+        ) -> Result<ChatCompletionResponse>;
+
+        async fn chat_completion_stream(
+            &self,
+            request: ChatCompletionRequest,
+        ) -> Result<mpsc::Receiver<Result<ChatCompletionChunk>>>;
+    }
+}
+
 /// 服务发现 trait。
 ///
 /// 提供模型列表查询、可用性检查和名称获取的基础设施能力。
@@ -144,37 +164,10 @@ mod tests {
     use crate::common::error::Result;
     use crate::common::types::Message;
     use crate::model::types::{
-        ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatChoice,
-        EmbeddingRequest, EmbeddingResponse, ModelCapability, ModelInfo, ModelType,
-        VisionChoice, VisionContent, VisionMessage, VisionRequest, VisionResponse,
+        ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
+        EmbeddingRequest, EmbeddingResponse, ModelCapability, ModelInfo, ModelType, VisionChoice,
+        VisionContent, VisionMessage, VisionRequest, VisionResponse,
     };
-
-    struct MockChatService;
-
-    #[async_trait]
-    impl ChatService for MockChatService {
-        async fn chat_completion(
-            &self,
-            _request: ChatCompletionRequest,
-        ) -> Result<ChatCompletionResponse> {
-            Ok(ChatCompletionResponse {
-                id: "test".to_string(),
-                object: "chat.completion".to_string(),
-                created: 0,
-                model: "test-model".to_string(),
-                choices: vec![],
-                usage: crate::common::types::TokenUsage::default(),
-            })
-        }
-
-        async fn chat_completion_stream(
-            &self,
-            _request: ChatCompletionRequest,
-        ) -> Result<mpsc::Receiver<Result<ChatCompletionChunk>>> {
-            let (tx, rx) = mpsc::channel(100);
-            Ok(rx)
-        }
-    }
 
     /// MockVlmService: 用于测试的 VlmService 实现。
     pub(crate) struct MockVlmService;

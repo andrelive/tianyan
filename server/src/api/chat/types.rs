@@ -5,14 +5,22 @@ use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
 /// 对话完成请求
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
+    /// 会话标识
     pub session_id: Option<String>,
+    /// 消息列表
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
+    /// 是否启用流式响应
     pub stream: bool,
     #[serde(default)]
+    /// 生成温度
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
+    /// 最大生成令牌数
     pub max_tokens: u32,
+    /// 指定使用的模型。未提供时使用配置中的默认模型。
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -46,9 +54,13 @@ impl ChatRequest {
 /// 对话完成响应（非流式）
 #[derive(Debug, Serialize)]
 pub struct ChatResponse {
+    /// 响应标识
     pub id: String,
+    /// 会话标识
     pub session_id: String,
+    /// 回复消息
     pub message: ChatMessage,
+    /// 令牌使用统计
     pub usage: TokenUsage,
 }
 
@@ -71,17 +83,24 @@ impl ChatResponse {
 /// 技能调用信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillCallInfo {
+    /// 技能标识
     pub skill_id: String,
+    /// 技能名称
     pub skill_name: String,
+    /// 是否执行成功
     pub success: bool,
+    /// 执行耗时（毫秒）
     pub execution_time_ms: u64,
+    /// 错误信息
     pub error: Option<String>,
 }
 
 /// 重新生成消息请求
 #[derive(Debug, Deserialize)]
 pub struct RegenerateRequest {
+    /// 会话标识
     pub session_id: String,
+    /// 消息索引
     pub message_index: usize,
 }
 
@@ -98,8 +117,11 @@ impl RegenerateRequest {
 /// 编辑消息请求
 #[derive(Debug, Deserialize)]
 pub struct EditMessageRequest {
+    /// 会话标识
     pub session_id: String,
+    /// 消息索引
     pub message_index: usize,
+    /// 编辑后的新内容
     pub new_content: String,
 }
 
@@ -122,12 +144,18 @@ impl EditMessageRequest {
 /// SSE 流式事件
 #[derive(Debug, Serialize)]
 pub struct ChatStreamEvent {
+    /// 事件标识
     pub id: String,
+    /// 会话标识
     pub session_id: String,
+    /// 增量内容
     pub delta: String,
+    /// 结束原因
     pub finish_reason: Option<String>,
+    /// 数据块类型
     pub chunk_type: tianyan::agent::StreamChunkType,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 技能调用列表
     pub skill_calls: Option<Vec<SkillCallInfo>>,
 }
 

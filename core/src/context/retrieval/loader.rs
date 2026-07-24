@@ -43,18 +43,45 @@ mod tests {
 
     #[test]
     fn test_load_strategy_from_score() {
-        assert_eq!(ContentLoadStrategy::from_score(0.9), ContentLoadStrategy::Full);
-        assert_eq!(ContentLoadStrategy::from_score(0.86), ContentLoadStrategy::Full);
-        assert_eq!(ContentLoadStrategy::from_score(0.7), ContentLoadStrategy::Overview);
-        assert_eq!(ContentLoadStrategy::from_score(0.61), ContentLoadStrategy::Overview);
-        assert_eq!(ContentLoadStrategy::from_score(0.5), ContentLoadStrategy::Abstract);
-        assert_eq!(ContentLoadStrategy::from_score(0.0), ContentLoadStrategy::Abstract);
+        assert_eq!(
+            ContentLoadStrategy::from_score(0.9),
+            ContentLoadStrategy::Full
+        );
+        assert_eq!(
+            ContentLoadStrategy::from_score(0.86),
+            ContentLoadStrategy::Full
+        );
+        assert_eq!(
+            ContentLoadStrategy::from_score(0.7),
+            ContentLoadStrategy::Overview
+        );
+        assert_eq!(
+            ContentLoadStrategy::from_score(0.61),
+            ContentLoadStrategy::Overview
+        );
+        assert_eq!(
+            ContentLoadStrategy::from_score(0.5),
+            ContentLoadStrategy::Abstract
+        );
+        assert_eq!(
+            ContentLoadStrategy::from_score(0.0),
+            ContentLoadStrategy::Abstract
+        );
     }
 
     #[test]
     fn test_load_strategy_to_content_level() {
-        assert_eq!(ContentLoadStrategy::Full.to_content_level(), ContentLevel::Detail);
-        assert_eq!(ContentLoadStrategy::Overview.to_content_level(), ContentLevel::Overview);
-        assert_eq!(ContentLoadStrategy::Abstract.to_content_level(), ContentLevel::Abstract);
+        assert_eq!(
+            ContentLoadStrategy::Full.to_content_level(),
+            ContentLevel::Detail
+        );
+        assert_eq!(
+            ContentLoadStrategy::Overview.to_content_level(),
+            ContentLevel::Overview
+        );
+        assert_eq!(
+            ContentLoadStrategy::Abstract.to_content_level(),
+            ContentLevel::Abstract
+        );
     }
 }

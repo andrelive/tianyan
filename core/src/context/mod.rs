@@ -9,13 +9,13 @@ pub mod retrieval;
 
 pub use pipeline::ContextPipeline;
 
+pub use assembler::ContextAssembler;
 pub use compression::{
     estimate_tokens, CompressionConfig, CompressionResult, CompressionStatus, CompressionStrategy,
     ContextCompressor, TokenEstimator,
 };
 pub use retrieval::{
-    ContentLoadStrategy, DualLayerRetriever, DualLayerRetrieverBuilder, Intent, IntentAnalyzer,
+    ContentLoadStrategy, DualLayerRetriever, Intent, IntentAnalyzer,
     QueryType, RetrievalResult, RetrievalStep, RetrievalStepType, RetrievalTrace,
     RetrievalTraceBuilder, TokenPercentages, TokenStats,
 };
-pub use assembler::ContextAssembler;

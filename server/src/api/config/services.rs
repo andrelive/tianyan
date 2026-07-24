@@ -1,13 +1,11 @@
 // 标准库
 use std::sync::Arc;
 
-use tracing::{debug, info};
+use tracing::info;
 
 use tianyan::config::TianyanConfig;
 
-use crate::api::config::types::{
-    ConfigResponse, ModelServiceInfo, ModelsResponse, UpdateConfigResponse,
-};
+use crate::api::config::types::{ConfigResponse, ModelsResponse, UpdateConfigResponse};
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
 
@@ -49,28 +47,47 @@ impl ConfigService {
         })
     }
 
-    /// 获取模型服务列表及默认模型
+    /// 获取模型服务列表
     pub async fn get_models(&self) -> Result<ModelsResponse, ApiError> {
+        use tianyan::config::api_types::{ModelInfo, PreferencesInfo, ProviderInfo};
+
         let config = self.state.config().read().await.clone();
 
-        let services: Vec<ModelServiceInfo> = config
+        let providers = config
             .models
-            .services
+            .providers
             .iter()
-            .map(|s| ModelServiceInfo {
-                name: s.name.clone(),
-                endpoint: s.endpoint.clone(),
-                default_model: s.default_model.clone(),
-                enabled: s.enabled,
-                priority: s.priority,
+            .map(|p| ProviderInfo {
+                name: p.name.clone(),
+                endpoint: p.endpoint.clone(),
+                enabled: p.enabled,
+                model_count: p.models.len(),
             })
             .collect();
 
+        let models = config
+            .models
+            .providers
+            .iter()
+            .flat_map(|p| {
+                p.models.iter().map(|m| ModelInfo {
+                    name: m.name.clone(),
+                    provider: p.name.clone(),
+                    capabilities: m.capabilities.clone(),
+                })
+            })
+            .collect();
+
+        let preferences = PreferencesInfo {
+            chat: config.models.preferences.chat.clone(),
+            embedding: config.models.preferences.embedding.clone(),
+            vision: config.models.preferences.vision.clone(),
+        };
+
         Ok(ModelsResponse {
-            services,
-            default_chat_model: config.models.default_chat_model.clone(),
-            default_embedding_model: config.models.default_embedding_model.clone(),
-            default_vision_model: config.models.default_vision_model.clone(),
+            providers,
+            models,
+            preferences,
         })
     }
 
@@ -78,23 +95,26 @@ impl ConfigService {
     pub async fn switch_model(&self, model: &str) -> Result<UpdateConfigResponse, ApiError> {
         let mut config = self.state.config().read().await.clone();
 
-        let valid_models: Vec<String> = config
+        // 查找哪个 provider 拥有此模型
+        let model_ref = config
             .models
-            .services
+            .providers
             .iter()
-            .filter(|s| s.enabled)
-            .flat_map(|s| s.models.clone())
-            .collect();
+            .filter(|p| p.enabled)
+            .find_map(|p| {
+                p.models
+                    .iter()
+                    .find(|m| m.name == model)
+                    .map(|_m| tianyan::config::ModelRef {
+                        provider: p.name.clone(),
+                        model: model.to_string(),
+                    })
+            })
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!("模型 '{}' 未在任何已启用的提供商中注册", model))
+            })?;
 
-        if !valid_models.contains(&model.to_string()) {
-            return Err(ApiError::BadRequest(format!(
-                "模型 '{}' 未在任何已启用的服务中注册",
-                model
-            )));
-        }
-
-        config.models.default_chat_model = model.to_string();
-        debug!(model = model, "切换默认聊天模型");
+        config.models.preferences.chat = Some(model_ref);
 
         config.validate().map_err(ApiError::Config)?;
 
@@ -111,8 +131,6 @@ impl ConfigService {
             message: format!("已切换到模型：{}", model),
         })
     }
-
-    /// 将配置持久化到文件
     async fn persist_config(&self, config: &TianyanConfig) -> Result<(), ApiError> {
         let path = TianyanConfig::find_config_file()
             .or_else(TianyanConfig::default_config_path)

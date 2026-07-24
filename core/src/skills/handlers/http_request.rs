@@ -12,18 +12,28 @@ use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 /// HTTP 请求处理器。
 pub struct HttpRequestHandler {
     client: reqwest::Client,
+    #[allow(dead_code)]
+    timeout_secs: u64,
 }
 
 impl HttpRequestHandler {
     /// 创建新的 HTTP 请求处理器。
     pub fn new() -> Self {
+        Self::with_timeout(60)
+    }
+
+    /// 使用自定义超时创建。
+    pub fn with_timeout(secs: u64) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(secs))
+            .connect_timeout(Duration::from_secs(secs.min(15)))
             .pool_max_idle_per_host(5)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client }
+        Self {
+            client,
+            timeout_secs: secs,
+        }
     }
 }
 

@@ -7,11 +7,11 @@ use tracing::{debug, info, warn};
 
 use tianyan::skills::{SkillExecutor, SkillRegistry};
 
+use crate::api::shared::error::ApiError;
 use crate::api::skills::types::{
     ExecuteSkillRequest, ExecuteSkillResponse, ListSkillsResponse, Skill, SkillExecutionStatus,
     SkillParameter,
 };
-use crate::api::shared::error::ApiError;
 
 /// 技能服务，管理和执行技能
 pub struct SkillService {

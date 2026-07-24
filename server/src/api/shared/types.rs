@@ -4,14 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 生成短 UUID（取第一个分段）
+/// 生成带 `session-` 前缀的会话 ID（完整 UUID）。
 pub fn short_uuid() -> String {
-    uuid::Uuid::new_v4()
-        .to_string()
-        .split('-')
-        .next()
-        .unwrap_or("")
-        .to_string()
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// 聊天消息角色

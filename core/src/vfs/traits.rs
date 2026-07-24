@@ -8,6 +8,7 @@ use crate::common::error::Result;
 use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
 
 use super::types::ContextEntry;
+use crate::common::types::EntryMetadata;
 
 /// 内容元数据。
 #[derive(Debug, Clone)]
@@ -119,6 +120,27 @@ pub trait VfsSearch: Send + Sync {
         abstract_content: &str,
         overview_content: &str,
     ) -> Result<()>;
+
+    /// 为条目生成并存储索引向量。
+    ///
+    /// 将 abstract/overview 文本 embed 为向量，与可选的 visual_vector
+    /// 和自定义 payload 元数据一起写入向量库。一次调用完成完整索引。
+    ///
+    /// 默认实现委托给 `update_summary_vectors()`（忽略 visual_vector 和 payload），
+    /// 以保持与未实现本方法的 mock 后向兼容。
+    async fn index_entry(
+        &self,
+        uri: &TianyanUri,
+        abstract_content: &str,
+        overview_content: &str,
+        visual_vector: Option<Vec<f32>>,
+        payload: EntryMetadata,
+        embedding_model: &str,
+    ) -> Result<()> {
+        let _ = (visual_vector, payload, embedding_model);
+        self.update_summary_vectors(uri, abstract_content, overview_content)
+            .await
+    }
 }
 
 /// 组合超 trait —— 提供统一的 VirtualFileSystem 接口。
@@ -176,7 +198,6 @@ pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch {
             .filter_map(|e| e.uri().path().last().cloned())
             .collect())
     }
-
 }
 
 #[cfg(test)]

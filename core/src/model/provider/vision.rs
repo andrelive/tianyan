@@ -26,8 +26,7 @@ impl VlmService for AsyncOpenAIClient {
         request_builder.model(model).messages(messages);
 
         if let Some(max_tokens) = request.max_tokens {
-            #[allow(deprecated)]
-            request_builder.max_tokens(max_tokens as u32);
+            request_builder.max_completion_tokens(max_tokens as u32);
         }
         if let Some(temp) = request.temperature {
             request_builder.temperature(temp);

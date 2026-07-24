@@ -35,7 +35,7 @@ impl Default for SkillLearningConfig {
             enable_auto_learning: true,
             success_threshold: 2,
             min_history_length: 3,
-            generation_model: "gpt-4o".to_string(),
+            generation_model: String::new(),
             skill_storage_prefix: "skill/learned".to_string(),
         }
     }
@@ -240,6 +240,7 @@ impl SkillLearningEngine {
         md
     }
 
+    /// 评估技能执行效果。
     pub async fn evaluate_skill(
         &self,
         skill_id: &str,
@@ -285,8 +286,8 @@ mod tests {
     #[test]
     fn test_categorize_task() {
         let engine = SkillLearningEngine::new(
-            Arc::new(MockChatService),
-            Arc::new(MockVfs),
+            mock_chat_empty(),
+            Arc::new(MockVfs::new()),
             SkillLearningConfig::default(),
         );
 
@@ -299,8 +300,8 @@ mod tests {
     #[tokio::test]
     async fn test_skill_evaluation() {
         let engine = SkillLearningEngine::new(
-            Arc::new(MockChatService),
-            Arc::new(MockVfs),
+            mock_chat_empty(),
+            Arc::new(MockVfs::new()),
             SkillLearningConfig::default(),
         );
 
@@ -315,133 +316,29 @@ mod tests {
         assert_eq!(eval.recommended_action, SkillAction::Improve);
     }
 
-    struct MockChatService;
-    #[async_trait::async_trait]
-    impl crate::model::ChatService for MockChatService {
-        async fn chat(
-            &self,
-            _model: &str,
-            _messages: Vec<crate::common::types::Message>,
-        ) -> crate::common::error::Result<String> {
-            Ok("{}".to_string())
-        }
-        async fn chat_completion(
-            &self,
-            _request: crate::model::ChatCompletionRequest,
-        ) -> crate::common::error::Result<crate::model::ChatCompletionResponse> {
-            unimplemented!()
-        }
-        async fn chat_completion_stream(
-            &self,
-            _request: crate::model::ChatCompletionRequest,
-        ) -> crate::common::error::Result<
-            tokio::sync::mpsc::Receiver<
-                crate::common::error::Result<crate::model::ChatCompletionChunk>,
-            >,
-        > {
-            unimplemented!()
-        }
+    use crate::model::types::{ChatChoice, ChatCompletionResponse};
+    use crate::model::ChatService;
+    use crate::test_utils::MockChatService;
+
+    /// 创建返回空 JSON 响应的 mock ChatService（用于学习引擎测试）。
+    fn mock_chat_empty() -> Arc<dyn crate::model::ChatService> {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            Ok(ChatCompletionResponse {
+                id: "mock".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: crate::common::types::Message::assistant("{}".to_string()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Default::default(),
+            })
+        });
+        Arc::new(mock)
     }
 
-    use crate::common::error::Result;
-    use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
-    use crate::vfs::{
-        ContentMetadata, ContentStore, ContextEntry, VfsCore, VfsSearch,
-        VirtualFileSystem,
-    };
-    use std::collections::HashMap;
-
-    struct MockVfs;
-
-    #[async_trait::async_trait]
-    impl VfsCore for MockVfs {
-        async fn initialize(&self) -> Result<()> {
-            Ok(())
-        }
-        async fn exists(&self, _uri: &TianyanUri) -> Result<bool> {
-            Ok(false)
-        }
-        async fn get_entry(&self, _uri: &TianyanUri) -> Result<ContextEntry> {
-            unimplemented!()
-        }
-        async fn create_directory(&self, _uri: &TianyanUri) -> Result<ContextEntry> {
-            unimplemented!()
-        }
-        async fn create_file(&self, _uri: &TianyanUri) -> Result<ContextEntry> {
-            unimplemented!()
-        }
-        async fn delete(&self, _uri: &TianyanUri) -> Result<()> {
-            Ok(())
-        }
-        async fn list(&self, _uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
-            Ok(vec![])
-        }
-        async fn move_entry(&self, _source: &TianyanUri, _destination: &TianyanUri) -> Result<()> {
-            Ok(())
-        }
-        async fn update_metadata(
-            &self,
-            _uri: &TianyanUri,
-            _importance: f32,
-            _custom: HashMap<String, serde_json::Value>,
-        ) -> Result<()> {
-            Ok(())
-        }
-        async fn get_all_content_metadata(
-            &self,
-            _uri: &TianyanUri,
-        ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
-            Ok(HashMap::new())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ContentStore for MockVfs {
-        async fn write(
-            &self,
-            _uri: &TianyanUri,
-            _level: ContentLevel,
-            _content: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-        async fn read(&self, _uri: &TianyanUri, _level: ContentLevel) -> Result<String> {
-            Ok("".to_string())
-        }
-        async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn has_content(&self, _uri: &TianyanUri, _level: ContentLevel) -> Result<bool> {
-            Ok(false)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl VfsSearch for MockVfs {
-        async fn search(
-            &self,
-            _query: &str,
-            _limit: usize,
-            _namespace: Option<ContextNamespace>,
-        ) -> Result<Vec<SearchResult>> {
-            Ok(vec![])
-        }
-        async fn search_by_visual(
-            &self,
-            _visual_vector: &[f32],
-            _top_k: usize,
-        ) -> Result<Vec<SearchResult>> {
-            Ok(vec![])
-        }
-        async fn update_summary_vectors(
-            &self,
-            _uri: &TianyanUri,
-            _abstract_content: &str,
-            _overview_content: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    impl VirtualFileSystem for MockVfs {}
+    use crate::test_utils::MockVfs;
 }

@@ -31,9 +31,7 @@ ring = { workspace = true }
 
 # JSON Schema generation
 schemars = { workspace = true }
-
-# Vector database
-qdrant-client = { workspace = true }
+lancedb.workspace = true
 
 # Document processing
 pulldown-cmark = { workspace = true }
@@ -77,12 +75,15 @@ base64 = { workspace = true }
 
 # Regular expressions
 regex = { workspace = true }
+arrow-array = "58.4.0"
+arrow-schema = "58.4.0"
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
+mockall = { workspace = true }
 
 [features]
 default = []

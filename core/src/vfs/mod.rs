@@ -8,8 +8,8 @@
 //!
 //! - **StorageConfig**: 存储后端配置（定义在 `crate::config`）
 //! - **UriMapper**: URI 到文件系统路径的映射
-//! - **StorageBackend**: 存储后端 trait（本地文件系统、云存储等）
-//! - **VectorStorage**: 向量存储后端 trait（仅支持 Qdrant。
+//! - **LocalFileBackend**: 本地文件系统存储后端
+//! - **VectorStorage**: 向量存储后端 trait（支持 LanceDB 嵌入式向量存储。
 //! - **VirtualFileSystem**: 统一的上下文存储接口
 //! - **SummaryEngine**: 分层摘要生成
 //!
@@ -18,12 +18,12 @@
 //! ```no_run
 //! use std::sync::Arc;
 //! use tianyan::config::StorageConfig;
-//! use tianyan::vfs::{LocalFileBackend, QdrantVectorStore, VirtualFileSystemImpl};
+//! use tianyan::vfs::{LanceDbVectorStore, LocalFileBackend, VirtualFileSystemImpl};
 //!
 //! async fn setup_storage() {
 //!     let config = StorageConfig::default();
 //!     let storage = Arc::new(LocalFileBackend::new(config.clone()));
-//!     let vector_storage = Arc::new(QdrantVectorStore::new(&config).unwrap());
+//!     let vector_storage = Arc::new(LanceDbVectorStore::new(&config).await.unwrap());
 //!     let vfs = VirtualFileSystemImpl::new(storage, vector_storage, config);
 //! }
 //! ```
@@ -41,23 +41,18 @@ mod test_utils;
 
 // 重新导出公共 API
 pub use crate::config::StorageConfig;
-pub use backend::{LocalFileBackend, StorageBackend};
-pub use summary::{
-    MockSummaryEngine, SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
-};
-pub use traits::{
-    ContentMetadata, ContentStore, VfsCore, VfsSearch,
-    VirtualFileSystem,
-};
+pub use backend::LocalFileBackend;
+#[cfg(test)]
+pub use summary::MockSummaryEngine;
+pub use summary::{SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT};
+pub use traits::{ContentMetadata, ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
 pub use types::{
     CategoryStats, ContextEntry, DirectoryIndex, DirectoryStats, IndexEntry, StorageStats,
     VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType, CURRENT_SCHEMA_VERSION,
 };
 pub use uri_mapper::UriMapper;
-pub use vector::{VectorStorage, QdrantVectorStore, QdrantVectorStoreBuilder};
-pub use vfs_impl::{
-    VirtualFileSystemBuilder, VirtualFileSystemImpl,
-};
+pub use vector::{LanceDbVectorStore, VectorStorage};
+pub use vfs_impl::{VirtualFileSystemBuilder, VirtualFileSystemImpl};
 
 /// 虚拟文件系统的共享引用类型别名。
 ///

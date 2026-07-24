@@ -31,16 +31,19 @@ function Check-Dependencies {
     }
     Write-Success "Cargo is installed"
 
-    # Check trunk
-    if (-not (Test-Command "trunk")) {
-        Write-Warn "Trunk not found. Installing..."
-        cargo install trunk
-        if ($LASTEXITCODE -ne 0) {
-            Write-Err "Failed to install Trunk"
-            exit 1
-        }
+    # Check Node.js (required for React frontend build)
+    if (-not (Test-Command "node")) {
+        Write-Err "Node.js not found. Please install Node.js 18+: https://nodejs.org/"
+        exit 1
     }
-    Write-Success "Trunk is installed"
+    Write-Success "Node.js is installed"
+
+    # Check npm
+    if (-not (Test-Command "npm")) {
+        Write-Err "npm not found. Please install Node.js (includes npm)"
+        exit 1
+    }
+    Write-Success "npm is installed"
 
     # Check tauri-cli
     $tauriCli = cargo install --list | Select-String "tauri-cli"
@@ -53,32 +56,32 @@ function Check-Dependencies {
         }
     }
     Write-Success "tauri-cli is installed"
-
-    # Check Node.js
-    if (-not (Test-Command "node")) {
-        Write-Warn "Node.js not found. Some features may not work"
-    } else {
-        Write-Success "Node.js is installed"
-    }
 }
 
-# Build GUI (Yew/WASM)
+# Build GUI (React/TypeScript)
 function Build-Gui {
     if ($SkipGui) {
         Write-Info "Skipping GUI build"
         return
     }
 
-    Write-Info "Building GUI (Yew/WASM)..."
+    Write-Info "Building GUI (React/TypeScript)..."
 
-    Push-Location "$PSScriptRoot\..\gui"
+    Push-Location "$PSScriptRoot\..\gui-vite"
     try {
-        $buildOutput = trunk build --release 2>&1
+        Write-Info "Installing npm dependencies..."
+        $installOutput = npm install 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Err "npm install failed"
+            if ($Verbose) { $installOutput | ForEach-Object { "  $_" } }
+            exit 1
+        }
+
+        Write-Info "Building React frontend..."
+        $buildOutput = npm run build 2>&1
         $exitCode = $LASTEXITCODE
 
         if ($Verbose) {
-            $buildOutput | ForEach-Object { "  $_" }
-        } else {
             $buildOutput | ForEach-Object { "  $_" }
         }
 
@@ -88,7 +91,7 @@ function Build-Gui {
         }
 
         Write-Success "GUI build completed"
-        Write-Info "Output directory: gui/dist/"
+        Write-Info "Output directory: gui-vite/dist/"
     } finally {
         Pop-Location
     }

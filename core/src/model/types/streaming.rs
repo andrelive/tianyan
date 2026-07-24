@@ -79,7 +79,7 @@ impl ChatCompletionChunk {
     pub fn add_to_message(&self, message: &mut Message) {
         for choice in &self.choices {
             if let Some(ref role) = choice.delta.role {
-                message.role = role.clone();
+                message.role = *role;
             }
             if let Some(ref content) = choice.delta.content {
                 message.content.push_str(content);

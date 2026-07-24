@@ -3,244 +3,125 @@
 
 # ==================== 智能体配置 ====================
 [agent]
-# 是否启用技能执行
-# 默认：true
 enable_skills = true
-
-# 是否启用记忆持久化
-# 默认：true
 enable_memory = true
-
-# 是否流式输出响应
-# 默认：true
 stream_responses = true
-
-# 是否启用模型的思考模式（Qwen3.5+ 支持）
-# 启用后模型会进行更深入的推理，但首字符响应会变慢
-# 默认：false
 enable_thinking = false
-
-# 默认检索 top-k 值
-# 默认：5
 default_top_k = 5
-
-# 是否启用技能
-# 默认：true
-enable_skills = true
-
 
 # ==================== 存储配置 ====================
 [storage]
-# 数据存储的根目录
-# 默认：系统数据目录下的 tianyan 文件夹（如 ~/.local/share/tianyan 或 %APPDATA%\tianyan）
 data_dir = "~/.tianyan"
-
-# 最大存储大小（字节，0 = 无限制）
-# 默认：0
 max_storage_size = 0
-
-# 启用旧数据自动清理
-# 默认：true
 auto_cleanup = true
-
-# 清理前数据保留天数
-# 默认：365
 cleanup_days = 365
 
-# 向量存储配置（仅支持 Qdrant）
 [storage.vector]
-# Qdrant 服务 URL
-# 默认：http://localhost:6334
 url = "http://localhost:6334"
-
-# 集合名称
-# 默认：tianyan_contexts
 collection_name = "tianyan_contexts"
-
-# 向量维度（根据使用的嵌入模型设置）
-# OpenAI text-embedding-3-small: 1536
-# OpenAI text-embedding-3-large: 3072
-# 默认：1536
+# 向量维度需与嵌入模型输出维度一致：
+#   text-embedding-3-small: 1536
+#   text-embedding-3-large: 3072
+#   text-embedding-v4:      1024
 vector_dimension = 1536
 
-
 # ==================== 模型配置 ====================
-[models]
-# 聊天补全的默认模型
-# 默认：gpt-4
-default_chat_model = "gpt-4"
+#
+# 模型配置采用 Provider → Model 二级结构：
+#   1. 先配置提供商（name, endpoint, api_key）
+#   2. 在每个提供商下声明其支持的模型和能力标签
+#   3. 在 preferences 中指定各能力首选模型
 
-# 嵌入的默认模型
-# 默认：text-embedding-3-small
-default_embedding_model = "text-embedding-3-small"
+# --- 模型提供商 ---
 
-# 视觉的默认模型
-# 默认：gpt-4-vision-preview
-default_vision_model = "gpt-4-vision-preview"
-
-# 模型服务配置（至少配置一个服务）
-[[models.services]]
-# 服务名称
+# OpenAI — chat + embedding + vision 全覆盖
+[[models.providers]]
 name = "openai"
-
-# 服务类型：openai, custom
-type = "openai"
-
-# API 端点 URL
 endpoint = "https://api.openai.com/v1"
+api_key = "${OPENAI_API_KEY}"
 
-# API 密钥（推荐在配置文件中使用）
-api_key = "your-api-key-here"
+[[models.providers.models]]
+name = "gpt-4"
+capabilities = ["chat"]
 
-# 此服务的默认模型
-default_model = "gpt-4"
+[[models.providers.models]]
+name = "gpt-4-vision-preview"
+capabilities = ["chat", "vision"]
 
-# 此服务可用的模型
-models = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
+[[models.providers.models]]
+name = "text-embedding-3-small"
+capabilities = ["text-embedding"]
 
-# 请求超时时间（秒）
-# 默认：60
-timeout = 60
+[[models.providers.models]]
+name = "text-embedding-3-large"
+capabilities = ["text-embedding", "multimodal-embedding"]
 
-# 是否启用此服务
-# 默认：true
-enabled = true
+# DeepSeek — 推理专用，不提供 embedding
+# [[models.providers]]
+# name = "deepseek"
+# endpoint = "https://api.deepseek.com/v1"
+# api_key = "${DEEPSEEK_API_KEY}"
+#
+# [[models.providers.models]]
+# name = "deepseek-chat"
+# capabilities = ["chat"]
+#
+# [[models.providers.models]]
+# name = "deepseek-coder"
+# capabilities = ["chat"]
 
-# 路由优先级（数值越大越优先）
-# 默认：0
-priority = 0
+# --- 能力偏好（可选） ---
+# 不配置则自动匹配第一个符合条件的模型
+[models.preferences]
+chat = { provider = "openai", model = "gpt-4" }
+embedding = { provider = "openai", model = "text-embedding-3-small" }
+vision = { provider = "openai", model = "gpt-4-vision-preview" }
 
-# 自定义请求头
-[models.services.headers]
-# X-Custom-Header = "value"
-
-# 可以配置多个模型服务（所有服务都使用 OpenAI 兼容接口）
-[[models.services]]
-name = "deepseek"
-type = "openai"
-endpoint = "https://api.deepseek.com/v1"
-api_key = "your-deepseek-api-key"
-default_model = "deepseek-chat"
-models = ["deepseek-chat", "deepseek-coder"]
-timeout = 60
-max_retries = 3
-enabled = true
-priority = 1
+# 跨提供商混合示例：
+# chat      → DeepSeek（推理强）
+# embedding → OpenAI （嵌入好）
+# vision    → OpenAI （多模态）
+#
+# [models.preferences]
+# chat = { provider = "deepseek", model = "deepseek-chat" }
+# embedding = { provider = "openai", model = "text-embedding-3-small" }
+# vision = { provider = "openai", model = "gpt-4-vision-preview" }
 
 # ==================== 日志配置 ====================
 [logging]
-# 日志级别：trace, debug, info, warn, error
-# 默认：info
 level = "info"
-
-# 日志格式：text, json
-# 默认：text
 format = "text"
-
-# 日志文件路径（可选，未设置则输出到控制台）
-# file = "/var/log/tianyan.log"
-
-# 最大日志文件大小（MB）
-# 默认：10
 max_file_size = 10
-
-# 保留的日志文件数量
-# 默认：5
 max_files = 5
-
-# 包含时间戳
-# 默认：true
 include_timestamp = true
-
-# 包含文件和行号信息
-# 默认：false
 include_location = false
-
 
 # ==================== 安全配置 ====================
 [security]
-# 启用安全功能
-# 默认：true
 enabled = true
-
-# 文件操作允许的目录（为空表示允许所有目录）
 allowed_directories = []
-
-# 文件操作禁止的目录
 blocked_directories = ["/", "/etc", "/bin", "/sbin", "/usr/bin", "/usr/sbin"]
-
-# 允许执行的命令（为空表示允许所有命令）
 allowed_commands = []
-
-# 禁止执行的命令
 blocked_commands = ["rm -rf /", "format", "del /s", "rd /s"]
-
-# 启用命令确认
-# 默认：true
 confirm_commands = true
-
-# 文件操作最大文件大小（字节）
-# 默认：104857600 (100 MB)
 max_file_size = 104857600
-
-# 启用审计日志
-# 默认：true
 audit_logging = true
-
 
 # ==================== 记忆配置 ====================
 [memory]
-# 最大会话记忆大小（token 数）
-# 默认：8000
 max_session_memory = 8000
-
-# 最大长期记忆条目数
-# 默认：10000
 max_long_term_memory = 10000
-
-# 记忆重要性阈值（0.0 - 1.0）
-# 默认：0.5
 importance_threshold = 0.5
-
-# 启用自动记忆整合
-# 默认：true
 auto_consolidation = true
-
-# 整合间隔（秒）
-# 默认：3600 (1 小时)
 consolidation_interval = 3600
-
-# 记忆每日衰减率（0.0 - 1.0）
-# 默认：0.01
 decay_rate = 0.01
-
 
 # ==================== 检索配置 ====================
 [retrieval]
-# 默认返回结果数量
-# 默认：10
 default_top_k = 10
-
-# 最小相关性评分阈值（0.0 - 1.0）
-# 默认：0.5
 min_score = 0.5
-
-# 启用 L0/L1 两阶段检索
-# 默认：true
 two_stage_retrieval = true
-
-# L0 结果倍数（用于重排序）
-# 默认：3
 l0_multiplier = 3
-
-# 上下文最大 token 数
-# 默认：4000
 max_context_tokens = 4000
-
-# 启用检索缓存
-# 默认：true
 enable_cache = true
-
-# 缓存 TTL（秒）
-# 默认：300 (5 分钟)
 cache_ttl = 300

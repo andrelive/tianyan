@@ -12,8 +12,8 @@ use tempfile::tempdir;
 use crate::common::types::TianyanUri;
 use crate::config::StorageConfig;
 use crate::vfs::backend::LocalFileBackend;
-use crate::vfs::vector::VectorStorage;
 use crate::vfs::types::{VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType};
+use crate::vfs::vector::VectorStorage;
 use crate::vfs::vfs_impl::VirtualFileSystemImpl;
 
 /// Mock 向量存储实现，用于单元测试。

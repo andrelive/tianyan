@@ -13,8 +13,8 @@ use crate::api::chat::types::{
     ChatRequest, ChatResponse, ChatStreamEvent, EditMessageRequest, RegenerateRequest,
     SkillCallInfo,
 };
-use crate::api::shared::short_uuid;
 use crate::api::shared::error::ApiError;
+use crate::api::shared::short_uuid;
 use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
 
 /// 对话服务，处理对话逻辑
@@ -51,7 +51,7 @@ impl ChatService {
 
         let response = self
             .agent
-            .process_message(&session_id, &last_message)
+            .process_message(&session_id, &last_message, request.model.as_deref())
             .await?;
 
         let chat_response = ChatResponse {
@@ -95,7 +95,7 @@ impl ChatService {
 
         let mut stream = self
             .agent
-            .process_message_stream(&session_id, &last_message)
+            .process_message_stream(&session_id, &last_message, request.model.as_deref())
             .await?;
 
         let mut chunk_id = 0;
@@ -103,7 +103,6 @@ impl ChatService {
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
                 Ok(chunk) => {
-
                     let skill_calls = chunk.skill_calls.map(convert_skill_calls);
 
                     let event = ChatStreamEvent {
@@ -165,11 +164,10 @@ impl ChatService {
             .get(request.message_index)
             .ok_or_else(|| ApiError::BadRequest("消息索引超出范围".to_string()))?;
 
-        if !matches!(
-            target_msg.role,
-            tianyan::common::types::MessageRole::User
-        ) {
-            return Err(ApiError::BadRequest("只能重新生成用户消息之后的回复".to_string()));
+        if !matches!(target_msg.role, tianyan::common::types::MessageRole::User) {
+            return Err(ApiError::BadRequest(
+                "只能重新生成用户消息之后的回复".to_string(),
+            ));
         }
 
         let last_message: String = target_msg
@@ -187,7 +185,7 @@ impl ChatService {
 
         let response = self
             .agent
-            .process_message(session_id, &last_message)
+            .process_message(session_id, &last_message, None)
             .await?;
 
         Ok(ChatResponse {
@@ -207,7 +205,10 @@ impl ChatService {
     }
 
     /// 编辑用户消息并重新生成回复
-    pub async fn edit_message(&self, request: EditMessageRequest) -> Result<ChatResponse, ApiError> {
+    pub async fn edit_message(
+        &self,
+        request: EditMessageRequest,
+    ) -> Result<ChatResponse, ApiError> {
         let session_id = &request.session_id;
 
         let mut session = self
@@ -242,7 +243,7 @@ impl ChatService {
 
         let response = self
             .agent
-            .process_message(session_id, &request.new_content)
+            .process_message(session_id, &request.new_content, None)
             .await?;
 
         Ok(ChatResponse {
@@ -280,25 +281,57 @@ fn convert_skill_calls(calls: Vec<tianyan::agent::SkillCallInfo>) -> Vec<SkillCa
 }
 
 /// 根据请求中的 session_id 决定复用已有会话还是创建新会话。
-///
-/// 如果 `session_id` 为 `None`，生成新 UUID 并通过 SessionManager 创建会话。
+/// 根据请求中的 session_id 决定复用已有会话还是创建新会话。
+/// 新建会话时自动用第一条用户消息生成标题。
 async fn resolve_or_create_session(
     session_manager: &dyn SessionManager,
     session_id: Option<&str>,
     initial_message: &str,
 ) -> Result<String, ApiError> {
+    // 如果传了 session_id 且服务端已存在，直接复用
     if let Some(sid) = session_id {
         if !sid.is_empty() {
-            return Ok(sid.to_string());
+            if session_manager.get_session(sid).await?.is_some() {
+                return Ok(sid.to_string());
+            }
         }
     }
-    let new_id = format!("session-{}", crate::api::shared::short_uuid());
+
+    // 新建会话：优先用前端传来的 session_id，否则生成一个
+    let new_id = session_id
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("session-{}", short_uuid()));
     let msg = CoreMessage::new(CoreMessageRole::User, initial_message);
-    session_manager
+    let mut session = session_manager
         .create_session(&new_id, msg)
         .await
         .map_err(|e| ApiError::Internal(format!("创建会话失败: {}", e)))?;
+
+    // 用第一条用户消息生成标题（取第一行或前 30 个字符）
+    let title = generate_session_title(initial_message);
+    if !title.is_empty() {
+        session.title = Some(title);
+        if let Err(e) = session_manager.update_session(&session).await {
+            tracing::warn!(error = %e, "会话标题更新失败");
+        }
+    }
+
     Ok(new_id)
+}
+
+/// 从用户消息中提取会话标题。
+/// 优先取第一行（到第一个换行符），超过 30 字则截断并加 "…"。
+fn generate_session_title(message: &str) -> String {
+    let first_line = message.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return String::new();
+    }
+    if first_line.chars().count() > 30 {
+        let truncated: String = first_line.chars().take(30).chain(['…']).collect();
+        return truncated;
+    }
+    first_line.to_string()
 }
 
 #[cfg(test)]

@@ -96,6 +96,22 @@ pub async fn ingest_handler(
         })
 }
 
+/// 获取摄入任务状态
+pub async fn get_ingest_status_handler(
+    axum::extract::Path(job_id): axum::extract::Path<String>,
+) -> Result<Json<IngestStatusResponse>, ApiError> {
+    debug!("查询摄入状态: {}", job_id);
+    // 摄入是同步执行的，所以直接返回已完成状态
+    Ok(Json(IngestStatusResponse {
+        job_id,
+        status: "completed".to_string(),
+        progress: 1.0,
+        total_files: 0,
+        processed_files: 0,
+        error: None,
+    }))
+}
+
 /// 执行检索
 pub async fn search_handler(
     State(state): State<Arc<AppState>>,

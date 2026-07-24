@@ -85,58 +85,6 @@ impl Session {
     }
 }
 
-/// 从会话中提取的关键信息。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct KeyInfo {
-    /// 识别到的用户偏好。
-    pub preferences: Vec<ExtractedPreference>,
-    /// 做出的重要决定。
-    pub decisions: Vec<ExtractedDecision>,
-    /// 提到的实体。
-    pub entities: Vec<ExtractedEntity>,
-    /// 讨论的主题。
-    pub topics: Vec<String>,
-    /// 识别到的行动项。
-    pub action_items: Vec<String>,
-}
-
-/// 从对话中提取的偏好。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtractedPreference {
-    /// 偏好键（例如 "coding_style"、"communication_style"）。
-    pub key: String,
-    /// 偏好值。
-    pub value: String,
-    /// 置信度分数（0.0 - 1.0）。
-    pub confidence: f32,
-    /// 来源消息索引。
-    pub source_message_idx: Option<usize>,
-}
-
-/// 从对话中提取的决定。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtractedDecision {
-    /// 决定描述。
-    pub description: String,
-    /// 决定的理由。
-    pub rationale: Option<String>,
-    /// 重要性分数（0.0 - 1.0）。
-    pub importance: f32,
-    /// 相关实体。
-    pub related_entities: Vec<String>,
-}
-
-/// 从对话中提取的实体。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtractedEntity {
-    /// 实体名称。
-    pub name: String,
-    /// 实体类型（人物、项目、概念等）。
-    pub entity_type: String,
-    /// 关于实体的附加信息。
-    pub info: Option<String>,
-}
-
 /// 会话元数据。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionMetadata {
@@ -152,9 +100,7 @@ pub struct SessionMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::{
-        DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime,
-    };
+    use crate::common::types::{DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime};
 
     #[test]
     fn test_session_creation() {

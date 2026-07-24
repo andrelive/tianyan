@@ -204,7 +204,7 @@ impl AgentMetrics {
 
         let history = self.token_history.read().await;
         let total_tokens: usize = history.iter().map(|r| r.total_tokens).sum();
-        let avg_tokens = if history.len() > 0 {
+        let avg_tokens = if !history.is_empty() {
             total_tokens / history.len()
         } else {
             0
@@ -285,9 +285,15 @@ mod tests {
     #[tokio::test]
     async fn test_record_failure_and_query_common_failures() {
         let metrics = AgentMetrics::new();
-        metrics.record_failure("read_file failed", "not found").await;
-        metrics.record_failure("read_file failed", "not found again").await;
-        metrics.record_failure("write failed", "permission denied").await;
+        metrics
+            .record_failure("read_file failed", "not found")
+            .await;
+        metrics
+            .record_failure("read_file failed", "not found again")
+            .await;
+        metrics
+            .record_failure("write failed", "permission denied")
+            .await;
 
         let result = metrics.query_common_failures().await;
         let failures = result["common_failures"].as_array().unwrap();
@@ -299,9 +305,15 @@ mod tests {
     #[tokio::test]
     async fn test_record_token_usage_and_query_summary() {
         let metrics = AgentMetrics::new();
-        metrics.record_token_usage(make_token_record("s1", 1000, true)).await;
-        metrics.record_token_usage(make_token_record("s2", 2000, true)).await;
-        metrics.record_token_usage(make_token_record("s3", 3000, false)).await;
+        metrics
+            .record_token_usage(make_token_record("s1", 1000, true))
+            .await;
+        metrics
+            .record_token_usage(make_token_record("s2", 2000, true))
+            .await;
+        metrics
+            .record_token_usage(make_token_record("s3", 3000, false))
+            .await;
 
         let result = metrics.query_token_summary().await;
         assert_eq!(result["total_executions"], 3);
@@ -313,7 +325,9 @@ mod tests {
     async fn test_token_history_truncation_at_1000() {
         let metrics = AgentMetrics::new();
         for i in 0..1100 {
-            metrics.record_token_usage(make_token_record("s", 1, true)).await;
+            metrics
+                .record_token_usage(make_token_record("s", 1, true))
+                .await;
         }
         let result = metrics.query_token_summary().await;
         assert_eq!(result["total_executions"], 1000);
@@ -347,7 +361,9 @@ mod tests {
         metrics.record_execution(true).await;
         metrics.record_execution(false).await;
         metrics.record_rule_hit(10).await;
-        metrics.record_token_usage(make_token_record("s1", 5000, true)).await;
+        metrics
+            .record_token_usage(make_token_record("s1", 5000, true))
+            .await;
         metrics.record_pipeline_failure().await;
 
         let health = metrics.query_harness_health().await;

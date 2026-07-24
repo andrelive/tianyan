@@ -32,7 +32,7 @@ pub use image::{
     ExifMetadata, ImageAnalysis, ImageAnalyzer, ImageFormatType, ImageProcessor,
     ImageProcessorConfig, ImageType, ProcessedImage, UnifiedTextRepresentation,
 };
-pub use ingestor::{IngestorConfig, KnowledgeIngestor, KnowledgeIngestorBuilder};
+pub use ingestor::{IngestorConfig, KnowledgeIngestor};
 pub use parser::{
     CodeParser, CompositeParser, DocumentMetadata, DocumentParser, DocxParser, MarkdownParser,
     ParsedDocument, PdfParser, TextParser, TocEntry,

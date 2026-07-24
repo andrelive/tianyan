@@ -33,6 +33,20 @@ pub struct ExecutorConfig {
     pub blocked_commands: Vec<String>,
     /// 允许的文件操作路径。
     pub allowed_paths: Vec<PathBuf>,
+    /// 文件读取技能最大文件大小。
+    pub skill_file_read_max_size: u64,
+    /// 文件读取技能超时。
+    pub skill_file_read_timeout_secs: u64,
+    /// 文件写入技能最大内容大小。
+    pub skill_file_write_max_size: u64,
+    /// 文件写入技能超时。
+    pub skill_file_write_timeout_secs: u64,
+    /// 文件列表技能最大条目数。
+    pub skill_file_list_max_entries: usize,
+    /// HTTP 请求技能超时。
+    pub skill_http_timeout_secs: u64,
+    /// 系统命令技能超时。
+    pub skill_command_timeout_secs: u64,
 }
 
 impl Default for ExecutorConfig {
@@ -60,6 +74,13 @@ impl Default for ExecutorConfig {
                 "netcat".to_string(),
             ],
             allowed_paths: Vec::new(),
+            skill_file_read_max_size: 50 * 1024 * 1024,
+            skill_file_read_timeout_secs: 30,
+            skill_file_write_max_size: 10 * 1024 * 1024,
+            skill_file_write_timeout_secs: 30,
+            skill_file_list_max_entries: 10000,
+            skill_http_timeout_secs: 60,
+            skill_command_timeout_secs: 300,
         }
     }
 }

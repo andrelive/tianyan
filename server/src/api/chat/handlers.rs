@@ -64,10 +64,11 @@ pub async fn chat_stream_handler(
         return Sse::new(ReceiverStream::new(rx));
     }
 
+    // 确保 request 携带 session_id（前端可能不传，此时生成新的）
+    let mut request = request;
     let session_id = request
         .session_id
-        .clone()
-        .unwrap_or_else(|| format!("session-{}", uuid::Uuid::new_v4().to_string()));
+        .get_or_insert_with(|| format!("session-{}", uuid::Uuid::new_v4()));
 
     info!(
         "流式对话请求: 会话={}, 消息数={}",
@@ -106,7 +107,9 @@ pub async fn chat_stream_handler(
                             }
                             // finish_reason 非空表示流结束
                             if event.finish_reason.is_some() {
-                                let _ = tx_clone.send(Ok(Event::default().data("[DONE]"))).await;
+                                if let Err(e) = tx_clone.send(Ok(Event::default().data("[DONE]"))).await {
+                                    tracing::warn!(error = %e, "SSE [DONE] 发送失败");
+                                }
                                 break;
                             }
                         }

@@ -10,12 +10,13 @@
 
 mod gc_task;
 mod memory_task;
-mod rule_recorder;
+pub mod rule_recorder;
 mod rule_suggester;
 mod rule_task;
 mod summary_task;
 
 pub use gc_task::GcTask;
 pub use memory_task::MemoryTask;
+pub use rule_recorder::RuleRecorder;
 pub use rule_task::RuleTask;
 pub use summary_task::SummaryTask;

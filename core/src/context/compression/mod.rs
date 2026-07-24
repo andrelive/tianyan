@@ -32,20 +32,17 @@ pub use estimator::{estimate_tokens, TokenEstimator};
 
 /// 压缩策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum CompressionStrategy {
     /// 摘要：将早期对话压缩为摘要。
     Summarize,
     /// 选择：保留重要消息，丢弃次要消息。
     Select,
     /// 混合：先摘要再选择。
+    #[default]
     Hybrid,
 }
 
-impl Default for CompressionStrategy {
-    fn default() -> Self {
-        Self::Hybrid
-    }
-}
 
 /// 默认上下文窗口大小。
 const DEFAULT_CONTEXT_WINDOW: usize = 128000;
@@ -88,7 +85,7 @@ impl Default for CompressionConfig {
             compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
             strategy: CompressionStrategy::Hybrid,
             preserve_recent_messages: DEFAULT_PRESERVE_RECENT,
-            summary_model: "gpt-4o-mini".to_string(),
+            summary_model: String::new(),
             min_messages_to_compress: DEFAULT_MIN_MESSAGES_TO_COMPRESS,
             max_summary_tokens: 500,
         }
@@ -209,9 +206,7 @@ impl ContextCompressor {
         let original_tokens = self.estimator.estimate_messages(messages);
 
         let (compressed_messages, summary) = match self.config.strategy {
-            CompressionStrategy::Summarize => {
-                self.compress_by_summarization(messages).await?
-            }
+            CompressionStrategy::Summarize => self.compress_by_summarization(messages).await?,
             CompressionStrategy::Select => self.compress_by_selection(messages).await?,
             CompressionStrategy::Hybrid => self.compress_hybrid(messages).await?,
         };
@@ -340,8 +335,7 @@ impl ContextCompressor {
             let to_preserve = &messages[summary_point..];
 
             let summary = if let Some(ref cached) = self.cached_summary {
-                self.incremental_summarize(cached, to_summarize)
-                    .await?
+                self.incremental_summarize(cached, to_summarize).await?
             } else {
                 self.summarize(to_summarize).await?
             };
@@ -420,26 +414,19 @@ impl std::fmt::Display for CompressionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::common::error::Result;
-    use crate::model::types::{ChatCompletionRequest, ChatCompletionResponse, ChatChoice, ChatCompletionChunk};
+    use crate::model::types::{
+        ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
+    };
     use crate::model::ChatService;
+    use crate::test_utils::MockChatService;
+    use async_trait::async_trait;
 
-    struct MockChatService {
-        response: String,
-    }
-
-    impl MockChatService {
-        fn new(response: impl Into<String>) -> Self {
-            Self {
-                response: response.into(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ChatService for MockChatService {
-        async fn chat_completion(&self, _request: ChatCompletionRequest) -> Result<ChatCompletionResponse> {
+    /// 创建返回指定响应文本的 mock ChatService。
+    fn mock_chat(response: &str) -> Arc<dyn ChatService> {
+        let response = response.to_string();
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(move |_| {
             Ok(ChatCompletionResponse {
                 id: "mock".to_string(),
                 object: "chat.completion".to_string(),
@@ -447,19 +434,13 @@ mod tests {
                 model: "mock".to_string(),
                 choices: vec![ChatChoice {
                     index: 0,
-                    message: Message::assistant(self.response.clone()),
+                    message: Message::assistant(response.clone()),
                     finish_reason: Some("stop".to_string()),
                 }],
                 usage: Default::default(),
             })
-        }
-
-        async fn chat_completion_stream(
-            &self,
-            _request: ChatCompletionRequest,
-        ) -> Result<tokio::sync::mpsc::Receiver<Result<ChatCompletionChunk>>> {
-            unimplemented!("stream not used in compression tests")
-        }
+        });
+        Arc::new(mock)
     }
 
     #[test]
@@ -505,7 +486,7 @@ mod tests {
             min_messages_to_compress: 3,
             ..CompressionConfig::default()
         };
-        let mock: Arc<dyn ChatService> = Arc::new(MockChatService::new("ok"));
+        let mock = mock_chat("ok");
         ContextCompressor::new(mock, config)
     }
 
@@ -523,7 +504,7 @@ mod tests {
             compression_threshold,
             ..CompressionConfig::default()
         };
-        let mock: Arc<dyn ChatService> = Arc::new(MockChatService::new("ok"));
+        let mock = mock_chat("ok");
         ContextCompressor::new(mock, config)
     }
 
@@ -554,12 +535,7 @@ mod tests {
     #[test]
     fn test_should_compress_above_threshold() {
         // Use very low threshold so even a few messages trigger compression
-        let compressor = make_compressor_with_threshold(
-            CompressionStrategy::Select,
-            100,
-            0.05,
-            3,
-        );
+        let compressor = make_compressor_with_threshold(CompressionStrategy::Select, 100, 0.05, 3);
         let msgs = vec![
             msg_user("trigger compression"),
             msg_assistant("response text"),
@@ -620,7 +596,7 @@ mod tests {
             min_messages_to_compress: 3,
             ..CompressionConfig::default()
         };
-        let mock: Arc<dyn ChatService> = Arc::new(MockChatService::new("ok"));
+        let mock = mock_chat("ok");
         let mut compressor = ContextCompressor::new(mock, config);
         let msgs = vec![msg_user("a"), msg_assistant("b")];
         let result = compressor.compress(&msgs).await.unwrap();
@@ -636,7 +612,7 @@ mod tests {
             min_messages_to_compress: 2,
             ..CompressionConfig::default()
         };
-        let mock: Arc<dyn ChatService> = Arc::new(MockChatService::new("ok"));
+        let mock = mock_chat("ok");
         let mut compressor = ContextCompressor::new(mock, config);
         let msgs = vec![
             msg_user("first"),

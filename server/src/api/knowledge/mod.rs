@@ -6,9 +6,13 @@
 //! - 文档检索
 //! - 检索建议
 
+/// 知识库请求处理函数
 pub mod handlers;
+/// 知识库路由定义
 pub mod routes;
+/// 知识库业务逻辑
 pub mod services;
+/// 知识库类型定义
 pub mod types;
 
 pub use routes::routes;

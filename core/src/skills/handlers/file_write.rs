@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -14,12 +14,32 @@ use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 /// 文件写入处理器。
 pub struct FileWriteHandler {
     allowed_paths: Vec<PathBuf>,
+    /// 单次写入最大内容大小（字节），默认 10MB。
+    max_size: u64,
+    /// 写入超时（秒），默认 30。
+    timeout_secs: u64,
 }
 
 impl FileWriteHandler {
     /// 创建新的文件写入处理器。
     pub fn new(allowed_paths: Vec<PathBuf>) -> Self {
-        Self { allowed_paths }
+        Self {
+            allowed_paths,
+            max_size: 10 * 1024 * 1024,
+            timeout_secs: 30,
+        }
+    }
+
+    /// 设置最大文件大小。
+    pub fn with_max_size(mut self, max_size: u64) -> Self {
+        self.max_size = max_size;
+        self
+    }
+
+    /// 设置写入超时。
+    pub fn with_timeout(mut self, secs: u64) -> Self {
+        self.timeout_secs = secs;
+        self
     }
 }
 
@@ -53,6 +73,15 @@ impl SkillHandler for FileWriteHandler {
                 message: "缺少 'content' 参数".to_string(),
             })?;
 
+        // Size check
+        let content_len = content.len() as u64;
+        if content_len > self.max_size {
+            return Err(TianyanError::OperationNotAllowed(format!(
+                "内容大小 {} 超过写入上限 {} 字节",
+                content_len, self.max_size
+            )));
+        }
+
         let path = PathBuf::from(path);
         validate_path(&path, &self.allowed_paths)?;
 
@@ -62,27 +91,20 @@ impl SkillHandler for FileWriteHandler {
                 .map_err(|e| TianyanError::SkillExecution(format!("创建目录失败: {}", e)))?;
         }
 
-        match tokio::fs::write(&path, content).await {
-            Ok(()) => Ok(SkillExecutionResult {
-                success: true,
-                output: Some(format!(
-                    "成功写入 {} 字节到 {}",
-                    content.len(),
-                    path.display()
-                )),
-                error: None,
-                exit_code: None,
-                execution_time_ms: start.elapsed().as_millis() as u64,
-                data: HashMap::new(),
-            }),
-            Err(e) => Ok(SkillExecutionResult {
-                success: false,
-                output: None,
-                error: Some(format!("写入文件失败: {}", e)),
-                exit_code: None,
-                execution_time_ms: start.elapsed().as_millis() as u64,
-                data: HashMap::new(),
-            }),
+        let timeout = Duration::from_secs(self.timeout_secs);
+        let write_op = async {
+            tokio::fs::write(&path, content).await.map_err(|e| {
+                TianyanError::SkillExecution(format!("写入文件失败: {}", e))
+            })
+        };
+
+        match tokio::time::timeout(timeout, write_op).await {
+            Ok(Ok(())) => Ok(super::result_success(
+                format!("成功写入 {} 字节到 {}", content_len, path.display()),
+                start,
+            )),
+            Ok(Err(e)) => Ok(super::result_failure(e.to_string(), start)),
+            Err(_) => Ok(super::result_timeout(self.timeout_secs, start)),
         }
     }
 

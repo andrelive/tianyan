@@ -110,6 +110,8 @@ pub struct VfsListParams {
 }
 
 /// 委托子 Agent 参数。
+///
+/// 委托采用单轮调用：LLM 返回工具调用请求后，由外层 AgentLoop 自主决策。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DelegateToAgentParams {
     /// 子任务描述。
@@ -117,9 +119,6 @@ pub struct DelegateToAgentParams {
     /// 系统提示。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
-    /// 最大轮数。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_turns: Option<usize>,
 }
 
 /// 自我检查参数（无参数 — Agent 自省查询内部指标）。

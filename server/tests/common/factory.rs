@@ -2,8 +2,8 @@
 
 use tianyan::agent::AgentConfig;
 use tianyan::config::{
-    LoggingConfig, MemoryConfig, ModelServiceConfig, ModelServiceType, ModelsConfig,
-    RetrievalConfig, SecurityConfig, StorageConfig, TianyanConfig,
+    LoggingConfig, MemoryConfig, ModelCapability, ModelEntry, ModelPreferences, ModelRef,
+    ModelsConfig, ProviderConfig, RetrievalConfig, SecurityConfig, StorageConfig, TianyanConfig,
     VectorStorageConfig,
 };
 
@@ -20,27 +20,48 @@ pub fn test_agent_config() -> AgentConfig {
     }
 }
 
-pub fn test_model_service_config(name: &str) -> ModelServiceConfig {
-    ModelServiceConfig {
+pub fn test_provider(name: &str) -> ProviderConfig {
+    ProviderConfig {
         name: name.to_string(),
         endpoint: "http://localhost:11434/v1".to_string(),
         api_key: Some("test-key".to_string()),
-        default_model: "test-model".to_string(),
-        models: vec!["test-model".to_string()],
-        service_type: ModelServiceType::default(),
+        models: vec![
+            ModelEntry {
+                name: "test-model".to_string(),
+                capabilities: vec![ModelCapability::Chat],
+            },
+            ModelEntry {
+                name: "text-embedding-3-small".to_string(),
+                capabilities: vec![ModelCapability::TextEmbedding],
+            },
+            ModelEntry {
+                name: "gpt-4-vision-preview".to_string(),
+                capabilities: vec![ModelCapability::Vision],
+            },
+        ],
         timeout: 30,
         enabled: true,
-        priority: 0,
         headers: std::collections::HashMap::new(),
     }
 }
 
 pub fn test_models_config() -> ModelsConfig {
     ModelsConfig {
-        services: vec![test_model_service_config("mock-service")],
-        default_chat_model: "test-model".to_string(),
-        default_embedding_model: "text-embedding-3-small".to_string(),
-        default_vision_model: "gpt-4-vision-preview".to_string(),
+        providers: vec![test_provider("mock-service")],
+        preferences: ModelPreferences {
+            chat: Some(ModelRef {
+                provider: "mock-service".to_string(),
+                model: "test-model".to_string(),
+            }),
+            embedding: Some(ModelRef {
+                provider: "mock-service".to_string(),
+                model: "text-embedding-3-small".to_string(),
+            }),
+            vision: Some(ModelRef {
+                provider: "mock-service".to_string(),
+                model: "gpt-4-vision-preview".to_string(),
+            }),
+        },
     }
 }
 
@@ -51,7 +72,6 @@ pub fn test_storage_config() -> StorageConfig {
         cleanup_days: 30,
         max_storage_size: 5368709120,
         vector: VectorStorageConfig {
-            url: "http://localhost:6334".to_string(),
             collection_name: "tianyan_test".to_string(),
             vector_dimension: 768,
         },

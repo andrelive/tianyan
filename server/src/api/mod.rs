@@ -11,7 +11,7 @@
 //! - `sessions/` - 会话管理领域
 //! - `knowledge/` - 知识管理领域（摄入 + 检索）
 //! - `skills/` - 技能执行领域
-//! - `config/` - 配置管理领域（包含配置向导）
+//! - `config/` - 配置管理领域
 
 use axum::Router;
 use std::sync::Arc;
@@ -45,30 +45,12 @@ pub use shared::{ApiError, ChatMessage, MessageRole, TokenUsage};
 /// ```
 pub fn create_api_router(state: Arc<AppState>) -> Router {
     Router::new()
-        // 配置向导路由放在 /api 下，不依赖版本（用于初始化）
-        .nest("/api", config::wizard_routes::routes())
-        // 其他 API 路由放在 /api/v1 下
-        .nest("/api/v1", create_routes_without_wizard())
+        .nest("/api/v1", create_routes())
         .with_state(state)
 }
 
 /// 创建无状态的路由（用于测试/组合）
-///
-/// 本函数创建所有可嵌套到父路由器的 API 路由，仅含常规路由不含向导路由。
-/// 向导路由单独挂载在 /api 下（见 create_api_router）。
 pub fn create_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .merge(chat::routes())
-        .merge(sessions::routes())
-        .merge(knowledge::routes())
-        .merge(skills::routes())
-        .merge(config::routes())
-}
-
-/// 创建不包含配置向导的路由（用于 /api/v1 前缀）
-///
-/// 配置向导路由单独放在 /api 下，不依赖版本
-pub fn create_routes_without_wizard() -> Router<Arc<AppState>> {
     Router::new()
         .merge(chat::routes())
         .merge(sessions::routes())

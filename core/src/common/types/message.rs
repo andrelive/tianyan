@@ -7,10 +7,14 @@ use super::tool::ToolCall;
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum MessageRole {
+    /// 系统角色。
     System,
+    /// 用户角色。
     #[default]
     User,
+    /// 助手角色。
     Assistant,
+    /// 工具角色。
     Tool,
 }
 

@@ -241,7 +241,10 @@ impl TaskScheduler {
                         break;
                     }
 
-                    let _ = sched.execute_task(&task_id, &ctx).await;
+                    match sched.execute_task(&task_id, &ctx).await {
+                        None => tracing::warn!(task = %task_id, "定时任务未找到"),
+                        Some(_result) => {}
+                    }
                 }
             });
 

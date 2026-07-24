@@ -112,7 +112,7 @@ fn default_learned_rules_max_tokens() -> usize {
 }
 
 fn default_max_turns() -> usize {
-    20
+    200
 }
 
 #[cfg(test)]

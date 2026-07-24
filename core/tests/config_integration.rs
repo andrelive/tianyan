@@ -1,22 +1,25 @@
 //! 配置系统集成测试 — 从文件加载、验证、保存、重新加载的完整流程
 
-use tianyan::config::{ModelServiceConfig, TianyanConfig};
+use tianyan::config::{ModelCapability, ModelEntry, ModelPreferences, ModelRef, ProviderConfig, TianyanConfig};
 
 fn make_test_config() -> TianyanConfig {
     let mut config = TianyanConfig::default();
-    config.models.services = vec![ModelServiceConfig {
+    config.models.providers = vec![ProviderConfig {
         name: "test".to_string(),
         endpoint: "http://localhost:11434/v1".to_string(),
         api_key: Some("test-key".to_string()),
-        default_model: "test-model".to_string(),
-        models: vec!["test-model".to_string()],
-        service_type: Default::default(),
+        models: vec![ModelEntry {
+            name: "test-model".to_string(),
+            capabilities: vec![ModelCapability::Chat],
+        }],
         timeout: 30,
         enabled: true,
-        priority: 0,
         headers: std::collections::HashMap::new(),
     }];
-    config.models.default_chat_model = "test-model".to_string();
+    config.models.preferences.chat = Some(ModelRef {
+        provider: "test".to_string(),
+        model: "test-model".to_string(),
+    });
     config
 }
 
@@ -50,7 +53,7 @@ async fn test_config_defaults_are_reasonable() {
 #[tokio::test]
 async fn test_model_service_validation_rejects_empty_endpoint() {
     let mut config = make_test_config();
-    config.models.services[0].endpoint = String::new();
+    config.models.providers[0].endpoint = String::new();
     let result = config.validate();
     assert!(result.is_err(), "空 endpoint 应失败");
 }

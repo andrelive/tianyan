@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::path::Path;
 
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
@@ -372,23 +371,6 @@ impl ImageProcessor {
         })
     }
 
-    /// 从文件名和内容检测图像格式。
-    #[allow(dead_code)]
-    fn detect_format(&self, filename: &str, _data: &[u8]) -> Result<ImageFormatType> {
-        // 首先尝试从扩展名检测
-        let ext = Path::new(filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-
-        if let Some(format) = ImageFormatType::from_extension(ext) {
-            return Ok(format);
-        }
-
-        // 如果未知则默认为 JPEG
-        Ok(ImageFormatType::Jpeg)
-    }
-
     /// 从图像提取 EXIF 元数据。
     fn extract_exif(&self, data: &[u8]) -> Result<ExifMetadata> {
         let mut exif = ExifMetadata::default();
@@ -555,10 +537,7 @@ impl<'a> ImageAnalyzer<'a> {
     }
 
     /// 为图像生成视觉嵌入向量（通过多模态嵌入模型）。
-    pub async fn generate_visual_embedding(
-        &self,
-        image_data: &[u8],
-    ) -> Result<Embedding> {
+    pub async fn generate_visual_embedding(&self, image_data: &[u8]) -> Result<Embedding> {
         self.embedding_service
             .embed_image(&self.model, image_data)
             .await

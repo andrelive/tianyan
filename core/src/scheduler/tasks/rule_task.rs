@@ -29,9 +29,10 @@ impl RuleTask {
     pub fn new(
         vfs: Arc<dyn VirtualFileSystem>,
         model_service: Arc<dyn ChatService>,
+        model_name: impl Into<String>,
     ) -> Self {
         Self {
-            suggester: RuleSuggester::new(vfs, model_service),
+            suggester: RuleSuggester::new(vfs, model_service, model_name),
             max_per_cycle: 10,
         }
     }
@@ -85,7 +86,10 @@ impl TaskHandler for RuleTask {
 
             match self
                 .suggester
-                .promote_to_rule(suggestion, &format!("scheduled-{}", chrono::Utc::now().timestamp()))
+                .promote_to_rule(
+                    suggestion,
+                    &format!("scheduled-{}", chrono::Utc::now().timestamp()),
+                )
                 .await
             {
                 Ok(()) => promoted_count += 1,

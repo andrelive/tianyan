@@ -4,26 +4,39 @@ use serde_json::Value;
 /// 技能信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
+    /// 技能标识
     pub id: String,
+    /// 技能名称
     pub name: String,
+    /// 技能描述
     pub description: String,
+    /// 技能类别
     pub category: String,
+    /// 版本号
     pub version: String,
+    /// 是否启用
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 参数定义列表
     pub parameters: Option<Vec<SkillParameter>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 图标
     pub icon: Option<String>,
 }
 
 /// 技能参数定义
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillParameter {
+    /// 参数名称
     pub name: String,
+    /// 参数描述
     pub description: String,
+    /// 参数类型
     pub param_type: String,
+    /// 是否必填
     pub required: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 默认值
     pub default_value: Option<Value>,
 }
 
@@ -31,8 +44,10 @@ pub struct SkillParameter {
 #[derive(Debug, Deserialize)]
 pub struct ExecuteSkillRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 技能参数
     pub parameters: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 执行上下文
     pub context: Option<Value>,
 }
 
@@ -62,33 +77,47 @@ impl ExecuteSkillRequest {
 /// 执行技能响应
 #[derive(Debug, Serialize)]
 pub struct ExecuteSkillResponse {
+    /// 是否成功
     pub success: bool,
+    /// 任务标识
     pub job_id: String,
+    /// 技能标识
     pub skill_id: String,
+    /// 响应消息
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 执行结果
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 错误信息
     pub error: Option<String>,
 }
 
 /// 列出技能响应
 #[derive(Debug, Serialize)]
 pub struct ListSkillsResponse {
+    /// 技能列表
     pub skills: Vec<Skill>,
+    /// 技能总数
     pub total: usize,
 }
 
 /// 技能执行状态
 #[derive(Debug, Serialize)]
 pub struct SkillExecutionStatus {
+    /// 任务标识
     pub job_id: String,
+    /// 技能标识
     pub skill_id: String,
+    /// 执行状态
     pub status: String,
+    /// 执行进度百分比
     pub progress: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 执行结果
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 错误信息
     pub error: Option<String>,
 }
 

@@ -55,22 +55,8 @@ impl SkillHandler for FileDeleteHandler {
         };
 
         match result {
-            Ok(()) => Ok(SkillExecutionResult {
-                success: true,
-                output: Some(format!("成功删除 {}", path.display())),
-                error: None,
-                exit_code: None,
-                execution_time_ms: start.elapsed().as_millis() as u64,
-                data: HashMap::new(),
-            }),
-            Err(e) => Ok(SkillExecutionResult {
-                success: false,
-                output: None,
-                error: Some(format!("删除失败: {}", e)),
-                exit_code: None,
-                execution_time_ms: start.elapsed().as_millis() as u64,
-                data: HashMap::new(),
-            }),
+            Ok(()) => Ok(super::result_success(format!("成功删除 {}", path.display()), start)),
+            Err(e) => Ok(super::result_failure(format!("删除失败: {}", e), start)),
         }
     }
 

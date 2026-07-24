@@ -1,15 +1,23 @@
 use serde::{Deserialize, Serialize};
 use tianyan::config::TianyanConfig;
 
+// Re-export shared types from core so server API can use them directly
+pub use tianyan::config::api_types::{
+    ModelInfo, ModelsResponse, PreferencesInfo, ProviderInfo, SwitchModelRequest,
+    UpdateConfigResponse,
+};
+
 /// 配置响应
 #[derive(Debug, Serialize)]
 pub struct ConfigResponse {
+    /// 天演配置
     pub config: TianyanConfig,
 }
 
 /// 更新配置请求 — 接受完整的 TianyanConfig
 #[derive(Debug, Deserialize)]
 pub struct UpdateConfigRequest {
+    /// 天演配置
     pub config: TianyanConfig,
 }
 
@@ -22,47 +30,8 @@ impl UpdateConfigRequest {
     }
 }
 
-/// 更新配置响应
-#[derive(Debug, Serialize)]
-pub struct UpdateConfigResponse {
-    pub success: bool,
-    pub message: String,
-}
-
-/// 模型服务摘要（供前端列表展示）
-#[derive(Debug, Serialize)]
-pub struct ModelServiceInfo {
-    pub name: String,
-    pub endpoint: String,
-    pub default_model: String,
-    pub enabled: bool,
-    pub priority: u32,
-}
-
-/// 模型服务列表响应
-#[derive(Debug, Serialize)]
-pub struct ModelsResponse {
-    pub services: Vec<ModelServiceInfo>,
-    pub default_chat_model: String,
-    pub default_embedding_model: String,
-    pub default_vision_model: String,
-}
-
-/// 切换默认聊天模型请求
-#[derive(Debug, Deserialize)]
-pub struct SwitchModelRequest {
-    pub model: String,
-}
-
-impl SwitchModelRequest {
-    /// 验证请求参数
-    pub fn validate(&self) -> Result<(), String> {
-        if self.model.trim().is_empty() {
-            return Err("模型名不能为空".to_string());
-        }
-        Ok(())
-    }
-}
+// Shared types (ModelServiceInfo, ModelsResponse, SwitchModelRequest, UpdateConfigResponse)
+// are re-exported from tianyan::config::api_types above.
 
 #[cfg(test)]
 mod tests {

@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 mod agent;
+pub mod api_types;
 mod logging;
 mod memory;
 mod model;
@@ -18,18 +19,18 @@ pub mod wizard;
 pub use agent::AgentConfig;
 pub use logging::LoggingConfig;
 pub use memory::MemoryConfig;
-pub use model::{ModelServiceConfig, ModelServiceType, ModelsConfig};
+pub use model::{
+    find_provider, ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig,
+    ProviderConfig,
+};
 pub use retrieval::RetrievalConfig;
-pub use security::SecurityConfig;
+pub use security::{SafetyMode, SecurityConfig};
 pub use storage::{StorageConfig, VectorStorageConfig};
 pub use validation::{
-    validate_agent_config, validate_model_service, validate_models_config, validate_storage_config,
-    validation_errors_to_strings, ConfigValidationError, ValidationResult,
+    validate_agent_config, validate_models_config, validate_provider, validate_storage_config,
+    validation_errors_to_strings, ValidationResult,
 };
-pub use wizard::{
-    ConfigStatus, TestConnectionRequest, TestConnectionResponse, WizardAgentConfig, WizardConfig,
-    WizardModelService, WizardModelsConfig, WizardStorageConfig, WizardVectorStorageConfig,
-};
+pub use wizard::{TestConnectionRequest, TestConnectionResponse};
 
 /// Tianyan 代理的主配置。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -60,30 +61,6 @@ pub struct TianyanConfig {
 impl TianyanConfig {
     /// 配置文件名。
     const CONFIG_FILE_NAME: &'static str = "tianyan.toml";
-
-    /// 检查配置状态。
-    ///
-    /// 返回配置状态，包括是否已配置、配置文件路径和错误列表。
-    pub fn check_config_status() -> ConfigStatus {
-        // 查找配置文件
-        let config_path = Self::find_config_file();
-
-        let Some(path) = config_path else {
-            return ConfigStatus::not_configured(vec!["未找到配置文件".to_string()]);
-        };
-
-        // 尝试加载配置
-        match Self::load_from_file(&path) {
-            Ok(config) => {
-                // 验证配置
-                match config.validate() {
-                    Ok(()) => ConfigStatus::configured(path),
-                    Err(e) => ConfigStatus::invalid(path, vec![e]),
-                }
-            }
-            Err(e) => ConfigStatus::invalid(path, vec![e]),
-        }
-    }
 
     /// 从默认位置加载配置。
     ///
@@ -223,7 +200,10 @@ static CONFIG: std::sync::OnceLock<TianyanConfig> = std::sync::OnceLock::new();
 /// ```
 pub fn get_config() -> &'static TianyanConfig {
     CONFIG.get_or_init(|| {
-        TianyanConfig::load().expect("Failed to load tianyan configuration")
+        TianyanConfig::load().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "加载配置文件失败，使用默认配置");
+            TianyanConfig::default()
+        })
     })
 }
 
@@ -235,7 +215,6 @@ mod tests {
     fn test_default_config() {
         let config = TianyanConfig::default();
         assert!(!config.storage.data_dir.as_os_str().is_empty());
-        assert!(!config.models.default_chat_model.is_empty());
     }
 
     #[test]
@@ -243,10 +222,8 @@ mod tests {
         let config = TianyanConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: TianyanConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(
-            config.models.default_chat_model,
-            parsed.models.default_chat_model
-        );
+        // 默认配置 providers 和 preferences 都为空
+        assert!(parsed.models.providers.is_empty());
     }
 
     #[test]

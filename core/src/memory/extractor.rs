@@ -27,7 +27,7 @@ pub struct ExtractionConfig {
 impl Default for ExtractionConfig {
     fn default() -> Self {
         Self {
-            model: "gpt-4".to_string(),
+            model: String::new(),
             prompt_template: DEFAULT_EXTRACTION_PROMPT.to_string(),
             min_conversation_length: 50,
             max_extracted_memories: 10,

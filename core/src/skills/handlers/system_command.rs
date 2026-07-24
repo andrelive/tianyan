@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -13,12 +13,23 @@ use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 /// 系统命令处理器。
 pub struct SystemCommandHandler {
     blocked_commands: Vec<String>,
+    /// 命令执行超时（秒），默认 300。
+    timeout_secs: u64,
 }
 
 impl SystemCommandHandler {
     /// 创建新的系统命令处理器。
     pub fn new(blocked_commands: Vec<String>) -> Self {
-        Self { blocked_commands }
+        Self {
+            blocked_commands,
+            timeout_secs: 300,
+        }
+    }
+
+    /// 设置命令执行超时。
+    pub fn with_timeout(mut self, secs: u64) -> Self {
+        self.timeout_secs = secs;
+        self
     }
 }
 
@@ -55,26 +66,29 @@ impl SkillHandler for SystemCommandHandler {
 
         let working_dir = context.working_directory.as_ref().map(PathBuf::from);
 
-        let output = if cfg!(target_os = "windows") {
-            tokio::process::Command::new("cmd")
-                .args(["/C", command])
-                .current_dir(working_dir.unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                }))
-                .output()
-                .await
-        } else {
-            tokio::process::Command::new("sh")
-                .args(["-c", command])
-                .current_dir(working_dir.unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                }))
-                .output()
-                .await
+        let timeout = Duration::from_secs(self.timeout_secs);
+        let cmd_op = async {
+            if cfg!(target_os = "windows") {
+                tokio::process::Command::new("cmd")
+                    .args(["/C", command])
+                    .current_dir(working_dir.unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    }))
+                    .output()
+                    .await
+            } else {
+                tokio::process::Command::new("sh")
+                    .args(["-c", command])
+                    .current_dir(working_dir.unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    }))
+                    .output()
+                    .await
+            }
         };
 
-        match output {
-            Ok(output) => {
+        match tokio::time::timeout(timeout, cmd_op).await {
+            Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
@@ -99,10 +113,21 @@ impl SkillHandler for SystemCommandHandler {
                     data: HashMap::new(),
                 })
             }
-            Err(e) => Ok(SkillExecutionResult {
+            Ok(Err(e)) => Ok(SkillExecutionResult {
                 success: false,
                 output: None,
                 error: Some(format!("执行命令失败: {}", e)),
+                exit_code: None,
+                execution_time_ms: start.elapsed().as_millis() as u64,
+                data: HashMap::new(),
+            }),
+            Err(_) => Ok(SkillExecutionResult {
+                success: false,
+                output: None,
+                error: Some(format!(
+                    "命令执行超时（超过 {} 秒）",
+                    self.timeout_secs
+                )),
                 exit_code: None,
                 execution_time_ms: start.elapsed().as_millis() as u64,
                 data: HashMap::new(),

@@ -15,14 +15,17 @@
 //! # 示例
 //!
 //! ```rust,ignore
-//! use tianyan::model::{AsyncOpenAIClient, ModelConfig, ChatService};
-//! use tianyan::model::types::{ChatCompletionRequest, ModelProvider};
+//! use tianyan::model::{AsyncOpenAIClient, ChatService};
+//! use tianyan::config::ProviderConfig;
+//! use tianyan::model::types::ChatCompletionRequest;
 //! use tianyan::common::types::Message;
 //!
 //! async fn example() -> tianyan::common::error::Result<()> {
 //!     let client = AsyncOpenAIClient::new(
-//!         ModelConfig::new(ModelProvider::OpenAI, "your-api-key")
-//!             .with_chat_model("gpt-4")
+//!         "openai",
+//!         "https://api.openai.com/v1",
+//!         "your-api-key",
+//!         60,
 //!     )?;
 //!
 //!     let request = ChatCompletionRequest::new(
@@ -36,10 +39,10 @@
 //! }
 //! ```
 
-mod config;
 pub(crate) mod provider;
 mod services;
 mod traits;
+/// 模型类型定义（请求/响应/工具）。
 pub mod types;
 
 pub use traits::{ChatService, EmbeddingService, ServiceDiscovery, VlmService};
@@ -53,15 +56,16 @@ pub use types::{
     VisionContent, VisionMessage, VisionRequest, VisionResponse,
 };
 
-pub use config::ModelConfig;
-
 pub use services::ModelServices;
 
 /// 基于 async-openai 的 OpenAI 兼容客户端。
 pub use provider::AsyncOpenAIClient;
 
-/// 模型服务的共享引用类型别名。
+/// 聊天服务的共享引用类型别名。
 pub type SharedChatService = std::sync::Arc<dyn ChatService>;
+
+#[cfg(test)]
+pub use traits::MockChatService;
 
 #[cfg(test)]
 mod tests {

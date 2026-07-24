@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.tianyan.app",
   "build": {
-    "beforeBuildCommand": "powershell -Command \"cd ../gui; trunk build --release\"",
-    "frontendDist": "../gui/dist"
+    "beforeBuildCommand": "powershell -Command \"Set-Location ../gui-vite; npm run build\"",
+    "frontendDist": "../gui-vite/dist"
   },
   "app": {
     "windows": [

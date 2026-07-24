@@ -6,7 +6,9 @@ use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
 use crate::agent::types::ClarificationQuestion;
-use crate::common::types::{DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage};
+use crate::common::types::{
+    DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
+};
 
 const MAX_CONVERSATION_MESSAGES: usize = 100;
 const KEEP_RECENT_MESSAGES: usize = 50;

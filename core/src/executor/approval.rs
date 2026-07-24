@@ -415,7 +415,9 @@ impl ApprovalWorkflow {
                 approved_by: approved_by.to_string(),
             };
 
-            let _ = pending_approval.response_tx.send(response);
+            if let Err(e) = pending_approval.response_tx.send(response) {
+                tracing::warn!(error = ?e, "发送审批响应失败");
+            }
             Ok(())
         } else {
             Err(crate::common::error::TianyanError::Internal(

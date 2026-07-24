@@ -11,13 +11,10 @@ use std::time::Instant;
 use chrono::Utc;
 use ring::digest::{Context, SHA256};
 
-use crate::common::error::{Result, TianyanError};
-use crate::common::types::{ContextNamespace, TianyanUri};
+use crate::common::error::Result;
+use crate::common::types::{ContextNamespace, EntryMetadata, TianyanUri};
 use crate::model::{ChatService, EmbeddingService, VlmService};
-use crate::vfs::{
-    backend::StorageBackend, ContextEntry, SummaryEngine, VectorPoint, VectorStorage,
-    CURRENT_SCHEMA_VERSION,
-};
+use crate::vfs::{ContextEntry, SummaryEngine, VirtualFileSystem};
 
 use super::image::{ImageAnalyzer, ImageProcessor, ImageProcessorConfig};
 use super::parser::CompositeParser;
@@ -42,6 +39,8 @@ pub struct IngestorConfig {
     pub embedding_model: String,
     /// 默认摘要模型。
     pub summary_model: String,
+    /// 图像分析模型（VLM）。
+    pub vision_model: String,
     /// 最大并发处理任务数。
     pub max_concurrent_tasks: usize,
 }
@@ -53,7 +52,8 @@ impl Default for IngestorConfig {
             generate_embeddings: true,
             generate_summaries: true,
             embedding_model: "text-embedding-3-small".to_string(),
-            summary_model: "gpt-4o-mini".to_string(),
+            summary_model: String::new(),
+            vision_model: String::new(),
             max_concurrent_tasks: 4,
         }
     }
@@ -88,6 +88,12 @@ impl IngestorConfig {
         self.summary_model = model.into();
         self
     }
+
+    /// 设置视觉分析模型。
+    pub fn with_vision_model(mut self, model: impl Into<String>) -> Self {
+        self.vision_model = model.into();
+        self
+    }
 }
 
 /// 协调文档处理的知识导入器。
@@ -103,8 +109,7 @@ pub struct KnowledgeIngestor {
     image_processor: ImageProcessor,
     embedding_service: Arc<dyn EmbeddingService>,
     vlm_service: Arc<dyn VlmService>,
-    storage: Arc<dyn StorageBackend>,
-    vector_storage: Arc<dyn VectorStorage>,
+    vfs: Arc<dyn VirtualFileSystem>,
     summary_engine: SummaryEngine,
 }
 
@@ -115,8 +120,7 @@ impl KnowledgeIngestor {
         model_service: Arc<dyn ChatService>,
         embedding_service: Arc<dyn EmbeddingService>,
         vlm_service: Arc<dyn VlmService>,
-        storage: Arc<dyn StorageBackend>,
-        vector_storage: Arc<dyn VectorStorage>,
+        vfs: Arc<dyn VirtualFileSystem>,
     ) -> Self {
         let parser = CompositeParser::new();
         let image_processor = ImageProcessor::new(config.image.clone());
@@ -134,8 +138,7 @@ impl KnowledgeIngestor {
             image_processor,
             embedding_service,
             vlm_service,
-            storage,
-            vector_storage,
+            vfs,
             summary_engine,
         }
     }
@@ -159,12 +162,8 @@ impl KnowledgeIngestor {
 
         let uri = self.create_uri(&category, &doc_id);
 
-        if self
-            .storage
-            .exists(&TianyanUri::parse(&uri.to_string()).unwrap_or(uri.clone()))
-            .await
-            .unwrap_or(false)
-        {
+        // 通过 VFS 检查是否已存在（去重）
+        if self.vfs.exists(&uri).await.unwrap_or(false) {
             return Ok(IngestionResult {
                 document_id: doc_id,
                 uri,
@@ -176,7 +175,10 @@ impl KnowledgeIngestor {
 
         let (text_content, visual_embedding, _metadata) = match doc_type {
             DocumentType::Image => self.process_image(&request, &doc_id).await?,
-            _ => self.process_document(&request, &doc_id, &doc_type).await.map(|(t, m)| (t, None, m))?,
+            _ => self
+                .process_document(&request, &doc_id, &doc_type)
+                .await
+                .map(|(t, m)| (t, None, m))?,
         };
 
         let (abstract_content, overview_content) = if self.config.generate_summaries {
@@ -197,23 +199,42 @@ impl KnowledgeIngestor {
             )
         };
 
-        let mut entry = ContextEntry::new_file(uri.clone());
-        entry.abstract_content = Some(abstract_content);
-        entry.overview_content = Some(overview_content);
-        entry.detail_content = Some(text_content.clone());
-        entry
-            .metadata
-            .custom
-            .insert("content_hash".to_string(), serde_json::json!(content_hash));
-        entry.metadata.source = request.source;
-        entry.metadata.original_name = Some(request.filename.clone());
-        entry.metadata.file_size = Some(request.content.len() as u64);
-        entry.metadata.tags = request.tags.clone();
+        // 通过 VFS 创建文件并写入各层级内容
+        self.vfs.create_file(&uri).await?;
+        self.vfs.write_abstract(&uri, &abstract_content).await?;
+        self.vfs.write_overview(&uri, &overview_content).await?;
+        self.vfs.write_content(&uri, &text_content).await?;
 
-        self.storage.write_entry(&entry).await?;
+        // 将自定义元数据（content_hash 等）写入 VFS
+        let mut custom_meta = std::collections::HashMap::new();
+        custom_meta.insert("content_hash".to_string(), serde_json::json!(content_hash));
+        self.vfs.update_metadata(&uri, 0.5, custom_meta).await?;
+
+        // 构建向量 payload（包含完整元数据，用于搜索发现）
+        let payload = {
+            let mut e = ContextEntry::new_file(uri.clone());
+            e.abstract_content = Some(abstract_content.clone());
+            e.overview_content = Some(overview_content.clone());
+            e.detail_content = Some(text_content.clone());
+            e.metadata
+                .custom
+                .insert("content_hash".to_string(), serde_json::json!(content_hash));
+            e.metadata.source = request.source;
+            e.metadata.original_name = Some(request.filename.clone());
+            e.metadata.file_size = Some(request.content.len() as u64);
+            e.metadata.tags = request.tags.clone();
+            e.metadata
+        };
 
         if self.config.generate_embeddings {
-            self.store_embeddings(&uri, &entry, visual_embedding).await?;
+            self.store_embeddings(
+                &uri,
+                &abstract_content,
+                &overview_content,
+                visual_embedding,
+                payload,
+            )
+            .await?;
         }
 
         let tokens_processed = count_tokens(&text_content);
@@ -270,7 +291,7 @@ impl KnowledgeIngestor {
         let analyzer = ImageAnalyzer::new(
             self.vlm_service.as_ref(),
             self.embedding_service.as_ref(),
-            "gpt-4o",
+            &self.config.vision_model,
         );
         let analysis = analyzer.analyze(&request.content).await?;
 
@@ -298,7 +319,11 @@ impl KnowledgeIngestor {
             importance: 0.5,
         };
 
-        Ok((unified.combined_text, visual_embedding.map(|e| e.vector), metadata))
+        Ok((
+            unified.combined_text,
+            visual_embedding.map(|e| e.vector),
+            metadata,
+        ))
     }
 
     /// 为内容生成分层摘要。
@@ -318,44 +343,25 @@ impl KnowledgeIngestor {
         Ok((abstract_content, overview_content))
     }
 
-    /// 为条目的 abstract、overview 和视觉内容生成嵌入向量并写入向量库。
+    /// 为条目内容生成嵌入向量并通过 VFS 写入向量库。
     async fn store_embeddings(
         &self,
         uri: &TianyanUri,
-        entry: &ContextEntry,
+        abstract_content: &str,
+        overview_content: &str,
         visual_vector: Option<Vec<f32>>,
+        payload: EntryMetadata,
     ) -> Result<()> {
-        let abstract_text = entry
-            .abstract_content
-            .as_ref()
-            .ok_or_else(|| TianyanError::EmbeddingService("没有摘要内容可嵌入".to_string()))?;
-
-        let abstract_embedding = self
-            .embedding_service
-            .embed_single(&self.config.embedding_model, abstract_text)
-            .await?;
-
-        let overview_embedding = if let Some(ref overview) = entry.overview_content {
-            Some(
-                self.embedding_service
-                    .embed_single(&self.config.embedding_model, overview)
-                    .await?,
+        self.vfs
+            .index_entry(
+                uri,
+                abstract_content,
+                overview_content,
+                visual_vector,
+                payload,
+                &self.config.embedding_model,
             )
-        } else {
-            None
-        };
-
-        let point = VectorPoint {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            id: uri.to_string().replace("tianyan://", "").replace('/', "-"),
-            abstract_vector: Some(abstract_embedding.vector),
-            overview_vector: overview_embedding.map(|e| e.vector),
-            visual_vector,
-            payload: entry.metadata.clone(),
-        };
-
-        self.vector_storage.upsert_point(&point).await?;
-        Ok(())
+            .await
     }
 
     /// 为文档创建 URI。
@@ -405,15 +411,13 @@ impl KnowledgeIngestor {
         let mut context = Context::new(&SHA256);
         context.update(content);
         let digest = context.finish();
-        digest.as_ref()
+        digest
+            .as_ref()
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect::<String>()
     }
 }
-
-pub mod builder;
-pub use builder::KnowledgeIngestorBuilder;
 
 #[cfg(test)]
 mod tests {
@@ -450,7 +454,8 @@ mod tests {
         let mut context = Context::new(&SHA256);
         context.update(content);
         let digest = context.finish();
-        let hash = digest.as_ref()
+        let hash = digest
+            .as_ref()
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect::<String>();

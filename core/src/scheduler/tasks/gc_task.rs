@@ -11,7 +11,6 @@ use chrono::Utc;
 use crate::common::error::Result;
 use crate::common::types::{AgentPath, ContentLevel, ContextNamespace, TianyanUri};
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
-use crate::vfs::VirtualFileSystem;
 
 /// 规则过时的默认天数阈值。
 const DEFAULT_RULE_STALE_DAYS: u32 = 30;
@@ -125,7 +124,7 @@ impl GcTask {
                 auto_cleanup = self.auto_cleanup,
                 "GC: 发现过时规则"
             );
-        } else if entries.len() > 0 {
+        } else if !entries.is_empty() {
             tracing::debug!(total_rules = entries.len(), "GC: 所有规则均未过时");
         }
 
@@ -212,7 +211,7 @@ impl GcTask {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().map_or(true, |e| e != "md") {
+                    if path.extension().is_none_or(|e| e != "md") {
                         continue;
                     }
                     report.total_docs_checked += 1;
@@ -235,11 +234,9 @@ impl GcTask {
                                 if !std::path::Path::new(&rs_path).exists()
                                     && !std::path::Path::new(&format!("{}/mod.rs", &fs_path))
                                         .exists()
-                                {
-                                    if !report.missing_modules.contains(&module_path.to_string()) {
+                                    && !report.missing_modules.contains(&module_path.to_string()) {
                                         report.missing_modules.push(module_path.to_string());
                                     }
-                                }
                             }
                         }
                     }
@@ -292,7 +289,10 @@ impl GcTask {
             now, now
         );
 
-        ctx.vfs.write(&report_uri, ContentLevel::Detail, &content).await.ok();
+        ctx.vfs
+            .write(&report_uri, ContentLevel::Detail, &content)
+            .await
+            .ok();
         tracing::info!(path = %report_uri, "质量报告已更新");
 
         Ok(())

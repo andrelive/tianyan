@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use tracing::{debug, info, instrument};
 
-use crate::common::error::{Result, TianyanError};
+use super::types::RetrievalResult;
+use crate::common::error::Result;
 use crate::common::types::{ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
-use super::types::RetrievalResult;
 use crate::model::EmbeddingService;
 use crate::vfs::VirtualFileSystem;
 
@@ -284,91 +284,6 @@ impl DualLayerRetriever {
             .take(top_k)
             .collect();
         Ok(filtered)
-    }
-}
-
-/// 用于创建融合检索器实例的构建器。
-pub struct DualLayerRetrieverBuilder {
-    vfs: Option<Arc<dyn VirtualFileSystem>>,
-    embedding_service: Option<Arc<dyn EmbeddingService>>,
-    embedding_model: Option<String>,
-    memory_bias: Option<f32>,
-    memory_decay_rate: Option<f32>,
-}
-
-impl DualLayerRetrieverBuilder {
-    /// 创建新的构建器。
-    pub fn new() -> Self {
-        Self {
-            vfs: None,
-            embedding_service: None,
-            embedding_model: None,
-            memory_bias: None,
-            memory_decay_rate: None,
-        }
-    }
-
-    /// 设置 VFS（必需）。
-    pub fn with_vfs(mut self, vfs: Arc<dyn VirtualFileSystem>) -> Self {
-        self.vfs = Some(vfs);
-        self
-    }
-
-    /// 设置嵌入服务（仅用于配置意图分析器）。
-    pub fn with_embedding_service(mut self, service: Arc<dyn EmbeddingService>) -> Self {
-        self.embedding_service = Some(service);
-        self
-    }
-
-    /// 设置嵌入模型。
-    pub fn with_embedding_model(mut self, model: impl Into<String>) -> Self {
-        self.embedding_model = Some(model.into());
-        self
-    }
-
-    /// 设置 Memory 命名空间的分数偏置倍数。
-    pub fn with_memory_bias(mut self, bias: f32) -> Self {
-        self.memory_bias = Some(bias);
-        self
-    }
-
-    /// 设置记忆衰减率（每日）。
-    pub fn with_memory_decay_rate(mut self, rate: f32) -> Self {
-        self.memory_decay_rate = Some(rate);
-        self
-    }
-
-    /// 构建检索器。
-    pub fn build(self) -> Result<DualLayerRetriever> {
-        let vfs = self
-            .vfs
-            .ok_or_else(|| TianyanError::Internal("VFS 不可用".to_string()))?;
-
-        let mut retriever = DualLayerRetriever::new(vfs);
-
-        if let Some(service) = self.embedding_service {
-            retriever = retriever.with_embedding_service(service);
-        }
-
-        if let Some(model) = self.embedding_model {
-            retriever = retriever.with_embedding_model(model);
-        }
-
-        if let Some(bias) = self.memory_bias {
-            retriever = retriever.with_memory_bias(bias);
-        }
-
-        if let Some(rate) = self.memory_decay_rate {
-            retriever = retriever.with_memory_decay_rate(rate);
-        }
-
-        Ok(retriever)
-    }
-}
-
-impl Default for DualLayerRetrieverBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -723,11 +638,8 @@ mod tests {
         let vfs: Arc<dyn VirtualFileSystem> =
             Arc::new(TestVfs::new(vector_storage, Arc::new(MockEmbeddingService)));
 
-        DualLayerRetrieverBuilder::new()
-            .with_vfs(vfs)
+        DualLayerRetriever::new(vfs)
             .with_embedding_service(Arc::new(MockEmbeddingService))
-            .build()
-            .unwrap()
     }
 
     async fn create_test_retriever_with_data() -> (DualLayerRetriever, Arc<InMemoryVectorStorage>) {
@@ -759,11 +671,8 @@ mod tests {
             Arc::new(MockEmbeddingService),
         ));
 
-        let retriever = DualLayerRetrieverBuilder::new()
-            .with_vfs(vfs)
-            .with_embedding_service(Arc::new(MockEmbeddingService))
-            .build()
-            .unwrap();
+        let retriever = DualLayerRetriever::new(vfs)
+            .with_embedding_service(Arc::new(MockEmbeddingService));
 
         (retriever, vector_storage)
     }
@@ -820,12 +729,9 @@ mod tests {
         let vfs: Arc<dyn VirtualFileSystem> =
             Arc::new(TestVfs::new(vector_storage, Arc::new(MockEmbeddingService)));
 
-        let retriever = DualLayerRetrieverBuilder::new()
-            .with_vfs(vfs)
+        let retriever = DualLayerRetriever::new(vfs)
             .with_embedding_service(Arc::new(MockEmbeddingService))
-            .with_embedding_model("custom-model")
-            .build()
-            .unwrap();
+            .with_embedding_model("custom-model");
 
         assert_eq!(retriever.embedding_model, "custom-model");
     }
@@ -957,20 +863,9 @@ mod tests {
         assert!(!results.is_empty());
     }
 
-    // ==================== Builder Tests ====================
-
-    #[test]
-    fn test_builder_defaults() {
-        let builder = DualLayerRetrieverBuilder::new();
-        assert!(builder.vfs.is_none());
-        assert!(builder.embedding_service.is_none());
-    }
-
-    #[test]
-    fn test_builder_default() {
-        let builder = DualLayerRetrieverBuilder::default();
-        assert!(builder.vfs.is_none());
-    }
+    // ==================== Builder Removed ====================
+    // DualLayerRetrieverBuilder removed — used only in these tests, never in production.
+    // DualLayerRetriever::new() + with_*() methods provide the same functionality directly.
 
     // ==================== Token Estimation Tests ====================
 

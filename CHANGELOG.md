@@ -8,35 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial project structure and architecture
-- Unified URI context management system
-- Three-layer summary mechanism (L0/L1/L2)
-- Virtual file system for context storage
-- Qdrant integration for vector storage
-- Multi-model support (OpenAI, Claude, DeepSeek)
-- Model routing with failover support
-- CLI interface with multiple commands
-- Knowledge ingestion system
-- Memory management with decay mechanism
-- Skill system framework
-- Configuration management
-- Logging system
-- Security features
+- **Tauri + Yew + Axum** 桌面应用架构（替代原 CLI-only 模式）
+- **Agent Loop 架构**：LLM 自主工具调用 + 流式 SSE 响应（6 种 chunk_type）
+- **VFS 双层摘要索引**：L0/L1/L2 三层内容 + Qdrant RRF 融合检索
+- **StructuredMessage** 单一真相源：持久化（JSONL）、会话组装、Token 统计
+- **ToolRegistry**：13 个 OpenAI function calling 兼容工具
+- **Skill 系统**：6 个内置技能 + GEPA 进化引擎自动学习
+- **Scheduler 定时任务**：RuleTask、MemoryTask、SummaryTask、GcTask
+- **ContextPipeline**：soul → rules → retrieval → compression → assemble
+- **ModelServices** 容器：统一管理 ChatService / EmbeddingService / VlmService
+- **PersistentSessionManager**：VFS 持久化会话管理
+- **AgentMetrics**：可观测性存储和 Agent 自省接口
+- **KnowledgeIngestor**：知识库导入管道（未在 Agent 流程中集成）
 
 ### Changed
-- N/A
-
-### Deprecated
-- N/A
+- Workspace 多 Crate 重构（core/server/gui/tauri）
+- `core/` → `tianyan-core`（lib name: `tianyan`）
+- `Server` 层：知识 API 完成真实集成（ingestion + retrieval）
+- `Server` 层：`anyhow` 迁移完成
+- **KnowledgeIngestor** 泛型消除（4 泛型参数 → `Arc<dyn ...>` 具体 struct）
+- **规则管线重构**：RuleRecorder/RuleSuggester 移至 `scheduler/tasks/`
+- `DEFAULT_SOUL` 通过 `include_str!` 构建
 
 ### Removed
-- N/A
+- `planner/` 模块（Planner-Executor 架构废弃）
+- `ModelRouter`（被 `ModelServices` 替代）
+- `TokenBudget`（被 `ContentLoadStrategy::from_score()` 替代）
+- `Chunker` / `DocumentChunker` / `ChunkingConfig`（VFS 双层检索替代）
+- `ConversationSummarizer`（被 `ContextCompressor` 替代）
+- `VisionEncoder`（被 VFS 图像双通道替代）
+- `AgentHarness` wrapper（功能由 `Agent` 直接持有）
+- `AgentSkills` wrapper（功能由 `Agent` 直接持有）
+- `MemoryExtractionTrait`（简化为 `MemoryExtractor`）
+- `ContextRetriever` trait
+- `RetryService`（Providers fail fast）
 
 ### Fixed
-- N/A
-
-### Security
-- N/A
+- VFS write/append 自带容错，移除上层冗余检查
+- 配置查找顺序规范化：`./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml`
 
 ## [0.1.0] - 2024-01-15
 
@@ -86,29 +95,13 @@ No breaking changes in the unreleased version.
 
 ## Roadmap
 
-### v0.2.0 (Planned)
-- GUI interface (egui-based)
-- Web interface
-- Plugin system for skills
-- Multi-agent collaboration
-
-### v0.3.0 (Planned)
-- Knowledge graph support
-- Advanced memory consolidation
-- Custom embedding models
-- Distributed storage support
-
-### v1.0.0 (Future)
-- Stable API
-- Production-ready
-- Comprehensive documentation
-- Full test coverage
+> ⚠️ 此 Roadmap 自 2024-01 后未更新。当前架构已大幅演进，参见 [系统架构文档](./docs/system-architecture.md)。
 
 ---
 
 ## Contributing
 
-See [Development Guide](./docs/development.md) for information on how to contribute.
+See [README](./README.md) and [AGENTS.md](./AGENTS.md) for development information.
 
 ## License
 

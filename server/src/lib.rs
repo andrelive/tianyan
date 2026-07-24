@@ -11,8 +11,8 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
-use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 use tianyan::scheduler::tasks::{GcTask, MemoryTask, RuleTask, SummaryTask};
+use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 
 use crate::agent_builder::create_model_services;
 
@@ -28,7 +28,9 @@ use state::AppState;
 /// Server configuration
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
+    /// 服务器端口号
     pub port: u16,
+    /// 服务器主机地址
     pub host: String,
 }
 
@@ -62,7 +64,9 @@ impl ServerConfig {
 /// Health check response
 #[derive(Serialize)]
 pub struct HealthResponse {
+    /// 健康状态
     pub status: String,
+    /// 服务版本号
     pub version: String,
 }
 
@@ -110,32 +114,49 @@ fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
     use tianyan::vfs::{
-        LocalFileBackend, QdrantVectorStore, VectorStorage,
-        VirtualFileSystemBuilder,
+        LanceDbVectorStore, LocalFileBackend, VectorStorage, VirtualFileSystemBuilder,
     };
 
     // 1. 创建存储后端
     let storage = Arc::new(LocalFileBackend::new(config.storage.clone()));
-    let vector_storage = Arc::new(QdrantVectorStore::new(&config.storage)?);
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async { vector_storage.initialize().await })
+
+    // LanceDB 需要 async 初始化
+    let vector_storage = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(async { LanceDbVectorStore::new(&config.storage).await })
     })?;
+    let vector_storage = Arc::new(vector_storage);
 
-    // 2. 创建模型服务（用于嵌入服务）
-    let model_services = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async { create_model_services(config).await })
-    })
-    .map_err(|e| tianyan::TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
-
-    let embedding_service = model_services.embedding;
-    let embedding_model = config.models.default_embedding_model.clone();
-
-    // 3. 初始化 VFS（单一实例）
-    let vfs = VirtualFileSystemBuilder::new()
+    // 2. 创建模型服务（用于嵌入服务），无配置时跳过
+    let mut vfs_builder = VirtualFileSystemBuilder::new()
         .with_storage(storage)
         .with_vector_storage(vector_storage)
-        .with_config(config.storage.clone())
-        .with_embedding_service(embedding_service, embedding_model)
+        .with_config(config.storage.clone());
+    {
+        let model_services = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { create_model_services(config).await })
+        });
+        match model_services {
+            Ok(ms) => {
+                let emb_model = config
+                    .models
+                    .resolve(tianyan::config::ModelCapability::TextEmbedding)
+                    .map(|r| r.model)
+                    .unwrap_or_else(|| "text-embedding-3-small".to_string());
+                vfs_builder = vfs_builder.with_embedding_service(
+                    ms.embedding,
+                    emb_model,
+                );
+            }
+            Err(e) => {
+                warn!("无法创建模型服务（{}），VFS 将以无嵌入模式运行", e);
+            }
+        }
+    }
+
+    // 3. 初始化 VFS（单一实例）
+    let vfs = vfs_builder
         .build()
         .map_err(|e| tianyan::TianyanError::VirtualFileSystem(format!("VFS 构建失败：{}", e)))?;
 
@@ -145,8 +166,7 @@ fn initialize_vfs_for_app(
     })?;
 
     tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current()
-            .block_on(async { bootstrap_app_vfs(&vfs).await })
+        tokio::runtime::Handle::current().block_on(async { bootstrap_app_vfs(&vfs).await })
     })?;
 
     Ok(Arc::new(vfs))
@@ -160,9 +180,14 @@ async fn bootstrap_app_vfs(
     use tianyan::vfs::{ContentStore, VfsCore};
 
     let soul_uri = AgentPath::Soul.uri();
-    if !vfs.has_content(&soul_uri, ContentLevel::Detail).await.unwrap_or(false) {
+    if !vfs
+        .has_content(&soul_uri, ContentLevel::Detail)
+        .await
+        .unwrap_or(false)
+    {
         vfs.create_file(&soul_uri).await?;
-        vfs.write(&soul_uri, ContentLevel::Detail, DEFAULT_SOUL).await?;
+        vfs.write(&soul_uri, ContentLevel::Detail, DEFAULT_SOUL)
+            .await?;
         tracing::info!("已创建默认核心提示词： tianyan://agent/soul");
     }
 
@@ -173,8 +198,13 @@ async fn bootstrap_app_vfs(
     }
 
     let user_uri = TianyanUri::new(ContextNamespace::User, vec![]);
-    if !vfs.has_content(&user_uri, ContentLevel::Detail).await.unwrap_or(false) {
-        vfs.write(&user_uri, ContentLevel::Detail, "# 用户档案\n\n").await?;
+    if !vfs
+        .has_content(&user_uri, ContentLevel::Detail)
+        .await
+        .unwrap_or(false)
+    {
+        vfs.write(&user_uri, ContentLevel::Detail, "# 用户档案\n\n")
+            .await?;
         tracing::info!("已创建默认用户档案： tianyan://user");
     }
 
@@ -183,12 +213,13 @@ async fn bootstrap_app_vfs(
 }
 
 /// 允许的 CORS 来源（编译期常量，避免运行时 parse panic）。
-const ALLOWED_ORIGINS: [HeaderValue; 5] = [
+const ALLOWED_ORIGINS: [HeaderValue; 6] = [
     HeaderValue::from_static("http://localhost:3000"),
     HeaderValue::from_static("http://localhost:1420"),
     HeaderValue::from_static("http://127.0.0.1:3000"),
     HeaderValue::from_static("http://127.0.0.1:1420"),
     HeaderValue::from_static("tauri://localhost"),
+    HeaderValue::from_static("http://tauri.localhost"),
 ];
 
 /// Create the application router with configuration
@@ -196,7 +227,9 @@ const ALLOWED_ORIGINS: [HeaderValue; 5] = [
 /// 支持无配置启动，用于配置向导模式
 ///
 /// 返回 (Router, AppState) 元组，以便在关闭时访问 AppState
-fn create_app(config: tianyan::config::TianyanConfig) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
+fn create_app(
+    config: tianyan::config::TianyanConfig,
+) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
     // 在应用层初始化 VFS（单一实例）
     let vfs = initialize_vfs_for_app(&config)?;
 
@@ -263,74 +296,87 @@ pub async fn start_server(
     config: ServerConfig,
     tianyan_config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<()> {
+    let has_providers = tianyan_config.models.providers.iter().any(|p| p.enabled);
     let (app, state) = create_app(tianyan_config)?;
+    let task_scheduler: Option<Arc<TaskScheduler>> = if has_providers {
+        let scheduler = Arc::new(TaskScheduler::new());
 
-    // 创建任务调度器
-    let task_scheduler = Arc::new(TaskScheduler::new());
+        // 创建任务上下文
+        let vfs = state.vfs();
+        let summary_engine = state.create_summary_engine()?;
+        let memory_extractor = state.create_memory_extractor()?;
+        let app_config = Arc::new(state.config().read().await.clone());
 
-    // 创建任务上下文
-    let vfs = state.vfs();
-    let summary_engine = state.create_summary_engine()?;
-    let memory_extractor = state.create_memory_extractor()?;
-    let app_config = Arc::new(state.config().read().await.clone());
+        let task_ctx = Arc::new(TaskContext::new(
+            vfs.clone(),
+            summary_engine,
+            memory_extractor,
+            app_config,
+        ));
 
-    let task_ctx = Arc::new(TaskContext::new(
-        vfs.clone(),
-        summary_engine,
-        memory_extractor,
-        app_config,
-    ));
-
-    // 注册摘要任务（每 5 分钟）
-    task_scheduler
-        .register_task(TaskDefinition::new(
-            "summary_generation",
-            "摘要生成",
-            "0 */5 * * * *",
-            Arc::new(SummaryTask::new()),
-        ))
-        .await?;
-
-    // 注册记忆任务（每 10 分钟）
-    task_scheduler
-        .register_task(TaskDefinition::new(
-            "memory_extraction",
-            "记忆提取",
-            "0 */10 * * * *",
-            Arc::new(MemoryTask::new()),
-        ))
-        .await?;
-
-    // 注册规则提炼任务（每 15 分钟，在记忆提取之后运行）
-    {
-        let config_lock = state.config();
-        let config_guard = config_lock.read().await;
-        let model_services =
-            create_model_services(&config_guard).await
-                .map_err(|e| tianyan::TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
-        task_scheduler
+        // 注册摘要任务（每 5 分钟）
+        scheduler
             .register_task(TaskDefinition::new(
-                "rule_extraction",
-                "规则提炼",
-                "30 */15 * * * *",
-                Arc::new(RuleTask::new(vfs, model_services.chat)),
+                "summary_generation",
+                "摘要生成",
+                "0 */5 * * * *",
+                Arc::new(SummaryTask::new()),
             ))
             .await?;
-    }
 
-    // 注册垃圾回收任务（每 6 小时，清理低效规则和检测文档漂移）
-    task_scheduler
-        .register_task(TaskDefinition::new(
-            "garbage_collection",
-            "垃圾回收",
-            "0 0 */6 * * *",
-            Arc::new(GcTask::new()),
-        ))
-        .await?;
+        // 注册记忆任务（每 10 分钟）
+        scheduler
+            .register_task(TaskDefinition::new(
+                "memory_extraction",
+                "记忆提取",
+                "0 */10 * * * *",
+                Arc::new(MemoryTask::new()),
+            ))
+            .await?;
 
-    // 启动任务调度器
-    TaskScheduler::start_with_scheduler(task_scheduler.clone(), task_ctx.clone()).await?;
-    info!("任务调度器已启动");
+        // 注册规则提炼任务（每 15 分钟）
+        {
+            let config_lock = state.config();
+            let config_guard = config_lock.read().await;
+            let model_services = create_model_services(&config_guard).await.map_err(|e| {
+                tianyan::TianyanError::ModelService(format!("模型服务创建失败：{}", e))
+            })?;
+            scheduler
+                .register_task(TaskDefinition::new(
+                    "rule_extraction",
+                    "规则提炼",
+                    "30 */15 * * * *",
+                    Arc::new(RuleTask::new(
+                        vfs,
+                        model_services.chat,
+                        config_guard
+                            .models
+                            .resolve(tianyan::config::ModelCapability::Chat)
+                            .map(|r| r.model)
+                            .unwrap_or_default(),
+                    )),
+                ))
+                .await?;
+        }
+
+        // 注册垃圾回收任务（每 6 小时）
+        scheduler
+            .register_task(TaskDefinition::new(
+                "garbage_collection",
+                "垃圾回收",
+                "0 0 */6 * * *",
+                Arc::new(GcTask::new()),
+            ))
+            .await?;
+
+        // 启动任务调度器
+        TaskScheduler::start_with_scheduler(scheduler.clone(), task_ctx.clone()).await?;
+        info!("任务调度器已启动");
+        Some(scheduler)
+    } else {
+        warn!("没有启用的模型服务，跳过所有定时任务注册");
+        None
+    };
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
@@ -356,7 +402,9 @@ pub async fn start_server(
         let server = axum::serve(listener, app);
         let shutdown_signal = async move {
             // 等待 shutdown 信号
-            let _ = shutdown_rx_server.changed().await;
+            if shutdown_rx_server.changed().await.is_err() {
+                tracing::warn!("关闭信号通道已断开，直接关闭服务器");
+            }
             info!("收到关闭信号，服务器停止接受新连接");
         };
 
@@ -460,9 +508,11 @@ pub async fn start_server(
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // 停止任务调度器
-        info!("停止任务调度器...");
-        if let Err(e) = task_scheduler.shutdown().await {
-            error!("停止任务调度器失败：{}", e);
+        if let Some(ref scheduler) = task_scheduler {
+            info!("停止任务调度器...");
+            if let Err(e) = scheduler.shutdown().await {
+                error!("停止任务调度器失败：{}", e);
+            }
         }
 
         // 调用 AppState::shutdown() 等待所有 pending 任务完成

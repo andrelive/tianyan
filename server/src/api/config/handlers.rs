@@ -91,6 +91,41 @@ pub async fn get_models(
     })
 }
 
+/// GET /api/config/status — simple bootstrap check for frontend.
+pub async fn get_config_status() -> Json<Value> {
+    let configured = tianyan::config::TianyanConfig::config_exists();
+    Json(serde_json::json!({ "configured": configured }))
+}
+
+/// POST /api/config/test-connection — test a model service connection.
+pub async fn test_connection(
+    Json(request): Json<tianyan::config::TestConnectionRequest>,
+) -> Json<tianyan::config::TestConnectionResponse> {
+    use tianyan::config::TestConnectionResponse;
+    if !request.endpoint.starts_with("http://") && !request.endpoint.starts_with("https://") {
+        return Json(TestConnectionResponse::error(
+            "API 端点 URL 格式无效，必须以 http:// 或 https:// 开头",
+        ));
+    }
+    if request.api_key.is_empty() {
+        return Json(TestConnectionResponse::error("API 密钥不能为空"));
+    }
+    if request.model.is_empty() {
+        return Json(TestConnectionResponse::error("模型名称不能为空"));
+    }
+    // Delegate to core_bridge for actual connection test
+    match crate::core_bridge::test_model_connection(
+        &request.endpoint,
+        &request.api_key,
+        &request.model,
+    )
+    .await
+    {
+        Ok(models) => Json(TestConnectionResponse::success("连接成功", models)),
+        Err(e) => Json(TestConnectionResponse::error(format!("连接失败: {}", e))),
+    }
+}
+
 /// 切换默认聊天模型
 pub async fn switch_model(
     State(state): State<Arc<AppState>>,

@@ -95,7 +95,12 @@ impl ContextAssembler {
                                 reasoning_content = Some(text.clone());
                             }
                         }
-                        Part::ToolCall { id, name, arguments, .. } => {
+                        Part::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                            ..
+                        } => {
                             tool_calls.push(CoreToolCall {
                                 id: id.clone(),
                                 call_type: ToolCallType::Function,
@@ -126,7 +131,12 @@ impl ContextAssembler {
             }
             MessageRole::Tool => {
                 for part in &sm.parts {
-                    if let Part::ToolResult { tool_call_id, content, .. } = part {
+                    if let Part::ToolResult {
+                        tool_call_id,
+                        content,
+                        ..
+                    } = part
+                    {
                         messages.push(Message::tool(tool_call_id.clone(), content.clone()));
                     }
                 }
@@ -204,12 +214,14 @@ impl ContextAssembler {
             parent_id: parent_id.map(|s| s.to_string()),
             role,
             parts,
-            tokens: token_usage.map(|tu| DetailedTokenUsage {
-                input: tu.prompt_tokens,
-                output: tu.completion_tokens,
-                total: tu.total_tokens,
-                ..Default::default()
-            }).unwrap_or_default(),
+            tokens: token_usage
+                .map(|tu| DetailedTokenUsage {
+                    input: tu.prompt_tokens,
+                    output: tu.completion_tokens,
+                    total: tu.total_tokens,
+                    ..Default::default()
+                })
+                .unwrap_or_default(),
             cost: 0.0,
             model_id: None,
             time: MessageTime {
@@ -231,7 +243,12 @@ mod tests {
         DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
     };
 
-    fn make_text_msg(id: &str, role: MessageRole, text: &str, session_id: &str) -> StructuredMessage {
+    fn make_text_msg(
+        id: &str,
+        role: MessageRole,
+        text: &str,
+        session_id: &str,
+    ) -> StructuredMessage {
         StructuredMessage {
             id: id.to_string(),
             parent_id: None,
@@ -442,7 +459,11 @@ mod tests {
         assert_eq!(sm.role, MessageRole::Tool);
         assert_eq!(sm.parts.len(), 1);
         match &sm.parts[0] {
-            Part::ToolResult { tool_call_id, content, .. } => {
+            Part::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } => {
                 assert_eq!(tool_call_id, "call_1");
                 assert_eq!(content, r#"{"result":"ok"}"#);
             }

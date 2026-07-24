@@ -35,25 +35,41 @@ async fn make_router() -> Router {
                 let s = s.clone();
                 async move {
                     let config = s.read().await;
-                    let services: Vec<serde_json::Value> = config
+                    let providers: Vec<serde_json::Value> = config
                         .models
-                        .services
+                        .providers
                         .iter()
-                        .map(|svc| {
+                        .map(|p| {
                             json!({
-                                "name": svc.name,
-                                "endpoint": svc.endpoint,
-                                "default_model": svc.default_model,
-                                "enabled": svc.enabled,
-                                "priority": svc.priority,
+                                "name": p.name,
+                                "endpoint": p.endpoint,
+                                "enabled": p.enabled,
+                                "model_count": p.models.len(),
+                            })
+                        })
+                        .collect();
+                    let models: Vec<serde_json::Value> = config
+                        .models
+                        .providers
+                        .iter()
+                        .flat_map(|p| {
+                            p.models.iter().map(|m| {
+                                json!({
+                                    "name": m.name,
+                                    "provider": p.name,
+                                    "capabilities": m.capabilities,
+                                })
                             })
                         })
                         .collect();
                     axum::Json(json!({
-                        "services": services,
-                        "default_chat_model": config.models.default_chat_model,
-                        "default_embedding_model": config.models.default_embedding_model,
-                        "default_vision_model": config.models.default_vision_model,
+                        "providers": providers,
+                        "models": models,
+                        "preferences": {
+                            "chat": config.models.preferences.chat,
+                            "embedding": config.models.preferences.embedding,
+                            "vision": config.models.preferences.vision,
+                        },
                     }))
                 }
             })
@@ -98,12 +114,12 @@ async fn test_models_endpoint_returns_services() {
 
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(
-        body.get("services").is_some(),
-        "models 响应应包含 services 字段"
+        body.get("providers").is_some(),
+        "models 响应应包含 providers 字段"
     );
     assert!(
-        body.get("default_chat_model").is_some(),
-        "models 响应应包含 default_chat_model"
+        body.get("preferences").is_some(),
+        "models 响应应包含 preferences 字段"
     );
 
     let services = body["services"].as_array().unwrap();

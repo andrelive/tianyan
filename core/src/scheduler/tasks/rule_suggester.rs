@@ -38,15 +38,22 @@ const MIN_OCCURRENCES: usize = 2;
 pub struct RuleSuggester {
     vfs: Arc<dyn VirtualFileSystem>,
     model_service: Arc<dyn ChatService>,
+    /// 用于规则提炼的模型名称（如 "gpt-4o-mini"）。
+    model_name: String,
     model_version: String,
     pipeline_version: String,
 }
 
 impl RuleSuggester {
-    pub fn new(vfs: Arc<dyn VirtualFileSystem>, model_service: Arc<dyn ChatService>) -> Self {
+    pub fn new(
+        vfs: Arc<dyn VirtualFileSystem>,
+        model_service: Arc<dyn ChatService>,
+        model_name: impl Into<String>,
+    ) -> Self {
         Self {
             vfs,
             model_service,
+            model_name: model_name.into(),
             model_version: "unknown".to_string(),
             pipeline_version: "1.0".to_string(),
         }
@@ -142,7 +149,7 @@ impl RuleSuggester {
         let response = self
             .model_service
             .chat(
-                "gpt-4o-mini",
+                &self.model_name,
                 vec![crate::common::types::Message::user(prompt)],
             )
             .await?;
@@ -200,101 +207,20 @@ pub struct RuleSuggestion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
 
-    use crate::common::types::{AgentPath, ContentLevel, ContextNamespace, SearchResult, TianyanUri};
-    use crate::model::types::{ChatCompletionRequest, ChatCompletionResponse, ChatChoice};
-    use crate::vfs::{ContentMetadata, ContentStore, ContextEntry, VfsCore, VfsSearch};
+    use crate::common::types::{
+        AgentPath, ContentLevel, ContextNamespace, SearchResult, TianyanUri,
+    };
+    use crate::model::types::{ChatChoice, ChatCompletionRequest, ChatCompletionResponse};
+    use crate::test_utils::MockChatService;
+    use crate::test_utils::MockVfs;
+    use crate::vfs::ContextEntry;
 
-    /// Mock VFS for RuleSuggester tests.
-    struct MockVfs {
-        exists_result: Mutex<HashMap<String, bool>>,
-        entries: Mutex<HashMap<String, Vec<ContextEntry>>>,
-        content: Mutex<HashMap<(String, ContentLevel), String>>,
-    }
-
-    impl MockVfs {
-        fn new() -> Self {
-            Self {
-                exists_result: Mutex::new(HashMap::new()),
-                entries: Mutex::new(HashMap::new()),
-                content: Mutex::new(HashMap::new()),
-            }
-        }
-
-        fn set_exists(&self, uri: &TianyanUri, val: bool) {
-            self.exists_result.lock().unwrap().insert(uri.to_string(), val);
-        }
-
-        fn add_entry(&self, dir_uri: &TianyanUri, entry_uri: &TianyanUri) {
-            self.entries.lock().unwrap()
-                .entry(dir_uri.to_string())
-                .or_default()
-                .push(ContextEntry::new_file(entry_uri.clone()));
-        }
-
-        fn set_content(&self, uri: &TianyanUri, level: ContentLevel, text: &str) {
-            self.content.lock().unwrap()
-                .insert((uri.to_string(), level), text.to_string());
-        }
-    }
-
-    #[async_trait]
-    impl VfsCore for MockVfs {
-        async fn initialize(&self) -> Result<()> { Ok(()) }
-        async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
-            Ok(self.exists_result.lock().unwrap().get(&uri.to_string()).copied().unwrap_or(false))
-        }
-        async fn get_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
-            Ok(ContextEntry::new_file(uri.clone()))
-        }
-        async fn create_directory(&self, uri: &TianyanUri) -> Result<ContextEntry> {
-            Ok(ContextEntry::new_directory(uri.clone()))
-        }
-        async fn create_file(&self, uri: &TianyanUri) -> Result<ContextEntry> {
-            Ok(ContextEntry::new_file(uri.clone()))
-        }
-        async fn delete(&self, _uri: &TianyanUri) -> Result<()> { Ok(()) }
-        async fn list(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
-            Ok(self.entries.lock().unwrap().get(&uri.to_string()).cloned().unwrap_or_default())
-        }
-        async fn move_entry(&self, _s: &TianyanUri, _d: &TianyanUri) -> Result<()> { Ok(()) }
-        async fn update_metadata(&self, _uri: &TianyanUri, _i: f32, _c: HashMap<String, serde_json::Value>) -> Result<()> { Ok(()) }
-        async fn get_all_content_metadata(&self, _uri: &TianyanUri) -> Result<HashMap<ContentLevel, ContentMetadata>> { Ok(HashMap::new()) }
-    }
-
-    #[async_trait]
-    impl ContentStore for MockVfs {
-        async fn write(&self, _uri: &TianyanUri, _level: ContentLevel, _content: &str) -> Result<()> { Ok(()) }
-        async fn read(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
-            self.content.lock().unwrap()
-                .get(&(uri.to_string(), level))
-                .cloned()
-                .ok_or_else(|| crate::common::error::TianyanError::EntryNotFound(format!("{}", uri)))
-        }
-        async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> { Ok(()) }
-        async fn has_content(&self, _uri: &TianyanUri, _level: ContentLevel) -> Result<bool> { Ok(true) }
-    }
-
-    #[async_trait]
-    impl VfsSearch for MockVfs {
-        async fn search(&self, _q: &str, _l: usize, _n: Option<ContextNamespace>) -> Result<Vec<SearchResult>> { Ok(vec![]) }
-        async fn search_by_visual(&self, _v: &[f32], _k: usize) -> Result<Vec<SearchResult>> { Ok(vec![]) }
-        async fn update_summary_vectors(&self, _uri: &TianyanUri, _a: &str, _o: &str) -> Result<()> { Ok(()) }
-    }
-
-    impl VirtualFileSystem for MockVfs {}
-
-    /// Mock chat service that returns a configurable JSON response.
-    struct MockChatService {
-        response_json: String,
-    }
-
-    #[async_trait]
-    impl ChatService for MockChatService {
-        async fn chat_completion(&self, _request: ChatCompletionRequest) -> Result<ChatCompletionResponse> {
+    /// 创建返回指定 JSON 响应的 mock ChatService。
+    fn mock_chat_json(json: &str) -> Arc<dyn ChatService> {
+        let json = json.to_string();
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(move |_| {
             Ok(ChatCompletionResponse {
                 id: "mock".to_string(),
                 object: "chat.completion".to_string(),
@@ -302,18 +228,13 @@ mod tests {
                 model: "mock".to_string(),
                 choices: vec![ChatChoice {
                     index: 0,
-                    message: crate::common::types::Message::assistant(self.response_json.clone()),
+                    message: crate::common::types::Message::assistant(json.clone()),
                     finish_reason: Some("stop".to_string()),
                 }],
                 usage: Default::default(),
             })
-        }
-        async fn chat_completion_stream(
-            &self,
-            _request: ChatCompletionRequest,
-        ) -> Result<tokio::sync::mpsc::Receiver<Result<crate::model::types::ChatCompletionChunk>>> {
-            unimplemented!()
-        }
+        });
+        Arc::new(mock)
     }
 
     fn make_uri(namespace: ContextNamespace, path: &[&str]) -> TianyanUri {
@@ -325,8 +246,8 @@ mod tests {
     #[tokio::test]
     async fn test_scan_no_entries_returns_empty() {
         let vfs = Arc::new(MockVfs::new());
-        let chat = Arc::new(MockChatService { response_json: "{}".to_string() });
-        let suggester = RuleSuggester::new(vfs, chat);
+        let chat = mock_chat_json("{}");
+        let suggester = RuleSuggester::new(vfs, chat, "test-model");
 
         let suggestions = suggester.scan().await.unwrap();
         assert!(suggestions.is_empty());
@@ -347,11 +268,15 @@ mod tests {
         vfs.set_content(&entry1, ContentLevel::Abstract, "Pattern A");
         vfs.set_content(&entry2, ContentLevel::Abstract, "Pattern B");
 
-        let chat = Arc::new(MockChatService { response_json: "{}".to_string() });
-        let suggester = RuleSuggester::new(vfs, chat);
+        let chat = mock_chat_json("{}");
+        let suggester = RuleSuggester::new(vfs, chat, "test-model");
 
         let suggestions = suggester.scan().await.unwrap();
-        assert_eq!(suggestions.len(), 1, "should find 1 category with >= 2 entries");
+        assert_eq!(
+            suggestions.len(),
+            1,
+            "should find 1 category with >= 2 entries"
+        );
         assert_eq!(suggestions[0].source_category, "pattern");
         assert_eq!(suggestions[0].source_count, 2);
     }
@@ -368,11 +293,14 @@ mod tests {
         vfs.add_entry(&failed_uri, &entry1);
         vfs.set_content(&entry1, ContentLevel::Abstract, "Failed task 1");
 
-        let chat = Arc::new(MockChatService { response_json: "{}".to_string() });
-        let suggester = RuleSuggester::new(vfs, chat);
+        let chat = mock_chat_json("{}");
+        let suggester = RuleSuggester::new(vfs, chat, "test-model");
 
         let suggestions = suggester.scan().await.unwrap();
-        assert!(suggestions.is_empty(), "1 entry is below MIN_OCCURRENCES (2)");
+        assert!(
+            suggestions.is_empty(),
+            "1 entry is below MIN_OCCURRENCES (2)"
+        );
     }
 
     // ── promote_to_rule: has_pattern=true writes rule ───────────────
@@ -388,15 +316,20 @@ mod tests {
             "has_pattern": true,
             "rule_abstract": "Always validate input.",
             "rule_detail": "Check input before processing to avoid errors."
-        }).to_string();
+        })
+        .to_string();
 
-        let chat = Arc::new(MockChatService { response_json: response });
-        let suggester = RuleSuggester::new(vfs, chat);
+        let chat = mock_chat_json(&response);
+        let suggester = RuleSuggester::new(vfs, chat, "test-model");
 
         let suggestion = RuleSuggestion {
             source_category: "failed_case".to_string(),
             source_count: 3,
-            source_contents: vec!["Fail 1".to_string(), "Fail 2".to_string(), "Fail 3".to_string()],
+            source_contents: vec![
+                "Fail 1".to_string(),
+                "Fail 2".to_string(),
+                "Fail 3".to_string(),
+            ],
         };
 
         // Should call promote_to_rule → LLM → record_with_kind → create_file + write
@@ -410,8 +343,8 @@ mod tests {
     async fn test_promote_to_rule_no_pattern_skips_recording() {
         let vfs = Arc::new(MockVfs::new());
         let response = serde_json::json!({"has_pattern": false}).to_string();
-        let chat = Arc::new(MockChatService { response_json: response });
-        let suggester = RuleSuggester::new(vfs, chat);
+        let chat = mock_chat_json(&response);
+        let suggester = RuleSuggester::new(vfs, chat, "test-model");
 
         let suggestion = RuleSuggestion {
             source_category: "pattern".to_string(),

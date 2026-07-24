@@ -27,7 +27,6 @@ pub struct ContextEntry {
     pub detail_content: Option<String>,
     /// 此条目的元数据（包含 URI 和 is_directory）
     pub metadata: EntryMetadata,
-
 }
 
 impl ContextEntry {
@@ -142,7 +141,7 @@ pub struct DirectoryStats {
     pub total_size: u64,
 }
 
-/// Qdrant 存储的向量点。
+/// 向量存储的向量点。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorPoint {
     /// Schema 版本号，用于兼容性检查。
@@ -277,5 +276,4 @@ mod tests {
         assert!(entry.is_directory());
         assert_eq!(entry.metadata.content_type, "directory");
     }
-
 }

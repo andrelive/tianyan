@@ -17,7 +17,7 @@ Tianyan（天演）是一个本地智能代理系统，旨在通过自然语言�
 - **三层摘要结构**：L0/L1/L2 分层结构，实现高效的上下文加载和 Token 优化
 - **OpenAI API 标准**：统一支持所有兼容 OpenAI API 的模型服务
 - **本地优先**：数据本地存储，确保隐私和离线能力
-- **GUI 桌面应用**：基于 Tauri + Yew + Axum 的跨平台桌面应用
+- **GUI 桌面应用**：基于 Tauri + React + TypeScript + Axum 的跨平台桌面应用
 - **可扩展技能**：内置文件操作、系统命令等技能
 - **记忆自迭代**：自动从交互中学习和改进
 
@@ -51,15 +51,20 @@ tianyan/
 │           ├── search.rs   # 知识搜索
 │           ├── skills.rs   # 技能管理
 │           └── config.rs   # 配置管理
-├── gui/                    # Yew WASM 前端
-│   ├── Cargo.toml          # 库名: tianyan-gui
-│   ├── index.html          # Trunk 入口
+├── gui-vite/                # React TypeScript 前端
+│   ├── package.json          # npm 依赖
+│   ├── vite.config.ts        # Vite 构建配置
 │   └── src/
-│       ├── main.rs         # Yew 应用入口
-│       └── components/     # UI 组件
-│           ├── chat/       # 聊天面板
-│           ├── sidebar/    # 侧边栏
-│           └── settings/   # 设置面板
+│       ├── main.tsx          # React 应用入口
+│       ├── App.tsx           # 路由 + 主题
+│       ├── lib/              # 类型、API 客户端、状态管理
+│       └── components/       # UI 组件
+│           ├── chat/         # 聊天面板（SSE 流式）
+│           ├── sidebar/      # 侧边栏 + 会话管理
+│           ├── settings/     # 设置面板（10 个 Tab）
+│           ├── knowledge/    # 知识管理
+│           ├── skills/       # 技能浏览 + 执行
+│           └── wizard/       # 初次配置向导
 └── tauri/                  # Tauri 桌面包装
     ├── Cargo.toml          # 库名: tianyan-tauri
     ├── tauri.conf.json     # Tauri 配置
@@ -76,21 +81,22 @@ tianyan/
 | 组件 | 版本 | 说明 |
 |-----|------|------|
 | **Rust** | 1.75+ | 2021 Edition |
-| **Yew** | 0.22 | WASM 前端框架 |
+| **React** | 18.3 | TypeScript 前端框架 |
+| **Vite** | 5.4 | 前端构建工具 |
 | **Axum** | 0.8 | HTTP 后端框架 |
 | **Tauri** | 2.2+ | 桌面应用包装 |
 | **Tokio** | 1.35+ | 异步运行时 |
-| **gloo-net** | 0.6 | WASM HTTP 客户端 |
-| **Qdrant** | 1.17+ | 向量数据库 |
+| **Zustand** | 4.5 | 前端状态管理 |
+| **Tailwind CSS** | 3.4 | 原子化 CSS 框架 |
+| **LanceDB** | - | 嵌入式向量数据库 |
 
 ## 安装
 
 ### 前置要求
 
 - **Rust** 1.75 或更高版本
-- **Node.js** 18+（用于 Tauri 构建）
-- **Qdrant** 向量数据库（外部部署）
-- **Trunk**: `cargo install trunk`（Yew 构建工具）
+- **Node.js** 18+（用于前端构建）
+- **LanceDB** 嵌入式向量数据库（无需外部服务）
 - **Tauri CLI**: `cargo install tauri-cli`
 - **Windows**: Microsoft Edge WebView2 Runtime
 
@@ -132,9 +138,10 @@ cargo build --release
 **手动构建：**
 
 ```bash
-# 1. 构建前端 (Yew/WASM)
-cd gui
-trunk build --release
+# 1. 构建前端 (React/TypeScript)
+cd gui-vite
+npm install
+npm run build
 cd ..
 
 # 2. 构建 Tauri 桌面应用
@@ -157,13 +164,7 @@ cd tauri && cargo tauri dev
 cargo run -p tianyan-server
 
 # 仅前端（需要后端已启动）
-cd gui && trunk serve
-```
-
-### 从 Crates.io 安装
-
-```bash
-cargo install tianyan
+cd gui-vite && npm run dev
 ```
 
 ## 快速开始
@@ -186,7 +187,7 @@ open ./tauri/target/release/tianyan-tauri.app
 启动流程：
 1. Tauri 启动
 2. 内嵌 Axum 服务器启动（127.0.0.1:3000）
-3. Yew 前端加载
+3. React/TypeScript 前端加载
 4. 显示主界面
 
 ### 2. 初始化配置
@@ -197,15 +198,7 @@ open ./tauri/target/release/tianyan-tauri.app
 - **模型选择**：GPT-4、Claude 3、DeepSeek 等
 - **知识库路径**：文档存储位置
 
-或通过 CLI 初始化：
-
-```bash
-# 初始化配置目录
-cargo run -p tianyan-core -- init
-
-# 或使用旧版 CLI（如果已安装）
-tianyan init
-```
+> **注意：** 天演仅提供 GUI 桌面应用和 HTTP API 服务，不支持 CLI 交互模式。所有配置请在 GUI 设置页面中完成。
 
 ### 3. 配置 API 密钥
 
@@ -221,11 +214,15 @@ $env:OPENAI_API_KEY = 'your-api-key'
 
 **配置文件方式：**
 
-```bash
-# 生成默认配置
-cargo run -p tianyan-core -- config generate --output ~/.config/tianyan/tianyan.toml
+编辑 `~/.config/tianyan/tianyan.toml`（首次启动后自动生成），填入你的 API 密钥：
 
-# 编辑配置文件并添加你的 API 密钥
+```toml
+[[models.services]]
+name = "openai"
+type = "openai"
+endpoint = "https://api.openai.com/v1"
+api_key = "your-api-key"
+default_model = "gpt-4"
 ```
 
 ## 基础用法
@@ -239,61 +236,6 @@ cargo run -p tianyan-core -- config generate --output ~/.config/tianyan/tianyan.
 - **知识导入**：设置面板中导入文档到知识库
 - **实时流式**：对话响应实时显示，支持打字机效果
 - **设置管理**：模型配置、API 密钥、界面主题
-
-### CLI 模式（Core Crate）
-
-```bash
-# 交互式对话会话
-cargo run -p tianyan-core -- chat
-
-# 使用特定模型
-cargo run -p tianyan-core -- chat --model gpt-4-turbo
-
-# 发送单条消息
-cargo run -p tianyan-core -- chat -m "用简单的术语解释量子计算"
-```
-
-### 知识管理
-
-```bash
-# 将文档导入知识库
-cargo run -p tianyan-core -- ingest --path ./documents
-
-# 按特定类别导入
-cargo run -p tianyan-core -- ingest --path ./api-docs --category technical
-
-# 搜索知识库
-cargo run -p tianyan-core -- search "API 认证" --limit 5
-```
-
-### 记忆管理
-
-```bash
-# 列出最近会话
-cargo run -p tianyan-core -- memory list-sessions --limit 10
-
-# 显示特定会话
-cargo run -p tianyan-core -- memory show --session-id <id>
-
-# 清理旧记忆
-cargo run -p tianyan-core -- memory clear --older-than 30
-
-# 导出记忆
-cargo run -p tianyan-core -- memory export --output memories.json --format json
-```
-
-### 技能
-
-```bash
-# 列出可用技能
-cargo run -p tianyan-core -- skill list
-
-# 显示技能详情
-cargo run -p tianyan-core -- skill show file_operations
-
-# 执行技能
-cargo run -p tianyan-core -- skill execute file_operations --params '{"action": "read", "path": "./test.txt"}'
-```
 
 ### 独立 API 服务
 
@@ -344,70 +286,21 @@ Tianyan 按以下顺序查找配置文件：
 
 ## 架构
 
-Tianyan 使用统一上下文架构和三层摘要结构：
+Tianyan 采用四层架构（Tauri → React/TypeScript 前端 → Axum Server → Core Library），核心设计基于 4 个架构决策：
 
-```
-tianyan://
-├── user/           # 用户信息
-│   ├── profile/    # 用户画像
-│   ├── preferences/# 用户偏好
-│   └── entities/   # 实体记忆
-├── memory/         # 记忆系统
-│   ├── sessions/   # 会话记忆（短期）
-│   ├── events/     # 事件记录
-│   └── cases/      # 学习案例
-├── knowledge/      # 知识库
-│   ├── documents/  # 文档知识
-│   ├── images/     # 图片知识
-│   ├── code/       # 代码知识
-│   └── projects/   # 项目知识
-└── agent/          # 代理自身
-    ├── skills/     # 技能定义
-    ├── patterns/   # 学习模式
-    └── config/     # 配置
-```
+- **VFS 双层摘要索引**（L0/L1/L2 + RRF 融合检索）— 统一存储与检索基础
+- **StructuredMessage** — 贯穿持久化、会话组装、Token 统计的单一真相源
+- **组件工具化** — 13 个 OpenAI function calling 兼容工具
+- **前缀匹配缓存** — soul→rules→memories→history 固定顺序
 
-### 三层摘要
-
-每个上下文条目有三个层级：
-
-| 层级 | Token 数 | 用途 |
-|------|----------|------|
-| L0 摘要 | ~100 | 向量检索、快速过滤 |
-| L1 概览 | ~2K | 内容导航、重新排序 |
-| L2 详情 | 无限制 | 完整内容，按需加载 |
-
-### 通信架构
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                  Tauri 桌面应用（单安装包）                    │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │              Yew 前端（WASM）                          │  │
-│  │  - 通过 HTTP 调用后端                                 │  │
-│  └───────────────────────┬───────────────────────────────┘  │
-│                          │ HTTP (localhost:3000)            │
-│  ┌───────────────────────┴───────────────────────────────┐  │
-│  │              Axum 后端服务（随 Tauri 启动）             │  │
-│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐     │  │
-│  │  │  Agent  │ │ 模型路由 │ │ 双层检索 │ │ 记忆协调 │     │  │
-│  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘     │  │
-│  └───────────────────────┬───────────────────────────────┘  │
-│                          │                                  │
-│  ┌───────────────────────┴───────────────────────────────┐  │
-│  │              存储层（VFS + Qdrant）                    │  │
-│  │  • VFS: tianyan://memory/sessions/ 等                │  │
-│  │  • Qdrant: L0/L1 向量检索                            │  │
-│  │  ❌ 不使用 SQLite                                    │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
+详见 [系统架构文档](./docs/system-architecture.md) 和 [架构决策记录](./docs/architecture/decisions/)。
 
 ## 文档
 
-- [配置指南](./docs/configuration.md)
-- [开发指南](./docs/development.md)
-- [GUI 迁移计划](./docs/serve-gui-migration-plan.md)
+- [系统架构](./docs/system-architecture.md)
+- [模块索引](./docs/architecture/module-map.md)
+- [设计原则](./docs/architecture/principles.md)
+- [架构决策记录](./docs/architecture/decisions/)
 - [更新日志](./CHANGELOG.md)
 
 ## 支持的模型
@@ -421,17 +314,16 @@ tianyan://
 
 ## 项目状态
 
-Tianyan 正在积极开发中。详见 [项目计划](./rust_local_agent_plan.md) 了解架构和路线图详情。
+Tianyan 正在积极开发中。详见 [系统架构文档](./docs/system-architecture.md)。
 
-### 已完成的迁移
+### 核心能力
 
-- ✅ Workspace 多 Crate 架构
-- ✅ Core 库迁移（原 src/ → core/src/）
-- ✅ Axum HTTP 后端服务
-- ✅ Yew WASM 前端
-- ✅ Tauri 桌面包装
-- ✅ SSE 流式对话支持
-- ✅ 完整 API 端点实现
+- Agent Loop 架构（LLM 自主工具调用 + 流式响应）
+- VFS 双层摘要索引（L0/L1/L2 三层内容 + RRF 融合检索）
+- StructuredMessage 单一真相源（持久化 + 会话组装 + Token 统计）
+- 13 个内置工具（文件操作、代码搜索、技能调用、子 Agent 委托）
+- 6 个内置技能 + GEPA 进化引擎自动学习
+- 定时任务调度（记忆提取、规则提炼、摘要生成）
 
 ## 贡献
 

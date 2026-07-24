@@ -138,10 +138,9 @@ impl TianyanUri {
         Self::new(self.namespace, new_path)
     }
 
-    /// 生成 Qdrant 点 ID（标准 UUID 格式）。
+    /// 生成向量存储点 ID。
     ///
-    /// Qdrant 要求点 ID 必须是有效的 UUID 格式或无符号整数。
-    /// 这里使用 URI 字符串的 hash 生成确定性 UUID。
+    /// 点 ID 由 URI 字符串的 hash 确定性生成。
     pub fn to_point_id(&self) -> String {
         let uri_str = self.to_string();
 

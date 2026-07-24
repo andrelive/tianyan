@@ -16,7 +16,7 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolCallType {
-    /// 函数调用。
+    /// 函数调用类型。
     Function,
 }
 

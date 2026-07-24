@@ -17,17 +17,15 @@ use crate::vfs::VirtualFileSystem;
 /// - Input: 轻量记录（用户输入模糊，标记来源）
 /// - System: 记录并告警（系统级故障）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum FailureKind {
     /// 瞬态错误（网络超时、临时服务不可用），不应记录为规则。
-    #[allow(dead_code)]
     Transient,
     /// 逻辑错误（Planner 误判、Executor 执行失败），值得记录为规则。
     Logic,
     /// 用户输入错误（模糊指令、信息不足），记录但不作为失败规则。
-    #[allow(dead_code)]
     Input,
     /// 系统级错误（配置缺失、存储损坏），记录并升级告警。
-    #[allow(dead_code)]
     System,
 }
 
@@ -90,6 +88,7 @@ impl RuleRecorder {
     /// - `abstract_text` - 规则摘要（~100 tokens），注入 system_prompt
     /// - `detail_text` - 规则详情（含溯源信息），存储在 Detail 层
     /// - `source_session` - 触发此规则的会话 ID
+    #[allow(dead_code)]
     pub async fn record(
         &self,
         abstract_text: &str,
@@ -272,19 +271,34 @@ mod tests {
 
     #[async_trait]
     impl VfsCore for SpyVfs {
-        async fn initialize(&self) -> Result<()> { Ok(()) }
-        async fn exists(&self, _uri: &TianyanUri) -> Result<bool> { Ok(true) }
-        async fn get_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> { Ok(ContextEntry::new_file(uri.clone())) }
-        async fn create_directory(&self, uri: &TianyanUri) -> Result<ContextEntry> { Ok(ContextEntry::new_directory(uri.clone())) }
+        async fn initialize(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn exists(&self, _uri: &TianyanUri) -> Result<bool> {
+            Ok(true)
+        }
+        async fn get_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+            Ok(ContextEntry::new_file(uri.clone()))
+        }
+        async fn create_directory(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+            Ok(ContextEntry::new_directory(uri.clone()))
+        }
         async fn create_file(&self, uri: &TianyanUri) -> Result<ContextEntry> {
             self.created_files.lock().unwrap().push(uri.to_string());
             Ok(ContextEntry::new_file(uri.clone()))
         }
-        async fn delete(&self, _uri: &TianyanUri) -> Result<()> { Ok(()) }
+        async fn delete(&self, _uri: &TianyanUri) -> Result<()> {
+            Ok(())
+        }
         async fn list(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
             // Include both pre-configured entries and files created via create_file.
-            let mut result = self.entries.lock().unwrap()
-                .get(&uri.to_string()).cloned().unwrap_or_default();
+            let mut result = self
+                .entries
+                .lock()
+                .unwrap()
+                .get(&uri.to_string())
+                .cloned()
+                .unwrap_or_default();
 
             // create_file records URIs — treat them as entries under the learned dir.
             let created = self.created_files.lock().unwrap();
@@ -298,33 +312,74 @@ mod tests {
 
             Ok(result)
         }
-        async fn move_entry(&self, _s: &TianyanUri, _d: &TianyanUri) -> Result<()> { Ok(()) }
-        async fn update_metadata(&self, _uri: &TianyanUri, _importance: f32, _custom: HashMap<String, serde_json::Value>) -> Result<()> { Ok(()) }
-        async fn get_all_content_metadata(&self, _uri: &TianyanUri) -> Result<HashMap<ContentLevel, ContentMetadata>> { Ok(HashMap::new()) }
+        async fn move_entry(&self, _s: &TianyanUri, _d: &TianyanUri) -> Result<()> {
+            Ok(())
+        }
+        async fn update_metadata(
+            &self,
+            _uri: &TianyanUri,
+            _importance: f32,
+            _custom: HashMap<String, serde_json::Value>,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn get_all_content_metadata(
+            &self,
+            _uri: &TianyanUri,
+        ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
+            Ok(HashMap::new())
+        }
     }
 
     #[async_trait]
     impl ContentStore for SpyVfs {
         async fn write(&self, uri: &TianyanUri, _level: ContentLevel, content: &str) -> Result<()> {
-            self.written_content.lock().unwrap().push((uri.to_string(), content.to_string()));
+            self.written_content
+                .lock()
+                .unwrap()
+                .push((uri.to_string(), content.to_string()));
             self.add_content(uri, _level, content);
             Ok(())
         }
         async fn read(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
-            self.content.lock().unwrap()
+            self.content
+                .lock()
+                .unwrap()
                 .get(&(uri.to_string(), level))
                 .cloned()
-                .ok_or_else(|| crate::common::error::TianyanError::EntryNotFound(format!("{}", uri)))
+                .ok_or_else(|| {
+                    crate::common::error::TianyanError::EntryNotFound(format!("{}", uri))
+                })
         }
-        async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> { Ok(()) }
-        async fn has_content(&self, _uri: &TianyanUri, _level: ContentLevel) -> Result<bool> { Ok(true) }
+        async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn has_content(&self, _uri: &TianyanUri, _level: ContentLevel) -> Result<bool> {
+            Ok(true)
+        }
     }
 
     #[async_trait]
     impl VfsSearch for SpyVfs {
-        async fn search(&self, _q: &str, _l: usize, _n: Option<ContextNamespace>) -> Result<Vec<SearchResult>> { Ok(vec![]) }
-        async fn search_by_visual(&self, _v: &[f32], _k: usize) -> Result<Vec<SearchResult>> { Ok(vec![]) }
-        async fn update_summary_vectors(&self, _uri: &TianyanUri, _a: &str, _o: &str) -> Result<()> { Ok(()) }
+        async fn search(
+            &self,
+            _q: &str,
+            _l: usize,
+            _n: Option<ContextNamespace>,
+        ) -> Result<Vec<SearchResult>> {
+            Ok(vec![])
+        }
+        async fn search_by_visual(&self, _v: &[f32], _k: usize) -> Result<Vec<SearchResult>> {
+            Ok(vec![])
+        }
+        async fn update_summary_vectors(
+            &self,
+            _uri: &TianyanUri,
+            _a: &str,
+            _o: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     impl VirtualFileSystem for SpyVfs {}
@@ -336,7 +391,10 @@ mod tests {
         let vfs = Arc::new(SpyVfs::new());
         let recorder = RuleRecorder::new(vfs.clone());
 
-        recorder.record_with_kind("summary", "detail", "s1", FailureKind::Transient).await.unwrap();
+        recorder
+            .record_with_kind("summary", "detail", "s1", FailureKind::Transient)
+            .await
+            .unwrap();
 
         assert_eq!(vfs.created_count(), 0, "Transient should not create files");
         assert_eq!(vfs.written_count(), 0, "Transient should not write content");
@@ -347,7 +405,10 @@ mod tests {
         let vfs = Arc::new(SpyVfs::new());
         let recorder = RuleRecorder::new(vfs.clone());
 
-        recorder.record_with_kind("summary", "detail", "s1", FailureKind::Input).await.unwrap();
+        recorder
+            .record_with_kind("summary", "detail", "s1", FailureKind::Input)
+            .await
+            .unwrap();
 
         assert_eq!(vfs.created_count(), 0);
         assert_eq!(vfs.written_count(), 0);
@@ -360,10 +421,24 @@ mod tests {
         let vfs = Arc::new(SpyVfs::new());
         let recorder = RuleRecorder::new(vfs.clone());
 
-        recorder.record_with_kind("Always check file existence first.", "detail text", "s1", FailureKind::Logic).await.unwrap();
+        recorder
+            .record_with_kind(
+                "Always check file existence first.",
+                "detail text",
+                "s1",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
 
-        assert!(vfs.created_count() > 0, "Logic failure should create a rule file");
-        assert!(vfs.written_count() > 0, "Logic failure should write rule content");
+        assert!(
+            vfs.created_count() > 0,
+            "Logic failure should create a rule file"
+        );
+        assert!(
+            vfs.written_count() > 0,
+            "Logic failure should write rule content"
+        );
     }
 
     // ── Dedup: exact abstraction should not duplicate ───────────────
@@ -374,16 +449,35 @@ mod tests {
         let recorder = RuleRecorder::new(vfs.clone());
 
         // Record first
-        recorder.record_with_kind("Check auth before accessing data.", "detail", "s1", FailureKind::Logic).await.unwrap();
+        recorder
+            .record_with_kind(
+                "Check auth before accessing data.",
+                "detail",
+                "s1",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
         let count_after_first = vfs.created_count();
 
         // Try recording the same rule again
-        recorder.record_with_kind("Check auth before accessing data.", "detail2", "s2", FailureKind::Logic).await.unwrap();
+        recorder
+            .record_with_kind(
+                "Check auth before accessing data.",
+                "detail2",
+                "s2",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
 
         // No additional files created (dedup should catch it via list + read)
         // The first record created a file which appears in entries listing
-        assert_eq!(vfs.created_count(), count_after_first,
-            "Duplicate rule should not create a new file");
+        assert_eq!(
+            vfs.created_count(),
+            count_after_first,
+            "Duplicate rule should not create a new file"
+        );
     }
 
     // ── Dedup: substring containment ────────────────────────────────
@@ -394,14 +488,29 @@ mod tests {
         let recorder = RuleRecorder::new(vfs.clone());
 
         // Record a long rule
-        recorder.record_with_kind("Validate user input before processing any request.", "detail", "s1", FailureKind::Logic).await.unwrap();
+        recorder
+            .record_with_kind(
+                "Validate user input before processing any request.",
+                "detail",
+                "s1",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
         let count = vfs.created_count();
 
         // Try recording a shorter rule that is a substring of the first
-        recorder.record_with_kind("Validate user input", "detail2", "s2", FailureKind::Logic).await.unwrap();
+        recorder
+            .record_with_kind("Validate user input", "detail2", "s2", FailureKind::Logic)
+            .await
+            .unwrap();
 
         // The shorter text is contained in the existing rule, so it should be dedupped
-        assert_eq!(vfs.created_count(), count, "Substring-contained rule should not duplicate");
+        assert_eq!(
+            vfs.created_count(),
+            count,
+            "Substring-contained rule should not duplicate"
+        );
     }
 
     // ── Dedup: no match should create a new file ────────────────────
@@ -411,12 +520,31 @@ mod tests {
         let vfs = Arc::new(SpyVfs::new());
         let recorder = RuleRecorder::new(vfs.clone());
 
-        recorder.record_with_kind("Close file handles after use.", "detail", "s1", FailureKind::Logic).await.unwrap();
+        recorder
+            .record_with_kind(
+                "Close file handles after use.",
+                "detail",
+                "s1",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
 
         // Different rule
-        recorder.record_with_kind("Always validate network input.", "detail2", "s2", FailureKind::Logic).await.unwrap();
+        recorder
+            .record_with_kind(
+                "Always validate network input.",
+                "detail2",
+                "s2",
+                FailureKind::Logic,
+            )
+            .await
+            .unwrap();
 
         // Both should be recorded (different topics)
-        assert!(vfs.created_count() >= 2, "Different rules should each create a file");
+        assert!(
+            vfs.created_count() >= 2,
+            "Different rules should each create a file"
+        );
     }
 }

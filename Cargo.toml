@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "server", "gui", "tauri"]
+members = ["core", "server", "tauri"]
 resolver = "2"
 
 [workspace.package]
@@ -26,8 +26,8 @@ anyhow = "1.0"
 # Cryptography
 ring = "0.17"
 
-# Vector database
-qdrant-client = "1.17"
+# Vector database (embedded)
+lancedb = "0.31"
 
 # Document processing
 pulldown-cmark = "0.9"
@@ -72,6 +72,7 @@ regex = "1.10"
 
 # Dev dependencies
 tempfile = "3.10"
+mockall = "0.13"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

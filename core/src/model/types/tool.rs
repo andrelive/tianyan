@@ -3,14 +3,18 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::common::types::tool::{FunctionCall, ToolCall, ToolCallType};
 
+/// 工具定义。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
+    /// 工具类型。
     #[serde(rename = "type")]
     pub tool_type: ToolType,
+    /// 函数定义。
     pub function: FunctionDefinition,
 }
 
 impl ToolDefinition {
+    /// 创建函数工具。
     pub fn function(function: FunctionDefinition) -> Self {
         Self {
             tool_type: ToolType::Function,
@@ -19,20 +23,27 @@ impl ToolDefinition {
     }
 }
 
+/// 工具类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolType {
+    /// 函数调用类型。
     Function,
 }
 
+/// 函数定义。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDefinition {
+    /// 函数名称。
     pub name: String,
+    /// 函数描述。
     pub description: String,
+    /// 函数参数 Schema。
     pub parameters: serde_json::Value,
 }
 
 impl FunctionDefinition {
+    /// 创建函数定义。
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -45,6 +56,7 @@ impl FunctionDefinition {
         }
     }
 
+    /// 从 JSON Schema 创建函数定义。
     pub fn from_schema<T: JsonSchema>(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -58,28 +70,40 @@ impl FunctionDefinition {
     }
 }
 
+/// 工具调用选择策略。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolChoice {
+    /// 自动选择。
     Auto,
+    /// 禁止调用。
     None,
-    Function { function: ToolChoiceFunction },
+    /// 强制调用指定函数。
+    Function {
+        /// 指定的函数。
+        function: ToolChoiceFunction,
+    },
 }
 
+/// 强制调用的函数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolChoiceFunction {
+    /// 函数名称。
     pub name: String,
 }
 
 impl ToolChoice {
+    /// 自动选择策略。
     pub fn auto() -> Self {
         Self::Auto
     }
 
+    /// 禁止调用策略。
     pub fn none() -> Self {
         Self::None
     }
 
+    /// 强制调用指定函数。
     pub fn function(name: impl Into<String>) -> Self {
         Self::Function {
             function: ToolChoiceFunction { name: name.into() },

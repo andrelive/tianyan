@@ -140,12 +140,20 @@ pub fn register_builtin_skills(registry: &mut SkillRegistry, config: &ExecutorCo
 
     registry.register_with_handler(
         Skill::new("file_read", "Read File", "Read the contents of a file"),
-        Arc::new(FileReadHandler::new(config.allowed_paths.clone())),
+        Arc::new(
+            FileReadHandler::new(config.allowed_paths.clone())
+                .with_max_size(config.skill_file_read_max_size)
+                .with_timeout(config.skill_file_read_timeout_secs),
+        ),
     );
 
     registry.register_with_handler(
         Skill::new("file_write", "Write File", "Write content to a file"),
-        Arc::new(FileWriteHandler::new(config.allowed_paths.clone())),
+        Arc::new(
+            FileWriteHandler::new(config.allowed_paths.clone())
+                .with_max_size(config.skill_file_write_max_size)
+                .with_timeout(config.skill_file_write_timeout_secs),
+        ),
     );
 
     registry.register_with_handler(
@@ -159,7 +167,10 @@ pub fn register_builtin_skills(registry: &mut SkillRegistry, config: &ExecutorCo
             "List Directory",
             "List contents of a directory",
         ),
-        Arc::new(FileListHandler::new(config.allowed_paths.clone())),
+        Arc::new(
+            FileListHandler::new(config.allowed_paths.clone())
+                .with_max_entries(config.skill_file_list_max_entries),
+        ),
     );
 
     registry.register_with_handler(
@@ -168,11 +179,14 @@ pub fn register_builtin_skills(registry: &mut SkillRegistry, config: &ExecutorCo
             "Execute Command",
             "Execute a system shell command",
         ),
-        Arc::new(SystemCommandHandler::new(config.blocked_commands.clone())),
+        Arc::new(
+            SystemCommandHandler::new(config.blocked_commands.clone())
+                .with_timeout(config.skill_command_timeout_secs),
+        ),
     );
 
     registry.register_with_handler(
         Skill::new("http_request", "HTTP Request", "Make an HTTP request"),
-        Arc::new(HttpRequestHandler::new()),
+        Arc::new(HttpRequestHandler::with_timeout(config.skill_http_timeout_secs)),
     );
 }
