@@ -6,6 +6,7 @@
 
 mod content;
 mod embedding;
+mod injectable;
 mod memory;
 mod message;
 mod metadata;
@@ -15,6 +16,8 @@ mod structured_message;
 mod token;
 pub(crate) mod tool;
 mod uri;
+
+pub use injectable::InjectableContext;
 
 pub use content::{ContentLevel, ContentSource, EntryType};
 pub use embedding::Embedding;

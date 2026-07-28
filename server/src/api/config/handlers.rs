@@ -132,7 +132,7 @@ pub async fn switch_model(
     Json(request): Json<SwitchModelRequest>,
 ) -> Result<Json<UpdateConfigResponse>, ApiError> {
     if let Err(e) = request.validate() {
-        return Err(ApiError::BadRequest(e));
+        return Err(ApiError::BadRequest(e.to_string()));
     }
 
     info!(model = %request.model, "切换默认聊天模型");

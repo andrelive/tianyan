@@ -8,9 +8,8 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
     ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
 };
-use crate::model::EmbeddingService;
 use crate::vfs::backend::LocalFileBackend;
-use crate::vfs::traits::{ContentMetadata, ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
+use crate::vfs::traits::{ContentMetadata, ContentStore, EmbeddingProvider, VfsCore, VfsSearch, VirtualFileSystem};
 use crate::vfs::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
 use crate::vfs::vector::VectorStorage;
 
@@ -21,7 +20,7 @@ pub struct VirtualFileSystemImpl {
     storage: Arc<LocalFileBackend>,
     vector_storage: Arc<dyn VectorStorage>,
     config: StorageConfig,
-    embedding_service: Option<Arc<dyn EmbeddingService>>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     embedding_model: Option<String>,
 }
 
@@ -36,7 +35,7 @@ impl VirtualFileSystemImpl {
             storage,
             vector_storage,
             config,
-            embedding_service: None,
+            embedding_provider: None,
             embedding_model: None,
         }
     }
@@ -49,24 +48,24 @@ impl VirtualFileSystemImpl {
         Self::new(storage, vector_storage, StorageConfig::default())
     }
 
-    /// 设置嵌入服务。
-    pub fn with_embedding_service(
+    /// 设置嵌入提供者。
+    pub fn with_embedding_provider(
         mut self,
-        service: Arc<dyn EmbeddingService>,
+        provider: Arc<dyn EmbeddingProvider>,
         model: impl Into<String>,
     ) -> Self {
-        self.embedding_service = Some(service);
+        self.embedding_provider = Some(provider);
         self.embedding_model = Some(model.into());
         self
     }
 
-    /// 设置嵌入服务（可变引用版本）。
-    pub fn set_embedding_service(
+    /// 设置嵌入提供者（可变引用版本）。
+    pub fn set_embedding_provider(
         &mut self,
-        service: Arc<dyn EmbeddingService>,
+        provider: Arc<dyn EmbeddingProvider>,
         model: impl Into<String>,
     ) {
-        self.embedding_service = Some(service);
+        self.embedding_provider = Some(provider);
         self.embedding_model = Some(model.into());
     }
 
@@ -445,7 +444,7 @@ impl VfsSearch for VirtualFileSystemImpl {
         limit: usize,
         namespace: Option<ContextNamespace>,
     ) -> Result<Vec<SearchResult>> {
-        let embedding_service = self.embedding_service.as_ref().ok_or_else(|| {
+        let embedding_provider = self.embedding_provider.as_ref().ok_or_else(|| {
             TianyanError::Retrieval("VFS 未配置嵌入服务，无法进行向量搜索".to_string())
         })?;
 
@@ -454,7 +453,7 @@ impl VfsSearch for VirtualFileSystemImpl {
             .as_deref()
             .unwrap_or("text-embedding-3-small");
 
-        let embedding = embedding_service.embed_single(model, query).await?;
+        let embedding = embedding_provider.embed_single(model, query).await?;
         let query_vector = embedding.vector;
 
         let category_filter = namespace.map(|ns| ns.to_string());
@@ -541,15 +540,15 @@ impl VfsSearch for VirtualFileSystemImpl {
         payload: EntryMetadata,
         embedding_model: &str,
     ) -> Result<()> {
-        let embedding_service = self
-            .embedding_service
+        let embedding_provider = self
+            .embedding_provider
             .as_ref()
             .ok_or_else(|| TianyanError::Retrieval("VFS 未配置嵌入服务".to_string()))?;
 
-        let abstract_embedding = embedding_service
+        let abstract_embedding = embedding_provider
             .embed_single(embedding_model, abstract_content)
             .await?;
-        let overview_embedding = embedding_service
+        let overview_embedding = embedding_provider
             .embed_single(embedding_model, overview_content)
             .await?;
 

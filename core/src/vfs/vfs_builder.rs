@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
 use crate::config::StorageConfig;
-use crate::model::EmbeddingService;
 use crate::vfs::backend::LocalFileBackend;
+use crate::vfs::traits::EmbeddingProvider;
 use crate::vfs::vector::VectorStorage;
 
 use super::VirtualFileSystemImpl;
@@ -15,7 +15,7 @@ pub struct VirtualFileSystemBuilder {
     config: Option<StorageConfig>,
     storage: Option<Arc<LocalFileBackend>>,
     vector_storage: Option<Arc<dyn VectorStorage>>,
-    embedding_service: Option<Arc<dyn EmbeddingService>>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     embedding_model: Option<String>,
 }
 
@@ -26,7 +26,7 @@ impl VirtualFileSystemBuilder {
             config: None,
             storage: None,
             vector_storage: None,
-            embedding_service: None,
+            embedding_provider: None,
             embedding_model: None,
         }
     }
@@ -49,13 +49,13 @@ impl VirtualFileSystemBuilder {
         self
     }
 
-    /// 设置嵌入服务。
-    pub fn with_embedding_service(
+    /// 设置嵌入提供者。
+    pub fn with_embedding_provider(
         mut self,
-        service: Arc<dyn EmbeddingService>,
+        provider: Arc<dyn EmbeddingProvider>,
         model: impl Into<String>,
     ) -> Self {
-        self.embedding_service = Some(service);
+        self.embedding_provider = Some(provider);
         self.embedding_model = Some(model.into());
         self
     }
@@ -72,8 +72,8 @@ impl VirtualFileSystemBuilder {
 
         let mut vfs = VirtualFileSystemImpl::new(storage, vector_storage, config);
 
-        if let (Some(service), Some(model)) = (self.embedding_service, self.embedding_model) {
-            vfs.set_embedding_service(service, model);
+        if let (Some(provider), Some(model)) = (self.embedding_provider, self.embedding_model) {
+            vfs.set_embedding_provider(provider, model);
         }
 
         Ok(vfs)

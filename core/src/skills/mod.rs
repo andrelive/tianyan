@@ -52,7 +52,7 @@ pub use learning::{
 };
 pub use manager::{SkillManager, SkillSummary};
 pub use registry::{create_builtin_skills, register_builtin_skills};
-pub use types::*;
+pub use types::{ExecutionContext, MatchReason, SecurityLevel, SkillCategory, SkillDiscoveryResult, SkillExample, SkillExecutionRequest, SkillExecutionResult, SkillStatistics};
 
 #[cfg(test)]
 mod tests {

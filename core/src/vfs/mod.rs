@@ -32,6 +32,7 @@ pub mod backend;
 mod summary;
 mod traits;
 mod types;
+mod embedding_bridge;
 mod uri_mapper;
 mod vector;
 mod vfs_impl;
@@ -40,12 +41,12 @@ mod vfs_impl;
 mod test_utils;
 
 // 重新导出公共 API
-pub use crate::config::StorageConfig;
 pub use backend::LocalFileBackend;
 #[cfg(test)]
 pub use summary::MockSummaryEngine;
 pub use summary::{SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT};
-pub use traits::{ContentMetadata, ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
+pub use traits::{ContentMetadata, ContentStore, EmbeddingProvider, VfsCore, VfsSearch, VirtualFileSystem};
+pub use embedding_bridge::EmbeddingServiceBridge;
 pub use types::{
     CategoryStats, ContextEntry, DirectoryIndex, DirectoryStats, IndexEntry, StorageStats,
     VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType, CURRENT_SCHEMA_VERSION,

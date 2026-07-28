@@ -20,6 +20,7 @@ use crate::scheduler::tasks::RuleRecorder;
 use crate::knowledge::{IngestionRequest, KnowledgeCategory, KnowledgeIngestor};
 use crate::model::types::{ChatCompletionRequest, FunctionDefinition, ToolCall, ToolDefinition};
 use crate::model::ChatService;
+use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
 use crate::skills::learning::ExecutionHistory;
 use crate::skills::{SkillExecutionRequest, SkillExecutor};
@@ -62,6 +63,8 @@ pub struct ToolRegistry {
     verification_gate: Option<Arc<VerificationGate>>,
     /// 规则记录器（工具执行失败时自动学习规则，供 GEPA 进化引擎消费）。
     rule_recorder: Option<Arc<RuleRecorder>>,
+    /// 使用统计追踪器（技能调用频率、文档访问热度）。
+    usage_stats: Option<Arc<UsageStats>>,
     definitions: Vec<ToolDefinition>,
     /// 执行轨迹（GEPA 引擎消费）。
     execution_history: Arc<Mutex<Vec<ExecutionHistory>>>,
@@ -81,6 +84,7 @@ impl ToolRegistry {
             approval_workflow: None,
             verification_gate: None,
             rule_recorder: None,
+            usage_stats: None,
             definitions: Vec::new(),
             execution_history: Arc::new(Mutex::new(Vec::new())),
         };
@@ -139,6 +143,12 @@ impl ToolRegistry {
     /// 设置规则记录器（工具执行失败时自动学习规则）。
     pub fn with_rule_recorder(mut self, recorder: Arc<RuleRecorder>) -> Self {
         self.rule_recorder = Some(recorder);
+        self
+    }
+
+    /// 设置使用统计追踪器。
+    pub fn with_usage_stats(mut self, stats: Arc<UsageStats>) -> Self {
+        self.usage_stats = Some(stats);
         self
     }
 
@@ -383,6 +393,12 @@ impl ToolRegistry {
             }
             _ => Err(ToolExecutionError::UnknownTool(call.function.name.clone())),
         };
+
+        // Record usage stats for tool call
+        if let Some(ref stats) = self.usage_stats {
+            let elapsed_us = start.elapsed().as_micros() as u64;
+            stats.record_skill_call(&call.function.name, result.is_ok(), elapsed_us);
+        }
 
         // Record execution history for GEPA
         let elapsed = start.elapsed().as_millis() as u64;

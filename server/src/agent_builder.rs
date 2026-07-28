@@ -17,6 +17,7 @@ use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::context::DualLayerRetriever;
 use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::model::ModelServices;
+use tianyan::observability::usage_stats::UsageStats;
 use tianyan::session::PersistentSessionManager;
 use tianyan::skills::{SkillExecutor, SkillRegistry};
 use tianyan::vfs::VirtualFileSystemImpl;
@@ -40,12 +41,14 @@ impl AgentBuilderFactory {
         vfs: Arc<VirtualFileSystemImpl>,
         skill_registry: Arc<RwLock<SkillRegistry>>,
         skill_executor: Arc<SkillExecutor>,
+        usage_stats: Arc<UsageStats>,
     ) -> TianyanResult<Agent> {
         Self::validate_config(config)?;
 
         let model_services = create_model_services(config).await?;
 
-        let retriever = DualLayerRetriever::new(vfs.clone());
+        let retriever = DualLayerRetriever::new(vfs.clone())
+            .with_usage_stats(usage_stats.clone());
 
         // 从配置中解析各能力模型名称
         let chat_model = config
@@ -89,6 +92,7 @@ impl AgentBuilderFactory {
             .with_skill_registry(skill_registry)
             .with_knowledge_ingestor(Arc::new(knowledge_ingestor))
             .with_security_config(config.security.clone())
+            .with_usage_stats(usage_stats)
             .with_session_manager(Arc::new(PersistentSessionManager::new(vfs)))
             .build()
             .map_err(|e| TianyanError::Internal(format!("Agent 构建失败：{}", e)))?;
@@ -108,8 +112,9 @@ impl AgentBuilderFactory {
         vfs: Arc<VirtualFileSystemImpl>,
         skill_registry: Arc<RwLock<SkillRegistry>>,
         skill_executor: Arc<SkillExecutor>,
+        usage_stats: Arc<UsageStats>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
-        match Self::build_agent(config, vfs, skill_registry, skill_executor).await {
+        match Self::build_agent(config, vfs, skill_registry, skill_executor, usage_stats).await {
             Ok(agent) => Ok(Arc::new(agent)),
             Err(e) => {
                 tracing::warn!("Agent 构建失败 ({}), 使用向导模式", e);

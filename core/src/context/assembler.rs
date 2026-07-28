@@ -238,7 +238,7 @@ impl ContextAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::session_state::InjectableContext;
+    use crate::common::types::InjectableContext;
     use crate::common::types::{
         DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
     };

@@ -4,6 +4,9 @@
 //! 让智能体可以反思自己的执行历史，实现 Harness Engineering 原则 2
 //! 的"环境可读性"。
 
+pub mod sqlite_db;
+pub mod usage_stats;
+
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};

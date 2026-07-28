@@ -73,6 +73,10 @@ base64 = { workspace = true }
 
 
 
+# Usage statistics
+rusqlite = { workspace = true }
+dashmap = { workspace = true }
+
 # Regular expressions
 regex = { workspace = true }
 arrow-array = "58.4.0"

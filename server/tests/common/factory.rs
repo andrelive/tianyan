@@ -1,7 +1,6 @@
 //! 测试工厂 — 快速创建可复用的测试对象
 
-use tianyan::agent::AgentConfig;
-use tianyan::config::{
+use tianyan::config::{AgentConfig, 
     LoggingConfig, MemoryConfig, ModelCapability, ModelEntry, ModelPreferences, ModelRef,
     ModelsConfig, ProviderConfig, RetrievalConfig, SecurityConfig, StorageConfig, TianyanConfig,
     VectorStorageConfig,

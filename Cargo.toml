@@ -67,6 +67,10 @@ dirs = "5.0"
 # Base64 encoding
 base64 = "0.22"
 
+# Usage statistics
+rusqlite = { version = "0.31", features = ["bundled"] }
+dashmap = "6.1"
+
 # Regular expressions
 regex = "1.10"
 
@@ -98,7 +102,7 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 0
-debug = true
+debug = 1
 
 [profile.test]
 opt-level = 2

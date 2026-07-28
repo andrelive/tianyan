@@ -116,8 +116,7 @@ impl From<TianyanError> for ApiError {
             TianyanError::MemorySystem(msg) => ApiError::Internal(msg),
             TianyanError::ModelService(msg)
             | TianyanError::ModelRequestFailed(msg)
-            | TianyanError::VlmService(msg)
-            | TianyanError::VisionEncoder(msg) => ApiError::Internal(msg),
+            | TianyanError::VlmService(msg) => ApiError::Internal(msg),
             TianyanError::StorageBackend(msg)
             | TianyanError::VirtualFileSystem(msg)
             | TianyanError::EntryAlreadyExists(msg) => ApiError::Internal(msg),

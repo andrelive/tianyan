@@ -9,6 +9,7 @@ pub const DEFAULT_SOUL: &str = include_str!("default_soul.md");
 /// 会话状态管理。
 pub mod session_state;
 
+mod agent_core;
 mod builder;
 mod coordinator;
 mod r#loop;
@@ -17,9 +18,9 @@ mod tool_registry;
 mod tools;
 mod types;
 
-pub use crate::config::AgentConfig;
+pub use agent_core::Agent;
 pub use builder::AgentBuilder;
-pub use coordinator::{Agent, AgentCoordinator};
+pub use coordinator::AgentCoordinator;
 pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopError, AgentLoopResult};
 pub use session_state::{SessionState, SessionStateManager};
 pub use tool_params::{

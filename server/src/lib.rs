@@ -114,7 +114,7 @@ fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
     use tianyan::vfs::{
-        LanceDbVectorStore, LocalFileBackend, VectorStorage, VirtualFileSystemBuilder,
+        EmbeddingServiceBridge, LanceDbVectorStore, LocalFileBackend, VirtualFileSystemBuilder,
     };
 
     // 1. 创建存储后端
@@ -144,8 +144,9 @@ fn initialize_vfs_for_app(
                     .resolve(tianyan::config::ModelCapability::TextEmbedding)
                     .map(|r| r.model)
                     .unwrap_or_else(|| "text-embedding-3-small".to_string());
-                vfs_builder = vfs_builder.with_embedding_service(
-                    ms.embedding,
+                let bridge = EmbeddingServiceBridge::new(ms.embedding);
+                vfs_builder = vfs_builder.with_embedding_provider(
+                    Arc::new(bridge),
                     emb_model,
                 );
             }

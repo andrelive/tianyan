@@ -18,13 +18,14 @@ use crate::executor::{LlmJudge, VerificationGate};
 use crate::scheduler::tasks::RuleRecorder;
 use crate::knowledge::KnowledgeIngestor;
 use crate::model::ChatService;
+use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
 use crate::session::SessionManager;
 use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
 use crate::skills::{SkillExecutor, SkillRegistry};
 use crate::vfs::VirtualFileSystem;
 
-use super::coordinator::Agent;
+use super::agent_core::Agent;
 
 /// 用于创建智能体的构建器。
 pub struct AgentBuilder {
@@ -39,6 +40,7 @@ pub struct AgentBuilder {
     session_manager: Option<Arc<dyn SessionManager>>,
     knowledge_ingestor: Option<Arc<KnowledgeIngestor>>,
     security_config: Option<SecurityConfig>,
+    usage_stats: Option<Arc<UsageStats>>,
 }
 
 impl AgentBuilder {
@@ -55,6 +57,7 @@ impl AgentBuilder {
             session_manager: None,
             knowledge_ingestor: None,
             security_config: None,
+            usage_stats: None,
         }
     }
 
@@ -118,6 +121,12 @@ impl AgentBuilder {
         self
     }
 
+    /// 设置使用统计追踪器。
+    pub fn with_usage_stats(mut self, stats: Arc<UsageStats>) -> Self {
+        self.usage_stats = Some(stats);
+        self
+    }
+
     /// 构建 Agent 实例。
     pub fn build(self) -> Result<Agent> {
         let model_service = self
@@ -171,6 +180,9 @@ impl AgentBuilder {
             .with_approval_workflow(approval)
             .with_verification_gate(verification)
             .with_rule_recorder(rule_recorder);
+        if let Some(ref stats) = self.usage_stats {
+            tool_registry = tool_registry.with_usage_stats(stats.clone());
+        }
         if let Some(ref executor) = self.skill_executor {
             tool_registry = tool_registry.with_skill_executor(executor.clone());
         }

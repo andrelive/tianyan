@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use tracing::{debug, info, instrument};
 
+use crate::observability::usage_stats::UsageStats;
+
 use super::types::RetrievalResult;
 use crate::common::error::Result;
 use crate::common::types::{ContentLevel, TianyanUri};
@@ -44,6 +46,8 @@ pub struct DualLayerRetriever {
     memory_bias: f32,
     /// 记忆衰减率（每日，0.0-1.0），越旧的记忆偏置越低。
     memory_decay_rate: f32,
+    /// 使用统计追踪器。
+    usage_stats: Option<Arc<UsageStats>>,
 }
 
 impl DualLayerRetriever {
@@ -55,6 +59,7 @@ impl DualLayerRetriever {
             embedding_model: "text-embedding-3-small".to_string(),
             memory_bias: 1.15,
             memory_decay_rate: 0.01,
+            usage_stats: None,
         }
     }
 
@@ -83,6 +88,12 @@ impl DualLayerRetriever {
         self
     }
 
+    /// 设置使用统计追踪器。
+    pub fn with_usage_stats(mut self, stats: Arc<UsageStats>) -> Self {
+        self.usage_stats = Some(stats);
+        self
+    }
+
     /// 检索查询的内容。
     #[instrument(skip(self), fields(query = %query))]
     pub async fn retrieve(&self, query: &str, top_k: usize) -> Result<Vec<RetrievalResult>> {
@@ -98,6 +109,15 @@ impl DualLayerRetriever {
             .await?;
         debug!("Fused search returned {} results", results.len());
 
+        // Record doc hits and search query in usage stats
+        if let Some(ref stats) = self.usage_stats {
+            for result in &results {
+                stats.record_doc_hit(&result.uri.to_string(), result.score);
+            }
+            let ns = results.first().map(|r| r.uri.namespace().to_string());
+            stats.record_search_query(query, results.len(), ns.as_deref());
+        }
+
         for result in &results {
             trace_builder.add_l1_search(result.uri.clone(), result.score, 0);
         }
@@ -107,6 +127,15 @@ impl DualLayerRetriever {
         for result in &results {
             if result.has_content() {
                 trace_builder.add_content_load(result.uri.clone(), result.token_count);
+            }
+        }
+
+        // Record doc loads in usage stats
+        if let Some(ref stats) = self.usage_stats {
+            for result in &results {
+                if result.has_content() {
+                    stats.record_doc_load(&result.uri.to_string());
+                }
             }
         }
 

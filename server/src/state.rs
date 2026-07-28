@@ -17,6 +17,8 @@ use tianyan::config::TianyanConfig;
 use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
 use tianyan::session::{PersistentSessionManager, SessionManager};
+use tianyan::observability::usage_stats::UsageStats;
+use tianyan::observability::sqlite_db::SqliteDb;
 use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
 };
@@ -56,6 +58,8 @@ pub struct AppState {
     skill_registry: Arc<RwLock<SkillRegistry>>,
     /// 技能执行器
     skill_executor: Arc<SkillExecutor>,
+    /// 使用统计追踪器
+    usage_stats: Arc<UsageStats>,
 }
 
 impl AppState {
@@ -107,12 +111,24 @@ impl AppState {
             }
         }
 
+        // 初始化使用统计（共享 SQLite 数据库）
+        let db_path = config.storage.data_dir.join("usage_stats.db");
+        let sqlite_db = SqliteDb::open(db_path)
+            .map_err(|e| TianyanError::StorageBackend(format!("创建 SQLite 数据库失败：{}", e)))?;
+        sqlite_db.init_all_schemas().await.map_err(|e| {
+            TianyanError::StorageBackend(format!("初始化 SQLite 表失败：{}", e))
+        })?;
+        let usage_stats = UsageStats::new(sqlite_db).map_err(|e| {
+            TianyanError::StorageBackend(format!("创建 UsageStats 失败：{}", e))
+        })?;
+
         // 构建 Agent（传入 vfs + 技能组件）
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             vfs.clone(),
             skill_registry.clone(),
             skill_executor.clone(),
+            usage_stats.clone(),
         )
         .await?;
 
@@ -129,6 +145,7 @@ impl AppState {
             vfs,
             skill_registry,
             skill_executor,
+            usage_stats,
         })
     }
 
@@ -169,6 +186,7 @@ impl AppState {
             self.vfs.clone(),
             self.skill_registry.clone(),
             self.skill_executor.clone(),
+            self.usage_stats.clone(),
         )
         .await?;
 

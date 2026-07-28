@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use crate::common::error::Result;
-use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
+use crate::common::types::{ContentLevel, ContextNamespace, Embedding, SearchResult, TianyanUri};
 
 use super::types::ContextEntry;
 use crate::common::types::EntryMetadata;
@@ -141,6 +141,15 @@ pub trait VfsSearch: Send + Sync {
         self.update_summary_vectors(uri, abstract_content, overview_content)
             .await
     }
+}
+
+/// 嵌入服务提供者 trait（VFS 的嵌入依赖通过此 trait 反转）。
+///
+/// VFS 只依赖此 trait 进行文本向量化，不直接依赖 `crate::model::EmbeddingService`。
+#[async_trait]
+pub trait EmbeddingProvider: Send + Sync {
+    /// 为单个文本生成嵌入向量。
+    async fn embed_single(&self, model: &str, text: &str) -> Result<Embedding>;
 }
 
 /// 组合超 trait —— 提供统一的 VirtualFileSystem 接口。
