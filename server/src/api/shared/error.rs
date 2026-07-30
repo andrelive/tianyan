@@ -80,84 +80,33 @@ impl IntoResponse for ApiError {
 impl From<TianyanError> for ApiError {
     fn from(err: TianyanError) -> Self {
         match err {
-            TianyanError::FileNotFound(path) => {
-                ApiError::NotFound(format!("文件未找到：{}", path.display()))
-            }
-            TianyanError::DirectoryNotFound(path) => {
-                ApiError::NotFound(format!("目录未找到：{}", path.display()))
-            }
-            TianyanError::ConfigNotFound(path) => {
-                ApiError::NotFound(format!("配置文件未找到：{}", path.display()))
-            }
-            TianyanError::ModelNotFound(model) => {
-                ApiError::NotFound(format!("模型未找到：{}", model))
-            }
-            TianyanError::SkillNotFound(skill) => {
-                ApiError::NotFound(format!("技能未找到：{}", skill))
-            }
-            TianyanError::EntryNotFound(uri) => ApiError::NotFound(format!("条目未找到：{}", uri)),
-            TianyanError::NoResultsFound(query) => {
-                ApiError::NotFound(format!("未找到结果：{}", query))
-            }
-            TianyanError::InvalidPath(path) => ApiError::BadRequest(format!("无效路径：{}", path)),
-            TianyanError::Config(msg)
-            | TianyanError::InvalidConfig {
-                key: _,
-                message: msg,
-            } => ApiError::Config(msg),
-            TianyanError::InvalidArgument {
-                arg: _,
-                message: msg,
-            }
-            | TianyanError::InvalidSkillParameters {
-                skill: _,
-                message: msg,
-            } => ApiError::BadRequest(msg),
-            TianyanError::MemorySystem(msg) => ApiError::Internal(msg),
-            TianyanError::ModelService(msg)
-            | TianyanError::ModelRequestFailed(msg)
-            | TianyanError::VlmService(msg) => ApiError::Internal(msg),
-            TianyanError::StorageBackend(msg)
-            | TianyanError::VirtualFileSystem(msg)
-            | TianyanError::EntryAlreadyExists(msg) => ApiError::Internal(msg),
-            TianyanError::VectorDatabase(msg) | TianyanError::VectorOperationFailed(msg) => {
-                ApiError::Internal(msg)
-            }
-            TianyanError::DocumentProcessing(msg)
-            | TianyanError::UnsupportedDocumentFormat(msg)
-            | TianyanError::ImageProcessing(msg)
-            | TianyanError::UnsupportedImageFormat(msg) => ApiError::Internal(msg),
-            TianyanError::KnowledgeBase(msg) => ApiError::Internal(msg),
-            TianyanError::Retrieval(msg) => ApiError::Internal(msg),
-            TianyanError::SkillExecution(msg) => ApiError::Internal(msg),
-            TianyanError::Internal(msg) | TianyanError::Other(msg) => ApiError::Internal(msg),
-            TianyanError::Serialization(msg) => ApiError::Internal(msg),
-            TianyanError::JsonError(_) => ApiError::BadRequest("JSON 解析错误".to_string()),
-            TianyanError::TomlError(_) => ApiError::BadRequest("TOML 解析错误".to_string()),
-            TianyanError::TomlSerializeError(_) => {
-                ApiError::Internal("TOML 序列化错误".to_string())
-            }
-            TianyanError::Network(msg) | TianyanError::HttpRequest(msg) => ApiError::Internal(msg),
-            TianyanError::Timeout(msg) => ApiError::GatewayTimeout(msg),
-            TianyanError::TokenCounting(msg) => ApiError::Internal(msg),
-            TianyanError::SummaryGeneration(msg) => ApiError::Internal(msg),
-            TianyanError::Cli(msg) => ApiError::Internal(msg),
-            TianyanError::NotImplemented(feature) => {
-                ApiError::Internal(format!("功能未实现：{}", feature))
-            }
             TianyanError::Io(e) => ApiError::Internal(format!("IO 错误：{}", e)),
-            TianyanError::InvalidUri(msg) | TianyanError::UriParseError { uri: msg, .. } => {
-                ApiError::BadRequest(format!("无效 URI: {}", msg))
+            TianyanError::Json(e) => ApiError::BadRequest(format!("JSON 解析错误：{}", e)),
+            TianyanError::Toml(e) => ApiError::BadRequest(format!("TOML 解析错误：{}", e)),
+            TianyanError::Custom(msg) => {
+                if msg.starts_with("配置错误：") {
+                    ApiError::Config(msg)
+                } else if msg.starts_with("未找到结果：")
+                    || msg.starts_with("条目未找到：")
+                    || msg.starts_with("模型未找到：")
+                {
+                    ApiError::NotFound(msg)
+                } else if msg.starts_with("认证失败：") {
+                    ApiError::Unauthorized(msg)
+                } else if msg.starts_with("操作不被允许：")
+                    || msg.starts_with("安全错误：")
+                {
+                    ApiError::Forbidden(msg)
+                } else if msg.starts_with("操作超时：") {
+                    ApiError::GatewayTimeout(msg)
+                } else if msg.starts_with("无效路径：")
+                    || msg.starts_with("无效 URI:")
+                {
+                    ApiError::BadRequest(msg)
+                } else {
+                    ApiError::Internal(msg)
+                }
             }
-            TianyanError::UnsupportedUriScheme { scheme } => {
-                ApiError::BadRequest(format!("不支持的 URI 方案：{}", scheme))
-            }
-            TianyanError::EmbeddingService(msg) => ApiError::Internal(msg),
-            TianyanError::PermissionDenied(msg) => ApiError::Forbidden(msg.clone()),
-            TianyanError::OperationNotAllowed(msg) => ApiError::Forbidden(msg.clone()),
-            TianyanError::AuthenticationFailed(msg) => ApiError::Unauthorized(msg.clone()),
-            TianyanError::Security(msg) => ApiError::Forbidden(msg.clone()),
-            TianyanError::Planning(msg) | TianyanError::Execution(msg) => ApiError::Internal(msg),
         }
     }
 }
@@ -217,10 +166,10 @@ mod tests {
 
     #[test]
     fn test_from_tianyan_error() {
-        let tianyan_err = TianyanError::FileNotFound(std::path::PathBuf::from("/test/path"));
+        let tianyan_err = TianyanError::Custom("配置错误：无效的配置".to_string());
         let api_err: ApiError = tianyan_err.into();
         match api_err {
-            ApiError::NotFound(msg) => assert!(msg.contains("文件未找到")),
+            ApiError::Config(msg) => assert!(msg.contains("无效的配置")),
             _ => panic!("错误的错误类型"),
         }
     }

@@ -32,19 +32,14 @@ impl LocalFileBackend {
         }
     }
 
-    /// 创建具有默认配置的本地存储后端。
-    pub(crate) fn with_defaults() -> Self {
-        Self::new(StorageConfig::default())
-    }
-
     /// 确保目录存在，如需要则创建。
     async fn ensure_dir(&self, path: &Path) -> Result<()> {
         if !fs::try_exists(path)
             .await
-            .map_err(|e| TianyanError::StorageBackend(format!("检查目录 {:?} 失败: {}", path, e)))?
+            .map_err(|e| TianyanError::Custom(format!("存储后端错误：检查目录 {path:?} 失败: {e}")))?
         {
             fs::create_dir_all(path).await.map_err(|e| {
-                TianyanError::StorageBackend(format!("创建目录 {:?} 失败: {}", path, e))
+                TianyanError::Custom(format!("存储后端错误：创建目录 {path:?} 失败: {e}"))
             })?;
         }
         Ok(())
@@ -53,11 +48,11 @@ impl LocalFileBackend {
     /// 读取文件内容为字符串。
     async fn read_file(&self, path: &Path) -> Result<String> {
         let mut file = fs::File::open(path).await.map_err(|e| {
-            TianyanError::StorageBackend(format!("打开文件 {:?} 失败: {}", path, e))
+            TianyanError::Custom(format!("存储后端错误：打开文件 {path:?} 失败: {e}"))
         })?;
         let mut content = String::new();
         file.read_to_string(&mut content).await.map_err(|e| {
-            TianyanError::StorageBackend(format!("读取文件 {:?} 失败: {}", path, e))
+            TianyanError::Custom(format!("存储后端错误：读取文件 {path:?} 失败: {e}"))
         })?;
         Ok(content)
     }
@@ -70,10 +65,10 @@ impl LocalFileBackend {
         let lock = self.acquire_write_lock(path).await;
         let _guard = lock.lock().await;
         let mut file = fs::File::create(path).await.map_err(|e| {
-            TianyanError::StorageBackend(format!("创建文件 {:?} 失败: {}", path, e))
+            TianyanError::Custom(format!("存储后端错误：创建文件 {path:?} 失败: {e}"))
         })?;
         file.write_all(content.as_bytes()).await.map_err(|e| {
-            TianyanError::StorageBackend(format!("写入文件 {:?} 失败: {}", path, e))
+            TianyanError::Custom(format!("存储后端错误：写入文件 {path:?} 失败: {e}"))
         })?;
         Ok(())
     }
@@ -104,10 +99,10 @@ impl LocalFileBackend {
             .open(path)
             .await
             .map_err(|e| {
-                TianyanError::StorageBackend(format!("打开文件 {:?} 用于追加失败: {}", path, e))
+                TianyanError::Custom(format!("存储后端错误：打开文件 {path:?} 用于追加失败: {e}"))
             })?;
         file.write_all(content.as_bytes()).await.map_err(|e| {
-            TianyanError::StorageBackend(format!("追加写入文件 {:?} 失败: {}", path, e))
+            TianyanError::Custom(format!("存储后端错误：追加写入文件 {path:?} 失败: {e}"))
         })?;
         Ok(())
     }
@@ -117,19 +112,18 @@ impl LocalFileBackend {
         match fs::metadata(path).await {
             Ok(m) if m.is_dir() => {
                 fs::remove_dir_all(path).await.map_err(|e| {
-                    TianyanError::StorageBackend(format!("删除目录 {:?} 失败: {}", path, e))
+                    TianyanError::Custom(format!("存储后端错误：删除目录 {path:?} 失败: {e}"))
                 })?;
             }
             Ok(_) => {
                 fs::remove_file(path).await.map_err(|e| {
-                    TianyanError::StorageBackend(format!("删除文件 {:?} 失败: {}", path, e))
+                    TianyanError::Custom(format!("存储后端错误：删除文件 {path:?} 失败: {e}"))
                 })?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                return Err(TianyanError::StorageBackend(format!(
-                    "访问 {:?} 失败: {}",
-                    path, e
+                return Err(TianyanError::Custom(format!(
+                    "存储后端错误：访问 {path:?} 失败: {e}"
                 )));
             }
         }
@@ -146,10 +140,10 @@ impl LocalFileBackend {
 
         if !fs::try_exists(&path)
             .await
-            .map_err(|e| TianyanError::StorageBackend(format!("访问 {:?} 失败: {}", path, e)))?
+            .map_err(|e| TianyanError::Custom(format!("存储后端错误：访问 {path:?} 失败: {e}")))? 
         {
-            return Err(TianyanError::EntryNotFound(format!(
-                "{} 无 {:?} 层级内容",
+            return Err(TianyanError::Custom(format!(
+                "条目未找到：{} 无 {:?} 层级内容",
                 uri, level
             )));
         }
@@ -159,25 +153,28 @@ impl LocalFileBackend {
 }
 
 impl LocalFileBackend {
+    /// 初始化存储后端，确保数据目录存在。
     pub async fn initialize(&self) -> Result<()> {
         self.ensure_dir(&self.config.data_dir).await?;
         tracing::info!("已在 {:?} 初始化本地存储", self.config.data_dir);
         Ok(())
     }
 
+    /// 检查指定 URI 的条目是否存在。
     pub async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
         let path = self.mapper.uri_to_path(uri);
         Ok(fs::try_exists(path).await.unwrap_or(false))
     }
 
+    /// 读取指定 URI 的完整条目（含 L0/L1/L2 三层内容）。
     pub async fn read_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
         let path = self.mapper.uri_to_path(uri);
 
         let meta = fs::metadata(&path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                TianyanError::EntryNotFound(uri.to_string())
+                TianyanError::Custom(format!("条目未找到：{uri}"))
             } else {
-                TianyanError::StorageBackend(format!("访问 {:?} 失败: {}", path, e))
+                TianyanError::Custom(format!("存储后端错误：访问 {path:?} 失败: {e}"))
             }
         })?;
 
@@ -205,6 +202,7 @@ impl LocalFileBackend {
         })
     }
 
+    /// 写入完整的条目内容（按层级分别持久化）。
     pub async fn write_entry(&self, entry: &ContextEntry) -> Result<()> {
         let path = self.mapper.uri_to_path(entry.uri());
 
@@ -229,14 +227,15 @@ impl LocalFileBackend {
         Ok(())
     }
 
+    /// 删除指定 URI 的条目（文件或目录）。
     pub async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
         let path = self.mapper.uri_to_path(uri);
 
         if !fs::try_exists(&path)
             .await
-            .map_err(|e| TianyanError::StorageBackend(format!("访问 {:?} 失败: {}", path, e)))?
+            .map_err(|e| TianyanError::Custom(format!("存储后端错误：访问 {path:?} 失败: {e}")))?
         {
-            return Err(TianyanError::EntryNotFound(uri.to_string()));
+            return Err(TianyanError::Custom(format!("条目未找到：{uri}")));
         }
 
         self.delete_path(&path).await?;
@@ -245,23 +244,24 @@ impl LocalFileBackend {
         Ok(())
     }
 
+    /// 列出指定 URI 下的一级子条目。
     pub async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
         let path = self.mapper.uri_to_path(uri);
 
         let meta = fs::metadata(&path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                TianyanError::DirectoryNotFound(path.clone())
+                TianyanError::Custom(format!("目录未找到：{}", path.display()))
             } else {
-                TianyanError::StorageBackend(format!("访问 {:?} 失败: {}", path, e))
+                TianyanError::Custom(format!("存储后端错误：访问 {path:?} 失败: {e}"))
             }
         })?;
 
         if !meta.is_dir() {
-            return Err(TianyanError::DirectoryNotFound(path));
+            return Err(TianyanError::Custom(format!("目录未找到：{}", path.display())));
         }
 
         let mut read_dir = fs::read_dir(&path).await.map_err(|e| {
-            TianyanError::StorageBackend(format!("读取目录 {:?} 失败: {}", path, e))
+            TianyanError::Custom(format!("存储后端错误：读取目录 {path:?} 失败: {e}"))
         })?;
 
         let mut entries = Vec::new();
@@ -269,7 +269,7 @@ impl LocalFileBackend {
         while let Some(entry) = read_dir
             .next_entry()
             .await
-            .map_err(|e| TianyanError::StorageBackend(format!("读取目录条目失败: {}", e)))?
+            .map_err(|e| TianyanError::Custom(format!("存储后端错误：读取目录条目失败: {e}")))?
         {
             let name = entry.file_name().to_string_lossy().to_string();
 
@@ -286,10 +286,12 @@ impl LocalFileBackend {
         Ok(entries)
     }
 
+    /// 读取指定 URI 的某一层级内容（L0/L1/L2）。
     pub async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
         self.read_content_sync(uri, level).await
     }
 
+    /// 写入指定 URI 的某一层级内容（覆盖写入）。
     pub async fn write_content(
         &self,
         uri: &TianyanUri,
@@ -307,6 +309,7 @@ impl LocalFileBackend {
         Ok(())
     }
 
+    /// 追加内容到指定 URI 的某一层级（自动创建文件）。
     pub async fn append_content(
         &self,
         uri: &TianyanUri,

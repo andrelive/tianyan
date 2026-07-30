@@ -7,7 +7,7 @@ pub mod logging;
 pub mod types;
 
 // 重新导出常用类型
-pub use error::{ErrorCategory, Result, TianyanError};
+pub use error::{Result, TianyanError};
 pub use types::{
     ContentLevel, ContentSource, ContextNamespace, Embedding, EntryMetadata, EntryType,
     MemoryCategory, MemoryEntry, Message, MessageRole, SearchResult, TianyanUri, TokenUsage,

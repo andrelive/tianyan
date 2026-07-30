@@ -145,7 +145,7 @@ pub(crate) fn validate_path(path: &PathBuf, allowed_paths: &[PathBuf]) -> Result
         .canonicalize()
         .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(path)))
         .map_err(|e| {
-            TianyanError::OperationNotAllowed(format!("无法解析路径 '{}': {}", path.display(), e))
+            TianyanError::Custom(format!("操作不被允许：无法解析路径 '{}': {}", path.display(), e))
         })?;
 
     for allowed in allowed_paths {
@@ -155,8 +155,8 @@ pub(crate) fn validate_path(path: &PathBuf, allowed_paths: &[PathBuf]) -> Result
         }
     }
 
-    Err(TianyanError::OperationNotAllowed(format!(
-        "路径 '{}' 不在允许的操作范围内",
+    Err(TianyanError::Custom(format!(
+        "操作不被允许：路径 '{}' 不在允许的操作范围内",
         path.display()
     )))
 }
@@ -186,13 +186,13 @@ impl SkillExecutor {
             registry
                 .get(&request.skill_id)
                 .cloned()
-                .ok_or_else(|| TianyanError::SkillNotFound(request.skill_id.clone()))?
+                .ok_or_else(|| TianyanError::Custom(format!("技能未找到：{}", request.skill_id)))?
         };
 
         // 检查技能是否启用
         if !skill.enabled {
-            return Err(TianyanError::SkillExecution(format!(
-                "技能 '{}' 已禁用",
+            return Err(TianyanError::Custom(format!(
+                "技能执行错误：技能 '{}' 已禁用",
                 request.skill_id
             )));
         }
@@ -207,8 +207,8 @@ impl SkillExecutor {
         let handler = {
             let registry = self.registry.read().await;
             registry.get_handler(&request.skill_id).ok_or_else(|| {
-                TianyanError::SkillExecution(format!(
-                    "技能 '{}' 没有注册处理程序",
+                TianyanError::Custom(format!(
+                    "技能执行错误：技能 '{}' 没有注册处理程序",
                     request.skill_id
                 ))
             })?
@@ -277,10 +277,10 @@ impl SkillExecutor {
         // 检查必需参数
         for required in &skill.required_parameters {
             if !params.contains_key(required) {
-                return Err(TianyanError::InvalidSkillParameters {
-                    skill: skill.id.clone(),
-                    message: format!("缺少必需参数: {}", required),
-                });
+                return Err(TianyanError::Custom(format!(
+                    "[{}] 缺少必需参数: {}",
+                    skill.id, required
+                )));
             }
         }
 
@@ -311,8 +311,8 @@ impl SkillExecutor {
                                 "eval", "exec",
                             ];
                             if dangerous_patterns.iter().any(|p| s.contains(p)) {
-                                return Err(TianyanError::OperationNotAllowed(
-                                    "检测到潜在危险的参数值".to_string(),
+                                return Err(TianyanError::Custom(
+                                    "操作不被允许：检测到潜在危险的参数值".to_string(),
                                 ));
                             }
                         }
@@ -323,8 +323,8 @@ impl SkillExecutor {
             SecurityLevel::Dangerous => {
                 // 危险操作需要明确允许
                 if !self.config.allow_dangerous_operations {
-                    return Err(TianyanError::OperationNotAllowed(format!(
-                        "技能 '{}' 需要危险操作权限，当前未允许",
+                    return Err(TianyanError::Custom(format!(
+                        "操作不被允许：技能 '{}' 需要危险操作权限，当前未允许",
                         skill.id
                     )));
                 }

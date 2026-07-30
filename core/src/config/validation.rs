@@ -14,16 +14,16 @@ pub fn validate_models_config(config: &ModelsConfig) -> ValidationResult {
 
     // 检查是否有模型提供商
     if config.providers.is_empty() {
-        errors.push(TianyanError::ModelService(
-            "至少需要配置一个模型提供商".to_string(),
+        errors.push(TianyanError::Custom(
+            "模型服务错误：至少需要配置一个模型提供商".to_string(),
         ));
     }
 
     // 验证每个提供商
     for provider in &config.providers {
         if let Err(e) = validate_provider(provider) {
-            errors.push(TianyanError::ModelService(format!(
-                "提供商 '{}': {}",
+            errors.push(TianyanError::Custom(format!(
+                "模型服务错误：提供商 '{}': {}",
                 provider.name, e
             )));
         }
@@ -41,8 +41,8 @@ pub fn validate_models_config(config: &ModelsConfig) -> ValidationResult {
                 .iter()
                 .any(|p| p.name == r.provider && p.models.iter().any(|m| m.name == r.model))
             {
-                errors.push(TianyanError::ModelService(format!(
-                    "preferences.{} 引用的模型 '{}' (提供商 '{}') 不存在",
+                errors.push(TianyanError::Custom(format!(
+                    "模型服务错误：preferences.{} 引用的模型 '{}' (提供商 '{}') 不存在",
                     label, r.model, r.provider
                 )));
             }
@@ -67,25 +67,25 @@ pub fn validate_storage_config(config: &StorageConfig) -> ValidationResult {
 
     // 检查数据目录
     if config.data_dir.as_os_str().is_empty() {
-        errors.push(TianyanError::InvalidConfig {
-            key: "storage.data_dir".to_string(),
-            message: "缺少必要字段".to_string(),
-        });
+        errors.push(TianyanError::Custom(format!(
+            "'{}' 的配置值无效：{}",
+            "storage.data_dir", "缺少必要字段"
+        )));
     }
 
     // 检查向量存储配置
     if config.vector.collection_name.is_empty() {
-        errors.push(TianyanError::InvalidConfig {
-            key: "storage.vector.collection_name".to_string(),
-            message: "缺少必要字段".to_string(),
-        });
+        errors.push(TianyanError::Custom(format!(
+            "'{}' 的配置值无效：{}",
+            "storage.vector.collection_name", "缺少必要字段"
+        )));
     }
 
     if config.vector.vector_dimension == 0 {
-        errors.push(TianyanError::InvalidConfig {
-            key: "storage.vector.vector_dimension".to_string(),
-            message: "必须大于 0".to_string(),
-        });
+        errors.push(TianyanError::Custom(format!(
+            "'{}' 的配置值无效：{}",
+            "storage.vector.vector_dimension", "必须大于 0"
+        )));
     }
 
     if errors.is_empty() {
@@ -99,7 +99,7 @@ pub fn validate_storage_config(config: &StorageConfig) -> ValidationResult {
 pub fn validate_agent_config(config: &AgentConfig) -> ValidationResult {
     let mut errors = Vec::new();
     if let Err(e) = config.validate() {
-        errors.push(TianyanError::Config(format!("智能体配置错误：{}", e)));
+        errors.push(TianyanError::Custom(format!("配置错误：智能体配置错误：{}", e)));
     }
     if errors.is_empty() {
         Ok(())
@@ -180,11 +180,8 @@ mod tests {
     #[test]
     fn test_validation_errors_to_strings() {
         let errors = vec![
-            TianyanError::Config("未找到配置文件".to_string()),
-            TianyanError::InvalidConfig {
-                key: "test".to_string(),
-                message: "缺少必要字段".to_string(),
-            },
+            TianyanError::Custom("配置错误：未找到配置文件".to_string()),
+            TianyanError::Custom(format!("'{}' 的配置值无效：{}", "test", "缺少必要字段")),
         ];
         let strings = validation_errors_to_strings(errors);
         assert_eq!(strings.len(), 2);

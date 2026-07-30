@@ -34,14 +34,14 @@ impl VlmService for AsyncOpenAIClient {
 
         let chat_request = request_builder
             .build()
-            .map_err(|e| TianyanError::VlmService(format!("构建请求失败: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("VLM 服务错误：构建请求失败: {}", e)))?;
 
         let response = self
             .client
             .chat()
             .create(chat_request)
             .await
-            .map_err(|e| TianyanError::VlmService(format!("视觉分析请求失败: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("VLM 服务错误：视觉分析请求失败: {}", e)))?;
 
         let choices = response
             .choices
@@ -137,7 +137,7 @@ fn convert_content_parts(
                     .text(part.text.unwrap_or_default())
                     .build()
                     .map_err(|e| {
-                        TianyanError::VlmService(format!("构建文本内容部分失败: {}", e))
+                        TianyanError::Custom(format!("VLM 服务错误：构建文本内容部分失败: {}", e))
                     })?;
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::Text(
                     text_content,
@@ -145,27 +145,27 @@ fn convert_content_parts(
             }
             "image_url" => {
                 let image_url = part.image_url.ok_or_else(|| {
-                    TianyanError::VlmService("image_url 部分缺少 image_url 字段".to_string())
+                    TianyanError::Custom("VLM 服务错误：image_url 部分缺少 image_url 字段".to_string())
                 })?;
                 let detail = map_image_detail(image_url.detail);
                 let img_url = ImageUrlArgs::default()
                     .url(image_url.url)
                     .detail(detail)
                     .build()
-                    .map_err(|e| TianyanError::VlmService(format!("构建图片 URL 失败: {}", e)))?;
+                    .map_err(|e| TianyanError::Custom(format!("VLM 服务错误：构建图片 URL 失败: {}", e)))?;
                 let image_part = ChatCompletionRequestMessageContentPartImageArgs::default()
                     .image_url(img_url)
                     .build()
                     .map_err(|e| {
-                        TianyanError::VlmService(format!("构建图片内容部分失败: {}", e))
+                        TianyanError::Custom(format!("VLM 服务错误：构建图片内容部分失败: {}", e))
                     })?;
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     image_part,
                 ));
             }
             other => {
-                return Err(TianyanError::VlmService(format!(
-                    "不支持的内容类型: {}",
+                return Err(TianyanError::Custom(format!(
+                    "VLM 服务错误：不支持的内容类型: {}",
                     other
                 )));
             }

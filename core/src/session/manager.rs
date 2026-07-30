@@ -73,7 +73,7 @@ impl PersistentSessionManager {
 
         // 直接构建 URI 并读取
         let uri = TianyanUri::parse(&format!("tianyan://session/{}", id))
-            .map_err(|e| TianyanError::MemorySystem(format!("无效的 session URI: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("会话存储错误：无效的 session URI: {}", e)))?;
 
         // 尝试读取 JSONL 内容
         let content = match self.vfs.read_content(&uri, ContentLevel::Detail).await {
@@ -131,7 +131,7 @@ impl PersistentSessionManager {
     /// 追加消息到 VFS。
     async fn append_message_to_vfs(&self, uri: &TianyanUri, msg: &StructuredMessage) -> Result<()> {
         let json_line =
-            serde_json::to_string(msg).map_err(|e| TianyanError::Serialization(e.to_string()))?;
+            serde_json::to_string(msg).map_err(|e| TianyanError::Custom(format!("序列化错误：{}", e)))?;
         let jsonl_line = format!("{}\n", json_line);
         self.vfs.append_content(uri, &jsonl_line).await?;
         Ok(())
@@ -193,14 +193,14 @@ impl SessionManager for PersistentSessionManager {
 
         // 先检查会话是否已存在，避免重复创建
         if self.get_session(id).await?.is_some() {
-            return Err(TianyanError::MemorySystem(format!("会话已存在：{}", id)));
+            return Err(TianyanError::Custom(format!("会话存储错误：会话已存在：{}", id)));
         }
 
         // 创建目录
         self.vfs
             .create_directory(&uri)
             .await
-            .map_err(|e| TianyanError::MemorySystem(format!("会话创建失败：{} ({})", id, e)))?;
+            .map_err(|e| TianyanError::Custom(format!("会话存储错误：会话创建失败：{} ({})", id, e)))?;
 
         // 追加第一条消息到 VFS
         self.append_message_to_vfs(&uri, &sm).await?;
@@ -218,8 +218,8 @@ impl SessionManager for PersistentSessionManager {
     async fn update_session(&self, session: &Session) -> Result<()> {
         // 检查会话是否存在
         if self.get_session(&session.session_id).await?.is_none() {
-            return Err(TianyanError::MemorySystem(format!(
-                "会话未找到：{}",
+            return Err(TianyanError::Custom(format!(
+                "会话存储错误：会话未找到：{}",
                 session.session_id
             )));
         }
@@ -232,7 +232,7 @@ impl SessionManager for PersistentSessionManager {
 
     async fn add_message(&self, session_id: &str, message: Message) -> Result<()> {
         let uri = TianyanUri::parse(&format!("tianyan://session/{}", session_id))
-            .map_err(|e| TianyanError::MemorySystem(format!("无效的 session URI: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("会话存储错误：无效的 session URI: {}", e)))?;
 
         let now_ms = Utc::now().timestamp_millis();
         let sm = StructuredMessage {
@@ -263,7 +263,7 @@ impl SessionManager for PersistentSessionManager {
 
     async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()> {
         let uri = TianyanUri::parse(&format!("tianyan://session/{}", session_id))
-            .map_err(|e| TianyanError::MemorySystem(format!("无效的 session URI: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("会话存储错误：无效的 session URI: {}", e)))?;
 
         self.append_message_to_vfs(&uri, &msg).await?;
         Ok(())
@@ -297,7 +297,7 @@ impl SessionManager for PersistentSessionManager {
         let session = self
             .get_session(id)
             .await?
-            .ok_or_else(|| TianyanError::MemorySystem(format!("会话未找到：{}", id)))?;
+            .ok_or_else(|| TianyanError::Custom(format!("会话存储错误：会话未找到：{}", id)))?;
 
         self.vfs.delete(&session.uri()).await?;
 

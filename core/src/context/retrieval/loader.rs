@@ -6,7 +6,7 @@ use crate::common::types::ContentLevel;
 
 /// 基于相关性分数的内容加载策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContentLoadStrategy {
+pub(crate) enum ContentLoadStrategy {
     /// 加载完整内容（L2） - 用于高相关性（分数 > 0.85）
     Full,
     /// 加载概览（L1） - 用于中等相关性（0.6 < 分数 <= 0.85）

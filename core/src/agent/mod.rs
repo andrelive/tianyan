@@ -21,14 +21,14 @@ mod types;
 pub use agent_core::Agent;
 pub use builder::AgentBuilder;
 pub use coordinator::AgentCoordinator;
-pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopError, AgentLoopResult};
+pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopResult};
 pub use session_state::{SessionState, SessionStateManager};
 pub use tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, ReadFileParams,
     RunTestsParams, SearchCodeParams, SearchKnowledgeParams, SelfCheckParams, VerifyBuildParams,
     VfsListParams, VfsReadParams, WriteFileParams,
 };
-pub use tool_registry::{ToolExecutionError, ToolRegistry};
+pub use tool_registry::ToolRegistry;
 pub use tools::{AgentTool, ToolResult};
 pub use types::{
     AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,

@@ -284,8 +284,8 @@ impl TaskScheduler {
         let mut tasks = self.tasks.write().await;
 
         if tasks.contains_key(&definition.id) {
-            return Err(crate::common::error::TianyanError::Internal(format!(
-                "任务 ID 已存在：{}",
+            return Err(crate::common::error::TianyanError::Custom(format!(
+                "内部错误：任务 ID 已存在：{}",
                 definition.id
             )));
         }

@@ -14,5 +14,5 @@ pub use actions::{
     execute_verify_build, execute_write_file, SecurityPolicy,
 };
 pub use judge::LlmJudge;
-pub use types::{Action, ExecutorError};
+pub use types::Action;
 pub use verification::{VerificationGate, VerificationResult};

@@ -50,7 +50,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry） |
 | `AgentLoop` | Agent 迭代循环（LLM 工具调用循环） |
 | `AgentLoopConfig` | AgentLoop 配置（loop_limit 默认 50） |
-| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls；注册 13 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、delegate_to_agent |
+| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls；注册 14 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、knowledge_ingest、delegate_to_agent |
 | `SessionState` | 会话状态容器（对话历史为唯一真相源，上下文窗口、待持久化记忆） |
 | `SessionStateManager` | 多会话状态管理器（线程安全，Arc<RwLock<HashMap>>） |
 | `AgentResponse` | Agent 响应（内容、追问、Token 使用量、技能调用信息、处理时间） |
@@ -70,7 +70,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 1. **StructuredMessage 持久化**：AgentLoop 每产生一条消息，实时调 `SessionManager::add_structured_message()` 落盘，工具调用消息全部持久化。
 2. **压缩锚点**：`StructuredMessage.compression_marker` 标记压缩产生的摘要消息，加载会话时反向扫描到最近 marker。
-3. **组件工具化**：`ToolRegistry` 注册 13 个 OpenAI function calling 兼容工具，`call_skill` 桥接到 `SkillExecutor`。
+3. **组件工具化**：`ToolRegistry` 注册 14 个 OpenAI function calling 兼容工具，`call_skill` 桥接到 `SkillExecutor`。
 
 ### 1.3 model 子模块
 
@@ -104,7 +104,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `vfs/types.rs` — 存储相关类型定义
 - `vfs/vfs_impl.rs` — `VirtualFileSystemImpl` 实现 + `initialize()` 基础设施初始化
 - `vfs/vfs_builder.rs` — `VirtualFileSystemBuilder` 构建器
-- `vfs/backend/local.rs` — 本地文件系统存储后端（具体类型）
+- `vfs/backend/sqlite.rs` — SQLite 存储后端（替代已删除的 `LocalFileBackend`）
 - `vfs/vector/lancedb.rs` — LanceDB 嵌入式向量数据库实现（RRF 融合搜索）
 - `vfs/summary/engine.rs` — `SummaryEngine` 分层摘要生成
 - `vfs/uri_mapper.rs` — URI 到文件系统路径映射
@@ -118,7 +118,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `VfsSearch` (trait) | 向量检索：查询 embed → LanceDB RRF 融合 abstract_vector + overview_vector |
 | `VirtualFileSystemImpl` | VFS 默认实现 |
 | `VirtualFileSystemBuilder` | VFS 构建器 |
-| `LocalFileBackend` | 本地文件系统存储实现（具体类型，非 trait） |
+| `SqliteBackend` | SQLite 存储后端（具体类型，替代已删除的 `LocalFileBackend`） |
 | `LanceDbVectorStore` | LanceDB 嵌入式向量数据库实现（支持多点向量、RRF 融合搜索） |
 | `SummaryEngine` | 分层摘要生成引擎（L0: ~100 tokens, L1: ~2K tokens） |
 | `UriMapper` | URI 到文件系统路径映射 |
@@ -236,7 +236,7 @@ soul → rules+memories → history(from compression_marker) → current input
 
 ### 1.8 observability 子模块
 
-**职责**：Agent 的可观测性存储，记录执行指标并支持 Agent 自省查询。模块仅一个 `mod.rs` 文件（244 行），功能自包含。
+**职责**：Agent 的可观测性存储，记录执行指标并支持 Agent 自省查询。模块包含 3 个文件（mod.rs、sqlite_db.rs、usage_stats.rs），功能自包含。
 
 **核心类型**：
 
@@ -263,7 +263,7 @@ soul → rules+memories → history(from compression_marker) → current input
 | `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage` | 通用错误（禁止引入新错误类型）、URI、向量、消息、记忆类型 |
 | `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager` | 会话管理，支持 VFS 持久化；`load_session_from_vfs()` 用 `compression_marker` 截断 |
 | `memory` | `MemoryExtractor`, `ExtractionConfig` | 从会话文本中提取结构化记忆的纯功能，与调度/持久化解耦 |
-| `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（代码编写完成，但未在 Agent 流程中使用）。ingestor/ 拆分为 mod + builder |
+| `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（已通过 `knowledge_ingest` 工具集成到 Agent 流程）。ingestor/ 拆分为 mod + builder |
 | `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `RuleTask`, `GcTask`, `MemoryTask`, `SummaryTask`, `RuleRecorder`, `RuleSuggester` | 定时任务调度框架 + 所有任务实现，位于 `scheduler/tasks/` |
 
 ---
@@ -276,7 +276,7 @@ soul → rules+memories → history(from compression_marker) → current input
 | model | ✅ 完整集成 | ModelServices + AsyncOpenAIClient 已集成；原 ModelRouter 已移除 |
 | context | ✅ 完整集成 | ContextPipeline + DualLayerRetriever + ContextAssembler 在 Agent 中完整集成 |
 | skills | ✅ 完整集成 | 含 GEPA 进化引擎，通过 call_skill 工具桥接 |
-| vfs | ✅ 完整集成 | VirtualFileSystemImpl + LocalFileBackend + LanceDbVectorStore；双层摘要索引 |
+| vfs | ✅ 完整集成 | VirtualFileSystemImpl + SqliteBackend + LanceDbVectorStore；双层摘要索引 |
 | scheduler | ✅ 完整集成 | TaskScheduler + RuleTask + MemoryTask + SummaryTask + GcTask |
 | config | ✅ 完整集成 | 配置加载器和验证器 |
 | common | ✅ 完整集成 | 错误类型和通用工具 |
@@ -284,7 +284,7 @@ soul → rules+memories → history(from compression_marker) → current input
 | memory | ✅ 已集成 | `MemoryExtractor` 提取结构化记忆 |
 | observability | ✅ 已集成 | AgentMetrics 提供可观测性存储和自省接口 |
 | executor | ✅ 正常使用 | 独立执行函数、审批工作流、验证门控均被 agent 模块使用 |
-| knowledge | ❌ 未集成 | ingestor 代码编写完成，但未在 Agent 流程中使用 |
+| knowledge | ✅ 已集成 | KnowledgeIngestor 已通过 knowledge_ingest 工具集成到 Agent 流程，Server 层通过 KnowledgeIngestor 真实处理导入与检索 |
 
 **已删除模块**：`planner/`（Planner-Executor 架构已废弃，仅保留 `ClarificationQuestion` 类型在 agent 中导出）
 **已删除类型**：`ModelRouter`、`TokenBudget`、`DocumentChunker`、`ChunkingConfig`、`ConversationSummarizer`、`VisionEncoder`、`AgentHarness`（wrapper struct）、`AgentSkills`（wrapper struct）、`MemoryExtractionTrait`、`ContextRetriever` (trait)
@@ -344,10 +344,10 @@ Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE �
 
 | 端点 | 方法 | 功能 | 前端状态 |
 |------|------|------|:---:|
-| `/ingest` | POST | 上传文档（Multipart） | ❌ |
-| `/ingest/{job_id}/status` | GET | 导入任务状态 | ❌ |
-| `/search` | GET | 知识库检索 | ❌ |
-| `/search/suggestions` | GET | 检索建议 | ❌ |
+| `/knowledge/ingest` | POST | 上传文档（Multipart） | ❌ |
+| `/knowledge/ingest/{job_id}/status` | GET | 导入任务状态 | ❌ |
+| `/knowledge/search` | GET | 知识库检索 | ❌ |
+| `/knowledge/search/suggestions` | GET | 检索建议 | ❌ |
 
 #### 技能执行（/api/v1/skills）
 

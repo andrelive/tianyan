@@ -42,17 +42,17 @@ impl ChatService for AsyncOpenAIClient {
 
         let oa_request = builder
             .build()
-            .map_err(|e| TianyanError::ModelService(format!("构建请求失败：{}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("模型服务错误：构建请求失败：{}", e)))?;
 
         let response = if request.enable_thinking == Some(true) {
             let mut body = serde_json::to_value(&oa_request)
-                .map_err(|e| TianyanError::ModelService(format!("序列化请求失败: {}", e)))?;
+                .map_err(|e| TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e)))?;
             body["enable_thinking"] = Value::Bool(true);
             self.client.chat().create_byot(body).await
         } else {
             self.client.chat().create(oa_request).await
         }
-        .map_err(|e| TianyanError::ModelService(format!("聊天补全失败：{}", e)))?;
+        .map_err(|e| TianyanError::Custom(format!("模型服务错误：聊天补全失败：{}", e)))?;
 
         let choices = response
             .choices
@@ -120,17 +120,17 @@ impl ChatService for AsyncOpenAIClient {
 
         let oa_request = builder
             .build()
-            .map_err(|e| TianyanError::ModelService(format!("构建流式请求失败：{}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("模型服务错误：构建流式请求失败：{}", e)))?;
 
         let mut stream = if request.enable_thinking == Some(true) {
             let mut body = serde_json::to_value(&oa_request)
-                .map_err(|e| TianyanError::ModelService(format!("序列化请求失败: {}", e)))?;
+                .map_err(|e| TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e)))?;
             body["enable_thinking"] = Value::Bool(true);
             self.client.chat().create_stream_byot(body).await
         } else {
             self.client.chat().create_stream(oa_request).await
         }
-        .map_err(|e| TianyanError::ModelService(format!("创建流失败：{}", e)))?;
+        .map_err(|e| TianyanError::Custom(format!("模型服务错误：创建流失败：{}", e)))?;
 
         let (tx, rx) = mpsc::channel(100);
 
@@ -186,7 +186,7 @@ impl ChatService for AsyncOpenAIClient {
                     }
                     Err(e) => {
                         if let Err(send_err) = tx
-                            .send(Err(TianyanError::ModelService(format!("流错误：{}", e))))
+                            .send(Err(TianyanError::Custom(format!("模型服务错误：流错误：{}", e))))
                             .await
                         {
                             tracing::warn!(error = %send_err, "流错误通知发送失败");

@@ -139,7 +139,7 @@ Tauri App 启动
     ├─ 3. start_axum_server(config)         [tauri/src/server.rs → server/src/lib.rs]
     │     │
     │     ├─ 3.1 initialize_vfs_for_app()   [server/src/lib.rs]
-     │     │     ├─ LocalFileBackend::new()
+     │     │     ├─ SqliteBackend::new()
     │     │     ├─ LanceDbVectorStore::new() + initialize()
     │     │     ├─ ModelServices::from_configs() — 替代旧 ModelRouter
     │     │     └─ VirtualFileSystemBuilder::build() + initialize()
@@ -244,14 +244,14 @@ React Frontend 按 chunk_type 差异化渲染
                 ┌───────────────────┼───────────────────┐
                 ▼                   ▼                    ▼
     ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐
-     │  LocalFileBackend  │  │   ContentStore   │  │    VfsSearch     │
-     │  (本地文件系统)   │  │  L0/L1/L2 读写   │  │  RRF 融合检索    │
+│   SqliteBackend   │  │   ContentStore   │  │    VfsSearch     │
+│  (SQLite 存储)    │  │  L0/L1/L2 读写   │  │  RRF 融合检索    │
     └────────┬────────┘  └────────┬────────┘  └────────┬─────────┘
              │                    │                     │
              ▼                    ▼                     ▼
     ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐
-│  backend/local/  │  │  summary/       │  │  vector/lancedb.rs │
-│  UriMapper       │  │  SummaryEngine  │  │  LanceDbVectorStore │
+│  backend/sqlite/  │  │  summary/       │  │  vector/lancedb.rs │
+│  SqliteBackend    │  │  SummaryEngine  │  │  LanceDbVectorStore │
     └─────────────────┘  └─────────────────┘  └──────────────────┘
 ```
 
@@ -339,7 +339,7 @@ TaskScheduler 触发
 | `ContentStore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `scheduler/tasks/` |
 | `VfsSearch` | `core/src/vfs/traits.rs` | `VfsImpl` | `context/retrieval/retriever.rs` |
 | `VirtualFileSystem` | `core/src/vfs/traits.rs` | 实现 VfsCore+ContentStore+VfsSearch 的类型自动获得 | `server/state.rs`, `agent/coordinator.rs`, `session/manager.rs` |
-| `LocalFileBackend` | `core/src/vfs/backend/local.rs` | 本地文件系统存储（具体类型） | `vfs/vfs_impl.rs` |
+| `SqliteBackend` | `core/src/vfs/backend/sqlite.rs` | SQLite 存储后端（具体类型） | `vfs/vfs_impl.rs` |
 | `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore` | `vfs/vfs_impl.rs`, `context/retrieval/` |
 | `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`, `PlaceholderSessionManager` | `server/state.rs`, `agent/coordinator.rs` |
 | `SkillExecutor` | `core/src/skills/executor.rs` | `SkillExecutor` | `agent/tool_registry.rs`（通过 call_skill 工具桥接） |

@@ -27,7 +27,7 @@ anyhow = "1.0"
 ring = "0.17"
 
 # Vector database (embedded)
-lancedb = "0.31"
+lancedb = "0.33"
 
 # Document processing
 pulldown-cmark = "0.9"

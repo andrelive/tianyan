@@ -28,14 +28,14 @@ impl EmbeddingService for AsyncOpenAIClient {
 
         let oa_request = builder
             .build()
-            .map_err(|e| TianyanError::EmbeddingService(format!("构建嵌入请求失败: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("嵌入服务错误：构建嵌入请求失败: {}", e)))?;
 
         let response = self
             .client
             .embeddings()
             .create(oa_request)
             .await
-            .map_err(|e| TianyanError::EmbeddingService(format!("嵌入请求失败: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("嵌入服务错误：嵌入请求失败: {}", e)))?;
 
         let data = response
             .data

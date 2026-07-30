@@ -80,8 +80,8 @@ impl SkillHandler for FileListHandler {
                     }
                     Ok(files)
                 }
-                Err(e) => Err(TianyanError::SkillExecution(format!(
-                    "列出目录失败: {}",
+                Err(e) => Err(TianyanError::Custom(format!(
+                    "技能执行错误：列出目录失败: {}",
                     e
                 ))),
             }

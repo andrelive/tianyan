@@ -12,7 +12,7 @@ use super::types::{RetrievalStep, RetrievalStepType, RetrievalTrace};
 
 /// 用于创建检索追踪记录的构建器。
 #[derive(Debug)]
-pub struct RetrievalTraceBuilder {
+pub(crate) struct RetrievalTraceBuilder {
     query: String,
     steps: Vec<RetrievalStep>,
     results: Vec<TianyanUri>,
@@ -20,6 +20,7 @@ pub struct RetrievalTraceBuilder {
     start_time: Instant,
 }
 
+#[allow(dead_code)]
 impl RetrievalTraceBuilder {
     /// 创建新的追踪构建器。
     pub fn new(query: impl Into<String>) -> Self {
@@ -118,7 +119,7 @@ impl RetrievalTraceBuilder {
 
 impl RetrievalTrace {
     /// 为此追踪记录创建构建器。
-    pub fn builder(query: impl Into<String>) -> RetrievalTraceBuilder {
+    pub(crate) fn builder(query: impl Into<String>) -> RetrievalTraceBuilder {
         RetrievalTraceBuilder::new(query)
     }
 
@@ -235,7 +236,8 @@ impl RetrievalStep {
 
 /// Token 消耗统计。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TokenStats {
+#[allow(dead_code)]
+pub(crate) struct TokenStats {
     /// 意图分析使用的 Token。
     pub intent_analysis_tokens: usize,
     /// L0 搜索使用的 Token。
@@ -250,6 +252,7 @@ pub struct TokenStats {
     pub total_tokens: usize,
 }
 
+#[allow(dead_code)]
 impl TokenStats {
     /// 创建新的 Token 统计。
     pub fn new() -> Self {
@@ -301,7 +304,8 @@ impl TokenStats {
 
 /// Token 消耗百分比。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TokenPercentages {
+#[allow(dead_code)]
+pub(crate) struct TokenPercentages {
     /// 意图分析占比。
     pub intent_analysis: f32,
     /// L0 搜索占比。

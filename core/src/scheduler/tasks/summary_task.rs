@@ -132,8 +132,8 @@ impl SummaryTask {
             .read_content(uri, ContentLevel::Detail)
             .await
             .map_err(|_| {
-                crate::common::error::TianyanError::SummaryGeneration(format!(
-                    "无法读取 Detail：{}",
+                crate::common::error::TianyanError::Custom(format!(
+                    "摘要生成错误：无法读取 Detail：{}",
                     uri
                 ))
             })?;

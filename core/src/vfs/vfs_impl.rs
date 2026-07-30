@@ -79,34 +79,6 @@ impl VirtualFileSystemImpl {
         VectorPoint::from_entry(entry)
     }
 
-    /// 通过视觉嵌入搜索（用于图像相似度搜索）。
-    pub(crate) async fn find_by_visual_embedding(
-        &self,
-        query_embedding: &[f32],
-        scope: Option<&TianyanUri>,
-        top_k: usize,
-    ) -> Result<Vec<SearchResult>> {
-        let query = VectorSearchQuery {
-            vector: query_embedding.to_vec(),
-            vector_type: VectorType::Visual,
-            limit: top_k,
-            category_filter: scope.map(|s| s.namespace().to_string()),
-            min_score: None,
-        };
-
-        let results = self.vector_storage.search(query).await?;
-
-        Ok(results
-            .into_iter()
-            .map(|r| SearchResult {
-                uri: r.payload.uri.clone(),
-                score: r.score,
-                matched_level: ContentLevel::Abstract,
-                content: None,
-            })
-            .collect())
-    }
-
     /// 递归收集指定 URI 下的所有 URI。
     pub(crate) async fn collect_all_uris(&self, uri: &TianyanUri) -> Result<Vec<TianyanUri>> {
         let mut uris = Vec::new();
@@ -136,21 +108,6 @@ impl VirtualFileSystemImpl {
         Ok(())
     }
 
-    /// 获取条目的总大小（包括目录的子条目）。
-    pub(crate) async fn get_entry_size(&self, uri: &TianyanUri) -> Result<u64> {
-        let entry = self.storage.read_entry(uri).await?;
-        if entry.is_directory() {
-            let children = self.storage.list_directory(uri).await?;
-            let mut total_size = 0u64;
-            for child in children {
-                total_size += Box::pin(self.get_entry_size(child.uri())).await?;
-            }
-            Ok(total_size)
-        } else {
-            Ok(entry.metadata.file_size.unwrap_or(0))
-        }
-    }
-
     /// 检查 URI 是否有效。
     pub(crate) fn validate_uri(uri: &TianyanUri) -> Result<()> {
         if uri.path().is_empty() {
@@ -159,15 +116,13 @@ impl VirtualFileSystemImpl {
 
         for segment in uri.path() {
             if segment.is_empty() {
-                return Err(TianyanError::InvalidUri(format!(
-                    "URI 中存在空段： {}",
-                    uri
+                return Err(TianyanError::Custom(format!(
+                    "无效 URI 路径：URI 中存在空段：{uri}"
                 )));
             }
             if segment.contains("..") || segment.contains('\\') || segment.contains('\0') {
-                return Err(TianyanError::InvalidUri(format!(
-                    "URI '{}' 中存在无效段 '{}'",
-                    uri, segment
+                return Err(TianyanError::Custom(format!(
+                    "无效 URI 路径：URI '{uri}' 中存在无效段 '{segment}'"
                 )));
             }
         }
@@ -217,7 +172,7 @@ impl VfsCore for VirtualFileSystemImpl {
         Self::validate_uri(uri)?;
 
         if self.storage.exists(uri).await? {
-            return Err(TianyanError::EntryAlreadyExists(uri.to_string()));
+            return Err(TianyanError::Custom(format!("条目已存在：{uri}")));
         }
 
         if let Some(parent) = uri.parent() {
@@ -237,7 +192,7 @@ impl VfsCore for VirtualFileSystemImpl {
         Self::validate_uri(uri)?;
 
         if self.storage.exists(uri).await? {
-            return Err(TianyanError::EntryAlreadyExists(uri.to_string()));
+            return Err(TianyanError::Custom(format!("条目已存在：{uri}")));
         }
 
         if let Some(parent) = uri.parent() {
@@ -256,7 +211,7 @@ impl VfsCore for VirtualFileSystemImpl {
     async fn delete(&self, uri: &TianyanUri) -> Result<()> {
         Self::validate_uri(uri)?;
         if !self.storage.exists(uri).await? {
-            return Err(TianyanError::EntryNotFound(uri.to_string()));
+            return Err(TianyanError::Custom(format!("条目未找到：{}", uri)));
         }
 
         // 先递归收集所有子 URI（包括目录自身），统一清理向量库
@@ -445,7 +400,7 @@ impl VfsSearch for VirtualFileSystemImpl {
         namespace: Option<ContextNamespace>,
     ) -> Result<Vec<SearchResult>> {
         let embedding_provider = self.embedding_provider.as_ref().ok_or_else(|| {
-            TianyanError::Retrieval("VFS 未配置嵌入服务，无法进行向量搜索".to_string())
+            TianyanError::Custom("检索错误：VFS 未配置嵌入服务，无法进行向量搜索".to_string())
         })?;
 
         let model = self
@@ -543,7 +498,7 @@ impl VfsSearch for VirtualFileSystemImpl {
         let embedding_provider = self
             .embedding_provider
             .as_ref()
-            .ok_or_else(|| TianyanError::Retrieval("VFS 未配置嵌入服务".to_string()))?;
+            .ok_or_else(|| TianyanError::Custom("检索错误：VFS 未配置嵌入服务".to_string()))?;
 
         let abstract_embedding = embedding_provider
             .embed_single(embedding_model, abstract_content)

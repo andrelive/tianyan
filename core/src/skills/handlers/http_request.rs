@@ -12,8 +12,6 @@ use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 /// HTTP 请求处理器。
 pub struct HttpRequestHandler {
     client: reqwest::Client,
-    #[allow(dead_code)]
-    timeout_secs: u64,
 }
 
 impl HttpRequestHandler {
@@ -32,7 +30,6 @@ impl HttpRequestHandler {
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             client,
-            timeout_secs: secs,
         }
     }
 }
@@ -53,17 +50,14 @@ impl SkillHandler for HttpRequestHandler {
         let start = Instant::now();
 
         let url = params.get("url").and_then(|v| v.as_str()).ok_or_else(|| {
-            TianyanError::InvalidSkillParameters {
-                skill: "http_request".to_string(),
-                message: "缺少 'url' 参数".to_string(),
-            }
+            TianyanError::Custom("[http_request] 缺少 'url' 参数".to_string())
         })?;
 
         if let Ok(parsed) = url.parse::<reqwest::Url>() {
             let scheme = parsed.scheme();
             if scheme != "http" && scheme != "https" {
-                return Err(TianyanError::OperationNotAllowed(format!(
-                    "不支持的 URL 协议: {}",
+                return Err(TianyanError::Custom(format!(
+                    "操作不被允许：不支持的 URL 协议: {}",
                     scheme
                 )));
             }
@@ -76,16 +70,13 @@ impl SkillHandler for HttpRequestHandler {
                     || lower.starts_with("172.")
                     || lower.starts_with("0.")
                 {
-                    return Err(TianyanError::OperationNotAllowed(
-                        "禁止访问本地或内网地址".to_string(),
+                    return Err(TianyanError::Custom(
+                        "操作不被允许：禁止访问本地或内网地址".to_string(),
                     ));
                 }
             }
         } else {
-            return Err(TianyanError::InvalidSkillParameters {
-                skill: "http_request".to_string(),
-                message: "无效的 URL 格式".to_string(),
-            });
+            return Err(TianyanError::Custom("[http_request] 无效的 URL 格式".to_string()));
         }
 
         let method = params
@@ -104,10 +95,10 @@ impl SkillHandler for HttpRequestHandler {
             "DELETE" => self.client.delete(url),
             "PATCH" => self.client.patch(url),
             _ => {
-                return Err(TianyanError::InvalidSkillParameters {
-                    skill: "http_request".to_string(),
-                    message: format!("不支持的 HTTP 方法: {}", method),
-                })
+                return Err(TianyanError::Custom(format!(
+                    "[http_request] 不支持的 HTTP 方法: {}",
+                    method
+                )))
             }
         };
 

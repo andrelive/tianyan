@@ -89,7 +89,7 @@ impl DocumentParser for PdfParser {
     fn parse(&self, content: &[u8], _filename: &str) -> Result<ParsedDocument> {
         // 使用 pdf-extract 提取文本
         let text = pdf_extract::extract_text_from_mem(content)
-            .map_err(|e| TianyanError::DocumentProcessing(format!("PDF 解析失败: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("文档处理错误：PDF 解析失败: {}", e)))?;
 
         // 通过查找分页符来计算近似页数
         let page_count = text.matches('\x0c').count().max(1);
@@ -133,7 +133,7 @@ impl DocumentParser for DocxParser {
     fn parse(&self, content: &[u8], _filename: &str) -> Result<ParsedDocument> {
         // 使用 docx-rs 提取文本
         let doc = docx_rs::read_docx(content)
-            .map_err(|e| TianyanError::DocumentProcessing(format!("DOCX 解析失败: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("文档处理错误：DOCX 解析失败: {}", e)))?;
 
         let mut text = String::new();
 
@@ -457,7 +457,7 @@ impl DocumentParser for CsvParser {
 
         let headers: Vec<String> = reader
             .headers()
-            .map_err(|e| TianyanError::DocumentProcessing(format!("CSV 解析失败: {}", e)))?
+            .map_err(|e| TianyanError::Custom(format!("文档处理错误：CSV 解析失败: {}", e)))?
             .iter()
             .map(|h| h.to_string())
             .collect();
@@ -470,7 +470,7 @@ impl DocumentParser for CsvParser {
         // 写入每行数据
         for result in reader.records() {
             let record = result
-                .map_err(|e| TianyanError::DocumentProcessing(format!("CSV 行解析失败: {}", e)))?;
+                .map_err(|e| TianyanError::Custom(format!("文档处理错误：CSV 行解析失败: {}", e)))?;
             let line: Vec<&str> = record.iter().collect();
             text.push_str(&line.join("\t"));
             text.push('\n');
@@ -510,7 +510,7 @@ impl DocumentParser for XlsxParser {
         use calamine::{open_workbook_from_rs, DataType, Reader, Xlsx};
 
         let mut workbook: Xlsx<_> = open_workbook_from_rs(std::io::Cursor::new(content))
-            .map_err(|e| TianyanError::DocumentProcessing(format!("XLSX 打开失败: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("文档处理错误：XLSX 打开失败: {}", e)))?;
 
         let mut text = String::new();
 

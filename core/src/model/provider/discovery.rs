@@ -13,7 +13,7 @@ const DEFAULT_CHAT_CONTEXT_LENGTH: usize = 8192;
 impl ServiceDiscovery for AsyncOpenAIClient {
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let response = self.client.models().list().await.map_err(|e| {
-            crate::common::error::TianyanError::ModelService(format!("列出模型失败：{}", e))
+            crate::common::error::TianyanError::Custom(format!("模型服务错误：列出模型失败：{}", e))
         })?;
 
         let models: Vec<ModelInfo> = response

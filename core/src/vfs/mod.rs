@@ -42,6 +42,7 @@ mod test_utils;
 
 // 重新导出公共 API
 pub use backend::LocalFileBackend;
+pub use backend::SqliteBackend;
 #[cfg(test)]
 pub use summary::MockSummaryEngine;
 pub use summary::{SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT};
@@ -67,6 +68,7 @@ pub use test_utils::MockVectorStorage;
 mod tests {
     use super::test_utils::{create_test_vfs, MockVectorStorage};
     use super::*;
+    use crate::config::StorageConfig;
     use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
     use crate::vfs::types::{VectorPoint, VectorSearchQuery, VectorSearchResult};
     use std::path::PathBuf;

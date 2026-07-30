@@ -65,10 +65,10 @@ impl VirtualFileSystemBuilder {
         let config = self.config.unwrap_or_default();
         let storage = self
             .storage
-            .ok_or_else(|| TianyanError::Internal("需要存储后端".to_string()))?;
+            .ok_or_else(|| TianyanError::Custom("内部错误：需要存储后端".to_string()))?;
         let vector_storage = self
             .vector_storage
-            .ok_or_else(|| TianyanError::Internal("需要向量存储".to_string()))?;
+            .ok_or_else(|| TianyanError::Custom("内部错误：需要向量存储".to_string()))?;
 
         let mut vfs = VirtualFileSystemImpl::new(storage, vector_storage, config);
 

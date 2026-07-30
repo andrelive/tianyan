@@ -95,12 +95,12 @@ impl AgentBuilderFactory {
             .with_usage_stats(usage_stats)
             .with_session_manager(Arc::new(PersistentSessionManager::new(vfs)))
             .build()
-            .map_err(|e| TianyanError::Internal(format!("Agent 构建失败：{}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("内部错误：Agent 构建失败：{}", e)))?;
 
         agent
             .initialize()
             .await
-            .map_err(|e| TianyanError::Internal(format!("Agent 初始化失败：{}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("内部错误：Agent 初始化失败：{}", e)))?;
 
         tracing::info!("Agent 构建并初始化成功");
         Ok(agent)
@@ -133,9 +133,7 @@ impl AgentBuilderFactory {
             .collect();
 
         if enabled_providers.is_empty() {
-            return Err(TianyanError::Config(
-                "没有启用的模型提供商，请先完成配置".to_string(),
-            ));
+            return Err(TianyanError::Custom("配置错误：没有启用的模型提供商，请先完成配置".to_string()));
         }
 
         for provider in &enabled_providers {
@@ -146,22 +144,22 @@ impl AgentBuilderFactory {
                     .map(|k| k.is_empty())
                     .unwrap_or(true)
             {
-                return Err(TianyanError::Config(format!(
-                    "模型提供商 '{}' 未配置 API Key，请先完成配置",
+                return Err(TianyanError::Custom(format!(
+                    "配置错误：模型提供商 '{}' 未配置 API Key，请先完成配置",
                     provider.name
                 )));
             }
 
             if provider.endpoint.is_empty() {
-                return Err(TianyanError::Config(format!(
-                    "模型提供商 '{}' 未配置 API 端点，请先完成配置",
+                return Err(TianyanError::Custom(format!(
+                    "配置错误：模型提供商 '{}' 未配置 API 端点，请先完成配置",
                     provider.name
                 )));
             }
 
             if provider.models.is_empty() {
-                return Err(TianyanError::Config(format!(
-                    "模型提供商 '{}' 未配置任何模型，请先完成配置",
+                return Err(TianyanError::Custom(format!(
+                    "配置错误：模型提供商 '{}' 未配置任何模型，请先完成配置",
                     provider.name
                 )));
             }
@@ -169,8 +167,8 @@ impl AgentBuilderFactory {
 
         // 确保至少有一个可用聊天模型
         if config.models.resolve(ModelCapability::Chat).is_none() {
-            return Err(TianyanError::Config(
-                "未找到可用的聊天模型（需要 chat 能力标签），请先完成配置".to_string(),
+            return Err(TianyanError::Custom(
+                "配置错误：未找到可用的聊天模型（需要 chat 能力标签），请先完成配置".to_string(),
             ));
         }
 
@@ -192,8 +190,8 @@ impl AgentCoordinator for WizardModeAgent {
         _message: &str,
         _model: Option<&str>,
     ) -> TianyanResult<AgentResponse> {
-        Err(TianyanError::ModelService(
-            "应用未配置。请先完成配置向导。".to_string(),
+        Err(TianyanError::Custom(
+            "模型服务错误：应用未配置。请先完成配置向导。".to_string(),
         ))
     }
 
@@ -203,8 +201,8 @@ impl AgentCoordinator for WizardModeAgent {
         _message: &str,
         _model: Option<&str>,
     ) -> TianyanResult<mpsc::Receiver<TianyanResult<AgentStreamChunk>>> {
-        Err(TianyanError::ModelService(
-            "应用未配置。请先完成配置向导。".to_string(),
+        Err(TianyanError::Custom(
+            "模型服务错误：应用未配置。请先完成配置向导。".to_string(),
         ))
     }
 
@@ -213,8 +211,8 @@ impl AgentCoordinator for WizardModeAgent {
         _session_id: &str,
         _answers: &str,
     ) -> TianyanResult<AgentResponse> {
-        Err(TianyanError::ModelService(
-            "应用未配置。请先完成配置向导。".to_string(),
+        Err(TianyanError::Custom(
+            "模型服务错误：应用未配置。请先完成配置向导。".to_string(),
         ))
     }
 

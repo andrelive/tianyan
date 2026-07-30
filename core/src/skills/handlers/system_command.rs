@@ -45,10 +45,7 @@ impl SkillHandler for SystemCommandHandler {
         let command = params
             .get("command")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TianyanError::InvalidSkillParameters {
-                skill: "system_command".to_string(),
-                message: "缺少 'command' 参数".to_string(),
-            })?;
+            .ok_or_else(|| TianyanError::Custom("[system_command] 缺少 'command' 参数".to_string()))?;
 
         let cmd_parts: Vec<&str> = command.split_whitespace().collect();
         if let Some(first) = cmd_parts.first() {
@@ -57,8 +54,8 @@ impl SkillHandler for SystemCommandHandler {
                 .iter()
                 .any(|b| b.to_lowercase() == first.to_lowercase())
             {
-                return Err(TianyanError::OperationNotAllowed(format!(
-                    "命令 '{}' 已被阻止",
+                return Err(TianyanError::Custom(format!(
+                    "操作不被允许：命令 '{}' 已被阻止",
                     first
                 )));
             }

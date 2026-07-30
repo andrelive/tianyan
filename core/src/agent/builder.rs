@@ -131,15 +131,15 @@ impl AgentBuilder {
     pub fn build(self) -> Result<Agent> {
         let model_service = self
             .model_service
-            .ok_or_else(|| TianyanError::Internal("需要模型服务".to_string()))?;
+            .ok_or_else(|| TianyanError::Custom("内部错误：需要模型服务".to_string()))?;
 
         let retriever = self
             .retriever
-            .ok_or_else(|| TianyanError::Internal("需要检索器".to_string()))?;
+            .ok_or_else(|| TianyanError::Custom("内部错误：需要检索器".to_string()))?;
 
         let vfs = self
             .vfs
-            .ok_or_else(|| TianyanError::Internal("需要虚拟文件系统".to_string()))?;
+            .ok_or_else(|| TianyanError::Custom("内部错误：需要虚拟文件系统".to_string()))?;
 
         let skill_registry = self
             .skill_registry
@@ -147,7 +147,7 @@ impl AgentBuilder {
 
         let session_manager = self
             .session_manager
-            .ok_or_else(|| TianyanError::Internal("需要会话管理器".to_string()))?;
+            .ok_or_else(|| TianyanError::Custom("内部错误：需要会话管理器".to_string()))?;
 
         // 构建可观测性指标（tool_registry 依赖）
         let metrics = AgentMetrics::new();

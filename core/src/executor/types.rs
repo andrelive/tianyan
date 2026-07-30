@@ -60,44 +60,9 @@ pub enum Action {
     },
 }
 
-/// 执行器错误。
-/// 执行器错误。
-#[derive(thiserror::Error, Debug)]
-pub enum ExecutorError {
-    /// 文件操作失败。
-    #[error("文件操作失败：{0}")]
-    FileError(String),
-    /// 命令执行失败。
-    #[error("命令执行失败：{0}")]
-    CommandError(String),
-    /// 搜索失败。
-    #[error("搜索失败：{0}")]
-    SearchError(String),
-    /// 执行超时。
-    #[error("执行超时")]
-    Timeout,
-    /// 安全策略违规。
-    #[error("安全策略违规：{0}")]
-    SecurityViolation(String),
-    /// 技能执行失败。
-    #[error("技能执行失败：{0}")]
-    SkillExecution(String),
-    /// 内部错误。
-    #[error("内部错误：{0}")]
-    Internal(String),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_executor_error_display() {
-        let err = ExecutorError::FileError("文件不存在".to_string());
-        assert!(err.to_string().contains("文件操作失败"));
-        let err = ExecutorError::Timeout;
-        assert!(err.to_string().contains("执行超时"));
-    }
 
     #[test]
     fn test_action_serialization() {

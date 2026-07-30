@@ -341,8 +341,8 @@ impl ApprovalWorkflow {
         {
             let mut pending = self.pending_approvals.write().await;
             if pending.len() >= self.config.max_pending_approvals {
-                return Err(crate::common::error::TianyanError::Internal(
-                    "待处理审批数量超过上限".to_string(),
+                return Err(crate::common::error::TianyanError::Custom(
+                    "内部错误：待处理审批数量超过上限".to_string(),
                 ));
             }
             pending.insert(
@@ -420,8 +420,8 @@ impl ApprovalWorkflow {
             }
             Ok(())
         } else {
-            Err(crate::common::error::TianyanError::Internal(
-                "审批请求不存在或已超时".to_string(),
+            Err(crate::common::error::TianyanError::Custom(
+                "内部错误：审批请求不存在或已超时".to_string(),
             ))
         }
     }

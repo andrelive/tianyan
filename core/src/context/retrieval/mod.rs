@@ -12,15 +12,15 @@ mod retriever;
 mod trace;
 mod types;
 
-pub use intent::{Intent, IntentAnalyzer, QueryType, TargetScope};
-pub use loader::ContentLoadStrategy;
+pub use intent::{Intent, IntentAnalyzer};
 pub use retriever::DualLayerRetriever;
-pub use trace::{RetrievalTraceBuilder, TokenPercentages, TokenStats};
 pub use types::{RetrievalResult, RetrievalStep, RetrievalStepType, RetrievalTrace};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::retrieval::intent::QueryType;
+    use crate::context::retrieval::loader::ContentLoadStrategy;
 
     #[test]
     fn test_module_exports() {

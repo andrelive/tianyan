@@ -39,10 +39,7 @@ impl SkillHandler for FileDeleteHandler {
         let start = Instant::now();
 
         let path = params.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            TianyanError::InvalidSkillParameters {
-                skill: "file_delete".to_string(),
-                message: "缺少 'path' 参数".to_string(),
-            }
+            TianyanError::Custom("[file_delete] 缺少 'path' 参数".to_string())
         })?;
 
         let path = PathBuf::from(path);

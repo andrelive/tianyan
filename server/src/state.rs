@@ -114,12 +114,12 @@ impl AppState {
         // 初始化使用统计（共享 SQLite 数据库）
         let db_path = config.storage.data_dir.join("usage_stats.db");
         let sqlite_db = SqliteDb::open(db_path)
-            .map_err(|e| TianyanError::StorageBackend(format!("创建 SQLite 数据库失败：{}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("存储后端错误：创建 SQLite 数据库失败：{}", e)))?;
         sqlite_db.init_all_schemas().await.map_err(|e| {
-            TianyanError::StorageBackend(format!("初始化 SQLite 表失败：{}", e))
+            TianyanError::Custom(format!("存储后端错误：初始化 SQLite 表失败：{}", e))
         })?;
         let usage_stats = UsageStats::new(sqlite_db).map_err(|e| {
-            TianyanError::StorageBackend(format!("创建 UsageStats 失败：{}", e))
+            TianyanError::Custom(format!("存储后端错误：创建 UsageStats 失败：{}", e))
         })?;
 
         // 构建 Agent（传入 vfs + 技能组件）
@@ -249,7 +249,7 @@ impl AppState {
             tokio::runtime::Handle::current()
                 .block_on(async { create_model_services(&config).await })
         })
-        .map_err(|e| TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
+        .map_err(|e| TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{}", e)))?;
 
         let chat_model = config
             .models
@@ -286,7 +286,7 @@ impl AppState {
             tokio::runtime::Handle::current()
                 .block_on(async { create_model_services(&config).await })
         })
-        .map_err(|e| TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
+        .map_err(|e| TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{}", e)))?;
 
         let chat_model = config
             .models
@@ -314,7 +314,7 @@ impl AppState {
             tokio::runtime::Handle::current()
                 .block_on(async { create_model_services(&config).await })
         })
-        .map_err(|e| TianyanError::ModelService(format!("模型服务创建失败：{}", e)))?;
+        .map_err(|e| TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{}", e)))?;
 
         let vfs: Arc<dyn tianyan::vfs::VirtualFileSystem> = self.vfs.clone();
 

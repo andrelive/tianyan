@@ -35,7 +35,7 @@ pub mod agent;
 pub mod common;
 pub mod config;
 pub mod context;
-/// 执行器（独立执行函数 + Action / ExecutorError）。
+/// 执行器（独立执行函数 + Action）。
 pub mod executor;
 pub mod knowledge;
 pub mod memory;

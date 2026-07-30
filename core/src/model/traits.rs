@@ -98,7 +98,7 @@ pub trait EmbeddingService: Send + Sync {
             .first()
             .map(|d| Embedding::new(d.embedding.clone()))
             .ok_or_else(|| {
-                crate::common::error::TianyanError::EmbeddingService("未返回嵌入向量".to_string())
+                crate::common::error::TianyanError::Custom("嵌入服务错误：未返回嵌入向量".to_string())
             })
     }
 
@@ -116,7 +116,7 @@ pub trait EmbeddingService: Send + Sync {
             .first()
             .map(|d| Embedding::new(d.embedding.clone()))
             .ok_or_else(|| {
-                crate::common::error::TianyanError::EmbeddingService("未返回嵌入向量".to_string())
+                crate::common::error::TianyanError::Custom("嵌入服务错误：未返回嵌入向量".to_string())
             })
     }
 

@@ -27,33 +27,9 @@ use crate::vfs::VirtualFileSystem;
 /// compression_marker 之后至少积累多少条消息才触发压缩。
 const MIN_MESSAGES_BEFORE_COMPRESSION: usize = 6;
 
-/// AgentLoop 处理的三种结果分类。
-pub(crate) enum LoopOutcome {
-    /// 正常回答。
-    Answer {
-        /// 回答内容。
-        content: String,
-        /// Token 使用量。
-        tokens: TokenUsage,
-        /// 已持久化的消息。
-        persisted_message: StructuredMessage,
-    },
-    /// 需要追问。
-    NeedsClarification {
-        /// 追问问题。
-        question: ClarificationQuestion,
-        /// Token 使用量。
-        tokens: TokenUsage,
-    },
-    /// 处理错误。
-    Error {
-        /// 错误消息。
-        message: String,
-    },
-}
-
 /// 智能体协调器的默认实现。
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Agent {
     pub(crate) config: AgentConfig,
     /// 默认对话模型名（配置中指定，未被请求级 model 覆盖时使用）。
@@ -379,48 +355,6 @@ impl Agent {
         }
     }
 
-    /// 处理 AgentLoopResult 并生成响应与 token 信息。
-    ///
-    /// 返回 (AgentResponse, Option<TokenUsage>) 二元组。
-    pub(crate) fn handle_loop_result(
-        loop_result: std::result::Result<AgentLoopResult, crate::agent::r#loop::AgentLoopError>,
-        start: Instant,
-    ) -> (AgentResponse, Option<TokenUsage>) {
-        match loop_result {
-            Ok(AgentLoopResult::Answer {
-                content,
-                total_tokens,
-                ..
-            }) => {
-                let mut resp = AgentResponse::simple(content);
-                resp.token_usage = total_tokens.clone();
-                resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                (resp, Some(total_tokens))
-            }
-            Ok(AgentLoopResult::NeedsClarification {
-                question,
-                total_tokens,
-                ..
-            }) => {
-                let question_obj = ClarificationQuestion {
-                    question,
-                    question_type: QuestionType::OpenEnded,
-                    options: None,
-                    required: true,
-                };
-                let formatted = format_clarification_questions(&[question_obj.clone()]);
-                let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
-                resp.token_usage = total_tokens.clone();
-                resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                (resp, Some(total_tokens))
-            }
-            Err(e) => {
-                let mut resp = AgentResponse::error(format!("处理失败：{}", e));
-                resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                (resp, None)
-            }
-        }
-    }
 }
 
 /// 格式化追问问题为用户友好的文本。

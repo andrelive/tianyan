@@ -71,17 +71,18 @@ impl TianyanUri {
         let url = Url::parse(uri)?;
 
         if url.scheme() != TIANYAN_URI_SCHEME {
-            return Err(error::TianyanError::UnsupportedUriScheme {
-                scheme: url.scheme().to_string(),
-            });
+            return Err(error::TianyanError::Custom(format!(
+                "不支持的 URI 方案 '{}'。预期使用 'tianyan://'",
+                url.scheme()
+            )));
         }
 
         let host = url
             .host_str()
-            .ok_or_else(|| error::TianyanError::InvalidUri(format!("URI 中缺少主机：{}", uri)))?;
+            .ok_or_else(|| error::TianyanError::Custom(format!("无效的 URI：URI 中缺少主机：{}", uri)))?;
 
         let namespace = ContextNamespace::parse(host).ok_or_else(|| {
-            error::TianyanError::InvalidUri(format!("URI 中包含无效命名空间：{}", host))
+            error::TianyanError::Custom(format!("无效的 URI：URI 中包含无效命名空间：{}", host))
         })?;
 
         let path: Vec<String> = url
@@ -233,10 +234,11 @@ mod tests {
     fn test_tianyan_uri_parse_invalid_scheme() {
         let result = TianyanUri::parse("http://user/profile");
         assert!(result.is_err());
-        if let Err(TianyanError::UnsupportedUriScheme { scheme }) = result {
-            assert_eq!(scheme, "http");
+        if let Err(TianyanError::Custom(msg)) = result {
+            assert!(msg.contains("不支持的 URI 方案"));
+            assert!(msg.contains("http"));
         } else {
-            panic!("预期 UnsupportedUriScheme 错误");
+            panic!("预期 Custom 错误（不支持的 URI 方案）");
         }
     }
 

@@ -13,7 +13,7 @@ use crate::model::EmbeddingService;
 /// 查询类型分类。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum QueryType {
+pub(crate) enum QueryType {
     /// 搜索查询 - 查找特定信息
     Search(String),
     /// 导航查询 - 浏览到特定位置
@@ -22,6 +22,7 @@ pub enum QueryType {
     Retrieve(String),
 }
 
+#[allow(dead_code)]
 impl QueryType {
     /// 创建搜索查询。
     pub fn search(query: impl Into<String>) -> Self {
@@ -81,9 +82,9 @@ pub struct Intent {
     /// 查询向量（嵌入）。
     pub query_vector: Option<Vec<f32>>,
     /// 目标范围（类别过滤）。
-    pub target_scope: Option<TargetScope>,
+    pub(crate) target_scope: Option<TargetScope>,
     /// 查询类型分类。
-    pub query_type: QueryType,
+    pub(crate) query_type: QueryType,
     /// 意图分析的置信度分数。
     pub confidence: f32,
     /// 分析时间戳。
@@ -115,13 +116,13 @@ impl Intent {
     }
 
     /// 设置目标范围。
-    pub fn with_scope(mut self, scope: TargetScope) -> Self {
+    pub(crate) fn with_scope(mut self, scope: TargetScope) -> Self {
         self.target_scope = Some(scope);
         self
     }
 
     /// 设置查询类型。
-    pub fn with_query_type(mut self, query_type: QueryType) -> Self {
+    pub(crate) fn with_query_type(mut self, query_type: QueryType) -> Self {
         self.query_type = query_type;
         self
     }
@@ -150,7 +151,7 @@ impl Intent {
 
 /// 检索的目标范围。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TargetScope {
+pub(crate) struct TargetScope {
     /// 要搜索的类别。
     category: ContextNamespace,
     /// 可选的子类别路径。
@@ -159,6 +160,7 @@ pub struct TargetScope {
     uri_prefix: Option<String>,
 }
 
+#[allow(dead_code)]
 impl TargetScope {
     /// 为类别创建新目标范围。
     pub fn new(category: ContextNamespace) -> Self {
@@ -364,19 +366,6 @@ impl IntentAnalyzer {
         }
 
         Ok(intent)
-    }
-
-    /// 使用预计算向量分析查询。
-    pub(crate) fn analyze_with_vector(&self, query: impl Into<String>, vector: Vec<f32>) -> Intent {
-        let query = query.into();
-        let mut intent = Intent::new(&query);
-
-        intent.query_type = self.classify_query_type(&query);
-        intent.target_scope = self.infer_target_scope(&query);
-        intent.query_vector = Some(vector);
-        intent.confidence = 0.8;
-
-        intent
     }
 
     /// 分类查询类型。

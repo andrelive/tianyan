@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use tokio::sync::RwLock;
 
 use crate::agent::types::ClarificationQuestion;
@@ -10,31 +10,12 @@ use crate::common::types::{
     DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
 };
 
+// Re-export: InjectableContext was moved to common::types::injectable to eliminate
+// the context → agent inverted dependency.
+pub use crate::common::types::injectable::InjectableContext;
+
 const MAX_CONVERSATION_MESSAGES: usize = 100;
 const KEEP_RECENT_MESSAGES: usize = 50;
-
-/// 可注入的上下文内容，由 ContextPipeline 填充，由 ContextAssembler 组装使用。
-#[derive(Debug, Clone, Default)]
-pub struct InjectableContext {
-    /// 智能体核心人格（soul.md）。
-    pub soul: String,
-    /// 经验与方法论。
-    pub rules_and_experiences: Vec<String>,
-    /// 用户画像与环境事实。
-    pub memories: Vec<String>,
-    /// 最后更新时间。
-    pub last_updated: DateTime<Utc>,
-}
-
-impl InjectableContext {
-    /// 创建空的注入上下文。
-    pub fn new() -> Self {
-        Self {
-            last_updated: Utc::now(),
-            ..Default::default()
-        }
-    }
-}
 
 /// 会话状态容器（conversation 为唯一真相源）。
 #[derive(Debug, Clone)]

@@ -26,8 +26,8 @@ pub fn init_logging(config: &LoggingConfig) -> Result<()> {
                 .with_line_number(config.include_location);
 
             tracing::subscriber::set_global_default(subscriber.with(json_layer)).map_err(|e| {
-                crate::common::error::TianyanError::Config(format!(
-                    "Failed to set logging subscriber: {}",
+                crate::common::error::TianyanError::Custom(format!(
+                    "配置错误：Failed to set logging subscriber: {}",
                     e
                 ))
             })?;
@@ -41,8 +41,8 @@ pub fn init_logging(config: &LoggingConfig) -> Result<()> {
                 .with_thread_names(false);
 
             tracing::subscriber::set_global_default(subscriber.with(text_layer)).map_err(|e| {
-                crate::common::error::TianyanError::Config(format!(
-                    "Failed to set logging subscriber: {}",
+                crate::common::error::TianyanError::Custom(format!(
+                    "配置错误：Failed to set logging subscriber: {}",
                     e
                 ))
             })?;

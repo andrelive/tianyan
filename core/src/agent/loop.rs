@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::agent::tool_params::AskUserParams;
+use crate::common::error::TianyanError;
 use crate::agent::tool_registry::ToolRegistry;
 use crate::agent::types::StreamEventSender;
 use crate::common::types::{FunctionCall, Message, MessageRole, StructuredMessage, TokenUsage};
@@ -50,19 +51,7 @@ pub enum AgentLoopResult {
     },
 }
 
-/// Agent 循环错误。
-#[derive(thiserror::Error, Debug)]
-pub enum AgentLoopError {
-    /// 达到最大轮数。
-    #[error("Reached maximum turns: {0}")]
-    MaxTurnsReached(usize),
-    /// LLM 调用失败。
-    #[error("LLM call failed: {0}")]
-    LlmCallFailed(String),
-    /// 空响应。
-    #[error("Empty response from LLM")]
-    EmptyResponse,
-}
+// AgentLoopError replaced with TianyanError::Custom("agent_loop: ...")
 
 /// Agent 迭代循环。
 #[derive(Clone)]
@@ -102,7 +91,7 @@ impl AgentLoop {
         session_id: &str,
         initial_parent_id: Option<&str>,
         model: &str,
-    ) -> Result<AgentLoopResult, AgentLoopError> {
+    ) -> Result<AgentLoopResult, TianyanError> {
         let mut current_parent_id = initial_parent_id.map(|s| s.to_string());
         let mut total_tokens = TokenUsage::default();
 
@@ -114,14 +103,14 @@ impl AgentLoop {
                 .model_service
                 .chat_completion(request)
                 .await
-                .map_err(|e| AgentLoopError::LlmCallFailed(e.to_string()))?;
+                .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e.to_string())))?;
 
             let turn_usage = response.usage;
             let choice = response
                 .choices
                 .into_iter()
                 .next()
-                .ok_or(AgentLoopError::EmptyResponse)?;
+                .ok_or(TianyanError::Custom("agent_loop: LLM 返回空响应".to_string()))?;
 
             if let Some(result) = self
                 .handle_llm_response(
@@ -140,7 +129,7 @@ impl AgentLoop {
             }
         }
 
-        Err(AgentLoopError::MaxTurnsReached(self.config.max_turns))
+        Err(TianyanError::Custom(format!("agent_loop: 达到最大轮数限制：{}", self.config.max_turns)))
     }
 
     /// 运行迭代循环（流式），将 LLM 文本增量实时推送到前端。
@@ -155,7 +144,7 @@ impl AgentLoop {
         session_id: &str,
         initial_parent_id: Option<&str>,
         model: &str,
-    ) -> Result<AgentLoopResult, AgentLoopError> {
+    ) -> Result<AgentLoopResult, TianyanError> {
         let mut current_parent_id = initial_parent_id.map(|s| s.to_string());
         let mut total_tokens = TokenUsage::default();
 
@@ -168,7 +157,7 @@ impl AgentLoop {
                 .model_service
                 .chat_completion_stream(request)
                 .await
-                .map_err(|e| AgentLoopError::LlmCallFailed(e.to_string()))?;
+                .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e.to_string())))?;
 
             // Accumulators for streaming chunks
             let mut accumulated_content = String::new();
@@ -223,7 +212,7 @@ impl AgentLoop {
 
             // If streaming failed mid-response, report error rather than using partial data
             if let Some(err_msg) = stream_error {
-                return Err(AgentLoopError::LlmCallFailed(err_msg));
+                return Err(TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", err_msg)));
             }
 
             // Build assistant message from accumulated content + tool calls
@@ -267,7 +256,7 @@ impl AgentLoop {
             }
         }
 
-        Err(AgentLoopError::MaxTurnsReached(self.config.max_turns))
+        Err(TianyanError::Custom(format!("agent_loop: 达到最大轮数限制：{}", self.config.max_turns)))
     }
 
     /// Process a single turn after the LLM response has been obtained.
@@ -287,7 +276,7 @@ impl AgentLoop {
         stream_sender: Option<&StreamEventSender>,
         session_id: &str,
         turn: usize,
-    ) -> Result<Option<AgentLoopResult>, AgentLoopError> {
+    ) -> Result<Option<AgentLoopResult>, TianyanError> {
         // Accumulate turn token usage
         if let Some(ref usage) = turn_usage {
             total_tokens.prompt_tokens += usage.prompt_tokens;
@@ -302,7 +291,7 @@ impl AgentLoop {
                 .find(|tc| tc.function.name == "ask_user")
             {
                 let params: AskUserParams = serde_json::from_str(&ask_call.function.arguments)
-                    .map_err(|e| AgentLoopError::LlmCallFailed(e.to_string()))?;
+                .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e.to_string())))?;
                 return Ok(Some(AgentLoopResult::NeedsClarification {
                     question: params.question,
                     total_tokens: total_tokens.clone(),
@@ -382,7 +371,7 @@ impl AgentLoop {
             // LLM returned neither content nor tool calls — treat as error
             // rather than silently continuing the loop (which would consume
             // up to max_turns with no progress).
-            Err(AgentLoopError::EmptyResponse)
+            Err(TianyanError::Custom("agent_loop: LLM 返回空响应".to_string()))
         } else {
             // Already persisted above — just return.
             Ok(Some(AgentLoopResult::Answer {
@@ -417,19 +406,19 @@ mod tests {
             Ok(())
         }
         async fn create_session(&self, _id: &str, _message: Message) -> Result<Session> {
-            unimplemented!()
+            Ok(Session::new(_id))
         }
         async fn get_session(&self, _id: &str) -> Result<Option<Session>> {
-            unimplemented!()
+            Ok(None)
         }
         async fn update_session(&self, _session: &Session) -> Result<()> {
-            unimplemented!()
+            Ok(())
         }
         async fn list_sessions(&self) -> Result<Vec<Session>> {
-            unimplemented!()
+            Ok(vec![])
         }
         async fn delete_session(&self, _id: &str) -> Result<()> {
-            unimplemented!()
+            Ok(())
         }
     }
 
@@ -441,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_agent_loop_error_display() {
-        let err = AgentLoopError::MaxTurnsReached(5);
+        let err = TianyanError::Custom(format!("agent_loop: 达到最大轮数限制：{}", 5));
         assert!(err.to_string().contains("5"));
     }
 }

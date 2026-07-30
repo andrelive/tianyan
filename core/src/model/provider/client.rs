@@ -19,7 +19,7 @@ impl AsyncOpenAIClient {
     pub fn from_provider(config: &ProviderConfig) -> Result<Self> {
         let base_url = config
             .get_endpoint()
-            .map_err(|e| TianyanError::Config(format!("获取 endpoint 失败: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("配置错误：获取 endpoint 失败: {}", e)))?;
 
         let mut oa_config = OpenAIConfig::default().with_api_base(&base_url);
 
@@ -34,7 +34,7 @@ impl AsyncOpenAIClient {
             .pool_max_idle_per_host(5)
             .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
-            .map_err(|e| TianyanError::Config(format!("构建 HTTP 客户端失败: {}", e)))?;
+            .map_err(|e| TianyanError::Custom(format!("配置错误：构建 HTTP 客户端失败: {}", e)))?;
 
         let client = Client::with_config(oa_config).with_http_client(http_client);
 

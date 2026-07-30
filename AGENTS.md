@@ -17,7 +17,7 @@
 | 为技能建立独立的文件系统加载（全量读 skill.md） | 技能通过 VFS 命名空间管理，渐进式披露 | L0 Abstract 发现 → L2 Detail 按需加载；`SkillManager::list_available_skills()` 读 abstract |
 | 在 VFS 之外引入新的存储抽象（新 trait、新 Manager） | 已有链路不叠加抽象 | 直接使用 `VfsCore` / `ContentStore` / `VfsSearch` trait |
 | 对内容做 chunk 分块 | `Chunker` 已移除。VFS 双层检索替代 | 完整内容写入 L2，由 `SummaryEngine` 生成结构化摘要 |
-| 引入 SQLite、Redis、独立文件存储 | — | 仅用 VFS（`LocalFileBackend`）+ LanceDB（嵌入式向量） |
+| 绕过 VFS 引入独立存储（独立 SQLite 连接、Redis、独立文件存储） | VFS 是唯一的存储入口。SQLite 是 VFS 的底层实现（`SqliteBackend`），模块不得绕过 VFS trait 直接操作 `SqliteDb` | 仅用 VFS（`SqliteBackend`）+ LanceDB（嵌入式向量）；统计模块可共享 `SqliteDb` 连接但必须通过 VFS trait 写入内容 |
 
 ### VFS 统一模型（每次设计前先看）
 
@@ -59,7 +59,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - `unsafe_code = "deny"` — 禁用 unsafe
 - Clippy: `unwrap_used`、`expect_used`、`unwrap_in_result` 均为 `warn`
 - 公开 API 用 `///` / `//!`，不要用 `//` 行注释
-- 所有错误用 `TianyanError`，禁止引入新错误类型
+- 所有错误用 `TianyanError`，禁止引入新错误类型。`TianyanError` 仅保留 4 个变体（`Io` / `Json` / `Toml` / `Custom`），模块内部错误通过 `Custom(String)` 传递，调用方在消息中携带"模块前缀：详情"，**严禁新增变体**
 
 ## 架构导航
 
@@ -68,6 +68,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-002: StructuredMessage](docs/architecture/decisions/002-structured-message.md) — 单一真相源
 - [ADR-003: 组件工具化](docs/architecture/decisions/003-component-toolization.md) — ToolRegistry + call_skill 桥接
 - [ADR-004: 前缀匹配上下文组装](docs/architecture/decisions/004-prefix-match-context-assembly.md) — soul→rules→history 顺序
+- [ADR-005: SQLite 作为主存储后端](docs/architecture/decisions/005-sqlite-backend.md) — 替代 `LocalFileBackend`
 
 模块索引 → [`docs/architecture/module-map.md`](docs/architecture/module-map.md)
 设计原则 → [`docs/architecture/principles.md`](docs/architecture/principles.md)
@@ -91,7 +92,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `observability` | `core/src/observability/` | `AgentMetrics` 可观测性存储 | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控） | — |
 
-已删除组件：`planner/`、`ModelRouter`、`TokenBudget`、`Chunker`、`AgentHarness` wrapper、`AgentSkills` wrapper。
+已删除组件：`planner/`、`ModelRouter`、`TokenBudget`、`Chunker`、`AgentHarness` wrapper、`AgentSkills` wrapper、`LocalFileBackend`。
 
 ## 常见陷阱
 

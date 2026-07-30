@@ -159,7 +159,7 @@ fn initialize_vfs_for_app(
     // 3. 初始化 VFS（单一实例）
     let vfs = vfs_builder
         .build()
-        .map_err(|e| tianyan::TianyanError::VirtualFileSystem(format!("VFS 构建失败：{}", e)))?;
+        .map_err(|e| tianyan::TianyanError::Custom(format!("虚拟文件系统错误：VFS 构建失败：{}", e)))?;
 
     use tianyan::vfs::VfsCore;
     tokio::task::block_in_place(|| {
@@ -340,7 +340,7 @@ pub async fn start_server(
             let config_lock = state.config();
             let config_guard = config_lock.read().await;
             let model_services = create_model_services(&config_guard).await.map_err(|e| {
-                tianyan::TianyanError::ModelService(format!("模型服务创建失败：{}", e))
+                tianyan::TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{}", e))
             })?;
             scheduler
                 .register_task(TaskDefinition::new(
@@ -381,13 +381,13 @@ pub async fn start_server(
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
-        .map_err(|e| tianyan::TianyanError::Config(format!("无效地址: {}", e)))?;
+        .map_err(|e| tianyan::TianyanError::Custom(format!("配置错误：无效地址: {}", e)))?;
 
     info!("Starting Tianyan server on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
         error!("Failed to bind to address {}: {}", addr, e);
-        tianyan::TianyanError::Network(format!("Failed to bind to address: {}", e))
+        tianyan::TianyanError::Custom(format!("网络错误：Failed to bind to address: {}", e))
     })?;
 
     info!("Server is ready to accept connections");

@@ -109,9 +109,9 @@ impl UriMapper {
     /// 将文件系统路径转换回 URI。
     pub fn path_to_uri(&self, path: &Path) -> Result<TianyanUri> {
         let relative = path.strip_prefix(&self.config.data_dir).map_err(|_| {
-            TianyanError::InvalidPath(format!(
-                "路径 {:?} 不在根目录 {:?} 内",
-                path, self.config.data_dir
+            TianyanError::Custom(format!(
+                "无效路径：路径 {path:?} 不在根目录 {:?} 内",
+                self.config.data_dir
             ))
         })?;
 
@@ -133,7 +133,7 @@ impl UriMapper {
 
         // 构建 URI 字符
         if segments.is_empty() {
-            return Err(TianyanError::InvalidPath("无法从路径确定分段".to_string()));
+            return Err(TianyanError::Custom("无效路径：无法从路径确定分段".to_string()));
         }
 
         let category_str = &segments[0];

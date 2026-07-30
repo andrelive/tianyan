@@ -17,7 +17,6 @@ use crate::vfs::VirtualFileSystem;
 /// - Input: 轻量记录（用户输入模糊，标记来源）
 /// - System: 记录并告警（系统级故障）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum FailureKind {
     /// 瞬态错误（网络超时、临时服务不可用），不应记录为规则。
     Transient,
@@ -81,27 +80,6 @@ impl RuleRecorder {
     pub fn with_pipeline_version(mut self, version: impl Into<String>) -> Self {
         self.pipeline_version = version.into();
         self
-    }
-
-    /// 追加一条学习规则。
-    ///
-    /// - `abstract_text` - 规则摘要（~100 tokens），注入 system_prompt
-    /// - `detail_text` - 规则详情（含溯源信息），存储在 Detail 层
-    /// - `source_session` - 触发此规则的会话 ID
-    #[allow(dead_code)]
-    pub async fn record(
-        &self,
-        abstract_text: &str,
-        detail_text: &str,
-        source_session: &str,
-    ) -> Result<()> {
-        self.record_with_kind(
-            abstract_text,
-            detail_text,
-            source_session,
-            FailureKind::Logic,
-        )
-        .await
     }
 
     /// 带失败类型分类的记录。
@@ -348,7 +326,7 @@ mod tests {
                 .get(&(uri.to_string(), level))
                 .cloned()
                 .ok_or_else(|| {
-                    crate::common::error::TianyanError::EntryNotFound(format!("{}", uri))
+                    crate::common::error::TianyanError::Custom(format!("条目未找到：{}", uri))
                 })
         }
         async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> {

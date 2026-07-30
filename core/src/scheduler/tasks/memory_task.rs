@@ -77,7 +77,7 @@ impl MemoryTask {
     ) -> Result<()> {
         let state_uri = session_uri.append("_metadata");
         let json = serde_json::to_string(state)
-            .map_err(|e| crate::common::error::TianyanError::Serialization(e.to_string()))?;
+            .map_err(|e| crate::common::error::TianyanError::Custom(format!("序列化错误：{}", e)))?;
         if !ctx.vfs.exists(&state_uri).await? {
             ctx.vfs.create_file(&state_uri).await?;
         }

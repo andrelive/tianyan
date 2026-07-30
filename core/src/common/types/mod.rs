@@ -6,7 +6,7 @@
 
 mod content;
 mod embedding;
-mod injectable;
+pub(crate) mod injectable;
 mod memory;
 mod message;
 mod metadata;

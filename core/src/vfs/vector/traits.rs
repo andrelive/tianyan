@@ -74,6 +74,9 @@ pub trait VectorStorage: Send + Sync {
     }
 
     /// 使用摘要和概览向量进行融合搜索。
+    ///
+    /// RRF 融合分数为排名倒数（范围约 0~0.02），不使用绝对阈值，
+    /// 结果数量由 `top_k` 控制。
     async fn search_abstract_and_overview(
         &self,
         query_vector: Vec<f32>,
@@ -85,7 +88,7 @@ pub trait VectorStorage: Send + Sync {
             &["abstract", "overview"],
             top_k,
             category_filter,
-            Some(0.5),
+            None,
         )
         .await
     }

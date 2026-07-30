@@ -200,10 +200,10 @@ impl ParameterSchema {
         // 检查必需参数
         for required in &self.required {
             if !params.contains_key(required) {
-                return Err(TianyanError::InvalidSkillParameters {
-                    skill: "unknown".to_string(),
-                    message: format!("缺少必需参数: {}", required),
-                });
+                return Err(TianyanError::Custom(format!(
+                    "[unknown] 缺少必需参数: {}",
+                    required
+                )));
             }
         }
 
@@ -327,42 +327,36 @@ impl ParameterDefinition {
         };
 
         if !type_valid {
-            return Err(TianyanError::InvalidSkillParameters {
-                skill: "unknown".to_string(),
-                message: format!(
-                    "参数 '{}' 类型错误。期望 {:?}，实际 {:?}",
-                    name, self.param_type, value
-                ),
-            });
+            return Err(TianyanError::Custom(format!(
+                "[unknown] 参数 '{}' 类型错误。期望 {:?}，实际 {:?}",
+                name, self.param_type, value
+            )));
         }
 
         // 检查枚举值
         if !self.enum_values.is_empty() && !self.enum_values.contains(value) {
-            return Err(TianyanError::InvalidSkillParameters {
-                skill: "unknown".to_string(),
-                message: format!(
-                    "参数 '{}' 必须为 {:?} 之一，实际 {:?}",
-                    name, self.enum_values, value
-                ),
-            });
+            return Err(TianyanError::Custom(format!(
+                "[unknown] 参数 '{}' 必须为 {:?} 之一，实际 {:?}",
+                name, self.enum_values, value
+            )));
         }
 
         // 检查字符串约束
         if let Value::String(s) = value {
             if let Some(min) = self.min_length {
                 if s.len() < min {
-                    return Err(TianyanError::InvalidSkillParameters {
-                        skill: "unknown".to_string(),
-                        message: format!("参数 '{}' 太短。最小长度为 {}", name, min),
-                    });
+                    return Err(TianyanError::Custom(format!(
+                        "[unknown] 参数 '{}' 太短。最小长度为 {}",
+                        name, min
+                    )));
                 }
             }
             if let Some(max) = self.max_length {
                 if s.len() > max {
-                    return Err(TianyanError::InvalidSkillParameters {
-                        skill: "unknown".to_string(),
-                        message: format!("参数 '{}' 太长。最大长度为 {}", name, max),
-                    });
+                    return Err(TianyanError::Custom(format!(
+                        "[unknown] 参数 '{}' 太长。最大长度为 {}",
+                        name, max
+                    )));
                 }
             }
         }
@@ -372,20 +366,20 @@ impl ParameterDefinition {
             if let Some(min) = self.minimum {
                 if let Some(f) = n.as_f64() {
                     if f < min {
-                        return Err(TianyanError::InvalidSkillParameters {
-                            skill: "unknown".to_string(),
-                            message: format!("参数 '{}' 太小。最小值为 {}", name, min),
-                        });
+                        return Err(TianyanError::Custom(format!(
+                            "[unknown] 参数 '{}' 太小。最小值为 {}",
+                            name, min
+                        )));
                     }
                 }
             }
             if let Some(max) = self.maximum {
                 if let Some(f) = n.as_f64() {
                     if f > max {
-                        return Err(TianyanError::InvalidSkillParameters {
-                            skill: "unknown".to_string(),
-                            message: format!("参数 '{}' 太大。最大值为 {}", name, max),
-                        });
+                        return Err(TianyanError::Custom(format!(
+                            "[unknown] 参数 '{}' 太大。最大值为 {}",
+                            name, max
+                        )));
                     }
                 }
             }

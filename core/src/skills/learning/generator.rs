@@ -73,7 +73,7 @@ pub fn parse_generated_skill(
         .trim();
 
     let json: serde_json::Value = serde_json::from_str(cleaned).map_err(|e| {
-        crate::common::error::TianyanError::Internal(format!("解析生成的技能失败: {}", e))
+        crate::common::error::TianyanError::Custom(format!("内部错误：解析生成的技能失败: {}", e))
     })?;
 
     let id = json

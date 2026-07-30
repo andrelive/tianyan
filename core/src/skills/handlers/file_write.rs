@@ -59,25 +59,19 @@ impl SkillHandler for FileWriteHandler {
         let start = Instant::now();
 
         let path = params.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            TianyanError::InvalidSkillParameters {
-                skill: "file_write".to_string(),
-                message: "缺少 'path' 参数".to_string(),
-            }
+            TianyanError::Custom("[file_write] 缺少 'path' 参数".to_string())
         })?;
 
         let content = params
             .get("content")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TianyanError::InvalidSkillParameters {
-                skill: "file_write".to_string(),
-                message: "缺少 'content' 参数".to_string(),
-            })?;
+            .ok_or_else(|| TianyanError::Custom("[file_write] 缺少 'content' 参数".to_string()))?;
 
         // Size check
         let content_len = content.len() as u64;
         if content_len > self.max_size {
-            return Err(TianyanError::OperationNotAllowed(format!(
-                "内容大小 {} 超过写入上限 {} 字节",
+            return Err(TianyanError::Custom(format!(
+                "操作不被允许：内容大小 {} 超过写入上限 {} 字节",
                 content_len, self.max_size
             )));
         }
@@ -88,13 +82,13 @@ impl SkillHandler for FileWriteHandler {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(|e| TianyanError::SkillExecution(format!("创建目录失败: {}", e)))?;
+                .map_err(|e| TianyanError::Custom(format!("技能执行错误：创建目录失败: {}", e)))?;
         }
 
         let timeout = Duration::from_secs(self.timeout_secs);
         let write_op = async {
             tokio::fs::write(&path, content).await.map_err(|e| {
-                TianyanError::SkillExecution(format!("写入文件失败: {}", e))
+                TianyanError::Custom(format!("技能执行错误：写入文件失败: {}", e))
             })
         };
 
