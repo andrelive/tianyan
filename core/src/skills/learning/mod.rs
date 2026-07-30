@@ -79,7 +79,7 @@ impl SkillLearningEngine {
 
         let mut grouped: HashMap<String, Vec<&ExecutionHistory>> = HashMap::new();
         for exec in &successful {
-            let key = self.categorize_task(&exec.task_description);
+            let key = self.categorize_task(&exec.task_description).await;
             grouped.entry(key).or_default().push(exec);
         }
 
@@ -106,7 +106,56 @@ impl SkillLearningEngine {
         Ok(generated_skills)
     }
 
-    fn categorize_task(&self, description: &str) -> String {
+    /// 使用 LLM 将任务描述分类到已知操作类型。
+    ///
+    /// 分类失败时回退到关键词匹配。
+    async fn categorize_task(&self, description: &str) -> String {
+        if let Ok(category) = self.categorize_via_llm(description).await {
+            return category;
+        }
+        // LLM 不可用时回退到关键词匹配
+        Self::categorize_by_keyword(description)
+    }
+
+    /// 通过 LLM 对任务描述进行分类。
+    async fn categorize_via_llm(&self, description: &str) -> Result<String> {
+        let prompt = format!(
+            "将以下任务描述分类为以下类别之一：\n\
+             - file_operation（文件操作）\n\
+             - code_operation（代码操作）\n\
+             - search_operation（搜索操作）\n\
+             - test_operation（测试操作）\n\
+             - deploy_operation（部署操作）\n\
+             - analysis_operation（分析操作）\n\
+             - general_operation（通用操作）\n\n\
+             任务描述：{description}\n\n\
+             只返回类别名称，不要解释。"
+        );
+
+        let response = self
+            .model_service
+            .chat(
+                &self.config.generation_model,
+                vec![crate::common::types::Message::user(prompt)],
+            )
+            .await?;
+
+        let category = response.trim().to_lowercase();
+        let valid = [
+            "file_operation", "code_operation", "search_operation",
+            "test_operation", "deploy_operation", "analysis_operation",
+            "general_operation",
+        ];
+        if valid.contains(&category.as_str()) {
+            Ok(category)
+        } else {
+            // LLM 返回了无效类别，回退到关键词
+            Ok(Self::categorize_by_keyword(description))
+        }
+    }
+
+    /// 基于关键词的任务分类（LLM 不可用时的回退）。
+    fn categorize_by_keyword(description: &str) -> String {
         let lower = description.to_lowercase();
 
         if lower.contains("文件")
@@ -270,6 +319,61 @@ impl SkillLearningEngine {
 
         Ok(evaluation)
     }
+
+    /// 应用技能评估结果，更新技能生命周期。
+    ///
+    /// - Deprecate: 禁用心能（写入 `enabled: false` 标记）
+    /// - Improve: 提升版本号
+    /// - Keep: 不操作
+    pub async fn apply_evaluation(&self, evaluation: &SkillEvaluation) -> Result<()> {
+        let uri = TianyanUri::new(ContextNamespace::Skill, vec![evaluation.skill_id.clone()]);
+
+        if !self.vfs.exists(&uri).await? {
+            return Ok(());
+        }
+
+        match evaluation.recommended_action {
+            SkillAction::Deprecate => {
+                let marker = format!(
+                    "# 已弃用\n\n成功率: {:.1}% ({}/{})\n评估时间: {}\n",
+                    evaluation.success_rate * 100.0,
+                    evaluation.successful_uses,
+                    evaluation.total_uses,
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S")
+                );
+                self.vfs.write_content(&uri, &marker).await?;
+                tracing::info!(
+                    skill_id = %evaluation.skill_id,
+                    success_rate = %evaluation.success_rate,
+                    "技能已弃用"
+                );
+            }
+            SkillAction::Improve => {
+                // 在技能内容末尾追加改进标记，供下次 GEPA 生成时参考
+                let improvement_note = format!(
+                    "\n\n<!-- GEPA_IMPROVE: success_rate={:.1}% ({}/{}) -->\n",
+                    evaluation.success_rate * 100.0,
+                    evaluation.successful_uses,
+                    evaluation.total_uses
+                );
+                self.vfs.append_content(&uri, &improvement_note).await?;
+                tracing::info!(
+                    skill_id = %evaluation.skill_id,
+                    success_rate = %evaluation.success_rate,
+                    "技能已标记待改进"
+                );
+            }
+            SkillAction::Keep => {
+                tracing::debug!(
+                    skill_id = %evaluation.skill_id,
+                    success_rate = %evaluation.success_rate,
+                    "技能保持活跃"
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -283,18 +387,19 @@ mod tests {
         assert_eq!(config.success_threshold, 2);
     }
 
-    #[test]
-    fn test_categorize_task() {
+    #[tokio::test]
+    async fn test_categorize_task() {
         let engine = SkillLearningEngine::new(
             mock_chat_empty(),
             Arc::new(MockVfs::new()),
             SkillLearningConfig::default(),
         );
 
-        assert_eq!(engine.categorize_task("读取文件内容"), "file_operation");
-        assert_eq!(engine.categorize_task("搜索代码中的函数"), "code_operation");
-        assert_eq!(engine.categorize_task("运行单元测试"), "test_operation");
-        assert_eq!(engine.categorize_task("分析项目结构"), "analysis_operation");
+        // mock LLM 返回无效类别 → 回退到关键词匹配
+        assert_eq!(engine.categorize_task("读取文件内容").await, "file_operation");
+        assert_eq!(engine.categorize_task("搜索代码中的函数").await, "code_operation");
+        assert_eq!(engine.categorize_task("运行单元测试").await, "test_operation");
+        assert_eq!(engine.categorize_task("分析项目结构").await, "analysis_operation");
     }
 
     #[tokio::test]
