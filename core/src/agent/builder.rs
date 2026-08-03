@@ -23,6 +23,7 @@ use crate::scheduler::tasks::RuleRecorder;
 use crate::session::SessionManager;
 use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
 use crate::skills::{SkillExecutor, SkillRegistry};
+use crate::snapshot::SnapshotManager;
 use crate::vfs::VirtualFileSystem;
 
 use super::agent_core::Agent;
@@ -41,6 +42,8 @@ pub struct AgentBuilder {
     knowledge_ingestor: Option<Arc<KnowledgeIngestor>>,
     security_config: Option<SecurityConfig>,
     usage_stats: Option<Arc<UsageStats>>,
+    /// 工作区快照管理器（配置了 working_directory 时启用）。
+    snapshot_manager: Option<Arc<SnapshotManager>>,
 }
 
 impl AgentBuilder {
@@ -58,6 +61,7 @@ impl AgentBuilder {
             knowledge_ingestor: None,
             security_config: None,
             usage_stats: None,
+            snapshot_manager: None,
         }
     }
 
@@ -124,6 +128,12 @@ impl AgentBuilder {
     /// 设置使用统计追踪器。
     pub fn with_usage_stats(mut self, stats: Arc<UsageStats>) -> Self {
         self.usage_stats = Some(stats);
+        self
+    }
+
+    /// 设置工作区快照管理器（会话回退时恢复文件修改）。
+    pub fn with_snapshot_manager(mut self, manager: Arc<SnapshotManager>) -> Self {
+        self.snapshot_manager = Some(manager);
         self
     }
 
@@ -239,6 +249,7 @@ impl AgentBuilder {
             skill_learning_engine,
             agent_loop,
             session_manager,
+            self.snapshot_manager,
         ))
     }
 }

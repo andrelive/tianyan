@@ -11,9 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info};
 
 use crate::api::chat::services::ChatService;
-use crate::api::chat::types::{
-    ChatRequest, ChatResponse, ChatStreamEvent, EditMessageRequest, RegenerateRequest,
-};
+use crate::api::chat::types::{ChatRequest, ChatResponse, ChatStreamEvent};
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
 
@@ -126,58 +124,4 @@ pub async fn chat_stream_handler(
     });
 
     Sse::new(ReceiverStream::new(rx))
-}
-
-/// 重新生成消息处理器
-pub async fn regenerate_handler(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<RegenerateRequest>,
-) -> Result<Json<ChatResponse>, ApiError> {
-    if let Err(e) = request.validate() {
-        return Err(ApiError::BadRequest(e));
-    }
-
-    info!(
-        "重新生成消息: 会话={}, 索引={}",
-        request.session_id, request.message_index
-    );
-
-    let agent = state.agent().await;
-    let session_manager = state.session_manager();
-
-    let service = ChatService::new(agent, session_manager);
-
-    service
-        .regenerate_message(request)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            error!("重新生成失败: {}", e);
-            ApiError::Internal(format!("重新生成失败: {}", e))
-        })
-}
-
-/// 编辑消息处理器
-pub async fn edit_message_handler(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<EditMessageRequest>,
-) -> Result<Json<ChatResponse>, ApiError> {
-    if let Err(e) = request.validate() {
-        return Err(ApiError::BadRequest(e));
-    }
-
-    info!(
-        "编辑消息: 会话={}, 索引={}",
-        request.session_id, request.message_index
-    );
-
-    let agent = state.agent().await;
-    let session_manager = state.session_manager();
-
-    let service = ChatService::new(agent, session_manager);
-
-    service.edit_message(request).await.map(Json).map_err(|e| {
-        error!("编辑消息失败: {}", e);
-        ApiError::Internal(format!("编辑消息失败: {}", e))
-    })
 }

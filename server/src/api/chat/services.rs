@@ -4,15 +4,11 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 use tianyan::agent::AgentCoordinator;
-use tianyan::common::types::Part;
 use tianyan::session::SessionManager;
 use tianyan::Message as CoreMessage;
 use tianyan::MessageRole as CoreMessageRole;
 
-use crate::api::chat::types::{
-    ChatRequest, ChatResponse, ChatStreamEvent, EditMessageRequest, RegenerateRequest,
-    SkillCallInfo,
-};
+use crate::api::chat::types::{ChatRequest, ChatResponse, ChatStreamEvent, SkillCallInfo};
 use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
 use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
@@ -144,146 +140,6 @@ impl ChatService {
         info!("流式处理完成，会话：{}", session_id);
 
         Ok(())
-    }
-
-    /// 重新生成指定用户消息的助手回复。
-    ///
-    /// 截断到该用户消息之前（`process_message` 会重新追加该用户消息并生成新回复），
-    /// 持久化后重新生成，保证会话历史与前端展示一致。
-    pub async fn regenerate_message(
-        &self,
-        request: RegenerateRequest,
-    ) -> Result<ChatResponse, ApiError> {
-        let session_id = &request.session_id;
-
-        let mut session = self
-            .session_manager
-            .get_session(session_id)
-            .await?
-            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
-
-        let target_msg = session
-            .messages
-            .get(request.message_index)
-            .ok_or_else(|| ApiError::BadRequest("消息索引超出范围".to_string()))?;
-
-        if !matches!(target_msg.role, tianyan::common::types::MessageRole::User) {
-            return Err(ApiError::BadRequest(
-                "只能重新生成用户消息之后的回复".to_string(),
-            ));
-        }
-
-        let last_message: String = target_msg
-            .parts
-            .iter()
-            .filter_map(|p| {
-                if let Part::Text { text, .. } = p {
-                    Some(text.clone())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // 截断到该用户消息之前（不含），process_message 会重新追加并生成新回复
-        session.messages.truncate(request.message_index);
-        if let Err(e) = self.session_manager.update_session(&session).await {
-            error!("更新会话失败: {}", e);
-            return Err(ApiError::Internal(format!("更新会话失败: {}", e)));
-        }
-        if let Err(e) = self
-            .session_manager
-            .rewrite_messages(session_id, &session.messages)
-            .await
-        {
-            error!("重写会话历史失败: {}", e);
-            return Err(ApiError::Internal(format!("重写会话历史失败: {}", e)));
-        }
-
-        let response = self
-            .agent
-            .process_message(session_id, &last_message, None)
-            .await?;
-
-        Ok(ChatResponse {
-            id: format!("chatcmpl-{}", short_uuid()),
-            session_id: session_id.clone(),
-            message: ChatMessage {
-                role: MessageRole::Assistant,
-                content: response.content,
-                timestamp: Some(chrono::Utc::now().to_rfc3339()),
-            },
-            usage: TokenUsage {
-                prompt_tokens: response.token_usage.prompt_tokens as u32,
-                completion_tokens: response.token_usage.completion_tokens as u32,
-                total_tokens: response.token_usage.total_tokens as u32,
-            },
-        })
-    }
-
-    /// 编辑用户消息并重新生成回复。
-    ///
-    /// 截断到该消息之前（不含），`process_message` 会追加编辑后的用户消息并生成新回复，
-    /// 避免同一条用户消息在历史中重复。
-    pub async fn edit_message(
-        &self,
-        request: EditMessageRequest,
-    ) -> Result<ChatResponse, ApiError> {
-        let session_id = &request.session_id;
-
-        let mut session = self
-            .session_manager
-            .get_session(session_id)
-            .await?
-            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
-
-        if request.message_index >= session.messages.len() {
-            return Err(ApiError::BadRequest("消息索引超出范围".to_string()));
-        }
-
-        if !matches!(
-            session.messages[request.message_index].role,
-            tianyan::common::types::MessageRole::User
-        ) {
-            return Err(ApiError::BadRequest("只能编辑用户消息".to_string()));
-        }
-
-        // 截断到该用户消息之前（不含），process_message 会追加编辑后的用户消息并生成新回复
-        session.messages.truncate(request.message_index);
-
-        if let Err(e) = self.session_manager.update_session(&session).await {
-            error!("更新会话失败: {}", e);
-            return Err(ApiError::Internal(format!("更新会话失败: {}", e)));
-        }
-        if let Err(e) = self
-            .session_manager
-            .rewrite_messages(session_id, &session.messages)
-            .await
-        {
-            error!("重写会话历史失败: {}", e);
-            return Err(ApiError::Internal(format!("重写会话历史失败: {}", e)));
-        }
-
-        let response = self
-            .agent
-            .process_message(session_id, &request.new_content, None)
-            .await?;
-
-        Ok(ChatResponse {
-            id: format!("chatcmpl-{}", short_uuid()),
-            session_id: session_id.clone(),
-            message: ChatMessage {
-                role: MessageRole::Assistant,
-                content: response.content,
-                timestamp: Some(chrono::Utc::now().to_rfc3339()),
-            },
-            usage: TokenUsage {
-                prompt_tokens: response.token_usage.prompt_tokens as u32,
-                completion_tokens: response.token_usage.completion_tokens as u32,
-                total_tokens: response.token_usage.total_tokens as u32,
-            },
-        })
     }
 }
 

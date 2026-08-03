@@ -20,6 +20,7 @@ use crate::observability::AgentMetrics;
 use crate::observability::TokenRecord;
 use crate::session::{Session, SessionManager};
 use crate::skills::{SkillExecutor, SkillLearningEngine, SkillRegistry};
+use crate::snapshot::SnapshotManager;
 use crate::vfs::VirtualFileSystem;
 
 /// compression_marker 之后至少积累多少条消息才触发压缩。
@@ -42,6 +43,8 @@ pub struct Agent {
     pub(crate) state: Arc<RwLock<AgentState>>,
     pub(crate) agent_loop: AgentLoop,
     pub(crate) session_manager: Arc<dyn SessionManager>,
+    /// 工作区快照管理器（配置了 working_directory 时启用，用于会话回退恢复文件）。
+    pub(crate) snapshot_manager: Option<Arc<SnapshotManager>>,
 }
 
 impl Agent {
@@ -61,6 +64,7 @@ impl Agent {
         skill_learning_engine: Option<SkillLearningEngine>,
         agent_loop: AgentLoop,
         session_manager: Arc<dyn SessionManager>,
+        snapshot_manager: Option<Arc<SnapshotManager>>,
     ) -> Self {
         Self {
             config,
@@ -75,6 +79,18 @@ impl Agent {
             state: Arc::new(RwLock::new(AgentState::default())),
             agent_loop,
             session_manager,
+            snapshot_manager,
+        }
+    }
+
+    /// 捕获工作区快照（消息处理前调用，索引 = 当前消息数）。
+    pub(crate) async fn capture_workspace_snapshot(&self, session_id: &str, state: &SessionState) {
+        let Some(sm) = &self.snapshot_manager else {
+            return;
+        };
+        let index = state.structured_messages.len();
+        if let Err(e) = sm.capture(session_id, index).await {
+            tracing::warn!(error = %e, session = %session_id, "工作区快照捕获失败");
         }
     }
 

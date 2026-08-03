@@ -51,6 +51,8 @@ pub mod observability;
 pub mod scheduler;
 pub mod session;
 pub mod skills;
+/// 工作区文件快照（会话回退时恢复文件修改）。
+pub mod snapshot;
 pub mod vfs;
 
 /// 测试工具（仅在 cfg(test) 时编译）。

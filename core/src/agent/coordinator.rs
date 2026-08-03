@@ -175,6 +175,12 @@ impl AgentCoordinator for Agent {
         // 1. Load session and build state
         let state = self.load_and_build_state(session_id).await?;
 
+        // 1.5 捕获工作区快照（消息处理前，供会话回退恢复文件）
+        {
+            let s = state.read().await;
+            self.capture_workspace_snapshot(session_id, &s).await;
+        }
+
         // 2. Persist current user message
         self.persist_user_message(session_id, &state, &message)
             .await;
@@ -283,6 +289,14 @@ impl AgentCoordinator for Agent {
 
         tokio::spawn(async move {
             let messages = self_clone.prepare_context(&state_clone, &message).await;
+
+            // 捕获工作区快照（消息处理前，供会话回退恢复文件）
+            {
+                let s = state_clone.read().await;
+                self_clone
+                    .capture_workspace_snapshot(&s.session_id, &s)
+                    .await;
+            }
 
             let (session_id_str, parent_id) = {
                 let s = state_clone.read().await;

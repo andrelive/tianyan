@@ -8,6 +8,9 @@ enable_memory = true
 stream_responses = true
 enable_thinking = false
 default_top_k = 5
+# 工作目录：Agent 执行命令/读写文件的基础目录，也是会话回退时文件快照的根目录。
+# 未配置时使用进程当前目录，且不启用文件快照回退。
+# working_directory = "/path/to/your/project"
 
 # ==================== 存储配置 ====================
 [storage]

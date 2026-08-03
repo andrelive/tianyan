@@ -58,17 +58,6 @@ export interface SkillCallInfo {
   error?: string | null;
 }
 
-export interface RegenerateRequest {
-  session_id: string;
-  message_index: number;
-}
-
-export interface EditMessageRequest {
-  session_id: string;
-  message_index: number;
-  new_content: string;
-}
-
 // ========== Session Types ==========
 
 export interface Session {

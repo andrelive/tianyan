@@ -42,6 +42,7 @@ impl AgentBuilderFactory {
         skill_registry: Arc<RwLock<SkillRegistry>>,
         skill_executor: Arc<SkillExecutor>,
         usage_stats: Arc<UsageStats>,
+        snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
     ) -> TianyanResult<Agent> {
         Self::validate_config(config)?;
 
@@ -92,7 +93,12 @@ impl AgentBuilderFactory {
             .with_knowledge_ingestor(Arc::new(knowledge_ingestor))
             .with_security_config(config.security.clone())
             .with_usage_stats(usage_stats)
-            .with_session_manager(Arc::new(PersistentSessionManager::new(vfs)))
+            .with_session_manager(Arc::new(PersistentSessionManager::new(vfs)));
+        let agent = match snapshot_manager {
+            Some(sm) => agent.with_snapshot_manager(sm),
+            None => agent,
+        };
+        let agent = agent
             .build()
             .map_err(|e| TianyanError::Custom(format!("内部错误：Agent 构建失败：{}", e)))?;
 
@@ -112,8 +118,18 @@ impl AgentBuilderFactory {
         skill_registry: Arc<RwLock<SkillRegistry>>,
         skill_executor: Arc<SkillExecutor>,
         usage_stats: Arc<UsageStats>,
+        snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
-        match Self::build_agent(config, vfs, skill_registry, skill_executor, usage_stats).await {
+        match Self::build_agent(
+            config,
+            vfs,
+            skill_registry,
+            skill_executor,
+            usage_stats,
+            snapshot_manager,
+        )
+        .await
+        {
             Ok(agent) => Ok(Arc::new(agent)),
             Err(e) => {
                 tracing::warn!("Agent 构建失败 ({}), 使用向导模式", e);

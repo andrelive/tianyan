@@ -15,16 +15,25 @@ use crate::api::sessions::types::{
 use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
 use crate::api::shared::types::ChatMessage;
+use tianyan::snapshot::SnapshotManager;
 
 /// 会话服务，管理对话会话
 pub struct SessionService {
     session_manager: Arc<dyn SessionManager>,
+    /// 工作区快照管理器（配置了 working_directory 时启用）。
+    snapshot_manager: Option<Arc<SnapshotManager>>,
 }
 
 impl SessionService {
     /// 创建新的会话服务
-    pub fn new(session_manager: Arc<dyn SessionManager>) -> Self {
-        Self { session_manager }
+    pub fn new(
+        session_manager: Arc<dyn SessionManager>,
+        snapshot_manager: Option<Arc<SnapshotManager>>,
+    ) -> Self {
+        Self {
+            session_manager,
+            snapshot_manager,
+        }
     }
 
     /// 列出所有会话
@@ -230,6 +239,26 @@ impl SessionService {
         {
             tracing::error!("重写会话历史失败: {}", e);
             return Err(ApiError::Internal(format!("重写会话历史失败: {}", e)));
+        }
+
+        // 回退工作区文件到该消息处理前的快照（配置了 working_directory 时生效）
+        if let Some(sm) = &self.snapshot_manager {
+            match sm.restore(session_id, request.message_index).await {
+                Ok(n) => {
+                    info!(
+                        "回退工作区文件: 会话={}, 索引={}, 恢复 {} 个文件",
+                        session_id, request.message_index, n
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        session = %session_id,
+                        index = request.message_index,
+                        "工作区快照恢复失败（会话已回退，文件未回退）"
+                    );
+                }
+            }
         }
 
         // 返回剩余消息，前端可直接替换本地状态

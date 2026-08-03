@@ -22,6 +22,7 @@ use tianyan::session::{PersistentSessionManager, SessionManager};
 use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
 };
+use tianyan::snapshot::SnapshotManager;
 use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
@@ -60,6 +61,8 @@ pub struct AppState {
     skill_executor: Arc<SkillExecutor>,
     /// 使用统计追踪器
     usage_stats: Arc<UsageStats>,
+    /// 工作区快照管理器（配置了 working_directory 时启用）
+    snapshot_manager: Option<Arc<SnapshotManager>>,
 }
 
 impl AppState {
@@ -117,6 +120,18 @@ impl AppState {
             TianyanError::Custom(format!("存储后端错误：创建 UsageStats 失败：{}", e))
         })?;
 
+        // 初始化工作区快照管理器（配置了 working_directory 时启用）
+        let snapshot_manager = config.agent.working_directory.clone().map(|workdir| {
+            let root = config.storage.data_dir.join("snapshots");
+            let workdir = std::path::PathBuf::from(workdir);
+            tracing::info!(
+                "工作区快照已启用: 目录={}, 存储={}",
+                workdir.display(),
+                root.display()
+            );
+            Arc::new(SnapshotManager::new(root, workdir))
+        });
+
         // 构建 Agent（传入 vfs + 技能组件）
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
@@ -124,6 +139,7 @@ impl AppState {
             skill_registry.clone(),
             skill_executor.clone(),
             usage_stats.clone(),
+            snapshot_manager.clone(),
         )
         .await?;
 
@@ -141,6 +157,7 @@ impl AppState {
             skill_registry,
             skill_executor,
             usage_stats,
+            snapshot_manager,
         })
     }
 
@@ -182,6 +199,7 @@ impl AppState {
             self.skill_registry.clone(),
             self.skill_executor.clone(),
             self.usage_stats.clone(),
+            self.snapshot_manager.clone(),
         )
         .await?;
 
@@ -205,6 +223,11 @@ impl AppState {
     /// * `Arc<VirtualFileSystemImpl>` - VFS 实例
     pub fn vfs(&self) -> Arc<VirtualFileSystemImpl> {
         self.vfs.clone()
+    }
+
+    /// 获取工作区快照管理器（未配置 working_directory 时为 None）。
+    pub fn snapshot_manager(&self) -> Option<Arc<SnapshotManager>> {
+        self.snapshot_manager.clone()
     }
 
     /// 获取配置

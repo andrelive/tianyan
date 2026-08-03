@@ -95,52 +95,6 @@ pub struct SkillCallInfo {
     pub error: Option<String>,
 }
 
-/// 重新生成消息请求
-#[derive(Debug, Deserialize)]
-pub struct RegenerateRequest {
-    /// 会话标识
-    pub session_id: String,
-    /// 消息索引
-    pub message_index: usize,
-}
-
-impl RegenerateRequest {
-    /// 验证请求参数
-    pub fn validate(&self) -> Result<(), String> {
-        if self.session_id.trim().is_empty() {
-            return Err("session_id 不能为空".to_string());
-        }
-        Ok(())
-    }
-}
-
-/// 编辑消息请求
-#[derive(Debug, Deserialize)]
-pub struct EditMessageRequest {
-    /// 会话标识
-    pub session_id: String,
-    /// 消息索引
-    pub message_index: usize,
-    /// 编辑后的新内容
-    pub new_content: String,
-}
-
-impl EditMessageRequest {
-    /// 验证请求参数
-    pub fn validate(&self) -> Result<(), String> {
-        if self.session_id.trim().is_empty() {
-            return Err("session_id 不能为空".to_string());
-        }
-        if self.new_content.trim().is_empty() {
-            return Err("新消息内容不能为空".to_string());
-        }
-        if self.new_content.len() > 10_000 {
-            return Err("消息内容长度不能超过 10000 个字符".to_string());
-        }
-        Ok(())
-    }
-}
-
 /// SSE 流式事件
 #[derive(Debug, Serialize)]
 pub struct ChatStreamEvent {

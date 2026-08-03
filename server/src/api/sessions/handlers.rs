@@ -20,7 +20,7 @@ pub async fn list_sessions(
 ) -> Result<Json<ListSessionsResponse>, ApiError> {
     info!("列出所有会话");
 
-    let service = SessionService::new(state.session_manager());
+    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
 
     service.list_sessions().await.map(Json).map_err(|e| {
         error!("列出会话失败: {}", e);
@@ -39,7 +39,7 @@ pub async fn get_session(
 
     info!("获取会话详情: {}", session_id);
 
-    let service = SessionService::new(state.session_manager());
+    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
 
     service
         .get_session_detail(&session_id)
@@ -62,7 +62,7 @@ pub async fn get_session_messages(
 
     info!("获取会话消息: {}", session_id);
 
-    let service = SessionService::new(state.session_manager());
+    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
 
     service
         .get_messages(&session_id)
@@ -85,7 +85,7 @@ pub async fn delete_session(
 
     info!("删除会话: {}", session_id);
 
-    let service = SessionService::new(state.session_manager());
+    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
 
     service
         .delete_session(&session_id)
@@ -112,7 +112,7 @@ pub async fn delete_message(
         session_id, request.message_index
     );
 
-    let service = SessionService::new(state.session_manager());
+    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
 
     let resp = service.delete_message(&session_id, request).await?;
     Ok(Json(resp))
@@ -133,7 +133,7 @@ pub async fn update_session_title(
 
     info!("更新会话标题: {}", session_id);
 
-    let service = SessionService::new(state.session_manager());
+    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
 
     service
         .update_title(&session_id, request)

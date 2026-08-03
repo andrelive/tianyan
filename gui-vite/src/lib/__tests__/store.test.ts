@@ -192,20 +192,6 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().messages).toEqual([]);
   });
 
-  it('editMessage updates content at the given index', () => {
-    useAppStore.setState({
-      messages: [
-        { role: 'user', content: 'original' },
-        { role: 'assistant', content: 'reply' },
-      ],
-    });
-
-    useAppStore.getState().editMessage(0, 'edited');
-    const msgs = useAppStore.getState().messages;
-    expect(msgs[0].content).toBe('edited');
-    expect(msgs[1].content).toBe('reply');
-  });
-
   it('deleteMessagesFrom removes messages from index onward and resets stream status', () => {
     useAppStore.setState({
       messages: [
@@ -217,22 +203,6 @@ describe('useAppStore', () => {
     });
 
     useAppStore.getState().deleteMessagesFrom(1);
-    expect(useAppStore.getState().messages).toHaveLength(1);
-    expect(useAppStore.getState().messages[0].content).toBe('a');
-    expect(useAppStore.getState().streamStatus).toBe('idle');
-  });
-
-  it('regenerateFrom keeps messages up to and including index and resets stream status', () => {
-    useAppStore.setState({
-      messages: [
-        { role: 'user', content: 'a' },
-        { role: 'assistant', content: 'b' },
-        { role: 'user', content: 'c' },
-      ],
-      streamStatus: 'streaming',
-    });
-
-    useAppStore.getState().regenerateFrom(0);
     expect(useAppStore.getState().messages).toHaveLength(1);
     expect(useAppStore.getState().messages[0].content).toBe('a');
     expect(useAppStore.getState().streamStatus).toBe('idle');

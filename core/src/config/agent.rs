@@ -33,6 +33,10 @@ pub struct AgentConfig {
     /// Agent Loop 最大轮次。
     #[serde(default = "default_max_turns")]
     pub max_turns: usize,
+    /// 工作目录：Agent 执行命令/读写文件的基础目录，也是会话回退时
+    /// 文件快照的根目录。缺省使用进程当前目录。
+    #[serde(default)]
+    pub working_directory: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -46,6 +50,7 @@ impl Default for AgentConfig {
             learned_rules_top_k: default_learned_rules_top_k(),
             learned_rules_max_tokens: default_learned_rules_max_tokens(),
             max_turns: default_max_turns(),
+            working_directory: None,
         }
     }
 }

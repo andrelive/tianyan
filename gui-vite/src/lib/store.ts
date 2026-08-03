@@ -32,9 +32,7 @@ interface AppState {
   updateLastMessage: (delta: string) => void;
   appendSkillCalls: (calls: SkillCallInfo[]) => void;
   clearMessages: () => void;
-  editMessage: (index: number, newContent: string) => void;
   deleteMessagesFrom: (index: number) => void;
-  regenerateFrom: (index: number) => void;
 
   // Streaming
   streamStatus: StreamStatus;
@@ -129,22 +127,9 @@ export const useAppStore = create<AppState>()(
           return { messages };
         }),
       clearMessages: () => set({ messages: [] }),
-      editMessage: (index, newContent) =>
-        set((s) => {
-          const messages = [...s.messages];
-          if (index < messages.length) {
-            messages[index] = { ...messages[index], content: newContent };
-          }
-          return { messages };
-        }),
       deleteMessagesFrom: (index) =>
         set((s) => ({
           messages: s.messages.slice(0, index),
-          streamStatus: 'idle',
-        })),
-      regenerateFrom: (index) =>
-        set((s) => ({
-          messages: s.messages.slice(0, index + 1),
           streamStatus: 'idle',
         })),
 
