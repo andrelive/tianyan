@@ -13,13 +13,17 @@ use tianyan::vfs::ContentStore;
 use crate::api::ApiError;
 use crate::state::AppState;
 
+/// 更新 soul 内容的请求体。
 #[derive(Debug, Deserialize)]
 pub struct SoulUpdateRequest {
+    /// soul 全文内容。
     pub content: String,
 }
 
+/// soul 内容响应。
 #[derive(Debug, Serialize)]
 pub struct SoulResponse {
+    /// soul 全文内容。
     pub content: String,
 }
 

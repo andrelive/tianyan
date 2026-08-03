@@ -328,14 +328,16 @@ impl ImageProcessor {
                     &mut cursor,
                     self.config.jpeg_quality,
                 );
-                processed_img
-                    .write_with_encoder(encoder)
-                    .map_err(|e| TianyanError::Custom(format!("图片处理错误：JPEG 编码失败: {}", e)))?;
+                processed_img.write_with_encoder(encoder).map_err(|e| {
+                    TianyanError::Custom(format!("图片处理错误：JPEG 编码失败: {}", e))
+                })?;
             }
             _ => {
                 processed_img
                     .write_to(&mut cursor, self.config.target_format.to_image_format())
-                    .map_err(|e| TianyanError::Custom(format!("图片处理错误：图像编码失败: {}", e)))?;
+                    .map_err(|e| {
+                        TianyanError::Custom(format!("图片处理错误：图像编码失败: {}", e))
+                    })?;
             }
         }
 
@@ -349,7 +351,9 @@ impl ImageProcessor {
             let mut thumb_cursor = Cursor::new(&mut thumb_buffer);
             thumbnail_img
                 .write_to(&mut thumb_cursor, ImageFormat::Jpeg)
-                .map_err(|e| TianyanError::Custom(format!("图片处理错误：创建缩略图失败：{}", e)))?;
+                .map_err(|e| {
+                    TianyanError::Custom(format!("图片处理错误：创建缩略图失败：{}", e))
+                })?;
             Some(thumb_buffer)
         } else {
             None

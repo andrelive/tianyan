@@ -2,8 +2,6 @@
 //!
 //! 提供共享的 Mock 实现，避免在各个测试模块中重复定义。
 
-#![cfg(test)]
-
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -13,11 +11,8 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
     ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
 };
-use crate::model::types::{
-    ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, EmbeddingData,
-    EmbeddingRequest, EmbeddingResponse,
-};
-use crate::model::{ChatService, EmbeddingService};
+use crate::model::types::{EmbeddingData, EmbeddingRequest, EmbeddingResponse};
+use crate::model::EmbeddingService;
 use crate::vfs::{
     ContentMetadata, ContentStore, ContextEntry, VectorPoint, VectorSearchQuery,
     VectorSearchResult, VectorStorage, VectorType, VfsCore, VfsSearch, VirtualFileSystem,
@@ -357,6 +352,7 @@ pub struct InMemoryVectorStorage {
 }
 
 impl InMemoryVectorStorage {
+    /// 创建新的内存向量存储。
     pub fn new() -> Self {
         Self {
             points: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -466,6 +462,7 @@ pub struct TestVfs {
 }
 
 impl TestVfs {
+    /// 创建新的测试 VFS（使用内存向量存储与 mock 嵌入服务）。
     pub fn new(
         vector_storage: Arc<InMemoryVectorStorage>,
         embedding_service: Arc<MockEmbeddingService>,
@@ -558,7 +555,7 @@ impl VfsSearch for TestVfs {
         let query_embedding = self
             ._embedding_service
             .embed(EmbeddingRequest::new(
-                &"test".to_string(),
+                "test".to_string(),
                 query_text.to_string(),
             ))
             .await?

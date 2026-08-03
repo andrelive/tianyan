@@ -18,7 +18,6 @@ pub use types::{RetrievalResult, RetrievalStep, RetrievalStepType, RetrievalTrac
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::context::retrieval::intent::QueryType;
     use crate::context::retrieval::loader::ContentLoadStrategy;
 

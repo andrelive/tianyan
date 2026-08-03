@@ -133,7 +133,9 @@ impl UriMapper {
 
         // 构建 URI 字符
         if segments.is_empty() {
-            return Err(TianyanError::Custom("无效路径：无法从路径确定分段".to_string()));
+            return Err(TianyanError::Custom(
+                "无效路径：无法从路径确定分段".to_string(),
+            ));
         }
 
         let category_str = &segments[0];

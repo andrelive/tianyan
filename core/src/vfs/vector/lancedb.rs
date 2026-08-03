@@ -102,7 +102,9 @@ impl LanceDbVectorStore {
                     .create_table(table_name, empty)
                     .execute()
                     .await
-                    .map_err(|e| TianyanError::Custom(format!("向量数据库错误：创建表失败: {e}")))?;
+                    .map_err(|e| {
+                        TianyanError::Custom(format!("向量数据库错误：创建表失败: {e}"))
+                    })?;
                 tracing::info!("LanceDB 表已创建: {}", table_name);
                 tbl
             }
@@ -256,8 +258,9 @@ impl LanceDbVectorStore {
 
         let mut results = Vec::with_capacity(batch.num_rows());
         for i in 0..batch.num_rows() {
-            let (id, payload) = Self::extract_base_fields(batch, i)
-                .ok_or_else(|| TianyanError::Custom("向量数据库错误：缺少 id 或 uri 列".to_string()))?;
+            let (id, payload) = Self::extract_base_fields(batch, i).ok_or_else(|| {
+                TianyanError::Custom("向量数据库错误：缺少 id 或 uri 列".to_string())
+            })?;
             let score = score_data.as_ref().map(|c| 1.0 - c.value(i)).unwrap_or(0.0);
             results.push(VectorSearchResult { id, score, payload });
         }
@@ -525,8 +528,10 @@ mod tests {
     /// 辅助函数：创建隔离的 LanceDbVectorStore + TempDir。
     async fn create_store() -> (LanceDbVectorStore, tempfile::TempDir) {
         let dir = tempdir().unwrap();
-        let mut config = StorageConfig::default();
-        config.data_dir = dir.path().to_path_buf();
+        let mut config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
         config.vector.vector_dimension = 8;
         config.vector.collection_name = "test_lancedb".to_string();
         let store = LanceDbVectorStore::new(&config).await.unwrap();

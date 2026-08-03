@@ -99,7 +99,10 @@ pub fn validate_storage_config(config: &StorageConfig) -> ValidationResult {
 pub fn validate_agent_config(config: &AgentConfig) -> ValidationResult {
     let mut errors = Vec::new();
     if let Err(e) = config.validate() {
-        errors.push(TianyanError::Custom(format!("配置错误：智能体配置错误：{}", e)));
+        errors.push(TianyanError::Custom(format!(
+            "配置错误：智能体配置错误：{}",
+            e
+        )));
     }
     if errors.is_empty() {
         Ok(())

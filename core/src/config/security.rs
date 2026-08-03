@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// 安全模式 — 决定如何处理危险操作。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SafetyMode {
     /// 严格模式（默认）：对危险操作硬阻断，必须通过审批。
+    #[default]
     #[serde(alias = "deny")]
     Strict,
     /// 转换模式：将危险命令自动重写为安全等价操作
@@ -15,12 +16,6 @@ pub enum SafetyMode {
     Transform,
     /// 宽松模式：允许所有操作（用户自行承担风险）。
     Permissive,
-}
-
-impl Default for SafetyMode {
-    fn default() -> Self {
-        Self::Strict
-    }
 }
 
 /// 安全配置。

@@ -1,4 +1,8 @@
 //! 服务端测试宿主 — 在测试中启动完整 Axum 服务器并提供 HTTP 客户端
+//!
+//! 工具库：部分辅助方法（post/put）暂未被现有测试使用，保留供后续集成测试复用。
+
+#![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 use std::net::SocketAddr;
 

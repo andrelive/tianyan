@@ -95,8 +95,8 @@ impl SummaryTask {
             _ => return Ok(false),
         };
 
-        let has_abstract = metadata.get(&ContentLevel::Abstract).is_some();
-        let has_overview = metadata.get(&ContentLevel::Overview).is_some();
+        let has_abstract = metadata.contains_key(&ContentLevel::Abstract);
+        let has_overview = metadata.contains_key(&ContentLevel::Overview);
 
         if !has_abstract || !has_overview {
             return Ok(true);

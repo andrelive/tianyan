@@ -47,8 +47,7 @@ impl AgentBuilderFactory {
 
         let model_services = create_model_services(config).await?;
 
-        let retriever = DualLayerRetriever::new(vfs.clone())
-            .with_usage_stats(usage_stats.clone());
+        let retriever = DualLayerRetriever::new(vfs.clone()).with_usage_stats(usage_stats.clone());
 
         // 从配置中解析各能力模型名称
         let chat_model = config
@@ -133,7 +132,9 @@ impl AgentBuilderFactory {
             .collect();
 
         if enabled_providers.is_empty() {
-            return Err(TianyanError::Custom("配置错误：没有启用的模型提供商，请先完成配置".to_string()));
+            return Err(TianyanError::Custom(
+                "配置错误：没有启用的模型提供商，请先完成配置".to_string(),
+            ));
         }
 
         for provider in &enabled_providers {

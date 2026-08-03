@@ -31,8 +31,7 @@ pub mod estimator;
 pub use estimator::{estimate_tokens, TokenEstimator};
 
 /// 压缩策略。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompressionStrategy {
     /// 摘要：将早期对话压缩为摘要。
     Summarize,
@@ -42,7 +41,6 @@ pub enum CompressionStrategy {
     #[default]
     Hybrid,
 }
-
 
 /// 默认上下文窗口大小。
 const DEFAULT_CONTEXT_WINDOW: usize = 128000;
@@ -414,13 +412,9 @@ impl std::fmt::Display for CompressionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::error::Result;
-    use crate::model::types::{
-        ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
-    };
+    use crate::model::types::{ChatChoice, ChatCompletionResponse};
     use crate::model::ChatService;
     use crate::test_utils::MockChatService;
-    use async_trait::async_trait;
 
     /// 创建返回指定响应文本的 mock ChatService。
     fn mock_chat(response: &str) -> Arc<dyn ChatService> {

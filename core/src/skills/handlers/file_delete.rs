@@ -38,9 +38,10 @@ impl SkillHandler for FileDeleteHandler {
     ) -> Result<SkillExecutionResult> {
         let start = Instant::now();
 
-        let path = params.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            TianyanError::Custom("[file_delete] 缺少 'path' 参数".to_string())
-        })?;
+        let path = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TianyanError::Custom("[file_delete] 缺少 'path' 参数".to_string()))?;
 
         let path = PathBuf::from(path);
         validate_path(&path, &self.allowed_paths)?;
@@ -52,7 +53,10 @@ impl SkillHandler for FileDeleteHandler {
         };
 
         match result {
-            Ok(()) => Ok(super::result_success(format!("成功删除 {}", path.display()), start)),
+            Ok(()) => Ok(super::result_success(
+                format!("成功删除 {}", path.display()),
+                start,
+            )),
             Err(e) => Ok(super::result_failure(format!("删除失败: {}", e), start)),
         }
     }

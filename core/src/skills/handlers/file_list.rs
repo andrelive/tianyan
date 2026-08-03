@@ -74,8 +74,7 @@ impl SkillHandler for FileListHandler {
                             break;
                         }
                         let name = entry.file_name().to_string_lossy().to_string();
-                        let is_dir =
-                            entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+                        let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
                         files.push(if is_dir { format!("{}/", name) } else { name });
                     }
                     Ok(files)

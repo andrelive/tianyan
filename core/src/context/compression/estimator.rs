@@ -179,7 +179,7 @@ mod tests {
         let estimator = TokenEstimator::new();
         // "你好世界" = 4 中文字符 ≈ 3 tokens
         let tokens = estimator.estimate_text("你好世界");
-        assert!(tokens >= 2 && tokens <= 4);
+        assert!((2..=4).contains(&tokens));
     }
 
     #[test]
@@ -187,7 +187,7 @@ mod tests {
         let estimator = TokenEstimator::new();
         // "Hello world" = 2 词 ≈ 2-3 tokens
         let tokens = estimator.estimate_text("Hello world");
-        assert!(tokens >= 2 && tokens <= 5);
+        assert!((2..=5).contains(&tokens));
     }
 
     #[test]

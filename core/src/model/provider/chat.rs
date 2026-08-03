@@ -45,8 +45,9 @@ impl ChatService for AsyncOpenAIClient {
             .map_err(|e| TianyanError::Custom(format!("模型服务错误：构建请求失败：{}", e)))?;
 
         let response = if request.enable_thinking == Some(true) {
-            let mut body = serde_json::to_value(&oa_request)
-                .map_err(|e| TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e)))?;
+            let mut body = serde_json::to_value(&oa_request).map_err(|e| {
+                TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e))
+            })?;
             body["enable_thinking"] = Value::Bool(true);
             self.client.chat().create_byot(body).await
         } else {
@@ -123,8 +124,9 @@ impl ChatService for AsyncOpenAIClient {
             .map_err(|e| TianyanError::Custom(format!("模型服务错误：构建流式请求失败：{}", e)))?;
 
         let mut stream = if request.enable_thinking == Some(true) {
-            let mut body = serde_json::to_value(&oa_request)
-                .map_err(|e| TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e)))?;
+            let mut body = serde_json::to_value(&oa_request).map_err(|e| {
+                TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e))
+            })?;
             body["enable_thinking"] = Value::Bool(true);
             self.client.chat().create_stream_byot(body).await
         } else {
@@ -186,7 +188,10 @@ impl ChatService for AsyncOpenAIClient {
                     }
                     Err(e) => {
                         if let Err(send_err) = tx
-                            .send(Err(TianyanError::Custom(format!("模型服务错误：流错误：{}", e))))
+                            .send(Err(TianyanError::Custom(format!(
+                                "模型服务错误：流错误：{}",
+                                e
+                            ))))
                             .await
                         {
                             tracing::warn!(error = %send_err, "流错误通知发送失败");
@@ -325,7 +330,7 @@ fn convert_role(role: &OaRole) -> MessageRole {
 #[cfg(test)]
 mod convert_tests {
     use super::*;
-    use crate::common::types::{Message, MessageRole};
+    use crate::common::types::Message;
     use crate::model::types::{FunctionCall, ToolCall, ToolCallType};
 
     #[test]

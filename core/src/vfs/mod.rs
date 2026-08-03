@@ -29,10 +29,10 @@
 //! ```
 
 pub mod backend;
+mod embedding_bridge;
 mod summary;
 mod traits;
 mod types;
-mod embedding_bridge;
 mod uri_mapper;
 mod vector;
 mod vfs_impl;
@@ -43,11 +43,13 @@ mod test_utils;
 // 重新导出公共 API
 pub use backend::LocalFileBackend;
 pub use backend::SqliteBackend;
+pub use embedding_bridge::EmbeddingServiceBridge;
 #[cfg(test)]
 pub use summary::MockSummaryEngine;
 pub use summary::{SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT};
-pub use traits::{ContentMetadata, ContentStore, EmbeddingProvider, VfsCore, VfsSearch, VirtualFileSystem};
-pub use embedding_bridge::EmbeddingServiceBridge;
+pub use traits::{
+    ContentMetadata, ContentStore, EmbeddingProvider, VfsCore, VfsSearch, VirtualFileSystem,
+};
 pub use types::{
     CategoryStats, ContextEntry, DirectoryIndex, DirectoryStats, IndexEntry, StorageStats,
     VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType, CURRENT_SCHEMA_VERSION,
@@ -66,14 +68,12 @@ pub use test_utils::MockVectorStorage;
 
 #[cfg(test)]
 mod tests {
-    use super::test_utils::{create_test_vfs, MockVectorStorage};
+    use super::test_utils::create_test_vfs;
     use super::*;
-    use crate::config::StorageConfig;
     use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-    use crate::vfs::types::{VectorPoint, VectorSearchQuery, VectorSearchResult};
+    use crate::config::StorageConfig;
+    use crate::vfs::types::VectorPoint;
     use std::path::PathBuf;
-    use std::sync::Arc;
-    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_full_workflow() {
@@ -133,8 +133,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_uri_mapper() {
-        let mut config = StorageConfig::default();
-        config.data_dir = PathBuf::from("/test");
+        let config = StorageConfig {
+            data_dir: PathBuf::from("/test"),
+            ..Default::default()
+        };
         let mapper = UriMapper::new(config);
 
         let uri = TianyanUri::new(

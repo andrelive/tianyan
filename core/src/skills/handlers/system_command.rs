@@ -45,7 +45,9 @@ impl SkillHandler for SystemCommandHandler {
         let command = params
             .get("command")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| TianyanError::Custom("[system_command] 缺少 'command' 参数".to_string()))?;
+            .ok_or_else(|| {
+                TianyanError::Custom("[system_command] 缺少 'command' 参数".to_string())
+            })?;
 
         let cmd_parts: Vec<&str> = command.split_whitespace().collect();
         if let Some(first) = cmd_parts.first() {
@@ -121,10 +123,7 @@ impl SkillHandler for SystemCommandHandler {
             Err(_) => Ok(SkillExecutionResult {
                 success: false,
                 output: None,
-                error: Some(format!(
-                    "命令执行超时（超过 {} 秒）",
-                    self.timeout_secs
-                )),
+                error: Some(format!("命令执行超时（超过 {} 秒）", self.timeout_secs)),
                 exit_code: None,
                 execution_time_ms: start.elapsed().as_millis() as u64,
                 data: HashMap::new(),

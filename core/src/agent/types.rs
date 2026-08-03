@@ -445,7 +445,7 @@ mod tests {
         assert!(resp.needs_clarification);
         assert_eq!(resp.clarification_questions.len(), 1);
         assert_eq!(resp.clarification_questions[0].question, "你是？");
-        assert_eq!(resp.clarification_questions[0].required, true);
+        assert!(resp.clarification_questions[0].required);
     }
 
     #[test]

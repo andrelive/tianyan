@@ -77,9 +77,9 @@ impl TianyanUri {
             )));
         }
 
-        let host = url
-            .host_str()
-            .ok_or_else(|| error::TianyanError::Custom(format!("无效的 URI：URI 中缺少主机：{}", uri)))?;
+        let host = url.host_str().ok_or_else(|| {
+            error::TianyanError::Custom(format!("无效的 URI：URI 中缺少主机：{}", uri))
+        })?;
 
         let namespace = ContextNamespace::parse(host).ok_or_else(|| {
             error::TianyanError::Custom(format!("无效的 URI：URI 中包含无效命名空间：{}", host))

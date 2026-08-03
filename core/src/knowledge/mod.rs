@@ -37,7 +37,10 @@ pub use parser::{
     CodeParser, CompositeParser, DocumentMetadata, DocumentParser, DocxParser, MarkdownParser,
     ParsedDocument, PdfParser, TextParser, TocEntry,
 };
-pub use types::{DocumentType, IngestionRequest, IngestionResult, KnowledgeCategory, KnowledgeDocument, KnowledgeMetadata, KnowledgeSearchResult};
+pub use types::{
+    DocumentType, IngestionRequest, IngestionResult, KnowledgeCategory, KnowledgeDocument,
+    KnowledgeMetadata, KnowledgeSearchResult,
+};
 
 #[cfg(test)]
 mod tests {

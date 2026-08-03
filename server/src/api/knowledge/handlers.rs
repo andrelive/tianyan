@@ -8,7 +8,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::api::knowledge::services::KnowledgeService;
 use crate::api::knowledge::types::{
-    IngestRequest, IngestResponse, IngestStatusResponse, SearchQuery, SearchResponse,
+    IngestRequest, IngestResponse, IngestStatusResponse, KnowledgeEntriesResponse,
+    ListEntriesQuery, ReadEntryQuery, ReadEntryResponse, SearchQuery, SearchResponse,
     SearchSuggestionsResponse,
 };
 use crate::api::shared::error::ApiError;
@@ -152,4 +153,32 @@ pub async fn search_suggestions_handler(
             error!("获取搜索建议失败: {}", e);
             ApiError::Internal(format!("获取搜索建议失败: {}", e))
         })
+}
+
+/// 列出知识库条目（只读浏览）
+pub async fn list_entries_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListEntriesQuery>,
+) -> Result<Json<KnowledgeEntriesResponse>, ApiError> {
+    let ingestor = state.create_knowledge_ingestor()?;
+    let vfs = state.vfs();
+    let service = KnowledgeService::new(Arc::new(ingestor), vfs);
+
+    let resp = service.list_entries(query.path.as_deref()).await?;
+    Ok(Json(resp))
+}
+
+/// 读取知识库条目内容（只读浏览）
+pub async fn read_entry_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ReadEntryQuery>,
+) -> Result<Json<ReadEntryResponse>, ApiError> {
+    let ingestor = state.create_knowledge_ingestor()?;
+    let vfs = state.vfs();
+    let service = KnowledgeService::new(Arc::new(ingestor), vfs);
+
+    let resp = service
+        .read_entry(&query.uri, query.level.as_deref())
+        .await?;
+    Ok(Json(resp))
 }

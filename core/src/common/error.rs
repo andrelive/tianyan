@@ -46,8 +46,6 @@ impl From<config::ConfigError> for TianyanError {
     }
 }
 
-
-
 impl From<reqwest::Error> for TianyanError {
     fn from(err: reqwest::Error) -> Self {
         if err.is_timeout() {

@@ -145,7 +145,11 @@ pub(crate) fn validate_path(path: &PathBuf, allowed_paths: &[PathBuf]) -> Result
         .canonicalize()
         .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(path)))
         .map_err(|e| {
-            TianyanError::Custom(format!("操作不被允许：无法解析路径 '{}': {}", path.display(), e))
+            TianyanError::Custom(format!(
+                "操作不被允许：无法解析路径 '{}': {}",
+                path.display(),
+                e
+            ))
         })?;
 
     for allowed in allowed_paths {

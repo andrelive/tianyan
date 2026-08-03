@@ -469,8 +469,9 @@ impl DocumentParser for CsvParser {
 
         // 写入每行数据
         for result in reader.records() {
-            let record = result
-                .map_err(|e| TianyanError::Custom(format!("文档处理错误：CSV 行解析失败: {}", e)))?;
+            let record = result.map_err(|e| {
+                TianyanError::Custom(format!("文档处理错误：CSV 行解析失败: {}", e))
+            })?;
             let line: Vec<&str> = record.iter().collect();
             text.push_str(&line.join("\t"));
             text.push('\n');

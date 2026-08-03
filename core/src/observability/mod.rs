@@ -327,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn test_token_history_truncation_at_1000() {
         let metrics = AgentMetrics::new();
-        for i in 0..1100 {
+        for _i in 0..1100 {
             metrics
                 .record_token_usage(make_token_record("s", 1, true))
                 .await;

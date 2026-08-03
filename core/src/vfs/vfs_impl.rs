@@ -9,7 +9,9 @@ use crate::common::types::{
     ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
 };
 use crate::vfs::backend::LocalFileBackend;
-use crate::vfs::traits::{ContentMetadata, ContentStore, EmbeddingProvider, VfsCore, VfsSearch, VirtualFileSystem};
+use crate::vfs::traits::{
+    ContentMetadata, ContentStore, EmbeddingProvider, VfsCore, VfsSearch, VirtualFileSystem,
+};
 use crate::vfs::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
 use crate::vfs::vector::VectorStorage;
 

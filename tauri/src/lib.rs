@@ -151,7 +151,13 @@ pub fn run() {
     };
 
     // 创建 Tokio runtime 用于后台服务
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            error!("Failed to create Tokio runtime: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // 启动 Axum 服务在后台线程，传入配置
     // 即使配置无效，也启动服务以支持配置向导 API
@@ -175,8 +181,8 @@ pub fn run() {
 
     // 构建并运行 Tauri 应用
     // Tauri 会自动加载 frontendDist 中配置的静态文件 (gui/dist)
-    // Yew 前端通过 HTTP 调用 Axum 后端 API
-    tauri::Builder::default()
+    // 前端通过 HTTP 调用 Axum 后端 API
+    if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|_app| {
             info!("Tauri setup completed, frontend loaded from gui/dist");
@@ -188,5 +194,8 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("Error while running Tauri application");
+    {
+        error!("Tauri application error: {}", e);
+        std::process::exit(1);
+    }
 }

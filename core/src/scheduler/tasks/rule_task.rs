@@ -114,8 +114,6 @@ impl TaskHandler for RuleTask {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_rule_task_new() {
         // RuleTask::new needs real Arc<dyn VFS + ChatService>, skip construction test.

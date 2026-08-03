@@ -9,10 +9,16 @@
 
 /// 配置请求处理函数
 pub mod handlers;
+/// MCP 服务器管理处理函数
+pub mod mcp_handlers;
+/// Ollama 模型发现处理函数
+pub mod ollama_handlers;
 /// 配置路由定义
 pub mod routes;
 /// 配置业务逻辑
 pub mod services;
+/// Soul（智能体人格）管理处理函数
+pub mod soul_handlers;
 /// 配置类型定义
 pub mod types;
 

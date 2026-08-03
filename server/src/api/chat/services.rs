@@ -146,14 +146,17 @@ impl ChatService {
         Ok(())
     }
 
-    /// 重新生成指定消息之后的助手回复
+    /// 重新生成指定用户消息的助手回复。
+    ///
+    /// 截断到该用户消息之前（`process_message` 会重新追加该用户消息并生成新回复），
+    /// 持久化后重新生成，保证会话历史与前端展示一致。
     pub async fn regenerate_message(
         &self,
         request: RegenerateRequest,
     ) -> Result<ChatResponse, ApiError> {
         let session_id = &request.session_id;
 
-        let session = self
+        let mut session = self
             .session_manager
             .get_session(session_id)
             .await?
@@ -183,6 +186,21 @@ impl ChatService {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // 截断到该用户消息之前（不含），process_message 会重新追加并生成新回复
+        session.messages.truncate(request.message_index);
+        if let Err(e) = self.session_manager.update_session(&session).await {
+            error!("更新会话失败: {}", e);
+            return Err(ApiError::Internal(format!("更新会话失败: {}", e)));
+        }
+        if let Err(e) = self
+            .session_manager
+            .rewrite_messages(session_id, &session.messages)
+            .await
+        {
+            error!("重写会话历史失败: {}", e);
+            return Err(ApiError::Internal(format!("重写会话历史失败: {}", e)));
+        }
+
         let response = self
             .agent
             .process_message(session_id, &last_message, None)
@@ -204,7 +222,10 @@ impl ChatService {
         })
     }
 
-    /// 编辑用户消息并重新生成回复
+    /// 编辑用户消息并重新生成回复。
+    ///
+    /// 截断到该消息之前（不含），`process_message` 会追加编辑后的用户消息并生成新回复，
+    /// 避免同一条用户消息在历史中重复。
     pub async fn edit_message(
         &self,
         request: EditMessageRequest,
@@ -228,17 +249,20 @@ impl ChatService {
             return Err(ApiError::BadRequest("只能编辑用户消息".to_string()));
         }
 
-        for part in &mut session.messages[request.message_index].parts {
-            if let Part::Text { text, .. } = part {
-                *text = request.new_content.clone();
-                break;
-            }
-        }
-        session.messages.truncate(request.message_index + 1);
+        // 截断到该用户消息之前（不含），process_message 会追加编辑后的用户消息并生成新回复
+        session.messages.truncate(request.message_index);
 
         if let Err(e) = self.session_manager.update_session(&session).await {
             error!("更新会话失败: {}", e);
             return Err(ApiError::Internal(format!("更新会话失败: {}", e)));
+        }
+        if let Err(e) = self
+            .session_manager
+            .rewrite_messages(session_id, &session.messages)
+            .await
+        {
+            error!("重写会话历史失败: {}", e);
+            return Err(ApiError::Internal(format!("重写会话历史失败: {}", e)));
         }
 
         let response = self
@@ -289,11 +313,9 @@ async fn resolve_or_create_session(
     initial_message: &str,
 ) -> Result<String, ApiError> {
     // 如果传了 session_id 且服务端已存在，直接复用
-    if let Some(sid) = session_id {
-        if !sid.is_empty() {
-            if session_manager.get_session(sid).await?.is_some() {
-                return Ok(sid.to_string());
-            }
+    if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+        if session_manager.get_session(sid).await?.is_some() {
+            return Ok(sid.to_string());
         }
     }
 
@@ -317,6 +339,13 @@ async fn resolve_or_create_session(
         }
     }
 
+    // 清空 create_session 预写的消息：会话历史统一由 agent.process_message 追加，
+    // 避免同一条用户消息在历史中重复
+    session.messages.clear();
+    if let Err(e) = session_manager.rewrite_messages(&new_id, &[]).await {
+        tracing::warn!(error = %e, "清空会话预写消息失败");
+    }
+
     Ok(new_id)
 }
 
@@ -336,8 +365,6 @@ fn generate_session_title(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_chat_service_creation() {
         // 这是一个编译时测试，确保 ChatService 可以被构造

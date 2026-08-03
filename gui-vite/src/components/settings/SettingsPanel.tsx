@@ -16,11 +16,10 @@ import {
   Box,
   Server,
   User,
-  FolderTree,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
-import { apiGet, apiPut } from '@/lib/api-client';
+import { apiGet, apiPost, apiPut } from '@/lib/api-client';
 import { fromBackendConfig, toBackendConfig, emptyProvider, emptyModelEntry } from '@/lib/config-transform';
 import type { ConfigState, ProviderConfigState, ProviderModelEntry, ModelCapability, ModelPreferencesState, ModelRef } from '@/lib/types';
 import type { BackendConfigResponse } from '@/lib/config-transform';
@@ -38,7 +37,6 @@ import AboutTab from './tabs/AboutTab';
 import OllamaTab from './tabs/OllamaTab';
 import McpTab from './tabs/McpTab';
 import SoulTab from './tabs/SoulTab';
-import VfsTab from './tabs/VfsTab';
 
 /* ───────── Tab definitions ───────── */
 
@@ -61,7 +59,6 @@ const TABS: TabDef[] = [
   { id: 'connection', label: '连接', icon: Wifi },
   { id: 'ollama', label: 'Ollama', icon: Box },
   { id: 'mcp', label: 'MCP', icon: Server },
-  { id: 'vfs', label: 'VFS 浏览器', icon: FolderTree },
   { id: 'about', label: '关于', icon: Info },
 ];
 
@@ -220,7 +217,6 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
       const modelName = p.models[0]?.name || 'test-model';
       setTestStatus((prev) => ({ ...prev, [index]: 'testing' }));
       try {
-        const { apiPost } = await import('@/lib/api-client');
         const resp = await apiPost<{ success: boolean; message: string }>(
           '/config/test-connection',
           {
@@ -265,7 +261,6 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
     activeTab !== 'appearance' &&
     activeTab !== 'connection' &&
     activeTab !== 'soul' &&
-    activeTab !== 'vfs' &&
     activeTab !== 'ollama' &&
     activeTab !== 'mcp' &&
     activeTab !== 'about';
@@ -312,8 +307,6 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
         return <OllamaTab />;
       case 'mcp':
         return <McpTab />;
-      case 'vfs':
-        return <VfsTab />;
       case 'about':
         return <AboutTab />;
       default:

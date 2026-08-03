@@ -1,5 +1,8 @@
 //! Tianyan HTTP 服务器。
 
+// 测试代码中 unwrap 是有意的（失败即 panic 即测试失败），豁免以保持测试可读性。
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use axum::http::HeaderValue;
 use axum::{extract::DefaultBodyLimit, response::Json, routing::get, Router};
 use serde::Serialize;
@@ -145,10 +148,7 @@ fn initialize_vfs_for_app(
                     .map(|r| r.model)
                     .unwrap_or_else(|| "text-embedding-3-small".to_string());
                 let bridge = EmbeddingServiceBridge::new(ms.embedding);
-                vfs_builder = vfs_builder.with_embedding_provider(
-                    Arc::new(bridge),
-                    emb_model,
-                );
+                vfs_builder = vfs_builder.with_embedding_provider(Arc::new(bridge), emb_model);
             }
             Err(e) => {
                 warn!("无法创建模型服务（{}），VFS 将以无嵌入模式运行", e);
@@ -157,9 +157,9 @@ fn initialize_vfs_for_app(
     }
 
     // 3. 初始化 VFS（单一实例）
-    let vfs = vfs_builder
-        .build()
-        .map_err(|e| tianyan::TianyanError::Custom(format!("虚拟文件系统错误：VFS 构建失败：{}", e)))?;
+    let vfs = vfs_builder.build().map_err(|e| {
+        tianyan::TianyanError::Custom(format!("虚拟文件系统错误：VFS 构建失败：{}", e))
+    })?;
 
     use tianyan::vfs::VfsCore;
     tokio::task::block_in_place(|| {

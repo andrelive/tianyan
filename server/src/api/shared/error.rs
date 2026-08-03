@@ -93,15 +93,12 @@ impl From<TianyanError> for ApiError {
                     ApiError::NotFound(msg)
                 } else if msg.starts_with("认证失败：") {
                     ApiError::Unauthorized(msg)
-                } else if msg.starts_with("操作不被允许：")
-                    || msg.starts_with("安全错误：")
+                } else if msg.starts_with("操作不被允许：") || msg.starts_with("安全错误：")
                 {
                     ApiError::Forbidden(msg)
                 } else if msg.starts_with("操作超时：") {
                     ApiError::GatewayTimeout(msg)
-                } else if msg.starts_with("无效路径：")
-                    || msg.starts_with("无效 URI:")
-                {
+                } else if msg.starts_with("无效路径：") || msg.starts_with("无效 URI:") {
                     ApiError::BadRequest(msg)
                 } else {
                     ApiError::Internal(msg)

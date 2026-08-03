@@ -118,11 +118,6 @@ impl RetrievalTraceBuilder {
 }
 
 impl RetrievalTrace {
-    /// 为此追踪记录创建构建器。
-    pub(crate) fn builder(query: impl Into<String>) -> RetrievalTraceBuilder {
-        RetrievalTraceBuilder::new(query)
-    }
-
     /// 获取步骤数量。
     pub fn step_count(&self) -> usize {
         self.steps.len()

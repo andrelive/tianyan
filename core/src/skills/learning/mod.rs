@@ -142,8 +142,12 @@ impl SkillLearningEngine {
 
         let category = response.trim().to_lowercase();
         let valid = [
-            "file_operation", "code_operation", "search_operation",
-            "test_operation", "deploy_operation", "analysis_operation",
+            "file_operation",
+            "code_operation",
+            "search_operation",
+            "test_operation",
+            "deploy_operation",
+            "analysis_operation",
             "general_operation",
         ];
         if valid.contains(&category.as_str()) {
@@ -396,10 +400,22 @@ mod tests {
         );
 
         // mock LLM 返回无效类别 → 回退到关键词匹配
-        assert_eq!(engine.categorize_task("读取文件内容").await, "file_operation");
-        assert_eq!(engine.categorize_task("搜索代码中的函数").await, "code_operation");
-        assert_eq!(engine.categorize_task("运行单元测试").await, "test_operation");
-        assert_eq!(engine.categorize_task("分析项目结构").await, "analysis_operation");
+        assert_eq!(
+            engine.categorize_task("读取文件内容").await,
+            "file_operation"
+        );
+        assert_eq!(
+            engine.categorize_task("搜索代码中的函数").await,
+            "code_operation"
+        );
+        assert_eq!(
+            engine.categorize_task("运行单元测试").await,
+            "test_operation"
+        );
+        assert_eq!(
+            engine.categorize_task("分析项目结构").await,
+            "analysis_operation"
+        );
     }
 
     #[tokio::test]
@@ -422,11 +438,10 @@ mod tests {
     }
 
     use crate::model::types::{ChatChoice, ChatCompletionResponse};
-    use crate::model::ChatService;
     use crate::test_utils::MockChatService;
 
     /// 创建返回空 JSON 响应的 mock ChatService（用于学习引擎测试）。
-    fn mock_chat_empty() -> Arc<dyn crate::model::ChatService> {
+    fn mock_chat_empty() -> Arc<dyn ChatService> {
         let mut mock = MockChatService::new();
         mock.expect_chat_completion().returning(|_| {
             Ok(ChatCompletionResponse {

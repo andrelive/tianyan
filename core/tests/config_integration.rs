@@ -1,6 +1,9 @@
 //! 配置系统集成测试 — 从文件加载、验证、保存、重新加载的完整流程
 
-use tianyan::config::{ModelCapability, ModelEntry, ModelPreferences, ModelRef, ProviderConfig, TianyanConfig};
+// 测试代码中 unwrap 是有意的（失败即 panic 即测试失败），豁免以保持测试可读性。
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use tianyan::config::{ModelCapability, ModelEntry, ModelRef, ProviderConfig, TianyanConfig};
 
 fn make_test_config() -> TianyanConfig {
     let mut config = TianyanConfig::default();

@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn test_create_routes() {
-        let routes = create_routes();
+        let _routes = create_routes();
         // 仅验证编译通过并创建路由器
         // 完整路由测试需要集成测试
     }

@@ -242,9 +242,10 @@ impl SecurityPolicy {
 
         // 检测命令链和命令替换元字符，防止注入
         if Self::has_shell_metacharacters(command) {
-            return Err(TianyanError::Custom(format!(
+            return Err(TianyanError::Custom(
                 "executor: 安全策略违规：命令包含不被允许的 shell 元字符（&&、||、;、`、$() 等）"
-            )));
+                    .to_string(),
+            ));
         }
 
         let cmd_name = command.split_whitespace().next().unwrap_or(command);
@@ -300,9 +301,9 @@ impl SecurityPolicy {
         if self.allow_file_write {
             Ok(())
         } else {
-            Err(TianyanError::Custom(format!(
-                "executor: 安全策略违规：文件写入被安全策略禁止"
-            )))
+            Err(TianyanError::Custom(
+                "executor: 安全策略违规：文件写入被安全策略禁止".to_string(),
+            ))
         }
     }
 }
@@ -380,7 +381,10 @@ pub async fn execute_command_action(
                 "exit_code": status.code().unwrap_or(-1),
             }))
         }
-        Ok(Err(e)) => Err(TianyanError::Custom(format!("executor: 命令执行失败：{}", e))),
+        Ok(Err(e)) => Err(TianyanError::Custom(format!(
+            "executor: 命令执行失败：{}",
+            e
+        ))),
         Err(_elapsed) => {
             if let Err(e) = child.kill().await {
                 tracing::warn!(error = %e, "终止超时子进程失败");
@@ -487,10 +491,9 @@ pub async fn execute_search_code(query: &str, scope: Option<&str>) -> Result<Val
         cmd.current_dir(dir);
     }
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| TianyanError::Custom(format!("executor: 搜索失败：执行 ripgrep 失败：{}", e)))?;
+    let output = cmd.output().await.map_err(|e| {
+        TianyanError::Custom(format!("executor: 搜索失败：执行 ripgrep 失败：{}", e))
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

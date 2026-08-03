@@ -200,8 +200,6 @@ fn convert_core_skill(core_skill: &tianyan::skills::Skill) -> Skill {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_skill_service_creation() {
         // 仅验证类型可构造，实际测试需要异步运行时

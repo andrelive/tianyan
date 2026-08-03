@@ -3,8 +3,6 @@
 //! 提供共享的 `MockVectorStorage` 和 `create_test_vfs()`，
 //! 避免在 `mod.rs` 和 `vfs/builder.rs` 之间重复定义。
 
-#![cfg(test)]
-
 use std::sync::Arc;
 
 use tempfile::tempdir;
@@ -20,8 +18,15 @@ use crate::vfs::vfs_impl::VirtualFileSystemImpl;
 pub struct MockVectorStorage;
 
 impl MockVectorStorage {
+    /// 创建 Mock 向量存储实例。
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl Default for MockVectorStorage {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -75,8 +80,10 @@ impl VectorStorage for MockVectorStorage {
 /// 创建测试 VFS 的辅助函数。
 pub async fn create_test_vfs() -> VirtualFileSystemImpl {
     let dir = tempdir().unwrap();
-    let mut config = StorageConfig::default();
-    config.data_dir = dir.path().into();
+    let config = StorageConfig {
+        data_dir: dir.path().into(),
+        ..Default::default()
+    };
     let storage = Arc::new(LocalFileBackend::new(config.clone()));
     let vector_storage: Arc<dyn VectorStorage> = Arc::new(MockVectorStorage::new());
     VirtualFileSystemImpl::new(storage, vector_storage, config)

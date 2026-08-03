@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 mod agent;
 pub mod api_types;
 mod logging;
+mod mcp;
 mod memory;
 mod model;
 mod retrieval;
@@ -18,6 +19,7 @@ pub mod wizard;
 
 pub use agent::AgentConfig;
 pub use logging::LoggingConfig;
+pub use mcp::{McpConfig, McpServerEntry};
 pub use memory::MemoryConfig;
 pub use model::{
     find_provider, ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig,
@@ -56,6 +58,9 @@ pub struct TianyanConfig {
     /// 检索配置。
     #[serde(default)]
     pub retrieval: RetrievalConfig,
+    /// MCP 服务器配置。
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 impl TianyanConfig {
@@ -152,6 +157,7 @@ impl TianyanConfig {
         self.security.validate()?;
         self.memory.validate()?;
         self.retrieval.validate()?;
+        self.mcp.validate().map_err(|e| e.to_string())?;
         Ok(())
     }
 

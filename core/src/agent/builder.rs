@@ -15,11 +15,11 @@ use crate::context::DualLayerRetriever;
 use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
 use crate::executor::SecurityPolicy;
 use crate::executor::{LlmJudge, VerificationGate};
-use crate::scheduler::tasks::RuleRecorder;
 use crate::knowledge::KnowledgeIngestor;
 use crate::model::ChatService;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
+use crate::scheduler::tasks::RuleRecorder;
 use crate::session::SessionManager;
 use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
 use crate::skills::{SkillExecutor, SkillRegistry};
@@ -167,9 +167,7 @@ impl AgentBuilder {
         let rule_recorder = Arc::new(RuleRecorder::new(vfs.clone()));
 
         // Build security policy from user config (or defaults)
-        let security_config = self
-            .security_config
-            .unwrap_or_else(SecurityConfig::default);
+        let security_config = self.security_config.unwrap_or_default();
         let security_policy = SecurityPolicy::from_config(&security_config);
 
         let mut tool_registry = ToolRegistry::new(security_policy)

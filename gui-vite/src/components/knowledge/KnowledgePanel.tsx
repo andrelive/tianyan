@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiGet, apiPostMultipart } from '@/lib/api-client';
 import {
-  fetchVfsEntries, fetchVfsEntryContent, updateVfsEntry, deleteVfsEntry, createVfsEntry,
-  type EntryItem,
+  fetchKnowledgeEntries,
+  fetchKnowledgeEntryContent,
+  type KnowledgeEntryItem,
 } from '@/lib/api-client';
 import type { KnowledgeSearchResult, KnowledgeSearchResponse } from '@/lib/types';
-import { useAppStore } from '@/lib/store';
 import {
   Search,
   Upload,
@@ -19,11 +19,7 @@ import {
   Inbox,
   BookOpen,
   FolderTree,
-  Edit3,
-  Trash2,
-  Save,
   Folder,
-  Plus,
   ChevronRight,
 } from 'lucide-react';
 
@@ -52,7 +48,6 @@ function HighlightedText({ text, query }: { text: string; query: string }) {
 }
 
 export default function KnowledgePanel() {
-  const showToast = useAppStore((s) => s.showToast);
   const [activeTab, setActiveTab] = useState<Tab>('search');
 
   // Search state
@@ -74,28 +69,20 @@ export default function KnowledgePanel() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Browse state
-  const [browseEntries, setBrowseEntries] = useState<EntryItem[]>([]);
+  const [browseEntries, setBrowseEntries] = useState<KnowledgeEntryItem[]>([]);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseError, setBrowseError] = useState<string | null>(null);
-  const [selectedBrowseEntry, setSelectedBrowseEntry] = useState<EntryItem | null>(null);
+  const [selectedBrowseEntry, setSelectedBrowseEntry] = useState<KnowledgeEntryItem | null>(null);
   const [browseContent, setBrowseContent] = useState('');
   const [browseLevel, setBrowseLevel] = useState('detail');
-  const [isEditingBrowse, setIsEditingBrowse] = useState(false);
-  const [editBrowseContent, setEditBrowseContent] = useState('');
   const [browseContentLoading, setBrowseContentLoading] = useState(false);
   const [browsePath, setBrowsePath] = useState<string[]>([]);
-
-  // Create state
-  const [showCreateBrowse, setShowCreateBrowse] = useState(false);
-  const [newBrowseName, setNewBrowseName] = useState('');
-  const [newBrowseContent, setNewBrowseContent] = useState('');
-  const [creatingBrowse, setCreatingBrowse] = useState(false);
 
   const loadBrowseEntries = useCallback(async () => {
     setBrowseLoading(true);
     setBrowseError(null);
     try {
-      const res = await fetchVfsEntries('knowledge', browsePath.join('/') || undefined);
+      const res = await fetchKnowledgeEntries(browsePath.join('/') || undefined);
       setBrowseEntries(res.entries);
     } catch (err: unknown) {
       setBrowseError(err instanceof Error ? err.message : '加载失败');
@@ -110,70 +97,22 @@ export default function KnowledgePanel() {
     }
   }, [activeTab, loadBrowseEntries]);
 
-  const handleBrowseView = async (entry: EntryItem) => {
+  const handleBrowseView = async (entry: KnowledgeEntryItem) => {
     if (entry.is_directory) {
-      // Navigate into subdirectory (same pattern as VfsTab)
+      // Navigate into subdirectory
       setBrowsePath((prev) => [...prev, entry.name]);
       setSelectedBrowseEntry(null);
       return;
     }
     setSelectedBrowseEntry(entry);
-    setIsEditingBrowse(false);
     setBrowseContentLoading(true);
     try {
-      const res = await fetchVfsEntryContent(entry.uri, browseLevel);
+      const res = await fetchKnowledgeEntryContent(entry.uri, browseLevel);
       setBrowseContent(res.content);
     } catch (err: unknown) {
       setBrowseContent(`加载失败: ${err instanceof Error ? err.message : '未知错误'}`);
     } finally {
       setBrowseContentLoading(false);
-    }
-  };
-
-  const handleBrowseEdit = () => {
-    setEditBrowseContent(browseContent);
-    setIsEditingBrowse(true);
-  };
-
-  const handleBrowseSave = async () => {
-    if (!selectedBrowseEntry) return;
-    try {
-      await updateVfsEntry(selectedBrowseEntry.uri, browseLevel, editBrowseContent);
-      setBrowseContent(editBrowseContent);
-      setIsEditingBrowse(false);
-    } catch (err: unknown) {
-      showToast(`保存失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
-    }
-  };
-
-  const handleBrowseDelete = async (entry: EntryItem) => {
-    if (!window.confirm(`确定要删除 "${entry.name}" 吗？`)) return;
-    try {
-      await deleteVfsEntry(entry.uri);
-      setBrowseEntries((prev) => prev.filter((e) => e.uri !== entry.uri));
-      if (selectedBrowseEntry?.uri === entry.uri) {
-        setSelectedBrowseEntry(null);
-      }
-    } catch (err: unknown) {
-      showToast(`删除失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
-    }
-  };
-
-  const handleCreateBrowse = async () => {
-    if (!newBrowseName.trim()) return;
-    setCreatingBrowse(true);
-    const uri = `tianyan://knowledge/${newBrowseName.trim()}`;
-    try {
-      await createVfsEntry({ uri, detail_content: newBrowseContent || undefined });
-      showToast(`已创建: ${newBrowseName}`, 'success');
-      setShowCreateBrowse(false);
-      setNewBrowseName('');
-      setNewBrowseContent('');
-      await loadBrowseEntries();
-    } catch (err: unknown) {
-      showToast(`创建失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
-    } finally {
-      setCreatingBrowse(false);
     }
   };
 
@@ -485,29 +424,9 @@ export default function KnowledgePanel() {
                       {entry.is_directory ? <Folder size={16} className="shrink-0 text-yellow-500" /> : <File size={16} className="shrink-0 text-[var(--color-text-tertiary)]" />}
                       <span className="text-sm text-[var(--color-text-primary)] truncate">{entry.name}</span>
                     </div>
-                    <button onClick={(e) => { e.stopPropagation(); handleBrowseDelete(entry); }} className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-[var(--color-text-tertiary)] hover:text-red-500 shrink-0" title="删除"><Trash2 size={14} /></button>
                   </div>
                 ))}
                 {browseEntries.length === 0 && !browseLoading && !browseError && (<p className="text-sm text-[var(--color-text-tertiary)] py-8 text-center">知识库暂无条目</p>)}
-              </div>
-            )}
-
-            {/* Create button & form */}
-            {!showCreateBrowse ? (
-              <button onClick={() => setShowCreateBrowse(true)} className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md border border-dashed border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:border-blue-400 hover:text-blue-600 transition-colors">
-                <Plus size={14} /> 新建条目
-              </button>
-            ) : (
-              <div className="mt-3 p-4 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-900/10 space-y-3">
-                <input type="text" value={newBrowseName} onChange={(e) => setNewBrowseName(e.target.value)} placeholder="条目名称" autoFocus className="w-full px-2.5 py-1.5 text-sm rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500/30" />
-                <textarea value={newBrowseContent} onChange={(e) => setNewBrowseContent(e.target.value)} placeholder="详细内容（可选，L2 Detail 层级）" rows={4} className="w-full px-2.5 py-1.5 text-sm rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-blue-500/30" />
-                <div className="flex items-center gap-2">
-                  <button onClick={handleCreateBrowse} disabled={creatingBrowse || !newBrowseName.trim()} className="flex items-center gap-1 px-3 py-1 text-xs font-medium rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors">
-                    {creatingBrowse ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                    {creatingBrowse ? '创建中...' : '创建'}
-                  </button>
-                  <button onClick={() => { setShowCreateBrowse(false); setNewBrowseName(''); setNewBrowseContent(''); }} className="flex items-center gap-1 px-3 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"><X size={12} /> 取消</button>
-                </div>
               </div>
             )}
 
@@ -515,11 +434,8 @@ export default function KnowledgePanel() {
               <div className="border-t border-[var(--color-border)] pt-4">
                 <div className="flex items-center justify-between mb-3">
                   <h4 className="text-sm font-medium text-[var(--color-text-primary)] truncate max-w-[70%]">{selectedBrowseEntry.name}</h4>
-                  <div className="flex items-center gap-2">
-                    {!isEditingBrowse ? (<button onClick={handleBrowseEdit} className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"><Edit3 size={12} />编辑</button>) : (<><button onClick={handleBrowseSave} className="flex items-center gap-1 px-2 py-1 text-xs rounded bg-green-600 text-white hover:bg-green-700"><Save size={12} />保存</button><button onClick={() => setIsEditingBrowse(false)} className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"><X size={12} />取消</button></>)}
-                  </div>
                 </div>
-                {browseContentLoading ? (<div className="flex items-center justify-center py-10"><Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" /></div>) : isEditingBrowse ? (<textarea value={editBrowseContent} onChange={(e) => setEditBrowseContent(e.target.value)} className="w-full min-h-[200px] px-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500/30" />) : (<pre className="max-h-[300px] overflow-y-auto p-4 rounded-lg bg-[var(--color-bg-secondary)] text-sm text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono leading-relaxed border border-[var(--color-border)]">{browseContent || '(空内容)'}</pre>)}
+                {browseContentLoading ? (<div className="flex items-center justify-center py-10"><Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" /></div>) : (<pre className="max-h-[300px] overflow-y-auto p-4 rounded-lg bg-[var(--color-bg-secondary)] text-sm text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono leading-relaxed border border-[var(--color-border)]">{browseContent || '(空内容)'}</pre>)}
               </div>
             )}
           </div>

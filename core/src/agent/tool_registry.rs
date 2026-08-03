@@ -9,22 +9,22 @@ use crate::agent::tool_params::{
     KnowledgeIngestParams, ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams,
     SelfCheckParams, VerifyBuildParams, VfsListParams, VfsReadParams, WriteFileParams,
 };
+use crate::common::error::TianyanError;
 use crate::common::types::{
     ContentLevel, ContentSource, ContextNamespace, Message, SearchResult, TianyanUri,
 };
 use crate::executor::approval::{ApprovalDecision, ApprovalWorkflow};
-use crate::executor::SecurityPolicy;
 use crate::executor::Action;
+use crate::executor::SecurityPolicy;
 use crate::executor::VerificationGate;
-use crate::scheduler::tasks::RuleRecorder;
 use crate::knowledge::{IngestionRequest, KnowledgeCategory, KnowledgeIngestor};
 use crate::model::types::{ChatCompletionRequest, FunctionDefinition, ToolCall, ToolDefinition};
 use crate::model::ChatService;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
+use crate::scheduler::tasks::RuleRecorder;
 use crate::skills::learning::ExecutionHistory;
 use crate::skills::{SkillExecutionRequest, SkillExecutor};
-use crate::common::error::TianyanError;
 use crate::vfs::VirtualFileSystem;
 
 /// 工具注册表，维护工具定义并并行执行 tool_calls。
@@ -167,35 +167,32 @@ impl ToolRegistry {
         results
     }
 
-    async fn execute_single(
-        &self,
-        call: &ToolCall,
-    ) -> Result<serde_json::Value, TianyanError> {
+    async fn execute_single(&self, call: &ToolCall) -> Result<serde_json::Value, TianyanError> {
         let start = std::time::Instant::now();
         let arguments = &call.function.arguments;
         let result = match call.function.name.as_str() {
             "read_file" => {
                 let params: ReadFileParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
                 self.security_policy
                     .check_path(std::path::Path::new(&params.path))
-                    .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))?;
                 crate::executor::execute_read_file(&params.path)
                     .await
-                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e.to_string())))
+                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
             }
             "write_file" => {
                 let params: WriteFileParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
                 self.security_policy
                     .check_file_write()
-                    .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))?;
                 self.security_policy
                     .check_path(std::path::Path::new(&params.path))
-                    .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))?;
                 self.security_policy
                     .check_file_size(params.content.len() as u64)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))?;
                 // Approval workflow check — auto-approve safe paths,
                 // deny critical paths (e.g. /etc/, .env), request human
                 // approval for Medium/High risk paths.
@@ -208,25 +205,22 @@ impl ToolRegistry {
                         .request_approval("tool-execution", &action)
                         .await
                         .map_err(|e| {
-                            TianyanError::Custom(format!("tool: 执行失败：{}", format!(
-                                "审批工作流错误: {}",
-                                e
-                            )))
+                            TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
                         })?;
                     if resp.decision != ApprovalDecision::Approve {
-                        return Err(TianyanError::Custom(format!("tool: 安全违规：{}", format!(
-                            "操作被审批工作流拒绝: {}",
+                        return Err(TianyanError::Custom(format!(
+                            "tool: 安全违规：操作被审批工作流拒绝: {}",
                             resp.reason.unwrap_or_default()
-                        ))));
+                        )));
                     }
                 }
                 crate::executor::execute_write_file(&params.path, &params.content)
                     .await
-                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e.to_string())))
+                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
             }
             "execute_command" => {
                 let mut params: ExecuteCommandParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
 
                 // Check command against security policy.
                 // If blocked but safety_mode is Transform, try rewriting to a safe equivalent.
@@ -241,8 +235,9 @@ impl ToolRegistry {
                         );
                         params.command = transformed;
                     } else {
-                        return Err(TianyanError::Custom(format!("tool: 安全违规：{}", 
-                            security_err.to_string(),
+                        return Err(TianyanError::Custom(format!(
+                            "tool: 安全违规：{}",
+                            security_err,
                         )));
                     }
                 }
@@ -251,7 +246,7 @@ impl ToolRegistry {
                 if let Some(ref cwd) = params.cwd {
                     self.security_policy
                         .check_path(std::path::Path::new(cwd))
-                        .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e.to_string())))?;
+                        .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))?;
                 }
 
                 // Approval workflow check — auto-approve safe commands,
@@ -267,16 +262,13 @@ impl ToolRegistry {
                         .request_approval("tool-execution", &action)
                         .await
                         .map_err(|e| {
-                            TianyanError::Custom(format!("tool: 执行失败：{}", format!(
-                                "审批工作流错误: {}",
-                                e
-                            )))
+                            TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
                         })?;
                     if resp.decision != ApprovalDecision::Approve {
-                        return Err(TianyanError::Custom(format!("tool: 安全违规：{}", format!(
-                            "操作被审批工作流拒绝: {}",
+                        return Err(TianyanError::Custom(format!(
+                            "tool: 安全违规：操作被审批工作流拒绝: {}",
                             resp.reason.unwrap_or_default()
-                        ))));
+                        )));
                     }
                 }
                 crate::executor::execute_command_action(
@@ -285,64 +277,58 @@ impl ToolRegistry {
                     params.timeout_secs,
                 )
                 .await
-                .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e.to_string())))
+                .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
             }
             "search_code" => {
                 let params: SearchCodeParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
                 crate::executor::execute_search_code(&params.query, params.scope.as_deref())
                     .await
-                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e.to_string())))
+                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
             }
             "search_knowledge" => {
                 let params: SearchKnowledgeParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
                 self.execute_search_knowledge(&params.query, params.top_k)
                     .await
             }
             "vfs_read" => {
                 let params: VfsReadParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
                 self.execute_vfs_read(&params.uri).await
             }
             "vfs_list" => {
                 let params: VfsListParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
                 self.execute_vfs_list(params.uri.as_deref()).await
             }
             "call_skill" => {
                 let params: CallSkillParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
                 self.execute_call_skill(&params.skill_id, &params.parameters)
                     .await
             }
             "run_tests" => {
                 let params: RunTestsParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
                 crate::executor::execute_run_tests(
                     &params.command,
                     params.cwd.as_deref(),
                     params.timeout_secs,
                 )
                 .await
-                .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e.to_string())))
+                .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
             }
             "verify_build" => {
                 let params: VerifyBuildParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
                 // Use semantic verification if available, otherwise fall back
                 // to exit code + pattern matching.
                 if let Some(ref gate) = self.verification_gate {
                     let result = gate
-                        .verify_build(
-                            &params.command,
-                            params.cwd.as_deref(),
-                            params.timeout_secs,
-                        )
+                        .verify_build(&params.command, params.cwd.as_deref(), params.timeout_secs)
                         .await
-                        .map_err(|e| {
-                            TianyanError::Custom(format!("tool: 执行失败：{}", e.to_string()))
-                        })?;
+                        .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
                     Ok(serde_json::Value::from(result))
                 } else {
                     crate::executor::execute_verify_build(
@@ -351,28 +337,34 @@ impl ToolRegistry {
                         params.timeout_secs,
                     )
                     .await
-                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e.to_string())))
+                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
                 }
             }
             "ask_user" => {
                 let params: AskUserParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
-                Err(TianyanError::Custom(format!("tool: 需要追问：{}", params.question)))
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+                Err(TianyanError::Custom(format!(
+                    "tool: 需要追问：{}",
+                    params.question
+                )))
             }
             "self_check" => self.execute_self_check().await,
             "knowledge_ingest" => {
                 let params: KnowledgeIngestParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
                 self.execute_knowledge_ingest(&params.path, params.category.as_deref())
                     .await
             }
             "delegate_to_agent" => {
                 let params: DelegateToAgentParams = serde_json::from_str(arguments)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
                 self.execute_delegate_to_agent(&params.task, params.system_prompt.as_deref())
                     .await
             }
-            _ => Err(TianyanError::Custom(format!("tool: 未知工具：{}", call.function.name.clone()))),
+            _ => Err(TianyanError::Custom(format!(
+                "tool: 未知工具：{}",
+                call.function.name.clone()
+            ))),
         };
 
         // Record usage stats for tool call
@@ -409,7 +401,11 @@ impl ToolRegistry {
         if !success {
             if let Some(ref recorder) = self.rule_recorder {
                 let tool_name = &call.function.name;
-                let err_msg = result.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+                let err_msg = result
+                    .as_ref()
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default();
                 let abstract_text = format!("{} 工具执行失败", tool_name);
                 let detail_text = format!(
                     "工具: {}\n参数: {}\n错误: {}\n",
@@ -470,11 +466,12 @@ impl ToolRegistry {
                     );
                     Ok(serde_json::Value::Object(data.into_iter().collect()))
                 }
-                Err(e) => Err(TianyanError::Custom(format!("tool: 执行失败：{}", e.to_string()))),
+                Err(e) => Err(TianyanError::Custom(format!("tool: 执行失败：{}", e))),
             }
         } else {
-            Err(TianyanError::Custom(format!("tool: 执行失败：{}", 
-                "SkillExecutor not configured".to_string(),
+            Err(TianyanError::Custom(format!(
+                "tool: 执行失败：{}",
+                "SkillExecutor not configured",
             )))
         }
     }
@@ -485,15 +482,16 @@ impl ToolRegistry {
         top_k: Option<usize>,
     ) -> Result<serde_json::Value, TianyanError> {
         let vfs = self.vfs.as_ref().ok_or_else(|| {
-            TianyanError::Custom(format!("tool: 执行失败：{}", 
-                "VFS not configured for knowledge search".to_string(),
+            TianyanError::Custom(format!(
+                "tool: 执行失败：{}",
+                "VFS not configured for knowledge search",
             ))
         })?;
         let limit = top_k.unwrap_or(5);
         let results: Vec<SearchResult> = vfs
             .search(query, limit, None)
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e.to_string())))?;
+            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
         let items = futures::future::join_all(results.into_iter().map(|r| {
             let uri = r.uri.to_string();
             let uri_clone = r.uri.clone();
@@ -520,12 +518,11 @@ impl ToolRegistry {
     }
 
     async fn execute_vfs_read(&self, uri: &str) -> Result<serde_json::Value, TianyanError> {
-        let vfs = self
-            .vfs
-            .as_ref()
-            .ok_or_else(|| TianyanError::Custom(format!("tool: 执行失败：{}", "VFS not configured".to_string())))?;
+        let vfs = self.vfs.as_ref().ok_or_else(|| {
+            TianyanError::Custom(format!("tool: 执行失败：{}", "VFS not configured"))
+        })?;
         let parsed = TianyanUri::parse(uri)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", format!("无效 URI: {}", e))))?;
+            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：无效 URI: {}", e)))?;
         // 加载三层内容，让 LLM 按需使用
         let (l0, l1, l2) = tokio::join!(
             vfs.read_content(&parsed, ContentLevel::Abstract),
@@ -540,23 +537,19 @@ impl ToolRegistry {
         }))
     }
 
-    async fn execute_vfs_list(
-        &self,
-        uri: Option<&str>,
-    ) -> Result<serde_json::Value, TianyanError> {
-        let vfs = self
-            .vfs
-            .as_ref()
-            .ok_or_else(|| TianyanError::Custom(format!("tool: 执行失败：{}", "VFS not configured".to_string())))?;
+    async fn execute_vfs_list(&self, uri: Option<&str>) -> Result<serde_json::Value, TianyanError> {
+        let vfs = self.vfs.as_ref().ok_or_else(|| {
+            TianyanError::Custom(format!("tool: 执行失败：{}", "VFS not configured"))
+        })?;
         let target_uri = match uri {
             Some(s) => TianyanUri::parse(s)
-                .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", format!("无效 URI: {}", e))))?,
+                .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：无效 URI: {}", e)))?,
             None => TianyanUri::new(ContextNamespace::Knowledge, vec![]),
         };
         let entries = vfs
             .list(&target_uri)
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e.to_string())))?;
+            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
         let items: Vec<serde_json::Value> = entries
             .iter()
             .map(|e| {
@@ -575,7 +568,7 @@ impl ToolRegistry {
 
     async fn execute_self_check(&self) -> Result<serde_json::Value, TianyanError> {
         let metrics = self.metrics.as_ref().ok_or_else(|| {
-            TianyanError::Custom(format!("tool: 执行失败：{}", "AgentMetrics not configured".to_string()))
+            TianyanError::Custom(format!("tool: 执行失败：{}", "AgentMetrics not configured"))
         })?;
         Ok(metrics.query_harness_health().await)
     }
@@ -586,11 +579,14 @@ impl ToolRegistry {
         category: Option<&str>,
     ) -> Result<serde_json::Value, TianyanError> {
         let ingestor = self.knowledge_ingestor.as_ref().ok_or_else(|| {
-            TianyanError::Custom(format!("tool: 执行失败：{}", "KnowledgeIngestor not configured".to_string()))
+            TianyanError::Custom(format!(
+                "tool: 执行失败：{}",
+                "KnowledgeIngestor not configured"
+            ))
         })?;
 
         let meta = std::fs::metadata(path).map_err(|e| {
-            TianyanError::Custom(format!("tool: 执行失败：{}", format!("无法访问路径 '{}': {}", path, e)))
+            TianyanError::Custom(format!("tool: 执行失败：无法访问路径 '{}': {}", path, e))
         })?;
 
         if meta.is_dir() {
@@ -608,7 +604,7 @@ impl ToolRegistry {
         category: Option<&str>,
     ) -> Result<serde_json::Value, TianyanError> {
         let content = tokio::fs::read(path).await.map_err(|e| {
-            TianyanError::Custom(format!("tool: 执行失败：{}", format!("读取文件失败 '{}': {}", path, e)))
+            TianyanError::Custom(format!("tool: 执行失败：读取文件失败 '{}': {}", path, e))
         })?;
 
         let filename = std::path::Path::new(path)
@@ -628,7 +624,7 @@ impl ToolRegistry {
         let result = ingestor
             .ingest(req)
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", format!("知识导入失败: {}", e))))?;
+            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：知识导入失败: {}", e)))?;
 
         Ok(serde_json::json!({
             "status": "completed",
@@ -649,13 +645,13 @@ impl ToolRegistry {
     ) -> Result<serde_json::Value, TianyanError> {
         let mut entries = Vec::new();
         let mut dir = tokio::fs::read_dir(path).await.map_err(|e| {
-            TianyanError::Custom(format!("tool: 执行失败：{}", format!("读取目录失败 '{}': {}", path, e)))
+            TianyanError::Custom(format!("tool: 执行失败：读取目录失败 '{}': {}", path, e))
         })?;
 
         while let Some(entry) = dir
             .next_entry()
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", format!("读取目录条目失败: {}", e))))?
+            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：读取目录条目失败: {}", e)))?
         {
             if entry
                 .file_type()
@@ -718,8 +714,9 @@ impl ToolRegistry {
             const MAX_DELEGATION_TURNS: usize = 200;
 
             let model_service = self.model_service.clone().ok_or_else(|| {
-                TianyanError::Custom(format!("tool: 执行失败：{}", 
-                    "ModelService not configured for delegation".to_string(),
+                TianyanError::Custom(format!(
+                    "tool: 执行失败：{}",
+                    "ModelService not configured for delegation",
                 ))
             })?;
 
@@ -738,11 +735,11 @@ impl ToolRegistry {
                 let response = model_service
                     .chat_completion(request)
                     .await
-                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e.to_string())))?;
+                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
 
                 total_tokens += response.usage.total_tokens;
                 let choice = response.choices.into_iter().next().ok_or_else(|| {
-                    TianyanError::Custom(format!("tool: 执行失败：{}", "Empty response".to_string()))
+                    TianyanError::Custom(format!("tool: 执行失败：{}", "Empty response"))
                 })?;
 
                 let assistant_msg = choice.message;
@@ -782,9 +779,7 @@ impl ToolRegistry {
                     }
                 } else {
                     // LLM provided a final answer — record it and return.
-                    sub_messages.push(Message::assistant(
-                        assistant_msg.content.clone(),
-                    ));
+                    sub_messages.push(Message::assistant(assistant_msg.content.clone()));
                     return Ok(serde_json::json!({
                         "result": assistant_msg.content,
                         "total_tokens": total_tokens,

@@ -170,76 +170,42 @@ export async function fetchDefaultSoul(): Promise<SoulResponse> {
   return apiGet<SoulResponse>('/config/soul/default');
 }
 
-// ========== VFS API ==========
+// ========== Knowledge entries (read-only browse) ==========
 
-export interface NamespaceInfo {
-  name: string;
-  display: string;
-  uri: string;
-}
-
-export interface NamespaceListResponse {
-  namespaces: NamespaceInfo[];
-}
-
-export interface EntryItem {
+export interface KnowledgeEntryItem {
   uri: string;
   name: string;
   is_directory: boolean;
   has_abstract: boolean;
   has_overview: boolean;
   has_detail: boolean;
-  updated_at?: string;
 }
 
-export interface ListEntriesResponse {
-  entries: EntryItem[];
+export interface KnowledgeEntriesResponse {
+  entries: KnowledgeEntryItem[];
 }
 
-export interface ReadEntryResponse {
+/** 列出知识库命名空间下指定路径的直接子条目。 */
+export async function fetchKnowledgeEntries(
+  path?: string
+): Promise<KnowledgeEntriesResponse> {
+  const params = new URLSearchParams();
+  if (path) params.set('path', path);
+  return apiGet<KnowledgeEntriesResponse>(`/knowledge/entries?${params}`);
+}
+
+export interface KnowledgeReadResponse {
   uri: string;
   level: string;
   content: string;
-  updated_at?: string;
 }
 
-export async function fetchNamespaces(): Promise<NamespaceListResponse> {
-  return apiGet<NamespaceListResponse>('/vfs/namespaces');
-}
-
-export async function fetchVfsEntries(namespace?: string, path?: string): Promise<ListEntriesResponse> {
-  const params = new URLSearchParams();
-  if (namespace) params.set('namespace', namespace);
-  if (path) params.set('path', path);
-  return apiGet<ListEntriesResponse>(`/vfs/entries?${params}`);
-}
-
-export async function fetchVfsEntryContent(uri: string, level?: string): Promise<ReadEntryResponse> {
+/** 读取知识库条目的指定层级内容（abstract/overview/detail）。 */
+export async function fetchKnowledgeEntryContent(
+  uri: string,
+  level?: string
+): Promise<KnowledgeReadResponse> {
   const params = new URLSearchParams({ uri });
   if (level) params.set('level', level);
-  return apiGet<ReadEntryResponse>(`/vfs/entries/read?${params}`);
-}
-
-export async function updateVfsEntry(
-  uri: string,
-  level: string,
-  content: string,
-): Promise<{ success: boolean }> {
-  return apiPut('/vfs/entries', { uri, level, content });
-}
-
-export async function deleteVfsEntry(uri: string): Promise<{ success: boolean }> {
-  return apiDelete(`/vfs/entries?uri=${encodeURIComponent(uri)}`);
-}
-
-export interface CreateEntryRequest {
-  uri: string;
-  is_directory?: boolean;
-  abstract_content?: string;
-  overview_content?: string;
-  detail_content?: string;
-}
-
-export async function createVfsEntry(req: CreateEntryRequest): Promise<{ success: boolean; message: string; uri: string }> {
-  return apiPost('/vfs/entries', req);
+  return apiGet<KnowledgeReadResponse>(`/knowledge/entries/read?${params}`);
 }

@@ -187,6 +187,8 @@ pub fn register_builtin_skills(registry: &mut SkillRegistry, config: &ExecutorCo
 
     registry.register_with_handler(
         Skill::new("http_request", "HTTP Request", "Make an HTTP request"),
-        Arc::new(HttpRequestHandler::with_timeout(config.skill_http_timeout_secs)),
+        Arc::new(HttpRequestHandler::with_timeout(
+            config.skill_http_timeout_secs,
+        )),
     );
 }

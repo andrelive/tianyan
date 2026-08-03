@@ -1,12 +1,18 @@
 import { useRef, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
-import { getApiBase } from '@/lib/api-client';
+import { apiGet, apiPost, getApiBase } from '@/lib/api-client';
 import { useChatStream } from '@/hooks/useChatStream';
 import { MessageSquare, Loader2 } from 'lucide-react';
 import ChatInput from './ChatInput';
 import MessageBubble from './MessageBubble';
 import ModelSelector from './ModelSelector';
+import type {
+  ChatMessage,
+  ChatResponse,
+  EditMessageRequest,
+  RegenerateRequest,
+} from '@/lib/types';
 
 export default function ChatPanel() {
   const { sessionId: urlSessionId } = useParams<{ sessionId: string }>();
@@ -120,62 +126,94 @@ export default function ChatPanel() {
     async (assistantIndex: number) => {
       if (streamStatus === 'streaming') return;
 
-      // Delete the assistant response and everything after it
-      deleteMessagesFrom(assistantIndex);
+      const state = useAppStore.getState();
+      const sessionId = state.currentSessionId;
+      if (!sessionId) {
+        state.showToast('请先发送一条消息以创建会话', 'error');
+        return;
+      }
 
-      // Add empty assistant placeholder
+      // 找到该回复之前的最近用户消息索引（后端按用户消息索引重新生成）
+      let userIndex = -1;
+      for (let i = assistantIndex - 1; i >= 0; i--) {
+        if (state.messages[i]?.role === 'user') {
+          userIndex = i;
+          break;
+        }
+      }
+      if (userIndex < 0) {
+        state.showToast('未找到可重新生成的消息', 'error');
+        return;
+      }
+
+      // 乐观更新：截断到该用户消息（含），占位等待新回复
+      deleteMessagesFrom(userIndex + 1);
       addMessage({
         role: 'assistant',
         content: '',
         timestamp: new Date().toISOString(),
       });
 
-      const state = useAppStore.getState();
-      const apiMessages = state.messages.slice(0, -1);
-
       state.setStreamStatus('streaming');
-      await startStream({
-        session_id: state.currentSessionId,
-        messages: apiMessages,
-        stream: true,
-        temperature: 0.7,
-        max_tokens: 2048,
-        model: state.selectedModel,
-      });
+      try {
+        const resp = await apiPost<ChatResponse>('/chat/regenerate', {
+          session_id: sessionId,
+          message_index: userIndex,
+        } satisfies RegenerateRequest);
+        replaceLastAssistant(resp.message);
+      } catch (err: unknown) {
+        state.showToast(
+          `重新生成失败: ${err instanceof Error ? err.message : '未知错误'}`,
+          'error'
+        );
+        await reloadSession(sessionId);
+      } finally {
+        state.setStreamStatus('idle');
+      }
     },
-    [streamStatus, deleteMessagesFrom, addMessage, startStream]
+    [streamStatus, deleteMessagesFrom, addMessage]
   );
 
   const handleEdit = useCallback(
     async (index: number, newContent: string) => {
       if (streamStatus === 'streaming' || !newContent.trim()) return;
 
-      // Update the edited message locally
-      editMessage(index, newContent);
-      // Delete everything after the edited message
-      deleteMessagesFrom(index + 1);
+      const trimmed = newContent.trim();
+      const state = useAppStore.getState();
+      const sessionId = state.currentSessionId;
+      if (!sessionId) {
+        state.showToast('请先发送一条消息以创建会话', 'error');
+        return;
+      }
 
-      // Add empty assistant placeholder
+      // 乐观更新：编辑 + 截断 + 占位等待新回复
+      editMessage(index, trimmed);
+      deleteMessagesFrom(index + 1);
       addMessage({
         role: 'assistant',
         content: '',
         timestamp: new Date().toISOString(),
       });
 
-      const state = useAppStore.getState();
-      const apiMessages = state.messages.slice(0, -1);
-
       state.setStreamStatus('streaming');
-      await startStream({
-        session_id: state.currentSessionId,
-        messages: apiMessages,
-        stream: true,
-        temperature: 0.7,
-        max_tokens: 2048,
-        model: state.selectedModel,
-      });
+      try {
+        const resp = await apiPost<ChatResponse>('/chat/edit', {
+          session_id: sessionId,
+          message_index: index,
+          new_content: trimmed,
+        } satisfies EditMessageRequest);
+        replaceLastAssistant(resp.message);
+      } catch (err: unknown) {
+        state.showToast(
+          `编辑失败: ${err instanceof Error ? err.message : '未知错误'}`,
+          'error'
+        );
+        await reloadSession(sessionId);
+      } finally {
+        state.setStreamStatus('idle');
+      }
     },
-    [streamStatus, editMessage, deleteMessagesFrom, addMessage, startStream]
+    [streamStatus, editMessage, deleteMessagesFrom, addMessage]
   );
 
   const handleDelete = useCallback(
@@ -190,6 +228,35 @@ export default function ChatPanel() {
     stopStream();
     setStreamStatus('idle');
   }, [stopStream, setStreamStatus]);
+
+  // 用服务器返回的回复替换最后一条 assistant 占位消息
+  const replaceLastAssistant = useCallback((msg: ChatResponse['message']) => {
+    const state = useAppStore.getState();
+    const messages = [...state.messages];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') {
+        messages[i] = {
+          ...messages[i],
+          content: msg.content,
+          timestamp: msg.timestamp ?? new Date().toISOString(),
+        };
+        break;
+      }
+    }
+    state.setMessages(messages);
+  }, []);
+
+  // 从后端重新加载会话消息（失败回滚，恢复与持久化一致的状态）
+  const reloadSession = useCallback(async (sessionId: string) => {
+    try {
+      const data = await apiGet<{ messages: ChatMessage[] }>(
+        `/sessions/${sessionId}/messages`
+      );
+      useAppStore.getState().setMessages(data.messages);
+    } catch {
+      useAppStore.getState().setMessages([]);
+    }
+  }, []);
 
   // Determine which message is currently streaming
   const streamingIndex =

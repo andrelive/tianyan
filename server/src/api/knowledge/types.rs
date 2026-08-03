@@ -180,10 +180,63 @@ pub struct SearchResultMetadata {
 /// 检索建议响应
 #[derive(Debug, Serialize)]
 pub struct SearchSuggestionsResponse {
-    /// 搜索查询字符串
+    /// 查询字符串
     pub query: String,
     /// 建议列表
     pub suggestions: Vec<String>,
+}
+
+/// 知识库条目浏览查询参数。
+#[derive(Debug, Deserialize)]
+pub struct ListEntriesQuery {
+    /// 相对知识库根目录的路径（斜杠分隔），为空表示根目录。
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// 知识库条目列表中的单个条目。
+#[derive(Debug, Serialize)]
+pub struct KnowledgeEntryItem {
+    /// 条目 URI。
+    pub uri: String,
+    /// 条目名称（路径最后一段）。
+    pub name: String,
+    /// 是否为目录。
+    pub is_directory: bool,
+    /// 是否包含 L0 摘要。
+    pub has_abstract: bool,
+    /// 是否包含 L1 概览。
+    pub has_overview: bool,
+    /// 是否包含 L2 详情。
+    pub has_detail: bool,
+}
+
+/// 知识库条目列表响应。
+#[derive(Debug, Serialize)]
+pub struct KnowledgeEntriesResponse {
+    /// 当前目录下的条目。
+    pub entries: Vec<KnowledgeEntryItem>,
+}
+
+/// 读取知识条目的查询参数。
+#[derive(Debug, Deserialize)]
+pub struct ReadEntryQuery {
+    /// 条目 URI（必须位于 tianyan://knowledge/ 命名空间）。
+    pub uri: String,
+    /// 内容层级：abstract | overview | detail，缺省 detail。
+    #[serde(default)]
+    pub level: Option<String>,
+}
+
+/// 读取知识条目响应。
+#[derive(Debug, Serialize)]
+pub struct ReadEntryResponse {
+    /// 条目 URI。
+    pub uri: String,
+    /// 实际读取的层级。
+    pub level: String,
+    /// 内容。
+    pub content: String,
 }
 
 #[cfg(test)]

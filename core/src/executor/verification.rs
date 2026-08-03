@@ -3,9 +3,9 @@
 //! 将命令执行与 LLM-as-Judge 语义验证结合起来，
 //! 为 `verify_build` 工具提供深度质量门控。
 
+use crate::common::error::TianyanError;
 use crate::executor::actions::execute_command_action;
 use crate::executor::judge::LlmJudge;
-use crate::common::error::TianyanError;
 use serde_json::json;
 
 /// 验证结果。
@@ -154,7 +154,8 @@ mod tests {
 
     #[test]
     fn test_extract_build_errors_from_stdout() {
-        let stdout = "Compiling foo.rs v1.0.0\nerror[E0308]: mismatched types\n  --> src/main.rs:10:5\n";
+        let stdout =
+            "Compiling foo.rs v1.0.0\nerror[E0308]: mismatched types\n  --> src/main.rs:10:5\n";
         let stderr = "";
         let errors = extract_build_errors(stdout, stderr);
         assert_eq!(errors.len(), 1);

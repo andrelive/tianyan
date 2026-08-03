@@ -44,6 +44,15 @@ pub trait SessionManager: Send + Sync {
     /// 直接持久化 StructuredMessage（不经过 Message 转换）。
     async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()>;
 
+    /// 全量重写会话消息（用于编辑/截断后持久化，覆盖 JSONL 内容）。
+    ///
+    /// 会话必须已存在。传入空切片将清空会话历史。
+    async fn rewrite_messages(
+        &self,
+        session_id: &str,
+        messages: &[StructuredMessage],
+    ) -> Result<()>;
+
     /// 列出所有会话。
     async fn list_sessions(&self) -> Result<Vec<Session>>;
 
@@ -72,8 +81,9 @@ impl PersistentSessionManager {
         use crate::ContentLevel;
 
         // 直接构建 URI 并读取
-        let uri = TianyanUri::parse(&format!("tianyan://session/{}", id))
-            .map_err(|e| TianyanError::Custom(format!("会话存储错误：无效的 session URI: {}", e)))?;
+        let uri = TianyanUri::parse(&format!("tianyan://session/{}", id)).map_err(|e| {
+            TianyanError::Custom(format!("会话存储错误：无效的 session URI: {}", e))
+        })?;
 
         // 尝试读取 JSONL 内容
         let content = match self.vfs.read_content(&uri, ContentLevel::Detail).await {
@@ -130,8 +140,8 @@ impl PersistentSessionManager {
 
     /// 追加消息到 VFS。
     async fn append_message_to_vfs(&self, uri: &TianyanUri, msg: &StructuredMessage) -> Result<()> {
-        let json_line =
-            serde_json::to_string(msg).map_err(|e| TianyanError::Custom(format!("序列化错误：{}", e)))?;
+        let json_line = serde_json::to_string(msg)
+            .map_err(|e| TianyanError::Custom(format!("序列化错误：{}", e)))?;
         let jsonl_line = format!("{}\n", json_line);
         self.vfs.append_content(uri, &jsonl_line).await?;
         Ok(())
@@ -193,14 +203,16 @@ impl SessionManager for PersistentSessionManager {
 
         // 先检查会话是否已存在，避免重复创建
         if self.get_session(id).await?.is_some() {
-            return Err(TianyanError::Custom(format!("会话存储错误：会话已存在：{}", id)));
+            return Err(TianyanError::Custom(format!(
+                "会话存储错误：会话已存在：{}",
+                id
+            )));
         }
 
         // 创建目录
-        self.vfs
-            .create_directory(&uri)
-            .await
-            .map_err(|e| TianyanError::Custom(format!("会话存储错误：会话创建失败：{} ({})", id, e)))?;
+        self.vfs.create_directory(&uri).await.map_err(|e| {
+            TianyanError::Custom(format!("会话存储错误：会话创建失败：{} ({})", id, e))
+        })?;
 
         // 追加第一条消息到 VFS
         self.append_message_to_vfs(&uri, &sm).await?;
@@ -231,8 +243,9 @@ impl SessionManager for PersistentSessionManager {
     }
 
     async fn add_message(&self, session_id: &str, message: Message) -> Result<()> {
-        let uri = TianyanUri::parse(&format!("tianyan://session/{}", session_id))
-            .map_err(|e| TianyanError::Custom(format!("会话存储错误：无效的 session URI: {}", e)))?;
+        let uri = TianyanUri::parse(&format!("tianyan://session/{}", session_id)).map_err(|e| {
+            TianyanError::Custom(format!("会话存储错误：无效的 session URI: {}", e))
+        })?;
 
         let now_ms = Utc::now().timestamp_millis();
         let sm = StructuredMessage {
@@ -262,10 +275,40 @@ impl SessionManager for PersistentSessionManager {
     }
 
     async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()> {
-        let uri = TianyanUri::parse(&format!("tianyan://session/{}", session_id))
-            .map_err(|e| TianyanError::Custom(format!("会话存储错误：无效的 session URI: {}", e)))?;
+        let uri = TianyanUri::parse(&format!("tianyan://session/{}", session_id)).map_err(|e| {
+            TianyanError::Custom(format!("会话存储错误：无效的 session URI: {}", e))
+        })?;
 
         self.append_message_to_vfs(&uri, &msg).await?;
+        Ok(())
+    }
+
+    async fn rewrite_messages(
+        &self,
+        session_id: &str,
+        messages: &[StructuredMessage],
+    ) -> Result<()> {
+        let uri = TianyanUri::parse(&format!("tianyan://session/{}", session_id)).map_err(|e| {
+            TianyanError::Custom(format!("会话存储错误：无效的 session URI: {}", e))
+        })?;
+
+        // 会话必须已存在
+        if !self.vfs.exists(&uri).await? {
+            return Err(TianyanError::Custom(format!(
+                "会话存储错误：会话未找到：{}",
+                session_id
+            )));
+        }
+
+        // 序列化全部消息为 JSONL 并全量覆写 Detail 层级
+        let mut content = String::new();
+        for msg in messages {
+            let json_line = serde_json::to_string(msg)
+                .map_err(|e| TianyanError::Custom(format!("序列化错误：{}", e)))?;
+            content.push_str(&json_line);
+            content.push('\n');
+        }
+        self.vfs.write_content(&uri, &content).await?;
         Ok(())
     }
 
@@ -422,7 +465,7 @@ mod tests {
         setup_session(&vfs, id).await;
 
         // Write directly: 2 messages before marker, 1 marker, 2 after
-        let msgs = vec![
+        let msgs = [
             make_msg("m1", id, MessageRole::User, "old msg 1", false),
             make_msg("m2", id, MessageRole::Assistant, "old reply 1", false),
             make_msg("cmp", id, MessageRole::System, "summary", true), // ← marker

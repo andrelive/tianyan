@@ -212,7 +212,5 @@ pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_traits_defined() {
-        assert!(true);
-    }
+    fn test_traits_defined() {}
 }

@@ -58,9 +58,10 @@ impl SkillHandler for FileWriteHandler {
     ) -> Result<SkillExecutionResult> {
         let start = Instant::now();
 
-        let path = params.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            TianyanError::Custom("[file_write] 缺少 'path' 参数".to_string())
-        })?;
+        let path = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TianyanError::Custom("[file_write] 缺少 'path' 参数".to_string()))?;
 
         let content = params
             .get("content")
@@ -87,9 +88,9 @@ impl SkillHandler for FileWriteHandler {
 
         let timeout = Duration::from_secs(self.timeout_secs);
         let write_op = async {
-            tokio::fs::write(&path, content).await.map_err(|e| {
-                TianyanError::Custom(format!("技能执行错误：写入文件失败: {}", e))
-            })
+            tokio::fs::write(&path, content)
+                .await
+                .map_err(|e| TianyanError::Custom(format!("技能执行错误：写入文件失败: {}", e)))
         };
 
         match tokio::time::timeout(timeout, write_op).await {

@@ -15,6 +15,6 @@ pub use compression::{
     ContextCompressor, TokenEstimator,
 };
 pub use retrieval::{
-    DualLayerRetriever, Intent, IntentAnalyzer,
-    RetrievalResult, RetrievalStep, RetrievalStepType, RetrievalTrace,
+    DualLayerRetriever, Intent, IntentAnalyzer, RetrievalResult, RetrievalStep, RetrievalStepType,
+    RetrievalTrace,
 };

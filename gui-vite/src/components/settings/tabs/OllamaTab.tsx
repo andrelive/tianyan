@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Loader2, Wifi, WifiOff, RefreshCw, Plus } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
 import {
+  apiPost,
   scanOllamaModels,
   testOllamaConnection,
 } from '@/lib/api-client';
@@ -70,7 +71,6 @@ export default function OllamaTab() {
   const handleAddToConfig = async (model: OllamaModelInfo) => {
     setAddingModel(model.name);
     try {
-      const { apiPost } = await import('@/lib/api-client');
       await apiPost('/config/ollama/add-model', {
         endpoint,
         model_name: model.name,

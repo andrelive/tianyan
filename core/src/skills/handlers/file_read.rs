@@ -58,17 +58,18 @@ impl SkillHandler for FileReadHandler {
     ) -> Result<SkillExecutionResult> {
         let start = Instant::now();
 
-        let path = params.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            TianyanError::Custom("[file_read] 缺少 'path' 参数".to_string())
-        })?;
+        let path = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TianyanError::Custom("[file_read] 缺少 'path' 参数".to_string()))?;
 
         let path = PathBuf::from(path);
         validate_path(&path, &self.allowed_paths)?;
 
         // Check file size before reading
-        let metadata = tokio::fs::metadata(&path).await.map_err(|e| {
-            TianyanError::Custom(format!("技能执行错误：无法获取文件信息: {}", e))
-        })?;
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(|e| TianyanError::Custom(format!("技能执行错误：无法获取文件信息: {}", e)))?;
         if metadata.len() > self.max_file_size {
             return Err(TianyanError::Custom(format!(
                 "操作不被允许：文件大小 {} 超过读取上限 {} 字节",

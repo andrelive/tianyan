@@ -234,9 +234,10 @@ impl GcTask {
                                 if !std::path::Path::new(&rs_path).exists()
                                     && !std::path::Path::new(&format!("{}/mod.rs", &fs_path))
                                         .exists()
-                                    && !report.missing_modules.contains(&module_path.to_string()) {
-                                        report.missing_modules.push(module_path.to_string());
-                                    }
+                                    && !report.missing_modules.contains(&module_path.to_string())
+                                {
+                                    report.missing_modules.push(module_path.to_string());
+                                }
                             }
                         }
                     }

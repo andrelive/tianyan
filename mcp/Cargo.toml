@@ -1,0 +1,29 @@
+[package]
+name = "tianyan-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MCP (Model Context Protocol) client for Tianyan - manages MCP server connections"
+readme = "../README.md"
+keywords = ["mcp", "client", "protocol", "ai", "tools"]
+categories = ["development-tools"]
+
+[lib]
+name = "tianyan_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+rust-mcp-sdk = { version = "0.9", default-features = false, features = ["client", "stdio"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }

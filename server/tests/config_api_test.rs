@@ -1,5 +1,8 @@
 //! 配置 API 集成测试 — 测试运行时配置的 HTTP 端点
 
+// 测试代码中 unwrap 是有意的（失败即 panic 即测试失败），豁免以保持测试可读性。
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use std::sync::Arc;
@@ -122,10 +125,10 @@ async fn test_models_endpoint_returns_services() {
         "models 响应应包含 preferences 字段"
     );
 
-    let services = body["services"].as_array().unwrap();
-    assert!(!services.is_empty(), "至少应有一项服务");
+    let providers = body["providers"].as_array().unwrap();
+    assert!(!providers.is_empty(), "至少应有一项服务");
 
-    let first = &services[0];
+    let first = &providers[0];
     assert_eq!(first["name"], "mock-service");
     assert_eq!(first["enabled"], true);
 

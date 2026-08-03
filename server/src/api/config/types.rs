@@ -50,11 +50,13 @@ mod tests {
     fn test_switch_model_request_validation() {
         let req = SwitchModelRequest {
             model: "gpt-4".to_string(),
+            capability: None,
         };
         assert!(req.validate().is_ok());
 
         let req = SwitchModelRequest {
             model: "".to_string(),
+            capability: None,
         };
         assert!(req.validate().is_err());
     }

@@ -31,6 +31,13 @@
 //! }
 //! ```
 
+// 测试代码中 unwrap/expect 是有意的（失败即 panic 即测试失败），
+// 豁免这些 lint 以保持测试可读性。生产代码不受影响。
+#![cfg_attr(
+    test,
+    allow(clippy::unwrap_used, clippy::expect_used, clippy::unwrap_in_result)
+)]
+
 pub mod agent;
 pub mod common;
 pub mod config;

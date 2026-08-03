@@ -248,15 +248,10 @@ mod tests {
     use super::*;
     use crate::test_utils::MockVfs;
 
-    use crate::common::error::TianyanError;
-    use crate::common::types::{
-        ContentLevel, ContextNamespace, Message, MessageRole, SearchResult, TianyanUri,
-    };
+    use crate::common::types::{ContentLevel, ContextNamespace, Message, SearchResult, TianyanUri};
     use crate::context::compression::CompressionConfig;
-    use crate::context::retrieval::{DualLayerRetriever, RetrievalResult};
-    use crate::model::types::{
-        ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
-    };
+    use crate::context::retrieval::DualLayerRetriever;
+    use crate::model::types::{ChatChoice, ChatCompletionResponse};
     use crate::model::ChatService;
     use crate::test_utils::MockChatService;
     use crate::vfs::{ContextEntry, VirtualFileSystem};
@@ -334,11 +329,11 @@ mod tests {
     #[tokio::test]
     async fn test_run_loads_soul() {
         let soul_uri = AgentPath::Soul.uri();
-        let vfs = Arc::new(MockVfs::builder().with_content(
-            &soul_uri,
-            ContentLevel::Detail,
-            "You are a helpful AI.",
-        ).build());
+        let vfs = Arc::new(
+            MockVfs::builder()
+                .with_content(&soul_uri, ContentLevel::Detail, "You are a helpful AI.")
+                .build(),
+        );
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![];
 
@@ -381,7 +376,11 @@ mod tests {
     #[tokio::test]
     async fn test_run_rules_empty_results() {
         let soul_uri = AgentPath::Soul.uri();
-        let vfs = Arc::new(MockVfs::builder().with_content(&soul_uri, ContentLevel::Detail, "soul").build());
+        let vfs = Arc::new(
+            MockVfs::builder()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .build(),
+        );
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![];
 
@@ -473,7 +472,11 @@ mod tests {
     #[tokio::test]
     async fn test_run_no_compression_for_few_messages() {
         let soul_uri = AgentPath::Soul.uri();
-        let vfs = Arc::new(MockVfs::builder().with_content(&soul_uri, ContentLevel::Detail, "soul").build());
+        let vfs = Arc::new(
+            MockVfs::builder()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .build(),
+        );
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![Message::user("hello"), Message::assistant("hi")];
 
@@ -488,7 +491,11 @@ mod tests {
     #[tokio::test]
     async fn test_run_compression_triggers_with_many_messages() {
         let soul_uri = AgentPath::Soul.uri();
-        let vfs = Arc::new(MockVfs::builder().with_content(&soul_uri, ContentLevel::Detail, "soul").build());
+        let vfs = Arc::new(
+            MockVfs::builder()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .build(),
+        );
 
         let config = CompressionConfig {
             context_window: 100,

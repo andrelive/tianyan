@@ -28,9 +28,7 @@ impl HttpRequestHandler {
             .pool_max_idle_per_host(5)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self {
-            client,
-        }
+        Self { client }
     }
 }
 
@@ -49,9 +47,10 @@ impl SkillHandler for HttpRequestHandler {
     ) -> Result<SkillExecutionResult> {
         let start = Instant::now();
 
-        let url = params.get("url").and_then(|v| v.as_str()).ok_or_else(|| {
-            TianyanError::Custom("[http_request] 缺少 'url' 参数".to_string())
-        })?;
+        let url = params
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TianyanError::Custom("[http_request] 缺少 'url' 参数".to_string()))?;
 
         if let Ok(parsed) = url.parse::<reqwest::Url>() {
             let scheme = parsed.scheme();
@@ -76,7 +75,9 @@ impl SkillHandler for HttpRequestHandler {
                 }
             }
         } else {
-            return Err(TianyanError::Custom("[http_request] 无效的 URL 格式".to_string()));
+            return Err(TianyanError::Custom(
+                "[http_request] 无效的 URL 格式".to_string(),
+            ));
         }
 
         let method = params

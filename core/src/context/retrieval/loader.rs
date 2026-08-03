@@ -28,7 +28,7 @@ impl ContentLoadStrategy {
     }
 
     /// 获取此策略对应的内容层级。
-    pub fn to_content_level(&self) -> ContentLevel {
+    pub fn to_content_level(self) -> ContentLevel {
         match self {
             Self::Full => ContentLevel::Detail,
             Self::Overview => ContentLevel::Overview,

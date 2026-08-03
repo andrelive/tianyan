@@ -6,7 +6,8 @@ use axum::{
 };
 
 use crate::api::knowledge::handlers::{
-    get_ingest_status_handler, ingest_handler, search_handler, search_suggestions_handler,
+    get_ingest_status_handler, ingest_handler, list_entries_handler, read_entry_handler,
+    search_handler, search_suggestions_handler,
 };
 use crate::state::AppState;
 
@@ -23,4 +24,7 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/knowledge/search/suggestions",
             get(search_suggestions_handler),
         )
+        // 只读浏览：列表 + 读内容（不提供写操作，知识条目通过 ingest 管理）
+        .route("/knowledge/entries", get(list_entries_handler))
+        .route("/knowledge/entries/read", get(read_entry_handler))
 }

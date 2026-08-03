@@ -98,7 +98,9 @@ pub trait EmbeddingService: Send + Sync {
             .first()
             .map(|d| Embedding::new(d.embedding.clone()))
             .ok_or_else(|| {
-                crate::common::error::TianyanError::Custom("嵌入服务错误：未返回嵌入向量".to_string())
+                crate::common::error::TianyanError::Custom(
+                    "嵌入服务错误：未返回嵌入向量".to_string(),
+                )
             })
     }
 
@@ -116,7 +118,9 @@ pub trait EmbeddingService: Send + Sync {
             .first()
             .map(|d| Embedding::new(d.embedding.clone()))
             .ok_or_else(|| {
-                crate::common::error::TianyanError::Custom("嵌入服务错误：未返回嵌入向量".to_string())
+                crate::common::error::TianyanError::Custom(
+                    "嵌入服务错误：未返回嵌入向量".to_string(),
+                )
             })
     }
 
@@ -154,67 +158,4 @@ pub trait EmbeddingService: Send + Sync {
 pub trait VlmService: Send + Sync {
     /// 分析图像并生成描述。
     async fn analyze_image(&self, request: VisionRequest) -> Result<VisionResponse>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::sync::mpsc;
-
-    use crate::common::error::Result;
-    use crate::common::types::Message;
-    use crate::model::types::{
-        ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
-        EmbeddingRequest, EmbeddingResponse, ModelCapability, ModelInfo, ModelType, VisionChoice,
-        VisionContent, VisionMessage, VisionRequest, VisionResponse,
-    };
-
-    /// MockVlmService: 用于测试的 VlmService 实现。
-    pub(crate) struct MockVlmService;
-
-    #[async_trait]
-    impl VlmService for MockVlmService {
-        async fn analyze_image(&self, _request: VisionRequest) -> Result<VisionResponse> {
-            Ok(VisionResponse {
-                id: "mock-vision".to_string(),
-                object: "chat.completion".to_string(),
-                created: 0,
-                model: "mock-vision".to_string(),
-                choices: vec![VisionChoice {
-                    index: 0,
-                    message: VisionMessage {
-                        role: "assistant".to_string(),
-                        content: VisionContent::Text("模拟图像描述".to_string()),
-                    },
-                    finish_reason: Some("stop".to_string()),
-                }],
-                usage: crate::common::types::TokenUsage::default(),
-            })
-        }
-    }
-
-    /// MockServiceDiscovery: 用于测试的 ServiceDiscovery 实现。
-    pub(crate) struct MockServiceDiscovery;
-
-    #[async_trait]
-    impl ServiceDiscovery for MockServiceDiscovery {
-        async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-            Ok(vec![ModelInfo {
-                id: "mock-model".to_string(),
-                name: "Mock Model".to_string(),
-                provider: "mock".to_string(),
-                model_type: ModelType::Chat,
-                max_context_length: 4096,
-                capabilities: vec![ModelCapability::Chat, ModelCapability::Streaming],
-            }])
-        }
-
-        async fn is_available(&self) -> bool {
-            true
-        }
-
-        fn service_name(&self) -> &str {
-            "mock-discovery"
-        }
-    }
 }

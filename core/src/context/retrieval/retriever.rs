@@ -112,7 +112,7 @@ impl DualLayerRetriever {
         // Record doc hits and search query in usage stats
         if let Some(ref stats) = self.usage_stats {
             for result in &results {
-                stats.record_doc_hit(&result.uri.to_string(), result.score);
+                stats.record_doc_hit(result.uri.as_str(), result.score);
             }
             let ns = results.first().map(|r| r.uri.namespace().to_string());
             stats.record_search_query(query, results.len(), ns.as_deref());
@@ -134,7 +134,7 @@ impl DualLayerRetriever {
         if let Some(ref stats) = self.usage_stats {
             for result in &results {
                 if result.has_content() {
-                    stats.record_doc_load(&result.uri.to_string());
+                    stats.record_doc_load(result.uri.as_str());
                 }
             }
         }
@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl crate::vfs::VectorStorage for InMemoryVectorStorage {
+    impl VectorStorage for InMemoryVectorStorage {
         async fn initialize(&self) -> Result<()> {
             Ok(())
         }
@@ -667,8 +667,7 @@ mod tests {
         let vfs: Arc<dyn VirtualFileSystem> =
             Arc::new(TestVfs::new(vector_storage, Arc::new(MockEmbeddingService)));
 
-        DualLayerRetriever::new(vfs)
-            .with_embedding_service(Arc::new(MockEmbeddingService))
+        DualLayerRetriever::new(vfs).with_embedding_service(Arc::new(MockEmbeddingService))
     }
 
     async fn create_test_retriever_with_data() -> (DualLayerRetriever, Arc<InMemoryVectorStorage>) {
@@ -700,8 +699,8 @@ mod tests {
             Arc::new(MockEmbeddingService),
         ));
 
-        let retriever = DualLayerRetriever::new(vfs)
-            .with_embedding_service(Arc::new(MockEmbeddingService));
+        let retriever =
+            DualLayerRetriever::new(vfs).with_embedding_service(Arc::new(MockEmbeddingService));
 
         (retriever, vector_storage)
     }

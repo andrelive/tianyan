@@ -6,11 +6,11 @@
 //!
 //! 模型服务层组织如下：
 //!
-//! - [`traits`]: 核心服务 trait（ChatService, EmbeddingService, VlmService）
-//! - [`types`]: 请求和响应的类型定义
-//! - [`config`]: 模型服务配置（ModelConfig）
-//! - [`provider`]: 基于 async-openai 的 OpenAI 兼容 API 客户端实现
-//! - [`services`]: 从配置构建一组已包装（日志）服务的简单容器
+//! - [traits](crate::model::traits): 核心服务 trait（ChatService, EmbeddingService, VlmService）
+//! - [types](crate::model::types): 请求和响应的类型定义
+//! - [config](crate::config): 模型服务配置（ModelConfig）
+//! - [provider](crate::model::provider): 基于 async-openai 的 OpenAI 兼容 API 客户端实现
+//! - [services](crate::model::services): 从配置构建一组已包装（日志）服务的简单容器
 //!
 //! # 示例
 //!

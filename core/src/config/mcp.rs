@@ -61,10 +61,11 @@ impl McpServerEntry {
             )));
         }
         if self.command.is_empty() {
+            let key = format!("mcp.servers['{}'].command", self.name);
+            let message = format!("MCP 服务器 '{}' 的命令不能为空", self.name);
             return Err(TianyanError::Custom(format!(
                 "'{}' 的配置值无效：{}",
-                format!("mcp.servers['{}'].command", self.name),
-                format!("MCP 服务器 '{}' 的命令不能为空", self.name)
+                key, message
             )));
         }
         Ok(())
@@ -131,7 +132,11 @@ mod tests {
         };
         let result = entry.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("名称不能为空"));
+        let message = match result {
+            Err(e) => e.to_string(),
+            Ok(()) => String::new(),
+        };
+        assert!(message.contains("名称不能为空"));
     }
 
     #[test]
@@ -146,7 +151,11 @@ mod tests {
         };
         let result = entry.validate();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("命令不能为空"));
+        let message = match result {
+            Err(e) => e.to_string(),
+            Ok(()) => String::new(),
+        };
+        assert!(message.contains("命令不能为空"));
     }
 
     #[test]
@@ -195,8 +204,14 @@ mod tests {
                 description: Some("Safe file access".to_string()),
             }],
         };
-        let toml_str = toml::to_string_pretty(&config).unwrap();
-        let parsed: McpConfig = toml::from_str(&toml_str).unwrap();
+        let toml_str = match toml::to_string_pretty(&config) {
+            Ok(s) => s,
+            Err(e) => panic!("McpConfig 序列化失败: {e}"),
+        };
+        let parsed: McpConfig = match toml::from_str(&toml_str) {
+            Ok(c) => c,
+            Err(e) => panic!("McpConfig 反序列化失败: {e}"),
+        };
         assert_eq!(parsed.servers.len(), 1);
         assert_eq!(parsed.servers[0].name, "filesystem");
         assert_eq!(parsed.servers[0].command, "npx");

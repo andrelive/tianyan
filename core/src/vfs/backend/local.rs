@@ -34,10 +34,9 @@ impl LocalFileBackend {
 
     /// 确保目录存在，如需要则创建。
     async fn ensure_dir(&self, path: &Path) -> Result<()> {
-        if !fs::try_exists(path)
-            .await
-            .map_err(|e| TianyanError::Custom(format!("存储后端错误：检查目录 {path:?} 失败: {e}")))?
-        {
+        if !fs::try_exists(path).await.map_err(|e| {
+            TianyanError::Custom(format!("存储后端错误：检查目录 {path:?} 失败: {e}"))
+        })? {
             fs::create_dir_all(path).await.map_err(|e| {
                 TianyanError::Custom(format!("存储后端错误：创建目录 {path:?} 失败: {e}"))
             })?;
@@ -140,7 +139,7 @@ impl LocalFileBackend {
 
         if !fs::try_exists(&path)
             .await
-            .map_err(|e| TianyanError::Custom(format!("存储后端错误：访问 {path:?} 失败: {e}")))? 
+            .map_err(|e| TianyanError::Custom(format!("存储后端错误：访问 {path:?} 失败: {e}")))?
         {
             return Err(TianyanError::Custom(format!(
                 "条目未找到：{} 无 {:?} 层级内容",
@@ -257,7 +256,10 @@ impl LocalFileBackend {
         })?;
 
         if !meta.is_dir() {
-            return Err(TianyanError::Custom(format!("目录未找到：{}", path.display())));
+            return Err(TianyanError::Custom(format!(
+                "目录未找到：{}",
+                path.display()
+            )));
         }
 
         let mut read_dir = fs::read_dir(&path).await.map_err(|e| {
@@ -338,8 +340,10 @@ mod tests {
     async fn test_local_storage_initialize() {
         let dir = tempdir().unwrap();
         let sub = dir.path().join("data");
-        let mut config = StorageConfig::default();
-        config.data_dir = sub.clone();
+        let config = StorageConfig {
+            data_dir: sub.clone(),
+            ..Default::default()
+        };
         let storage = LocalFileBackend::new(config);
 
         assert!(!fs::try_exists(&sub).await.unwrap_or(false));
@@ -350,8 +354,10 @@ mod tests {
     #[tokio::test]
     async fn test_local_storage_write_read_entry() {
         let dir = tempdir().unwrap();
-        let mut config = StorageConfig::default();
-        config.data_dir = dir.path().into();
+        let config = StorageConfig {
+            data_dir: dir.path().into(),
+            ..Default::default()
+        };
         let storage = LocalFileBackend::new(config);
         storage.initialize().await.unwrap();
 
@@ -377,8 +383,10 @@ mod tests {
     #[tokio::test]
     async fn test_local_storage_delete_entry() {
         let dir = tempdir().unwrap();
-        let mut config = StorageConfig::default();
-        config.data_dir = dir.path().into();
+        let config = StorageConfig {
+            data_dir: dir.path().into(),
+            ..Default::default()
+        };
         let storage = LocalFileBackend::new(config);
         storage.initialize().await.unwrap();
 
@@ -399,8 +407,10 @@ mod tests {
     #[tokio::test]
     async fn test_local_storage_list_directory() {
         let dir = tempdir().unwrap();
-        let mut config = StorageConfig::default();
-        config.data_dir = dir.path().into();
+        let config = StorageConfig {
+            data_dir: dir.path().into(),
+            ..Default::default()
+        };
         let storage = LocalFileBackend::new(config);
         storage.initialize().await.unwrap();
 

@@ -237,14 +237,6 @@ mod tests {
                 .unwrap()
                 .insert((uri.to_string(), level), text.to_string());
         }
-
-        fn add_entry_for_dir(&self, dir_uri: &TianyanUri, entry_uri: &TianyanUri) {
-            let mut entries = self.entries.lock().unwrap();
-            entries
-                .entry(dir_uri.to_string())
-                .or_default()
-                .push(ContextEntry::new_file(entry_uri.clone()));
-        }
     }
 
     #[async_trait]

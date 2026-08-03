@@ -115,15 +115,10 @@ impl Intent {
         self
     }
 
-    /// 设置目标范围。
+    /// 设置目标范围（测试路径使用）。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn with_scope(mut self, scope: TargetScope) -> Self {
         self.target_scope = Some(scope);
-        self
-    }
-
-    /// 设置查询类型。
-    pub(crate) fn with_query_type(mut self, query_type: QueryType) -> Self {
-        self.query_type = query_type;
         self
     }
 

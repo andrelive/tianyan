@@ -229,10 +229,12 @@ impl Default for MockSummaryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::common::types::TokenUsage;
-    use crate::model::types::{ChatChoice, ChatCompletionResponse, EmbeddingData, EmbeddingRequest, EmbeddingResponse};
+    use crate::model::types::{
+        ChatChoice, ChatCompletionResponse, EmbeddingData, EmbeddingRequest, EmbeddingResponse,
+    };
     use crate::model::{EmbeddingService, MockChatService};
+    use async_trait::async_trait;
 
     /// Helper to build a ChatCompletionResponse from a content string.
     fn mock_chat_response(content: &str) -> ChatCompletionResponse {
@@ -302,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_mock_summary_engine_default() {
-        let engine = MockSummaryEngine::default();
+        let engine = MockSummaryEngine;
         let content = "Test content";
         let abstract_content = engine.generate_abstract(content);
         assert!(!abstract_content.is_empty());
@@ -312,7 +314,7 @@ mod tests {
     fn test_token_limit_constants() {
         assert_eq!(ABSTRACT_TOKEN_LIMIT, 100);
         assert_eq!(OVERVIEW_TOKEN_LIMIT, 2000);
-        assert!(ABSTRACT_TOKEN_LIMIT < OVERVIEW_TOKEN_LIMIT);
+        const { assert!(ABSTRACT_TOKEN_LIMIT < OVERVIEW_TOKEN_LIMIT) };
     }
 
     /// ── 真实 SummaryEngine 测试 ─────────────────────────────────────────
@@ -367,16 +369,15 @@ mod tests {
     async fn test_generate_summaries_with_mock() {
         let mut chat = MockChatService::new();
         let call_count = std::sync::Mutex::new(0usize);
-        chat.expect_chat_completion()
-            .returning(move |_| {
-                let mut count = call_count.lock().unwrap();
-                *count += 1;
-                if *count == 1 {
-                    Ok(mock_chat_response("Test abstract summary"))
-                } else {
-                    Ok(mock_chat_response("Test overview content"))
-                }
-            });
+        chat.expect_chat_completion().returning(move |_| {
+            let mut count = call_count.lock().unwrap();
+            *count += 1;
+            if *count == 1 {
+                Ok(mock_chat_response("Test abstract summary"))
+            } else {
+                Ok(mock_chat_response("Test overview content"))
+            }
+        });
         let emb = MockTestEmbeddingService::new();
         let engine = SummaryEngine::new(
             Arc::new(chat),
@@ -384,10 +385,8 @@ mod tests {
             "test-model",
             "test-embed-model",
         );
-        let (abstract_result, overview_result) = engine
-            .generate_summaries("Some content")
-            .await
-            .unwrap();
+        let (abstract_result, overview_result) =
+            engine.generate_summaries("Some content").await.unwrap();
         assert_eq!(abstract_result, "Test abstract summary");
         assert_eq!(overview_result, "Test overview content");
     }
@@ -398,8 +397,7 @@ mod tests {
         let mut emb = MockTestEmbeddingService::new();
         emb.expect_embed()
             .returning(|_| Ok(mock_embedding_response(vec![1.0, 2.0, 3.0])));
-        emb.expect_embedding_dimension()
-            .returning(|_| 3);
+        emb.expect_embedding_dimension().returning(|_| 3);
         let engine = SummaryEngine::new(
             Arc::new(chat),
             Arc::new(emb),
@@ -415,18 +413,16 @@ mod tests {
         let chat = MockChatService::new();
         let mut emb = MockTestEmbeddingService::new();
         let call_count = std::sync::Mutex::new(0usize);
-        emb.expect_embed()
-            .returning(move |_| {
-                let mut count = call_count.lock().unwrap();
-                *count += 1;
-                if *count == 1 {
-                    Ok(mock_embedding_response(vec![1.0, 0.0, 0.0]))
-                } else {
-                    Ok(mock_embedding_response(vec![0.0, 1.0, 0.0]))
-                }
-            });
-        emb.expect_embedding_dimension()
-            .returning(|_| 3);
+        emb.expect_embed().returning(move |_| {
+            let mut count = call_count.lock().unwrap();
+            *count += 1;
+            if *count == 1 {
+                Ok(mock_embedding_response(vec![1.0, 0.0, 0.0]))
+            } else {
+                Ok(mock_embedding_response(vec![0.0, 1.0, 0.0]))
+            }
+        });
+        emb.expect_embedding_dimension().returning(|_| 3);
         let engine = SummaryEngine::new(
             Arc::new(chat),
             Arc::new(emb),
@@ -473,10 +469,19 @@ mod tests {
             .generate_image_overview("A cat", &[], None)
             .await
             .unwrap();
-        assert!(result.contains("## 图片描述"), "should have description header");
+        assert!(
+            result.contains("## 图片描述"),
+            "should have description header"
+        );
         assert!(result.contains("A cat"), "should contain description text");
-        assert!(!result.contains("## 识别元素"), "should NOT have elements section");
-        assert!(!result.contains("## 图中文字"), "should NOT have OCR section");
+        assert!(
+            !result.contains("## 识别元素"),
+            "should NOT have elements section"
+        );
+        assert!(
+            !result.contains("## 图中文字"),
+            "should NOT have OCR section"
+        );
 
         // description + elements, no OCR
         let result = engine
@@ -542,9 +547,6 @@ mod tests {
             desc_pos < elem_pos,
             "description should come before elements"
         );
-        assert!(
-            elem_pos < ocr_pos,
-            "elements should come before OCR text"
-        );
+        assert!(elem_pos < ocr_pos, "elements should come before OCR text");
     }
 }

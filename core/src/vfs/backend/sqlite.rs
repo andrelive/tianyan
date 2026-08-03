@@ -102,7 +102,9 @@ impl SqliteBackend {
             },
         )
         .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => TianyanError::Custom(format!("条目未找到：{uri_str}")),
+            rusqlite::Error::QueryReturnedNoRows => {
+                TianyanError::Custom(format!("条目未找到：{uri_str}"))
+            }
             other => TianyanError::Custom(format!("存储后端错误：读取条目失败: {other}")),
         })
     }
@@ -157,7 +159,7 @@ impl SqliteBackend {
     /// 列出指定 URI 下的一级子条目（基于 SQL LIKE 过滤）。
     pub async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
         let conn = self.db.lock().await;
-        let prefix = format!("{}/", uri.to_string());
+        let prefix = format!("{}/", uri);
         // 只列出一级子条目：匹配 prefix，且 prefix 之后不含 '/'
         let pattern = format!("{}%", prefix);
 

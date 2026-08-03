@@ -1,5 +1,8 @@
 //! 端到端系统测试 — 完整启动 → API 调用 → 验证流程
 
+// 测试代码中 unwrap 是有意的（失败即 panic 即测试失败），豁免以保持测试可读性。
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod common;
 
 use std::sync::Arc;
@@ -74,4 +77,22 @@ async fn full_router() -> Router {
                 }
             })
         })
+}
+
+#[tokio::test]
+async fn test_e2e_full_router_health_and_config() {
+    let router = full_router().await;
+    let server = TestServer::start(router).await.unwrap();
+
+    // 健康检查
+    let resp = server.get("/health").await;
+    assert_eq!(resp.status(), 200);
+
+    // 配置端点返回有效 JSON
+    let resp = server.get("/api/v1/config").await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body.get("config").is_some(), "响应应包含 config 字段");
+
+    server.shutdown();
 }

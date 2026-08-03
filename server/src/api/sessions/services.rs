@@ -249,8 +249,6 @@ impl SessionService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_session_service_creation() {
         // 编译时测试

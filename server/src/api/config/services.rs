@@ -1,9 +1,9 @@
 // 标准库
 use std::sync::Arc;
 
-use tracing::info;
+use tracing::{info, warn};
 
-use tianyan::config::TianyanConfig;
+use tianyan::config::{McpServerEntry, TianyanConfig};
 
 use crate::api::config::types::{ConfigResponse, ModelsResponse, UpdateConfigResponse};
 use crate::api::shared::error::ApiError;
@@ -142,5 +142,185 @@ impl ConfigService {
 
         info!(path = %path.display(), "配置已保存到: {}", path.display());
         Ok(())
+    }
+
+    /// 校验、持久化并热重载配置。
+    async fn persist_and_reload(&self, config: TianyanConfig) -> Result<(), ApiError> {
+        config.validate().map_err(ApiError::Config)?;
+        self.persist_config(&config).await?;
+        self.state
+            .update_config(config)
+            .await
+            .map_err(|e| ApiError::Internal(format!("热重载失败: {}", e)))?;
+        Ok(())
+    }
+
+    // ─── MCP 服务器管理 ───
+
+    /// 列出所有 MCP 服务器。
+    pub async fn list_mcp_servers(&self) -> Vec<McpServerEntry> {
+        self.state.config().read().await.clone().mcp.servers
+    }
+
+    /// 添加 MCP 服务器（校验 + 持久化 + 热重载）。
+    pub async fn add_mcp_server(&self, server: McpServerEntry) -> Result<(), ApiError> {
+        server
+            .validate()
+            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+        let mut config = self.state.config().read().await.clone();
+        if config.mcp.servers.iter().any(|s| s.name == server.name) {
+            return Err(ApiError::BadRequest(format!(
+                "MCP 服务器 '{}' 已存在",
+                server.name
+            )));
+        }
+        config.mcp.servers.push(server);
+        self.persist_and_reload(config).await
+    }
+
+    /// 移除 MCP 服务器。
+    pub async fn remove_mcp_server(&self, name: &str) -> Result<(), ApiError> {
+        let mut config = self.state.config().read().await.clone();
+        let before = config.mcp.servers.len();
+        config.mcp.servers.retain(|s| s.name != name);
+        if config.mcp.servers.len() == before {
+            return Err(ApiError::NotFound(format!("MCP 服务器 '{}' 未找到", name)));
+        }
+        self.persist_and_reload(config).await
+    }
+
+    /// 启用/禁用 MCP 服务器。
+    pub async fn toggle_mcp_server(&self, name: &str, enabled: bool) -> Result<(), ApiError> {
+        let mut config = self.state.config().read().await.clone();
+        let server = config
+            .mcp
+            .servers
+            .iter_mut()
+            .find(|s| s.name == name)
+            .ok_or_else(|| ApiError::NotFound(format!("MCP 服务器 '{}' 未找到", name)))?;
+        server.enabled = enabled;
+        self.persist_and_reload(config).await
+    }
+
+    /// 测试 MCP 服务器连接：启动子进程、完成 MCP 握手、统计工具数量。
+    pub async fn test_mcp_server(
+        &self,
+        name: &str,
+    ) -> Result<crate::api::config::mcp_handlers::McpTestResponse, ApiError> {
+        let config = self.state.config().read().await.clone();
+        let entry = config
+            .mcp
+            .servers
+            .iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| ApiError::NotFound(format!("MCP 服务器 '{}' 未找到", name)))?;
+
+        match tianyan_mcp::McpClient::connect(
+            entry.name.clone(),
+            entry.command.clone(),
+            entry.args.clone(),
+            entry.env.clone(),
+        )
+        .await
+        {
+            Ok(client) => {
+                let tools = client
+                    .list_tools()
+                    .await
+                    .map_err(|e| ApiError::Internal(format!("获取工具列表失败: {}", e)))?
+                    .len();
+                let _ = client.disconnect().await;
+                info!(server = %name, tools, "MCP 服务器连接测试成功");
+                Ok(crate::api::config::mcp_handlers::McpTestResponse {
+                    success: true,
+                    tools,
+                    error: None,
+                })
+            }
+            Err(e) => {
+                warn!(server = %name, error = %e, "MCP 服务器连接测试失败");
+                Ok(crate::api::config::mcp_handlers::McpTestResponse {
+                    success: false,
+                    tools: 0,
+                    error: Some(e.to_string()),
+                })
+            }
+        }
+    }
+
+    // ─── Ollama 模型注册 ───
+
+    /// 将 Ollama 模型注册进模型配置（自动创建 "ollama" 提供商）。
+    pub async fn add_ollama_model(
+        &self,
+        endpoint: &str,
+        model_name: &str,
+        capabilities: &[String],
+    ) -> Result<(), ApiError> {
+        use tianyan::config::ModelCapability;
+
+        let mut config = self.state.config().read().await.clone();
+
+        // 查找或创建 "ollama" 提供商
+        let provider = match config
+            .models
+            .providers
+            .iter_mut()
+            .find(|p| p.name.eq_ignore_ascii_case("ollama"))
+        {
+            Some(p) => p,
+            None => {
+                config
+                    .models
+                    .providers
+                    .push(tianyan::config::ProviderConfig {
+                        name: "ollama".to_string(),
+                        endpoint: endpoint.to_string(),
+                        api_key: None,
+                        models: vec![],
+                        timeout: 60,
+                        enabled: true,
+                        headers: Default::default(),
+                    });
+                config
+                    .models
+                    .providers
+                    .last_mut()
+                    .ok_or_else(|| ApiError::Internal("创建 Ollama 提供商失败".to_string()))?
+            }
+        };
+
+        // 同步最新端点
+        provider.endpoint = endpoint.to_string();
+
+        if provider.models.iter().any(|m| m.name == model_name) {
+            return Err(ApiError::BadRequest(format!(
+                "模型 '{}' 已存在于 Ollama 提供商中",
+                model_name
+            )));
+        }
+
+        // 映射能力标签，未知标签忽略；空则默认 chat
+        let mut mapped: Vec<ModelCapability> = capabilities
+            .iter()
+            .filter_map(|c| match c.as_str() {
+                "chat" => Some(ModelCapability::Chat),
+                "vision" => Some(ModelCapability::Vision),
+                "text-embedding" => Some(ModelCapability::TextEmbedding),
+                "multimodal-embedding" => Some(ModelCapability::MultimodalEmbedding),
+                _ => None,
+            })
+            .collect();
+        if mapped.is_empty() {
+            mapped.push(ModelCapability::Chat);
+        }
+
+        provider.models.push(tianyan::config::ModelEntry {
+            name: model_name.to_string(),
+            capabilities: mapped,
+        });
+
+        self.persist_and_reload(config).await
     }
 }

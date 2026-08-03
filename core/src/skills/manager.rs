@@ -104,8 +104,6 @@ impl SkillManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_skill_manager_new() {
         // 仅验证类型可构造

@@ -36,12 +36,10 @@ impl VlmService for AsyncOpenAIClient {
             .build()
             .map_err(|e| TianyanError::Custom(format!("VLM 服务错误：构建请求失败: {}", e)))?;
 
-        let response = self
-            .client
-            .chat()
-            .create(chat_request)
-            .await
-            .map_err(|e| TianyanError::Custom(format!("VLM 服务错误：视觉分析请求失败: {}", e)))?;
+        let response =
+            self.client.chat().create(chat_request).await.map_err(|e| {
+                TianyanError::Custom(format!("VLM 服务错误：视觉分析请求失败: {}", e))
+            })?;
 
         let choices = response
             .choices
@@ -145,14 +143,18 @@ fn convert_content_parts(
             }
             "image_url" => {
                 let image_url = part.image_url.ok_or_else(|| {
-                    TianyanError::Custom("VLM 服务错误：image_url 部分缺少 image_url 字段".to_string())
+                    TianyanError::Custom(
+                        "VLM 服务错误：image_url 部分缺少 image_url 字段".to_string(),
+                    )
                 })?;
                 let detail = map_image_detail(image_url.detail);
                 let img_url = ImageUrlArgs::default()
                     .url(image_url.url)
                     .detail(detail)
                     .build()
-                    .map_err(|e| TianyanError::Custom(format!("VLM 服务错误：构建图片 URL 失败: {}", e)))?;
+                    .map_err(|e| {
+                        TianyanError::Custom(format!("VLM 服务错误：构建图片 URL 失败: {}", e))
+                    })?;
                 let image_part = ChatCompletionRequestMessageContentPartImageArgs::default()
                     .image_url(img_url)
                     .build()

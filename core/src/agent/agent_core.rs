@@ -10,9 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
-use crate::agent::types::{
-    AgentResponse, AgentState, ClarificationQuestion, QuestionType,
-};
+use crate::agent::types::{AgentResponse, AgentState, ClarificationQuestion, QuestionType};
 use crate::common::error::Result;
 use crate::common::types::{Message, StructuredMessage, TokenUsage};
 use crate::config::AgentConfig;
@@ -213,7 +211,13 @@ impl Agent {
         };
         let loop_result = self
             .agent_loop
-            .run(&mut messages.clone(), None, &session_id, parent_id.as_deref(), &self.default_model)
+            .run(
+                &mut messages.clone(),
+                None,
+                &session_id,
+                parent_id.as_deref(),
+                &self.default_model,
+            )
             .await;
 
         let mut clarification_tokens: Option<TokenUsage> = None;
@@ -227,7 +231,7 @@ impl Agent {
                 state
                     .write()
                     .await
-                    .add_structured_message(persisted_message);
+                    .add_structured_message(*persisted_message);
 
                 let mut resp = AgentResponse::simple(content);
                 resp.token_usage = total_tokens.clone();
@@ -248,7 +252,7 @@ impl Agent {
                     required: true,
                 };
                 state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
-                let formatted = format_clarification_questions(&[question_obj.clone()]);
+                let formatted = format_clarification_questions(std::slice::from_ref(&question_obj));
                 let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
                 resp.token_usage = total_tokens.clone();
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
@@ -354,7 +358,6 @@ impl Agent {
             tracing::warn!(error = %e, "持久化用户消息失败");
         }
     }
-
 }
 
 /// 格式化追问问题为用户友好的文本。

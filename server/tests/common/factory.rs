@@ -1,9 +1,13 @@
 //! 测试工厂 — 快速创建可复用的测试对象
+//!
+//! 工具库：部分工厂函数仅被其他测试函数间接使用，保留供后续测试复用。
 
-use tianyan::config::{AgentConfig, 
-    LoggingConfig, MemoryConfig, ModelCapability, ModelEntry, ModelPreferences, ModelRef,
-    ModelsConfig, ProviderConfig, RetrievalConfig, SecurityConfig, StorageConfig, TianyanConfig,
-    VectorStorageConfig,
+#![allow(dead_code)]
+
+use tianyan::config::{
+    AgentConfig, LoggingConfig, MemoryConfig, ModelCapability, ModelEntry, ModelPreferences,
+    ModelRef, ModelsConfig, ProviderConfig, RetrievalConfig, SecurityConfig, StorageConfig,
+    TianyanConfig, VectorStorageConfig,
 };
 
 pub fn test_agent_config() -> AgentConfig {
@@ -86,5 +90,6 @@ pub fn test_tianyan_config() -> TianyanConfig {
         security: SecurityConfig::default(),
         memory: MemoryConfig::default(),
         retrieval: RetrievalConfig::default(),
+        mcp: Default::default(),
     }
 }

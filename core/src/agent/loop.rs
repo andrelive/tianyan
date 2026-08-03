@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use crate::agent::tool_params::AskUserParams;
-use crate::common::error::TianyanError;
 use crate::agent::tool_registry::ToolRegistry;
 use crate::agent::types::StreamEventSender;
+use crate::common::error::TianyanError;
 use crate::common::types::{FunctionCall, Message, MessageRole, StructuredMessage, TokenUsage};
 use crate::common::types::{ToolCall, ToolCallType};
 use crate::context::ContextAssembler;
@@ -20,9 +20,7 @@ pub struct AgentLoopConfig {
 
 impl Default for AgentLoopConfig {
     fn default() -> Self {
-        Self {
-            max_turns: 200,
-        }
+        Self { max_turns: 200 }
     }
 }
 
@@ -38,7 +36,7 @@ pub enum AgentLoopResult {
         /// 循环轮数。
         turns: usize,
         /// AgentLoop 已持久化的 StructuredMessage，coordinator 直接复用此消息加入状态，避免重复创建。
-        persisted_message: StructuredMessage,
+        persisted_message: Box<StructuredMessage>,
     },
     /// 需要追问。
     NeedsClarification {
@@ -103,14 +101,16 @@ impl AgentLoop {
                 .model_service
                 .chat_completion(request)
                 .await
-                .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e.to_string())))?;
+                .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e)))?;
 
             let turn_usage = response.usage;
             let choice = response
                 .choices
                 .into_iter()
                 .next()
-                .ok_or(TianyanError::Custom("agent_loop: LLM 返回空响应".to_string()))?;
+                .ok_or(TianyanError::Custom(
+                    "agent_loop: LLM 返回空响应".to_string(),
+                ))?;
 
             if let Some(result) = self
                 .handle_llm_response(
@@ -129,7 +129,10 @@ impl AgentLoop {
             }
         }
 
-        Err(TianyanError::Custom(format!("agent_loop: 达到最大轮数限制：{}", self.config.max_turns)))
+        Err(TianyanError::Custom(format!(
+            "agent_loop: 达到最大轮数限制：{}",
+            self.config.max_turns
+        )))
     }
 
     /// 运行迭代循环（流式），将 LLM 文本增量实时推送到前端。
@@ -157,7 +160,7 @@ impl AgentLoop {
                 .model_service
                 .chat_completion_stream(request)
                 .await
-                .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e.to_string())))?;
+                .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e)))?;
 
             // Accumulators for streaming chunks
             let mut accumulated_content = String::new();
@@ -212,7 +215,10 @@ impl AgentLoop {
 
             // If streaming failed mid-response, report error rather than using partial data
             if let Some(err_msg) = stream_error {
-                return Err(TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", err_msg)));
+                return Err(TianyanError::Custom(format!(
+                    "agent_loop: LLM 调用失败：{}",
+                    err_msg
+                )));
             }
 
             // Build assistant message from accumulated content + tool calls
@@ -256,7 +262,10 @@ impl AgentLoop {
             }
         }
 
-        Err(TianyanError::Custom(format!("agent_loop: 达到最大轮数限制：{}", self.config.max_turns)))
+        Err(TianyanError::Custom(format!(
+            "agent_loop: 达到最大轮数限制：{}",
+            self.config.max_turns
+        )))
     }
 
     /// Process a single turn after the LLM response has been obtained.
@@ -266,6 +275,9 @@ impl AgentLoop {
     ///
     /// Returns `Ok(Some(result))` if this turn produces a final answer or clarification,
     /// `Ok(None)` if tool calls were executed and the loop should continue.
+    ///
+    /// 参数均为调用点上下文（可变历史/流发送器/会话 ID），合并进结构体反而降低可读性，故豁免该 lint。
+    #[allow(clippy::too_many_arguments)]
     async fn handle_llm_response(
         &self,
         assistant_msg: &Message,
@@ -286,12 +298,11 @@ impl AgentLoop {
 
         // Check for ask_user before adding to history
         if let Some(ref tool_calls) = assistant_msg.tool_calls {
-            if let Some(ask_call) = tool_calls
-                .iter()
-                .find(|tc| tc.function.name == "ask_user")
-            {
+            if let Some(ask_call) = tool_calls.iter().find(|tc| tc.function.name == "ask_user") {
                 let params: AskUserParams = serde_json::from_str(&ask_call.function.arguments)
-                .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e.to_string())))?;
+                    .map_err(|e| {
+                        TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
+                    })?;
                 return Ok(Some(AgentLoopResult::NeedsClarification {
                     question: params.question,
                     total_tokens: total_tokens.clone(),
@@ -371,14 +382,16 @@ impl AgentLoop {
             // LLM returned neither content nor tool calls — treat as error
             // rather than silently continuing the loop (which would consume
             // up to max_turns with no progress).
-            Err(TianyanError::Custom("agent_loop: LLM 返回空响应".to_string()))
+            Err(TianyanError::Custom(
+                "agent_loop: LLM 返回空响应".to_string(),
+            ))
         } else {
             // Already persisted above — just return.
             Ok(Some(AgentLoopResult::Answer {
                 content: assistant_msg.content.clone(),
                 total_tokens: total_tokens.clone(),
                 turns: turn + 1,
-                persisted_message: persisted,
+                persisted_message: Box::new(persisted),
             }))
         }
     }
@@ -405,6 +418,13 @@ mod tests {
         async fn add_message(&self, _session_id: &str, _message: Message) -> Result<()> {
             Ok(())
         }
+        async fn rewrite_messages(
+            &self,
+            _session_id: &str,
+            _messages: &[StructuredMessage],
+        ) -> Result<()> {
+            Ok(())
+        }
         async fn create_session(&self, _id: &str, _message: Message) -> Result<Session> {
             Ok(Session::new(_id))
         }
@@ -426,6 +446,8 @@ mod tests {
     fn test_agent_loop_config_default() {
         let config = AgentLoopConfig::default();
         assert_eq!(config.max_turns, 200);
+        // Touch the mock to keep it "constructed" (dead-code lint).
+        let _mgr = MockSessionManager;
     }
 
     #[test]

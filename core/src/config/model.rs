@@ -100,8 +100,7 @@ impl ProviderConfig {
     pub fn get_endpoint(&self) -> Result<String, String> {
         if self.endpoint.is_empty() {
             Err("API 端点 URL 不能为空".to_string())
-        } else if !self.endpoint.starts_with("http://") && !self.endpoint.starts_with("https://")
-        {
+        } else if !self.endpoint.starts_with("http://") && !self.endpoint.starts_with("https://") {
             Err(format!(
                 "API 端点 URL 格式无效：{}，必须以 http:// 或 https:// 开头",
                 self.endpoint
@@ -304,18 +303,6 @@ fn default_true() -> bool {
 mod tests {
     use super::*;
 
-    fn make_provider(name: &str) -> ProviderConfig {
-        ProviderConfig {
-            name: name.to_string(),
-            endpoint: "https://api.example.com".to_string(),
-            api_key: Some("sk-test".to_string()),
-            models: vec![],
-            timeout: 60,
-            enabled: true,
-            headers: HashMap::new(),
-        }
-    }
-
     fn make_model(name: &str, caps: Vec<ModelCapability>) -> ModelEntry {
         ModelEntry {
             name: name.to_string(),
@@ -471,7 +458,10 @@ mod tests {
                 enabled: true,
                 headers: HashMap::new(),
                 models: vec![
-                    make_model("gpt-4", vec![ModelCapability::Chat, ModelCapability::Vision]),
+                    make_model(
+                        "gpt-4",
+                        vec![ModelCapability::Chat, ModelCapability::Vision],
+                    ),
                     make_model(
                         "text-embedding-3-small",
                         vec![ModelCapability::TextEmbedding],
@@ -504,7 +494,10 @@ mod tests {
                 headers: HashMap::new(),
                 models: vec![make_model(
                     "te3",
-                    vec![ModelCapability::TextEmbedding, ModelCapability::MultimodalEmbedding],
+                    vec![
+                        ModelCapability::TextEmbedding,
+                        ModelCapability::MultimodalEmbedding,
+                    ],
                 )],
             }],
             preferences: ModelPreferences {
@@ -517,7 +510,9 @@ mod tests {
         };
 
         assert!(config.resolve(ModelCapability::TextEmbedding).is_some());
-        assert!(config.resolve(ModelCapability::MultimodalEmbedding).is_some());
+        assert!(config
+            .resolve(ModelCapability::MultimodalEmbedding)
+            .is_some());
     }
 
     #[test]
@@ -528,10 +523,7 @@ mod tests {
             ModelCapability::TextEmbedding,
         ];
         let json = serde_json::to_string(&caps).unwrap();
-        assert_eq!(
-            json,
-            r#"["chat","vision","text-embedding"]"#
-        );
+        assert_eq!(json, r#"["chat","vision","text-embedding"]"#);
 
         let parsed: Vec<ModelCapability> = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, caps);

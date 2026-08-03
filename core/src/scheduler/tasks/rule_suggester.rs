@@ -208,13 +208,10 @@ pub struct RuleSuggestion {
 mod tests {
     use super::*;
 
-    use crate::common::types::{
-        AgentPath, ContentLevel, ContextNamespace, SearchResult, TianyanUri,
-    };
-    use crate::model::types::{ChatChoice, ChatCompletionRequest, ChatCompletionResponse};
+    use crate::common::types::{AgentPath, ContentLevel, ContextNamespace, TianyanUri};
+    use crate::model::types::{ChatChoice, ChatCompletionResponse};
     use crate::test_utils::MockChatService;
     use crate::test_utils::MockVfs;
-    use crate::vfs::ContextEntry;
 
     /// 创建返回指定 JSON 响应的 mock ChatService。
     fn mock_chat_json(json: &str) -> Arc<dyn ChatService> {

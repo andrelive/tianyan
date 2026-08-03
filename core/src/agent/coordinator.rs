@@ -117,7 +117,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::agent::agent_core::{Agent, format_clarification_questions};
+use crate::agent::agent_core::{format_clarification_questions, Agent};
 use crate::agent::r#loop::AgentLoopResult;
 use crate::agent::types::{
     AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
@@ -148,11 +148,7 @@ pub trait AgentCoordinator: Send + Sync {
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
 
     /// 处理用户对追问的回答。
-    async fn handle_clarification(
-        &self,
-        session_id: &str,
-        answers: &str,
-    ) -> Result<AgentResponse>;
+    async fn handle_clarification(&self, session_id: &str, answers: &str) -> Result<AgentResponse>;
 
     /// 初始化智能体。
     async fn initialize(&self) -> Result<()>;
@@ -180,7 +176,8 @@ impl AgentCoordinator for Agent {
         let state = self.load_and_build_state(session_id).await?;
 
         // 2. Persist current user message
-        self.persist_user_message(session_id, &state, &message).await;
+        self.persist_user_message(session_id, &state, &message)
+            .await;
 
         // 3. Prepare context
         let messages = self.prepare_context(&state, &message).await;
@@ -192,7 +189,13 @@ impl AgentCoordinator for Agent {
         };
         let loop_result = self
             .agent_loop
-            .run(&mut messages.clone(), None, session_id, parent_id.as_deref(), model)
+            .run(
+                &mut messages.clone(),
+                None,
+                session_id,
+                parent_id.as_deref(),
+                model,
+            )
             .await;
 
         // 5. Handle loop result
@@ -207,7 +210,7 @@ impl AgentCoordinator for Agent {
                 state
                     .write()
                     .await
-                    .add_structured_message(persisted_message);
+                    .add_structured_message(*persisted_message);
 
                 let mut resp = AgentResponse::simple(content);
                 resp.token_usage = total_tokens.clone();
@@ -228,7 +231,7 @@ impl AgentCoordinator for Agent {
                     required: true,
                 };
                 state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
-                let formatted = format_clarification_questions(&[question_obj.clone()]);
+                let formatted = format_clarification_questions(std::slice::from_ref(&question_obj));
                 let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
                 resp.token_usage = total_tokens.clone();
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
@@ -314,7 +317,7 @@ impl AgentCoordinator for Agent {
                     state_clone
                         .write()
                         .await
-                        .add_structured_message(persisted_message);
+                        .add_structured_message(*persisted_message);
 
                     // run_stream 已逐 chunk 流式推完内容，这里只发结束标记
                     stream_sender
@@ -338,7 +341,8 @@ impl AgentCoordinator for Agent {
                     };
                     state_clone.write().await.pending_clarification =
                         Some(vec![question_obj.clone()]);
-                    let formatted = format_clarification_questions(&[question_obj.clone()]);
+                    let formatted =
+                        format_clarification_questions(std::slice::from_ref(&question_obj));
                     stream_sender
                         .send_complete(&formatted, StreamChunkType::Clarification, None)
                         .await;
@@ -363,11 +367,7 @@ impl AgentCoordinator for Agent {
         Ok(rx)
     }
 
-    async fn handle_clarification(
-        &self,
-        session_id: &str,
-        answers: &str,
-    ) -> Result<AgentResponse> {
+    async fn handle_clarification(&self, session_id: &str, answers: &str) -> Result<AgentResponse> {
         let state = self.load_and_build_state(session_id).await?;
         self.handle_clarification_response(&state, answers).await
     }
@@ -390,7 +390,6 @@ impl AgentCoordinator for Agent {
 #[cfg(test)]
 mod tests {
     use crate::agent::types::{ClarificationQuestion, QuestionType};
-    use crate::agent::agent_core::format_clarification_questions;
 
     #[test]
     fn test_format_clarification_questions() {

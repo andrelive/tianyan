@@ -174,4 +174,75 @@ describe('ChatPanel', () => {
     // ModelSelector renders a model select element
     expect(screen.getByText('对话')).toBeInTheDocument();
   });
+
+  it('edits a user message via backend and shows the regenerated reply', async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      messages: [
+        {
+          role: 'user',
+          content: '原始消息',
+          timestamp: new Date().toISOString(),
+        },
+        {
+          role: 'assistant',
+          content: '旧回复',
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    });
+
+    renderChatPanel();
+
+    // 打开编辑
+    await user.click(screen.getByRole('button', { name: /编辑消息/ }));
+    const textarea = screen.getByRole('textbox', { name: /编辑消息内容/ });
+    await user.clear(textarea);
+    await user.type(textarea, '修改后的消息');
+    await user.click(screen.getByRole('button', { name: /保存编辑/ }));
+
+    // 等待后端回复替换占位
+    expect(
+      await screen.findByText('已根据编辑内容重新生成')
+    ).toBeInTheDocument();
+
+    const messages = useAppStore.getState().messages;
+    // 编辑后的用户消息 + 新回复，旧回复被截断
+    expect(messages).toHaveLength(2);
+    expect(messages[0].content).toBe('修改后的消息');
+    expect(messages[1].content).toBe('已根据编辑内容重新生成');
+    expect(useAppStore.getState().streamStatus).toBe('idle');
+  });
+
+  it('regenerates an assistant reply via backend', async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      messages: [
+        {
+          role: 'user',
+          content: '问题',
+          timestamp: new Date().toISOString(),
+        },
+        {
+          role: 'assistant',
+          content: '旧回复',
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    });
+
+    renderChatPanel();
+
+    await user.click(screen.getByRole('button', { name: /重新生成回复/ }));
+
+    expect(await screen.findByText('重新生成的回复')).toBeInTheDocument();
+
+    const messages = useAppStore.getState().messages;
+    // 用户消息 + 新回复
+    expect(messages).toHaveLength(2);
+    expect(messages[0].content).toBe('问题');
+    expect(messages[1].content).toBe('重新生成的回复');
+  });
 });

@@ -226,6 +226,51 @@ export const handlers = [
     return HttpResponse.json(mockChatResponse);
   }),
 
+  // Chat edit: 编辑用户消息并重新生成
+  http.post(`${API_BASE}/chat/edit`, () => {
+    return HttpResponse.json({
+      ...mockChatResponse,
+      id: 'msg-edit-1',
+      message: {
+        role: 'assistant',
+        content: '已根据编辑内容重新生成',
+        timestamp: '2026-07-23T10:01:00Z',
+      },
+    });
+  }),
+
+  // Chat regenerate: 重新生成回复
+  http.post(`${API_BASE}/chat/regenerate`, () => {
+    return HttpResponse.json({
+      ...mockChatResponse,
+      id: 'msg-regen-1',
+      message: {
+        role: 'assistant',
+        content: '重新生成的回复',
+        timestamp: '2026-07-23T10:02:00Z',
+      },
+    });
+  }),
+
+  // Session messages
+  http.get(`${API_BASE}/sessions/:id/messages`, ({ params }) => {
+    return HttpResponse.json({
+      session_id: params.id,
+      messages: [
+        {
+          role: 'user',
+          content: '你好',
+          timestamp: '2026-07-23T10:00:00Z',
+        },
+        {
+          role: 'assistant',
+          content: '你好！我是天演，有什么可以帮助你的？',
+          timestamp: '2026-07-23T10:00:05Z',
+        },
+      ],
+    });
+  }),
+
   // Chat stream (SSE)
   http.post(`${API_BASE}/chat/stream`, () => {
     const encoder = new TextEncoder();

@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "server", "tauri"]
+members = ["core", "server", "tauri", "mcp"]
 resolver = "2"
 
 [workspace.package]

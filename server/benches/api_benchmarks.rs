@@ -1,5 +1,8 @@
 //! API 性能基准测试
 
+// 基准代码中 unwrap 是有意的；criterion_group! 宏生成的项缺少文档。
+#![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
+
 use std::sync::Arc;
 
 use axum::{routing::get, Router};
