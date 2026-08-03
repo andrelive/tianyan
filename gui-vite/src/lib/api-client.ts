@@ -111,6 +111,21 @@ export async function deleteSessionMessage(
   );
 }
 
+export interface RedoRequest {
+  message_index: number;
+}
+
+/** 重做被回退的消息与工作区文件，返回恢复后的消息。 */
+export async function redoSessionMessage(
+  sessionId: string,
+  messageIndex: number
+): Promise<SessionMessagesResponse> {
+  return apiPost<SessionMessagesResponse>(
+    `/sessions/${encodeURIComponent(sessionId)}/messages/redo`,
+    { message_index: messageIndex } satisfies RedoRequest
+  );
+}
+
 export { getApiBase };
 
 // ========== Ollama API ==========

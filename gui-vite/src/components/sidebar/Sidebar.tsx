@@ -43,7 +43,6 @@ export default function Sidebar() {
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
   const setMessages = useAppStore((s) => s.setMessages);
   const showToast = useAppStore((s) => s.showToast);
-  const currentView = useAppStore((s) => s.currentView);
   const setView = useAppStore((s) => s.setView);
   const [hoveredSession, setHoveredSession] = useState<string | null>(null);
   const sessionListRef = useRef<HTMLDivElement>(null);
@@ -113,8 +112,6 @@ export default function Sidebar() {
     },
     [sessions, handleSelectSession]
   );
-
-  const isActive = (id: string) => currentView === id;
 
   // Current path determines which nav is active
   const pathBase = location.pathname.split('/')[1] || 'chat';

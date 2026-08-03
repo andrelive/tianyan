@@ -26,27 +26,6 @@ function renderSidebar(initialEntries: string[] = ['/chat']) {
 }
 
 // ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
-const mockSessions = [
-  {
-    id: 'session-1',
-    title: '测试会话 1',
-    created_at: '2026-07-20T10:00:00Z',
-    updated_at: '2026-07-23T08:00:00Z',
-    message_count: 5,
-  },
-  {
-    id: 'session-2',
-    title: '代码审查对话',
-    created_at: '2026-07-22T14:00:00Z',
-    updated_at: '2026-07-23T09:30:00Z',
-    message_count: 12,
-  },
-];
-
-// ---------------------------------------------------------------------------
 // Suite
 // ---------------------------------------------------------------------------
 
@@ -71,7 +50,7 @@ describe('Sidebar', () => {
 
     it('renders collapsed with 64px width', () => {
       renderSidebar();
-      const aside = screen.getByRole('complementary');
+      const aside = screen.getByRole('navigation', { name: '导航' });
       expect(aside.className).toContain('w-[64px]');
     });
 
@@ -116,7 +95,7 @@ describe('Sidebar', () => {
   describe('Expanded state (isSidebarOpen=true)', () => {
     it('renders expanded with 280px width', () => {
       renderSidebar();
-      const aside = screen.getByRole('complementary');
+      const aside = screen.getByRole('navigation', { name: '导航' });
       expect(aside.className).toContain('w-[280px]');
     });
 

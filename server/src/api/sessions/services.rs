@@ -9,12 +9,13 @@ use tianyan::MessageRole as CoreMessageRole;
 
 use crate::api::sessions::types::{
     CreateSessionRequest, CreateSessionResponse, DeleteMessageRequest, DeleteSessionResponse,
-    ListSessionsResponse, Session, SessionDetail, SessionMessagesResponse, SessionMetadata,
-    UpdateTitleRequest,
+    ListSessionsResponse, RedoRequest, Session, SessionDetail, SessionMessagesResponse,
+    SessionMetadata, UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
 use crate::api::shared::types::ChatMessage;
+use tianyan::common::types::StructuredMessage;
 use tianyan::snapshot::SnapshotManager;
 
 /// 会话服务，管理对话会话
@@ -225,6 +226,18 @@ impl SessionService {
             return Err(ApiError::BadRequest("消息索引超出范围".to_string()));
         }
 
+        // 保存重做状态：当前工作区 + 被截断的消息（配置了 working_directory 时）
+        if let Some(sm) = &self.snapshot_manager {
+            let truncated: Vec<StructuredMessage> =
+                session.messages[request.message_index..].to_vec();
+            if let Err(e) = sm
+                .save_redo(session_id, request.message_index, &truncated)
+                .await
+            {
+                tracing::warn!(error = %e, "保存重做状态失败");
+            }
+        }
+
         // 截断到该消息之前（不含）
         session.messages.truncate(request.message_index);
 
@@ -262,6 +275,55 @@ impl SessionService {
         }
 
         // 返回剩余消息，前端可直接替换本地状态
+        self.get_messages(session_id).await
+    }
+
+    /// 重做：恢复被回退的消息与工作区文件。
+    pub async fn redo_message(
+        &self,
+        session_id: &str,
+        request: RedoRequest,
+    ) -> Result<SessionMessagesResponse, ApiError> {
+        info!(
+            "重做消息: 会话={}, 索引={}",
+            session_id, request.message_index
+        );
+
+        // 1. 恢复工作区文件 + 取出被截断的消息（快照管理器一次性语义）
+        let Some((messages, restored)) = self
+            .snapshot_manager
+            .as_ref()
+            .ok_or_else(|| ApiError::BadRequest("未启用工作区快照，无法重做".to_string()))?
+            .load_redo(session_id, request.message_index)
+            .await?
+        else {
+            return Err(ApiError::BadRequest("没有可重做的状态".to_string()));
+        };
+
+        // 2. 恢复会话消息
+        let mut session = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
+
+        for msg in messages {
+            session.add_structured_message(msg);
+        }
+        if let Err(e) = self.session_manager.update_session(&session).await {
+            tracing::error!("更新会话失败: {}", e);
+            return Err(ApiError::Internal(format!("更新会话失败: {}", e)));
+        }
+        if let Err(e) = self
+            .session_manager
+            .rewrite_messages(session_id, &session.messages)
+            .await
+        {
+            tracing::error!("重写会话历史失败: {}", e);
+            return Err(ApiError::Internal(format!("重写会话历史失败: {}", e)));
+        }
+
+        tracing::info!(session = %session_id, restored, "重做完成");
         self.get_messages(session_id).await
     }
 

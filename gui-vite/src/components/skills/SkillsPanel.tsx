@@ -3,7 +3,6 @@ import { useAppStore } from '@/lib/store';
 import { apiGet, apiPost } from '@/lib/api-client';
 import { groupByCategory } from '@/lib/utils';
 import type {
-  Skill,
   SkillParameter,
   SkillExecutionStatus,
   SkillListResponse,
@@ -15,7 +14,6 @@ import {
   Loader2,
   CheckCircle2,
   AlertCircle,
-  Clock,
   ChevronRight,
 } from 'lucide-react';
 
@@ -74,15 +72,9 @@ function ParameterInput({
   );
 }
 
-function formatExecutionTime(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
 export default function SkillsPanel() {
   const skills = useAppStore((s) => s.skills);
   const setSkills = useAppStore((s) => s.setSkills);
-  const showToast = useAppStore((s) => s.showToast);
 
   // Skills list
   const [loadingSkills, setLoadingSkills] = useState(true);

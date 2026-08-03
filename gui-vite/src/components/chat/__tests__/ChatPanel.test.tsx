@@ -143,8 +143,6 @@ describe('ChatPanel', () => {
   });
 
   it('is disabled from sending when already streaming', async () => {
-    const user = userEvent.setup();
-
     // Pre-set streaming state
     useAppStore.setState({
       streamStatus: 'streaming',
@@ -203,5 +201,36 @@ describe('ChatPanel', () => {
       expect(messages).toHaveLength(1);
       expect(messages[0].content).toBe('你好');
     });
+
+    // 回退后可撤销回退
+    expect(
+      screen.getByRole('button', { name: /撤销回退/ })
+    ).toBeInTheDocument();
+  });
+
+  it('undoes a rollback via backend (redo)', async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      lastRollbackIndex: 1,
+      messages: [
+        {
+          role: 'user',
+          content: '你好',
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    });
+
+    renderChatPanel();
+
+    await user.click(screen.getByRole('button', { name: /撤销回退/ }));
+
+    await waitFor(() => {
+      const messages = useAppStore.getState().messages;
+      expect(messages).toHaveLength(2);
+      expect(messages[1].content).toBe('你好！我是天演，有什么可以帮助你的？');
+    });
+    expect(useAppStore.getState().lastRollbackIndex).toBeNull();
   });
 });

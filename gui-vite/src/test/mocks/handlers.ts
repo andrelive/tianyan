@@ -259,6 +259,25 @@ export const handlers = [
     });
   }),
 
+  // Session message redo: 恢复被回退的消息
+  http.post(`${API_BASE}/sessions/:id/messages/redo`, ({ params }) => {
+    return HttpResponse.json({
+      session_id: params.id,
+      messages: [
+        {
+          role: 'user',
+          content: '你好',
+          timestamp: '2026-07-23T10:00:00Z',
+        },
+        {
+          role: 'assistant',
+          content: '你好！我是天演，有什么可以帮助你的？',
+          timestamp: '2026-07-23T10:00:05Z',
+        },
+      ],
+    });
+  }),
+
   // Chat stream (SSE)
   http.post(`${API_BASE}/chat/stream`, () => {
     const encoder = new TextEncoder();

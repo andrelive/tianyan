@@ -31,6 +31,7 @@ export function emptyProvider(): ProviderConfigState {
     models: [],
     timeout: 60,
     enabled: true,
+    is_local: false,
     headers: {},
   };
 }
@@ -54,6 +55,7 @@ export function emptyConfigState(): ConfigState {
   return {
     providers: [],
     preferences: emptyPreferences(),
+    mcpServers: [],
     enable_skills: true,
     enable_memory: true,
     stream_responses: true,
@@ -374,13 +376,13 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     default_top_k: agent.default_top_k ?? defaults.default_top_k,
     max_turns: agent.max_turns ?? defaults.max_turns,
     learned_rules_top_k: (() => {
-      const agentRecord = agent as Record<string, unknown>;
+      const agentRecord = agent as unknown as Record<string, unknown>;
       return typeof agentRecord.loaded_rules_top_k === 'number'
         ? agentRecord.loaded_rules_top_k
         : defaults.learned_rules_top_k;
     })(),
     learned_rules_max_tokens: (() => {
-      const agentRecord = agent as Record<string, unknown>;
+      const agentRecord = agent as unknown as Record<string, unknown>;
       return typeof agentRecord.loaded_rules_max_tokens === 'number'
         ? agentRecord.loaded_rules_max_tokens
         : defaults.learned_rules_max_tokens;

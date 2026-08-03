@@ -158,6 +158,7 @@ export default function ConfigWizard() {
           ],
           timeout: 60,
           enabled: true,
+          is_local: false,
           headers: {},
         },
       ];

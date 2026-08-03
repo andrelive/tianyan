@@ -1,1 +1,25 @@
+# Rust build output
 /target
+
+# Node.js
+node_modules/
+dist/
+test-results/
+*.tsbuildinfo
+
+# Tianyan runtime data (accidental writes to repo root)
+~/
+*.db
+*.db-wal
+*.db-shm
+
+# IDE / tooling
+.omo/
+.trae/
+.idea/
+.vscode/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

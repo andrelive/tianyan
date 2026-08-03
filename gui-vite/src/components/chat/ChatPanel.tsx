@@ -1,9 +1,14 @@
 import { useRef, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
-import { apiGet, deleteSessionMessage, getApiBase } from '@/lib/api-client';
+import {
+  apiGet,
+  deleteSessionMessage,
+  getApiBase,
+  redoSessionMessage,
+} from '@/lib/api-client';
 import { useChatStream } from '@/hooks/useChatStream';
-import { MessageSquare, Loader2 } from 'lucide-react';
+import { MessageSquare, Loader2, Undo2 } from 'lucide-react';
 import ChatInput from './ChatInput';
 import MessageBubble from './MessageBubble';
 import ModelSelector from './ModelSelector';
@@ -21,6 +26,8 @@ export default function ChatPanel() {
   const setStreamStatus = useAppStore((s) => s.setStreamStatus);
   const deleteMessagesFrom = useAppStore((s) => s.deleteMessagesFrom);
   const setMessages = useAppStore((s) => s.setMessages);
+  const lastRollbackIndex = useAppStore((s) => s.lastRollbackIndex);
+  const setLastRollbackIndex = useAppStore((s) => s.setLastRollbackIndex);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -132,6 +139,7 @@ export default function ChatPanel() {
       try {
         const resp = await deleteSessionMessage(sessionId, index);
         state.setMessages(resp.messages);
+        setLastRollbackIndex(index);
       } catch (err: unknown) {
         state.showToast(
           `回退失败: ${err instanceof Error ? err.message : '未知错误'}`,
@@ -140,8 +148,31 @@ export default function ChatPanel() {
         await reloadSession(sessionId);
       }
     },
-    [streamStatus, deleteMessagesFrom]
+    [streamStatus, deleteMessagesFrom, setLastRollbackIndex]
   );
+
+  // 撤销回退：恢复被回退的消息与工作区文件
+  const handleRedo = useCallback(async () => {
+    if (streamStatus === 'streaming' || lastRollbackIndex === null) return;
+
+    const state = useAppStore.getState();
+    const sessionId = state.currentSessionId;
+    if (!sessionId) return;
+
+    const index = lastRollbackIndex;
+    try {
+      const resp = await redoSessionMessage(sessionId, index);
+      state.setMessages(resp.messages);
+      setLastRollbackIndex(null);
+      state.showToast('已撤销回退', 'success');
+    } catch (err: unknown) {
+      state.showToast(
+        `撤销回退失败: ${err instanceof Error ? err.message : '未知错误'}`,
+        'error'
+      );
+      await reloadSession(sessionId);
+    }
+  }, [streamStatus, lastRollbackIndex, setLastRollbackIndex]);
 
   const handleStop = useCallback(() => {
     stopStream();
@@ -215,6 +246,20 @@ export default function ChatPanel() {
                   <span className="text-sm">思考中...</span>
                 </div>
               )}
+          </div>
+        )}
+
+        {/* Redo banner: 回退后可撤销 */}
+        {lastRollbackIndex !== null && streamStatus !== 'streaming' && (
+          <div className="flex justify-center pb-1">
+            <button
+              onClick={handleRedo}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+              aria-label="撤销回退"
+            >
+              <Undo2 className="w-3.5 h-3.5" />
+              已回退 — 撤销回退
+            </button>
           </div>
         )}
       </div>

@@ -142,6 +142,13 @@ pub struct DeleteMessageRequest {
     pub message_index: usize,
 }
 
+/// 重做请求 —— 恢复被回退的消息与工作区文件。
+#[derive(Debug, Deserialize)]
+pub struct RedoRequest {
+    /// 回退时的消息索引。
+    pub message_index: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

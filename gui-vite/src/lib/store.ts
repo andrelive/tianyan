@@ -34,6 +34,10 @@ interface AppState {
   clearMessages: () => void;
   deleteMessagesFrom: (index: number) => void;
 
+  // Rollback / redo
+  lastRollbackIndex: number | null;
+  setLastRollbackIndex: (index: number | null) => void;
+
   // Streaming
   streamStatus: StreamStatus;
   setStreamStatus: (status: StreamStatus) => void;
@@ -132,6 +136,10 @@ export const useAppStore = create<AppState>()(
           messages: s.messages.slice(0, index),
           streamStatus: 'idle',
         })),
+
+      // Rollback / redo
+      lastRollbackIndex: null,
+      setLastRollbackIndex: (index) => set({ lastRollbackIndex: index }),
 
       // Streaming
       streamStatus: 'idle',

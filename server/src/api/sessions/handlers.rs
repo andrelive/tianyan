@@ -8,8 +8,8 @@ use tracing::{error, info};
 
 use crate::api::sessions::services::SessionService;
 use crate::api::sessions::types::{
-    DeleteMessageRequest, DeleteSessionResponse, ListSessionsResponse, Session, SessionDetail,
-    SessionMessagesResponse, UpdateTitleRequest,
+    DeleteMessageRequest, DeleteSessionResponse, ListSessionsResponse, RedoRequest, Session,
+    SessionDetail, SessionMessagesResponse, UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
@@ -115,6 +115,27 @@ pub async fn delete_message(
     let service = SessionService::new(state.session_manager(), state.snapshot_manager());
 
     let resp = service.delete_message(&session_id, request).await?;
+    Ok(Json(resp))
+}
+
+/// 重做被回退的消息与工作区文件
+pub async fn redo_message(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(request): Json<RedoRequest>,
+) -> Result<Json<SessionMessagesResponse>, ApiError> {
+    if session_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("会话ID不能为空".to_string()));
+    }
+
+    info!(
+        "重做消息请求: 会话={}, 索引={}",
+        session_id, request.message_index
+    );
+
+    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
+
+    let resp = service.redo_message(&session_id, request).await?;
     Ok(Json(resp))
 }
 
