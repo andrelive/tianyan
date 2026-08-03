@@ -8,7 +8,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
     ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
 };
-use crate::vfs::backend::LocalFileBackend;
+use crate::vfs::backend::StorageBackend;
 use crate::vfs::traits::{
     ContentMetadata, ContentStore, EmbeddingProvider, VfsCore, VfsSearch, VirtualFileSystem,
 };
@@ -19,7 +19,7 @@ use crate::config::StorageConfig;
 
 /// 虚拟文件系统实现。
 pub struct VirtualFileSystemImpl {
-    storage: Arc<LocalFileBackend>,
+    storage: Arc<dyn StorageBackend>,
     vector_storage: Arc<dyn VectorStorage>,
     config: StorageConfig,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
@@ -29,7 +29,7 @@ pub struct VirtualFileSystemImpl {
 impl VirtualFileSystemImpl {
     /// 创建新的虚拟文件系统。
     pub fn new(
-        storage: Arc<LocalFileBackend>,
+        storage: Arc<dyn StorageBackend>,
         vector_storage: Arc<dyn VectorStorage>,
         config: StorageConfig,
     ) -> Self {
@@ -44,7 +44,7 @@ impl VirtualFileSystemImpl {
 
     /// 使用默认配置创建虚拟文件系统。
     pub fn with_defaults(
-        storage: Arc<LocalFileBackend>,
+        storage: Arc<dyn StorageBackend>,
         vector_storage: Arc<dyn VectorStorage>,
     ) -> Self {
         Self::new(storage, vector_storage, StorageConfig::default())

@@ -71,9 +71,11 @@ pub fn test_models_config() -> ModelsConfig {
 pub fn test_storage_config() -> StorageConfig {
     StorageConfig {
         data_dir: std::env::temp_dir().join("tianyan-test"),
+        backend: Default::default(),
+        sqlite_path: None,
+        max_storage_size: 5368709120,
         auto_cleanup: false,
         cleanup_days: 30,
-        max_storage_size: 5368709120,
         vector: VectorStorageConfig {
             collection_name: "tianyan_test".to_string(),
             vector_dimension: 768,

@@ -1,5 +1,6 @@
 //! 本地文件系统存储后端实现。
 
+use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::fs::{self, OpenOptions};
@@ -8,6 +9,7 @@ use tokio::sync::Mutex;
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, TianyanUri};
+use crate::vfs::backend::StorageBackend;
 use crate::vfs::types::ContextEntry;
 
 use crate::config::StorageConfig;
@@ -151,22 +153,23 @@ impl LocalFileBackend {
     }
 }
 
-impl LocalFileBackend {
+#[async_trait]
+impl StorageBackend for LocalFileBackend {
     /// 初始化存储后端，确保数据目录存在。
-    pub async fn initialize(&self) -> Result<()> {
+    async fn initialize(&self) -> Result<()> {
         self.ensure_dir(&self.config.data_dir).await?;
         tracing::info!("已在 {:?} 初始化本地存储", self.config.data_dir);
         Ok(())
     }
 
     /// 检查指定 URI 的条目是否存在。
-    pub async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
+    async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
         let path = self.mapper.uri_to_path(uri);
         Ok(fs::try_exists(path).await.unwrap_or(false))
     }
 
     /// 读取指定 URI 的完整条目（含 L0/L1/L2 三层内容）。
-    pub async fn read_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+    async fn read_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
         let path = self.mapper.uri_to_path(uri);
 
         let meta = fs::metadata(&path).await.map_err(|e| {
@@ -202,7 +205,7 @@ impl LocalFileBackend {
     }
 
     /// 写入完整的条目内容（按层级分别持久化）。
-    pub async fn write_entry(&self, entry: &ContextEntry) -> Result<()> {
+    async fn write_entry(&self, entry: &ContextEntry) -> Result<()> {
         let path = self.mapper.uri_to_path(entry.uri());
 
         self.ensure_dir(&path).await?;
@@ -227,7 +230,7 @@ impl LocalFileBackend {
     }
 
     /// 删除指定 URI 的条目（文件或目录）。
-    pub async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
+    async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
         let path = self.mapper.uri_to_path(uri);
 
         if !fs::try_exists(&path)
@@ -244,7 +247,7 @@ impl LocalFileBackend {
     }
 
     /// 列出指定 URI 下的一级子条目。
-    pub async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
+    async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
         let path = self.mapper.uri_to_path(uri);
 
         let meta = fs::metadata(&path).await.map_err(|e| {
@@ -289,12 +292,12 @@ impl LocalFileBackend {
     }
 
     /// 读取指定 URI 的某一层级内容（L0/L1/L2）。
-    pub async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+    async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
         self.read_content_sync(uri, level).await
     }
 
     /// 写入指定 URI 的某一层级内容（覆盖写入）。
-    pub async fn write_content(
+    async fn write_content(
         &self,
         uri: &TianyanUri,
         level: ContentLevel,
@@ -312,7 +315,7 @@ impl LocalFileBackend {
     }
 
     /// 追加内容到指定 URI 的某一层级（自动创建文件）。
-    pub async fn append_content(
+    async fn append_content(
         &self,
         uri: &TianyanUri,
         level: ContentLevel,

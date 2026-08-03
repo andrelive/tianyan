@@ -27,7 +27,7 @@ pub use model::{
 };
 pub use retrieval::RetrievalConfig;
 pub use security::{SafetyMode, SecurityConfig};
-pub use storage::{StorageConfig, VectorStorageConfig};
+pub use storage::{StorageBackendType, StorageConfig, VectorStorageConfig};
 pub use validation::{
     validate_agent_config, validate_models_config, validate_provider, validate_storage_config,
     validation_errors_to_strings, ValidationResult,

@@ -82,7 +82,7 @@
 | `AgentHarness` wrapper | 已删除 | 功能由 `Agent` 直接持有 |
 | `AgentSkills` wrapper | 已删除 | 功能由 `Agent` 直接持有 |
 
-> **注**：`LocalFileBackend` 当前仍为生产后端。`SqliteBackend` 已实现并公开导出，待 `VirtualFileSystemImpl` 重构为 trait-based 后端后完成迁移。
+> **注**：存储后端已 trait 化（`StorageBackend` seam，ADR-005）。`LocalFileBackend` 为默认生产后端；`SqliteBackend` 已接入,通过配置 `[storage] backend = "sqlite"` 启用。
 
 ---
 

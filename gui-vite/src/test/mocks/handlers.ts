@@ -271,6 +271,20 @@ export const handlers = [
     });
   }),
 
+  // Session message delete: 删除该消息及其后，返回剩余消息
+  http.post(`${API_BASE}/sessions/:id/messages/delete`, ({ params }) => {
+    return HttpResponse.json({
+      session_id: params.id,
+      messages: [
+        {
+          role: 'user',
+          content: '你好',
+          timestamp: '2026-07-23T10:00:00Z',
+        },
+      ],
+    });
+  }),
+
   // Chat stream (SSE)
   http.post(`${API_BASE}/chat/stream`, () => {
     const encoder = new TextEncoder();

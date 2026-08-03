@@ -8,7 +8,9 @@
 //!
 //! - **StorageConfig**: 存储后端配置（定义在 `crate::config`）
 //! - **UriMapper**: URI 到文件系统路径的映射
-//! - **LocalFileBackend**: 本地文件系统存储后端
+//! - **StorageBackend**: 结构化存储 adapter seam（ADR-005）
+//! - **LocalFileBackend**: 本地文件系统存储后端（默认）
+//! - **SqliteBackend**: SQLite 存储后端（配置 `backend = "sqlite"` 启用）
 //! - **VectorStorage**: 向量存储后端 trait（支持 LanceDB 嵌入式向量存储。
 //! - **VirtualFileSystem**: 统一的上下文存储接口
 //! - **SummaryEngine**: 分层摘要生成
@@ -41,8 +43,7 @@ mod vfs_impl;
 mod test_utils;
 
 // 重新导出公共 API
-pub use backend::LocalFileBackend;
-pub use backend::SqliteBackend;
+pub use backend::{LocalFileBackend, SqliteBackend, StorageBackend};
 pub use embedding_bridge::EmbeddingServiceBridge;
 #[cfg(test)]
 pub use summary::MockSummaryEngine;

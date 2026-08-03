@@ -85,6 +85,32 @@ export async function apiPostMultipart<T>(
   return response.json();
 }
 
+// ========== Session messages ==========
+
+export interface DeleteMessageRequest {
+  message_index: number;
+}
+
+export interface SessionMessagesResponse {
+  session_id: string;
+  messages: {
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+    timestamp?: string;
+  }[];
+}
+
+/** 删除指定索引的消息及其后的所有消息，返回剩余消息。 */
+export async function deleteSessionMessage(
+  sessionId: string,
+  messageIndex: number
+): Promise<SessionMessagesResponse> {
+  return apiPost<SessionMessagesResponse>(
+    `/sessions/${encodeURIComponent(sessionId)}/messages/delete`,
+    { message_index: messageIndex } satisfies DeleteMessageRequest
+  );
+}
+
 export { getApiBase };
 
 // ========== Ollama API ==========

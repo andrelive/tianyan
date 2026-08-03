@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
 use crate::config::StorageConfig;
-use crate::vfs::backend::LocalFileBackend;
+use crate::vfs::backend::StorageBackend;
 use crate::vfs::traits::EmbeddingProvider;
 use crate::vfs::vector::VectorStorage;
 
@@ -13,7 +13,7 @@ use super::VirtualFileSystemImpl;
 /// 用于创建虚拟文件系统实例的构建器。
 pub struct VirtualFileSystemBuilder {
     config: Option<StorageConfig>,
-    storage: Option<Arc<LocalFileBackend>>,
+    storage: Option<Arc<dyn StorageBackend>>,
     vector_storage: Option<Arc<dyn VectorStorage>>,
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     embedding_model: Option<String>,
@@ -37,8 +37,8 @@ impl VirtualFileSystemBuilder {
         self
     }
 
-    /// 设置存储后端。
-    pub fn with_storage(mut self, storage: Arc<LocalFileBackend>) -> Self {
+    /// 设置存储后端（LocalFileBackend / SqliteBackend 等 adapter）。
+    pub fn with_storage(mut self, storage: Arc<dyn StorageBackend>) -> Self {
         self.storage = Some(storage);
         self
     }

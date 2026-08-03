@@ -3,12 +3,31 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// VFS 结构化存储后端类型（ADR-005）。
+///
+/// 默认使用本地文件系统；配置 `backend = "sqlite"` 切换为 SQLite。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageBackendType {
+    /// 本地文件系统后端（默认）。
+    #[default]
+    Local,
+    /// SQLite 后端（替代 LocalFileBackend，需共享 SqliteDb 连接）。
+    Sqlite,
+}
+
 /// 存储配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// 数据存储的根目录。
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+    /// 结构化存储后端（local | sqlite，默认 local）。
+    #[serde(default)]
+    pub backend: StorageBackendType,
+    /// SQLite 数据库文件路径（backend = "sqlite" 时使用；缺省为 data_dir/tianyan.db）。
+    #[serde(default)]
+    pub sqlite_path: Option<PathBuf>,
     /// 最大存储大小（字节，0 = 无限制）。
     #[serde(default)]
     pub max_storage_size: u64,
@@ -60,6 +79,8 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
+            backend: StorageBackendType::default(),
+            sqlite_path: None,
             max_storage_size: 0,
             auto_cleanup: true,
             cleanup_days: 365,

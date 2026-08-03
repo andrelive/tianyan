@@ -1,8 +1,8 @@
 # ADR-005: SQLite 作为主存储后端
 
 **日期**: 2026-07  
-**状态**: ✅ 已采纳  
-**影响范围**: 全局存储 — 替代 `LocalFileBackend`，统一结构化数据存储
+**状态**: ⚠️ 部分落地 —— `SqliteBackend` 已实现并接入 `StorageBackend` seam；`LocalFileBackend` 仍为默认后端，SQLite 通过配置 `[storage] backend = "sqlite"` 启用。  
+**影响范围**: 全局存储 — 结构化数据存储的 adapter seam（`StorageBackend`），最终目标为 SQLite 默认
 
 ---
 

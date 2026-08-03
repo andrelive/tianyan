@@ -1,7 +1,7 @@
 import { useRef, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
-import { apiGet, apiPost, getApiBase } from '@/lib/api-client';
+import { apiGet, apiPost, deleteSessionMessage, getApiBase } from '@/lib/api-client';
 import { useChatStream } from '@/hooks/useChatStream';
 import { MessageSquare, Loader2 } from 'lucide-react';
 import ChatInput from './ChatInput';
@@ -217,9 +217,28 @@ export default function ChatPanel() {
   );
 
   const handleDelete = useCallback(
-    (index: number) => {
+    async (index: number) => {
       if (streamStatus === 'streaming') return;
+
+      const state = useAppStore.getState();
+      const sessionId = state.currentSessionId;
+      if (!sessionId) {
+        state.showToast('请先发送一条消息以创建会话', 'error');
+        return;
+      }
+
+      // 乐观更新：删除该消息及其后的所有消息
       deleteMessagesFrom(index);
+      try {
+        const resp = await deleteSessionMessage(sessionId, index);
+        state.setMessages(resp.messages);
+      } catch (err: unknown) {
+        state.showToast(
+          `删除失败: ${err instanceof Error ? err.message : '未知错误'}`,
+          'error'
+        );
+        await reloadSession(sessionId);
+      }
     },
     [streamStatus, deleteMessagesFrom]
   );

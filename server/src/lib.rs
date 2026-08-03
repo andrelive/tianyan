@@ -112,16 +112,31 @@ fn get_static_dir() -> std::path::PathBuf {
 
 /// 应用级 VFS 初始化
 ///
-/// 创建并初始化单一的 VFS 实例，供整个应用使用
+/// 创建并初始化单一的 VFS 实例，供整个应用使用。
+/// `sqlite_db` 为全系统共享连接（ADR-005：禁止第二个 SQLite 连接）。
 fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
+    sqlite_db: tianyan::observability::SqliteDb,
 ) -> tianyan::common::error::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
+    use tianyan::config::StorageBackendType;
     use tianyan::vfs::{
-        EmbeddingServiceBridge, LanceDbVectorStore, LocalFileBackend, VirtualFileSystemBuilder,
+        EmbeddingServiceBridge, LanceDbVectorStore, SqliteBackend, StorageBackend,
+        VirtualFileSystemBuilder,
     };
 
-    // 1. 创建存储后端
-    let storage = Arc::new(LocalFileBackend::new(config.storage.clone()));
+    // 1. 创建存储后端（config.storage.backend 决定 adapter）
+    let storage: Arc<dyn StorageBackend> = match config.storage.backend {
+        StorageBackendType::Local => {
+            Arc::new(tianyan::vfs::LocalFileBackend::new(config.storage.clone()))
+        }
+        StorageBackendType::Sqlite => {
+            info!(
+                "VFS 使用 SQLite 存储后端（共享连接）：{}",
+                sqlite_db.path().display()
+            );
+            Arc::new(SqliteBackend::new(sqlite_db))
+        }
+    };
 
     // LanceDB 需要 async 初始化
     let vector_storage = tokio::task::block_in_place(|| {
@@ -231,12 +246,37 @@ const ALLOWED_ORIGINS: [HeaderValue; 6] = [
 fn create_app(
     config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
-    // 在应用层初始化 VFS（单一实例）
-    let vfs = initialize_vfs_for_app(&config)?;
+    // 创建全系统共享的 SqliteDb（ADR-005：单文件、单连接）
+    // - backend = "sqlite" 时：VFS 内容存储（vfs_entries 表）
+    // - 始终：UsageStats 统计（skill_calls / doc_access 等表）
+    let db_path = config
+        .storage
+        .sqlite_path
+        .clone()
+        .unwrap_or_else(|| config.storage.data_dir.join("tianyan.db"));
+    let sqlite_db = tianyan::observability::SqliteDb::open(db_path).map_err(|e| {
+        tianyan::TianyanError::Custom(format!("虚拟文件系统错误：打开 SQLite 数据库失败：{}", e))
+    })?;
+    let init_error: Option<String> = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(async { sqlite_db.init_all_schemas().await })
+            .err()
+            .map(|e| e.to_string())
+    });
+    if let Some(e) = init_error {
+        return Err(tianyan::TianyanError::Custom(format!(
+            "虚拟文件系统错误：初始化 SQLite Schema 失败：{}",
+            e
+        )));
+    }
 
-    // Create shared application state（传入 VFS）
+    // 在应用层初始化 VFS（单一实例，共享 SqliteDb）
+    let vfs = initialize_vfs_for_app(&config, sqlite_db.clone())?;
+
+    // Create shared application state（传入 VFS + 共享 SqliteDb）
     let state = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async { AppState::new(config, vfs).await })
+        tokio::runtime::Handle::current()
+            .block_on(async { AppState::new(config, vfs, sqlite_db).await })
     })?;
 
     info!("Application state initialized successfully");

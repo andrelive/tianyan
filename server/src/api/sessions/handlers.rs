@@ -8,8 +8,8 @@ use tracing::{error, info};
 
 use crate::api::sessions::services::SessionService;
 use crate::api::sessions::types::{
-    DeleteSessionResponse, ListSessionsResponse, Session, SessionDetail, SessionMessagesResponse,
-    UpdateTitleRequest,
+    DeleteMessageRequest, DeleteSessionResponse, ListSessionsResponse, Session, SessionDetail,
+    SessionMessagesResponse, UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
@@ -95,6 +95,27 @@ pub async fn delete_session(
             error!("删除会话失败: {}", e);
             ApiError::Internal(format!("删除会话失败: {}", e))
         })
+}
+
+/// 删除消息（该消息及其后的所有消息）
+pub async fn delete_message(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(request): Json<DeleteMessageRequest>,
+) -> Result<Json<SessionMessagesResponse>, ApiError> {
+    if session_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("会话ID不能为空".to_string()));
+    }
+
+    info!(
+        "删除消息请求: 会话={}, 索引={}",
+        session_id, request.message_index
+    );
+
+    let service = SessionService::new(state.session_manager());
+
+    let resp = service.delete_message(&session_id, request).await?;
+    Ok(Json(resp))
 }
 
 /// 更新会话标题

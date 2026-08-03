@@ -8,8 +8,9 @@ use tianyan::Message as CoreMessage;
 use tianyan::MessageRole as CoreMessageRole;
 
 use crate::api::sessions::types::{
-    CreateSessionRequest, CreateSessionResponse, DeleteSessionResponse, ListSessionsResponse,
-    Session, SessionDetail, SessionMessagesResponse, SessionMetadata, UpdateTitleRequest,
+    CreateSessionRequest, CreateSessionResponse, DeleteMessageRequest, DeleteSessionResponse,
+    ListSessionsResponse, Session, SessionDetail, SessionMessagesResponse, SessionMetadata,
+    UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
@@ -190,6 +191,49 @@ impl SessionService {
             session_id: detail.id,
             messages: detail.messages,
         })
+    }
+
+    /// 删除消息及其后的所有消息（与编辑/重新生成一致的截断语义）。
+    ///
+    /// 保留 `message_index` 之前的消息，删除该消息及之后，持久化后返回剩余消息。
+    pub async fn delete_message(
+        &self,
+        session_id: &str,
+        request: DeleteMessageRequest,
+    ) -> Result<SessionMessagesResponse, ApiError> {
+        info!(
+            "删除消息: 会话={}, 索引={}",
+            session_id, request.message_index
+        );
+
+        let mut session = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
+
+        if request.message_index >= session.messages.len() {
+            return Err(ApiError::BadRequest("消息索引超出范围".to_string()));
+        }
+
+        // 截断到该消息之前（不含）
+        session.messages.truncate(request.message_index);
+
+        if let Err(e) = self.session_manager.update_session(&session).await {
+            tracing::error!("更新会话失败: {}", e);
+            return Err(ApiError::Internal(format!("更新会话失败: {}", e)));
+        }
+        if let Err(e) = self
+            .session_manager
+            .rewrite_messages(session_id, &session.messages)
+            .await
+        {
+            tracing::error!("重写会话历史失败: {}", e);
+            return Err(ApiError::Internal(format!("重写会话历史失败: {}", e)));
+        }
+
+        // 返回剩余消息，前端可直接替换本地状态
+        self.get_messages(session_id).await
     }
 
     /// 删除会话

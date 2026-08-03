@@ -45,7 +45,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 
 ## 工作区结构
 
-4 crate，单 `Cargo.toml` workspace (resolver = "2")：
+5 crate，单 `Cargo.toml` workspace (resolver = "2")：
 
 | Crate | Package | 类型 |
 |-------|---------|------|
@@ -53,6 +53,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 | `server/` | `tianyan-server` | Axum HTTP 服务 |
 | `gui-vite/` | - | React TypeScript 前端 |
 | `tauri/` | `tianyan-tauri` | Tauri 桌面包装 |
+| `mcp/` | `tianyan-mcp` | MCP 协议客户端 |
 
 ## 代码规范
 
@@ -92,7 +93,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `observability` | `core/src/observability/` | `AgentMetrics` 可观测性存储 | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控） | — |
 
-已删除组件：`planner/`、`ModelRouter`、`TokenBudget`、`Chunker`、`AgentHarness` wrapper、`AgentSkills` wrapper、`LocalFileBackend`。
+已删除组件：`planner/`、`ModelRouter`、`TokenBudget`、`Chunker`、`AgentHarness` wrapper、`AgentSkills` wrapper。
 
 ## 常见陷阱
 

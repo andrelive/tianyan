@@ -135,6 +135,13 @@ impl UpdateTitleRequest {
     }
 }
 
+/// 删除消息请求 —— 删除指定索引的消息及其后的所有消息。
+#[derive(Debug, Deserialize)]
+pub struct DeleteMessageRequest {
+    /// 要删除的消息索引（该消息及其后的消息都会被删除）。
+    pub message_index: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

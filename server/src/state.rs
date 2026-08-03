@@ -81,6 +81,7 @@ impl AppState {
     pub async fn new(
         config: TianyanConfig,
         vfs: Arc<VirtualFileSystemImpl>,
+        sqlite_db: SqliteDb,
     ) -> TianyanResult<Self> {
         // 初始化技能注册表和执行器
         let mut skill_registry = SkillRegistry::new();
@@ -111,14 +112,7 @@ impl AppState {
             }
         }
 
-        // 初始化使用统计（共享 SQLite 数据库）
-        let db_path = config.storage.data_dir.join("usage_stats.db");
-        let sqlite_db = SqliteDb::open(db_path).map_err(|e| {
-            TianyanError::Custom(format!("存储后端错误：创建 SQLite 数据库失败：{}", e))
-        })?;
-        sqlite_db.init_all_schemas().await.map_err(|e| {
-            TianyanError::Custom(format!("存储后端错误：初始化 SQLite 表失败：{}", e))
-        })?;
+        // 初始化使用统计（复用全系统共享的 SqliteDb，ADR-005：单连接）
         let usage_stats = UsageStats::new(sqlite_db).map_err(|e| {
             TianyanError::Custom(format!("存储后端错误：创建 UsageStats 失败：{}", e))
         })?;

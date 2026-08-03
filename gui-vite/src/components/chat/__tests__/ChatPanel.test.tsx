@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
@@ -244,5 +244,35 @@ describe('ChatPanel', () => {
     expect(messages).toHaveLength(2);
     expect(messages[0].content).toBe('问题');
     expect(messages[1].content).toBe('重新生成的回复');
+  });
+
+  it('deletes a message via backend and syncs remaining messages', async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      messages: [
+        {
+          role: 'user',
+          content: '你好',
+          timestamp: new Date().toISOString(),
+        },
+        {
+          role: 'assistant',
+          content: '你好！我是天演',
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    });
+
+    renderChatPanel();
+
+    // 删除第二条消息（assistant）→ 剩余只有第一条
+    await user.click(screen.getAllByRole('button', { name: /删除消息/ })[1]);
+
+    await waitFor(() => {
+      const messages = useAppStore.getState().messages;
+      expect(messages).toHaveLength(1);
+      expect(messages[0].content).toBe('你好');
+    });
   });
 });

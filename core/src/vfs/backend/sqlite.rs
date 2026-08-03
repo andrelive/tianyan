@@ -3,8 +3,11 @@
 //! 所有 VFS 条目内容存储在 SQLite 的 `vfs_entries` 表中，
 //! 使用 URI 作为主键。
 
+use async_trait::async_trait;
+
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, EntryMetadata, TianyanUri};
+use crate::vfs::backend::StorageBackend;
 use crate::vfs::types::{ContextEntry, CURRENT_SCHEMA_VERSION};
 
 use crate::observability::sqlite_db::SqliteDb;
@@ -43,18 +46,19 @@ impl SqliteBackend {
         .map_err(|e| TianyanError::Custom(format!("存储后端错误：创建 vfs_entries 表失败: {e}")))?;
         Ok(())
     }
+}
 
-    // ── 公共 API（与 LocalFileBackend 同签名）────────────────────────────
-
+#[async_trait]
+impl StorageBackend for SqliteBackend {
     /// 初始化 SQLite VFS 后端，确保 vfs_entries 表存在。
-    pub async fn initialize(&self) -> Result<()> {
+    async fn initialize(&self) -> Result<()> {
         self.ensure_schema().await?;
         tracing::info!("SQLite VFS 后端已初始化");
         Ok(())
     }
 
     /// 检查指定 URI 的条目是否存在。
-    pub async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
+    async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
         let conn = self.db.lock().await;
         let count: i64 = conn
             .query_row(
@@ -67,7 +71,7 @@ impl SqliteBackend {
     }
 
     /// 读取指定 URI 的完整条目（含 L0/L1/L2 三层内容）。
-    pub async fn read_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
+    async fn read_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {
         let conn = self.db.lock().await;
         let uri_str = uri.to_string();
 
@@ -110,7 +114,7 @@ impl SqliteBackend {
     }
 
     /// 写入完整的条目内容（UPSERT 语义）。
-    pub async fn write_entry(&self, entry: &ContextEntry) -> Result<()> {
+    async fn write_entry(&self, entry: &ContextEntry) -> Result<()> {
         let conn = self.db.lock().await;
         let uri = entry.uri().to_string();
         let is_dir = entry.metadata.is_directory as i32;
@@ -138,7 +142,7 @@ impl SqliteBackend {
     }
 
     /// 删除指定 URI 及其所有子条目。
-    pub async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
+    async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
         let conn = self.db.lock().await;
         let uri_str = uri.to_string();
         let pattern = format!("{}%", uri_str);
@@ -157,7 +161,7 @@ impl SqliteBackend {
     }
 
     /// 列出指定 URI 下的一级子条目（基于 SQL LIKE 过滤）。
-    pub async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
+    async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
         let conn = self.db.lock().await;
         let prefix = format!("{}/", uri);
         // 只列出一级子条目：匹配 prefix，且 prefix 之后不含 '/'
@@ -218,7 +222,7 @@ impl SqliteBackend {
     }
 
     /// 读取指定 URI 的某一层级内容（L0/L1/L2）。
-    pub async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
+    async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
         let conn = self.db.lock().await;
         let column = match level {
             ContentLevel::Abstract => "abstract_content",
@@ -237,7 +241,7 @@ impl SqliteBackend {
     }
 
     /// 写入指定 URI 的某一层级内容（UPSERT 语义）。
-    pub async fn write_content(
+    async fn write_content(
         &self,
         uri: &TianyanUri,
         level: ContentLevel,
@@ -262,7 +266,7 @@ impl SqliteBackend {
     }
 
     /// 追加内容到指定 URI 的某一层级（利用 SQL COALESCE 拼接）。
-    pub async fn append_content(
+    async fn append_content(
         &self,
         uri: &TianyanUri,
         level: ContentLevel,

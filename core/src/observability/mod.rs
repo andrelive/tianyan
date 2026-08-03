@@ -7,6 +7,8 @@
 pub mod sqlite_db;
 pub mod usage_stats;
 
+pub use sqlite_db::SqliteDb;
+
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
