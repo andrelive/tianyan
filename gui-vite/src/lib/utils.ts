@@ -22,9 +22,7 @@ export function formatRelativeTime(iso: string): string {
   return formatDate(iso);
 }
 
-export function groupByCategory<T extends { category: string }>(
-  items: T[]
-): Map<string, T[]> {
+export function groupByCategory<T extends { category: string }>(items: T[]): Map<string, T[]> {
   const map = new Map<string, T[]>();
   for (const item of items) {
     const list = map.get(item.category) || [];
@@ -34,8 +32,6 @@ export function groupByCategory<T extends { category: string }>(
   return map;
 }
 
-export function cn(
-  ...classes: (string | boolean | undefined | null)[]
-): string {
+export function cn(...classes: (string | boolean | undefined | null)[]): string {
   return classes.filter(Boolean).join(' ');
 }

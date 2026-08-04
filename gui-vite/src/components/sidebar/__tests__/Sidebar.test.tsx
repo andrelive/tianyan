@@ -21,7 +21,7 @@ function renderSidebar(initialEntries: string[] = ['/chat']) {
     <MemoryRouter initialEntries={initialEntries}>
       <Sidebar />
       <LocationDisplay />
-    </MemoryRouter>
+    </MemoryRouter>,
   );
 }
 
@@ -259,6 +259,61 @@ describe('Sidebar', () => {
         expect(toast!.message).toBe('删除会话失败');
         expect(toast!.type).toBe('error');
       });
+    });
+  });
+
+  // ── Session rename ───────────────────────────────────────────────────────
+
+  describe('Session rename', () => {
+    const renameSession = {
+      id: 'session-1',
+      title: '旧标题',
+      created_at: '2026-07-20T10:00:00Z',
+      updated_at: '2026-07-20T10:00:00Z',
+      message_count: 0,
+    };
+
+    beforeEach(() => {
+      // 覆盖 GET /sessions，避免 mount 后的 fetch 用默认 mock 数据覆盖预置会话
+      server.use(
+        http.get('/api/v1/sessions', () => {
+          return HttpResponse.json({ sessions: [renameSession], total: 1 });
+        }),
+      );
+      useAppStore.setState({ sessions: [renameSession] });
+    });
+
+    it('double-clicking a title shows an inline editor', async () => {
+      const user = userEvent.setup();
+      renderSidebar();
+
+      await waitFor(() => {
+        expect(screen.getByText('旧标题')).toBeInTheDocument();
+      });
+
+      await user.dblClick(screen.getByText('旧标题'));
+      expect(screen.getByLabelText('编辑会话标题')).toBeInTheDocument();
+    });
+
+    it('submitting a new title updates the store via the title API', async () => {
+      const user = userEvent.setup();
+      renderSidebar();
+
+      await waitFor(() => {
+        expect(screen.getByText('旧标题')).toBeInTheDocument();
+      });
+
+      await user.dblClick(screen.getByText('旧标题'));
+      const input = screen.getByLabelText('编辑会话标题');
+      await user.clear(input);
+      await user.type(input, '新标题');
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => {
+        const sessions = useAppStore.getState().sessions;
+        expect(sessions[0].title).toBe('新标题');
+      });
+      expect(screen.getByText('新标题')).toBeInTheDocument();
     });
   });
 

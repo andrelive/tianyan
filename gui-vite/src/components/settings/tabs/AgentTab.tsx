@@ -14,19 +14,31 @@ export default function AgentTab({ config, onUpdateField }: AgentTabProps) {
         <div className="grid grid-cols-2 gap-4">
           <div className="flex items-center gap-3">
             <label className="text-sm text-[var(--color-text-primary)] w-32">启用技能</label>
-            <Toggle checked={config.enable_skills} onChange={(v) => onUpdateField('enable_skills', v)} />
+            <Toggle
+              checked={config.enable_skills}
+              onChange={(v) => onUpdateField('enable_skills', v)}
+            />
           </div>
           <div className="flex items-center gap-3">
             <label className="text-sm text-[var(--color-text-primary)] w-32">启用记忆</label>
-            <Toggle checked={config.enable_memory} onChange={(v) => onUpdateField('enable_memory', v)} />
+            <Toggle
+              checked={config.enable_memory}
+              onChange={(v) => onUpdateField('enable_memory', v)}
+            />
           </div>
           <div className="flex items-center gap-3">
             <label className="text-sm text-[var(--color-text-primary)] w-32">流式响应</label>
-            <Toggle checked={config.stream_responses} onChange={(v) => onUpdateField('stream_responses', v)} />
+            <Toggle
+              checked={config.stream_responses}
+              onChange={(v) => onUpdateField('stream_responses', v)}
+            />
           </div>
           <div className="flex items-center gap-3">
             <label className="text-sm text-[var(--color-text-primary)] w-32">启用思考</label>
-            <Toggle checked={config.enable_thinking} onChange={(v) => onUpdateField('enable_thinking', v)} />
+            <Toggle
+              checked={config.enable_thinking}
+              onChange={(v) => onUpdateField('enable_thinking', v)}
+            />
           </div>
         </div>
 
@@ -67,7 +79,9 @@ export default function AgentTab({ config, onUpdateField }: AgentTabProps) {
               min={100}
               max={10000}
               value={config.learned_rules_max_tokens}
-              onChange={(e) => onUpdateField('learned_rules_max_tokens', parseInt(e.target.value) || 800)}
+              onChange={(e) =>
+                onUpdateField('learned_rules_max_tokens', parseInt(e.target.value) || 800)
+              }
               className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
             />
           </FieldRow>

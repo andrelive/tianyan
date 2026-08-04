@@ -25,7 +25,9 @@ export default function MemoryTab({ config, onUpdateField }: MemoryTabProps) {
             type="number"
             min={1}
             value={config.max_long_term_memory}
-            onChange={(e) => onUpdateField('max_long_term_memory', parseInt(e.target.value) || 10000)}
+            onChange={(e) =>
+              onUpdateField('max_long_term_memory', parseInt(e.target.value) || 10000)
+            }
             className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
           />
         </FieldRow>
@@ -58,7 +60,9 @@ export default function MemoryTab({ config, onUpdateField }: MemoryTabProps) {
               type="number"
               min={60}
               value={config.consolidation_interval}
-              onChange={(e) => onUpdateField('consolidation_interval', parseInt(e.target.value) || 3600)}
+              onChange={(e) =>
+                onUpdateField('consolidation_interval', parseInt(e.target.value) || 3600)
+              }
               className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
             />
           </FieldRow>

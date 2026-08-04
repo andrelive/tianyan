@@ -98,7 +98,12 @@ export default function ConfigWizard() {
       case 0:
         return true;
       case 1:
-        return providerName.trim().length > 0 && providerEndpoint.trim().length > 0 && providerApiKey.trim().length > 0 && modelName.trim().length > 0;
+        return (
+          providerName.trim().length > 0 &&
+          providerEndpoint.trim().length > 0 &&
+          providerApiKey.trim().length > 0 &&
+          modelName.trim().length > 0
+        );
       case 2:
         return dataDir.trim().length > 0;
       case 3:
@@ -170,7 +175,10 @@ export default function ConfigWizard() {
           model: modelName.trim(),
         };
       }
-      if (modelCapsToUse.includes('text-embedding') || modelCapsToUse.includes('multimodal-embedding')) {
+      if (
+        modelCapsToUse.includes('text-embedding') ||
+        modelCapsToUse.includes('multimodal-embedding')
+      ) {
         config.preferences.embedding = {
           provider: providerName.trim(),
           model: modelName.trim(),
@@ -274,11 +282,7 @@ export default function ConfigWizard() {
               disabled={submitting}
               className="flex items-center gap-1.5 px-5 py-2 text-sm font-medium rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
             >
-              {submitting ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : (
-                <Check size={16} />
-              )}
+              {submitting ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
               {submitting ? '保存中...' : '完成配置'}
             </button>
           )}

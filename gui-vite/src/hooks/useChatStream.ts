@@ -40,9 +40,7 @@ export function useChatStream(options: UseChatStreamOptions) {
 
         if (!response.ok) {
           const text = await response.text();
-          throw new Error(
-            `HTTP ${response.status}${text ? ': ' + text : ''}`,
-          );
+          throw new Error(`HTTP ${response.status}${text ? ': ' + text : ''}`);
         }
 
         const reader = response.body?.getReader();

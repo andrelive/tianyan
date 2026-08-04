@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
-import { apiGet, apiDelete } from '@/lib/api-client';
+import { apiGet, apiDelete, updateSessionTitle } from '@/lib/api-client';
 import type { Session, ListSessionsResponse, SessionMessagesResponse } from '@/lib/types';
 import { formatRelativeTime } from '@/lib/utils';
 import {
@@ -45,7 +45,10 @@ export default function Sidebar() {
   const showToast = useAppStore((s) => s.showToast);
   const setView = useAppStore((s) => s.setView);
   const [hoveredSession, setHoveredSession] = useState<string | null>(null);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState('');
   const sessionListRef = useRef<HTMLDivElement>(null);
+  const editInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     apiGet<ListSessionsResponse>('/sessions')
@@ -54,6 +57,39 @@ export default function Sidebar() {
         /* sessions optional for now */
       });
   }, [setSessions]);
+
+  // 进入编辑模式时聚焦输入框
+  useEffect(() => {
+    if (editingSessionId) {
+      editInputRef.current?.focus();
+      editInputRef.current?.select();
+    }
+  }, [editingSessionId]);
+
+  const handleStartRename = (e: React.MouseEvent, session: Session) => {
+    e.stopPropagation();
+    setEditingSessionId(session.id);
+    setEditingTitle(session.title || '');
+  };
+
+  const handleRenameSubmit = async () => {
+    if (!editingSessionId) return;
+    const sessionId = editingSessionId;
+    const title = editingTitle.trim();
+    setEditingSessionId(null);
+    if (!title) return;
+
+    try {
+      await updateSessionTitle(sessionId, title);
+      // 更新本地会话列表中的标题
+      const current = useAppStore.getState().sessions;
+      useAppStore
+        .getState()
+        .setSessions(current.map((s) => (s.id === sessionId ? { ...s, title } : s)));
+    } catch {
+      showToast('重命名会话失败', 'error');
+    }
+  };
 
   const handleNewChat = () => {
     setCurrentSession(null);
@@ -68,9 +104,7 @@ export default function Sidebar() {
     navigate(`/chat/${session.id}`);
     // Fetch messages for the selected session
     try {
-      const data = await apiGet<SessionMessagesResponse>(
-        `/sessions/${session.id}/messages`
-      );
+      const data = await apiGet<SessionMessagesResponse>(`/sessions/${session.id}/messages`);
       setMessages(data.messages);
     } catch {
       showToast('加载会话消息失败', 'error');
@@ -110,7 +144,7 @@ export default function Sidebar() {
         handleSelectSession(sessions[index]);
       }
     },
-    [sessions, handleSelectSession]
+    [sessions, handleSelectSession],
   );
 
   // Current path determines which nav is active
@@ -119,7 +153,11 @@ export default function Sidebar() {
 
   if (!isSidebarOpen) {
     return (
-      <aside role="navigation" aria-label="导航" className="w-[64px] flex flex-col bg-[var(--color-bg-secondary)] border-r border-[var(--color-border)] shrink-0">
+      <aside
+        role="navigation"
+        aria-label="导航"
+        className="w-[64px] flex flex-col bg-[var(--color-bg-secondary)] border-r border-[var(--color-border)] shrink-0"
+      >
         <div className="flex flex-col items-center gap-1 py-3">
           <button
             onClick={toggleSidebar}
@@ -150,12 +188,14 @@ export default function Sidebar() {
   }
 
   return (
-    <aside role="navigation" aria-label="导航" className="w-[280px] flex flex-col bg-[var(--color-bg-secondary)] border-r border-[var(--color-border)] shrink-0">
+    <aside
+      role="navigation"
+      aria-label="导航"
+      className="w-[280px] flex flex-col bg-[var(--color-bg-secondary)] border-r border-[var(--color-border)] shrink-0"
+    >
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
-        <h1 className="text-base font-semibold text-[var(--color-text-primary)]">
-          天演
-        </h1>
+        <h1 className="text-base font-semibold text-[var(--color-text-primary)]">天演</h1>
         <div className="flex items-center gap-1">
           <button
             onClick={handleNewChat}
@@ -197,11 +237,19 @@ export default function Sidebar() {
       {/* Session list */}
       <div className="flex-1 overflow-y-auto px-2 py-2">
         {sessions.length === 0 ? (
-          <p className="text-xs text-[var(--color-text-tertiary)] text-center mt-8" aria-live="polite">
+          <p
+            className="text-xs text-[var(--color-text-tertiary)] text-center mt-8"
+            aria-live="polite"
+          >
             暂无会话
           </p>
         ) : (
-          <div ref={sessionListRef} className="flex flex-col gap-0.5" role="list" aria-label="会话列表">
+          <div
+            ref={sessionListRef}
+            className="flex flex-col gap-0.5"
+            role="list"
+            aria-label="会话列表"
+          >
             {sessions.map((session, i) => (
               <div
                 key={session.id}
@@ -220,15 +268,36 @@ export default function Sidebar() {
                 }`}
               >
                 <div className="flex-1 min-w-0">
-                  <p
-                    className={`truncate ${
-                      currentSessionId === session.id
-                        ? 'text-blue-700 dark:text-blue-300 font-medium'
-                        : 'text-[var(--color-text-primary)]'
-                    }`}
-                  >
-                    {session.title || '新对话'}
-                  </p>
+                  {editingSessionId === session.id ? (
+                    <input
+                      ref={editInputRef}
+                      value={editingTitle}
+                      onChange={(e) => setEditingTitle(e.target.value)}
+                      onBlur={handleRenameSubmit}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === 'Enter') {
+                          handleRenameSubmit();
+                        } else if (e.key === 'Escape') {
+                          setEditingSessionId(null);
+                        }
+                      }}
+                      className="w-full px-1 py-0.5 text-sm rounded border border-blue-500 bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] outline-none"
+                      aria-label="编辑会话标题"
+                    />
+                  ) : (
+                    <p
+                      onDoubleClick={(e) => handleStartRename(e, session)}
+                      title="双击重命名"
+                      className={`truncate ${
+                        currentSessionId === session.id
+                          ? 'text-blue-700 dark:text-blue-300 font-medium'
+                          : 'text-[var(--color-text-primary)]'
+                      }`}
+                    >
+                      {session.title || '新对话'}
+                    </p>
+                  )}
                   <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
                     {formatRelativeTime(session.updated_at)}
                   </p>

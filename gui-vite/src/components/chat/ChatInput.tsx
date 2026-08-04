@@ -42,7 +42,7 @@ export default function ChatInput({ onSend, onStop, isStreaming }: Props) {
         handleSend();
       }
     },
-    [handleSend]
+    [handleSend],
   );
 
   return (
@@ -65,7 +65,7 @@ export default function ChatInput({ onSend, onStop, isStreaming }: Props) {
               'placeholder:text-[var(--color-text-tertiary)]',
               'focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500',
               'disabled:opacity-50 disabled:cursor-not-allowed',
-              'transition-colors'
+              'transition-colors',
             )}
           />
         </div>
@@ -88,7 +88,7 @@ export default function ChatInput({ onSend, onStop, isStreaming }: Props) {
               'flex items-center gap-2 px-4 py-3 rounded-xl text-white text-sm font-medium transition-colors shrink-0',
               input.trim()
                 ? 'bg-blue-500 hover:bg-blue-600'
-                : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-tertiary)] cursor-not-allowed'
+                : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-tertiary)] cursor-not-allowed',
             )}
           >
             <Send className="w-4 h-4" />

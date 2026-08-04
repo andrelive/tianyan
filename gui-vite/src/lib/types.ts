@@ -3,12 +3,7 @@
 export type MessageRole = 'system' | 'user' | 'assistant';
 
 export type StreamChunkType =
-  | 'answer'
-  | 'thought'
-  | 'tool_call'
-  | 'observation'
-  | 'clarification'
-  | 'error';
+  'answer' | 'thought' | 'tool_call' | 'observation' | 'clarification' | 'error';
 
 export interface ChatMessage {
   id?: string;
@@ -92,8 +87,10 @@ export interface Skill {
   id: string;
   name: string;
   description: string;
-  parameters: SkillParameter[];
+  parameters?: SkillParameter[];
   category: string;
+  version: string;
+  enabled: boolean;
 }
 
 export interface SkillExecutionStatus {
@@ -103,11 +100,6 @@ export interface SkillExecutionStatus {
   progress?: number;
   result?: unknown;
   error?: string;
-}
-
-export interface ExecuteSkillRequest {
-  skill_id: string;
-  params: Record<string, string>;
 }
 
 export interface SkillListResponse {
@@ -143,7 +135,7 @@ export interface KnowledgeSearchResponse {
   query: string;
   results: KnowledgeSearchResult[];
   total: number;
-  top_k: number;
+  limit: number;
   offset: number;
 }
 
@@ -343,4 +335,10 @@ export interface McpServerConfigState {
   env?: Record<string, string>;
   enabled: boolean;
   description: string;
+}
+
+export interface McpTestResponse {
+  success: boolean;
+  tools: number;
+  error?: string;
 }

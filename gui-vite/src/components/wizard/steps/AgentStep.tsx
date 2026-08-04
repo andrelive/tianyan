@@ -19,9 +19,7 @@ function Toggle({
         aria-label={label || ''}
       />
       <div className="relative w-10 h-5 rounded-full bg-[var(--color-bg-tertiary)] peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-4 after:h-4 after:bg-white after:rounded-full after:shadow-sm after:transition-all peer-checked:after:translate-x-5" />
-      {label && (
-        <span className="text-sm text-[var(--color-text-secondary)]">{label}</span>
-      )}
+      {label && <span className="text-sm text-[var(--color-text-secondary)]">{label}</span>}
     </label>
   );
 }
@@ -35,13 +33,9 @@ interface FieldRowProps {
 function FieldRow({ label, children, description }: FieldRowProps) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-sm font-medium text-[var(--color-text-primary)]">
-        {label}
-      </label>
+      <label className="text-sm font-medium text-[var(--color-text-primary)]">{label}</label>
       {children}
-      {description && (
-        <p className="text-xs text-[var(--color-text-tertiary)]">{description}</p>
-      )}
+      {description && <p className="text-xs text-[var(--color-text-tertiary)]">{description}</p>}
     </div>
   );
 }
@@ -69,20 +63,14 @@ export default function AgentStep({
               <p className="text-sm font-medium text-[var(--color-text-primary)]">启用技能</p>
               <p className="text-xs text-[var(--color-text-tertiary)]">允许 Agent 调用内置工具</p>
             </div>
-            <Toggle
-              checked={data.enableSkills}
-              onChange={(v) => onChange({ enableSkills: v })}
-            />
+            <Toggle checked={data.enableSkills} onChange={(v) => onChange({ enableSkills: v })} />
           </div>
           <div className="flex items-center justify-between p-3 rounded-lg border border-[var(--color-border)]">
             <div>
               <p className="text-sm font-medium text-[var(--color-text-primary)]">启用记忆</p>
               <p className="text-xs text-[var(--color-text-tertiary)]">Agent 可记住历史交互</p>
             </div>
-            <Toggle
-              checked={data.enableMemory}
-              onChange={(v) => onChange({ enableMemory: v })}
-            />
+            <Toggle checked={data.enableMemory} onChange={(v) => onChange({ enableMemory: v })} />
           </div>
           <div className="flex items-center justify-between p-3 rounded-lg border border-[var(--color-border)]">
             <div>

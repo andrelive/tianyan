@@ -20,8 +20,20 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
 import { apiGet, apiPost, apiPut } from '@/lib/api-client';
-import { fromBackendConfig, toBackendConfig, emptyProvider, emptyModelEntry } from '@/lib/config-transform';
-import type { ConfigState, ProviderConfigState, ProviderModelEntry, ModelCapability, ModelPreferencesState, ModelRef } from '@/lib/types';
+import {
+  fromBackendConfig,
+  toBackendConfig,
+  emptyProvider,
+  emptyModelEntry,
+} from '@/lib/config-transform';
+import type {
+  ConfigState,
+  ProviderConfigState,
+  ProviderModelEntry,
+  ModelCapability,
+  ModelPreferencesState,
+  ModelRef,
+} from '@/lib/types';
 import type { BackendConfigResponse } from '@/lib/config-transform';
 
 import ModelsTab from './tabs/ModelsTab';
@@ -72,7 +84,9 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
   const [saving, setSaving] = useState(false);
 
   /* Test connection state per provider (runtime only, not persisted) */
-  const [testStatus, setTestStatus] = useState<Record<number, 'idle' | 'testing' | 'success' | 'error'>>({});
+  const [testStatus, setTestStatus] = useState<
+    Record<number, 'idle' | 'testing' | 'success' | 'error'>
+  >({});
 
   /* Sync config when prop changes (e.g. after navigating back) */
   useEffect(() => {
@@ -80,10 +94,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
   }, [cfg]);
 
   /* Generic field updater */
-  const updateField = useCallback(<K extends keyof ConfigState>(
-    key: K,
-    value: ConfigState[K]
-  ) => {
+  const updateField = useCallback(<K extends keyof ConfigState>(key: K, value: ConfigState[K]) => {
     setConfig((prev) => (prev ? { ...prev, [key]: value } : prev));
   }, []);
 
@@ -111,12 +122,12 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
       setConfig((prev) => {
         if (!prev) return prev;
         const providers = prev.providers.map((p, i) =>
-          i === index ? { ...p, [field]: value } : p
+          i === index ? { ...p, [field]: value } : p,
         );
         return { ...prev, providers };
       });
     },
-    []
+    [],
   );
 
   /* ── Model entry helpers ── */
@@ -144,20 +155,25 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
   }, []);
 
   const updateModel = useCallback(
-    (providerIndex: number, modelIndex: number, field: keyof ProviderModelEntry, value: unknown) => {
+    (
+      providerIndex: number,
+      modelIndex: number,
+      field: keyof ProviderModelEntry,
+      value: unknown,
+    ) => {
       setConfig((prev) => {
         if (!prev) return prev;
         const providers = prev.providers.map((p, i) => {
           if (i !== providerIndex) return p;
           const models = p.models.map((m, mi) =>
-            mi === modelIndex ? { ...m, [field]: value } : m
+            mi === modelIndex ? { ...m, [field]: value } : m,
           );
           return { ...p, models };
         });
         return { ...prev, providers };
       });
     },
-    []
+    [],
   );
 
   const toggleModelCapability = useCallback(
@@ -181,27 +197,23 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
         return { ...prev, providers };
       });
     },
-    []
+    [],
   );
 
   /* ── Preferences helpers ── */
 
   type PreferenceKey = keyof ModelPreferencesState;
 
-  const updatePreference = useCallback(
-    (key: PreferenceKey, provider: string, model: string) => {
-      setConfig((prev) => {
-        if (!prev) return prev;
-        const ref: ModelRef | null =
-          provider && model ? { provider, model } : null;
-        return {
-          ...prev,
-          preferences: { ...prev.preferences, [key]: ref },
-        };
-      });
-    },
-    []
-  );
+  const updatePreference = useCallback((key: PreferenceKey, provider: string, model: string) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const ref: ModelRef | null = provider && model ? { provider, model } : null;
+      return {
+        ...prev,
+        preferences: { ...prev.preferences, [key]: ref },
+      };
+    });
+  }, []);
 
   /* Test model connection — uses backend test-connection endpoint */
   const testConnection = useCallback(
@@ -223,7 +235,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
             endpoint: p.endpoint,
             api_key: p.api_key,
             model: modelName,
-          }
+          },
         );
         if (resp.success) {
           setTestStatus((prev) => ({ ...prev, [index]: 'success' }));
@@ -238,7 +250,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
         showToast(`${p.name} 连接失败: ${msg}`, 'error');
       }
     },
-    [config.providers, showToast]
+    [config.providers, showToast],
   );
 
   /* Save config */
@@ -319,7 +331,11 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
   return (
     <div className="flex-1 flex overflow-hidden">
       {/* Left: tab navigation */}
-      <nav role="tablist" aria-label="设置选项卡" className="w-44 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-secondary)] overflow-y-auto">
+      <nav
+        role="tablist"
+        aria-label="设置选项卡"
+        className="w-44 shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-secondary)] overflow-y-auto"
+      >
         {TABS.map((tab) => {
           const Icon = tab.icon;
           return (
@@ -344,7 +360,12 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
       </nav>
 
       {/* Right: content */}
-      <div className="flex-1 overflow-y-auto" role="tabpanel" id={`tabpanel-${activeTab}`} aria-labelledby={`tab-${activeTab}`}>
+      <div
+        className="flex-1 overflow-y-auto"
+        role="tabpanel"
+        id={`tabpanel-${activeTab}`}
+        aria-labelledby={`tab-${activeTab}`}
+      >
         <div className="max-w-2xl mx-auto p-6">
           {renderActiveTab()}
 
@@ -355,11 +376,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
                 disabled={saving}
                 className="flex items-center gap-2 px-5 py-2 text-sm font-medium rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
               >
-                {saving ? (
-                  <Loader2 size={16} className="animate-spin" />
-                ) : (
-                  <Save size={16} />
-                )}
+                {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
                 {saving ? '保存中...' : '保存设置'}
               </button>
             </div>
@@ -404,7 +421,11 @@ export default function SettingsPanel() {
 
   if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center" aria-live="polite" aria-label="正在加载设置">
+      <div
+        className="flex-1 flex items-center justify-center"
+        aria-live="polite"
+        aria-label="正在加载设置"
+      >
         <Loader2 size={24} className="animate-spin text-[var(--color-text-tertiary)]" />
       </div>
     );

@@ -52,7 +52,11 @@ export default function StorageTab({ config, onUpdateField }: StorageTabProps) {
         </FieldRow>
         <div className="flex items-end pb-1">
           <div className="flex items-center gap-4">
-            <Toggle checked={config.auto_cleanup} onChange={(v) => onUpdateField('auto_cleanup', v)} label="自动清理" />
+            <Toggle
+              checked={config.auto_cleanup}
+              onChange={(v) => onUpdateField('auto_cleanup', v)}
+              label="自动清理"
+            />
             {config.auto_cleanup && (
               <div className="flex items-center gap-2">
                 <label className="text-xs text-[var(--color-text-secondary)]">清理天数</label>

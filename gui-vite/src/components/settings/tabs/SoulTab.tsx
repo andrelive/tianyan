@@ -65,7 +65,11 @@ export default function SoulTab() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-20" aria-live="polite" aria-label="加载中">
+      <div
+        className="flex items-center justify-center py-20"
+        aria-live="polite"
+        aria-label="加载中"
+      >
         <Loader2 size={24} className="animate-spin text-[var(--color-text-tertiary)]" />
       </div>
     );
@@ -77,9 +81,7 @@ export default function SoulTab() {
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-base font-semibold text-[var(--color-text-primary)]">
-          智能体人格
-        </h3>
+        <h3 className="text-base font-semibold text-[var(--color-text-primary)]">智能体人格</h3>
         <div className="text-xs text-[var(--color-text-tertiary)]">
           {lineCount} 行 · {charCount.toLocaleString()} 字符
         </div>
@@ -116,11 +118,7 @@ export default function SoulTab() {
           disabled={saving || !content.trim()}
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
         >
-          {saving ? (
-            <Loader2 size={16} className="animate-spin" />
-          ) : (
-            <Save size={16} />
-          )}
+          {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
           {saving ? '保存中...' : '保存人格'}
         </button>
         <button
@@ -128,11 +126,7 @@ export default function SoulTab() {
           disabled={restoring}
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 transition-colors"
         >
-          {restoring ? (
-            <Loader2 size={16} className="animate-spin" />
-          ) : (
-            <RotateCcw size={16} />
-          )}
+          {restoring ? <Loader2 size={16} className="animate-spin" /> : <RotateCcw size={16} />}
           {restoring ? '加载中...' : '恢复默认'}
         </button>
       </div>

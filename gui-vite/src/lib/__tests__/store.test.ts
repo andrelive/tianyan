@@ -117,7 +117,13 @@ describe('useAppStore', () => {
   });
 
   it('removeSession clears currentSessionId and messages when current session removed', () => {
-    const s: Session = { id: 'cur', title: 'Current', created_at: '', updated_at: '', message_count: 0 };
+    const s: Session = {
+      id: 'cur',
+      title: 'Current',
+      created_at: '',
+      updated_at: '',
+      message_count: 0,
+    };
     useAppStore.setState({
       sessions: [s],
       currentSessionId: 'cur',
@@ -232,9 +238,9 @@ describe('useAppStore', () => {
     });
 
     // Should not throw and messages remain unchanged
-    useAppStore.getState().appendSkillCalls([
-      { skill_id: 's1', skill_name: 't', success: true, execution_time_ms: 0 },
-    ]);
+    useAppStore
+      .getState()
+      .appendSkillCalls([{ skill_id: 's1', skill_name: 't', success: true, execution_time_ms: 0 }]);
     expect(useAppStore.getState().messages).toHaveLength(1);
     expect(useAppStore.getState().messages[0].skill_calls).toBeUndefined();
   });
@@ -319,7 +325,15 @@ describe('useAppStore', () => {
 
   it('setSkills replaces the skills array', () => {
     const skills: Skill[] = [
-      { id: 'x', name: 'X', description: '', parameters: [], category: '' },
+      {
+        id: 'x',
+        name: 'X',
+        description: '',
+        parameters: [],
+        category: '',
+        version: '1.0.0',
+        enabled: true,
+      },
     ];
 
     useAppStore.getState().setSkills(skills);

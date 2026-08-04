@@ -1,12 +1,6 @@
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
-import {
-  ChevronDown,
-  ChevronRight,
-  CheckCircle2,
-  XCircle,
-  Clock,
-} from 'lucide-react';
+import { ChevronDown, ChevronRight, CheckCircle2, XCircle, Clock } from 'lucide-react';
 import type { SkillCallInfo } from '@/lib/types';
 
 interface Props {
@@ -22,7 +16,7 @@ export default function SkillCallCard({ info }: Props) {
         'rounded-lg border-l-4 p-3 my-2 text-sm',
         info.success
           ? 'border-l-green-500 bg-green-50 dark:bg-green-950/30'
-          : 'border-l-red-500 bg-red-50 dark:bg-red-950/30'
+          : 'border-l-red-500 bg-red-50 dark:bg-red-950/30',
       )}
     >
       <button

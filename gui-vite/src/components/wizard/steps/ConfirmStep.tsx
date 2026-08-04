@@ -39,9 +39,7 @@ export default function ConfirmStep({
 }: ConfirmStepProps) {
   return (
     <div>
-      <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-1">
-        确认配置
-      </h2>
+      <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-1">确认配置</h2>
       <p className="text-xs text-[var(--color-text-tertiary)] mb-5">
         请检查以下配置无误，点击"完成配置"开始使用天演。
       </p>
@@ -106,7 +104,10 @@ export default function ConfirmStep({
       </div>
 
       {submitting && (
-        <div className="flex items-center justify-center gap-2 mt-4 text-sm text-[var(--color-text-secondary)]" aria-live="polite">
+        <div
+          className="flex items-center justify-center gap-2 mt-4 text-sm text-[var(--color-text-secondary)]"
+          aria-live="polite"
+        >
           <Loader2 size={16} className="animate-spin" />
           正在保存配置...
         </div>

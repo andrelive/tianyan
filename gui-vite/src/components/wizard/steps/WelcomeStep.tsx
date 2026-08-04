@@ -5,12 +5,9 @@ export default function WelcomeStep(_props: StepProps) {
   return (
     <div className="flex flex-col items-center text-center py-8">
       <Bot size={64} className="text-accent mb-4" />
-      <h1 className="text-2xl font-bold text-[var(--color-text-primary)] mb-2">
-        欢迎使用天演
-      </h1>
+      <h1 className="text-2xl font-bold text-[var(--color-text-primary)] mb-2">欢迎使用天演</h1>
       <p className="text-sm text-[var(--color-text-secondary)] max-w-md mb-8 leading-relaxed">
-        天演是一个基于大语言模型的本地智能代理系统。
-        在开始之前，我们需要完成一些基本配置。
+        天演是一个基于大语言模型的本地智能代理系统。 在开始之前，我们需要完成一些基本配置。
         整个过程大约需要 2 分钟。
       </p>
 
@@ -30,9 +27,7 @@ export default function WelcomeStep(_props: StepProps) {
               <span className="text-sm font-medium text-[var(--color-text-primary)]">
                 {item.title}
               </span>
-              <span className="text-xs text-[var(--color-text-tertiary)]">
-                {item.desc}
-              </span>
+              <span className="text-xs text-[var(--color-text-tertiary)]">{item.desc}</span>
             </div>
           );
         })}

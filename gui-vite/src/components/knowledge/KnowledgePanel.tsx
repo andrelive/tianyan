@@ -41,7 +41,7 @@ function HighlightedText({ text, query }: { text: string; query: string }) {
           </mark>
         ) : (
           part
-        )
+        ),
       )}
     </>
   );
@@ -133,7 +133,9 @@ export default function KnowledgePanel() {
       setIsSearching(true);
       setSearchError(null);
       try {
-        const res = await apiGet<KnowledgeSearchResponse>(`/knowledge/search?q=${encodeURIComponent(query)}&limit=10`);
+        const res = await apiGet<KnowledgeSearchResponse>(
+          `/knowledge/search?q=${encodeURIComponent(query)}&limit=10`,
+        );
         setSearchResults(res.results);
         setTotalResults(res.total);
       } catch (err) {
@@ -238,13 +240,15 @@ export default function KnowledgePanel() {
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border)]">
-        <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
-          知识库
-        </h2>
+        <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">知识库</h2>
       </div>
 
       {/* Sub-tabs */}
-      <div role="tablist" aria-label="知识库功能" className="flex gap-2 px-6 py-3 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
+      <div
+        role="tablist"
+        aria-label="知识库功能"
+        className="flex gap-2 px-6 py-3 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]"
+      >
         <button
           role="tab"
           aria-selected={activeTab === 'search'}
@@ -306,7 +310,10 @@ export default function KnowledgePanel() {
 
             {/* Search error */}
             {searchError && (
-              <div role="alert" className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm">
+              <div
+                role="alert"
+                className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
+              >
                 <AlertCircle size={16} />
                 <span>{searchError}</span>
               </div>
@@ -358,10 +365,7 @@ export default function KnowledgePanel() {
                     {expandedResultId === result.id && (
                       <div className="px-4 pb-4">
                         <div className="p-3 rounded-md bg-[var(--color-bg-secondary)] text-sm text-[var(--color-text-secondary)] leading-relaxed">
-                          <HighlightedText
-                            text={result.content}
-                            query={searchQuery}
-                          />
+                          <HighlightedText text={result.content} query={searchQuery} />
                         </div>
                       </div>
                     )}
@@ -394,11 +398,18 @@ export default function KnowledgePanel() {
             {/* Breadcrumb */}
             {browsePath.length > 0 && (
               <div className="flex items-center gap-1 text-xs text-[var(--color-text-secondary)]">
-                <button onClick={() => setBrowsePath([])} className="hover:text-blue-600">知识库</button>
+                <button onClick={() => setBrowsePath([])} className="hover:text-blue-600">
+                  知识库
+                </button>
                 {browsePath.map((seg, i) => (
                   <span key={i} className="flex items-center gap-1">
                     <ChevronRight size={12} />
-                    <button onClick={() => setBrowsePath(browsePath.slice(0, i + 1))} className="hover:text-blue-600">{seg}</button>
+                    <button
+                      onClick={() => setBrowsePath(browsePath.slice(0, i + 1))}
+                      className="hover:text-blue-600"
+                    >
+                      {seg}
+                    </button>
                   </span>
                 ))}
               </div>
@@ -407,35 +418,79 @@ export default function KnowledgePanel() {
             <div className="flex items-center gap-2 mb-2">
               <label className="text-xs text-[var(--color-text-tertiary)]">查看层级:</label>
               {(['abstract', 'overview', 'detail'] as const).map((lvl) => (
-                <button key={lvl} onClick={() => setBrowseLevel(lvl)} className={`px-2 py-0.5 text-xs rounded border ${browseLevel === lvl ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'border-[var(--color-border)] text-[var(--color-text-secondary)]'}`}>
+                <button
+                  key={lvl}
+                  onClick={() => setBrowseLevel(lvl)}
+                  className={`px-2 py-0.5 text-xs rounded border ${browseLevel === lvl ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'border-[var(--color-border)] text-[var(--color-text-secondary)]'}`}
+                >
                   {lvl === 'abstract' ? 'L0 摘要' : lvl === 'overview' ? 'L1 概览' : 'L2 详情'}
                 </button>
               ))}
-              <button onClick={loadBrowseEntries} disabled={browseLoading} className="ml-auto px-2 py-0.5 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]">
+              <button
+                onClick={loadBrowseEntries}
+                disabled={browseLoading}
+                className="ml-auto px-2 py-0.5 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+              >
                 {browseLoading ? '刷新中...' : '刷新'}
               </button>
             </div>
-            {browseError && (<div role="alert" className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"><AlertCircle size={16} /><span>{browseError}</span></div>)}
-            {browseLoading ? (<div className="flex items-center justify-center py-10"><Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" /></div>) : (
+            {browseError && (
+              <div
+                role="alert"
+                className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
+              >
+                <AlertCircle size={16} />
+                <span>{browseError}</span>
+              </div>
+            )}
+            {browseLoading ? (
+              <div className="flex items-center justify-center py-10">
+                <Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" />
+              </div>
+            ) : (
               <div className="space-y-1">
                 {browseEntries.map((entry) => (
-                  <div key={entry.uri} onClick={() => handleBrowseView(entry)} className={`flex items-center justify-between px-3 py-2 rounded-md cursor-pointer transition-colors ${selectedBrowseEntry?.uri === entry.uri ? 'bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800' : 'border border-transparent hover:bg-[var(--color-bg-hover)]'}`}>
+                  <div
+                    key={entry.uri}
+                    onClick={() => handleBrowseView(entry)}
+                    className={`flex items-center justify-between px-3 py-2 rounded-md cursor-pointer transition-colors ${selectedBrowseEntry?.uri === entry.uri ? 'bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800' : 'border border-transparent hover:bg-[var(--color-bg-hover)]'}`}
+                  >
                     <div className="flex items-center gap-2 min-w-0">
-                      {entry.is_directory ? <Folder size={16} className="shrink-0 text-yellow-500" /> : <File size={16} className="shrink-0 text-[var(--color-text-tertiary)]" />}
-                      <span className="text-sm text-[var(--color-text-primary)] truncate">{entry.name}</span>
+                      {entry.is_directory ? (
+                        <Folder size={16} className="shrink-0 text-yellow-500" />
+                      ) : (
+                        <File size={16} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                      )}
+                      <span className="text-sm text-[var(--color-text-primary)] truncate">
+                        {entry.name}
+                      </span>
                     </div>
                   </div>
                 ))}
-                {browseEntries.length === 0 && !browseLoading && !browseError && (<p className="text-sm text-[var(--color-text-tertiary)] py-8 text-center">知识库暂无条目</p>)}
+                {browseEntries.length === 0 && !browseLoading && !browseError && (
+                  <p className="text-sm text-[var(--color-text-tertiary)] py-8 text-center">
+                    知识库暂无条目
+                  </p>
+                )}
               </div>
             )}
 
             {selectedBrowseEntry && (
               <div className="border-t border-[var(--color-border)] pt-4">
                 <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-sm font-medium text-[var(--color-text-primary)] truncate max-w-[70%]">{selectedBrowseEntry.name}</h4>
+                  <h4 className="text-sm font-medium text-[var(--color-text-primary)] truncate max-w-[70%]">
+                    {selectedBrowseEntry.name}
+                  </h4>
                 </div>
-                {browseContentLoading ? (<div className="flex items-center justify-center py-10"><Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" /></div>) : (<pre className="max-h-[300px] overflow-y-auto p-4 rounded-lg bg-[var(--color-bg-secondary)] text-sm text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono leading-relaxed border border-[var(--color-border)]">{browseContent || '(空内容)'}</pre>)}
+                {browseContentLoading ? (
+                  <div className="flex items-center justify-center py-10">
+                    <Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" />
+                  </div>
+                ) : (
+                  <pre className="max-h-[300px] overflow-y-auto p-4 rounded-lg bg-[var(--color-bg-secondary)] text-sm text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono leading-relaxed border border-[var(--color-border)]">
+                    {browseContent || '(空内容)'}
+                  </pre>
+                )}
               </div>
             )}
           </div>
@@ -473,16 +528,12 @@ export default function KnowledgePanel() {
               <Inbox
                 size={40}
                 className={`mb-3 ${
-                  dragOver
-                    ? 'text-blue-500'
-                    : 'text-[var(--color-text-tertiary)]'
+                  dragOver ? 'text-blue-500' : 'text-[var(--color-text-tertiary)]'
                 }`}
               />
               <p
                 className={`text-sm font-medium ${
-                  dragOver
-                    ? 'text-blue-600'
-                    : 'text-[var(--color-text-secondary)]'
+                  dragOver ? 'text-blue-600' : 'text-[var(--color-text-secondary)]'
                 }`}
               >
                 {dragOver ? '释放文件以上传' : '拖拽文件到此处，或点击选择'}
@@ -505,10 +556,7 @@ export default function KnowledgePanel() {
                       className="flex items-center justify-between px-3 py-2 rounded-md bg-[var(--color-bg-secondary)] border border-[var(--color-border)]"
                     >
                       <div className="flex items-center gap-2 min-w-0">
-                        <File
-                          size={16}
-                          className="shrink-0 text-[var(--color-text-tertiary)]"
-                        />
+                        <File size={16} className="shrink-0 text-[var(--color-text-tertiary)]" />
                         <span className="text-sm text-[var(--color-text-primary)] truncate">
                           {file.name}
                         </span>
@@ -572,7 +620,11 @@ export default function KnowledgePanel() {
 
             {/* Success message */}
             {ingestSuccess && (
-              <div role="status" aria-live="polite" className="flex items-center gap-2 p-3 rounded-lg bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-300 text-sm">
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-2 p-3 rounded-lg bg-green-50 dark:bg-green-950 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-300 text-sm"
+              >
                 <CheckCircle2 size={16} />
                 <span>文件导入成功！</span>
               </div>
@@ -580,7 +632,10 @@ export default function KnowledgePanel() {
 
             {/* Error message */}
             {ingestError && (
-              <div role="alert" className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm">
+              <div
+                role="alert"
+                className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
+              >
                 <AlertCircle size={16} />
                 <span>{ingestError}</span>
               </div>

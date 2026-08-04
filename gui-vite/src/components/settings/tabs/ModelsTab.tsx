@@ -25,7 +25,11 @@ interface ModelsTabProps {
     field: keyof ProviderModelEntry,
     value: unknown,
   ) => void;
-  onToggleModelCapability: (providerIndex: number, modelIndex: number, cap: ModelCapability) => void;
+  onToggleModelCapability: (
+    providerIndex: number,
+    modelIndex: number,
+    cap: ModelCapability,
+  ) => void;
   onUpdatePreference: (key: keyof ModelPreferencesState, provider: string, model: string) => void;
   onTestConnection: (index: number) => void;
   testStatus: Record<number, 'idle' | 'testing' | 'success' | 'error'>;
@@ -85,20 +89,30 @@ export default function ModelsTab({
 
       {/* ── Preferences section ── */}
       <div className="mb-6 p-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
-        <h4 className="text-sm font-semibold text-[var(--color-text-primary)] mb-3">默认模型偏好</h4>
+        <h4 className="text-sm font-semibold text-[var(--color-text-primary)] mb-3">
+          默认模型偏好
+        </h4>
         <p className="text-xs text-[var(--color-text-tertiary)] mb-3">
           为每种能力指定首选模型。未设置时将自动匹配第一个符合条件的已启用模型。
         </p>
         <div className="grid grid-cols-3 gap-3">
-          {([
-            { key: 'chat' as PreferenceKey, label: '对话 (Chat)', caps: ['chat'] as ModelCapability[] },
+          {[
+            {
+              key: 'chat' as PreferenceKey,
+              label: '对话 (Chat)',
+              caps: ['chat'] as ModelCapability[],
+            },
             {
               key: 'embedding' as PreferenceKey,
               label: '嵌入 (Embedding)',
               caps: ['text-embedding', 'multimodal-embedding'] as ModelCapability[],
             },
-            { key: 'vision' as PreferenceKey, label: '视觉 (Vision)', caps: ['vision'] as ModelCapability[] },
-          ]).map(({ key, label, caps }) => {
+            {
+              key: 'vision' as PreferenceKey,
+              label: '视觉 (Vision)',
+              caps: ['vision'] as ModelCapability[],
+            },
+          ].map(({ key, label, caps }) => {
             const current = config.preferences[key];
             const options = getSelectableModels(config.providers, caps);
             return (
@@ -117,7 +131,10 @@ export default function ModelsTab({
                 >
                   <option value="">自动选择</option>
                   {options.map((opt) => (
-                    <option key={`${opt.provider}|${opt.model}`} value={`${opt.provider}|${opt.model}`}>
+                    <option
+                      key={`${opt.provider}|${opt.model}`}
+                      value={`${opt.provider}|${opt.model}`}
+                    >
                       {opt.provider}/{opt.model}
                     </option>
                   ))}
@@ -130,7 +147,10 @@ export default function ModelsTab({
 
       {/* ── Provider cards ── */}
       {config.providers.map((p, pi) => (
-        <div key={p.name || pi} className="border border-[var(--color-border)] rounded-lg p-4 mb-3 space-y-3">
+        <div
+          key={p.name || pi}
+          className="border border-[var(--color-border)] rounded-lg p-4 mb-3 space-y-3"
+        >
           <div className="grid grid-cols-[1fr_1fr_auto_auto] gap-3 items-end">
             <FieldRow label="名称">
               <input
@@ -151,7 +171,11 @@ export default function ModelsTab({
               />
             </FieldRow>
             <div className="flex items-center gap-2 pb-1">
-              <Toggle checked={p.enabled} onChange={(v) => onUpdateProvider(pi, 'enabled', v)} label="启用" />
+              <Toggle
+                checked={p.enabled}
+                onChange={(v) => onUpdateProvider(pi, 'enabled', v)}
+                label="启用"
+              />
             </div>
             <button
               onClick={() => onRemoveProvider(pi)}
@@ -180,7 +204,9 @@ export default function ModelsTab({
                     min={1}
                     max={3600}
                     value={p.timeout}
-                    onChange={(e) => onUpdateProvider(pi, 'timeout', parseInt(e.target.value) || 60)}
+                    onChange={(e) =>
+                      onUpdateProvider(pi, 'timeout', parseInt(e.target.value) || 60)
+                    }
                     className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
                   />
                 </FieldRow>
@@ -220,7 +246,10 @@ export default function ModelsTab({
               <p className="text-xs text-[var(--color-text-tertiary)] italic">暂无模型，请添加</p>
             )}
             {p.models.map((m, mi) => (
-              <div key={m.name || mi} className="flex items-start gap-2 mb-2 p-2 rounded bg-[var(--color-bg-secondary)]">
+              <div
+                key={m.name || mi}
+                className="flex items-start gap-2 mb-2 p-2 rounded bg-[var(--color-bg-secondary)]"
+              >
                 <div className="flex-1 min-w-0">
                   <input
                     type="text"

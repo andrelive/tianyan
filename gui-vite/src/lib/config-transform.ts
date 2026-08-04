@@ -389,7 +389,8 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     })(),
 
     // Storage
-    data_dir: (typeof storage.data_dir === 'string' ? storage.data_dir : undefined) ?? defaults.data_dir,
+    data_dir:
+      (typeof storage.data_dir === 'string' ? storage.data_dir : undefined) ?? defaults.data_dir,
     collection_name: storage.vector?.collection_name ?? defaults.collection_name,
     vector_dimension: storage.vector?.vector_dimension ?? defaults.vector_dimension,
     max_storage_size: storage.max_storage_size ?? defaults.max_storage_size,

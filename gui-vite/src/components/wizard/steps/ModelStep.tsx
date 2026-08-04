@@ -18,13 +18,9 @@ interface FieldRowProps {
 function FieldRow({ label, children, description }: FieldRowProps) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-sm font-medium text-[var(--color-text-primary)]">
-        {label}
-      </label>
+      <label className="text-sm font-medium text-[var(--color-text-primary)]">{label}</label>
       {children}
-      {description && (
-        <p className="text-xs text-[var(--color-text-tertiary)]">{description}</p>
-      )}
+      {description && <p className="text-xs text-[var(--color-text-tertiary)]">{description}</p>}
     </div>
   );
 }
@@ -38,17 +34,13 @@ export default function ModelStep({
 }: StepProps) {
   const toggleCap = (cap: ModelCapability) => {
     const prev = data.modelCaps;
-    const next = prev.includes(cap)
-      ? prev.filter((c) => c !== cap)
-      : [...prev, cap];
+    const next = prev.includes(cap) ? prev.filter((c) => c !== cap) : [...prev, cap];
     onChange({ modelCaps: next });
   };
 
   return (
     <div>
-      <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-1">
-        模型服务配置
-      </h2>
+      <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-1">模型服务配置</h2>
       <p className="text-xs text-[var(--color-text-tertiary)] mb-5">
         添加 AI 模型服务提供商及第一个模型。所有服务通过 OpenAI 兼容 API 通信。
       </p>

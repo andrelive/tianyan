@@ -30,10 +30,7 @@ export default function Toast() {
         onClick={hideToast}
       >
         <span className="text-sm">{toast.message}</span>
-        <button
-          className="ml-2 opacity-60 hover:opacity-100"
-          aria-label="关闭通知"
-        >
+        <button className="ml-2 opacity-60 hover:opacity-100" aria-label="关闭通知">
           ✕
         </button>
       </div>

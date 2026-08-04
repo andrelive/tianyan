@@ -1,12 +1,8 @@
 import { useState } from 'react';
 import { Loader2, Wifi, WifiOff, RefreshCw, Plus } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
-import {
-  apiPost,
-  scanOllamaModels,
-  testOllamaConnection,
-} from '@/lib/api-client';
-import type { OllamaModelInfo } from '@/lib/api-client';
+import { apiPost, scanOllamaModels, testOllamaConnection } from '@/lib/api-client';
+import type { OllamaModelInfo } from '@/lib/types';
 import { FieldRow, SectionTitle } from './shared';
 
 type ConnectionStatus = 'idle' | 'testing' | 'connected' | 'disconnected';
@@ -94,22 +90,30 @@ export default function OllamaTab() {
   };
 
   const connectionDot =
-    connectionStatus === 'connected' ? 'bg-green-500' :
-    connectionStatus === 'disconnected' ? 'bg-red-500' :
-    'bg-gray-500';
+    connectionStatus === 'connected'
+      ? 'bg-green-500'
+      : connectionStatus === 'disconnected'
+        ? 'bg-red-500'
+        : 'bg-gray-500';
 
   const connectionLabel =
-    connectionStatus === 'connected' ? `已连接${ollamaVersion ? ` (v${ollamaVersion})` : ''}` :
-    connectionStatus === 'disconnected' ? '未连接' :
-    connectionStatus === 'testing' ? '测试中...' :
-    '未检测';
+    connectionStatus === 'connected'
+      ? `已连接${ollamaVersion ? ` (v${ollamaVersion})` : ''}`
+      : connectionStatus === 'disconnected'
+        ? '未连接'
+        : connectionStatus === 'testing'
+          ? '测试中...'
+          : '未检测';
 
   return (
     <div>
       <SectionTitle title="Ollama 配置" />
 
       {/* Endpoint */}
-      <FieldRow label="Ollama 服务地址" description="Ollama API 端点地址，默认 http://localhost:11434">
+      <FieldRow
+        label="Ollama 服务地址"
+        description="Ollama API 端点地址，默认 http://localhost:11434"
+      >
         <div className="flex gap-2">
           <input
             type="text"
@@ -140,21 +144,14 @@ export default function OllamaTab() {
       </div>
 
       {/* Scan models */}
-      <FieldRow
-        label="扫描本地模型"
-        description="扫描 Ollama 中已下载的模型并列出"
-      >
+      <FieldRow label="扫描本地模型" description="扫描 Ollama 中已下载的模型并列出">
         <div className="flex gap-2">
           <button
             onClick={handleScanModels}
             disabled={scanning}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 transition-colors"
           >
-            {scanning ? (
-              <Loader2 size={14} className="animate-spin" />
-            ) : (
-              <RefreshCw size={14} />
-            )}
+            {scanning ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
             {scanning ? '扫描中...' : '扫描模型'}
           </button>
         </div>

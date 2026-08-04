@@ -6,13 +6,7 @@ interface StepDef {
   icon: LucideIcon;
 }
 
-export default function StepIndicator({
-  current,
-  steps,
-}: {
-  current: number;
-  steps: StepDef[];
-}) {
+export default function StepIndicator({ current, steps }: { current: number; steps: StepDef[] }) {
   return (
     <nav aria-label="配置步骤" className="flex items-center justify-center gap-0">
       {steps.map((step, i) => {

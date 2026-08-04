@@ -42,7 +42,7 @@ export default function ModelSelector() {
     return () => {
       cancelled = true;
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
   }, []);
 
   useEffect(() => {
@@ -63,9 +63,7 @@ export default function ModelSelector() {
   }, []);
 
   const currentModel = selectedModel || chatModels[0]?.model || '选择模型';
-  const displayModels = chatModels.length > 0
-    ? chatModels.map((m) => m.model)
-    : [];
+  const displayModels = chatModels.length > 0 ? chatModels.map((m) => m.model) : [];
 
   return (
     <div ref={ref} className="relative">
@@ -78,16 +76,16 @@ export default function ModelSelector() {
         aria-label="选择模型"
         className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] transition-colors disabled:opacity-50"
       >
-        {loading ? (
-          <Loader2 size={14} className="animate-spin" />
-        ) : (
-          <span>{currentModel}</span>
-        )}
+        {loading ? <Loader2 size={14} className="animate-spin" /> : <span>{currentModel}</span>}
         <ChevronDown className="w-4 h-4 text-[var(--color-text-tertiary)]" />
       </button>
 
       {open && displayModels.length > 0 && (
-        <div role="listbox" aria-label="模型列表" className="absolute right-0 top-full mt-1 w-56 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg shadow-lg z-50 py-1">
+        <div
+          role="listbox"
+          aria-label="模型列表"
+          className="absolute right-0 top-full mt-1 w-56 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg shadow-lg z-50 py-1"
+        >
           {displayModels.map((model) => (
             <button
               key={model}

@@ -31,7 +31,8 @@ pub struct SkillParameter {
     pub name: String,
     /// 参数描述
     pub description: String,
-    /// 参数类型
+    /// 参数类型（序列化为 `type` 与前端类型定义对齐）
+    #[serde(rename = "type")]
     pub param_type: String,
     /// 是否必填
     pub required: bool,
@@ -166,5 +167,20 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("job-123"));
         assert!(json.contains("成功"));
+    }
+
+    #[test]
+    fn test_skill_parameter_serializes_type_field() {
+        // 前端类型定义使用 `type`，后端字段为 `param_type`，必须序列化为 `type`
+        let param = SkillParameter {
+            name: "verbose".to_string(),
+            description: "详细输出".to_string(),
+            param_type: "boolean".to_string(),
+            required: false,
+            default_value: None,
+        };
+        let json = serde_json::to_string(&param).unwrap();
+        assert!(json.contains("\"type\":\"boolean\""), "序列化应输出 type 字段: {json}");
+        assert!(!json.contains("param_type"), "不应输出 param_type 字段: {json}");
     }
 }

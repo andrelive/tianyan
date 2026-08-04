@@ -8,14 +8,7 @@ import type {
   SkillListResponse,
   SkillExecuteResponse,
 } from '@/lib/types';
-import {
-  Wrench,
-  Play,
-  Loader2,
-  CheckCircle2,
-  AlertCircle,
-  ChevronRight,
-} from 'lucide-react';
+import { Wrench, Play, Loader2, CheckCircle2, AlertCircle, ChevronRight } from 'lucide-react';
 
 type ParamValues = Record<string, string | number | boolean>;
 
@@ -52,9 +45,7 @@ function ParameterInput({
       <input
         type="number"
         value={value as number}
-        onChange={(e) =>
-          onChange(param.name, e.target.value === '' ? '' : Number(e.target.value))
-        }
+        onChange={(e) => onChange(param.name, e.target.value === '' ? '' : Number(e.target.value))}
         placeholder={param.description || param.name}
         className={baseClass}
       />
@@ -90,8 +81,7 @@ export default function SkillsPanel() {
   // Execution
   const [executing, setExecuting] = useState(false);
   const [executionId, setExecutionId] = useState<string | null>(null);
-  const [executionStatus, setExecutionStatus] =
-    useState<SkillExecutionStatus | null>(null);
+  const [executionStatus, setExecutionStatus] = useState<SkillExecutionStatus | null>(null);
   const pollingRef = useRef<ReturnType<typeof setInterval>>();
 
   // Load skills on mount
@@ -127,7 +117,7 @@ export default function SkillsPanel() {
   useEffect(() => {
     if (selectedSkill) {
       const initial: ParamValues = {};
-      for (const p of selectedSkill.parameters) {
+      for (const p of selectedSkill.parameters ?? []) {
         if (p.default_value !== undefined && p.default_value !== null) {
           initial[p.name] = p.default_value as string | number | boolean;
         } else if (p.type === 'boolean') {
@@ -151,7 +141,7 @@ export default function SkillsPanel() {
     const poll = async () => {
       try {
         const status = await apiGet<SkillExecutionStatus>(
-          `/skills/${selectedSkillId}/jobs/${executionId}/status`
+          `/skills/${selectedSkillId}/jobs/${executionId}/status`,
         );
         setExecutionStatus(status);
         if (status.status === 'completed' || status.status === 'failed') {
@@ -186,12 +176,9 @@ export default function SkillsPanel() {
     };
   }, [executionId]);
 
-  const handleParamChange = useCallback(
-    (name: string, val: string | number | boolean) => {
-      setParamValues((prev) => ({ ...prev, [name]: val }));
-    },
-    []
-  );
+  const handleParamChange = useCallback((name: string, val: string | number | boolean) => {
+    setParamValues((prev) => ({ ...prev, [name]: val }));
+  }, []);
 
   const handleExecute = async () => {
     if (!selectedSkill) return;
@@ -207,10 +194,9 @@ export default function SkillsPanel() {
         params[key] = String(val);
       }
 
-      const res = await apiPost<SkillExecuteResponse>(
-        `/skills/${selectedSkill.id}/execute`,
-        { parameters: params }
-      );
+      const res = await apiPost<SkillExecuteResponse>(`/skills/${selectedSkill.id}/execute`, {
+        parameters: params,
+      });
 
       setExecutionId(res.job_id);
       setExecutionStatus({
@@ -251,14 +237,18 @@ export default function SkillsPanel() {
 
         <div className="flex-1 overflow-y-auto p-3">
           {loadingSkills ? (
-            <div className="flex items-center justify-center py-16" aria-live="polite" aria-label="正在加载技能">
-              <Loader2
-                size={24}
-                className="animate-spin text-[var(--color-text-tertiary)]"
-              />
+            <div
+              className="flex items-center justify-center py-16"
+              aria-live="polite"
+              aria-label="正在加载技能"
+            >
+              <Loader2 size={24} className="animate-spin text-[var(--color-text-tertiary)]" />
             </div>
           ) : skillsError ? (
-            <div role="alert" className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm">
+            <div
+              role="alert"
+              className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
+            >
               <AlertCircle size={16} />
               <span>{skillsError}</span>
             </div>
@@ -287,18 +277,13 @@ export default function SkillsPanel() {
                       >
                         <div className="flex items-center justify-between">
                           <div className="min-w-0 flex-1">
-                            <p className="font-medium truncate">
-                              {skill.name}
-                            </p>
+                            <p className="font-medium truncate">{skill.name}</p>
                             <p className="text-xs text-[var(--color-text-tertiary)] truncate mt-0.5">
                               {skill.description}
                             </p>
                           </div>
                           {selectedSkillId === skill.id && (
-                            <ChevronRight
-                              size={14}
-                              className="shrink-0 ml-2 text-blue-500"
-                            />
+                            <ChevronRight size={14} className="shrink-0 ml-2 text-blue-500" />
                           )}
                         </div>
                       </button>
@@ -337,12 +322,10 @@ export default function SkillsPanel() {
             <div className="flex-1 overflow-y-auto p-6">
               <div className="space-y-5 max-w-xl">
                 {/* Parameter form */}
-                {selectedSkill.parameters.length > 0 && (
+                {(selectedSkill.parameters?.length ?? 0) > 0 && (
                   <div className="space-y-4">
-                    <h3 className="text-sm font-medium text-[var(--color-text-primary)]">
-                      参数
-                    </h3>
-                    {selectedSkill.parameters.map((param) => {
+                    <h3 className="text-sm font-medium text-[var(--color-text-primary)]">参数</h3>
+                    {(selectedSkill.parameters ?? []).map((param) => {
                       const val = paramValues[param.name];
                       if (val === undefined) return null;
 
@@ -350,15 +333,9 @@ export default function SkillsPanel() {
                         <div key={param.name}>
                           <label className="block text-sm text-[var(--color-text-secondary)] mb-1">
                             {param.name}
-                            {param.required && (
-                              <span className="text-red-500 ml-0.5">*</span>
-                            )}
+                            {param.required && <span className="text-red-500 ml-0.5">*</span>}
                           </label>
-                          <ParameterInput
-                            param={param}
-                            value={val}
-                            onChange={handleParamChange}
-                          />
+                          <ParameterInput param={param} value={val} onChange={handleParamChange} />
                           {param.description && param.type !== 'boolean' && (
                             <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
                               {param.description}
@@ -409,15 +386,9 @@ export default function SkillsPanel() {
                   >
                     <div className="flex items-center gap-2">
                       {executionStatus.status === 'completed' ? (
-                        <CheckCircle2
-                          size={18}
-                          className="text-green-600 dark:text-green-400"
-                        />
+                        <CheckCircle2 size={18} className="text-green-600 dark:text-green-400" />
                       ) : executionStatus.status === 'failed' ? (
-                        <AlertCircle
-                          size={18}
-                          className="text-red-600 dark:text-red-400"
-                        />
+                        <AlertCircle size={18} className="text-red-600 dark:text-red-400" />
                       ) : (
                         <Loader2
                           size={18}
@@ -441,19 +412,17 @@ export default function SkillsPanel() {
                       </span>
                     </div>
 
-                    {executionStatus.status === 'completed' &&
-                      executionStatus.result != null && (
-                        <pre className="mt-2 p-3 rounded-md bg-[var(--color-bg-primary)] text-sm text-[var(--color-text-primary)] overflow-x-auto whitespace-pre-wrap">
-                          {String(executionStatus.result)}
-                        </pre>
-                      )}
+                    {executionStatus.status === 'completed' && executionStatus.result != null && (
+                      <pre className="mt-2 p-3 rounded-md bg-[var(--color-bg-primary)] text-sm text-[var(--color-text-primary)] overflow-x-auto whitespace-pre-wrap">
+                        {String(executionStatus.result)}
+                      </pre>
+                    )}
 
-                    {executionStatus.status === 'failed' &&
-                      executionStatus.error && (
-                        <p className="mt-1 text-sm text-red-600 dark:text-red-400">
-                          {executionStatus.error}
-                        </p>
-                      )}
+                    {executionStatus.status === 'failed' && executionStatus.error && (
+                      <p className="mt-1 text-sm text-red-600 dark:text-red-400">
+                        {executionStatus.error}
+                      </p>
+                    )}
                   </div>
                 )}
               </div>

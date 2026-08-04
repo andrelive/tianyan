@@ -13,7 +13,9 @@ export default function AppearanceTab() {
       <SectionTitle title="界面外观" />
 
       <div className="mb-6">
-        <label className="text-sm font-medium text-[var(--color-text-primary)] block mb-3">主题</label>
+        <label className="text-sm font-medium text-[var(--color-text-primary)] block mb-3">
+          主题
+        </label>
         <div className="flex gap-4">
           {(['light', 'dark', 'system'] as Theme[]).map((t) => (
             <label
@@ -48,7 +50,9 @@ export default function AppearanceTab() {
       </div>
 
       <div>
-        <label className="text-sm font-medium text-[var(--color-text-primary)] block mb-3">字体大小</label>
+        <label className="text-sm font-medium text-[var(--color-text-primary)] block mb-3">
+          字体大小
+        </label>
         <div className="flex gap-4">
           {(['small', 'medium', 'large'] as FontSize[]).map((s) => (
             <label

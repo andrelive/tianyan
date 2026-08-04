@@ -16,7 +16,7 @@ function renderAppLayoutWithChild(childContent: string = 'Main Content') {
           <Route path="/" element={<div>{childContent}</div>} />
         </Route>
       </Routes>
-    </MemoryRouter>
+    </MemoryRouter>,
   );
 }
 

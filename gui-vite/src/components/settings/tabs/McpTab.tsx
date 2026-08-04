@@ -8,7 +8,7 @@ import {
   toggleMcpServer,
   testMcpServer,
 } from '@/lib/api-client';
-import type { McpServerEntry } from '@/lib/api-client';
+import type { McpServerEntry } from '@/lib/types';
 import { Toggle, FieldRow, SectionTitle } from './shared';
 
 interface ServerTestStatus {
@@ -58,14 +58,9 @@ export default function McpTab() {
     try {
       await toggleMcpServer(server.name, !server.enabled);
       setServers((prev) =>
-        prev.map((s) =>
-          s.name === server.name ? { ...s, enabled: !s.enabled } : s
-        )
+        prev.map((s) => (s.name === server.name ? { ...s, enabled: !s.enabled } : s)),
       );
-      showToast(
-        `${server.name} 已${server.enabled ? '禁用' : '启用'}`,
-        'success'
-      );
+      showToast(`${server.name} 已${server.enabled ? '禁用' : '启用'}`, 'success');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '操作失败';
       showToast(msg, 'error');
@@ -88,10 +83,7 @@ export default function McpTab() {
             tools: resp.tools,
           },
         }));
-        showToast(
-          `${server.name} 连接成功 (${resp.tools} 个工具)`,
-          'success'
-        );
+        showToast(`${server.name} 连接成功 (${resp.tools} 个工具)`, 'success');
       } else {
         setTestStatuses((prev) => ({
           ...prev,
@@ -101,10 +93,7 @@ export default function McpTab() {
             error: resp.error,
           },
         }));
-        showToast(
-          `${server.name} 连接失败: ${resp.error}`,
-          'error'
-        );
+        showToast(`${server.name} 连接失败: ${resp.error}`, 'error');
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '测试失败';
@@ -225,10 +214,7 @@ export default function McpTab() {
               >
                 {/* Toggle */}
                 <div className="pt-0.5">
-                  <Toggle
-                    checked={server.enabled}
-                    onChange={() => handleToggle(server)}
-                  />
+                  <Toggle checked={server.enabled} onChange={() => handleToggle(server)} />
                 </div>
 
                 {/* Info */}
@@ -238,14 +224,15 @@ export default function McpTab() {
                       {server.name}
                     </span>
                     {testInfo?.status === 'testing' && (
-                      <Loader2 size={12} className="animate-spin text-[var(--color-text-tertiary)]" />
+                      <Loader2
+                        size={12}
+                        className="animate-spin text-[var(--color-text-tertiary)]"
+                      />
                     )}
                     {testInfo?.status === 'success' && (
                       <Check size={12} className="text-green-500" />
                     )}
-                    {testInfo?.status === 'error' && (
-                      <X size={12} className="text-red-500" />
-                    )}
+                    {testInfo?.status === 'error' && <X size={12} className="text-red-500" />}
                   </div>
                   {server.description && (
                     <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
@@ -307,9 +294,7 @@ export default function McpTab() {
         /* Empty state */
         <div className="p-6 rounded-md bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-center mb-4">
           <WifiOff size={24} className="mx-auto mb-2 text-[var(--color-text-tertiary)]" />
-          <p className="text-sm text-[var(--color-text-tertiary)]">
-            尚未配置 MCP 服务器
-          </p>
+          <p className="text-sm text-[var(--color-text-tertiary)]">尚未配置 MCP 服务器</p>
           <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
             MCP 服务器用于扩展 AI 助手的能力，提供文件操作、代码搜索等功能
           </p>
@@ -388,11 +373,7 @@ export default function McpTab() {
               disabled={formSaving}
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
             >
-              {formSaving ? (
-                <Loader2 size={14} className="animate-spin" />
-              ) : (
-                <Check size={14} />
-              )}
+              {formSaving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
               保存
             </button>
             <button

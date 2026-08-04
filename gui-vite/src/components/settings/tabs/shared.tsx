@@ -42,7 +42,9 @@ export function SliderField({
 }) {
   return (
     <div className="flex items-center gap-3">
-      {label && <span className="text-xs text-[var(--color-text-tertiary)] w-16 shrink-0">{label}</span>}
+      {label && (
+        <span className="text-xs text-[var(--color-text-tertiary)] w-16 shrink-0">{label}</span>
+      )}
       <input
         type="range"
         min={min}
@@ -52,7 +54,9 @@ export function SliderField({
         onChange={(e) => onChange(parseFloat(e.target.value))}
         className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer bg-[var(--color-bg-tertiary)] accent-accent [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-accent [&::-webkit-slider-thumb]:shadow-sm"
       />
-      <span className="text-xs text-[var(--color-text-secondary)] w-8 text-right tabular-nums">{value.toFixed(2)}</span>
+      <span className="text-xs text-[var(--color-text-secondary)] w-8 text-right tabular-nums">
+        {value.toFixed(2)}
+      </span>
     </div>
   );
 }
@@ -70,9 +74,7 @@ export function FieldRow({
     <div className="flex flex-col gap-1.5">
       <label className="text-sm font-medium text-[var(--color-text-primary)]">{label}</label>
       {children}
-      {description && (
-        <p className="text-xs text-[var(--color-text-tertiary)]">{description}</p>
-      )}
+      {description && <p className="text-xs text-[var(--color-text-tertiary)]">{description}</p>}
     </div>
   );
 }

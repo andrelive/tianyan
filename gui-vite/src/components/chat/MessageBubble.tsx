@@ -14,12 +14,7 @@ interface Props {
   onRollback: (index: number) => void;
 }
 
-function MessageBubble({
-  message,
-  index,
-  isStreaming,
-  onRollback,
-}: Props) {
+function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
   const [copied, setCopied] = useState(false);
 
   const isUser = message.role === 'user';
@@ -35,19 +30,14 @@ function MessageBubble({
   };
 
   return (
-    <div
-      className={cn(
-        'flex items-start gap-2 group',
-        isUser ? 'flex-row-reverse' : 'flex-row'
-      )}
-    >
+    <div className={cn('flex items-start gap-2 group', isUser ? 'flex-row-reverse' : 'flex-row')}>
       {/* Bubble */}
       <div
         className={cn(
           'max-w-[80%] rounded-2xl px-4 py-2.5 relative',
           isUser
             ? 'bg-blue-500 text-white rounded-br-sm'
-            : 'bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)] rounded-bl-sm border border-[var(--color-border)]'
+            : 'bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)] rounded-bl-sm border border-[var(--color-border)]',
         )}
       >
         <div
@@ -64,7 +54,7 @@ function MessageBubble({
             '[&_blockquote]:pl-3 [&_blockquote]:italic [&_blockquote]:opacity-80',
             '[&_a]:underline',
             isUser ? '[&_a]:text-blue-200' : '[&_a]:text-blue-500',
-            '[&_hr]:border-[var(--color-border)] [&_hr]:my-2'
+            '[&_hr]:border-[var(--color-border)] [&_hr]:my-2',
           )}
         >
           <ReactMarkdown
@@ -92,9 +82,7 @@ function MessageBubble({
                   <code
                     className={cn(
                       'px-1.5 py-0.5 rounded text-sm font-mono',
-                      isUser
-                        ? 'bg-blue-600/30'
-                        : 'bg-[var(--color-bg-tertiary)]'
+                      isUser ? 'bg-blue-600/30' : 'bg-[var(--color-bg-tertiary)]',
                     )}
                     {...props}
                   >
@@ -122,7 +110,10 @@ function MessageBubble({
 
         {/* Streaming cursor for empty content */}
         {isStreaming && message.content === '' && (
-          <span className="inline-block w-2 h-4 bg-current animate-pulse rounded-sm" aria-label="AI 正在思考中..." />
+          <span
+            className="inline-block w-2 h-4 bg-current animate-pulse rounded-sm"
+            aria-label="AI 正在思考中..."
+          />
         )}
 
         {/* Live region for streaming content updates */}
@@ -137,7 +128,7 @@ function MessageBubble({
           <p
             className={cn(
               'text-xs mt-1 opacity-60',
-              isUser ? 'text-right text-blue-100' : 'text-left text-[var(--color-text-tertiary)]'
+              isUser ? 'text-right text-blue-100' : 'text-left text-[var(--color-text-tertiary)]',
             )}
           >
             {formatTime(message.timestamp)}
@@ -149,7 +140,7 @@ function MessageBubble({
       <div
         className={cn(
           'flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity pt-1',
-          isUser ? 'flex-row' : 'flex-row'
+          isUser ? 'flex-row' : 'flex-row',
         )}
       >
         {/* Copy - both roles */}
