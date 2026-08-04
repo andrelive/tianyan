@@ -268,6 +268,180 @@ pub fn format_memory_as_markdown(memory: &MemoryEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::error::TianyanError;
+    use crate::common::types::MemoryCategory;
+    use crate::common::types::TokenUsage;
+    use crate::model::types::{ChatChoice, ChatCompletionResponse};
+    use crate::model::MockChatService;
+
+    fn extractor_with_mock(mock: MockChatService) -> MemoryExtractor {
+        MemoryExtractor::new(Arc::new(mock), ExtractionConfig::default())
+    }
+
+    fn long_conversation() -> String {
+        // 超过默认 min_conversation_length (50) 的对话文本
+        "这是一段足够长的对话内容，用于触发记忆提取流程，其中包含用户偏好与项目事实等多个值得记录的信息点，长度需超过阈值。".to_string()
+    }
+
+    // ── parse_extraction_response ─────────────────────────────
+
+    #[test]
+    fn test_parse_response_with_json_fence() {
+        let extractor = extractor_with_mock(MockChatService::new());
+        let response = "```json\n{\"memories\":[{\"id\":\"m1\",\"category\":\"preference\",\"content\":\"用户喜欢简洁\",\"importance\":0.8,\"tags\":[\"style\"]}]}\n```";
+        let memories = extractor.parse_extraction_response(response).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, "m1");
+        assert_eq!(memories[0].category, MemoryCategory::Preference);
+        assert_eq!(memories[0].content, "用户喜欢简洁");
+        assert_eq!(memories[0].importance, 0.8);
+        assert_eq!(memories[0].tags, vec!["style".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_response_plain_json() {
+        let extractor = extractor_with_mock(MockChatService::new());
+        let response = r#"{"memories":[{"id":"m1","category":"decision","content":"采用 Rust","importance":0.7}]}"#;
+        let memories = extractor.parse_extraction_response(response).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].category, MemoryCategory::Decision);
+    }
+
+    #[test]
+    fn test_parse_response_invalid_json_returns_empty() {
+        let extractor = extractor_with_mock(MockChatService::new());
+        let memories = extractor
+            .parse_extraction_response("这不是 JSON 内容")
+            .unwrap();
+        assert!(memories.is_empty());
+    }
+
+    #[test]
+    fn test_parse_response_respects_max_memories() {
+        let extractor = extractor_with_mock(MockChatService::new());
+        let response = r#"{"memories":[
+            {"id":"m1","category":"fact","content":"a","importance":0.9},
+            {"id":"m2","category":"fact","content":"b","importance":0.9},
+            {"id":"m3","category":"fact","content":"c","importance":0.9}
+        ]}"#;
+        let memories = extractor.parse_extraction_response(response).unwrap();
+        assert_eq!(memories.len(), 3); // 默认 max_extracted_memories = 10
+
+        let extractor = MemoryExtractor::new(
+            Arc::new(MockChatService::new()),
+            ExtractionConfig {
+                max_extracted_memories: 2,
+                ..Default::default()
+            },
+        );
+        let memories = extractor.parse_extraction_response(response).unwrap();
+        assert_eq!(memories.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_response_legacy_format() {
+        let extractor = extractor_with_mock(MockChatService::new());
+        let response = r#"{"preferences":[{"id":"p1","content":"喜欢简洁","confidence":0.8}]}"#;
+        let memories = extractor.parse_extraction_response(response).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].category, MemoryCategory::Preference);
+        assert_eq!(memories[0].importance, 0.8);
+    }
+
+    // ── parse_single_memory ───────────────────────────────────
+
+    #[test]
+    fn test_parse_single_memory_category_aliases() {
+        let extractor = extractor_with_mock(MockChatService::new());
+        let cases = [
+            ("preference", MemoryCategory::Preference),
+            ("preferences", MemoryCategory::Preference),
+            ("success", MemoryCategory::SuccessfulCase),
+            ("successful_case", MemoryCategory::SuccessfulCase),
+            ("failure", MemoryCategory::FailedCase),
+            ("failed_case", MemoryCategory::FailedCase),
+            ("unknown_category", MemoryCategory::Fact), // 未知 → 默认 Fact
+        ];
+        for (cat, expected) in cases {
+            let json = serde_json::json!({
+                "id": "m1", "category": cat, "content": "内容", "importance": 0.5
+            });
+            let entry = extractor.parse_single_memory(&json).unwrap();
+            assert_eq!(entry.category, expected, "category={cat}");
+        }
+    }
+
+    #[test]
+    fn test_parse_single_memory_missing_fields_returns_none() {
+        let extractor = extractor_with_mock(MockChatService::new());
+        assert!(extractor.parse_single_memory(&serde_json::json!({})).is_none());
+        assert!(extractor
+            .parse_single_memory(&serde_json::json!({"id": "m1"}))
+            .is_none());
+        assert!(extractor
+            .parse_single_memory(&serde_json::json!({"id": "m1", "category": "fact"}))
+            .is_none());
+    }
+
+    #[test]
+    fn test_parse_single_memory_clamps_importance() {
+        let extractor = extractor_with_mock(MockChatService::new());
+        let json = serde_json::json!({
+            "id": "m1", "category": "fact", "content": "x", "importance": 1.7
+        });
+        let entry = extractor.parse_single_memory(&json).unwrap();
+        assert_eq!(entry.importance, 1.0);
+    }
+
+    // ── extract ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_extract_short_conversation_skips_llm() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().times(0);
+        let extractor = extractor_with_mock(mock);
+        let result = extractor.extract("短对话").await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_extract_filters_by_importance() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            Ok(ChatCompletionResponse {
+                id: "r1".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "test".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant(
+                        r#"{"memories":[
+                            {"id":"m1","category":"fact","content":"重要事实","importance":0.9},
+                            {"id":"m2","category":"fact","content":"低价值信息","importance":0.1}
+                        ]}"#,
+                    ),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: TokenUsage::default(),
+            })
+        });
+        let extractor = extractor_with_mock(mock);
+        let result = extractor.extract(&long_conversation()).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "重要事实");
+    }
+
+    #[tokio::test]
+    async fn test_extract_propagates_llm_error() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            Err(TianyanError::Custom("模型服务错误：连接失败".to_string()))
+        });
+        let extractor = extractor_with_mock(mock);
+        let result = extractor.extract(&long_conversation()).await;
+        assert!(result.is_err());
+    }
 
     #[test]
     fn test_format_memory_as_markdown() {

@@ -63,6 +63,8 @@ pub struct AppState {
     usage_stats: Arc<UsageStats>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
     snapshot_manager: Option<Arc<SnapshotManager>>,
+    /// 模型服务（chat/embedding/vision，全组件共享；配置热更新时重建）
+    model_services: Arc<RwLock<tianyan::model::ModelServices>>,
 }
 
 impl AppState {
@@ -132,9 +134,13 @@ impl AppState {
             Arc::new(SnapshotManager::new(root, workdir))
         });
 
-        // 构建 Agent（传入 vfs + 技能组件）
+        // 构建 Agent（传入 vfs + 技能组件 + 共享模型服务）
+        let model_services = create_model_services(&config)
+            .await
+            .map_err(|e| TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{e}")))?;
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
+            model_services.clone(),
             vfs.clone(),
             skill_registry.clone(),
             skill_executor.clone(),
@@ -158,6 +164,7 @@ impl AppState {
             skill_executor,
             usage_stats,
             snapshot_manager,
+            model_services: Arc::new(RwLock::new(model_services)),
         })
     }
 
@@ -193,8 +200,13 @@ impl AppState {
     /// * Agent 构建失败时返回相应错误
     pub async fn reload_agent(&self) -> TianyanResult<()> {
         let config = self.config.read().await.clone();
+        // 配置可能已变化（模型/API Key），重建共享模型服务
+        let model_services = create_model_services(&config)
+            .await
+            .map_err(|e| TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{e}")))?;
         let new_agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
+            model_services.clone(),
             self.vfs.clone(),
             self.skill_registry.clone(),
             self.skill_executor.clone(),
@@ -204,6 +216,7 @@ impl AppState {
         .await?;
 
         *self.agent.write().await = new_agent;
+        *self.model_services.write().await = model_services;
 
         tracing::info!("Agent 重新加载成功");
         Ok(())
@@ -254,7 +267,16 @@ impl AppState {
         self.skill_executor.clone()
     }
 
-    /// 创建摘要引擎
+    /// 获取共享模型服务（配置热更新后自动指向新实例）。
+    fn shared_model_services(&self) -> TianyanResult<tianyan::model::ModelServices> {
+        let services = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { self.model_services.read().await.clone() })
+        });
+        Ok(services)
+    }
+
+    /// 创建摘要引擎（复用共享模型服务，不重复创建 HTTP 客户端）。
     ///
     /// # Returns
     /// * `TianyanResult<Arc<SummaryEngine>>` - 摘要引擎实例
@@ -263,11 +285,7 @@ impl AppState {
             tokio::runtime::Handle::current().block_on(async { self.config.read().await.clone() })
         });
 
-        let model_services = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { create_model_services(&config).await })
-        })
-        .map_err(|e| TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{}", e)))?;
+        let model_services = self.shared_model_services()?;
 
         let chat_model = config
             .models
@@ -291,7 +309,7 @@ impl AppState {
         Ok(Arc::new(summary_engine))
     }
 
-    /// 创建记忆提取器
+    /// 创建记忆提取器（复用共享模型服务）。
     ///
     /// # Returns
     /// * `TianyanResult<Arc<MemoryExtractor>>` - 记忆提取器实例
@@ -300,11 +318,7 @@ impl AppState {
             tokio::runtime::Handle::current().block_on(async { self.config.read().await.clone() })
         });
 
-        let model_services = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { create_model_services(&config).await })
-        })
-        .map_err(|e| TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{}", e)))?;
+        let model_services = self.shared_model_services()?;
 
         let chat_model = config
             .models
@@ -322,17 +336,13 @@ impl AppState {
         Ok(Arc::new(extractor))
     }
 
-    /// 创建知识导入器。
+    /// 创建知识导入器（复用共享模型服务）。
     pub fn create_knowledge_ingestor(&self) -> TianyanResult<KnowledgeIngestor> {
         let config = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async { self.config.read().await.clone() })
         });
 
-        let model_services = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { create_model_services(&config).await })
-        })
-        .map_err(|e| TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{}", e)))?;
+        let model_services = self.shared_model_services()?;
 
         let vfs: Arc<dyn tianyan::vfs::VirtualFileSystem> = self.vfs.clone();
 

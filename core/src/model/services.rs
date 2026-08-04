@@ -12,6 +12,7 @@ use super::provider::AsyncOpenAIClient;
 ///
 /// 将 chat / embedding / vision 三种服务打包在一起，
 /// 每种能力可能来自不同的提供商。
+#[derive(Clone)]
 pub struct ModelServices {
     /// 聊天补全服务（含日志装饰）。
     pub chat: Arc<dyn ChatService>,

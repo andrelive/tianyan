@@ -70,6 +70,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-003: 组件工具化](docs/architecture/decisions/003-component-toolization.md) — ToolRegistry + call_skill 桥接
 - [ADR-004: 前缀匹配上下文组装](docs/architecture/decisions/004-prefix-match-context-assembly.md) — soul→rules→history 顺序
 - [ADR-005: SQLite 作为主存储后端](docs/architecture/decisions/005-sqlite-backend.md) — 替代 `LocalFileBackend`
+- [ADR-006: 工作区快照独立存储](docs/architecture/decisions/006-snapshot-storage-exception.md) — snapshot 的 VFS 例外
 
 模块索引 → [`docs/architecture/module-map.md`](docs/architecture/module-map.md)
 设计原则 → [`docs/architecture/principles.md`](docs/architecture/principles.md)
@@ -92,6 +93,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `scheduler` | `core/src/scheduler/` | 定时任务（RuleTask、MemoryTask、SummaryTask） | 定时任务产物写入 VFS |
 | `observability` | `core/src/observability/` | `AgentMetrics` 可观测性存储 | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控） | — |
+| `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退） | ⚠️ **ADR-006 例外**：独立文件存储于 `{data_dir}/snapshots/`，不经 VFS |
 
 已删除组件：`planner/`、`ModelRouter`、`TokenBudget`、`Chunker`、`AgentHarness` wrapper、`AgentSkills` wrapper。
 

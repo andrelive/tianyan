@@ -36,8 +36,12 @@ pub struct AgentBuilderFactory;
 
 impl AgentBuilderFactory {
     /// 构建 Agent 实例
+    ///
+    /// `model_services` 由调用方（AppState）创建并持有，配置热更新时重建，
+    /// 避免每次构建 Agent 时重复创建 HTTP 客户端。
     pub async fn build_agent(
         config: &TianyanConfig,
+        model_services: ModelServices,
         vfs: Arc<VirtualFileSystemImpl>,
         skill_registry: Arc<RwLock<SkillRegistry>>,
         skill_executor: Arc<SkillExecutor>,
@@ -45,8 +49,6 @@ impl AgentBuilderFactory {
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
     ) -> TianyanResult<Agent> {
         Self::validate_config(config)?;
-
-        let model_services = create_model_services(config).await?;
 
         let retriever = DualLayerRetriever::new(vfs.clone()).with_usage_stats(usage_stats.clone());
 
@@ -114,6 +116,7 @@ impl AgentBuilderFactory {
     /// 构建 Agent 或降级为 WizardMode
     pub async fn build_agent_or_wizard(
         config: &TianyanConfig,
+        model_services: ModelServices,
         vfs: Arc<VirtualFileSystemImpl>,
         skill_registry: Arc<RwLock<SkillRegistry>>,
         skill_executor: Arc<SkillExecutor>,
@@ -122,6 +125,7 @@ impl AgentBuilderFactory {
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
+            model_services,
             vfs,
             skill_registry,
             skill_executor,

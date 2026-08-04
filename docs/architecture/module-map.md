@@ -34,6 +34,7 @@
 | `scheduler` | `core/src/scheduler/` | 定时任务调度器 + 任务实现 | `task_scheduler.rs`, `tasks/` |
 | `session` | `core/src/session/` | 会话管理（PersistentSessionManager，基于 SQLite） | `manager.rs`, `types.rs` |
 | `skills` | `core/src/skills/` | 技能定义、执行、学习（GEPA 进化引擎） | `definition.rs`, `executor.rs`, `manager.rs`, `handlers/`, `learning/` |
+| `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退，⚠️ ADR-006 VFS 例外） | `mod.rs` |
 | `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `vector/lancedb.rs`, `summary/engine.rs` |
 
 ---
@@ -95,3 +96,4 @@
 - [ADR-003: 组件工具化](decisions/003-component-toolization.md)
 - [ADR-004: 前缀匹配上下文组装](decisions/004-prefix-match-context-assembly.md)
 - [ADR-005: SQLite 作为主存储后端](decisions/005-sqlite-backend.md)
+- [ADR-006: 工作区快照独立存储](decisions/006-snapshot-storage-exception.md) — snapshot 的 VFS 例外

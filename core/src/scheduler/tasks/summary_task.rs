@@ -20,8 +20,12 @@ const PROCESSED_CACHE_LIMIT: usize = 10000;
 pub struct SummaryTask {
     /// 待处理 URI 队列。
     queue: RwLock<VecDeque<TianyanUri>>,
-    /// 已处理 URI 缓存（有容量上限，防止内存泄漏）。
+    /// 已处理 URI 缓存（有容量上限，FIFO 淘汰最旧记录）。
     processed: RwLock<std::collections::HashSet<String>>,
+    /// 已处理 URI 的插入顺序（配合 processed 实现 FIFO 淘汰，避免全量清空后重复摘要）。
+    processed_order: RwLock<VecDeque<String>>,
+    /// 已处理缓存容量上限（测试可调小）。
+    processed_cache_limit: usize,
 }
 
 impl SummaryTask {
@@ -30,6 +34,23 @@ impl SummaryTask {
         Self {
             queue: RwLock::new(VecDeque::new()),
             processed: RwLock::new(std::collections::HashSet::new()),
+            processed_order: RwLock::new(VecDeque::new()),
+            processed_cache_limit: PROCESSED_CACHE_LIMIT,
+        }
+    }
+
+    /// 记录已处理 URI（FIFO 淘汰：超过上限时移除最旧记录）。
+    async fn record_processed(&self, uri_str: &str) {
+        let mut processed = self.processed.write().await;
+        let mut order = self.processed_order.write().await;
+        // 仅在首次出现时记录插入顺序（重复处理不改变顺序）
+        if processed.insert(uri_str.to_string()) {
+            order.push_back(uri_str.to_string());
+        }
+        while processed.len() > self.processed_cache_limit {
+            if let Some(oldest) = order.pop_front() {
+                processed.remove(&oldest);
+            }
         }
     }
 
@@ -158,15 +179,8 @@ impl SummaryTask {
             .update_summary_vectors(uri, &abstract_content, &overview_content)
             .await?;
 
-        // 标记为已处理（带容量限制）
-        {
-            let mut processed = self.processed.write().await;
-            processed.insert(uri.to_string());
-            if processed.len() > PROCESSED_CACHE_LIMIT {
-                processed.clear();
-                tracing::info!("已处理 URI 缓存达到上限，已清空重建");
-            }
-        }
+        // 标记为已处理（带容量限制，FIFO 淘汰最旧记录）
+        self.record_processed(uri.as_str()).await;
 
         tracing::info!("摘要生成完成：{}", uri);
         Ok(())
@@ -249,5 +263,36 @@ mod tests {
     fn test_summary_task_default() {
         let task: SummaryTask = Default::default();
         assert_eq!(task.name(), "summary_generation");
+    }
+
+    #[tokio::test]
+    async fn test_processed_cache_fifo_eviction() {
+        // 容量超限时淘汰最旧记录，而非全量清空（避免已摘要条目被重复处理）
+        let mut task = SummaryTask::new();
+        task.processed_cache_limit = 3;
+        for i in 0..5 {
+            task.record_processed(&format!("uri-{}", i)).await;
+        }
+        let processed = task.processed.read().await;
+        assert_eq!(processed.len(), 3);
+        assert!(!processed.contains("uri-0"));
+        assert!(!processed.contains("uri-1"));
+        assert!(processed.contains("uri-2"));
+        assert!(processed.contains("uri-3"));
+        assert!(processed.contains("uri-4"));
+    }
+
+    #[tokio::test]
+    async fn test_processed_cache_duplicate_keeps_original_order() {
+        let mut task = SummaryTask::new();
+        task.processed_cache_limit = 2;
+        task.record_processed("a").await;
+        task.record_processed("b").await;
+        task.record_processed("a").await; // 重复处理不改变插入顺序
+        task.record_processed("c").await; // 淘汰最旧的 a，b 保留
+        let processed = task.processed.read().await;
+        assert!(processed.contains("b"));
+        assert!(processed.contains("c"));
+        assert!(!processed.contains("a"));
     }
 }

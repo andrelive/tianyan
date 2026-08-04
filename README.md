@@ -247,18 +247,43 @@ cargo run -p tianyan-server -- --host 127.0.0.1 --port 3000
 ./target/release/tianyan-server --host 127.0.0.1 --port 3000
 ```
 
-API 端点：
+API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/health` | GET | 健康检查 |
-| `/api/chat` | POST | 对话请求 |
-| `/api/chat/stream` | POST | 流式对话（SSE） |
-| `/api/sessions` | GET/POST | 会话管理 |
-| `/api/ingest` | POST | 文档导入 |
-| `/api/search` | POST | 知识搜索 |
-| `/api/skills` | GET | 技能列表 |
-| `/api/config` | GET/PUT | 配置管理 |
+| `/api/v1/chat` | POST | 对话请求 |
+| `/api/v1/chat/stream` | POST | 流式对话（SSE） |
+| `/api/v1/chat/clarify` | POST | 追问澄清（提交澄清问题回答） |
+| `/api/v1/sessions` | GET | 会话列表 |
+| `/api/v1/sessions/{id}` | GET / DELETE | 获取 / 删除会话 |
+| `/api/v1/sessions/{id}/messages` | GET | 会话消息列表 |
+| `/api/v1/sessions/{id}/messages/delete` | POST | 删除指定消息 |
+| `/api/v1/sessions/{id}/messages/redo` | POST | 重做指定消息 |
+| `/api/v1/sessions/{id}/title` | POST | 更新会话标题 |
+| `/api/v1/knowledge/ingest` | POST | 文档导入（multipart） |
+| `/api/v1/knowledge/ingest/{job_id}/status` | GET | 导入状态（当前为占位实现） |
+| `/api/v1/knowledge/search` | GET | 知识搜索 |
+| `/api/v1/knowledge/search/suggestions` | GET | 搜索建议 |
+| `/api/v1/knowledge/entries` | GET | 知识条目列表 |
+| `/api/v1/knowledge/entries/read` | GET | 读取知识条目内容 |
+| `/api/v1/skills` | GET | 技能列表 |
+| `/api/v1/skills/{id}/execute` | POST | 执行技能 |
+| `/api/v1/skills/{id}/jobs/{job_id}/status` | GET | 技能执行状态 |
+| `/api/v1/config` | GET / PUT | 读取 / 更新配置 |
+| `/api/v1/config/status` | GET | 配置状态 |
+| `/api/v1/config/{section}` | GET | 获取指定配置节 |
+| `/api/v1/config/models` | GET | 模型列表 |
+| `/api/v1/config/models/switch` | POST | 切换当前模型 |
+| `/api/v1/config/test-connection` | POST | 测试模型连接 |
+| `/api/v1/config/soul` | GET / PUT | 读取 / 更新 Agent 人格设定 |
+| `/api/v1/config/soul/default` | GET | 获取默认人格设定 |
+| `/api/v1/config/mcp/servers` | GET / POST | 列出 / 添加 MCP 服务器 |
+| `/api/v1/config/mcp/servers/{name}` | DELETE / PUT | 移除 / 启停 MCP 服务器 |
+| `/api/v1/config/mcp/servers/{name}/test` | POST | 测试 MCP 服务器连接 |
+| `/api/v1/config/ollama/test` | POST | 测试 Ollama 连接 |
+| `/api/v1/config/ollama/scan` | POST | 扫描 Ollama 模型 |
+| `/api/v1/config/ollama/add-model` | POST | 添加 Ollama 模型 |
 
 ## 配置
 

@@ -73,6 +73,36 @@ jobs:
       - name: Run unit tests
         run: cargo test --workspace --lib -- --nocapture
 
+  # ========== 前端质量门禁 ==========
+  frontend:
+    name: Frontend (lint + typecheck + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gui-vite
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gui-vite/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test
+
   # ========== 集成测试 ==========
   integration-test:
     name: Integration Tests
