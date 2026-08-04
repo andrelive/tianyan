@@ -232,8 +232,9 @@ const ALLOWED_ORIGINS: [HeaderValue; 6] = [
 ///
 /// 支持无配置启动，用于配置向导模式
 ///
-/// 返回 (Router, AppState) 元组，以便在关闭时访问 AppState
-async fn create_app(
+/// 返回 (Router, AppState) 元组，以便在关闭时访问 AppState。
+/// `pub` 供集成测试（server/tests/）直接驱动真实路由与处理器。
+pub async fn create_app(
     config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
     // 创建全系统共享的 SqliteDb（ADR-005：单文件、单连接）

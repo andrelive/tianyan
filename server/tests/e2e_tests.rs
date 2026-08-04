@@ -1,98 +1,65 @@
-//! 端到端系统测试 — 完整启动 → API 调用 → 验证流程
+//! 端到端系统测试 — 驱动真实 `create_app()`：完整启动 → API 调用 → 验证流程
 
 // 测试代码中 unwrap 是有意的（失败即 panic 即测试失败），豁免以保持测试可读性。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
-use std::sync::Arc;
+use tempfile::tempdir;
 
-use axum::{routing::get, Router};
-use serde_json::json;
-
-use common::factory::test_tianyan_config;
+use common::factory::test_tianyan_config_with_data_dir;
 use common::harness::TestServer;
 
-/// 构建完整的测试路由（模拟 server/src/api 的完整路由结构）
-async fn full_router() -> Router {
-    let config = Arc::new(tokio::sync::RwLock::new(test_tianyan_config()));
+/// 使用独立临时数据目录构建真实应用路由（完整 VFS + AppState 初始化）。
+async fn start_real_server() -> (TestServer, tempfile::TempDir) {
+    let dir = tempdir().expect("创建临时目录失败");
+    let config = test_tianyan_config_with_data_dir(dir.path().to_path_buf());
 
-    Router::new()
-        .route(
-            "/health",
-            get(|| async { axum::Json(json!({"status": "ok"})) }),
-        )
-        .route("/api/v1/config", {
-            let s = config.clone();
-            get(move || {
-                let s = s.clone();
-                async move {
-                    let c = s.read().await;
-                    axum::Json(json!({"config": *c}))
-                }
-            })
-        })
-        .route("/api/v1/config/models", {
-            let s = config.clone();
-            get(move || {
-                let s = s.clone();
-                async move {
-                    let c = s.read().await;
-                    let providers: Vec<serde_json::Value> = c
-                        .models
-                        .providers
-                        .iter()
-                        .map(|p| {
-                            json!({
-                                "name": p.name,
-                                "endpoint": p.endpoint,
-                                "enabled": p.enabled,
-                                "model_count": p.models.len(),
-                            })
-                        })
-                        .collect();
-                    let models: Vec<serde_json::Value> = c
-                        .models
-                        .providers
-                        .iter()
-                        .flat_map(|p| {
-                            p.models.iter().map(|m| {
-                                json!({
-                                    "name": m.name,
-                                    "provider": p.name,
-                                    "capabilities": m.capabilities,
-                                })
-                            })
-                        })
-                        .collect();
-                    axum::Json(json!({
-                        "providers": providers,
-                        "models": models,
-                        "preferences": {
-                            "chat": c.models.preferences.chat,
-                            "embedding": c.models.preferences.embedding,
-                            "vision": c.models.preferences.vision,
-                        },
-                    }))
-                }
-            })
-        })
+    let (router, _state) = tianyan_server::create_app(config)
+        .await
+        .expect("create_app 失败");
+    let server = TestServer::start(router).await.expect("启动测试服务器失败");
+    (server, dir)
 }
 
 #[tokio::test]
-async fn test_e2e_full_router_health_and_config() {
-    let router = full_router().await;
-    let server = TestServer::start(router).await.unwrap();
+async fn test_e2e_health_and_config() {
+    let (server, _dir) = start_real_server().await;
 
-    // 健康检查
+    // 健康检查（真实 handler：status + version）
     let resp = server.get("/health").await;
     assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert!(body["version"].is_string());
 
-    // 配置端点返回有效 JSON
+    // 配置端点返回有效 JSON（真实 handler：完整 TianyanConfig 序列化）
     let resp = server.get("/api/v1/config").await;
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body.get("config").is_some(), "响应应包含 config 字段");
+
+    // 模型服务列表（真实 handler：providers/models/preferences）
+    let resp = server.get("/api/v1/config/models").await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let providers = body["providers"].as_array().expect("providers 应为数组");
+    assert!(!providers.is_empty());
+    assert_eq!(providers[0]["name"], "mock-service");
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_e2e_sessions_endpoint_roundtrip() {
+    let (server, _dir) = start_real_server().await;
+
+    // 会话列表（真实 handler：读取 VFS 持久化会话）
+    let resp = server.get("/api/v1/sessions").await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let sessions = body["sessions"].as_array().expect("sessions 应为数组");
+    assert!(sessions.is_empty(), "新数据目录应无会话: {body}");
 
     server.shutdown();
 }

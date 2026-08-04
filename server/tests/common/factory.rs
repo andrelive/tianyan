@@ -69,8 +69,12 @@ pub fn test_models_config() -> ModelsConfig {
 }
 
 pub fn test_storage_config() -> StorageConfig {
+    test_storage_config_with_data_dir(std::env::temp_dir().join("tianyan-test"))
+}
+
+pub fn test_storage_config_with_data_dir(data_dir: std::path::PathBuf) -> StorageConfig {
     StorageConfig {
-        data_dir: std::env::temp_dir().join("tianyan-test"),
+        data_dir,
         backend: Default::default(),
         sqlite_path: None,
         max_storage_size: 5368709120,
@@ -83,10 +87,20 @@ pub fn test_storage_config() -> StorageConfig {
     }
 }
 
+/// 使用默认临时目录创建测试配置（固定路径：多个测试并发时请改用
+/// [`test_tianyan_config_with_data_dir`] 传入独立目录）。
 pub fn test_tianyan_config() -> TianyanConfig {
+    test_tianyan_config_with_data_dir(std::env::temp_dir().join("tianyan-test"))
+}
+
+/// 使用指定数据目录创建测试配置。
+///
+/// 集成测试驱动真实 `create_app` 时每个测试应传入独立的 `tempdir`，
+/// 避免 SQLite/LanceDB 数据目录被并发测试互相污染。
+pub fn test_tianyan_config_with_data_dir(data_dir: std::path::PathBuf) -> TianyanConfig {
     TianyanConfig {
         agent: test_agent_config(),
-        storage: test_storage_config(),
+        storage: test_storage_config_with_data_dir(data_dir),
         models: test_models_config(),
         logging: LoggingConfig::default(),
         security: SecurityConfig::default(),
