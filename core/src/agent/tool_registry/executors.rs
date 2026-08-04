@@ -603,3 +603,8 @@ impl ToolRegistry {
         })
     }
 }
+
+/// 测试模块（拆分至独立文件，保持主文件聚焦生产逻辑）。
+#[cfg(test)]
+#[path = "executors_tests.rs"]
+mod tests;

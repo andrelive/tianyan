@@ -61,13 +61,29 @@ impl SkillHandler for HttpRequestHandler {
                 )));
             }
             if let Some(host) = parsed.host_str() {
-                let lower = host.to_lowercase();
+                // host_str() 返回原始切片：IPv6 带方括号（[::1]），先去掉再判断
+                let lower = host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_lowercase();
+                // IPv4/IPv6 回环、未指定地址与私网/链路本地地址一律禁止，
+                // 防止 SSRF 访问本地服务（127.0.0.1、::1、10/8、172.16/12、192.168/16、
+                // 0.0.0.0、fe80:: 链路本地、fc00::/7 唯一本地地址）。
+                let is_ipv6_loopback = lower == "::1";
+                let is_ipv6_unspecified = lower == "::";
+                let is_ipv6_private =
+                    lower.contains(':') && (lower.starts_with("fc") || lower.starts_with("fd"));
+                let is_ipv6_link_local = lower.starts_with("fe80:");
                 if lower == "localhost"
-                    || lower == "127.0.0.1"
+                    || lower.starts_with("127.")
                     || lower.starts_with("192.168.")
                     || lower.starts_with("10.")
                     || lower.starts_with("172.")
                     || lower.starts_with("0.")
+                    || is_ipv6_loopback
+                    || is_ipv6_unspecified
+                    || is_ipv6_private
+                    || is_ipv6_link_local
                 {
                     return Err(TianyanError::Custom(
                         "操作不被允许：禁止访问本地或内网地址".to_string(),
@@ -161,5 +177,103 @@ impl SkillHandler for HttpRequestHandler {
 
     fn skill_id(&self) -> &str {
         "http_request"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(url: &str) -> HashMap<String, Value> {
+        HashMap::from([("url".to_string(), Value::String(url.to_string()))])
+    }
+
+    #[tokio::test]
+    async fn test_missing_url_param() {
+        let handler = HttpRequestHandler::new();
+        let err = handler
+            .execute(HashMap::new(), ExecutionContext::default())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("缺少 'url'"));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_url_rejected() {
+        let handler = HttpRequestHandler::new();
+        let err = handler
+            .execute(params("not a url"), ExecutionContext::default())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("无效的 URL 格式"),
+            "无效 URL 应被拒绝: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_non_http_scheme_rejected() {
+        let handler = HttpRequestHandler::new();
+        for url in [
+            "file:///etc/passwd",
+            "ftp://example.com/x",
+            "gopher://example.com",
+        ] {
+            let err = handler
+                .execute(params(url), ExecutionContext::default())
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("不支持的 URL 协议"),
+                "{url} 应因协议被拒绝: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_local_and_private_hosts_rejected() {
+        let handler = HttpRequestHandler::new();
+        let blocked = [
+            "http://localhost/x",
+            "http://127.0.0.1/x",
+            "http://127.0.0.2:8080/x",
+            "http://192.168.1.1/x",
+            "http://10.0.0.1/x",
+            "http://172.16.0.1/x",
+            "http://0.0.0.0/x",
+            "http://[::1]/x",
+        ];
+        for url in blocked {
+            match handler
+                .execute(params(url), ExecutionContext::default())
+                .await
+            {
+                Ok(_) => panic!("{url} 应被拒绝但执行成功了"),
+                Err(e) => assert!(
+                    e.to_string().contains("禁止访问本地或内网地址"),
+                    "{url} 应因内网地址被拒绝: {e}"
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_method_rejected() {
+        let handler = HttpRequestHandler::new();
+        let mut p = params("https://example.com/x");
+        p.insert("method".to_string(), Value::String("TRACE".to_string()));
+        let err = handler
+            .execute(p, ExecutionContext::default())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("不支持的 HTTP 方法"),
+            "TRACE 应被拒绝: {err}"
+        );
+    }
+
+    #[test]
+    fn test_skill_id() {
+        assert_eq!(HttpRequestHandler::new().skill_id(), "http_request");
     }
 }

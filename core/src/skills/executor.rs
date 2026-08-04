@@ -134,6 +134,21 @@ pub struct ExecutionLogEntry {
     pub parameters: HashMap<String, Value>,
 }
 
+/// 规范化路径用于比较：Windows 上 `canonicalize()` 会产生 `\\?\` verbatim 前缀，
+/// 与未规范化的路径（如 `current_dir().join(path)` 的 fallback 结果）直接比较
+/// `starts_with` 会失败，导致允许目录内的写入/删除被误拒。
+fn normalize_for_compare(p: &std::path::Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    };
+    PathBuf::from(s)
+}
+
 /// 验证文件路径是否在允许的路径列表内。
 pub(crate) fn validate_path(path: &PathBuf, allowed_paths: &[PathBuf]) -> Result<()> {
     if allowed_paths.is_empty() {
@@ -151,9 +166,11 @@ pub(crate) fn validate_path(path: &PathBuf, allowed_paths: &[PathBuf]) -> Result
                 e
             ))
         })?;
+    let canonical = normalize_for_compare(&canonical);
 
     for allowed in allowed_paths {
-        let allowed_canonical = allowed.canonicalize().unwrap_or_else(|_| allowed.clone());
+        let allowed_canonical =
+            normalize_for_compare(&allowed.canonicalize().unwrap_or_else(|_| allowed.clone()));
         if canonical.starts_with(&allowed_canonical) {
             return Ok(());
         }
@@ -400,6 +417,69 @@ mod tests {
     use crate::skills::definition::{ParameterDefinition, ParameterType};
     use crate::skills::registry::{create_builtin_skills, register_builtin_skills};
     use crate::skills::types::SkillCategory;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_validate_path_empty_allowed_is_unrestricted() {
+        let p = PathBuf::from("/anywhere");
+        assert!(validate_path(&p, &[]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_path_allows_inside_allowed() {
+        let dir = tempdir().unwrap();
+        let inside = dir.path().join("sub").join("file.txt");
+        assert!(validate_path(&inside, &[dir.path().to_path_buf()]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_path_rejects_outside_allowed() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let p = outside.path().join("file.txt");
+        let err = validate_path(&p, &[dir.path().to_path_buf()]).unwrap_err();
+        assert!(err.to_string().contains("不在允许的操作范围内"));
+    }
+
+    #[test]
+    fn test_validate_path_rejects_prefix_sibling() {
+        // 允许目录 /ab 时，/abc 不得被视为其子路径
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("ab");
+        let sibling = dir.path().join("abc");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        assert!(validate_path(&base.join("x.txt"), &[base.clone()]).is_ok());
+        let err = validate_path(&sibling.join("x.txt"), &[base]).unwrap_err();
+        assert!(err.to_string().contains("不在允许的操作范围内"));
+    }
+
+    #[test]
+    fn test_normalize_for_compare_strips_verbatim_prefix() {
+        let win = PathBuf::from(r"\\?\C:\Users\me\dir");
+        assert_eq!(
+            normalize_for_compare(&win),
+            PathBuf::from(r"C:\Users\me\dir")
+        );
+        let unc = PathBuf::from(r"\\?\UNC\server\share");
+        assert_eq!(
+            normalize_for_compare(&unc),
+            PathBuf::from(r"\\server\share")
+        );
+        let plain = PathBuf::from(r"C:\Users\me\dir");
+        assert_eq!(normalize_for_compare(&plain), plain);
+    }
+
+    #[test]
+    fn test_validate_path_verbatim_allowed_compared_consistently() {
+        // 模拟 Windows canonicalize 产生的 \\?\ 前缀路径仍应匹配普通 allowed 路径
+        let dir = tempdir().unwrap();
+        let verbatim = PathBuf::from(format!(
+            r"\\?\{}",
+            dir.path().join("x.txt").to_string_lossy()
+        ));
+        assert!(validate_path(&verbatim, &[dir.path().to_path_buf()]).is_ok());
+    }
 
     #[test]
     fn test_executor_config() {

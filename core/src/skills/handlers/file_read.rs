@@ -90,3 +90,125 @@ impl SkillHandler for FileReadHandler {
         "file_read"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn params(path: &str) -> HashMap<String, Value> {
+        HashMap::from([("path".to_string(), Value::String(path.to_string()))])
+    }
+
+    #[tokio::test]
+    async fn test_read_file_success() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "hello 天演").unwrap();
+
+        let handler = FileReadHandler::new(vec![dir.path().to_path_buf()]);
+        let result = handler
+            .execute(params(file.to_str().unwrap()), ExecutionContext::default())
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.output.as_deref(), Some("hello 天演"));
+    }
+
+    #[tokio::test]
+    async fn test_read_missing_path_param() {
+        let handler = FileReadHandler::new(Vec::new());
+        let err = handler
+            .execute(HashMap::new(), ExecutionContext::default())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("缺少 'path'"));
+    }
+
+    #[tokio::test]
+    async fn test_read_path_outside_allowed_denied() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let file = outside.path().join("secret.txt");
+        std::fs::write(&file, "secret").unwrap();
+
+        let handler = FileReadHandler::new(vec![dir.path().to_path_buf()]);
+        let err = handler
+            .execute(params(file.to_str().unwrap()), ExecutionContext::default())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("不在允许的操作范围内"),
+            "应为越权错误: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_path_traversal_denied() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let file = outside.path().join("secret.txt");
+        std::fs::write(&file, "secret").unwrap();
+
+        // 通过相对路径 ../ 尝试逃逸 allowed_paths
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        let traversal = format!("{}{}", allowed.to_str().unwrap(), std::path::MAIN_SEPARATOR);
+        // 构造 ../../<tempdir>/secret.txt 形式的相对路径
+        let rel = format!(
+            "..{0}..{0}{1}",
+            std::path::MAIN_SEPARATOR,
+            file.to_str().unwrap()
+        );
+        let full = format!("{traversal}{rel}");
+
+        let handler = FileReadHandler::new(vec![allowed.clone()]);
+        let result = handler
+            .execute(params(&full), ExecutionContext::default())
+            .await;
+        // 规范化后应判定不在允许范围（或解析失败），绝不能读到外部文件
+        assert!(
+            result.is_err() || !result.unwrap().success,
+            "路径穿越必须被拒绝"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_exceeds_max_size_rejected() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("big.txt");
+        std::fs::write(&file, "x".repeat(1024)).unwrap();
+
+        let handler = FileReadHandler::new(vec![dir.path().to_path_buf()]).with_max_size(100);
+        let err = handler
+            .execute(params(file.to_str().unwrap()), ExecutionContext::default())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("超过读取上限"));
+    }
+
+    #[tokio::test]
+    async fn test_read_nonexistent_file_returns_error() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing.txt");
+
+        let handler = FileReadHandler::new(vec![dir.path().to_path_buf()]);
+        let err = handler
+            .execute(
+                params(missing.to_str().unwrap()),
+                ExecutionContext::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("无法获取文件信息"),
+            "错误信息应说明无法获取文件信息: {err}"
+        );
+    }
+
+    #[test]
+    fn test_skill_id() {
+        assert_eq!(FileReadHandler::new(Vec::new()).skill_id(), "file_read");
+    }
+}

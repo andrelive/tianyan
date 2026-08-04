@@ -107,3 +107,139 @@ impl SkillHandler for FileWriteHandler {
         "file_write"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn params(path: &str, content: &str) -> HashMap<String, Value> {
+        HashMap::from([
+            ("path".to_string(), Value::String(path.to_string())),
+            ("content".to_string(), Value::String(content.to_string())),
+        ])
+    }
+
+    #[tokio::test]
+    async fn test_write_file_success() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("out.txt");
+
+        let handler = FileWriteHandler::new(vec![dir.path().to_path_buf()]);
+        let result = handler
+            .execute(
+                params(file.to_str().unwrap(), "content 内容"),
+                ExecutionContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "content 内容",
+            "文件应被真实写入"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_creates_parent_dirs() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("nested").join("deep").join("out.txt");
+
+        let handler = FileWriteHandler::new(vec![dir.path().to_path_buf()]);
+        let result = handler
+            .execute(
+                params(file.to_str().unwrap(), "x"),
+                ExecutionContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "x");
+    }
+
+    #[tokio::test]
+    async fn test_write_missing_params() {
+        let handler = FileWriteHandler::new(Vec::new());
+        // 缺 path
+        let err = handler
+            .execute(
+                HashMap::from([("content".to_string(), Value::String("x".into()))]),
+                ExecutionContext::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("缺少 'path'"));
+
+        // 缺 content
+        let err = handler
+            .execute(
+                HashMap::from([("path".to_string(), Value::String("x".into()))]),
+                ExecutionContext::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("缺少 'content'"));
+    }
+
+    #[tokio::test]
+    async fn test_write_outside_allowed_denied() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let file = outside.path().join("hacked.txt");
+
+        let handler = FileWriteHandler::new(vec![dir.path().to_path_buf()]);
+        let err = handler
+            .execute(
+                params(file.to_str().unwrap(), "pwn"),
+                ExecutionContext::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("不在允许的操作范围内"),
+            "越权写入必须被拒绝: {err}"
+        );
+        assert!(!file.exists(), "文件不应被创建");
+    }
+
+    #[tokio::test]
+    async fn test_write_exceeds_max_size_rejected() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("big.txt");
+
+        let handler = FileWriteHandler::new(vec![dir.path().to_path_buf()]).with_max_size(10);
+        let err = handler
+            .execute(
+                params(file.to_str().unwrap(), "x".repeat(100).as_str()),
+                ExecutionContext::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("超过写入上限"));
+        assert!(!file.exists(), "超限内容不应写入");
+    }
+
+    #[tokio::test]
+    async fn test_write_to_directory_returns_failure() {
+        let dir = tempdir().unwrap();
+        // 目标是已存在的目录：写入必定失败（EISDIR/拒绝访问），应降级为失败结果而非崩溃
+        let handler = FileWriteHandler::new(vec![dir.path().to_path_buf()]);
+        let result = handler
+            .execute(
+                params(dir.path().to_str().unwrap(), "x"),
+                ExecutionContext::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn test_skill_id() {
+        assert_eq!(FileWriteHandler::new(Vec::new()).skill_id(), "file_write");
+    }
+}
