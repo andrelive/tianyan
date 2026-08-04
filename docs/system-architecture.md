@@ -28,7 +28,7 @@
 | **Agent Loop 架构** | LLM 在循环中自主调用工具或直接回答，支持并行工具调用和追问中断 |
 | **VFS 双层摘要索引** | 三层内容（L0 Abstract / L1 Overview / L2 Detail）+ 双向量 RRF 融合检索 |
 | **StructuredMessage** | 单一真相源：持久化、会话组装、压缩跟踪、Token 统计 |
-| **组件工具化** | 13 个 OpenAI function calling 兼容工具，`call_skill` 桥接到技能系统 |
+| **组件工具化** | 14 个 OpenAI function calling 兼容工具，`call_skill` 桥接到技能系统 |
 | **前缀匹配缓存** | soul+rules+memories 固定前缀 → history 可变后缀，利用 LLM Provider 缓存 |
 | **技能系统** | 6 个内置技能 + GEPA 进化引擎自动学习 |
 | **流式响应** | SSE 流式输出，6 种 chunk_type 差异化渲染 |

@@ -315,7 +315,7 @@ Tianyan 采用四层架构（Tauri → React/TypeScript 前端 → Axum Server �
 
 - **VFS 双层摘要索引**（L0/L1/L2 + RRF 融合检索）— 统一存储与检索基础
 - **StructuredMessage** — 贯穿持久化、会话组装、Token 统计的单一真相源
-- **组件工具化** — 13 个 OpenAI function calling 兼容工具
+- **组件工具化** — 14 个 OpenAI function calling 兼容工具
 - **前缀匹配缓存** — soul→rules→memories→history 固定顺序
 
 详见 [系统架构文档](./docs/system-architecture.md) 和 [架构决策记录](./docs/architecture/decisions/)。
@@ -346,7 +346,7 @@ Tianyan 正在积极开发中。详见 [系统架构文档](./docs/system-archit
 - Agent Loop 架构（LLM 自主工具调用 + 流式响应）
 - VFS 双层摘要索引（L0/L1/L2 三层内容 + RRF 融合检索）
 - StructuredMessage 单一真相源（持久化 + 会话组装 + Token 统计）
-- 13 个内置工具（文件操作、代码搜索、技能调用、子 Agent 委托）
+- 14 个内置工具（文件操作、代码搜索、知识导入、技能调用、子 Agent 委托）
 - 6 个内置技能 + GEPA 进化引擎自动学习
 - 定时任务调度（记忆提取、规则提炼、摘要生成）
 
