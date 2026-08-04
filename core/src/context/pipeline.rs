@@ -8,7 +8,7 @@ use std::sync::Arc;
 use chrono;
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::agent::session_state::InjectableContext;
+use crate::common::types::InjectableContext;
 use crate::common::error::Result;
 use crate::common::types::{
     AgentPath, ContentLevel, ContextNamespace, DetailedTokenUsage, Message, MessageRole,
@@ -145,11 +145,18 @@ impl ContextPipeline {
         session_id: &str,
     ) -> Option<StructuredMessage> {
         let mut conversation = messages.to_vec();
-        let summary = self.compress_if_needed(&mut conversation).await.ok()??;
-
-        if summary.is_empty() {
-            return None;
-        }
+        // 压缩失败不阻断会话（降级为不压缩），但必须记录日志以便诊断 token 膨胀
+        let summary = match self.compress_if_needed(&mut conversation).await {
+            Ok(Some(summary)) => summary,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "上下文压缩失败，本次会话以降级（不压缩）方式继续"
+                );
+                return None;
+            }
+        };
 
         Some(StructuredMessage {
             id: format!("cmp_{}", chrono::Utc::now().timestamp_millis()),

@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use crate::common::error::Result;
+use crate::common::error::{Result, TianyanError};
 use crate::common::types::{AgentPath, ContentLevel, ContextNamespace, TianyanUri};
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
 
@@ -263,7 +263,9 @@ impl GcTask {
     async fn write_quality_report(&self, ctx: &TaskContext) -> Result<()> {
         let quality_uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["quality".to_string()]);
         if !ctx.vfs.exists(&quality_uri).await.unwrap_or(false) {
-            ctx.vfs.create_directory(&quality_uri).await.ok();
+            if let Err(e) = ctx.vfs.create_directory(&quality_uri).await {
+                tracing::warn!(error = %e, uri = %quality_uri, "GC 任务错误：创建质量报告目录失败");
+            }
         }
 
         let report_uri = quality_uri.append("domain-grades.md");
@@ -290,10 +292,17 @@ impl GcTask {
             now, now
         );
 
-        ctx.vfs
+        if let Err(e) = ctx
+            .vfs
             .write(&report_uri, ContentLevel::Detail, &content)
             .await
-            .ok();
+        {
+            tracing::warn!(error = %e, path = %report_uri, "GC 任务错误：质量报告写入失败");
+            return Err(TianyanError::Custom(format!(
+                "GC 任务错误：质量报告写入失败：{}",
+                e
+            )));
+        }
         tracing::info!(path = %report_uri, "质量报告已更新");
 
         Ok(())
@@ -311,8 +320,10 @@ impl TaskHandler for GcTask {
         // 文档漂移检测（不阻塞 GC 主流程）
         let drift_result = self.scan_documentation_drift(ctx).await;
 
-        // 质量报告回写
-        let _ = self.write_quality_report(ctx).await;
+        // 质量报告回写（尽力而为，失败仅记录日志）
+        if let Err(e) = self.write_quality_report(ctx).await {
+            tracing::warn!(error = %e, "GC 任务：质量报告回写失败");
+        }
 
         match (rules_result, memory_result) {
             (Ok(rules), Ok(mem)) => {

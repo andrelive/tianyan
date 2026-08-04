@@ -32,6 +32,34 @@ pub enum TianyanError {
 /// 使用 TianyanError 的 Result 类型别名。
 pub type Result<T> = std::result::Result<T, TianyanError>;
 
+impl TianyanError {
+    /// "条目未找到"类错误的统一消息前缀。
+    ///
+    /// 所有"目标不存在"错误通过 [`Self::not_found`] 构造，判断时用 [`Self::is_not_found`]，
+    /// 避免散落的字符串字面量与脆弱的 `starts_with` 判断。
+    pub const NOT_FOUND_PREFIX: &str = "条目未找到";
+
+    /// "目录未找到"类错误的统一消息前缀（`is_not_found` 同样识别）。
+    pub const DIRECTORY_NOT_FOUND_PREFIX: &str = "目录未找到";
+
+    /// 构造"条目未找到"错误（与"不存在"语义统一的入口）。
+    pub fn not_found<T: std::fmt::Display>(detail: T) -> Self {
+        TianyanError::Custom(format!("{}：{}", Self::NOT_FOUND_PREFIX, detail))
+    }
+
+    /// 判断是否为"目标不存在"类错误（条目未找到 / 目录未找到 / IO NotFound）。
+    pub fn is_not_found(&self) -> bool {
+        match self {
+            TianyanError::Io(e) => e.kind() == std::io::ErrorKind::NotFound,
+            TianyanError::Custom(msg) => {
+                msg.starts_with(Self::NOT_FOUND_PREFIX)
+                    || msg.starts_with(Self::DIRECTORY_NOT_FOUND_PREFIX)
+            }
+            _ => false,
+        }
+    }
+}
+
 // ── From impls ──────────────────────────────────────────────
 
 impl From<url::ParseError> for TianyanError {
@@ -99,5 +127,33 @@ mod tests {
     fn test_custom_prefix() {
         let err = TianyanError::Custom("模型服务错误：connection refused".to_string());
         assert!(err.to_string().contains("模型服务错误"));
+    }
+
+    #[test]
+    fn test_not_found_constructor_and_predicate() {
+        let err = TianyanError::not_found("tianyan://memory/abc");
+        assert_eq!(err.to_string(), "条目未找到：tianyan://memory/abc");
+        assert!(err.is_not_found());
+    }
+
+    #[test]
+    fn test_is_not_found_variants() {
+        // Io(NotFound) 识别
+        let io_err = TianyanError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file",
+        ));
+        assert!(io_err.is_not_found());
+        // 目录未找到识别
+        let dir_err = TianyanError::Custom("目录未找到：C:\\data".to_string());
+        assert!(dir_err.is_not_found());
+        // 其他错误不识别
+        let other = TianyanError::Custom("存储后端错误：磁盘已满".to_string());
+        assert!(!other.is_not_found());
+        let io_other = TianyanError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ));
+        assert!(!io_other.is_not_found());
     }
 }

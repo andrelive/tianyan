@@ -213,7 +213,7 @@ impl VfsCore for VirtualFileSystemImpl {
     async fn delete(&self, uri: &TianyanUri) -> Result<()> {
         Self::validate_uri(uri)?;
         if !self.storage.exists(uri).await? {
-            return Err(TianyanError::Custom(format!("条目未找到：{}", uri)));
+            return Err(TianyanError::not_found(uri));
         }
 
         // 先递归收集所有子 URI（包括目录自身），统一清理向量库

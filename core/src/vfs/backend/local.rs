@@ -143,13 +143,31 @@ impl LocalFileBackend {
             .await
             .map_err(|e| TianyanError::Custom(format!("存储后端错误：访问 {path:?} 失败: {e}")))?
         {
-            return Err(TianyanError::Custom(format!(
-                "条目未找到：{} 无 {:?} 层级内容",
+            return Err(TianyanError::not_found(format!(
+                "{} 无 {:?} 层级内容",
                 uri, level
             )));
         }
-
         self.read_file(&path).await
+    }
+
+    /// 读取层级内容，层级缺失（未写入）时返回 None；真实 IO 错误记录日志后返回 None。
+    async fn read_content_optional(&self, uri: &TianyanUri, level: ContentLevel) -> Option<String> {
+        match self.read_content_sync(uri, level).await {
+            Ok(content) => Some(content),
+            Err(e) => {
+                // 未找到表示该层级从未写入，属正常情况；其余为真实 IO 错误
+                if !e.is_not_found() {
+                    tracing::warn!(
+                        error = %e,
+                        uri = %uri,
+                        ?level,
+                        "存储后端错误：读取层级内容失败"
+                    );
+                }
+                None
+            }
+        }
     }
 }
 
@@ -174,7 +192,7 @@ impl StorageBackend for LocalFileBackend {
 
         let meta = fs::metadata(&path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                TianyanError::Custom(format!("条目未找到：{uri}"))
+                TianyanError::not_found(uri)
             } else {
                 TianyanError::Custom(format!("存储后端错误：访问 {path:?} 失败: {e}"))
             }
@@ -183,14 +201,12 @@ impl StorageBackend for LocalFileBackend {
         let is_directory = meta.is_dir();
 
         let abstract_content = self
-            .read_content_sync(uri, ContentLevel::Abstract)
-            .await
-            .ok();
+            .read_content_optional(uri, ContentLevel::Abstract)
+            .await;
         let overview_content = self
-            .read_content_sync(uri, ContentLevel::Overview)
-            .await
-            .ok();
-        let detail_content = self.read_content_sync(uri, ContentLevel::Detail).await.ok();
+            .read_content_optional(uri, ContentLevel::Overview)
+            .await;
+        let detail_content = self.read_content_optional(uri, ContentLevel::Detail).await;
 
         let mut metadata = crate::common::types::EntryMetadata::new(uri.clone(), "unknown");
         metadata.is_directory = is_directory;
@@ -237,7 +253,7 @@ impl StorageBackend for LocalFileBackend {
             .await
             .map_err(|e| TianyanError::Custom(format!("存储后端错误：访问 {path:?} 失败: {e}")))?
         {
-            return Err(TianyanError::Custom(format!("条目未找到：{uri}")));
+            return Err(TianyanError::not_found(uri));
         }
 
         self.delete_path(&path).await?;
@@ -252,15 +268,15 @@ impl StorageBackend for LocalFileBackend {
 
         let meta = fs::metadata(&path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                TianyanError::Custom(format!("目录未找到：{}", path.display()))
+                TianyanError::not_found(format!("目录 {} 不存在", path.display()))
             } else {
                 TianyanError::Custom(format!("存储后端错误：访问 {path:?} 失败: {e}"))
             }
         })?;
 
         if !meta.is_dir() {
-            return Err(TianyanError::Custom(format!(
-                "目录未找到：{}",
+            return Err(TianyanError::not_found(format!(
+                "路径 {} 不是目录",
                 path.display()
             )));
         }

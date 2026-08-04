@@ -196,8 +196,12 @@ impl SnapshotManager {
             .map_err(|e| TianyanError::Custom(format!("snapshot: 解析重做消息失败: {e}")))?;
 
         // 3. 清理重做数据（一次性）
-        let _ = fs::remove_file(&messages_path).await;
-        let _ = fs::remove_file(&tree_path).await;
+        if let Err(e) = fs::remove_file(&messages_path).await {
+            tracing::debug!(error = %e, session = %session_id, "snapshot: 清理重做消息文件失败");
+        }
+        if let Err(e) = fs::remove_file(&tree_path).await {
+            tracing::debug!(error = %e, session = %session_id, "snapshot: 清理重做树文件失败");
+        }
 
         tracing::info!(session = %session_id, index, restored, "已重做工作区文件");
         Ok(Some((messages, restored)))
@@ -520,7 +524,9 @@ impl SnapshotManager {
         // 从最深目录开始删除
         dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
         for dir in dirs {
-            let _ = fs::remove_dir(&dir).await;
+            if let Err(e) = fs::remove_dir(&dir).await {
+                tracing::debug!(error = %e, ?dir, "snapshot: 清理空目录失败");
+            }
         }
     }
 

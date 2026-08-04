@@ -130,12 +130,17 @@ impl UsageStats {
     ) {
         let conn = match self.db.try_lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "统计存储错误：搜索查询跳过（数据库锁不可用）");
+                return;
+            }
         };
-        let _ = conn.execute(
+        if let Err(e) = conn.execute(
             "INSERT INTO daily_search_queries (query_text, result_count, top_namespace) VALUES (?1,?2,?3)",
             rusqlite::params![query_text, result_count as i64, top_namespace],
-        );
+        ) {
+            tracing::warn!(error = %e, "统计存储错误：搜索查询写入失败");
+        }
     }
 
     // ── 持久化 ─────────────────────────────────────────────────────

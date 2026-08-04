@@ -107,7 +107,7 @@ impl StorageBackend for SqliteBackend {
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => {
-                TianyanError::Custom(format!("条目未找到：{uri_str}"))
+                TianyanError::not_found(uri_str.clone())
             }
             other => TianyanError::Custom(format!("存储后端错误：读取条目失败: {other}")),
         })
@@ -155,7 +155,7 @@ impl StorageBackend for SqliteBackend {
             .map_err(|e| TianyanError::Custom(format!("存储后端错误：删除条目失败: {e}")))?;
 
         if deleted == 0 {
-            return Err(TianyanError::Custom(format!("条目未找到：{uri_str}")));
+            return Err(TianyanError::not_found(uri_str));
         }
         Ok(())
     }
@@ -234,7 +234,7 @@ impl StorageBackend for SqliteBackend {
         conn.query_row(&sql, rusqlite::params![uri.to_string()], |row| row.get(0))
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => {
-                    TianyanError::Custom(format!("条目未找到：{uri} 无 {level:?} 层级内容"))
+                    TianyanError::not_found(format!("{uri} 无 {level:?} 层级内容"))
                 }
                 other => TianyanError::Custom(format!("存储后端错误：读取内容失败: {other}")),
             })

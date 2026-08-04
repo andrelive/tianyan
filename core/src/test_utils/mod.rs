@@ -191,7 +191,7 @@ impl ContentStore for MockVfs {
             .unwrap()
             .get(&(uri.to_string(), level))
             .cloned()
-            .ok_or_else(|| TianyanError::Custom(format!("条目未找到：{}", uri)))
+            .ok_or_else(|| TianyanError::not_found(uri))
     }
 
     async fn append(&self, uri: &TianyanUri, content: &str) -> Result<()> {
