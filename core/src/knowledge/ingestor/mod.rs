@@ -101,8 +101,8 @@ impl IngestorConfig {
 /// 解析文档后直接写入 VFS，由 SummaryEngine 生成分层摘要（abstract + overview），
 /// 不做切片——双层检索替代了传统 RAG 的切片逻辑。
 ///
-/// 注意：此导入器目前未被集成到 Agent 流程中。
-/// 按组件工具化原则，后续应通过 `ingest_knowledge` 工具暴露给 LLM 调用。
+/// 已通过 `knowledge_ingest` 工具接入 Agent 流程（ToolRegistry → KnowledgeIngestor），
+/// LLM 可自主触发文档导入；server 层另有 HTTP multipart 导入路径（/api/v1/knowledge/ingest）。
 pub struct KnowledgeIngestor {
     config: IngestorConfig,
     parser: CompositeParser,

@@ -100,23 +100,6 @@ pub struct IngestionResult {
     pub warnings: Vec<String>,
 }
 
-/// 知识搜索结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeSearchResult {
-    /// 文档 URI。
-    pub uri: TianyanUri,
-    /// 文档标题。
-    pub title: Option<String>,
-    /// 匹配的内容。
-    pub content: String,
-    /// 相关性分数。
-    pub score: f32,
-    /// 文档类型。
-    pub doc_type: DocumentType,
-    /// 高亮片段。
-    pub snippet: Option<String>,
-}
-
 /// 知识库中的知识分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

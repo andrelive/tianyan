@@ -22,7 +22,8 @@ pub(crate) enum QueryType {
     Retrieve(String),
 }
 
-#[allow(dead_code)]
+// 构造器/查询方法由测试使用，为调试 UI 预留；生产构建豁免未使用告警。
+#[cfg_attr(not(test), allow(dead_code))]
 impl QueryType {
     /// 创建搜索查询。
     pub fn search(query: impl Into<String>) -> Self {
@@ -155,7 +156,8 @@ pub(crate) struct TargetScope {
     uri_prefix: Option<String>,
 }
 
-#[allow(dead_code)]
+// 构造器由测试使用，为调试 UI 预留；生产构建豁免未使用告警。
+#[cfg_attr(not(test), allow(dead_code))]
 impl TargetScope {
     /// 为类别创建新目标范围。
     pub fn new(category: ContextNamespace) -> Self {
@@ -207,11 +209,6 @@ impl TargetScope {
     /// 获取 URI 前缀。
     pub fn uri_prefix(&self) -> Option<&str> {
         self.uri_prefix.as_deref()
-    }
-
-    /// 转换为 URI。
-    pub fn to_uri(&self) -> TianyanUri {
-        TianyanUri::new(self.category, self.sub_path.clone())
     }
 }
 

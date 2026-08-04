@@ -20,7 +20,8 @@ pub(crate) struct RetrievalTraceBuilder {
     start_time: Instant,
 }
 
-#[allow(dead_code)]
+// 构建器由测试使用，为调试 UI 预留；生产构建豁免未使用告警。
+#[cfg_attr(not(test), allow(dead_code))]
 impl RetrievalTraceBuilder {
     /// 创建新的追踪构建器。
     pub fn new(query: impl Into<String>) -> Self {
@@ -77,17 +78,6 @@ impl RetrievalTraceBuilder {
         });
     }
 
-    /// 添加聚合步骤。
-    pub fn add_aggregation(&mut self, tokens: usize) {
-        self.add_step(RetrievalStep {
-            step_type: RetrievalStepType::Aggregation,
-            target_uri: TianyanUri::new(crate::common::types::ContextNamespace::User, vec![]),
-            score: None,
-            tokens_used: tokens,
-            timestamp: Utc::now(),
-        });
-    }
-
     /// 添加自定义步骤。
     pub fn add_step(&mut self, step: RetrievalStep) {
         self.total_tokens += step.tokens_used;
@@ -97,11 +87,6 @@ impl RetrievalTraceBuilder {
     /// 添加结果 URI。
     pub fn add_result(&mut self, uri: TianyanUri) {
         self.results.push(uri);
-    }
-
-    /// 添加多个结果 URI。
-    pub fn add_results(&mut self, uris: Vec<TianyanUri>) {
-        self.results.extend(uris);
     }
 
     /// 构建最终追踪记录。
@@ -231,7 +216,8 @@ impl RetrievalStep {
 
 /// Token 消耗统计。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[allow(dead_code)]
+// 由测试使用，为调试 UI 预留；生产构建豁免未使用告警。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct TokenStats {
     /// 意图分析使用的 Token。
     pub intent_analysis_tokens: usize,
@@ -247,7 +233,7 @@ pub(crate) struct TokenStats {
     pub total_tokens: usize,
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))]
 impl TokenStats {
     /// 创建新的 Token 统计。
     pub fn new() -> Self {
@@ -299,7 +285,8 @@ impl TokenStats {
 
 /// Token 消耗百分比。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[allow(dead_code)]
+// 由测试使用，为调试 UI 预留；生产构建豁免未使用告警。
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct TokenPercentages {
     /// 意图分析占比。
     pub intent_analysis: f32,
