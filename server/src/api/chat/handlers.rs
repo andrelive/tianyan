@@ -11,7 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info};
 
 use crate::api::chat::services::ChatService;
-use crate::api::chat::types::{ChatRequest, ChatResponse, ChatStreamEvent};
+use crate::api::chat::types::{ChatRequest, ChatResponse, ChatStreamEvent, ClarifyRequest};
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
 
@@ -42,6 +42,31 @@ pub async fn chat_handler(
         .map_err(|e| {
             error!("对话处理错误: {}", e);
             ApiError::Internal(format!("对话处理错误: {}", e))
+        })
+}
+
+/// 追问回答处理器（非流式）
+pub async fn chat_clarify_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ClarifyRequest>,
+) -> Result<Json<ChatResponse>, ApiError> {
+    if let Err(e) = request.validate() {
+        return Err(ApiError::BadRequest(e));
+    }
+
+    info!("收到追问回答请求，会话: {}", request.session_id);
+
+    let agent = state.agent().await;
+    let session_manager = state.session_manager();
+
+    let service = ChatService::new(agent, session_manager);
+    service
+        .handle_clarification(&request.session_id, &request.answer)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("追问回答处理错误: {}", e);
+            ApiError::Internal(format!("追问回答处理错误: {}", e))
         })
 }
 

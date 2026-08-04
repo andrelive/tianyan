@@ -50,22 +50,7 @@ impl ChatService {
             .process_message(&session_id, &last_message, request.model.as_deref())
             .await?;
 
-        let chat_response = ChatResponse {
-            id: format!("chatcmpl-{}", short_uuid()),
-            session_id,
-            message: ChatMessage {
-                role: MessageRole::Assistant,
-                content: response.content,
-                timestamp: Some(chrono::Utc::now().to_rfc3339()),
-            },
-            usage: TokenUsage {
-                prompt_tokens: response.token_usage.prompt_tokens as u32,
-                completion_tokens: response.token_usage.completion_tokens as u32,
-                total_tokens: response.token_usage.total_tokens as u32,
-            },
-        };
-
-        Ok(chat_response)
+        Ok(to_chat_response(&session_id, response))
     }
 
     /// 处理对话消息（流式响应）
@@ -94,7 +79,9 @@ impl ChatService {
             .process_message_stream(&session_id, &last_message, request.model.as_deref())
             .await?;
 
-        let mut chunk_id = 0;
+        // 一次流式响应对应一个响应 id（与非流式 ChatResponse.id 语义一致）。
+        // SSE 事件 id 用于 Last-Event-ID 重连，同一响应流的所有 chunk 共享该 id。
+        let stream_id = format!("chatcmpl-{}", short_uuid());
 
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
@@ -102,7 +89,7 @@ impl ChatService {
                     let skill_calls = chunk.skill_calls.map(convert_skill_calls);
 
                     let event = ChatStreamEvent {
-                        id: format!("chatcmpl-{}", chunk_id),
+                        id: stream_id.clone(),
                         session_id: session_id.clone(),
                         delta: chunk.delta,
                         finish_reason: if chunk.is_complete {
@@ -118,13 +105,12 @@ impl ChatService {
                         debug!("客户端断开流式连接");
                         break;
                     }
-                    chunk_id += 1;
                 }
                 Err(e) => {
                     error!("流式处理错误: {}", e);
                     let _ = tx
                         .send(ChatStreamEvent {
-                            id: "chatcmpl-error".to_string(),
+                            id: stream_id.clone(),
                             session_id: session_id.clone(),
                             delta: format!("错误: {}", e),
                             finish_reason: Some("error".to_string()),
@@ -140,6 +126,39 @@ impl ChatService {
         info!("流式处理完成，会话：{}", session_id);
 
         Ok(())
+    }
+
+    /// 处理用户对追问的回答（非流式）。
+    ///
+    /// 会话必须存在待处理的追问（由 AgentLoop 在 ask_user 工具触发时设置）。
+    pub async fn handle_clarification(
+        &self,
+        session_id: &str,
+        answer: &str,
+    ) -> Result<ChatResponse, ApiError> {
+        let response = self
+            .agent
+            .handle_clarification(session_id, answer)
+            .await?;
+        Ok(to_chat_response(session_id, response))
+    }
+}
+
+/// 将核心 AgentResponse 转换为 API 层 ChatResponse。
+fn to_chat_response(session_id: &str, response: tianyan::agent::AgentResponse) -> ChatResponse {
+    ChatResponse {
+        id: format!("chatcmpl-{}", short_uuid()),
+        session_id: session_id.to_string(),
+        message: ChatMessage {
+            role: MessageRole::Assistant,
+            content: response.content,
+            timestamp: Some(chrono::Utc::now().to_rfc3339()),
+        },
+        usage: TokenUsage {
+            prompt_tokens: response.token_usage.prompt_tokens as u32,
+            completion_tokens: response.token_usage.completion_tokens as u32,
+            total_tokens: response.token_usage.total_tokens as u32,
+        },
     }
 }
 

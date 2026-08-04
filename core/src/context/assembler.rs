@@ -3,7 +3,7 @@
 //! 负责将存储层的 StructuredMessage 和 InjectableContext 组装为
 //! 传输层的 Vec<Message>，优化 DeepSeek 前缀缓存命中率。
 
-use crate::agent::session_state::InjectableContext;
+use crate::common::types::InjectableContext;
 use crate::common::types::{
     DetailedTokenUsage, FunctionCall, Message, MessageRole, MessageTime, Part, PartTime,
     StructuredMessage, TokenUsage, ToolCall as CoreToolCall, ToolCallType,

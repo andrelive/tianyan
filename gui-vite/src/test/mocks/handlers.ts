@@ -36,10 +36,10 @@ export const mockSkills: Skill[] = [
     id: 'skill-1',
     name: 'file-reader',
     description: '读取文件内容',
-    parameters: [
-      { name: 'path', type: 'string', description: '文件路径', required: true },
-    ],
+    parameters: [{ name: 'path', type: 'string', description: '文件路径', required: true }],
     category: '文件操作',
+    version: '1.0.0',
+    enabled: true,
   },
   {
     id: 'skill-2',
@@ -50,6 +50,8 @@ export const mockSkills: Skill[] = [
       { name: 'path', type: 'string', description: '搜索路径', required: false },
     ],
     category: '代码工具',
+    version: '1.0.0',
+    enabled: true,
   },
 ];
 
@@ -73,6 +75,7 @@ export const mockChatResponse: ChatResponse = {
 // ========== Knowledge mock ==========
 
 export const mockKnowledgeResults = {
+  query: 'architecture',
   results: [
     {
       id: 'doc-1',
@@ -90,6 +93,8 @@ export const mockKnowledgeResults = {
     },
   ],
   total: 2,
+  limit: 10,
+  offset: 0,
   suggestions: ['架构', 'VFS', 'Session'],
 };
 
@@ -227,6 +232,16 @@ export const handlers = [
   }),
 
   // Session messages
+  // 重命名会话标题（后端为 POST /sessions/{id}/title）
+  http.post(`${API_BASE}/sessions/:id/title`, async ({ request, params }) => {
+    const body = (await request.json()) as { title?: string };
+    const session = mockSessions.find((s) => s.id === params.id);
+    if (session && body.title) {
+      session.title = body.title;
+    }
+    return HttpResponse.json({ success: true, message: '标题已更新' });
+  }),
+
   http.get(`${API_BASE}/sessions/:id/messages`, ({ params }) => {
     return HttpResponse.json({
       session_id: params.id,
@@ -299,9 +314,38 @@ export const handlers = [
     });
   }),
 
-  // Knowledge search
-  http.post(`${API_BASE}/search`, () => {
+  // Chat clarify（追问回答）
+  http.post(`${API_BASE}/chat/clarify`, () => {
+    return HttpResponse.json({
+      id: 'msg-2',
+      session_id: 'session-1',
+      message: {
+        role: 'assistant',
+        content: '好的，我来继续处理。',
+        timestamp: '2026-07-23T10:00:10Z',
+      },
+      usage: { prompt_tokens: 60, completion_tokens: 20, total_tokens: 80 },
+    });
+  }),
+
+  // Knowledge search（后端为 GET /knowledge/search）
+  http.get(`${API_BASE}/knowledge/search`, () => {
     return HttpResponse.json(mockKnowledgeResults);
+  }),
+
+  // Knowledge ingest（后端为 POST /knowledge/ingest，multipart）
+  http.post(`${API_BASE}/knowledge/ingest`, () => {
+    return HttpResponse.json({
+      success: true,
+      message: '导入完成',
+      imported: 1,
+      total_files: 1,
+    });
+  }),
+
+  // Knowledge entries（后端为 GET /knowledge/entries）
+  http.get(`${API_BASE}/knowledge/entries`, () => {
+    return HttpResponse.json({ entries: [], path: '' });
   }),
 
   // Config

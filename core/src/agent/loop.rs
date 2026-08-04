@@ -345,6 +345,27 @@ impl AgentLoop {
 
             let results = self.tool_registry.execute_parallel(tool_calls).await;
 
+            // 审批降级：任一工具因"需要用户确认"被拒时，不再继续循环，
+            // 直接转为追问用户（用户批准后重试工具调用）。
+            let denied_action = results
+                .iter()
+                .find_map(|(_call_id, result)| match result {
+                    Err(e) if e.to_string().contains("approval_required") => {
+                        Some(e.to_string())
+                    }
+                    _ => None,
+                });
+            if let Some(err_msg) = denied_action {
+                return Ok(Some(AgentLoopResult::NeedsClarification {
+                    question: format!(
+                        "系统安全策略要求确认后才能执行该操作。\n\n操作详情：{}\n\n请回复「允许」继续执行，或回复「拒绝」终止。",
+                        err_msg
+                    ),
+                    total_tokens: total_tokens.clone(),
+                    turns: turn + 1,
+                }));
+            }
+
             for (call_id, result) in results {
                 let content = match result {
                     Ok(ref value) => serde_json::to_string(value).unwrap_or_else(|e| {
@@ -454,5 +475,165 @@ mod tests {
     fn test_agent_loop_error_display() {
         let err = TianyanError::Custom(format!("agent_loop: 达到最大轮数限制：{}", 5));
         assert!(err.to_string().contains("5"));
+    }
+
+    // ── 完整循环测试（MockChatService + 真实 ToolRegistry） ────
+
+    use crate::common::types::TokenUsage as CommonTokenUsage;
+    use crate::common::types::{FunctionCall, ToolCall, ToolCallType};
+    use crate::executor::SecurityPolicy;
+    use crate::model::types::{ChatChoice, ChatCompletionResponse};
+    use crate::model::MockChatService;
+
+    fn response_with(assistant: Message) -> ChatCompletionResponse {
+        ChatCompletionResponse {
+            id: "resp-1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: assistant,
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: CommonTokenUsage::default(),
+        }
+    }
+
+    fn tool_call_msg(name: &str) -> Message {
+        Message::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: format!("call_{}", name),
+                call_type: ToolCallType::Function,
+                function: FunctionCall {
+                    name: name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+        )
+    }
+
+    fn make_loop(mock: MockChatService, max_turns: usize) -> AgentLoop {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        AgentLoop::new(
+            Arc::new(mock),
+            registry,
+            Arc::new(MockSessionManager),
+            AgentLoopConfig { max_turns },
+        )
+    }
+
+    #[tokio::test]
+    async fn test_run_completes_tool_loop() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|req| {
+            // 第一轮：仅 user 消息 → 返回工具调用（未知工具 → 工具错误结果）
+            // 第二轮：user + assistant + tool → 返回最终回答
+            if req.messages.len() <= 1 {
+                Ok(response_with(tool_call_msg("nonexistent_tool")))
+            } else {
+                Ok(response_with(Message::assistant("最终回答")))
+            }
+        });
+        let agent_loop = make_loop(mock, 5);
+
+        let mut messages = vec![Message::user("帮我做点事")];
+        let result = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model")
+            .await
+            .unwrap();
+
+        match result {
+            AgentLoopResult::Answer {
+                content, turns, ..
+            } => {
+                assert_eq!(content, "最终回答");
+                assert_eq!(turns, 2);
+            }
+            other => panic!("期望 Answer，得到 {:?}", other),
+        }
+        // 循环结束后消息历史包含 user + assistant + tool + assistant
+        assert!(messages.len() >= 4);
+    }
+
+    #[tokio::test]
+    async fn test_run_ask_user_returns_clarification() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            Ok(response_with(Message::assistant_with_tools(
+                "",
+                vec![ToolCall {
+                    id: "call_ask".to_string(),
+                    call_type: ToolCallType::Function,
+                    function: FunctionCall {
+                        name: "ask_user".to_string(),
+                        arguments: r#"{"question": "你希望我怎么处理？"}"#.to_string(),
+                    },
+                }],
+            )))
+        });
+        let agent_loop = make_loop(mock, 5);
+
+        let mut messages = vec![Message::user("帮我决定一下")];
+        let result = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model")
+            .await
+            .unwrap();
+
+        match result {
+            AgentLoopResult::NeedsClarification { question, turns, .. } => {
+                assert_eq!(question, "你希望我怎么处理？");
+                assert_eq!(turns, 1);
+            }
+            other => panic!("期望 NeedsClarification，得到 {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_empty_response_errors() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion()
+            .returning(|_| Ok(response_with(Message::assistant(""))));
+        let agent_loop = make_loop(mock, 5);
+
+        let mut messages = vec![Message::user("你好")];
+        let err = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("空响应"));
+    }
+
+    #[tokio::test]
+    async fn test_run_max_turns_exceeded() {
+        let mut mock = MockChatService::new();
+        // 每轮都返回工具调用 → 永远不结束 → 达到 max_turns 报错
+        mock.expect_chat_completion()
+            .returning(|_| Ok(response_with(tool_call_msg("nonexistent_tool"))));
+        let agent_loop = make_loop(mock, 2);
+
+        let mut messages = vec![Message::user("循环测试")];
+        let err = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("最大轮数"));
+    }
+
+    #[tokio::test]
+    async fn test_run_llm_error_propagates() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            Err(TianyanError::Custom("模型服务错误：连接超时".to_string()))
+        });
+        let agent_loop = make_loop(mock, 5);
+
+        let mut messages = vec![Message::user("测试")];
+        let err = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("LLM 调用失败"));
     }
 }

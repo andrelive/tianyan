@@ -191,60 +191,63 @@ impl StreamEventSender {
         Self { tx }
     }
 
+    /// 尽力发送事件；接收端已关闭（正常结束场景）时记录 debug 日志。
+    async fn try_send(&self, chunk: AgentStreamChunk) {
+        if let Err(e) = self.tx.send(Ok(chunk)).await {
+            tracing::debug!(
+                error = %e,
+                closed = self.tx.is_closed(),
+                "流式事件发送失败：接收端已关闭"
+            );
+        }
+    }
+
     /// 发送思考开始事件。
     pub async fn send_thought(&self, content: &str) {
-        let _ = self
-            .tx
-            .send(Ok(AgentStreamChunk {
-                delta: content.to_string(),
-                is_complete: false,
-                token_usage: None,
-                chunk_type: StreamChunkType::Thought,
-                skill_calls: None,
-            }))
-            .await;
+        self.try_send(AgentStreamChunk {
+            delta: content.to_string(),
+            is_complete: false,
+            token_usage: None,
+            chunk_type: StreamChunkType::Thought,
+            skill_calls: None,
+        })
+        .await;
     }
 
     /// 发送工具调用事件。
     pub async fn send_tool_call(&self, description: &str) {
-        let _ = self
-            .tx
-            .send(Ok(AgentStreamChunk {
-                delta: description.to_string(),
-                is_complete: false,
-                token_usage: None,
-                chunk_type: StreamChunkType::ToolCall,
-                skill_calls: None,
-            }))
-            .await;
+        self.try_send(AgentStreamChunk {
+            delta: description.to_string(),
+            is_complete: false,
+            token_usage: None,
+            chunk_type: StreamChunkType::ToolCall,
+            skill_calls: None,
+        })
+        .await;
     }
 
     /// 发送观察结果事件。
     pub async fn send_observation(&self, content: &str) {
-        let _ = self
-            .tx
-            .send(Ok(AgentStreamChunk {
-                delta: content.to_string(),
-                is_complete: false,
-                token_usage: None,
-                chunk_type: StreamChunkType::Observation,
-                skill_calls: None,
-            }))
-            .await;
+        self.try_send(AgentStreamChunk {
+            delta: content.to_string(),
+            is_complete: false,
+            token_usage: None,
+            chunk_type: StreamChunkType::Observation,
+            skill_calls: None,
+        })
+        .await;
     }
 
     /// 发送回答片段事件。
     pub async fn send_answer_delta(&self, delta: &str) {
-        let _ = self
-            .tx
-            .send(Ok(AgentStreamChunk {
-                delta: delta.to_string(),
-                is_complete: false,
-                token_usage: None,
-                chunk_type: StreamChunkType::Answer,
-                skill_calls: None,
-            }))
-            .await;
+        self.try_send(AgentStreamChunk {
+            delta: delta.to_string(),
+            is_complete: false,
+            token_usage: None,
+            chunk_type: StreamChunkType::Answer,
+            skill_calls: None,
+        })
+        .await;
     }
 
     /// 发送最终完成事件。
@@ -254,30 +257,26 @@ impl StreamEventSender {
         chunk_type: StreamChunkType,
         skill_calls: Option<Vec<SkillCallInfo>>,
     ) {
-        let _ = self
-            .tx
-            .send(Ok(AgentStreamChunk {
-                delta: content.to_string(),
-                is_complete: true,
-                token_usage: None,
-                chunk_type,
-                skill_calls,
-            }))
-            .await;
+        self.try_send(AgentStreamChunk {
+            delta: content.to_string(),
+            is_complete: true,
+            token_usage: None,
+            chunk_type,
+            skill_calls,
+        })
+        .await;
     }
 
     /// 发送错误事件。
     pub async fn send_error(&self, error: &str) {
-        let _ = self
-            .tx
-            .send(Ok(AgentStreamChunk {
-                delta: error.to_string(),
-                is_complete: true,
-                token_usage: None,
-                chunk_type: StreamChunkType::Error,
-                skill_calls: None,
-            }))
-            .await;
+        self.try_send(AgentStreamChunk {
+            delta: error.to_string(),
+            is_complete: true,
+            token_usage: None,
+            chunk_type: StreamChunkType::Error,
+            skill_calls: None,
+        })
+        .await;
     }
 }
 

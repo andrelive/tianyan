@@ -87,12 +87,11 @@
 //!     // 创建会话
 //!     manager.with_state("session-001", |state| {
 //!         state.add_user_message("Hello");
-//!         state.add_assistant_message("Hi there!");
 //!     }).await;
 //!
 //!     // 读取会话
 //!     let msg_count = manager.with_state_read("session-001", |state| {
-//!         state.get_conversation().len()
+//!         state.message_count()
 //!     }).await;
 //!
 //!     println!("会话消息数：{}", msg_count.unwrap_or(0));

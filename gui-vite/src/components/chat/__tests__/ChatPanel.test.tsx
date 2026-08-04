@@ -13,7 +13,7 @@ function renderChatPanel(route = '/chat') {
         <Route path="/chat" element={<ChatPanel />} />
         <Route path="/chat/:sessionId" element={<ChatPanel />} />
       </Routes>
-    </MemoryRouter>
+    </MemoryRouter>,
   );
 }
 
@@ -40,9 +40,7 @@ describe('ChatPanel', () => {
     // Default store state: messages=[], streamStatus='idle'
     renderChatPanel();
     expect(screen.getByText('开始一段新的对话')).toBeInTheDocument();
-    expect(
-      screen.getByText('输入消息开始与 AI 助手交流')
-    ).toBeInTheDocument();
+    expect(screen.getByText('输入消息开始与 AI 助手交流')).toBeInTheDocument();
   });
 
   it('does not show empty state when there are messages', () => {
@@ -203,9 +201,7 @@ describe('ChatPanel', () => {
     });
 
     // 回退后可撤销回退
-    expect(
-      screen.getByRole('button', { name: /撤销回退/ })
-    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /撤销回退/ })).toBeInTheDocument();
   });
 
   it('undoes a rollback via backend (redo)', async () => {
@@ -232,5 +228,51 @@ describe('ChatPanel', () => {
       expect(messages[1].content).toBe('你好！我是天演，有什么可以帮助你的？');
     });
     expect(useAppStore.getState().lastRollbackIndex).toBeNull();
+  });
+
+  it('shows the clarification bubble when a clarification is pending', () => {
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      pendingClarification: '请确认是否删除该文件？',
+    });
+
+    renderChatPanel();
+
+    expect(screen.getByText('AI 需要确认')).toBeInTheDocument();
+    expect(screen.getByText('请确认是否删除该文件？')).toBeInTheDocument();
+    // 回答输入框与提交按钮可见
+    expect(screen.getByLabelText('输入对追问的回答')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '提交回答' })).toBeInTheDocument();
+  });
+
+  it('submits a clarification answer via /chat/clarify, appends messages and clears the bubble', async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      pendingClarification: '请确认是否删除该文件？',
+    });
+
+    renderChatPanel();
+
+    const answerInput = screen.getByLabelText('输入对追问的回答');
+    await user.type(answerInput, '确认删除');
+
+    await user.click(screen.getByRole('button', { name: '提交回答' }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().pendingClarification).toBeNull();
+    });
+
+    // 回答作为 user 消息、继续处理结果作为 assistant 消息追加
+    const messages = useAppStore.getState().messages;
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({ role: 'user', content: '确认删除' });
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: '好的，我来继续处理。',
+    });
+
+    // 追问气泡消失
+    expect(screen.queryByText('请确认是否删除该文件？')).not.toBeInTheDocument();
   });
 });

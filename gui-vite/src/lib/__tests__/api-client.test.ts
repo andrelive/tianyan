@@ -1,13 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { server } from '@/test/mocks/server';
-import { apiGet, apiPost, apiDelete, ApiError, apiPostMultipart } from '@/lib/api-client';
-import type {
-  ListSessionsResponse,
-  Session,
-  SkillListResponse,
-  ChatResponse,
-} from '@/lib/types';
+import {
+  apiGet,
+  apiPost,
+  apiDelete,
+  ApiError,
+  apiPostMultipart,
+  clarifyChat,
+} from '@/lib/api-client';
+import type { ListSessionsResponse, Session, SkillListResponse, ChatResponse } from '@/lib/types';
 
 const API_BASE = '/api/v1';
 
@@ -87,16 +89,28 @@ describe('apiPost', () => {
     expect(result.usage.total_tokens).toBe(80);
   });
 
-  it('sends a knowledge search request', async () => {
-    const body = { query: 'architecture' };
-
-    const result = await apiPost<{
+  it('fetches knowledge search results via GET', async () => {
+    const result = await apiGet<{
       results: unknown[];
       total: number;
-    }>('/search', body);
+    }>('/knowledge/search?q=architecture&limit=10');
 
     expect(result.results).toHaveLength(2);
     expect(result.total).toBe(2);
+  });
+
+  it('knowledge search response carries limit field (backend contract)', async () => {
+    // 后端 SearchResponse 返回 limit（而非 top_k），前端类型需与其对齐
+    const result = await apiGet<{
+      query: string;
+      limit: number;
+      offset: number;
+      total: number;
+    }>('/knowledge/search?q=architecture&limit=10');
+
+    expect(result.limit).toBeDefined();
+    expect(result.offset).toBeDefined();
+    expect(result.query).toBe('architecture');
   });
 
   it('sends correct JSON content-type header', async () => {
@@ -165,6 +179,40 @@ describe('ApiError', () => {
   });
 });
 
+// ─── clarifyChat ───────────────────────────────────────────────────────────────
+
+describe('clarifyChat', () => {
+  it('submits an answer and returns the continued response', async () => {
+    const result = await clarifyChat('session-1', '我的回答');
+
+    expect(result.id).toBe('msg-2');
+    expect(result.session_id).toBe('session-1');
+    expect(result.message.role).toBe('assistant');
+    expect(result.message.content).toBe('好的，我来继续处理。');
+    expect(result.message.timestamp).toBe('2026-07-23T10:00:10Z');
+    expect(result.usage.total_tokens).toBe(80);
+  });
+
+  it('posts the answer in the request body', async () => {
+    let receivedBody: unknown;
+    server.use(
+      http.post(`${API_BASE}/chat/clarify`, async ({ request }) => {
+        receivedBody = await request.json();
+        return HttpResponse.json({
+          id: 'msg-2',
+          session_id: 'session-1',
+          message: { role: 'assistant', content: 'ok' },
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      }),
+    );
+
+    await clarifyChat('session-1', '我的回答');
+
+    expect(receivedBody).toEqual({ session_id: 'session-1', answer: '我的回答' });
+  });
+});
+
 // ─── apiPostMultipart ──────────────────────────────────────────────────────────
 
 describe('apiPostMultipart', () => {
@@ -190,8 +238,6 @@ describe('apiPostMultipart', () => {
       }),
     );
 
-    await expect(apiPostMultipart('/upload-error', formData)).rejects.toThrow(
-      ApiError,
-    );
+    await expect(apiPostMultipart('/upload-error', formData)).rejects.toThrow(ApiError);
   });
 });

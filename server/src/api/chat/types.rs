@@ -80,6 +80,28 @@ impl ChatResponse {
     }
 }
 
+/// 追问回答请求
+#[derive(Debug, Deserialize)]
+pub struct ClarifyRequest {
+    /// 会话标识（追问状态与会话绑定，必填）
+    pub session_id: String,
+    /// 用户对追问的回答
+    pub answer: String,
+}
+
+impl ClarifyRequest {
+    /// 验证请求参数
+    pub fn validate(&self) -> Result<(), String> {
+        if self.session_id.trim().is_empty() {
+            return Err("session_id 不能为空".to_string());
+        }
+        if self.answer.trim().is_empty() {
+            return Err("answer 不能为空".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// 技能调用信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillCallInfo {
@@ -152,6 +174,37 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("chatcmpl-123"));
         assert!(json.contains("Hello!"));
+    }
+
+    #[test]
+    fn test_clarify_request_deserialization() {
+        // 正常请求：session_id 与 answer 均合法，校验通过
+        let json = r#"{
+            "session_id": "session-123",
+            "answer": "我的回答"
+        }"#;
+        let req: ClarifyRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.session_id, "session-123");
+        assert_eq!(req.answer, "我的回答");
+        assert!(req.validate().is_ok());
+
+        // 空 session_id：校验失败
+        let bad = ClarifyRequest {
+            session_id: "  ".to_string(),
+            answer: "回答".to_string(),
+        };
+        assert!(bad.validate().is_err());
+
+        // 空 answer：校验失败
+        let bad = ClarifyRequest {
+            session_id: "session-123".to_string(),
+            answer: "".to_string(),
+        };
+        assert!(bad.validate().is_err());
+
+        // 缺少必填字段：反序列化失败
+        let missing = r#"{"session_id": "session-123"}"#;
+        assert!(serde_json::from_str::<ClarifyRequest>(missing).is_err());
     }
 
     #[test]

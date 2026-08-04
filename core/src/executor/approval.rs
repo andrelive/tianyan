@@ -6,7 +6,7 @@
 //! - 审批决策持久化，支持审计追踪
 //! - 超时机制和默认拒绝策略
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -169,6 +169,12 @@ pub struct ApprovalWorkflowConfig {
     pub persist_records: bool,
     /// 最大待处理审批数。
     pub max_pending_approvals: usize,
+    /// 无人值守模式：Medium/High 风险操作自动批准并记录审计，不等待人工审批。
+    /// 默认关闭（安全默认）：高风险操作需用户确认，未确认时拒绝并降级为询问用户。
+    pub unattended_mode: bool,
+    /// attended 模式下是否等待人工审批响应（需 GUI 审批通道已接入）。
+    /// 当前无审批通道，默认 false：未确认的操作立即拒绝并降级为询问用户。
+    pub wait_for_approval: bool,
 }
 
 impl Default for ApprovalWorkflowConfig {
@@ -188,6 +194,10 @@ impl Default for ApprovalWorkflowConfig {
             ],
             persist_records: true,
             max_pending_approvals: 100,
+            // 默认关闭无人值守：Medium/High 风险操作必须获得用户确认（拒绝时降级为询问用户）
+            unattended_mode: false,
+            // 审批通道未接入前不等待：未确认即拒绝，由上层降级为 ask_user 追问
+            wait_for_approval: false,
         }
     }
 }
@@ -199,6 +209,8 @@ pub struct ApprovalWorkflow {
     config: ApprovalWorkflowConfig,
     pending_approvals: Arc<RwLock<HashMap<String, PendingApproval>>>,
     records: Arc<RwLock<Vec<ApprovalRecord>>>,
+    /// 用户已确认的操作指纹集合（经"询问用户"降级链路获得批准后记录）。
+    confirmed_actions: Arc<RwLock<HashSet<String>>>,
 }
 
 /// 待处理审批。
@@ -215,7 +227,31 @@ impl ApprovalWorkflow {
             config,
             pending_approvals: Arc::new(RwLock::new(HashMap::new())),
             records: Arc::new(RwLock::new(Vec::new())),
+            confirmed_actions: Arc::new(RwLock::new(HashSet::new())),
         }
+    }
+
+    /// 计算操作的稳定指纹（用于"用户已确认"的去重判定）。
+    pub fn action_fingerprint(action: &Action) -> String {
+        serde_json::to_string(action).unwrap_or_else(|e| format!("{:?}-{e}", action))
+    }
+
+    /// 记录用户对该操作的确认（来自"询问用户"降级链路）。
+    pub async fn record_user_confirmation(&self, action: &Action) {
+        let fp = Self::action_fingerprint(action);
+        self.confirmed_actions.write().await.insert(fp);
+        tracing::info!(action = ?action, "用户已确认执行该操作");
+    }
+
+    /// 记录用户对指定指纹操作的确认（指纹由 [`Self::action_fingerprint`] 生成）。
+    pub async fn record_user_confirmation_by_fingerprint(&self, fingerprint: &str) {
+        self.confirmed_actions.write().await.insert(fingerprint.to_string());
+    }
+
+    /// 检查操作是否已被用户确认。
+    pub async fn is_action_confirmed(&self, action: &Action) -> bool {
+        let fp = Self::action_fingerprint(action);
+        self.confirmed_actions.read().await.contains(&fp)
     }
 
     /// 评估操作的风险等级。
@@ -324,7 +360,73 @@ impl ApprovalWorkflow {
             });
         }
 
-        // 需要人工审批
+        // 无人值守模式：Medium/High 风险操作自动批准并记录审计。
+        if self.config.unattended_mode {
+            let request = ApprovalRequest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.to_string(),
+                action_description: format!("{:?}", action),
+                action: action.clone(),
+                risk_level,
+                requested_at: chrono::Utc::now(),
+                timeout_secs: self.config.default_timeout_secs,
+            };
+            let response = ApprovalResponse {
+                request_id: request.request_id.clone(),
+                decision: ApprovalDecision::Approve,
+                reason: Some(format!("无人值守模式：{} 风险自动批准", risk_level)),
+                responded_at: chrono::Utc::now(),
+                approved_by: "auto".to_string(),
+            };
+            tracing::info!(
+                session_id = %session_id,
+                action = ?action,
+                risk_level = %risk_level,
+                decision = ?response.decision,
+                "无人值守模式自动审批（审计）"
+            );
+            self.record_approval_audit(request, Some(response.clone()))
+                .await;
+            return Ok(response);
+        }
+
+        // attended 模式（默认）：检查用户是否已通过"询问用户"链路确认过该操作
+        if self.is_action_confirmed(action).await {
+            return Ok(ApprovalResponse {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                decision: ApprovalDecision::Approve,
+                reason: Some("用户已确认执行该操作".to_string()),
+                responded_at: chrono::Utc::now(),
+                approved_by: "user".to_string(),
+            });
+        }
+
+        // 审批通道已接入时：等待人工审批响应（带超时）
+        if self.config.wait_for_approval {
+            return self.wait_for_human_approval(session_id, action, risk_level).await;
+        }
+
+        // 无审批通道：立即拒绝并携带 approval_required 标记，
+        // 由上层（agent loop）降级为"询问用户"追问，用户确认后重试。
+        Ok(ApprovalResponse {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            decision: ApprovalDecision::Deny,
+            reason: Some(format!(
+                "需要用户确认（approval_required）：{:?}",
+                action
+            )),
+            responded_at: chrono::Utc::now(),
+            approved_by: "system".to_string(),
+        })
+    }
+
+    /// 等待人工审批响应（GUI 审批通道接入后使用），超时默认拒绝。
+    async fn wait_for_human_approval(
+        &self,
+        session_id: &str,
+        action: &Action,
+        risk_level: RiskLevel,
+    ) -> crate::common::error::Result<ApprovalResponse> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
 
@@ -378,17 +480,28 @@ impl ApprovalWorkflow {
         }
 
         // 记录审批历史
-        if self.config.persist_records {
-            let record = ApprovalRecord {
-                request,
-                response: Some(response.clone()),
-                execution_result: None,
-            };
-            let mut records = self.records.write().await;
-            records.push(record);
-        }
+        self.record_approval_audit(request, Some(response.clone()))
+            .await;
 
         Ok(response)
+    }
+
+    /// 记录审批审计（仅当 `persist_records` 开启时）。
+    async fn record_approval_audit(
+        &self,
+        request: ApprovalRequest,
+        response: Option<ApprovalResponse>,
+    ) {
+        if !self.config.persist_records {
+            return;
+        }
+        let record = ApprovalRecord {
+            request,
+            response,
+            execution_result: None,
+        };
+        let mut records = self.records.write().await;
+        records.push(record);
     }
 
     /// 响应审批请求。
@@ -557,5 +670,153 @@ mod tests {
         };
         let decision = workflow.check_auto_approval(&safe_action, RiskLevel::Safe);
         assert_eq!(decision, Some(ApprovalDecision::Approve));
+    }
+
+    #[tokio::test]
+    async fn test_unattended_mode_auto_approves_medium_risk() {
+        // 显式开启无人值守模式
+        let config = ApprovalWorkflowConfig {
+            unattended_mode: true,
+            ..Default::default()
+        };
+        let workflow = Arc::new(ApprovalWorkflow::new(config));
+
+        // git 命令为 Medium 风险
+        let action = Action::ExecuteCommand {
+            command: "git status".to_string(),
+            cwd: None,
+            timeout_secs: None,
+        };
+        assert_eq!(workflow.assess_risk(&action), RiskLevel::Medium);
+
+        // 应立即返回批准，而非等待 300 秒人工响应
+        let resp = workflow
+            .request_approval("session-1", &action)
+            .await
+            .unwrap();
+        assert_eq!(resp.decision, ApprovalDecision::Approve);
+        assert_eq!(resp.approved_by, "auto");
+        assert!(resp.reason.unwrap().contains("无人值守"));
+
+        // 审计记录已写入
+        let records = workflow.get_approval_records().await;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].request.risk_level, RiskLevel::Medium);
+        assert_eq!(
+            records[0].response.as_ref().unwrap().decision,
+            ApprovalDecision::Approve
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unattended_mode_keeps_critical_denied() {
+        let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+
+        let action = Action::ExecuteCommand {
+            command: "rm -rf /".to_string(),
+            cwd: None,
+            timeout_secs: None,
+        };
+        assert_eq!(workflow.assess_risk(&action), RiskLevel::Critical);
+
+        let resp = workflow
+            .request_approval("session-1", &action)
+            .await
+            .unwrap();
+        assert_eq!(resp.decision, ApprovalDecision::Deny);
+        assert_eq!(resp.approved_by, "system");
+    }
+
+    #[tokio::test]
+    async fn test_attended_mode_denies_without_confirmation() {
+        // 默认（attended、无审批通道）：Medium 风险应立即拒绝并携带 approval_required 标记
+        let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+
+        let action = Action::ExecuteCommand {
+            command: "git status".to_string(),
+            cwd: None,
+            timeout_secs: None,
+        };
+        assert_eq!(workflow.assess_risk(&action), RiskLevel::Medium);
+
+        let resp = workflow
+            .request_approval("session-1", &action)
+            .await
+            .unwrap();
+        assert_eq!(resp.decision, ApprovalDecision::Deny);
+        assert!(resp.reason.as_deref().unwrap().contains("approval_required"));
+    }
+
+    #[tokio::test]
+    async fn test_attended_mode_approves_after_user_confirmation() {
+        let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+
+        let action = Action::ExecuteCommand {
+            command: "git status".to_string(),
+            cwd: None,
+            timeout_secs: None,
+        };
+
+        // 未确认：拒绝
+        let resp = workflow
+            .request_approval("session-1", &action)
+            .await
+            .unwrap();
+        assert_eq!(resp.decision, ApprovalDecision::Deny);
+
+        // 用户确认后：批准
+        workflow.record_user_confirmation(&action).await;
+        let resp = workflow
+            .request_approval("session-1", &action)
+            .await
+            .unwrap();
+        assert_eq!(resp.decision, ApprovalDecision::Approve);
+        assert_eq!(resp.approved_by, "user");
+    }
+
+    #[tokio::test]
+    async fn test_attended_mode_still_requests_human_approval() {
+        // 显式开启 wait_for_approval（GUI 审批通道接入后）：
+        // Medium 风险应进入待处理队列等待人工审批
+        let config = ApprovalWorkflowConfig {
+            unattended_mode: false,
+            wait_for_approval: true,
+            ..Default::default()
+        };
+        let workflow = Arc::new(ApprovalWorkflow::new(config));
+
+        let action = Action::ExecuteCommand {
+            command: "git status".to_string(),
+            cwd: None,
+            timeout_secs: None,
+        };
+
+        let wf = workflow.clone();
+        let handle = tokio::spawn(async move {
+            wf.request_approval("session-1", &action).await.unwrap()
+        });
+
+        // 等待请求进入待处理队列
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let request_id = loop {
+            let pending = workflow.get_pending_approvals().await;
+            if pending.len() == 1 {
+                assert_eq!(pending[0].risk_level, RiskLevel::Medium);
+                break pending[0].request_id.clone();
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("审批请求未进入待处理队列");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        // 模拟人工批准，spawn 的任务应解除等待并返回批准
+        workflow
+            .respond_to_approval(&request_id, ApprovalDecision::Approve, None, "human")
+            .await
+            .unwrap();
+        let resp = handle.await.unwrap();
+        assert_eq!(resp.decision, ApprovalDecision::Approve);
+        assert_eq!(resp.approved_by, "human");
     }
 }

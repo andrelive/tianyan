@@ -7,12 +7,9 @@ use tokio::sync::RwLock;
 
 use crate::agent::types::ClarificationQuestion;
 use crate::common::types::{
-    DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
+    DetailedTokenUsage, InjectableContext, MessageRole, MessageTime, Part, PartTime,
+    StructuredMessage,
 };
-
-// Re-export: InjectableContext was moved to common::types::injectable to eliminate
-// the context → agent inverted dependency.
-pub use crate::common::types::injectable::InjectableContext;
 
 const MAX_CONVERSATION_MESSAGES: usize = 100;
 const KEEP_RECENT_MESSAGES: usize = 50;
@@ -101,13 +98,6 @@ impl SessionState {
     pub fn message_count(&self) -> usize {
         self.structured_messages.len()
     }
-
-    // 转换为 Session（待 Task 7 完成 Session 类型更新后恢复）。
-    // pub fn to_session(&self) -> Session {
-    //     let mut session = Session::new(&self.session_id);
-
-    //     session
-    // }
 
     /// 清理过期消息。
     pub fn cleanup(&mut self) {

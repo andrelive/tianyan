@@ -1,4 +1,12 @@
 import { getApiBase } from '@/hooks/use-api-base';
+import type {
+  ChatMessage,
+  McpServerEntry,
+  McpTestResponse,
+  OllamaScanResponse,
+  OllamaTestResponse,
+  SessionMessagesResponse,
+} from './types';
 
 const DEFAULT_TIMEOUT = 60000;
 
@@ -15,7 +23,7 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
-  signal?: AbortSignal
+  signal?: AbortSignal,
 ): Promise<T> {
   const url = `${getApiBase()}${path}`;
   const headers: Record<string, string> = {
@@ -69,10 +77,7 @@ export async function apiDelete<T>(path: string): Promise<T> {
   return request<T>('DELETE', path);
 }
 
-export async function apiPostMultipart<T>(
-  path: string,
-  formData: FormData
-): Promise<T> {
+export async function apiPostMultipart<T>(path: string, formData: FormData): Promise<T> {
   const url = `${getApiBase()}${path}`;
   const response = await fetch(url, {
     method: 'POST',
@@ -91,23 +96,14 @@ export interface DeleteMessageRequest {
   message_index: number;
 }
 
-export interface SessionMessagesResponse {
-  session_id: string;
-  messages: {
-    role: 'user' | 'assistant' | 'system';
-    content: string;
-    timestamp?: string;
-  }[];
-}
-
 /** 删除指定索引的消息及其后的所有消息，返回剩余消息。 */
 export async function deleteSessionMessage(
   sessionId: string,
-  messageIndex: number
+  messageIndex: number,
 ): Promise<SessionMessagesResponse> {
   return apiPost<SessionMessagesResponse>(
     `/sessions/${encodeURIComponent(sessionId)}/messages/delete`,
-    { message_index: messageIndex } satisfies DeleteMessageRequest
+    { message_index: messageIndex } satisfies DeleteMessageRequest,
   );
 }
 
@@ -118,35 +114,53 @@ export interface RedoRequest {
 /** 重做被回退的消息与工作区文件，返回恢复后的消息。 */
 export async function redoSessionMessage(
   sessionId: string,
-  messageIndex: number
+  messageIndex: number,
 ): Promise<SessionMessagesResponse> {
   return apiPost<SessionMessagesResponse>(
     `/sessions/${encodeURIComponent(sessionId)}/messages/redo`,
-    { message_index: messageIndex } satisfies RedoRequest
+    { message_index: messageIndex } satisfies RedoRequest,
   );
+}
+
+/** 更新会话标题。 */
+export async function updateSessionTitle(
+  sessionId: string,
+  title: string,
+): Promise<{ success: boolean; message: string }> {
+  return apiPost(`/sessions/${encodeURIComponent(sessionId)}/title`, {
+    title,
+  });
+}
+
+// ========== Chat clarification ==========
+
+export interface ClarifyRequest {
+  session_id: string;
+  answer: string;
+}
+
+export interface ClarifyResponse {
+  id: string;
+  session_id: string;
+  message: ChatMessage;
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+}
+
+/** 提交对 Agent 追问的回答，返回继续处理的结果（非流式）。 */
+export async function clarifyChat(sessionId: string, answer: string): Promise<ClarifyResponse> {
+  return apiPost<ClarifyResponse>('/chat/clarify', {
+    session_id: sessionId,
+    answer,
+  } satisfies ClarifyRequest);
 }
 
 export { getApiBase };
 
 // ========== Ollama API ==========
-
-export interface OllamaModelInfo {
-  name: string;
-  size: string;
-  capabilities: string[];
-}
-
-export interface OllamaScanResponse {
-  success: boolean;
-  models: OllamaModelInfo[];
-  error?: string;
-}
-
-export interface OllamaTestResponse {
-  success: boolean;
-  version?: string;
-  error?: string;
-}
 
 export async function scanOllamaModels(endpoint?: string): Promise<OllamaScanResponse> {
   return apiPost<OllamaScanResponse>('/config/ollama/scan', { endpoint });
@@ -157,21 +171,6 @@ export async function testOllamaConnection(endpoint?: string): Promise<OllamaTes
 }
 
 // ========== MCP API ==========
-
-export interface McpServerEntry {
-  name: string;
-  command: string;
-  args: string[];
-  env?: Record<string, string>;
-  enabled: boolean;
-  description?: string;
-}
-
-export interface McpTestResponse {
-  success: boolean;
-  tools: number;
-  error?: string;
-}
 
 export async function listMcpServers(): Promise<McpServerEntry[]> {
   return apiGet<McpServerEntry[]>('/config/mcp/servers');
@@ -203,7 +202,9 @@ export async function fetchSoulContent(): Promise<SoulResponse> {
   return apiGet<SoulResponse>('/config/soul');
 }
 
-export async function updateSoulContent(content: string): Promise<{ success: boolean; message: string }> {
+export async function updateSoulContent(
+  content: string,
+): Promise<{ success: boolean; message: string }> {
   return apiPut('/config/soul', { content });
 }
 
@@ -227,9 +228,7 @@ export interface KnowledgeEntriesResponse {
 }
 
 /** 列出知识库命名空间下指定路径的直接子条目。 */
-export async function fetchKnowledgeEntries(
-  path?: string
-): Promise<KnowledgeEntriesResponse> {
+export async function fetchKnowledgeEntries(path?: string): Promise<KnowledgeEntriesResponse> {
   const params = new URLSearchParams();
   if (path) params.set('path', path);
   return apiGet<KnowledgeEntriesResponse>(`/knowledge/entries?${params}`);
@@ -244,7 +243,7 @@ export interface KnowledgeReadResponse {
 /** 读取知识库条目的指定层级内容（abstract/overview/detail）。 */
 export async function fetchKnowledgeEntryContent(
   uri: string,
-  level?: string
+  level?: string,
 ): Promise<KnowledgeReadResponse> {
   const params = new URLSearchParams({ uri });
   if (level) params.set('level', level);

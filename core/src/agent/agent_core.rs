@@ -28,6 +28,8 @@ const MIN_MESSAGES_BEFORE_COMPRESSION: usize = 6;
 
 /// 智能体协调器的默认实现。
 #[derive(Clone)]
+// 字段由 AgentBuilder 注入，当前协调器 API 主要通过 agent_loop / tool_registry 间接使用；
+// config / model_service / vfs / skill_executor / skill_registry 为未来协调器 API 预留。
 #[allow(dead_code)]
 pub struct Agent {
     pub(crate) config: AgentConfig,
@@ -51,6 +53,10 @@ impl Agent {
     /// 创建新的 Agent 实例。
     ///
     /// 此构造函数由 AgentBuilder::build() 调用，外部应通过 Builder 创建 Agent。
+    // clippy::too_many_arguments: 12 个参数均为必需的依赖注入项，
+    // AgentBuilder 已是唯一构造入口，此处保持 pub(crate) 且参数不可合并
+    // （每个参数类型不同，无逻辑分组余地）。保留 allow 并非偷懒，
+    // 而是 Builder 模式下的合理设计权衡。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config: AgentConfig,
@@ -216,8 +222,7 @@ impl Agent {
         }
         state.write().await.pending_clarification = None;
 
-        let messages = self.prepare_context(state, clarification_answers).await;
-
+        // 持久化用户对追问的回答，保持会话历史完整（与 process_message 路径对齐）
         let (session_id, parent_id) = {
             let s = state.read().await;
             (
@@ -225,6 +230,26 @@ impl Agent {
                 s.structured_messages.last().map(|m| m.id.clone()),
             )
         };
+        self.persist_user_message(&session_id, state, clarification_answers)
+            .await;
+
+        // 审批降级链路：若存在待用户确认的审批操作，根据回答记录批准/拒绝
+        let approved = is_approval_confirmation(clarification_answers);
+        if self
+            .agent_loop
+            .tool_registry()
+            .confirm_pending_approval(approved)
+            .await
+        {
+            tracing::info!(
+                approved,
+                answer = %clarification_answers,
+                "已记录用户对审批追问的回应"
+            );
+        }
+
+        let messages = self.prepare_context(state, clarification_answers).await;
+
         let loop_result = self
             .agent_loop
             .run(
@@ -399,4 +424,73 @@ pub(crate) fn format_clarification_questions(questions: &[ClarificationQuestion]
 
     content.push_str("请提供以上信息，我会根据您的回答继续处理。");
     content
+}
+
+/// 判断用户对审批追问的回答是否为"允许执行"语义。
+///
+/// 启发式匹配：出现肯定词（允许/可以/同意/好/是/确认/继续/yes/ok）且
+/// 未出现否定词（不/别/拒绝/否/禁止/取消）时视为批准。
+fn is_approval_confirmation(answer: &str) -> bool {
+    let lower = answer.trim().to_lowercase();
+    let affirmatives = [
+        "允许", "可以", "同意", "好", "是", "确认", "继续", "执行", "yes", "ok", "y",
+    ];
+    let negatives = ["不", "别", "拒绝", "否", "禁止", "取消", "no", "n", "停止"];
+
+    let has_affirmative = affirmatives.iter().any(|w| lower.contains(w));
+    let has_negative = negatives.iter().any(|w| lower.contains(w));
+    has_affirmative && !has_negative
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::session_state::SessionState;
+    use crate::common::types::{InjectableContext, MessageRole};
+    use crate::context::assembler::ContextAssembler;
+
+    #[test]
+    fn test_is_approval_confirmation() {
+        assert!(is_approval_confirmation("允许"));
+        assert!(is_approval_confirmation("可以，继续吧"));
+        assert!(is_approval_confirmation("好的，同意执行"));
+        assert!(is_approval_confirmation("yes, go ahead"));
+        assert!(!is_approval_confirmation("不允许"));
+        assert!(!is_approval_confirmation("拒绝执行"));
+        assert!(!is_approval_confirmation("不可以"));
+        assert!(!is_approval_confirmation("no"));
+        assert!(!is_approval_confirmation(""));
+        assert!(!is_approval_confirmation("请不要执行"));
+    }
+
+    #[test]
+    fn test_clarification_answer_injected_once() {
+        // 回归保护：handle_clarification_response 链路中，用户对追问的回答
+        // 通过 prepare_context 仅注入内存状态一次；持久化（persist_user_message）
+        // 走 VFS，与上下文组装是两条独立存储，组装结果不得出现重复回答。
+        let mut state = SessionState::new("session-1");
+        state.add_user_message("原始问题");
+        state.add_structured_message(
+            ContextAssembler::message_to_structured(
+                &Message::assistant("为了继续，需要确认：是否允许执行操作？"),
+                "session-1",
+                None,
+                None,
+            ),
+        );
+        // prepare_context 对追问回答的注入（每次调用仅一次）
+        state.add_user_message("允许");
+
+        let messages = ContextAssembler::assemble(
+            &state.structured_messages,
+            &InjectableContext::default(),
+            "",
+        );
+
+        let answer_count = messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User && m.content.contains("允许"))
+            .count();
+        assert_eq!(answer_count, 1, "用户回答在组装上下文中只能出现一次");
+    }
 }

@@ -34,6 +34,11 @@ interface AppState {
   clearMessages: () => void;
   deleteMessagesFrom: (index: number) => void;
 
+  // Clarification（追问）
+  pendingClarification: string | null;
+  setPendingClarification: (question: string | null) => void;
+  removeEmptyAssistantMessage: () => void;
+
   // Rollback / redo
   lastRollbackIndex: number | null;
   setLastRollbackIndex: (index: number | null) => void;
@@ -85,13 +90,11 @@ export const useAppStore = create<AppState>()(
       setCurrentSession: (id) => set({ currentSessionId: id }),
       sessions: [],
       setSessions: (sessions) => set({ sessions }),
-      addSession: (session) =>
-        set((s) => ({ sessions: [...s.sessions, session] })),
+      addSession: (session) => set((s) => ({ sessions: [...s.sessions, session] })),
       removeSession: (id) =>
         set((s) => {
           const sessions = s.sessions.filter((x) => x.id !== id);
-          const currentSessionId =
-            s.currentSessionId === id ? null : s.currentSessionId;
+          const currentSessionId = s.currentSessionId === id ? null : s.currentSessionId;
           const messages = s.currentSessionId === id ? [] : s.messages;
           return { sessions, currentSessionId, messages };
         }),
@@ -101,10 +104,7 @@ export const useAppStore = create<AppState>()(
       setMessages: (messages) => set({ messages }),
       addMessage: (message) =>
         set((s) => ({
-          messages: [
-            ...s.messages,
-            { ...message, id: message.id || crypto.randomUUID() },
-          ],
+          messages: [...s.messages, { ...message, id: message.id || crypto.randomUUID() }],
         })),
       updateLastMessage: (delta) =>
         set((s) => {
@@ -136,6 +136,19 @@ export const useAppStore = create<AppState>()(
           messages: s.messages.slice(0, index),
           streamStatus: 'idle',
         })),
+
+      // Clarification（追问）
+      pendingClarification: null,
+      setPendingClarification: (question) => set({ pendingClarification: question }),
+      removeEmptyAssistantMessage: () =>
+        set((s) => {
+          const messages = [...s.messages];
+          const last = messages[messages.length - 1];
+          if (last && last.role === 'assistant' && last.content === '') {
+            messages.pop();
+          }
+          return { messages };
+        }),
 
       // Rollback / redo
       lastRollbackIndex: null,
@@ -178,12 +191,12 @@ export const useAppStore = create<AppState>()(
       setConfigured: (val) => set({ configured: val }),
     }),
 
-{
-  name: 'tianyan-ui-preferences',
-  partialize: (state) => ({
-    theme: state.theme,
-    fontSize: state.fontSize,
-  }),
-}
-)
+    {
+      name: 'tianyan-ui-preferences',
+      partialize: (state) => ({
+        theme: state.theme,
+        fontSize: state.fontSize,
+      }),
+    },
+  ),
 );
