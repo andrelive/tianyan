@@ -80,9 +80,19 @@ pub async fn chat_stream_handler(
     if let Err(e) = request.validate() {
         let tx_clone = tx.clone();
         tokio::spawn(async move {
-            let _ = tx_clone
-                .send(Ok(Event::default().data(format!("{{\"error\":\"{}\"}}", e))))
-                .await;
+            // 以标准 ChatStreamEvent 发送错误（chunk_type=error），
+            // 前端据此展示错误并清理占位消息。
+            let event = ChatStreamEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: String::new(),
+                delta: e,
+                finish_reason: None,
+                chunk_type: tianyan::agent::StreamChunkType::Error,
+                skill_calls: None,
+            };
+            if let Ok(json) = serde_json::to_string(&event) {
+                let _ = tx_clone.send(Ok(Event::default().data(json))).await;
+            }
         });
         return Sse::new(ReceiverStream::new(rx));
     }

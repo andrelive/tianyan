@@ -233,8 +233,9 @@ impl Agent {
         self.persist_user_message(&session_id, state, clarification_answers)
             .await;
 
-        // 审批降级链路：若存在待用户确认的审批操作，根据回答记录批准/拒绝
-        let approved = is_approval_confirmation(clarification_answers);
+        // 审批降级链路：若存在待用户确认的审批操作，根据回答记录批准/拒绝。
+        // 决策语义由审批模块（executor::approval::is_user_confirmation）解析。
+        let approved = crate::executor::approval::is_user_confirmation(clarification_answers);
         if self
             .agent_loop
             .tool_registry()
@@ -426,22 +427,6 @@ pub(crate) fn format_clarification_questions(questions: &[ClarificationQuestion]
     content
 }
 
-/// 判断用户对审批追问的回答是否为"允许执行"语义。
-///
-/// 启发式匹配：出现肯定词（允许/可以/同意/好/是/确认/继续/yes/ok）且
-/// 未出现否定词（不/别/拒绝/否/禁止/取消）时视为批准。
-fn is_approval_confirmation(answer: &str) -> bool {
-    let lower = answer.trim().to_lowercase();
-    let affirmatives = [
-        "允许", "可以", "同意", "好", "是", "确认", "继续", "执行", "yes", "ok", "y",
-    ];
-    let negatives = ["不", "别", "拒绝", "否", "禁止", "取消", "no", "n", "停止"];
-
-    let has_affirmative = affirmatives.iter().any(|w| lower.contains(w));
-    let has_negative = negatives.iter().any(|w| lower.contains(w));
-    has_affirmative && !has_negative
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,34 +435,18 @@ mod tests {
     use crate::context::assembler::ContextAssembler;
 
     #[test]
-    fn test_is_approval_confirmation() {
-        assert!(is_approval_confirmation("允许"));
-        assert!(is_approval_confirmation("可以，继续吧"));
-        assert!(is_approval_confirmation("好的，同意执行"));
-        assert!(is_approval_confirmation("yes, go ahead"));
-        assert!(!is_approval_confirmation("不允许"));
-        assert!(!is_approval_confirmation("拒绝执行"));
-        assert!(!is_approval_confirmation("不可以"));
-        assert!(!is_approval_confirmation("no"));
-        assert!(!is_approval_confirmation(""));
-        assert!(!is_approval_confirmation("请不要执行"));
-    }
-
-    #[test]
     fn test_clarification_answer_injected_once() {
         // 回归保护：handle_clarification_response 链路中，用户对追问的回答
         // 通过 prepare_context 仅注入内存状态一次；持久化（persist_user_message）
         // 走 VFS，与上下文组装是两条独立存储，组装结果不得出现重复回答。
         let mut state = SessionState::new("session-1");
         state.add_user_message("原始问题");
-        state.add_structured_message(
-            ContextAssembler::message_to_structured(
-                &Message::assistant("为了继续，需要确认：是否允许执行操作？"),
-                "session-1",
-                None,
-                None,
-            ),
-        );
+        state.add_structured_message(ContextAssembler::message_to_structured(
+            &Message::assistant("为了继续，需要确认：是否允许执行操作？"),
+            "session-1",
+            None,
+            None,
+        ));
         // prepare_context 对追问回答的注入（每次调用仅一次）
         state.add_user_message("允许");
 

@@ -32,25 +32,33 @@ tianyan/
 │   ├── Cargo.toml          # 库名: tianyan
 │   └── src/
 │       ├── lib.rs          # 核心模块导出
-│       ├── agent/          # Agent 协调器
-│       ├── config/         # 配置管理
-│       ├── context/        # 上下文管理
-│       ├── memory/         # 记忆系统
-│       ├── model/          # 模型路由
-│       ├── vfs/            # 虚拟文件系统
+│       ├── agent/          # Agent 协调器（AgentLoop + ToolRegistry）
+│       ├── config/         # 配置管理（含 MCP 服务器配置）
+│       ├── context/        # 上下文工程（检索 + 压缩 + 组装）
+│       ├── executor/       # 工具执行支撑（安全策略、审批、验证门控）
+│       ├── knowledge/      # 知识库导入管道
+│       ├── memory/         # 记忆提取
+│       ├── model/          # 模型服务容器（Chat/Embedding/Vision）
+│       ├── observability/  # 可观测性统计（SQLite）
+│       ├── scheduler/      # 定时任务调度
+│       ├── session/        # 会话管理（JSONL 持久化）
+│       ├── skills/         # 技能定义 + 执行 + GEPA 进化引擎
+│       ├── snapshot/       # 工作区快照（回退/重做）
+│       ├── vfs/            # 虚拟文件系统（L0/L1/L2 + LanceDB 向量）
 │       └── ...
 ├── server/                 # Axum HTTP 后端服务
 │   ├── Cargo.toml          # 库名: tianyan-server
 │   └── src/
-│       ├── lib.rs          # 暴露 start_server()
+│       ├── lib.rs          # 暴露 start_server() + bootstrap_app_vfs()
 │       ├── main.rs         # 独立运行入口
-│       └── api/            # HTTP API 路由
-│           ├── chat.rs     # 对话接口（含 SSE 流式）
-│           ├── sessions.rs # 会话管理
-│           ├── ingest.rs   # 知识导入
-│           ├── search.rs   # 知识搜索
-│           ├── skills.rs   # 技能管理
-│           └── config.rs   # 配置管理
+│       ├── state.rs        # 共享 AppState（热重载、组件装配）
+│       └── api/            # HTTP API（每个域 handler/routes/services/types 四件套）
+│           ├── chat/       # 对话接口（含 SSE 流式、追问澄清）
+│           ├── sessions/   # 会话管理（消息回退/重做、标题编辑）
+│           ├── knowledge/  # 知识导入、检索、条目浏览
+│           ├── skills/     # 技能列表与执行
+│           ├── config/     # 配置管理（含 soul/Ollama/MCP 子模块）
+│           └── shared/     # 通用错误类型与 DTO
 ├── gui-vite/                # React TypeScript 前端
 │   ├── package.json          # npm 依赖
 │   ├── vite.config.ts        # Vite 构建配置
@@ -61,7 +69,7 @@ tianyan/
 │       └── components/       # UI 组件
 │           ├── chat/         # 聊天面板（SSE 流式）
 │           ├── sidebar/      # 侧边栏 + 会话管理
-│           ├── settings/     # 设置面板（10 个 Tab）
+│           ├── settings/     # 设置面板（13 个 Tab）
 │           ├── knowledge/    # 知识管理
 │           ├── skills/       # 技能浏览 + 执行
 │           └── wizard/       # 初次配置向导
@@ -74,6 +82,12 @@ tianyan/
         ├── lib.rs          # Tauri 库入口
         ├── main.rs         # 桌面应用入口
         └── server.rs       # 内嵌服务器启动
+└── mcp/                   # MCP 协议客户端（stdio 传输）
+    ├── Cargo.toml         # 库名: tianyan-mcp
+    └── src/
+        ├── client.rs      # 单连接 MCP 客户端
+        ├── manager.rs     # 多连接管理器
+        └── types.rs       # 服务器配置（复用 core 类型）
 ```
 
 ### 技术栈
@@ -217,12 +231,22 @@ $env:OPENAI_API_KEY = 'your-api-key'
 编辑 `~/.config/tianyan/tianyan.toml`（首次启动后自动生成），填入你的 API 密钥：
 
 ```toml
-[[models.services]]
+[[models.providers]]
 name = "openai"
-type = "openai"
 endpoint = "https://api.openai.com/v1"
 api_key = "your-api-key"
-default_model = "gpt-4"
+
+[[models.providers.models]]
+name = "gpt-4"
+capabilities = ["chat"]
+
+[[models.providers.models]]
+name = "text-embedding-3-small"
+capabilities = ["text-embedding"]
+
+[models.preferences]
+chat = { provider = "openai", model = "gpt-4" }
+embedding = { provider = "openai", model = "text-embedding-3-small" }
 ```
 
 ## 基础用法
@@ -311,12 +335,14 @@ Tianyan 按以下顺序查找配置文件：
 
 ## 架构
 
-Tianyan 采用四层架构（Tauri → React/TypeScript 前端 → Axum Server → Core Library），核心设计基于 4 个架构决策：
+Tianyan 采用四层架构（Tauri → React/TypeScript 前端 → Axum Server → Core Library），核心设计基于 6 个架构决策：
 
 - **VFS 双层摘要索引**（L0/L1/L2 + RRF 融合检索）— 统一存储与检索基础
 - **StructuredMessage** — 贯穿持久化、会话组装、Token 统计的单一真相源
 - **组件工具化** — 14 个 OpenAI function calling 兼容工具
-- **前缀匹配缓存** — soul→rules→memories→history 固定顺序
+- **前缀匹配上下文组装** — soul→rules→memories→history 固定顺序
+- **SQLite 主存储后端** — 单文件、单连接，替代本地文件后端
+- **工作区快照独立存储** — 会话回退时恢复文件修改（VFS 例外）
 
 详见 [系统架构文档](./docs/system-architecture.md) 和 [架构决策记录](./docs/architecture/decisions/)。
 
@@ -347,8 +373,9 @@ Tianyan 正在积极开发中。详见 [系统架构文档](./docs/system-archit
 - VFS 双层摘要索引（L0/L1/L2 三层内容 + RRF 融合检索）
 - StructuredMessage 单一真相源（持久化 + 会话组装 + Token 统计）
 - 14 个内置工具（文件操作、代码搜索、知识导入、技能调用、子 Agent 委托）
-- 6 个内置技能 + GEPA 进化引擎自动学习
+- 6 个内置技能 + GEPA 进化引擎自动学习（学习回路：VFS 存储 → 启动时注册 → 可发现/执行指引）
 - 定时任务调度（记忆提取、规则提炼、摘要生成）
+- 审批降级链路（危险操作询问用户，类型化确认信号）
 
 ## 贡献
 

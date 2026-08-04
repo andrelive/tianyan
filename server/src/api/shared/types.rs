@@ -11,17 +11,9 @@ pub fn short_uuid() -> String {
 
 /// 聊天消息角色
 ///
-/// 表示对话中的消息发送者类型。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MessageRole {
-    /// 系统消息
-    System,
-    /// 用户消息
-    User,
-    /// 助手消息
-    Assistant,
-}
+/// 复用 core 的 [`tianyan::common::types::MessageRole`]（单一真相源），
+/// 避免 API 层重复定义导致变体漂移（core 含 Tool 变体）。
+pub use tianyan::common::types::MessageRole;
 
 /// 聊天消息
 ///

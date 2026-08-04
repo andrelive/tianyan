@@ -60,7 +60,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-            ApiError::Config(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            ApiError::Config(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             ApiError::Agent(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
@@ -169,5 +169,29 @@ mod tests {
             ApiError::Config(msg) => assert!(msg.contains("无效的配置")),
             _ => panic!("错误的错误类型"),
         }
+    }
+
+    /// 回归测试：HTTP 状态码映射 —— 配置校验错误必须是 400（客户端输入），
+    /// 而不是 500；NotFound 必须保持 404。
+    #[test]
+    fn test_http_status_mapping() {
+        use axum::http::StatusCode;
+
+        let config_err = ApiError::Config("无效配置".to_string());
+        let (status, _) = error_to_parts(config_err);
+        assert_eq!(status, StatusCode::BAD_REQUEST, "Config 错误应为 400");
+
+        let not_found = ApiError::NotFound("会话未找到".to_string());
+        let (status, _) = error_to_parts(not_found);
+        assert_eq!(status, StatusCode::NOT_FOUND, "NotFound 错误应为 404");
+
+        let internal = ApiError::Internal("内部错误".to_string());
+        let (status, _) = error_to_parts(internal);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    fn error_to_parts(err: ApiError) -> (StatusCode, String) {
+        let response = err.into_response();
+        (response.status(), String::new())
     }
 }

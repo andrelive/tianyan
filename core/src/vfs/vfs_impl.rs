@@ -42,14 +42,6 @@ impl VirtualFileSystemImpl {
         }
     }
 
-    /// 使用默认配置创建虚拟文件系统。
-    pub fn with_defaults(
-        storage: Arc<dyn StorageBackend>,
-        vector_storage: Arc<dyn VectorStorage>,
-    ) -> Self {
-        Self::new(storage, vector_storage, StorageConfig::default())
-    }
-
     /// 设置嵌入提供者。
     pub fn with_embedding_provider(
         mut self,
@@ -414,12 +406,13 @@ impl VfsSearch for VirtualFileSystemImpl {
         let query_vector = embedding.vector;
 
         let category_filter = namespace.map(|ns| ns.to_string());
+        // 内部请求 limit * 2 保证融合质量（每列独立搜索后融合），返回前截断到 limit。
         let results = self
             .vector_storage
             .search_abstract_and_overview(query_vector, limit * 2, category_filter.as_deref())
             .await?;
 
-        let results: Vec<SearchResult> = results
+        let mut results: Vec<SearchResult> = results
             .into_iter()
             .map(|vsr| SearchResult {
                 uri: vsr.payload.uri.clone(),
@@ -429,6 +422,7 @@ impl VfsSearch for VirtualFileSystemImpl {
             })
             .collect();
 
+        results.truncate(limit);
         Ok(results)
     }
 

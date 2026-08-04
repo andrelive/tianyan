@@ -20,6 +20,9 @@ test-results/
 .vscode/
 *.log
 
+# Temporary workspace (audit notes, scratch plans)
+.scratch/
+
 # OS
 .DS_Store
 Thumbs.db

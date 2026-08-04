@@ -68,6 +68,13 @@ export default function ChatPanel() {
       if (event.session_id) {
         useAppStore.getState().setCurrentSession(event.session_id);
       }
+      // Server-side error (validation / processing failure): surface to user
+      if (event.chunk_type === 'error') {
+        useAppStore.getState().removeEmptyAssistantMessage();
+        useAppStore.getState().setStreamStatus('idle');
+        useAppStore.getState().showToast(event.delta || '对话处理失败', 'error');
+        return;
+      }
       // Clarification: 不追加 delta，改为展示追问气泡等待用户回答
       if (event.chunk_type === 'clarification') {
         useAppStore.getState().removeEmptyAssistantMessage();

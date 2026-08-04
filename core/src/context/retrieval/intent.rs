@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::common::error::Result;
 use crate::common::types::{ContextNamespace, TianyanUri};
 use crate::context::compression::estimate_tokens;
-use crate::model::EmbeddingService;
 
 /// 查询类型分类。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,14 +79,10 @@ impl std::fmt::Display for QueryType {
 pub struct Intent {
     /// 原始查询文本。
     pub original_query: String,
-    /// 查询向量（嵌入）。
-    pub query_vector: Option<Vec<f32>>,
     /// 目标范围（类别过滤）。
     pub(crate) target_scope: Option<TargetScope>,
     /// 查询类型分类。
     pub(crate) query_type: QueryType,
-    /// 意图分析的置信度分数。
-    pub confidence: f32,
     /// 分析时间戳。
     pub timestamp: DateTime<Utc>,
     /// 查询 Token 数量。
@@ -101,19 +96,11 @@ impl Intent {
         let token_count = estimate_tokens(&query);
         Self {
             original_query: query.clone(),
-            query_vector: None,
             target_scope: None,
             query_type: QueryType::Search(query),
-            confidence: 0.0,
             timestamp: Utc::now(),
             token_count,
         }
-    }
-
-    /// 设置查询向量。
-    pub fn with_vector(mut self, vector: Vec<f32>) -> Self {
-        self.query_vector = Some(vector);
-        self
     }
 
     /// 设置目标范围（测试路径使用）。
@@ -121,22 +108,6 @@ impl Intent {
     pub(crate) fn with_scope(mut self, scope: TargetScope) -> Self {
         self.target_scope = Some(scope);
         self
-    }
-
-    /// 设置置信度分数。
-    pub fn with_confidence(mut self, confidence: f32) -> Self {
-        self.confidence = confidence.clamp(0.0, 1.0);
-        self
-    }
-
-    /// 检查是否有查询向量。
-    pub fn has_vector(&self) -> bool {
-        self.query_vector.is_some()
-    }
-
-    /// 获取查询向量。
-    pub fn get_vector(&self) -> Option<&[f32]> {
-        self.query_vector.as_deref()
     }
 
     /// 获取类别过滤器（如果可用）。
@@ -214,10 +185,6 @@ impl TargetScope {
 
 /// 查询理解的意图分析器。
 pub struct IntentAnalyzer {
-    /// 用于向量生成的嵌入服务。
-    embedding_service: Option<std::sync::Arc<dyn EmbeddingService>>,
-    /// 默认嵌入模型。
-    embedding_model: String,
     /// 用于范围推断的类别关键词。
     category_keywords: std::collections::HashMap<ContextNamespace, Vec<String>>,
 }
@@ -226,21 +193,8 @@ impl IntentAnalyzer {
     /// 创建新的意图分析器。
     pub fn new() -> Self {
         Self {
-            embedding_service: None,
-            embedding_model: "text-embedding-3-small".to_string(),
             category_keywords: Self::build_category_keywords(),
         }
-    }
-
-    /// 创建带有嵌入服务的意图分析器。
-    pub fn with_embedding_service(
-        mut self,
-        service: std::sync::Arc<dyn EmbeddingService>,
-        model: impl Into<String>,
-    ) -> Self {
-        self.embedding_service = Some(service);
-        self.embedding_model = model.into();
-        self
     }
 
     /// 构建默认类别关键词。
@@ -338,6 +292,10 @@ impl IntentAnalyzer {
     }
 
     /// 分析查询并创建意图。
+    ///
+    /// 注意：不做查询嵌入 —— 向量检索路径由 VFS 内部统一嵌入
+    /// （`VirtualFileSystem::search`），此处若再嵌入一次会产生
+    /// 一次被丢弃的模型调用（双 embedding）。
     pub(crate) async fn analyze(&self, query: impl Into<String>) -> Result<Intent> {
         let query = query.into();
         let mut intent = Intent::new(&query);
@@ -347,15 +305,6 @@ impl IntentAnalyzer {
 
         // 确定目标范围
         intent.target_scope = self.infer_target_scope(&query);
-
-        // 如果嵌入服务可用，生成查询向。
-        if let Some(ref service) = self.embedding_service {
-            let vector = service.embed_single(&self.embedding_model, &query).await?;
-            intent.query_vector = Some(vector.vector);
-            intent.confidence = 0.8; // 有嵌入时置信度高
-        } else {
-            intent.confidence = 0.5; // 无嵌入时置信度较。
-        }
 
         Ok(intent)
     }
@@ -438,12 +387,6 @@ impl IntentAnalyzer {
 
         None
     }
-
-    /// 设置嵌入模型。
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.embedding_model = model.into();
-        self
-    }
 }
 
 impl Default for IntentAnalyzer {
@@ -473,17 +416,7 @@ mod tests {
     fn test_intent_creation() {
         let intent = Intent::new("test query");
         assert_eq!(intent.original_query, "test query");
-        assert!(intent.query_vector.is_none());
         assert!(intent.target_scope.is_none());
-        assert!(intent.confidence == 0.0);
-    }
-
-    #[test]
-    fn test_intent_with_vector() {
-        let vector = vec![0.1, 0.2, 0.3];
-        let intent = Intent::new("test").with_vector(vector.clone());
-        assert!(intent.has_vector());
-        assert_eq!(intent.get_vector(), Some(vector.as_slice()));
     }
 
     #[test]
@@ -550,9 +483,8 @@ mod tests {
         let intent = analyzer.analyze("find my user profile").await.unwrap();
 
         assert_eq!(intent.original_query, "find my user profile");
-        assert!(intent.query_vector.is_none()); // No embedding service
+        // 意图分析不做查询嵌入（VFS 检索路径统一嵌入），无向量字段
         assert!(intent.target_scope.is_some());
-        assert!(intent.confidence > 0.0);
     }
 
     #[test]

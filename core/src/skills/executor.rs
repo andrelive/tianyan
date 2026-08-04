@@ -208,14 +208,32 @@ impl SkillExecutor {
         self.security_check(&skill, &request.parameters, &request.context)?;
 
         // 获取处理程序
+        // 已学习技能（GEPA 产物）无内置 handler：返回说明指引，
+        // 由 LLM 参考技能描述后使用基础工具执行，而不是报硬错误。
         let handler = {
             let registry = self.registry.read().await;
-            registry.get_handler(&request.skill_id).ok_or_else(|| {
-                TianyanError::Custom(format!(
-                    "技能执行错误：技能 '{}' 没有注册处理程序",
-                    request.skill_id
-                ))
-            })?
+            match registry.get_handler(&request.skill_id) {
+                Some(h) => h,
+                None => {
+                    if skill.tags.iter().any(|t| t == "learned") {
+                        return Ok(SkillExecutionResult {
+                            success: true,
+                            output: Some(format!(
+                                "技能 '{}' 为学习型技能（无内置处理器）。\n\n{}",
+                                skill.id, skill.description
+                            )),
+                            error: None,
+                            exit_code: None,
+                            execution_time_ms: 0,
+                            data: HashMap::new(),
+                        });
+                    }
+                    return Err(TianyanError::Custom(format!(
+                        "技能执行错误：技能 '{}' 没有注册处理程序",
+                        request.skill_id
+                    )));
+                }
+            }
         };
 
         // 带超时执行
@@ -403,6 +421,47 @@ mod tests {
         assert_eq!(file_read.unwrap().category, SkillCategory::FileOperations);
     }
 
+    /// 回归测试：内置技能注册后必须保留参数 schema 与安全级别。
+    ///
+    /// 曾因先注册带元数据的技能、再用裸 `Skill::new` 覆盖注册，
+    /// 导致所有内置技能的参数定义与安全级别静默丢失。
+    #[test]
+    fn test_builtin_skills_keep_metadata_after_registration() {
+        let mut registry = SkillRegistry::new();
+        let config = ExecutorConfig::new();
+        register_builtin_skills(&mut registry, &config);
+
+        assert_eq!(registry.count(), 6);
+
+        let file_write = registry.get("file_write").unwrap();
+        assert_eq!(file_write.category, SkillCategory::FileOperations);
+        assert_eq!(file_write.security_level, SecurityLevel::Moderate);
+        let params = file_write.parameters.as_ref().unwrap();
+        assert!(
+            params.required.contains(&"path".to_string()),
+            "path 应为必填参数"
+        );
+        assert!(
+            params.required.contains(&"content".to_string()),
+            "content 应为必填参数"
+        );
+        assert!(
+            params.properties.contains_key("content"),
+            "content 参数定义应保留"
+        );
+
+        let system_command = registry.get("system_command").unwrap();
+        assert_eq!(
+            system_command.security_level,
+            SecurityLevel::Dangerous,
+            "system_command 安全级别应保留"
+        );
+
+        // 处理器必须与元数据技能绑定
+        assert!(registry.get_handler("file_write").is_some());
+        assert!(registry.get_handler("http_request").is_some());
+    }
+
     #[tokio::test]
     async fn test_skill_executor() {
         let mut registry = SkillRegistry::new();
@@ -426,6 +485,52 @@ mod tests {
 
         let result = executor.execute(request).await;
         assert!(result.is_ok());
+    }
+
+    /// 回归测试：GEPA 学习技能（无 handler，带 learned 标签）执行时
+    /// 返回说明指引而非硬错误 —— 闭合学习回路。
+    #[tokio::test]
+    async fn test_learned_skill_execution_returns_guidance() {
+        use crate::skills::types::SkillCategory;
+
+        let mut registry = SkillRegistry::new();
+        registry.register(
+            Skill::new("learned_x", "Learned X", "基于成功执行生成的流程说明")
+                .with_category(SkillCategory::Custom)
+                .with_tag("learned"),
+        );
+
+        let registry = Arc::new(RwLock::new(registry));
+        let executor = SkillExecutor::new(registry.clone(), ExecutorConfig::new());
+
+        let result = executor
+            .execute(SkillExecutionRequest::new("learned_x", HashMap::new()))
+            .await
+            .unwrap();
+
+        assert!(result.success, "学习技能执行应返回成功（说明指引）");
+        let output = result.output.unwrap_or_default();
+        assert!(
+            output.contains("学习型技能"),
+            "输出应包含学习型技能指引: {output}"
+        );
+        assert!(output.contains("learned_x"));
+    }
+
+    /// 回归测试：无 handler 且非学习技能仍应报错（防止误放行普通技能）。
+    #[tokio::test]
+    async fn test_unhandled_non_learned_skill_still_errors() {
+        let mut registry = SkillRegistry::new();
+        registry.register(Skill::new("orphan", "Orphan", "无处理器技能"));
+
+        let registry = Arc::new(RwLock::new(registry));
+        let executor = SkillExecutor::new(registry.clone(), ExecutorConfig::new());
+
+        let err = executor
+            .execute(SkillExecutionRequest::new("orphan", HashMap::new()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("没有注册处理程序"));
     }
 
     #[test]

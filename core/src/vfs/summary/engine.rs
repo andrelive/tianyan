@@ -40,24 +40,20 @@ impl SummaryLevel {
 /// 用于生成分层摘要的摘要引擎。
 pub struct SummaryEngine {
     model_service: Arc<dyn ChatService>,
-    embedding_service: Arc<dyn EmbeddingService>,
     model_name: String,
-    embedding_model_name: String,
 }
 
 impl SummaryEngine {
     /// 创建新的摘要引擎。
     pub fn new(
         model_service: Arc<dyn ChatService>,
-        embedding_service: Arc<dyn EmbeddingService>,
+        _embedding_service: Arc<dyn EmbeddingService>,
         model_name: impl Into<String>,
-        embedding_model_name: impl Into<String>,
+        _embedding_model_name: impl Into<String>,
     ) -> Self {
         Self {
             model_service,
-            embedding_service,
             model_name: model_name.into(),
-            embedding_model_name: embedding_model_name.into(),
         }
     }
 
@@ -126,26 +122,6 @@ impl SummaryEngine {
         let abstract_content = self.generate_abstract(content).await?;
         let overview_content = self.generate_overview(content).await?;
         Ok((abstract_content, overview_content))
-    }
-
-    /// 为文本生成嵌入向量。
-    pub async fn generate_embedding(&self, text: &str) -> Result<Vec<f32>> {
-        let embedding = self
-            .embedding_service
-            .embed_single(&self.embedding_model_name, text)
-            .await?;
-        Ok(embedding.vector)
-    }
-
-    /// 为摘要和概览生成嵌入向量。
-    pub async fn generate_embeddings(
-        &self,
-        abstract_content: &str,
-        overview_content: &str,
-    ) -> Result<(Vec<f32>, Vec<f32>)> {
-        let abstract_embedding = self.generate_embedding(abstract_content).await?;
-        let overview_embedding = self.generate_embedding(overview_content).await?;
-        Ok((abstract_embedding, overview_embedding))
     }
 
     /// 为图片描述生成摘要。
@@ -231,7 +207,7 @@ mod tests {
     use super::*;
     use crate::common::types::TokenUsage;
     use crate::model::types::{
-        ChatChoice, ChatCompletionResponse, EmbeddingData, EmbeddingRequest, EmbeddingResponse,
+        ChatChoice, ChatCompletionResponse, EmbeddingRequest, EmbeddingResponse,
     };
     use crate::model::{EmbeddingService, MockChatService};
     use async_trait::async_trait;
@@ -248,20 +224,6 @@ mod tests {
                 message: crate::common::types::Message::assistant(content),
                 finish_reason: Some("stop".to_string()),
             }],
-            usage: TokenUsage::default(),
-        }
-    }
-
-    /// Helper to build an EmbeddingResponse with a given vector.
-    fn mock_embedding_response(vector: Vec<f32>) -> EmbeddingResponse {
-        EmbeddingResponse {
-            object: "list".to_string(),
-            data: vec![EmbeddingData {
-                object: "embedding".to_string(),
-                embedding: vector,
-                index: 0,
-            }],
-            model: "test-embed".to_string(),
             usage: TokenUsage::default(),
         }
     }
@@ -330,7 +292,6 @@ mod tests {
             "test-embed-model",
         );
         assert_eq!(engine.model_name, "test-model");
-        assert_eq!(engine.embedding_model_name, "test-embed-model");
     }
 
     #[tokio::test]
@@ -389,52 +350,6 @@ mod tests {
             engine.generate_summaries("Some content").await.unwrap();
         assert_eq!(abstract_result, "Test abstract summary");
         assert_eq!(overview_result, "Test overview content");
-    }
-
-    #[tokio::test]
-    async fn test_generate_embedding_with_mock() {
-        let chat = MockChatService::new();
-        let mut emb = MockTestEmbeddingService::new();
-        emb.expect_embed()
-            .returning(|_| Ok(mock_embedding_response(vec![1.0, 2.0, 3.0])));
-        emb.expect_embedding_dimension().returning(|_| 3);
-        let engine = SummaryEngine::new(
-            Arc::new(chat),
-            Arc::new(emb),
-            "test-model",
-            "test-embed-model",
-        );
-        let vector = engine.generate_embedding("test text").await.unwrap();
-        assert_eq!(vector, vec![1.0, 2.0, 3.0]);
-    }
-
-    #[tokio::test]
-    async fn test_generate_embeddings_with_mock() {
-        let chat = MockChatService::new();
-        let mut emb = MockTestEmbeddingService::new();
-        let call_count = std::sync::Mutex::new(0usize);
-        emb.expect_embed().returning(move |_| {
-            let mut count = call_count.lock().unwrap();
-            *count += 1;
-            if *count == 1 {
-                Ok(mock_embedding_response(vec![1.0, 0.0, 0.0]))
-            } else {
-                Ok(mock_embedding_response(vec![0.0, 1.0, 0.0]))
-            }
-        });
-        emb.expect_embedding_dimension().returning(|_| 3);
-        let engine = SummaryEngine::new(
-            Arc::new(chat),
-            Arc::new(emb),
-            "test-model",
-            "test-embed-model",
-        );
-        let (abstract_emb, overview_emb) = engine
-            .generate_embeddings("abstract", "overview")
-            .await
-            .unwrap();
-        assert_eq!(abstract_emb, vec![1.0, 0.0, 0.0]);
-        assert_eq!(overview_emb, vec![0.0, 1.0, 0.0]);
     }
 
     #[tokio::test]

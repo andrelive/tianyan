@@ -52,17 +52,12 @@ pub use traits::{
     ContentMetadata, ContentStore, EmbeddingProvider, VfsCore, VfsSearch, VirtualFileSystem,
 };
 pub use types::{
-    CategoryStats, ContextEntry, DirectoryIndex, DirectoryStats, IndexEntry, StorageStats,
-    VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType, CURRENT_SCHEMA_VERSION,
+    ContextEntry, VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType,
+    CURRENT_SCHEMA_VERSION,
 };
 pub use uri_mapper::UriMapper;
 pub use vector::{LanceDbVectorStore, VectorStorage};
 pub use vfs_impl::{VirtualFileSystemBuilder, VirtualFileSystemImpl};
-
-/// 虚拟文件系统的共享引用类型别名。
-///
-/// 出现 ≥2 次，按项目规范提取。
-pub type SharedVfs = std::sync::Arc<dyn VirtualFileSystem>;
 
 #[cfg(test)]
 pub use test_utils::MockVectorStorage;

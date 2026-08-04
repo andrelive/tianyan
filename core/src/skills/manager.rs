@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use crate::common::error::Result;
 use crate::common::types::{ContextNamespace, TianyanUri};
+use crate::skills::definition::Skill;
+use crate::skills::types::{SecurityLevel, SkillCategory};
 use crate::vfs::VirtualFileSystem;
 
 /// 技能摘要信息。
@@ -100,12 +102,59 @@ impl SkillManager {
         let uri = TianyanUri::new(ContextNamespace::Skill, vec![skill_id.to_string()]);
         self.vfs.exists(&uri).await
     }
+
+    /// 从 VFS 加载所有已学习技能（GEPA 引擎产物），构造可注册的 [`Skill`] 元数据。
+    ///
+    /// 已学习技能没有内置 handler（本质是操作流程说明），注册后可供发现、
+    /// 列出与语义检索；`call_skill` 执行时由 [`SkillExecutor`] 返回说明指引。
+    ///
+    /// 返回的技能使用 `Custom` 分类与 `Moderate` 安全级别（保守默认）。
+    pub async fn load_learned_skills(&self) -> Result<Vec<Skill>> {
+        let summaries = self.list_available_skills().await?;
+        let mut skills = Vec::new();
+        for summary in summaries {
+            skills.push(
+                Skill::new(&summary.id, &summary.id, &summary.description)
+                    .with_category(SkillCategory::Custom)
+                    .with_security_level(SecurityLevel::Moderate)
+                    .with_tag("learned"),
+            );
+        }
+        Ok(skills)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::common::types::ContentLevel;
+    use crate::test_utils::MockVfs;
+
     #[test]
     fn test_skill_manager_new() {
         // 仅验证类型可构造
+    }
+
+    /// 回归测试：GEPA 学习技能写入 VFS 后可通过 load_learned_skills 加载
+    /// 为 Skill 元数据（学习回路闭环的加载端）。
+    #[tokio::test]
+    async fn test_load_learned_skills_roundtrip() {
+        let skill_root = TianyanUri::new(ContextNamespace::Skill, vec![]);
+        let learned_uri = TianyanUri::new(ContextNamespace::Skill, vec!["learned_a".to_string()]);
+        let mock = MockVfs::new();
+        mock.add_directory(&skill_root, &learned_uri);
+        mock.set_content(&learned_uri, ContentLevel::Abstract, "自动化的文档处理流程");
+        let vfs: Arc<dyn VirtualFileSystem> = Arc::new(mock);
+
+        let manager = SkillManager::new(vfs.clone());
+        let skills = manager.load_learned_skills().await.unwrap();
+        let learned = skills.iter().find(|s| s.id == "learned_a");
+        assert!(learned.is_some(), "应加载到已学习技能");
+        let skill = learned.unwrap();
+        assert_eq!(skill.name, "learned_a");
+        assert_eq!(skill.category, SkillCategory::Custom);
+        assert_eq!(skill.security_level, SecurityLevel::Moderate);
+        assert!(skill.tags.contains(&"learned".to_string()));
+        assert!(skill.description.contains("文档处理"));
     }
 }

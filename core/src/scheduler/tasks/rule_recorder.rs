@@ -317,9 +317,7 @@ mod tests {
                 .unwrap()
                 .get(&(uri.to_string(), level))
                 .cloned()
-                .ok_or_else(|| {
-                    crate::common::error::TianyanError::not_found(uri)
-                })
+                .ok_or_else(|| crate::common::error::TianyanError::not_found(uri))
         }
         async fn append(&self, _uri: &TianyanUri, _content: &str) -> Result<()> {
             Ok(())

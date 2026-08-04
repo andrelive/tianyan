@@ -294,15 +294,24 @@ export const handlers = [
   }),
 
   // Chat stream (SSE)
-  http.post(`${API_BASE}/chat/stream`, () => {
+  http.post(`${API_BASE}/chat/stream`, async ({ request }) => {
     const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      start(controller) {
-        const chunks = [
+    const body = (await request.json()) as { messages?: { content?: string }[] };
+    const msgs = body.messages ?? [];
+    const lastContent = msgs.length > 0 ? msgs[msgs.length - 1].content ?? '' : '';
+
+    const chunks = lastContent.includes('[error-test]')
+      ? [
+          'data: {"id":"msg-err","session_id":"session-1","delta":"请求校验失败: [error-test] 是非法输入","finish_reason":null,"chunk_type":"error","skill_calls":null}\n\n',
+        ]
+      : [
           'data: {"id":"msg-1","session_id":"session-1","delta":"你好","chunk_type":"answer"}\n\n',
           'data: {"id":"msg-1","session_id":"session-1","delta":"！","chunk_type":"answer"}\n\n',
           'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',
         ];
+
+    const stream = new ReadableStream({
+      start(controller) {
         for (const chunk of chunks) {
           controller.enqueue(encoder.encode(chunk));
         }
@@ -337,9 +346,9 @@ export const handlers = [
   http.post(`${API_BASE}/knowledge/ingest`, () => {
     return HttpResponse.json({
       success: true,
+      job_id: 'mock-ingest-job',
       message: '导入完成',
-      imported: 1,
-      total_files: 1,
+      files: [{ filename: 'mock-doc.md', status: 'success' }],
     });
   }),
 

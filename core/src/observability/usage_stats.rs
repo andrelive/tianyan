@@ -210,6 +210,17 @@ impl UsageStats {
 
     // ── 查询 API ─────────────────────────────────────────────────
 
+    /// 记录 SQL 查询错误（统计查询失败时降级返回空数据，但错误必须可见）。
+    fn log_query_err<T>(result: Result<T, rusqlite::Error>, query: &str) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(e) => {
+                tracing::warn!(error = %e, query, "统计查询失败，返回空数据");
+                None
+            }
+        }
+    }
+
     /// 查询调用次数最多的技能列表。
     pub async fn query_top_skills(&self, limit: usize) -> Vec<SkillStats> {
         let conn = self.db.lock().await;
@@ -220,19 +231,25 @@ impl UsageStats {
          FROM skill_calls GROUP BY skill_id ORDER BY 2 DESC LIMIT ?1",
         ) {
             Ok(s) => s,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, "统计查询 prepare 失败");
+                return Vec::new();
+            }
         };
-        stmt.query_map(rusqlite::params![limit as i64], |row| {
-            Ok(SkillStats {
-                skill_id: row.get(0)?,
-                total_calls: row.get::<_, i64>(1)? as u64,
-                success_calls: row.get::<_, i64>(2)? as u64,
-                success_rate: row.get(3)?,
-                avg_time_ms: row.get(4)?,
-                last_called_at: row.get(5)?,
+        Self::log_query_err(
+            stmt.query_map(rusqlite::params![limit as i64], |row| {
+                Ok(SkillStats {
+                    skill_id: row.get(0)?,
+                    total_calls: row.get::<_, i64>(1)? as u64,
+                    success_calls: row.get::<_, i64>(2)? as u64,
+                    success_rate: row.get(3)?,
+                    avg_time_ms: row.get(4)?,
+                    last_called_at: row.get(5)?,
+                })
             })
-        })
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .map(|rows| rows.filter_map(|r| r.ok()).collect()),
+            "query_top_skills",
+        )
         .unwrap_or_default()
     }
 
@@ -246,18 +263,24 @@ impl UsageStats {
          FROM doc_access GROUP BY uri ORDER BY 2 ASC LIMIT ?1",
         ) {
             Ok(s) => s,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, "统计查询 prepare 失败");
+                return Vec::new();
+            }
         };
-        stmt.query_map(rusqlite::params![limit as i64], |row| {
-            Ok(DocStats {
-                uri: row.get(0)?,
-                search_hits: row.get::<_, i64>(1)? as u64,
-                detail_loads: row.get::<_, i64>(2)? as u64,
-                avg_score: row.get(3)?,
-                last_hit_at: row.get(4)?,
+        Self::log_query_err(
+            stmt.query_map(rusqlite::params![limit as i64], |row| {
+                Ok(DocStats {
+                    uri: row.get(0)?,
+                    search_hits: row.get::<_, i64>(1)? as u64,
+                    detail_loads: row.get::<_, i64>(2)? as u64,
+                    avg_score: row.get(3)?,
+                    last_hit_at: row.get(4)?,
+                })
             })
-        })
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .map(|rows| rows.filter_map(|r| r.ok()).collect()),
+            "query_cold_documents",
+        )
         .unwrap_or_default()
     }
 
@@ -270,40 +293,53 @@ impl UsageStats {
          GROUP BY 1 ORDER BY 2 DESC",
         ) {
             Ok(s) => s,
-            Err(_) => return serde_json::json!({"period":"7d","namespaces":[]}),
+            Err(e) => {
+                tracing::warn!(error = %e, "统计查询 prepare 失败");
+                return serde_json::json!({"period":"7d","namespaces":[]});
+            }
         };
-        let rows: Vec<_> = stmt
-            .query_map([], |row| {
+        let rows: Vec<_> = Self::log_query_err(
+            stmt.query_map([], |row| {
                 Ok(serde_json::json!({"namespace": row.get::<_, String>(0)?, "count": row.get::<_, i64>(1)?}))
             })
-            .map(|r| r.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default();
+            .map(|r| r.filter_map(|r| r.ok()).collect()),
+            "query_search_heatmap",
+        )
+        .unwrap_or_default();
         serde_json::json!({"period":"7d","namespaces":rows})
     }
 
     /// 查询全局统计概览（技能数、调用数、文档数、搜索数）。
     pub async fn query_summary(&self) -> serde_json::Value {
         let conn = self.db.lock().await;
-        let skills: i64 = conn
-            .query_row(
+        let skills: i64 = Self::log_query_err(
+            conn.query_row(
                 "SELECT COUNT(DISTINCT skill_id) FROM skill_calls",
                 [],
                 |r| r.get(0),
-            )
-            .unwrap_or(0);
-        let calls: i64 = conn
-            .query_row("SELECT COUNT(*) FROM skill_calls", [], |r| r.get(0))
-            .unwrap_or(0);
-        let docs: i64 = conn
-            .query_row("SELECT COUNT(DISTINCT uri) FROM doc_access", [], |r| {
+            ),
+            "query_summary.skills",
+        )
+        .unwrap_or(0);
+        let calls: i64 = Self::log_query_err(
+            conn.query_row("SELECT COUNT(*) FROM skill_calls", [], |r| r.get(0)),
+            "query_summary.calls",
+        )
+        .unwrap_or(0);
+        let docs: i64 = Self::log_query_err(
+            conn.query_row("SELECT COUNT(DISTINCT uri) FROM doc_access", [], |r| {
                 r.get(0)
-            })
-            .unwrap_or(0);
-        let searches: i64 = conn
-            .query_row("SELECT COUNT(*) FROM daily_search_queries", [], |r| {
+            }),
+            "query_summary.docs",
+        )
+        .unwrap_or(0);
+        let searches: i64 = Self::log_query_err(
+            conn.query_row("SELECT COUNT(*) FROM daily_search_queries", [], |r| {
                 r.get(0)
-            })
-            .unwrap_or(0);
+            }),
+            "query_summary.searches",
+        )
+        .unwrap_or(0);
         serde_json::json!({"total_skills_tracked":skills,"total_skill_calls":calls,"total_docs_tracked":docs,"total_searches":searches})
     }
 }

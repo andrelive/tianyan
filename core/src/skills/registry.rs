@@ -133,62 +133,58 @@ pub fn create_builtin_skills() -> Vec<Skill> {
 }
 
 /// 注册内置技能到注册表。
+///
+/// 单次遍历完成注册：每个技能携带完整元数据（参数 schema、分类、安全级别）
+/// 与对应处理器一起注册，避免先注册元数据、再用裸 `Skill::new` 覆盖
+/// 导致参数 schema 丢失的问题。
 pub fn register_builtin_skills(registry: &mut SkillRegistry, config: &ExecutorConfig) {
-    for skill in create_builtin_skills() {
-        registry.register(skill);
-    }
-
-    registry.register_with_handler(
-        Skill::new("file_read", "Read File", "Read the contents of a file"),
-        Arc::new(
-            FileReadHandler::new(config.allowed_paths.clone())
-                .with_max_size(config.skill_file_read_max_size)
-                .with_timeout(config.skill_file_read_timeout_secs),
+    let handlers: Vec<(&str, Arc<dyn super::definition::SkillHandler>)> = vec![
+        (
+            "file_read",
+            Arc::new(
+                FileReadHandler::new(config.allowed_paths.clone())
+                    .with_max_size(config.skill_file_read_max_size)
+                    .with_timeout(config.skill_file_read_timeout_secs),
+            ),
         ),
-    );
-
-    registry.register_with_handler(
-        Skill::new("file_write", "Write File", "Write content to a file"),
-        Arc::new(
-            FileWriteHandler::new(config.allowed_paths.clone())
-                .with_max_size(config.skill_file_write_max_size)
-                .with_timeout(config.skill_file_write_timeout_secs),
+        (
+            "file_write",
+            Arc::new(
+                FileWriteHandler::new(config.allowed_paths.clone())
+                    .with_max_size(config.skill_file_write_max_size)
+                    .with_timeout(config.skill_file_write_timeout_secs),
+            ),
         ),
-    );
-
-    registry.register_with_handler(
-        Skill::new("file_delete", "Delete File", "Delete a file or directory"),
-        Arc::new(FileDeleteHandler::new(config.allowed_paths.clone())),
-    );
-
-    registry.register_with_handler(
-        Skill::new(
+        (
+            "file_delete",
+            Arc::new(FileDeleteHandler::new(config.allowed_paths.clone())),
+        ),
+        (
             "file_list",
-            "List Directory",
-            "List contents of a directory",
+            Arc::new(
+                FileListHandler::new(config.allowed_paths.clone())
+                    .with_max_entries(config.skill_file_list_max_entries),
+            ),
         ),
-        Arc::new(
-            FileListHandler::new(config.allowed_paths.clone())
-                .with_max_entries(config.skill_file_list_max_entries),
-        ),
-    );
-
-    registry.register_with_handler(
-        Skill::new(
+        (
             "system_command",
-            "Execute Command",
-            "Execute a system shell command",
+            Arc::new(
+                SystemCommandHandler::new(config.blocked_commands.clone())
+                    .with_timeout(config.skill_command_timeout_secs),
+            ),
         ),
-        Arc::new(
-            SystemCommandHandler::new(config.blocked_commands.clone())
-                .with_timeout(config.skill_command_timeout_secs),
+        (
+            "http_request",
+            Arc::new(HttpRequestHandler::with_timeout(
+                config.skill_http_timeout_secs,
+            )),
         ),
-    );
+    ];
 
-    registry.register_with_handler(
-        Skill::new("http_request", "HTTP Request", "Make an HTTP request"),
-        Arc::new(HttpRequestHandler::with_timeout(
-            config.skill_http_timeout_secs,
-        )),
-    );
+    for skill in create_builtin_skills() {
+        match handlers.iter().find(|(id, _)| *id == skill.id) {
+            Some((_, handler)) => registry.register_with_handler(skill, handler.clone()),
+            None => registry.register(skill),
+        }
+    }
 }

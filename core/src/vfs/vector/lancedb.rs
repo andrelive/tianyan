@@ -415,9 +415,12 @@ impl VectorStorage for LanceDbVectorStore {
             return Ok(vec![]);
         }
 
-        // 对每个向量列独立搜索，收集带排名的结果
-        // point_id → (fused_rrf_score, best_result)
-        let mut merged: HashMap<String, (f32, VectorSearchResult)> = HashMap::new();
+        // 对每个向量列独立搜索，收集带排名的结果。
+        // point_id → (fused_rrf_score, best_similarity, best_result)
+        // RRF 分数（1/(rank+k)）仅用于跨列排序；暴露给调用方的 score 取各列中
+        // 最高的相似度（1.0 - distance，与单列 search() 同尺度），
+        // 供 ContentLoadStrategy 的绝对阈值（0.6/0.85）使用。
+        let mut merged: HashMap<String, (f32, f32, VectorSearchResult)> = HashMap::new();
 
         for &vec_name in vector_names {
             let column = Self::vector_column_name(match vec_name {
@@ -461,26 +464,27 @@ impl VectorStorage for LanceDbVectorStore {
 
                     merged
                         .entry(point_id)
-                        .and_modify(|(score, _)| *score += rrf)
-                        .or_insert_with(|| (rrf, res));
+                        .and_modify(|(rrf_acc, best_sim, _)| {
+                            *rrf_acc += rrf;
+                            *best_sim = best_sim.max(res.score);
+                        })
+                        .or_insert_with(|| (rrf, res.score, res));
                 }
             }
         }
 
-        // 收集并排序融合结果
-        let mut fused: Vec<VectorSearchResult> = merged
+        // 按 RRF 融合分数排序（排序依据），暴露的 score 为最高相似度（加载深度依据）。
+        let mut fused: Vec<(f32, VectorSearchResult)> = merged
             .into_values()
-            .map(|(score, mut res)| {
-                res.score = score;
-                res
+            .map(|(rrf_score, best_sim, mut res)| {
+                res.score = best_sim;
+                (rrf_score, res)
             })
             .collect();
 
-        fused.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        fused.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut fused: Vec<VectorSearchResult> = fused.into_iter().map(|(_, res)| res).collect();
 
         if let Some(cat) = category_filter {
             fused.retain(|res| res.payload.uri.namespace().to_string() == cat);
@@ -781,8 +785,14 @@ mod tests {
             .await
             .unwrap();
 
-        // RRF 融合分数基于排名倒数，不使用绝对阈值
+        // RRF 融合仅决定排序；score 保持相似度尺度（1.0 - distance），
+        // 与单列 search() 一致，供 ContentLoadStrategy 绝对阈值使用。
         assert!(!results.is_empty());
         assert_eq!(results[0].id, p1.uri().to_point_id());
+        assert!(
+            results[0].score > 0.5,
+            "融合搜索分数应为相似度尺度（≈1.0），实际: {}",
+            results[0].score
+        );
     }
 }

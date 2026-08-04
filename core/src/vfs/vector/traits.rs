@@ -17,24 +17,8 @@ pub trait VectorStorage: Send + Sync {
     /// 插入或更新向量点。
     async fn upsert_point(&self, point: &VectorPoint) -> Result<()>;
 
-    /// 批量插入或更新向量点。
-    async fn upsert_points(&self, points: &[VectorPoint]) -> Result<()> {
-        for point in points {
-            self.upsert_point(point).await?;
-        }
-        Ok(())
-    }
-
     /// 按 ID 删除向量点。
     async fn delete_point(&self, id: &str) -> Result<()>;
-
-    /// 批量删除向量点。
-    async fn delete_points(&self, ids: &[String]) -> Result<()> {
-        for id in ids {
-            self.delete_point(id).await?;
-        }
-        Ok(())
-    }
 
     /// 搜索相似向量。
     async fn search(&self, query: VectorSearchQuery) -> Result<Vec<VectorSearchResult>>;
@@ -75,8 +59,9 @@ pub trait VectorStorage: Send + Sync {
 
     /// 使用摘要和概览向量进行融合搜索。
     ///
-    /// RRF 融合分数为排名倒数（范围约 0~0.02），不使用绝对阈值，
-    /// 结果数量由 `top_k` 控制。
+    /// RRF 融合决定跨列排序；返回结果的 `score` 为各列中最高的相似度
+    /// （1.0 - distance，与单列 `search()` 同尺度），供上层绝对阈值
+    /// （如 `ContentLoadStrategy` 的 0.6/0.85）判断加载深度。
     async fn search_abstract_and_overview(
         &self,
         query_vector: Vec<f32>,

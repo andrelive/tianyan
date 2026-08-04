@@ -8,8 +8,8 @@ use std::sync::Arc;
 use chrono;
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::common::types::InjectableContext;
 use crate::common::error::Result;
+use crate::common::types::InjectableContext;
 use crate::common::types::{
     AgentPath, ContentLevel, ContextNamespace, DetailedTokenUsage, Message, MessageRole,
     MessageTime, Part, PartTime, StructuredMessage,

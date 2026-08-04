@@ -77,6 +77,16 @@ impl MockVfs {
             .push(ContextEntry::new_file(entry_uri.clone()));
     }
 
+    /// 在指定目录下添加目录条目（is_directory = true）。
+    pub fn add_directory(&self, dir_uri: &TianyanUri, entry_uri: &TianyanUri) {
+        self.entries
+            .write()
+            .unwrap()
+            .entry(dir_uri.to_string())
+            .or_default()
+            .push(ContextEntry::new_directory(entry_uri.clone()));
+    }
+
     /// 设置指定 URI 的 exists() 返回值。
     pub fn set_exists(&self, uri: &TianyanUri, val: bool) {
         self.exists.write().unwrap().insert(uri.to_string(), val);
@@ -614,5 +624,5 @@ pub async fn create_test_retriever() -> DualLayerRetriever {
     let vfs: Arc<dyn VirtualFileSystem> =
         Arc::new(TestVfs::new(vector_storage, Arc::new(MockEmbeddingService)));
 
-    DualLayerRetriever::new(vfs).with_embedding_service(Arc::new(MockEmbeddingService))
+    DualLayerRetriever::new(vfs)
 }

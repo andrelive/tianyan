@@ -1,7 +1,6 @@
 //! 存储类型定义。
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::common::types::{ContentLevel, EntryMetadata, TianyanUri};
 
@@ -92,55 +91,6 @@ impl ContextEntry {
     }
 }
 
-/// 用于快速导航的目录索引。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirectoryIndex {
-    /// Schema 版本号，用于兼容性检查。
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
-    /// 最后更新时间戳。
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    /// 此目录中的条目。
-    pub entries: Vec<IndexEntry>,
-    /// 目录统计信息。
-    pub stats: DirectoryStats,
-}
-
-impl Default for DirectoryIndex {
-    fn default() -> Self {
-        Self {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            updated_at: chrono::Utc::now(),
-            entries: Vec::new(),
-            stats: DirectoryStats::default(),
-        }
-    }
-}
-
-/// 目录索引中的条目。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndexEntry {
-    /// 条目名称。
-    pub name: String,
-    /// 条目类型（文件或目录）。
-    pub entry_type: String,
-    /// 抽象摘要。
-    pub abstract_summary: Option<String>,
-    /// 标签。
-    pub tags: Vec<String>,
-    /// 重要性评分。
-    pub importance: f32,
-}
-
-/// 目录统计信息。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DirectoryStats {
-    /// 条目总数。
-    pub total_entries: usize,
-    /// 总大小（字节）。
-    pub total_size: u64,
-}
-
 /// 向量存储的向量点。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorPoint {
@@ -225,32 +175,6 @@ impl VectorSearchResult {
     pub fn uri(&self) -> &TianyanUri {
         &self.payload.uri
     }
-}
-
-/// 存储统计信息
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct StorageStats {
-    /// 条目总数
-    pub total_entries: usize,
-    /// 目录总数
-    pub total_directories: usize,
-    /// 文件总数
-    pub total_files: usize,
-    /// 总存储大小（字节）
-    pub total_size: u64,
-    /// 向量点数量
-    pub vector_points: usize,
-    /// 按分类的统计
-    pub by_category: HashMap<String, CategoryStats>,
-}
-
-/// 分类的统计信息
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CategoryStats {
-    /// 条目数量
-    pub count: usize,
-    /// 总大小
-    pub size: u64,
 }
 
 #[cfg(test)]

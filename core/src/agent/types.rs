@@ -145,7 +145,11 @@ pub struct SkillCallInfo {
 }
 
 /// 流式响应块的类型。
+///
+/// 序列化为小写（answer/tool_call/...），与前端 SSE 契约及
+/// `ChatStreamEvent.chunk_type` 的类型定义保持一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum StreamChunkType {
     /// 思考过程。
     Thought,
@@ -322,21 +326,22 @@ mod tests {
 
     #[test]
     fn stream_chunk_type_serialized_names() {
+        // 小写契约：与前端 SSE 事件类型定义（'answer' | 'tool_call' | ...）一致
         assert_eq!(
             serde_json::to_value(StreamChunkType::Thought).unwrap(),
-            serde_json::json!("Thought")
+            serde_json::json!("thought")
         );
         assert_eq!(
             serde_json::to_value(StreamChunkType::ToolCall).unwrap(),
-            serde_json::json!("ToolCall")
+            serde_json::json!("tool_call")
         );
         assert_eq!(
             serde_json::to_value(StreamChunkType::Answer).unwrap(),
-            serde_json::json!("Answer")
+            serde_json::json!("answer")
         );
         assert_eq!(
             serde_json::to_value(StreamChunkType::Clarification).unwrap(),
-            serde_json::json!("Clarification")
+            serde_json::json!("clarification")
         );
     }
 

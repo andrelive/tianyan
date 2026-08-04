@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 mod agent;
 pub mod api_types;
 mod logging;
-mod mcp;
+pub mod mcp;
 mod memory;
 mod model;
 mod retrieval;

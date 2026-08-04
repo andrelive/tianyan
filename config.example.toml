@@ -20,7 +20,6 @@ auto_cleanup = true
 cleanup_days = 365
 
 [storage.vector]
-url = "http://localhost:6334"
 collection_name = "tianyan_contexts"
 # 向量维度需与嵌入模型输出维度一致：
 #   text-embedding-3-small: 1536

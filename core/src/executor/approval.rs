@@ -15,6 +15,25 @@ use tokio::sync::{oneshot, RwLock};
 
 use crate::executor::Action;
 
+/// 判断用户对审批追问的回答是否为"允许执行"语义。
+///
+/// 启发式匹配：出现肯定词（允许/可以/同意/好/是/确认/继续/yes/ok）且
+/// 未出现否定词（不/别/拒绝/否/禁止/取消）时视为批准。
+///
+/// 审批决策语义归属本模块，Agent 协调层通过此函数解析用户回答，
+/// 不自行实现关键词启发式。
+pub fn is_user_confirmation(answer: &str) -> bool {
+    let lower = answer.trim().to_lowercase();
+    let affirmatives = [
+        "允许", "可以", "同意", "好", "是", "确认", "继续", "执行", "yes", "ok", "y",
+    ];
+    let negatives = ["不", "别", "拒绝", "否", "禁止", "取消", "no", "n", "停止"];
+
+    let has_affirmative = affirmatives.iter().any(|w| lower.contains(w));
+    let has_negative = negatives.iter().any(|w| lower.contains(w));
+    has_affirmative && !has_negative
+}
+
 /// 操作风险等级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(i32)]
@@ -245,7 +264,10 @@ impl ApprovalWorkflow {
 
     /// 记录用户对指定指纹操作的确认（指纹由 [`Self::action_fingerprint`] 生成）。
     pub async fn record_user_confirmation_by_fingerprint(&self, fingerprint: &str) {
-        self.confirmed_actions.write().await.insert(fingerprint.to_string());
+        self.confirmed_actions
+            .write()
+            .await
+            .insert(fingerprint.to_string());
     }
 
     /// 检查操作是否已被用户确认。
@@ -403,18 +425,18 @@ impl ApprovalWorkflow {
 
         // 审批通道已接入时：等待人工审批响应（带超时）
         if self.config.wait_for_approval {
-            return self.wait_for_human_approval(session_id, action, risk_level).await;
+            return self
+                .wait_for_human_approval(session_id, action, risk_level)
+                .await;
         }
 
-        // 无审批通道：立即拒绝并携带 approval_required 标记，
-        // 由上层（agent loop）降级为"询问用户"追问，用户确认后重试。
+        // 无审批通道：立即拒绝，由上层（agent loop）降级为"询问用户"追问，
+        // 用户确认后重试。降级判断基于 ToolRegistry 的待确认指纹队列，
+        // 与 reason 文案无关。
         Ok(ApprovalResponse {
             request_id: uuid::Uuid::new_v4().to_string(),
             decision: ApprovalDecision::Deny,
-            reason: Some(format!(
-                "需要用户确认（approval_required）：{:?}",
-                action
-            )),
+            reason: Some(format!("需要用户确认：{:?}", action)),
             responded_at: chrono::Utc::now(),
             approved_by: "system".to_string(),
         })
@@ -627,196 +649,7 @@ impl ApprovalWorkflow {
     }
 }
 
+/// 测试模块（拆分至独立文件，保持主文件聚焦生产逻辑）。
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_risk_level_assessment() {
-        let workflow = ApprovalWorkflow::new(ApprovalWorkflowConfig::default());
-
-        let read_action = Action::ReadFile {
-            path: "test.txt".to_string(),
-        };
-        assert_eq!(workflow.assess_risk(&read_action), RiskLevel::Safe);
-
-        let write_action = Action::WriteFile {
-            path: "test.txt".to_string(),
-            content: "hello".to_string(),
-        };
-        assert_eq!(workflow.assess_risk(&write_action), RiskLevel::Low);
-
-        let dangerous_write = Action::WriteFile {
-            path: "/etc/passwd".to_string(),
-            content: "hack".to_string(),
-        };
-        assert_eq!(workflow.assess_risk(&dangerous_write), RiskLevel::High);
-
-        let dangerous_cmd = Action::ExecuteCommand {
-            command: "rm -rf /".to_string(),
-            cwd: None,
-            timeout_secs: None,
-        };
-        assert_eq!(workflow.assess_risk(&dangerous_cmd), RiskLevel::Critical);
-    }
-
-    #[test]
-    fn test_auto_approval_rules() {
-        let config = ApprovalWorkflowConfig::default();
-        let workflow = ApprovalWorkflow::new(config);
-
-        let safe_action = Action::ReadFile {
-            path: "test.txt".to_string(),
-        };
-        let decision = workflow.check_auto_approval(&safe_action, RiskLevel::Safe);
-        assert_eq!(decision, Some(ApprovalDecision::Approve));
-    }
-
-    #[tokio::test]
-    async fn test_unattended_mode_auto_approves_medium_risk() {
-        // 显式开启无人值守模式
-        let config = ApprovalWorkflowConfig {
-            unattended_mode: true,
-            ..Default::default()
-        };
-        let workflow = Arc::new(ApprovalWorkflow::new(config));
-
-        // git 命令为 Medium 风险
-        let action = Action::ExecuteCommand {
-            command: "git status".to_string(),
-            cwd: None,
-            timeout_secs: None,
-        };
-        assert_eq!(workflow.assess_risk(&action), RiskLevel::Medium);
-
-        // 应立即返回批准，而非等待 300 秒人工响应
-        let resp = workflow
-            .request_approval("session-1", &action)
-            .await
-            .unwrap();
-        assert_eq!(resp.decision, ApprovalDecision::Approve);
-        assert_eq!(resp.approved_by, "auto");
-        assert!(resp.reason.unwrap().contains("无人值守"));
-
-        // 审计记录已写入
-        let records = workflow.get_approval_records().await;
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].request.risk_level, RiskLevel::Medium);
-        assert_eq!(
-            records[0].response.as_ref().unwrap().decision,
-            ApprovalDecision::Approve
-        );
-    }
-
-    #[tokio::test]
-    async fn test_unattended_mode_keeps_critical_denied() {
-        let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
-
-        let action = Action::ExecuteCommand {
-            command: "rm -rf /".to_string(),
-            cwd: None,
-            timeout_secs: None,
-        };
-        assert_eq!(workflow.assess_risk(&action), RiskLevel::Critical);
-
-        let resp = workflow
-            .request_approval("session-1", &action)
-            .await
-            .unwrap();
-        assert_eq!(resp.decision, ApprovalDecision::Deny);
-        assert_eq!(resp.approved_by, "system");
-    }
-
-    #[tokio::test]
-    async fn test_attended_mode_denies_without_confirmation() {
-        // 默认（attended、无审批通道）：Medium 风险应立即拒绝并携带 approval_required 标记
-        let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
-
-        let action = Action::ExecuteCommand {
-            command: "git status".to_string(),
-            cwd: None,
-            timeout_secs: None,
-        };
-        assert_eq!(workflow.assess_risk(&action), RiskLevel::Medium);
-
-        let resp = workflow
-            .request_approval("session-1", &action)
-            .await
-            .unwrap();
-        assert_eq!(resp.decision, ApprovalDecision::Deny);
-        assert!(resp.reason.as_deref().unwrap().contains("approval_required"));
-    }
-
-    #[tokio::test]
-    async fn test_attended_mode_approves_after_user_confirmation() {
-        let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
-
-        let action = Action::ExecuteCommand {
-            command: "git status".to_string(),
-            cwd: None,
-            timeout_secs: None,
-        };
-
-        // 未确认：拒绝
-        let resp = workflow
-            .request_approval("session-1", &action)
-            .await
-            .unwrap();
-        assert_eq!(resp.decision, ApprovalDecision::Deny);
-
-        // 用户确认后：批准
-        workflow.record_user_confirmation(&action).await;
-        let resp = workflow
-            .request_approval("session-1", &action)
-            .await
-            .unwrap();
-        assert_eq!(resp.decision, ApprovalDecision::Approve);
-        assert_eq!(resp.approved_by, "user");
-    }
-
-    #[tokio::test]
-    async fn test_attended_mode_still_requests_human_approval() {
-        // 显式开启 wait_for_approval（GUI 审批通道接入后）：
-        // Medium 风险应进入待处理队列等待人工审批
-        let config = ApprovalWorkflowConfig {
-            unattended_mode: false,
-            wait_for_approval: true,
-            ..Default::default()
-        };
-        let workflow = Arc::new(ApprovalWorkflow::new(config));
-
-        let action = Action::ExecuteCommand {
-            command: "git status".to_string(),
-            cwd: None,
-            timeout_secs: None,
-        };
-
-        let wf = workflow.clone();
-        let handle = tokio::spawn(async move {
-            wf.request_approval("session-1", &action).await.unwrap()
-        });
-
-        // 等待请求进入待处理队列
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let request_id = loop {
-            let pending = workflow.get_pending_approvals().await;
-            if pending.len() == 1 {
-                assert_eq!(pending[0].risk_level, RiskLevel::Medium);
-                break pending[0].request_id.clone();
-            }
-            if tokio::time::Instant::now() > deadline {
-                panic!("审批请求未进入待处理队列");
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
-
-        // 模拟人工批准，spawn 的任务应解除等待并返回批准
-        workflow
-            .respond_to_approval(&request_id, ApprovalDecision::Approve, None, "human")
-            .await
-            .unwrap();
-        let resp = handle.await.unwrap();
-        assert_eq!(resp.decision, ApprovalDecision::Approve);
-        assert_eq!(resp.approved_by, "human");
-    }
-}
+#[path = "approval_tests.rs"]
+mod tests;

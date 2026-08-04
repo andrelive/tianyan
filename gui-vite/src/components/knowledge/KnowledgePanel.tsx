@@ -216,7 +216,9 @@ export default function KnowledgePanel() {
           .split(',')
           .map((t) => t.trim())
           .filter(Boolean);
-        formData.append('tags', JSON.stringify(tags));
+        // 后端契约：元数据通过 "metadata" 字段（IngestRequest JSON）传递，
+        // 而不是顶层 "tags" 字段（会被后端忽略并静默丢弃）。
+        formData.append('metadata', JSON.stringify({ tags }));
       }
       await apiPostMultipart('/knowledge/ingest', formData);
       setIngestSuccess(true);

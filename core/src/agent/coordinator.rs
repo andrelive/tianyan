@@ -75,31 +75,8 @@
 //!
 //! ## 会话状态管理
 //!
-//! Coordinator 使用 SessionStateManager 管理所有会话的运行时状态：
-//!
-//! ```rust,no_run
-//! use tianyan::agent::session_state::SessionStateManager;
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     let manager = SessionStateManager::new();
-//!
-//!     // 创建会话
-//!     manager.with_state("session-001", |state| {
-//!         state.add_user_message("Hello");
-//!     }).await;
-//!
-//!     // 读取会话
-//!     let msg_count = manager.with_state_read("session-001", |state| {
-//!         state.message_count()
-//!     }).await;
-//!
-//!     println!("会话消息数：{}", msg_count.unwrap_or(0));
-//!
-//!     // 清理过期会话（30 分钟不活动）
-//!     manager.cleanup_expired(1800).await;
-//! }
-//! ```
+//! Coordinator 每次处理消息时从 SessionManager 加载会话状态，
+//! 运行期间持有单个 SessionState（不跨请求缓存多会话状态）。
 //!
 //! # 错误处理
 //!

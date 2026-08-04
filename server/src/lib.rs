@@ -114,7 +114,7 @@ fn get_static_dir() -> std::path::PathBuf {
 ///
 /// 创建并初始化单一的 VFS 实例，供整个应用使用。
 /// `sqlite_db` 为全系统共享连接（ADR-005：禁止第二个 SQLite 连接）。
-fn initialize_vfs_for_app(
+async fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
     sqlite_db: tianyan::observability::SqliteDb,
 ) -> tianyan::common::error::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
@@ -139,10 +139,7 @@ fn initialize_vfs_for_app(
     };
 
     // LanceDB 需要 async 初始化
-    let vector_storage = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current()
-            .block_on(async { LanceDbVectorStore::new(&config.storage).await })
-    })?;
+    let vector_storage = LanceDbVectorStore::new(&config.storage).await?;
     let vector_storage = Arc::new(vector_storage);
 
     // 2. 创建模型服务（用于嵌入服务），无配置时跳过
@@ -151,10 +148,7 @@ fn initialize_vfs_for_app(
         .with_vector_storage(vector_storage)
         .with_config(config.storage.clone());
     {
-        let model_services = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { create_model_services(config).await })
-        });
+        let model_services = create_model_services(config).await;
         match model_services {
             Ok(ms) => {
                 let emb_model = config
@@ -177,13 +171,9 @@ fn initialize_vfs_for_app(
     })?;
 
     use tianyan::vfs::VfsCore;
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async { vfs.initialize().await })
-    })?;
+    vfs.initialize().await?;
 
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async { bootstrap_app_vfs(&vfs).await })
-    })?;
+    bootstrap_app_vfs(&vfs).await?;
 
     Ok(Arc::new(vfs))
 }
@@ -243,7 +233,7 @@ const ALLOWED_ORIGINS: [HeaderValue; 6] = [
 /// 支持无配置启动，用于配置向导模式
 ///
 /// 返回 (Router, AppState) 元组，以便在关闭时访问 AppState
-fn create_app(
+async fn create_app(
     config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
     // 创建全系统共享的 SqliteDb（ADR-005：单文件、单连接）
@@ -257,13 +247,7 @@ fn create_app(
     let sqlite_db = tianyan::observability::SqliteDb::open(db_path).map_err(|e| {
         tianyan::TianyanError::Custom(format!("虚拟文件系统错误：打开 SQLite 数据库失败：{}", e))
     })?;
-    let init_error: Option<String> = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current()
-            .block_on(async { sqlite_db.init_all_schemas().await })
-            .err()
-            .map(|e| e.to_string())
-    });
-    if let Some(e) = init_error {
+    if let Err(e) = sqlite_db.init_all_schemas().await {
         return Err(tianyan::TianyanError::Custom(format!(
             "虚拟文件系统错误：初始化 SQLite Schema 失败：{}",
             e
@@ -271,13 +255,10 @@ fn create_app(
     }
 
     // 在应用层初始化 VFS（单一实例，共享 SqliteDb）
-    let vfs = initialize_vfs_for_app(&config, sqlite_db.clone())?;
+    let vfs = initialize_vfs_for_app(&config, sqlite_db.clone()).await?;
 
     // Create shared application state（传入 VFS + 共享 SqliteDb）
-    let state = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current()
-            .block_on(async { AppState::new(config, vfs, sqlite_db).await })
-    })?;
+    let state = AppState::new(config, vfs, sqlite_db).await?;
 
     info!("Application state initialized successfully");
     let state = Arc::new(state);
@@ -338,14 +319,14 @@ pub async fn start_server(
     tianyan_config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<()> {
     let has_providers = tianyan_config.models.providers.iter().any(|p| p.enabled);
-    let (app, state) = create_app(tianyan_config)?;
+    let (app, state) = create_app(tianyan_config).await?;
     let task_scheduler: Option<Arc<TaskScheduler>> = if has_providers {
         let scheduler = Arc::new(TaskScheduler::new());
 
         // 创建任务上下文
         let vfs = state.vfs();
-        let summary_engine = state.create_summary_engine()?;
-        let memory_extractor = state.create_memory_extractor()?;
+        let summary_engine = state.create_summary_engine().await?;
+        let memory_extractor = state.create_memory_extractor().await?;
         let app_config = Arc::new(state.config().read().await.clone());
 
         let task_ctx = Arc::new(TaskContext::new(

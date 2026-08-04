@@ -40,10 +40,6 @@ impl VectorStorage for MockVectorStorage {
         Ok(())
     }
 
-    async fn upsert_points(&self, _points: &[VectorPoint]) -> crate::common::error::Result<()> {
-        Ok(())
-    }
-
     async fn delete_point(&self, _id: &str) -> crate::common::error::Result<()> {
         Ok(())
     }

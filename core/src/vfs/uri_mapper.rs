@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::common::error::{Result, TianyanError};
 use crate::common::types::TianyanUri;
 use crate::config::StorageConfig;
 
@@ -36,18 +35,6 @@ impl UriMapper {
         path
     }
 
-    /// 将 URI 转换为目录路径（用于目录条目）。
-    pub fn uri_to_directory_path(&self, uri: &TianyanUri) -> PathBuf {
-        self.uri_to_path(uri)
-    }
-
-    /// 将 URI 转换为带扩展名的文件路径。
-    pub fn uri_to_file_path(&self, uri: &TianyanUri, extension: &str) -> PathBuf {
-        let mut path = self.uri_to_path(uri);
-        path.set_extension(extension);
-        path
-    }
-
     /// 获取抽象内容路径（L0）。
     ///
     /// 抽象内容存储在父目录中，文件名为 `.abstract.md`。
@@ -69,12 +56,6 @@ impl UriMapper {
         let dir_path = self.uri_to_path(uri);
         let extension = Self::get_detail_extension(uri);
         dir_path.join(format!("content.{}", extension))
-    }
-
-    /// 获取目录索引路径。
-    pub fn get_index_path(&self, uri: &TianyanUri) -> PathBuf {
-        let dir_path = self.uri_to_path(uri);
-        dir_path.join("index.json")
     }
 
     /// 根据 URI 路径确定 Detail 层的文件扩展名。
@@ -106,55 +87,6 @@ impl UriMapper {
         }
     }
 
-    /// 将文件系统路径转换回 URI。
-    pub fn path_to_uri(&self, path: &Path) -> Result<TianyanUri> {
-        let relative = path.strip_prefix(&self.config.data_dir).map_err(|_| {
-            TianyanError::Custom(format!(
-                "无效路径：路径 {path:?} 不在根目录 {:?} 内",
-                self.config.data_dir
-            ))
-        })?;
-
-        let segments: Vec<String> = relative
-            .components()
-            .filter_map(|c| {
-                let s = c.as_os_str().to_string_lossy();
-                if s.starts_with('.')
-                    || s == ".meta"
-                    || s == "index.json"
-                    || s.starts_with("content.")
-                {
-                    None
-                } else {
-                    Some(s.to_string())
-                }
-            })
-            .collect();
-
-        // 构建 URI 字符
-        if segments.is_empty() {
-            return Err(TianyanError::Custom(
-                "无效路径：无法从路径确定分段".to_string(),
-            ));
-        }
-
-        let category_str = &segments[0];
-        let path_segments: Vec<String> = segments[1..].to_vec();
-
-        let uri_str = if path_segments.is_empty() {
-            format!("tianyan://{}", category_str)
-        } else {
-            format!("tianyan://{}/{}", category_str, path_segments.join("/"))
-        };
-
-        TianyanUri::parse(&uri_str)
-    }
-
-    /// 获取 URI 的父目录路径。
-    pub fn get_parent_path(&self, uri: &TianyanUri) -> Option<PathBuf> {
-        uri.parent().map(|p| self.uri_to_path(&p))
-    }
-
     /// 检查路径是否为特殊文件（抽象、概览、索引等）。
     pub fn is_special_file(path: &Path) -> bool {
         if path.components().any(|c| c.as_os_str() == ".meta") {
@@ -169,17 +101,12 @@ impl UriMapper {
             false
         }
     }
-
-    /// 获取特定层级的内容文件名。
-    pub fn get_content_filename(level: crate::common::types::ContentLevel) -> &'static str {
-        level.file_name()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::{ContentLevel, ContextNamespace};
+    use crate::common::types::ContextNamespace;
 
     #[test]
     fn test_uri_mapper_uri_to_path() {
@@ -337,21 +264,5 @@ mod tests {
         assert!(UriMapper::is_special_file(Path::new(".meta/abstract.md")));
         assert!(UriMapper::is_special_file(Path::new(".meta/overview.md")));
         assert!(!UriMapper::is_special_file(Path::new("normal_file.md")));
-    }
-
-    #[test]
-    fn test_content_filename() {
-        assert_eq!(
-            UriMapper::get_content_filename(ContentLevel::Abstract),
-            ".abstract.md"
-        );
-        assert_eq!(
-            UriMapper::get_content_filename(ContentLevel::Overview),
-            ".overview.md"
-        );
-        assert_eq!(
-            UriMapper::get_content_filename(ContentLevel::Detail),
-            "content.md"
-        );
     }
 }

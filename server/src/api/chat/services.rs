@@ -136,10 +136,7 @@ impl ChatService {
         session_id: &str,
         answer: &str,
     ) -> Result<ChatResponse, ApiError> {
-        let response = self
-            .agent
-            .handle_clarification(session_id, answer)
-            .await?;
+        let response = self.agent.handle_clarification(session_id, answer).await?;
         Ok(to_chat_response(session_id, response))
     }
 }

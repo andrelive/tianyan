@@ -374,7 +374,9 @@ mod tests {
     #[test]
     fn test_parse_single_memory_missing_fields_returns_none() {
         let extractor = extractor_with_mock(MockChatService::new());
-        assert!(extractor.parse_single_memory(&serde_json::json!({})).is_none());
+        assert!(extractor
+            .parse_single_memory(&serde_json::json!({}))
+            .is_none());
         assert!(extractor
             .parse_single_memory(&serde_json::json!({"id": "m1"}))
             .is_none());
@@ -435,9 +437,8 @@ mod tests {
     #[tokio::test]
     async fn test_extract_propagates_llm_error() {
         let mut mock = MockChatService::new();
-        mock.expect_chat_completion().returning(|_| {
-            Err(TianyanError::Custom("模型服务错误：连接失败".to_string()))
-        });
+        mock.expect_chat_completion()
+            .returning(|_| Err(TianyanError::Custom("模型服务错误：连接失败".to_string())));
         let extractor = extractor_with_mock(mock);
         let result = extractor.extract(&long_conversation()).await;
         assert!(result.is_err());

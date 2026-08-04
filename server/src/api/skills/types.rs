@@ -180,7 +180,13 @@ mod tests {
             default_value: None,
         };
         let json = serde_json::to_string(&param).unwrap();
-        assert!(json.contains("\"type\":\"boolean\""), "序列化应输出 type 字段: {json}");
-        assert!(!json.contains("param_type"), "不应输出 param_type 字段: {json}");
+        assert!(
+            json.contains("\"type\":\"boolean\""),
+            "序列化应输出 type 字段: {json}"
+        );
+        assert!(
+            !json.contains("param_type"),
+            "不应输出 param_type 字段: {json}"
+        );
     }
 }

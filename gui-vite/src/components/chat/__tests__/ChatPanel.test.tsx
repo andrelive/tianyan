@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
@@ -137,6 +137,27 @@ describe('ChatPanel', () => {
     // After the stream completes, status returns to 'idle'
     await vi.waitFor(() => {
       expect(useAppStore.getState().streamStatus).toBe('idle');
+    });
+  });
+
+  it('handles server-side SSE error events: removes empty bubble and shows toast', async () => {
+    const user = userEvent.setup();
+    renderChatPanel();
+
+    const textarea = screen.getByPlaceholderText(/输入消息/);
+    // user.type 会把 [..] 当作键盘修饰符语法，改用 fireEvent.change
+    fireEvent.change(textarea, { target: { value: '这是一个 [error-test] 请求' } });
+    await user.click(screen.getByRole('button', { name: /发送/i }));
+
+    // 服务端返回 chunk_type=error 后：空气泡被清理、状态回到 idle、错误 toast 显示
+    await vi.waitFor(() => {
+      const state = useAppStore.getState();
+      const emptyAssistant = state.messages.filter(
+        (m) => m.role === 'assistant' && m.content === '',
+      );
+      expect(emptyAssistant).toHaveLength(0);
+      expect(state.streamStatus).toBe('idle');
+      expect(state.toast?.message).toContain('请求校验失败');
     });
   });
 

@@ -106,9 +106,7 @@ impl StorageBackend for SqliteBackend {
             },
         )
         .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => {
-                TianyanError::not_found(uri_str.clone())
-            }
+            rusqlite::Error::QueryReturnedNoRows => TianyanError::not_found(uri_str.clone()),
             other => TianyanError::Custom(format!("存储后端错误：读取条目失败: {other}")),
         })
     }
@@ -142,15 +140,20 @@ impl StorageBackend for SqliteBackend {
     }
 
     /// 删除指定 URI 及其所有子条目。
+    ///
+    /// 使用 `substr` 做精确前缀匹配（而非 LIKE）：LIKE 会把 URI 中的
+    /// `%`/`_` 当作通配符，且 `uri%` 会误删同前缀的兄弟条目
+    /// （如删除 `.../ab` 时连带删除 `.../abc`）。
     async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
         let conn = self.db.lock().await;
         let uri_str = uri.to_string();
-        let pattern = format!("{}%", uri_str);
+        // 子条目前缀：URI + "/"，仅匹配直接或间接子条目。
+        let dir_prefix = format!("{}/", uri_str);
 
         let deleted = conn
             .execute(
-                "DELETE FROM vfs_entries WHERE uri = ?1 OR uri LIKE ?2",
-                rusqlite::params![&uri_str, &pattern],
+                "DELETE FROM vfs_entries WHERE uri = ?1 OR substr(uri, 1, ?2) = ?3",
+                rusqlite::params![&uri_str, dir_prefix.len(), &dir_prefix],
             )
             .map_err(|e| TianyanError::Custom(format!("存储后端错误：删除条目失败: {e}")))?;
 
@@ -351,6 +354,33 @@ mod tests {
             .unwrap();
         be.delete_entry(&uri).await.unwrap();
         assert!(!be.exists(&uri).await.unwrap());
+    }
+
+    /// 回归测试：删除条目不得误删同前缀的兄弟条目，但应级联删除子条目。
+    #[tokio::test]
+    async fn test_delete_entry_prefix_collision() {
+        let be = setup().await;
+        let parent = knowledge_uri("ab");
+        let sibling = knowledge_uri("abc");
+        let child = TianyanUri::new(
+            ContextNamespace::Knowledge,
+            vec!["ab".to_string(), "x.md".to_string()],
+        );
+        for uri in [&parent, &sibling, &child] {
+            be.write_entry(&ContextEntry::new_file(uri.clone()))
+                .await
+                .unwrap();
+        }
+
+        // 删除父条目：应保留同前缀兄弟 "abc"，删除子条目 "ab/x.md"
+        be.delete_entry(&parent).await.unwrap();
+
+        assert!(!be.exists(&parent).await.unwrap(), "父条目应被删除");
+        assert!(!be.exists(&child).await.unwrap(), "子条目应被级联删除");
+        assert!(
+            be.exists(&sibling).await.unwrap(),
+            "同前缀兄弟条目不应被误删"
+        );
     }
 
     #[tokio::test]

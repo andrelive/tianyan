@@ -18,6 +18,5 @@ pub mod types;
 
 pub use routes::routes;
 pub use types::{
-    CreateSessionRequest, CreateSessionResponse, DeleteSessionResponse, ListSessionsResponse,
-    Session, SessionMessagesResponse, SessionMetadata,
+    DeleteSessionResponse, ListSessionsResponse, Session, SessionMessagesResponse, SessionMetadata,
 };

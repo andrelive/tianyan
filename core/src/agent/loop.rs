@@ -345,16 +345,17 @@ impl AgentLoop {
 
             let results = self.tool_registry.execute_parallel(tool_calls).await;
 
-            // 审批降级：任一工具因"需要用户确认"被拒时，不再继续循环，
-            // 直接转为追问用户（用户批准后重试工具调用）。
-            let denied_action = results
-                .iter()
-                .find_map(|(_call_id, result)| match result {
-                    Err(e) if e.to_string().contains("approval_required") => {
-                        Some(e.to_string())
-                    }
+            // 审批降级：任一工具因审批门控被拒（已入队待确认指纹）时，
+            // 不再继续循环，直接转为追问用户（用户批准后重试工具调用）。
+            // 通过 has_pending_approval() 类型化信号判断，而非解析错误字符串。
+            let denied_action = if self.tool_registry.has_pending_approval().await {
+                results.iter().find_map(|(_call_id, result)| match result {
+                    Err(e) => Some(e.to_string()),
                     _ => None,
-                });
+                })
+            } else {
+                None
+            };
             if let Some(err_msg) = denied_action {
                 return Ok(Some(AgentLoopResult::NeedsClarification {
                     question: format!(
@@ -545,9 +546,7 @@ mod tests {
             .unwrap();
 
         match result {
-            AgentLoopResult::Answer {
-                content, turns, ..
-            } => {
+            AgentLoopResult::Answer { content, turns, .. } => {
                 assert_eq!(content, "最终回答");
                 assert_eq!(turns, 2);
             }
@@ -582,11 +581,65 @@ mod tests {
             .unwrap();
 
         match result {
-            AgentLoopResult::NeedsClarification { question, turns, .. } => {
+            AgentLoopResult::NeedsClarification {
+                question, turns, ..
+            } => {
                 assert_eq!(question, "你希望我怎么处理？");
                 assert_eq!(turns, 1);
             }
             other => panic!("期望 NeedsClarification，得到 {:?}", other),
+        }
+    }
+
+    /// 回归测试：审批门控拒绝必须通过 `has_pending_approval()` 类型化信号
+    /// 降级为追问，而不是解析错误消息中的字符串标记。
+    #[tokio::test]
+    async fn test_run_approval_denied_returns_clarification() {
+        use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
+        use std::sync::Arc as StdArc;
+
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            // write_file 到非 test/temp/tmp 路径 → Medium 风险 → 审批拒绝
+            Ok(response_with(Message::assistant_with_tools(
+                "",
+                vec![ToolCall {
+                    id: "call_write".to_string(),
+                    call_type: ToolCallType::Function,
+                    function: FunctionCall {
+                        name: "write_file".to_string(),
+                        arguments: r#"{"path": "project/src/main.rs", "content": "fn main() {}"}"#
+                            .to_string(),
+                    },
+                }],
+            )))
+        });
+
+        let mut registry = ToolRegistry::new(SecurityPolicy::default());
+        registry = registry.with_approval_workflow(StdArc::new(ApprovalWorkflow::new(
+            ApprovalWorkflowConfig::default(),
+        )));
+        let agent_loop = AgentLoop::new(
+            Arc::new(mock),
+            registry,
+            Arc::new(MockSessionManager),
+            AgentLoopConfig { max_turns: 5 },
+        );
+
+        let mut messages = vec![Message::user("请帮我写入文件")];
+        let result = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model")
+            .await
+            .unwrap();
+
+        match result {
+            AgentLoopResult::NeedsClarification { question, .. } => {
+                assert!(
+                    question.contains("安全策略要求确认"),
+                    "追问应包含审批确认提示，实际: {question}"
+                );
+            }
+            other => panic!("期望审批降级为 NeedsClarification，得到 {:?}", other),
         }
     }
 
@@ -624,9 +677,8 @@ mod tests {
     #[tokio::test]
     async fn test_run_llm_error_propagates() {
         let mut mock = MockChatService::new();
-        mock.expect_chat_completion().returning(|_| {
-            Err(TianyanError::Custom("模型服务错误：连接超时".to_string()))
-        });
+        mock.expect_chat_completion()
+            .returning(|_| Err(TianyanError::Custom("模型服务错误：连接超时".to_string())));
         let agent_loop = make_loop(mock, 5);
 
         let mut messages = vec![Message::user("测试")];

@@ -5,11 +5,9 @@
 
 // 标准库
 use std::sync::Arc;
-use std::time::Duration;
 
 // 外部 crate
-use tokio::sync::{RwLock, Semaphore};
-use tokio::time::timeout;
+use tokio::sync::RwLock;
 
 // 内部 crate
 use tianyan::agent::AgentCoordinator;
@@ -27,11 +25,6 @@ use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
 use crate::agent_builder::{create_model_services, AgentBuilderFactory};
-
-// 常量定义
-const MAX_PENDING_TASKS: usize = 1000;
-const SHUTDOWN_TIMEOUT_SECS: u64 = 30;
-const TASK_CHECK_INTERVAL_MS: u64 = 100;
 
 // 类型别名
 type SharedConfig = Arc<RwLock<TianyanConfig>>;
@@ -51,8 +44,6 @@ pub struct AppState {
     config: SharedConfig,
     /// 会话管理器
     session_manager: Arc<dyn SessionManager>,
-    /// 待处理任务信号量（控制并发数）
-    pending_tasks: Arc<Semaphore>,
     /// 虚拟文件系统（所有组件共享）
     vfs: Arc<VirtualFileSystemImpl>,
     /// 技能注册表
@@ -106,14 +97,23 @@ impl AppState {
         let skill_registry = Arc::new(RwLock::new(skill_registry));
         let skill_executor = Arc::new(SkillExecutor::new(skill_registry.clone(), skill_config));
 
-        // VFS 技能自动发现：加载之前学到的技能
+        // VFS 技能自动发现：把之前学到的技能注册进 SkillRegistry，
+        // 使它们可被列出、检索（GEPA 学习回路闭环）。
         {
             let skill_manager = SkillManager::new(vfs.clone());
-            if let Ok(skills) = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { skill_manager.list_available_skills().await })
-            }) {
-                tracing::info!(count = skills.len(), "从VFS加载了已学习的技能");
+            match skill_manager.load_learned_skills().await {
+                Ok(learned) => {
+                    let mut registry = skill_registry.write().await;
+                    let mut registered = 0usize;
+                    for skill in learned {
+                        if !registry.contains(&skill.id) {
+                            registry.register(skill);
+                            registered += 1;
+                        }
+                    }
+                    tracing::info!(count = registered, "已注册 VFS 学习技能");
+                }
+                Err(e) => tracing::warn!(error = %e, "加载已学习技能失败"),
             }
         }
 
@@ -152,13 +152,10 @@ impl AppState {
         // 创建持久化会话管理器
         let session_manager = Arc::new(PersistentSessionManager::new(vfs.clone()));
 
-        let pending_tasks = Arc::new(Semaphore::new(MAX_PENDING_TASKS));
-
         Ok(Self {
             agent: Arc::new(RwLock::new(agent)),
             config: Arc::new(RwLock::new(config)),
             session_manager,
-            pending_tasks,
             vfs,
             skill_registry,
             skill_executor,
@@ -268,24 +265,18 @@ impl AppState {
     }
 
     /// 获取共享模型服务（配置热更新后自动指向新实例）。
-    fn shared_model_services(&self) -> TianyanResult<tianyan::model::ModelServices> {
-        let services = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { self.model_services.read().await.clone() })
-        });
-        Ok(services)
+    async fn shared_model_services(&self) -> TianyanResult<tianyan::model::ModelServices> {
+        Ok(self.model_services.read().await.clone())
     }
 
     /// 创建摘要引擎（复用共享模型服务，不重复创建 HTTP 客户端）。
     ///
     /// # Returns
     /// * `TianyanResult<Arc<SummaryEngine>>` - 摘要引擎实例
-    pub fn create_summary_engine(&self) -> TianyanResult<Arc<SummaryEngine>> {
-        let config = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async { self.config.read().await.clone() })
-        });
+    pub async fn create_summary_engine(&self) -> TianyanResult<Arc<SummaryEngine>> {
+        let config = self.config.read().await.clone();
 
-        let model_services = self.shared_model_services()?;
+        let model_services = self.shared_model_services().await?;
 
         let chat_model = config
             .models
@@ -313,12 +304,10 @@ impl AppState {
     ///
     /// # Returns
     /// * `TianyanResult<Arc<MemoryExtractor>>` - 记忆提取器实例
-    pub fn create_memory_extractor(&self) -> TianyanResult<Arc<MemoryExtractor>> {
-        let config = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async { self.config.read().await.clone() })
-        });
+    pub async fn create_memory_extractor(&self) -> TianyanResult<Arc<MemoryExtractor>> {
+        let config = self.config.read().await.clone();
 
-        let model_services = self.shared_model_services()?;
+        let model_services = self.shared_model_services().await?;
 
         let chat_model = config
             .models
@@ -337,12 +326,10 @@ impl AppState {
     }
 
     /// 创建知识导入器（复用共享模型服务）。
-    pub fn create_knowledge_ingestor(&self) -> TianyanResult<KnowledgeIngestor> {
-        let config = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async { self.config.read().await.clone() })
-        });
+    pub async fn create_knowledge_ingestor(&self) -> TianyanResult<KnowledgeIngestor> {
+        let config = self.config.read().await.clone();
 
-        let model_services = self.shared_model_services()?;
+        let model_services = self.shared_model_services().await?;
 
         let vfs: Arc<dyn tianyan::vfs::VirtualFileSystem> = self.vfs.clone();
 
@@ -382,49 +369,17 @@ impl AppState {
 
     /// 优雅关闭应用
     ///
-    /// 等待所有待处理任务完成，带有超时保护。
+    /// 关闭应用。
     ///
     /// # Returns
-    /// * `TianyanResult<()>` - 成功返回 Ok，超时也返回 Ok（仅记录警告）
+    /// * `TianyanResult<()>` - 成功返回 Ok
     ///
     /// # Errors
     /// * 正常情况下不会返回错误
     pub async fn shutdown(&self) -> TianyanResult<()> {
         tracing::info!("开始关闭应用...");
-
-        match timeout(
-            Duration::from_secs(SHUTDOWN_TIMEOUT_SECS),
-            self.wait_for_pending_tasks(),
-        )
-        .await
-        {
-            Ok(_) => {
-                tracing::info!("所有任务已完成，应用已关闭");
-                Ok(())
-            }
-            Err(_) => {
-                tracing::warn!("关闭超时 ({}s)，仍有任务未完成", SHUTDOWN_TIMEOUT_SECS);
-                Ok(())
-            }
-        }
-    }
-
-    /// 等待所有待处理任务完成
-    async fn wait_for_pending_tasks(&self) {
-        let initial_available = self.pending_tasks.available_permits();
-        let pending_count = MAX_PENDING_TASKS - initial_available;
-
-        if pending_count == 0 {
-            tracing::debug!("没有待处理任务");
-            return;
-        }
-
-        tracing::info!("等待 {} 个待处理任务完成...", pending_count);
-
-        while self.pending_tasks.available_permits() < MAX_PENDING_TASKS {
-            tokio::time::sleep(Duration::from_millis(TASK_CHECK_INTERVAL_MS)).await;
-        }
-
-        tracing::info!("所有待处理任务已完成");
+        // 无待跟踪的后台任务（信号量并发控制未启用），直接完成关闭。
+        tracing::info!("应用已关闭");
+        Ok(())
     }
 }

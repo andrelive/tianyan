@@ -1,9 +1,6 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
-use tokio::sync::RwLock;
 
 use crate::agent::types::ClarificationQuestion;
 use crate::common::types::{
@@ -132,67 +129,6 @@ impl SessionState {
     }
 }
 
-/// 多会话状态管理器。
-#[derive(Debug, Clone)]
-pub struct SessionStateManager {
-    states: Arc<RwLock<HashMap<String, SessionState>>>,
-}
-
-impl SessionStateManager {
-    /// 创建新的管理器。
-    pub fn new() -> Self {
-        Self {
-            states: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    /// 获取或创建会话状态并执行闭包。
-    pub async fn with_state<F, R>(&self, session_id: &str, f: F) -> R
-    where
-        F: FnOnce(&mut SessionState) -> R,
-    {
-        let mut states = self.states.write().await;
-        let state = states
-            .entry(session_id.to_string())
-            .or_insert_with(|| SessionState::new(session_id));
-        f(state)
-    }
-
-    /// 只读访问会话状态。
-    pub async fn with_state_read<F, R>(&self, session_id: &str, f: F) -> Option<R>
-    where
-        F: FnOnce(&SessionState) -> R,
-    {
-        let states = self.states.read().await;
-        states.get(session_id).map(f)
-    }
-
-    /// 删除会话状态。
-    pub async fn remove(&self, session_id: &str) {
-        let mut states = self.states.write().await;
-        states.remove(session_id);
-    }
-
-    /// 获取所有会话 ID。
-    pub async fn get_all_session_ids(&self) -> Vec<String> {
-        let states = self.states.read().await;
-        states.keys().cloned().collect()
-    }
-
-    /// 清理过期会话。
-    pub async fn cleanup_expired(&self, max_inactive_duration_secs: u64) {
-        let mut states = self.states.write().await;
-        let duration = std::time::Duration::from_secs(max_inactive_duration_secs);
-        states.retain(|_, state| state.last_activity.elapsed() < duration);
-    }
-}
-
-impl Default for SessionStateManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,19 +158,5 @@ mod tests {
         state.cleanup();
         assert!(state.structured_messages.len() <= KEEP_RECENT_MESSAGES);
         assert!(!state.structured_messages.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_session_state_manager() {
-        let manager = SessionStateManager::new();
-        let session_id = manager
-            .with_state("session1", |state| state.session_id.clone())
-            .await;
-        assert_eq!(session_id, "session1");
-        let exists = manager.with_state_read("session1", |_| true).await;
-        assert!(exists.is_some());
-        manager.remove("session1").await;
-        let exists_after_remove = manager.with_state_read("session1", |_| true).await;
-        assert!(exists_after_remove.is_none());
     }
 }

@@ -52,6 +52,30 @@ fn default_enabled() -> bool {
 }
 
 impl McpServerEntry {
+    /// 创建新的 MCP 服务器配置。
+    pub fn new(name: impl Into<String>, command: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            command: command.into(),
+            args,
+            env: None,
+            enabled: true,
+            description: None,
+        }
+    }
+
+    /// 设置环境变量。
+    pub fn with_env(mut self, env: HashMap<String, String>) -> Self {
+        self.env = Some(env);
+        self
+    }
+
+    /// 设置描述。
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
     /// 验证 MCP 服务器配置是否有效。
     pub fn validate(&self) -> Result<(), TianyanError> {
         if self.name.is_empty() {

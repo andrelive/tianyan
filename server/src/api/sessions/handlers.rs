@@ -44,11 +44,8 @@ pub async fn get_session(
     service
         .get_session_detail(&session_id)
         .await
+        .inspect_err(|e| error!("获取会话详情失败: {}", e))
         .map(Json)
-        .map_err(|e| {
-            error!("获取会话详情失败: {}", e);
-            ApiError::Internal(format!("获取会话详情失败: {}", e))
-        })
 }
 
 /// 获取会话消息
@@ -67,11 +64,8 @@ pub async fn get_session_messages(
     service
         .get_messages(&session_id)
         .await
+        .inspect_err(|e| error!("获取会话消息失败: {}", e))
         .map(Json)
-        .map_err(|e| {
-            error!("获取会话消息失败: {}", e);
-            ApiError::Internal(format!("获取会话消息失败: {}", e))
-        })
 }
 
 /// 删除会话
@@ -90,11 +84,8 @@ pub async fn delete_session(
     service
         .delete_session(&session_id)
         .await
+        .inspect_err(|e| error!("删除会话失败: {}", e))
         .map(Json)
-        .map_err(|e| {
-            error!("删除会话失败: {}", e);
-            ApiError::Internal(format!("删除会话失败: {}", e))
-        })
 }
 
 /// 删除消息（该消息及其后的所有消息）
@@ -159,9 +150,6 @@ pub async fn update_session_title(
     service
         .update_title(&session_id, request)
         .await
+        .inspect_err(|e| error!("更新会话标题失败: {}", e))
         .map(Json)
-        .map_err(|e| {
-            error!("更新会话标题失败: {}", e);
-            ApiError::Internal(format!("更新会话标题失败: {}", e))
-        })
 }

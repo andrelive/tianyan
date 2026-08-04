@@ -444,9 +444,13 @@ impl SkillRegistry {
     }
 
     /// 注册技能及其处理器。
+    ///
+    /// 如果技能已注册（例如先通过 [`Self::register`] 注册了带完整元数据的技能），
+    /// 保留已有技能定义（参数 schema、分类、安全级别等），仅附加处理器；
+    /// 否则注册传入的技能。
     pub fn register_with_handler(&mut self, skill: Skill, handler: Arc<dyn SkillHandler>) {
         let skill_id = skill.id.clone();
-        self.skills.insert(skill_id.clone(), skill);
+        self.skills.entry(skill_id.clone()).or_insert(skill);
         self.handlers.insert(skill_id, handler);
     }
 

@@ -74,7 +74,7 @@ pub async fn ingest_handler(
         }
     }
 
-    let ingestor = state.create_knowledge_ingestor()?;
+    let ingestor = state.create_knowledge_ingestor().await?;
     let vfs = state.vfs();
     let service = KnowledgeService::new(Arc::new(ingestor), vfs);
     let request = metadata.unwrap_or(IngestRequest {
@@ -122,7 +122,7 @@ pub async fn search_handler(
         return Err(ApiError::BadRequest(e));
     }
 
-    let ingestor = state.create_knowledge_ingestor()?;
+    let ingestor = state.create_knowledge_ingestor().await?;
     let vfs = state.vfs();
     let service = KnowledgeService::new(Arc::new(ingestor), vfs);
 
@@ -141,7 +141,7 @@ pub async fn search_suggestions_handler(
         return Err(ApiError::BadRequest(e));
     }
 
-    let ingestor = state.create_knowledge_ingestor()?;
+    let ingestor = state.create_knowledge_ingestor().await?;
     let vfs = state.vfs();
     let service = KnowledgeService::new(Arc::new(ingestor), vfs);
 
@@ -160,7 +160,7 @@ pub async fn list_entries_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListEntriesQuery>,
 ) -> Result<Json<KnowledgeEntriesResponse>, ApiError> {
-    let ingestor = state.create_knowledge_ingestor()?;
+    let ingestor = state.create_knowledge_ingestor().await?;
     let vfs = state.vfs();
     let service = KnowledgeService::new(Arc::new(ingestor), vfs);
 
@@ -173,7 +173,7 @@ pub async fn read_entry_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ReadEntryQuery>,
 ) -> Result<Json<ReadEntryResponse>, ApiError> {
-    let ingestor = state.create_knowledge_ingestor()?;
+    let ingestor = state.create_knowledge_ingestor().await?;
     let vfs = state.vfs();
     let service = KnowledgeService::new(Arc::new(ingestor), vfs);
 
