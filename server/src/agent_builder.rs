@@ -252,6 +252,19 @@ impl AgentCoordinator for WizardModeAgent {
         Ok(())
     }
 
+    async fn approval_status(
+        &self,
+    ) -> TianyanResult<tianyan::executor::approval::ApprovalStatusSnapshot> {
+        // 向导模式未装配审批工作流：返回默认配置与空队列
+        Ok(tianyan::executor::approval::ApprovalStatusSnapshot {
+            config: tianyan::executor::approval::ApprovalWorkflowConfig::default(),
+            pending_approvals: Vec::new(),
+            pending_confirmations: Vec::new(),
+            recent_records: Vec::new(),
+            confirmed_action_count: 0,
+        })
+    }
+
     async fn get_state(&self) -> AgentState {
         AgentState::default()
     }

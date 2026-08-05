@@ -129,3 +129,27 @@ async fn test_e2e_scheduler_status_endpoint() {
 
     server.shutdown();
 }
+
+#[tokio::test]
+async fn test_e2e_approval_status_endpoint() {
+    let (server, _dir) = start_real_server().await;
+
+    // 审批状态（真实 handler：Agent 审批链路，结构完整 JSON）
+    let resp = server.get("/api/v1/approval/status").await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    // 配置节必须存在且含关键字段
+    assert!(
+        body["config"]["enable_auto_approval"].is_boolean(),
+        "审批配置应包含 enable_auto_approval: {body}"
+    );
+    assert!(body["config"]["unattended_mode"].is_boolean());
+    assert!(body["config"]["wait_for_approval"].is_boolean());
+    // 空队列：pending_approvals / pending_confirmations / recent_records
+    assert_eq!(body["pending_approvals"].as_array().unwrap().len(), 0);
+    assert_eq!(body["pending_confirmations"].as_array().unwrap().len(), 0);
+    assert_eq!(body["recent_records"].as_array().unwrap().len(), 0);
+    assert_eq!(body["confirmed_action_count"], 0);
+
+    server.shutdown();
+}

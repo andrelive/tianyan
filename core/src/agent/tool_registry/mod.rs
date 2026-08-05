@@ -196,6 +196,16 @@ impl ToolRegistry {
         !self.pending_approval_fingerprints.lock().await.is_empty()
     }
 
+    /// 获取待用户确认的操作指纹快照。
+    pub async fn pending_approval_fingerprints(&self) -> Vec<String> {
+        self.pending_approval_fingerprints.lock().await.clone()
+    }
+
+    /// 获取审批工作流（write_file / execute_command 危险操作门控）。
+    pub fn approval_workflow(&self) -> Option<Arc<ApprovalWorkflow>> {
+        self.approval_workflow.clone()
+    }
+
     /// 设置语义验证门控（verify_build 工具的 LLM-as-Judge 支持）。
     pub fn with_verification_gate(mut self, gate: Arc<VerificationGate>) -> Self {
         self.verification_gate = Some(gate);

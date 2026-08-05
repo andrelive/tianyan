@@ -128,6 +128,12 @@ pub trait AgentCoordinator: Send + Sync {
 
     /// 初始化智能体。
     async fn initialize(&self) -> Result<()>;
+
+    /// 获取审批状态快照（工作流配置 + 待处理请求 + 最近审计记录）。
+    ///
+    /// 用于状态查询接口；审批工作流未装配时返回默认配置与空队列。
+    async fn approval_status(&self) -> Result<crate::executor::approval::ApprovalStatusSnapshot>;
+
     /// 获取智能体状态。
     async fn get_state(&self) -> AgentState;
     /// 关闭智能体。
@@ -365,6 +371,32 @@ impl AgentCoordinator for Agent {
     async fn initialize(&self) -> Result<()> {
         tracing::info!("Agent initialized with AgentLoop architecture");
         Ok(())
+    }
+
+    async fn approval_status(&self) -> Result<crate::executor::approval::ApprovalStatusSnapshot> {
+        use crate::executor::approval::{ApprovalStatusSnapshot, ApprovalWorkflowConfig};
+
+        let registry = self.agent_loop.tool_registry();
+        let pending_confirmations = registry.pending_approval_fingerprints().await;
+        let Some(workflow) = registry.approval_workflow() else {
+            return Ok(ApprovalStatusSnapshot {
+                config: ApprovalWorkflowConfig::default(),
+                pending_approvals: Vec::new(),
+                pending_confirmations,
+                recent_records: Vec::new(),
+                confirmed_action_count: 0,
+            });
+        };
+        let mut records = workflow.get_approval_records().await;
+        records.reverse();
+        records.truncate(50);
+        Ok(ApprovalStatusSnapshot {
+            config: workflow.config(),
+            pending_approvals: workflow.get_pending_approvals().await,
+            pending_confirmations,
+            recent_records: records,
+            confirmed_action_count: workflow.confirmed_action_count().await,
+        })
     }
 
     async fn get_state(&self) -> AgentState {

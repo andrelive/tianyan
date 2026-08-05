@@ -105,3 +105,20 @@ pub async fn get_scheduler_status_handler(
         None => Ok(Json(json!({ "running": false, "tasks": [] }))),
     }
 }
+
+/// 返回审批状态（工作流配置 + 待处理请求 + 最近审计记录）。
+///
+/// 审批链路：工具执行门控 → 风险分级 → 自动审批/拒绝 → "询问用户"降级确认；
+/// 本端点暴露该链路的当前状态与历史记录。
+pub async fn get_approval_status_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let agent = state.agent().await;
+    let snapshot = agent
+        .approval_status()
+        .await
+        .map_err(|e| ApiError::Internal(format!("审批状态查询失败：{e}")))?;
+    serde_json::to_value(snapshot)
+        .map(Json)
+        .map_err(|e| ApiError::Internal(format!("审批状态序列化失败：{e}")))
+}

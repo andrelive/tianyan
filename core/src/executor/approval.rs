@@ -131,7 +131,7 @@ pub struct ApprovalRecord {
 }
 
 /// 自动审批规则。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AutoApprovalRule {
     /// 规则名称。
     pub name: String,
@@ -146,7 +146,7 @@ pub struct AutoApprovalRule {
 }
 
 /// 操作模式匹配。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ActionPattern {
     /// 匹配任何操作。
     Any,
@@ -159,12 +159,12 @@ pub enum ActionPattern {
 }
 
 /// 审批条件。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum ApprovalCondition {
     /// 无条件匹配。
     Always,
-    /// 命令参数匹配正则。
-    ArgsMatch(regex::Regex),
+    /// 命令参数匹配正则（pattern 字符串；匹配逻辑当前未启用，保留扩展位）。
+    ArgsMatch(String),
     /// 路径匹配。
     PathMatch(String),
     /// 风险等级低于阈值。
@@ -176,7 +176,7 @@ pub enum ApprovalCondition {
 }
 
 /// 审批工作流配置。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ApprovalWorkflowConfig {
     /// 默认超时时间（秒）。
     pub default_timeout_secs: u64,
@@ -239,6 +239,21 @@ struct PendingApproval {
     _created_at: Instant,
 }
 
+/// 审批状态快照（供状态查询接口使用）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalStatusSnapshot {
+    /// 审批工作流配置。
+    pub config: ApprovalWorkflowConfig,
+    /// 待人工审批的请求（`wait_for_approval` 通道，当前默认未接入）。
+    pub pending_approvals: Vec<ApprovalRequest>,
+    /// 待用户确认的操作指纹（"询问用户"降级链路，agent loop 追问中）。
+    pub pending_confirmations: Vec<String>,
+    /// 最近审批记录（审计，倒序 50 条）。
+    pub recent_records: Vec<ApprovalRecord>,
+    /// 用户已确认的操作指纹数量。
+    pub confirmed_action_count: usize,
+}
+
 impl ApprovalWorkflow {
     /// 创建新的审批工作流。
     pub fn new(config: ApprovalWorkflowConfig) -> Self {
@@ -248,6 +263,16 @@ impl ApprovalWorkflow {
             records: Arc::new(RwLock::new(Vec::new())),
             confirmed_actions: Arc::new(RwLock::new(HashSet::new())),
         }
+    }
+
+    /// 获取工作流配置（快照拷贝）。
+    pub fn config(&self) -> ApprovalWorkflowConfig {
+        self.config.clone()
+    }
+
+    /// 获取用户已确认的操作指纹数量。
+    pub async fn confirmed_action_count(&self) -> usize {
+        self.confirmed_actions.read().await.len()
     }
 
     /// 计算操作的稳定指纹（用于"用户已确认"的去重判定）。
