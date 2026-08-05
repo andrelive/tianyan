@@ -177,6 +177,33 @@ export interface MemoryListResponse {
   total: number;
 }
 
+// ========== Retrieval Trace Types (matches backend retrieval trace DTO) ==========
+
+export type RetrievalStepType =
+  'intent_analysis' | 'l0_search' | 'l1_search' | 'content_load' | 'aggregation';
+
+export interface RetrievalStep {
+  step_type: RetrievalStepType;
+  target_uri: MemoryUri;
+  score: number | null;
+  tokens_used: number;
+  timestamp: string;
+}
+
+export interface RetrievalTrace {
+  query: string;
+  steps: RetrievalStep[];
+  results: MemoryUri[];
+  total_tokens: number;
+  total_time_ms: number;
+  timestamp: string;
+}
+
+export interface RetrievalTracesResponse {
+  traces: RetrievalTrace[];
+  total: number;
+}
+
 // ========== Config Types (aligned with backend TianyanConfig) ==========
 
 export interface ConfigStatus {
@@ -322,7 +349,7 @@ export interface PreferencesInfo {
 
 // ========== App State Types ==========
 
-export type View = 'chat' | 'skills' | 'knowledge' | 'settings' | 'memory';
+export type View = 'chat' | 'skills' | 'knowledge' | 'settings' | 'memory' | 'traces';
 
 export type StreamStatus = 'idle' | 'streaming' | 'error';
 

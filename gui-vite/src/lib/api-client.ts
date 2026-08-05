@@ -6,6 +6,7 @@ import type {
   MemoryListResponse,
   OllamaScanResponse,
   OllamaTestResponse,
+  RetrievalTracesResponse,
   SessionMessagesResponse,
 } from './types';
 
@@ -256,4 +257,13 @@ export async function fetchKnowledgeEntryContent(
 /** 列出 VFS memory 命名空间全部条目（含 L0/L1/L2 内容）。 */
 export async function fetchMemories(): Promise<MemoryListResponse> {
   return apiGet<MemoryListResponse>('/memory');
+}
+
+// ========== Retrieval traces API ==========
+
+/** 获取最近检索轨迹（单次检索完整过程，limit 默认 20 上限 100）。 */
+export async function fetchRetrievalTraces(limit = 20): Promise<RetrievalTracesResponse> {
+  const params = new URLSearchParams();
+  params.set('limit', String(Math.min(limit, 100)));
+  return apiGet<RetrievalTracesResponse>(`/retrieval/traces?${params}`);
 }

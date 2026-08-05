@@ -9,6 +9,7 @@ import {
   Wrench,
   BookOpen,
   MemoryStick,
+  Route,
   Settings,
   Plus,
   PanelLeftClose,
@@ -30,6 +31,12 @@ const NAV_ITEMS = [
     label: '记忆',
     icon: MemoryStick,
     path: '/memory',
+  },
+  {
+    id: 'traces' as const,
+    label: '检索轨迹',
+    icon: Route,
+    path: '/traces',
   },
   {
     id: 'settings' as const,

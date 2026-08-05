@@ -8,6 +8,8 @@ import type {
   ModelsResponse,
   MemoryEntry,
   MemoryListResponse,
+  RetrievalTrace,
+  RetrievalTracesResponse,
 } from '@/lib/types';
 
 const API_BASE = '/api/v1';
@@ -279,6 +281,182 @@ export const mockMemories: MemoryEntry[] = [
   },
 ];
 
+// ========== Retrieval trace mock ==========
+
+export const mockRetrievalTraces: RetrievalTrace[] = [
+  {
+    query: 'VFS 双层摘要索引架构',
+    timestamp: '2026-07-23T09:00:00Z',
+    total_time_ms: 1280,
+    total_tokens: 2430,
+    steps: [
+      {
+        step_type: 'intent_analysis',
+        target_uri: {
+          uri: 'tianyan://knowledge/architecture/dual-layer-index',
+          namespace: 'knowledge',
+          path: ['architecture', 'dual-layer-index'],
+        },
+        score: null,
+        tokens_used: 320,
+        timestamp: '2026-07-23T09:00:00.100Z',
+      },
+      {
+        step_type: 'l0_search',
+        target_uri: {
+          uri: 'tianyan://knowledge/architecture/dual-layer-index',
+          namespace: 'knowledge',
+          path: ['architecture', 'dual-layer-index'],
+        },
+        score: 0.87,
+        tokens_used: 150,
+        timestamp: '2026-07-23T09:00:00.300Z',
+      },
+      {
+        step_type: 'l1_search',
+        target_uri: {
+          uri: 'tianyan://knowledge/architecture/vfs',
+          namespace: 'knowledge',
+          path: ['architecture', 'vfs'],
+        },
+        score: 0.72,
+        tokens_used: 260,
+        timestamp: '2026-07-23T09:00:00.550Z',
+      },
+      {
+        step_type: 'content_load',
+        target_uri: {
+          uri: 'tianyan://knowledge/architecture/dual-layer-index',
+          namespace: 'knowledge',
+          path: ['architecture', 'dual-layer-index'],
+        },
+        score: null,
+        tokens_used: 1100,
+        timestamp: '2026-07-23T09:00:00.800Z',
+      },
+      {
+        step_type: 'aggregation',
+        target_uri: {
+          uri: 'tianyan://knowledge/architecture/vfs',
+          namespace: 'knowledge',
+          path: ['architecture', 'vfs'],
+        },
+        score: null,
+        tokens_used: 600,
+        timestamp: '2026-07-23T09:00:01.200Z',
+      },
+    ],
+    results: [
+      {
+        uri: 'tianyan://knowledge/architecture/dual-layer-index',
+        namespace: 'knowledge',
+        path: ['architecture', 'dual-layer-index'],
+      },
+      {
+        uri: 'tianyan://knowledge/architecture/vfs',
+        namespace: 'knowledge',
+        path: ['architecture', 'vfs'],
+      },
+    ],
+  },
+  {
+    query: 'Rust 内存安全模式',
+    timestamp: '2026-07-23T09:05:00Z',
+    total_time_ms: 860,
+    total_tokens: 1540,
+    steps: [
+      {
+        step_type: 'intent_analysis',
+        target_uri: {
+          uri: 'tianyan://knowledge/rust/ownership',
+          namespace: 'knowledge',
+          path: ['rust', 'ownership'],
+        },
+        score: null,
+        tokens_used: 240,
+        timestamp: '2026-07-23T09:05:00.100Z',
+      },
+      {
+        step_type: 'l1_search',
+        target_uri: {
+          uri: 'tianyan://knowledge/rust/ownership',
+          namespace: 'knowledge',
+          path: ['rust', 'ownership'],
+        },
+        score: 0.64,
+        tokens_used: 180,
+        timestamp: '2026-07-23T09:05:00.400Z',
+      },
+      {
+        step_type: 'content_load',
+        target_uri: {
+          uri: 'tianyan://knowledge/rust/ownership',
+          namespace: 'knowledge',
+          path: ['rust', 'ownership'],
+        },
+        score: null,
+        tokens_used: 1120,
+        timestamp: '2026-07-23T09:05:00.700Z',
+      },
+    ],
+    results: [
+      {
+        uri: 'tianyan://knowledge/rust/ownership',
+        namespace: 'knowledge',
+        path: ['rust', 'ownership'],
+      },
+    ],
+  },
+  {
+    query: 'SQLite 单连接限制',
+    timestamp: '2026-07-23T09:10:00Z',
+    total_time_ms: 540,
+    total_tokens: 980,
+    steps: [
+      {
+        step_type: 'intent_analysis',
+        target_uri: {
+          uri: 'tianyan://knowledge/storage/sqlite-backend',
+          namespace: 'knowledge',
+          path: ['storage', 'sqlite-backend'],
+        },
+        score: null,
+        tokens_used: 210,
+        timestamp: '2026-07-23T09:10:00.100Z',
+      },
+      {
+        step_type: 'l0_search',
+        target_uri: {
+          uri: 'tianyan://knowledge/storage/sqlite-backend',
+          namespace: 'knowledge',
+          path: ['storage', 'sqlite-backend'],
+        },
+        score: 0.91,
+        tokens_used: 140,
+        timestamp: '2026-07-23T09:10:00.300Z',
+      },
+      {
+        step_type: 'aggregation',
+        target_uri: {
+          uri: 'tianyan://knowledge/storage/sqlite-backend',
+          namespace: 'knowledge',
+          path: ['storage', 'sqlite-backend'],
+        },
+        score: null,
+        tokens_used: 630,
+        timestamp: '2026-07-23T09:10:00.500Z',
+      },
+    ],
+    results: [
+      {
+        uri: 'tianyan://knowledge/storage/sqlite-backend',
+        namespace: 'knowledge',
+        path: ['storage', 'sqlite-backend'],
+      },
+    ],
+  },
+];
+
 // ========== Handler mapping ==========
 
 export const handlers = [
@@ -445,6 +623,15 @@ export const handlers = [
     const response: MemoryListResponse = {
       memories: mockMemories,
       total: mockMemories.length,
+    };
+    return HttpResponse.json(response);
+  }),
+
+  // Retrieval traces（后端为 GET /retrieval/traces）
+  http.get(`${API_BASE}/retrieval/traces`, () => {
+    const response: RetrievalTracesResponse = {
+      traces: mockRetrievalTraces,
+      total: mockRetrievalTraces.length,
     };
     return HttpResponse.json(response);
   }),
