@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   McpServerEntry,
   McpTestResponse,
+  MemoryListResponse,
   OllamaScanResponse,
   OllamaTestResponse,
   SessionMessagesResponse,
@@ -248,4 +249,11 @@ export async function fetchKnowledgeEntryContent(
   const params = new URLSearchParams({ uri });
   if (level) params.set('level', level);
   return apiGet<KnowledgeReadResponse>(`/knowledge/entries/read?${params}`);
+}
+
+// ========== Memory API ==========
+
+/** 列出 VFS memory 命名空间全部条目（含 L0/L1/L2 内容）。 */
+export async function fetchMemories(): Promise<MemoryListResponse> {
+  return apiGet<MemoryListResponse>('/memory');
 }

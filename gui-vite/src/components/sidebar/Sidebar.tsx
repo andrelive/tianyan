@@ -8,6 +8,7 @@ import {
   MessageSquare,
   Wrench,
   BookOpen,
+  MemoryStick,
   Settings,
   Plus,
   PanelLeftClose,
@@ -23,6 +24,12 @@ const NAV_ITEMS = [
     label: '知识',
     icon: BookOpen,
     path: '/knowledge',
+  },
+  {
+    id: 'memory' as const,
+    label: '记忆',
+    icon: MemoryStick,
+    path: '/memory',
   },
   {
     id: 'settings' as const,

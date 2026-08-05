@@ -11,6 +11,7 @@ import Toast from '@/components/layout/Toast';
 import ChatPanel from '@/components/chat/ChatPanel';
 import SkillsPanel from '@/components/skills/SkillsPanel';
 import KnowledgePanel from '@/components/knowledge/KnowledgePanel';
+import MemoryPanel from '@/components/memory/MemoryPanel';
 import SettingsPanel from '@/components/settings/SettingsPanel';
 import ConfigWizard from '@/components/wizard/ConfigWizard';
 
@@ -78,6 +79,7 @@ function App() {
           <Route path="/chat/:sessionId" element={<ChatPanel />} />
           <Route path="/skills" element={<SkillsPanel />} />
           <Route path="/knowledge" element={<KnowledgePanel />} />
+          <Route path="/memory" element={<MemoryPanel />} />
           <Route path="/settings" element={<SettingsPanel />} />
         </Route>
       </Routes>

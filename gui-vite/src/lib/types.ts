@@ -139,6 +139,44 @@ export interface KnowledgeSearchResponse {
   offset: number;
 }
 
+// ========== Memory Types ==========
+
+export interface MemoryUri {
+  uri: string;
+  namespace: string;
+  path: string[];
+}
+
+export interface MemoryEntryMetadata {
+  uri: MemoryUri;
+  is_directory: boolean;
+  content_type: string;
+  category: string | null;
+  source: string;
+  original_name: string | null;
+  file_size: number | null;
+  importance: number;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+  custom: Record<string, unknown>;
+}
+
+export interface MemoryEntry {
+  uri: string;
+  is_directory: boolean;
+  name: string | null;
+  metadata: MemoryEntryMetadata;
+  abstract: string | null;
+  overview: string | null;
+  detail: string | null;
+}
+
+export interface MemoryListResponse {
+  memories: MemoryEntry[];
+  total: number;
+}
+
 // ========== Config Types (aligned with backend TianyanConfig) ==========
 
 export interface ConfigStatus {
@@ -284,7 +322,7 @@ export interface PreferencesInfo {
 
 // ========== App State Types ==========
 
-export type View = 'chat' | 'skills' | 'knowledge' | 'settings';
+export type View = 'chat' | 'skills' | 'knowledge' | 'settings' | 'memory';
 
 export type StreamStatus = 'idle' | 'streaming' | 'error';
 

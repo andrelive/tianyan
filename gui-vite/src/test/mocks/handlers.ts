@@ -6,6 +6,8 @@ import type {
   ChatResponse,
   SkillListResponse,
   ModelsResponse,
+  MemoryEntry,
+  MemoryListResponse,
 } from '@/lib/types';
 
 const API_BASE = '/api/v1';
@@ -196,6 +198,87 @@ export const mockTianyanConfig = {
   },
 };
 
+// ========== Memory mock ==========
+
+export const mockMemories: MemoryEntry[] = [
+  {
+    uri: 'tianyan://memory/rules',
+    is_directory: true,
+    name: 'rules',
+    metadata: {
+      uri: { uri: 'tianyan://memory/rules', namespace: 'memory', path: ['rules'] },
+      is_directory: true,
+      content_type: 'directory',
+      category: null,
+      source: 'memory',
+      original_name: null,
+      file_size: null,
+      importance: 0,
+      tags: [],
+      created_at: '2026-07-20T10:00:00Z',
+      updated_at: '2026-07-23T09:00:00Z',
+      custom: {},
+    },
+    abstract: null,
+    overview: null,
+    detail: null,
+  },
+  {
+    uri: 'tianyan://memory/preferences/response_style',
+    is_directory: false,
+    name: 'response_style',
+    metadata: {
+      uri: {
+        uri: 'tianyan://memory/preferences/response_style',
+        namespace: 'memory',
+        path: ['preferences', 'response_style'],
+      },
+      is_directory: false,
+      content_type: 'text/plain',
+      category: 'preference',
+      source: 'MemoryTask',
+      original_name: 'response_style.md',
+      file_size: 512,
+      importance: 0.9,
+      tags: ['偏好', '风格'],
+      created_at: '2026-07-21T08:30:00Z',
+      updated_at: '2026-07-23T09:00:00Z',
+      custom: {},
+    },
+    abstract: '用户偏好简洁直接的回复风格，代码示例优先使用 Rust。',
+    overview:
+      '用户希望回复简洁直接，避免冗长铺垫；技术问答中优先给出 Rust 代码示例，并附一行说明。',
+    detail:
+      '用户偏好简洁直接的回复风格，代码示例优先使用 Rust。\n\n技术问答时：\n- 先给结论，再给解释\n- 代码示例默认使用 Rust 编写\n- 保留关键错误处理分支',
+  },
+  {
+    uri: 'tianyan://memory/facts/user_name',
+    is_directory: false,
+    name: 'user_name',
+    metadata: {
+      uri: {
+        uri: 'tianyan://memory/facts/user_name',
+        namespace: 'memory',
+        path: ['facts', 'user_name'],
+      },
+      is_directory: false,
+      content_type: 'text/plain',
+      category: 'fact',
+      source: 'MemoryTask',
+      original_name: 'user_name.md',
+      file_size: 128,
+      importance: 0.6,
+      tags: ['事实', '用户'],
+      created_at: '2026-07-22T11:00:00Z',
+      updated_at: '2026-07-22T11:00:00Z',
+      custom: {},
+    },
+    abstract: '用户昵称为「小天」。',
+    overview: null,
+    detail: null,
+  },
+];
+
 // ========== Handler mapping ==========
 
 export const handlers = [
@@ -298,7 +381,7 @@ export const handlers = [
     const encoder = new TextEncoder();
     const body = (await request.json()) as { messages?: { content?: string }[] };
     const msgs = body.messages ?? [];
-    const lastContent = msgs.length > 0 ? msgs[msgs.length - 1].content ?? '' : '';
+    const lastContent = msgs.length > 0 ? (msgs[msgs.length - 1].content ?? '') : '';
 
     const chunks = lastContent.includes('[error-test]')
       ? [
@@ -355,6 +438,15 @@ export const handlers = [
   // Knowledge entries（后端为 GET /knowledge/entries）
   http.get(`${API_BASE}/knowledge/entries`, () => {
     return HttpResponse.json({ entries: [], path: '' });
+  }),
+
+  // Memory（后端为 GET /memory）
+  http.get(`${API_BASE}/memory`, () => {
+    const response: MemoryListResponse = {
+      memories: mockMemories,
+      total: mockMemories.length,
+    };
+    return HttpResponse.json(response);
   }),
 
   // Config
