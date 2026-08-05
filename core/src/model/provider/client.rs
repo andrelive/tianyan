@@ -78,3 +78,78 @@ impl AsyncOpenAIClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ProviderConfig;
+
+    fn provider(name: &str, endpoint: &str, api_key: Option<&str>) -> ProviderConfig {
+        ProviderConfig {
+            name: name.to_string(),
+            endpoint: endpoint.to_string(),
+            api_key: api_key.map(|s| s.to_string()),
+            models: vec![],
+            timeout: 30,
+            enabled: true,
+            headers: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_from_provider_constructs_client() {
+        let config = provider("openai", "https://api.openai.com/v1", Some("sk-test"));
+        let client = AsyncOpenAIClient::from_provider(&config).expect("构造客户端");
+        assert_eq!(client.service_name(), "openai");
+    }
+
+    #[test]
+    fn test_from_provider_without_api_key() {
+        // 本地服务（Ollama 等）无密钥也应可构造
+        let config = provider("local", "http://localhost:11434/v1", None);
+        let client = AsyncOpenAIClient::from_provider(&config).expect("无密钥构造客户端");
+        assert_eq!(client.service_name(), "local");
+    }
+
+    #[test]
+    fn test_from_provider_rejects_empty_endpoint() {
+        let config = provider("bad", "", Some("sk-test"));
+        assert!(
+            AsyncOpenAIClient::from_provider(&config).is_err(),
+            "空 endpoint 应报错"
+        );
+    }
+
+    #[test]
+    fn test_from_provider_rejects_non_http_endpoint() {
+        let config = provider("bad", "api.openai.com/v1", Some("sk-test"));
+        assert!(
+            AsyncOpenAIClient::from_provider(&config).is_err(),
+            "非 http(s) endpoint 应报错"
+        );
+    }
+
+    #[test]
+    fn test_finish_reason_str_mapping() {
+        assert_eq!(
+            AsyncOpenAIClient::finish_reason_str(&FinishReason::Stop),
+            "stop"
+        );
+        assert_eq!(
+            AsyncOpenAIClient::finish_reason_str(&FinishReason::Length),
+            "length"
+        );
+        assert_eq!(
+            AsyncOpenAIClient::finish_reason_str(&FinishReason::ToolCalls),
+            "tool_calls"
+        );
+        assert_eq!(
+            AsyncOpenAIClient::finish_reason_str(&FinishReason::ContentFilter),
+            "content_filter"
+        );
+        assert_eq!(
+            AsyncOpenAIClient::finish_reason_str(&FinishReason::FunctionCall),
+            "function_call"
+        );
+    }
+}
