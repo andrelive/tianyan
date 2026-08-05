@@ -68,6 +68,61 @@ fn instance_running_on(rt: &tokio::runtime::Runtime, port: u16) -> bool {
     })
 }
 
+/// 构建系统托盘：左键单击显示主窗口，右键菜单（显示主窗口 / 退出）。
+///
+/// 「退出」走 `app.exit(0)` → RunEvent::ExitRequested 钩子 → 优雅关停链。
+/// 托盘句柄通过 `app.manage` 持有（drop 会移除托盘图标）。
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let Some(icon) = app.default_window_icon() else {
+        warn!("无默认窗口图标，跳过托盘构建");
+        return Ok(());
+    };
+
+    let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+    let tray = TrayIconBuilder::with_id("tianyan-tray")
+        .icon(icon.clone())
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "quit" => {
+                info!("托盘菜单：退出");
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // 左键单击：显示主窗口
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        })
+        .build(app)?;
+
+    app.manage(tray);
+    info!("系统托盘已启用（左键显示窗口，右键菜单退出）");
+    Ok(())
+}
+
 /// 服务器重启退避：初始间隔（首次重启等待时间）。
 const SERVER_RESTART_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 /// 服务器重启退避：最大间隔（崩溃风暴保护，指数增长封顶）。
@@ -529,6 +584,19 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        // 关闭窗口 → 最小化到托盘（退出流程中的窗口关闭放行）
+        .on_window_event({
+            let exiting = exiting.clone();
+            move |window, event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    if !exiting.load(Ordering::SeqCst) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        info!("窗口关闭 → 最小化到托盘（托盘菜单「退出」结束应用）");
+                    }
+                }
+            }
+        })
         .setup(move |app| {
             info!("Tauri setup completed, frontend loaded from gui/dist");
             // 注入实际监听端口：前端 getApiBase() 优先读取该变量
@@ -546,6 +614,7 @@ pub fn run() {
             }
             // 将 AppHandle 交给监督循环（服务器重启后注入新端口用）
             let _ = app_handle_tx.send(app.handle().clone());
+            build_tray(app)?;
             Ok(())
         })
         .build(tauri::generate_context!())

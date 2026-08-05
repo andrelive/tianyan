@@ -463,7 +463,7 @@ Tauri 是天演的桌面应用壳，负责窗口管理和服务器生命周期�
 | 文件 | 职责 |
 |------|------|
 | `lib.rs` | 应用入口：初始化日志、加载配置、启动服务器、健康检查、创建窗口 |
-| `server.rs` | 服务器启动封装：`start_axum_server` 和 `start_axum_server_blocking` |
+| `server.rs` | 服务器启动封装：`start_axum_server`（监督循环启动路径） |
 | `main.rs` | 二进制入口：调用 `tianyan_tauri_lib::run()` |
 
 ### 5.2 启动参数
@@ -492,3 +492,4 @@ Tauri lib.rs::run()
 **文档版本**: 2026-08-04
 **最后更新**: 2026-08-04（重构：storage→vfs，移除 planner/chunker/ModelRouter/TokenBudget/ConversationSummarizer/VisionEncoder/AgentHarness/AgentSkills wrapper，修正 ContentLoadStrategy→enum、L1 tokens→~2K、MemoryExtractionTrait→MemoryExtractor，反映 4 项核心架构决策，model/router+openai→provider，tasks→scheduler/tasks，executor 标注废弃，knowledge 确认未集成，session 确认已集成）
 **本轮更新**: 2026-08-04（审查改进 16 项：knowledge_ingest 工具确认已接入 Agent 流程；ToolRegistry 拆分 execute_single 为 14 个独立工具方法；审批默认关闭无人值守、拒绝降级 ask_user 追问；TianyanError 新增 not_found/is_not_found 结构化错误分类；AppState 复用 ModelServices；SummaryTask 缓存 FIFO 淘汰；SSE 事件 id 语义对齐）
+

@@ -63,26 +63,6 @@ pub async fn start_axum_server(
     }
 }
 
-/// 启动 Axum 服务（阻塞版本）
-///
-/// 此函数用于在单独的任务中启动服务器
-///
-/// # Arguments
-///
-/// * `tianyan_config` - Tianyan core 配置
-pub fn start_axum_server_blocking(tianyan_config: tianyan::config::TianyanConfig) {
-    let rt = tokio::runtime::Handle::current();
-    rt.spawn(async move {
-        let Some(listener) = find_available_port(PREFERRED_PORT) else {
-            error!("未找到可用端口（{} 起 100 个端口均被占用）", PREFERRED_PORT);
-            return;
-        };
-        // 无外部信号源：channel 永不触发，保持仅信号驱动的既有语义
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        start_axum_server(tianyan_config, listener, rx).await;
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
