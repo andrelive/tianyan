@@ -293,6 +293,7 @@ API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
 | `/api/v1/knowledge/entries/read` | GET | 读取知识条目内容 |
 | `/api/v1/memory` | GET | 记忆列表（VFS memory 命名空间浏览） |
 | `/api/v1/stats` | GET | 使用统计摘要（技能调用 / 文档访问 / 搜索热度） |
+| `/api/v1/retrieval/traces` | GET | 最近检索轨迹（单次检索完整过程，FIFO 500 条） |
 | `/api/v1/skills` | GET | 技能列表 |
 | `/api/v1/skills/{id}/execute` | POST | 执行技能 |
 | `/api/v1/skills/{id}/jobs/{job_id}/status` | GET | 技能执行状态 |

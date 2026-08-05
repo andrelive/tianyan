@@ -124,6 +124,12 @@ impl DualLayerRetriever {
 
         // 构建最终追踪记录。
         let trace = trace_builder.build();
+
+        // 持久化轨迹（完整过程快照，供调试界面回溯"为什么检索成这样"）。
+        if let Some(ref stats) = self.usage_stats {
+            stats.record_retrieval_trace(&trace);
+        }
+
         info!(
             query = %query,
             total_time_ms = trace.total_time_ms,

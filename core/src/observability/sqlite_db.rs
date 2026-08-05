@@ -102,6 +102,17 @@ const SCHEMA_SQL: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_daily_queries_date ON daily_search_queries(recorded_at);
 
+    -- 检索轨迹（单次检索完整过程，观测数据；写入即保留最近 N 条，由 UsageStats 控制）
+    CREATE TABLE IF NOT EXISTS retrieval_traces (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        query         TEXT    NOT NULL,
+        trace_json    TEXT    NOT NULL,
+        total_tokens  INTEGER NOT NULL,
+        total_time_ms INTEGER NOT NULL,
+        recorded_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_retrieval_traces_date ON retrieval_traces(recorded_at);
+
     -- 会话
     CREATE TABLE IF NOT EXISTS sessions (
         session_id   TEXT PRIMARY KEY,

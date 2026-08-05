@@ -5,7 +5,8 @@
 
 use std::sync::Arc;
 
-use axum::{extract::State, Json};
+use axum::{extract::Query, extract::State, Json};
+use serde::Deserialize;
 use serde_json::json;
 use tracing::info;
 
@@ -60,4 +61,29 @@ pub async fn get_stats_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let stats = state.usage_stats();
     Ok(Json(stats.query_summary().await))
+}
+
+/// 检索轨迹列表查询参数。
+#[derive(Debug, Deserialize)]
+pub struct TracesQuery {
+    /// 返回条数（默认 20，上限 100）。
+    #[serde(default = "default_trace_limit")]
+    pub limit: usize,
+}
+
+fn default_trace_limit() -> usize {
+    20
+}
+
+/// 返回最近的检索轨迹（单次检索的完整过程快照，供调试）。
+///
+/// 每条轨迹包含：查询、意图分析、每步搜索（URI/分数/Token）、
+/// 内容加载层级、总耗时——用于回溯"为什么这次检索成这样"。
+pub async fn list_traces_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TracesQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let limit = query.limit.min(100);
+    let traces = state.usage_stats().query_recent_traces(limit).await;
+    Ok(Json(json!({ "traces": traces, "total": traces.len() })))
 }

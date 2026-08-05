@@ -12,6 +12,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 
 use super::sqlite_db::SqliteDb;
+use crate::context::retrieval::RetrievalTrace;
 
 #[derive(Default)]
 struct SkillCounter {
@@ -140,6 +141,39 @@ impl UsageStats {
             rusqlite::params![query_text, result_count as i64, top_namespace],
         ) {
             tracing::warn!(error = %e, "统计存储错误：搜索查询写入失败");
+        }
+    }
+
+    /// 记录一次检索轨迹（完整过程快照，非热路径）。
+    ///
+    /// 轨迹保留最近 [`MAX_RETRIEVAL_TRACES`] 条，超出删除最旧（FIFO）。
+    pub fn record_retrieval_trace(&self, trace: &RetrievalTrace) {
+        let trace_json = match serde_json::to_string(trace) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!(error = %e, "统计存储错误：轨迹序列化失败");
+                return;
+            }
+        };
+        let conn = match self.db.try_lock() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "统计存储错误：检索轨迹跳过（数据库锁不可用）");
+                return;
+            }
+        };
+        if let Err(e) = conn.execute(
+            "INSERT INTO retrieval_traces (query, trace_json, total_tokens, total_time_ms) VALUES (?1,?2,?3,?4)",
+            rusqlite::params![trace.query, trace_json, trace.total_tokens as i64, trace.total_time_ms as i64],
+        ) {
+            tracing::warn!(error = %e, "统计存储错误：检索轨迹写入失败");
+            return;
+        }
+        if let Err(e) = conn.execute(
+            "DELETE FROM retrieval_traces WHERE id NOT IN (SELECT id FROM retrieval_traces ORDER BY id DESC LIMIT ?1)",
+            rusqlite::params![MAX_RETRIEVAL_TRACES],
+        ) {
+            tracing::warn!(error = %e, "统计存储错误：检索轨迹清理失败");
         }
     }
 
@@ -342,7 +376,38 @@ impl UsageStats {
         .unwrap_or(0);
         serde_json::json!({"total_skills_tracked":skills,"total_skill_calls":calls,"total_docs_tracked":docs,"total_searches":searches})
     }
+
+    /// 查询最近的检索轨迹（完整过程快照，供调试界面使用）。
+    ///
+    /// 返回按时间倒序的最新 `limit` 条；轨迹 JSON 解析失败的行被跳过。
+    pub async fn query_recent_traces(&self, limit: usize) -> Vec<RetrievalTrace> {
+        let conn = self.db.lock().await;
+        let mut stmt = match conn
+            .prepare("SELECT trace_json FROM retrieval_traces ORDER BY id DESC LIMIT ?1")
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "统计查询失败：检索轨迹 prepare 失败");
+                return Vec::new();
+            }
+        };
+        let rows: Vec<String> = match stmt.query_map(rusqlite::params![limit as i64], |row| {
+            row.get::<_, String>(0)
+        }) {
+            Ok(iter) => iter.filter_map(Result::ok).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "统计查询失败：检索轨迹查询失败");
+                return Vec::new();
+            }
+        };
+        rows.iter()
+            .filter_map(|j| serde_json::from_str::<RetrievalTrace>(j).ok())
+            .collect()
+    }
 }
+
+/// 检索轨迹保留上限（FIFO 淘汰）。
+const MAX_RETRIEVAL_TRACES: i64 = 500;
 
 #[cfg(test)]
 mod tests {
@@ -380,5 +445,51 @@ mod tests {
         stats.record_search_query("async rust", 5, Some("knowledge"));
         let hm = stats.query_search_heatmap().await;
         assert!(!hm["namespaces"].as_array().unwrap().is_empty());
+    }
+
+    fn sample_trace(query: &str) -> RetrievalTrace {
+        use crate::common::types::TianyanUri;
+        use crate::context::retrieval::{RetrievalStep, RetrievalStepType};
+        RetrievalTrace {
+            query: query.to_string(),
+            steps: vec![RetrievalStep {
+                step_type: RetrievalStepType::IntentAnalysis,
+                target_uri: TianyanUri::parse("tianyan://knowledge/x").unwrap(),
+                score: None,
+                tokens_used: 10,
+                timestamp: Utc::now(),
+            }],
+            results: vec![],
+            total_tokens: 10,
+            total_time_ms: 5,
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retrieval_trace_roundtrip() {
+        let stats = setup().await;
+        stats.record_retrieval_trace(&sample_trace("为什么没找到"));
+        let traces = stats.query_recent_traces(10).await;
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].query, "为什么没找到");
+        assert_eq!(traces[0].steps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_retrieval_trace_fifo_cap() {
+        let stats = setup().await;
+        for i in 0..(MAX_RETRIEVAL_TRACES + 10) {
+            stats.record_retrieval_trace(&sample_trace(&format!("query-{i}")));
+        }
+        let traces = stats.query_recent_traces(1000).await;
+        assert_eq!(
+            traces.len() as i64,
+            MAX_RETRIEVAL_TRACES,
+            "超出上限应 FIFO 淘汰"
+        );
+        // 最旧的 10 条（query-0..query-9）应被淘汰，query-10 起保留
+        assert!(traces.iter().any(|t| t.query == "query-10"));
+        assert!(!traces.iter().any(|t| t.query == "query-9"));
     }
 }
