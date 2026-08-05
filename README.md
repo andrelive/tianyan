@@ -118,12 +118,12 @@ tianyan/
 
 **Linux/macOS：**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tianyan/tianyan/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/andrelive/tianyan/master/scripts/install.sh | bash
 ```
 
 **Windows (PowerShell)：**
 ```powershell
-irm https://raw.githubusercontent.com/tianyan/tianyan/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/andrelive/tianyan/master/scripts/install.ps1 | iex
 ```
 
 ### 从源码构建
