@@ -7,6 +7,8 @@
 
 pub mod server;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::Manager;
 use tokio::time::sleep;
@@ -65,7 +67,7 @@ fn init_logging() {
 
     if let Some(file) = file_appender {
         let fmt_layer_file = tracing_subscriber::fmt::layer()
-            .with_writer(std::sync::Arc::new(file))
+            .with_writer(Arc::new(file))
             .with_ansi(false)
             .with_target(true)
             .with_thread_ids(true)
@@ -184,14 +186,16 @@ pub fn run() {
 
     // 启动 Axum 服务在后台任务，传入已绑定的 listener
     // 即使配置无效，也启动服务以支持配置向导 API
+    // 外部关闭信号：Tauri 退出时（RunEvent::ExitRequested）发送，触发优雅关停
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let config_clone = tianyan_config.clone();
-    rt.spawn(async move {
+    let server_task = Arc::new(Mutex::new(Some(rt.spawn(async move {
         info!(
             "Starting Axum server in background task on port {}...",
             port
         );
-        start_axum_server(config_clone, listener).await;
-    });
+        start_axum_server(config_clone, listener, shutdown_rx).await;
+    }))));
 
     // 等待服务器启动完成
     info!("Waiting for server to be ready...");
@@ -208,7 +212,7 @@ pub fn run() {
     // 构建并运行 Tauri 应用
     // Tauri 会自动加载 frontendDist 中配置的静态文件 (gui/dist)
     // 前端通过 HTTP 调用 Axum 后端 API
-    if let Err(e) = tauri::Builder::default()
+    let app = match tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
             info!("Tauri setup completed, frontend loaded from gui/dist");
@@ -227,9 +231,47 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
     {
-        error!("Tauri application error: {}", e);
-        std::process::exit(1);
-    }
+        Ok(app) => app,
+        Err(e) => {
+            error!("Tauri application build error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // 退出防重入：app.exit(0) 可能再次触发 ExitRequested
+    let exiting = Arc::new(AtomicBool::new(false));
+    let exiting_cb = exiting.clone();
+    let shutdown_tx_cb = shutdown_tx;
+    let server_task_cb = server_task;
+
+    app.run(move |app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            // 第二次进入（app.exit 重入）：不再拦截，让退出流程继续
+            if exiting_cb.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            api.prevent_exit();
+            info!("收到退出请求，开始优雅关闭内嵌服务器...");
+
+            // 触发 server 的优雅关停链（停止接收连接 → 停调度器 → 等 pending 任务，30s 超时）
+            if shutdown_tx_cb.send(true).is_err() {
+                warn!("服务器可能已不在运行（关闭信号发送失败）");
+            }
+
+            // 等待服务器任务完成，确保关停链走完再退出
+            let handle = match server_task_cb.lock() {
+                Ok(mut guard) => guard.take(),
+                Err(poisoned) => poisoned.into_inner().take(),
+            };
+            if let Some(handle) = handle {
+                if let Err(e) = rt.block_on(handle) {
+                    error!("内嵌服务器任务异常：{}", e);
+                }
+            }
+            info!("内嵌服务器已优雅关闭，退出应用");
+            app_handle.exit(0);
+        }
+    });
 }

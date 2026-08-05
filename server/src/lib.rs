@@ -341,6 +341,31 @@ pub async fn start_server_with_listener(
     listener: tokio::net::TcpListener,
     tianyan_config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<()> {
+    start_server_inner(listener, tianyan_config, None).await
+}
+
+/// 使用调用方已绑定的 listener + 外部关闭信号启动服务器。
+///
+/// 桌面端使用：Tauri 退出时通过 watch channel 发送关闭信号，
+/// 触发与 Ctrl+C / SIGTERM 相同的优雅关停链
+/// （停止接收连接 → 停止调度器 → 等待 pending 任务，30s 超时）。
+pub async fn start_server_with_shutdown_signal(
+    listener: tokio::net::TcpListener,
+    tianyan_config: tianyan::config::TianyanConfig,
+    shutdown_signal: watch::Receiver<bool>,
+) -> tianyan::common::error::Result<()> {
+    start_server_inner(listener, tianyan_config, Some(shutdown_signal)).await
+}
+
+/// 服务器主体：装配应用 → 监听 → 优雅关停。
+///
+/// `external_shutdown` 为 `Some` 时，外部关闭信号与 Ctrl+C/SIGTERM 并列监听；
+/// 为 `None` 时保持仅信号驱动（独立 server 二进制的既有语义）。
+async fn start_server_inner(
+    listener: tokio::net::TcpListener,
+    tianyan_config: tianyan::config::TianyanConfig,
+    external_shutdown: Option<watch::Receiver<bool>>,
+) -> tianyan::common::error::Result<()> {
     let has_providers = tianyan_config.models.providers.iter().any(|p| p.enabled);
     let (app, state) = create_app(tianyan_config).await?;
     let task_scheduler: Option<Arc<TaskScheduler>> = if has_providers {
@@ -458,6 +483,18 @@ pub async fn start_server_with_listener(
     // 监听关闭信号
     #[cfg(unix)]
     let shutdown_result = tokio::select! {
+        external_result = wait_external_shutdown(external_shutdown) => {
+            match external_result {
+                "external" => {
+                    info!("收到外部关闭信号（桌面端退出）");
+                    "external"
+                }
+                _ => {
+                    error!("外部关闭信号通道断开");
+                    "error"
+                }
+            }
+        },
         ctrl_c_result = tokio::signal::ctrl_c() => {
             match ctrl_c_result {
                 Ok(()) => {
@@ -506,6 +543,18 @@ pub async fn start_server_with_listener(
 
     #[cfg(not(unix))]
     let shutdown_result = tokio::select! {
+        external_result = wait_external_shutdown(external_shutdown) => {
+            match external_result {
+                "external" => {
+                    info!("收到外部关闭信号（桌面端退出）");
+                    "external"
+                }
+                _ => {
+                    error!("外部关闭信号通道断开");
+                    "error"
+                }
+            }
+        },
         ctrl_c_result = tokio::signal::ctrl_c() => {
             match ctrl_c_result {
                 Ok(()) => {
@@ -579,6 +628,22 @@ pub async fn start_server_with_listener(
     }
 
     Ok(())
+}
+
+/// 等待外部关闭信号。
+///
+/// 未提供信号源时永久挂起（保持仅 Ctrl+C/SIGTERM 驱动的既有语义）。
+async fn wait_external_shutdown(external: Option<watch::Receiver<bool>>) -> &'static str {
+    match external {
+        Some(mut rx) => {
+            if rx.changed().await.is_ok() {
+                "external"
+            } else {
+                "external_error"
+            }
+        }
+        None => std::future::pending().await,
+    }
 }
 
 /// Start the server with default configuration

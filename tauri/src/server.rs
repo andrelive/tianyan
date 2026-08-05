@@ -2,7 +2,7 @@
 //!
 //! This module handles the Axum server lifecycle within the Tauri application.
 
-use tianyan_server::start_server_with_listener;
+use tianyan_server::start_server_with_shutdown_signal;
 use tracing::{error, info};
 
 /// 服务器监听地址（仅本机回环，不对外暴露）。
@@ -34,9 +34,11 @@ pub fn find_available_port(preferred: u16) -> Option<std::net::TcpListener> {
 ///
 /// * `tianyan_config` - Tianyan core 配置
 /// * `listener` - 已绑定的监听 socket（由 [`find_available_port`] 提供）
+/// * `shutdown_signal` - 外部关闭信号：发送 `true` 触发与 Ctrl+C 相同的优雅关停
 pub async fn start_axum_server(
     tianyan_config: tianyan::config::TianyanConfig,
     listener: std::net::TcpListener,
+    shutdown_signal: tokio::sync::watch::Receiver<bool>,
 ) {
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     let listener = match listener.set_nonblocking(true) {
@@ -54,7 +56,9 @@ pub async fn start_axum_server(
     };
     info!("Starting Axum server on {}:{}", SERVER_HOST, port);
 
-    if let Err(e) = start_server_with_listener(listener, tianyan_config).await {
+    if let Err(e) =
+        start_server_with_shutdown_signal(listener, tianyan_config, shutdown_signal).await
+    {
         error!("Server error: {}", e);
     }
 }
@@ -73,7 +77,9 @@ pub fn start_axum_server_blocking(tianyan_config: tianyan::config::TianyanConfig
             error!("未找到可用端口（{} 起 100 个端口均被占用）", PREFERRED_PORT);
             return;
         };
-        start_axum_server(tianyan_config, listener).await;
+        // 无外部信号源：channel 永不触发，保持仅信号驱动的既有语义
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        start_axum_server(tianyan_config, listener, rx).await;
     });
 }
 
