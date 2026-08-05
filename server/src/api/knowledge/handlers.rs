@@ -8,8 +8,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::api::knowledge::services::KnowledgeService;
 use crate::api::knowledge::types::{
-    IngestRequest, IngestResponse, KnowledgeEntriesResponse, ListEntriesQuery, ReadEntryQuery,
-    ReadEntryResponse, SearchQuery, SearchResponse, SearchSuggestionsResponse,
+    DeleteEntryRequest, DeleteEntryResponse, IngestRequest, IngestResponse,
+    KnowledgeEntriesResponse, ListEntriesQuery, ReadEntryQuery, ReadEntryResponse, SearchQuery,
+    SearchResponse, SearchSuggestionsResponse,
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
@@ -164,4 +165,20 @@ pub async fn read_entry_handler(
         .read_entry(&query.uri, query.level.as_deref())
         .await?;
     Ok(Json(resp))
+}
+
+/// 删除知识库条目（递归删除子条目 + 同步清理向量索引）
+pub async fn delete_entry_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DeleteEntryRequest>,
+) -> Result<Json<DeleteEntryResponse>, ApiError> {
+    if request.uri.trim().is_empty() {
+        return Err(ApiError::BadRequest("条目 URI 不能为空".to_string()));
+    }
+
+    let ingestor = state.create_knowledge_ingestor().await?;
+    let vfs = state.vfs();
+    let service = KnowledgeService::new(Arc::new(ingestor), vfs);
+
+    service.delete_entry(&request.uri).await.map(Json)
 }

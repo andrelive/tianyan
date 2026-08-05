@@ -289,6 +289,7 @@ API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
 | `/api/v1/knowledge/search/suggestions` | GET | 搜索建议 |
 | `/api/v1/knowledge/entries` | GET | 知识条目列表 |
 | `/api/v1/knowledge/entries/read` | GET | 读取知识条目内容 |
+| `/api/v1/knowledge/entries/delete` | POST | 删除知识条目（递归删除子条目 + 同步清理向量索引） |
 | `/api/v1/memory` | GET | 记忆列表（VFS memory 命名空间浏览） |
 | `/api/v1/stats` | GET | 使用统计摘要（技能调用 / 文档访问 / 搜索热度） |
 | `/api/v1/retrieval/traces` | GET | 最近检索轨迹（单次检索完整过程，FIFO 500 条） |

@@ -256,6 +256,15 @@ export async function fetchKnowledgeEntryContent(
   return apiGet<KnowledgeReadResponse>(`/knowledge/entries/read?${params}`);
 }
 
+/** 删除知识库条目（递归删除子条目 + 同步清理向量索引）。 */
+export async function deleteKnowledgeEntry(
+  uri: string,
+): Promise<{ uri: string; success: boolean }> {
+  return apiPost<{ uri: string; success: boolean }>('/knowledge/entries/delete', {
+    uri,
+  });
+}
+
 // ========== Memory API ==========
 
 /** 列出 VFS memory 命名空间全部条目（含 L0/L1/L2 内容）。 */

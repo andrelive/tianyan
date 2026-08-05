@@ -9,9 +9,9 @@ use tianyan::knowledge::{IngestionRequest, KnowledgeCategory, KnowledgeIngestor}
 use tianyan::vfs::VirtualFileSystem;
 
 use crate::api::knowledge::types::{
-    FileIngestResult, IngestRequest, IngestResponse, KnowledgeEntriesResponse, KnowledgeEntryItem,
-    ReadEntryResponse, SearchQuery, SearchResponse, SearchResult, SearchResultMetadata,
-    SearchSuggestionsResponse,
+    DeleteEntryResponse, FileIngestResult, IngestRequest, IngestResponse, KnowledgeEntriesResponse,
+    KnowledgeEntryItem, ReadEntryResponse, SearchQuery, SearchResponse, SearchResult,
+    SearchResultMetadata, SearchSuggestionsResponse,
 };
 use crate::api::shared::error::ApiError;
 
@@ -257,6 +257,42 @@ impl KnowledgeService {
             uri: uri_str.to_string(),
             level: level_str.to_string(),
             content,
+        })
+    }
+
+    /// 删除知识库条目（递归删除子条目 + 同步清理向量索引）。
+    ///
+    /// 仅允许删除 knowledge 命名空间下的条目；不存在的条目返回 404。
+    pub async fn delete_entry(&self, uri_str: &str) -> Result<DeleteEntryResponse, ApiError> {
+        if !uri_str.starts_with(KNOWLEDGE_NAMESPACE) {
+            return Err(ApiError::BadRequest(
+                "仅允许删除知识库命名空间 (tianyan://knowledge/) 条目".to_string(),
+            ));
+        }
+
+        let uri = TianyanUri::parse(uri_str)
+            .map_err(|e| ApiError::BadRequest(format!("无效的条目 URI: {}", e)))?;
+
+        // 存在性检查：不存在的条目 → 404（幂等语义，避免 500）
+        let exists = self
+            .vfs
+            .exists(&uri)
+            .await
+            .map_err(|e| ApiError::Internal(format!("检查知识库条目失败: {}", e)))?;
+        if !exists {
+            return Err(ApiError::NotFound(format!("知识库条目未找到: {}", uri_str)));
+        }
+
+        // 递归删除：子条目 + SQLite vfs_entries + LanceDB 向量索引同步清理
+        self.vfs
+            .delete(&uri)
+            .await
+            .map_err(|e| ApiError::Internal(format!("删除知识库条目失败: {}", e)))?;
+
+        info!(uri = %uri_str, "知识库条目已删除");
+        Ok(DeleteEntryResponse {
+            uri: uri_str.to_string(),
+            success: true,
         })
     }
 }

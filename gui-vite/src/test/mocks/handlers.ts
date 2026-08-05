@@ -14,6 +14,7 @@ import type {
   SchedulerStatus,
   UsageStatsSummary,
 } from '@/lib/types';
+import type { KnowledgeEntryItem } from '@/lib/api-client';
 
 const API_BASE = '/api/v1';
 
@@ -104,6 +105,46 @@ export const mockKnowledgeResults = {
   offset: 0,
   suggestions: ['架构', 'VFS', 'Session'],
 };
+
+// 可变的浏览条目列表：delete handler 会从中移除条目，GET 返回当前状态。
+export const mockKnowledgeEntries: KnowledgeEntryItem[] = [
+  {
+    uri: 'tianyan://knowledge/architecture',
+    name: 'architecture',
+    is_directory: true,
+    has_abstract: false,
+    has_overview: false,
+    has_detail: false,
+  },
+  {
+    uri: 'tianyan://knowledge/architecture/dual-layer-index',
+    name: 'dual-layer-index',
+    is_directory: false,
+    has_abstract: true,
+    has_overview: true,
+    has_detail: true,
+  },
+  {
+    uri: 'tianyan://knowledge/rust/ownership',
+    name: 'ownership',
+    is_directory: false,
+    has_abstract: true,
+    has_overview: false,
+    has_detail: false,
+  },
+];
+
+const KNOWLEDGE_ENTRIES_BASE: KnowledgeEntryItem[] = [...mockKnowledgeEntries];
+
+/** 记录的知识条目删除调用（{ uri }），测试断言用。 */
+export const mockKnowledgeDeleteCalls: { uri: string }[] = [];
+
+/** 恢复知识条目 mock 到初始状态（delete 会就地修改 mockKnowledgeEntries）。 */
+export function resetKnowledgeEntryMocks() {
+  mockKnowledgeDeleteCalls.length = 0;
+  mockKnowledgeEntries.length = 0;
+  mockKnowledgeEntries.push(...KNOWLEDGE_ENTRIES_BASE);
+}
 
 // ========== Config mock ==========
 
@@ -713,7 +754,19 @@ export const handlers = [
 
   // Knowledge entries（后端为 GET /knowledge/entries）
   http.get(`${API_BASE}/knowledge/entries`, () => {
-    return HttpResponse.json({ entries: [], path: '' });
+    return HttpResponse.json({ entries: mockKnowledgeEntries, path: '' });
+  }),
+
+  // Knowledge entry delete（后端为 POST /knowledge/entries/delete，body: { uri }）
+  http.post(`${API_BASE}/knowledge/entries/delete`, async ({ request }) => {
+    const body = (await request.json()) as { uri?: string };
+    const uri = body.uri ?? '';
+    mockKnowledgeDeleteCalls.push({ uri });
+    const index = mockKnowledgeEntries.findIndex((entry) => entry.uri === uri);
+    if (index >= 0) {
+      mockKnowledgeEntries.splice(index, 1);
+    }
+    return HttpResponse.json({ uri, success: true });
   }),
 
   // Memory（后端为 GET /memory）

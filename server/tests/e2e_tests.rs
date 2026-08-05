@@ -311,3 +311,46 @@ async fn test_e2e_config_misc_endpoints() {
 
     server.shutdown();
 }
+
+#[tokio::test]
+async fn test_e2e_knowledge_delete_entry_endpoint() {
+    let (server, _dir) = start_real_server().await;
+
+    // 空 URI → 400
+    let resp = server
+        .post(
+            "/api/v1/knowledge/entries/delete",
+            &serde_json::json!({ "uri": "   " }),
+        )
+        .await;
+    assert_eq!(resp.status(), 400, "空 URI 应 400");
+
+    // 非 knowledge 命名空间 → 400（越权保护）
+    let resp = server
+        .post(
+            "/api/v1/knowledge/entries/delete",
+            &serde_json::json!({ "uri": "tianyan://memory/facts/user_name" }),
+        )
+        .await;
+    assert_eq!(resp.status(), 400, "非知识库命名空间应 400");
+
+    // 无效 URI 格式 → 400
+    let resp = server
+        .post(
+            "/api/v1/knowledge/entries/delete",
+            &serde_json::json!({ "uri": "not-a-uri" }),
+        )
+        .await;
+    assert_eq!(resp.status(), 400, "无效 URI 应 400");
+
+    // 不存在的条目 → 404
+    let resp = server
+        .post(
+            "/api/v1/knowledge/entries/delete",
+            &serde_json::json!({ "uri": "tianyan://knowledge/nonexistent-doc" }),
+        )
+        .await;
+    assert_eq!(resp.status(), 404, "不存在的知识条目应 404");
+
+    server.shutdown();
+}

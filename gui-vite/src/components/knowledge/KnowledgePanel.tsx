@@ -3,6 +3,7 @@ import { apiGet, apiPostMultipart } from '@/lib/api-client';
 import {
   fetchKnowledgeEntries,
   fetchKnowledgeEntryContent,
+  deleteKnowledgeEntry,
   type KnowledgeEntryItem,
 } from '@/lib/api-client';
 import type { KnowledgeSearchResult, KnowledgeSearchResponse } from '@/lib/types';
@@ -21,6 +22,7 @@ import {
   FolderTree,
   Folder,
   ChevronRight,
+  Trash2,
 } from 'lucide-react';
 
 type Tab = 'search' | 'ingest' | 'browse';
@@ -77,10 +79,24 @@ export default function KnowledgePanel() {
   const [browseLevel, setBrowseLevel] = useState('detail');
   const [browseContentLoading, setBrowseContentLoading] = useState(false);
   const [browsePath, setBrowsePath] = useState<string[]>([]);
+  // Browse delete state
+  const [confirmDeleteUri, setConfirmDeleteUri] = useState<string | null>(null);
+  const [deletingUri, setDeletingUri] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current) {
+        clearTimeout(confirmTimerRef.current);
+      }
+    };
+  }, []);
 
   const loadBrowseEntries = useCallback(async () => {
     setBrowseLoading(true);
     setBrowseError(null);
+    setDeleteError(null);
     try {
       const res = await fetchKnowledgeEntries(browsePath.join('/') || undefined);
       setBrowseEntries(res.entries);
@@ -113,6 +129,50 @@ export default function KnowledgePanel() {
       setBrowseContent(`加载失败: ${err instanceof Error ? err.message : '未知错误'}`);
     } finally {
       setBrowseContentLoading(false);
+    }
+  };
+
+  // Delete handlers（内联二次确认：5 秒未确认自动恢复）
+  const handleDeleteClick = (entry: KnowledgeEntryItem) => {
+    setDeleteError(null);
+    setConfirmDeleteUri(entry.uri);
+    if (confirmTimerRef.current) {
+      clearTimeout(confirmTimerRef.current);
+    }
+    confirmTimerRef.current = setTimeout(() => setConfirmDeleteUri(null), 5000);
+  };
+
+  const handleCancelDelete = () => {
+    if (confirmTimerRef.current) {
+      clearTimeout(confirmTimerRef.current);
+    }
+    setConfirmDeleteUri(null);
+  };
+
+  const handleConfirmDelete = async (entry: KnowledgeEntryItem) => {
+    if (confirmTimerRef.current) {
+      clearTimeout(confirmTimerRef.current);
+    }
+    setConfirmDeleteUri(null);
+    setDeletingUri(entry.uri);
+    setDeleteError(null);
+    try {
+      const res = await deleteKnowledgeEntry(entry.uri);
+      if (!res.success) {
+        setDeleteError('删除失败');
+        return;
+      }
+      // 删除的是展开查看中的条目则收起；目录被删则收起其子条目
+      setSelectedBrowseEntry((prev) => {
+        if (!prev) return null;
+        if (prev.uri === entry.uri || prev.uri.startsWith(`${entry.uri}/`)) return null;
+        return prev;
+      });
+      await loadBrowseEntries();
+    } catch (err: unknown) {
+      setDeleteError(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeletingUri(null);
     }
   };
 
@@ -445,6 +505,15 @@ export default function KnowledgePanel() {
                 <span>{browseError}</span>
               </div>
             )}
+            {deleteError && (
+              <div
+                role="alert"
+                className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
+              >
+                <AlertCircle size={16} />
+                <span>{deleteError}</span>
+              </div>
+            )}
             {browseLoading ? (
               <div className="flex items-center justify-center py-10">
                 <Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" />
@@ -454,10 +523,13 @@ export default function KnowledgePanel() {
                 {browseEntries.map((entry) => (
                   <div
                     key={entry.uri}
-                    onClick={() => handleBrowseView(entry)}
-                    className={`flex items-center justify-between px-3 py-2 rounded-md cursor-pointer transition-colors ${selectedBrowseEntry?.uri === entry.uri ? 'bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800' : 'border border-transparent hover:bg-[var(--color-bg-hover)]'}`}
+                    className={`flex items-center justify-between gap-2 px-3 py-2 rounded-md transition-colors ${selectedBrowseEntry?.uri === entry.uri ? 'bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800' : 'border border-transparent hover:bg-[var(--color-bg-hover)]'}`}
                   >
-                    <div className="flex items-center gap-2 min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => handleBrowseView(entry)}
+                      className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+                    >
                       {entry.is_directory ? (
                         <Folder size={16} className="shrink-0 text-yellow-500" />
                       ) : (
@@ -466,7 +538,56 @@ export default function KnowledgePanel() {
                       <span className="text-sm text-[var(--color-text-primary)] truncate">
                         {entry.name}
                       </span>
-                    </div>
+                    </button>
+                    {confirmDeleteUri === entry.uri ? (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {entry.is_directory && (
+                          <span className="text-xs text-red-600 dark:text-red-400">
+                            将同时删除其全部子条目
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleConfirmDelete(entry)}
+                          disabled={deletingUri === entry.uri}
+                          aria-label={`确认删除 ${entry.name}`}
+                          className="flex items-center gap-1 px-2 py-1 text-xs rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
+                        >
+                          {deletingUri === entry.uri ? (
+                            <Loader2 size={12} className="animate-spin" />
+                          ) : (
+                            <Trash2 size={12} />
+                          )}
+                          确认删除？
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleCancelDelete}
+                          className="px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteClick(entry)}
+                        disabled={deletingUri !== null}
+                        aria-label={`删除 ${entry.name}`}
+                        title={
+                          entry.is_directory
+                            ? `删除 ${entry.name}（将同时删除其全部子条目）`
+                            : `删除 ${entry.name}`
+                        }
+                        className="p-1.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-[var(--color-text-tertiary)] hover:text-red-500 disabled:opacity-50 shrink-0"
+                      >
+                        {deletingUri === entry.uri ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : (
+                          <Trash2 size={14} />
+                        )}
+                      </button>
+                    )}
                   </div>
                 ))}
                 {browseEntries.length === 0 && !browseLoading && !browseError && (

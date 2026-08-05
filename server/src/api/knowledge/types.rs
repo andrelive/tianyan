@@ -221,6 +221,22 @@ pub struct ReadEntryResponse {
     pub content: String,
 }
 
+/// 删除知识条目请求。
+#[derive(Debug, Deserialize)]
+pub struct DeleteEntryRequest {
+    /// 条目 URI（必须位于 tianyan://knowledge/ 命名空间）。
+    pub uri: String,
+}
+
+/// 删除知识条目响应。
+#[derive(Debug, Serialize)]
+pub struct DeleteEntryResponse {
+    /// 已删除的条目 URI。
+    pub uri: String,
+    /// 是否删除成功。
+    pub success: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
