@@ -21,7 +21,13 @@ impl SqliteDb {
     /// 打开（或创建）指定路径的 SQLite 数据库。
     pub fn open(path: PathBuf) -> Result<Self, rusqlite::Error> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    path = %parent.display(),
+                    error = %e,
+                    "创建数据库目录失败（数据库打开可能失败）"
+                );
+            }
         }
         let conn = Connection::open(&path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;

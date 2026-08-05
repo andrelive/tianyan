@@ -90,7 +90,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `skills` | `core/src/skills/` | 技能定义 + 执行 + GEPA 进化引擎 | ❌ **不全量加载**，L0 发现→L2 按需 |
 | `session` | `core/src/session/` | `PersistentSessionManager` — JSONL 持久化 | 会话文件仅通过 VFS 读写 |
 | `model` | `core/src/model/` | `ModelServices` 容器（不路由、不重试） | — |
-| `scheduler` | `core/src/scheduler/` | 定时任务（RuleTask、MemoryTask、SummaryTask） | 定时任务产物写入 VFS |
+| `scheduler` | `core/src/scheduler/` | 定时任务（RuleTask、MemoryTask、SummaryTask、GcTask） | 定时任务产物写入 VFS |
 | `observability` | `core/src/observability/` | `AgentMetrics` 可观测性存储 | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控） | — |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退） | ⚠️ **ADR-006 例外**：独立文件存储于 `{data_dir}/snapshots/`，不经 VFS |

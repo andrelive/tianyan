@@ -108,16 +108,17 @@ impl ChatService {
                 }
                 Err(e) => {
                     error!("流式处理错误: {}", e);
-                    let _ = tx
-                        .send(ChatStreamEvent {
-                            id: stream_id.clone(),
-                            session_id: session_id.clone(),
-                            delta: format!("错误: {}", e),
-                            finish_reason: Some("error".to_string()),
-                            chunk_type: tianyan::agent::StreamChunkType::Error,
-                            skill_calls: None,
-                        })
-                        .await;
+                    let event = ChatStreamEvent {
+                        id: stream_id.clone(),
+                        session_id: session_id.clone(),
+                        delta: format!("错误: {}", e),
+                        finish_reason: Some("error".to_string()),
+                        chunk_type: tianyan::agent::StreamChunkType::Error,
+                        skill_calls: None,
+                    };
+                    if tx.send(event).await.is_err() {
+                        debug!("客户端已断开，错误事件未送达");
+                    }
                     return Err(e.into());
                 }
             }

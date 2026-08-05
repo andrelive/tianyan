@@ -91,7 +91,13 @@ pub async fn chat_stream_handler(
                 skill_calls: None,
             };
             if let Ok(json) = serde_json::to_string(&event) {
-                let _ = tx_clone.send(Ok(Event::default().data(json))).await;
+                if tx_clone
+                    .send(Ok(Event::default().data(json)))
+                    .await
+                    .is_err()
+                {
+                    debug!("SSE 客户端已断开，错误事件未送达");
+                }
             }
         });
         return Sse::new(ReceiverStream::new(rx));

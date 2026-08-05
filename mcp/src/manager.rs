@@ -71,7 +71,9 @@ impl McpClientManager {
         if let Some(client) = guard.remove(name) {
             drop(guard);
             // Actually disconnect the client (shuts down subprocess)
-            let _ = client.disconnect().await;
+            if let Err(e) = client.disconnect().await {
+                tracing::warn!(server = %name, error = %e, "MCP 断开失败（子进程可能残留）");
+            }
             tracing::info!(server = %name, "MCP server unregistered from manager");
             Ok(())
         } else {
