@@ -178,3 +178,136 @@ async fn test_e2e_approval_respond_endpoint() {
 
     server.shutdown();
 }
+
+// ========== 核心链路补充（无 LLM 依赖的确定性路径） ==========
+
+#[tokio::test]
+async fn test_e2e_sessions_error_paths() {
+    let (server, _dir) = start_real_server().await;
+
+    // 不存在的会话 → 404（详情 / 消息 / 删除）
+    assert_eq!(
+        server.get("/api/v1/sessions/missing-001").await.status(),
+        404
+    );
+    assert_eq!(
+        server
+            .get("/api/v1/sessions/missing-001/messages")
+            .await
+            .status(),
+        404
+    );
+    let resp = server
+        .client()
+        .delete(format!("{}/api/v1/sessions/missing-001", server.base_url()))
+        .send()
+        .await
+        .expect("DELETE 请求失败");
+    assert_eq!(resp.status(), 404, "删除不存在的会话应返回 404");
+
+    // 消息操作（会话不存在 → 404）
+    let resp = server
+        .post(
+            "/api/v1/sessions/missing-001/messages/delete",
+            &serde_json::json!({ "message_index": 0 }),
+        )
+        .await;
+    assert_eq!(resp.status(), 404, "删除消息：会话不存在应 404");
+
+    let resp = server
+        .post(
+            "/api/v1/sessions/missing-001/messages/redo",
+            &serde_json::json!({ "message_index": 0 }),
+        )
+        .await;
+    assert_eq!(resp.status(), 404, "重做消息：会话不存在应 404");
+
+    let resp = server
+        .post(
+            "/api/v1/sessions/missing-001/title",
+            &serde_json::json!({ "title": "新标题" }),
+        )
+        .await;
+    assert_eq!(resp.status(), 404, "更新标题：会话不存在应 404");
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_e2e_skills_endpoints() {
+    let (server, _dir) = start_real_server().await;
+
+    // 技能列表（registry 装配，无 LLM 依赖）
+    let resp = server.get("/api/v1/skills").await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["skills"].is_array(), "skills 应为数组: {body}");
+
+    // 不存在的技能 → 同步执行器语义：200 + success=false
+    let resp = server
+        .post(
+            "/api/v1/skills/not-a-real-skill/execute",
+            &serde_json::json!({ "parameters": {} }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["success"], false,
+        "不存在的技能应返回 success=false: {body}"
+    );
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_e2e_knowledge_read_paths() {
+    let (server, _dir) = start_real_server().await;
+
+    // 空库条目列表（VFS 命名空间浏览，无 LLM 依赖）
+    let resp = server.get("/api/v1/knowledge/entries").await;
+    assert_eq!(resp.status(), 200, "空知识库条目列表应 200");
+
+    // search 缺 q → 400（参数校验）
+    let resp = server.get("/api/v1/knowledge/search").await;
+    assert_eq!(resp.status(), 400, "search 缺 q 应 400");
+
+    // entries/read 缺 uri → 400（参数校验）
+    let resp = server.get("/api/v1/knowledge/entries/read").await;
+    assert_eq!(resp.status(), 400, "entries/read 缺 uri 应 400");
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_e2e_config_misc_endpoints() {
+    let (server, _dir) = start_real_server().await;
+
+    // 配置状态
+    let resp = server.get("/api/v1/config/status").await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body.get("configured").is_some(),
+        "config/status 应含 configured 字段: {body}"
+    );
+
+    // soul（当前配置 + 默认人格）
+    assert_eq!(server.get("/api/v1/config/soul").await.status(), 200);
+    assert_eq!(
+        server.get("/api/v1/config/soul/default").await.status(),
+        200
+    );
+
+    // MCP 服务器列表
+    let resp = server.get("/api/v1/config/mcp/servers").await;
+    assert_eq!(resp.status(), 200);
+
+    // 未知配置节 → 200 + null（节不存在语义）
+    let resp = server.get("/api/v1/config/unknown-section").await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body.is_null(), "未知配置节应返回 null: {body}");
+
+    server.shutdown();
+}

@@ -244,6 +244,16 @@ impl SessionService {
             session_id, request.message_index
         );
 
+        // 0. 存在性检查：不存在的会话 → 404（优先于重做状态检查）
+        let exists = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .is_some();
+        if !exists {
+            return Err(ApiError::NotFound(format!("会话未找到: {}", session_id)));
+        }
+
         // 1. 恢复工作区文件 + 取出被截断的消息（快照管理器一次性语义）
         let Some((messages, restored)) = self
             .snapshot_manager
@@ -288,6 +298,16 @@ impl SessionService {
         session_id: &str,
     ) -> Result<DeleteSessionResponse, ApiError> {
         info!("删除会话: {}", session_id);
+
+        // 存在性检查：不存在的会话删除 → 404（幂等语义，避免 500）
+        let exists = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .is_some();
+        if !exists {
+            return Err(ApiError::NotFound(format!("会话未找到: {}", session_id)));
+        }
 
         self.session_manager.delete_session(session_id).await?;
 
