@@ -40,6 +40,8 @@ pub struct MockVfs {
     search_results: RwLock<Vec<SearchResult>>,
     /// 搜索错误（Some = 模拟搜索失败）
     search_error: RwLock<Option<String>>,
+    /// move_entry 调用记录（(src, dst)），供断言归档/移动行为
+    moved: RwLock<Vec<(String, String)>>,
 }
 
 impl MockVfs {
@@ -51,6 +53,7 @@ impl MockVfs {
             exists: RwLock::new(HashMap::new()),
             search_results: RwLock::new(vec![]),
             search_error: RwLock::new(None),
+            moved: RwLock::new(vec![]),
         }
     }
 
@@ -90,6 +93,28 @@ impl MockVfs {
     /// 设置指定 URI 的 exists() 返回值。
     pub fn set_exists(&self, uri: &TianyanUri, val: bool) {
         self.exists.write().unwrap().insert(uri.to_string(), val);
+    }
+
+    /// 在指定目录下添加条目（可指定更新时间，用于模拟过期内容）。
+    pub fn add_entry_with_updated_at(
+        &self,
+        dir_uri: &TianyanUri,
+        entry_uri: &TianyanUri,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        let mut entry = ContextEntry::new_file(entry_uri.clone());
+        entry.metadata.updated_at = updated_at;
+        self.entries
+            .write()
+            .unwrap()
+            .entry(dir_uri.to_string())
+            .or_default()
+            .push(entry);
+    }
+
+    /// 返回 move_entry 调用记录（(src, dst) 字符串对）。
+    pub fn move_calls(&self) -> Vec<(String, String)> {
+        self.moved.read().unwrap().clone()
     }
 
     /// 设置搜索结果。
@@ -143,7 +168,13 @@ impl VfsCore for MockVfs {
     }
 
     async fn delete(&self, uri: &TianyanUri) -> Result<()> {
-        self.entries.write().unwrap().remove(&uri.to_string());
+        // 条目存储在各目录的 Vec 中：从所有目录移除匹配条目
+        {
+            let mut entries = self.entries.write().unwrap();
+            for list in entries.values_mut() {
+                list.retain(|e| e.uri() != uri);
+            }
+        }
         self.content
             .write()
             .unwrap()
@@ -164,7 +195,11 @@ impl VfsCore for MockVfs {
         Ok(entries)
     }
 
-    async fn move_entry(&self, _src: &TianyanUri, _dst: &TianyanUri) -> Result<()> {
+    async fn move_entry(&self, src: &TianyanUri, dst: &TianyanUri) -> Result<()> {
+        self.moved
+            .write()
+            .unwrap()
+            .push((src.to_string(), dst.to_string()));
         Ok(())
     }
 

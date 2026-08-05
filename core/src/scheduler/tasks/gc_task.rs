@@ -331,3 +331,172 @@ impl TaskHandler for GcTask {
         "garbage_collection"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use std::sync::Arc;
+
+    use crate::common::types::ContextNamespace;
+    use crate::memory::{ExtractionConfig, MemoryExtractor};
+    use crate::model::{ChatService, EmbeddingService};
+    use crate::test_utils::{MockChatService, MockEmbeddingService, MockVfs};
+    use crate::vfs::{SummaryEngine, VfsCore};
+
+    /// 构造 GC 测试上下文（MockVfs + mock 服务，GC 仅使用 vfs）。
+    fn make_context(vfs: Arc<MockVfs>) -> TaskContext {
+        let chat: Arc<dyn ChatService> = Arc::new(MockChatService::new());
+        let embedding: Arc<dyn EmbeddingService> = Arc::new(MockEmbeddingService);
+        let summary_engine = Arc::new(SummaryEngine::new(
+            chat.clone(),
+            embedding,
+            "test-model",
+            "test-embedding",
+        ));
+        let memory_extractor = Arc::new(MemoryExtractor::new(chat, ExtractionConfig::default()));
+        let config = Arc::new(crate::config::TianyanConfig::default());
+        TaskContext::new(vfs, summary_engine, memory_extractor, config)
+    }
+
+    fn learned_uri(name: &str) -> TianyanUri {
+        AgentPath::Learned.uri().append(name)
+    }
+
+    fn memory_uri(name: &str) -> TianyanUri {
+        TianyanUri::new(ContextNamespace::Memory, vec![]).append(name)
+    }
+
+    // ── scan_learned_rules ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_scan_learned_rules_archives_stale_rule() {
+        let vfs = Arc::new(MockVfs::new());
+        let learned_dir = AgentPath::Learned.uri();
+        vfs.add_entry_with_updated_at(
+            &learned_dir,
+            &learned_uri("stale-rule"),
+            Utc::now() - ChronoDuration::days(40), // 超过 30 天阈值
+        );
+        vfs.add_entry_with_updated_at(
+            &learned_dir,
+            &learned_uri("fresh-rule"),
+            Utc::now() - ChronoDuration::days(1),
+        );
+
+        let ctx = make_context(vfs.clone());
+        let stale = GcTask::new().scan_learned_rules(&ctx).await.unwrap();
+
+        assert_eq!(stale, 1, "仅过时规则应计数");
+        let moves = vfs.move_calls();
+        assert_eq!(moves.len(), 1, "仅过时规则应被归档");
+        assert_eq!(
+            moves[0],
+            (
+                learned_uri("stale-rule").to_string(),
+                AgentPath::Learned
+                    .uri()
+                    .append("archive")
+                    .append("stale-rule")
+                    .to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_learned_rules_keeps_fresh_rule() {
+        let vfs = Arc::new(MockVfs::new());
+        vfs.add_entry_with_updated_at(
+            &AgentPath::Learned.uri(),
+            &learned_uri("fresh-rule"),
+            Utc::now() - ChronoDuration::days(1),
+        );
+
+        let ctx = make_context(vfs.clone());
+        let stale = GcTask::new().scan_learned_rules(&ctx).await.unwrap();
+
+        assert_eq!(stale, 0, "新规则不应计数");
+        assert!(vfs.move_calls().is_empty(), "新规则不应被归档");
+    }
+
+    // ── scan_memory ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_scan_memory_deletes_expired_memory() {
+        let vfs = Arc::new(MockVfs::new());
+        let mem_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+        vfs.add_entry_with_updated_at(
+            &mem_root,
+            &memory_uri("expired-fact"),
+            Utc::now() - ChronoDuration::days(120), // 超过 90 天 TTL
+        );
+        vfs.add_entry_with_updated_at(
+            &mem_root,
+            &memory_uri("recent-fact"),
+            Utc::now() - ChronoDuration::days(1),
+        );
+
+        let ctx = make_context(vfs.clone());
+        let cleaned = GcTask::new().scan_memory(&ctx).await.unwrap();
+
+        assert_eq!(cleaned, 1, "仅过期记忆应被清理");
+        let remaining = vfs.list(&mem_root).await.unwrap();
+        assert_eq!(remaining.len(), 1, "过期记忆应从 VFS 移除");
+        assert_eq!(
+            remaining[0].uri().path().last().map(|s| s.as_str()),
+            Some("recent-fact"),
+            "新记忆应保留"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_memory_keeps_fresh_memory() {
+        let vfs = Arc::new(MockVfs::new());
+        vfs.add_entry_with_updated_at(
+            &TianyanUri::new(ContextNamespace::Memory, vec![]),
+            &memory_uri("recent-fact"),
+            Utc::now() - ChronoDuration::days(1),
+        );
+
+        let ctx = make_context(vfs.clone());
+        let cleaned = GcTask::new().scan_memory(&ctx).await.unwrap();
+
+        assert_eq!(cleaned, 0, "新记忆不应被清理");
+        assert_eq!(
+            vfs.list(&TianyanUri::new(ContextNamespace::Memory, vec![]))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_memory_skips_when_auto_cleanup_disabled() {
+        let vfs = Arc::new(MockVfs::new());
+        vfs.add_entry_with_updated_at(
+            &TianyanUri::new(ContextNamespace::Memory, vec![]),
+            &memory_uri("expired-fact"),
+            Utc::now() - ChronoDuration::days(120),
+        );
+
+        // 同模块可直接构造私有字段（模拟 auto_cleanup=false 配置）
+        let task = GcTask {
+            auto_cleanup: false,
+            memory_ttl_days: DEFAULT_MEMORY_TTL_DAYS,
+            rule_stale_days: DEFAULT_RULE_STALE_DAYS,
+        };
+        let ctx = make_context(vfs.clone());
+        let cleaned = task.scan_memory(&ctx).await.unwrap();
+
+        assert_eq!(cleaned, 0, "关闭自动清理时不应删除任何记忆");
+        assert_eq!(
+            vfs.list(&TianyanUri::new(ContextNamespace::Memory, vec![]))
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "过期记忆应保留"
+        );
+    }
+}
