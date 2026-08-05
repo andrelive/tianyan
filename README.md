@@ -5,7 +5,6 @@
 [![CI](https://github.com/andrelive/tianyan/workflows/CI/badge.svg)](https://github.com/andrelive/tianyan/actions/workflows/ci.yml)
 [![Release](https://github.com/andrelive/tianyan/workflows/Release/badge.svg)](https://github.com/andrelive/tianyan/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 
 ## 概述
 
@@ -94,7 +93,7 @@ tianyan/
 
 | 组件 | 版本 | 说明 |
 |-----|------|------|
-| **Rust** | 1.75+ | 2021 Edition |
+| **Rust** | stable（由 `rust-toolchain.toml` 管理） | 2021 Edition |
 | **React** | 18.3 | TypeScript 前端框架 |
 | **Vite** | 5.4 | 前端构建工具 |
 | **Axum** | 0.8 | HTTP 后端框架 |
@@ -108,7 +107,7 @@ tianyan/
 
 ### 前置要求
 
-- **Rust** 1.75 或更高版本
+- **Rust**（stable 通道，由 `rust-toolchain.toml` 管理）
 - **Node.js** 18+（用于前端构建）
 - **LanceDB** 嵌入式向量数据库（无需外部服务）
 - **Tauri CLI**: `cargo install tauri-cli`
