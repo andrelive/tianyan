@@ -46,6 +46,131 @@ fn instance_running_on(rt: &tokio::runtime::Runtime, port: u16) -> bool {
     })
 }
 
+/// 服务器重启退避：初始间隔（首次重启等待时间）。
+const SERVER_RESTART_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+/// 服务器重启退避：最大间隔（崩溃风暴保护，指数增长封顶）。
+const SERVER_RESTART_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// 服务器监督循环：监控内嵌服务器任务，异常结束后自动重启。
+///
+/// 重启流程：退避等待 → 重新绑定端口（原端口已释放自然拿回）→
+/// 创建新关闭信号通道（watch 版本变化后旧 receiver 不可复用）→
+/// 启动新任务 → 等待就绪 → 重新注入 API base 端口（前端动态读取，自动生效）。
+///
+/// 退出流程（[`crate::run`] 的 ExitRequested 钩子置位 `exiting` 后）不再重启，
+/// 并正常结束以便退出钩子 join。
+async fn run_server_supervisor(
+    server_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    exiting: Arc<AtomicBool>,
+    shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
+    app_handle_rx: tokio::sync::oneshot::Receiver<tauri::AppHandle>,
+    config: tianyan::config::TianyanConfig,
+) {
+    // 等待 setup 完成（AppHandle 就绪后才能注入端口）
+    let app_handle = match app_handle_rx.await {
+        Ok(handle) => handle,
+        Err(_) => {
+            warn!("AppHandle 通道关闭，监督循环退出");
+            return;
+        }
+    };
+
+    let mut backoff = SERVER_RESTART_BACKOFF_INITIAL;
+
+    loop {
+        // 取出当前任务句柄并等待其结束
+        let handle = match server_task.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(handle) = handle else {
+            info!("服务器任务句柄已不存在，监督循环退出");
+            return;
+        };
+        if let Err(e) = handle.await {
+            error!("内嵌服务器任务异常结束：{}", e);
+        } else {
+            info!("内嵌服务器任务已结束");
+        }
+
+        // 退出流程中（用户关闭应用）不再重启
+        if exiting.load(Ordering::SeqCst) {
+            info!("应用退出流程中，监督循环退出");
+            return;
+        }
+
+        // 退避后重启（崩溃风暴保护：1s → 2s → 4s → ... → 30s 封顶）
+        warn!("内嵌服务器已停止，{:.1}s 后尝试重启", backoff.as_secs_f32());
+        sleep(backoff).await;
+        backoff = next_backoff(backoff, SERVER_RESTART_BACKOFF_MAX);
+
+        // 退出流程可能在退避期间触发
+        if exiting.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // 重新绑定端口：原端口已释放（任务结束），自然拿回；被外部抢占则顺延
+        let Some(listener) = find_available_port(PREFERRED_PORT) else {
+            error!("重启失败：未找到可用端口，监督循环退出");
+            return;
+        };
+        let port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(e) => {
+                error!("重启失败：读取监听地址失败：{}", e);
+                continue;
+            }
+        };
+
+        // 新关闭信号通道（watch 版本已变化，不可复用旧 receiver）
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        *shutdown_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+
+        let config_clone = config.clone();
+        let handle = tokio::spawn(async move {
+            info!("Restarting Axum server on port {}...", port);
+            start_axum_server(config_clone, listener, rx).await;
+        });
+        *server_task.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+
+        // 等待重启就绪并重新注入端口（前端 getApiBase() 动态读取，自动生效）
+        match wait_for_server_ready(port).await {
+            Ok(()) => {
+                backoff = SERVER_RESTART_BACKOFF_INITIAL;
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let _ = window.eval(format!(
+                        "window.__TIANYAN_API_BASE__ = 'http://{}:{}';",
+                        SERVER_HOST, port
+                    ));
+                }
+                info!("内嵌服务器重启成功，端口 {}", port);
+            }
+            Err(e) => {
+                error!("重启后服务器未就绪（{}），将进入下一轮重试", e);
+                // 任务可能仍在运行：发关闭信号强制退出，
+                // 下一轮循环 take 该句柄并等待其结束
+                if let Some(tx) = shutdown_tx
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone()
+                {
+                    let _ = tx.send(true);
+                }
+            }
+        }
+    }
+}
+
+/// 重启退避计算：指数增长，封顶 `max`。
+fn next_backoff(current: Duration, max: Duration) -> Duration {
+    let doubled = current * 2;
+    if doubled >= max {
+        max
+    } else {
+        doubled
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +230,30 @@ mod tests {
         let port = probe.local_addr().expect("读取端口").port();
         drop(probe);
         assert!(!instance_running_on(&rt, port), "空闲端口不应探测到实例");
+    }
+
+    #[test]
+    fn test_next_backoff_doubles_exponentially() {
+        assert_eq!(
+            next_backoff(Duration::from_secs(1), Duration::from_secs(30)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(4), Duration::from_secs(30)),
+            Duration::from_secs(8)
+        );
+    }
+
+    #[test]
+    fn test_next_backoff_caps_at_max() {
+        assert_eq!(
+            next_backoff(Duration::from_secs(16), Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(30), Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
     }
 }
 
@@ -282,20 +431,32 @@ pub fn run() {
         info!("端口 {} 已被占用，动态选择端口 {}", PREFERRED_PORT, port);
     }
 
-    // 启动 Axum 服务在后台任务，传入已绑定的 listener
-    // 即使配置无效，也启动服务以支持配置向导 API
-    // 外部关闭信号：Tauri 退出时（RunEvent::ExitRequested）发送，触发优雅关停
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let config_clone = tianyan_config.clone();
-    let server_task = Arc::new(Mutex::new(Some(rt.spawn(async move {
-        info!(
-            "Starting Axum server in background task on port {}...",
-            port
-        );
-        start_axum_server(config_clone, listener, shutdown_rx).await;
-    }))));
+    // ===== 服务器监督基础设施 =====
+    // 当前 server 任务句柄（监督循环与退出钩子共享）
+    let server_task = Arc::new(Mutex::new(None::<tokio::task::JoinHandle<()>>));
+    // 退出流程标志：置位后监督循环不再重启服务器
+    let exiting = Arc::new(AtomicBool::new(false));
+    // 当前活跃的关闭信号 sender（跨重启替换：watch 版本变化后旧 receiver 不可复用）
+    let shutdown_tx = Arc::new(Mutex::new(None::<tokio::sync::watch::Sender<bool>>));
+    // AppHandle 通道：setup 完成后交给监督循环（重启时注入端口用）
+    let (app_handle_tx, app_handle_rx) = tokio::sync::oneshot::channel();
 
-    // 等待服务器启动完成
+    // 启动初始 server 任务（listener 已绑定，见上方 find_available_port）
+    {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        *shutdown_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+        let config_clone = tianyan_config.clone();
+        let handle = rt.spawn(async move {
+            info!(
+                "Starting Axum server in background task on port {}...",
+                port
+            );
+            start_axum_server(config_clone, listener, rx).await;
+        });
+        *server_task.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+    }
+
+    // 等待服务器启动完成（初始启动失败是环境问题，直接退出）
     info!("Waiting for server to be ready...");
     rt.block_on(async {
         if let Err(e) = wait_for_server_ready(port).await {
@@ -304,6 +465,15 @@ pub fn run() {
         }
         info!("Axum server is ready, proceeding to start Tauri...");
     });
+
+    // 监督循环：server 任务异常结束后自动重启（退避重试 + 重新注入端口）
+    let supervisor_task = rt.spawn(run_server_supervisor(
+        server_task.clone(),
+        exiting.clone(),
+        shutdown_tx.clone(),
+        app_handle_rx,
+        tianyan_config,
+    ));
 
     info!("Initializing Tauri application...");
 
@@ -335,6 +505,8 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.open_devtools();
             }
+            // 将 AppHandle 交给监督循环（服务器重启后注入新端口用）
+            let _ = app_handle_tx.send(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -347,10 +519,9 @@ pub fn run() {
     };
 
     // 退出防重入：app.exit(0) 可能再次触发 ExitRequested
-    let exiting = Arc::new(AtomicBool::new(false));
     let exiting_cb = exiting.clone();
     let shutdown_tx_cb = shutdown_tx;
-    let server_task_cb = server_task;
+    let mut supervisor_task = Some(supervisor_task);
 
     app.run(move |app_handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
@@ -362,18 +533,20 @@ pub fn run() {
             info!("收到退出请求，开始优雅关闭内嵌服务器...");
 
             // 触发 server 的优雅关停链（停止接收连接 → 停调度器 → 等 pending 任务，30s 超时）
-            if shutdown_tx_cb.send(true).is_err() {
-                warn!("服务器可能已不在运行（关闭信号发送失败）");
+            if let Some(tx) = shutdown_tx_cb
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+            {
+                if tx.send(true).is_err() {
+                    warn!("服务器可能已不在运行（关闭信号发送失败）");
+                }
             }
 
-            // 等待服务器任务完成，确保关停链走完再退出
-            let handle = match server_task_cb.lock() {
-                Ok(mut guard) => guard.take(),
-                Err(poisoned) => poisoned.into_inner().take(),
-            };
-            if let Some(handle) = handle {
-                if let Err(e) = rt.block_on(handle) {
-                    error!("内嵌服务器任务异常：{}", e);
+            // 监督循环在服务器任务结束后（检查退出标志后）退出
+            if let Some(task) = supervisor_task.take() {
+                if let Err(e) = rt.block_on(task) {
+                    error!("服务器监督循环异常：{}", e);
                 }
             }
             info!("内嵌服务器已优雅关闭，退出应用");
