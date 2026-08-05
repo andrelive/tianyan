@@ -63,3 +63,34 @@ async fn test_e2e_sessions_endpoint_roundtrip() {
 
     server.shutdown();
 }
+
+#[tokio::test]
+async fn test_e2e_memory_browse_endpoint() {
+    let (server, _dir) = start_real_server().await;
+
+    // 记忆浏览（真实 handler：VFS memory 命名空间读取）
+    let resp = server.get("/api/v1/memory").await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let memories = body["memories"].as_array().expect("memories 应为数组");
+    assert!(memories.is_empty(), "新数据目录应无记忆: {body}");
+    assert_eq!(body["total"], 0);
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_e2e_stats_endpoint() {
+    let (server, _dir) = start_real_server().await;
+
+    // 统计摘要（真实 handler：UsageStats 查询，空库也应返回结构完整 JSON）
+    let resp = server.get("/api/v1/stats").await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body.is_object() && !body.as_object().unwrap().is_empty(),
+        "stats 应返回统计对象: {body}"
+    );
+
+    server.shutdown();
+}

@@ -19,6 +19,7 @@ use std::sync::Arc;
 // 领域模块
 pub mod chat;
 pub mod config;
+pub mod insights;
 pub mod knowledge;
 pub mod sessions;
 pub mod shared;
@@ -57,6 +58,7 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .merge(knowledge::routes())
         .merge(skills::routes())
         .merge(config::routes())
+        .merge(insights::routes())
 }
 
 #[cfg(test)]

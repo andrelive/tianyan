@@ -286,6 +286,14 @@ impl AppState {
         self.skill_executor.clone()
     }
 
+    /// 获取使用统计追踪器
+    ///
+    /// # Returns
+    /// * `Arc<UsageStats>` - 使用统计追踪器实例
+    pub fn usage_stats(&self) -> Arc<UsageStats> {
+        self.usage_stats.clone()
+    }
+
     /// 获取共享模型服务（配置热更新后自动指向新实例）。
     async fn shared_model_services(&self) -> TianyanResult<tianyan::model::ModelServices> {
         Ok(self.model_services.read().await.clone())
