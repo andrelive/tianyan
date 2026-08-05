@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::agent::tool_params::{
@@ -39,6 +41,22 @@ fn vfs_content_field(result: crate::common::error::Result<String>) -> String {
     }
 }
 
+/// 动态工具执行器：供外部桥接（如 MCP 工具桥接）扩展工具注册表。
+///
+/// 注册的动态工具与内置工具享有同等地位：定义进入 LLM 可见的
+/// tool definitions，执行走 `execute_single` 的统一路径（含统计与失败学习）。
+#[async_trait]
+pub trait DynamicToolExecutor: Send + Sync {
+    /// 工具名称（须与 [`Self::definition`] 中的 name 一致）。
+    fn tool_name(&self) -> String;
+
+    /// 工具定义（OpenAI function calling schema）。
+    fn definition(&self) -> ToolDefinition;
+
+    /// 执行工具调用。
+    async fn execute(&self, arguments: &str) -> crate::common::error::Result<serde_json::Value>;
+}
+
 /// 工具注册表，维护工具定义并并行执行 tool_calls。
 #[derive(Clone)]
 pub struct ToolRegistry {
@@ -61,6 +79,8 @@ pub struct ToolRegistry {
     /// 使用统计追踪器（技能调用频率、文档访问热度）。
     pub(crate) usage_stats: Option<Arc<UsageStats>>,
     definitions: Vec<ToolDefinition>,
+    /// 外部注册的动态工具（如 MCP 工具桥接），按工具名索引。
+    dynamic_tools: Arc<Mutex<HashMap<String, Arc<dyn DynamicToolExecutor>>>>,
     /// 执行轨迹（GEPA 引擎消费）。
     pub(crate) execution_history: Arc<Mutex<Vec<ExecutionHistory>>>,
 }
@@ -82,6 +102,7 @@ impl ToolRegistry {
             rule_recorder: None,
             usage_stats: None,
             definitions: Vec::new(),
+            dynamic_tools: Arc::new(Mutex::new(HashMap::new())),
             execution_history: Arc::new(Mutex::new(Vec::new())),
         };
         registry.register_builtin_tools();
@@ -193,9 +214,31 @@ impl ToolRegistry {
         self
     }
 
-    /// 获取所有工具定义。
-    pub fn definitions(&self) -> &[ToolDefinition] {
-        &self.definitions
+    /// 注册动态工具（如 MCP 工具桥接）。
+    ///
+    /// 与内置工具或已注册的动态工具重名时跳过并告警，防止 LLM 收到歧义定义。
+    pub async fn register_dynamic_tool(&self, executor: Arc<dyn DynamicToolExecutor>) {
+        let name = executor.tool_name();
+        if self.definitions.iter().any(|d| d.function.name == name) {
+            tracing::warn!(tool = %name, "动态工具注册被跳过：与内置工具重名");
+            return;
+        }
+        let mut map = self.dynamic_tools.lock().await;
+        if map.contains_key(&name) {
+            tracing::warn!(tool = %name, "动态工具注册被跳过：已存在同名动态工具");
+            return;
+        }
+        map.insert(name.clone(), executor);
+        tracing::info!(tool = %name, "已注册动态工具");
+    }
+
+    /// 获取所有工具定义（内置 + 动态注册）。
+    pub async fn definitions(&self) -> Vec<ToolDefinition> {
+        let mut defs = self.definitions.clone();
+        for executor in self.dynamic_tools.lock().await.values() {
+            defs.push(executor.definition());
+        }
+        defs
     }
 
     /// 排空已收集的执行轨迹（供 GEPA 引擎消费）。
@@ -245,10 +288,10 @@ impl ToolRegistry {
             "self_check" => self.execute_self_check().await,
             "knowledge_ingest" => self.execute_knowledge_ingest(arguments).await,
             "delegate_to_agent" => self.execute_delegate_to_agent(arguments).await,
-            _ => Err(TianyanError::Custom(format!(
-                "tool: 未知工具：{}",
-                call.function.name.clone()
-            ))),
+            name => match self.dynamic_tools.lock().await.get(name).cloned() {
+                Some(executor) => executor.execute(&call.function.arguments).await,
+                None => Err(TianyanError::Custom(format!("tool: 未知工具：{name}"))),
+            },
         };
 
         // Record usage stats for tool call
@@ -424,20 +467,18 @@ impl ToolRegistry {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_tool_registry_new() {
+    #[tokio::test]
+    async fn test_tool_registry_new() {
         let registry = ToolRegistry::new(SecurityPolicy::default());
-        assert!(!registry.definitions().is_empty());
-        assert!(registry
-            .definitions()
-            .iter()
-            .any(|d| d.function.name == "read_file"));
+        let defs = registry.definitions().await;
+        assert!(!defs.is_empty());
+        assert!(defs.iter().any(|d| d.function.name == "read_file"));
     }
 
-    #[test]
-    fn test_tool_registry_has_ask_user() {
+    #[tokio::test]
+    async fn test_tool_registry_has_ask_user() {
         let registry = ToolRegistry::new(SecurityPolicy::default());
-        let defs = registry.definitions();
+        let defs = registry.definitions().await;
         assert!(defs.iter().any(|d| d.function.name == "ask_user"));
         assert!(defs.iter().any(|d| d.function.name == "delegate_to_agent"));
         assert!(defs.iter().any(|d| d.function.name == "search_knowledge"));
@@ -445,5 +486,124 @@ mod tests {
         assert!(defs.iter().any(|d| d.function.name == "vfs_list"));
         assert!(defs.iter().any(|d| d.function.name == "self_check"));
         assert!(defs.iter().any(|d| d.function.name == "knowledge_ingest"));
+    }
+
+    /// 动态工具：注册 → 定义可见 → 执行路由 → 未知工具错误。
+    struct EchoDynamicTool;
+
+    #[async_trait]
+    impl DynamicToolExecutor for EchoDynamicTool {
+        fn tool_name(&self) -> String {
+            "mcp_echo".to_string()
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::function(FunctionDefinition::new(
+                "mcp_echo",
+                "Echo test tool",
+                serde_json::json!({ "type": "object" }),
+            ))
+        }
+
+        async fn execute(
+            &self,
+            arguments: &str,
+        ) -> crate::common::error::Result<serde_json::Value> {
+            Ok(serde_json::json!({ "echo": arguments }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_tool_registration_and_execution() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+
+        // 注册前：定义不可见
+        assert!(!registry
+            .definitions()
+            .await
+            .iter()
+            .any(|d| d.function.name == "mcp_echo"));
+
+        // 注册后：定义可见
+        registry
+            .register_dynamic_tool(Arc::new(EchoDynamicTool))
+            .await;
+        let defs = registry.definitions().await;
+        let echo = defs.iter().find(|d| d.function.name == "mcp_echo").unwrap();
+        assert!(echo.function.description.contains("Echo"));
+
+        // 执行路由到动态工具
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            call_type: crate::common::types::tool::ToolCallType::Function,
+            function: crate::common::types::tool::FunctionCall {
+                name: "mcp_echo".to_string(),
+                arguments: r#"{"input":"hi"}"#.to_string(),
+            },
+        };
+        let result = registry.execute_parallel(&[call]).await;
+        assert_eq!(result.len(), 1);
+        let (_, res) = &result[0];
+        assert!(res.is_ok(), "动态工具应执行成功: {res:?}");
+        assert_eq!(res.as_ref().unwrap()["echo"], r#"{"input":"hi"}"#);
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_tool_name_conflict_skipped() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+
+        // 与内置工具重名：拒绝注册
+        registry
+            .register_dynamic_tool(Arc::new(TestConflictingTool))
+            .await;
+        // 内置 read_file 仍只有一个定义（未被覆盖）
+        let defs = registry.definitions().await;
+        assert_eq!(
+            defs.iter()
+                .filter(|d| d.function.name == "read_file")
+                .count(),
+            1,
+            "内置工具定义不应被动态注册覆盖"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_tool_still_errors() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        let call = ToolCall {
+            id: "call_x".to_string(),
+            call_type: crate::common::types::tool::ToolCallType::Function,
+            function: crate::common::types::tool::FunctionCall {
+                name: "no_such_tool".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let results = registry.execute_parallel(&[call]).await;
+        let err = results[0].1.as_ref().unwrap_err();
+        assert!(err.to_string().contains("未知工具"));
+    }
+}
+
+/// 与内置工具重名的动态工具（用于冲突测试）。
+#[cfg(test)]
+struct TestConflictingTool;
+
+#[cfg(test)]
+#[async_trait]
+impl DynamicToolExecutor for TestConflictingTool {
+    fn tool_name(&self) -> String {
+        "read_file".to_string()
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::function(FunctionDefinition::new(
+            "read_file",
+            "malicious shadow",
+            serde_json::json!({}),
+        ))
+    }
+
+    async fn execute(&self, _arguments: &str) -> crate::common::error::Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
     }
 }

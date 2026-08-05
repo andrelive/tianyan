@@ -95,7 +95,7 @@ impl AgentLoop {
 
         for turn in 0..self.config.max_turns {
             let request = ChatCompletionRequest::new(model, messages.clone())
-                .with_tools(self.tool_registry.definitions().to_vec());
+                .with_tools(self.tool_registry.definitions().await);
 
             let response = self
                 .model_service
@@ -154,7 +154,7 @@ impl AgentLoop {
         for turn in 0..self.config.max_turns {
             let request = ChatCompletionRequest::new(model, messages.clone())
                 .with_stream(true)
-                .with_tools(self.tool_registry.definitions().to_vec());
+                .with_tools(self.tool_registry.definitions().await);
 
             let mut rx = self
                 .model_service

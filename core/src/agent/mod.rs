@@ -27,7 +27,7 @@ pub use tool_params::{
     RunTestsParams, SearchCodeParams, SearchKnowledgeParams, SelfCheckParams, VerifyBuildParams,
     VfsListParams, VfsReadParams, WriteFileParams,
 };
-pub use tool_registry::ToolRegistry;
+pub use tool_registry::{DynamicToolExecutor, ToolRegistry};
 pub use types::{
     AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
     SkillCallInfo, StreamChunkType, StreamEventSender,

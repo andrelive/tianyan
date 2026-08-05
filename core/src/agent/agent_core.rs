@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
+use crate::agent::tool_registry::DynamicToolExecutor;
 use crate::agent::types::{AgentResponse, AgentState, ClarificationQuestion, QuestionType};
 use crate::common::error::Result;
 use crate::common::types::{Message, StructuredMessage, TokenUsage};
@@ -86,6 +87,19 @@ impl Agent {
             agent_loop,
             session_manager,
             snapshot_manager,
+        }
+    }
+
+    /// 注册动态工具（如 MCP 工具桥接）。
+    ///
+    /// 由 server 层在 Agent 构建后注入：配置中的 MCP 服务器工具经
+    /// 桥接注册后，对 LLM 可见并可执行（与内置工具同等地位）。
+    pub async fn register_dynamic_tools(&self, tools: Vec<Arc<dyn DynamicToolExecutor>>) {
+        for tool in tools {
+            self.agent_loop
+                .tool_registry()
+                .register_dynamic_tool(tool)
+                .await;
         }
     }
 

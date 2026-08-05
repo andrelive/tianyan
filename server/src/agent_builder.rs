@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, RwLock};
 
 // 内部 crate
+use tianyan::agent::DynamicToolExecutor;
 use tianyan::agent::{
     Agent, AgentBuilder, AgentCoordinator, AgentResponse, AgentState, AgentStreamChunk,
 };
@@ -39,6 +40,9 @@ impl AgentBuilderFactory {
     ///
     /// `model_services` 由调用方（AppState）创建并持有，配置热更新时重建，
     /// 避免每次构建 Agent 时重复创建 HTTP 客户端。
+    ///
+    /// `dynamic_tools` 为外部注册的扩展工具（如 MCP 工具桥接），构建后注入 Agent。
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_agent(
         config: &TianyanConfig,
         model_services: ModelServices,
@@ -47,6 +51,7 @@ impl AgentBuilderFactory {
         skill_executor: Arc<SkillExecutor>,
         usage_stats: Arc<UsageStats>,
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
+        dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
     ) -> TianyanResult<Agent> {
         Self::validate_config(config)?;
 
@@ -104,6 +109,9 @@ impl AgentBuilderFactory {
             .build()
             .map_err(|e| TianyanError::Custom(format!("内部错误：Agent 构建失败：{}", e)))?;
 
+        // 注入动态工具（如 MCP 工具桥接）——失败仅告警，不阻塞 Agent 启动
+        agent.register_dynamic_tools(dynamic_tools).await;
+
         agent
             .initialize()
             .await
@@ -114,6 +122,7 @@ impl AgentBuilderFactory {
     }
 
     /// 构建 Agent 或降级为 WizardMode
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_agent_or_wizard(
         config: &TianyanConfig,
         model_services: ModelServices,
@@ -122,6 +131,7 @@ impl AgentBuilderFactory {
         skill_executor: Arc<SkillExecutor>,
         usage_stats: Arc<UsageStats>,
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
+        dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -131,6 +141,7 @@ impl AgentBuilderFactory {
             skill_executor,
             usage_stats,
             snapshot_manager,
+            dynamic_tools,
         )
         .await
         {

@@ -23,6 +23,7 @@ use crate::agent_builder::create_model_services;
 pub mod agent_builder;
 pub mod api;
 pub mod core_bridge;
+pub mod mcp_bridge;
 pub mod state;
 
 use api::create_api_router;

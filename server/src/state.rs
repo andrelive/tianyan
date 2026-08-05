@@ -25,6 +25,7 @@ use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
 use crate::agent_builder::{create_model_services, AgentBuilderFactory};
+use crate::mcp_bridge::McpToolManager;
 
 // 类型别名
 type SharedConfig = Arc<RwLock<TianyanConfig>>;
@@ -56,6 +57,8 @@ pub struct AppState {
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// 模型服务（chat/embedding/vision，全组件共享；配置热更新时重建）
     model_services: Arc<RwLock<tianyan::model::ModelServices>>,
+    /// MCP 客户端生命周期管理器（跨 agent reload 保持连接一致）
+    mcp_tools: Arc<McpToolManager>,
 }
 
 impl AppState {
@@ -134,7 +137,15 @@ impl AppState {
             Arc::new(SnapshotManager::new(root, workdir))
         });
 
-        // 构建 Agent（传入 vfs + 技能组件 + 共享模型服务）
+        // MCP 工具桥接：连接配置中的 MCP 服务器，生成动态工具
+        let mcp_tools = Arc::new(McpToolManager::new());
+        mcp_tools.sync(&config.mcp.servers).await;
+        let dynamic_tools = mcp_tools.bridges().await;
+        if !dynamic_tools.is_empty() {
+            tracing::info!(tool_count = dynamic_tools.len(), "MCP 动态工具已就绪");
+        }
+
+        // 构建 Agent（传入 vfs + 技能组件 + 共享模型服务 + MCP 动态工具）
         let model_services = create_model_services(&config)
             .await
             .map_err(|e| TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{e}")))?;
@@ -146,6 +157,7 @@ impl AppState {
             skill_executor.clone(),
             usage_stats.clone(),
             snapshot_manager.clone(),
+            dynamic_tools,
         )
         .await?;
 
@@ -162,6 +174,7 @@ impl AppState {
             usage_stats,
             snapshot_manager,
             model_services: Arc::new(RwLock::new(model_services)),
+            mcp_tools,
         })
     }
 
@@ -197,6 +210,9 @@ impl AppState {
     /// * Agent 构建失败时返回相应错误
     pub async fn reload_agent(&self) -> TianyanResult<()> {
         let config = self.config.read().await.clone();
+        // MCP 配置可能已变化：对齐连接（断开移除的、连接新增的），重建动态工具
+        self.mcp_tools.sync(&config.mcp.servers).await;
+        let dynamic_tools = self.mcp_tools.bridges().await;
         // 配置可能已变化（模型/API Key），重建共享模型服务
         let model_services = create_model_services(&config)
             .await
@@ -209,6 +225,7 @@ impl AppState {
             self.skill_executor.clone(),
             self.usage_stats.clone(),
             self.snapshot_manager.clone(),
+            dynamic_tools,
         )
         .await?;
 
@@ -378,7 +395,8 @@ impl AppState {
     /// * 正常情况下不会返回错误
     pub async fn shutdown(&self) -> TianyanResult<()> {
         tracing::info!("开始关闭应用...");
-        // 无待跟踪的后台任务（信号量并发控制未启用），直接完成关闭。
+        // 断开所有 MCP 服务器连接（显式 shutdown，McpClient::drop 不会自动清理子进程）
+        self.mcp_tools.shutdown().await;
         tracing::info!("应用已关闭");
         Ok(())
     }
