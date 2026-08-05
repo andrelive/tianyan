@@ -111,6 +111,8 @@ impl DualLayerRetriever {
             if result.has_content() {
                 trace_builder.add_content_load(result.uri.clone(), result.token_count);
             }
+            // 记录最终命中的结果 URI（轨迹黑匣子的结果清单）。
+            trace_builder.add_result(result.uri.clone());
         }
 
         // Record doc loads in usage stats
