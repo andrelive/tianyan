@@ -22,6 +22,92 @@ use server::{find_available_port, PREFERRED_PORT, SERVER_HOST};
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// 检测首选端口上是否已有 Tianyan 实例在服务（健康检查可达）。
+///
+/// 在启动内嵌服务器之前调用：第二实例直接退出，避免短暂打开共享数据文件。
+fn existing_instance_running(rt: &tokio::runtime::Runtime) -> bool {
+    instance_running_on(rt, PREFERRED_PORT)
+}
+
+/// 探测指定端口上的 /health 是否可达。
+fn instance_running_on(rt: &tokio::runtime::Runtime, port: u16) -> bool {
+    let url = format!("http://{}:{}/health", SERVER_HOST, port);
+    rt.block_on(async {
+        tokio::time::timeout(HEALTH_CHECK_INTERVAL * 3, async {
+            reqwest::Client::new()
+                .get(&url)
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("创建测试 runtime")
+    }
+
+    #[test]
+    fn test_instance_running_on_detects_live_server() {
+        // 起一个真实健康检查服务，探测应返回 true
+        let rt = test_runtime();
+        let listener = std::net::TcpListener::bind((SERVER_HOST, 0)).expect("绑定临时端口");
+        let port = listener.local_addr().expect("读取端口").port();
+        listener.set_nonblocking(true).expect("非阻塞");
+
+        // 启动测试服务并等待就绪（同一 block_on 内：from_std/spawn 需要 runtime 上下文，
+        // 轮询驱动 server 任务；最多 2s）
+        let ready = rt.block_on(async {
+            let tokio_listener =
+                tokio::net::TcpListener::from_std(listener).expect("转 tokio listener");
+            let app = axum::Router::new().route(
+                "/health",
+                axum::routing::get(|| async {
+                    axum::response::Json(serde_json::json!({"status": "ok"}))
+                }),
+            );
+            rt.spawn(async move {
+                let _ = axum::serve(tokio_listener, app).await;
+            });
+            for _ in 0..20 {
+                if reqwest::Client::new()
+                    .get(format!("http://{}:{}/health", SERVER_HOST, port))
+                    .send()
+                    .await
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+                tokio::time::sleep(HEALTH_CHECK_INTERVAL).await;
+            }
+            false
+        });
+        assert!(ready, "测试服务应就绪");
+        assert!(instance_running_on(&rt, port), "服务在线时应探测到实例");
+    }
+
+    #[test]
+    fn test_instance_running_on_returns_false_for_idle_port() {
+        // 未启动服务的随机端口，探测应返回 false（无并发占用，结果确定）
+        let rt = test_runtime();
+        let probe = std::net::TcpListener::bind((SERVER_HOST, 0)).expect("绑定临时端口");
+        let port = probe.local_addr().expect("读取端口").port();
+        drop(probe);
+        assert!(!instance_running_on(&rt, port), "空闲端口不应探测到实例");
+    }
+}
+
 /// 初始化日志系统 - 同时输出到文件和控制台（如果有）
 fn init_logging() {
     // 创建日志目录
@@ -161,6 +247,18 @@ pub fn run() {
         }
     };
 
+    // 应用层单实例检查（先于内嵌服务器启动）：
+    // 首选端口健康检查可达 = 已有实例在服务 → 直接退出，
+    // 避免第二实例短暂启动 server 并打开共享 SQLite/LanceDB 数据文件。
+    // 与 single-instance 插件构成双保险（插件兜底此处检查与启动之间的竞态窗口）。
+    if existing_instance_running(&rt) {
+        info!(
+            "检测到已有实例运行（端口 {} 服务可达），退出当前进程",
+            PREFERRED_PORT
+        );
+        return;
+    }
+
     // 选择并绑定监听端口：首选 3000，被占用时动态递增（避免与其他本地服务冲突）。
     // listener 提前绑定，探测与监听原子化，消除竞态窗口
     let listener = match find_available_port(PREFERRED_PORT) {
@@ -214,6 +312,14 @@ pub fn run() {
     // 前端通过 HTTP 调用 Axum 后端 API
     let app = match tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // 单实例保护：双开时第二实例的启动参数转发到第一实例并聚焦主窗口，
+        // 避免两个进程共享同一 SQLite/LanceDB 数据文件
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            info!("检测到已有实例运行，聚焦主窗口");
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+            }
+        }))
         .setup(move |app| {
             info!("Tauri setup completed, frontend loaded from gui/dist");
             // 注入实际监听端口：前端 getApiBase() 优先读取该变量
