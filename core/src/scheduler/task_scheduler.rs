@@ -137,12 +137,6 @@ impl TaskDefinition {
             handler,
         }
     }
-
-    /// 设置优先级。
-    pub fn with_priority(mut self, priority: TaskPriority) -> Self {
-        self.priority = priority;
-        self
-    }
 }
 
 /// 已注册任务的信息。

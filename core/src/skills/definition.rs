@@ -483,14 +483,6 @@ impl SkillRegistry {
             .collect()
     }
 
-    /// 按安全级别列出技能。
-    pub fn list_by_security_level(&self, level: SecurityLevel) -> Vec<&Skill> {
-        self.skills
-            .values()
-            .filter(|s| s.security_level == level)
-            .collect()
-    }
-
     /// 按名称查找技能（模糊匹配）。
     pub fn find_by_name(&self, name: &str) -> Vec<&Skill> {
         let name_lower = name.to_lowercase();
@@ -501,41 +493,6 @@ impl SkillRegistry {
                     || name_lower.contains(&s.name.to_lowercase())
             })
             .collect()
-    }
-
-    /// 按标签查找技能。
-    pub fn find_by_tags(&self, tags: &[String]) -> Vec<&Skill> {
-        self.skills
-            .values()
-            .filter(|s| {
-                tags.iter().any(|t| {
-                    s.tags
-                        .iter()
-                        .any(|st| st.to_lowercase() == t.to_lowercase())
-                })
-            })
-            .collect()
-    }
-
-    /// 按语义相似度查找技能。
-    pub fn find_by_similarity(
-        &self,
-        query_embedding: &Embedding,
-        top_k: usize,
-    ) -> Vec<(&Skill, f32)> {
-        let mut results: Vec<(&Skill, f32)> = self
-            .skills
-            .values()
-            .filter_map(|s| {
-                s.description_embedding
-                    .as_ref()
-                    .map(|e| (s, e.cosine_similarity(query_embedding)))
-            })
-            .collect();
-
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        results.truncate(top_k);
-        results
     }
 
     /// 获取已注册技能的数量。

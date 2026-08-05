@@ -21,8 +21,6 @@ const DEFAULT_MEMORY_TTL_DAYS: u32 = 90;
 pub struct GcTask {
     /// 是否启用自动清理（来自 StorageConfig.auto_cleanup）。
     auto_cleanup: bool,
-    /// 清理前数据保留天数（来自 StorageConfig.cleanup_days）。
-    cleanup_days: u32,
     /// 记忆条目 TTL 天数。
     memory_ttl_days: u32,
     /// 规则过时天数阈值。
@@ -34,28 +32,9 @@ impl GcTask {
     pub fn new() -> Self {
         Self {
             auto_cleanup: true,
-            cleanup_days: 365,
             memory_ttl_days: DEFAULT_MEMORY_TTL_DAYS,
             rule_stale_days: DEFAULT_RULE_STALE_DAYS,
         }
-    }
-
-    /// 设置是否启用自动清理。
-    pub fn with_auto_cleanup(mut self, auto_cleanup: bool) -> Self {
-        self.auto_cleanup = auto_cleanup;
-        self
-    }
-
-    /// 设置清理保留天数。
-    pub fn with_cleanup_days(mut self, days: u32) -> Self {
-        self.cleanup_days = days;
-        self
-    }
-
-    /// 设置规则过时天数阈值。
-    pub fn with_rule_stale_days(mut self, days: u32) -> Self {
-        self.rule_stale_days = days;
-        self
     }
 
     /// 扫描 learned 规则，检查并清理过时规则。

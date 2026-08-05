@@ -83,7 +83,6 @@ impl TianyanConfig {
     }
 
     /// 从指定文件加载配置。
-    #[cfg_attr(test, allow(dead_code))]
     pub fn load_from_file(path: &std::path::Path) -> Result<Self, String> {
         use config::{File, FileFormat};
 

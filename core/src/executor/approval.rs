@@ -631,22 +631,6 @@ impl ApprovalWorkflow {
         let records = self.records.read().await;
         records.clone()
     }
-
-    /// 更新执行结果。
-    pub async fn record_execution_result(
-        &self,
-        request_id: &str,
-        success: bool,
-    ) -> crate::common::error::Result<()> {
-        let mut records = self.records.write().await;
-        for record in records.iter_mut() {
-            if record.request.request_id == request_id {
-                record.execution_result = Some(success);
-                return Ok(());
-            }
-        }
-        Ok(())
-    }
 }
 
 /// 测试模块（拆分至独立文件，保持主文件聚焦生产逻辑）。
