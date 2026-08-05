@@ -159,13 +159,30 @@ pub fn run() {
         }
     };
 
-    // 选择监听端口：首选 3000，被占用时动态递增（避免与其他本地服务冲突）
-    let port = find_available_port(PREFERRED_PORT);
+    // 选择并绑定监听端口：首选 3000，被占用时动态递增（避免与其他本地服务冲突）。
+    // listener 提前绑定，探测与监听原子化，消除竞态窗口
+    let listener = match find_available_port(PREFERRED_PORT) {
+        Some(l) => l,
+        None => {
+            error!(
+                "未找到可用端口（{} 起 100 个端口均被占用），退出",
+                PREFERRED_PORT
+            );
+            std::process::exit(1);
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(e) => {
+            error!("读取监听端口失败：{}", e);
+            std::process::exit(1);
+        }
+    };
     if port != PREFERRED_PORT {
         info!("端口 {} 已被占用，动态选择端口 {}", PREFERRED_PORT, port);
     }
 
-    // 启动 Axum 服务在后台线程，传入配置
+    // 启动 Axum 服务在后台任务，传入已绑定的 listener
     // 即使配置无效，也启动服务以支持配置向导 API
     let config_clone = tianyan_config.clone();
     rt.spawn(async move {
@@ -173,7 +190,7 @@ pub fn run() {
             "Starting Axum server in background task on port {}...",
             port
         );
-        start_axum_server(config_clone, port).await;
+        start_axum_server(config_clone, listener).await;
     });
 
     // 等待服务器启动完成

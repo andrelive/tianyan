@@ -320,6 +320,27 @@ pub async fn start_server(
     config: ServerConfig,
     tianyan_config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<()> {
+    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
+        .parse()
+        .map_err(|e| tianyan::TianyanError::Custom(format!("配置错误：无效地址: {}", e)))?;
+
+    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+        error!("Failed to bind to address {}: {}", addr, e);
+        tianyan::TianyanError::Custom(format!("网络错误：Failed to bind to address: {}", e))
+    })?;
+
+    start_server_with_listener(listener, tianyan_config).await
+}
+
+/// 使用调用方已绑定的 listener 启动服务器。
+///
+/// 与 [`start_server`] 的区别：监听 socket 由调用方提前绑定并传入，
+/// 消除"探测端口 → 释放 → 重新绑定"之间的竞态窗口
+/// （桌面端动态端口场景使用，见 `tauri::server::find_available_port`）。
+pub async fn start_server_with_listener(
+    listener: tokio::net::TcpListener,
+    tianyan_config: tianyan::config::TianyanConfig,
+) -> tianyan::common::error::Result<()> {
     let has_providers = tianyan_config.models.providers.iter().any(|p| p.enabled);
     let (app, state) = create_app(tianyan_config).await?;
     let task_scheduler: Option<Arc<TaskScheduler>> = if has_providers {
@@ -405,16 +426,12 @@ pub async fn start_server(
     // 暴露调度器状态查询（无 Provider 时注入 None，端点返回空状态）
     state.attach_scheduler(task_scheduler.clone()).await;
 
-    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
-        .parse()
-        .map_err(|e| tianyan::TianyanError::Custom(format!("配置错误：无效地址: {}", e)))?;
+    let addr = listener.local_addr().map_err(|e| {
+        error!("Failed to read listener address: {}", e);
+        tianyan::TianyanError::Custom(format!("网络错误：Failed to read listener address: {}", e))
+    })?;
 
     info!("Starting Tianyan server on http://{}", addr);
-
-    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
-        error!("Failed to bind to address {}: {}", addr, e);
-        tianyan::TianyanError::Custom(format!("网络错误：Failed to bind to address: {}", e))
-    })?;
 
     info!("Server is ready to accept connections");
 
