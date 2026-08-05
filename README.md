@@ -2,8 +2,8 @@
 
 一个基于大语言模型的本地智能代理系统。
 
-[![CI](https://github.com/tianyan/tianyan/workflows/CI/badge.svg)](https://github.com/tianyan/tianyan/actions/workflows/ci.yml)
-[![Release](https://github.com/tianyan/tianyan/workflows/Release/badge.svg)](https://github.com/tianyan/tianyan/actions/workflows/release.yml)
+[![CI](https://github.com/andrelive/tianyan/workflows/CI/badge.svg)](https://github.com/andrelive/tianyan/actions/workflows/ci.yml)
+[![Release](https://github.com/andrelive/tianyan/workflows/Release/badge.svg)](https://github.com/andrelive/tianyan/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 
@@ -130,7 +130,7 @@ irm https://raw.githubusercontent.com/tianyan/tianyan/main/scripts/install.ps1 |
 
 ```bash
 # 克隆仓库
-git clone https://github.com/tianyan/tianyan.git
+git clone https://github.com/andrelive/tianyan.git
 cd tianyan
 
 # 构建整个 Workspace

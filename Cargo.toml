@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Tianyan Team"]
 license = "MIT"
-repository = "https://github.com/tianyan/tianyan"
+repository = "https://github.com/andrelive/tianyan"
 
 [workspace.dependencies]
 # Core dependencies
