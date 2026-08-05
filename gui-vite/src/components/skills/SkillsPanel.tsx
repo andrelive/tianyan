@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAppStore } from '@/lib/store';
 import { apiGet, apiPost } from '@/lib/api-client';
 import { groupByCategory } from '@/lib/utils';
@@ -80,9 +80,7 @@ export default function SkillsPanel() {
 
   // Execution
   const [executing, setExecuting] = useState(false);
-  const [executionId, setExecutionId] = useState<string | null>(null);
   const [executionStatus, setExecutionStatus] = useState<SkillExecutionStatus | null>(null);
-  const pollingRef = useRef<ReturnType<typeof setInterval>>();
 
   // Load skills on mount
   useEffect(() => {
@@ -130,51 +128,8 @@ export default function SkillsPanel() {
       }
       setParamValues(initial);
       setExecutionStatus(null);
-      setExecutionId(null);
     }
   }, [selectedSkillId, skills]);
-
-  // Poll execution status
-  useEffect(() => {
-    if (!executionId || !selectedSkillId) return;
-
-    const poll = async () => {
-      try {
-        const status = await apiGet<SkillExecutionStatus>(
-          `/skills/${selectedSkillId}/jobs/${executionId}/status`,
-        );
-        setExecutionStatus(status);
-        if (status.status === 'completed' || status.status === 'failed') {
-          if (pollingRef.current) {
-            clearInterval(pollingRef.current);
-            pollingRef.current = undefined;
-          }
-          setExecuting(false);
-        }
-      } catch {
-        if (pollingRef.current) {
-          clearInterval(pollingRef.current);
-          pollingRef.current = undefined;
-        }
-        setExecutionStatus({
-          status: 'failed',
-          error: '查询执行状态失败',
-        });
-        setExecuting(false);
-      }
-    };
-
-    pollingRef.current = setInterval(poll, 2000);
-    // Also poll immediately
-    poll();
-
-    return () => {
-      if (pollingRef.current) {
-        clearInterval(pollingRef.current);
-        pollingRef.current = undefined;
-      }
-    };
-  }, [executionId]);
 
   const handleParamChange = useCallback((name: string, val: string | number | boolean) => {
     setParamValues((prev) => ({ ...prev, [name]: val }));
@@ -185,7 +140,6 @@ export default function SkillsPanel() {
 
     setExecuting(true);
     setExecutionStatus(null);
-    setExecutionId(null);
 
     try {
       // Convert param values to strings for the API
@@ -198,21 +152,21 @@ export default function SkillsPanel() {
         parameters: params,
       });
 
-      setExecutionId(res.job_id);
-      setExecutionStatus({
-        status: 'running',
-        job_id: res.job_id,
-        skill_id: res.skill_id,
-      });
-
-      // If immediately failed, no polling needed
-      if (!res.success) {
+      // 同步执行器：execute 响应即最终结果，直接展示（无异步轮询）
+      if (res.success) {
+        setExecutionStatus({
+          status: 'completed',
+          job_id: res.job_id,
+          skill_id: res.skill_id,
+          result: res.result,
+        });
+      } else {
         setExecutionStatus({
           status: 'failed',
           error: res.error || res.message || '执行技能失败',
         });
-        setExecuting(false);
       }
+      setExecuting(false);
     } catch (err) {
       setExecutionStatus({
         status: 'failed',

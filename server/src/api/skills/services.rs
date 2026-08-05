@@ -9,8 +9,7 @@ use tianyan::skills::{SkillExecutor, SkillRegistry};
 
 use crate::api::shared::error::ApiError;
 use crate::api::skills::types::{
-    ExecuteSkillRequest, ExecuteSkillResponse, ListSkillsResponse, Skill, SkillExecutionStatus,
-    SkillParameter,
+    ExecuteSkillRequest, ExecuteSkillResponse, ListSkillsResponse, Skill, SkillParameter,
 };
 
 /// 技能服务，管理和执行技能
@@ -131,26 +130,6 @@ impl SkillService {
                 })
             }
         }
-    }
-
-    /// 获取技能执行状态
-    pub async fn get_execution_status(
-        &self,
-        skill_id: &str,
-        job_id: &str,
-    ) -> Result<SkillExecutionStatus, ApiError> {
-        info!("获取技能 {} 任务 {} 的状态", skill_id, job_id);
-
-        // 当前执行器是同步完成的，直接返回完成状态
-        // 后续如果需要异步执行，可以扩展此处逻辑
-        Ok(SkillExecutionStatus {
-            job_id: job_id.to_string(),
-            skill_id: skill_id.to_string(),
-            status: "completed".to_string(),
-            progress: 1.0,
-            result: Some(serde_json::json!({"message": "执行完成"})),
-            error: None,
-        })
     }
 }
 

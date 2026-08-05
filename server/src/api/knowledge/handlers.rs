@@ -8,9 +8,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::api::knowledge::services::KnowledgeService;
 use crate::api::knowledge::types::{
-    IngestRequest, IngestResponse, IngestStatusResponse, KnowledgeEntriesResponse,
-    ListEntriesQuery, ReadEntryQuery, ReadEntryResponse, SearchQuery, SearchResponse,
-    SearchSuggestionsResponse,
+    IngestRequest, IngestResponse, KnowledgeEntriesResponse, ListEntriesQuery, ReadEntryQuery,
+    ReadEntryResponse, SearchQuery, SearchResponse, SearchSuggestionsResponse,
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
@@ -95,22 +94,6 @@ pub async fn ingest_handler(
             error!("摄入错误: {}", e);
             ApiError::Internal(format!("摄入失败: {}", e))
         })
-}
-
-/// 获取摄入任务状态
-pub async fn get_ingest_status_handler(
-    axum::extract::Path(job_id): axum::extract::Path<String>,
-) -> Result<Json<IngestStatusResponse>, ApiError> {
-    debug!("查询摄入状态: {}", job_id);
-    // 摄入是同步执行的，所以直接返回已完成状态
-    Ok(Json(IngestStatusResponse {
-        job_id,
-        status: "completed".to_string(),
-        progress: 1.0,
-        total_files: 0,
-        processed_files: 0,
-        error: None,
-    }))
 }
 
 /// 执行检索

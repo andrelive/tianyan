@@ -16,6 +16,5 @@ pub mod types;
 
 pub use routes::routes;
 pub use types::{
-    ExecuteSkillRequest, ExecuteSkillResponse, ListSkillsResponse, Skill, SkillExecutionStatus,
-    SkillParameter,
+    ExecuteSkillRequest, ExecuteSkillResponse, ListSkillsResponse, Skill, SkillParameter,
 };

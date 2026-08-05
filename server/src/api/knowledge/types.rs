@@ -71,24 +71,6 @@ pub struct FileIngestResult {
     pub document_id: Option<String>,
 }
 
-/// 摄入状态响应
-#[derive(Debug, Serialize)]
-pub struct IngestStatusResponse {
-    /// 任务标识
-    pub job_id: String,
-    /// 任务状态
-    pub status: String,
-    /// 处理进度百分比
-    pub progress: f32,
-    /// 总文件数
-    pub total_files: u32,
-    /// 已处理文件数
-    pub processed_files: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// 错误信息
-    pub error: Option<String>,
-}
-
 /// 检索请求查询参数
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {

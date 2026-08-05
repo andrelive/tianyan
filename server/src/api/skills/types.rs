@@ -103,25 +103,6 @@ pub struct ListSkillsResponse {
     pub total: usize,
 }
 
-/// 技能执行状态
-#[derive(Debug, Serialize)]
-pub struct SkillExecutionStatus {
-    /// 任务标识
-    pub job_id: String,
-    /// 技能标识
-    pub skill_id: String,
-    /// 执行状态
-    pub status: String,
-    /// 执行进度百分比
-    pub progress: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// 执行结果
-    pub result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// 错误信息
-    pub error: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

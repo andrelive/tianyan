@@ -6,8 +6,8 @@ use axum::{
 };
 
 use crate::api::knowledge::handlers::{
-    get_ingest_status_handler, ingest_handler, list_entries_handler, read_entry_handler,
-    search_handler, search_suggestions_handler,
+    ingest_handler, list_entries_handler, read_entry_handler, search_handler,
+    search_suggestions_handler,
 };
 use crate::state::AppState;
 
@@ -15,10 +15,6 @@ use crate::state::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/knowledge/ingest", post(ingest_handler))
-        .route(
-            "/knowledge/ingest/{job_id}/status",
-            get(get_ingest_status_handler),
-        )
         .route("/knowledge/search", get(search_handler))
         .route(
             "/knowledge/search/suggestions",

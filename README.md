@@ -285,7 +285,6 @@ API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
 | `/api/v1/sessions/{id}/messages/redo` | POST | 重做指定消息 |
 | `/api/v1/sessions/{id}/title` | POST | 更新会话标题 |
 | `/api/v1/knowledge/ingest` | POST | 文档导入（multipart） |
-| `/api/v1/knowledge/ingest/{job_id}/status` | GET | 导入状态（当前为占位实现） |
 | `/api/v1/knowledge/search` | GET | 知识搜索 |
 | `/api/v1/knowledge/search/suggestions` | GET | 搜索建议 |
 | `/api/v1/knowledge/entries` | GET | 知识条目列表 |
@@ -296,8 +295,7 @@ API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
 | `/api/v1/scheduler/status` | GET | 定时任务状态（任务列表 / 执行次数 / 距上次执行） |
 | `/api/v1/approval/status` | GET | 审批状态（风险配置 / 待处理 / 待确认 / 审计记录） |
 | `/api/v1/skills` | GET | 技能列表 |
-| `/api/v1/skills/{id}/execute` | POST | 执行技能 |
-| `/api/v1/skills/{id}/jobs/{job_id}/status` | GET | 技能执行状态 |
+| `/api/v1/skills/{id}/execute` | POST | 执行技能（同步执行，响应即最终结果） |
 | `/api/v1/config` | GET / PUT | 读取 / 更新配置 |
 | `/api/v1/config/status` | GET | 配置状态 |
 | `/api/v1/config/{section}` | GET | 获取指定配置节 |

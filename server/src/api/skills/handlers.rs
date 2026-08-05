@@ -8,9 +8,7 @@ use tracing::info;
 
 use crate::api::shared::error::ApiError;
 use crate::api::skills::services::SkillService;
-use crate::api::skills::types::{
-    ExecuteSkillRequest, ExecuteSkillResponse, ListSkillsResponse, SkillExecutionStatus,
-};
+use crate::api::skills::types::{ExecuteSkillRequest, ExecuteSkillResponse, ListSkillsResponse};
 use crate::state::AppState;
 
 /// 列出所有可用技能
@@ -51,31 +49,5 @@ pub async fn execute_skill(
         .map_err(|e| {
             tracing::error!("执行技能失败: {}", e);
             ApiError::Internal(format!("执行技能失败: {}", e))
-        })
-}
-
-/// 获取技能执行状态
-pub async fn get_skill_status(
-    State(state): State<Arc<AppState>>,
-    Path((skill_id, job_id)): Path<(String, String)>,
-) -> Result<Json<SkillExecutionStatus>, ApiError> {
-    if skill_id.trim().is_empty() {
-        return Err(ApiError::BadRequest("技能ID不能为空".to_string()));
-    }
-    if job_id.trim().is_empty() {
-        return Err(ApiError::BadRequest("任务ID不能为空".to_string()));
-    }
-
-    info!("获取技能 {} 任务 {} 的状态", skill_id, job_id);
-
-    let service = SkillService::new(state.skill_registry(), state.skill_executor());
-
-    service
-        .get_execution_status(&skill_id, &job_id)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            tracing::error!("获取技能状态失败: {}", e);
-            ApiError::Internal(format!("获取技能状态失败: {}", e))
         })
 }
