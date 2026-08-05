@@ -15,8 +15,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 pub use server::start_axum_server;
 
-const SERVER_HOST: &str = "127.0.0.1";
-const SERVER_PORT: u16 = 3000;
+use server::{find_available_port, PREFERRED_PORT, SERVER_HOST};
+
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -89,9 +89,9 @@ fn init_logging() {
 }
 
 /// 等待服务就绪（健康检查）
-pub async fn wait_for_server_ready() -> anyhow::Result<()> {
+pub async fn wait_for_server_ready(port: u16) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
-    let health_url = format!("http://{}:{}/health", SERVER_HOST, SERVER_PORT);
+    let health_url = format!("http://{}:{}/health", SERVER_HOST, port);
 
     info!("Waiting for server at {}...", health_url);
     let start_time = std::time::Instant::now();
@@ -159,18 +159,27 @@ pub fn run() {
         }
     };
 
+    // 选择监听端口：首选 3000，被占用时动态递增（避免与其他本地服务冲突）
+    let port = find_available_port(PREFERRED_PORT);
+    if port != PREFERRED_PORT {
+        info!("端口 {} 已被占用，动态选择端口 {}", PREFERRED_PORT, port);
+    }
+
     // 启动 Axum 服务在后台线程，传入配置
     // 即使配置无效，也启动服务以支持配置向导 API
     let config_clone = tianyan_config.clone();
     rt.spawn(async move {
-        info!("Starting Axum server in background task...");
-        start_axum_server(config_clone).await;
+        info!(
+            "Starting Axum server in background task on port {}...",
+            port
+        );
+        start_axum_server(config_clone, port).await;
     });
 
     // 等待服务器启动完成
     info!("Waiting for server to be ready...");
     rt.block_on(async {
-        if let Err(e) = wait_for_server_ready().await {
+        if let Err(e) = wait_for_server_ready(port).await {
             error!("Server failed to start: {}", e);
             std::process::exit(1);
         }
@@ -184,11 +193,19 @@ pub fn run() {
     // 前端通过 HTTP 调用 Axum 后端 API
     if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .setup(|_app| {
+        .setup(move |app| {
             info!("Tauri setup completed, frontend loaded from gui/dist");
+            // 注入实际监听端口：前端 getApiBase() 优先读取该变量
+            // （动态端口时前端无法从默认值得知，必须显式注入）
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.eval(format!(
+                    "window.__TIANYAN_API_BASE__ = 'http://{}:{}';",
+                    SERVER_HOST, port
+                ));
+            }
             // 仅在 debug 构建时打开开发者工具
             #[cfg(debug_assertions)]
-            if let Some(window) = _app.get_webview_window("main") {
+            if let Some(window) = app.get_webview_window("main") {
                 window.open_devtools();
             }
             Ok(())
