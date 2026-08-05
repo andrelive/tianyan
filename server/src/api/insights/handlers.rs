@@ -87,3 +87,21 @@ pub async fn list_traces_handler(
     let traces = state.usage_stats().query_recent_traces(limit).await;
     Ok(Json(json!({ "traces": traces, "total": traces.len() })))
 }
+
+/// 返回定时任务调度器状态。
+///
+/// 无启用的模型 Provider 时调度器未装配，返回空状态（running=false、tasks=[]）。
+pub async fn get_scheduler_status_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    match state.scheduler().await {
+        Some(scheduler) => {
+            let tasks = scheduler.snapshot().await;
+            Ok(Json(json!({
+                "running": scheduler.is_running(),
+                "tasks": tasks,
+            })))
+        }
+        None => Ok(Json(json!({ "running": false, "tasks": [] }))),
+    }
+}

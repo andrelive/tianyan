@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Serialize;
 use tokio::sync::RwLock;
 
 use crate::config::TianyanConfig;
@@ -13,7 +14,7 @@ use crate::memory::MemoryExtractor;
 use crate::vfs::{SummaryEngine, VirtualFileSystem};
 
 /// 任务优先级。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize)]
 pub enum TaskPriority {
     /// 低优先级。
     Low = 1,
@@ -147,6 +148,23 @@ struct RegisteredTask {
     last_run: Option<std::time::Instant>,
     /// 执行次数。
     run_count: u64,
+}
+
+/// 任务运行状态快照（供状态查询接口使用）。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskStatus {
+    /// 任务唯一 ID。
+    pub id: String,
+    /// 任务显示名称。
+    pub name: String,
+    /// 任务优先级。
+    pub priority: TaskPriority,
+    /// Cron 表达式。
+    pub cron_expression: String,
+    /// 执行次数。
+    pub run_count: u64,
+    /// 距上次执行已过秒数（从未执行时为 None）。
+    pub last_run_ago_secs: Option<u64>,
 }
 
 /// 统一任务调度器。
@@ -368,6 +386,27 @@ impl TaskScheduler {
         })
     }
 
+    /// 获取全部任务的运行状态快照。
+    ///
+    /// # 返回
+    /// 按任务 ID 排序的任务状态列表（含执行统计与上次执行时间）。
+    pub async fn snapshot(&self) -> Vec<TaskStatus> {
+        let tasks = self.tasks.read().await;
+        let mut statuses: Vec<TaskStatus> = tasks
+            .iter()
+            .map(|(id, t)| TaskStatus {
+                id: id.clone(),
+                name: t.definition.name.clone(),
+                priority: t.definition.priority,
+                cron_expression: t.definition.cron_expression.clone(),
+                run_count: t.run_count,
+                last_run_ago_secs: t.last_run.map(|i| i.elapsed().as_secs()),
+            })
+            .collect();
+        statuses.sort_by(|a, b| a.id.cmp(&b.id));
+        statuses
+    }
+
     /// 执行指定任务。
     ///
     /// # 参数
@@ -517,6 +556,51 @@ mod tests {
         let ids = scheduler.get_task_ids().await;
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], "test");
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_reports_task_status() {
+        let scheduler = TaskScheduler::new();
+        scheduler
+            .register_task(TaskDefinition::new(
+                "b",
+                "任务B",
+                "0 */10 * * * *",
+                Arc::new(TestTask),
+            ))
+            .await
+            .unwrap();
+        scheduler
+            .register_task(TaskDefinition::new(
+                "a",
+                "任务A",
+                "0 */5 * * * *",
+                Arc::new(TestTask),
+            ))
+            .await
+            .unwrap();
+
+        // 未执行前：run_count=0、last_run=None；按 ID 排序输出
+        let snapshot = scheduler.snapshot().await;
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].id, "a");
+        assert_eq!(snapshot[1].id, "b");
+        assert_eq!(snapshot[0].name, "任务A");
+        assert_eq!(snapshot[0].cron_expression, "0 */5 * * * *");
+        assert_eq!(snapshot[0].priority, TaskPriority::Normal);
+        assert_eq!(snapshot[0].run_count, 0);
+        assert!(snapshot[0].last_run_ago_secs.is_none());
+
+        // 模拟执行后的内部状态（execute_task 的 run_count/last_run 更新逻辑与此同源）
+        {
+            let mut tasks = scheduler.tasks.write().await;
+            let t = tasks.get_mut("a").unwrap();
+            t.run_count = 3;
+            t.last_run = Some(std::time::Instant::now());
+        }
+        let snapshot = scheduler.snapshot().await;
+        assert_eq!(snapshot[0].run_count, 3);
+        assert!(snapshot[0].last_run_ago_secs.is_some());
     }
 
     #[tokio::test]

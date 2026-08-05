@@ -402,6 +402,9 @@ pub async fn start_server(
         None
     };
 
+    // 暴露调度器状态查询（无 Provider 时注入 None，端点返回空状态）
+    state.attach_scheduler(task_scheduler.clone()).await;
+
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .map_err(|e| tianyan::TianyanError::Custom(format!("配置错误：无效地址: {}", e)))?;

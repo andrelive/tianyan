@@ -112,3 +112,20 @@ async fn test_e2e_retrieval_traces_endpoint() {
 
     server.shutdown();
 }
+
+#[tokio::test]
+async fn test_e2e_scheduler_status_endpoint() {
+    let (server, _dir) = start_real_server().await;
+
+    // 调度器状态（无 Provider 环境未装配 → 空状态）
+    let resp = server.get("/api/v1/scheduler/status").await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["running"], false,
+        "无 Provider 环境调度器应未运行: {body}"
+    );
+    assert_eq!(body["tasks"].as_array().unwrap().len(), 0);
+
+    server.shutdown();
+}

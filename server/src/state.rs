@@ -16,6 +16,7 @@ use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
 use tianyan::observability::sqlite_db::SqliteDb;
 use tianyan::observability::usage_stats::UsageStats;
+use tianyan::scheduler::TaskScheduler;
 use tianyan::session::{PersistentSessionManager, SessionManager};
 use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
@@ -64,6 +65,8 @@ pub struct AppState {
     model_services: Arc<RwLock<tianyan::model::ModelServices>>,
     /// MCP 客户端生命周期管理器（跨 agent reload 保持连接一致）
     mcp_tools: Arc<McpToolManager>,
+    /// 定时任务调度器（无启用的模型 Provider 时为 None，在 `start_server` 中装配）
+    scheduler: Arc<RwLock<Option<Arc<TaskScheduler>>>>,
 }
 
 impl AppState {
@@ -180,6 +183,7 @@ impl AppState {
             snapshot_manager,
             model_services: Arc::new(RwLock::new(model_services)),
             mcp_tools,
+            scheduler: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -292,6 +296,16 @@ impl AppState {
     /// * `Arc<UsageStats>` - 使用统计追踪器实例
     pub fn usage_stats(&self) -> Arc<UsageStats> {
         self.usage_stats.clone()
+    }
+
+    /// 装配定时任务调度器（`start_server` 在创建并注册任务后调用）。
+    pub async fn attach_scheduler(&self, scheduler: Option<Arc<TaskScheduler>>) {
+        *self.scheduler.write().await = scheduler;
+    }
+
+    /// 获取定时任务调度器（未装配或无 Provider 时为 None）。
+    pub async fn scheduler(&self) -> Option<Arc<TaskScheduler>> {
+        self.scheduler.read().await.clone()
     }
 
     /// 获取共享模型服务（配置热更新后自动指向新实例）。
