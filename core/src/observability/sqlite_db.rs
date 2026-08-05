@@ -1,4 +1,4 @@
-//! 共享 SQLite 数据库连接，供 UsageStats 和 SqliteSessionStore 共用。
+//! 共享 SQLite 数据库连接，供 UsageStats 统计与 VFS 元数据共用。
 //!
 //! 设计：单个 SQLite 文件，多张表，统一管理 Schema 迁移。
 
@@ -30,7 +30,10 @@ impl SqliteDb {
             }
         }
         let conn = Connection::open(&path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        // foreign_keys=ON：启用 schema 中声明的 FK 约束（ON DELETE CASCADE 等）
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+        )?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -112,36 +115,6 @@ const SCHEMA_SQL: &str = "
         recorded_at   TEXT    NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_retrieval_traces_date ON retrieval_traces(recorded_at);
-
-    -- 会话
-    CREATE TABLE IF NOT EXISTS sessions (
-        session_id   TEXT PRIMARY KEY,
-        title        TEXT,
-        token_count  INTEGER DEFAULT 0,
-        created_at   TEXT NOT NULL,
-        ended_at     TEXT
-    );
-
-    -- 会话消息
-    CREATE TABLE IF NOT EXISTS session_messages (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id      TEXT    NOT NULL,
-        msg_id          TEXT    NOT NULL,
-        parent_id       TEXT,
-        role            TEXT    NOT NULL,
-        parts_json      TEXT    NOT NULL,   -- JSON: Vec<Part>
-        tokens_json     TEXT,               -- JSON: DetailedTokenUsage
-        cost            REAL    DEFAULT 0.0,
-        model_id        TEXT,
-        time_created    INTEGER NOT NULL,
-        time_completed  INTEGER NOT NULL,
-        finish          TEXT,
-        compression_marker INTEGER DEFAULT 0,
-        recorded_at     TEXT    NOT NULL DEFAULT (datetime('now')),
-        FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
-    );
-    CREATE INDEX IF NOT EXISTS idx_msg_session ON session_messages(session_id);
-    CREATE INDEX IF NOT EXISTS idx_msg_marker ON session_messages(session_id, compression_marker);
 
     -- VFS 条目内容
     CREATE TABLE IF NOT EXISTS vfs_entries (

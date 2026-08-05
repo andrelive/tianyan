@@ -2,8 +2,6 @@
 
 一个基于大语言模型的本地智能代理系统。
 
-[![CI](https://github.com/andrelive/tianyan/workflows/CI/badge.svg)](https://github.com/andrelive/tianyan/actions/workflows/ci.yml)
-[![Release](https://github.com/andrelive/tianyan/workflows/Release/badge.svg)](https://github.com/andrelive/tianyan/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 概述

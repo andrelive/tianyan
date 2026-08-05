@@ -3,7 +3,7 @@
 //! 设计原则：
 //! - **热路径零 I/O**：每次工具调用/文档检索只写内存 DashMap，不碰 SQLite
 //! - **定时刷盘**：`flush()` 将内存计数器批量写入 SQLite
-//! - **共享 SQLite**：与 SqliteSessionStore 共用同一个 SqliteDb
+//! - **共享 SQLite**：与 VFS 元数据共用同一个 SqliteDb
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
