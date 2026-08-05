@@ -134,6 +134,16 @@ pub trait AgentCoordinator: Send + Sync {
     /// 用于状态查询接口；审批工作流未装配时返回默认配置与空队列。
     async fn approval_status(&self) -> Result<crate::executor::approval::ApprovalStatusSnapshot>;
 
+    /// 响应待处理审批请求（GUI 审批面板调用）。
+    ///
+    /// 请求不存在或已超时返回错误（调用方映射为 404/409）。
+    async fn respond_approval(
+        &self,
+        request_id: &str,
+        decision: crate::executor::approval::ApprovalDecision,
+        reason: Option<String>,
+    ) -> Result<()>;
+
     /// 获取智能体状态。
     async fn get_state(&self) -> AgentState;
     /// 关闭智能体。
@@ -397,6 +407,24 @@ impl AgentCoordinator for Agent {
             recent_records: records,
             confirmed_action_count: workflow.confirmed_action_count().await,
         })
+    }
+
+    async fn respond_approval(
+        &self,
+        request_id: &str,
+        decision: crate::executor::approval::ApprovalDecision,
+        reason: Option<String>,
+    ) -> Result<()> {
+        let registry = self.agent_loop.tool_registry();
+        let Some(workflow) = registry.approval_workflow() else {
+            return Err(crate::TianyanError::Custom(
+                "审批流程未装配（审批工作流不可用）".to_string(),
+            ));
+        };
+        // GUI 人工响应：approved_by 固定为 "user"
+        workflow
+            .respond_to_approval(request_id, decision, reason, "user")
+            .await
     }
 
     async fn get_state(&self) -> AgentState {

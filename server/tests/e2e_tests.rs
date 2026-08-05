@@ -153,3 +153,28 @@ async fn test_e2e_approval_status_endpoint() {
 
     server.shutdown();
 }
+
+#[tokio::test]
+async fn test_e2e_approval_respond_endpoint() {
+    let (server, _dir) = start_real_server().await;
+
+    // 无效决策 → 400
+    let resp = server
+        .post(
+            "/api/v1/approval/respond",
+            &serde_json::json!({ "request_id": "req-x", "decision": "maybe" }),
+        )
+        .await;
+    assert_eq!(resp.status(), 400, "无效决策应返回 400");
+
+    // 不存在的请求 → 404（核心层"审批请求不存在或已超时"）
+    let resp = server
+        .post(
+            "/api/v1/approval/respond",
+            &serde_json::json!({ "request_id": "req-not-exist", "decision": "approve" }),
+        )
+        .await;
+    assert_eq!(resp.status(), 404, "不存在的审批请求应返回 404");
+
+    server.shutdown();
+}

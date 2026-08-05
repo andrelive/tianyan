@@ -10,6 +10,7 @@ import {
   BookOpen,
   MemoryStick,
   Route,
+  ShieldCheck,
   Settings,
   Plus,
   PanelLeftClose,
@@ -37,6 +38,12 @@ const NAV_ITEMS = [
     label: '检索轨迹',
     icon: Route,
     path: '/traces',
+  },
+  {
+    id: 'approval' as const,
+    label: '审批',
+    icon: ShieldCheck,
+    path: '/approval',
   },
   {
     id: 'settings' as const,

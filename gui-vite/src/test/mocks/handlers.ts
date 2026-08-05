@@ -10,6 +10,7 @@ import type {
   MemoryListResponse,
   RetrievalTrace,
   RetrievalTracesResponse,
+  ApprovalStatusSnapshot,
 } from '@/lib/types';
 
 const API_BASE = '/api/v1';
@@ -457,6 +458,62 @@ export const mockRetrievalTraces: RetrievalTrace[] = [
   },
 ];
 
+// ========== Approval mock ==========
+
+export const mockApprovalStatus: ApprovalStatusSnapshot = {
+  config: {
+    default_timeout_secs: 300,
+    enable_auto_approval: true,
+    persist_records: true,
+    max_pending_approvals: 100,
+    unattended_mode: false,
+    wait_for_approval: true,
+  },
+  pending_approvals: [
+    {
+      request_id: 'req-1',
+      session_id: 's1',
+      action_description: '写入文件 /home/user/data.txt',
+      action: {},
+      risk_level: 'High',
+      requested_at: '2026-08-05T10:00:00Z',
+      timeout_secs: 300,
+    },
+    {
+      request_id: 'req-2',
+      session_id: 's1',
+      action_description: '执行命令 rm -rf /tmp/cache',
+      action: {},
+      risk_level: 'Critical',
+      requested_at: '2026-08-05T10:01:00Z',
+      timeout_secs: 300,
+    },
+  ],
+  pending_confirmations: [],
+  recent_records: [
+    {
+      request: {
+        request_id: 'req-0',
+        session_id: 's1',
+        action_description: '写入文件 /home/user/old.txt',
+        action: {},
+        risk_level: 'High',
+        requested_at: '2026-08-05T09:55:00Z',
+        timeout_secs: 300,
+      },
+      response: {
+        request_id: 'req-0',
+        decision: 'Approve',
+        reason: null,
+        responded_at: '2026-08-05T09:56:00Z',
+        approved_by: 'user',
+      },
+      execution_result: true,
+    },
+  ],
+  confirmed_action_count: 3,
+};
+
 // ========== Handler mapping ==========
 
 export const handlers = [
@@ -634,6 +691,16 @@ export const handlers = [
       total: mockRetrievalTraces.length,
     };
     return HttpResponse.json(response);
+  }),
+
+  // Approval（后端为 GET /approval/status）
+  http.get(`${API_BASE}/approval/status`, () => {
+    return HttpResponse.json(mockApprovalStatus);
+  }),
+
+  // Approval respond（后端为 POST /approval/respond）
+  http.post(`${API_BASE}/approval/respond`, () => {
+    return HttpResponse.json({ ok: true });
   }),
 
   // Config

@@ -1,0 +1,311 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { fetchApprovalStatus, respondApproval } from '@/lib/api-client';
+import type { ApprovalDecision, ApprovalStatusSnapshot } from '@/lib/types';
+import { Loader2, AlertCircle, ShieldCheck, RefreshCw, Check, X, ShieldAlert } from 'lucide-react';
+
+/** 风险等级 → 中文标签。 */
+const RISK_LABELS: Record<string, string> = {
+  Safe: '安全',
+  Low: '低',
+  Medium: '中',
+  High: '高',
+  Critical: '危险',
+};
+
+/** 风险等级 → badge 颜色（Tailwind 明暗双主题）。 */
+const RISK_BADGE_CLASSES: Record<string, string> = {
+  Safe: 'bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800',
+  Low: 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800',
+  Medium:
+    'bg-yellow-50 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300 border-yellow-200 dark:border-yellow-800',
+  High: 'bg-orange-50 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 border-orange-200 dark:border-orange-800',
+  Critical:
+    'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800',
+};
+
+/** 决策 → 中文标签（后端返回大小写不固定，统一小写匹配）。 */
+const DECISION_LABELS: Record<string, string> = {
+  approve: '批准',
+  deny: '拒绝',
+  request_more_info: '更多信息',
+};
+
+/** 风险等级徽标。 */
+function RiskBadge({ riskLevel }: { riskLevel: string }) {
+  const label = RISK_LABELS[riskLevel] ?? riskLevel;
+  const classes = RISK_BADGE_CLASSES[riskLevel] ?? RISK_BADGE_CLASSES.Medium;
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 text-xs rounded border ${classes}`}>
+      {label}
+    </span>
+  );
+}
+
+/** RFC3339 时间戳 → 本地时间（yyyy/M/d HH:mm:ss）。 */
+function formatDateTime(ts: string): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+
+/** 审批决策 → 中文标签（response 可能为 null）。 */
+function decisionLabel(decision: string | null | undefined): string {
+  if (!decision) return '未响应';
+  const key = decision.toLowerCase();
+  return DECISION_LABELS[key] ?? decision;
+}
+
+/** 布尔配置 → 中文显示。 */
+function booleanLabel(value: boolean): string {
+  return value ? '开启' : '关闭';
+}
+
+export default function ApprovalPanel() {
+  const [snapshot, setSnapshot] = useState<ApprovalStatusSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  // 正在响应的 request_id，用于禁用按钮防重复点击
+  const [respondingId, setRespondingId] = useState<string | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const loadStatus = useCallback(async (showLoading = false) => {
+    if (showLoading) setLoading(true);
+    setError(null);
+    try {
+      const res = await fetchApprovalStatus();
+      setSnapshot(res);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : '加载审批状态失败');
+    } finally {
+      if (showLoading) setLoading(false);
+    }
+  }, []);
+
+  // 挂载后立即加载 + 每 2s 轮询（审批需及时出现），卸载时清理
+  useEffect(() => {
+    void loadStatus(true);
+    pollTimerRef.current = setInterval(() => {
+      void loadStatus(false);
+    }, 2000);
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [loadStatus]);
+
+  const handleRespond = useCallback(
+    async (requestId: string, decision: ApprovalDecision) => {
+      setRespondingId(requestId);
+      try {
+        await respondApproval(requestId, decision);
+        await loadStatus(false);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : '响应审批失败');
+      } finally {
+        setRespondingId(null);
+      }
+    },
+    [loadStatus],
+  );
+
+  const pending = snapshot?.pending_approvals ?? [];
+  const records = snapshot?.recent_records.slice(0, 10) ?? [];
+  const waitForApproval = snapshot?.config.wait_for_approval ?? true;
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border)]">
+        <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">审批</h2>
+        <button
+          onClick={() => void loadStatus(true)}
+          disabled={loading}
+          className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
+        >
+          <RefreshCw size={12} />
+          刷新
+        </button>
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        {error && (
+          <div
+            role="alert"
+            className="flex items-center justify-between gap-3 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
+          >
+            <span className="flex items-center gap-2">
+              <AlertCircle size={16} className="shrink-0" />
+              <span>{error}</span>
+            </span>
+            <button
+              onClick={() => void loadStatus(true)}
+              className="shrink-0 px-2 py-1 text-xs rounded border border-red-300 dark:border-red-700 hover:bg-red-100 dark:hover:bg-red-900/40"
+            >
+              重试
+            </button>
+          </div>
+        )}
+
+        {!error && loading && (
+          <div className="flex items-center justify-center py-16">
+            <Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" />
+          </div>
+        )}
+
+        {!error && !loading && snapshot && (
+          <>
+            {/* a) 待处理审批 */}
+            <section>
+              <h3 className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">
+                待处理审批
+              </h3>
+              {pending.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-10 text-[var(--color-text-tertiary)]">
+                  <ShieldCheck size={36} className="mb-2 opacity-40" />
+                  <p className="text-sm">暂无待处理审批</p>
+                  {!waitForApproval && (
+                    <p className="text-xs mt-2 max-w-md text-center">
+                      审批等待模式未开启（配置 security.wait_for_approval=false
+                      时危险操作走对话确认链路）
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {pending.map((req) => {
+                    const responding = respondingId === req.request_id;
+                    return (
+                      <div
+                        key={req.request_id}
+                        className="p-4 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm text-[var(--color-text-primary)] break-all">
+                              {req.action_description}
+                            </p>
+                            <div className="flex items-center gap-2 mt-1.5 text-xs text-[var(--color-text-tertiary)]">
+                              <RiskBadge riskLevel={req.risk_level} />
+                              <span>{formatDateTime(req.requested_at)}</span>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              onClick={() => void handleRespond(req.request_id, 'approve')}
+                              disabled={responding}
+                              aria-label={`批准 ${req.action_description}`}
+                              className="flex items-center gap-1 px-2.5 py-1 text-xs rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
+                            >
+                              {responding ? (
+                                <Loader2 size={12} className="animate-spin" />
+                              ) : (
+                                <Check size={12} />
+                              )}
+                              批准
+                            </button>
+                            <button
+                              onClick={() => void handleRespond(req.request_id, 'deny')}
+                              disabled={responding}
+                              aria-label={`拒绝 ${req.action_description}`}
+                              className="flex items-center gap-1 px-2.5 py-1 text-xs rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+                            >
+                              <X size={12} />
+                              拒绝
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            {/* b) 审批配置摘要 */}
+            <section>
+              <h3 className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">
+                审批配置
+              </h3>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    等待人工响应（降级链路）
+                  </p>
+                  <p className="text-sm font-medium text-[var(--color-text-primary)] mt-1">
+                    {booleanLabel(snapshot.config.wait_for_approval)}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                  <p className="text-xs text-[var(--color-text-tertiary)]">自动批准</p>
+                  <p className="text-sm font-medium text-[var(--color-text-primary)] mt-1">
+                    {booleanLabel(snapshot.config.enable_auto_approval)}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                  <p className="text-xs text-[var(--color-text-tertiary)]">无人值守模式</p>
+                  <p className="text-sm font-medium text-[var(--color-text-primary)] mt-1">
+                    {booleanLabel(snapshot.config.unattended_mode)}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                  <p className="text-xs text-[var(--color-text-tertiary)]">默认超时</p>
+                  <p className="text-sm font-medium text-[var(--color-text-primary)] mt-1">
+                    {snapshot.config.default_timeout_secs} 秒
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                  <p className="text-xs text-[var(--color-text-tertiary)]">已确认操作数</p>
+                  <p className="text-sm font-medium text-[var(--color-text-primary)] mt-1">
+                    {snapshot.confirmed_action_count}
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            {/* c) 最近审计（前 10 条） */}
+            <section>
+              <h3 className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">
+                最近审计
+              </h3>
+              {records.length === 0 ? (
+                <div className="flex items-center justify-center py-8 text-[var(--color-text-tertiary)]">
+                  <ShieldAlert size={28} className="mr-2 opacity-40" />
+                  <p className="text-sm">暂无审计记录</p>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  {records.map((record) => (
+                    <div
+                      key={record.request.request_id}
+                      className="flex items-center gap-3 px-3 py-2 rounded-md bg-[var(--color-bg-secondary)] border border-[var(--color-border)]"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm text-[var(--color-text-primary)] truncate">
+                          {record.request.action_description}
+                        </p>
+                        <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+                          {record.response ? formatDateTime(record.response.responded_at) : '—'}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="px-1.5 py-0.5 text-xs rounded bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-secondary)]">
+                          {decisionLabel(record.response?.decision)}
+                        </span>
+                        <span className="text-xs text-[var(--color-text-secondary)]">
+                          {record.response?.approved_by ?? '—'}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

@@ -73,6 +73,10 @@ pub struct SecurityConfig {
     /// 系统命令技能超时（秒），默认 300。
     #[serde(default = "default_skill_command_timeout")]
     pub skill_command_timeout_secs: u64,
+    /// 审批等待模式：危险操作通过 GUI 审批面板等待人工响应
+    /// （默认关闭：走"询问用户 → 指纹确认"降级链路）。
+    #[serde(default)]
+    pub wait_for_approval: bool,
 }
 
 fn default_true() -> bool {
@@ -138,6 +142,7 @@ impl Default for SecurityConfig {
             skill_file_list_max_entries: default_skill_list_max(),
             skill_http_timeout_secs: default_skill_http_timeout(),
             skill_command_timeout_secs: default_skill_command_timeout(),
+            wait_for_approval: false,
         }
     }
 }

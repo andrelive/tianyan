@@ -1,5 +1,7 @@
 import { getApiBase } from '@/hooks/use-api-base';
 import type {
+  ApprovalDecision,
+  ApprovalStatusSnapshot,
   ChatMessage,
   McpServerEntry,
   McpTestResponse,
@@ -266,4 +268,30 @@ export async function fetchRetrievalTraces(limit = 20): Promise<RetrievalTracesR
   const params = new URLSearchParams();
   params.set('limit', String(Math.min(limit, 100)));
   return apiGet<RetrievalTracesResponse>(`/retrieval/traces?${params}`);
+}
+
+// ========== Approval API ==========
+
+/** 获取审批状态快照（配置 + 待处理请求 + 最近审计）。 */
+export async function fetchApprovalStatus(): Promise<ApprovalStatusSnapshot> {
+  return apiGet<ApprovalStatusSnapshot>('/approval/status');
+}
+
+/** 响应待处理审批请求（批准/拒绝/要求更多信息）。 */
+export async function respondApproval(
+  requestId: string,
+  decision: ApprovalDecision,
+  reason?: string,
+): Promise<{ ok: boolean }> {
+  return apiPost<{ ok: boolean }>('/approval/respond', {
+    request_id: requestId,
+    decision,
+    ...(reason ? { reason } : {}),
+  } satisfies RespondApprovalRequest);
+}
+
+interface RespondApprovalRequest {
+  request_id: string;
+  decision: ApprovalDecision;
+  reason?: string;
 }

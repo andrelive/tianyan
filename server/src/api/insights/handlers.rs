@@ -122,3 +122,55 @@ pub async fn get_approval_status_handler(
         .map(Json)
         .map_err(|e| ApiError::Internal(format!("审批状态序列化失败：{e}")))
 }
+
+/// 审批响应请求体（GUI 审批面板调用）。
+#[derive(Debug, serde::Deserialize)]
+pub struct RespondApprovalRequest {
+    /// 待处理审批请求 ID（来自 approval/status 的 pending_approvals[].request_id）。
+    pub request_id: String,
+    /// 决策：approve / deny / request_more_info。
+    pub decision: String,
+    /// 理由（可选，记入审计记录）。
+    pub reason: Option<String>,
+}
+
+impl RespondApprovalRequest {
+    /// 解析决策字符串为内部枚举（snake_case API 语义）。
+    fn parse_decision(&self) -> Result<tianyan::executor::approval::ApprovalDecision, ApiError> {
+        match self.decision.as_str() {
+            "approve" => Ok(tianyan::executor::approval::ApprovalDecision::Approve),
+            "deny" => Ok(tianyan::executor::approval::ApprovalDecision::Deny),
+            "request_more_info" => {
+                Ok(tianyan::executor::approval::ApprovalDecision::RequestMoreInfo)
+            }
+            other => Err(ApiError::BadRequest(format!(
+                "无效的审批决策：{other}（可选：approve / deny / request_more_info）"
+            ))),
+        }
+    }
+}
+
+/// 响应待处理审批请求。
+///
+/// 请求不存在或已超时（默认 300s，超时自动拒绝）→ 404；
+/// 向导模式（审批工作流未装配）→ 500。
+pub async fn respond_approval_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RespondApprovalRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let decision = request.parse_decision()?;
+    let agent = state.agent().await;
+    agent
+        .respond_approval(&request.request_id, decision, request.reason)
+        .await
+        .map_err(|e| {
+            // core 侧固定错误消息（approval.rs respond_to_approval），
+            // 匹配以映射 404 语义；其余错误归 500
+            if e.to_string().contains("审批请求不存在或已超时") {
+                ApiError::NotFound(e.to_string())
+            } else {
+                ApiError::Internal(format!("审批响应失败：{e}"))
+            }
+        })?;
+    Ok(Json(json!({ "ok": true })))
+}

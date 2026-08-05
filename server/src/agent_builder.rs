@@ -265,6 +265,17 @@ impl AgentCoordinator for WizardModeAgent {
         })
     }
 
+    async fn respond_approval(
+        &self,
+        _request_id: &str,
+        _decision: tianyan::executor::approval::ApprovalDecision,
+        _reason: Option<String>,
+    ) -> TianyanResult<()> {
+        Err(TianyanError::Custom(
+            "模型服务错误：应用未配置。请先完成配置向导。".to_string(),
+        ))
+    }
+
     async fn get_state(&self) -> AgentState {
         AgentState::default()
     }

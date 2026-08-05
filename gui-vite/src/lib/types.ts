@@ -204,6 +204,57 @@ export interface RetrievalTracesResponse {
   total: number;
 }
 
+// ========== Approval Types (matches backend approval DTO) ==========
+
+/** 审批决策（API 语义：snake_case 字符串）。 */
+export type ApprovalDecision = 'approve' | 'deny' | 'request_more_info';
+
+/** 待处理审批请求。 */
+export interface ApprovalRequest {
+  request_id: string;
+  session_id: string;
+  action_description: string;
+  action: unknown;
+  risk_level: string;
+  requested_at: string;
+  timeout_secs: number;
+}
+
+/** 审批响应记录（审计）。 */
+export interface ApprovalResponse {
+  request_id: string;
+  decision: string;
+  reason: string | null;
+  responded_at: string;
+  approved_by: string;
+}
+
+/** 审批审计记录。 */
+export interface ApprovalRecord {
+  request: ApprovalRequest;
+  response: ApprovalResponse | null;
+  execution_result: boolean | null;
+}
+
+/** 审批工作流配置。 */
+export interface ApprovalWorkflowConfig {
+  default_timeout_secs: number;
+  enable_auto_approval: boolean;
+  persist_records: boolean;
+  max_pending_approvals: number;
+  unattended_mode: boolean;
+  wait_for_approval: boolean;
+}
+
+/** 审批状态快照（GET /approval/status）。 */
+export interface ApprovalStatusSnapshot {
+  config: ApprovalWorkflowConfig;
+  pending_approvals: ApprovalRequest[];
+  pending_confirmations: string[];
+  recent_records: ApprovalRecord[];
+  confirmed_action_count: number;
+}
+
 // ========== Config Types (aligned with backend TianyanConfig) ==========
 
 export interface ConfigStatus {
@@ -349,7 +400,7 @@ export interface PreferencesInfo {
 
 // ========== App State Types ==========
 
-export type View = 'chat' | 'skills' | 'knowledge' | 'settings' | 'memory' | 'traces';
+export type View = 'chat' | 'skills' | 'knowledge' | 'settings' | 'memory' | 'traces' | 'approval';
 
 export type StreamStatus = 'idle' | 'streaming' | 'error';
 

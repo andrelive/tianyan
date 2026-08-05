@@ -162,8 +162,17 @@ impl AgentBuilder {
         // 构建可观测性指标（tool_registry 依赖）
         let metrics = AgentMetrics::new();
 
+        // Build security policy from user config (or defaults)
+        let security_config = self.security_config.clone().unwrap_or_default();
+        let security_policy = SecurityPolicy::from_config(&security_config);
+
         // 构建审批工作流（write_file / execute_command 危险操作门控）
-        let approval = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+        // wait_for_approval 开启时：危险操作挂起等待 GUI 审批面板人工响应；
+        // 默认关闭：走"询问用户 → 指纹确认"降级链路
+        let approval = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
+            wait_for_approval: security_config.wait_for_approval,
+            ..Default::default()
+        }));
 
         let chat_model = self.model.clone().unwrap_or_else(|| "default".to_string());
 
@@ -175,10 +184,6 @@ impl AgentBuilder {
 
         // 构建规则记录器（工具执行失败时自动学习，供 GEPA 和 RuleSuggester 消费）
         let rule_recorder = Arc::new(RuleRecorder::new(vfs.clone()));
-
-        // Build security policy from user config (or defaults)
-        let security_config = self.security_config.unwrap_or_default();
-        let security_policy = SecurityPolicy::from_config(&security_config);
 
         let mut tool_registry = ToolRegistry::new(security_policy)
             .with_vfs(vfs.clone())
