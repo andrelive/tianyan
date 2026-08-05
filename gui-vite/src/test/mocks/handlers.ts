@@ -11,6 +11,8 @@ import type {
   RetrievalTrace,
   RetrievalTracesResponse,
   ApprovalStatusSnapshot,
+  SchedulerStatus,
+  UsageStatsSummary,
 } from '@/lib/types';
 
 const API_BASE = '/api/v1';
@@ -514,6 +516,45 @@ export const mockApprovalStatus: ApprovalStatusSnapshot = {
   confirmed_action_count: 3,
 };
 
+// ========== Insights mock ==========
+
+export const mockSchedulerStatus: SchedulerStatus = {
+  running: true,
+  tasks: [
+    {
+      id: 'summary_generation',
+      name: '摘要生成',
+      priority: 'Medium',
+      cron_expression: '0 */5 * * * *',
+      run_count: 12,
+      last_run_ago_secs: 183,
+    },
+    {
+      id: 'memory_extraction',
+      name: '记忆提取',
+      priority: 'Medium',
+      cron_expression: '0 */10 * * * *',
+      run_count: 6,
+      last_run_ago_secs: null,
+    },
+    {
+      id: 'garbage_collection',
+      name: '垃圾回收',
+      priority: 'Low',
+      cron_expression: '0 0 */6 * * *',
+      run_count: 2,
+      last_run_ago_secs: 3600,
+    },
+  ],
+};
+
+export const mockUsageStats: UsageStatsSummary = {
+  total_skills_tracked: 7,
+  total_skill_calls: 124,
+  total_docs_tracked: 45,
+  total_searches: 230,
+};
+
 // ========== Handler mapping ==========
 
 export const handlers = [
@@ -701,6 +742,16 @@ export const handlers = [
   // Approval respond（后端为 POST /approval/respond）
   http.post(`${API_BASE}/approval/respond`, () => {
     return HttpResponse.json({ ok: true });
+  }),
+
+  // Scheduler status（后端为 GET /scheduler/status）
+  http.get(`${API_BASE}/scheduler/status`, () => {
+    return HttpResponse.json(mockSchedulerStatus);
+  }),
+
+  // Usage stats（后端为 GET /stats）
+  http.get(`${API_BASE}/stats`, () => {
+    return HttpResponse.json(mockUsageStats);
   }),
 
   // Config

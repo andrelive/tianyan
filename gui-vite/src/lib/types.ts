@@ -255,6 +255,32 @@ export interface ApprovalStatusSnapshot {
   confirmed_action_count: number;
 }
 
+// ========== Insights Types (matches backend scheduler/stats DTO) ==========
+
+/** 定时任务状态（GET /scheduler/status）。 */
+export interface SchedulerTaskStatus {
+  id: string;
+  name: string;
+  priority: string;
+  cron_expression: string;
+  run_count: number;
+  /** 距上次执行秒数（从未执行时为 null）。 */
+  last_run_ago_secs: number | null;
+}
+
+export interface SchedulerStatus {
+  running: boolean;
+  tasks: SchedulerTaskStatus[];
+}
+
+/** 使用统计摘要（GET /stats）。 */
+export interface UsageStatsSummary {
+  total_skills_tracked: number;
+  total_skill_calls: number;
+  total_docs_tracked: number;
+  total_searches: number;
+}
+
 // ========== Config Types (aligned with backend TianyanConfig) ==========
 
 export interface ConfigStatus {
@@ -400,7 +426,8 @@ export interface PreferencesInfo {
 
 // ========== App State Types ==========
 
-export type View = 'chat' | 'skills' | 'knowledge' | 'settings' | 'memory' | 'traces' | 'approval';
+export type View =
+  'chat' | 'skills' | 'knowledge' | 'settings' | 'memory' | 'traces' | 'approval' | 'insights';
 
 export type StreamStatus = 'idle' | 'streaming' | 'error';
 

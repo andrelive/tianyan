@@ -14,6 +14,7 @@ import KnowledgePanel from '@/components/knowledge/KnowledgePanel';
 import MemoryPanel from '@/components/memory/MemoryPanel';
 import RetrievalTracesPanel from '@/components/retrieval/RetrievalTracesPanel';
 import ApprovalPanel from '@/components/approval/ApprovalPanel';
+import InsightsPanel from '@/components/insights/InsightsPanel';
 import SettingsPanel from '@/components/settings/SettingsPanel';
 import ConfigWizard from '@/components/wizard/ConfigWizard';
 
@@ -84,6 +85,7 @@ function App() {
           <Route path="/memory" element={<MemoryPanel />} />
           <Route path="/traces" element={<RetrievalTracesPanel />} />
           <Route path="/approval" element={<ApprovalPanel />} />
+          <Route path="/insights" element={<InsightsPanel />} />
           <Route path="/settings" element={<SettingsPanel />} />
         </Route>
       </Routes>

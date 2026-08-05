@@ -11,6 +11,7 @@ import {
   MemoryStick,
   Route,
   ShieldCheck,
+  Gauge,
   Settings,
   Plus,
   PanelLeftClose,
@@ -44,6 +45,12 @@ const NAV_ITEMS = [
     label: '审批',
     icon: ShieldCheck,
     path: '/approval',
+  },
+  {
+    id: 'insights' as const,
+    label: '洞察',
+    icon: Gauge,
+    path: '/insights',
   },
   {
     id: 'settings' as const,

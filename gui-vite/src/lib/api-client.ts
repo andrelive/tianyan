@@ -9,7 +9,9 @@ import type {
   OllamaScanResponse,
   OllamaTestResponse,
   RetrievalTracesResponse,
+  SchedulerStatus,
   SessionMessagesResponse,
+  UsageStatsSummary,
 } from './types';
 
 const DEFAULT_TIMEOUT = 60000;
@@ -294,4 +296,16 @@ interface RespondApprovalRequest {
   request_id: string;
   decision: ApprovalDecision;
   reason?: string;
+}
+
+// ========== Insights API ==========
+
+/** 获取定时任务调度器状态（任务列表 / 执行次数 / 距上次执行）。 */
+export async function fetchSchedulerStatus(): Promise<SchedulerStatus> {
+  return apiGet<SchedulerStatus>('/scheduler/status');
+}
+
+/** 获取使用统计摘要（技能调用 / 文档访问 / 搜索热度）。 */
+export async function fetchUsageStats(): Promise<UsageStatsSummary> {
+  return apiGet<UsageStatsSummary>('/stats');
 }
