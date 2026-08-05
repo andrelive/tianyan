@@ -27,6 +27,11 @@ use tianyan::{Result as TianyanResult, TianyanError};
 use crate::agent_builder::{create_model_services, AgentBuilderFactory};
 use crate::mcp_bridge::McpToolManager;
 
+/// 构造模型服务创建错误（统一错误前缀，避免调用点重复拼装）。
+fn model_services_error(e: impl std::fmt::Display) -> TianyanError {
+    TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{e}"))
+}
+
 // 类型别名
 type SharedConfig = Arc<RwLock<TianyanConfig>>;
 type SharedAgent = Arc<RwLock<Arc<dyn AgentCoordinator>>>;
@@ -148,7 +153,7 @@ impl AppState {
         // 构建 Agent（传入 vfs + 技能组件 + 共享模型服务 + MCP 动态工具）
         let model_services = create_model_services(&config)
             .await
-            .map_err(|e| TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{e}")))?;
+            .map_err(model_services_error)?;
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -216,7 +221,7 @@ impl AppState {
         // 配置可能已变化（模型/API Key），重建共享模型服务
         let model_services = create_model_services(&config)
             .await
-            .map_err(|e| TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{e}")))?;
+            .map_err(model_services_error)?;
         let new_agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),

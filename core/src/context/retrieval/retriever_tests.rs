@@ -1,6 +1,7 @@
 use super::*;
 use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
-use crate::model::{EmbeddingData, EmbeddingRequest, EmbeddingResponse, EmbeddingService};
+use crate::model::EmbeddingService;
+use crate::test_utils::{cosine_similarity, MockEmbeddingService};
 use crate::vfs::{
     ContentMetadata, ContentStore, ContextEntry, VectorPoint, VectorSearchQuery,
     VectorSearchResult, VectorStorage, VectorType, VfsCore, VfsSearch,
@@ -8,29 +9,6 @@ use crate::vfs::{
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-/// Mock embedding service for testing.
-struct MockEmbeddingService;
-
-#[async_trait]
-impl EmbeddingService for MockEmbeddingService {
-    async fn embed(&self, _request: EmbeddingRequest) -> Result<EmbeddingResponse> {
-        Ok(EmbeddingResponse {
-            object: "list".to_string(),
-            data: vec![EmbeddingData {
-                object: "embedding".to_string(),
-                embedding: vec![0.1; 768],
-                index: 0,
-            }],
-            model: "test".to_string(),
-            usage: crate::common::types::TokenUsage::default(),
-        })
-    }
-
-    fn embedding_dimension(&self, _model: &str) -> usize {
-        768
-    }
-}
 
 /// Mock in-memory vector storage for testing.
 pub struct InMemoryVectorStorage {
@@ -173,23 +151,6 @@ impl VectorStorage for InMemoryVectorStorage {
         points.clear();
         Ok(())
     }
-}
-
-/// Calculate cosine similarity between two vectors.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-
-    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-
-    dot_product / (norm_a * norm_b)
 }
 
 /// Test VFS that delegates to in-memory vector storage.

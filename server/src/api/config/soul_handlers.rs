@@ -13,6 +13,11 @@ use tianyan::vfs::ContentStore;
 use crate::api::ApiError;
 use crate::state::AppState;
 
+/// 构造无效 soul URI 错误（统一错误前缀）。
+fn invalid_soul_uri_error(e: impl std::fmt::Display) -> ApiError {
+    ApiError::Internal(format!("无效的 soul URI: {e}"))
+}
+
 /// 更新 soul 内容的请求体。
 #[derive(Debug, Deserialize)]
 pub struct SoulUpdateRequest {
@@ -31,8 +36,7 @@ pub struct SoulResponse {
 pub async fn get_soul_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SoulResponse>, ApiError> {
-    let uri = TianyanUri::parse("tianyan://agent/soul")
-        .map_err(|e| ApiError::Internal(format!("无效的 soul URI: {}", e)))?;
+    let uri = TianyanUri::parse("tianyan://agent/soul").map_err(invalid_soul_uri_error)?;
 
     let content = state
         .vfs()
@@ -52,8 +56,7 @@ pub async fn update_soul_handler(
         return Err(ApiError::BadRequest("内容不能为空".into()));
     }
 
-    let uri = TianyanUri::parse("tianyan://agent/soul")
-        .map_err(|e| ApiError::Internal(format!("无效的 soul URI: {}", e)))?;
+    let uri = TianyanUri::parse("tianyan://agent/soul").map_err(invalid_soul_uri_error)?;
 
     state
         .vfs()

@@ -9,6 +9,11 @@ use crate::api::config::types::{ConfigResponse, ModelsResponse, UpdateConfigResp
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
 
+/// 构造热重载失败错误（统一错误前缀，避免调用点重复拼装）。
+fn reload_error(e: impl std::fmt::Display) -> ApiError {
+    ApiError::Internal(format!("热重载失败: {e}"))
+}
+
 /// 配置服务，管理应用配置的读取、保存与热重载
 pub struct ConfigService {
     state: Arc<AppState>,
@@ -38,7 +43,7 @@ impl ConfigService {
         self.state
             .update_config(config)
             .await
-            .map_err(|e| ApiError::Internal(format!("热重载失败: {}", e)))?;
+            .map_err(reload_error)?;
 
         info!("配置已更新并重载");
         Ok(UpdateConfigResponse {
@@ -123,7 +128,7 @@ impl ConfigService {
         self.state
             .update_config(config)
             .await
-            .map_err(|e| ApiError::Internal(format!("热重载失败: {}", e)))?;
+            .map_err(reload_error)?;
 
         info!(model = model, "默认聊天模型已切换");
         Ok(UpdateConfigResponse {
@@ -151,7 +156,7 @@ impl ConfigService {
         self.state
             .update_config(config)
             .await
-            .map_err(|e| ApiError::Internal(format!("热重载失败: {}", e)))?;
+            .map_err(reload_error)?;
         Ok(())
     }
 

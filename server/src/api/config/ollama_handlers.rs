@@ -16,6 +16,16 @@ use crate::state::AppState;
 /// Ollama 服务默认端点。
 const DEFAULT_OLLAMA_ENDPOINT: &str = "http://localhost:11434";
 
+/// 构造 Ollama 客户端创建错误（统一错误前缀）。
+fn ollama_client_error(e: impl std::fmt::Display) -> ApiError {
+    ApiError::Internal(format!("创建 HTTP 客户端失败: {e}"))
+}
+
+/// 构造 Ollama 响应解析错误（统一错误前缀）。
+fn ollama_parse_error(e: impl std::fmt::Display) -> ApiError {
+    ApiError::Internal(format!("解析 Ollama 响应失败: {e}"))
+}
+
 /// 携带可选端点的请求体。
 #[derive(Debug, Deserialize)]
 pub struct OllamaEndpointRequest {
@@ -119,14 +129,11 @@ pub async fn test_ollama_connection(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .map_err(|e| ApiError::Internal(format!("创建 HTTP 客户端失败: {}", e)))?;
+        .map_err(ollama_client_error)?;
 
     match client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|e| ApiError::Internal(format!("解析 Ollama 响应失败: {}", e)))?;
+            let body: serde_json::Value = resp.json().await.map_err(ollama_parse_error)?;
             let version = body
                 .get("version")
                 .and_then(|v| v.as_str())
@@ -167,14 +174,11 @@ pub async fn scan_ollama_models(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| ApiError::Internal(format!("创建 HTTP 客户端失败: {}", e)))?;
+        .map_err(ollama_client_error)?;
 
     match client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
-            let body: OllamaTagsResponse = resp
-                .json()
-                .await
-                .map_err(|e| ApiError::Internal(format!("解析 Ollama 响应失败: {}", e)))?;
+            let body: OllamaTagsResponse = resp.json().await.map_err(ollama_parse_error)?;
             let models: Vec<OllamaModelInfo> = body
                 .models
                 .into_iter()
