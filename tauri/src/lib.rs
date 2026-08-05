@@ -22,6 +22,24 @@ use server::{find_available_port, PREFERRED_PORT, SERVER_HOST};
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
+/// 启动期致命错误：记录日志 → 弹原生错误对话框 → 退出进程。
+///
+/// 启动失败（端口占用 / 健康检查超时 / 构建失败）时用户需要可见反馈，
+/// 不能静默退出。
+fn fatal_startup_error(title: &str, message: &str) -> ! {
+    error!("启动失败：{} — {}", title, message);
+    let log_hint = dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("com.tianyan.app")
+        .join("logs");
+    let _ = rfd::MessageDialog::new()
+        .set_title(format!("天演启动失败：{title}"))
+        .set_description(format!("{message}\n\n详细日志：{}", log_hint.display()))
+        .set_level(rfd::MessageLevel::Error)
+        .show();
+    std::process::exit(1);
+}
+
 /// 检测首选端口上是否已有 Tianyan 实例在服务（健康检查可达）。
 ///
 /// 在启动内嵌服务器之前调用：第二实例直接退出，避免短暂打开共享数据文件。
@@ -391,8 +409,7 @@ pub fn run() {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
-            error!("Failed to create Tokio runtime: {}", e);
-            std::process::exit(1);
+            fatal_startup_error("运行环境初始化", &format!("创建后台运行时失败：{}", e));
         }
     };
 
@@ -413,18 +430,19 @@ pub fn run() {
     let listener = match find_available_port(PREFERRED_PORT) {
         Some(l) => l,
         None => {
-            error!(
-                "未找到可用端口（{} 起 100 个端口均被占用），退出",
-                PREFERRED_PORT
+            fatal_startup_error(
+                "端口不可用",
+                &format!(
+                    "{} 起 100 个端口均被占用，请释放部分端口后重试",
+                    PREFERRED_PORT
+                ),
             );
-            std::process::exit(1);
         }
     };
     let port = match listener.local_addr() {
         Ok(addr) => addr.port(),
         Err(e) => {
-            error!("读取监听端口失败：{}", e);
-            std::process::exit(1);
+            fatal_startup_error("端口绑定", &format!("读取监听地址失败：{}", e));
         }
     };
     if port != PREFERRED_PORT {
@@ -456,12 +474,17 @@ pub fn run() {
         *server_task.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
     }
 
-    // 等待服务器启动完成（初始启动失败是环境问题，直接退出）
+    // 等待服务器启动完成（初始启动失败是环境问题，弹窗提示后退出）
     info!("Waiting for server to be ready...");
     rt.block_on(async {
         if let Err(e) = wait_for_server_ready(port).await {
-            error!("Server failed to start: {}", e);
-            std::process::exit(1);
+            fatal_startup_error(
+                "内嵌服务器启动",
+                &format!(
+                    "服务器 {} 秒内未能就绪：{e}。\n请检查数据目录是否可写、磁盘空间是否充足。",
+                    HEALTH_CHECK_TIMEOUT.as_secs()
+                ),
+            );
         }
         info!("Axum server is ready, proceeding to start Tauri...");
     });
@@ -513,8 +536,7 @@ pub fn run() {
     {
         Ok(app) => app,
         Err(e) => {
-            error!("Tauri application build error: {}", e);
-            std::process::exit(1);
+            fatal_startup_error("界面初始化", &format!("Tauri 应用构建失败：{}", e));
         }
     };
 

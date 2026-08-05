@@ -17,6 +17,7 @@ tianyan-server = { path = "../server" }
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }
 tauri-plugin-shell = "2.2"
 tauri-plugin-single-instance = "2"
+rfd = "0.17"
 
 # HTTP server
 axum = { version = "0.8", features = ["multipart"] }
