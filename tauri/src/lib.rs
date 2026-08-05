@@ -13,7 +13,11 @@ use std::time::Duration;
 use tauri::Manager;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{
+    layer::{Layer, SubscriberExt},
+    util::SubscriberInitExt,
+    EnvFilter,
+};
 
 pub use server::start_axum_server;
 
@@ -275,8 +279,11 @@ mod tests {
     }
 }
 
-/// 初始化日志系统 - 同时输出到文件和控制台（如果有）
-fn init_logging() {
+/// 初始化日志系统 - 同时输出到文件和控制台。
+///
+/// 级别/格式来自配置文件 `[logging]` 节（`RUST_LOG` 环境变量可覆盖级别）；
+/// 文件日志写入 `{data_dir}/com.tianyan.app/logs/`。
+fn init_logging(config: &tianyan::config::LoggingConfig) {
     // 创建日志目录
     let log_dir = dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -308,24 +315,37 @@ fn init_logging() {
         }
     };
 
-    // 设置日志格式和级别
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,tianyan=debug,tauri=debug"));
+    // 级别：RUST_LOG 优先，回退配置文件 [logging].level
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
 
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_line_number(true)
-        .with_file(true);
+    // 控制台 layer：格式（text/json）来自配置文件 [logging].format
+    let fmt_layer = if config.format == "json" {
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_target(true)
+            .with_line_number(true)
+            .with_file(true)
+            .boxed()
+    } else {
+        tracing_subscriber::fmt::layer()
+            .with_target(true)
+            .with_thread_ids(true)
+            .with_line_number(true)
+            .with_file(true)
+            .boxed()
+    };
 
     if let Some(file) = file_appender {
+        // 文件 layer：固定 text 格式（ANSI off，可读性好）
         let fmt_layer_file = tracing_subscriber::fmt::layer()
             .with_writer(Arc::new(file))
             .with_ansi(false)
             .with_target(true)
             .with_thread_ids(true)
             .with_line_number(true)
-            .with_file(true);
+            .with_file(true)
+            .boxed();
 
         tracing_subscriber::registry()
             .with(env_filter)
@@ -383,27 +403,23 @@ pub async fn wait_for_server_ready(port: u16) -> anyhow::Result<()> {
 /// 运行 Tauri 应用程序
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 初始化日志（输出到文件）
-    init_logging();
+    // 尝试加载配置（日志初始化需要 [logging] 节；失败则默认配置，前端显示配置向导）
+    let tianyan_config = match tianyan::config::TianyanConfig::load() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("配置加载失败（使用默认配置）: {}", e);
+            tianyan::config::TianyanConfig::default()
+        }
+    };
+
+    // 初始化日志（级别/格式来自配置文件 [logging] 节，RUST_LOG 可覆盖级别）
+    init_logging(&tianyan_config.logging);
 
     info!("Starting Tianyan Tauri application...");
 
     // 检查配置状态
     let configured = tianyan::config::TianyanConfig::config_exists();
     info!("Configuration status: configured={}", configured);
-
-    // 尝试加载配置，如果失败则使用默认配置
-    let tianyan_config = match tianyan::config::TianyanConfig::load() {
-        Ok(config) => {
-            info!("Tianyan configuration loaded successfully");
-            config
-        }
-        Err(e) => {
-            warn!("Failed to load configuration: {}. Using default config.", e);
-            // 使用默认配置，让前端显示配置向导
-            tianyan::config::TianyanConfig::default()
-        }
-    };
 
     // 创建 Tokio runtime 用于后台服务
     let rt = match tokio::runtime::Runtime::new() {

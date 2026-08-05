@@ -326,11 +326,12 @@ Tianyan 按以下顺序查找配置文件：
 |------|------|--------|
 | `TIANYAN_CONFIG` | 配置文件路径 | - |
 | `TIANYAN_DATA_DIR` | 数据存储目录 | `~/.local/share/tianyan` |
-| `TIANYAN_LOG_LEVEL` | 日志级别 | `info` |
-| `TIANYAN_LOG_FORMAT` | 日志格式 (text/json) | `text` |
 | `OPENAI_API_KEY` | OpenAI API 密钥 | - |
 | `ANTHROPIC_API_KEY` | Anthropic API 密钥 | - |
 | `DEEPSEEK_API_KEY` | DeepSeek API 密钥 | - |
+
+> **日志配置**：级别与格式通过 `tianyan.toml` 的 `[logging]` 节配置（`level` / `format`）。
+> `RUST_LOG` 环境变量可覆盖日志级别（tracing 标准行为）。
 
 详见 [.env.example](./.env.example) 获取更多选项。
 

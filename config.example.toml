@@ -90,12 +90,10 @@ vision = { provider = "openai", model = "gpt-4-vision-preview" }
 # vision = { provider = "openai", model = "gpt-4-vision-preview" }
 
 # ==================== 日志配置 ====================
+# level / format 生效；日志级别也可用 RUST_LOG 环境变量覆盖
 [logging]
 level = "info"
 format = "text"
-max_file_size = 10
-max_files = 5
-include_timestamp = true
 include_location = false
 
 # ==================== 安全配置 ====================
