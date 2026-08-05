@@ -13,6 +13,10 @@ import type {
   ApprovalStatusSnapshot,
   SchedulerStatus,
   UsageStatsSummary,
+  McpServerEntry,
+  McpTestResponse,
+  OllamaScanResponse,
+  OllamaTestResponse,
 } from '@/lib/types';
 import type { KnowledgeEntryItem } from '@/lib/api-client';
 
@@ -243,6 +247,43 @@ export const mockTianyanConfig = {
     cache_ttl: 300,
   },
 };
+
+// ========== Settings detail mocks (MCP / Ollama / Soul / test-connection) ==========
+
+export const mockMcpServers: McpServerEntry[] = [
+  {
+    name: 'filesystem-server',
+    command: 'npx',
+    args: ['-y', '@anthropic-ai/mcp-serve'],
+    env: { GITHUB_TOKEN: 'ghp_xxx' },
+    enabled: true,
+    description: '文件系统操作',
+  },
+  {
+    name: 'code-search-server',
+    command: 'node',
+    args: ['search.js'],
+    enabled: false,
+  },
+];
+
+export const mockMcpTestResult: McpTestResponse = { success: true, tools: 12 };
+
+export const mockOllamaScanResult: OllamaScanResponse = {
+  success: true,
+  models: [
+    { name: 'llama3:8b', size: '4700000000', capabilities: ['chat'] },
+    { name: 'nomic-embed-text', size: '274000000', capabilities: ['text-embedding'] },
+  ],
+};
+
+export const mockOllamaTestResult: OllamaTestResponse = { success: true, version: '0.3.6' };
+
+export const mockSoulContent = { content: '你是天演，一个本地智能代理助手。' };
+
+export const mockDefaultSoulContent = { content: '（默认人格设定）' };
+
+export const mockTestConnectionResult = { success: true, message: '连接成功' };
 
 // ========== Memory mock ==========
 
@@ -821,6 +862,54 @@ export const handlers = [
     const body = await request.json();
     console.debug('Mock config update:', body);
     return HttpResponse.json({ success: true, message: '配置已保存' });
+  }),
+
+  // MCP servers（后端为 GET/POST /config/mcp/servers）
+  http.get(`${API_BASE}/config/mcp/servers`, () => {
+    return HttpResponse.json(mockMcpServers);
+  }),
+
+  http.post(`${API_BASE}/config/mcp/servers`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.put(`${API_BASE}/config/mcp/servers/:name`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.delete(`${API_BASE}/config/mcp/servers/:name`, () => {
+    return HttpResponse.json({ success: true });
+  }),
+
+  http.post(`${API_BASE}/config/mcp/servers/:name/test`, () => {
+    return HttpResponse.json(mockMcpTestResult);
+  }),
+
+  // Ollama（后端为 POST /config/ollama/scan、/config/ollama/test）
+  http.post(`${API_BASE}/config/ollama/scan`, () => {
+    return HttpResponse.json(mockOllamaScanResult);
+  }),
+
+  http.post(`${API_BASE}/config/ollama/test`, () => {
+    return HttpResponse.json(mockOllamaTestResult);
+  }),
+
+  // Soul（后端为 GET/PUT /config/soul，GET /config/soul/default）
+  http.get(`${API_BASE}/config/soul`, () => {
+    return HttpResponse.json(mockSoulContent);
+  }),
+
+  http.put(`${API_BASE}/config/soul`, () => {
+    return HttpResponse.json({ success: true, message: '已保存' });
+  }),
+
+  http.get(`${API_BASE}/config/soul/default`, () => {
+    return HttpResponse.json(mockDefaultSoulContent);
+  }),
+
+  // Test connection（后端为 POST /config/test-connection）
+  http.post(`${API_BASE}/config/test-connection`, () => {
+    return HttpResponse.json(mockTestConnectionResult);
   }),
 
   http.get(`${API_BASE}/config/models`, () => {
