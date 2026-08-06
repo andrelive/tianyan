@@ -322,7 +322,7 @@ impl TaskHandler for GcTask {
             }
             (Err(e), _) | (_, Err(e)) => {
                 tracing::warn!(error = %e, "GC 扫描失败");
-                TaskResult::failed(format!("GC 扫描失败：{}", e))
+                TaskResult::failed(TianyanError::Custom(format!("GC 任务：扫描失败：{}", e)))
             }
         }
     }

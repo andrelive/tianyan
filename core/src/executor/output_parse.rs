@@ -1,4 +1,4 @@
-//! 命令输出解析工具：从 build/lint 输出中提取编译错误。
+//! 命令输出解析工具：从 build/lint 输出中提取编译错误、从 test 输出中统计/提取结果。
 
 /// 从 build/lint 输出中提取编译错误。
 ///
@@ -30,6 +30,53 @@ pub(crate) fn extract_build_errors(stdout: &str, stderr: &str) -> Vec<String> {
     }
 
     errors
+}
+
+/// 从 cargo test 输出中统计通过的测试数。
+pub(crate) fn count_test_passed(stdout: &str) -> usize {
+    for line in stdout.lines().rev() {
+        if line.contains("test result:") {
+            if let Some(passed_str) = line.split(';').next().and_then(|s| s.split("ok. ").nth(1)) {
+                return passed_str
+                    .split(' ')
+                    .next()
+                    .unwrap_or("0")
+                    .parse()
+                    .unwrap_or(0);
+            }
+            if let Some(pos) = line.find(" passed") {
+                let before = &line[..pos];
+                if let Some(num) = before.rsplit(' ').next() {
+                    return num.parse().unwrap_or(0);
+                }
+            }
+        }
+    }
+    0
+}
+
+/// 从 cargo test 输出中提取失败测试的名称和错误。
+pub(crate) fn extract_test_failures(stdout: &str, stderr: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    let combined = format!("{}\n{}", stdout, stderr);
+    let mut in_failure = false;
+
+    for line in combined.lines() {
+        if line.contains("FAILED") || line.starts_with("thread '") {
+            in_failure = true;
+            failures.push(line.trim().to_string());
+        } else if line.contains("failures:") {
+            in_failure = false;
+        } else if in_failure && !line.trim().is_empty() {
+            failures.push(line.trim().to_string());
+        }
+        if failures.len() > 50 {
+            failures.push("... (截断，过多失败输出)".to_string());
+            break;
+        }
+    }
+
+    failures
 }
 
 #[cfg(test)]

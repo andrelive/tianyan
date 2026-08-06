@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 use tokio::sync::RwLock;
 
+use crate::common::error::TianyanError;
 use crate::config::TianyanConfig;
 use crate::memory::MemoryExtractor;
 use crate::vfs::{SummaryEngine, VirtualFileSystem};
@@ -28,14 +29,14 @@ pub enum TaskPriority {
 }
 
 /// 任务执行结果。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TaskResult {
     /// 是否成功。
     pub success: bool,
     /// 处理的条目数量。
     pub processed_count: usize,
     /// 错误信息（如果有）。
-    pub error: Option<String>,
+    pub error: Option<TianyanError>,
 }
 
 impl TaskResult {
@@ -49,7 +50,7 @@ impl TaskResult {
     }
 
     /// 创建失败结果。
-    pub fn failed(error: impl Into<String>) -> Self {
+    pub fn failed(error: impl Into<TianyanError>) -> Self {
         Self {
             success: false,
             processed_count: 0,
@@ -296,7 +297,7 @@ impl TaskScheduler {
         let mut tasks = self.tasks.write().await;
 
         if tasks.contains_key(&definition.id) {
-            return Err(crate::common::error::TianyanError::Custom(format!(
+            return Err(TianyanError::Custom(format!(
                 "内部错误：任务 ID 已存在：{}",
                 definition.id
             )));
@@ -629,9 +630,39 @@ mod tests {
         assert_eq!(success.processed_count, 5);
         assert!(success.error.is_none());
 
-        let failed = TaskResult::failed("测试错误");
+        let failed = TaskResult::failed(TianyanError::Custom("scheduler：测试错误".to_string()));
         assert!(!failed.success);
         assert_eq!(failed.processed_count, 0);
-        assert!(failed.error.is_some());
+        match &failed.error {
+            Some(err) => assert_eq!(err.to_string(), "scheduler：测试错误"),
+            None => panic!("失败结果应携带错误信息"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_task_status_json_contract() {
+        // TaskStatus 序列化契约锁定：/api/v1/scheduler/status 输出的字段集合与形状
+        // （id/name/priority/cron_expression/run_count/last_run_ago_secs），不包含 error 字段。
+        let status = TaskStatus {
+            id: "summary_generation".to_string(),
+            name: "摘要生成".to_string(),
+            priority: TaskPriority::Normal,
+            cron_expression: "0 */5 * * * *".to_string(),
+            run_count: 3,
+            last_run_ago_secs: Some(42),
+        };
+        let expected = serde_json::json!({
+            "id": "summary_generation",
+            "name": "摘要生成",
+            "priority": "Normal",
+            "cron_expression": "0 */5 * * * *",
+            "run_count": 3,
+            "last_run_ago_secs": 42,
+        });
+        assert_eq!(serde_json::to_value(&status).unwrap(), expected);
+        assert!(serde_json::to_value(&status)
+            .unwrap()
+            .get("error")
+            .is_none());
     }
 }

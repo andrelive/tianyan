@@ -59,7 +59,10 @@ impl TaskHandler for RuleTask {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "记忆聚类扫描失败");
-                return TaskResult::failed(format!("扫描失败：{}", e));
+                return TaskResult::failed(crate::common::error::TianyanError::Custom(format!(
+                    "规则提炼任务：扫描失败：{}",
+                    e
+                )));
             }
         };
 

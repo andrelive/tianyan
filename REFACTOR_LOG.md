@@ -439,3 +439,91 @@ core 模块系统性架构重构日志。约束：公开 API 签名与行为完�
 - `parent_id` 计算点两条路径原本不一致（process：prepare 之后=当前用户消息；clarify：persist 之前=上一消息，回复链跳过用户回答）。统一为 process_message 语义（回复挂接在用户回答之下）——process 路径行为零变化；澄清路径的持久化回复链被修正为 回答→回复（此前全代码库无任何消费者读取 parent_id 链，无测试断言，仅 JSONL 元数据）
 - 审批确认相对 persist 的顺序互换（原 persist→confirm，现 confirm→persist）：两子系统（VFS 会话 / 审批注册表）互不可观测，无行为影响
 - `start` 由调用方传入而非骨架内部新建：process_message 原测量窗口含 load_and_build_state + 快照捕获，保持 processing_time_ms 语义逐字不变
+
+## Wave 4（T17）：删除 session/manager.rs 残留设计注释
+
+- `core/src/session/manager.rs`：删除 load_session 尾部失效注释（"注意：元数据存储在向量库中，暂时不读取 / 如果需要，可以通过 vector_storage().get_point() 获取"，约 :135-136）——SessionManager 无 vector_storage 引用，误导维护者；纯注释清理、代码零改动，`cargo check -p tianyan-core` 通过
+
+## Wave 4（T14）：拆分 executor/actions.rs（P1-7，纯移动）
+
+### 改动
+
+`core/src/executor/actions.rs`（597 行）单文件混合三组职责（SecurityPolicy 安全策略 :36-312 + 命令执行 :314-400 + 输出解析 :400-450），拆分为三个子模块，公开 API 路径零变化：
+
+- **新建 `executor/security.rs`（280 行）**：移入 `SecurityPolicy` 结构体 + 全部 impl（`from_config` / `transform_command` / `check_path` / `check_file_size` / `check_command` / `has_shell_metacharacters` / `check_file_write`）+ `Default` impl。原 actions.rs 测试模块中无 SecurityPolicy 专属测试（3 个测试为 read/write/command），故无测试随迁；行为覆盖由 `tool_registry/executors_tests.rs`（构造 `SecurityPolicy` 字面量 + 各 check 方法）保持
+- **新建 `executor/command.rs`（132 行）**：移入 `DEFAULT_COMMAND_TIMEOUT_SECS`、`read_reader_to_vec`、`extract_command_base`、`execute_command_action` + 原 `test_execute_command` 测试。`extract_command_base` / `DEFAULT_COMMAND_TIMEOUT_SECS` 因 security.rs 引用改为 `pub(super)`（原为模块私有，可见域从"本文件"扩为"executor 子树"，同 crate 内不构成公开 API）
+- **`executor/output_parse.rs`（T12 已建）**：追加 `count_test_passed` / `extract_test_failures`（`pub(crate)`，与原 `extract_build_errors` 可见域一致）；模块文档更新为覆盖 build/lint/test 三类输出
+- **`executor/actions.rs`（150 行）**：保留 5 个公开 `execute_*`（read/write/search_code/run_tests/verify_build）+ 2 个 `pub use` 重导出（`command::execute_command_action`、`security::SecurityPolicy`）+ read/write 2 个测试。保留 `pub use` 而非改 mod.rs 的原因：`verification.rs` 硬引用 `crate::executor::actions::execute_command_action`，actions.rs 重导出使该内部路径与 `executor/mod.rs` 的 `pub use actions::{...}` 均原样可用
+- **`executor/mod.rs`**：仅追加 `mod command;` / `mod security;` 声明，re-export 块逐字未动
+
+### 验证
+
+- `cargo check -p tianyan-core` 通过（余下 1 个 `unused-qualifications` warning 位于 scheduler，属既有）
+- `cargo test -p tianyan-core --lib` = **559 passed / 0 failed / 1 ignored**（基线 558 + 其他波次新增 1；executor 全模块含 `actions::tests` 2 个、`command::tests` 1 个、`output_parse::tests` 7 个均绿）
+- `cargo fmt --all` 干净
+
+### 决策理由
+
+- 纯移动：除 import 路径、mod 声明与两个 `pub(super)` 可见域调整外，函数体/错误消息/测试逐字未动；`chrono::Utc` 等全限定引用原样保留
+- 薄委托层选 `pub use` 而非转发函数：`execute_run_tests` / `execute_verify_build` 本就调用 `execute_command_action`，转发层会引入无意义包装；`pub use` 让 `crate::executor::actions::execute_command_action`（verification.rs 依赖）与 `crate::executor::SecurityPolicy`（builder/agent_core/loop/tool_registry 依赖）两条既有路径零改动
+- 输出解析函数统一收拢进 output_parse.rs：与 T12 的 `extract_build_errors` 同属"命令输出 → 结构化结果"职责，后续测试输出解析测试可直接挂载该模块
+
+## Wave 4（T15）：拆分 agent/tool_registry/executors.rs（P2-6，纯移动）
+
+### 改动
+
+`core/src/agent/tool_registry/executors.rs`（611 行，15 个 `pub(crate)` 工具函数 + 2 个模块级 helper + 39 个测试）按工具域拆分为 4 个 `pub(crate)` 模块，`ToolRegistry` 公开 API 与 mod.rs 的 dispatch match 零变化（mod.rs 仍直接调用 `self.execute_*` 方法，方法名/签名原样保留）：
+
+- **新建 `tool_registry/file_ops.rs`（156 行）**：`execute_read_file` / `execute_write_file` / `execute_vfs_read` / `execute_vfs_list`（文件读写 + VFS 条目浏览，含 write_file 的安全检查链与审批工作流门控）
+- **新建 `tool_registry/code_ops.rs`（67 行）**：`execute_search_code` / `execute_run_tests` / `execute_verify_build`（代码搜索 + 测试运行 + 构建验证，含 verification_gate 语义验证回退）
+- **新建 `tool_registry/knowledge_ops.rs`（196 行）**：`execute_search_knowledge` / `execute_knowledge_ingest` / `ingest_single_file` / `ingest_directory`（VFS 语义检索 + 文件/目录知识摄入；`ingest_*` 两辅助方法随 `execute_knowledge_ingest` 同驻，保持文件/目录分流依赖内聚）
+- **新建 `tool_registry/agent_ops.rs`（247 行）**：`execute_execute_command` / `execute_call_skill` / `execute_ask_user` / `execute_self_check` / `execute_delegate_to_agent`（命令执行 + 技能调用 + 追问 + 指标自检 + 子 Agent 委托，含 execute_command 的安全策略重写与审批门控；delegate_to_agent 的 `BoxFuture` 异步递归打破原样保留）
+- **`tool_registry/mod.rs`**：`mod executors;` 替换为 4 个 `mod` 声明；`parse_params` / `safety_violation` 两个模块级 helper 上移为 mod.rs 私有函数（私有项对子模块可见，各新模块经 `use super::{parse_params, safety_violation}` 引用，可见域不变）；既有 `vfs_content_field` 同样被 file_ops / knowledge_ops 经 `super::` 复用
+- **删除** `executors.rs` / `executors_tests.rs`（mod.rs 直接调用方法，无薄委托层）
+- **测试随迁**：`executors_tests.rs` 的 39 个测试按工具域切分为 4 个 `#[path]` 挂载测试文件（`file_ops_tests.rs` 15 / `code_ops_tests.rs` 5 / `knowledge_ops_tests.rs` 5 / `agent_ops_tests.rs` 14），每个测试文件不自带 `mod tests` 包装；`default_strict_policy` / `file_policy` / `read_file_args` / `write_file_args` / `EchoSkillHandler` / `chat_response` 等测试 helper 随所属测试文件复制
+
+### 验证
+
+- `cargo check -p tianyan-core` 通过（2 个既有 warning 位于 executor / scheduler，属其他波次任务改动）
+- `cargo test -p tianyan-core --lib` = **559 passed / 0 failed / 1 ignored**；`cargo test --lib tool_registry` = 44 passed（mod.rs 5 + file_ops 15 + code_ops 5 + knowledge_ops 5 + agent_ops 14），拆分前后计数一致
+- 4 个新生产文件 + 4 个测试文件 `rustfmt --check` 零差异
+
+### 决策理由
+
+- 纯移动：函数体、错误消息文本、安全检查/审批调用顺序逐字未动；仅 import 路径与 mod 声明变化。`execute_delegate_to_agent` 保留内联 `serde_json::from_str`（不换用 `parse_params`，避免借机改动）
+- helper 上移 mod.rs 而非保留薄 `executors.rs`：mod.rs 通过方法直调新模块，无调用方引用 executors 路径，薄文件会沦为"仅两个 helper"的空壳；mod.rs 私有函数对子模块可见（Rust 可见性规则：私有项对后代模块可见），各模块 `use super::` 引用即可，无需改 `pub` 可见域
+- 分组以任务清单为基准、按实际依赖微调：`ingest_single_file` / `ingest_directory` 非工具入口但被 `execute_knowledge_ingest` 直接调用，必须同驻 knowledge_ops；`execute_command` 的审批门控与 `execute_write_file` 同型但归入 agent_ops（命令/委托/追问同属"与外部交互"域），两处样板互不引用，无拆散依赖
+
+## Wave 4（T16）：TaskResult 错误从 String 改为 TianyanError（P1-9）
+
+### 问题
+`scheduler/task_scheduler.rs` 的 `TaskResult { error: Option<String> }` 用 String 传递任务错误，违反 AGENTS.md「所有错误用 TianyanError、消息带模块前缀」；错误不可结构化处理（无法调用 `is_not_found()` 等谓词、无法携带结构化信息）。
+
+### 改动
+- `core/src/scheduler/task_scheduler.rs`：
+  - `TaskResult.error` 字段类型 `Option<String>` → `Option<TianyanError>`；`TaskResult::failed(error: impl Into<String>)` → `failed(error: impl Into<TianyanError>)`
+  - `TaskResult` derive 从 `Debug, Clone` 收窄为 `Debug`——`TianyanError` 含 `Io(io::Error)` 非 Clone 变体，无法派生 Clone；全代码库无任何 TaskResult 克隆点（`execute_task` 按值返回、调度循环丢弃结果），去掉 Clone 零影响
+  - `register_task` 的重复 ID 错误改为使用已导入的 `TianyanError::Custom`（消除全限定路径冗余）
+  - `execute_task` 失败日志（`任务执行失败：{} - {}`）不变：`TianyanError` derive `Error`（thiserror），`{}` Display 继续可用
+- 4 个任务调用点改为 `TaskResult::failed(TianyanError::Custom(format!("模块前缀: 详情")))`，错误消息文本保持（仅补模块前缀）：
+  - `tasks/summary_task.rs`：「摘要生成任务：扫描失败：{}」
+  - `tasks/memory_task.rs`：「记忆提取任务：扫描会话失败：{}」
+  - `tasks/rule_task.rs`：「规则提炼任务：扫描失败：{}」
+  - `tasks/gc_task.rs`：「GC 任务：扫描失败：{}」（gc_task 已有 `TianyanError` 导入，其余用全限定路径）
+- 未改：`TaskContext` 结构、调度循环逻辑（interval/register/start）、无新错误类型（沿用 `TianyanError::Custom`）
+
+### 契约保持
+- **`TaskStatus` serde JSON 契约零变化**：`TaskStatus`（task_scheduler.rs:155）本就**不含 error 字段**（仅 id/name/priority/cron_expression/run_count/last_run_ago_secs），`scheduler.snapshot() → Vec<TaskStatus>` 的 `/api/v1/scheduler/status` JSON 字节不变；server `insights/handlers.rs::get_scheduler_status_handler` 无需改动
+- 新增测试 `test_task_status_json_contract`：直接序列化 TaskStatus 并与 `json!` 字面量全等断言（含 `"priority": "Normal"`），并断言输出无 error 键——锁定 API 契约
+- e2e（`server/tests/e2e_tests.rs:121-128`）仅断言 `tasks` 数组长度，与字段无关
+
+### 验证
+- `cargo test -p tianyan-core --lib` = **559 passed / 0 failed / 1 ignored**（基线 558 + 本任务 1 新测试 `test_task_status_json_contract`；`test_task_result` 原地更新断言 TianyanError 字符串化）
+- `cargo check --workspace` 通过（含 tianyan-server/tianyan-tauri/tianyan-mcp）
+- fmt：scheduler 5 文件干净；clippy：改动文件零新警告（crate 余下 5 个警告均在 observability / gc_task:212,214（既有）/ session，与基线一致）
+
+### 决策理由
+- 错误结构化是「错误统一 TianyanError」约束的一部分：后续任务失败可用 `is_not_found()` 等谓词区分错误类别
+- `impl Into<TianyanError>` 保留宽松构造点：TianyanError 无 `From<String>`，调用点显式构造 `Custom(String)` 强制带模块前缀（AGENTS.md 要求），避免裸字符串再次渗入
+- 去掉 TaskResult 的 Clone 而非给 TianyanError 补 Clone：io::Error 非 Clone，补 Clone 需包装 Io 变体（改动共享错误类型、超出任务范围）；且 TaskResult 无克隆消费点
+- 错误消息文本逐字保持（原「GC 扫描失败：{}」→「GC 任务：扫描失败：{}」等），仅补模块前缀符合「错误消息文本尽量保持」

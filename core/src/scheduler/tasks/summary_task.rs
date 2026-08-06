@@ -203,7 +203,10 @@ impl TaskHandler for SummaryTask {
         let missing = match self.scan_missing_summaries(ctx).await {
             Ok(uris) => uris,
             Err(e) => {
-                return TaskResult::failed(format!("扫描失败：{}", e));
+                return TaskResult::failed(crate::common::error::TianyanError::Custom(format!(
+                    "摘要生成任务：扫描失败：{}",
+                    e
+                )));
             }
         };
 

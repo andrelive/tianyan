@@ -217,7 +217,10 @@ impl TaskHandler for MemoryTask {
         let sessions = match self.scan_sessions(ctx).await {
             Ok(uris) => uris,
             Err(e) => {
-                return TaskResult::failed(format!("扫描会话失败：{}", e));
+                return TaskResult::failed(crate::common::error::TianyanError::Custom(format!(
+                    "记忆提取任务：扫描会话失败：{}",
+                    e
+                )));
             }
         };
 

@@ -132,9 +132,6 @@ impl PersistentSessionManager {
             );
         }
 
-        // 注意：元数据存储在向量库中，暂时不读取
-        // 如果需要，可以通过 vector_storage().get_point() 获取
-
         Ok(Some(session))
     }
 

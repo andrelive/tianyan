@@ -24,8 +24,11 @@ use crate::skills::learning::ExecutionHistory;
 use crate::skills::SkillExecutor;
 use crate::vfs::VirtualFileSystem;
 
-/// 工具执行器（14 个 `execute_*` 方法，拆分自注册表主体）。
-mod executors;
+mod agent_ops;
+mod code_ops;
+/// 工具执行器实现（按工具域拆分，14 个 `execute_*` 方法）。
+mod file_ops;
+mod knowledge_ops;
 
 /// 将 VFS 层级内容读取结果转换为 JSON 字段值。
 ///
@@ -39,6 +42,20 @@ fn vfs_content_field(result: crate::common::error::Result<String>) -> String {
         Err(e) if e.is_not_found() => String::new(),
         Err(e) => format!("<读取失败: {}>", e),
     }
+}
+
+/// 解析工具参数（JSON → 类型化参数）。
+///
+/// 所有工具的参数解析共用同一错误包装（"tool: 参数无效"），
+/// 提取为单点避免多份重复样板。
+fn parse_params<T: serde::de::DeserializeOwned>(arguments: &str) -> Result<T, TianyanError> {
+    serde_json::from_str(arguments)
+        .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))
+}
+
+/// 将安全策略检查错误包装为统一的安全违规工具错误。
+fn safety_violation<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, TianyanError> {
+    result.map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))
 }
 
 /// 动态工具执行器：供外部桥接（如 MCP 工具桥接）扩展工具注册表。
