@@ -4,6 +4,7 @@
 
 pub mod error;
 pub mod logging;
+pub mod token_estimator;
 pub mod types;
 
 // 重新导出常用类型

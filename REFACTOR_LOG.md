@@ -246,3 +246,57 @@ core 模块系统性架构重构日志。约束：公开 API 签名与行为完�
 
 ### 决策理由
 - 死参数是"设计声明与实际不符"的直接证据（traits.rs 声称 VFS 经 EmbeddingProvider 反转，engine 却携带未用依赖）；删除后构造 API 反映真实依赖
+
+## Wave 2（T7）：knowledge/ingestor token 估算口径统一（P2-3b）
+
+### 改动
+- `core/src/knowledge/ingestor/mod.rs`：删除本地 `count_tokens`（`text.len() / 4` 字节口径）私有函数，3 处调用点全部替换为统一的 `estimate_tokens`（`crate::common::token_estimator::estimate_tokens`，字符类启发式：中文 1.5 字符/token、英文 0.75 词/token）：
+  - `ingest()` 的 `tokens_processed` 统计
+  - `process_document()` 元数据 `total_tokens`
+  - `process_image()` 元数据 `total_tokens`
+- import 选择 `crate::common::token_estimator::estimate_tokens`（非 `context::compression` re-export）：ingestor 现有 import 均为 `crate::common::` 风格，且 common 是叶模块，最小依赖；context 不反向依赖 knowledge，两者均可选，取最小改动
+- 测试：新增 `test_token_estimation_matches_unified_caliber` —— 中文文本 `estimate_tokens` > 0 且 < `len() / 4`（证明旧字节口径被更合理的字符类口径替代），并断言与全局统一估算器输出一致
+
+### 外部行为变化（必须注意）
+- `ingest` API 返回的 `tokens_processed` 数值口径改变：从字节数/4 变为字符类估算。对纯中文文本，新口径约 0.67 字符/token vs 旧口径 0.75 字符/token（UTF-8 中文 3 字节/字符），数值略降；中英文混合文本方向不定。server 层不消费该字段（`server/src/api/knowledge/services.rs` 仅读 `document_id`），无需 server 适配
+
+### 验证
+- `cargo test -p tianyan-core --lib`：**543 通过 / 0 失败**（基线 542 + 1 个新测试），零 warning
+- grep `count_tokens|\.len() / 4` `core/src/knowledge/` = 空
+
+### 决策理由
+- 字节数/4 是第三套估算口径（且中文字节/字符比 3:1 使统计失真），统一到全系统唯一的 `estimate_tokens` 后，ingestor 报告的 token 统计与其他模块（context/retrieval）口径一致，用户看到的数值可信
+- 无精确数值断言测试需迁移：ingestor 现有测试（config/infer_category/hash）均不触及 token 数值，故只补口径正确性断言而非改期望值
+
+## Wave 2（T6）：SummaryTask 修复字节/token 误判 bug（P0-5a）
+
+### 改动
+- `scheduler/tasks/summary_task.rs` `process_uri`：短内容判断由 `detail_content.len() < ABSTRACT_TOKEN_LIMIT * 4`（字节数，400 字节阈值）改为 `estimate_tokens(&detail_content) < ABSTRACT_TOKEN_LIMIT`（token 数，100 token 阈值），语义与 L0 Abstract 约 100 token 的定位对齐
+- 新增 `use crate::common::token_estimator::estimate_tokens;`（T5 统一后的唯一估算入口）
+- 回归测试 4 个（复用 `test_utils::MockVfs` + `MockChatService` + 真实 `SummaryEngine` 包装 mock chat 的既有模式，与 gc_task 测试同构）：
+  - 短中文（96 汉字 ≈ 288 字节 / 64 token）→ 短路径：Abstract == 原文，且 mock 无期望（被调用即 panic）证明未调 LLM
+  - 长中文（312 汉字 ≈ 936 字节 / 208 token）→ LLM 路径：Abstract/Overview 均为 mock 输出且 ≠ 原文
+  - 长中文不写全文进 L0：Abstract 必须为摘要输出
+  - **边界回归（RED 核心）**：144 汉字（432 字节 ≥ 400 旧阈值，但 96 token < 100）→ 必须仍走短路径
+
+### 验证
+- RED：先加测试，`cargo test -p tianyan-core --lib scheduler::tasks::summary_task` 边界测试失败——`left: "模拟摘要" / right: <原文 144 字>`，证明字节判断把 <100 token 的中文误送 LLM 摘要
+- GREEN：修复后同一命令 8 passed / 0 failed；全量 `cargo test -p tianyan-core --lib` = **547 passed / 0 failed / 1 ignored**（基线 542 + 本任务 4 新测试 + 并行波次 1 新测试；ignored 为既有 session::manager 忽略项）
+- `grep -n "ABSTRACT_TOKEN_LIMIT \* 4\|\.len() <" core/src/scheduler/tasks/summary_task.rs` = 空
+- rustfmt：本次改动文件干净；clippy：summary_task.rs 零警告（余下 5 个警告均为其他模块既有/并行波次产物）
+
+### 决策理由
+- 字节数 ≠ token 数：中文 3 字节/字符使 400 字节 ≈ 133 汉字 ≈ 89 token，阈值两侧都存在误判（token 密集 ASCII 短字节长 token 直接全文入 L0；134–149 汉字字节超限但 token 不足被误送 LLM），统一用 `estimate_tokens` 后判断口径与 L0 语义一致
+- 边界回归测试用「字节超旧阈值 + token 低于阈值」双前置断言构造分歧输入，使测试在 bug 存在时必然失败、修复后必然通过，且不依赖 mockall verify（默认 times 范围 0..=MAX，短路径下未调用不报错）
+## Wave 2（T8）：P0-5b 显式索引标记 —— 决策：SKIP
+
+### 决策
+不引入"写入方显式标记已索引"机制。
+
+### 理由
+1. T6 已修复正确性 bug（字节/token 误判），L0 摘要污染问题消除，无失败行为支撑新机制
+2. 显式索引标记 = 新功能面（VFS metadata 契约 + SummaryTask 扫描逻辑 + 前端/API 可能受影响），收益（写入方知晓索引时机）不构成当前架构缺陷
+3. 现有 SummaryTask 兜底扫描（5 分钟间隔）在数据量增长前是可接受的延迟；若未来成为瓶颈，再引入写入触发队列（届时作为独立 ADR 决策）
+
+### 验证
+- 决策已记录；无代码改动

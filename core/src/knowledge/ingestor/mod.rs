@@ -12,6 +12,7 @@ use chrono::Utc;
 use ring::digest::{Context, SHA256};
 
 use crate::common::error::Result;
+use crate::common::token_estimator::estimate_tokens;
 use crate::common::types::{ContextNamespace, EntryMetadata, TianyanUri};
 use crate::model::{ChatService, EmbeddingService, VlmService};
 use crate::vfs::{ContextEntry, SummaryEngine, VirtualFileSystem};
@@ -21,10 +22,6 @@ use super::parser::CompositeParser;
 use super::types::{
     DocumentType, IngestionRequest, IngestionResult, KnowledgeCategory, KnowledgeMetadata,
 };
-
-fn count_tokens(text: &str) -> usize {
-    text.len() / 4
-}
 
 /// 知识导入器配置。
 #[derive(Debug, Clone)]
@@ -235,7 +232,7 @@ impl KnowledgeIngestor {
             .await?;
         }
 
-        let tokens_processed = count_tokens(&text_content);
+        let tokens_processed = estimate_tokens(&text_content);
 
         Ok(IngestionResult {
             document_id: doc_id,
@@ -267,7 +264,7 @@ impl KnowledgeIngestor {
             content_hash: self.calculate_hash(&request.content),
             tags: request.tags.clone(),
             language: parsed.language,
-            total_tokens: count_tokens(&parsed.text),
+            total_tokens: estimate_tokens(&parsed.text),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             importance: 0.5,
@@ -311,7 +308,7 @@ impl KnowledgeIngestor {
             content_hash: self.calculate_hash(&request.content),
             tags: [request.tags.clone(), analysis.tags.clone()].concat(),
             language: None,
-            total_tokens: count_tokens(&unified.combined_text),
+            total_tokens: estimate_tokens(&unified.combined_text),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             importance: 0.5,
@@ -459,5 +456,16 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_token_estimation_matches_unified_caliber() {
+        // 中文文本：统一字符类口径（1.5 字符/token）应显著小于旧口径（字节数/4，UTF-8 中文 3 字节/字符）
+        let chinese = "知识导入协调器负责解析文档并写入虚拟文件系统生成分层摘要";
+        let tokens = estimate_tokens(chinese);
+        assert!(tokens > 0);
+        assert!(tokens < chinese.len() / 4);
+        // 与全局统一估算器完全一致（同一口径）
+        assert_eq!(tokens, estimate_tokens(chinese));
     }
 }

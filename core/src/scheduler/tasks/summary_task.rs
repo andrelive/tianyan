@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
+use crate::common::token_estimator::estimate_tokens;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
 use crate::vfs::{ContextEntry, ABSTRACT_TOKEN_LIMIT};
@@ -160,7 +161,7 @@ impl SummaryTask {
             })?;
 
         let (abstract_content, overview_content) =
-            if detail_content.len() < ABSTRACT_TOKEN_LIMIT * 4 {
+            if estimate_tokens(&detail_content) < ABSTRACT_TOKEN_LIMIT {
                 tracing::debug!("短内容直接用作摘要：{}", uri);
                 (detail_content.clone(), detail_content)
             } else {
@@ -252,6 +253,50 @@ impl TaskHandler for SummaryTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::common::token_estimator::estimate_tokens;
+    use crate::common::types::TokenUsage;
+    use crate::memory::{ExtractionConfig, MemoryExtractor};
+    use crate::model::types::{ChatChoice, ChatCompletionResponse};
+    use crate::model::{ChatService, MockChatService};
+    use crate::test_utils::MockVfs;
+    use crate::vfs::SummaryEngine;
+
+    /// 构造测试用的 ChatCompletionResponse。
+    fn mock_chat_response(content: &str) -> ChatCompletionResponse {
+        ChatCompletionResponse {
+            id: "test".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: crate::common::types::Message::assistant(content),
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: TokenUsage::default(),
+        }
+    }
+
+    /// 构造摘要任务测试上下文（MockVfs + 真实 SummaryEngine 包装 mock 聊天服务）。
+    fn make_context(vfs: Arc<MockVfs>, chat: MockChatService) -> TaskContext {
+        let chat: Arc<dyn ChatService> = Arc::new(chat);
+        let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
+        let memory_extractor = Arc::new(MemoryExtractor::new(chat, ExtractionConfig::default()));
+        let config = Arc::new(crate::config::TianyanConfig::default());
+        TaskContext::new(vfs, summary_engine, memory_extractor, config)
+    }
+
+    /// 约 100 个汉字的中文文本（字节 < 400 且 token < 100）。
+    fn short_chinese() -> String {
+        "天演系统是一个基于大语言模型的本地智能代理系统。".repeat(4)
+    }
+
+    /// 约 300 个汉字的中文文本（字节 ≥ 400 且 token ≥ 100）。
+    fn long_chinese() -> String {
+        "天演系统是一个基于大语言模型的本地智能代理系统。".repeat(13)
+    }
 
     #[test]
     fn test_summary_task_new() {
@@ -294,5 +339,155 @@ mod tests {
         assert!(processed.contains("b"));
         assert!(processed.contains("c"));
         assert!(!processed.contains("a"));
+    }
+
+    // ── 短内容 / 长内容分支（CJK 字节 vs token 回归） ─────────────
+
+    #[tokio::test]
+    async fn test_short_chinese_uses_full_text_as_abstract() {
+        // 约 100 个汉字（96 字 ≈ 288 字节，64 token）：字节数与 token 数都低于阈值，
+        // 应走"短内容直接作摘要"路径
+        let content = short_chinese();
+        assert!(
+            estimate_tokens(&content) < ABSTRACT_TOKEN_LIMIT,
+            "前置：{} token 应低于阈值",
+            estimate_tokens(&content)
+        );
+
+        // 不设置任何期望：若摘要引擎被调用，mockall 会直接 panic
+        let chat = MockChatService::new();
+        let vfs = Arc::new(MockVfs::new());
+        let uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["short-cn".into()]);
+        vfs.set_content(&uri, ContentLevel::Detail, &content);
+        let ctx = make_context(vfs, chat);
+
+        SummaryTask::new().process_uri(&ctx, &uri).await.unwrap();
+
+        let abstract_content = ctx
+            .vfs
+            .read_content(&uri, ContentLevel::Abstract)
+            .await
+            .unwrap();
+        let overview_content = ctx
+            .vfs
+            .read_content(&uri, ContentLevel::Overview)
+            .await
+            .unwrap();
+        assert_eq!(
+            abstract_content, content,
+            "短中文应全文直接作为 L0 Abstract"
+        );
+        assert_eq!(
+            overview_content, content,
+            "短中文应全文直接作为 L1 Overview"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_long_chinese_calls_llm_summary() {
+        // 约 300 个汉字（≈936 字节，≈208 token ≥ 100）→ 长路径：调用摘要引擎
+        let content = long_chinese();
+        assert!(
+            content.len() >= 400,
+            "前置：字节 {} 应超过旧字节阈值（约 133 汉字）",
+            content.len()
+        );
+        assert!(
+            estimate_tokens(&content) >= ABSTRACT_TOKEN_LIMIT,
+            "前置：{} token 应达到阈值",
+            estimate_tokens(&content)
+        );
+
+        let mut chat = MockChatService::new();
+        chat.expect_chat_completion()
+            .times(2)
+            .returning(|_| Ok(mock_chat_response("模拟摘要内容")));
+        let vfs = Arc::new(MockVfs::new());
+        let uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["long-cn".into()]);
+        vfs.set_content(&uri, ContentLevel::Detail, &content);
+        let ctx = make_context(vfs, chat);
+
+        SummaryTask::new().process_uri(&ctx, &uri).await.unwrap();
+
+        let abstract_content = ctx
+            .vfs
+            .read_content(&uri, ContentLevel::Abstract)
+            .await
+            .unwrap();
+        let overview_content = ctx
+            .vfs
+            .read_content(&uri, ContentLevel::Overview)
+            .await
+            .unwrap();
+        assert_eq!(abstract_content, "模拟摘要内容", "长中文应调用 LLM 生成 L0");
+        assert_eq!(overview_content, "模拟摘要内容", "长中文应调用 LLM 生成 L1");
+        assert_ne!(abstract_content, content, "长中文摘要不应等于全文");
+    }
+
+    #[tokio::test]
+    async fn test_long_chinese_does_not_write_full_text_to_l0() {
+        // 长中文走 LLM 摘要路径：L0 Abstract 必须是摘要输出，不得直接写入全文
+        let content = long_chinese();
+        assert!(estimate_tokens(&content) >= ABSTRACT_TOKEN_LIMIT);
+
+        let mut chat = MockChatService::new();
+        chat.expect_chat_completion()
+            .times(2)
+            .returning(|_| Ok(mock_chat_response("生成摘要结果")));
+        let vfs = Arc::new(MockVfs::new());
+        let uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["long-cn-no-full".into()]);
+        vfs.set_content(&uri, ContentLevel::Detail, &content);
+        let ctx = make_context(vfs, chat);
+
+        SummaryTask::new().process_uri(&ctx, &uri).await.unwrap();
+
+        let abstract_content = ctx
+            .vfs
+            .read_content(&uri, ContentLevel::Abstract)
+            .await
+            .unwrap();
+        assert_ne!(
+            abstract_content, content,
+            "长中文不得把全文直接写入 L0 Abstract"
+        );
+        assert_eq!(abstract_content, "生成摘要结果");
+    }
+
+    #[tokio::test]
+    async fn test_cjk_bytes_over_limit_but_tokens_under_limit_stays_short() {
+        // 回归：约 144 个汉字（432 字节 ≥ 400 旧阈值）但仅 96 token < 100 ——
+        // 旧实现按字节数判断会误走 LLM 摘要路径；正确行为是仍走短路径
+        let content = "天演系统是一个基于大语言模型的本地智能代理系统。".repeat(6);
+        assert!(
+            content.len() >= 400,
+            "前置：字节 {} 必须超过旧字节阈值（触发字节误判）",
+            content.len()
+        );
+        assert!(
+            estimate_tokens(&content) < ABSTRACT_TOKEN_LIMIT,
+            "前置：{} token 必须低于阈值（应走短路径）",
+            estimate_tokens(&content)
+        );
+
+        // 摘要引擎返回固定内容：若被（错误地）调用，写出的 Abstract 将是 mock 输出而非原文
+        let mut chat = MockChatService::new();
+        chat.expect_chat_completion()
+            .returning(|_| Ok(mock_chat_response("模拟摘要")));
+        let vfs = Arc::new(MockVfs::new());
+        let uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["boundary-cn".into()]);
+        vfs.set_content(&uri, ContentLevel::Detail, &content);
+        let ctx = make_context(vfs, chat);
+
+        SummaryTask::new().process_uri(&ctx, &uri).await.unwrap();
+
+        let abstract_content = ctx
+            .vfs
+            .read_content(&uri, ContentLevel::Abstract)
+            .await
+            .unwrap();
+        assert_eq!(
+            abstract_content, content,
+            "token 低于阈值的中文内容不应被 LLM 摘要（字节/token 误判 bug）"
+        );
     }
 }

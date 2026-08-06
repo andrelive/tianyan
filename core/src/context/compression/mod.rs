@@ -26,9 +26,9 @@ use crate::common::error::Result;
 use crate::common::types::Message;
 use crate::model::ChatService;
 
-pub mod estimator;
-
-pub use estimator::{estimate_tokens, TokenEstimator};
+pub use crate::common::token_estimator::{
+    estimate_tokens, EstimationDetails, MessageTokenEstimate, TokenEstimator,
+};
 
 /// 压缩策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
