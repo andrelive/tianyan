@@ -53,19 +53,19 @@
 
 ```
 core/src/
-├── agent/       (coordinator, loop, session_state, tool_registry, tools, types, builder)
-├── common/      (error, types/ 子模块)
-├── config/      (TOML 配置)
+├── agent/       (coordinator, loop, session_state, tool_registry/, tools, types, builder)
+├── common/      (error, logging, token_estimator, types/ 子模块)
+├── config/      (TOML 配置；LoggingConfig 自 common::logging re-export)
 ├── context/     (pipeline, assembler, compression/, retrieval/)
 ├── executor/    (工具执行：Action、审批、LLM-as-Judge、验证门控)
-├── knowledge/   (parser, image, ingestor/, types)
+├── knowledge/   (parser, image/, ingestor/, types)
 ├── memory/      (extractor.rs)
 ├── model/       (traits, services.rs, provider/)
-├── observability/ (空壳)
+├── observability/ (AgentMetrics, usage_stats.rs；SqliteDb 位于 vfs/backend/)
 ├── scheduler/   (task_scheduler, tasks/)
-├── session/     (manager, types)
+├── session/     (manager, types, mod.rs 截断常量)
 ├── skills/      (definition, executor, manager, handlers/, learning/, registry, types)
-├── vfs/         (traits, vfs_impl, backend/, vector/, summary/)
+├── vfs/         (traits, vfs_impl, backend/ 含 sqlite_db.rs, vector/, summary/)
 └── lib.rs
 ```
 
@@ -115,11 +115,17 @@ core/src/
 ```
 
 **依赖方向说明**：
-- `common` → 所有模块的基础层（类型、错误）
+- `common` → 所有模块的基础层（类型、错误、日志配置、token 估算），自洽无环（不依赖 config）
 - `model / vfs / session` → 中坚层，分别提供 LLM 服务、存储、会话管理
 - `context` → 依赖 vfs 和 model，提供检索+组装+压缩管线
 - `agent` → 协调者，聚合 context、model、session、vfs
 - `skills / scheduler` → 被 agent 调用，scheduler 独立运行后台任务
+
+**依赖环现状（Wave 6 重构后，详见 [ADR-007](architecture/decisions/007-core-dependency-cycle-removal.md)）**：
+
+- ✅ 已消除 3 个依赖环：`vfs→observability`（SqliteDb 下沉 `vfs::backend`）、`context↔observability`（RetrievalTrace 下沉 `common::types`）、`common↔config`（LoggingConfig 下沉 `common::logging`，config 单向 re-export）
+- ⬇️ 残留单向依赖（均非环，已接受）：`observability→vfs`（`usage_stats.rs` 引入 `vfs::backend::sqlite_db::SqliteDb`）、`observability→common`（`common::types::retrieval_trace::RetrievalTrace`）、`vfs→model`（`SummaryEngine` 摘要生成依赖 `ChatService`）
+- `common` 内部无 `use crate::config` / `use crate::context` / `use crate::observability`，为叶模块
 
 ---
 
@@ -243,17 +249,20 @@ React Frontend 按 chunk_type 差异化渲染
                                     │
                 ┌───────────────────┼───────────────────┐
                 ▼                   ▼                    ▼
-    ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐
-│   SqliteBackend   │  │   ContentStore   │  │    VfsSearch     │
-│  (SQLite 存储)    │  │  L0/L1/L2 读写   │  │  RRF 融合检索    │
-    └────────┬────────┘  └────────┬────────┘  └────────┬─────────┘
-             │                    │                     │
-             ▼                    ▼                     ▼
-    ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐
-│  backend/sqlite/  │  │  summary/       │  │  vector/lancedb.rs │
-│  SqliteBackend    │  │  SummaryEngine  │  │  LanceDbVectorStore │
-    └─────────────────┘  └─────────────────┘  └──────────────────┘
+    ┌─────────────────────┐  ┌──────────────┐  ┌───────────────────┐
+    │  SqliteBackend      │  │ ContentStore │  │     VfsSearch     │
+    │  (SQLite 存储)      │  │ L0/L1/L2 读写│  │   RRF 融合检索    │
+    └─────────┬───────────┘  └──────┬───────┘  └─────────┬─────────┘
+              │                     │                     │
+              ▼                     ▼                     ▼
+    ┌─────────────────────┐  ┌──────────────┐  ┌───────────────────┐
+    │ backend/sqlite.rs   │  │ summary/     │  │ vector/lancedb/   │
+    │ backend/sqlite_db.rs│  │ SummaryEngine│  │ LanceDbVectorStore│
+    │ (共享 SQLite 连接)  │  │ (依赖 ChatService) │  │ (batch/mod/tests)│
+    └─────────────────────┘  └──────────────┘  └───────────────────┘
 ```
+
+> **注**：`backend/sqlite_db.rs` 是 VFS 与 `observability/usage_stats.rs` 共享的 SQLite 连接（ADR-005 单连接语义，ADR-007 下沉决策）。`SummaryEngine` 经 `model::ChatService` 生成 L0/L1 摘要，是 vfs→model 的残留单向依赖（非环）。
 
 ### 3.5 记忆持久化流程（定时任务）
 
@@ -340,9 +349,9 @@ TaskScheduler 触发
 | `VfsSearch` | `core/src/vfs/traits.rs` | `VfsImpl` | `context/retrieval/retriever.rs` |
 | `VirtualFileSystem` | `core/src/vfs/traits.rs` | 实现 VfsCore+ContentStore+VfsSearch 的类型自动获得 | `server/state.rs`, `agent/coordinator.rs`, `session/manager.rs` |
 | `SqliteBackend` | `core/src/vfs/backend/sqlite.rs` | SQLite 存储后端（具体类型） | `vfs/vfs_impl.rs` |
-| `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore` | `vfs/vfs_impl.rs`, `context/retrieval/` |
-| `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`, `PlaceholderSessionManager` | `server/state.rs`, `agent/coordinator.rs` |
-| `SkillExecutor` | `core/src/skills/executor.rs` | `SkillExecutor` | `agent/tool_registry.rs`（通过 call_skill 工具桥接） |
+| `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore`（`vfs/vector/lancedb/`） | `vfs/vfs_impl.rs`, `context/retrieval/` |
+| `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager` | `server/state.rs`, `agent/coordinator.rs` |
+| `SkillExecutor` | `core/src/skills/executor.rs` | `SkillExecutor` | `agent/tool_registry/`（通过 call_skill 工具桥接） |
 
 > **注意**：`ModelServices` 不是 trait，是 `core/src/model/services.rs` 中的 struct，聚合 `Arc<dyn ChatService>` + `Arc<dyn EmbeddingService>` + `Arc<dyn VlmService>`。
 
@@ -382,19 +391,21 @@ TaskScheduler 触发
 
 ## 6. 架构偏差分析
 
-以下为当前与理想架构仍存在的偏差：
+以下偏差已在历次迭代中消除（以代码为准核验）：
 
-| 偏差项 | 描述 | 实际状态 | 影响 |
-|--------|------|---------|------|
-| SessionManager | VFS 持久化会话管理 | `PlaceholderSessionManager`（空实现） | 会话不持久化 |
-| 前端 Knowledge UI | 知识管理面板 | 无前端 UI 对应 | 后端端点只被 API 工具使用 |
-| 前端 Runtime Config UI | 运行时配置面板 | 无前端 UI 对应 | 后端 3 个端点闲置 |
+| 原偏差项 | 原描述 | 现状 |
+|--------|------|------|
+| SessionManager | `PlaceholderSessionManager`（空实现） | 已删除；仅存 `PersistentSessionManager`，会话经 VFS 持久化（`core/src/session/manager.rs`） |
+| 前端 Knowledge UI | 无前端 UI 对应 | 已有知识管理面板 `gui-vite/src/components/knowledge/KnowledgePanel.tsx` |
+| 前端 Runtime Config UI | 无前端 UI 对应 | 设置面板 `gui-vite/src/components/settings/`（13 Tab）经 `lib/api-client.ts` 覆盖运行时配置 |
+
+当前无已知架构偏差。
 
 ---
 
 ## 7. 核心架构决策与模块关系
 
-以下 4 个架构决策决定了模块间的职责划分和依赖方向：
+以下 4 个架构决策决定了模块间的职责划分和依赖方向（完整决策清单见 [decisions/](architecture/decisions/)，另含 ADR-005 SQLite 后端、ADR-006 快照例外、ADR-007 依赖环消除）：
 
 ### 决策 1：VFS 双层摘要索引 — 底层基础
 
@@ -406,7 +417,7 @@ TaskScheduler 触发
 | L1 Overview | ~2K | `overview_vector` | 内容导航、重排序 |
 | L2 Detail | 无限制 | — | 完整内容，按需加载 |
 
-**模块影响**：`context/retrieval/` 依赖 `vfs::VfsSearch` 做双层检索；`scheduler/tasks/summary_task.rs` 定时生成 L0/L1 摘要。
+**模块影响**：`context/retrieval/` 依赖 `vfs::VfsSearch` 做双层检索；`scheduler/tasks/summary_task.rs` 定时生成 L0/L1 摘要（短内容判断用 `common::token_estimator::estimate_tokens`，非字节数）。`SummaryEngine` 构造仅依赖 `model::ChatService`（2 参数），构成 vfs→model 的残留单向依赖（非环，已接受）。
 
 ### 决策 2：StructuredMessage — 单一真相源
 
@@ -416,9 +427,9 @@ TaskScheduler 触发
 
 ### 决策 3：组件工具化
 
-`agent/tool_registry.rs` 注册 9 个工具（`read_file`、`write_file`、`execute_command`、`search_code`、`call_skill`、`run_tests`、`verify_build`、`ask_user`、`delegate_to_agent`），其中 `call_skill` 桥接到 `skills/executor.rs`。
+`agent/tool_registry/`（目录模块）注册 14 个工具（`read_file`、`write_file`、`execute_command`、`search_code`、`search_knowledge`、`vfs_read`、`vfs_list`、`call_skill`、`run_tests`、`verify_build`、`ask_user`、`self_check`、`knowledge_ingest`、`delegate_to_agent`），其中 `call_skill` 桥接到 `skills/executor.rs`。工具执行器按域拆分为 4 个文件（`file_ops.rs` / `code_ops.rs` / `knowledge_ops.rs` / `agent_ops.rs`），公开 API 与 dispatch 不变。
 
-**模块影响**：`agent/tool_registry.rs` 依赖 `skills::SkillExecutor` 实现 call_skill 工具，形成 agent → skills 单向依赖。
+**模块影响**：`agent/tool_registry/` 依赖 `skills::SkillExecutor` 实现 call_skill 工具，形成 agent → skills 单向依赖。
 
 ### 决策 4：前缀匹配缓存顺序
 
@@ -430,6 +441,17 @@ soul → rules+memories → history(from compression_marker) → current input
 
 **模块影响**：soul 首次加载后缓存（`context/pipeline.rs` 中的 `cached_soul`）；compression_marker 由 `context/compression/` 模块管理；顺序不可变更以保证 LLM 前缀缓存命中率。
 
+### 决策 5：依赖环消除与共享基础设施归属（ADR-007）
+
+共享基础设施归属**被依赖方/叶模块**，消费方保留 re-export 保留下游兼容：
+
+- `SqliteDb` → `vfs/backend/sqlite_db.rs`（被 vfs 与 observability 共享的 SQLite 连接，归属存储层）
+- `RetrievalTrace` 家族 → `common/types/retrieval_trace.rs`（纯数据契约；`context/retrieval/types.rs` re-export）
+- `LoggingConfig` → `common/logging.rs`（`config::LoggingConfig` re-export 仍可用）
+- `TokenEstimator`/`estimate_tokens` → `common/token_estimator.rs`（全系统唯一估算入口；`context::compression` re-export）
+
+**模块影响**：3 个依赖环（vfs→observability、context↔observability、common↔config）全部消除；残留单向依赖 `observability→vfs`、`observability→common`、`vfs→model` 均为非环。详见 [ADR-007](architecture/decisions/007-core-dependency-cycle-removal.md)。
+
 ---
 
 ## 8. 已知待办事项
@@ -439,11 +461,10 @@ soul → rules+memories → history(from compression_marker) → current input
 | sessions/services.rs | TODO: 与核心存储集成 | 🔴 |
 | knowledge/services.rs | TODO: 与核心摄入管道/检索引擎集成 (4处) | 🔴 |
 | config/services.rs | TODO: 与核心配置存储集成 (2处) | 🔴 |
-| gui 知识管理面板 | 前端无 Knowledge UI，后端端点闲置 | 🟡 |
-| gui 运行时配置 | 前端无 Runtime Config UI | 🟡 |
-| 记忆持久化 | MemoryExtractor 已就绪，server 层接入待实现 | 🟡 |
+
+> 已随迭代消除：知识管理面板（`gui-vite/src/components/knowledge/`）与运行时配置设置面板（`gui-vite/src/components/settings/`）均已实现；记忆提取由 `scheduler/tasks/memory_task.rs` 定时触发并经 VFS 持久化（不依赖 server 层接入）。
 
 ---
 
-**文档版本**: 2026-06-04
-**最后更新**: 2026-06-04（全面修正：移除不存在模块、更新 trait 契约、修剪历史偏差、新增架构决策章节）
+**文档版本**: 2026-08-06
+**最后更新**: 2026-08-06（Wave 6 重构后同步：3 个依赖环消除（SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉，ADR-007）、executor 与 tool_registry 拆分路径、§6 偏差表与 §8 待办按代码核验清理、SessionManager 仅存 PersistentSessionManager）

@@ -22,20 +22,20 @@
 
 | 子模块 | 位置 | 职责 | 关键文件 |
 |--------|------|------|---------|
-| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 | `coordinator.rs`, `loop.rs`, `tool_registry.rs`, `session_state.rs`, `builder.rs` |
-| `common` | `core/src/common/` | 通用类型、错误处理、`StructuredMessage` | `error.rs`, `types/structured_message.rs` |
+| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 | `coordinator.rs`, `loop.rs`, `tool_registry/`, `session_state.rs`, `builder.rs` |
+| `common` | `core/src/common/` | 通用类型、错误处理、日志配置、token 估算、`StructuredMessage` | `error.rs`, `logging.rs`, `token_estimator.rs`, `types/`（含 `retrieval_trace.rs`） |
 | `config` | `core/src/config/` | TOML 配置管理 + 环境变量 + 向导 | `mod.rs`, `wizard.rs`, `validation.rs` |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 管线 + 组装） | `pipeline.rs`, `assembler.rs`, `retrieval/`, `compression/` |
-| `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控） | `actions.rs`, `approval.rs`, `verification.rs`, `judge.rs` |
-| `knowledge` | `core/src/knowledge/` | 知识库导入（解析、图像、注入管道） | `ingestor/`, `parser.rs`, `image.rs` |
+| `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控） | `actions.rs`, `security.rs`, `command.rs`, `output_parse.rs`, `approval/`, `verification.rs`, `judge.rs` |
+| `knowledge` | `core/src/knowledge/` | 知识库导入（解析、图像、注入管道） | `ingestor/`, `parser.rs`, `image/` |
 | `memory` | `core/src/memory/` | 长期记忆提取 | `extractor.rs` |
 | `model` | `core/src/model/` | 模型服务容器（`ModelServices`）+ provider 实现 | `traits.rs`, `services.rs`, `provider/` |
-| `observability` | `core/src/observability/` | 可观测性 + 使用统计（`AgentMetrics`、`UsageStats`） | `mod.rs`, `sqlite_db.rs`, `usage_stats.rs` |
+| `observability` | `core/src/observability/` | 可观测性 + 使用统计（`AgentMetrics`、`UsageStats`；SQLite 连接经 `vfs::backend::sqlite_db` 复用） | `mod.rs`, `usage_stats.rs` |
 | `scheduler` | `core/src/scheduler/` | 定时任务调度器 + 任务实现 | `task_scheduler.rs`, `tasks/` |
-| `session` | `core/src/session/` | 会话管理（PersistentSessionManager，基于 SQLite） | `manager.rs`, `types.rs` |
+| `session` | `core/src/session/` | 会话管理（PersistentSessionManager，基于 VFS）；截断常量单点（`MAX_SESSION_MESSAGES`/`KEEP_RECENT_MESSAGES`） | `manager.rs`, `types.rs` |
 | `skills` | `core/src/skills/` | 技能定义、执行、学习（GEPA 进化引擎） | `definition.rs`, `executor.rs`, `manager.rs`, `handlers/`, `learning/` |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退，⚠️ ADR-006 VFS 例外） | `mod.rs` |
-| `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `vector/lancedb.rs`, `summary/engine.rs` |
+| `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `backend/sqlite_db.rs`, `vector/lancedb/`, `summary/engine.rs` |
 
 ---
 
@@ -97,3 +97,4 @@
 - [ADR-004: 前缀匹配上下文组装](decisions/004-prefix-match-context-assembly.md)
 - [ADR-005: SQLite 作为主存储后端](decisions/005-sqlite-backend.md)
 - [ADR-006: 工作区快照独立存储](decisions/006-snapshot-storage-exception.md) — snapshot 的 VFS 例外
+- [ADR-007: Core 依赖环消除与共享基础设施归属](decisions/007-core-dependency-cycle-removal.md) — SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉决策

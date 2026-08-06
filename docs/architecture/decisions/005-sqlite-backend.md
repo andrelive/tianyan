@@ -90,7 +90,6 @@ server boot → SqliteDb::open("tianyan.db") ─┬→ SqliteBackend  → VFS �
 ## 关键文件
 
 - `core/src/vfs/backend/sqlite.rs` — `SqliteBackend` 实现
-- `core/src/observability/sqlite_db.rs` — 共享 `SqliteDb` 连接
-- `core/src/observability/sqlite_session.rs` — 会话消息存储
+- `core/src/vfs/backend/sqlite_db.rs` — 共享 `SqliteDb` 连接（自 `observability/` 下沉，ADR-007）
 - `core/src/observability/usage_stats.rs` — 使用统计追踪
 - `server/src/lib.rs` — `create_app()` 中统一初始化 `SqliteDb`

@@ -144,7 +144,7 @@ VFS 是所有上下文（知识库、记忆、技能、规则）的统一存储�
 - **图像双通道**：VLM 生成文本描述 → 文本 embedding 用于 L0/L1，同时 `embed_image()` 生成 `visual_vector` 用于视觉相似度搜索。
 - 所有命名空间（User、Session、Memory、Knowledge、Agent、Skill）共享同一套机制。
 
-关键文件：`core/src/vfs/traits.rs`（`VfsSearch` trait）、`core/src/vfs/vfs_impl.rs`（`search()`）、`core/src/vfs/vector/lancedb.rs`（RRF 融合）、`core/src/context/retrieval/retriever.rs`（`DualLayerRetriever`）。
+关键文件：`core/src/vfs/traits.rs`（`VfsSearch` trait）、`core/src/vfs/vfs_impl.rs`（`search()`）、`core/src/vfs/vector/lancedb/`（RRF 融合）、`core/src/context/retrieval/retriever.rs`（`DualLayerRetriever`）。
 
 ### 3.2 决策 2: StructuredMessage —— 核心数据结构
 

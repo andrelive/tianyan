@@ -52,7 +52,7 @@
 ## 关键文件
 
 - `core/src/vfs/backend/sqlite.rs` — `SqliteBackend` 内容存储
-- `core/src/vfs/vector/lancedb.rs` — RRF 融合检索
+- `core/src/vfs/vector/lancedb/` — RRF 融合检索（`batch.rs` / `mod.rs` / `tests.rs`）
 - `core/src/context/retrieval/retriever.rs` — `DualLayerRetriever`
-- `core/src/observability/sqlite_db.rs` — 共享 SQLite 连接
+- `core/src/vfs/backend/sqlite_db.rs` — 共享 SQLite 连接（自 `observability/` 下沉，ADR-007）
 - `core/src/observability/usage_stats.rs` — 使用统计追踪

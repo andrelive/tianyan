@@ -23,19 +23,19 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 | 子模块 | 职责 | 关键文件 | 集成状态 |
 |--------|------|---------|---------|
-| `agent` | Agent 协调器 + AgentLoop 迭代循环 + 会话状态 | coordinator.rs, builder.rs, session_state.rs, loop.rs, tool_registry.rs, tools.rs, types.rs | ✅ 已集成 |
-| `common` | 通用类型（按领域拆分）、错误处理 | error.rs, types/ | ✅ 已集成 |
+| `agent` | Agent 协调器 + AgentLoop 迭代循环 + 会话状态 | coordinator.rs, builder.rs, session_state.rs, loop.rs, tool_registry/, tools.rs, types.rs | ✅ 已集成 |
+| `common` | 通用类型（按领域拆分）、错误处理、日志配置、token 估算 | error.rs, logging.rs, token_estimator.rs, types/ | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
 | `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
-| `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控） | actions.rs, approval.rs, types.rs, judge.rs, verification.rs | ✅ 正常使用 |
-| `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image.rs, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
+| `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs | ✅ 正常使用 |
+| `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image/, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
 | `memory` | 长期记忆提取 | extractor.rs | ✅ 已集成 |
 | `model` | 模型服务（provider 实现 + 服务容器） | traits.rs, types/, provider/, services.rs | ✅ 已集成 |
-| `observability` | 可观测性存储（AgentMetrics，Agent 自省） | mod.rs | ✅ 已集成 |
+| `observability` | 可观测性存储（AgentMetrics，Agent 自省）+ 使用统计 | mod.rs, usage_stats.rs（SQLite 连接复用 `vfs/backend/sqlite_db.rs`） | ✅ 已集成 |
 | `scheduler` | 定时任务调度器 + 任务实现 | task_scheduler.rs, tasks/ | ✅ 已集成 |
-| `session` | 会话管理（创建、持久化、消息记录） | manager.rs, types.rs | ✅ 已集成 |
+| `session` | 会话管理（创建、持久化、消息记录）；截断常量单点 | manager.rs, types.rs（常量在 mod.rs） | ✅ 已集成 |
 | `skills` | 技能定义、执行和学习（GEPA 进化引擎） | definition.rs, executor.rs, manager.rs, handlers/, registry.rs, learning/ | ✅ 已集成 |
-| `vfs` | 虚拟文件系统、存储后端、向量存储、摘要引擎 | traits.rs, types.rs, vfs_impl.rs, vfs_builder.rs, backend/, vector/, summary/, uri_mapper.rs | ✅ 已集成 |
+| `vfs` | 虚拟文件系统、存储后端、向量存储、摘要引擎 | traits.rs, types.rs, vfs_impl.rs, vfs_builder.rs, backend/（含 sqlite_db.rs）, vector/, summary/, uri_mapper.rs | ✅ 已集成 |
 
 ### 1.2 agent 子模块
 
@@ -45,9 +45,9 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 | 类型 | 说明 |
 |------|------|
-| `Agent` | `AgentCoordinator` 的默认实现，持有 ModelService、VFS、ContextPipeline、AgentLoop、ToolRegistry 等组件 |
+| `Agent` | `AgentCoordinator` 的默认实现，持有 default_model、ContextPipeline、AgentMetrics、AgentLoop、SessionManager、SnapshotManager（可选）等组件 |
 | `AgentCoordinator` (trait) | Agent 协调器接口，定义 `process_message`、`process_message_stream`、`handle_clarification`、`initialize`、`shutdown` |
-| `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry） |
+| `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry；`Agent::new` 7 参数） |
 | `AgentLoop` | Agent 迭代循环（LLM 工具调用循环） |
 | `AgentLoopConfig` | AgentLoop 配置（loop_limit 默认 50） |
 | `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls；注册 14 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、knowledge_ingest、delegate_to_agent |
@@ -105,8 +105,9 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `vfs/vfs_impl.rs` — `VirtualFileSystemImpl` 实现 + `initialize()` 基础设施初始化
 - `vfs/vfs_builder.rs` — `VirtualFileSystemBuilder` 构建器
 - `vfs/backend/sqlite.rs` — SQLite 存储后端（替代已删除的 `LocalFileBackend`）
-- `vfs/vector/lancedb.rs` — LanceDB 嵌入式向量数据库实现（RRF 融合搜索）
-- `vfs/summary/engine.rs` — `SummaryEngine` 分层摘要生成
+- `vfs/backend/sqlite_db.rs` — 共享 SQLite 连接 `SqliteDb`（与 `observability/usage_stats.rs` 共用，ADR-005 单连接语义；自 `observability/` 下沉，ADR-007）
+- `vfs/vector/lancedb/` — LanceDB 嵌入式向量数据库实现（`batch.rs` / `mod.rs` / `tests.rs`，RRF 融合搜索）
+- `vfs/summary/engine.rs` — `SummaryEngine` 分层摘要生成（`new(model_service, model_name)` 2 参数，依赖 `model::ChatService`）
 - `vfs/uri_mapper.rs` — URI 到文件系统路径映射
 
 **核心类型**：
@@ -147,9 +148,12 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 > `Executor` trait 壳、`Step`、`StepResult`、`FailureHandling`、`ExecutorTrait` 等旧 Planner-Executor 架构类型已移除。
 
 **模块组织**：
-- `executor/actions.rs` — 独立执行函数（`execute_read_file`、`execute_write_file` 等）
+- `executor/actions.rs` — 公开执行函数（`execute_read_file`、`execute_write_file`、`execute_search_code`、`execute_run_tests`、`execute_verify_build`）+ 重导出 `execute_command_action` / `SecurityPolicy`
+- `executor/security.rs` — `SecurityPolicy` 安全策略（命令白名单/黑名单、目录限制、command_timeout）+ 路径沙箱统一判定（`check_path_rules` / `normalize_path_for_check`，skills 侧共享）
+- `executor/command.rs` — 命令执行（`execute_command_action`、`DEFAULT_COMMAND_TIMEOUT_SECS`）
+- `executor/output_parse.rs` — 命令输出解析统一实现（`extract_build_errors` / `count_test_passed` / `extract_test_failures`：大小写不敏感匹配、单行 200 字符截断、50 条上限）
 - `executor/types.rs` — `Action` 枚举和 `ExecutorError`
-- `executor/approval.rs` — 审批工作流
+- `executor/approval/` — 审批工作流（`types.rs` 领域类型 + `workflow.rs` 状态机）
 - `executor/verification.rs` — 验证门控
 - `executor/judge.rs` — LLM-as-Judge 语义验证
 
@@ -169,8 +173,8 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 **职责**：上下文工程系统，包括双层检索、对话压缩、统一上下文管线和消息组装。
 
 **子模块组织**：
-- `context/retrieval/` — 意图分析、双层向量检索（DualLayerRetriever）、内容加载（ContentLoadStrategy）、检索追踪
-- `context/compression/` — 对话压缩（ContextCompressor）、Token 估算
+- `context/retrieval/` — 意图分析、双层向量检索（DualLayerRetriever）、内容加载（ContentLoadStrategy）、检索追踪（`RetrievalTraceBuilder` 构建器；`RetrievalTrace` 类型定义于 `common/types/retrieval_trace.rs`，此处 re-export）
+- `context/compression/` — 对话压缩（ContextCompressor）；`TokenEstimator` / `estimate_tokens` 定义于 `common/token_estimator.rs`，此处 re-export（全系统唯一估算入口）
 - `context/pipeline.rs` — `ContextPipeline`，统一上下文管线（规则注入 → 检索 → 压缩）
 - `context/assembler.rs` — `ContextAssembler`，纯函数：存储层 `StructuredMessage` → 传输层 `Message`
 
@@ -236,7 +240,7 @@ soul → rules+memories → history(from compression_marker) → current input
 
 ### 1.8 observability 子模块
 
-**职责**：Agent 的可观测性存储，记录执行指标并支持 Agent 自省查询。模块包含 3 个文件（mod.rs、sqlite_db.rs、usage_stats.rs），功能自包含。
+**职责**：Agent 的可观测性存储，记录执行指标并支持 Agent 自省查询。模块包含 2 个文件（mod.rs、usage_stats.rs）；SQLite 连接复用 `vfs/backend/sqlite_db.rs` 的 `SqliteDb`（ADR-005 单连接，ADR-007 下沉），`usage_stats.rs` 依赖 `common::types::retrieval_trace::RetrievalTrace` 持久化检索轨迹。
 
 **核心类型**：
 
@@ -260,11 +264,11 @@ soul → rules+memories → history(from compression_marker) → current input
 | 子模块 | 核心类型 | 说明 |
 |--------|---------|------|
 | `config` | `TianyanConfig`, `AgentConfig`, `ModelsConfig`, `ConfigStatus` | 全局配置管理，支持 TOML + env。查找顺序：`./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml` |
-| `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage` | 通用错误（禁止引入新错误类型）、URI、向量、消息、记忆类型 |
-| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager` | 会话管理，支持 VFS 持久化；`load_session_from_vfs()` 用 `compression_marker` 截断 |
+| `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage`, `LoggingConfig`, `TokenEstimator` | 通用错误（禁止引入新错误类型）、URI、向量、消息、记忆类型、日志配置、token 估算（叶模块，无 core 内部依赖） |
+| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager` | 会话管理，支持 VFS 持久化；`load_session_from_vfs()` 用 `compression_marker` 截断；截断常量单点定义于 `session/mod.rs`（`MAX_SESSION_MESSAGES=100` / `KEEP_RECENT_MESSAGES=50`） |
 | `memory` | `MemoryExtractor`, `ExtractionConfig` | 从会话文本中提取结构化记忆的纯功能，与调度/持久化解耦 |
-| `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（已通过 `knowledge_ingest` 工具集成到 Agent 流程）。ingestor/ 拆分为 mod + builder |
-| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `RuleTask`, `GcTask`, `MemoryTask`, `SummaryTask`, `RuleRecorder`, `RuleSuggester` | 定时任务调度框架 + 所有任务实现，位于 `scheduler/tasks/` |
+| `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（已通过 `knowledge_ingest` 工具集成到 Agent 流程）。ingestor/ 拆分为 mod + builder；`image/` 拆分为 types/processor/analyzer |
+| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `RuleTask`, `GcTask`, `MemoryTask`, `SummaryTask`, `RuleRecorder`, `RuleSuggester` | 定时任务调度框架 + 所有任务实现，位于 `scheduler/tasks/`；`TaskResult.error: Option<TianyanError>`（结构化错误）；GcTask 职责为规则归档 + 记忆 TTL 清理（文档漂移检测/质量报告投机代码已删除） |
 
 ---
 
@@ -288,6 +292,7 @@ soul → rules+memories → history(from compression_marker) → current input
 
 **已删除模块**：`planner/`（Planner-Executor 架构已废弃，仅保留 `ClarificationQuestion` 类型在 agent 中导出）
 **已删除类型**：`ModelRouter`、`TokenBudget`、`DocumentChunker`、`ChunkingConfig`、`ConversationSummarizer`、`VisionEncoder`、`AgentHarness`（wrapper struct）、`AgentSkills`（wrapper struct）、`MemoryExtractionTrait`、`ContextRetriever` (trait)
+**已拆分/下沉文件**（公开 API 路径不变）：`agent/tool_registry/executors.rs` → `file_ops.rs`/`code_ops.rs`/`knowledge_ops.rs`/`agent_ops.rs`；`observability/sqlite_db.rs` → `vfs/backend/sqlite_db.rs`；`config/logging.rs` → `common/logging.rs`；`context/compression/estimator.rs` → `common/token_estimator.rs`；`context/retrieval/types.rs` 的 RetrievalTrace → `common/types/retrieval_trace.rs`；`executor/actions.rs` 拆分出 `security.rs`/`command.rs`/`output_parse.rs`（详见 ADR-007）
 
 ---
 
@@ -489,7 +494,8 @@ Tauri lib.rs::run()
 
 ---
 
-**文档版本**: 2026-08-04
-**最后更新**: 2026-08-04（重构：storage→vfs，移除 planner/chunker/ModelRouter/TokenBudget/ConversationSummarizer/VisionEncoder/AgentHarness/AgentSkills wrapper，修正 ContentLoadStrategy→enum、L1 tokens→~2K、MemoryExtractionTrait→MemoryExtractor，反映 4 项核心架构决策，model/router+openai→provider，tasks→scheduler/tasks，executor 标注废弃，knowledge 确认未集成，session 确认已集成）
-**本轮更新**: 2026-08-04（审查改进 16 项：knowledge_ingest 工具确认已接入 Agent 流程；ToolRegistry 拆分 execute_single 为 14 个独立工具方法；审批默认关闭无人值守、拒绝降级 ask_user 追问；TianyanError 新增 not_found/is_not_found 结构化错误分类；AppState 复用 ModelServices；SummaryTask 缓存 FIFO 淘汰；SSE 事件 id 语义对齐）
+**文档版本**: 2026-08-06
+**最后更新**: 2026-08-06（Wave 6 重构后同步：executor 拆分 security/command/output_parse、tool_registry 4 域文件、approval//image//lancedb/ 目录化、SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉（ADR-007）、observability 2 文件、SessionManager 仅存 PersistentSessionManager、GcTask 删除投机代码、会话截断常量单点）
+**历史**: 2026-08-04（重构：storage→vfs，移除 planner/chunker/ModelRouter/TokenBudget/ConversationSummarizer/VisionEncoder/AgentHarness/AgentSkills wrapper，修正 ContentLoadStrategy→enum、L1 tokens→~2K、MemoryExtractionTrait→MemoryExtractor，反映 4 项核心架构决策，model/router+openai→provider，tasks→scheduler/tasks，executor 标注废弃，knowledge 确认未集成，session 确认已集成）
+**历史**: 2026-08-04（审查改进 16 项：knowledge_ingest 工具确认已接入 Agent 流程；ToolRegistry 拆分 execute_single 为 14 个独立工具方法；审批默认关闭无人值守、拒绝降级 ask_user 追问；TianyanError 新增 not_found/is_not_found 结构化错误分类；AppState 复用 ModelServices；SummaryTask 缓存 FIFO 淘汰；SSE 事件 id 语义对齐）
 
