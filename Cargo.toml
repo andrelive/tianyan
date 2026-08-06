@@ -74,6 +74,29 @@ dashmap = "6.1"
 # Regular expressions
 regex = "1.10"
 
+# 文本相似度比较
+similar = "3.1.2"
+
+# 压缩 / 解压
+flate2 = "1"
+
+# Cargo 元数据解析（Message::parse_stream 默认可用）
+cargo_metadata = "0.23"
+
+# 语法解析（tree-sitter）
+# 注意：runtime 需 ≥0.25 —— 最新 grammar 补丁（tree-sitter-rust 0.24.x、
+# tree-sitter-python 0.23.6 等）由 tree-sitter 0.25 生成器重新生成（grammar ABI 15），
+# 0.24.x runtime（最高 ABI 14）无法加载（Incompatible language version 15）。
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+
+# LSP 协议类型
+lsp-types = "0.97"
+
 # Dev dependencies
 tempfile = "3.10"
 mockall = "0.13"

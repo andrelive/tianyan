@@ -29,6 +29,7 @@ async-trait = "0.1"
 # Utilities
 uuid = { version = "1.0", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+similar = { workspace = true }
 
 [lints]
 workspace = true
@@ -36,6 +37,8 @@ workspace = true
 [lib]
 name = "tianyan_server"
 path = "src/lib.rs"
+# 禁用 doctest：与 core 同步，避免改动后 doctest 目标全量重编（全量测试 378.8s → 约 2 分钟）
+doctest = false
 
 [[bin]]
 name = "tianyan-server"

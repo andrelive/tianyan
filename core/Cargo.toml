@@ -12,6 +12,8 @@ categories = ["development-tools"]
 [lib]
 name = "tianyan"
 path = "src/lib.rs"
+# 禁用 doctest：9 个示例（4 有效）冷编译 ~60s、热循环每次 ~11s，运行仅 1.7s，性价比极低
+doctest = false
 
 [dependencies]
 # Core dependencies
@@ -81,6 +83,26 @@ dashmap = { workspace = true }
 regex = { workspace = true }
 arrow-array = "58.4.0"
 arrow-schema = "58.4.0"
+
+# 文本相似度比较
+similar = { workspace = true }
+
+# 压缩 / 解压
+flate2 = { workspace = true }
+
+# Cargo 元数据解析
+cargo_metadata = { workspace = true }
+
+# 语法解析（tree-sitter）
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }
+tree-sitter-typescript = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-python = { workspace = true }
+tree-sitter-go = { workspace = true }
+
+# LSP 协议类型
+lsp-types = { workspace = true }
 
 [lints]
 workspace = true
