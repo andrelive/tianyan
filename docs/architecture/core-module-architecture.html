@@ -233,6 +233,10 @@ table.tb .lvl{display:inline-block;font-size:10px;border-radius:4px;padding:1px 
     <span class="mark">TY // CORE</span>
     <h1>天演 core 模块架构</h1>
     <span class="sub">Rust 本地 AI 代理 · core 纯库 crate · 数据来源：codegraph 扫描 + 源码验证</span>
+    <div style="margin-top:8px;padding:6px 10px;border:1px solid #fbbf24;border-radius:6px;background:rgba(251,191,36,.08);color:#fcd34d;font-size:12.5px">
+      ⚠️ 本图为 2026-08-06 重构前快照：3 处依赖环已消除（SqliteDb 下沉 vfs/backend、RetrievalTrace/LoggingConfig/TokenEstimator 下沉 common），
+      死参数/死字段已清理，若干文件已拆分。最新结构请以代码与 <a href="007-core-dependency-cycle-removal.html" style="color:#fbbf24">ADR-007</a> / REFACTOR_LOG.md 为准。
+    </div>
   </div>
   <div class="cards">
     <div class="card"><div class="k">15</div><div class="t">core 模块 · 4 层</div></div>
