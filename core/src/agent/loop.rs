@@ -51,6 +51,26 @@ pub enum AgentLoopResult {
 
 // AgentLoopError replaced with TianyanError::Custom("agent_loop: ...")
 
+/// 单轮迭代的回合级上下文。
+///
+/// 收拢 `run` / `run_stream` 两条路径中逐轮演进的可变状态，
+/// 使 [`AgentLoop::handle_llm_response`] 只需一个数据入口，
+/// 后续新增回合级状态（如流式缓冲）无需再改函数签名。
+struct TurnContext<'a> {
+    /// 当前会话 ID。
+    session_id: &'a str,
+    /// 上一条已持久化消息的 ID（消息链父节点）。
+    current_parent_id: &'a mut Option<String>,
+    /// 全轮累计 token 用量。
+    total_tokens: &'a mut TokenUsage,
+    /// 内存中的消息历史。
+    messages: &'a mut Vec<Message>,
+    /// 流式事件发送器（非流式路径为 None）。
+    stream_sender: Option<&'a StreamEventSender>,
+    /// 当前轮数（0 起）。
+    turn: usize,
+}
+
 /// Agent 迭代循环。
 #[derive(Clone)]
 pub struct AgentLoop {
@@ -112,17 +132,17 @@ impl AgentLoop {
                     "agent_loop: LLM 返回空响应".to_string(),
                 ))?;
 
+            let mut ctx = TurnContext {
+                session_id,
+                current_parent_id: &mut current_parent_id,
+                total_tokens: &mut total_tokens,
+                messages,
+                stream_sender: stream_sender.as_ref(),
+                turn,
+            };
+
             if let Some(result) = self
-                .handle_llm_response(
-                    &choice.message,
-                    Some(turn_usage),
-                    &mut current_parent_id,
-                    &mut total_tokens,
-                    messages,
-                    stream_sender.as_ref(),
-                    session_id,
-                    turn,
-                )
+                .handle_llm_response(&choice.message, Some(turn_usage), &mut ctx)
                 .await?
             {
                 return Ok(result);
@@ -245,17 +265,17 @@ impl AgentLoop {
                 reasoning_content: None,
             };
 
+            let mut ctx = TurnContext {
+                session_id,
+                current_parent_id: &mut current_parent_id,
+                total_tokens: &mut total_tokens,
+                messages,
+                stream_sender: Some(&stream_sender),
+                turn,
+            };
+
             if let Some(result) = self
-                .handle_llm_response(
-                    &assistant_msg,
-                    turn_usage,
-                    &mut current_parent_id,
-                    &mut total_tokens,
-                    messages,
-                    Some(&stream_sender),
-                    session_id,
-                    turn,
-                )
+                .handle_llm_response(&assistant_msg, turn_usage, &mut ctx)
                 .await?
             {
                 return Ok(result);
@@ -275,25 +295,15 @@ impl AgentLoop {
     ///
     /// Returns `Ok(Some(result))` if this turn produces a final answer or clarification,
     /// `Ok(None)` if tool calls were executed and the loop should continue.
-    ///
-    /// 参数均为调用点上下文（可变历史/流发送器/会话 ID），合并进结构体反而降低可读性，故豁免该 lint。
-    #[allow(clippy::too_many_arguments)]
     async fn handle_llm_response(
         &self,
         assistant_msg: &Message,
         turn_usage: Option<TokenUsage>,
-        current_parent_id: &mut Option<String>,
-        total_tokens: &mut TokenUsage,
-        messages: &mut Vec<Message>,
-        stream_sender: Option<&StreamEventSender>,
-        session_id: &str,
-        turn: usize,
+        ctx: &mut TurnContext<'_>,
     ) -> Result<Option<AgentLoopResult>, TianyanError> {
         // Accumulate turn token usage
         if let Some(ref usage) = turn_usage {
-            total_tokens.prompt_tokens += usage.prompt_tokens;
-            total_tokens.completion_tokens += usage.completion_tokens;
-            total_tokens.total_tokens += usage.total_tokens;
+            ctx.total_tokens.accumulate(usage);
         }
 
         // Check for ask_user before adding to history
@@ -305,37 +315,23 @@ impl AgentLoop {
                     })?;
                 return Ok(Some(AgentLoopResult::NeedsClarification {
                     question: params.question,
-                    total_tokens: total_tokens.clone(),
-                    turns: turn + 1,
+                    total_tokens: ctx.total_tokens.clone(),
+                    turns: ctx.turn + 1,
                 }));
             }
         }
 
         // Add assistant message to in-memory history
-        messages.push(assistant_msg.clone());
+        ctx.messages.push(assistant_msg.clone());
 
         // Persist assistant message via SessionManager
-        let assistant_for_persist = ContextAssembler::message_to_structured(
-            assistant_msg,
-            session_id,
-            current_parent_id.as_deref(),
-            turn_usage,
-        );
-        *current_parent_id = Some(assistant_for_persist.id.clone());
-        // Clone before moving into add_structured_message — needed for the
+        // Clone before moving into persist_message — needed for the
         // Answer result in the no-tool-calls branch below.
-        let persisted = assistant_for_persist.clone();
-        if let Err(e) = self
-            .session_manager
-            .add_structured_message(session_id, assistant_for_persist)
-            .await
-        {
-            tracing::warn!(error = %e, "持久化 assistant 消息失败");
-        }
+        let persisted = self.persist_message(ctx, assistant_msg, turn_usage).await;
 
         if let Some(ref tool_calls) = assistant_msg.tool_calls {
             // Notify about tool calls if sender is available
-            if let Some(sender) = stream_sender {
+            if let Some(sender) = ctx.stream_sender {
                 for tc in tool_calls {
                     sender
                         .send_tool_call(&format!("\u{8c03}\u{7528}: {}", tc.function.name))
@@ -362,8 +358,8 @@ impl AgentLoop {
                         "系统安全策略要求确认后才能执行该操作。\n\n操作详情：{}\n\n请回复「允许」继续执行，或回复「拒绝」终止。",
                         err_msg
                     ),
-                    total_tokens: total_tokens.clone(),
-                    turns: turn + 1,
+                    total_tokens: ctx.total_tokens.clone(),
+                    turns: ctx.turn + 1,
                 }));
             }
 
@@ -377,24 +373,11 @@ impl AgentLoop {
 
                 // Persist tool result
                 let tool_msg = Message::tool(&call_id, &content);
-                let tool_for_persist = ContextAssembler::message_to_structured(
-                    &tool_msg,
-                    session_id,
-                    current_parent_id.as_deref(),
-                    None,
-                );
-                *current_parent_id = Some(tool_for_persist.id.clone());
-                if let Err(e) = self
-                    .session_manager
-                    .add_structured_message(session_id, tool_for_persist)
-                    .await
-                {
-                    tracing::warn!(error = %e, "持久化 tool result 消息失败");
-                }
+                self.persist_message(ctx, &tool_msg, None).await;
 
-                messages.push(tool_msg);
+                ctx.messages.push(tool_msg);
 
-                if let Some(sender) = stream_sender {
+                if let Some(sender) = ctx.stream_sender {
                     sender.send_observation(&content).await;
                 }
             }
@@ -411,11 +394,39 @@ impl AgentLoop {
             // Already persisted above — just return.
             Ok(Some(AgentLoopResult::Answer {
                 content: assistant_msg.content.clone(),
-                total_tokens: total_tokens.clone(),
-                turns: turn + 1,
+                total_tokens: ctx.total_tokens.clone(),
+                turns: ctx.turn + 1,
                 persisted_message: Box::new(persisted),
             }))
         }
+    }
+
+    /// 将消息转换为 StructuredMessage 并持久化到会话，返回持久化后的消息。
+    ///
+    /// 同时推进 `current_parent_id` 指向新消息，维持消息链。
+    /// 持久化失败仅告警不中断（与历史行为一致）。
+    async fn persist_message(
+        &self,
+        ctx: &mut TurnContext<'_>,
+        message: &Message,
+        usage: Option<TokenUsage>,
+    ) -> StructuredMessage {
+        let structured = ContextAssembler::message_to_structured(
+            message,
+            ctx.session_id,
+            ctx.current_parent_id.as_deref(),
+            usage,
+        );
+        *ctx.current_parent_id = Some(structured.id.clone());
+        let persisted = structured.clone();
+        if let Err(e) = self
+            .session_manager
+            .add_structured_message(ctx.session_id, structured)
+            .await
+        {
+            tracing::warn!(error = %e, "持久化消息失败");
+        }
+        persisted
     }
 }
 

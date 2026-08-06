@@ -23,6 +23,13 @@ impl TokenUsage {
             total_tokens: prompt_tokens + completion_tokens,
         }
     }
+
+    /// 累加另一份使用统计（多轮对话的轮次汇总）。
+    pub fn accumulate(&mut self, other: &TokenUsage) {
+        self.prompt_tokens += other.prompt_tokens;
+        self.completion_tokens += other.completion_tokens;
+        self.total_tokens += other.total_tokens;
+    }
 }
 
 #[cfg(test)]
@@ -43,5 +50,14 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 0);
         assert_eq!(usage.completion_tokens, 0);
         assert_eq!(usage.total_tokens, 0);
+    }
+
+    #[test]
+    fn test_token_usage_accumulate() {
+        let mut total = TokenUsage::new(10, 5);
+        total.accumulate(&TokenUsage::new(100, 50));
+        assert_eq!(total.prompt_tokens, 110);
+        assert_eq!(total.completion_tokens, 55);
+        assert_eq!(total.total_tokens, 165);
     }
 }

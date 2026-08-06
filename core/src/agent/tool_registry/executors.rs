@@ -24,17 +24,31 @@ use crate::skills::SkillExecutionRequest;
 
 use super::{vfs_content_field, ToolRegistry};
 
+/// 解析工具参数（JSON → 类型化参数）。
+///
+/// 所有工具的参数解析共用同一错误包装（"tool: 参数无效"），
+/// 提取为单点避免 13 处重复样板。
+fn parse_params<T: serde::de::DeserializeOwned>(arguments: &str) -> Result<T, TianyanError> {
+    serde_json::from_str(arguments)
+        .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))
+}
+
+/// 将安全策略检查错误包装为统一的安全违规工具错误。
+fn safety_violation<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, TianyanError> {
+    result.map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))
+}
+
 impl ToolRegistry {
     /// 执行 read_file 工具：读取文件内容。
     pub(crate) async fn execute_read_file(
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: ReadFileParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
-        self.security_policy
-            .check_path(std::path::Path::new(&params.path))
-            .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))?;
+        let params: ReadFileParams = parse_params(arguments)?;
+        safety_violation(
+            self.security_policy
+                .check_path(std::path::Path::new(&params.path)),
+        )?;
         crate::executor::execute_read_file(&params.path)
             .await
             .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
@@ -45,17 +59,16 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: WriteFileParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
-        self.security_policy
-            .check_file_write()
-            .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))?;
-        self.security_policy
-            .check_path(std::path::Path::new(&params.path))
-            .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))?;
-        self.security_policy
-            .check_file_size(params.content.len() as u64)
-            .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))?;
+        let params: WriteFileParams = parse_params(arguments)?;
+        safety_violation(self.security_policy.check_file_write())?;
+        safety_violation(
+            self.security_policy
+                .check_path(std::path::Path::new(&params.path)),
+        )?;
+        safety_violation(
+            self.security_policy
+                .check_file_size(params.content.len() as u64),
+        )?;
         // Approval workflow check — auto-approve safe paths,
         // deny critical paths (e.g. /etc/, .env), request human
         // approval for Medium/High risk paths.
@@ -89,8 +102,7 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let mut params: ExecuteCommandParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let mut params: ExecuteCommandParams = parse_params(arguments)?;
 
         // Check command against security policy.
         // If blocked but safety_mode is Transform, try rewriting to a safe equivalent.
@@ -112,9 +124,7 @@ impl ToolRegistry {
 
         // Path sandbox for working directory
         if let Some(ref cwd) = params.cwd {
-            self.security_policy
-                .check_path(std::path::Path::new(cwd))
-                .map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))?;
+            safety_violation(self.security_policy.check_path(std::path::Path::new(cwd)))?;
         }
 
         // Approval workflow check — auto-approve safe commands,
@@ -155,8 +165,7 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: SearchCodeParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let params: SearchCodeParams = parse_params(arguments)?;
         crate::executor::execute_search_code(&params.query, params.scope.as_deref())
             .await
             .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
@@ -167,8 +176,7 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: SearchKnowledgeParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let params: SearchKnowledgeParams = parse_params(arguments)?;
         let vfs = self.vfs.as_ref().ok_or_else(|| {
             TianyanError::Custom(format!(
                 "tool: 执行失败：{}",
@@ -210,8 +218,7 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: VfsReadParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let params: VfsReadParams = parse_params(arguments)?;
         let vfs = self.vfs.as_ref().ok_or_else(|| {
             TianyanError::Custom(format!("tool: 执行失败：{}", "VFS not configured"))
         })?;
@@ -236,8 +243,7 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: VfsListParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let params: VfsListParams = parse_params(arguments)?;
         let vfs = self.vfs.as_ref().ok_or_else(|| {
             TianyanError::Custom(format!("tool: 执行失败：{}", "VFS not configured"))
         })?;
@@ -271,8 +277,7 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: CallSkillParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let params: CallSkillParams = parse_params(arguments)?;
         if let Some(ref skill_executor) = self.skill_executor {
             let request = SkillExecutionRequest::new(params.skill_id, params.parameters);
             match skill_executor.execute(request).await {
@@ -315,8 +320,7 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: RunTestsParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let params: RunTestsParams = parse_params(arguments)?;
         crate::executor::execute_run_tests(
             &params.command,
             params.cwd.as_deref(),
@@ -331,8 +335,7 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: VerifyBuildParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let params: VerifyBuildParams = parse_params(arguments)?;
         // Use semantic verification if available, otherwise fall back
         // to exit code + pattern matching.
         if let Some(ref gate) = self.verification_gate {
@@ -357,8 +360,7 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: AskUserParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let params: AskUserParams = parse_params(arguments)?;
         Err(TianyanError::Custom(format!(
             "tool: 需要追问：{}",
             params.question
@@ -378,8 +380,7 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: KnowledgeIngestParams = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let params: KnowledgeIngestParams = parse_params(arguments)?;
         let ingestor = self.knowledge_ingestor.as_ref().ok_or_else(|| {
             TianyanError::Custom(format!(
                 "tool: 执行失败：{}",
