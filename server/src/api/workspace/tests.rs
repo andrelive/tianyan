@@ -1,0 +1,518 @@
+//! workspace 领域测试
+//!
+//! RED → GREEN：本文件先行编写，验证 workspace 服务与路由的行为契约。
+//! 服务层测试直接构造 [`WorkspaceService`]（跟随 knowledge 领域"组件注入"模式），
+//! 处理器层测试通过 `create_app` 构建完整 AppState 后以 `tower::ServiceExt::oneshot`
+//! 直击路由。
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use serde_json::Value;
+use tempfile::tempdir;
+use tianyan::config::{
+    ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig, ProviderConfig,
+    TianyanConfig,
+};
+use tianyan::snapshot::SnapshotManager;
+use tower::ServiceExt;
+
+use crate::api::shared::error::ApiError;
+use crate::api::workspace::services::WorkspaceService;
+use crate::api::workspace::types::TreeResponse;
+
+// ---------------------------------------------------------------------------
+// 测试夹具
+// ---------------------------------------------------------------------------
+
+/// 使用临时工作目录构建服务（无快照管理器）。
+fn service_with_workdir(workdir: PathBuf) -> WorkspaceService {
+    WorkspaceService::new(Some(workdir), None)
+}
+
+/// 未配置 working_directory 的服务。
+fn service_without_workdir() -> WorkspaceService {
+    WorkspaceService::new(None, None)
+}
+
+/// 构建带 mock 模型提供商的测试配置（与 `server/tests/common/factory.rs` 同构；
+/// `ModelServices::from_config` 强制要求 chat/embedding/vision 三者齐备）。
+fn test_config(data_dir: &Path, workdir: Option<&Path>) -> TianyanConfig {
+    let mut config = TianyanConfig::default();
+    config.storage.data_dir = data_dir.to_path_buf();
+    config.agent.working_directory = workdir.map(|p| p.to_string_lossy().into_owned());
+    config.models = ModelsConfig {
+        providers: vec![ProviderConfig {
+            name: "mock".to_string(),
+            endpoint: "http://localhost:11434/v1".to_string(),
+            api_key: Some("test-key".to_string()),
+            models: vec![
+                ModelEntry {
+                    name: "test-model".to_string(),
+                    capabilities: vec![ModelCapability::Chat],
+                },
+                ModelEntry {
+                    name: "embed".to_string(),
+                    capabilities: vec![ModelCapability::TextEmbedding],
+                },
+                ModelEntry {
+                    name: "vision".to_string(),
+                    capabilities: vec![ModelCapability::Vision],
+                },
+            ],
+            timeout: 30,
+            enabled: true,
+            headers: std::collections::HashMap::new(),
+        }],
+        preferences: ModelPreferences {
+            chat: Some(ModelRef {
+                provider: "mock".to_string(),
+                model: "test-model".to_string(),
+            }),
+            embedding: Some(ModelRef {
+                provider: "mock".to_string(),
+                model: "embed".to_string(),
+            }),
+            vision: Some(ModelRef {
+                provider: "mock".to_string(),
+                model: "vision".to_string(),
+            }),
+        },
+    };
+    config
+}
+
+/// 创建含嵌套文件的工作目录：`src/nested`、`zeta`、`Cargo.toml`、`alpha.txt`。
+fn create_workdir(root: &Path) -> PathBuf {
+    let workdir = root.join("work");
+    std::fs::create_dir_all(workdir.join("src/nested")).unwrap();
+    std::fs::create_dir_all(workdir.join("zeta")).unwrap();
+    std::fs::write(workdir.join("Cargo.toml"), "x".repeat(42)).unwrap();
+    std::fs::write(workdir.join("alpha.txt"), "hello").unwrap();
+    workdir
+}
+
+/// 去掉 Windows `\\?\` 逐字前缀（与服务端展示逻辑一致）。
+fn strip_verbatim(path: &str) -> String {
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+}
+
+// ---------------------------------------------------------------------------
+// tree
+// ---------------------------------------------------------------------------
+
+/// 根目录单层列出：目录在前、文件在后，各自按名称升序；文件带 size/mtime。
+#[tokio::test]
+async fn tree_lists_entries_dirs_first_then_files_alpha() {
+    let dir = tempdir().unwrap();
+    let workdir = create_workdir(dir.path());
+    let service = service_with_workdir(workdir.clone());
+
+    let resp: TreeResponse = service.tree("").await.unwrap();
+
+    assert_eq!(
+        resp.root,
+        strip_verbatim(&workdir.canonicalize().unwrap().to_string_lossy())
+    );
+    assert_eq!(resp.path, "");
+    let names: Vec<&str> = resp.entries.iter().map(|e| e.name.as_str()).collect();
+    // 目录（src、zeta）在前且升序；文件（Cargo.toml、alpha.txt）在后且按字节序升序
+    assert_eq!(names, vec!["src", "zeta", "Cargo.toml", "alpha.txt"]);
+
+    let dir_entry = &resp.entries[0];
+    assert_eq!(dir_entry.entry_type, "dir");
+    assert_eq!(dir_entry.path, "src");
+    assert!(dir_entry.size.is_none(), "目录不应携带 size");
+    assert!(dir_entry.mtime.is_none(), "目录不应携带 mtime");
+
+    let file_entry = resp.entries.iter().find(|e| e.name == "alpha.txt").unwrap();
+    assert_eq!(file_entry.entry_type, "file");
+    assert_eq!(file_entry.path, "alpha.txt");
+    assert_eq!(file_entry.size, Some(5));
+    assert!(file_entry.mtime.is_some(), "文件应携带 mtime");
+}
+
+/// 子目录浏览：条目 path 为相对工作目录的完整相对路径。
+#[tokio::test]
+async fn tree_lists_subdir_with_rel_path() {
+    let dir = tempdir().unwrap();
+    let workdir = create_workdir(dir.path());
+    let service = service_with_workdir(workdir);
+
+    let resp: TreeResponse = service.tree("src").await.unwrap();
+
+    assert_eq!(resp.path, "src");
+    assert_eq!(resp.entries.len(), 1);
+    assert_eq!(resp.entries[0].name, "nested");
+    assert_eq!(resp.entries[0].path, "src/nested");
+}
+
+/// `..` 相对路径必须被拒绝（400）。
+#[tokio::test]
+async fn tree_rejects_dotdot_path() {
+    let service = service_with_workdir(tempdir().unwrap().path().join("work"));
+
+    let err = service.tree("..").await.unwrap_err();
+    assert!(matches!(err, ApiError::BadRequest(_)), "err = {err:?}");
+}
+
+/// 含 `..` 组件的相对路径必须被拒绝（400）。
+#[tokio::test]
+async fn tree_rejects_parent_traversal() {
+    let service = service_with_workdir(tempdir().unwrap().path().join("work"));
+
+    let err = service.tree("../escape").await.unwrap_err();
+    assert!(matches!(err, ApiError::BadRequest(_)), "err = {err:?}");
+}
+
+/// 未配置 working_directory → 400 且提示明确。
+#[tokio::test]
+async fn tree_missing_working_directory_returns_bad_request() {
+    let service = service_without_workdir();
+
+    let err = service.tree("").await.unwrap_err();
+    assert!(
+        matches!(&err, ApiError::BadRequest(msg) if msg.contains("working_directory")),
+        "err = {err:?}"
+    );
+}
+
+/// 不存在的相对路径 → 404。
+#[tokio::test]
+async fn tree_nonexistent_rel_returns_not_found() {
+    let dir = tempdir().unwrap();
+    let workdir = create_workdir(dir.path());
+    let service = service_with_workdir(workdir);
+
+    let err = service.tree("no-such-dir").await.unwrap_err();
+    assert!(matches!(err, ApiError::NotFound(_)), "err = {err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// read
+// ---------------------------------------------------------------------------
+
+/// 文本文件读取：逐行 `N#ID|content` 锚点前缀 + 总行数。
+#[tokio::test]
+async fn read_returns_hashline_content_for_text_file() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.txt"), "alpha\nbeta\n").unwrap();
+    let service = service_with_workdir(workdir.clone());
+
+    let value: Value = service.read("a.txt", None, None).await.unwrap();
+
+    assert_eq!(
+        value["path"],
+        strip_verbatim(
+            &workdir
+                .join("a.txt")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+        )
+    );
+    let content = value["content"].as_str().unwrap();
+    assert!(
+        content.starts_with("1#"),
+        "content 应带行锚点前缀: {content}"
+    );
+    assert!(
+        content.contains("|alpha"),
+        "content 应包含行内容: {content}"
+    );
+    assert_eq!(value["total_lines"], 2);
+    assert_eq!(value["truncated"], false);
+}
+
+/// 二进制文件 → binary: true。
+#[tokio::test]
+async fn read_marks_binary_file() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("blob.bin"), [0u8, 1u8, 2u8, 255u8]).unwrap();
+    let service = service_with_workdir(workdir);
+
+    let value: Value = service.read("blob.bin", None, None).await.unwrap();
+
+    assert_eq!(value["binary"], true);
+}
+
+/// 不存在的文件 → 404。
+#[tokio::test]
+async fn read_missing_file_returns_not_found() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let service = service_with_workdir(workdir);
+
+    let err = service.read("ghost.rs", None, None).await.unwrap_err();
+    assert!(matches!(err, ApiError::NotFound(_)), "err = {err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// diff（快照模式）
+// ---------------------------------------------------------------------------
+
+/// 构造带快照管理器的服务（快照根在 workdir 之外），返回 (服务, 管理器)。
+fn service_with_snapshot(
+    workdir: PathBuf,
+    snap_root: PathBuf,
+) -> (WorkspaceService, Arc<SnapshotManager>) {
+    let manager = Arc::new(SnapshotManager::new(snap_root, workdir.clone()));
+    let service = WorkspaceService::new(Some(workdir), Some(manager.clone()));
+    (service, manager)
+}
+
+/// 捕获快照后修改文件 → diff 显示 modified，行数变化正确。
+#[tokio::test]
+async fn diff_snapshot_reports_modified_file() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.txt"), "v1\n").unwrap();
+    let snap_root = dir.path().join("snaproot");
+    let (service, manager) = service_with_snapshot(workdir.clone(), snap_root);
+    manager.capture("s1", 0).await.unwrap();
+
+    std::fs::write(workdir.join("a.txt"), "v1\nv2\n").unwrap();
+
+    let value: Value = service.diff_snapshot("s1", 0, Some("a.txt")).await.unwrap();
+    assert_eq!(value["path"], "a.txt");
+    assert_eq!(value["status"], "modified");
+    assert_eq!(value["old_lines"], 1);
+    assert_eq!(value["new_lines"], 2);
+    let hunks = value["hunks"].as_array().unwrap();
+    assert!(!hunks.is_empty(), "modified 文件应有变更块");
+    assert!(value["unified"].as_str().unwrap().contains("@@"));
+}
+
+/// 快照索引缺失 → 404。
+#[tokio::test]
+async fn diff_snapshot_missing_index_returns_not_found() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.txt"), "v1\n").unwrap();
+    let snap_root = dir.path().join("snaproot");
+    let (service, manager) = service_with_snapshot(workdir, snap_root);
+    manager.capture("s1", 0).await.unwrap();
+
+    let err = service
+        .diff_snapshot("s1", 99, Some("a.txt"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ApiError::NotFound(_)), "err = {err:?}");
+}
+
+/// 省略 path → 返回整个 `{ "files": [...] }` 结构。
+#[tokio::test]
+async fn diff_snapshot_without_path_returns_files_list() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.txt"), "v1\n").unwrap();
+    let snap_root = dir.path().join("snaproot");
+    let (service, manager) = service_with_snapshot(workdir.clone(), snap_root);
+    manager.capture("s1", 0).await.unwrap();
+
+    std::fs::write(workdir.join("a.txt"), "v1\nv2\n").unwrap();
+
+    let value: Value = service.diff_snapshot("s1", 0, None).await.unwrap();
+    let files = value["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "仅修改的文件应出现在列表中: {value}");
+    assert_eq!(files[0]["path"], "a.txt");
+    assert_eq!(files[0]["status"], "modified");
+}
+
+// ---------------------------------------------------------------------------
+// diff（文件间模式）
+// ---------------------------------------------------------------------------
+
+/// 两个不同文件 → status modified，hunks 与 unified 非空。
+#[tokio::test]
+async fn diff_files_reports_modified_with_hunks() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    std::fs::write(workdir.join("b.txt"), "one\ntwo\nfour\n").unwrap();
+    let service = service_with_workdir(workdir);
+
+    let value: Value = service.diff_files("a.txt", "b.txt").await.unwrap();
+
+    assert_eq!(value["path"], "a.txt");
+    assert_eq!(value["status"], "modified");
+    assert!(
+        !value["hunks"].as_array().unwrap().is_empty(),
+        "内容不同应有变更块: {value}"
+    );
+    assert!(
+        value["unified"].as_str().unwrap().contains("@@"),
+        "unified 应包含块头: {value}"
+    );
+    assert_eq!(value["old_lines"], 3);
+    assert_eq!(value["new_lines"], 3);
+}
+
+/// 两个相同文件 → status unchanged，hunks 为空。
+#[tokio::test]
+async fn diff_files_unchanged_for_identical_content() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    std::fs::write(workdir.join("b.txt"), "one\ntwo\nthree\n").unwrap();
+    let service = service_with_workdir(workdir);
+
+    let value: Value = service.diff_files("a.txt", "b.txt").await.unwrap();
+
+    assert_eq!(value["status"], "unchanged");
+    assert!(value["hunks"].as_array().unwrap().is_empty());
+    assert_eq!(value["old_lines"], 3);
+    assert_eq!(value["new_lines"], 3);
+}
+
+/// 文件间对比中任一文件缺失 → 404。
+#[tokio::test]
+async fn diff_files_missing_path_returns_not_found() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.txt"), "one\n").unwrap();
+    let service = service_with_workdir(workdir);
+
+    let err = service.diff_files("a.txt", "ghost.txt").await.unwrap_err();
+    assert!(matches!(err, ApiError::NotFound(_)), "err = {err:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 处理器层：oneshot 路由测试
+// ---------------------------------------------------------------------------
+
+/// tree 端点 → 200 + 约定 JSON 结构（完整 create_app 状态）。
+#[tokio::test]
+async fn tree_endpoint_returns_200_with_expected_shape() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("main.rs"), "fn main() {}\n").unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/workspace/tree?path=")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["root"],
+        strip_verbatim(&workdir.canonicalize().unwrap().to_string_lossy())
+    );
+    assert_eq!(body["path"], "");
+    let entries = body["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], "main.rs");
+    assert_eq!(entries[0]["type"], "file");
+    assert!(entries[0]["size"].is_number());
+    assert!(entries[0]["mtime"].is_number());
+}
+
+/// tree 端点的 `..` 请求 → 400。
+#[tokio::test]
+async fn tree_endpoint_rejects_dotdot_with_400() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/workspace/tree?path=..")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["success"], false);
+    assert!(body["error"].is_string());
+}
+
+/// read 端点 → 200 + 锚点行内容（端到端验证 core 委托链路）。
+#[tokio::test]
+async fn read_endpoint_returns_hashline_content() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.txt"), "alpha\nbeta\n").unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/workspace/read?path=a.txt")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body["content"].as_str().unwrap().starts_with("1#"));
+    assert_eq!(body["total_lines"], 2);
+}
+
+/// 未配置 working_directory 时 tree 端点 → 400。
+#[tokio::test]
+async fn tree_endpoint_missing_working_directory_returns_400() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path(), None);
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/workspace/tree?path=")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("working_directory"));
+}

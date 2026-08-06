@@ -24,6 +24,7 @@ pub mod knowledge;
 pub mod sessions;
 pub mod shared;
 pub mod skills;
+pub mod workspace;
 
 // 重新导出应用状态和共享类型
 pub use crate::state::AppState;
@@ -59,6 +60,7 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .merge(skills::routes())
         .merge(config::routes())
         .merge(insights::routes())
+        .merge(workspace::routes())
 }
 
 #[cfg(test)]
