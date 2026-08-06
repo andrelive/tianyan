@@ -527,3 +527,129 @@ core 模块系统性架构重构日志。约束：公开 API 签名与行为完�
 - `impl Into<TianyanError>` 保留宽松构造点：TianyanError 无 `From<String>`，调用点显式构造 `Custom(String)` 强制带模块前缀（AGENTS.md 要求），避免裸字符串再次渗入
 - 去掉 TaskResult 的 Clone 而非给 TianyanError 补 Clone：io::Error 非 Clone，补 Clone 需包装 Io 变体（改动共享错误类型、超出任务范围）；且 TaskResult 无克隆消费点
 - 错误消息文本逐字保持（原「GC 扫描失败：{}」→「GC 任务：扫描失败：{}」等），仅补模块前缀符合「错误消息文本尽量保持」
+
+## Wave 5（T19）：会话截断常量单点定义（P1-6）
+
+### 问题
+会话历史截断常量散落两处、口径不同：
+- `agent/session_state.rs`（内存态 `trim_conversation`）：`MAX_CONVERSATION_MESSAGES = 100`（裁剪触发阈值）+ `KEEP_RECENT_MESSAGES = 50`（保留条数）
+- `session/manager.rs`（持久态 `load_session_from_vfs` 加载截断）：`MAX_SESSION_MESSAGES = 100`（安全上限）
+
+同一领域概念（会话历史生命周期）横跨两模块，各管一段，无统一契约，调参需改两处。
+
+### 改动
+- `core/src/session/mod.rs`：定义统一常量（模块公开面）：
+  - `pub const MAX_SESSION_MESSAGES: usize = 100;` —— 持久态安全上限（`manager.rs` 加载截断）+ 内存态裁剪触发阈值（`session_state.rs` trim 触发，原 `MAX_CONVERSATION_MESSAGES` 100 并入此常量）
+  - `pub const KEEP_RECENT_MESSAGES: usize = 50;` —— 内存态裁剪后保留的最近消息条数
+- `core/src/agent/session_state.rs`：删除本地 `MAX_CONVERSATION_MESSAGES` / `KEEP_RECENT_MESSAGES` 定义，改为 `use crate::session::{KEEP_RECENT_MESSAGES, MAX_SESSION_MESSAGES}`；`trim_conversation` 内 `MAX_CONVERSATION_MESSAGES` 引用替换为 `MAX_SESSION_MESSAGES`（值不变 100）
+- `core/src/session/manager.rs`：删除本地 `MAX_SESSION_MESSAGES` 定义，改为 `use super::{types::Session, MAX_SESSION_MESSAGES}` 引用统一常量
+- 截断逻辑（`trim_conversation` / `load_session_from_vfs` 裁剪段）零改动，仅常量来源变化
+
+### 契约保持
+- **常量数值零变化**：100（触发/加载上限）/ 50（保留条数）/ 100（加载上限）
+- 行为差异（`session_state.rs` 裁剪触发 100 vs 保留 50；`manager.rs` 加载上限 100）**未合并**——本任务只做单点化，不做口径合并
+
+### 验证
+- `cargo test -p tianyan-core --lib` = **559 passed / 0 failed / 1 ignored**（基线 559，零新增测试；`session_state.rs::test_session_state_cleanup` 断言 `<= KEEP_RECENT_MESSAGES` 经 `use super::*` 解析到统一常量）
+- grep 验收：`MAX_SESSION_MESSAGES` 定义 1 处（`session/mod.rs`），`KEEP_RECENT_MESSAGES` 定义 1 处（`session/mod.rs`），`MAX_CONVERSATION_MESSAGES` 已不存在（生产代码零定义）
+
+### 决策理由
+- 常量定义在 `session/mod.rs`（领域模块公开面）而非 manager.rs：会话历史生命周期属于 session 领域，`agent/session_state.rs` 引用 `crate::session::*` 依赖方向合理（agent → session），避免 agent 常量被 session 反向依赖
+- 100-vs-50 的触发/保留差是既有产品行为（压缩标记机制依赖保留窗口），数值一律不动，待产品决策
+- 后续如需调参，改 `session/mod.rs` 一处即可全局生效
+
+## Wave 5（T21）：删除 gc_task 投机代码（文档漂移检测 + 质量报告回写，P2-5）
+
+### 问题
+`core/src/scheduler/tasks/gc_task.rs` 含三块投机代码，与 GC 核心职责（规则归档 / 记忆 TTL 清理）无关：
+- `DocDriftReport` struct + `scan_documentation_drift`：硬编码 `docs` / `core/src` 相对路径扫描文档模块引用（依赖进程工作目录，VFS 之外直接 `std::fs` 访问项目源码目录），结果只用于 warn 日志，无任何实际消费者
+- `write_quality_report`：向 VFS `knowledge/quality/domain-grades.md` 写入全 "-" 占位的模板 Markdown（无真实数据），仅空转消耗 VFS 写入
+- 全仓 grep 确认零外部消费者（仅 gc_task.rs 内部调用自身），server / gui / e2e 均不引用
+
+### 改动
+- 删除 `DocDriftReport` struct（6 行）与第二个 `impl GcTask` 块（`scan_documentation_drift` 65 行 + `write_quality_report` 47 行 + 文档注释，120 行）
+- `execute()`：删除 drift 调用（含"不阻塞 GC 主流程"注释）、质量报告回写调用、`drift_msg` 拼接分支；`GC 扫描完成{}` 日志去掉 `{}` 占位与 `drift_msg` 参数；`stale_rules` / `cleaned_memory` 统计字段与 `TaskResult::success(rules + mem)` 保留
+- 移除随删变死的 `ContentLevel` 导入（仅 `write_quality_report` 使用）
+- 共删除 143 行（496 → 353）；GC 核心 `scan_learned_rules` / `scan_memory` 与 `TaskHandler` 注册（`garbage_collection`）逐字未动
+
+### 测试
+- gc_task 测试模块本就只覆盖 `scan_learned_rules` / `scan_memory`（5 个测试），无 drift/report 测试；测试基建（`make_context` / MockVfs）与被删函数无关，零调整
+- `cargo test -p tianyan-core --lib` = **559 passed / 0 failed / 1 ignored**（基线 559 持平）；`cargo check --workspace` 通过（server 的 scheduler status 仅消费 `run_count` 等 TaskStatus 字段，不受影响）
+- 验收：`grep "DocDriftReport|scan_documentation_drift|write_quality_report" core/src/` = 空
+
+### 决策理由
+- 零消费者 + cwd 依赖（进程启动目录不在 `docs` 时静默空转或 warn）+ 全占位报告 = 纯投机代码，删除零行为影响
+- 质量报告是"GC 任务自动生成"的既有空壳，无数据来源（规则/记忆计数在内存中已有，但报告从未接线），保留只会误导维护者以为有质量评级功能
+
+## Wave 5（T20）：配置加载失败从静默降级改为可观测（P2-2）
+
+### 问题
+`config/mod.rs` 的 `get_config()` 加载失败仅 `tracing::warn!` 后返回 `TianyanConfig::default()`——生产环境配置损坏时**静默用默认配置运行**，无任何显式错误暴露。`get_config()` 有 3 个真实外部调用点（core `lib.rs:init` + config 内部 + server `lib.rs`），签名不可改。
+
+### 改动（最小化方案：保持签名，暴露错误）
+- `core/src/config/mod.rs`：新增 `static CONFIG_LOAD_ERROR: OnceLock<TianyanError>`（进程级单例，与 `CONFIG` 同生命周期）
+- `get_config()` 失败路径（`load_config_or_default` 返回错误时）：`tracing::warn!` → **`tracing::error!`**（日志文本含路径与错误详情），错误写入 `CONFIG_LOAD_ERROR`，仍返回默认配置（行为零变化）
+- 新增公开方法 `pub fn last_config_error() -> Option<&'static TianyanError>`：调用方可查询首次加载错误；**本任务不改 server**，仅提供查询入口（server 若接入 `config_load_error` 语义，建议挂到既有 `/api/v1/config/status`）
+- 提取两个私有函数便于测试（`CONFIG` 为进程级单例、OnceLock 不可重置）：
+  - `load_config_or_default()`：加载配置；失败时构造带路径上下文的错误并回退默认配置
+  - `config_load_error(path, detail)`：构造错误消息（模块前缀 + 配置路径 + 详情；文件缺失时路径回退到预期配置路径 `default_config_path`）
+- 修正 `get_config` 过时文档：原 `# Panics`（"配置加载失败时 panic"）与实现不符（从不 panic），改为记录 `error` 日志 + 回退默认 + `last_config_error` 可查询
+
+### 测试
+新增 3 个测试（`config::tests`）：
+- `test_config_load_error_contains_path_and_detail`：纯函数验证错误消息格式（模块前缀 + 路径 + 详情；路径未知时"默认搜索路径"占位）
+- `test_load_invalid_toml_fails`：temp 目录写非法 TOML → `load_from_file` 返回 Err（损坏配置触发源）
+- `test_get_config_once_semantics_and_error_query`：lib 测试二进制中唯一调用 `get_config()` 的测试（grep 确认），验证 OnceLock 单次初始化语义（`ptr::eq` 同一实例）+ 首次加载失败时 `last_config_error()` 为 `Some` 且含"config 加载失败"前缀与"路径"上下文
+
+**测试限制**：`CONFIG` / `CONFIG_LOAD_ERROR` 为进程级 OnceLock，无 `take()` 无法重置，且测试并行执行——因此"损坏配置 → `get_config()` 返回默认 + `last_config_error()` 为 Some"的完整链路无法在单进程内确定性重放（首个调用前无法注入环境）。采用等价拆解：错误构造纯函数 + `load_from_file` 损坏文件失败 + 首次调用语义（本机无任何配置文件，实际运行中 Some 分支被真实触发并通过断言）。
+
+### 验证
+- `cargo test -p tianyan-core --lib` = **577 passed / 0 failed / 1 ignored**（基线 559；新增 3 个 config 测试，其余 15 个为并行任务 T21 等新增）；`config::` 过滤 44 个全绿
+- `cargo check --workspace` 通过；`cargo fmt --all -- --check` 干净
+- clippy：`cargo clippy -p tianyan-core -- -D warnings` 当前 6 个错误全部位于并行任务在途文件（`executor/security.rs` x2 / `observability/mod.rs` x2 / `session/manager.rs` / `skills/executor.rs`），**零个位于 `config/mod.rs`**——本文件 clippy 干净
+
+### 决策理由（为何最小化而非重构）
+- 调用点 >3 个（core lib.rs + config 内部 + server lib.rs），改签名或返回类型会破坏调用方；保持 `get_config() -> &'static TianyanConfig` 签名与返回行为零变化是硬约束
+- 不引入 `Result<&'static TianyanConfig>` 双 API：`last_config_error()` 查询入口已覆盖"可观测"诉求（错误日志 + 可查询），server 诊断面（`/api/v1/config/status`）后续消费即可，无需新依赖或错误类型
+- 错误用既有 `TianyanError::Custom`，遵循"模块前缀：详情"约定（`config 加载失败（路径：…）：…`），不新增变体
+
+## Wave 5（T18）：统一两套路径沙箱实现（P1-5，安全敏感）
+
+### 问题
+
+两套独立的路径校验实现，语义不同，同一条路径在不同入口（技能 vs 工具）可能得到不同判定：
+
+| 维度 | `skills/executor.rs::validate_path` | `SecurityPolicy::check_path` |
+|------|-------------------------------------|------------------------------|
+| 列表语义 | allowlist：空列表 = 放行全部 | blacklist 优先 + allowlist（非空时） |
+| 路径规范化 | `canonicalize` → 失败回退 `cwd.join(path)` → **剥离 `\\?\` verbatim 前缀** | `canonicalize` → 失败回退原值（相对路径不解析） |
+| 目录规范化 | 逐目录 `canonicalize` + 剥离前缀 | 直接用配置原始值 `starts_with`（依赖调用方预规范化，Windows 上 raw 配置目录因 verbatim 前缀失配静默失效） |
+| 错误前缀 | `操作不被允许：...` | `executor: 安全策略违规：...` |
+
+### 改动
+
+- **`core/src/executor/security.rs`（共享 helper 落地处）**：
+  - 新增 `pub(crate) fn normalize_path_for_check(p: &Path) -> PathBuf`——自 `skills/executor.rs` 原样移入（`\\?\UNC\` → `\\`、`\\?\` 剥离），成为两套沙箱唯一的规范化实现
+  - 新增 `pub(crate) enum PathCheckOutcome { Allowed, Blocked(PathBuf), NotAllowed }`——`Blocked` 携带命中的黑名单目录，供调用方格式化各自的错误消息
+  - 新增 `pub(crate) fn check_path_rules(path, allowed: &[PathBuf], blocked: &[PathBuf]) -> PathCheckOutcome`——统一判定：**黑名单绝对优先**（命中任一黑名单目录 → `Blocked`，与 `check_path` 既有顺序一致），白名单非空且不在其中 → `NotAllowed`，其余（含白名单为空）→ `Allowed`；路径与目录均规范化后做组件级 `starts_with` 前缀匹配（天然拒绝前缀兄弟目录）
+  - 私有 `resolve_canonical` / `normalize_dir_for_check`：canonicalize 失败时路径回退 `cwd.join(path)`（与 `validate_path` 既有行为一致，保留相对路径语义）、目录回退原值
+  - `SecurityPolicy::check_path` 改调 `check_path_rules`，**签名、blocked 绝对优先语义、两条错误消息逐字不变**（`Blocked` 携带的目录即配置原始值，`(禁止：{})` 展示不变）；Permissive 提前放行保留在方法内
+- **`core/src/skills/executor.rs`**：删除本地 `normalize_for_compare` 与手写判定循环；`validate_path`（`pub(crate)` 签名不变）改调 `check_path_rules(path, allowed_paths, &[])`，错误消息逐字不变——4 个 handlers 调用点（file_read / file_write / file_list / file_delete）零改动；skills 测试模块补 `use crate::executor::security::normalize_path_for_check` 引用被移函数
+- **`core/src/executor/mod.rs`**：`mod security` → `pub(crate) mod security`（技能模块跨模块访问共享 helper 所需；`pub(crate)` 对外部 crate 不可见，公开 API 零变化）
+
+### 优先级决策
+
+以现有两套实现的行为为准：`check_path` 先查黑名单 → **黑名单绝对优先**；技能侧无黑名单概念，`validate_path` 固定传 `blocked = &[]`，保留"空白名单 = 放行"的 allowlist 语义，同时获得可选黑名单能力。
+
+### 取舍说明（合并代价）
+
+1. **错误消息无法合并**：两入口消息前缀不同（`操作不被允许` vs `executor: 安全策略违规`），且 approval 指纹/前端展示依赖后者逐字保持 → helper 返回结构化 `PathCheckOutcome` 而非 `Result<TianyanError>`，消息由各调用方格式化，**两套消息逐字保持**。grep 验收：黑名单/白名单错误消息文本各只出现 1 处（`executor/security.rs`），判定逻辑 1 处（`check_path_rules`）
+2. **`validate_path` 的"无法解析路径"分支（canonicalize 与 current_dir 双双失败）随委托消失**：该分支依赖 `current_dir()` 失败（cwd 被删除等不可达场景），无测试覆盖；委托后此场景回退原值路径 → 走"不在允许的操作范围内"。可达路径上的所有错误消息不变
+3. **`check_path` 对 Windows raw 配置目录的行为修复（安全正向）**：旧实现 `canonical.starts_with(blocked原始值)` 在 Windows 上因 `\\?\` verbatim 前缀组件失配，未预规范化的配置目录（用户原始配置/相对路径）静默不生效；统一后两侧均剥离前缀 + 目录规范化，黑名单/白名单按配置意图生效。方向全部为"更严格地执行既有配置"（黑名单更有效、白名单按 resolved 路径匹配），非 Windows 平台 normalize 为恒等变换零影响；file_ops_tests 的 `file_policy` 预规范化目录的既有测试全部保持绿
+
+### 验证
+
+- RED：新增 15 个行为锁定测试先行编译失败（`check_path_rules` / `PathCheckOutcome` / `normalize_path_for_check` 不存在）
+- GREEN：`cargo test -p tianyan-core --lib` = **577 passed / 0 failed / 1 ignored**（基线 559 + 本任务 15 新测试；剩余 3 为并行 Wave 5 任务测试；skills `validate_path` 5 测试 + `normalize` 1 测试全绿，security.rs 新 15 测试全绿）
+- 新测试覆盖：allowlist（内放行/外拒绝/前缀兄弟拒绝/空列表放行/绝对路径匹配）+ blacklist（拒绝/嵌套子路径拒绝/**黑名单优先于白名单**/未命中黑名单时白名单放行）+ `SecurityPolicy::check_path` 行为锁定（黑名单消息含 `(禁止：{})`、白名单消息、空列表放行、黑名单优先级、Permissive 跳过）+ verbatim 前缀剥离
+- `cargo check --workspace` 通过；改动 3 文件 `rustfmt --check` 零差异；clippy 仅剩基线既有警告（`validate_path` 的 `ptr_arg` 为任务锁定签名，属既有警告随行号迁移）

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{AgentPath, ContentLevel, ContextNamespace, TianyanUri};
+use crate::common::types::{AgentPath, ContextNamespace, TianyanUri};
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
 
 /// 规则过时的默认天数阈值。
@@ -160,134 +160,6 @@ impl Default for GcTask {
     }
 }
 
-/// 文档漂移检测报告。
-#[derive(Debug, Clone)]
-struct DocDriftReport {
-    pub missing_modules: Vec<String>,
-    pub total_docs_checked: usize,
-}
-
-impl GcTask {
-    /// 检测 docs/ 中的模块引用是否仍然有效。
-    ///
-    /// 扫描 docs/*.md 文件中引用到的模块路径（如 `core/src/agent/`），
-    /// 验证它们在实际源代码中是否仍然存在。
-    async fn scan_documentation_drift(&self, _ctx: &TaskContext) -> Result<DocDriftReport> {
-        let mut report = DocDriftReport {
-            missing_modules: Vec::new(),
-            total_docs_checked: 0,
-        };
-
-        // VFS 迁移说明：docs/ 和 core/src/ 是项目源代码路径，由文件系统直接管理，
-        // 不属于 VFS 管理的应用层内容（记忆、知识库条目、技能等）。
-        // 文档扫描需要读取项目级 Markdown 文件并验证源文件是否存在，
-        // 这些操作保持使用 std::fs 访问本地文件系统。
-        let docs_dir = "docs";
-        let src_dir = "core/src";
-
-        // 扫描 docs/ 目录（使用 std::fs 而非 VFS，因为 docs/ 是项目源代码目录）
-        match std::fs::read_dir(docs_dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().is_none_or(|e| e != "md") {
-                        continue;
-                    }
-                    report.total_docs_checked += 1;
-
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        // 查找文档中引用的模块路径（如 `core/src/agent/coordinator.rs`）
-                        for line in content.lines() {
-                            if let Some(idx) = line.find("core/src/") {
-                                let rest = &line[idx..];
-                                let module_path = rest
-                                    .split(&[' ', ',', ')', '(', ':', '\t', '\r', '\n'][..])
-                                    .next()
-                                    .unwrap_or("");
-                                let module_path = module_path.trim_end_matches(".rs");
-
-                                // 检查对应文件是否存在
-                                let fs_path =
-                                    format!("{}/{}", src_dir, &module_path["core/src/".len()..]);
-                                let rs_path = format!("{}.rs", &fs_path);
-                                if !std::path::Path::new(&rs_path).exists()
-                                    && !std::path::Path::new(&format!("{}/mod.rs", &fs_path))
-                                        .exists()
-                                    && !report.missing_modules.contains(&module_path.to_string())
-                                {
-                                    report.missing_modules.push(module_path.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "无法读取 docs/ 目录");
-            }
-        }
-
-        if !report.missing_modules.is_empty() {
-            tracing::warn!(
-                count = report.missing_modules.len(),
-                modules = ?report.missing_modules,
-                "发现文档引用了不存在的模块"
-            );
-        }
-
-        Ok(report)
-    }
-
-    /// 将质量评分写入 VFS Knowledge 命名空间下的 quality 报告中。
-    async fn write_quality_report(&self, ctx: &TaskContext) -> Result<()> {
-        let quality_uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["quality".to_string()]);
-        if !ctx.vfs.exists(&quality_uri).await.unwrap_or(false) {
-            if let Err(e) = ctx.vfs.create_directory(&quality_uri).await {
-                tracing::warn!(error = %e, uri = %quality_uri, "GC 任务错误：创建质量报告目录失败");
-            }
-        }
-
-        let report_uri = quality_uri.append("domain-grades.md");
-        let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-        let content = format!(
-            r#"# 域质量评级 (最后更新: {})
-
-> 由 GC 任务自动生成，每次 GC 扫描后更新。
-
-| 域 | 过时规则数 | 过期记忆数 | 文档漂移 | 备注 |
-|----|-----------|-----------|---------|------|
-| agent | - | - | - | 验证门控已集成 |
-| context | - | - | - | 新鲜度评分已集成 |
-| storage | - | - | - | - |
-| skills | - | - | - | - |
-| scheduler | - | - | - | - |
-
-## 最新 GC 扫描摘要
-
-- 扫描时间: {}
-- 状态: GC 任务正常运行
-"#,
-            now, now
-        );
-
-        if let Err(e) = ctx
-            .vfs
-            .write(&report_uri, ContentLevel::Detail, &content)
-            .await
-        {
-            tracing::warn!(error = %e, path = %report_uri, "GC 任务错误：质量报告写入失败");
-            return Err(TianyanError::Custom(format!(
-                "GC 任务错误：质量报告写入失败：{}",
-                e
-            )));
-        }
-        tracing::info!(path = %report_uri, "质量报告已更新");
-
-        Ok(())
-    }
-}
-
 #[async_trait]
 impl TaskHandler for GcTask {
     async fn execute(&self, ctx: &TaskContext) -> TaskResult {
@@ -296,28 +168,9 @@ impl TaskHandler for GcTask {
         let rules_result = self.scan_learned_rules(ctx).await;
         let memory_result = self.scan_memory(ctx).await;
 
-        // 文档漂移检测（不阻塞 GC 主流程）
-        let drift_result = self.scan_documentation_drift(ctx).await;
-
-        // 质量报告回写（尽力而为，失败仅记录日志）
-        if let Err(e) = self.write_quality_report(ctx).await {
-            tracing::warn!(error = %e, "GC 任务：质量报告回写失败");
-        }
-
         match (rules_result, memory_result) {
             (Ok(rules), Ok(mem)) => {
-                let drift_msg = match drift_result {
-                    Ok(ref report) if !report.missing_modules.is_empty() => {
-                        format!("，发现 {} 个文档漂移", report.missing_modules.len())
-                    }
-                    _ => String::new(),
-                };
-                tracing::info!(
-                    stale_rules = rules,
-                    cleaned_memory = mem,
-                    "GC 扫描完成{}",
-                    drift_msg
-                );
+                tracing::info!(stale_rules = rules, cleaned_memory = mem, "GC 扫描完成");
                 TaskResult::success(rules + mem)
             }
             (Err(e), _) | (_, Err(e)) => {

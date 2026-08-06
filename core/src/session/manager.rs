@@ -14,10 +14,7 @@ use crate::common::types::{
 };
 use crate::vfs::VirtualFileSystem;
 
-/// 每个会话加载的最大消息数量（保护内存和性能）
-const MAX_SESSION_MESSAGES: usize = 100;
-
-use super::types::Session;
+use super::{types::Session, MAX_SESSION_MESSAGES};
 
 /// 会话管理操作 trait。
 #[async_trait]

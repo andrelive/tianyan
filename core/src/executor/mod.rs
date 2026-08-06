@@ -3,8 +3,8 @@ mod actions;
 mod command;
 /// 命令输出解析工具（构建错误提取 / 测试输出解析）。
 mod output_parse;
-/// Executor 安全策略。
-mod security;
+/// Executor 安全策略（`pub(crate)`：`check_path_rules` 供 skills 路径沙箱复用）。
+pub(crate) mod security;
 
 /// 审批工作流模块。
 pub mod approval;

@@ -3,7 +3,7 @@
 //! 本模块提供技能执行框架，包括参数验证、安全检查、执行监控和内置技能。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use tokio::time::timeout;
 
 use crate::common::error::{Result, TianyanError};
+use crate::executor::security::{check_path_rules, PathCheckOutcome};
 
 use super::definition::{Skill, SkillRegistry};
 use super::types::{ExecutionContext, SecurityLevel, SkillExecutionRequest, SkillExecutionResult};
@@ -134,52 +135,22 @@ pub struct ExecutionLogEntry {
     pub parameters: HashMap<String, Value>,
 }
 
-/// 规范化路径用于比较：Windows 上 `canonicalize()` 会产生 `\\?\` verbatim 前缀，
-/// 与未规范化的路径（如 `current_dir().join(path)` 的 fallback 结果）直接比较
-/// `starts_with` 会失败，导致允许目录内的写入/删除被误拒。
-fn normalize_for_compare(p: &std::path::Path) -> PathBuf {
-    let s = p.to_string_lossy();
-    let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{rest}")
-    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
-        rest.to_string()
-    } else {
-        s.to_string()
-    };
-    PathBuf::from(s)
-}
-
 /// 验证文件路径是否在允许的路径列表内。
-pub(crate) fn validate_path(path: &PathBuf, allowed_paths: &[PathBuf]) -> Result<()> {
+///
+/// 委托给共享的 [`check_path_rules`]（空列表 = 放行；规范化 + 组件级前缀匹配；
+/// 黑名单绝对优先，本入口不传黑名单）。签名与错误消息保持既有契约。
+pub(crate) fn validate_path(path: &Path, allowed_paths: &[PathBuf]) -> Result<()> {
     if allowed_paths.is_empty() {
         return Ok(());
     }
 
-    // 规范化路径：使用绝对路径并清理 `.` 和 `..`
-    let canonical = path
-        .canonicalize()
-        .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(path)))
-        .map_err(|e| {
-            TianyanError::Custom(format!(
-                "操作不被允许：无法解析路径 '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
-    let canonical = normalize_for_compare(&canonical);
-
-    for allowed in allowed_paths {
-        let allowed_canonical =
-            normalize_for_compare(&allowed.canonicalize().unwrap_or_else(|_| allowed.clone()));
-        if canonical.starts_with(&allowed_canonical) {
-            return Ok(());
-        }
+    match check_path_rules(path, allowed_paths, &[]) {
+        PathCheckOutcome::Allowed => Ok(()),
+        _ => Err(TianyanError::Custom(format!(
+            "操作不被允许：路径 '{}' 不在允许的操作范围内",
+            path.display()
+        ))),
     }
-
-    Err(TianyanError::Custom(format!(
-        "操作不被允许：路径 '{}' 不在允许的操作范围内",
-        path.display()
-    )))
 }
 
 impl SkillExecutor {
@@ -414,6 +385,7 @@ impl SkillExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::security::normalize_path_for_check;
     use crate::skills::definition::{ParameterDefinition, ParameterType};
     use crate::skills::registry::{create_builtin_skills, register_builtin_skills};
     use crate::skills::types::SkillCategory;
@@ -449,7 +421,7 @@ mod tests {
         let sibling = dir.path().join("abc");
         std::fs::create_dir(&base).unwrap();
         std::fs::create_dir(&sibling).unwrap();
-        assert!(validate_path(&base.join("x.txt"), &[base.clone()]).is_ok());
+        assert!(validate_path(&base.join("x.txt"), std::slice::from_ref(&base)).is_ok());
         let err = validate_path(&sibling.join("x.txt"), &[base]).unwrap_err();
         assert!(err.to_string().contains("不在允许的操作范围内"));
     }
@@ -458,16 +430,16 @@ mod tests {
     fn test_normalize_for_compare_strips_verbatim_prefix() {
         let win = PathBuf::from(r"\\?\C:\Users\me\dir");
         assert_eq!(
-            normalize_for_compare(&win),
+            normalize_path_for_check(&win),
             PathBuf::from(r"C:\Users\me\dir")
         );
         let unc = PathBuf::from(r"\\?\UNC\server\share");
         assert_eq!(
-            normalize_for_compare(&unc),
+            normalize_path_for_check(&unc),
             PathBuf::from(r"\\server\share")
         );
         let plain = PathBuf::from(r"C:\Users\me\dir");
-        assert_eq!(normalize_for_compare(&plain), plain);
+        assert_eq!(normalize_path_for_check(&plain), plain);
     }
 
     #[test]

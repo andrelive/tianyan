@@ -28,6 +28,18 @@
 mod manager;
 mod types;
 
+/// 会话消息数量上限（持久态安全上限）。
+///
+/// 从 VFS 加载会话时最多保留的消息条数（`manager.rs`），同时作为内存态
+/// 会话裁剪的触发阈值（`agent/session_state.rs`）。
+pub const MAX_SESSION_MESSAGES: usize = 100;
+
+/// 内存态裁剪后保留的最近消息条数。
+///
+/// 会话历史超过上限后，`agent/session_state.rs` 仅保留最近
+/// `KEEP_RECENT_MESSAGES` 条消息（含 compression_marker 处理）。
+pub const KEEP_RECENT_MESSAGES: usize = 50;
+
 // 重新导出类型
 pub use types::{Session, SessionMetadata};
 

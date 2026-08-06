@@ -150,39 +150,24 @@ impl SecurityPolicy {
     /// - `blocked_directories` 优先：路径在任一禁止目录下则拒绝。
     /// - `allowed_directories` 不为空时：路径必须在某一允许目录下。
     /// - Permissive 模式下跳过所有检查。
+    ///
+    /// 判定委托给共享的 [`check_path_rules`]，错误消息逐字保持。
     pub fn check_path(&self, path: &std::path::Path) -> Result<(), TianyanError> {
         if self.safety_mode == SafetyMode::Permissive {
             return Ok(());
         }
-
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-
-        // Blocked directories first (highest priority)
-        for blocked in &self.blocked_directories {
-            if canonical.starts_with(blocked) {
-                return Err(TianyanError::Custom(format!(
-                    "executor: 安全策略违规：路径在黑名单目录中：{} (禁止：{})",
-                    path.display(),
-                    blocked.display()
-                )));
-            }
+        match check_path_rules(path, &self.allowed_directories, &self.blocked_directories) {
+            PathCheckOutcome::Allowed => Ok(()),
+            PathCheckOutcome::Blocked(blocked) => Err(TianyanError::Custom(format!(
+                "executor: 安全策略违规：路径在黑名单目录中：{} (禁止：{})",
+                path.display(),
+                blocked.display()
+            ))),
+            PathCheckOutcome::NotAllowed => Err(TianyanError::Custom(format!(
+                "executor: 安全策略违规：路径不在白名单目录中：{}",
+                path.display()
+            ))),
         }
-
-        // If allowed list is set, path must be under an allowed directory
-        if !self.allowed_directories.is_empty() {
-            let allowed = self
-                .allowed_directories
-                .iter()
-                .any(|d| canonical.starts_with(d));
-            if !allowed {
-                return Err(TianyanError::Custom(format!(
-                    "executor: 安全策略违规：路径不在白名单目录中：{}",
-                    path.display()
-                )));
-            }
-        }
-
-        Ok(())
     }
 
     /// 检查文件大小是否在限制内。
@@ -201,6 +186,83 @@ impl Default for SecurityPolicy {
     fn default() -> Self {
         Self::from_config(&SecurityConfig::default())
     }
+}
+
+/// 路径沙箱判定结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PathCheckOutcome {
+    /// 放行。
+    Allowed,
+    /// 命中黑名单目录（携带命中的目录，供调用方格式化错误消息）。
+    Blocked(std::path::PathBuf),
+    /// 白名单非空且路径不在任一白名单目录下。
+    NotAllowed,
+}
+
+/// 规范化路径用于比较：Windows 上 `canonicalize()` 会产生 `\\?\` verbatim 前缀，
+/// 与未规范化的路径（如 `current_dir().join(path)` 的 fallback 结果）直接比较
+/// `starts_with` 会失败，导致允许目录内的写入/删除被误拒。
+///
+/// 从 `skills/executor.rs` 移入，作为技能 `validate_path` 与 `SecurityPolicy::check_path`
+/// 两套路径沙箱共享的底层规范化。
+pub(crate) fn normalize_path_for_check(p: &std::path::Path) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    };
+    std::path::PathBuf::from(s)
+}
+
+/// 统一路径沙箱判定（黑名单绝对优先），供技能 `validate_path` 与 `SecurityPolicy::check_path`
+/// 共用，消除两套语义不一致的路径校验实现：
+///
+/// 1. 路径与目录均规范化（`canonicalize` + Windows verbatim 前缀剥离）后做组件级前缀匹配；
+/// 2. 命中任一黑名单目录 → `Blocked`（黑名单绝对优先）；
+/// 3. 白名单非空且路径不在任一白名单目录下 → `NotAllowed`；
+/// 4. 其余 → `Allowed`（含白名单为空 = 放行）。
+///
+/// 规范化失败回退：路径回退到 `current_dir().join(path)`（保留相对路径语义，与
+/// `validate_path` 既有行为一致），目录回退原值。
+pub(crate) fn check_path_rules(
+    path: &std::path::Path,
+    allowed: &[std::path::PathBuf],
+    blocked: &[std::path::PathBuf],
+) -> PathCheckOutcome {
+    let canonical = resolve_canonical(path);
+    for dir in blocked {
+        if canonical.starts_with(normalize_dir_for_check(dir)) {
+            return PathCheckOutcome::Blocked(dir.clone());
+        }
+    }
+    if !allowed.is_empty() {
+        let hit = allowed
+            .iter()
+            .any(|d| canonical.starts_with(normalize_dir_for_check(d)));
+        if !hit {
+            return PathCheckOutcome::NotAllowed;
+        }
+    }
+    PathCheckOutcome::Allowed
+}
+
+/// 解析路径为规范化形式：`canonicalize` 失败回退 `current_dir().join(path)`（再回退原值），
+/// 并剥离 Windows verbatim 前缀。
+fn resolve_canonical(path: &std::path::Path) -> std::path::PathBuf {
+    let resolved = path.canonicalize().unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    });
+    normalize_path_for_check(&resolved)
+}
+
+/// 规范化目录用于前缀比较：`canonicalize` 失败回退原值，并剥离 Windows verbatim 前缀。
+fn normalize_dir_for_check(dir: &std::path::Path) -> std::path::PathBuf {
+    normalize_path_for_check(&dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()))
 }
 
 impl SecurityPolicy {
@@ -276,5 +338,231 @@ impl SecurityPolicy {
                 "executor: 安全策略违规：文件写入被安全策略禁止".to_string(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    /// 构造带白/黑名单的严格模式策略（目录不预规范化，模拟配置原始值）。
+    fn policy_with(allowed: Vec<PathBuf>, blocked: Vec<PathBuf>) -> SecurityPolicy {
+        SecurityPolicy {
+            safety_mode: SafetyMode::Strict,
+            trash_directory: std::env::temp_dir(),
+            allowed_commands: None,
+            blocked_commands: Vec::new(),
+            allowed_directories: allowed,
+            blocked_directories: blocked,
+            allow_file_write: true,
+            max_command_timeout_secs: 30,
+            max_file_size: 1024 * 1024,
+            block_interpreters: true,
+        }
+    }
+
+    // ── normalize_path_for_check ─────────────────────────────────────────
+
+    #[test]
+    fn test_normalize_path_for_check_strips_verbatim_prefix() {
+        let win = PathBuf::from(r"\\?\C:\Users\me\dir");
+        assert_eq!(
+            normalize_path_for_check(&win),
+            PathBuf::from(r"C:\Users\me\dir")
+        );
+        let unc = PathBuf::from(r"\\?\UNC\server\share");
+        assert_eq!(
+            normalize_path_for_check(&unc),
+            PathBuf::from(r"\\server\share")
+        );
+        let plain = PathBuf::from(r"C:\Users\me\dir");
+        assert_eq!(normalize_path_for_check(&plain), plain);
+    }
+
+    // ── check_path_rules：allowlist 语义 ─────────────────────────────────
+
+    #[test]
+    fn test_check_path_rules_allows_inside_allowed() {
+        let dir = tempdir().unwrap();
+        let inside = dir.path().join("sub").join("file.txt");
+        assert_eq!(
+            check_path_rules(&inside, &[dir.path().to_path_buf()], &[]),
+            PathCheckOutcome::Allowed
+        );
+    }
+
+    #[test]
+    fn test_check_path_rules_rejects_outside_allowed() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let p = outside.path().join("file.txt");
+        assert_eq!(
+            check_path_rules(&p, &[dir.path().to_path_buf()], &[]),
+            PathCheckOutcome::NotAllowed
+        );
+    }
+
+    #[test]
+    fn test_check_path_rules_rejects_prefix_sibling() {
+        // 允许目录 /ab 时，/abc 不得被视为其子路径
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("ab");
+        let sibling = dir.path().join("abc");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        assert_eq!(
+            check_path_rules(&base.join("x.txt"), std::slice::from_ref(&base), &[]),
+            PathCheckOutcome::Allowed
+        );
+        assert_eq!(
+            check_path_rules(&sibling.join("x.txt"), &[base], &[]),
+            PathCheckOutcome::NotAllowed
+        );
+    }
+
+    #[test]
+    fn test_check_path_rules_empty_allowlist_is_unrestricted() {
+        let p = PathBuf::from("/anywhere");
+        assert_eq!(check_path_rules(&p, &[], &[]), PathCheckOutcome::Allowed);
+    }
+
+    #[test]
+    fn test_check_path_rules_absolute_path_matches_allowed() {
+        // 路径（即使不存在）解析为绝对路径后应能匹配绝对白名单目录
+        let dir = tempdir().unwrap();
+        let abs = dir.path().join("sub").join("new.txt");
+        assert_eq!(
+            check_path_rules(&abs, &[dir.path().to_path_buf()], &[]),
+            PathCheckOutcome::Allowed
+        );
+    }
+
+    // ── check_path_rules：blacklist 语义 ─────────────────────────────────
+
+    #[test]
+    fn test_check_path_rules_rejects_blocked_dir() {
+        let dir = tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        let path = blocked.join("x.txt");
+        std::fs::write(&path, "x").unwrap();
+        assert_eq!(
+            check_path_rules(&path, &[], std::slice::from_ref(&blocked)),
+            PathCheckOutcome::Blocked(blocked.clone())
+        );
+    }
+
+    #[test]
+    fn test_check_path_rules_rejects_nested_in_blocked_dir() {
+        let dir = tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir_all(blocked.join("deep")).unwrap();
+        let path = blocked.join("deep").join("nested.txt");
+        std::fs::write(&path, "x").unwrap();
+        assert!(matches!(
+            check_path_rules(&path, &[], &[blocked]),
+            PathCheckOutcome::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn test_check_path_rules_blacklist_priority_over_allowlist() {
+        // 路径同时在白名单与黑名单内：黑名单绝对优先
+        let dir = tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let path = shared.join("x.txt");
+        std::fs::write(&path, "x").unwrap();
+        assert_eq!(
+            check_path_rules(
+                &path,
+                std::slice::from_ref(&shared),
+                std::slice::from_ref(&shared)
+            ),
+            PathCheckOutcome::Blocked(shared.clone())
+        );
+    }
+
+    #[test]
+    fn test_check_path_rules_allows_when_not_blocked_and_in_allowlist() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::create_dir(&blocked).unwrap();
+        let path = allowed.join("x.txt");
+        std::fs::write(&path, "x").unwrap();
+        assert_eq!(
+            check_path_rules(&path, &[allowed], &[blocked]),
+            PathCheckOutcome::Allowed
+        );
+    }
+
+    // ── SecurityPolicy::check_path 行为锁定 ──────────────────────────────
+
+    #[test]
+    fn test_check_path_rejects_blocked_with_message() {
+        let dir = tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        let path = blocked.join("x.txt");
+        std::fs::write(&path, "x").unwrap();
+        let err = policy_with(vec![], vec![blocked.clone()])
+            .check_path(&path)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("executor: 安全策略违规：路径在黑名单目录中"));
+        assert!(msg.contains(&format!("(禁止：{})", blocked.display())));
+    }
+
+    #[test]
+    fn test_check_path_rejects_outside_allowlist_with_message() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir(&allowed).unwrap();
+        let outside = dir.path().join("secret.txt");
+        std::fs::write(&outside, "x").unwrap();
+        let err = policy_with(vec![allowed], vec![])
+            .check_path(&outside)
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("executor: 安全策略违规：路径不在白名单目录中"));
+    }
+
+    #[test]
+    fn test_check_path_empty_lists_unrestricted() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("x.txt");
+        assert!(policy_with(vec![], vec![]).check_path(&p).is_ok());
+    }
+
+    #[test]
+    fn test_check_path_blocked_priority_over_allowed() {
+        let dir = tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        let path = shared.join("x.txt");
+        std::fs::write(&path, "x").unwrap();
+        let err = policy_with(vec![shared.clone()], vec![shared.clone()])
+            .check_path(&path)
+            .unwrap_err();
+        assert!(err.to_string().contains("黑名单"));
+    }
+
+    #[test]
+    fn test_check_path_permissive_skips_all_checks() {
+        let dir = tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        let path = blocked.join("x.txt");
+        std::fs::write(&path, "x").unwrap();
+        let mut policy = policy_with(vec![], vec![blocked]);
+        policy.safety_mode = SafetyMode::Permissive;
+        assert!(policy.check_path(&path).is_ok());
     }
 }

@@ -7,9 +7,7 @@ use crate::common::types::{
     DetailedTokenUsage, InjectableContext, MessageRole, MessageTime, Part, PartTime,
     StructuredMessage,
 };
-
-const MAX_CONVERSATION_MESSAGES: usize = 100;
-const KEEP_RECENT_MESSAGES: usize = 50;
+use crate::session::{KEEP_RECENT_MESSAGES, MAX_SESSION_MESSAGES};
 
 /// 会话状态容器（conversation 为唯一真相源）。
 #[derive(Debug, Clone)]
@@ -102,7 +100,7 @@ impl SessionState {
     }
 
     fn trim_conversation(&mut self) {
-        if self.structured_messages.len() <= MAX_CONVERSATION_MESSAGES {
+        if self.structured_messages.len() <= MAX_SESSION_MESSAGES {
             return;
         }
         // 优先找到最近的 compression_marker 位置，避免截断标记
