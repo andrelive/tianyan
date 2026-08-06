@@ -689,3 +689,38 @@ Oracle 批判性终审（Loop 2）发现 Wave 7 的 clippy 修复引入 3 处 fm
 ### 修复
 - 运行 `cargo fmt --all`：3 处格式自动修复（签名拆行 + 空行清理）
 - 复验：`cargo fmt --all -- --check` exit 0；`cargo test -p tianyan-core --lib` 577 passed；clippy 0 warnings
+
+## Wave 8（性能优化）：全局禁用 doctest
+
+### 背景与测量（先测量后优化）
+用户报告 `cargo test` 性能差。实测分解（Windows, warm）：
+- **测试运行不是瓶颈**：全部测试（577 单测 + 集成 + e2e）运行 <3s
+- 普通测试目标编译（`--lib --tests`）：72.1s（冷）
+- **doctest 冷编译 59.7s**（仅 core；全 workspace 共 14 个示例：core 9、server 3、mcp 2、tauri 0，其中 9 有效 + 5 ignored），运行仅 ~8s
+- 真实开发循环（改 1 个源文件后）：core lib 15.9s；core doctest 10.7s；workspace `--lib --tests` 38.5s
+- 全量 `cargo test --workspace`（warm 混合冷目标）：378.8s
+
+### nextest 调研结论（不引入）
+- 收益集中在**运行**阶段（本项目 <3s → 收益 ≤2s），不解决编译瓶颈
+- 多 binary 并行对 5-crate workspace 有结构性收益（官方基准 1.4×–3.4×），但本项目运行时间占比过小
+- 零迁移成本（构建产物与 cargo test 共享），作为未来 CI 选项保留
+
+### 改动
+- 4 个 crate 的 `Cargo.toml` `[lib]` 段加 `doctest = false`（core/server/tauri/mcp，各附一行理由注释）
+- `scripts/test.ps1` 无需改动（本就无 `--doc` 调用）
+- 零 Rust 源码改动
+
+### 行为变化（记录）
+- 常规 `cargo test` / `cargo test --workspace` 不再构建与运行 doctest（14 个示例不再执行）
+- `cargo test --doc` 显式请求仍可运行 doctest（Cargo 语义：`doctest` 字段控制"默认"测试，显式目标选择覆盖——已实测验证）
+- `cargo doc` 文档生成不受影响（示例仍渲染为代码块）
+
+### 验证
+- 常规 `cargo test -p tianyan-core`：577 passed / 0 failed / 1 ignored，输出无 `Doc-tests` 段
+- `cargo test --workspace`：改 1 文件场景 41.1s（此前 ~55-60s 含 doctest 重编）；clean core 后全量 133.3s
+- clippy 0 warnings；`cargo check --workspace` 通过；git diff 仅 4 个 Cargo.toml +8 行
+
+### 决策理由
+- 14 个示例编译成本 ~60s（冷）/ 每次改动 ~11s（热），运行仅 ~8s——编译:运行 > 7:1，性价比极低
+- 示例均为模块级文档代码块（coordinator.rs / config / context），无 API 契约测试价值
+- 保留 `--doc` 显式能力，未来引入重要 API 示例时可选择性恢复

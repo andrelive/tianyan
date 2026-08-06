@@ -45,6 +45,8 @@ workspace = true
 [lib]
 name = "tianyan_tauri_lib"
 path = "src/lib.rs"
+# 禁用 doctest：0 个示例，无任何测试价值
+doctest = false
 
 [[bin]]
 name = "tianyan-tauri"
