@@ -57,6 +57,8 @@ pub trait StorageBackend: Send + Sync {
 
 mod local;
 mod sqlite;
+/// 共享 SQLite 连接（VFS 与 UsageStats 共用，ADR-005 单连接）。
+pub mod sqlite_db;
 
 pub use local::LocalFileBackend;
 pub use sqlite::SqliteBackend;

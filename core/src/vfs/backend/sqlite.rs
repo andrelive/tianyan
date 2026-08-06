@@ -10,7 +10,7 @@ use crate::common::types::{ContentLevel, EntryMetadata, TianyanUri};
 use crate::vfs::backend::StorageBackend;
 use crate::vfs::types::{ContextEntry, CURRENT_SCHEMA_VERSION};
 
-use crate::observability::sqlite_db::SqliteDb;
+use super::sqlite_db::SqliteDb;
 
 /// 基于 SQLite 的 VFS 存储后端。
 #[derive(Clone)]
@@ -303,7 +303,7 @@ impl StorageBackend for SqliteBackend {
 mod tests {
     use super::*;
     use crate::common::types::ContextNamespace;
-    use crate::observability::sqlite_db::SqliteDb;
+    use crate::vfs::backend::sqlite_db::SqliteDb;
 
     async fn setup() -> SqliteBackend {
         let db = SqliteDb::open_in_memory().unwrap();

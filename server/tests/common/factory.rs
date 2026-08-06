@@ -4,10 +4,11 @@
 
 #![allow(dead_code)]
 
+use tianyan::common::logging::LoggingConfig;
 use tianyan::config::{
-    AgentConfig, LoggingConfig, MemoryConfig, ModelCapability, ModelEntry, ModelPreferences,
-    ModelRef, ModelsConfig, ProviderConfig, RetrievalConfig, SecurityConfig, StorageConfig,
-    TianyanConfig, VectorStorageConfig,
+    AgentConfig, MemoryConfig, ModelCapability, ModelEntry, ModelPreferences, ModelRef,
+    ModelsConfig, ProviderConfig, RetrievalConfig, SecurityConfig, StorageConfig, TianyanConfig,
+    VectorStorageConfig,
 };
 
 pub fn test_agent_config() -> AgentConfig {

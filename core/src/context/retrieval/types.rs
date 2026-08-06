@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 use crate::common::types::{ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
 
+// 检索追踪类型（RetrievalStep / RetrievalStepType / RetrievalTrace）已下沉到
+// `common::types::retrieval_trace`（跨模块共享的持久化契约），此处仅重新导出
+// 以保持既有引用路径 `crate::context::retrieval::types::*` 不变。
+pub use crate::common::types::retrieval_trace::{RetrievalStep, RetrievalStepType, RetrievalTrace};
+
 /// 带有内容的检索结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalResult {
@@ -56,79 +61,6 @@ impl RetrievalResult {
         self.content = Some(content);
         self.content_level = level;
         self
-    }
-}
-
-/// 检索追踪步骤。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RetrievalStep {
-    /// 步骤类型。
-    pub step_type: RetrievalStepType,
-    /// 目标 URI。
-    pub target_uri: TianyanUri,
-    /// 相关性分数。
-    pub score: Option<f32>,
-    /// Token 消耗量。
-    pub tokens_used: usize,
-    /// 时间戳。
-    pub timestamp: DateTime<Utc>,
-}
-
-/// 检索步骤类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RetrievalStepType {
-    /// 意图分析。
-    IntentAnalysis,
-    /// L0 向量搜索。
-    L0Search,
-    /// L1 向量搜索。
-    L1Search,
-    /// 内容加载。
-    ContentLoad,
-    /// 结果聚合。
-    Aggregation,
-}
-
-/// 完整的检索追踪记录。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RetrievalTrace {
-    /// 原始查询。
-    pub query: String,
-    /// 检索步骤列表。
-    pub steps: Vec<RetrievalStep>,
-    /// 最终结果 URI 列表。
-    pub results: Vec<TianyanUri>,
-    /// 总 Token 消耗量。
-    pub total_tokens: usize,
-    /// 总检索时间（毫秒）。
-    pub total_time_ms: u64,
-    /// 时间戳。
-    pub timestamp: DateTime<Utc>,
-}
-
-impl RetrievalTrace {
-    /// 创建新的检索追踪记录。
-    pub fn new(query: impl Into<String>) -> Self {
-        Self {
-            query: query.into(),
-            steps: Vec::new(),
-            results: Vec::new(),
-            total_tokens: 0,
-            total_time_ms: 0,
-            timestamp: Utc::now(),
-        }
-    }
-
-    /// 添加一个步骤到追踪记录。
-    pub fn add_step(&mut self, step: RetrievalStep) {
-        self.total_tokens += step.tokens_used;
-        self.steps.push(step);
-    }
-
-    /// 添加结果 URI。
-    pub fn add_result(&mut self, uri: TianyanUri) {
-        self.results.push(uri);
     }
 }
 

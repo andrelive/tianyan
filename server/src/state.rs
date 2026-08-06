@@ -14,7 +14,6 @@ use tianyan::agent::AgentCoordinator;
 use tianyan::config::TianyanConfig;
 use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
-use tianyan::observability::sqlite_db::SqliteDb;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::scheduler::TaskScheduler;
 use tianyan::session::{PersistentSessionManager, SessionManager};
@@ -22,6 +21,7 @@ use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
 };
 use tianyan::snapshot::SnapshotManager;
+use tianyan::vfs::backend::sqlite_db::SqliteDb;
 use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
@@ -129,9 +129,7 @@ impl AppState {
         }
 
         // 初始化使用统计（复用全系统共享的 SqliteDb，ADR-005：单连接）
-        let usage_stats = UsageStats::new(sqlite_db).map_err(|e| {
-            TianyanError::Custom(format!("存储后端错误：创建 UsageStats 失败：{}", e))
-        })?;
+        let usage_stats = UsageStats::new(sqlite_db)?;
 
         // 初始化工作区快照管理器（配置了 working_directory 时启用）
         let snapshot_manager = config.agent.working_directory.clone().map(|workdir| {

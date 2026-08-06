@@ -153,3 +153,82 @@ core 模块系统性架构重构日志。约束：公开 API 签名与行为完�
 | 5 | lancedb.rs 798 行 → batch/mod/tests 三文件 | 单一职责 |
 
 **净效果**：-2432 行大文件重构为模块化目录；公开 API 零变化；测试 537 全绿（+1 新测试 accumulate）；零回归。
+
+## Wave 1a：断开 common↔config 循环依赖（P0-3）
+
+### 改动
+
+**1. `common/logging.rs`：LoggingConfig 移入（与 init_logging 同文件）**
+- 结构体（7 字段）+ 默认值函数 + `Default` impl + `validate()` + 2 个配置测试从 `config/logging.rs` 原样迁入
+- serde 属性、字段名、默认值逐字节保留（与 HEAD 版本 diff 验证一致），TOML 配置兼容性零变化
+- 删除 `use crate::config::LoggingConfig;` —— `core/src/common/` 内不再有任何 `use crate::config`（验收 1 ✓）
+- `validate()` 返回类型写为 `std::result::Result<(), String>`：common 的 `Result<T>` 别名只有一个泛型参数（`Result<T, TianyanError>`），被导入后遮蔽 std Result；全限定路径保持原签名语义，`TianyanConfig::validate` 的 `?` 链（String 错误）不变
+
+**2. `config/mod.rs`：改为 re-export**
+- 删除 `mod logging;`，`pub use logging::LoggingConfig;` → `pub use crate::common::logging::LoggingConfig;`
+- 方向 config→common 合法，`tianyan::config::LoggingConfig` 路径对下游保持可用（API 兼容）
+- 删除空壳文件 `config/logging.rs`（全部内容已迁移）
+
+**3. 外部调用点更新**
+- `tauri/src/lib.rs` 本地 init_logging：`&tianyan::config::LoggingConfig` → `&tianyan::common::logging::LoggingConfig`
+- `server/tests/common/factory.rs`：`LoggingConfig` 从 `tianyan::config` 批量导入中拆出，独立 `use tianyan::common::logging::LoggingConfig;`（struct literal 字段不变）
+- `server/src/main.rs` 无需改动（仅用 `config.logging` 字段 + `init_logging`，无类型路径引用）
+
+### 验证
+
+- `grep "use crate::config" core/src/common/`：空
+- `cargo check -p tianyan-core`：本任务文件零错误（残留错误全部位于另一 Wave 1b 的 in-flight 文件 `observability/usage_stats.rs` / `vfs/backend/sqlite.rs`）
+- HEAD 基线（stash 隔离验证）：`cargo check -p tianyan-core` 干净通过（12.35s），证明 Wave 1b 未落地前基线本绿
+- 结构体块与 `git show HEAD:core/src/config/logging.rs` 逐字节一致（regex 提取比较）
+- **受阻项**：`cargo test -p tianyan-core --lib` 与 `cargo check --workspace` 无法在共享工作树跑通 —— 同一工作树上有并行 Wave 1b 的半成品（`sqlite_db.rs` 迁移 + `usage_stats.rs` 编译错误），且对方 worker 正在运行构建持有 cargo 锁。协调者合并两个 Wave 后需复跑全量测试（config round-trip 测试 `test_config_serialization` 等随本改动无逻辑变化）
+
+### 决策理由
+
+- 类型归属 common：`init_logging` 的入参类型与行为同属"通用基础设施"，移动后 common 自成一体（不再依赖 config），config 侧单向 re-export 保留下游兼容
+- `validate()` 留在结构体旁而非 config：方法是类型的一部分，拆开会产生"类型在 A、行为在 B"的割裂；返回 String 错误与整条配置校验链一致
+- 仅更新显式引用 `config::LoggingConfig` 的 2 处外部调用点：re-export 已保证 `tianyan::config::LoggingConfig` 继续有效，但显式路径更清晰，且为未来彻底移除 re-export 留出余地
+
+### 经验教训
+
+- **共享工作树 + 并行 Wave 的互操作**：`git stash` 验证基线会连其他 worker 的 in-flight 改动一起暂存；stash pop 遇对方实时编辑会失败。恢复策略：逐文件 `git restore --source=stash@{0} --worktree`（PowerShell 下 `--source=stash@{0}` 必须整体加引号，否则 `{0}` 被误解析为 switch），索引侧纯重命名靠 `git mv`/索引状态复核，勿直接 stash drop
+- 临时 worktree 验证隔离改动时，worktree 路径差异会使共享 target 全量冷编译（lancedb/datafusion 数十分钟级）——此路不可行；且其残留指纹会拖慢并行 worker 的构建。隔离验证应优先静态 diff + 等对方合并后跑全量
+- 超时杀进程时须先按 CommandLine 核对归属（`Win32_Process.CommandLine`），只杀自己的 cargo/rustc 树，避免误伤并行 worker 的构建
+
+
+## 迭代 7：断开依赖环（vfs↔observability、context↔observability）+ 错误类型泄漏修复（Wave 1a）
+
+### 改动
+
+**1. SqliteDb 下沉到 `vfs::backend`（断开 `vfs → observability` 环）**
+- `observability/sqlite_db.rs` 整体移入 `vfs/backend/sqlite_db.rs`（git mv，内容不变）
+- `vfs/backend/mod.rs` 注册 `pub mod sqlite_db;`；`observability/mod.rs` 删除 sqlite_db 模块声明与 `pub use SqliteDb` re-export（不保留隐藏依赖）
+- 引用更新：`vfs/backend/sqlite.rs` 顶部 `super::sqlite_db::SqliteDb`（tests 模块内为绝对路径 `crate::vfs::backend::sqlite_db::SqliteDb`）；`usage_stats.rs` 改 `crate::vfs::backend::sqlite_db::SqliteDb`；server 的 `state.rs` / `lib.rs` 改 `tianyan::vfs::backend::sqlite_db::SqliteDb`
+
+**2. rusqlite::Error → TianyanError（usage_stats 错误类型泄漏修复）**
+- `UsageStats::new` / `flush` / `shutdown` 返回类型改为 `Result<_, TianyanError>`，rusqlite 错误经模块私有 `sqlite_error()` 映射为 `TianyanError::Custom("observability: {e}")`
+- server `state.rs` 的 `UsageStats::new(...).map_err(...)` 简化为 `?`（new 已返回 TianyanError）
+- `SqliteDb` 内部方法保持 rusqlite::Error 不变（边界处包装即可，属既有约定）
+
+**3. RetrievalTrace 家族下沉到 `common::types::retrieval_trace`（断开 `context ↔ observability` 环）**
+- `RetrievalStep` / `RetrievalStepType` / `RetrievalTrace`（含 impl）从 `context/retrieval/types.rs` 移入新文件 `common/types/retrieval_trace.rs`，字段名/顺序原样保留（`retrieval_traces.trace_json` 持久化契约 + `gui-vite/src/lib/types.ts` 镜像冻结）
+- `context/retrieval/types.rs` 保留 `pub use` 兼容既有引用路径；`usage_stats.rs` 改 `use crate::common::types::retrieval_trace::RetrievalTrace`（依赖方向变为 observability → common，不再反向依赖 context）
+
+### 验证
+
+- `cargo check --workspace`：通过（core/server/tauri/mcp 全部编译）
+- `cargo test -p tianyan-core --lib`：**542 通过 / 0 失败**（基线 537 + 5 个新测试）
+  - 新增：serde round-trip 字节一致性（锁定 trace_json 契约）、step_type snake_case 序列化契约、`UsageStats::new` 返回 TianyanError 类型断言、坏 DB 路径打开失败、未初始化 schema 时 `flush` 错误映射为 `TianyanError::Custom`
+- `grep "use crate::observability" core/src/vfs/` = 空；`grep "use crate::context" core/src/observability/` = 空
+- rustfmt：本次改动文件全部格式干净（仅并行波次的 `config/mod.rs` 存在非本任务 fmt diff，未触碰）
+
+### 决策理由
+
+- 共享基础设施放在被依赖方（vfs）而非依赖方（observability），消除 `vfs → observability` 反向依赖；observability 不保留 re-export，避免旧路径残留掩盖真实依赖
+- RetrievalTrace 是纯数据契约，放 `common::types` 使其对生产方（context）与持久化方（observability）同为下游，`context ↔ observability` 环自然消除
+- 错误映射统一到 `TianyanError::Custom` 并带模块前缀，符合 AGENTS.md「所有错误用 TianyanError、消息带模块前缀」约束；SqliteDb 内部保持 rusqlite::Error 是因其它经 map_err 包装、改内部类型属无收益的扩散性变更
+
+### 经验教训
+
+- **并发波次风险**：任务执行期间工作区存在其他并行修改（LoggingConfig 迁移）；中途一次外部 git 恢复操作回滚了已完成的 `git mv` 与部分文件编辑（usage_stats 部分编辑保留、types.rs/common-types 注册被回滚）。应对：每步编辑后立即用 `git diff` / `Select-String` 核对磁盘真相，被回滚的编辑重新应用，最终以 `git diff` 全量核对为准
+- `super::` 在 `#[cfg(test)] mod tests` 内指向 tests 的父模块（`sqlite`），而非 `backend` —— tests 模块内引用兄弟模块需绝对路径，`cargo check`（不含 cfg(test)）无法发现此类错误，必须跑 `cargo test` 编译
+- 首次 `cargo test -p tianyan-core --lib` 需冷编译 lance/datafusion 依赖链（debug profile），耗时可能超过 10 分钟，期间与并行波次的 cargo 构建互相阻塞，需放大超时

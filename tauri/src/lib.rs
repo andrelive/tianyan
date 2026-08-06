@@ -338,7 +338,7 @@ mod tests {
 ///
 /// 级别/格式来自配置文件 `[logging]` 节（`RUST_LOG` 环境变量可覆盖级别）；
 /// 文件日志写入 `{data_dir}/com.tianyan.app/logs/`。
-fn init_logging(config: &tianyan::config::LoggingConfig) {
+fn init_logging(config: &tianyan::common::logging::LoggingConfig) {
     // 创建日志目录
     let log_dir = dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)

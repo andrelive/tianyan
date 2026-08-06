@@ -11,6 +11,8 @@ mod memory;
 mod message;
 mod metadata;
 mod namespace;
+/// 检索追踪类型（context 与 observability 共享的持久化契约）。
+pub mod retrieval_trace;
 mod search;
 mod structured_message;
 mod token;

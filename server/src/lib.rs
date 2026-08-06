@@ -117,7 +117,7 @@ fn get_static_dir() -> std::path::PathBuf {
 /// `sqlite_db` 为全系统共享连接（ADR-005：禁止第二个 SQLite 连接）。
 async fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
-    sqlite_db: tianyan::observability::SqliteDb,
+    sqlite_db: tianyan::vfs::backend::sqlite_db::SqliteDb,
 ) -> tianyan::common::error::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
     use tianyan::config::StorageBackendType;
     use tianyan::vfs::{
@@ -246,7 +246,7 @@ pub async fn create_app(
         .sqlite_path
         .clone()
         .unwrap_or_else(|| config.storage.data_dir.join("tianyan.db"));
-    let sqlite_db = tianyan::observability::SqliteDb::open(db_path).map_err(|e| {
+    let sqlite_db = tianyan::vfs::backend::sqlite_db::SqliteDb::open(db_path).map_err(|e| {
         tianyan::TianyanError::Custom(format!("虚拟文件系统错误：打开 SQLite 数据库失败：{}", e))
     })?;
     if let Err(e) = sqlite_db.init_all_schemas().await {

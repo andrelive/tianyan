@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 
 mod agent;
 pub mod api_types;
-mod logging;
 pub mod mcp;
 mod memory;
 mod model;
@@ -18,7 +17,7 @@ pub mod validation;
 pub mod wizard;
 
 pub use agent::AgentConfig;
-pub use logging::LoggingConfig;
+pub use crate::common::logging::LoggingConfig;
 pub use mcp::{McpConfig, McpServerEntry};
 pub use memory::MemoryConfig;
 pub use model::{

@@ -11,8 +11,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use dashmap::DashMap;
 
-use super::sqlite_db::SqliteDb;
-use crate::context::retrieval::RetrievalTrace;
+use crate::common::error::TianyanError;
+use crate::common::types::retrieval_trace::RetrievalTrace;
+use crate::vfs::backend::sqlite_db::SqliteDb;
 
 #[derive(Default)]
 struct SkillCounter {
@@ -70,7 +71,10 @@ pub struct UsageStats {
 
 impl UsageStats {
     /// 创建新的 UsageStats 实例，使用共享的 SqliteDb 连接。
-    pub fn new(db: SqliteDb) -> Result<Arc<Self>, rusqlite::Error> {
+    ///
+    /// # Errors
+    /// * 返回 `TianyanError`（本方法当前不失败，签名保持与全库统一错误类型）。
+    pub fn new(db: SqliteDb) -> Result<Arc<Self>, TianyanError> {
         Ok(Arc::new(Self {
             skill_counters: DashMap::new(),
             doc_counters: DashMap::new(),
@@ -180,7 +184,10 @@ impl UsageStats {
     // ── 持久化 ─────────────────────────────────────────────────────
 
     /// 将内存计数器批量刷入 SQLite。
-    pub async fn flush(&self) -> Result<(), rusqlite::Error> {
+    ///
+    /// # Errors
+    /// * SQLite 写入失败时返回 `TianyanError::Custom`（带 `observability` 前缀）。
+    pub async fn flush(&self) -> Result<(), TianyanError> {
         let skill_batch: Vec<_> = self
             .skill_counters
             .iter()
@@ -216,29 +223,38 @@ impl UsageStats {
         }
 
         let conn = self.db.lock().await;
-        let tx = conn.unchecked_transaction()?;
+        let tx = conn.unchecked_transaction().map_err(sqlite_error)?;
         let now = Utc::now().to_rfc3339();
         for (skill_id, calls, _succ, time) in &skill_batch {
             tx.execute(
                 "INSERT INTO skill_calls (skill_id, success, time_us, recorded_at) VALUES (?1,1,?2,?3)",
                 rusqlite::params![skill_id, if *calls > 0 { time / calls } else { 0 }, now],
-            )?;
+            )
+            .map_err(sqlite_error)?;
         }
         for (uri, _hits, avg_score) in &doc_batch {
             tx.execute(
                 "INSERT INTO doc_access (uri, event_type, score, recorded_at) VALUES (?1,'search_hit',?2,?3)",
                 rusqlite::params![uri, avg_score, now],
-            )?;
+            )
+            .map_err(sqlite_error)?;
         }
-        tx.commit()?;
+        tx.commit().map_err(sqlite_error)?;
         self.pending_writes.store(0, Ordering::Relaxed);
         Ok(())
     }
 
     /// 关闭统计模块，先刷盘再执行 PRAGMA optimize。
-    pub async fn shutdown(&self) -> Result<(), rusqlite::Error> {
+    ///
+    /// # Errors
+    /// * SQLite 写入失败时返回 `TianyanError::Custom`（带 `observability` 前缀）。
+    pub async fn shutdown(&self) -> Result<(), TianyanError> {
         self.flush().await?;
-        self.db.lock().await.execute_batch("PRAGMA optimize;")?;
+        self.db
+            .lock()
+            .await
+            .execute_batch("PRAGMA optimize;")
+            .map_err(sqlite_error)?;
         Ok(())
     }
 
@@ -409,6 +425,11 @@ impl UsageStats {
 /// 检索轨迹保留上限（FIFO 淘汰）。
 const MAX_RETRIEVAL_TRACES: i64 = 500;
 
+/// 将 rusqlite 错误映射为 `TianyanError::Custom`（统一 observability 模块前缀）。
+fn sqlite_error(e: rusqlite::Error) -> TianyanError {
+    TianyanError::Custom(format!("observability: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,8 +469,8 @@ mod tests {
     }
 
     fn sample_trace(query: &str) -> RetrievalTrace {
+        use crate::common::types::retrieval_trace::{RetrievalStep, RetrievalStepType};
         use crate::common::types::TianyanUri;
-        use crate::context::retrieval::{RetrievalStep, RetrievalStepType};
         RetrievalTrace {
             query: query.to_string(),
             steps: vec![RetrievalStep {
@@ -491,5 +512,40 @@ mod tests {
         // 最旧的 10 条（query-0..query-9）应被淘汰，query-10 起保留
         assert!(traces.iter().any(|t| t.query == "query-10"));
         assert!(!traces.iter().any(|t| t.query == "query-9"));
+    }
+
+    #[test]
+    fn test_new_error_type_is_tianyan_error() {
+        // 契约：UsageStats::new 的错误类型必须是 TianyanError（不再泄漏 rusqlite::Error）
+        let db = SqliteDb::open_in_memory().unwrap();
+        let result: Result<Arc<UsageStats>, TianyanError> = UsageStats::new(db);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_open_bad_db_path_fails() {
+        // 坏路径：父目录位置被普通文件占用 → SqliteDb::open 失败（rusqlite::Error，边界类型不变）
+        let tmp = std::env::temp_dir().join(format!("tianyan_bad_db_{}", std::process::id()));
+        std::fs::write(&tmp, b"x").unwrap();
+        let bad_path = tmp.join("nested").join("tianyan.db");
+        let result = SqliteDb::open(bad_path);
+        let _ = std::fs::remove_file(&tmp);
+        assert!(result.is_err(), "坏数据库路径应打开失败");
+    }
+
+    #[tokio::test]
+    async fn test_flush_error_maps_to_tianyan_error() {
+        // 未初始化 schema 的数据库 → 刷盘失败，错误必须映射为 TianyanError::Custom
+        let db = SqliteDb::open_in_memory().unwrap(); // 故意不调用 init_all_schemas
+        let stats = UsageStats::new(db).unwrap();
+        stats.record_skill_call("read_file", true, 100);
+        let err = stats.flush().await.unwrap_err();
+        match err {
+            TianyanError::Custom(msg) => assert!(
+                msg.contains("observability"),
+                "flush 失败错误消息应带 observability 前缀，实际: {msg}"
+            ),
+            other => panic!("flush 失败应映射为 TianyanError::Custom，实际: {other:?}"),
+        }
     }
 }
