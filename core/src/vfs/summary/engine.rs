@@ -279,10 +279,7 @@ mod tests {
     #[test]
     fn test_real_engine_constructor() {
         let chat = MockChatService::new();
-        let engine = SummaryEngine::new(
-            Arc::new(chat),
-            "test-model",
-        );
+        let engine = SummaryEngine::new(Arc::new(chat), "test-model");
         assert_eq!(engine.model_name, "test-model");
     }
 
@@ -291,10 +288,7 @@ mod tests {
         let mut chat = MockChatService::new();
         chat.expect_chat_completion()
             .returning(|_| Ok(mock_chat_response("Test abstract summary")));
-        let engine = SummaryEngine::new(
-            Arc::new(chat),
-            "test-model",
-        );
+        let engine = SummaryEngine::new(Arc::new(chat), "test-model");
         let result = engine.generate_abstract("Some content").await.unwrap();
         assert_eq!(result, "Test abstract summary");
     }
@@ -304,10 +298,7 @@ mod tests {
         let mut chat = MockChatService::new();
         chat.expect_chat_completion()
             .returning(|_| Ok(mock_chat_response("Test overview content")));
-        let engine = SummaryEngine::new(
-            Arc::new(chat),
-            "test-model",
-        );
+        let engine = SummaryEngine::new(Arc::new(chat), "test-model");
         let result = engine.generate_overview("Some content").await.unwrap();
         assert_eq!(result, "Test overview content");
     }
@@ -325,10 +316,7 @@ mod tests {
                 Ok(mock_chat_response("Test overview content"))
             }
         });
-        let engine = SummaryEngine::new(
-            Arc::new(chat),
-            "test-model",
-        );
+        let engine = SummaryEngine::new(Arc::new(chat), "test-model");
         let (abstract_result, overview_result) =
             engine.generate_summaries("Some content").await.unwrap();
         assert_eq!(abstract_result, "Test abstract summary");
@@ -340,10 +328,7 @@ mod tests {
         let mut chat = MockChatService::new();
         chat.expect_chat_completion()
             .returning(|_| Ok(mock_chat_response("A cat sitting on a chair")));
-        let engine = SummaryEngine::new(
-            Arc::new(chat),
-            "test-model",
-        );
+        let engine = SummaryEngine::new(Arc::new(chat), "test-model");
         let result = engine.generate_image_abstract("Cat image").await.unwrap();
         assert_eq!(result, "A cat sitting on a chair");
     }
@@ -351,10 +336,7 @@ mod tests {
     #[tokio::test]
     async fn test_generate_image_overview() {
         let chat = MockChatService::new();
-        let engine = SummaryEngine::new(
-            Arc::new(chat),
-            "test-model",
-        );
+        let engine = SummaryEngine::new(Arc::new(chat), "test-model");
 
         // description only — no elements, no ocr_text
         let result = engine
@@ -400,10 +382,7 @@ mod tests {
     #[tokio::test]
     async fn test_generate_image_overview_full() {
         let chat = MockChatService::new();
-        let engine = SummaryEngine::new(
-            Arc::new(chat),
-            "test-model",
-        );
+        let engine = SummaryEngine::new(Arc::new(chat), "test-model");
 
         let result = engine
             .generate_image_overview(

@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::agent::tool_params::AskUserParams;
@@ -71,6 +73,10 @@ struct TurnContext<'a> {
     turn: usize,
 }
 
+/// 单轮响应获取步骤返回的 future（`run` / `run_stream` 传入 [`AgentLoop::run_turns`]）。
+type TurnStep<'a> =
+    Pin<Box<dyn Future<Output = Result<(Message, Option<TokenUsage>), TianyanError>> + Send + 'a>>;
+
 /// Agent 迭代循环。
 #[derive(Clone)]
 pub struct AgentLoop {
@@ -110,49 +116,40 @@ impl AgentLoop {
         initial_parent_id: Option<&str>,
         model: &str,
     ) -> Result<AgentLoopResult, TianyanError> {
-        let mut current_parent_id = initial_parent_id.map(|s| s.to_string());
-        let mut total_tokens = TokenUsage::default();
+        self.run_turns(
+            messages,
+            stream_sender.as_ref(),
+            session_id,
+            initial_parent_id,
+            model,
+            |this, model, _sender, msgs| {
+                Box::pin(async move {
+                    let request = ChatCompletionRequest::new(model, msgs)
+                        .with_tools(this.tool_registry.definitions().await);
 
-        for turn in 0..self.config.max_turns {
-            let request = ChatCompletionRequest::new(model, messages.clone())
-                .with_tools(self.tool_registry.definitions().await);
+                    let response =
+                        this.model_service
+                            .chat_completion(request)
+                            .await
+                            .map_err(|e| {
+                                TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
+                            })?;
 
-            let response = self
-                .model_service
-                .chat_completion(request)
-                .await
-                .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e)))?;
+                    let turn_usage = response.usage;
+                    let choice =
+                        response
+                            .choices
+                            .into_iter()
+                            .next()
+                            .ok_or(TianyanError::Custom(
+                                "agent_loop: LLM 返回空响应".to_string(),
+                            ))?;
 
-            let turn_usage = response.usage;
-            let choice = response
-                .choices
-                .into_iter()
-                .next()
-                .ok_or(TianyanError::Custom(
-                    "agent_loop: LLM 返回空响应".to_string(),
-                ))?;
-
-            let mut ctx = TurnContext {
-                session_id,
-                current_parent_id: &mut current_parent_id,
-                total_tokens: &mut total_tokens,
-                messages,
-                stream_sender: stream_sender.as_ref(),
-                turn,
-            };
-
-            if let Some(result) = self
-                .handle_llm_response(&choice.message, Some(turn_usage), &mut ctx)
-                .await?
-            {
-                return Ok(result);
-            }
-        }
-
-        Err(TianyanError::Custom(format!(
-            "agent_loop: 达到最大轮数限制：{}",
-            self.config.max_turns
-        )))
+                    Ok((choice.message, Some(turn_usage)))
+                })
+            },
+        )
+        .await
     }
 
     /// 运行迭代循环（流式），将 LLM 文本增量实时推送到前端。
@@ -168,109 +165,157 @@ impl AgentLoop {
         initial_parent_id: Option<&str>,
         model: &str,
     ) -> Result<AgentLoopResult, TianyanError> {
-        let mut current_parent_id = initial_parent_id.map(|s| s.to_string());
-        let mut total_tokens = TokenUsage::default();
+        self.run_turns(
+            messages,
+            Some(&stream_sender),
+            session_id,
+            initial_parent_id,
+            model,
+            |this, model, sender, msgs| {
+                Box::pin(async move {
+                    let sender = sender.ok_or_else(|| {
+                        TianyanError::Custom("agent_loop: 流式路径缺少 stream_sender".to_string())
+                    })?;
 
-        for turn in 0..self.config.max_turns {
-            let request = ChatCompletionRequest::new(model, messages.clone())
-                .with_stream(true)
-                .with_tools(self.tool_registry.definitions().await);
+                    let request = ChatCompletionRequest::new(model, msgs)
+                        .with_stream(true)
+                        .with_tools(this.tool_registry.definitions().await);
 
-            let mut rx = self
-                .model_service
-                .chat_completion_stream(request)
-                .await
-                .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e)))?;
+                    let mut rx = this
+                        .model_service
+                        .chat_completion_stream(request)
+                        .await
+                        .map_err(|e| {
+                            TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
+                        })?;
 
-            // Accumulators for streaming chunks
-            let mut accumulated_content = String::new();
-            let mut accumulated_tool_calls: std::collections::BTreeMap<
-                usize,
-                (String, String, String),
-            > = std::collections::BTreeMap::new();
-            let mut turn_usage: Option<TokenUsage> = None;
-            let mut stream_error: Option<String> = None;
+                    // Accumulators for streaming chunks
+                    let mut accumulated_content = String::new();
+                    let mut accumulated_tool_calls: std::collections::BTreeMap<
+                        usize,
+                        (String, String, String),
+                    > = std::collections::BTreeMap::new();
+                    let mut turn_usage: Option<TokenUsage> = None;
+                    let mut stream_error: Option<String> = None;
 
-            while let Some(chunk_result) = rx.recv().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        // OpenAI sends usage in the final chunk
-                        if let Some(ref usage) = chunk.usage {
-                            turn_usage = Some(usage.clone());
-                        }
-                        for choice in &chunk.choices {
-                            if let Some(ref content) = choice.delta.content {
-                                accumulated_content.push_str(content);
-                                stream_sender.send_answer_delta(content).await;
-                            }
-                            if let Some(ref tc_deltas) = choice.delta.tool_calls {
-                                for tc in tc_deltas {
-                                    let entry =
-                                        accumulated_tool_calls.entry(tc.index).or_insert_with(
-                                            || (String::new(), String::new(), String::new()),
-                                        );
-                                    if let Some(ref id) = tc.id {
-                                        entry.0.clone_from(id);
+                    while let Some(chunk_result) = rx.recv().await {
+                        match chunk_result {
+                            Ok(chunk) => {
+                                // OpenAI sends usage in the final chunk
+                                if let Some(ref usage) = chunk.usage {
+                                    turn_usage = Some(usage.clone());
+                                }
+                                for choice in &chunk.choices {
+                                    if let Some(ref content) = choice.delta.content {
+                                        accumulated_content.push_str(content);
+                                        sender.send_answer_delta(content).await;
                                     }
-                                    if let Some(ref func) = tc.function {
-                                        if let Some(ref name) = func.name {
-                                            entry.1.clone_from(name);
-                                        }
-                                        if let Some(ref args) = func.arguments {
-                                            entry.2.push_str(args);
+                                    if let Some(ref tc_deltas) = choice.delta.tool_calls {
+                                        for tc in tc_deltas {
+                                            let entry = accumulated_tool_calls
+                                                .entry(tc.index)
+                                                .or_insert_with(|| {
+                                                    (String::new(), String::new(), String::new())
+                                                });
+                                            if let Some(ref id) = tc.id {
+                                                entry.0.clone_from(id);
+                                            }
+                                            if let Some(ref func) = tc.function {
+                                                if let Some(ref name) = func.name {
+                                                    entry.1.clone_from(name);
+                                                }
+                                                if let Some(ref args) = func.arguments {
+                                                    entry.2.push_str(args);
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
+                            Err(e) => {
+                                let err_msg = format!("流式接收中断: {}", e);
+                                tracing::warn!(error = %e, "{}", err_msg);
+                                stream_error = Some(err_msg);
+                                break;
+                            }
                         }
                     }
-                    Err(e) => {
-                        let err_msg = format!("流式接收中断: {}", e);
-                        tracing::warn!(error = %e, "{}", err_msg);
-                        stream_error = Some(err_msg);
-                        break;
+
+                    // If streaming failed mid-response, report error rather than using partial data
+                    if let Some(err_msg) = stream_error {
+                        return Err(TianyanError::Custom(format!(
+                            "agent_loop: LLM 调用失败：{}",
+                            err_msg
+                        )));
                     }
-                }
-            }
 
-            // If streaming failed mid-response, report error rather than using partial data
-            if let Some(err_msg) = stream_error {
-                return Err(TianyanError::Custom(format!(
-                    "agent_loop: LLM 调用失败：{}",
-                    err_msg
-                )));
-            }
+                    // Build assistant message from accumulated content + tool calls
+                    let tool_calls: Option<Vec<ToolCall>> = if accumulated_tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            accumulated_tool_calls
+                                .into_values()
+                                .map(|(id, name, arguments)| ToolCall {
+                                    id,
+                                    call_type: ToolCallType::Function,
+                                    function: FunctionCall { name, arguments },
+                                })
+                                .collect(),
+                        )
+                    };
 
-            // Build assistant message from accumulated content + tool calls
-            let tool_calls: Option<Vec<ToolCall>> = if accumulated_tool_calls.is_empty() {
-                None
-            } else {
-                Some(
-                    accumulated_tool_calls
-                        .into_values()
-                        .map(|(id, name, arguments)| ToolCall {
-                            id,
-                            call_type: ToolCallType::Function,
-                            function: FunctionCall { name, arguments },
-                        })
-                        .collect(),
-                )
-            };
+                    let assistant_msg = Message {
+                        role: MessageRole::Assistant,
+                        content: accumulated_content,
+                        tool_calls,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                    };
 
-            let assistant_msg = Message {
-                role: MessageRole::Assistant,
-                content: accumulated_content,
-                tool_calls,
-                tool_call_id: None,
-                reasoning_content: None,
-            };
+                    Ok((assistant_msg, turn_usage))
+                })
+            },
+        )
+        .await
+    }
+
+    /// 运行多轮迭代循环的共享脚手架（`run` / `run_stream` 共用）。
+    ///
+    /// 统一处理：轮次状态初始化（`current_parent_id` / `total_tokens`）、
+    /// [`TurnContext`] 构建、[`AgentLoop::handle_llm_response`] 调用与早返回、
+    /// 最大轮数错误。`step` 负责每轮获取模型响应，并统一转换为
+    /// `(assistant_msg, turn_usage)` 形式。
+    async fn run_turns<F>(
+        &self,
+        messages: &mut Vec<Message>,
+        stream_sender: Option<&StreamEventSender>,
+        session_id: &str,
+        initial_parent_id: Option<&str>,
+        model: &str,
+        mut step: F,
+    ) -> Result<AgentLoopResult, TianyanError>
+    where
+        F: for<'a> FnMut(
+            &'a AgentLoop,
+            &'a str,
+            Option<&'a StreamEventSender>,
+            Vec<Message>,
+        ) -> TurnStep<'a>,
+    {
+        let mut current_parent_id = initial_parent_id.map(|s| s.to_string());
+        let mut total_tokens = TokenUsage::default();
+
+        for turn in 0..self.config.max_turns {
+            let (assistant_msg, turn_usage) =
+                step(self, model, stream_sender, messages.clone()).await?;
 
             let mut ctx = TurnContext {
                 session_id,
                 current_parent_id: &mut current_parent_id,
                 total_tokens: &mut total_tokens,
-                messages,
-                stream_sender: Some(&stream_sender),
+                messages: &mut *messages,
+                stream_sender,
                 turn,
             };
 
@@ -494,8 +539,14 @@ mod tests {
     use crate::common::types::TokenUsage as CommonTokenUsage;
     use crate::common::types::{FunctionCall, ToolCall, ToolCallType};
     use crate::executor::SecurityPolicy;
-    use crate::model::types::{ChatChoice, ChatCompletionResponse};
+    use crate::model::types::{
+        ChatChoice, ChatCompletionChunk, ChatCompletionResponse, ChunkChoice, DeltaContent,
+        ToolCallDelta, ToolCallFunctionDelta,
+    };
     use crate::model::MockChatService;
+
+    // 流式回归测试：AgentStreamChunk / StreamChunkType
+    use crate::agent::types::{AgentStreamChunk, StreamChunkType};
 
     fn response_with(assistant: Message) -> ChatCompletionResponse {
         ChatCompletionResponse {
@@ -698,5 +749,263 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("LLM 调用失败"));
+    }
+
+    // ── 流式回归测试（run_stream） ──────────────────────────────────
+
+    /// 构造单个流式 chunk（文本 / tool_call delta / usage 三选一组合）。
+    fn stream_chunk(
+        content: Option<&str>,
+        tool_calls: Option<Vec<ToolCallDelta>>,
+        usage: Option<TokenUsage>,
+    ) -> ChatCompletionChunk {
+        ChatCompletionChunk {
+            id: "chunk-1".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: DeltaContent {
+                    role: None,
+                    content: content.map(|s| s.to_string()),
+                    tool_calls,
+                },
+                finish_reason: None,
+            }],
+            usage,
+        }
+    }
+
+    /// mock 固定 chunk 序列的流式响应（每次调用重放同一序列）。
+    fn stream_mock(chunks: Vec<ChatCompletionChunk>) -> MockChatService {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion_stream().returning(move |_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            for chunk in &chunks {
+                tx.try_send(Ok(chunk.clone())).unwrap();
+            }
+            Ok(rx)
+        });
+        mock
+    }
+
+    /// 收集 stream_sender 上所有 Answer 类型 delta。
+    async fn collect_answer_deltas(
+        mut rx: tokio::sync::mpsc::Receiver<Result<AgentStreamChunk>>,
+    ) -> Vec<String> {
+        let mut deltas = Vec::new();
+        while let Some(Ok(chunk)) = rx.recv().await {
+            if chunk.chunk_type == StreamChunkType::Answer {
+                deltas.push(chunk.delta);
+            }
+        }
+        deltas
+    }
+
+    /// 流式路径：多 chunk 文本累积 —— 最终消息内容 = 各 chunk 拼接。
+    #[tokio::test]
+    async fn test_run_stream_accumulates_multi_chunk_content() {
+        let chunks = vec![
+            stream_chunk(Some("你好"), None, None),
+            stream_chunk(Some("，世界"), None, None),
+            stream_chunk(Some("！"), None, None),
+        ];
+        let agent_loop = make_loop(stream_mock(chunks), 5);
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamEventSender::new(event_tx);
+
+        let mut messages = vec![Message::user("流式测试")];
+        let result = agent_loop
+            .run_stream(&mut messages, sender, "session-1", None, "test-model")
+            .await
+            .unwrap();
+
+        match result {
+            AgentLoopResult::Answer { content, turns, .. } => {
+                assert_eq!(content, "你好，世界！");
+                assert_eq!(turns, 1);
+            }
+            other => panic!("期望 Answer，得到 {:?}", other),
+        }
+
+        // chunk 顺序：stream_sender 收到的 answer_delta 顺序与发送一致
+        let deltas = collect_answer_deltas(event_rx).await;
+        assert_eq!(deltas, vec!["你好", "，世界", "！"]);
+    }
+
+    /// 流式路径：tool_calls delta 按 index 累积 —— 分片 id/name/arguments 最终完整。
+    #[tokio::test]
+    async fn test_run_stream_accumulates_tool_call_deltas() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion_stream().returning(|req| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            if req.messages.len() <= 1 {
+                // 第一轮：tool_call 分片 —— id/name 在首个 delta，arguments 分两次累积
+                let chunks = [
+                    stream_chunk(
+                        None,
+                        Some(vec![ToolCallDelta {
+                            index: 0,
+                            id: Some("call_abc".to_string()),
+                            call_type: Some("function".to_string()),
+                            function: Some(ToolCallFunctionDelta {
+                                name: Some("get_weather".to_string()),
+                                arguments: Some(String::new()),
+                            }),
+                        }]),
+                        None,
+                    ),
+                    stream_chunk(
+                        None,
+                        Some(vec![ToolCallDelta {
+                            index: 0,
+                            id: None,
+                            call_type: None,
+                            function: Some(ToolCallFunctionDelta {
+                                name: None,
+                                arguments: Some(r#"{"city":"#.to_string()),
+                            }),
+                        }]),
+                        None,
+                    ),
+                    stream_chunk(
+                        None,
+                        Some(vec![ToolCallDelta {
+                            index: 0,
+                            id: None,
+                            call_type: None,
+                            function: Some(ToolCallFunctionDelta {
+                                name: None,
+                                arguments: Some("\"北京\"}".to_string()),
+                            }),
+                        }]),
+                        None,
+                    ),
+                ];
+                for chunk in chunks {
+                    tx.try_send(Ok(chunk)).unwrap();
+                }
+            } else {
+                // 第二轮：最终回答
+                tx.try_send(Ok(stream_chunk(Some("天气：晴"), None, None)))
+                    .unwrap();
+            }
+            Ok(rx)
+        });
+        let agent_loop = make_loop(mock, 5);
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamEventSender::new(event_tx);
+
+        let mut messages = vec![Message::user("北京天气如何？")];
+        let result = agent_loop
+            .run_stream(&mut messages, sender, "session-1", None, "test-model")
+            .await
+            .unwrap();
+
+        match result {
+            AgentLoopResult::Answer { content, turns, .. } => {
+                assert_eq!(content, "天气：晴");
+                assert_eq!(turns, 2);
+            }
+            other => panic!("期望 Answer，得到 {:?}", other),
+        }
+
+        // 第一轮累积的 assistant 消息应包含完整的 ToolCall（id/name/arguments 拼接）
+        let assistant_msg = &messages[1];
+        let tool_calls = assistant_msg
+            .tool_calls
+            .as_ref()
+            .expect("第一轮应有 tool_calls");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_abc");
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments, r#"{"city":"北京"}"#);
+    }
+
+    /// 流式路径：第 2 个 chunk 后流中断 —— 返回 agent_loop 前缀的 Custom 错误。
+    #[tokio::test]
+    async fn test_run_stream_mid_stream_error_returns_custom() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion_stream().returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tx.try_send(Ok(stream_chunk(Some("部分回答"), None, None)))
+                .unwrap();
+            tx.try_send(Ok(stream_chunk(Some("继续"), None, None)))
+                .unwrap();
+            // 第 2 个 chunk 之后流中断
+            tx.try_send(Err(TianyanError::Custom("网络中断".to_string())))
+                .unwrap();
+            Ok(rx)
+        });
+        let agent_loop = make_loop(mock, 5);
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamEventSender::new(event_tx);
+
+        let mut messages = vec![Message::user("测试")];
+        let err = agent_loop
+            .run_stream(&mut messages, sender, "session-1", None, "test-model")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("agent_loop"), "应含 agent_loop 前缀：{msg}");
+        assert!(msg.contains("LLM 调用失败"), "应含 LLM 调用失败：{msg}");
+        assert!(msg.contains("流式接收中断"), "应含流式接收中断：{msg}");
+    }
+
+    /// 流式路径：usage 在最后 chunk —— 最终 token 统计正确。
+    #[tokio::test]
+    async fn test_run_stream_usage_from_final_chunk() {
+        let chunks = vec![
+            stream_chunk(Some("你好"), None, None),
+            stream_chunk(Some("世界"), None, Some(TokenUsage::new(100, 50))),
+        ];
+        let agent_loop = make_loop(stream_mock(chunks), 5);
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamEventSender::new(event_tx);
+
+        let mut messages = vec![Message::user("流式测试")];
+        let result = agent_loop
+            .run_stream(&mut messages, sender, "session-1", None, "test-model")
+            .await
+            .unwrap();
+
+        match result {
+            AgentLoopResult::Answer { total_tokens, .. } => {
+                assert_eq!(total_tokens.prompt_tokens, 100);
+                assert_eq!(total_tokens.completion_tokens, 50);
+                assert_eq!(total_tokens.total_tokens, 150);
+            }
+            other => panic!("期望 Answer，得到 {:?}", other),
+        }
+    }
+
+    /// 流式路径：answer_delta 顺序与发送 chunk 顺序一致。
+    #[tokio::test]
+    async fn test_run_stream_answer_delta_order_preserved() {
+        let chunks = vec![
+            stream_chunk(Some("A"), None, None),
+            stream_chunk(Some("B"), None, None),
+            stream_chunk(Some("C"), None, None),
+            stream_chunk(Some("D"), None, None),
+        ];
+        let agent_loop = make_loop(stream_mock(chunks), 5);
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamEventSender::new(event_tx);
+
+        let mut messages = vec![Message::user("顺序测试")];
+        let result = agent_loop
+            .run_stream(&mut messages, sender, "session-1", None, "test-model")
+            .await
+            .unwrap();
+        assert!(matches!(result, AgentLoopResult::Answer { .. }));
+
+        let deltas = collect_answer_deltas(event_rx).await;
+        assert_eq!(deltas, vec!["A", "B", "C", "D"]);
     }
 }

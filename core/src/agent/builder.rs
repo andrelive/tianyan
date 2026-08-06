@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex as TokioMutex;
 
-use tokio::sync::RwLock;
-
 use crate::agent::r#loop::{AgentLoop, AgentLoopConfig};
 use crate::agent::tool_registry::ToolRegistry;
 use crate::common::error::{Result, TianyanError};
@@ -22,7 +20,7 @@ use crate::observability::AgentMetrics;
 use crate::scheduler::tasks::RuleRecorder;
 use crate::session::SessionManager;
 use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
-use crate::skills::{SkillExecutor, SkillRegistry};
+use crate::skills::SkillExecutor;
 use crate::snapshot::SnapshotManager;
 use crate::vfs::VirtualFileSystem;
 
@@ -37,7 +35,6 @@ pub struct AgentBuilder {
     retriever: Option<Arc<DualLayerRetriever>>,
     vfs: Option<Arc<dyn VirtualFileSystem>>,
     skill_executor: Option<Arc<SkillExecutor>>,
-    skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
     session_manager: Option<Arc<dyn SessionManager>>,
     knowledge_ingestor: Option<Arc<KnowledgeIngestor>>,
     security_config: Option<SecurityConfig>,
@@ -56,7 +53,6 @@ impl AgentBuilder {
             retriever: None,
             vfs: None,
             skill_executor: None,
-            skill_registry: None,
             session_manager: None,
             knowledge_ingestor: None,
             security_config: None,
@@ -98,12 +94,6 @@ impl AgentBuilder {
     /// 设置技能执行器。
     pub fn with_skill_executor(mut self, executor: Arc<SkillExecutor>) -> Self {
         self.skill_executor = Some(executor);
-        self
-    }
-
-    /// 设置技能注册表。
-    pub fn with_skill_registry(mut self, registry: Arc<RwLock<SkillRegistry>>) -> Self {
-        self.skill_registry = Some(registry);
         self
     }
 
@@ -150,10 +140,6 @@ impl AgentBuilder {
         let vfs = self
             .vfs
             .ok_or_else(|| TianyanError::Custom("内部错误：需要虚拟文件系统".to_string()))?;
-
-        let skill_registry = self
-            .skill_registry
-            .unwrap_or_else(|| Arc::new(RwLock::new(SkillRegistry::new())));
 
         let session_manager = self
             .session_manager
@@ -243,14 +229,9 @@ impl AgentBuilder {
         };
 
         Ok(Agent::new(
-            self.config,
             chat_model,
-            model_service,
-            vfs,
             context_pipeline,
             metrics,
-            self.skill_executor,
-            skill_registry,
             skill_learning_engine,
             agent_loop,
             session_manager,

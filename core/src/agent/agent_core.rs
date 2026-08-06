@@ -14,34 +14,23 @@ use crate::agent::tool_registry::DynamicToolExecutor;
 use crate::agent::types::{AgentResponse, AgentState, ClarificationQuestion, QuestionType};
 use crate::common::error::Result;
 use crate::common::types::{Message, StructuredMessage, TokenUsage};
-use crate::config::AgentConfig;
 use crate::context::{ContextAssembler, ContextPipeline};
-use crate::model::ChatService;
 use crate::observability::AgentMetrics;
 use crate::observability::TokenRecord;
 use crate::session::{Session, SessionManager};
-use crate::skills::{SkillExecutor, SkillLearningEngine, SkillRegistry};
+use crate::skills::SkillLearningEngine;
 use crate::snapshot::SnapshotManager;
-use crate::vfs::VirtualFileSystem;
 
 /// compression_marker 之后至少积累多少条消息才触发压缩。
 const MIN_MESSAGES_BEFORE_COMPRESSION: usize = 6;
 
 /// 智能体协调器的默认实现。
 #[derive(Clone)]
-// 字段由 AgentBuilder 注入，当前协调器 API 主要通过 agent_loop / tool_registry 间接使用；
-// config / model_service / vfs / skill_executor / skill_registry 为未来协调器 API 预留。
-#[allow(dead_code)]
 pub struct Agent {
-    pub(crate) config: AgentConfig,
     /// 默认对话模型名（配置中指定，未被请求级 model 覆盖时使用）。
     pub(crate) default_model: String,
-    pub(crate) model_service: Arc<dyn ChatService>,
-    pub(crate) vfs: Arc<dyn VirtualFileSystem>,
     pub(crate) context_pipeline: ContextPipeline,
     pub(crate) metrics: Arc<AgentMetrics>,
-    pub(crate) skill_executor: Option<Arc<SkillExecutor>>,
-    pub(crate) skill_registry: Arc<RwLock<SkillRegistry>>,
     pub(crate) skill_learning_engine: Option<SkillLearningEngine>,
     pub(crate) state: Arc<RwLock<AgentState>>,
     pub(crate) agent_loop: AgentLoop,
@@ -54,34 +43,19 @@ impl Agent {
     /// 创建新的 Agent 实例。
     ///
     /// 此构造函数由 AgentBuilder::build() 调用，外部应通过 Builder 创建 Agent。
-    // clippy::too_many_arguments: 12 个参数均为必需的依赖注入项，
-    // AgentBuilder 已是唯一构造入口，此处保持 pub(crate) 且参数不可合并
-    // （每个参数类型不同，无逻辑分组余地）。保留 allow 并非偷懒，
-    // 而是 Builder 模式下的合理设计权衡。
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        config: AgentConfig,
         default_model: String,
-        model_service: Arc<dyn ChatService>,
-        vfs: Arc<dyn VirtualFileSystem>,
         context_pipeline: ContextPipeline,
         metrics: Arc<AgentMetrics>,
-        skill_executor: Option<Arc<SkillExecutor>>,
-        skill_registry: Arc<RwLock<SkillRegistry>>,
         skill_learning_engine: Option<SkillLearningEngine>,
         agent_loop: AgentLoop,
         session_manager: Arc<dyn SessionManager>,
         snapshot_manager: Option<Arc<SnapshotManager>>,
     ) -> Self {
         Self {
-            config,
             default_model,
-            model_service,
-            vfs,
             context_pipeline,
             metrics,
-            skill_executor,
-            skill_registry,
             skill_learning_engine,
             state: Arc::new(RwLock::new(AgentState::default())),
             agent_loop,

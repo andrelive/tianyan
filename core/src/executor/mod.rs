@@ -1,4 +1,6 @@
 mod actions;
+/// 命令输出解析工具（构建错误提取）。
+mod output_parse;
 
 /// 审批工作流模块。
 pub mod approval;

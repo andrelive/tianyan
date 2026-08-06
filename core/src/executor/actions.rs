@@ -3,6 +3,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::common::error::TianyanError;
+use crate::executor::output_parse::extract_build_errors;
 
 const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 
@@ -442,24 +443,6 @@ fn extract_test_failures(stdout: &str, stderr: &str) -> Vec<String> {
     }
 
     failures
-}
-
-/// 从 build/lint 输出中提取编译错误。
-fn extract_build_errors(stdout: &str, stderr: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    let combined = format!("{}\n{}", stdout, stderr);
-
-    for line in combined.lines() {
-        if line.contains("error:") || line.contains("error[") {
-            errors.push(line.trim().to_string());
-        }
-        if errors.len() > 50 {
-            errors.push("... (截断，过多错误输出)".to_string());
-            break;
-        }
-    }
-
-    errors
 }
 
 /// 执行文件读取操作。

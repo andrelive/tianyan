@@ -122,10 +122,7 @@ impl KnowledgeIngestor {
         let parser = CompositeParser::new();
         let image_processor = ImageProcessor::new(config.image.clone());
 
-        let summary_engine = SummaryEngine::new(
-            model_service,
-            config.summary_model.clone(),
-        );
+        let summary_engine = SummaryEngine::new(model_service, config.summary_model.clone());
 
         Self {
             config,
@@ -322,19 +319,12 @@ impl KnowledgeIngestor {
     }
 
     /// 为内容生成分层摘要。
+    ///
+    /// 生成失败时向上传播错误，由 [`KnowledgeIngestor::ingest`] 的唯一回退层
+    /// （截断 + warning）处理，避免双层回退导致行为难以推理。
     async fn generate_summaries(&self, content: &str) -> Result<(String, String)> {
-        let abstract_content = self
-            .summary_engine
-            .generate_abstract(content)
-            .await
-            .unwrap_or_else(|_| content.chars().take(500).collect());
-
-        let overview_content = self
-            .summary_engine
-            .generate_overview(content)
-            .await
-            .unwrap_or_else(|_| content.chars().take(2000).collect());
-
+        let abstract_content = self.summary_engine.generate_abstract(content).await?;
+        let overview_content = self.summary_engine.generate_overview(content).await?;
         Ok((abstract_content, overview_content))
     }
 
@@ -417,7 +407,65 @@ impl KnowledgeIngestor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use ring::digest::{Context, SHA256};
+
+    use crate::common::error::TianyanError;
+    use crate::common::types::ContentLevel;
+    use crate::model::types::{VisionRequest, VisionResponse};
+    use crate::model::MockChatService;
+    use crate::test_utils::{MockEmbeddingService, MockVfs};
+    use crate::vfs::ContentStore;
+
+    /// VLM mock：文本文档导入不会调用，返回错误以防误用。
+    struct MockVlmService;
+
+    #[async_trait]
+    impl VlmService for MockVlmService {
+        async fn analyze_image(&self, _request: VisionRequest) -> Result<VisionResponse> {
+            Err(TianyanError::Custom("VLM 未用于文本文档".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ingest_summary_failure_single_layer_fallback() {
+        // SummaryEngine 生成失败（chat_completion 返回错误）时，由 ingest() 的唯一回退层处理：
+        // 截断摘要 + warning，不 panic、不向上传播错误。
+        let mut chat = MockChatService::new();
+        chat.expect_chat_completion()
+            .returning(|_| Err(TianyanError::Custom("模拟摘要服务不可用".to_string())));
+
+        let vfs = Arc::new(MockVfs::new());
+        let ingestor = KnowledgeIngestor::new(
+            IngestorConfig::new().with_embeddings(false),
+            Arc::new(chat),
+            Arc::new(MockEmbeddingService),
+            Arc::new(MockVlmService),
+            vfs.clone(),
+        );
+
+        let content = "a".repeat(3000);
+        let result = ingestor
+            .ingest(IngestionRequest::new(
+                content.as_bytes().to_vec(),
+                "test.txt",
+            ))
+            .await
+            .expect("摘要失败不应导致 ingest 失败");
+
+        // 单层回退：恰好一条 warning，且 abstract 截断为 500 字符、overview 为完整内容
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("摘要生成失败，使用截断回退"));
+
+        let uri = TianyanUri::new(
+            ContextNamespace::Knowledge,
+            vec!["other".to_string(), result.document_id.clone()],
+        );
+        let abstract_stored = vfs.read(&uri, ContentLevel::Abstract).await.unwrap();
+        assert_eq!(abstract_stored.chars().count(), 500);
+        let overview_stored = vfs.read(&uri, ContentLevel::Overview).await.unwrap();
+        assert_eq!(overview_stored.chars().count(), 3000);
+    }
 
     #[test]
     fn test_ingestor_config() {

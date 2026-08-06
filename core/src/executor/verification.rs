@@ -6,6 +6,7 @@
 use crate::common::error::TianyanError;
 use crate::executor::actions::execute_command_action;
 use crate::executor::judge::LlmJudge;
+use crate::executor::output_parse::extract_build_errors;
 use serde_json::json;
 
 /// 验证结果。
@@ -111,22 +112,6 @@ impl VerificationGate {
     }
 }
 
-/// 从命令输出中提取构建错误的简化版本。
-///
-/// 检查 stdout 和 stderr 中的 "error:" 模式。
-fn extract_build_errors(stdout: &str, stderr: &str) -> Vec<String> {
-    let mut errors = Vec::new();
-    for line in stdout.lines().chain(stderr.lines()) {
-        let lower = line.to_lowercase();
-        if lower.contains("error:") || lower.contains("error[") {
-            // Grab up to 200 chars of context
-            let end = line.len().min(200);
-            errors.push(line[..end].to_string());
-        }
-    }
-    errors
-}
-
 /// 将 VerificationResult 转换为 JSON（供工具返回使用）。
 impl From<VerificationResult> for serde_json::Value {
     fn from(r: VerificationResult) -> Self {
@@ -150,42 +135,6 @@ mod tests {
     fn test_verification_gate_new_none() {
         let gate = VerificationGate::new(None);
         assert!(gate.judge.is_none());
-    }
-
-    #[test]
-    fn test_extract_build_errors_from_stdout() {
-        let stdout =
-            "Compiling foo.rs v1.0.0\nerror[E0308]: mismatched types\n  --> src/main.rs:10:5\n";
-        let stderr = "";
-        let errors = extract_build_errors(stdout, stderr);
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("error[E0308]: mismatched types"));
-    }
-
-    #[test]
-    fn test_extract_build_errors_from_stderr() {
-        let stdout = "";
-        let stderr = "  error: expected `;`\n  --> src/lib.rs:42:10\n";
-        let errors = extract_build_errors(stdout, stderr);
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("error: expected `;`"));
-    }
-
-    #[test]
-    fn test_extract_build_errors_clean_output() {
-        let stdout = "Compiling foo.rs v1.0.0\n   Compilation successful\n";
-        let stderr = "warning: unused variable `x`\n";
-        let errors = extract_build_errors(stdout, stderr);
-        assert!(errors.is_empty());
-    }
-
-    #[test]
-    fn test_extract_build_errors_case_insensitive() {
-        let stdout = "ERROR: something went wrong\n";
-        let stderr = "";
-        let errors = extract_build_errors(stdout, stderr);
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("ERROR: something went wrong"));
     }
 
     #[test]

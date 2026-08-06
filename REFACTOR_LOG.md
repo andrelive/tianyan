@@ -300,3 +300,101 @@ core 模块系统性架构重构日志。约束：公开 API 签名与行为完�
 
 ### 验证
 - 决策已记录；无代码改动
+
+## Wave 3（T12）：统一 extract_build_errors 双实现（P1-8）
+
+### 改动
+- `core/src/executor/output_parse.rs`（新建）：单一 `pub(crate) fn extract_build_errors(stdout, stderr) -> Vec<String>`，合并两套语义：
+  - **大小写不敏感匹配** `error:` / `error[`（原 `verification.rs` 行为，`to_lowercase` 后 contains）
+  - **每行 trim 首尾空白**（原 `actions.rs` 行为）
+  - **单行截断 200 字符**（原 `verification.rs` 行为；改为 `chars().take(200)` 按 char 截断——原实现的 `line[..line.len().min(200)]` 字节切片在 200 落在多字节 UTF-8 字符中间时会 **panic**，统一版顺带修复该隐患）
+  - **50 条上限 + 截断标记**（原 `actions.rs` 行为；原实现 `errors.len() > 50` 在 push 之后判断，实际放行 51 条 + 标记，统一版收敛为严格 50 条 + 标记）
+- `executor/actions.rs`：删除本地 `extract_build_errors`（原 448-463），`execute_verify_build` 调用点改为委托 `crate::executor::output_parse::extract_build_errors`
+- `executor/verification.rs`：删除本地 `extract_build_errors`（原 117-128），`verify_build` 的 pattern 提取改为委托统一函数；原 4 个提取测试迁移至 output_parse.rs（stdout/stderr/clean/case-insensitive 行为不变）
+- `executor/mod.rs`：注册 `mod output_parse;`
+- 测试：output_parse.rs 共 7 个（4 个迁移 + 3 个新增：大写 `ERROR:` 匹配、`error[E0308]` 匹配、51 行 → 50 条 + 截断标记、>200 字符行截断、trim 行为、无错误空结果、stdout/stderr 来源）
+
+### 外部行为变化（必须注意）
+- `run_tests`/`verify_build` 工具返回 JSON 的 `errors` 字段内容可能变化：
+  - 匹配更全：大写 `ERROR:` / `Error[` 等此前 `actions.rs` 大小写敏感版漏掉的行现在会进入 `errors`（`verify_build` 的 `error_count` 可能上升）
+  - 行内容变短：统一后每行 trim + 200 字符截断，此前 `actions.rs` 版不截断的长行会被裁剪
+  - 上限从实际 51+标记 收紧为 50+标记
+- 已核实 server 层无依赖该 JSON 格式的解析代码，前端仅展示用，可接受
+
+### 验证
+- RED：新建 output_parse.rs 仅含测试时，`cargo test -p tianyan-core --lib executor::output_parse` 编译失败——7 处 `E0425: cannot find function extract_build_errors`（编译器提示到 verification 的私有同名函数，证明统一函数尚不存在）
+- GREEN：实现后同一命令 7 passed / 0 failed；executor 模块 44 passed / 0 failed
+- 全量 `cargo test -p tianyan-core --lib`：**556 passed / 0 failed / 1 ignored**（基线 547 + 本任务净增 3 测试 + 并行任务 6 个；ignored 为既有 session::manager 忽略项）
+- grep `fn extract_build_errors` `core/src/executor/` = 仅 output_parse.rs 1 处定义；rustfmt 4 个改动文件干净
+- clippy 全库暂不可跑：并行任务对 `agent/loop.rs` 的在途改动（E0106）阻塞编译，非本次改动引入
+
+### 决策理由
+- 同一模式匹配双实现是"输出解析契约"分裂：`run_tests` 返回的 `errors` 与 `verify_build` 的 `pattern_errors` 对同一输出可能给出不同列表，LLM 看到错误列表与判定依据不一致。统一后单一实现保证两处一致
+- 语义合并取向：匹配取 verification 版（大小写不敏感更全）、输出取 actions 版（trim + 上限 + 标记，防 LLM 上下文被超长/超量输出淹没）——两版各自的"强项"保留
+- 上限 off-by-one（51 vs 50）与字节切片 panic 属实现缺陷，测试锁定任务描述语义（50 条上限），修复顺带完成
+
+
+## Wave 3（T9）：清理 Agent 结构体死字段（P1-2）
+
+### 改动
+- `core/src/agent/agent_core.rs`：`Agent` 结构体删除 5 个"为未来协调器 API 预留"的从未被读取字段：`config` / `model_service` / `vfs` / `skill_executor` / `skill_registry`（证据：全仓 `agent.(config|model_service|vfs|skill_executor|skill_registry)` 与 agent 模块内 `self.<字段>` 均无读取点；`Agent::new` 的 12 参数同步减为 7 参数）。删除 `#[allow(dead_code)]` 及 `#[allow(clippy::too_many_arguments)]`（7 参数低于 clippy 阈值 8），同步清理 4 个随之失效的 import（`AgentConfig` / `ChatService` / `VirtualFileSystem` / `SkillExecutor`+`SkillRegistry`）
+- 保留字段（有真实读取点）：`default_model`（coordinator.rs:165/274、agent_core.rs:275）、`context_pipeline` / `metrics` / `skill_learning_engine` / `state` / `agent_loop` / `session_manager` / `snapshot_manager`
+- `core/src/agent/builder.rs`：`with_skill_registry` 是唯一变死的 with_* 方法（其值只流向被删的 Agent 字段，删后 builder 私有字段无人读取 → 编译器 dead_code），删除方法 + `AgentBuilder.skill_registry` 字段 + `build()` 内局部 `skill_registry`；`with_config` / `with_model_service` / `with_vfs` / `with_skill_executor` 保留（build() 内仍读取喂给 AgentLoop/ToolRegistry/ContextPipeline）
+- `server/src/agent_builder.rs`：删除 `.with_skill_registry(...)` 调用；`build_agent` / `build_agent_or_wizard` 删除 `skill_registry` 参数（已无消费方）
+- `server/src/state.rs`：两处 `build_agent_or_wizard(...)` 调用删除对应实参；`skill_registry` 字段与访问器保留（skills API 仍使用）
+
+### 验证
+- `cargo check -p tianyan-core`：0 错误（仅 1 个既有无关 warning：`executor/output_parse.rs::extract_build_errors`，并行波次产物，非本任务文件）
+- `cargo check --workspace`：通过
+- `cargo test -p tianyan-core --lib`：**556 passed / 0 failed / 1 ignored**（基线 547 + 并行波次新增 9；knowledge ingestor 单个用例首轮偶发失败，隔离重跑通过，并行波次改动所致非本任务回归）
+- `grep allow(dead_code) core/src/agent/agent_core.rs` = 空
+
+### 决策理由
+- 以编译器为准删除：先删字段跑 check，无使用点报错即确认死字段；`with_skill_registry` 因唯一消费者（Agent.skill_registry）被删而变死，连带 server 参数链一并清理（保留会触发 dead_code warning）
+- 不删仍被内部读取的 with_* 方法（config/model_service/vfs/skill_executor 在 build() 中继续喂给 AgentLoop/ToolRegistry/ContextPipeline/SkillLearningEngine）
+- 未重构 AgentCoordinator 实现逻辑（T10 范围）
+
+## Wave 3（T13）：消除 ingestor 摘要失败双层回退（P1-10）
+
+### 改动
+- `core/src/knowledge/ingestor/mod.rs` `generate_summaries()`：删除 abstract/overview 各自的 `unwrap_or_else` 截断回退（`chars().take(500)` / `take(2000)`），改为 `?` 直接传播错误；摘要失败的回退仅保留在 `ingest()` 外层一处（截断 500 字符 abstract + overview 全文 + warning）
+- 删除后行为变化：失败时 abstract 仍截断为 500 字符（不变），overview 从 `take(2000)` 变为完整内容（与回退语义一致：无摘要可用时保留全文），且新增 warning 提示（此前内层吞错导致无 warning，用户无从得知摘要失败）
+- 测试：新增 `test_ingest_summary_failure_single_layer_fallback` —— `MockChatService` 的 `chat_completion` 返回错误模拟摘要失败，走完整 `ingest()` 流程断言：恰好 1 条 warning（含"摘要生成失败，使用截断回退"）、abstract 落库 500 字符、overview 落库为完整内容、不 panic
+
+### 验证
+- RED：加测试后运行 `cargo test -p tianyan-core --lib knowledge::ingestor` 失败——`assertion left: 0 right: 1`（warnings 为 0，证明旧代码内层吞错无 warning）
+- GREEN：删除内层回退后同命令 5 passed / 0 failed；全量 `cargo test -p tianyan-core --lib` = **556 passed / 0 failed / 1 ignored**
+- grep `take(2000)` = 空；`take(500)` 仅剩 2 处（`:185` 外层摘要失败回退 + `:192` 禁用摘要配置路径，均为 ingest() 单一决策点）；摘要相关的 `unwrap_or_else` = 0（`:156` 为分类推断，非摘要路径）
+- rustfmt：本次改动文件干净（含顺手修正该文件既有的 `SummaryEngine::new` 多行格式）
+
+### 决策理由
+- 双层回退是"同一决策（摘要失败怎么办）在两处实现"的典型冗余：内层吞错使外层永不触发，warning 永不产生，失败行为不可观测且推理困难。收敛为单层后，失败路径只有一个入口（ingest() 的 match），控制流与可观测性（warning）同时成立
+
+
+## Wave 3（T11）：AgentLoop 流式路径回归测试 + 共享轮次脚手架去重（P1-4）
+
+### 改动（仅 `core/src/agent/loop.rs`）
+
+**1. 流式回归测试（RED 先行，5 个新测试）** —— 此前 `run_stream` 零覆盖，是真实风险源：
+- `test_run_stream_accumulates_multi_chunk_content`：3 chunk 文本 → 最终消息内容 = 拼接；同时断言 stream_sender 收到的 answer_delta 顺序与发送一致
+- `test_run_stream_accumulates_tool_call_deltas`：tool_call 分片（id/name 首 delta + arguments 分两次）→ 两轮循环后 messages[1] 中 ToolCall 的 id/name/arguments 完整（`{"city":"北京"}`）
+- `test_run_stream_mid_stream_error_returns_custom`：第 2 个 chunk 后 Err → 返回 `TianyanError::Custom`（含 agent_loop 前缀 + LLM 调用失败 + 流式接收中断）
+- `test_run_stream_usage_from_final_chunk`：usage 仅出现在最后 chunk → Answer.total_tokens 三字段（100/50/150）正确
+- `test_run_stream_answer_delta_order_preserved`：A/B/C/D 顺序与发送一致
+- 测试基建复用既有 `MockChatService`（mockall 已 mock `chat_completion_stream`，无新 mock）；新增 helper：`stream_chunk`（构造 chunk）、`stream_mock`（重放 chunk 序列）、`collect_answer_deltas`（收集中断后收集 Answer delta）
+
+**2. `run` / `run_stream` 轮次脚手架去重（GREEN）**
+- 提取私有 `run_turns<F>`：统一两路径的轮次状态初始化（current_parent_id / total_tokens）、TurnContext 构建、`handle_llm_response` 调用与早返回、最大轮数错误。`step` 闭包负责每轮"请求构造 → 响应获取 → 统一为 (Message, Option<TokenUsage>)"，两路径各保留差异部分（with_stream 标记 / chunk 累积）
+- 私有类型别名 `TurnStep<'a>` 承载 step 返回的 boxed future；HRTB 约束 `for<'a> FnMut(&'a AgentLoop, &'a str, Option<&'a StreamEventSender>, Vec<Message>) -> TurnStep<'a>` 使闭包不捕获借用（self/model/sender 均作为入参传入），避免异步闭包借用冲突
+- 净删 ~60 行重复脚手架；`handle_llm_response`、`persist_message` 未动；公开 API 签名零变化
+
+### 验证
+
+- RED：5 个测试先全绿（现有实现行为正确，回归锁定）；随后临时变异 `accumulated_content.push_str(content)` → `accumulated_content = content.clone()`（只保留最后 chunk），`test_run_stream_accumulates_multi_chunk_content` 失败——`left: "！" / right: "你好，世界！"`，证明测试能捕获累积逻辑回归；恢复后重新全绿
+- GREEN：去重后 `cargo test -p tianyan-core --lib test_run_stream` = 5 passed；全量 `cargo test -p tianyan-core --lib` = **556 passed / 0 failed / 1 ignored**（基线 547 + 本任务 5 新测试 + 并行波次新测试；ignored 为既有 session::manager 忽略项）
+- clippy：loop.rs 零警告（crate 余下 5 个警告均在 observability / scheduler / session，既有）；fmt 干净
+
+### 决策理由
+- 流式路径此前零测试且累积/错误语义是前端打字机效果的契约（chunk 顺序、usage 末 chunk、中途错误前缀），必须用回归测试锁定
+- `run`/`run_stream` 的重复不只在请求构造：轮次状态初始化、TurnContext 构建、早返回、最大轮数错误各出现两份，提取为 `run_turns` 后单轮脚手架只有一份；step 闭包用 HRTB 入参传递而非捕获，规避异步闭包借用冲突（若 HRTB 方案编译失败，备选方案为仅提取 `build_request` 并保留双循环）
+- 行为零变化：错误消息文本、chunk 顺序、累积逻辑逐字保持；`run_stream` 中新增的 `stream_sender` 缺失守卫（`ok_or_else`）在既有调用下不可达，仅为满足 Option 入参契约

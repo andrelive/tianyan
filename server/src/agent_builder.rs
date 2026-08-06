@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 // 外部 crate
 use async_trait::async_trait;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 
 // 内部 crate
 use tianyan::agent::DynamicToolExecutor;
@@ -20,7 +20,7 @@ use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::model::ModelServices;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::session::PersistentSessionManager;
-use tianyan::skills::{SkillExecutor, SkillRegistry};
+use tianyan::skills::SkillExecutor;
 use tianyan::vfs::VirtualFileSystemImpl;
 use tianyan::{Result as TianyanResult, TianyanError};
 
@@ -47,7 +47,6 @@ impl AgentBuilderFactory {
         config: &TianyanConfig,
         model_services: ModelServices,
         vfs: Arc<VirtualFileSystemImpl>,
-        skill_registry: Arc<RwLock<SkillRegistry>>,
         skill_executor: Arc<SkillExecutor>,
         usage_stats: Arc<UsageStats>,
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
@@ -96,7 +95,6 @@ impl AgentBuilderFactory {
             .with_vfs(vfs.clone())
             .with_retriever(Arc::new(retriever))
             .with_skill_executor(skill_executor)
-            .with_skill_registry(skill_registry)
             .with_knowledge_ingestor(Arc::new(knowledge_ingestor))
             .with_security_config(config.security.clone())
             .with_usage_stats(usage_stats)
@@ -127,7 +125,6 @@ impl AgentBuilderFactory {
         config: &TianyanConfig,
         model_services: ModelServices,
         vfs: Arc<VirtualFileSystemImpl>,
-        skill_registry: Arc<RwLock<SkillRegistry>>,
         skill_executor: Arc<SkillExecutor>,
         usage_stats: Arc<UsageStats>,
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
@@ -137,7 +134,6 @@ impl AgentBuilderFactory {
             config,
             model_services,
             vfs,
-            skill_registry,
             skill_executor,
             usage_stats,
             snapshot_manager,

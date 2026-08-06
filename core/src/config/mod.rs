@@ -16,8 +16,8 @@ mod storage;
 pub mod validation;
 pub mod wizard;
 
-pub use agent::AgentConfig;
 pub use crate::common::logging::LoggingConfig;
+pub use agent::AgentConfig;
 pub use mcp::{McpConfig, McpServerEntry};
 pub use memory::MemoryConfig;
 pub use model::{
