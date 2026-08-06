@@ -27,7 +27,9 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `common` | 通用类型（按领域拆分）、错误处理、日志配置、token 估算 | error.rs, logging.rs, token_estimator.rs, types/ | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
 | `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
-| `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs | ✅ 正常使用 |
+| `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控）+ 编程助手执行原语（hashline 编辑、patch、文件浏览、搜索、符号、测试发现） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs, hashline.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
+| `lsp` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储） | registry.rs, client.rs, diagnostics.rs | ✅ 已集成 |
+| `snapshot` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | mod.rs | ✅ 正常使用 |
 | `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image/, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
 | `memory` | 长期记忆提取 | extractor.rs | ✅ 已集成 |
 | `model` | 模型服务（provider 实现 + 服务容器） | traits.rs, types/, provider/, services.rs | ✅ 已集成 |
@@ -50,7 +52,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry；`Agent::new` 7 参数） |
 | `AgentLoop` | Agent 迭代循环（LLM 工具调用循环） |
 | `AgentLoopConfig` | AgentLoop 配置（loop_limit 默认 50） |
-| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls；注册 14 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、knowledge_ingest、delegate_to_agent |
+| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls；注册 21 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、knowledge_ingest、delegate_to_agent、apply_edit、apply_patch、glob、list_dir、discover_tests、symbol_outline、lsp |
 | `SessionState` | 会话状态容器（对话历史为唯一真相源，上下文窗口、待持久化记忆） |
 | `SessionStateManager` | 多会话状态管理器（线程安全，Arc<RwLock<HashMap>>） |
 | `AgentResponse` | Agent 响应（内容、追问、Token 使用量、技能调用信息、处理时间） |
@@ -70,7 +72,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 1. **StructuredMessage 持久化**：AgentLoop 每产生一条消息，实时调 `SessionManager::add_structured_message()` 落盘，工具调用消息全部持久化。
 2. **压缩锚点**：`StructuredMessage.compression_marker` 标记压缩产生的摘要消息，加载会话时反向扫描到最近 marker。
-3. **组件工具化**：`ToolRegistry` 注册 14 个 OpenAI function calling 兼容工具，`call_skill` 桥接到 `SkillExecutor`。
+3. **组件工具化**：`ToolRegistry` 注册 21 个 OpenAI function calling 兼容工具，`call_skill` 桥接到 `SkillExecutor`。
 
 ### 1.3 model 子模块
 
@@ -143,7 +145,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 ### 1.5 executor 子模块
 
-**职责**：独立的工具执行函数（`execute_read_file`、`execute_write_file`、`execute_search_code`、`execute_command_action`、`execute_run_tests`、`execute_verify_build`），供 `ToolRegistry` 调用。`Action`、`ExecutorError`、`ApprovalWorkflow`、`LlmJudge`、`VerificationGate` 类型被 `agent/build.rs` 和 `agent/tool_registry.rs` 使用。
+**职责**：独立的工具执行函数（`execute_read_file`、`execute_write_file`、`execute_search_code`、`execute_command_action`、`execute_run_tests`、`execute_verify_build`）+ 编程助手执行原语（apply_edit / apply_patch / glob / list_dir / discover_tests / symbol_outline / lsp），供 `ToolRegistry` 调用。`Action`、`ExecutorError`、`ApprovalWorkflow`、`LlmJudge`、`VerificationGate` 类型被 `agent/build.rs` 和 `agent/tool_registry.rs` 使用。
 
 > `Executor` trait 壳、`Step`、`StepResult`、`FailureHandling`、`ExecutorTrait` 等旧 Planner-Executor 架构类型已移除。
 
@@ -152,23 +154,70 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `executor/security.rs` — `SecurityPolicy` 安全策略（命令白名单/黑名单、目录限制、command_timeout）+ 路径沙箱统一判定（`check_path_rules` / `normalize_path_for_check`，skills 侧共享）
 - `executor/command.rs` — 命令执行（`execute_command_action`、`DEFAULT_COMMAND_TIMEOUT_SECS`）
 - `executor/output_parse.rs` — 命令输出解析统一实现（`extract_build_errors` / `count_test_passed` / `extract_test_failures`：大小写不敏感匹配、单行 200 字符截断、50 条上限）
-- `executor/types.rs` — `Action` 枚举和 `ExecutorError`
+- `executor/types.rs` — `Action` 枚举（ReadFile / WriteFile / ExecuteCommand / SearchCode / ApplyEdit / ApplyPatch）和 `ExecutorError`
 - `executor/approval/` — 审批工作流（`types.rs` 领域类型 + `workflow.rs` 状态机）
-- `executor/verification.rs` — 验证门控
+- `executor/verification.rs` — 验证门控 + 结构化诊断（`StructuredDiagnostic` / `parse_json_diagnostics`，解析 `cargo check --message-format=json-render-diagnostics`）
 - `executor/judge.rs` — LLM-as-Judge 语义验证
+- `executor/hashline.rs` — hashline 锚点（`line_hash` 空白不敏感 FNV-1a；`format_line` 生成 `N#ID|content`；`parse_anchor` / `hash_line_pair`）
+- `executor/truncate.rs` — 统一截断层（`truncate_head` / `truncate_tail` / `truncate_spill`，`MAX_LINES = 2000` / `MAX_BYTES = 50KB`，UTF-8 安全）
+- `executor/edit.rs` — 语义化编辑（`EditSpec` / `apply_edits_to_content` 纯函数 bottom-up 原子应用 / `apply_edit_action` / `detect_eol` CRLF 保留）
+- `executor/patch.rs` — unified diff（`parse_patch` 解析 `*** Update File:` 信封 / `apply_patch_to_content` similar fuzzy seek / `apply_patch_action` 多文件原子，`FUZZY_RATIO_THRESHOLD = 0.75`）
+- `executor/fs.rs` — 文件浏览（`execute_glob` rg --files + 回退 walk、mtime 排序；`execute_list_dir` 目录优先 + 分页；`MAX_GLOB_RESULTS = 200`）
+- `executor/search.rs` — ripgrep 封装（`SearchOptions` / `OutputMode`（files_with_matches 默认）/ `execute_search_code`；64KB 记录拒绝、100 submatch 上限、2000 字符行截断、`.git` 排除、offset/head_limit 分页、无效正则报"正则无效"）
+- `executor/symbols.rs` — tree-sitter 多语言符号大纲（`symbol_outline` / `SymbolKind` / `language_from_extension`，rust/ts/tsx/js/py/go，`MAX_SYMBOLS = 500`，解析错误置 errors 标志）
+- `executor/project.rs` — 项目探测（`probe_project` walk-up 标记检测：Cargo.toml > pyproject.toml > tsconfig.json；`ProjectFormat` / `verification_command`）
+- `executor/test_discovery.rs` — 测试发现与结果解析（`discover_tests` 解析 cargo/pytest/vitest 列表，上限 500；`parse_test_output` 失败 ≤20 + 回溯头 30/尾 20 行、按文件分组；`resolve_test_command` / `run_tests_action`）
 
 **核心类型**：
 
 | 类型 | 说明 |
 |------|------|
-| `Action` | 动作定义（ReadFile / WriteFile / ExecuteCommand / SearchCode） |
+| `Action` | 动作定义（ReadFile / WriteFile / ExecuteCommand / SearchCode / ApplyEdit / ApplyPatch） |
 | `ExecutorError` | 执行器错误类型 |
 | `SecurityPolicy` | 安全策略（命令白名单/黑名单、目录限制、command_timeout） |
 | `ApprovalWorkflow` | 审批工作流（Safe/Low/Medium/High/Critical 五级风险） |
 | `VerificationGate` | 验证门控（执行后自动运行 cargo check/测试验证产出） |
 | `LlmJudge` | LLM-as-Judge（语义判断，解析 `-- JUDGMENT: PASS/FAIL/NEEDS_CHANGES`） |
+| `StructuredDiagnostic` | 结构化编译诊断（file/line/column/level/code/message/suggestion） |
+| `EditSpec` | 语义化编辑规格（start_line / anchor / old_lines / new_lines，hashline 防陈旧校验） |
+| `Truncated` | 截断结果（text / truncated / total_lines / total_bytes / spill_path） |
 
-### 1.6 context 子模块
+### 1.6 lsp 子模块
+
+**职责**：语言服务器协议（LSP）客户端，提供诊断、跳转、符号等代码智能能力，供 `lsp` 工具调用（goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation）。诊断 = 内环快信号，`verify_build` = 最终权威门控（见 gap-analysis D4）。
+
+**模块组织**：
+- `lsp/registry.rs` — 服务器注册表：`ServerSpec { language_id, extensions, root_markers, spawn_command, args, auto_install_hint }`；`BUILTIN_SERVERS` 内置 rust-analyzer / typescript-language-server / pyright-langserver / gopls；`spec_for_extension` 按扩展名路由、`probe_project_root` 按 root marker 探测项目根
+- `lsp/client.rs` — 自研 JSON-RPC 2.0 客户端：Content-Length 帧、tokio 进程管道、DashMap + oneshot 请求/响应关联、10s 超时；服务器不可用时优雅降级（"不可用" + 安装提示）
+- `lsp/diagnostics.rs` — `LspManager`：按绝对路径键控的 push 诊断存储、按项目根键控的服务器池、`diagnostics_for` 排序输出、`ensure_server` 惰性拉起、`query` 统一入口
+
+**核心类型**：
+
+| 类型 | 说明 |
+|------|------|
+| `ServerSpec` | LSP 服务器规格（语言 ID、扩展名、root 标记、spawn 命令、自动安装提示） |
+| `LspClient` | JSON-RPC 2.0 LSP 客户端（initialize / hover / goto_definition / references / document_symbols / workspace_symbols / goto_implementation） |
+| `LspManager` | 诊断存储 + 服务器池管理（handle_publish / diagnostics_for / ensure_server / query） |
+
+### 1.7 snapshot 子模块
+
+**职责**：工作区快照（会话回退/撤销回退），ADR-006 定义的 VFS 例外（独立文件存储于 `{data_dir}/snapshots/`，不经 VFS）。编程助手落地（ADR-008）新增三项能力：gzip 压缩、GC、similar diff。
+
+**模块组织**：
+- `snapshot/mod.rs` — `SnapshotManager`：内容寻址对象库（sha256-of-raw 键，全局去重）+ 树文件（`trees/{index}.json`）+ redo 增量（`redo/`）
+- **gzip 压缩**（`flate2`）：对象以 gzip 流写入，读取时按魔数 `0x1f 0x8b`（`GZIP_MAGIC`）识别，legacy 未压缩对象向后兼容；对象键不变，去重语义不变
+- **`gc()` 标记-清除**：可达集 = 所有会话 `trees/*.json` + `redo/tree-*.json`，清理孤儿 redo cache 文件与不可达对象，返回 `GcStats`
+- **`diff(session_id, index)`**：经 `similar::TextDiff::from_lines` 生成 `DiffResult` / `FileDiff`（added / removed / modified / binary 分类 + unified 文本），服务 `/api/v1/workspace/diff`
+
+**核心类型**：
+
+| 类型 | 说明 |
+|------|------|
+| `SnapshotManager` | 快照管理器（capture / restore / save_redo / load_redo / gc / diff） |
+| `GcStats` | GC 统计（标记对象数、删除孤儿数、释放字节数） |
+| `DiffResult` / `FileDiff` | 快照间差异（文件级分类 + unified 文本） |
+
+### 1.8 context 子模块
 
 **职责**：上下文工程系统，包括双层检索、对话压缩、统一上下文管线和消息组装。
 
@@ -207,7 +256,7 @@ soul → rules+memories → history(from compression_marker) → current input
 - `RuleSuggester` (`scheduler/tasks/rule_suggester.rs`) — 扫描聚类 + LLM 提炼
 - `RuleRecorder` (`scheduler/tasks/rule_recorder.rs`) — 去重 + 写入 learned rule
 
-### 1.7 skills 子模块
+### 1.9 skills 子模块
 
 **职责**：管理 Agent 可调用的技能，包括技能定义、执行、注册、发现和学习（GEPA 进化引擎）。
 
@@ -238,7 +287,7 @@ soul → rules+memories → history(from compression_marker) → current input
 - **P**erfect：通过多次使用优化参数模板
 - **A**dapt：根据上下文自动调整技能执行策略
 
-### 1.8 observability 子模块
+### 1.10 observability 子模块
 
 **职责**：Agent 的可观测性存储，记录执行指标并支持 Agent 自省查询。模块包含 2 个文件（mod.rs、usage_stats.rs）；SQLite 连接复用 `vfs/backend/sqlite_db.rs` 的 `SqliteDb`（ADR-005 单连接，ADR-007 下沉），`usage_stats.rs` 依赖 `common::types::retrieval_trace::RetrievalTrace` 持久化检索轨迹。
 
@@ -259,7 +308,7 @@ soul → rules+memories → history(from compression_marker) → current input
 - `query_harness_health()` — Harness 健康摘要
 - `record_token_usage()` / `record_failure()` / `record_execution()` / `record_rule_hit()` — 记录接口
 
-### 1.9 其他子模块
+### 1.11 其他子模块
 
 | 子模块 | 核心类型 | 说明 |
 |--------|---------|------|
@@ -288,6 +337,8 @@ soul → rules+memories → history(from compression_marker) → current input
 | memory | ✅ 已集成 | `MemoryExtractor` 提取结构化记忆 |
 | observability | ✅ 已集成 | AgentMetrics 提供可观测性存储和自省接口 |
 | executor | ✅ 正常使用 | 独立执行函数、审批工作流、验证门控均被 agent 模块使用 |
+| lsp | ✅ 已集成 | 自研 LSP 客户端（注册表 + JSON-RPC 传输 + 诊断存储），通过 lsp 工具接入 |
+| snapshot | ✅ 已集成 | gzip 压缩 + GC + similar diff（ADR-006 例外，ADR-008 升级） |
 | knowledge | ✅ 已集成 | KnowledgeIngestor 已通过 knowledge_ingest 工具集成到 Agent 流程，Server 层通过 KnowledgeIngestor 真实处理导入与检索 |
 
 **已删除模块**：`planner/`（Planner-Executor 架构已废弃，仅保留 `ClarificationQuestion` 类型在 agent 中导出）
@@ -494,8 +545,9 @@ Tauri lib.rs::run()
 
 ---
 
-**文档版本**: 2026-08-06
-**最后更新**: 2026-08-06（Wave 6 重构后同步：executor 拆分 security/command/output_parse、tool_registry 4 域文件、approval//image//lancedb/ 目录化、SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉（ADR-007）、observability 2 文件、SessionManager 仅存 PersistentSessionManager、GcTask 删除投机代码、会话截断常量单点）
+**文档版本**: 2026-08-07
+**最后更新**: 2026-08-07（编程助手落地同步：executor 新增 hashline/truncate/edit/patch/fs/search/symbols/project/test_discovery 子模块，新增 lsp 模块，snapshot 升级 gzip+GC+diff（ADR-007/ADR-008），工具 14→21，Agent 章节工具清单更新）
+**历史**: 2026-08-06（Wave 6 重构后同步：executor 拆分 security/command/output_parse、tool_registry 4 域文件、approval//image//lancedb/ 目录化、SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉（ADR-007）、observability 2 文件、SessionManager 仅存 PersistentSessionManager、GcTask 删除投机代码、会话截断常量单点）
 **历史**: 2026-08-04（重构：storage→vfs，移除 planner/chunker/ModelRouter/TokenBudget/ConversationSummarizer/VisionEncoder/AgentHarness/AgentSkills wrapper，修正 ContentLoadStrategy→enum、L1 tokens→~2K、MemoryExtractionTrait→MemoryExtractor，反映 4 项核心架构决策，model/router+openai→provider，tasks→scheduler/tasks，executor 标注废弃，knowledge 确认未集成，session 确认已集成）
 **历史**: 2026-08-04（审查改进 16 项：knowledge_ingest 工具确认已接入 Agent 流程；ToolRegistry 拆分 execute_single 为 14 个独立工具方法；审批默认关闭无人值守、拒绝降级 ask_user 追问；TianyanError 新增 not_found/is_not_found 结构化错误分类；AppState 复用 ModelServices；SummaryTask 缓存 FIFO 淘汰；SSE 事件 id 语义对齐）
 

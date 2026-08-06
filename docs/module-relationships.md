@@ -427,7 +427,7 @@ TaskScheduler 触发
 
 ### 决策 3：组件工具化
 
-`agent/tool_registry/`（目录模块）注册 14 个工具（`read_file`、`write_file`、`execute_command`、`search_code`、`search_knowledge`、`vfs_read`、`vfs_list`、`call_skill`、`run_tests`、`verify_build`、`ask_user`、`self_check`、`knowledge_ingest`、`delegate_to_agent`），其中 `call_skill` 桥接到 `skills/executor.rs`。工具执行器按域拆分为 4 个文件（`file_ops.rs` / `code_ops.rs` / `knowledge_ops.rs` / `agent_ops.rs`），公开 API 与 dispatch 不变。
+`agent/tool_registry/`（目录模块）注册 21 个工具（`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_code`、`search_knowledge`、`vfs_read`、`vfs_list`、`call_skill`、`run_tests`、`discover_tests`、`verify_build`、`ask_user`、`self_check`、`knowledge_ingest`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`lsp`），其中 `call_skill` 桥接到 `skills/executor.rs`。工具执行器按域拆分为 8 个文件（`file_ops.rs` / `code_ops.rs` / `knowledge_ops.rs` / `agent_ops.rs` / `fs_ops.rs` / `lsp_ops.rs` / `symbol_ops.rs` / `test_ops.rs`），公开 API 与 dispatch 不变。
 
 **模块影响**：`agent/tool_registry/` 依赖 `skills::SkillExecutor` 实现 call_skill 工具，形成 agent → skills 单向依赖。
 

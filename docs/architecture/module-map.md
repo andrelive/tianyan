@@ -26,7 +26,8 @@
 | `common` | `core/src/common/` | 通用类型、错误处理、日志配置、token 估算、`StructuredMessage` | `error.rs`, `logging.rs`, `token_estimator.rs`, `types/`（含 `retrieval_trace.rs`） |
 | `config` | `core/src/config/` | TOML 配置管理 + 环境变量 + 向导 | `mod.rs`, `wizard.rs`, `validation.rs` |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 管线 + 组装） | `pipeline.rs`, `assembler.rs`, `retrieval/`, `compression/` |
-| `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控） | `actions.rs`, `security.rs`, `command.rs`, `output_parse.rs`, `approval/`, `verification.rs`, `judge.rs` |
+| `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 编程助手执行原语（hashline 编辑、patch、文件浏览、搜索、符号、测试发现） | `actions.rs`, `security.rs`, `command.rs`, `output_parse.rs`, `approval/`, `verification.rs`, `judge.rs`, `hashline.rs`, `truncate.rs`, `edit.rs`, `patch.rs`, `fs.rs`, `search.rs`, `symbols.rs`, `project.rs`, `test_discovery.rs` |
+| `lsp` | `core/src/lsp/` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储） | `registry.rs`, `client.rs`, `diagnostics.rs` |
 | `knowledge` | `core/src/knowledge/` | 知识库导入（解析、图像、注入管道） | `ingestor/`, `parser.rs`, `image/` |
 | `memory` | `core/src/memory/` | 长期记忆提取 | `extractor.rs` |
 | `model` | `core/src/model/` | 模型服务容器（`ModelServices`）+ provider 实现 | `traits.rs`, `services.rs`, `provider/` |
@@ -98,3 +99,5 @@
 - [ADR-005: SQLite 作为主存储后端](decisions/005-sqlite-backend.md)
 - [ADR-006: 工作区快照独立存储](decisions/006-snapshot-storage-exception.md) — snapshot 的 VFS 例外
 - [ADR-007: Core 依赖环消除与共享基础设施归属](decisions/007-core-dependency-cycle-removal.md) — SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉决策
+- [ADR-009: 语义化编辑双原语](decisions/009-hashline-editing.md) — hashline 锚点 + unified diff 信封（apply_edit / apply_patch）
+- [ADR-008: 快照升级](decisions/008-snapshot-upgrade.md) — gzip 压缩 + GC + similar diff（扩展 ADR-006）
