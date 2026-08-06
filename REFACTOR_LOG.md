@@ -232,3 +232,17 @@ core 模块系统性架构重构日志。约束：公开 API 签名与行为完�
 - **并发波次风险**：任务执行期间工作区存在其他并行修改（LoggingConfig 迁移）；中途一次外部 git 恢复操作回滚了已完成的 `git mv` 与部分文件编辑（usage_stats 部分编辑保留、types.rs/common-types 注册被回滚）。应对：每步编辑后立即用 `git diff` / `Select-String` 核对磁盘真相，被回滚的编辑重新应用，最终以 `git diff` 全量核对为准
 - `super::` 在 `#[cfg(test)] mod tests` 内指向 tests 的父模块（`sqlite`），而非 `backend` —— tests 模块内引用兄弟模块需绝对路径，`cargo check`（不含 cfg(test)）无法发现此类错误，必须跑 `cargo test` 编译
 - 首次 `cargo test -p tianyan-core --lib` 需冷编译 lance/datafusion 依赖链（debug profile），耗时可能超过 10 分钟，期间与并行波次的 cargo 构建互相阻塞，需放大超时
+## Wave 1b（T4）：SummaryEngine 删除死参数（P0-4）
+
+### 改动
+- `vfs/summary/engine.rs`：`SummaryEngine::new` 4 参数 → 2 参数（删除 `_embedding_service` / `_embedding_model_name` 两个从未使用的死参数）；`use crate::model::{ChatService, EmbeddingService}` → 仅 ChatService —— vfs→model 依赖边收窄（残留 ChatService 为摘要生成所需，非环）
+- 调用点同步：`server/src/state.rs`（删除 embedding_model 解析 + 简化调用）、`knowledge/ingestor/mod.rs`（删除 2 参数）、`gc_task.rs` 测试（删除 embedding 变量与 import）
+- engine.rs 7 处测试调用同步简化，删除 7 处 `let emb` 声明
+
+### 验证
+- `cargo test -p tianyan-core --lib`：542 通过 / 0 失败；零 warning
+- `cargo check --workspace`：通过
+- grep `_embedding_service|_embedding_model_name`（SummaryEngine 相关）= 0（test_utils 的 `_embedding_service` 字段为 TestVfs 自有字段，非本次范围）
+
+### 决策理由
+- 死参数是"设计声明与实际不符"的直接证据（traits.rs 声称 VFS 经 EmbeddingProvider 反转，engine 却携带未用依赖）；删除后构造 API 反映真实依赖

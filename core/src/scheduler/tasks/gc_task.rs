@@ -340,19 +340,16 @@ mod tests {
 
     use crate::common::types::ContextNamespace;
     use crate::memory::{ExtractionConfig, MemoryExtractor};
-    use crate::model::{ChatService, EmbeddingService};
-    use crate::test_utils::{MockChatService, MockEmbeddingService, MockVfs};
+use crate::model::ChatService;
+use crate::test_utils::{MockChatService, MockVfs};
     use crate::vfs::{SummaryEngine, VfsCore};
 
     /// 构造 GC 测试上下文（MockVfs + mock 服务，GC 仅使用 vfs）。
     fn make_context(vfs: Arc<MockVfs>) -> TaskContext {
         let chat: Arc<dyn ChatService> = Arc::new(MockChatService::new());
-        let embedding: Arc<dyn EmbeddingService> = Arc::new(MockEmbeddingService);
         let summary_engine = Arc::new(SummaryEngine::new(
             chat.clone(),
-            embedding,
             "test-model",
-            "test-embedding",
         ));
         let memory_extractor = Arc::new(MemoryExtractor::new(chat, ExtractionConfig::default()));
         let config = Arc::new(crate::config::TianyanConfig::default());

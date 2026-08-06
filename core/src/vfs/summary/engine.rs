@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::common::error::Result;
-use crate::model::{ChatService, EmbeddingService};
+use crate::model::ChatService;
 
 /// 不同内容级别的 token 限制。
 pub const ABSTRACT_TOKEN_LIMIT: usize = 100;
@@ -45,12 +45,7 @@ pub struct SummaryEngine {
 
 impl SummaryEngine {
     /// 创建新的摘要引擎。
-    pub fn new(
-        model_service: Arc<dyn ChatService>,
-        _embedding_service: Arc<dyn EmbeddingService>,
-        model_name: impl Into<String>,
-        _embedding_model_name: impl Into<String>,
-    ) -> Self {
+    pub fn new(model_service: Arc<dyn ChatService>, model_name: impl Into<String>) -> Self {
         Self {
             model_service,
             model_name: model_name.into(),
@@ -284,12 +279,9 @@ mod tests {
     #[test]
     fn test_real_engine_constructor() {
         let chat = MockChatService::new();
-        let emb = MockTestEmbeddingService::new();
         let engine = SummaryEngine::new(
             Arc::new(chat),
-            Arc::new(emb),
             "test-model",
-            "test-embed-model",
         );
         assert_eq!(engine.model_name, "test-model");
     }
@@ -299,12 +291,9 @@ mod tests {
         let mut chat = MockChatService::new();
         chat.expect_chat_completion()
             .returning(|_| Ok(mock_chat_response("Test abstract summary")));
-        let emb = MockTestEmbeddingService::new();
         let engine = SummaryEngine::new(
             Arc::new(chat),
-            Arc::new(emb),
             "test-model",
-            "test-embed-model",
         );
         let result = engine.generate_abstract("Some content").await.unwrap();
         assert_eq!(result, "Test abstract summary");
@@ -315,12 +304,9 @@ mod tests {
         let mut chat = MockChatService::new();
         chat.expect_chat_completion()
             .returning(|_| Ok(mock_chat_response("Test overview content")));
-        let emb = MockTestEmbeddingService::new();
         let engine = SummaryEngine::new(
             Arc::new(chat),
-            Arc::new(emb),
             "test-model",
-            "test-embed-model",
         );
         let result = engine.generate_overview("Some content").await.unwrap();
         assert_eq!(result, "Test overview content");
@@ -339,12 +325,9 @@ mod tests {
                 Ok(mock_chat_response("Test overview content"))
             }
         });
-        let emb = MockTestEmbeddingService::new();
         let engine = SummaryEngine::new(
             Arc::new(chat),
-            Arc::new(emb),
             "test-model",
-            "test-embed-model",
         );
         let (abstract_result, overview_result) =
             engine.generate_summaries("Some content").await.unwrap();
@@ -357,12 +340,9 @@ mod tests {
         let mut chat = MockChatService::new();
         chat.expect_chat_completion()
             .returning(|_| Ok(mock_chat_response("A cat sitting on a chair")));
-        let emb = MockTestEmbeddingService::new();
         let engine = SummaryEngine::new(
             Arc::new(chat),
-            Arc::new(emb),
             "test-model",
-            "test-embed-model",
         );
         let result = engine.generate_image_abstract("Cat image").await.unwrap();
         assert_eq!(result, "A cat sitting on a chair");
@@ -371,12 +351,9 @@ mod tests {
     #[tokio::test]
     async fn test_generate_image_overview() {
         let chat = MockChatService::new();
-        let emb = MockTestEmbeddingService::new();
         let engine = SummaryEngine::new(
             Arc::new(chat),
-            Arc::new(emb),
             "test-model",
-            "test-embed-model",
         );
 
         // description only — no elements, no ocr_text
@@ -423,12 +400,9 @@ mod tests {
     #[tokio::test]
     async fn test_generate_image_overview_full() {
         let chat = MockChatService::new();
-        let emb = MockTestEmbeddingService::new();
         let engine = SummaryEngine::new(
             Arc::new(chat),
-            Arc::new(emb),
             "test-model",
-            "test-embed-model",
         );
 
         let result = engine

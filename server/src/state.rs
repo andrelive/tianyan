@@ -325,19 +325,8 @@ impl AppState {
             .resolve(tianyan::config::ModelCapability::Chat)
             .map(|r| r.model)
             .unwrap_or_default();
-        let embedding_model = config
-            .models
-            .resolve(tianyan::config::ModelCapability::TextEmbedding)
-            .map(|r| r.model)
-            .unwrap_or_default();
-
         // 创建 SummaryEngine
-        let summary_engine = SummaryEngine::new(
-            model_services.chat,
-            model_services.embedding,
-            &chat_model,
-            &embedding_model,
-        );
+        let summary_engine = SummaryEngine::new(model_services.chat, &chat_model);
 
         Ok(Arc::new(summary_engine))
     }

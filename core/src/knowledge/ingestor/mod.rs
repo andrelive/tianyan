@@ -127,9 +127,7 @@ impl KnowledgeIngestor {
 
         let summary_engine = SummaryEngine::new(
             model_service,
-            embedding_service.clone(),
             config.summary_model.clone(),
-            config.embedding_model.clone(),
         );
 
         Self {
