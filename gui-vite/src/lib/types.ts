@@ -424,10 +424,91 @@ export interface PreferencesInfo {
   vision?: ModelRef | null;
 }
 
+// ========== Workspace Types (matches backend workspace DTO) ==========
+
+/** 工作区条目（GET /workspace/tree 中的单个条目）。 */
+export interface WorkspaceEntry {
+  name: string;
+  type: 'dir' | 'file';
+  /** 相对工作区根的路径（如 "src/main.rs"）。 */
+  path: string;
+  /** 文件大小（字节），目录条目无此字段。 */
+  size?: number;
+  /** 修改时间（epoch 毫秒），目录条目无此字段。 */
+  mtime?: number;
+}
+
+/** 工作区目录树响应（GET /workspace/tree）。 */
+export interface WorkspaceTreeResponse {
+  /** 工作区根目录绝对路径。 */
+  root: string;
+  /** 当前目录相对路径（根为空字符串）。 */
+  path: string;
+  entries: WorkspaceEntry[];
+}
+
+/** 工作区文件读取响应（GET /workspace/read）。 */
+export interface WorkspaceReadResponse {
+  /** 文件绝对路径。 */
+  path: string;
+  /** hashline 前缀内容（"N#ID|content"），二进制文件无此字段。 */
+  content?: string;
+  /** 内容是否被截断（还有更多行可分页读取）。 */
+  truncated?: boolean;
+  /** 文件总行数。 */
+  total_lines?: number;
+  /** 本窗口实际覆盖的行区间（offset 1 起始；limit 为请求的窗口行数）。 */
+  showing?: {
+    /** 窗口起始行号（1 起始）。 */
+    offset: number;
+    /** 请求的窗口行数。 */
+    limit: number;
+  };
+  /** 是否为二进制文件。 */
+  binary?: boolean;
+  /** 二进制文件大小（字节）。 */
+  size?: number;
+  /** 二进制文件预览文本。 */
+  preview?: string;
+}
+
+/** 工作区 diff 的单个 hunk（GET /workspace/diff）。 */
+export interface WorkspaceDiffHunk {
+  old_start: number;
+  old_len: number;
+  new_start: number;
+  new_len: number;
+}
+
+/** 工作区文件 diff 响应（GET /workspace/diff）。 */
+export interface WorkspaceDiffResponse {
+  /** 相对路径（省略时响应整体文件列表）。 */
+  path?: string;
+  status: 'modified' | 'added' | 'removed' | 'binary' | 'unchanged';
+  hunks: WorkspaceDiffHunk[];
+  /** 统一 diff 文本。 */
+  unified?: string;
+  old_lines?: number;
+  new_lines?: number;
+}
+
+/** 工作区整体 diff 响应（GET /workspace/diff 不带 path）。 */
+export interface WorkspaceDiffListResponse {
+  files: WorkspaceDiffResponse[];
+}
+
 // ========== App State Types ==========
 
 export type View =
-  'chat' | 'skills' | 'knowledge' | 'settings' | 'memory' | 'traces' | 'approval' | 'insights';
+  | 'chat'
+  | 'skills'
+  | 'knowledge'
+  | 'workspace'
+  | 'settings'
+  | 'memory'
+  | 'traces'
+  | 'approval'
+  | 'insights';
 
 export type StreamStatus = 'idle' | 'streaming' | 'error';
 

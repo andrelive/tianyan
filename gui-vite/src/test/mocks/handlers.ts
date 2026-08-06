@@ -17,6 +17,10 @@ import type {
   McpTestResponse,
   OllamaScanResponse,
   OllamaTestResponse,
+  WorkspaceEntry,
+  WorkspaceTreeResponse,
+  WorkspaceReadResponse,
+  WorkspaceDiffResponse,
 } from '@/lib/types';
 import type { KnowledgeEntryItem } from '@/lib/api-client';
 
@@ -148,6 +152,106 @@ export function resetKnowledgeEntryMocks() {
   mockKnowledgeDeleteCalls.length = 0;
   mockKnowledgeEntries.length = 0;
   mockKnowledgeEntries.push(...KNOWLEDGE_ENTRIES_BASE);
+}
+
+// ========== Workspace mock ==========
+
+/** 工作区目录树 fixture：key 为相对路径（根为空串）。 */
+export const mockWorkspaceTree: Record<string, WorkspaceEntry[]> = {
+  '': [
+    { name: 'src', type: 'dir', path: 'src' },
+    { name: 'Cargo.toml', type: 'file', path: 'Cargo.toml', size: 1234, mtime: 1712345678901 },
+    { name: 'main.rs', type: 'file', path: 'main.rs', size: 512, mtime: 1712345678000 },
+    { name: 'data.bin', type: 'file', path: 'data.bin', size: 4096, mtime: 1712345678000 },
+  ],
+  src: [
+    { name: 'lib.rs', type: 'file', path: 'src/lib.rs', size: 2048, mtime: 1712345678000 },
+    { name: 'utils.rs', type: 'file', path: 'src/utils.rs', size: 1024, mtime: 1712345678000 },
+    { name: 'generated', type: 'dir', path: 'src/generated' },
+  ],
+  'src/generated': [],
+};
+
+/** 记录的工作区 tree 调用（{ path, depth }），测试断言懒加载用。 */
+export const mockWorkspaceTreeCalls: { path?: string; depth: number }[] = [];
+
+/** 记录的工作区 read 调用（{ path, offset, limit }）。 */
+export const mockWorkspaceReadCalls: { path: string; offset?: number; limit: number }[] = [];
+
+/** 记录的工作区 diff 调用（{ path, sessionId, index }）。 */
+export const mockWorkspaceDiffCalls: {
+  path?: string;
+  sessionId?: string;
+  index?: number;
+}[] = [];
+
+/** 工作区根目录绝对路径 fixture。 */
+export const mockWorkspaceRoot = 'C:\\work\\tianyan';
+
+/** hashline 前缀的文件内容 fixture（"N#ID|content"）。 */
+export const mockWorkspaceReadContent = [
+  '1#3f|fn main() {',
+  '2#a1|    println!("hello");',
+  '3#7c|}',
+].join('\n');
+
+/** 截断文件第一页 fixture（truncated=true，供“加载更多”测试）。 */
+export const mockWorkspaceReadPage1 = {
+  path: 'C:\\work\\tianyan\\src\\lib.rs',
+  content: '1#3f|fn main() {',
+  truncated: true,
+  total_lines: 3,
+  binary: false,
+};
+
+/** 截断文件第二页 fixture。 */
+export const mockWorkspaceReadPage2 = {
+  path: 'C:\\work\\tianyan\\src\\lib.rs',
+  content: '2#a1|    println!("hello");\n3#7c|}',
+  truncated: false,
+  total_lines: 3,
+  binary: false,
+};
+
+/** 二进制文件读取 fixture。 */
+export const mockWorkspaceReadBinary = {
+  path: 'C:\\work\\tianyan\\data.bin',
+  binary: true,
+  size: 4096,
+  preview: '\\x00\\x01\\x02 binary preview',
+};
+
+/** 单文件 diff fixture（unified 文本带 +/- 行）。 */
+export const mockWorkspaceDiff: WorkspaceDiffResponse = {
+  path: 'src/lib.rs',
+  status: 'modified',
+  hunks: [{ old_start: 1, old_len: 3, new_start: 1, new_len: 3 }],
+  unified: [
+    '--- a/src/lib.rs',
+    '+++ b/src/lib.rs',
+    '@@ -1,3 +1,3 @@',
+    '-fn main() {',
+    '+fn main() {',
+    '     println!("hello");',
+    ' }',
+  ].join('\n'),
+  old_lines: 3,
+  new_lines: 3,
+};
+
+/** 整体 diff fixture（不带 path 时返回文件列表）。 */
+export const mockWorkspaceDiffList = {
+  files: [
+    mockWorkspaceDiff,
+    { path: 'main.rs', status: 'added', hunks: [], unified: '', old_lines: 0, new_lines: 1 },
+  ],
+};
+
+/** 恢复工作区 mock 到初始状态。 */
+export function resetWorkspaceMocks() {
+  mockWorkspaceTreeCalls.length = 0;
+  mockWorkspaceReadCalls.length = 0;
+  mockWorkspaceDiffCalls.length = 0;
 }
 
 // ========== Config mock ==========
@@ -846,6 +950,69 @@ export const handlers = [
   // Usage stats（后端为 GET /stats）
   http.get(`${API_BASE}/stats`, () => {
     return HttpResponse.json(mockUsageStats);
+  }),
+
+  // Workspace tree（后端为 GET /workspace/tree?path=&depth=）
+  http.get(`${API_BASE}/workspace/tree`, ({ request }) => {
+    const url = new URL(request.url);
+    const path = url.searchParams.get('path') ?? '';
+    const depth = Number(url.searchParams.get('depth') ?? 1);
+    mockWorkspaceTreeCalls.push({ path: path || undefined, depth });
+    const entries = mockWorkspaceTree[path] ?? [];
+    const response: WorkspaceTreeResponse = { root: mockWorkspaceRoot, path, entries };
+    return HttpResponse.json(response);
+  }),
+
+  // Workspace read（后端为 GET /workspace/read?path=&offset=&limit=）
+  http.get(`${API_BASE}/workspace/read`, ({ request }) => {
+    const url = new URL(request.url);
+    const path = url.searchParams.get('path') ?? '';
+    const offset = url.searchParams.get('offset');
+    const limit = Number(url.searchParams.get('limit') ?? 2000);
+    mockWorkspaceReadCalls.push({
+      path,
+      offset: offset === null ? undefined : Number(offset),
+      limit,
+    });
+    if (path.endsWith('.bin')) {
+      return HttpResponse.json(mockWorkspaceReadBinary);
+    }
+    // src/lib.rs 走分页 fixture；其余文件返回单页内容
+    if (path === 'src/lib.rs' && offset !== null) {
+      return HttpResponse.json(mockWorkspaceReadPage2);
+    }
+    if (path === 'src/lib.rs') {
+      return HttpResponse.json(mockWorkspaceReadPage1);
+    }
+    const response: WorkspaceReadResponse = {
+      path: `${mockWorkspaceRoot}\\${path}`,
+      content: mockWorkspaceReadContent,
+      truncated: false,
+      total_lines: 3,
+      binary: false,
+    };
+    return HttpResponse.json(response);
+  }),
+
+  // Workspace diff（后端为 GET /workspace/diff?path=&base=snapshot&session_id=&index=）
+  // 与后端契约一致：base=snapshot 缺少 session_id 或 index 时返回 400。
+  http.get(`${API_BASE}/workspace/diff`, ({ request }) => {
+    const url = new URL(request.url);
+    const path = url.searchParams.get('path');
+    const sessionId = url.searchParams.get('session_id') ?? undefined;
+    const indexRaw = url.searchParams.get('index');
+    mockWorkspaceDiffCalls.push({
+      path: path ?? undefined,
+      sessionId,
+      index: indexRaw === null ? undefined : Number(indexRaw),
+    });
+    if (sessionId === undefined || indexRaw === null) {
+      return new HttpResponse(null, { status: 400 });
+    }
+    if (!path) {
+      return HttpResponse.json(mockWorkspaceDiffList);
+    }
+    return HttpResponse.json(mockWorkspaceDiff);
   }),
 
   // Config

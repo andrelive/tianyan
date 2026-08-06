@@ -18,8 +18,16 @@
     "test:all": "vitest run && playwright test"
   },
   "dependencies": {
+    "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/lang-python": "^6.1.6",
+    "@codemirror/lang-rust": "^6.0.1",
+    "@codemirror/language": "^6.10.8",
+    "@codemirror/merge": "^6.0.1",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.36.4",
     "lucide-react": "^0.460.0",
     "react": "^18.3.1",
+    "react-arborist": "^3.4.2",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",
     "react-router-dom": "^6.28.0",

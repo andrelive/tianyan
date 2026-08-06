@@ -11,6 +11,7 @@ import Toast from '@/components/layout/Toast';
 import ChatPanel from '@/components/chat/ChatPanel';
 import SkillsPanel from '@/components/skills/SkillsPanel';
 import KnowledgePanel from '@/components/knowledge/KnowledgePanel';
+import WorkspacePanel from '@/components/workspace/WorkspacePanel';
 import MemoryPanel from '@/components/memory/MemoryPanel';
 import RetrievalTracesPanel from '@/components/retrieval/RetrievalTracesPanel';
 import ApprovalPanel from '@/components/approval/ApprovalPanel';
@@ -82,6 +83,7 @@ function App() {
           <Route path="/chat/:sessionId" element={<ChatPanel />} />
           <Route path="/skills" element={<SkillsPanel />} />
           <Route path="/knowledge" element={<KnowledgePanel />} />
+          <Route path="/workspace" element={<WorkspacePanel />} />
           <Route path="/memory" element={<MemoryPanel />} />
           <Route path="/traces" element={<RetrievalTracesPanel />} />
           <Route path="/approval" element={<ApprovalPanel />} />

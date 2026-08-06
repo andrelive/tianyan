@@ -8,6 +8,7 @@ import {
   MessageSquare,
   Wrench,
   BookOpen,
+  FolderOpen,
   MemoryStick,
   Route,
   ShieldCheck,
@@ -27,6 +28,12 @@ const NAV_ITEMS = [
     label: '知识',
     icon: BookOpen,
     path: '/knowledge',
+  },
+  {
+    id: 'workspace' as const,
+    label: '工作区',
+    icon: FolderOpen,
+    path: '/workspace',
   },
   {
     id: 'memory' as const,

@@ -12,6 +12,10 @@ import type {
   SchedulerStatus,
   SessionMessagesResponse,
   UsageStatsSummary,
+  WorkspaceDiffListResponse,
+  WorkspaceDiffResponse,
+  WorkspaceReadResponse,
+  WorkspaceTreeResponse,
 } from './types';
 
 const DEFAULT_TIMEOUT = 60000;
@@ -317,4 +321,49 @@ export async function fetchSchedulerStatus(): Promise<SchedulerStatus> {
 /** 获取使用统计摘要（技能调用 / 文档访问 / 搜索热度）。 */
 export async function fetchUsageStats(): Promise<UsageStatsSummary> {
   return apiGet<UsageStatsSummary>('/stats');
+}
+
+// ========== Workspace API (read-only, Phase 1) ==========
+
+/** 列出工作区目录下的直接子条目（dir 深度 1）。 */
+export async function fetchWorkspaceTree(path?: string, depth = 1): Promise<WorkspaceTreeResponse> {
+  const params = new URLSearchParams();
+  if (path) params.set('path', path);
+  params.set('depth', String(depth));
+  return apiGet<WorkspaceTreeResponse>(`/workspace/tree?${params}`);
+}
+
+/** 分页读取工作区文件内容（offset 为起始行号，limit 默认 2000）。 */
+export async function fetchWorkspaceRead(
+  path: string,
+  offset?: number,
+  limit = 2000,
+): Promise<WorkspaceReadResponse> {
+  const params = new URLSearchParams({ path });
+  if (offset !== undefined) params.set('offset', String(offset));
+  params.set('limit', String(limit));
+  return apiGet<WorkspaceReadResponse>(`/workspace/read?${params}`);
+}
+
+/** 读取指定文件相对快照的 diff（sessionId/index 定位快照）。 */
+export async function fetchWorkspaceDiff(
+  path: string,
+  sessionId?: string,
+  index?: number,
+): Promise<WorkspaceDiffResponse> {
+  const params = new URLSearchParams({ path, base: 'snapshot' });
+  if (sessionId) params.set('session_id', sessionId);
+  if (index !== undefined) params.set('index', String(index));
+  return apiGet<WorkspaceDiffResponse>(`/workspace/diff?${params}`);
+}
+
+/** 读取工作区整体 diff（不带 path 时返回文件列表）。 */
+export async function fetchWorkspaceDiffList(
+  sessionId?: string,
+  index?: number,
+): Promise<WorkspaceDiffListResponse> {
+  const params = new URLSearchParams({ base: 'snapshot' });
+  if (sessionId) params.set('session_id', sessionId);
+  if (index !== undefined) params.set('index', String(index));
+  return apiGet<WorkspaceDiffListResponse>(`/workspace/diff?${params}`);
 }
