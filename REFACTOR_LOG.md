@@ -653,3 +653,18 @@ core 模块系统性架构重构日志。约束：公开 API 签名与行为完�
 - GREEN：`cargo test -p tianyan-core --lib` = **577 passed / 0 failed / 1 ignored**（基线 559 + 本任务 15 新测试；剩余 3 为并行 Wave 5 任务测试；skills `validate_path` 5 测试 + `normalize` 1 测试全绿，security.rs 新 15 测试全绿）
 - 新测试覆盖：allowlist（内放行/外拒绝/前缀兄弟拒绝/空列表放行/绝对路径匹配）+ blacklist（拒绝/嵌套子路径拒绝/**黑名单优先于白名单**/未命中黑名单时白名单放行）+ `SecurityPolicy::check_path` 行为锁定（黑名单消息含 `(禁止：{})`、白名单消息、空列表放行、黑名单优先级、Permissive 跳过）+ verbatim 前缀剥离
 - `cargo check --workspace` 通过；改动 3 文件 `rustfmt --check` 零差异；clippy 仅剩基线既有警告（`validate_path` 的 `ptr_arg` 为任务锁定签名，属既有警告随行号迁移）
+## Wave 7（Loop 2）：clippy 零警告达成（19 → 0）
+
+### 改动
+- `core/src/observability/mod.rs`：`total / count` 手动除零判断 → `checked_div().unwrap_or(0)`（manual_checked_div）；`sort_by` → `sort_by_key(Reverse)`（sort_by_key）
+- `core/src/session/manager.rs`：`sort_by` → `sort_by_key(Reverse)`（sort_by_key）
+- `core/src/agent/tool_registry/mod.rs`：`TestConflictingTool` 从 `mod tests` 之后移入测试模块内（items_after_test_module）
+- `tauri/src/lib.rs`：顶部新增 `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]`（与 core/lib.rs 模式一致，覆盖整个 crate 含 server.rs 测试）；`mod tests` 移到文件末尾（items_after_test_module）；`tokio::time::sleep` → `sleep`（unnecessary_qualification）
+
+### 验证
+- `cargo clippy --workspace --all-targets`：0 warnings（重构起点 22 → Loop 1 后 19 → 本轮 0）
+- `cargo test -p tianyan-core --lib`：577 passed；`cargo test -p tianyan-tauri --lib`：7 passed；`cargo test -p tianyan-server --lib`：36 passed
+- 纯 lint 清理，零行为变化（豁免属性仅作用于 cfg(test)）
+
+### 决策理由
+- 项目 REFACTOR_LOG 迭代 6 曾声明"clippy 零警告"标准，19 个遗留（observability/session/tool_registry/tauri）为最后卫生缺口；expect 豁免采用与 core 相同的 crate 级 cfg_attr(test) 模式，避免逐测试加 allow 的噪声

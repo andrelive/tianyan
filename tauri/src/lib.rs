@@ -5,6 +5,10 @@
 //! - Waits for the server to be ready via health checks
 //! - Launches a Tauri window to display the Yew-based GUI
 
+// 测试代码中 unwrap/expect 是有意的（失败即 panic 即测试失败），
+// 豁免这些 lint 以保持测试可读性。生产代码不受影响。
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod server;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -248,91 +252,6 @@ fn next_backoff(current: Duration, max: Duration) -> Duration {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("创建测试 runtime")
-    }
-
-    #[test]
-    fn test_instance_running_on_detects_live_server() {
-        // 起一个真实健康检查服务，探测应返回 true
-        let rt = test_runtime();
-        let listener = std::net::TcpListener::bind((SERVER_HOST, 0)).expect("绑定临时端口");
-        let port = listener.local_addr().expect("读取端口").port();
-        listener.set_nonblocking(true).expect("非阻塞");
-
-        // 启动测试服务并等待就绪（同一 block_on 内：from_std/spawn 需要 runtime 上下文，
-        // 轮询驱动 server 任务；最多 2s）
-        let ready = rt.block_on(async {
-            let tokio_listener =
-                tokio::net::TcpListener::from_std(listener).expect("转 tokio listener");
-            let app = axum::Router::new().route(
-                "/health",
-                axum::routing::get(|| async {
-                    axum::response::Json(serde_json::json!({"status": "ok"}))
-                }),
-            );
-            rt.spawn(async move {
-                let _ = axum::serve(tokio_listener, app).await;
-            });
-            for _ in 0..20 {
-                if reqwest::Client::new()
-                    .get(format!("http://{}:{}/health", SERVER_HOST, port))
-                    .send()
-                    .await
-                    .map(|r| r.status().is_success())
-                    .unwrap_or(false)
-                {
-                    return true;
-                }
-                tokio::time::sleep(HEALTH_CHECK_INTERVAL).await;
-            }
-            false
-        });
-        assert!(ready, "测试服务应就绪");
-        assert!(instance_running_on(&rt, port), "服务在线时应探测到实例");
-    }
-
-    #[test]
-    fn test_instance_running_on_returns_false_for_idle_port() {
-        // 未启动服务的随机端口，探测应返回 false（无并发占用，结果确定）
-        let rt = test_runtime();
-        let probe = std::net::TcpListener::bind((SERVER_HOST, 0)).expect("绑定临时端口");
-        let port = probe.local_addr().expect("读取端口").port();
-        drop(probe);
-        assert!(!instance_running_on(&rt, port), "空闲端口不应探测到实例");
-    }
-
-    #[test]
-    fn test_next_backoff_doubles_exponentially() {
-        assert_eq!(
-            next_backoff(Duration::from_secs(1), Duration::from_secs(30)),
-            Duration::from_secs(2)
-        );
-        assert_eq!(
-            next_backoff(Duration::from_secs(4), Duration::from_secs(30)),
-            Duration::from_secs(8)
-        );
-    }
-
-    #[test]
-    fn test_next_backoff_caps_at_max() {
-        assert_eq!(
-            next_backoff(Duration::from_secs(16), Duration::from_secs(30)),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            next_backoff(Duration::from_secs(30), Duration::from_secs(30)),
-            Duration::from_secs(30)
-        );
-    }
-}
 
 /// 初始化日志系统 - 同时输出到文件和控制台。
 ///
@@ -661,3 +580,90 @@ pub fn run() {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("创建测试 runtime")
+    }
+
+    #[test]
+    fn test_instance_running_on_detects_live_server() {
+        // 起一个真实健康检查服务，探测应返回 true
+        let rt = test_runtime();
+        let listener = std::net::TcpListener::bind((SERVER_HOST, 0)).expect("绑定临时端口");
+        let port = listener.local_addr().expect("读取端口").port();
+        listener.set_nonblocking(true).expect("非阻塞");
+
+        // 启动测试服务并等待就绪（同一 block_on 内：from_std/spawn 需要 runtime 上下文，
+        // 轮询驱动 server 任务；最多 2s）
+        let ready = rt.block_on(async {
+            let tokio_listener =
+                tokio::net::TcpListener::from_std(listener).expect("转 tokio listener");
+            let app = axum::Router::new().route(
+                "/health",
+                axum::routing::get(|| async {
+                    axum::response::Json(serde_json::json!({"status": "ok"}))
+                }),
+            );
+            rt.spawn(async move {
+                let _ = axum::serve(tokio_listener, app).await;
+            });
+            for _ in 0..20 {
+                if reqwest::Client::new()
+                    .get(format!("http://{}:{}/health", SERVER_HOST, port))
+                    .send()
+                    .await
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+                sleep(HEALTH_CHECK_INTERVAL).await;
+            }
+            false
+        });
+        assert!(ready, "测试服务应就绪");
+        assert!(instance_running_on(&rt, port), "服务在线时应探测到实例");
+    }
+
+    #[test]
+    fn test_instance_running_on_returns_false_for_idle_port() {
+        // 未启动服务的随机端口，探测应返回 false（无并发占用，结果确定）
+        let rt = test_runtime();
+        let probe = std::net::TcpListener::bind((SERVER_HOST, 0)).expect("绑定临时端口");
+        let port = probe.local_addr().expect("读取端口").port();
+        drop(probe);
+        assert!(!instance_running_on(&rt, port), "空闲端口不应探测到实例");
+    }
+
+    #[test]
+    fn test_next_backoff_doubles_exponentially() {
+        assert_eq!(
+            next_backoff(Duration::from_secs(1), Duration::from_secs(30)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(4), Duration::from_secs(30)),
+            Duration::from_secs(8)
+        );
+    }
+
+    #[test]
+    fn test_next_backoff_caps_at_max() {
+        assert_eq!(
+            next_backoff(Duration::from_secs(16), Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(30), Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+    }
+}
+

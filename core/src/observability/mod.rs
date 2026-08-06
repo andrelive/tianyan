@@ -132,7 +132,7 @@ impl AgentMetrics {
         let history = self.token_history.read().await;
         let total: usize = history.iter().map(|r| r.total_tokens).sum();
         let count = history.len();
-        let avg = if count > 0 { total / count } else { 0 };
+        let avg = total.checked_div(count).unwrap_or(0);
 
         serde_json::json!({
             "total_executions": count,
@@ -180,7 +180,7 @@ impl AgentMetrics {
     pub async fn query_common_failures(&self) -> serde_json::Value {
         let failures = self.failure_history.read().await;
         let mut sorted = failures.clone();
-        sorted.sort_by(|a, b| b.failure_count.cmp(&a.failure_count));
+        sorted.sort_by_key(|f| std::cmp::Reverse(f.failure_count));
 
         let top: Vec<serde_json::Value> = sorted
             .iter()
