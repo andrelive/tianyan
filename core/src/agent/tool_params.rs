@@ -2,11 +2,19 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::executor::edit::EditSpec;
+
 /// 读取文件参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReadFileParams {
     /// 文件路径。
     pub path: String,
+    /// 起始行号（1 起始，默认 1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// 最大读取行数（默认 2000）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// 写入文件参数。
@@ -16,6 +24,15 @@ pub struct WriteFileParams {
     pub path: String,
     /// 文件内容。
     pub content: String,
+}
+
+/// 应用编辑参数（哈希锚定行编辑，1..=20 条）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApplyEditParams {
+    /// 文件路径。
+    pub path: String,
+    /// 编辑规格列表。
+    pub edits: Vec<EditSpec>,
 }
 
 /// 执行命令参数。
@@ -32,13 +49,50 @@ pub struct ExecuteCommandParams {
 }
 
 /// 搜索代码参数。
+///
+/// 字段命名对齐 ripgrep 参数：`pattern` 为正式字段名（serde alias 兼容旧载荷的
+/// `query`），`path` 兼容旧 `scope`；其余为可选的 ripgrep 高级参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchCodeParams {
-    /// 查询字符串。
-    pub query: String,
-    /// 搜索范围。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+    /// 搜索模式（正则；兼容旧字段名 `query`）。
+    #[serde(alias = "query")]
+    pub pattern: String,
+    /// 搜索根目录（默认当前工作目录；兼容旧字段名 `scope`）。
+    #[serde(default, alias = "scope", skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// glob 过滤器（如 `*.rs`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glob: Option<String>,
+    /// 输出模式："files_with_matches"（默认）| "content" | "count"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_mode: Option<String>,
+    /// 文件类型过滤器（rg --type，如 "rust"）。
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub type_: Option<String>,
+    /// 忽略大小写（-i）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignore_case: Option<bool>,
+    /// 显示行号（-n，content 模式默认 true）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_number: Option<bool>,
+    /// 上下文行数（-C）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<usize>,
+    /// 前文行数（-B）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_context: Option<usize>,
+    /// 后文行数（-A）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_context: Option<usize>,
+    /// 结果条数上限（默认 200）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_limit: Option<usize>,
+    /// 分页偏移（0 起始）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// 多行匹配（-U）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multiline: Option<bool>,
 }
 
 /// 调用技能参数。
@@ -52,16 +106,29 @@ pub struct CallSkillParams {
 }
 
 /// 运行测试参数。
+///
+/// `command` 为显式命令（向后兼容旧必填契约，缺省时按 `framework`/`suite`/`filter`
+/// 由项目探测（[`crate::executor::project::probe_project`]）解析默认命令模板）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RunTestsParams {
-    /// 测试命令。
-    pub command: String,
+    /// 显式测试命令（向后兼容旧必填字段；缺省时由 framework 解析默认命令）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     /// 工作目录。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     /// 超时秒数。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// 框架："auto"（默认，按项目探测）| "cargo" | "pytest" | "vitest"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+    /// 测试过滤（cargo test <filter> / pytest -k <filter>）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    /// 测试套件（cargo -p <suite> / pytest <suite-file>）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suite: Option<String>,
 }
 
 /// 验证构建参数。
@@ -157,4 +224,68 @@ mod tests {
         let json = serde_json::to_string(&params).unwrap();
         assert!(json.contains("What is your name?"));
     }
+}
+
+/// glob 查找文件参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GlobParams {
+    /// glob 模式（如 `**/*.rs`、`*.toml`）。
+    pub pattern: String,
+    /// 搜索根目录（默认当前工作目录）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// 列出目录条目参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ListDirParams {
+    /// 目录路径。
+    pub path: String,
+    /// 分页偏移（0 起始，排序后应用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// 分页条数上限。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// 应用统一 diff 补丁参数（codex 风格 `*** Update File` 信封格式，可含多文件）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApplyPatchParams {
+    /// 补丁文本（可能包含多个文件的补丁块）。
+    pub patch: String,
+}
+
+/// 符号大纲提取参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SymbolOutlineParams {
+    /// 源码文件路径。
+    pub path: String,
+}
+
+/// 发现测试参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DiscoverTestsParams {
+    /// 项目根目录（或项目内任意目录，向上探测）。
+    pub path: String,
+}
+
+/// LSP 查询参数（lsp 工具：goToDefinition / findReferences / hover /
+/// documentSymbol / workspaceSymbol / goToImplementation）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LspParams {
+    /// 操作类型。
+    pub operation: String,
+    /// 目标文件路径（workspaceSymbol 也用它选择项目服务器；全操作必需）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    /// 目标行（0 起始；workspaceSymbol 可省略）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// 目标列（0 起始；workspaceSymbol 可省略）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<usize>,
+    /// workspaceSymbol 查询关键字。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
 }

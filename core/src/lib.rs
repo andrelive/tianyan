@@ -45,6 +45,8 @@ pub mod context;
 /// 执行器（独立执行函数 + Action）。
 pub mod executor;
 pub mod knowledge;
+/// LSP 集成：语言服务器注册表 + 自实现 JSON-RPC 客户端 + 推送诊断。
+pub mod lsp;
 pub mod memory;
 pub mod model;
 pub mod observability;

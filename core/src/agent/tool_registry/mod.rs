@@ -5,9 +5,11 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::agent::tool_params::{
-    AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams,
-    KnowledgeIngestParams, ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams,
-    SelfCheckParams, VerifyBuildParams, VfsListParams, VfsReadParams, WriteFileParams,
+    ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
+    DiscoverTestsParams, ExecuteCommandParams, GlobParams, KnowledgeIngestParams, ListDirParams,
+    LspParams, ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams,
+    SelfCheckParams, SymbolOutlineParams, VerifyBuildParams, VfsListParams, VfsReadParams,
+    WriteFileParams,
 };
 use crate::common::error::TianyanError;
 use crate::executor::approval::ApprovalWorkflow;
@@ -15,6 +17,7 @@ use crate::executor::Action;
 use crate::executor::SecurityPolicy;
 use crate::executor::VerificationGate;
 use crate::knowledge::KnowledgeIngestor;
+use crate::lsp::diagnostics::LspManager;
 use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition};
 use crate::model::ChatService;
 use crate::observability::usage_stats::UsageStats;
@@ -28,7 +31,15 @@ mod agent_ops;
 mod code_ops;
 /// 工具执行器实现（按工具域拆分，14 个 `execute_*` 方法）。
 mod file_ops;
+/// 文件系统浏览工具执行器（glob / list_dir）。
+mod fs_ops;
 mod knowledge_ops;
+/// LSP 工具执行器（execute_lsp）。
+mod lsp_ops;
+/// 符号大纲工具执行器（symbol_outline）。
+mod symbol_ops;
+/// 测试发现工具执行器（discover_tests）。
+mod test_ops;
 
 /// 将 VFS 层级内容读取结果转换为 JSON 字段值。
 ///
@@ -91,6 +102,8 @@ pub struct ToolRegistry {
     pub(crate) pending_approval_fingerprints: Arc<Mutex<Vec<String>>>,
     /// 语义验证门控（verify_build 工具的 LLM-as-Judge 支持）。
     pub(crate) verification_gate: Option<Arc<VerificationGate>>,
+    /// LSP 管理器（lsp 工具与编辑后诊断附加依赖；None 表示未启用 LSP）。
+    pub(crate) lsp_manager: Option<Arc<LspManager>>,
     /// 规则记录器（工具执行失败时自动学习规则，供 GEPA 进化引擎消费）。
     pub(crate) rule_recorder: Option<Arc<RuleRecorder>>,
     /// 使用统计追踪器（技能调用频率、文档访问热度）。
@@ -116,6 +129,7 @@ impl ToolRegistry {
             approval_workflow: None,
             pending_approval_fingerprints: Arc::new(Mutex::new(Vec::new())),
             verification_gate: None,
+            lsp_manager: None,
             rule_recorder: None,
             usage_stats: None,
             definitions: Vec::new(),
@@ -229,6 +243,12 @@ impl ToolRegistry {
         self
     }
 
+    /// 设置 LSP 管理器（execute_lsp 工具与编辑后诊断附加依赖）。
+    pub fn with_lsp_manager(mut self, manager: Arc<LspManager>) -> Self {
+        self.lsp_manager = Some(manager);
+        self
+    }
+
     /// 设置规则记录器（工具执行失败时自动学习规则）。
     pub fn with_rule_recorder(mut self, recorder: Arc<RuleRecorder>) -> Self {
         self.rule_recorder = Some(recorder);
@@ -303,6 +323,8 @@ impl ToolRegistry {
         let result = match call.function.name.as_str() {
             "read_file" => self.execute_read_file(arguments).await,
             "write_file" => self.execute_write_file(arguments).await,
+            "apply_edit" => self.execute_apply_edit(arguments).await,
+            "apply_patch" => self.execute_apply_patch(arguments).await,
             "execute_command" => self.execute_execute_command(arguments).await,
             "search_code" => self.execute_search_code(arguments).await,
             "search_knowledge" => self.execute_search_knowledge(arguments).await,
@@ -310,11 +332,16 @@ impl ToolRegistry {
             "vfs_list" => self.execute_vfs_list(arguments).await,
             "call_skill" => self.execute_call_skill(arguments).await,
             "run_tests" => self.execute_run_tests(arguments).await,
+            "discover_tests" => self.execute_discover_tests(arguments).await,
             "verify_build" => self.execute_verify_build(arguments).await,
             "ask_user" => self.execute_ask_user(arguments).await,
             "self_check" => self.execute_self_check().await,
             "knowledge_ingest" => self.execute_knowledge_ingest(arguments).await,
             "delegate_to_agent" => self.execute_delegate_to_agent(arguments).await,
+            "glob" => self.execute_glob(arguments).await,
+            "list_dir" => self.execute_list_dir(arguments).await,
+            "symbol_outline" => self.execute_symbol_outline(arguments).await,
+            "lsp" => self.execute_lsp(arguments).await,
             name => match self.dynamic_tools.lock().await.get(name).cloned() {
                 Some(executor) => executor.execute(&call.function.arguments).await,
                 None => Err(TianyanError::Custom(format!("tool: 未知工具：{name}"))),
@@ -405,6 +432,20 @@ impl ToolRegistry {
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                ApplyEditParams,
+            >(
+                "apply_edit",
+                "Apply precise edits to a file using line-number + content-hash anchors. Each edit targets a line range verified by an anchor hash; edits are applied bottom-up after all anchors are validated (atomic batch).",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                ApplyPatchParams,
+            >(
+                "apply_patch",
+                "Apply a unified diff patch (*** Update File format) to one or more files. Supports fuzzy matching of context lines and multiple files in one patch.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
                 ExecuteCommandParams,
             >(
                 "execute_command",
@@ -454,6 +495,13 @@ impl ToolRegistry {
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                DiscoverTestsParams,
+            >(
+                "discover_tests",
+                "Discover tests in the project (cargo test -- --list / pytest --collect-only -q / vitest --list) and return structured test list with suite, name, file and line. Does not execute tests.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
                 VerifyBuildParams,
             >(
                 "verify_build",
@@ -486,6 +534,32 @@ impl ToolRegistry {
             >(
                 "delegate_to_agent",
                 "Delegate a sub-task to an isolated sub-agent with its own context.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                GlobParams,
+            >(
+                "glob",
+                "Find files by glob pattern (e.g. **/*.rs) under a directory, sorted by modification time (newest first). Respects .gitignore.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                ListDirParams,
+            >(
+                "list_dir",
+                "List entries in a single directory level. Directories have a trailing '/'. Supports pagination via offset/limit.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                SymbolOutlineParams,
+            >(
+                "symbol_outline",
+                "Extract a structural outline (functions, structs, classes, impls, interfaces, enums) of a source file using tree-sitter. Supports Rust, TypeScript/JavaScript, Python, Go.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<LspParams>(
+                "lsp",
+                "Query the language server for the given file: goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation. Returns structured results.",
             )));
     }
 }

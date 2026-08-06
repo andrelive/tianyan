@@ -8,10 +8,22 @@
 //! - **回退恢复**：[`SnapshotManager::restore`] 读取目标树，增量对比当前工作区，
 //!   恢复差异文件、删除快照中不存在的新增文件
 //! - **排除规则**：`.git`、`node_modules`、`target` 等大目录与超大文件不纳入快照
+//!
+//! # 对象压缩（磁盘格式决策）
+//!
+//! 对象库中的字节自 **2026-08-06** 起以 gzip 流存储（`flate2` 默认压缩级别，
+//! 写路径 [`SnapshotManager::capture_file`] 压缩）。对象键**不变**，仍为 raw 内容
+//! sha256（`hex_sha256`），全局去重语义保持不变。读取时以 gzip 魔数 `0x1f 0x8b`
+//! 识别：命中则 `GzDecoder` 解压，否则按 legacy 未压缩对象处理 —— 旧版本快照库
+//! 保持可读，混合存储亦可正确恢复。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use ring::digest::{digest, SHA256};
 use tokio::fs;
 
@@ -53,6 +65,60 @@ struct CachedFile {
 
 /// 文件缓存表：{相对路径 → 缓存条目}。
 type FileCache = HashMap<String, CachedFile>;
+
+/// 垃圾回收统计结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcStats {
+    /// 删除的孤儿对象数。
+    pub objects_removed: usize,
+    /// 保留的对象数（`total_objects - objects_removed`）。
+    pub objects_retained: usize,
+    /// 删除的孤儿重做缓存文件数。
+    pub cache_files_removed: usize,
+    /// 扫描时的对象总数。
+    pub total_objects: usize,
+}
+
+/// 工作区与快照的差异结果（前端展示 / 模型理解用）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiffResult {
+    /// 会话 ID。
+    pub session_id: String,
+    /// 快照索引。
+    pub index: usize,
+    /// 文件级差异（按路径排序）。
+    pub files: Vec<FileDiff>,
+}
+
+/// 单个文件的差异。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FileDiff {
+    /// 相对路径。
+    pub path: String,
+    /// 差异状态：`added` | `removed` | `modified` | `binary`。
+    pub status: String,
+    /// 变更块（added/removed/binary 为空）。
+    pub hunks: Vec<Hunk>,
+    /// unified diff 文本（binary 为空）。
+    pub unified: String,
+    /// 旧内容行数（added 为 0）。
+    pub old_lines: usize,
+    /// 新内容行数（removed 为 0）。
+    pub new_lines: usize,
+}
+
+/// 变更块坐标（1 起始）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Hunk {
+    /// 旧内容起始行（1 起始）。
+    pub old_start: usize,
+    /// 旧内容行数。
+    pub old_len: usize,
+    /// 新内容起始行（1 起始）。
+    pub new_start: usize,
+    /// 新内容行数。
+    pub new_len: usize,
+}
 
 impl SnapshotManager {
     /// 创建快照管理器。
@@ -122,6 +188,128 @@ impl SnapshotManager {
 
         let tree = self.load_tree(session_id, index).await?;
         self.restore_tree(tree, &self.workdir).await
+    }
+
+    /// 对比当前工作区与 `(session_id, index)` 快照，返回结构化差异（前端展示 / 模型理解用）。
+    ///
+    /// 快照树中的文件按内容哈希比较：哈希相同 → 跳过（unchanged）；工作区缺失 → `removed`；
+    /// 内容不同 → 读取双方字节，二进制（NUL 字节或控制字符占比 >30%）→ `binary`，
+    /// 否则生成 hunks + unified diff → `modified`。当前工作区新增文件 → `added`。
+    /// 结果按路径排序，输出确定。
+    pub async fn diff(&self, session_id: &str, index: usize) -> Result<DiffResult> {
+        self.validate_session_id(session_id)?;
+        let tree = self.load_tree(session_id, index).await?;
+
+        let mut current: SnapshotTree = HashMap::new();
+        if self.workdir.exists() {
+            self.walk_current(&self.workdir, "", &mut current).await?;
+        }
+
+        let mut files: Vec<FileDiff> = Vec::new();
+
+        // 1. 快照树侧：removed / binary / modified（unchanged 跳过）
+        for (path, tree_hash) in &tree {
+            let work_path = self.workdir.join(path);
+            match current.get(path) {
+                Some(cur_hash) if cur_hash == tree_hash => continue,
+                _ => {
+                    let meta = match fs::metadata(&work_path).await {
+                        Ok(m) => m,
+                        Err(_) => {
+                            // 工作区缺失 → removed（行数取自对象内容）
+                            let old_lines = self.object_line_count(tree_hash).await;
+                            files.push(FileDiff {
+                                path: path.clone(),
+                                status: "removed".to_string(),
+                                hunks: Vec::new(),
+                                unified: String::new(),
+                                old_lines,
+                                new_lines: 0,
+                            });
+                            continue;
+                        }
+                    };
+                    if meta.len() > MAX_FILE_BYTES {
+                        files.push(binary_diff(path));
+                        continue;
+                    }
+                    let current_bytes = match fs::read(&work_path).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!(path = %path, error = %e, "snapshot: diff 跳过无法读取的文件");
+                            continue;
+                        }
+                    };
+                    let object_bytes = match fs::read(self.object_path(tree_hash)).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!(path = %path, error = %e, "snapshot: diff 读取快照对象失败");
+                            continue;
+                        }
+                    };
+                    let old_bytes = match read_object_bytes(&object_bytes) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!(path = %path, error = %e, "snapshot: diff 解压快照对象失败");
+                            continue;
+                        }
+                    };
+                    if looks_binary(&current_bytes) || looks_binary(&old_bytes) {
+                        files.push(binary_diff(path));
+                        continue;
+                    }
+                    let old_text = String::from_utf8_lossy(&old_bytes).into_owned();
+                    let new_text = String::from_utf8_lossy(&current_bytes).into_owned();
+                    let text_diff =
+                        similar::TextDiff::from_lines(old_text.as_str(), new_text.as_str());
+                    files.push(FileDiff {
+                        path: path.clone(),
+                        status: "modified".to_string(),
+                        hunks: build_hunks(text_diff.ops()),
+                        unified: text_diff
+                            .unified_diff()
+                            .header("snapshot", "current")
+                            .to_string(),
+                        old_lines: old_text.lines().count(),
+                        new_lines: new_text.lines().count(),
+                    });
+                }
+            }
+        }
+
+        // 2. 当前工作区侧：added（二进制 → binary）
+        for path in current.keys() {
+            if tree.contains_key(path) {
+                continue;
+            }
+            let work_path = self.workdir.join(path);
+            let bytes = match fs::read(&work_path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(path = %path, error = %e, "snapshot: diff 跳过无法读取的文件");
+                    continue;
+                }
+            };
+            if looks_binary(&bytes) {
+                files.push(binary_diff(path));
+            } else {
+                files.push(FileDiff {
+                    path: path.clone(),
+                    status: "added".to_string(),
+                    hunks: Vec::new(),
+                    unified: String::new(),
+                    old_lines: 0,
+                    new_lines: String::from_utf8_lossy(&bytes).lines().count(),
+                });
+            }
+        }
+
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(DiffResult {
+            session_id: session_id.to_string(),
+            index,
+            files,
+        })
     }
 
     /// 回退时保存重做状态：捕获当前工作区树 + 被截断的消息。
@@ -220,6 +408,140 @@ impl SnapshotManager {
             .exists()
     }
 
+    /// 垃圾回收：删除所有会话不再引用的对象与孤儿重做缓存文件。
+    ///
+    /// 标记阶段收集所有会话 `trees/{index}.json` 与 `redo/tree-{index}.json`
+    /// 引用的对象哈希（对象库为内容寻址、跨会话全局共享，任一引用即保留）；
+    /// 清扫阶段删除 `objects/` 中未被引用的对象并清理空子目录；
+    /// 另删除 `redo/` 下缺少对应 `tree-{index}.json` 的孤儿缓存文件
+    /// （`load_redo` 遗留的历史泄漏）。`trees/` 下的缓存文件不受影响。
+    pub async fn gc(&self) -> Result<GcStats> {
+        // ── 标记阶段：收集可达对象哈希 ────────────────────────────
+        let mut reachable: HashSet<String> = HashSet::new();
+        let mut session_dirs: Vec<PathBuf> = Vec::new();
+
+        let mut root_entries = fs::read_dir(&self.root)
+            .await
+            .map_err(|e| TianyanError::Custom(format!("snapshot: 读取快照根目录失败: {e}")))?;
+        while let Some(entry) = root_entries
+            .next_entry()
+            .await
+            .map_err(|e| TianyanError::Custom(format!("snapshot: 遍历快照根目录失败: {e}")))?
+        {
+            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir && entry.file_name().to_string_lossy() != "objects" {
+                session_dirs.push(entry.path());
+            }
+        }
+
+        for session_dir in &session_dirs {
+            let trees_dir = session_dir.join("trees");
+            if trees_dir.is_dir() {
+                collect_tree_hashes(&trees_dir, "", &mut reachable).await;
+            }
+            let redo_dir = session_dir.join("redo");
+            if redo_dir.is_dir() {
+                collect_tree_hashes(&redo_dir, "tree-", &mut reachable).await;
+            }
+        }
+
+        // ── 清扫阶段：删除不可达对象并清理空子目录 ──────────────────
+        let mut objects_removed = 0usize;
+        let mut total_objects = 0usize;
+        let objects_dir = self.root.join("objects");
+        if objects_dir.is_dir() {
+            let mut dir_entries = fs::read_dir(&objects_dir)
+                .await
+                .map_err(|e| TianyanError::Custom(format!("snapshot: 读取对象目录失败: {e}")))?;
+            while let Some(dir_entry) = dir_entries
+                .next_entry()
+                .await
+                .map_err(|e| TianyanError::Custom(format!("snapshot: 遍历对象目录失败: {e}")))?
+            {
+                if !dir_entry
+                    .file_type()
+                    .await
+                    .map(|t| t.is_dir())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let dir_path = dir_entry.path();
+                let mut file_entries = fs::read_dir(&dir_path).await.map_err(|e| {
+                    TianyanError::Custom(format!("snapshot: 读取对象子目录失败: {e}"))
+                })?;
+                while let Some(file_entry) = file_entries.next_entry().await.map_err(|e| {
+                    TianyanError::Custom(format!("snapshot: 遍历对象子目录失败: {e}"))
+                })? {
+                    let fname = file_entry.file_name().to_string_lossy().into_owned();
+                    if !fname.ends_with(".bin") {
+                        continue;
+                    }
+                    total_objects += 1;
+                    let hash = fname.trim_end_matches(".bin").to_string();
+                    if !reachable.contains(&hash) {
+                        match fs::remove_file(file_entry.path()).await {
+                            Ok(()) => objects_removed += 1,
+                            Err(e) => tracing::warn!(
+                                error = %e, hash = %hash,
+                                "snapshot: GC 删除孤儿对象失败"
+                            ),
+                        }
+                    }
+                }
+                // 子目录已空则移除（非空时 remove_dir 失败属预期,不视为错误）
+                if let Err(e) = fs::remove_dir(&dir_path).await {
+                    tracing::debug!(error = %e, ?dir_path, "snapshot: GC 清理对象子目录失败");
+                }
+            }
+        }
+
+        // ── 孤儿重做缓存清理 ─────────────────────────────────────
+        let mut cache_files_removed = 0usize;
+        for session_dir in &session_dirs {
+            let redo_dir = session_dir.join("redo");
+            if !redo_dir.is_dir() {
+                continue;
+            }
+            let mut entries = fs::read_dir(&redo_dir)
+                .await
+                .map_err(|e| TianyanError::Custom(format!("snapshot: 读取重做目录失败: {e}")))?;
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|e| TianyanError::Custom(format!("snapshot: 遍历重做目录失败: {e}")))?
+            {
+                let fname = entry.file_name().to_string_lossy().into_owned();
+                // 匹配 tree-{index}.cache.json 且无对应 tree-{index}.json → 孤儿
+                let Some(index_part) = fname.strip_suffix(".cache.json") else {
+                    continue;
+                };
+                let Some(index) = index_part.strip_prefix("tree-") else {
+                    continue;
+                };
+                if index.parse::<usize>().is_err() {
+                    continue;
+                }
+                if !redo_dir.join(format!("{index_part}.json")).exists() {
+                    match fs::remove_file(entry.path()).await {
+                        Ok(()) => cache_files_removed += 1,
+                        Err(e) => tracing::warn!(
+                            error = %e, path = %fname,
+                            "snapshot: GC 删除孤儿重做缓存失败"
+                        ),
+                    }
+                }
+            }
+        }
+
+        Ok(GcStats {
+            objects_removed,
+            objects_retained: total_objects.saturating_sub(objects_removed),
+            cache_files_removed,
+            total_objects,
+        })
+    }
+
     // ─── 内部实现 ─────────────────────────────────────────────
 
     /// 捕获工作区到指定树文件（核心逻辑,供 capture / save_redo 复用）。
@@ -286,6 +608,7 @@ impl SnapshotManager {
                             rel_path
                         ))
                     })?;
+                    let bytes = read_object_bytes(&bytes)?;
                     let target = workdir.join(rel_path);
                     if let Some(parent) = target.parent() {
                         fs::create_dir_all(parent).await.map_err(|e| {
@@ -430,6 +753,9 @@ impl SnapshotManager {
     }
 
     /// 复制单个文件到内容寻址对象库,返回其 sha256（文件不可读时返回错误由调用方跳过）。
+    ///
+    /// 对象以 gzip 流写入（见模块文档「对象压缩」）；去重键为 raw 字节 sha256,
+    /// 已存在对象（内容未变）不重复压缩写入。
     async fn capture_file(&self, path: &Path) -> Result<Option<String>> {
         let bytes = fs::read(path).await.map_err(|e| {
             TianyanError::Custom(format!("snapshot: 读取文件失败 {}: {e}", path.display()))
@@ -437,10 +763,11 @@ impl SnapshotManager {
         let hash = hex_sha256(&bytes);
         let object_path = self.object_path(&hash);
         if !object_path.exists() {
+            let compressed = gzip_compress(&bytes)?;
             fs::create_dir_all(object_path.parent().unwrap_or(&self.root))
                 .await
                 .map_err(|e| TianyanError::Custom(format!("snapshot: 创建对象目录失败: {e}")))?;
-            fs::write(&object_path, bytes)
+            fs::write(&object_path, compressed)
                 .await
                 .map_err(|e| TianyanError::Custom(format!("snapshot: 写入对象失败: {e}")))?;
         }
@@ -487,6 +814,17 @@ impl SnapshotManager {
             }
         }
         Ok(())
+    }
+
+    /// 读取对象内容并返回其行数（对象缺失/解压失败时返回 0，供 diff 的 removed 状态使用）。
+    async fn object_line_count(&self, hash: &str) -> usize {
+        let Ok(object_bytes) = fs::read(self.object_path(hash)).await else {
+            return 0;
+        };
+        let Ok(bytes) = read_object_bytes(&object_bytes) else {
+            return 0;
+        };
+        String::from_utf8_lossy(&bytes).lines().count()
     }
 
     /// 判断路径片段是否应被排除。
@@ -559,6 +897,40 @@ impl SnapshotManager {
     }
 }
 
+/// 解析目录下形如 `{prefix}{index}.json` 的树文件,收集其引用的对象哈希（GC 标记阶段）。
+///
+/// 仅处理 `{prefix}` 后为纯数字索引的文件：`trees/` 传空前缀匹配 `0.json`,
+/// `redo/` 传 `tree-` 匹配 `tree-0.json`。`.cache.json` 等缓存文件不匹配命名规则,
+/// 直接忽略；格式损坏的树文件以 warn 日志跳过（不影响其余文件的回收）。
+async fn collect_tree_hashes(dir: &Path, prefix: &str, reachable: &mut HashSet<String>) {
+    let Ok(mut entries) = fs::read_dir(dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(index_part) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let Some(index) = index_part.strip_prefix(prefix) else {
+            continue;
+        };
+        if index.parse::<usize>().is_err() {
+            continue;
+        }
+        match fs::read_to_string(entry.path()).await {
+            Ok(content) => match serde_json::from_str::<SnapshotTree>(&content) {
+                Ok(tree) => reachable.extend(tree.values().cloned()),
+                Err(e) => {
+                    tracing::warn!(path = %name, error = %e, "snapshot: GC 跳过无法解析的树文件");
+                }
+            },
+            Err(e) => {
+                tracing::warn!(path = %name, error = %e, "snapshot: GC 读取树文件失败");
+            }
+        }
+    }
+}
+
 /// 计算内容的 SHA256 十六进制摘要。
 fn hex_sha256(bytes: &[u8]) -> String {
     let digest = digest(&SHA256, bytes);
@@ -567,6 +939,100 @@ fn hex_sha256(bytes: &[u8]) -> String {
         hex.push_str(&format!("{:02x}", b));
     }
     hex
+}
+
+/// gzip 魔数（前 2 字节）,用于区分压缩对象与 legacy 未压缩对象。
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+/// 将内容压缩为 gzip 流（对象写路径,默认压缩级别）。
+fn gzip_compress(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(bytes)
+        .map_err(|e| TianyanError::Custom(format!("snapshot: gzip 压缩失败: {e}")))?;
+    encoder
+        .finish()
+        .map_err(|e| TianyanError::Custom(format!("snapshot: gzip 压缩失败: {e}")))
+}
+
+/// 读取对象字节：以 `0x1f 0x8b` 魔数识别 gzip 流并解压,否则按 legacy 未压缩字节返回。
+fn read_object_bytes(bytes: &[u8]) -> Result<Vec<u8>> {
+    if bytes.len() >= GZIP_MAGIC.len() && bytes[..GZIP_MAGIC.len()] == GZIP_MAGIC {
+        let mut decoder = GzDecoder::new(bytes);
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| TianyanError::Custom(format!("snapshot: gzip 解压对象失败: {e}")))?;
+        Ok(out)
+    } else {
+        Ok(bytes.to_vec())
+    }
+}
+
+/// 构造二进制文件差异条目（无 hunks / unified，行数均为 0）。
+fn binary_diff(path: &str) -> FileDiff {
+    FileDiff {
+        path: path.to_string(),
+        status: "binary".to_string(),
+        hunks: Vec::new(),
+        unified: String::new(),
+        old_lines: 0,
+        new_lines: 0,
+    }
+}
+
+/// 启发式判断内容是否为二进制：含 NUL 字节，或控制字符（除 `\n` `\r` `\t` 外 < 0x20 及 0x7f）
+/// 占比超过 30%。UTF-8 多字节字符（≥ 0x80）不计为控制字符，中文文本不会被误判。
+fn looks_binary(bytes: &[u8]) -> bool {
+    if bytes.contains(&0) {
+        return true;
+    }
+    if bytes.is_empty() {
+        return false;
+    }
+    let control = bytes
+        .iter()
+        .filter(|&&b| b == 0x7f || (b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t'))
+        .count();
+    control * 100 / bytes.len() > 30
+}
+
+/// 从 diff ops 构建变更块：合并相邻的增删改操作（跳过 Equal），每个连续变更簇生成一个 hunk。
+///
+/// 坐标 1 起始；Delete + Insert 相邻时合并为一个 hunk（同一变更区域）。
+fn build_hunks(ops: &[similar::DiffOp]) -> Vec<Hunk> {
+    fn flush(hunks: &mut Vec<Hunk>, current: &mut Option<(usize, usize, usize, usize)>) {
+        if let Some((old_start, old_end, new_start, new_end)) = current.take() {
+            hunks.push(Hunk {
+                old_start: old_start + 1,
+                old_len: old_end - old_start,
+                new_start: new_start + 1,
+                new_len: new_end - new_start,
+            });
+        }
+    }
+
+    let mut hunks: Vec<Hunk> = Vec::new();
+    let mut current: Option<(usize, usize, usize, usize)> = None;
+    for op in ops {
+        if matches!(op, similar::DiffOp::Equal { .. }) {
+            flush(&mut hunks, &mut current);
+            continue;
+        }
+        let old = op.old_range();
+        let new = op.new_range();
+        match &mut current {
+            Some((old_start, old_end, new_start, new_end)) => {
+                *old_start = (*old_start).min(old.start);
+                *old_end = (*old_end).max(old.end);
+                *new_start = (*new_start).min(new.start);
+                *new_end = (*new_end).max(new.end);
+            }
+            None => current = Some((old.start, old.end, new.start, new.end)),
+        }
+    }
+    flush(&mut hunks, &mut current);
+    hunks
 }
 
 #[cfg(test)]
@@ -703,6 +1169,216 @@ mod tests {
         assert!(mgr.load_redo("s1", 1).await.unwrap().is_none());
     }
 
+    /// 读取对象库中指定哈希的原始字节（不做解压）。
+    fn object_bytes(mgr: &SnapshotManager, hash: &str) -> Vec<u8> {
+        std::fs::read(
+            mgr.root
+                .join("objects")
+                .join(&hash[..2])
+                .join(format!("{}.bin", hash)),
+        )
+        .unwrap()
+    }
+
+    /// 手动写入 legacy 未压缩对象（模拟旧版本快照库）。
+    fn write_object_raw(mgr: &SnapshotManager, hash: &str, bytes: &[u8]) {
+        let path = mgr
+            .root
+            .join("objects")
+            .join(&hash[..2])
+            .join(format!("{}.bin", hash));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_compressed_object_roundtrip() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "原始内容");
+
+        mgr.capture("s1", 0).await.unwrap();
+        let tree = mgr.load_tree("s1", 0).await.unwrap();
+        let hash = tree.get("a.txt").unwrap();
+
+        // 对象文件必须是 gzip 流（魔数 0x1f 0x8b）
+        let bytes = object_bytes(&mgr, hash);
+        assert_eq!(&bytes[..2], &[0x1f, 0x8b], "对象应以 gzip 魔数开头");
+
+        // 删除工作区文件后恢复 → 逐字节一致
+        std::fs::remove_file(mgr.workdir.join("a.txt")).unwrap();
+        let restored = mgr.restore("s1", 0).await.unwrap();
+        assert_eq!(restored, 1);
+        assert_eq!(read(&mgr.workdir, "a.txt"), "原始内容");
+    }
+
+    #[tokio::test]
+    async fn test_legacy_raw_object_still_readable() {
+        let (_dir, mgr) = setup().await;
+        let content = "遗留未压缩对象内容";
+        // 手动构造 legacy 对象库:raw 字节 + sha256 文件名,不经 gzip
+        let hash = hex_sha256(content.as_bytes());
+        write_object_raw(&mgr, &hash, content.as_bytes());
+        let mut tree: SnapshotTree = HashMap::new();
+        tree.insert("legacy.txt".to_string(), hash);
+        let tree_dir = mgr.trees_dir("s1");
+        std::fs::create_dir_all(&tree_dir).unwrap();
+        std::fs::write(
+            tree_dir.join("0.json"),
+            serde_json::to_string(&tree).unwrap(),
+        )
+        .unwrap();
+        // 工作区写入不同内容,触发真实恢复路径
+        write(&mgr.workdir, "legacy.txt", "不同内容");
+
+        let restored = mgr.restore("s1", 0).await.unwrap();
+        assert_eq!(restored, 1);
+        assert_eq!(read(&mgr.workdir, "legacy.txt"), "遗留未压缩对象内容");
+    }
+
+    #[tokio::test]
+    async fn test_compression_ratio() {
+        let (_dir, mgr) = setup().await;
+        let content = "hello world\n".repeat(5000);
+        std::fs::write(mgr.workdir.join("rep.txt"), &content).unwrap();
+
+        mgr.capture("s1", 0).await.unwrap();
+        let tree = mgr.load_tree("s1", 0).await.unwrap();
+        let hash = tree.get("rep.txt").unwrap();
+        let stored = object_bytes(&mgr, hash);
+
+        assert!(
+            stored.len() < content.len(),
+            "压缩后 {} 字节应小于原始 {} 字节",
+            stored.len(),
+            content.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dedup_semantics_preserved() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "跨会话相同内容");
+        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s2", 0).await.unwrap();
+
+        // 跨会话全局去重:同内容只存一个对象（基于 raw 字节 sha256）
+        assert_eq!(count_files(&mgr.root.join("objects")), 1);
+    }
+
+    #[tokio::test]
+    async fn test_mixed_store_restores() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "comp.txt", "压缩对象内容");
+        write(&mgr.workdir, "raw.txt", "原始对象内容");
+        mgr.capture("s1", 0).await.unwrap();
+
+        let tree = mgr.load_tree("s1", 0).await.unwrap();
+        // 把 raw.txt 的对象替换为 legacy 未压缩字节 → 混合存储
+        let raw_hash = tree.get("raw.txt").unwrap();
+        write_object_raw(&mgr, raw_hash, "原始对象内容".as_bytes());
+
+        write(&mgr.workdir, "comp.txt", "修改1");
+        write(&mgr.workdir, "raw.txt", "修改2");
+
+        let restored = mgr.restore("s1", 0).await.unwrap();
+        assert_eq!(restored, 2);
+        assert_eq!(read(&mgr.workdir, "comp.txt"), "压缩对象内容");
+        assert_eq!(read(&mgr.workdir, "raw.txt"), "原始对象内容");
+    }
+
+    #[tokio::test]
+    async fn test_gc_removes_unreferenced_objects() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "keep.txt", "保留内容");
+        mgr.capture("s1", 0).await.unwrap();
+        write(&mgr.workdir, "drop.txt", "将被丢弃的内容");
+        mgr.capture("s2", 0).await.unwrap();
+
+        // 模拟删除会话 s2:整个 trees 目录被移除
+        std::fs::remove_dir_all(mgr.trees_dir("s2")).unwrap();
+
+        let stats = mgr.gc().await.unwrap();
+        assert_eq!(stats.objects_removed, 1);
+        assert_eq!(stats.objects_retained, 1);
+        assert_eq!(stats.total_objects, 2);
+        assert_eq!(count_files(&mgr.root.join("objects")), 1);
+    }
+
+    #[tokio::test]
+    async fn test_gc_keeps_shared_objects() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "same.txt", "跨会话共享内容");
+        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s2", 0).await.unwrap();
+
+        // 删除会话 s2 的树,但对象仍被 s1 引用（内容寻址全局共享）
+        std::fs::remove_dir_all(mgr.trees_dir("s2")).unwrap();
+
+        let stats = mgr.gc().await.unwrap();
+        assert_eq!(stats.objects_removed, 0);
+        assert!(stats.objects_retained >= 1);
+        assert_eq!(count_files(&mgr.root.join("objects")), 1);
+    }
+
+    #[tokio::test]
+    async fn test_gc_removes_orphaned_redo_cache() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "原始");
+        mgr.capture("s1", 0).await.unwrap();
+
+        // 模拟泄漏:save_redo 写入 tree/cache/messages,load_redo 消费后遗留孤儿 cache
+        mgr.save_redo("s1", 0, &[]).await.unwrap();
+        mgr.load_redo("s1", 0).await.unwrap();
+        // 对照组:tree-1.json 与其 cache 同时存在（不应被 GC 删除）
+        mgr.save_redo("s1", 1, &[]).await.unwrap();
+
+        let redo_dir = mgr.redo_dir("s1");
+        assert!(
+            redo_dir.join("tree-0.cache.json").exists(),
+            "孤儿重做缓存必须存在"
+        );
+        assert!(redo_dir.join("tree-1.cache.json").exists());
+        assert!(redo_dir.join("tree-1.json").exists());
+
+        let stats = mgr.gc().await.unwrap();
+        assert_eq!(stats.cache_files_removed, 1);
+        assert!(!redo_dir.join("tree-0.cache.json").exists());
+        assert!(
+            redo_dir.join("tree-1.cache.json").exists(),
+            "匹配的重做缓存不应被删除"
+        );
+        assert!(redo_dir.join("tree-1.json").exists());
+    }
+
+    #[tokio::test]
+    async fn test_gc_idempotent() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "内容");
+        mgr.capture("s1", 0).await.unwrap();
+
+        mgr.gc().await.unwrap();
+        let stats = mgr.gc().await.unwrap();
+        assert_eq!(stats.objects_removed, 0);
+        assert_eq!(stats.cache_files_removed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_gc_keeps_all_live_trees() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "v0");
+        mgr.capture("s1", 0).await.unwrap();
+        write(&mgr.workdir, "a.txt", "v1");
+        mgr.capture("s1", 1).await.unwrap();
+        write(&mgr.workdir, "a.txt", "v2");
+        mgr.capture("s1", 2).await.unwrap();
+        mgr.save_redo("s1", 0, &[]).await.unwrap();
+
+        let stats = mgr.gc().await.unwrap();
+        assert_eq!(stats.objects_removed, 0);
+        assert_eq!(stats.objects_retained, 3);
+        assert_eq!(count_files(&mgr.root.join("objects")), 3);
+    }
+
     fn count_files(dir: &Path) -> usize {
         if !dir.exists() {
             return 0;
@@ -721,5 +1397,110 @@ mod tests {
             }
         }
         count
+    }
+
+    // ─── diff 测试 ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_diff_unchanged_is_empty() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "内容");
+        mgr.capture("s1", 0).await.unwrap();
+
+        let result = mgr.diff("s1", 0).await.unwrap();
+        assert_eq!(result.files.len(), 0);
+        assert_eq!(result.session_id, "s1");
+        assert_eq!(result.index, 0);
+    }
+
+    #[tokio::test]
+    async fn test_diff_modified_file_hunks() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "a\nb\nc\nd\n");
+        mgr.capture("s1", 0).await.unwrap();
+        write(&mgr.workdir, "a.txt", "a\nX\nc\nd\n");
+
+        let result = mgr.diff("s1", 0).await.unwrap();
+        assert_eq!(result.files.len(), 1);
+        let file = &result.files[0];
+        assert_eq!(file.path, "a.txt");
+        assert_eq!(file.status, "modified");
+        assert_eq!(file.hunks.len(), 1, "单处修改应生成一个 hunk");
+        assert!(file.hunks[0].old_len >= 1);
+        assert!(file.hunks[0].new_len >= 1);
+        assert_eq!(file.old_lines, 4);
+        assert_eq!(file.new_lines, 4);
+        assert!(
+            file.unified.contains("-b"),
+            "unified diff 应包含删除行 -b: {}",
+            file.unified
+        );
+        assert!(
+            file.unified.contains("+X"),
+            "unified diff 应包含新增行 +X: {}",
+            file.unified
+        );
+    }
+
+    #[tokio::test]
+    async fn test_diff_added_file() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "keep.txt", "保留");
+        mgr.capture("s1", 0).await.unwrap();
+        write(&mgr.workdir, "new.txt", "新增内容");
+
+        let result = mgr.diff("s1", 0).await.unwrap();
+        assert_eq!(result.files.len(), 1);
+        let file = &result.files[0];
+        assert_eq!(file.path, "new.txt");
+        assert_eq!(file.status, "added");
+        assert_eq!(file.old_lines, 0);
+        assert!(file.new_lines >= 1);
+        assert!(file.hunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_diff_removed_file() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "gone.txt", "将被删除");
+        mgr.capture("s1", 0).await.unwrap();
+        std::fs::remove_file(mgr.workdir.join("gone.txt")).unwrap();
+
+        let result = mgr.diff("s1", 0).await.unwrap();
+        assert_eq!(result.files.len(), 1);
+        let file = &result.files[0];
+        assert_eq!(file.path, "gone.txt");
+        assert_eq!(file.status, "removed");
+        assert!(file.old_lines >= 1);
+        assert_eq!(file.new_lines, 0);
+        assert!(file.hunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_diff_binary_file() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "bin.dat", "text content");
+        mgr.capture("s1", 0).await.unwrap();
+        std::fs::write(mgr.workdir.join("bin.dat"), [0u8, 1, 2, 3, 0]).unwrap();
+
+        let result = mgr.diff("s1", 0).await.unwrap();
+        assert_eq!(result.files.len(), 1);
+        let file = &result.files[0];
+        assert_eq!(file.path, "bin.dat");
+        assert_eq!(file.status, "binary");
+        assert!(file.hunks.is_empty());
+        assert!(file.unified.is_empty());
+        assert_eq!(file.old_lines, 0);
+        assert_eq!(file.new_lines, 0);
+    }
+
+    #[tokio::test]
+    async fn test_diff_missing_snapshot_errors() {
+        let (_dir, mgr) = setup().await;
+        let err = mgr.diff("s1", 0).await.unwrap_err();
+        assert!(
+            err.to_string().contains("快照"),
+            "错误信息应包含「快照」: {err}"
+        );
     }
 }

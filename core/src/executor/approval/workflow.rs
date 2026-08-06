@@ -126,8 +126,12 @@ impl ApprovalWorkflow {
                     RiskLevel::Low
                 }
             }
-            Action::RunTests { .. } => RiskLevel::Low,
-            Action::VerifyBuild { .. } => RiskLevel::Low,
+            Action::ApplyEdit { .. } => RiskLevel::Medium,
+            Action::ApplyPatch { .. } => RiskLevel::Medium,
+            // 测试/构建命令经 cmd /C、sh -c 执行任意 shell 命令（与
+            // ExecuteCommand 同级），属 Medium 风险，需用户确认。
+            Action::RunTests { .. } => RiskLevel::Medium,
+            Action::VerifyBuild { .. } => RiskLevel::Medium,
         }
     }
 

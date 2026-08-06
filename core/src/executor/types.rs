@@ -17,6 +17,20 @@ pub enum Action {
         /// 写入内容。
         content: String,
     },
+    /// 应用精确编辑（哈希锚定行编辑）。
+    ApplyEdit {
+        /// 文件路径。
+        path: String,
+        /// 编辑规格列表（JSON 序列化的 [`crate::executor::edit::EditSpec`]）。
+        edits: Vec<Value>,
+    },
+    /// 应用统一 diff 补丁（codex 风格 `*** Update File` 信封格式，可含多文件）。
+    ApplyPatch {
+        /// 补丁涉及的主要文件路径（首个 `*** Update File:` 头部；审批展示用）。
+        path: String,
+        /// 补丁文本（可能包含多个文件的补丁块）。
+        patch: String,
+    },
     /// 执行命令。
     ExecuteCommand {
         /// 命令字符串。

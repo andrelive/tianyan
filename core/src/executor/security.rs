@@ -318,13 +318,15 @@ impl SecurityPolicy {
     /// 检测命令中是否包含命令链或命令替换元字符。
     ///
     /// 阻止的模式：`&&`（命令链）、`||`（条件链）、`;`（分隔符）、
-    /// `` ` ``（反引号替换）、`$(`（命令替换）。
+    /// `&`（Windows cmd 分隔符 / Unix 后台符）、`` ` ``（反引号替换）、
+    /// `$(`（命令替换）。
     /// 管道 `|` 和重定向 `>` `<` 不在阻止范围内，因为它们是合法的
     /// 单命令操作。
     fn has_shell_metacharacters(command: &str) -> bool {
         command.contains("&&")
             || command.contains("||")
             || command.contains(';')
+            || command.contains('&')
             || command.contains('`')
             || command.contains("$(")
     }

@@ -14,6 +14,7 @@ use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
 use crate::executor::SecurityPolicy;
 use crate::executor::{LlmJudge, VerificationGate};
 use crate::knowledge::KnowledgeIngestor;
+use crate::lsp::diagnostics::LspManager;
 use crate::model::ChatService;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
@@ -178,7 +179,8 @@ impl AgentBuilder {
             .with_metrics(metrics.clone())
             .with_approval_workflow(approval)
             .with_verification_gate(verification)
-            .with_rule_recorder(rule_recorder);
+            .with_rule_recorder(rule_recorder)
+            .with_lsp_manager(Arc::new(LspManager::new()));
         if let Some(ref stats) = self.usage_stats {
             tool_registry = tool_registry.with_usage_stats(stats.clone());
         }
