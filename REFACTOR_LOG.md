@@ -398,3 +398,44 @@ core 模块系统性架构重构日志。约束：公开 API 签名与行为完�
 - 流式路径此前零测试且累积/错误语义是前端打字机效果的契约（chunk 顺序、usage 末 chunk、中途错误前缀），必须用回归测试锁定
 - `run`/`run_stream` 的重复不只在请求构造：轮次状态初始化、TurnContext 构建、早返回、最大轮数错误各出现两份，提取为 `run_turns` 后单轮脚手架只有一份；step 闭包用 HRTB 入参传递而非捕获，规避异步闭包借用冲突（若 HRTB 方案编译失败，备选方案为仅提取 `build_request` 并保留双循环）
 - 行为零变化：错误消息文本、chunk 顺序、累积逻辑逐字保持；`run_stream` 中新增的 `stream_sender` 缺失守卫（`ok_or_else`）在既有调用下不可达，仅为满足 Option 入参契约
+
+## Wave 3（T10）：提取 run_agent_turn 消除编排逻辑重复（P1-3）
+
+### 问题
+`Agent::process_message`（coordinator.rs，AgentCoordinator trait 实现）与 `Agent::handle_clarification_response`（agent_core.rs，impl Agent）两条编排路径各约 110 行、逐段重复同一编排：`persist_user_message` → `prepare_context` → `agent_loop.run` → Answer/NeedsClarification/Err 三分支组装 AgentResponse → `update_agent_metrics`，连错误处理都相同。行为漂移风险：改一条忘另一条。
+
+### 共享/差异段对比（基于实际代码）
+| 段 | process_message | handle_clarification_response | 处理 |
+|---|---|---|---|
+| `start = Instant::now()` | 函数入口 | 函数入口 | 共享（`start` 由调用方传入，测量窗口不变） |
+| model 解析 | `model.unwrap_or(&default_model)` | 恒 `&default_model` | 差异（调用方） |
+| load_and_build_state | 有 | 无（trait 侧已加载） | 差异（调用方） |
+| capture_workspace_snapshot | 有 | 无 | 差异（extras） |
+| pending_clarification 检查/清理 | 无 | 有 + 早返回 | 差异（extras） |
+| persist_user_message | 有 | 有 | **共享** |
+| 审批 confirm_pending_approval | 无 | 有 | 差异（extras） |
+| prepare_context | 有 | 有 | **共享** |
+| parent_id 计算点 | prepare 之后（=当前用户消息） | persist 之前（=上一消息） | 统一为 prepare 之后（见决策理由） |
+| agent_loop.run | 有（model 参数） | 有（default_model） | **共享**（model 作入参） |
+| 三分支 match（含 record_execution / token_usage / processing_time_ms / 错误消息） | 相同 | 相同 | **共享** |
+| update_agent_metrics | 有 | 有 | **共享** |
+| maybe_compress_and_persist | 有 | 无 | 差异（extras） |
+| learn_skills 后台 spawn | 有 | 无 | 差异（extras） |
+
+### 改动
+- `core/src/agent/agent_core.rs`：在 `impl Agent` 新增 `pub(crate) async fn run_agent_turn(&self, state, session_id, query, model, start) -> Result<AgentResponse>`，承载共享骨架（persist → prepare → parent_id → run → 三分支 → update_agent_metrics，约 85 行）
+- `coordinator.rs::process_message`：保留 extras（model 解析、快照、压缩、技能学习 spawn），编排压缩至 **40 行**（含签名）
+- `agent_core.rs::handle_clarification_response`：保留 extras（pending 检查/清理、审批确认），编排压缩至 **≤40 行**（含签名）；删去自身 parent_id 预计算（由共享骨架统一）
+- `coordinator.rs`：删除随提取变死的 `use crate::common::types::TokenUsage` 导入
+- `process_message_stream` 未动（流式路径不在范围）
+
+### 验证
+- RED（特性锁定）：澄清路径此前零覆盖，先补 2 个集成测试（MockChatService + 真实 ContextPipeline/ToolRegistry 构造完整 Agent）：`test_process_message_returns_clarification`（ask_user → AgentResponse::clarification，问题文本一致）、`test_clarification_response_returns_answer`（回答追问 → Answer，pending 清理）。重构前运行通过（行为锁定）
+- GREEN：提取后同 2 测试通过；全量 `cargo test -p tianyan-core --lib` = **558 passed / 0 failed / 1 ignored**（基线 556 + 本任务 2 新测试）
+- clippy：本次改动文件零警告（crate 余下 5 个警告均在 observability / scheduler / session，既有）；fmt 干净；`cargo check -p tianyan-core` 通过
+
+### 决策理由
+- 共享骨架置于 agent_core.rs `impl Agent`（`handle_clarification_response` 所在文件），coordinator 侧经 `self` 调用，同类型跨 impl 块无新抽象
+- `parent_id` 计算点两条路径原本不一致（process：prepare 之后=当前用户消息；clarify：persist 之前=上一消息，回复链跳过用户回答）。统一为 process_message 语义（回复挂接在用户回答之下）——process 路径行为零变化；澄清路径的持久化回复链被修正为 回答→回复（此前全代码库无任何消费者读取 parent_id 链，无测试断言，仅 JSONL 元数据）
+- 审批确认相对 persist 的顺序互换（原 persist→confirm，现 confirm→persist）：两子系统（VFS 会话 / 审批注册表）互不可观测，无行为影响
+- `start` 由调用方传入而非骨架内部新建：process_message 原测量窗口含 load_and_build_state + 快照捕获，保持 processing_time_ms 语义逐字不变

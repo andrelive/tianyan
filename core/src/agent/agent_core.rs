@@ -194,63 +194,46 @@ impl Agent {
         }
     }
 
-    /// 处理用户对追问的回答。
-    pub(crate) async fn handle_clarification_response(
+    /// 共享编排骨架：持久化用户消息 → 准备上下文 → AgentLoop → 结果组装 → 指标更新。
+    ///
+    /// `process_message` 与 `handle_clarification_response` 共用此骨架，
+    /// 差异段（快照、审批确认、压缩、技能学习等）由调用方保留。
+    /// - `model` — 本次使用的模型（调用方已解析）。
+    /// - `start` — 由调用方传入，保证 `processing_time_ms` 测量窗口与调用前一致。
+    /// - `parent_id` — 在 `prepare_context` 之后统一计算（挂接在当前用户消息之下），
+    ///   与 process_message 原行为一致（澄清路径的回复链随之修正为 回答→回复）。
+    pub(crate) async fn run_agent_turn(
         &self,
         state: &Arc<RwLock<SessionState>>,
-        clarification_answers: &str,
+        session_id: &str,
+        query: &str,
+        model: &str,
+        start: Instant,
     ) -> Result<AgentResponse> {
-        let start = Instant::now();
+        // 1. Persist current user message
+        self.persist_user_message(session_id, state, query).await;
 
-        {
-            let s = state.read().await;
-            if s.pending_clarification.is_none() {
-                return Ok(AgentResponse::simple("当前没有待处理的追问".to_string()));
-            }
-        }
-        state.write().await.pending_clarification = None;
+        // 2. Prepare context
+        let messages = self.prepare_context(state, query).await;
 
-        // 持久化用户对追问的回答，保持会话历史完整（与 process_message 路径对齐）
-        let (session_id, parent_id) = {
+        // 3. Run agent loop (internal persistence in AgentLoop)
+        let parent_id = {
             let s = state.read().await;
-            (
-                s.session_id.clone(),
-                s.structured_messages.last().map(|m| m.id.clone()),
-            )
+            s.structured_messages.last().map(|m| m.id.clone())
         };
-        self.persist_user_message(&session_id, state, clarification_answers)
-            .await;
-
-        // 审批降级链路：若存在待用户确认的审批操作，根据回答记录批准/拒绝。
-        // 决策语义由审批模块（executor::approval::is_user_confirmation）解析。
-        let approved = crate::executor::approval::is_user_confirmation(clarification_answers);
-        if self
-            .agent_loop
-            .tool_registry()
-            .confirm_pending_approval(approved)
-            .await
-        {
-            tracing::info!(
-                approved,
-                answer = %clarification_answers,
-                "已记录用户对审批追问的回应"
-            );
-        }
-
-        let messages = self.prepare_context(state, clarification_answers).await;
-
         let loop_result = self
             .agent_loop
             .run(
                 &mut messages.clone(),
                 None,
-                &session_id,
+                session_id,
                 parent_id.as_deref(),
-                &self.default_model,
+                model,
             )
             .await;
 
-        let mut clarification_tokens: Option<TokenUsage> = None;
+        // 4. Handle loop result
+        let mut loop_tokens: Option<TokenUsage> = None;
         let response = match loop_result {
             Ok(AgentLoopResult::Answer {
                 content,
@@ -267,7 +250,7 @@ impl Agent {
                 resp.token_usage = total_tokens.clone();
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
                 self.metrics.record_execution(true).await;
-                clarification_tokens = Some(total_tokens);
+                loop_tokens = Some(total_tokens);
                 resp
             }
             Ok(AgentLoopResult::NeedsClarification {
@@ -286,7 +269,7 @@ impl Agent {
                 let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
                 resp.token_usage = total_tokens.clone();
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                clarification_tokens = Some(total_tokens);
+                loop_tokens = Some(total_tokens);
                 resp
             }
             Err(e) => {
@@ -298,14 +281,53 @@ impl Agent {
             }
         };
 
-        self.update_agent_metrics(
-            &session_id,
-            clarification_tokens.as_ref(),
-            clarification_tokens.is_some(),
-        )
-        .await;
+        // 5. Update agent metrics
+        self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
+            .await;
 
         Ok(response)
+    }
+
+    /// 处理用户对追问的回答。
+    pub(crate) async fn handle_clarification_response(
+        &self,
+        state: &Arc<RwLock<SessionState>>,
+        clarification_answers: &str,
+    ) -> Result<AgentResponse> {
+        let start = Instant::now();
+
+        if state.read().await.pending_clarification.is_none() {
+            return Ok(AgentResponse::simple("当前没有待处理的追问".to_string()));
+        }
+        state.write().await.pending_clarification = None;
+
+        let session_id = state.read().await.session_id.clone();
+
+        // 审批降级链路：若存在待用户确认的审批操作，根据回答记录批准/拒绝。
+        // 决策语义由审批模块（executor::approval::is_user_confirmation）解析。
+        let approved = crate::executor::approval::is_user_confirmation(clarification_answers);
+        if self
+            .agent_loop
+            .tool_registry()
+            .confirm_pending_approval(approved)
+            .await
+        {
+            tracing::info!(
+                approved,
+                answer = %clarification_answers,
+                "已记录用户对审批追问的回应"
+            );
+        }
+
+        // 共享编排骨架（parent_id 统一在 prepare_context 之后计算，回复挂接在用户回答之下，与 process_message 路径语义一致）
+        self.run_agent_turn(
+            state,
+            &session_id,
+            clarification_answers,
+            &self.default_model,
+            start,
+        )
+        .await
     }
 
     /// 从会话执行历史中自动学习新技能（GEPA 进化引擎）。
@@ -421,6 +443,173 @@ mod tests {
     use crate::agent::session_state::SessionState;
     use crate::common::types::{InjectableContext, MessageRole};
     use crate::context::assembler::ContextAssembler;
+
+    // ── 编排路径集成测试（MockChatService + 真实 ContextPipeline/ToolRegistry）──
+
+    use crate::agent::r#loop::AgentLoopConfig;
+    use crate::agent::tool_registry::ToolRegistry;
+    use crate::agent::AgentCoordinator;
+    use crate::common::types::{FunctionCall, ToolCall, ToolCallType};
+    use crate::context::compression::{CompressionConfig, ContextCompressor};
+    use crate::context::retrieval::DualLayerRetriever;
+    use crate::executor::SecurityPolicy;
+    use crate::model::types::{ChatChoice, ChatCompletionResponse};
+    use crate::model::MockChatService;
+    use crate::session::{Session, SessionManager};
+    use crate::test_utils::MockVfs;
+    use crate::vfs::VirtualFileSystem;
+    use async_trait::async_trait;
+    use tokio::sync::Mutex as TokioMutex;
+
+    struct MockSessionManager;
+    #[async_trait]
+    impl SessionManager for MockSessionManager {
+        async fn add_structured_message(
+            &self,
+            _session_id: &str,
+            _msg: StructuredMessage,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn add_message(&self, _session_id: &str, _message: Message) -> Result<()> {
+            Ok(())
+        }
+        async fn rewrite_messages(
+            &self,
+            _session_id: &str,
+            _messages: &[StructuredMessage],
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn create_session(&self, _id: &str, _message: Message) -> Result<Session> {
+            Ok(Session::new(_id))
+        }
+        async fn get_session(&self, _id: &str) -> Result<Option<Session>> {
+            Ok(None)
+        }
+        async fn update_session(&self, _session: &Session) -> Result<()> {
+            Ok(())
+        }
+        async fn list_sessions(&self) -> Result<Vec<Session>> {
+            Ok(vec![])
+        }
+        async fn delete_session(&self, _id: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn response_with(assistant: Message) -> ChatCompletionResponse {
+        ChatCompletionResponse {
+            id: "resp-1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            choices: vec![ChatChoice {
+                index: 0,
+                message: assistant,
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: TokenUsage::default(),
+        }
+    }
+
+    fn ask_user_msg(question: &str) -> Message {
+        Message::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "call_ask".to_string(),
+                call_type: ToolCallType::Function,
+                function: FunctionCall {
+                    name: "ask_user".to_string(),
+                    arguments: format!(r#"{{"question": "{}"}}"#, question),
+                },
+            }],
+        )
+    }
+
+    fn make_agent(mock: MockChatService) -> Agent {
+        let vfs = Arc::new(MockVfs::new());
+        let retriever = Arc::new(DualLayerRetriever::new(
+            vfs.clone() as Arc<dyn VirtualFileSystem>
+        ));
+        // 压缩服务在短会话测试中不会被调用（< MIN_MESSAGES_BEFORE_COMPRESSION）
+        let compressor = Arc::new(TokioMutex::new(ContextCompressor::new(
+            Arc::new(MockChatService::new()),
+            CompressionConfig::default(),
+        )));
+        let context_pipeline = ContextPipeline::new(
+            vfs.clone() as Arc<dyn VirtualFileSystem>,
+            retriever,
+            compressor,
+            10,
+            5,
+        );
+        let agent_loop = AgentLoop::new(
+            Arc::new(mock),
+            ToolRegistry::new(SecurityPolicy::default()),
+            Arc::new(MockSessionManager),
+            AgentLoopConfig { max_turns: 5 },
+        );
+        Agent::new(
+            "test-model".to_string(),
+            context_pipeline,
+            AgentMetrics::new(),
+            None,
+            agent_loop,
+            Arc::new(MockSessionManager),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_process_message_returns_clarification() {
+        // 回归保护：process_message 编排路径（共享骨架 + 快照/压缩/技能学习 extras）。
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion()
+            .times(1)
+            .returning(|_| Ok(response_with(ask_user_msg("测试问题"))));
+        let agent = make_agent(mock);
+
+        let resp = agent
+            .process_message("session-1", "帮我处理", None)
+            .await
+            .unwrap();
+
+        assert!(resp.needs_clarification, "ask_user 应触发追问响应");
+        assert_eq!(resp.clarification_questions.len(), 1);
+        assert_eq!(resp.clarification_questions[0].question, "测试问题");
+    }
+
+    #[tokio::test]
+    async fn test_clarification_response_returns_answer() {
+        // 回归保护：handle_clarification_response 编排路径（共享骨架 + 审批确认 extras）。
+        // 注意：trait 层 handle_clarification 每次重新 load_and_build_state，
+        // pending_clarification 不跨请求保留，故直接构造带待追问的状态调用
+        // pub(crate) handle_clarification_response 以覆盖其编排路径。
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion()
+            .times(1)
+            .returning(|_| Ok(response_with(Message::assistant("处理完成"))));
+        let agent = make_agent(mock);
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        state.write().await.pending_clarification = Some(vec![ClarificationQuestion {
+            question: "测试问题".to_string(),
+            question_type: QuestionType::OpenEnded,
+            options: None,
+            required: true,
+        }]);
+
+        let resp = agent
+            .handle_clarification_response(&state, "好的")
+            .await
+            .unwrap();
+
+        assert!(!resp.needs_clarification, "回答追问后应返回正常回答");
+        assert_eq!(resp.content, "处理完成");
+        // 待追问状态已被清理
+        assert!(state.read().await.pending_clarification.is_none());
+    }
 
     #[test]
     fn test_clarification_answer_injected_once() {

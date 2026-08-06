@@ -100,7 +100,6 @@ use crate::agent::types::{
     StreamChunkType, StreamEventSender,
 };
 use crate::common::error::Result;
-use crate::common::types::TokenUsage;
 
 /// 智能体协调器 trait。
 #[async_trait]
@@ -173,81 +172,10 @@ impl AgentCoordinator for Agent {
             self.capture_workspace_snapshot(session_id, &s).await;
         }
 
-        // 2. Persist current user message
-        self.persist_user_message(session_id, &state, &message)
-            .await;
-
-        // 3. Prepare context
-        let messages = self.prepare_context(&state, &message).await;
-
-        // 4. Run agent loop (internal persistence in AgentLoop)
-        let parent_id = {
-            let s = state.read().await;
-            s.structured_messages.last().map(|m| m.id.clone())
-        };
-        let loop_result = self
-            .agent_loop
-            .run(
-                &mut messages.clone(),
-                None,
-                session_id,
-                parent_id.as_deref(),
-                model,
-            )
-            .await;
-
-        // 5. Handle loop result
-        let mut loop_tokens: Option<TokenUsage> = None;
-        let response = match loop_result {
-            Ok(AgentLoopResult::Answer {
-                content,
-                total_tokens,
-                persisted_message,
-                ..
-            }) => {
-                state
-                    .write()
-                    .await
-                    .add_structured_message(*persisted_message);
-
-                let mut resp = AgentResponse::simple(content);
-                resp.token_usage = total_tokens.clone();
-                resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                self.metrics.record_execution(true).await;
-                loop_tokens = Some(total_tokens);
-                resp
-            }
-            Ok(AgentLoopResult::NeedsClarification {
-                question,
-                total_tokens,
-                ..
-            }) => {
-                let question_obj = ClarificationQuestion {
-                    question,
-                    question_type: QuestionType::OpenEnded,
-                    options: None,
-                    required: true,
-                };
-                state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
-                let formatted = format_clarification_questions(std::slice::from_ref(&question_obj));
-                let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
-                resp.token_usage = total_tokens.clone();
-                resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                loop_tokens = Some(total_tokens);
-                resp
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "AgentLoop 执行失败");
-                self.metrics.record_execution(false).await;
-                let mut resp = AgentResponse::error(format!("处理失败：{}", e));
-                resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                resp
-            }
-        };
-
-        // 6. Update agent metrics
-        self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
-            .await;
+        // 2-6. 共享编排骨架：持久化 → 上下文 → AgentLoop → 结果组装 → 指标更新
+        let response = self
+            .run_agent_turn(&state, session_id, &message, model, start)
+            .await?;
 
         // 7. Compression check and persist
         self.maybe_compress_and_persist(&state, session_id).await;
