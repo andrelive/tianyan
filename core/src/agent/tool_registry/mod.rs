@@ -627,7 +627,10 @@ mod tests {
             ))
         }
 
-        async fn execute(&self, _arguments: &str) -> crate::common::error::Result<serde_json::Value> {
+        async fn execute(
+            &self,
+            _arguments: &str,
+        ) -> crate::common::error::Result<serde_json::Value> {
             Ok(serde_json::json!({}))
         }
     }

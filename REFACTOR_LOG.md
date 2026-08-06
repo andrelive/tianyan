@@ -668,3 +668,24 @@ core 模块系统性架构重构日志。约束：公开 API 签名与行为完�
 
 ### 决策理由
 - 项目 REFACTOR_LOG 迭代 6 曾声明"clippy 零警告"标准，19 个遗留（observability/session/tool_registry/tauri）为最后卫生缺口；expect 豁免采用与 core 相同的 crate 级 cfg_attr(test) 模式，避免逐测试加 allow 的噪声
+## Wave 6：文档同步（T22/T23 后补日志）
+
+### 改动（提交 deeec6f9 + 919e2474，此前未记日志）
+- `docs/architecture/module-map.md`：模块索引同步重构后路径（sqlite_db/retrieval_trace/token_estimator/security.rs/file_ops.rs/approval/ 目录化）
+- `docs/module-relationships.md`：依赖矩阵更新（3 环消除后的新边）、§6 偏差表按代码核验、§7 新增"决策 5：依赖环消除（ADR-007）"
+- `docs/architecture/principles.md`：新增原则"共享基础设施归属被依赖方"
+- 新建 `docs/architecture/decisions/007-core-dependency-cycle-removal.md`（ADR-007：下沉决策 + SKIP 决策 + 行为变化记录）
+- `docs/module-descriptions.md`：模块描述同步；`001/005` ADR 与 system-architecture.md 路径修正
+- `docs/architecture/core-module-architecture.html`：顶部标注"重构前快照，以 ADR-007 为准"
+
+### 验证
+- 文档断言与代码路径 grep 抽查一致（T22 报告列 12 项核对表）；无代码改动
+
+## Wave 7（Loop 2）补记：Oracle 终审 fmt 回归修复
+
+### 背景
+Oracle 批判性终审（Loop 2）发现 Wave 7 的 clippy 修复引入 3 处 fmt 回归：`tool_registry/mod.rs` TestConflictingTool::execute 签名移入测试模块后缩进加深（98→102 字符超 100 上限）未拆行；`tauri/src/lib.rs` mod tests 移文件尾遗留 2 处多余空行。判定 NOT-COMPLETE（按项目自身验收定义，fmt 干净属验收项）。
+
+### 修复
+- 运行 `cargo fmt --all`：3 处格式自动修复（签名拆行 + 空行清理）
+- 复验：`cargo fmt --all -- --check` exit 0；`cargo test -p tianyan-core --lib` 577 passed；clippy 0 warnings

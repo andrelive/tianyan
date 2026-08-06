@@ -252,7 +252,6 @@ fn next_backoff(current: Duration, max: Duration) -> Duration {
     }
 }
 
-
 /// 初始化日志系统 - 同时输出到文件和控制台。
 ///
 /// 级别/格式来自配置文件 `[logging]` 节（`RUST_LOG` 环境变量可覆盖级别）；
@@ -666,4 +665,3 @@ mod tests {
         );
     }
 }
-
