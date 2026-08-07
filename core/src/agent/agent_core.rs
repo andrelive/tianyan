@@ -3,6 +3,7 @@
 //! 包含 Agent 结构体定义、构造函数和所有辅助方法。
 //! 将 Agent 与 AgentCoordinator trait 分离，消除循环依赖。
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -218,6 +219,7 @@ impl Agent {
     /// - `start` — 由调用方传入，保证 `processing_time_ms` 测量窗口与调用前一致。
     /// - `parent_id` — 在 `prepare_context` 之后统一计算（挂接在当前用户消息之下），
     ///   与 process_message 原行为一致（澄清路径的回复链随之修正为 回答→回复）。
+    /// - `cancel` — 取消标志（客户端断开/服务关停时置位）；`None` 表示不可取消。
     pub(crate) async fn run_agent_turn(
         &self,
         state: &Arc<RwLock<SessionState>>,
@@ -225,6 +227,7 @@ impl Agent {
         query: &str,
         model: &str,
         start: Instant,
+        cancel: Option<&AtomicBool>,
     ) -> Result<AgentResponse> {
         // 1. Persist current user message
         self.persist_user_message(session_id, state, query).await;
@@ -245,6 +248,7 @@ impl Agent {
                 session_id,
                 parent_id.as_deref(),
                 model,
+                cancel,
             )
             .await;
 
@@ -283,6 +287,19 @@ impl Agent {
                 state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
                 let formatted = format_clarification_questions(std::slice::from_ref(&question_obj));
                 let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
+                resp.token_usage = total_tokens.clone();
+                resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                loop_tokens = Some(total_tokens);
+                resp
+            }
+            Ok(AgentLoopResult::Cancelled {
+                total_tokens,
+                turns,
+            }) => {
+                tracing::info!(turns, "AgentLoop 被取消");
+                self.metrics.record_execution(false).await;
+                let mut resp = AgentResponse::simple("任务已取消".to_string());
+                resp.cancelled = true;
                 resp.token_usage = total_tokens.clone();
                 resp.processing_time_ms = start.elapsed().as_millis() as u64;
                 loop_tokens = Some(total_tokens);
@@ -342,6 +359,7 @@ impl Agent {
             clarification_answers,
             &self.default_model,
             start,
+            None,
         )
         .await
     }

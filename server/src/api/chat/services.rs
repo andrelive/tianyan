@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -56,10 +57,13 @@ impl ChatService {
     /// 处理对话消息（流式响应）
     ///
     /// 如果 `session_id` 未提供，会自动创建新会话。
+    /// `cancel` 为服务层/传输层共享的取消标志：客户端断开或服务关停时置位，
+    /// 使后台 AgentLoop 在轮次边界/流式 chunk 边界及时停止。
     pub async fn process_message_stream(
         &self,
         request: ChatRequest,
         tx: mpsc::Sender<ChatStreamEvent>,
+        cancel: Arc<AtomicBool>,
     ) -> Result<(), ApiError> {
         let last_message = request
             .messages
@@ -76,7 +80,12 @@ impl ChatService {
 
         let mut stream = self
             .agent
-            .process_message_stream(&session_id, &last_message, request.model.as_deref())
+            .process_message_stream(
+                &session_id,
+                &last_message,
+                request.model.as_deref(),
+                Some(cancel),
+            )
             .await?;
 
         // 一次流式响应对应一个响应 id（与非流式 ChatResponse.id 语义一致）。

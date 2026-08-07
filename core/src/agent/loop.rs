@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::agent::tool_params::AskUserParams;
@@ -47,6 +48,13 @@ pub enum AgentLoopResult {
         /// Token 用量。
         total_tokens: TokenUsage,
         /// 循环轮数。
+        turns: usize,
+    },
+    /// 循环被取消（客户端断开或服务关停）。
+    Cancelled {
+        /// Token 用量。
+        total_tokens: TokenUsage,
+        /// 已执行的循环轮数。
         turns: usize,
     },
 }
@@ -107,7 +115,15 @@ impl AgentLoop {
         &self.tool_registry
     }
 
+    /// 取消标志检查（None 视为未取消）。
+    fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+        cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
+    }
+
     /// 运行迭代循环直到回答或追问（非流式）。
+    ///
+    /// `cancel` 为 `Some` 时，每轮开始前检查取消标志；被取消返回
+    /// [`AgentLoopResult::Cancelled`]（而非错误），调用方可区分"用户取消"与"失败"。
     pub async fn run(
         &self,
         messages: &mut Vec<Message>,
@@ -115,6 +131,7 @@ impl AgentLoop {
         session_id: &str,
         initial_parent_id: Option<&str>,
         model: &str,
+        cancel: Option<&AtomicBool>,
     ) -> Result<AgentLoopResult, TianyanError> {
         self.run_turns(
             messages,
@@ -122,7 +139,8 @@ impl AgentLoop {
             session_id,
             initial_parent_id,
             model,
-            |this, model, _sender, msgs| {
+            cancel,
+            |this, model, _sender, msgs, _cancel| {
                 Box::pin(async move {
                     let request = ChatCompletionRequest::new(model, msgs)
                         .with_tools(this.tool_registry.definitions().await);
@@ -157,6 +175,7 @@ impl AgentLoop {
     /// 与 [`run`] 的区别：每个 LLM 调用使用 `chat_completion_stream`，
     /// 文本 delta 通过 `stream_sender` 逐 token 发送，实现打字机效果。
     /// tool call 检测和执行仍为非流式（在完整消息累积后处理）。
+    /// `cancel` 为 `Some` 时，chunk 接收循环与轮次边界都会检查取消标志。
     pub async fn run_stream(
         &self,
         messages: &mut Vec<Message>,
@@ -164,6 +183,7 @@ impl AgentLoop {
         session_id: &str,
         initial_parent_id: Option<&str>,
         model: &str,
+        cancel: Option<&AtomicBool>,
     ) -> Result<AgentLoopResult, TianyanError> {
         self.run_turns(
             messages,
@@ -171,7 +191,8 @@ impl AgentLoop {
             session_id,
             initial_parent_id,
             model,
-            |this, model, sender, msgs| {
+            cancel,
+            |this, model, sender, msgs, cancel| {
                 Box::pin(async move {
                     let sender = sender.ok_or_else(|| {
                         TianyanError::Custom("agent_loop: 流式路径缺少 stream_sender".to_string())
@@ -199,6 +220,10 @@ impl AgentLoop {
                     let mut stream_error: Option<String> = None;
 
                     while let Some(chunk_result) = rx.recv().await {
+                        // 客户端断开/服务关停：chunk 循环内及时中断（长响应时不必等流结束）
+                        if AgentLoop::is_cancelled(cancel) {
+                            return Err(TianyanError::Custom("agent_loop: 任务已取消".to_string()));
+                        }
                         match chunk_result {
                             Ok(chunk) => {
                                 // OpenAI sends usage in the final chunk
@@ -284,8 +309,11 @@ impl AgentLoop {
     ///
     /// 统一处理：轮次状态初始化（`current_parent_id` / `total_tokens`）、
     /// [`TurnContext`] 构建、[`AgentLoop::handle_llm_response`] 调用与早返回、
-    /// 最大轮数错误。`step` 负责每轮获取模型响应，并统一转换为
+    /// 最大轮数错误、取消检查（轮顶 + step 错误时）。
+    /// `step` 负责每轮获取模型响应，并统一转换为
     /// `(assistant_msg, turn_usage)` 形式。
+    // 私有脚手架：8 个参数均为单轮演进所需状态/依赖，收敛为结构体反而降低可读性
+    #[allow(clippy::too_many_arguments)]
     async fn run_turns<F>(
         &self,
         messages: &mut Vec<Message>,
@@ -293,6 +321,7 @@ impl AgentLoop {
         session_id: &str,
         initial_parent_id: Option<&str>,
         model: &str,
+        cancel: Option<&AtomicBool>,
         mut step: F,
     ) -> Result<AgentLoopResult, TianyanError>
     where
@@ -301,14 +330,36 @@ impl AgentLoop {
             &'a str,
             Option<&'a StreamEventSender>,
             Vec<Message>,
+            Option<&'a AtomicBool>,
         ) -> TurnStep<'a>,
     {
         let mut current_parent_id = initial_parent_id.map(|s| s.to_string());
         let mut total_tokens = TokenUsage::default();
 
         for turn in 0..self.config.max_turns {
+            // 轮顶取消检查：工具执行结束后、进入下一轮 LLM 调用前响应取消
+            if Self::is_cancelled(cancel) {
+                return Ok(AgentLoopResult::Cancelled {
+                    total_tokens,
+                    turns: turn,
+                });
+            }
+
             let (assistant_msg, turn_usage) =
-                step(self, model, stream_sender, messages.clone()).await?;
+                match step(self, model, stream_sender, messages.clone(), cancel).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // step 内部（如流式 chunk 循环）检测到取消会上抛"任务已取消"，
+                        // 此处统一转换为 Cancelled 结果，避免被当作失败
+                        if Self::is_cancelled(cancel) {
+                            return Ok(AgentLoopResult::Cancelled {
+                                total_tokens,
+                                turns: turn + 1,
+                            });
+                        }
+                        return Err(e);
+                    }
+                };
 
             let mut ctx = TurnContext {
                 session_id,
@@ -603,7 +654,7 @@ mod tests {
 
         let mut messages = vec![Message::user("帮我做点事")];
         let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model")
+            .run(&mut messages, None, "session-1", None, "test-model", None)
             .await
             .unwrap();
 
@@ -638,7 +689,7 @@ mod tests {
 
         let mut messages = vec![Message::user("帮我决定一下")];
         let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model")
+            .run(&mut messages, None, "session-1", None, "test-model", None)
             .await
             .unwrap();
 
@@ -690,7 +741,7 @@ mod tests {
 
         let mut messages = vec![Message::user("请帮我写入文件")];
         let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model")
+            .run(&mut messages, None, "session-1", None, "test-model", None)
             .await
             .unwrap();
 
@@ -714,7 +765,7 @@ mod tests {
 
         let mut messages = vec![Message::user("你好")];
         let err = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model")
+            .run(&mut messages, None, "session-1", None, "test-model", None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("空响应"));
@@ -730,7 +781,7 @@ mod tests {
 
         let mut messages = vec![Message::user("循环测试")];
         let err = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model")
+            .run(&mut messages, None, "session-1", None, "test-model", None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("最大轮数"));
@@ -745,10 +796,110 @@ mod tests {
 
         let mut messages = vec![Message::user("测试")];
         let err = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model")
+            .run(&mut messages, None, "session-1", None, "test-model", None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("LLM 调用失败"));
+    }
+
+    // ── 取消路径（cancel 标志） ──────────────────────────────────────
+
+    /// 预置取消标志：run 应在轮顶立即返回 Cancelled（不发起 LLM 调用）。
+    #[tokio::test]
+    async fn test_run_returns_cancelled_when_flag_pre_set() {
+        // 不配置任何 LLM expectation：若循环发起调用会 panic
+        let agent_loop = make_loop(MockChatService::new(), 5);
+        let cancel = AtomicBool::new(true);
+
+        let mut messages = vec![Message::user("测试")];
+        let result = agent_loop
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                Some(&cancel),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result, AgentLoopResult::Cancelled { turns: 0, .. }),
+            "预置取消应返回 Cancelled，实际: {:?}",
+            result
+        );
+    }
+
+    /// 流式中途取消：chunk 循环检测到 cancel 后中断，返回 Cancelled（而非错误）。
+    #[tokio::test]
+    async fn test_run_stream_returns_cancelled_mid_chunk() {
+        use std::sync::atomic::Ordering;
+
+        // mock 流式响应：发第一段后等待测试信号（期间测试置位 cancel）再发后续
+        let (gate_tx, gate_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let mut gate_rx = Some(gate_rx);
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion_stream().returning(move |_| {
+            let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(16);
+            let mut gate_rx = gate_rx.take();
+            tokio::spawn(async move {
+                chunk_tx
+                    .send(Ok(stream_chunk(Some("第一段"), None, None)))
+                    .await
+                    .ok();
+                if let Some(rx) = &mut gate_rx {
+                    rx.recv().await; // 等测试置位 cancel
+                }
+                chunk_tx
+                    .send(Ok(stream_chunk(Some("第二段"), None, None)))
+                    .await
+                    .ok();
+                chunk_tx
+                    .send(Ok(stream_chunk(None, None, Some(TokenUsage::default()))))
+                    .await
+                    .ok();
+            });
+            Ok(chunk_rx)
+        });
+        let agent_loop = make_loop(mock, 5);
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<AgentStreamChunk>>(8);
+        let sender = StreamEventSender::new(tx);
+
+        // 旁路任务：收到第一段 delta 后置位 cancel 并释放 mock 的 gate
+        let cancel_clone = cancel.clone();
+        let gate_tx = gate_tx.clone();
+        let cancel_watcher = tokio::spawn(async move {
+            while let Some(Ok(chunk)) = rx.recv().await {
+                if chunk.chunk_type == StreamChunkType::Answer && !chunk.delta.is_empty() {
+                    cancel_clone.store(true, Ordering::Relaxed);
+                    gate_tx.send(()).await.ok();
+                    break;
+                }
+            }
+        });
+
+        let mut messages = vec![Message::user("测试")];
+        let result = agent_loop
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                Some(&cancel),
+            )
+            .await
+            .unwrap();
+        cancel_watcher.await.ok();
+
+        assert!(
+            matches!(result, AgentLoopResult::Cancelled { .. }),
+            "流式中途取消应返回 Cancelled，实际: {:?}",
+            result
+        );
     }
 
     // ── 流式回归测试（run_stream） ──────────────────────────────────
@@ -818,7 +969,7 @@ mod tests {
 
         let mut messages = vec![Message::user("流式测试")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model")
+            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
             .await
             .unwrap();
 
@@ -901,7 +1052,7 @@ mod tests {
 
         let mut messages = vec![Message::user("北京天气如何？")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model")
+            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
             .await
             .unwrap();
 
@@ -947,7 +1098,7 @@ mod tests {
 
         let mut messages = vec![Message::user("测试")];
         let err = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model")
+            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -970,7 +1121,7 @@ mod tests {
 
         let mut messages = vec![Message::user("流式测试")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model")
+            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
             .await
             .unwrap();
 
@@ -1000,7 +1151,7 @@ mod tests {
 
         let mut messages = vec![Message::user("顺序测试")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model")
+            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
             .await
             .unwrap();
         assert!(matches!(result, AgentLoopResult::Answer { .. }));

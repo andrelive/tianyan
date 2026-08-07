@@ -72,6 +72,8 @@ pub struct AgentResponse {
     pub needs_clarification: bool,
     /// 追问问题列表。
     pub clarification_questions: Vec<ClarificationQuestion>,
+    /// 是否被取消（客户端断开或服务关停导致循环中断）。
+    pub cancelled: bool,
 }
 
 impl AgentResponse {
@@ -90,6 +92,7 @@ impl AgentResponse {
             processing_time_ms: 0,
             needs_clarification: false,
             clarification_questions: vec![],
+            cancelled: false,
         }
     }
 
@@ -109,6 +112,7 @@ impl AgentResponse {
             processing_time_ms: 0,
             needs_clarification: true,
             clarification_questions: questions,
+            cancelled: false,
         }
     }
 
@@ -127,6 +131,7 @@ impl AgentResponse {
             processing_time_ms: 0,
             needs_clarification: false,
             clarification_questions: vec![],
+            cancelled: false,
         }
     }
 }

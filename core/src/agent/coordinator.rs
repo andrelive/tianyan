@@ -87,6 +87,7 @@
 //! - **执行失败**：记录日志并返回友好的错误消息
 //! - **资源限制**：当达到最大迭代次数时生成错误响应
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -115,11 +116,13 @@ pub trait AgentCoordinator: Send + Sync {
 
     /// 处理用户消息（流式响应）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
+    /// - `cancel` — 取消标志（客户端断开/服务关停时置位）；`None` 表示不可取消。
     async fn process_message_stream(
         &self,
         session_id: &str,
         message: &str,
         model: Option<&str>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
 
     /// 处理用户对追问的回答。
@@ -173,8 +176,9 @@ impl AgentCoordinator for Agent {
         }
 
         // 2-6. 共享编排骨架：持久化 → 上下文 → AgentLoop → 结果组装 → 指标更新
+        // 非流式路径无可取消源（HTTP 请求生命周期内），传 None
         let response = self
-            .run_agent_turn(&state, session_id, &message, model, start)
+            .run_agent_turn(&state, session_id, &message, model, start, None)
             .await?;
 
         // 7. Compression check and persist
@@ -197,6 +201,7 @@ impl AgentCoordinator for Agent {
         session_id: &str,
         message: &str,
         model: Option<&str>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
         let state = self.load_and_build_state(session_id).await?;
         let model = model.unwrap_or(&self.default_model).to_string();
@@ -239,6 +244,7 @@ impl AgentCoordinator for Agent {
                     &session_id_str,
                     parent_id.as_deref(),
                     &model,
+                    cancel.as_deref(),
                 )
                 .await;
 
@@ -282,6 +288,19 @@ impl AgentCoordinator for Agent {
                         .await;
                     self_clone
                         .update_agent_metrics(&session_id_str, Some(&total_tokens), true)
+                        .await;
+                }
+                Ok(AgentLoopResult::Cancelled {
+                    total_tokens,
+                    turns,
+                }) => {
+                    tracing::info!(turns, "AgentLoop 流式执行被取消");
+                    self_clone.metrics.record_execution(false).await;
+                    stream_sender
+                        .send_complete("任务已取消", StreamChunkType::Answer, None)
+                        .await;
+                    self_clone
+                        .update_agent_metrics(&session_id_str, Some(&total_tokens), false)
                         .await;
                 }
                 Err(e) => {

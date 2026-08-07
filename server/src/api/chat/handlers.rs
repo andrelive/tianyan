@@ -119,12 +119,19 @@ pub async fn chat_stream_handler(
 
     let agent = state.agent().await;
     let session_manager = state.session_manager();
+    // 取消标志：客户端断开或服务关停时置位，停止后台 AgentLoop（不再烧 token）
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_flag = state.shutdown_flag();
 
     // 生成任务处理流式响应
+    let cancel_for_service = cancel.clone();
     tokio::spawn(async move {
         let service = ChatService::new(agent, session_manager);
 
-        if let Err(e) = service.process_message_stream(request, event_tx).await {
+        if let Err(e) = service
+            .process_message_stream(request, event_tx, cancel_for_service)
+            .await
+        {
             error!("流式处理错误: {}", e);
         }
     });
@@ -132,8 +139,10 @@ pub async fn chat_stream_handler(
     // 转发事件到 SSE，同时发送 15 秒间隔心跳防止连接超时
     let tx_clone = tx.clone();
     let ping_tx = tx.clone();
+    let cancel_for_sse = cancel.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
+        let mut shutdown_poll = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 event = event_rx.recv() => {
@@ -141,6 +150,8 @@ pub async fn chat_stream_handler(
                         Some(event) => {
                             if let Ok(json) = serde_json::to_string(&event) {
                                 if tx_clone.send(Ok(Event::default().data(json))).await.is_err() {
+                                    // 客户端断开：取消后台 AgentLoop
+                                    cancel_for_sse.store(true, std::sync::atomic::Ordering::Relaxed);
                                     break;
                                 }
                             }
@@ -155,8 +166,17 @@ pub async fn chat_stream_handler(
                         None => break,
                     }
                 }
+                _ = shutdown_poll.tick() => {
+                    // 服务关停：立即结束 SSE 并取消后台循环，避免阻塞优雅关停
+                    if shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        cancel_for_sse.store(true, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
+                }
                 _ = interval.tick() => {
                     if ping_tx.send(Ok(Event::default().data(":ping"))).await.is_err() {
+                        // 客户端断开：取消后台 AgentLoop
+                        cancel_for_sse.store(true, std::sync::atomic::Ordering::Relaxed);
                         break;
                     }
                 }

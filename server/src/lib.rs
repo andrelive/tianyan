@@ -499,6 +499,7 @@ async fn start_server_inner(
             match external_result {
                 "external" => {
                     info!("收到外部关闭信号（桌面端退出）");
+                    state.shutdown_flag().store(true, std::sync::atomic::Ordering::Relaxed);
                     "external"
                 }
                 _ => {
@@ -511,6 +512,7 @@ async fn start_server_inner(
             match ctrl_c_result {
                 Ok(()) => {
                     info!("捕获到 Ctrl+C 信号");
+                    state.shutdown_flag().store(true, std::sync::atomic::Ordering::Relaxed);
                     "ctrl_c"
                 }
                 Err(e) => {
@@ -524,6 +526,7 @@ async fn start_server_inner(
                 Ok(mut signal) => {
                     if signal.recv().await.is_some() {
                         info!("捕获到 SIGTERM 信号");
+                        state.shutdown_flag().store(true, std::sync::atomic::Ordering::Relaxed);
                         "sigterm"
                     } else {
                         "sigterm_error"
@@ -559,6 +562,7 @@ async fn start_server_inner(
             match external_result {
                 "external" => {
                     info!("收到外部关闭信号（桌面端退出）");
+                    state.shutdown_flag().store(true, std::sync::atomic::Ordering::Relaxed);
                     "external"
                 }
                 _ => {
@@ -571,6 +575,7 @@ async fn start_server_inner(
             match ctrl_c_result {
                 Ok(()) => {
                     info!("捕获到 Ctrl+C 信号");
+                    state.shutdown_flag().store(true, std::sync::atomic::Ordering::Relaxed);
                     "ctrl_c"
                 }
                 Err(e) => {

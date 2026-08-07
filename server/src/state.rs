@@ -67,6 +67,10 @@ pub struct AppState {
     mcp_tools: Arc<McpToolManager>,
     /// 定时任务调度器（无启用的模型 Provider 时为 None，在 `start_server` 中装配）
     scheduler: Arc<RwLock<Option<Arc<TaskScheduler>>>>,
+    /// 服务关停标志（Ctrl+C / SIGTERM / 桌面端退出时置位）。
+    ///
+    /// 流式请求据此取消进行中的 AgentLoop，使优雅关停不被长连接阻塞。
+    shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -181,7 +185,13 @@ impl AppState {
             model_services: Arc::new(RwLock::new(model_services)),
             mcp_tools,
             scheduler: Arc::new(RwLock::new(None)),
+            shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+
+    /// 服务关停标志（Ctrl+C / SIGTERM / 桌面端退出时置位）。
+    pub fn shutdown_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.shutdown_flag.clone()
     }
 
     /// 获取当前 Agent 实例
