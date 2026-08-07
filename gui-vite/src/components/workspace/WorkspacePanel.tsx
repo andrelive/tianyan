@@ -8,11 +8,15 @@ import {
   PanelLeftClose,
   PanelRightClose,
 } from 'lucide-react';
-import { fetchWorkspaceDiff } from '@/lib/api-client';
+import { createTwoFilesPatch } from 'diff';
+import { ApiError, fetchWorkspaceApplyPatch, fetchWorkspaceDiff } from '@/lib/api-client';
 import type { WorkspaceDiffResponse } from '@/lib/types';
 import { useAppStore } from '@/lib/store';
 import WorkspaceTree from './WorkspaceTree';
 import FileViewer from './FileViewer';
+import type { FileViewerDraft } from './FileViewer';
+import { languageForPath } from './fileLanguage';
+import { SaveConfirmDialog } from './DiffView';
 
 const DIFF_STATUS_LABEL: Record<WorkspaceDiffResponse['status'], string> = {
   modified: '已修改',
@@ -194,8 +198,53 @@ export default function WorkspacePanel() {
   const [treeCollapsed, setTreeCollapsed] = useState(false);
   const [diffOpen, setDiffOpen] = useState(false);
 
+  // ---- 保存前 diff 确认（编辑模式 → 保存 → 弹窗 → 确认 → apply-patch） ----
+  const [saveDraft, setSaveDraft] = useState<FileViewerDraft | null>(null);
+  const [saveSaving, setSaveSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  /** 保存成功后自增，传给 FileViewer 触发重新读取磁盘内容。 */
+  const [reloadKey, setReloadKey] = useState(0);
+
   const handleSelectFile = (path: string) => {
     setSelectedFile(path);
+  };
+
+  const handleSaveRequest = (draft: FileViewerDraft) => {
+    setSaveDraft(draft);
+    setSaveError(null);
+    setSaveSaving(false);
+  };
+
+  const handleCloseSaveDialog = () => {
+    if (saveSaving) return;
+    setSaveDraft(null);
+    setSaveError(null);
+  };
+
+  const handleConfirmSave = async () => {
+    if (!saveDraft) return;
+    setSaveSaving(true);
+    setSaveError(null);
+    try {
+      // jsdiff 生成的 unified patch：`--- a/path` `+++ b/path` 头，直接提交给后端。
+      const patch = createTwoFilesPatch(
+        `a/${saveDraft.path}`,
+        `b/${saveDraft.path}`,
+        saveDraft.original,
+        saveDraft.modified,
+      );
+      await fetchWorkspaceApplyPatch(patch);
+      setSaveDraft(null);
+      setReloadKey((k) => k + 1);
+    } catch (err: unknown) {
+      // 409 = 补丁定位失败/内容不匹配（文件在编辑期间被改动）。
+      const isConflict = err instanceof ApiError && err.code === '409';
+      setSaveError(
+        isConflict ? '文件已被修改，请重新加载' : err instanceof Error ? err.message : '保存失败',
+      );
+    } finally {
+      setSaveSaving(false);
+    }
   };
 
   return (
@@ -257,12 +306,26 @@ export default function WorkspacePanel() {
 
         {/* 中：文件查看器 */}
         <main className="flex-1 min-w-0 flex flex-col bg-[var(--color-bg-primary)]">
-          <FileViewer path={selectedFile} />
+          <FileViewer path={selectedFile} reloadKey={reloadKey} onSaveRequest={handleSaveRequest} />
         </main>
 
         {/* 右：diff 面板（默认隐藏） */}
         {diffOpen && <DiffPanel filePath={selectedFile} onClose={() => setDiffOpen(false)} />}
       </div>
+
+      {/* 保存前 diff 确认弹窗 */}
+      {saveDraft && (
+        <SaveConfirmDialog
+          path={saveDraft.path}
+          original={saveDraft.original}
+          modified={saveDraft.modified}
+          language={languageForPath(saveDraft.path)}
+          saving={saveSaving}
+          error={saveError}
+          onCancel={handleCloseSaveDialog}
+          onConfirm={handleConfirmSave}
+        />
+      )}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { server } from '@/test/mocks/server';
@@ -8,6 +8,7 @@ import {
   resetWorkspaceMocks,
   mockWorkspaceDiffCalls,
   mockWorkspaceReadCalls,
+  mockWorkspaceApplyPatchCalls,
 } from '@/test/mocks/handlers';
 import WorkspacePanel from '../WorkspacePanel';
 
@@ -159,5 +160,98 @@ describe('WorkspacePanel', () => {
       expect(screen.getByText('请填写会话 ID')).toBeInTheDocument();
     });
     expect(mockWorkspaceDiffCalls).toHaveLength(0);
+  });
+
+  it('opens the save-confirm dialog, confirms, and submits the generated patch', async () => {
+    const user = userEvent.setup();
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText('main.rs')).toBeInTheDocument();
+    });
+    await user.click(screen.getByText('main.rs'));
+
+    // 进入编辑模式并输入修改
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /编辑/ })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: /编辑/ }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument();
+    });
+    const cmContent = screen.getByText(
+      (_, element) => element?.classList.contains('cm-content') ?? false,
+    );
+    await user.click(cmContent);
+    await user.keyboard('x');
+    await waitFor(() => {
+      expect(screen.getByLabelText('未保存')).toBeInTheDocument();
+    });
+
+    // 点保存 → diff 确认弹窗出现（含统一 diff 视图与磁盘原文内容）
+    await user.click(screen.getByRole('button', { name: '保存' }));
+    const dialog = await screen.findByRole('dialog', { name: '保存确认' });
+    expect(dialog).toBeInTheDocument();
+    // unifiedMergeView 会把变更行以"删除块 + 当前行"各渲染一次
+    expect(within(dialog).getAllByText(/fn main\(\) \{/).length).toBeGreaterThanOrEqual(1);
+
+    // 确认保存 → apply-patch 收到包含标准 unified patch 头的调用 → 弹窗关闭
+    await user.click(screen.getByRole('button', { name: '确认保存' }));
+    await waitFor(() => {
+      expect(mockWorkspaceApplyPatchCalls).toHaveLength(1);
+    });
+    const { patch } = mockWorkspaceApplyPatchCalls[0];
+    expect(patch).toContain('--- a/main.rs');
+    expect(patch).toContain('+++ b/main.rs');
+    expect(patch).toContain('@@');
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows the conflict message inside the dialog when apply-patch returns 409', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post(`${API_BASE}/workspace/apply-patch`, async ({ request }) => {
+        const body = (await request.json()) as { patch?: string };
+        mockWorkspaceApplyPatchCalls.push({ patch: body.patch ?? '' });
+        return new HttpResponse(JSON.stringify({ message: 'conflict', code: 'conflict' }), {
+          status: 409,
+        });
+      }),
+    );
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText('main.rs')).toBeInTheDocument();
+    });
+    await user.click(screen.getByText('main.rs'));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /编辑/ })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: /编辑/ }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '保存' })).toBeInTheDocument();
+    });
+    const cmContent = screen.getByText(
+      (_, element) => element?.classList.contains('cm-content') ?? false,
+    );
+    await user.click(cmContent);
+    await user.keyboard('y');
+    await waitFor(() => {
+      expect(screen.getByLabelText('未保存')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: '保存' }));
+    await screen.findByRole('dialog', { name: '保存确认' });
+    await user.click(screen.getByRole('button', { name: '确认保存' }));
+
+    // 409 → 弹窗内显示冲突提示，弹窗保持打开
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toBeInTheDocument();
+    });
+    expect(screen.getByRole('alert').textContent).toContain('文件已被修改，请重新加载');
+    expect(screen.getByRole('dialog', { name: '保存确认' })).toBeInTheDocument();
+    expect(mockWorkspaceApplyPatchCalls).toHaveLength(1);
   });
 });

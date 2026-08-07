@@ -21,6 +21,7 @@ import type {
   WorkspaceTreeResponse,
   WorkspaceReadResponse,
   WorkspaceDiffResponse,
+  WorkspaceApplyPatchResponse,
 } from '@/lib/types';
 import type { KnowledgeEntryItem } from '@/lib/api-client';
 
@@ -247,11 +248,21 @@ export const mockWorkspaceDiffList = {
   ],
 };
 
+/** 记录的工作区 apply-patch 调用（{ patch }），测试断言用。 */
+export const mockWorkspaceApplyPatchCalls: { patch: string }[] = [];
+
+/** apply-patch 成功 fixture（POST /workspace/apply-patch）。 */
+export const mockWorkspaceApplyPatchResult: WorkspaceApplyPatchResponse = {
+  files: [{ path: 'src/lib.rs', hunks_applied: 1, lines_changed: 2 }],
+  total_files: 1,
+};
+
 /** 恢复工作区 mock 到初始状态。 */
 export function resetWorkspaceMocks() {
   mockWorkspaceTreeCalls.length = 0;
   mockWorkspaceReadCalls.length = 0;
   mockWorkspaceDiffCalls.length = 0;
+  mockWorkspaceApplyPatchCalls.length = 0;
 }
 
 // ========== Config mock ==========
@@ -1013,6 +1024,14 @@ export const handlers = [
       return HttpResponse.json(mockWorkspaceDiffList);
     }
     return HttpResponse.json(mockWorkspaceDiff);
+  }),
+
+  // Workspace apply-patch（后端为 POST /workspace/apply-patch，body: { patch }）
+  // 记录调用并返回成功 fixture；测试失败场景用 server.use 覆盖。
+  http.post(`${API_BASE}/workspace/apply-patch`, async ({ request }) => {
+    const body = (await request.json()) as { patch?: string };
+    mockWorkspaceApplyPatchCalls.push({ patch: body.patch ?? '' });
+    return HttpResponse.json(mockWorkspaceApplyPatchResult);
   }),
 
   // Config

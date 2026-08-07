@@ -16,6 +16,8 @@ import type {
   WorkspaceDiffResponse,
   WorkspaceReadResponse,
   WorkspaceTreeResponse,
+  WorkspaceApplyPatchRequest,
+  WorkspaceApplyPatchResponse,
 } from './types';
 
 const DEFAULT_TIMEOUT = 60000;
@@ -366,4 +368,13 @@ export async function fetchWorkspaceDiffList(
   if (sessionId) params.set('session_id', sessionId);
   if (index !== undefined) params.set('index', String(index));
   return apiGet<WorkspaceDiffListResponse>(`/workspace/diff?${params}`);
+}
+
+/** 应用工作区补丁（保存前 diff 确认后的写入，body: { patch }）。 */
+export async function fetchWorkspaceApplyPatch(
+  patch: string,
+): Promise<WorkspaceApplyPatchResponse> {
+  return apiPost<WorkspaceApplyPatchResponse>('/workspace/apply-patch', {
+    patch,
+  } satisfies WorkspaceApplyPatchRequest);
 }

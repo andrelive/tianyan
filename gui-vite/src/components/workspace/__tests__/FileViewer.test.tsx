@@ -111,4 +111,103 @@ describe('FileViewer', () => {
       limit: 2000,
     });
   });
+
+  it('enters edit mode, marks dirty on typing, and discard restores the disk content', async () => {
+    const user = userEvent.setup();
+    render(<FileViewer path="main.rs" />);
+
+    // 读模式：hashline 剥离显示
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /编辑/ })).toBeInTheDocument();
+    });
+
+    // 进入编辑模式：编辑按钮消失，保存/放弃出现
+    await user.click(screen.getByRole('button', { name: /编辑/ }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '放弃' })).toBeInTheDocument();
+    });
+    expect(screen.getByText('编辑模式')).toBeInTheDocument();
+
+    // 初始无 dirty
+    expect(screen.queryByLabelText('未保存')).not.toBeInTheDocument();
+
+    // 在编辑器中输入 → dirty 出现，保存按钮可用
+    const cmContent = screen.getByText(
+      (_, element) => element?.classList.contains('cm-content') ?? false,
+    );
+    await user.click(cmContent);
+    await user.keyboard('x');
+    await waitFor(() => {
+      expect(screen.getByLabelText('未保存')).toBeInTheDocument();
+    });
+    const saveButton = screen.getByRole('button', { name: '保存' }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(false);
+
+    // 放弃 → 退出编辑模式，内容恢复磁盘原文，dirty 清除
+    await user.click(screen.getByRole('button', { name: '放弃' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /编辑/ })).toBeInTheDocument();
+    });
+    expect(screen.queryByLabelText('未保存')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          (_, element) =>
+            (element?.classList.contains('cm-line') ?? false) &&
+            element?.textContent === 'fn main() {',
+        ),
+      ).toBeInTheDocument();
+    });
+    // 放弃后不应残留编辑插入的字符
+    expect(screen.queryByText((content) => content.includes('xfn main'))).not.toBeInTheDocument();
+  });
+
+  it('loads the full content before entering edit mode when the file is truncated', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get(`${API_BASE}/workspace/read`, ({ request }) => {
+        const url = new URL(request.url);
+        const offsetRaw = url.searchParams.get('offset');
+        mockWorkspaceReadCalls.push({
+          path: url.searchParams.get('path') ?? '',
+          offset: offsetRaw === null ? undefined : Number(offsetRaw),
+          limit: Number(url.searchParams.get('limit') ?? 2000),
+        });
+        if (offsetRaw === null || offsetRaw === '1') {
+          return HttpResponse.json(
+            page(
+              1,
+              ['1#3f|fn main() {', '(Showing lines 1-1 of 2. Use offset=2 to continue.)'],
+              true,
+            ),
+          );
+        }
+        return HttpResponse.json(page(2, ['2#a1|    println!("hello");'], false));
+      }),
+    );
+
+    render(<FileViewer path="src/lib.rs" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /编辑/ })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: /编辑/ }));
+
+    // 编辑模式出现前应已循环拉完剩余页（offset=2），并显示全量内容
+    await waitFor(() => {
+      expect(screen.getByText('编辑模式')).toBeInTheDocument();
+    });
+    expect(mockWorkspaceReadCalls).toContainEqual({
+      path: 'src/lib.rs',
+      offset: 2,
+      limit: 2000,
+    });
+    expect(
+      screen.getByText(
+        (_, element) =>
+          (element?.classList.contains('cm-line') ?? false) &&
+          element?.textContent === '    println!("hello");',
+      ),
+    ).toBeInTheDocument();
+  });
 });

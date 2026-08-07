@@ -497,6 +497,28 @@ export interface WorkspaceDiffListResponse {
   files: WorkspaceDiffResponse[];
 }
 
+/** 应用工作区补丁请求（POST /workspace/apply-patch，body: { patch }）。 */
+export interface WorkspaceApplyPatchRequest {
+  /** unified diff patch 文本（`--- a/path` / `+++ b/path` 头）。 */
+  patch: string;
+}
+
+/** 工作区补丁应用后的单个文件结果（POST /workspace/apply-patch）。 */
+export interface WorkspaceApplyPatchFile {
+  /** 相对工作区根的路径（如 "src/main.rs"）。 */
+  path: string;
+  /** 成功应用的 hunk 数量。 */
+  hunks_applied: number;
+  /** 变更行数。 */
+  lines_changed: number;
+}
+
+/** 工作区补丁应用响应（POST /workspace/apply-patch）。 */
+export interface WorkspaceApplyPatchResponse {
+  files: WorkspaceApplyPatchFile[];
+  total_files: number;
+}
+
 // ========== App State Types ==========
 
 export type View =
