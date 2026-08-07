@@ -9,7 +9,10 @@ use serde_json::Value;
 
 use crate::api::shared::error::ApiError;
 use crate::api::workspace::services::WorkspaceService;
-use crate::api::workspace::types::{DiffQuery, ReadQuery, TreeQuery, TreeResponse};
+use crate::api::workspace::types::{
+    ApplyEditRequest, ApplyEditResponse, ApplyPatchRequest, ApplyPatchResponse, DiffQuery,
+    ReadQuery, TreeQuery, TreeResponse,
+};
 use crate::state::AppState;
 
 /// 从应用状态构建工作区服务（配置读取 + 快照管理器）。
@@ -70,4 +73,24 @@ pub async fn diff_handler(
         ));
     };
     Ok(Json(value))
+}
+
+/// 处理补丁应用请求（前端保存文件的主通道）。
+pub async fn apply_patch_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ApplyPatchRequest>,
+) -> Result<Json<ApplyPatchResponse>, ApiError> {
+    let service = build_service(state).await;
+    Ok(Json(service.apply_patch(&payload.patch).await?))
+}
+
+/// 处理 hashline 语义编辑请求（供 LLM/外部工作流）。
+pub async fn apply_edit_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<ApplyEditRequest>,
+) -> Result<Json<ApplyEditResponse>, ApiError> {
+    let service = build_service(state).await;
+    Ok(Json(
+        service.apply_edit(&payload.path, payload.edits).await?,
+    ))
 }

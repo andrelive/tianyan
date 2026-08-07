@@ -1,19 +1,23 @@
 //! 工作区业务逻辑
 //!
-//! 只读浏览工作目录：目录树单层列出、文件读取（委托 core executor 锚点行读取）、
-//! 差异对比（快照对比 / 文件间对比）。
+//! 只读浏览工作目录（目录树单层列出、文件读取、差异对比），以及编程工作台
+//! 编辑（apply-patch 补丁应用、apply-edit hashline 语义编辑，均委托 core
+//! executor 并映射错误到 HTTP 语义）。
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use serde_json::{json, Value};
+use tianyan::executor::edit::EditSpec;
 use tianyan::executor::execute_read_file;
 use tianyan::snapshot::SnapshotManager;
 use tianyan::TianyanError;
 
 use crate::api::shared::error::ApiError;
-use crate::api::workspace::types::{FileDiffResponse, HunkDto, TreeEntry, TreeResponse};
+use crate::api::workspace::types::{
+    ApplyEditResponse, ApplyPatchResponse, FileDiffResponse, HunkDto, TreeEntry, TreeResponse,
+};
 
 /// 工作区服务：对配置的 working_directory 提供只读访问。
 pub struct WorkspaceService {
@@ -205,6 +209,50 @@ impl WorkspaceService {
         serde_json::to_value(response).map_err(ApiError::from)
     }
 
+    /// 应用 unified diff 补丁（委托 core executor 原子多文件落盘）。
+    ///
+    /// 接受 git 风格（jsdiff `createTwoFilesPatch` 产物）与 codex 风格两种补丁，
+    /// git 风格先归一化为 codex 信封（见 [`normalize_patch`]）。补丁内路径由
+    /// core 内部沙箱校验（拒绝 `..` 组件与绝对路径，相对 `working_directory`
+    /// 解析），此处不重复校验。未配置工作目录 → 400。
+    pub async fn apply_patch(&self, patch_text: &str) -> Result<ApplyPatchResponse, ApiError> {
+        let working_dir = self
+            .working_dir
+            .clone()
+            .ok_or_else(|| ApiError::BadRequest("未配置 working_directory".to_string()))?;
+        let normalized = normalize_patch(patch_text)?;
+        let value = tianyan::executor::patch::apply_patch_action(&normalized, &working_dir)
+            .await
+            .map_err(executor_error_to_api)?;
+        serde_json::from_value(value).map_err(ApiError::from)
+    }
+
+    /// 应用 hashline 语义编辑（委托 core executor 锚点校验 + 原子落盘）。
+    ///
+    /// 先经 [`Self::resolve`] 沙箱解析绝对路径（文件不存在 → 404），再交给
+    /// core；响应路径回显请求的相对路径（前端契约）。
+    pub async fn apply_edit(
+        &self,
+        rel: &str,
+        edits: Vec<EditSpec>,
+    ) -> Result<ApplyEditResponse, ApiError> {
+        let (_base, target) = self.resolve(rel).await?;
+        let abs = strip_verbatim(&target.to_string_lossy());
+        let value = tianyan::executor::edit::apply_edit_action(&abs, edits)
+            .await
+            .map_err(executor_error_to_api)?;
+        let edits_applied = value
+            .get("edits_applied")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                ApiError::Internal("executor: apply_edit: 响应缺少 edits_applied".to_string())
+            })? as usize;
+        Ok(ApplyEditResponse {
+            path: rel.to_string(),
+            edits_applied,
+        })
+    }
+
     /// 校验相对路径并解析为绝对路径。
     ///
     /// 拒绝 `..` / 绝对路径（400）；目标必须存在（404）；canonicalize 后必须
@@ -248,13 +296,88 @@ fn strip_verbatim(path: &str) -> String {
     path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
 }
 
-/// core executor 错误 → API 错误：文件缺失 → 404，其余 → 500。
+/// core executor 错误 → API 错误：
+/// - 文件缺失 → 404；
+/// - 路径沙箱违规（非法路径、绝对路径）→ 400；
+/// - 内容不匹配 / 补丁定位失败（锚点、旧内容不匹配、补丁、块）→ 409
+///   （前端据此提示"文件已被修改，请重新加载"）；
+/// - 其余 → 500。
 fn executor_error_to_api(err: TianyanError) -> ApiError {
     let msg = err.to_string();
     if msg.contains("文件不存在") {
         ApiError::NotFound(msg)
+    } else if msg.contains("非法路径") || msg.contains("绝对路径") {
+        ApiError::BadRequest(msg)
+    } else if msg.contains("锚点")
+        || msg.contains("旧内容不匹配")
+        || msg.contains("补丁")
+        || msg.contains("块")
+    {
+        ApiError::Conflict(msg)
     } else {
         ApiError::Internal(msg)
+    }
+}
+
+/// 将 git 风格 unified diff（jsdiff `createTwoFilesPatch` 产物）归一化为
+/// core `parse_patch` 接受的 codex `*** Update File:` 信封；输入已是 codex
+/// 风格时原样透传。
+///
+/// git 风格（jsdiff 输出）：
+/// ```text
+/// --- a/src/main.rs
+/// +++ b/src/main.rs
+/// @@ -1,3 +1,4 @@
+///  context
+/// -old
+/// +new
+/// ```
+/// 转换规则：`--- a/<path>` 头 → `*** Update File: <path>`（去 `a/`/`b/`
+/// 前缀与 jsdiff 的引号转义）；`+++ b/<path>` 头删除；其余行（`@@` 块头、
+/// 块体行、`\ No newline` 标记）原样保留。`--- ` / `+++ ` 只在进入 `@@`
+/// 块之前被识别为文件头——块体中的删除行是 `-` 加原文（原文再以 `---`
+/// 开头时呈现为 `---- `，四连 `-`），不会误判。
+fn normalize_patch(patch_text: &str) -> Result<String, ApiError> {
+    if patch_text.trim_start().starts_with("*** Update File:") {
+        return Ok(patch_text.to_string());
+    }
+    let mut out = String::with_capacity(patch_text.len());
+    let mut in_hunk = false;
+    let mut saw_header = false;
+    for line in patch_text.split('\n') {
+        if !in_hunk {
+            if let Some(rest) = line.strip_prefix("--- ") {
+                saw_header = true;
+                out.push_str("*** Update File: ");
+                out.push_str(&strip_ab_prefix(rest.trim()));
+                out.push('\n');
+                continue;
+            }
+            if line.starts_with("+++ ") {
+                continue;
+            }
+        }
+        if line.starts_with("@@") {
+            in_hunk = true;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !saw_header {
+        return Err(ApiError::BadRequest(
+            "补丁格式无效：缺少 --- a/ 文件头或 *** Update File 信封".to_string(),
+        ));
+    }
+    Ok(out)
+}
+
+/// 去掉 jsdiff 路径的 `a/` / `b/` 前缀与引号转义（路径含空格时 jsdiff 用
+/// 引号包裹）。前缀缺失时返回原样。
+fn strip_ab_prefix(path: &str) -> String {
+    let p = path.trim().trim_matches('"');
+    match p.strip_prefix("a/").or_else(|| p.strip_prefix("b/")) {
+        Some(rest) if !rest.is_empty() => rest.to_string(),
+        _ => p.to_string(),
     }
 }
 

@@ -14,7 +14,7 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
-use tianyan::scheduler::tasks::{GcTask, MemoryTask, RuleTask, SummaryTask};
+use tianyan::scheduler::tasks::{GcTask, MemoryTask, RuleTask, SnapshotGcTask, SummaryTask};
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 
 use crate::agent_builder::create_model_services;
@@ -438,6 +438,18 @@ async fn start_server_inner(
                 Arc::new(GcTask::new()),
             ))
             .await?;
+
+        // 注册快照垃圾回收任务（每 12 小时；未配置工作区时 snapshot_manager 为 None，跳过）
+        if let Some(sm) = state.snapshot_manager() {
+            scheduler
+                .register_task(TaskDefinition::new(
+                    "snapshot_gc",
+                    "快照垃圾回收",
+                    "0 0 */12 * * *",
+                    Arc::new(SnapshotGcTask::new(sm)),
+                ))
+                .await?;
+        }
 
         // 启动任务调度器
         TaskScheduler::start_with_scheduler(scheduler.clone(), task_ctx.clone()).await?;

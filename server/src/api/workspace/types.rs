@@ -1,8 +1,10 @@
 //! 工作区类型定义
 //!
-//! 定义工作区只读 API 的请求/响应 DTO（frozen 契约，前端 Phase 1 依赖）。
+//! 定义工作区 API 的请求/响应 DTO（frozen 契约）：只读（tree/read/diff）与
+//! 编辑（apply-patch / apply-edit，编程工作台 Phase 2）。
 
 use serde::{Deserialize, Serialize};
+use tianyan::executor::edit::EditSpec;
 
 /// 目录树响应。
 #[derive(Debug, Clone, Serialize)]
@@ -98,4 +100,49 @@ pub struct DiffQuery {
     pub path_a: Option<String>,
     /// 文件间模式：右侧相对路径。
     pub path_b: Option<String>,
+}
+
+/// apply-patch 请求体（前端保存文件的主通道）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApplyPatchRequest {
+    /// unified diff 补丁文本（codex 风格 `*** Update File:` 信封格式）。
+    pub patch: String,
+}
+
+/// apply-patch 响应中单个文件的变更摘要。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyPatchFileDto {
+    /// 相对工作目录的路径（补丁头部声明的原样路径）。
+    pub path: String,
+    /// 应用的补丁块数。
+    pub hunks_applied: usize,
+    /// 变更行数（删除 + 新增行合计）。
+    pub lines_changed: usize,
+}
+
+/// apply-patch 响应体。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplyPatchResponse {
+    /// 各文件变更摘要。
+    pub files: Vec<ApplyPatchFileDto>,
+    /// 变更文件总数。
+    pub total_files: usize,
+}
+
+/// apply-edit 请求体（hashline 语义编辑，供 LLM/外部工作流）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApplyEditRequest {
+    /// 相对工作目录的路径。
+    pub path: String,
+    /// 语义编辑列表（复用 core [`EditSpec`] 的 serde 契约）。
+    pub edits: Vec<EditSpec>,
+}
+
+/// apply-edit 响应体。
+#[derive(Debug, Clone, Serialize)]
+pub struct ApplyEditResponse {
+    /// 相对工作目录的路径（回显请求值）。
+    pub path: String,
+    /// 实际应用的编辑条数。
+    pub edits_applied: usize,
 }

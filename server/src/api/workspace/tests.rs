@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tempfile::tempdir;
 use tianyan::config::{
     ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig, ProviderConfig,
@@ -515,4 +515,232 @@ async fn tree_endpoint_missing_working_directory_returns_400() {
         .as_str()
         .unwrap()
         .contains("working_directory"));
+}
+
+// ---------------------------------------------------------------------------
+// 处理器层：apply-patch / apply-edit（编程工作台 Phase 2）
+// ---------------------------------------------------------------------------
+
+/// 构造 JSON POST 请求。
+fn post_json(uri: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// apply-patch 成功路径：补丁落盘 + 响应 total_files=1 与变更摘要。
+#[tokio::test]
+async fn apply_patch_endpoint_applies_patch_and_updates_file() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let patch = "*** Update File: a.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+two2\n three\n";
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/workspace/apply-patch",
+            json!({ "patch": patch }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["total_files"], 1);
+    let files = body["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "a.txt");
+    assert_eq!(files[0]["hunks_applied"], 1);
+    assert_eq!(files[0]["lines_changed"], 2);
+    let disk = std::fs::read_to_string(workdir.join("a.txt")).unwrap();
+    assert_eq!(disk, "one\ntwo2\nthree\n");
+}
+
+/// apply-patch 拒绝 `..` 路径（core 沙箱违规）→ 400。
+#[tokio::test]
+async fn apply_patch_endpoint_rejects_dotdot_path() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let patch = "*** Update File: ../escape.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n";
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/workspace/apply-patch",
+            json!({ "patch": patch }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["success"], false);
+    assert!(body["error"].as_str().unwrap().contains("非法路径"));
+}
+
+/// apply-edit 成功路径：hashline 锚点定位 + 落盘 + 响应 edits_applied=1。
+#[tokio::test]
+async fn apply_edit_endpoint_applies_hashline_edit() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.txt"), "alpha\nbeta\n").unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let anchor = tianyan::executor::hashline::line_hash("beta");
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/workspace/apply-edit",
+            json!({
+                "path": "a.txt",
+                "edits": [{ "start_line": 2, "anchor": anchor, "new_lines": ["BETA"] }],
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["path"], "a.txt");
+    assert_eq!(body["edits_applied"], 1);
+    let disk = std::fs::read_to_string(workdir.join("a.txt")).unwrap();
+    assert_eq!(disk, "alpha\nBETA\n");
+}
+
+/// apply-edit 锚点不匹配（内容漂移）→ 409（前端提示"文件已被修改"）。
+#[tokio::test]
+async fn apply_edit_endpoint_anchor_mismatch_returns_409() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::write(workdir.join("a.txt"), "alpha\nbeta\n").unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/workspace/apply-edit",
+            json!({
+                "path": "a.txt",
+                "edits": [{ "start_line": 1, "anchor": "ff", "new_lines": ["x"] }],
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["success"], false);
+    assert!(body["error"].as_str().unwrap().contains("锚点"));
+}
+
+/// apply-patch 接受 git 风格补丁（jsdiff `createTwoFilesPatch` 产物）：
+/// 服务端归一化为 codex 信封后落盘。
+#[tokio::test]
+async fn apply_patch_endpoint_accepts_git_style_patch() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(workdir.join("src")).unwrap();
+    std::fs::write(
+        workdir.join("src/lib.rs"),
+        "fn main() {\n    println!(\"hello\");\n}\n",
+    )
+    .unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    // jsdiff createTwoFilesPatch("a/src/lib.rs", "b/src/lib.rs", old, new) 的输出形状
+    let patch = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n fn main() {\n-    println!(\"hello\");\n+    println!(\"hello world\");\n }\n";
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/workspace/apply-patch",
+            json!({ "patch": patch }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["total_files"], 1);
+    assert_eq!(body["files"][0]["path"], "src/lib.rs");
+    let disk = std::fs::read_to_string(workdir.join("src/lib.rs")).unwrap();
+    assert_eq!(disk, "fn main() {\n    println!(\"hello world\");\n}\n");
+}
+
+/// apply-patch 拒绝既非 git 也非 codex 的补丁文本 → 400。
+#[tokio::test]
+async fn apply_patch_endpoint_rejects_unknown_format() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/workspace/apply-patch",
+            json!({ "patch": "这不是一个补丁" }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["success"], false);
+    assert!(body["error"].as_str().unwrap().contains("补丁格式无效"));
+}
+
+/// apply-edit 目标文件不存在 → 404（resolve 沙箱）。
+#[tokio::test]
+async fn apply_edit_endpoint_missing_file_returns_404() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/workspace/apply-edit",
+            json!({
+                "path": "ghost.rs",
+                "edits": [{ "start_line": 1, "new_lines": ["x"] }],
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["success"], false);
 }

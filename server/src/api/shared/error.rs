@@ -34,6 +34,8 @@ pub enum ApiError {
     PayloadTooLarge(String),
     /// 网关超时
     GatewayTimeout(String),
+    /// 内容冲突（文件已被外部修改、锚点/补丁定位不匹配）
+    Conflict(String),
 }
 
 impl fmt::Display for ApiError {
@@ -48,6 +50,7 @@ impl fmt::Display for ApiError {
             ApiError::Forbidden(msg) => write!(f, "禁止访问：{}", msg),
             ApiError::PayloadTooLarge(msg) => write!(f, "请求体过大：{}", msg),
             ApiError::GatewayTimeout(msg) => write!(f, "网关超时：{}", msg),
+            ApiError::Conflict(msg) => write!(f, "冲突：{}", msg),
         }
     }
 }
@@ -66,6 +69,7 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             ApiError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
             ApiError::GatewayTimeout(msg) => (StatusCode::GATEWAY_TIMEOUT, msg.clone()),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
         };
 
         let body = Json(ErrorResponse {
