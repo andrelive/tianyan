@@ -13,7 +13,7 @@ use crate::agent::session_state::SessionState;
 use crate::agent::tool_registry::DynamicToolExecutor;
 use crate::agent::types::{AgentResponse, AgentState, ClarificationQuestion, QuestionType};
 use crate::common::error::Result;
-use crate::common::types::{Message, StructuredMessage, TokenUsage};
+use crate::common::types::{Message, MessageRole, StructuredMessage, TokenUsage};
 use crate::context::{ContextAssembler, ContextPipeline};
 use crate::observability::AgentMetrics;
 use crate::observability::TokenRecord;
@@ -149,7 +149,23 @@ impl Agent {
         };
 
         let s = state.read().await;
-        ContextAssembler::assemble(&s.structured_messages, &injectable, "")
+        let mut messages = ContextAssembler::assemble(&s.structured_messages, &injectable, "");
+
+        // 注入会话定位信息：早期对话被压缩后，摘要字段可能不足以恢复细节，
+        // 告知 LLM 当前会话 URI，使其可用 vfs_read 检索被压缩的原始记录。
+        // 位置固定在 system 前缀（soul/rules）之后、历史消息之前，
+        // 同会话内内容恒定，不影响 DeepSeek 前缀缓存。
+        let session_hint = format!(
+            "## 会话定位\n当前会话 ID：{}\n若早期对话已被压缩且摘要信息不足，可用 vfs_read 工具读取 tianyan://session/{} 查看原始对话记录（JSONL 格式，含压缩前的完整消息）。",
+            s.session_id, s.session_id
+        );
+        let insert_at = messages
+            .iter()
+            .position(|m| m.role != MessageRole::System)
+            .unwrap_or(messages.len());
+        messages.insert(insert_at, Message::system(session_hint));
+
+        messages
     }
 
     /// 判断是否需要压缩，如果需要则生成摘要 StructuredMessage 并持久化。
@@ -609,6 +625,48 @@ mod tests {
         assert_eq!(resp.content, "处理完成");
         // 待追问状态已被清理
         assert!(state.read().await.pending_clarification.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_prepare_context_injects_session_hint() {
+        // 回归保护：组装上下文必须包含会话定位信息（session_id + vfs 检索路径），
+        // 使 LLM 在早期对话被压缩后仍能向上检索原始记录（resume 不丢意图的最后一环）。
+        let mock = MockChatService::new();
+        let agent = make_agent(mock);
+
+        let state = agent.load_and_build_state("session-abc").await.unwrap();
+        let messages = agent.prepare_context(&state, "你好").await;
+
+        let hint = messages
+            .iter()
+            .find(|m| m.role == MessageRole::System && m.content.contains("会话定位"));
+        assert!(hint.is_some(), "上下文应包含会话定位提示");
+        let hint = hint.unwrap();
+        assert!(
+            hint.content.contains("session-abc"),
+            "提示应包含当前会话 ID"
+        );
+        assert!(
+            hint.content.contains("tianyan://session/session-abc"),
+            "提示应包含可检索的会话 URI"
+        );
+        // 提示应位于 system 前缀之后、历史/当前输入之前
+        let hint_idx = messages
+            .iter()
+            .position(|m| m.content == hint.content)
+            .unwrap();
+        assert!(
+            messages[hint_idx + 1..]
+                .iter()
+                .any(|m| m.role == MessageRole::User),
+            "会话定位提示之后应有历史或当前输入"
+        );
+        assert!(
+            messages[..hint_idx]
+                .iter()
+                .all(|m| m.role == MessageRole::System),
+            "会话定位提示之前只应有 system 前缀（soul/rules）"
+        );
     }
 
     #[test]

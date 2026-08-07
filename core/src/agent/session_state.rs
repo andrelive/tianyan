@@ -115,10 +115,12 @@ impl SessionState {
         if keep_from == 0 {
             return;
         }
-        // 如果有 compression_marker，只截断到 marker 之前，保留 marker 及之后所有消息
+        // 如果有 compression_marker，只截断到 marker 之前，保留 marker（摘要消息）及之后所有消息
         if let Some(marker_pos) = last_marker_pos {
             if marker_pos < keep_from {
-                self.structured_messages.drain(0..=marker_pos);
+                // 修复：原实现 drain(0..=marker_pos) 会把摘要消息本身一并删除，
+                // 导致早期摘要从上下文消失；应为 drain(0..marker_pos)。
+                self.structured_messages.drain(0..marker_pos);
                 return;
             }
         }
@@ -156,5 +158,76 @@ mod tests {
         state.cleanup();
         assert!(state.structured_messages.len() <= KEEP_RECENT_MESSAGES);
         assert!(!state.structured_messages.is_empty());
+    }
+
+    /// 回归测试：早期存在 compression_marker 时，裁剪必须保留摘要消息本身
+    /// （修复 drain(0..=marker_pos) 误删 marker 的 bug）。
+    #[test]
+    fn test_trim_conversation_keeps_marker_message() {
+        let mut state = SessionState::new("test-session");
+        // 早期消息 + 摘要 marker
+        for i in 0..30 {
+            state.add_user_message(format!("early {}", i));
+        }
+        let marker = StructuredMessage {
+            id: "msg_marker".to_string(),
+            parent_id: None,
+            role: MessageRole::System,
+            parts: vec![Part::Text {
+                text: "[对话摘要] 早期对话已压缩".to_string(),
+                time: PartTime::default(),
+            }],
+            tokens: Default::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime::default(),
+            session_id: "test-session".to_string(),
+            finish: None,
+            compression_marker: true,
+        };
+        state.add_structured_message(marker);
+        // 后续消息撑过 MAX_SESSION_MESSAGES，使 marker 落在保留窗口之前
+        for i in 0..80 {
+            state.add_user_message(format!("later {}", i));
+        }
+        state.cleanup();
+
+        assert!(
+            state
+                .structured_messages
+                .iter()
+                .any(|m| m.compression_marker),
+            "摘要消息（compression_marker）不应被裁剪掉"
+        );
+        // marker 之前的 early 消息必须全部删除；marker 之后的 later 消息全部保留
+        assert!(
+            state
+                .structured_messages
+                .iter()
+                .all(|m| m.compression_marker || !m.parts.is_empty()),
+            "裁剪后消息不应为空"
+        );
+        let texts: Vec<String> = state
+            .structured_messages
+            .iter()
+            .flat_map(|m| {
+                m.parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        Part::Text { text, .. } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            texts.iter().all(|t| !t.starts_with("early ")),
+            "marker 之前的消息应被删除，但残留: {:?}",
+            texts
+        );
+        assert!(
+            texts.iter().any(|t| t.starts_with("later ")),
+            "marker 之后的消息应保留"
+        );
     }
 }
