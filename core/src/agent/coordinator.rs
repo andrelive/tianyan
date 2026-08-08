@@ -101,26 +101,29 @@ use crate::agent::types::{
     StreamChunkType, StreamEventSender,
 };
 use crate::common::error::Result;
+use crate::common::types::Message;
 
 /// 智能体协调器 trait。
 #[async_trait]
 pub trait AgentCoordinator: Send + Sync {
     /// 处理用户消息。
+    /// - `message` — 完整消息（含可选的多模态图片片段，`content` 为纯文本）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
     async fn process_message(
         &self,
         session_id: &str,
-        message: &str,
+        message: &Message,
         model: Option<&str>,
     ) -> Result<AgentResponse>;
 
     /// 处理用户消息（流式响应）。
+    /// - `message` — 完整消息（含可选的多模态图片片段）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
     /// - `cancel` — 取消标志（客户端断开/服务关停时置位）；`None` 表示不可取消。
     async fn process_message_stream(
         &self,
         session_id: &str,
-        message: &str,
+        message: &Message,
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
@@ -157,11 +160,10 @@ impl AgentCoordinator for Agent {
     async fn process_message(
         &self,
         session_id: &str,
-        message: &str,
+        message: &Message,
         model: Option<&str>,
     ) -> Result<AgentResponse> {
         let start = Instant::now();
-        let message = message.to_string();
 
         // Resolve model: caller-specified > Agent default config
         let model = model.unwrap_or(&self.default_model);
@@ -178,7 +180,7 @@ impl AgentCoordinator for Agent {
         // 2-6. 共享编排骨架：持久化 → 上下文 → AgentLoop → 结果组装 → 指标更新
         // 非流式路径无可取消源（HTTP 请求生命周期内），传 None
         let response = self
-            .run_agent_turn(&state, session_id, &message, model, start, None)
+            .run_agent_turn(&state, session_id, message, model, start, None)
             .await?;
 
         // 7. Compression check and persist
@@ -199,7 +201,7 @@ impl AgentCoordinator for Agent {
     async fn process_message_stream(
         &self,
         session_id: &str,
-        message: &str,
+        message: &Message,
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
@@ -208,7 +210,7 @@ impl AgentCoordinator for Agent {
 
         let (tx, rx) = mpsc::channel(100);
         let self_clone = Arc::new(self.clone());
-        let message = message.to_string();
+        let message = message.clone();
         let stream_sender = StreamEventSender::new(tx.clone());
         let state_clone = state.clone();
 

@@ -102,15 +102,16 @@ export default function ChatPanel() {
   // ─── Handlers ───────────────────────────────────────────────────
 
   const handleSend = useCallback(
-    async (content: string) => {
-      if (streamStatus === 'streaming' || !content.trim()) return;
-
+    async (content: string, images: string[] = []) => {
+      if (streamStatus === 'streaming') return;
       const trimmed = content.trim();
+      if (!trimmed && images.length === 0) return;
 
       // Add user message
       addMessage({
         role: 'user',
         content: trimmed,
+        images: images.length > 0 ? images : undefined,
         timestamp: new Date().toISOString(),
       });
 

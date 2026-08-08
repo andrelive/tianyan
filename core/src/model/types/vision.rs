@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::common::types::ContentPart;
 use crate::common::types::TokenUsage;
 
 /// 视觉模型请求。
@@ -41,30 +42,6 @@ pub enum VisionContent {
     Text(String),
     /// 多模态片段。
     MultiPart(Vec<ContentPart>),
-}
-
-/// 内容片段。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContentPart {
-    /// 内容类型。
-    #[serde(rename = "type")]
-    pub content_type: String,
-    /// 文本内容。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// 图片 URL。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_url: Option<ImageUrl>,
-}
-
-/// 图片 URL。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageUrl {
-    /// URL 地址。
-    pub url: String,
-    /// 细节级别。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
 }
 
 impl VisionRequest {

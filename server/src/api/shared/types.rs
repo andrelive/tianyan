@@ -24,6 +24,9 @@ pub struct ChatMessage {
     pub role: MessageRole,
     /// 消息内容
     pub content: String,
+    /// 图片 data URL 列表（`data:image/png;base64,...`），仅用户消息使用。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub images: Option<Vec<String>>,
     /// 可选的时间戳（RFC3339 格式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
@@ -41,6 +44,7 @@ impl ChatMessage {
         Self {
             role: MessageRole::System,
             content: content.to_string(),
+            images: None,
             timestamp: None,
         }
     }
@@ -56,6 +60,7 @@ impl ChatMessage {
         Self {
             role: MessageRole::User,
             content: content.to_string(),
+            images: None,
             timestamp: None,
         }
     }
@@ -71,6 +76,7 @@ impl ChatMessage {
         Self {
             role: MessageRole::Assistant,
             content: content.to_string(),
+            images: None,
             timestamp: None,
         }
     }

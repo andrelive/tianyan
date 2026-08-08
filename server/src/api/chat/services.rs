@@ -14,6 +14,16 @@ use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
 use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
 
+/// 把 API 层消息转换为 core 消息：携带图片时构造多模态消息。
+fn to_core_message(msg: &ChatMessage) -> CoreMessage {
+    match &msg.images {
+        Some(images) if !images.is_empty() => {
+            CoreMessage::user_with_images(msg.content.clone(), images.clone())
+        }
+        _ => CoreMessage::user(msg.content.clone()),
+    }
+}
+
 /// 对话服务，处理对话逻辑
 pub struct ChatService {
     agent: Arc<dyn AgentCoordinator>,
@@ -33,16 +43,21 @@ impl ChatService {
     ///
     /// 如果 `session_id` 未提供，会自动创建新会话。
     pub async fn process_message(&self, request: ChatRequest) -> Result<ChatResponse, ApiError> {
-        let last_message = request
+        let last_text = request
             .messages
             .last()
             .map(|m| m.content.clone())
             .unwrap_or_default();
+        let last_message = request
+            .messages
+            .last()
+            .map(to_core_message)
+            .unwrap_or_else(|| CoreMessage::user(""));
 
         let session_id = resolve_or_create_session(
             self.session_manager.as_ref(),
             request.session_id.as_deref(),
-            &last_message,
+            &last_text,
         )
         .await?;
 
@@ -65,16 +80,21 @@ impl ChatService {
         tx: mpsc::Sender<ChatStreamEvent>,
         cancel: Arc<AtomicBool>,
     ) -> Result<(), ApiError> {
-        let last_message = request
+        let last_text = request
             .messages
             .last()
             .map(|m| m.content.clone())
             .unwrap_or_default();
+        let last_message = request
+            .messages
+            .last()
+            .map(to_core_message)
+            .unwrap_or_else(|| CoreMessage::user(""));
 
         let session_id = resolve_or_create_session(
             self.session_manager.as_ref(),
             request.session_id.as_deref(),
-            &last_message,
+            &last_text,
         )
         .await?;
 
@@ -159,6 +179,7 @@ fn to_chat_response(session_id: &str, response: tianyan::agent::AgentResponse) -
         message: ChatMessage {
             role: MessageRole::Assistant,
             content: response.content,
+            images: None,
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
         },
         usage: TokenUsage {

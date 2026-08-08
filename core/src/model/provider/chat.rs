@@ -1,12 +1,14 @@
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestSystemMessage,
     ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionTool, ChatCompletionToolChoiceOption,
-    ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall as OaFunctionCall,
-    FunctionName, FunctionObject, Role as OaRole, ToolChoiceOptions,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionTools,
+    CreateChatCompletionRequestArgs, FunctionCall as OaFunctionCall, FunctionName, FunctionObject,
+    ImageDetail as OaImageDetail, ImageUrl as OaImageUrl, Role as OaRole, ToolChoiceOptions,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -81,6 +83,7 @@ impl ChatService for AsyncOpenAIClient {
                     message: Message {
                         role: convert_role(&msg.role),
                         content: msg.content.unwrap_or_default(),
+                        content_parts: None,
                         tool_calls,
                         tool_call_id: None,
                         reasoning_content: None,
@@ -262,6 +265,53 @@ impl AsyncOpenAIClient {
     }
 }
 
+/// 构造用户消息内容：携带多模态片段时输出数组格式（文本 + 图片），
+/// 否则保持纯文本（与旧行为一致）。
+fn user_content(m: &Message) -> ChatCompletionRequestUserMessageContent {
+    let Some(parts) = &m.content_parts else {
+        return ChatCompletionRequestUserMessageContent::Text(m.content.clone());
+    };
+    if parts.is_empty() {
+        return ChatCompletionRequestUserMessageContent::Text(m.content.clone());
+    }
+
+    let oa_parts: Vec<ChatCompletionRequestUserMessageContentPart> = parts
+        .iter()
+        .map(|p| {
+            if p.content_type == "image_url" {
+                match &p.image_url {
+                    Some(url) => ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                        ChatCompletionRequestMessageContentPartImage {
+                            image_url: OaImageUrl {
+                                url: url.url.clone(),
+                                detail: url.detail.clone().and_then(|d| match d.as_str() {
+                                    "low" => Some(OaImageDetail::Low),
+                                    "high" => Some(OaImageDetail::High),
+                                    "auto" => Some(OaImageDetail::Auto),
+                                    _ => None,
+                                }),
+                            },
+                        },
+                    ),
+                    None => ChatCompletionRequestUserMessageContentPart::Text(
+                        ChatCompletionRequestMessageContentPartText {
+                            text: "[图片（内容缺失）]".to_string(),
+                        },
+                    ),
+                }
+            } else {
+                ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartText {
+                        text: p.text.clone().unwrap_or_default(),
+                    },
+                )
+            }
+        })
+        .collect();
+
+    ChatCompletionRequestUserMessageContent::Array(oa_parts)
+}
+
 fn convert_messages(messages: &[Message]) -> Vec<ChatCompletionRequestMessage> {
     messages
         .iter()
@@ -274,7 +324,7 @@ fn convert_messages(messages: &[Message]) -> Vec<ChatCompletionRequestMessage> {
             }
             MessageRole::User => {
                 ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                    content: ChatCompletionRequestUserMessageContent::Text(m.content.clone()),
+                    content: user_content(m),
                     name: None,
                 })
             }
@@ -345,6 +395,53 @@ mod convert_tests {
         let msg = Message::user("Hello");
         let converted = convert_messages(&[msg]);
         assert_eq!(converted.len(), 1);
+    }
+
+    #[test]
+    fn test_convert_user_message_with_images_produces_array() {
+        use async_openai::types::chat::{
+            ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
+            ChatCompletionRequestUserMessageContentPart,
+        };
+
+        let msg =
+            Message::user_with_images("描述这张图", vec!["data:image/png;base64,AAAA".to_string()]);
+        let converted = convert_messages(&[msg]);
+        let ChatCompletionRequestMessage::User(user) = &converted[0] else {
+            panic!("应生成 User 消息");
+        };
+        let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content else {
+            panic!("带图片的 User 消息应为 Array 格式");
+        };
+        assert_eq!(parts.len(), 2, "文本 + 图片共 2 个片段");
+        assert!(matches!(
+            parts[0],
+            ChatCompletionRequestUserMessageContentPart::Text(_)
+        ));
+        assert!(matches!(
+            parts[1],
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+        ));
+    }
+
+    #[test]
+    fn test_convert_user_message_plain_text_unchanged() {
+        use async_openai::types::chat::{
+            ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
+        };
+
+        let msg = Message::user("Hello");
+        let converted = convert_messages(&[msg]);
+        let ChatCompletionRequestMessage::User(user) = &converted[0] else {
+            panic!("应生成 User 消息");
+        };
+        assert!(
+            matches!(
+                user.content,
+                ChatCompletionRequestUserMessageContent::Text(_)
+            ),
+            "无图片时保持纯文本格式（向后兼容）"
+        );
     }
 
     #[test]

@@ -51,14 +51,35 @@ impl SessionState {
 
     /// 添加用户消息。
     pub fn add_user_message(&mut self, content: impl Into<String>) {
+        self.push_user_message(content.into(), Vec::new());
+    }
+
+    /// 添加携带图片的用户消息（`images` 为 data URL 列表）。
+    pub fn add_user_message_with_images(
+        &mut self,
+        content: impl Into<String>,
+        images: Vec<String>,
+    ) {
+        self.push_user_message(content.into(), images);
+    }
+
+    /// 用户消息内部构造：文本 + 可选图片 → 持久化 parts。
+    fn push_user_message(&mut self, content: String, images: Vec<String>) {
+        let mut parts = vec![Part::Text {
+            text: content,
+            time: PartTime::default(),
+        }];
+        for url in images {
+            parts.push(Part::Image {
+                url,
+                time: PartTime::default(),
+            });
+        }
         let msg = StructuredMessage {
             id: format!("msg_{}", Utc::now().timestamp_millis()),
             parent_id: self.structured_messages.last().map(|m| m.id.clone()),
             role: MessageRole::User,
-            parts: vec![Part::Text {
-                text: content.into(),
-                time: PartTime::default(),
-            }],
+            parts,
             tokens: DetailedTokenUsage::default(),
             cost: 0.0,
             model_id: None,

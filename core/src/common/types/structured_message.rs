@@ -101,6 +101,15 @@ pub enum Part {
         #[serde(default)]
         time: PartTime,
     },
+    /// 用户消息中的图片（URL 或 `data:image/png;base64,...` data URL）。
+    #[serde(rename = "image")]
+    Image {
+        /// 图片 URL 或 data URL。
+        url: String,
+        /// 时间戳。
+        #[serde(default)]
+        time: PartTime,
+    },
 }
 
 /// 面向持久化的结构化消息。

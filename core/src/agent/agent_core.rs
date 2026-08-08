@@ -115,12 +115,24 @@ impl Agent {
     /// 执行：写入用户消息 → 检查会话缓存 → 按需加载 injectable → 压缩 → 组装。
     /// soul/rules/memories 仅会话首次加载，后续轮次复用缓存，
     /// 确保 system prompt 前缀稳定以命中 DeepSeek 前缀缓存。
+    ///
+    /// 图片（`message.content_parts`）随用户消息写入会话状态，经
+    /// `ContextAssembler` 组装为多模态传输消息，对 LLM 可见。
     pub(crate) async fn prepare_context(
         &self,
         state: &Arc<RwLock<SessionState>>,
-        query: &str,
+        message: &Message,
     ) -> Vec<Message> {
-        state.write().await.add_user_message(query);
+        let query = message.content.clone();
+        let images = message.image_urls();
+        if images.is_empty() {
+            state.write().await.add_user_message(&query);
+        } else {
+            state
+                .write()
+                .await
+                .add_user_message_with_images(&query, images);
+        }
 
         // 会话级缓存：soul 非空表示已加载过，跳过 I/O
         let soul_loaded = {
@@ -129,7 +141,7 @@ impl Agent {
         };
 
         let injectable = if !soul_loaded {
-            match self.context_pipeline.load_injectable(query).await {
+            match self.context_pipeline.load_injectable(&query).await {
                 Ok(ctx) => {
                     let injected_rules = ctx.rules_and_experiences.len();
                     if injected_rules > 0 {
@@ -224,16 +236,16 @@ impl Agent {
         &self,
         state: &Arc<RwLock<SessionState>>,
         session_id: &str,
-        query: &str,
+        message: &Message,
         model: &str,
         start: Instant,
         cancel: Option<&AtomicBool>,
     ) -> Result<AgentResponse> {
         // 1. Persist current user message
-        self.persist_user_message(session_id, state, query).await;
+        self.persist_user_message(session_id, state, message).await;
 
         // 2. Prepare context
-        let messages = self.prepare_context(state, query).await;
+        let messages = self.prepare_context(state, message).await;
 
         // 3. Run agent loop (internal persistence in AgentLoop)
         let parent_id = {
@@ -353,10 +365,11 @@ impl Agent {
         }
 
         // 共享编排骨架（parent_id 统一在 prepare_context 之后计算，回复挂接在用户回答之下，与 process_message 路径语义一致）
+        let clarification_msg = Message::user(clarification_answers);
         self.run_agent_turn(
             state,
             &session_id,
-            clarification_answers,
+            &clarification_msg,
             &self.default_model,
             start,
             None,
@@ -424,14 +437,20 @@ impl Agent {
         &self,
         session_id: &str,
         state: &Arc<RwLock<SessionState>>,
-        message: &str,
+        message: &Message,
     ) {
         let parent_id = {
             let s = state.read().await;
             s.structured_messages.last().map(|m| m.id.clone())
         };
+        let images = message.image_urls();
+        let user_msg = if images.is_empty() {
+            Message::user(message.content.clone())
+        } else {
+            Message::user_with_images(message.content.clone(), images)
+        };
         let user_sm = ContextAssembler::message_to_structured(
-            &Message::user(message),
+            &user_msg,
             session_id,
             parent_id.as_deref(),
             None,
@@ -605,7 +624,7 @@ mod tests {
         let agent = make_agent(mock);
 
         let resp = agent
-            .process_message("session-1", "帮我处理", None)
+            .process_message("session-1", &Message::user("帮我处理"), None)
             .await
             .unwrap();
 
@@ -653,7 +672,8 @@ mod tests {
         let agent = make_agent(mock);
 
         let state = agent.load_and_build_state("session-abc").await.unwrap();
-        let messages = agent.prepare_context(&state, "你好").await;
+        let query_msg = Message::user("你好");
+        let messages = agent.prepare_context(&state, &query_msg).await;
 
         let hint = messages
             .iter()

@@ -40,6 +40,21 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
             : 'bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)] rounded-bl-sm border border-[var(--color-border)]',
         )}
       >
+        {/* 用户消息图片（data URL） */}
+        {message.images && message.images.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-2">
+            {message.images.map((src, i) => (
+              <img
+                key={`${src.slice(0, 40)}-${i}`}
+                src={src}
+                alt={`图片 ${i + 1}`}
+                loading="lazy"
+                className="max-w-[240px] max-h-[240px] rounded-lg object-contain border border-white/10"
+              />
+            ))}
+          </div>
+        )}
+
         <div
           className={cn(
             'text-sm leading-relaxed break-words',

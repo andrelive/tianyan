@@ -69,10 +69,26 @@ impl ContextAssembler {
 
         match sm.role {
             MessageRole::User => {
+                let mut text = String::new();
+                let mut images: Vec<String> = Vec::new();
                 for part in &sm.parts {
-                    if let Part::Text { text, .. } = part {
-                        messages.push(Message::user(text.clone()));
+                    match part {
+                        Part::Text { text: t, .. } => {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(t);
+                        }
+                        Part::Image { url, .. } => images.push(url.clone()),
+                        _ => {}
                     }
+                }
+                if images.is_empty() {
+                    if !text.is_empty() {
+                        messages.push(Message::user(text));
+                    }
+                } else {
+                    messages.push(Message::user_with_images(text, images));
                 }
             }
             MessageRole::Assistant => {
@@ -111,6 +127,8 @@ impl ContextAssembler {
                             });
                         }
                         Part::ToolResult { .. } => {}
+                        // Assistant 消息不应携带图片；异常数据静默忽略。
+                        Part::Image { .. } => {}
                     }
                 }
 
@@ -118,6 +136,7 @@ impl ContextAssembler {
                     let msg = Message {
                         role: MessageRole::Assistant,
                         content,
+                        content_parts: None,
                         tool_calls: if tool_calls.is_empty() {
                             None
                         } else {
@@ -194,6 +213,18 @@ impl ContextAssembler {
                         text: msg.content.clone(),
                         time: default_time.clone(),
                     });
+                }
+
+                // 多模态片段中的图片 → Part::Image（持久化 data URL，供历史重放）
+                if let Some(ref content_parts) = msg.content_parts {
+                    for cp in content_parts {
+                        if let Some(image_url) = &cp.image_url {
+                            parts.push(Part::Image {
+                                url: image_url.url.clone(),
+                                time: default_time.clone(),
+                            });
+                        }
+                    }
                 }
 
                 if let Some(ref tool_calls) = msg.tool_calls {
@@ -369,6 +400,7 @@ mod tests {
         let msg = Message {
             role: MessageRole::Assistant,
             content: "Hello".to_string(),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
@@ -451,6 +483,7 @@ mod tests {
         let msg = Message {
             role: MessageRole::Tool,
             content: r#"{"result":"ok"}"#.to_string(),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: Some("call_1".to_string()),
             reasoning_content: None,
@@ -469,5 +502,62 @@ mod tests {
             }
             _ => panic!("expected ToolResult part"),
         }
+    }
+
+    #[test]
+    fn test_structured_to_messages_user_with_image_replays_parts() {
+        let sm = StructuredMessage {
+            id: "msg_img".to_string(),
+            parent_id: None,
+            role: MessageRole::User,
+            parts: vec![
+                Part::Text {
+                    text: "看这张图".to_string(),
+                    time: PartTime::default(),
+                },
+                Part::Image {
+                    url: "data:image/png;base64,AAAA".to_string(),
+                    time: PartTime::default(),
+                },
+            ],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime::default(),
+            session_id: "ses_1".to_string(),
+            finish: None,
+            compression_marker: false,
+        };
+        let messages = ContextAssembler::structured_to_messages(&sm);
+        assert_eq!(messages.len(), 1, "文本+图片应合并为一条用户消息");
+        let msg = &messages[0];
+        assert_eq!(msg.content, "看这张图");
+        assert_eq!(msg.image_urls(), vec!["data:image/png;base64,AAAA"]);
+    }
+
+    #[test]
+    fn test_message_to_structured_user_with_images_creates_image_part() {
+        let msg =
+            Message::user_with_images("看这张图", vec!["data:image/png;base64,AAAA".to_string()]);
+        let sm = ContextAssembler::message_to_structured(&msg, "ses_1", None, None);
+        let images: Vec<&String> = sm
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Image { url, .. } => Some(url),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images, vec!["data:image/png;base64,AAAA"]);
+    }
+
+    #[test]
+    fn test_message_to_structured_plain_user_no_image_part() {
+        let msg = Message::user("hello");
+        let sm = ContextAssembler::message_to_structured(&msg, "ses_1", None, None);
+        assert!(
+            !sm.parts.iter().any(|p| matches!(p, Part::Image { .. })),
+            "纯文本消息不应产生 Image part"
+        );
     }
 }

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::content_part::ContentPart;
 use super::tool::ToolCall;
 
 /// 对话中的消息角色。
@@ -36,6 +37,10 @@ pub struct Message {
     pub role: MessageRole,
     /// 消息内容
     pub content: String,
+    /// 多模态内容片段（当前仅用户消息携带图片时使用；
+    /// `content` 保持为纯文本（可为空），片段中的图片对 LLM 可见）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub content_parts: Option<Vec<ContentPart>>,
     /// 当 role 为 Assistant 时，模型发出的工具调用列表。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -54,6 +59,7 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
@@ -70,6 +76,28 @@ impl Message {
         Self::new(MessageRole::User, content)
     }
 
+    /// 创建携带图片的用户消息。
+    ///
+    /// - `content` - 用户文本（可为空，此时由图片充当全部内容）
+    /// - `images` - 图片 data URL 列表（`data:image/png;base64,...`），
+    ///   按顺序排在文本片段之后。
+    pub fn user_with_images(content: impl Into<String>, images: Vec<String>) -> Self {
+        let mut parts: Vec<ContentPart> = Vec::new();
+        let content = content.into();
+        if !content.is_empty() {
+            parts.push(ContentPart::text(&content));
+        }
+        parts.extend(images.into_iter().map(ContentPart::image));
+        Self {
+            role: MessageRole::User,
+            content,
+            content_parts: Some(parts),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
     /// 创建助手消息。
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::new(MessageRole::Assistant, content)
@@ -80,6 +108,7 @@ impl Message {
         Self {
             role: MessageRole::Assistant,
             content: content.into(),
+            content_parts: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             reasoning_content: None,
@@ -94,10 +123,24 @@ impl Message {
         Self {
             role: MessageRole::Tool,
             content: content.into(),
+            content_parts: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             reasoning_content: None,
         }
+    }
+
+    /// 提取多模态片段中的图片 URL 列表（无则返回空）。
+    pub fn image_urls(&self) -> Vec<String> {
+        self.content_parts
+            .as_ref()
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|p| p.image_url.as_ref().map(|u| u.url.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -177,5 +220,57 @@ mod tests {
         assert_eq!(msg.content, "hello");
         assert!(msg.tool_calls.is_none());
         assert!(msg.tool_call_id.is_none());
+        assert!(msg.content_parts.is_none(), "旧格式 JSON 无 content_parts");
+    }
+
+    #[test]
+    fn test_message_user_with_images_creates_parts() {
+        let msg =
+            Message::user_with_images("看这张图", vec!["data:image/png;base64,AAAA".to_string()]);
+        assert_eq!(msg.content, "看这张图");
+        let parts = msg.content_parts.as_ref().expect("应携带 content_parts");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].content_type, "text");
+        assert_eq!(parts[0].text.as_deref(), Some("看这张图"));
+        assert_eq!(parts[1].content_type, "image_url");
+        assert_eq!(
+            parts[1].image_url.as_ref().unwrap().url,
+            "data:image/png;base64,AAAA"
+        );
+    }
+
+    #[test]
+    fn test_message_user_with_images_empty_text_only_images() {
+        // 文本为空时仅生成图片片段（图片消息以图为主体）
+        let msg = Message::user_with_images("", vec!["data:image/png;base64,BBBB".to_string()]);
+        assert_eq!(msg.content, "");
+        let parts = msg.content_parts.as_ref().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].content_type, "image_url");
+    }
+
+    #[test]
+    fn test_message_image_urls_extraction() {
+        let plain = Message::user("hi");
+        assert!(plain.image_urls().is_empty());
+
+        let with_images = Message::user_with_images(
+            "text",
+            vec![
+                "data:image/png;base64,1".to_string(),
+                "data:image/jpeg;base64,2".to_string(),
+            ],
+        );
+        assert_eq!(with_images.image_urls().len(), 2);
+    }
+
+    #[test]
+    fn test_message_content_parts_roundtrip() {
+        let msg =
+            Message::user_with_images("hello", vec!["data:image/png;base64,AAAA".to_string()]);
+        let json = serde_json::to_string(&msg).unwrap();
+        let restored: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.content, "hello");
+        assert_eq!(restored.image_urls(), vec!["data:image/png;base64,AAAA"]);
     }
 }

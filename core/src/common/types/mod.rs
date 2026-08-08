@@ -5,6 +5,7 @@
 //! 按领域拆分为独立子模块，通过本文件统一重新导出。
 
 mod content;
+mod content_part;
 mod embedding;
 pub(crate) mod injectable;
 mod memory;
@@ -22,6 +23,7 @@ mod uri;
 pub use injectable::InjectableContext;
 
 pub use content::{ContentLevel, ContentSource, EntryType};
+pub use content_part::{ContentPart, ImageUrl};
 pub use embedding::Embedding;
 pub use memory::{MemoryCategory, MemoryEntry};
 pub use message::{Message, MessageRole};

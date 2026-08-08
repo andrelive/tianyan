@@ -38,8 +38,19 @@ impl ChatRequest {
         if self.messages.is_empty() {
             return Err("messages 不能为空".to_string());
         }
-        if self.messages.iter().any(|m| m.content.trim().is_empty()) {
+        // 内容允许为空——当且仅当该消息携带图片（多模态消息以图片为主体）。
+        if self.messages.iter().any(|m| {
+            m.content.trim().is_empty() && m.images.as_deref().unwrap_or_default().is_empty()
+        }) {
             return Err("消息内容不能为空".to_string());
+        }
+        if self.messages.iter().any(|m| {
+            m.images
+                .as_deref()
+                .map(|imgs| imgs.iter().any(|u| !u.starts_with("data:")))
+                .unwrap_or(false)
+        }) {
+            return Err("图片必须为 data URL（data:image/...;base64,...）".to_string());
         }
         if !(0.0..=2.0).contains(&self.temperature) {
             return Err("temperature 必须在 0.0 到 2.0 之间".to_string());
@@ -73,6 +84,7 @@ impl ChatResponse {
             message: ChatMessage {
                 role: MessageRole::Assistant,
                 content: message.to_string(),
+                images: None,
                 timestamp: Some(chrono::Utc::now().to_rfc3339()),
             },
             usage: TokenUsage::empty(),
@@ -163,6 +175,7 @@ mod tests {
             message: ChatMessage {
                 role: MessageRole::Assistant,
                 content: "Hello!".to_string(),
+                images: None,
                 timestamp: Some("2026-02-20T10:00:00Z".to_string()),
             },
             usage: TokenUsage {
@@ -220,5 +233,58 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Hello"));
         assert!(json.contains("chatcmpl-1"));
+    }
+
+    fn request_with_messages(messages: Vec<ChatMessage>) -> ChatRequest {
+        ChatRequest {
+            session_id: Some("s1".to_string()),
+            messages,
+            stream: false,
+            temperature: 0.7,
+            max_tokens: 100,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_plain_message_ok() {
+        let req = request_with_messages(vec![ChatMessage::user("hello")]);
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_image_only_message_ok() {
+        // 内容为空但携带图片：多模态消息以图为主体，应通过
+        let mut msg = ChatMessage::user("");
+        msg.images = Some(vec!["data:image/png;base64,AAAA".to_string()]);
+        let req = request_with_messages(vec![msg]);
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_content_without_images_rejected() {
+        let req = request_with_messages(vec![ChatMessage::user("  ")]);
+        assert!(req.validate().is_err(), "无图片时空内容应被拒绝");
+    }
+
+    #[test]
+    fn test_validate_non_data_url_image_rejected() {
+        let mut msg = ChatMessage::user("图");
+        msg.images = Some(vec!["https://example.com/x.png".to_string()]);
+        let req = request_with_messages(vec![msg]);
+        assert!(req.validate().is_err(), "非 data URL 图片应被拒绝");
+    }
+
+    #[test]
+    fn test_chat_message_images_roundtrip() {
+        let json = r#"{"role":"user","content":"","images":["data:image/png;base64,AAAA"]}"#;
+        let msg: ChatMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            msg.images.as_deref(),
+            Some(&["data:image/png;base64,AAAA".to_string()][..])
+        );
+        // 序列化应包含 images 字段
+        let out = serde_json::to_string(&msg).unwrap();
+        assert!(out.contains("images"));
     }
 }

@@ -216,7 +216,7 @@ impl AgentCoordinator for WizardModeAgent {
     async fn process_message(
         &self,
         _session_id: &str,
-        _message: &str,
+        _message: &tianyan::Message,
         _model: Option<&str>,
     ) -> TianyanResult<AgentResponse> {
         Err(TianyanError::Custom(
@@ -227,7 +227,7 @@ impl AgentCoordinator for WizardModeAgent {
     async fn process_message_stream(
         &self,
         _session_id: &str,
-        _message: &str,
+        _message: &tianyan::Message,
         _model: Option<&str>,
         _cancel: Option<Arc<AtomicBool>>,
     ) -> TianyanResult<mpsc::Receiver<TianyanResult<AgentStreamChunk>>> {

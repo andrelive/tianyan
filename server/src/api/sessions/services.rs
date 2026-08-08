@@ -115,9 +115,20 @@ impl SessionService {
                             };
                             acc.push_str(&format!("[工具结果 {}] {}", tool_call_id, truncated));
                         }
+                        // 图片不进文本拼接（前端经 images 字段渲染）
+                        Part::Image { .. } => {}
                     }
                     acc
                 });
+                // 提取历史消息中的图片 data URL（Part::Image → API images 字段）
+                let images = m
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        Part::Image { url, .. } => Some(url.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
                 ChatMessage {
                     // Tool 角色在 API 层映射为 Assistant（与旧 core_bridge 转换一致），
                     // 工具结果已展平为 [工具结果] 文本，前端不消费 tool 角色。
@@ -126,6 +137,11 @@ impl SessionService {
                         role => role,
                     },
                     content,
+                    images: if images.is_empty() {
+                        None
+                    } else {
+                        Some(images)
+                    },
                     timestamp: None,
                 }
             })

@@ -293,6 +293,7 @@ impl AgentLoop {
                     let assistant_msg = Message {
                         role: MessageRole::Assistant,
                         content: accumulated_content,
+                        content_parts: None,
                         tool_calls,
                         tool_call_id: None,
                         reasoning_content: None,

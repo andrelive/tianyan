@@ -9,6 +9,8 @@ export interface ChatMessage {
   id?: string;
   role: MessageRole;
   content: string;
+  /** 图片 data URL 列表（仅用户消息），如 data:image/png;base64,... */
+  images?: string[];
   timestamp?: string;
   skill_calls?: SkillCallInfo[];
   chunk_type?: StreamChunkType;

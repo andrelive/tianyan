@@ -6,6 +6,7 @@ mod streaming;
 mod tool;
 mod vision;
 
+pub use crate::common::types::{ContentPart, ImageUrl};
 pub use api_error::{ApiError, ApiErrorResponse};
 pub use chat::{ChatChoice, ChatCompletionRequest, ChatCompletionResponse};
 pub use embedding::{
@@ -19,7 +20,4 @@ pub use tool::{
     FunctionCall, FunctionDefinition, ToolCall, ToolCallType, ToolChoice, ToolChoiceFunction,
     ToolDefinition, ToolType,
 };
-pub use vision::{
-    ContentPart, ImageUrl, VisionChoice, VisionContent, VisionMessage, VisionRequest,
-    VisionResponse,
-};
+pub use vision::{VisionChoice, VisionContent, VisionMessage, VisionRequest, VisionResponse};
