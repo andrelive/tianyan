@@ -58,7 +58,7 @@ pub mod error;
 pub mod manager;
 pub mod types;
 
-pub use client::{McpClient, ToolInfo};
+pub use client::{McpCallOutput, McpClient, McpImage, ToolInfo};
 pub use error::{McpError, McpResult};
 pub use manager::McpClientManager;
 pub use types::McpServerConfig;

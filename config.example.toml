@@ -125,3 +125,26 @@ l0_multiplier = 3
 max_context_tokens = 4000
 enable_cache = true
 cache_ttl = 300
+
+# ==================== MCP 服务器配置 ====================
+# 通过 MCP 协议接入外部工具服务器（stdio 传输），工具自动注册进 Agent 工具循环。
+# 服务器名必须唯一；enabled = false 时仅保存配置不连接。
+#
+# 浏览器感知示例（Playwright MCP，微软官方）：
+# 使 Agent 获得网页导航/点击/填表/截图等完整浏览器能力。
+# 前置要求：Node.js 18+（npx 可用），首次连接时自动下载 Chromium（约 150MB）。
+# 截图会保存到 {data_dir}/mcp_images/ 并以路径形式返回给 Agent。
+#
+# [[mcp.servers]]
+# name = "playwright"
+# command = "npx"
+# args = ["-y", "@playwright/mcp@latest", "--headless"]
+# enabled = true
+# description = "浏览器自动化（导航/点击/截图）"
+#
+# 通用示例（文件系统服务器）：
+# [[mcp.servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# enabled = false

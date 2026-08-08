@@ -148,7 +148,10 @@ impl AppState {
         });
 
         // MCP 工具桥接：连接配置中的 MCP 服务器，生成动态工具
-        let mcp_tools = Arc::new(McpToolManager::new());
+        // （图片类返回，如浏览器截图，落盘到 {data_dir}/mcp_images/）
+        let mcp_tools = Arc::new(McpToolManager::with_image_dir(
+            config.storage.data_dir.join("mcp_images"),
+        ));
         mcp_tools.sync(&config.mcp.servers).await;
         let dynamic_tools = mcp_tools.bridges().await;
         if !dynamic_tools.is_empty() {

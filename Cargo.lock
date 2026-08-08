@@ -8855,6 +8855,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "criterion",
  "reqwest 0.12.28",

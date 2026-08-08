@@ -42,6 +42,31 @@ impl From<rust_mcp_sdk::schema::Tool> for ToolInfo {
     }
 }
 
+/// MCP 工具调用结果中的图片内容块。
+///
+/// 数据为 base64 编码（不含 `data:` 前缀），与 MCP 协议 `type: "image"`
+/// content block 一致；mime_type 如 `image/png`。
+#[derive(Debug, Clone)]
+pub struct McpImage {
+    /// Base64 编码的图片数据。
+    pub data: String,
+    /// 图片 MIME 类型，如 `image/png`。
+    pub mime_type: String,
+}
+
+/// MCP 工具调用的完整结构化输出：文本拼接 + 图片列表。
+///
+/// `text` 保留兼容的 `[Image: <mime> (<bytes>)]` 占位符（供无落盘能力时
+/// 降级展示）；`images` 携带完整 base64 数据，供上层（如服务器桥接层）
+/// 保存为文件后把路径暴露给 LLM。
+#[derive(Debug, Clone)]
+pub struct McpCallOutput {
+    /// 文本内容块拼接结果。
+    pub text: String,
+    /// 图片内容块列表（数据完整保留，不再丢弃）。
+    pub images: Vec<McpImage>,
+}
+
 /// A simple MCP client handler that logs events to tracing.
 #[derive(Debug, Clone)]
 struct LoggingClientHandler;
@@ -200,12 +225,30 @@ impl McpClient {
     ///
     /// Returns the text content of the tool result. If the tool returns
     /// multiple content blocks, they are concatenated with newlines.
+    /// Images are represented by `[Image: <mime> (<bytes>)]` placeholders
+    /// (their data is dropped); use [`Self::call_tool_detailed`] to receive
+    /// the full image data.
     #[instrument(skip(arguments), fields(server = %self.server_name, tool = %tool_name))]
     pub async fn call_tool(
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> McpResult<String> {
+        Ok(self.call_tool_detailed(tool_name, arguments).await?.text)
+    }
+
+    /// Calls a tool on the server and returns the full structured output.
+    ///
+    /// Unlike [`Self::call_tool`], image content blocks are preserved in
+    /// [`McpCallOutput::images`] with their base64 data intact, so callers
+    /// can persist them (e.g. save screenshots to disk) instead of losing
+    /// them to a text placeholder.
+    #[instrument(skip(arguments), fields(server = %self.server_name, tool = %tool_name))]
+    pub async fn call_tool_detailed(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> McpResult<McpCallOutput> {
         if !self.is_connected() {
             return Err(McpError::ConnectionFailed(
                 self.server_name.clone(),
@@ -236,9 +279,8 @@ impl McpClient {
             McpError::ConnectionFailed(self.server_name.clone(), format!("Tool call failed: {e}"))
         })?;
 
-        // Extract text content from the result.
-        let text = Self::extract_text_content(&result);
-        Ok(text)
+        // Extract structured content from the result (text + images).
+        Ok(Self::extract_output(&result))
     }
 
     /// Disconnects from the server.
@@ -267,16 +309,23 @@ impl McpClient {
         Ok(result.tools.into_iter().map(ToolInfo::from).collect())
     }
 
-    /// Extract text content from a `CallToolResult`.
-    fn extract_text_content(result: &rust_mcp_sdk::schema::CallToolResult) -> String {
+    /// Extract structured content (text + images) from a `CallToolResult`.
+    fn extract_output(result: &rust_mcp_sdk::schema::CallToolResult) -> McpCallOutput {
         use rust_mcp_sdk::schema::ContentBlock;
 
         let mut parts: Vec<String> = Vec::new();
+        let mut images: Vec<McpImage> = Vec::new();
         for block in &result.content {
             match block {
                 ContentBlock::TextContent(text) => parts.push(text.text.clone()),
                 ContentBlock::ImageContent(img) => {
+                    // 占位符保留在文本中（无落盘能力时的降级展示）；
+                    // 完整 base64 数据进入 images 列表，供上层保存。
                     parts.push(format!("[Image: {} ({})]", img.mime_type, img.data.len()));
+                    images.push(McpImage {
+                        data: img.data.clone(),
+                        mime_type: img.mime_type.clone(),
+                    });
                 }
                 ContentBlock::AudioContent(audio) => {
                     parts.push(format!(
@@ -294,7 +343,10 @@ impl McpClient {
                 }
             }
         }
-        parts.join("\n")
+        McpCallOutput {
+            text: parts.join("\n"),
+            images,
+        }
     }
 }
 
@@ -396,5 +448,93 @@ mod tests {
     fn test_mcp_error_transport() {
         let err = McpError::Transport("io error".to_string());
         assert_eq!(err.to_string(), "Transport error: io error");
+    }
+
+    /// 构造一个只含文本块的 `CallToolResult`。
+    fn result_with_text(text: &str) -> rust_mcp_sdk::schema::CallToolResult {
+        use rust_mcp_sdk::schema::{CallToolResult, ContentBlock, TextContent};
+        CallToolResult {
+            content: vec![ContentBlock::from(TextContent::new(
+                text.to_string(),
+                None,
+                None,
+            ))],
+            is_error: None,
+            meta: None,
+            structured_content: None,
+        }
+    }
+
+    #[test]
+    fn test_extract_output_text_only() {
+        let result = result_with_text("hello world");
+        let output = McpClient::extract_output(&result);
+        assert_eq!(output.text, "hello world");
+        assert!(output.images.is_empty(), "纯文本结果不应有图片");
+    }
+
+    #[test]
+    fn test_extract_output_with_image_preserves_data() {
+        use rust_mcp_sdk::schema::{CallToolResult, ContentBlock, ImageContent, TextContent};
+
+        let base64_data = "iVBORw0KGgoAAAANSUhEUg==";
+        let result = CallToolResult {
+            content: vec![
+                ContentBlock::from(TextContent::new("screenshot taken".to_string(), None, None)),
+                ContentBlock::from(ImageContent::new(
+                    base64_data.to_string(),
+                    "image/png".to_string(),
+                    None,
+                    None,
+                )),
+            ],
+            is_error: None,
+            meta: None,
+            structured_content: None,
+        };
+
+        let output = McpClient::extract_output(&result);
+
+        // 文本占位符保留（无落盘能力时的降级展示）
+        assert!(output.text.contains("screenshot taken"));
+        assert!(output.text.contains("[Image: image/png ("));
+
+        // 完整 base64 数据不再丢弃
+        assert_eq!(output.images.len(), 1);
+        assert_eq!(output.images[0].data, base64_data);
+        assert_eq!(output.images[0].mime_type, "image/png");
+    }
+
+    #[test]
+    fn test_extract_output_multiple_images() {
+        use rust_mcp_sdk::schema::{CallToolResult, ContentBlock, ImageContent};
+
+        let result = CallToolResult {
+            content: vec![
+                ContentBlock::from(ImageContent::new(
+                    "AAAA".to_string(),
+                    "image/png".to_string(),
+                    None,
+                    None,
+                )),
+                ContentBlock::from(ImageContent::new(
+                    "BBBB".to_string(),
+                    "image/jpeg".to_string(),
+                    None,
+                    None,
+                )),
+            ],
+            is_error: None,
+            meta: None,
+            structured_content: None,
+        };
+
+        let output = McpClient::extract_output(&result);
+        assert_eq!(output.images.len(), 2);
+        assert_eq!(output.images[0].data, "AAAA");
+        assert_eq!(output.images[1].mime_type, "image/jpeg");
+        // 文本中按顺序出现两个占位符
+        assert!(output.text.contains("image/png"));
+        assert!(output.text.contains("image/jpeg"));
     }
 }
