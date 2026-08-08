@@ -126,6 +126,21 @@ max_context_tokens = 4000
 enable_cache = true
 cache_ttl = 300
 
+# ==================== Web 工具配置 ====================
+# web_search / web_fetch 工具（Agent 的网页感知能力）
+[web]
+enabled = true
+# 搜索后端：duckduckgo（默认，零配置）或 searxng（自托管/公共实例）
+search_backend = "duckduckgo"
+# search_backend = "searxng" 时必填，如 "https://searx.be"
+# searxng_endpoint = "https://searx.be"
+# HTTP 超时（秒）
+timeout_secs = 15
+# 搜索/抓取结果缓存 TTL（秒）
+cache_ttl_secs = 600
+# 单次抓取响应大小上限（字节）
+max_fetch_bytes = 2097152
+
 # ==================== MCP 服务器配置 ====================
 # 通过 MCP 协议接入外部工具服务器（stdio 传输），工具自动注册进 Agent 工具循环。
 # 服务器名必须唯一；enabled = false 时仅保存配置不连接。

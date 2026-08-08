@@ -348,7 +348,7 @@ mod tests {
                     r#"{"relevance": 9, "correctness": 8, "completeness": 7, "clarity": 8, "strengths": ["准确"], "improvements": ["更详细"]}"#,
                 ))
             });
-        let judge = AnswerJudge::new(std::sync::Arc::new(mock), "test-model");
+        let judge = AnswerJudge::new(Arc::new(mock), "test-model");
 
         let eval = judge.evaluate("问题", "回答", None).await;
         assert!(eval.parsed);
@@ -364,7 +364,7 @@ mod tests {
         let mut mock = MockChatService::new();
         // 空回答应走快速路径，不调用 LLM
         mock.expect_chat_completion().times(0);
-        let judge = AnswerJudge::new(std::sync::Arc::new(mock), "test-model");
+        let judge = AnswerJudge::new(Arc::new(mock), "test-model");
 
         let eval = judge.evaluate("问题", "   ", None).await;
         assert!(!eval.parsed);
@@ -381,7 +381,7 @@ mod tests {
                 "模拟调用失败".to_string(),
             ))
         });
-        let judge = AnswerJudge::new(std::sync::Arc::new(mock), "test-model");
+        let judge = AnswerJudge::new(Arc::new(mock), "test-model");
 
         let eval = judge.evaluate("问题", "回答", None).await;
         assert!(!eval.parsed, "LLM 失败应回退到中性分");

@@ -208,6 +208,26 @@ pub struct KnowledgeIngestParams {
     pub category: Option<String>,
 }
 
+/// Web 搜索参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WebSearchParams {
+    /// 搜索查询词。
+    pub query: String,
+    /// 返回结果上限（默认 8，最大 20）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_results: Option<usize>,
+}
+
+/// Web 抓取参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WebFetchParams {
+    /// 目标 URL（仅 http/https；本地/内网地址被拒绝）。
+    pub url: String,
+    /// 返回内容字符上限（默认 50000，范围 500-200000）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_chars: Option<usize>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

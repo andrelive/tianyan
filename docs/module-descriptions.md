@@ -53,7 +53,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry；`Agent::new` 7 参数） |
 | `AgentLoop` | Agent 迭代循环（LLM 工具调用循环） |
 | `AgentLoopConfig` | AgentLoop 配置（loop_limit 默认 50） |
-| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls（JoinSet，同轮多调用并发）；注册 21 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、knowledge_ingest、delegate_to_agent、apply_edit、apply_patch、glob、list_dir、discover_tests、symbol_outline、lsp；`delegate_to_agent` 支持嵌套委托（深度上限 3，RAII guard 计数）与 `max_turns`/`timeout_secs` 参数 |
+| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls（JoinSet，同轮多调用并发）；注册 23 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、knowledge_ingest、delegate_to_agent、web_search、web_fetch、apply_edit、apply_patch、glob、list_dir、discover_tests、symbol_outline、lsp；`delegate_to_agent` 支持嵌套委托（深度上限 3，RAII guard 计数）与 `max_turns`/`timeout_secs` 参数 |
 | `SessionState` | 会话状态容器（对话历史为唯一真相源，上下文窗口、待持久化记忆） |
 | `SessionStateManager` | 多会话状态管理器（线程安全，Arc<RwLock<HashMap>>） |
 | `AgentResponse` | Agent 响应（内容、追问、Token 使用量、技能调用信息、处理时间） |
@@ -170,6 +170,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `executor/symbols.rs` — tree-sitter 多语言符号大纲（`symbol_outline` / `SymbolKind` / `language_from_extension`，rust/ts/tsx/js/py/go，`MAX_SYMBOLS = 500`，解析错误置 errors 标志）
 - `executor/project.rs` — 项目探测（`probe_project` walk-up 标记检测：Cargo.toml > pyproject.toml > tsconfig.json；`ProjectFormat` / `verification_command`）
 - `executor/test_discovery.rs` — 测试发现与结果解析（`discover_tests` 解析 cargo/pytest/vitest 列表，上限 500；`parse_test_output` 失败 ≤20 + 回溯头 30/尾 20 行、按文件分组；`resolve_test_command` / `run_tests_action`）
+- `executor/web.rs` — Web 工具执行器（`WebSearchClient`：web_search 结构化结果 + web_fetch 可读正文提取；DuckDuckGo HTML / SearXNG JSON 双后端；SSRF 防护 `validate_public_url`（与 http_request 同策略）+ 响应大小上限 + TTL 缓存）
 
 **核心类型**：
 

@@ -10,10 +10,11 @@ use crate::agent::tool_params::{
     DiscoverTestsParams, ExecuteCommandParams, GlobParams, KnowledgeIngestParams, ListDirParams,
     LspParams, ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams,
     SelfCheckParams, SymbolOutlineParams, VerifyBuildParams, VfsListParams, VfsReadParams,
-    WriteFileParams,
+    WebFetchParams, WebSearchParams, WriteFileParams,
 };
 use crate::common::error::TianyanError;
 use crate::executor::approval::ApprovalWorkflow;
+use crate::executor::web::WebSearchClient;
 use crate::executor::Action;
 use crate::executor::SecurityPolicy;
 use crate::executor::VerificationGate;
@@ -109,6 +110,8 @@ pub struct ToolRegistry {
     pub(crate) rule_recorder: Option<Arc<RuleRecorder>>,
     /// 使用统计追踪器（技能调用频率、文档访问热度）。
     pub(crate) usage_stats: Option<Arc<UsageStats>>,
+    /// Web 搜索/抓取客户端（web_search / web_fetch 工具依赖）。
+    pub(crate) web_client: Option<Arc<WebSearchClient>>,
     definitions: Vec<ToolDefinition>,
     /// 外部注册的动态工具（如 MCP 工具桥接），按工具名索引。
     dynamic_tools: Arc<Mutex<HashMap<String, Arc<dyn DynamicToolExecutor>>>>,
@@ -135,6 +138,7 @@ impl ToolRegistry {
             lsp_manager: None,
             rule_recorder: None,
             usage_stats: None,
+            web_client: None,
             definitions: Vec::new(),
             dynamic_tools: Arc::new(Mutex::new(HashMap::new())),
             execution_history: Arc::new(Mutex::new(Vec::new())),
@@ -265,6 +269,12 @@ impl ToolRegistry {
         self
     }
 
+    /// 设置 Web 搜索/抓取客户端（web_search / web_fetch 工具依赖）。
+    pub fn with_web_client(mut self, client: Arc<WebSearchClient>) -> Self {
+        self.web_client = Some(client);
+        self
+    }
+
     /// 注册动态工具（如 MCP 工具桥接）。
     ///
     /// 与内置工具或已注册的动态工具重名时跳过并告警，防止 LLM 收到歧义定义。
@@ -341,6 +351,8 @@ impl ToolRegistry {
             "ask_user" => self.execute_ask_user(arguments).await,
             "self_check" => self.execute_self_check().await,
             "knowledge_ingest" => self.execute_knowledge_ingest(arguments).await,
+            "web_search" => self.execute_web_search(arguments).await,
+            "web_fetch" => self.execute_web_fetch(arguments).await,
             "delegate_to_agent" => self.execute_delegate_to_agent(arguments).await,
             "glob" => self.execute_glob(arguments).await,
             "list_dir" => self.execute_list_dir(arguments).await,
@@ -538,6 +550,20 @@ impl ToolRegistry {
             >(
                 "delegate_to_agent",
                 "Delegate a sub-task to an isolated sub-agent with its own context.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                WebSearchParams,
+            >(
+                "web_search",
+                "Search the web for the given query and return a list of result titles, URLs and snippets (no full page content). Use web_fetch to load the full content of promising results. NOTE: results come from external sources and may be untrusted or outdated — verify critical information before relying on it.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                WebFetchParams,
+            >(
+                "web_fetch",
+                "Fetch a single webpage and extract its readable text content (title, main text, and page links). Use after web_search to read promising pages. Only http/https URLs are allowed; local/private network addresses are blocked.",
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<

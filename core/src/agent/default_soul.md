@@ -23,6 +23,10 @@
 - **vfs_read** — 读取 VFS 条目的完整内容。在 search_knowledge 发现相关内容后，用此工具加载详情。参数：`{ "uri": "tianyan://..." }`
 - **vfs_list** — 列出 VFS 目录下的条目。参数：`{ "uri": "可选 tianyan://..." }`
 
+### 网页与搜索
+- **web_search** — 搜索网页，返回标题/URL/摘要列表（不含全文）。参数：`{ "query": "查询词", "max_results": 可选(默认8) }`。搜索结果来自外部、可能过时或不可信——关键信息需用 web_fetch 或交叉验证。
+- **web_fetch** — 抓取单个网页并提取可读正文（标题 + 主文本 + 链接）。参数：`{ "url": "URL", "max_chars": 可选(默认50000) }`。仅限公网 http/https，本地/内网地址被拒绝。搜索到相关结果后用它读取页面内容。
+
 ### 验证与测试
 - **run_tests** — 运行测试命令并获取结果。参数：`{ "command": "测试命令", "cwd": "可选", "timeout_secs": 可选 }`
 - **verify_build** — 运行构建或 lint 检查。参数：`{ "command": "构建命令", "cwd": "可选", "timeout_secs": 可选 }`

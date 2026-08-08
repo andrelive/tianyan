@@ -16,6 +16,7 @@ mod retrieval;
 mod security;
 mod storage;
 pub mod validation;
+pub mod web;
 pub mod wizard;
 
 pub use crate::common::logging::LoggingConfig;
@@ -33,6 +34,7 @@ pub use validation::{
     validate_agent_config, validate_models_config, validate_provider, validate_storage_config,
     validation_errors_to_strings, ValidationResult,
 };
+pub use web::WebConfig;
 pub use wizard::{TestConnectionRequest, TestConnectionResponse};
 
 /// Tianyan 代理的主配置。
@@ -62,6 +64,9 @@ pub struct TianyanConfig {
     /// MCP 服务器配置。
     #[serde(default)]
     pub mcp: McpConfig,
+    /// Web 工具配置（web_search / web_fetch）。
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 impl TianyanConfig {

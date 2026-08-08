@@ -98,6 +98,7 @@ impl AgentBuilderFactory {
             .with_skill_executor(skill_executor)
             .with_knowledge_ingestor(Arc::new(knowledge_ingestor))
             .with_security_config(config.security.clone())
+            .with_web_config(config.web.clone())
             .with_usage_stats(usage_stats)
             .with_session_manager(Arc::new(PersistentSessionManager::new(vfs)));
         let agent = match snapshot_manager {
