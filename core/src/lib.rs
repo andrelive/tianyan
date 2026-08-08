@@ -42,6 +42,8 @@ pub mod agent;
 pub mod common;
 pub mod config;
 pub mod context;
+/// 回答质量评测（LLM-as-Judge 评分式，离线基准用）。
+pub mod eval;
 /// 执行器（独立执行函数 + Action）。
 pub mod executor;
 pub mod knowledge;
