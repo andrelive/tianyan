@@ -2,6 +2,8 @@
 //! delegate_to_agent。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
@@ -16,6 +18,18 @@ use crate::model::types::ChatCompletionRequest;
 use crate::skills::SkillExecutionRequest;
 
 use super::{parse_params, safety_violation, ToolRegistry};
+
+/// 委托链最大深度（主循环为 0；1 = 一层子 Agent，以此类推）。
+pub(crate) const MAX_DELEGATION_DEPTH: usize = 3;
+
+/// 委托深度 RAII guard：Drop 时自动递减，保证异常路径不泄漏深度计数。
+pub(crate) struct DelegationDepthGuard(pub(crate) Arc<AtomicUsize>);
+
+impl Drop for DelegationDepthGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl ToolRegistry {
     /// 执行 execute_command 工具：运行 shell 命令（含安全策略 + 审批门控）。
@@ -152,8 +166,13 @@ impl ToolRegistry {
     /// decide what to do next — the tool facilitates the mechanics, the LLM
     /// owns the decisions.
     ///
-    /// This is intentionally a bounded loop (max 200 turns) to prevent
-    /// runaway delegation.
+    /// 编排能力：
+    /// - **并行委托**：同一轮内多个 `delegate_to_agent` 调用经
+    ///   [`execute_parallel`]（JoinSet）并行执行，多个子任务可同时推进。
+    /// - **嵌套委托**：子 Agent 内可继续委托（树状编排），深度受
+    ///   [`MAX_DELEGATION_DEPTH`] 限制，超限调用被拒绝（防失控派生）。
+    /// - **有界循环**：默认 200 轮，可用 `max_turns` 收紧；`timeout_secs`
+    ///   可整体限时，超时中断委托。
     ///
     /// Returns `BoxFuture` to break async recursion with `execute_single`.
     pub(crate) fn execute_delegate_to_agent<'a>(
@@ -161,10 +180,23 @@ impl ToolRegistry {
         arguments: &'a str,
     ) -> BoxFuture<'a, Result<serde_json::Value, TianyanError>> {
         Box::pin(async move {
-            const MAX_DELEGATION_TURNS: usize = 200;
+            const DEFAULT_MAX_TURNS: usize = 200;
+            const MAX_TURNS_CAP: usize = 500;
 
             let params: DelegateToAgentParams = serde_json::from_str(arguments)
                 .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+
+            // 嵌套委托深度保护：进入委托时 +1，超出上限拒绝。
+            let depth = self.delegation_depth.fetch_add(1, Ordering::SeqCst) + 1;
+            if depth > MAX_DELEGATION_DEPTH {
+                self.delegation_depth.fetch_sub(1, Ordering::SeqCst);
+                return Err(TianyanError::Custom(format!(
+                    "tool: 委托深度超过上限（{} 层），已拒绝嵌套委托",
+                    MAX_DELEGATION_DEPTH
+                )));
+            }
+            // 深度 guard 必须活到委托结束（含 Err 路径），Drop 时自动回滚计数。
+            let _depth_guard = DelegationDepthGuard(self.delegation_depth.clone());
 
             let model_service = self.model_service.clone().ok_or_else(|| {
                 TianyanError::Custom(format!(
@@ -181,69 +213,80 @@ impl ToolRegistry {
             }
             sub_messages.push(Message::user(&params.task));
 
-            let mut total_tokens: usize = 0;
+            let max_turns = params
+                .max_turns
+                .unwrap_or(DEFAULT_MAX_TURNS)
+                .clamp(1, MAX_TURNS_CAP);
 
-            for _turn in 0..MAX_DELEGATION_TURNS {
-                let request = ChatCompletionRequest::new(&self.model, sub_messages.clone());
-                let response = model_service
-                    .chat_completion(request)
-                    .await
-                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+            let run_loop = async {
+                let mut total_tokens: usize = 0;
 
-                total_tokens += response.usage.total_tokens;
-                let choice = response.choices.into_iter().next().ok_or_else(|| {
-                    TianyanError::Custom(format!("tool: 执行失败：{}", "Empty response"))
-                })?;
+                for _turn in 0..max_turns {
+                    let request = ChatCompletionRequest::new(&self.model, sub_messages.clone());
+                    let response = model_service
+                        .chat_completion(request)
+                        .await
+                        .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
 
-                let assistant_msg = choice.message;
-                if assistant_msg.content.is_empty() {
-                    if let Some(ref tool_calls) = assistant_msg.tool_calls {
-                        // LLM requested tools — execute them in parallel, feed results back.
+                    total_tokens += response.usage.total_tokens;
+                    let choice = response.choices.into_iter().next().ok_or_else(|| {
+                        TianyanError::Custom(format!("tool: 执行失败：{}", "Empty response"))
+                    })?;
 
-                        // Record the assistant's tool-call request in the history.
-                        sub_messages.push(Message::assistant_with_tools(
-                            String::new(),
-                            tool_calls.clone(),
-                        ));
-
-                        // Filter out nested delegation (breaks async recursion).
-                        let (allowed, denied): (Vec<_>, Vec<_>) = tool_calls
-                            .iter()
-                            .cloned()
-                            .partition(|tc| tc.function.name != "delegate_to_agent");
-
-                        if !allowed.is_empty() {
-                            let results = self.execute_parallel(&allowed).await;
-                            for (call_id, result) in results {
-                                let content = match result {
-                                    Ok(val) => val.to_string(),
-                                    Err(e) => format!("Error: {}", e),
-                                };
-                                sub_messages.push(Message::tool(call_id, content));
-                            }
-                        }
-                        for tc in denied {
-                            sub_messages.push(Message::tool(
-                                &tc.id,
-                                "Error: nested delegation is not supported",
+                    let assistant_msg = choice.message;
+                    if assistant_msg.content.is_empty() {
+                        if let Some(ref tool_calls) = assistant_msg.tool_calls {
+                            // LLM requested tools — execute them in parallel, feed results back.
+                            // 嵌套委托不再过滤：子 Agent 内调用 delegate_to_agent 直接执行，
+                            // 由委托深度计数器（depth_guard）防止失控派生。
+                            sub_messages.push(Message::assistant_with_tools(
+                                String::new(),
+                                tool_calls.clone(),
                             ));
-                        }
-                        continue;
-                    }
-                } else {
-                    // LLM provided a final answer — record it and return.
-                    sub_messages.push(Message::assistant(assistant_msg.content.clone()));
-                    return Ok(serde_json::json!({
-                        "result": assistant_msg.content,
-                        "total_tokens": total_tokens,
-                    }));
-                }
-            }
 
-            Ok(serde_json::json!({
-                "result": "sub-task reached max turns without final answer",
-                "total_tokens": total_tokens,
-            }))
+                            if !tool_calls.is_empty() {
+                                let results = self.execute_parallel(tool_calls).await;
+                                for (call_id, result) in results {
+                                    let content = match result {
+                                        Ok(val) => val.to_string(),
+                                        Err(e) => format!("Error: {}", e),
+                                    };
+                                    sub_messages.push(Message::tool(call_id, content));
+                                }
+                            }
+                            continue;
+                        }
+                    } else {
+                        // LLM provided a final answer — record it and return.
+                        sub_messages.push(Message::assistant(assistant_msg.content.clone()));
+                        return Ok(serde_json::json!({
+                            "result": assistant_msg.content,
+                            "total_tokens": total_tokens,
+                        }));
+                    }
+                }
+
+                Ok(serde_json::json!({
+                    "result": format!("sub-task reached max turns ({}) without final answer", max_turns),
+                    "total_tokens": total_tokens,
+                }))
+            };
+
+            match params.timeout_secs {
+                Some(secs) => {
+                    let result =
+                        tokio::time::timeout(std::time::Duration::from_secs(secs), run_loop).await;
+                    match result {
+                        Ok(inner) => inner,
+                        Err(_) => Err(TianyanError::Custom(format!(
+                            "tool: 委托执行超时（{}s）",
+                            secs
+                        ))),
+                    }
+                }
+                None => run_loop.await,
+            }
+            // depth_guard 在此作用域结束时自动 drop（含 Err 路径）
         })
     }
 }

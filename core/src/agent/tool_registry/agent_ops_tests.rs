@@ -2,12 +2,13 @@
 //! self_check / delegate_to_agent。
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-use crate::common::types::TokenUsage;
+use crate::common::types::{FunctionCall, TokenUsage, ToolCall, ToolCallType};
 use crate::config::SafetyMode;
 use crate::executor::SecurityPolicy;
 use crate::model::types::{ChatChoice, ChatCompletionResponse};
@@ -239,4 +240,159 @@ fn chat_response(content: &str) -> ChatCompletionResponse {
         }],
         usage: TokenUsage::default(),
     }
+}
+
+/// 构造返回工具调用的 ChatCompletionResponse（content 为空）。
+fn chat_response_with_tools(calls: Vec<ToolCall>) -> ChatCompletionResponse {
+    ChatCompletionResponse {
+        id: "test".to_string(),
+        object: "chat.completion".to_string(),
+        created: 0,
+        model: "test-model".to_string(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: Message::assistant_with_tools("", calls),
+            finish_reason: Some("tool_calls".to_string()),
+        }],
+        usage: TokenUsage::default(),
+    }
+}
+
+fn delegate_call(id: &str, task: &str) -> ToolCall {
+    ToolCall {
+        id: id.to_string(),
+        call_type: ToolCallType::Function,
+        function: FunctionCall {
+            name: "delegate_to_agent".to_string(),
+            arguments: format!(r#"{{"task":"{task}"}}"#),
+        },
+    }
+}
+
+#[tokio::test]
+async fn test_delegate_nested_delegation_executes_and_depth_released() {
+    // 嵌套委托链路：外层 → 子 Agent → 内层委托（深度 2，允许），
+    // 完成后委托深度应恢复为 0（guard 释放）。
+    use mockall::Sequence;
+
+    let mut mock = MockChatService::new();
+    let mut seq = Sequence::new();
+    // 第 1 轮：外层子循环收到嵌套委托请求
+    mock.expect_chat_completion()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            Ok(chat_response_with_tools(vec![delegate_call(
+                "c1",
+                "inner task",
+            )]))
+        });
+    // 第 2 轮：内层委托子循环直接返回答案
+    mock.expect_chat_completion()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Ok(chat_response("inner done")));
+    // 第 3 轮：外层子循环收到工具结果后返回最终答案
+    mock.expect_chat_completion()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Ok(chat_response("outer done")));
+
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("test-model");
+
+    let result = registry
+        .execute_delegate_to_agent(r#"{"task":"outer task"}"#)
+        .await
+        .unwrap();
+    assert_eq!(result["result"].as_str().unwrap(), "outer done");
+    assert_eq!(
+        registry.delegation_depth.load(Ordering::SeqCst),
+        0,
+        "委托结束后深度应恢复为 0（guard 释放）"
+    );
+}
+
+#[tokio::test]
+async fn test_delegate_depth_limit_rejected() {
+    // 深度到达上限时，新委托被拒绝，且深度回滚（不泄漏计数）。
+    let mock = MockChatService::new();
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("test-model");
+    // 手动将深度推至上限（模拟已有 MAX 层委托在途）
+    registry
+        .delegation_depth
+        .store(MAX_DELEGATION_DEPTH, Ordering::SeqCst);
+
+    let result = registry
+        .execute_delegate_to_agent(r#"{"task":"too deep"}"#)
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("委托深度超过上限"),
+        "超限应被拒绝，实际: {err}"
+    );
+    assert_eq!(
+        registry.delegation_depth.load(Ordering::SeqCst),
+        MAX_DELEGATION_DEPTH,
+        "拒绝后深度应回滚到上限值"
+    );
+}
+
+#[tokio::test]
+async fn test_delegate_max_turns_param_bounds_loop() {
+    // max_turns=2：mock 始终返回工具调用（无最终答案），2 轮后返回超限消息。
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion().times(2).returning(|_| {
+        Ok(chat_response_with_tools(vec![ToolCall {
+            id: "c1".to_string(),
+            call_type: ToolCallType::Function,
+            function: FunctionCall {
+                name: "read_file".to_string(),
+                arguments: r#"{"path":"x"}"#.to_string(),
+            },
+        }]))
+    });
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("test-model");
+
+    let result = registry
+        .execute_delegate_to_agent(r#"{"task":"loop forever","max_turns":2}"#)
+        .await
+        .unwrap();
+    assert!(
+        result["result"]
+            .as_str()
+            .unwrap()
+            .contains("reached max turns (2)"),
+        "应报告到达 max_turns"
+    );
+}
+
+#[tokio::test]
+async fn test_delegate_timeout_param_accepted() {
+    // timeout_secs 参数被接受：正常完成不受影响，深度恢复为 0。
+    // （mock 无法真实挂起——mockall async 方法闭包同步返回，超时中断路径
+    // 由 tokio::time::timeout 保证，此处覆盖参数解析与正常路径。）
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .times(1)
+        .returning(|_| Ok(chat_response("quick answer")));
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("test-model");
+
+    let result = registry
+        .execute_delegate_to_agent(r#"{"task":"quick","timeout_secs":30}"#)
+        .await
+        .unwrap();
+    assert_eq!(result["result"].as_str().unwrap(), "quick answer");
+    assert_eq!(
+        registry.delegation_depth.load(Ordering::SeqCst),
+        0,
+        "正常完成后深度应恢复为 0"
+    );
 }

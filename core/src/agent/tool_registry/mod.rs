@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -113,6 +114,8 @@ pub struct ToolRegistry {
     dynamic_tools: Arc<Mutex<HashMap<String, Arc<dyn DynamicToolExecutor>>>>,
     /// 执行轨迹（GEPA 引擎消费）。
     pub(crate) execution_history: Arc<Mutex<Vec<ExecutionHistory>>>,
+    /// 当前委托链深度（delegate_to_agent 嵌套保护；主循环为 0）。
+    pub(crate) delegation_depth: Arc<AtomicUsize>,
 }
 
 impl ToolRegistry {
@@ -135,6 +138,7 @@ impl ToolRegistry {
             definitions: Vec::new(),
             dynamic_tools: Arc::new(Mutex::new(HashMap::new())),
             execution_history: Arc::new(Mutex::new(Vec::new())),
+            delegation_depth: Arc::new(AtomicUsize::new(0)),
         };
         registry.register_builtin_tools();
         registry

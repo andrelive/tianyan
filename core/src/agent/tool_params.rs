@@ -186,6 +186,12 @@ pub struct DelegateToAgentParams {
     /// 系统提示。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// 子 Agent 最大循环轮数（默认 200，范围 1-500）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
+    /// 委托整体超时（秒）。超时返回错误，子 Agent 循环被中断。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 /// 自我检查参数（无参数 — Agent 自省查询内部指标）。
