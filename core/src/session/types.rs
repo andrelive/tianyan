@@ -6,7 +6,52 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::common::types::{StructuredMessage, TianyanUri};
+use crate::common::types::{InjectableContext, StructuredMessage, TianyanUri};
+
+/// 会话 JSONL 首行的会话级状态头部。
+///
+/// 与消息行区分：`session_header` 标记恒为 1；解析时据此识别头部行
+/// （StructuredMessage 不含该字段，天然互斥）。旧格式会话（首行即消息）
+/// 兼容加载，仅在下次重写时补齐头部。
+///
+/// 当前承载 `injectable_snapshot`（soul/rules/memories 前缀快照）：
+/// 前缀内容随会话固化——重启后旧会话沿用同一份快照，不重新检索，
+/// 保证前缀内容与重启前一致（prompt 缓存不失效、语义不漂移）；
+/// 仅在会话首次加载（无快照）与压缩点（会话转换）更新。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionHeader {
+    /// 头部标记（恒为 1；用于与消息行区分）。
+    pub session_header: Option<u8>,
+    /// 注入上下文快照（首次加载时固化，压缩点刷新）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub injectable_snapshot: Option<InjectableContext>,
+}
+
+impl Default for SessionHeader {
+    fn default() -> Self {
+        Self {
+            session_header: Some(Self::MARKER),
+            injectable_snapshot: None,
+        }
+    }
+}
+
+impl SessionHeader {
+    /// 头部标记值。
+    pub const MARKER: u8 = 1;
+
+    /// 判断该 JSONL 行是否为会话头部行。
+    pub fn parse_line(line: &str) -> Option<Self> {
+        serde_json::from_str::<SessionHeader>(line)
+            .ok()
+            .filter(|h| h.session_header == Some(Self::MARKER))
+    }
+
+    /// 是否为空头部（无任何快照载荷）。
+    pub fn is_empty(&self) -> bool {
+        self.injectable_snapshot.is_none()
+    }
+}
 
 /// 表示对话或交互的记忆会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +68,9 @@ pub struct Session {
     pub summary: Option<String>,
     /// 会话标题（可选）。
     pub title: Option<String>,
+    /// 会话级状态头部（JSONL 首行，存注入上下文快照）。
+    #[serde(default)]
+    pub header: SessionHeader,
 }
 
 impl Session {
@@ -35,6 +83,7 @@ impl Session {
             messages: Vec::new(),
             summary: None,
             title: None,
+            header: SessionHeader::default(),
         }
     }
 

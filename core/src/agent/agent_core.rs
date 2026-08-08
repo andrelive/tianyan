@@ -14,12 +14,14 @@ use crate::agent::session_state::SessionState;
 use crate::agent::tool_registry::DynamicToolExecutor;
 use crate::agent::types::{AgentResponse, AgentState, ClarificationQuestion, QuestionType};
 use crate::common::error::Result;
-use crate::common::types::{Message, MessageRole, StructuredMessage, TokenUsage};
+use crate::common::types::{
+    InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage,
+};
 use crate::context::{ContextAssembler, ContextPipeline};
 use crate::observability::AgentMetrics;
 use crate::observability::TokenRecord;
 use crate::session::{Session, SessionManager};
-use crate::skills::SkillLearningEngine;
+use crate::skills::{SkillLearningEngine, SkillRefresher};
 use crate::snapshot::SnapshotManager;
 
 /// compression_marker 之后至少积累多少条消息才触发压缩。
@@ -38,12 +40,15 @@ pub struct Agent {
     pub(crate) session_manager: Arc<dyn SessionManager>,
     /// 工作区快照管理器（配置了 working_directory 时启用，用于会话回退恢复文件）。
     pub(crate) snapshot_manager: Option<Arc<SnapshotManager>>,
+    /// 技能注册表刷新钩子：压缩（会话转换点）时增量注册 VFS 学习技能。
+    pub(crate) skill_refresher: Option<Arc<dyn SkillRefresher>>,
 }
 
 impl Agent {
     /// 创建新的 Agent 实例。
     ///
     /// 此构造函数由 AgentBuilder::build() 调用，外部应通过 Builder 创建 Agent。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         default_model: String,
         context_pipeline: ContextPipeline,
@@ -52,6 +57,7 @@ impl Agent {
         agent_loop: AgentLoop,
         session_manager: Arc<dyn SessionManager>,
         snapshot_manager: Option<Arc<SnapshotManager>>,
+        skill_refresher: Option<Arc<dyn SkillRefresher>>,
     ) -> Self {
         Self {
             default_model,
@@ -62,6 +68,7 @@ impl Agent {
             agent_loop,
             session_manager,
             snapshot_manager,
+            skill_refresher,
         }
     }
 
@@ -103,6 +110,9 @@ impl Agent {
         let state = Arc::new(RwLock::new(SessionState::new(session_id)));
         {
             let mut s = state.write().await;
+            // 恢复注入上下文快照（重启后沿用会话固化的前缀内容，不重新检索——
+            // 保证旧会话前缀稳定，prompt 缓存不失效；无快照时为空，首次加载填充）
+            s.injectable_context = session.header.injectable_snapshot.unwrap_or_default();
             for sm in &session.messages {
                 s.add_structured_message(sm.clone());
             }
@@ -147,7 +157,10 @@ impl Agent {
                     if injected_rules > 0 {
                         self.metrics.record_rule_hit(injected_rules).await;
                     }
-                    state.write().await.injectable_context = ctx;
+                    state.write().await.injectable_context = ctx.clone();
+                    // 固化注入上下文快照到会话（重启后沿用同一份前缀内容）
+                    let sid = state.read().await.session_id.clone();
+                    self.persist_injectable_snapshot(&sid, &ctx).await;
                     state.read().await.injectable_context.clone()
                 }
                 Err(e) => {
@@ -181,12 +194,57 @@ impl Agent {
         messages
     }
 
-    /// 判断是否需要压缩，如果需要则生成摘要 StructuredMessage 并持久化。
-    pub(crate) async fn maybe_compress_and_persist(
+    /// 持久化注入上下文快照到会话头部（JSONL 首行）。
+    ///
+    /// 会话首次加载时调用一次：前缀内容（soul/rules/memories）随会话固化，
+    /// 重启后 `load_and_build_state` 直接恢复，不重新检索——旧会话前缀稳定，
+    /// prompt 缓存不失效。失败仅告警（本次运行内存缓存仍生效）。
+    pub(crate) async fn persist_injectable_snapshot(
+        &self,
+        session_id: &str,
+        ctx: &InjectableContext,
+    ) {
+        let Ok(Some(mut session)) = self.session_manager.get_session(session_id).await else {
+            return;
+        };
+        session.header.injectable_snapshot = Some(ctx.clone());
+        if let Err(e) = self.session_manager.update_session(&session).await {
+            tracing::warn!(error = %e, "持久化注入上下文快照失败");
+        }
+    }
+
+    /// 清空注入上下文快照（压缩点调用）：内存缓存 + 持久化快照一并失效，
+    /// 下一轮 prepare_context 重新加载并固化新快照。
+    async fn invalidate_injectable_snapshot(
         &self,
         state: &Arc<RwLock<SessionState>>,
         session_id: &str,
     ) {
+        state.write().await.injectable_context = InjectableContext::default();
+        if let Ok(Some(mut session)) = self.session_manager.get_session(session_id).await {
+            session.header.injectable_snapshot = None;
+            if let Err(e) = self.session_manager.update_session(&session).await {
+                tracing::warn!(error = %e, "清空注入上下文快照失败");
+            }
+        }
+    }
+
+    /// 判断是否需要压缩，如果需要则生成摘要 StructuredMessage 并持久化。
+    ///
+    /// 压缩成功后执行会话转换点刷新（自动/手动压缩共用）：
+    /// 1. 清空 injectable_context 缓存 —— 下一轮 `prepare_context` 重新加载，
+    ///    learned rules / memories 最新化（GEPA 经验对会话后续阶段可见）；
+    /// 2. 触发 [`SkillRefresher`] —— VFS 新进化技能增量注册，call_skill 可用。
+    ///
+    /// 压缩已重建 system 前缀（摘要消息插入），此刻刷新零额外缓存成本，
+    /// 是会话内唯一的免费刷新点。
+    ///
+    /// 返回是否发生了压缩（供手动压缩入口判断结果）。
+    pub(crate) async fn maybe_compress_and_persist(
+        &self,
+        state: &Arc<RwLock<SessionState>>,
+        session_id: &str,
+    ) -> bool {
         let messages_since_marker: Vec<StructuredMessage> = {
             let s = state.read().await;
             let marker_pos = s
@@ -198,7 +256,7 @@ impl Agent {
         };
 
         if messages_since_marker.len() < MIN_MESSAGES_BEFORE_COMPRESSION {
-            return;
+            return false;
         }
 
         let conversation: Vec<Message> = messages_since_marker
@@ -206,21 +264,33 @@ impl Agent {
             .flat_map(ContextAssembler::structured_to_messages)
             .collect();
 
-        if let Some(summary_sm) = self
+        let Some(summary_sm) = self
             .context_pipeline
             .compress_for_session(&conversation, session_id)
             .await
+        else {
+            return false;
+        };
+
+        if let Err(e) = self
+            .session_manager
+            .add_structured_message(session_id, summary_sm.clone())
+            .await
         {
-            if let Err(e) = self
-                .session_manager
-                .add_structured_message(session_id, summary_sm.clone())
-                .await
-            {
-                tracing::warn!(error = %e, "持久化压缩摘要失败");
-            } else {
-                state.write().await.add_structured_message(summary_sm);
+            tracing::warn!(error = %e, "持久化压缩摘要失败");
+        } else {
+            state.write().await.add_structured_message(summary_sm);
+        }
+
+        // 会话转换点刷新（learned rules 缓存 + 技能注册表）
+        self.invalidate_injectable_snapshot(state, session_id).await;
+        if let Some(refresher) = &self.skill_refresher {
+            if let Err(e) = refresher.refresh_skills().await {
+                tracing::warn!(error = %e, "压缩后技能刷新失败（不影响会话）");
             }
         }
+
+        true
     }
 
     /// 共享编排骨架：持久化用户消息 → 准备上下文 → AgentLoop → 结果组装 → 指标更新。
@@ -581,14 +651,29 @@ mod tests {
     }
 
     fn make_agent(mock: MockChatService) -> Agent {
+        make_agent_full(
+            mock,
+            MockChatService::new(),
+            CompressionConfig::default(),
+            None,
+        )
+    }
+
+    /// 构造带可配置压缩窗口与技能刷新钩子的 Agent（压缩测试专用）。
+    #[allow(clippy::too_many_arguments)]
+    fn make_agent_full(
+        mock: MockChatService,
+        compression_mock: MockChatService,
+        compression_config: CompressionConfig,
+        refresher: Option<Arc<dyn SkillRefresher>>,
+    ) -> Agent {
         let vfs = Arc::new(MockVfs::new());
         let retriever = Arc::new(DualLayerRetriever::new(
             vfs.clone() as Arc<dyn VirtualFileSystem>
         ));
-        // 压缩服务在短会话测试中不会被调用（< MIN_MESSAGES_BEFORE_COMPRESSION）
         let compressor = Arc::new(TokioMutex::new(ContextCompressor::new(
-            Arc::new(MockChatService::new()),
-            CompressionConfig::default(),
+            Arc::new(compression_mock),
+            compression_config,
         )));
         let context_pipeline = ContextPipeline::new(
             vfs.clone() as Arc<dyn VirtualFileSystem>,
@@ -611,7 +696,25 @@ mod tests {
             agent_loop,
             Arc::new(MockSessionManager),
             None,
+            refresher,
         )
+    }
+
+    /// 记录调用次数的技能刷新钩子 mock。
+    struct MockRefresher {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SkillRefresher for MockRefresher {
+        async fn refresh_skills(&self) -> Result<usize> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(0)
+        }
+    }
+
+    fn refresher_calls(refresher: &MockRefresher) -> usize {
+        refresher.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[tokio::test]
@@ -734,5 +837,94 @@ mod tests {
             .filter(|m| m.role == MessageRole::User && m.content.contains("允许"))
             .count();
         assert_eq!(answer_count, 1, "用户回答在组装上下文中只能出现一次");
+    }
+
+    #[tokio::test]
+    async fn test_compression_refreshes_injectable_and_skills() {
+        // 回归保护：压缩（会话转换点）成功后必须清空 injectable_context
+        // （下一轮 prepare_context 重新加载，learned rules 最新化）并触发
+        // SkillRefresher（VFS 新进化技能增量注册）。
+        let mut compress_mock = MockChatService::new();
+        compress_mock
+            .expect_chat_completion()
+            .returning(|_| Ok(response_with(Message::assistant("这是压缩摘要"))));
+        let refresher = Arc::new(MockRefresher {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let agent = make_agent_full(
+            MockChatService::new(),
+            compress_mock,
+            CompressionConfig {
+                context_window: 2000,
+                compression_threshold: 1.0,
+                ..CompressionConfig::default()
+            },
+            Some(refresher.clone()),
+        );
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        // 预置已加载的注入上下文（模拟会话早期已加载 soul/rules/memories）
+        state.write().await.injectable_context = InjectableContext {
+            soul: "已加载的 soul".to_string(),
+            rules_and_experiences: vec!["旧规则".to_string()],
+            ..Default::default()
+        };
+        // 添加 ≥6 条大消息（token 估算超窗口阈值）
+        let big = "字".repeat(12_000);
+        for _ in 0..7 {
+            let sm = ContextAssembler::message_to_structured(
+                &Message::user(big.clone()),
+                "session-1",
+                None,
+                None,
+            );
+            state.write().await.add_structured_message(sm);
+        }
+
+        let compressed = agent.maybe_compress_and_persist(&state, "session-1").await;
+        assert!(compressed, "token 超阈值且消息数足够时应发生压缩");
+        assert!(
+            state.read().await.injectable_context.soul.is_empty(),
+            "压缩后注入上下文缓存应清空（下一轮重新加载 learned rules）"
+        );
+        assert_eq!(refresher_calls(&refresher), 1, "压缩后应触发技能注册表刷新");
+    }
+
+    #[tokio::test]
+    async fn test_compress_skipped_without_enough_messages() {
+        // 回归保护：消息不足（< MIN_MESSAGES_BEFORE_COMPRESSION）时不压缩，
+        // 不得清空注入上下文缓存、不得触发技能刷新。
+        let refresher = Arc::new(MockRefresher {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let agent = make_agent_full(
+            MockChatService::new(),
+            MockChatService::new(),
+            CompressionConfig::default(),
+            Some(refresher.clone()),
+        );
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        state.write().await.injectable_context = InjectableContext {
+            soul: "已加载的 soul".to_string(),
+            ..Default::default()
+        };
+        for _ in 0..5 {
+            let sm = ContextAssembler::message_to_structured(
+                &Message::user("简短消息"),
+                "session-1",
+                None,
+                None,
+            );
+            state.write().await.add_structured_message(sm);
+        }
+
+        let compressed = agent.maybe_compress_and_persist(&state, "session-1").await;
+        assert!(!compressed, "消息不足不应压缩");
+        assert!(
+            !state.read().await.injectable_context.soul.is_empty(),
+            "未压缩不应清空注入上下文缓存"
+        );
+        assert_eq!(refresher_calls(&refresher), 0, "未压缩不应触发技能刷新");
     }
 }

@@ -8,8 +8,8 @@ use tracing::{error, info};
 
 use crate::api::sessions::services::SessionService;
 use crate::api::sessions::types::{
-    DeleteMessageRequest, DeleteSessionResponse, ListSessionsResponse, RedoRequest, Session,
-    SessionDetail, SessionMessagesResponse, UpdateTitleRequest,
+    CompressSessionResponse, DeleteMessageRequest, DeleteSessionResponse, ListSessionsResponse,
+    RedoRequest, Session, SessionDetail, SessionMessagesResponse, UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
@@ -128,6 +128,28 @@ pub async fn redo_message(
 
     let resp = service.redo_message(&session_id, request).await?;
     Ok(Json(resp))
+}
+
+/// 手动压缩会话（与自动压缩共用处理逻辑）。
+///
+/// 压缩成功后同步执行会话转换点刷新：learned rules 缓存清空（下一轮重新
+/// 检索）+ 技能注册表增量注册（GEPA 新技能对后续对话可见）。
+pub async fn compress_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<CompressSessionResponse>, ApiError> {
+    if session_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("会话ID不能为空".to_string()));
+    }
+
+    info!("手动压缩会话: {}", session_id);
+
+    let agent = state.agent().await;
+    let compressed = agent
+        .compress_session(&session_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("压缩会话失败: {}", e)))?;
+    Ok(Json(CompressSessionResponse { compressed }))
 }
 
 /// 更新会话标题

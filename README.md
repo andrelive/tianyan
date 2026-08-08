@@ -284,6 +284,7 @@ API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
 | `/api/v1/sessions/{id}/messages/delete` | POST | 删除指定消息 |
 | `/api/v1/sessions/{id}/messages/redo` | POST | 重做指定消息 |
 | `/api/v1/sessions/{id}/title` | POST | 更新会话标题 |
+| `/api/v1/sessions/{id}/compress` | POST | 手动压缩会话（与自动压缩共用逻辑；压缩点同步刷新 learned rules 与技能注册表） |
 | `/api/v1/knowledge/ingest` | POST | 文档导入（multipart） |
 | `/api/v1/knowledge/search` | GET | 知识搜索 |
 | `/api/v1/knowledge/search/suggestions` | GET | 搜索建议 |
@@ -384,7 +385,8 @@ Tianyan 正在积极开发中。详见 [系统架构文档](./docs/system-archit
 - 子 Agent 编排（`delegate_to_agent`：并行委托 + 嵌套委托（深度上限 3）+ `max_turns`/`timeout_secs` + **后台任务**（fire-and-forget，完成自动通知会话））
 - 后台任务管理（`task_status`/`task_cancel` 工具 + `GET /api/v1/tasks`）
 - 回答质量评测（LLM-as-Judge 评分式四维度评测 + 黄金用例，离线基准）
-- 6 个内置技能 + GEPA 进化引擎自动学习（学习回路：VFS 存储 → 启动时注册 → 可发现/执行指引）
+- 6 个内置技能 + GEPA 进化引擎自动学习（学习回路：VFS 存储 → 注册 → 可发现/执行指引；会话边界刷新——新会话立即可见最新进化产物，会话内前缀稳定不破坏缓存；压缩点刷新——长会话压缩后 learned rules 与技能同步更新；前缀快照随会话持久化——重启后旧会话沿用同一份，不重新检索）
+- 上下文压缩（自动阈值触发 + 手动 API；压缩点 = 会话内唯一免费刷新点）
 - 定时任务调度（记忆提取、规则提炼、摘要生成）
 - 审批降级链路（危险操作询问用户，类型化确认信号）
 

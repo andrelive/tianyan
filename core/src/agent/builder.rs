@@ -21,7 +21,7 @@ use crate::observability::AgentMetrics;
 use crate::scheduler::tasks::RuleRecorder;
 use crate::session::SessionManager;
 use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
-use crate::skills::SkillExecutor;
+use crate::skills::{SkillExecutor, SkillRefresher};
 use crate::snapshot::SnapshotManager;
 use crate::vfs::VirtualFileSystem;
 
@@ -44,6 +44,8 @@ pub struct AgentBuilder {
     web_config: Option<crate::config::WebConfig>,
     /// 工作区快照管理器（配置了 working_directory 时启用）。
     snapshot_manager: Option<Arc<SnapshotManager>>,
+    /// 技能注册表刷新钩子（压缩会话转换点时增量注册 VFS 学习技能）。
+    skill_refresher: Option<Arc<dyn SkillRefresher>>,
 }
 
 impl AgentBuilder {
@@ -62,6 +64,7 @@ impl AgentBuilder {
             usage_stats: None,
             web_config: None,
             snapshot_manager: None,
+            skill_refresher: None,
         }
     }
 
@@ -134,6 +137,12 @@ impl AgentBuilder {
     /// 设置工作区快照管理器（会话回退时恢复文件修改）。
     pub fn with_snapshot_manager(mut self, manager: Arc<SnapshotManager>) -> Self {
         self.snapshot_manager = Some(manager);
+        self
+    }
+
+    /// 设置技能注册表刷新钩子（压缩会话转换点时增量注册 VFS 学习技能）。
+    pub fn with_skill_refresher(mut self, refresher: Arc<dyn SkillRefresher>) -> Self {
+        self.skill_refresher = Some(refresher);
         self
     }
 
@@ -264,6 +273,7 @@ impl AgentBuilder {
             agent_loop,
             session_manager,
             self.snapshot_manager,
+            self.skill_refresher,
         ))
     }
 }

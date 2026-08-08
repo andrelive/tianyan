@@ -2,11 +2,16 @@
 //!
 //! 定义 ContextPipeline 填充、ContextAssembler 组装使用的可注入上下文结构。
 //! 该类型原本位于 `agent::session_state`，提取到此处以消除 `context` → `agent` 的倒置依赖。
+//!
+//! `Serialize`/`Deserialize` 用于会话快照持久化（SessionHeader）：
+//! 前缀内容（soul/rules/memories）随会话固化，重启后沿用同一份，
+//! 不重新检索——保证旧会话前缀稳定，prompt 缓存不失效。
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// 可注入的上下文内容，由 ContextPipeline 填充，由 ContextAssembler 组装使用。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InjectableContext {
     /// 智能体核心人格（soul.md）。
     pub soul: String,

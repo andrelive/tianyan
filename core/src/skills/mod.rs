@@ -50,7 +50,7 @@ pub use learning::{
     ExecutionHistory, ExecutionStep, GeneratedSkill, SkillAction, SkillEvaluation,
     SkillLearningConfig, SkillLearningEngine, SkillParameter,
 };
-pub use manager::{SkillManager, SkillSummary};
+pub use manager::{SkillManager, SkillRefresher, SkillSummary};
 pub use registry::{create_builtin_skills, register_builtin_skills};
 pub use types::{
     ExecutionContext, MatchReason, SecurityLevel, SkillCategory, SkillDiscoveryResult,

@@ -155,6 +155,13 @@ pub trait AgentCoordinator: Send + Sync {
     /// 获取后台任务列表快照（delegate_to_agent(background) 的任务）。
     async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask>;
 
+    /// 手动压缩会话（前端按钮触发）。
+    ///
+    /// 与自动压缩共用 `maybe_compress_and_persist` 逻辑（含压缩点刷新：
+    /// learned rules 缓存清空 + 技能注册表增量注册），仅触发点不同。
+    /// 返回是否实际发生了压缩（消息不足 / token 未超阈值时为 false）。
+    async fn compress_session(&self, session_id: &str) -> Result<bool>;
+
     /// 关闭智能体。
     async fn shutdown(&self) -> Result<()>;
 }
@@ -329,6 +336,11 @@ impl AgentCoordinator for Agent {
     async fn handle_clarification(&self, session_id: &str, answers: &str) -> Result<AgentResponse> {
         let state = self.load_and_build_state(session_id).await?;
         self.handle_clarification_response(&state, answers).await
+    }
+
+    async fn compress_session(&self, session_id: &str) -> Result<bool> {
+        let state = self.load_and_build_state(session_id).await?;
+        Ok(self.maybe_compress_and_persist(&state, session_id).await)
     }
 
     async fn initialize(&self) -> Result<()> {

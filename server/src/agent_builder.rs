@@ -21,7 +21,7 @@ use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::model::ModelServices;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::session::PersistentSessionManager;
-use tianyan::skills::SkillExecutor;
+use tianyan::skills::{SkillExecutor, SkillRefresher};
 use tianyan::vfs::VirtualFileSystemImpl;
 use tianyan::{Result as TianyanResult, TianyanError};
 
@@ -51,6 +51,7 @@ impl AgentBuilderFactory {
         skill_executor: Arc<SkillExecutor>,
         usage_stats: Arc<UsageStats>,
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
+        skill_refresher: Arc<dyn SkillRefresher>,
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
     ) -> TianyanResult<Agent> {
         Self::validate_config(config)?;
@@ -106,6 +107,7 @@ impl AgentBuilderFactory {
             None => agent,
         };
         let agent = agent
+            .with_skill_refresher(skill_refresher)
             .build()
             .map_err(|e| TianyanError::Custom(format!("内部错误：Agent 构建失败：{}", e)))?;
 
@@ -130,6 +132,7 @@ impl AgentBuilderFactory {
         skill_executor: Arc<SkillExecutor>,
         usage_stats: Arc<UsageStats>,
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
+        skill_refresher: Arc<dyn SkillRefresher>,
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
@@ -139,6 +142,7 @@ impl AgentBuilderFactory {
             skill_executor,
             usage_stats,
             snapshot_manager,
+            skill_refresher,
             dynamic_tools,
         )
         .await
@@ -281,6 +285,11 @@ impl AgentCoordinator for WizardModeAgent {
 
     async fn background_tasks(&self) -> Vec<tianyan::agent::background::BackgroundTask> {
         Vec::new()
+    }
+
+    async fn compress_session(&self, _session_id: &str) -> TianyanResult<bool> {
+        // 向导模式未装配 Agent，压缩不可用
+        Ok(false)
     }
 
     async fn shutdown(&self) -> TianyanResult<()> {

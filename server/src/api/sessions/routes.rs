@@ -6,8 +6,8 @@ use axum::{
 };
 
 use crate::api::sessions::handlers::{
-    delete_message, delete_session, get_session, get_session_messages, list_sessions, redo_message,
-    update_session_title,
+    compress_session, delete_message, delete_session, get_session, get_session_messages,
+    list_sessions, redo_message, update_session_title,
 };
 use crate::state::AppState;
 
@@ -20,4 +20,5 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/sessions/{id}/messages/delete", post(delete_message))
         .route("/sessions/{id}/messages/redo", post(redo_message))
         .route("/sessions/{id}/title", post(update_session_title))
+        .route("/sessions/{id}/compress", post(compress_session))
 }

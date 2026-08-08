@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::shared::types::ChatMessage;
 
+/// 会话压缩响应。
+#[derive(Debug, Serialize)]
+pub struct CompressSessionResponse {
+    /// 是否实际发生了压缩（消息不足 / token 未超阈值时为 false）。
+    pub compressed: bool,
+}
+
 /// 会话信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
