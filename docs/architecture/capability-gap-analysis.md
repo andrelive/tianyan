@@ -113,7 +113,8 @@ Phase 3（P2）
 
 | 项 | 状态 | 实现 |
 |----|------|------|
-| Web 搜索工具（Phase 1） | ✅ 已实施 | `core/src/executor/web.rs`：web_search（DuckDuckGo/SearXNG 双后端）+ web_fetch（可读正文提取）+ SSRF 防护 + TTL 缓存；`[web]` 配置节；23 个内置工具 |
+| Web 搜索工具（Phase 1） | ✅ 已实施 | `core/src/executor/web.rs`：web_search（DuckDuckGo/SearXNG 双后端）+ web_fetch（可读正文提取）+ SSRF 防护 + TTL 缓存；`[web]` 配置节；25 个内置工具 |
+| 后台长任务 + 结果聚合（Phase 2） | ✅ 已实施 | `core/src/agent/background.rs`：delegate(background) fire-and-forget + 任务注册表（状态机/并发上限 4）+ 完成通知注入父会话（结果摘要 + 剩余计数 join 信号）；task_status/task_cancel 工具 + GET /api/v1/tasks |
 
 ## 附录 A：调研来源（代表）
 

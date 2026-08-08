@@ -10,6 +10,8 @@ pub const DEFAULT_SOUL: &str = include_str!("default_soul.md");
 pub mod session_state;
 
 mod agent_core;
+/// 后台任务支持（fire-and-forget 委托 + 完成通知 + join 信号）。
+pub mod background;
 mod builder;
 mod coordinator;
 mod r#loop;

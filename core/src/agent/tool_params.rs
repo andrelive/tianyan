@@ -192,6 +192,24 @@ pub struct DelegateToAgentParams {
     /// 委托整体超时（秒）。超时返回错误，子 Agent 循环被中断。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// 后台执行（默认 false）：true 时立即返回任务 ID，任务独立运行，
+    /// 完成时自动向父会话注入通知（含结果摘要与剩余任务计数）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
+}
+
+/// 后台任务状态查询参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskStatusParams {
+    /// 后台任务 ID（delegate_to_agent(background) 返回的 task_id）。
+    pub task_id: String,
+}
+
+/// 后台任务取消参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskCancelParams {
+    /// 后台任务 ID。
+    pub task_id: String,
 }
 
 /// 自我检查参数（无参数 — Agent 自省查询内部指标）。

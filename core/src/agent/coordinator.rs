@@ -151,6 +151,10 @@ pub trait AgentCoordinator: Send + Sync {
 
     /// 获取智能体状态。
     async fn get_state(&self) -> AgentState;
+
+    /// 获取后台任务列表快照（delegate_to_agent(background) 的任务）。
+    async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask>;
+
     /// 关闭智能体。
     async fn shutdown(&self) -> Result<()>;
 }
@@ -378,6 +382,14 @@ impl AgentCoordinator for Agent {
 
     async fn get_state(&self) -> AgentState {
         self.state.read().await.clone()
+    }
+
+    async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask> {
+        self.agent_loop
+            .tool_registry()
+            .background_tasks
+            .snapshot()
+            .await
     }
 
     async fn shutdown(&self) -> Result<()> {

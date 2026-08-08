@@ -279,6 +279,10 @@ impl AgentCoordinator for WizardModeAgent {
         AgentState::default()
     }
 
+    async fn background_tasks(&self) -> Vec<tianyan::agent::background::BackgroundTask> {
+        Vec::new()
+    }
+
     async fn shutdown(&self) -> TianyanResult<()> {
         Ok(())
     }

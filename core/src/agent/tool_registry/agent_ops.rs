@@ -173,6 +173,10 @@ impl ToolRegistry {
     ///   [`MAX_DELEGATION_DEPTH`] 限制，超限调用被拒绝（防失控派生）。
     /// - **有界循环**：默认 200 轮，可用 `max_turns` 收紧；`timeout_secs`
     ///   可整体限时，超时中断委托。
+    /// - **后台委托**：`background = true` 时 fire-and-forget——立即返回
+    ///   任务 ID，任务独立运行；完成时自动向父会话注入通知（含结果摘要
+    ///   与剩余任务计数），主 LLM 下一轮看到后聚合继续（业界模式：
+    ///   opencode task(background) / Claude Code background subagents）。
     ///
     /// Returns `BoxFuture` to break async recursion with `execute_single`.
     pub(crate) fn execute_delegate_to_agent<'a>(
@@ -180,11 +184,14 @@ impl ToolRegistry {
         arguments: &'a str,
     ) -> BoxFuture<'a, Result<serde_json::Value, TianyanError>> {
         Box::pin(async move {
-            const DEFAULT_MAX_TURNS: usize = 200;
-            const MAX_TURNS_CAP: usize = 500;
-
             let params: DelegateToAgentParams = serde_json::from_str(arguments)
                 .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+
+            // 后台委托：注册 + spawn + 立即返回（并发上限由任务管理器控制；
+            // 后台任务内再委托由内层深度检查与并发上限共同防失控）。
+            if params.background == Some(true) {
+                return self.spawn_background_delegate(&params).await;
+            }
 
             // 嵌套委托深度保护：进入委托时 +1，超出上限拒绝。
             let depth = self.delegation_depth.fetch_add(1, Ordering::SeqCst) + 1;
@@ -198,96 +205,200 @@ impl ToolRegistry {
             // 深度 guard 必须活到委托结束（含 Err 路径），Drop 时自动回滚计数。
             let _depth_guard = DelegationDepthGuard(self.delegation_depth.clone());
 
-            let model_service = self.model_service.clone().ok_or_else(|| {
-                TianyanError::Custom(format!(
-                    "tool: 执行失败：{}",
-                    "ModelService not configured for delegation",
-                ))
+            self.run_delegation_loop(&params).await
+        })
+    }
+
+    /// 委托核心循环（前台/后台共用）。
+    ///
+    /// 深度保护由调用方负责（前台在入口，后台任务内由内层委托自行检查）。
+    pub(crate) async fn run_delegation_loop(
+        &self,
+        params: &DelegateToAgentParams,
+    ) -> Result<serde_json::Value, TianyanError> {
+        const DEFAULT_MAX_TURNS: usize = 200;
+        const MAX_TURNS_CAP: usize = 500;
+
+        let model_service = self.model_service.clone().ok_or_else(|| {
+            TianyanError::Custom(format!(
+                "tool: 执行失败：{}",
+                "ModelService not configured for delegation",
+            ))
+        })?;
+
+        let mut sub_messages: Vec<Message> = Vec::new();
+        if let Some(prompt) = params.system_prompt.as_deref() {
+            if !prompt.is_empty() {
+                sub_messages.push(Message::system(prompt));
+            }
+        }
+        sub_messages.push(Message::user(&params.task));
+
+        let max_turns = params
+            .max_turns
+            .unwrap_or(DEFAULT_MAX_TURNS)
+            .clamp(1, MAX_TURNS_CAP);
+
+        let run_loop = async {
+            let mut total_tokens: usize = 0;
+
+            for _turn in 0..max_turns {
+                let request = ChatCompletionRequest::new(&self.model, sub_messages.clone());
+                let response = model_service
+                    .chat_completion(request)
+                    .await
+                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+
+                total_tokens += response.usage.total_tokens;
+                let choice = response.choices.into_iter().next().ok_or_else(|| {
+                    TianyanError::Custom(format!("tool: 执行失败：{}", "Empty response"))
+                })?;
+
+                let assistant_msg = choice.message;
+                if assistant_msg.content.is_empty() {
+                    if let Some(ref tool_calls) = assistant_msg.tool_calls {
+                        // LLM requested tools — execute them in parallel, feed results back.
+                        // 嵌套委托不再过滤：子 Agent 内调用 delegate_to_agent 直接执行，
+                        // 由委托深度计数器（depth_guard）防止失控派生。
+                        sub_messages.push(Message::assistant_with_tools(
+                            String::new(),
+                            tool_calls.clone(),
+                        ));
+
+                        if !tool_calls.is_empty() {
+                            let results = self.execute_parallel(tool_calls).await;
+                            for (call_id, result) in results {
+                                let content = match result {
+                                    Ok(val) => val.to_string(),
+                                    Err(e) => format!("Error: {}", e),
+                                };
+                                sub_messages.push(Message::tool(call_id, content));
+                            }
+                        }
+                        continue;
+                    }
+                } else {
+                    // LLM provided a final answer — record it and return.
+                    sub_messages.push(Message::assistant(assistant_msg.content.clone()));
+                    return Ok(serde_json::json!({
+                        "result": assistant_msg.content,
+                        "total_tokens": total_tokens,
+                    }));
+                }
+            }
+
+            Ok(serde_json::json!({
+                "result": format!("sub-task reached max turns ({}) without final answer", max_turns),
+                "total_tokens": total_tokens,
+            }))
+        };
+
+        match params.timeout_secs {
+            Some(secs) => {
+                let result =
+                    tokio::time::timeout(std::time::Duration::from_secs(secs), run_loop).await;
+                match result {
+                    Ok(inner) => inner,
+                    Err(_) => Err(TianyanError::Custom(format!(
+                        "tool: 委托执行超时（{}s）",
+                        secs
+                    ))),
+                }
+            }
+            None => run_loop.await,
+        }
+    }
+
+    /// 后台委托：注册任务 → 获取并发许可 → spawn 独立执行 → 立即返回。
+    async fn spawn_background_delegate(
+        &self,
+        params: &DelegateToAgentParams,
+    ) -> Result<serde_json::Value, TianyanError> {
+        let manager = &self.background_tasks;
+
+        // 父会话归属：AgentLoop 每轮工具执行前设置
+        let session_id = self
+            .current_session_id
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| {
+                TianyanError::Custom(
+                    "tool: 后台任务需要会话上下文（current_session_id 未设置）".to_string(),
+                )
             })?;
 
-            let mut sub_messages: Vec<Message> = Vec::new();
-            if let Some(prompt) = params.system_prompt.as_deref() {
-                if !prompt.is_empty() {
-                    sub_messages.push(Message::system(prompt));
-                }
+        // 并发许可：达到上限立即拒绝（不阻塞）
+        let _permit = manager.try_acquire().await?;
+
+        let desc = params.task.clone();
+        let task_id = manager.register(desc.clone(), session_id.clone()).await;
+        manager.mark_running(&task_id).await;
+
+        let this = self.clone();
+        let mgr = manager.clone();
+        let run_params = params.clone();
+        let run_task_id = task_id.clone();
+
+        tokio::spawn(async move {
+            let outcome = this.run_delegation_loop(&run_params).await;
+            match outcome {
+                Ok(v) => mgr.complete(&run_task_id, format!("{v}")).await,
+                Err(e) => mgr.fail(&run_task_id, e.to_string()).await,
             }
-            sub_messages.push(Message::user(&params.task));
+            // _permit 在此作用域结束时释放
+        });
 
-            let max_turns = params
-                .max_turns
-                .unwrap_or(DEFAULT_MAX_TURNS)
-                .clamp(1, MAX_TURNS_CAP);
+        Ok(serde_json::json!({
+            "task_id": task_id,
+            "status": "running",
+            "message": format!(
+                "后台任务已启动（{desc}）。完成后将自动通知本会话，无需轮询；可用 task_status 查询状态。"
+            ),
+        }))
+    }
 
-            let run_loop = async {
-                let mut total_tokens: usize = 0;
+    /// 执行 task_status 工具：查询后台任务状态与结果（非阻塞快照）。
+    pub(crate) async fn execute_task_status(
+        &self,
+        arguments: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        #[derive(serde::Deserialize)]
+        struct Params {
+            task_id: String,
+        }
+        let params: Params = serde_json::from_str(arguments)
+            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
 
-                for _turn in 0..max_turns {
-                    let request = ChatCompletionRequest::new(&self.model, sub_messages.clone());
-                    let response = model_service
-                        .chat_completion(request)
-                        .await
-                        .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+        let task = self
+            .background_tasks
+            .get(&params.task_id)
+            .await
+            .ok_or_else(|| TianyanError::Custom(format!("tool: 任务不存在：{}", params.task_id)))?;
 
-                    total_tokens += response.usage.total_tokens;
-                    let choice = response.choices.into_iter().next().ok_or_else(|| {
-                        TianyanError::Custom(format!("tool: 执行失败：{}", "Empty response"))
-                    })?;
+        serde_json::to_value(task)
+            .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))
+    }
 
-                    let assistant_msg = choice.message;
-                    if assistant_msg.content.is_empty() {
-                        if let Some(ref tool_calls) = assistant_msg.tool_calls {
-                            // LLM requested tools — execute them in parallel, feed results back.
-                            // 嵌套委托不再过滤：子 Agent 内调用 delegate_to_agent 直接执行，
-                            // 由委托深度计数器（depth_guard）防止失控派生。
-                            sub_messages.push(Message::assistant_with_tools(
-                                String::new(),
-                                tool_calls.clone(),
-                            ));
+    /// 执行 task_cancel 工具：取消后台任务（终态任务为幂等空操作）。
+    pub(crate) async fn execute_task_cancel(
+        &self,
+        arguments: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        #[derive(serde::Deserialize)]
+        struct Params {
+            task_id: String,
+        }
+        let params: Params = serde_json::from_str(arguments)
+            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
 
-                            if !tool_calls.is_empty() {
-                                let results = self.execute_parallel(tool_calls).await;
-                                for (call_id, result) in results {
-                                    let content = match result {
-                                        Ok(val) => val.to_string(),
-                                        Err(e) => format!("Error: {}", e),
-                                    };
-                                    sub_messages.push(Message::tool(call_id, content));
-                                }
-                            }
-                            continue;
-                        }
-                    } else {
-                        // LLM provided a final answer — record it and return.
-                        sub_messages.push(Message::assistant(assistant_msg.content.clone()));
-                        return Ok(serde_json::json!({
-                            "result": assistant_msg.content,
-                            "total_tokens": total_tokens,
-                        }));
-                    }
-                }
+        self.background_tasks.cancel(&params.task_id).await?;
 
-                Ok(serde_json::json!({
-                    "result": format!("sub-task reached max turns ({}) without final answer", max_turns),
-                    "total_tokens": total_tokens,
-                }))
-            };
-
-            match params.timeout_secs {
-                Some(secs) => {
-                    let result =
-                        tokio::time::timeout(std::time::Duration::from_secs(secs), run_loop).await;
-                    match result {
-                        Ok(inner) => inner,
-                        Err(_) => Err(TianyanError::Custom(format!(
-                            "tool: 委托执行超时（{}s）",
-                            secs
-                        ))),
-                    }
-                }
-                None => run_loop.await,
-            }
-            // depth_guard 在此作用域结束时自动 drop（含 Err 路径）
-        })
+        Ok(serde_json::json!({
+            "task_id": params.task_id,
+            "status": "cancelled",
+            "message": "后台任务已取消",
+        }))
     }
     /// 执行 web_search 工具：搜索网页并返回结构化结果（标题/URL/摘要）。
     pub(crate) async fn execute_web_search(

@@ -560,7 +560,8 @@ pub async fn execute_web_search(
     let results = client
         .search(&params.query, params.max_results.unwrap_or(8))
         .await?;
-    serde_json::to_value(results).map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))
+    serde_json::to_value(results)
+        .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))
 }
 
 /// 执行 web_fetch 工具。

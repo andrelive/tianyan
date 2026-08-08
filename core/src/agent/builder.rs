@@ -212,6 +212,10 @@ impl AgentBuilder {
                 }
             }
         }
+        // 后台任务完成通知器：把通知持久化到父会话（主 LLM 下一轮看到并继续）
+        tool_registry = tool_registry.with_task_notifier(Arc::new(
+            crate::agent::background::SessionTaskNotifier::new(session_manager.clone()),
+        ));
 
         let agent_loop = AgentLoop::new(
             model_service.clone(),

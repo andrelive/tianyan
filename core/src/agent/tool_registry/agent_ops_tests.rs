@@ -396,3 +396,108 @@ async fn test_delegate_timeout_param_accepted() {
         "正常完成后深度应恢复为 0"
     );
 }
+
+// ── 后台任务（delegate background / task_status / task_cancel）──────────
+
+#[tokio::test]
+async fn test_delegate_background_starts_and_completes() {
+    use crate::agent::background::TaskStatus;
+
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .returning(|_| Ok(chat_response("bg done")));
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("test-model");
+    registry.set_current_session("session-1").await;
+
+    let result = registry
+        .execute_delegate_to_agent(r#"{"task":"background job","background":true}"#)
+        .await
+        .unwrap();
+    assert_eq!(result["status"].as_str(), Some("running"));
+    let task_id = result["task_id"].as_str().unwrap().to_string();
+    assert!(
+        task_id.starts_with("bt_"),
+        "任务 ID 应为 bt_ 前缀: {task_id}"
+    );
+
+    // 等待后台任务完成（tokio::spawn 异步执行）
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if let Some(task) = registry.background_tasks.get(&task_id).await {
+            if task.status.is_terminal() {
+                break;
+            }
+        }
+    }
+
+    let task = registry.background_tasks.get(&task_id).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert!(
+        task.result.as_deref().unwrap_or("").contains("bg done"),
+        "结果应包含委托输出: {:?}",
+        task.result
+    );
+    assert_eq!(task.parent_session_id, "session-1");
+
+    // task_status 工具查询
+    let status = registry
+        .execute_task_status(&format!(r#"{{"task_id":"{task_id}"}}"#))
+        .await
+        .unwrap();
+    assert_eq!(status["status"].as_str(), Some("completed"));
+}
+
+#[tokio::test]
+async fn test_task_cancel_via_tool() {
+    use crate::agent::background::TaskStatus;
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    let id = registry
+        .background_tasks
+        .register("task".to_string(), "s1".to_string())
+        .await;
+    registry.background_tasks.mark_running(&id).await;
+
+    let result = registry
+        .execute_task_cancel(&format!(r#"{{"task_id":"{id}"}}"#))
+        .await
+        .unwrap();
+    assert_eq!(result["status"].as_str(), Some("cancelled"));
+
+    let task = registry.background_tasks.get(&id).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn test_task_status_missing_task() {
+    let registry = ToolRegistry::new(default_strict_policy());
+    let err = registry
+        .execute_task_status(r#"{"task_id":"bt_nope"}"#)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("任务不存在"),
+        "缺失任务应报错: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_background_requires_session_context() {
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .returning(|_| Ok(chat_response("x")));
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("test-model");
+    // 未设置 current_session_id → 后台委托应拒绝
+    let err = registry
+        .execute_delegate_to_agent(r#"{"task":"bg","background":true}"#)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("会话上下文"),
+        "缺少会话上下文应报错: {err}"
+    );
+}

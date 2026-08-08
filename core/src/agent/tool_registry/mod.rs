@@ -9,8 +9,8 @@ use crate::agent::tool_params::{
     ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
     DiscoverTestsParams, ExecuteCommandParams, GlobParams, KnowledgeIngestParams, ListDirParams,
     LspParams, ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams,
-    SelfCheckParams, SymbolOutlineParams, VerifyBuildParams, VfsListParams, VfsReadParams,
-    WebFetchParams, WebSearchParams, WriteFileParams,
+    SelfCheckParams, SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VerifyBuildParams,
+    VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
 };
 use crate::common::error::TianyanError;
 use crate::executor::approval::ApprovalWorkflow;
@@ -112,6 +112,10 @@ pub struct ToolRegistry {
     pub(crate) usage_stats: Option<Arc<UsageStats>>,
     /// Web 搜索/抓取客户端（web_search / web_fetch 工具依赖）。
     pub(crate) web_client: Option<Arc<WebSearchClient>>,
+    /// 后台任务管理器（delegate_to_agent(background) / task_status / task_cancel）。
+    pub(crate) background_tasks: Arc<crate::agent::background::BackgroundTaskManager>,
+    /// 当前会话 ID（AgentLoop 每轮执行工具前设置；后台任务归属父会话用）。
+    pub(crate) current_session_id: Arc<Mutex<Option<String>>>,
     definitions: Vec<ToolDefinition>,
     /// 外部注册的动态工具（如 MCP 工具桥接），按工具名索引。
     dynamic_tools: Arc<Mutex<HashMap<String, Arc<dyn DynamicToolExecutor>>>>,
@@ -139,6 +143,8 @@ impl ToolRegistry {
             rule_recorder: None,
             usage_stats: None,
             web_client: None,
+            background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
+            current_session_id: Arc::new(Mutex::new(None)),
             definitions: Vec::new(),
             dynamic_tools: Arc::new(Mutex::new(HashMap::new())),
             execution_history: Arc::new(Mutex::new(Vec::new())),
@@ -275,6 +281,22 @@ impl ToolRegistry {
         self
     }
 
+    /// 设置后台任务完成通知器（Agent 装配层注入；默认无通知，
+    /// 任务状态仍可经 task_status 查询）。
+    pub fn with_task_notifier(
+        mut self,
+        notifier: Arc<dyn crate::agent::background::TaskNotifier>,
+    ) -> Self {
+        self.background_tasks = Arc::new((*self.background_tasks).clone().with_notifier(notifier));
+        self
+    }
+
+    /// 设置当前会话 ID（AgentLoop 每轮工具执行前调用；
+    /// 后台委托据此归属父会话，完成通知注入该会话）。
+    pub async fn set_current_session(&self, session_id: &str) {
+        *self.current_session_id.lock().await = Some(session_id.to_string());
+    }
+
     /// 注册动态工具（如 MCP 工具桥接）。
     ///
     /// 与内置工具或已注册的动态工具重名时跳过并告警，防止 LLM 收到歧义定义。
@@ -354,6 +376,8 @@ impl ToolRegistry {
             "web_search" => self.execute_web_search(arguments).await,
             "web_fetch" => self.execute_web_fetch(arguments).await,
             "delegate_to_agent" => self.execute_delegate_to_agent(arguments).await,
+            "task_status" => self.execute_task_status(arguments).await,
+            "task_cancel" => self.execute_task_cancel(arguments).await,
             "glob" => self.execute_glob(arguments).await,
             "list_dir" => self.execute_list_dir(arguments).await,
             "symbol_outline" => self.execute_symbol_outline(arguments).await,
@@ -549,7 +573,21 @@ impl ToolRegistry {
                 DelegateToAgentParams,
             >(
                 "delegate_to_agent",
-                "Delegate a sub-task to an isolated sub-agent with its own context.",
+                "Delegate a sub-task to an isolated sub-agent with its own context. Set background=true to run it as a fire-and-forget background task: the tool returns a task_id immediately, and a completion notification (with the result summary) is injected into this session automatically — do NOT poll, just continue working until notified. Use task_status to query a task, task_cancel to abort it.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                TaskStatusParams,
+            >(
+                "task_status",
+                "Query the status and result of a background task by its task_id (bt_xxx). Returns a non-blocking snapshot. Prefer waiting for the automatic completion notification over polling this tool repeatedly.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                TaskCancelParams,
+            >(
+                "task_cancel",
+                "Cancel a running background task by its task_id. Cancelling an already finished task is a no-op.",
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<

@@ -436,6 +436,9 @@ impl AgentLoop {
                 }
             }
 
+            // 设置当前会话上下文（后台委托归属父会话，完成通知注入该会话）
+            self.tool_registry.set_current_session(ctx.session_id).await;
+
             let results = self.tool_registry.execute_parallel(tool_calls).await;
 
             // 审批降级：任一工具因审批门控被拒（已入队待确认指纹）时，

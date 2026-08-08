@@ -53,7 +53,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry；`Agent::new` 7 参数） |
 | `AgentLoop` | Agent 迭代循环（LLM 工具调用循环） |
 | `AgentLoopConfig` | AgentLoop 配置（loop_limit 默认 50） |
-| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls（JoinSet，同轮多调用并发）；注册 23 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、knowledge_ingest、delegate_to_agent、web_search、web_fetch、apply_edit、apply_patch、glob、list_dir、discover_tests、symbol_outline、lsp；`delegate_to_agent` 支持嵌套委托（深度上限 3，RAII guard 计数）与 `max_turns`/`timeout_secs` 参数 |
+| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls（JoinSet，同轮多调用并发）；注册 25 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、knowledge_ingest、delegate_to_agent、web_search、web_fetch、task_status、task_cancel、apply_edit、apply_patch、glob、list_dir、discover_tests、symbol_outline、lsp；`delegate_to_agent` 支持嵌套委托（深度上限 3，RAII guard 计数）、`max_turns`/`timeout_secs` 参数与**后台执行**（`background: true` → 任务注册表 + 完成通知注入父会话） |
 | `SessionState` | 会话状态容器（对话历史为唯一真相源，上下文窗口、待持久化记忆） |
 | `SessionStateManager` | 多会话状态管理器（线程安全，Arc<RwLock<HashMap>>） |
 | `AgentResponse` | Agent 响应（内容、追问、Token 使用量、技能调用信息、处理时间） |
