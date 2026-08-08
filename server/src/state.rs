@@ -18,7 +18,8 @@ use tianyan::observability::usage_stats::UsageStats;
 use tianyan::scheduler::TaskScheduler;
 use tianyan::session::{PersistentSessionManager, SessionManager};
 use tianyan::skills::{
-    register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRegistry,
+    register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRefresher,
+    SkillRegistry,
 };
 use tianyan::snapshot::SnapshotManager;
 use tianyan::vfs::backend::sqlite_db::SqliteDb;
@@ -36,6 +37,33 @@ fn model_services_error(e: impl std::fmt::Display) -> TianyanError {
 // 类型别名
 type SharedConfig = Arc<RwLock<TianyanConfig>>;
 type SharedAgent = Arc<RwLock<Arc<dyn AgentCoordinator>>>;
+
+/// 技能注册表同步句柄。
+///
+/// 会话边界刷新的承载者：新会话创建时把 VFS 中已学习技能（GEPA 产物）
+/// 增量注册进 SkillRegistry。刷新是幂等的（仅注册新技能），失败不影响对话。
+#[derive(Clone)]
+pub struct SkillSync {
+    manager: Arc<SkillManager>,
+    registry: Arc<RwLock<SkillRegistry>>,
+}
+
+impl SkillSync {
+    /// 将 VFS 已学习技能增量注册进注册表，返回新注册数。
+    pub async fn refresh(&self) -> TianyanResult<usize> {
+        let mut registry = self.registry.write().await;
+        self.manager.refresh_registry(&mut registry).await
+    }
+}
+
+/// SkillSync 作为核心层 [`SkillRefresher`] 的实现：
+/// 压缩（会话转换点）时被 Agent 调用，增量注册 VFS 学习技能。
+#[async_trait::async_trait]
+impl SkillRefresher for SkillSync {
+    async fn refresh_skills(&self) -> TianyanResult<usize> {
+        self.refresh().await
+    }
+}
 
 /// 共享应用状态
 ///
@@ -57,6 +85,8 @@ pub struct AppState {
     skill_registry: Arc<RwLock<SkillRegistry>>,
     /// 技能执行器
     skill_executor: Arc<SkillExecutor>,
+    /// 技能管理器（VFS 命名空间访问；会话边界刷新已学习技能用）
+    skill_manager: Arc<SkillManager>,
     /// 使用统计追踪器
     usage_stats: Arc<UsageStats>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
@@ -114,18 +144,13 @@ impl AppState {
 
         // VFS 技能自动发现：把之前学到的技能注册进 SkillRegistry，
         // 使它们可被列出、检索（GEPA 学习回路闭环）。
+        // 启动时全量加载一次；运行中新进化的技能由会话边界刷新
+        // （SkillSync::refresh，见 ChatService 接线）增量注册。
+        let skill_manager = Arc::new(SkillManager::new(vfs.clone()));
         {
-            let skill_manager = SkillManager::new(vfs.clone());
-            match skill_manager.load_learned_skills().await {
-                Ok(learned) => {
-                    let mut registry = skill_registry.write().await;
-                    let mut registered = 0usize;
-                    for skill in learned {
-                        if !registry.contains(&skill.id) {
-                            registry.register(skill);
-                            registered += 1;
-                        }
-                    }
+            let mut registry = skill_registry.write().await;
+            match skill_manager.refresh_registry(&mut registry).await {
+                Ok(registered) => {
                     tracing::info!(count = registered, "已注册 VFS 学习技能");
                 }
                 Err(e) => tracing::warn!(error = %e, "加载已学习技能失败"),
@@ -169,6 +194,10 @@ impl AppState {
             skill_executor.clone(),
             usage_stats.clone(),
             snapshot_manager.clone(),
+            Arc::new(SkillSync {
+                manager: skill_manager.clone(),
+                registry: skill_registry.clone(),
+            }),
             dynamic_tools,
         )
         .await?;
@@ -183,6 +212,7 @@ impl AppState {
             vfs,
             skill_registry,
             skill_executor,
+            skill_manager,
             usage_stats,
             snapshot_manager,
             model_services: Arc::new(RwLock::new(model_services)),
@@ -203,6 +233,18 @@ impl AppState {
     /// * `Arc<dyn AgentCoordinator>` - 当前 Agent 实例的 Arc 引用
     pub async fn agent(&self) -> Arc<dyn AgentCoordinator> {
         self.agent.read().await.clone()
+    }
+
+    /// 获取技能注册表同步句柄。
+    ///
+    /// ChatService 在新会话创建时调用 [`SkillSync::refresh`]，把 GEPA 在
+    /// 运行期间进化出的新技能增量注册进 SkillRegistry —— 新会话立即可用，
+    /// 会话内保持冻结（system 前缀稳定，prompt 缓存不失效）。
+    pub fn skill_sync(&self) -> SkillSync {
+        SkillSync {
+            manager: self.skill_manager.clone(),
+            registry: self.skill_registry.clone(),
+        }
     }
 
     /// 更新应用配置并重新构建 Agent
@@ -243,6 +285,7 @@ impl AppState {
             self.skill_executor.clone(),
             self.usage_stats.clone(),
             self.snapshot_manager.clone(),
+            Arc::new(self.skill_sync()),
             dynamic_tools,
         )
         .await?;

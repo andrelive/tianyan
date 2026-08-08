@@ -13,6 +13,7 @@ use crate::api::chat::types::{ChatRequest, ChatResponse, ChatStreamEvent, SkillC
 use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
 use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
+use crate::state::SkillSync;
 
 /// 把 API 层消息转换为 core 消息：携带图片时构造多模态消息。
 fn to_core_message(msg: &ChatMessage) -> CoreMessage {
@@ -28,6 +29,8 @@ fn to_core_message(msg: &ChatMessage) -> CoreMessage {
 pub struct ChatService {
     agent: Arc<dyn AgentCoordinator>,
     session_manager: Arc<dyn SessionManager>,
+    /// 技能注册表同步句柄：新会话创建时刷新已学习技能（会话边界刷新）。
+    skill_sync: Option<SkillSync>,
 }
 
 impl ChatService {
@@ -36,6 +39,24 @@ impl ChatService {
         Self {
             agent,
             session_manager,
+            skill_sync: None,
+        }
+    }
+
+    /// 挂载技能注册表同步句柄（新会话创建时刷新已学习技能）。
+    pub fn with_skill_sync(mut self, sync: SkillSync) -> Self {
+        self.skill_sync = Some(sync);
+        self
+    }
+
+    /// 会话边界刷新：新会话创建后把 VFS 中已学习技能增量注册进注册表。
+    ///
+    /// 幂等（仅注册新技能）；失败仅告警，不影响对话。
+    async fn refresh_learned_skills(&self) {
+        if let Some(sync) = &self.skill_sync {
+            if let Err(e) = sync.refresh().await {
+                tracing::warn!(error = %e, "新会话技能刷新失败（不影响对话）");
+            }
         }
     }
 
@@ -54,12 +75,15 @@ impl ChatService {
             .map(to_core_message)
             .unwrap_or_else(|| CoreMessage::user(""));
 
-        let session_id = resolve_or_create_session(
+        let (session_id, is_new) = resolve_or_create_session(
             self.session_manager.as_ref(),
             request.session_id.as_deref(),
             &last_text,
         )
         .await?;
+        if is_new {
+            self.refresh_learned_skills().await;
+        }
 
         let response = self
             .agent
@@ -91,12 +115,15 @@ impl ChatService {
             .map(to_core_message)
             .unwrap_or_else(|| CoreMessage::user(""));
 
-        let session_id = resolve_or_create_session(
+        let (session_id, is_new) = resolve_or_create_session(
             self.session_manager.as_ref(),
             request.session_id.as_deref(),
             &last_text,
         )
         .await?;
+        if is_new {
+            self.refresh_learned_skills().await;
+        }
 
         let mut stream = self
             .agent
@@ -210,15 +237,19 @@ fn convert_skill_calls(calls: Vec<tianyan::agent::SkillCallInfo>) -> Vec<SkillCa
 /// 根据请求中的 session_id 决定复用已有会话还是创建新会话。
 /// 根据请求中的 session_id 决定复用已有会话还是创建新会话。
 /// 新建会话时自动用第一条用户消息生成标题。
+/// 解析或创建会话，返回 `(session_id, is_new)`。
+///
+/// - 已存在会话：复用，`is_new = false`（会话内，不触发技能刷新）
+/// - 新会话：创建，`is_new = true`（会话边界，调用方刷新已学习技能）
 async fn resolve_or_create_session(
     session_manager: &dyn SessionManager,
     session_id: Option<&str>,
     initial_message: &str,
-) -> Result<String, ApiError> {
+) -> Result<(String, bool), ApiError> {
     // 如果传了 session_id 且服务端已存在，直接复用
     if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
         if session_manager.get_session(sid).await?.is_some() {
-            return Ok(sid.to_string());
+            return Ok((sid.to_string(), false));
         }
     }
 
@@ -249,7 +280,7 @@ async fn resolve_or_create_session(
         tracing::warn!(error = %e, "清空会话预写消息失败");
     }
 
-    Ok(new_id)
+    Ok((new_id, true))
 }
 
 /// 从用户消息中提取会话标题。

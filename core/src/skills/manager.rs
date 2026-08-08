@@ -6,9 +6,19 @@ use std::sync::Arc;
 
 use crate::common::error::Result;
 use crate::common::types::{ContextNamespace, TianyanUri};
-use crate::skills::definition::Skill;
+use crate::skills::definition::{Skill, SkillRegistry};
 use crate::skills::types::{SecurityLevel, SkillCategory};
 use crate::vfs::VirtualFileSystem;
+
+/// 技能注册表刷新钩子：在会话转换点（压缩）增量注册 VFS 中已学习技能。
+///
+/// 压缩发生时 system 前缀已重建（摘要消息插入），此刻刷新注册表零额外
+/// 缓存成本——是会话内唯一的免费刷新点。
+#[async_trait::async_trait]
+pub trait SkillRefresher: Send + Sync {
+    /// 将 VFS 中已学习技能增量注册进注册表，返回新注册数。
+    async fn refresh_skills(&self) -> Result<usize>;
+}
 
 /// 技能摘要信息。
 #[derive(Debug, Clone)]
@@ -122,6 +132,24 @@ impl SkillManager {
         }
         Ok(skills)
     }
+
+    /// 将 VFS 中已学习技能增量同步到注册表（幂等：已注册的跳过）。
+    ///
+    /// 会话边界刷新：新会话首次请求时调用，使 GEPA 进化产物对新会话立即可用；
+    /// 会话内不调用，保持 system 前缀稳定以最大化 prompt 缓存命中。
+    ///
+    /// 返回本次新注册的技能数量。
+    pub async fn refresh_registry(&self, registry: &mut SkillRegistry) -> Result<usize> {
+        let learned = self.load_learned_skills().await?;
+        let mut registered = 0usize;
+        for skill in learned {
+            if !registry.contains(&skill.id) {
+                registry.register(skill);
+                registered += 1;
+            }
+        }
+        Ok(registered)
+    }
 }
 
 #[cfg(test)]
@@ -156,5 +184,36 @@ mod tests {
         assert_eq!(skill.security_level, SecurityLevel::Moderate);
         assert!(skill.tags.contains(&"learned".to_string()));
         assert!(skill.description.contains("文档处理"));
+    }
+
+    /// 回归测试：refresh_registry 幂等且增量——首次注册全部、重复刷新 0 新增、
+    /// VFS 新增技能后只注册增量（会话边界刷新语义）。
+    #[tokio::test]
+    async fn test_refresh_registry_idempotent_and_incremental() {
+        let skill_root = TianyanUri::new(ContextNamespace::Skill, vec![]);
+        let learned_a = TianyanUri::new(ContextNamespace::Skill, vec!["learned_a".to_string()]);
+        let mock = Arc::new(MockVfs::new());
+        mock.add_directory(&skill_root, &learned_a);
+        mock.set_content(&learned_a, ContentLevel::Abstract, "技能 A 摘要");
+        let vfs: Arc<dyn VirtualFileSystem> = mock.clone();
+
+        let manager = SkillManager::new(vfs.clone());
+        let mut registry = SkillRegistry::new();
+
+        let first = manager.refresh_registry(&mut registry).await.unwrap();
+        assert_eq!(first, 1, "首次刷新应注册全部学习技能");
+        assert!(registry.contains("learned_a"));
+
+        let second = manager.refresh_registry(&mut registry).await.unwrap();
+        assert_eq!(second, 0, "重复刷新应幂等（0 新注册）");
+
+        // VFS 新增技能后刷新只注册增量
+        let learned_b = TianyanUri::new(ContextNamespace::Skill, vec!["learned_b".to_string()]);
+        mock.add_directory(&skill_root, &learned_b);
+        mock.set_content(&learned_b, ContentLevel::Abstract, "技能 B 摘要");
+        let third = manager.refresh_registry(&mut registry).await.unwrap();
+        assert_eq!(third, 1, "增量刷新应只注册新技能");
+        assert!(registry.contains("learned_b"));
+        assert_eq!(registry.count(), 2);
     }
 }
