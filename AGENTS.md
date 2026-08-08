@@ -73,6 +73,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-006: 工作区快照独立存储](docs/architecture/decisions/006-snapshot-storage-exception.md) — snapshot 的 VFS 例外
 - [ADR-009: 语义化编辑双原语](docs/architecture/decisions/009-hashline-editing.md) — apply_edit hashline 锚点 + apply_patch unified diff 信封
 - [ADR-008: 快照升级](docs/architecture/decisions/008-snapshot-upgrade.md) — gzip 压缩 + GC + similar diff（扩展 ADR-006）
+- [ADR-010: 对话多模态链路](docs/architecture/decisions/010-multimodal-message-chain.md) — 图片输入（Message.content_parts + Part::Image）+ MCP 截图落盘
 
 模块索引 → [`docs/architecture/module-map.md`](docs/architecture/module-map.md)
 设计原则 → [`docs/architecture/principles.md`](docs/architecture/principles.md)
@@ -94,9 +95,12 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `model` | `core/src/model/` | `ModelServices` 容器（不路由、不重试） | — |
 | `scheduler` | `core/src/scheduler/` | 定时任务（RuleTask、MemoryTask、SummaryTask、GcTask） | 定时任务产物写入 VFS |
 | `observability` | `core/src/observability/` | `AgentMetrics` 可观测性存储 | — |
+| `eval` | `core/src/eval/` | 回答质量评测（LLM-as-Judge 评分式：四维度 1-10 + 黄金用例批处理；离线基准用） | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 语义化编辑（hashline/edit/patch）、文件浏览（fs/search）、代码智能（symbols/project/test_discovery） | — |
 | `lsp` | `core/src/lsp/` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储；lsp 工具：诊断/跳转/符号） | — |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | ⚠️ **ADR-006 例外**：独立文件存储于 `{data_dir}/snapshots/`，不经 VFS |
+
+> **注**：MCP 桥接（`server/src/mcp_bridge.rs`）返回的图片（浏览器截图等）落盘于 `{data_dir}/mcp_images/`，与 snapshot 同级运行时产物例外，不经 VFS（ADR-010）。
 
 已删除组件：`planner/`、`ModelRouter`、`TokenBudget`、`Chunker`、`AgentHarness` wrapper、`AgentSkills` wrapper。
 

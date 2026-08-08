@@ -27,6 +27,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `common` | 通用类型（按领域拆分）、错误处理、日志配置、token 估算 | error.rs, logging.rs, token_estimator.rs, types/ | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
 | `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
+| `eval` | 回答质量评测（LLM-as-Judge 评分式：四维度 1-10 分 + 黄金用例批处理；离线基准用，不接入在线链路） | judge.rs, runner.rs, golden.rs | ✅ 已实现（离线工具） |
 | `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控）+ 编程助手执行原语（hashline 编辑、patch、文件浏览、搜索、符号、测试发现） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs, hashline.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
 | `lsp` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储） | registry.rs, client.rs, diagnostics.rs | ✅ 已集成 |
 | `snapshot` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | mod.rs | ✅ 正常使用 |
@@ -48,11 +49,11 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | 类型 | 说明 |
 |------|------|
 | `Agent` | `AgentCoordinator` 的默认实现，持有 default_model、ContextPipeline、AgentMetrics、AgentLoop、SessionManager、SnapshotManager（可选）等组件 |
-| `AgentCoordinator` (trait) | Agent 协调器接口，定义 `process_message`、`process_message_stream`、`handle_clarification`、`initialize`、`shutdown` |
+| `AgentCoordinator` (trait) | Agent 协调器接口，定义 `process_message`、`process_message_stream`、`handle_clarification`、`initialize`、`shutdown`；消息参数为 `&Message`（支持多模态图片片段，ADR-010） |
 | `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry；`Agent::new` 7 参数） |
 | `AgentLoop` | Agent 迭代循环（LLM 工具调用循环） |
 | `AgentLoopConfig` | AgentLoop 配置（loop_limit 默认 50） |
-| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls；注册 21 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、knowledge_ingest、delegate_to_agent、apply_edit、apply_patch、glob、list_dir、discover_tests、symbol_outline、lsp |
+| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls（JoinSet，同轮多调用并发）；注册 21 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、knowledge_ingest、delegate_to_agent、apply_edit、apply_patch、glob、list_dir、discover_tests、symbol_outline、lsp；`delegate_to_agent` 支持嵌套委托（深度上限 3，RAII guard 计数）与 `max_turns`/`timeout_secs` 参数 |
 | `SessionState` | 会话状态容器（对话历史为唯一真相源，上下文窗口、待持久化记忆） |
 | `SessionStateManager` | 多会话状态管理器（线程安全，Arc<RwLock<HashMap>>） |
 | `AgentResponse` | Agent 响应（内容、追问、Token 使用量、技能调用信息、处理时间） |
@@ -96,6 +97,8 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `ChatCompletionRequest/Response` | 聊天补全请求和响应类型 |
 | `EmbeddingRequest/Response` | 嵌入请求和响应类型 |
 | `SharedChatService` | `Arc<dyn ChatService>` 类型别名 |
+
+**多模态序列化**（ADR-010）：`model/provider/chat.rs::user_content` 在用户消息携带 `content_parts`（图片）时输出 OpenAI 数组格式（text + image_url content parts，detail 映射 low/high/auto）；无图片保持纯文本（行为零变化）。`ContentPart`/`ImageUrl` 类型已上移 `common/types/content_part.rs`（`model::types` re-export 兼容）。
 
 ### 1.4 vfs 子模块
 
@@ -313,7 +316,8 @@ soul → rules+memories → history(from compression_marker) → current input
 | 子模块 | 核心类型 | 说明 |
 |--------|---------|------|
 | `config` | `TianyanConfig`, `AgentConfig`, `ModelsConfig`, `ConfigStatus` | 全局配置管理，支持 TOML + env。查找顺序：`./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml` |
-| `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage`, `LoggingConfig`, `TokenEstimator` | 通用错误（禁止引入新错误类型）、URI、向量、消息、记忆类型、日志配置、token 估算（叶模块，无 core 内部依赖） |
+| `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage`, `ContentPart`, `ImageUrl`, `LoggingConfig`, `TokenEstimator` | 通用错误（禁止引入新错误类型）、URI、向量、消息（含多模态 `content_parts`，ADR-010）、记忆类型、日志配置、token 估算（叶模块，无 core 内部依赖） |
+| `eval` | `AnswerJudge`, `AnswerEvaluation`, `DimensionScores`, `EvalCase`, `EvalResult`, `golden_cases` | 回答质量评测（LLM-as-Judge 评分式）：四维度（相关性/正确性/完整性/清晰度）1-10 分 + 加权总分 + 分级判定；解析回退链（JSON → 围栏提取 → 行格式 → 中性 5 分）；`run_eval_suite` 批处理 + `format_report` 报告；依赖 `model::ChatService` 与 `common::types`，与 `executor::judge`（工具执行二值门控）正交 |
 | `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager` | 会话管理，支持 VFS 持久化；`load_session_from_vfs()` 用 `compression_marker` 截断；截断常量单点定义于 `session/mod.rs`（`MAX_SESSION_MESSAGES=100` / `KEEP_RECENT_MESSAGES=50`） |
 | `memory` | `MemoryExtractor`, `ExtractionConfig` | 从会话文本中提取结构化记忆的纯功能，与调度/持久化解耦 |
 | `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（已通过 `knowledge_ingest` 工具集成到 Agent 流程）。ingestor/ 拆分为 mod + builder；`image/` 拆分为 types/processor/analyzer |
@@ -337,6 +341,7 @@ soul → rules+memories → history(from compression_marker) → current input
 | memory | ✅ 已集成 | `MemoryExtractor` 提取结构化记忆 |
 | observability | ✅ 已集成 | AgentMetrics 提供可观测性存储和自省接口 |
 | executor | ✅ 正常使用 | 独立执行函数、审批工作流、验证门控均被 agent 模块使用 |
+| eval | ✅ 已实现（离线） | AnswerJudge 评分式评测 + 黄金用例；离线基准用，未接入在线对话链路 |
 | lsp | ✅ 已集成 | 自研 LSP 客户端（注册表 + JSON-RPC 传输 + 诊断存储），通过 lsp 工具接入 |
 | snapshot | ✅ 已集成 | gzip 压缩 + GC + similar diff（ADR-006 例外，ADR-008 升级） |
 | knowledge | ✅ 已集成 | KnowledgeIngestor 已通过 knowledge_ingest 工具集成到 Agent 流程，Server 层通过 KnowledgeIngestor 真实处理导入与检索 |

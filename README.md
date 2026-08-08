@@ -17,6 +17,8 @@ Tianyan（天演）是一个本地智能代理系统，旨在通过自然语言�
 - **GUI 桌面应用**：基于 Tauri + React + TypeScript + Axum 的跨平台桌面应用
 - **可扩展技能**：内置文件操作、系统命令等技能
 - **记忆自迭代**：自动从交互中学习和改进
+- **对话图片输入**：聊天中粘贴/拖拽/选择图片（多模态消息链路，需 vision 模型支持）
+- **浏览器感知**：通过 MCP 接入 Playwright 等浏览器服务器，Agent 可导航/点击/截图（截图自动落盘）
 
 ## 项目架构
 
@@ -341,10 +343,12 @@ Tianyan 采用四层架构（Tauri → React/TypeScript 前端 → Axum Server �
 
 - **VFS 双层摘要索引**（L0/L1/L2 + RRF 融合检索）— 统一存储与检索基础
 - **StructuredMessage** — 贯穿持久化、会话组装、Token 统计的单一真相源
-- **组件工具化** — 14 个 OpenAI function calling 兼容工具
+- **组件工具化** — 21 个 OpenAI function calling 兼容工具
 - **前缀匹配上下文组装** — soul→rules→memories→history 固定顺序
 - **SQLite 主存储后端** — 单文件、单连接，替代本地文件后端
 - **工作区快照独立存储** — 会话回退时恢复文件修改（VFS 例外）
+
+另见：[架构决策记录](./docs/architecture/decisions/)（含 ADR-010 对话多模态链路）。
 
 详见 [系统架构文档](./docs/system-architecture.md) 和 [架构决策记录](./docs/architecture/decisions/)。
 
@@ -374,7 +378,11 @@ Tianyan 正在积极开发中。详见 [系统架构文档](./docs/system-archit
 - Agent Loop 架构（LLM 自主工具调用 + 流式响应）
 - VFS 双层摘要索引（L0/L1/L2 三层内容 + RRF 融合检索）
 - StructuredMessage 单一真相源（持久化 + 会话组装 + Token 统计）
-- 14 个内置工具（文件操作、代码搜索、知识导入、技能调用、子 Agent 委托）
+- 21 个内置工具（文件操作、代码搜索、语义化编辑、知识导入、技能调用、子 Agent 委托）
+- 多模态对话（图片输入全链路：粘贴/拖拽 → 持久化 → 历史重放；需 vision 模型支持）
+- MCP 工具桥接（外部 MCP 服务器工具进入 Agent 循环；浏览器截图自动落盘 `{data_dir}/mcp_images/`）
+- 子 Agent 编排（`delegate_to_agent`：并行委托 + 嵌套委托（深度上限 3）+ `max_turns`/`timeout_secs`）
+- 回答质量评测（LLM-as-Judge 评分式四维度评测 + 黄金用例，离线基准）
 - 6 个内置技能 + GEPA 进化引擎自动学习（学习回路：VFS 存储 → 启动时注册 → 可发现/执行指引）
 - 定时任务调度（记忆提取、规则提炼、摘要生成）
 - 审批降级链路（危险操作询问用户，类型化确认信号）

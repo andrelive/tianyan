@@ -28,7 +28,7 @@
 | **Agent Loop 架构** | LLM 在循环中自主调用工具或直接回答，支持并行工具调用和追问中断 |
 | **VFS 双层摘要索引** | 三层内容（L0 Abstract / L1 Overview / L2 Detail）+ 双向量 RRF 融合检索 |
 | **StructuredMessage** | 单一真相源：持久化、会话组装、压缩跟踪、Token 统计 |
-| **组件工具化** | 14 个 OpenAI function calling 兼容工具，`call_skill` 桥接到技能系统 |
+| **组件工具化** | 21 个 OpenAI function calling 兼容工具，`call_skill` 桥接到技能系统 |
 | **前缀匹配缓存** | soul+rules+memories 固定前缀 → history 可变后缀，利用 LLM Provider 缓存 |
 | **技能系统** | 6 个内置技能 + GEPA 进化引擎自动学习 |
 | **流式响应** | SSE 流式输出，6 种 chunk_type 差异化渲染 |
@@ -172,7 +172,7 @@ pub struct StructuredMessage {
 
 知识库查询、技能调用等能力封装为 OpenAI function calling 兼容的工具，由 LLM 通过 `tool_call` 自主调用。
 
-当前 `ToolRegistry` 注册了 9 个工具：`read_file`、`write_file`、`execute_command`、`search_code`、`call_skill`、`run_tests`、`verify_build`、`ask_user`、`delegate_to_agent`。其中 `call_skill` 桥接到 `SkillExecutor`（参数验证 + 安全检查 + 超时控制）。
+当前 `ToolRegistry` 注册了 21 个工具：`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_code`、`search_knowledge`、`vfs_read`、`vfs_list`、`call_skill`、`run_tests`、`discover_tests`、`verify_build`、`ask_user`、`self_check`、`knowledge_ingest`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`lsp`。其中 `call_skill` 桥接到 `SkillExecutor`（参数验证 + 安全检查 + 超时控制）；`delegate_to_agent` 支持并行/嵌套委托（深度上限 3）+ `max_turns`/`timeout_secs`。
 
 ### 3.4 决策 4: 上下文组装前缀匹配原则
 
@@ -220,13 +220,14 @@ Agent :: process_message(session_id, msg)
 
 ### 4.2 ToolRegistry 实现
 
-`ToolRegistry` 维护所有可用工具的 JSON Schema 定义，`execute_parallel()` 通过 tokio JoinSet 并行执行：
+`ToolRegistry` 维护所有可用工具的 JSON Schema 定义，`execute_parallel()` 通过 tokio JoinSet 并行执行（同轮多个 tool_call 并发）：
 
-- **9 个内置工具**：基于 `#[derive(JsonSchema)]` 参数结构体自动生成 Schema
+- **21 个内置工具**：基于 `#[derive(JsonSchema)]` 参数结构体自动生成 Schema
 - **安全策略**：`SecurityPolicy` 控制命令白名单/黑名单，文件操作前检查
 - **审批工作流**：`ApprovalWorkflow` 五级风险（Safe/Low/Medium/High/Critical）
 - **验证门控**：`VerificationGate` 控制执行后自动验证（cargo check/test）
 - **LLM-as-Judge**：`LlmJudge` 对执行结果进行语义验证
+- **动态工具**：外部 MCP 服务器工具经 `DynamicToolExecutor` 注册进注册表（对 LLM 可见可执行）
 
 ### 4.3 已移除/废弃组件
 
