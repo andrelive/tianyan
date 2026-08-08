@@ -188,7 +188,9 @@ async fn test_glob_and_list_dir_dispatch() {
             arguments: list_dir_args(dir.path()),
         },
     };
-    let results = registry.execute_parallel(&[glob_call, list_call]).await;
+    let results = registry
+        .execute_parallel(&[glob_call, list_call], "test-session")
+        .await;
     assert_eq!(results.len(), 2);
     assert!(results[0].1.is_ok(), "glob 分发应成功：{:?}", results[0].1);
     assert_eq!(results[0].1.as_ref().unwrap()["count"].as_u64(), Some(1));

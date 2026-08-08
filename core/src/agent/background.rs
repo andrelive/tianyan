@@ -79,6 +79,11 @@ pub struct BackgroundTask {
     pub created_at: i64,
     /// 完成时间（epoch 毫秒）。
     pub completed_at: Option<i64>,
+    /// 注册序号（单调递增，注册表排序键）。
+    ///
+    /// `created_at` 为毫秒精度，同毫秒注册的任务无法区分先后；
+    /// `seq` 保证快照/列表顺序确定（先注册在前）。
+    pub seq: u64,
 }
 
 /// 任务完成通知器。
@@ -97,6 +102,7 @@ pub struct BackgroundTaskManager {
     tasks: Arc<Mutex<HashMap<String, BackgroundTask>>>,
     semaphore: Arc<Semaphore>,
     notifier: Option<Arc<dyn TaskNotifier>>,
+    next_seq: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl BackgroundTaskManager {
@@ -111,6 +117,7 @@ impl BackgroundTaskManager {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
             notifier: None,
+            next_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -132,6 +139,9 @@ impl BackgroundTaskManager {
     /// 注册新任务（Pending）并返回任务 ID。
     pub async fn register(&self, description: String, parent_session_id: String) -> String {
         let id = format!("bt_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let seq = self
+            .next_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let task = BackgroundTask {
             id: id.clone(),
             description: truncate(&description, 200),
@@ -141,6 +151,7 @@ impl BackgroundTaskManager {
             error: None,
             created_at: now_ms(),
             completed_at: None,
+            seq,
         };
         self.tasks.lock().await.insert(id.clone(), task);
         id
@@ -194,7 +205,9 @@ impl BackgroundTaskManager {
     /// 获取全部任务快照（按创建时间排序）。
     pub async fn snapshot(&self) -> Vec<BackgroundTask> {
         let mut tasks: Vec<BackgroundTask> = self.tasks.lock().await.values().cloned().collect();
-        tasks.sort_by_key(|t| t.created_at);
+        // 按注册序号排序（seq 单调递增，先注册在前；created_at 毫秒精度
+        // 同毫秒无法区分，且 HashMap 迭代顺序随机）
+        tasks.sort_by_key(|t| t.seq);
         tasks
     }
 
@@ -385,6 +398,7 @@ mod tests {
             error: None,
             created_at: 0,
             completed_at: Some(1),
+            seq: 0,
         };
         let text = build_notification_text(&task, 2);
         assert!(text.contains("[后台任务完成]"));
@@ -404,6 +418,7 @@ mod tests {
             error: None,
             created_at: 0,
             completed_at: Some(1),
+            seq: 0,
         };
         let text = build_notification_text(&task, 0);
         assert!(text.contains("所有后台任务均已完成"));
@@ -581,6 +596,7 @@ mod tests {
             error: None,
             created_at: 0,
             completed_at: Some(1),
+            seq: 0,
         };
         notifier.on_task_terminal("s1", &task, 0).await;
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "应持久化一条通知");

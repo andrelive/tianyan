@@ -115,6 +115,8 @@ Phase 3（P2）
 |----|------|------|
 | Web 搜索工具（Phase 1） | ✅ 已实施 | `core/src/executor/web.rs`：web_search（DuckDuckGo/SearXNG 双后端）+ web_fetch（可读正文提取）+ SSRF 防护 + TTL 缓存；`[web]` 配置节；25 个内置工具 |
 | 后台长任务 + 结果聚合（Phase 2） | ✅ 已实施 | `core/src/agent/background.rs`：delegate(background) fire-and-forget + 任务注册表（状态机/并发上限 4）+ 完成通知注入父会话（结果摘要 + 剩余计数 join 信号）；task_status/task_cancel 工具 + GET /api/v1/tasks |
+| 结果聚合工具（P1） | ✅ 已消除（设计替代） | 2026-08-08 审查：事件驱动 + LLM 聚合完整覆盖——完成通知携带**完整结果** + join 信号（剩余计数/汇总指令）；`task_status` 返回完整任务（含 result，serde 全量）作兜底；前台并行委托同轮直接返回聚合。业界代码级 fan-in（collect_delegations）面向 20-100 扇出规模，天演并发上限 4 + LLM 合成质量更高，无需工具级实现 |
+| 注入上下文快照持久化 + 会话边界/压缩点技能刷新 | ✅ 已实施 | JSONL 首行 SessionHeader 固化 soul/rules/memories 快照（重启后旧会话零漂移）；新会话边界增量注册 GEPA 技能（`SkillManager::refresh_registry` 幂等）；压缩点（自动/手动 `POST /sessions/{id}/compress`）清空快照 + 刷新注册表（会话内唯一免费刷新点） |
 
 ## 附录 A：调研来源（代表）
 

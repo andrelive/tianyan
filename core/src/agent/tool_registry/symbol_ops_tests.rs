@@ -152,7 +152,7 @@ async fn test_symbol_outline_dispatch() {
             arguments: symbol_args(&path),
         },
     };
-    let results = registry.execute_parallel(&[call]).await;
+    let results = registry.execute_parallel(&[call], "test-session").await;
     assert_eq!(results.len(), 1);
     assert!(
         results[0].1.is_ok(),

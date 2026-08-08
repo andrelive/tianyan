@@ -192,7 +192,7 @@ async fn test_self_check_success_with_metrics() {
 async fn test_delegate_to_agent_not_configured() {
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_delegate_to_agent(r#"{"task":"do something"}"#)
+        .execute_delegate_to_agent(r#"{"task":"do something"}"#, "session-1")
         .await;
     assert!(result.is_err());
     assert!(result
@@ -204,7 +204,9 @@ async fn test_delegate_to_agent_not_configured() {
 #[tokio::test]
 async fn test_delegate_to_agent_rejects_missing_arguments() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_delegate_to_agent(r#"{}"#).await;
+    let result = registry
+        .execute_delegate_to_agent(r#"{}"#, "session-1")
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -219,7 +221,7 @@ async fn test_delegate_to_agent_success() {
         .with_model("test-model");
 
     let result = registry
-        .execute_delegate_to_agent(r#"{"task":"summarize the notes"}"#)
+        .execute_delegate_to_agent(r#"{"task":"summarize the notes"}"#, "session-1")
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "final answer");
@@ -303,7 +305,7 @@ async fn test_delegate_nested_delegation_executes_and_depth_released() {
         .with_model("test-model");
 
     let result = registry
-        .execute_delegate_to_agent(r#"{"task":"outer task"}"#)
+        .execute_delegate_to_agent(r#"{"task":"outer task"}"#, "session-1")
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "outer done");
@@ -327,7 +329,7 @@ async fn test_delegate_depth_limit_rejected() {
         .store(MAX_DELEGATION_DEPTH, Ordering::SeqCst);
 
     let result = registry
-        .execute_delegate_to_agent(r#"{"task":"too deep"}"#)
+        .execute_delegate_to_agent(r#"{"task":"too deep"}"#, "session-1")
         .await;
     let err = result.unwrap_err().to_string();
     assert!(
@@ -360,7 +362,7 @@ async fn test_delegate_max_turns_param_bounds_loop() {
         .with_model("test-model");
 
     let result = registry
-        .execute_delegate_to_agent(r#"{"task":"loop forever","max_turns":2}"#)
+        .execute_delegate_to_agent(r#"{"task":"loop forever","max_turns":2}"#, "session-1")
         .await
         .unwrap();
     assert!(
@@ -386,7 +388,7 @@ async fn test_delegate_timeout_param_accepted() {
         .with_model("test-model");
 
     let result = registry
-        .execute_delegate_to_agent(r#"{"task":"quick","timeout_secs":30}"#)
+        .execute_delegate_to_agent(r#"{"task":"quick","timeout_secs":30}"#, "session-1")
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "quick answer");
@@ -409,10 +411,12 @@ async fn test_delegate_background_starts_and_completes() {
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
         .with_model("test-model");
-    registry.set_current_session("session-1").await;
 
     let result = registry
-        .execute_delegate_to_agent(r#"{"task":"background job","background":true}"#)
+        .execute_delegate_to_agent(
+            r#"{"task":"background job","background":true}"#,
+            "session-1",
+        )
         .await
         .unwrap();
     assert_eq!(result["status"].as_str(), Some("running"));
@@ -484,20 +488,42 @@ async fn test_task_status_missing_task() {
 }
 
 #[tokio::test]
-async fn test_background_requires_session_context() {
+async fn test_background_assigns_correct_parent_session() {
+    // 回归保护：后台任务归属由调用链显式传递的 session_id 决定（非共享可变
+    // 状态）——多会话并发 turn 下，各任务挂到正确的父会话。
     let mut mock = MockChatService::new();
     mock.expect_chat_completion()
         .returning(|_| Ok(chat_response("x")));
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
         .with_model("test-model");
-    // 未设置 current_session_id → 后台委托应拒绝
-    let err = registry
-        .execute_delegate_to_agent(r#"{"task":"bg","background":true}"#)
+
+    // 不同会话各自发起后台委托（模拟并发 turn 的交错调用）
+    let r1 = registry
+        .execute_delegate_to_agent(r#"{"task":"bg-a","background":true}"#, "session-a")
         .await
-        .unwrap_err();
-    assert!(
-        err.to_string().contains("会话上下文"),
-        "缺少会话上下文应报错: {err}"
+        .unwrap();
+    let r2 = registry
+        .execute_delegate_to_agent(r#"{"task":"bg-b","background":true}"#, "session-b")
+        .await
+        .unwrap();
+
+    let task_a = registry
+        .background_tasks
+        .get(r1["task_id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let task_b = registry
+        .background_tasks
+        .get(r2["task_id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        task_a.parent_session_id, "session-a",
+        "任务 A 应归属 session-a"
+    );
+    assert_eq!(
+        task_b.parent_session_id, "session-b",
+        "任务 B 应归属 session-b"
     );
 }

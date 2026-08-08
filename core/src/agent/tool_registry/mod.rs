@@ -114,8 +114,6 @@ pub struct ToolRegistry {
     pub(crate) web_client: Option<Arc<WebSearchClient>>,
     /// 后台任务管理器（delegate_to_agent(background) / task_status / task_cancel）。
     pub(crate) background_tasks: Arc<crate::agent::background::BackgroundTaskManager>,
-    /// 当前会话 ID（AgentLoop 每轮执行工具前设置；后台任务归属父会话用）。
-    pub(crate) current_session_id: Arc<Mutex<Option<String>>>,
     definitions: Vec<ToolDefinition>,
     /// 外部注册的动态工具（如 MCP 工具桥接），按工具名索引。
     dynamic_tools: Arc<Mutex<HashMap<String, Arc<dyn DynamicToolExecutor>>>>,
@@ -144,7 +142,6 @@ impl ToolRegistry {
             usage_stats: None,
             web_client: None,
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
-            current_session_id: Arc::new(Mutex::new(None)),
             definitions: Vec::new(),
             dynamic_tools: Arc::new(Mutex::new(HashMap::new())),
             execution_history: Arc::new(Mutex::new(Vec::new())),
@@ -291,12 +288,6 @@ impl ToolRegistry {
         self
     }
 
-    /// 设置当前会话 ID（AgentLoop 每轮工具执行前调用；
-    /// 后台委托据此归属父会话，完成通知注入该会话）。
-    pub async fn set_current_session(&self, session_id: &str) {
-        *self.current_session_id.lock().await = Some(session_id.to_string());
-    }
-
     /// 注册动态工具（如 MCP 工具桥接）。
     ///
     /// 与内置工具或已注册的动态工具重名时跳过并告警，防止 LLM 收到歧义定义。
@@ -331,16 +322,21 @@ impl ToolRegistry {
     }
 
     /// 并行执行多个 tool_call。
+    ///
+    /// `session_id` 随调用链传递（后台委托归属父会话用；不依赖共享可变状态，
+    /// 多会话并发 turn 安全）。
     pub async fn execute_parallel(
         &self,
         calls: &[ToolCall],
+        session_id: &str,
     ) -> Vec<(String, Result<serde_json::Value, TianyanError>)> {
         let mut set = tokio::task::JoinSet::new();
         for call in calls {
             let call: ToolCall = call.clone();
             let this = self.clone();
+            let session_id = session_id.to_string();
             set.spawn(async move {
-                let result = this.execute_single(&call).await;
+                let result = this.execute_single(&call, &session_id).await;
                 (call.id, result)
             });
         }
@@ -353,7 +349,11 @@ impl ToolRegistry {
         results
     }
 
-    async fn execute_single(&self, call: &ToolCall) -> Result<serde_json::Value, TianyanError> {
+    async fn execute_single(
+        &self,
+        call: &ToolCall,
+        session_id: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
         let start = std::time::Instant::now();
         let arguments = &call.function.arguments;
         let result = match call.function.name.as_str() {
@@ -375,7 +375,7 @@ impl ToolRegistry {
             "knowledge_ingest" => self.execute_knowledge_ingest(arguments).await,
             "web_search" => self.execute_web_search(arguments).await,
             "web_fetch" => self.execute_web_fetch(arguments).await,
-            "delegate_to_agent" => self.execute_delegate_to_agent(arguments).await,
+            "delegate_to_agent" => self.execute_delegate_to_agent(arguments, session_id).await,
             "task_status" => self.execute_task_status(arguments).await,
             "task_cancel" => self.execute_task_cancel(arguments).await,
             "glob" => self.execute_glob(arguments).await,
@@ -710,7 +710,7 @@ mod tests {
                 arguments: r#"{"input":"hi"}"#.to_string(),
             },
         };
-        let result = registry.execute_parallel(&[call]).await;
+        let result = registry.execute_parallel(&[call], "test-session").await;
         assert_eq!(result.len(), 1);
         let (_, res) = &result[0];
         assert!(res.is_ok(), "动态工具应执行成功: {res:?}");
@@ -747,7 +747,7 @@ mod tests {
                 arguments: "{}".to_string(),
             },
         };
-        let results = registry.execute_parallel(&[call]).await;
+        let results = registry.execute_parallel(&[call], "test-session").await;
         let err = results[0].1.as_ref().unwrap_err();
         assert!(err.to_string().contains("未知工具"));
     }

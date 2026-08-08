@@ -179,9 +179,13 @@ impl ToolRegistry {
     ///   opencode task(background) / Claude Code background subagents）。
     ///
     /// Returns `BoxFuture` to break async recursion with `execute_single`.
+    ///
+    /// `session_id` 随调用链显式传递（后台委托归属父会话；不依赖共享可变
+    /// 状态，多会话并发 turn 安全）。
     pub(crate) fn execute_delegate_to_agent<'a>(
         &'a self,
         arguments: &'a str,
+        session_id: &'a str,
     ) -> BoxFuture<'a, Result<serde_json::Value, TianyanError>> {
         Box::pin(async move {
             let params: DelegateToAgentParams = serde_json::from_str(arguments)
@@ -190,7 +194,7 @@ impl ToolRegistry {
             // 后台委托：注册 + spawn + 立即返回（并发上限由任务管理器控制；
             // 后台任务内再委托由内层深度检查与并发上限共同防失控）。
             if params.background == Some(true) {
-                return self.spawn_background_delegate(&params).await;
+                return self.spawn_background_delegate(&params, session_id).await;
             }
 
             // 嵌套委托深度保护：进入委托时 +1，超出上限拒绝。
@@ -205,7 +209,7 @@ impl ToolRegistry {
             // 深度 guard 必须活到委托结束（含 Err 路径），Drop 时自动回滚计数。
             let _depth_guard = DelegationDepthGuard(self.delegation_depth.clone());
 
-            self.run_delegation_loop(&params).await
+            self.run_delegation_loop(&params, session_id).await
         })
     }
 
@@ -215,6 +219,7 @@ impl ToolRegistry {
     pub(crate) async fn run_delegation_loop(
         &self,
         params: &DelegateToAgentParams,
+        session_id: &str,
     ) -> Result<serde_json::Value, TianyanError> {
         const DEFAULT_MAX_TURNS: usize = 200;
         const MAX_TURNS_CAP: usize = 500;
@@ -266,7 +271,7 @@ impl ToolRegistry {
                         ));
 
                         if !tool_calls.is_empty() {
-                            let results = self.execute_parallel(tool_calls).await;
+                            let results = self.execute_parallel(tool_calls, session_id).await;
                             for (call_id, result) in results {
                                 let content = match result {
                                     Ok(val) => val.to_string(),
@@ -310,23 +315,17 @@ impl ToolRegistry {
     }
 
     /// 后台委托：注册任务 → 获取并发许可 → spawn 独立执行 → 立即返回。
+    ///
+    /// `session_id` 由调用链显式传入（父会话归属），不再依赖共享可变状态。
     async fn spawn_background_delegate(
         &self,
         params: &DelegateToAgentParams,
+        session_id: &str,
     ) -> Result<serde_json::Value, TianyanError> {
         let manager = &self.background_tasks;
 
-        // 父会话归属：AgentLoop 每轮工具执行前设置
-        let session_id = self
-            .current_session_id
-            .lock()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                TianyanError::Custom(
-                    "tool: 后台任务需要会话上下文（current_session_id 未设置）".to_string(),
-                )
-            })?;
+        // 父会话归属：调用链显式传递（AgentLoop 经 execute_parallel 传入当前会话）
+        let session_id = session_id.to_string();
 
         // 并发许可：达到上限立即拒绝（不阻塞）
         let _permit = manager.try_acquire().await?;
@@ -339,9 +338,10 @@ impl ToolRegistry {
         let mgr = manager.clone();
         let run_params = params.clone();
         let run_task_id = task_id.clone();
+        let run_session_id = session_id.clone();
 
         tokio::spawn(async move {
-            let outcome = this.run_delegation_loop(&run_params).await;
+            let outcome = this.run_delegation_loop(&run_params, &run_session_id).await;
             match outcome {
                 Ok(v) => mgr.complete(&run_task_id, format!("{v}")).await,
                 Err(e) => mgr.fail(&run_task_id, e.to_string()).await,
