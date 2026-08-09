@@ -3,17 +3,20 @@
 //! 包含 Agent 结构体定义、构造函数和所有辅助方法。
 //! 将 Agent 与 AgentCoordinator trait 分离，消除循环依赖。
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use tokio::sync::RwLock;
+use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{OwnedMutexGuard, RwLock};
 
+use crate::agent::background::TaskWaker;
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
 use crate::agent::tool_registry::DynamicToolExecutor;
 use crate::agent::types::{AgentResponse, AgentState, ClarificationQuestion, QuestionType};
-use crate::common::error::Result;
+use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
     InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage,
 };
@@ -26,6 +29,11 @@ use crate::snapshot::SnapshotManager;
 
 /// compression_marker 之后至少积累多少条消息才触发压缩。
 const MIN_MESSAGES_BEFORE_COMPRESSION: usize = 6;
+
+/// 唤醒轮重试次数（ADR-013：重试 2 次后降级为静默）。
+const WAKE_RETRY_LIMIT: usize = 3;
+/// 唤醒轮重试间隔。
+const WAKE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// 智能体协调器的默认实现。
 #[derive(Clone)]
@@ -42,6 +50,9 @@ pub struct Agent {
     pub(crate) snapshot_manager: Option<Arc<SnapshotManager>>,
     /// 技能注册表刷新钩子：压缩（会话转换点）时增量注册 VFS 学习技能。
     pub(crate) skill_refresher: Option<Arc<dyn SkillRefresher>>,
+    /// 会话级轮次锁（ADR-013 串行化）：单会话同一时刻只有一个活动轮；
+    /// 唤醒轮与用户轮互斥——wake 排队等待当前轮结束，绝不抢占。
+    turn_locks: Arc<TokioMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl Agent {
@@ -69,6 +80,186 @@ impl Agent {
             session_manager,
             snapshot_manager,
             skill_refresher,
+            turn_locks: Arc::new(TokioMutex::new(HashMap::new())),
+        }
+    }
+
+    /// 获取会话级轮次锁（ADR-013 串行化）。
+    ///
+    /// 持锁期间该会话的任何其他轮次（用户消息 / 唤醒轮）排队等待；
+    /// 返回 OwnedMutexGuard（持有 Arc，不依赖 self 借用）。
+    pub(crate) async fn turn_guard(&self, session_id: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut map = self.turn_locks.lock().await;
+            map.entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        lock.lock_owned().await
+    }
+
+    /// 注册任务唤醒器（ADR-013：后台任务全部完成/失败 → 触发唤醒轮）。
+    ///
+    /// 由 server 装配层在 Agent 构建完成后调用（传入自引用转发器
+    /// [`AgentWakeForwarder`]——Weak 打破循环引用）。
+    pub async fn register_task_waker(&self, waker: Arc<dyn TaskWaker>) {
+        self.agent_loop.tool_registry().set_task_waker(waker).await;
+    }
+
+    /// 唤醒轮（ADR-013）：后台任务全部完成或失败时触发主 agent 新一轮。
+    ///
+    /// 与用户轮共用 turn 锁（串行化）；上下文 = 会话历史（含已注入的
+    /// System 完成通知）+ 唤醒指令；模型可输出空文本合法结束；失败重试
+    /// [`WAKE_RETRY_LIMIT`] 次后降级为静默（消息已在 transcript，用户下
+    /// 一条消息自然触发）。
+    pub(crate) async fn process_wake(&self, session_id: &str) {
+        let _turn = self.turn_guard(session_id).await;
+        let start = Instant::now();
+
+        let mut last_err: Option<TianyanError> = None;
+        for attempt in 0..WAKE_RETRY_LIMIT {
+            if attempt > 0 {
+                tokio::time::sleep(WAKE_RETRY_DELAY).await;
+            }
+            let state = match self.load_and_build_state(session_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(session = %session_id, error = %e, "唤醒轮加载会话失败");
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+            let messages = self.prepare_wake_context(&state).await;
+            let parent_id = {
+                let s = state.read().await;
+                s.structured_messages.last().map(|m| m.id.clone())
+            };
+
+            let loop_result = self
+                .agent_loop
+                .clone()
+                .with_allow_empty_answer()
+                .run(
+                    &mut messages.clone(),
+                    None,
+                    session_id,
+                    parent_id.as_deref(),
+                    &self.default_model,
+                    None,
+                )
+                .await;
+
+            match loop_result {
+                Ok(AgentLoopResult::Answer {
+                    content,
+                    total_tokens,
+                    persisted_message,
+                    ..
+                }) => {
+                    state
+                        .write()
+                        .await
+                        .add_structured_message(*persisted_message);
+                    self.update_agent_metrics(session_id, Some(&total_tokens), true)
+                        .await;
+                    if content.is_empty() {
+                        tracing::debug!(session = %session_id, "唤醒轮空输出（模型无需回复）");
+                    } else {
+                        tracing::info!(session = %session_id, "唤醒轮完成：后台任务结果已汇总");
+                    }
+                    return;
+                }
+                Ok(AgentLoopResult::NeedsClarification { .. }) => {
+                    // 唤醒轮不应追问用户（无人值守）：放弃，通知已在 transcript
+                    tracing::warn!(session = %session_id, "唤醒轮返回追问，忽略（等待用户下次交互）");
+                    return;
+                }
+                Ok(AgentLoopResult::Cancelled { .. }) => {
+                    tracing::debug!(session = %session_id, "唤醒轮被取消");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(session = %session_id, error = %e, attempt, "唤醒轮执行失败");
+                    last_err = Some(e);
+                }
+            }
+        }
+        tracing::warn!(
+            error = ?last_err,
+            session = %session_id,
+            "唤醒轮重试 {} 次后放弃（消息已在会话中，用户下一条消息自然触发）",
+            WAKE_RETRY_LIMIT - 1
+        );
+        let _ = start; // 保留 start 供未来指标扩展
+    }
+
+    /// 组装唤醒轮上下文（ADR-013）。
+    ///
+    /// 与 [`Self::prepare_context`] 的区别：**不添加用户消息**（无用户输入），
+    /// 直接组装会话历史（System 完成通知已在其中）+ 会话定位 + 唤醒指令。
+    async fn prepare_wake_context(&self, state: &Arc<RwLock<SessionState>>) -> Vec<Message> {
+        let injectable = self.ensure_injectable(state, "").await;
+        let s = state.read().await;
+        let mut messages = ContextAssembler::assemble(&s.structured_messages, &injectable, "");
+
+        // 会话定位信息（与 prepare_context 一致）
+        let session_hint = format!(
+            "## 会话定位\n当前会话 ID：{}\n若早期对话已被压缩且摘要信息不足，可用 vfs_read 工具读取 tianyan://session/{} 查看原始对话记录（JSONL 格式，含压缩前的完整消息）。",
+            s.session_id, s.session_id
+        );
+        let insert_at = messages
+            .iter()
+            .position(|m| m.role != MessageRole::System)
+            .unwrap_or(messages.len());
+        messages.insert(insert_at, Message::system(session_hint));
+
+        // 唤醒指令：告知模型这是后台任务完成触发的自动处理轮
+        messages.push(Message::system(
+            "## 自动唤醒轮\n这是一轮由后台任务完成（或失败）自动触发的处理轮，不是用户新消息。\n\
+             若全部后台任务已完成：汇总各任务结果，并继续原有工作。\n\
+             若无需向用户输出任何内容：直接输出空文本结束本轮。",
+        ));
+
+        messages
+    }
+
+    /// 加载（或复用）可注入上下文（soul/rules/memories 前缀）。
+    ///
+    /// 会话级缓存 + 首次加载固化快照（提取自 prepare_context，唤醒轮共用）；
+    /// `query` 用于首次加载时的语义检索（唤醒轮无用户查询，传空串）。
+    async fn ensure_injectable(
+        &self,
+        state: &Arc<RwLock<SessionState>>,
+        query: &str,
+    ) -> InjectableContext {
+        // 会话级缓存：soul 非空表示已加载过，跳过 I/O
+        let soul_loaded = {
+            let s = state.read().await;
+            !s.injectable_context.soul.is_empty()
+        };
+
+        if !soul_loaded {
+            match self.context_pipeline.load_injectable(query).await {
+                Ok(ctx) => {
+                    let injected_rules = ctx.rules_and_experiences.len();
+                    if injected_rules > 0 {
+                        self.metrics.record_rule_hit(injected_rules).await;
+                    }
+                    state.write().await.injectable_context = ctx.clone();
+                    // 固化注入上下文快照到会话（重启后沿用同一份前缀内容）
+                    let sid = state.read().await.session_id.clone();
+                    self.persist_injectable_snapshot(&sid, &ctx).await;
+                    state.read().await.injectable_context.clone()
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "加载可注入上下文失败");
+                    self.metrics.record_pipeline_failure().await;
+                    state.read().await.injectable_context.clone()
+                }
+            }
+        } else {
+            let s = state.read().await;
+            s.injectable_context.clone()
         }
     }
 
@@ -144,35 +335,8 @@ impl Agent {
                 .add_user_message_with_images(&query, images);
         }
 
-        // 会话级缓存：soul 非空表示已加载过，跳过 I/O
-        let soul_loaded = {
-            let s = state.read().await;
-            !s.injectable_context.soul.is_empty()
-        };
-
-        let injectable = if !soul_loaded {
-            match self.context_pipeline.load_injectable(&query).await {
-                Ok(ctx) => {
-                    let injected_rules = ctx.rules_and_experiences.len();
-                    if injected_rules > 0 {
-                        self.metrics.record_rule_hit(injected_rules).await;
-                    }
-                    state.write().await.injectable_context = ctx.clone();
-                    // 固化注入上下文快照到会话（重启后沿用同一份前缀内容）
-                    let sid = state.read().await.session_id.clone();
-                    self.persist_injectable_snapshot(&sid, &ctx).await;
-                    state.read().await.injectable_context.clone()
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "加载可注入上下文失败");
-                    self.metrics.record_pipeline_failure().await;
-                    state.read().await.injectable_context.clone()
-                }
-            }
-        } else {
-            let s = state.read().await;
-            s.injectable_context.clone()
-        };
+        // 加载（或复用）可注入上下文：soul/rules/memories 前缀
+        let injectable = self.ensure_injectable(state, &query).await;
 
         let s = state.read().await;
         let mut messages = ContextAssembler::assemble(&s.structured_messages, &injectable, "");
@@ -686,7 +850,10 @@ mod tests {
             Arc::new(mock),
             ToolRegistry::new(SecurityPolicy::default()),
             Arc::new(MockSessionManager),
-            AgentLoopConfig { max_turns: 5 },
+            AgentLoopConfig {
+                max_turns: 5,
+                ..Default::default()
+            },
         );
         Agent::new(
             "test-model".to_string(),
@@ -926,5 +1093,91 @@ mod tests {
             "未压缩不应清空注入上下文缓存"
         );
         assert_eq!(refresher_calls(&refresher), 0, "未压缩不应触发技能刷新");
+    }
+
+    // ── ADR-013：唤醒轮（process_wake） ─────────────────────────
+
+    #[tokio::test]
+    async fn test_process_wake_produces_summary() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().times(1).returning(|_| {
+            Ok(response_with(Message::assistant(
+                "三个调研任务汇总：已完成",
+            )))
+        });
+        let agent = make_agent(mock);
+
+        agent.process_wake("session-1").await;
+
+        let state = agent.state.read().await;
+        assert_eq!(
+            state.conversations_processed, 1,
+            "唤醒轮应计入处理指标（成功）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_wake_empty_answer_legal() {
+        // ADR-013：唤醒轮空输出是合法结束（模型无需回复），非错误
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion()
+            .times(1)
+            .returning(|_| Ok(response_with(Message::assistant(""))));
+        let agent = make_agent(mock);
+
+        agent.process_wake("session-1").await;
+
+        let state = agent.state.read().await;
+        assert_eq!(
+            state.conversations_processed, 1,
+            "空输出应正常结束（计入成功，不重试）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_wake_retries_then_gives_up() {
+        // 失败重试 3 次后静默放弃（ADR-013：重试 2 次后降级），不 panic、不记成功
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion()
+            .times(3)
+            .returning(|_| Err(TianyanError::Custom("mock: LLM 不可用".to_string())));
+        let agent = make_agent(mock);
+
+        agent.process_wake("session-1").await;
+
+        let state = agent.state.read().await;
+        assert_eq!(state.conversations_processed, 0, "失败重试后不记成功");
+    }
+}
+
+/// 任务唤醒转发器（ADR-013：BackgroundTaskManager → [`Agent::process_wake`]）。
+///
+/// 用 `Weak<Agent>` 打破循环引用（Agent → AgentLoop → ToolRegistry →
+/// BackgroundTaskManager → TaskWaker → Agent）；Agent 已销毁时唤醒静默丢弃。
+/// `wake` 内部 spawn 独立任务执行唤醒轮，不阻塞任务完成收尾。
+pub struct AgentWakeForwarder {
+    agent: std::sync::Weak<Agent>,
+}
+
+impl AgentWakeForwarder {
+    /// 创建转发器（引用持有方必须与 `agent` 同一 Arc）。
+    pub fn new(agent: &Arc<Agent>) -> Self {
+        Self {
+            agent: Arc::downgrade(agent),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TaskWaker for AgentWakeForwarder {
+    async fn wake(&self, session_id: &str) {
+        let Some(agent) = self.agent.upgrade() else {
+            tracing::debug!("唤醒被丢弃：Agent 已销毁");
+            return;
+        };
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            agent.process_wake(&session_id).await;
+        });
     }
 }

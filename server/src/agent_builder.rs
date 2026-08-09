@@ -22,6 +22,7 @@ use tianyan::model::ModelServices;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::session::PersistentSessionManager;
 use tianyan::skills::{SkillExecutor, SkillRefresher};
+use tianyan::vfs::backend::sqlite_db::SqliteDb;
 use tianyan::vfs::VirtualFileSystemImpl;
 use tianyan::{Result as TianyanResult, TianyanError};
 
@@ -43,6 +44,8 @@ impl AgentBuilderFactory {
     /// 避免每次构建 Agent 时重复创建 HTTP 客户端。
     ///
     /// `dynamic_tools` 为外部注册的扩展工具（如 MCP 工具桥接），构建后注入 Agent。
+    /// `sqlite_db` 为全系统共享数据库（后台任务持久化 + 唤醒，ADR-013；
+    /// None 时任务状态纯内存、无唤醒）。
     #[allow(clippy::too_many_arguments)]
     pub async fn build_agent(
         config: &TianyanConfig,
@@ -53,7 +56,8 @@ impl AgentBuilderFactory {
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
         skill_refresher: Arc<dyn SkillRefresher>,
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
-    ) -> TianyanResult<Agent> {
+        sqlite_db: Option<SqliteDb>,
+    ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
         let retriever = DualLayerRetriever::new(vfs.clone()).with_usage_stats(usage_stats.clone());
@@ -106,21 +110,33 @@ impl AgentBuilderFactory {
             Some(sm) => agent.with_snapshot_manager(sm),
             None => agent,
         };
-        let agent = agent
-            .with_skill_refresher(skill_refresher)
+        let mut builder = agent.with_skill_refresher(skill_refresher);
+        if let Some(db) = sqlite_db {
+            builder = builder.with_background_task_db(db);
+        }
+        let agent = builder
             .build()
             .map_err(|e| TianyanError::Custom(format!("内部错误：Agent 构建失败：{}", e)))?;
 
         // 注入动态工具（如 MCP 工具桥接）——失败仅告警，不阻塞 Agent 启动
         agent.register_dynamic_tools(dynamic_tools).await;
 
-        agent
+        // ADR-013：注册任务唤醒器（Weak 自引用转发器 → Agent::process_wake）。
+        // 后台任务全部完成/失败时自动触发主 agent 新一轮生成。
+        let agent_arc = Arc::new(agent);
+        agent_arc
+            .register_task_waker(Arc::new(tianyan::agent::AgentWakeForwarder::new(
+                &agent_arc,
+            )))
+            .await;
+
+        agent_arc
             .initialize()
             .await
             .map_err(|e| TianyanError::Custom(format!("内部错误：Agent 初始化失败：{}", e)))?;
 
         tracing::info!("Agent 构建并初始化成功");
-        Ok(agent)
+        Ok(agent_arc)
     }
 
     /// 构建 Agent 或降级为 WizardMode
@@ -134,6 +150,7 @@ impl AgentBuilderFactory {
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
         skill_refresher: Arc<dyn SkillRefresher>,
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
+        sqlite_db: Option<SqliteDb>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -144,10 +161,11 @@ impl AgentBuilderFactory {
             snapshot_manager,
             skill_refresher,
             dynamic_tools,
+            sqlite_db,
         )
         .await
         {
-            Ok(agent) => Ok(Arc::new(agent)),
+            Ok(agent) => Ok(agent),
             Err(e) => {
                 tracing::warn!("Agent 构建失败 ({}), 使用向导模式", e);
                 Ok(Arc::new(WizardModeAgent))

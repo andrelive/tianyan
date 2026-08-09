@@ -108,5 +108,6 @@ pub fn test_tianyan_config_with_data_dir(data_dir: std::path::PathBuf) -> Tianya
         memory: MemoryConfig::default(),
         retrieval: RetrievalConfig::default(),
         mcp: Default::default(),
+        web: Default::default(),
     }
 }

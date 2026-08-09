@@ -48,6 +48,8 @@ pub struct AgentBuilder {
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// 技能注册表刷新钩子（压缩会话转换点时增量注册 VFS 学习技能）。
     skill_refresher: Option<Arc<dyn SkillRefresher>>,
+    /// 后台任务 SQLite 持久化后端（ADR-013；None 时任务状态纯内存）。
+    background_task_db: Option<crate::vfs::backend::sqlite_db::SqliteDb>,
 }
 
 impl AgentBuilder {
@@ -67,6 +69,7 @@ impl AgentBuilder {
             web_config: None,
             snapshot_manager: None,
             skill_refresher: None,
+            background_task_db: None,
         }
     }
 
@@ -145,6 +148,12 @@ impl AgentBuilder {
     /// 设置技能注册表刷新钩子（压缩会话转换点时增量注册 VFS 学习技能）。
     pub fn with_skill_refresher(mut self, refresher: Arc<dyn SkillRefresher>) -> Self {
         self.skill_refresher = Some(refresher);
+        self
+    }
+
+    /// 设置后台任务 SQLite 持久化后端（ADR-013：任务实体化，重启可恢复）。
+    pub fn with_background_task_db(mut self, db: crate::vfs::backend::sqlite_db::SqliteDb) -> Self {
+        self.background_task_db = Some(db);
         self
     }
 
@@ -232,6 +241,10 @@ impl AgentBuilder {
         tool_registry = tool_registry.with_task_notifier(Arc::new(
             crate::agent::background::SessionTaskNotifier::new(session_manager.clone()),
         ));
+        // 后台任务持久化（ADR-013：任务实体化，重启可查询可恢复）
+        if let Some(ref db) = self.background_task_db {
+            tool_registry = tool_registry.with_background_task_db(db.clone());
+        }
 
         let agent_loop = AgentLoop::new(
             model_service.clone(),
@@ -239,6 +252,7 @@ impl AgentBuilder {
             session_manager.clone(),
             AgentLoopConfig {
                 max_turns: self.config.max_turns,
+                ..Default::default()
             },
         );
 

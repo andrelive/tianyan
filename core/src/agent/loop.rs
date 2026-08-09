@@ -19,11 +19,19 @@ use crate::session::SessionManager;
 pub struct AgentLoopConfig {
     /// 最大轮数。
     pub max_turns: usize,
+    /// 允许模型输出空文本作为合法结束（ADR-013 唤醒轮语义）。
+    ///
+    /// 唤醒轮（后台任务全部完成/失败触发）中模型可能认为无需回复——
+    /// 空输出是合法结束而非错误；普通用户轮保持 false（空输出视为错误）。
+    pub allow_empty_answer: bool,
 }
 
 impl Default for AgentLoopConfig {
     fn default() -> Self {
-        Self { max_turns: 200 }
+        Self {
+            max_turns: 200,
+            allow_empty_answer: false,
+        }
     }
 }
 
@@ -113,6 +121,14 @@ impl AgentLoop {
     /// 获取工具注册表引用。
     pub fn tool_registry(&self) -> &ToolRegistry {
         &self.tool_registry
+    }
+
+    /// 允许模型空输出合法结束（ADR-013 唤醒轮语义）。
+    ///
+    /// 返回克隆实例（AgentLoop 为值类型，字段仅 config 变化）。
+    pub fn with_allow_empty_answer(mut self) -> Self {
+        self.config.allow_empty_answer = true;
+        self
     }
 
     /// 取消标志检查（None 视为未取消）。
@@ -486,12 +502,23 @@ impl AgentLoop {
 
             Ok(None)
         } else if assistant_msg.content.is_empty() {
-            // LLM returned neither content nor tool calls — treat as error
-            // rather than silently continuing the loop (which would consume
-            // up to max_turns with no progress).
-            Err(TianyanError::Custom(
-                "agent_loop: LLM 返回空响应".to_string(),
-            ))
+            if self.config.allow_empty_answer {
+                // ADR-013 唤醒轮：模型空输出 = 合法结束（无需回复）。
+                // 空消息已在上方 persist_message 持久化（无害，下一轮组装跳过空文本）。
+                Ok(Some(AgentLoopResult::Answer {
+                    content: String::new(),
+                    total_tokens: ctx.total_tokens.clone(),
+                    turns: ctx.turn + 1,
+                    persisted_message: Box::new(persisted),
+                }))
+            } else {
+                // LLM returned neither content nor tool calls — treat as error
+                // rather than silently continuing the loop (which would consume
+                // up to max_turns with no progress).
+                Err(TianyanError::Custom(
+                    "agent_loop: LLM 返回空响应".to_string(),
+                ))
+            }
         } else {
             // Already persisted above — just return.
             Ok(Some(AgentLoopResult::Answer {
@@ -640,7 +667,10 @@ mod tests {
             Arc::new(mock),
             registry,
             Arc::new(MockSessionManager),
-            AgentLoopConfig { max_turns },
+            AgentLoopConfig {
+                max_turns,
+                ..Default::default()
+            },
         )
     }
 
@@ -742,7 +772,10 @@ mod tests {
             Arc::new(mock),
             registry,
             Arc::new(MockSessionManager),
-            AgentLoopConfig { max_turns: 5 },
+            AgentLoopConfig {
+                max_turns: 5,
+                ..Default::default()
+            },
         );
 
         let mut messages = vec![Message::user("请帮我写入文件")];

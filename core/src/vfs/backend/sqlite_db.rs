@@ -126,4 +126,19 @@ const SCHEMA_SQL: &str = "
         created_at       TEXT DEFAULT (datetime('now')),
         updated_at       TEXT DEFAULT (datetime('now'))
     );
+
+    -- 后台任务状态（ADR-013：任务实体化——状态脱离调用栈持久化，
+    -- 重启可查询可恢复；Running/Pending 任务重启后标记为 Failed）
+    CREATE TABLE IF NOT EXISTS background_tasks (
+        id                 TEXT PRIMARY KEY,
+        description        TEXT    NOT NULL,
+        status             TEXT    NOT NULL,
+        parent_session_id  TEXT    NOT NULL,
+        result             TEXT,
+        error              TEXT,
+        created_at         INTEGER NOT NULL,
+        completed_at       INTEGER,
+        seq                INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_background_tasks_session ON background_tasks(parent_session_id, seq);
 ";

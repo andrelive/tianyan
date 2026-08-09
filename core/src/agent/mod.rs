@@ -20,6 +20,7 @@ mod tool_registry;
 mod types;
 
 pub use agent_core::Agent;
+pub use agent_core::AgentWakeForwarder;
 pub use builder::AgentBuilder;
 pub use coordinator::AgentCoordinator;
 pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopResult};

@@ -288,6 +288,19 @@ impl ToolRegistry {
         self
     }
 
+    /// 设置后台任务 SQLite 持久化后端（ADR-013：任务实体化，重启可恢复）。
+    pub fn with_background_task_db(mut self, db: crate::vfs::backend::sqlite_db::SqliteDb) -> Self {
+        self.background_tasks = Arc::new((*self.background_tasks).clone().with_db(db));
+        self
+    }
+
+    /// 设置后台任务唤醒器（ADR-013：全部完成/失败时触发主 agent 新轮）。
+    ///
+    /// 构建后注入（Agent 构建完成后注册自引用转发器）。
+    pub async fn set_task_waker(&self, waker: Arc<dyn crate::agent::background::TaskWaker>) {
+        self.background_tasks.set_waker(waker).await;
+    }
+
     /// 注册动态工具（如 MCP 工具桥接）。
     ///
     /// 与内置工具或已注册的动态工具重名时跳过并告警，防止 LLM 收到歧义定义。

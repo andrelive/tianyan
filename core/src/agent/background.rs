@@ -6,15 +6,21 @@
 //! - 并发上限：信号量限制同时运行的后台委托数（防失控扇出）
 //! - 完成通知：任务完成时通过 [`TaskNotifier`] 通知父会话（默认实现把
 //!   通知作为 System 消息持久化到会话——主 LLM 下一轮自然看到并继续，
-//!   对应"noReply 注入 + 轮次边界投递"模式；天演为请求驱动架构，
-//!   通知在用户下次交互时进入上下文）
+//!   对应"noReply 注入 + 轮次边界投递"模式）
+//! - 唤醒语义（ADR-013）：全部完成或失败时通过 [`TaskWaker`] 触发主 agent
+//!   新一轮生成（shouldReply = allComplete || failure，oh-my-openagent 实证）；
+//!   部分完成时仅静默注入，主 agent 不醒来（运行时强制，非模型自律）
 //! - join 信号：通知携带"该会话剩余任务数"，全部完成时明确提示汇总
 //!   （代码层只做计数与批量提示，最终聚合由主 LLM 完成——opencode 共识）
+//! - 任务持久化（ADR-013）：可选 SqliteDb 后端——任务状态脱离调用栈成为
+//!   独立实体，重启后可查询；中断的任务（Pending/Running）重启时标记为
+//!   Failed，保证唤醒计数（remaining）不因重启失真
 //!
 //! 与 [`crate::scheduler`]（cron 定时任务）无关：本模块是 LLM 驱动的
 //! agent 后台任务，不是定时调度。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -27,6 +33,7 @@ use crate::common::types::{
     DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
 };
 use crate::session::SessionManager;
+use crate::vfs::backend::sqlite_db::SqliteDb;
 
 /// 默认最大并发后台任务数。
 pub const DEFAULT_MAX_BACKGROUND_TASKS: usize = 4;
@@ -48,6 +55,31 @@ pub enum TaskStatus {
     Failed,
     /// 已取消。
     Cancelled,
+}
+
+impl TaskStatus {
+    /// 持久化用字符串表示（与 serde 的 snake_case 一致）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// 从持久化字符串还原。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "running" => Some(Self::Running),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
 }
 
 impl TaskStatus {
@@ -96,13 +128,31 @@ pub trait TaskNotifier: Send + Sync {
     async fn on_task_terminal(&self, session_id: &str, task: &BackgroundTask, remaining: usize);
 }
 
-/// 后台任务管理器：注册表 + 并发限制 + 完成通知分发。
+/// 任务唤醒器（ADR-013：统一消息通知与唤醒原语）。
+///
+/// 与 [`TaskNotifier`]（注入消息，静默）解耦：唤醒 = 触发主 agent
+/// 新一轮生成。判定规则在 [`BackgroundTaskManager::finish`]：
+/// `should_wake = remaining == 0 || status == Failed`（oh-my-openagent 实证
+/// 语义）——全部完成或失败才唤醒，部分完成保持静默（运行时强制，
+/// 非模型自律）。由 Agent 装配层注入（Agent 侧转发到 process_wake）。
+#[async_trait]
+pub trait TaskWaker: Send + Sync {
+    /// 唤醒指定会话的主 agent（触发一轮系统消息处理）。
+    async fn wake(&self, session_id: &str);
+}
+
+/// 后台任务管理器：注册表 + 并发限制 + 完成通知分发 + 唤醒 + 可选持久化。
 #[derive(Clone)]
 pub struct BackgroundTaskManager {
     tasks: Arc<Mutex<HashMap<String, BackgroundTask>>>,
     semaphore: Arc<Semaphore>,
     notifier: Option<Arc<dyn TaskNotifier>>,
-    next_seq: Arc<std::sync::atomic::AtomicU64>,
+    /// 唤醒器槽（Arc<Mutex> 支持构建后注入：Agent 完成后注册自引用转发器）。
+    waker: Arc<Mutex<Option<Arc<dyn TaskWaker>>>>,
+    db: Option<SqliteDb>,
+    next_seq: Arc<AtomicU64>,
+    /// 持久化加载只执行一次（惰性：首次 register/snapshot 前）。
+    reloaded: Arc<AtomicBool>,
 }
 
 impl BackgroundTaskManager {
@@ -117,7 +167,10 @@ impl BackgroundTaskManager {
             tasks: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
             notifier: None,
-            next_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            waker: Arc::new(Mutex::new(None)),
+            db: None,
+            next_seq: Arc::new(AtomicU64::new(0)),
+            reloaded: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -125,6 +178,23 @@ impl BackgroundTaskManager {
     pub fn with_notifier(mut self, notifier: Arc<dyn TaskNotifier>) -> Self {
         self.notifier = Some(notifier);
         self
+    }
+
+    /// 设置唤醒器（ADR-013：全部完成/失败时触发主 agent 新轮）。
+    pub fn with_waker(mut self, waker: Arc<dyn TaskWaker>) -> Self {
+        self.waker = Arc::new(Mutex::new(Some(waker)));
+        self
+    }
+
+    /// 设置 SQLite 持久化后端（任务状态脱离调用栈；重启可查询可恢复）。
+    pub fn with_db(mut self, db: SqliteDb) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    /// 设置唤醒器（构建后注入；Agent 构建完成后注册自引用转发器）。
+    pub async fn set_waker(&self, waker: Arc<dyn TaskWaker>) {
+        *self.waker.lock().await = Some(waker);
     }
 
     /// 尝试获取并发许可；达到上限时立即报错（不阻塞）。
@@ -138,6 +208,7 @@ impl BackgroundTaskManager {
 
     /// 注册新任务（Pending）并返回任务 ID。
     pub async fn register(&self, description: String, parent_session_id: String) -> String {
+        self.ensure_reloaded().await;
         let id = format!("bt_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
         let seq = self
             .next_seq
@@ -153,7 +224,8 @@ impl BackgroundTaskManager {
             completed_at: None,
             seq,
         };
-        self.tasks.lock().await.insert(id.clone(), task);
+        self.tasks.lock().await.insert(id.clone(), task.clone());
+        self.persist_upsert(&task).await;
         id
     }
 
@@ -183,6 +255,7 @@ impl BackgroundTaskManager {
 
     /// 取消任务并触发通知。
     pub async fn cancel(&self, id: &str) -> Result<()> {
+        self.ensure_reloaded().await;
         let exists = {
             let tasks = self.tasks.lock().await;
             tasks
@@ -199,11 +272,13 @@ impl BackgroundTaskManager {
 
     /// 获取任务快照。
     pub async fn get(&self, id: &str) -> Option<BackgroundTask> {
+        self.ensure_reloaded().await;
         self.tasks.lock().await.get(id).cloned()
     }
 
     /// 获取全部任务快照（按创建时间排序）。
     pub async fn snapshot(&self) -> Vec<BackgroundTask> {
+        self.ensure_reloaded().await;
         let mut tasks: Vec<BackgroundTask> = self.tasks.lock().await.values().cloned().collect();
         // 按注册序号排序（seq 单调递增，先注册在前；created_at 毫秒精度
         // 同毫秒无法区分，且 HashMap 迭代顺序随机）
@@ -211,7 +286,7 @@ impl BackgroundTaskManager {
         tasks
     }
 
-    /// 统一终态收尾：更新状态 → 计算剩余计数 → 通知。
+    /// 统一终态收尾：更新状态 → 计算剩余计数 → 通知 → 唤醒。
     async fn finish(
         &self,
         id: &str,
@@ -241,10 +316,134 @@ impl BackgroundTaskManager {
             (session, remaining, task)
         };
 
+        self.persist_upsert(&task).await;
+
         if let Some(notifier) = &self.notifier {
             notifier
                 .on_task_terminal(&session_id, &task, remaining)
                 .await;
+        }
+
+        // ADR-013 唤醒语义：should_wake = allComplete || failure
+        // （oh-my-openagent 实证：shouldReply = allComplete || isTaskFailure）。
+        // 部分完成保持静默（消息已注入 transcript，等待语义靠消息积累）；
+        // 全部完成或失败才触发主 agent 新一轮生成。
+        let should_wake = remaining == 0 || task.status == TaskStatus::Failed;
+        if should_wake {
+            if let Some(waker) = &*self.waker.lock().await {
+                waker.wake(&session_id).await;
+            }
+        }
+    }
+
+    /// 惰性持久化加载：首次使用时把历史任务载入内存。
+    ///
+    /// 进程重启后 Running/Pending 任务已随进程消亡，标记为 Failed
+    /// （"进程重启中断"）——保证 remaining 计数不误判"仍有任务进行中"
+    /// （否则全部完成唤醒永不触发）。
+    async fn ensure_reloaded(&self) {
+        if self.reloaded.load(AtomicOrdering::SeqCst) {
+            return;
+        }
+        self.reloaded.store(true, AtomicOrdering::SeqCst);
+
+        let Some(db) = &self.db else {
+            return;
+        };
+        // 先完整读取（Statement/Connection 非 Send，不可跨 await；块内 drop）
+        let rows: Vec<BackgroundTask> = {
+            let conn = match db.try_lock() {
+                Ok(c) => c,
+                Err(_) => {
+                    tracing::warn!("后台任务持久化加载跳过（数据库锁不可用）");
+                    return;
+                }
+            };
+            let mut stmt = match conn.prepare(
+                "SELECT id, description, status, parent_session_id, result, error, created_at, completed_at, seq FROM background_tasks",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "后台任务持久化加载失败");
+                    return;
+                }
+            };
+            stmt.query_map([], |row| {
+                let id: String = row.get(0)?;
+                let status_str: String = row.get(2)?;
+                let status = TaskStatus::parse(&status_str).unwrap_or(TaskStatus::Failed); // 未知状态按失败处理
+                Ok(BackgroundTask {
+                    id,
+                    description: row.get(1)?,
+                    status,
+                    parent_session_id: row.get(3)?,
+                    result: row.get(4)?,
+                    error: row.get(5)?,
+                    created_at: row.get(6)?,
+                    completed_at: row.get(7)?,
+                    seq: row.get(8)?,
+                })
+            })
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+        };
+
+        let now = now_ms();
+        let mut interrupted: Vec<BackgroundTask> = Vec::new();
+        let mut tasks = self.tasks.lock().await;
+        for mut t in rows {
+            if !t.status.is_terminal() {
+                t.status = TaskStatus::Failed;
+                t.error = Some("进程重启中断（任务随进程消亡）".to_string());
+                t.completed_at = Some(now);
+                interrupted.push(t.clone());
+            }
+            // seq 续接：避免与历史任务重复
+            if t.seq >= self.next_seq.load(AtomicOrdering::SeqCst) {
+                self.next_seq.store(t.seq + 1, AtomicOrdering::SeqCst);
+            }
+            tasks.insert(t.id.clone(), t);
+        }
+        drop(tasks);
+        for t in interrupted {
+            self.persist_upsert(&t).await;
+        }
+    }
+
+    /// 写入/更新任务到 SQLite（失败仅告警：内存态仍是权威）。
+    async fn persist_upsert(&self, task: &BackgroundTask) {
+        let Some(db) = &self.db else {
+            return;
+        };
+        let conn = match db.try_lock() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "后台任务持久化跳过（数据库锁不可用）");
+                return;
+            }
+        };
+        let result = conn.execute(
+            "INSERT INTO background_tasks (id, description, status, parent_session_id, result, error, created_at, completed_at, seq)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(id) DO UPDATE SET
+                status = excluded.status,
+                result = excluded.result,
+                error = excluded.error,
+                completed_at = excluded.completed_at",
+            rusqlite::params![
+                task.id,
+                task.description,
+                task.status.as_str(),
+                task.parent_session_id,
+                task.result,
+                task.error,
+                task.created_at,
+                task.completed_at,
+                task.seq as i64,
+            ],
+        );
+        if let Err(e) = result {
+            tracing::warn!(error = %e, task = %task.id, "后台任务持久化失败");
         }
     }
 }
@@ -365,6 +564,7 @@ struct TaskHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn test_status_terminal() {
@@ -600,5 +800,121 @@ mod tests {
         };
         notifier.on_task_terminal("s1", &task, 0).await;
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "应持久化一条通知");
+    }
+
+    // ── ADR-013：唤醒语义 + 持久化 ─────────────────────────────
+
+    /// 记录唤醒次数的测试唤醒器。
+    struct RecordingWaker {
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl TaskWaker for RecordingWaker {
+        async fn wake(&self, _session_id: &str) {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wake_on_all_complete_only() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = BackgroundTaskManager::new().with_waker(Arc::new(RecordingWaker {
+            calls: calls.clone(),
+        }));
+        let id1 = manager.register("t1".to_string(), "s1".to_string()).await;
+        let id2 = manager.register("t2".to_string(), "s1".to_string()).await;
+        manager.complete(&id1, "r1".to_string()).await;
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            0,
+            "部分完成不唤醒（静默注入）"
+        );
+        manager.complete(&id2, "r2".to_string()).await;
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "全部完成唤醒一次（shouldReply = allComplete）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wake_on_failure() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = BackgroundTaskManager::new().with_waker(Arc::new(RecordingWaker {
+            calls: calls.clone(),
+        }));
+        let id = manager.register("t1".to_string(), "s1".to_string()).await;
+        manager.fail(&id, "boom".to_string()).await;
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "失败即唤醒（汇总失败信息）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wake_scoped_per_session() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = BackgroundTaskManager::new().with_waker(Arc::new(RecordingWaker {
+            calls: calls.clone(),
+        }));
+        let a = manager.register("ta".to_string(), "s1".to_string()).await;
+        let b = manager.register("tb".to_string(), "s2".to_string()).await;
+        manager.complete(&a, "ra".to_string()).await;
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "s1 全部完成 → 唤醒 s1"
+        );
+        manager.complete(&b, "rb".to_string()).await;
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            2,
+            "s2 全部完成 → 唤醒 s2"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_task_persistence_reload() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.init_all_schemas().await.unwrap();
+        let manager = BackgroundTaskManager::new().with_db(db.clone());
+        let id = manager.register("t1".to_string(), "s1".to_string()).await;
+        manager.mark_running(&id).await;
+        manager.complete(&id, "done".to_string()).await;
+
+        // 模拟重启：新 manager 共享同一 db
+        let manager2 = BackgroundTaskManager::new().with_db(db);
+        let tasks = manager2.snapshot().await;
+        assert_eq!(tasks.len(), 1, "重启后任务可查询");
+        assert_eq!(tasks[0].status, TaskStatus::Completed);
+        assert_eq!(tasks[0].result.as_deref(), Some("done"));
+        // seq 续接：新注册任务序号不与历史冲突
+        let new_id = manager2.register("t2".to_string(), "s1".to_string()).await;
+        let tasks = manager2.snapshot().await;
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().any(|t| t.id == new_id && t.seq > 0));
+    }
+
+    #[tokio::test]
+    async fn test_persistence_reload_interrupted_becomes_failed() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.init_all_schemas().await.unwrap();
+        let manager = BackgroundTaskManager::new().with_db(db.clone());
+        let id = manager.register("t1".to_string(), "s1".to_string()).await;
+        manager.mark_running(&id).await; // 重启前仍在运行
+
+        let manager2 = BackgroundTaskManager::new().with_db(db);
+        let tasks = manager2.snapshot().await;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].status,
+            TaskStatus::Failed,
+            "中断任务标记为失败（remaining 计数不误判）"
+        );
+        assert!(
+            tasks[0].error.as_deref().unwrap_or("").contains("重启"),
+            "错误信息说明中断原因"
+        );
     }
 }

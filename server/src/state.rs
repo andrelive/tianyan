@@ -97,6 +97,8 @@ pub struct AppState {
     mcp_tools: Arc<McpToolManager>,
     /// 定时任务调度器（无启用的模型 Provider 时为 None，在 `start_server` 中装配）
     scheduler: Arc<RwLock<Option<Arc<TaskScheduler>>>>,
+    /// 全系统共享 SQLite（ADR-005；后台任务持久化/唤醒，ADR-013）
+    sqlite_db: SqliteDb,
     /// 服务关停标志（Ctrl+C / SIGTERM / 桌面端退出时置位）。
     ///
     /// 流式请求据此取消进行中的 AgentLoop，使优雅关停不被长连接阻塞。
@@ -158,7 +160,7 @@ impl AppState {
         }
 
         // 初始化使用统计（复用全系统共享的 SqliteDb，ADR-005：单连接）
-        let usage_stats = UsageStats::new(sqlite_db)?;
+        let usage_stats = UsageStats::new(sqlite_db.clone())?;
 
         // 初始化工作区快照管理器（配置了 working_directory 时启用）
         let snapshot_manager = config.agent.working_directory.clone().map(|workdir| {
@@ -199,6 +201,7 @@ impl AppState {
                 registry: skill_registry.clone(),
             }),
             dynamic_tools,
+            Some(sqlite_db.clone()),
         )
         .await?;
 
@@ -218,6 +221,7 @@ impl AppState {
             model_services: Arc::new(RwLock::new(model_services)),
             mcp_tools,
             scheduler: Arc::new(RwLock::new(None)),
+            sqlite_db,
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
@@ -287,6 +291,7 @@ impl AppState {
             self.snapshot_manager.clone(),
             Arc::new(self.skill_sync()),
             dynamic_tools,
+            Some(self.sqlite_db.clone()),
         )
         .await?;
 

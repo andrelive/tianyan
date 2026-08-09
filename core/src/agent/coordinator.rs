@@ -181,6 +181,9 @@ impl AgentCoordinator for Agent {
     ) -> Result<AgentResponse> {
         let start = Instant::now();
 
+        // ADR-013 串行化：单会话同一时刻只有一个活动轮（用户轮 / 唤醒轮互斥）
+        let _turn_guard = self.turn_guard(session_id).await;
+
         // Resolve model: caller-specified > Agent default config
         let model = model.unwrap_or(&self.default_model);
 
@@ -231,6 +234,14 @@ impl AgentCoordinator for Agent {
         let state_clone = state.clone();
 
         tokio::spawn(async move {
+            // ADR-013 串行化：单会话同一时刻只有一个活动轮（用户轮 / 唤醒轮互斥）；
+            // 锁覆盖 prepare_context + AgentLoop 全程（其他轮排队等待）
+            let (session_id_str, _) = {
+                let s = state_clone.read().await;
+                (s.session_id.clone(), ())
+            };
+            let _turn_guard = self_clone.turn_guard(&session_id_str).await;
+
             let messages = self_clone.prepare_context(&state_clone, &message).await;
 
             // 捕获工作区快照（消息处理前，供会话回退恢复文件）
@@ -241,12 +252,9 @@ impl AgentCoordinator for Agent {
                     .await;
             }
 
-            let (session_id_str, parent_id) = {
+            let parent_id = {
                 let s = state_clone.read().await;
-                (
-                    s.session_id.clone(),
-                    s.structured_messages.last().map(|m| m.id.clone()),
-                )
+                s.structured_messages.last().map(|m| m.id.clone())
             };
 
             // 持久化用户消息（和非流式路径对齐）
@@ -339,6 +347,8 @@ impl AgentCoordinator for Agent {
     }
 
     async fn handle_clarification(&self, session_id: &str, answers: &str) -> Result<AgentResponse> {
+        // ADR-013 串行化：澄清回答是用户轮的延续，同样占用会话轮次锁
+        let _turn_guard = self.turn_guard(session_id).await;
         let state = self.load_and_build_state(session_id).await?;
         self.handle_clarification_response(&state, answers).await
     }

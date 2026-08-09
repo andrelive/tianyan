@@ -37,6 +37,7 @@ export default function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [submittingClarify, setSubmittingClarify] = useState(false);
   const [compressing, setCompressing] = useState(false);
+  const [wakePolling, setWakePolling] = useState(false);
 
   // Sync URL sessionId to store on mount / navigation
   useEffect(() => {
@@ -46,6 +47,38 @@ export default function ChatPanel() {
       setPendingClarification(null);
     }
   }, [urlSessionId, currentSessionId, setCurrentSession, setMessages, setPendingClarification]);
+
+  // ADR-013：唤醒轮自动刷新——会话末尾是后台任务 System 通知时轮询会话消息，
+  // 直到出现新的非空 assistant 消息（主 agent 自动汇总结果，无需用户操作）
+  useEffect(() => {
+    if (!currentSessionId || streamStatus === 'streaming') return;
+    const last = messages[messages.length - 1];
+    const hasTaskNotice = last?.role === 'system' && last.content.includes('后台任务');
+    if (!hasTaskNotice) return;
+
+    setWakePolling(true);
+    const timer = setInterval(async () => {
+      try {
+        const data = await apiGet<{ messages: ChatMessage[] }>(
+          `/sessions/${currentSessionId}/messages`,
+        );
+        const serverMessages = data.messages;
+        const lastServer = serverMessages[serverMessages.length - 1];
+        // 唤醒轮结果（非空 assistant）出现 → 刷新并停止轮询
+        if (lastServer && lastServer.role === 'assistant' && lastServer.content !== '') {
+          useAppStore.getState().setMessages(serverMessages);
+          setWakePolling(false);
+        }
+      } catch {
+        // 轮询失败（会话删除等）：停止，避免无限重试
+        setWakePolling(false);
+      }
+    }, 3000);
+    return () => {
+      clearInterval(timer);
+      setWakePolling(false);
+    };
+  }, [currentSessionId, messages, streamStatus]);
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -315,6 +348,18 @@ export default function ChatPanel() {
                   <span className="text-sm">思考中...</span>
                 </div>
               )}
+
+            {/* Wake polling indicator: 后台任务完成后主 agent 正在自动汇总 */}
+            {wakePolling && streamStatus === 'idle' && (
+              <div
+                className="flex items-center gap-2 text-[var(--color-text-tertiary)] py-2"
+                aria-live="polite"
+                aria-label="等待后台任务汇总"
+              >
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span className="text-sm">后台任务完成，AI 正在汇总结果...</span>
+              </div>
+            )}
           </div>
         )}
 
