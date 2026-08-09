@@ -1,7 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchApprovalStatus, respondApproval } from '@/lib/api-client';
 import type { ApprovalDecision, ApprovalStatusSnapshot } from '@/lib/types';
-import { Loader2, AlertCircle, ShieldCheck, RefreshCw, Check, X, ShieldAlert } from 'lucide-react';
+import {
+  Loader2,
+  AlertCircle,
+  ShieldCheck,
+  RefreshCw,
+  Check,
+  X,
+  ShieldAlert,
+  Pencil,
+} from 'lucide-react';
 
 /** 风险等级 → 中文标签。 */
 const RISK_LABELS: Record<string, string> = {
@@ -60,12 +69,31 @@ function booleanLabel(value: boolean): string {
   return value ? '开启' : '关闭';
 }
 
+/**
+ * 从审批请求的 action 中提取命令文本（execute_command 类请求）。
+ *
+ * 后端 Action 序列化为 `{ action_type: "ExecuteCommand", command: ... }`
+ * （serde tag = "action_type"）；其他类型返回 null，不显示编辑交互。
+ */
+function extractCommand(action: unknown): string | null {
+  if (!action || typeof action !== 'object') return null;
+  const a = action as Record<string, unknown>;
+  if (a.action_type === 'ExecuteCommand' && typeof a.command === 'string') {
+    return a.command;
+  }
+  return null;
+}
+
 export default function ApprovalPanel() {
   const [snapshot, setSnapshot] = useState<ApprovalStatusSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // 正在响应的 request_id，用于禁用按钮防重复点击
   const [respondingId, setRespondingId] = useState<string | null>(null);
+  // 正在内联编辑命令的 request_id（null = 未在编辑）
+  const [editingId, setEditingId] = useState<string | null>(null);
+  // 内联编辑草稿
+  const [editText, setEditText] = useState('');
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadStatus = useCallback(async (showLoading = false) => {
@@ -96,11 +124,12 @@ export default function ApprovalPanel() {
   }, [loadStatus]);
 
   const handleRespond = useCallback(
-    async (requestId: string, decision: ApprovalDecision) => {
+    async (requestId: string, decision: ApprovalDecision, editedCommand?: string) => {
       setRespondingId(requestId);
       try {
-        await respondApproval(requestId, decision);
+        await respondApproval(requestId, decision, undefined, editedCommand);
         await loadStatus(false);
+        setEditingId(null);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : '响应审批失败');
       } finally {
@@ -109,6 +138,12 @@ export default function ApprovalPanel() {
     },
     [loadStatus],
   );
+
+  // 开始内联编辑：预填原命令
+  const startEdit = useCallback((requestId: string, command: string) => {
+    setEditingId(requestId);
+    setEditText(command);
+  }, []);
 
   const pending = snapshot?.pending_approvals ?? [];
   const records = snapshot?.recent_records.slice(0, 10) ?? [];
@@ -177,6 +212,8 @@ export default function ApprovalPanel() {
                 <div className="space-y-2">
                   {pending.map((req) => {
                     const responding = respondingId === req.request_id;
+                    const command = extractCommand(req.action);
+                    const editing = editingId === req.request_id;
                     return (
                       <div
                         key={req.request_id}
@@ -191,8 +228,60 @@ export default function ApprovalPanel() {
                               <RiskBadge riskLevel={req.risk_level} />
                               <span>{formatDateTime(req.requested_at)}</span>
                             </div>
+                            {/* execute_command 类请求：展示命令文本 + 编辑后批准 */}
+                            {command !== null && (
+                              <pre className="mt-2 px-2.5 py-1.5 text-xs text-[var(--color-text-primary)] bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded overflow-x-auto whitespace-pre-wrap break-all font-mono">
+                                {command}
+                              </pre>
+                            )}
+                            {editing && command !== null && (
+                              <div className="mt-2">
+                                <textarea
+                                  value={editText}
+                                  onChange={(e) => setEditText(e.target.value)}
+                                  rows={2}
+                                  aria-label="编辑后的命令"
+                                  className="w-full px-2.5 py-1.5 text-xs font-mono text-[var(--color-text-primary)] bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded resize-y focus:outline-none focus:border-[var(--color-accent)]"
+                                />
+                                <div className="flex items-center gap-2 mt-1.5">
+                                  <button
+                                    onClick={() =>
+                                      void handleRespond(req.request_id, 'approve', editText)
+                                    }
+                                    disabled={responding || editText.trim() === ''}
+                                    aria-label="提交编辑并批准"
+                                    className="flex items-center gap-1 px-2.5 py-1 text-xs rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
+                                  >
+                                    {responding ? (
+                                      <Loader2 size={12} className="animate-spin" />
+                                    ) : (
+                                      <Check size={12} />
+                                    )}
+                                    提交编辑并批准
+                                  </button>
+                                  <button
+                                    onClick={() => setEditingId(null)}
+                                    disabled={responding}
+                                    className="px-2.5 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+                                  >
+                                    取消
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
+                            {command !== null && !editing && (
+                              <button
+                                onClick={() => startEdit(req.request_id, command)}
+                                disabled={responding}
+                                aria-label={`编辑后批准 ${req.action_description}`}
+                                className="flex items-center gap-1 px-2.5 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
+                              >
+                                <Pencil size={12} />
+                                编辑后批准
+                              </button>
+                            )}
                             <button
                               onClick={() => void handleRespond(req.request_id, 'approve')}
                               disabled={responding}
@@ -286,6 +375,11 @@ export default function ApprovalPanel() {
                         <p className="text-sm text-[var(--color-text-primary)] truncate">
                           {record.request.action_description}
                         </p>
+                        {record.edited_command && (
+                          <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5 truncate">
+                            编辑后命令：{record.edited_command}
+                          </p>
+                        )}
                         <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
                           {record.response ? formatDateTime(record.response.responded_at) : '—'}
                         </p>

@@ -199,7 +199,7 @@ async fn test_attended_mode_still_requests_human_approval() {
 
     // 模拟人工批准，spawn 的任务应解除等待并返回批准
     workflow
-        .respond_to_approval(&request_id, ApprovalDecision::Approve, None, "human")
+        .respond_to_approval(&request_id, ApprovalDecision::Approve, None, "human", None)
         .await
         .unwrap();
     let resp = handle.await.unwrap();
@@ -262,7 +262,7 @@ async fn test_approval_pending_notifier_called() {
 
     // 通知后审批面板响应 → 任务恢复
     workflow
-        .respond_to_approval(&request_id, ApprovalDecision::Approve, None, "human")
+        .respond_to_approval(&request_id, ApprovalDecision::Approve, None, "human", None)
         .await
         .unwrap();
     let resp = handle.await.unwrap();
@@ -333,4 +333,315 @@ async fn test_request_approval_no_wait_never_waits() {
         workflow.get_pending_approvals().await.is_empty(),
         "子任务审批不应产生挂起请求"
     );
+}
+
+// ── T2-6 命令级审批策略：规则引擎补全 ─────────────────────────────
+
+/// 构造命令执行动作。
+fn cmd_action(command: &str) -> Action {
+    Action::ExecuteCommand {
+        command: command.to_string(),
+        cwd: None,
+        timeout_secs: None,
+    }
+}
+
+#[test]
+fn test_blocked_command_deny_overrides_auto_approve() {
+    // 低风险命令命中黑名单 Deny 规则时强制拒绝——
+    // 即使默认的 Any + RiskBelow(Medium) 放行规则也会匹配（deny 优先）。
+    let config = ApprovalWorkflowConfig {
+        auto_approval_rules: vec![
+            AutoApprovalRule {
+                name: "safe_operations".to_string(),
+                action_pattern: ActionPattern::Any,
+                condition: ApprovalCondition::RiskBelow(RiskLevel::Medium),
+                decision: ApprovalDecision::Approve,
+                enabled: true,
+            },
+            AutoApprovalRule {
+                name: "security_blocked_dir".to_string(),
+                action_pattern: ActionPattern::CommandPattern("dir".to_string()),
+                condition: ApprovalCondition::Always,
+                decision: ApprovalDecision::Deny,
+                enabled: true,
+            },
+        ],
+        ..Default::default()
+    };
+    let workflow = ApprovalWorkflow::new(config);
+
+    let action = cmd_action("dir");
+    assert_eq!(
+        workflow.assess_risk(&action),
+        RiskLevel::Low,
+        "dir 应为低风险"
+    );
+    let decision = workflow.check_auto_approval(&action, RiskLevel::Low);
+    assert_eq!(
+        decision,
+        Some(ApprovalDecision::Deny),
+        "黑名单拒绝必须优先于放行"
+    );
+}
+
+#[test]
+fn test_deny_rule_priority_regardless_of_rule_order() {
+    // Approve 规则配置在 Deny 规则之前时，Deny 仍必须胜出（评估顺序 deny 优先）
+    let config = ApprovalWorkflowConfig {
+        auto_approval_rules: vec![
+            AutoApprovalRule {
+                name: "security_allowed_git".to_string(),
+                action_pattern: ActionPattern::CommandPattern("git".to_string()),
+                condition: ApprovalCondition::Always,
+                decision: ApprovalDecision::Approve,
+                enabled: true,
+            },
+            AutoApprovalRule {
+                name: "security_blocked_git".to_string(),
+                action_pattern: ActionPattern::CommandPattern("git".to_string()),
+                condition: ApprovalCondition::Always,
+                decision: ApprovalDecision::Deny,
+                enabled: true,
+            },
+        ],
+        ..Default::default()
+    };
+    let workflow = ApprovalWorkflow::new(config);
+
+    let action = cmd_action("git status");
+    let decision = workflow.check_auto_approval(&action, RiskLevel::Medium);
+    assert_eq!(
+        decision,
+        Some(ApprovalDecision::Deny),
+        "deny 规则优先于 approve 规则"
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_command_denied_even_with_wait_for_approval() {
+    // 命中 Deny 规则的命令：即使 wait_for_approval 开启（否则 Medium 风险
+    // 会挂起等待人工），也立即强制拒绝，不进入待处理队列。
+    let config = ApprovalWorkflowConfig {
+        wait_for_approval: true,
+        auto_approval_rules: vec![AutoApprovalRule {
+            name: "security_blocked_git".to_string(),
+            action_pattern: ActionPattern::CommandPattern("git".to_string()),
+            condition: ApprovalCondition::Always,
+            decision: ApprovalDecision::Deny,
+            enabled: true,
+        }],
+        ..Default::default()
+    };
+    let workflow = Arc::new(ApprovalWorkflow::new(config));
+
+    let resp = workflow
+        .request_approval("session-1", &cmd_action("git status"))
+        .await
+        .unwrap();
+    assert_eq!(resp.decision, ApprovalDecision::Deny);
+    assert!(resp.reason.unwrap().contains("自动审批规则匹配"));
+    assert!(
+        workflow.get_pending_approvals().await.is_empty(),
+        "拒绝规则命中时不得挂起等待"
+    );
+}
+
+#[tokio::test]
+async fn test_prompt_commands_force_ask_even_in_unattended_mode() {
+    // 总是询问命令：即使无人值守模式（否则 Medium 风险自动批准）
+    // 也强制走审批——未确认即拒绝。
+    let config = ApprovalWorkflowConfig {
+        unattended_mode: true,
+        prompt_commands: vec!["git".to_string()],
+        ..Default::default()
+    };
+    let workflow = Arc::new(ApprovalWorkflow::new(config));
+
+    let action = cmd_action("git status");
+    assert_eq!(workflow.assess_risk(&action), RiskLevel::Medium);
+    let resp = workflow
+        .request_approval("session-1", &action)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.decision,
+        ApprovalDecision::Deny,
+        "prompt 命令不得被无人值守放行"
+    );
+    assert!(resp.reason.unwrap().contains("需要用户确认"));
+}
+
+#[tokio::test]
+async fn test_prompt_commands_force_ask_for_safe_risk() {
+    // 低风险命令命中总是询问列表时也不得自动放行
+    // （默认 safe_operations 规则会放行 Low 风险命令）。
+    let config = ApprovalWorkflowConfig {
+        prompt_commands: vec!["echo".to_string()],
+        ..Default::default()
+    };
+    let workflow = Arc::new(ApprovalWorkflow::new(config));
+
+    let action = cmd_action("echo hi");
+    assert_eq!(workflow.assess_risk(&action), RiskLevel::Low);
+    let resp = workflow
+        .request_approval("session-1", &action)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.decision,
+        ApprovalDecision::Deny,
+        "prompt 命令不得被 Safe 放行"
+    );
+}
+
+#[tokio::test]
+async fn test_prompt_command_routes_to_human_approval() {
+    // 总是询问命令 + wait_for_approval：强制进入待处理队列等待人工响应
+    let config = ApprovalWorkflowConfig {
+        wait_for_approval: true,
+        prompt_commands: vec!["echo".to_string()],
+        ..Default::default()
+    };
+    let workflow = Arc::new(ApprovalWorkflow::new(config));
+
+    let wf = workflow.clone();
+    let handle = tokio::spawn(async move {
+        wf.request_approval("session-1", &cmd_action("echo hi"))
+            .await
+            .unwrap()
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let request_id = loop {
+        let pending = workflow.get_pending_approvals().await;
+        if pending.len() == 1 {
+            break pending[0].request_id.clone();
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("prompt 命令未进入待处理队列");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    workflow
+        .respond_to_approval(&request_id, ApprovalDecision::Approve, None, "user", None)
+        .await
+        .unwrap();
+    let resp = handle.await.unwrap();
+    assert_eq!(resp.decision, ApprovalDecision::Approve);
+}
+
+// ── T2-6 审批卡编辑命令：审计记录 ───────────────────────────────
+
+#[tokio::test]
+async fn test_respond_with_edited_command_records_audit() {
+    let config = ApprovalWorkflowConfig {
+        wait_for_approval: true,
+        ..Default::default()
+    };
+    let workflow = Arc::new(ApprovalWorkflow::new(config));
+
+    let wf = workflow.clone();
+    let handle = tokio::spawn(async move {
+        wf.request_approval("session-1", &cmd_action("git push"))
+            .await
+            .unwrap()
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let request_id = loop {
+        let pending = workflow.get_pending_approvals().await;
+        if pending.len() == 1 {
+            break pending[0].request_id.clone();
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("审批请求未进入待处理队列");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    // 用户批准并提供编辑后的命令（纠正/改写）
+    workflow
+        .respond_to_approval(
+            &request_id,
+            ApprovalDecision::Approve,
+            None,
+            "user",
+            Some("git push --force-with-lease".to_string()),
+        )
+        .await
+        .unwrap();
+    let resp = handle.await.unwrap();
+    assert_eq!(resp.decision, ApprovalDecision::Approve);
+    assert_eq!(
+        resp.edited_command.as_deref(),
+        Some("git push --force-with-lease"),
+        "响应应携带编辑后的命令（等待方可见）"
+    );
+
+    // 审计记录写入编辑后的命令
+    let records = workflow.get_approval_records().await;
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].edited_command.as_deref(),
+        Some("git push --force-with-lease"),
+        "审计记录应包含编辑后的命令"
+    );
+    assert_eq!(
+        records[0]
+            .response
+            .as_ref()
+            .unwrap()
+            .edited_command
+            .as_deref(),
+        Some("git push --force-with-lease")
+    );
+}
+
+#[tokio::test]
+async fn test_respond_deny_ignores_edited_command() {
+    // 编辑命令仅对批准语义生效：deny 响应忽略编辑值，审计不记录
+    let config = ApprovalWorkflowConfig {
+        wait_for_approval: true,
+        ..Default::default()
+    };
+    let workflow = Arc::new(ApprovalWorkflow::new(config));
+
+    let wf = workflow.clone();
+    let handle = tokio::spawn(async move {
+        wf.request_approval("session-1", &cmd_action("git push"))
+            .await
+            .unwrap()
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let request_id = loop {
+        let pending = workflow.get_pending_approvals().await;
+        if pending.len() == 1 {
+            break pending[0].request_id.clone();
+        }
+        if tokio::time::Instant::now() > deadline {
+            panic!("审批请求未进入待处理队列");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    workflow
+        .respond_to_approval(
+            &request_id,
+            ApprovalDecision::Deny,
+            None,
+            "user",
+            Some("git push --force".to_string()),
+        )
+        .await
+        .unwrap();
+    let resp = handle.await.unwrap();
+    assert_eq!(resp.decision, ApprovalDecision::Deny);
+    assert_eq!(resp.edited_command, None, "deny 响应不得携带编辑命令");
+
+    let records = workflow.get_approval_records().await;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].edited_command, None, "deny 审计不记录编辑命令");
 }

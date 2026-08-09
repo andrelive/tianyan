@@ -9,6 +9,30 @@ use crate::common::error::Result;
 use crate::common::types::{DetailedTokenUsage, TokenUsage};
 use crate::context::RetrievalTrace;
 
+/// 智能体运行模式。
+///
+/// 请求级参数：每次对话请求可指定模式，缺省为 [`AgentMode::Act`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AgentMode {
+    /// 执行模式（默认）：完整工具集可用。
+    #[default]
+    #[serde(rename = "act")]
+    Act,
+    /// 计划模式（只读）：写类工具被过滤，模型只能读取/查询/追问。
+    #[serde(rename = "plan")]
+    Plan,
+}
+
+impl AgentMode {
+    /// 是否为只读模式。
+    ///
+    /// Plan 模式下写类工具（文件写入/执行/测试/验证/知识导入/委托等）
+    /// 从工具定义中过滤，且执行处二次硬阻断。
+    pub fn is_read_only(&self) -> bool {
+        matches!(self, AgentMode::Plan)
+    }
+}
+
 /// 追问问题
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClarificationQuestion {

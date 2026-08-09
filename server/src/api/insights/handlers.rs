@@ -132,6 +132,10 @@ pub struct RespondApprovalRequest {
     pub decision: String,
     /// 理由（可选，记入审计记录）。
     pub reason: Option<String>,
+    /// 用户编辑后的命令（可选；纠正/改写场景，仅 decision=approve 时生效，
+    /// 记入审计记录与通知文本，不影响实际执行——执行仍由 agent 按原命令发起）。
+    #[serde(default)]
+    pub edited_command: Option<String>,
 }
 
 impl RespondApprovalRequest {
@@ -161,7 +165,12 @@ pub async fn respond_approval_handler(
     let decision = request.parse_decision()?;
     let agent = state.agent().await;
     agent
-        .respond_approval(&request.request_id, decision, request.reason)
+        .respond_approval(
+            &request.request_id,
+            decision,
+            request.reason,
+            request.edited_command,
+        )
         .await
         .map_err(|e| {
             // core 侧固定错误消息（approval.rs respond_to_approval），

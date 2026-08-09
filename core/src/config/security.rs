@@ -77,6 +77,11 @@ pub struct SecurityConfig {
     /// （默认关闭：走"询问用户 → 指纹确认"降级链路）。
     #[serde(default)]
     pub wait_for_approval: bool,
+    /// "总是询问"命令列表：命中的命令强制走人工审批/询问，
+    /// 不被自动审批规则、Safe 自动放行与无人值守模式放行。
+    /// 默认空（不强制）。注入审批工作流 `prompt_commands`。
+    #[serde(default)]
+    pub prompt_commands: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -143,6 +148,7 @@ impl Default for SecurityConfig {
             skill_http_timeout_secs: default_skill_http_timeout(),
             skill_command_timeout_secs: default_skill_command_timeout(),
             wait_for_approval: false,
+            prompt_commands: Vec::new(),
         }
     }
 }

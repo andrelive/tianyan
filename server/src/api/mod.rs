@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 // 领域模块
 pub mod chat;
+pub mod clipboard;
 pub mod config;
+pub mod events;
 pub mod insights;
 pub mod knowledge;
 pub mod sessions;
@@ -63,6 +65,8 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .merge(insights::routes())
         .merge(workspace::routes())
         .merge(tasks::routes())
+        .merge(clipboard::routes())
+        .merge(events::routes())
 }
 
 #[cfg(test)]

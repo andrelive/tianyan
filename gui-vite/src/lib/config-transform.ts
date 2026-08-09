@@ -84,6 +84,9 @@ export function emptyConfigState(): ConfigState {
     blocked_directories: '',
     allowed_commands: '',
     blocked_commands: '',
+    clipboard_enabled: false,
+    clipboard_auto_capture: false,
+    clipboard_prompt_confirm: true,
     max_session_memory: 8000,
     max_long_term_memory: 10000,
     importance_threshold: 0.5,
@@ -176,6 +179,12 @@ interface BackendSecurityConfig {
   blocked_commands: string[];
 }
 
+interface BackendClipboardConfig {
+  enabled: boolean;
+  auto_capture: boolean;
+  prompt_confirm: boolean;
+}
+
 interface BackendMemoryConfig {
   max_session_memory: number;
   max_long_term_memory: number;
@@ -201,6 +210,7 @@ interface BackendTianyanConfig {
   storage: BackendStorageConfig;
   logging: BackendLoggingConfig;
   security: BackendSecurityConfig;
+  clipboard: BackendClipboardConfig;
   memory: BackendMemoryConfig;
   retrieval: BackendRetrievalConfig;
   mcp: BackendMcpConfig;
@@ -301,6 +311,11 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
         blocked_directories: splitLines(cs.blocked_directories),
         allowed_commands: splitLines(cs.allowed_commands),
         blocked_commands: splitLines(cs.blocked_commands),
+      },
+      clipboard: {
+        enabled: cs.clipboard_enabled,
+        auto_capture: cs.clipboard_auto_capture,
+        prompt_confirm: cs.clipboard_prompt_confirm,
       },
       memory: {
         max_session_memory: cs.max_session_memory,
@@ -414,6 +429,11 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     blocked_directories: (security.blocked_directories || []).join('\n'),
     allowed_commands: (security.allowed_commands || []).join('\n'),
     blocked_commands: (security.blocked_commands || []).join('\n'),
+
+    // Clipboard（复制即记忆；默认关闭 opt-in）
+    clipboard_enabled: c.clipboard?.enabled ?? defaults.clipboard_enabled,
+    clipboard_auto_capture: c.clipboard?.auto_capture ?? defaults.clipboard_auto_capture,
+    clipboard_prompt_confirm: c.clipboard?.prompt_confirm ?? defaults.clipboard_prompt_confirm,
 
     // Memory
     max_session_memory: memory.max_session_memory ?? defaults.max_session_memory,

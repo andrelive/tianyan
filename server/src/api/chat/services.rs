@@ -87,7 +87,12 @@ impl ChatService {
 
         let response = self
             .agent
-            .process_message(&session_id, &last_message, request.model.as_deref())
+            .process_message(
+                &session_id,
+                &last_message,
+                request.model.as_deref(),
+                request.mode.unwrap_or_default(),
+            )
             .await?;
 
         Ok(to_chat_response(&session_id, response))
@@ -132,6 +137,7 @@ impl ChatService {
                 &last_message,
                 request.model.as_deref(),
                 Some(cancel),
+                request.mode.unwrap_or_default(),
             )
             .await?;
 

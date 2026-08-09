@@ -9,9 +9,12 @@ use crate::common::error::TianyanError;
 
 mod agent;
 pub mod api_types;
+mod clipboard;
+mod events;
 pub mod mcp;
 mod memory;
 mod model;
+mod reminder;
 mod retrieval;
 mod security;
 mod storage;
@@ -21,12 +24,15 @@ pub mod wizard;
 
 pub use crate::common::logging::LoggingConfig;
 pub use agent::AgentConfig;
+pub use clipboard::ClipboardConfig;
+pub use events::EventsConfig;
 pub use mcp::{McpConfig, McpServerEntry};
 pub use memory::MemoryConfig;
 pub use model::{
     find_provider, ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig,
     ProviderConfig,
 };
+pub use reminder::ReminderConfig;
 pub use retrieval::RetrievalConfig;
 pub use security::{SafetyMode, SecurityConfig};
 pub use storage::{StorageBackendType, StorageConfig, VectorStorageConfig};
@@ -67,6 +73,15 @@ pub struct TianyanConfig {
     /// Web 工具配置（web_search / web_fetch）。
     #[serde(default)]
     pub web: WebConfig,
+    /// 剪贴板配置（复制即记忆；隐私敏感，默认关闭）。
+    #[serde(default)]
+    pub clipboard: ClipboardConfig,
+    /// 事件驱动触发配置（文件监听 + webhook；默认关闭）。
+    #[serde(default)]
+    pub events: EventsConfig,
+    /// 主动提醒配置（记忆/规则 relevant-now 评估；默认关闭）。
+    #[serde(default)]
+    pub reminder: ReminderConfig,
 }
 
 impl TianyanConfig {

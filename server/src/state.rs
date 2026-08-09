@@ -99,6 +99,8 @@ pub struct AppState {
     scheduler: Arc<RwLock<Option<Arc<TaskScheduler>>>>,
     /// 全系统共享 SQLite（ADR-005；后台任务持久化/唤醒，ADR-013）
     sqlite_db: SqliteDb,
+    /// 事件总线（T1 事件驱动：文件监听/webhook → 处理器/唤醒）
+    event_bus: Arc<tianyan::events::EventBus>,
     /// 服务关停标志（Ctrl+C / SIGTERM / 桌面端退出时置位）。
     ///
     /// 流式请求据此取消进行中的 AgentLoop，使优雅关停不被长连接阻塞。
@@ -202,6 +204,7 @@ impl AppState {
             }),
             dynamic_tools,
             Some(sqlite_db.clone()),
+            crate::notification::global_notification_sink(),
         )
         .await?;
 
@@ -222,6 +225,7 @@ impl AppState {
             mcp_tools,
             scheduler: Arc::new(RwLock::new(None)),
             sqlite_db,
+            event_bus: Arc::new(tianyan::events::EventBus::new()),
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
@@ -292,6 +296,7 @@ impl AppState {
             Arc::new(self.skill_sync()),
             dynamic_tools,
             Some(self.sqlite_db.clone()),
+            crate::notification::global_notification_sink(),
         )
         .await?;
 
@@ -368,6 +373,11 @@ impl AppState {
     /// 获取共享模型服务（配置热更新后自动指向新实例）。
     async fn shared_model_services(&self) -> TianyanResult<tianyan::model::ModelServices> {
         Ok(self.model_services.read().await.clone())
+    }
+
+    /// 获取事件总线（T1 事件驱动：webhook/文件监听发布）。
+    pub fn event_bus(&self) -> Arc<tianyan::events::EventBus> {
+        self.event_bus.clone()
     }
 
     /// 创建摘要引擎（复用共享模型服务，不重复创建 HTTP 客户端）。

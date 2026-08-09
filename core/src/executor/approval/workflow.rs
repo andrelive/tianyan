@@ -12,6 +12,7 @@ use tokio::sync::{oneshot, RwLock};
 use super::types::*;
 use crate::common::types::{MessageRole, Part, PartTime, StructuredMessage};
 use crate::executor::Action;
+use crate::notification::SharedNotificationSink;
 use crate::session::SessionManager;
 
 /// 审批挂起通知器。
@@ -29,14 +30,25 @@ pub trait ApprovalPendingNotifier: Send + Sync {
 /// 前台任务：用户正在对话，流式停止即感知，System 消息给出审批面板指引；
 /// 后台任务：审批请求不再静默——用户回到会话即看到待处理请求，
 /// 到审批面板批准/拒绝后任务经 oneshot 通道恢复继续。
+/// 可选注入系统通知通道：挂起时同时发出桌面通知（无人值守场景即时提醒）。
 pub struct SessionApprovalNotifier {
     session_manager: Arc<dyn SessionManager>,
+    notification: Option<SharedNotificationSink>,
 }
 
 impl SessionApprovalNotifier {
     /// 创建通知器。
     pub fn new(session_manager: Arc<dyn SessionManager>) -> Self {
-        Self { session_manager }
+        Self {
+            session_manager,
+            notification: None,
+        }
+    }
+
+    /// 设置系统通知通道（挂起时发出桌面通知；未注入时仅持久化会话消息）。
+    pub fn with_notification_sink(mut self, sink: SharedNotificationSink) -> Self {
+        self.notification = Some(sink);
+        self
     }
 }
 
@@ -78,6 +90,11 @@ impl ApprovalPendingNotifier for SessionApprovalNotifier {
                 error = %e,
                 "审批挂起通知持久化失败"
             );
+        }
+
+        // 桌面系统通知：审批挂起时即时提醒用户（非阻塞；未注入时静默）
+        if let Some(sink) = &self.notification {
+            sink.notify("需要审批", &build_approval_pending_text(request));
         }
     }
 }
@@ -250,8 +267,11 @@ impl ApprovalWorkflow {
     ) -> crate::common::error::Result<ApprovalResponse> {
         let risk_level = self.assess_risk(action);
 
-        // 检查自动审批规则
-        if self.config.enable_auto_approval {
+        // "总是询问"命令：强制走人工审批/询问，不被任何自动放行路径放行
+        let forced_prompt = self.matches_prompt_command(action);
+
+        // 检查自动审批规则（Deny 规则优先；总是询问命令跳过）
+        if !forced_prompt && self.config.enable_auto_approval {
             if let Some(decision) = self.check_auto_approval(action, risk_level) {
                 tracing::info!(
                     action = ?action,
@@ -264,18 +284,20 @@ impl ApprovalWorkflow {
                     reason: Some("自动审批规则匹配".to_string()),
                     responded_at: chrono::Utc::now(),
                     approved_by: "auto".to_string(),
+                    edited_command: None,
                 });
             }
         }
 
-        // 如果风险等级为 Safe，直接通过
-        if risk_level == RiskLevel::Safe {
+        // 如果风险等级为 Safe，直接通过（总是询问命令除外）
+        if !forced_prompt && risk_level == RiskLevel::Safe {
             return Ok(ApprovalResponse {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 decision: ApprovalDecision::Approve,
                 reason: Some("安全操作，无需审批".to_string()),
                 responded_at: chrono::Utc::now(),
                 approved_by: "system".to_string(),
+                edited_command: None,
             });
         }
 
@@ -287,11 +309,13 @@ impl ApprovalWorkflow {
                 reason: Some(format!("危险操作（{}），默认拒绝", risk_level)),
                 responded_at: chrono::Utc::now(),
                 approved_by: "system".to_string(),
+                edited_command: None,
             });
         }
 
-        // 无人值守模式：Medium/High 风险操作自动批准并记录审计。
-        if self.config.unattended_mode {
+        // 无人值守模式：Medium/High 风险操作自动批准并记录审计
+        // （总是询问命令除外——prompt 命令强制走审批，不自动批准）。
+        if !forced_prompt && self.config.unattended_mode {
             let request = ApprovalRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 session_id: session_id.to_string(),
@@ -307,6 +331,7 @@ impl ApprovalWorkflow {
                 reason: Some(format!("无人值守模式：{} 风险自动批准", risk_level)),
                 responded_at: chrono::Utc::now(),
                 approved_by: "auto".to_string(),
+                edited_command: None,
             };
             tracing::info!(
                 session_id = %session_id,
@@ -328,10 +353,12 @@ impl ApprovalWorkflow {
                 reason: Some("用户已确认执行该操作".to_string()),
                 responded_at: chrono::Utc::now(),
                 approved_by: "user".to_string(),
+                edited_command: None,
             });
         }
 
-        // 审批通道已接入且允许等待时：等待人工审批响应（带超时）
+        // 审批通道已接入且允许等待时：等待人工审批响应（带超时）。
+        // 总是询问命令在这里强制挂起等待人工响应。
         if self.config.wait_for_approval && allow_human_wait {
             return self
                 .wait_for_human_approval(session_id, action, risk_level)
@@ -351,6 +378,7 @@ impl ApprovalWorkflow {
             reason: Some(reason),
             responded_at: chrono::Utc::now(),
             approved_by: "system".to_string(),
+            edited_command: None,
         })
     }
 
@@ -408,6 +436,7 @@ impl ApprovalWorkflow {
                     reason: Some("审批超时，默认拒绝".to_string()),
                     responded_at: chrono::Utc::now(),
                     approved_by: "system".to_string(),
+                    edited_command: None,
                 }
             }
         };
@@ -436,8 +465,9 @@ impl ApprovalWorkflow {
         }
         let record = ApprovalRecord {
             request,
-            response,
+            response: response.clone(),
             execution_result: None,
+            edited_command: response.as_ref().and_then(|r| r.edited_command.clone()),
         };
         let mut records = self.records.write().await;
         records.push(record);
@@ -449,22 +479,39 @@ impl ApprovalWorkflow {
     /// - `decision` - 审批决策
     /// - `reason` - 审批理由
     /// - `approved_by` - 审批者
+    /// - `edited_command` - 用户编辑后的命令（纠正/改写场景；仅
+    ///   decision=Approve 且提供时生效，记入审计，不影响实际执行）
     pub async fn respond_to_approval(
         &self,
         request_id: &str,
         decision: ApprovalDecision,
         reason: Option<String>,
         approved_by: &str,
+        edited_command: Option<String>,
     ) -> crate::common::error::Result<()> {
         let mut pending = self.pending_approvals.write().await;
 
         if let Some(pending_approval) = pending.remove(request_id) {
+            // 编辑命令仅对"批准"语义生效；空字符串视为未提供
+            let edited = if decision == ApprovalDecision::Approve {
+                edited_command.filter(|c| !c.trim().is_empty())
+            } else {
+                None
+            };
+            if let Some(cmd) = &edited {
+                tracing::info!(
+                    request_id = %request_id,
+                    edited_command = %cmd,
+                    "审批批准时收到用户编辑后的命令（仅审计/通知，实际执行仍按原命令）"
+                );
+            }
             let response = ApprovalResponse {
                 request_id: request_id.to_string(),
                 decision,
                 reason,
                 responded_at: chrono::Utc::now(),
                 approved_by: approved_by.to_string(),
+                edited_command: edited,
             };
 
             if let Err(e) = pending_approval.response_tx.send(response) {
@@ -480,17 +527,32 @@ impl ApprovalWorkflow {
 
     /// 检查自动审批规则。
     ///
+    /// 评估顺序：**Deny 规则优先**——先匹配所有拒绝规则（强制拒绝，
+    /// 无视 Approve 规则的配置顺序），再匹配放行规则（Approve /
+    /// RequestMoreInfo），保证黑名单命令不被白名单规则覆盖。
+    ///
     /// `pub(super)`：审批模块内部（含模块测试）可访问，不对外暴露。
     pub(super) fn check_auto_approval(
         &self,
         action: &Action,
         risk_level: RiskLevel,
     ) -> Option<ApprovalDecision> {
+        // 第一遍：Deny 规则（拒绝优先）
         for rule in &self.config.auto_approval_rules {
-            if !rule.enabled {
+            if !rule.enabled || rule.decision != ApprovalDecision::Deny {
                 continue;
             }
-
+            if self.matches_pattern(action, &rule.action_pattern)
+                && self.matches_condition(action, risk_level, &rule.condition)
+            {
+                return Some(ApprovalDecision::Deny);
+            }
+        }
+        // 第二遍：放行规则（Approve / RequestMoreInfo）
+        for rule in &self.config.auto_approval_rules {
+            if !rule.enabled || rule.decision == ApprovalDecision::Deny {
+                continue;
+            }
             if self.matches_pattern(action, &rule.action_pattern)
                 && self.matches_condition(action, risk_level, &rule.condition)
             {
@@ -498,6 +560,25 @@ impl ApprovalWorkflow {
             }
         }
         None
+    }
+
+    /// 检查操作是否命中"总是询问"命令列表。
+    ///
+    /// 匹配语义与 [`Self::matches_pattern`] 的 `CommandPattern` 一致：
+    /// 命令首词精确匹配或扩展名后缀匹配（如 `git.exe` 命中 `git`）。
+    /// 命中的命令强制走人工审批/询问，不被自动放行。
+    fn matches_prompt_command(&self, action: &Action) -> bool {
+        if self.config.prompt_commands.is_empty() {
+            return false;
+        }
+        let Action::ExecuteCommand { command, .. } = action else {
+            return false;
+        };
+        let cmd = command.split_whitespace().next().unwrap_or(command);
+        self.config
+            .prompt_commands
+            .iter()
+            .any(|p| cmd == p || cmd.ends_with(&format!(".{}", p)))
     }
 
     /// 检查操作是否匹配模式。

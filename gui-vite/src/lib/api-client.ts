@@ -324,11 +324,13 @@ export async function respondApproval(
   requestId: string,
   decision: ApprovalDecision,
   reason?: string,
+  editedCommand?: string,
 ): Promise<{ ok: boolean }> {
   return apiPost<{ ok: boolean }>('/approval/respond', {
     request_id: requestId,
     decision,
     ...(reason ? { reason } : {}),
+    ...(editedCommand ? { edited_command: editedCommand } : {}),
   } satisfies RespondApprovalRequest);
 }
 
@@ -336,6 +338,8 @@ interface RespondApprovalRequest {
   request_id: string;
   decision: ApprovalDecision;
   reason?: string;
+  /** 用户编辑后的命令（纠正/改写场景；仅 decision=approve 时生效，记入审计）。 */
+  edited_command?: string;
 }
 
 // ========== Insights API ==========
@@ -402,4 +406,30 @@ export async function fetchWorkspaceApplyPatch(
   return apiPost<WorkspaceApplyPatchResponse>('/workspace/apply-patch', {
     patch,
   } satisfies WorkspaceApplyPatchRequest);
+}
+
+// ── 剪贴板 I/O（T1 路线：复制即记忆） ─────────────────────────────
+
+/** 待确认的剪贴板捕获。 */
+export interface ClipboardPendingCapture {
+  id: string;
+  text: string;
+  captured_at: string;
+}
+
+/** 获取待确认的剪贴板捕获（无则 null）。 */
+export async function fetchClipboardPending(): Promise<ClipboardPendingCapture | null> {
+  const resp = await apiGet<{ pending: ClipboardPendingCapture | null }>('/clipboard/pending');
+  return resp.pending;
+}
+
+/** 响应剪贴板捕获（沉淀/忽略）。 */
+export async function respondClipboard(
+  action: 'remember' | 'knowledge' | 'ignore',
+  text?: string,
+): Promise<{ status: string; uri?: string }> {
+  return apiPost<{ status: string; uri?: string }>('/clipboard/respond', {
+    action,
+    ...(text ? { text } : {}),
+  });
 }

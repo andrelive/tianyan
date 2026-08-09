@@ -46,6 +46,8 @@ impl AgentBuilderFactory {
     /// `dynamic_tools` 为外部注册的扩展工具（如 MCP 工具桥接），构建后注入 Agent。
     /// `sqlite_db` 为全系统共享数据库（后台任务持久化 + 唤醒，ADR-013；
     /// None 时任务状态纯内存、无唤醒）。
+    /// `notification_sink` 为系统通知通道（后台任务完成/审批挂起；动态包装，
+    /// Tauri 后注册亦生效）。
     #[allow(clippy::too_many_arguments)]
     pub async fn build_agent(
         config: &TianyanConfig,
@@ -57,6 +59,7 @@ impl AgentBuilderFactory {
         skill_refresher: Arc<dyn SkillRefresher>,
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
         sqlite_db: Option<SqliteDb>,
+        notification_sink: tianyan::notification::SharedNotificationSink,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
@@ -114,6 +117,8 @@ impl AgentBuilderFactory {
         if let Some(db) = sqlite_db {
             builder = builder.with_background_task_db(db);
         }
+        // 系统通知通道（动态包装：Tauri 后注册亦生效）
+        builder = builder.with_notification_sink(notification_sink);
         let agent = builder
             .build()
             .map_err(|e| TianyanError::Custom(format!("内部错误：Agent 构建失败：{}", e)))?;
@@ -151,6 +156,7 @@ impl AgentBuilderFactory {
         skill_refresher: Arc<dyn SkillRefresher>,
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
         sqlite_db: Option<SqliteDb>,
+        notification_sink: tianyan::notification::SharedNotificationSink,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -162,6 +168,7 @@ impl AgentBuilderFactory {
             skill_refresher,
             dynamic_tools,
             sqlite_db,
+            notification_sink,
         )
         .await
         {
@@ -241,6 +248,7 @@ impl AgentCoordinator for WizardModeAgent {
         _session_id: &str,
         _message: &tianyan::Message,
         _model: Option<&str>,
+        _mode: tianyan::agent::AgentMode,
     ) -> TianyanResult<AgentResponse> {
         Err(TianyanError::Custom(
             "模型服务错误：应用未配置。请先完成配置向导。".to_string(),
@@ -253,6 +261,7 @@ impl AgentCoordinator for WizardModeAgent {
         _message: &tianyan::Message,
         _model: Option<&str>,
         _cancel: Option<Arc<AtomicBool>>,
+        _mode: tianyan::agent::AgentMode,
     ) -> TianyanResult<mpsc::Receiver<TianyanResult<AgentStreamChunk>>> {
         Err(TianyanError::Custom(
             "模型服务错误：应用未配置。请先完成配置向导。".to_string(),
@@ -291,6 +300,7 @@ impl AgentCoordinator for WizardModeAgent {
         _request_id: &str,
         _decision: tianyan::executor::approval::ApprovalDecision,
         _reason: Option<String>,
+        _edited_command: Option<String>,
     ) -> TianyanResult<()> {
         Err(TianyanError::Custom(
             "模型服务错误：应用未配置。请先完成配置向导。".to_string(),

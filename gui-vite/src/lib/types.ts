@@ -16,6 +16,9 @@ export interface ChatMessage {
   chunk_type?: StreamChunkType;
 }
 
+/** 运行模式：act = 执行（默认），plan = 计划（只读，写工具被后端拒绝） */
+export type AgentMode = 'act' | 'plan';
+
 export interface ChatRequest {
   session_id?: string | null;
   messages: ChatMessage[];
@@ -23,6 +26,8 @@ export interface ChatRequest {
   temperature: number;
   max_tokens: number;
   model?: string | null;
+  /** 请求级运行模式，缺省 act */
+  mode?: AgentMode;
 }
 
 export interface ChatResponse {
@@ -229,6 +234,8 @@ export interface ApprovalResponse {
   reason: string | null;
   responded_at: string;
   approved_by: string;
+  /** 用户审批时编辑后的命令（纠正/改写场景；仅审计展示，不影响实际执行）。 */
+  edited_command?: string | null;
 }
 
 /** 审批审计记录。 */
@@ -236,6 +243,8 @@ export interface ApprovalRecord {
   request: ApprovalRequest;
   response: ApprovalResponse | null;
   execution_result: boolean | null;
+  /** 用户审批时编辑后的命令（纠正/改写场景；仅审计展示，不影响实际执行）。 */
+  edited_command?: string | null;
 }
 
 /** 审批工作流配置。 */
@@ -246,6 +255,8 @@ export interface ApprovalWorkflowConfig {
   max_pending_approvals: number;
   unattended_mode: boolean;
   wait_for_approval: boolean;
+  /** "总是询问"命令列表：命中命令强制走人工审批（不被自动放行）。 */
+  prompt_commands?: string[];
 }
 
 /** 审批状态快照（GET /approval/status）。 */
@@ -410,6 +421,11 @@ export interface ConfigState {
   blocked_directories: string;
   allowed_commands: string;
   blocked_commands: string;
+
+  // -- Clipboard config (clipboard.*；复制即记忆，默认关闭 opt-in) --
+  clipboard_enabled: boolean;
+  clipboard_auto_capture: boolean;
+  clipboard_prompt_confirm: boolean;
 
   // -- Memory config (memory.*) --
   max_session_memory: number;

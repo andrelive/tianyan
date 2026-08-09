@@ -11,7 +11,8 @@ use crate::context::compression::{CompressionConfig, ContextCompressor};
 use crate::context::pipeline::ContextPipeline;
 use crate::context::DualLayerRetriever;
 use crate::executor::approval::{
-    ApprovalWorkflow, ApprovalWorkflowConfig, SessionApprovalNotifier,
+    ActionPattern, ApprovalCondition, ApprovalDecision, ApprovalWorkflow, ApprovalWorkflowConfig,
+    AutoApprovalRule, SessionApprovalNotifier,
 };
 use crate::executor::SecurityPolicy;
 use crate::executor::{LlmJudge, VerificationGate};
@@ -50,6 +51,8 @@ pub struct AgentBuilder {
     skill_refresher: Option<Arc<dyn SkillRefresher>>,
     /// 后台任务 SQLite 持久化后端（ADR-013；None 时任务状态纯内存）。
     background_task_db: Option<crate::vfs::backend::sqlite_db::SqliteDb>,
+    /// 系统通知通道（后台任务完成 / 审批挂起的桌面通知；None 时静默）。
+    notification_sink: Option<crate::notification::SharedNotificationSink>,
 }
 
 impl AgentBuilder {
@@ -70,6 +73,7 @@ impl AgentBuilder {
             snapshot_manager: None,
             skill_refresher: None,
             background_task_db: None,
+            notification_sink: None,
         }
     }
 
@@ -157,6 +161,17 @@ impl AgentBuilder {
         self
     }
 
+    /// 设置系统通知通道（后台任务全部完成/失败、审批挂起时桌面通知）。
+    ///
+    /// 装配层（Tauri 实现）注入；未注入时通知静默（行为零变化）。
+    pub fn with_notification_sink(
+        mut self,
+        sink: crate::notification::SharedNotificationSink,
+    ) -> Self {
+        self.notification_sink = Some(sink);
+        self
+    }
+
     /// 构建 Agent 实例。
     pub fn build(self) -> Result<Agent> {
         let model_service = self
@@ -185,14 +200,41 @@ impl AgentBuilder {
         // 构建审批工作流（write_file / execute_command 危险操作门控）
         // wait_for_approval 开启时：危险操作挂起等待 GUI 审批面板人工响应；
         // 默认关闭：走"询问用户 → 指纹确认"降级链路
+        // 安全配置注入（T2-6 命令级审批策略）：
+        //   blocked_commands → Deny 规则（强制拒绝，评估时 deny 优先，
+        //                       无视自动放行规则）；
+        //   allowed_commands → Approve 规则（自动放行）；
+        //   prompt_commands  → 总是询问（强制走人工审批，不被自动放行）。
+        let mut approval_config = ApprovalWorkflowConfig {
+            wait_for_approval: security_config.wait_for_approval,
+            ..Default::default()
+        };
+        approval_config.prompt_commands = security_config.prompt_commands.clone();
+        for cmd in &security_config.blocked_commands {
+            approval_config.auto_approval_rules.push(AutoApprovalRule {
+                name: format!("security_blocked_{cmd}"),
+                action_pattern: ActionPattern::CommandPattern(cmd.clone()),
+                condition: ApprovalCondition::Always,
+                decision: ApprovalDecision::Deny,
+                enabled: true,
+            });
+        }
+        for cmd in &security_config.allowed_commands {
+            approval_config.auto_approval_rules.push(AutoApprovalRule {
+                name: format!("security_allowed_{cmd}"),
+                action_pattern: ActionPattern::CommandPattern(cmd.clone()),
+                condition: ApprovalCondition::Always,
+                decision: ApprovalDecision::Approve,
+                enabled: true,
+            });
+        }
+        let mut approval_notifier = SessionApprovalNotifier::new(session_manager.clone());
+        if let Some(ref sink) = self.notification_sink {
+            approval_notifier = approval_notifier.with_notification_sink(sink.clone());
+        }
         let approval = Arc::new(
-            ApprovalWorkflow::new(ApprovalWorkflowConfig {
-                wait_for_approval: security_config.wait_for_approval,
-                ..Default::default()
-            })
-            .with_pending_notifier(Arc::new(SessionApprovalNotifier::new(
-                session_manager.clone(),
-            ))),
+            ApprovalWorkflow::new(approval_config)
+                .with_pending_notifier(Arc::new(approval_notifier)),
         );
 
         let chat_model = self.model.clone().unwrap_or_else(|| "default".to_string());
@@ -241,6 +283,10 @@ impl AgentBuilder {
         tool_registry = tool_registry.with_task_notifier(Arc::new(
             crate::agent::background::SessionTaskNotifier::new(session_manager.clone()),
         ));
+        // 后台任务系统通知通道（全部完成/失败时桌面通知）
+        if let Some(ref sink) = self.notification_sink {
+            tool_registry = tool_registry.with_notification_sink(sink.clone());
+        }
         // 后台任务持久化（ADR-013：任务实体化，重启可查询可恢复）
         if let Some(ref db) = self.background_task_db {
             tool_registry = tool_registry.with_background_task_db(db.clone());

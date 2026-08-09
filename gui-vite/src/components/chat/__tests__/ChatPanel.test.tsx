@@ -196,6 +196,115 @@ describe('ChatPanel', () => {
     expect(screen.getByText('对话')).toBeInTheDocument();
   });
 
+  it('renders Plan/Act mode toggle buttons (Act active by default)', () => {
+    renderChatPanel();
+    const group = screen.getByRole('group', { name: '运行模式切换' });
+    expect(group).toBeInTheDocument();
+    const act = screen.getByRole('button', { name: '切换到执行模式' });
+    const plan = screen.getByRole('button', { name: '切换到计划模式' });
+    expect(act).toHaveAttribute('aria-pressed', 'true');
+    expect(plan).toHaveAttribute('aria-pressed', 'false');
+    // Act 模式下不显示只读徽标
+    expect(screen.queryByLabelText('只读模式')).not.toBeInTheDocument();
+  });
+
+  it('switching to Plan highlights the Plan button and shows 只读 badge', async () => {
+    const user = userEvent.setup();
+    renderChatPanel();
+    await user.click(screen.getByRole('button', { name: '切换到计划模式' }));
+    expect(screen.getByRole('button', { name: '切换到计划模式' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.getByRole('button', { name: '切换到执行模式' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    // Plan 高亮时显示只读徽标
+    expect(screen.getByLabelText('只读模式')).toBeInTheDocument();
+  });
+
+  it('sends the request with mode=plan when Plan mode is active', async () => {
+    const user = userEvent.setup();
+    let capturedBody: Record<string, unknown> | null = null;
+    server.use(
+      http.post('/api/v1/chat/stream', async ({ request }) => {
+        capturedBody = (await request.json()) as Record<string, unknown>;
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                'data: {"id":"msg-1","session_id":"session-1","delta":"计划","chunk_type":"answer"}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',
+              ),
+            );
+            controller.close();
+          },
+        });
+        return new HttpResponse(stream, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+      }),
+    );
+
+    renderChatPanel();
+    await user.click(screen.getByRole('button', { name: '切换到计划模式' }));
+
+    const textarea = screen.getByPlaceholderText(/输入消息/);
+    await user.type(textarea, '先帮我分析一下代码结构');
+    await user.click(screen.getByRole('button', { name: /发送/i }));
+
+    await vi.waitFor(() => {
+      expect(capturedBody).not.toBeNull();
+      expect(capturedBody?.mode).toBe('plan');
+    });
+  });
+
+  it('sends the request with mode=act by default', async () => {
+    const user = userEvent.setup();
+    let capturedBody: Record<string, unknown> | null = null;
+    server.use(
+      http.post('/api/v1/chat/stream', async ({ request }) => {
+        capturedBody = (await request.json()) as Record<string, unknown>;
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                'data: {"id":"msg-1","session_id":"session-1","delta":"好","chunk_type":"answer"}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',
+              ),
+            );
+            controller.close();
+          },
+        });
+        return new HttpResponse(stream, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+      }),
+    );
+
+    renderChatPanel();
+
+    const textarea = screen.getByPlaceholderText(/输入消息/);
+    await user.type(textarea, '你好');
+    await user.click(screen.getByRole('button', { name: /发送/i }));
+
+    await vi.waitFor(() => {
+      expect(capturedBody).not.toBeNull();
+      expect(capturedBody?.mode).toBe('act');
+    });
+  });
+
   it('rolls back to a message via backend and syncs remaining messages', async () => {
     const user = userEvent.setup();
     useAppStore.setState({

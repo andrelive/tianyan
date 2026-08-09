@@ -97,7 +97,7 @@ use tokio::sync::mpsc;
 use crate::agent::agent_core::{format_clarification_questions, Agent};
 use crate::agent::r#loop::AgentLoopResult;
 use crate::agent::types::{
-    AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
+    AgentMode, AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
     StreamChunkType, StreamEventSender,
 };
 use crate::common::error::Result;
@@ -109,23 +109,27 @@ pub trait AgentCoordinator: Send + Sync {
     /// 处理用户消息。
     /// - `message` — 完整消息（含可选的多模态图片片段，`content` 为纯文本）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
+    /// - `mode` — 运行模式（Plan 只读 / Act 执行），缺省 [`AgentMode::Act`]。
     async fn process_message(
         &self,
         session_id: &str,
         message: &Message,
         model: Option<&str>,
+        mode: AgentMode,
     ) -> Result<AgentResponse>;
 
     /// 处理用户消息（流式响应）。
     /// - `message` — 完整消息（含可选的多模态图片片段）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
     /// - `cancel` — 取消标志（客户端断开/服务关停时置位）；`None` 表示不可取消。
+    /// - `mode` — 运行模式（Plan 只读 / Act 执行），缺省 [`AgentMode::Act`]。
     async fn process_message_stream(
         &self,
         session_id: &str,
         message: &Message,
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
+        mode: AgentMode,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
 
     /// 处理用户对追问的回答。
@@ -141,12 +145,16 @@ pub trait AgentCoordinator: Send + Sync {
 
     /// 响应待处理审批请求（GUI 审批面板调用）。
     ///
+    /// `edited_command` 为用户在审批面板编辑后的命令（纠正/改写场景；
+    /// 仅 decision=Approve 且提供时生效，记入审计记录与通知文本，
+    /// 不影响实际执行——执行仍由 agent 按原命令发起）。
     /// 请求不存在或已超时返回错误（调用方映射为 404/409）。
     async fn respond_approval(
         &self,
         request_id: &str,
         decision: crate::executor::approval::ApprovalDecision,
         reason: Option<String>,
+        edited_command: Option<String>,
     ) -> Result<()>;
 
     /// 获取智能体状态。
@@ -167,6 +175,11 @@ pub trait AgentCoordinator: Send + Sync {
     /// 返回是否实际发生了压缩（消息不足 / token 未超阈值时为 false）。
     async fn compress_session(&self, session_id: &str) -> Result<bool>;
 
+    /// 唤醒指定会话的主 agent（T1 事件驱动：外部事件触发一轮系统消息处理）。
+    ///
+    /// 默认空实现（不唤醒）；Agent 实现转发到 `process_wake`（ADR-013）。
+    async fn wake_session(&self, _session_id: &str) {}
+
     /// 关闭智能体。
     async fn shutdown(&self) -> Result<()>;
 }
@@ -178,6 +191,7 @@ impl AgentCoordinator for Agent {
         session_id: &str,
         message: &Message,
         model: Option<&str>,
+        mode: AgentMode,
     ) -> Result<AgentResponse> {
         let start = Instant::now();
 
@@ -199,7 +213,7 @@ impl AgentCoordinator for Agent {
         // 2-6. 共享编排骨架：持久化 → 上下文 → AgentLoop → 结果组装 → 指标更新
         // 非流式路径无可取消源（HTTP 请求生命周期内），传 None
         let response = self
-            .run_agent_turn(&state, session_id, message, model, start, None)
+            .run_agent_turn(&state, session_id, message, model, start, None, mode)
             .await?;
 
         // 7. Compression check and persist
@@ -223,6 +237,7 @@ impl AgentCoordinator for Agent {
         message: &Message,
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
+        mode: AgentMode,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
         let state = self.load_and_build_state(session_id).await?;
         let model = model.unwrap_or(&self.default_model).to_string();
@@ -264,6 +279,8 @@ impl AgentCoordinator for Agent {
 
             let loop_result = self_clone
                 .agent_loop
+                .clone()
+                .with_mode(mode)
                 .run_stream(
                     &mut messages.clone(),
                     stream_sender.clone(),
@@ -358,6 +375,10 @@ impl AgentCoordinator for Agent {
         Ok(self.maybe_compress_and_persist(&state, session_id).await)
     }
 
+    async fn wake_session(&self, session_id: &str) {
+        self.process_wake(session_id).await;
+    }
+
     async fn initialize(&self) -> Result<()> {
         tracing::info!("Agent initialized with AgentLoop architecture");
         Ok(())
@@ -394,6 +415,7 @@ impl AgentCoordinator for Agent {
         request_id: &str,
         decision: crate::executor::approval::ApprovalDecision,
         reason: Option<String>,
+        edited_command: Option<String>,
     ) -> Result<()> {
         let registry = self.agent_loop.tool_registry();
         let Some(workflow) = registry.approval_workflow() else {
@@ -403,7 +425,7 @@ impl AgentCoordinator for Agent {
         };
         // GUI 人工响应：approved_by 固定为 "user"
         workflow
-            .respond_to_approval(request_id, decision, reason, "user")
+            .respond_to_approval(request_id, decision, reason, "user", edited_command)
             .await
     }
 

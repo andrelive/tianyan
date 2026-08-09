@@ -83,6 +83,34 @@ export default function SecurityTab({ config, onUpdateField }: SecurityTabProps)
             placeholder="rm, sudo, dd"
           />
         </FieldRow>
+
+        <SectionTitle title="剪贴板（复制即记忆）" />
+        <p className="text-xs text-[var(--color-text-tertiary)]">
+          隐私敏感功能，默认关闭。开启后监听系统剪贴板，捕获内容经确认后沉淀到记忆/知识库（数据仅本机处理）。
+        </p>
+        <div className="grid grid-cols-2 gap-4 pt-2">
+          <div className="flex items-center gap-3">
+            <label className="text-sm text-[var(--color-text-primary)] w-36">启用剪贴板监听</label>
+            <Toggle
+              checked={config.clipboard_enabled}
+              onChange={(v) => onUpdateField('clipboard_enabled', v)}
+            />
+          </div>
+          <div className="flex items-center gap-3">
+            <label className="text-sm text-[var(--color-text-primary)] w-36">自动沉淀（跳过确认）</label>
+            <Toggle
+              checked={config.clipboard_auto_capture}
+              onChange={(v) => onUpdateField('clipboard_auto_capture', v)}
+            />
+          </div>
+          <div className="flex items-center gap-3">
+            <label className="text-sm text-[var(--color-text-primary)] w-36">显示确认条</label>
+            <Toggle
+              checked={config.clipboard_prompt_confirm}
+              onChange={(v) => onUpdateField('clipboard_prompt_confirm', v)}
+            />
+          </div>
+        </div>
       </div>
     </div>
   );

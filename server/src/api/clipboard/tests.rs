@@ -1,0 +1,344 @@
+//! 剪贴板 I/O 领域测试。
+//!
+//! 处理器层测试通过 `create_app` 构建完整 AppState（真实 VFS + tempdir）
+//! 后以 `tower::ServiceExt::oneshot` 直击路由（跟随 workspace 领域模式）；
+//! 服务层测试直接构造 [`ClipboardService`] 验证沉淀链路。
+//! 注意：pending/outbox 为模块级共享状态，测试间通过显式文本/清空隔离。
+
+use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use serde_json::{json, Value};
+use tempfile::tempdir;
+use tianyan::agent::DynamicToolExecutor;
+use tianyan::common::types::{ContentLevel, ContextNamespace, TianyanUri};
+use tianyan::config::{
+    ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig, ProviderConfig,
+    TianyanConfig,
+};
+use tianyan::vfs::ContentStore;
+use tower::ServiceExt;
+
+use crate::api::clipboard::services::ClipboardService;
+use crate::api::clipboard::tool::ClipboardWriteTool;
+use crate::api::clipboard::types::{RespondAction, RespondRequest};
+use crate::create_app;
+
+/// 构建带 mock 模型提供商的测试配置（与 workspace 领域测试同构；
+/// `ModelServices::from_config` 强制要求 chat/embedding/vision 三者齐备）。
+fn test_config(data_dir: &Path) -> TianyanConfig {
+    let mut config = TianyanConfig::default();
+    config.storage.data_dir = data_dir.to_path_buf();
+    config.models = ModelsConfig {
+        providers: vec![ProviderConfig {
+            name: "mock".to_string(),
+            endpoint: "http://localhost:11434/v1".to_string(),
+            api_key: Some("test-key".to_string()),
+            models: vec![
+                ModelEntry {
+                    name: "test-model".to_string(),
+                    capabilities: vec![ModelCapability::Chat],
+                },
+                ModelEntry {
+                    name: "embed".to_string(),
+                    capabilities: vec![ModelCapability::TextEmbedding],
+                },
+                ModelEntry {
+                    name: "vision".to_string(),
+                    capabilities: vec![ModelCapability::Vision],
+                },
+            ],
+            timeout: 30,
+            enabled: true,
+            headers: std::collections::HashMap::new(),
+        }],
+        preferences: ModelPreferences {
+            chat: Some(ModelRef {
+                provider: "mock".to_string(),
+                model: "test-model".to_string(),
+            }),
+            embedding: Some(ModelRef {
+                provider: "mock".to_string(),
+                model: "embed".to_string(),
+            }),
+            vision: Some(ModelRef {
+                provider: "mock".to_string(),
+                model: "vision".to_string(),
+            }),
+        },
+    };
+    config
+}
+
+/// 构造 JSON POST 请求。
+fn post_json(uri: &str, body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// 解析响应体为 JSON。
+async fn response_json(response: axum::response::Response) -> Value {
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// 模块级状态（pending/outbox）测试串行化锁：
+/// pending/outbox 为进程级共享，并行测试互相污染，涉共享状态的测试先拿锁。
+fn state_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+// ---------------------------------------------------------------------------
+// capture：配置门控
+// ---------------------------------------------------------------------------
+
+/// 监听未启用（默认 enabled=false）：204，不做任何存储。
+#[tokio::test]
+async fn capture_disabled_returns_204() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path());
+    let (app, _state) = create_app(config).await.unwrap();
+
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/clipboard/capture",
+            json!({ "text": "hello" }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}
+
+/// 监听启用 + 非 auto_capture：返回 pending 确认信息（200）。
+#[tokio::test]
+async fn capture_enabled_returns_pending() {
+    let _guard = state_lock().lock().unwrap();
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.clipboard.enabled = true;
+    let (app, _state) = create_app(config).await.unwrap();
+
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/clipboard/capture",
+            json!({ "text": "capture-me" }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["status"], "pending");
+    assert_eq!(body["pending"]["text"], "capture-me");
+    assert!(body["pending"]["id"].as_str().is_some());
+    assert!(!body["pending"]["captured_at"].as_str().unwrap().is_empty());
+}
+
+/// 捕获文本为空：400（监听侧已过滤，防御性校验）。
+#[tokio::test]
+async fn capture_empty_text_returns_400() {
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.clipboard.enabled = true;
+    let (app, _state) = create_app(config).await.unwrap();
+
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/clipboard/capture",
+            json!({ "text": "   " }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// respond：沉淀链路
+// ---------------------------------------------------------------------------
+
+/// remember（显式 text）：写入 `tianyan://memory/clipboard/*`，Detail 全文 + Abstract 摘要。
+#[tokio::test]
+async fn respond_remember_writes_vfs_memory() {
+    let _guard = state_lock().lock().unwrap();
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path());
+    let (_app, state) = create_app(config).await.unwrap();
+    let service = ClipboardService::new(state.vfs());
+
+    let resp = service
+        .respond(
+            &state,
+            RespondRequest {
+                text: Some("记住这条剪贴板内容".to_string()),
+                action: RespondAction::Remember,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp["status"], "stored");
+    let uri_str = resp["uri"].as_str().expect("应返回记忆 URI");
+    let uri = TianyanUri::parse(uri_str).unwrap();
+    assert_eq!(uri.namespace(), ContextNamespace::Memory);
+    let path = uri.path();
+    assert_eq!(path[0], "clipboard");
+
+    let vfs = state.vfs();
+    let detail = vfs
+        .read(&uri, ContentLevel::Detail)
+        .await
+        .expect("Detail 应已写入");
+    assert_eq!(detail, "记住这条剪贴板内容");
+    let abstract_content = vfs
+        .read(&uri, ContentLevel::Abstract)
+        .await
+        .expect("Abstract 应已写入");
+    assert!(!abstract_content.is_empty());
+    assert!(abstract_content.contains("记住这条剪贴板内容"));
+}
+
+/// ignore（无 pending 时提供显式 text）：清空 pending，不落任何存储。
+#[tokio::test]
+async fn respond_ignore_clears_pending() {
+    let _guard = state_lock().lock().unwrap();
+    let dir = tempdir().unwrap();
+    let mut config = test_config(dir.path());
+    config.clipboard.enabled = true;
+    let (_app, state) = create_app(config).await.unwrap();
+    let service = ClipboardService::new(state.vfs());
+
+    // 先捕获 → pending 存在
+    let capture = service.capture(&state, "tmp-ignore-me").await.unwrap();
+    assert_eq!(capture.as_ref().unwrap().status, "pending");
+    assert!(service.get_pending().await.is_some());
+
+    let resp = service
+        .respond(
+            &state,
+            RespondRequest {
+                text: None,
+                action: RespondAction::Ignore,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp["status"], "ignored");
+    assert!(service.get_pending().await.is_none());
+}
+
+/// respond 无 pending 且未提供 text：400。
+#[tokio::test]
+async fn respond_without_text_or_pending_returns_bad_request() {
+    let _guard = state_lock().lock().unwrap();
+    // 显式清空 pending（锁内操作，确定性保证无 pending）
+    *ClipboardService::pending_handle().write().await = None;
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path());
+    let (_app, state) = create_app(config).await.unwrap();
+    let service = ClipboardService::new(state.vfs());
+
+    let err = service
+        .respond(
+            &state,
+            RespondRequest {
+                text: None,
+                action: RespondAction::Ignore,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        crate::api::shared::error::ApiError::BadRequest(_)
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// clipboard_write 动态工具
+// ---------------------------------------------------------------------------
+
+/// 工具执行后内容进入 outbox（tauri 轮询消费）。
+#[tokio::test]
+async fn clipboard_write_tool_pushes_outbox() {
+    // 清空模块级 outbox，保证测试独立
+    ClipboardService::outbox_handle().lock().unwrap().clear();
+
+    let tool = ClipboardWriteTool::shared();
+    let result = tool
+        .execute(r#"{"content":"粘贴这段文本"}"#)
+        .await
+        .expect("工具执行应成功");
+    assert_eq!(result["status"], "queued");
+    assert!(result["content_length"].as_u64().unwrap() > 0);
+
+    let items: Vec<String> = ClipboardService::outbox_handle().lock().unwrap().clone();
+    assert!(
+        items.iter().any(|i| i == "粘贴这段文本"),
+        "outbox 应包含工具写入的内容：{items:?}"
+    );
+}
+
+/// 参数非法：返回工具错误而非 panic。
+#[tokio::test]
+async fn clipboard_write_tool_rejects_invalid_args() {
+    let tool = ClipboardWriteTool::new(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let result = tool.execute(r#"not-json"#).await;
+    assert!(result.is_err(), "非法参数应报错");
+    assert!(result.unwrap_err().to_string().contains("参数无效"));
+}
+
+/// 缺 content 字段：报错。
+#[tokio::test]
+async fn clipboard_write_tool_requires_content() {
+    let tool = ClipboardWriteTool::new(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let result = tool.execute(r#"{}"#).await;
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// outbox 端点（tauri 轮询路径）
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/clipboard/outbox：取后清空（drain 语义，防重复写出）。
+#[tokio::test]
+async fn outbox_endpoint_drains_contents() {
+    let _guard = state_lock().lock().unwrap();
+    // 清空模块级 outbox，保证测试独立
+    ClipboardService::outbox_handle().lock().unwrap().clear();
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path());
+    let (app, state) = create_app(config).await.unwrap();
+
+    // 直接经服务推入两条内容（等价于 agent 工具写入）
+    let service = ClipboardService::new(state.vfs());
+    service.outbox_push("第一条".to_string());
+    service.outbox_push("第二条".to_string());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/clipboard/outbox")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["contents"].as_array().unwrap().len(), 2);
+
+    // 再次读取应为空（drain 语义）
+    let service2 = ClipboardService::new(state.vfs());
+    assert!(service2.outbox_drain().is_empty());
+}

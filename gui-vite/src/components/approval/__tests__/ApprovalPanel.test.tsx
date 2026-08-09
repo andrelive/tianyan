@@ -114,6 +114,86 @@ describe('ApprovalPanel', () => {
     expect(respondSpy).toHaveBeenCalledWith({ request_id: 'req-2', decision: 'deny' });
   });
 
+  it('shows command text and approves with edited command via inline editor', async () => {
+    const user = userEvent.setup();
+    let responded = false;
+    let respondBody: unknown = null;
+
+    server.use(
+      http.post('/api/v1/approval/respond', async ({ request }) => {
+        responded = true;
+        respondBody = await request.json();
+        return HttpResponse.json({ ok: true });
+      }),
+      http.get('/api/v1/approval/status', () => {
+        return HttpResponse.json(
+          responded ? { ...mockApprovalStatus, pending_approvals: [] } : mockApprovalStatus,
+        );
+      }),
+    );
+
+    renderApprovalPanel();
+    await waitFor(() => {
+      expect(screen.getByText('执行命令 rm -rf /tmp/cache')).toBeInTheDocument();
+    });
+
+    // execute_command 类请求展示命令文本（mono block）
+    expect(screen.getByText('rm -rf /tmp/cache')).toBeInTheDocument();
+    // 非命令类请求（写入文件）不显示"编辑后批准"
+    expect(
+      screen.queryByRole('button', { name: /编辑后批准 写入文件/ }),
+    ).not.toBeInTheDocument();
+
+    // 打开内联编辑器 → 改写命令 → 提交编辑并批准
+    await user.click(screen.getByRole('button', { name: /编辑后批准 执行命令/ }));
+    const textarea = screen.getByRole('textbox', { name: '编辑后的命令' });
+    expect(textarea).toHaveValue('rm -rf /tmp/cache');
+    await user.clear(textarea);
+    await user.type(textarea, 'rm -rf /tmp/cache --keep-log');
+
+    await user.click(screen.getByRole('button', { name: '提交编辑并批准' }));
+
+    await waitFor(() => {
+      expect(respondBody).not.toBeNull();
+    });
+    expect(respondBody).toEqual({
+      request_id: 'req-2',
+      decision: 'approve',
+      edited_command: 'rm -rf /tmp/cache --keep-log',
+    });
+
+    // 成功后刷新 → 空 pending 提示
+    await waitFor(() => {
+      expect(screen.getByText('暂无待处理审批')).toBeInTheDocument();
+    });
+  });
+
+  it('cancels inline editing without responding', async () => {
+    const user = userEvent.setup();
+    const respondSpy = vi.fn();
+
+    server.use(
+      http.post('/api/v1/approval/respond', async ({ request }) => {
+        respondSpy(await request.json());
+        return HttpResponse.json({ ok: true });
+      }),
+    );
+
+    renderApprovalPanel();
+    await waitFor(() => {
+      expect(screen.getByText('执行命令 rm -rf /tmp/cache')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: /编辑后批准 执行命令/ }));
+    expect(screen.getByRole('textbox', { name: '编辑后的命令' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '取消' }));
+
+    // 取消后编辑器关闭，未发起响应
+    expect(screen.queryByRole('textbox', { name: '编辑后的命令' })).not.toBeInTheDocument();
+    expect(respondSpy).not.toHaveBeenCalled();
+  });
+
   it('shows hint when wait_for_approval is disabled and no pending approvals', async () => {
     server.use(
       http.get('/api/v1/approval/status', () => {

@@ -32,6 +32,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
     DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
 };
+use crate::notification::SharedNotificationSink;
 use crate::session::SessionManager;
 use crate::vfs::backend::sqlite_db::SqliteDb;
 
@@ -149,6 +150,8 @@ pub struct BackgroundTaskManager {
     notifier: Option<Arc<dyn TaskNotifier>>,
     /// 唤醒器槽（Arc<Mutex> 支持构建后注入：Agent 完成后注册自引用转发器）。
     waker: Arc<Mutex<Option<Arc<dyn TaskWaker>>>>,
+    /// 系统通知通道槽（全部完成/失败时桌面通知；Arc<Mutex> 支持构建后注入）。
+    notification: Arc<Mutex<Option<SharedNotificationSink>>>,
     db: Option<SqliteDb>,
     next_seq: Arc<AtomicU64>,
     /// 持久化加载只执行一次（惰性：首次 register/snapshot 前）。
@@ -168,6 +171,7 @@ impl BackgroundTaskManager {
             semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
             notifier: None,
             waker: Arc::new(Mutex::new(None)),
+            notification: Arc::new(Mutex::new(None)),
             db: None,
             next_seq: Arc::new(AtomicU64::new(0)),
             reloaded: Arc::new(AtomicBool::new(false)),
@@ -195,6 +199,17 @@ impl BackgroundTaskManager {
     /// 设置唤醒器（构建后注入；Agent 构建完成后注册自引用转发器）。
     pub async fn set_waker(&self, waker: Arc<dyn TaskWaker>) {
         *self.waker.lock().await = Some(waker);
+    }
+
+    /// 设置系统通知通道（Agent 装配层注入；未注入时静默）。
+    pub fn with_notification_sink(mut self, sink: SharedNotificationSink) -> Self {
+        self.notification = Arc::new(Mutex::new(Some(sink)));
+        self
+    }
+
+    /// 设置系统通知通道（构建后注入；运行时替换实现用）。
+    pub async fn set_notification_sink(&self, sink: SharedNotificationSink) {
+        *self.notification.lock().await = Some(sink);
     }
 
     /// 尝试获取并发许可；达到上限时立即报错（不阻塞）。
@@ -327,9 +342,18 @@ impl BackgroundTaskManager {
         // ADR-013 唤醒语义：should_wake = allComplete || failure
         // （oh-my-openagent 实证：shouldReply = allComplete || isTaskFailure）。
         // 部分完成保持静默（消息已注入 transcript，等待语义靠消息积累）；
-        // 全部完成或失败才触发主 agent 新一轮生成。
+        // 全部完成或失败才触发主 agent 新一轮生成 + 桌面系统通知。
         let should_wake = remaining == 0 || task.status == TaskStatus::Failed;
         if should_wake {
+            // 系统通知：桌面原生提醒（非阻塞；sink 内部自行处理线程/队列）
+            if let Some(sink) = &*self.notification.lock().await {
+                let title = if task.status == TaskStatus::Failed {
+                    "后台任务失败"
+                } else {
+                    "后台任务完成"
+                };
+                sink.notify(title, &build_notification_text(&task, remaining));
+            }
             if let Some(waker) = &*self.waker.lock().await {
                 waker.wake(&session_id).await;
             }
@@ -850,6 +874,68 @@ mod tests {
             1,
             "失败即唤醒（汇总失败信息）"
         );
+    }
+
+    // ── 系统通知通道（全部完成/失败时桌面通知） ───────────────
+
+    /// 记录通知次数的测试通知通道。
+    struct RecordingSink {
+        calls: Arc<AtomicUsize>,
+    }
+    impl crate::notification::NotificationSink for RecordingSink {
+        fn notify(&self, _title: &str, _body: &str) {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_notification_sink_only_on_should_wake() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager =
+            BackgroundTaskManager::new().with_notification_sink(Arc::new(RecordingSink {
+                calls: calls.clone(),
+            }));
+        let id1 = manager.register("t1".to_string(), "s1".to_string()).await;
+        let id2 = manager.register("t2".to_string(), "s1".to_string()).await;
+        manager.complete(&id1, "r1".to_string()).await;
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            0,
+            "部分完成不发系统通知（仅静默注入消息）"
+        );
+        manager.complete(&id2, "r2".to_string()).await;
+        assert_eq!(
+            calls.load(AtomicOrdering::SeqCst),
+            1,
+            "全部完成发一次系统通知"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_notification_sink_on_failure() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager =
+            BackgroundTaskManager::new().with_notification_sink(Arc::new(RecordingSink {
+                calls: calls.clone(),
+            }));
+        let id = manager.register("t1".to_string(), "s1".to_string()).await;
+        manager.fail(&id, "boom".to_string()).await;
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "失败触发系统通知");
+    }
+
+    #[tokio::test]
+    async fn test_notification_sink_set_after_build() {
+        // 构建后注入（set_notification_sink）：与 waker 槽同模式
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = BackgroundTaskManager::new();
+        manager
+            .set_notification_sink(Arc::new(RecordingSink {
+                calls: calls.clone(),
+            }))
+            .await;
+        let id = manager.register("t1".to_string(), "s1".to_string()).await;
+        manager.complete(&id, "r".to_string()).await;
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "构建后注入同样生效");
     }
 
     #[tokio::test]

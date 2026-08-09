@@ -103,6 +103,9 @@ allowed_directories = []
 blocked_directories = ["/", "/etc", "/bin", "/sbin", "/usr/bin", "/usr/sbin"]
 allowed_commands = []
 blocked_commands = ["rm -rf /", "format", "del /s", "rd /s"]
+# "总是询问"命令列表：命中的命令强制走人工审批/询问（不被自动放行、
+# Safe 自动通过与无人值守模式放行）。默认空。
+prompt_commands = []
 confirm_commands = true
 max_file_size = 104857600
 audit_logging = true

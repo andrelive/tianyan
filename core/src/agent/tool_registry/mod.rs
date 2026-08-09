@@ -294,6 +294,24 @@ impl ToolRegistry {
         self
     }
 
+    /// 设置后台任务系统通知通道（全部完成/失败时桌面通知；未注入时静默）。
+    pub fn with_notification_sink(
+        mut self,
+        sink: crate::notification::SharedNotificationSink,
+    ) -> Self {
+        self.background_tasks = Arc::new(
+            (*self.background_tasks)
+                .clone()
+                .with_notification_sink(sink),
+        );
+        self
+    }
+
+    /// 设置后台任务系统通知通道（构建后注入；运行时替换实现用）。
+    pub async fn set_notification_sink(&self, sink: crate::notification::SharedNotificationSink) {
+        self.background_tasks.set_notification_sink(sink).await;
+    }
+
     /// 设置后台任务唤醒器（ADR-013：全部完成/失败时触发主 agent 新轮）。
     ///
     /// 构建后注入（Agent 构建完成后注册自引用转发器）。

@@ -21,6 +21,9 @@ pub struct ChatRequest {
     /// 指定使用的模型。未提供时使用配置中的默认模型。
     #[serde(default)]
     pub model: Option<String>,
+    /// 运行模式（"act" 执行 / "plan" 只读）。缺省为 Act。
+    #[serde(default)]
+    pub mode: Option<tianyan::agent::AgentMode>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -243,7 +246,27 @@ mod tests {
             temperature: 0.7,
             max_tokens: 100,
             model: None,
+            mode: None,
         }
+    }
+
+    #[test]
+    fn test_chat_request_mode_deserialization() {
+        // 缺省 mode：反序列化为 None（调用方按 Act 处理，行为零变化）
+        let req: ChatRequest =
+            serde_json::from_str(r#"{"messages":[{"role":"user","content":"hi"}]}"#).unwrap();
+        assert!(req.mode.is_none());
+
+        // 显式 plan / act：解析为对应 AgentMode
+        let plan: ChatRequest =
+            serde_json::from_str(r#"{"messages":[{"role":"user","content":"hi"}],"mode":"plan"}"#)
+                .unwrap();
+        assert_eq!(plan.mode, Some(tianyan::agent::AgentMode::Plan));
+
+        let act: ChatRequest =
+            serde_json::from_str(r#"{"messages":[{"role":"user","content":"hi"}],"mode":"act"}"#)
+                .unwrap();
+        assert_eq!(act.mode, Some(tianyan::agent::AgentMode::Act));
     }
 
     #[test]

@@ -109,6 +109,11 @@ pub struct ApprovalResponse {
     pub responded_at: chrono::DateTime<chrono::Utc>,
     /// 审批者（用户 ID 或 "auto"）。
     pub approved_by: String,
+    /// 用户审批时编辑后的命令（纠正/改写场景；仅在 decision=Approve
+    /// 且用户在审批面板提供编辑值时存在）。仅用于审计与通知——
+    /// 实际执行仍由 agent 按原命令发起。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_command: Option<String>,
 }
 
 /// 审批记录（用于审计）。
@@ -120,6 +125,10 @@ pub struct ApprovalRecord {
     pub response: Option<ApprovalResponse>,
     /// 最终执行结果（成功/失败）。
     pub execution_result: Option<bool>,
+    /// 用户审批时编辑后的命令（纠正/改写场景；仅审计展示，
+    /// 不影响实际执行——执行链仍按原命令发起）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_command: Option<String>,
 }
 
 /// 自动审批规则。
@@ -186,6 +195,10 @@ pub struct ApprovalWorkflowConfig {
     /// attended 模式下是否等待人工审批响应（需 GUI 审批通道已接入）。
     /// 当前无审批通道，默认 false：未确认的操作立即拒绝并降级为询问用户。
     pub wait_for_approval: bool,
+    /// "总是询问"命令列表：命中的命令强制走人工审批/询问，
+    /// 不被自动审批规则、Safe 自动放行与无人值守模式放行。
+    /// 默认空（不强制）。
+    pub prompt_commands: Vec<String>,
 }
 
 impl Default for ApprovalWorkflowConfig {
@@ -209,6 +222,8 @@ impl Default for ApprovalWorkflowConfig {
             unattended_mode: false,
             // 审批通道未接入前不等待：未确认即拒绝，由上层降级为 ask_user 追问
             wait_for_approval: false,
+            // 默认不强制任何命令走人工审批
+            prompt_commands: Vec::new(),
         }
     }
 }

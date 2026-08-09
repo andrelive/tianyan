@@ -11,6 +11,7 @@
 
 mod gc_task;
 mod memory_task;
+mod reminder_task;
 pub mod rule_recorder;
 mod rule_suggester;
 mod rule_task;
@@ -19,6 +20,7 @@ mod summary_task;
 
 pub use gc_task::GcTask;
 pub use memory_task::MemoryTask;
+pub use reminder_task::ReminderTask;
 pub use rule_recorder::RuleRecorder;
 pub use rule_task::RuleTask;
 pub use snapshot_gc_task::SnapshotGcTask;

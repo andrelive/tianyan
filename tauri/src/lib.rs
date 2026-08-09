@@ -14,7 +14,8 @@ pub mod server;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use tracing_subscriber::{
@@ -29,6 +30,14 @@ use server::{find_available_port, PREFERRED_PORT, SERVER_HOST};
 
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// 剪贴板监听轮询间隔（毫秒）。
+///
+/// tauri 不做配置解析（由服务端 `clipboard.poll_interval_ms` 门控行为），
+/// 固定间隔轮询；捕获内容是否沉淀由服务端配置决定。
+const CLIPBOARD_POLL_INTERVAL_MS: u64 = 1000;
+/// agent outbox 轮询间隔（毫秒）：`clipboard_write` 工具产物 → 系统剪贴板。
+const CLIPBOARD_OUTBOX_POLL_INTERVAL_MS: u64 = 500;
 
 /// 启动期致命错误：记录日志 → 弹原生错误对话框 → 退出进程。
 ///
@@ -125,6 +134,84 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     app.manage(tray);
     info!("系统托盘已启用（左键显示窗口，右键菜单退出）");
     Ok(())
+}
+
+/// Tauri 系统通知通道：`core::notification::NotificationSink` 的桌面实现。
+///
+/// 用 tauri-plugin-notification 发送 OS 原生通知；`notify` 是同步非阻塞的
+/// （通知由系统接管，失败仅告警）。装配层把本类型经 `app.manage` 托管，
+/// 集成者从 `app.state::<TauriNotificationSink>()` 取出后注入
+/// server/AppState → agent builder（`with_notification_sink`）。
+pub struct TauriNotificationSink {
+    app: tauri::AppHandle,
+}
+
+impl TauriNotificationSink {
+    /// 创建通知通道（持有 AppHandle，任意线程可发送）。
+    pub fn new(app: tauri::AppHandle) -> Self {
+        Self { app }
+    }
+}
+
+impl tianyan::notification::NotificationSink for TauriNotificationSink {
+    fn notify(&self, title: &str, body: &str) {
+        use tauri_plugin_notification::NotificationExt;
+        if let Err(e) = self
+            .app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+        {
+            warn!("系统通知发送失败：{}", e);
+        }
+    }
+}
+
+/// 全局快捷键回调（tauri-plugin-global-shortcut）。
+///
+/// - `Ctrl+Alt+T`：唤起/聚焦主窗口（与托盘「显示主窗口」同语义）
+/// - `Ctrl+Alt+S`：向 webview emit `tianyan-stop-stream`（前端据此停止
+///   当前流式输出；前端接线由集成者完成）
+fn on_global_shortcut(
+    app: &tauri::AppHandle,
+    shortcut: &tauri_plugin_global_shortcut::Shortcut,
+    event: tauri_plugin_global_shortcut::ShortcutEvent,
+) {
+    use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
+
+    if event.state != ShortcutState::Pressed {
+        return; // 仅处理按下（松开忽略，避免重复触发）
+    }
+
+    let ctrl_alt = Modifiers::CONTROL | Modifiers::ALT;
+    if shortcut.matches(ctrl_alt, Code::KeyT) {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    } else if shortcut.matches(ctrl_alt, Code::KeyS) {
+        if let Err(e) = app.emit("tianyan-stop-stream", ()) {
+            warn!("停止流式事件发送失败：{}", e);
+        }
+    }
+}
+
+/// 构建全局快捷键插件（注册失败仅告警，不阻塞应用启动）。
+///
+/// 快捷键被其他程序占用等注册失败场景不致命——用户仍可用托盘/窗口操作。
+fn build_global_shortcut_plugin() -> Option<tauri::plugin::TauriPlugin<tauri::Wry>> {
+    match tauri_plugin_global_shortcut::Builder::new()
+        .with_shortcuts(["ctrl+alt+t", "ctrl+alt+s"])
+        .map(|builder| builder.with_handler(on_global_shortcut).build())
+    {
+        Ok(plugin) => Some(plugin),
+        Err(e) => {
+            warn!("全局快捷键注册失败（应用继续运行）：{e}");
+            None
+        }
+    }
 }
 
 /// 服务器重启退避：初始间隔（首次重启等待时间）。
@@ -250,6 +337,95 @@ fn next_backoff(current: Duration, max: Duration) -> Duration {
     } else {
         doubled
     }
+}
+
+/// 剪贴板 I/O 循环：监听捕获（读系统剪贴板 → 服务端沉淀）+ agent 写出（outbox → 系统剪贴板）。
+///
+/// 两个方向共用一个 `last_seen` 防回声：outbox 写出前先记录，监听循环
+/// 读到相同文本即跳过，避免 agent 自己写入的内容被再次捕获上报。
+/// 配置门控在服务端（`POST /api/v1/clipboard/capture` 检查 `clipboard.enabled`）：
+/// 本循环始终运行，不解析配置。
+///
+/// 说明：`clipboard-manager` 的 `read_text`/`write_text` 不应在主线程调用
+/// （Linux 下可能死锁），本循环运行在 tokio 工作线程，天然满足。
+async fn clipboard_io_loop(app_handle: tauri::AppHandle, api_base: String) {
+    let client = reqwest::Client::new();
+    let last_seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+    // 监听方向：非空文本且与上次不同 → POST /api/v1/clipboard/capture。
+    // 仅在 HTTP 交换完成（含 204 门控拒绝）后记录 last_seen；
+    // 服务端暂不可达时保留旧值，下次轮询重试，不丢捕获。
+    let monitor = {
+        let app_handle = app_handle.clone();
+        let last_seen = last_seen.clone();
+        let client = client.clone();
+        let api_base = api_base.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_millis(CLIPBOARD_POLL_INTERVAL_MS)).await;
+                let text = match app_handle.clipboard().read_text() {
+                    Ok(t) if !t.trim().is_empty() => t,
+                    _ => continue,
+                };
+                let is_new = {
+                    let seen = last_seen.lock().unwrap_or_else(|p| p.into_inner());
+                    seen.as_deref() != Some(text.as_str())
+                };
+                if !is_new {
+                    continue;
+                }
+                let url = format!("{api_base}/clipboard/capture");
+                match client
+                    .post(&url)
+                    .json(&serde_json::json!({ "text": text }))
+                    .send()
+                    .await
+                {
+                    Ok(_) => {
+                        *last_seen.lock().unwrap_or_else(|p| p.into_inner()) = Some(text);
+                    }
+                    Err(e) => warn!("剪贴板捕获上报失败（下次轮询重试）：{e}"),
+                }
+            }
+        })
+    };
+
+    // 写出方向：GET /api/v1/clipboard/outbox（drain 语义）→ 写系统剪贴板。
+    // 写前先记录 last_seen，消除与监听方向的回声竞态。
+    let outbox_poller = {
+        let app_handle = app_handle.clone();
+        let last_seen = last_seen.clone();
+        let client = client.clone();
+        let api_base = api_base.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_millis(CLIPBOARD_OUTBOX_POLL_INTERVAL_MS)).await;
+                let url = format!("{api_base}/clipboard/outbox");
+                let Ok(response) = client.get(&url).send().await else {
+                    continue;
+                };
+                let Ok(body) = response.json::<serde_json::Value>().await else {
+                    continue;
+                };
+                let Some(contents) = body["contents"].as_array() else {
+                    continue;
+                };
+                for item in contents {
+                    let Some(content) = item.as_str() else {
+                        continue;
+                    };
+                    // 先记录后写出：即使写出与监听轮询并发，也不会回声上报
+                    *last_seen.lock().unwrap_or_else(|p| p.into_inner()) =
+                        Some(content.to_string());
+                    if let Err(e) = app_handle.clipboard().write_text(content) {
+                        warn!("剪贴板写入失败：{e}");
+                    }
+                }
+            }
+        })
+    };
+
+    let _ = tokio::join!(monitor, outbox_poller);
 }
 
 /// 初始化日志系统 - 同时输出到文件和控制台。
@@ -492,8 +668,10 @@ pub fn run() {
     // 构建并运行 Tauri 应用
     // Tauri 会自动加载 frontendDist 中配置的静态文件 (gui/dist)
     // 前端通过 HTTP 调用 Axum 后端 API
-    let app = match tauri::Builder::default()
+    let mut app_builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         // 单实例保护：双开时第二实例的启动参数转发到第一实例并聚焦主窗口，
         // 避免两个进程共享同一 SQLite/LanceDB 数据文件
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -514,7 +692,12 @@ pub fn run() {
                     }
                 }
             }
-        })
+        });
+    // 全局快捷键（Ctrl+Alt+T 唤起 / Ctrl+Alt+S 停止流式）：注册失败仅告警
+    if let Some(plugin) = build_global_shortcut_plugin() {
+        app_builder = app_builder.plugin(plugin);
+    }
+    let app = match app_builder
         .setup(move |app| {
             info!("Tauri setup completed, frontend loaded from gui/dist");
             // 注入实际监听端口：前端 getApiBase() 优先读取该变量
@@ -530,6 +713,14 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.open_devtools();
             }
+            // 系统通知通道（core::notification::NotificationSink 桌面实现）：
+            // 托管到 Tauri state + 注册到 server 全局通知点（动态包装，
+            // core 组件构建时注入的包装器读取此处，注册前后均动态生效）
+            app.manage(TauriNotificationSink::new(app.handle().clone()));
+            tianyan_server::notification::register_global_notification_sink(Arc::new(
+                TauriNotificationSink::new(app.handle().clone()),
+            ));
+            info!("系统通知通道已启用（后台任务完成/审批挂起/主动提醒 → 桌面通知）");
             // 将 AppHandle 交给监督循环（服务器重启后注入新端口用）
             let _ = app_handle_tx.send(app.handle().clone());
             build_tray(app)?;
@@ -542,6 +733,12 @@ pub fn run() {
             fatal_startup_error("界面初始化", &format!("Tauri 应用构建失败：{}", e));
         }
     };
+
+    // 剪贴板 I/O 循环：监听捕获（→ 服务端沉淀）+ agent clipboard_write 回写
+    // （plugin 状态在 build 阶段已托管，AppHandle 可安全访问剪贴板）
+    let api_base = format!("http://{}:{}/api/v1", SERVER_HOST, port);
+    rt.spawn(clipboard_io_loop(app.handle().clone(), api_base));
+    info!("剪贴板 I/O 循环已启动（监听捕获 + agent 写出）");
 
     // 退出防重入：app.exit(0) 可能再次触发 ExitRequested
     let exiting_cb = exiting.clone();

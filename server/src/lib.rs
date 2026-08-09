@@ -18,12 +18,14 @@ use tianyan::scheduler::tasks::{GcTask, MemoryTask, RuleTask, SnapshotGcTask, Su
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 
 use crate::agent_builder::create_model_services;
+use crate::api::events::{handlers as event_handlers, processor as event_processor};
 
 // Import API module
 pub mod agent_builder;
 pub mod api;
 pub mod core_bridge;
 pub mod mcp_bridge;
+pub mod notification;
 pub mod state;
 
 use api::create_api_router;
@@ -449,6 +451,75 @@ async fn start_server_inner(
                     Arc::new(SnapshotGcTask::new(sm)),
                 ))
                 .await?;
+        }
+
+        // 注册主动提醒任务（reminder.enabled 时；间隔取整分钟，至少 1 分钟）
+        {
+            let cfg = state.config().read().await.clone();
+            if cfg.reminder.enabled {
+                let interval_min = (cfg.reminder.interval_secs.max(60) / 60) as u64;
+                let model_services = create_model_services(&cfg).await.map_err(|e| {
+                    tianyan::TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{}", e))
+                })?;
+                let model_name = cfg
+                    .models
+                    .resolve(tianyan::config::ModelCapability::Chat)
+                    .map(|r| r.model)
+                    .unwrap_or_default();
+                scheduler
+                    .register_task(TaskDefinition::new(
+                        "reminder",
+                        "主动提醒",
+                        format!("0 */{interval_min} * * * *"),
+                        Arc::new(tianyan::scheduler::tasks::ReminderTask::new(
+                            model_services.chat,
+                            model_name,
+                            notification::global_notification_sink(),
+                            state.session_manager(),
+                            cfg.reminder.max_per_run,
+                            cfg.reminder.inject_to_session,
+                        )),
+                    ))
+                    .await?;
+            }
+        }
+
+        // T1 事件驱动：webhook 令牌 + 文件监听 + 事件处理器（events.enabled 时）
+        {
+            let events_config = state.config().read().await.events.clone();
+            if events_config.enabled {
+                event_handlers::set_webhook_token(&events_config.webhook_token);
+                event_handlers::set_event_bus(state.event_bus());
+                // 文件监听（notify 独立线程运行；失败仅告警，webhook 仍可用）
+                if !events_config.watch_dirs.is_empty() {
+                    let watcher = tianyan::events::FileWatcher::new((*state.event_bus()).clone());
+                    let dirs: Vec<std::path::PathBuf> = events_config
+                        .watch_dirs
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                    if let Err(e) = watcher
+                        .start(dirs, events_config.watch_events.clone())
+                        .await
+                    {
+                        warn!("文件监听启动失败（事件驱动部分不可用）：{}", e);
+                    }
+                }
+                // 事件处理器（task 动作在 scheduler 可用时装配触发器；
+                // 事件装配位于 has_providers 块内，scheduler/task_ctx 必存在）
+                let deps = event_processor::ProcessorDeps::new(
+                    state.agent().await,
+                    state.session_manager(),
+                )
+                .with_task_trigger(Arc::new(
+                    event_processor::SchedulerTaskTrigger::new(scheduler.clone(), task_ctx.clone()),
+                ));
+                event_processor::EventProcessor::start(
+                    (*state.event_bus()).clone(),
+                    tianyan::events::parse_rules(&events_config.rules),
+                    deps,
+                );
+            }
         }
 
         // 启动任务调度器
