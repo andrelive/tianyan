@@ -155,6 +155,11 @@ pub trait AgentCoordinator: Send + Sync {
     /// 获取后台任务列表快照（delegate_to_agent(background) 的任务）。
     async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask>;
 
+    /// 取消后台任务（终态任务为幂等空操作）。
+    ///
+    /// 返回是否取消成功（任务不存在时返回 false，不报错）。
+    async fn cancel_background_task(&self, task_id: &str) -> Result<bool>;
+
     /// 手动压缩会话（前端按钮触发）。
     ///
     /// 与自动压缩共用 `maybe_compress_and_persist` 逻辑（含压缩点刷新：
@@ -402,6 +407,15 @@ impl AgentCoordinator for Agent {
             .background_tasks
             .snapshot()
             .await
+    }
+
+    async fn cancel_background_task(&self, task_id: &str) -> Result<bool> {
+        let manager = &self.agent_loop.tool_registry().background_tasks;
+        if manager.get(task_id).await.is_none() {
+            return Ok(false);
+        }
+        manager.cancel(task_id).await?;
+        Ok(true)
     }
 
     async fn shutdown(&self) -> Result<()> {

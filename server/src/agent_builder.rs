@@ -287,6 +287,11 @@ impl AgentCoordinator for WizardModeAgent {
         Vec::new()
     }
 
+    async fn cancel_background_task(&self, _task_id: &str) -> TianyanResult<bool> {
+        // 向导模式未装配 Agent，无后台任务
+        Ok(false)
+    }
+
     async fn compress_session(&self, _session_id: &str) -> TianyanResult<bool> {
         // 向导模式未装配 Agent，压缩不可用
         Ok(false)
