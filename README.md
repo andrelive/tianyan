@@ -296,8 +296,16 @@ API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
 | `/api/v1/retrieval/traces` | GET | 最近检索轨迹（单次检索完整过程，FIFO 500 条） |
 | `/api/v1/scheduler/status` | GET | 定时任务状态（任务列表 / 执行次数 / 距上次执行） |
 | `/api/v1/approval/status` | GET | 审批状态（风险配置 / 待处理 / 待确认 / 审计记录） |
+| `/api/v1/approval/respond` | POST | 响应待处理审批请求（GUI 审批面板） |
 | `/api/v1/skills` | GET | 技能列表 |
 | `/api/v1/skills/{id}/execute` | POST | 执行技能（同步执行，响应即最终结果） |
+| `/api/v1/tasks` | GET | 后台任务列表（delegate_to_agent background 任务） |
+| `/api/v1/tasks/{id}/cancel` | POST | 取消后台任务（终态幂等；不存在 404） |
+| `/api/v1/workspace/tree` | GET | 工作区文件树 |
+| `/api/v1/workspace/read` | GET | 工作区文件读取 |
+| `/api/v1/workspace/diff` | GET | 工作区差异 |
+| `/api/v1/workspace/apply-patch` | POST | 工作区补丁应用 |
+| `/api/v1/workspace/apply-edit` | POST | 工作区编辑应用 |
 | `/api/v1/config` | GET / PUT | 读取 / 更新配置 |
 | `/api/v1/config/status` | GET | 配置状态 |
 | `/api/v1/config/{section}` | GET | 获取指定配置节 |

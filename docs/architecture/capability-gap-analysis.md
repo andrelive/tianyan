@@ -58,8 +58,8 @@
 
 | 缺口 | 现状 | 业界标准 | 参照 |
 |------|------|---------|------|
-| Checkpoint 升级 | ⚠️ 消息级快照回退 | 每 prompt 自动快照 + 对话/代码分选回滚（100 个）；step-level checkpoint | Claude Code、LangGraph PostgresSaver |
-| 防失控硬限制 | ⚠️ 深度上限 3（与 Claude 默认一致 ✅），无并发上限/终止条件/预算 | 并发上限 20、termination 一等公民、recursion_limit | Claude Code、AutoGen、LangGraph |
+| Checkpoint 升级 | ✅ **已由现状覆盖**（2026-08-09 核实） | 每轮自动快照已存在：`capture_workspace_snapshot` 在 process_message/process_message_stream 每条消息处理前自动捕获（ADR-006/008：gzip + GC + similar diff）；恢复链路：消息回退/重做 API（`/messages/delete` + `/messages/redo`）+ 前端按钮。与业界剩余差距仅"分选回滚（对话/代码分开恢复）"与"快照时间线视图"，单用户场景价值低，不追 |
+| 防失控硬限制 | ❌ **已决策不做**（2026-08-09） | 本地单用户场景：嵌套深度上限 3 + 后台并发上限 4 已构成足够边界；任务级 `max_turns`/`timeout_secs` 由 LLM 自主设置；终止条件由用户/会话自然边界承担。**不再评估该缺口** |
 | HITL 审批门 | ⚠️ 有审批工作流但未挂接委托/敏感工具 pause-resume | `needs_approval` + RunState 序列化跨进程等待 | OpenAI SDK、CrewAI @human_feedback |
 | 跨 agent 通信 | ❌ 无 | agent teams 共享任务清单+消息；文件信道；共享 state（共识：多数场景不需要） | Claude Code、Cursor |
 | 进度可视化 | ❌ 无 | `/tasks`、Agents Window、agents panel | Cursor、Copilot |

@@ -34,7 +34,7 @@
 | `model` | `core/src/model/` | 模型服务容器（`ModelServices`）+ provider 实现 | `traits.rs`, `services.rs`, `provider/` |
 | `observability` | `core/src/observability/` | 可观测性 + 使用统计（`AgentMetrics`、`UsageStats`；SQLite 连接经 `vfs::backend::sqlite_db` 复用） | `mod.rs`, `usage_stats.rs` |
 | `scheduler` | `core/src/scheduler/` | 定时任务调度器 + 任务实现 | `task_scheduler.rs`, `tasks/` |
-| `session` | `core/src/session/` | 会话管理（PersistentSessionManager，基于 VFS）；截断常量单点（`MAX_SESSION_MESSAGES`/`KEEP_RECENT_MESSAGES`） | `manager.rs`, `types.rs` |
+| `session` | `core/src/session/` | 会话管理（PersistentSessionManager，基于 VFS）；JSONL 首行 SessionHeader（注入上下文快照持久化）；截断常量单点（`MAX_SESSION_MESSAGES`/`KEEP_RECENT_MESSAGES`） | `manager.rs`, `types.rs` |
 | `skills` | `core/src/skills/` | 技能定义、执行、学习（GEPA 进化引擎） | `definition.rs`, `executor.rs`, `manager.rs`, `handlers/`, `learning/` |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退，⚠️ ADR-006 VFS 例外） | `mod.rs` |
 | `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `backend/sqlite_db.rs`, `vector/lancedb/`, `summary/engine.rs` |
