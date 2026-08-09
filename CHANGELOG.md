@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **压缩点技能刷新 + 手动压缩**：上下文压缩（自动或手动触发）是会话内唯一的前缀重建时刻——压缩成功后同步清空注入上下文缓存（learned rules/memories 下一轮重新检索，GEPA 经验对会话后续阶段可见）并增量注册技能（`SkillRefresher` 钩子）；`POST /api/v1/sessions/{id}/compress` 手动压缩入口（与自动压缩共用 `maybe_compress_and_persist` 逻辑，仅触发点不同）
 - **注入上下文快照持久化**：soul/rules/memories 前缀快照随会话固化（JSONL 首行 SessionHeader）——重启后旧会话沿用同一份快照，不重新检索，前缀内容与重启前一致（prompt 缓存不失效、语义不漂移）；仅在会话首次加载（无快照）与压缩点更新；旧格式会话兼容加载
 - **后台任务并发正确性**：session_id 从共享可变字段（`current_session_id`）改为**调用链显式参数传递**（`execute_parallel`/`execute_single`/`delegate_to_agent`）——多会话并发 turn 不再互相覆盖归属，后台任务可靠挂到正确的父会话；任务注册表新增单调递增 `seq` 排序键（替代毫秒时间戳——同毫秒注册 + HashMap 随机迭代导致快照顺序不确定的竞态）
+- **审批挂起通知**：wait_for_approval 模式（GUI 审批面板通道）挂起时，`ApprovalPendingNotifier` 把审批请求作为 System 消息注入所属会话——前台任务用户获得面板指引；**后台子 agent 的审批请求不再静默**（此前无人知晓、只能等超时拒绝），用户到审批面板批准/拒绝后任务经 oneshot 通道恢复继续
+- **子任务无交互审批**（原则落地：子 agent 是主 agent 意图的执行器，任务下发即授权边界）：子任务（subagent）上下文审批**永不等待**——已确认指纹命中（主 agent 确认过）直接执行（指纹共享），未授权新危险操作立即拒绝（`request_approval_no_wait`，拒绝原因携带"主任务授权"标记）→ 子 agent 上报 → 主 agent 在主对话确认 → 指纹记录 → 重新委托；交互只发生在主 agent 与用户之间。同时修复审批调用的真实 session_id 传递（此前硬编码 "tool-execution"，挂起通知/归属全部错乱）
 
 ### Changed
 - Workspace 多 Crate 重构（core/server/gui/tauri）

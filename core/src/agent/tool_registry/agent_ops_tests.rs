@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use crate::common::types::{FunctionCall, TokenUsage, ToolCall, ToolCallType};
 use crate::config::SafetyMode;
+use crate::executor::approval::{ApprovalDecision, ApprovalWorkflow, ApprovalWorkflowConfig};
 use crate::executor::SecurityPolicy;
 use crate::model::types::{ChatChoice, ChatCompletionResponse};
 use crate::model::MockChatService;
@@ -48,7 +49,7 @@ fn default_strict_policy() -> SecurityPolicy {
 async fn test_execute_command_success_captures_output() {
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_execute_command(r#"{"command":"echo hello"}"#)
+        .execute_execute_command(r#"{"command":"echo hello"}"#, "test-session", false)
         .await
         .unwrap();
     assert!(result["stdout"].as_str().unwrap().contains("hello"));
@@ -59,7 +60,7 @@ async fn test_execute_command_success_captures_output() {
 async fn test_execute_command_rejects_blocked_command() {
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_execute_command(r#"{"command":"rm foo.txt"}"#)
+        .execute_execute_command(r#"{"command":"rm foo.txt"}"#, "test-session", false)
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
@@ -69,7 +70,7 @@ async fn test_execute_command_rejects_blocked_command() {
 async fn test_execute_command_rejects_shell_metacharacters() {
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_execute_command(r#"{"command":"echo a && echo b"}"#)
+        .execute_execute_command(r#"{"command":"echo a && echo b"}"#, "test-session", false)
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
@@ -78,9 +79,72 @@ async fn test_execute_command_rejects_shell_metacharacters() {
 #[tokio::test]
 async fn test_execute_command_rejects_missing_arguments() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_execute_command(r#"{}"#).await;
+    let result = registry
+        .execute_execute_command(r#"{}"#, "test-session", false)
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
+}
+
+#[tokio::test]
+async fn test_subagent_command_denied_without_hang() {
+    // 回归保护：子任务（subagent=true）审批不交互——即使全局
+    // wait_for_approval=true（主循环会挂起等面板），子任务也必须立即
+    // 拒绝（timeout 包裹验证不挂起），由主 agent 在主对话确认后重试。
+    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
+        unattended_mode: false,
+        wait_for_approval: true,
+        ..Default::default()
+    }));
+    let registry =
+        ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow.clone());
+
+    let fut =
+        registry.execute_execute_command(r#"{"command":"cargo --version"}"#, "session-1", true);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), fut)
+        .await
+        .expect("子任务审批必须立即返回，不得挂起等待");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("安全违规"), "子任务未授权操作应拒绝: {err}");
+    assert!(
+        err.contains("子任务操作需要主任务授权"),
+        "拒绝原因应携带主任务授权标记: {err}"
+    );
+    // 审批请求不应进入待处理队列（不挂起）
+    assert!(
+        workflow.get_pending_approvals().await.is_empty(),
+        "子任务审批不应产生挂起请求"
+    );
+}
+
+#[tokio::test]
+async fn test_subagent_command_approved_via_shared_fingerprint() {
+    // 回归保护：主 agent 已确认过的操作（指纹共享），子任务直接执行——
+    // 子 agent 是主 agent 意图的执行器，已授权范围内的操作零交互。
+    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
+        unattended_mode: false,
+        wait_for_approval: true,
+        ..Default::default()
+    }));
+    // 主循环先确认过该操作（指纹记录）
+    let action = crate::executor::Action::ExecuteCommand {
+        command: "cargo --version".to_string(),
+        cwd: None,
+        timeout_secs: None,
+    };
+    workflow.record_user_confirmation(&action).await;
+
+    let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
+
+    let result = registry
+        .execute_execute_command(r#"{"command":"cargo --version"}"#, "session-1", true)
+        .await
+        .unwrap();
+    assert_eq!(result["exit_code"].as_i64(), Some(0));
+    assert!(
+        result["stdout"].as_str().unwrap().contains("cargo"),
+        "子任务应执行已确认操作: {result:?}"
+    );
 }
 
 // ── call_skill ───────────────────────────────────────────────────────────

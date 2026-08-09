@@ -377,7 +377,11 @@ async fn test_write_file_success() {
     let registry = ToolRegistry::new(default_strict_policy());
     let path = dir.path().join("out.txt");
     let result = registry
-        .execute_write_file(&write_file_args(&path, "written content"))
+        .execute_write_file(
+            &write_file_args(&path, "written content"),
+            "test-session",
+            false,
+        )
         .await;
     assert!(result.is_ok());
     let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
@@ -387,7 +391,9 @@ async fn test_write_file_success() {
 #[tokio::test]
 async fn test_write_file_rejects_missing_arguments() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_write_file(r#"{}"#).await;
+    let result = registry
+        .execute_write_file(r#"{}"#, "test-session", false)
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -402,7 +408,7 @@ async fn test_write_file_rejects_blocked_directory() {
     std::fs::write(&path, "existing").unwrap();
     let registry = ToolRegistry::new(file_policy(vec![], vec![blocked.to_path_buf()]));
     let result = registry
-        .execute_write_file(&write_file_args(&path, "x"))
+        .execute_write_file(&write_file_args(&path, "x"), "test-session", false)
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
@@ -414,7 +420,7 @@ async fn test_write_file_rejects_when_file_write_disabled() {
     policy.allow_file_write = false;
     let registry = ToolRegistry::new(policy);
     let result = registry
-        .execute_write_file(r#"{"path":"any.txt","content":"x"}"#)
+        .execute_write_file(r#"{"path":"any.txt","content":"x"}"#, "test-session", false)
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
@@ -537,7 +543,7 @@ async fn test_apply_edit_success() {
         }
     ]);
     let result = registry
-        .execute_apply_edit(&apply_edit_args(&path, edits))
+        .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
         .await
         .unwrap();
     assert_eq!(result["edits_applied"].as_u64(), Some(1));
@@ -550,7 +556,9 @@ async fn test_apply_edit_success() {
 #[tokio::test]
 async fn test_apply_edit_rejects_missing_edits() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_apply_edit(r#"{"path":"x.txt"}"#).await;
+    let result = registry
+        .execute_apply_edit(r#"{"path":"x.txt"}"#, "test-session", false)
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -567,7 +575,7 @@ async fn test_apply_edit_rejects_path_traversal() {
     let registry = ToolRegistry::new(file_policy(vec![allowed.to_path_buf()], vec![]));
     let edits = json!([{ "start_line": 1, "new_lines": ["x"] }]);
     let result = registry
-        .execute_apply_edit(&apply_edit_args(&escape, edits))
+        .execute_apply_edit(&apply_edit_args(&escape, edits), "test-session", false)
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
@@ -580,7 +588,11 @@ async fn test_apply_edit_rejects_when_file_write_disabled() {
     let registry = ToolRegistry::new(policy);
     let edits = json!([{ "start_line": 1, "new_lines": ["x"] }]);
     let result = registry
-        .execute_apply_edit(&apply_edit_args(std::path::Path::new("any.txt"), edits))
+        .execute_apply_edit(
+            &apply_edit_args(std::path::Path::new("any.txt"), edits),
+            "test-session",
+            false,
+        )
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
@@ -597,7 +609,7 @@ async fn test_apply_edit_approval_denied() {
     let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
     let edits = json!([{ "start_line": 1, "new_lines": ["x"] }]);
     let result = registry
-        .execute_apply_edit(&apply_edit_args(&path, edits))
+        .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
         .await;
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("安全违规"), "应报安全违规: {msg}");
@@ -622,7 +634,7 @@ async fn test_apply_edit_approval_approved() {
     let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
     let edits = json!([{ "start_line": 1, "new_lines": ["x"] }]);
     let result = registry
-        .execute_apply_edit(&apply_edit_args(&path, edits))
+        .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
         .await;
     assert!(result.is_ok(), "无人值守应批准编辑: {result:?}");
     let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
@@ -667,7 +679,7 @@ async fn test_apply_patch_success_multi_file() {
 ";
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_apply_patch(&apply_patch_args(patch))
+        .execute_apply_patch(&apply_patch_args(patch), "test-session", false)
         .await
         .unwrap();
     assert_eq!(result["total_files"].as_u64(), Some(2));
@@ -681,7 +693,9 @@ async fn test_apply_patch_success_multi_file() {
 #[tokio::test]
 async fn test_apply_patch_rejects_missing_patch() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_apply_patch(r#"{}"#).await;
+    let result = registry
+        .execute_apply_patch(r#"{}"#, "test-session", false)
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -700,7 +714,7 @@ async fn test_apply_patch_rejects_path_traversal() {
     );
     let registry = ToolRegistry::new(file_policy(vec![allowed.to_path_buf()], vec![]));
     let result = registry
-        .execute_apply_patch(&apply_patch_args(&patch))
+        .execute_apply_patch(&apply_patch_args(&patch), "test-session", false)
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
@@ -712,9 +726,11 @@ async fn test_apply_patch_rejects_when_file_write_disabled() {
     policy.allow_file_write = false;
     let registry = ToolRegistry::new(policy);
     let result = registry
-        .execute_apply_patch(&apply_patch_args(
-            "*** Update File: x.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n",
-        ))
+        .execute_apply_patch(
+            &apply_patch_args("*** Update File: x.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n"),
+            "test-session",
+            false,
+        )
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
@@ -734,7 +750,7 @@ async fn test_apply_patch_approval_denied() {
         path.to_string_lossy()
     );
     let result = registry
-        .execute_apply_patch(&apply_patch_args(&patch))
+        .execute_apply_patch(&apply_patch_args(&patch), "test-session", false)
         .await;
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("安全违规"), "应报安全违规: {msg}");
@@ -764,7 +780,9 @@ async fn test_apply_patch_approval_approved() {
 -b
 +c
 ";
-    let result = registry.execute_apply_patch(&apply_patch_args(patch)).await;
+    let result = registry
+        .execute_apply_patch(&apply_patch_args(patch), "test-session", false)
+        .await;
     assert!(result.is_ok(), "无人值守应批准补丁: {result:?}");
     let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
     assert_eq!(on_disk, "c\n");
@@ -790,7 +808,7 @@ async fn test_apply_patch_rejects_second_file_absolute_outside_allowlist() {
     );
     let registry = ToolRegistry::new(file_policy(vec![allowed.to_path_buf()], vec![]));
     let result = registry
-        .execute_apply_patch(&apply_patch_args(&patch))
+        .execute_apply_patch(&apply_patch_args(&patch), "test-session", false)
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
@@ -826,7 +844,7 @@ async fn test_apply_edit_without_lsp_manager_unchanged() {
     let registry = ToolRegistry::new(default_strict_policy());
     let edits = json!([{ "start_line": 1, "new_lines": ["x"] }]);
     let result = registry
-        .execute_apply_edit(&apply_edit_args(&path, edits))
+        .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
         .await
         .expect("编辑成功");
     assert!(
@@ -844,7 +862,7 @@ async fn test_apply_edit_with_lsp_manager_appends_diagnostics() {
         ToolRegistry::new(default_strict_policy()).with_lsp_manager(seeded_manager(&path));
     let edits = json!([{ "start_line": 1, "new_lines": ["fn main() {}"] }]);
     let result = registry
-        .execute_apply_edit(&apply_edit_args(&path, edits))
+        .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
         .await
         .expect("编辑成功");
     let diagnostics = result
@@ -868,7 +886,7 @@ async fn test_apply_patch_with_lsp_manager_appends_diagnostics() {
 +fn main() { let x: u32 = 1; }
 ";
     let result = registry
-        .execute_apply_patch(&apply_patch_args(patch))
+        .execute_apply_patch(&apply_patch_args(patch), "test-session", false)
         .await
         .expect("补丁成功");
     let diagnostics = result

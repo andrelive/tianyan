@@ -115,7 +115,7 @@ async fn test_search_code_serde_alias_old_payload() {
 async fn test_run_tests_success() {
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_run_tests(r#"{"command":"echo hello"}"#)
+        .execute_run_tests(r#"{"command":"echo hello"}"#, "test-session", false)
         .await
         .unwrap();
     // 设计 D6 新输出形状：success + 计数 + 结构化 failures + grouped_by_file
@@ -137,7 +137,7 @@ async fn test_run_tests_missing_command_unknown_project_errors() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = serde_json::to_string(&dir.path().to_string_lossy().into_owned()).unwrap();
     let result = registry
-        .execute_run_tests(&format!(r#"{{"cwd":{cwd}}}"#))
+        .execute_run_tests(&format!(r#"{{"cwd":{cwd}}}"#), "test-session", false)
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("command"));
@@ -146,7 +146,9 @@ async fn test_run_tests_missing_command_unknown_project_errors() {
 #[tokio::test]
 async fn test_run_tests_rejects_malformed_arguments() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_run_tests(r#"{"command":"echo"#).await;
+    let result = registry
+        .execute_run_tests(r#"{"command":"echo"#, "test-session", false)
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -156,7 +158,11 @@ async fn test_run_tests_framework_suite_filter_backward_compat_command_wins() {
     // 显式 command 优先于 framework/suite/filter（向后兼容，LLM 完全控制）
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_run_tests(r#"{"command":"echo hi","framework":"cargo","suite":"x","filter":"y"}"#)
+        .execute_run_tests(
+            r#"{"command":"echo hi","framework":"cargo","suite":"x","filter":"y"}"#,
+            "test-session",
+            false,
+        )
         .await
         .unwrap();
     assert_eq!(result["success"].as_bool(), Some(true));
@@ -178,7 +184,7 @@ async fn test_run_tests_approval_denied_without_confirmation() {
     let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
     let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
     let result = registry
-        .execute_run_tests(r#"{"command":"echo hello"}"#)
+        .execute_run_tests(r#"{"command":"echo hello"}"#, "test-session", false)
         .await;
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("安全违规"), "应报安全违规: {msg}");
@@ -190,7 +196,7 @@ async fn test_run_tests_approval_approved_unattended() {
     let registry =
         ToolRegistry::new(default_strict_policy()).with_approval_workflow(unattended_workflow());
     let result = registry
-        .execute_run_tests(r#"{"command":"echo hello"}"#)
+        .execute_run_tests(r#"{"command":"echo hello"}"#, "test-session", false)
         .await;
     let result = result.expect("无人值守应批准测试命令");
     assert_eq!(result["exit_code"].as_i64(), Some(0));
@@ -201,7 +207,11 @@ async fn test_run_tests_command_metacharacters_blocked() {
     // 命令链元字符（&& 等）→ check_command 拦截，不执行。
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_run_tests(r#"{"command":"echo hi && echo bye"}"#)
+        .execute_run_tests(
+            r#"{"command":"echo hi && echo bye"}"#,
+            "test-session",
+            false,
+        )
         .await;
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("安全违规"), "应报安全违规: {msg}");
@@ -225,7 +235,9 @@ async fn test_run_tests_filter_metacharacters_blocked() {
         "filter": "x\"; del *",
     })
     .to_string();
-    let result = registry.execute_run_tests(&args).await;
+    let result = registry
+        .execute_run_tests(&args, "test-session", false)
+        .await;
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("安全违规"), "应报安全违规: {msg}");
 }
@@ -279,7 +291,7 @@ async fn test_verify_build_success_fallback() {
     // 未配置 verification_gate 时回退到退出码校验路径。
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_verify_build(r#"{"command":"echo hello"}"#)
+        .execute_verify_build(r#"{"command":"echo hello"}"#, "test-session", false)
         .await
         .unwrap();
     // 统一输出形状：passed + structured_diagnostics（可能为空数组）+ judge_method null。
@@ -297,7 +309,9 @@ async fn test_verify_build_success_fallback() {
 #[tokio::test]
 async fn test_verify_build_rejects_missing_arguments() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_verify_build(r#"{}"#).await;
+    let result = registry
+        .execute_verify_build(r#"{}"#, "test-session", false)
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -308,7 +322,7 @@ async fn test_verify_build_approval_denied_without_confirmation() {
     let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
     let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
     let result = registry
-        .execute_verify_build(r#"{"command":"echo hello"}"#)
+        .execute_verify_build(r#"{"command":"echo hello"}"#, "test-session", false)
         .await;
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("安全违规"), "应报安全违规: {msg}");
@@ -320,7 +334,7 @@ async fn test_verify_build_approval_approved_unattended() {
     let registry =
         ToolRegistry::new(default_strict_policy()).with_approval_workflow(unattended_workflow());
     let result = registry
-        .execute_verify_build(r#"{"command":"echo hello"}"#)
+        .execute_verify_build(r#"{"command":"echo hello"}"#, "test-session", false)
         .await;
     let result = result.expect("无人值守应批准构建命令");
     assert_eq!(result["passed"].as_bool(), Some(true));
@@ -331,7 +345,7 @@ async fn test_verify_build_command_metacharacters_blocked() {
     // 命令分隔符（;）→ check_command 拦截，不执行。
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_verify_build(r#"{"command":"echo hi; echo bye"}"#)
+        .execute_verify_build(r#"{"command":"echo hi; echo bye"}"#, "test-session", false)
         .await;
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("安全违规"), "应报安全违规: {msg}");

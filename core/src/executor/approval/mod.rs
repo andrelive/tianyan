@@ -15,7 +15,9 @@ pub mod types;
 mod workflow;
 
 pub use types::*;
-pub use workflow::ApprovalWorkflow;
+pub use workflow::{
+    build_approval_pending_text, ApprovalPendingNotifier, ApprovalWorkflow, SessionApprovalNotifier,
+};
 
 /// 测试模块（拆分至独立文件，保持主模块聚焦生产逻辑）。
 #[cfg(test)]

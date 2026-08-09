@@ -33,9 +33,14 @@ impl Drop for DelegationDepthGuard {
 
 impl ToolRegistry {
     /// 执行 execute_command 工具：运行 shell 命令（含安全策略 + 审批门控）。
+    ///
+    /// `session_id` 为真实会话（审批挂起通知/归属用）；`subagent` 为子任务
+    /// 执行上下文——审批不交互（未授权操作立即拒绝，上报主 agent 确认）。
     pub(crate) async fn execute_execute_command(
         &self,
         arguments: &str,
+        session_id: &str,
+        subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
         let mut params: ExecuteCommandParams = parse_params(arguments)?;
 
@@ -65,18 +70,20 @@ impl ToolRegistry {
         // Approval workflow check — auto-approve safe commands,
         // auto-deny critical commands (rm, format, dd), request
         // human approval for Medium/High risk commands.
+        // 子任务（subagent）：不挂起、不交互——未授权操作立即拒绝，
+        // 错误携带"需要主任务授权"标记，由主 agent 在主对话确认后重新委托。
         if let Some(ref approval) = self.approval_workflow {
             let action = Action::ExecuteCommand {
                 command: params.command.clone(),
                 cwd: params.cwd.clone(),
                 timeout_secs: params.timeout_secs,
             };
-            let resp = approval
-                .request_approval("tool-execution", &action)
-                .await
-                .map_err(|e| {
-                    TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
-                })?;
+            let resp = if subagent {
+                approval.request_approval_no_wait(session_id, &action).await
+            } else {
+                approval.request_approval(session_id, &action).await
+            }
+            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e)))?;
             if resp.decision != ApprovalDecision::Approve {
                 // 记录待确认操作：用户通过"询问用户"链路批准后放行
                 self.remember_pending_approval(&action).await;
@@ -271,7 +278,9 @@ impl ToolRegistry {
                         ));
 
                         if !tool_calls.is_empty() {
-                            let results = self.execute_parallel(tool_calls, session_id).await;
+                            // subagent=true：子任务工具执行——审批不交互，
+                            // 未授权操作拒绝并上报主 agent 确认
+                            let results = self.execute_parallel(tool_calls, session_id, true).await;
                             for (call_id, result) in results {
                                 let content = match result {
                                     Ok(val) => val.to_string(),

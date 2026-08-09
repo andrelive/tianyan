@@ -10,7 +10,77 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, RwLock};
 
 use super::types::*;
+use crate::common::types::{MessageRole, Part, PartTime, StructuredMessage};
 use crate::executor::Action;
+use crate::session::SessionManager;
+
+/// 审批挂起通知器。
+///
+/// 人工审批请求挂起等待时调用（GUI 审批面板通道），把请求告知用户——
+/// 否则后台任务等无人值守场景的审批请求会静默挂起（直到超时拒绝）。
+#[async_trait::async_trait]
+pub trait ApprovalPendingNotifier: Send + Sync {
+    /// 审批请求挂起等待人工响应时调用。
+    async fn on_approval_pending(&self, request: &ApprovalRequest);
+}
+
+/// 默认通知器：把审批请求作为 System 消息持久化到所属会话。
+///
+/// 前台任务：用户正在对话，流式停止即感知，System 消息给出审批面板指引；
+/// 后台任务：审批请求不再静默——用户回到会话即看到待处理请求，
+/// 到审批面板批准/拒绝后任务经 oneshot 通道恢复继续。
+pub struct SessionApprovalNotifier {
+    session_manager: Arc<dyn SessionManager>,
+}
+
+impl SessionApprovalNotifier {
+    /// 创建通知器。
+    pub fn new(session_manager: Arc<dyn SessionManager>) -> Self {
+        Self { session_manager }
+    }
+}
+
+/// 构建审批挂起通知文本。
+pub fn build_approval_pending_text(request: &ApprovalRequest) -> String {
+    format!(
+        "[审批请求] 操作需要人工确认：{}（风险等级：{}，请求 ID：{}）。\n请到「审批」面板批准或拒绝；超时（{} 秒）将默认拒绝。",
+        request.action_description, request.risk_level, request.request_id, request.timeout_secs
+    )
+}
+
+#[async_trait::async_trait]
+impl ApprovalPendingNotifier for SessionApprovalNotifier {
+    async fn on_approval_pending(&self, request: &ApprovalRequest) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let sm = StructuredMessage {
+            id: format!("msg_{now}"),
+            parent_id: None,
+            role: MessageRole::System,
+            parts: vec![Part::Text {
+                text: build_approval_pending_text(request),
+                time: PartTime::default(),
+            }],
+            tokens: Default::default(),
+            cost: 0.0,
+            model_id: None,
+            time: Default::default(),
+            session_id: request.session_id.clone(),
+            finish: None,
+            compression_marker: false,
+        };
+        if let Err(e) = self
+            .session_manager
+            .add_structured_message(&request.session_id, sm)
+            .await
+        {
+            tracing::warn!(
+                request_id = %request.request_id,
+                error = %e,
+                "审批挂起通知持久化失败"
+            );
+        }
+    }
+}
 
 /// 审批工作流管理器。
 ///
@@ -21,6 +91,8 @@ pub struct ApprovalWorkflow {
     records: Arc<RwLock<Vec<ApprovalRecord>>>,
     /// 用户已确认的操作指纹集合（经"询问用户"降级链路获得批准后记录）。
     confirmed_actions: Arc<RwLock<HashSet<String>>>,
+    /// 审批挂起通知器（GUI 审批通道挂起时告知用户）。
+    pending_notifier: Option<Arc<dyn ApprovalPendingNotifier>>,
 }
 
 /// 待处理审批。
@@ -38,7 +110,14 @@ impl ApprovalWorkflow {
             pending_approvals: Arc::new(RwLock::new(HashMap::new())),
             records: Arc::new(RwLock::new(Vec::new())),
             confirmed_actions: Arc::new(RwLock::new(HashSet::new())),
+            pending_notifier: None,
         }
+    }
+
+    /// 设置审批挂起通知器（Agent 装配层注入）。
+    pub fn with_pending_notifier(mut self, notifier: Arc<dyn ApprovalPendingNotifier>) -> Self {
+        self.pending_notifier = Some(notifier);
+        self
     }
 
     /// 获取工作流配置（快照拷贝）。
@@ -135,7 +214,7 @@ impl ApprovalWorkflow {
         }
     }
 
-    /// 请求审批。
+    /// 请求审批（主循环路径：可按配置等待人工审批）。
     ///
     /// - `session_id` - 会话 ID
     /// - `action` - 要执行的操作
@@ -144,6 +223,30 @@ impl ApprovalWorkflow {
         &self,
         session_id: &str,
         action: &Action,
+    ) -> crate::common::error::Result<ApprovalResponse> {
+        self.request_approval_internal(session_id, action, true)
+            .await
+    }
+
+    /// 请求审批（子任务路径：**永不等待人工响应**）。
+    ///
+    /// 子 agent 是主 agent 意图的执行器，任务下发即授权边界——遇到未授权
+    /// 的新危险操作时不交互、不挂起，立即拒绝；拒绝原因携带"需要主任务
+    /// 授权"标记，由子 agent 上报主 agent，在主对话中向用户确认。
+    pub async fn request_approval_no_wait(
+        &self,
+        session_id: &str,
+        action: &Action,
+    ) -> crate::common::error::Result<ApprovalResponse> {
+        self.request_approval_internal(session_id, action, false)
+            .await
+    }
+
+    async fn request_approval_internal(
+        &self,
+        session_id: &str,
+        action: &Action,
+        allow_human_wait: bool,
     ) -> crate::common::error::Result<ApprovalResponse> {
         let risk_level = self.assess_risk(action);
 
@@ -228,20 +331,24 @@ impl ApprovalWorkflow {
             });
         }
 
-        // 审批通道已接入时：等待人工审批响应（带超时）
-        if self.config.wait_for_approval {
+        // 审批通道已接入且允许等待时：等待人工审批响应（带超时）
+        if self.config.wait_for_approval && allow_human_wait {
             return self
                 .wait_for_human_approval(session_id, action, risk_level)
                 .await;
         }
 
-        // 无审批通道：立即拒绝，由上层（agent loop）降级为"询问用户"追问，
-        // 用户确认后重试。降级判断基于 ToolRegistry 的待确认指纹队列，
-        // 与 reason 文案无关。
+        // 子任务路径（不允许等待）：立即拒绝，由子 agent 上报主 agent，
+        // 在主对话中向用户确认后重新委托。
+        let reason = if !allow_human_wait {
+            format!("子任务操作需要主任务授权确认：{:?}", action)
+        } else {
+            format!("需要用户确认：{:?}", action)
+        };
         Ok(ApprovalResponse {
             request_id: uuid::Uuid::new_v4().to_string(),
             decision: ApprovalDecision::Deny,
-            reason: Some(format!("需要用户确认：{:?}", action)),
+            reason: Some(reason),
             responded_at: chrono::Utc::now(),
             approved_by: "system".to_string(),
         })
@@ -282,6 +389,11 @@ impl ApprovalWorkflow {
                     _created_at: Instant::now(),
                 },
             );
+        }
+
+        // 挂起通知：告知用户有审批请求待处理（后台任务不再静默等待）
+        if let Some(notifier) = &self.pending_notifier {
+            notifier.on_approval_pending(&request).await;
         }
 
         // 等待审批响应（带超时）

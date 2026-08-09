@@ -33,6 +33,9 @@ impl ToolRegistry {
     pub(crate) async fn execute_write_file(
         &self,
         arguments: &str,
+
+        session_id: &str,
+        subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: WriteFileParams = parse_params(arguments)?;
         safety_violation(self.security_policy.check_file_write())?;
@@ -52,12 +55,14 @@ impl ToolRegistry {
                 path: params.path.clone(),
                 content: params.content.clone(),
             };
-            let resp = approval
-                .request_approval("tool-execution", &action)
-                .await
-                .map_err(|e| {
-                    TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
-                })?;
+            let approval_result = if subagent {
+                approval.request_approval_no_wait(session_id, &action).await
+            } else {
+                approval.request_approval(session_id, &action).await
+            };
+            let resp = approval_result.map_err(|e| {
+                TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
+            })?;
             if resp.decision != ApprovalDecision::Approve {
                 // 记录待确认操作：用户通过"询问用户"链路批准后放行
                 self.remember_pending_approval(&action).await;
@@ -76,6 +81,9 @@ impl ToolRegistry {
     pub(crate) async fn execute_apply_edit(
         &self,
         arguments: &str,
+
+        session_id: &str,
+        subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: ApplyEditParams = parse_params(arguments)?;
         safety_violation(self.security_policy.check_file_write())?;
@@ -96,12 +104,14 @@ impl ToolRegistry {
                 path: params.path.clone(),
                 edits,
             };
-            let resp = approval
-                .request_approval("tool-execution", &action)
-                .await
-                .map_err(|e| {
-                    TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
-                })?;
+            let approval_result = if subagent {
+                approval.request_approval_no_wait(session_id, &action).await
+            } else {
+                approval.request_approval(session_id, &action).await
+            };
+            let resp = approval_result.map_err(|e| {
+                TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
+            })?;
             if resp.decision != ApprovalDecision::Approve {
                 // 记录待确认操作：用户通过"询问用户"链路批准后放行
                 self.remember_pending_approval(&action).await;
@@ -124,6 +134,9 @@ impl ToolRegistry {
     pub(crate) async fn execute_apply_patch(
         &self,
         arguments: &str,
+
+        session_id: &str,
+        subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: ApplyPatchParams = parse_params(arguments)?;
         safety_violation(self.security_policy.check_file_write())?;
@@ -150,12 +163,14 @@ impl ToolRegistry {
                 path: first_path.clone(),
                 patch: params.patch.clone(),
             };
-            let resp = approval
-                .request_approval("tool-execution", &action)
-                .await
-                .map_err(|e| {
-                    TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
-                })?;
+            let approval_result = if subagent {
+                approval.request_approval_no_wait(session_id, &action).await
+            } else {
+                approval.request_approval(session_id, &action).await
+            };
+            let resp = approval_result.map_err(|e| {
+                TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
+            })?;
             if resp.decision != ApprovalDecision::Approve {
                 // 记录待确认操作：用户通过"询问用户"链路批准后放行
                 self.remember_pending_approval(&action).await;

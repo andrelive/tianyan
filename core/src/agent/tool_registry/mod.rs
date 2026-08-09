@@ -324,11 +324,13 @@ impl ToolRegistry {
     /// 并行执行多个 tool_call。
     ///
     /// `session_id` 随调用链传递（后台委托归属父会话用；不依赖共享可变状态，
-    /// 多会话并发 turn 安全）。
+    /// 多会话并发 turn 安全）。`subagent` 标记子 agent 执行上下文——子任务
+    /// 是主 agent 意图的执行器，审批不交互（未授权操作拒绝并上报主 agent）。
     pub async fn execute_parallel(
         &self,
         calls: &[ToolCall],
         session_id: &str,
+        subagent: bool,
     ) -> Vec<(String, Result<serde_json::Value, TianyanError>)> {
         let mut set = tokio::task::JoinSet::new();
         for call in calls {
@@ -336,7 +338,7 @@ impl ToolRegistry {
             let this = self.clone();
             let session_id = session_id.to_string();
             set.spawn(async move {
-                let result = this.execute_single(&call, &session_id).await;
+                let result = this.execute_single(&call, &session_id, subagent).await;
                 (call.id, result)
             });
         }
@@ -353,23 +355,42 @@ impl ToolRegistry {
         &self,
         call: &ToolCall,
         session_id: &str,
+        subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
         let start = std::time::Instant::now();
         let arguments = &call.function.arguments;
         let result = match call.function.name.as_str() {
             "read_file" => self.execute_read_file(arguments).await,
-            "write_file" => self.execute_write_file(arguments).await,
-            "apply_edit" => self.execute_apply_edit(arguments).await,
-            "apply_patch" => self.execute_apply_patch(arguments).await,
-            "execute_command" => self.execute_execute_command(arguments).await,
+            "write_file" => {
+                self.execute_write_file(arguments, session_id, subagent)
+                    .await
+            }
+            "apply_edit" => {
+                self.execute_apply_edit(arguments, session_id, subagent)
+                    .await
+            }
+            "apply_patch" => {
+                self.execute_apply_patch(arguments, session_id, subagent)
+                    .await
+            }
+            "execute_command" => {
+                self.execute_execute_command(arguments, session_id, subagent)
+                    .await
+            }
             "search_code" => self.execute_search_code(arguments).await,
             "search_knowledge" => self.execute_search_knowledge(arguments).await,
             "vfs_read" => self.execute_vfs_read(arguments).await,
             "vfs_list" => self.execute_vfs_list(arguments).await,
             "call_skill" => self.execute_call_skill(arguments).await,
-            "run_tests" => self.execute_run_tests(arguments).await,
+            "run_tests" => {
+                self.execute_run_tests(arguments, session_id, subagent)
+                    .await
+            }
             "discover_tests" => self.execute_discover_tests(arguments).await,
-            "verify_build" => self.execute_verify_build(arguments).await,
+            "verify_build" => {
+                self.execute_verify_build(arguments, session_id, subagent)
+                    .await
+            }
             "ask_user" => self.execute_ask_user(arguments).await,
             "self_check" => self.execute_self_check().await,
             "knowledge_ingest" => self.execute_knowledge_ingest(arguments).await,
@@ -710,7 +731,9 @@ mod tests {
                 arguments: r#"{"input":"hi"}"#.to_string(),
             },
         };
-        let result = registry.execute_parallel(&[call], "test-session").await;
+        let result = registry
+            .execute_parallel(&[call], "test-session", false)
+            .await;
         assert_eq!(result.len(), 1);
         let (_, res) = &result[0];
         assert!(res.is_ok(), "动态工具应执行成功: {res:?}");
@@ -747,7 +770,9 @@ mod tests {
                 arguments: "{}".to_string(),
             },
         };
-        let results = registry.execute_parallel(&[call], "test-session").await;
+        let results = registry
+            .execute_parallel(&[call], "test-session", false)
+            .await;
         let err = results[0].1.as_ref().unwrap_err();
         assert!(err.to_string().contains("未知工具"));
     }

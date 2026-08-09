@@ -437,10 +437,10 @@ impl AgentLoop {
             }
 
             // 执行工具（session_id 随调用链传递：后台委托归属父会话，完成
-            // 通知注入该会话；不依赖共享可变状态，多会话并发 turn 安全）
+            // 通知注入该会话；subagent=false 主循环——审批可交互）
             let results = self
                 .tool_registry
-                .execute_parallel(tool_calls, ctx.session_id)
+                .execute_parallel(tool_calls, ctx.session_id, false)
                 .await;
 
             // 审批降级：任一工具因审批门控被拒（已入队待确认指纹）时，

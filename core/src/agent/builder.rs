@@ -10,7 +10,9 @@ use crate::config::SecurityConfig;
 use crate::context::compression::{CompressionConfig, ContextCompressor};
 use crate::context::pipeline::ContextPipeline;
 use crate::context::DualLayerRetriever;
-use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
+use crate::executor::approval::{
+    ApprovalWorkflow, ApprovalWorkflowConfig, SessionApprovalNotifier,
+};
 use crate::executor::SecurityPolicy;
 use crate::executor::{LlmJudge, VerificationGate};
 use crate::knowledge::KnowledgeIngestor;
@@ -174,10 +176,15 @@ impl AgentBuilder {
         // 构建审批工作流（write_file / execute_command 危险操作门控）
         // wait_for_approval 开启时：危险操作挂起等待 GUI 审批面板人工响应；
         // 默认关闭：走"询问用户 → 指纹确认"降级链路
-        let approval = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
-            wait_for_approval: security_config.wait_for_approval,
-            ..Default::default()
-        }));
+        let approval = Arc::new(
+            ApprovalWorkflow::new(ApprovalWorkflowConfig {
+                wait_for_approval: security_config.wait_for_approval,
+                ..Default::default()
+            })
+            .with_pending_notifier(Arc::new(SessionApprovalNotifier::new(
+                session_manager.clone(),
+            ))),
+        );
 
         let chat_model = self.model.clone().unwrap_or_else(|| "default".to_string());
 

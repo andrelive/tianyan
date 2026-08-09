@@ -189,7 +189,7 @@ async fn test_glob_and_list_dir_dispatch() {
         },
     };
     let results = registry
-        .execute_parallel(&[glob_call, list_call], "test-session")
+        .execute_parallel(&[glob_call, list_call], "test-session", false)
         .await;
     assert_eq!(results.len(), 2);
     assert!(results[0].1.is_ok(), "glob 分发应成功：{:?}", results[0].1);
