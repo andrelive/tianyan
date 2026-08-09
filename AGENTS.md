@@ -78,6 +78,8 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-012: 注入上下文快照持久化](docs/architecture/decisions/012-injectable-snapshot-persistence.md) — 前缀零漂移（JSONL SessionHeader）+ 会话边界/压缩点技能刷新
 - [ADR-013: 统一消息通知与唤醒原语](docs/architecture/decisions/013-unified-message-notification-wake.md) — 消息入库 + 唤醒语义（shouldReply = allComplete || failure；任务持久化前置）
 
+被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
+
 模块索引 → [`docs/architecture/module-map.md`](docs/architecture/module-map.md)
 设计原则 → [`docs/architecture/principles.md`](docs/architecture/principles.md)
 模块详细说明 → [`docs/module-descriptions.md`](docs/module-descriptions.md)
