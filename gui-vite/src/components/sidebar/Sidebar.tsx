@@ -12,6 +12,7 @@ import {
   MemoryStick,
   Route,
   ShieldCheck,
+  ListTodo,
   Gauge,
   Settings,
   Plus,
@@ -52,6 +53,12 @@ const NAV_ITEMS = [
     label: '审批',
     icon: ShieldCheck,
     path: '/approval',
+  },
+  {
+    id: 'tasks' as const,
+    label: '任务',
+    icon: ListTodo,
+    path: '/tasks',
   },
   {
     id: 'insights' as const,

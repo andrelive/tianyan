@@ -2,6 +2,7 @@ import { http, HttpResponse } from 'msw';
 import type {
   Session,
   Skill,
+  BackgroundTask,
   ListSessionsResponse,
   ChatResponse,
   SkillListResponse,
@@ -657,6 +658,94 @@ export const mockRetrievalTraces: RetrievalTrace[] = [
   },
 ];
 
+// ========== Background Task mock ==========
+
+/** 可变的后台任务列表：cancel handler 会就地更新状态，GET 返回当前状态。 */
+export const mockTasks: BackgroundTask[] = [
+  {
+    id: 'task-1',
+    description: '写入文件 /home/user/report.md',
+    status: 'running',
+    parent_session_id: 'session-1',
+    result: null,
+    error: null,
+    created_at: 1754395200000,
+    completed_at: null,
+    seq: 1,
+  },
+  {
+    id: 'task-2',
+    description: '搜索代码库中的 TODO 标记',
+    status: 'completed',
+    parent_session_id: 'session-2',
+    result: '找到 12 处 TODO 标记',
+    error: null,
+    created_at: 1754394000000,
+    completed_at: 1754394120000,
+    seq: 2,
+  },
+  {
+    id: 'task-3',
+    description: '解析大型文档并生成摘要',
+    status: 'failed',
+    parent_session_id: null,
+    result: null,
+    error: '读取文件超时: 网络错误',
+    created_at: 1754393000000,
+    completed_at: 1754393060000,
+    seq: 3,
+  },
+];
+
+/** 记录的后台任务取消调用（{ taskId }），测试断言用。 */
+export const mockTaskCancelCalls: { taskId: string }[] = [];
+
+/** 记录的手动压缩会话调用（{ sessionId }），测试断言用。 */
+export const mockSessionCompressCalls: { sessionId: string }[] = [];
+
+/** 恢复后台任务 mock 到初始状态（cancel 会就地修改 mockTasks）。 */
+export function resetTaskMocks() {
+  mockTaskCancelCalls.length = 0;
+  mockSessionCompressCalls.length = 0;
+  const base: BackgroundTask[] = [
+    {
+      id: 'task-1',
+      description: '写入文件 /home/user/report.md',
+      status: 'running',
+      parent_session_id: 'session-1',
+      result: null,
+      error: null,
+      created_at: 1754395200000,
+      completed_at: null,
+      seq: 1,
+    },
+    {
+      id: 'task-2',
+      description: '搜索代码库中的 TODO 标记',
+      status: 'completed',
+      parent_session_id: 'session-2',
+      result: '找到 12 处 TODO 标记',
+      error: null,
+      created_at: 1754394000000,
+      completed_at: 1754394120000,
+      seq: 2,
+    },
+    {
+      id: 'task-3',
+      description: '解析大型文档并生成摘要',
+      status: 'failed',
+      parent_session_id: null,
+      result: null,
+      error: '读取文件超时: 网络错误',
+      created_at: 1754393000000,
+      completed_at: 1754393060000,
+      seq: 3,
+    },
+  ];
+  mockTasks.length = 0;
+  mockTasks.push(...base);
+}
+
 // ========== Approval mock ==========
 
 export const mockApprovalStatus: ApprovalStatusSnapshot = {
@@ -847,6 +936,28 @@ export const handlers = [
         },
       ],
     });
+  }),
+
+  // Session compress（后端为 POST /sessions/{id}/compress，body: {}）
+  http.post(`${API_BASE}/sessions/:id/compress`, ({ params }) => {
+    mockSessionCompressCalls.push({ sessionId: String(params.id) });
+    return HttpResponse.json({ compressed: true });
+  }),
+
+  // Background tasks（后端为 GET /tasks，返回 Vec<BackgroundTask>）
+  http.get(`${API_BASE}/tasks`, () => {
+    return HttpResponse.json(mockTasks);
+  }),
+
+  // Task cancel（后端为 POST /tasks/{id}/cancel）
+  http.post(`${API_BASE}/tasks/:id/cancel`, ({ params }) => {
+    const taskId = String(params.id);
+    const task = mockTasks.find((t) => t.id === taskId);
+    if (!task) return new HttpResponse(null, { status: 404 });
+    mockTaskCancelCalls.push({ taskId });
+    task.status = 'cancelled';
+    task.completed_at = Date.now();
+    return HttpResponse.json({ task_id: taskId, status: 'cancelled' });
   }),
 
   // Chat stream (SSE)

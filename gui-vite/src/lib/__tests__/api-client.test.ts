@@ -1,6 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { server } from '@/test/mocks/server';
+import {
+  mockTaskCancelCalls,
+  mockSessionCompressCalls,
+  resetTaskMocks,
+} from '@/test/mocks/handlers';
 import {
   apiGet,
   apiPost,
@@ -8,6 +13,9 @@ import {
   ApiError,
   apiPostMultipart,
   clarifyChat,
+  fetchTasks,
+  cancelTask,
+  compressSession,
 } from '@/lib/api-client';
 import type { ListSessionsResponse, Session, SkillListResponse, ChatResponse } from '@/lib/types';
 
@@ -210,6 +218,100 @@ describe('clarifyChat', () => {
     await clarifyChat('session-1', '我的回答');
 
     expect(receivedBody).toEqual({ session_id: 'session-1', answer: '我的回答' });
+  });
+});
+
+// ─── fetchTasks ────────────────────────────────────────────────────────────────
+
+describe('fetchTasks', () => {
+  beforeEach(() => {
+    resetTaskMocks();
+  });
+
+  it('fetches the background task list (Vec<BackgroundTask>)', async () => {
+    const result = await fetchTasks();
+
+    expect(result).toHaveLength(3);
+    expect(result[0]).toMatchObject({ id: 'task-1', status: 'running' });
+    expect(result[0].created_at).toBeTypeOf('number');
+    expect(result[0].completed_at).toBeNull();
+    expect(result[1].result).toBe('找到 12 处 TODO 标记');
+    expect(result[2]).toMatchObject({ status: 'failed', error: '读取文件超时: 网络错误' });
+  });
+
+  it('returns empty array when no tasks exist', async () => {
+    server.use(
+      http.get('/api/v1/tasks', () => {
+        return HttpResponse.json([]);
+      }),
+    );
+
+    const result = await fetchTasks();
+    expect(result).toEqual([]);
+  });
+});
+
+// ─── cancelTask ────────────────────────────────────────────────────────────────
+
+describe('cancelTask', () => {
+  beforeEach(() => {
+    resetTaskMocks();
+  });
+
+  it('posts to /tasks/{id}/cancel and returns the cancelled task', async () => {
+    const result = await cancelTask('task-1');
+
+    expect(mockTaskCancelCalls).toEqual([{ taskId: 'task-1' }]);
+    expect(result).toEqual({ task_id: 'task-1', status: 'cancelled' });
+  });
+
+  it('throws ApiError when the task does not exist (404)', async () => {
+    await expect(cancelTask('nonexistent')).rejects.toThrow(ApiError);
+  });
+
+  it('throws ApiError with 404 status code for unknown tasks', async () => {
+    try {
+      await cancelTask('nonexistent');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).code).toBe('404');
+    }
+  });
+});
+
+// ─── compressSession ──────────────────────────────────────────────────────────
+
+describe('compressSession', () => {
+  beforeEach(() => {
+    resetTaskMocks();
+  });
+
+  it('posts to /sessions/{id}/compress and reports compressed', async () => {
+    const result = await compressSession('session-1');
+
+    expect(mockSessionCompressCalls).toEqual([{ sessionId: 'session-1' }]);
+    expect(result).toEqual({ compressed: true });
+  });
+
+  it('returns compressed=false when there is nothing to compress', async () => {
+    server.use(
+      http.post('/api/v1/sessions/:id/compress', () => {
+        return HttpResponse.json({ compressed: false });
+      }),
+    );
+
+    const result = await compressSession('session-1');
+    expect(result.compressed).toBe(false);
+  });
+
+  it('throws ApiError on server error', async () => {
+    server.use(
+      http.post('/api/v1/sessions/:id/compress', () => {
+        return new HttpResponse(null, { status: 500 });
+      }),
+    );
+
+    await expect(compressSession('session-1')).rejects.toThrow(ApiError);
   });
 });
 

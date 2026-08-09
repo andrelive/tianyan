@@ -2,7 +2,10 @@ import { getApiBase } from '@/hooks/use-api-base';
 import type {
   ApprovalDecision,
   ApprovalStatusSnapshot,
+  BackgroundTask,
+  CancelTaskResponse,
   ChatMessage,
+  CompressSessionResponse,
   McpServerEntry,
   McpTestResponse,
   MemoryListResponse,
@@ -285,6 +288,28 @@ export async function fetchRetrievalTraces(limit = 20): Promise<RetrievalTracesR
   const params = new URLSearchParams();
   params.set('limit', String(Math.min(limit, 100)));
   return apiGet<RetrievalTracesResponse>(`/retrieval/traces?${params}`);
+}
+
+// ========== Background Tasks API ==========
+
+/** 列出全部后台任务（含 pending/running/completed/failed/cancelled）。 */
+export async function fetchTasks(): Promise<BackgroundTask[]> {
+  return apiGet<BackgroundTask[]>('/tasks');
+}
+
+/** 取消一个后台任务（仅 pending/running 有效；404 任务不存在）。 */
+export async function cancelTask(taskId: string): Promise<CancelTaskResponse> {
+  return apiPost<CancelTaskResponse>(`/tasks/${encodeURIComponent(taskId)}/cancel`, {});
+}
+
+// ========== Session compression API ==========
+
+/** 手动压缩会话上下文（与自动压缩共用逻辑）。 */
+export async function compressSession(sessionId: string): Promise<CompressSessionResponse> {
+  return apiPost<CompressSessionResponse>(
+    `/sessions/${encodeURIComponent(sessionId)}/compress`,
+    {},
+  );
 }
 
 // ========== Approval API ==========

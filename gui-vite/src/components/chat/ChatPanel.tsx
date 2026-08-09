@@ -4,12 +4,13 @@ import { useAppStore } from '@/lib/store';
 import {
   apiGet,
   clarifyChat,
+  compressSession,
   deleteSessionMessage,
   getApiBase,
   redoSessionMessage,
 } from '@/lib/api-client';
 import { useChatStream } from '@/hooks/useChatStream';
-import { MessageSquare, Loader2, Undo2 } from 'lucide-react';
+import { MessageSquare, Loader2, Undo2, Minimize2 } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
@@ -35,6 +36,7 @@ export default function ChatPanel() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [submittingClarify, setSubmittingClarify] = useState(false);
+  const [compressing, setCompressing] = useState(false);
 
   // Sync URL sessionId to store on mount / navigation
   useEffect(() => {
@@ -236,6 +238,22 @@ export default function ChatPanel() {
     setStreamStatus('idle');
   }, [stopStream, setStreamStatus]);
 
+  // 手动压缩当前会话上下文
+  const handleCompress = useCallback(async () => {
+    const state = useAppStore.getState();
+    const sessionId = state.currentSessionId;
+    if (!sessionId || streamStatus === 'streaming' || compressing) return;
+    setCompressing(true);
+    try {
+      const resp = await compressSession(sessionId);
+      state.showToast(resp.compressed ? '已压缩' : '无需压缩', 'success');
+    } catch (err: unknown) {
+      state.showToast(`压缩失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
+    } finally {
+      setCompressing(false);
+    }
+  }, [streamStatus, compressing]);
+
   // Determine which message is currently streaming
   const streamingIndex = streamStatus === 'streaming' ? messages.length - 1 : -1;
 
@@ -246,7 +264,19 @@ export default function ChatPanel() {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] shrink-0">
         <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">对话</h1>
-        <ModelSelector />
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => void handleCompress()}
+            disabled={!currentSessionId || streamStatus === 'streaming' || compressing}
+            title="压缩会话（手动压缩当前会话上下文）"
+            aria-label="压缩会话"
+            className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {compressing ? <Loader2 size={12} className="animate-spin" /> : <Minimize2 size={12} />}
+            压缩会话
+          </button>
+          <ModelSelector />
+        </div>
       </div>
 
       {/* Messages area */}

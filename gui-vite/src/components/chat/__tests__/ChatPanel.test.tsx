@@ -3,6 +3,9 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
+import { server } from '@/test/mocks/server';
+import { http, HttpResponse } from 'msw';
+import { resetTaskMocks, mockSessionCompressCalls } from '@/test/mocks/handlers';
 import ChatPanel from '@/components/chat/ChatPanel';
 import type { ChatMessage } from '@/lib/types';
 
@@ -19,6 +22,7 @@ function renderChatPanel(route = '/chat') {
 
 beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState());
+  resetTaskMocks();
 });
 
 describe('ChatPanel', () => {
@@ -295,5 +299,69 @@ describe('ChatPanel', () => {
 
     // 追问气泡消失
     expect(screen.queryByText('请确认是否删除该文件？')).not.toBeInTheDocument();
+  });
+
+  it('disables the compress button when there is no session', () => {
+    renderChatPanel();
+
+    // 默认 store 无会话 → 按钮禁用
+    expect(screen.getByRole('button', { name: '压缩会话' })).toBeDisabled();
+  });
+
+  it('compresses the current session and shows a success toast', async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({ currentSessionId: 'session-1' });
+
+    renderChatPanel();
+
+    await user.click(screen.getByRole('button', { name: '压缩会话' }));
+
+    // compress API 被调用
+    await waitFor(() => {
+      expect(mockSessionCompressCalls).toEqual([{ sessionId: 'session-1' }]);
+    });
+
+    // 成功 toast（compressed=true → 已压缩）
+    await waitFor(() => {
+      expect(useAppStore.getState().toast?.message).toBe('已压缩');
+    });
+    expect(useAppStore.getState().toast?.type).toBe('success');
+  });
+
+  it('shows 无需压缩 when the backend reports nothing to compress', async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({ currentSessionId: 'session-1' });
+    server.use(
+      http.post('/api/v1/sessions/:id/compress', () => {
+        return HttpResponse.json({ compressed: false });
+      }),
+    );
+
+    renderChatPanel();
+
+    await user.click(screen.getByRole('button', { name: '压缩会话' }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().toast?.message).toBe('无需压缩');
+    });
+  });
+
+  it('shows an error toast when compression fails', async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({ currentSessionId: 'session-1' });
+    server.use(
+      http.post('/api/v1/sessions/:id/compress', () => {
+        return new HttpResponse(null, { status: 500 });
+      }),
+    );
+
+    renderChatPanel();
+
+    await user.click(screen.getByRole('button', { name: '压缩会话' }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().toast?.message).toContain('压缩失败');
+    });
+    expect(useAppStore.getState().toast?.type).toBe('error');
   });
 });

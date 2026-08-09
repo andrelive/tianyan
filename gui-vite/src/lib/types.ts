@@ -257,6 +257,39 @@ export interface ApprovalStatusSnapshot {
   confirmed_action_count: number;
 }
 
+// ========== Background Task Types (matches backend background_task DTO) ==========
+
+/** 后台任务状态。 */
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+/** 后台任务（GET /tasks 返回 `Vec<BackgroundTask>`）。 */
+export interface BackgroundTask {
+  id: string;
+  description: string;
+  status: TaskStatus;
+  /** 归属会话 id（未归属时为 null）。 */
+  parent_session_id: string | null;
+  result: string | null;
+  error: string | null;
+  /** 创建时间（epoch 毫秒）。 */
+  created_at: number;
+  /** 完成时间（epoch 毫秒，未完成时为 null）。 */
+  completed_at: number | null;
+  seq: number;
+}
+
+/** 取消后台任务响应（POST /tasks/{id}/cancel，404 任务不存在）。 */
+export interface CancelTaskResponse {
+  task_id: string;
+  status: TaskStatus;
+}
+
+/** 手动压缩会话响应（POST /sessions/{id}/compress）。 */
+export interface CompressSessionResponse {
+  /** true=已执行压缩；false=无需压缩。 */
+  compressed: boolean;
+}
+
 // ========== Insights Types (matches backend scheduler/stats DTO) ==========
 
 /** 定时任务状态（GET /scheduler/status）。 */
@@ -532,6 +565,7 @@ export type View =
   | 'memory'
   | 'traces'
   | 'approval'
+  | 'tasks'
   | 'insights';
 
 export type StreamStatus = 'idle' | 'streaming' | 'error';
