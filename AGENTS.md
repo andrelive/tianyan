@@ -76,6 +76,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-010: 对话多模态链路](docs/architecture/decisions/010-multimodal-message-chain.md) — 图片输入（Message.content_parts + Part::Image）+ MCP 截图落盘
 - [ADR-011: 子任务授权边界](docs/architecture/decisions/011-subagent-approval-boundary.md) — 子 agent 无交互审批（任务下发即授权边界，交互只在主 agent 与用户之间）
 - [ADR-012: 注入上下文快照持久化](docs/architecture/decisions/012-injectable-snapshot-persistence.md) — 前缀零漂移（JSONL SessionHeader）+ 会话边界/压缩点技能刷新
+- [ADR-013: 统一消息通知与唤醒原语](docs/architecture/decisions/013-unified-message-notification-wake.md) — 消息入库 + 唤醒语义（shouldReply = allComplete || failure；任务持久化前置）
 
 模块索引 → [`docs/architecture/module-map.md`](docs/architecture/module-map.md)
 设计原则 → [`docs/architecture/principles.md`](docs/architecture/principles.md)
