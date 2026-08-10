@@ -15,9 +15,7 @@ use crate::agent::background::TaskWaker;
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
 use crate::agent::tool_registry::DynamicToolExecutor;
-use crate::agent::types::{
-    AgentMode, AgentResponse, AgentState, ClarificationQuestion, QuestionType,
-};
+use crate::agent::types::{AgentResponse, AgentState, ClarificationQuestion, QuestionType};
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
     InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage,
@@ -468,8 +466,7 @@ impl Agent {
     /// - `parent_id` — 在 `prepare_context` 之后统一计算（挂接在当前用户消息之下），
     ///   与 process_message 原行为一致（澄清路径的回复链随之修正为 回答→回复）。
     /// - `cancel` — 取消标志（客户端断开/服务关停时置位）；`None` 表示不可取消。
-    /// - `mode` — 运行模式（Plan 只读 / Act 执行）。
-    // 共享骨架：8 个参数均为单轮演进所需状态/依赖（含请求级 mode），收敛为结构体反而降低可读性
+    // 共享骨架：7 个参数均为单轮演进所需状态/依赖，收敛为结构体反而降低可读性
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn run_agent_turn(
         &self,
@@ -479,7 +476,6 @@ impl Agent {
         model: &str,
         start: Instant,
         cancel: Option<&AtomicBool>,
-        mode: AgentMode,
     ) -> Result<AgentResponse> {
         // 1. Persist current user message
         self.persist_user_message(session_id, state, message).await;
@@ -495,7 +491,6 @@ impl Agent {
         let loop_result = self
             .agent_loop
             .clone()
-            .with_mode(mode)
             .run(
                 &mut messages.clone(),
                 None,
@@ -615,7 +610,6 @@ impl Agent {
             &self.default_model,
             start,
             None,
-            AgentMode::Act,
         )
         .await
     }
@@ -903,12 +897,7 @@ mod tests {
         let agent = make_agent(mock);
 
         let resp = agent
-            .process_message(
-                "session-1",
-                &Message::user("帮我处理"),
-                None,
-                AgentMode::Act,
-            )
+            .process_message("session-1", &Message::user("帮我处理"), None)
             .await
             .unwrap();
 

@@ -483,7 +483,7 @@ mod tests {
         let config = ExecutorConfig::new();
         register_builtin_skills(&mut registry, &config);
 
-        assert_eq!(registry.count(), 6);
+        assert_eq!(registry.count(), 7, "内置技能：6 执行型 + planning 软约束");
 
         let file_write = registry.get("file_write").unwrap();
         assert_eq!(file_write.category, SkillCategory::FileOperations);

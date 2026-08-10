@@ -129,6 +129,24 @@ pub fn create_builtin_skills() -> Vec<Skill> {
             .with_tag("http")
             .with_tag("network")
             .with_tag("request"),
+        // 计划阶段技能（软约束：无副作用，返回行为指南注入对话；
+        // 用户"计划一下"触发，替代显式 Plan 模式切换——见 REJECTED.md）
+        Skill::new(
+            "planning",
+            "Planning",
+            "进入计划阶段：只读研究并输出结构化计划，等待用户确认后执行",
+        )
+        .with_category(SkillCategory::Custom)
+        .with_security_level(SecurityLevel::Safe)
+        .with_parameters(
+            ParameterSchema::new().with_parameter(
+                "goal",
+                ParameterDefinition::new(ParameterType::String)
+                    .with_description("本次规划的目标（可选）"),
+            ),
+        )
+        .with_tag("planning")
+        .with_tag("plan"),
     ]
 }
 
@@ -178,6 +196,10 @@ pub fn register_builtin_skills(registry: &mut SkillRegistry, config: &ExecutorCo
             Arc::new(HttpRequestHandler::with_timeout(
                 config.skill_http_timeout_secs,
             )),
+        ),
+        (
+            "planning",
+            Arc::new(crate::skills::handlers::PlanningHandler::new()),
         ),
     ];
 

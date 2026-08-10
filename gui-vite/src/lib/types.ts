@@ -16,9 +16,6 @@ export interface ChatMessage {
   chunk_type?: StreamChunkType;
 }
 
-/** 运行模式：act = 执行（默认），plan = 计划（只读，写工具被后端拒绝） */
-export type AgentMode = 'act' | 'plan';
-
 export interface ChatRequest {
   session_id?: string | null;
   messages: ChatMessage[];
@@ -26,8 +23,6 @@ export interface ChatRequest {
   temperature: number;
   max_tokens: number;
   model?: string | null;
-  /** 请求级运行模式，缺省 act */
-  mode?: AgentMode;
 }
 
 export interface ChatResponse {

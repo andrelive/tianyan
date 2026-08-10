@@ -201,7 +201,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
     use tianyan::agent::background::BackgroundTask;
-    use tianyan::agent::{AgentMode, AgentResponse, AgentState, AgentStreamChunk};
+    use tianyan::agent::{AgentResponse, AgentState, AgentStreamChunk};
     use tianyan::common::types::{Message, StructuredMessage};
     use tianyan::events::EventBus;
     use tianyan::executor::approval::{ApprovalDecision, ApprovalStatusSnapshot};
@@ -229,7 +229,6 @@ mod tests {
             _session_id: &str,
             _message: &Message,
             _model: Option<&str>,
-            _mode: AgentMode,
         ) -> tianyan::Result<AgentResponse> {
             Err(tianyan::TianyanError::Custom("测试桩".to_string()))
         }
@@ -239,7 +238,6 @@ mod tests {
             _message: &Message,
             _model: Option<&str>,
             _cancel: Option<Arc<AtomicBool>>,
-            _mode: AgentMode,
         ) -> tianyan::Result<tokio::sync::mpsc::Receiver<tianyan::Result<AgentStreamChunk>>>
         {
             Err(tianyan::TianyanError::Custom("测试桩".to_string()))

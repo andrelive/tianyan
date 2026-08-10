@@ -97,7 +97,7 @@ use tokio::sync::mpsc;
 use crate::agent::agent_core::{format_clarification_questions, Agent};
 use crate::agent::r#loop::AgentLoopResult;
 use crate::agent::types::{
-    AgentMode, AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
+    AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
     StreamChunkType, StreamEventSender,
 };
 use crate::common::error::Result;
@@ -109,27 +109,23 @@ pub trait AgentCoordinator: Send + Sync {
     /// 处理用户消息。
     /// - `message` — 完整消息（含可选的多模态图片片段，`content` 为纯文本）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
-    /// - `mode` — 运行模式（Plan 只读 / Act 执行），缺省 [`AgentMode::Act`]。
     async fn process_message(
         &self,
         session_id: &str,
         message: &Message,
         model: Option<&str>,
-        mode: AgentMode,
     ) -> Result<AgentResponse>;
 
     /// 处理用户消息（流式响应）。
     /// - `message` — 完整消息（含可选的多模态图片片段）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
     /// - `cancel` — 取消标志（客户端断开/服务关停时置位）；`None` 表示不可取消。
-    /// - `mode` — 运行模式（Plan 只读 / Act 执行），缺省 [`AgentMode::Act`]。
     async fn process_message_stream(
         &self,
         session_id: &str,
         message: &Message,
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
-        mode: AgentMode,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
 
     /// 处理用户对追问的回答。
@@ -191,7 +187,6 @@ impl AgentCoordinator for Agent {
         session_id: &str,
         message: &Message,
         model: Option<&str>,
-        mode: AgentMode,
     ) -> Result<AgentResponse> {
         let start = Instant::now();
 
@@ -213,7 +208,7 @@ impl AgentCoordinator for Agent {
         // 2-6. 共享编排骨架：持久化 → 上下文 → AgentLoop → 结果组装 → 指标更新
         // 非流式路径无可取消源（HTTP 请求生命周期内），传 None
         let response = self
-            .run_agent_turn(&state, session_id, message, model, start, None, mode)
+            .run_agent_turn(&state, session_id, message, model, start, None)
             .await?;
 
         // 7. Compression check and persist
@@ -237,7 +232,6 @@ impl AgentCoordinator for Agent {
         message: &Message,
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
-        mode: AgentMode,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
         let state = self.load_and_build_state(session_id).await?;
         let model = model.unwrap_or(&self.default_model).to_string();
@@ -280,7 +274,6 @@ impl AgentCoordinator for Agent {
             let loop_result = self_clone
                 .agent_loop
                 .clone()
-                .with_mode(mode)
                 .run_stream(
                     &mut messages.clone(),
                     stream_sender.clone(),

@@ -10,12 +10,12 @@ import {
   redoSessionMessage,
 } from '@/lib/api-client';
 import { useChatStream } from '@/hooks/useChatStream';
-import { MessageSquare, Loader2, Undo2, Minimize2, ShieldCheck } from 'lucide-react';
+import { MessageSquare, Loader2, Undo2, Minimize2 } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
 import ModelSelector from './ModelSelector';
-import type { AgentMode, ChatMessage } from '@/lib/types';
+import type { ChatMessage } from '@/lib/types';
 
 export default function ChatPanel() {
   const { sessionId: urlSessionId } = useParams<{ sessionId: string }>();
@@ -38,8 +38,6 @@ export default function ChatPanel() {
   const [submittingClarify, setSubmittingClarify] = useState(false);
   const [compressing, setCompressing] = useState(false);
   const [wakePolling, setWakePolling] = useState(false);
-  // 请求级运行模式：Plan（只读）模式下写类工具被后端拒绝
-  const [mode, setMode] = useState<AgentMode>('act');
 
   // Sync URL sessionId to store on mount / navigation
   useEffect(() => {
@@ -171,10 +169,9 @@ export default function ChatPanel() {
         temperature: 0.7,
         max_tokens: 2048,
         model: state.selectedModel,
-        mode,
       });
     },
-    [streamStatus, addMessage, startStream, mode],
+    [streamStatus, addMessage, startStream],
   );
 
   const handleRollback = useCallback(
@@ -301,50 +298,6 @@ export default function ChatPanel() {
       <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] shrink-0">
         <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">对话</h1>
         <div className="flex items-center gap-2">
-          {/* Plan / Act 模式切换：Plan（只读）模式下写工具不可用 */}
-          <div
-            role="group"
-            aria-label="运行模式切换"
-            className="flex items-center gap-0.5 p-0.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]"
-          >
-            <button
-              type="button"
-              onClick={() => setMode('act')}
-              disabled={streamStatus === 'streaming'}
-              aria-pressed={mode === 'act'}
-              aria-label="切换到执行模式"
-              className={`px-2.5 py-1 text-xs rounded-md transition-colors disabled:opacity-50 ${
-                mode === 'act'
-                  ? 'bg-[var(--color-accent)] text-white font-medium'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
-              }`}
-            >
-              Act
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode('plan')}
-              disabled={streamStatus === 'streaming'}
-              aria-pressed={mode === 'plan'}
-              aria-label="切换到计划模式"
-              className={`flex items-center gap-1 px-2.5 py-1 text-xs rounded-md transition-colors disabled:opacity-50 ${
-                mode === 'plan'
-                  ? 'bg-[var(--color-accent)] text-white font-medium'
-                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
-              }`}
-            >
-              Plan
-              {mode === 'plan' && (
-                <span
-                  className="flex items-center gap-0.5 px-1 py-px rounded bg-white/20 text-[10px] leading-tight"
-                  aria-label="只读模式"
-                >
-                  <ShieldCheck size={10} />
-                  只读
-                </span>
-              )}
-            </button>
-          </div>
           <button
             onClick={() => void handleCompress()}
             disabled={!currentSessionId || streamStatus === 'streaming' || compressing}

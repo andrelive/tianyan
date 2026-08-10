@@ -5,31 +5,14 @@ use std::sync::Arc;
 
 use crate::agent::tool_params::AskUserParams;
 use crate::agent::tool_registry::ToolRegistry;
-use crate::agent::types::{AgentMode, StreamEventSender};
+use crate::agent::types::StreamEventSender;
 use crate::common::error::TianyanError;
 use crate::common::types::{FunctionCall, Message, MessageRole, StructuredMessage, TokenUsage};
 use crate::common::types::{ToolCall, ToolCallType};
 use crate::context::ContextAssembler;
-use crate::model::types::{ChatCompletionRequest, ToolDefinition};
+use crate::model::types::ChatCompletionRequest;
 use crate::model::ChatService;
 use crate::session::SessionManager;
-
-/// Plan（只读）模式下被排除的写类工具。
-///
-/// 覆盖写文件 / 语义化编辑 / 执行 / 测试 / 验证 / 知识导入 / 委托 / 任务取消。
-/// 读类工具（read_file/search_code/vfs_read/glob/list_dir/symbol_outline/lsp/
-/// web_search/web_fetch/ask_user/self_check/task_status 等）在 Plan 模式下保持可用。
-const PLAN_READONLY_EXCLUDED: &[&str] = &[
-    "write_file",
-    "apply_edit",
-    "apply_patch",
-    "execute_command",
-    "run_tests",
-    "verify_build",
-    "knowledge_ingest",
-    "delegate_to_agent",
-    "task_cancel",
-];
 
 /// Agent 循环配置。
 #[derive(Debug, Clone)]
@@ -117,8 +100,6 @@ pub struct AgentLoop {
     tool_registry: ToolRegistry,
     session_manager: Arc<dyn SessionManager>,
     config: AgentLoopConfig,
-    /// 运行模式（缺省 Act；Plan 模式过滤写类工具并硬阻断其执行）。
-    mode: AgentMode,
 }
 
 impl AgentLoop {
@@ -134,7 +115,6 @@ impl AgentLoop {
             tool_registry,
             session_manager,
             config,
-            mode: AgentMode::default(),
         }
     }
 
@@ -149,27 +129,6 @@ impl AgentLoop {
     pub fn with_allow_empty_answer(mut self) -> Self {
         self.config.allow_empty_answer = true;
         self
-    }
-
-    /// 设置运行模式（请求级）。
-    ///
-    /// Plan 模式过滤写类工具定义，且即使模型绕过 schema 调用被排除工具，
-    /// 执行处也会硬阻断返回错误。缺省为 [`AgentMode::Act`]（行为零变化）。
-    pub fn with_mode(mut self, mode: AgentMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    /// 当前模式下的工具定义。
-    ///
-    /// Plan（只读）模式下过滤 [`PLAN_READONLY_EXCLUDED`] 中的写类工具，
-    /// Act 模式返回完整定义。
-    async fn tool_definitions_for_mode(&self) -> Vec<ToolDefinition> {
-        let mut defs = self.tool_registry.definitions().await;
-        if self.mode.is_read_only() {
-            defs.retain(|d| !PLAN_READONLY_EXCLUDED.contains(&d.function.name.as_str()));
-        }
-        defs
     }
 
     /// 取消标志检查（None 视为未取消）。
@@ -200,7 +159,7 @@ impl AgentLoop {
             |this, model, _sender, msgs, _cancel| {
                 Box::pin(async move {
                     let request = ChatCompletionRequest::new(model, msgs)
-                        .with_tools(this.tool_definitions_for_mode().await);
+                        .with_tools(this.tool_registry.definitions().await);
 
                     let response =
                         this.model_service
@@ -257,7 +216,7 @@ impl AgentLoop {
 
                     let request = ChatCompletionRequest::new(model, msgs)
                         .with_stream(true)
-                        .with_tools(this.tool_definitions_for_mode().await);
+                        .with_tools(this.tool_registry.definitions().await);
 
                     let mut rx = this
                         .model_service
@@ -472,23 +431,6 @@ impl AgentLoop {
                     total_tokens: ctx.total_tokens.clone(),
                     turns: ctx.turn + 1,
                 }));
-            }
-        }
-
-        // Plan 模式二次防护（代码级硬阻断）：模型绕过 schema 仍调用被排除的
-        // 写类工具时直接返回错误，绝不执行。此检查在消息入史/持久化之前，
-        // 保证只读会话历史中不残留未执行的写意图。
-        if self.mode.is_read_only() {
-            if let Some(blocked) = assistant_msg
-                .tool_calls
-                .iter()
-                .flatten()
-                .find(|tc| PLAN_READONLY_EXCLUDED.contains(&tc.function.name.as_str()))
-            {
-                return Err(TianyanError::Custom(format!(
-                    "agent_loop: plan 模式只读，禁止调用工具 '{}'",
-                    blocked.function.name
-                )));
             }
         }
 
@@ -897,134 +839,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("LLM 调用失败"));
-    }
-
-    // ── Plan（只读）模式 ────────────────────────────────────────────
-
-    /// Plan 模式下 LLM 请求的工具定义被过滤：读类工具保留、写类工具移除。
-    #[tokio::test]
-    async fn test_run_plan_mode_filters_write_tools() {
-        let mut mock = MockChatService::new();
-        mock.expect_chat_completion().returning(|req| {
-            let tools = req.tools.as_ref().expect("Plan 模式请求应携带工具定义");
-            // 读/查/问工具保留
-            for keep in [
-                "read_file",
-                "search_code",
-                "vfs_read",
-                "glob",
-                "list_dir",
-                "lsp",
-                "ask_user",
-            ] {
-                assert!(
-                    tools.iter().any(|d| d.function.name == keep),
-                    "Plan 模式应保留 {keep}"
-                );
-            }
-            // 写/执行/测试/验证/知识导入/委托/取消全部移除
-            for gone in [
-                "write_file",
-                "apply_edit",
-                "apply_patch",
-                "execute_command",
-                "run_tests",
-                "verify_build",
-                "knowledge_ingest",
-                "delegate_to_agent",
-                "task_cancel",
-            ] {
-                assert!(
-                    !tools.iter().any(|d| d.function.name == gone),
-                    "Plan 模式应过滤 {gone}"
-                );
-            }
-            Ok(response_with(Message::assistant(
-                "计划：先读取代码，再给出方案",
-            )))
-        });
-        let agent_loop = make_loop(mock, 5).with_mode(AgentMode::Plan);
-
-        let mut messages = vec![Message::user("帮我规划一个重构方案")];
-        let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
-            .await
-            .unwrap();
-        assert!(matches!(result, AgentLoopResult::Answer { .. }));
-    }
-
-    /// Act 模式（缺省）下工具定义完整：写类工具仍在。
-    #[tokio::test]
-    async fn test_run_act_mode_keeps_write_tools() {
-        let mut mock = MockChatService::new();
-        mock.expect_chat_completion().returning(|req| {
-            let tools = req.tools.as_ref().expect("Act 模式请求应携带工具定义");
-            for name in ["read_file", "write_file", "apply_edit", "execute_command"] {
-                assert!(
-                    tools.iter().any(|d| d.function.name == name),
-                    "Act 模式应保留 {name}"
-                );
-            }
-            Ok(response_with(Message::assistant("完成")))
-        });
-        let agent_loop = make_loop(mock, 5); // 未设置 mode → 默认 Act
-
-        let mut messages = vec![Message::user("写个文件")];
-        let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
-            .await
-            .unwrap();
-        assert!(matches!(result, AgentLoopResult::Answer { .. }));
-    }
-
-    /// Plan 模式硬阻断：模型绕过 schema 仍调用被排除工具 → 直接返回错误（不执行）。
-    #[tokio::test]
-    async fn test_run_plan_mode_hard_blocks_write_tool_call() {
-        let mut mock = MockChatService::new();
-        mock.expect_chat_completion()
-            .returning(|_| Ok(response_with(tool_call_msg("write_file"))));
-        let agent_loop = make_loop(mock, 5).with_mode(AgentMode::Plan);
-
-        let mut messages = vec![Message::user("帮我写代码")];
-        let err = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
-            .await
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("plan 模式只读"), "应含只读提示：{msg}");
-        assert!(msg.contains("write_file"), "应点名被禁工具：{msg}");
-    }
-
-    /// Plan 模式下 ask_user 不被硬阻断：追问路径仍工作（交互属于只读）。
-    #[tokio::test]
-    async fn test_run_plan_mode_ask_user_allowed() {
-        let mut mock = MockChatService::new();
-        mock.expect_chat_completion().returning(|_| {
-            Ok(response_with(Message::assistant_with_tools(
-                "",
-                vec![ToolCall {
-                    id: "call_ask".to_string(),
-                    call_type: ToolCallType::Function,
-                    function: FunctionCall {
-                        name: "ask_user".to_string(),
-                        arguments: r#"{"question": "计划范围是？"}"#.to_string(),
-                    },
-                }],
-            )))
-        });
-        let agent_loop = make_loop(mock, 5).with_mode(AgentMode::Plan);
-
-        let mut messages = vec![Message::user("帮我规划")];
-        let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
-            .await
-            .unwrap();
-        match result {
-            AgentLoopResult::NeedsClarification { question, .. } => {
-                assert_eq!(question, "计划范围是？");
-            }
-            other => panic!("期望 NeedsClarification，得到 {:?}", other),
-        }
     }
 
     // ── 取消路径（cancel 标志） ──────────────────────────────────────

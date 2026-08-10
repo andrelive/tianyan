@@ -102,8 +102,7 @@ Dispatch（VM 沙箱 + 默认拒网 + 文件夹授权，但不支持后台）、
 
 ### T2 —— 推荐（竞品标配，天演缺失，工作量可控）
 
-5. **Plan 模式**：只读模式门控（plan 时写工具不可用，Cline 式硬阻断而非提示）+ 复用现有 ask_user 澄清 + 计划文本持久化（Devin megaplan 式）。
-   - 注：不重建 planner 组件（保持"工具不做自主多轮决策"决策），只是执行模式门控
+5. ~~**Plan 模式**~~ → **已否决并回滚**（见 [REJECTED.md](./decisions/REJECTED.md) 第 19 项）：显式模式切换是额外状态机负担，单用户场景价值被审批流 + 快照回退覆盖。**替代（已实施）**：`planning` 内置技能软约束——对话语义触发（"计划一下"→ call_skill），行为指南注入对话跨轮可见，不硬阻断。
 6. **命令级审批策略**：审批规则引擎（命令前缀 glob allow/prompt/forbid + 文件路径模式）——Codex rules / Devin permissions 同构；顺带审批卡支持"编辑命令后再批准"（Devin wand 简化版：前端编辑 + 直接执行，无需 LLM 改写）
 
 ### 明确不做（原 T3 第 7 项：git worktree 隔离并行）
