@@ -56,6 +56,8 @@ pub struct AgentBuilder {
     notification_sink: Option<crate::notification::SharedNotificationSink>,
     /// 子 Agent 角色配置（delegate_to_agent role 参数；None 时使用内置角色）。
     agent_roles: Option<AgentRolesConfig>,
+    /// 结构化 Trace 收集器（G6；None 时不记录 span）。
+    trace_collector: Option<Arc<crate::observability::trace::TraceCollector>>,
 }
 
 impl AgentBuilder {
@@ -78,6 +80,7 @@ impl AgentBuilder {
             background_task_db: None,
             notification_sink: None,
             agent_roles: None,
+            trace_collector: None,
         }
     }
 
@@ -181,6 +184,15 @@ impl AgentBuilder {
     /// 同名角色覆盖内置定义，新名字新增角色；未设置时使用内置角色。
     pub fn with_agent_roles(mut self, config: AgentRolesConfig) -> Self {
         self.agent_roles = Some(config);
+        self
+    }
+
+    /// 设置结构化 Trace 收集器（G6：轮次/工具/任务 span 持久化）。
+    pub fn with_trace_collector(
+        mut self,
+        collector: Arc<crate::observability::trace::TraceCollector>,
+    ) -> Self {
+        self.trace_collector = Some(collector);
         self
     }
 
@@ -316,8 +328,12 @@ impl AgentBuilder {
                 crate::executor::judge::LlmTaskReviewer::new(model_service.clone(), &chat_model),
             ));
         }
+        // 结构化 Trace（G6）：轮次/工具/任务 span 持久化（工具 + 后台任务）
+        if let Some(ref trace) = self.trace_collector {
+            tool_registry = tool_registry.with_trace_collector(trace.clone());
+        }
 
-        let agent_loop = AgentLoop::new(
+        let mut agent_loop = AgentLoop::new(
             model_service.clone(),
             tool_registry,
             session_manager.clone(),
@@ -327,6 +343,10 @@ impl AgentBuilder {
                 ..Default::default()
             },
         );
+        // 结构化 Trace（G6）：轮次 span
+        if let Some(ref trace) = self.trace_collector {
+            agent_loop = agent_loop.with_trace_collector(trace.clone());
+        }
 
         // 构建上下文管线
         let context_pipeline = ContextPipeline::new(

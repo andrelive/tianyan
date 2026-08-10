@@ -23,6 +23,7 @@ use crate::knowledge::KnowledgeIngestor;
 use crate::lsp::diagnostics::LspManager;
 use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition};
 use crate::model::ChatService;
+use crate::observability::trace::TraceCollector;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
 use crate::scheduler::tasks::RuleRecorder;
@@ -70,6 +71,19 @@ fn parse_params<T: serde::de::DeserializeOwned>(arguments: &str) -> Result<T, Ti
 /// 将安全策略检查错误包装为统一的安全违规工具错误。
 fn safety_violation<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, TianyanError> {
     result.map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))
+}
+
+/// 截断工具参数摘要（G6 trace 观测数据控制体积；UTF-8 边界安全）。
+fn truncate_trace_params(arguments: &str) -> String {
+    const MAX: usize = 200;
+    if arguments.len() <= MAX {
+        return arguments.to_string();
+    }
+    let mut end = MAX;
+    while !arguments.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &arguments[..end])
 }
 
 /// 动态工具执行器：供外部桥接（如 MCP 工具桥接）扩展工具注册表。
@@ -124,6 +138,8 @@ pub struct ToolRegistry {
     pub(crate) delegation_depth: Arc<AtomicUsize>,
     /// 子 Agent 角色注册表（delegate_to_agent role 参数解析；默认内置角色）。
     pub(crate) role_registry: Arc<RoleRegistry>,
+    /// 结构化 Trace 收集器（G6；None 时不记录 span——行为零变化）。
+    pub(crate) trace_collector: Option<Arc<TraceCollector>>,
 }
 
 impl ToolRegistry {
@@ -150,6 +166,7 @@ impl ToolRegistry {
             execution_history: Arc::new(Mutex::new(Vec::new())),
             delegation_depth: Arc::new(AtomicUsize::new(0)),
             role_registry: Arc::new(RoleRegistry::builtin()),
+            trace_collector: None,
         };
         registry.register_builtin_tools();
         registry
@@ -314,6 +331,14 @@ impl ToolRegistry {
     ) -> Self {
         self.background_tasks =
             Arc::new((*self.background_tasks).clone().with_task_reviewer(reviewer));
+        self
+    }
+
+    /// 设置结构化 Trace 收集器（G6；工具 span + 后台任务 span 记录）。
+    pub fn with_trace_collector(mut self, collector: Arc<TraceCollector>) -> Self {
+        self.trace_collector = Some(collector.clone());
+        self.background_tasks =
+            Arc::new((*self.background_tasks).clone().with_trace_collector(collector));
         self
     }
 
@@ -588,6 +613,18 @@ impl ToolRegistry {
         if let Some(ref stats) = self.usage_stats {
             let elapsed_us = start.elapsed().as_micros() as u64;
             stats.record_skill_call(&call.function.name, result.is_ok(), elapsed_us);
+        }
+
+        // G6 结构化 Trace：工具 span（归属当前轮；参数摘要截断控制体积）
+        if let Some(ref trace) = self.trace_collector {
+            trace.record_tool(
+                session_id,
+                &call.function.name,
+                &truncate_trace_params(arguments),
+                start.elapsed().as_millis() as i64,
+                result.is_ok(),
+                result.as_ref().err().map(|e| e.to_string()),
+            );
         }
 
         // Record execution history for GEPA

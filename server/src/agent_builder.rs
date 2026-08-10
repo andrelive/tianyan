@@ -116,6 +116,11 @@ impl AgentBuilderFactory {
         };
         let mut builder = agent.with_skill_refresher(skill_refresher);
         if let Some(db) = sqlite_db {
+            // G6：结构化 Trace（共享 SqliteDb，观测持久化；失败仅告警）
+            match tianyan::observability::trace::TraceCollector::new(db.clone()) {
+                Ok(trace) => builder = builder.with_trace_collector(trace),
+                Err(e) => tracing::warn!(error = %e, "TraceCollector 初始化失败，span 记录不可用"),
+            }
             builder = builder.with_background_task_db(db);
         }
         // 系统通知通道（动态包装：Tauri 后注册亦生效）

@@ -221,14 +221,31 @@ impl ConfigService {
             .find(|s| s.name == name)
             .ok_or_else(|| ApiError::NotFound(format!("MCP 服务器 '{}' 未找到", name)))?;
 
-        match tianyan_mcp::McpClient::connect(
-            entry.name.clone(),
-            entry.command.clone(),
-            entry.args.clone(),
-            entry.env.clone(),
-        )
-        .await
-        {
+        // G7：按传输方式分流测试——http 走 streamable HTTP，缺省/stdio 走子进程
+        let test_result = match entry.transport.as_deref() {
+            Some("http") => match entry.url.as_deref() {
+                Some(url) => tianyan_mcp::McpClient::connect_http(entry.name.clone(), url).await,
+                None => {
+                    warn!(server = %name, "transport=http 但未配置 url");
+                    return Ok(crate::api::config::mcp_handlers::McpTestResponse {
+                        success: false,
+                        tools: 0,
+                        error: Some("transport=http 但未配置 url".to_string()),
+                    });
+                }
+            },
+            _ => {
+                tianyan_mcp::McpClient::connect(
+                    entry.name.clone(),
+                    entry.command.clone(),
+                    entry.args.clone(),
+                    entry.env.clone(),
+                )
+                .await
+            }
+        };
+
+        match test_result {
             Ok(client) => {
                 let tools = client
                     .list_tools()

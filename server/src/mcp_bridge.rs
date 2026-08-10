@@ -19,7 +19,7 @@ use tianyan::agent::DynamicToolExecutor;
 use tianyan::common::error::{Result, TianyanError};
 use tianyan::config::McpServerEntry;
 use tianyan::model::types::{FunctionDefinition, ToolDefinition};
-use tianyan_mcp::{McpClient, McpImage, ToolInfo};
+use tianyan_mcp::{McpClient, McpImage, McpResult, ToolInfo};
 
 /// 构造 LLM 可见的工具描述（带 `[MCP:<服务器名>]` 来源前缀）。
 fn mcp_tool_description(server_name: &str, tool: &ToolInfo) -> String {
@@ -245,14 +245,33 @@ impl McpToolManager {
             if clients.contains_key(&server.name) {
                 continue;
             }
-            match McpClient::connect(
-                server.name.clone(),
-                server.command.clone(),
-                server.args.clone(),
-                server.env.clone(),
-            )
-            .await
-            {
+            // G7：传输方式分流——http 走 streamable HTTP（远程服务器），
+            // 缺省/stdio 走本地子进程。
+            let connected = match server.transport.as_deref() {
+                Some("http") => match server.url.as_deref() {
+                    Some(url) => {
+                        McpClient::connect_http(server.name.clone(), url.to_string()).await
+                    }
+                    None => {
+                        tracing::warn!(
+                            server = %server.name,
+                            "MCP 服务器 transport=http 但未配置 url，跳过"
+                        );
+                        continue;
+                    }
+                },
+                Some(other) => {
+                    tracing::warn!(
+                        server = %server.name,
+                        transport = %other,
+                        "未知 MCP 传输方式，回退 stdio"
+                    );
+                    Self::connect_stdio(server).await
+                }
+                None => Self::connect_stdio(server).await,
+            };
+
+            match connected {
                 Ok(client) => {
                     let tool_count = client.list_tools().await.map(|t| t.len()).unwrap_or(0);
                     tracing::info!(
@@ -271,6 +290,17 @@ impl McpToolManager {
                 }
             }
         }
+    }
+
+    /// 以 stdio 传输连接本地 MCP 服务器进程。
+    async fn connect_stdio(server: &McpServerEntry) -> McpResult<McpClient> {
+        McpClient::connect(
+            server.name.clone(),
+            server.command.clone(),
+            server.args.clone(),
+            server.env.clone(),
+        )
+        .await
     }
 
     /// 从当前连接的服务器生成全部工具桥接。

@@ -45,6 +45,13 @@ pub struct McpServerEntry {
     /// 可读描述。
     #[serde(default)]
     pub description: Option<String>,
+    /// 传输方式（G7）：`"stdio"`（默认，本地进程）| `"http"`（远程
+    /// streamable HTTP 服务器）。`http` 时必须配置 `url`。
+    #[serde(default)]
+    pub transport: Option<String>,
+    /// 远程服务器地址（transport = "http" 时必填；http/https 绝对地址）。
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -61,7 +68,16 @@ impl McpServerEntry {
             env: None,
             enabled: true,
             description: None,
+            transport: None,
+            url: None,
         }
+    }
+
+    /// 设置远程 streamable HTTP 传输（G7）：`url` 为 http/https 绝对地址。
+    pub fn with_http_transport(mut self, url: impl Into<String>) -> Self {
+        self.transport = Some("http".to_string());
+        self.url = Some(url.into());
+        self
     }
 
     /// 设置环境变量。
@@ -140,6 +156,8 @@ mod tests {
             env: None,
             enabled: true,
             description: Some("File operations".to_string()),
+            transport: None,
+            url: None,
         };
         assert!(entry.validate().is_ok());
     }
@@ -153,6 +171,8 @@ mod tests {
             env: None,
             enabled: true,
             description: None,
+            transport: None,
+            url: None,
         };
         let result = entry.validate();
         assert!(result.is_err());
@@ -172,6 +192,8 @@ mod tests {
             env: None,
             enabled: true,
             description: None,
+            transport: None,
+            url: None,
         };
         let result = entry.validate();
         assert!(result.is_err());
@@ -193,6 +215,8 @@ mod tests {
                     env: None,
                     enabled: true,
                     description: None,
+                    transport: None,
+                    url: None,
                 },
                 McpServerEntry {
                     name: "server2".to_string(),
@@ -201,6 +225,8 @@ mod tests {
                     env: None,
                     enabled: false,
                     description: None,
+                    transport: None,
+                    url: None,
                 },
             ],
         };
@@ -226,6 +252,8 @@ mod tests {
                 )])),
                 enabled: false,
                 description: Some("Safe file access".to_string()),
+                transport: None,
+                url: None,
             }],
         };
         let toml_str = match toml::to_string_pretty(&config) {
@@ -254,6 +282,8 @@ mod tests {
                 env: None,
                 enabled: true,
                 description: None,
+                transport: None,
+                url: None,
             }],
         };
         assert!(config.validate().is_ok());
@@ -266,8 +296,35 @@ mod tests {
                 env: None,
                 enabled: true,
                 description: None,
+                transport: None,
+                url: None,
             }],
         };
         assert!(invalid_config.validate().is_err());
+    }
+
+    #[test]
+    fn test_http_transport_roundtrip() {
+        // G7：streamable HTTP 传输配置（transport=http + url）随 TOML 往返
+        let config = McpConfig {
+            servers: vec![McpServerEntry::new("remote", "unused", vec![])
+                .with_http_transport("https://mcp.example.com/mcp")
+                .with_description("远程服务器")],
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: McpConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.servers[0].transport.as_deref(), Some("http"));
+        assert_eq!(
+            parsed.servers[0].url.as_deref(),
+            Some("https://mcp.example.com/mcp")
+        );
+
+        // 旧配置（无 transport/url 字段）兼容解析：默认 stdio
+        let legacy: McpConfig = toml::from_str(
+            "[[servers]]\nname = \"old\"\ncommand = \"npx\"\nargs = []\n",
+        )
+        .unwrap();
+        assert!(legacy.servers[0].transport.is_none());
+        assert!(legacy.servers[0].url.is_none());
     }
 }

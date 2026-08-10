@@ -154,6 +154,8 @@ pub struct BackgroundTaskManager {
     notification: Arc<Mutex<Option<SharedNotificationSink>>>,
     /// 任务结果自审器（G4；None 时不自审——通知直接注入）。
     task_reviewer: Option<Arc<dyn crate::executor::judge::TaskReviewer>>,
+    /// 结构化 Trace 收集器（G6；None 时不记录任务 span）。
+    trace_collector: Option<Arc<crate::observability::trace::TraceCollector>>,
     db: Option<SqliteDb>,
     next_seq: Arc<AtomicU64>,
     /// 持久化加载只执行一次（惰性：首次 register/snapshot 前）。
@@ -175,6 +177,7 @@ impl BackgroundTaskManager {
             waker: Arc::new(Mutex::new(None)),
             notification: Arc::new(Mutex::new(None)),
             task_reviewer: None,
+            trace_collector: None,
             db: None,
             next_seq: Arc::new(AtomicU64::new(0)),
             reloaded: Arc::new(AtomicBool::new(false)),
@@ -205,6 +208,15 @@ impl BackgroundTaskManager {
     /// 下一轮看到后决策（复核/重新委托）——不自动重跑。
     pub fn with_task_reviewer(mut self, reviewer: Arc<dyn crate::executor::judge::TaskReviewer>) -> Self {
         self.task_reviewer = Some(reviewer);
+        self
+    }
+
+    /// 设置结构化 Trace 收集器（G6：任务终态 span 记录）。
+    pub fn with_trace_collector(
+        mut self,
+        collector: Arc<crate::observability::trace::TraceCollector>,
+    ) -> Self {
+        self.trace_collector = Some(collector);
         self
     }
 
@@ -376,6 +388,20 @@ impl BackgroundTaskManager {
         };
 
         self.persist_upsert(&task).await;
+
+        // G6 结构化 Trace：任务终态 span（独立子树根，task_id 关联）
+        if let Some(trace) = &self.trace_collector {
+            let duration = task.completed_at.unwrap_or_else(now_ms) - task.created_at;
+            trace.record_task(
+                &session_id,
+                &task.id,
+                &task.description,
+                task.result.as_deref().unwrap_or(""),
+                duration,
+                task.status == TaskStatus::Completed,
+                task.error.clone(),
+            );
+        }
 
         if let Some(notifier) = &self.notifier {
             notifier

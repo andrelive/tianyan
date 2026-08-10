@@ -157,7 +157,12 @@ cache_ttl_secs = 600
 max_fetch_bytes = 2097152
 
 # ==================== MCP 服务器配置 ====================
-# 通过 MCP 协议接入外部工具服务器（stdio 传输），工具自动注册进 Agent 工具循环。
+# 通过 MCP 协议接入外部工具服务器，工具自动注册进 Agent 工具循环。
+# 传输方式（G7）：
+#   transport = "stdio"（默认）—— 本地子进程（command + args）
+#   transport = "http"  —— 远程 streamable HTTP 服务器（需配置 url，
+#                          如 GitHub MCP / 云服务 MCP；对齐 2026-07-28
+#                          stateless 核心规范）
 # 服务器名必须唯一；enabled = false 时仅保存配置不连接。
 #
 # 浏览器感知示例（Playwright MCP，微软官方）：
@@ -171,6 +176,15 @@ max_fetch_bytes = 2097152
 # args = ["-y", "@playwright/mcp@latest", "--headless"]
 # enabled = true
 # description = "浏览器自动化（导航/点击/截图）"
+#
+# 远程服务器示例（streamable HTTP）：
+# [[mcp.servers]]
+# name = "remote-github"
+# transport = "http"
+# url = "https://mcp.example.com/mcp"
+# command = "unused"
+# args = []
+# enabled = true
 #
 # 通用示例（文件系统服务器）：
 # [[mcp.servers]]

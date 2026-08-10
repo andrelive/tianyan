@@ -141,4 +141,24 @@ const SCHEMA_SQL: &str = "
         seq                INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_background_tasks_session ON background_tasks(parent_session_id, seq);
+
+    -- 结构化 Trace（G6）：会话/任务执行 span，支持事后回放与坏例分析。
+    -- 按 (session_id, task_id, turn_index) 分组还原调用树；由 TraceCollector
+    -- 缓冲批量写入并清理超出保留窗口的旧记录。
+    CREATE TABLE IF NOT EXISTS trace_spans (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id    TEXT    NOT NULL,
+        task_id       TEXT,
+        turn_index    INTEGER,
+        kind          TEXT    NOT NULL,
+        name          TEXT    NOT NULL,
+        detail        TEXT    NOT NULL DEFAULT '',
+        duration_ms   INTEGER NOT NULL DEFAULT 0,
+        tokens        INTEGER NOT NULL DEFAULT 0,
+        success       INTEGER NOT NULL DEFAULT 1,
+        error         TEXT,
+        recorded_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_trace_spans_session ON trace_spans(session_id, id);
+    CREATE INDEX IF NOT EXISTS idx_trace_spans_task ON trace_spans(task_id, id);
 ";

@@ -16,7 +16,7 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-rust-mcp-sdk = { version = "0.9", default-features = false, features = ["client", "stdio"] }
+rust-mcp-sdk = { version = "0.9", default-features = false, features = ["client", "stdio", "streamable-http"] }
 tianyan-core = { path = "../core" }
 tokio = { workspace = true }
 serde = { workspace = true }

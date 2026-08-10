@@ -14,7 +14,10 @@ use rust_mcp_sdk::mcp_client::{
 use rust_mcp_sdk::schema::{
     CallToolRequestParams, ClientCapabilities, Implementation, InitializeRequestParams,
 };
-use rust_mcp_sdk::{McpClient as McpClientTrait, StdioTransport, TransportOptions};
+use rust_mcp_sdk::{
+    McpClient as McpClientTrait, RequestOptions, StdioTransport, StreamableTransportOptions,
+    TransportOptions,
+};
 use tracing::instrument;
 
 use crate::error::{McpError, McpResult};
@@ -143,21 +146,7 @@ impl McpClient {
                 })?;
 
         // Prepare the initialize request with client metadata.
-        let client_info = Implementation {
-            name: "tianyan-mcp".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            description: Some("Tianyan MCP Client".to_string()),
-            icons: vec![],
-            title: None,
-            website_url: None,
-        };
-
-        let client_details = InitializeRequestParams {
-            protocol_version: "2024-11-05".to_string(),
-            capabilities: ClientCapabilities::default(),
-            client_info,
-            meta: None,
-        };
+        let client_details = Self::build_client_details();
 
         // Create the client runtime with our handler.
         let client = client_runtime::create_client(McpClientOptions {
@@ -181,6 +170,67 @@ impl McpClient {
             server = %server_name,
             tool_count = tools.len(),
             "Connected to MCP server"
+        );
+
+        Ok(Self {
+            server_name,
+            client,
+            tools,
+            connected: AtomicBool::new(true),
+        })
+    }
+
+    /// Connect to a remote MCP server over streamable HTTP transport（G7）。
+    ///
+    /// 对齐 2026-07-28 stateless 核心规范（SDK `with_transport_options`）；
+    /// 支持远程 MCP 服务器（GitHub MCP / 云服务 MCP 等生态主流形态）。
+    /// `url` 必须是 `http://` 或 `https://` 绝对地址（如
+    /// `https://mcp.example.com/mcp`）。
+    ///
+    /// # Arguments
+    /// * `server_name` - A human-readable label for this server.
+    /// * `url` - The streamable HTTP endpoint of the remote MCP server.
+    pub async fn connect_http(
+        server_name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> McpResult<Self> {
+        let server_name: String = server_name.into();
+        let url: String = url.into();
+
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(McpError::connection_failed(
+                &server_name,
+                format!("streamable HTTP URL 必须为 http/https 绝对地址：{url}"),
+            ));
+        }
+
+        tracing::info!(server = %server_name, url = %url, "Connecting to remote MCP server");
+
+        let transport_options = StreamableTransportOptions {
+            mcp_url: url,
+            request_options: RequestOptions::default(),
+        };
+
+        let client = client_runtime::with_transport_options(
+            Self::build_client_details(),
+            transport_options,
+            LoggingClientHandler,
+            None,
+            None,
+            None,
+        );
+
+        // Start the client (initializes the connection).
+        client.clone().start().await.map_err(|e| {
+            McpError::connection_failed(&server_name, format!("Failed to start client: {e}"))
+        })?;
+
+        let tools = Self::fetch_tools(&client).await?;
+
+        tracing::info!(
+            server = %server_name,
+            tool_count = tools.len(),
+            "Connected to remote MCP server"
         );
 
         Ok(Self {
@@ -298,6 +348,25 @@ impl McpClient {
     }
 
     // ─── private helpers ───
+
+    /// 构建 MCP initialize 请求参数（stdio 与 streamable HTTP 共用）。
+    fn build_client_details() -> InitializeRequestParams {
+        let client_info = Implementation {
+            name: "tianyan-mcp".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            description: Some("Tianyan MCP Client".to_string()),
+            icons: vec![],
+            title: None,
+            website_url: None,
+        };
+
+        InitializeRequestParams {
+            protocol_version: "2024-11-05".to_string(),
+            capabilities: ClientCapabilities::default(),
+            client_info,
+            meta: None,
+        }
+    }
 
     /// Fetch the tool list from the server.
     async fn fetch_tools(client: &ClientRuntime) -> McpResult<Vec<ToolInfo>> {
@@ -448,6 +517,15 @@ mod tests {
     fn test_mcp_error_transport() {
         let err = McpError::Transport("io error".to_string());
         assert_eq!(err.to_string(), "Transport error: io error");
+    }
+
+    #[tokio::test]
+    async fn test_connect_http_rejects_non_http_url() {
+        // G7：非 http/https URL 在发起连接前即被拒绝（不触网）
+        let err = McpClient::connect_http("remote", "ftp://example.com/mcp")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("http"), "应提示 URL 必须为 http/https: {err}");
     }
 
     /// 构造一个只含文本块的 `CallToolResult`。

@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use crate::common::error::TianyanError;
 use crate::config::TianyanConfig;
 use crate::memory::MemoryExtractor;
+use crate::scheduler::TaskStateStore;
 use crate::vfs::{SummaryEngine, VirtualFileSystem};
 
 /// 任务优先级。
@@ -72,6 +73,8 @@ pub struct TaskContext {
     pub memory_extractor: Arc<MemoryExtractor>,
     /// 配置。
     pub config: Arc<TianyanConfig>,
+    /// 任务作用域状态存储（G5：定时任务跨运行状态——读写自己的持久状态）。
+    pub task_state: Arc<TaskStateStore>,
 }
 
 impl TaskContext {
@@ -82,11 +85,13 @@ impl TaskContext {
         memory_extractor: Arc<MemoryExtractor>,
         config: Arc<TianyanConfig>,
     ) -> Self {
+        let task_state = Arc::new(TaskStateStore::new(vfs.clone()));
         Self {
             vfs,
             summary_engine,
             memory_extractor,
             config,
+            task_state,
         }
     }
 }

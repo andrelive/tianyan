@@ -12,6 +12,7 @@ use crate::common::types::{ToolCall, ToolCallType};
 use crate::context::ContextAssembler;
 use crate::model::types::ChatCompletionRequest;
 use crate::model::ChatService;
+use crate::observability::trace::TraceCollector;
 use crate::session::SessionManager;
 
 /// Agent 循环配置。
@@ -103,6 +104,8 @@ pub struct AgentLoop {
     tool_registry: ToolRegistry,
     session_manager: Arc<dyn SessionManager>,
     config: AgentLoopConfig,
+    /// 结构化 Trace 收集器（G6；None 时不记录轮 span）。
+    trace: Option<Arc<TraceCollector>>,
 }
 
 impl AgentLoop {
@@ -118,7 +121,14 @@ impl AgentLoop {
             tool_registry,
             session_manager,
             config,
+            trace: None,
         }
+    }
+
+    /// 设置结构化 Trace 收集器（G6：轮次 span 记录；None 时不记录）。
+    pub fn with_trace_collector(mut self, collector: Arc<TraceCollector>) -> Self {
+        self.trace = Some(collector);
+        self
     }
 
     /// 获取工具注册表引用。
@@ -391,6 +401,12 @@ impl AgentLoop {
                 });
             }
 
+            // G6 结构化 Trace：设置当前轮次（工具 span 归属本轮）
+            let turn_start = std::time::Instant::now();
+            if let Some(ref trace) = self.trace {
+                trace.set_current_turn(session_id, turn as i64);
+            }
+
             let (assistant_msg, turn_usage) =
                 match step(self, model, stream_sender, messages.clone(), cancel).await {
                     Ok(v) => v,
@@ -420,7 +436,28 @@ impl AgentLoop {
                 .handle_llm_response(&assistant_msg, turn_usage, &mut ctx)
                 .await?
             {
+                // G6：终轮 span（含 token 消耗）
+                if let Some(ref trace) = self.trace {
+                    trace.record_turn(
+                        session_id,
+                        model,
+                        turn_start.elapsed().as_millis() as i64,
+                        (total_tokens.prompt_tokens + total_tokens.completion_tokens) as i64,
+                        true,
+                    );
+                }
                 return Ok(result);
+            }
+
+            // G6：非终轮 span（工具执行后继续下一轮）
+            if let Some(ref trace) = self.trace {
+                trace.record_turn(
+                    session_id,
+                    model,
+                    turn_start.elapsed().as_millis() as i64,
+                    (total_tokens.prompt_tokens + total_tokens.completion_tokens) as i64,
+                    true,
+                );
             }
         }
 

@@ -269,6 +269,16 @@ impl TaskHandler for MemoryTask {
     async fn execute(&self, ctx: &TaskContext) -> TaskResult {
         tracing::info!("开始执行记忆提取任务...");
 
+        // G5 跨运行状态：读取上次周期摘要（任务上下文延续）
+        match ctx.task_state.read("memory_extraction").await {
+            Ok(Some(prev)) => {
+                let first_line = prev.lines().next().unwrap_or("").to_string();
+                tracing::info!(prev_summary = %first_line, "记忆提取任务上次运行摘要");
+            }
+            Ok(None) => tracing::debug!("记忆提取任务首次运行（无历史状态）"),
+            Err(e) => tracing::warn!(error = %e, "读取任务状态失败"),
+        }
+
         let sessions = match self.scan_sessions(ctx).await {
             Ok(uris) => uris,
             Err(e) => {
@@ -306,6 +316,17 @@ impl TaskHandler for MemoryTask {
             processed_count,
             total_memories
         );
+
+        // G5 跨运行状态：写入本次周期摘要（下次运行可读）
+        let summary = format!(
+            "# 记忆提取周期摘要\n\n- 时间: {}\n- 处理会话: {}\n- 提取记忆: {}\n",
+            chrono::Utc::now().to_rfc3339(),
+            processed_count,
+            total_memories
+        );
+        if let Err(e) = ctx.task_state.write("memory_extraction", &summary).await {
+            tracing::warn!(error = %e, "任务状态写入失败");
+        }
 
         TaskResult::success(total_memories)
     }

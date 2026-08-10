@@ -27,6 +27,7 @@ pub mod sessions;
 pub mod shared;
 pub mod skills;
 pub mod tasks;
+pub mod traces;
 pub mod workspace;
 
 // 重新导出应用状态和共享类型
@@ -65,6 +66,7 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .merge(insights::routes())
         .merge(workspace::routes())
         .merge(tasks::routes())
+        .merge(traces::routes())
         .merge(clipboard::routes())
         .merge(events::routes())
 }

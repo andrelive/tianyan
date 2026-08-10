@@ -89,6 +89,8 @@ pub struct AppState {
     skill_manager: Arc<SkillManager>,
     /// 使用统计追踪器
     usage_stats: Arc<UsageStats>,
+    /// 结构化 Trace 收集器（G6：span 持久化与回放查询）
+    trace_collector: Arc<tianyan::observability::trace::TraceCollector>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// 模型服务（chat/embedding/vision，全组件共享；配置热更新时重建）
@@ -164,6 +166,12 @@ impl AppState {
         // 初始化使用统计（复用全系统共享的 SqliteDb，ADR-005：单连接）
         let usage_stats = UsageStats::new(sqlite_db.clone())?;
 
+        // 初始化结构化 Trace（G6：span 持久化与回放；失败仅告警）
+        let trace_collector =
+            tianyan::observability::trace::TraceCollector::new(sqlite_db.clone()).map_err(|e| {
+                TianyanError::Custom(format!("TraceCollector 初始化失败：{e}"))
+            })?;
+
         // 初始化工作区快照管理器（配置了 working_directory 时启用）
         let snapshot_manager = config.agent.working_directory.clone().map(|workdir| {
             let root = config.storage.data_dir.join("snapshots");
@@ -220,6 +228,7 @@ impl AppState {
             skill_executor,
             skill_manager,
             usage_stats,
+            trace_collector,
             snapshot_manager,
             model_services: Arc::new(RwLock::new(model_services)),
             mcp_tools,
@@ -253,6 +262,11 @@ impl AppState {
             manager: self.skill_manager.clone(),
             registry: self.skill_registry.clone(),
         }
+    }
+
+    /// 获取结构化 Trace 收集器（G6 回放查询）。
+    pub fn trace_collector(&self) -> Arc<tianyan::observability::trace::TraceCollector> {
+        self.trace_collector.clone()
     }
 
     /// 更新应用配置并重新构建 Agent
