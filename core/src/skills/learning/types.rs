@@ -92,3 +92,12 @@ pub enum SkillAction {
     /// 废弃。
     Deprecate,
 }
+
+/// 候选技能验证结果（G2b 注册前质量门）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillVerification {
+    /// 质量评分（0-10；低于阈值标记为试验性技能）。
+    pub score: u8,
+    /// 问题清单（审查员指出，供后续改进参考）。
+    pub issues: Vec<String>,
+}

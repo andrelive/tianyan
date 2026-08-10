@@ -196,6 +196,15 @@ pub struct DelegateToAgentParams {
     /// 完成时自动向父会话注入通知（含结果摘要与剩余任务计数）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background: Option<bool>,
+    /// 子 Agent 角色名（内置 researcher / editor / reviewer，或 tianyan.toml
+    /// `[agent_roles]` 节自定义角色）。角色提供模型、系统提示、工具白名单、
+    /// max_turns 与 timeout_secs；同名参数显式指定时优先于角色值。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// 子 Agent 模型名称（与主 Agent 模型同空间；优先级：
+    /// 显式 model > role.model > 主 Agent 模型）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// 后台任务状态查询参数。

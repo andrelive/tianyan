@@ -152,6 +152,8 @@ pub struct BackgroundTaskManager {
     waker: Arc<Mutex<Option<Arc<dyn TaskWaker>>>>,
     /// 系统通知通道槽（全部完成/失败时桌面通知；Arc<Mutex> 支持构建后注入）。
     notification: Arc<Mutex<Option<SharedNotificationSink>>>,
+    /// 任务结果自审器（G4；None 时不自审——通知直接注入）。
+    task_reviewer: Option<Arc<dyn crate::executor::judge::TaskReviewer>>,
     db: Option<SqliteDb>,
     next_seq: Arc<AtomicU64>,
     /// 持久化加载只执行一次（惰性：首次 register/snapshot 前）。
@@ -172,6 +174,7 @@ impl BackgroundTaskManager {
             notifier: None,
             waker: Arc::new(Mutex::new(None)),
             notification: Arc::new(Mutex::new(None)),
+            task_reviewer: None,
             db: None,
             next_seq: Arc::new(AtomicU64::new(0)),
             reloaded: Arc::new(AtomicBool::new(false)),
@@ -193,6 +196,15 @@ impl BackgroundTaskManager {
     /// 设置 SQLite 持久化后端（任务状态脱离调用栈；重启可查询可恢复）。
     pub fn with_db(mut self, db: SqliteDb) -> Self {
         self.db = Some(db);
+        self
+    }
+
+    /// 设置任务结果自审器（G4：完成通知注入前轻量自审；None 时不自审）。
+    ///
+    /// 未通过自审的任务结果前缀 `[自审未通过] {reason}`，由主 agent
+    /// 下一轮看到后决策（复核/重新委托）——不自动重跑。
+    pub fn with_task_reviewer(mut self, reviewer: Arc<dyn crate::executor::judge::TaskReviewer>) -> Self {
+        self.task_reviewer = Some(reviewer);
         self
     }
 
@@ -251,8 +263,9 @@ impl BackgroundTaskManager {
         }
     }
 
-    /// 标记完成并触发通知。
+    /// 标记完成并触发通知（G4：注入前先过自审门，未通过则结果带标记）。
     pub async fn complete(&self, id: &str, result: String) {
+        let result = self.maybe_self_review(id, &result).await;
         self.finish(
             id,
             TaskStatus::Completed,
@@ -260,6 +273,37 @@ impl BackgroundTaskManager {
             None,
         )
         .await;
+    }
+
+    /// G4 循环内自审门：任务结果注入父会话前轻量 LLM 自审。
+    ///
+    /// 未通过（`NeedsChanges`/`Fail`）时在结果前加 `[自审未通过] {reason}`
+    /// 标记——通知与 `task_status` 均携带，主 agent 下一轮看到后决策
+    /// （复核/重新委托），**不自动重跑**。无自审器 / 空结果 / 自审通过
+    /// 时原样返回（行为零变化）。
+    async fn maybe_self_review(&self, id: &str, result: &str) -> String {
+        let Some(reviewer) = &self.task_reviewer else {
+            return result.to_string();
+        };
+        if result.trim().is_empty() {
+            return result.to_string();
+        }
+        let Some(task) = self.get(id).await else {
+            return result.to_string();
+        };
+
+        let judgment = reviewer.review(&task.description, result).await;
+        if judgment.verdict.is_pass() {
+            return result.to_string();
+        }
+
+        let marker = format!("[自审未通过] {}", truncate(&judgment.reason, 200));
+        tracing::info!(
+            task_id = %id,
+            reason = %judgment.reason,
+            "后台任务结果未通过自审（已标记，主 agent 复核）"
+        );
+        format!("{marker}\n{result}")
     }
 
     /// 标记失败并触发通知。
@@ -589,6 +633,7 @@ struct TaskHandle {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn test_status_terminal() {
@@ -1002,5 +1047,75 @@ mod tests {
             tasks[0].error.as_deref().unwrap_or("").contains("重启"),
             "错误信息说明中断原因"
         );
+    }
+
+    // ── G4 循环内自审门 ───────────────────────────────────────
+
+    use crate::executor::judge::{Judgment, TaskReviewer, Verdict};
+
+    /// 固定判定结果的 mock 自审器。
+    struct FixedReviewer {
+        verdict: Verdict,
+        reason: String,
+        reviewed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl TaskReviewer for FixedReviewer {
+        async fn review(&self, _description: &str, _result: &str) -> Judgment {
+            self.reviewed.fetch_add(1, Ordering::SeqCst);
+            Judgment {
+                verdict: self.verdict.clone(),
+                reason: self.reason.clone(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_complete_marks_failed_review() {
+        // 自审未通过 → 结果带 [自审未通过] 标记
+        let reviewed = Arc::new(AtomicUsize::new(0));
+        let manager = BackgroundTaskManager::new().with_task_reviewer(Arc::new(FixedReviewer {
+            verdict: Verdict::NeedsChanges {
+                suggestion: "继续处理".to_string(),
+            },
+            reason: "只完成了一半".to_string(),
+            reviewed: reviewed.clone(),
+        }));
+        let id = manager.register("整理日志".to_string(), "s1".to_string()).await;
+        manager.complete(&id, "已处理 6/12 个文件".to_string()).await;
+
+        let task = manager.get(&id).await.unwrap();
+        let result = task.result.unwrap();
+        assert!(result.contains("[自审未通过]"), "应带自审标记: {result}");
+        assert!(result.contains("只完成了一半"));
+        assert!(result.contains("已处理 6/12 个文件"), "原始结果应保留");
+        assert_eq!(reviewed.load(Ordering::SeqCst), 1, "自审器应被调用一次");
+    }
+
+    #[tokio::test]
+    async fn test_complete_passed_review_unchanged() {
+        // 自审通过 → 结果原样
+        let manager = BackgroundTaskManager::new().with_task_reviewer(Arc::new(FixedReviewer {
+            verdict: Verdict::Pass,
+            reason: "结果完整".to_string(),
+            reviewed: Arc::new(AtomicUsize::new(0)),
+        }));
+        let id = manager.register("任务".to_string(), "s1".to_string()).await;
+        manager.complete(&id, "完成".to_string()).await;
+
+        let task = manager.get(&id).await.unwrap();
+        assert_eq!(task.result.as_deref(), Some("完成"));
+    }
+
+    #[tokio::test]
+    async fn test_complete_without_reviewer_unchanged() {
+        // 未注入自审器 → 行为零变化
+        let manager = BackgroundTaskManager::new();
+        let id = manager.register("任务".to_string(), "s1".to_string()).await;
+        manager.complete(&id, "结果".to_string()).await;
+
+        let task = manager.get(&id).await.unwrap();
+        assert_eq!(task.result.as_deref(), Some("结果"));
     }
 }

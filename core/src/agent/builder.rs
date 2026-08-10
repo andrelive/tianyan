@@ -6,6 +6,7 @@ use crate::agent::r#loop::{AgentLoop, AgentLoopConfig};
 use crate::agent::tool_registry::ToolRegistry;
 use crate::common::error::{Result, TianyanError};
 use crate::config::AgentConfig;
+use crate::config::AgentRolesConfig;
 use crate::config::SecurityConfig;
 use crate::context::compression::{CompressionConfig, ContextCompressor};
 use crate::context::pipeline::ContextPipeline;
@@ -53,6 +54,8 @@ pub struct AgentBuilder {
     background_task_db: Option<crate::vfs::backend::sqlite_db::SqliteDb>,
     /// 系统通知通道（后台任务完成 / 审批挂起的桌面通知；None 时静默）。
     notification_sink: Option<crate::notification::SharedNotificationSink>,
+    /// 子 Agent 角色配置（delegate_to_agent role 参数；None 时使用内置角色）。
+    agent_roles: Option<AgentRolesConfig>,
 }
 
 impl AgentBuilder {
@@ -74,6 +77,7 @@ impl AgentBuilder {
             skill_refresher: None,
             background_task_db: None,
             notification_sink: None,
+            agent_roles: None,
         }
     }
 
@@ -172,6 +176,14 @@ impl AgentBuilder {
         self
     }
 
+    /// 设置子 Agent 角色配置（delegate_to_agent role 参数）。
+    ///
+    /// 同名角色覆盖内置定义，新名字新增角色；未设置时使用内置角色。
+    pub fn with_agent_roles(mut self, config: AgentRolesConfig) -> Self {
+        self.agent_roles = Some(config);
+        self
+    }
+
     /// 构建 Agent 实例。
     pub fn build(self) -> Result<Agent> {
         let model_service = self
@@ -257,6 +269,12 @@ impl AgentBuilder {
             .with_verification_gate(verification)
             .with_rule_recorder(rule_recorder)
             .with_lsp_manager(Arc::new(LspManager::new()));
+        // 子 Agent 角色注册表（delegate_to_agent role 参数）
+        if let Some(agent_roles) = self.agent_roles {
+            tool_registry = tool_registry.with_role_registry(Arc::new(
+                crate::agent::RoleRegistry::from_config(&agent_roles),
+            ));
+        }
         if let Some(ref stats) = self.usage_stats {
             tool_registry = tool_registry.with_usage_stats(stats.clone());
         }
@@ -291,6 +309,13 @@ impl AgentBuilder {
         if let Some(ref db) = self.background_task_db {
             tool_registry = tool_registry.with_background_task_db(db.clone());
         }
+        // 后台任务结果自审（G4，opt-in）：完成通知注入前 LLM 自审，
+        // 未通过则结果带 [自审未通过] 标记，主 agent 复核
+        if self.config.background_self_review {
+            tool_registry = tool_registry.with_task_reviewer(Arc::new(
+                crate::executor::judge::LlmTaskReviewer::new(model_service.clone(), &chat_model),
+            ));
+        }
 
         let agent_loop = AgentLoop::new(
             model_service.clone(),
@@ -298,6 +323,7 @@ impl AgentBuilder {
             session_manager.clone(),
             AgentLoopConfig {
                 max_turns: self.config.max_turns,
+                shortlist_tools: self.config.shortlist_tools,
                 ..Default::default()
             },
         );

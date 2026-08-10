@@ -12,6 +12,7 @@ use crate::agent::tool_params::{
     SelfCheckParams, SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VerifyBuildParams,
     VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
 };
+use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
 use crate::executor::approval::ApprovalWorkflow;
 use crate::executor::web::WebSearchClient;
@@ -121,6 +122,8 @@ pub struct ToolRegistry {
     pub(crate) execution_history: Arc<Mutex<Vec<ExecutionHistory>>>,
     /// 当前委托链深度（delegate_to_agent 嵌套保护；主循环为 0）。
     pub(crate) delegation_depth: Arc<AtomicUsize>,
+    /// 子 Agent 角色注册表（delegate_to_agent role 参数解析；默认内置角色）。
+    pub(crate) role_registry: Arc<RoleRegistry>,
 }
 
 impl ToolRegistry {
@@ -146,6 +149,7 @@ impl ToolRegistry {
             dynamic_tools: Arc::new(Mutex::new(HashMap::new())),
             execution_history: Arc::new(Mutex::new(Vec::new())),
             delegation_depth: Arc::new(AtomicUsize::new(0)),
+            role_registry: Arc::new(RoleRegistry::builtin()),
         };
         registry.register_builtin_tools();
         registry
@@ -178,6 +182,15 @@ impl ToolRegistry {
     /// 设置委托子 Agent 使用的模型名称。
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self
+    }
+
+    /// 设置子 Agent 角色注册表（delegate_to_agent role 参数解析）。
+    ///
+    /// 缺省使用 [`RoleRegistry::builtin`]；配置装配层注入
+    /// `[agent_roles]` 覆盖/扩展后的注册表。
+    pub fn with_role_registry(mut self, registry: Arc<RoleRegistry>) -> Self {
+        self.role_registry = registry;
         self
     }
 
@@ -294,6 +307,16 @@ impl ToolRegistry {
         self
     }
 
+    /// 设置后台任务结果自审器（G4：完成通知注入前轻量自审；未注入时不自审）。
+    pub fn with_task_reviewer(
+        mut self,
+        reviewer: Arc<dyn crate::executor::judge::TaskReviewer>,
+    ) -> Self {
+        self.background_tasks =
+            Arc::new((*self.background_tasks).clone().with_task_reviewer(reviewer));
+        self
+    }
+
     /// 设置后台任务系统通知通道（全部完成/失败时桌面通知；未注入时静默）。
     pub fn with_notification_sink(
         mut self,
@@ -344,6 +367,127 @@ impl ToolRegistry {
             defs.push(executor.definition());
         }
         defs
+    }
+
+    /// 工具短路选择阈值（G1）：LLM 可见工具数超过该值时启用按相关性过滤。
+    ///
+    /// 业界证据（IBM General Agent Evaluation）：工具数 >128 且无短路时
+    /// 模型工具调用质量崩塌；40-60 个工具内模型通常仍可应付。阈值取 40：
+    /// 内置 25 + 少量 MCP 时行为零变化，MCP/技能生态膨胀后自动启用。
+    pub(crate) const TOOL_SHORTLIST_THRESHOLD: usize = 40;
+
+    /// 恒存核心工具集：基础操作与通用检索，任何场景都保留。
+    const CORE_TOOLS: &[&str] = &[
+        "read_file",
+        "write_file",
+        "apply_edit",
+        "apply_patch",
+        "execute_command",
+        "search_code",
+        "glob",
+        "list_dir",
+        "call_skill",
+        "ask_user",
+        "self_check",
+        "delegate_to_agent",
+        "task_status",
+        "task_cancel",
+        "search_knowledge",
+        "vfs_read",
+        "vfs_list",
+        "web_search",
+        "web_fetch",
+    ];
+
+    /// 条件工具关键词表（query 命中任一关键词即保留；G1）。
+    ///
+    /// 仅覆盖低频/专用工具；关键词为小写（英文）或原文（中文）。
+    const CONDITIONAL_TOOL_KEYWORDS: &[(&str, &[&str])] = &[
+        ("knowledge_ingest", &["知识", "导入", "ingest", "文档库", "knowledge"]),
+        ("run_tests", &["测试", "用例", "test", "pytest", "cargo test", "run_tests"]),
+        ("discover_tests", &["测试", "用例", "test", "发现测试", "discover"]),
+        ("verify_build", &["构建", "编译", "build", "报错", "编译错误", "verify"]),
+        ("symbol_outline", &["符号", "大纲", "symbol", "outline", "结构"]),
+        ("lsp", &["lsp", "诊断", "跳转", "定义", "引用", "diagnostic", "符号"]),
+    ];
+
+    /// 按相关性过滤的 LLM 可见工具定义（G1 工具短路选择）。
+    ///
+    /// - 工具总数 ≤ [`TOOL_SHORTLIST_THRESHOLD`] 或 `query` 为 None 时：
+    ///   返回全量（行为零变化，保守——无查询信号不冒险）。
+    /// - 超阈值时：核心工具恒存；条件工具按关键词表匹配；
+    ///   动态（MCP）工具按名称/描述与 query 分词重叠匹配。
+    /// - **执行层不受影响**：`execute_single` 保留全部工具——被过滤工具
+    ///   若被模型调用（如模型从历史中学到该工具），仍正常执行；
+    ///   过滤仅改变 LLM 可见的 schema 数量，不产生"未加载"错误路径。
+    pub async fn definitions_shortlisted(&self, query: Option<&str>) -> Vec<ToolDefinition> {
+        let defs = self.definitions().await;
+        let Some(query) = query else {
+            return defs;
+        };
+        if defs.len() <= Self::TOOL_SHORTLIST_THRESHOLD {
+            return defs;
+        }
+        let query_lower = query.to_lowercase();
+
+        defs.into_iter()
+            .filter(|def| {
+                let name = def.function.name.as_str();
+                // 核心工具恒存
+                if Self::CORE_TOOLS.contains(&name) {
+                    return true;
+                }
+                // 条件工具：关键词任一命中 query
+                if let Some((_, keywords)) = Self::CONDITIONAL_TOOL_KEYWORDS
+                    .iter()
+                    .find(|(tool, _)| *tool == name)
+                {
+                    return keywords
+                        .iter()
+                        .any(|k| query_lower.contains(&k.to_lowercase()));
+                }
+                // 动态（MCP）工具：query 分词与名称/描述重叠匹配
+                Self::dynamic_tool_matches(&query_lower, def)
+            })
+            .collect()
+    }
+
+    /// 动态工具相关性：query 的英文分词（≥3 字符）与中文片段（≥2 字符）
+    /// 任一出现在工具名或描述中即保留。
+    fn dynamic_tool_matches(query_lower: &str, def: &ToolDefinition) -> bool {
+        let haystack = format!(
+            "{} {}",
+            def.function.name, def.function.description
+        )
+        .to_lowercase();
+        // 英文/数字分词：按非字母数字切分
+        let tokens: Vec<&str> = query_lower
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|t| t.len() >= 3)
+            .collect();
+        // 中文片段：提取连续 CJK 字符块（长度 ≥2）作为匹配键
+        let mut cjk = String::new();
+        let mut cjk_chunks: Vec<String> = Vec::new();
+        for ch in query_lower.chars() {
+            if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+                cjk.push(ch);
+            } else {
+                if cjk.chars().count() >= 2 {
+                    cjk_chunks.push(cjk.clone());
+                }
+                cjk.clear();
+            }
+        }
+        if cjk.chars().count() >= 2 {
+            cjk_chunks.push(cjk);
+        }
+
+        let overlap = tokens.iter().any(|t| haystack.contains(t))
+            || cjk_chunks.iter().any(|c| haystack.contains(c));
+        if !overlap {
+            tracing::debug!(tool = %def.function.name, "工具被短路过滤（与当前 query 不相关）");
+        }
+        overlap
     }
 
     /// 排空已收集的执行轨迹（供 GEPA 引擎消费）。
@@ -621,12 +765,12 @@ impl ToolRegistry {
                 "Ingest a file or directory into the knowledge base. The file is parsed, summarized (L0 abstract + L1 overview), and indexed for semantic search. Accepts a file path or directory path. Optionally specify a category to organize the content.",
             )));
         self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                DelegateToAgentParams,
-            >(
-                "delegate_to_agent",
-                "Delegate a sub-task to an isolated sub-agent with its own context. Set background=true to run it as a fire-and-forget background task: the tool returns a task_id immediately, and a completion notification (with the result summary) is injected into this session automatically — do NOT poll, just continue working until notified. Use task_status to query a task, task_cancel to abort it.",
-            )));
+                .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                    DelegateToAgentParams,
+                >(
+                    "delegate_to_agent",
+                    "Delegate a sub-task to an isolated sub-agent with its own context. Use role (researcher for research, editor for code editing, reviewer for verification/review, or custom roles configured in [agent_roles]) to pick a preset model, system prompt, tool allowlist, max_turns and timeout; use model to explicitly override the sub-agent model. Set background=true to run it as a fire-and-forget background task: the tool returns a task_id immediately, and a completion notification (with the result summary) is injected into this session automatically — do NOT poll, just continue working until notified. Use task_status to query a task, task_cancel to abort it.",
+                )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
                 TaskStatusParams,
@@ -831,5 +975,169 @@ mod tests {
         ) -> crate::common::error::Result<serde_json::Value> {
             Ok(serde_json::json!({}))
         }
+    }
+
+    // ── G1 工具短路选择 ───────────────────────────────────────
+
+    /// 参数化 mock 动态工具（名称/描述可配）。
+    struct NamedDynamicTool {
+        name: String,
+        description: String,
+    }
+
+    #[async_trait]
+    impl DynamicToolExecutor for NamedDynamicTool {
+        fn tool_name(&self) -> String {
+            self.name.clone()
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::function(FunctionDefinition::new(
+                self.name.clone(),
+                self.description.clone(),
+                serde_json::json!({ "type": "object" }),
+            ))
+        }
+
+        async fn execute(
+            &self,
+            arguments: &str,
+        ) -> crate::common::error::Result<serde_json::Value> {
+            Ok(serde_json::json!({ "ok": arguments }))
+        }
+    }
+
+    /// 注册 N 个 mock 动态工具（使总数超阈值）。
+    async fn register_mock_tools(registry: &ToolRegistry, count: usize) {
+        for i in 0..count {
+            registry
+                .register_dynamic_tool(Arc::new(NamedDynamicTool {
+                    name: format!("mcp_tool_{i:02}"),
+                    description: "Generic mock MCP tool with no specific domain".to_string(),
+                }))
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_shortlist_below_threshold_returns_all() {
+        // 内置 25 工具 < 40 阈值：即使传 query 也返回全量（行为零变化）
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        let defs = registry
+            .definitions_shortlisted(Some("帮我测试一下构建"))
+            .await;
+        assert_eq!(defs.len(), registry.definitions().await.len());
+        assert!(defs.iter().any(|d| d.function.name == "lsp"));
+    }
+
+    #[tokio::test]
+    async fn test_shortlist_none_query_returns_all() {
+        // 无查询信号：保守全量
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        register_mock_tools(&registry, 20).await; // 25 + 20 = 45 > 40
+        let defs = registry.definitions_shortlisted(None).await;
+        assert_eq!(defs.len(), 45);
+    }
+
+    #[tokio::test]
+    async fn test_shortlist_core_tools_always_kept() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        register_mock_tools(&registry, 20).await;
+
+        let defs = registry
+            .definitions_shortlisted(Some("随便聊聊天气"))
+            .await;
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        // 核心工具恒存
+        for core in [
+            "read_file",
+            "write_file",
+            "apply_edit",
+            "apply_patch",
+            "execute_command",
+            "search_code",
+            "glob",
+            "list_dir",
+            "call_skill",
+            "ask_user",
+            "self_check",
+            "delegate_to_agent",
+            "task_status",
+            "task_cancel",
+            "search_knowledge",
+            "vfs_read",
+            "vfs_list",
+            "web_search",
+            "web_fetch",
+        ] {
+            assert!(names.contains(&core), "核心工具 {core} 应恒存");
+        }
+        // 不相关条件工具被过滤（query 无编程关键词）
+        assert!(!names.contains(&"lsp"));
+        assert!(!names.contains(&"run_tests"));
+        assert!(!names.contains(&"verify_build"));
+    }
+
+    #[tokio::test]
+    async fn test_shortlist_conditional_keyword_match() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        register_mock_tools(&registry, 20).await;
+
+        // query 含"测试" → run_tests / discover_tests 保留
+        let defs = registry
+            .definitions_shortlisted(Some("帮我跑一下测试看看哪些失败"))
+            .await;
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"run_tests"));
+        assert!(names.contains(&"discover_tests"));
+
+        // query 含"构建" → verify_build 保留
+        let defs = registry
+            .definitions_shortlisted(Some("构建报错了，帮我看看"))
+            .await;
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"verify_build"));
+    }
+
+    #[tokio::test]
+    async fn test_shortlist_dynamic_tool_match_by_name() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        // 注册一个领域工具 + 一堆无关工具
+        registry
+            .register_dynamic_tool(Arc::new(NamedDynamicTool {
+                name: "mcp_git_status".to_string(),
+                description: "Inspect git repository status and diff".to_string(),
+            }))
+            .await;
+        register_mock_tools(&registry, 20).await;
+
+        let defs = registry
+            .definitions_shortlisted(Some("git 状态怎么样"))
+            .await;
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        // 中文片段 "git" 命中工具名 → 保留
+        assert!(names.contains(&"mcp_git_status"));
+        // 无关 mock 工具被过滤
+        assert!(!names.contains(&"mcp_tool_01"));
+        assert!(!names.contains(&"mcp_tool_15"));
+    }
+
+    #[tokio::test]
+    async fn test_shortlist_dynamic_tool_match_by_description() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        registry
+            .register_dynamic_tool(Arc::new(NamedDynamicTool {
+                name: "mcp_browser_click".to_string(),
+                description: "Click an element in the browser via playwright".to_string(),
+            }))
+            .await;
+        register_mock_tools(&registry, 20).await;
+
+        // 英文分词 "browser"/"playwright" 命中描述 → 保留
+        let defs = registry
+            .definitions_shortlisted(Some("use playwright to click the button in browser"))
+            .await;
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"mcp_browser_click"));
     }
 }

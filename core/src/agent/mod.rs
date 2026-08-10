@@ -15,6 +15,8 @@ pub mod background;
 mod builder;
 mod coordinator;
 mod r#loop;
+/// 角色化子 Agent 委托（delegate_to_agent role 参数）。
+pub mod roles;
 mod tool_params;
 mod tool_registry;
 mod types;
@@ -24,6 +26,7 @@ pub use agent_core::AgentWakeForwarder;
 pub use builder::AgentBuilder;
 pub use coordinator::AgentCoordinator;
 pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopResult};
+pub use roles::{AgentRole, RoleRegistry};
 pub use session_state::SessionState;
 pub use tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, ReadFileParams,

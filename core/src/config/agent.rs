@@ -33,6 +33,17 @@ pub struct AgentConfig {
     /// Agent Loop 最大轮次。
     #[serde(default = "default_max_turns")]
     pub max_turns: usize,
+    /// 工具短路选择（G1，默认开启）：LLM 可见工具数超过阈值（40）时，
+    /// 按当前 query 相关性过滤工具 schema（核心集恒存 + 关键词匹配），
+    /// 减少工具选择困惑与 token 开销。执行层保留全部工具——被过滤工具
+    /// 若被模型调用仍可正常执行（过滤仅影响 LLM 可见性）。
+    #[serde(default = "default_shortlist_tools")]
+    pub shortlist_tools: bool,
+    /// 后台任务结果自审（G4，默认关闭 opt-in）：开启后后台任务完成
+    /// 通知注入前经 LLM 自审，未通过则结果带 `[自审未通过]` 标记，
+    /// 由主 agent 复核（每个后台任务多一次小调用）。
+    #[serde(default = "default_false")]
+    pub background_self_review: bool,
     /// 工作目录：Agent 执行命令/读写文件的基础目录，也是会话回退时
     /// 文件快照的根目录。缺省使用进程当前目录。
     #[serde(default)]
@@ -50,6 +61,8 @@ impl Default for AgentConfig {
             learned_rules_top_k: default_learned_rules_top_k(),
             learned_rules_max_tokens: default_learned_rules_max_tokens(),
             max_turns: default_max_turns(),
+            shortlist_tools: default_shortlist_tools(),
+            background_self_review: false,
             working_directory: None,
         }
     }
@@ -118,6 +131,14 @@ fn default_learned_rules_max_tokens() -> usize {
 
 fn default_max_turns() -> usize {
     200
+}
+
+fn default_shortlist_tools() -> bool {
+    true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 #[cfg(test)]

@@ -97,6 +97,9 @@ pub struct MemoryEntry {
     pub tags: Vec<String>,
     /// 来源会话 ID。
     pub source_session: Option<String>,
+    /// 来源消息 ID 列表（消息级溯源；提取自会话 JSONL 中对应消息的 id）。
+    #[serde(default)]
+    pub source_message_ids: Vec<String>,
     /// 相关记忆 ID。
     pub related_memories: Vec<String>,
 }
@@ -121,6 +124,7 @@ impl MemoryEntry {
             last_accessed: None,
             tags: Vec::new(),
             source_session: None,
+            source_message_ids: Vec::new(),
             related_memories: Vec::new(),
         }
     }
@@ -171,6 +175,12 @@ impl MemoryEntry {
     /// 设置来源会话并返回自身（链式调用）。
     pub fn with_source_session(mut self, session_id: impl Into<String>) -> Self {
         self.source_session = Some(session_id.into());
+        self
+    }
+
+    /// 设置来源消息 ID 列表并返回自身（链式调用）。
+    pub fn with_source_message_ids(mut self, ids: Vec<String>) -> Self {
+        self.source_message_ids = ids;
         self
     }
 }

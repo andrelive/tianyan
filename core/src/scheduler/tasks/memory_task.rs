@@ -6,7 +6,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::common::error::Result;
-use crate::common::types::{ContentLevel, ContextNamespace, MemoryEntry, TianyanUri};
+use crate::common::types::{
+    ContentLevel, ContextNamespace, MemoryCategory, MemoryEntry, TianyanUri,
+};
 use crate::memory::format_memory_as_markdown;
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
 
@@ -156,14 +158,38 @@ impl MemoryTask {
         let content = format_memory_as_markdown(memory);
         ctx.vfs.write_content(uri, &content).await?;
 
-        let abstract_content = format!(
+        // L1 摘要携带来源会话（G3：注入上下文时出处对 LLM 可见）。
+        let mut abstract_content = format!(
             "{} | 重要性: {:.2} | 类别: {}",
             memory.content, memory.importance, memory.category
         );
+        if let Some(ref session_id) = memory.source_session {
+            abstract_content.push_str(&format!(" | 来源会话: {}", session_id));
+        }
         ctx.vfs.write_abstract(uri, &abstract_content).await?;
 
         tracing::debug!(memory_id = %memory.id, uri = %uri, "记忆已持久化");
         Ok(())
+    }
+
+    /// 从会话 JSONL 文本中提取消息 ID 列表（消息级溯源，G3）。
+    ///
+    /// 逐行尝试反序列化为 `StructuredMessage`（会话文件为 JSONL，
+    /// 每行一条消息）；解析失败的行跳过。全失败时返回空列表
+    /// （退化为仅会话级溯源，行为与旧版一致）。
+    fn extract_message_ids(conversation: &str) -> Vec<String> {
+        conversation
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.is_empty() {
+                    return None;
+                }
+                serde_json::from_str::<crate::common::types::StructuredMessage>(line)
+                    .ok()
+                    .map(|sm| sm.id)
+            })
+            .collect()
     }
 
     /// 处理单个会话：提取并持久化记忆。
@@ -173,11 +199,40 @@ impl MemoryTask {
             .read_content(session_uri, ContentLevel::Detail)
             .await?;
 
-        let memories = ctx.memory_extractor.extract(&conversation).await?;
+        let source_message_ids = Self::extract_message_ids(&conversation);
+        let memories = ctx
+            .memory_extractor
+            .extract(&conversation, &source_message_ids)
+            .await?;
 
         let mut stored_count = 0;
         for mut memory in memories {
             memory.source_session = Some(session_uri.to_string());
+
+            // 偏好类写前校验（G3，opt-in）：验证为稳定长期偏好才持久化。
+            if memory.category == MemoryCategory::Preference
+                && ctx.config.memory.verify_preferences
+            {
+                match ctx.memory_extractor.verify_preference(&memory).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::info!(
+                            memory_id = %memory.id,
+                            "偏好记忆未通过写前校验，跳过持久化"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            memory_id = %memory.id,
+                            error = %e,
+                            "偏好记忆校验失败，跳过持久化"
+                        );
+                        continue;
+                    }
+                }
+            }
+
             if let Err(e) = self.store_memory(ctx, &memory).await {
                 tracing::warn!(memory_id = %memory.id, error = %e, "存储记忆失败");
                 continue;

@@ -12,7 +12,30 @@ use crate::vfs::VirtualFileSystem;
 use generator::{build_skill_generation_prompt, parse_generated_skill};
 pub use types::{
     ExecutionHistory, ExecutionStep, GeneratedSkill, SkillAction, SkillEvaluation, SkillParameter,
+    SkillVerification,
 };
+
+/// 候选技能质量审查提示词（G2b）。
+///
+/// 输出 JSON：`{"score": 0-10, "issues": ["问题1", ...]}`；
+/// `score >= 6` 为正式技能，`< 6` 标记为试验性。
+pub const CANDIDATE_VERIFICATION_PROMPT: &str = r#"你是技能质量审查员。评估以下 GEPA 自动生成的技能是否值得作为正式技能注册。
+
+技能名称：{name}
+技能描述：{description}
+适用场景：{scenarios}
+技能内容：
+{content}
+
+评分标准（0-10 分）：
+- 描述清晰、步骤完整、可执行（3 分）
+- 与一般常识操作相比有明确复用价值，值得长期保存（4 分）
+- 内容不空洞、不重复、无自相矛盾（3 分）
+
+输出 JSON（不要输出其他内容）：
+{"score": <0-10 整数>, "issues": ["问题1", "问题2"]}
+
+score >= 6 为正式技能；score < 6 标记为试验性技能。"#;
 
 /// 技能学习配置。
 #[derive(Debug, Clone)]
@@ -27,6 +50,13 @@ pub struct SkillLearningConfig {
     pub generation_model: String,
     /// 技能存储前缀。
     pub skill_storage_prefix: String,
+    /// 候选验证门（G2b，默认开启）：新生成技能注册前经 LLM 质量审查
+    /// （0-10 打分），低于 [`candidate_score_threshold`] 的标记为
+    /// "试验性"技能（仍注册可发现，但 L0 摘要带 [试验性] 提示谨慎使用）。
+    /// 验证不可用（LLM 错误/解析失败）时降级为正式注册，不阻塞学习回路。
+    pub candidate_verification: bool,
+    /// 候选技能正式注册的分数阈值（0-10，默认 6）。
+    pub candidate_score_threshold: u8,
 }
 
 impl Default for SkillLearningConfig {
@@ -37,6 +67,8 @@ impl Default for SkillLearningConfig {
             min_history_length: 3,
             generation_model: String::new(),
             skill_storage_prefix: "skill/learned".to_string(),
+            candidate_verification: true,
+            candidate_score_threshold: 6,
         }
     }
 }
@@ -89,9 +121,30 @@ impl SkillLearningEngine {
             if executions.len() >= self.config.success_threshold {
                 match self.generate_skill(&task_type, &executions).await {
                     Ok(skill) => {
-                        if let Err(e) = self.store_skill(&skill).await {
+                        // G2b 候选验证门：注册前 LLM 质量审查，分级（正式/试验性）。
+                        let verification = if self.config.candidate_verification {
+                            self.verify_candidate(&skill).await.unwrap_or(None)
+                        } else {
+                            None
+                        };
+                        let experimental = verification
+                            .as_ref()
+                            .map(|v| {
+                                v.score < self.config.candidate_score_threshold
+                            })
+                            .unwrap_or(false);
+
+                        if let Err(e) = self.store_skill(&skill, experimental).await {
                             tracing::warn!(skill_id = %skill.id, error = %e, "存储技能失败");
                         } else {
+                            if experimental {
+                                tracing::info!(
+                                    skill_id = %skill.id,
+                                    score = %verification.as_ref().map(|v| v.score).unwrap_or(0),
+                                    issues = ?verification.as_ref().map(|v| v.issues.clone()).unwrap_or_default(),
+                                    "技能标记为试验性（未达正式阈值）"
+                                );
+                            }
                             generated_skills.push(skill);
                         }
                     }
@@ -104,6 +157,75 @@ impl SkillLearningEngine {
 
         tracing::info!(count = generated_skills.len(), "技能学习完成");
         Ok(generated_skills)
+    }
+
+    /// 候选技能质量验证（G2b）：LLM 对新生成技能 0-10 打分 + 问题清单。
+    ///
+    /// 返回 `None` 表示验证不可用（LLM 错误 / 响应解析失败）——调用方
+    /// 降级为正式注册，保证学习回路不被验证环节阻塞。
+    pub async fn verify_candidate(
+        &self,
+        skill: &GeneratedSkill,
+    ) -> Result<Option<SkillVerification>> {
+        let prompt = CANDIDATE_VERIFICATION_PROMPT
+            .replace("{name}", &skill.name)
+            .replace("{description}", &skill.description)
+            .replace(
+                "{scenarios}",
+                &skill.applicable_scenarios.join("；"),
+            )
+            .replace("{content}", &skill.content);
+
+        let response = match self
+            .model_service
+            .chat(
+                &self.config.generation_model,
+                vec![crate::common::types::Message::user(prompt)],
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(skill_id = %skill.id, error = %e, "候选技能验证调用失败，降级为正式注册");
+                return Ok(None);
+            }
+        };
+
+        let cleaned = response
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        let json: serde_json::Value = match serde_json::from_str(cleaned) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(skill_id = %skill.id, error = %e, "候选技能验证响应解析失败，降级为正式注册");
+                return Ok(None);
+            }
+        };
+
+        let score = json.get("score").and_then(|v| v.as_u64()).map(|s| s as u8);
+        let Some(score) = score else {
+            tracing::warn!(skill_id = %skill.id, "候选技能验证缺少 score，降级为正式注册");
+            return Ok(None);
+        };
+
+        let issues = json
+            .get("issues")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|i| i.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Some(SkillVerification {
+            score,
+            issues,
+        }))
     }
 
     /// 使用 LLM 将任务描述分类到已知操作类型。
@@ -221,7 +343,7 @@ impl SkillLearningEngine {
         parse_generated_skill(&response, task_type, executions)
     }
 
-    async fn store_skill(&self, skill: &GeneratedSkill) -> Result<()> {
+    async fn store_skill(&self, skill: &GeneratedSkill, experimental: bool) -> Result<()> {
         let uri = TianyanUri::new(ContextNamespace::Skill, vec![skill.id.clone()]);
 
         if let Some(parent) = uri.parent() {
@@ -230,27 +352,36 @@ impl SkillLearningEngine {
             }
         }
 
-        let skill_md = self.format_skill_as_markdown(skill);
+        let skill_md = self.format_skill_as_markdown(skill, experimental);
         self.vfs.write_content(&uri, &skill_md).await?;
 
-        let abstract_content = format!(
+        // 试验性技能在 L0 摘要中带 [试验性] 标记——渐进式披露时
+        // LLM 可识别状态，谨慎选用（G2b 分级注册）。
+        let mut abstract_content = format!(
             "{} | 适用场景: {}",
             skill.description,
             skill.applicable_scenarios.join(", ")
         );
+        if experimental {
+            abstract_content = format!("[试验性] {}", abstract_content);
+        }
         self.vfs.write_abstract(&uri, &abstract_content).await?;
 
-        tracing::info!(skill_id = %skill.id, name = %skill.name, "技能已存储");
+        tracing::info!(skill_id = %skill.id, name = %skill.name, experimental, "技能已存储");
         Ok(())
     }
 
-    fn format_skill_as_markdown(&self, skill: &GeneratedSkill) -> String {
+    fn format_skill_as_markdown(&self, skill: &GeneratedSkill, experimental: bool) -> String {
         let mut md = String::new();
 
         md.push_str(&format!("# {}\n\n", skill.name));
         md.push_str(&format!("**ID**: `{}`\n\n", skill.id));
         md.push_str(&format!("**版本**: {}\n\n", skill.version));
         md.push_str(&format!("**描述**: {}\n\n", skill.description));
+        md.push_str(&format!(
+            "**状态**: {}\n\n",
+            if experimental { "试验性（未达正式质量阈值，谨慎使用）" } else { "正式" }
+        ));
 
         if !skill.applicable_scenarios.is_empty() {
             md.push_str("## 适用场景\n\n");
@@ -461,4 +592,105 @@ mod tests {
     }
 
     use crate::test_utils::MockVfs;
+
+    /// 构造固定响应文本的 mock ChatService。
+    fn mock_chat_with(response: &str) -> Arc<dyn ChatService> {
+        let response = response.to_string();
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(move |_| {
+            Ok(ChatCompletionResponse {
+                id: "mock".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: crate::common::types::Message::assistant(response.clone()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Default::default(),
+            })
+        });
+        Arc::new(mock)
+    }
+
+    fn sample_skill() -> GeneratedSkill {
+        GeneratedSkill {
+            id: "skill-1".to_string(),
+            name: "整理日志文件".to_string(),
+            description: "按日期归档日志文件到子目录".to_string(),
+            content: "1. 读取日志目录\n2. 按日期分组\n3. 移动归档".to_string(),
+            applicable_scenarios: vec!["日志维护".to_string()],
+            parameters: Vec::new(),
+            version: "1.0.0".to_string(),
+            source_history: vec!["exec-1".to_string()],
+        }
+    }
+
+    // ── G2b 候选验证门 ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_verify_candidate_parses_score_and_issues() {
+        let engine = SkillLearningEngine::new(
+            mock_chat_with(r#"{"score": 8, "issues": ["无"]}"#),
+            Arc::new(MockVfs::new()),
+            SkillLearningConfig::default(),
+        );
+
+        let verification = engine.verify_candidate(&sample_skill()).await.unwrap();
+        let verification = verification.expect("应解析出验证结果");
+        assert_eq!(verification.score, 8);
+        assert_eq!(verification.issues, vec!["无".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_verify_candidate_unparseable_returns_none() {
+        // 解析失败 → None（降级正式注册，不阻塞学习回路）
+        let engine = SkillLearningEngine::new(
+            mock_chat_with("这不是 JSON"),
+            Arc::new(MockVfs::new()),
+            SkillLearningConfig::default(),
+        );
+        assert!(engine.verify_candidate(&sample_skill()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_verify_candidate_llm_error_returns_none() {
+        use crate::common::error::TianyanError;
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion()
+            .returning(|_| Err(TianyanError::Custom("模型不可用".to_string())));
+        let engine = SkillLearningEngine::new(
+            Arc::new(mock),
+            Arc::new(MockVfs::new()),
+            SkillLearningConfig::default(),
+        );
+        assert!(engine.verify_candidate(&sample_skill()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_store_skill_experimental_marker() {
+        // 试验性技能：L2 内容含状态标记，L0 摘要带 [试验性] 前缀
+        let vfs = Arc::new(MockVfs::new());
+        let engine = SkillLearningEngine::new(
+            mock_chat_empty(),
+            vfs.clone(),
+            SkillLearningConfig::default(),
+        );
+        engine.store_skill(&sample_skill(), true).await.unwrap();
+
+        let uri = TianyanUri::new(ContextNamespace::Skill, vec!["skill-1".to_string()]);
+        let content = vfs.read_content(&uri, crate::common::types::ContentLevel::Detail).await.unwrap();
+        assert!(content.contains("**状态**: 试验性"), "L2 应标记试验性状态");
+        let abstract_content = vfs
+            .read_content(&uri, crate::common::types::ContentLevel::Abstract)
+            .await
+            .unwrap();
+        assert!(abstract_content.starts_with("[试验性]"), "L0 摘要应带试验性前缀: {abstract_content}");
+
+        // 正式技能：状态为"正式"，摘要无前缀
+        engine.store_skill(&sample_skill(), false).await.unwrap();
+        let content = vfs.read_content(&uri, crate::common::types::ContentLevel::Detail).await.unwrap();
+        assert!(content.contains("**状态**: 正式"));
+    }
 }

@@ -8,9 +8,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use crate::agent::{AgentRole, RoleRegistry};
 use crate::common::types::{FunctionCall, TokenUsage, ToolCall, ToolCallType};
+use crate::config::AgentRolesConfig;
 use crate::config::SafetyMode;
-use crate::executor::approval::{ApprovalDecision, ApprovalWorkflow, ApprovalWorkflowConfig};
+use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
 use crate::executor::SecurityPolicy;
 use crate::model::types::{ChatChoice, ChatCompletionResponse};
 use crate::model::MockChatService;
@@ -127,7 +129,7 @@ async fn test_subagent_command_approved_via_shared_fingerprint() {
         ..Default::default()
     }));
     // 主循环先确认过该操作（指纹记录）
-    let action = crate::executor::Action::ExecuteCommand {
+    let action = Action::ExecuteCommand {
         command: "cargo --version".to_string(),
         cwd: None,
         timeout_secs: None,
@@ -460,6 +462,327 @@ async fn test_delegate_timeout_param_accepted() {
         registry.delegation_depth.load(Ordering::SeqCst),
         0,
         "正常完成后深度应恢复为 0"
+    );
+}
+
+// ── 角色化委托（delegate role / model）───────────────────────────────────
+
+/// 构造覆盖 researcher 内置角色的注册表（仅保留注入的字段）。
+fn role_registry_with(model: Option<&str>, tools: Option<Vec<&str>>) -> Arc<RoleRegistry> {
+    let mut roles = HashMap::new();
+    roles.insert(
+        "researcher".to_string(),
+        AgentRole {
+            name: "researcher".to_string(),
+            model: model.map(str::to_string),
+            system_prompt: None,
+            tools: tools.map(|ts| ts.into_iter().map(str::to_string).collect()),
+            max_turns: None,
+            timeout_secs: None,
+        },
+    );
+    Arc::new(RoleRegistry::from_config(&AgentRolesConfig { roles }))
+}
+
+/// 构造任意工具调用。
+fn tool_call(id: &str, name: &str, args: &str) -> ToolCall {
+    ToolCall {
+        id: id.to_string(),
+        call_type: ToolCallType::Function,
+        function: FunctionCall {
+            name: name.to_string(),
+            arguments: args.to_string(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn test_delegate_role_model_used() {
+    // role="researcher"（配置覆盖 model）：子 Agent 请求使用角色模型
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .withf(|req: &ChatCompletionRequest| req.model == "role-model")
+        .returning(|_| Ok(chat_response("researched")));
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("main-model")
+        .with_role_registry(role_registry_with(Some("role-model"), None));
+
+    let result = registry
+        .execute_delegate_to_agent(r#"{"task":"research x","role":"researcher"}"#, "session-1")
+        .await
+        .unwrap();
+    assert_eq!(result["result"].as_str().unwrap(), "researched");
+    assert_eq!(
+        registry.delegation_depth.load(Ordering::SeqCst),
+        0,
+        "委托结束后深度应恢复为 0"
+    );
+}
+
+#[tokio::test]
+async fn test_delegate_no_role_uses_self_model() {
+    // 无 role：请求模型回落主 Agent 模型（self.model）
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .withf(|req: &ChatCompletionRequest| req.model == "main-model")
+        .returning(|_| Ok(chat_response("answer")));
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("main-model");
+
+    let result = registry
+        .execute_delegate_to_agent(r#"{"task":"t"}"#, "session-1")
+        .await
+        .unwrap();
+    assert_eq!(result["result"].as_str().unwrap(), "answer");
+}
+
+#[tokio::test]
+async fn test_delegate_explicit_model_beats_role_model() {
+    // 显式 model 参数优先级最高（> role.model > self.model）
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .withf(|req: &ChatCompletionRequest| req.model == "explicit-model")
+        .returning(|_| Ok(chat_response("answer")));
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("main-model")
+        .with_role_registry(role_registry_with(Some("role-model"), None));
+
+    let result = registry
+        .execute_delegate_to_agent(
+            r#"{"task":"t","role":"researcher","model":"explicit-model"}"#,
+            "session-1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["result"].as_str().unwrap(), "answer");
+}
+
+#[tokio::test]
+async fn test_delegate_role_system_prompt_injected() {
+    // 角色系统提示注入子 Agent 请求（无显式 system_prompt 时）
+    let mut roles = HashMap::new();
+    roles.insert(
+        "researcher".to_string(),
+        AgentRole {
+            name: "researcher".to_string(),
+            model: None,
+            system_prompt: Some("你是检索调研助手。只调研不改文件。".to_string()),
+            tools: None,
+            max_turns: None,
+            timeout_secs: None,
+        },
+    );
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .withf(|req: &ChatCompletionRequest| {
+            req.messages
+                .iter()
+                .any(|m| m.content.contains("检索调研助手"))
+        })
+        .returning(|_| Ok(chat_response("answer")));
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("main-model")
+        .with_role_registry(Arc::new(RoleRegistry::from_config(&AgentRolesConfig {
+            roles,
+        })));
+
+    let result = registry
+        .execute_delegate_to_agent(r#"{"task":"t","role":"researcher"}"#, "session-1")
+        .await
+        .unwrap();
+    assert_eq!(result["result"].as_str().unwrap(), "answer");
+}
+
+#[tokio::test]
+async fn test_delegate_explicit_system_prompt_beats_role() {
+    // 显式 system_prompt 优先于角色系统提示
+    let mut roles = HashMap::new();
+    roles.insert(
+        "researcher".to_string(),
+        AgentRole {
+            name: "researcher".to_string(),
+            model: None,
+            system_prompt: Some("角色提示".to_string()),
+            tools: None,
+            max_turns: None,
+            timeout_secs: None,
+        },
+    );
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .withf(|req: &ChatCompletionRequest| {
+            req.messages.iter().any(|m| m.content.contains("显式提示"))
+                && !req.messages.iter().any(|m| m.content.contains("角色提示"))
+        })
+        .returning(|_| Ok(chat_response("answer")));
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("main-model")
+        .with_role_registry(Arc::new(RoleRegistry::from_config(&AgentRolesConfig {
+            roles,
+        })));
+
+    let result = registry
+        .execute_delegate_to_agent(
+            r#"{"task":"t","role":"researcher","system_prompt":"显式提示"}"#,
+            "session-1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["result"].as_str().unwrap(), "answer");
+}
+
+#[tokio::test]
+async fn test_delegate_role_filters_disallowed_tools() {
+    // 角色白名单外的工具：不执行，合成错误结果回喂模型（循环继续，不硬失败）
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion().times(1).returning(|_| {
+        Ok(chat_response_with_tools(vec![tool_call(
+            "c1",
+            "write_file",
+            r#"{"path":"x","content":"y"}"#,
+        )]))
+    });
+    mock.expect_chat_completion()
+        .times(1)
+        .withf(|req: &ChatCompletionRequest| {
+            req.messages
+                .iter()
+                .any(|m| m.content.contains("不允许使用工具 write_file"))
+        })
+        .returning(|_| Ok(chat_response("fixed answer")));
+
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("main-model")
+        .with_role_registry(role_registry_with(
+            None,
+            Some(vec!["read_file", "delegate_to_agent"]),
+        ));
+
+    let result = registry
+        .execute_delegate_to_agent(r#"{"task":"t","role":"researcher"}"#, "session-1")
+        .await
+        .unwrap();
+    assert_eq!(result["result"].as_str().unwrap(), "fixed answer");
+}
+
+#[tokio::test]
+async fn test_delegate_role_allows_allowlisted_tool() {
+    // 白名单内的工具正常执行：read_file 直接执行并回喂结果
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion().times(1).returning(|_| {
+        Ok(chat_response_with_tools(vec![tool_call(
+            "c1",
+            "read_file",
+            r#"{"path":"x"}"#,
+        )]))
+    });
+    mock.expect_chat_completion()
+        .times(1)
+        .withf(|req: &ChatCompletionRequest| {
+            req.messages.iter().any(|m| {
+                m.tool_call_id.as_deref() == Some("c1") && !m.content.contains("不允许使用工具")
+            })
+        })
+        .returning(|_| Ok(chat_response("done")));
+
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("main-model")
+        .with_role_registry(role_registry_with(None, Some(vec!["read_file"])));
+
+    let result = registry
+        .execute_delegate_to_agent(r#"{"task":"t","role":"researcher"}"#, "session-1")
+        .await
+        .unwrap();
+    assert_eq!(result["result"].as_str().unwrap(), "done");
+}
+
+#[tokio::test]
+async fn test_delegate_unknown_role_errors_with_available_roles() {
+    // 未知角色：循环启动前报错，错误消息列出可用角色（模型可重试）
+    let mock = MockChatService::new();
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("main-model");
+
+    let err = registry
+        .execute_delegate_to_agent(r#"{"task":"t","role":"ghost"}"#, "session-1")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("角色不存在：ghost"), "应报未知角色: {err}");
+    assert!(err.contains("researcher"), "应列出可用角色: {err}");
+    assert!(
+        err.contains("editor") && err.contains("reviewer"),
+        "应列出可用角色: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_delegate_background_role_applies() {
+    // 后台委托同样应用角色：角色模型 + 白名单过滤（与前台共用循环）
+    use crate::agent::background::TaskStatus;
+
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .times(1)
+        .withf(|req: &ChatCompletionRequest| req.model == "role-model")
+        .returning(|_| {
+            Ok(chat_response_with_tools(vec![tool_call(
+                "c1",
+                "write_file",
+                r#"{"path":"x","content":"y"}"#,
+            )]))
+        });
+    mock.expect_chat_completion()
+        .times(1)
+        .withf(|req: &ChatCompletionRequest| {
+            req.messages
+                .iter()
+                .any(|m| m.content.contains("不允许使用工具"))
+        })
+        .returning(|_| Ok(chat_response("bg done")));
+
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("main-model")
+        .with_role_registry(role_registry_with(
+            Some("role-model"),
+            Some(vec!["read_file", "delegate_to_agent"]),
+        ));
+
+    let result = registry
+        .execute_delegate_to_agent(
+            r#"{"task":"bg role job","background":true,"role":"researcher"}"#,
+            "session-1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["status"].as_str(), Some("running"));
+    let task_id = result["task_id"].as_str().unwrap().to_string();
+
+    // 等待后台任务完成（tokio::spawn 异步执行）
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        if let Some(task) = registry.background_tasks.get(&task_id).await {
+            if task.status.is_terminal() {
+                break;
+            }
+        }
+    }
+
+    let task = registry.background_tasks.get(&task_id).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert!(
+        task.result.as_deref().unwrap_or("").contains("bg done"),
+        "结果应包含委托输出: {:?}",
+        task.result
     );
 }
 

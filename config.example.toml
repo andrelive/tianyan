@@ -4,6 +4,14 @@
 # ==================== 智能体配置 ====================
 [agent]
 enable_skills = true
+# 工具短路选择（G1，默认开启）：LLM 可见工具数超过阈值（40）时按 query
+# 相关性过滤工具 schema（核心工具恒存 + 关键词匹配）。执行层保留全部工具，
+# 被过滤工具若被模型调用仍可正常执行——过滤仅影响 LLM 可见性。
+shortlist_tools = true
+# 后台任务结果自审（G4，默认关闭 opt-in）：开启后后台任务完成通知注入前
+# 经 LLM 自审，未通过则结果带 [自审未通过] 标记，由主 agent 复核
+# （每个后台任务多一次小调用）。
+# background_self_review = false
 enable_memory = true
 stream_responses = true
 enable_thinking = false
@@ -118,6 +126,10 @@ importance_threshold = 0.5
 auto_consolidation = true
 consolidation_interval = 3600
 decay_rate = 0.01
+# 偏好类记忆写前校验（G3，默认关闭 opt-in）：开启后 MemoryTask 对
+# preferences 类别记忆先经 LLM 校验（是否稳定长期偏好）再持久化，
+# 未通过/校验失败的记忆被丢弃。每提取周期仅对偏好类记忆多一次小调用。
+# verify_preferences = false
 
 # ==================== 检索配置 ====================
 [retrieval]
@@ -166,3 +178,21 @@ max_fetch_bytes = 2097152
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 # enabled = false
+
+# ==================== 子 Agent 角色配置 ====================
+# delegate_to_agent 工具的 role 参数按名字选择角色；内置角色：
+#   researcher（检索/调研）、editor（代码编辑）、reviewer（验证/评审）。
+# 同名角色整体覆盖内置定义，新名字新增角色。
+# 角色字段（均可省略，缺省回落主 Agent 配置）：
+#   model         角色模型名（缺省回落主 Agent 模型）
+#   system_prompt 角色系统提示（缺省无）
+#   tools         工具白名单（缺省不限制；白名单外工具调用被拒绝并回喂模型）
+#   max_turns     子 Agent 最大循环轮数（缺省 200）
+#   timeout_secs  委托整体超时（秒，缺省不限制）
+#
+# [agent_roles.researcher]
+# model = "deepseek-r1"
+# system_prompt = "你是检索调研助手。"
+# tools = ["web_search", "web_fetch", "search_knowledge", "read_file"]
+# max_turns = 30
+# timeout_secs = 300

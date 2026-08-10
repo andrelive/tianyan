@@ -108,6 +108,7 @@ impl AgentBuilderFactory {
             .with_security_config(config.security.clone())
             .with_web_config(config.web.clone())
             .with_usage_stats(usage_stats)
+            .with_agent_roles(config.agent_roles.clone())
             .with_session_manager(Arc::new(PersistentSessionManager::new(vfs)));
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),

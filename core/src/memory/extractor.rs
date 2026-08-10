@@ -74,6 +74,21 @@ pub const DEFAULT_EXTRACTION_PROMPT: &str = r#"分析以下对话，提取值得
 - 每个记忆应该简洁明了，不超过100字
 - 最多提取 {max_memories} 条记忆"#;
 
+/// 偏好类记忆写前校验提示词。
+///
+/// 判定提取出的"用户偏好"是否为稳定长期偏好：仅当内容明确、可跨会话
+/// 复用、非临时非一次性时才应持久化。输出只需一个词：true 或 false。
+pub const VERIFY_PREFERENCE_PROMPT: &str = r#"判断以下记忆是否是一个稳定、长期的用户偏好（可跨会话复用的工作习惯、格式偏好、沟通风格等）。
+
+记忆内容：
+{memory}
+
+判定标准：
+- true：内容明确具体，属于用户长期偏好（如"用户写 Rust 代码时喜欢 4 空格缩进"）
+- false：内容模糊、临时性、一次性、或属于事实/决策而非偏好（如"用户今天选用了方案 A"）
+
+只输出一个词：true 或 false。"#;
+
 /// 记忆提取器。
 ///
 /// 使用 LLM 将对话文本转换为结构化记忆。
@@ -96,7 +111,14 @@ impl MemoryExtractor {
     ///
     /// 不执行持久化，仅返回提取结果。
     /// 调用方负责将结果写入 VFS。
-    pub async fn extract(&self, conversation: &str) -> Result<Vec<MemoryEntry>> {
+    ///
+    /// `source_message_ids`：本次对话覆盖的消息 ID 列表（消息级溯源）；
+    /// 提取出的每条记忆都会携带该列表（G3 记忆溯源——注入时可核对出处）。
+    pub async fn extract(
+        &self,
+        conversation: &str,
+        source_message_ids: &[String],
+    ) -> Result<Vec<MemoryEntry>> {
         if conversation.len() < self.config.min_conversation_length {
             return Ok(Vec::new());
         }
@@ -120,10 +142,39 @@ impl MemoryExtractor {
         let filtered: Vec<MemoryEntry> = memories
             .into_iter()
             .filter(|m| m.importance >= self.config.min_importance_threshold)
+            .map(|mut m| {
+                if !source_message_ids.is_empty() {
+                    m.source_message_ids = source_message_ids.to_vec();
+                }
+                m
+            })
             .collect();
 
         tracing::info!(count = filtered.len(), "记忆提取完成");
         Ok(filtered)
+    }
+
+    /// 校验偏好类记忆是否为稳定长期偏好（写前验证门，G3）。
+    ///
+    /// 仅对 `MemoryCategory::Preference` 使用：LLM 判定记忆内容是否
+    /// 明确、非临时、非一次性的用户偏好。返回 `true` 才应持久化；
+    /// 解析失败/模型异常时返回 `Ok(false)`（保守：宁可不存）。
+    pub async fn verify_preference(&self, memory: &MemoryEntry) -> Result<bool> {
+        let prompt = VERIFY_PREFERENCE_PROMPT.replace("{memory}", &memory.content);
+        let response = self
+            .model_service
+            .chat(&self.config.model, vec![Message::user(prompt)])
+            .await?;
+        let cleaned = response.trim().to_lowercase();
+        // 容错解析：接受 true/false/yes/no/1/0（含前后缀文本）
+        if cleaned.contains("true") || cleaned.contains("yes") || cleaned.contains("1") {
+            Ok(true)
+        } else if cleaned.contains("false") || cleaned.contains("no") || cleaned.contains("0") {
+            Ok(false)
+        } else {
+            tracing::warn!(memory_id = %memory.id, response = %response, "偏好校验响应无法解析，保守拒绝");
+            Ok(false)
+        }
     }
 
     fn parse_extraction_response(&self, response: &str) -> Result<Vec<MemoryEntry>> {
@@ -245,6 +296,13 @@ pub fn format_memory_as_markdown(memory: &MemoryEntry) -> String {
 
     if let Some(ref session_id) = memory.source_session {
         md.push_str(&format!("- **来源会话**: {}\n", session_id));
+    }
+
+    if !memory.source_message_ids.is_empty() {
+        md.push_str(&format!(
+            "- **来源消息**: {}\n",
+            memory.source_message_ids.join(", ")
+        ));
     }
 
     if !memory.tags.is_empty() {
@@ -402,7 +460,10 @@ mod tests {
         let mut mock = MockChatService::new();
         mock.expect_chat_completion().times(0);
         let extractor = extractor_with_mock(mock);
-        let result = extractor.extract("短对话").await.unwrap();
+        let result = extractor
+            .extract("短对话", &[])
+            .await
+            .unwrap();
         assert!(result.is_empty());
     }
 
@@ -429,7 +490,10 @@ mod tests {
             })
         });
         let extractor = extractor_with_mock(mock);
-        let result = extractor.extract(&long_conversation()).await.unwrap();
+        let result = extractor
+            .extract(&long_conversation(), &[])
+            .await
+            .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content, "重要事实");
     }
@@ -440,8 +504,136 @@ mod tests {
         mock.expect_chat_completion()
             .returning(|_| Err(TianyanError::Custom("模型服务错误：连接失败".to_string())));
         let extractor = extractor_with_mock(mock);
-        let result = extractor.extract(&long_conversation()).await;
+        let result = extractor.extract(&long_conversation(), &[]).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_extract_attaches_source_message_ids() {
+        // 消息级溯源：extract 传入的消息 ID 列表附加到每条记忆
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            Ok(ChatCompletionResponse {
+                id: "r1".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "test".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant(
+                        r#"{"memories":[
+                            {"id":"m1","category":"preference","content":"用户偏好简洁","importance":0.9}
+                        ]}"#,
+                    ),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: TokenUsage::default(),
+            })
+        });
+        let extractor = extractor_with_mock(mock);
+        let ids = vec!["msg-1".to_string(), "msg-2".to_string()];
+        let result = extractor
+            .extract(&long_conversation(), &ids)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].source_message_ids, ids);
+    }
+
+    #[tokio::test]
+    async fn test_extract_empty_source_ids_leaves_empty() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            Ok(ChatCompletionResponse {
+                id: "r1".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "test".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant(
+                        r#"{"memories":[
+                            {"id":"m1","category":"fact","content":"事实","importance":0.9}
+                        ]}"#,
+                    ),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: TokenUsage::default(),
+            })
+        });
+        let extractor = extractor_with_mock(mock);
+        let result = extractor.extract(&long_conversation(), &[]).await.unwrap();
+        assert!(result[0].source_message_ids.is_empty());
+    }
+
+    // ── verify_preference ─────────────────────────────────────
+
+    fn memory_for_verify() -> MemoryEntry {
+        MemoryEntry::new("pref-1", "用户写 Rust 时喜欢 4 空格缩进", MemoryCategory::Preference)
+    }
+
+    #[tokio::test]
+    async fn test_verify_preference_true() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            Ok(ChatCompletionResponse {
+                id: "r1".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "test".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant("true".to_string()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: TokenUsage::default(),
+            })
+        });
+        let extractor = extractor_with_mock(mock);
+        assert!(extractor.verify_preference(&memory_for_verify()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_verify_preference_false() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            Ok(ChatCompletionResponse {
+                id: "r1".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "test".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant("false".to_string()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: TokenUsage::default(),
+            })
+        });
+        let extractor = extractor_with_mock(mock);
+        assert!(!extractor.verify_preference(&memory_for_verify()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_verify_preference_unparseable_returns_false() {
+        // 解析失败保守拒绝（不持久化）
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            Ok(ChatCompletionResponse {
+                id: "r1".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "test".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant("不好说".to_string()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: TokenUsage::default(),
+            })
+        });
+        let extractor = extractor_with_mock(mock);
+        assert!(!extractor.verify_preference(&memory_for_verify()).await.unwrap());
     }
 
     #[test]
@@ -455,5 +647,16 @@ mod tests {
         assert!(md.contains("**类别**: preference"));
         assert!(md.contains("**重要性**: 0.80"));
         assert!(md.contains("这是一个测试记忆"));
+    }
+
+    #[test]
+    fn test_format_memory_with_source_message_ids() {
+        let memory = MemoryEntry::new("test-2", "内容", MemoryCategory::Fact)
+            .with_source_session("session-1")
+            .with_source_message_ids(vec!["msg-1".to_string(), "msg-2".to_string()]);
+
+        let md = format_memory_as_markdown(&memory);
+        assert!(md.contains("**来源会话**: session-1"));
+        assert!(md.contains("**来源消息**: msg-1, msg-2"));
     }
 }

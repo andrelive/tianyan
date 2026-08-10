@@ -15,6 +15,7 @@ use crate::common::types::Message;
 use crate::executor::approval::ApprovalDecision;
 use crate::executor::Action;
 use crate::model::types::ChatCompletionRequest;
+use crate::model::types::ToolCall;
 use crate::skills::SkillExecutionRequest;
 
 use super::{parse_params, safety_violation, ToolRegistry};
@@ -108,6 +109,12 @@ impl ToolRegistry {
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: CallSkillParams = parse_params(arguments)?;
+
+        // G2a：技能激活可观测性——self_check 可见每个技能被调用的次数。
+        if let Some(ref metrics) = self.metrics {
+            metrics.record_skill_call(&params.skill_id).await;
+        }
+
         if let Some(ref skill_executor) = self.skill_executor {
             let request = SkillExecutionRequest::new(params.skill_id, params.parameters);
             match skill_executor.execute(request).await {
@@ -223,6 +230,9 @@ impl ToolRegistry {
     /// 委托核心循环（前台/后台共用）。
     ///
     /// 深度保护由调用方负责（前台在入口，后台任务内由内层委托自行检查）。
+    ///
+    /// 角色解析（`params.role`）：未知角色在循环启动前报错（模型可换用有效
+    /// 角色重试）。字段优先级：显式参数 > 角色值 > 主 Agent 配置/默认值。
     pub(crate) async fn run_delegation_loop(
         &self,
         params: &DelegateToAgentParams,
@@ -238,24 +248,56 @@ impl ToolRegistry {
             ))
         })?;
 
+        let role = match params.role.as_deref() {
+            Some(name) => Some(self.role_registry.get(name).ok_or_else(|| {
+                TianyanError::Custom(format!(
+                    "tool: 角色不存在：{name}。可用角色：{}",
+                    self.role_registry.names().join("、")
+                ))
+            })?),
+            None => None,
+        };
+
+        // 模型优先级：显式 model > role.model > 主 Agent 模型。
+        let model = params
+            .model
+            .clone()
+            .or_else(|| role.as_ref().and_then(|r| r.model.clone()))
+            .unwrap_or_else(|| self.model.clone());
+
+        // 系统提示优先级：显式 system_prompt > role.system_prompt > 无。
+        let system_prompt = params
+            .system_prompt
+            .clone()
+            .or_else(|| role.as_ref().and_then(|r| r.system_prompt.clone()));
+
+        // 轮数/超时优先级：显式参数 > 角色值 > 默认值。
+        let max_turns = params
+            .max_turns
+            .or_else(|| role.as_ref().and_then(|r| r.max_turns))
+            .unwrap_or(DEFAULT_MAX_TURNS)
+            .clamp(1, MAX_TURNS_CAP);
+        let timeout_secs = params
+            .timeout_secs
+            .or_else(|| role.as_ref().and_then(|r| r.timeout_secs));
+
+        // 工具白名单：Some 时白名单外工具调用返回合成错误结果（不硬失败循环）。
+        let role_tools: Option<Vec<String>> = role.as_ref().and_then(|r| r.tools.clone());
+        let role_name: Option<String> = role.as_ref().map(|r| r.name.clone());
+
         let mut sub_messages: Vec<Message> = Vec::new();
-        if let Some(prompt) = params.system_prompt.as_deref() {
+        if let Some(prompt) = system_prompt.as_deref() {
             if !prompt.is_empty() {
                 sub_messages.push(Message::system(prompt));
             }
         }
         sub_messages.push(Message::user(&params.task));
 
-        let max_turns = params
-            .max_turns
-            .unwrap_or(DEFAULT_MAX_TURNS)
-            .clamp(1, MAX_TURNS_CAP);
-
         let run_loop = async {
             let mut total_tokens: usize = 0;
 
             for _turn in 0..max_turns {
-                let request = ChatCompletionRequest::new(&self.model, sub_messages.clone());
+                let request = ChatCompletionRequest::new(&model, sub_messages.clone());
                 let response = model_service
                     .chat_completion(request)
                     .await
@@ -280,7 +322,14 @@ impl ToolRegistry {
                         if !tool_calls.is_empty() {
                             // subagent=true：子任务工具执行——审批不交互，
                             // 未授权操作拒绝并上报主 agent 确认
-                            let results = self.execute_parallel(tool_calls, session_id, true).await;
+                            let results = self
+                                .execute_tool_calls_with_role(
+                                    tool_calls,
+                                    session_id,
+                                    role_tools.as_deref(),
+                                    role_name.as_deref(),
+                                )
+                                .await;
                             for (call_id, result) in results {
                                 let content = match result {
                                     Ok(val) => val.to_string(),
@@ -307,7 +356,7 @@ impl ToolRegistry {
             }))
         };
 
-        match params.timeout_secs {
+        match timeout_secs {
             Some(secs) => {
                 let result =
                     tokio::time::timeout(std::time::Duration::from_secs(secs), run_loop).await;
@@ -321,6 +370,45 @@ impl ToolRegistry {
             }
             None => run_loop.await,
         }
+    }
+
+    /// 执行子 Agent 工具调用（含角色白名单过滤）。
+    ///
+    /// `role_tools` 为 Some 时，白名单外的工具调用**不执行**，而是返回合成
+    /// 错误结果（保留 call_id，错误消息作为普通工具结果回喂模型，模型可换用
+    /// 允许的工具重试）；白名单内工具正常并行执行。`role_tools` 为 None 时
+    /// 不限制（与主 Agent 相同）。前台/后台共用此路径，过滤语义一致。
+    async fn execute_tool_calls_with_role(
+        &self,
+        tool_calls: &[ToolCall],
+        session_id: &str,
+        role_tools: Option<&[String]>,
+        role_name: Option<&str>,
+    ) -> Vec<(String, Result<serde_json::Value, TianyanError>)> {
+        let Some(allowed) = role_tools else {
+            return self.execute_parallel(tool_calls, session_id, true).await;
+        };
+
+        let (allowed_refs, blocked): (Vec<&ToolCall>, Vec<&ToolCall>) = tool_calls
+            .iter()
+            .partition(|call| allowed.iter().any(|t| t == &call.function.name));
+        let allowed_calls: Vec<ToolCall> = allowed_refs.into_iter().cloned().collect();
+
+        let mut results = self
+            .execute_parallel(&allowed_calls, session_id, true)
+            .await;
+        for call in blocked {
+            results.push((
+                call.id.clone(),
+                Err(TianyanError::Custom(format!(
+                    "tool: 角色 {} 不允许使用工具 {}（允许：{}）",
+                    role_name.unwrap_or("?"),
+                    call.function.name,
+                    allowed.join("、")
+                ))),
+            ));
+        }
+        results
     }
 
     /// 后台委托：注册任务 → 获取并发许可 → spawn 独立执行 → 立即返回。

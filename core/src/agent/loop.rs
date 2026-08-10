@@ -24,6 +24,8 @@ pub struct AgentLoopConfig {
     /// 唤醒轮（后台任务全部完成/失败触发）中模型可能认为无需回复——
     /// 空输出是合法结束而非错误；普通用户轮保持 false（空输出视为错误）。
     pub allow_empty_answer: bool,
+    /// 工具短路选择（G1）：LLM 可见工具数超过阈值时按相关性过滤 schema。
+    pub shortlist_tools: bool,
 }
 
 impl Default for AgentLoopConfig {
@@ -31,6 +33,7 @@ impl Default for AgentLoopConfig {
         Self {
             max_turns: 200,
             allow_empty_answer: false,
+            shortlist_tools: true,
         }
     }
 }
@@ -136,6 +139,31 @@ impl AgentLoop {
         cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
     }
 
+    /// 提取工具短路选择的查询信号（G1）：最后一条用户消息的文本。
+    ///
+    /// 过滤以"当前任务意图"为相关性锚点；取不到用户消息时返回 None
+    /// （短路层保守回退为全量工具）。
+    fn shortlist_query(msgs: &[Message]) -> Option<String> {
+        msgs.iter()
+            .rev()
+            .find(|m| m.role == MessageRole::User)
+            .map(|m| m.content.clone())
+    }
+
+    /// 获取本轮的 LLM 可见工具定义（G1 工具短路选择）。
+    ///
+    /// 配置开启且工具总数超阈值时按 query 相关性过滤 schema；
+    /// 否则全量（行为零变化）。执行层不受影响（被过滤工具仍可执行）。
+    async fn tools_for_turn(&self, msgs: &[Message]) -> Vec<crate::model::types::ToolDefinition> {
+        if self.config.shortlist_tools {
+            self.tool_registry
+                .definitions_shortlisted(Self::shortlist_query(msgs).as_deref())
+                .await
+        } else {
+            self.tool_registry.definitions().await
+        }
+    }
+
     /// 运行迭代循环直到回答或追问（非流式）。
     ///
     /// `cancel` 为 `Some` 时，每轮开始前检查取消标志；被取消返回
@@ -158,8 +186,8 @@ impl AgentLoop {
             cancel,
             |this, model, _sender, msgs, _cancel| {
                 Box::pin(async move {
-                    let request = ChatCompletionRequest::new(model, msgs)
-                        .with_tools(this.tool_registry.definitions().await);
+                    let tools = this.tools_for_turn(&msgs).await;
+                    let request = ChatCompletionRequest::new(model, msgs).with_tools(tools);
 
                     let response =
                         this.model_service
@@ -214,9 +242,10 @@ impl AgentLoop {
                         TianyanError::Custom("agent_loop: 流式路径缺少 stream_sender".to_string())
                     })?;
 
+                    let tools = this.tools_for_turn(&msgs).await;
                     let request = ChatCompletionRequest::new(model, msgs)
                         .with_stream(true)
-                        .with_tools(this.tool_registry.definitions().await);
+                        .with_tools(tools);
 
                     let mut rx = this
                         .model_service

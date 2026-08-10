@@ -23,6 +23,13 @@ pub struct MemoryConfig {
     /// 记忆每日衰减率（0.0 - 1.0）。
     #[serde(default = "default_decay_rate")]
     pub decay_rate: f32,
+    /// 偏好类记忆写前校验（G3，默认关闭 opt-in）。
+    ///
+    /// 开启后 MemoryTask 对 `preferences` 类别记忆先经 LLM 校验
+    /// （是否稳定长期偏好）再持久化；未通过/校验失败的记忆被丢弃。
+    /// 每提取周期仅对偏好类记忆多一次小调用，成本可控。
+    #[serde(default = "default_false")]
+    pub verify_preferences: bool,
 }
 
 fn default_session_memory() -> usize {
@@ -49,6 +56,10 @@ fn default_decay_rate() -> f32 {
     0.01
 }
 
+fn default_false() -> bool {
+    false
+}
+
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
@@ -58,6 +69,7 @@ impl Default for MemoryConfig {
             auto_consolidation: true,
             consolidation_interval: default_consolidation_interval(),
             decay_rate: default_decay_rate(),
+            verify_preferences: false,
         }
     }
 }
@@ -102,6 +114,7 @@ mod tests {
         assert!(config.auto_consolidation);
         assert_eq!(config.consolidation_interval, 3600);
         assert_eq!(config.decay_rate, 0.01);
+        assert!(!config.verify_preferences, "偏好校验默认关闭 opt-in");
     }
 
     #[test]

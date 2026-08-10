@@ -16,6 +16,7 @@ mod memory;
 mod model;
 mod reminder;
 mod retrieval;
+mod roles;
 mod security;
 mod storage;
 pub mod validation;
@@ -34,6 +35,7 @@ pub use model::{
 };
 pub use reminder::ReminderConfig;
 pub use retrieval::RetrievalConfig;
+pub use roles::AgentRolesConfig;
 pub use security::{SafetyMode, SecurityConfig};
 pub use storage::{StorageBackendType, StorageConfig, VectorStorageConfig};
 pub use validation::{
@@ -82,6 +84,10 @@ pub struct TianyanConfig {
     /// 主动提醒配置（记忆/规则 relevant-now 评估；默认关闭）。
     #[serde(default)]
     pub reminder: ReminderConfig,
+    /// 子 Agent 角色配置（delegate_to_agent role 参数；同名覆盖内置角色，
+    /// 新名字新增角色）。
+    #[serde(default)]
+    pub agent_roles: AgentRolesConfig,
 }
 
 impl TianyanConfig {
@@ -296,6 +302,42 @@ mod tests {
         let parsed: TianyanConfig = toml::from_str(&toml_str).unwrap();
         // 默认配置 providers 和 preferences 都为空
         assert!(parsed.models.providers.is_empty());
+    }
+
+    #[test]
+    fn test_config_agent_roles_section_roundtrip() {
+        // [agent_roles.<name>] 生产形式：随 TianyanConfig 序列化/反序列化往返
+        let toml_str = r#"
+            [agent_roles.researcher]
+            model = "deepseek-r1"
+            tools = ["web_search", "read_file"]
+            max_turns = 30
+        "#;
+        let config: TianyanConfig = toml::from_str(toml_str).unwrap();
+        let role = config
+            .agent_roles
+            .roles
+            .get("researcher")
+            .expect("应解析出角色");
+        assert_eq!(role.model.as_deref(), Some("deepseek-r1"));
+        assert_eq!(role.max_turns, Some(30));
+
+        // 序列化后重新解析仍一致（旧配置无该节时默认空）
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let reparsed: TianyanConfig = toml::from_str(&serialized).unwrap();
+        let role2 = reparsed
+            .agent_roles
+            .roles
+            .get("researcher")
+            .expect("往返后角色应存在");
+        assert_eq!(role2.model, role.model);
+        assert_eq!(role2.tools, role.tools);
+
+        let legacy: TianyanConfig = toml::from_str("[agent]\n").unwrap();
+        assert!(
+            legacy.agent_roles.roles.is_empty(),
+            "旧配置无 [agent_roles] 节应默认空"
+        );
     }
 
     #[test]

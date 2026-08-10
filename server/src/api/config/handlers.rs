@@ -68,6 +68,7 @@ pub async fn get_config_section(
         "security" => serde_json::to_value(&config.security).unwrap_or(Value::Null),
         "memory" => serde_json::to_value(&config.memory).unwrap_or(Value::Null),
         "retrieval" => serde_json::to_value(&config.retrieval).unwrap_or(Value::Null),
+        "agent_roles" => serde_json::to_value(&config.agent_roles).unwrap_or(Value::Null),
         _ => {
             warn!("未知配置节: {}", section);
             Value::Null
