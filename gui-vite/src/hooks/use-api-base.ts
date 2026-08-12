@@ -7,9 +7,9 @@ export function getApiBase(): string {
   if (injected) {
     return `${injected}/api/v1`;
   }
-  // Dev mode with Vite proxy: use relative path
-  const href = window.location.href;
-  if (href.includes('localhost:5173') || href.includes('127.0.0.1:5173')) {
+  // Dev mode with Vite proxy: use relative path（与端口无关——
+  // 修复：原实现硬编码 5173，端口变化（如 5174）时误走生产分支导致跨源 CORS 失败）
+  if (import.meta.env.DEV) {
     return '/api/v1';
   }
   // Production: read base URL from store and append /api/v1
