@@ -9,6 +9,8 @@ test-results/
 
 # Tianyan runtime data (accidental writes to repo root)
 ~/
+# Local config (contains secrets; keep local, tianyan.toml.example as template)
+/tianyan.toml
 *.db
 *.db-wal
 *.db-shm

@@ -1,0 +1,194 @@
+# Tianyan 配置模板（脱敏版，从本地 tianyan.toml 复制）
+#
+# 使用方式：
+#   1. 复制本文件为 tianyan.toml（已被 .gitignore 忽略，不会提交到仓库）
+#   2. 设置以下环境变量后启动：
+#      - BAILIAN_API_KEY   阿里云百炼 API Key
+#      - OPENCODE_API_KEY  opencode.ai 网关 API Key
+#   3. 本机路径类字段（如 security.trash_directory）按需修改
+# 完整字段说明见 config.example.toml
+
+[agent]
+enable_skills = true
+enable_memory = true
+stream_responses = true
+enable_thinking = false
+default_top_k = 5
+learned_rules_top_k = 5
+learned_rules_max_tokens = 800
+max_turns = 200
+shortlist_tools = true
+background_self_review = false
+
+[storage]
+data_dir = "~/.tianyan"
+backend = "local"
+max_storage_size = 0
+auto_cleanup = true
+cleanup_days = 365
+
+[storage.vector]
+collection_name = "tianyan_contexts"
+vector_dimension = 2048
+
+[[models.providers]]
+name = "bailian"
+endpoint = "https://llm-0kacxy8o62q1skhc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+api_key = "${BAILIAN_API_KEY}"
+timeout = 60
+enabled = true
+
+[[models.providers.models]]
+name = "qwen3.5-plus"
+capabilities = [
+    "chat",
+    "vision",
+]
+
+[[models.providers.models]]
+name = "qwen3.7-plus"
+capabilities = ["chat"]
+
+[[models.providers.models]]
+name = "text-embedding-v4"
+capabilities = [
+    "text-embedding",
+    "multimodal-embedding",
+]
+
+[models.providers.headers]
+
+[[models.providers]]
+name = "opencode"
+endpoint = "https://opencode.ai/zen/go/v1"
+api_key = "${OPENCODE_API_KEY}"
+timeout = 120
+enabled = true
+
+[[models.providers.models]]
+name = "deepseek-v4-flash"
+capabilities = ["chat"]
+
+[[models.providers.models]]
+name = "deepseek-v4-pro"
+capabilities = ["chat"]
+
+[[models.providers.models]]
+name = "glm-5.2"
+capabilities = ["chat"]
+
+[[models.providers.models]]
+name = "kimi-k3"
+capabilities = [
+    "chat",
+    "vision",
+]
+
+[models.providers.headers]
+
+[models.preferences.chat]
+provider = "opencode"
+model = "deepseek-v4-flash"
+
+[models.preferences.embedding]
+provider = "bailian"
+model = "text-embedding-v4"
+
+[models.preferences.vision]
+provider = "bailian"
+model = "qwen3.5-plus"
+
+[logging]
+level = "info"
+format = "text"
+max_file_size = 10
+max_files = 5
+include_timestamp = true
+include_location = false
+
+[security]
+enabled = true
+safety_mode = "strict"
+trash_directory = 'C:\Users\<用户名>\.tianyan\trash'
+allowed_directories = []
+blocked_directories = [
+    "/",
+    "/etc",
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+]
+allowed_commands = []
+blocked_commands = [
+    "rm -rf /",
+    "format",
+    "del /s",
+    "rd /s",
+]
+confirm_commands = true
+max_file_size = 104857600
+audit_logging = true
+skill_file_read_max_size = 52428800
+skill_file_read_timeout_secs = 30
+skill_file_write_max_size = 10485760
+skill_file_write_timeout_secs = 30
+skill_file_list_max_entries = 10000
+skill_http_timeout_secs = 60
+skill_command_timeout_secs = 300
+wait_for_approval = false
+prompt_commands = []
+allow_dangerous_skills = false
+
+[memory]
+max_session_memory = 8000
+max_long_term_memory = 10000
+importance_threshold = 0.5
+auto_consolidation = true
+consolidation_interval = 3600
+decay_rate = 0.01
+verify_preferences = false
+
+[retrieval]
+default_top_k = 10
+min_score = 0.5
+two_stage_retrieval = true
+l0_multiplier = 3
+max_context_tokens = 4000
+enable_cache = true
+cache_ttl = 300
+
+[mcp]
+servers = []
+
+[web]
+enabled = true
+search_backend = "duckduckgo"
+timeout_secs = 15
+cache_ttl_secs = 600
+max_fetch_bytes = 2097152
+
+[clipboard]
+enabled = false
+auto_capture = false
+prompt_confirm = true
+poll_interval_ms = 1000
+
+[events]
+enabled = false
+watch_dirs = []
+watch_events = [
+    "create",
+    "write",
+    "remove",
+]
+rules = []
+webhook_token = ""
+
+[reminder]
+enabled = false
+interval_secs = 3600
+max_per_run = 1
+inject_to_session = true
+
+[agent_roles]
