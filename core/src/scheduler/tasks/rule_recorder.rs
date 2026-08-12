@@ -285,14 +285,6 @@ mod tests {
         async fn move_entry(&self, _s: &TianyanUri, _d: &TianyanUri) -> Result<()> {
             Ok(())
         }
-        async fn update_metadata(
-            &self,
-            _uri: &TianyanUri,
-            _importance: f32,
-            _custom: HashMap<String, serde_json::Value>,
-        ) -> Result<()> {
-            Ok(())
-        }
         async fn get_all_content_metadata(
             &self,
             _uri: &TianyanUri,
