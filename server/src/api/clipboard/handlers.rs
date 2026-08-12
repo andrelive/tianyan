@@ -22,7 +22,11 @@ pub async fn capture_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CaptureRequest>,
 ) -> Result<Response, ApiError> {
-    let service = ClipboardService::new(state.vfs());
+    let service = ClipboardService::new(
+        state.vfs(),
+        state.clipboard_outbox(),
+        state.clipboard_pending(),
+    );
     match service.capture(&state, &request.text).await? {
         None => Ok(StatusCode::NO_CONTENT.into_response()),
         Some(resp) => Ok(Json(resp).into_response()),
@@ -34,7 +38,11 @@ pub async fn respond_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RespondRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let service = ClipboardService::new(state.vfs());
+    let service = ClipboardService::new(
+        state.vfs(),
+        state.clipboard_outbox(),
+        state.clipboard_pending(),
+    );
     Ok(Json(service.respond(&state, request).await?))
 }
 
@@ -42,7 +50,11 @@ pub async fn respond_handler(
 pub async fn pending_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let service = ClipboardService::new(state.vfs());
+    let service = ClipboardService::new(
+        state.vfs(),
+        state.clipboard_outbox(),
+        state.clipboard_pending(),
+    );
     let pending = service.get_pending().await;
     Ok(Json(serde_json::json!({ "pending": pending })))
 }
@@ -51,7 +63,11 @@ pub async fn pending_handler(
 pub async fn outbox_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let service = ClipboardService::new(state.vfs());
+    let service = ClipboardService::new(
+        state.vfs(),
+        state.clipboard_outbox(),
+        state.clipboard_pending(),
+    );
     let contents = service.outbox_drain();
     Ok(Json(serde_json::json!({ "contents": contents })))
 }

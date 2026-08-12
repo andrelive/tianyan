@@ -28,7 +28,7 @@ pub async fn chat_handler(
     }
 
     info!("收到对话请求，会话: {:?}", request.session_id);
-    debug!("消息数量: {}", request.messages.len());
+    debug!("消息长度: {}", request.message.content.len());
 
     let agent = state.agent().await;
     let session_manager = state.session_manager();
@@ -110,9 +110,9 @@ pub async fn chat_stream_handler(
         .get_or_insert_with(|| format!("session-{}", uuid::Uuid::new_v4()));
 
     info!(
-        "流式对话请求: 会话={}, 消息数={}",
+        "流式对话请求: 会话={}, 消息长度={}",
         session_id,
-        request.messages.len()
+        request.message.content.len()
     );
 
     let (event_tx, mut event_rx) = mpsc::channel::<ChatStreamEvent>(SSE_CHANNEL_BUFFER);

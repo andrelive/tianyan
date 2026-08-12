@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use crate::common::error::Result;
-use crate::common::types::{ContextNamespace, ContentLevel, TianyanUri};
+use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::vfs::VirtualFileSystem;
 
 /// 任务状态存储：VFS-backed 的 `name -> markdown` 映射。
@@ -122,12 +122,18 @@ mod tests {
         let vfs = Arc::new(MockVfs::new());
         let store = TaskStateStore::new(vfs.clone());
 
-        store.write("memory_extraction", "# 周期摘要\n\n提取 5 条记忆\n").await.unwrap();
+        store
+            .write("memory_extraction", "# 周期摘要\n\n提取 5 条记忆\n")
+            .await
+            .unwrap();
         let content = store.read("memory_extraction").await.unwrap().unwrap();
         assert!(content.contains("提取 5 条记忆"));
 
         // 覆盖写入
-        store.write("memory_extraction", "# 周期摘要\n\n提取 8 条记忆\n").await.unwrap();
+        store
+            .write("memory_extraction", "# 周期摘要\n\n提取 8 条记忆\n")
+            .await
+            .unwrap();
         let content = store.read("memory_extraction").await.unwrap().unwrap();
         assert!(content.contains("提取 8 条记忆"));
         assert!(!content.contains("5 条"));

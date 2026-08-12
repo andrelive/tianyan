@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 
 use crate::client::McpClient;
 use crate::error::{McpError, McpResult};
+use crate::types::McpServerConfig;
 use crate::ToolInfo;
 
 /// Manages a collection of named MCP server connections.
@@ -41,32 +42,89 @@ impl McpClientManager {
     ///
     /// If a server with the same name already exists, it will be disconnected
     /// and replaced.
+    ///
+    /// `env: None` means inherit the parent process environment.
     pub async fn connect_server(
-        &mut self,
+        &self,
         name: impl Into<String>,
         command: impl Into<String>,
         args: Vec<String>,
         env: Option<HashMap<String, String>>,
     ) -> McpResult<()> {
-        let name: String = name.into();
+        let config = McpServerConfig {
+            env,
+            ..McpServerConfig::new(name.into(), command, args)
+        };
+        self.connect_from_config(&config).await
+    }
 
-        // Disconnect existing connection with this name, if any.
-        if self.is_connected(&name).await {
-            self.disconnect_server(&name).await?;
+    /// 按服务器配置连接并注册（transport 分发见 [`McpClient::connect_from_config`]）。
+    ///
+    /// 同名已存在时先断开再替换；工具数量计入日志（连接成功的可见信号）。
+    pub async fn connect_from_config(&self, config: &McpServerConfig) -> McpResult<()> {
+        if self.is_connected(&config.name).await {
+            self.disconnect_server(&config.name).await?;
         }
 
-        let client = McpClient::connect(name.clone(), command, args, env).await?;
+        let client = McpClient::connect_from_config(config).await?;
+        let tool_count = client.list_tools().await.map(|t| t.len()).unwrap_or(0);
         let client = Arc::new(client);
 
-        let mut guard = self.clients.write().await;
-        guard.insert(name.clone(), client);
+        self.clients
+            .write()
+            .await
+            .insert(config.name.clone(), client);
 
-        tracing::info!(server = %name, "MCP server registered in manager");
+        tracing::info!(
+            server = %config.name,
+            tools = tool_count,
+            "MCP server registered in manager"
+        );
         Ok(())
     }
 
+    /// 与配置对齐（sync 语义）：断开已移除/禁用的服务器，连接新增/启用的。
+    ///
+    /// 连接失败仅告警并跳过（fail fast，不重试）。配置变化时调用
+    /// （如 server 层配置热更新 / agent reload）。
+    pub async fn sync(&self, servers: &[McpServerConfig]) {
+        let enabled: Vec<&str> = servers
+            .iter()
+            .filter(|s| s.enabled)
+            .map(|s| s.name.as_str())
+            .collect();
+
+        // 断开配置中已不存在或已禁用的服务器
+        let stale: Vec<String> = {
+            let guard = self.clients.read().await;
+            guard
+                .keys()
+                .filter(|k| !enabled.contains(&k.as_str()))
+                .cloned()
+                .collect()
+        };
+        for name in stale {
+            tracing::info!(server = %name, "MCP 服务器已从配置移除，断开连接");
+            let _ = self.disconnect_server(&name).await;
+        }
+
+        // 连接新增/启用的服务器（已连接则保持，不做重复握手）
+        for server in servers.iter().filter(|s| s.enabled) {
+            if self.is_connected(&server.name).await {
+                continue;
+            }
+            if let Err(e) = self.connect_from_config(server).await {
+                tracing::warn!(
+                    server = %server.name,
+                    error = %e,
+                    "MCP 服务器连接失败，跳过其工具"
+                );
+            }
+        }
+    }
+
     /// Disconnect and remove a server by name.
-    pub async fn disconnect_server(&mut self, name: &str) -> McpResult<()> {
+    pub async fn disconnect_server(&self, name: &str) -> McpResult<()> {
         let mut guard = self.clients.write().await;
         if let Some(client) = guard.remove(name) {
             drop(guard);
@@ -132,7 +190,7 @@ impl McpClientManager {
     }
 
     /// Disconnect all servers.
-    pub async fn disconnect_all(&mut self) {
+    pub async fn disconnect_all(&self) {
         let names: Vec<String> = {
             let guard = self.clients.read().await;
             guard.keys().cloned().collect()
@@ -171,9 +229,32 @@ mod tests {
 
     #[test]
     fn test_disconnect_unknown_server_returns_error() {
-        let mut manager = McpClientManager::new();
+        let manager = McpClientManager::new();
         let result = futures::executor::block_on(manager.disconnect_server("ghost"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_connect_from_config_http_without_url_fails() {
+        // transport=http 但未配置 url：连接分发应拒绝（不发起网络请求）
+        let manager = McpClientManager::new();
+        let config = McpServerConfig {
+            name: "remote".to_string(),
+            command: String::new(),
+            args: vec![],
+            env: None,
+            enabled: true,
+            description: None,
+            transport: Some("http".to_string()),
+            url: None,
+        };
+        let result = futures::executor::block_on(manager.connect_from_config(&config));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("transport=http 但未配置 url"),
+            "错误应携带原因: {msg}"
+        );
     }
 
     #[test]

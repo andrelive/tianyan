@@ -57,6 +57,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **定时任务跨运行状态（G5）**：新增 `TaskStateStore`（VFS `tianyan://memory/events/task_states/` 命名空间，容错读写/删除）——`TaskContext.task_state` 供任何任务读写自己的持久状态（"carries state between runs"）；MemoryTask 示范用例：每次运行读上次周期摘要、结束后写入本次摘要（处理会话数/提取记忆数）；内置任务自包含不受影响
 
 ### Changed
+- **死面清理包**：删除零调用的 `AgentMetrics::record_failure`/`failure_history`/`query_common_failures`（含 harness 摘要的 `common_failures_count` 字段）；删除恒为 Abstract 的 `SearchResult.matched_level`（无任何消费方）；删除无数据源的 `RetrievalResult.freshness_score`/`source_updated_at`（新鲜度常数 1.0 内联，排名行为逐位一致）；移除无人监听的 `tianyan-stop-stream` 快捷键死线（Ctrl+Alt+S，停止流式本就走 AbortController）
+- **server 模块级静态清除**：事件 webhook 令牌与总线改经 `AppState` 直读（热更新即时生效，删 `set_event_bus`/`set_webhook_token` 及静态）；剪贴板 pending/outbox 迁入 AppState（`clipboard_outbox`/`clipboard_pending` 句柄注入，`ClipboardWriteTool::shared` 删除）——测试不再需要串行化锁（每个 AppState 独立状态）
+- **调度器文档与实现对齐**：模块文档删除「使用 tokio-cron-scheduler」的不实声明（自研间隔循环 + `*/N` 简化 cron 解析，语义边界写入 `parse_cron_interval` 文档：固定值=相位忽略、日/月/星期不支持、回退 300s 告警）；移除只翻转运行标志、生产未使用的 `TaskScheduler::start()`（空操作易误导）
+- **GcTask 配置接线**：`auto_cleanup` 从 `StorageConfig.auto_cleanup` 注入（原注释声称配置驱动但 new() 硬编码 true），注册处传 `[storage]` 配置；TTL 阈值保持模块默认值
+- **VFS 内部重复收敛**：write/append 共用的 15 行幂等建目录块提取为 `VirtualFileSystemImpl::ensure_entry_exists`（已存在静默跳过，与 create_file 的报错语义区分）；知识摄入移除冗余双 upsert（update_metadata 前置写入会被 index_entry 的完整 payload 覆盖，content_hash 等元数据随向量 payload 一次写入）——每次摄入 LanceDB 写入减半
+- **协调器三层穿透消除**：Agent 构造时从 ToolRegistry 提取后台任务/审批/待确认队列的**共享 Arc**（同一实例，非复制状态）——`approval_status`/`respond_approval`/`background_tasks`/`cancel_background_task`/`register_task_waker` 从 `Agent → AgentLoop → ToolRegistry` 穿透改为直连；删除 ToolRegistry 的纯转发 `set_task_waker`
+- **LLM 输出截断收敛**：`common::llm_judge::truncate_output` 成为唯一实现（此前 4 份逐字复制：eval/judge、executor/judge、agent/background、executor/web），统一「内容被截断」标记并修复 UTF-8 字节边界 panic（CJK 安全）；`ChatCompletionResponse::first_choice_content` 收敛 3 处「取首个 choice」样板（实测探索报告高估了 judge 管道重复——提示词与回退链语义本就不同，未强行合并）
+- **MCP 连接逻辑收敛**：传输分发唯一实现下沉 `mcp::McpClient::connect_from_config`（stdio/http/未知回退）；`McpClientManager` 补齐 `connect_from_config`/`sync` 并改为 `&self`（内部已同步）；server 层 `McpToolManager` 删除自建客户端注册表改为委托，配置测试端点同样走唯一分发——此前 3 处连接逻辑复制
+- **`/chat` 与 `/chat/stream` 请求体瘦身**（破坏性变更）：`messages: [...]`（全量历史，服务端只读末条）→ `message: {role, content, images?}` 单条输入——历史由服务端会话持久化提供，消除冗余载荷、占位符耦合与双真相源
+- **会话元数据持久化**：created_at/title/ended_at 收敛进 JSONL 首行 SessionHeader（重启恢复标题/排序，删除只写不读的 VFS custom metadata 路径）；`list_sessions` 按目录条目过滤，幽灵会话消失；记忆提取水位线迁出 Session 命名空间（`memory/events/extraction_state/`，旧 `_metadata` 自动迁移）
+- **会话 JSONL 格式知识收敛**：`session::parse_message_lines` 成为唯一解析点（会话加载 / 记忆提取计数 / 消息溯源共用）；记忆提取水位线不再把首行 SessionHeader 计入（差一修复）
+- **审批门控收敛**：6 个危险工具（write_file/apply_edit/apply_patch/execute_command/run_tests/verify_build）复制 6 份的审批序列合并为 `ToolRegistry::ensure_approved` 单一实现
+- **使用统计刷盘接通**：`/api/v1/stats` 技能/文档计数恢复真实数据（查询前自动落库 + 每 1 分钟 `usage_stats_flush` 任务 + 退出前 shutdown 落盘）
 - Workspace 多 Crate 重构（core/server/gui/tauri）
 - `core/` → `tianyan-core`（lib name: `tianyan`）
 - `Server` 层：知识 API 完成真实集成（ingestion + retrieval）

@@ -11,8 +11,11 @@ use crate::common::types::{
 };
 use crate::memory::format_memory_as_markdown;
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
+use crate::session::parse_message_lines;
 
-/// 会话的记忆提取状态，存储在会话目录下的 `_metadata` 文件中。
+/// 会话的记忆提取状态，存储在 `tianyan://memory/events/extraction_state/{session_id}`
+/// （迁出 Session 命名空间——旧版存放于会话目录 `_metadata` 子文件，会被
+/// `list_sessions` 当作空会话列出）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionExtractionState {
     /// 上次提取时处理到的消息行数。
@@ -30,10 +33,28 @@ impl SessionExtractionState {
     }
 }
 
+/// 提取状态的存储 URI（`tianyan://memory/events/extraction_state/{session_id}`）。
+fn state_uri(session_uri: &TianyanUri) -> TianyanUri {
+    let session_id = session_uri.path().last().cloned().unwrap_or_default();
+    TianyanUri::new(
+        ContextNamespace::Memory,
+        vec![
+            "events".to_string(),
+            "extraction_state".to_string(),
+            session_id,
+        ],
+    )
+}
+
+/// 旧版水位线 URI（会话目录下 `_metadata` 子文件；一次性迁移用）。
+fn legacy_state_uri(session_uri: &TianyanUri) -> TianyanUri {
+    session_uri.append("_metadata")
+}
+
 /// 记忆提取任务。
 ///
-/// 定时扫描 Session 命名空间下的所有会话，对比 VFS 中持久化的
-/// `_metadata` 文件判断是否有新消息需要提取。
+/// 定时扫描 Session 命名空间下的所有会话，对比持久化的提取状态
+/// 判断是否有新消息需要提取。
 pub struct MemoryTask {
     /// 每个扫描周期处理上限，避免单次扫描耗时过长。
     max_process_per_cycle: usize,
@@ -47,48 +68,71 @@ impl MemoryTask {
         }
     }
 
-    /// 从 `_metadata` 子文件中读取上次提取状态。
+    /// 读取上次提取状态（新位置优先；旧版 `_metadata` 回退读取，不删除——
+    /// 待写入成功后再清理，避免提取失败丢水位线导致重复提取）。
     async fn read_state(
         &self,
         ctx: &TaskContext,
         session_uri: &TianyanUri,
     ) -> Option<SessionExtractionState> {
-        let state_uri = session_uri.append("_metadata");
-        match ctx.vfs.read_content(&state_uri, ContentLevel::Detail).await {
-            Ok(json) => match serde_json::from_str::<SessionExtractionState>(&json) {
-                Ok(state) => Some(state),
-                Err(e) => {
-                    tracing::warn!(
-                        session_uri = %session_uri,
-                        error = %e,
-                        "解析 _metadata 文件失败，将全量提取"
-                    );
-                    None
-                }
+        let content = match ctx
+            .vfs
+            .read_content(&state_uri(session_uri), ContentLevel::Detail)
+            .await
+        {
+            Ok(json) => json,
+            Err(_) => match ctx
+                .vfs
+                .read_content(&legacy_state_uri(session_uri), ContentLevel::Detail)
+                .await
+            {
+                Ok(json) => json,
+                Err(_) => return None,
             },
-            Err(_) => None,
+        };
+        match serde_json::from_str::<SessionExtractionState>(&content) {
+            Ok(state) => Some(state),
+            Err(e) => {
+                tracing::warn!(
+                    session_uri = %session_uri,
+                    error = %e,
+                    "解析提取状态文件失败，将全量提取"
+                );
+                None
+            }
         }
     }
 
-    /// 写入 `_metadata` 状态文件。
+    /// 写入提取状态到新位置；成功后清理旧版 `_metadata` 文件（一次性迁移）。
     async fn write_state(
         &self,
         ctx: &TaskContext,
         session_uri: &TianyanUri,
         state: &SessionExtractionState,
     ) -> Result<()> {
-        let state_uri = session_uri.append("_metadata");
+        let target_uri = state_uri(session_uri);
         let json = serde_json::to_string(state).map_err(|e| {
             crate::common::error::TianyanError::Custom(format!("序列化错误：{}", e))
         })?;
-        if !ctx.vfs.exists(&state_uri).await? {
-            ctx.vfs.create_file(&state_uri).await?;
+        if !ctx.vfs.exists(&target_uri).await? {
+            ctx.vfs.create_file(&target_uri).await?;
         }
-        ctx.vfs.write_content(&state_uri, &json).await?;
+        ctx.vfs.write_content(&target_uri, &json).await?;
+        // 迁移完成：删除旧版水位线（失败仅告警——list_sessions 已按目录过滤）
+        let legacy_uri = legacy_state_uri(session_uri);
+        if ctx.vfs.exists(&legacy_uri).await.unwrap_or(false) {
+            if let Err(e) = ctx.vfs.delete(&legacy_uri).await {
+                tracing::warn!(error = %e, "旧版提取状态文件删除失败（无害）");
+            }
+        }
         Ok(())
     }
 
-    /// 统计 session JSONL 文件中的消息行数。
+    /// 统计 session JSONL 中的消息数。
+    ///
+    /// 经共享解析 [`parse_message_lines`] 计数——**不含首行 SessionHeader**，
+    /// 修复旧版按行数统计把头部行计入的差一问题（头部缺失/补齐会触发
+    /// 意外全量重提；水位线从此与真实消息数精确对齐）。
     async fn count_session_messages(
         &self,
         ctx: &TaskContext,
@@ -98,7 +142,7 @@ impl MemoryTask {
             .vfs
             .read_content(session_uri, ContentLevel::Detail)
             .await?;
-        Ok(content.lines().filter(|l| !l.trim().is_empty()).count())
+        Ok(parse_message_lines(&content).len())
     }
 
     /// 扫描需要提取记忆的会话。
@@ -174,21 +218,12 @@ impl MemoryTask {
 
     /// 从会话 JSONL 文本中提取消息 ID 列表（消息级溯源，G3）。
     ///
-    /// 逐行尝试反序列化为 `StructuredMessage`（会话文件为 JSONL，
-    /// 每行一条消息）；解析失败的行跳过。全失败时返回空列表
-    /// （退化为仅会话级溯源，行为与旧版一致）。
+    /// 经共享解析 [`parse_message_lines`]（跳过首行 SessionHeader 与解析失败行），
+    /// 不再自行解析格式内部。全失败时返回空列表（退化为仅会话级溯源）。
     fn extract_message_ids(conversation: &str) -> Vec<String> {
-        conversation
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim();
-                if line.is_empty() {
-                    return None;
-                }
-                serde_json::from_str::<crate::common::types::StructuredMessage>(line)
-                    .ok()
-                    .map(|sm| sm.id)
-            })
+        parse_message_lines(conversation)
+            .into_iter()
+            .map(|sm| sm.id)
             .collect()
     }
 
@@ -210,8 +245,7 @@ impl MemoryTask {
             memory.source_session = Some(session_uri.to_string());
 
             // 偏好类写前校验（G3，opt-in）：验证为稳定长期偏好才持久化。
-            if memory.category == MemoryCategory::Preference
-                && ctx.config.memory.verify_preferences
+            if memory.category == MemoryCategory::Preference && ctx.config.memory.verify_preferences
             {
                 match ctx.memory_extractor.verify_preference(&memory).await {
                     Ok(true) => {}
@@ -340,6 +374,54 @@ impl TaskHandler for MemoryTask {
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
+    use crate::common::types::{DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime};
+    use crate::memory::{ExtractionConfig, MemoryExtractor};
+    use crate::model::ChatService;
+    use crate::test_utils::{MockChatService, MockVfs};
+    use crate::vfs::SummaryEngine;
+
+    /// 构造任务执行上下文（MockVfs + mock 服务）。
+    fn make_context(vfs: Arc<MockVfs>) -> TaskContext {
+        let chat: Arc<dyn ChatService> = Arc::new(MockChatService::new());
+        let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
+        let memory_extractor = Arc::new(MemoryExtractor::new(chat, ExtractionConfig::default()));
+        let config = Arc::new(crate::config::TianyanConfig::default());
+        TaskContext::new(vfs, summary_engine, memory_extractor, config)
+    }
+
+    /// 构造单条消息（测试辅助）。
+    fn make_msg(id: &str) -> crate::common::types::StructuredMessage {
+        crate::common::types::StructuredMessage {
+            id: id.to_string(),
+            parent_id: None,
+            role: MessageRole::User,
+            parts: vec![Part::Text {
+                text: "hi".to_string(),
+                time: PartTime::default(),
+            }],
+            tokens: DetailedTokenUsage::default(),
+            cost: 0.0,
+            model_id: None,
+            time: MessageTime::default(),
+            session_id: "s1".to_string(),
+            finish: None,
+            compression_marker: false,
+        }
+    }
+
+    /// 头部行 + N 条消息的 JSONL 文本。
+    fn jsonl_with_header(message_ids: &[&str]) -> String {
+        let header = serde_json::to_string(&crate::session::SessionHeader::default()).unwrap();
+        let mut content = format!("{header}\n");
+        for id in message_ids {
+            content.push_str(&serde_json::to_string(&make_msg(id)).unwrap());
+            content.push('\n');
+        }
+        content
+    }
+
     #[test]
     fn test_memory_task_new() {
         let task = MemoryTask::new();
@@ -359,5 +441,33 @@ mod tests {
         let parsed: SessionExtractionState = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.last_extracted_message_count, 42);
         assert!(!parsed.last_extracted_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_count_session_messages_excludes_header() {
+        // 回归保护：消息计数不得包含首行 SessionHeader（旧版按行数统计差 1，
+        // 头部补齐会触发意外全量重提）。
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let session_uri = TianyanUri::parse("tianyan://session/s1").unwrap();
+        vfs.set_content(
+            &session_uri,
+            ContentLevel::Detail,
+            &jsonl_with_header(&["m1", "m2"]),
+        );
+
+        let task = MemoryTask::new();
+        let count = task
+            .count_session_messages(&ctx, &session_uri)
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "头部行不得计入消息数");
+    }
+
+    #[test]
+    fn test_extract_message_ids_excludes_header() {
+        // 回归保护：消息溯源 ID 列表不含头部行
+        let ids = MemoryTask::extract_message_ids(&jsonl_with_header(&["m1", "m2"]));
+        assert_eq!(ids, vec!["m1".to_string(), "m2".to_string()]);
     }
 }

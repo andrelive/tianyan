@@ -129,9 +129,7 @@ impl SkillLearningEngine {
                         };
                         let experimental = verification
                             .as_ref()
-                            .map(|v| {
-                                v.score < self.config.candidate_score_threshold
-                            })
+                            .map(|v| v.score < self.config.candidate_score_threshold)
                             .unwrap_or(false);
 
                         if let Err(e) = self.store_skill(&skill, experimental).await {
@@ -170,10 +168,7 @@ impl SkillLearningEngine {
         let prompt = CANDIDATE_VERIFICATION_PROMPT
             .replace("{name}", &skill.name)
             .replace("{description}", &skill.description)
-            .replace(
-                "{scenarios}",
-                &skill.applicable_scenarios.join("；"),
-            )
+            .replace("{scenarios}", &skill.applicable_scenarios.join("；"))
             .replace("{content}", &skill.content);
 
         let response = match self
@@ -222,10 +217,7 @@ impl SkillLearningEngine {
             })
             .unwrap_or_default();
 
-        Ok(Some(SkillVerification {
-            score,
-            issues,
-        }))
+        Ok(Some(SkillVerification { score, issues }))
     }
 
     /// 使用 LLM 将任务描述分类到已知操作类型。
@@ -380,7 +372,11 @@ impl SkillLearningEngine {
         md.push_str(&format!("**描述**: {}\n\n", skill.description));
         md.push_str(&format!(
             "**状态**: {}\n\n",
-            if experimental { "试验性（未达正式质量阈值，谨慎使用）" } else { "正式" }
+            if experimental {
+                "试验性（未达正式质量阈值，谨慎使用）"
+            } else {
+                "正式"
+            }
         ));
 
         if !skill.applicable_scenarios.is_empty() {
@@ -651,7 +647,11 @@ mod tests {
             Arc::new(MockVfs::new()),
             SkillLearningConfig::default(),
         );
-        assert!(engine.verify_candidate(&sample_skill()).await.unwrap().is_none());
+        assert!(engine
+            .verify_candidate(&sample_skill())
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -665,7 +665,11 @@ mod tests {
             Arc::new(MockVfs::new()),
             SkillLearningConfig::default(),
         );
-        assert!(engine.verify_candidate(&sample_skill()).await.unwrap().is_none());
+        assert!(engine
+            .verify_candidate(&sample_skill())
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -680,17 +684,26 @@ mod tests {
         engine.store_skill(&sample_skill(), true).await.unwrap();
 
         let uri = TianyanUri::new(ContextNamespace::Skill, vec!["skill-1".to_string()]);
-        let content = vfs.read_content(&uri, crate::common::types::ContentLevel::Detail).await.unwrap();
+        let content = vfs
+            .read_content(&uri, crate::common::types::ContentLevel::Detail)
+            .await
+            .unwrap();
         assert!(content.contains("**状态**: 试验性"), "L2 应标记试验性状态");
         let abstract_content = vfs
             .read_content(&uri, crate::common::types::ContentLevel::Abstract)
             .await
             .unwrap();
-        assert!(abstract_content.starts_with("[试验性]"), "L0 摘要应带试验性前缀: {abstract_content}");
+        assert!(
+            abstract_content.starts_with("[试验性]"),
+            "L0 摘要应带试验性前缀: {abstract_content}"
+        );
 
         // 正式技能：状态为"正式"，摘要无前缀
         engine.store_skill(&sample_skill(), false).await.unwrap();
-        let content = vfs.read_content(&uri, crate::common::types::ContentLevel::Detail).await.unwrap();
+        let content = vfs
+            .read_content(&uri, crate::common::types::ContentLevel::Detail)
+            .await
+            .unwrap();
         assert!(content.contains("**状态**: 正式"));
     }
 }

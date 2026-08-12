@@ -20,6 +20,7 @@ use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 
 use crate::common::error::{Result, TianyanError};
+use crate::common::llm_judge::truncate_output;
 use crate::config::WebConfig;
 
 /// 单条搜索结果。
@@ -167,7 +168,7 @@ impl WebSearchClient {
 
         let text = self.fetch_text(url).await?;
         let extracted = extract_readable(&text);
-        let truncated = truncate_text(&extracted, limit);
+        let truncated = truncate_output(&extracted, limit);
         self.cache_put(cache_key, truncated.clone());
         Ok(truncated)
     }
@@ -525,22 +526,6 @@ fn extract_block_text(container: &ElementRef) -> String {
     parts.join("\n\n")
 }
 
-/// 截断文本（保留头尾）。
-fn truncate_text(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        return text.to_string();
-    }
-    let head = &text[..max_chars * 2 / 3];
-    let tail_start = text.len().saturating_sub(max_chars / 3);
-    let tail = &text[tail_start..];
-    format!(
-        "{}...\n[内容被截断，省略 {} 字符]...\n{}",
-        head,
-        text.len() - head.len() - tail.len(),
-        tail
-    )
-}
-
 // ─── 工具执行函数（ToolRegistry 调用） ────────────────────────────────────
 
 /// 执行 web_search 工具。
@@ -742,7 +727,7 @@ mod tests {
     #[test]
     fn test_truncate_text() {
         let long = "a".repeat(3000);
-        let t = truncate_text(&long, 2000);
+        let t = truncate_output(&long, 2000);
         assert!(t.contains("[内容被截断"));
         assert!(t.len() < 2500);
     }

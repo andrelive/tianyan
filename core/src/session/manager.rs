@@ -5,7 +5,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
@@ -15,6 +14,7 @@ use crate::common::types::{
 };
 use crate::vfs::VirtualFileSystem;
 
+use super::types::parse_message_lines;
 use super::types::SessionHeader;
 use super::{types::Session, MAX_SESSION_MESSAGES};
 
@@ -91,12 +91,21 @@ impl PersistentSessionManager {
         // 解析 JSONL 重建 Session
         let mut session = Session::new(id);
         let mut lines = content.lines();
-        // 首行可能是会话头部（SessionHeader：injectable 快照等会话级状态）；
+        // 首行可能是会话头部（SessionHeader：injectable 快照 + 会话元数据）；
         // 旧格式会话（首行即消息）兼容跳过
         if let Some(first) = lines.next() {
             if !first.trim().is_empty() {
                 match SessionHeader::parse_line(first) {
-                    Some(header) => session.header = header,
+                    Some(header) => {
+                        // 从头部恢复会话元数据（title/ended_at 用户可见；
+                        // created_at 旧会话缺省时保持 Session::new 的加载时刻）
+                        if let Some(created) = header.created_at {
+                            session.created_at = created;
+                        }
+                        session.title = header.title.clone();
+                        session.ended_at = header.ended_at;
+                        session.header = header;
+                    }
                     None => match serde_json::from_str::<StructuredMessage>(first) {
                         Ok(msg) => session.add_structured_message(msg),
                         Err(e) => {
@@ -106,18 +115,20 @@ impl PersistentSessionManager {
                 }
             }
         }
-        for line in lines {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<StructuredMessage>(line) {
-                Ok(msg) => {
-                    session.add_structured_message(msg);
-                }
-                Err(e) => {
-                    tracing::warn!("解析消息记录失败：{} - {}", uri, e);
-                }
-            }
+        // 其余行统一走共享 JSONL 解析（格式知识收敛点
+        // [`parse_message_lines`]：跳过空行与解析失败行）
+        let rest: String = lines.collect::<Vec<_>>().join("\n");
+        let parsed = parse_message_lines(&rest);
+        let non_empty_lines = rest.lines().filter(|l| !l.trim().is_empty()).count();
+        if non_empty_lines != parsed.len() {
+            tracing::warn!(
+                skipped = non_empty_lines - parsed.len(),
+                session_id = %id,
+                "会话消息解析失败行数"
+            );
+        }
+        for msg in parsed {
+            session.add_structured_message(msg);
         }
 
         // 从后向前扫描 compression_marker，只保留 marker 及之后的消息
@@ -157,32 +168,7 @@ impl PersistentSessionManager {
         Ok(())
     }
 
-    /// 更新会话元数据。
-    async fn update_session_metadata(&self, session: &Session) -> Result<()> {
-        let custom = self.build_session_custom(session);
-        self.vfs
-            .update_metadata(&session.uri(), 0.5, custom)
-            .await?;
-        Ok(())
-    }
-
-    /// 构建 Session 的 custom 元数据。
-    fn build_session_custom(&self, session: &Session) -> HashMap<String, serde_json::Value> {
-        let mut custom = HashMap::new();
-        custom.insert(
-            "session_id".to_string(),
-            serde_json::json!(session.session_id),
-        );
-        custom.insert("ended_at".to_string(), serde_json::json!(session.ended_at));
-        custom.insert("title".to_string(), serde_json::json!(session.title));
-        custom.insert(
-            "message_count".to_string(),
-            serde_json::json!(session.messages.len()),
-        );
-        custom
-    }
-
-    /// 将会话头部（injectable 快照等）写回 JSONL 首行。
+    /// 将会话头部（injectable 快照 + 会话元数据）写回 JSONL 首行。
     ///
     /// 已有头部则替换，否则前置插入（旧格式会话首次更新时补齐）。
     /// 低频操作（标题更新 / 快照固化 / 压缩点清空），全量读写可接受。
@@ -261,16 +247,18 @@ impl SessionManager for PersistentSessionManager {
             TianyanError::Custom(format!("会话存储错误：会话创建失败：{} ({})", id, e))
         })?;
 
-        // 写入会话头部（会话级状态：injectable 快照等）与第一条消息
-        let header_line = serde_json::to_string(&SessionHeader::default())
+        // 写入会话头部（会话级状态：injectable 快照 + created_at 等元数据）
+        // 与第一条消息
+        let header = SessionHeader {
+            created_at: Some(session.created_at),
+            ..SessionHeader::default()
+        };
+        let header_line = serde_json::to_string(&header)
             .map_err(|e| TianyanError::Custom(format!("序列化错误：{}", e)))?;
         self.vfs
             .append_content(&uri, &format!("{header_line}\n"))
             .await?;
         self.append_message_to_vfs(&uri, &sm).await?;
-
-        // 更新元数据
-        self.update_session_metadata(&session).await?;
 
         Ok(session)
     }
@@ -288,11 +276,13 @@ impl SessionManager for PersistentSessionManager {
             )));
         }
 
-        // 更新元数据
-        self.update_session_metadata(session).await?;
-
-        // 同步会话头部（injectable 快照等会话级状态）
-        self.write_session_header(&session.session_id, &session.header)
+        // 同步会话级元数据到头部（title/ended_at 用户可见，唯一持久化 home；
+        // created_at 新会话由 create_session 固化，旧会话首次更新时冻结当前值）
+        let mut header = session.header.clone();
+        header.created_at = Some(session.created_at);
+        header.title = session.title.clone();
+        header.ended_at = session.ended_at;
+        self.write_session_header(&session.session_id, &header)
             .await?;
 
         Ok(())
@@ -394,6 +384,11 @@ impl SessionManager for PersistentSessionManager {
 
         let mut sessions = Vec::new();
         for entry in entries {
+            // 会话是 Session 命名空间下的目录条目；旧版记忆提取水位线
+            // （`_metadata` 子文件）等非目录条目不是会话，跳过防幽灵会话
+            if !entry.is_directory() {
+                continue;
+            }
             if let Some(session_id) = entry.uri().path().last().cloned() {
                 if let Some(session) = self.get_session(&session_id).await? {
                     sessions.push(session);
@@ -422,7 +417,7 @@ impl SessionManager for PersistentSessionManager {
 mod tests {
     use super::*;
 
-    use crate::common::types::{ContentLevel, InjectableContext, MessageRole};
+    use crate::common::types::{ContentLevel, ContextNamespace, InjectableContext, MessageRole};
     use crate::test_utils::MockVfs;
     use crate::vfs::{ContentStore, VfsCore};
 
@@ -683,5 +678,75 @@ mod tests {
             session.header.injectable_snapshot.is_none(),
             "旧格式无快照，header 应为空"
         );
+    }
+
+    #[tokio::test]
+    async fn test_session_metadata_roundtrip() {
+        // 回归保护：会话元数据（created_at / title / ended_at）持久化于 JSONL 首行
+        // SessionHeader——重启（重新 load）后恢复，不再只写不读。
+        let vfs = Arc::new(MockVfs::new());
+        let id = "test-meta";
+        setup_session(&vfs, id).await;
+        let mgr = PersistentSessionManager::new(vfs.clone());
+
+        let msg = Message::user("Hello");
+        mgr.create_session(id, msg).await.unwrap();
+        let original_created_at = mgr.get_session(id).await.unwrap().unwrap().created_at;
+
+        let mut session = mgr.get_session(id).await.unwrap().unwrap();
+        session.title = Some("我的标题".to_string());
+        session.end();
+        mgr.update_session(&session).await.unwrap();
+
+        // 模拟重启：重新加载
+        let loaded = mgr.get_session(id).await.unwrap().unwrap();
+        assert_eq!(
+            loaded.title.as_deref(),
+            Some("我的标题"),
+            "标题应持久化恢复"
+        );
+        assert_eq!(
+            loaded.created_at, original_created_at,
+            "created_at 不应随加载漂移（旧实现每次加载取 Utc::now()）"
+        );
+        assert_eq!(loaded.ended_at, session.ended_at, "ended_at 应持久化恢复");
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_list_sessions_skips_non_directory_entries() {
+        // 回归保护：Session 命名空间下的非目录条目（旧版 `_metadata` 水位线）
+        // 不得被当作会话列出（幽灵会话）。
+        let vfs = Arc::new(MockVfs::new());
+        let session_ns = TianyanUri::new(ContextNamespace::Session, vec![]);
+
+        // 会话目录 + JSONL 内容（头部含 created_at + 一条消息）
+        let session_uri = TianyanUri::parse("tianyan://session/s-a").unwrap();
+        vfs.add_directory(&session_ns, &session_uri);
+        let header = SessionHeader {
+            created_at: Some(Utc::now()),
+            ..SessionHeader::default()
+        };
+        let msg = make_msg("m1", "s-a", MessageRole::User, "hi", false);
+        let jsonl = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&header).unwrap(),
+            serde_json::to_string(&msg).unwrap()
+        );
+        vfs.set_content(&session_uri, ContentLevel::Detail, &jsonl);
+
+        // 幽灵条目：旧版记忆提取水位线文件（修复前会被当作空会话列出）
+        let metadata_uri = TianyanUri::parse("tianyan://session/_metadata").unwrap();
+        vfs.add_entry(&session_ns, &metadata_uri);
+        vfs.set_content(
+            &metadata_uri,
+            ContentLevel::Detail,
+            r#"{"last_extracted_message_count":1,"last_extracted_at":"2026-01-01T00:00:00Z"}"#,
+        );
+
+        let mgr = PersistentSessionManager::new(vfs);
+        let sessions = mgr.list_sessions().await.unwrap();
+        assert_eq!(sessions.len(), 1, "非目录条目不得作为会话列出");
+        assert_eq!(sessions[0].session_id, "s-a");
     }
 }

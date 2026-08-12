@@ -378,7 +378,14 @@ mod tests {
         c.set_current_turn("s1", 0);
         c.record_turn("s1", "gpt-test", 120, 1500, true);
         c.record_tool("s1", "read_file", r#"{"path":"a.rs"}"#, 10, true, None);
-        c.record_tool("s1", "write_file", r#"{"path":"b.rs"}"#, 5, false, Some("权限拒绝".to_string()));
+        c.record_tool(
+            "s1",
+            "write_file",
+            r#"{"path":"b.rs"}"#,
+            5,
+            false,
+            Some("权限拒绝".to_string()),
+        );
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let spans = rt.block_on(async { c.query(Some("s1"), None, 100).await.unwrap() });
@@ -395,7 +402,15 @@ mod tests {
     #[test]
     fn test_record_task_span() {
         let c = collector();
-        c.record_task("s1", "bt_abc", "整理日志", "已归档 12 个文件", 3000, true, None);
+        c.record_task(
+            "s1",
+            "bt_abc",
+            "整理日志",
+            "已归档 12 个文件",
+            3000,
+            true,
+            None,
+        );
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let spans = rt.block_on(async { c.query(None, Some("bt_abc"), 10).await.unwrap() });
@@ -434,7 +449,11 @@ mod tests {
     fn test_truncate_unicode_boundary() {
         let long = "汉".repeat(200);
         let t = truncate(&long, 100);
-        assert!(t.len() <= 100 + 3, "截断 + 省略号（3 字节）应在上限内: {}", t.len());
+        assert!(
+            t.len() <= 100 + 3,
+            "截断 + 省略号（3 字节）应在上限内: {}",
+            t.len()
+        );
         assert!(t.ends_with('…'));
         assert_eq!(
             (t.len() - 3) % 3,

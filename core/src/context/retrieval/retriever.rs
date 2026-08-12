@@ -19,15 +19,12 @@ use super::intent::{Intent, IntentAnalyzer};
 use super::loader::ContentLoadStrategy;
 use super::trace::RetrievalTraceBuilder;
 
-/// 融合语义相关性分数与新鲜度分数的组合评分。
-///
-/// - `semantic_score`: 原始向量检索/偏置分数
-/// - `freshness_score`: 内容新鲜度
-/// - `freshness_weight`: 新鲜度权重（默认 0.2）
+/// 组合评分（新鲜度恒为 1.0——`source_updated_at` 无数据源，字段已移除，
+/// 常数项内联，与旧行为逐位一致）。
 const DEFAULT_FRESHNESS_WEIGHT: f32 = 0.2;
 
-fn compute_combined_score(semantic_score: f32, freshness_score: f32) -> f32 {
-    semantic_score * (1.0 - DEFAULT_FRESHNESS_WEIGHT) + freshness_score * DEFAULT_FRESHNESS_WEIGHT
+fn compute_combined_score(semantic_score: f32) -> f32 {
+    semantic_score * (1.0 - DEFAULT_FRESHNESS_WEIGHT) + DEFAULT_FRESHNESS_WEIGHT
 }
 
 /// 用于基于向量的内容检索的融合检索器。
@@ -192,7 +189,7 @@ impl DualLayerRetriever {
 
         // 将新鲜度评分融入最终分数（VFS 搜索结果不含时间戳，默认为 1.0）
         for result in &mut results {
-            result.score = compute_combined_score(result.score, result.freshness_score);
+            result.score = compute_combined_score(result.score);
         }
 
         results.sort_by(|a, b| {

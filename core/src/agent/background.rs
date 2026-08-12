@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::common::error::{Result, TianyanError};
+use crate::common::llm_judge::truncate_output;
 use crate::common::types::{
     DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
 };
@@ -206,7 +207,10 @@ impl BackgroundTaskManager {
     ///
     /// 未通过自审的任务结果前缀 `[自审未通过] {reason}`，由主 agent
     /// 下一轮看到后决策（复核/重新委托）——不自动重跑。
-    pub fn with_task_reviewer(mut self, reviewer: Arc<dyn crate::executor::judge::TaskReviewer>) -> Self {
+    pub fn with_task_reviewer(
+        mut self,
+        reviewer: Arc<dyn crate::executor::judge::TaskReviewer>,
+    ) -> Self {
         self.task_reviewer = Some(reviewer);
         self
     }
@@ -254,7 +258,7 @@ impl BackgroundTaskManager {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let task = BackgroundTask {
             id: id.clone(),
-            description: truncate(&description, 200),
+            description: truncate_output(&description, 200),
             status: TaskStatus::Pending,
             parent_session_id,
             result: None,
@@ -281,7 +285,7 @@ impl BackgroundTaskManager {
         self.finish(
             id,
             TaskStatus::Completed,
-            Some(truncate(&result, RESULT_SUMMARY_MAX_CHARS)),
+            Some(truncate_output(&result, RESULT_SUMMARY_MAX_CHARS)),
             None,
         )
         .await;
@@ -309,7 +313,7 @@ impl BackgroundTaskManager {
             return result.to_string();
         }
 
-        let marker = format!("[自审未通过] {}", truncate(&judgment.reason, 200));
+        let marker = format!("[自审未通过] {}", truncate_output(&judgment.reason, 200));
         tracing::info!(
             task_id = %id,
             reason = %judgment.reason,
@@ -320,8 +324,13 @@ impl BackgroundTaskManager {
 
     /// 标记失败并触发通知。
     pub async fn fail(&self, id: &str, error: String) {
-        self.finish(id, TaskStatus::Failed, None, Some(truncate(&error, 500)))
-            .await;
+        self.finish(
+            id,
+            TaskStatus::Failed,
+            None,
+            Some(truncate_output(&error, 500)),
+        )
+        .await;
     }
 
     /// 取消任务并触发通知。
@@ -628,22 +637,6 @@ pub fn build_notification_text(task: &BackgroundTask, remaining: usize) -> Strin
     text
 }
 
-/// 截断文本（保留头尾）。
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        return text.to_string();
-    }
-    let head = &text[..max_chars * 2 / 3];
-    let tail_start = text.len().saturating_sub(max_chars / 3);
-    let tail = &text[tail_start..];
-    format!(
-        "{}...\n[内容被截断，省略 {} 字符]...\n{}",
-        head,
-        text.len() - head.len() - tail.len(),
-        tail
-    )
-}
-
 /// 当前时间（epoch 毫秒）。
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -672,13 +665,13 @@ mod tests {
 
     #[test]
     fn test_truncate_short_unchanged() {
-        assert_eq!(truncate("hello", 100), "hello");
+        assert_eq!(truncate_output("hello", 100), "hello");
     }
 
     #[test]
     fn test_truncate_long() {
         let long = "a".repeat(3000);
-        let t = truncate(&long, 2000);
+        let t = truncate_output(&long, 2000);
         assert!(t.contains("[内容被截断"));
     }
 
@@ -1108,8 +1101,12 @@ mod tests {
             reason: "只完成了一半".to_string(),
             reviewed: reviewed.clone(),
         }));
-        let id = manager.register("整理日志".to_string(), "s1".to_string()).await;
-        manager.complete(&id, "已处理 6/12 个文件".to_string()).await;
+        let id = manager
+            .register("整理日志".to_string(), "s1".to_string())
+            .await;
+        manager
+            .complete(&id, "已处理 6/12 个文件".to_string())
+            .await;
 
         let task = manager.get(&id).await.unwrap();
         let result = task.result.unwrap();

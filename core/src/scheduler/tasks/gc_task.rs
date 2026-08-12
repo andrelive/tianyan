@@ -10,6 +10,7 @@ use chrono::Utc;
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{AgentPath, ContextNamespace, TianyanUri};
+use crate::config::StorageConfig;
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
 
 /// 规则过时的默认天数阈值。
@@ -19,7 +20,7 @@ const DEFAULT_MEMORY_TTL_DAYS: u32 = 90;
 
 /// GC 任务：定期扫描并清理过期内容。
 pub struct GcTask {
-    /// 是否启用自动清理（来自 StorageConfig.auto_cleanup）。
+    /// 是否启用自动清理（来自 [`StorageConfig::auto_cleanup`]）。
     auto_cleanup: bool,
     /// 记忆条目 TTL 天数。
     memory_ttl_days: u32,
@@ -29,9 +30,12 @@ pub struct GcTask {
 
 impl GcTask {
     /// 创建新的 GC 任务。
-    pub fn new() -> Self {
+    ///
+    /// `auto_cleanup` 取自存储配置（`[storage] auto_cleanup`）；
+    /// TTL 阈值使用模块默认值（规则 30 天 / 记忆 90 天）。
+    pub fn new(config: &StorageConfig) -> Self {
         Self {
-            auto_cleanup: true,
+            auto_cleanup: config.auto_cleanup,
             memory_ttl_days: DEFAULT_MEMORY_TTL_DAYS,
             rule_stale_days: DEFAULT_RULE_STALE_DAYS,
         }
@@ -156,7 +160,7 @@ impl GcTask {
 
 impl Default for GcTask {
     fn default() -> Self {
-        Self::new()
+        Self::new(&StorageConfig::default())
     }
 }
 
@@ -232,7 +236,7 @@ mod tests {
         );
 
         let ctx = make_context(vfs.clone());
-        let stale = GcTask::new().scan_learned_rules(&ctx).await.unwrap();
+        let stale = GcTask::default().scan_learned_rules(&ctx).await.unwrap();
 
         assert_eq!(stale, 1, "仅过时规则应计数");
         let moves = vfs.move_calls();
@@ -260,7 +264,7 @@ mod tests {
         );
 
         let ctx = make_context(vfs.clone());
-        let stale = GcTask::new().scan_learned_rules(&ctx).await.unwrap();
+        let stale = GcTask::default().scan_learned_rules(&ctx).await.unwrap();
 
         assert_eq!(stale, 0, "新规则不应计数");
         assert!(vfs.move_calls().is_empty(), "新规则不应被归档");
@@ -284,7 +288,7 @@ mod tests {
         );
 
         let ctx = make_context(vfs.clone());
-        let cleaned = GcTask::new().scan_memory(&ctx).await.unwrap();
+        let cleaned = GcTask::default().scan_memory(&ctx).await.unwrap();
 
         assert_eq!(cleaned, 1, "仅过期记忆应被清理");
         let remaining = vfs.list(&mem_root).await.unwrap();
@@ -306,7 +310,7 @@ mod tests {
         );
 
         let ctx = make_context(vfs.clone());
-        let cleaned = GcTask::new().scan_memory(&ctx).await.unwrap();
+        let cleaned = GcTask::default().scan_memory(&ctx).await.unwrap();
 
         assert_eq!(cleaned, 0, "新记忆不应被清理");
         assert_eq!(

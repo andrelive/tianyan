@@ -1,6 +1,5 @@
 //! 检索结果类型定义。
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::common::types::{ContentLevel, TianyanUri};
@@ -28,10 +27,6 @@ pub struct RetrievalResult {
     pub category: String,
     /// 结果关联的标签。
     pub tags: Vec<String>,
-    /// 源内容最后更新时间（用于新鲜度计算）。
-    pub source_updated_at: Option<DateTime<Utc>>,
-    /// 新鲜度评分（0.0~1.0，1.0 为最新）。
-    pub freshness_score: f32,
 }
 
 impl RetrievalResult {
@@ -45,8 +40,6 @@ impl RetrievalResult {
             token_count: 0,
             category: String::new(),
             tags: Vec::new(),
-            source_updated_at: None,
-            freshness_score: 1.0,
         }
     }
 
@@ -67,6 +60,7 @@ impl RetrievalResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[test]
     fn test_retrieval_result() {

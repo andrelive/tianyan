@@ -7,8 +7,11 @@ use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
 pub struct ChatRequest {
     /// 会话标识
     pub session_id: Option<String>,
-    /// 消息列表
-    pub messages: Vec<ChatMessage>,
+    /// 本轮输入消息（单条）。
+    ///
+    /// 历史由服务端会话持久化（VFS JSONL）提供——请求只携带本轮输入，
+    /// 服务端以会话文件为准组装上下文（防篡改、与本地 UI 状态解耦）。
+    pub message: ChatMessage,
     #[serde(default)]
     /// 是否启用流式响应
     pub stream: bool,
@@ -35,21 +38,24 @@ impl ChatRequest {
                 return Err("session_id 不能为空".to_string());
             }
         }
-        if self.messages.is_empty() {
-            return Err("messages 不能为空".to_string());
-        }
         // 内容允许为空——当且仅当该消息携带图片（多模态消息以图片为主体）。
-        if self.messages.iter().any(|m| {
-            m.content.trim().is_empty() && m.images.as_deref().unwrap_or_default().is_empty()
-        }) {
+        if self.message.content.trim().is_empty()
+            && self
+                .message
+                .images
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+        {
             return Err("消息内容不能为空".to_string());
         }
-        if self.messages.iter().any(|m| {
-            m.images
-                .as_deref()
-                .map(|imgs| imgs.iter().any(|u| !u.starts_with("data:")))
-                .unwrap_or(false)
-        }) {
+        if self
+            .message
+            .images
+            .as_deref()
+            .map(|imgs| imgs.iter().any(|u| !u.starts_with("data:")))
+            .unwrap_or(false)
+        {
             return Err("图片必须为 data URL（data:image/...;base64,...）".to_string());
         }
         if !(0.0..=2.0).contains(&self.temperature) {
@@ -156,14 +162,14 @@ mod tests {
     fn test_chat_request_deserialization() {
         let json = r#"{
             "session_id": "test-session",
-            "messages": [{"role": "user", "content": "Hello"}],
+            "message": {"role": "user", "content": "Hello"},
             "stream": false,
             "temperature": 0.7,
             "max_tokens": 100
         }"#;
         let req: ChatRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.session_id, Some("test-session".to_string()));
-        assert_eq!(req.messages.len(), 1);
+        assert_eq!(req.message.content, "Hello");
         assert!(!req.stream);
     }
 
@@ -235,10 +241,10 @@ mod tests {
         assert!(json.contains("chatcmpl-1"));
     }
 
-    fn request_with_messages(messages: Vec<ChatMessage>) -> ChatRequest {
+    fn request_with_message(message: ChatMessage) -> ChatRequest {
         ChatRequest {
             session_id: Some("s1".to_string()),
-            messages,
+            message,
             stream: false,
             temperature: 0.7,
             max_tokens: 100,
@@ -248,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_validate_plain_message_ok() {
-        let req = request_with_messages(vec![ChatMessage::user("hello")]);
+        let req = request_with_message(ChatMessage::user("hello"));
         assert!(req.validate().is_ok());
     }
 
@@ -257,13 +263,13 @@ mod tests {
         // 内容为空但携带图片：多模态消息以图为主体，应通过
         let mut msg = ChatMessage::user("");
         msg.images = Some(vec!["data:image/png;base64,AAAA".to_string()]);
-        let req = request_with_messages(vec![msg]);
+        let req = request_with_message(msg);
         assert!(req.validate().is_ok());
     }
 
     #[test]
     fn test_validate_empty_content_without_images_rejected() {
-        let req = request_with_messages(vec![ChatMessage::user("  ")]);
+        let req = request_with_message(ChatMessage::user("  "));
         assert!(req.validate().is_err(), "无图片时空内容应被拒绝");
     }
 
@@ -271,7 +277,7 @@ mod tests {
     fn test_validate_non_data_url_image_rejected() {
         let mut msg = ChatMessage::user("图");
         msg.images = Some(vec!["https://example.com/x.png".to_string()]);
-        let req = request_with_messages(vec![msg]);
+        let req = request_with_message(msg);
         assert!(req.validate().is_err(), "非 data URL 图片应被拒绝");
     }
 

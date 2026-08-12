@@ -3,9 +3,10 @@
 //! 对命令输出进行语义判断，而非仅依赖退出码和关键词匹配。
 //! 用于 `verify_build` 工具的深度质量门控，以及后台任务结果自审（G4）。
 
-use async_trait::async_trait;
+use crate::common::llm_judge::truncate_output;
 use crate::model::types::ChatCompletionRequest;
 use crate::model::ChatService;
+use async_trait::async_trait;
 use std::sync::Arc;
 
 /// 判断结论。
@@ -90,8 +91,8 @@ impl LlmJudge {
         }
 
         // Truncate output to keep LLM call cheap
-        let stdout_trunc = truncate_for_judge(stdout, 2000);
-        let stderr_trunc = truncate_for_judge(stderr, 2000);
+        let stdout_trunc = truncate_output(stdout, 2000);
+        let stderr_trunc = truncate_output(stderr, 2000);
 
         let prompt = build_judge_prompt(command, &stdout_trunc, &stderr_trunc, exit_code);
 
@@ -102,11 +103,10 @@ impl LlmJudge {
 
         match self.model_service.chat_completion(request).await {
             Ok(response) => {
-                let choice = match response.choices.into_iter().next() {
-                    Some(c) => c,
-                    None => return fallback_judgment(exit_code),
+                let Some(content) = response.first_choice_content() else {
+                    return fallback_judgment(exit_code);
                 };
-                parse_judgment(&choice.message.content, exit_code)
+                parse_judgment(&content, exit_code)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "LlmJudge LLM 调用失败，回退到退出码判断");
@@ -182,19 +182,20 @@ impl TaskReviewer for LlmTaskReviewer {
             };
         }
 
-        let result_trunc = truncate_for_judge(result, 2000);
+        let result_trunc = truncate_output(result, 2000);
         let prompt = build_task_review_prompt(description, &result_trunc);
 
-        let request =
-            ChatCompletionRequest::new(&self.model, vec![crate::common::types::Message::user(&prompt)]);
+        let request = ChatCompletionRequest::new(
+            &self.model,
+            vec![crate::common::types::Message::user(&prompt)],
+        );
 
         match self.model_service.chat_completion(request).await {
             Ok(response) => {
-                let choice = match response.choices.into_iter().next() {
-                    Some(c) => c,
-                    None => return fallback_task_review_pass(),
+                let Some(content) = response.first_choice_content() else {
+                    return fallback_task_review_pass();
                 };
-                parse_judgment(&choice.message.content, 0)
+                parse_judgment(&content, 0)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "任务自审 LLM 调用失败，默认通过");
@@ -298,25 +299,6 @@ fn fallback_judgment(exit_code: i32) -> Judgment {
     }
 }
 
-/// 截断输出以控制 LLM 调用成本。
-fn truncate_for_judge(output: &str, max_chars: usize) -> String {
-    if output.len() <= max_chars {
-        output.to_string()
-    } else {
-        // Keep the beginning (first error is usually most important)
-        // and the end (summary/error count often at the end)
-        let head = &output[..max_chars * 2 / 3];
-        let tail_start = output.len().saturating_sub(max_chars / 3);
-        let tail = &output[tail_start..];
-        format!(
-            "{}...\n[输出被截断，省略 {} 字符]...\n{}",
-            head,
-            output.len() - head.len() - tail.len(),
-            tail
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,15 +306,15 @@ mod tests {
     #[test]
     fn test_truncate_short_output_is_unchanged() {
         let short = "hello world";
-        assert_eq!(truncate_for_judge(short, 2000), short);
+        assert_eq!(truncate_output(short, 2000), short);
     }
 
     #[test]
     fn test_truncate_long_output() {
         let long = "a".repeat(3000);
-        let truncated = truncate_for_judge(&long, 2000);
+        let truncated = truncate_output(&long, 2000);
         assert!(truncated.len() <= 2500); // Allow some overhead for truncation message
-        assert!(truncated.contains("[输出被截断"));
+        assert!(truncated.contains("[内容被截断"));
     }
 
     #[test]

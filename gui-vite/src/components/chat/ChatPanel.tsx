@@ -157,14 +157,20 @@ export default function ChatPanel() {
         timestamp: new Date().toISOString(),
       });
 
-      // Build the API payload: all messages except the empty placeholder
+      // Build the API payload: only the new user message. The server's context
+      // truth is the VFS-backed session history — sending the full local array
+      // was dead weight and coupled the payload to the empty assistant
+      // placeholder being the last element.
       const state = useAppStore.getState();
-      const apiMessages = state.messages.slice(0, -1);
-
       state.setStreamStatus('streaming');
       await startStream({
         session_id: state.currentSessionId,
-        messages: apiMessages,
+        message: {
+          role: 'user',
+          content: trimmed,
+          images: images.length > 0 ? images : undefined,
+          timestamp: new Date().toISOString(),
+        },
         stream: true,
         temperature: 0.7,
         max_tokens: 2048,

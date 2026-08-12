@@ -14,7 +14,7 @@ pub mod server;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -172,8 +172,10 @@ impl tianyan::notification::NotificationSink for TauriNotificationSink {
 /// 全局快捷键回调（tauri-plugin-global-shortcut）。
 ///
 /// - `Ctrl+Alt+T`：唤起/聚焦主窗口（与托盘「显示主窗口」同语义）
-/// - `Ctrl+Alt+S`：向 webview emit `tianyan-stop-stream`（前端据此停止
-///   当前流式输出；前端接线由集成者完成）
+///
+/// 注：`Ctrl+Alt+S`（停止流式）已移除——前端从未监听 `tianyan-stop-stream`，
+/// 停止走 `AbortController` 断开 SSE（服务端检测断开即取消 AgentLoop），
+/// 该事件是无人消费的死线。
 fn on_global_shortcut(
     app: &tauri::AppHandle,
     shortcut: &tauri_plugin_global_shortcut::Shortcut,
@@ -191,10 +193,6 @@ fn on_global_shortcut(
             let _ = window.show();
             let _ = window.set_focus();
         }
-    } else if shortcut.matches(ctrl_alt, Code::KeyS) {
-        if let Err(e) = app.emit("tianyan-stop-stream", ()) {
-            warn!("停止流式事件发送失败：{}", e);
-        }
     }
 }
 
@@ -203,7 +201,7 @@ fn on_global_shortcut(
 /// 快捷键被其他程序占用等注册失败场景不致命——用户仍可用托盘/窗口操作。
 fn build_global_shortcut_plugin() -> Option<tauri::plugin::TauriPlugin<tauri::Wry>> {
     match tauri_plugin_global_shortcut::Builder::new()
-        .with_shortcuts(["ctrl+alt+t", "ctrl+alt+s"])
+        .with_shortcuts(["ctrl+alt+t"])
         .map(|builder| builder.with_handler(on_global_shortcut).build())
     {
         Ok(plugin) => Some(plugin),

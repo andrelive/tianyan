@@ -175,7 +175,8 @@ pub struct TaskStatus {
 
 /// 统一任务调度器。
 ///
-/// 使用 tokio-cron-scheduler 管理所有后台任务。
+/// 自研轻量实现（非 tokio-cron-scheduler 依赖）：每个任务一个 tokio
+/// 间隔循环；cron 表达式仅支持 `*/N` 间隔语义（详见 [`parse_cron_interval`]）。
 pub struct TaskScheduler {
     /// 已注册的任务。
     tasks: RwLock<HashMap<String, RegisteredTask>>,
@@ -327,28 +328,6 @@ impl TaskScheduler {
         Ok(())
     }
 
-    /// 启动调度器。
-    ///
-    /// 开始执行所有已注册的任务。
-    ///
-    /// # 返回
-    /// - `Ok(())`: 启动成功
-    /// - `Err`: 启动失败
-    pub async fn start(&self) -> crate::common::error::Result<()> {
-        if self.running.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            tracing::warn!("任务调度器已在运行");
-            return Ok(());
-        }
-
-        tracing::info!("任务调度器启动中...");
-
-        // 注意：实际的任务执行由外部调用者控制
-        // 这里只是标记为运行状态
-
-        tracing::info!("任务调度器已启动");
-        Ok(())
-    }
-
     /// 停止调度器。
     ///
     /// 停止所有任务的执行。
@@ -454,14 +433,19 @@ impl Default for TaskScheduler {
     }
 }
 
-/// 解析 cron 表达式获取间隔秒数（简化实现）。
+/// 解析 cron 表达式获取间隔秒数（自研简化实现，非完整 cron 语义）。
 ///
-/// 支持格式：秒 分钟 小时 日期 月份 星期
+/// 支持 6 字段格式（秒 分钟 小时 日 月 星期），但仅 `*/N` 字段参与
+/// 间隔计算：
 ///
-/// - "0 */5 * * * *" = 每 5 分钟 = 300 秒
-/// - "0 */10 * * * *" = 每 10 分钟 = 600 秒
+/// - `"0 */5 * * * *"` = 每 5 分钟 = 300 秒
+/// - `"0 */10 * * * *"` = 每 10 分钟 = 600 秒
 ///
-/// 其他 cron 格式暂不支持，将回退到默认 300 秒并输出警告日志。
+/// 语义边界（有意收缩，勿按完整 cron 预期）：
+/// - 固定值字段（如秒位 `0`/`30`）只表达相位，被忽略（首个 tick 不
+///   对齐相位）；
+/// - 日/月/星期字段不支持，恒被忽略；
+/// - 无任何 `*/N` 字段或解析失败 → 回退默认 300 秒并告警。
 fn parse_cron_interval(cron: &str) -> u64 {
     let parts: Vec<&str> = cron.split_whitespace().collect();
     if parts.len() != 6 {
@@ -542,12 +526,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_task_scheduler_start_stop() {
+    async fn test_task_scheduler_stop_idempotent() {
         let scheduler = TaskScheduler::new();
-
-        scheduler.start().await.unwrap();
-        assert!(scheduler.is_running());
-
+        assert!(!scheduler.is_running());
+        // 未运行时 stop 幂等（running 标志仅在 start_with_scheduler 时置位）
         scheduler.stop().await.unwrap();
         assert!(!scheduler.is_running());
     }

@@ -14,7 +14,7 @@ use crate::agent::tool_params::{
 };
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
-use crate::executor::approval::ApprovalWorkflow;
+use crate::executor::approval::{ApprovalDecision, ApprovalWorkflow};
 use crate::executor::web::WebSearchClient;
 use crate::executor::Action;
 use crate::executor::SecurityPolicy;
@@ -113,7 +113,8 @@ pub struct ToolRegistry {
     /// 委托子 Agent 时使用的模型名称。
     pub(crate) model: String,
     pub(crate) metrics: Option<Arc<AgentMetrics>>,
-    /// 审批工作流（write_file / execute_command 危险操作门控）。
+    /// 审批工作流（write_file / apply_edit / apply_patch / execute_command /
+    /// run_tests / verify_build 危险操作门控，统一经 [`Self::ensure_approved`]）。
     pub(crate) approval_workflow: Option<Arc<ApprovalWorkflow>>,
     /// 待用户确认的操作指纹（审批拒绝 → 询问用户 → 用户回答后确认/放弃）。
     pub(crate) pending_approval_fingerprints: Arc<Mutex<Vec<String>>>,
@@ -217,7 +218,8 @@ impl ToolRegistry {
         self
     }
 
-    /// 设置审批工作流（write_file / execute_command 危险操作门控）。
+    /// 设置审批工作流（write_file / apply_edit / apply_patch / execute_command /
+    /// run_tests / verify_build 危险操作门控，统一经 [`Self::ensure_approved`]）。
     pub fn with_approval_workflow(mut self, workflow: Arc<ApprovalWorkflow>) -> Self {
         self.approval_workflow = Some(workflow);
         self
@@ -232,6 +234,40 @@ impl ToolRegistry {
         let fp = ApprovalWorkflow::action_fingerprint(action);
         self.pending_approval_fingerprints.lock().await.push(fp);
         tracing::info!(action = ?action, "操作已进入待用户确认队列");
+    }
+
+    /// 审批门控：请求审批并处理拒绝降级。
+    ///
+    /// 统一 6 个危险工具（write_file / apply_edit / apply_patch / execute_command /
+    /// run_tests / verify_build）的审批序列，消除各执行器内的逐字复制：
+    /// 1. `approval_workflow` 未装配（None）时直接放行；
+    /// 2. 子任务（subagent）非交互审批——未授权操作立即拒绝（ADR-011）；
+    /// 3. 拒绝 → 记录待确认指纹（用户经"询问用户"链路批准后放行）并返回
+    ///    统一"操作需要用户确认"错误。
+    pub(crate) async fn ensure_approved(
+        &self,
+        session_id: &str,
+        subagent: bool,
+        action: &Action,
+    ) -> Result<(), TianyanError> {
+        let Some(ref approval) = self.approval_workflow else {
+            return Ok(());
+        };
+        let approval_result = if subagent {
+            approval.request_approval_no_wait(session_id, action).await
+        } else {
+            approval.request_approval(session_id, action).await
+        };
+        let resp = approval_result
+            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e)))?;
+        if resp.decision != ApprovalDecision::Approve {
+            self.remember_pending_approval(action).await;
+            return Err(TianyanError::Custom(format!(
+                "tool: 安全违规：操作需要用户确认：{}",
+                resp.reason.unwrap_or_default()
+            )));
+        }
+        Ok(())
     }
 
     /// 处理用户对审批追问的回答。
@@ -273,7 +309,8 @@ impl ToolRegistry {
         self.pending_approval_fingerprints.lock().await.clone()
     }
 
-    /// 获取审批工作流（write_file / execute_command 危险操作门控）。
+    /// 获取审批工作流（write_file / apply_edit / apply_patch / execute_command /
+    /// run_tests / verify_build 危险操作门控）。
     pub fn approval_workflow(&self) -> Option<Arc<ApprovalWorkflow>> {
         self.approval_workflow.clone()
     }
@@ -329,16 +366,22 @@ impl ToolRegistry {
         mut self,
         reviewer: Arc<dyn crate::executor::judge::TaskReviewer>,
     ) -> Self {
-        self.background_tasks =
-            Arc::new((*self.background_tasks).clone().with_task_reviewer(reviewer));
+        self.background_tasks = Arc::new(
+            (*self.background_tasks)
+                .clone()
+                .with_task_reviewer(reviewer),
+        );
         self
     }
 
     /// 设置结构化 Trace 收集器（G6；工具 span + 后台任务 span 记录）。
     pub fn with_trace_collector(mut self, collector: Arc<TraceCollector>) -> Self {
         self.trace_collector = Some(collector.clone());
-        self.background_tasks =
-            Arc::new((*self.background_tasks).clone().with_trace_collector(collector));
+        self.background_tasks = Arc::new(
+            (*self.background_tasks)
+                .clone()
+                .with_trace_collector(collector),
+        );
         self
     }
 
@@ -358,13 +401,6 @@ impl ToolRegistry {
     /// 设置后台任务系统通知通道（构建后注入；运行时替换实现用）。
     pub async fn set_notification_sink(&self, sink: crate::notification::SharedNotificationSink) {
         self.background_tasks.set_notification_sink(sink).await;
-    }
-
-    /// 设置后台任务唤醒器（ADR-013：全部完成/失败时触发主 agent 新轮）。
-    ///
-    /// 构建后注入（Agent 构建完成后注册自引用转发器）。
-    pub async fn set_task_waker(&self, waker: Arc<dyn crate::agent::background::TaskWaker>) {
-        self.background_tasks.set_waker(waker).await;
     }
 
     /// 注册动态工具（如 MCP 工具桥接）。
@@ -428,12 +464,30 @@ impl ToolRegistry {
     ///
     /// 仅覆盖低频/专用工具；关键词为小写（英文）或原文（中文）。
     const CONDITIONAL_TOOL_KEYWORDS: &[(&str, &[&str])] = &[
-        ("knowledge_ingest", &["知识", "导入", "ingest", "文档库", "knowledge"]),
-        ("run_tests", &["测试", "用例", "test", "pytest", "cargo test", "run_tests"]),
-        ("discover_tests", &["测试", "用例", "test", "发现测试", "discover"]),
-        ("verify_build", &["构建", "编译", "build", "报错", "编译错误", "verify"]),
-        ("symbol_outline", &["符号", "大纲", "symbol", "outline", "结构"]),
-        ("lsp", &["lsp", "诊断", "跳转", "定义", "引用", "diagnostic", "符号"]),
+        (
+            "knowledge_ingest",
+            &["知识", "导入", "ingest", "文档库", "knowledge"],
+        ),
+        (
+            "run_tests",
+            &["测试", "用例", "test", "pytest", "cargo test", "run_tests"],
+        ),
+        (
+            "discover_tests",
+            &["测试", "用例", "test", "发现测试", "discover"],
+        ),
+        (
+            "verify_build",
+            &["构建", "编译", "build", "报错", "编译错误", "verify"],
+        ),
+        (
+            "symbol_outline",
+            &["符号", "大纲", "symbol", "outline", "结构"],
+        ),
+        (
+            "lsp",
+            &["lsp", "诊断", "跳转", "定义", "引用", "diagnostic", "符号"],
+        ),
     ];
 
     /// 按相关性过滤的 LLM 可见工具定义（G1 工具短路选择）。
@@ -480,11 +534,7 @@ impl ToolRegistry {
     /// 动态工具相关性：query 的英文分词（≥3 字符）与中文片段（≥2 字符）
     /// 任一出现在工具名或描述中即保留。
     fn dynamic_tool_matches(query_lower: &str, def: &ToolDefinition) -> bool {
-        let haystack = format!(
-            "{} {}",
-            def.function.name, def.function.description
-        )
-        .to_lowercase();
+        let haystack = format!("{} {}", def.function.name, def.function.description).to_lowercase();
         // 英文/数字分词：按非字母数字切分
         let tokens: Vec<&str> = query_lower
             .split(|c: char| !c.is_alphanumeric() && c != '_')
@@ -1081,9 +1131,7 @@ mod tests {
         let registry = ToolRegistry::new(SecurityPolicy::default());
         register_mock_tools(&registry, 20).await;
 
-        let defs = registry
-            .definitions_shortlisted(Some("随便聊聊天气"))
-            .await;
+        let defs = registry.definitions_shortlisted(Some("随便聊聊天气")).await;
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
         // 核心工具恒存
         for core in [

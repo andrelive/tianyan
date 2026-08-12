@@ -29,19 +29,6 @@ pub struct TokenRecord {
     pub success: bool,
 }
 
-/// 步骤失败统计。
-#[derive(Debug, Clone)]
-pub struct FailureStats {
-    /// 步骤描述。
-    pub step_description: String,
-    /// 失败次数。
-    pub failure_count: usize,
-    /// 最后一次失败时间。
-    pub last_failure: DateTime<Utc>,
-    /// 最后一次错误信息。
-    pub last_error: String,
-}
-
 /// 规则命中记录。
 #[derive(Debug, Clone)]
 pub struct RuleHitRecord {
@@ -58,7 +45,6 @@ pub struct RuleHitRecord {
 /// 智能体可查询的可观测性存储。
 pub struct AgentMetrics {
     token_history: RwLock<Vec<TokenRecord>>,
-    failure_history: RwLock<Vec<FailureStats>>,
     execution_count: RwLock<usize>,
     success_count: RwLock<usize>,
     rule_hit_count: RwLock<usize>,
@@ -73,7 +59,6 @@ impl AgentMetrics {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             token_history: RwLock::new(Vec::new()),
-            failure_history: RwLock::new(Vec::new()),
             execution_count: RwLock::new(0),
             success_count: RwLock::new(0),
             rule_hit_count: RwLock::new(0),
@@ -90,26 +75,6 @@ impl AgentMetrics {
         if history.len() > 1000 {
             let keep_from = history.len() - 1000;
             history.drain(..keep_from);
-        }
-    }
-
-    /// 记录一次步骤失败。
-    pub async fn record_failure(&self, step_description: &str, error: &str) {
-        let mut failures = self.failure_history.write().await;
-        if let Some(existing) = failures
-            .iter_mut()
-            .find(|f| f.step_description == step_description)
-        {
-            existing.failure_count += 1;
-            existing.last_failure = Utc::now();
-            existing.last_error = error.to_string();
-        } else {
-            failures.push(FailureStats {
-                step_description: step_description.to_string(),
-                failure_count: 1,
-                last_failure: Utc::now(),
-                last_error: error.to_string(),
-            });
         }
     }
 
@@ -214,27 +179,6 @@ impl AgentMetrics {
         })
     }
 
-    /// 查询常见失败。
-    pub async fn query_common_failures(&self) -> serde_json::Value {
-        let failures = self.failure_history.read().await;
-        let mut sorted = failures.clone();
-        sorted.sort_by_key(|f| std::cmp::Reverse(f.failure_count));
-
-        let top: Vec<serde_json::Value> = sorted
-            .iter()
-            .take(10)
-            .map(|f| {
-                serde_json::json!({
-                    "description": f.step_description,
-                    "count": f.failure_count,
-                    "last_error": f.last_error,
-                })
-            })
-            .collect();
-
-        serde_json::json!({ "common_failures": top })
-    }
-
     /// 查询 Harness 健康摘要（供 Agent 自省）。
     pub async fn query_harness_health(&self) -> serde_json::Value {
         let exec = *self.execution_count.read().await;
@@ -267,7 +211,6 @@ impl AgentMetrics {
             "rules_injected": rule_hits,
             "avg_tokens_per_execution": avg_tokens,
             "total_tokens_consumed": total_tokens,
-            "common_failures_count": self.failure_history.read().await.len(),
             "skills_invoked": skill_counts.len(),
             "skill_calls_total": skill_calls_total,
         })
@@ -278,7 +221,6 @@ impl Default for AgentMetrics {
     fn default() -> Self {
         Self {
             token_history: RwLock::new(Vec::new()),
-            failure_history: RwLock::new(Vec::new()),
             execution_count: RwLock::new(0),
             success_count: RwLock::new(0),
             rule_hit_count: RwLock::new(0),
@@ -326,26 +268,6 @@ mod tests {
         assert_eq!(result["successful"], 3);
         let rate = result["success_rate_percent"].as_f64().unwrap();
         assert!((rate - 75.0).abs() < 0.01);
-    }
-
-    #[tokio::test]
-    async fn test_record_failure_and_query_common_failures() {
-        let metrics = AgentMetrics::new();
-        metrics
-            .record_failure("read_file failed", "not found")
-            .await;
-        metrics
-            .record_failure("read_file failed", "not found again")
-            .await;
-        metrics
-            .record_failure("write failed", "permission denied")
-            .await;
-
-        let result = metrics.query_common_failures().await;
-        let failures = result["common_failures"].as_array().unwrap();
-        assert_eq!(failures.len(), 2);
-        assert_eq!(failures[0]["description"], "read_file failed");
-        assert_eq!(failures[0]["count"], 2);
     }
 
     #[tokio::test]
@@ -421,14 +343,6 @@ mod tests {
         assert_eq!(health["pipeline_failures"], 1);
         assert_eq!(health["total_tokens_consumed"], 5000);
         assert_eq!(health["avg_tokens_per_execution"], 5000);
-    }
-
-    #[tokio::test]
-    async fn test_query_common_failures_empty() {
-        let metrics = AgentMetrics::new();
-        let result = metrics.query_common_failures().await;
-        let failures = result["common_failures"].as_array().unwrap();
-        assert!(failures.is_empty());
     }
 
     #[tokio::test]

@@ -260,6 +260,16 @@ impl UsageStats {
 
     // ── 查询 API ─────────────────────────────────────────────────
 
+    /// 查询前刷盘：把内存中的热路径计数先落库，保证查询看到最新数据
+    /// （与 [`crate::observability::trace::TraceCollector`] 的"查询前自动落库"一致）。
+    ///
+    /// 刷盘失败不阻断查询——降级为返回已落库数据，错误仅告警。
+    async fn flush_pending(&self) {
+        if let Err(e) = self.flush().await {
+            tracing::warn!(error = %e, "统计查询前刷盘失败，返回已落库数据");
+        }
+    }
+
     /// 记录 SQL 查询错误（统计查询失败时降级返回空数据，但错误必须可见）。
     fn log_query_err<T>(result: Result<T, rusqlite::Error>, query: &str) -> Option<T> {
         match result {
@@ -273,6 +283,7 @@ impl UsageStats {
 
     /// 查询调用次数最多的技能列表。
     pub async fn query_top_skills(&self, limit: usize) -> Vec<SkillStats> {
+        self.flush_pending().await;
         let conn = self.db.lock().await;
         let mut stmt = match conn.prepare(
             "SELECT skill_id, COUNT(*), SUM(success),
@@ -305,6 +316,7 @@ impl UsageStats {
 
     /// 查询访问最少的冷门文档列表。
     pub async fn query_cold_documents(&self, limit: usize) -> Vec<DocStats> {
+        self.flush_pending().await;
         let conn = self.db.lock().await;
         let mut stmt = match conn.prepare(
             "SELECT uri, SUM(CASE WHEN event_type='search_hit' THEN 1 ELSE 0 END),
@@ -361,6 +373,7 @@ impl UsageStats {
 
     /// 查询全局统计概览（技能数、调用数、文档数、搜索数）。
     pub async fn query_summary(&self) -> serde_json::Value {
+        self.flush_pending().await;
         let conn = self.db.lock().await;
         let skills: i64 = Self::log_query_err(
             conn.query_row(

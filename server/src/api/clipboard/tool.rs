@@ -23,20 +23,16 @@ pub struct ClipboardWriteArgs {
 /// `GET /api/v1/clipboard/outbox` 取走并写入系统剪贴板。工具本身不直接
 /// 触碰系统剪贴板——写剪贴板发生在桌面进程，避免跨进程/平台差异。
 ///
-/// 注册方式（集成者）：`tool_registry.register_dynamic_tool(Arc::new(ClipboardWriteTool::shared())).await`
+/// 注册方式（集成者）：outbox 取 `AppState::clipboard_outbox()` 注入——
+/// `tool_registry.register_dynamic_tool(Arc::new(ClipboardWriteTool::new(state.clipboard_outbox()))).await`
 pub struct ClipboardWriteTool {
     outbox: Arc<Mutex<Vec<String>>>,
 }
 
 impl ClipboardWriteTool {
-    /// 绑定到指定 outbox（测试与集成者自定义挂载用）。
+    /// 绑定到指定 outbox（与 `GET /api/v1/clipboard/outbox` 同一实例）。
     pub fn new(outbox: Arc<Mutex<Vec<String>>>) -> Self {
         Self { outbox }
-    }
-
-    /// 绑定到模块级共享 outbox（与 `GET /api/v1/clipboard/outbox` 同一实例）。
-    pub fn shared() -> Self {
-        Self::new(super::services::shared_outbox())
     }
 }
 

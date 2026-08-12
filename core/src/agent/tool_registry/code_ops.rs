@@ -2,7 +2,6 @@
 
 use crate::agent::tool_params::{RunTestsParams, SearchCodeParams, VerifyBuildParams};
 use crate::common::error::TianyanError;
-use crate::executor::approval::ApprovalDecision;
 use crate::executor::search::{execute_search_code as execute_search, SearchOptions};
 use crate::executor::Action;
 
@@ -58,31 +57,17 @@ impl ToolRegistry {
         )
         .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
         safety_violation(self.security_policy.check_command(&resolved))?;
-        // Approval workflow check — 与 execute_command 一致：测试命令属
-        // Medium 风险，需用户确认（自动规则/无人值守放行除外）。
-        if let Some(ref approval) = self.approval_workflow {
-            let action = Action::RunTests {
+        // 审批门控（统一序列见 [`ToolRegistry::ensure_approved`]）
+        self.ensure_approved(
+            session_id,
+            subagent,
+            &Action::RunTests {
                 command: resolved.clone(),
                 cwd: params.cwd.clone(),
                 timeout_secs: params.timeout_secs,
-            };
-            let approval_result = if subagent {
-                approval.request_approval_no_wait(session_id, &action).await
-            } else {
-                approval.request_approval(session_id, &action).await
-            };
-            let resp = approval_result.map_err(|e| {
-                TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
-            })?;
-            if resp.decision != ApprovalDecision::Approve {
-                // 记录待确认操作：用户通过"询问用户"链路批准后放行
-                self.remember_pending_approval(&action).await;
-                return Err(TianyanError::Custom(format!(
-                    "tool: 安全违规：操作需要用户确认：{}",
-                    resp.reason.unwrap_or_default()
-                )));
-            }
-        }
+            },
+        )
+        .await?;
         // 显式传入已解析命令（命令解析对同一输入幂等，门控与执行严格一致）
         crate::executor::test_discovery::run_tests_action(
             Some(&resolved),
@@ -113,31 +98,17 @@ impl ToolRegistry {
             safety_violation(self.security_policy.check_path(std::path::Path::new(cwd)))?;
         }
         safety_violation(self.security_policy.check_command(&params.command))?;
-        // Approval workflow check — 与 execute_command 一致：构建命令属
-        // Medium 风险，需用户确认（自动规则/无人值守放行除外）。
-        if let Some(ref approval) = self.approval_workflow {
-            let action = Action::VerifyBuild {
+        // 审批门控（统一序列见 [`ToolRegistry::ensure_approved`]）
+        self.ensure_approved(
+            session_id,
+            subagent,
+            &Action::VerifyBuild {
                 command: params.command.clone(),
                 cwd: params.cwd.clone(),
                 timeout_secs: params.timeout_secs,
-            };
-            let approval_result = if subagent {
-                approval.request_approval_no_wait(session_id, &action).await
-            } else {
-                approval.request_approval(session_id, &action).await
-            };
-            let resp = approval_result.map_err(|e| {
-                TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
-            })?;
-            if resp.decision != ApprovalDecision::Approve {
-                // 记录待确认操作：用户通过"询问用户"链路批准后放行
-                self.remember_pending_approval(&action).await;
-                return Err(TianyanError::Custom(format!(
-                    "tool: 安全违规：操作需要用户确认：{}",
-                    resp.reason.unwrap_or_default()
-                )));
-            }
-        }
+            },
+        )
+        .await?;
         // Use semantic verification if available, otherwise fall back
         // to exit code + pattern matching.
         if let Some(ref gate) = self.verification_gate {

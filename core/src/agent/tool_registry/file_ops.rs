@@ -8,7 +8,6 @@ use crate::agent::tool_params::{
 };
 use crate::common::error::TianyanError;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
-use crate::executor::approval::ApprovalDecision;
 use crate::executor::Action;
 
 use super::{parse_params, safety_violation, vfs_content_field, ToolRegistry};
@@ -47,31 +46,17 @@ impl ToolRegistry {
             self.security_policy
                 .check_file_size(params.content.len() as u64),
         )?;
-        // Approval workflow check — auto-approve safe paths,
-        // deny critical paths (e.g. /etc/, .env), request human
-        // approval for Medium/High risk paths.
-        if let Some(ref approval) = self.approval_workflow {
-            let action = Action::WriteFile {
+        // 审批门控（自动放行安全路径/拒绝关键路径/请求人类确认，
+        // 统一序列见 [`ToolRegistry::ensure_approved`]）
+        self.ensure_approved(
+            session_id,
+            subagent,
+            &Action::WriteFile {
                 path: params.path.clone(),
                 content: params.content.clone(),
-            };
-            let approval_result = if subagent {
-                approval.request_approval_no_wait(session_id, &action).await
-            } else {
-                approval.request_approval(session_id, &action).await
-            };
-            let resp = approval_result.map_err(|e| {
-                TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
-            })?;
-            if resp.decision != ApprovalDecision::Approve {
-                // 记录待确认操作：用户通过"询问用户"链路批准后放行
-                self.remember_pending_approval(&action).await;
-                return Err(TianyanError::Custom(format!(
-                    "tool: 安全违规：操作需要用户确认：{}",
-                    resp.reason.unwrap_or_default()
-                )));
-            }
-        }
+            },
+        )
+        .await?;
         crate::executor::execute_write_file(&params.path, &params.content)
             .await
             .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
@@ -91,36 +76,23 @@ impl ToolRegistry {
             self.security_policy
                 .check_path(std::path::Path::new(&params.path)),
         )?;
-        // Approval workflow check — 与 write_file 一致：文件变更属 Medium 风险，
-        // 需用户确认（自动规则/无人值守放行除外）。
-        if let Some(ref approval) = self.approval_workflow {
-            let edits: Vec<serde_json::Value> = params
-                .edits
-                .iter()
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
-            let action = Action::ApplyEdit {
+        // 审批门控（统一序列见 [`ToolRegistry::ensure_approved`]；
+        // edits 序列化为审批动作负载，与 execute_apply_edit 行为一致）
+        let edits: Vec<serde_json::Value> = params
+            .edits
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        self.ensure_approved(
+            session_id,
+            subagent,
+            &Action::ApplyEdit {
                 path: params.path.clone(),
                 edits,
-            };
-            let approval_result = if subagent {
-                approval.request_approval_no_wait(session_id, &action).await
-            } else {
-                approval.request_approval(session_id, &action).await
-            };
-            let resp = approval_result.map_err(|e| {
-                TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
-            })?;
-            if resp.decision != ApprovalDecision::Approve {
-                // 记录待确认操作：用户通过"询问用户"链路批准后放行
-                self.remember_pending_approval(&action).await;
-                return Err(TianyanError::Custom(format!(
-                    "tool: 安全违规：操作需要用户确认：{}",
-                    resp.reason.unwrap_or_default()
-                )));
-            }
-        }
+            },
+        )
+        .await?;
         crate::executor::edit::apply_edit_action(&params.path, params.edits)
             .await
             .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
@@ -156,30 +128,16 @@ impl ToolRegistry {
             };
             safety_violation(self.security_policy.check_path(&resolved))?;
         }
-        // Approval workflow check — 与 write_file/apply_edit 一致：文件变更
-        // 属 Medium 风险，需用户确认（自动规则/无人值守放行除外）。
-        if let Some(ref approval) = self.approval_workflow {
-            let action = Action::ApplyPatch {
+        // 审批门控（统一序列见 [`ToolRegistry::ensure_approved`]）
+        self.ensure_approved(
+            session_id,
+            subagent,
+            &Action::ApplyPatch {
                 path: first_path.clone(),
                 patch: params.patch.clone(),
-            };
-            let approval_result = if subagent {
-                approval.request_approval_no_wait(session_id, &action).await
-            } else {
-                approval.request_approval(session_id, &action).await
-            };
-            let resp = approval_result.map_err(|e| {
-                TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e))
-            })?;
-            if resp.decision != ApprovalDecision::Approve {
-                // 记录待确认操作：用户通过"询问用户"链路批准后放行
-                self.remember_pending_approval(&action).await;
-                return Err(TianyanError::Custom(format!(
-                    "tool: 安全违规：操作需要用户确认：{}",
-                    resp.reason.unwrap_or_default()
-                )));
-            }
-        }
+            },
+        )
+        .await?;
         crate::executor::patch::apply_patch_action(&params.patch, &base_dir)
             .await
             .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))

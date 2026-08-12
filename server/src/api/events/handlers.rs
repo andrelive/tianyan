@@ -3,15 +3,21 @@
 //! 校验配置 `events.webhook_token`（非空时必须匹配 header `X-Tianyan-Token`，
 //! 不匹配返回 401；为空则放行——仅本机可访问时安全），通过后把事件发布到
 //! 共享事件总线，由事件消费处理器按规则处理。
+//!
+//! 总线与令牌经 `AppState` 直读（路由为常规 `Router<Arc<AppState>>`）——
+//! 不再使用模块级静态：配置热更新即时生效（旧静态在热更新后会过期），
+//! 且消除与 AppState 的双份状态。
 
 use std::sync::Arc;
 
+use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
 use serde::Deserialize;
-use tianyan::events::{Event, EventBus};
+use tianyan::events::Event;
 
 use crate::api::shared::error::ApiError;
+use crate::state::AppState;
 
 /// webhook 请求体。
 #[derive(Debug, Clone, Deserialize)]
@@ -23,67 +29,25 @@ pub struct WebhookRequest {
     pub payload: serde_json::Value,
 }
 
-/// 模块级事件总线（集成者启动时设置；axum 0.8 路由 state 类型限制，
-/// 采用与 webhook 令牌一致的模块级共享模式）。
-static EVENT_BUS: std::sync::RwLock<Option<Arc<EventBus>>> = std::sync::RwLock::new(None);
-
-/// 设置事件总线（装配时用 `AppState::event_bus()` 调用）。
-pub fn set_event_bus(bus: Arc<EventBus>) {
-    match EVENT_BUS.write() {
-        Ok(mut guard) => *guard = Some(bus),
-        Err(poisoned) => *poisoned.into_inner() = Some(bus),
-    }
-}
-
-/// 读取当前事件总线（None = 未装配，发布失败返回服务错误）。
-fn current_event_bus() -> Option<Arc<EventBus>> {
-    match EVENT_BUS.read() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    }
-}
-
-/// 模块级 webhook 令牌（配置 `events.webhook_token`；集成者启动时设置）。
-///
-/// 用可重置的 `RwLock`（而非 `OnceLock`）承载：配置热更新后可重新设置。
-static WEBHOOK_TOKEN: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
-
-/// 设置 webhook 令牌（空字符串 = 不校验，放行所有请求）。
-///
-/// 集成者在装配时用 `config.events.webhook_token` 调用；配置热更新时重设。
-pub fn set_webhook_token(token: impl Into<String>) {
-    let token = token.into();
-    match WEBHOOK_TOKEN.write() {
-        Ok(mut guard) => *guard = Some(token),
-        Err(poisoned) => *poisoned.into_inner() = Some(token),
-    }
-}
-
-/// 读取当前 webhook 令牌（None = 从未设置，等同空令牌放行）。
-fn current_webhook_token() -> Option<String> {
-    match WEBHOOK_TOKEN.read() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    }
-}
-
 /// 接收 webhook 事件。
 ///
 /// 令牌校验通过后发布 `Event::Webhook` 到事件总线，返回 `200 accepted`。
 pub async fn receive_webhook(
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<WebhookRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !validate_token(&headers) {
-        return Err(ApiError::Unauthorized("无效的 X-Tianyan-Token".to_string()));
-    }
-
-    let Some(bus) = current_event_bus() else {
+    let config = state.config().read().await.clone();
+    if !config.events.enabled {
         return Err(ApiError::Internal(
             "事件总线未装配（events.enabled 未开启？）".to_string(),
         ));
-    };
-    bus.publish(Event::Webhook {
+    }
+    if !validate_token(&config.events.webhook_token, &headers) {
+        return Err(ApiError::Unauthorized("无效的 X-Tianyan-Token".to_string()));
+    }
+
+    state.event_bus().publish(Event::Webhook {
         name: body.name,
         payload: body.payload,
     });
@@ -92,17 +56,14 @@ pub async fn receive_webhook(
 }
 
 /// 校验请求令牌：未配置令牌（空）时放行；配置后必须与 `X-Tianyan-Token` 匹配。
-fn validate_token(headers: &HeaderMap) -> bool {
-    let Some(expected) = current_webhook_token() else {
-        return true;
-    };
-    if expected.is_empty() {
+fn validate_token(expected_token: &str, headers: &HeaderMap) -> bool {
+    if expected_token.is_empty() {
         return true;
     }
     let Some(actual) = headers.get("x-tianyan-token").and_then(|v| v.to_str().ok()) else {
         return false;
     };
-    constant_time_eq(expected.as_bytes(), actual.as_bytes())
+    constant_time_eq(expected_token.as_bytes(), actual.as_bytes())
 }
 
 /// 常量时间比较（避免令牌校验的时序侧信道）。
@@ -120,21 +81,92 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
-    use axum::Router;
-    use tower::ServiceExt;
 
-    /// 串行化 webhook 测试（模块级令牌/总线为共享状态）。
-    static TOKEN_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use std::path::Path;
 
-    /// 直接调用 webhook handler（避免 Router state 装配依赖）。
-    async fn invoke_webhook(token: Option<&str>) -> Result<Json<serde_json::Value>, ApiError> {
+    use tempfile::tempdir;
+    use tianyan::config::{
+        ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig, ProviderConfig,
+        TianyanConfig,
+    };
+
+    use crate::create_app;
+
+    /// 构建带 mock 模型提供商的测试配置（`ModelServices::from_config`
+    /// 强制要求 chat/embedding/vision 三者齐备；模式同 clipboard/workspace 测试）。
+    fn test_config(data_dir: &Path) -> TianyanConfig {
+        let mut config = TianyanConfig::default();
+        config.storage.data_dir = data_dir.to_path_buf();
+        config.models = ModelsConfig {
+            providers: vec![ProviderConfig {
+                name: "mock".to_string(),
+                endpoint: "http://localhost:11434/v1".to_string(),
+                api_key: Some("test-key".to_string()),
+                models: vec![
+                    ModelEntry {
+                        name: "test-model".to_string(),
+                        capabilities: vec![ModelCapability::Chat],
+                    },
+                    ModelEntry {
+                        name: "embed".to_string(),
+                        capabilities: vec![ModelCapability::TextEmbedding],
+                    },
+                    ModelEntry {
+                        name: "vision".to_string(),
+                        capabilities: vec![ModelCapability::Vision],
+                    },
+                ],
+                timeout: 30,
+                enabled: true,
+                headers: std::collections::HashMap::new(),
+            }],
+            preferences: ModelPreferences {
+                chat: Some(ModelRef {
+                    provider: "mock".to_string(),
+                    model: "test-model".to_string(),
+                }),
+                embedding: Some(ModelRef {
+                    provider: "mock".to_string(),
+                    model: "embed".to_string(),
+                }),
+                vision: Some(ModelRef {
+                    provider: "mock".to_string(),
+                    model: "vision".to_string(),
+                }),
+            },
+        };
+        config
+    }
+
+    /// 构造启用事件驱动的 AppState（返回事件订阅，供断言发布）。
+    async fn setup_state(
+        token: &str,
+        enabled: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<AppState>,
+        tokio::sync::mpsc::UnboundedReceiver<Event>,
+    ) {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.events.enabled = enabled;
+        config.events.webhook_token = token.to_string();
+        let (_app, state) = create_app(config).await.unwrap();
+        let rx = state.event_bus().subscribe();
+        (dir, state, rx)
+    }
+
+    /// 直接调用 webhook handler（携带 State）。
+    async fn invoke_webhook(
+        state: &AppState,
+        token: Option<&str>,
+    ) -> Result<Json<serde_json::Value>, ApiError> {
         let mut headers = HeaderMap::new();
         if let Some(t) = token {
             headers.insert("x-tianyan-token", t.parse().expect("令牌应为 ASCII"));
         }
         receive_webhook(
+            State(Arc::new(state.clone())),
             headers,
             Json(WebhookRequest {
                 name: "deploy".to_string(),
@@ -144,18 +176,11 @@ mod tests {
         .await
     }
 
-    /// 串行化 webhook 测试（模块级令牌/总线为共享状态）：测试体全程持锁，
-    /// 锁不参与 handler 逻辑，跨 await 持有无死锁风险。
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_webhook_accepts_without_token() {
-        let _guard = TOKEN_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        set_webhook_token("");
-        let bus = Arc::new(EventBus::new());
-        let mut rx = bus.subscribe();
-        set_event_bus(bus);
+        let (_dir, state, mut rx) = setup_state("", true).await;
 
-        let resp = invoke_webhook(None).await.expect("无令牌应放行");
+        let resp = invoke_webhook(&state, None).await.expect("无令牌应放行");
         assert_eq!(resp.0["status"], "accepted");
 
         let event = rx.recv().await.expect("应发布 Webhook 事件");
@@ -168,22 +193,30 @@ mod tests {
         }
     }
 
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_webhook_token_validation() {
-        let _guard = TOKEN_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        set_webhook_token("s3cret");
-        set_event_bus(Arc::new(EventBus::new()));
+        let (_dir, state, _rx) = setup_state("s3cret", true).await;
 
         // 无令牌 → 401
-        assert!(invoke_webhook(None).await.is_err());
+        assert!(invoke_webhook(&state, None).await.is_err());
         // 错误令牌 → 401
-        assert!(invoke_webhook(Some("wrong")).await.is_err());
+        assert!(invoke_webhook(&state, Some("wrong")).await.is_err());
         // 正确令牌 → 200
-        let resp = invoke_webhook(Some("s3cret"))
+        let resp = invoke_webhook(&state, Some("s3cret"))
             .await
             .expect("正确令牌应放行");
         assert_eq!(resp.0["status"], "accepted");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_disabled_returns_internal() {
+        // events.enabled = false：总线无消费者，拒绝并提示（保持旧静态
+        // "未装配"语义——路由常挂，禁用态应显式拒绝而非静默吞掉）
+        let (_dir, state, _rx) = setup_state("", false).await;
+        let err = invoke_webhook(&state, None)
+            .await
+            .expect_err("禁用态应拒绝");
+        assert!(matches!(err, ApiError::Internal(_)));
     }
 
     #[test]

@@ -3,10 +3,11 @@
 //! 处理器层测试通过 `create_app` 构建完整 AppState（真实 VFS + tempdir）
 //! 后以 `tower::ServiceExt::oneshot` 直击路由（跟随 workspace 领域模式）；
 //! 服务层测试直接构造 [`ClipboardService`] 验证沉淀链路。
-//! 注意：pending/outbox 为模块级共享状态，测试间通过显式文本/清空隔离。
+//! pending/outbox 挂载于 AppState——每个测试独立实例，无跨测试污染，
+//! 无需串行化锁。
 
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -90,13 +91,6 @@ async fn response_json(response: axum::response::Response) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-/// 模块级状态（pending/outbox）测试串行化锁：
-/// pending/outbox 为进程级共享，并行测试互相污染，涉共享状态的测试先拿锁。
-fn state_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 // ---------------------------------------------------------------------------
 // capture：配置门控
 // ---------------------------------------------------------------------------
@@ -122,7 +116,6 @@ async fn capture_disabled_returns_204() {
 /// 监听启用 + 非 auto_capture：返回 pending 确认信息（200）。
 #[tokio::test]
 async fn capture_enabled_returns_pending() {
-    let _guard = state_lock().lock().unwrap();
     let dir = tempdir().unwrap();
     let mut config = test_config(dir.path());
     config.clipboard.enabled = true;
@@ -170,11 +163,14 @@ async fn capture_empty_text_returns_400() {
 /// remember（显式 text）：写入 `tianyan://memory/clipboard/*`，Detail 全文 + Abstract 摘要。
 #[tokio::test]
 async fn respond_remember_writes_vfs_memory() {
-    let _guard = state_lock().lock().unwrap();
     let dir = tempdir().unwrap();
     let config = test_config(dir.path());
     let (_app, state) = create_app(config).await.unwrap();
-    let service = ClipboardService::new(state.vfs());
+    let service = ClipboardService::new(
+        state.vfs(),
+        state.clipboard_outbox(),
+        state.clipboard_pending(),
+    );
 
     let resp = service
         .respond(
@@ -211,12 +207,15 @@ async fn respond_remember_writes_vfs_memory() {
 /// ignore（无 pending 时提供显式 text）：清空 pending，不落任何存储。
 #[tokio::test]
 async fn respond_ignore_clears_pending() {
-    let _guard = state_lock().lock().unwrap();
     let dir = tempdir().unwrap();
     let mut config = test_config(dir.path());
     config.clipboard.enabled = true;
     let (_app, state) = create_app(config).await.unwrap();
-    let service = ClipboardService::new(state.vfs());
+    let service = ClipboardService::new(
+        state.vfs(),
+        state.clipboard_outbox(),
+        state.clipboard_pending(),
+    );
 
     // 先捕获 → pending 存在
     let capture = service.capture(&state, "tmp-ignore-me").await.unwrap();
@@ -240,13 +239,14 @@ async fn respond_ignore_clears_pending() {
 /// respond 无 pending 且未提供 text：400。
 #[tokio::test]
 async fn respond_without_text_or_pending_returns_bad_request() {
-    let _guard = state_lock().lock().unwrap();
-    // 显式清空 pending（锁内操作，确定性保证无 pending）
-    *ClipboardService::pending_handle().write().await = None;
     let dir = tempdir().unwrap();
     let config = test_config(dir.path());
     let (_app, state) = create_app(config).await.unwrap();
-    let service = ClipboardService::new(state.vfs());
+    let service = ClipboardService::new(
+        state.vfs(),
+        state.clipboard_outbox(),
+        state.clipboard_pending(),
+    );
 
     let err = service
         .respond(
@@ -271,10 +271,11 @@ async fn respond_without_text_or_pending_returns_bad_request() {
 /// 工具执行后内容进入 outbox（tauri 轮询消费）。
 #[tokio::test]
 async fn clipboard_write_tool_pushes_outbox() {
-    // 清空模块级 outbox，保证测试独立
-    ClipboardService::outbox_handle().lock().unwrap().clear();
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path());
+    let (_app, state) = create_app(config).await.unwrap();
 
-    let tool = ClipboardWriteTool::shared();
+    let tool = ClipboardWriteTool::new(state.clipboard_outbox());
     let result = tool
         .execute(r#"{"content":"粘贴这段文本"}"#)
         .await
@@ -282,7 +283,7 @@ async fn clipboard_write_tool_pushes_outbox() {
     assert_eq!(result["status"], "queued");
     assert!(result["content_length"].as_u64().unwrap() > 0);
 
-    let items: Vec<String> = ClipboardService::outbox_handle().lock().unwrap().clone();
+    let items: Vec<String> = state.clipboard_outbox().lock().unwrap().clone();
     assert!(
         items.iter().any(|i| i == "粘贴这段文本"),
         "outbox 应包含工具写入的内容：{items:?}"
@@ -292,7 +293,7 @@ async fn clipboard_write_tool_pushes_outbox() {
 /// 参数非法：返回工具错误而非 panic。
 #[tokio::test]
 async fn clipboard_write_tool_rejects_invalid_args() {
-    let tool = ClipboardWriteTool::new(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let tool = ClipboardWriteTool::new(Arc::new(Mutex::new(Vec::new())));
     let result = tool.execute(r#"not-json"#).await;
     assert!(result.is_err(), "非法参数应报错");
     assert!(result.unwrap_err().to_string().contains("参数无效"));
@@ -301,7 +302,7 @@ async fn clipboard_write_tool_rejects_invalid_args() {
 /// 缺 content 字段：报错。
 #[tokio::test]
 async fn clipboard_write_tool_requires_content() {
-    let tool = ClipboardWriteTool::new(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let tool = ClipboardWriteTool::new(Arc::new(Mutex::new(Vec::new())));
     let result = tool.execute(r#"{}"#).await;
     assert!(result.is_err());
 }
@@ -313,15 +314,16 @@ async fn clipboard_write_tool_requires_content() {
 /// GET /api/v1/clipboard/outbox：取后清空（drain 语义，防重复写出）。
 #[tokio::test]
 async fn outbox_endpoint_drains_contents() {
-    let _guard = state_lock().lock().unwrap();
-    // 清空模块级 outbox，保证测试独立
-    ClipboardService::outbox_handle().lock().unwrap().clear();
     let dir = tempdir().unwrap();
     let config = test_config(dir.path());
     let (app, state) = create_app(config).await.unwrap();
 
     // 直接经服务推入两条内容（等价于 agent 工具写入）
-    let service = ClipboardService::new(state.vfs());
+    let service = ClipboardService::new(
+        state.vfs(),
+        state.clipboard_outbox(),
+        state.clipboard_pending(),
+    );
     service.outbox_push("第一条".to_string());
     service.outbox_push("第二条".to_string());
 
@@ -339,6 +341,10 @@ async fn outbox_endpoint_drains_contents() {
     assert_eq!(body["contents"].as_array().unwrap().len(), 2);
 
     // 再次读取应为空（drain 语义）
-    let service2 = ClipboardService::new(state.vfs());
+    let service2 = ClipboardService::new(
+        state.vfs(),
+        state.clipboard_outbox(),
+        state.clipboard_pending(),
+    );
     assert!(service2.outbox_drain().is_empty());
 }

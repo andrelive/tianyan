@@ -21,6 +21,7 @@ use rust_mcp_sdk::{
 use tracing::instrument;
 
 use crate::error::{McpError, McpResult};
+use crate::types::McpServerConfig;
 
 /// Information about a tool provided by an MCP server.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -239,6 +240,48 @@ impl McpClient {
             tools,
             connected: AtomicBool::new(true),
         })
+    }
+
+    /// 按服务器配置建立连接（**传输分发唯一实现**）。
+    ///
+    /// - `transport = "http"`：streamable HTTP（远程服务器），`url` 必填；
+    /// - 缺省 / `"stdio"`：本地子进程；
+    /// - 未知 transport：告警并回退 stdio。
+    ///
+    /// 连接逻辑收敛于此——server 层的生命周期管理器与连接测试端点
+    /// 均经此分发，不再各自复制 transport 判断。
+    pub async fn connect_from_config(config: &McpServerConfig) -> McpResult<Self> {
+        match config.transport.as_deref() {
+            Some("http") => {
+                let url = config.url.clone().ok_or_else(|| {
+                    McpError::connection_failed(&config.name, "transport=http 但未配置 url")
+                })?;
+                McpClient::connect_http(config.name.clone(), url).await
+            }
+            Some(other) => {
+                tracing::warn!(
+                    server = %config.name,
+                    transport = %other,
+                    "未知 MCP 传输方式，回退 stdio"
+                );
+                McpClient::connect(
+                    config.name.clone(),
+                    config.command.clone(),
+                    config.args.clone(),
+                    config.env.clone(),
+                )
+                .await
+            }
+            None => {
+                McpClient::connect(
+                    config.name.clone(),
+                    config.command.clone(),
+                    config.args.clone(),
+                    config.env.clone(),
+                )
+                .await
+            }
+        }
     }
 
     /// Returns the server name.
@@ -525,7 +568,10 @@ mod tests {
         let err = McpClient::connect_http("remote", "ftp://example.com/mcp")
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("http"), "应提示 URL 必须为 http/https: {err}");
+        assert!(
+            err.to_string().contains("http"),
+            "应提示 URL 必须为 http/https: {err}"
+        );
     }
 
     /// 构造一个只含文本块的 `CallToolResult`。

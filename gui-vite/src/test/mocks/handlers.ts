@@ -963,9 +963,8 @@ export const handlers = [
   // Chat stream (SSE)
   http.post(`${API_BASE}/chat/stream`, async ({ request }) => {
     const encoder = new TextEncoder();
-    const body = (await request.json()) as { messages?: { content?: string }[] };
-    const msgs = body.messages ?? [];
-    const lastContent = msgs.length > 0 ? (msgs[msgs.length - 1].content ?? '') : '';
+    const body = (await request.json()) as { message?: { content?: string } };
+    const lastContent = body.message?.content ?? '';
 
     const chunks = lastContent.includes('[error-test]')
       ? [

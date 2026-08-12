@@ -8,18 +8,16 @@
 //! 生命周期：MCP 客户端跨 agent reload 保持连接一致（[`McpToolManager::sync`]），
 //! 配置热更新时断开已移除的服务器、连接新增的；连接失败仅告警（fail fast，不重试）。
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
 
 use tianyan::agent::DynamicToolExecutor;
 use tianyan::common::error::{Result, TianyanError};
 use tianyan::config::McpServerEntry;
 use tianyan::model::types::{FunctionDefinition, ToolDefinition};
-use tianyan_mcp::{McpClient, McpImage, McpResult, ToolInfo};
+use tianyan_mcp::{McpClient, McpClientManager, McpImage, ToolInfo};
 
 /// 构造 LLM 可见的工具描述（带 `[MCP:<服务器名>]` 来源前缀）。
 fn mcp_tool_description(server_name: &str, tool: &ToolInfo) -> String {
@@ -185,8 +183,13 @@ fn append_image_paths(text: &mut String, dir: &Path, prefix: &str, images: &[Mcp
 }
 
 /// MCP 客户端生命周期管理器：跨 agent reload 保持连接与配置一致。
+///
+/// 连接生命周期（注册表、连接/断开/sync 语义、transport 分发）委托给
+/// [`McpClientManager`]（mcp crate 唯一实现）；本类型只保留工具桥接与
+/// 图片落盘（ADR-010）。
 pub struct McpToolManager {
-    clients: Mutex<HashMap<String, Arc<McpClient>>>,
+    /// 连接注册表（委托，非自建——连接逻辑只有一份）。
+    manager: McpClientManager,
     /// 图片落盘目录（浏览器截图等）；`None` 时不保存图片。
     image_dir: Option<PathBuf>,
 }
@@ -201,7 +204,7 @@ impl McpToolManager {
     /// 创建管理器（默认不落盘 MCP 图片）。
     pub fn new() -> Self {
         Self {
-            clients: Mutex::new(HashMap::new()),
+            manager: McpClientManager::new(),
             image_dir: None,
         }
     }
@@ -209,105 +212,24 @@ impl McpToolManager {
     /// 创建管理器并指定 MCP 图片（如浏览器截图）落盘目录。
     pub fn with_image_dir(image_dir: PathBuf) -> Self {
         Self {
-            clients: Mutex::new(HashMap::new()),
+            manager: McpClientManager::new(),
             image_dir: Some(image_dir),
         }
     }
 
-    /// 与配置对齐：断开已移除/禁用的服务器，连接新增/启用的。
-    ///
-    /// 连接失败仅告警并跳过（fail fast，不重试）。
+    /// 与配置对齐（委托 [`McpClientManager::sync`]）：断开已移除/禁用的
+    /// 服务器，连接新增/启用的。连接失败仅告警（fail fast，不重试）。
     pub async fn sync(&self, servers: &[McpServerEntry]) {
-        let mut clients = self.clients.lock().await;
-        let enabled: Vec<&str> = servers
-            .iter()
-            .filter(|s| s.enabled)
-            .map(|s| s.name.as_str())
-            .collect();
-
-        // 断开配置中已不存在或已禁用的服务器
-        let stale: Vec<String> = clients
-            .keys()
-            .filter(|k| !enabled.contains(&k.as_str()))
-            .cloned()
-            .collect();
-        for name in stale {
-            tracing::info!(server = %name, "MCP 服务器已从配置移除，断开连接");
-            if let Some(client) = clients.remove(&name) {
-                if let Err(e) = client.disconnect().await {
-                    tracing::warn!(server = %name, error = %e, "MCP 断开失败");
-                }
-            }
-        }
-
-        // 连接新增/启用的服务器
-        for server in servers.iter().filter(|s| s.enabled) {
-            if clients.contains_key(&server.name) {
-                continue;
-            }
-            // G7：传输方式分流——http 走 streamable HTTP（远程服务器），
-            // 缺省/stdio 走本地子进程。
-            let connected = match server.transport.as_deref() {
-                Some("http") => match server.url.as_deref() {
-                    Some(url) => {
-                        McpClient::connect_http(server.name.clone(), url.to_string()).await
-                    }
-                    None => {
-                        tracing::warn!(
-                            server = %server.name,
-                            "MCP 服务器 transport=http 但未配置 url，跳过"
-                        );
-                        continue;
-                    }
-                },
-                Some(other) => {
-                    tracing::warn!(
-                        server = %server.name,
-                        transport = %other,
-                        "未知 MCP 传输方式，回退 stdio"
-                    );
-                    Self::connect_stdio(server).await
-                }
-                None => Self::connect_stdio(server).await,
-            };
-
-            match connected {
-                Ok(client) => {
-                    let tool_count = client.list_tools().await.map(|t| t.len()).unwrap_or(0);
-                    tracing::info!(
-                        server = %server.name,
-                        tools = tool_count,
-                        "MCP 服务器已连接"
-                    );
-                    clients.insert(server.name.clone(), Arc::new(client));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        server = %server.name,
-                        error = %e,
-                        "MCP 服务器连接失败，跳过其工具"
-                    );
-                }
-            }
-        }
-    }
-
-    /// 以 stdio 传输连接本地 MCP 服务器进程。
-    async fn connect_stdio(server: &McpServerEntry) -> McpResult<McpClient> {
-        McpClient::connect(
-            server.name.clone(),
-            server.command.clone(),
-            server.args.clone(),
-            server.env.clone(),
-        )
-        .await
+        self.manager.sync(servers).await;
     }
 
     /// 从当前连接的服务器生成全部工具桥接。
     pub async fn bridges(&self) -> Vec<Arc<dyn DynamicToolExecutor>> {
-        let clients = self.clients.lock().await;
         let mut bridges: Vec<Arc<dyn DynamicToolExecutor>> = Vec::new();
-        for (name, client) in clients.iter() {
+        for name in self.manager.connected_servers().await {
+            let Some(client) = self.manager.get_client(&name).await else {
+                continue;
+            };
             match client.list_tools().await {
                 Ok(tools) => {
                     for tool in tools {
@@ -326,12 +248,7 @@ impl McpToolManager {
 
     /// 断开全部连接（应用关闭时调用）。
     pub async fn shutdown(&self) {
-        let clients = std::mem::take(&mut *self.clients.lock().await);
-        for (name, client) in clients {
-            if let Err(e) = client.disconnect().await {
-                tracing::warn!(server = %name, error = %e, "MCP 断开失败");
-            }
-        }
+        self.manager.disconnect_all().await;
     }
 }
 
@@ -348,6 +265,8 @@ mod tests {
             env: None,
             enabled,
             description: None,
+            transport: None,
+            url: None,
         }
     }
 

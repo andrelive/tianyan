@@ -460,10 +460,7 @@ mod tests {
         let mut mock = MockChatService::new();
         mock.expect_chat_completion().times(0);
         let extractor = extractor_with_mock(mock);
-        let result = extractor
-            .extract("短对话", &[])
-            .await
-            .unwrap();
+        let result = extractor.extract("短对话", &[]).await.unwrap();
         assert!(result.is_empty());
     }
 
@@ -490,10 +487,7 @@ mod tests {
             })
         });
         let extractor = extractor_with_mock(mock);
-        let result = extractor
-            .extract(&long_conversation(), &[])
-            .await
-            .unwrap();
+        let result = extractor.extract(&long_conversation(), &[]).await.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content, "重要事实");
     }
@@ -532,10 +526,7 @@ mod tests {
         });
         let extractor = extractor_with_mock(mock);
         let ids = vec!["msg-1".to_string(), "msg-2".to_string()];
-        let result = extractor
-            .extract(&long_conversation(), &ids)
-            .await
-            .unwrap();
+        let result = extractor.extract(&long_conversation(), &ids).await.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].source_message_ids, ids);
     }
@@ -569,7 +560,11 @@ mod tests {
     // ── verify_preference ─────────────────────────────────────
 
     fn memory_for_verify() -> MemoryEntry {
-        MemoryEntry::new("pref-1", "用户写 Rust 时喜欢 4 空格缩进", MemoryCategory::Preference)
+        MemoryEntry::new(
+            "pref-1",
+            "用户写 Rust 时喜欢 4 空格缩进",
+            MemoryCategory::Preference,
+        )
     }
 
     #[tokio::test]
@@ -590,7 +585,10 @@ mod tests {
             })
         });
         let extractor = extractor_with_mock(mock);
-        assert!(extractor.verify_preference(&memory_for_verify()).await.unwrap());
+        assert!(extractor
+            .verify_preference(&memory_for_verify())
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -611,7 +609,10 @@ mod tests {
             })
         });
         let extractor = extractor_with_mock(mock);
-        assert!(!extractor.verify_preference(&memory_for_verify()).await.unwrap());
+        assert!(!extractor
+            .verify_preference(&memory_for_verify())
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -633,7 +634,10 @@ mod tests {
             })
         });
         let extractor = extractor_with_mock(mock);
-        assert!(!extractor.verify_preference(&memory_for_verify()).await.unwrap());
+        assert!(!extractor
+            .verify_preference(&memory_for_verify())
+            .await
+            .unwrap());
     }
 
     #[test]

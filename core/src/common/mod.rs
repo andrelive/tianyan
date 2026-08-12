@@ -3,6 +3,7 @@
 //! 包含整个系统共享的通用组件和类型。
 
 pub mod error;
+pub mod llm_judge;
 pub mod logging;
 pub mod token_estimator;
 pub mod types;

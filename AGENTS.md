@@ -98,7 +98,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `skills` | `core/src/skills/` | 技能定义 + 执行 + GEPA 进化引擎 | ❌ **不全量加载**，L0 发现→L2 按需 |
 | `session` | `core/src/session/` | `PersistentSessionManager` — JSONL 持久化 | 会话文件仅通过 VFS 读写 |
 | `model` | `core/src/model/` | `ModelServices` 容器（不路由、不重试） | — |
-| `scheduler` | `core/src/scheduler/` | 定时任务（RuleTask、MemoryTask、SummaryTask、GcTask） | 定时任务产物写入 VFS |
+| `scheduler` | `core/src/scheduler/` | 定时任务（RuleTask、MemoryTask、SummaryTask、GcTask、SnapshotGcTask、ReminderTask、UsageStatsFlushTask） | 定时任务产物写入 VFS |
 | `observability` | `core/src/observability/` | `AgentMetrics` 可观测性存储 | — |
 | `eval` | `core/src/eval/` | 回答质量评测（LLM-as-Judge 评分式：四维度 1-10 + 黄金用例批处理；离线基准用） | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 语义化编辑（hashline/edit/patch）、文件浏览（fs/search）、代码智能（symbols/project/test_discovery） | — |

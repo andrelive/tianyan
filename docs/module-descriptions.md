@@ -308,9 +308,8 @@ soul → rules+memories → history(from compression_marker) → current input
 - `query_token_summary()` — Token 消耗历史和平均值
 - `query_success_rate()` — 执行总数、成功数、成功率百分比
 - `query_rule_effectiveness()` — 规则注入总数、命中数、相关性百分比
-- `query_common_failures()` — Top-10 常见失败步骤及错误信息
 - `query_harness_health()` — Harness 健康摘要
-- `record_token_usage()` / `record_failure()` / `record_execution()` / `record_rule_hit()` — 记录接口
+- `record_token_usage()` / `record_execution()` / `record_rule_hit()` / `record_pipeline_failure()` / `record_skill_call()` — 记录接口
 
 ### 1.11 其他子模块
 
@@ -319,10 +318,10 @@ soul → rules+memories → history(from compression_marker) → current input
 | `config` | `TianyanConfig`, `AgentConfig`, `ModelsConfig`, `ConfigStatus` | 全局配置管理，支持 TOML + env。查找顺序：`./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml` |
 | `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage`, `ContentPart`, `ImageUrl`, `LoggingConfig`, `TokenEstimator` | 通用错误（禁止引入新错误类型）、URI、向量、消息（含多模态 `content_parts`，ADR-010）、记忆类型、日志配置、token 估算（叶模块，无 core 内部依赖） |
 | `eval` | `AnswerJudge`, `AnswerEvaluation`, `DimensionScores`, `EvalCase`, `EvalResult`, `golden_cases` | 回答质量评测（LLM-as-Judge 评分式）：四维度（相关性/正确性/完整性/清晰度）1-10 分 + 加权总分 + 分级判定；解析回退链（JSON → 围栏提取 → 行格式 → 中性 5 分）；`run_eval_suite` 批处理 + `format_report` 报告；依赖 `model::ChatService` 与 `common::types`，与 `executor::judge`（工具执行二值门控）正交 |
-| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager` | 会话管理，支持 VFS 持久化；`load_session_from_vfs()` 用 `compression_marker` 截断；截断常量单点定义于 `session/mod.rs`（`MAX_SESSION_MESSAGES=100` / `KEEP_RECENT_MESSAGES=50`） |
+| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager` | 会话管理，支持 VFS 持久化；`load_session_from_vfs()` 用 `compression_marker` 截断；截断常量单点定义于 `session/mod.rs`（`MAX_SESSION_MESSAGES=100` / `KEEP_RECENT_MESSAGES=50`）；JSONL 首行 SessionHeader 承载注入上下文快照（ADR-012）+ 会话元数据（created_at/title/ended_at，重启恢复；`list_sessions` 按目录条目过滤防幽灵会话） |
 | `memory` | `MemoryExtractor`, `ExtractionConfig` | 从会话文本中提取结构化记忆的纯功能，与调度/持久化解耦 |
 | `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（已通过 `knowledge_ingest` 工具集成到 Agent 流程）。ingestor/ 拆分为 mod + builder；`image/` 拆分为 types/processor/analyzer |
-| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `RuleTask`, `GcTask`, `MemoryTask`, `SummaryTask`, `RuleRecorder`, `RuleSuggester` | 定时任务调度框架 + 所有任务实现，位于 `scheduler/tasks/`；`TaskResult.error: Option<TianyanError>`（结构化错误）；GcTask 职责为规则归档 + 记忆 TTL 清理（文档漂移检测/质量报告投机代码已删除） |
+| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `RuleTask`, `GcTask`, `MemoryTask`, `SummaryTask`, `RuleRecorder`, `RuleSuggester`, `UsageStatsFlushTask` | 定时任务调度框架 + 所有任务实现，位于 `scheduler/tasks/`；`TaskResult.error: Option<TianyanError>`（结构化错误）；GcTask 职责为规则归档 + 记忆 TTL 清理（文档漂移检测/质量报告投机代码已删除）；UsageStatsFlushTask 定期把使用统计内存计数器刷入 SQLite（构造器注入，同 SnapshotGcTask 模式） |
 
 ---
 
@@ -335,7 +334,7 @@ soul → rules+memories → history(from compression_marker) → current input
 | context | ✅ 完整集成 | ContextPipeline + DualLayerRetriever + ContextAssembler 在 Agent 中完整集成 |
 | skills | ✅ 完整集成 | 含 GEPA 进化引擎，通过 call_skill 工具桥接 |
 | vfs | ✅ 完整集成 | VirtualFileSystemImpl + SqliteBackend + LanceDbVectorStore；双层摘要索引 |
-| scheduler | ✅ 完整集成 | TaskScheduler + RuleTask + MemoryTask + SummaryTask + GcTask |
+| scheduler | ✅ 完整集成 | TaskScheduler + RuleTask + MemoryTask + SummaryTask + GcTask + UsageStatsFlushTask |
 | config | ✅ 完整集成 | 配置加载器和验证器 |
 | common | ✅ 完整集成 | 错误类型和通用工具 |
 | session | ✅ 已集成 | `PersistentSessionManager` 持久化到 VFS |

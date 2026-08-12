@@ -18,7 +18,8 @@ export interface ChatMessage {
 
 export interface ChatRequest {
   session_id?: string | null;
-  messages: ChatMessage[];
+  /** 本轮输入消息（单条）——历史由服务端会话持久化提供，请求不携带全量历史 */
+  message: ChatMessage;
   stream: boolean;
   temperature: number;
   max_tokens: number;

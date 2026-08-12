@@ -320,10 +320,8 @@ mod tests {
         );
 
         // 旧配置（无 transport/url 字段）兼容解析：默认 stdio
-        let legacy: McpConfig = toml::from_str(
-            "[[servers]]\nname = \"old\"\ncommand = \"npx\"\nargs = []\n",
-        )
-        .unwrap();
+        let legacy: McpConfig =
+            toml::from_str("[[servers]]\nname = \"old\"\ncommand = \"npx\"\nargs = []\n").unwrap();
         assert!(legacy.servers[0].transport.is_none());
         assert!(legacy.servers[0].url.is_none());
     }

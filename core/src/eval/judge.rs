@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
+use crate::common::llm_judge::truncate_output;
 use crate::common::types::Message;
 use crate::model::types::ChatCompletionRequest;
 use crate::model::ChatService;
@@ -63,12 +64,7 @@ impl AnswerJudge {
             }
         };
 
-        let content = response
-            .choices
-            .into_iter()
-            .next()
-            .map(|c| c.message.content)
-            .unwrap_or_default();
+        let content = response.first_choice_content().unwrap_or_default();
 
         parse_evaluation(&content)
     }
@@ -104,34 +100,17 @@ fn build_eval_prompt(question: &str, answer: &str, context: Option<&str>) -> Str
     if let Some(ctx) = context {
         if !ctx.is_empty() {
             prompt.push_str("\n参考上下文（用于判断正确性）：\n");
-            prompt.push_str(&truncate(ctx, 3000));
+            prompt.push_str(&truncate_output(ctx, 3000));
             prompt.push('\n');
         }
     }
 
     prompt.push_str("\n用户问题：\n");
-    prompt.push_str(&truncate(question, 2000));
+    prompt.push_str(&truncate_output(question, 2000));
     prompt.push_str("\n\nAI 回答：\n");
-    prompt.push_str(&truncate(answer, 4000));
+    prompt.push_str(&truncate_output(answer, 4000));
     prompt.push('\n');
     prompt
-}
-
-/// 截断长文本控制评测成本。
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        text.to_string()
-    } else {
-        let head = &text[..max_chars * 2 / 3];
-        let tail_start = text.len().saturating_sub(max_chars / 3);
-        let tail = &text[tail_start..];
-        format!(
-            "{}...\n[内容被截断，省略 {} 字符]...\n{}",
-            head,
-            text.len() - head.len() - tail.len(),
-            tail
-        )
-    }
 }
 
 /// LLM 输出的结构化评分（JSON 解析目标）。
@@ -240,13 +219,13 @@ mod tests {
 
     #[test]
     fn test_truncate_short_unchanged() {
-        assert_eq!(truncate("hello", 2000), "hello");
+        assert_eq!(truncate_output("hello", 2000), "hello");
     }
 
     #[test]
     fn test_truncate_long_output() {
         let long = "a".repeat(3000);
-        let t = truncate(&long, 2000);
+        let t = truncate_output(&long, 2000);
         assert!(t.contains("[内容被截断"));
     }
 
