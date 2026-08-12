@@ -141,9 +141,8 @@ impl ConfigService {
             .or_else(TianyanConfig::default_config_path)
             .ok_or_else(|| ApiError::Internal("无法确定配置文件路径".to_string()))?;
 
-        config
-            .save_to_file(&path)
-            .map_err(|e| ApiError::Internal(format!("保存配置文件失败: {}", e)))?;
+        // ? 传播：保存失败（IO/序列化）映射为内部错误（无语义前缀，From 默认 Internal）
+        config.save_to_file(&path)?;
 
         info!(path = %path.display(), "配置已保存到: {}", path.display());
         Ok(())
@@ -221,29 +220,9 @@ impl ConfigService {
             .find(|s| s.name == name)
             .ok_or_else(|| ApiError::NotFound(format!("MCP 服务器 '{}' 未找到", name)))?;
 
-        // G7：按传输方式分流测试——http 走 streamable HTTP，缺省/stdio 走子进程
-        let test_result = match entry.transport.as_deref() {
-            Some("http") => match entry.url.as_deref() {
-                Some(url) => tianyan_mcp::McpClient::connect_http(entry.name.clone(), url).await,
-                None => {
-                    warn!(server = %name, "transport=http 但未配置 url");
-                    return Ok(crate::api::config::mcp_handlers::McpTestResponse {
-                        success: false,
-                        tools: 0,
-                        error: Some("transport=http 但未配置 url".to_string()),
-                    });
-                }
-            },
-            _ => {
-                tianyan_mcp::McpClient::connect(
-                    entry.name.clone(),
-                    entry.command.clone(),
-                    entry.args.clone(),
-                    entry.env.clone(),
-                )
-                .await
-            }
-        };
+        // G7：传输分发唯一实现（mcp crate）——http 走 streamable HTTP，
+        // 缺省/stdio 走子进程；url 缺失等错误经 McpError 返回
+        let test_result = tianyan_mcp::McpClient::connect_from_config(entry).await;
 
         match test_result {
             Ok(client) => {

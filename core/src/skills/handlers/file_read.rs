@@ -7,11 +7,16 @@ use serde_json::Value;
 
 use crate::common::error::{Result, TianyanError};
 
+use crate::executor::execute_read_file;
 use crate::skills::definition::SkillHandler;
 use crate::skills::executor::validate_path;
 use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 
 /// 文件读取处理器。
+///
+/// 薄 adapter：沙箱（allowed_paths / max_file_size / timeout）与参数契约在此层，
+/// 实际读取委托 [`execute_read_file`]（窗口化、行锚点、二进制嗅探——与 read_file
+/// 工具同实现同输出格式）。
 pub struct FileReadHandler {
     allowed_paths: Vec<PathBuf>,
     /// 单次读取最大文件大小（字节），默认 50MB。
@@ -78,10 +83,12 @@ impl SkillHandler for FileReadHandler {
             )));
         }
 
+        let path_str = path.to_string_lossy().into_owned();
         let timeout = Duration::from_secs(self.timeout_secs);
-        match tokio::time::timeout(timeout, tokio::fs::read_to_string(&path)).await {
-            Ok(Ok(content)) => Ok(super::result_success(content, start)),
-            Ok(Err(e)) => Ok(super::result_failure(format!("读取文件失败: {}", e), start)),
+        let read_op = execute_read_file(&path_str, None, None);
+        match tokio::time::timeout(timeout, read_op).await {
+            Ok(Ok(result)) => Ok(super::result_success(result.to_string(), start)),
+            Ok(Err(e)) => Ok(super::result_failure(e.to_string(), start)),
             Err(_) => Ok(super::result_timeout(self.timeout_secs, start)),
         }
     }
@@ -113,7 +120,16 @@ mod tests {
             .unwrap();
 
         assert!(result.success);
-        assert_eq!(result.output.as_deref(), Some("hello 天演"));
+        let output = result.output.as_deref().unwrap();
+        // 委托 execute_read_file：输出为统一 JSON（content 含内容与行锚点）
+        assert!(
+            output.contains("hello 天演"),
+            "输出应包含文件内容: {output}"
+        );
+        assert!(
+            output.contains("total_lines"),
+            "输出应为结构化 JSON: {output}"
+        );
     }
 
     #[tokio::test]

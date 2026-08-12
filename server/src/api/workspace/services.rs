@@ -48,11 +48,7 @@ impl WorkspaceService {
             .await
             .map_err(|e| ApiError::NotFound(format!("工作区目录不存在：{e}")))?;
         let mut entries = Vec::new();
-        while let Some(entry) = rd
-            .next_entry()
-            .await
-            .map_err(|e| ApiError::Internal(format!("工作区目录读取失败：{e}")))?
-        {
+        while let Some(entry) = rd.next_entry().await? {
             let name = entry.file_name().to_string_lossy().into_owned();
             let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
             let entry_path = if rel.is_empty() {

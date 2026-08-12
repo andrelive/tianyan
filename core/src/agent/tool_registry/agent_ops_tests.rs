@@ -216,10 +216,14 @@ async fn test_ask_user_returns_clarification() {
     let result = registry
         .execute_ask_user(r#"{"question":"Which file do you mean?"}"#)
         .await;
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("需要追问"));
-    assert!(err.contains("Which file do you mean?"));
+    // 子代理上下文：返回指导性结果（携带原问题），而非错误字符串
+    let value = result.expect("子代理 ask_user 应返回指导性结果");
+    assert_eq!(value["status"], "delegated_agent_cannot_ask");
+    assert_eq!(value["question"], "Which file do you mean?");
+    assert!(
+        value["hint"].as_str().unwrap().contains("无法向用户追问"),
+        "应包含无法追问的提示"
+    );
 }
 
 #[tokio::test]

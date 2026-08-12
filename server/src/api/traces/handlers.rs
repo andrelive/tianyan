@@ -32,13 +32,8 @@ pub async fn query_traces(
     let collector = state.trace_collector();
 
     let spans = collector
-        .query(
-            query.session_id.as_deref(),
-            query.task_id.as_deref(),
-            limit,
-        )
-        .await
-        .map_err(|e| ApiError::Internal(format!("Trace 查询失败: {}", e)))?;
+        .query(query.session_id.as_deref(), query.task_id.as_deref(), limit)
+        .await?;
 
     // 回放视图：按 (session_id, task_id) 分组，组内时间正序
     let mut groups: Vec<serde_json::Value> = Vec::new();

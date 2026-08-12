@@ -101,6 +101,7 @@ pub fn test_tianyan_config() -> TianyanConfig {
 pub fn test_tianyan_config_with_data_dir(data_dir: std::path::PathBuf) -> TianyanConfig {
     TianyanConfig {
         agent: test_agent_config(),
+        agent_roles: Default::default(),
         storage: test_storage_config_with_data_dir(data_dir),
         models: test_models_config(),
         logging: LoggingConfig::default(),

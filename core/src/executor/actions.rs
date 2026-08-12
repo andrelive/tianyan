@@ -1,7 +1,6 @@
 use serde_json::{json, Value};
 
 use crate::common::error::TianyanError;
-use crate::executor::output_parse::{count_test_passed, extract_test_failures};
 
 pub use crate::executor::command::execute_command_action;
 pub use crate::executor::security::SecurityPolicy;
@@ -33,7 +32,10 @@ pub async fn execute_read_file(
         .await
         .map_err(|e| not_found_error(path, e))?;
     if meta.is_dir() {
-        return list_directory(path).await;
+        // 目录模式：统一委托 fs::execute_list_dir（唯一目录列举实现）。
+        let output = crate::executor::fs::execute_list_dir(Path::new(path), offset, limit).await?;
+        return serde_json::to_value(output)
+            .map_err(|e| TianyanError::Custom(format!("executor: 序列化失败：{e}")));
     }
     let bytes = tokio::fs::read(path)
         .await
@@ -107,40 +109,6 @@ fn binary_result(path: &str, bytes: &[u8]) -> Value {
         "size": bytes.len(),
         "preview": preview,
     })
-}
-
-/// 目录模式：单层列出条目（目录在前、文件在后，各自按名称排序；隐藏条目不忽略）。
-async fn list_directory(path: &str) -> Result<Value, TianyanError> {
-    let mut rd = tokio::fs::read_dir(path)
-        .await
-        .map_err(|e| TianyanError::Custom(format!("executor: 目录读取失败：{e}")))?;
-    let mut entries: Vec<(bool, String, String)> = Vec::new();
-    while let Some(entry) = rd
-        .next_entry()
-        .await
-        .map_err(|e| TianyanError::Custom(format!("executor: 目录读取失败：{e}")))?
-    {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let full = entry.path().to_string_lossy().into_owned();
-        let is_dir = entry.file_type().await.is_ok_and(|t| t.is_dir());
-        entries.push((is_dir, name, full));
-    }
-    entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    let items: Vec<Value> = entries
-        .iter()
-        .map(|(is_dir, name, full)| {
-            json!({
-                "type": if *is_dir { "dir" } else { "file" },
-                "name": name,
-                "path": full,
-            })
-        })
-        .collect();
-    Ok(json!({
-        "path": path,
-        "directory": true,
-        "entries": items,
-    }))
 }
 
 /// 文本行模式：应用 offset/limit 窗口，逐行生成 `N#ID|content` 锚点，追加截断提示行，
@@ -243,31 +211,6 @@ pub async fn execute_search_code(query: &str, scope: Option<&str>) -> Result<Val
         ..Default::default()
     };
     crate::executor::search::execute_search_code(query, &options).await
-}
-
-/// 执行测试运行操作。
-pub async fn execute_run_tests(
-    command: &str,
-    cwd: Option<&str>,
-    timeout_secs: Option<u64>,
-) -> Result<Value, TianyanError> {
-    let output = execute_command_action(command, cwd, timeout_secs).await?;
-    let stdout = output["stdout"].as_str().unwrap_or("");
-    let stderr = output["stderr"].as_str().unwrap_or("");
-    let exit_code = output["exit_code"].as_i64().unwrap_or(-1);
-
-    let passed = count_test_passed(stdout);
-    let failures: Vec<String> = extract_test_failures(stdout, stderr);
-
-    Ok(json!({
-        "success": exit_code == 0,
-        "passed": passed,
-        "failed": failures.len(),
-        "failures": failures,
-        "stdout": stdout,
-        "stderr": stderr,
-        "exit_code": exit_code,
-    }))
 }
 
 /// 执行构建验证操作。

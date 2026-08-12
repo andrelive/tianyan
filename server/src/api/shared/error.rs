@@ -83,6 +83,11 @@ impl IntoResponse for ApiError {
 
 impl From<TianyanError> for ApiError {
     fn from(err: TianyanError) -> Self {
+        // 语义谓词优先：统一"目标不存在"判定（Custom 前缀 + Io(NotFound)），
+        // 与 core 的 TianyanError::is_not_found 单一来源对齐。
+        if err.is_not_found() {
+            return ApiError::NotFound(err.to_string());
+        }
         match err {
             TianyanError::Io(e) => ApiError::Internal(format!("IO 错误：{}", e)),
             TianyanError::Json(e) => ApiError::BadRequest(format!("JSON 解析错误：{}", e)),
@@ -90,9 +95,7 @@ impl From<TianyanError> for ApiError {
             TianyanError::Custom(msg) => {
                 if msg.starts_with("配置错误：") {
                     ApiError::Config(msg)
-                } else if msg.starts_with("未找到结果：")
-                    || msg.starts_with("条目未找到：")
-                    || msg.starts_with("模型未找到：")
+                } else if msg.starts_with("未找到结果：") || msg.starts_with("模型未找到：")
                 {
                     ApiError::NotFound(msg)
                 } else if msg.starts_with("认证失败：") {
@@ -115,6 +118,12 @@ impl From<TianyanError> for ApiError {
 impl From<serde_json::Error> for ApiError {
     fn from(err: serde_json::Error) -> Self {
         ApiError::BadRequest(format!("JSON 解析错误：{}", err))
+    }
+}
+
+impl From<std::io::Error> for ApiError {
+    fn from(err: std::io::Error) -> Self {
+        ApiError::Internal(format!("IO 错误：{}", err))
     }
 }
 

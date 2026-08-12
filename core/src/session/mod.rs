@@ -41,7 +41,7 @@ pub const MAX_SESSION_MESSAGES: usize = 100;
 pub const KEEP_RECENT_MESSAGES: usize = 50;
 
 // 重新导出类型
-pub use types::{Session, SessionHeader, SessionMetadata};
+pub use types::{parse_message_lines, Session, SessionHeader};
 
 // 重新导出管理层
 pub use manager::{PersistentSessionManager, SessionManager};

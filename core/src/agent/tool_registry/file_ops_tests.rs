@@ -275,7 +275,7 @@ async fn test_read_file_directory_lists_sorted() {
         .execute_read_file(&read_file_args(&root))
         .await
         .unwrap();
-    assert_eq!(result["directory"].as_bool(), Some(true));
+    // 目录模式统一输出 list_dir 形状（ListDirOutput：entries/count/truncated/total）
     let entries = result["entries"].as_array().unwrap();
     let kinds: Vec<&str> = entries
         .iter()
@@ -286,9 +286,10 @@ async fn test_read_file_directory_lists_sorted() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
+    // 目录名带尾部 /（list_dir 约定）
     assert_eq!(
         names,
-        vec!["adir", "zdir", ".hidden", "apple.txt", "banana.txt"]
+        vec!["adir/", "zdir/", ".hidden", "apple.txt", "banana.txt"]
     );
     // 条目携带完整路径
     assert_eq!(

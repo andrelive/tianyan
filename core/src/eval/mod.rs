@@ -7,12 +7,19 @@
 //! 基准对比使用，不接入在线对话链路（每次评分额外消耗一次 LLM 调用，
 //! 由调用方按需启用）。
 //!
+//! 可见性：`pub(crate)`——无运行时调用者，属保留工具模块；由外部评测
+//! 驱动（CLI 或测试）按需启用时再升为 `pub`。
+//!
 //! 用法：
 //! ```ignore
 //! let judge = AnswerJudge::new(model_service, "gpt-4");
 //! let eval = judge.evaluate("问题", "回答", None).await?;
 //! println!("总分: {}", eval.overall_score);
 //! ```
+
+// 离线基准工具：pub(crate) 下无 crate 内调用者，模块整体豁免 dead_code /
+// unused_imports（API 保留供外部评测驱动；激活时删除本豁免）。
+#![allow(dead_code, unused_imports)]
 
 mod golden;
 mod judge;

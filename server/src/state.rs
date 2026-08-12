@@ -4,7 +4,7 @@
 //! 构建逻辑已委托给 AgentBuilderFactory。
 
 // 标准库
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // 外部 crate
 use tokio::sync::RwLock;
@@ -27,11 +27,71 @@ use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
 use crate::agent_builder::{create_model_services, AgentBuilderFactory};
+use crate::api::clipboard::types::PendingCapture;
 use crate::mcp_bridge::McpToolManager;
 
 /// 构造模型服务创建错误（统一错误前缀，避免调用点重复拼装）。
 fn model_services_error(e: impl std::fmt::Display) -> TianyanError {
     TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{e}"))
+}
+
+// ── 模型解析单一入口（组合根去重） ────────────────────────────────────────
+//
+// 全 server 各装配点（state.rs 工厂、agent_builder.rs、scheduler 任务注册）
+// 的"从配置解析能力模型名"统一收敛于此，消除 6 份重复解析。
+
+/// 解析 Chat 能力模型名（未配置时空串，由下游取默认）。
+pub(crate) fn resolve_chat_model(config: &TianyanConfig) -> String {
+    config
+        .models
+        .resolve(tianyan::config::ModelCapability::Chat)
+        .map(|r| r.model)
+        .unwrap_or_default()
+}
+
+/// 解析嵌入模型名（TextEmbedding 优先，回退 MultimodalEmbedding）。
+pub(crate) fn resolve_embedding_model(config: &TianyanConfig) -> String {
+    config
+        .models
+        .resolve(tianyan::config::ModelCapability::TextEmbedding)
+        .or_else(|| {
+            config
+                .models
+                .resolve(tianyan::config::ModelCapability::MultimodalEmbedding)
+        })
+        .map(|r| r.model)
+        .unwrap_or_default()
+}
+
+/// 解析 Vision 能力模型名。
+pub(crate) fn resolve_vision_model(config: &TianyanConfig) -> String {
+    config
+        .models
+        .resolve(tianyan::config::ModelCapability::Vision)
+        .map(|r| r.model)
+        .unwrap_or_default()
+}
+
+/// 构造知识导入器（唯一构造点：state.rs 工厂与 agent_builder 共用）。
+pub(crate) fn build_knowledge_ingestor(
+    config: &TianyanConfig,
+    model_services: &tianyan::model::ModelServices,
+    vfs: Arc<dyn tianyan::vfs::VirtualFileSystem>,
+) -> KnowledgeIngestor {
+    let chat_model = resolve_chat_model(config);
+    let embedding_model = resolve_embedding_model(config);
+    let vision_model = resolve_vision_model(config);
+
+    KnowledgeIngestor::new(
+        IngestorConfig::new()
+            .with_embedding_model(&embedding_model)
+            .with_summary_model(&chat_model)
+            .with_vision_model(&vision_model),
+        model_services.chat.clone(),
+        model_services.embedding.clone(),
+        model_services.vision.clone(),
+        vfs,
+    )
 }
 
 // 类型别名
@@ -107,6 +167,12 @@ pub struct AppState {
     ///
     /// 流式请求据此取消进行中的 AgentLoop，使优雅关停不被长连接阻塞。
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+    /// 剪贴板 outbox（agent `clipboard_write` 工具 → tauri 轮询消费）。
+    ///
+    /// 挂载于 AppState：配置热更新只重建 agent，此状态跨请求/跨重载保持。
+    clipboard_outbox: Arc<Mutex<Vec<String>>>,
+    /// 剪贴板 pending（capture 存 → 前端确认（respond）消费）。
+    clipboard_pending: Arc<RwLock<Option<PendingCapture>>>,
 }
 
 impl AppState {
@@ -142,6 +208,18 @@ impl AppState {
             cfg.skill_file_list_max_entries = sec.skill_file_list_max_entries;
             cfg.skill_http_timeout_secs = sec.skill_http_timeout_secs;
             cfg.skill_command_timeout_secs = sec.skill_command_timeout_secs;
+            // 双安全域统一接线：blocklist / 危险技能许可 / 路径白名单
+            // 与工具路径共用同一配置源（security 节）。
+            cfg.blocked_commands = if sec.blocked_commands.is_empty() {
+                tianyan::executor::DEFAULT_BLOCKED_COMMANDS
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            } else {
+                sec.blocked_commands.clone()
+            };
+            cfg.allow_dangerous_operations = sec.allow_dangerous_skills;
+            cfg.allowed_paths = sec.allowed_directories.clone();
             cfg
         };
         register_builtin_skills(&mut skill_registry, &skill_config);
@@ -167,10 +245,8 @@ impl AppState {
         let usage_stats = UsageStats::new(sqlite_db.clone())?;
 
         // 初始化结构化 Trace（G6：span 持久化与回放；失败仅告警）
-        let trace_collector =
-            tianyan::observability::trace::TraceCollector::new(sqlite_db.clone()).map_err(|e| {
-                TianyanError::Custom(format!("TraceCollector 初始化失败：{e}"))
-            })?;
+        let trace_collector = tianyan::observability::trace::TraceCollector::new(sqlite_db.clone())
+            .map_err(|e| TianyanError::Custom(format!("TraceCollector 初始化失败：{e}")))?;
 
         // 初始化工作区快照管理器（配置了 working_directory 时启用）
         let snapshot_manager = config.agent.working_directory.clone().map(|workdir| {
@@ -236,7 +312,19 @@ impl AppState {
             sqlite_db,
             event_bus: Arc::new(tianyan::events::EventBus::new()),
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            clipboard_outbox: Arc::new(Mutex::new(Vec::new())),
+            clipboard_pending: Arc::new(RwLock::new(None)),
         })
+    }
+
+    /// 获取剪贴板 outbox 句柄。
+    pub fn clipboard_outbox(&self) -> Arc<Mutex<Vec<String>>> {
+        self.clipboard_outbox.clone()
+    }
+
+    /// 获取剪贴板 pending 句柄。
+    pub fn clipboard_pending(&self) -> Arc<RwLock<Option<PendingCapture>>> {
+        self.clipboard_pending.clone()
     }
 
     /// 服务关停标志（Ctrl+C / SIGTERM / 桌面端退出时置位）。
@@ -385,7 +473,9 @@ impl AppState {
     }
 
     /// 获取共享模型服务（配置热更新后自动指向新实例）。
-    async fn shared_model_services(&self) -> TianyanResult<tianyan::model::ModelServices> {
+    pub(crate) async fn shared_model_services(
+        &self,
+    ) -> TianyanResult<tianyan::model::ModelServices> {
         Ok(self.model_services.read().await.clone())
     }
 
@@ -400,14 +490,8 @@ impl AppState {
     /// * `TianyanResult<Arc<SummaryEngine>>` - 摘要引擎实例
     pub async fn create_summary_engine(&self) -> TianyanResult<Arc<SummaryEngine>> {
         let config = self.config.read().await.clone();
-
         let model_services = self.shared_model_services().await?;
-
-        let chat_model = config
-            .models
-            .resolve(tianyan::config::ModelCapability::Chat)
-            .map(|r| r.model)
-            .unwrap_or_default();
+        let chat_model = resolve_chat_model(&config);
         // 创建 SummaryEngine
         let summary_engine = SummaryEngine::new(model_services.chat, &chat_model);
 
@@ -420,14 +504,8 @@ impl AppState {
     /// * `TianyanResult<Arc<MemoryExtractor>>` - 记忆提取器实例
     pub async fn create_memory_extractor(&self) -> TianyanResult<Arc<MemoryExtractor>> {
         let config = self.config.read().await.clone();
-
         let model_services = self.shared_model_services().await?;
-
-        let chat_model = config
-            .models
-            .resolve(tianyan::config::ModelCapability::Chat)
-            .map(|r| r.model)
-            .unwrap_or_default();
+        let chat_model = resolve_chat_model(&config);
 
         let extractor = MemoryExtractor::new(
             model_services.chat,
@@ -439,46 +517,13 @@ impl AppState {
         Ok(Arc::new(extractor))
     }
 
-    /// 创建知识导入器（复用共享模型服务）。
+    /// 创建知识导入器（复用共享模型服务与唯一构造点 [`build_knowledge_ingestor`]）。
     pub async fn create_knowledge_ingestor(&self) -> TianyanResult<KnowledgeIngestor> {
         let config = self.config.read().await.clone();
-
         let model_services = self.shared_model_services().await?;
-
         let vfs: Arc<dyn tianyan::vfs::VirtualFileSystem> = self.vfs.clone();
 
-        let chat_model = config
-            .models
-            .resolve(tianyan::config::ModelCapability::Chat)
-            .map(|r| r.model)
-            .unwrap_or_default();
-        let embedding_model = config
-            .models
-            .resolve(tianyan::config::ModelCapability::TextEmbedding)
-            .or_else(|| {
-                config
-                    .models
-                    .resolve(tianyan::config::ModelCapability::MultimodalEmbedding)
-            })
-            .map(|r| r.model)
-            .unwrap_or_default();
-        let vision_model = config
-            .models
-            .resolve(tianyan::config::ModelCapability::Vision)
-            .map(|r| r.model)
-            .unwrap_or_default();
-
-        let ingestor = KnowledgeIngestor::new(
-            IngestorConfig::new()
-                .with_embedding_model(&embedding_model)
-                .with_summary_model(&chat_model)
-                .with_vision_model(&vision_model),
-            model_services.chat,
-            model_services.embedding,
-            model_services.vision,
-            vfs,
-        );
-        Ok(ingestor)
+        Ok(build_knowledge_ingestor(&config, &model_services, vfs))
     }
 
     /// 优雅关闭应用
@@ -494,6 +539,10 @@ impl AppState {
         tracing::info!("开始关闭应用...");
         // 断开所有 MCP 服务器连接（显式 shutdown，McpClient::drop 不会自动清理子进程）
         self.mcp_tools.shutdown().await;
+        // 使用统计落盘（flush + PRAGMA optimize；失败不阻断关闭）
+        if let Err(e) = self.usage_stats.shutdown().await {
+            tracing::warn!(error = %e, "使用统计刷盘失败");
+        }
         tracing::info!("应用已关闭");
         Ok(())
     }

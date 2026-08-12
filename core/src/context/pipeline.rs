@@ -292,8 +292,6 @@ mod tests {
         SearchResult {
             uri: uri.clone(),
             score,
-            matched_level: ContentLevel::Abstract,
-            content: None,
         }
     }
 

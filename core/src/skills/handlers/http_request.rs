@@ -6,10 +6,14 @@ use serde_json::Value;
 
 use crate::common::error::{Result, TianyanError};
 
+use crate::executor::web::validate_public_url;
 use crate::skills::definition::SkillHandler;
 use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 
 /// HTTP 请求处理器。
+///
+/// SSRF 防护委托 [`validate_public_url`]（与 web_fetch 工具同实现），
+/// 请求执行保留本层（reqwest client 配置为技能契约）。
 pub struct HttpRequestHandler {
     client: reqwest::Client,
 }
@@ -52,49 +56,8 @@ impl SkillHandler for HttpRequestHandler {
             .and_then(|v| v.as_str())
             .ok_or_else(|| TianyanError::Custom("[http_request] 缺少 'url' 参数".to_string()))?;
 
-        if let Ok(parsed) = url.parse::<reqwest::Url>() {
-            let scheme = parsed.scheme();
-            if scheme != "http" && scheme != "https" {
-                return Err(TianyanError::Custom(format!(
-                    "操作不被允许：不支持的 URL 协议: {}",
-                    scheme
-                )));
-            }
-            if let Some(host) = parsed.host_str() {
-                // host_str() 返回原始切片：IPv6 带方括号（[::1]），先去掉再判断
-                let lower = host
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_lowercase();
-                // IPv4/IPv6 回环、未指定地址与私网/链路本地地址一律禁止，
-                // 防止 SSRF 访问本地服务（127.0.0.1、::1、10/8、172.16/12、192.168/16、
-                // 0.0.0.0、fe80:: 链路本地、fc00::/7 唯一本地地址）。
-                let is_ipv6_loopback = lower == "::1";
-                let is_ipv6_unspecified = lower == "::";
-                let is_ipv6_private =
-                    lower.contains(':') && (lower.starts_with("fc") || lower.starts_with("fd"));
-                let is_ipv6_link_local = lower.starts_with("fe80:");
-                if lower == "localhost"
-                    || lower.starts_with("127.")
-                    || lower.starts_with("192.168.")
-                    || lower.starts_with("10.")
-                    || lower.starts_with("172.")
-                    || lower.starts_with("0.")
-                    || is_ipv6_loopback
-                    || is_ipv6_unspecified
-                    || is_ipv6_private
-                    || is_ipv6_link_local
-                {
-                    return Err(TianyanError::Custom(
-                        "操作不被允许：禁止访问本地或内网地址".to_string(),
-                    ));
-                }
-            }
-        } else {
-            return Err(TianyanError::Custom(
-                "[http_request] 无效的 URL 格式".to_string(),
-            ));
-        }
+        // SSRF 防护（与 web_fetch 同策略，统一委托 executor::web::validate_public_url）
+        validate_public_url(url)?;
 
         let method = params
             .get("method")

@@ -2,6 +2,12 @@ use crate::common::error::TianyanError;
 use crate::config::{SafetyMode, SecurityConfig};
 use crate::executor::command::{extract_command_base, DEFAULT_COMMAND_TIMEOUT_SECS};
 
+/// 默认禁止命令——工具路径（[`SecurityPolicy`]）与技能路径（`ExecutorConfig`）
+/// 共享的单一默认源（空配置时的兜底）。与工具侧既有默认一致，技能侧
+/// 此前硬编码的更宽列表（python/curl 等）已收敛到本单一来源。
+pub const DEFAULT_BLOCKED_COMMANDS: &[&str] =
+    &["rm", "del", "format", "rmdir", "rd", "shutdown", "taskkill"];
+
 /// Executor 安全策略。
 #[derive(Debug, Clone)]
 pub struct SecurityPolicy {
@@ -31,15 +37,10 @@ impl SecurityPolicy {
     /// 从用户安全配置创建 SecurityPolicy。
     pub fn from_config(config: &SecurityConfig) -> Self {
         let blocked = if config.blocked_commands.is_empty() {
-            vec![
-                "rm".to_string(),
-                "del".to_string(),
-                "format".to_string(),
-                "rmdir".to_string(),
-                "rd".to_string(),
-                "shutdown".to_string(),
-                "taskkill".to_string(),
-            ]
+            DEFAULT_BLOCKED_COMMANDS
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
         } else {
             config.blocked_commands.clone()
         };

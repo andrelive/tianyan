@@ -1,6 +1,6 @@
 //! 剪贴板服务：配置门控的捕获处理、记忆/知识沉淀、pending 与 outbox 状态。
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::RwLock;
 
@@ -21,46 +21,32 @@ const MEMORY_ABSTRACT_MAX_CHARS: usize = 300;
 /// 知识库导入使用的文件名（内容为剪贴板文本，无真实磁盘文件）。
 const KNOWLEDGE_CLIPBOARD_FILENAME: &str = "clipboard.txt";
 
-/// 模块级 outbox 句柄：agent `clipboard_write` 工具写入 → tauri 轮询消费。
-///
-/// 先模块级共享（集成者决定后续是否挂载到 AppState；句柄经
-/// [`ClipboardService::outbox_handle`] 对外暴露）。
-pub(crate) fn shared_outbox() -> Arc<Mutex<Vec<String>>> {
-    static OUTBOX: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
-    OUTBOX
-        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
-        .clone()
-}
-
-/// 模块级 pending 句柄：capture 存 → 前端确认（respond）消费。
-pub(crate) fn shared_pending() -> Arc<RwLock<Option<PendingCapture>>> {
-    static PENDING: OnceLock<Arc<RwLock<Option<PendingCapture>>>> = OnceLock::new();
-    PENDING.get_or_init(|| Arc::new(RwLock::new(None))).clone()
-}
-
 /// 剪贴板服务。
 ///
 /// 职责边界：配置门控（`clipboard.enabled` / `auto_capture`）、
 /// 沉淀落盘（记忆/知识库）、pending 与 outbox 的存取。
-/// pending 与 outbox 为模块级共享状态，跨请求保持。
+/// pending 与 outbox 句柄由调用方（`AppState`）注入——跨请求保持，
+/// 配置热更新不重建。
 pub struct ClipboardService {
     vfs: Arc<dyn VirtualFileSystem>,
+    /// outbox：agent `clipboard_write` 工具写入 → tauri 轮询消费。
+    outbox: Arc<Mutex<Vec<String>>>,
+    /// pending：capture 存 → 前端确认（respond）消费。
+    pending: Arc<RwLock<Option<PendingCapture>>>,
 }
 
 impl ClipboardService {
-    /// 创建服务（持有 VFS 用于沉淀写入）。
-    pub fn new(vfs: Arc<dyn VirtualFileSystem>) -> Self {
-        Self { vfs }
-    }
-
-    /// 获取模块级 outbox 句柄（动态工具与集成者共享）。
-    pub fn outbox_handle() -> Arc<Mutex<Vec<String>>> {
-        shared_outbox()
-    }
-
-    /// 获取模块级 pending 句柄。
-    pub fn pending_handle() -> Arc<RwLock<Option<PendingCapture>>> {
-        shared_pending()
+    /// 创建服务（持有 VFS 用于沉淀写入 + AppState 注入的共享状态句柄）。
+    pub fn new(
+        vfs: Arc<dyn VirtualFileSystem>,
+        outbox: Arc<Mutex<Vec<String>>>,
+        pending: Arc<RwLock<Option<PendingCapture>>>,
+    ) -> Self {
+        Self {
+            vfs,
+            outbox,
+            pending,
+        }
     }
 
     /// 处理捕获：配置门控 → auto_capture 直接沉淀，否则存 pending。
@@ -106,7 +92,7 @@ impl ClipboardService {
             text: text.to_string(),
             captured_at: chrono::Utc::now().to_rfc3339(),
         };
-        *shared_pending().write().await = Some(pending.clone());
+        *self.pending.write().await = Some(pending.clone());
         Ok(Some(CaptureResponse {
             status: "pending".to_string(),
             pending: Some(pending),
@@ -125,7 +111,7 @@ impl ClipboardService {
     ) -> Result<serde_json::Value, ApiError> {
         let text = match request.text {
             Some(t) if !t.trim().is_empty() => t,
-            _ => match shared_pending().read().await.as_ref() {
+            _ => match self.pending.read().await.as_ref() {
                 Some(p) => p.text.clone(),
                 None => {
                     return Err(ApiError::BadRequest(
@@ -151,26 +137,25 @@ impl ClipboardService {
                         .with_source(ContentSource::ExternalImport)
                         .with_tags(vec!["clipboard".to_string()]),
                     )
-                    .await
-                    .map_err(|e| ApiError::Internal(format!("剪贴板沉淀到知识库失败：{e}")))?;
+                    .await?;
                 ("ingested", Some(result.uri.to_string()))
             }
             RespondAction::Ignore => ("ignored", None),
         };
 
         // 无论何种动作，pending 一次性消费
-        *shared_pending().write().await = None;
+        *self.pending.write().await = None;
         Ok(serde_json::json!({ "status": status, "uri": uri }))
     }
 
     /// 读取当前待确认捕获（无则 `None`）。
     pub async fn get_pending(&self) -> Option<PendingCapture> {
-        shared_pending().read().await.clone()
+        self.pending.read().await.clone()
     }
 
     /// 把文本推入 outbox（agent `clipboard_write` 工具调用）。
     pub fn outbox_push(&self, content: String) {
-        shared_outbox()
+        self.outbox
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(content);
@@ -178,8 +163,7 @@ impl ClipboardService {
 
     /// 取出 outbox 全部内容（tauri 轮询消费；取后清空，防重复写出）。
     pub fn outbox_drain(&self) -> Vec<String> {
-        let outbox = shared_outbox();
-        let mut guard = outbox.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.outbox.lock().unwrap_or_else(|p| p.into_inner());
         std::mem::take(&mut *guard)
     }
 }
@@ -201,14 +185,10 @@ async fn store_memory(
         ],
     );
 
-    vfs.write_content(&uri, text)
-        .await
-        .map_err(|e| ApiError::Internal(format!("剪贴板记忆写入失败（Detail）：{e}")))?;
+    vfs.write_content(&uri, text).await?;
 
     let abstract_content: String = text.chars().take(MEMORY_ABSTRACT_MAX_CHARS).collect();
-    vfs.write_abstract(&uri, &abstract_content)
-        .await
-        .map_err(|e| ApiError::Internal(format!("剪贴板记忆写入失败（Abstract）：{e}")))?;
+    vfs.write_abstract(&uri, &abstract_content).await?;
 
     tracing::info!(uri = %uri, bytes = text.len(), "剪贴板内容已沉淀到记忆");
     Ok(uri)

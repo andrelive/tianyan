@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use tokio::time::timeout;
 
 use crate::common::error::{Result, TianyanError};
-use crate::executor::security::{check_path_rules, PathCheckOutcome};
+use crate::executor::security::{check_path_rules, PathCheckOutcome, DEFAULT_BLOCKED_COMMANDS};
 
 use super::definition::{Skill, SkillRegistry};
 use super::types::{ExecutionContext, SecurityLevel, SkillExecutionRequest, SkillExecutionResult};
@@ -58,22 +58,11 @@ impl Default for ExecutorConfig {
             max_output_size: 10 * 1024 * 1024, // 10MB
             allow_dangerous_operations: false,
             working_directory: None,
-            blocked_commands: vec![
-                "rm".to_string(),
-                "del".to_string(),
-                "format".to_string(),
-                "mkfs".to_string(),
-                "dd".to_string(),
-                "shutdown".to_string(),
-                "reboot".to_string(),
-                "powershell".to_string(),
-                "python".to_string(),
-                "python3".to_string(),
-                "curl".to_string(),
-                "wget".to_string(),
-                "nc".to_string(),
-                "netcat".to_string(),
-            ],
+            // 与工具路径共享单一默认源（SecurityPolicy::from_config 同源）
+            blocked_commands: DEFAULT_BLOCKED_COMMANDS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             allowed_paths: Vec::new(),
             skill_file_read_max_size: 50 * 1024 * 1024,
             skill_file_read_timeout_secs: 30,
@@ -298,40 +287,26 @@ impl SkillExecutor {
     }
 
     /// 执行安全检查。
+    ///
+    /// 安全域与工具路径统一（候选 2）：危险判定只由 [`SecurityLevel`] 门控
+    /// （Safe/Moderate 放行、Dangerous 需显式许可），命令拦截由 handler 的
+    /// blocklist（与工具路径共享 [`DEFAULT_BLOCKED_COMMANDS`] 源）承担；
+    /// 参数内容注入扫描已移除——它与工具路径（execute_write_file 等）语义
+    /// 分歧，且误伤合法内容（如写入含 `&&` 的脚本）。
     fn security_check(
         &self,
         skill: &Skill,
-        params: &HashMap<String, Value>,
+        _params: &HashMap<String, Value>,
         _context: &ExecutionContext,
     ) -> Result<()> {
         match skill.security_level {
-            SecurityLevel::Safe => {
-                // 安全操作始终允许
-                Ok(())
-            }
-            SecurityLevel::Moderate => {
-                // 中等风险操作需要一些检查
-                if !self.config.allow_dangerous_operations {
-                    // 检查潜在危险的参数值
-                    for value in params.values() {
-                        if let Value::String(s) = value {
-                            // 检查命令注入模式
-                            let dangerous_patterns = [
-                                "&&", "||", "|", ";", "`", "$()", ">>", ">", "<", "$(", "${",
-                                "eval", "exec",
-                            ];
-                            if dangerous_patterns.iter().any(|p| s.contains(p)) {
-                                return Err(TianyanError::Custom(
-                                    "操作不被允许：检测到潜在危险的参数值".to_string(),
-                                ));
-                            }
-                        }
-                    }
-                }
+            SecurityLevel::Safe | SecurityLevel::Moderate => {
+                // 安全/中等风险操作放行：参数 schema 校验 + handler 沙箱
+                // （allowed_paths / max_size / blocklist）已承担管控。
                 Ok(())
             }
             SecurityLevel::Dangerous => {
-                // 危险操作需要明确允许
+                // 危险操作需要明确允许（配置 security.allow_dangerous_skills）
                 if !self.config.allow_dangerous_operations {
                     return Err(TianyanError::Custom(format!(
                         "操作不被允许：技能 '{}' 需要危险操作权限，当前未允许",

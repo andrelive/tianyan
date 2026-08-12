@@ -8,7 +8,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::Utc;
 use ring::digest::{Context, SHA256};
 
 use crate::common::error::Result;
@@ -19,9 +18,7 @@ use crate::vfs::{ContextEntry, SummaryEngine, VirtualFileSystem};
 
 use super::image::{ImageAnalyzer, ImageProcessor, ImageProcessorConfig};
 use super::parser::CompositeParser;
-use super::types::{
-    DocumentType, IngestionRequest, IngestionResult, KnowledgeCategory, KnowledgeMetadata,
-};
+use super::types::{DocumentType, IngestionRequest, IngestionResult, KnowledgeCategory};
 
 /// 知识导入器配置。
 #[derive(Debug, Clone)]
@@ -165,12 +162,12 @@ impl KnowledgeIngestor {
             });
         }
 
-        let (text_content, visual_embedding, _metadata) = match doc_type {
-            DocumentType::Image => self.process_image(&request, &doc_id).await?,
+        let (text_content, visual_embedding) = match doc_type {
+            DocumentType::Image => self.process_image(&request).await?,
             _ => self
-                .process_document(&request, &doc_id, &doc_type)
+                .process_document(&request)
                 .await
-                .map(|(t, m)| (t, None, m))?,
+                .map(|text| (text, None))?,
         };
 
         let (abstract_content, overview_content) = if self.config.generate_summaries {
@@ -197,12 +194,10 @@ impl KnowledgeIngestor {
         self.vfs.write_overview(&uri, &overview_content).await?;
         self.vfs.write_content(&uri, &text_content).await?;
 
-        // 将自定义元数据（content_hash 等）写入 VFS
-        let mut custom_meta = std::collections::HashMap::new();
-        custom_meta.insert("content_hash".to_string(), serde_json::json!(content_hash));
-        self.vfs.update_metadata(&uri, 0.5, custom_meta).await?;
-
-        // 构建向量 payload（包含完整元数据，用于搜索发现）
+        // （content_hash 等自定义元数据随下方 index_entry 的向量 payload
+        // 一次写入——旧版先 update_metadata 再 index_entry 的双 upsert 中，
+        // 前置写入会被后者的整体 upsert 覆盖，属冗余双写，已移除；
+        // 未启用 embeddings 时不存在可检索的向量点，payload 写入无消费方）
         let payload = {
             let mut e = ContextEntry::new_file(uri.clone());
             e.abstract_content = Some(abstract_content.clone());
@@ -241,41 +236,19 @@ impl KnowledgeIngestor {
     }
 
     /// 处理文档（非图像）：解析为纯文本。
-    async fn process_document(
-        &self,
-        request: &IngestionRequest,
-        doc_id: &str,
-        doc_type: &DocumentType,
-    ) -> Result<(String, KnowledgeMetadata)> {
+    async fn process_document(&self, request: &IngestionRequest) -> Result<String> {
         let parsed = self
             .parser
             .parse_file(&request.content, Path::new(&request.filename))?;
 
-        let metadata = KnowledgeMetadata {
-            document_id: doc_id.to_string(),
-            original_name: request.filename.clone(),
-            doc_type: *doc_type,
-            category: self.infer_category(doc_type, &request.filename),
-            source: request.source,
-            file_size: request.content.len() as u64,
-            content_hash: self.calculate_hash(&request.content),
-            tags: request.tags.clone(),
-            language: parsed.language,
-            total_tokens: estimate_tokens(&parsed.text),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            importance: 0.5,
-        };
-
-        Ok((parsed.text, metadata))
+        Ok(parsed.text)
     }
 
     /// 处理图像：VLM 分析 → 统一文本表示 → 视觉嵌入向量。
     async fn process_image(
         &self,
         request: &IngestionRequest,
-        doc_id: &str,
-    ) -> Result<(String, Option<Vec<f32>>, KnowledgeMetadata)> {
+    ) -> Result<(String, Option<Vec<f32>>)> {
         let _processed = self
             .image_processor
             .process(&request.content, &request.filename)?;
@@ -295,27 +268,7 @@ impl KnowledgeIngestor {
             None
         };
 
-        let metadata = KnowledgeMetadata {
-            document_id: doc_id.to_string(),
-            original_name: request.filename.clone(),
-            doc_type: DocumentType::Image,
-            category: self.infer_image_category(&analysis.image_type),
-            source: request.source,
-            file_size: request.content.len() as u64,
-            content_hash: self.calculate_hash(&request.content),
-            tags: [request.tags.clone(), analysis.tags.clone()].concat(),
-            language: None,
-            total_tokens: estimate_tokens(&unified.combined_text),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            importance: 0.5,
-        };
-
-        Ok((
-            unified.combined_text,
-            visual_embedding.map(|e| e.vector),
-            metadata,
-        ))
+        Ok((unified.combined_text, visual_embedding.map(|e| e.vector)))
     }
 
     /// 为内容生成分层摘要。
@@ -375,19 +328,6 @@ impl KnowledgeIngestor {
                     KnowledgeCategory::Other
                 }
             }
-        }
-    }
-
-    /// 从图像类型推断分类。
-    fn infer_image_category(&self, image_type: &super::image::ImageType) -> KnowledgeCategory {
-        match image_type {
-            super::image::ImageType::Screenshot => KnowledgeCategory::Screenshots,
-            super::image::ImageType::Photo => KnowledgeCategory::Photos,
-            super::image::ImageType::Diagram => KnowledgeCategory::Diagrams,
-            super::image::ImageType::Chart => KnowledgeCategory::Diagrams,
-            super::image::ImageType::CodeScreenshot => KnowledgeCategory::CodeSnippets,
-            super::image::ImageType::DocumentScan => KnowledgeCategory::Technical,
-            _ => KnowledgeCategory::Other,
         }
     }
 

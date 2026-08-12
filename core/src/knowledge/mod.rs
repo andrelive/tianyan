@@ -39,7 +39,6 @@ pub use parser::{
 };
 pub use types::{
     DocumentType, IngestionRequest, IngestionResult, KnowledgeCategory, KnowledgeDocument,
-    KnowledgeMetadata,
 };
 
 #[cfg(test)]

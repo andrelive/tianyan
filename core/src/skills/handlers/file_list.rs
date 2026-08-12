@@ -5,13 +5,17 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::common::error::{Result, TianyanError};
+use crate::common::error::Result;
 
+use crate::executor::fs::execute_list_dir;
 use crate::skills::definition::SkillHandler;
 use crate::skills::executor::validate_path;
 use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 
 /// 文件列表处理器。
+///
+/// 薄 adapter：沙箱（allowed_paths / max_entries / timeout）与文本输出契约在此层，
+/// 实际列举委托 [`execute_list_dir`]（目录优先排序、分页——与 list_dir 工具同实现）。
 pub struct FileListHandler {
     allowed_paths: Vec<PathBuf>,
     /// 单次列表最大条目数，默认 10000。
@@ -64,30 +68,16 @@ impl SkillHandler for FileListHandler {
         validate_path(&path, &self.allowed_paths)?;
 
         let timeout = Duration::from_secs(self.timeout_secs);
-        let list_op = async {
-            match tokio::fs::read_dir(&path).await {
-                Ok(mut entries) => {
-                    let mut files = Vec::new();
-                    while let Ok(Some(entry)) = entries.next_entry().await {
-                        if files.len() >= self.max_entries {
-                            files.push("... (已达到条目上限)".to_string());
-                            break;
-                        }
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
-                        files.push(if is_dir { format!("{}/", name) } else { name });
-                    }
-                    Ok(files)
-                }
-                Err(e) => Err(TianyanError::Custom(format!(
-                    "技能执行错误：列出目录失败: {}",
-                    e
-                ))),
-            }
-        };
-
+        let list_op = execute_list_dir(&path, None, Some(self.max_entries));
         match tokio::time::timeout(timeout, list_op).await {
-            Ok(Ok(files)) => Ok(super::result_success(files.join("\n"), start)),
+            Ok(Ok(output)) => {
+                let mut lines: Vec<String> =
+                    output.entries.iter().map(|e| e.name.clone()).collect();
+                if output.truncated {
+                    lines.push("... (已达到条目上限)".to_string());
+                }
+                Ok(super::result_success(lines.join("\n"), start))
+            }
             Ok(Err(e)) => Ok(super::result_failure(e.to_string(), start)),
             Err(_) => Ok(super::result_timeout(self.timeout_secs, start)),
         }
@@ -202,8 +192,8 @@ mod tests {
             .unwrap();
         assert!(!result.success);
         assert!(
-            result.error.as_deref().unwrap().contains("列出目录失败"),
-            "错误信息应说明列目录失败: {:?}",
+            result.error.as_deref().unwrap().contains("目录不存在"),
+            "错误信息应说明目录不存在: {:?}",
             result.error
         );
     }

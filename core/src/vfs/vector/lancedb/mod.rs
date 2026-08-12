@@ -298,7 +298,7 @@ impl VectorStorage for LanceDbVectorStore {
     async fn search_fused(
         &self,
         query_vector: Vec<f32>,
-        vector_names: &[&str],
+        vector_types: &[VectorType],
         top_k: usize,
         category_filter: Option<&str>,
         min_score: Option<f32>,
@@ -306,7 +306,7 @@ impl VectorStorage for LanceDbVectorStore {
         /// RRF 常数 k，用于平滑排序差异（标准值为 60）。
         const RRF_K: f32 = 60.0;
 
-        if vector_names.is_empty() {
+        if vector_types.is_empty() {
             return Ok(vec![]);
         }
 
@@ -317,13 +317,8 @@ impl VectorStorage for LanceDbVectorStore {
         // 供 ContentLoadStrategy 的绝对阈值（0.6/0.85）使用。
         let mut merged: HashMap<String, (f32, f32, VectorSearchResult)> = HashMap::new();
 
-        for &vec_name in vector_names {
-            let column = batch::vector_column_name(match vec_name {
-                "abstract" => VectorType::Abstract,
-                "overview" => VectorType::Overview,
-                "visual" => VectorType::Visual,
-                _ => continue,
-            });
+        for &vec_type in vector_types {
+            let column = batch::vector_column_name(vec_type);
 
             let stream = match self
                 .table

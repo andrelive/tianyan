@@ -55,8 +55,6 @@ async fn test_search_knowledge_success_surfaces_vfs_results() {
         .with_search_results(vec![SearchResult {
             uri: uri.clone(),
             score: 0.9,
-            matched_level: ContentLevel::Abstract,
-            content: Some("abstract text".to_string()),
         }])
         .build();
     let registry = ToolRegistry::new(default_strict_policy()).with_vfs(Arc::new(vfs));

@@ -1,16 +1,20 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::common::error::{Result, TianyanError};
 
+use crate::executor::execute_command_action;
 use crate::skills::definition::SkillHandler;
 use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 
 /// 系统命令处理器。
+///
+/// 薄 adapter：blocklist 检查（待并入统一安全域）与结果映射在此层，
+/// 实际执行委托 [`execute_command_action`]（跨平台 shell 派生、输出管道读取、
+/// 超时强杀——与 execute_command 工具同实现）。
 pub struct SystemCommandHandler {
     blocked_commands: Vec<String>,
     /// 命令执行超时（秒），默认 300。
@@ -63,71 +67,59 @@ impl SkillHandler for SystemCommandHandler {
             }
         }
 
-        let working_dir = context.working_directory.as_ref().map(PathBuf::from);
+        let working_dir = context.working_directory.clone();
 
-        let timeout = Duration::from_secs(self.timeout_secs);
-        let cmd_op = async {
-            if cfg!(target_os = "windows") {
-                tokio::process::Command::new("cmd")
-                    .args(["/C", command])
-                    .current_dir(working_dir.unwrap_or_else(|| {
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                    }))
-                    .output()
-                    .await
-            } else {
-                tokio::process::Command::new("sh")
-                    .args(["-c", command])
-                    .current_dir(working_dir.unwrap_or_else(|| {
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                    }))
-                    .output()
-                    .await
-            }
-        };
-
-        match tokio::time::timeout(timeout, cmd_op).await {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        match execute_command_action(command, working_dir.as_deref(), Some(self.timeout_secs)).await
+        {
+            Ok(output) => {
+                let stdout = output["stdout"].as_str().unwrap_or("");
+                let stderr = output["stderr"].as_str().unwrap_or("");
+                let exit_code = output["exit_code"].as_i64().unwrap_or(-1);
 
                 let combined_output = if stderr.is_empty() {
-                    stdout.clone()
+                    stdout.to_string()
                 } else if stdout.is_empty() {
-                    stderr.clone()
+                    stderr.to_string()
                 } else {
                     format!("{}\n{}", stdout, stderr)
                 };
 
                 Ok(SkillExecutionResult {
-                    success: output.status.success(),
+                    success: exit_code == 0,
                     output: Some(combined_output),
-                    error: if output.status.success() {
+                    error: if exit_code == 0 {
                         None
+                    } else if stderr.is_empty() {
+                        Some(format!("命令退出码 {}", exit_code))
                     } else {
-                        Some(stderr)
+                        Some(stderr.to_string())
                     },
-                    exit_code: output.status.code(),
+                    exit_code: Some(exit_code as i32),
                     execution_time_ms: start.elapsed().as_millis() as u64,
                     data: HashMap::new(),
                 })
             }
-            Ok(Err(e)) => Ok(SkillExecutionResult {
-                success: false,
-                output: None,
-                error: Some(format!("执行命令失败: {}", e)),
-                exit_code: None,
-                execution_time_ms: start.elapsed().as_millis() as u64,
-                data: HashMap::new(),
-            }),
-            Err(_) => Ok(SkillExecutionResult {
-                success: false,
-                output: None,
-                error: Some(format!("命令执行超时（超过 {} 秒）", self.timeout_secs)),
-                exit_code: None,
-                execution_time_ms: start.elapsed().as_millis() as u64,
-                data: HashMap::new(),
-            }),
+            Err(e) => {
+                if e.to_string().contains("执行超时") {
+                    Ok(SkillExecutionResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!("命令执行超时（超过 {} 秒）", self.timeout_secs)),
+                        exit_code: None,
+                        execution_time_ms: start.elapsed().as_millis() as u64,
+                        data: HashMap::new(),
+                    })
+                } else {
+                    Ok(SkillExecutionResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!("执行命令失败: {}", e)),
+                        exit_code: None,
+                        execution_time_ms: start.elapsed().as_millis() as u64,
+                        data: HashMap::new(),
+                    })
+                }
+            }
         }
     }
 

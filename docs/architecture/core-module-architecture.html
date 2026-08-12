@@ -791,9 +791,9 @@ table.tb .lvl{display:inline-block;font-size:10px;border-radius:4px;padding:1px 
       <text x="480" y="56" class="t1">② vfs.search</text>
       <text x="480" y="78" class="t2 mono">embed_single(query)</text>
       <text x="480" y="100" class="t2">→ LanceDb::search_fused</text>
-      <text x="480" y="122" class="t2">embedding 桥接：</text>
-      <text x="480" y="140" class="t2 mono">EmbeddingProvider（embedding_bridge.rs）</text>
-      <text x="480" y="162" class="t3">解耦 VFS 与模型层</text></g>
+      <text x="480" y="122" class="t2">嵌入服务直接注入：</text>
+      <text x="480" y="140" class="t2 mono">Arc&lt;dyn EmbeddingService&gt;（model 层，无桥接）</text>
+      <text x="480" y="162" class="t3">VFS 与模型层共享同一服务实例</text></g>
     <g class="edge"><path d="M760,105 C830,105 830,105 900,105" marker-end="url(#ar)"/></g>
     <g class="flowbox" id="r3"><rect x="900" y="30" width="240" height="150" rx="10"/><rect x="900" y="30" width="240" height="150" rx="10" fill="none" stroke="#8fa8d8" stroke-width="1.4"/>
       <text x="920" y="56" class="t1">③ abstract 列独立 ANN</text>
@@ -901,8 +901,8 @@ table.tb .lvl{display:inline-block;font-size:10px;border-radius:4px;padding:1px 
       <text x="320" y="772" class="t2 mono">vfs.create_file + write_abstract + write_overview + write_content（L0 / L1 / L2）</text></g>
     <g class="edge"><path d="M690,788 C690,806 690,806 690,824" marker-end="url(#ar)"/></g>
     <g class="flowbox" id="k-7"><rect x="470" y="824" width="440" height="52" rx="10"/>
-      <text x="490" y="846" class="t1">⑦ update_metadata（content_hash）</text>
-      <text x="490" y="864" class="t2">供后续增量检测</text></g>
+      <text x="490" y="846" class="t1">⑦ index_entry（content_hash 等 payload 一次写入）</text>
+      <text x="490" y="864" class="t2">向量 payload 随索引整体 upsert（update_metadata 已移除）</text></g>
     <g class="edge"><path d="M690,876 C690,896 690,896 690,914" marker-end="url(#ar)"/></g>
     <g class="flowbox" id="k-8"><rect x="340" y="914" width="700" height="62" rx="10"/><rect x="340" y="914" width="700" height="62" rx="10" fill="none" stroke="#fbbf24" stroke-width="1.6"/>
       <text x="360" y="940" class="t1" fill="#ffe9ad">⑧ store_embeddings → vfs.index_entry（）</text>
@@ -1039,11 +1039,11 @@ table.tb .lvl{display:inline-block;font-size:10px;border-radius:4px;padding:1px 
     <h3>核心 trait 接口（D 节）</h3>
     <table class="tb">
       <tr><th style="width:18%">Trait</th><th style="width:52%">方法</th><th>职责</th></tr>
-      <tr><td class="m">VfsCore</td><td class="m">initialize / exists / get_entry / create_directory / create_file / delete / list / move_entry / update_metadata / get_all_content_metadata</td><td>条目与目录操作</td></tr>
+      <tr><td class="m">VfsCore</td><td class="m">initialize / exists / get_entry / create_directory / create_file / delete / list / move_entry / get_all_content_metadata</td><td>条目与目录操作</td></tr>
       <tr><td class="m">ContentStore</td><td class="m">write / read / append / has_content　＋　便捷：write_content(L2) / write_abstract(L0) / write_overview(L1)</td><td>三层内容读写</td></tr>
       <tr><td class="m">VfsSearch</td><td class="m">search / search_by_visual / update_summary_vectors / index_entry</td><td>检索 + 向量索引（仅 2 向量化入口之一在此触发）</td></tr>
       <tr><td class="m">VirtualFileSystem</td><td class="m">VfsCore + ContentStore + VfsSearch + read_file / write_file / list_files 等</td><td>聚合门面</td></tr>
-      <tr><td class="m">EmbeddingProvider</td><td class="m">embed_single</td><td>embedding 桥接（embedding_bridge.rs 解耦 VFS 与模型层）</td></tr>
+      <tr><td class="m">EmbeddingService</td><td class="m">embed_single</td><td>VFS 直接注入 model::EmbeddingService（桥接已移除，单一实现）</td></tr>
       <tr><td class="m">AgentCoordinator</td><td class="m">process_message / process_message_stream / respond_approval / approval_status</td><td>agent 门面（respond_approval 对应 GUI 审批通道）</td></tr>
       <tr><td class="m">SessionManager</td><td class="m">get_session / add_structured_message / …</td><td>PersistentSessionManager / PlaceholderSessionManager</td></tr>
       <tr><td class="m">ChatService / EmbeddingService / VlmService / ServiceDiscovery</td><td class="m">chat_completion(_stream) / embed_single / embed_image / vision / is_available</td><td>ModelServices 容器聚合 3 个 Arc&lt;dyn&gt;</td></tr>

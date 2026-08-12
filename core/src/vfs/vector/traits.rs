@@ -49,7 +49,7 @@ pub trait VectorStorage: Send + Sync {
     async fn search_fused(
         &self,
         _query_vector: Vec<f32>,
-        _vector_names: &[&str],
+        _vector_types: &[VectorType],
         _top_k: usize,
         _category_filter: Option<&str>,
         _min_score: Option<f32>,
@@ -70,7 +70,7 @@ pub trait VectorStorage: Send + Sync {
     ) -> Result<Vec<VectorSearchResult>> {
         self.search_fused(
             query_vector,
-            &["abstract", "overview"],
+            &[VectorType::Abstract, VectorType::Overview],
             top_k,
             category_filter,
             None,

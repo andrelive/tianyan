@@ -12,7 +12,6 @@ use crate::agent::tool_params::{
 };
 use crate::common::error::TianyanError;
 use crate::common::types::Message;
-use crate::executor::approval::ApprovalDecision;
 use crate::executor::Action;
 use crate::model::types::ChatCompletionRequest;
 use crate::model::types::ToolCall;
@@ -68,32 +67,19 @@ impl ToolRegistry {
             safety_violation(self.security_policy.check_path(std::path::Path::new(cwd)))?;
         }
 
-        // Approval workflow check — auto-approve safe commands,
-        // auto-deny critical commands (rm, format, dd), request
-        // human approval for Medium/High risk commands.
-        // 子任务（subagent）：不挂起、不交互——未授权操作立即拒绝，
-        // 错误携带"需要主任务授权"标记，由主 agent 在主对话确认后重新委托。
-        if let Some(ref approval) = self.approval_workflow {
-            let action = Action::ExecuteCommand {
+        // 审批门控（自动放行安全命令/拒绝关键命令/请求人类确认，
+        // 统一序列见 [`ToolRegistry::ensure_approved`]；子任务非交互拒绝，
+        // 错误携带"需要主任务授权"标记，由主 agent 在主对话确认后重新委托）
+        self.ensure_approved(
+            session_id,
+            subagent,
+            &Action::ExecuteCommand {
                 command: params.command.clone(),
                 cwd: params.cwd.clone(),
                 timeout_secs: params.timeout_secs,
-            };
-            let resp = if subagent {
-                approval.request_approval_no_wait(session_id, &action).await
-            } else {
-                approval.request_approval(session_id, &action).await
-            }
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e)))?;
-            if resp.decision != ApprovalDecision::Approve {
-                // 记录待确认操作：用户通过"询问用户"链路批准后放行
-                self.remember_pending_approval(&action).await;
-                return Err(TianyanError::Custom(format!(
-                    "tool: 安全违规：操作需要用户确认：{}",
-                    resp.reason.unwrap_or_default()
-                )));
-            }
-        }
+            },
+        )
+        .await?;
         crate::executor::execute_command_action(
             &params.command,
             params.cwd.as_deref(),
@@ -153,15 +139,21 @@ impl ToolRegistry {
     }
 
     /// 执行 ask_user 工具：向用户追问。
+    ///
+    /// 语义归一：主循环（`loop.rs::handle_llm_response`）在工具执行前按名称
+    /// 拦截 ask_user 并转 `NeedsClarification`——本函数因此只在**子代理循环**
+    /// （delegation）可达。子代理不可交互追问：返回指导性结果（携带原问题），
+    /// 让子 LLM 基于已有上下文继续，而非收到误导性的错误字符串。
     pub(crate) async fn execute_ask_user(
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: AskUserParams = parse_params(arguments)?;
-        Err(TianyanError::Custom(format!(
-            "tool: 需要追问：{}",
-            params.question
-        )))
+        Ok(serde_json::json!({
+            "status": "delegated_agent_cannot_ask",
+            "question": params.question,
+            "hint": "子代理无法向用户追问。请基于已有上下文与工具结果尽量回答该问题；若确需用户输入，请给出当前可交付的最佳结果。",
+        }))
     }
 
     /// 执行 self_check 工具：查询内部指标。

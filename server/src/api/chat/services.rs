@@ -64,16 +64,8 @@ impl ChatService {
     ///
     /// 如果 `session_id` 未提供，会自动创建新会话。
     pub async fn process_message(&self, request: ChatRequest) -> Result<ChatResponse, ApiError> {
-        let last_text = request
-            .messages
-            .last()
-            .map(|m| m.content.clone())
-            .unwrap_or_default();
-        let last_message = request
-            .messages
-            .last()
-            .map(to_core_message)
-            .unwrap_or_else(|| CoreMessage::user(""));
+        let last_text = request.message.content.clone();
+        let last_message = to_core_message(&request.message);
 
         let (session_id, is_new) = resolve_or_create_session(
             self.session_manager.as_ref(),
@@ -104,16 +96,8 @@ impl ChatService {
         tx: mpsc::Sender<ChatStreamEvent>,
         cancel: Arc<AtomicBool>,
     ) -> Result<(), ApiError> {
-        let last_text = request
-            .messages
-            .last()
-            .map(|m| m.content.clone())
-            .unwrap_or_default();
-        let last_message = request
-            .messages
-            .last()
-            .map(to_core_message)
-            .unwrap_or_else(|| CoreMessage::user(""));
+        let last_text = request.message.content.clone();
+        let last_message = to_core_message(&request.message);
 
         let (session_id, is_new) = resolve_or_create_session(
             self.session_manager.as_ref(),
@@ -259,10 +243,8 @@ async fn resolve_or_create_session(
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("session-{}", short_uuid()));
     let msg = CoreMessage::new(CoreMessageRole::User, initial_message);
-    let mut session = session_manager
-        .create_session(&new_id, msg)
-        .await
-        .map_err(|e| ApiError::Internal(format!("创建会话失败: {}", e)))?;
+    // ? 传播：保留 core 错误语义（不吞成 Internal）
+    let mut session = session_manager.create_session(&new_id, msg).await?;
 
     // 用第一条用户消息生成标题（取第一行或前 30 个字符）
     let title = generate_session_title(initial_message);

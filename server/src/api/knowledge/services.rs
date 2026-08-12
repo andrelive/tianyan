@@ -118,8 +118,7 @@ impl KnowledgeService {
                 query.limit + query.offset,
                 Some(ContextNamespace::Knowledge),
             )
-            .await
-            .map_err(|e| ApiError::Internal(format!("搜索失败: {}", e)))?;
+            .await?;
 
         let total = results.len();
         let search_results: Vec<SearchResult> = results
@@ -128,7 +127,9 @@ impl KnowledgeService {
             .take(query.limit)
             .map(|r: CoreSearchResult| SearchResult {
                 id: r.uri.to_string(),
-                content: r.content.unwrap_or_default(),
+                // 向量搜索结果不携带内容（SearchResult.content 已移除），
+                // 内容由前端按需调用 /entries/read 加载。
+                content: String::new(),
                 source: String::new(),
                 score: r.score,
                 metadata: Some(SearchResultMetadata {
@@ -188,11 +189,7 @@ impl KnowledgeService {
         let uri = TianyanUri::parse(&uri_str)
             .map_err(|e| ApiError::BadRequest(format!("无效的知识库路径: {}", e)))?;
 
-        let entries = self
-            .vfs
-            .list(&uri)
-            .await
-            .map_err(|e| ApiError::Internal(format!("列出知识库条目失败: {}", e)))?;
+        let entries = self.vfs.list(&uri).await?;
 
         let items: Vec<KnowledgeEntryItem> = entries
             .into_iter()
@@ -246,11 +243,8 @@ impl KnowledgeService {
             }
         };
 
-        let content = self
-            .vfs
-            .read(&uri, level_enum)
-            .await
-            .map_err(|e| ApiError::Internal(format!("读取条目内容失败: {}", e)))?;
+        // ? 传播：条目不存在时由 core 返回 not_found 语义（404），不吞成 Internal
+        let content = self.vfs.read(&uri, level_enum).await?;
 
         debug!(uri = %uri_str, level = %level_str, "读取知识库条目");
         Ok(ReadEntryResponse {
@@ -274,20 +268,13 @@ impl KnowledgeService {
             .map_err(|e| ApiError::BadRequest(format!("无效的条目 URI: {}", e)))?;
 
         // 存在性检查：不存在的条目 → 404（幂等语义，避免 500）
-        let exists = self
-            .vfs
-            .exists(&uri)
-            .await
-            .map_err(|e| ApiError::Internal(format!("检查知识库条目失败: {}", e)))?;
+        let exists = self.vfs.exists(&uri).await?;
         if !exists {
             return Err(ApiError::NotFound(format!("知识库条目未找到: {}", uri_str)));
         }
 
         // 递归删除：子条目 + SQLite vfs_entries + LanceDB 向量索引同步清理
-        self.vfs
-            .delete(&uri)
-            .await
-            .map_err(|e| ApiError::Internal(format!("删除知识库条目失败: {}", e)))?;
+        self.vfs.delete(&uri).await?;
 
         info!(uri = %uri_str, "知识库条目已删除");
         Ok(DeleteEntryResponse {

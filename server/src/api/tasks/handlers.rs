@@ -27,10 +27,8 @@ pub async fn cancel_task(
     Path(task_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let agent = state.agent().await;
-    let cancelled = agent
-        .cancel_background_task(&task_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("取消任务失败: {}", e)))?;
+    // ? 传播：保留 core 错误语义（ApiError 变体保真，不吞成 Internal）
+    let cancelled = agent.cancel_background_task(&task_id).await?;
     if !cancelled {
         return Err(ApiError::NotFound(format!("任务不存在：{}", task_id)));
     }

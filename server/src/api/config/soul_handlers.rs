@@ -38,11 +38,7 @@ pub async fn get_soul_handler(
 ) -> Result<Json<SoulResponse>, ApiError> {
     let uri = TianyanUri::parse("tianyan://agent/soul").map_err(invalid_soul_uri_error)?;
 
-    let content = state
-        .vfs()
-        .read(&uri, ContentLevel::Detail)
-        .await
-        .map_err(|e| ApiError::Internal(format!("读取 soul 失败: {}", e)))?;
+    let content = state.vfs().read(&uri, ContentLevel::Detail).await?;
 
     Ok(Json(SoulResponse { content }))
 }
@@ -61,8 +57,7 @@ pub async fn update_soul_handler(
     state
         .vfs()
         .write(&uri, ContentLevel::Detail, &body.content)
-        .await
-        .map_err(|e| ApiError::Internal(format!("写入 soul 失败: {}", e)))?;
+        .await?;
 
     Ok(Json(serde_json::json!({
         "success": true,

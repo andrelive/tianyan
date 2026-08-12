@@ -145,10 +145,8 @@ pub async fn compress_session(
     info!("手动压缩会话: {}", session_id);
 
     let agent = state.agent().await;
-    let compressed = agent
-        .compress_session(&session_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("压缩会话失败: {}", e)))?;
+    // ? 传播：会话不存在时由 core 返回 not_found 语义（404），不吞成 Internal
+    let compressed = agent.compress_session(&session_id).await?;
     Ok(Json(CompressSessionResponse { compressed }))
 }
 

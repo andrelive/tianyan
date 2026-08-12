@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
 use crate::common::error::Result;
-use crate::common::types::{ContentLevel, ContextNamespace, Embedding, SearchResult, TianyanUri};
+use crate::common::types::{ContentLevel, ContextNamespace, SearchResult, TianyanUri};
 
 use super::types::ContextEntry;
 use crate::common::types::EntryMetadata;
@@ -47,14 +47,6 @@ pub trait VfsCore: Send + Sync {
 
     /// 移动条目及其子条目到新位置。
     async fn move_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()>;
-
-    /// 更新条目的重要性评分和自定义键值标签。
-    async fn update_metadata(
-        &self,
-        uri: &TianyanUri,
-        importance: f32,
-        custom: HashMap<String, serde_json::Value>,
-    ) -> Result<()>;
 
     /// 批量获取所有层级的内容元数据。
     async fn get_all_content_metadata(
@@ -143,15 +135,6 @@ pub trait VfsSearch: Send + Sync {
     }
 }
 
-/// 嵌入服务提供者 trait（VFS 的嵌入依赖通过此 trait 反转）。
-///
-/// VFS 只依赖此 trait 进行文本向量化，不直接依赖 `crate::model::EmbeddingService`。
-#[async_trait]
-pub trait EmbeddingProvider: Send + Sync {
-    /// 为单个文本生成嵌入向量。
-    async fn embed_single(&self, model: &str, text: &str) -> Result<Embedding>;
-}
-
 /// 组合超 trait —— 提供统一的 VirtualFileSystem 接口。
 ///
 /// 任何同时实现了上述三个子 trait 的类型自动实现本 trait。
@@ -170,11 +153,6 @@ pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch {
     /// 读取 Abstract 层级内容。
     async fn read_abstract(&self, uri: &TianyanUri) -> Result<String> {
         self.read_content(uri, ContentLevel::Abstract).await
-    }
-
-    /// 读取 Overview 层级内容。
-    async fn read_overview(&self, uri: &TianyanUri) -> Result<String> {
-        self.read_content(uri, ContentLevel::Overview).await
     }
 
     /// 读取子文件内容。

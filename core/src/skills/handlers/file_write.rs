@@ -7,11 +7,15 @@ use serde_json::Value;
 
 use crate::common::error::{Result, TianyanError};
 
+use crate::executor::execute_write_file;
 use crate::skills::definition::SkillHandler;
 use crate::skills::executor::validate_path;
 use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 
 /// 文件写入处理器。
+///
+/// 薄 adapter：沙箱（allowed_paths / max_size / timeout）与父目录创建在此层，
+/// 实际写入委托 [`execute_write_file`]（与 write_file 工具同实现）。
 pub struct FileWriteHandler {
     allowed_paths: Vec<PathBuf>,
     /// 单次写入最大内容大小（字节），默认 10MB。
@@ -86,15 +90,12 @@ impl SkillHandler for FileWriteHandler {
                 .map_err(|e| TianyanError::Custom(format!("技能执行错误：创建目录失败: {}", e)))?;
         }
 
+        let path_str = path.to_string_lossy().into_owned();
         let timeout = Duration::from_secs(self.timeout_secs);
-        let write_op = async {
-            tokio::fs::write(&path, content)
-                .await
-                .map_err(|e| TianyanError::Custom(format!("技能执行错误：写入文件失败: {}", e)))
-        };
+        let write_op = execute_write_file(&path_str, content);
 
         match tokio::time::timeout(timeout, write_op).await {
-            Ok(Ok(())) => Ok(super::result_success(
+            Ok(Ok(_)) => Ok(super::result_success(
                 format!("成功写入 {} 字节到 {}", content_len, path.display()),
                 start,
             )),

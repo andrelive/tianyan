@@ -15,11 +15,12 @@
 //! ## 基本使用
 //!
 //! ```rust,ignore
-//! use tianyan::agent::{Agent, AgentCoordinator, SessionState};
+//! use tianyan::agent::{Agent, AgentCoordinator};
+//! use tianyan::common::types::Message;
 //!
 //! async fn example(agent: &Agent) -> Result<(), Box<dyn std::error::Error>> {
-//!     let mut state = SessionState::new("session-001");
-//!     let response = agent.process_message(&mut state, "帮我分析项目性能问题").await?;
+//!     let message = Message::user("帮我分析项目性能问题");
+//!     let response = agent.process_message("session-001", &message, None).await?;
 //!     println!("响应：{}", response.content);
 //!     Ok(())
 //! }
@@ -30,15 +31,16 @@
 //! 当 AgentLoop 信息不足时，会返回追问：
 //!
 //! ```rust,ignore
-//! use tianyan::agent::{Agent, AgentCoordinator, SessionState};
+//! use tianyan::agent::{Agent, AgentCoordinator};
+//! use tianyan::common::types::Message;
 //!
 //! async fn chat_with_clarification(
 //!     agent: &Agent,
 //!     user_input: &str,
 //! ) -> Result<String, Box<dyn std::error::Error>> {
-//!     let mut state = SessionState::new("session-001");
-//!
-//!     let response = agent.process_message(&mut state, user_input).await?;
+//!     let response = agent
+//!         .process_message("session-001", &Message::user(user_input), None)
+//!         .await?;
 //!
 //!     if response.needs_clarification {
 //!         println!("需要追问：");
@@ -47,7 +49,9 @@
 //!         }
 //!
 //!         let user_answer = "我想优化 src/parser.rs，关注执行速度";
-//!         let final_response = agent.handle_clarification(&mut state, user_answer).await?;
+//!         let final_response = agent
+//!             .handle_clarification("session-001", &Message::user(user_answer), None)
+//!             .await?;
 //!         Ok(final_response.content)
 //!     } else {
 //!         Ok(response.content)
@@ -94,12 +98,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::agent::agent_core::{format_clarification_questions, Agent};
-use crate::agent::r#loop::AgentLoopResult;
-use crate::agent::types::{
-    AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
-    StreamChunkType, StreamEventSender,
-};
+use crate::agent::agent_core::Agent;
+use crate::agent::types::{AgentResponse, AgentState, AgentStreamChunk, StreamEventSender};
 use crate::common::error::Result;
 use crate::common::types::Message;
 
@@ -199,22 +199,25 @@ impl AgentCoordinator for Agent {
         // 1. Load session and build state
         let state = self.load_and_build_state(session_id).await?;
 
-        // 1.5 捕获工作区快照（消息处理前，供会话回退恢复文件）
-        {
-            let s = state.read().await;
-            self.capture_workspace_snapshot(session_id, &s).await;
-        }
-
-        // 2-6. 共享编排骨架：持久化 → 上下文 → AgentLoop → 结果组装 → 指标更新
+        // 2-6. 共享编排骨架：快照 → 持久化 → 上下文 → AgentLoop → 结果 → 指标 → 压缩
         // 非流式路径无可取消源（HTTP 请求生命周期内），传 None
         let response = self
-            .run_agent_turn(&state, session_id, message, model, start, None)
+            .run_agent_turn(
+                &state,
+                session_id,
+                message,
+                model,
+                start,
+                None,
+                crate::agent::agent_core::TurnOptions {
+                    mode: crate::agent::agent_core::TurnMode::Plain,
+                    do_snapshot: true,
+                    do_compress: true,
+                },
+            )
             .await?;
 
-        // 7. Compression check and persist
-        self.maybe_compress_and_persist(&state, session_id).await;
-
-        // 8. Background: GEPA skill learning
+        // 7. Background: GEPA skill learning
         {
             let agent = self.clone();
             let sid = session_id.to_string();
@@ -251,105 +254,28 @@ impl AgentCoordinator for Agent {
             };
             let _turn_guard = self_clone.turn_guard(&session_id_str).await;
 
-            let messages = self_clone.prepare_context(&state_clone, &message).await;
-
-            // 捕获工作区快照（消息处理前，供会话回退恢复文件）
-            {
-                let s = state_clone.read().await;
-                self_clone
-                    .capture_workspace_snapshot(&s.session_id, &s)
-                    .await;
-            }
-
-            let parent_id = {
-                let s = state_clone.read().await;
-                s.structured_messages.last().map(|m| m.id.clone())
-            };
-
-            // 持久化用户消息（和非流式路径对齐）
-            self_clone
-                .persist_user_message(&session_id_str, &state_clone, &message)
-                .await;
-
-            let loop_result = self_clone
-                .agent_loop
-                .clone()
-                .run_stream(
-                    &mut messages.clone(),
-                    stream_sender.clone(),
+            let start = Instant::now();
+            // 共享编排骨架：快照 → 持久化 → 上下文 → run_stream → 流式事件 → 指标 → 压缩
+            // （do_compress = true：修复流式路径缺失压缩检查的漂移，与 process_message 对齐）
+            let _ = self_clone
+                .run_agent_turn(
+                    &state_clone,
                     &session_id_str,
-                    parent_id.as_deref(),
+                    &message,
                     &model,
+                    start,
                     cancel.as_deref(),
+                    crate::agent::agent_core::TurnOptions {
+                        mode: crate::agent::agent_core::TurnMode::Stream {
+                            sender: stream_sender,
+                        },
+                        do_snapshot: true,
+                        do_compress: true,
+                    },
                 )
                 .await;
 
-            match loop_result {
-                Ok(AgentLoopResult::Answer {
-                    total_tokens,
-                    persisted_message,
-                    ..
-                }) => {
-                    state_clone
-                        .write()
-                        .await
-                        .add_structured_message(*persisted_message);
-
-                    // run_stream 已逐 chunk 流式推完内容，这里只发结束标记
-                    stream_sender
-                        .send_complete("", StreamChunkType::Answer, None)
-                        .await;
-                    self_clone
-                        .update_agent_metrics(&session_id_str, Some(&total_tokens), true)
-                        .await;
-                    self_clone.metrics.record_execution(true).await;
-                }
-                Ok(AgentLoopResult::NeedsClarification {
-                    question,
-                    total_tokens,
-                    ..
-                }) => {
-                    let question_obj = ClarificationQuestion {
-                        question,
-                        question_type: QuestionType::OpenEnded,
-                        options: None,
-                        required: true,
-                    };
-                    state_clone.write().await.pending_clarification =
-                        Some(vec![question_obj.clone()]);
-                    let formatted =
-                        format_clarification_questions(std::slice::from_ref(&question_obj));
-                    stream_sender
-                        .send_complete(&formatted, StreamChunkType::Clarification, None)
-                        .await;
-                    self_clone
-                        .update_agent_metrics(&session_id_str, Some(&total_tokens), true)
-                        .await;
-                }
-                Ok(AgentLoopResult::Cancelled {
-                    total_tokens,
-                    turns,
-                }) => {
-                    tracing::info!(turns, "AgentLoop 流式执行被取消");
-                    self_clone.metrics.record_execution(false).await;
-                    stream_sender
-                        .send_complete("任务已取消", StreamChunkType::Answer, None)
-                        .await;
-                    self_clone
-                        .update_agent_metrics(&session_id_str, Some(&total_tokens), false)
-                        .await;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "AgentLoop 流式执行失败");
-                    self_clone.metrics.record_execution(false).await;
-                    stream_sender.send_error(&format!("处理失败：{}", e)).await;
-                    self_clone
-                        .update_agent_metrics(&session_id_str, None, false)
-                        .await;
-                }
-            }
-
-            // Background: GEPA skill learning
+            // Background: GEPA skill learning（保持原流式路径语义：await 而非 spawn）
             self_clone.learn_skills_from_session(&session_id_str).await;
         });
 
@@ -380,9 +306,8 @@ impl AgentCoordinator for Agent {
     async fn approval_status(&self) -> Result<crate::executor::approval::ApprovalStatusSnapshot> {
         use crate::executor::approval::{ApprovalStatusSnapshot, ApprovalWorkflowConfig};
 
-        let registry = self.agent_loop.tool_registry();
-        let pending_confirmations = registry.pending_approval_fingerprints().await;
-        let Some(workflow) = registry.approval_workflow() else {
+        let pending_confirmations = self.pending_approval_fingerprints.lock().await.clone();
+        let Some(workflow) = &self.approval_workflow else {
             return Ok(ApprovalStatusSnapshot {
                 config: ApprovalWorkflowConfig::default(),
                 pending_approvals: Vec::new(),
@@ -410,8 +335,7 @@ impl AgentCoordinator for Agent {
         reason: Option<String>,
         edited_command: Option<String>,
     ) -> Result<()> {
-        let registry = self.agent_loop.tool_registry();
-        let Some(workflow) = registry.approval_workflow() else {
+        let Some(workflow) = &self.approval_workflow else {
             return Err(crate::TianyanError::Custom(
                 "审批流程未装配（审批工作流不可用）".to_string(),
             ));
@@ -427,19 +351,14 @@ impl AgentCoordinator for Agent {
     }
 
     async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask> {
-        self.agent_loop
-            .tool_registry()
-            .background_tasks
-            .snapshot()
-            .await
+        self.background_tasks.snapshot().await
     }
 
     async fn cancel_background_task(&self, task_id: &str) -> Result<bool> {
-        let manager = &self.agent_loop.tool_registry().background_tasks;
-        if manager.get(task_id).await.is_none() {
+        if self.background_tasks.get(task_id).await.is_none() {
             return Ok(false);
         }
-        manager.cancel(task_id).await?;
+        self.background_tasks.cancel(task_id).await?;
         Ok(true)
     }
 
@@ -470,7 +389,7 @@ mod tests {
             },
         ];
 
-        let result = super::format_clarification_questions(&questions);
+        let result = crate::agent::agent_core::format_clarification_questions(&questions);
 
         assert!(result.contains("为了更好帮助您，需要以下信息"));
         assert!(result.contains("1. 您想创建什么类型的项目？"));

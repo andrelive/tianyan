@@ -221,37 +221,6 @@ impl IngestionRequest {
     }
 }
 
-/// 与内容一起存储的知识元数据。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeMetadata {
-    /// 文档 ID。
-    pub document_id: String,
-    /// 原始文件名。
-    pub original_name: String,
-    /// 文档类型。
-    pub doc_type: DocumentType,
-    /// 知识分类。
-    pub category: KnowledgeCategory,
-    /// 内容来源。
-    pub source: ContentSource,
-    /// 文件大小（字节）。
-    pub file_size: u64,
-    /// 内容哈希（SHA-256）。
-    pub content_hash: String,
-    /// 标签。
-    pub tags: Vec<String>,
-    /// 语言（用于代码）。
-    pub language: Option<String>,
-    /// 总 token 数量。
-    pub total_tokens: usize,
-    /// 创建时间戳。
-    pub created_at: DateTime<Utc>,
-    /// 最后更新时间戳。
-    pub updated_at: DateTime<Utc>,
-    /// 重要性分数。
-    pub importance: f32,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,27 +253,5 @@ mod tests {
         assert_eq!(request.filename, "test.txt");
         assert_eq!(request.category, Some(KnowledgeCategory::Technical));
         assert_eq!(request.tags, vec!["test"]);
-    }
-
-    #[test]
-    fn test_knowledge_metadata() {
-        let metadata = KnowledgeMetadata {
-            document_id: "doc-1".to_string(),
-            original_name: "test.pdf".to_string(),
-            doc_type: DocumentType::Pdf,
-            category: KnowledgeCategory::Technical,
-            source: ContentSource::UserUpload,
-            file_size: 1024,
-            content_hash: "abc123".to_string(),
-            tags: vec!["api".to_string()],
-            language: None,
-            total_tokens: 500,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            importance: 0.8,
-        };
-
-        assert_eq!(metadata.document_id, "doc-1");
-        assert_eq!(metadata.doc_type, DocumentType::Pdf);
     }
 }

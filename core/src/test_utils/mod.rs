@@ -203,15 +203,6 @@ impl VfsCore for MockVfs {
         Ok(())
     }
 
-    async fn update_metadata(
-        &self,
-        _uri: &TianyanUri,
-        _imp: f32,
-        _custom: HashMap<String, serde_json::Value>,
-    ) -> Result<()> {
-        Ok(())
-    }
-
     async fn get_all_content_metadata(
         &self,
         _uri: &TianyanUri,
@@ -553,15 +544,6 @@ impl VfsCore for TestVfs {
         Ok(())
     }
 
-    async fn update_metadata(
-        &self,
-        _uri: &TianyanUri,
-        _imp: f32,
-        _custom: HashMap<String, serde_json::Value>,
-    ) -> Result<()> {
-        Ok(())
-    }
-
     async fn get_all_content_metadata(
         &self,
         _uri: &TianyanUri,
@@ -626,8 +608,6 @@ impl VfsSearch for TestVfs {
                     TianyanUri::new(ContextNamespace::Knowledge, vec![r.id.clone()])
                 }),
                 score: r.score,
-                matched_level: ContentLevel::Abstract,
-                content: None,
             })
             .collect())
     }

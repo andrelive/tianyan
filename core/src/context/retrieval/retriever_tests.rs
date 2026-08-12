@@ -197,14 +197,6 @@ impl VfsCore for TestVfs {
     async fn move_entry(&self, _source: &TianyanUri, _destination: &TianyanUri) -> Result<()> {
         Ok(())
     }
-    async fn update_metadata(
-        &self,
-        _uri: &TianyanUri,
-        _importance: f32,
-        _custom: HashMap<String, serde_json::Value>,
-    ) -> Result<()> {
-        Ok(())
-    }
     async fn get_all_content_metadata(
         &self,
         _uri: &TianyanUri,
@@ -255,8 +247,6 @@ impl VfsSearch for TestVfs {
             .map(|r| SearchResult {
                 uri: r.payload.uri.clone(),
                 score: r.score,
-                matched_level: ContentLevel::Abstract,
-                content: None,
             })
             .collect())
     }
@@ -279,8 +269,6 @@ impl VfsSearch for TestVfs {
             .map(|r| SearchResult {
                 uri: r.payload.uri.clone(),
                 score: r.score,
-                matched_level: ContentLevel::Abstract,
-                content: None,
             })
             .collect())
     }

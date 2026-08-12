@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
 use crate::config::StorageConfig;
+use crate::model::EmbeddingService;
 use crate::vfs::backend::StorageBackend;
-use crate::vfs::traits::EmbeddingProvider;
 use crate::vfs::vector::VectorStorage;
 
 use super::VirtualFileSystemImpl;
@@ -15,7 +15,7 @@ pub struct VirtualFileSystemBuilder {
     config: Option<StorageConfig>,
     storage: Option<Arc<dyn StorageBackend>>,
     vector_storage: Option<Arc<dyn VectorStorage>>,
-    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    embedding_provider: Option<Arc<dyn EmbeddingService>>,
     embedding_model: Option<String>,
 }
 
@@ -49,10 +49,10 @@ impl VirtualFileSystemBuilder {
         self
     }
 
-    /// 设置嵌入提供者。
+    /// 设置嵌入服务（`model::EmbeddingService` 直接注入，无桥接层）。
     pub fn with_embedding_provider(
         mut self,
-        provider: Arc<dyn EmbeddingProvider>,
+        provider: Arc<dyn EmbeddingService>,
         model: impl Into<String>,
     ) -> Self {
         self.embedding_provider = Some(provider);

@@ -82,6 +82,11 @@ pub struct SecurityConfig {
     /// 默认空（不强制）。注入审批工作流 `prompt_commands`。
     #[serde(default)]
     pub prompt_commands: Vec<String>,
+    /// 允许技能执行危险操作（system_command / file_delete）。
+    /// 默认关闭：技能路径无审批流，危险技能须显式启用。
+    /// 工具路径不受影响（走审批/询问降级链路）。
+    #[serde(default)]
+    pub allow_dangerous_skills: bool,
 }
 
 fn default_true() -> bool {
@@ -149,6 +154,7 @@ impl Default for SecurityConfig {
             skill_command_timeout_secs: default_skill_command_timeout(),
             wait_for_approval: false,
             prompt_commands: Vec::new(),
+            allow_dangerous_skills: false,
         }
     }
 }

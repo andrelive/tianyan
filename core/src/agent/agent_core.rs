@@ -11,16 +11,20 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::{OwnedMutexGuard, RwLock};
 
-use crate::agent::background::TaskWaker;
+use crate::agent::background::{BackgroundTaskManager, TaskWaker};
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
 use crate::agent::tool_registry::DynamicToolExecutor;
-use crate::agent::types::{AgentResponse, AgentState, ClarificationQuestion, QuestionType};
+use crate::agent::types::{
+    AgentResponse, AgentState, ClarificationQuestion, QuestionType, StreamChunkType,
+    StreamEventSender,
+};
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
     InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage,
 };
 use crate::context::{ContextAssembler, ContextPipeline};
+use crate::executor::approval::ApprovalWorkflow;
 use crate::observability::AgentMetrics;
 use crate::observability::TokenRecord;
 use crate::session::{Session, SessionManager};
@@ -34,6 +38,24 @@ const MIN_MESSAGES_BEFORE_COMPRESSION: usize = 6;
 const WAKE_RETRY_LIMIT: usize = 3;
 /// 唤醒轮重试间隔。
 const WAKE_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// 轮执行模式：Plain 构造 [`AgentResponse`]；Stream 向 sender 推送流式事件。
+#[derive(Clone)]
+pub(crate) enum TurnMode {
+    /// 非流式：结果组装为 `AgentResponse`。
+    Plain,
+    /// 流式：loop 用 `run_stream` 逐 chunk 推送，结果处理发送流式完成事件。
+    Stream { sender: StreamEventSender },
+}
+
+/// 轮级差异段开关（调用方按路径语义选择）。
+pub(crate) struct TurnOptions {
+    pub mode: TurnMode,
+    /// 轮前是否捕获工作区快照（用户轮 true；澄清回答轮保持原语义 false）。
+    pub do_snapshot: bool,
+    /// 轮后是否执行压缩检查（用户轮与流式轮 true；澄清回答轮 false）。
+    pub do_compress: bool,
+}
 
 /// 智能体协调器的默认实现。
 #[derive(Clone)]
@@ -53,6 +75,18 @@ pub struct Agent {
     /// 会话级轮次锁（ADR-013 串行化）：单会话同一时刻只有一个活动轮；
     /// 唤醒轮与用户轮互斥——wake 排队等待当前轮结束，绝不抢占。
     turn_locks: Arc<TokioMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// 后台任务管理器（delegate_to_agent(background) 状态机）。
+    ///
+    /// 协调器/唤醒器直接持有（构造时从 ToolRegistry 提取**同一 Arc**，
+    /// 与工具执行路径共享状态）——避免 `Agent → AgentLoop → ToolRegistry`
+    /// 三层穿透。
+    pub(crate) background_tasks: Arc<BackgroundTaskManager>,
+    /// 审批工作流（危险操作门控）。协调器响应/状态查询直接持有
+    /// （与 ToolRegistry 共享同一 Arc）。
+    pub(crate) approval_workflow: Option<Arc<ApprovalWorkflow>>,
+    /// 待用户确认的操作指纹队列（与 ToolRegistry 共享同一 Arc；
+    /// 状态展示直读，不经穿透）。
+    pub(crate) pending_approval_fingerprints: Arc<TokioMutex<Vec<String>>>,
 }
 
 impl Agent {
@@ -70,6 +104,12 @@ impl Agent {
         snapshot_manager: Option<Arc<SnapshotManager>>,
         skill_refresher: Option<Arc<dyn SkillRefresher>>,
     ) -> Self {
+        // 从 AgentLoop 的 ToolRegistry 提取共享句柄（同一 Arc，非复制状态）：
+        // 协调器对后台任务/审批的直接入口，避免逐调用三层穿透。
+        let tool_registry = agent_loop.tool_registry();
+        let background_tasks = tool_registry.background_tasks.clone();
+        let approval_workflow = tool_registry.approval_workflow.clone();
+        let pending_approval_fingerprints = tool_registry.pending_approval_fingerprints.clone();
         Self {
             default_model,
             context_pipeline,
@@ -81,6 +121,9 @@ impl Agent {
             snapshot_manager,
             skill_refresher,
             turn_locks: Arc::new(TokioMutex::new(HashMap::new())),
+            background_tasks,
+            approval_workflow,
+            pending_approval_fingerprints,
         }
     }
 
@@ -103,7 +146,7 @@ impl Agent {
     /// 由 server 装配层在 Agent 构建完成后调用（传入自引用转发器
     /// [`AgentWakeForwarder`]——Weak 打破循环引用）。
     pub async fn register_task_waker(&self, waker: Arc<dyn TaskWaker>) {
-        self.agent_loop.tool_registry().set_task_waker(waker).await;
+        self.background_tasks.set_waker(waker).await;
     }
 
     /// 唤醒轮（ADR-013）：后台任务全部完成或失败时触发主 agent 新一轮。
@@ -457,10 +500,14 @@ impl Agent {
         true
     }
 
-    /// 共享编排骨架：持久化用户消息 → 准备上下文 → AgentLoop → 结果组装 → 指标更新。
+    /// 共享编排骨架：快照（可选）→ 持久化用户消息 → 准备上下文 → AgentLoop →
+    /// 结果组装 → 指标更新 → 压缩检查（可选）。
     ///
-    /// `process_message` 与 `handle_clarification_response` 共用此骨架，
-    /// 差异段（快照、审批确认、压缩、技能学习等）由调用方保留。
+    /// `process_message`、`process_message_stream` 与 `handle_clarification_response`
+    /// 三条路径共用此骨架；差异段由 [`TurnOptions`] 参数化：
+    /// - `mode`：Plain（构造 `AgentResponse`）或 Stream（`run_stream` + 流式事件）
+    /// - `do_snapshot` / `do_compress`：快照与压缩检查开关（流式轮此前缺失
+    ///   压缩检查的漂移在此修复）。
     /// - `model` — 本次使用的模型（调用方已解析）。
     /// - `start` — 由调用方传入，保证 `processing_time_ms` 测量窗口与调用前一致。
     /// - `parent_id` — 在 `prepare_context` 之后统一计算（挂接在当前用户消息之下），
@@ -476,7 +523,14 @@ impl Agent {
         model: &str,
         start: Instant,
         cancel: Option<&AtomicBool>,
+        options: TurnOptions,
     ) -> Result<AgentResponse> {
+        // 0. Capture workspace snapshot (before message processing, for session rollback)
+        if options.do_snapshot {
+            let s = state.read().await;
+            self.capture_workspace_snapshot(session_id, &s).await;
+        }
+
         // 1. Persist current user message
         self.persist_user_message(session_id, state, message).await;
 
@@ -488,20 +542,62 @@ impl Agent {
             let s = state.read().await;
             s.structured_messages.last().map(|m| m.id.clone())
         };
-        let loop_result = self
-            .agent_loop
-            .clone()
-            .run(
-                &mut messages.clone(),
-                None,
-                session_id,
-                parent_id.as_deref(),
-                model,
-                cancel,
-            )
+        let loop_result = match &options.mode {
+            TurnMode::Plain => {
+                self.agent_loop
+                    .clone()
+                    .run(
+                        &mut messages.clone(),
+                        None,
+                        session_id,
+                        parent_id.as_deref(),
+                        model,
+                        cancel,
+                    )
+                    .await
+            }
+            TurnMode::Stream { sender } => {
+                self.agent_loop
+                    .clone()
+                    .run_stream(
+                        &mut messages.clone(),
+                        sender.clone(),
+                        session_id,
+                        parent_id.as_deref(),
+                        model,
+                        cancel,
+                    )
+                    .await
+            }
+        };
+
+        // 4. Handle loop result (mode-aware output assembly)
+        let (response, loop_tokens) = self
+            .apply_loop_result(state, loop_result, start, &options.mode)
             .await;
 
-        // 4. Handle loop result
+        // 5. Update agent metrics
+        self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
+            .await;
+
+        // 6. Compression check and persist (optional per path semantics)
+        if options.do_compress {
+            self.maybe_compress_and_persist(state, session_id).await;
+        }
+
+        Ok(response)
+    }
+
+    /// 组装 AgentLoop 结果：公共部分（状态更新 / 指标记录 / token 收集）集中，
+    /// 输出按模式分叉——Plain 构造 [`AgentResponse`]；Stream 发送流式完成事件
+    /// 并返回占位响应（内容已在 `run_stream` 阶段逐 chunk 推送完毕）。
+    async fn apply_loop_result(
+        &self,
+        state: &Arc<RwLock<SessionState>>,
+        loop_result: Result<AgentLoopResult>,
+        start: Instant,
+        mode: &TurnMode,
+    ) -> (AgentResponse, Option<TokenUsage>) {
         let mut loop_tokens: Option<TokenUsage> = None;
         let response = match loop_result {
             Ok(AgentLoopResult::Answer {
@@ -515,12 +611,25 @@ impl Agent {
                     .await
                     .add_structured_message(*persisted_message);
 
-                let mut resp = AgentResponse::simple(content);
-                resp.token_usage = total_tokens.clone();
-                resp.processing_time_ms = start.elapsed().as_millis() as u64;
                 self.metrics.record_execution(true).await;
-                loop_tokens = Some(total_tokens);
-                resp
+                loop_tokens = Some(total_tokens.clone());
+                match mode {
+                    TurnMode::Plain => {
+                        let mut resp = AgentResponse::simple(content);
+                        resp.token_usage = total_tokens.clone();
+                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                        resp
+                    }
+                    TurnMode::Stream { sender } => {
+                        sender
+                            .send_complete("", StreamChunkType::Answer, None)
+                            .await;
+                        let mut resp = AgentResponse::simple(content);
+                        resp.token_usage = total_tokens.clone();
+                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                        resp
+                    }
+                }
             }
             Ok(AgentLoopResult::NeedsClarification {
                 question,
@@ -535,11 +644,24 @@ impl Agent {
                 };
                 state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
                 let formatted = format_clarification_questions(std::slice::from_ref(&question_obj));
-                let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
-                resp.token_usage = total_tokens.clone();
-                resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                loop_tokens = Some(total_tokens);
-                resp
+                loop_tokens = Some(total_tokens.clone());
+                match mode {
+                    TurnMode::Plain => {
+                        let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
+                        resp.token_usage = total_tokens.clone();
+                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                        resp
+                    }
+                    TurnMode::Stream { sender } => {
+                        sender
+                            .send_complete(&formatted, StreamChunkType::Clarification, None)
+                            .await;
+                        let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
+                        resp.token_usage = total_tokens.clone();
+                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                        resp
+                    }
+                }
             }
             Ok(AgentLoopResult::Cancelled {
                 total_tokens,
@@ -547,27 +669,46 @@ impl Agent {
             }) => {
                 tracing::info!(turns, "AgentLoop 被取消");
                 self.metrics.record_execution(false).await;
-                let mut resp = AgentResponse::simple("任务已取消".to_string());
-                resp.cancelled = true;
-                resp.token_usage = total_tokens.clone();
-                resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                loop_tokens = Some(total_tokens);
-                resp
+                loop_tokens = Some(total_tokens.clone());
+                match mode {
+                    TurnMode::Plain => {
+                        let mut resp = AgentResponse::simple("任务已取消".to_string());
+                        resp.cancelled = true;
+                        resp.token_usage = total_tokens.clone();
+                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                        resp
+                    }
+                    TurnMode::Stream { sender } => {
+                        sender
+                            .send_complete("任务已取消", StreamChunkType::Answer, None)
+                            .await;
+                        let mut resp = AgentResponse::simple("任务已取消".to_string());
+                        resp.cancelled = true;
+                        resp.token_usage = total_tokens.clone();
+                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                        resp
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "AgentLoop 执行失败");
                 self.metrics.record_execution(false).await;
-                let mut resp = AgentResponse::error(format!("处理失败：{}", e));
-                resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                resp
+                match mode {
+                    TurnMode::Plain => {
+                        let mut resp = AgentResponse::error(format!("处理失败：{}", e));
+                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                        resp
+                    }
+                    TurnMode::Stream { sender } => {
+                        sender.send_error(&format!("处理失败：{}", e)).await;
+                        let mut resp = AgentResponse::error(format!("处理失败：{}", e));
+                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
+                        resp
+                    }
+                }
             }
         };
-
-        // 5. Update agent metrics
-        self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
-            .await;
-
-        Ok(response)
+        (response, loop_tokens)
     }
 
     /// 处理用户对追问的回答。
@@ -610,6 +751,12 @@ impl Agent {
             &self.default_model,
             start,
             None,
+            TurnOptions {
+                // 澄清轮：不拍快照、不触发压缩（保持原路径语义）
+                mode: TurnMode::Plain,
+                do_snapshot: false,
+                do_compress: false,
+            },
         )
         .await
     }

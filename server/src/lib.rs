@@ -14,11 +14,13 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
-use tianyan::scheduler::tasks::{GcTask, MemoryTask, RuleTask, SnapshotGcTask, SummaryTask};
+use tianyan::scheduler::tasks::{
+    GcTask, MemoryTask, RuleTask, SnapshotGcTask, SummaryTask, UsageStatsFlushTask,
+};
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 
 use crate::agent_builder::create_model_services;
-use crate::api::events::{handlers as event_handlers, processor as event_processor};
+use crate::api::events::processor as event_processor;
 
 // Import API module
 pub mod agent_builder;
@@ -123,8 +125,7 @@ async fn initialize_vfs_for_app(
 ) -> tianyan::common::error::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
     use tianyan::config::StorageBackendType;
     use tianyan::vfs::{
-        EmbeddingServiceBridge, LanceDbVectorStore, SqliteBackend, StorageBackend,
-        VirtualFileSystemBuilder,
+        LanceDbVectorStore, SqliteBackend, StorageBackend, VirtualFileSystemBuilder,
     };
 
     // 1. 创建存储后端（config.storage.backend 决定 adapter）
@@ -159,8 +160,8 @@ async fn initialize_vfs_for_app(
                     .resolve(tianyan::config::ModelCapability::TextEmbedding)
                     .map(|r| r.model)
                     .unwrap_or_else(|| "text-embedding-3-small".to_string());
-                let bridge = EmbeddingServiceBridge::new(ms.embedding);
-                vfs_builder = vfs_builder.with_embedding_provider(Arc::new(bridge), emb_model);
+                // 直接注入 EmbeddingService（无桥接层）
+                vfs_builder = vfs_builder.with_embedding_provider(ms.embedding, emb_model);
             }
             Err(e) => {
                 warn!("无法创建模型服务（{}），VFS 将以无嵌入模式运行", e);
@@ -383,7 +384,7 @@ async fn start_server_inner(
             vfs.clone(),
             summary_engine,
             memory_extractor,
-            app_config,
+            app_config.clone(),
         ));
 
         // 注册摘要任务（每 5 分钟）
@@ -408,36 +409,38 @@ async fn start_server_inner(
 
         // 注册规则提炼任务（每 15 分钟）
         {
-            let config_lock = state.config();
-            let config_guard = config_lock.read().await;
-            let model_services = create_model_services(&config_guard).await.map_err(|e| {
-                tianyan::TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{}", e))
-            })?;
+            // 复用共享 ModelServices（不重复创建 HTTP client 池）
+            let model_services = state.shared_model_services().await?;
+            let cfg = state.config().read().await.clone();
+            let chat_model = state::resolve_chat_model(&cfg);
             scheduler
                 .register_task(TaskDefinition::new(
                     "rule_extraction",
                     "规则提炼",
                     "30 */15 * * * *",
-                    Arc::new(RuleTask::new(
-                        vfs,
-                        model_services.chat,
-                        config_guard
-                            .models
-                            .resolve(tianyan::config::ModelCapability::Chat)
-                            .map(|r| r.model)
-                            .unwrap_or_default(),
-                    )),
+                    Arc::new(RuleTask::new(vfs, model_services.chat, chat_model)),
                 ))
                 .await?;
         }
 
-        // 注册垃圾回收任务（每 6 小时）
+        // 注册垃圾回收任务（每 6 小时；auto_cleanup 来自存储配置）
         scheduler
             .register_task(TaskDefinition::new(
                 "garbage_collection",
                 "垃圾回收",
                 "0 0 */6 * * *",
-                Arc::new(GcTask::new()),
+                Arc::new(GcTask::new(&app_config.storage)),
+            ))
+            .await?;
+
+        // 注册使用统计刷盘任务（每 1 分钟；内存计数器 → SQLite，
+        // 保证 /api/v1/stats 数据时效与内存有界，退出前由 shutdown 兜底）
+        scheduler
+            .register_task(TaskDefinition::new(
+                "usage_stats_flush",
+                "使用统计刷盘",
+                "0 */1 * * * *",
+                Arc::new(UsageStatsFlushTask::new(state.usage_stats())),
             ))
             .await?;
 
@@ -458,14 +461,9 @@ async fn start_server_inner(
             let cfg = state.config().read().await.clone();
             if cfg.reminder.enabled {
                 let interval_min = (cfg.reminder.interval_secs.max(60) / 60) as u64;
-                let model_services = create_model_services(&cfg).await.map_err(|e| {
-                    tianyan::TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{}", e))
-                })?;
-                let model_name = cfg
-                    .models
-                    .resolve(tianyan::config::ModelCapability::Chat)
-                    .map(|r| r.model)
-                    .unwrap_or_default();
+                // 复用共享 ModelServices（不重复创建 HTTP client 池）
+                let model_services = state.shared_model_services().await?;
+                let model_name = state::resolve_chat_model(&cfg);
                 scheduler
                     .register_task(TaskDefinition::new(
                         "reminder",
@@ -484,12 +482,11 @@ async fn start_server_inner(
             }
         }
 
-        // T1 事件驱动：webhook 令牌 + 文件监听 + 事件处理器（events.enabled 时）
+        // T1 事件驱动：文件监听 + 事件处理器（events.enabled 时；
+        // webhook 令牌/总线经 AppState 由 handler 直读，无需装配）
         {
             let events_config = state.config().read().await.events.clone();
             if events_config.enabled {
-                event_handlers::set_webhook_token(&events_config.webhook_token);
-                event_handlers::set_event_bus(state.event_bus());
                 // 文件监听（notify 独立线程运行；失败仅告警，webhook 仍可用）
                 if !events_config.watch_dirs.is_empty() {
                     let watcher = tianyan::events::FileWatcher::new((*state.event_bus()).clone());
@@ -563,8 +560,8 @@ async fn start_server_inner(
         server.with_graceful_shutdown(shutdown_signal).await
     });
 
-    // 监听关闭信号
-    #[cfg(unix)]
+    // 监听关闭信号（外部信号 / Ctrl+C / SIGTERM(unix) / 服务器退出）
+    // 单 select 块 + cfg 分支属性：消除 unix/非 unix 双份近重复实现
     let shutdown_result = tokio::select! {
         external_result = wait_external_shutdown(external_shutdown) => {
             match external_result {
@@ -592,67 +589,14 @@ async fn start_server_inner(
                 }
             }
         },
-        sigterm_result = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) => {
+        sigterm_result = wait_sigterm() => {
             match sigterm_result {
-                Ok(mut signal) => {
-                    if signal.recv().await.is_some() {
-                        info!("捕获到 SIGTERM 信号");
-                        state.shutdown_flag().store(true, std::sync::atomic::Ordering::Relaxed);
-                        "sigterm"
-                    } else {
-                        "sigterm_error"
-                    }
-                }
-                Err(e) => {
-                    error!("监听 SIGTERM 失败：{}", e);
-                    "error"
-                }
-            }
-        },
-        server_result = server_handle => {
-            match server_result {
-                Ok(Ok(())) => {
-                    info!("服务器正常退出");
-                    "server_stopped"
-                }
-                Ok(Err(e)) => {
-                    error!("服务器错误：{}", e);
-                    "server_error"
-                }
-                Err(e) => {
-                    error!("服务器任务失败：{}", e);
-                    "server_task_error"
-                }
-            }
-        }
-    };
-
-    #[cfg(not(unix))]
-    let shutdown_result = tokio::select! {
-        external_result = wait_external_shutdown(external_shutdown) => {
-            match external_result {
-                "external" => {
-                    info!("收到外部关闭信号（桌面端退出）");
+                Some(reason) => {
+                    info!("捕获到 {reason} 信号");
                     state.shutdown_flag().store(true, std::sync::atomic::Ordering::Relaxed);
-                    "external"
+                    "sigterm"
                 }
-                _ => {
-                    error!("外部关闭信号通道断开");
-                    "error"
-                }
-            }
-        },
-        ctrl_c_result = tokio::signal::ctrl_c() => {
-            match ctrl_c_result {
-                Ok(()) => {
-                    info!("捕获到 Ctrl+C 信号");
-                    state.shutdown_flag().store(true, std::sync::atomic::Ordering::Relaxed);
-                    "ctrl_c"
-                }
-                Err(e) => {
-                    error!("监听 Ctrl+C 失败：{}", e);
-                    "error"
-                }
+                None => "sigterm_error",
             }
         },
         server_result = server_handle => {
@@ -731,6 +675,31 @@ async fn wait_external_shutdown(external: Option<watch::Receiver<bool>>) -> &'st
             }
         }
         None => std::future::pending().await,
+    }
+}
+
+/// 等待 SIGTERM 信号（unix）；非 unix 平台永挂起——
+/// 该分支在 select 中不可达，保持"仅外部/Ctrl+C 驱动"的既有语义。
+async fn wait_sigterm() -> Option<&'static str> {
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                if signal.recv().await.is_some() {
+                    Some("SIGTERM")
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                error!("监听 SIGTERM 失败：{}", e);
+                None
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::future::pending().await
     }
 }
 

@@ -60,59 +60,6 @@ impl SkillManager {
         Ok(skills)
     }
 
-    /// 读取技能定义（优先 skill.md，回退 content.md）。
-    pub async fn read_skill_definition(&self, skill_id: &str) -> Result<String> {
-        let uri = TianyanUri::new(ContextNamespace::Skill, vec![skill_id.to_string()]);
-
-        if self.vfs.file_exists(&uri, "skill.md").await? {
-            self.vfs.read_file(&uri, "skill.md").await
-        } else {
-            self.vfs.read_file(&uri, "content.md").await
-        }
-    }
-
-    /// 列出技能的参考资料。
-    pub async fn list_references(&self, skill_id: &str) -> Result<Vec<String>> {
-        let uri = TianyanUri::new(
-            ContextNamespace::Skill,
-            vec![skill_id.to_string(), "references".to_string()],
-        );
-        self.vfs.list_files(&uri).await
-    }
-
-    /// 读取技能的参考资料。
-    pub async fn read_reference(&self, skill_id: &str, ref_name: &str) -> Result<String> {
-        let uri = TianyanUri::new(
-            ContextNamespace::Skill,
-            vec![skill_id.to_string(), "references".to_string()],
-        );
-        self.vfs.read_file(&uri, ref_name).await
-    }
-
-    /// 列出技能的脚本文件。
-    pub async fn list_scripts(&self, skill_id: &str) -> Result<Vec<String>> {
-        let uri = TianyanUri::new(
-            ContextNamespace::Skill,
-            vec![skill_id.to_string(), "scripts".to_string()],
-        );
-        self.vfs.list_files(&uri).await
-    }
-
-    /// 读取技能的脚本文件。
-    pub async fn read_script(&self, skill_id: &str, script_name: &str) -> Result<String> {
-        let uri = TianyanUri::new(
-            ContextNamespace::Skill,
-            vec![skill_id.to_string(), "scripts".to_string()],
-        );
-        self.vfs.read_file(&uri, script_name).await
-    }
-
-    /// 检查技能是否存在。
-    pub async fn skill_exists(&self, skill_id: &str) -> Result<bool> {
-        let uri = TianyanUri::new(ContextNamespace::Skill, vec![skill_id.to_string()]);
-        self.vfs.exists(&uri).await
-    }
-
     /// 从 VFS 加载所有已学习技能（GEPA 引擎产物），构造可注册的 [`Skill`] 元数据。
     ///
     /// 已学习技能没有内置 handler（本质是操作流程说明），注册后可供发现、

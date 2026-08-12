@@ -26,10 +26,7 @@ pub async fn list_memories_handler(
     let vfs = state.vfs();
     let memory_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
 
-    let entries = vfs
-        .list(&memory_root)
-        .await
-        .map_err(|e| ApiError::Internal(format!("记忆浏览错误：列出记忆失败：{e}")))?;
+    let entries = vfs.list(&memory_root).await?;
 
     let mut memories = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -114,10 +111,8 @@ pub async fn get_approval_status_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let agent = state.agent().await;
-    let snapshot = agent
-        .approval_status()
-        .await
-        .map_err(|e| ApiError::Internal(format!("审批状态查询失败：{e}")))?;
+    let snapshot = agent.approval_status().await?;
+    // serde 序列化失败为内部错误（已有 From<serde_json::Error> 映射面向反序列化，此处显式 Internal）
     serde_json::to_value(snapshot)
         .map(Json)
         .map_err(|e| ApiError::Internal(format!("审批状态序列化失败：{e}")))

@@ -102,27 +102,32 @@ impl TianyanConfig {
     /// 3. 主目录 `~/.tianyan/tianyan.toml`
     ///
     /// 如果找不到配置文件，返回错误。
-    pub fn load() -> Result<Self, String> {
-        let config_path = Self::find_config_file()
-            .ok_or("未找到配置文件，请将 tianyan.toml 放置在当前目录、配置目录 (~/.config/tianyan) 或主目录 (~/.tianyan)")?;
+    pub fn load() -> Result<Self, TianyanError> {
+        let config_path = Self::find_config_file().ok_or_else(|| {
+            TianyanError::Custom(
+                "配置加载失败：未找到配置文件，请将 tianyan.toml 放置在当前目录、配置目录 (~/.config/tianyan) 或主目录 (~/.tianyan)".to_string(),
+            )
+        })?;
 
         Self::load_from_file(&config_path)
     }
 
     /// 从指定文件加载配置。
-    pub fn load_from_file(path: &std::path::Path) -> Result<Self, String> {
+    pub fn load_from_file(path: &std::path::Path) -> Result<Self, TianyanError> {
         use config::{File, FileFormat};
 
         let config_raw = config::Config::builder()
             .add_source(File::from(path).format(FileFormat::Toml))
             .build()
-            .map_err(|e| format!("构建配置失败：{}", e))?;
+            .map_err(|e| TianyanError::Custom(format!("配置加载失败：构建配置失败：{}", e)))?;
 
         let config: TianyanConfig = config_raw
             .try_deserialize()
-            .map_err(|e| format!("反序列化配置失败：{}", e))?;
+            .map_err(|e| TianyanError::Custom(format!("配置加载失败：反序列化配置失败：{}", e)))?;
 
-        config.validate()?;
+        config
+            .validate()
+            .map_err(|e| TianyanError::Custom(format!("配置加载失败：{e}")))?;
 
         Ok(config)
     }
@@ -188,19 +193,21 @@ impl TianyanConfig {
     }
 
     /// 生成默认配置文件内容。
-    pub fn generate_default_toml() -> Result<String, String> {
-        toml::to_string_pretty(&Self::default()).map_err(|e| format!("序列化配置失败：{}", e))
+    pub fn generate_default_toml() -> Result<String, TianyanError> {
+        Ok(toml::to_string_pretty(&Self::default())?)
     }
 
     /// 将配置保存到文件。
-    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), String> {
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), TianyanError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{}", e))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| TianyanError::Custom(format!("配置保存失败：创建目录失败：{}", e)))?;
         }
 
-        let content = toml::to_string_pretty(self).map_err(|e| format!("序列化配置失败：{}", e))?;
+        let content = toml::to_string_pretty(self)?;
 
-        std::fs::write(path, content).map_err(|e| format!("写入文件失败: {}", e))?;
+        std::fs::write(path, content)
+            .map_err(|e| TianyanError::Custom(format!("配置保存失败：写入文件失败：{}", e)))?;
 
         Ok(())
     }
@@ -237,7 +244,7 @@ fn load_config_or_default() -> (TianyanConfig, Option<TianyanError>) {
 /// 构造配置加载错误（带路径上下文）。
 ///
 /// `path` 为实际失败路径（文件存在但损坏）或预期配置路径（文件缺失）。
-fn config_load_error(path: Option<&std::path::Path>, detail: String) -> TianyanError {
+fn config_load_error(path: Option<&std::path::Path>, detail: TianyanError) -> TianyanError {
     let location = match path {
         Some(p) => p.display().to_string(),
         None => "默认搜索路径".to_string(),
@@ -369,7 +376,10 @@ mod tests {
         // 纯函数验证 get_config 失败路径记录的错误格式：
         // 模块前缀 + 配置路径 + 错误详情
         let bad_path = std::path::Path::new("/tmp/bad-config/tianyan.toml");
-        let err = config_load_error(Some(bad_path), "反序列化配置失败：syntax".to_string());
+        let err = config_load_error(
+            Some(bad_path),
+            TianyanError::Custom("反序列化配置失败：syntax".to_string()),
+        );
         let msg = err.to_string();
         assert!(msg.contains("config 加载失败"), "应含模块前缀：{msg}");
         assert!(
@@ -379,7 +389,7 @@ mod tests {
         assert!(msg.contains("反序列化配置失败"), "应含错误详情：{msg}");
 
         // 路径未知时给出"默认搜索路径"占位
-        let err = config_load_error(None, "未找到配置文件".to_string());
+        let err = config_load_error(None, TianyanError::Custom("未找到配置文件".to_string()));
         assert!(err.to_string().contains("默认搜索路径"));
     }
 

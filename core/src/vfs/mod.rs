@@ -31,7 +31,6 @@
 //! ```
 
 pub mod backend;
-mod embedding_bridge;
 mod summary;
 mod traits;
 mod types;
@@ -44,13 +43,10 @@ mod test_utils;
 
 // 重新导出公共 API
 pub use backend::{LocalFileBackend, SqliteBackend, StorageBackend};
-pub use embedding_bridge::EmbeddingServiceBridge;
 #[cfg(test)]
 pub use summary::MockSummaryEngine;
 pub use summary::{SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT};
-pub use traits::{
-    ContentMetadata, ContentStore, EmbeddingProvider, VfsCore, VfsSearch, VirtualFileSystem,
-};
+pub use traits::{ContentMetadata, ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
 pub use types::{
     ContextEntry, VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType,
     CURRENT_SCHEMA_VERSION,

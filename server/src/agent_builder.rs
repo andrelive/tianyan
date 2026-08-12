@@ -17,7 +17,6 @@ use tianyan::agent::{
 };
 use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::context::DualLayerRetriever;
-use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::model::ModelServices;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::session::PersistentSessionManager;
@@ -25,6 +24,8 @@ use tianyan::skills::{SkillExecutor, SkillRefresher};
 use tianyan::vfs::backend::sqlite_db::SqliteDb;
 use tianyan::vfs::VirtualFileSystemImpl;
 use tianyan::{Result as TianyanResult, TianyanError};
+
+use crate::state::{build_knowledge_ingestor, resolve_chat_model};
 
 /// 根据配置创建模型服务。
 pub async fn create_model_services(config: &TianyanConfig) -> TianyanResult<ModelServices> {
@@ -65,36 +66,13 @@ impl AgentBuilderFactory {
 
         let retriever = DualLayerRetriever::new(vfs.clone()).with_usage_stats(usage_stats.clone());
 
-        // 从配置中解析各能力模型名称
-        let chat_model = config
-            .models
-            .resolve(ModelCapability::Chat)
-            .map(|r| r.model)
-            .unwrap_or_default();
-
-        let embedding_model = config
-            .models
-            .resolve(ModelCapability::TextEmbedding)
-            .or_else(|| config.models.resolve(ModelCapability::MultimodalEmbedding))
-            .map(|r| r.model)
-            .unwrap_or_default();
-
-        let vision_model = config
-            .models
-            .resolve(ModelCapability::Vision)
-            .map(|r| r.model)
-            .unwrap_or_default();
-
-        // Build KnowledgeIngestor so the knowledge_ingest agent tool works.
-        let knowledge_ingestor = KnowledgeIngestor::new(
-            IngestorConfig::new()
-                .with_embedding_model(&embedding_model)
-                .with_summary_model(&chat_model)
-                .with_vision_model(&vision_model),
-            model_services.chat.clone(),
-            model_services.embedding.clone(),
-            model_services.vision.clone(),
-            vfs.clone(),
+        // 模型名解析与 KnowledgeIngestor 构造收敛于 state.rs 唯一入口
+        // （resolve_chat_model / build_knowledge_ingestor）
+        let chat_model = resolve_chat_model(config);
+        let knowledge_ingestor = build_knowledge_ingestor(
+            config,
+            &model_services,
+            vfs.clone() as Arc<dyn tianyan::vfs::VirtualFileSystem>,
         );
 
         let agent = AgentBuilder::new()

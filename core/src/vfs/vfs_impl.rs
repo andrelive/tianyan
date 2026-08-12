@@ -8,10 +8,9 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
     ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
 };
+use crate::model::EmbeddingService;
 use crate::vfs::backend::StorageBackend;
-use crate::vfs::traits::{
-    ContentMetadata, ContentStore, EmbeddingProvider, VfsCore, VfsSearch, VirtualFileSystem,
-};
+use crate::vfs::traits::{ContentMetadata, ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
 use crate::vfs::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
 use crate::vfs::vector::VectorStorage;
 
@@ -22,7 +21,7 @@ pub struct VirtualFileSystemImpl {
     storage: Arc<dyn StorageBackend>,
     vector_storage: Arc<dyn VectorStorage>,
     config: StorageConfig,
-    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    embedding_provider: Option<Arc<dyn EmbeddingService>>,
     embedding_model: Option<String>,
 }
 
@@ -42,10 +41,10 @@ impl VirtualFileSystemImpl {
         }
     }
 
-    /// 设置嵌入提供者。
+    /// 设置嵌入服务（`model::EmbeddingService` 直接注入，无桥接层）。
     pub fn with_embedding_provider(
         mut self,
-        provider: Arc<dyn EmbeddingProvider>,
+        provider: Arc<dyn EmbeddingService>,
         model: impl Into<String>,
     ) -> Self {
         self.embedding_provider = Some(provider);
@@ -53,10 +52,10 @@ impl VirtualFileSystemImpl {
         self
     }
 
-    /// 设置嵌入提供者（可变引用版本）。
+    /// 设置嵌入服务（可变引用版本）。
     pub fn set_embedding_provider(
         &mut self,
-        provider: Arc<dyn EmbeddingProvider>,
+        provider: Arc<dyn EmbeddingService>,
         model: impl Into<String>,
     ) {
         self.embedding_provider = Some(provider);
@@ -264,39 +263,6 @@ impl VfsCore for VirtualFileSystemImpl {
         Ok(())
     }
 
-    async fn update_metadata(
-        &self,
-        uri: &TianyanUri,
-        importance: f32,
-        custom: HashMap<String, serde_json::Value>,
-    ) -> Result<()> {
-        let point_id = uri.to_point_id();
-
-        let point = match self.vector_storage.get_point(&point_id).await? {
-            Some(mut p) => {
-                p.payload.importance = importance;
-                for (k, v) in custom {
-                    p.payload.custom.insert(k, v);
-                }
-                p
-            }
-            None => {
-                let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string())
-                    .with_importance(importance);
-                VectorPoint {
-                    schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
-                    id: point_id,
-                    abstract_vector: None,
-                    overview_vector: None,
-                    visual_vector: None,
-                    payload,
-                }
-            }
-        };
-
-        self.vector_storage.upsert_point(&point).await
-    }
-
     async fn get_all_content_metadata(
         &self,
         uri: &TianyanUri,
@@ -327,11 +293,12 @@ impl VfsCore for VirtualFileSystemImpl {
     }
 }
 
-#[async_trait]
-impl ContentStore for VirtualFileSystemImpl {
-    async fn write(&self, uri: &TianyanUri, level: ContentLevel, content: &str) -> Result<()> {
-        Self::validate_uri(uri)?;
-
+/// 确保条目存在（幂等）：不存在时自动创建父目录 + 文件条目。
+///
+/// write/append 的建目录语义收敛于此（与 [`VfsCore::create_file`] 的区别：
+/// 已存在时静默跳过而非报错——内容写入可重复执行，VFS 自带容错）。
+impl VirtualFileSystemImpl {
+    async fn ensure_entry_exists(&self, uri: &TianyanUri) -> Result<()> {
         if !self.storage.exists(uri).await? {
             if let Some(parent) = uri.parent() {
                 if !self.storage.exists(&parent).await? {
@@ -344,6 +311,16 @@ impl ContentStore for VirtualFileSystemImpl {
                 .write_entry(&ContextEntry::new_file(uri.clone()))
                 .await?;
         }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ContentStore for VirtualFileSystemImpl {
+    async fn write(&self, uri: &TianyanUri, level: ContentLevel, content: &str) -> Result<()> {
+        Self::validate_uri(uri)?;
+
+        self.ensure_entry_exists(uri).await?;
 
         self.storage.write_content(uri, level, content).await?;
 
@@ -359,18 +336,7 @@ impl ContentStore for VirtualFileSystemImpl {
     async fn append(&self, uri: &TianyanUri, content: &str) -> Result<()> {
         Self::validate_uri(uri)?;
 
-        if !self.storage.exists(uri).await? {
-            if let Some(parent) = uri.parent() {
-                if !self.storage.exists(&parent).await? {
-                    self.storage
-                        .write_entry(&ContextEntry::new_directory(parent.clone()))
-                        .await?;
-                }
-            }
-            self.storage
-                .write_entry(&ContextEntry::new_file(uri.clone()))
-                .await?;
-        }
+        self.ensure_entry_exists(uri).await?;
 
         let level = ContentLevel::Detail;
         self.storage.append_content(uri, level, content).await?;
@@ -417,8 +383,6 @@ impl VfsSearch for VirtualFileSystemImpl {
             .map(|vsr| SearchResult {
                 uri: vsr.payload.uri.clone(),
                 score: vsr.score,
-                matched_level: ContentLevel::Abstract,
-                content: None,
             })
             .collect();
 
@@ -444,8 +408,6 @@ impl VfsSearch for VirtualFileSystemImpl {
             .map(|vsr| SearchResult {
                 uri: vsr.payload.uri.clone(),
                 score: vsr.score,
-                matched_level: ContentLevel::Abstract,
-                content: None,
             })
             .collect();
         Ok(results)

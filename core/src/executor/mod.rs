@@ -37,9 +37,10 @@ pub mod truncate;
 pub mod web;
 
 pub use actions::{
-    execute_command_action, execute_read_file, execute_run_tests, execute_search_code,
-    execute_verify_build, execute_write_file, SecurityPolicy,
+    execute_command_action, execute_read_file, execute_search_code, execute_verify_build,
+    execute_write_file, SecurityPolicy,
 };
 pub use judge::LlmJudge;
+pub use security::DEFAULT_BLOCKED_COMMANDS;
 pub use types::Action;
 pub use verification::{VerificationGate, VerificationResult};
