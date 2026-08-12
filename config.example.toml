@@ -80,6 +80,12 @@ capabilities = ["text-embedding", "multimodal-embedding"]
 # name = "deepseek-coder"
 # capabilities = ["chat"]
 
+# Ollama 本地服务 — OpenAI 兼容端点（/v1）与原生协议（/api/version、/api/tags）
+# [[models.providers]]
+# name = "ollama"
+# endpoint = "http://localhost:11434/v1"
+# api_key = ""
+
 # --- 能力偏好（可选） ---
 # 不配置则自动匹配第一个符合条件的模型
 [models.preferences]

@@ -593,21 +593,19 @@ export interface ToastMessage {
   type: ToastType;
 }
 
-// ========== Ollama / MCP Types ==========
-
-export interface OllamaModelInfo {
+// ========== Provider Discovery Types ==========
+export type ProviderProtocol = 'openai' | 'ollama';
+export interface DiscoveredModelInfo {
   name: string;
-  size: string;
+  size?: string;
   capabilities: string[];
 }
-
-export interface OllamaScanResponse {
+export interface ProviderScanResponse {
   success: boolean;
-  models: OllamaModelInfo[];
+  models: DiscoveredModelInfo[];
   error?: string;
 }
-
-export interface OllamaTestResponse {
+export interface ProviderTestResponse {
   success: boolean;
   version?: string;
   error?: string;

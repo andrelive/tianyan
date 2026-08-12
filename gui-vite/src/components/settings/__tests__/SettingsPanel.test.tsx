@@ -7,7 +7,7 @@ import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
 import SettingsPanel from '../SettingsPanel';
 
-/** 13 个 tab 的名称（与 SettingsPanel 中 TABS 定义一致）。 */
+/** 12 个 tab 的名称（与 SettingsPanel 中 TABS 定义一致）。 */
 const TAB_LABELS = [
   '模型服务',
   '数据存储',
@@ -19,7 +19,6 @@ const TAB_LABELS = [
   '检索',
   '外观',
   '连接',
-  'Ollama',
   'MCP',
   '关于',
 ];
@@ -40,9 +39,9 @@ describe('SettingsPanel', () => {
   it('renders the settings panel with the full tab list after config loads', async () => {
     renderSettingsPanel();
 
-    // 配置加载完成后渲染 13 个 tab
+    // 配置加载完成后渲染 12 个 tab
     await waitFor(() => {
-      expect(screen.getAllByRole('tab')).toHaveLength(13);
+      expect(screen.getAllByRole('tab')).toHaveLength(12);
     });
     for (const label of TAB_LABELS) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);
@@ -67,11 +66,8 @@ describe('SettingsPanel', () => {
     expect(screen.getByDisplayValue('~/.local/share/tianyan')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '保存设置' })).toBeInTheDocument();
 
-    // 点击「Ollama」→ 显示 Ollama 配置区域，且该 tab 不渲染全局保存按钮
-    await user.click(screen.getByRole('tab', { name: 'Ollama' }));
-    expect(screen.getByText('Ollama 配置')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '扫描模型' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '保存设置' })).not.toBeInTheDocument();
+    // 独立的 Ollama tab 已移除（模型发现能力集成进「模型服务」tab）
+    expect(screen.queryByRole('tab', { name: 'Ollama' })).not.toBeInTheDocument();
   });
 
   it('shows an error state when loading config fails with HTTP 500', async () => {

@@ -16,8 +16,7 @@ import type {
   UsageStatsSummary,
   McpServerEntry,
   McpTestResponse,
-  OllamaScanResponse,
-  OllamaTestResponse,
+  ProviderScanResponse,
   WorkspaceEntry,
   WorkspaceTreeResponse,
   WorkspaceReadResponse,
@@ -385,15 +384,13 @@ export const mockMcpServers: McpServerEntry[] = [
 
 export const mockMcpTestResult: McpTestResponse = { success: true, tools: 12 };
 
-export const mockOllamaScanResult: OllamaScanResponse = {
+export const mockProviderScanResult: ProviderScanResponse = {
   success: true,
   models: [
-    { name: 'llama3:8b', size: '4700000000', capabilities: ['chat'] },
-    { name: 'nomic-embed-text', size: '274000000', capabilities: ['text-embedding'] },
+    { name: 'llama3:8b', size: '4.7 GB', capabilities: ['chat'] },
+    { name: 'nomic-embed-text', size: '274 MB', capabilities: ['text-embedding'] },
   ],
 };
-
-export const mockOllamaTestResult: OllamaTestResponse = { success: true, version: '0.3.6' };
 
 export const mockSoulContent = { content: '你是天演，一个本地智能代理助手。' };
 
@@ -1181,13 +1178,9 @@ export const handlers = [
     return HttpResponse.json(mockMcpTestResult);
   }),
 
-  // Ollama（后端为 POST /config/ollama/scan、/config/ollama/test）
-  http.post(`${API_BASE}/config/ollama/scan`, () => {
-    return HttpResponse.json(mockOllamaScanResult);
-  }),
-
-  http.post(`${API_BASE}/config/ollama/test`, () => {
-    return HttpResponse.json(mockOllamaTestResult);
+  // Provider discovery（后端为 POST /config/providers/scan）
+  http.post(`${API_BASE}/config/providers/scan`, () => {
+    return HttpResponse.json(mockProviderScanResult);
   }),
 
   // Soul（后端为 GET/PUT /config/soul，GET /config/soul/default）

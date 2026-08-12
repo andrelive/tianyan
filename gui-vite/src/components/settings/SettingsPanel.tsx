@@ -13,7 +13,6 @@ import {
   Save,
   Loader2,
   X,
-  Box,
   Server,
   User,
 } from 'lucide-react';
@@ -46,7 +45,6 @@ import RetrievalTab from './tabs/RetrievalTab';
 import AppearanceTab from './tabs/AppearanceTab';
 import ConnectionTab from './tabs/ConnectionTab';
 import AboutTab from './tabs/AboutTab';
-import OllamaTab from './tabs/OllamaTab';
 import McpTab from './tabs/McpTab';
 import SoulTab from './tabs/SoulTab';
 
@@ -69,7 +67,6 @@ const TABS: TabDef[] = [
   { id: 'retrieval', label: '检索', icon: Search },
   { id: 'appearance', label: '外观', icon: Palette },
   { id: 'connection', label: '连接', icon: Wifi },
-  { id: 'ollama', label: 'Ollama', icon: Box },
   { id: 'mcp', label: 'MCP', icon: Server },
   { id: 'about', label: '关于', icon: Info },
 ];
@@ -200,6 +197,25 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
     [],
   );
 
+  /* Add a scanned model (from provider discovery) into the provider's model list */
+  const addScannedModel = useCallback((providerIndex: number, name: string, capabilities: string[]) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const providers = prev.providers.map((p, i) =>
+        i === providerIndex
+          ? {
+              ...p,
+              models: [
+                ...p.models,
+                { name, capabilities: capabilities as ModelCapability[] },
+              ],
+            }
+          : p,
+      );
+      return { ...prev, providers };
+    });
+  }, []);
+
   /* ── Preferences helpers ── */
 
   type PreferenceKey = keyof ModelPreferencesState;
@@ -273,7 +289,6 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
     activeTab !== 'appearance' &&
     activeTab !== 'connection' &&
     activeTab !== 'soul' &&
-    activeTab !== 'ollama' &&
     activeTab !== 'mcp' &&
     activeTab !== 'about';
 
@@ -295,6 +310,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
             onUpdatePreference={updatePreference}
             onTestConnection={testConnection}
             testStatus={testStatus}
+            onAddScannedModel={addScannedModel}
           />
         );
       case 'storage':
@@ -315,8 +331,6 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
         return <AppearanceTab />;
       case 'connection':
         return <ConnectionTab />;
-      case 'ollama':
-        return <OllamaTab />;
       case 'mcp':
         return <McpTab />;
       case 'about':

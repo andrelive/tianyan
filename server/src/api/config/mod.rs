@@ -7,12 +7,12 @@
 //! - 获取配置状态
 //! - 测试模型连接
 
+/// Provider 发现与引导处理函数
+pub mod discovery_handlers;
 /// 配置请求处理函数
 pub mod handlers;
 /// MCP 服务器管理处理函数
 pub mod mcp_handlers;
-/// Ollama 模型发现处理函数
-pub mod ollama_handlers;
 /// 配置路由定义
 pub mod routes;
 /// 配置业务逻辑

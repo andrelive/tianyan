@@ -7,8 +7,7 @@ import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
 import {
   mockTianyanConfig,
-  mockOllamaScanResult,
-  mockOllamaTestResult,
+  mockProviderScanResult,
   mockSoulContent,
 } from '@/test/mocks/handlers';
 import SettingsPanel from '../SettingsPanel';
@@ -214,27 +213,30 @@ describe('SettingsPanel tabs', () => {
     });
   });
 
-  it('scans Ollama models via POST /config/ollama/scan and renders the results', async () => {
+  it('scans provider models via POST /config/providers/scan and renders the results', async () => {
     const user = userEvent.setup();
     let scanBody: unknown = null;
 
     server.use(
-      http.post('/api/v1/config/ollama/scan', async ({ request }) => {
+      http.post('/api/v1/config/providers/scan', async ({ request }) => {
         scanBody = await request.json();
-        return HttpResponse.json(mockOllamaScanResult);
+        return HttpResponse.json(mockProviderScanResult);
       }),
     );
 
+    useTwoProviderConfig();
     renderSettingsPanel();
     await waitFor(() => {
       expect(screen.getByText('默认模型偏好')).toBeInTheDocument();
     });
-    await user.click(screen.getByRole('tab', { name: 'Ollama' }));
 
-    await user.click(screen.getByRole('button', { name: '扫描模型' }));
+    // 默认在「模型服务」tab；将第一个 provider 的扫描协议切换为 Ollama 后扫描
+    const protocolSelect = screen.getByRole('combobox', { name: 'openai 扫描协议' });
+    await user.selectOptions(protocolSelect, 'ollama');
+    await user.click(screen.getAllByRole('button', { name: '扫描模型' })[0]);
 
     await waitFor(() => {
-      expect(scanBody).toEqual({ endpoint: 'http://localhost:11434' });
+      expect(scanBody).toEqual({ endpoint: 'https://api.openai.com/v1', protocol: 'ollama' });
     });
     await waitFor(() => {
       expect(screen.getByText('llama3:8b')).toBeInTheDocument();
@@ -243,30 +245,9 @@ describe('SettingsPanel tabs', () => {
     expect(screen.getByText('已发现模型 (2)')).toBeInTheDocument();
     expect(screen.getByText('4.7 GB')).toBeInTheDocument();
 
-    await waitFor(() => {
-      expect(useAppStore.getState().toast).toEqual({ message: '找到 2 个模型', type: 'success' });
-    });
-  });
-
-  it('tests the Ollama connection and shows the connected version', async () => {
-    const user = userEvent.setup();
-    server.use(
-      http.post('/api/v1/config/ollama/test', () => {
-        return HttpResponse.json(mockOllamaTestResult);
-      }),
-    );
-
-    renderSettingsPanel();
-    await waitFor(() => {
-      expect(screen.getByText('默认模型偏好')).toBeInTheDocument();
-    });
-    await user.click(screen.getByRole('tab', { name: 'Ollama' }));
-
-    await user.click(screen.getByRole('button', { name: '测试连接' }));
-
-    await waitFor(() => {
-      expect(screen.getByText('已连接 (v0.3.6)')).toBeInTheDocument();
-    });
+    // 点击「添加到配置」→ 模型写入对应 provider 的模型输入框
+    await user.click(screen.getAllByRole('button', { name: '添加到配置' })[0]);
+    expect(screen.getByDisplayValue('llama3:8b')).toBeInTheDocument();
   });
 
   it('loads soul content and saves edited content via PUT /config/soul', async () => {

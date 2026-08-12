@@ -56,7 +56,7 @@ tianyan/
 │           ├── sessions/   # 会话管理（消息回退/重做、标题编辑）
 │           ├── knowledge/  # 知识导入、检索、条目浏览
 │           ├── skills/     # 技能列表与执行
-│           ├── config/     # 配置管理（含 soul/Ollama/MCP 子模块）
+│           ├── config/     # 配置管理（含 soul/MCP/Provider 发现子模块）
 │           └── shared/     # 通用错误类型与 DTO
 ├── gui-vite/                # React TypeScript 前端
 │   ├── package.json          # npm 依赖
@@ -317,9 +317,9 @@ API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
 | `/api/v1/config/mcp/servers` | GET / POST | 列出 / 添加 MCP 服务器 |
 | `/api/v1/config/mcp/servers/{name}` | DELETE / PUT | 移除 / 启停 MCP 服务器 |
 | `/api/v1/config/mcp/servers/{name}/test` | POST | 测试 MCP 服务器连接 |
-| `/api/v1/config/ollama/test` | POST | 测试 Ollama 连接 |
-| `/api/v1/config/ollama/scan` | POST | 扫描 Ollama 模型 |
-| `/api/v1/config/ollama/add-model` | POST | 添加 Ollama 模型 |
+| `/api/v1/config/providers/test` | POST | 测试 Provider 连接（protocol: openai/ollama） |
+| `/api/v1/config/providers/scan` | POST | 扫描 Provider 模型（protocol: openai/ollama） |
+| `/api/v1/config/providers/add-model` | POST | 注册模型到 Provider 配置 |
 
 ## 配置
 

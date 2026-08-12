@@ -1,4 +1,5 @@
-import { Plus, Trash2, TestTube, Check, X, Loader2 } from 'lucide-react';
+import { useState } from 'react';
+import { Plus, Trash2, TestTube, Check, X, Loader2, RefreshCw } from 'lucide-react';
 import { Toggle, FieldRow, SectionTitle } from './shared';
 import type {
   ConfigState,
@@ -6,8 +7,11 @@ import type {
   ProviderModelEntry,
   ModelCapability,
   ModelPreferencesState,
+  DiscoveredModelInfo,
+  ProviderProtocol,
 } from '@/lib/types';
 import { MODEL_CAPABILITIES } from '@/lib/types';
+import { scanProviderModels } from '@/lib/api-client';
 
 /* ── Props ── */
 
@@ -33,6 +37,7 @@ interface ModelsTabProps {
   onUpdatePreference: (key: keyof ModelPreferencesState, provider: string, model: string) => void;
   onTestConnection: (index: number) => void;
   testStatus: Record<number, 'idle' | 'testing' | 'success' | 'error'>;
+  onAddScannedModel: (providerIndex: number, name: string, capabilities: string[]) => void;
 }
 
 /* ── Capability labels ── */
@@ -79,7 +84,54 @@ export default function ModelsTab({
   onUpdatePreference,
   onTestConnection,
   testStatus,
+  onAddScannedModel,
 }: ModelsTabProps) {
+  /* Scan state per provider (runtime only, not persisted) */
+  const [scanState, setScanState] = useState<
+    Record<
+      number,
+      {
+        protocol: ProviderProtocol;
+        scanning: boolean;
+        models: DiscoveredModelInfo[];
+        error: string | null;
+      }
+    >
+  >({});
+
+  const handleScanModels = async (pi: number, endpoint: string, protocol: ProviderProtocol) => {
+    setScanState((prev) => ({
+      ...prev,
+      [pi]: {
+        ...(prev[pi] ?? { protocol, models: [], error: null }),
+        scanning: true,
+        error: null,
+      },
+    }));
+    try {
+      const resp = await scanProviderModels(endpoint, protocol);
+      setScanState((prev) => ({
+        ...prev,
+        [pi]: {
+          ...(prev[pi] ?? { protocol, models: [], error: null }),
+          scanning: false,
+          models: resp.success ? resp.models : [],
+          error: resp.success ? null : (resp.error ?? '扫描失败'),
+        },
+      }));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '扫描请求失败';
+      setScanState((prev) => ({
+        ...prev,
+        [pi]: {
+          ...(prev[pi] ?? { protocol, models: [], error: null }),
+          scanning: false,
+          error: msg,
+        },
+      }));
+    }
+  };
+
   return (
     <div>
       <SectionTitle title="模型服务" />
@@ -146,7 +198,14 @@ export default function ModelsTab({
       </div>
 
       {/* ── Provider cards ── */}
-      {config.providers.map((p, pi) => (
+      {config.providers.map((p, pi) => {
+        const st = scanState[pi] ?? {
+          protocol: 'openai' as ProviderProtocol,
+          scanning: false,
+          models: [],
+          error: null,
+        };
+        return (
         <div
           key={p.name || pi}
           className="border border-[var(--color-border)] rounded-lg p-4 mb-3 space-y-3"
@@ -230,6 +289,106 @@ export default function ModelsTab({
             </div>
           </div>
 
+          {/* ── Provider discovery (scan models) ── */}
+          <div className="pt-2 border-t border-[var(--color-border)]">
+            <div className="flex items-center gap-2">
+              <select
+                aria-label={`${p.name} 扫描协议`}
+                value={st.protocol}
+                onChange={(e) => {
+                  const protocol = e.target.value as ProviderProtocol;
+                  setScanState((prev) => ({
+                    ...prev,
+                    [pi]: prev[pi]
+                      ? { ...prev[pi], protocol }
+                      : { protocol, scanning: false, models: [], error: null },
+                  }));
+                }}
+                className="px-2 py-1.5 text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              >
+                <option value="openai">OpenAI 兼容</option>
+                <option value="ollama">Ollama 原生</option>
+              </select>
+              <button
+                onClick={() => handleScanModels(pi, p.endpoint, st.protocol)}
+                disabled={st.scanning || !p.endpoint}
+                title={!p.endpoint ? '请先填写端点 URL' : undefined}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors disabled:opacity-50"
+              >
+                {st.scanning ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <RefreshCw size={14} />
+                )}
+                扫描模型
+              </button>
+            </div>
+
+            {/* Scan error */}
+            {st.error && (
+              <div className="mt-2 p-2 rounded-md bg-red-500/10 border border-red-500/30 text-xs text-red-400">
+                {st.error}
+              </div>
+            )}
+
+            {/* Discovered models */}
+            {st.models.length > 0 && (
+              <div className="mt-3">
+                <h4 className="text-xs font-medium text-[var(--color-text-primary)] mb-2">
+                  已发现模型 ({st.models.length})
+                </h4>
+                <div className="space-y-1.5">
+                  {st.models.map((m) => (
+                    <div
+                      key={m.name}
+                      className="flex items-center justify-between p-2 rounded-md bg-[var(--color-bg-secondary)] border border-[var(--color-border)]"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-medium text-[var(--color-text-primary)] truncate">
+                            {m.name}
+                          </span>
+                          {m.size && (
+                            <span className="text-[10px] text-[var(--color-text-tertiary)] shrink-0">
+                              {m.size}
+                            </span>
+                          )}
+                        </div>
+                        {m.capabilities.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {m.capabilities.map((cap) => (
+                              <span
+                                key={cap}
+                                className="px-1.5 py-0.5 text-[10px] rounded-md bg-accent/10 text-accent border border-accent/20"
+                              >
+                                {cap}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        onClick={() =>
+                          onAddScannedModel(
+                            pi,
+                            m.name,
+                            m.capabilities.filter((c) =>
+                              MODEL_CAPABILITIES.includes(c as ModelCapability),
+                            ),
+                          )
+                        }
+                        className="flex items-center gap-1 ml-2 px-2 py-1 text-xs rounded-md bg-accent text-white hover:bg-accent-hover transition-colors shrink-0"
+                      >
+                        <Plus size={12} />
+                        添加到配置
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* ── Models under this provider ── */}
           <div className="pt-2 border-t border-[var(--color-border)]">
             <div className="flex items-center justify-between mb-2">
@@ -290,7 +449,8 @@ export default function ModelsTab({
             ))}
           </div>
         </div>
-      ))}
+        );
+      })}
 
       <button
         onClick={onAddProvider}

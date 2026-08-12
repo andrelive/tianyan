@@ -9,8 +9,8 @@ import type {
   McpServerEntry,
   McpTestResponse,
   MemoryListResponse,
-  OllamaScanResponse,
-  OllamaTestResponse,
+  ProviderProtocol,
+  ProviderScanResponse,
   RetrievalTracesResponse,
   SchedulerStatus,
   SessionMessagesResponse,
@@ -175,14 +175,13 @@ export async function clarifyChat(sessionId: string, answer: string): Promise<Cl
 
 export { getApiBase };
 
-// ========== Ollama API ==========
+// ========== Provider Discovery API ==========
 
-export async function scanOllamaModels(endpoint?: string): Promise<OllamaScanResponse> {
-  return apiPost<OllamaScanResponse>('/config/ollama/scan', { endpoint });
-}
-
-export async function testOllamaConnection(endpoint?: string): Promise<OllamaTestResponse> {
-  return apiPost<OllamaTestResponse>('/config/ollama/test', { endpoint });
+export async function scanProviderModels(
+  endpoint: string,
+  protocol: ProviderProtocol = 'openai',
+): Promise<ProviderScanResponse> {
+  return apiPost<ProviderScanResponse>('/config/providers/scan', { endpoint, protocol });
 }
 
 // ========== MCP API ==========

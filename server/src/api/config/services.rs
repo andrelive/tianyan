@@ -250,11 +250,12 @@ impl ConfigService {
         }
     }
 
-    // ─── Ollama 模型注册 ───
+    // ─── Provider 模型注册 ───
 
-    /// 将 Ollama 模型注册进模型配置（自动创建 "ollama" 提供商）。
-    pub async fn add_ollama_model(
+    /// 将模型注册进模型配置（按名称查找或创建 provider）。
+    pub async fn add_provider_model(
         &self,
+        provider_name: &str,
         endpoint: &str,
         model_name: &str,
         capabilities: &[String],
@@ -263,12 +264,12 @@ impl ConfigService {
 
         let mut config = self.state.config().read().await.clone();
 
-        // 查找或创建 "ollama" 提供商
+        // 查找或创建指定名称的 provider
         let provider = match config
             .models
             .providers
             .iter_mut()
-            .find(|p| p.name.eq_ignore_ascii_case("ollama"))
+            .find(|p| p.name.eq_ignore_ascii_case(provider_name))
         {
             Some(p) => p,
             None => {
@@ -276,7 +277,7 @@ impl ConfigService {
                     .models
                     .providers
                     .push(tianyan::config::ProviderConfig {
-                        name: "ollama".to_string(),
+                        name: provider_name.to_string(),
                         endpoint: endpoint.to_string(),
                         api_key: None,
                         models: vec![],
@@ -288,7 +289,7 @@ impl ConfigService {
                     .models
                     .providers
                     .last_mut()
-                    .ok_or_else(|| ApiError::Internal("创建 Ollama 提供商失败".to_string()))?
+                    .ok_or_else(|| ApiError::Internal("创建 Provider 提供商失败".to_string()))?
             }
         };
 
@@ -297,8 +298,8 @@ impl ConfigService {
 
         if provider.models.iter().any(|m| m.name == model_name) {
             return Err(ApiError::BadRequest(format!(
-                "模型 '{}' 已存在于 Ollama 提供商中",
-                model_name
+                "模型 '{}' 已存在于 {} 提供商中",
+                model_name, provider_name
             )));
         }
 

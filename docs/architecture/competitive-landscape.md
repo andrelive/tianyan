@@ -47,7 +47,7 @@ Dispatch（VM 沙箱 + 默认拒网 + 文件夹授权，但不支持后台）、
 
 | 能力维度 | 天演现状（代码事实） | 业界标杆做法 | 判定 |
 |---------|-------------------|-------------|------|
-| 本地推理 | Ollama 集成（test/scan/add-model） | Cline/Aider 同款；主流商业产品反而不支持 | ✅ 差异化 |
+| 本地推理 | Provider 发现（test/scan/add-model，含 Ollama 原生协议） | Cline/Aider 同款；主流商业产品反而不支持 | ✅ 差异化 |
 | 双层摘要 RAG | VFS L0/L1/L2 + RRF 融合 | 无同构（OpenHands 两层记忆最接近） | ✅ 领先 |
 | 记忆提取/整理 | MemoryExtractor + MemoryTask | Letta sleep-time agent（同构） | ✅ |
 | 子任务编排 | delegate 并行 + 嵌套 3 层 + 后台 + 取消 | Claude subagents / Cursor multitask | ✅（嵌套深度与后台等同业水准） |
