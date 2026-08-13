@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 
 // 内部 crate
 use tianyan::agent::AgentCoordinator;
-use tianyan::config::TianyanConfig;
+use tianyan::config::{ModelEntry, TianyanConfig};
 use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
 use tianyan::model::spec::ModelSpec;
@@ -54,28 +54,81 @@ pub(crate) fn resolve_chat_model(config: &TianyanConfig) -> String {
 ///
 /// 从已解析的 Chat [`tianyan::config::ModelRef`] 回查 provider 下的
 /// [`tianyan::config::ModelEntry`]：显式字段优先，其次内置规格表，最后
-/// 全局默认；模型未配置/未找到时返回 [`ModelSpec::default`]（不 panic）。
+/// 全局默认；模型未配置/未找到时返回 [`ModelSpec::default`]（不 panic），
+/// 并输出 warn 日志提示静默降级（不再无声回退）。
 pub(crate) fn resolve_chat_model_spec(config: &TianyanConfig) -> ModelSpec {
     let Some(model_ref) = config
         .models
         .resolve(tianyan::config::ModelCapability::Chat)
     else {
+        tracing::warn!("chat 模型未解析到配置条目，使用默认规格 32K/8K");
         return ModelSpec::default();
     };
     let Some(provider) =
         tianyan::config::find_provider(&config.models.providers, &model_ref.provider)
     else {
+        tracing::warn!(
+            provider = %model_ref.provider,
+            model = %model_ref.model,
+            "chat 模型未解析到配置条目，使用默认规格 32K/8K"
+        );
         return ModelSpec::default();
     };
     let Some(entry) = provider.models.iter().find(|m| m.name == model_ref.model) else {
+        tracing::warn!(
+            provider = %model_ref.provider,
+            model = %model_ref.model,
+            "chat 模型未解析到配置条目，使用默认规格 32K/8K"
+        );
         return ModelSpec::default();
     };
+    resolve_model_spec(&model_ref.provider, entry)
+}
+
+/// 解析单个模型的上下文规格（显式 > 内置表 > 默认），并输出结构化日志。
+///
+/// [`resolve_chat_model_spec`] 与 GET /api/v1/config 的 model_specs 填充共用，
+/// 是"单模型解析"的唯一实现。日志分支：
+/// - 显式配置字段 → `info`（显式配置）
+/// - 命中内置规格表 → `info`（内置表匹配）
+/// - 均未命中 → `warn`（默认规格降级，建议显式声明）
+pub(crate) fn resolve_model_spec(provider_name: &str, entry: &ModelEntry) -> ModelSpec {
     let explicit = tianyan::model::spec::from_entry_fields(
         entry.context_length,
         entry.max_output_tokens,
         entry.max_input_tokens,
     );
-    tianyan::model::spec::resolve_spec(explicit, &model_ref.provider, &model_ref.model)
+    let spec = tianyan::model::spec::resolve_spec(explicit, provider_name, &entry.name);
+    match explicit {
+        Some(_) => {
+            tracing::info!(
+                provider = provider_name,
+                model = %entry.name,
+                context_length = spec.context_length,
+                max_output_tokens = spec.max_output_tokens,
+                "模型规格：显式配置"
+            );
+        }
+        None => match tianyan::model::spec::builtin_spec(provider_name, &entry.name) {
+            Some(_) => {
+                tracing::info!(
+                    provider = provider_name,
+                    model = %entry.name,
+                    context_length = spec.context_length,
+                    max_output_tokens = spec.max_output_tokens,
+                    "模型规格：内置表匹配"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    provider = provider_name,
+                    model = %entry.name,
+                    "模型未匹配内置规格表且未配置 context_length/max_output_tokens，使用默认规格 32K/8K，建议在配置中显式声明"
+                );
+            }
+        },
+    }
+    spec
 }
 
 /// 解析嵌入模型名（TextEmbedding 优先，回退 MultimodalEmbedding）。
@@ -703,6 +756,34 @@ mod tests {
             },
         };
         let spec = resolve_chat_model_spec(&config_with(models));
+        assert_eq!(spec, ModelSpec::default());
+    }
+
+    #[test]
+    fn test_resolve_model_spec_explicit_builtin_default() {
+        // 显式字段优先（provider 无关）
+        let explicit_entry = ModelEntry {
+            name: "custom-chat".to_string(),
+            context_length: Some(64_000),
+            max_output_tokens: Some(4_000),
+            max_input_tokens: Some(60_000),
+            ..Default::default()
+        };
+        let spec = resolve_model_spec("openai", &explicit_entry);
+        assert_eq!(spec.context_length, 64_000);
+        assert_eq!(spec.max_output_tokens, 4_000);
+        assert_eq!(spec.max_input_tokens, 60_000);
+
+        // 无显式 + 内置表命中（deepseek / deepseek-v4-flash → 1M 窗口）
+        let builtin_entry = chat_entry("deepseek-v4-flash");
+        let spec = resolve_model_spec("deepseek", &builtin_entry);
+        assert_eq!(spec.context_length, 1_000_000);
+        assert_eq!(spec.max_output_tokens, 32_000);
+        assert_eq!(spec.max_input_tokens, 968_000);
+
+        // 无显式 + 内置表未命中 → 全局默认 32_768/8_192/8_192
+        let unknown_entry = chat_entry("my-local-model");
+        let spec = resolve_model_spec("ollama", &unknown_entry);
         assert_eq!(spec, ModelSpec::default());
     }
 

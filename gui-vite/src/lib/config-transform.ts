@@ -19,6 +19,7 @@ import type {
   ModelCapability,
   ModelPreferencesState,
   ModelRef,
+  ResolvedModelSpec,
 } from '@/lib/types';
 
 /* ─────── Default values ─────── */
@@ -55,6 +56,7 @@ export function emptyConfigState(): ConfigState {
   return {
     providers: [],
     preferences: emptyPreferences(),
+    resolvedSpecs: {},
     mcpServers: [],
     enable_skills: true,
     enable_memory: true,
@@ -238,6 +240,8 @@ export interface BackendUpdateRequest {
 
 export interface BackendConfigResponse {
   config: BackendTianyanConfig;
+  /** 后端解析出的模型生效规格（显式 > 内置表 > 默认），key = "{provider}/{model}"。旧后端可能缺省。 */
+  model_specs?: Record<string, ResolvedModelSpec>;
 }
 
 /* ─────── Form → Backend (ConfigState → { config: TianyanConfig }) ─────── */
@@ -388,6 +392,7 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
       is_local: p.is_local ?? false,
       headers: p.headers ?? {},
     })),
+    resolvedSpecs: response.model_specs ?? {},
     preferences: {
       chat: models.preferences?.chat ?? null,
       embedding: models.preferences?.embedding ?? null,

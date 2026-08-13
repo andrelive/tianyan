@@ -106,9 +106,14 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
 
 /// 在内置规格表中查找规格。
 ///
-/// 匹配顺序：先精确模型名匹配，再按前缀匹配（provider 前缀与模型名前缀均忽略大小写）。
+/// 三级匹配（按序，均为 `eq_ignore_ascii_case` 前缀比较）：
+///
+/// 1. provider 前缀匹配 + 模型名精确匹配（如 deepseek-v4-flash 用完整模型名）
+/// 2. provider 前缀匹配 + 模型名前缀匹配（如 qwen2.5-72b-instruct 命中 "qwen" 前缀）
+/// 3. 兜底：provider 前缀不匹配时，仅按模型名前缀匹配。模型名本身具强标识性，
+///    网关 provider（如 "opencode"）挂载知名模型（如 "deepseek-v4-flash"）时也能命中。
 pub fn builtin_spec(provider: &str, model: &str) -> Option<ModelSpec> {
-    // 第一遍：精确模型名匹配（如 deepseek-v4-flash 用完整模型名）
+    // 第一级：provider 前缀匹配 + 模型名精确匹配（如 deepseek-v4-flash 用完整模型名）
     for entry in BUILTIN_SPECS {
         if provider.eq_ignore_ascii_case(entry.provider_prefix)
             && model.eq_ignore_ascii_case(entry.model_prefix)
@@ -116,12 +121,22 @@ pub fn builtin_spec(provider: &str, model: &str) -> Option<ModelSpec> {
             return Some(entry.spec);
         }
     }
-    // 第二遍：前缀匹配（如 qwen2.5-72b-instruct 命中 "qwen" 前缀）
+    // 第二级：provider 前缀匹配 + 模型名前缀匹配（如 qwen2.5-72b-instruct 命中 "qwen" 前缀）
     for entry in BUILTIN_SPECS {
         if provider.eq_ignore_ascii_case(entry.provider_prefix)
             && model
                 .get(..entry.model_prefix.len())
                 .is_some_and(|head| head.eq_ignore_ascii_case(entry.model_prefix))
+        {
+            return Some(entry.spec);
+        }
+    }
+    // 第三级（兜底）：provider 前缀不匹配时，仅按模型名前缀匹配。
+    // 模型名本身具强标识性：deepseek-v4-flash 挂在网关 provider "opencode" 下也能命中。
+    for entry in BUILTIN_SPECS {
+        if model
+            .get(..entry.model_prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(entry.model_prefix))
         {
             return Some(entry.spec);
         }
@@ -279,8 +294,42 @@ mod tests {
     #[test]
     fn test_builtin_unknown_model_none() {
         assert!(builtin_spec("deepseek", "deepseek-chat").is_none());
-        assert!(builtin_spec("unknown-provider", "gpt-4o").is_none());
         assert!(builtin_spec("openai", "gpt-3.5-turbo").is_none());
+        assert!(builtin_spec("unknown-provider", "totally-unknown-model").is_none());
+    }
+
+    #[test]
+    fn test_builtin_fallback_model_name_only_gateway_provider() {
+        // 网关 provider "opencode" 挂载 deepseek-v4-flash：provider 前缀不匹配，
+        // 第三级兜底仅按模型名前缀命中 deepseek 条目
+        let spec = builtin_spec("opencode", "deepseek-v4-flash").unwrap();
+        assert_eq!(spec.context_length, 1_000_000);
+        assert_eq!(spec.max_output_tokens, 32_000);
+        assert_eq!(spec.max_input_tokens, 968_000);
+    }
+
+    #[test]
+    fn test_builtin_fallback_model_name_only_custom_provider() {
+        // 自定义 provider + gpt-4o 前缀模型 → 命中 openai 条目
+        let spec = builtin_spec("custom", "gpt-4o-mini").unwrap();
+        assert_eq!(spec.context_length, 128_000);
+        assert_eq!(spec.max_output_tokens, 16_000);
+        assert_eq!(spec.max_input_tokens, 112_000);
+    }
+
+    #[test]
+    fn test_builtin_fallback_model_name_only_ollama_provider() {
+        // ollama + "llama3.1:8b"：get(..5) 取 "llama" 前缀，冒号不影响边界
+        let spec = builtin_spec("ollama", "llama3.1:8b").unwrap();
+        assert_eq!(spec.context_length, 128_000);
+        assert_eq!(spec.max_output_tokens, 8_000);
+        assert_eq!(spec.max_input_tokens, 120_000);
+    }
+
+    #[test]
+    fn test_builtin_fallback_still_none_for_unknown_model() {
+        // 第三级也不匹配 → None，避免误伤
+        assert!(builtin_spec("unknown", "totally-unknown-model").is_none());
     }
 
     #[test]

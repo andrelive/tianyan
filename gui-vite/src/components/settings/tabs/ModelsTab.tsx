@@ -9,6 +9,7 @@ import type {
   ModelPreferencesState,
   DiscoveredModelInfo,
   ProviderProtocol,
+  ResolvedModelSpec,
 } from '@/lib/types';
 import { MODEL_CAPABILITIES } from '@/lib/types';
 import { scanProviderModels } from '@/lib/api-client';
@@ -53,6 +54,13 @@ const CAPABILITY_LABELS: Record<ModelCapability, string> = {
 
 type PreferenceKey = keyof ModelPreferencesState;
 
+/** 数字紧凑缩写：>=1M → "1M"；>=1K → "128K"；否则原样。 */
+function formatCompactNumber(n: number): string {
+  if (n >= 1_000_000) return `${Math.floor(n / 1_000_000)}M`;
+  if (n >= 1_000) return `${Math.floor(n / 1_000)}K`;
+  return String(n);
+}
+
 function getSelectableModels(
   providers: ProviderConfigState[],
   caps: ModelCapability[],
@@ -68,6 +76,52 @@ function getSelectableModels(
     }
   }
   return result;
+}
+
+/**
+ * 生效规格只读行（后端解析结果）。key = "{provider}/{model}"；
+ * 旧后端无 model_specs 数据时不渲染。展示字段与规格输入框门控一致。
+ */
+function ResolvedSpecRow({
+  spec,
+  model,
+}: {
+  spec: ResolvedModelSpec;
+  model: ProviderModelEntry;
+}) {
+  const isChatOrVision = model.capabilities.some(
+    (cap) => cap === 'chat' || cap === 'vision',
+  );
+  const isEmbedding = model.capabilities.some(
+    (cap) => cap === 'text-embedding' || cap === 'multimodal-embedding',
+  );
+  const parts: string[] = [];
+  if (isChatOrVision) {
+    parts.push(`${formatCompactNumber(spec.context_length)} 上下文`);
+    parts.push(`${formatCompactNumber(spec.max_output_tokens)} 输出`);
+  }
+  if (isEmbedding) {
+    parts.push(`嵌入上限 ${formatCompactNumber(spec.max_input_tokens)}`);
+  }
+  if (parts.length === 0) return null;
+
+  const hasExplicit = model.context_length ?? model.max_output_tokens ?? model.max_input_tokens;
+  return (
+    <div className="flex items-center gap-2 mt-1.5">
+      <span className="text-xs text-[var(--color-text-tertiary)]">
+        生效规格：{parts.join(' / ')}
+      </span>
+      {hasExplicit ? (
+        <span className="px-1.5 py-0.5 text-[10px] rounded-md bg-accent/10 text-accent border border-accent/20">
+          自定义
+        </span>
+      ) : (
+        <span className="px-1.5 py-0.5 text-[10px] rounded-md bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] border border-[var(--color-border)]">
+          自动匹配
+        </span>
+      )}
+    </div>
+  );
 }
 
 /* ── Component ── */
@@ -494,6 +548,11 @@ export default function ModelsTab({
                       placeholder="默认 8192"
                     />
                   )}
+                  {/* 生效规格（只读；后端解析结果，key = "{provider}/{model}"；旧后端无数据时不渲染） */}
+                  {(() => {
+                    const spec = config.resolvedSpecs[`${p.name}/${m.name}`];
+                    return spec ? <ResolvedSpecRow spec={spec} model={m} /> : null;
+                  })()}
                 </div>
                 <button
                   onClick={() => onRemoveModel(pi, mi)}

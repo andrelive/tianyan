@@ -1,17 +1,38 @@
 // 标准库
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::{info, warn};
 
-use tianyan::config::{McpServerEntry, TianyanConfig};
+use tianyan::config::{McpServerEntry, ModelsConfig, TianyanConfig};
+use tianyan::model::spec::ModelSpec;
 
 use crate::api::config::types::{ConfigResponse, ModelsResponse, UpdateConfigResponse};
 use crate::api::shared::error::ApiError;
-use crate::state::AppState;
+use crate::state::{resolve_model_spec, AppState};
 
 /// 构造热重载失败错误（统一错误前缀，避免调用点重复拼装）。
 fn reload_error(e: impl std::fmt::Display) -> ApiError {
     ApiError::Internal(format!("热重载失败: {e}"))
+}
+
+/// 解析配置中全部模型的完整规格（key = "{provider}/{model}"），供响应展示。
+///
+/// 与 [`crate::state::resolve_chat_model_spec`] 共用"单模型解析"逻辑
+/// （[`resolve_model_spec`]：显式 > 内置表 > 默认），不重复实现。
+fn resolve_all_model_specs(models: &ModelsConfig) -> HashMap<String, ModelSpec> {
+    models
+        .providers
+        .iter()
+        .flat_map(|p| {
+            p.models.iter().map(|m| {
+                (
+                    format!("{}/{}", p.name, m.name),
+                    resolve_model_spec(&p.name, m),
+                )
+            })
+        })
+        .collect()
 }
 
 /// 配置服务，管理应用配置的读取、保存与热重载
@@ -28,7 +49,10 @@ impl ConfigService {
     /// 获取当前配置
     pub async fn get_config(&self) -> Result<ConfigResponse, ApiError> {
         let config = self.state.config().read().await.clone();
-        Ok(ConfigResponse { config })
+        Ok(ConfigResponse {
+            model_specs: Some(resolve_all_model_specs(&config.models)),
+            config,
+        })
     }
 
     /// 更新配置 — 验证、保存到文件、热重载 Agent
@@ -325,5 +349,67 @@ impl ConfigService {
         });
 
         self.persist_and_reload(config).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tianyan::config::{ModelCapability, ModelEntry, ModelsConfig, ProviderConfig};
+    use tianyan::model::spec::ModelSpec;
+
+    fn provider_with(name: &str, models: Vec<ModelEntry>) -> ProviderConfig {
+        ProviderConfig {
+            name: name.to_string(),
+            endpoint: "https://example.com/v1".to_string(),
+            api_key: None,
+            models,
+            timeout: 60,
+            enabled: true,
+            headers: Default::default(),
+        }
+    }
+
+    fn chat_entry(name: &str) -> ModelEntry {
+        ModelEntry {
+            name: name.to_string(),
+            capabilities: vec![ModelCapability::Chat],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_resolve_all_model_specs_maps_every_model() {
+        let explicit_entry = ModelEntry {
+            context_length: Some(64_000),
+            max_output_tokens: Some(4_000),
+            max_input_tokens: Some(60_000),
+            ..chat_entry("custom-chat")
+        };
+        let models = ModelsConfig {
+            providers: vec![
+                provider_with("deepseek", vec![chat_entry("deepseek-v4-flash")]),
+                provider_with("openai", vec![explicit_entry]),
+                provider_with("ollama", vec![chat_entry("my-local-model")]),
+            ],
+            ..Default::default()
+        };
+        let specs = resolve_all_model_specs(&models);
+        assert_eq!(specs.len(), 3);
+        // 内置表命中（无显式字段）
+        assert_eq!(
+            specs["deepseek/deepseek-v4-flash"].context_length,
+            1_000_000
+        );
+        assert_eq!(
+            specs["deepseek/deepseek-v4-flash"].max_output_tokens,
+            32_000
+        );
+        // 显式字段优先
+        assert_eq!(specs["openai/custom-chat"].context_length, 64_000);
+        assert_eq!(specs["openai/custom-chat"].max_output_tokens, 4_000);
+        assert_eq!(specs["openai/custom-chat"].max_input_tokens, 60_000);
+        // 未知模型 → 全局默认 32_768/8_192
+        assert_eq!(specs["ollama/my-local-model"], ModelSpec::default());
     }
 }

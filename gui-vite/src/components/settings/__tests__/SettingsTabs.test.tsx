@@ -63,6 +63,68 @@ function useTwoProviderConfig() {
   );
 }
 
+/** 覆盖 GET /config：模型带规格字段（context_length / max_output_tokens / max_input_tokens）＋ 后端解析结果 model_specs。 */
+function useResolvedSpecConfig() {
+  server.use(
+    http.get('/api/v1/config', () => {
+      return HttpResponse.json({
+        config: {
+          ...mockTianyanConfig,
+          models: {
+            providers: [
+              {
+                name: 'openai',
+                endpoint: 'https://api.openai.com/v1',
+                api_key: 'sk-test',
+                models: [
+                  {
+                    name: 'gpt-4o',
+                    capabilities: ['chat', 'vision'],
+                    context_length: 128000,
+                    max_output_tokens: 4096,
+                  },
+                  {
+                    name: 'text-embedding-3-small',
+                    capabilities: ['text-embedding'],
+                    max_input_tokens: 8192,
+                  },
+                ],
+                timeout: 60,
+                enabled: true,
+                headers: {},
+              },
+              {
+                name: 'deepseek',
+                endpoint: 'https://api.deepseek.com/v1',
+                api_key: 'sk-deepseek',
+                models: [{ name: 'deepseek-chat', capabilities: ['chat'] }],
+                timeout: 60,
+                enabled: true,
+                headers: {},
+              },
+            ],
+            preferences: {
+              chat: { provider: 'openai', model: 'gpt-4o' },
+              embedding: null,
+              vision: null,
+            },
+          },
+        },
+        // 后端已解析的生效规格（显式 > 内置表 > 默认）；key = "{provider}/{model}"
+        model_specs: {
+          'openai/gpt-4o': { context_length: 1000000, max_output_tokens: 32000, max_input_tokens: 968000 },
+          'openai/text-embedding-3-small': {
+            context_length: 32768,
+            max_output_tokens: 8192,
+            max_input_tokens: 8192,
+          },
+          'deepseek/deepseek-chat': { context_length: 64000, max_output_tokens: 8000, max_input_tokens: 64000 },
+        },
+      });
+    }),
+  );
+}
+
 /** 覆盖 GET /config：模型带规格字段（context_length / max_output_tokens / max_input_tokens）。 */
 function useSpecConfig() {
   server.use(
@@ -427,5 +489,59 @@ describe('SettingsPanel tabs', () => {
     expect(screen.getAllByPlaceholderText('默认 8192').length).toBeGreaterThanOrEqual(1);
     // 规格输入框初始为空
     expect(screen.getByLabelText('上下文长度')).toHaveValue(null);
+  });
+
+  it('renders resolved spec rows with compact number abbreviations from model_specs', async () => {
+    useResolvedSpecConfig();
+    renderSettingsPanel();
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
+    });
+
+    // chat/vision 模型（gpt-4o）：1000000 → "1M" 上下文、32000 → "32K" 输出
+    expect(screen.getByText(/生效规格：1M 上下文 \/ 32K 输出/)).toBeInTheDocument();
+    // embedding 模型：只显示嵌入上限（8192 → "8K"）
+    expect(screen.getByText(/生效规格：嵌入上限 8K/)).toBeInTheDocument();
+    // 无显式字段模型（deepseek-chat）：64000 → "64K" 上下文、8000 → "8K" 输出
+    expect(screen.getByText(/生效规格：64K 上下文 \/ 8K 输出/)).toBeInTheDocument();
+  });
+
+  it('shows 自定义 badge for models with explicit fields and 自动匹配 for auto-matched ones', async () => {
+    useResolvedSpecConfig();
+    renderSettingsPanel();
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
+    });
+
+    // gpt-4o 有显式 context_length → 自定义；deepseek-chat 无显式字段 → 自动匹配
+    expect(screen.getAllByText('自定义')).toHaveLength(2); // gpt-4o + text-embedding-3-small
+    expect(screen.getAllByText('自动匹配')).toHaveLength(1); // deepseek-chat
+  });
+
+  it('does not render resolved spec rows when response has no model_specs (old backend)', async () => {
+    renderSettingsPanel(); // mockTianyanConfig：响应无 model_specs
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
+    });
+
+    // 不渲染生效规格行，也不报错
+    expect(screen.queryByText(/生效规格/)).not.toBeInTheDocument();
+    expect(screen.queryByText('自定义')).not.toBeInTheDocument();
+    expect(screen.queryByText('自动匹配')).not.toBeInTheDocument();
+  });
+
+  it('gates resolved spec row fields by capability: embedding shows only input limit', async () => {
+    useResolvedSpecConfig();
+    renderSettingsPanel();
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
+    });
+
+    // 三条生效规格行：gpt-4o（chat/vision）、text-embedding-3-small（embedding）、deepseek-chat（chat）
+    const rows = screen.getAllByText(/生效规格/);
+    expect(rows).toHaveLength(3);
+    // embedding 行不含 上下文/输出 字段
+    expect(screen.getByText(/生效规格：嵌入上限 8K/)).toBeInTheDocument();
+    expect(screen.queryByText(/生效规格：32K 上下文/)).not.toBeInTheDocument();
   });
 });

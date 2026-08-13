@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use tianyan::config::TianyanConfig;
+use tianyan::model::spec::ModelSpec;
 
 // Re-export shared types from core so server API can use them directly
 pub use tianyan::config::api_types::{
@@ -12,6 +15,10 @@ pub use tianyan::config::api_types::{
 pub struct ConfigResponse {
     /// 天演配置
     pub config: TianyanConfig,
+    /// 各模型解析后的完整规格（只读展示字段，key = "{provider}/{model}";
+    /// 缺省时省略该字段以兼容旧客户端）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_specs: Option<HashMap<String, ModelSpec>>,
 }
 
 /// 更新配置请求 — 接受完整的 TianyanConfig
@@ -40,10 +47,41 @@ mod tests {
     #[test]
     fn test_config_response_serialization() {
         let config = TianyanConfig::default();
-        let response = ConfigResponse { config };
+        let response = ConfigResponse {
+            config,
+            model_specs: None,
+        };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("agent"));
         assert!(json.contains("models"));
+    }
+
+    #[test]
+    fn test_config_response_model_specs_field() {
+        use std::collections::HashMap;
+        use tianyan::model::spec::ModelSpec;
+
+        let config = TianyanConfig::default();
+        // 填充时序列化含 model_specs（key = "{provider}/{model}"）
+        let mut specs = HashMap::new();
+        specs.insert(
+            "deepseek/deepseek-v4-flash".to_string(),
+            ModelSpec::default(),
+        );
+        let response = ConfigResponse {
+            config: config.clone(),
+            model_specs: Some(specs),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"model_specs\""));
+        assert!(json.contains("deepseek/deepseek-v4-flash"));
+        // 缺省时省略该字段（旧客户端兼容）
+        let response = ConfigResponse {
+            config,
+            model_specs: None,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(!json.contains("model_specs"));
     }
 
     #[test]

@@ -375,6 +375,16 @@ export interface ModelRef {
   model: string;
 }
 
+/** 后端解析后的模型生效规格（显式字段 > 内置模型表 > 默认），只读展示用。 */
+export interface ResolvedModelSpec {
+  /** 上下文窗口长度（token）。 */
+  context_length: number;
+  /** 最大输出 token 数。 */
+  max_output_tokens: number;
+  /** 嵌入模型最大输入 token 数。 */
+  max_input_tokens: number;
+}
+
 export interface ModelPreferencesState {
   chat?: ModelRef | null;
   embedding?: ModelRef | null;
@@ -389,6 +399,8 @@ export interface ConfigState {
   // -- Model config (replaces old model_services) --
   providers: ProviderConfigState[];
   preferences: ModelPreferencesState;
+  /** 后端解析出的模型生效规格，key = "{provider}/{model}"。旧后端无该字段时为空对象。 */
+  resolvedSpecs: Record<string, ResolvedModelSpec>;
 
   // -- Agent config (agent.*) --
   enable_skills: boolean;
