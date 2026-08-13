@@ -133,7 +133,7 @@ impl ChatService {
                         session_id: session_id.clone(),
                         delta: chunk.delta,
                         finish_reason: if chunk.is_complete {
-                            Some("stop".to_string())
+                            map_finish_reason(chunk.finish_reason.clone())
                         } else {
                             None
                         },
@@ -180,6 +180,12 @@ impl ChatService {
         let response = self.agent.handle_clarification(session_id, answer).await?;
         Ok(to_chat_response(session_id, response))
     }
+}
+
+/// 完成 chunk 的 finish_reason 映射：透传模型真实 finish_reason（length/tool_calls 等），
+/// 无 finish_reason 时回退 "stop"（保持缺省线上行为）。
+fn map_finish_reason(finish_reason: Option<String>) -> Option<String> {
+    finish_reason.or_else(|| Some("stop".to_string()))
 }
 
 /// 将核心 AgentResponse 转换为 API 层 ChatResponse。
@@ -281,9 +287,25 @@ fn generate_session_title(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_chat_service_creation() {
         // 这是一个编译时测试，确保 ChatService 可以被构造
         // 实际测试需要 mock 实现
+    }
+
+    #[test]
+    fn test_map_finish_reason_passthrough_real_reason() {
+        // 模型真实 finish_reason（如 length/tool_calls）应原样透传
+        let fr = map_finish_reason(Some("length".to_string()));
+        assert_eq!(fr.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn test_map_finish_reason_defaults_to_stop() {
+        // 无 finish_reason 时回退 "stop"（保持缺省线上行为）
+        let fr = map_finish_reason(None);
+        assert_eq!(fr.as_deref(), Some("stop"));
     }
 }

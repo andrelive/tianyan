@@ -14,6 +14,7 @@ use tianyan::agent::AgentCoordinator;
 use tianyan::config::TianyanConfig;
 use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
+use tianyan::model::spec::ModelSpec;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::scheduler::TaskScheduler;
 use tianyan::session::{PersistentSessionManager, SessionManager};
@@ -47,6 +48,34 @@ pub(crate) fn resolve_chat_model(config: &TianyanConfig) -> String {
         .resolve(tianyan::config::ModelCapability::Chat)
         .map(|r| r.model)
         .unwrap_or_default()
+}
+
+/// 解析 Chat 能力模型的上下文规格（显式 > 内置表 > 默认）。
+///
+/// 从已解析的 Chat [`tianyan::config::ModelRef`] 回查 provider 下的
+/// [`tianyan::config::ModelEntry`]：显式字段优先，其次内置规格表，最后
+/// 全局默认；模型未配置/未找到时返回 [`ModelSpec::default`]（不 panic）。
+pub(crate) fn resolve_chat_model_spec(config: &TianyanConfig) -> ModelSpec {
+    let Some(model_ref) = config
+        .models
+        .resolve(tianyan::config::ModelCapability::Chat)
+    else {
+        return ModelSpec::default();
+    };
+    let Some(provider) =
+        tianyan::config::find_provider(&config.models.providers, &model_ref.provider)
+    else {
+        return ModelSpec::default();
+    };
+    let Some(entry) = provider.models.iter().find(|m| m.name == model_ref.model) else {
+        return ModelSpec::default();
+    };
+    let explicit = tianyan::model::spec::from_entry_fields(
+        entry.context_length,
+        entry.max_output_tokens,
+        entry.max_input_tokens,
+    );
+    tianyan::model::spec::resolve_spec(explicit, &model_ref.provider, &model_ref.model)
 }
 
 /// 解析嵌入模型名（TextEmbedding 优先，回退 MultimodalEmbedding）。
@@ -545,5 +574,146 @@ impl AppState {
         }
         tracing::info!("应用已关闭");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tianyan::config::{
+        find_provider, ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig,
+        ProviderConfig,
+    };
+
+    fn provider_with(models: Vec<ModelEntry>) -> ProviderConfig {
+        ProviderConfig {
+            name: "deepseek".to_string(),
+            endpoint: "https://api.deepseek.com/v1".to_string(),
+            api_key: Some("sk-test".to_string()),
+            models,
+            timeout: 60,
+            enabled: true,
+            headers: std::collections::HashMap::new(),
+        }
+    }
+
+    fn chat_entry(name: &str) -> ModelEntry {
+        ModelEntry {
+            name: name.to_string(),
+            capabilities: vec![ModelCapability::Chat],
+            ..Default::default()
+        }
+    }
+
+    fn config_with(models: ModelsConfig) -> TianyanConfig {
+        TianyanConfig {
+            models,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_resolve_chat_model_spec_explicit_fields_win() {
+        // 显式三字段 → 返回显式 spec（不走内置表/默认）
+        let entry = ModelEntry {
+            context_length: Some(64_000),
+            max_output_tokens: Some(4_000),
+            max_input_tokens: Some(60_000),
+            ..chat_entry("deepseek-v4-flash")
+        };
+        let models = ModelsConfig {
+            providers: vec![provider_with(vec![entry])],
+            preferences: ModelPreferences {
+                chat: Some(ModelRef {
+                    provider: "deepseek".to_string(),
+                    model: "deepseek-v4-flash".to_string(),
+                }),
+                ..Default::default()
+            },
+        };
+        let spec = resolve_chat_model_spec(&config_with(models));
+        assert_eq!(spec.context_length, 64_000);
+        assert_eq!(spec.max_output_tokens, 4_000);
+        assert_eq!(spec.max_input_tokens, 60_000);
+    }
+
+    #[test]
+    fn test_resolve_chat_model_spec_partial_explicit_fields() {
+        // 仅 context_length 显式 → 其余字段用默认值（from_entry_fields 语义）
+        let entry = ModelEntry {
+            context_length: Some(128_000),
+            ..chat_entry("my-chat-model")
+        };
+        let models = ModelsConfig {
+            providers: vec![provider_with(vec![entry])],
+            preferences: ModelPreferences {
+                chat: Some(ModelRef {
+                    provider: "deepseek".to_string(),
+                    model: "my-chat-model".to_string(),
+                }),
+                ..Default::default()
+            },
+        };
+        let spec = resolve_chat_model_spec(&config_with(models));
+        assert_eq!(spec.context_length, 128_000);
+        assert_eq!(spec.max_output_tokens, 8_192);
+        assert_eq!(spec.max_input_tokens, 8_192);
+    }
+
+    #[test]
+    fn test_resolve_chat_model_spec_builtin_table_hit() {
+        // 无显式字段 + 内置表命中（deepseek / deepseek-v4-flash → 1M 窗口）
+        let models = ModelsConfig {
+            providers: vec![provider_with(vec![chat_entry("deepseek-v4-flash")])],
+            preferences: ModelPreferences::default(),
+        };
+        let spec = resolve_chat_model_spec(&config_with(models));
+        assert_eq!(spec.context_length, 1_000_000);
+        assert_eq!(spec.max_output_tokens, 32_000);
+        assert_eq!(spec.max_input_tokens, 968_000);
+    }
+
+    #[test]
+    fn test_resolve_chat_model_spec_unknown_model_default() {
+        // 无显式字段 + 内置表未命中 → 全局默认 32_768/8_192/8_192
+        let models = ModelsConfig {
+            providers: vec![provider_with(vec![chat_entry("deepseek-chat")])],
+            preferences: ModelPreferences::default(),
+        };
+        let spec = resolve_chat_model_spec(&config_with(models));
+        assert_eq!(spec, ModelSpec::default());
+    }
+
+    #[test]
+    fn test_resolve_chat_model_spec_no_chat_model_default() {
+        // 无任何 chat 能力模型 → 默认 spec（不 panic）
+        let models = ModelsConfig::default();
+        let spec = resolve_chat_model_spec(&config_with(models));
+        assert_eq!(spec, ModelSpec::default());
+
+        // preference 指向不存在的模型 → 回退默认（resolve 自动选择亦失败）
+        let models = ModelsConfig {
+            providers: vec![provider_with(vec![])],
+            preferences: ModelPreferences {
+                chat: Some(ModelRef {
+                    provider: "deepseek".to_string(),
+                    model: "ghost".to_string(),
+                }),
+                ..Default::default()
+            },
+        };
+        let spec = resolve_chat_model_spec(&config_with(models));
+        assert_eq!(spec, ModelSpec::default());
+    }
+
+    #[test]
+    fn test_find_provider_lookup_used_by_resolve() {
+        // 确认 entry 回查使用的 find_provider 语义：仅命中已启用 provider
+        let models = ModelsConfig {
+            providers: vec![provider_with(vec![chat_entry("deepseek-v4-flash")])],
+            ..Default::default()
+        };
+        let p = find_provider(&models.providers, "deepseek").unwrap();
+        assert_eq!(p.models[0].name, "deepseek-v4-flash");
     }
 }

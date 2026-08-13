@@ -606,6 +606,9 @@ impl Agent {
                 persisted_message,
                 ..
             }) => {
+                // T4：模型 finish_reason 已由 loop 持久化到 StructuredMessage.finish，
+                // 流式完成事件复用该值（`persisted_message` 随后被 move 进 state）
+                let finish_reason = persisted_message.finish.clone();
                 state
                     .write()
                     .await
@@ -622,7 +625,7 @@ impl Agent {
                     }
                     TurnMode::Stream { sender } => {
                         sender
-                            .send_complete("", StreamChunkType::Answer, None)
+                            .send_complete("", StreamChunkType::Answer, None, finish_reason)
                             .await;
                         let mut resp = AgentResponse::simple(content);
                         resp.token_usage = total_tokens.clone();
@@ -654,7 +657,7 @@ impl Agent {
                     }
                     TurnMode::Stream { sender } => {
                         sender
-                            .send_complete(&formatted, StreamChunkType::Clarification, None)
+                            .send_complete(&formatted, StreamChunkType::Clarification, None, None)
                             .await;
                         let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
                         resp.token_usage = total_tokens.clone();
@@ -680,7 +683,7 @@ impl Agent {
                     }
                     TurnMode::Stream { sender } => {
                         sender
-                            .send_complete("任务已取消", StreamChunkType::Answer, None)
+                            .send_complete("任务已取消", StreamChunkType::Answer, None, None)
                             .await;
                         let mut resp = AgentResponse::simple("任务已取消".to_string());
                         resp.cancelled = true;

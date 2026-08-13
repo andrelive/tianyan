@@ -364,4 +364,40 @@ describe('ChatPanel', () => {
     });
     expect(useAppStore.getState().toast?.type).toBe('error');
   });
+
+  it('shows truncation hint when stream ends with finish_reason "length"', async () => {
+    const user = userEvent.setup();
+    renderChatPanel();
+
+    const textarea = screen.getByPlaceholderText(/输入消息/);
+    // user.type 会把 [..] 当作键盘修饰符语法，改用 fireEvent.change
+    fireEvent.change(textarea, { target: { value: '这是一个 [length-test] 请求' } });
+    await user.click(screen.getByRole('button', { name: /发送/i }));
+
+    // SSE 流结束事件 finish_reason='length' → 助手消息下方显示截断提示
+    await waitFor(() => {
+      expect(screen.getByText(/输出已达上限/)).toBeInTheDocument();
+    });
+
+    // 流结束后提示仍然保留
+    await waitFor(() => {
+      expect(useAppStore.getState().streamStatus).toBe('idle');
+    });
+    expect(screen.getByText(/输出已达上限/)).toBeInTheDocument();
+  });
+
+  it('does not show truncation hint when stream ends with finish_reason "stop"', async () => {
+    const user = userEvent.setup();
+    renderChatPanel();
+
+    const textarea = screen.getByPlaceholderText(/输入消息/);
+    await user.type(textarea, '普通请求');
+    await user.click(screen.getByRole('button', { name: /发送/i }));
+
+    // 流正常结束后（finish_reason='stop'）不显示截断提示
+    await waitFor(() => {
+      expect(useAppStore.getState().streamStatus).toBe('idle');
+    });
+    expect(screen.queryByText(/输出已达上限/)).not.toBeInTheDocument();
+  });
 });

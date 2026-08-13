@@ -125,6 +125,7 @@ mod tests {
         ModelEntry {
             name: name.to_string(),
             capabilities: caps,
+            ..Default::default()
         }
     }
 

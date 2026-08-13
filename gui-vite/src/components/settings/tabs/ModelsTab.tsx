@@ -437,6 +437,63 @@ export default function ModelsTab({
                       </label>
                     ))}
                   </div>
+                  {/* 模型规格字段：按 capability 显示；留空 = 未配置 = 走后端内置模型表默认 */}
+                  {m.capabilities.some((cap) => cap === 'chat' || cap === 'vision') && (
+                    <div className="grid grid-cols-2 gap-1.5 mt-1.5">
+                      <input
+                        type="number"
+                        min={1}
+                        aria-label="上下文长度"
+                        value={m.context_length ?? ''}
+                        onChange={(e) =>
+                          onUpdateModel(
+                            pi,
+                            mi,
+                            'context_length',
+                            e.target.value === '' ? undefined : parseInt(e.target.value, 10),
+                          )
+                        }
+                        className="w-full px-2 py-1 text-xs rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+                        placeholder="默认 32768（内置表自动匹配）"
+                      />
+                      <input
+                        type="number"
+                        min={1}
+                        aria-label="最大输出"
+                        value={m.max_output_tokens ?? ''}
+                        onChange={(e) =>
+                          onUpdateModel(
+                            pi,
+                            mi,
+                            'max_output_tokens',
+                            e.target.value === '' ? undefined : parseInt(e.target.value, 10),
+                          )
+                        }
+                        className="w-full px-2 py-1 text-xs rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+                        placeholder="默认 8192"
+                      />
+                    </div>
+                  )}
+                  {m.capabilities.some(
+                    (cap) => cap === 'text-embedding' || cap === 'multimodal-embedding',
+                  ) && (
+                    <input
+                      type="number"
+                      min={1}
+                      aria-label="嵌入输入上限"
+                      value={m.max_input_tokens ?? ''}
+                      onChange={(e) =>
+                        onUpdateModel(
+                          pi,
+                          mi,
+                          'max_input_tokens',
+                          e.target.value === '' ? undefined : parseInt(e.target.value, 10),
+                        )
+                      }
+                      className="w-full px-2 py-1 text-xs rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent mt-1.5"
+                      placeholder="默认 8192"
+                    />
+                  )}
                 </div>
                 <button
                   onClick={() => onRemoveModel(pi, mi)}

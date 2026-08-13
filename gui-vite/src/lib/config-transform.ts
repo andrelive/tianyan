@@ -119,6 +119,9 @@ interface BackendAgentConfig {
 interface BackendModelEntry {
   name: string;
   capabilities: string[];
+  context_length?: number;
+  max_output_tokens?: number;
+  max_input_tokens?: number;
 }
 
 interface BackendProviderConfig {
@@ -272,6 +275,11 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
           models: p.models.map((m) => ({
             name: m.name,
             capabilities: m.capabilities as string[],
+            ...(m.context_length !== undefined ? { context_length: m.context_length } : {}),
+            ...(m.max_output_tokens !== undefined
+              ? { max_output_tokens: m.max_output_tokens }
+              : {}),
+            ...(m.max_input_tokens !== undefined ? { max_input_tokens: m.max_input_tokens } : {}),
           })),
           timeout: p.timeout,
           enabled: p.enabled,
@@ -371,6 +379,9 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
       models: (p.models || []).map((m) => ({
         name: m.name ?? '',
         capabilities: (m.capabilities || []) as ModelCapability[],
+        context_length: m.context_length ?? undefined,
+        max_output_tokens: m.max_output_tokens ?? undefined,
+        max_input_tokens: m.max_input_tokens ?? undefined,
       })),
       timeout: p.timeout ?? defaults.providers[0]?.timeout ?? 60,
       enabled: p.enabled ?? true,

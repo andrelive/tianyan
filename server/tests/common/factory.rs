@@ -33,14 +33,17 @@ pub fn test_provider(name: &str) -> ProviderConfig {
             ModelEntry {
                 name: "test-model".to_string(),
                 capabilities: vec![ModelCapability::Chat],
+                ..Default::default()
             },
             ModelEntry {
                 name: "text-embedding-3-small".to_string(),
                 capabilities: vec![ModelCapability::TextEmbedding],
+                ..Default::default()
             },
             ModelEntry {
                 name: "gpt-4-vision-preview".to_string(),
                 capabilities: vec![ModelCapability::Vision],
+                ..Default::default()
             },
         ],
         timeout: 30,

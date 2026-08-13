@@ -19,6 +19,7 @@ use crate::executor::SecurityPolicy;
 use crate::executor::{LlmJudge, VerificationGate};
 use crate::knowledge::KnowledgeIngestor;
 use crate::lsp::diagnostics::LspManager;
+use crate::model::spec::ModelSpec;
 use crate::model::ChatService;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
@@ -58,6 +59,8 @@ pub struct AgentBuilder {
     agent_roles: Option<AgentRolesConfig>,
     /// 结构化 Trace 收集器（G6；None 时不记录 span）。
     trace_collector: Option<Arc<crate::observability::trace::TraceCollector>>,
+    /// 聊天模型上下文规格（T5；注入 AgentLoop 并联动压缩窗口；None 时走默认窗口）。
+    chat_model_spec: Option<ModelSpec>,
 }
 
 impl AgentBuilder {
@@ -81,6 +84,7 @@ impl AgentBuilder {
             notification_sink: None,
             agent_roles: None,
             trace_collector: None,
+            chat_model_spec: None,
         }
     }
 
@@ -193,6 +197,16 @@ impl AgentBuilder {
         collector: Arc<crate::observability::trace::TraceCollector>,
     ) -> Self {
         self.trace_collector = Some(collector);
+        self
+    }
+
+    /// 设置聊天模型上下文规格（T5）。
+    ///
+    /// 规格注入 AgentLoop（供后续请求构造使用），并把压缩器
+    /// `context_window` 联动为 `spec.context_length`；未设置时压缩器
+    /// 保持默认窗口 128_000，AgentLoop.chat_spec 为 None。
+    pub fn with_chat_model_spec(mut self, spec: ModelSpec) -> Self {
+        self.chat_model_spec = Some(spec);
         self
     }
 
@@ -347,6 +361,8 @@ impl AgentBuilder {
         if let Some(ref trace) = self.trace_collector {
             agent_loop = agent_loop.with_trace_collector(trace.clone());
         }
+        // 聊天模型上下文规格注入（T5）：None 时 AgentLoop 内部走默认窗口
+        agent_loop = agent_loop.with_chat_spec(self.chat_model_spec);
 
         // 构建上下文管线
         let context_pipeline = ContextPipeline::new(
@@ -355,6 +371,12 @@ impl AgentBuilder {
             Arc::new(TokioMutex::new(ContextCompressor::new(
                 model_service.clone(),
                 CompressionConfig {
+                    // 模型规格联动压缩窗口；无 spec 时保持默认 128_000（语义与
+                    // DEFAULT_CONTEXT_WINDOW 一致，不能依赖 ..Default::default() 覆盖）。
+                    context_window: self
+                        .chat_model_spec
+                        .map(|s| s.context_length)
+                        .unwrap_or(128_000),
                     preserve_recent_messages: 6,
                     summary_model: chat_model.clone(),
                     ..CompressionConfig::default()
@@ -401,10 +423,132 @@ impl Default for AgentBuilder {
 mod tests {
     use super::*;
 
+    use crate::common::types::{Message, StructuredMessage};
+    use crate::context::DualLayerRetriever;
+    use crate::model::spec::ModelSpec;
+    use crate::model::MockChatService;
+    use crate::session::{Session, SessionManager};
+    use crate::test_utils::MockVfs;
+    use crate::vfs::VirtualFileSystem;
+    use async_trait::async_trait;
+
+    struct MockSessionManager;
+    #[async_trait]
+    impl SessionManager for MockSessionManager {
+        async fn add_structured_message(
+            &self,
+            _session_id: &str,
+            _msg: StructuredMessage,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn add_message(&self, _session_id: &str, _message: Message) -> Result<()> {
+            Ok(())
+        }
+        async fn rewrite_messages(
+            &self,
+            _session_id: &str,
+            _messages: &[StructuredMessage],
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn create_session(&self, _id: &str, _message: Message) -> Result<Session> {
+            Ok(Session::new(_id))
+        }
+        async fn get_session(&self, _id: &str) -> Result<Option<Session>> {
+            Ok(None)
+        }
+        async fn update_session(&self, _session: &Session) -> Result<()> {
+            Ok(())
+        }
+        async fn list_sessions(&self) -> Result<Vec<Session>> {
+            Ok(vec![])
+        }
+        async fn delete_session(&self, _id: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 用最小依赖构建一个完整 Agent（测试 build() 全链路）。
+    fn build_test_agent(with_spec: bool) -> Result<Agent> {
+        let vfs = Arc::new(MockVfs::new());
+        let mut builder = AgentBuilder::new()
+            .with_model("test-model")
+            .with_model_service(Arc::new(MockChatService::new()))
+            .with_vfs(vfs.clone() as Arc<dyn VirtualFileSystem>)
+            .with_retriever(Arc::new(DualLayerRetriever::new(
+                vfs.clone() as Arc<dyn VirtualFileSystem>
+            )))
+            .with_session_manager(Arc::new(MockSessionManager));
+        if with_spec {
+            builder = builder.with_chat_model_spec(ModelSpec {
+                context_length: 200_000,
+                max_output_tokens: 16_000,
+                max_input_tokens: 184_000,
+            });
+        }
+        builder.build()
+    }
+
     #[test]
     fn test_agent_builder() {
         let builder = AgentBuilder::new();
         assert!(builder.config.enable_skills);
         assert!(builder.config.enable_memory);
+    }
+
+    #[tokio::test]
+    async fn test_with_chat_model_spec_sets_loop_spec_and_window() {
+        // with_chat_model_spec(spec) → build() 后：
+        // 1) AgentLoop.chat_spec == Some(spec)
+        // 2) 压缩器 context_window == spec.context_length（窗口联动）
+        let spec = ModelSpec {
+            context_length: 200_000,
+            max_output_tokens: 16_000,
+            max_input_tokens: 184_000,
+        };
+        let vfs = Arc::new(MockVfs::new());
+        let agent = AgentBuilder::new()
+            .with_model("test-model")
+            .with_model_service(Arc::new(MockChatService::new()))
+            .with_vfs(vfs.clone() as Arc<dyn VirtualFileSystem>)
+            .with_retriever(Arc::new(DualLayerRetriever::new(
+                vfs.clone() as Arc<dyn VirtualFileSystem>
+            )))
+            .with_session_manager(Arc::new(MockSessionManager))
+            .with_chat_model_spec(spec)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            agent.agent_loop.chat_spec,
+            Some(spec),
+            "spec 应注入 AgentLoop"
+        );
+        let status = agent
+            .context_pipeline
+            .compressor()
+            .lock()
+            .await
+            .get_status(&[]);
+        assert_eq!(
+            status.context_window, spec.context_length,
+            "压缩器 context_window 应与 spec.context_length 联动"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_chat_model_spec_defaults_window() {
+        // 无 spec 时：AgentLoop.chat_spec 为 None，压缩器 context_window 保持默认 128_000。
+        let agent = build_test_agent(false).unwrap();
+        assert_eq!(agent.agent_loop.chat_spec, None);
+
+        let status = agent
+            .context_pipeline
+            .compressor()
+            .lock()
+            .await
+            .get_status(&[]);
+        assert_eq!(status.context_window, 128_000);
     }
 }

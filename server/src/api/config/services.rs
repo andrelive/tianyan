@@ -321,6 +321,7 @@ impl ConfigService {
         provider.models.push(tianyan::config::ModelEntry {
             name: model_name.to_string(),
             capabilities: mapped,
+            ..Default::default()
         });
 
         self.persist_and_reload(config).await

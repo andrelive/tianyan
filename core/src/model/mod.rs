@@ -41,6 +41,8 @@
 
 pub(crate) mod provider;
 mod services;
+/// 模型上下文规格与内置规格表。
+pub mod spec;
 mod traits;
 /// 模型类型定义（请求/响应/工具）。
 pub mod types;

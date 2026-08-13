@@ -41,6 +41,20 @@ vector_dimension = 1536
 #   1. 先配置提供商（name, endpoint, api_key）
 #   2. 在每个提供商下声明其支持的模型和能力标签
 #   3. 在 preferences 中指定各能力首选模型
+#
+# 每个模型条目（[[models.providers.models]]）可选三个规格字段，平铺在与
+# name / capabilities 同级的位置（均为可选，不配置则走回退）：
+#   context_length     — 上下文总窗口，输入与输出共享的 token 数
+#   max_output_tokens  — 单次生成的最大输出 token 数（含思考链；请求时按
+#                        「窗口 − 输入」动态收缩，此值仅为上限）
+#   max_input_tokens   — 仅 embedding 模型生效，单次向量化输入的上限
+#
+# 字段解析优先级：显式配置 > 内置规格表 > 全局默认（32K 窗口 / 8K 输出）。
+# 内置规格表按 provider + 模型名前缀自动匹配主流模型（gpt-4o、claude、
+# qwen、llama、deepseek-v4-flash 等），因此大多数用户无需配置这三个字段。
+# 确有需要时，从模型官方规格页抄两个数字即可，例如 gpt-4o：
+#   context_length = 128000
+#   max_output_tokens = 16000
 
 # --- 模型提供商 ---
 
@@ -53,6 +67,9 @@ api_key = "${OPENAI_API_KEY}"
 [[models.providers.models]]
 name = "gpt-4"
 capabilities = ["chat"]
+# 规格字段写法示例（仅注释，取消注释即生效）：
+# context_length = 8192
+# max_output_tokens = 4096
 
 [[models.providers.models]]
 name = "gpt-4-vision-preview"
@@ -61,6 +78,8 @@ capabilities = ["chat", "vision"]
 [[models.providers.models]]
 name = "text-embedding-3-small"
 capabilities = ["text-embedding"]
+# embedding 模型只需配置 max_input_tokens（其余字段不生效）：
+# max_input_tokens = 8192
 
 [[models.providers.models]]
 name = "text-embedding-3-large"
@@ -85,6 +104,13 @@ capabilities = ["text-embedding", "multimodal-embedding"]
 # name = "ollama"
 # endpoint = "http://localhost:11434/v1"
 # api_key = ""
+#
+# 本地 chat 模型示例（128K 上下文，输出上限 32K）：
+# [[models.providers.models]]
+# name = "qwen2.5-72b-instruct"
+# capabilities = ["chat"]
+# context_length = 131072
+# max_output_tokens = 32768
 
 # --- 能力偏好（可选） ---
 # 不配置则自动匹配第一个符合条件的模型

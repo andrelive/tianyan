@@ -31,6 +31,8 @@ interface AppState {
   addMessage: (message: ChatMessage) => void;
   updateLastMessage: (delta: string) => void;
   appendSkillCalls: (calls: SkillCallInfo[]) => void;
+  /** 标记最后一条 assistant 消息为截断（finish_reason === 'length'） */
+  markLastMessageTruncated: () => void;
   clearMessages: () => void;
   deleteMessagesFrom: (index: number) => void;
 
@@ -127,6 +129,18 @@ export const useAppStore = create<AppState>()(
           }
           if (lastIdx >= 0) {
             messages[lastIdx] = { ...messages[lastIdx], skill_calls: calls };
+          }
+          return { messages };
+        }),
+      markLastMessageTruncated: () =>
+        set((s) => {
+          const messages = [...s.messages];
+          let lastIdx = messages.length - 1;
+          while (lastIdx >= 0 && messages[lastIdx].role !== 'assistant') {
+            lastIdx--;
+          }
+          if (lastIdx >= 0) {
+            messages[lastIdx] = { ...messages[lastIdx], truncated_by_length: true };
           }
           return { messages };
         }),

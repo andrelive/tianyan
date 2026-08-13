@@ -52,14 +52,17 @@ fn test_config(data_dir: &Path, workdir: Option<&Path>) -> TianyanConfig {
                 ModelEntry {
                     name: "test-model".to_string(),
                     capabilities: vec![ModelCapability::Chat],
+                    ..Default::default()
                 },
                 ModelEntry {
                     name: "embed".to_string(),
                     capabilities: vec![ModelCapability::TextEmbedding],
+                    ..Default::default()
                 },
                 ModelEntry {
                     name: "vision".to_string(),
                     capabilities: vec![ModelCapability::Vision],
+                    ..Default::default()
                 },
             ],
             timeout: 30,

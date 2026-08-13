@@ -55,6 +55,12 @@ impl ContextPipeline {
         }
     }
 
+    /// 压缩器引用（crate 内测试断言压缩配置用）。
+    #[cfg(test)]
+    pub(crate) fn compressor(&self) -> &Arc<TokioMutex<ContextCompressor>> {
+        &self.compressor
+    }
+
     /// 加载可注入上下文（soul + rules + memories）。
     ///
     /// soul 通过 VFS 读取（有内部缓存），rules 和 memories 通过向量检索。

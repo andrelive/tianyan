@@ -289,6 +289,16 @@ impl ToolRegistry {
             let mut total_tokens: usize = 0;
 
             for _turn in 0..max_turns {
+                // T12 延期决策：子 agent 请求未应用 dynamic_max_tokens。
+                // 原因：ToolRegistry 仅持有模型名字符串（self.model），既不持有
+                // chat_spec（主 agent 的 ModelSpec 经 AgentLoop::with_chat_spec 注入，
+                // 未传入 ToolRegistry），也不持有 provider 名——builtin_spec /
+                // resolve_spec 需要 provider + model 双前缀匹配，仅有 model 名
+                // 无法解析规格；ChatService trait 亦不暴露规格查询。接线需把
+                // chat_spec 注入 ToolRegistry（架构变更，另行立项），届时按
+                // dynamic_max_tokens(&spec, None, &sub_messages) 设置 max_tokens
+                // （子 agent 无实测输入，退化为 TokenEstimator 估算）。
+                // 主 agent 请求已应用动态 max_tokens（agent/loop.rs），本处保持默认。
                 let request = ChatCompletionRequest::new(&model, sub_messages.clone());
                 let response = model_service
                     .chat_completion(request)

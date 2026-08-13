@@ -124,6 +124,11 @@ export default function ChatPanel() {
       if (event.skill_calls && event.skill_calls.length > 0) {
         useAppStore.getState().appendSkillCalls(event.skill_calls);
       }
+      // 输出达到 token 上限（finish_reason === 'length'）：标记消息为截断，
+      // 在助手消息下方渲染提示；'stop'/'tool_calls' 等不处理
+      if (event.finish_reason === 'length') {
+        useAppStore.getState().markLastMessageTruncated();
+      }
     },
     onError: (error) => {
       useAppStore.getState().setStreamStatus('idle');

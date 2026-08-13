@@ -63,6 +63,58 @@ function useTwoProviderConfig() {
   );
 }
 
+/** 覆盖 GET /config：模型带规格字段（context_length / max_output_tokens / max_input_tokens）。 */
+function useSpecConfig() {
+  server.use(
+    http.get('/api/v1/config', () => {
+      return HttpResponse.json({
+        config: {
+          ...mockTianyanConfig,
+          models: {
+            providers: [
+              {
+                name: 'openai',
+                endpoint: 'https://api.openai.com/v1',
+                api_key: 'sk-test',
+                models: [
+                  {
+                    name: 'gpt-4o',
+                    capabilities: ['chat', 'vision'],
+                    context_length: 128000,
+                    max_output_tokens: 4096,
+                  },
+                  {
+                    name: 'text-embedding-3-small',
+                    capabilities: ['text-embedding'],
+                    max_input_tokens: 8192,
+                  },
+                ],
+                timeout: 60,
+                enabled: true,
+                headers: {},
+              },
+              {
+                name: 'deepseek',
+                endpoint: 'https://api.deepseek.com/v1',
+                api_key: 'sk-deepseek',
+                models: [{ name: 'deepseek-chat', capabilities: ['chat'] }],
+                timeout: 60,
+                enabled: true,
+                headers: {},
+              },
+            ],
+            preferences: {
+              chat: { provider: 'openai', model: 'gpt-4o' },
+              embedding: null,
+              vision: null,
+            },
+          },
+        },
+      });
+    }),
+  );
+}
+
 beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState());
 });
@@ -307,5 +359,73 @@ describe('SettingsPanel tabs', () => {
       expect(screen.getByText(/HTTP 500/)).toBeInTheDocument();
     });
     expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument();
+  });
+
+  it('renders model spec fields from config and persists edits via PUT /config', async () => {
+    const user = userEvent.setup();
+    useSpecConfig();
+    let putBody: unknown = null;
+
+    server.use(
+      http.put('/api/v1/config', async ({ request }) => {
+        putBody = await request.json();
+        return HttpResponse.json({ success: true, message: '配置已保存' });
+      }),
+    );
+
+    renderSettingsPanel();
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
+    });
+
+    // 规格字段渲染出后端下发的值（gpt-4o 的上下文长度/最大输出 + embedding 的输入上限）
+    const ctxInput = screen.getByDisplayValue('128000');
+    expect(ctxInput).toHaveAttribute('aria-label', '上下文长度');
+    expect(screen.getByDisplayValue('4096')).toHaveAttribute('aria-label', '最大输出');
+    expect(screen.getByDisplayValue('8192')).toHaveAttribute('aria-label', '嵌入输入上限');
+
+    // 修改上下文长度并保存 → PUT body 携带三个规格字段
+    await user.clear(ctxInput);
+    await user.type(ctxInput, '200000');
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+
+    await waitFor(() => {
+      expect(putBody).not.toBeNull();
+    });
+    const body = putBody as {
+      config: { models: { providers: { models: Record<string, unknown>[] }[] } };
+    };
+    const models = body.config.models.providers[0].models;
+    expect(models[0].context_length).toBe(200000);
+    expect(models[0].max_output_tokens).toBe(4096);
+    expect(models[1].max_input_tokens).toBe(8192);
+  });
+
+  it('gates spec inputs by model capability: chat/vision vs embedding', async () => {
+    useSpecConfig();
+    renderSettingsPanel();
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
+    });
+
+    // 两个 chat/vision 模型 → 每个显示上下文长度 + 最大输出（共 2 组）
+    expect(screen.getAllByLabelText('上下文长度')).toHaveLength(2);
+    expect(screen.getAllByLabelText('最大输出')).toHaveLength(2);
+    // 仅一个 embedding 模型 → 只有一个嵌入输入上限
+    expect(screen.getAllByLabelText('嵌入输入上限')).toHaveLength(1);
+  });
+
+  it('shows built-in default placeholders on unconfigured spec inputs', async () => {
+    renderSettingsPanel(); // mockTianyanConfig：模型无规格字段
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
+    });
+
+    // chat 模型（gpt-4o）→ 上下文长度 + 最大输出 placeholder
+    expect(screen.getByPlaceholderText('默认 32768（内置表自动匹配）')).toBeInTheDocument();
+    // 最大输出 + 嵌入输入上限均为「默认 8192」
+    expect(screen.getAllByPlaceholderText('默认 8192').length).toBeGreaterThanOrEqual(1);
+    // 规格输入框初始为空
+    expect(screen.getByLabelText('上下文长度')).toHaveValue(null);
   });
 });

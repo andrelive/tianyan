@@ -186,6 +186,9 @@ pub struct AgentStreamChunk {
     /// 技能调用信息。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_calls: Option<Vec<SkillCallInfo>>,
+    /// 完成原因（finish_reason；来自模型响应的最终 choice/chunk）。
+    #[serde(default)]
+    pub finish_reason: Option<String>,
 }
 
 /// 流式事件发送器（用于在Planner-Executor循环中实时推送事件）。
@@ -219,6 +222,7 @@ impl StreamEventSender {
             token_usage: None,
             chunk_type: StreamChunkType::Thought,
             skill_calls: None,
+            finish_reason: None,
         })
         .await;
     }
@@ -231,6 +235,7 @@ impl StreamEventSender {
             token_usage: None,
             chunk_type: StreamChunkType::ToolCall,
             skill_calls: None,
+            finish_reason: None,
         })
         .await;
     }
@@ -243,6 +248,7 @@ impl StreamEventSender {
             token_usage: None,
             chunk_type: StreamChunkType::Observation,
             skill_calls: None,
+            finish_reason: None,
         })
         .await;
     }
@@ -255,6 +261,7 @@ impl StreamEventSender {
             token_usage: None,
             chunk_type: StreamChunkType::Answer,
             skill_calls: None,
+            finish_reason: None,
         })
         .await;
     }
@@ -265,6 +272,7 @@ impl StreamEventSender {
         content: &str,
         chunk_type: StreamChunkType,
         skill_calls: Option<Vec<SkillCallInfo>>,
+        finish_reason: Option<String>,
     ) {
         self.try_send(AgentStreamChunk {
             delta: content.to_string(),
@@ -272,6 +280,7 @@ impl StreamEventSender {
             token_usage: None,
             chunk_type,
             skill_calls,
+            finish_reason,
         })
         .await;
     }
@@ -284,6 +293,7 @@ impl StreamEventSender {
             token_usage: None,
             chunk_type: StreamChunkType::Error,
             skill_calls: None,
+            finish_reason: None,
         })
         .await;
     }
@@ -360,6 +370,7 @@ mod tests {
             token_usage: None,
             chunk_type: StreamChunkType::Answer,
             skill_calls: None,
+            finish_reason: None,
         };
         assert_eq!(chunk.delta, "你好");
         assert!(!chunk.is_complete);
@@ -382,6 +393,7 @@ mod tests {
             token_usage: Some(TokenUsage::new(10, 20)),
             chunk_type: StreamChunkType::ToolCall,
             skill_calls: Some(calls.clone()),
+            finish_reason: None,
         };
         assert_eq!(chunk.delta, "调用技能");
         assert!(chunk.is_complete);
@@ -398,6 +410,7 @@ mod tests {
             token_usage: None,
             chunk_type: StreamChunkType::Thought,
             skill_calls: None,
+            finish_reason: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
@@ -415,6 +428,7 @@ mod tests {
             token_usage: None,
             chunk_type: StreamChunkType::Answer,
             skill_calls: None,
+            finish_reason: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         // skill_calls 为 None 时不应出现在 JSON 中
@@ -619,13 +633,47 @@ mod tests {
         }]);
 
         sender
-            .send_complete("finished", StreamChunkType::Answer, calls)
+            .send_complete("finished", StreamChunkType::Answer, calls, None)
             .await;
         let msg = rx.recv().await.unwrap().unwrap();
         assert_eq!(msg.delta, "finished");
         assert!(msg.is_complete);
         assert_eq!(msg.chunk_type, StreamChunkType::Answer);
         assert!(msg.skill_calls.is_some());
+        assert_eq!(msg.finish_reason, None);
+    }
+
+    /// 完成事件携带 finish_reason（模型最终 chunk 的结束原因）。
+    #[tokio::test]
+    async fn stream_event_sender_send_complete_carries_finish_reason() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let sender = StreamEventSender::new(tx);
+
+        sender
+            .send_complete(
+                "done",
+                StreamChunkType::Answer,
+                None,
+                Some("stop".to_string()),
+            )
+            .await;
+        let msg = rx.recv().await.unwrap().unwrap();
+        assert!(msg.is_complete);
+        assert_eq!(msg.finish_reason.as_deref(), Some("stop"));
+    }
+
+    /// 旧 JSON（无 finish_reason 字段）反序列化兼容：缺省为 None。
+    #[test]
+    fn agent_stream_chunk_serde_missing_finish_reason_defaults_none() {
+        let json =
+            r#"{"delta":"旧数据","is_complete":true,"token_usage":null,"chunk_type":"answer"}"#;
+        let chunk: AgentStreamChunk = serde_json::from_str(json).unwrap();
+        assert!(chunk.is_complete);
+        assert_eq!(chunk.finish_reason, None);
+        // 反序列化结果可再次序列化（roundtrip 一致性）
+        let json2 = serde_json::to_string(&chunk).unwrap();
+        let restored: AgentStreamChunk = serde_json::from_str(&json2).unwrap();
+        assert_eq!(restored.finish_reason, None);
     }
 
     #[tokio::test]

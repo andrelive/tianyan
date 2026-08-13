@@ -123,6 +123,13 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
           </div>
         )}
 
+        {/* 输出达到 token 上限被截断的提示（finish_reason === 'length'） */}
+        {message.truncated_by_length && (
+          <p className="mt-2 text-xs text-[var(--color-text-tertiary)] flex items-center gap-1">
+            <span aria-hidden="true">⚠️</span> 输出已达上限
+          </p>
+        )}
+
         {/* Streaming cursor for empty content */}
         {isStreaming && message.content === '' && (
           <span

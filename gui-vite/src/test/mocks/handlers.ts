@@ -967,7 +967,12 @@ export const handlers = [
       ? [
           'data: {"id":"msg-err","session_id":"session-1","delta":"请求校验失败: [error-test] 是非法输入","finish_reason":null,"chunk_type":"error","skill_calls":null}\n\n',
         ]
-      : [
+      : lastContent.includes('[length-test]')
+        ? [
+            'data: {"id":"msg-1","session_id":"session-1","delta":"第一段","chunk_type":"answer"}\n\n',
+            'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"length","chunk_type":"answer"}\n\n',
+          ]
+        : [
           'data: {"id":"msg-1","session_id":"session-1","delta":"你好","chunk_type":"answer"}\n\n',
           'data: {"id":"msg-1","session_id":"session-1","delta":"！","chunk_type":"answer"}\n\n',
           'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',

@@ -133,6 +133,18 @@ impl ProviderConfig {
                     model.name, self.name
                 ));
             }
+            for (field, value) in [
+                ("context_length", model.context_length),
+                ("max_output_tokens", model.max_output_tokens),
+                ("max_input_tokens", model.max_input_tokens),
+            ] {
+                if value == Some(0) {
+                    return Err(format!(
+                        "模型 '{}' (提供商 '{}') 的 {} 必须大于 0",
+                        model.name, self.name, field
+                    ));
+                }
+            }
         }
         if self.timeout == 0 {
             return Err("超时时间必须大于 0".to_string());
@@ -150,13 +162,22 @@ impl ProviderConfig {
 ///
 /// 描述一个模型实例的名称和能力标签。
 /// 能力标签决定该模型可用于哪种任务（推理、视觉、嵌入等）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelEntry {
     /// 模型名称（如 "gpt-4"、"text-embedding-3-small"）。
     pub name: String,
     /// 能力标签列表。
     #[serde(default)]
     pub capabilities: Vec<ModelCapability>,
+    /// 上下文总窗口（token 数，输入+输出共享）。缺省查内置规格表。
+    #[serde(default)]
+    pub context_length: Option<usize>,
+    /// 单次生成最大输出 token 数。缺省查内置规格表。
+    #[serde(default)]
+    pub max_output_tokens: Option<usize>,
+    /// 单次嵌入输入上限（仅 embedding 模型生效）。缺省查内置规格表。
+    #[serde(default)]
+    pub max_input_tokens: Option<usize>,
 }
 
 // ─── 模型偏好 ───
@@ -307,6 +328,19 @@ mod tests {
         ModelEntry {
             name: name.to_string(),
             capabilities: caps,
+            ..Default::default()
+        }
+    }
+
+    fn make_provider(entry: ModelEntry) -> ProviderConfig {
+        ProviderConfig {
+            name: "test".to_string(),
+            endpoint: "https://api.example.com".to_string(),
+            api_key: None,
+            models: vec![entry],
+            timeout: 60,
+            enabled: true,
+            headers: HashMap::new(),
         }
     }
 
@@ -560,5 +594,66 @@ embedding = { provider = "openai", model = "text-embedding-3-small" }
             vec![ModelCapability::Chat, ModelCapability::Vision]
         );
         assert!(config.preferences.chat.is_some());
+    }
+
+    #[test]
+    fn test_model_entry_old_config_compat() {
+        // 无新字段的旧配置（TOML + JSON）必须反序列化成功，新字段为 None
+        let toml_str = r#"
+name = "gpt-4"
+capabilities = ["chat"]
+"#;
+        let entry: ModelEntry = toml::from_str(toml_str).unwrap();
+        assert_eq!(entry.name, "gpt-4");
+        assert_eq!(entry.capabilities, vec![ModelCapability::Chat]);
+        assert!(entry.context_length.is_none());
+        assert!(entry.max_output_tokens.is_none());
+        assert!(entry.max_input_tokens.is_none());
+
+        let json = r#"{"name":"gpt-4","capabilities":["chat"]}"#;
+        let entry: ModelEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.context_length.is_none());
+        assert!(entry.max_output_tokens.is_none());
+        assert!(entry.max_input_tokens.is_none());
+    }
+
+    #[test]
+    fn test_model_entry_new_fields_roundtrip() {
+        let toml_str = r#"
+name = "gpt-4"
+capabilities = ["chat"]
+context_length = 128000
+max_output_tokens = 8192
+max_input_tokens = 8000
+"#;
+        let entry: ModelEntry = toml::from_str(toml_str).unwrap();
+        assert_eq!(entry.context_length, Some(128000));
+        assert_eq!(entry.max_output_tokens, Some(8192));
+        assert_eq!(entry.max_input_tokens, Some(8000));
+
+        let back: ModelEntry = toml::from_str(&toml::to_string(&entry).unwrap()).unwrap();
+        assert_eq!(back.context_length, Some(128000));
+        assert_eq!(back.max_output_tokens, Some(8192));
+        assert_eq!(back.max_input_tokens, Some(8000));
+    }
+
+    #[test]
+    fn test_provider_validation_zero_spec_fields() {
+        // 三字段任一显式 Some(0) → 校验失败，错误信息指明具体字段
+        let mut entry = make_model("gpt-4", vec![ModelCapability::Chat]);
+
+        entry.context_length = Some(0);
+        let err = make_provider(entry.clone()).validate().unwrap_err();
+        assert!(err.contains("context_length"), "err: {err}");
+
+        entry.context_length = None;
+        entry.max_output_tokens = Some(0);
+        let err = make_provider(entry.clone()).validate().unwrap_err();
+        assert!(err.contains("max_output_tokens"), "err: {err}");
+
+        entry.max_output_tokens = None;
+        entry.max_input_tokens = Some(0);
+        let err = make_provider(entry).validate().unwrap_err();
+        assert!(err.contains("max_input_tokens"), "err: {err}");
     }
 }

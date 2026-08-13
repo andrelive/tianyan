@@ -14,6 +14,7 @@ fn make_test_config() -> TianyanConfig {
         models: vec![ModelEntry {
             name: "test-model".to_string(),
             capabilities: vec![ModelCapability::Chat],
+            ..Default::default()
         }],
         timeout: 30,
         enabled: true,

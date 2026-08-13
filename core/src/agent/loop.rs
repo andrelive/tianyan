@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::agent::tool_params::AskUserParams;
@@ -10,6 +10,7 @@ use crate::common::error::TianyanError;
 use crate::common::types::{FunctionCall, Message, MessageRole, StructuredMessage, TokenUsage};
 use crate::common::types::{ToolCall, ToolCallType};
 use crate::context::ContextAssembler;
+use crate::model::spec::ModelSpec;
 use crate::model::types::ChatCompletionRequest;
 use crate::model::ChatService;
 use crate::observability::trace::TraceCollector;
@@ -94,8 +95,14 @@ struct TurnContext<'a> {
 }
 
 /// 单轮响应获取步骤返回的 future（`run` / `run_stream` 传入 [`AgentLoop::run_turns`]）。
-type TurnStep<'a> =
-    Pin<Box<dyn Future<Output = Result<(Message, Option<TokenUsage>), TianyanError>> + Send + 'a>>;
+/// 第三元素为模型响应的 finish_reason（非流式来自 choice，流式来自最终 chunk）。
+type TurnStep<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<(Message, Option<TokenUsage>, Option<String>), TianyanError>>
+            + Send
+            + 'a,
+    >,
+>;
 
 /// Agent 迭代循环。
 #[derive(Clone)]
@@ -106,6 +113,12 @@ pub struct AgentLoop {
     config: AgentLoopConfig,
     /// 结构化 Trace 收集器（G6；None 时不记录轮 span）。
     trace: Option<Arc<TraceCollector>>,
+    /// 当前聊天模型的上下文规格（T5；由 AgentBuilder 注入，供请求构造/压缩联动使用）。
+    pub(crate) chat_spec: Option<ModelSpec>,
+    /// 上次请求实测输入 token 数（T6 动态 max_tokens 校准）。
+    ///
+    /// `Arc` 保证 AgentLoop 克隆后校准值共享；0 表示尚无实测（退化为估算）。
+    pub(crate) last_input_usage: Arc<AtomicUsize>,
 }
 
 impl AgentLoop {
@@ -122,7 +135,15 @@ impl AgentLoop {
             session_manager,
             config,
             trace: None,
+            chat_spec: None,
+            last_input_usage: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// 设置聊天模型上下文规格（T5：由 AgentBuilder 从模型配置注入；None 时走默认窗口）。
+    pub fn with_chat_spec(mut self, spec: Option<ModelSpec>) -> Self {
+        self.chat_spec = spec;
+        self
     }
 
     /// 设置结构化 Trace 收集器（G6：轮次 span 记录；None 时不记录）。
@@ -197,7 +218,38 @@ impl AgentLoop {
             |this, model, _sender, msgs, _cancel| {
                 Box::pin(async move {
                     let tools = this.tools_for_turn(&msgs).await;
+
+                    // T6 动态 max_tokens：优先上次请求实测输入（usage.prompt_tokens），
+                    // 无实测时退化为 TokenEstimator 估算；预算不足 1024 时提前报错
+                    // （不发送请求），交由压缩链路在后续轮次恢复。
+                    let max_tokens = this.chat_spec.and_then(|spec| {
+                        let measured = (this.last_input_usage.load(Ordering::Relaxed) > 0)
+                            .then(|| this.last_input_usage.load(Ordering::Relaxed));
+                        let input_est = measured.unwrap_or_else(|| {
+                            crate::common::token_estimator::TokenEstimator::new()
+                                .estimate_messages(&msgs)
+                        });
+                        let max = crate::model::spec::dynamic_max_tokens(&spec, measured, &msgs);
+                        tracing::debug!(
+                            model = %model,
+                            max_tokens = ?max,
+                            input_est,
+                            "agent_loop: 动态 max_tokens"
+                        );
+                        max
+                    });
+
                     let request = ChatCompletionRequest::new(model, msgs).with_tools(tools);
+                    let request = if let Some(n) = max_tokens {
+                        request.with_max_tokens(n)
+                    } else if this.chat_spec.is_some() {
+                        return Err(TianyanError::Custom(
+                            "agent_loop: 上下文预算不足（不足 1024 tokens），将由压缩链路在后续轮次恢复"
+                                .to_string(),
+                        ));
+                    } else {
+                        request
+                    };
 
                     let response =
                         this.model_service
@@ -207,7 +259,14 @@ impl AgentLoop {
                                 TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
                             })?;
 
+                    // T6：记录本次实测输入，供下一轮动态 max_tokens 校准（跨轮共享）。
+                    this.last_input_usage
+                        .store(response.usage.prompt_tokens, Ordering::Relaxed);
                     let turn_usage = response.usage;
+                    let finish_reason = response
+                        .choices
+                        .first()
+                        .and_then(|c| c.finish_reason.clone());
                     let choice =
                         response
                             .choices
@@ -217,7 +276,7 @@ impl AgentLoop {
                                 "agent_loop: LLM 返回空响应".to_string(),
                             ))?;
 
-                    Ok((choice.message, Some(turn_usage)))
+                    Ok((choice.message, Some(turn_usage), finish_reason))
                 })
             },
         )
@@ -253,9 +312,38 @@ impl AgentLoop {
                     })?;
 
                     let tools = this.tools_for_turn(&msgs).await;
+
+                    // T6 动态 max_tokens：与 run() 同语义（见非流式注释）。
+                    let max_tokens = this.chat_spec.and_then(|spec| {
+                        let measured = (this.last_input_usage.load(Ordering::Relaxed) > 0)
+                            .then(|| this.last_input_usage.load(Ordering::Relaxed));
+                        let input_est = measured.unwrap_or_else(|| {
+                            crate::common::token_estimator::TokenEstimator::new()
+                                .estimate_messages(&msgs)
+                        });
+                        let max = crate::model::spec::dynamic_max_tokens(&spec, measured, &msgs);
+                        tracing::debug!(
+                            model = %model,
+                            max_tokens = ?max,
+                            input_est,
+                            "agent_loop: 动态 max_tokens"
+                        );
+                        max
+                    });
+
                     let request = ChatCompletionRequest::new(model, msgs)
                         .with_stream(true)
                         .with_tools(tools);
+                    let request = if let Some(n) = max_tokens {
+                        request.with_max_tokens(n)
+                    } else if this.chat_spec.is_some() {
+                        return Err(TianyanError::Custom(
+                            "agent_loop: 上下文预算不足（不足 1024 tokens），将由压缩链路在后续轮次恢复"
+                                .to_string(),
+                        ));
+                    } else {
+                        request
+                    };
 
                     let mut rx = this
                         .model_service
@@ -273,6 +361,7 @@ impl AgentLoop {
                     > = std::collections::BTreeMap::new();
                     let mut turn_usage: Option<TokenUsage> = None;
                     let mut stream_error: Option<String> = None;
+                    let mut finish_reason: Option<String> = None;
 
                     while let Some(chunk_result) = rx.recv().await {
                         // 客户端断开/服务关停：chunk 循环内及时中断（长响应时不必等流结束）
@@ -284,8 +373,17 @@ impl AgentLoop {
                                 // OpenAI sends usage in the final chunk
                                 if let Some(ref usage) = chunk.usage {
                                     turn_usage = Some(usage.clone());
+                                    // T6：记录本次实测输入，供下一轮动态 max_tokens 校准。
+                                    this.last_input_usage.store(
+                                        usage.prompt_tokens,
+                                        Ordering::Relaxed,
+                                    );
                                 }
                                 for choice in &chunk.choices {
+                                    // finish_reason：最终 chunk 携带；None 保持之前值（if let Some 覆盖累计）
+                                    if let Some(ref fr) = choice.finish_reason {
+                                        finish_reason = Some(fr.clone());
+                                    }
                                     if let Some(ref content) = choice.delta.content {
                                         accumulated_content.push_str(content);
                                         sender.send_answer_delta(content).await;
@@ -354,7 +452,7 @@ impl AgentLoop {
                         reasoning_content: None,
                     };
 
-                    Ok((assistant_msg, turn_usage))
+                    Ok((assistant_msg, turn_usage, finish_reason))
                 })
             },
         )
@@ -407,7 +505,7 @@ impl AgentLoop {
                 trace.set_current_turn(session_id, turn as i64);
             }
 
-            let (assistant_msg, turn_usage) =
+            let (assistant_msg, turn_usage, finish_reason) =
                 match step(self, model, stream_sender, messages.clone(), cancel).await {
                     Ok(v) => v,
                     Err(e) => {
@@ -433,7 +531,7 @@ impl AgentLoop {
             };
 
             if let Some(result) = self
-                .handle_llm_response(&assistant_msg, turn_usage, &mut ctx)
+                .handle_llm_response(&assistant_msg, turn_usage, finish_reason, &mut ctx)
                 .await?
             {
                 // G6：终轮 span（含 token 消耗）
@@ -478,6 +576,7 @@ impl AgentLoop {
         &self,
         assistant_msg: &Message,
         turn_usage: Option<TokenUsage>,
+        finish_reason: Option<String>,
         ctx: &mut TurnContext<'_>,
     ) -> Result<Option<AgentLoopResult>, TianyanError> {
         // Accumulate turn token usage
@@ -506,7 +605,9 @@ impl AgentLoop {
         // Persist assistant message via SessionManager
         // Clone before moving into persist_message — needed for the
         // Answer result in the no-tool-calls branch below.
-        let persisted = self.persist_message(ctx, assistant_msg, turn_usage).await;
+        let persisted = self
+            .persist_message(ctx, assistant_msg, turn_usage, finish_reason)
+            .await;
 
         if let Some(ref tool_calls) = assistant_msg.tool_calls {
             // Notify about tool calls if sender is available
@@ -557,7 +658,7 @@ impl AgentLoop {
 
                 // Persist tool result
                 let tool_msg = Message::tool(&call_id, &content);
-                self.persist_message(ctx, &tool_msg, None).await;
+                self.persist_message(ctx, &tool_msg, None, None).await;
 
                 ctx.messages.push(tool_msg);
 
@@ -605,13 +706,16 @@ impl AgentLoop {
         ctx: &mut TurnContext<'_>,
         message: &Message,
         usage: Option<TokenUsage>,
+        finish_reason: Option<String>,
     ) -> StructuredMessage {
-        let structured = ContextAssembler::message_to_structured(
+        let mut structured = ContextAssembler::message_to_structured(
             message,
             ctx.session_id,
             ctx.current_parent_id.as_deref(),
             usage,
         );
+        // T4：持久化消息携带模型 finish_reason（此前恒为 None）
+        structured.finish = finish_reason;
         *ctx.current_parent_id = Some(structured.id.clone());
         let persisted = structured.clone();
         if let Err(e) = self
@@ -676,6 +780,32 @@ mod tests {
         assert_eq!(config.max_turns, 200);
         // Touch the mock to keep it "constructed" (dead-code lint).
         let _mgr = MockSessionManager;
+    }
+
+    #[test]
+    fn test_with_chat_spec_chain() {
+        // 链式注入：with_chat_spec(Some(spec)) 设置 chat_spec，
+        // with_chat_spec(None) 清除；默认 new() 为 None。
+        let spec = ModelSpec {
+            context_length: 100_000,
+            max_output_tokens: 8_192,
+            max_input_tokens: 91_808,
+        };
+        let base = make_loop(MockChatService::new(), 5);
+        assert_eq!(
+            base.chat_spec, None,
+            "新建 AgentLoop 的 chat_spec 应为 None"
+        );
+
+        let with_spec = base.with_chat_spec(Some(spec));
+        assert_eq!(
+            with_spec.chat_spec,
+            Some(spec),
+            "注入 spec 后 chat_spec 应为 Some(spec)"
+        );
+
+        let cleared = with_spec.with_chat_spec(None);
+        assert_eq!(cleared.chat_spec, None, "with_chat_spec(None) 应清除 spec");
     }
 
     #[test]
@@ -1015,6 +1145,16 @@ mod tests {
         tool_calls: Option<Vec<ToolCallDelta>>,
         usage: Option<TokenUsage>,
     ) -> ChatCompletionChunk {
+        stream_chunk_with_finish(content, tool_calls, usage, None)
+    }
+
+    /// 构造携带 finish_reason 的流式 chunk（OpenAI 语义：最终 chunk 携带）。
+    fn stream_chunk_with_finish(
+        content: Option<&str>,
+        tool_calls: Option<Vec<ToolCallDelta>>,
+        usage: Option<TokenUsage>,
+        finish_reason: Option<&str>,
+    ) -> ChatCompletionChunk {
         ChatCompletionChunk {
             id: "chunk-1".to_string(),
             object: "chat.completion.chunk".to_string(),
@@ -1027,7 +1167,7 @@ mod tests {
                     content: content.map(|s| s.to_string()),
                     tool_calls,
                 },
-                finish_reason: None,
+                finish_reason: finish_reason.map(|s| s.to_string()),
             }],
             usage,
         }
@@ -1263,5 +1403,240 @@ mod tests {
 
         let deltas = collect_answer_deltas(event_rx).await;
         assert_eq!(deltas, vec!["A", "B", "C", "D"]);
+    }
+
+    // ── finish_reason 链路（T4） ─────────────────────────────────
+
+    /// 非流式路径：响应 choice 的 finish_reason → 持久化 StructuredMessage.finish。
+    #[tokio::test]
+    async fn test_run_persists_finish_reason() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|_| {
+            let mut resp = response_with(Message::assistant("完成"));
+            resp.choices[0].finish_reason = Some("length".to_string());
+            Ok(resp)
+        });
+        let agent_loop = make_loop(mock, 5);
+
+        let mut messages = vec![Message::user("测试")];
+        let result = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .await
+            .unwrap();
+
+        match result {
+            AgentLoopResult::Answer {
+                persisted_message, ..
+            } => {
+                assert_eq!(persisted_message.finish.as_deref(), Some("length"));
+            }
+            other => panic!("期望 Answer，得到 {:?}", other),
+        }
+    }
+
+    /// 流式路径：最终 chunk 的 finish_reason=stop → 持久化消息 finish。
+    #[tokio::test]
+    async fn test_run_stream_persists_finish_reason() {
+        let chunks = vec![
+            stream_chunk(Some("你好"), None, None),
+            stream_chunk_with_finish(Some("世界"), None, None, Some("stop")),
+        ];
+        let agent_loop = make_loop(stream_mock(chunks), 5);
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamEventSender::new(event_tx);
+
+        let mut messages = vec![Message::user("流式测试")];
+        let result = agent_loop
+            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .await
+            .unwrap();
+
+        match result {
+            AgentLoopResult::Answer {
+                persisted_message, ..
+            } => {
+                assert_eq!(persisted_message.finish.as_deref(), Some("stop"));
+            }
+            other => panic!("期望 Answer，得到 {:?}", other),
+        }
+    }
+
+    /// 流式路径：全部 chunk 无 finish_reason → finish 为 None（行为不变兼容）。
+    #[tokio::test]
+    async fn test_run_stream_no_finish_reason_keeps_none() {
+        let chunks = vec![
+            stream_chunk(Some("你好"), None, None),
+            stream_chunk(Some("世界"), None, None),
+        ];
+        let agent_loop = make_loop(stream_mock(chunks), 5);
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamEventSender::new(event_tx);
+
+        let mut messages = vec![Message::user("流式测试")];
+        let result = agent_loop
+            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .await
+            .unwrap();
+
+        match result {
+            AgentLoopResult::Answer {
+                persisted_message, ..
+            } => {
+                assert_eq!(persisted_message.finish, None);
+            }
+            other => panic!("期望 Answer，得到 {:?}", other),
+        }
+    }
+
+    // ── 动态 max_tokens（T6） ────────────────────────────────────
+
+    /// 128k/16k 规格的模型规格，供 T6 测试复用。
+    fn spec_128k_16k() -> ModelSpec {
+        ModelSpec {
+            context_length: 128_000,
+            max_output_tokens: 16_000,
+            max_input_tokens: 112_000,
+        }
+    }
+
+    /// 非流式：小消息 + 128k 规格 → 请求带 max_tokens = Some(16_000)（预算远超 cap）。
+    #[tokio::test]
+    async fn test_run_sets_dynamic_max_tokens_with_spec() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|req| {
+            assert_eq!(
+                req.max_tokens,
+                Some(16_000),
+                "小消息 + 128k 窗口应达到输出上限 16_000"
+            );
+            Ok(response_with(Message::assistant("回答")))
+        });
+        let agent_loop = make_loop(mock, 5).with_chat_spec(Some(spec_128k_16k()));
+
+        let mut messages = vec![Message::user("帮我做点事")];
+        let result = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .await
+            .unwrap();
+        assert!(matches!(result, AgentLoopResult::Answer { .. }));
+    }
+
+    /// 校准跨轮：首轮响应 usage.prompt_tokens=120_000 → 次轮 max_tokens=4096
+    /// （剩余 8_000×0.9=7_200 → pow2_floor=4096）。
+    #[tokio::test]
+    async fn test_run_calibrates_max_tokens_from_prior_usage() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_in_mock = calls.clone();
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion()
+            .times(2)
+            .returning(
+                move |req| match calls_in_mock.fetch_add(1, Ordering::Relaxed) {
+                    0 => {
+                        assert_eq!(
+                            req.max_tokens,
+                            Some(16_000),
+                            "首轮无实测输入 → 估算 → 达到输出上限"
+                        );
+                        let mut resp = response_with(Message::assistant("第一轮"));
+                        resp.usage = CommonTokenUsage::new(120_000, 0);
+                        Ok(resp)
+                    }
+                    _ => {
+                        assert_eq!(
+                            req.max_tokens,
+                            Some(4_096),
+                            "120_000 实测 → 剩余 8_000×0.9=7_200 → pow2_floor=4096"
+                        );
+                        Ok(response_with(Message::assistant("第二轮")))
+                    }
+                },
+            );
+        let agent_loop = make_loop(mock, 5).with_chat_spec(Some(spec_128k_16k()));
+
+        let mut messages = vec![Message::user("帮我做点事")];
+        let r1 = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .await
+            .unwrap();
+        let r2 = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .await
+            .unwrap();
+        assert!(matches!(r1, AgentLoopResult::Answer { .. }));
+        assert!(matches!(r2, AgentLoopResult::Answer { .. }));
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "应恰好发起两次请求");
+    }
+
+    /// 流式：with_stream(true) 请求同样携带 max_tokens = Some(16_000)。
+    #[tokio::test]
+    async fn test_run_stream_sets_dynamic_max_tokens_with_spec() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion_stream().returning(|req| {
+            assert_eq!(
+                req.max_tokens,
+                Some(16_000),
+                "流式请求应携带动态 max_tokens"
+            );
+            assert_eq!(req.stream, Some(true));
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tx.try_send(Ok(stream_chunk(Some("你好"), None, None)))
+                .unwrap();
+            Ok(rx)
+        });
+        let agent_loop = make_loop(mock, 5).with_chat_spec(Some(spec_128k_16k()));
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamEventSender::new(event_tx);
+
+        let mut messages = vec![Message::user("流式测试")];
+        let result = agent_loop
+            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .await
+            .unwrap();
+        assert!(matches!(result, AgentLoopResult::Answer { .. }));
+    }
+
+    /// 1024 门槛：预置实测输入使剩余预算 < 1024 → 返回 Err 且不发送请求。
+    #[tokio::test]
+    async fn test_run_errors_when_budget_below_min() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion()
+            .returning(|_| panic!("预算不足时不应发送请求"));
+        let agent_loop = make_loop(mock, 5).with_chat_spec(Some(spec_128k_16k()));
+        // 剩余 1137 × 0.9 = 1023 → pow2_floor = 512 < 1024 → dynamic_max_tokens 返回 None
+        agent_loop
+            .last_input_usage
+            .store(128_000 - 1137, Ordering::Relaxed);
+
+        let mut messages = vec![Message::user("测试")];
+        let err = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("上下文预算不足"),
+            "错误应提示预算不足，实际: {err}"
+        );
+    }
+
+    /// 无规格：chat_spec=None → 不设 max_tokens、不报错（行为保持现状）。
+    #[tokio::test]
+    async fn test_run_without_spec_skips_max_tokens() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(|req| {
+            assert_eq!(req.max_tokens, None, "无 chat_spec 时不应设置 max_tokens");
+            Ok(response_with(Message::assistant("回答")))
+        });
+        let agent_loop = make_loop(mock, 5); // 默认 chat_spec = None
+
+        let mut messages = vec![Message::user("测试")];
+        let result = agent_loop
+            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .await
+            .unwrap();
+        assert!(matches!(result, AgentLoopResult::Answer { .. }));
     }
 }

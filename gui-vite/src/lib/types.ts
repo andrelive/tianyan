@@ -14,6 +14,8 @@ export interface ChatMessage {
   timestamp?: string;
   skill_calls?: SkillCallInfo[];
   chunk_type?: StreamChunkType;
+  /** 流结束事件 finish_reason === 'length'：输出达到 token 上限被截断（前端本地标记） */
+  truncated_by_length?: boolean;
 }
 
 export interface ChatRequest {
@@ -345,6 +347,12 @@ export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
 export interface ProviderModelEntry {
   name: string;
   capabilities: ModelCapability[];
+  /** 上下文窗口长度（token）。未配置时由后端内置模型表自动匹配。 */
+  context_length?: number;
+  /** 最大输出 token 数。未配置时走内置默认。 */
+  max_output_tokens?: number;
+  /** 嵌入模型最大输入 token 数。未配置时走内置默认。 */
+  max_input_tokens?: number;
 }
 
 // ── Provider Config (matches backend ProviderConfig) ──

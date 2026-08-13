@@ -25,7 +25,7 @@ use tianyan::vfs::backend::sqlite_db::SqliteDb;
 use tianyan::vfs::VirtualFileSystemImpl;
 use tianyan::{Result as TianyanResult, TianyanError};
 
-use crate::state::{build_knowledge_ingestor, resolve_chat_model};
+use crate::state::{build_knowledge_ingestor, resolve_chat_model, resolve_chat_model_spec};
 
 /// 根据配置创建模型服务。
 pub async fn create_model_services(config: &TianyanConfig) -> TianyanResult<ModelServices> {
@@ -67,8 +67,9 @@ impl AgentBuilderFactory {
         let retriever = DualLayerRetriever::new(vfs.clone()).with_usage_stats(usage_stats.clone());
 
         // 模型名解析与 KnowledgeIngestor 构造收敛于 state.rs 唯一入口
-        // （resolve_chat_model / build_knowledge_ingestor）
+        // （resolve_chat_model / resolve_chat_model_spec / build_knowledge_ingestor）
         let chat_model = resolve_chat_model(config);
+        let chat_model_spec = resolve_chat_model_spec(config);
         let knowledge_ingestor = build_knowledge_ingestor(
             config,
             &model_services,
@@ -78,6 +79,7 @@ impl AgentBuilderFactory {
         let agent = AgentBuilder::new()
             .with_config(config.agent.clone())
             .with_model(&chat_model)
+            .with_chat_model_spec(chat_model_spec)
             .with_model_service(model_services.chat)
             .with_vfs(vfs.clone())
             .with_retriever(Arc::new(retriever))
