@@ -86,6 +86,24 @@ export default function AgentTab({ config, onUpdateField }: AgentTabProps) {
             />
           </FieldRow>
         </div>
+
+        {/* 工作目录：Agent 执行命令/读写文件的基础目录，会话回退快照的根目录 */}
+        <div className="pt-2">
+          <FieldRow label="工作目录">
+            <input
+              type="text"
+              aria-label="工作目录"
+              value={config.working_directory}
+              onChange={(e) => onUpdateField('working_directory', e.target.value)}
+              placeholder="留空 = 使用进程当前目录（如 E:\\code\\my-project）"
+              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+          </FieldRow>
+          <p className="mt-1.5 text-xs text-[var(--color-text-tertiary)]">
+            Agent 执行命令/读写文件的基础目录，也是会话回退时文件快照的根目录。
+            工作区面板需要配置后才能使用。
+          </p>
+        </div>
       </div>
     </div>
   );

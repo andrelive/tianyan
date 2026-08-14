@@ -23,6 +23,9 @@ pub struct Session {
     /// 消息数量
     pub message_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 会话绑定的工作目录（工作区归属；None = 使用全局配置兜底）
+    pub working_directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     /// 会话元数据
     pub metadata: Option<SessionMetadata>,
 }
@@ -101,6 +104,23 @@ impl UpdateTitleRequest {
     }
 }
 
+/// 更新会话工作目录请求（工作区归属；空串 = 清除绑定）。
+#[derive(Debug, Deserialize)]
+pub struct UpdateWorkspaceRequest {
+    /// 新工作目录绝对路径（空串清除绑定）。
+    pub working_directory: String,
+}
+
+impl UpdateWorkspaceRequest {
+    /// 验证请求参数。
+    pub fn validate(&self) -> Result<(), String> {
+        if self.working_directory.trim().len() > 4096 {
+            return Err("工作目录路径过长".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// 删除消息请求 —— 删除指定索引的消息及其后的所有消息。
 #[derive(Debug, Deserialize)]
 pub struct DeleteMessageRequest {
@@ -127,6 +147,7 @@ mod tests {
             created_at: "2026-02-20T10:00:00Z".to_string(),
             updated_at: "2026-02-20T10:30:00Z".to_string(),
             message_count: 5,
+            working_directory: None,
             metadata: None,
         };
         let json = serde_json::to_string(&session).unwrap();

@@ -28,6 +28,8 @@ export interface ChatRequest {
   temperature: number;
   max_tokens: number;
   model?: string | null;
+  /** 新会话绑定的工作目录（仅新建会话时生效） */
+  working_directory?: string | null;
 }
 
 export interface ChatResponse {
@@ -93,6 +95,8 @@ export interface Session {
   created_at: string;
   updated_at: string;
   message_count: number;
+  /** 会话绑定的工作目录（工作区归属；None = 全局配置兜底） */
+  working_directory?: string | null;
 }
 
 export interface ListSessionsResponse {
@@ -461,6 +465,7 @@ export interface ConfigState {
   max_turns: number;
   learned_rules_top_k: number;
   learned_rules_max_tokens: number;
+  working_directory: string;
 
   // -- Storage config (storage.*) --
   data_dir: string;
@@ -562,6 +567,26 @@ export interface WorkspaceTreeResponse {
   /** 当前目录相对路径（根为空字符串）。 */
   path: string;
   entries: WorkspaceEntry[];
+}
+
+/** 目录选择器响应（GET /workspace/dirs；工作区选择：逐级浏览任意目录）。 */
+export interface WorkspaceDirsResponse {
+  /** 当前浏览目录（浏览根时可能为哨兵文案如"浏览根"）。 */
+  current: string;
+  /** 上级目录（已到浏览根时为 null）。 */
+  parent: string | null;
+  /** 当前目录下的子目录列表。 */
+  entries: WorkspaceDirEntry[];
+}
+
+/** 目录选择器条目。 */
+export interface WorkspaceDirEntry {
+  /** 目录名称。 */
+  name: string;
+  /** 完整路径（进入该目录时传给 path 参数）。 */
+  path: string;
+  /** 是否为浏览根条目（盘符/家目录）。 */
+  is_root?: boolean;
 }
 
 /** 工作区文件读取响应（GET /workspace/read）。 */

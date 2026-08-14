@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::Mutex as TokioMutex;
@@ -49,6 +50,9 @@ pub struct AgentBuilder {
     web_config: Option<crate::config::WebConfig>,
     /// 工作区快照管理器（配置了 working_directory 时启用）。
     snapshot_manager: Option<Arc<SnapshotManager>>,
+    /// 全局默认工作目录（[agent] working_directory 配置；会话级绑定缺省时
+    /// 快照/工具操作以此为根）。
+    default_working_directory: Option<PathBuf>,
     /// 技能注册表刷新钩子（压缩会话转换点时增量注册 VFS 学习技能）。
     skill_refresher: Option<Arc<dyn SkillRefresher>>,
     /// 后台任务 SQLite 持久化后端（ADR-013；None 时任务状态纯内存）。
@@ -79,6 +83,7 @@ impl AgentBuilder {
             usage_stats: None,
             web_config: None,
             snapshot_manager: None,
+            default_working_directory: None,
             skill_refresher: None,
             background_task_db: None,
             notification_sink: None,
@@ -157,6 +162,14 @@ impl AgentBuilder {
     /// 设置工作区快照管理器（会话回退时恢复文件修改）。
     pub fn with_snapshot_manager(mut self, manager: Arc<SnapshotManager>) -> Self {
         self.snapshot_manager = Some(manager);
+        self
+    }
+
+    /// 设置全局默认工作目录（[agent] working_directory 配置值）。
+    ///
+    /// 会话未绑定工作目录（或绑定目录不存在）时，快照捕获以此为根。
+    pub fn with_default_working_directory(mut self, dir: Option<PathBuf>) -> Self {
+        self.default_working_directory = dir;
         self
     }
 
@@ -408,6 +421,7 @@ impl AgentBuilder {
             agent_loop,
             session_manager,
             self.snapshot_manager,
+            self.default_working_directory,
             self.skill_refresher,
         ))
     }

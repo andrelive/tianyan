@@ -15,7 +15,7 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: 'html',
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: 'http://localhost:5100',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
@@ -31,7 +31,7 @@ export default defineConfig({
   //    —— 配置里 working_directory 相对进程启动目录解析，webServer 命令以本配置所在目录
   //    （gui-vite/）为 cwd 启动，因此 ../scripts/e2e/fixtures/workspace 正确指向仓库 fixtures。
   //    每个运行进程独立 data dir，实现跨运行隔离）
-  // 3) vite dev（前端，5173 代理 /api → 3000）
+  // 3) vite dev（前端，5100 代理 /api → 3000）
   webServer: [
     {
       command: 'node ../scripts/e2e/mock-llm.mjs',
@@ -54,7 +54,7 @@ export default defineConfig({
     },
     {
       command: 'npm run dev',
-      url: 'http://localhost:5173',
+      url: 'http://localhost:5100',
       reuseExistingServer: !process.env.CI,
       timeout: 30000,
     },

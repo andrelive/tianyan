@@ -198,23 +198,23 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
   );
 
   /* Add a scanned model (from provider discovery) into the provider's model list */
-  const addScannedModel = useCallback((providerIndex: number, name: string, capabilities: string[]) => {
-    setConfig((prev) => {
-      if (!prev) return prev;
-      const providers = prev.providers.map((p, i) =>
-        i === providerIndex
-          ? {
-              ...p,
-              models: [
-                ...p.models,
-                { name, capabilities: capabilities as ModelCapability[] },
-              ],
-            }
-          : p,
-      );
-      return { ...prev, providers };
-    });
-  }, []);
+  const addScannedModel = useCallback(
+    (providerIndex: number, name: string, capabilities: string[]) => {
+      setConfig((prev) => {
+        if (!prev) return prev;
+        const providers = prev.providers.map((p, i) =>
+          i === providerIndex
+            ? {
+                ...p,
+                models: [...p.models, { name, capabilities: capabilities as ModelCapability[] }],
+              }
+            : p,
+        );
+        return { ...prev, providers };
+      });
+    },
+    [],
+  );
 
   /* ── Preferences helpers ── */
 
@@ -276,6 +276,11 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
       const payload = toBackendConfig(config);
       await apiPut<{ success: boolean; message: string }>('/config', payload);
       showToast('设置已保存', 'success');
+      // 保存成功后重新拉取配置：刷新后端解析结果（model_specs → resolvedSpecs，
+      // 即"生效规格"行）。否则生效规格停留在面板挂载时的旧快照
+      // （如手动设置 spec 后仍显示内置表匹配的旧值）。
+      const fresh = await apiGet<BackendConfigResponse>('/config');
+      setConfig(fromBackendConfig(fresh));
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '保存失败';
       showToast(`保存失败: ${msg}`, 'error');

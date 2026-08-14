@@ -3,6 +3,7 @@
 //! 提供 Agent 构建工厂，负责 Agent 实例的创建和配置验证。
 
 // 标准库
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -93,6 +94,9 @@ impl AgentBuilderFactory {
             .with_web_config(config.web.clone())
             .with_usage_stats(usage_stats)
             .with_agent_roles(config.agent_roles.clone())
+            .with_default_working_directory(
+                config.agent.working_directory.clone().map(PathBuf::from),
+            )
             .with_session_manager(session_manager);
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),

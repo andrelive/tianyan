@@ -5,11 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
 import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
-import {
-  mockTianyanConfig,
-  mockProviderScanResult,
-  mockSoulContent,
-} from '@/test/mocks/handlers';
+import { mockTianyanConfig, mockProviderScanResult, mockSoulContent } from '@/test/mocks/handlers';
 import SettingsPanel from '../SettingsPanel';
 
 function renderSettingsPanel() {
@@ -112,13 +108,21 @@ function useResolvedSpecConfig() {
         },
         // 后端已解析的生效规格（显式 > 内置表 > 默认）；key = "{provider}/{model}"
         model_specs: {
-          'openai/gpt-4o': { context_length: 1000000, max_output_tokens: 32000, max_input_tokens: 968000 },
+          'openai/gpt-4o': {
+            context_length: 1000000,
+            max_output_tokens: 32000,
+            max_input_tokens: 968000,
+          },
           'openai/text-embedding-3-small': {
             context_length: 32768,
             max_output_tokens: 8192,
             max_input_tokens: 8192,
           },
-          'deepseek/deepseek-chat': { context_length: 64000, max_output_tokens: 8000, max_input_tokens: 64000 },
+          'deepseek/deepseek-chat': {
+            context_length: 64000,
+            max_output_tokens: 8000,
+            max_input_tokens: 64000,
+          },
         },
       });
     }),
@@ -269,6 +273,38 @@ describe('SettingsPanel tabs', () => {
       provider: 'deepseek',
       model: 'deepseek-chat',
     });
+  });
+
+  it('edits working directory in Agent tab and persists it on save', async () => {
+    const user = userEvent.setup();
+    let putBody: unknown = null;
+
+    server.use(
+      http.put('/api/v1/config', async ({ request }) => {
+        putBody = await request.json();
+        return HttpResponse.json({ success: true, message: '配置已保存' });
+      }),
+    );
+
+    renderSettingsPanel();
+    await waitFor(() => {
+      expect(screen.getByRole('tab', { name: 'Agent 行为' })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('tab', { name: 'Agent 行为' }));
+    await waitFor(() => {
+      expect(screen.getByLabelText('工作目录')).toBeInTheDocument();
+    });
+
+    const wdInput = screen.getByLabelText('工作目录');
+    await user.clear(wdInput);
+    await user.type(wdInput, 'D:/code/my-project');
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+
+    await waitFor(() => {
+      expect(putBody).not.toBeNull();
+    });
+    const body = putBody as { config: { agent: { working_directory: string | null } } };
+    expect(body.config.agent.working_directory).toBe('D:/code/my-project');
   });
 
   it('renders MCP servers and adds a new one via the form', async () => {
@@ -543,5 +579,77 @@ describe('SettingsPanel tabs', () => {
     // embedding 行不含 上下文/输出 字段
     expect(screen.getByText(/生效规格：嵌入上限 8K/)).toBeInTheDocument();
     expect(screen.queryByText(/生效规格：32K 上下文/)).not.toBeInTheDocument();
+  });
+
+  it('refreshes resolved spec rows after save (bugfix: stale 生效规格 after PUT /config)', async () => {
+    const user = userEvent.setup();
+    useResolvedSpecConfig();
+
+    // 保存标记：GET 先返回旧解析（32K），PUT 后返回新解析（384K）——模拟后端热重载
+    let saved = false;
+    server.use(
+      http.put('/api/v1/config', () => {
+        saved = true;
+        return HttpResponse.json({ success: true, message: '配置已保存' });
+      }),
+      http.get('/api/v1/config', () => {
+        const out = saved ? 384000 : 32000;
+        return HttpResponse.json({
+          config: {
+            ...mockTianyanConfig,
+            models: {
+              providers: [
+                {
+                  name: 'openai',
+                  endpoint: 'https://api.openai.com/v1',
+                  api_key: 'sk-test',
+                  models: [
+                    {
+                      name: 'gpt-4o',
+                      capabilities: ['chat', 'vision'],
+                      context_length: 1000000,
+                      max_output_tokens: out,
+                    },
+                  ],
+                  timeout: 60,
+                  enabled: true,
+                  headers: {},
+                },
+              ],
+              preferences: {
+                chat: { provider: 'openai', model: 'gpt-4o' },
+                embedding: null,
+                vision: null,
+              },
+            },
+          },
+          model_specs: {
+            'openai/gpt-4o': {
+              context_length: 1000000,
+              max_output_tokens: out,
+              max_input_tokens: 968000,
+            },
+          },
+        });
+      }),
+    );
+
+    renderSettingsPanel();
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
+    });
+    // 初始：后端解析为 32K 输出
+    expect(screen.getByText(/生效规格：1M 上下文 \/ 32K 输出/)).toBeInTheDocument();
+
+    // 用户把最大输出改为 384000 并保存
+    const outInput = screen.getByLabelText('最大输出');
+    await user.clear(outInput);
+    await user.type(outInput, '384000');
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+
+    // 保存后生效规格行应刷新为 384K（不再停留在旧快照 32K）
+    await waitFor(() => {
+      expect(screen.getByText(/生效规格：1M 上下文 \/ 384K 输出/)).toBeInTheDocument();
+    });
   });
 });

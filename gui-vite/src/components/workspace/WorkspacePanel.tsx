@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import {
   AlertCircle,
   FolderTree,
+  FolderOpen,
   GitCompareArrows,
   Loader2,
   PanelLeft,
@@ -14,10 +15,12 @@ import {
   fetchWorkspaceApplyPatch,
   fetchWorkspaceDiff,
   fetchWorkspaceDiffList,
+  updateSessionWorkspace,
 } from '@/lib/api-client';
 import type { WorkspaceDiffListResponse, WorkspaceDiffResponse } from '@/lib/types';
 import { useAppStore } from '@/lib/store';
 import WorkspaceTree from './WorkspaceTree';
+import WorkspacePicker from './WorkspacePicker';
 import FileViewer from './FileViewer';
 import type { FileViewerDraft } from './FileViewer';
 import { languageForPath } from './fileLanguage';
@@ -308,9 +311,18 @@ function DiffPanel({ filePath, onClose }: DiffPanelProps) {
 
 /** 工作区页面：左侧文件树 + 中间文件查看器 + 右侧 diff 面板（默认隐藏）。 */
 export default function WorkspacePanel() {
+  const currentSessionId = useAppStore((s) => s.currentSessionId);
+  const sessions = useAppStore((s) => s.sessions);
+  const newSessionWorkspace = useAppStore((s) => s.newSessionWorkspace);
+  const setNewSessionWorkspace = useAppStore((s) => s.setNewSessionWorkspace);
+  const showToast = useAppStore((s) => s.showToast);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [treeCollapsed, setTreeCollapsed] = useState(false);
   const [diffOpen, setDiffOpen] = useState(false);
+  /** 工作区目录选择器（选择工作目录）。 */
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerSaving, setPickerSaving] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
 
   // ---- 保存前 diff 确认（编辑模式 → 保存 → 弹窗 → 确认 → apply-patch） ----
   const [saveDraft, setSaveDraft] = useState<FileViewerDraft | null>(null);
@@ -321,6 +333,53 @@ export default function WorkspacePanel() {
 
   const handleSelectFile = (path: string) => {
     setSelectedFile(path);
+  };
+
+  // 当前会话绑定的工作目录（工作区 = 会话的父级分组）
+  const currentSession = sessions.find((s) => s.id === currentSessionId) ?? null;
+  const activeWorkspaceLabel = currentSession?.working_directory
+    ? `工作区：${currentSession.working_directory}`
+    : currentSessionId
+      ? '工作区：全局默认'
+      : newSessionWorkspace
+        ? `新对话工作区：${newSessionWorkspace}`
+        : '未选择会话（浏览全局工作区）';
+
+  /**
+   * 选择工作目录（工作区 = 会话的父级分组）：
+   * - 有活动会话 → 绑定到当前会话（PUT /sessions/:id/workspace）；
+   * - 无活动会话 → 作为下一个新对话的待绑定工作区。
+   */
+  const handleSelectWorkingDir = async (path: string) => {
+    setPickerSaving(true);
+    setWorkspaceError(null);
+    try {
+      if (currentSessionId) {
+        const updated = await updateSessionWorkspace(currentSessionId, path);
+        // 同步本地会话列表中的工作区归属（侧边栏分组即时更新）
+        const current = useAppStore.getState().sessions;
+        useAppStore
+          .getState()
+          .setSessions(
+            current.map((s) =>
+              s.id === currentSessionId
+                ? { ...s, working_directory: updated.working_directory ?? null }
+                : s,
+            ),
+          );
+      } else {
+        setNewSessionWorkspace(path || null);
+        if (path) {
+          showToast(`已设置：新对话将绑定工作区 ${path}`, 'success');
+        }
+      }
+      setPickerOpen(false);
+      setReloadKey((k) => k + 1);
+    } catch (err: unknown) {
+      setWorkspaceError(err instanceof Error ? err.message : '保存工作目录失败');
+    } finally {
+      setPickerSaving(false);
+    }
   };
 
   const handleSaveRequest = (draft: FileViewerDraft) => {
@@ -347,7 +406,7 @@ export default function WorkspacePanel() {
         saveDraft.original,
         saveDraft.modified,
       );
-      await fetchWorkspaceApplyPatch(patch);
+      await fetchWorkspaceApplyPatch(patch, currentSessionId ?? undefined);
       setSaveDraft(null);
       setReloadKey((k) => k + 1);
     } catch (err: unknown) {
@@ -365,8 +424,29 @@ export default function WorkspacePanel() {
     <div className="flex flex-col h-full min-h-0">
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border)] shrink-0">
-        <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">工作区</h2>
+        <div className="flex items-center gap-3 min-w-0">
+          <h2 className="text-lg font-semibold text-[var(--color-text-primary)] shrink-0">
+            工作区
+          </h2>
+          <span
+            className="text-xs text-[var(--color-text-tertiary)] truncate"
+            title={activeWorkspaceLabel}
+            aria-label={activeWorkspaceLabel}
+          >
+            {activeWorkspaceLabel}
+          </span>
+        </div>
         <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setPickerOpen(true)}
+            aria-label="选择工作目录"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+          >
+            <FolderOpen size={14} />
+            选择目录
+          </button>
+
           <button
             type="button"
             onClick={() => setDiffOpen((prev) => !prev)}
@@ -413,14 +493,22 @@ export default function WorkspacePanel() {
               </button>
             </div>
             <div className="flex-1 min-h-0">
-              <WorkspaceTree onSelectFile={handleSelectFile} />
+              <WorkspaceTree
+                onSelectFile={handleSelectFile}
+                sessionId={currentSessionId ?? undefined}
+              />
             </div>
           </aside>
         )}
 
         {/* 中：文件查看器 */}
         <main className="flex-1 min-w-0 flex flex-col bg-[var(--color-bg-primary)]">
-          <FileViewer path={selectedFile} reloadKey={reloadKey} onSaveRequest={handleSaveRequest} />
+          <FileViewer
+            path={selectedFile}
+            reloadKey={reloadKey}
+            onSaveRequest={handleSaveRequest}
+            sessionId={currentSessionId ?? undefined}
+          />
         </main>
 
         {/* 右：diff 面板（默认隐藏） */}
@@ -439,6 +527,21 @@ export default function WorkspacePanel() {
           onCancel={handleCloseSaveDialog}
           onConfirm={handleConfirmSave}
         />
+      )}
+
+      {/* 工作目录选择器 */}
+      <WorkspacePicker
+        open={pickerOpen}
+        currentWorkingDir={currentSession?.working_directory ?? newSessionWorkspace ?? ''}
+        onClose={() => setPickerOpen(false)}
+        onSelect={handleSelectWorkingDir}
+        saving={pickerSaving}
+        clearLabel={currentSession?.working_directory ? '清除绑定' : '不绑定工作区'}
+      />
+      {workspaceError && (
+        <p className="px-6 py-2 text-xs text-[var(--color-error)]" role="alert">
+          {workspaceError}
+        </p>
       )}
     </div>
   );

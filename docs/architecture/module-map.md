@@ -104,3 +104,8 @@
 - [ADR-009: 语义化编辑双原语](decisions/009-hashline-editing.md) — hashline 锚点 + unified diff 信封（apply_edit / apply_patch）
 - [ADR-008: 快照升级](decisions/008-snapshot-upgrade.md) — gzip 压缩 + GC + similar diff（扩展 ADR-006）
 - [ADR-010: 对话多模态链路](decisions/010-multimodal-message-chain.md) — 图片输入（Message.content_parts + Part::Image）+ MCP 截图落盘
+- [ADR-011: 子任务授权边界](decisions/011-subagent-approval-boundary.md) — 子 agent 无交互审批
+- [ADR-012: 注入上下文快照持久化](decisions/012-injectable-snapshot-persistence.md) — 前缀零漂移（JSONL SessionHeader）
+- [ADR-013: 统一消息通知与唤醒原语](decisions/013-unified-message-notification-wake.md) — 消息入库 + 唤醒语义
+- [ADR-014: 错误分类语义谓词](decisions/014-error-classification.md) — not_found/conflict/invalid_input 语义谓词
+- [ADR-015: 会话工作区绑定](decisions/015-session-workspace-binding.md) — 工作区是会话的父级分组

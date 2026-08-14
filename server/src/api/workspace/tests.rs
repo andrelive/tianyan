@@ -27,14 +27,91 @@ use crate::api::workspace::types::TreeResponse;
 // 测试夹具
 // ---------------------------------------------------------------------------
 
+/// 内存会话管理器 mock（服务层测试用；支持预置会话工作目录绑定）。
+struct MockSessionManager {
+    sessions: std::sync::Mutex<std::collections::HashMap<String, tianyan::session::Session>>,
+}
+
+impl MockSessionManager {
+    fn new() -> Self {
+        Self {
+            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// 预置会话（可携带工作目录绑定）。
+    fn with_sessions(sessions: Vec<tianyan::session::Session>) -> Self {
+        let map = sessions
+            .into_iter()
+            .map(|s| (s.session_id.clone(), s))
+            .collect();
+        Self {
+            sessions: std::sync::Mutex::new(map),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl tianyan::session::SessionManager for MockSessionManager {
+    async fn create_session(
+        &self,
+        id: &str,
+        _message: tianyan::Message,
+    ) -> tianyan::Result<tianyan::session::Session> {
+        let session = tianyan::session::Session::new(id);
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), session.clone());
+        Ok(session)
+    }
+
+    async fn get_session(&self, id: &str) -> tianyan::Result<Option<tianyan::session::Session>> {
+        Ok(self.sessions.lock().unwrap().get(id).cloned())
+    }
+
+    async fn update_session(&self, session: &tianyan::session::Session) -> tianyan::Result<()> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session.session_id.clone(), session.clone());
+        Ok(())
+    }
+
+    async fn add_structured_message(
+        &self,
+        _session_id: &str,
+        _msg: tianyan::common::types::StructuredMessage,
+    ) -> tianyan::Result<()> {
+        Ok(())
+    }
+
+    async fn rewrite_messages(
+        &self,
+        _session_id: &str,
+        _messages: &[tianyan::common::types::StructuredMessage],
+    ) -> tianyan::Result<()> {
+        Ok(())
+    }
+
+    async fn list_sessions(&self) -> tianyan::Result<Vec<tianyan::session::Session>> {
+        Ok(self.sessions.lock().unwrap().values().cloned().collect())
+    }
+
+    async fn delete_session(&self, id: &str) -> tianyan::Result<()> {
+        self.sessions.lock().unwrap().remove(id);
+        Ok(())
+    }
+}
+
 /// 使用临时工作目录构建服务（无快照管理器）。
 fn service_with_workdir(workdir: PathBuf) -> WorkspaceService {
-    WorkspaceService::new(Some(workdir), None)
+    WorkspaceService::new(Arc::new(MockSessionManager::new()), Some(workdir), None)
 }
 
 /// 未配置 working_directory 的服务。
 fn service_without_workdir() -> WorkspaceService {
-    WorkspaceService::new(None, None)
+    WorkspaceService::new(Arc::new(MockSessionManager::new()), None, None)
 }
 
 /// 构建带 mock 模型提供商的测试配置（与 `server/tests/common/factory.rs` 同构；
@@ -113,7 +190,7 @@ async fn tree_lists_entries_dirs_first_then_files_alpha() {
     let workdir = create_workdir(dir.path());
     let service = service_with_workdir(workdir.clone());
 
-    let resp: TreeResponse = service.tree("").await.unwrap();
+    let resp: TreeResponse = service.tree("", None).await.unwrap();
 
     assert_eq!(
         resp.root,
@@ -144,7 +221,7 @@ async fn tree_lists_subdir_with_rel_path() {
     let workdir = create_workdir(dir.path());
     let service = service_with_workdir(workdir);
 
-    let resp: TreeResponse = service.tree("src").await.unwrap();
+    let resp: TreeResponse = service.tree("src", None).await.unwrap();
 
     assert_eq!(resp.path, "src");
     assert_eq!(resp.entries.len(), 1);
@@ -157,7 +234,7 @@ async fn tree_lists_subdir_with_rel_path() {
 async fn tree_rejects_dotdot_path() {
     let service = service_with_workdir(tempdir().unwrap().path().join("work"));
 
-    let err = service.tree("..").await.unwrap_err();
+    let err = service.tree("..", None).await.unwrap_err();
     assert!(matches!(err, ApiError::BadRequest(_)), "err = {err:?}");
 }
 
@@ -166,7 +243,7 @@ async fn tree_rejects_dotdot_path() {
 async fn tree_rejects_parent_traversal() {
     let service = service_with_workdir(tempdir().unwrap().path().join("work"));
 
-    let err = service.tree("../escape").await.unwrap_err();
+    let err = service.tree("../escape", None).await.unwrap_err();
     assert!(matches!(err, ApiError::BadRequest(_)), "err = {err:?}");
 }
 
@@ -175,7 +252,7 @@ async fn tree_rejects_parent_traversal() {
 async fn tree_missing_working_directory_returns_bad_request() {
     let service = service_without_workdir();
 
-    let err = service.tree("").await.unwrap_err();
+    let err = service.tree("", None).await.unwrap_err();
     assert!(
         matches!(&err, ApiError::BadRequest(msg) if msg.contains("working_directory")),
         "err = {err:?}"
@@ -189,8 +266,57 @@ async fn tree_nonexistent_rel_returns_not_found() {
     let workdir = create_workdir(dir.path());
     let service = service_with_workdir(workdir);
 
-    let err = service.tree("no-such-dir").await.unwrap_err();
+    let err = service.tree("no-such-dir", None).await.unwrap_err();
     assert!(matches!(err, ApiError::NotFound(_)), "err = {err:?}");
+}
+
+/// 会话级工作区：带 session_id 时按会话绑定目录解析（覆盖全局默认）。
+#[tokio::test]
+async fn tree_resolves_session_bound_workdir() {
+    let dir = tempdir().unwrap();
+    let default_workdir = dir.path().join("default");
+    let session_workdir = dir.path().join("session-ws");
+    std::fs::create_dir_all(&default_workdir).unwrap();
+    std::fs::create_dir_all(&session_workdir).unwrap();
+    std::fs::write(session_workdir.join("only-in-session.txt"), "x").unwrap();
+
+    let mut session = tianyan::session::Session::new("s1");
+    session.header.working_directory = Some(session_workdir.to_string_lossy().into_owned());
+    let manager = Arc::new(MockSessionManager::with_sessions(vec![session]));
+    let service = WorkspaceService::new(manager, Some(default_workdir), None);
+
+    let resp: TreeResponse = service.tree("", Some("s1")).await.unwrap();
+    assert_eq!(
+        resp.root,
+        strip_verbatim(&session_workdir.canonicalize().unwrap().to_string_lossy()),
+        "会话级绑定目录应覆盖全局默认"
+    );
+    assert_eq!(resp.entries.len(), 1);
+    assert_eq!(resp.entries[0].name, "only-in-session.txt");
+}
+
+/// 会话级工作区：session_id 指向不存在的会话 → 404。
+#[tokio::test]
+async fn tree_session_not_found_returns_not_found() {
+    let service = service_with_workdir(tempdir().unwrap().path().join("work"));
+
+    let err = service.tree("", Some("ghost-session")).await.unwrap_err();
+    assert!(matches!(err, ApiError::NotFound(_)), "err = {err:?}");
+}
+
+/// 会话级工作区：会话绑定目录已不存在 → 400 且提示明确。
+#[tokio::test]
+async fn tree_session_bound_workdir_missing_returns_bad_request() {
+    let mut session = tianyan::session::Session::new("s1");
+    session.header.working_directory = Some("Z:/gone-ws".to_string());
+    let manager = Arc::new(MockSessionManager::with_sessions(vec![session]));
+    let service = WorkspaceService::new(manager, None, None);
+
+    let err = service.tree("", Some("s1")).await.unwrap_err();
+    assert!(
+        matches!(&err, ApiError::BadRequest(msg) if msg.contains("会话工作目录不存在")),
+        "err = {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +332,7 @@ async fn read_returns_hashline_content_for_text_file() {
     std::fs::write(workdir.join("a.txt"), "alpha\nbeta\n").unwrap();
     let service = service_with_workdir(workdir.clone());
 
-    let value: Value = service.read("a.txt", None, None).await.unwrap();
+    let value: Value = service.read("a.txt", None, None, None).await.unwrap();
 
     assert_eq!(
         value["path"],
@@ -240,7 +366,7 @@ async fn read_marks_binary_file() {
     std::fs::write(workdir.join("blob.bin"), [0u8, 1u8, 2u8, 255u8]).unwrap();
     let service = service_with_workdir(workdir);
 
-    let value: Value = service.read("blob.bin", None, None).await.unwrap();
+    let value: Value = service.read("blob.bin", None, None, None).await.unwrap();
 
     assert_eq!(value["binary"], true);
 }
@@ -253,7 +379,10 @@ async fn read_missing_file_returns_not_found() {
     std::fs::create_dir_all(&workdir).unwrap();
     let service = service_with_workdir(workdir);
 
-    let err = service.read("ghost.rs", None, None).await.unwrap_err();
+    let err = service
+        .read("ghost.rs", None, None, None)
+        .await
+        .unwrap_err();
     assert!(matches!(err, ApiError::NotFound(_)), "err = {err:?}");
 }
 
@@ -267,7 +396,14 @@ fn service_with_snapshot(
     snap_root: PathBuf,
 ) -> (WorkspaceService, Arc<SnapshotManager>) {
     let manager = Arc::new(SnapshotManager::new(snap_root, workdir.clone()));
-    let service = WorkspaceService::new(Some(workdir), Some(manager.clone()));
+    // 快照 diff 按会话解析工作目录：预置绑定到 workdir 的会话 s1
+    let mut session = tianyan::session::Session::new("s1");
+    session.header.working_directory = Some(workdir.to_string_lossy().into_owned());
+    let service = WorkspaceService::new(
+        Arc::new(MockSessionManager::with_sessions(vec![session])),
+        Some(workdir),
+        Some(manager.clone()),
+    );
     (service, manager)
 }
 
@@ -346,7 +482,7 @@ async fn diff_files_reports_modified_with_hunks() {
     std::fs::write(workdir.join("b.txt"), "one\ntwo\nfour\n").unwrap();
     let service = service_with_workdir(workdir);
 
-    let value: Value = service.diff_files("a.txt", "b.txt").await.unwrap();
+    let value: Value = service.diff_files("a.txt", "b.txt", None).await.unwrap();
 
     assert_eq!(value["path"], "a.txt");
     assert_eq!(value["status"], "modified");
@@ -372,7 +508,7 @@ async fn diff_files_unchanged_for_identical_content() {
     std::fs::write(workdir.join("b.txt"), "one\ntwo\nthree\n").unwrap();
     let service = service_with_workdir(workdir);
 
-    let value: Value = service.diff_files("a.txt", "b.txt").await.unwrap();
+    let value: Value = service.diff_files("a.txt", "b.txt", None).await.unwrap();
 
     assert_eq!(value["status"], "unchanged");
     assert!(value["hunks"].as_array().unwrap().is_empty());
@@ -389,7 +525,10 @@ async fn diff_files_missing_path_returns_not_found() {
     std::fs::write(workdir.join("a.txt"), "one\n").unwrap();
     let service = service_with_workdir(workdir);
 
-    let err = service.diff_files("a.txt", "ghost.txt").await.unwrap_err();
+    let err = service
+        .diff_files("a.txt", "ghost.txt", None)
+        .await
+        .unwrap_err();
     assert!(matches!(err, ApiError::NotFound(_)), "err = {err:?}");
 }
 
@@ -746,4 +885,95 @@ async fn apply_edit_endpoint_missing_file_returns_404() {
         .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["success"], false);
+}
+
+// ---------------------------------------------------------------------------
+// dirs（目录选择器）
+// ---------------------------------------------------------------------------
+
+/// 服务层：列出指定目录的子目录（只列目录，不列文件）。
+#[tokio::test]
+async fn dirs_lists_subdirectories_only() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::create_dir_all(workdir.join("sub-a")).unwrap();
+    std::fs::create_dir_all(workdir.join("sub-b")).unwrap();
+    std::fs::write(workdir.join("file.txt"), "x").unwrap();
+    let service = service_with_workdir(workdir.clone());
+
+    let resp = service
+        .list_dirs(Some(workdir.to_string_lossy().as_ref()))
+        .await
+        .unwrap();
+    // 只列目录：sub-a、sub-b；file.txt 不出现
+    let names: Vec<&str> = resp.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["sub-a", "sub-b"]);
+    assert!(resp.parent.is_some());
+    // 条目路径为绝对路径（可继续传入 path 参数）
+    assert!(resp.entries[0].path.starts_with(&strip_verbatim(
+        &workdir.canonicalize().unwrap().to_string_lossy()
+    )));
+}
+
+/// 服务层：不存在的目录 → 404。
+#[tokio::test]
+async fn dirs_missing_dir_returns_404() {
+    let service = service_with_workdir(tempdir().unwrap().path().join("work"));
+    let err = service
+        .list_dirs(Some("Z:/definitely-not-exists-tianyan-test"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ApiError::NotFound(_)),
+        "应返回 NotFound: {err:?}"
+    );
+}
+
+/// 端点层：GET /workspace/dirs 返回子目录；缺省 path 时（浏览根）不报错。
+#[tokio::test]
+async fn dirs_endpoint_lists_subdirs() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    std::fs::create_dir_all(workdir.join("src")).unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let uri = format!("/api/v1/workspace/dirs?path={}", workdir.display());
+    let response = app
+        .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let names: Vec<&str> = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["src"]);
+}
+
+/// 端点层：GET /workspace/dirs（无 path）返回浏览根（Windows 盘符/家目录），HTTP 200。
+#[tokio::test]
+async fn dirs_endpoint_root_without_path_ok() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/workspace/dirs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }

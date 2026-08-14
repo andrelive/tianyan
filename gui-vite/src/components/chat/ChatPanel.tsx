@@ -171,6 +171,7 @@ export default function ChatPanel() {
       // was dead weight and coupled the payload to the empty assistant
       // placeholder being the last element.
       const state = useAppStore.getState();
+      const isNewSession = !state.currentSessionId;
       state.setStreamStatus('streaming');
       await startStream({
         session_id: state.currentSessionId,
@@ -184,7 +185,13 @@ export default function ChatPanel() {
         temperature: 0.7,
         max_tokens: 2048,
         model: state.selectedModel,
+        // 新会话绑定工作区（工作区 = 会话的父级分组；服务端固化到会话头部）
+        working_directory: isNewSession ? (state.newSessionWorkspace ?? undefined) : undefined,
       });
+      // 新会话已创建并固化工作区绑定：清除待绑定状态（每个新对话重新选择）
+      if (isNewSession) {
+        useAppStore.getState().setNewSessionWorkspace(null);
+      }
     },
     [streamStatus, addMessage, startStream],
   );

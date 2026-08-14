@@ -24,6 +24,10 @@ pub struct ChatRequest {
     /// 指定使用的模型。未提供时使用配置中的默认模型。
     #[serde(default)]
     pub model: Option<String>,
+    /// 新会话绑定的工作目录（工作区归属：会话的父级分组）。
+    /// 仅新建会话时生效；已存在会话忽略此字段。
+    #[serde(default)]
+    pub working_directory: Option<String>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -253,6 +257,7 @@ mod tests {
             temperature: 0.7,
             max_tokens: 100,
             model: None,
+            working_directory: None,
         }
     }
 

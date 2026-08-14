@@ -4,6 +4,7 @@
 //! 将 Agent 与 AgentCoordinator trait 分离，消除循环依赖。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,6 +71,9 @@ pub struct Agent {
     pub(crate) session_manager: Arc<dyn SessionManager>,
     /// 工作区快照管理器（配置了 working_directory 时启用，用于会话回退恢复文件）。
     pub(crate) snapshot_manager: Option<Arc<SnapshotManager>>,
+    /// 全局默认工作目录（[agent] working_directory 配置；会话级绑定缺省时
+    /// 快照捕获以此为根）。
+    pub(crate) default_working_directory: Option<PathBuf>,
     /// 技能注册表刷新钩子：压缩（会话转换点）时增量注册 VFS 学习技能。
     pub(crate) skill_refresher: Option<Arc<dyn SkillRefresher>>,
     /// 会话级轮次锁（ADR-013 串行化）：单会话同一时刻只有一个活动轮；
@@ -102,6 +106,7 @@ impl Agent {
         agent_loop: AgentLoop,
         session_manager: Arc<dyn SessionManager>,
         snapshot_manager: Option<Arc<SnapshotManager>>,
+        default_working_directory: Option<PathBuf>,
         skill_refresher: Option<Arc<dyn SkillRefresher>>,
     ) -> Self {
         // 从 AgentLoop 的 ToolRegistry 提取共享句柄（同一 Arc，非复制状态）：
@@ -119,6 +124,7 @@ impl Agent {
             agent_loop,
             session_manager,
             snapshot_manager,
+            default_working_directory,
             skill_refresher,
             turn_locks: Arc::new(TokioMutex::new(HashMap::new())),
             background_tasks,
@@ -311,13 +317,30 @@ impl Agent {
         }
     }
 
+    /// 解析会话生效的工作目录：会话级绑定（header.working_directory，目录必须
+    /// 存在）优先，缺省回退构建时注入的全局默认（[agent] working_directory）。
+    pub(crate) async fn resolve_working_directory(&self, session_id: &str) -> Option<PathBuf> {
+        if let Ok(Some(session)) = self.session_manager.get_session(session_id).await {
+            if let Some(wd) = session.working_directory(None) {
+                return Some(wd);
+            }
+        }
+        self.default_working_directory.clone()
+    }
+
     /// 捕获工作区快照（消息处理前调用，索引 = 当前消息数）。
+    ///
+    /// 快照根取会话生效的工作目录（会话级绑定优先，缺省全局配置），
+    /// 经 [`SnapshotManager::with_workdir`] 绑定后捕获。
     pub(crate) async fn capture_workspace_snapshot(&self, session_id: &str, state: &SessionState) {
         let Some(sm) = &self.snapshot_manager else {
             return;
         };
+        let Some(workdir) = self.resolve_working_directory(session_id).await else {
+            return;
+        };
         let index = state.structured_messages.len();
-        if let Err(e) = sm.capture(session_id, index).await {
+        if let Err(e) = sm.with_workdir(workdir).capture(session_id, index).await {
             tracing::warn!(error = %e, session = %session_id, "工作区快照捕获失败");
         }
     }
@@ -994,6 +1017,7 @@ mod tests {
             None,
             agent_loop,
             Arc::new(MockSessionManager),
+            None,
             None,
             refresher,
         )

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracing::info;
@@ -19,6 +20,8 @@ pub struct SessionService {
     session_manager: Arc<dyn SessionManager>,
     /// 工作区快照管理器（配置了 working_directory 时启用）。
     snapshot_manager: Option<Arc<SnapshotManager>>,
+    /// 全局默认工作目录（[agent] working_directory；会话级绑定缺省时的快照根）。
+    default_working_dir: Option<PathBuf>,
 }
 
 impl SessionService {
@@ -26,11 +29,18 @@ impl SessionService {
     pub fn new(
         session_manager: Arc<dyn SessionManager>,
         snapshot_manager: Option<Arc<SnapshotManager>>,
+        default_working_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             session_manager,
             snapshot_manager,
+            default_working_dir,
         }
+    }
+
+    /// 解析会话生效的工作目录（会话级绑定优先，缺省回退全局配置）。
+    fn resolve_workdir(&self, session: &tianyan::session::Session) -> Option<PathBuf> {
+        session.working_directory(self.default_working_dir.as_deref())
     }
 
     /// 列出所有会话
@@ -47,6 +57,7 @@ impl SessionService {
                 created_at: s.created_at.to_rfc3339(),
                 updated_at: s.ended_at.unwrap_or(s.created_at).to_rfc3339(),
                 message_count: s.messages.len() as u32,
+                working_directory: s.header.working_directory.clone(),
                 metadata: Some(SessionMetadata {
                     model: None,
                     tags: None,
@@ -197,15 +208,19 @@ impl SessionService {
             return Err(ApiError::BadRequest("消息索引超出范围".to_string()));
         }
 
-        // 保存重做状态：当前工作区 + 被截断的消息（配置了 working_directory 时）
+        // 保存重做状态：当前工作区 + 被截断的消息（配置了 working_directory 时；
+        // 快照根取会话生效的工作目录）
         if let Some(sm) = &self.snapshot_manager {
             let truncated: Vec<StructuredMessage> =
                 session.messages[request.message_index..].to_vec();
-            if let Err(e) = sm
-                .save_redo(session_id, request.message_index, &truncated)
-                .await
-            {
-                tracing::warn!(error = %e, "保存重做状态失败");
+            if let Some(workdir) = self.resolve_workdir(&session) {
+                if let Err(e) = sm
+                    .with_workdir(workdir)
+                    .save_redo(session_id, request.message_index, &truncated)
+                    .await
+                {
+                    tracing::warn!(error = %e, "保存重做状态失败");
+                }
             }
         }
 
@@ -225,9 +240,17 @@ impl SessionService {
             return Err(e.into());
         }
 
-        // 回退工作区文件到该消息处理前的快照（配置了 working_directory 时生效）
+        // 回退工作区文件到该消息处理前的快照（配置了 working_directory 时生效；
+        // 快照根取会话生效的工作目录）
         if let Some(sm) = &self.snapshot_manager {
-            match sm.restore(session_id, request.message_index).await {
+            let Some(workdir) = self.resolve_workdir(&session) else {
+                return self.get_messages(session_id).await;
+            };
+            match sm
+                .with_workdir(workdir)
+                .restore(session_id, request.message_index)
+                .await
+            {
                 Ok(n) => {
                     info!(
                         "回退工作区文件: 会话={}, 索引={}, 恢复 {} 个文件",
@@ -260,21 +283,23 @@ impl SessionService {
             session_id, request.message_index
         );
 
-        // 0. 存在性检查：不存在的会话 → 404（优先于重做状态检查）
-        let exists = self
+        // 0. 存在性检查：不存在的会话 → 404（优先于重做状态检查）；
+        //    同时解析会话生效的工作目录（快照根，会话级绑定优先）
+        let session = self
             .session_manager
             .get_session(session_id)
             .await?
-            .is_some();
-        if !exists {
-            return Err(ApiError::NotFound(format!("会话未找到: {}", session_id)));
-        }
+            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
+        let workdir = self
+            .resolve_workdir(&session)
+            .ok_or_else(|| ApiError::BadRequest("未启用工作区快照，无法重做".to_string()))?;
 
         // 1. 恢复工作区文件 + 取出被截断的消息（快照管理器一次性语义）
         let Some((messages, restored)) = self
             .snapshot_manager
             .as_ref()
             .ok_or_else(|| ApiError::BadRequest("未启用工作区快照，无法重做".to_string()))?
+            .with_workdir(workdir)
             .load_redo(session_id, request.message_index)
             .await?
         else {
@@ -357,6 +382,49 @@ impl SessionService {
             created_at: session.created_at.to_rfc3339(),
             updated_at: session.ended_at.unwrap_or(session.created_at).to_rfc3339(),
             message_count: session.messages.len() as u32,
+            working_directory: session.header.working_directory.clone(),
+            metadata: Some(SessionMetadata {
+                model: None,
+                tags: None,
+            }),
+        })
+    }
+
+    /// 更新会话绑定的工作目录（工作区归属；空串清除绑定）。
+    ///
+    /// 目录必须存在，否则 400。
+    pub async fn update_workspace(
+        &self,
+        session_id: &str,
+        working_directory: &str,
+    ) -> Result<Session, ApiError> {
+        info!("更新会话工作目录: {} -> {}", session_id, working_directory);
+
+        let mut session = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
+
+        let trimmed = working_directory.trim();
+        if trimmed.is_empty() {
+            session.header.working_directory = None;
+        } else {
+            if !std::path::Path::new(trimmed).is_dir() {
+                return Err(ApiError::BadRequest(format!("目录不存在：{trimmed}")));
+            }
+            session.header.working_directory = Some(trimmed.to_string());
+        }
+
+        self.session_manager.update_session(&session).await?;
+
+        Ok(Session {
+            id: session.session_id,
+            title: session.title.unwrap_or_else(|| "新对话".to_string()),
+            created_at: session.created_at.to_rfc3339(),
+            updated_at: session.ended_at.unwrap_or(session.created_at).to_rfc3339(),
+            message_count: session.messages.len() as u32,
+            working_directory: session.header.working_directory.clone(),
             metadata: Some(SessionMetadata {
                 model: None,
                 tags: None,

@@ -18,6 +18,8 @@ interface WorkspaceTreeProps {
   onSelectFile: (path: string) => void;
   /** 树容器高度（react-arborist 需要显式数值高度）。 */
   height?: number;
+  /** 会话 ID（解析会话绑定的工作目录；缺省 = 全局配置）。 */
+  sessionId?: string;
 }
 
 const DEFAULT_HEIGHT = 600;
@@ -121,6 +123,7 @@ function WorkspaceNode({
 export default function WorkspaceTree({
   onSelectFile,
   height = DEFAULT_HEIGHT,
+  sessionId,
 }: WorkspaceTreeProps) {
   const [rootEntries, setRootEntries] = useState<WorkspaceEntry[]>([]);
   const [childrenMap, setChildrenMap] = useState<Record<string, WorkspaceNodeData[]>>({});
@@ -132,7 +135,7 @@ export default function WorkspaceTree({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetchWorkspaceTree('', 1);
+      const res = await fetchWorkspaceTree('', 1, sessionId);
       setRootEntries(res.entries);
       setChildrenMap({});
     } catch (err: unknown) {
@@ -140,24 +143,27 @@ export default function WorkspaceTree({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [sessionId]);
 
   useEffect(() => {
     loadRoot();
   }, [loadRoot]);
 
-  const loadChildren = useCallback(async (path: string) => {
-    setExpandingPath(path);
-    try {
-      const res = await fetchWorkspaceTree(path, 1);
-      setChildrenMap((prev) => ({ ...prev, [path]: res.entries.map(toNode) }));
-    } catch {
-      // 子目录加载失败：保持空展开状态，用户可再次点击重试
-      setChildrenMap((prev) => ({ ...prev, [path]: [] }));
-    } finally {
-      setExpandingPath(null);
-    }
-  }, []);
+  const loadChildren = useCallback(
+    async (path: string) => {
+      setExpandingPath(path);
+      try {
+        const res = await fetchWorkspaceTree(path, 1, sessionId);
+        setChildrenMap((prev) => ({ ...prev, [path]: res.entries.map(toNode) }));
+      } catch {
+        // 子目录加载失败：保持空展开状态，用户可再次点击重试
+        setChildrenMap((prev) => ({ ...prev, [path]: [] }));
+      } finally {
+        setExpandingPath(null);
+      }
+    },
+    [sessionId],
+  );
 
   const data = useMemo(() => rootEntries.map(toNode), [rootEntries]);
 

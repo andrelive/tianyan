@@ -31,6 +31,8 @@ test.describe('real backend chat', () => {
   }) => {
     await page.goto('/');
     await page.locator('button[title="新建对话"]').click();
+    // 新建对话先选工作区（工作区 = 会话的父级分组）；不绑定直接进入对话页
+    await page.getByRole('button', { name: '不绑定工作区' }).click();
     await expect(page).toHaveURL('/chat');
 
     const textarea = page.getByRole('textbox', { name: '输入消息' });

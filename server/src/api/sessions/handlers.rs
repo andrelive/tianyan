@@ -10,6 +10,7 @@ use crate::api::sessions::services::SessionService;
 use crate::api::sessions::types::{
     CompressSessionResponse, DeleteMessageRequest, DeleteSessionResponse, ListSessionsResponse,
     RedoRequest, Session, SessionDetail, SessionMessagesResponse, UpdateTitleRequest,
+    UpdateWorkspaceRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
@@ -20,7 +21,11 @@ pub async fn list_sessions(
 ) -> Result<Json<ListSessionsResponse>, ApiError> {
     info!("列出所有会话");
 
-    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
+    let service = SessionService::new(
+        state.session_manager(),
+        state.snapshot_manager(),
+        state.agent_working_directory().await,
+    );
 
     service
         .list_sessions()
@@ -40,7 +45,11 @@ pub async fn get_session(
 
     info!("获取会话详情: {}", session_id);
 
-    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
+    let service = SessionService::new(
+        state.session_manager(),
+        state.snapshot_manager(),
+        state.agent_working_directory().await,
+    );
 
     service
         .get_session_detail(&session_id)
@@ -60,7 +69,11 @@ pub async fn get_session_messages(
 
     info!("获取会话消息: {}", session_id);
 
-    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
+    let service = SessionService::new(
+        state.session_manager(),
+        state.snapshot_manager(),
+        state.agent_working_directory().await,
+    );
 
     service
         .get_messages(&session_id)
@@ -80,7 +93,11 @@ pub async fn delete_session(
 
     info!("删除会话: {}", session_id);
 
-    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
+    let service = SessionService::new(
+        state.session_manager(),
+        state.snapshot_manager(),
+        state.agent_working_directory().await,
+    );
 
     service
         .delete_session(&session_id)
@@ -104,7 +121,11 @@ pub async fn delete_message(
         session_id, request.message_index
     );
 
-    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
+    let service = SessionService::new(
+        state.session_manager(),
+        state.snapshot_manager(),
+        state.agent_working_directory().await,
+    );
 
     let resp = service.delete_message(&session_id, request).await?;
     Ok(Json(resp))
@@ -125,7 +146,11 @@ pub async fn redo_message(
         session_id, request.message_index
     );
 
-    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
+    let service = SessionService::new(
+        state.session_manager(),
+        state.snapshot_manager(),
+        state.agent_working_directory().await,
+    );
 
     let resp = service.redo_message(&session_id, request).await?;
     Ok(Json(resp))
@@ -166,11 +191,43 @@ pub async fn update_session_title(
 
     info!("更新会话标题: {}", session_id);
 
-    let service = SessionService::new(state.session_manager(), state.snapshot_manager());
+    let service = SessionService::new(
+        state.session_manager(),
+        state.snapshot_manager(),
+        state.agent_working_directory().await,
+    );
 
     service
         .update_title(&session_id, request)
         .await
         .inspect_err(|e| error!("更新会话标题失败: {}", e))
+        .map(Json)
+}
+
+/// 更新会话绑定的工作目录（工作区归属；空串清除绑定）。
+pub async fn update_session_workspace(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(request): Json<UpdateWorkspaceRequest>,
+) -> Result<Json<Session>, ApiError> {
+    if session_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("会话ID不能为空".to_string()));
+    }
+    if let Err(e) = request.validate() {
+        return Err(ApiError::BadRequest(e));
+    }
+
+    info!("更新会话工作目录: {}", session_id);
+
+    let service = SessionService::new(
+        state.session_manager(),
+        state.snapshot_manager(),
+        state.agent_working_directory().await,
+    );
+
+    service
+        .update_workspace(&session_id, &request.working_directory)
+        .await
+        .inspect_err(|e| error!("更新会话工作目录失败: {}", e))
         .map(Json)
 }

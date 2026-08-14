@@ -11,13 +11,13 @@ use crate::api::shared::error::ApiError;
 use crate::api::workspace::services::WorkspaceService;
 use crate::api::workspace::types::{
     ApplyEditRequest, ApplyEditResponse, ApplyPatchRequest, ApplyPatchResponse, DiffQuery,
-    ReadQuery, TreeQuery, TreeResponse,
+    DirsQuery, DirsResponse, ReadQuery, TreeQuery, TreeResponse,
 };
 use crate::state::AppState;
 
-/// 从应用状态构建工作区服务（配置读取 + 快照管理器）。
+/// 从应用状态构建工作区服务（会话管理器 + 全局默认目录 + 快照管理器）。
 async fn build_service(state: Arc<AppState>) -> WorkspaceService {
-    let working_dir = state
+    let default_working_dir = state
         .config()
         .read()
         .await
@@ -25,7 +25,11 @@ async fn build_service(state: Arc<AppState>) -> WorkspaceService {
         .working_directory
         .clone()
         .map(PathBuf::from);
-    WorkspaceService::new(working_dir, state.snapshot_manager())
+    WorkspaceService::new(
+        state.session_manager(),
+        default_working_dir,
+        state.snapshot_manager(),
+    )
 }
 
 /// 处理目录树请求。
@@ -35,7 +39,16 @@ pub async fn tree_handler(
 ) -> Result<Json<TreeResponse>, ApiError> {
     let service = build_service(state).await;
     let rel = query.path.unwrap_or_default();
-    Ok(Json(service.tree(&rel).await?))
+    Ok(Json(service.tree(&rel, query.session_id.as_deref()).await?))
+}
+
+/// 处理目录选择器请求（工作区选择：逐级浏览任意目录，不限于当前工作目录）。
+pub async fn dirs_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DirsQuery>,
+) -> Result<Json<DirsResponse>, ApiError> {
+    let service = build_service(state).await;
+    Ok(Json(service.list_dirs(query.path.as_deref()).await?))
 }
 
 /// 处理文件读取请求（委托 core executor）。
@@ -45,7 +58,11 @@ pub async fn read_handler(
 ) -> Result<Json<Value>, ApiError> {
     let service = build_service(state).await;
     let rel = query.path.unwrap_or_default();
-    Ok(Json(service.read(&rel, query.offset, query.limit).await?))
+    Ok(Json(
+        service
+            .read(&rel, query.offset, query.limit, query.session_id.as_deref())
+            .await?,
+    ))
 }
 
 /// 处理差异对比请求（快照模式 / 文件间模式）。
@@ -66,7 +83,9 @@ pub async fn diff_handler(
             .await?
     } else if let (Some(path_a), Some(path_b)) = (query.path_a.as_deref(), query.path_b.as_deref())
     {
-        service.diff_files(path_a, path_b).await?
+        service
+            .diff_files(path_a, path_b, query.session_id.as_deref())
+            .await?
     } else {
         return Err(ApiError::BadRequest(
             "diff 需要 base=snapshot&session_id&index 或 path_a&path_b".to_string(),
@@ -81,7 +100,11 @@ pub async fn apply_patch_handler(
     Json(payload): Json<ApplyPatchRequest>,
 ) -> Result<Json<ApplyPatchResponse>, ApiError> {
     let service = build_service(state).await;
-    Ok(Json(service.apply_patch(&payload.patch).await?))
+    Ok(Json(
+        service
+            .apply_patch(&payload.patch, payload.session_id.as_deref())
+            .await?,
+    ))
 }
 
 /// 处理 hashline 语义编辑请求（供 LLM/外部工作流）。
@@ -91,6 +114,8 @@ pub async fn apply_edit_handler(
 ) -> Result<Json<ApplyEditResponse>, ApiError> {
     let service = build_service(state).await;
     Ok(Json(
-        service.apply_edit(&payload.path, payload.edits).await?,
+        service
+            .apply_edit(&payload.path, payload.edits, payload.session_id.as_deref())
+            .await?,
     ))
 }

@@ -951,6 +951,15 @@ export const handlers = [
     });
   }),
 
+  // Session workspace（后端为 PUT /sessions/{id}/workspace，body: { working_directory }）
+  http.put(`${API_BASE}/sessions/:id/workspace`, async ({ request, params }) => {
+    const body = (await request.json()) as { working_directory?: string };
+    const session = mockSessions.find((s) => s.id === params.id);
+    if (!session) return new HttpResponse(null, { status: 404 });
+    session.working_directory = (body.working_directory ?? '').trim() || null;
+    return HttpResponse.json(session);
+  }),
+
   // Session compress（后端为 POST /sessions/{id}/compress，body: {}）
   http.post(`${API_BASE}/sessions/:id/compress`, ({ params }) => {
     mockSessionCompressCalls.push({ sessionId: String(params.id) });
@@ -989,10 +998,10 @@ export const handlers = [
             'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"length","chunk_type":"answer"}\n\n',
           ]
         : [
-          'data: {"id":"msg-1","session_id":"session-1","delta":"你好","chunk_type":"answer"}\n\n',
-          'data: {"id":"msg-1","session_id":"session-1","delta":"！","chunk_type":"answer"}\n\n',
-          'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',
-        ];
+            'data: {"id":"msg-1","session_id":"session-1","delta":"你好","chunk_type":"answer"}\n\n',
+            'data: {"id":"msg-1","session_id":"session-1","delta":"！","chunk_type":"answer"}\n\n',
+            'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',
+          ];
 
     const stream = new ReadableStream({
       start(controller) {
@@ -1109,6 +1118,33 @@ export const handlers = [
   // Usage stats（后端为 GET /stats）
   http.get(`${API_BASE}/stats`, () => {
     return HttpResponse.json(mockUsageStats);
+  }),
+
+  // Workspace dirs（后端为 GET /workspace/dirs?path=；目录选择器）
+  http.get(`${API_BASE}/workspace/dirs`, ({ request }) => {
+    const url = new URL(request.url);
+    const path = url.searchParams.get('path');
+    if (!path) {
+      return HttpResponse.json({
+        current: '浏览根',
+        parent: null,
+        entries: [
+          { name: 'C:\\', path: 'C:\\', is_root: true },
+          { name: 'D:\\', path: 'D:\\', is_root: true },
+        ],
+      });
+    }
+    if (path === 'C:\\') {
+      return HttpResponse.json({
+        current: 'C:\\',
+        parent: null,
+        entries: [
+          { name: 'sub1', path: 'C:\\sub1' },
+          { name: 'sub2', path: 'C:\\sub2' },
+        ],
+      });
+    }
+    return HttpResponse.json({ current: path, parent: null, entries: [] });
   }),
 
   // Workspace tree（后端为 GET /workspace/tree?path=&depth=）

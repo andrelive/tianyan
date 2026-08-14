@@ -25,6 +25,9 @@ interface AppState {
   setSessions: (sessions: Session[]) => void;
   addSession: (session: Session) => void;
   removeSession: (id: string) => void;
+  /** 新建对话绑定的工作目录（工作区归属；首条消息时随 ChatRequest 提交） */
+  newSessionWorkspace: string | null;
+  setNewSessionWorkspace: (dir: string | null) => void;
 
   // Messages
   messages: ChatMessage[];
@@ -94,6 +97,8 @@ export const useAppStore = create<AppState>()(
       sessions: [],
       setSessions: (sessions) => set({ sessions }),
       addSession: (session) => set((s) => ({ sessions: [...s.sessions, session] })),
+      newSessionWorkspace: null,
+      setNewSessionWorkspace: (dir) => set({ newSessionWorkspace: dir }),
       removeSession: (id) =>
         set((s) => {
           const sessions = s.sessions.filter((x) => x.id !== id);

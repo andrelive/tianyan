@@ -72,6 +72,8 @@ pub struct TreeQuery {
     pub path: Option<String>,
     /// 深度（当前固定单层列出，参数保留以兼容前端）。
     pub depth: Option<u32>,
+    /// 会话 ID（解析会话绑定的工作目录；缺省 = 全局配置）。
+    pub session_id: Option<String>,
 }
 
 /// read 查询参数。
@@ -83,6 +85,8 @@ pub struct ReadQuery {
     pub offset: Option<usize>,
     /// 窗口行数。
     pub limit: Option<usize>,
+    /// 会话 ID（解析会话绑定的工作目录；缺省 = 全局配置）。
+    pub session_id: Option<String>,
 }
 
 /// diff 查询参数（快照模式与文件间模式二选一）。
@@ -107,6 +111,8 @@ pub struct DiffQuery {
 pub struct ApplyPatchRequest {
     /// unified diff 补丁文本（codex 风格 `*** Update File:` 信封格式）。
     pub patch: String,
+    /// 会话 ID（解析会话绑定的工作目录；缺省 = 全局配置）。
+    pub session_id: Option<String>,
 }
 
 /// apply-patch 响应中单个文件的变更摘要。
@@ -136,6 +142,8 @@ pub struct ApplyEditRequest {
     pub path: String,
     /// 语义编辑列表（复用 core [`EditSpec`] 的 serde 契约）。
     pub edits: Vec<EditSpec>,
+    /// 会话 ID（解析会话绑定的工作目录；缺省 = 全局配置）。
+    pub session_id: Option<String>,
 }
 
 /// apply-edit 响应体。
@@ -145,4 +153,34 @@ pub struct ApplyEditResponse {
     pub path: String,
     /// 实际应用的编辑条数。
     pub edits_applied: usize,
+}
+
+/// 目录选择器查询参数（工作区目录浏览，供前端逐级选择工作目录）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct DirsQuery {
+    /// 要浏览的目录绝对路径（缺省/空 = 浏览根：Windows 盘符列表，其余平台家目录）。
+    pub path: Option<String>,
+}
+
+/// 目录选择器响应。
+#[derive(Debug, Clone, Serialize)]
+pub struct DirsResponse {
+    /// 当前浏览的目录（缺省时为浏览根哨兵，见 [`DirEntry::is_root`]）。
+    pub current: String,
+    /// 上级目录（已到浏览根时为 None）。
+    pub parent: Option<String>,
+    /// 当前目录下可直接进入的子目录列表（目录 + 可浏览根，无文件）。
+    pub entries: Vec<DirEntry>,
+}
+
+/// 目录选择器条目。
+#[derive(Debug, Clone, Serialize)]
+pub struct DirEntry {
+    /// 目录名称。
+    pub name: String,
+    /// 完整路径（进入该目录时传给 `path` 参数）。
+    pub path: String,
+    /// 是否为浏览根（盘符列表 / 家目录哨兵）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_root: Option<bool>,
 }

@@ -78,10 +78,17 @@ interface FileViewerProps {
   reloadKey?: number;
   /** 用户点击"保存"时携带磁盘原文与编辑结果通知父组件（打开 diff 确认弹窗）。 */
   onSaveRequest?: (draft: FileViewerDraft) => void;
+  /** 会话 ID（解析会话绑定的工作目录；缺省 = 全局配置）。 */
+  sessionId?: string;
 }
 
 /** 只读/可编辑 CodeMirror 6 文件查看器：hashline 剥离、二进制提示、分页加载更多、编辑模式。 */
-export default function FileViewer({ path, reloadKey = 0, onSaveRequest }: FileViewerProps) {
+export default function FileViewer({
+  path,
+  reloadKey = 0,
+  onSaveRequest,
+  sessionId,
+}: FileViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -100,32 +107,35 @@ export default function FileViewer({ path, reloadKey = 0, onSaveRequest }: FileV
   /** 编辑后的当前内容（由 CM updateListener 提升）。 */
   const [draftText, setDraftText] = useState('');
 
-  const loadFile = useCallback(async (filePath: string) => {
-    setLoading(true);
-    setError(null);
-    setResponse(null);
-    setRawLines([]);
-    setNextOffset(0);
-    setShowAnchors(false);
-    setEditing(false);
-    setEditLoading(false);
-    setDirty(false);
-    setOriginalText('');
-    setDraftText('');
-    try {
-      const res = await fetchWorkspaceRead(filePath, undefined, PAGE_LIMIT);
-      setResponse(res);
-      if (res.content !== undefined) {
-        const lines = res.content.split('\n');
-        setRawLines(lines);
-        setNextOffset(computeNextOffset(res));
+  const loadFile = useCallback(
+    async (filePath: string) => {
+      setLoading(true);
+      setError(null);
+      setResponse(null);
+      setRawLines([]);
+      setNextOffset(0);
+      setShowAnchors(false);
+      setEditing(false);
+      setEditLoading(false);
+      setDirty(false);
+      setOriginalText('');
+      setDraftText('');
+      try {
+        const res = await fetchWorkspaceRead(filePath, undefined, PAGE_LIMIT, sessionId);
+        setResponse(res);
+        if (res.content !== undefined) {
+          const lines = res.content.split('\n');
+          setRawLines(lines);
+          setNextOffset(computeNextOffset(res));
+        }
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : '加载失败');
+      } finally {
+        setLoading(false);
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    },
+    [sessionId],
+  );
 
   useEffect(() => {
     if (path) {
@@ -146,7 +156,7 @@ export default function FileViewer({ path, reloadKey = 0, onSaveRequest }: FileV
     if (!path) return;
     setLoadMoreLoading(true);
     try {
-      const res = await fetchWorkspaceRead(path, nextOffset, PAGE_LIMIT);
+      const res = await fetchWorkspaceRead(path, nextOffset, PAGE_LIMIT, sessionId);
       setResponse((prev) => ({ ...prev, ...res }));
       if (res.content !== undefined) {
         const lines = res.content.split('\n');
@@ -172,7 +182,7 @@ export default function FileViewer({ path, reloadKey = 0, onSaveRequest }: FileV
       let offset = nextOffset;
       let truncated = response.truncated ?? false;
       while (truncated) {
-        const res = await fetchWorkspaceRead(path, offset, PAGE_LIMIT);
+        const res = await fetchWorkspaceRead(path, offset, PAGE_LIMIT, sessionId);
         setResponse((prev) => ({ ...prev, ...res }));
         if (res.content !== undefined) {
           lines = [...lines, ...res.content.split('\n')];

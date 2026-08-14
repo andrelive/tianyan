@@ -19,7 +19,7 @@ scripts/e2e/
 |------|------|------|
 | 8765 | mock-llm.mjs | OpenAI 兼容 mock（`MOCK_LLM_PORT` 可改） |
 | 3000 | tianyan-server | Axum 后端（固定 127.0.0.1:3000，不支持改端口） |
-| 5173 | vite dev | 前端开发服务器（`npm run dev`） |
+| 5100 | vite dev | 前端开发服务器（`npm run dev`） |
 
 ## mock-llm.mjs：提供什么
 
@@ -92,7 +92,7 @@ $backend = Start-Process cargo -ArgumentList "run","-p","tianyan-server" `
 do { Start-Sleep 2 } until (curl.exe -s http://127.0.0.1:3000/health)
 
 # 3. 前端
-# cd gui-vite; npm run dev   # http://localhost:5173
+# cd gui-vite; npm run dev   # http://localhost:5100
 ```
 
 **关键约束（2026-08-13 起）**：
@@ -111,6 +111,11 @@ do { Start-Sleep 2 } until (curl.exe -s http://127.0.0.1:3000/health)
 `fixtures/workspace/hello.txt` 是 Agent 文件操作的沙箱：`working_directory`
 指向它，`/api/v1/workspace/tree` 应列出 `hello.txt`。测试可安全地读写/修改
 该目录下的文件，不影响仓库其他部分。
+
+**会话级工作区（ADR-015）**：工作区是会话的父级分组。除全局配置兜底外，
+`POST /api/v1/chat` 可携带 `working_directory`（仅新会话生效，固化到会话头部）；
+`PUT /api/v1/sessions/{id}/workspace` 可修改/清除绑定（空串）。`/workspace/*`
+端点接受可选 `session_id` 解析会话绑定目录（缺省 = 全局配置）。
 
 ## 排障
 

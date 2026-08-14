@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
@@ -118,7 +118,19 @@ describe('Sidebar', () => {
       expect(screen.getByText('设置')).toBeInTheDocument();
     });
 
-    it('clicking "新建对话" resets session, messages, view, and navigates to /chat', async () => {
+    it('clicking "新建对话" opens the workspace picker without resetting state', async () => {
+      const user = userEvent.setup();
+      useAppStore.setState({ currentSessionId: 'session-1' });
+      renderSidebar();
+
+      await user.click(screen.getByTitle('新建对话'));
+
+      // 先选工作区（工作区 = 会话的父级分组），选择完成前不重置当前状态
+      expect(screen.getByRole('dialog', { name: '选择工作目录' })).toBeInTheDocument();
+      expect(useAppStore.getState().currentSessionId).toBe('session-1');
+    });
+
+    it('choosing "不绑定工作区" resets session, messages, view, and navigates to /chat', async () => {
       const user = userEvent.setup();
       // Pre-set state to verify it gets reset
       useAppStore.setState({
@@ -129,10 +141,30 @@ describe('Sidebar', () => {
       renderSidebar();
 
       await user.click(screen.getByTitle('新建对话'));
+      await user.click(screen.getByRole('button', { name: '不绑定工作区' }));
 
+      expect(useAppStore.getState().newSessionWorkspace).toBeNull();
       expect(useAppStore.getState().currentSessionId).toBeNull();
       expect(useAppStore.getState().messages).toEqual([]);
       expect(useAppStore.getState().currentView).toBe('chat');
+      expect(screen.getByTestId('location-display').textContent).toBe('/chat');
+    });
+
+    it('choosing a directory sets newSessionWorkspace and navigates to /chat', async () => {
+      const user = userEvent.setup();
+      renderSidebar();
+
+      await user.click(screen.getByTitle('新建对话'));
+      const dialog = screen.getByRole('dialog', { name: '选择工作目录' });
+      // 浏览根列出盘符 → 双击 C:\ 进入二级浏览 → 选中子目录 → 确认
+      await user.dblClick(within(dialog).getByRole('button', { name: '目录 C:\\' }));
+      // 二级浏览为异步加载：等待子目录出现后选中
+      const subDir = await within(dialog).findByRole('button', { name: '目录 sub1' });
+      await user.click(subDir);
+      await user.click(within(dialog).getByRole('button', { name: '确认选择' }));
+
+      expect(useAppStore.getState().newSessionWorkspace).toBe('C:\\sub1');
+      expect(useAppStore.getState().currentSessionId).toBeNull();
       expect(screen.getByTestId('location-display').textContent).toBe('/chat');
     });
 

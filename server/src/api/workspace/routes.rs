@@ -6,7 +6,7 @@ use axum::routing::{get, post};
 use axum::Router;
 
 use crate::api::workspace::handlers::{
-    apply_edit_handler, apply_patch_handler, diff_handler, read_handler, tree_handler,
+    apply_edit_handler, apply_patch_handler, diff_handler, dirs_handler, read_handler, tree_handler,
 };
 use crate::state::AppState;
 
@@ -14,6 +14,7 @@ use crate::state::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/workspace/tree", get(tree_handler))
+        .route("/workspace/dirs", get(dirs_handler))
         .route("/workspace/read", get(read_handler))
         .route("/workspace/diff", get(diff_handler))
         .route("/workspace/apply-patch", post(apply_patch_handler))

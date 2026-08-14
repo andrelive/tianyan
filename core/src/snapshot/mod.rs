@@ -145,6 +145,18 @@ impl SnapshotManager {
         &self.workdir
     }
 
+    /// 返回绑定到指定工作目录的实例（root/excludes 共享，workdir 替换）。
+    ///
+    /// 会话级工作区支持：同一管理器按会话工作目录克隆出实例，快照树与对象
+    /// 库仍按 session_id 组织（内容寻址对象全局去重，跨工作目录共享）。
+    pub fn with_workdir(&self, workdir: PathBuf) -> Self {
+        Self {
+            root: self.root.clone(),
+            workdir,
+            excludes: self.excludes.clone(),
+        }
+    }
+
     /// 捕获工作区状态为快照（消息处理前调用）。
     ///
     /// 遍历工作目录生成 `{path → sha256}` 树并持久化；内容寻址对象缺失时复制原文。
@@ -1039,6 +1051,16 @@ mod tests {
 
     fn read(workdir: &Path, rel: &str) -> String {
         std::fs::read_to_string(workdir.join(rel)).unwrap()
+    }
+
+    #[test]
+    fn test_with_workdir_swaps_workdir_keeps_root() {
+        // 会话级工作区：with_workdir 克隆出绑定不同目录的实例（root/excludes 共享）
+        let mgr = SnapshotManager::new(PathBuf::from("root-a"), PathBuf::from("ws-a"));
+        let other = mgr.with_workdir(PathBuf::from("ws-b"));
+        assert_eq!(other.root(), Path::new("root-a"), "root 应共享");
+        assert_eq!(other.workdir(), Path::new("ws-b"), "workdir 应替换");
+        assert_eq!(mgr.workdir(), Path::new("ws-a"), "原实例不受影响");
     }
 
     #[tokio::test]

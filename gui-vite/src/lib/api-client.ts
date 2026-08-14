@@ -14,10 +14,12 @@ import type {
   RetrievalTracesResponse,
   SchedulerStatus,
   SearchSuggestionsResponse,
+  Session,
   SessionMessagesResponse,
   UsageStatsSummary,
   WorkspaceDiffListResponse,
   WorkspaceDiffResponse,
+  WorkspaceDirsResponse,
   WorkspaceReadResponse,
   WorkspaceTreeResponse,
   WorkspaceApplyPatchRequest,
@@ -163,6 +165,16 @@ export async function updateSessionTitle(
   });
 }
 
+/** 更新会话绑定的工作目录（工作区归属；空串清除绑定）。 */
+export async function updateSessionWorkspace(
+  sessionId: string,
+  workingDirectory: string,
+): Promise<Session> {
+  return apiPut<Session>(`/sessions/${encodeURIComponent(sessionId)}/workspace`, {
+    working_directory: workingDirectory,
+  });
+}
+
 // ========== Chat clarification ==========
 
 export interface ClarifyRequest {
@@ -244,6 +256,23 @@ export async function toggleMcpServer(name: string, enabled: boolean): Promise<v
 
 export async function testMcpServer(name: string): Promise<McpTestResponse> {
   return apiPost<McpTestResponse>(`/config/mcp/servers/${encodeURIComponent(name)}/test`, {});
+}
+
+// ========== 工作目录 API ==========
+
+/** 设置工作目录（读完整配置 → 改 agent.working_directory → PUT；空串清除）。 */
+export async function updateWorkingDirectory(path: string): Promise<void> {
+  const resp = await apiGet<{ config: { agent?: { working_directory?: string | null } } }>(
+    '/config',
+  );
+  const agent = resp.config.agent ?? {};
+  const payload = {
+    config: {
+      ...(resp.config as object),
+      agent: { ...agent, working_directory: path || null },
+    },
+  };
+  await apiPut<{ success: boolean }>('/config', payload);
 }
 
 // ========== Soul API ==========
@@ -402,23 +431,38 @@ export async function fetchUsageStats(): Promise<UsageStatsSummary> {
 
 // ========== Workspace API (read-only, Phase 1) ==========
 
-/** 列出工作区目录下的直接子条目（dir 深度 1）。 */
-export async function fetchWorkspaceTree(path?: string, depth = 1): Promise<WorkspaceTreeResponse> {
+/** 目录选择器：列出指定路径下的子目录（path 缺省 = 浏览根：Windows 盘符 / 家目录）。 */
+export async function fetchWorkspaceDirs(path?: string): Promise<WorkspaceDirsResponse> {
+  const params = new URLSearchParams();
+  if (path) params.set('path', path);
+  const qs = params.toString();
+  return apiGet<WorkspaceDirsResponse>(`/workspace/dirs${qs ? `?${qs}` : ''}`);
+}
+
+/** 列出工作区目录下的直接子条目（dir 深度 1；sessionId 解析会话绑定目录）。 */
+export async function fetchWorkspaceTree(
+  path?: string,
+  depth = 1,
+  sessionId?: string,
+): Promise<WorkspaceTreeResponse> {
   const params = new URLSearchParams();
   if (path) params.set('path', path);
   params.set('depth', String(depth));
+  if (sessionId) params.set('session_id', sessionId);
   return apiGet<WorkspaceTreeResponse>(`/workspace/tree?${params}`);
 }
 
-/** 分页读取工作区文件内容（offset 为起始行号，limit 默认 2000）。 */
+/** 分页读取工作区文件内容（offset 为起始行号，limit 默认 2000；sessionId 解析会话绑定目录）。 */
 export async function fetchWorkspaceRead(
   path: string,
   offset?: number,
   limit = 2000,
+  sessionId?: string,
 ): Promise<WorkspaceReadResponse> {
   const params = new URLSearchParams({ path });
   if (offset !== undefined) params.set('offset', String(offset));
   params.set('limit', String(limit));
+  if (sessionId) params.set('session_id', sessionId);
   return apiGet<WorkspaceReadResponse>(`/workspace/read?${params}`);
 }
 
@@ -445,12 +489,14 @@ export async function fetchWorkspaceDiffList(
   return apiGet<WorkspaceDiffListResponse>(`/workspace/diff?${params}`);
 }
 
-/** 应用工作区补丁（保存前 diff 确认后的写入，body: { patch }）。 */
+/** 应用工作区补丁（保存前 diff 确认后的写入；sessionId 解析会话绑定目录）。 */
 export async function fetchWorkspaceApplyPatch(
   patch: string,
+  sessionId?: string,
 ): Promise<WorkspaceApplyPatchResponse> {
   return apiPost<WorkspaceApplyPatchResponse>('/workspace/apply-patch', {
     patch,
+    ...(sessionId ? { session_id: sessionId } : {}),
   } satisfies WorkspaceApplyPatchRequest);
 }
 

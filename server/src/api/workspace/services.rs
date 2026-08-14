@@ -8,6 +8,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use tianyan::session::SessionManager;
+
 use serde_json::{json, Value};
 use tianyan::executor::edit::EditSpec;
 use tianyan::executor::execute_read_file;
@@ -16,13 +18,16 @@ use tianyan::TianyanError;
 
 use crate::api::shared::error::ApiError;
 use crate::api::workspace::types::{
-    ApplyEditResponse, ApplyPatchResponse, FileDiffResponse, HunkDto, TreeEntry, TreeResponse,
+    ApplyEditResponse, ApplyPatchResponse, DirEntry, DirsResponse, FileDiffResponse, HunkDto,
+    TreeEntry, TreeResponse,
 };
 
-/// 工作区服务：对配置的 working_directory 提供只读访问。
+/// 工作区服务：对会话生效的工作目录（会话级绑定优先，缺省全局配置）提供只读访问。
 pub struct WorkspaceService {
-    /// 工作目录（配置未设置时为 None）。
-    working_dir: Option<PathBuf>,
+    /// 会话管理器（按 session_id 解析工作区归属）。
+    session_manager: Arc<dyn SessionManager>,
+    /// 全局默认工作目录（[agent] working_directory；会话未绑定时使用）。
+    default_working_dir: Option<PathBuf>,
     /// 快照管理器（配置未设置时为 None）。
     snapshot_manager: Option<Arc<SnapshotManager>>,
 }
@@ -30,20 +35,49 @@ pub struct WorkspaceService {
 impl WorkspaceService {
     /// 创建新的工作区服务。
     pub fn new(
-        working_dir: Option<PathBuf>,
+        session_manager: Arc<dyn SessionManager>,
+        default_working_dir: Option<PathBuf>,
         snapshot_manager: Option<Arc<SnapshotManager>>,
     ) -> Self {
         Self {
-            working_dir,
+            session_manager,
+            default_working_dir,
             snapshot_manager,
         }
+    }
+
+    /// 解析请求生效的工作目录：会话级绑定（目录必须存在）优先，
+    /// 缺省回退全局配置。会话不存在 → 404；未配置任何目录 → 400。
+    async fn resolve_workdir(&self, session_id: Option<&str>) -> Result<PathBuf, ApiError> {
+        if let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            let session = self
+                .session_manager
+                .get_session(sid)
+                .await?
+                .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {sid}")))?;
+            if let Some(wd) = session.header.working_directory.as_deref() {
+                let p = PathBuf::from(wd);
+                if p.is_dir() {
+                    return Ok(p);
+                }
+                return Err(ApiError::BadRequest(format!("会话工作目录不存在：{wd}")));
+            }
+        }
+        self.default_working_dir
+            .clone()
+            .ok_or_else(|| ApiError::BadRequest("未配置 working_directory".to_string()))
     }
 
     /// 列出 `<working_dir>/<rel>` 的单层条目（目录在前、文件在后，各自按名称升序）。
     ///
     /// `rel` 为空表示工作目录根。`depth` 参数当前固定为单层列出（与契约一致）。
-    pub async fn tree(&self, rel: &str) -> Result<TreeResponse, ApiError> {
-        let (base, target) = self.resolve(rel).await?;
+    pub async fn tree(
+        &self,
+        rel: &str,
+        session_id: Option<&str>,
+    ) -> Result<TreeResponse, ApiError> {
+        let base = self.resolve_workdir(session_id).await?;
+        let (base, target) = resolve_rel(&base, rel).await?;
         let mut rd = tokio::fs::read_dir(&target)
             .await
             .map_err(|e| ApiError::NotFound(format!("工作区目录不存在：{e}")))?;
@@ -97,8 +131,10 @@ impl WorkspaceService {
         rel: &str,
         offset: Option<usize>,
         limit: Option<usize>,
+        session_id: Option<&str>,
     ) -> Result<Value, ApiError> {
-        let (_base, target) = self.resolve(rel).await?;
+        let base = self.resolve_workdir(session_id).await?;
+        let (_base, target) = resolve_rel(&base, rel).await?;
         let value = execute_read_file(&strip_verbatim(&target.to_string_lossy()), offset, limit)
             .await
             .map_err(executor_error_to_api)?;
@@ -122,7 +158,10 @@ impl WorkspaceService {
         if let Some(rel) = path {
             validate_rel_path(rel)?;
         }
+        // 快照根取该会话生效的工作目录（会话级绑定优先，缺省全局配置）
+        let workdir = self.resolve_workdir(Some(session_id)).await?;
         let result = manager
+            .with_workdir(workdir)
             .diff(session_id, index)
             .await
             .map_err(snapshot_error_to_api)?;
@@ -149,9 +188,15 @@ impl WorkspaceService {
     /// 文件间模式差异：`<working_dir>/<path_a>` vs `<working_dir>/<path_b>`。
     ///
     /// 使用 `similar::TextDiff` 按行对比；任一文件为二进制 → `binary`。
-    pub async fn diff_files(&self, path_a: &str, path_b: &str) -> Result<Value, ApiError> {
-        let (_base, target_a) = self.resolve(path_a).await?;
-        let (_, target_b) = self.resolve(path_b).await?;
+    pub async fn diff_files(
+        &self,
+        path_a: &str,
+        path_b: &str,
+        session_id: Option<&str>,
+    ) -> Result<Value, ApiError> {
+        let base = self.resolve_workdir(session_id).await?;
+        let (_base, target_a) = resolve_rel(&base, path_a).await?;
+        let (_, target_b) = resolve_rel(&base, path_b).await?;
         let bytes_a = tokio::fs::read(&target_a)
             .await
             .map_err(|e| ApiError::NotFound(format!("文件不存在：{e}")))?;
@@ -213,11 +258,12 @@ impl WorkspaceService {
     /// git 风格先归一化为 codex 信封（见 [`normalize_patch`]）。补丁内路径由
     /// core 内部沙箱校验（拒绝 `..` 组件与绝对路径，相对 `working_directory`
     /// 解析），此处不重复校验。未配置工作目录 → 400。
-    pub async fn apply_patch(&self, patch_text: &str) -> Result<ApplyPatchResponse, ApiError> {
-        let working_dir = self
-            .working_dir
-            .clone()
-            .ok_or_else(|| ApiError::BadRequest("未配置 working_directory".to_string()))?;
+    pub async fn apply_patch(
+        &self,
+        patch_text: &str,
+        session_id: Option<&str>,
+    ) -> Result<ApplyPatchResponse, ApiError> {
+        let working_dir = self.resolve_workdir(session_id).await?;
         let normalized = normalize_patch(patch_text)?;
         let value = tianyan::executor::patch::apply_patch_action(&normalized, &working_dir)
             .await
@@ -233,8 +279,10 @@ impl WorkspaceService {
         &self,
         rel: &str,
         edits: Vec<EditSpec>,
+        session_id: Option<&str>,
     ) -> Result<ApplyEditResponse, ApiError> {
-        let (_base, target) = self.resolve(rel).await?;
+        let base = self.resolve_workdir(session_id).await?;
+        let (_base, target) = resolve_rel(&base, rel).await?;
         let abs = strip_verbatim(&target.to_string_lossy());
         let value = tianyan::executor::edit::apply_edit_action(&abs, edits)
             .await
@@ -251,28 +299,91 @@ impl WorkspaceService {
         })
     }
 
-    /// 校验相对路径并解析为绝对路径。
+    /// 目录选择器：列出 `path` 下的子目录（供前端逐级浏览选择工作目录）。
     ///
-    /// 拒绝 `..` / 绝对路径（400）；目标必须存在（404）；canonicalize 后必须
-    /// 仍位于工作目录内（沙箱，越界 → Forbidden）。
-    async fn resolve(&self, rel: &str) -> Result<(PathBuf, PathBuf), ApiError> {
-        let working_dir = self
-            .working_dir
-            .clone()
-            .ok_or_else(|| ApiError::BadRequest("未配置 working_directory".to_string()))?;
-        validate_rel_path(rel)?;
-        let target = working_dir.join(rel);
-        let base = tokio::fs::canonicalize(&working_dir)
-            .await
-            .map_err(|e| ApiError::NotFound(format!("工作目录不存在：{e}")))?;
-        let target = tokio::fs::canonicalize(&target)
-            .await
-            .map_err(|e| ApiError::NotFound(format!("路径不存在：{e}")))?;
-        if !target.starts_with(&base) {
-            return Err(ApiError::Forbidden("路径超出工作目录".to_string()));
+    /// - `path` 缺省/空 → 浏览根：Windows 返回盘符列表（`C:\`、`D:\`...），
+    ///   其余平台返回家目录下的子目录（parent = None）。
+    /// - 指定路径 → 列出该目录的子目录（parent = 上级目录，根目录时 None）。
+    /// - 与 [`Self::tree`] 不同：这是**任意路径浏览**（工作区选择器用），
+    ///   不限于当前 working_directory；只列目录不列文件；目录不存在 → 404。
+    pub async fn list_dirs(&self, path: Option<&str>) -> Result<DirsResponse, ApiError> {
+        let path = path.map(str::trim).filter(|p| !p.is_empty());
+        let Some(path) = path else {
+            // 浏览根：Windows 返回盘符列表；其余平台返回家目录下的子目录
+            return self.browse_root().await;
+        };
+
+        let target = PathBuf::from(path);
+        if !target.is_dir() {
+            return Err(ApiError::NotFound(format!("目录不存在：{path}")));
         }
-        Ok((base, target))
+        let canonical = tokio::fs::canonicalize(&target)
+            .await
+            .map_err(|e| ApiError::NotFound(format!("目录不存在：{e}")))?;
+        let current = strip_verbatim(&canonical.to_string_lossy());
+        let parent = canonical
+            .parent()
+            .map(|p| strip_verbatim(&p.to_string_lossy()));
+        let entries = read_subdirs(&canonical, false)?;
+        Ok(DirsResponse {
+            current,
+            parent,
+            entries,
+        })
     }
+
+    /// 浏览根：Windows 盘符列表（A:-Z: 存在即列出）；其余平台家目录子目录。
+    async fn browse_root(&self) -> Result<DirsResponse, ApiError> {
+        #[cfg(target_os = "windows")]
+        {
+            let mut entries = Vec::new();
+            for letter in b'A'..=b'Z' {
+                let drive = format!("{}:\\", letter as char);
+                if Path::new(&drive).exists() {
+                    entries.push(DirEntry {
+                        name: drive.clone(),
+                        path: drive,
+                        is_root: Some(true),
+                    });
+                }
+            }
+            Ok(DirsResponse {
+                current: "浏览根".to_string(),
+                parent: None,
+                entries,
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let home =
+                dirs::home_dir().ok_or_else(|| ApiError::Internal("无法解析家目录".to_string()))?;
+            let entries = read_subdirs(&home, true)?;
+            Ok(DirsResponse {
+                current: home.to_string_lossy().into_owned(),
+                parent: None,
+                entries,
+            })
+        }
+    }
+}
+
+/// 校验相对路径并解析为绝对路径（基于给定的工作目录根）。
+///
+/// 拒绝 `..` / 绝对路径（400）；目标必须存在（404）；canonicalize 后必须
+/// 仍位于工作目录内（沙箱，越界 → Forbidden）。
+async fn resolve_rel(base: &Path, rel: &str) -> Result<(PathBuf, PathBuf), ApiError> {
+    validate_rel_path(rel)?;
+    let target = base.join(rel);
+    let base = tokio::fs::canonicalize(base)
+        .await
+        .map_err(|e| ApiError::NotFound(format!("工作目录不存在：{e}")))?;
+    let target = tokio::fs::canonicalize(&target)
+        .await
+        .map_err(|e| ApiError::NotFound(format!("路径不存在：{e}")))?;
+    if !target.starts_with(&base) {
+        return Err(ApiError::Forbidden("路径超出工作目录".to_string()));
+    }
+    Ok((base, target))
 }
 
 /// 拒绝包含 `..` 组件或以根/前缀（绝对路径、盘符）开头的相对路径。
@@ -287,6 +398,29 @@ fn validate_rel_path(rel: &str) -> Result<(), ApiError> {
         }
     }
     Ok(())
+}
+
+/// 列出目录的直接子目录（只列目录，不列文件；目录名按升序）。
+///
+/// `is_root_entries`：浏览根模式下条目本身即盘符/家目录（不再展开）。
+fn read_subdirs(dir: &Path, is_root_entries: bool) -> Result<Vec<DirEntry>, ApiError> {
+    let mut entries = Vec::new();
+    let rd = std::fs::read_dir(dir).map_err(|e| ApiError::NotFound(format!("目录不存在：{e}")))?;
+    for entry in rd.flatten() {
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if !is_dir {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let entry_path = entry.path();
+        entries.push(DirEntry {
+            name: name.clone(),
+            path: strip_verbatim(&entry_path.to_string_lossy()),
+            is_root: is_root_entries.then_some(true),
+        });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(entries)
 }
 
 /// 去掉 Windows `\\?\` 逐字前缀（canonicalize 产物），返回前端可用的常规绝对路径。

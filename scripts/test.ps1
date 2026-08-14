@@ -54,8 +54,8 @@ function Test-GuiE2E {
     cargo build -p tianyan-server
     if ($LASTEXITCODE -ne 0) { throw "后端预编译失败" }
 
-    # 端口占用预检：8765 (mock-llm) / 3000 (后端) / 5173 (vite)
-    foreach ($port in 8765, 3000, 5173) {
+    # 端口占用预检：8765 (mock-llm) / 3000 (后端) / 5100 (vite)
+    foreach ($port in 8765, 3000, 5100) {
         if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) {
             throw "端口 $port 已被占用。请先停止占用该端口的进程（如开发中的 tianyan server / vite dev / mock-llm）再运行 GUI E2E。"
         }

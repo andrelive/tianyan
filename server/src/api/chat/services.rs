@@ -71,6 +71,7 @@ impl ChatService {
             self.session_manager.as_ref(),
             request.session_id.as_deref(),
             &last_text,
+            request.working_directory.as_deref(),
         )
         .await?;
         if is_new {
@@ -103,6 +104,7 @@ impl ChatService {
             self.session_manager.as_ref(),
             request.session_id.as_deref(),
             &last_text,
+            request.working_directory.as_deref(),
         )
         .await?;
         if is_new {
@@ -226,17 +228,16 @@ fn convert_skill_calls(calls: Vec<tianyan::agent::SkillCallInfo>) -> Vec<SkillCa
         .collect()
 }
 
-/// 根据请求中的 session_id 决定复用已有会话还是创建新会话。
-/// 根据请求中的 session_id 决定复用已有会话还是创建新会话。
-/// 新建会话时自动用第一条用户消息生成标题。
 /// 解析或创建会话，返回 `(session_id, is_new)`。
 ///
 /// - 已存在会话：复用，`is_new = false`（会话内，不触发技能刷新）
-/// - 新会话：创建，`is_new = true`（会话边界，调用方刷新已学习技能）
+/// - 新会话：创建，`is_new = true`（会话边界，调用方刷新已学习技能）；
+///   携带 `working_directory` 时绑定为新会话的工作目录（工作区归属）。
 async fn resolve_or_create_session(
     session_manager: &dyn SessionManager,
     session_id: Option<&str>,
     initial_message: &str,
+    working_directory: Option<&str>,
 ) -> Result<(String, bool), ApiError> {
     // 如果传了 session_id 且服务端已存在，直接复用
     if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
@@ -253,6 +254,18 @@ async fn resolve_or_create_session(
     let msg = CoreMessage::new(CoreMessageRole::User, initial_message);
     // ? 传播：保留 core 错误语义（不吞成 Internal）
     let mut session = session_manager.create_session(&new_id, msg).await?;
+
+    // 新会话绑定工作目录（工作区归属）：目录必须存在，坏值仅告警不阻断对话
+    if let Some(wd) = working_directory.map(str::trim).filter(|w| !w.is_empty()) {
+        if std::path::Path::new(wd).is_dir() {
+            session.header.working_directory = Some(wd.to_string());
+            if let Err(e) = session_manager.update_session(&session).await {
+                tracing::warn!(error = %e, working_directory = %wd, "会话工作目录绑定持久化失败");
+            }
+        } else {
+            tracing::warn!(working_directory = %wd, "新会话工作目录不存在，忽略绑定");
+        }
+    }
 
     // 用第一条用户消息生成标题（取第一行或前 30 个字符）
     let title = generate_session_title(initial_message);

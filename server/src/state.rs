@@ -527,6 +527,18 @@ impl AppState {
         self.snapshot_manager.clone()
     }
 
+    /// 获取全局默认工作目录（[agent] working_directory 配置；动态读取，
+    /// 配置热更新后自动指向新值）。
+    pub async fn agent_working_directory(&self) -> Option<std::path::PathBuf> {
+        self.config
+            .read()
+            .await
+            .agent
+            .working_directory
+            .clone()
+            .map(std::path::PathBuf::from)
+    }
+
     /// 获取配置
     ///
     /// # Returns

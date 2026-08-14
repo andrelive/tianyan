@@ -19,7 +19,8 @@ pub mod types;
 pub use routes::routes;
 pub use types::{
     ApplyEditRequest, ApplyEditResponse, ApplyPatchFileDto, ApplyPatchRequest, ApplyPatchResponse,
-    DiffQuery, FileDiffResponse, HunkDto, ReadQuery, TreeEntry, TreeQuery, TreeResponse,
+    DiffQuery, DirEntry, DirsQuery, DirsResponse, FileDiffResponse, HunkDto, ReadQuery, TreeEntry,
+    TreeQuery, TreeResponse,
 };
 
 #[cfg(test)]
