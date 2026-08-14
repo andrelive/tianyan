@@ -27,6 +27,7 @@ use flate2::Compression;
 use ring::digest::{digest, SHA256};
 use tokio::fs;
 
+use crate::common::binary::sniff_binary;
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::StructuredMessage;
 
@@ -132,12 +133,6 @@ impl SnapshotManager {
             workdir,
             excludes: Vec::new(),
         }
-    }
-
-    /// 添加额外排除项（相对工作目录的路径片段或目录名，匹配即跳过）。
-    pub fn with_exclude(mut self, path: impl Into<String>) -> Self {
-        self.excludes.push(path.into());
-        self
     }
 
     /// 快照存储根目录。
@@ -254,7 +249,7 @@ impl SnapshotManager {
                             continue;
                         }
                     };
-                    if looks_binary(&current_bytes) || looks_binary(&old_bytes) {
+                    if sniff_binary(&current_bytes) || sniff_binary(&old_bytes) {
                         files.push(binary_diff(path));
                         continue;
                     }
@@ -290,7 +285,7 @@ impl SnapshotManager {
                     continue;
                 }
             };
-            if looks_binary(&bytes) {
+            if sniff_binary(&bytes) {
                 files.push(binary_diff(path));
             } else {
                 files.push(FileDiff {
@@ -395,12 +390,6 @@ impl SnapshotManager {
         Ok(Some((messages, restored)))
     }
 
-    /// 检查指定索引的快照是否存在。
-    pub async fn has_snapshot(&self, session_id: &str, index: usize) -> bool {
-        let path = self.trees_dir(session_id).join(format!("{}.json", index));
-        path.exists()
-    }
-
     /// 检查指定索引的重做状态是否存在。
     pub async fn has_redo(&self, session_id: &str, index: usize) -> bool {
         self.redo_dir(session_id)
@@ -416,6 +405,17 @@ impl SnapshotManager {
     /// 另删除 `redo/` 下缺少对应 `tree-{index}.json` 的孤儿缓存文件
     /// （`load_redo` 遗留的历史泄漏）。`trees/` 下的缓存文件不受影响。
     pub async fn gc(&self) -> Result<GcStats> {
+        // 全新数据目录（尚无任何快照）时 root 不存在：无垃圾可清，空操作成功。
+        // 否则 scheduler 的 snapshot_gc 任务在首次快照前持续报错（os error 3）。
+        if !self.root.is_dir() {
+            return Ok(GcStats {
+                objects_removed: 0,
+                objects_retained: 0,
+                cache_files_removed: 0,
+                total_objects: 0,
+            });
+        }
+
         // ── 标记阶段：收集可达对象哈希 ────────────────────────────
         let mut reachable: HashSet<String> = HashSet::new();
         let mut session_dirs: Vec<PathBuf> = Vec::new();
@@ -642,9 +642,7 @@ impl SnapshotManager {
     async fn load_tree(&self, session_id: &str, index: usize) -> Result<SnapshotTree> {
         let tree_path = self.trees_dir(session_id).join(format!("{}.json", index));
         let content = fs::read_to_string(&tree_path).await.map_err(|e| {
-            TianyanError::Custom(format!(
-                "snapshot: 快照不存在（会话 {session_id} 索引 {index}）: {e}"
-            ))
+            TianyanError::not_found(format!("快照不存在（会话 {session_id} 索引 {index}）: {e}"))
         })?;
         serde_json::from_str(&content)
             .map_err(|e| TianyanError::Custom(format!("snapshot: 解析快照树失败: {e}")))
@@ -981,22 +979,6 @@ fn binary_diff(path: &str) -> FileDiff {
     }
 }
 
-/// 启发式判断内容是否为二进制：含 NUL 字节，或控制字符（除 `\n` `\r` `\t` 外 < 0x20 及 0x7f）
-/// 占比超过 30%。UTF-8 多字节字符（≥ 0x80）不计为控制字符，中文文本不会被误判。
-fn looks_binary(bytes: &[u8]) -> bool {
-    if bytes.contains(&0) {
-        return true;
-    }
-    if bytes.is_empty() {
-        return false;
-    }
-    let control = bytes
-        .iter()
-        .filter(|&&b| b == 0x7f || (b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t'))
-        .count();
-    control * 100 / bytes.len() > 30
-}
-
 /// 从 diff ops 构建变更块：合并相邻的增删改操作（跳过 Equal），每个连续变更簇生成一个 hunk。
 ///
 /// 坐标 1 起始；Delete + Insert 相邻时合并为一个 hunk（同一变更区域）。
@@ -1284,6 +1266,23 @@ mod tests {
         assert_eq!(restored, 2);
         assert_eq!(read(&mgr.workdir, "comp.txt"), "压缩对象内容");
         assert_eq!(read(&mgr.workdir, "raw.txt"), "原始对象内容");
+    }
+
+    #[tokio::test]
+    async fn test_gc_missing_root_is_noop() {
+        // 新数据目录（尚无任何快照）时 root 不存在：GC 应为空操作成功，
+        // 而非报错——否则 scheduler 的 snapshot_gc 任务在全新安装上持续失败。
+        let dir = tempdir().unwrap();
+        let workdir = dir.path().join("work");
+        let missing_root = dir.path().join("snapshots"); // 故意不创建
+        std::fs::create_dir_all(&workdir).unwrap();
+        let mgr = SnapshotManager::new(missing_root, workdir);
+
+        let stats = mgr.gc().await.unwrap();
+        assert_eq!(stats.objects_removed, 0);
+        assert_eq!(stats.objects_retained, 0);
+        assert_eq!(stats.cache_files_removed, 0);
+        assert_eq!(stats.total_objects, 0);
     }
 
     #[tokio::test]

@@ -19,7 +19,7 @@ use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::context::DualLayerRetriever;
 use tianyan::model::ModelServices;
 use tianyan::observability::usage_stats::UsageStats;
-use tianyan::session::PersistentSessionManager;
+use tianyan::session::SessionManager;
 use tianyan::skills::{SkillExecutor, SkillRefresher};
 use tianyan::vfs::backend::sqlite_db::SqliteDb;
 use tianyan::vfs::VirtualFileSystemImpl;
@@ -49,6 +49,8 @@ impl AgentBuilderFactory {
     /// None 时任务状态纯内存、无唤醒）。
     /// `notification_sink` 为系统通知通道（后台任务完成/审批挂起；动态包装，
     /// Tauri 后注册亦生效）。
+    /// `session_manager` / `trace_collector` 由调用方（AppState）创建并持有——
+    /// 组合根收敛：API 层与 Agent 共享同一实例，避免双写/双收集。
     #[allow(clippy::too_many_arguments)]
     pub async fn build_agent(
         config: &TianyanConfig,
@@ -61,6 +63,8 @@ impl AgentBuilderFactory {
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
         sqlite_db: Option<SqliteDb>,
         notification_sink: tianyan::notification::SharedNotificationSink,
+        session_manager: Arc<dyn SessionManager>,
+        trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
@@ -89,18 +93,17 @@ impl AgentBuilderFactory {
             .with_web_config(config.web.clone())
             .with_usage_stats(usage_stats)
             .with_agent_roles(config.agent_roles.clone())
-            .with_session_manager(Arc::new(PersistentSessionManager::new(vfs)));
+            .with_session_manager(session_manager);
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),
             None => agent,
         };
         let mut builder = agent.with_skill_refresher(skill_refresher);
+        if let Some(trace) = trace_collector {
+            // G6：结构化 Trace（与 AppState 共享同一收集器，单一写入路径）
+            builder = builder.with_trace_collector(trace);
+        }
         if let Some(db) = sqlite_db {
-            // G6：结构化 Trace（共享 SqliteDb，观测持久化；失败仅告警）
-            match tianyan::observability::trace::TraceCollector::new(db.clone()) {
-                Ok(trace) => builder = builder.with_trace_collector(trace),
-                Err(e) => tracing::warn!(error = %e, "TraceCollector 初始化失败，span 记录不可用"),
-            }
             builder = builder.with_background_task_db(db);
         }
         // 系统通知通道（动态包装：Tauri 后注册亦生效）
@@ -143,6 +146,8 @@ impl AgentBuilderFactory {
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
         sqlite_db: Option<SqliteDb>,
         notification_sink: tianyan::notification::SharedNotificationSink,
+        session_manager: Arc<dyn SessionManager>,
+        trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -155,6 +160,8 @@ impl AgentBuilderFactory {
             dynamic_tools,
             sqlite_db,
             notification_sink,
+            session_manager,
+            trace_collector,
         )
         .await
         {
@@ -262,10 +269,6 @@ impl AgentCoordinator for WizardModeAgent {
         ))
     }
 
-    async fn initialize(&self) -> TianyanResult<()> {
-        Ok(())
-    }
-
     async fn approval_status(
         &self,
     ) -> TianyanResult<tianyan::executor::approval::ApprovalStatusSnapshot> {
@@ -307,9 +310,5 @@ impl AgentCoordinator for WizardModeAgent {
     async fn compress_session(&self, _session_id: &str) -> TianyanResult<bool> {
         // 向导模式未装配 Agent，压缩不可用
         Ok(false)
-    }
-
-    async fn shutdown(&self) -> TianyanResult<()> {
-        Ok(())
     }
 }

@@ -104,24 +104,6 @@ impl ExecutorConfig {
 pub struct SkillExecutor {
     registry: Arc<RwLock<SkillRegistry>>,
     config: ExecutorConfig,
-    execution_log: Arc<RwLock<Vec<ExecutionLogEntry>>>,
-}
-
-/// 执行日志条目。
-#[derive(Debug, Clone)]
-pub struct ExecutionLogEntry {
-    /// 技能 ID。
-    pub skill_id: String,
-    /// 执行时间戳。
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    /// 执行是否成功。
-    pub success: bool,
-    /// 执行时间（毫秒）。
-    pub execution_time_ms: u64,
-    /// 错误消息（如果失败）。
-    pub error: Option<String>,
-    /// 使用的参数。
-    pub parameters: HashMap<String, Value>,
 }
 
 /// 验证文件路径是否在允许的路径列表内。
@@ -145,11 +127,7 @@ pub(crate) fn validate_path(path: &Path, allowed_paths: &[PathBuf]) -> Result<()
 impl SkillExecutor {
     /// 创建新的技能执行器。
     pub fn new(registry: Arc<RwLock<SkillRegistry>>, config: ExecutorConfig) -> Self {
-        Self {
-            registry,
-            config,
-            execution_log: Arc::new(RwLock::new(Vec::new())),
-        }
+        Self { registry, config }
     }
 
     /// 使用默认配置创建执行器。
@@ -254,16 +232,6 @@ impl SkillExecutor {
             },
         };
 
-        // 记录执行
-        self.log_execution(
-            request.skill_id,
-            request.parameters,
-            result.success,
-            start.elapsed().as_millis() as u64,
-            result.error.clone(),
-        )
-        .await;
-
         Ok(result)
     }
 
@@ -316,44 +284,6 @@ impl SkillExecutor {
                 Ok(())
             }
         }
-    }
-
-    /// 记录执行。
-    async fn log_execution(
-        &self,
-        skill_id: String,
-        parameters: HashMap<String, Value>,
-        success: bool,
-        execution_time_ms: u64,
-        error: Option<String>,
-    ) {
-        let entry = ExecutionLogEntry {
-            skill_id,
-            timestamp: chrono::Utc::now(),
-            success,
-            execution_time_ms,
-            error,
-            parameters,
-        };
-
-        let mut log = self.execution_log.write().await;
-        log.push(entry);
-
-        // 只保留最近 1000 条记录
-        if log.len() > 1000 {
-            let excess = log.len() - 1000;
-            log.drain(0..excess);
-        }
-    }
-
-    /// 获取执行日志。
-    pub async fn get_execution_log(&self) -> Vec<ExecutionLogEntry> {
-        self.execution_log.read().await.clone()
-    }
-
-    /// 清除执行日志。
-    pub async fn clear_execution_log(&self) {
-        self.execution_log.write().await.clear();
     }
 }
 

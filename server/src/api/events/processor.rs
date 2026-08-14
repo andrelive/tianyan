@@ -249,9 +249,6 @@ mod tests {
         ) -> tianyan::Result<AgentResponse> {
             Err(tianyan::TianyanError::Custom("测试桩".to_string()))
         }
-        async fn initialize(&self) -> tianyan::Result<()> {
-            Ok(())
-        }
         async fn approval_status(&self) -> tianyan::Result<ApprovalStatusSnapshot> {
             Err(tianyan::TianyanError::Custom("测试桩".to_string()))
         }
@@ -282,9 +279,6 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(session_id.to_string());
         }
-        async fn shutdown(&self) -> tianyan::Result<()> {
-            Ok(())
-        }
     }
 
     /// 返回预置会话列表的内存会话管理器（其余方法为最小桩）。
@@ -301,9 +295,6 @@ mod tests {
             Ok(None)
         }
         async fn update_session(&self, _session: &Session) -> tianyan::Result<()> {
-            Ok(())
-        }
-        async fn add_message(&self, _session_id: &str, _message: Message) -> tianyan::Result<()> {
             Ok(())
         }
         async fn add_structured_message(

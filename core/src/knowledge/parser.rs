@@ -389,12 +389,6 @@ impl CompositeParser {
         Self { parsers }
     }
 
-    /// 添加自定义解析器。
-    pub fn with_parser(mut self, parser: Box<dyn DocumentParser>) -> Self {
-        self.parsers.push(parser);
-        self
-    }
-
     /// 获取文件对应的解析器。
     pub fn get_parser(&self, path: &Path) -> Option<&dyn DocumentParser> {
         let ext = path.extension()?.to_str()?;

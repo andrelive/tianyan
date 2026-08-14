@@ -14,7 +14,7 @@ use crate::common::error::Result;
 use crate::common::token_estimator::estimate_tokens;
 use crate::common::types::{ContextNamespace, EntryMetadata, TianyanUri};
 use crate::model::{ChatService, EmbeddingService, VlmService};
-use crate::vfs::{ContextEntry, SummaryEngine, VirtualFileSystem};
+use crate::vfs::{ContextEntry, SummaryEngine, SummaryService, VirtualFileSystem};
 
 use super::image::{ImageAnalyzer, ImageProcessor, ImageProcessorConfig};
 use super::parser::CompositeParser;
@@ -104,7 +104,7 @@ pub struct KnowledgeIngestor {
     embedding_service: Arc<dyn EmbeddingService>,
     vlm_service: Arc<dyn VlmService>,
     vfs: Arc<dyn VirtualFileSystem>,
-    summary_engine: SummaryEngine,
+    summary_engine: Arc<dyn SummaryService>,
 }
 
 impl KnowledgeIngestor {
@@ -119,7 +119,10 @@ impl KnowledgeIngestor {
         let parser = CompositeParser::new();
         let image_processor = ImageProcessor::new(config.image.clone());
 
-        let summary_engine = SummaryEngine::new(model_service, config.summary_model.clone());
+        let summary_engine: Arc<dyn SummaryService> = Arc::new(SummaryEngine::new(
+            model_service,
+            config.summary_model.clone(),
+        ));
 
         Self {
             config,
@@ -137,7 +140,7 @@ impl KnowledgeIngestor {
     /// 流程：解析文档 → 生成摘要 → 写入 VFS（abstract + overview + detail）→ 生成嵌入向量。
     pub async fn ingest(&self, request: IngestionRequest) -> Result<IngestionResult> {
         let start = Instant::now();
-        let mut warnings: Vec<String> = Vec::new();
+        let warnings = Vec::new();
 
         let content_hash = self.calculate_hash(&request.content);
         let doc_id = content_hash.clone();
@@ -171,16 +174,11 @@ impl KnowledgeIngestor {
         };
 
         let (abstract_content, overview_content) = if self.config.generate_summaries {
-            match self.generate_summaries(&text_content).await {
-                Ok((abs, ov)) => (abs, ov),
-                Err(e) => {
-                    warnings.push(format!("摘要生成失败，使用截断回退: {}", e));
-                    (
-                        text_content.chars().take(500).collect(),
-                        text_content.clone(),
-                    )
-                }
-            }
+            // 统一回退语义：LLM 摘要失败时截断兜底（generate_or_fallback 内部告警），
+            // 内容仍可写入与检索，不阻塞导入
+            self.summary_engine
+                .generate_or_fallback(&text_content)
+                .await
         } else {
             (
                 text_content.chars().take(500).collect(),
@@ -271,16 +269,6 @@ impl KnowledgeIngestor {
         Ok((unified.combined_text, visual_embedding.map(|e| e.vector)))
     }
 
-    /// 为内容生成分层摘要。
-    ///
-    /// 生成失败时向上传播错误，由 [`KnowledgeIngestor::ingest`] 的唯一回退层
-    /// （截断 + warning）处理，避免双层回退导致行为难以推理。
-    async fn generate_summaries(&self, content: &str) -> Result<(String, String)> {
-        let abstract_content = self.summary_engine.generate_abstract(content).await?;
-        let overview_content = self.summary_engine.generate_overview(content).await?;
-        Ok((abstract_content, overview_content))
-    }
-
     /// 为条目内容生成嵌入向量并通过 VFS 写入向量库。
     async fn store_embeddings(
         &self,
@@ -369,8 +357,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_ingest_summary_failure_single_layer_fallback() {
-        // SummaryEngine 生成失败（chat_completion 返回错误）时，由 ingest() 的唯一回退层处理：
-        // 截断摘要 + warning，不 panic、不向上传播错误。
+        // SummaryEngine 生成失败（chat_completion 返回错误）时，由
+        // SummaryService::generate_or_fallback 统一回退（截断摘要，内部告警），
+        // 不 panic、不向上传播错误。
         let mut chat = MockChatService::new();
         chat.expect_chat_completion()
             .returning(|_| Err(TianyanError::Custom("模拟摘要服务不可用".to_string())));
@@ -393,9 +382,9 @@ mod tests {
             .await
             .expect("摘要失败不应导致 ingest 失败");
 
-        // 单层回退：恰好一条 warning，且 abstract 截断为 500 字符、overview 为完整内容
-        assert_eq!(result.warnings.len(), 1);
-        assert!(result.warnings[0].contains("摘要生成失败，使用截断回退"));
+        // 统一回退：无 warning（回退由 SummaryService 内部告警），
+        // abstract 截断为 500 字符、overview 为完整内容
+        assert!(result.warnings.is_empty(), "回退不应产生 ingest warning");
 
         let uri = TianyanUri::new(
             ContextNamespace::Knowledge,

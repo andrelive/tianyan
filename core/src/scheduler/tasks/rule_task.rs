@@ -36,18 +36,6 @@ impl RuleTask {
             max_per_cycle: 10,
         }
     }
-
-    /// 设置模型版本（用于记录规则生成来源）。
-    pub fn with_model_version(mut self, version: impl Into<String>) -> Self {
-        self.suggester = self.suggester.with_model_version(version);
-        self
-    }
-
-    /// 设置 Pipeline 版本（用于记录规则生成来源）。
-    pub fn with_pipeline_version(mut self, version: impl Into<String>) -> Self {
-        self.suggester = self.suggester.with_pipeline_version(version);
-        self
-    }
 }
 
 #[async_trait]

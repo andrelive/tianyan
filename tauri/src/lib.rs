@@ -664,7 +664,7 @@ pub fn run() {
     info!("Initializing Tauri application...");
 
     // 构建并运行 Tauri 应用
-    // Tauri 会自动加载 frontendDist 中配置的静态文件 (gui/dist)
+    // Tauri 会自动加载 frontendDist 中配置的静态文件 (gui-vite/dist)
     // 前端通过 HTTP 调用 Axum 后端 API
     let mut app_builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -697,7 +697,7 @@ pub fn run() {
     }
     let app = match app_builder
         .setup(move |app| {
-            info!("Tauri setup completed, frontend loaded from gui/dist");
+            info!("Tauri setup completed, frontend loaded from gui-vite/dist");
             // 注入实际监听端口：前端 getApiBase() 优先读取该变量
             // （动态端口时前端无法从默认值得知，必须显式注入）
             if let Some(window) = app.get_webview_window("main") {

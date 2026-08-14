@@ -45,7 +45,11 @@ pub trait VfsCore: Send + Sync {
     /// 列出指定 URI 前缀下的所有条目。
     async fn list(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>>;
 
-    /// 移动条目及其子条目到新位置。
+    /// 移动单个条目（含三层内容与向量点）到新位置。
+    ///
+    /// 仅支持无子条目的条目（叶子文件或空目录）：源 URI 含子条目时返回冲突错误
+    /// （见 [`VfsCore::delete`] 的递归语义——move 不递归迁移子条目，拒绝移动目录
+    /// 以避免子条目被静默孤儿化）。向量点保留源向量并以目标 point_id 重写。
     async fn move_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()>;
 
     /// 批量获取所有层级的内容元数据。
@@ -98,13 +102,6 @@ pub trait VfsSearch: Send + Sync {
         namespace: Option<ContextNamespace>,
     ) -> Result<Vec<SearchResult>>;
 
-    /// 通过视觉向量搜索（用于图像相似性检索）。
-    async fn search_by_visual(
-        &self,
-        visual_vector: &[f32],
-        top_k: usize,
-    ) -> Result<Vec<SearchResult>>;
-
     /// 将 Abstract 和 Overview 文本 embed 为向量，存入向量库。
     async fn update_summary_vectors(
         &self,
@@ -153,37 +150,6 @@ pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch {
     /// 读取 Abstract 层级内容。
     async fn read_abstract(&self, uri: &TianyanUri) -> Result<String> {
         self.read_content(uri, ContentLevel::Abstract).await
-    }
-
-    /// 读取子文件内容。
-    async fn read_file(&self, uri: &TianyanUri, filename: &str) -> Result<String> {
-        let child_uri = uri.append(filename);
-        self.read_content(&child_uri, ContentLevel::Detail).await
-    }
-
-    /// 写入子文件内容。
-    async fn write_file(&self, uri: &TianyanUri, filename: &str, content: &str) -> Result<()> {
-        let child_uri = uri.append(filename);
-        if !self.exists(&child_uri).await? {
-            self.create_file(&child_uri).await?;
-        }
-        self.write_content(&child_uri, content).await
-    }
-
-    /// 检查子文件是否存在。
-    async fn file_exists(&self, uri: &TianyanUri, filename: &str) -> Result<bool> {
-        let child_uri = uri.append(filename);
-        self.exists(&child_uri).await
-    }
-
-    /// 列出子文件名。
-    async fn list_files(&self, uri: &TianyanUri) -> Result<Vec<String>> {
-        let entries = self.list(uri).await?;
-        Ok(entries
-            .into_iter()
-            .filter(|e| !e.is_directory())
-            .filter_map(|e| e.uri().path().last().cloned())
-            .collect())
     }
 }
 

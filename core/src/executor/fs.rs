@@ -71,7 +71,7 @@ pub async fn execute_glob(pattern: &str, path: Option<&Path>) -> Result<GlobOutp
             .map_err(|e| TianyanError::Custom(format!("executor: glob 获取当前目录失败：{e}")))?,
     };
     if !base.is_dir() {
-        return Err(TianyanError::Custom(format!(
+        return Err(TianyanError::not_found(format!(
             "executor: 目录不存在：{}",
             base.display()
         )));
@@ -117,7 +117,7 @@ pub async fn execute_list_dir(
     limit: Option<usize>,
 ) -> Result<ListDirOutput, TianyanError> {
     if !path.is_dir() {
-        return Err(TianyanError::Custom(format!(
+        return Err(TianyanError::not_found(format!(
             "executor: 目录不存在：{}",
             path.display()
         )));

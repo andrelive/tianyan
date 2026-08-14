@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::types::{Message, MessageRole, TokenUsage};
+use crate::common::types::{MessageRole, TokenUsage};
 
 /// 流式 tool call 函数增量。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,18 +72,4 @@ pub struct DeltaContent {
     /// 流式 tool calls 增量。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
-}
-
-impl ChatCompletionChunk {
-    /// 将增量内容追加到消息中。
-    pub fn add_to_message(&self, message: &mut Message) {
-        for choice in &self.choices {
-            if let Some(ref role) = choice.delta.role {
-                message.role = *role;
-            }
-            if let Some(ref content) = choice.delta.content {
-                message.content.push_str(content);
-            }
-        }
-    }
 }

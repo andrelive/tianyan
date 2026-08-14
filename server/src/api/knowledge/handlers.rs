@@ -90,11 +90,8 @@ pub async fn ingest_handler(
     service
         .ingest_files(files, request)
         .await
+        .inspect_err(|e| error!("摄入错误: {}", e))
         .map(Json)
-        .map_err(|e| {
-            error!("摄入错误: {}", e);
-            ApiError::Internal(format!("摄入失败: {}", e))
-        })
 }
 
 /// 执行检索
@@ -110,10 +107,11 @@ pub async fn search_handler(
     let vfs = state.vfs();
     let service = KnowledgeService::new(Arc::new(ingestor), vfs);
 
-    service.search(query).await.map(Json).map_err(|e| {
-        error!("搜索失败: {}", e);
-        ApiError::Internal(format!("搜索失败: {}", e))
-    })
+    service
+        .search(query)
+        .await
+        .inspect_err(|e| error!("搜索失败: {}", e))
+        .map(Json)
 }
 
 /// 获取检索建议
@@ -132,11 +130,8 @@ pub async fn search_suggestions_handler(
     service
         .get_search_suggestions(&query.q)
         .await
+        .inspect_err(|e| error!("获取搜索建议失败: {}", e))
         .map(Json)
-        .map_err(|e| {
-            error!("获取搜索建议失败: {}", e);
-            ApiError::Internal(format!("获取搜索建议失败: {}", e))
-        })
 }
 
 /// 列出知识库条目（只读浏览）

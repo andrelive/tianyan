@@ -158,7 +158,9 @@ impl WorkspaceService {
         let bytes_b = tokio::fs::read(&target_b)
             .await
             .map_err(|e| ApiError::NotFound(format!("文件不存在：{e}")))?;
-        if is_binary(&bytes_a) || is_binary(&bytes_b) {
+        if tianyan::common::binary::sniff_binary(&bytes_a)
+            || tianyan::common::binary::sniff_binary(&bytes_b)
+        {
             return Ok(json!({
                 "path": path_a,
                 "status": "binary",
@@ -292,26 +294,20 @@ fn strip_verbatim(path: &str) -> String {
     path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
 }
 
-/// core executor 错误 → API 错误：
-/// - 文件缺失 → 404；
-/// - 路径沙箱违规（非法路径、绝对路径）→ 400；
-/// - 内容不匹配 / 补丁定位失败（锚点、旧内容不匹配、补丁、块）→ 409
-///   （前端据此提示"文件已被修改，请重新加载"）；
+/// core executor 错误 → API 错误（语义谓词优先，与 core `TianyanError` 单一来源对齐）：
+/// - 目标不存在（条目/目录未找到）→ 404；
+/// - 冲突（锚点/旧内容/补丁定位不匹配）→ 409（前端据此提示"文件已被修改，请重新加载"）；
+/// - 无效输入（非法路径、绝对路径）→ 400；
 /// - 其余 → 500。
 fn executor_error_to_api(err: TianyanError) -> ApiError {
-    let msg = err.to_string();
-    if msg.contains("文件不存在") {
-        ApiError::NotFound(msg)
-    } else if msg.contains("非法路径") || msg.contains("绝对路径") {
-        ApiError::BadRequest(msg)
-    } else if msg.contains("锚点")
-        || msg.contains("旧内容不匹配")
-        || msg.contains("补丁")
-        || msg.contains("块")
-    {
-        ApiError::Conflict(msg)
+    if err.is_not_found() {
+        ApiError::NotFound(err.to_string())
+    } else if err.is_conflict() {
+        ApiError::Conflict(err.to_string())
+    } else if err.is_invalid_input() {
+        ApiError::BadRequest(err.to_string())
     } else {
-        ApiError::Internal(msg)
+        ApiError::Internal(err.to_string())
     }
 }
 
@@ -377,17 +373,11 @@ fn strip_ab_prefix(path: &str) -> String {
     }
 }
 
-/// 快照错误 → API 错误：快照缺失 → 404，其余 → 500。
+/// 快照错误 → API 错误：快照缺失（`is_not_found` 语义）→ 404，其余 → 500。
 fn snapshot_error_to_api(err: TianyanError) -> ApiError {
-    let msg = err.to_string();
-    if msg.contains("快照") {
-        ApiError::NotFound(msg)
+    if err.is_not_found() {
+        ApiError::NotFound(err.to_string())
     } else {
-        ApiError::Internal(msg)
+        ApiError::Internal(err.to_string())
     }
-}
-
-/// 文件间对比的二进制判定（与 core `sniff_binary` 的主信号一致：NUL 字节）。
-fn is_binary(bytes: &[u8]) -> bool {
-    bytes.contains(&0)
 }

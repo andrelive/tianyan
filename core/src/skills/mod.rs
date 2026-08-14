@@ -41,7 +41,7 @@ mod types;
 pub use definition::{
     ParameterDefinition, ParameterSchema, ParameterType, Skill, SkillHandler, SkillRegistry,
 };
-pub use executor::{ExecutionLogEntry, ExecutorConfig, SkillExecutor};
+pub use executor::{ExecutorConfig, SkillExecutor};
 pub use handlers::{
     FileDeleteHandler, FileListHandler, FileReadHandler, FileWriteHandler, HttpRequestHandler,
     SystemCommandHandler,
@@ -53,8 +53,8 @@ pub use learning::{
 pub use manager::{SkillManager, SkillRefresher, SkillSummary};
 pub use registry::{create_builtin_skills, register_builtin_skills};
 pub use types::{
-    ExecutionContext, MatchReason, SecurityLevel, SkillCategory, SkillDiscoveryResult,
-    SkillExample, SkillExecutionRequest, SkillExecutionResult, SkillStatistics,
+    ExecutionContext, SecurityLevel, SkillCategory, SkillExample, SkillExecutionRequest,
+    SkillExecutionResult,
 };
 
 #[cfg(test)]

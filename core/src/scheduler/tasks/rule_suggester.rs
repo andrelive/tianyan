@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::common::error::Result;
+use crate::common::llm_judge::parse_llm_json;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::model::ChatService;
 use crate::vfs::VirtualFileSystem;
@@ -57,18 +58,6 @@ impl RuleSuggester {
             model_version: "unknown".to_string(),
             pipeline_version: "1.0".to_string(),
         }
-    }
-
-    /// 设置模型版本（用于记录规则生成来源）。
-    pub fn with_model_version(mut self, version: impl Into<String>) -> Self {
-        self.model_version = version.into();
-        self
-    }
-
-    /// 设置 Pipeline 版本（用于记录规则生成来源）。
-    pub fn with_pipeline_version(mut self, version: impl Into<String>) -> Self {
-        self.pipeline_version = version.into();
-        self
     }
 
     /// 扫描 FailedCase 和 Pattern 记忆，检测可提炼的模式。
@@ -154,15 +143,7 @@ impl RuleSuggester {
             )
             .await?;
 
-        let json: serde_json::Value = {
-            let cleaned = response
-                .trim()
-                .trim_start_matches("```json")
-                .trim_start_matches("```")
-                .trim_end_matches("```")
-                .trim();
-            serde_json::from_str(cleaned).unwrap_or_default()
-        };
+        let json: serde_json::Value = parse_llm_json(&response).unwrap_or_default();
 
         if json
             .get("has_pattern")

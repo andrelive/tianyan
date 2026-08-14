@@ -214,7 +214,7 @@ impl SessionService {
 
         if let Err(e) = self.session_manager.update_session(&session).await {
             tracing::error!("更新会话失败: {}", e);
-            return Err(ApiError::Internal(format!("更新会话失败: {}", e)));
+            return Err(e.into());
         }
         if let Err(e) = self
             .session_manager
@@ -222,7 +222,7 @@ impl SessionService {
             .await
         {
             tracing::error!("重写会话历史失败: {}", e);
-            return Err(ApiError::Internal(format!("重写会话历史失败: {}", e)));
+            return Err(e.into());
         }
 
         // 回退工作区文件到该消息处理前的快照（配置了 working_directory 时生效）
@@ -293,7 +293,7 @@ impl SessionService {
         }
         if let Err(e) = self.session_manager.update_session(&session).await {
             tracing::error!("更新会话失败: {}", e);
-            return Err(ApiError::Internal(format!("更新会话失败: {}", e)));
+            return Err(e.into());
         }
         if let Err(e) = self
             .session_manager
@@ -301,7 +301,7 @@ impl SessionService {
             .await
         {
             tracing::error!("重写会话历史失败: {}", e);
-            return Err(ApiError::Internal(format!("重写会话历史失败: {}", e)));
+            return Err(e.into());
         }
 
         tracing::info!(session = %session_id, restored, "重做完成");

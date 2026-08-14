@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use crate::common::error::Result;
+use crate::common::llm_judge::parse_llm_json;
 use crate::common::types::{MemoryCategory, MemoryEntry, Message};
 use crate::model::ChatService;
 
@@ -178,17 +179,10 @@ impl MemoryExtractor {
     }
 
     fn parse_extraction_response(&self, response: &str) -> Result<Vec<MemoryEntry>> {
-        let cleaned = response
-            .trim()
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
-
-        let json: serde_json::Value = match serde_json::from_str(cleaned) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, response = %response, "记忆提取响应 JSON 解析失败");
+        let json: serde_json::Value = match parse_llm_json(response) {
+            Some(v) => v,
+            None => {
+                tracing::warn!(response = %response, "记忆提取响应 JSON 解析失败");
                 return Ok(Vec::new());
             }
         };

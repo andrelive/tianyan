@@ -329,9 +329,6 @@ mod tests {
         ) -> Result<Vec<SearchResult>> {
             Ok(vec![])
         }
-        async fn search_by_visual(&self, _v: &[f32], _k: usize) -> Result<Vec<SearchResult>> {
-            Ok(vec![])
-        }
         async fn update_summary_vectors(
             &self,
             _uri: &TianyanUri,

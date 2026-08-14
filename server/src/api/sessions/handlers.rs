@@ -22,10 +22,11 @@ pub async fn list_sessions(
 
     let service = SessionService::new(state.session_manager(), state.snapshot_manager());
 
-    service.list_sessions().await.map(Json).map_err(|e| {
-        error!("列出会话失败: {}", e);
-        ApiError::Internal(format!("列出会话失败: {}", e))
-    })
+    service
+        .list_sessions()
+        .await
+        .inspect_err(|e| error!("列出会话失败: {}", e))
+        .map(Json)
 }
 
 /// 获取会话详情

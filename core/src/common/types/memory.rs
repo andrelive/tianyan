@@ -149,17 +149,6 @@ impl MemoryEntry {
         }
     }
 
-    /// 获取记忆天数。
-    pub fn age_days(&self) -> i64 {
-        (chrono::Utc::now() - self.created_at).num_days()
-    }
-
-    /// 获取距离上次访问的天数。
-    pub fn days_since_access(&self) -> Option<i64> {
-        self.last_accessed
-            .map(|la| (chrono::Utc::now() - la).num_days())
-    }
-
     /// 设置重要性并返回自身（链式调用）。
     pub fn with_importance(mut self, importance: f32) -> Self {
         self.importance = importance.clamp(0.0, 1.0);

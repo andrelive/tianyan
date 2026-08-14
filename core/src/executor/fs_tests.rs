@@ -115,6 +115,10 @@ async fn test_glob_missing_dir_errors() {
         err.to_string().contains("目录不存在"),
         "应报目录不存在：{err}"
     );
+    assert!(
+        err.is_not_found(),
+        "目录缺失应分类为 not_found（ADR-014）：{err}"
+    );
 }
 
 #[tokio::test]
@@ -231,6 +235,10 @@ async fn test_list_dir_nonexistent_path_errors() {
     assert!(
         err.to_string().contains("目录不存在"),
         "应报目录不存在：{err}"
+    );
+    assert!(
+        err.is_not_found(),
+        "目录缺失应分类为 not_found（ADR-014）：{err}"
     );
 }
 

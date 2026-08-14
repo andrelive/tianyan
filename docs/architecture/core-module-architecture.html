@@ -586,7 +586,7 @@ table.tb .lvl{display:inline-block;font-size:10px;border-radius:4px;padding:1px 
           <text x="45" y="530" class="t2 mono">&gt;0.85 → L2 Detail · &gt;0.6 → L1 Overview · 否则 L0 Abstract（失败降级 L0）</text></g>
       </svg>
       </div>
-      <div class="note">⑥ 检索轨迹：RetrievalTrace → <code>UsageStats.record_retrieval_trace</code>（FIFO 500 条）。图像双通道（E4 节）：VLM 文本描述（L0/L1）+ <code>embed_image</code> → <code>visual_vector</code>（<code>search_by_visual</code>）。</div>
+      <div class="note">⑥ 检索轨迹：RetrievalTrace → <code>UsageStats.record_retrieval_trace</code>（FIFO 500 条）。图像双通道（E4 节）：VLM 文本描述（L0/L1）+ <code>embed_image</code> → <code>visual_vector</code>（<code>visual_vector</code> 存储于向量库，VFS 便捷检索入口已移除（零调用））。</div>
     </div>
   </div>
 </section>
@@ -887,7 +887,7 @@ table.tb .lvl{display:inline-block;font-size:10px;border-radius:4px;padding:1px 
       <text x="1040" y="552" class="t2">→ create_unified_text</text></g>
     <g class="edge" id="k-vis"><path d="M1200,566 C1200,610 1200,610 1200,640" marker-end="url(#ar)"/></g>
     <g class="flowbox" id="k-vv"><rect x="1060" y="640" width="280" height="44" rx="10"/>
-      <text x="1200" y="661" text-anchor="middle" class="t1 mono">embed_image → visual_vector</text><text x="1200" y="677" text-anchor="middle" class="t3">供 search_by_visual 视觉相似度检索</text></g>
+      <text x="1200" y="661" text-anchor="middle" class="t1 mono">embed_image → visual_vector</text><text x="1200" y="677" text-anchor="middle" class="t3">供向量库视觉相似度检索（VectorType::Visual）</text></g>
 
     <g class="edge" id="k-doc2"><path d="M195,486 C195,448 560,448 560,600" marker-end="url(#ar)"/></g>
     <g class="edge" id="k-img2m"><path d="M1020,526 C980,560 700,570 620,598" marker-end="url(#ar)"/></g>
@@ -909,7 +909,7 @@ table.tb .lvl{display:inline-block;font-size:10px;border-radius:4px;padding:1px 
       <text x="360" y="960" class="t2 mono">abstract_vector + overview_vector + visual_vector + payload</text></g>
   </svg>
   </div>
-  <div class="note">图像双通道（E4 节）：VLM 生成文本描述 → 文本 embedding（L0/L1）+ <code>embed_image</code> → <code>visual_vector</code>（视觉相似度搜索 <code>search_by_visual</code>）。两通道汇合后走相同的摘要 → 三层全写 → index_entry 链路。</div>
+  <div class="note">图像双通道（E4 节）：VLM 生成文本描述 → 文本 embedding（L0/L1）+ <code>embed_image</code> → <code>visual_vector</code>（视觉相似度搜索 <code>visual_vector</code> 存储于向量库，VFS 便捷检索入口已移除（零调用））。两通道汇合后走相同的摘要 → 三层全写 → index_entry 链路。</div>
 </section>
 
 <!-- ======================= 图 8 定时任务 ======================= -->
@@ -1041,7 +1041,7 @@ table.tb .lvl{display:inline-block;font-size:10px;border-radius:4px;padding:1px 
       <tr><th style="width:18%">Trait</th><th style="width:52%">方法</th><th>职责</th></tr>
       <tr><td class="m">VfsCore</td><td class="m">initialize / exists / get_entry / create_directory / create_file / delete / list / move_entry / get_all_content_metadata</td><td>条目与目录操作</td></tr>
       <tr><td class="m">ContentStore</td><td class="m">write / read / append / has_content　＋　便捷：write_content(L2) / write_abstract(L0) / write_overview(L1)</td><td>三层内容读写</td></tr>
-      <tr><td class="m">VfsSearch</td><td class="m">search / search_by_visual / update_summary_vectors / index_entry</td><td>检索 + 向量索引（仅 2 向量化入口之一在此触发）</td></tr>
+      <tr><td class="m">VfsSearch</td><td class="m">search / update_summary_vectors / index_entry</td><td>检索 + 向量索引（仅 2 向量化入口之一在此触发）</td></tr>
       <tr><td class="m">VirtualFileSystem</td><td class="m">VfsCore + ContentStore + VfsSearch + read_file / write_file / list_files 等</td><td>聚合门面</td></tr>
       <tr><td class="m">EmbeddingService</td><td class="m">embed_single</td><td>VFS 直接注入 model::EmbeddingService（桥接已移除，单一实现）</td></tr>
       <tr><td class="m">AgentCoordinator</td><td class="m">process_message / process_message_stream / respond_approval / approval_status</td><td>agent 门面（respond_approval 对应 GUI 审批通道）</td></tr>
@@ -1103,3 +1103,4 @@ table.tb .lvl{display:inline-block;font-size:10px;border-radius:4px;padding:1px 
 </main>
 </body>
 </html>
+

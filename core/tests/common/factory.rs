@@ -32,7 +32,7 @@ pub fn test_session_state(session_id: &str) -> SessionState {
 pub fn test_session_state_with_messages(session_id: &str, messages: Vec<Message>) -> SessionState {
     let mut state = SessionState::new(session_id);
     for msg in messages {
-        state.add_message(msg);
+        state.add_user_message(msg.content.clone());
     }
     state
 }

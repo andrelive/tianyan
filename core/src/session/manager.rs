@@ -3,15 +3,11 @@
 //! 本模块提供会话创建、维护、关键信息提取和摘要生成功能。
 
 use async_trait::async_trait;
-use chrono::Utc;
 use serde_json;
 use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{
-    ContentLevel, DetailedTokenUsage, Message, MessageTime, Part, PartTime, StructuredMessage,
-    TianyanUri,
-};
+use crate::common::types::{ContentLevel, Message, StructuredMessage, TianyanUri};
 use crate::vfs::VirtualFileSystem;
 
 use super::types::parse_message_lines;
@@ -36,9 +32,6 @@ pub trait SessionManager: Send + Sync {
 
     /// 更新会话。
     async fn update_session(&self, session: &Session) -> Result<()>;
-
-    /// 向会话添加消息。
-    async fn add_message(&self, session_id: &str, message: Message) -> Result<()>;
 
     /// 直接持久化 StructuredMessage（不经过 Message 转换）。
     async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()>;
@@ -209,26 +202,8 @@ impl PersistentSessionManager {
 #[async_trait]
 impl SessionManager for PersistentSessionManager {
     async fn create_session(&self, id: &str, message: Message) -> Result<Session> {
-        let now_ms = Utc::now().timestamp_millis();
-        let sm = StructuredMessage {
-            id: format!("msg_{}", now_ms),
-            parent_id: None,
-            role: message.role,
-            parts: vec![Part::Text {
-                text: message.content.clone(),
-                time: PartTime::default(),
-            }],
-            tokens: DetailedTokenUsage::default(),
-            cost: 0.0,
-            model_id: None,
-            time: MessageTime {
-                created: now_ms,
-                completed: now_ms,
-            },
-            session_id: id.to_string(),
-            finish: None,
-            compression_marker: false,
-        };
+        // 全保真转换（StructuredMessage::from_message：图片等非文本内容不丢失）
+        let sm = StructuredMessage::from_message(&message, id, None, None);
         let mut session = Session::new(id);
         session.add_structured_message(sm.clone());
 
@@ -236,7 +211,7 @@ impl SessionManager for PersistentSessionManager {
 
         // 先检查会话是否已存在，避免重复创建
         if self.get_session(id).await?.is_some() {
-            return Err(TianyanError::Custom(format!(
+            return Err(TianyanError::conflict(format!(
                 "会话存储错误：会话已存在：{}",
                 id
             )));
@@ -270,7 +245,7 @@ impl SessionManager for PersistentSessionManager {
     async fn update_session(&self, session: &Session) -> Result<()> {
         // 检查会话是否存在
         if self.get_session(&session.session_id).await?.is_none() {
-            return Err(TianyanError::Custom(format!(
+            return Err(TianyanError::not_found(format!(
                 "会话存储错误：会话未找到：{}",
                 session.session_id
             )));
@@ -284,38 +259,6 @@ impl SessionManager for PersistentSessionManager {
         header.ended_at = session.ended_at;
         self.write_session_header(&session.session_id, &header)
             .await?;
-
-        Ok(())
-    }
-
-    async fn add_message(&self, session_id: &str, message: Message) -> Result<()> {
-        let uri = TianyanUri::parse(&format!("tianyan://session/{}", session_id)).map_err(|e| {
-            TianyanError::Custom(format!("会话存储错误：无效的 session URI: {}", e))
-        })?;
-
-        let now_ms = Utc::now().timestamp_millis();
-        let sm = StructuredMessage {
-            id: format!("msg_{}", now_ms),
-            parent_id: None,
-            role: message.role,
-            parts: vec![Part::Text {
-                text: message.content.clone(),
-                time: PartTime::default(),
-            }],
-            tokens: DetailedTokenUsage::default(),
-            cost: 0.0,
-            model_id: None,
-            time: MessageTime {
-                created: now_ms,
-                completed: now_ms,
-            },
-            session_id: session_id.to_string(),
-            finish: None,
-            compression_marker: false,
-        };
-
-        // 追加消息到 VFS
-        self.append_message_to_vfs(&uri, &sm).await?;
 
         Ok(())
     }
@@ -340,7 +283,7 @@ impl SessionManager for PersistentSessionManager {
 
         // 会话必须已存在
         if !self.vfs.exists(&uri).await? {
-            return Err(TianyanError::Custom(format!(
+            return Err(TianyanError::not_found(format!(
                 "会话存储错误：会话未找到：{}",
                 session_id
             )));
@@ -405,7 +348,7 @@ impl SessionManager for PersistentSessionManager {
         let session = self
             .get_session(id)
             .await?
-            .ok_or_else(|| TianyanError::Custom(format!("会话存储错误：会话未找到：{}", id)))?;
+            .ok_or_else(|| TianyanError::not_found(format!("会话存储错误：会话未找到：{}", id)))?;
 
         self.vfs.delete(&session.uri()).await?;
 
@@ -417,9 +360,13 @@ impl SessionManager for PersistentSessionManager {
 mod tests {
     use super::*;
 
-    use crate::common::types::{ContentLevel, ContextNamespace, InjectableContext, MessageRole};
+    use crate::common::types::{
+        ContentLevel, ContextNamespace, DetailedTokenUsage, InjectableContext, MessageRole,
+        MessageTime, Part, PartTime,
+    };
     use crate::test_utils::MockVfs;
     use crate::vfs::{ContentStore, VfsCore};
+    use chrono::Utc;
 
     /// Helper to create a mock VFS with pre-existing session directory.
     async fn setup_session(vfs: &MockVfs, id: &str) {
@@ -481,6 +428,34 @@ mod tests {
         let loaded = mgr.get_session("test-1").await.unwrap().unwrap();
         assert_eq!(loaded.session_id, "test-1");
         assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_create_session_persists_image_parts() {
+        // 回归保护：create_session 曾用 to_structured_message（仅写 Part::Text，
+        // 静默丢弃 content_parts 图片）；修复后走 StructuredMessage::from_message
+        // 全保真路径，首条消息的图片必须持久化为 Part::Image。
+        let vfs = Arc::new(MockVfs::new());
+        let id = "test-img";
+        setup_session(&vfs, id).await;
+        let mgr = PersistentSessionManager::new(vfs.clone());
+
+        let msg = Message::user_with_images("看图", vec!["data:image/png;base64,AAAA".to_string()]);
+        mgr.create_session(id, msg).await.unwrap();
+
+        let loaded = mgr.get_session(id).await.unwrap().unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        let parts = &loaded.messages[0].parts;
+        assert!(
+            parts.iter().any(|p| matches!(p, Part::Image { .. })),
+            "首条消息的图片应持久化为 Part::Image，实际 parts: {:?}",
+            parts
+        );
+        assert!(
+            parts.iter().any(|p| matches!(p, Part::Text { .. })),
+            "文本 part 应保留，实际 parts: {:?}",
+            parts
+        );
     }
 
     #[tokio::test]
@@ -748,5 +723,49 @@ mod tests {
         let sessions = mgr.list_sessions().await.unwrap();
         assert_eq!(sessions.len(), 1, "非目录条目不得作为会话列出");
         assert_eq!(sessions[0].session_id, "s-a");
+    }
+
+    // ── ADR-014 错误分类 ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_duplicate_session_is_conflict() {
+        let vfs = Arc::new(MockVfs::new());
+        let id = "dup-1";
+        setup_session(&vfs, id).await;
+        let mgr = PersistentSessionManager::new(vfs.clone());
+
+        let msg = Message::user("Hello");
+        mgr.create_session(id, msg.clone()).await.unwrap();
+
+        let err = mgr.create_session(id, msg).await.unwrap_err();
+        assert!(err.is_conflict(), "重复创建应分类为冲突：{err}");
+    }
+
+    #[tokio::test]
+    async fn test_update_missing_session_is_not_found() {
+        let vfs = Arc::new(MockVfs::new());
+        let mgr = PersistentSessionManager::new(vfs);
+        let session = Session::new("no-such");
+
+        let err = mgr.update_session(&session).await.unwrap_err();
+        assert!(err.is_not_found(), "更新缺失会话应分类为未找到：{err}");
+    }
+
+    #[tokio::test]
+    async fn test_delete_missing_session_is_not_found() {
+        let vfs = Arc::new(MockVfs::new());
+        let mgr = PersistentSessionManager::new(vfs);
+
+        let err = mgr.delete_session("no-such").await.unwrap_err();
+        assert!(err.is_not_found(), "删除缺失会话应分类为未找到：{err}");
+    }
+
+    #[tokio::test]
+    async fn test_rewrite_messages_missing_session_is_not_found() {
+        let vfs = Arc::new(MockVfs::new());
+        let mgr = PersistentSessionManager::new(vfs);
+
+        let err = mgr.rewrite_messages("no-such", &[]).await.unwrap_err();
+        assert!(err.is_not_found(), "重写缺失会话应分类为未找到：{err}");
     }
 }

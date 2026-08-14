@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::error::Result;
+use crate::common::llm_judge::parse_llm_json;
 use crate::common::types::{ContextNamespace, TianyanUri};
 use crate::model::ChatService;
 use crate::vfs::VirtualFileSystem;
@@ -186,17 +187,10 @@ impl SkillLearningEngine {
             }
         };
 
-        let cleaned = response
-            .trim()
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim_end_matches("```")
-            .trim();
-
-        let json: serde_json::Value = match serde_json::from_str(cleaned) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(skill_id = %skill.id, error = %e, "候选技能验证响应解析失败，降级为正式注册");
+        let json: serde_json::Value = match parse_llm_json(&response) {
+            Some(v) => v,
+            None => {
+                tracing::warn!(skill_id = %skill.id, "候选技能验证响应解析失败，降级为正式注册");
                 return Ok(None);
             }
         };

@@ -12,7 +12,6 @@ use tokio::sync::RwLock;
 use crate::client::McpClient;
 use crate::error::{McpError, McpResult};
 use crate::types::McpServerConfig;
-use crate::ToolInfo;
 
 /// Manages a collection of named MCP server connections.
 ///
@@ -146,29 +145,6 @@ impl McpClientManager {
     pub async fn get_client(&self, name: &str) -> Option<Arc<McpClient>> {
         let guard = self.clients.read().await;
         guard.get(name).cloned()
-    }
-
-    /// Call a tool on a named server.
-    pub async fn call_tool(
-        &self,
-        server_name: &str,
-        tool_name: &str,
-        arguments: serde_json::Value,
-    ) -> McpResult<String> {
-        let client = self.get_client(server_name).await.ok_or_else(|| {
-            McpError::ConnectionFailed(server_name.to_string(), "Server not connected".to_string())
-        })?;
-
-        client.call_tool(tool_name, arguments).await
-    }
-
-    /// List tools available on a named server.
-    pub async fn list_tools(&self, server_name: &str) -> McpResult<Vec<ToolInfo>> {
-        let client = self.get_client(server_name).await.ok_or_else(|| {
-            McpError::ConnectionFailed(server_name.to_string(), "Server not connected".to_string())
-        })?;
-
-        client.list_tools().await
     }
 
     /// Check if a server is connected.

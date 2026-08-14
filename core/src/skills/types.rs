@@ -212,65 +212,6 @@ impl SkillExecutionResult {
         self.execution_time_ms = ms;
         self
     }
-
-    /// 设置退出码。
-    pub fn with_exit_code(mut self, code: i32) -> Self {
-        self.exit_code = Some(code);
-        self
-    }
-
-    /// 添加额外数据。
-    pub fn with_data(mut self, key: impl Into<String>, value: Value) -> Self {
-        self.data.insert(key.into(), value);
-        self
-    }
-}
-
-/// 技能发现结果。
-#[derive(Debug, Clone)]
-pub struct SkillDiscoveryResult {
-    /// 技能。
-    pub skill: super::definition::Skill,
-    /// 相似度分数（用于语义搜索）。
-    pub similarity: f32,
-    /// 匹配原因。
-    pub match_reason: MatchReason,
-}
-
-/// 技能匹配原因。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MatchReason {
-    /// 精确 ID 匹配。
-    ExactId,
-    /// 名称包含查询。
-    NameMatch,
-    /// 标签匹配。
-    TagMatch,
-    /// 语义相似度。
-    SemanticSimilarity,
-    /// 分类匹配。
-    CategoryMatch,
-}
-
-/// 技能统计信息。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SkillStatistics {
-    /// 技能总数。
-    pub total_skills: usize,
-    /// 已启用的技能数。
-    pub enabled_skills: usize,
-    /// 按分类统计的技能数。
-    pub by_category: HashMap<String, usize>,
-    /// 按安全级别统计的技能数。
-    pub by_security_level: HashMap<String, usize>,
-    /// 总执行次数。
-    pub total_executions: u64,
-    /// 成功执行次数。
-    pub successful_executions: u64,
-    /// 失败执行次数。
-    pub failed_executions: u64,
-    /// 平均执行时间（毫秒）。
-    pub avg_execution_time_ms: f64,
 }
 
 fn default_true() -> bool {

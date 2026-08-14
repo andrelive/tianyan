@@ -19,10 +19,11 @@ pub async fn list_skills(
 
     let service = SkillService::new(state.skill_registry(), state.skill_executor());
 
-    service.list_skills().await.map(Json).map_err(|e| {
-        tracing::error!("列出技能失败: {}", e);
-        ApiError::Internal(format!("列出技能失败: {}", e))
-    })
+    service
+        .list_skills()
+        .await
+        .inspect_err(|e| tracing::error!("列出技能失败: {}", e))
+        .map(Json)
 }
 
 /// 执行技能
@@ -45,9 +46,6 @@ pub async fn execute_skill(
     service
         .execute_skill(&skill_id, request)
         .await
+        .inspect_err(|e| tracing::error!("执行技能失败: {}", e))
         .map(Json)
-        .map_err(|e| {
-            tracing::error!("执行技能失败: {}", e);
-            ApiError::Internal(format!("执行技能失败: {}", e))
-        })
 }

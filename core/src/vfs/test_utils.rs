@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use tempfile::tempdir;
 
-use crate::common::types::TianyanUri;
 use crate::config::StorageConfig;
 use crate::vfs::backend::LocalFileBackend;
 use crate::vfs::types::{VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType};
@@ -55,21 +54,16 @@ impl VectorStorage for MockVectorStorage {
         Ok(None)
     }
 
-    async fn update_vector(
+    async fn search_fused(
         &self,
-        _uri: &TianyanUri,
-        _vector_type: VectorType,
-        _vector: &[f32],
-    ) -> crate::common::error::Result<()> {
-        Ok(())
-    }
-
-    async fn count_points(&self) -> crate::common::error::Result<usize> {
-        Ok(0)
-    }
-
-    async fn clear(&self) -> crate::common::error::Result<()> {
-        Ok(())
+        _query_vector: Vec<f32>,
+        _vector_types: &[VectorType],
+        _top_k: usize,
+        _category_filter: Option<&str>,
+        _min_score: Option<f32>,
+    ) -> crate::common::error::Result<Vec<VectorSearchResult>> {
+        // Mock 不存储任何向量点，融合搜索与单列 search() 一样恒为空。
+        Ok(vec![])
     }
 }
 

@@ -13,7 +13,7 @@ use crate::common::error::TianyanError;
 use crate::config::TianyanConfig;
 use crate::memory::MemoryExtractor;
 use crate::scheduler::TaskStateStore;
-use crate::vfs::{SummaryEngine, VirtualFileSystem};
+use crate::vfs::{SummaryService, VirtualFileSystem};
 
 /// 任务优先级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize)]
@@ -67,8 +67,8 @@ impl TaskResult {
 pub struct TaskContext {
     /// 虚拟文件系统。
     pub vfs: Arc<dyn VirtualFileSystem>,
-    /// 摘要引擎。
-    pub summary_engine: Arc<SummaryEngine>,
+    /// 摘要服务（`Arc<dyn SummaryService>`——测试可注入 MockSummaryEngine）。
+    pub summary_engine: Arc<dyn SummaryService>,
     /// 记忆提取器。
     pub memory_extractor: Arc<MemoryExtractor>,
     /// 配置。
@@ -81,7 +81,7 @@ impl TaskContext {
     /// 创建新的任务上下文。
     pub fn new(
         vfs: Arc<dyn VirtualFileSystem>,
-        summary_engine: Arc<SummaryEngine>,
+        summary_engine: Arc<dyn SummaryService>,
         memory_extractor: Arc<MemoryExtractor>,
         config: Arc<TianyanConfig>,
     ) -> Self {

@@ -86,21 +86,9 @@ impl ChatCompletionRequest {
         self
     }
 
-    /// 设置核采样参数。
-    pub fn with_top_p(mut self, top_p: f32) -> Self {
-        self.top_p = Some(top_p);
-        self
-    }
-
     /// 设置流式输出。
     pub fn with_stream(mut self, stream: bool) -> Self {
         self.stream = Some(stream);
-        self
-    }
-
-    /// 设置停止序列。
-    pub fn with_stop(mut self, stop: Vec<String>) -> Self {
-        self.stop = Some(stop);
         self
     }
 

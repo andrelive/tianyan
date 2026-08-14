@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use crate::common::binary::sniff_binary;
 use crate::common::error::TianyanError;
 
 pub use crate::executor::command::execute_command_action;
@@ -49,7 +50,7 @@ pub async fn execute_read_file(
 /// 将 io 错误映射为执行错误；文件不存在时附带父目录中相似文件名的建议（最多 3 个）。
 fn not_found_error(path: &str, e: std::io::Error) -> TianyanError {
     if e.kind() == std::io::ErrorKind::NotFound {
-        TianyanError::Custom(format!(
+        TianyanError::not_found(format!(
             "executor: 文件不存在：{path}{}",
             suggest_similar_paths(Path::new(path))
         ))
@@ -82,20 +83,6 @@ fn suggest_similar_paths(path: &Path) -> String {
     } else {
         format!("，您是否想找：{}", similar.join("，"))
     }
-}
-
-/// 二进制嗅探：含 NUL 字节，或超过 30% 字节为不可打印控制字符（排除 `\n` `\r` `\t`）。
-fn sniff_binary(bytes: &[u8]) -> bool {
-    let mut non_printable = 0usize;
-    for &b in bytes {
-        if b == 0 {
-            return true;
-        }
-        if (b < 0x20 || b == 0x7f) && b != b'\n' && b != b'\r' && b != b'\t' {
-            non_printable += 1;
-        }
-    }
-    !bytes.is_empty() && non_printable * 100 > bytes.len() * 30
 }
 
 /// 二进制文件结果：仅返回大小与前 200 字节的 lossy 预览。

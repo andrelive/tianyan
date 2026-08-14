@@ -22,8 +22,3 @@ impl NotificationSink for NoopNotificationSink {
 
 /// 便捷类型别名。
 pub type SharedNotificationSink = Arc<dyn NotificationSink>;
-
-/// 全局空通道（默认值）。
-pub fn noop_sink() -> SharedNotificationSink {
-    Arc::new(NoopNotificationSink)
-}

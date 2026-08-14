@@ -3,10 +3,7 @@
 //! 定时评估记忆与规则：命中"当前值得告知用户"的内容时，经
 //! [`NotificationSink`] 推送系统通知，并可注入最新会话（ADR-013 消息通路）。
 //! 评估失败静默（下一次调度自然重试，不重试、不堆积）。
-use crate::common::types::{
-    ContentLevel, ContextNamespace, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
-    TianyanUri,
-};
+use crate::common::types::{ContentLevel, ContextNamespace, StructuredMessage, TianyanUri};
 use crate::model::ChatService;
 use crate::notification::SharedNotificationSink;
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
@@ -144,26 +141,8 @@ impl ReminderTask {
         let Some(latest) = sessions.into_iter().max_by_key(|s| s.created_at) else {
             return;
         };
-        let now = chrono::Utc::now().timestamp_millis();
-        let sm = StructuredMessage {
-            id: format!("msg_{now}"),
-            parent_id: None,
-            role: MessageRole::System,
-            parts: vec![Part::Text {
-                text: format!("[主动提醒]\n{}", text),
-                time: PartTime::default(),
-            }],
-            tokens: crate::common::types::DetailedTokenUsage::default(),
-            cost: 0.0,
-            model_id: None,
-            time: MessageTime {
-                created: now,
-                completed: now,
-            },
-            session_id: latest.session_id.clone(),
-            finish: None,
-            compression_marker: false,
-        };
+        let sm =
+            StructuredMessage::system(latest.session_id.clone(), format!("[主动提醒]\n{}", text));
         if let Err(e) = self
             .session_manager
             .add_structured_message(&latest.session_id, sm)
@@ -214,7 +193,7 @@ impl TaskHandler for ReminderTask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::Message;
+    use crate::common::types::{Message, MessageRole, Part};
     use crate::memory::MemoryExtractor;
     use crate::model::MockChatService;
     use crate::session::Session;
@@ -245,13 +224,6 @@ mod tests {
             assert_eq!(msg.role, MessageRole::System, "提醒应为 System 消息");
             assert!(msg.parts.iter().any(|p| matches!(p, Part::Text { .. })));
             self.injected.fetch_add(1, AtomicOrdering::SeqCst);
-            Ok(())
-        }
-        async fn add_message(
-            &self,
-            _id: &str,
-            _m: Message,
-        ) -> Result<(), crate::common::error::TianyanError> {
             Ok(())
         }
         async fn rewrite_messages(

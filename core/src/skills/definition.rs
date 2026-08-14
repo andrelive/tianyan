@@ -98,39 +98,15 @@ impl Skill {
         self
     }
 
-    /// 设置必需参数。
-    pub fn with_required_parameters(mut self, params: Vec<String>) -> Self {
-        self.required_parameters = params;
-        self
-    }
-
-    /// 添加示例。
-    pub fn with_example(mut self, example: SkillExample) -> Self {
-        self.examples.push(example);
-        self
-    }
-
     /// 设置安全级别。
     pub fn with_security_level(mut self, level: SecurityLevel) -> Self {
         self.security_level = level;
         self
     }
 
-    /// 设置版本。
-    pub fn with_version(mut self, version: impl Into<String>) -> Self {
-        self.version = version.into();
-        self
-    }
-
     /// 添加标签。
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into());
-        self
-    }
-
-    /// 设置描述嵌入向量。
-    pub fn with_embedding(mut self, embedding: Embedding) -> Self {
-        self.description_embedding = Some(embedding);
         self
     }
 
@@ -277,12 +253,6 @@ impl ParameterDefinition {
         self
     }
 
-    /// 设置枚举值。
-    pub fn with_enum_values(mut self, values: Vec<Value>) -> Self {
-        self.enum_values = values;
-        self
-    }
-
     /// 设置最小值（用于数字）。
     pub fn with_minimum(mut self, min: f64) -> Self {
         self.minimum = Some(min);
@@ -304,12 +274,6 @@ impl ParameterDefinition {
     /// 设置最大长度（用于字符串）。
     pub fn with_max_length(mut self, max: usize) -> Self {
         self.max_length = Some(max);
-        self
-    }
-
-    /// 设置模式（用于字符串）。
-    pub fn with_pattern(mut self, pattern: impl Into<String>) -> Self {
-        self.pattern = Some(pattern.into());
         self
     }
 
@@ -452,12 +416,6 @@ impl SkillRegistry {
         let skill_id = skill.id.clone();
         self.skills.entry(skill_id.clone()).or_insert(skill);
         self.handlers.insert(skill_id, handler);
-    }
-
-    /// 注销技能。
-    pub fn unregister(&mut self, skill_id: &str) {
-        self.skills.remove(skill_id);
-        self.handlers.remove(skill_id);
     }
 
     /// 根据 ID 获取技能。

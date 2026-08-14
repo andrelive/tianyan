@@ -24,14 +24,10 @@ pub enum ApiError {
     Internal(String),
     /// 配置错误
     Config(String),
-    /// Agent 相关错误
-    Agent(String),
     /// 认证失败
     Unauthorized(String),
     /// 权限不足或操作不允许
     Forbidden(String),
-    /// 请求体过大
-    PayloadTooLarge(String),
     /// 网关超时
     GatewayTimeout(String),
     /// 内容冲突（文件已被外部修改、锚点/补丁定位不匹配）
@@ -45,10 +41,8 @@ impl fmt::Display for ApiError {
             ApiError::BadRequest(msg) => write!(f, "请求错误：{}", msg),
             ApiError::Internal(msg) => write!(f, "内部错误：{}", msg),
             ApiError::Config(msg) => write!(f, "配置错误：{}", msg),
-            ApiError::Agent(msg) => write!(f, "Agent 错误：{}", msg),
             ApiError::Unauthorized(msg) => write!(f, "认证失败：{}", msg),
             ApiError::Forbidden(msg) => write!(f, "禁止访问：{}", msg),
-            ApiError::PayloadTooLarge(msg) => write!(f, "请求体过大：{}", msg),
             ApiError::GatewayTimeout(msg) => write!(f, "网关超时：{}", msg),
             ApiError::Conflict(msg) => write!(f, "冲突：{}", msg),
         }
@@ -64,10 +58,8 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             ApiError::Config(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            ApiError::Agent(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
-            ApiError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
             ApiError::GatewayTimeout(msg) => (StatusCode::GATEWAY_TIMEOUT, msg.clone()),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
         };
@@ -88,25 +80,31 @@ impl From<TianyanError> for ApiError {
         if err.is_not_found() {
             return ApiError::NotFound(err.to_string());
         }
+        // 冲突（语义编辑锚点/旧内容/补丁定位不匹配）→ 409
+        if err.is_conflict() {
+            return ApiError::Conflict(err.to_string());
+        }
+        // 无效输入 → 400
+        if err.is_invalid_input() {
+            return ApiError::BadRequest(err.to_string());
+        }
+        // 权限拒绝 → 403
+        if err.is_permission() {
+            return ApiError::Forbidden(err.to_string());
+        }
+        // 超时 → 504
+        if err.is_timeout() {
+            return ApiError::GatewayTimeout(err.to_string());
+        }
         match err {
             TianyanError::Io(e) => ApiError::Internal(format!("IO 错误：{}", e)),
             TianyanError::Json(e) => ApiError::BadRequest(format!("JSON 解析错误：{}", e)),
             TianyanError::Toml(e) => ApiError::BadRequest(format!("TOML 解析错误：{}", e)),
             TianyanError::Custom(msg) => {
+                // 配置错误（core 侧 From<config::ConfigError> 统一前缀）→ 400；
+                // 其余语义在谓词链已分类，此处仅剩默认 Internal（ADR-014）
                 if msg.starts_with("配置错误：") {
                     ApiError::Config(msg)
-                } else if msg.starts_with("未找到结果：") || msg.starts_with("模型未找到：")
-                {
-                    ApiError::NotFound(msg)
-                } else if msg.starts_with("认证失败：") {
-                    ApiError::Unauthorized(msg)
-                } else if msg.starts_with("操作不被允许：") || msg.starts_with("安全错误：")
-                {
-                    ApiError::Forbidden(msg)
-                } else if msg.starts_with("操作超时：") {
-                    ApiError::GatewayTimeout(msg)
-                } else if msg.starts_with("无效路径：") || msg.starts_with("无效 URI:") {
-                    ApiError::BadRequest(msg)
                 } else {
                     ApiError::Internal(msg)
                 }
@@ -201,6 +199,45 @@ mod tests {
         let internal = ApiError::Internal("内部错误".to_string());
         let (status, _) = error_to_parts(internal);
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// 回归测试：已删除的死前缀 fallback 分支——"未找到结果：" 此前经冗余
+    /// 字符串匹配映射 404，但工作区内无任何生产者（语义化分类唯一入口为
+    /// TianyanError 构造器 + 谓词，ADR-014），删除后归为默认 Internal。
+    #[test]
+    fn test_removed_prefix_falls_to_internal() {
+        let api_err: ApiError =
+            TianyanError::Custom("未找到结果：tianyan://memory/abc".to_string()).into();
+        match api_err {
+            ApiError::Internal(msg) => assert!(msg.contains("未找到结果")),
+            other => panic!("预期 Internal，实际为：{other}"),
+        }
+    }
+
+    /// 语义谓词（ADR-014）映射不因死前缀清理而改变：not_found → 404、
+    /// conflict → 409、invalid_input → 400、permission → 403、timeout → 504。
+    #[test]
+    fn test_semantic_predicates_map_to_status_codes() {
+        let cases: [(TianyanError, StatusCode); 5] = [
+            (TianyanError::not_found("会话"), StatusCode::NOT_FOUND),
+            (TianyanError::conflict("锚点未命中"), StatusCode::CONFLICT),
+            (
+                TianyanError::invalid_input("缺少参数"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                TianyanError::permission("路径被阻止"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                TianyanError::timeout("LLM 调用超时"),
+                StatusCode::GATEWAY_TIMEOUT,
+            ),
+        ];
+        for (err, expected) in cases {
+            let (status, _) = error_to_parts(ApiError::from(err));
+            assert_eq!(status, expected, "语义错误应映射为 {expected}");
+        }
     }
 
     fn error_to_parts(err: ApiError) -> (StatusCode, String) {

@@ -19,11 +19,8 @@ use futures::TryStreamExt;
 use lancedb::query::ExecutableQuery;
 
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{EntryMetadata, TianyanUri};
 use crate::config::StorageConfig;
-use crate::vfs::types::{
-    VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType, CURRENT_SCHEMA_VERSION,
-};
+use crate::vfs::types::{VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType};
 use crate::vfs::vector::VectorStorage;
 
 /// LanceDB 向量存储实现。
@@ -254,45 +251,6 @@ impl VectorStorage for LanceDbVectorStore {
             }
         }
         Ok(None)
-    }
-
-    async fn update_vector(
-        &self,
-        uri: &TianyanUri,
-        vector_type: VectorType,
-        vector: &[f32],
-    ) -> Result<()> {
-        let id = uri.to_point_id();
-        let existing = self.get_point(&id).await?;
-        let mut point = existing.unwrap_or_else(|| VectorPoint {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            id: id.clone(),
-            abstract_vector: None,
-            overview_vector: None,
-            visual_vector: None,
-            payload: EntryMetadata::new(uri.clone(), "unknown"),
-        });
-        match vector_type {
-            VectorType::Abstract => point.abstract_vector = Some(vector.to_vec()),
-            VectorType::Overview => point.overview_vector = Some(vector.to_vec()),
-            VectorType::Visual => point.visual_vector = Some(vector.to_vec()),
-        }
-        self.upsert_point(&point).await
-    }
-
-    async fn count_points(&self) -> Result<usize> {
-        self.table
-            .count_rows(None)
-            .await
-            .map_err(|e| TianyanError::Custom(format!("向量数据库错误：计数失败: {e}")))
-    }
-
-    async fn clear(&self) -> Result<()> {
-        self.table
-            .delete("true")
-            .await
-            .map_err(|e| TianyanError::Custom(format!("向量数据库错误：清空失败: {e}")))?;
-        Ok(())
     }
 
     async fn search_fused(

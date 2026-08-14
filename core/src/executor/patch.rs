@@ -385,7 +385,7 @@ fn apply_hunks(
                 Some(name) => format!("无法定位补丁块（文件 {name}，块 {}）", idx + 1),
                 None => format!("无法定位补丁块（块 {}）", idx + 1),
             };
-            return Err(TianyanError::Custom(format!(
+            return Err(TianyanError::conflict(format!(
                 "executor: apply_patch: {detail}"
             )));
         };
@@ -399,7 +399,7 @@ fn apply_hunks(
     for &i in &order {
         let (s, e, _) = located[i];
         if applied.iter().any(|&(as_, ae)| s < ae && as_ < e) {
-            return Err(TianyanError::Custom(format!(
+            return Err(TianyanError::conflict(format!(
                 "executor: apply_patch: 补丁块重叠：块 {}",
                 i + 1
             )));
@@ -466,12 +466,12 @@ fn resolve_patch_path(patch_path: &str, base_dir: &Path) -> Result<PathBuf> {
     if p.components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
     {
-        return Err(TianyanError::Custom(format!(
+        return Err(TianyanError::invalid_input(format!(
             "executor: apply_patch: 非法路径: {patch_path}"
         )));
     }
     if p.is_absolute() {
-        return Err(TianyanError::Custom(format!(
+        return Err(TianyanError::invalid_input(format!(
             "executor: apply_patch: 不支持绝对路径：{patch_path}"
         )));
     }
@@ -525,7 +525,7 @@ pub async fn apply_patch_action(patch_text: &str, base_dir: &Path) -> Result<Val
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if needs_existing {
-                    return Err(TianyanError::Custom(format!(
+                    return Err(TianyanError::not_found(format!(
                         "executor: apply_patch: 文件不存在: {}",
                         pf.path
                     )));

@@ -11,7 +11,7 @@ use crate::common::types::{
 use crate::model::EmbeddingService;
 use crate::vfs::backend::StorageBackend;
 use crate::vfs::traits::{ContentMetadata, ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
-use crate::vfs::types::{ContextEntry, VectorPoint, VectorSearchQuery, VectorType};
+use crate::vfs::types::{ContextEntry, VectorPoint};
 use crate::vfs::vector::VectorStorage;
 
 use crate::config::StorageConfig;
@@ -232,6 +232,18 @@ impl VfsCore for VirtualFileSystemImpl {
     }
 
     async fn move_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()> {
+        // 子条目守卫：move 仅迁移顶层条目，不支持移动目录。
+        // 复用 delete 的子 URI 收集模式（collect_uris_recursive）的底层原语
+        // list_directory 直接探测一级子条目——LocalFileBackend 下文件与目录同为
+        // 磁盘目录（is_directory 不可靠），collect_all_uris 对含子条目的目录
+        // 会返回空集，无法作为子条目探测器。存在子条目即拒绝，避免子条目被
+        // 静默孤儿化（delete_entry 在两种后端下均为递归删除，但 move 只拷贝顶层条目）。
+        if !self.storage.list_directory(source).await?.is_empty() {
+            return Err(TianyanError::conflict(
+                "vfs: move_entry: 源条目含子条目，暂不支持移动目录",
+            ));
+        }
+
         for level in &[
             ContentLevel::Abstract,
             ContentLevel::Overview,
@@ -249,13 +261,30 @@ impl VfsCore for VirtualFileSystemImpl {
         dst_entry.metadata.touch();
         self.storage.write_entry(&dst_entry).await?;
         self.storage.delete_entry(source).await?;
-        // 清理源向量
+        // 迁移向量点：克隆源点（保留 abstract/overview/visual 向量与 payload 元数据），
+        // 强制 id = destination.to_point_id()——LanceDB 以 id 为主键 merge_insert，
+        // 所有读写路径均按 to_point_id() 定位；VectorPoint::from_entry 会置空全部向量
+        // 且 id 取 URI 字符串，导致目标点双重孤儿化，故不能直接使用。
         let src_point_id = source.to_point_id();
+        let dst_point = match self.vector_storage.get_point(&src_point_id).await {
+            Ok(Some(mut point)) => {
+                point.id = destination.to_point_id();
+                point.payload.uri = destination.clone();
+                point.payload.touch();
+                point
+            }
+            // 源点缺失（从未索引）：回退为 from_entry 重建，仍强制目标点 ID。
+            _ => {
+                let mut point = self.create_vector_point(&dst_entry);
+                point.id = destination.to_point_id();
+                point
+            }
+        };
+        // 清理源向量
         if let Err(e) = self.vector_storage.delete_point(&src_point_id).await {
             tracing::warn!(error = %e, source = %source, "清理源向量点失败");
         }
-        // 为目标创建向量点（使用 dst_entry 的 metadata 重建）
-        let dst_point = self.create_vector_point(&dst_entry);
+        // 写入目标向量点
         if let Err(e) = self.vector_storage.upsert_point(&dst_point).await {
             tracing::warn!(error = %e, destination = %destination, "创建目标向量点失败");
         }
@@ -387,29 +416,6 @@ impl VfsSearch for VirtualFileSystemImpl {
             .collect();
 
         results.truncate(limit);
-        Ok(results)
-    }
-
-    async fn search_by_visual(
-        &self,
-        visual_vector: &[f32],
-        top_k: usize,
-    ) -> Result<Vec<SearchResult>> {
-        let query = VectorSearchQuery {
-            vector: visual_vector.to_vec(),
-            vector_type: VectorType::Visual,
-            limit: top_k,
-            category_filter: None,
-            min_score: None,
-        };
-        let results = self.vector_storage.search(query).await?;
-        let results: Vec<SearchResult> = results
-            .into_iter()
-            .map(|vsr| SearchResult {
-                uri: vsr.payload.uri.clone(),
-                score: vsr.score,
-            })
-            .collect();
         Ok(results)
     }
 

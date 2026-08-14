@@ -17,15 +17,13 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use lsp_types::notification::{
-    DidOpenTextDocument, Initialized, Notification as LspNotification,
-    PublishDiagnostics,
+    DidOpenTextDocument, Initialized, Notification as LspNotification, PublishDiagnostics,
 };
 use lsp_types::request::{GotoImplementationParams, Request as LspRequest};
 use lsp_types::{
-    DidOpenTextDocumentParams, DocumentSymbolParams,
-    GotoDefinitionParams, HoverParams, InitializeParams, InitializedParams, Position,
-    PublishDiagnosticsParams, ReferenceContext, ReferenceParams,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
+    DidOpenTextDocumentParams, DocumentSymbolParams, GotoDefinitionParams, HoverParams,
+    InitializeParams, InitializedParams, Position, PublishDiagnosticsParams, ReferenceContext,
+    ReferenceParams, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
     WorkspaceFolder, WorkspaceSymbolParams,
 };
 use serde_json::{json, Value};
@@ -214,7 +212,11 @@ impl LspClient {
             }
             Err(_) => {
                 self.pending.remove(&id);
-                Err(unavailable(&self.name, "请求超时", &self.auto_install_hint))
+                // 超时语义化（ADR-014）：timeout 构造器使 is_timeout() 谓词可命中
+                Err(TianyanError::timeout(format!(
+                    "executor: lsp: 服务器 {} 不可用：请求超时，安装提示：{}",
+                    self.name, self.auto_install_hint
+                )))
             }
         }
     }

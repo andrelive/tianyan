@@ -262,10 +262,6 @@ impl VfsSearch for MockVfs {
         }
     }
 
-    async fn search_by_visual(&self, _v: &[f32], _k: usize) -> Result<Vec<SearchResult>> {
-        Ok(vec![])
-    }
-
     async fn update_summary_vectors(&self, _u: &TianyanUri, _a: &str, _o: &str) -> Result<()> {
         Ok(())
     }
@@ -452,38 +448,42 @@ impl VectorStorage for InMemoryVectorStorage {
         Ok(self.points.read().await.get(id).cloned())
     }
 
-    async fn update_vector(
+    async fn search_fused(
         &self,
-        uri: &TianyanUri,
-        vector_type: VectorType,
-        vector: &[f32],
-    ) -> Result<()> {
-        let id = uri.to_point_id();
-        let mut guard = self.points.write().await;
-        let mut point = guard.get(&id).cloned().unwrap_or_else(|| VectorPoint {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            id: id.clone(),
-            abstract_vector: None,
-            overview_vector: None,
-            visual_vector: None,
-            payload: EntryMetadata::new(uri.clone(), "unknown"),
-        });
-        match vector_type {
-            VectorType::Abstract => point.abstract_vector = Some(vector.to_vec()),
-            VectorType::Overview => point.overview_vector = Some(vector.to_vec()),
-            VectorType::Visual => point.visual_vector = Some(vector.to_vec()),
+        query_vector: Vec<f32>,
+        vector_types: &[VectorType],
+        top_k: usize,
+        category_filter: Option<&str>,
+        min_score: Option<f32>,
+    ) -> Result<Vec<VectorSearchResult>> {
+        // 基本融合：逐列搜索，按点去重（保留最高分），按分数降序截断。
+        let mut fused: Vec<VectorSearchResult> = Vec::new();
+        for &vector_type in vector_types {
+            let query = VectorSearchQuery {
+                vector: query_vector.clone(),
+                vector_type,
+                limit: top_k,
+                category_filter: category_filter.map(ToString::to_string),
+                min_score,
+            };
+            for result in self.search(query).await? {
+                match fused.iter_mut().find(|r| r.id == result.id) {
+                    Some(existing) if result.score > existing.score => {
+                        existing.score = result.score;
+                        existing.payload = result.payload;
+                    }
+                    Some(_) => {}
+                    None => fused.push(result),
+                }
+            }
         }
-        guard.insert(id, point);
-        Ok(())
-    }
-
-    async fn count_points(&self) -> Result<usize> {
-        Ok(self.points.read().await.len())
-    }
-
-    async fn clear(&self) -> Result<()> {
-        self.points.write().await.clear();
-        Ok(())
+        fused.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        fused.truncate(top_k);
+        Ok(fused)
     }
 }
 
@@ -612,10 +612,6 @@ impl VfsSearch for TestVfs {
             .collect())
     }
 
-    async fn search_by_visual(&self, _v: &[f32], _k: usize) -> Result<Vec<SearchResult>> {
-        Ok(vec![])
-    }
-
     async fn update_summary_vectors(
         &self,
         _uri: &TianyanUri,
@@ -640,4 +636,44 @@ pub async fn create_test_retriever() -> DualLayerRetriever {
         Arc::new(TestVfs::new(vector_storage, Arc::new(MockEmbeddingService)));
 
     DualLayerRetriever::new(vfs)
+}
+
+// ── search_fused 行为锁定 ────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `search_fused` 必须返回真实融合结果（不再静默返回空——见 VectorStorage trait）。
+    #[tokio::test]
+    async fn search_fused_returns_fused_results() {
+        let store = InMemoryVectorStorage::new();
+        store.initialize().await.unwrap();
+
+        let uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["fused".to_string()]);
+        let point = VectorPoint {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            id: uri.to_point_id(),
+            abstract_vector: Some(vec![1.0, 0.0, 0.0]),
+            overview_vector: Some(vec![0.8, 0.2, 0.0]),
+            visual_vector: None,
+            payload: EntryMetadata::new(uri, "test"),
+        };
+        store.upsert_point(&point).await.unwrap();
+
+        let results = store
+            .search_fused(
+                vec![1.0, 0.0, 0.0],
+                &[VectorType::Abstract, VectorType::Overview],
+                10,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(!results.is_empty(), "融合搜索应返回非空结果");
+        assert_eq!(results[0].id, point.id);
+        assert!(results[0].score > 0.5);
+    }
 }

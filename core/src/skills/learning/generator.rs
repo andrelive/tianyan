@@ -1,4 +1,5 @@
 use crate::common::error::Result;
+use crate::common::llm_judge::parse_llm_json;
 
 use super::types::{ExecutionHistory, GeneratedSkill, SkillParameter};
 
@@ -65,15 +66,8 @@ pub fn parse_generated_skill(
     task_type: &str,
     executions: &[&ExecutionHistory],
 ) -> Result<GeneratedSkill> {
-    let cleaned = response
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-
-    let json: serde_json::Value = serde_json::from_str(cleaned).map_err(|e| {
-        crate::common::error::TianyanError::Custom(format!("内部错误：解析生成的技能失败: {}", e))
+    let json: serde_json::Value = parse_llm_json(response).ok_or_else(|| {
+        crate::common::error::TianyanError::Custom("内部错误：解析生成的技能失败".to_string())
     })?;
 
     let id = json

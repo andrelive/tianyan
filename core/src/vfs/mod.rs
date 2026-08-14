@@ -45,7 +45,9 @@ mod test_utils;
 pub use backend::{LocalFileBackend, SqliteBackend, StorageBackend};
 #[cfg(test)]
 pub use summary::MockSummaryEngine;
-pub use summary::{SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT};
+pub use summary::{
+    SummaryEngine, SummaryLevel, SummaryService, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
+};
 pub use traits::{ContentMetadata, ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
 pub use types::{
     ContextEntry, VectorPoint, VectorSearchQuery, VectorSearchResult, VectorType,

@@ -86,14 +86,6 @@ impl TokenEstimator {
         cn_tokens + en_tokens + other_tokens
     }
 
-    /// 估算代码的 token 数量。
-    ///
-    /// 代码通常比自然语言更密集。
-    pub fn estimate_code(&self, code: &str) -> usize {
-        // 代码通常每 3-4 字符一个 token
-        (code.len() as f32 / 3.5) as usize
-    }
-
     /// 批量估算并返回详细统计。
     pub fn estimate_with_details(&self, messages: &[Message]) -> EstimationDetails {
         let mut total_content_tokens = 0;

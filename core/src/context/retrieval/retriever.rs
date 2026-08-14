@@ -11,7 +11,7 @@ use crate::observability::usage_stats::UsageStats;
 
 use super::types::RetrievalResult;
 use crate::common::error::Result;
-use crate::common::types::{ContentLevel, TianyanUri};
+use crate::common::types::ContentLevel;
 use crate::context::compression::estimate_tokens;
 use crate::vfs::VirtualFileSystem;
 
@@ -38,8 +38,6 @@ pub struct DualLayerRetriever {
     intent_analyzer: IntentAnalyzer,
     /// Memory 命名空间的分数偏置倍数。
     memory_bias: f32,
-    /// 记忆衰减率（每日，0.0-1.0），越旧的记忆偏置越低。
-    memory_decay_rate: f32,
     /// 使用统计追踪器。
     usage_stats: Option<Arc<UsageStats>>,
 }
@@ -51,7 +49,6 @@ impl DualLayerRetriever {
             vfs,
             intent_analyzer: IntentAnalyzer::new(),
             memory_bias: 1.15,
-            memory_decay_rate: 0.01,
             usage_stats: None,
         }
     }
@@ -59,12 +56,6 @@ impl DualLayerRetriever {
     /// 设置 Memory 命名空间的分数偏置倍数。
     pub fn with_memory_bias(mut self, bias: f32) -> Self {
         self.memory_bias = bias;
-        self
-    }
-
-    /// 设置记忆衰减率（每日）。
-    pub fn with_memory_decay_rate(mut self, rate: f32) -> Self {
-        self.memory_decay_rate = rate;
         self
     }
 
@@ -138,18 +129,6 @@ impl DualLayerRetriever {
         );
 
         Ok(results)
-    }
-
-    /// 使用预计算的意图进行检索。
-    pub async fn retrieve_with_intent(
-        &self,
-        intent: &Intent,
-        top_k: usize,
-    ) -> Result<Vec<RetrievalResult>> {
-        let results = self
-            .fused_search(&intent.original_query, top_k, intent)
-            .await?;
-        self.load_content_for_results(results).await
     }
 
     /// 分析查询意图，失败时返回默认意图（无 namespace 过滤的 Search 类型）。
@@ -237,34 +216,6 @@ impl DualLayerRetriever {
         }
 
         Ok(loaded_results)
-    }
-
-    /// 加载特定 URI 的内容。
-    pub async fn load_content(&self, uri: &TianyanUri) -> Result<String> {
-        self.vfs.read(uri, ContentLevel::Overview).await
-    }
-
-    /// 加载特定层级的内容。
-    pub async fn load_content_at_level(
-        &self,
-        uri: &TianyanUri,
-        level: ContentLevel,
-    ) -> Result<String> {
-        self.vfs.read(uri, level).await
-    }
-
-    /// 通过视觉嵌入搜索（用于图像相似性搜索）。
-    pub async fn search_by_visual(
-        &self,
-        visual_vector: &[f32],
-        top_k: usize,
-    ) -> Result<Vec<RetrievalResult>> {
-        let results = self.vfs.search_by_visual(visual_vector, top_k).await?;
-        let results: Vec<RetrievalResult> = results
-            .into_iter()
-            .map(|sr| RetrievalResult::new(sr.uri, sr.score))
-            .collect();
-        self.load_content_for_results(results).await
     }
 
     /// 使用命名空间过滤器检索内容。

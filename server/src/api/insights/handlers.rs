@@ -167,14 +167,8 @@ pub async fn respond_approval_handler(
             request.edited_command,
         )
         .await
-        .map_err(|e| {
-            // core 侧固定错误消息（approval.rs respond_to_approval），
-            // 匹配以映射 404 语义；其余错误归 500
-            if e.to_string().contains("审批请求不存在或已超时") {
-                ApiError::NotFound(e.to_string())
-            } else {
-                ApiError::Internal(format!("审批响应失败：{e}"))
-            }
-        })?;
+        // ? 传播：From<TianyanError> 语义谓词映射（not_found → 404 等，ADR-014），
+        // 不在此处重实现分类
+        ?;
     Ok(Json(json!({ "ok": true })))
 }

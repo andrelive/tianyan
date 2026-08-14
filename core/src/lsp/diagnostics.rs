@@ -25,6 +25,16 @@ use crate::executor::verification::StructuredDiagnostic;
 use super::client::{LspClient, PublishDiagnosticsCallback};
 use super::registry::{probe_project_root, spec_for_extension};
 
+/// LSP 查询支持的操作集合（单一来源：工具层校验与 `query` 分发共用）。
+pub(crate) const LSP_OPERATIONS: &[&str] = &[
+    "goToDefinition",
+    "findReferences",
+    "hover",
+    "documentSymbol",
+    "workspaceSymbol",
+    "goToImplementation",
+];
+
 /// LSP 管理器：服务池 + 推送诊断存储。
 pub struct LspManager {
     /// 推送诊断存储：绝对路径 → 结构化诊断列表。

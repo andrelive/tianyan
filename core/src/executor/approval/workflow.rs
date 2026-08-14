@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, RwLock};
 
 use super::types::*;
-use crate::common::types::{MessageRole, Part, PartTime, StructuredMessage};
+use crate::common::types::StructuredMessage;
 use crate::executor::Action;
 use crate::notification::SharedNotificationSink;
 use crate::session::SessionManager;
@@ -63,23 +63,10 @@ pub fn build_approval_pending_text(request: &ApprovalRequest) -> String {
 #[async_trait::async_trait]
 impl ApprovalPendingNotifier for SessionApprovalNotifier {
     async fn on_approval_pending(&self, request: &ApprovalRequest) {
-        let now = chrono::Utc::now().timestamp_millis();
-        let sm = StructuredMessage {
-            id: format!("msg_{now}"),
-            parent_id: None,
-            role: MessageRole::System,
-            parts: vec![Part::Text {
-                text: build_approval_pending_text(request),
-                time: PartTime::default(),
-            }],
-            tokens: Default::default(),
-            cost: 0.0,
-            model_id: None,
-            time: Default::default(),
-            session_id: request.session_id.clone(),
-            finish: None,
-            compression_marker: false,
-        };
+        let sm = StructuredMessage::system(
+            request.session_id.clone(),
+            build_approval_pending_text(request),
+        );
         if let Err(e) = self
             .session_manager
             .add_structured_message(&request.session_id, sm)
@@ -519,8 +506,8 @@ impl ApprovalWorkflow {
             }
             Ok(())
         } else {
-            Err(crate::common::error::TianyanError::Custom(
-                "内部错误：审批请求不存在或已超时".to_string(),
+            Err(crate::common::error::TianyanError::not_found(
+                "审批请求不存在或已超时",
             ))
         }
     }

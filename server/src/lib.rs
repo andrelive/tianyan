@@ -25,7 +25,6 @@ use crate::api::events::processor as event_processor;
 // Import API module
 pub mod agent_builder;
 pub mod api;
-pub mod core_bridge;
 pub mod mcp_bridge;
 pub mod notification;
 pub mod state;
@@ -90,7 +89,7 @@ async fn health_check() -> Json<HealthResponse> {
 
 /// Get the static files directory path
 ///
-/// This function tries to find the gui/dist directory from various possible locations
+/// This function tries to find the gui-vite/dist directory from various possible locations
 fn get_static_dir() -> std::path::PathBuf {
     // Try to find the project root by looking for Cargo.toml
     let current_dir = std::env::current_dir().unwrap_or_default();
@@ -98,10 +97,14 @@ fn get_static_dir() -> std::path::PathBuf {
     // Check if we're running from target/release or target/debug
     let possible_paths = [
         // From target/release or target/debug - go up 3 levels to project root
-        current_dir.join("../../..").join("gui/dist"),
+        current_dir.join("../../..").join("gui-vite/dist"),
         // Direct from project root
-        current_dir.join("gui/dist"),
+        current_dir.join("gui-vite/dist"),
         // From tauri directory
+        current_dir.join("../gui-vite/dist"),
+        // Legacy gui/dist layouts (kept for backward compatibility)
+        current_dir.join("../../..").join("gui/dist"),
+        current_dir.join("gui/dist"),
         current_dir.join("../gui/dist"),
     ];
 
@@ -277,7 +280,7 @@ pub async fn create_app(
     // Create API router
     let api_router = create_api_router(state.clone());
 
-    // Serve static files from gui/dist directory
+    // Serve static files (gui-vite/dist preferred, legacy gui/dist fallback)
     let static_dir = get_static_dir();
     info!("Serving static files from: {}", static_dir.display());
 

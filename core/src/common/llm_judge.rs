@@ -5,6 +5,20 @@
 //! （eval/judge.rs、executor/judge.rs、agent/background.rs、executor/web.rs），
 //! 统一收敛于此——共享基础设施归属被依赖方（ADR-007 先例）。
 
+/// 剥离 LLM 输出的代码围栏并解析为 JSON 值。
+///
+/// 兼容三种形态：```json 围栏、无语言 ``` 围栏、无围栏裸 JSON。
+/// 解析失败返回 `None`（调用方自行决定降级策略，如告警、空结果或默认值）。
+pub fn parse_llm_json(response: &str) -> Option<serde_json::Value> {
+    let cleaned = response
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    serde_json::from_str(cleaned).ok()
+}
+
 /// 截断长文本以控制 LLM 调用成本（保留头尾）。
 ///
 /// 保留开头（关键信息通常在前）与结尾（摘要/错误统计通常在后），
@@ -43,6 +57,50 @@ pub fn truncate_output(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_llm_json_fenced_with_lang() {
+        let v = parse_llm_json("```json\n{\"a\": 1}\n```").unwrap();
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn test_parse_llm_json_fenced_no_lang() {
+        let v = parse_llm_json("```\n{\"a\": 1}\n```").unwrap();
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn test_parse_llm_json_unfenced() {
+        let v = parse_llm_json("{\"a\": 1}").unwrap();
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn test_parse_llm_json_preamble_returns_none() {
+        // 前置说明文字（非围栏包裹）不属于受支持形态——返回 None 而非静默解析
+        assert!(parse_llm_json("结果如下：{\"a\": 1}").is_none());
+    }
+
+    #[test]
+    fn test_parse_llm_json_invalid_returns_none() {
+        assert!(parse_llm_json("不是 JSON").is_none());
+        assert!(parse_llm_json("").is_none());
+    }
+
+    #[test]
+    fn test_parse_llm_json_whitespace_variants() {
+        // 围栏内外的空白变体
+        let v = parse_llm_json("  ```json  \n  {\"a\": 1}  \n  ```  ").unwrap();
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn test_parse_llm_json_nested_fence_content() {
+        // 围栏内容含 ``` 字符串时仍应正确解析（只剥首尾围栏）
+        let v = parse_llm_json("```json\n{\"code\": \"a ``` b\"}\n```").unwrap();
+        assert_eq!(v["code"], "a ``` b");
+    }
 
     #[test]
     fn test_truncate_short_unchanged() {

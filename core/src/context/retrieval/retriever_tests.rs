@@ -97,59 +97,42 @@ impl VectorStorage for InMemoryVectorStorage {
         Ok(points.get(id).cloned())
     }
 
-    async fn update_vector(
+    async fn search_fused(
         &self,
-        uri: &TianyanUri,
-        vector_type: VectorType,
-        vector: &[f32],
-    ) -> Result<()> {
-        let id = uri.to_string().replace("://", "_").replace('/', "_");
-        let mut points = self.points.write().await;
-
-        if let Some(point) = points.get_mut(&id) {
-            match vector_type {
-                VectorType::Abstract => point.abstract_vector = Some(vector.to_vec()),
-                VectorType::Overview => point.overview_vector = Some(vector.to_vec()),
-                VectorType::Visual => point.visual_vector = Some(vector.to_vec()),
-            }
-        } else {
-            let payload = crate::common::types::EntryMetadata::new(uri.clone(), "unknown");
-
-            let point = VectorPoint {
-                schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
-                id: id.clone(),
-                abstract_vector: if vector_type == VectorType::Abstract {
-                    Some(vector.to_vec())
-                } else {
-                    None
-                },
-                overview_vector: if vector_type == VectorType::Overview {
-                    Some(vector.to_vec())
-                } else {
-                    None
-                },
-                visual_vector: if vector_type == VectorType::Visual {
-                    Some(vector.to_vec())
-                } else {
-                    None
-                },
-                payload,
+        query_vector: Vec<f32>,
+        vector_types: &[VectorType],
+        top_k: usize,
+        category_filter: Option<&str>,
+        min_score: Option<f32>,
+    ) -> Result<Vec<VectorSearchResult>> {
+        // 基本融合：逐列搜索，按点去重（保留最高分），按分数降序截断。
+        let mut fused: Vec<VectorSearchResult> = Vec::new();
+        for &vector_type in vector_types {
+            let query = VectorSearchQuery {
+                vector: query_vector.clone(),
+                vector_type,
+                limit: top_k,
+                category_filter: category_filter.map(ToString::to_string),
+                min_score,
             };
-            points.insert(id, point);
+            for result in self.search(query).await? {
+                match fused.iter_mut().find(|r| r.id == result.id) {
+                    Some(existing) if result.score > existing.score => {
+                        existing.score = result.score;
+                        existing.payload = result.payload;
+                    }
+                    Some(_) => {}
+                    None => fused.push(result),
+                }
+            }
         }
-
-        Ok(())
-    }
-
-    async fn count_points(&self) -> Result<usize> {
-        let points = self.points.read().await;
-        Ok(points.len())
-    }
-
-    async fn clear(&self) -> Result<()> {
-        let mut points = self.points.write().await;
-        points.clear();
-        Ok(())
+        fused.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        fused.truncate(top_k);
+        Ok(fused)
     }
 }
 
@@ -242,28 +225,6 @@ impl VfsSearch for TestVfs {
             min_score: None,
         };
         let results = self.vector_storage.search(query_obj).await?;
-        Ok(results
-            .into_iter()
-            .map(|r| SearchResult {
-                uri: r.payload.uri.clone(),
-                score: r.score,
-            })
-            .collect())
-    }
-
-    async fn search_by_visual(
-        &self,
-        visual_vector: &[f32],
-        top_k: usize,
-    ) -> Result<Vec<SearchResult>> {
-        let query = VectorSearchQuery {
-            vector: visual_vector.to_vec(),
-            vector_type: VectorType::Visual,
-            limit: top_k,
-            category_filter: None,
-            min_score: None,
-        };
-        let results = self.vector_storage.search(query).await?;
         Ok(results
             .into_iter()
             .map(|r| SearchResult {
@@ -437,38 +398,6 @@ async fn test_fused_search_with_category_filter() {
 }
 
 #[tokio::test]
-async fn test_load_content() {
-    let retriever = create_test_retriever().await;
-    let uri = TianyanUri::new(ContextNamespace::User, vec!["test".to_string()]);
-    let content = retriever.load_content(&uri).await.unwrap();
-    assert_eq!(content, "Overview content");
-}
-
-#[tokio::test]
-async fn test_load_content_at_level() {
-    let retriever = create_test_retriever().await;
-    let uri = TianyanUri::new(ContextNamespace::User, vec!["test".to_string()]);
-
-    let abstract_content = retriever
-        .load_content_at_level(&uri, ContentLevel::Abstract)
-        .await
-        .unwrap();
-    assert_eq!(abstract_content, "Abstract content");
-
-    let overview_content = retriever
-        .load_content_at_level(&uri, ContentLevel::Overview)
-        .await
-        .unwrap();
-    assert_eq!(overview_content, "Overview content");
-
-    let detail_content = retriever
-        .load_content_at_level(&uri, ContentLevel::Detail)
-        .await
-        .unwrap();
-    assert_eq!(detail_content, "Detail content");
-}
-
-#[tokio::test]
 async fn test_retrieve_empty_storage() {
     let retriever = create_test_retriever().await;
     let results = retriever.retrieve("test query", 10).await.unwrap();
@@ -501,34 +430,6 @@ async fn test_retrieve_loads_overview_or_detail_for_high_scores() {
         "高相似度结果的内容层级全部为 Abstract，L1/L2 渐进加载失效: {:?}",
         levels
     );
-}
-
-#[tokio::test]
-async fn test_search_by_visual() {
-    let (retriever, vector_storage) = create_test_retriever_with_data().await;
-
-    let uri = TianyanUri::new(
-        ContextNamespace::Knowledge,
-        vec!["images".to_string(), "img_1".to_string()],
-    );
-    let payload = crate::common::types::EntryMetadata::new(uri.clone(), "unknown")
-        .with_category("images")
-        .with_importance(0.8)
-        .with_tags(vec!["image".to_string()]);
-    let point = VectorPoint {
-        schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
-        id: "img_1".to_string(),
-        abstract_vector: Some(vec![0.1; 768]),
-        overview_vector: Some(vec![0.2; 768]),
-        visual_vector: Some(vec![0.5; 512]),
-        payload,
-    };
-    vector_storage.upsert_point(&point).await.unwrap();
-
-    let visual_query = vec![0.5; 512];
-    let results = retriever.search_by_visual(&visual_query, 10).await.unwrap();
-
-    assert!(!results.is_empty());
 }
 
 // ==================== Builder Removed ====================

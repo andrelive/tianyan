@@ -106,7 +106,7 @@ pub fn apply_edits_to_content(content: &str, edits: &[EditSpec]) -> Result<Strin
         let actual_hash = hashline::line_hash(actual_line);
         if let Some(expected) = &edit.anchor {
             if *expected != actual_hash {
-                return Err(TianyanError::Custom(format!(
+                return Err(TianyanError::conflict(format!(
                     "executor: apply_edit: 第{i}处编辑：锚点不匹配 第{}行 期望 {expected} 实际 {actual_hash}，最新锚点为 {}",
                     edit.start_line,
                     hashline::format_line(edit.start_line, &actual_hash, actual_line)
@@ -118,7 +118,7 @@ pub fn apply_edits_to_content(content: &str, edits: &[EditSpec]) -> Result<Strin
                 let line_no = edit.start_line + offset;
                 let actual = &lines[line_no - 1];
                 if hashline::line_hash(actual) != hashline::line_hash(expected_line) {
-                    return Err(TianyanError::Custom(format!(
+                    return Err(TianyanError::conflict(format!(
                         "executor: apply_edit: 第{i}处编辑：旧内容不匹配 第{line_no}行 期望 {} 实际 {actual}",
                         expected_line.trim_end_matches('\r')
                     )));

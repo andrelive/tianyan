@@ -4,4 +4,6 @@ mod engine;
 
 #[cfg(test)]
 pub use engine::MockSummaryEngine;
-pub use engine::{SummaryEngine, SummaryLevel, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT};
+pub use engine::{
+    SummaryEngine, SummaryLevel, SummaryService, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
+};

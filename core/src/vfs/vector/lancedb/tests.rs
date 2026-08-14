@@ -1,6 +1,7 @@
 use super::*;
-use crate::common::types::ContextNamespace;
+use crate::common::types::{ContextNamespace, EntryMetadata, TianyanUri};
 use crate::config::StorageConfig;
+use crate::vfs::CURRENT_SCHEMA_VERSION;
 use tempfile::tempdir;
 /// 创建一个测试用的向量（维度 8）。
 fn test_vec() -> Vec<f32> {
@@ -43,8 +44,7 @@ async fn create_store() -> (LanceDbVectorStore, tempfile::TempDir) {
 
 #[tokio::test]
 async fn test_new_store() {
-    let (store, _dir) = create_store().await;
-    assert_eq!(store.count_points().await.unwrap(), 0);
+    let (_store, _dir) = create_store().await;
 }
 
 #[tokio::test]
@@ -201,70 +201,6 @@ async fn test_delete_point() {
     // 删除
     store.delete_point(&id).await.unwrap();
     assert!(store.get_point(&id).await.unwrap().is_none());
-    assert_eq!(store.count_points().await.unwrap(), 0);
-}
-
-// ─── 计数 ───
-
-#[tokio::test]
-async fn test_count_points() {
-    let (store, _dir) = create_store().await;
-    assert_eq!(store.count_points().await.unwrap(), 0);
-
-    let p1 = make_point("tianyan://knowledge/a", Some(test_vec()), None);
-    let p2 = make_point("tianyan://memory/b", Some(test_vec2()), None);
-    store.upsert_point(&p1).await.unwrap();
-    store.upsert_point(&p2).await.unwrap();
-    assert_eq!(store.count_points().await.unwrap(), 2);
-
-    store.delete_point(&p1.uri().to_point_id()).await.unwrap();
-    assert_eq!(store.count_points().await.unwrap(), 1);
-}
-
-// ─── 清空 ───
-
-#[tokio::test]
-async fn test_clear() {
-    let (store, _dir) = create_store().await;
-    let p1 = make_point("tianyan://knowledge/x", Some(test_vec()), None);
-    let p2 = make_point("tianyan://memory/y", Some(test_vec2()), None);
-    store.upsert_point(&p1).await.unwrap();
-    store.upsert_point(&p2).await.unwrap();
-    assert_eq!(store.count_points().await.unwrap(), 2);
-
-    store.clear().await.unwrap();
-    assert_eq!(store.count_points().await.unwrap(), 0);
-}
-
-// ─── 更新向量 ───
-
-#[tokio::test]
-async fn test_update_vector() {
-    let (store, _dir) = create_store().await;
-    let uri = TianyanUri::parse("tianyan://knowledge/updatable").unwrap();
-    let point = make_point("tianyan://knowledge/updatable", None, None);
-    store.upsert_point(&point).await.unwrap();
-
-    // 更新 abstract vector
-    store
-        .update_vector(&uri, VectorType::Abstract, &test_vec())
-        .await
-        .unwrap();
-
-    let id = uri.to_point_id();
-    let retrieved = store.get_point(&id).await.unwrap().unwrap();
-    assert_eq!(retrieved.abstract_vector, Some(test_vec()));
-    assert!(retrieved.overview_vector.is_none());
-    assert!(retrieved.visual_vector.is_none());
-
-    // 更新 overview vector
-    store
-        .update_vector(&uri, VectorType::Overview, &test_vec2())
-        .await
-        .unwrap();
-    let retrieved = store.get_point(&id).await.unwrap().unwrap();
-    assert_eq!(retrieved.abstract_vector, Some(test_vec()));
-    assert_eq!(retrieved.overview_vector, Some(test_vec2()));
 }
 
 // ─── search_abstract_and_overview（默认 trait 方法） ───

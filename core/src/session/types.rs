@@ -119,12 +119,6 @@ impl Session {
         }
     }
 
-    /// 使用生成的 ID 创建新会话。
-    pub fn new_with_generated_id() -> Self {
-        let id = format!("session_{}", Utc::now().format("%Y%m%d_%H%M%S_%f"));
-        Self::new(id)
-    }
-
     /// 向会话添加结构化消息。
     pub fn add_structured_message(&mut self, msg: StructuredMessage) {
         self.messages.push(msg);
@@ -149,12 +143,6 @@ impl Session {
     /// 获取消息数量。
     pub fn message_count(&self) -> usize {
         self.messages.len()
-    }
-
-    /// 设置会话标题。
-    pub fn with_title(mut self, title: impl Into<String>) -> Self {
-        self.title = Some(title.into());
-        self
     }
 
     /// 获取此会话的 URI。

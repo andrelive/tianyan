@@ -113,7 +113,7 @@ pub async fn execute_command_action(
             if let Err(e) = child.wait().await {
                 tracing::warn!(error = %e, "等待超时子进程退出失败");
             }
-            Err(TianyanError::Custom("executor: 执行超时".to_string()))
+            Err(TianyanError::timeout("executor: 执行超时"))
         }
     }
 }
@@ -128,5 +128,22 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output["stdout"].as_str().unwrap_or("").contains("Hello"));
+    }
+
+    #[tokio::test]
+    async fn test_command_timeout_is_timeout_error() {
+        // 子进程运行时长超过超时阈值：Windows 用 ping 计数（约 4s），Unix 用 sleep
+        let cmd = if cfg!(target_os = "windows") {
+            "ping -n 5 127.0.0.1"
+        } else {
+            "sleep 5"
+        };
+        let err = execute_command_action(cmd, None, Some(1))
+            .await
+            .unwrap_err();
+        assert!(
+            err.is_timeout(),
+            "执行超时应分类为 timeout（ADR-014）：{err}"
+        );
     }
 }

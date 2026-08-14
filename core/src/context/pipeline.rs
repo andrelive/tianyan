@@ -105,6 +105,9 @@ impl ContextPipeline {
     /// - `conversation` - 当前对话历史（可变引用，压缩可能修改）
     ///
     /// 返回 InjectableContext（soul + rules + memories）和压缩摘要。
+    ///
+    /// 仅测试使用（生产路径直接调用 load_injectable / compress_for_session）。
+    #[cfg(test)]
     pub async fn run(
         &self,
         query: &str,

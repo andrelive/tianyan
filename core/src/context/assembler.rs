@@ -5,8 +5,8 @@
 
 use crate::common::types::InjectableContext;
 use crate::common::types::{
-    DetailedTokenUsage, FunctionCall, Message, MessageRole, MessageTime, Part, PartTime,
-    StructuredMessage, TokenUsage, ToolCall as CoreToolCall, ToolCallType,
+    FunctionCall, Message, MessageRole, Part, StructuredMessage, TokenUsage,
+    ToolCall as CoreToolCall, ToolCallType,
 };
 
 /// 上下文组装器——纯函数，无副作用。
@@ -177,92 +177,16 @@ impl ContextAssembler {
     /// 角色从 `msg.role` 直接派生。对于 Tool 消息，生成 `Part::ToolResult`；
     /// 对于其他角色，分别提取 reasoning content、text content 和 tool calls。
     /// `token_usage` 来自 LLM 响应的实际 token 统计，为 `None` 时使用默认值。
+    ///
+    /// 实现委托给 [`StructuredMessage::from_message`]——转换逻辑的唯一实现点
+    /// （会话创建、历史重放等路径共用，保证图片等非文本内容全保真）。
     pub fn message_to_structured(
         msg: &Message,
         session_id: &str,
         parent_id: Option<&str>,
         token_usage: Option<TokenUsage>,
     ) -> StructuredMessage {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let default_time = PartTime::default();
-        let id = format!("msg_{}", now_ms);
-        let role = msg.role;
-
-        let mut parts = Vec::new();
-
-        match role {
-            MessageRole::Tool => {
-                parts.push(Part::ToolResult {
-                    tool_call_id: msg.tool_call_id.clone().unwrap_or_default(),
-                    content: msg.content.clone(),
-                    time: default_time,
-                });
-            }
-            _ => {
-                if let Some(ref reasoning) = msg.reasoning_content {
-                    if !reasoning.is_empty() {
-                        parts.push(Part::Reasoning {
-                            text: reasoning.clone(),
-                            time: default_time.clone(),
-                        });
-                    }
-                }
-
-                if !msg.content.is_empty() {
-                    parts.push(Part::Text {
-                        text: msg.content.clone(),
-                        time: default_time.clone(),
-                    });
-                }
-
-                // 多模态片段中的图片 → Part::Image（持久化 data URL，供历史重放）
-                if let Some(ref content_parts) = msg.content_parts {
-                    for cp in content_parts {
-                        if let Some(image_url) = &cp.image_url {
-                            parts.push(Part::Image {
-                                url: image_url.url.clone(),
-                                time: default_time.clone(),
-                            });
-                        }
-                    }
-                }
-
-                if let Some(ref tool_calls) = msg.tool_calls {
-                    for tc in tool_calls {
-                        parts.push(Part::ToolCall {
-                            id: tc.id.clone(),
-                            name: tc.function.name.clone(),
-                            arguments: tc.function.arguments.clone(),
-                            time: default_time.clone(),
-                        });
-                    }
-                }
-            }
-        }
-
-        StructuredMessage {
-            id,
-            parent_id: parent_id.map(|s| s.to_string()),
-            role,
-            parts,
-            tokens: token_usage
-                .map(|tu| DetailedTokenUsage {
-                    input: tu.prompt_tokens,
-                    output: tu.completion_tokens,
-                    total: tu.total_tokens,
-                    ..Default::default()
-                })
-                .unwrap_or_default(),
-            cost: 0.0,
-            model_id: None,
-            time: MessageTime {
-                created: now_ms,
-                completed: now_ms,
-            },
-            session_id: session_id.to_string(),
-            finish: None,
-            compression_marker: false,
-        }
+        StructuredMessage::from_message(msg, session_id, parent_id, token_usage)
     }
 }
 

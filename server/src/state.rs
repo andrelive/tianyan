@@ -28,6 +28,7 @@ use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
 use crate::agent_builder::{create_model_services, AgentBuilderFactory};
+use crate::api::clipboard::tool::ClipboardWriteTool;
 use crate::api::clipboard::types::PendingCapture;
 use crate::mcp_bridge::McpToolManager;
 
@@ -348,15 +349,25 @@ impl AppState {
             config.storage.data_dir.join("mcp_images"),
         ));
         mcp_tools.sync(&config.mcp.servers).await;
-        let dynamic_tools = mcp_tools.bridges().await;
+        // 剪贴板 outbox（组合根收敛：ClipboardWriteTool 与 API 层共享同一实例；
+        // 配置热更新只重建 agent，此状态跨请求/跨重载保持）
+        let clipboard_outbox = Arc::new(Mutex::new(Vec::new()));
+        let mut dynamic_tools = mcp_tools.bridges().await;
+        dynamic_tools.push(Arc::new(ClipboardWriteTool::new(clipboard_outbox.clone())));
         if !dynamic_tools.is_empty() {
-            tracing::info!(tool_count = dynamic_tools.len(), "MCP 动态工具已就绪");
+            tracing::info!(
+                tool_count = dynamic_tools.len(),
+                "动态工具已就绪（含剪贴板写入）"
+            );
         }
 
-        // 构建 Agent（传入 vfs + 技能组件 + 共享模型服务 + MCP 动态工具）
+        // 构建 Agent（传入 vfs + 技能组件 + 共享模型服务 + MCP 动态工具；
+        // session_manager / trace_collector 与 API 层共享同一实例——组合根收敛）
         let model_services = create_model_services(&config)
             .await
             .map_err(model_services_error)?;
+        // 创建持久化会话管理器（唯一实例：Agent 与 API 层共享，避免双写）
+        let session_manager = Arc::new(PersistentSessionManager::new(vfs.clone()));
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -371,11 +382,10 @@ impl AppState {
             dynamic_tools,
             Some(sqlite_db.clone()),
             crate::notification::global_notification_sink(),
+            session_manager.clone(),
+            Some(trace_collector.clone()),
         )
         .await?;
-
-        // 创建持久化会话管理器
-        let session_manager = Arc::new(PersistentSessionManager::new(vfs.clone()));
 
         Ok(Self {
             agent: Arc::new(RwLock::new(agent)),
@@ -394,7 +404,7 @@ impl AppState {
             sqlite_db,
             event_bus: Arc::new(tianyan::events::EventBus::new()),
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            clipboard_outbox: Arc::new(Mutex::new(Vec::new())),
+            clipboard_outbox,
             clipboard_pending: Arc::new(RwLock::new(None)),
         })
     }
@@ -465,7 +475,10 @@ impl AppState {
         let config = self.config.read().await.clone();
         // MCP 配置可能已变化：对齐连接（断开移除的、连接新增的），重建动态工具
         self.mcp_tools.sync(&config.mcp.servers).await;
-        let dynamic_tools = self.mcp_tools.bridges().await;
+        let mut dynamic_tools = self.mcp_tools.bridges().await;
+        // 剪贴板写入工具随 agent 重建重新注入（复用同一 outbox 实例，
+        // tauri 轮询路径不因热重载中断）
+        dynamic_tools.push(Arc::new(ClipboardWriteTool::new(self.clipboard_outbox())));
         // 配置可能已变化（模型/API Key），重建共享模型服务
         let model_services = create_model_services(&config)
             .await
@@ -481,6 +494,8 @@ impl AppState {
             dynamic_tools,
             Some(self.sqlite_db.clone()),
             crate::notification::global_notification_sink(),
+            self.session_manager.clone(),
+            Some(self.trace_collector.clone()),
         )
         .await?;
 

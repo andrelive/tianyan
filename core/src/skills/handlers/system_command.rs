@@ -100,7 +100,7 @@ impl SkillHandler for SystemCommandHandler {
                 })
             }
             Err(e) => {
-                if e.to_string().contains("执行超时") {
+                if e.is_timeout() {
                     Ok(SkillExecutionResult {
                         success: false,
                         output: None,

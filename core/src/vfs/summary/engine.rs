@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use crate::common::error::Result;
 use crate::model::ChatService;
 
@@ -37,6 +39,42 @@ impl SummaryLevel {
     }
 }
 
+/// 摘要生成服务 seam。
+///
+/// 生产实现 [`SummaryEngine`]（LLM 生成）；测试实现 `MockSummaryEngine`
+/// 为第二适配器（项目 seam 原则：两个适配器 = 真实 seam）。
+/// 消费方（KnowledgeIngestor、SummaryTask）经 `Arc<dyn SummaryService>`
+/// 依赖此接口，可直接注入 mock 测试摘要路径。
+#[async_trait]
+pub trait SummaryService: Send + Sync {
+    /// 生成摘要（L0）。
+    async fn generate_abstract(&self, content: &str) -> Result<String>;
+
+    /// 生成概览（L1）。
+    async fn generate_overview(&self, content: &str) -> Result<String>;
+
+    /// 同时生成摘要和概览。
+    async fn generate_summaries(&self, content: &str) -> Result<(String, String)> {
+        let abstract_content = self.generate_abstract(content).await?;
+        let overview_content = self.generate_overview(content).await?;
+        Ok((abstract_content, overview_content))
+    }
+
+    /// 生成摘要，失败时使用截断回退（L0 = 前 500 字符，L1 = 全文）。
+    ///
+    /// 统一 knowledge 摄入与定时摘要任务的失败降级语义：
+    /// LLM 摘要不可用时内容仍可检索，不阻塞写路径。
+    async fn generate_or_fallback(&self, content: &str) -> (String, String) {
+        match self.generate_summaries(content).await {
+            Ok((abs, ov)) => (abs, ov),
+            Err(e) => {
+                tracing::warn!(error = %e, "摘要生成失败，使用截断回退");
+                (content.chars().take(500).collect(), content.to_string())
+            }
+        }
+    }
+}
+
 /// 用于生成分层摘要的摘要引擎。
 pub struct SummaryEngine {
     model_service: Arc<dyn ChatService>,
@@ -50,73 +88,6 @@ impl SummaryEngine {
             model_service,
             model_name: model_name.into(),
         }
-    }
-
-    /// 生成摘要（L0）。
-    ///
-    /// 摘要是约 100 个 token 的简洁摘要，
-    /// 用于向量搜索和快速过滤。
-    pub async fn generate_abstract(&self, content: &str) -> Result<String> {
-        let prompt = format!(
-            r#"请为以下内容生成一个简洁的摘要，限制在 100 个 token 以内。
-摘要应该：
-1. 突出主要内容
-2. 包含关键信息
-3. 便于快速理解
-
-内容：
-{}
-
-请直接输出摘要，不要包含其他说明。"#,
-            content
-        );
-
-        let response = self
-            .model_service
-            .chat(
-                &self.model_name,
-                vec![crate::common::types::Message::user(&prompt)],
-            )
-            .await?;
-
-        Ok(response)
-    }
-
-    /// 生成概览（L1）。
-    ///
-    /// 概览是约 2K 个 token 的详细摘要，
-    /// 用于内容导航和重新排序。
-    pub async fn generate_overview(&self, content: &str) -> Result<String> {
-        let prompt = format!(
-            r#"请为以下内容生成一个详细的概览，限制在 2000 个 token 以内。
-概览应该：
-1. 包含主要结构和关键点
-2. 保留重要细节
-3. 便于内容导航
-
-内容：
-{}
-
-请直接输出概览，不要包含其他说明。"#,
-            content
-        );
-
-        let response = self
-            .model_service
-            .chat(
-                &self.model_name,
-                vec![crate::common::types::Message::user(&prompt)],
-            )
-            .await?;
-
-        Ok(response)
-    }
-
-    /// 同时生成摘要和概览。
-    pub async fn generate_summaries(&self, content: &str) -> Result<(String, String)> {
-        let abstract_content = self.generate_abstract(content).await?;
-        let overview_content = self.generate_overview(content).await?;
-        Ok((abstract_content, overview_content))
     }
 
     /// 为图片描述生成摘要。
@@ -168,27 +139,72 @@ impl SummaryEngine {
     }
 }
 
-/// 用于测试的模拟摘要引擎。
-#[cfg(test)]
-pub struct MockSummaryEngine;
+#[async_trait]
+impl SummaryService for SummaryEngine {
+    /// 生成摘要（L0）。
+    ///
+    /// 摘要是约 100 个 token 的简洁摘要，
+    /// 用于向量搜索和快速过滤。
+    async fn generate_abstract(&self, content: &str) -> Result<String> {
+        let prompt = format!(
+            r#"请为以下内容生成一个简洁的摘要，限制在 100 个 token 以内。
+摘要应该：
+1. 突出主要内容
+2. 包含关键信息
+3. 便于快速理解
 
-#[cfg(test)]
-impl MockSummaryEngine {
-    /// 创建新的模拟摘要引擎。
-    pub fn new() -> Self {
-        Self
+内容：
+{}
+
+请直接输出摘要，不要包含其他说明。"#,
+            content
+        );
+
+        let response = self
+            .model_service
+            .chat(
+                &self.model_name,
+                vec![crate::common::types::Message::user(&prompt)],
+            )
+            .await?;
+
+        Ok(response)
     }
 
-    /// 生成模拟摘要。
-    pub fn generate_abstract(&self, content: &str) -> String {
-        content.to_string()
-    }
+    /// 生成概览（L1）。
+    ///
+    /// 概览是约 2K 个 token 的详细摘要，
+    /// 用于内容导航和重新排序。
+    async fn generate_overview(&self, content: &str) -> Result<String> {
+        let prompt = format!(
+            r#"请为以下内容生成一个详细的概览，限制在 2000 个 token 以内。
+概览应该：
+1. 包含主要结构和关键点
+2. 保留重要细节
+3. 便于内容导航
 
-    /// 生成模拟概览。
-    pub fn generate_overview(&self, content: &str) -> String {
-        content.to_string()
+内容：
+{}
+
+请直接输出概览，不要包含其他说明。"#,
+            content
+        );
+
+        let response = self
+            .model_service
+            .chat(
+                &self.model_name,
+                vec![crate::common::types::Message::user(&prompt)],
+            )
+            .await?;
+
+        Ok(response)
     }
 }
+
+/// 用于测试的模拟摘要引擎（`SummaryService` 第二适配器）。
+#[cfg(test)]
+pub struct MockSummaryEngine;
 
 #[cfg(test)]
 impl Default for MockSummaryEngine {
@@ -198,8 +214,21 @@ impl Default for MockSummaryEngine {
 }
 
 #[cfg(test)]
+#[async_trait]
+impl SummaryService for MockSummaryEngine {
+    async fn generate_abstract(&self, content: &str) -> Result<String> {
+        Ok(content.to_string())
+    }
+
+    async fn generate_overview(&self, content: &str) -> Result<String> {
+        Ok(content.to_string())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::error::TianyanError;
     use crate::common::types::TokenUsage;
     use crate::model::types::{
         ChatChoice, ChatCompletionResponse, EmbeddingRequest, EmbeddingResponse,
@@ -249,22 +278,52 @@ mod tests {
 
     #[test]
     fn test_mock_summary_engine() {
-        let engine = MockSummaryEngine::new();
-
+        let engine = MockSummaryEngine;
         let content = "This is test content for the summary engine.";
-        let abstract_content = engine.generate_abstract(content);
-        let overview_content = engine.generate_overview(content);
-
-        assert!(!abstract_content.is_empty());
-        assert!(!overview_content.is_empty());
+        // SummaryService 是 async trait——同步测试只验证 mock 可构造
+        let _ = &engine;
+        assert!(!content.is_empty());
     }
 
     #[test]
     fn test_mock_summary_engine_default() {
-        let engine = MockSummaryEngine;
+        let engine = MockSummaryEngine::default();
         let content = "Test content";
-        let abstract_content = engine.generate_abstract(content);
-        assert!(!abstract_content.is_empty());
+        // SummaryService 是 async trait——同步测试只验证默认构造
+        let _ = &engine;
+        assert!(!content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mock_summary_engine_async() {
+        let engine = MockSummaryEngine;
+        let (abs, ov) = engine.generate_summaries("content").await.unwrap();
+        assert_eq!(abs, "content");
+        assert_eq!(ov, "content");
+    }
+
+    #[tokio::test]
+    async fn test_generate_or_fallback_success() {
+        let mut chat = MockChatService::new();
+        chat.expect_chat_completion()
+            .returning(|_| Ok(mock_chat_response("Test abstract summary")));
+        let engine = SummaryEngine::new(Arc::new(chat), "test-model");
+        let (abs, ov) = engine.generate_or_fallback("Some content").await;
+        // 两次 chat 调用返回同一 mock 响应（abstract 与 overview 相同）
+        assert_eq!(abs, "Test abstract summary");
+        assert_eq!(ov, "Test abstract summary");
+    }
+
+    #[tokio::test]
+    async fn test_generate_or_fallback_failure_truncates() {
+        let mut chat = MockChatService::new();
+        chat.expect_chat_completion()
+            .returning(|_| Err(TianyanError::Custom("模拟摘要服务不可用".to_string())));
+        let engine = SummaryEngine::new(Arc::new(chat), "test-model");
+        let long = "x".repeat(1000);
+        let (abs, ov) = engine.generate_or_fallback(&long).await;
+        assert_eq!(abs.chars().count(), 500, "回退摘要截断为 500 字符");
+        assert_eq!(ov, long, "回退概览为全文");
     }
 
     #[test]
