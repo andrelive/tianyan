@@ -6,6 +6,7 @@ import type {
   Theme,
   FontSize,
   ChatMessage,
+  MessageSegment,
   Session,
   Skill,
   SkillCallInfo,
@@ -124,6 +125,8 @@ export const useAppStore = create<AppState>()(
             messages[messages.length - 1] = {
               ...last,
               content: last.content + delta,
+              // 时间线：文本增量按到达顺序追加
+              segments: [...(last.segments ?? []), { type: 'text', text: delta }],
             };
           }
           return { messages };
@@ -156,6 +159,13 @@ export const useAppStore = create<AppState>()(
               messages[lastIdx] = {
                 ...messages[lastIdx],
                 tool_calls: [...prev, ...fresh],
+                // 时间线：工具调用按到达顺序追加
+                segments: [
+                  ...(messages[lastIdx].segments ?? []),
+                  ...fresh.map(
+                    (call): MessageSegment => ({ type: 'tool', tool_call: call }),
+                  ),
+                ],
               };
             }
           }
@@ -170,7 +180,12 @@ export const useAppStore = create<AppState>()(
           }
           if (lastIdx >= 0) {
             const prev = messages[lastIdx].thinking ?? '';
-            messages[lastIdx] = { ...messages[lastIdx], thinking: prev + delta };
+            messages[lastIdx] = {
+              ...messages[lastIdx],
+              thinking: prev + delta,
+              // 时间线：思考增量按到达顺序追加
+              segments: [...(messages[lastIdx].segments ?? []), { type: 'thinking', text: delta }],
+            };
           }
           return { messages };
         }),

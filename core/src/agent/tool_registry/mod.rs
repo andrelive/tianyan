@@ -173,6 +173,9 @@ pub struct ToolRegistry {
     pub(crate) delegation_depth: Arc<AtomicUsize>,
     /// 子 Agent 角色注册表（delegate_to_agent role 参数解析；默认内置角色）。
     pub(crate) role_registry: Arc<RoleRegistry>,
+    /// 会话管理器（execute_command 默认 cwd 解析：模型未指定时使用会话
+    /// 绑定的工作目录，而非进程当前目录）。
+    pub(crate) session_manager: Option<Arc<dyn crate::session::SessionManager>>,
 }
 
 impl ToolRegistry {
@@ -201,6 +204,7 @@ impl ToolRegistry {
             dynamic_tools: Arc::new(Mutex::new(HashMap::new())),
             delegation_depth: Arc::new(AtomicUsize::new(0)),
             role_registry: Arc::new(RoleRegistry::builtin()),
+            session_manager: None,
         };
         // A1：内置可观测性监听器注册为第一个 post-execute 监听器——
         // 原 execute_single 尾部的统计/Trace/GEPA/规则学习自此是管线消费者。
@@ -232,6 +236,12 @@ impl ToolRegistry {
     /// 设置模型服务（delegate_to_agent 工具依赖）。
     pub fn with_model_service(mut self, svc: Arc<dyn ChatService>) -> Self {
         self.model_service = Some(svc);
+        self
+    }
+
+    /// 设置会话管理器（execute_command 默认 cwd 解析）。
+    pub fn with_session_manager(mut self, sm: Arc<dyn crate::session::SessionManager>) -> Self {
+        self.session_manager = Some(sm);
         self
     }
 

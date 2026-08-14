@@ -62,8 +62,24 @@ impl ToolRegistry {
             }
         }
 
+        // 默认工作目录：模型未指定 cwd 时使用会话绑定的工作目录（工作区），
+        // 缺省回退进程当前目录——确保命令在用户的工作区内执行，而非进程 cwd
+        // （如天演仓库根目录）
+        let cwd = match params.cwd.clone() {
+            Some(cwd) => Some(cwd),
+            None => match &self.session_manager {
+                Some(sm) => match sm.get_session(session_id).await {
+                    Ok(Some(session)) => session
+                        .working_directory(None)
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    _ => None,
+                },
+                None => None,
+            },
+        };
+
         // Path sandbox for working directory
-        if let Some(ref cwd) = params.cwd {
+        if let Some(ref cwd) = cwd {
             safety_violation(self.security_policy.check_path(std::path::Path::new(cwd)))?;
         }
 
@@ -75,14 +91,14 @@ impl ToolRegistry {
             subagent,
             &Action::ExecuteCommand {
                 command: params.command.clone(),
-                cwd: params.cwd.clone(),
+                cwd: cwd.clone(),
                 timeout_secs: params.timeout_secs,
             },
         )
         .await?;
         crate::executor::execute_command_action(
             &params.command,
-            params.cwd.as_deref(),
+            cwd.as_deref(),
             params.timeout_secs,
         )
         .await

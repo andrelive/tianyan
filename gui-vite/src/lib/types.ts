@@ -11,6 +11,8 @@ export interface ChatMessage {
   content: string;
   /** 思考过程文本（模型 reasoning；正文在 content，前端折叠展示） */
   thinking?: string;
+  /** 流式时间线段（按事件到达顺序累积；历史消息无此字段） */
+  segments?: MessageSegment[];
   /** 图片 data URL 列表（仅用户消息），如 data:image/png;base64,... */
   images?: string[];
   timestamp?: string;
@@ -75,6 +77,15 @@ export interface ToolCallEvent {
   /** generic/read/write/terminal/diff/search/web/skill/knowledge/delegate/code */
   presentation: string;
 }
+
+/**
+ * 消息时间线段（流式事件按到达顺序累积，前端据此按序轮番渲染
+ * 思考/文本/工具调用——不再把同类内容挤在一起）。
+ */
+export type MessageSegment =
+  | { type: 'thinking'; text: string }
+  | { type: 'text'; text: string }
+  | { type: 'tool'; tool_call: ToolCallEvent };
 
 /** 工具展示意图 → 卡片标签（A2） */
 export const TOOL_PRESENTATION_LABELS: Record<string, string> = {

@@ -307,7 +307,8 @@ impl AgentBuilder {
             .with_approval_workflow(approval)
             .with_verification_gate(verification)
             .with_rule_recorder(rule_recorder)
-            .with_lsp_manager(Arc::new(LspManager::new()));
+            .with_lsp_manager(Arc::new(LspManager::new()))
+            .with_session_manager(session_manager.clone());
         // 子 Agent 角色注册表（delegate_to_agent role 参数）
         if let Some(agent_roles) = self.agent_roles {
             tool_registry = tool_registry.with_role_registry(Arc::new(

@@ -5,9 +5,13 @@ import {
   apiGet,
   compressSession,
   deleteSessionMessage,
+  fetchApprovalStatus,
   getApiBase,
   redoSessionMessage,
+  respondApproval,
 } from '@/lib/api-client';
+import { ShieldAlert, Check, X } from 'lucide-react';
+import type { ApprovalDecision, ApprovalStatusSnapshot } from '@/lib/types';
 import { useChatStream } from '@/hooks/useChatStream';
 import { MessageSquare, Loader2, Undo2, Minimize2 } from 'lucide-react';
 import ChatInput from './ChatInput';
@@ -37,6 +41,11 @@ export default function ChatPanel() {
   const [submittingClarify, setSubmittingClarify] = useState(false);
   const [compressing, setCompressing] = useState(false);
   const [wakePolling, setWakePolling] = useState(false);
+  /** 当前会话待审批操作（应用层授权卡片；wait_for_approval 模式挂起时出现） */
+  const [pendingApproval, setPendingApproval] = useState<
+    ApprovalStatusSnapshot['pending_approvals'][number] | null
+  >(null);
+  const [approvalBusy, setApprovalBusy] = useState(false);
 
   // Sync URL sessionId to store on mount / navigation
   useEffect(() => {
@@ -78,6 +87,52 @@ export default function ChatPanel() {
       setWakePolling(false);
     };
   }, [currentSessionId, messages, streamStatus]);
+
+  // 应用层授权：轮询审批状态，当前会话有挂起操作时显示审批卡片。
+  // wait_for_approval 模式下危险操作由应用审批（与会话/LLM 无关），
+  // 批准/拒绝后挂起的工具自动继续。
+  useEffect(() => {
+    if (!currentSessionId) {
+      setPendingApproval(null);
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const status = await fetchApprovalStatus();
+        if (cancelled) return;
+        const mine =
+          status.pending_approvals.find((p) => p.session_id === currentSessionId) ?? null;
+        setPendingApproval((prev) => {
+          if (prev?.request_id !== mine?.request_id) return mine;
+          return prev;
+        });
+      } catch {
+        /* 轮询失败静默（下次重试） */
+      }
+    };
+    void poll();
+    const timer = setInterval(poll, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [currentSessionId]);
+
+  const handleApproval = async (decision: ApprovalDecision) => {
+    if (!pendingApproval || approvalBusy) return;
+    setApprovalBusy(true);
+    try {
+      await respondApproval(pendingApproval.request_id, decision);
+      setPendingApproval(null);
+    } catch (err: unknown) {
+      useAppStore
+        .getState()
+        .showToast(`审批响应失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
+    } finally {
+      setApprovalBusy(false);
+    }
+  };
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
@@ -460,6 +515,47 @@ export default function ChatPanel() {
           </div>
         )}
       </div>
+
+      {/* 应用层授权卡片：危险操作等待人工批准（与 LLM 澄清无关） */}
+      {pendingApproval && (
+        <div
+          role="alert"
+          aria-label="操作等待授权"
+          className="mx-4 mb-2 p-3 rounded-lg border border-amber-500/40 bg-amber-50/60 dark:bg-amber-950/20 text-sm"
+        >
+          <div className="flex items-center gap-2 text-amber-700 dark:text-amber-400">
+            <ShieldAlert size={16} className="shrink-0" />
+            <span className="font-medium">操作等待授权</span>
+            <span className="text-xs opacity-70 ml-auto">风险：{pendingApproval.risk_level}</span>
+          </div>
+          <p className="mt-1.5 text-xs font-mono text-[var(--color-text-primary)] break-all">
+            {pendingApproval.action_description}
+          </p>
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => handleApproval('approve')}
+              disabled={approvalBusy}
+              className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
+            >
+              <Check size={12} />
+              批准
+            </button>
+            <button
+              type="button"
+              onClick={() => handleApproval('deny')}
+              disabled={approvalBusy}
+              className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+            >
+              <X size={12} />
+              拒绝
+            </button>
+            <span className="text-xs text-[var(--color-text-tertiary)]">
+              批准后挂起的操作将自动继续执行
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Input area */}
       <ChatInput
