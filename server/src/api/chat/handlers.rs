@@ -38,11 +38,8 @@ pub async fn chat_handler(
     service
         .process_message(request)
         .await
+        .inspect_err(|e| error!("对话处理错误: {}", e))
         .map(Json)
-        .map_err(|e| {
-            error!("对话处理错误: {}", e);
-            ApiError::Internal(format!("对话处理错误: {}", e))
-        })
 }
 
 /// 追问回答处理器（非流式）
@@ -63,11 +60,8 @@ pub async fn chat_clarify_handler(
     service
         .handle_clarification(&request.session_id, &request.answer)
         .await
+        .inspect_err(|e| error!("追问回答处理错误: {}", e))
         .map(Json)
-        .map_err(|e| {
-            error!("追问回答处理错误: {}", e);
-            ApiError::Internal(format!("追问回答处理错误: {}", e))
-        })
 }
 
 /// 对话完成处理器（流式/SSE via POST）
@@ -89,6 +83,7 @@ pub async fn chat_stream_handler(
                 finish_reason: None,
                 chunk_type: tianyan::agent::StreamChunkType::Error,
                 skill_calls: None,
+                tool_call: None,
             };
             if let Ok(json) = serde_json::to_string(&event) {
                 if tx_clone

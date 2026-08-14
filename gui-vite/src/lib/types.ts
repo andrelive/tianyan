@@ -13,6 +13,8 @@ export interface ChatMessage {
   images?: string[];
   timestamp?: string;
   skill_calls?: SkillCallInfo[];
+  /** 工具调用卡片（A2 展示契约；流式 chunk 累积到当前 assistant 消息） */
+  tool_calls?: ToolCallEvent[];
   chunk_type?: StreamChunkType;
   /** 流结束事件 finish_reason === 'length'：输出达到 token 上限被截断（前端本地标记） */
   truncated_by_length?: boolean;
@@ -48,6 +50,8 @@ export interface ChatStreamEvent {
   finish_reason?: string | null;
   skill_calls?: SkillCallInfo[] | null;
   chunk_type: StreamChunkType;
+  /** A2：结构化工具调用事件（tool_call chunk 携带） */
+  tool_call?: ToolCallEvent | null;
 }
 
 export interface SkillCallInfo {
@@ -57,6 +61,29 @@ export interface SkillCallInfo {
   execution_time_ms: number;
   error?: string | null;
 }
+
+/** 工具调用事件（A2 展示契约）：工具名 + 参数 + 展示意图 */
+export interface ToolCallEvent {
+  name: string;
+  arguments: string;
+  /** generic/read/write/terminal/diff/search/web/skill/knowledge/delegate/code */
+  presentation: string;
+}
+
+/** 工具展示意图 → 卡片标签（A2） */
+export const TOOL_PRESENTATION_LABELS: Record<string, string> = {
+  generic: '工具',
+  read: '读取文件',
+  write: '写入文件',
+  terminal: '执行命令',
+  diff: '编辑文件',
+  search: '搜索',
+  web: '浏览网页',
+  skill: '调用技能',
+  knowledge: '导入知识',
+  delegate: '委托子代理',
+  code: '代码分析',
+};
 
 // ========== Session Types ==========
 
@@ -142,6 +169,12 @@ export interface KnowledgeSearchResponse {
   total: number;
   limit: number;
   offset: number;
+}
+
+/** 搜索建议响应（GET /knowledge/search/suggestions）。 */
+export interface SearchSuggestionsResponse {
+  query: string;
+  suggestions: string[];
 }
 
 // ========== Memory Types ==========
@@ -264,6 +297,23 @@ export interface ApprovalStatusSnapshot {
   pending_confirmations: string[];
   recent_records: ApprovalRecord[];
   confirmed_action_count: number;
+}
+
+/** 知识库导入响应（POST /knowledge/ingest，multipart）。 */
+export interface IngestFileResult {
+  filename: string;
+  /** 后端契约：completed | failed。 */
+  status: string;
+  /** 失败原因（status = failed 时存在）。 */
+  error?: string;
+  document_id?: string;
+}
+
+export interface IngestResponse {
+  success: boolean;
+  job_id: string;
+  message: string;
+  files: IngestFileResult[];
 }
 
 // ========== Background Task Types (matches backend background_task DTO) ==========

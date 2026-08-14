@@ -10,6 +10,7 @@ import type {
   Skill,
   SkillCallInfo,
   ToastMessage,
+  ToolCallEvent,
 } from './types';
 
 interface AppState {
@@ -31,6 +32,8 @@ interface AppState {
   addMessage: (message: ChatMessage) => void;
   updateLastMessage: (delta: string) => void;
   appendSkillCalls: (calls: SkillCallInfo[]) => void;
+  /** A2：累积工具调用事件到当前 assistant 消息（渲染 tool card） */
+  appendToolCalls: (calls: ToolCallEvent[]) => void;
   /** 标记最后一条 assistant 消息为截断（finish_reason === 'length'） */
   markLastMessageTruncated: () => void;
   clearMessages: () => void;
@@ -63,8 +66,6 @@ interface AppState {
   // Skills
   skills: Skill[];
   setSkills: (skills: Skill[]) => void;
-  currentSkillId: string | null;
-  setCurrentSkillId: (id: string | null) => void;
 
   // Toast
   toast: ToastMessage | null;
@@ -132,6 +133,27 @@ export const useAppStore = create<AppState>()(
           }
           return { messages };
         }),
+      appendToolCalls: (calls) =>
+        set((s) => {
+          const messages = [...s.messages];
+          let lastIdx = messages.length - 1;
+          while (lastIdx >= 0 && messages[lastIdx].role !== 'assistant') {
+            lastIdx--;
+          }
+          if (lastIdx >= 0) {
+            const prev = messages[lastIdx].tool_calls ?? [];
+            // 去重：同一次调用事件只追加一次（chunk 只携带完整事件，无增量合并）
+            const existing = new Set(prev.map((c) => c.name + c.arguments));
+            const fresh = calls.filter((c) => !existing.has(c.name + c.arguments));
+            if (fresh.length > 0) {
+              messages[lastIdx] = {
+                ...messages[lastIdx],
+                tool_calls: [...prev, ...fresh],
+              };
+            }
+          }
+          return { messages };
+        }),
       markLastMessageTruncated: () =>
         set((s) => {
           const messages = [...s.messages];
@@ -188,8 +210,6 @@ export const useAppStore = create<AppState>()(
       // Skills
       skills: [],
       setSkills: (skills) => set({ skills }),
-      currentSkillId: null,
-      setCurrentSkillId: (id) => set({ currentSkillId: id }),
 
       // Toast
       toast: null,

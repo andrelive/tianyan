@@ -43,7 +43,7 @@
 | **tianyan-gui** | ❌ | ❌ | - | ❌ |
 | **tianyan-tauri** | ✅ | ✅ | ❌* | - |
 
-> \* tauri 通过加载 `gui/dist` 静态资源间接依赖 gui，但无 Rust 编译期依赖。
+> \* tauri 通过加载 `gui-vite/dist` 静态资源间接依赖 gui，但无 Rust 编译期依赖。
 
 ---
 
@@ -171,7 +171,7 @@ Tauri App 启动
     │     └─ 轮询 GET /health（30s 超时）
     │
     └─ 5. Tauri 窗口创建
-          └─ 加载 gui/dist/index.html
+          └─ 加载 gui-vite/dist/index.html
 ```
 
 ### 3.2 聊天请求流程
@@ -429,7 +429,7 @@ TaskScheduler 触发
 
 ### 决策 3：组件工具化
 
-`agent/tool_registry/`（目录模块）注册 21 个工具（`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_code`、`search_knowledge`、`vfs_read`、`vfs_list`、`call_skill`、`run_tests`、`discover_tests`、`verify_build`、`ask_user`、`self_check`、`knowledge_ingest`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`lsp`），其中 `call_skill` 桥接到 `skills/executor.rs`。工具执行器按域拆分为 8 个文件（`file_ops.rs` / `code_ops.rs` / `knowledge_ops.rs` / `agent_ops.rs` / `fs_ops.rs` / `lsp_ops.rs` / `symbol_ops.rs` / `test_ops.rs`），公开 API 与 dispatch 不变。
+`agent/tool_registry/`（目录模块）注册内置工具（当前 25 个，完整清单见自动生成的 [`tool-catalog.md`](./tool-catalog.md)，freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁），其中 `call_skill` 桥接到 `skills/executor.rs`。工具执行器按域拆分为 8 个文件（`file_ops.rs` / `code_ops.rs` / `knowledge_ops.rs` / `agent_ops.rs` / `fs_ops.rs` / `lsp_ops.rs` / `symbol_ops.rs` / `test_ops.rs`），公开 API 与 dispatch 不变。工具执行管线为可插拔瀑布（`pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，A1/A4 吸收），内置可观测性监听器（`observability.rs`）承担统计/Trace/GEPA 历史/规则学习。
 
 **模块影响**：`agent/tool_registry/` 依赖 `skills::SkillExecutor` 实现 call_skill 工具，形成 agent → skills 单向依赖。
 
@@ -458,15 +458,9 @@ soul → rules+memories → history(from compression_marker) → current input
 
 ## 8. 已知待办事项
 
-| 位置 | 内容 | 优先级 |
-|------|------|:---:|
-| sessions/services.rs | TODO: 与核心存储集成 | 🔴 |
-| knowledge/services.rs | TODO: 与核心摄入管道/检索引擎集成 (4处) | 🔴 |
-| config/services.rs | TODO: 与核心配置存储集成 (2处) | 🔴 |
-
-> 已随迭代消除：知识管理面板（`gui-vite/src/components/knowledge/`）与运行时配置设置面板（`gui-vite/src/components/settings/`）均已实现；记忆提取由 `scheduler/tasks/memory_task.rs` 定时触发并经 VFS 持久化（不依赖 server 层接入）。
+> 当前无已知架构待办（2026-08-13 架构深化核查：sessions/knowledge/config 的旧 TODO 均已随迭代消除——会话 CRUD 经 `PersistentSessionManager`（VFS），知识导入/检索经 `KnowledgeIngestor` + `DualLayerRetriever`，配置读写经 `ConfigService` → core `TianyanConfig`）。
 
 ---
 
-**文档版本**: 2026-08-06
-**最后更新**: 2026-08-06（Wave 6 重构后同步：3 个依赖环消除（SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉，ADR-007）、executor 与 tool_registry 拆分路径、§6 偏差表与 §8 待办按代码核验清理、SessionManager 仅存 PersistentSessionManager）
+**文档版本**: 2026-08-13
+**最后更新**: 2026-08-13（架构深化同步：死代码清理（skills/vfs/retriever/session 等 ~700 行）、去重提取（`common::llm_judge::parse_llm_json`、`common::binary::sniff_binary`、session_hint 助手、LSP 操作列表单一来源）、错误语义化（`TianyanError` 冲突/无效输入/权限/超时构造器与谓词，见 ADR-014）、组合根收敛（AppState 单一 SessionManager/TraceCollector 注入 Agent、core_bridge 内联删除、`SummaryService` trait 接口化））

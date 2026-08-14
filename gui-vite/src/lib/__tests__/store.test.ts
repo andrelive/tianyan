@@ -16,7 +16,6 @@ describe('useAppStore', () => {
       fontSize: 'medium',
       apiBaseUrl: 'http://localhost:3000',
       skills: [],
-      currentSkillId: null,
       toast: null,
       selectedModel: null,
       configured: null,
@@ -37,7 +36,6 @@ describe('useAppStore', () => {
     expect(state.fontSize).toBe('medium');
     expect(state.apiBaseUrl).toBe('http://localhost:3000');
     expect(state.skills).toEqual([]);
-    expect(state.currentSkillId).toBeNull();
     expect(state.toast).toBeNull();
     expect(state.selectedModel).toBeNull();
     expect(state.configured).toBeNull();
@@ -245,6 +243,42 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().messages[0].skill_calls).toBeUndefined();
   });
 
+  // ── Tool Calls（A2 展示契约）──
+
+  it('appendToolCalls accumulates tool call cards on the last assistant message', () => {
+    useAppStore.setState({
+      messages: [
+        { role: 'user', content: 'go' },
+        { role: 'assistant', content: 'working' },
+      ],
+    });
+
+    const call = { name: 'read_file', arguments: '{"path":"a.txt"}', presentation: 'read' };
+    useAppStore.getState().appendToolCalls([call]);
+    expect(useAppStore.getState().messages[1].tool_calls).toEqual([call]);
+
+    // 同一调用重复推送（流式重发）不重复累积
+    useAppStore.getState().appendToolCalls([call]);
+    expect(useAppStore.getState().messages[1].tool_calls).toHaveLength(1);
+
+    // 不同调用追加
+    const call2 = { name: 'execute_command', arguments: '{}', presentation: 'terminal' };
+    useAppStore.getState().appendToolCalls([call2]);
+    expect(useAppStore.getState().messages[1].tool_calls).toHaveLength(2);
+    expect(useAppStore.getState().messages[1].tool_calls?.[1]).toEqual(call2);
+  });
+
+  it('appendToolCalls does nothing when no assistant message exists', () => {
+    useAppStore.setState({
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    useAppStore
+      .getState()
+      .appendToolCalls([{ name: 'glob', arguments: '{}', presentation: 'search' }]);
+    expect(useAppStore.getState().messages).toHaveLength(1);
+    expect(useAppStore.getState().messages[0].tool_calls).toBeUndefined();
+  });
+
   // ── Streaming ──
 
   it('setStreamStatus updates streamStatus', () => {
@@ -339,14 +373,6 @@ describe('useAppStore', () => {
     useAppStore.getState().setSkills(skills);
     expect(useAppStore.getState().skills).toHaveLength(1);
     expect(useAppStore.getState().skills[0].id).toBe('x');
-  });
-
-  it('setCurrentSkillId updates currentSkillId', () => {
-    useAppStore.getState().setCurrentSkillId('skill-42');
-    expect(useAppStore.getState().currentSkillId).toBe('skill-42');
-
-    useAppStore.getState().setCurrentSkillId(null);
-    expect(useAppStore.getState().currentSkillId).toBeNull();
   });
 
   // ── Current Session ──

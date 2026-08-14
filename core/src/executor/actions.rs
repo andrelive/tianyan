@@ -8,7 +8,6 @@ pub use crate::executor::security::SecurityPolicy;
 use std::path::Path;
 
 use crate::executor::hashline;
-use crate::executor::search::SearchOptions;
 use crate::executor::truncate;
 
 /// 单行最大显示字符数（超出部分截断并追加 `…<truncated>` 标记）。
@@ -198,19 +197,6 @@ pub async fn execute_write_file(path: &str, content: &str) -> Result<Value, Tian
         .await
         .map_err(|e| TianyanError::Custom(format!("executor: 文件操作失败：{}", e)))?;
     Ok(Value::String("写入成功".to_string()))
-}
-
-/// 执行代码搜索操作（兼容委托）。
-///
-/// 旧签名 `(query, scope)` 保留：映射到增强版搜索的 `pattern`/`path`，输出模式
-/// 固定为 content（与旧行为一致：带行号与匹配文本），其余参数取默认值。
-pub async fn execute_search_code(query: &str, scope: Option<&str>) -> Result<Value, TianyanError> {
-    let options = SearchOptions {
-        path: scope.map(str::to_string),
-        output_mode: Some("content".to_string()),
-        ..Default::default()
-    };
-    crate::executor::search::execute_search_code(query, &options).await
 }
 
 /// 执行构建验证操作。

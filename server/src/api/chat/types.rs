@@ -151,6 +151,9 @@ pub struct ChatStreamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// 技能调用列表
     pub skill_calls: Option<Vec<SkillCallInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 结构化工具调用信息（A2 展示契约；前端据此渲染 tool card）
+    pub tool_call: Option<tianyan::agent::ToolCallEvent>,
 }
 
 #[cfg(test)]
@@ -235,6 +238,7 @@ mod tests {
             finish_reason: None,
             chunk_type: tianyan::agent::StreamChunkType::Answer,
             skill_calls: None,
+            tool_call: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Hello"));

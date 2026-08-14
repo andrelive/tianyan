@@ -135,10 +135,18 @@ impl TianyanConfig {
     /// 在默认位置查找配置文件。
     ///
     /// 搜索顺序：
+    /// 0. 环境变量 `TIANYAN_CONFIG` 显式指定（最高优先级，README/.env.example 已声明）
     /// 1. 当前目录 `./tianyan.toml`
     /// 2. %APPDATA%/tianyan/tianyan.toml (Windows) 或 ~/.config/tianyan/tianyan.toml
     /// 3. ~/.tianyan/tianyan.toml
     pub fn find_config_file() -> Option<std::path::PathBuf> {
+        // 0. 环境变量显式覆盖（空值视为未设置）
+        if let Ok(path) = std::env::var("TIANYAN_CONFIG") {
+            if !path.trim().is_empty() {
+                return Some(std::path::PathBuf::from(path));
+            }
+        }
+
         // 1. 检查当前目录
         let current_dir = std::env::current_dir().ok()?;
         let config_in_current = current_dir.join(Self::CONFIG_FILE_NAME);
@@ -364,6 +372,40 @@ mod tests {
         assert!(toml.contains("[models]"));
     }
 
+    /// B5 分层覆盖：用户层只写部分键时，缺失字段继承默认层（serde default 即默认层）。
+    #[test]
+    fn test_user_layer_merges_over_default_layer() {
+        // 用户层：只配置安全模式与一个 provider，其余全部缺失
+        let user_toml = r#"
+            [security]
+            safety_mode = "strict"
+
+            [[models.providers]]
+            name = "user-provider"
+            endpoint = "http://localhost:9999/v1"
+            api_key = "test-key"
+            enabled = true
+        "#;
+        let config: TianyanConfig = toml::from_str(user_toml).unwrap();
+
+        // 用户层字段生效
+        assert_eq!(config.security.safety_mode, SafetyMode::Strict);
+        assert_eq!(config.models.providers.len(), 1);
+        assert_eq!(config.models.providers[0].name, "user-provider");
+
+        // 默认层继承：未写字段取默认值（不因用户层缺失而崩溃）
+        assert!(
+            !config.storage.data_dir.as_os_str().is_empty(),
+            "data_dir 应继承默认层"
+        );
+        assert_eq!(
+            config.agent.enable_skills,
+            AgentConfig::default().enable_skills,
+            "agent 应继承默认层"
+        );
+        assert!(config.mcp.servers.is_empty(), "mcp 应继承默认层（空）");
+    }
+
     #[test]
     fn test_load_without_config_file() {
         // 测试在没有配置文件的情况下，从指定路径加载会返回错误
@@ -413,6 +455,72 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         assert!(result.is_err(), "非法 TOML 应加载失败");
+    }
+
+    /// 串行化 TIANYAN_CONFIG 环境变量测试（进程级全局副作用，避免并行测试互相干扰）。
+    static ENV_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 保存 / 恢复 TIANYAN_CONFIG 环境变量。
+    fn with_tianyan_config_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_CONFIG_LOCK.lock().unwrap();
+        let original = std::env::var("TIANYAN_CONFIG").ok();
+        match value {
+            Some(v) => std::env::set_var("TIANYAN_CONFIG", v),
+            None => std::env::remove_var("TIANYAN_CONFIG"),
+        }
+        let result = f();
+        match original {
+            Some(v) => std::env::set_var("TIANYAN_CONFIG", v),
+            None => std::env::remove_var("TIANYAN_CONFIG"),
+        }
+        result
+    }
+
+    #[test]
+    fn test_find_config_file_prefers_tianyan_config_env() {
+        // README/.env.example 声明的 TIANYAN_CONFIG 覆盖：显式指定路径应优先于默认搜索
+        let dir = std::env::temp_dir().join(format!(
+            "tianyan-config-env-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("custom.toml");
+        std::fs::write(&path, "[storage]\n").unwrap();
+
+        let found = with_tianyan_config_env(Some(path.to_str().unwrap()), || {
+            TianyanConfig::find_config_file()
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found, Some(path), "TIANYAN_CONFIG 指定的路径应优先返回");
+    }
+
+    #[test]
+    fn test_find_config_file_ignores_empty_tianyan_config_env() {
+        // 空字符串环境变量不生效，回落到默认搜索（与未设置时结果一致）
+        let normal = with_tianyan_config_env(None, TianyanConfig::find_config_file);
+        let with_empty = with_tianyan_config_env(Some(""), TianyanConfig::find_config_file);
+        assert_eq!(with_empty, normal, "空 TIANYAN_CONFIG 应回落默认搜索");
+    }
+
+    #[test]
+    fn test_find_config_file_surfaces_missing_env_path() {
+        // 显式指定但文件不存在：返回该路径（由 load 报错），不静默回落
+        let missing = std::env::temp_dir().join(format!(
+            "tianyan-config-missing-{}.toml",
+            std::process::id()
+        ));
+        let found = with_tianyan_config_env(Some(missing.to_str().unwrap()), || {
+            TianyanConfig::find_config_file()
+        });
+        assert_eq!(
+            found,
+            Some(missing),
+            "显式 TIANYAN_CONFIG 路径应原样返回（含不存在场景）"
+        );
     }
 
     #[test]

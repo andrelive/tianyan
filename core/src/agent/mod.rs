@@ -36,5 +36,5 @@ pub use tool_params::{
 pub use tool_registry::{DynamicToolExecutor, ToolRegistry};
 pub use types::{
     AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion, QuestionType,
-    SkillCallInfo, StreamChunkType, StreamEventSender,
+    SkillCallInfo, StreamChunkType, StreamEventSender, ToolCallEvent,
 };

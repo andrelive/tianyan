@@ -189,6 +189,24 @@ pub struct AgentStreamChunk {
     /// 完成原因（finish_reason；来自模型响应的最终 choice/chunk）。
     #[serde(default)]
     pub finish_reason: Option<String>,
+    /// 结构化工具调用信息（A2 展示契约；ToolCall chunk 携带，供前端渲染 card）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<ToolCallEvent>,
+}
+
+/// 工具调用事件（A2 展示契约：工具自描述 UI 渲染意图）。
+///
+/// 随 [`StreamChunkType::ToolCall`] chunk 透传：工具名 + 参数 + 展示意图。
+/// 前端按 `presentation` 渲染 card（read/terminal/diff/search/web/...），
+/// 工具与 UI 解耦（DSH presentCall 吸收）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallEvent {
+    /// 工具名称。
+    pub name: String,
+    /// 参数 JSON 字符串（原始 arguments）。
+    pub arguments: String,
+    /// 展示意图（generic/read/write/terminal/diff/search/web/skill/knowledge/delegate/code）。
+    pub presentation: String,
 }
 
 /// 流式事件发送器（用于在Planner-Executor循环中实时推送事件）。
@@ -223,12 +241,13 @@ impl StreamEventSender {
             chunk_type: StreamChunkType::Thought,
             skill_calls: None,
             finish_reason: None,
+            tool_call: None,
         })
         .await;
     }
 
-    /// 发送工具调用事件。
-    pub async fn send_tool_call(&self, description: &str) {
+    /// 发送工具调用事件（A2：携带结构化 tool_call 信息供前端渲染 card）。
+    pub async fn send_tool_call(&self, description: &str, tool_call: Option<ToolCallEvent>) {
         self.try_send(AgentStreamChunk {
             delta: description.to_string(),
             is_complete: false,
@@ -236,6 +255,7 @@ impl StreamEventSender {
             chunk_type: StreamChunkType::ToolCall,
             skill_calls: None,
             finish_reason: None,
+            tool_call,
         })
         .await;
     }
@@ -249,6 +269,7 @@ impl StreamEventSender {
             chunk_type: StreamChunkType::Observation,
             skill_calls: None,
             finish_reason: None,
+            tool_call: None,
         })
         .await;
     }
@@ -262,6 +283,7 @@ impl StreamEventSender {
             chunk_type: StreamChunkType::Answer,
             skill_calls: None,
             finish_reason: None,
+            tool_call: None,
         })
         .await;
     }
@@ -281,6 +303,7 @@ impl StreamEventSender {
             chunk_type,
             skill_calls,
             finish_reason,
+            tool_call: None,
         })
         .await;
     }
@@ -294,6 +317,7 @@ impl StreamEventSender {
             chunk_type: StreamChunkType::Error,
             skill_calls: None,
             finish_reason: None,
+            tool_call: None,
         })
         .await;
     }
@@ -371,6 +395,7 @@ mod tests {
             chunk_type: StreamChunkType::Answer,
             skill_calls: None,
             finish_reason: None,
+            tool_call: None,
         };
         assert_eq!(chunk.delta, "你好");
         assert!(!chunk.is_complete);
@@ -394,6 +419,7 @@ mod tests {
             chunk_type: StreamChunkType::ToolCall,
             skill_calls: Some(calls.clone()),
             finish_reason: None,
+            tool_call: None,
         };
         assert_eq!(chunk.delta, "调用技能");
         assert!(chunk.is_complete);
@@ -411,6 +437,7 @@ mod tests {
             chunk_type: StreamChunkType::Thought,
             skill_calls: None,
             finish_reason: None,
+            tool_call: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
@@ -429,6 +456,7 @@ mod tests {
             chunk_type: StreamChunkType::Answer,
             skill_calls: None,
             finish_reason: None,
+            tool_call: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         // skill_calls 为 None 时不应出现在 JSON 中
@@ -591,10 +619,27 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         let sender = StreamEventSender::new(tx);
 
-        sender.send_tool_call("calling tool").await;
+        sender.send_tool_call("calling tool", None).await;
         let msg = rx.recv().await.unwrap().unwrap();
         assert_eq!(msg.delta, "calling tool");
         assert_eq!(msg.chunk_type, StreamChunkType::ToolCall);
+        assert!(msg.tool_call.is_none());
+
+        // A2：结构化 tool_call 事件透传
+        sender
+            .send_tool_call(
+                "调用: read_file",
+                Some(crate::agent::types::ToolCallEvent {
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                    presentation: "read".into(),
+                }),
+            )
+            .await;
+        let msg = rx.recv().await.unwrap().unwrap();
+        let event = msg.tool_call.unwrap();
+        assert_eq!(event.name, "read_file");
+        assert_eq!(event.presentation, "read");
     }
 
     #[tokio::test]

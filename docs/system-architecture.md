@@ -220,9 +220,12 @@ Agent :: process_message(session_id, msg)
 
 ### 4.2 ToolRegistry 实现
 
-`ToolRegistry` 维护所有可用工具的 JSON Schema 定义，`execute_parallel()` 通过 tokio JoinSet 并行执行（同轮多个 tool_call 并发）：
+`ToolRegistry` 维护所有可用工具的 JSON Schema 定义，`execute_parallel()` 通过 tokio JoinSet 并行执行（同轮多个 tool_call 并发）。
+**工具执行走可插拔管线**（`tool_registry/pipeline.rs`，DSH 瀑布吸收）：pre-execute 监听器（fail-closed）→ 单调守卫（只允许拒绝）→ 执行 → post-execute 监听器（观察/改写结果）。
+内置可观测性监听器（`tool_registry/observability.rs`）承担 usage stats / Trace / GEPA 执行历史 / 失败规则学习：
 
-- **25 个内置工具**：基于 `#[derive(JsonSchema)]` 参数结构体自动生成 Schema
+- **25 个内置工具**：基于 `#[derive(JsonSchema)]` 参数结构体自动生成 Schema；完整清单见自动生成的 [`docs/architecture/tool-catalog.md`](architecture/tool-catalog.md)（`scripts/gen-tool-catalog.ps1` 生成，freshness 挂入 `scripts/test.ps1` lint 门禁）
+- **展示契约（A2）**：每个工具注册 `ToolPresentation` 展示意图（read/terminal/diff/search/web/...），随 SSE `tool_call` 事件透传，前端 `ToolCallCard` 数据驱动渲染——工具与 UI 解耦
 - **安全策略**：`SecurityPolicy` 控制命令白名单/黑名单，文件操作前检查
 - **审批工作流**：`ApprovalWorkflow` 五级风险（Safe/Low/Medium/High/Critical）
 - **验证门控**：`VerificationGate` 控制执行后自动验证（cargo check/test）

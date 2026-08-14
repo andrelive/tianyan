@@ -21,7 +21,7 @@ use crate::executor::SecurityPolicy;
 use crate::executor::VerificationGate;
 use crate::knowledge::KnowledgeIngestor;
 use crate::lsp::diagnostics::LspManager;
-use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition};
+use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition, ToolPresentation};
 use crate::model::ChatService;
 use crate::observability::trace::TraceCollector;
 use crate::observability::usage_stats::UsageStats;
@@ -40,10 +40,16 @@ mod fs_ops;
 mod knowledge_ops;
 /// LSP 工具执行器（execute_lsp）。
 mod lsp_ops;
+/// 内置可观测性后置监听器（A1：统计/Trace/GEPA/规则学习迁移为管线消费者）。
+mod observability;
+/// 工具执行管线：pre-execute 监听器 / 单调守卫 / post-execute 监听器（A1/A4）。
+mod pipeline;
 /// 符号大纲工具执行器（symbol_outline）。
 mod symbol_ops;
 /// 测试发现工具执行器（discover_tests）。
 mod test_ops;
+
+pub use pipeline::{ToolGuard, ToolPostExecuteListener, ToolPreExecuteListener};
 
 /// 将 VFS 层级内容读取结果转换为 JSON 字段值。
 ///
@@ -66,6 +72,29 @@ fn vfs_content_field(result: crate::common::error::Result<String>) -> String {
 fn parse_params<T: serde::de::DeserializeOwned>(arguments: &str) -> Result<T, TianyanError> {
     serde_json::from_str(arguments)
         .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))
+}
+
+/// 包装工具执行错误，保留底层错误的语义分类（ADR-014）。
+///
+/// 底层（executor/edit/patch 等）已用 `not_found` / `conflict` / `invalid_input` /
+/// `permission` / `timeout` 构造器分类的错误，经此包装后谓词（`is_not_found` 等）
+/// 依然可命中——否则 `Custom("tool: 执行失败：...")` 前缀会掩盖分类，
+/// server 层只能映射为 500 而非 404/409。未分类错误保持原消息不变。
+fn wrap_tool_error(e: TianyanError) -> TianyanError {
+    let detail = format!("tool: 执行失败：{e}");
+    if e.is_not_found() {
+        TianyanError::not_found(detail)
+    } else if e.is_conflict() {
+        TianyanError::conflict(detail)
+    } else if e.is_invalid_input() {
+        TianyanError::invalid_input(detail)
+    } else if e.is_permission() {
+        TianyanError::permission(detail)
+    } else if e.is_timeout() {
+        TianyanError::timeout(detail)
+    } else {
+        TianyanError::Custom(detail)
+    }
 }
 
 /// 将安全策略检查错误包装为统一的安全违规工具错误。
@@ -122,25 +151,28 @@ pub struct ToolRegistry {
     pub(crate) verification_gate: Option<Arc<VerificationGate>>,
     /// LSP 管理器（lsp 工具与编辑后诊断附加依赖；None 表示未启用 LSP）。
     pub(crate) lsp_manager: Option<Arc<LspManager>>,
-    /// 规则记录器（工具执行失败时自动学习规则，供 GEPA 进化引擎消费）。
-    pub(crate) rule_recorder: Option<Arc<RuleRecorder>>,
-    /// 使用统计追踪器（技能调用频率、文档访问热度）。
-    pub(crate) usage_stats: Option<Arc<UsageStats>>,
+    /// 内置可观测性后置监听器（统计 / Trace / GEPA 历史 / 失败规则学习；
+    /// A1 迁移：原 execute_single 尾部观测逻辑）。
+    pub(crate) observability: observability::ToolObservabilityListener,
     /// Web 搜索/抓取客户端（web_search / web_fetch 工具依赖）。
     pub(crate) web_client: Option<Arc<WebSearchClient>>,
     /// 后台任务管理器（delegate_to_agent(background) / task_status / task_cancel）。
     pub(crate) background_tasks: Arc<crate::agent::background::BackgroundTaskManager>,
+    /// 工具执行管线：pre-execute 监听器（fail-closed，按注册顺序；A1）。
+    pre_execute_listeners: Vec<Arc<dyn ToolPreExecuteListener>>,
+    /// 工具执行管线：单调守卫（只允许拒绝；A4）。
+    guards: Vec<Arc<dyn ToolGuard>>,
+    /// 工具执行管线：post-execute 监听器（按注册顺序；首个为内置可观测性监听器）。
+    post_execute_listeners: Vec<Arc<dyn ToolPostExecuteListener>>,
+    /// 工具 UI 展示意图映射（A2；工具名 → card 类型，不进入 LLM schema）。
+    presentations: HashMap<String, ToolPresentation>,
     definitions: Vec<ToolDefinition>,
     /// 外部注册的动态工具（如 MCP 工具桥接），按工具名索引。
     dynamic_tools: Arc<Mutex<HashMap<String, Arc<dyn DynamicToolExecutor>>>>,
-    /// 执行轨迹（GEPA 引擎消费）。
-    pub(crate) execution_history: Arc<Mutex<Vec<ExecutionHistory>>>,
     /// 当前委托链深度（delegate_to_agent 嵌套保护；主循环为 0）。
     pub(crate) delegation_depth: Arc<AtomicUsize>,
     /// 子 Agent 角色注册表（delegate_to_agent role 参数解析；默认内置角色）。
     pub(crate) role_registry: Arc<RoleRegistry>,
-    /// 结构化 Trace 收集器（G6；None 时不记录 span——行为零变化）。
-    pub(crate) trace_collector: Option<Arc<TraceCollector>>,
 }
 
 impl ToolRegistry {
@@ -158,17 +190,23 @@ impl ToolRegistry {
             pending_approval_fingerprints: Arc::new(Mutex::new(Vec::new())),
             verification_gate: None,
             lsp_manager: None,
-            rule_recorder: None,
-            usage_stats: None,
+            observability: observability::ToolObservabilityListener::default(),
             web_client: None,
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
+            pre_execute_listeners: Vec::new(),
+            guards: Vec::new(),
+            post_execute_listeners: Vec::new(),
+            presentations: HashMap::new(),
             definitions: Vec::new(),
             dynamic_tools: Arc::new(Mutex::new(HashMap::new())),
-            execution_history: Arc::new(Mutex::new(Vec::new())),
             delegation_depth: Arc::new(AtomicUsize::new(0)),
             role_registry: Arc::new(RoleRegistry::builtin()),
-            trace_collector: None,
         };
+        // A1：内置可观测性监听器注册为第一个 post-execute 监听器——
+        // 原 execute_single 尾部的统计/Trace/GEPA/规则学习自此是管线消费者。
+        registry
+            .post_execute_listeners
+            .push(Arc::new(registry.observability.clone()));
         registry.register_builtin_tools();
         registry
     }
@@ -327,16 +365,56 @@ impl ToolRegistry {
         self
     }
 
-    /// 设置规则记录器（工具执行失败时自动学习规则）。
-    pub fn with_rule_recorder(mut self, recorder: Arc<RuleRecorder>) -> Self {
-        self.rule_recorder = Some(recorder);
+    /// 设置规则记录器（工具执行失败时自动学习规则；委托给内置可观测性监听器）。
+    pub fn with_rule_recorder(self, recorder: Arc<RuleRecorder>) -> Self {
+        self.observability.set_rule_recorder(recorder);
         self
     }
 
-    /// 设置使用统计追踪器。
-    pub fn with_usage_stats(mut self, stats: Arc<UsageStats>) -> Self {
-        self.usage_stats = Some(stats);
+    /// 设置使用统计追踪器（委托给内置可观测性监听器）。
+    pub fn with_usage_stats(self, stats: Arc<UsageStats>) -> Self {
+        self.observability.set_usage_stats(stats);
         self
+    }
+
+    /// 设置工具 UI 展示意图映射（A2 展示契约；工具名 → card 类型）。
+    ///
+    /// 内置工具在 [`Self::new`] 中已按注册内置默认映射（与内置定义一一对应），
+    /// 装配层可用此方法覆盖或补充动态工具的展示意图。映射不进入 LLM 可见的
+    /// tool schema——只服务于前端渲染。
+    pub fn with_presentations(mut self, presentations: HashMap<String, ToolPresentation>) -> Self {
+        self.presentations.extend(presentations);
+        self
+    }
+
+    /// 查询工具的 UI 展示意图（A2；未知工具返回 Generic）。
+    pub fn presentation(&self, name: &str) -> ToolPresentation {
+        self.presentations.get(name).copied().unwrap_or_default()
+    }
+
+    /// 注册工具执行前置监听器（A1 管线阶段 1，fail-closed）。
+    ///
+    /// 按注册顺序依次调用；任一监听器返回 [`PreDecision::Deny`] / [`PreDecision::Ask`]
+    /// 即整条管线中止，后续监听器与工具本身都不会执行。
+    pub fn register_pre_execute_listener(&mut self, listener: Arc<dyn ToolPreExecuteListener>) {
+        self.pre_execute_listeners.push(listener);
+    }
+
+    /// 注册单调守卫（A4 管线阶段 2，只允许拒绝）。
+    ///
+    /// 守卫在全部 pre-execute 监听器之后执行；返回 `Some(原因)` 即拒绝。
+    /// 守卫没有"允许"分支——任何监听器顺序都无法把守卫的拒绝反转成放行。
+    pub fn register_guard(&mut self, guard: Arc<dyn ToolGuard>) {
+        self.guards.push(guard);
+    }
+
+    /// 注册工具执行后置监听器（A1 管线阶段 4，观察/改写结果）。
+    ///
+    /// 在工具执行完成后按注册顺序调用，可观察结果（审计）或改写结果
+    /// （spill locator、错误包装等）。内置可观测性监听器已在 [`Self::new`] 注册
+    /// 为首个 post-execute 监听器。
+    pub fn register_post_execute_listener(&mut self, listener: Arc<dyn ToolPostExecuteListener>) {
+        self.post_execute_listeners.push(listener);
     }
 
     /// 设置 Web 搜索/抓取客户端（web_search / web_fetch 工具依赖）。
@@ -374,9 +452,10 @@ impl ToolRegistry {
         self
     }
 
-    /// 设置结构化 Trace 收集器（G6；工具 span + 后台任务 span 记录）。
+    /// 设置结构化 Trace 收集器（G6；工具 span + 后台任务 span 记录；
+    /// 工具 span 委托给内置可观测性监听器）。
     pub fn with_trace_collector(mut self, collector: Arc<TraceCollector>) -> Self {
-        self.trace_collector = Some(collector.clone());
+        self.observability.set_trace_collector(collector.clone());
         self.background_tasks = Arc::new(
             (*self.background_tasks)
                 .clone()
@@ -565,10 +644,9 @@ impl ToolRegistry {
         overlap
     }
 
-    /// 排空已收集的执行轨迹（供 GEPA 引擎消费）。
+    /// 排空已收集的执行轨迹（供 GEPA 引擎消费；委托给内置可观测性监听器）。
     pub async fn drain_execution_history(&self) -> Vec<ExecutionHistory> {
-        let mut guard = self.execution_history.lock().await;
-        std::mem::take(&mut *guard)
+        self.observability.drain_execution_history()
     }
 
     /// 并行执行多个 tool_call。
@@ -609,7 +687,34 @@ impl ToolRegistry {
     ) -> Result<serde_json::Value, TianyanError> {
         let start = std::time::Instant::now();
         let arguments = &call.function.arguments;
-        let result = match call.function.name.as_str() {
+
+        // A1 管线阶段 1：pre-execute 监听器（fail-closed，按注册顺序）。
+        // 任一监听器返回 Deny/Ask 即整条管线中止——拒绝是单调的，
+        // 后续监听器没有"重新允许"的路径。
+        for listener in &self.pre_execute_listeners {
+            let decision = listener.on_pre_execute(call, session_id, subagent).await;
+            if !decision.is_allow() {
+                let reason = decision
+                    .reason()
+                    .unwrap_or("pre-execute 监听器拒绝")
+                    .to_string();
+                return Err(TianyanError::Custom(format!("tool: 安全违规：{reason}")));
+            }
+        }
+
+        // A4 管线阶段 2：单调守卫（只允许拒绝）。
+        // 守卫返回 Some(原因) 即拒绝执行；守卫没有"允许"分支，
+        // 因此任何监听器顺序都无法把守卫的拒绝反转成放行。
+        for guard in &self.guards {
+            if let Some(reason) = guard.guard(call, session_id, subagent).await {
+                return Err(TianyanError::Custom(format!(
+                    "tool: 安全违规（守卫拒绝）：{reason}"
+                )));
+            }
+        }
+
+        // 管线阶段 3：工具执行（动态工具与内置工具同一路径）。
+        let mut result = match call.function.name.as_str() {
             "read_file" => self.execute_read_file(arguments).await,
             "write_file" => {
                 self.execute_write_file(arguments, session_id, subagent)
@@ -659,80 +764,15 @@ impl ToolRegistry {
             },
         };
 
-        // Record usage stats for tool call
-        if let Some(ref stats) = self.usage_stats {
-            let elapsed_us = start.elapsed().as_micros() as u64;
-            stats.record_skill_call(&call.function.name, result.is_ok(), elapsed_us);
-        }
-
-        // G6 结构化 Trace：工具 span（归属当前轮；参数摘要截断控制体积）
-        if let Some(ref trace) = self.trace_collector {
-            trace.record_tool(
-                session_id,
-                &call.function.name,
-                &truncate_trace_params(arguments),
-                start.elapsed().as_millis() as i64,
-                result.is_ok(),
-                result.as_ref().err().map(|e| e.to_string()),
-            );
-        }
-
-        // Record execution history for GEPA
-        let elapsed = start.elapsed().as_millis() as u64;
-        let success = result.is_ok();
-        let mut history = self.execution_history.lock().await;
-        history.push(ExecutionHistory {
-            task_description: format!("{}: {}", call.function.name, arguments),
-            steps: vec![],
-            result: match &result {
-                Ok(v) => format!("{}", v),
-                Err(e) => e.to_string(),
-            },
-            success,
-            execution_time_ms: elapsed,
-            skills_used: if call.function.name == "call_skill" {
-                serde_json::from_str::<CallSkillParams>(arguments)
-                    .map(|p| vec![p.skill_id])
-                    .unwrap_or_default()
-            } else {
-                vec![]
-            },
-        });
-
-        // Record tool failures as learned rules for GEPA evolution.
-        // Only Logic/System failures are persisted; Transient errors (e.g.,
-        // network timeouts) are skipped by RuleRecorder::record_with_kind.
-        if !success {
-            if let Some(ref recorder) = self.rule_recorder {
-                let tool_name = &call.function.name;
-                let err_msg = result
-                    .as_ref()
-                    .err()
-                    .map(|e| e.to_string())
-                    .unwrap_or_default();
-                let abstract_text = format!("{} 工具执行失败", tool_name);
-                let detail_text = format!(
-                    "工具: {}\n参数: {}\n错误: {}\n",
-                    tool_name, arguments, err_msg
-                );
-                // Use a fixed session_id — recordings are later aggregated
-                // by RuleSuggester across all sessions.
-                if let Err(e) = recorder
-                    .record_with_kind(
-                        &abstract_text,
-                        &detail_text,
-                        "tool-execution",
-                        crate::scheduler::tasks::rule_recorder::FailureKind::Logic,
-                    )
-                    .await
-                {
-                    tracing::debug!(
-                        tool = %tool_name,
-                        error = %e,
-                        "RuleRecorder 记录失败（将被 RuleSuggester 后续聚合）"
-                    );
-                }
-            }
+        // A1 管线阶段 4：post-execute 监听器（观察/改写结果，按注册顺序）。
+        // 内置可观测性监听器（ToolObservabilityListener）在 new() 时已注册为
+        // 第一个 post-execute 监听器——统计 / Trace / GEPA 历史 / 规则学习
+        // 由此接管（行为与原 execute_single 尾部一致）。
+        let elapsed = start.elapsed();
+        for listener in &self.post_execute_listeners {
+            listener
+                .on_post_execute(call, session_id, &mut result, elapsed)
+                .await;
         }
 
         result
@@ -912,6 +952,34 @@ impl ToolRegistry {
                 "lsp",
                 "Query the language server for the given file: goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation. Returns structured results.",
             )));
+
+        // A2 展示契约：内置工具默认展示意图（与上方定义一一对应；
+        // 装配层可用 with_presentations 覆盖/补充）。
+        self.presentations = [
+            ("read_file", ToolPresentation::Read),
+            ("vfs_read", ToolPresentation::Read),
+            ("write_file", ToolPresentation::Write),
+            ("apply_edit", ToolPresentation::Diff),
+            ("apply_patch", ToolPresentation::Diff),
+            ("execute_command", ToolPresentation::Terminal),
+            ("run_tests", ToolPresentation::Terminal),
+            ("verify_build", ToolPresentation::Terminal),
+            ("search_code", ToolPresentation::Search),
+            ("search_knowledge", ToolPresentation::Search),
+            ("glob", ToolPresentation::Search),
+            ("list_dir", ToolPresentation::Search),
+            ("discover_tests", ToolPresentation::Search),
+            ("web_search", ToolPresentation::Web),
+            ("web_fetch", ToolPresentation::Web),
+            ("call_skill", ToolPresentation::Skill),
+            ("knowledge_ingest", ToolPresentation::Knowledge),
+            ("delegate_to_agent", ToolPresentation::Delegate),
+            ("lsp", ToolPresentation::Code),
+            ("symbol_outline", ToolPresentation::Code),
+        ]
+        .into_iter()
+        .map(|(name, presentation)| (name.to_string(), presentation))
+        .collect();
     }
 }
 
@@ -938,6 +1006,34 @@ mod tests {
         assert!(defs.iter().any(|d| d.function.name == "vfs_list"));
         assert!(defs.iter().any(|d| d.function.name == "self_check"));
         assert!(defs.iter().any(|d| d.function.name == "knowledge_ingest"));
+    }
+
+    /// A2 展示契约：内置工具展示意图映射齐全，未知工具回退 Generic。
+    #[test]
+    fn test_builtin_presentations_registered() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        assert_eq!(registry.presentation("read_file"), ToolPresentation::Read);
+        assert_eq!(registry.presentation("write_file"), ToolPresentation::Write);
+        assert_eq!(
+            registry.presentation("execute_command"),
+            ToolPresentation::Terminal
+        );
+        assert_eq!(registry.presentation("apply_edit"), ToolPresentation::Diff);
+        assert_eq!(
+            registry.presentation("search_code"),
+            ToolPresentation::Search
+        );
+        assert_eq!(registry.presentation("web_fetch"), ToolPresentation::Web);
+        assert_eq!(registry.presentation("call_skill"), ToolPresentation::Skill);
+        assert_eq!(
+            registry.presentation("delegate_to_agent"),
+            ToolPresentation::Delegate
+        );
+        // 未注册工具回退 Generic
+        assert_eq!(
+            registry.presentation("mcp_unknown"),
+            ToolPresentation::Generic
+        );
     }
 
     /// 动态工具：注册 → 定义可见 → 执行路由 → 未知工具错误。

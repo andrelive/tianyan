@@ -613,8 +613,22 @@ impl AgentLoop {
             // Notify about tool calls if sender is available
             if let Some(sender) = ctx.stream_sender {
                 for tc in tool_calls {
+                    // A2 展示契约：携带结构化工具信息（名称/参数/展示意图），
+                    // 前端据此渲染 tool card；delta 保持人类可读文本。
+                    let event = crate::agent::types::ToolCallEvent {
+                        name: tc.function.name.clone(),
+                        arguments: tc.function.arguments.clone(),
+                        presentation: self
+                            .tool_registry
+                            .presentation(&tc.function.name)
+                            .as_str()
+                            .to_string(),
+                    };
                     sender
-                        .send_tool_call(&format!("\u{8c03}\u{7528}: {}", tc.function.name))
+                        .send_tool_call(
+                            &format!("\u{8c03}\u{7528}: {}", tc.function.name),
+                            Some(event),
+                        )
                         .await;
                 }
             }
@@ -745,9 +759,6 @@ mod tests {
             _session_id: &str,
             _msg: StructuredMessage,
         ) -> Result<()> {
-            Ok(())
-        }
-        async fn add_message(&self, _session_id: &str, _message: Message) -> Result<()> {
             Ok(())
         }
         async fn rewrite_messages(

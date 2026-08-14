@@ -61,6 +61,13 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - Clippy: `unwrap_used`、`expect_used`、`unwrap_in_result` 均为 `warn`
 - 公开 API 用 `///` / `//!`，不要用 `//` 行注释
 - 所有错误用 `TianyanError`，禁止引入新错误类型。`TianyanError` 仅保留 4 个变体（`Io` / `Json` / `Toml` / `Custom`），模块内部错误通过 `Custom(String)` 传递，调用方在消息中携带"模块前缀：详情"，**严禁新增变体**
+- **错误分类用语义谓词**（ADR-014）：构造用 `not_found` / `conflict` / `invalid_input` / `permission` / `timeout`，判定用 `is_not_found` / `is_conflict` / `is_invalid_input` / `is_permission` / `is_timeout`。**禁止在调用方对错误消息做字符串匹配分类**（`starts_with` / `contains` 判定错误类别）——分类契约只在 `core/src/common/error.rs` 一处
+
+## 协作纪律（多 agent / 并行工作）
+
+- **禁止全局 git 操作**：`git stash` / `git reset --hard` / `git checkout .` / `git clean` 会瞬间毁灭其他并行工作者的进行中编辑。只允许 `git diff` / `git status` / `git checkout <具体文件>` / `git log` / `git reflog`
+- 发现"文件被神秘回滚/修改"时：先 `git reflog -5` + `git stash list` 排查**内部**操作痕迹，再怀疑外部进程
+- 验证"干净树是否编译"用 `git worktree` 或临时克隆，**不要用 stash 切换**
 
 ## 架构导航
 
@@ -85,13 +92,14 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 模块详细说明 → [`docs/module-descriptions.md`](docs/module-descriptions.md)
 模块间关系 → [`docs/module-relationships.md`](docs/module-relationships.md)
 Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](docs/harness核心思路/harness-engineering-overview.md)
+**重构实践指南（审查/波次/QA 纪律）→ [`docs/architecture/refactoring-practices.md`](docs/architecture/refactoring-practices.md)**
 
 ## 模块速览
 
 | 模块 | 位置 | 一句话 | ⛔ VFS 约束 |
 |------|------|--------|-------------|
 | `vfs` | `core/src/vfs/` | **基础机制**：统一存储检索层（L0/L1/L2 + RRF 融合） | — |
-| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry | 所有工具操作通过 VFS |
+| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry；工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，DSH 吸收）+ 内置可观测性监听器（统计/Trace/GEPA/规则学习） | 所有工具操作通过 VFS |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 组装） | 检索仅通过 `DualLayerRetriever` |
 | `knowledge` | `core/src/knowledge/` | 知识库导入管道 | ❌ **不建独立检索管道**，导入→VFS→SummaryEngine |
 | `memory` | `core/src/memory/` | `MemoryExtractor` 长期记忆提取 | ❌ **不建独立存储**，提取→VFS write |
@@ -121,3 +129,6 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 - Providers fail fast，不做重试/退避
 - 工具不做自主多轮决策，决策权在 LLM
 - 已有链路不叠加抽象（不额外封装 Manager/Coordinator）
+- `server/main.rs` 不解析 `--host/--port` 命令行参数——独立启动总是监听默认 `127.0.0.1:3000`，QA 时直接测 3000
+- `scripts/test.ps1` 的 bench 步骤传 `-- --verbose` 会被 bench harness 拒绝（脚本 bug）——bench 请直接跑 `cargo bench -p tianyan-server`
+- 配置热更新 API（`PUT /api/v1/config`）会持久化写入 `tianyan.toml`——QA/测试改动配置后必须恢复，别留污染

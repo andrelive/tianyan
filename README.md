@@ -31,7 +31,7 @@ tianyan/
 │   ├── Cargo.toml          # 库名: tianyan
 │   └── src/
 │       ├── lib.rs          # 核心模块导出
-│       ├── agent/          # Agent 协调器（AgentLoop + ToolRegistry）
+│       ├── agent/          # Agent 协调器（AgentLoop + ToolRegistry；工具执行可插拔管线：pre-execute 监听器/单调守卫/post-execute 监听器）
 │       ├── config/         # 配置管理（含 MCP 服务器配置）
 │       ├── context/        # 上下文工程（检索 + 压缩 + 组装）
 │       ├── executor/       # 工具执行支撑（安全策略、审批、验证门控）
@@ -48,15 +48,24 @@ tianyan/
 ├── server/                 # Axum HTTP 后端服务
 │   ├── Cargo.toml          # 库名: tianyan-server
 │   └── src/
-│       ├── lib.rs          # 暴露 start_server() + bootstrap_app_vfs()
-│       ├── main.rs         # 独立运行入口
-│       ├── state.rs        # 共享 AppState（热重载、组件装配）
+│       ├── lib.rs          # 暴露 start_server() + bootstrap_app_vfs()（含 get_static_dir 前端目录探测）
+│       ├── main.rs         # 独立运行入口（固定监听 127.0.0.1:3000，不解析 CLI 参数）
+│       ├── state.rs        # 共享 AppState（热重载、组件装配、剪贴板桥接 outbox/pending）
+│       ├── agent_builder.rs # Agent 组装（动态工具注入）
+│       ├── mcp_bridge.rs   # MCP 桥接（浏览器截图等 MCP 产物落盘 mcp_images/）
+│       ├── notification.rs # 消息通知与唤醒原语
 │       └── api/            # HTTP API（每个域 handler/routes/services/types 四件套）
 │           ├── chat/       # 对话接口（含 SSE 流式、追问澄清）
 │           ├── sessions/   # 会话管理（消息回退/重做、标题编辑）
 │           ├── knowledge/  # 知识导入、检索、条目浏览
 │           ├── skills/     # 技能列表与执行
 │           ├── config/     # 配置管理（含 soul/MCP/Provider 发现子模块）
+│           ├── clipboard/  # 剪贴板桥接（capture/respond/pending/outbox）
+│           ├── events/     # 事件 webhook 接收
+│           ├── insights/   # 洞察与统计接口
+│           ├── tasks/      # 后台任务列表与取消
+│           ├── traces/     # 结构化轨迹查询
+│           ├── workspace/  # 工作区文件树/读取/差异/编辑
 │           └── shared/     # 通用错误类型与 DTO
 ├── gui-vite/                # React TypeScript 前端
 │   ├── package.json          # npm 依赖
@@ -263,11 +272,11 @@ embedding = { provider = "openai", model = "text-embedding-3-small" }
 ### 独立 API 服务
 
 ```bash
-# 启动 HTTP API 服务
-cargo run -p tianyan-server -- --host 127.0.0.1 --port 3000
+# 启动 HTTP API 服务（server/main.rs 不解析 --host/--port 参数，固定监听 127.0.0.1:3000）
+cargo run -p tianyan-server
 
-# 或使用发布版本
-./target/release/tianyan-server --host 127.0.0.1 --port 3000
+# 发布版本同样无需任何命令行参数
+./target/release/tianyan-server
 ```
 
 API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
@@ -294,9 +303,15 @@ API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
 | `/api/v1/memory` | GET | 记忆列表（VFS memory 命名空间浏览） |
 | `/api/v1/stats` | GET | 使用统计摘要（技能调用 / 文档访问 / 搜索热度） |
 | `/api/v1/retrieval/traces` | GET | 最近检索轨迹（单次检索完整过程，FIFO 500 条） |
+| `/api/v1/traces` | GET | 结构化轨迹查询（Trace 回放查询） |
 | `/api/v1/scheduler/status` | GET | 定时任务状态（任务列表 / 执行次数 / 距上次执行） |
+| `/api/v1/events` | POST | 事件 webhook 接收（事件总线外部投递入口） |
 | `/api/v1/approval/status` | GET | 审批状态（风险配置 / 待处理 / 待确认 / 审计记录） |
 | `/api/v1/approval/respond` | POST | 响应待处理审批请求（GUI 审批面板） |
+| `/api/v1/clipboard/capture` | POST | 剪贴板桥接：请求捕获系统剪贴板（agent 触发 → GUI 响应） |
+| `/api/v1/clipboard/respond` | POST | 剪贴板桥接：提交捕获结果（GUI → agent） |
+| `/api/v1/clipboard/pending` | GET | 剪贴板桥接：获取待处理捕获请求 |
+| `/api/v1/clipboard/outbox` | GET | 剪贴板桥接：获取写入队列（`clipboard_write` 工具输出，GUI 轮询消费） |
 | `/api/v1/skills` | GET | 技能列表 |
 | `/api/v1/skills/{id}/execute` | POST | 执行技能（同步执行，响应即最终结果） |
 | `/api/v1/tasks` | GET | 后台任务列表（delegate_to_agent background 任务） |
@@ -354,7 +369,7 @@ Tianyan 采用四层架构（Tauri → React/TypeScript 前端 → Axum Server �
 - **StructuredMessage** — 贯穿持久化、会话组装、Token 统计的单一真相源
 - **组件工具化** — 25 个 OpenAI function calling 兼容工具
 - **前缀匹配上下文组装** — soul→rules→memories→history 固定顺序
-- **SQLite 主存储后端** — 单文件、单连接，替代本地文件后端
+- **SQLite 主存储后端** — 单文件、单连接（ADR-005 部分落地：`LocalFileBackend` 仍为生产默认，SQLite 通过 `[storage] backend = "sqlite"` 启用）
 - **工作区快照独立存储** — 会话回退时恢复文件修改（VFS 例外）
 
 另见：[架构决策记录](./docs/architecture/decisions/)（含 ADR-010 对话多模态链路）。
@@ -392,6 +407,7 @@ Tianyan 正在积极开发中。详见 [系统架构文档](./docs/system-archit
 - MCP 工具桥接（外部 MCP 服务器工具进入 Agent 循环；浏览器截图自动落盘 `{data_dir}/mcp_images/`）
 - 子 Agent 编排（`delegate_to_agent`：并行委托 + 嵌套委托（深度上限 3）+ `max_turns`/`timeout_secs` + **后台任务**（fire-and-forget，完成自动通知会话））
 - 后台任务管理（`task_status`/`task_cancel` 工具 + `GET /api/v1/tasks`）
+- 剪贴板桥接（agent `clipboard_write` 工具已接线进组合根 → 系统剪贴板；`/api/v1/clipboard/*` 提供捕获/响应/pending/outbox 四端点）
 - 回答质量评测（LLM-as-Judge 评分式四维度评测 + 黄金用例，离线基准）
 - 6 个内置技能 + GEPA 进化引擎自动学习（学习回路：VFS 存储 → 注册 → 可发现/执行指引；会话边界刷新——新会话立即可见最新进化产物，会话内前缀稳定不破坏缓存；压缩点刷新——长会话压缩后 learned rules 与技能同步更新；前缀快照随会话持久化——重启后旧会话沿用同一份，不重新检索）
 - 上下文压缩（自动阈值触发 + 手动 API；压缩点 = 会话内唯一免费刷新点）

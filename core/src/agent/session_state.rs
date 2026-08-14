@@ -100,16 +100,6 @@ impl SessionState {
         self.last_activity = Instant::now();
     }
 
-    /// 获取最近 n 条消息。
-    pub fn recent_messages(&self, n: usize) -> Vec<&StructuredMessage> {
-        self.structured_messages
-            .iter()
-            .rev()
-            .take(n)
-            .rev()
-            .collect()
-    }
-
     /// 消息总数。
     pub fn message_count(&self) -> usize {
         self.structured_messages.len()

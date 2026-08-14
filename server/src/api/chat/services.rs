@@ -139,6 +139,7 @@ impl ChatService {
                         },
                         chunk_type: chunk.chunk_type,
                         skill_calls,
+                        tool_call: chunk.tool_call,
                     };
 
                     if tx.send(event).await.is_err() {
@@ -155,6 +156,7 @@ impl ChatService {
                         finish_reason: Some("error".to_string()),
                         chunk_type: tianyan::agent::StreamChunkType::Error,
                         skill_calls: None,
+                        tool_call: None,
                     };
                     if tx.send(event).await.is_err() {
                         debug!("客户端已断开，错误事件未送达");

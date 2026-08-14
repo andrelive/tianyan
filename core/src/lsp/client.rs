@@ -17,16 +17,16 @@ use std::time::Duration;
 
 use dashmap::DashMap;
 use lsp_types::notification::{
-    DidChangeTextDocument, DidOpenTextDocument, Initialized, Notification as LspNotification,
+    DidOpenTextDocument, Initialized, Notification as LspNotification,
     PublishDiagnostics,
 };
 use lsp_types::request::{GotoImplementationParams, Request as LspRequest};
 use lsp_types::{
-    DidChangeTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams,
+    DidOpenTextDocumentParams, DocumentSymbolParams,
     GotoDefinitionParams, HoverParams, InitializeParams, InitializedParams, Position,
-    PublishDiagnosticsParams, ReferenceContext, ReferenceParams, TextDocumentContentChangeEvent,
+    PublishDiagnosticsParams, ReferenceContext, ReferenceParams,
     TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
-    VersionedTextDocumentIdentifier, WorkspaceFolder, WorkspaceSymbolParams,
+    WorkspaceFolder, WorkspaceSymbolParams,
 };
 use serde_json::{json, Value};
 use tokio::io::{
@@ -289,23 +289,6 @@ impl LspClient {
         };
         self.notify(
             <DidOpenTextDocument as LspNotification>::METHOD,
-            serde_json::to_value(params)?,
-        )
-        .await
-    }
-
-    /// 全文同步内容变更通知。
-    pub async fn did_change(&self, uri: lsp_types::Uri, version: i32, text: &str) -> Result<()> {
-        let params = DidChangeTextDocumentParams {
-            text_document: VersionedTextDocumentIdentifier { uri, version },
-            content_changes: vec![TextDocumentContentChangeEvent {
-                range: None,
-                range_length: None,
-                text: text.to_string(),
-            }],
-        };
-        self.notify(
-            <DidChangeTextDocument as LspNotification>::METHOD,
             serde_json::to_value(params)?,
         )
         .await

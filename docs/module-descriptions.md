@@ -23,7 +23,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 | 子模块 | 职责 | 关键文件 | 集成状态 |
 |--------|------|---------|---------|
-| `agent` | Agent 协调器 + AgentLoop 迭代循环 + 会话状态 | coordinator.rs, builder.rs, session_state.rs, loop.rs, tool_registry/, tools.rs, types.rs | ✅ 已集成 |
+| `agent` | Agent 协调器 + AgentLoop 迭代循环 + 会话状态；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器）+ 内置可观测性监听器（`tool_registry/observability.rs`） | coordinator.rs, builder.rs, session_state.rs, loop.rs, tool_registry/（含 pipeline.rs、observability.rs）, tools.rs, types.rs | ✅ 已集成 |
 | `common` | 通用类型（按领域拆分）、错误处理、日志配置、token 估算 | error.rs, logging.rs, token_estimator.rs, types/ | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
 | `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
@@ -53,7 +53,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry；`Agent::new` 7 参数） |
 | `AgentLoop` | Agent 迭代循环（LLM 工具调用循环） |
 | `AgentLoopConfig` | AgentLoop 配置（loop_limit 默认 50） |
-| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls（JoinSet，同轮多调用并发）；注册 25 个工具：read_file、write_file、execute_command、search_code、search_knowledge、vfs_read、vfs_list、call_skill、run_tests、verify_build、ask_user、self_check、knowledge_ingest、delegate_to_agent、web_search、web_fetch、task_status、task_cancel、apply_edit、apply_patch、glob、list_dir、discover_tests、symbol_outline、lsp；`delegate_to_agent` 支持嵌套委托（深度上限 3，RAII guard 计数）、`max_turns`/`timeout_secs` 参数与**后台执行**（`background: true` → 任务注册表 + 完成通知注入父会话） |
+| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls（JoinSet，同轮多调用并发）；注册 25 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](./architecture/tool-catalog.md)，freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁，A3）；工具执行走**可插拔管线**（`tool_registry/pipeline.rs`：pre-execute 监听器 → 单调守卫 → 执行 → post-execute 监听器，A1/A4）；内置可观测性监听器（`tool_registry/observability.rs`）承担 usage stats / Trace / GEPA 执行历史 / 失败规则学习；工具展示意图映射（`ToolPresentation`，A2）供前端渲染 tool card；`delegate_to_agent` 支持嵌套委托（深度上限 3，RAII guard 计数）、`max_turns`/`timeout_secs` 参数与**后台执行**（`background: true` → 任务注册表 + 完成通知注入父会话） |
 | `SessionState` | 会话状态容器（对话历史为唯一真相源，上下文窗口、待持久化记忆） |
 | `SessionStateManager` | 多会话状态管理器（线程安全，Arc<RwLock<HashMap>>） |
 | `AgentResponse` | Agent 响应（内容、追问、Token 使用量、技能调用信息、处理时间） |
@@ -73,7 +73,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 1. **StructuredMessage 持久化**：AgentLoop 每产生一条消息，实时调 `SessionManager::add_structured_message()` 落盘，工具调用消息全部持久化。
 2. **压缩锚点**：`StructuredMessage.compression_marker` 标记压缩产生的摘要消息，加载会话时反向扫描到最近 marker。
-3. **组件工具化**：`ToolRegistry` 注册 21 个 OpenAI function calling 兼容工具，`call_skill` 桥接到 `SkillExecutor`。
+3. **组件工具化**：`ToolRegistry` 注册 25 个 OpenAI function calling 兼容工具（完整清单见自动生成的 [`tool-catalog.md`](architecture/tool-catalog.md)），`call_skill` 桥接到 `SkillExecutor`；工具执行走可插拔管线（pre-execute 监听器 / 单调守卫 / post-execute 监听器）。
 
 ### 1.3 model 子模块
 
@@ -109,7 +109,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `vfs/types.rs` — 存储相关类型定义
 - `vfs/vfs_impl.rs` — `VirtualFileSystemImpl` 实现 + `initialize()` 基础设施初始化
 - `vfs/vfs_builder.rs` — `VirtualFileSystemBuilder` 构建器
-- `vfs/backend/sqlite.rs` — SQLite 存储后端（替代已删除的 `LocalFileBackend`）
+- `vfs/backend/sqlite.rs` — SQLite 存储后端（ADR-005 部分落地：`LocalFileBackend` 仍为生产默认后端，SQLite 通过配置 `[storage] backend = "sqlite"` 启用）
 - `vfs/backend/sqlite_db.rs` — 共享 SQLite 连接 `SqliteDb`（与 `observability/usage_stats.rs` 共用，ADR-005 单连接语义；自 `observability/` 下沉，ADR-007）
 - `vfs/vector/lancedb/` — LanceDB 嵌入式向量数据库实现（`batch.rs` / `mod.rs` / `tests.rs`，RRF 融合搜索）
 - `vfs/summary/engine.rs` — `SummaryEngine` 分层摘要生成（`new(model_service, model_name)` 2 参数，依赖 `model::ChatService`）
@@ -124,7 +124,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `VfsSearch` (trait) | 向量检索：查询 embed → LanceDB RRF 融合 abstract_vector + overview_vector |
 | `VirtualFileSystemImpl` | VFS 默认实现 |
 | `VirtualFileSystemBuilder` | VFS 构建器 |
-| `SqliteBackend` | SQLite 存储后端（具体类型，替代已删除的 `LocalFileBackend`） |
+| `SqliteBackend` | SQLite 存储后端（具体类型；`LocalFileBackend` 仍为生产默认后端，ADR-005 部分落地） |
 | `LanceDbVectorStore` | LanceDB 嵌入式向量数据库实现（支持多点向量、RRF 融合搜索） |
 | `SummaryEngine` | 分层摘要生成引擎（L0: ~100 tokens, L1: ~2K tokens） |
 | `UriMapper` | URI 到文件系统路径映射 |
@@ -148,12 +148,12 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 ### 1.5 executor 子模块
 
-**职责**：独立的工具执行函数（`execute_read_file`、`execute_write_file`、`execute_search_code`、`execute_command_action`、`execute_run_tests`、`execute_verify_build`）+ 编程助手执行原语（apply_edit / apply_patch / glob / list_dir / discover_tests / symbol_outline / lsp），供 `ToolRegistry` 调用。`Action`、`ExecutorError`、`ApprovalWorkflow`、`LlmJudge`、`VerificationGate` 类型被 `agent/build.rs` 和 `agent/tool_registry.rs` 使用。
+**职责**：独立的工具执行函数（`execute_read_file`、`execute_write_file`、`execute_command_action`、`execute_verify_build`）+ 编程助手执行原语（apply_edit / apply_patch / glob / list_dir / discover_tests / symbol_outline / lsp），供 `ToolRegistry` 调用。`Action`、`ExecutorError`、`ApprovalWorkflow`、`LlmJudge`、`VerificationGate` 类型被 `agent/build.rs` 和 `agent/tool_registry.rs` 使用。
 
 > `Executor` trait 壳、`Step`、`StepResult`、`FailureHandling`、`ExecutorTrait` 等旧 Planner-Executor 架构类型已移除。
 
 **模块组织**：
-- `executor/actions.rs` — 公开执行函数（`execute_read_file`、`execute_write_file`、`execute_search_code`、`execute_run_tests`、`execute_verify_build`）+ 重导出 `execute_command_action` / `SecurityPolicy`
+- `executor/actions.rs` — 公开执行函数（`execute_read_file`、`execute_write_file`、`execute_verify_build`）+ 重导出 `execute_command_action` / `SecurityPolicy`
 - `executor/security.rs` — `SecurityPolicy` 安全策略（命令白名单/黑名单、目录限制、command_timeout）+ 路径沙箱统一判定（`check_path_rules` / `normalize_path_for_check`，skills 侧共享）
 - `executor/command.rs` — 命令执行（`execute_command_action`、`DEFAULT_COMMAND_TIMEOUT_SECS`）
 - `executor/output_parse.rs` — 命令输出解析统一实现（`extract_build_errors` / `count_test_passed` / `extract_test_failures`：大小写不敏感匹配、单行 200 字符截断、50 条上限）
@@ -369,7 +369,6 @@ Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE �
 | `api/shared` | 共享类型、错误处理、响应格式 | error.rs, response.rs, types.rs |
 | `state` | 应用状态管理（Agent、VFS、SessionManager 等生命周期） | state.rs |
 | `agent_builder` | Agent 构建工厂（构建 + 验证 + 降级） | agent_builder.rs |
-| `core_bridge` | Core 类型转换桥接 | core_bridge.rs |
 
 ### 3.2 API 端点清单
 
@@ -435,10 +434,7 @@ Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE �
 **AgentBuilderFactory** (`agent_builder.rs`)：
 - 静态工厂类，负责 Agent 实例的创建和配置验证
 - `build_agent_or_wizard`：构建失败时降级为 `WizardModeAgent`
-
-**core_bridge** (`core_bridge.rs`)：
-- `convert_message`：API 消息类型 → Core 消息类型
-- `convert_token_usage`：Core Token 使用量 → API Token 使用量
+- 组合根收敛：`session_manager` / `trace_collector` 由 AppState 创建并注入（单一实例，API 层与 Agent 共享）
 
 **错误处理** (`shared/error.rs`)：
 - `ApiError` 统一错误类型（NotFound / BadRequest / Internal / Config / Agent）
@@ -545,7 +541,7 @@ Tauri lib.rs::run()
     ├─→ tianyan_server::start_server()  (启动 HTTP 服务器)
     │     └─ bootstrap_app_vfs → AppState::new → axum::serve
     ├─→ reqwest GET /health             (健康检查)
-    └─→ Tauri WebView → gui/dist/       (加载前端)
+    └─→ Tauri WebView → gui-vite/dist/    (加载前端)
 ```
 
 ---

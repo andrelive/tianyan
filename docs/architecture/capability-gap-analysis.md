@@ -16,7 +16,7 @@
 
 | 维度 | 能力 |
 |------|------|
-| 工具层 | 21 内置（文件/代码/知识/VFS/测试/LSP/委托/技能）+ MCP 动态工具桥接（stdio，截图落盘） |
+| 工具层 | 25 内置（完整清单见自动生成的 [`tool-catalog.md`](./tool-catalog.md)）+ MCP 动态工具桥接（stdio，截图落盘） |
 | 感知层 | 对话图片输入（全链路）✅、浏览器感知（MCP playwright 截图）✅、纯 HTTP 抓取（http_request 技能，SSRF 防护） |
 | 编排层 | 子 agent 委托（同轮并行 + 嵌套深度 3 + max_turns/timeout）✅、AgentLoop 单循环 |
 | 记忆/知识 | VFS L0/L1/L2 双层摘要索引、记忆提取、GEPA 技能进化、会话压缩 |

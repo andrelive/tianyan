@@ -1,6 +1,6 @@
 # 天演 (Tianyan) 项目测试自动化脚本
 # 用法: .\scripts\test.ps1 [level]
-#   level: unit | integration | e2e | bench | all (默认)
+#   level: lint | unit | integration | e2e | gui-e2e | bench | all (默认)
 
 param(
     [string]$Level = "all"
@@ -10,6 +10,22 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "========== 天演自动化测试 ==========" -ForegroundColor Cyan
 Write-Host "测试层级: $Level" -ForegroundColor Yellow
+
+function Test-Lint {
+    Write-Host ">>>>> 0. 静态检查 (Lint)" -ForegroundColor Green
+    Write-Host "  - 格式化检查..."
+    cargo fmt --check
+    if ($LASTEXITCODE -ne 0) { throw "fmt 检查失败" }
+
+    Write-Host "  - Clippy 检查..."
+    cargo clippy --workspace -- -D warnings
+    if ($LASTEXITCODE -ne 0) { throw "clippy 检查失败" }
+
+    Write-Host "  - 工具目录 freshness 校验 (A3)..."
+    & "$PSScriptRoot\gen-tool-catalog.ps1" -Check
+    if ($LASTEXITCODE -ne 0) { throw "工具目录已漂移，请运行 scripts/gen-tool-catalog.ps1" }
+    Write-Host "静态检查通过" -ForegroundColor Green
+}
 
 function Test-Unit {
     Write-Host ">>>>> 1. 单元测试 (Unit Tests)" -ForegroundColor Green
@@ -26,29 +42,44 @@ function Test-Integration {
 }
 
 function Test-E2E {
-    Write-Host ">>>>> 3. E2E 测试" -ForegroundColor Green
+    Write-Host ">>>>> 3. Rust E2E 测试 (HTTP 级)" -ForegroundColor Green
     cargo test --workspace --test e2e_tests -- --nocapture
     if ($LASTEXITCODE -ne 0) { throw "E2E 测试失败" }
-    Write-Host "E2E 测试通过" -ForegroundColor Green
+    Write-Host "Rust E2E 测试通过" -ForegroundColor Green
+}
+
+function Test-GuiE2E {
+    Write-Host ">>>>> 4. GUI E2E 测试 (Playwright, 真实后端)" -ForegroundColor Green
+    # 预编译后端，避免 playwright webServer 首次编译超时
+    cargo build -p tianyan-server
+    if ($LASTEXITCODE -ne 0) { throw "后端预编译失败" }
+
+    # 端口占用预检：8765 (mock-llm) / 3000 (后端) / 5173 (vite)
+    foreach ($port in 8765, 3000, 5173) {
+        if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) {
+            throw "端口 $port 已被占用。请先停止占用该端口的进程（如开发中的 tianyan server / vite dev / mock-llm）再运行 GUI E2E。"
+        }
+    }
+
+    Push-Location gui-vite
+    try {
+        # CI=1 强制 reuseExistingServer=false + retries=2 + workers=1，保证确定性
+        $env:CI = "1"
+        npx playwright test
+        if ($LASTEXITCODE -ne 0) { throw "GUI E2E 测试失败" }
+    } finally {
+        Remove-Item Env:CI -ErrorAction SilentlyContinue
+        Pop-Location
+    }
+    Write-Host "GUI E2E 测试通过" -ForegroundColor Green
 }
 
 function Test-Benchmark {
-    Write-Host ">>>>> 4. 性能基准 (Benchmarks)" -ForegroundColor Green
-    cargo bench -p tianyan-server -- --verbose
+    Write-Host ">>>>> 5. 性能基准 (Benchmarks)" -ForegroundColor Green
+    # 注意：不要传 -- --verbose —— bench harness 会拒绝该参数
+    cargo bench -p tianyan-server
     if ($LASTEXITCODE -ne 0) { throw "基准测试失败" }
     Write-Host "基准测试完成" -ForegroundColor Green
-}
-
-function Test-Lint {
-    Write-Host ">>>>> 0. 静态检查 (Lint)" -ForegroundColor Green
-    Write-Host "  - 格式化检查..."
-    cargo fmt --check
-    if ($LASTEXITCODE -ne 0) { throw "fmt 检查失败" }
-
-    Write-Host "  - Clippy 检查..."
-    cargo clippy --workspace -- -D warnings
-    if ($LASTEXITCODE -ne 0) { throw "clippy 检查失败" }
-    Write-Host "静态检查通过" -ForegroundColor Green
 }
 
 function Test-All {
@@ -56,6 +87,7 @@ function Test-All {
     Test-Unit
     Test-Integration
     Test-E2E
+    Test-GuiE2E
     Test-Benchmark
 }
 
@@ -64,10 +96,11 @@ switch ($Level) {
     "unit"        { Test-Unit }
     "integration"  { Test-Integration }
     "e2e"         { Test-E2E }
+    "gui-e2e"     { Test-GuiE2E }
     "bench"       { Test-Benchmark }
     "all"         { Test-All }
     default       {
-        Write-Host "未知层级 '$Level'。可选: lint, unit, integration, e2e, bench, all" -ForegroundColor Red
+        Write-Host "未知层级 '$Level'。可选: lint, unit, integration, e2e, gui-e2e, bench, all" -ForegroundColor Red
         exit 1
     }
 }

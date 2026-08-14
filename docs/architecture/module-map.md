@@ -22,7 +22,7 @@
 
 | 子模块 | 位置 | 职责 | 关键文件 |
 |--------|------|------|---------|
-| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 + 后台任务 | `coordinator.rs`, `loop.rs`, `tool_registry/`, `session_state.rs`, `builder.rs`, `background.rs` |
+| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 + 后台任务；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器/单调守卫/post-execute 监听器，DSH A1/A4 吸收）+ 内置可观测性监听器（`tool_registry/observability.rs`：统计/Trace/GEPA 历史/规则学习） | `coordinator.rs`, `loop.rs`, `tool_registry/`（含 `pipeline.rs`、`observability.rs`）, `session_state.rs`, `builder.rs`, `background.rs` |
 | `common` | `core/src/common/` | 通用类型、错误处理、日志配置、token 估算、`StructuredMessage`、多模态片段（`ContentPart`/`ImageUrl`） | `error.rs`, `logging.rs`, `token_estimator.rs`, `types/`（含 `retrieval_trace.rs`、`content_part.rs`） |
 | `config` | `core/src/config/` | TOML 配置管理 + 环境变量 + 向导 | `mod.rs`, `wizard.rs`, `validation.rs` |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 管线 + 组装） | `pipeline.rs`, `assembler.rs`, `retrieval/`, `compression/` |
@@ -53,7 +53,6 @@
 | `api/config` | `server/src/api/config/` | 配置管理 API + 向导 |
 | `state` | `server/src/state.rs` | AppState 生命周期管理 |
 | `agent_builder` | `server/src/agent_builder.rs` | Agent 构建工厂 |
-| `core_bridge` | `server/src/core_bridge.rs` | Core ↔ API 类型转换桥接 |
 | `mcp_bridge` | `server/src/mcp_bridge.rs` | MCP 工具桥接（配置服务器 → ToolRegistry 动态工具；截图等图片结果落盘 `{data_dir}/mcp_images/`） |
 
 ---

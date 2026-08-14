@@ -43,11 +43,6 @@ pub enum RiskLevel {
 }
 
 impl RiskLevel {
-    /// 是否需要用户审批。
-    pub fn requires_approval(&self) -> bool {
-        matches!(self, Self::Medium | Self::High | Self::Critical)
-    }
-
     /// 是否默认拒绝。
     pub fn default_deny(&self) -> bool {
         matches!(self, Self::Critical)

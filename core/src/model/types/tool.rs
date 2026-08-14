@@ -3,6 +3,59 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::common::types::tool::{FunctionCall, ToolCall, ToolCallType};
 
+/// 工具 UI 展示意图（A2 展示契约，DSH presentCall/presentResult card 词汇吸收）。
+///
+/// 工具自带 UI 渲染意图，前端按 card 类型渲染 tool 调用卡片——UI 与工具
+/// 解耦，MCP 等动态工具也能有好看的卡片。对应 DSH card 词汇表
+/// （generic/terminal/diff/search/read/web）的天演投影。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPresentation {
+    /// 通用卡片（默认；无特定渲染意图）。
+    #[default]
+    Generic,
+    /// 文件读取（read_file / vfs_read）：展示文件路径与内容预览。
+    Read,
+    /// 文件写入（write_file）：展示目标路径。
+    Write,
+    /// 终端命令（execute_command / run_tests / verify_build）：等宽字体命令块。
+    Terminal,
+    /// 差异编辑（apply_edit / apply_patch）：展示 diff 意图。
+    Diff,
+    /// 搜索（search_code / search_knowledge / glob / list_dir / discover_tests）：
+    /// 结果列表。
+    Search,
+    /// Web（web_search / web_fetch）：链接卡片。
+    Web,
+    /// 技能调用（call_skill）。
+    Skill,
+    /// 知识库导入（knowledge_ingest）。
+    Knowledge,
+    /// 子代理委托（delegate_to_agent）。
+    Delegate,
+    /// LSP/符号（lsp / symbol_outline）。
+    Code,
+}
+
+impl ToolPresentation {
+    /// 序列化名（与 serde rename_all="snake_case" 一致；供 SSE 事件字符串化）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Terminal => "terminal",
+            Self::Diff => "diff",
+            Self::Search => "search",
+            Self::Web => "web",
+            Self::Skill => "skill",
+            Self::Knowledge => "knowledge",
+            Self::Delegate => "delegate",
+            Self::Code => "code",
+        }
+    }
+}
+
 /// 工具定义。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -119,6 +172,24 @@ mod tests {
     struct TestParams {
         query: String,
         limit: Option<usize>,
+    }
+
+    #[test]
+    fn test_tool_presentation_as_str_and_default() {
+        assert_eq!(ToolPresentation::default(), ToolPresentation::Generic);
+        assert_eq!(ToolPresentation::Read.as_str(), "read");
+        assert_eq!(ToolPresentation::Write.as_str(), "write");
+        assert_eq!(ToolPresentation::Terminal.as_str(), "terminal");
+        assert_eq!(ToolPresentation::Diff.as_str(), "diff");
+        assert_eq!(ToolPresentation::Search.as_str(), "search");
+        assert_eq!(ToolPresentation::Web.as_str(), "web");
+        assert_eq!(ToolPresentation::Skill.as_str(), "skill");
+        assert_eq!(ToolPresentation::Knowledge.as_str(), "knowledge");
+        assert_eq!(ToolPresentation::Delegate.as_str(), "delegate");
+        assert_eq!(ToolPresentation::Code.as_str(), "code");
+        // serde 序列化与 as_str 一致（snake_case）
+        let json = serde_json::to_value(ToolPresentation::Read).unwrap();
+        assert_eq!(json, serde_json::json!("read"));
     }
 
     #[test]

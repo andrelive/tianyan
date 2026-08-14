@@ -18,6 +18,6 @@ pub use streaming::{
 };
 pub use tool::{
     FunctionCall, FunctionDefinition, ToolCall, ToolCallType, ToolChoice, ToolChoiceFunction,
-    ToolDefinition, ToolType,
+    ToolDefinition, ToolPresentation, ToolType,
 };
 pub use vision::{VisionChoice, VisionContent, VisionMessage, VisionRequest, VisionResponse};

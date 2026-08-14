@@ -5,6 +5,7 @@
 node_modules/
 dist/
 test-results/
+playwright-report/
 *.tsbuildinfo
 
 # Tianyan runtime data (accidental writes to repo root)
@@ -21,6 +22,8 @@ test-results/
 .idea/
 .vscode/
 *.log
+# Playwright MCP runtime artifacts (console logs, page snapshots)
+.playwright-mcp/
 
 # Temporary workspace (audit notes, scratch plans)
 .scratch/

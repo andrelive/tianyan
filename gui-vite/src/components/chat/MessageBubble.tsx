@@ -6,6 +6,7 @@ import { Copy, Check, Undo2 } from 'lucide-react';
 import type { ChatMessage } from '@/lib/types';
 import { cn, formatTime } from '@/lib/utils';
 import SkillCallCard from './SkillCallCard';
+import ToolCallCard from './ToolCallCard';
 
 interface Props {
   message: ChatMessage;
@@ -113,6 +114,15 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
             {message.content}
           </ReactMarkdown>
         </div>
+
+        {/* Tool calls（A2 展示契约：按展示意图渲染卡片） */}
+        {message.tool_calls && message.tool_calls.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {message.tool_calls.map((call, i) => (
+              <ToolCallCard key={`${call.name}-${call.arguments}-${i}`} event={call} />
+            ))}
+          </div>
+        )}
 
         {/* Skill calls */}
         {message.skill_calls && message.skill_calls.length > 0 && (

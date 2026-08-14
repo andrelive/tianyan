@@ -22,7 +22,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -640,12 +639,6 @@ pub fn build_notification_text(task: &BackgroundTask, remaining: usize) -> Strin
 /// 当前时间（epoch 毫秒）。
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
-}
-
-/// 供取消逻辑追踪运行句柄（保留字段位，防止未来扩展时遗漏）。
-#[allow(dead_code)]
-struct TaskHandle {
-    _started: Instant,
 }
 
 #[cfg(test)]
