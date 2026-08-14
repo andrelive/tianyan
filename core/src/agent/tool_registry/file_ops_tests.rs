@@ -149,6 +149,20 @@ async fn test_read_file_missing_file_returns_error() {
 }
 
 #[tokio::test]
+async fn test_read_file_missing_file_is_not_found() {
+    // ADR-014：工具包装器必须保留底层 not_found 分类
+    // （否则 server 层收到 Custom 消息映射为 500 而非 404）。
+    let dir = tempfile::tempdir().unwrap();
+    let registry = ToolRegistry::new(default_strict_policy());
+    let missing = dir.path().join("does_not_exist.txt");
+    let err = registry
+        .execute_read_file(&read_file_args(&missing))
+        .await
+        .unwrap_err();
+    assert!(err.is_not_found(), "缺失文件应分类为 not_found：{err}");
+}
+
+#[tokio::test]
 async fn test_read_file_offset_limit_slicing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("lines.txt");
@@ -640,6 +654,29 @@ async fn test_apply_edit_approval_approved() {
     assert!(result.is_ok(), "无人值守应批准编辑: {result:?}");
     let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
     assert_eq!(on_disk, "x\nb\n");
+}
+
+#[tokio::test]
+async fn test_apply_edit_bad_anchor_is_conflict() {
+    // ADR-014：锚点不匹配是 conflict 类错误（edit.rs 已用冲突构造器），
+    // 工具包装器必须保留分类（否则 server 层收到 Custom 映射为 500 而非 409）。
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("code.rs");
+    std::fs::write(&path, "let a = 1;\nlet b = 2;\n").unwrap();
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    let edits = json!([
+        {
+            "start_line": 1,
+            "anchor": crate::executor::hashline::line_hash("完全不匹配的内容"),
+            "new_lines": ["let a = 10;"]
+        }
+    ]);
+    let err = registry
+        .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
+        .await
+        .unwrap_err();
+    assert!(err.is_conflict(), "锚点不匹配应分类为 conflict：{err}");
 }
 
 // ── apply_patch ───────────────────────────────────────────────────────────

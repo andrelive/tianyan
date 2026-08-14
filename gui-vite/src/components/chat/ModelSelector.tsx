@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '@/lib/store';
 import { ChevronDown, Loader2 } from 'lucide-react';
-import { apiGet } from '@/lib/api-client';
+import { apiGet, switchModel } from '@/lib/api-client';
 import type { ModelsResponse, ModelRef } from '@/lib/types';
 
 export default function ModelSelector() {
@@ -94,6 +94,11 @@ export default function ModelSelector() {
               onClick={() => {
                 setModel(model);
                 setOpen(false);
+                // 本地状态先行（UI 不依赖网络），后端持久化失败不阻塞交互
+                switchModel(model, 'chat').catch((err: unknown) => {
+                  const message = err instanceof Error ? err.message : '未知错误';
+                  useAppStore.getState().showToast(`切换模型失败: ${message}`, 'error');
+                });
               }}
               className={`w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)] transition-colors ${
                 model === currentModel

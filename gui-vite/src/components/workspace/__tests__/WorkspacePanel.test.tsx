@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { server } from '@/test/mocks/server';
@@ -10,6 +10,7 @@ import {
   mockWorkspaceReadCalls,
   mockWorkspaceApplyPatchCalls,
 } from '@/test/mocks/handlers';
+import { useAppStore } from '@/lib/store';
 import WorkspacePanel from '../WorkspacePanel';
 
 const API_BASE = '/api/v1';
@@ -253,5 +254,82 @@ describe('WorkspacePanel', () => {
     expect(screen.getByRole('alert').textContent).toContain('文件已被修改，请重新加载');
     expect(screen.getByRole('dialog', { name: '保存确认' })).toBeInTheDocument();
     expect(mockWorkspaceApplyPatchCalls).toHaveLength(1);
+  });
+
+  it('loads the workspace-wide diff list in 整体差异 mode', async () => {
+    const user = userEvent.setup();
+    // store 中已有当前会话 → 面板会话 ID 预填
+    useAppStore.setState({ currentSessionId: 'session-list' });
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText('main.rs')).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: '展开 diff 面板' }));
+
+    // 切换到整体差异 → 触发 path-less /workspace/diff 请求
+    await user.click(screen.getByRole('button', { name: '整体差异' }));
+
+    // 文件行渲染（path + 状态标签；状态标签来自 mock fixture）
+    const addedRow = await screen.findByRole('button', { name: /新增/ });
+    expect(addedRow).toBeInTheDocument();
+    expect(within(addedRow).getByText('main.rs')).toBeInTheDocument();
+    const modifiedRow = screen.getByRole('button', { name: /已修改/ });
+    expect(within(modifiedRow).getByText('src/lib.rs')).toBeInTheDocument();
+    expect(within(modifiedRow).getByText(/3 → 3 行/)).toBeInTheDocument();
+
+    // path 缺省 + 快照索引默认 0
+    expect(mockWorkspaceDiffCalls).toContainEqual({
+      path: undefined,
+      sessionId: 'session-list',
+      index: 0,
+    });
+  });
+
+  it('opens a single-file diff when clicking a row in 整体差异 mode', async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({ currentSessionId: 'session-list' });
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText('main.rs')).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: '展开 diff 面板' }));
+    await user.click(screen.getByRole('button', { name: '整体差异' }));
+    await screen.findByRole('button', { name: /已修改/ });
+
+    // 点击文件行 → 切回单文件模式并复用单文件 diff 视图
+    await user.click(screen.getByRole('button', { name: /已修改/ }));
+    await waitFor(() => {
+      expect(screen.getByText('+fn main() {')).toBeInTheDocument();
+    });
+    expect(mockWorkspaceDiffCalls).toContainEqual({
+      path: 'src/lib.rs',
+      sessionId: 'session-list',
+      index: 0,
+    });
+    expect(screen.getByRole('button', { name: '文件 Diff' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('re-syncs the session id input when the current session changes after mount', async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({ currentSessionId: null });
+    renderPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText('main.rs')).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: '展开 diff 面板' }));
+
+    // 挂载后切换当前会话 → 输入框跟随更新（bug：useState 初值只在挂载时读取）
+    const sessionInput = screen.getByLabelText('会话 ID');
+    expect(sessionInput).toHaveValue('');
+    act(() => {
+      useAppStore.setState({ currentSessionId: 'session-new' });
+    });
+    expect(sessionInput).toHaveValue('session-new');
   });
 });

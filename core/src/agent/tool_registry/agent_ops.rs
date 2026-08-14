@@ -17,7 +17,7 @@ use crate::model::types::ChatCompletionRequest;
 use crate::model::types::ToolCall;
 use crate::skills::SkillExecutionRequest;
 
-use super::{parse_params, safety_violation, ToolRegistry};
+use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
 
 /// 委托链最大深度（主循环为 0；1 = 一层子 Agent，以此类推）。
 pub(crate) const MAX_DELEGATION_DEPTH: usize = 3;
@@ -86,7 +86,7 @@ impl ToolRegistry {
             params.timeout_secs,
         )
         .await
-        .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
+        .map_err(wrap_tool_error)
     }
 
     /// 执行 call_skill 工具：调用已注册技能。
@@ -128,7 +128,7 @@ impl ToolRegistry {
                     );
                     Ok(serde_json::Value::Object(data.into_iter().collect()))
                 }
-                Err(e) => Err(TianyanError::Custom(format!("tool: 执行失败：{}", e))),
+                Err(e) => Err(wrap_tool_error(e)),
             }
         } else {
             Err(TianyanError::Custom(format!(
@@ -303,7 +303,7 @@ impl ToolRegistry {
                 let response = model_service
                     .chat_completion(request)
                     .await
-                    .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+                    .map_err(wrap_tool_error)?;
 
                 total_tokens += response.usage.total_tokens;
                 let choice = response.choices.into_iter().next().ok_or_else(|| {

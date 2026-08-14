@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiGet, apiPostMultipart } from '@/lib/api-client';
+import type { IngestResponse } from '@/lib/types';
 import {
   fetchKnowledgeEntries,
   fetchKnowledgeEntryContent,
+  fetchKnowledgeSuggestions,
   deleteKnowledgeEntry,
   type KnowledgeEntryItem,
 } from '@/lib/api-client';
@@ -58,6 +60,7 @@ export default function KnowledgePanel() {
   const [totalResults, setTotalResults] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
   const [expandedResultId, setExpandedResultId] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
 
@@ -114,7 +117,10 @@ export default function KnowledgePanel() {
   }, [activeTab, loadBrowseEntries]);
 
   const handleBrowseView = async (entry: KnowledgeEntryItem) => {
-    if (entry.is_directory) {
+    // VFS 中已 ingest 的文档以目录节点形态列出（is_directory=true 但携带 L0/L1/L2 内容）。
+    // 只要条目带内容层级就按文件读取；仅纯容器目录（无内容层级）才导航进入。
+    const hasContent = entry.has_abstract || entry.has_overview || entry.has_detail;
+    if (entry.is_directory && !hasContent) {
       // Navigate into subdirectory
       setBrowsePath((prev) => [...prev, entry.name]);
       setSelectedBrowseEntry(null);
@@ -213,6 +219,34 @@ export default function KnowledgePanel() {
     };
   }, [searchQuery]);
 
+  // Debounced search suggestions（与搜索同 300ms 防抖，并行拉取；卸载/过期时丢弃结果）
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!query) {
+      setSuggestions([]);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetchKnowledgeSuggestions(query);
+        if (!cancelled) {
+          setSuggestions(res.suggestions);
+        }
+      } catch {
+        if (!cancelled) {
+          setSuggestions([]);
+        }
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchQuery]);
+
   const toggleResultExpand = (id: string) => {
     setExpandedResultId((prev) => (prev === id ? null : id));
   };
@@ -280,10 +314,18 @@ export default function KnowledgePanel() {
         // 而不是顶层 "tags" 字段（会被后端忽略并静默丢弃）。
         formData.append('metadata', JSON.stringify({ tags }));
       }
-      await apiPostMultipart('/knowledge/ingest', formData);
-      setIngestSuccess(true);
-      setSelectedFiles([]);
-      setTagsInput('');
+      const resp = await apiPostMultipart<IngestResponse>('/knowledge/ingest', formData);
+      // 后端 HTTP 200 但可能携带文件级失败（success=false 或个别文件 status=failed）：
+      // 必须如实呈现，不能无条件显示"导入成功"。
+      const failed = (resp.files ?? []).filter((f) => f.status === 'failed');
+      if (resp.success && failed.length === 0) {
+        setIngestSuccess(true);
+        setSelectedFiles([]);
+        setTagsInput('');
+      } else {
+        const detail = failed[0]?.error ?? resp.message ?? '导入失败';
+        setIngestError(`${failed.length} 个文件导入失败：${detail}`);
+      }
     } catch (err) {
       setIngestError(err instanceof Error ? err.message : '导入失败');
     } finally {
@@ -369,6 +411,22 @@ export default function KnowledgePanel() {
                 />
               )}
             </div>
+
+            {/* Suggestion chips */}
+            {!isSearching && suggestions.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {suggestions.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => setSearchQuery(s)}
+                    className="px-2.5 py-1 text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:border-blue-400 hover:text-blue-600 transition-colors"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {/* Search error */}
             {searchError && (
@@ -530,7 +588,8 @@ export default function KnowledgePanel() {
                       onClick={() => handleBrowseView(entry)}
                       className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
                     >
-                      {entry.is_directory ? (
+                      {entry.is_directory &&
+                      !(entry.has_abstract || entry.has_overview || entry.has_detail) ? (
                         <Folder size={16} className="shrink-0 text-yellow-500" />
                       ) : (
                         <File size={16} className="shrink-0 text-[var(--color-text-tertiary)]" />

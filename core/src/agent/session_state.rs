@@ -1,12 +1,7 @@
 use std::time::Instant;
 
-use chrono::Utc;
-
 use crate::agent::types::ClarificationQuestion;
-use crate::common::types::{
-    DetailedTokenUsage, InjectableContext, MessageRole, MessageTime, Part, PartTime,
-    StructuredMessage,
-};
+use crate::common::types::{InjectableContext, StructuredMessage};
 use crate::session::{KEEP_RECENT_MESSAGES, MAX_SESSION_MESSAGES};
 
 /// 会话状态容器（conversation 为唯一真相源）。
@@ -65,29 +60,9 @@ impl SessionState {
 
     /// 用户消息内部构造：文本 + 可选图片 → 持久化 parts。
     fn push_user_message(&mut self, content: String, images: Vec<String>) {
-        let mut parts = vec![Part::Text {
-            text: content,
-            time: PartTime::default(),
-        }];
-        for url in images {
-            parts.push(Part::Image {
-                url,
-                time: PartTime::default(),
-            });
-        }
-        let msg = StructuredMessage {
-            id: format!("msg_{}", Utc::now().timestamp_millis()),
-            parent_id: self.structured_messages.last().map(|m| m.id.clone()),
-            role: MessageRole::User,
-            parts,
-            tokens: DetailedTokenUsage::default(),
-            cost: 0.0,
-            model_id: None,
-            time: MessageTime::default(),
-            session_id: self.session_id.clone(),
-            finish: None,
-            compression_marker: false,
-        };
+        let mut msg = StructuredMessage::user_with_images(self.session_id.clone(), content, images);
+        // 维持消息链：父消息指向会话当前最后一条消息
+        msg.parent_id = self.structured_messages.last().map(|m| m.id.clone());
         self.structured_messages.push(msg);
         self.trim_conversation();
         self.last_activity = Instant::now();
@@ -143,6 +118,7 @@ impl SessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::types::{MessageRole, MessageTime, Part, PartTime};
 
     #[test]
     fn test_session_state_new() {

@@ -29,9 +29,7 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::llm_judge::truncate_output;
-use crate::common::types::{
-    DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
-};
+use crate::common::types::StructuredMessage;
 use crate::notification::SharedNotificationSink;
 use crate::session::SessionManager;
 use crate::vfs::backend::sqlite_db::SqliteDb;
@@ -575,26 +573,7 @@ impl SessionTaskNotifier {
 impl TaskNotifier for SessionTaskNotifier {
     async fn on_task_terminal(&self, session_id: &str, task: &BackgroundTask, remaining: usize) {
         let text = build_notification_text(task, remaining);
-        let now = now_ms();
-        let sm = StructuredMessage {
-            id: format!("msg_{now}"),
-            parent_id: None,
-            role: MessageRole::System,
-            parts: vec![Part::Text {
-                text,
-                time: PartTime::default(),
-            }],
-            tokens: DetailedTokenUsage::default(),
-            cost: 0.0,
-            model_id: None,
-            time: MessageTime {
-                created: now,
-                completed: now,
-            },
-            session_id: session_id.to_string(),
-            finish: None,
-            compression_marker: false,
-        };
+        let sm = StructuredMessage::system(session_id.to_string(), text);
         if let Err(e) = self
             .session_manager
             .add_structured_message(session_id, sm)
@@ -644,6 +623,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::types::{MessageRole, Part};
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
@@ -827,13 +807,6 @@ mod tests {
                 Ok(None)
             }
             async fn update_session(&self, _session: &crate::session::Session) -> Result<()> {
-                Ok(())
-            }
-            async fn add_message(
-                &self,
-                _session_id: &str,
-                _message: crate::common::types::Message,
-            ) -> Result<()> {
                 Ok(())
             }
             async fn add_structured_message(

@@ -310,6 +310,29 @@ async fn clipboard_write_tool_requires_content() {
     assert!(result.is_err());
 }
 
+/// 组合根接线：`create_app` 装配的 Agent 工具注册表应包含 `clipboard_write`。
+///
+/// 验证 state.rs 把 [`ClipboardWriteTool`] 注入 dynamic_tools（new 与
+/// reload_agent 双点装配）——否则 tauri 轮询 outbox 永远等不到生产者。
+#[tokio::test]
+async fn clipboard_write_tool_registered_in_agent() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path());
+    let (_app, state) = create_app(config).await.unwrap();
+
+    let agent = state.agent().await;
+    let names: Vec<String> = agent
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|d| d.function.name)
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "clipboard_write"),
+        "Agent 工具注册表应包含 clipboard_write（state.rs 组合根接线）：{names:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // outbox 端点（tauri 轮询路径）
 // ---------------------------------------------------------------------------

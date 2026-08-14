@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   AlertCircle,
   FolderTree,
@@ -9,8 +9,13 @@ import {
   PanelRightClose,
 } from 'lucide-react';
 import { createTwoFilesPatch } from 'diff';
-import { ApiError, fetchWorkspaceApplyPatch, fetchWorkspaceDiff } from '@/lib/api-client';
-import type { WorkspaceDiffResponse } from '@/lib/types';
+import {
+  ApiError,
+  fetchWorkspaceApplyPatch,
+  fetchWorkspaceDiff,
+  fetchWorkspaceDiffList,
+} from '@/lib/api-client';
+import type { WorkspaceDiffListResponse, WorkspaceDiffResponse } from '@/lib/types';
 import { useAppStore } from '@/lib/store';
 import WorkspaceTree from './WorkspaceTree';
 import FileViewer from './FileViewer';
@@ -60,27 +65,28 @@ function DiffPanel({ filePath, onClose }: DiffPanelProps) {
   // 因此会话 ID 为必填：从 store 预填当前会话（可编辑），为空时阻止请求。
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const [sessionId, setSessionId] = useState(currentSessionId ?? '');
+  // 当前会话切换（侧边栏点击）后同步到输入框 —— useState 初值只在挂载时读取。
+  useEffect(() => {
+    setSessionId(currentSessionId ?? '');
+  }, [currentSessionId]);
   const [sessionIdError, setSessionIdError] = useState<string | null>(null);
   const [indexText, setIndexText] = useState('0');
+  /** 单文件 diff 视图（文件 Diff 模式）。 */
   const [diff, setDiff] = useState<WorkspaceDiffResponse | null>(null);
+  /** 工作区整体 diff 文件列表（整体差异模式）。 */
+  const [diffList, setDiffList] = useState<WorkspaceDiffListResponse | null>(null);
+  const [mode, setMode] = useState<'file' | 'workspace'>('file');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleLoad = async () => {
-    if (!filePath) return;
-    const trimmed = sessionId.trim();
-    if (!trimmed) {
-      setSessionIdError('请填写会话 ID');
-      return;
-    }
-    setSessionIdError(null);
+  const loadFileDiff = async (path: string, session: string) => {
     const indexNum = Number(indexText);
     setLoading(true);
     setError(null);
     try {
       const res = await fetchWorkspaceDiff(
-        filePath,
-        trimmed,
+        path,
+        session,
         Number.isFinite(indexNum) ? indexNum : undefined,
       );
       setDiff(res);
@@ -91,6 +97,64 @@ function DiffPanel({ filePath, onClose }: DiffPanelProps) {
       setLoading(false);
     }
   };
+
+  const handleLoad = async () => {
+    if (!filePath) return;
+    const trimmed = sessionId.trim();
+    if (!trimmed) {
+      setSessionIdError('请填写会话 ID');
+      return;
+    }
+    setSessionIdError(null);
+    await loadFileDiff(filePath, trimmed);
+  };
+
+  /** 切到整体差异：无 path 调用后端，返回工作区全部变更文件。 */
+  const handleWorkspaceMode = async () => {
+    const trimmed = sessionId.trim();
+    if (!trimmed) {
+      setSessionIdError('请填写会话 ID');
+      return;
+    }
+    setSessionIdError(null);
+    setMode('workspace');
+    const indexNum = Number(indexText);
+    setLoading(true);
+    setError(null);
+    setDiff(null);
+    try {
+      const res = await fetchWorkspaceDiffList(
+        trimmed,
+        Number.isFinite(indexNum) ? indexNum : undefined,
+      );
+      setDiffList(res);
+    } catch (err: unknown) {
+      setDiffList(null);
+      setError(err instanceof Error ? err.message : '加载整体 diff 失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** 点击整体差异列表中的文件行 → 切回单文件模式并加载该文件 diff。 */
+  const selectFileFromList = async (item: WorkspaceDiffResponse) => {
+    if (!item.path) return;
+    const trimmed = sessionId.trim();
+    if (!trimmed) {
+      setSessionIdError('请填写会话 ID');
+      return;
+    }
+    setSessionIdError(null);
+    setMode('file');
+    await loadFileDiff(item.path, trimmed);
+  };
+
+  const toggleButtonClass = (active: boolean) =>
+    `flex-1 px-2 py-1 text-xs rounded transition-colors ${
+      active
+        ? 'bg-blue-600 text-white'
+        : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+    }`;
 
   return (
     <aside
@@ -110,6 +174,28 @@ function DiffPanel({ filePath, onClose }: DiffPanelProps) {
       </div>
 
       <div className="px-4 py-3 space-y-2.5 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
+        <div
+          role="group"
+          aria-label="diff 模式"
+          className="flex gap-1 p-0.5 rounded bg-[var(--color-bg-primary)] border border-[var(--color-border)]"
+        >
+          <button
+            type="button"
+            aria-pressed={mode === 'file'}
+            onClick={() => setMode('file')}
+            className={toggleButtonClass(mode === 'file')}
+          >
+            文件 Diff
+          </button>
+          <button
+            type="button"
+            aria-pressed={mode === 'workspace'}
+            onClick={handleWorkspaceMode}
+            className={toggleButtonClass(mode === 'workspace')}
+          >
+            整体差异
+          </button>
+        </div>
         <label className="block">
           <span className="block text-xs text-[var(--color-text-tertiary)] mb-1">会话 ID</span>
           <input
@@ -142,8 +228,8 @@ function DiffPanel({ filePath, onClose }: DiffPanelProps) {
         </label>
         <button
           type="button"
-          onClick={handleLoad}
-          disabled={!filePath || loading}
+          onClick={mode === 'file' ? handleLoad : handleWorkspaceMode}
+          disabled={loading || (mode === 'file' && !filePath)}
           className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {loading ? (
@@ -151,9 +237,9 @@ function DiffPanel({ filePath, onClose }: DiffPanelProps) {
           ) : (
             <GitCompareArrows size={12} />
           )}
-          加载 diff
+          {mode === 'file' ? '加载 diff' : '加载整体 diff'}
         </button>
-        {!filePath && (
+        {mode === 'file' && !filePath && (
           <p className="text-xs text-[var(--color-text-tertiary)]">请先在左侧选择一个文件</p>
         )}
       </div>
@@ -168,25 +254,53 @@ function DiffPanel({ filePath, onClose }: DiffPanelProps) {
             <span>加载 diff 失败：{error}</span>
           </div>
         )}
-        {diff && (
-          <div className="p-3 space-y-2">
-            <div className="flex items-center gap-2">
-              <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
-                {DIFF_STATUS_LABEL[diff.status]}
-              </span>
-              {diff.old_lines !== undefined && diff.new_lines !== undefined && (
-                <span className="text-xs text-[var(--color-text-tertiary)]">
-                  {diff.old_lines} → {diff.new_lines} 行
-                </span>
-              )}
-            </div>
-            <pre className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)] font-mono text-xs leading-relaxed overflow-x-auto">
-              {(diff.unified ?? '').split('\n').map((line, i) => (
-                <DiffLine key={`${i}-${line}`} line={line} />
-              ))}
-            </pre>
-          </div>
-        )}
+        {mode === 'workspace'
+          ? diffList && (
+              <ul className="p-2 space-y-1">
+                {diffList.files.map((item) => (
+                  <li key={item.path ?? item.unified}>
+                    <button
+                      type="button"
+                      onClick={() => selectFileFromList(item)}
+                      className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] hover:bg-[var(--color-bg-hover)] text-left"
+                    >
+                      <span className="text-xs font-mono text-[var(--color-text-primary)] truncate">
+                        {item.path}
+                      </span>
+                      <span className="flex items-center gap-2 shrink-0">
+                        {item.old_lines !== undefined && item.new_lines !== undefined && (
+                          <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                            {item.old_lines} → {item.new_lines} 行
+                          </span>
+                        )}
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                          {DIFF_STATUS_LABEL[item.status]}
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )
+          : diff && (
+              <div className="p-3 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                    {DIFF_STATUS_LABEL[diff.status]}
+                  </span>
+                  {diff.old_lines !== undefined && diff.new_lines !== undefined && (
+                    <span className="text-xs text-[var(--color-text-tertiary)]">
+                      {diff.old_lines} → {diff.new_lines} 行
+                    </span>
+                  )}
+                </div>
+                <pre className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)] font-mono text-xs leading-relaxed overflow-x-auto">
+                  {(diff.unified ?? '').split('\n').map((line, i) => (
+                    <DiffLine key={`${i}-${line}`} line={line} />
+                  ))}
+                </pre>
+              </div>
+            )}
       </div>
     </aside>
   );

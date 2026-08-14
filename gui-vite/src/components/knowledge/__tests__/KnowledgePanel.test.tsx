@@ -4,7 +4,12 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
-import { mockKnowledgeDeleteCalls, resetKnowledgeEntryMocks } from '@/test/mocks/handlers';
+import {
+  mockKnowledgeDeleteCalls,
+  mockKnowledgeSearchCalls,
+  mockKnowledgeSuggestionsCalls,
+  resetKnowledgeEntryMocks,
+} from '@/test/mocks/handlers';
 import KnowledgePanel from '../KnowledgePanel';
 
 const API_BASE = '/api/v1';
@@ -129,5 +134,113 @@ describe('KnowledgePanel', () => {
     ).not.toBeInTheDocument();
     expect(mockKnowledgeDeleteCalls).toHaveLength(0);
     expect(screen.getByText('mock content')).toBeInTheDocument();
+  });
+
+  it('shows an error alert when the ingest response reports per-file failure', async () => {
+    server.use(
+      http.post(`${API_BASE}/knowledge/ingest`, () =>
+        HttpResponse.json({
+          success: false,
+          job_id: 'mock-ingest-job',
+          message: '处理了 1 个文件 (共 10 字节)',
+          files: [{ filename: 'broken.txt', status: 'failed', error: '解析失败：格式不支持' }],
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderKnowledgePanel();
+
+    await user.click(screen.getByRole('tab', { name: /导入/ }));
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(input, new File(['内容'], 'broken.txt', { type: 'text/plain' }));
+    await user.click(screen.getByRole('button', { name: /开始导入/ }));
+
+    // 后端 HTTP 200 但文件级失败：UI 必须显示错误而非"导入成功"
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('解析失败');
+    });
+    expect(screen.queryByText('文件导入成功！')).not.toBeInTheDocument();
+  });
+
+  it('shows the success banner when all files complete (backend status "completed")', async () => {
+    const user = userEvent.setup();
+    renderKnowledgePanel();
+
+    await user.click(screen.getByRole('tab', { name: /导入/ }));
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(input, new File(['内容'], 'ok.txt', { type: 'text/plain' }));
+    await user.click(screen.getByRole('button', { name: /开始导入/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText('文件导入成功！')).toBeInTheDocument();
+    });
+  });
+
+  it('reads content of a directory-flagged entry when it carries content levels (VFS doc nodes)', async () => {
+    // VFS 中已 ingest 的文档以目录节点形态列出（is_directory=true 但携带 L0/L1/L2 内容），
+    // 点击应读取内容而非导航进空目录（前后端对齐回归测试）。
+    server.use(
+      http.get(`${API_BASE}/knowledge/entries`, () =>
+        HttpResponse.json({
+          entries: [
+            {
+              uri: 'tianyan://knowledge/technical/doc123',
+              name: 'doc123',
+              is_directory: true,
+              has_abstract: true,
+              has_overview: true,
+              has_detail: true,
+            },
+          ],
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderKnowledgePanel();
+
+    await user.click(screen.getByRole('tab', { name: /浏览/ }));
+    await waitFor(() => {
+      expect(screen.getByText('doc123')).toBeInTheDocument();
+    });
+    await user.click(screen.getByText('doc123'));
+
+    // 内容应被读取并渲染（而非导航到子目录）：面包屑不出现 = 未发生导航
+    await waitFor(() => {
+      expect(screen.getByText('mock 读取内容')).toBeInTheDocument();
+    });
+    expect(screen.queryByRole('button', { name: '知识库' })).not.toBeInTheDocument();
+  });
+
+  it('shows suggestion chips after typing a partial query', async () => {
+    const user = userEvent.setup();
+    renderKnowledgePanel();
+
+    await user.type(screen.getByLabelText('搜索知识库'), '架');
+
+    // 300ms 防抖后拉取建议，chips 渲染
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '架构' })).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: 'VFS' })).toBeInTheDocument();
+    expect(mockKnowledgeSuggestionsCalls).toContainEqual({ q: '架' });
+  });
+
+  it('fills the search box and fires a search request when a suggestion chip is clicked', async () => {
+    const user = userEvent.setup();
+    renderKnowledgePanel();
+
+    await user.type(screen.getByLabelText('搜索知识库'), '架');
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '架构' })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: '架构' }));
+
+    // 搜索框值变为 chip 文本，且搜索请求以 chip 为查询条件发出
+    expect(screen.getByLabelText('搜索知识库')).toHaveValue('架构');
+    await waitFor(() => {
+      expect(mockKnowledgeSearchCalls).toContainEqual({ q: '架构' });
+    });
   });
 });

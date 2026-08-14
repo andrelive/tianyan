@@ -10,7 +10,7 @@ use crate::common::error::TianyanError;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::executor::Action;
 
-use super::{parse_params, safety_violation, vfs_content_field, ToolRegistry};
+use super::{parse_params, safety_violation, vfs_content_field, wrap_tool_error, ToolRegistry};
 
 impl ToolRegistry {
     /// 执行 read_file 工具：读取文件内容。
@@ -25,7 +25,7 @@ impl ToolRegistry {
         )?;
         crate::executor::execute_read_file(&params.path, params.offset, params.limit)
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
+            .map_err(wrap_tool_error)
     }
 
     /// 执行 write_file 工具：写入文件内容（含审批工作流门控）。
@@ -59,7 +59,7 @@ impl ToolRegistry {
         .await?;
         crate::executor::execute_write_file(&params.path, &params.content)
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
+            .map_err(wrap_tool_error)
     }
 
     /// 执行 apply_edit 工具：哈希锚定行编辑（含审批工作流门控）。
@@ -95,7 +95,7 @@ impl ToolRegistry {
         .await?;
         crate::executor::edit::apply_edit_action(&params.path, params.edits)
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
+            .map_err(wrap_tool_error)
             .map(|mut result| {
                 self.attach_lsp_diagnostics(&params.path, &mut result);
                 result
@@ -140,7 +140,7 @@ impl ToolRegistry {
         .await?;
         crate::executor::patch::apply_patch_action(&params.patch, &base_dir)
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
+            .map_err(wrap_tool_error)
             .map(|mut result| {
                 if !first_path.is_empty() {
                     self.attach_lsp_diagnostics(&first_path, &mut result);
@@ -207,10 +207,7 @@ impl ToolRegistry {
                 .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：无效 URI: {}", e)))?,
             None => TianyanUri::new(ContextNamespace::Knowledge, vec![]),
         };
-        let entries = vfs
-            .list(&target_uri)
-            .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+        let entries = vfs.list(&target_uri).await.map_err(wrap_tool_error)?;
         let items: Vec<serde_json::Value> = entries
             .iter()
             .map(|e| {

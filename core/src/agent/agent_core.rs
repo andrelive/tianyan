@@ -246,15 +246,7 @@ impl Agent {
         let mut messages = ContextAssembler::assemble(&s.structured_messages, &injectable, "");
 
         // 会话定位信息（与 prepare_context 一致）
-        let session_hint = format!(
-            "## 会话定位\n当前会话 ID：{}\n若早期对话已被压缩且摘要信息不足，可用 vfs_read 工具读取 tianyan://session/{} 查看原始对话记录（JSONL 格式，含压缩前的完整消息）。",
-            s.session_id, s.session_id
-        );
-        let insert_at = messages
-            .iter()
-            .position(|m| m.role != MessageRole::System)
-            .unwrap_or(messages.len());
-        messages.insert(insert_at, Message::system(session_hint));
+        insert_session_hint(&mut messages, &s.session_id);
 
         // 唤醒指令：告知模型这是后台任务完成触发的自动处理轮
         messages.push(Message::system(
@@ -388,24 +380,14 @@ impl Agent {
         // 告知 LLM 当前会话 URI，使其可用 vfs_read 检索被压缩的原始记录。
         // 位置固定在 system 前缀（soul/rules）之后、历史消息之前，
         // 同会话内内容恒定，不影响 DeepSeek 前缀缓存。
-        let session_hint = format!(
-            "## 会话定位\n当前会话 ID：{}\n若早期对话已被压缩且摘要信息不足，可用 vfs_read 工具读取 tianyan://session/{} 查看原始对话记录（JSONL 格式，含压缩前的完整消息）。",
-            s.session_id, s.session_id
-        );
-        let insert_at = messages
-            .iter()
-            .position(|m| m.role != MessageRole::System)
-            .unwrap_or(messages.len());
-        messages.insert(insert_at, Message::system(session_hint));
+        insert_session_hint(&mut messages, &s.session_id);
 
         messages
     }
 
-    /// 持久化注入上下文快照到会话头部（JSONL 首行）。
-    ///
+    /// 持久化注入上下文快照到会话头部（JSONL 首行）。    ///
     /// 会话首次加载时调用一次：前缀内容（soul/rules/memories）随会话固化，
-    /// 重启后 `load_and_build_state` 直接恢复，不重新检索——旧会话前缀稳定，
-    /// prompt 缓存不失效。失败仅告警（本次运行内存缓存仍生效）。
+    /// 重启后 `load_and_build_state` 直接恢复，不重新检索——旧会话前缀稳定，    /// prompt 缓存不失效。失败仅告警（本次运行内存缓存仍生效）。
     pub(crate) async fn persist_injectable_snapshot(
         &self,
         session_id: &str,
@@ -911,9 +893,6 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
-        async fn add_message(&self, _session_id: &str, _message: Message) -> Result<()> {
-            Ok(())
-        }
         async fn rewrite_messages(
             &self,
             _session_id: &str,
@@ -1301,6 +1280,23 @@ mod tests {
         let state = agent.state.read().await;
         assert_eq!(state.conversations_processed, 0, "失败重试后不记成功");
     }
+}
+
+/// 向消息列表注入会话定位信息（prepare_context / prepare_wake_context 共用）。
+///
+/// 告知 LLM 当前会话 URI，使其可用 `vfs_read` 检索被压缩的原始记录。
+/// 位置固定在 system 前缀（soul/rules）之后、历史消息之前；
+/// 同会话内内容恒定，不影响 DeepSeek 前缀缓存。
+fn insert_session_hint(messages: &mut Vec<Message>, session_id: &str) {
+    let hint = format!(
+        "## 会话定位\n当前会话 ID：{}\n若早期对话已被压缩且摘要信息不足，可用 vfs_read 工具读取 tianyan://session/{} 查看原始对话记录（JSONL 格式，含压缩前的完整消息）。",
+        session_id, session_id
+    );
+    let insert_at = messages
+        .iter()
+        .position(|m| m.role != MessageRole::System)
+        .unwrap_or(messages.len());
+    messages.insert(insert_at, Message::system(hint));
 }
 
 /// 任务唤醒转发器（ADR-013：BackgroundTaskManager → [`Agent::process_wake`]）。

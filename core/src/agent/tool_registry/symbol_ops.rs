@@ -9,7 +9,7 @@
 use crate::agent::tool_params::SymbolOutlineParams;
 use crate::common::error::TianyanError;
 
-use super::{parse_params, safety_violation, ToolRegistry};
+use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
 
 impl ToolRegistry {
     /// 执行 symbol_outline 工具：提取源码文件的结构化符号大纲。
@@ -23,13 +23,13 @@ impl ToolRegistry {
                 .check_path(std::path::Path::new(&params.path)),
         )?;
         let language = crate::executor::symbols::language_from_extension(&params.path)
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+            .map_err(wrap_tool_error)?;
         // 异步读取：工具执行路径不得阻塞运行时线程（与 file_ops 约定一致）
         let source = tokio::fs::read_to_string(&params.path)
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+            .map_err(|e| wrap_tool_error(e.into()))?;
         let outline = crate::executor::symbols::symbol_outline(&source, &language)
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+            .map_err(wrap_tool_error)?;
         serde_json::to_value(serde_json::json!({
             "path": params.path,
             "language": outline.language,

@@ -5,7 +5,7 @@ use crate::common::error::TianyanError;
 use crate::executor::search::{execute_search_code as execute_search, SearchOptions};
 use crate::executor::Action;
 
-use super::{parse_params, safety_violation, ToolRegistry};
+use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
 
 impl ToolRegistry {
     /// 执行 search_code 工具：使用 ripgrep 搜索代码模式。
@@ -22,7 +22,7 @@ impl ToolRegistry {
         }
         execute_search(&params.pattern, &search_options(&params))
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
+            .map_err(wrap_tool_error)
     }
 
     /// 执行 run_tests 工具：运行测试命令（设计 D6 增强结果解析）。
@@ -55,7 +55,7 @@ impl ToolRegistry {
             params.filter.as_deref(),
             params.suite.as_deref(),
         )
-        .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+        .map_err(wrap_tool_error)?;
         safety_violation(self.security_policy.check_command(&resolved))?;
         // 审批门控（统一序列见 [`ToolRegistry::ensure_approved`]）
         self.ensure_approved(
@@ -78,7 +78,7 @@ impl ToolRegistry {
             None,
         )
         .await
-        .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
+        .map_err(wrap_tool_error)
     }
 
     /// 执行 verify_build 工具：构建验证（语义验证或退出码回退）。
@@ -115,7 +115,7 @@ impl ToolRegistry {
             let result = gate
                 .verify_build(&params.command, params.cwd.as_deref(), params.timeout_secs)
                 .await
-                .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+                .map_err(wrap_tool_error)?;
             Ok(serde_json::Value::from(result))
         } else {
             crate::executor::execute_verify_build(
@@ -124,7 +124,7 @@ impl ToolRegistry {
                 params.timeout_secs,
             )
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
+            .map_err(wrap_tool_error)
         }
     }
 }

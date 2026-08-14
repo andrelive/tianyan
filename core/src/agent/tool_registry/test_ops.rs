@@ -3,7 +3,7 @@
 use crate::agent::tool_params::DiscoverTestsParams;
 use crate::common::error::TianyanError;
 
-use super::{parse_params, ToolRegistry};
+use super::{parse_params, wrap_tool_error, ToolRegistry};
 
 impl ToolRegistry {
     /// 执行 discover_tests 工具：探测项目格式并列出测试（不执行测试）。
@@ -23,6 +23,6 @@ impl ToolRegistry {
         }
         crate::executor::test_discovery::discover_tests(&params.path)
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))
+            .map_err(wrap_tool_error)
     }
 }

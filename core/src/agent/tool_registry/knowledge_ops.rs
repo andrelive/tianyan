@@ -5,7 +5,7 @@ use crate::common::error::TianyanError;
 use crate::common::types::{ContentLevel, ContentSource, SearchResult};
 use crate::knowledge::{IngestionRequest, KnowledgeCategory, KnowledgeIngestor};
 
-use super::{parse_params, vfs_content_field, ToolRegistry};
+use super::{parse_params, vfs_content_field, wrap_tool_error, ToolRegistry};
 
 impl ToolRegistry {
     /// 执行 search_knowledge 工具：语义搜索知识库。
@@ -24,7 +24,7 @@ impl ToolRegistry {
         let results: Vec<SearchResult> = vfs
             .search(&params.query, limit, None)
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+            .map_err(wrap_tool_error)?;
         let items = futures::future::join_all(results.into_iter().map(|r| {
             let uri = r.uri.to_string();
             let uri_clone = r.uri.clone();

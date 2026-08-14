@@ -31,12 +31,29 @@ export function useChatStream(options: UseChatStreamOptions) {
       setIsStreaming(true);
 
       try {
-        const response = await fetch(streamUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        });
+        let response: Response;
+        try {
+          response = await fetch(streamUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          });
+        } catch (err) {
+          // vitest jsdom 环境下 Node fetch 会拒绝 jsdom realm 的 AbortSignal
+          // （与 api-client request() 同源问题）；降级重试不带 signal。
+          // 生产浏览器同 realm，此分支永不触发；降级路径下 stopStream 的
+          // abort 退化为无效操作——仅影响测试环境。
+          if (err instanceof TypeError && /Expected signal/.test(err.message)) {
+            response = await fetch(streamUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+          } else {
+            throw err;
+          }
+        }
 
         if (!response.ok) {
           const text = await response.text();

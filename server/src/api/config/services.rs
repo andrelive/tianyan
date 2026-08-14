@@ -11,11 +11,6 @@ use crate::api::config::types::{ConfigResponse, ModelsResponse, UpdateConfigResp
 use crate::api::shared::error::ApiError;
 use crate::state::{resolve_model_spec, AppState};
 
-/// 构造热重载失败错误（统一错误前缀，避免调用点重复拼装）。
-fn reload_error(e: impl std::fmt::Display) -> ApiError {
-    ApiError::Internal(format!("热重载失败: {e}"))
-}
-
 /// 解析配置中全部模型的完整规格（key = "{provider}/{model}"），供响应展示。
 ///
 /// 与 [`crate::state::resolve_chat_model_spec`] 共用"单模型解析"逻辑
@@ -67,7 +62,9 @@ impl ConfigService {
         self.state
             .update_config(config)
             .await
-            .map_err(reload_error)?;
+            // ? 传播：From<TianyanError> 语义谓词映射（热重载失败非 500 专属，
+            // not_found/invalid_input 等保持原分类，ADR-014）
+            ?;
 
         info!("配置已更新并重载");
         Ok(UpdateConfigResponse {
@@ -152,7 +149,9 @@ impl ConfigService {
         self.state
             .update_config(config)
             .await
-            .map_err(reload_error)?;
+            // ? 传播：From<TianyanError> 语义谓词映射（热重载失败非 500 专属，
+            // not_found/invalid_input 等保持原分类，ADR-014）
+            ?;
 
         info!(model = model, "默认聊天模型已切换");
         Ok(UpdateConfigResponse {
@@ -179,7 +178,9 @@ impl ConfigService {
         self.state
             .update_config(config)
             .await
-            .map_err(reload_error)?;
+            // ? 传播：From<TianyanError> 语义谓词映射（热重载失败非 500 专属，
+            // not_found/invalid_input 等保持原分类，ADR-014）
+            ?;
         Ok(())
     }
 

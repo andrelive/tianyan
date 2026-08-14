@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use crate::agent::tool_params::{GlobParams, ListDirParams};
 use crate::common::error::TianyanError;
 
-use super::{parse_params, safety_violation, ToolRegistry};
+use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
 
 impl ToolRegistry {
     /// 执行 glob 工具：按 glob 模式查找文件（默认搜索当前工作目录）。
@@ -20,13 +20,12 @@ impl ToolRegistry {
         // 安全校验基于解析后的实际搜索根（path 参数或当前目录）
         let base: PathBuf = match params.path {
             Some(p) => PathBuf::from(p),
-            None => std::env::current_dir()
-                .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{e}")))?,
+            None => std::env::current_dir().map_err(|e| wrap_tool_error(e.into()))?,
         };
         safety_violation(self.security_policy.check_path(&base))?;
         let output = crate::executor::fs::execute_glob(&params.pattern, Some(&base))
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+            .map_err(wrap_tool_error)?;
         serde_json::to_value(output)
             .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：序列化失败：{e}")))
     }
@@ -47,7 +46,7 @@ impl ToolRegistry {
             params.limit,
         )
         .await
-        .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+        .map_err(wrap_tool_error)?;
         serde_json::to_value(output)
             .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：序列化失败：{e}")))
     }

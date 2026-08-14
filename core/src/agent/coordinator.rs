@@ -132,7 +132,12 @@ pub trait AgentCoordinator: Send + Sync {
     async fn handle_clarification(&self, session_id: &str, answers: &str) -> Result<AgentResponse>;
 
     /// 初始化智能体。
-    async fn initialize(&self) -> Result<()>;
+    ///
+    /// 默认空实现（无初始化资源的适配器/测试替身直接继承；
+    /// Agent 实现保留日志后覆盖）。
+    async fn initialize(&self) -> Result<()> {
+        Ok(())
+    }
 
     /// 获取审批状态快照（工作流配置 + 待处理请求 + 最近审计记录）。
     ///
@@ -144,7 +149,7 @@ pub trait AgentCoordinator: Send + Sync {
     /// `edited_command` 为用户在审批面板编辑后的命令（纠正/改写场景；
     /// 仅 decision=Approve 且提供时生效，记入审计记录与通知文本，
     /// 不影响实际执行——执行仍由 agent 按原命令发起）。
-    /// 请求不存在或已超时返回错误（调用方映射为 404/409）。
+    /// 请求不存在或已超时返回 not_found 语义错误（调用方以 is_not_found 映射 404）。
     async fn respond_approval(
         &self,
         request_id: &str,
@@ -155,6 +160,14 @@ pub trait AgentCoordinator: Send + Sync {
 
     /// 获取智能体状态。
     async fn get_state(&self) -> AgentState;
+
+    /// 获取已注册工具定义（内置 + 动态注册，如 `clipboard_write` / MCP 桥接）。
+    ///
+    /// 用于组合根接线验证（server 层测试断言动态工具已装配）。
+    /// 默认空实现（无工具装配的适配器/测试替身直接继承）。
+    async fn tool_definitions(&self) -> Vec<crate::model::types::ToolDefinition> {
+        Vec::new()
+    }
 
     /// 获取后台任务列表快照（delegate_to_agent(background) 的任务）。
     async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask>;
@@ -177,7 +190,12 @@ pub trait AgentCoordinator: Send + Sync {
     async fn wake_session(&self, _session_id: &str) {}
 
     /// 关闭智能体。
-    async fn shutdown(&self) -> Result<()>;
+    ///
+    /// 默认空实现（无持有资源的适配器/测试替身直接继承；
+    /// Agent 实现保留日志后覆盖）。
+    async fn shutdown(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -348,6 +366,10 @@ impl AgentCoordinator for Agent {
 
     async fn get_state(&self) -> AgentState {
         self.state.read().await.clone()
+    }
+
+    async fn tool_definitions(&self) -> Vec<crate::model::types::ToolDefinition> {
+        self.agent_loop.tool_registry().definitions().await
     }
 
     async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask> {

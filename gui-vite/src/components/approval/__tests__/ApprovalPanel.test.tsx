@@ -51,6 +51,37 @@ describe('ApprovalPanel', () => {
     expect(screen.getByText('300 秒')).toBeInTheDocument();
   });
 
+  it('renders pending confirmations as monospace fingerprints with a count badge', async () => {
+    const confirmations = ['op:write_file:/a.txt', 'op:exec:ls'];
+    server.use(
+      http.get('/api/v1/approval/status', () => {
+        return HttpResponse.json({ ...mockApprovalStatus, pending_confirmations: confirmations });
+      }),
+    );
+
+    renderApprovalPanel();
+
+    // 待确认操作 section：标题 + 数量徽标
+    await waitFor(() => {
+      expect(screen.getByText('待确认操作')).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText('待确认操作数：2')).toBeInTheDocument();
+
+    // 原始 fingerprint 逐字展示（不解析），等宽字体
+    for (const fp of confirmations) {
+      const el = screen.getByText(fp);
+      expect(el.className).toContain('font-mono');
+    }
+  });
+
+  it('shows muted empty hint when there are no pending confirmations', async () => {
+    renderApprovalPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText('无待确认操作')).toBeInTheDocument();
+    });
+  });
+
   it('approves a pending request, calls respond API and refreshes the list', async () => {
     const user = userEvent.setup();
     let responded = false;
@@ -140,9 +171,7 @@ describe('ApprovalPanel', () => {
     // execute_command 类请求展示命令文本（mono block）
     expect(screen.getByText('rm -rf /tmp/cache')).toBeInTheDocument();
     // 非命令类请求（写入文件）不显示"编辑后批准"
-    expect(
-      screen.queryByRole('button', { name: /编辑后批准 写入文件/ }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /编辑后批准 写入文件/ })).not.toBeInTheDocument();
 
     // 打开内联编辑器 → 改写命令 → 提交编辑并批准
     await user.click(screen.getByRole('button', { name: /编辑后批准 执行命令/ }));

@@ -13,6 +13,7 @@ import type {
   ProviderScanResponse,
   RetrievalTracesResponse,
   SchedulerStatus,
+  SearchSuggestionsResponse,
   SessionMessagesResponse,
   UsageStatsSummary,
   WorkspaceDiffListResponse,
@@ -51,12 +52,27 @@ async function request<T>(
   const finalSignal = signal || controller.signal;
 
   try {
-    const response = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-      signal: finalSignal,
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: finalSignal,
+      });
+    } catch (err) {
+      // vitest jsdom 环境下 Node fetch 会拒绝 jsdom realm 的 AbortSignal；
+      // 未显式传入 signal 时降级重试（生产浏览器同 realm，此分支永不触发）。
+      if (signal === undefined && err instanceof TypeError && /Expected signal/.test(err.message)) {
+        response = await fetch(url, {
+          method,
+          headers,
+          body: body ? JSON.stringify(body) : undefined,
+        });
+      } else {
+        throw err;
+      }
+    }
 
     if (!response.ok) {
       const text = await response.text();
@@ -184,6 +200,30 @@ export async function scanProviderModels(
   return apiPost<ProviderScanResponse>('/config/providers/scan', { endpoint, protocol });
 }
 
+// ========== Model switch API ==========
+
+export interface SwitchModelRequest {
+  model: string;
+  /** 能力类型（默认 'chat'，持久化到 models.preferences.chat）。 */
+  capability: 'chat';
+}
+
+export interface SwitchModelResponse {
+  success: boolean;
+  message: string;
+}
+
+/** 切换默认模型（POST /config/models/switch），持久化 preferences.chat。 */
+export async function switchModel(
+  model: string,
+  capability: 'chat' = 'chat',
+): Promise<SwitchModelResponse> {
+  return apiPost<SwitchModelResponse>('/config/models/switch', {
+    model,
+    capability,
+  } satisfies SwitchModelRequest);
+}
+
 // ========== MCP API ==========
 
 export async function listMcpServers(): Promise<McpServerEntry[]> {
@@ -271,6 +311,13 @@ export async function deleteKnowledgeEntry(
   return apiPost<{ uri: string; success: boolean }>('/knowledge/entries/delete', {
     uri,
   });
+}
+
+/** 获取知识搜索建议（GET /knowledge/search/suggestions?q=）。 */
+export async function fetchKnowledgeSuggestions(q: string): Promise<SearchSuggestionsResponse> {
+  return apiGet<SearchSuggestionsResponse>(
+    `/knowledge/search/suggestions?q=${encodeURIComponent(q)}`,
+  );
 }
 
 // ========== Memory API ==========

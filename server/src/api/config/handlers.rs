@@ -19,10 +19,11 @@ pub async fn get_config(
 
     let service = ConfigService::new(state);
 
-    service.get_config().await.map(Json).map_err(|e| {
-        error!("获取配置失败: {}", e);
-        ApiError::Internal(format!("获取配置失败: {}", e))
-    })
+    service
+        .get_config()
+        .await
+        .inspect_err(|e| error!("获取配置失败: {}", e))
+        .map(Json)
 }
 
 /// 更新配置处理器
@@ -41,11 +42,8 @@ pub async fn update_config(
     service
         .update_config(request.config)
         .await
+        .inspect_err(|e| error!("更新配置失败: {}", e))
         .map(Json)
-        .map_err(|e| {
-            error!("更新配置失败: {}", e);
-            ApiError::Internal(format!("更新配置失败: {}", e))
-        })
 }
 
 /// 获取配置的特定节
@@ -86,10 +84,11 @@ pub async fn get_models(
 
     let service = ConfigService::new(state);
 
-    service.get_models().await.map(Json).map_err(|e| {
-        error!("获取模型列表失败: {}", e);
-        ApiError::Internal(format!("获取模型列表失败: {}", e))
-    })
+    service
+        .get_models()
+        .await
+        .inspect_err(|e| error!("获取模型列表失败: {}", e))
+        .map(Json)
 }
 
 /// GET /api/config/status — simple bootstrap check for frontend.
@@ -114,16 +113,48 @@ pub async fn test_connection(
     if request.model.is_empty() {
         return Json(TestConnectionResponse::error("模型名称不能为空"));
     }
-    // Delegate to core_bridge for actual connection test
-    match crate::core_bridge::test_model_connection(
-        &request.endpoint,
-        &request.api_key,
-        &request.model,
-    )
-    .await
-    {
+    match test_model_connection(&request.endpoint, &request.api_key, &request.model).await {
         Ok(models) => Json(TestConnectionResponse::success("连接成功", models)),
         Err(e) => Json(TestConnectionResponse::error(format!("连接失败: {}", e))),
+    }
+}
+
+/// 测试模型连接：创建临时客户端并发送一个简单的聊天请求验证连接。
+///
+/// 错误文本按 HTTP 状态码文本分类（401/404/timeout），
+/// 面向配置面板的友好提示；不属 TianyanError 语义谓词范畴。
+async fn test_model_connection(
+    endpoint: &str,
+    api_key: &str,
+    model: &str,
+) -> Result<Vec<String>, String> {
+    let client = tianyan::model::AsyncOpenAIClient::new("test-connection", endpoint, api_key, 30)
+        .map_err(|e| format!("创建客户端失败: {}", e))?;
+
+    let request = tianyan::model::types::ChatCompletionRequest::new(
+        model.to_string(),
+        vec![tianyan::Message::system("You are a helpful assistant.")],
+    )
+    .with_temperature(0.7)
+    .with_max_tokens(10)
+    .with_stream(false)
+    .with_enable_thinking(false);
+
+    use tianyan::model::ChatService;
+    match client.chat_completion(request).await {
+        Ok(_) => Ok(vec![model.to_string()]),
+        Err(e) => {
+            let error_msg = e.to_string();
+            if error_msg.contains("401") || error_msg.contains("unauthorized") {
+                Err("API 密钥无效或已过期".to_string())
+            } else if error_msg.contains("404") {
+                Err("模型不存在，请检查模型名称".to_string())
+            } else if error_msg.contains("timeout") {
+                Err("连接超时，请检查网络或 API 端点".to_string())
+            } else {
+                Err(format!("连接失败: {}", error_msg))
+            }
+        }
     }
 }
 
@@ -143,9 +174,6 @@ pub async fn switch_model(
     service
         .switch_model(&request.model)
         .await
+        .inspect_err(|e| error!("切换模型失败: {}", e))
         .map(Json)
-        .map_err(|e| {
-            error!("切换模型失败: {}", e);
-            ApiError::Internal(format!("切换模型失败: {}", e))
-        })
 }

@@ -146,6 +146,7 @@ export default function ApprovalPanel() {
   }, []);
 
   const pending = snapshot?.pending_approvals ?? [];
+  const confirmations = snapshot?.pending_confirmations ?? [];
   const records = snapshot?.recent_records.slice(0, 10) ?? [];
   const waitForApproval = snapshot?.config.wait_for_approval ?? true;
 
@@ -313,7 +314,37 @@ export default function ApprovalPanel() {
               )}
             </section>
 
-            {/* b) 审批配置摘要 */}
+            {/* b) 待确认操作（ask-user 降级链路的对话确认指纹） */}
+            <section>
+              <h3 className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">
+                待确认操作
+                <span
+                  aria-label={`待确认操作数：${confirmations.length}`}
+                  className="ml-1.5 inline-flex items-center px-1.5 py-0.5 text-[10px] rounded-full bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-secondary)]"
+                >
+                  {confirmations.length}
+                </span>
+              </h3>
+              {confirmations.length === 0 ? (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-tertiary)]">
+                  <ShieldAlert size={14} className="shrink-0 opacity-40" />
+                  <p className="text-sm">无待确认操作</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {confirmations.map((fingerprint, idx) => (
+                    <pre
+                      key={`${fingerprint}-${idx}`}
+                      className="px-2.5 py-1.5 text-xs text-[var(--color-text-primary)] bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded whitespace-pre-wrap break-all font-mono"
+                    >
+                      {fingerprint}
+                    </pre>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {/* c) 审批配置摘要 */}
             <section>
               <h3 className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">
                 审批配置
@@ -354,7 +385,7 @@ export default function ApprovalPanel() {
               </div>
             </section>
 
-            {/* c) 最近审计（前 10 条） */}
+            {/* d) 最近审计（前 10 条） */}
             <section>
               <h3 className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider mb-2">
                 最近审计

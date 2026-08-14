@@ -74,7 +74,8 @@ test.describe('chat', () => {
     await textarea.press('Enter');
 
     // User message should appear in chat
-    await expect(page.getByText('你好')).toBeVisible();
+    // exact: true —— 默认子串匹配会同时命中助手回复"你好！有什么我可以帮助你的吗？"
+    await expect(page.getByText('你好', { exact: true })).toBeVisible();
   });
 
   test('assistant response appears after sending message', async ({ page }) => {

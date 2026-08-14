@@ -442,9 +442,6 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
-        async fn add_message(&self, _session_id: &str, _message: Message) -> Result<()> {
-            Ok(())
-        }
         async fn rewrite_messages(
             &self,
             _session_id: &str,

@@ -148,9 +148,17 @@ const KNOWLEDGE_ENTRIES_BASE: KnowledgeEntryItem[] = [...mockKnowledgeEntries];
 /** 记录的知识条目删除调用（{ uri }），测试断言用。 */
 export const mockKnowledgeDeleteCalls: { uri: string }[] = [];
 
+/** 记录的知识搜索调用（{ q }），测试断言用。 */
+export const mockKnowledgeSearchCalls: { q: string }[] = [];
+
+/** 记录的知识搜索建议调用（{ q }），测试断言用。 */
+export const mockKnowledgeSuggestionsCalls: { q: string }[] = [];
+
 /** 恢复知识条目 mock 到初始状态（delete 会就地修改 mockKnowledgeEntries）。 */
 export function resetKnowledgeEntryMocks() {
   mockKnowledgeDeleteCalls.length = 0;
+  mockKnowledgeSearchCalls.length = 0;
+  mockKnowledgeSuggestionsCalls.length = 0;
   mockKnowledgeEntries.length = 0;
   mockKnowledgeEntries.push(...KNOWLEDGE_ENTRIES_BASE);
 }
@@ -283,6 +291,14 @@ export const mockModelsResponse: ModelsResponse = {
     vision: null,
   },
 };
+
+/** 记录的模型切换调用（{ model, capability }），测试断言用。 */
+export const mockSwitchModelCalls: { model: string; capability: string }[] = [];
+
+/** 恢复模型切换 mock 到初始状态。 */
+export function resetModelSwitchMocks() {
+  mockSwitchModelCalls.length = 0;
+}
 
 export const mockTianyanConfig = {
   agent: {
@@ -1005,24 +1021,44 @@ export const handlers = [
     });
   }),
 
-  // Knowledge search（后端为 GET /knowledge/search）
-  http.get(`${API_BASE}/knowledge/search`, () => {
+  // Knowledge search（后端为 GET /knowledge/search?q=）
+  http.get(`${API_BASE}/knowledge/search`, ({ request }) => {
+    const url = new URL(request.url);
+    const q = url.searchParams.get('q') ?? '';
+    mockKnowledgeSearchCalls.push({ q });
     return HttpResponse.json(mockKnowledgeResults);
   }),
 
-  // Knowledge ingest（后端为 POST /knowledge/ingest，multipart）
+  // Knowledge search suggestions（后端为 GET /knowledge/search/suggestions?q=）
+  http.get(`${API_BASE}/knowledge/search/suggestions`, ({ request }) => {
+    const url = new URL(request.url);
+    const q = url.searchParams.get('q') ?? '';
+    mockKnowledgeSuggestionsCalls.push({ q });
+    return HttpResponse.json({ query: q, suggestions: ['架构', 'VFS'] });
+  }),
+
+  // Knowledge ingest（后端为 POST /knowledge/ingest，multipart；
+  // 文件级状态契约：completed | failed，error 可选）
   http.post(`${API_BASE}/knowledge/ingest`, () => {
     return HttpResponse.json({
       success: true,
       job_id: 'mock-ingest-job',
       message: '导入完成',
-      files: [{ filename: 'mock-doc.md', status: 'success' }],
+      files: [{ filename: 'mock-doc.md', status: 'completed' }],
     });
   }),
 
   // Knowledge entries（后端为 GET /knowledge/entries）
   http.get(`${API_BASE}/knowledge/entries`, () => {
     return HttpResponse.json({ entries: mockKnowledgeEntries, path: '' });
+  }),
+
+  // Knowledge entry read（后端为 GET /knowledge/entries/read?uri=&level=）
+  http.get(`${API_BASE}/knowledge/entries/read`, ({ request }) => {
+    const url = new URL(request.url);
+    const uri = url.searchParams.get('uri') ?? '';
+    const level = url.searchParams.get('level') ?? 'detail';
+    return HttpResponse.json({ uri, level, content: 'mock 读取内容' });
   }),
 
   // Knowledge entry delete（后端为 POST /knowledge/entries/delete，body: { uri }）
@@ -1208,5 +1244,13 @@ export const handlers = [
 
   http.get(`${API_BASE}/config/models`, () => {
     return HttpResponse.json(mockModelsResponse);
+  }),
+
+  // Model switch（后端为 POST /config/models/switch，body: { model, capability }）
+  // 记录调用并返回成功 fixture；测试失败场景用 server.use 覆盖。
+  http.post(`${API_BASE}/config/models/switch`, async ({ request }) => {
+    const body = (await request.json()) as { model?: string; capability?: string };
+    mockSwitchModelCalls.push({ model: body.model ?? '', capability: body.capability ?? 'chat' });
+    return HttpResponse.json({ success: true, message: '已切换' });
   }),
 ];

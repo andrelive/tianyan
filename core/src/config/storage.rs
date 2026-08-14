@@ -54,6 +54,12 @@ pub struct VectorStorageConfig {
 }
 
 fn default_data_dir() -> PathBuf {
+    // README/.env.example 声明的 TIANYAN_DATA_DIR 覆盖（空值视为未设置）
+    if let Ok(dir) = std::env::var("TIANYAN_DATA_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("tianyan")
@@ -125,6 +131,46 @@ mod tests {
         assert!(config.auto_cleanup);
         assert_eq!(config.vector.collection_name, "tianyan_data");
         assert_eq!(config.vector.vector_dimension, 1536);
+    }
+
+    /// 串行化 TIANYAN_DATA_DIR 环境变量测试（进程级全局副作用）。
+    static ENV_DATA_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_default_data_dir_honors_tianyan_data_dir_env() {
+        // README/.env.example 声明的 TIANYAN_DATA_DIR 覆盖：默认数据目录应取环境变量
+        let _guard = ENV_DATA_DIR_LOCK.lock().unwrap();
+        let original = std::env::var("TIANYAN_DATA_DIR").ok();
+        std::env::set_var("TIANYAN_DATA_DIR", "C:\\tianyan-e2e-data");
+
+        let config = StorageConfig::default();
+        let restored = || match &original {
+            Some(v) => std::env::set_var("TIANYAN_DATA_DIR", v),
+            None => std::env::remove_var("TIANYAN_DATA_DIR"),
+        };
+        assert_eq!(
+            config.data_dir,
+            std::path::PathBuf::from("C:\\tianyan-e2e-data"),
+            "TIANYAN_DATA_DIR 应覆盖默认数据目录"
+        );
+        restored();
+    }
+
+    #[test]
+    fn test_default_data_dir_ignores_empty_env() {
+        let _guard = ENV_DATA_DIR_LOCK.lock().unwrap();
+        let original = std::env::var("TIANYAN_DATA_DIR").ok();
+        let normal = {
+            std::env::remove_var("TIANYAN_DATA_DIR");
+            StorageConfig::default().data_dir.clone()
+        };
+        std::env::set_var("TIANYAN_DATA_DIR", "");
+        let with_empty = StorageConfig::default().data_dir.clone();
+        match &original {
+            Some(v) => std::env::set_var("TIANYAN_DATA_DIR", v),
+            None => std::env::remove_var("TIANYAN_DATA_DIR"),
+        }
+        assert_eq!(with_empty, normal, "空 TIANYAN_DATA_DIR 应回落到默认目录");
     }
 
     #[test]

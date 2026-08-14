@@ -1,0 +1,72 @@
+# Tianyan E2E 测试专用配置
+#
+# 供真实前后端集成测试（Playwright 启动 mock-llm + 后端 + vite）使用。
+# 所有外部依赖均为 mock（mock-llm.mjs，127.0.0.1:8765），测试可完全离线运行。
+
+# ==================== 模型配置 ====================
+# 唯一提供商：本地 mock（OpenAI 兼容协议，见 scripts/e2e/mock-llm.mjs）
+[[models.providers]]
+name = "e2e-mock"
+endpoint = "http://127.0.0.1:8765/v1"
+api_key = "e2e-key"
+timeout = 30
+enabled = true
+
+[[models.providers.models]]
+name = "e2e-chat"
+capabilities = ["chat"]
+
+[[models.providers.models]]
+name = "e2e-embed"
+capabilities = ["text-embedding"]
+
+# 后端 ModelServices::from_config 硬性要求 vision 能力模型（无则启动失败），
+# 因此额外声明一个 vision 模型；请求同样打到 mock 的 chat completions 端点
+# （mock 忽略消息内容，直接返回固定回复）。preferences 只需 chat + embedding。
+[[models.providers.models]]
+name = "e2e-vision"
+capabilities = ["vision"]
+
+[models.preferences]
+chat = { provider = "e2e-mock", model = "e2e-chat" }
+embedding = { provider = "e2e-mock", model = "e2e-embed" }
+
+# ==================== 存储配置 ====================
+# 注意：此处故意不设置 data_dir —— 由环境变量 TIANYAN_DATA_DIR 提供
+# （core/src/config/storage.rs default_data_dir 已读取该环境变量，2026-08-13 实现）。
+# 无需复制本文件；直接以 TIANYAN_CONFIG 指向本文件、TIANYAN_DATA_DIR 指向临时目录启动。
+[storage]
+
+[storage.vector]
+# 向量维度必须与 mock 嵌入向量长度一致（mock-llm.mjs 默认 768）
+collection_name = "tianyan_e2e"
+vector_dimension = 768
+
+# ==================== 智能体配置 ====================
+[agent]
+enable_thinking = false
+enable_skills = true
+stream_responses = true
+enable_memory = false
+default_top_k = 2
+max_turns = 50
+# working_directory 相对进程启动目录解析：
+# Playwright/test.ps1 从 gui-vite/ 启动后端，因此 ../scripts/... 即仓库
+# 根下的 scripts/...（<仓库根>\scripts\e2e\fixtures\workspace）。
+working_directory = "../scripts/e2e/fixtures/workspace"
+
+# ==================== 安全配置 ====================
+# wait_for_approval / unattended_mode 均关闭：危险操作不被挂起等待人工审批
+# （unattended_mode 为运行时字段，此处仅为文档化——后端解析时忽略未知键）。
+[security]
+wait_for_approval = false
+unattended_mode = false
+
+# ==================== 日志配置 ====================
+[logging]
+level = "warn"
+
+# ==================== 默认即禁用 ====================
+# 无 [scheduler] / [reminder] / [memory] 节：定时任务保持禁用，
+# 避免 E2E 期间后台任务干扰断言。
+# [retrieval] 不配置，使用代码默认值。

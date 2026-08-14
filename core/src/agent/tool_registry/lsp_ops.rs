@@ -5,17 +5,7 @@ use std::sync::Arc;
 use crate::agent::tool_params::LspParams;
 use crate::agent::tool_registry::ToolRegistry;
 use crate::common::error::{Result, TianyanError};
-use crate::lsp::diagnostics::LspManager;
-
-/// lsp 工具支持的操作集合。
-const LSP_OPERATIONS: &[&str] = &[
-    "goToDefinition",
-    "findReferences",
-    "hover",
-    "documentSymbol",
-    "workspaceSymbol",
-    "goToImplementation",
-];
+use crate::lsp::diagnostics::{LspManager, LSP_OPERATIONS};
 
 impl ToolRegistry {
     /// 执行 lsp 工具：查询语言服务器（跳转/悬停/符号等）。
@@ -52,7 +42,7 @@ impl ToolRegistry {
                 params.query.as_deref(),
             )
             .await
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：{}", e)))?;
+            .map_err(super::wrap_tool_error)?;
         Ok(serde_json::json!({
             "operation": params.operation,
             "file_path": file_path,
