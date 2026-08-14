@@ -19,8 +19,8 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{Message, MessageRole, TokenUsage};
 use crate::model::traits::ChatService;
 use crate::model::types::{
-    ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChunkChoice,
-    DeltaContent, ToolCall, ToolCallDelta, ToolCallFunctionDelta, ToolCallType, ToolChoice,
+    ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ToolCall,
+    ToolCallType, ToolChoice,
 };
 
 use super::client::AsyncOpenAIClient;
@@ -126,79 +126,78 @@ impl ChatService for AsyncOpenAIClient {
             .build()
             .map_err(|e| TianyanError::Custom(format!("模型服务错误：构建流式请求失败：{}", e)))?;
 
-        let mut stream = if request.enable_thinking == Some(true) {
-            let mut body = serde_json::to_value(&oa_request).map_err(|e| {
-                TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e))
-            })?;
+        // 一律走手写 SSE 解析（create_raw_stream）：async-openai 0.34 不解析
+        // DeepSeek 思考模型的 reasoning_content 增量字段——推理内容在反序列化时
+        // 被静默丢弃，模型"想完没说话"（content 空 + 仅 reasoning）会被误判为
+        // 空响应。思考模型天然携带该字段（与 enable_thinking 开关无关），
+        // 非思考模型不携带，行为与原有 async-openai 路径一致。
+        let mut body = serde_json::to_value(&oa_request)
+            .map_err(|e| TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e)))?;
+        if request.enable_thinking == Some(true) {
             body["enable_thinking"] = Value::Bool(true);
-            self.client.chat().create_stream_byot(body).await
-        } else {
-            self.client.chat().create_stream(oa_request).await
         }
-        .map_err(|e| TianyanError::Custom(format!("模型服务错误：创建流失败：{}", e)))?;
+        self.create_raw_stream(body).await
+    }
+}
 
+impl AsyncOpenAIClient {
+    /// 手写 SSE 流式补全：POST {base_url}/chat/completions（body 已含 stream: true），
+    /// 逐行解析 data: 事件为内部 ChatCompletionChunk 并经 channel 返回。
+    ///
+    /// async-openai 0.34 的流式反序列化丢弃 DeepSeek 思考模型的
+    /// reasoning_content 增量字段（其 chunk 结构体无此字段），本方法绕开
+    /// async-openai 直接解析原始 SSE，保留推理过程增量；非思考模型不携带
+    /// 该字段，解析结果与原有 async-openai 路径一致。
+    async fn create_raw_stream(
+        &self,
+        body: Value,
+    ) -> Result<mpsc::Receiver<Result<ChatCompletionChunk>>> {
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let mut req = self.http.post(&url).json(&body);
+        for (k, v) in &self.headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        if !self.api_key.is_empty() && !self.headers.contains_key("Authorization") {
+            req = req.bearer_auth(&self.api_key);
+        }
+
+        let response = req
+            .send()
+            .await
+            .map_err(|e| TianyanError::Custom(format!("模型服务错误：流式请求失败：{}", e)))?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            let detail: String = detail.chars().take(300).collect();
+            return Err(TianyanError::Custom(format!(
+                "模型服务错误：流式请求被拒绝（HTTP {}）：{}",
+                status, detail
+            )));
+        }
+
+        let mut byte_stream = response.bytes_stream();
         let (tx, rx) = mpsc::channel(100);
 
         tokio::spawn(async move {
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(oa_chunk) => {
-                        let chunk = ChatCompletionChunk {
-                            id: oa_chunk.id.clone(),
-                            object: "chat.completion.chunk".to_string(),
-                            created: oa_chunk.created as i64,
-                            model: oa_chunk.model,
-                            choices: oa_chunk
-                                .choices
-                                .into_iter()
-                                .map(|c| ChunkChoice {
-                                    index: c.index as usize,
-                                    delta: DeltaContent {
-                                        role: c.delta.role.as_ref().map(convert_role),
-                                        content: c.delta.content,
-                                        tool_calls: c.delta.tool_calls.map(|tcs| {
-                                            tcs.into_iter()
-                                                .map(|tc| ToolCallDelta {
-                                                    index: tc.index as usize,
-                                                    id: tc.id,
-                                                    call_type: tc
-                                                        .r#type
-                                                        .map(|_| "function".to_string()),
-                                                    function: tc.function.map(|f| {
-                                                        ToolCallFunctionDelta {
-                                                            name: f.name,
-                                                            arguments: f.arguments,
-                                                        }
-                                                    }),
-                                                })
-                                                .collect()
-                                        }),
-                                    },
-                                    finish_reason: c.finish_reason.as_ref().map(|r| {
-                                        AsyncOpenAIClient::finish_reason_str(r).to_string()
-                                    }),
-                                })
-                                .collect(),
-                            usage: oa_chunk.usage.map(|u| TokenUsage {
-                                prompt_tokens: u.prompt_tokens as usize,
-                                completion_tokens: u.completion_tokens as usize,
-                                total_tokens: u.total_tokens as usize,
-                            }),
-                        };
-                        if tx.send(Ok(chunk)).await.is_err() {
-                            return;
-                        }
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                match byte_stream.next().await {
+                    Some(Ok(bytes)) => {
+                        buf.extend_from_slice(&bytes);
+                        drain_sse_lines(&mut buf, &tx).await;
                     }
-                    Err(e) => {
-                        if let Err(send_err) = tx
+                    Some(Err(e)) => {
+                        let _ = tx
                             .send(Err(TianyanError::Custom(format!(
-                                "模型服务错误：流错误：{}",
+                                "模型服务错误：流读取失败：{}",
                                 e
                             ))))
-                            .await
-                        {
-                            tracing::warn!(error = %send_err, "流错误通知发送失败");
-                        }
+                            .await;
+                        return;
+                    }
+                    None => {
+                        // 流结束：处理残留缓冲（无换行的最后一个 data 行）
+                        drain_sse_lines(&mut buf, &tx).await;
                         return;
                     }
                 }
@@ -207,9 +206,7 @@ impl ChatService for AsyncOpenAIClient {
 
         Ok(rx)
     }
-}
 
-impl AsyncOpenAIClient {
     fn apply_shared_params(
         builder: &mut CreateChatCompletionRequestArgs,
         request: &ChatCompletionRequest,
@@ -261,6 +258,56 @@ impl AsyncOpenAIClient {
                 }
             };
             builder.tool_choice(oa_choice);
+        }
+    }
+}
+
+/// 从 SSE 缓冲中逐行提取完整的 data: 事件并送入 channel；
+/// 缓冲中未以换行结尾的残留数据留待后续字节到达或流结束时再处理。
+async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatCompletionChunk>>) {
+    loop {
+        let Some(nl) = buf.iter().position(|&b| b == b'\n') else {
+            return;
+        };
+        let line: Vec<u8> = buf.drain(..=nl).collect();
+        // 去掉行尾换行符；空行与注释行（: keep-alive）直接跳过
+        let line = String::from_utf8_lossy(&line[..line.len().saturating_sub(1)]);
+        let line = line.trim();
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data == "[DONE]" {
+            continue;
+        }
+        match serde_json::from_str::<ChatCompletionChunk>(data) {
+            Ok(chunk) => {
+                if tx.send(Ok(chunk)).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => {
+                // 部分兼容层（如 opencode）会在 [DONE] 后追加成本统计块
+                // （{"choices":[],"cost":"..."}），其结构缺少 id 等必填字段，
+                // 被严格反序列化拒绝。此类行跳过并告警，不中断整个流；
+                // 若负载是真正的错误对象则照常上报。
+                if let Ok(value) = serde_json::from_str::<Value>(data) {
+                    if let Some(err_obj) = value.get("error") {
+                        let _ = tx
+                            .send(Err(TianyanError::Custom(format!(
+                                "模型服务错误：提供商返回错误：{}",
+                                err_obj
+                            ))))
+                            .await;
+                        return;
+                    }
+                }
+                tracing::warn!(line = %data, "跳过无法解析的流式数据行: {}", e);
+                continue;
+            }
         }
     }
 }

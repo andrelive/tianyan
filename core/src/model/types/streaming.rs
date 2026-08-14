@@ -69,6 +69,10 @@ pub struct DeltaContent {
     /// 文本内容（可选）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// 思考过程增量（DeepSeek 等思考模型的 `reasoning_content` 字段；
+    /// async-openai 0.34 不解析该字段，由手写流式解析填充）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// 流式 tool calls 增量。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallDelta>>,

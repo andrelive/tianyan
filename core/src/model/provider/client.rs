@@ -12,6 +12,15 @@ use crate::config::ProviderConfig;
 pub struct AsyncOpenAIClient {
     pub(crate) service_name: String,
     pub(crate) client: Client<OpenAIConfig>,
+    /// 原始 HTTP 客户端（手写流式解析用：async-openai 0.34 不解析
+    /// DeepSeek 思考模型的 `reasoning_content` 增量字段）。
+    pub(crate) http: reqwest::Client,
+    /// 提供商 base URL（如 `https://api.openai.com/v1`）。
+    pub(crate) base_url: String,
+    /// API Key（可能为空，如本地服务）。
+    pub(crate) api_key: String,
+    /// 额外请求头（ProviderConfig.headers）。
+    pub(crate) headers: std::collections::HashMap<String, String>,
 }
 
 impl AsyncOpenAIClient {
@@ -36,11 +45,15 @@ impl AsyncOpenAIClient {
             .build()
             .map_err(|e| TianyanError::Custom(format!("配置错误：构建 HTTP 客户端失败: {}", e)))?;
 
-        let client = Client::with_config(oa_config).with_http_client(http_client);
+        let client = Client::with_config(oa_config).with_http_client(http_client.clone());
 
         Ok(Self {
             service_name: config.name.clone(),
             client,
+            http: http_client,
+            base_url,
+            api_key,
+            headers: config.headers.clone(),
         })
     }
 

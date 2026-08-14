@@ -355,6 +355,7 @@ impl AgentLoop {
 
                     // Accumulators for streaming chunks
                     let mut accumulated_content = String::new();
+                    let mut accumulated_reasoning = String::new();
                     let mut accumulated_tool_calls: std::collections::BTreeMap<
                         usize,
                         (String, String, String),
@@ -387,6 +388,12 @@ impl AgentLoop {
                                     if let Some(ref content) = choice.delta.content {
                                         accumulated_content.push_str(content);
                                         sender.send_answer_delta(content).await;
+                                    }
+                                    if let Some(ref reasoning) = choice.delta.reasoning_content {
+                                        if !reasoning.is_empty() {
+                                            accumulated_reasoning.push_str(reasoning);
+                                            sender.send_thought(reasoning).await;
+                                        }
                                     }
                                     if let Some(ref tc_deltas) = choice.delta.tool_calls {
                                         for tc in tc_deltas {
@@ -449,7 +456,11 @@ impl AgentLoop {
                         content_parts: None,
                         tool_calls,
                         tool_call_id: None,
-                        reasoning_content: None,
+                        reasoning_content: if accumulated_reasoning.is_empty() {
+                            None
+                        } else {
+                            Some(accumulated_reasoning)
+                        },
                     };
 
                     Ok((assistant_msg, turn_usage, finish_reason))
@@ -1209,11 +1220,33 @@ mod tests {
                 delta: DeltaContent {
                     role: None,
                     content: content.map(|s| s.to_string()),
+                    reasoning_content: None,
                     tool_calls,
                 },
                 finish_reason: finish_reason.map(|s| s.to_string()),
             }],
             usage,
+        }
+    }
+
+    /// 构造仅携带 reasoning_content 的流式 chunk（思考模型的推理段）。
+    fn stream_chunk_with_reasoning(reasoning: Option<&str>) -> ChatCompletionChunk {
+        ChatCompletionChunk {
+            id: "chunk-r".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: DeltaContent {
+                    role: None,
+                    content: None,
+                    reasoning_content: reasoning.map(|s| s.to_string()),
+                    tool_calls: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
         }
     }
 
@@ -1273,6 +1306,60 @@ mod tests {
         // chunk 顺序：stream_sender 收到的 answer_delta 顺序与发送一致
         let deltas = collect_answer_deltas(event_rx).await;
         assert_eq!(deltas, vec!["你好", "，世界", "！"]);
+    }
+
+    /// 流式路径：reasoning_content delta 累积进 assistant 消息并逐段推送
+    /// Thought 事件（修复思考模型推理内容被静默丢弃导致的空响应误判）。
+    #[tokio::test]
+    async fn test_run_stream_accumulates_reasoning_and_emits_thought() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion_stream().returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            // 思考段：仅 reasoning_content（无正文、无 tool_calls）
+            tx.try_send(Ok(stream_chunk_with_reasoning(Some("先分析项目结构"))))
+                .unwrap();
+            tx.try_send(Ok(stream_chunk_with_reasoning(Some("再检查测试"))))
+                .unwrap();
+            // 正文段
+            tx.try_send(Ok(stream_chunk(Some("审查完成"), None, None)))
+                .unwrap();
+            Ok(rx)
+        });
+        let agent_loop = make_loop(mock, 5);
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamEventSender::new(event_tx);
+
+        let mut messages = vec![Message::user("审查项目")];
+        let result = agent_loop
+            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .await
+            .unwrap();
+
+        // 最终回答不受推理段影响
+        match result {
+            AgentLoopResult::Answer { content, .. } => assert_eq!(content, "审查完成"),
+            other => panic!("期望 Answer，得到 {:?}", other),
+        }
+
+        // assistant 消息携带累积的 reasoning_content（供后续轮次/持久化使用）
+        let persisted = messages
+            .iter()
+            .find(|m| m.role == MessageRole::Assistant)
+            .expect("应存在 assistant 消息");
+        assert_eq!(
+            persisted.reasoning_content.as_deref(),
+            Some("先分析项目结构再检查测试")
+        );
+
+        // Thought 事件按推理段顺序实时推送（前端 thinking 渲染）
+        let mut thoughts = Vec::new();
+        while let Some(Ok(chunk)) = event_rx.recv().await {
+            if chunk.chunk_type == StreamChunkType::Thought {
+                thoughts.push(chunk.delta);
+            }
+        }
+        assert_eq!(thoughts, vec!["先分析项目结构", "再检查测试"]);
     }
 
     /// 流式路径：tool_calls delta 按 index 累积 —— 分片 id/name/arguments 最终完整。
