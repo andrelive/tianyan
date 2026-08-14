@@ -67,7 +67,7 @@ export default function WorkspacePicker({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
       role="dialog"
       aria-modal="true"
-      aria-label="选择工作目录"
+      aria-label="选择目录"
       onClick={(e) => {
         if (e.target === e.currentTarget && !saving) onClose();
       }}
@@ -76,7 +76,7 @@ export default function WorkspacePicker({
         {/* 头部 */}
         <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--color-border)]">
           <FolderOpen className="w-4 h-4 text-accent" />
-          <h2 className="text-sm font-medium text-[var(--color-text-primary)]">选择工作目录</h2>
+          <h2 className="text-sm font-medium text-[var(--color-text-primary)]">选择目录</h2>
           <button
             onClick={onClose}
             disabled={saving}

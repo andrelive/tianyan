@@ -52,22 +52,22 @@ test.describe('real backend session workspace grouping', () => {
       })
       .toBe(FIXTURE_WORKSPACE);
 
-    // 3. UI：侧边栏按工作区分组 —— 分组头显示工作区路径，会话归入其下
+    // 3. UI：会话页左栏按目录分组 —— 分组头显示目录 basename（title 携带完整路径）
     await page.goto('/');
-    await expect(page.getByText(FIXTURE_WORKSPACE, { exact: true })).toBeVisible({
+    await expect(page.getByRole('button', { name: `分组 ${path.basename(FIXTURE_WORKSPACE)}` })).toBeVisible({
       timeout: 30000,
     });
     await expect(page.getByText(message, { exact: true })).toBeVisible({ timeout: 30000 });
 
-    // 4. 进入该会话 → 工作区页解析会话工作目录并展示夹具树
+    // 4. 进入该会话 → 文件视图页解析会话工作目录并展示夹具树
     await page.getByText(message, { exact: true }).click();
-    await page.getByRole('button', { name: '工作区', exact: true }).click();
+    await page.getByRole('button', { name: '文件视图' }).click();
     await expect(page).toHaveURL('/workspace');
-    await expect(page.getByRole('heading', { name: '工作区', exact: true })).toBeVisible({
+    await expect(page.getByRole('heading', { name: '文件', exact: true })).toBeVisible({
       timeout: 30000,
     });
-    // 页头显示会话工作区标签
-    await expect(page.getByLabel(`工作区：${FIXTURE_WORKSPACE}`)).toBeVisible({ timeout: 15000 });
+    // 页头显示会话目录标签
+    await expect(page.getByLabel(`目录：${FIXTURE_WORKSPACE}`)).toBeVisible({ timeout: 15000 });
     // 文件树从会话绑定的工作区加载夹具
     const helloRow = page.getByRole('treeitem', { name: 'hello.txt' }).first();
     await expect(helloRow).toBeVisible({ timeout: 30000 });

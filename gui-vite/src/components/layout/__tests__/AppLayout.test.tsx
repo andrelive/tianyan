@@ -26,7 +26,7 @@ describe('AppLayout', () => {
     // Sidebar renders "天演" header
     expect(screen.getByText('天演')).toBeInTheDocument();
     // Sidebar renders nav items
-    expect(screen.getByText('对话')).toBeInTheDocument();
+    expect(screen.getByText('会话')).toBeInTheDocument();
     expect(screen.getByText('技能')).toBeInTheDocument();
     expect(screen.getByText('知识')).toBeInTheDocument();
     expect(screen.getByText('设置')).toBeInTheDocument();
@@ -65,11 +65,11 @@ describe('AppLayout', () => {
     // In collapsed mode, the sidebar has an expand button
     expect(screen.getByTitle('展开侧边栏')).toBeInTheDocument();
     // Nav icon buttons should still be visible (icon-only mode)
-    expect(screen.getByTitle('对话')).toBeInTheDocument();
+    expect(screen.getByTitle('会话')).toBeInTheDocument();
   });
 
   it('renders new chat button in sidebar', () => {
     renderAppLayoutWithChild();
-    expect(screen.getByTitle('新建对话')).toBeInTheDocument();
+    expect(screen.getByTitle('新建会话')).toBeInTheDocument();
   });
 });

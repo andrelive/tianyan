@@ -185,7 +185,7 @@ export default function WorkspaceTree({
     return (
       <div className="flex flex-col items-center gap-2 py-10 px-4 text-center">
         <p role="alert" className="text-sm text-red-600 dark:text-red-400">
-          加载工作区失败：{error}
+          加载目录失败：{error}
         </p>
         <button
           type="button"
@@ -202,7 +202,7 @@ export default function WorkspaceTree({
   if (rootEntries.length === 0) {
     return (
       <div className="flex items-center justify-center py-10">
-        <p className="text-sm text-[var(--color-text-tertiary)]">工作区为空</p>
+        <p className="text-sm text-[var(--color-text-tertiary)]">目录为空</p>
       </div>
     );
   }

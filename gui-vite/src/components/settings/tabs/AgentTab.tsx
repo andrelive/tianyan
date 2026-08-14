@@ -101,7 +101,7 @@ export default function AgentTab({ config, onUpdateField }: AgentTabProps) {
           </FieldRow>
           <p className="mt-1.5 text-xs text-[var(--color-text-tertiary)]">
             Agent 执行命令/读写文件的基础目录，也是会话回退时文件快照的根目录。
-            工作区面板需要配置后才能使用。
+            文件视图需要配置后才能使用。
           </p>
         </div>
       </div>

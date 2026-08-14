@@ -21,8 +21,9 @@ test.describe('real backend chat', () => {
   const uniqueMessage = `${MESSAGE_MARKER}${Date.now()}`;
 
   test.afterEach(async ({ request }) => {
-    // 唯一数据目录（playwright webServer 按 PID 隔离）：清理全部会话，幂等
-    await deleteAllSessions(request);
+    // 只清理本 spec 创建的会话（按标题标记精确匹配）——绝不删除其他 spec
+    // 的会话（并发 worker 共享同一后端数据目录，全量删除会互相踩踏）。
+    await deleteMarkerSessions(request);
   });
 
   test('sends message, streams the mock reply and persists the session', async ({
@@ -30,9 +31,7 @@ test.describe('real backend chat', () => {
     request,
   }) => {
     await page.goto('/');
-    await page.locator('button[title="新建对话"]').click();
-    // 新建对话先选工作区（工作区 = 会话的父级分组）；不绑定直接进入对话页
-    await page.getByRole('button', { name: '不绑定工作区' }).click();
+    await page.getByRole('navigation', { name: '导航' }).getByLabel('新建会话').click();
     await expect(page).toHaveURL('/chat');
 
     const textarea = page.getByRole('textbox', { name: '输入消息' });
@@ -68,12 +67,13 @@ test.describe('real backend chat', () => {
   });
 });
 
-/** 删除全部会话（幂等；数据目录每次运行唯一，不会误删其他数据）。 */
-async function deleteAllSessions(request: APIRequestContext): Promise<void> {
+/** 删除标题带本 spec 标记前缀的会话（幂等；不影响其他 spec 的会话）。 */
+async function deleteMarkerSessions(request: APIRequestContext): Promise<void> {
   const res = await request.get('/api/v1/sessions');
   if (!res.ok()) return;
-  const body = (await res.json()) as { sessions: Array<{ id: string }> };
+  const body = (await res.json()) as { sessions: Array<{ id: string; title: string }> };
   for (const session of body.sessions) {
+    if (!session.title.startsWith(MESSAGE_MARKER)) continue;
     const del = await request.delete(`/api/v1/sessions/${session.id}`);
     if (!del.ok() && del.status() !== 404) {
       throw new Error(`删除会话失败 ${session.id}: HTTP ${del.status()}`);

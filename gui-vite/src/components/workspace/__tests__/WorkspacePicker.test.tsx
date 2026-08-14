@@ -17,10 +17,10 @@ describe('WorkspacePicker', () => {
         currentWorkingDir=""
         onClose={() => {}}
         onSelect={(p) => selected.push(p)}
-        clearLabel="不绑定工作区"
+        clearLabel="不绑定目录"
       />,
     );
-    const dialog = screen.getByRole('dialog', { name: '选择工作目录' });
+    const dialog = screen.getByRole('dialog', { name: '选择目录' });
 
     // 浏览根：盘符列表
     await waitFor(() => {
@@ -45,14 +45,14 @@ describe('WorkspacePicker', () => {
         currentWorkingDir=""
         onClose={() => {}}
         onSelect={(p) => selected.push(p)}
-        clearLabel="不绑定工作区"
+        clearLabel="不绑定目录"
       />,
     );
-    const dialog = screen.getByRole('dialog', { name: '选择工作目录' });
+    const dialog = screen.getByRole('dialog', { name: '选择目录' });
     await waitFor(() => {
       expect(within(dialog).getByRole('button', { name: '目录 C:\\' })).toBeInTheDocument();
     });
-    await user.click(within(dialog).getByRole('button', { name: '不绑定工作区' }));
+    await user.click(within(dialog).getByRole('button', { name: '不绑定目录' }));
     expect(selected).toEqual(['']);
   });
 });

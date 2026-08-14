@@ -318,7 +318,7 @@ export default function ChatPanel() {
     <div className="flex flex-col h-full bg-[var(--color-bg-primary)]">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] shrink-0">
-        <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">对话</h1>
+        <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">会话</h1>
         <div className="flex items-center gap-2">
           <button
             onClick={() => void handleCompress()}

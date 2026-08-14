@@ -1,15 +1,9 @@
-import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
-import { apiGet, apiDelete, updateSessionTitle } from '@/lib/api-client';
-import type { Session, ListSessionsResponse, SessionMessagesResponse } from '@/lib/types';
-import WorkspacePicker from '@/components/workspace/WorkspacePicker';
-import { formatRelativeTime } from '@/lib/utils';
 import {
   MessageSquare,
   Wrench,
   BookOpen,
-  FolderOpen,
   MemoryStick,
   Route,
   ShieldCheck,
@@ -19,24 +13,15 @@ import {
   Plus,
   PanelLeftClose,
   PanelLeft,
-  Trash2,
 } from 'lucide-react';
 
+/**
+ * 全局一级导航侧边栏：纯导航，不含会话列表（会话列表在会话页左栏，见 SessionList）。
+ */
 const NAV_ITEMS = [
-  { id: 'chat' as const, label: '对话', icon: MessageSquare, path: '/chat' },
+  { id: 'chat' as const, label: '会话', icon: MessageSquare, path: '/chat' },
   { id: 'skills' as const, label: '技能', icon: Wrench, path: '/skills' },
-  {
-    id: 'knowledge' as const,
-    label: '知识',
-    icon: BookOpen,
-    path: '/knowledge',
-  },
-  {
-    id: 'workspace' as const,
-    label: '工作区',
-    icon: FolderOpen,
-    path: '/workspace',
-  },
+  { id: 'knowledge' as const, label: '知识', icon: BookOpen, path: '/knowledge' },
   {
     id: 'memory' as const,
     label: '记忆',
@@ -80,102 +65,18 @@ export default function Sidebar() {
   const location = useLocation();
   const isSidebarOpen = useAppStore((s) => s.isSidebarOpen);
   const toggleSidebar = useAppStore((s) => s.toggleSidebar);
-  const sessions = useAppStore((s) => s.sessions);
-  const setSessions = useAppStore((s) => s.setSessions);
-  const currentSessionId = useAppStore((s) => s.currentSessionId);
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
   const setMessages = useAppStore((s) => s.setMessages);
-  const newSessionWorkspace = useAppStore((s) => s.newSessionWorkspace);
-  const setNewSessionWorkspace = useAppStore((s) => s.setNewSessionWorkspace);
-  const showToast = useAppStore((s) => s.showToast);
   const setView = useAppStore((s) => s.setView);
-  const [hoveredSession, setHoveredSession] = useState<string | null>(null);
-  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
-  const [editingTitle, setEditingTitle] = useState('');
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const sessionListRef = useRef<HTMLDivElement>(null);
-  const editInputRef = useRef<HTMLInputElement>(null);
+  const setNewSessionWorkspace = useAppStore((s) => s.setNewSessionWorkspace);
 
-  useEffect(() => {
-    apiGet<ListSessionsResponse>('/sessions')
-      .then((data) => setSessions(data.sessions))
-      .catch(() => {
-        /* sessions optional for now */
-      });
-  }, [setSessions]);
-
-  // 进入编辑模式时聚焦输入框
-  useEffect(() => {
-    if (editingSessionId) {
-      editInputRef.current?.focus();
-      editInputRef.current?.select();
-    }
-  }, [editingSessionId]);
-
-  const handleStartRename = (e: React.MouseEvent, session: Session) => {
-    e.stopPropagation();
-    setEditingSessionId(session.id);
-    setEditingTitle(session.title || '');
-  };
-
-  const handleRenameSubmit = async () => {
-    if (!editingSessionId) return;
-    const sessionId = editingSessionId;
-    const title = editingTitle.trim();
-    setEditingSessionId(null);
-    if (!title) return;
-
-    try {
-      await updateSessionTitle(sessionId, title);
-      // 更新本地会话列表中的标题
-      const current = useAppStore.getState().sessions;
-      useAppStore
-        .getState()
-        .setSessions(current.map((s) => (s.id === sessionId ? { ...s, title } : s)));
-    } catch {
-      showToast('重命名会话失败', 'error');
-    }
-  };
-
-  // 新建对话：先选工作区（工作区 = 会话的父级分组），再进入对话页。
-  // 选中目录后绑定到即将创建的新会话（首条消息随 ChatRequest 提交）。
+  /** 新建会话：进入会话页空状态（默认组，零弹窗；会话页左栏可再选目录）。 */
   const handleNewChat = () => {
-    setPickerOpen(true);
-  };
-
-  const handleNewChatWorkspaceSelected = (path: string) => {
-    setPickerOpen(false);
-    setNewSessionWorkspace(path || null);
+    setNewSessionWorkspace(null);
     setCurrentSession(null);
     setMessages([]);
     setView('chat');
     navigate('/chat');
-    if (path) {
-      showToast(`新对话将绑定工作区：${path}`, 'success');
-    }
-  };
-
-  const handleSelectSession = async (session: Session) => {
-    setCurrentSession(session.id);
-    setView('chat');
-    navigate(`/chat/${session.id}`);
-    // Fetch messages for the selected session
-    try {
-      const data = await apiGet<SessionMessagesResponse>(`/sessions/${session.id}/messages`);
-      setMessages(data.messages);
-    } catch {
-      showToast('加载会话消息失败', 'error');
-    }
-  };
-
-  const handleDeleteSession = async (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    try {
-      await apiDelete(`/sessions/${id}`);
-      useAppStore.getState().removeSession(id);
-    } catch {
-      showToast('删除会话失败', 'error');
-    }
   };
 
   const handleNavClick = (item: (typeof NAV_ITEMS)[number]) => {
@@ -183,47 +84,9 @@ export default function Sidebar() {
     navigate(item.path);
   };
 
-  const handleSessionKeyDown = useCallback(
-    (e: React.KeyboardEvent, index: number) => {
-      const items = sessionListRef.current?.querySelectorAll('[role="button"]');
-      if (!items) return;
-
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        const next = Math.min(index + 1, items.length - 1);
-        (items[next] as HTMLElement).focus();
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        const prev = Math.max(index - 1, 0);
-        (items[prev] as HTMLElement).focus();
-      } else if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        handleSelectSession(sessions[index]);
-      }
-    },
-    [sessions, handleSelectSession],
-  );
-
   // Current path determines which nav is active
   const pathBase = location.pathname.split('/')[1] || 'chat';
   const activeNav = NAV_ITEMS.find((n) => n.id === pathBase)?.id || 'chat';
-
-  // 按工作目录分组（工作区 = 会话的父级分组；未绑定归入默认组）
-  const sessionGroups = useMemo(() => {
-    const map = new Map<string, Session[]>();
-    for (const s of sessions) {
-      const key = s.working_directory || '';
-      const list = map.get(key) ?? [];
-      list.push(s);
-      map.set(key, list);
-    }
-    return [...map.entries()].sort((a, b) => {
-      if (a[0] === '') return 1;
-      if (b[0] === '') return -1;
-      return a[0].localeCompare(b[0]);
-    });
-  }, [sessions]);
-  const flatSessions = useMemo(() => sessionGroups.flatMap(([, list]) => list), [sessionGroups]);
 
   if (!isSidebarOpen) {
     return (
@@ -274,8 +137,8 @@ export default function Sidebar() {
           <button
             onClick={handleNewChat}
             className="p-1.5 rounded-md hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]"
-            title="新建对话"
-            aria-label="新建对话"
+            title="新建会话"
+            aria-label="新建会话"
           >
             <Plus size={18} />
           </button>
@@ -291,7 +154,7 @@ export default function Sidebar() {
       </div>
 
       {/* Nav items */}
-      <nav className="flex flex-col px-2 py-2 gap-0.5 border-b border-[var(--color-border)]">
+      <nav className="flex flex-col px-2 py-2 gap-0.5">
         {NAV_ITEMS.map((item) => (
           <button
             key={item.id}
@@ -307,115 +170,6 @@ export default function Sidebar() {
           </button>
         ))}
       </nav>
-
-      {/* Session list（按工作区分组：工作区 = 会话的父级分组） */}
-      <div className="flex-1 overflow-y-auto px-2 py-2">
-        {sessions.length === 0 ? (
-          <p
-            className="text-xs text-[var(--color-text-tertiary)] text-center mt-8"
-            aria-live="polite"
-          >
-            暂无会话
-          </p>
-        ) : (
-          <div
-            ref={sessionListRef}
-            className="flex flex-col gap-2"
-            role="list"
-            aria-label="会话列表"
-          >
-            {sessionGroups.map(([workdir, groupSessions]) => (
-              <div key={workdir || '__default_ws__'} className="flex flex-col gap-0.5">
-                <div className="flex items-center gap-1 px-2 pt-1 pb-0.5">
-                  <FolderOpen size={10} className="shrink-0 text-[var(--color-text-tertiary)]" />
-                  <span
-                    className="text-[10px] uppercase tracking-wider text-[var(--color-text-tertiary)] truncate"
-                    title={workdir || undefined}
-                  >
-                    {workdir || '默认工作区'}
-                  </span>
-                </div>
-                {groupSessions.map((session) => {
-                  const flatIndex = flatSessions.findIndex((s) => s.id === session.id);
-                  return (
-                    <div
-                      key={session.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => handleSelectSession(session)}
-                      onKeyDown={(e) => handleSessionKeyDown(e, flatIndex)}
-                      onMouseEnter={() => setHoveredSession(session.id)}
-                      onMouseLeave={() => setHoveredSession(null)}
-                      aria-label={session.title || '新对话'}
-                      aria-current={currentSessionId === session.id ? 'true' : undefined}
-                      className={`group flex items-center justify-between px-3 py-2 rounded-md cursor-pointer text-sm transition-colors ${
-                        currentSessionId === session.id
-                          ? 'bg-blue-50 dark:bg-blue-900/20'
-                          : 'hover:bg-[var(--color-bg-hover)]'
-                      }`}
-                    >
-                      <div className="flex-1 min-w-0">
-                        {editingSessionId === session.id ? (
-                          <input
-                            ref={editInputRef}
-                            value={editingTitle}
-                            onChange={(e) => setEditingTitle(e.target.value)}
-                            onBlur={handleRenameSubmit}
-                            onKeyDown={(e) => {
-                              e.stopPropagation();
-                              if (e.key === 'Enter') {
-                                handleRenameSubmit();
-                              } else if (e.key === 'Escape') {
-                                setEditingSessionId(null);
-                              }
-                            }}
-                            className="w-full px-1 py-0.5 text-sm rounded border border-blue-500 bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] outline-none"
-                            aria-label="编辑会话标题"
-                          />
-                        ) : (
-                          <p
-                            onDoubleClick={(e) => handleStartRename(e, session)}
-                            title="双击重命名"
-                            className={`truncate ${
-                              currentSessionId === session.id
-                                ? 'text-blue-700 dark:text-blue-300 font-medium'
-                                : 'text-[var(--color-text-primary)]'
-                            }`}
-                          >
-                            {session.title || '新对话'}
-                          </p>
-                        )}
-                        <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
-                          {formatRelativeTime(session.updated_at)}
-                        </p>
-                      </div>
-                      {hoveredSession === session.id && (
-                        <button
-                          onClick={(e) => handleDeleteSession(e, session.id)}
-                          className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-[var(--color-text-tertiary)] hover:text-red-500 shrink-0"
-                          title="删除会话"
-                          aria-label={`删除会话 ${session.title || '新对话'}`}
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* 新建对话工作区选择器（工作区 = 会话的父级分组） */}
-      <WorkspacePicker
-        open={pickerOpen}
-        currentWorkingDir={newSessionWorkspace ?? ''}
-        onClose={() => setPickerOpen(false)}
-        onSelect={handleNewChatWorkspaceSelected}
-        clearLabel="不绑定工作区"
-      />
     </aside>
   );
 }

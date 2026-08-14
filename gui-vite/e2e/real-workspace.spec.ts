@@ -18,9 +18,9 @@ test.describe('real backend workspace', () => {
 
   test('workspace tree loads the fixture and renders its content', async ({ page }) => {
     await page.goto('/');
-    await page.getByRole('button', { name: '工作区', exact: true }).click();
+    await page.getByRole('button', { name: '文件视图' }).click();
     await expect(page).toHaveURL('/workspace');
-    await expect(page.getByRole('heading', { name: '工作区', exact: true })).toBeVisible({
+    await expect(page.getByRole('heading', { name: '文件', exact: true })).toBeVisible({
       timeout: 30000,
     });
 

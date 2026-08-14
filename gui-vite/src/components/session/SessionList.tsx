@@ -1,0 +1,382 @@
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useAppStore } from '@/lib/store';
+import { apiGet, apiDelete, updateSessionTitle } from '@/lib/api-client';
+import type { Session, ListSessionsResponse, SessionMessagesResponse } from '@/lib/types';
+import { formatRelativeTime } from '@/lib/utils';
+import {
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  FolderOpen,
+  FolderPlus,
+  Plus,
+  Trash2,
+} from 'lucide-react';
+import WorkspacePicker from '@/components/workspace/WorkspacePicker';
+
+/** 目录绝对路径 → 展示名（basename；默认组回退）。 */
+function groupLabel(workdir: string): string {
+  if (!workdir) return '默认';
+  const parts = workdir.split(/[\\/]/).filter(Boolean);
+  const base = parts.pop();
+  return base || workdir;
+}
+
+/**
+ * 会话页左栏（二级列表，对齐 deepseek harness 布局）：
+ * 工作区分组（目录名）+ 会话子项；组行 hover「＋」在该目录新建会话（零弹窗），
+ * 顶部「＋ 新建会话」（默认组）、「＋ 新目录」（目录选择器，唯一弹窗），
+ * 底部「文件视图」入口（当前会话工作区审计页）。
+ */
+export default function SessionList() {
+  const navigate = useNavigate();
+  const sessions = useAppStore((s) => s.sessions);
+  const setSessions = useAppStore((s) => s.setSessions);
+  const currentSessionId = useAppStore((s) => s.currentSessionId);
+  const setCurrentSession = useAppStore((s) => s.setCurrentSession);
+  const setMessages = useAppStore((s) => s.setMessages);
+  const setView = useAppStore((s) => s.setView);
+  const showToast = useAppStore((s) => s.showToast);
+  const newSessionWorkspace = useAppStore((s) => s.newSessionWorkspace);
+  const setNewSessionWorkspace = useAppStore((s) => s.setNewSessionWorkspace);
+
+  const [hoveredSession, setHoveredSession] = useState<string | null>(null);
+  const [hoveredGroup, setHoveredGroup] = useState<string | null>(null);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState('');
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const sessionListRef = useRef<HTMLDivElement>(null);
+  const editInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    apiGet<ListSessionsResponse>('/sessions')
+      .then((data) => setSessions(data.sessions))
+      .catch(() => {
+        /* sessions optional for now */
+      });
+  }, [setSessions]);
+
+  // 进入编辑模式时聚焦输入框
+  useEffect(() => {
+    if (editingSessionId) {
+      editInputRef.current?.focus();
+      editInputRef.current?.select();
+    }
+  }, [editingSessionId]);
+
+  // 按工作目录分组（工作区 = 会话的父级分组；未绑定归入默认组）
+  const sessionGroups = useMemo(() => {
+    const map = new Map<string, Session[]>();
+    for (const s of sessions) {
+      const key = s.working_directory || '';
+      const list = map.get(key) ?? [];
+      list.push(s);
+      map.set(key, list);
+    }
+    return [...map.entries()].sort((a, b) => {
+      if (a[0] === '') return 1;
+      if (b[0] === '') return -1;
+      return a[0].localeCompare(b[0]);
+    });
+  }, [sessions]);
+  const flatSessions = useMemo(() => sessionGroups.flatMap(([, list]) => list), [sessionGroups]);
+
+  /** 开启新会话：绑定到指定目录（空串 = 默认组），零弹窗。 */
+  const startNewSession = useCallback(
+    (workdir: string) => {
+      setNewSessionWorkspace(workdir || null);
+      setCurrentSession(null);
+      setMessages([]);
+      setView('chat');
+      navigate('/chat');
+    },
+    [navigate, setCurrentSession, setMessages, setNewSessionWorkspace, setView],
+  );
+
+  /** 添加新目录分组：目录选择器（唯一弹窗）→ 进入该目录的新会话。 */
+  const handleAddDirectory = useCallback(
+    (path: string) => {
+      setPickerOpen(false);
+      startNewSession(path);
+    },
+    [startNewSession],
+  );
+
+  const handleSelectSession = useCallback(
+    async (session: Session) => {
+      setCurrentSession(session.id);
+      setView('chat');
+      navigate(`/chat/${session.id}`);
+      try {
+        const data = await apiGet<SessionMessagesResponse>(`/sessions/${session.id}/messages`);
+        setMessages(data.messages);
+      } catch {
+        showToast('加载会话消息失败', 'error');
+      }
+    },
+    [navigate, setCurrentSession, setMessages, setView, showToast],
+  );
+
+  const handleStartRename = (e: React.MouseEvent, session: Session) => {
+    e.stopPropagation();
+    setEditingSessionId(session.id);
+    setEditingTitle(session.title || '');
+  };
+
+  const handleRenameSubmit = async () => {
+    if (!editingSessionId) return;
+    const sessionId = editingSessionId;
+    const title = editingTitle.trim();
+    setEditingSessionId(null);
+    if (!title) return;
+    try {
+      await updateSessionTitle(sessionId, title);
+      const current = useAppStore.getState().sessions;
+      useAppStore
+        .getState()
+        .setSessions(current.map((s) => (s.id === sessionId ? { ...s, title } : s)));
+    } catch {
+      showToast('重命名会话失败', 'error');
+    }
+  };
+
+  const handleDeleteSession = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    try {
+      await apiDelete(`/sessions/${id}`);
+      useAppStore.getState().removeSession(id);
+    } catch {
+      showToast('删除会话失败', 'error');
+    }
+  };
+
+  const toggleGroup = (key: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent, index: number) => {
+      const items = sessionListRef.current?.querySelectorAll('[role="button"]');
+      if (!items) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        const next = Math.min(index + 1, items.length - 1);
+        (items[next] as HTMLElement).focus();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        const prev = Math.max(index - 1, 0);
+        (items[prev] as HTMLElement).focus();
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        handleSelectSession(flatSessions[index]);
+      }
+    },
+    [flatSessions, handleSelectSession],
+  );
+
+  return (
+    <aside
+      aria-label="会话列表"
+      className="w-[272px] shrink-0 flex flex-col border-r border-[var(--color-border)] bg-[var(--color-bg-secondary)] min-h-0"
+    >
+      {/* 头部：新建会话（默认组）/ 新目录 */}
+      <div className="flex items-center gap-1 px-3 py-2 border-b border-[var(--color-border)]">
+        <span className="text-xs font-medium text-[var(--color-text-secondary)]">会话</span>
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => startNewSession('')}
+            title="新建会话"
+            aria-label="新建会话"
+            className="p-1.5 rounded-md hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]"
+          >
+            <Plus size={16} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setPickerOpen(true)}
+            title="新目录（添加工作区分组）"
+            aria-label="新目录"
+            className="p-1.5 rounded-md hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]"
+          >
+            <FolderPlus size={16} />
+          </button>
+        </div>
+      </div>
+
+      {/* 会话列表（工作区分组 + 会话子项） */}
+      <div ref={sessionListRef} className="flex-1 overflow-y-auto px-2 py-2">
+        {sessions.length === 0 ? (
+          <p
+            className="text-xs text-[var(--color-text-tertiary)] text-center mt-8"
+            aria-live="polite"
+          >
+            暂无会话
+          </p>
+        ) : (
+          <div className="flex flex-col gap-1.5" role="list" aria-label="会话列表">
+            {sessionGroups.map(([workdir, groupSessions]) => {
+              const collapsed = collapsedGroups.has(workdir);
+              const label = groupLabel(workdir);
+              return (
+                <div key={workdir || '__default_ws__'} className="flex flex-col gap-0.5">
+                  {/* 分组行：折叠/展开 + hover「＋」新建该目录会话 */}
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => toggleGroup(workdir)}
+                    onMouseEnter={() => setHoveredGroup(workdir)}
+                    onMouseLeave={() => setHoveredGroup(null)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleGroup(workdir);
+                      }
+                    }}
+                    aria-label={`分组 ${label}`}
+                    className="group flex items-center gap-1 px-1.5 py-1 rounded-md cursor-pointer hover:bg-[var(--color-bg-hover)]"
+                  >
+                    {collapsed ? (
+                      <ChevronRight
+                        size={12}
+                        className="shrink-0 text-[var(--color-text-tertiary)]"
+                      />
+                    ) : (
+                      <ChevronDown
+                        size={12}
+                        className="shrink-0 text-[var(--color-text-tertiary)]"
+                      />
+                    )}
+                    <FolderOpen size={13} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                    <span
+                      className="text-xs font-medium text-[var(--color-text-secondary)] truncate"
+                      title={workdir || undefined}
+                    >
+                      {label}
+                    </span>
+                    <span className="text-[10px] text-[var(--color-text-tertiary)] shrink-0">
+                      {groupSessions.length}
+                    </span>
+                    {hoveredGroup === workdir && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          startNewSession(workdir);
+                        }}
+                        title={`在 ${label} 新建会话`}
+                        aria-label={`在 ${label} 新建会话`}
+                        className="ml-auto p-0.5 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] shrink-0"
+                      >
+                        <Plus size={12} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* 会话子项（二级） */}
+                  {!collapsed &&
+                    groupSessions.map((session) => {
+                      const flatIndex = flatSessions.findIndex((s) => s.id === session.id);
+                      return (
+                        <div
+                          key={session.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => handleSelectSession(session)}
+                          onKeyDown={(e) => handleKeyDown(e, flatIndex)}
+                          onMouseEnter={() => setHoveredSession(session.id)}
+                          onMouseLeave={() => setHoveredSession(null)}
+                          aria-label={session.title || '新对话'}
+                          aria-current={currentSessionId === session.id ? 'true' : undefined}
+                          className={`group flex items-center justify-between pl-7 pr-2 py-1.5 rounded-md cursor-pointer text-sm transition-colors ${
+                            currentSessionId === session.id
+                              ? 'bg-blue-50 dark:bg-blue-900/20'
+                              : 'hover:bg-[var(--color-bg-hover)]'
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0">
+                            {editingSessionId === session.id ? (
+                              <input
+                                ref={editInputRef}
+                                value={editingTitle}
+                                onChange={(e) => setEditingTitle(e.target.value)}
+                                onBlur={handleRenameSubmit}
+                                onKeyDown={(e) => {
+                                  e.stopPropagation();
+                                  if (e.key === 'Enter') {
+                                    handleRenameSubmit();
+                                  } else if (e.key === 'Escape') {
+                                    setEditingSessionId(null);
+                                  }
+                                }}
+                                className="w-full px-1 py-0.5 text-sm rounded border border-blue-500 bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] outline-none"
+                                aria-label="编辑会话标题"
+                              />
+                            ) : (
+                              <p
+                                onDoubleClick={(e) => handleStartRename(e, session)}
+                                title="双击重命名"
+                                className={`truncate ${
+                                  currentSessionId === session.id
+                                    ? 'text-blue-700 dark:text-blue-300 font-medium'
+                                    : 'text-[var(--color-text-primary)]'
+                                }`}
+                              >
+                                {session.title || '新对话'}
+                              </p>
+                            )}
+                            <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+                              {formatRelativeTime(session.updated_at)}
+                            </p>
+                          </div>
+                          {hoveredSession === session.id && (
+                            <button
+                              onClick={(e) => handleDeleteSession(e, session.id)}
+                              className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-[var(--color-text-tertiary)] hover:text-red-500 shrink-0"
+                              title="删除会话"
+                              aria-label={`删除会话 ${session.title || '新对话'}`}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 底部：文件视图入口（当前会话工作区审计页） */}
+      <div className="border-t border-[var(--color-border)] px-2 py-2">
+        <button
+          type="button"
+          onClick={() => navigate('/workspace')}
+          className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+          title="打开当前会话的文件视图（树/diff 审计）"
+          aria-label="文件视图"
+        >
+          <FileText size={14} />
+          文件视图
+        </button>
+      </div>
+
+      {/* 新目录：目录选择器（唯一弹窗） */}
+      <WorkspacePicker
+        open={pickerOpen}
+        currentWorkingDir={newSessionWorkspace ?? ''}
+        onClose={() => setPickerOpen(false)}
+        onSelect={handleAddDirectory}
+      />
+    </aside>
+  );
+}

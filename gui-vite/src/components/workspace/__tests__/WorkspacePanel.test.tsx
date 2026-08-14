@@ -41,7 +41,7 @@ describe('WorkspacePanel', () => {
   it('renders the workspace file tree from the API', async () => {
     renderPanel();
 
-    expect(screen.getByText('工作区')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '文件' })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByText('Cargo.toml')).toBeInTheDocument();
     });

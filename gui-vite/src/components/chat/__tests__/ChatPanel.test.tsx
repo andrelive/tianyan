@@ -37,7 +37,7 @@ describe('ChatPanel', () => {
 
   it('renders header with title', () => {
     renderChatPanel();
-    expect(screen.getByText('对话')).toBeInTheDocument();
+    expect(screen.getByText('会话')).toBeInTheDocument();
   });
 
   it('shows empty state when there are no messages and status is idle', () => {
@@ -193,7 +193,7 @@ describe('ChatPanel', () => {
   it('renders ModelSelector in header', () => {
     renderChatPanel();
     // ModelSelector renders a model select element
-    expect(screen.getByText('对话')).toBeInTheDocument();
+    expect(screen.getByText('会话')).toBeInTheDocument();
   });
 
   it('rolls back to a message via backend and syncs remaining messages', async () => {

@@ -8,7 +8,7 @@ import { useKeyboardShortcuts } from '@/hooks/use-keyboard-shortcuts';
 import AppLayout from '@/components/layout/AppLayout';
 import ErrorBoundary from '@/components/layout/ErrorBoundary';
 import Toast from '@/components/layout/Toast';
-import ChatPanel from '@/components/chat/ChatPanel';
+import SessionPage from '@/components/session/SessionPage';
 import SkillsPanel from '@/components/skills/SkillsPanel';
 import KnowledgePanel from '@/components/knowledge/KnowledgePanel';
 import WorkspacePanel from '@/components/workspace/WorkspacePanel';
@@ -80,8 +80,8 @@ function App() {
       <Routes>
         <Route element={<AppLayout />}>
           <Route path="/" element={<Navigate to="/chat" replace />} />
-          <Route path="/chat" element={<ChatPanel />} />
-          <Route path="/chat/:sessionId" element={<ChatPanel />} />
+          <Route path="/chat" element={<SessionPage />} />
+          <Route path="/chat/:sessionId" element={<SessionPage />} />
           <Route path="/skills" element={<SkillsPanel />} />
           <Route path="/knowledge" element={<KnowledgePanel />} />
           <Route path="/workspace" element={<WorkspacePanel />} />

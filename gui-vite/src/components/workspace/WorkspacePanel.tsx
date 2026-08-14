@@ -338,12 +338,12 @@ export default function WorkspacePanel() {
   // 当前会话绑定的工作目录（工作区 = 会话的父级分组）
   const currentSession = sessions.find((s) => s.id === currentSessionId) ?? null;
   const activeWorkspaceLabel = currentSession?.working_directory
-    ? `工作区：${currentSession.working_directory}`
+    ? `目录：${currentSession.working_directory}`
     : currentSessionId
-      ? '工作区：全局默认'
+      ? '目录：全局默认'
       : newSessionWorkspace
-        ? `新对话工作区：${newSessionWorkspace}`
-        : '未选择会话（浏览全局工作区）';
+        ? `新会话目录：${newSessionWorkspace}`
+        : '未选择会话（浏览默认目录）';
 
   /**
    * 选择工作目录（工作区 = 会话的父级分组）：
@@ -425,9 +425,7 @@ export default function WorkspacePanel() {
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border)] shrink-0">
         <div className="flex items-center gap-3 min-w-0">
-          <h2 className="text-lg font-semibold text-[var(--color-text-primary)] shrink-0">
-            工作区
-          </h2>
+          <h2 className="text-lg font-semibold text-[var(--color-text-primary)] shrink-0">文件</h2>
           <span
             className="text-xs text-[var(--color-text-tertiary)] truncate"
             title={activeWorkspaceLabel}
@@ -440,7 +438,7 @@ export default function WorkspacePanel() {
           <button
             type="button"
             onClick={() => setPickerOpen(true)}
-            aria-label="选择工作目录"
+            aria-label="选择目录"
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors"
           >
             <FolderOpen size={14} />
@@ -536,7 +534,7 @@ export default function WorkspacePanel() {
         onClose={() => setPickerOpen(false)}
         onSelect={handleSelectWorkingDir}
         saving={pickerSaving}
-        clearLabel={currentSession?.working_directory ? '清除绑定' : '不绑定工作区'}
+        clearLabel={currentSession?.working_directory ? '清除绑定' : '不绑定目录'}
       />
       {workspaceError && (
         <p className="px-6 py-2 text-xs text-[var(--color-error)]" role="alert">
