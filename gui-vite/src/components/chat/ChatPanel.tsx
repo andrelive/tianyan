@@ -56,6 +56,35 @@ export default function ChatPanel() {
     }
   }, [urlSessionId, currentSessionId, setCurrentSession, setMessages, setPendingClarification]);
 
+  // 刷新/直达 URL（如 /chat/{id}）时恢复历史消息：仅在挂载时执行一次。
+  // 列表点击路径由 SessionList.handleSelectSession 负责加载（导航后
+  // currentSessionId 已一致，此处不会重复请求）。
+  // StrictMode 双跑安全：ref 守卫只允许一次；cleanup 不取消请求（取消会
+  // 杀死唯一请求），改由「应用前校验当前 URL 仍指向该会话」防旧请求覆盖。
+  const loadedOnMountRef = useRef(false);
+  const activeUrlSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeUrlSessionRef.current = urlSessionId ?? null;
+  }, [urlSessionId]);
+  useEffect(() => {
+    if (loadedOnMountRef.current) return;
+    loadedOnMountRef.current = true;
+    if (!urlSessionId) return;
+    const sessionId = urlSessionId;
+    (async () => {
+      try {
+        const data = await apiGet<{ messages: ChatMessage[] }>(
+          `/sessions/${sessionId}/messages`,
+        );
+        if (activeUrlSessionRef.current === sessionId) {
+          useAppStore.getState().setMessages(data.messages);
+        }
+      } catch {
+        // 加载失败保持空列表（与 reloadSession 行为一致）
+      }
+    })();
+  }, [urlSessionId]);
+
   // ADR-013：唤醒轮自动刷新——会话末尾是后台任务 System 通知时轮询会话消息，
   // 直到出现新的非空 assistant 消息（主 agent 自动汇总结果，无需用户操作）
   useEffect(() => {

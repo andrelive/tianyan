@@ -144,6 +144,25 @@ describe('ChatPanel', () => {
     });
   });
 
+  it('loads history messages when directly visiting a session URL (refresh/deep-link)', async () => {
+    // 刷新/直达 /chat/{id}：ChatPanel 挂载时从后端加载历史并渲染
+    renderChatPanel('/chat/session-1');
+
+    await waitFor(() => {
+      const messages = useAppStore.getState().messages;
+      expect(messages.length).toBeGreaterThanOrEqual(2);
+      expect(messages[0].role).toBe('user');
+      expect(messages[0].content).toBe('你好');
+    });
+
+    // 历史消息渲染到页面（assistant 回复来自 mock /sessions/:id/messages）
+    await waitFor(() => {
+      expect(screen.getByText('你好！我是天演，有什么可以帮助你的？')).toBeInTheDocument();
+    });
+    // 空状态不显示
+    expect(screen.queryByText('开始一段新的对话')).not.toBeInTheDocument();
+  });
+
   it('handles server-side SSE error events: removes empty bubble and shows toast', async () => {
     const user = userEvent.setup();
     renderChatPanel();
