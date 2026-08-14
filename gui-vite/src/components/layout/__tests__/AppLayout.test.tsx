@@ -23,13 +23,13 @@ function renderAppLayoutWithChild(childContent: string = 'Main Content') {
 describe('AppLayout', () => {
   it('renders Sidebar with navigation items', () => {
     renderAppLayoutWithChild();
-    // Sidebar renders "天演" header
-    expect(screen.getByText('天演')).toBeInTheDocument();
-    // Sidebar renders nav items
-    expect(screen.getByText('会话')).toBeInTheDocument();
-    expect(screen.getByText('技能')).toBeInTheDocument();
-    expect(screen.getByText('知识')).toBeInTheDocument();
-    expect(screen.getByText('设置')).toBeInTheDocument();
+    // Sidebar renders brand block (icon rail: 名字经 hover title 展示)
+    expect(screen.getByTitle('天演')).toBeInTheDocument();
+    // Sidebar renders nav icons
+    expect(screen.getByTitle('会话')).toBeInTheDocument();
+    expect(screen.getByTitle('技能')).toBeInTheDocument();
+    expect(screen.getByTitle('知识')).toBeInTheDocument();
+    expect(screen.getByTitle('设置')).toBeInTheDocument();
   });
 
   it('renders main content area', () => {
@@ -50,21 +50,5 @@ describe('AppLayout', () => {
     renderAppLayoutWithChild('子路由内容');
     // The child content passed via Outlet should be visible
     expect(screen.getByText('子路由内容')).toBeInTheDocument();
-  });
-
-  it('renders sidebar toggle button', () => {
-    renderAppLayoutWithChild();
-    // Sidebar has a toggle button when open (default isSidebarOpen=true)
-    expect(screen.getByTitle('收起侧边栏')).toBeInTheDocument();
-  });
-
-  it('renders collapsed sidebar when isSidebarOpen is false', () => {
-    useAppStore.setState({ isSidebarOpen: false });
-    renderAppLayoutWithChild();
-
-    // In collapsed mode, the sidebar has an expand button
-    expect(screen.getByTitle('展开侧边栏')).toBeInTheDocument();
-    // Nav icon buttons should still be visible (icon-only mode)
-    expect(screen.getByTitle('会话')).toBeInTheDocument();
   });
 });

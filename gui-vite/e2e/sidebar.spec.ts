@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 /**
- * 全局一级导航侧边栏（纯导航；会话列表在会话页左栏，见 session-page.spec.ts）。
+ * 全局一级导航侧边栏（图标 rail：恒 64px，hover 显示名字；会话列表在会话页左栏）。
  * 本 spec 使用 mock：config/status + sessions 均为页面路由拦截。
  */
 test.describe('sidebar', () => {
@@ -37,32 +37,18 @@ test.describe('sidebar', () => {
     await page.goto('/');
   });
 
-  test('sidebar opens and closes by clicking toggle button', async ({ page }) => {
-    await expect(page.locator('button[title="收起侧边栏"]')).toBeVisible();
-
-    await page.locator('button[title="收起侧边栏"]').click();
-    await expect(page.locator('button[title="展开侧边栏"]')).toBeVisible();
-
-    await page.locator('button[title="展开侧边栏"]').click();
-    await expect(page.locator('button[title="收起侧边栏"]')).toBeVisible();
-  });
-
-  test('collapsed sidebar shows only icons', async ({ page }) => {
-    await page.locator('button[title="收起侧边栏"]').click();
-
+  test('icon rail shows nav icons with hover names (title)', async ({ page }) => {
+    await expect(page.locator('aside').first()).toHaveClass(/w-\[64px\]/);
     await expect(page.locator('button[title="会话"]')).toBeVisible();
     await expect(page.locator('button[title="技能"]')).toBeVisible();
     await expect(page.locator('button[title="知识"]')).toBeVisible();
+    await expect(page.locator('button[title="记忆"]')).toBeVisible();
+    await expect(page.locator('button[title="检索轨迹"]')).toBeVisible();
+    await expect(page.locator('button[title="审批"]')).toBeVisible();
+    await expect(page.locator('button[title="任务"]')).toBeVisible();
+    await expect(page.locator('button[title="洞察"]')).toBeVisible();
     await expect(page.locator('button[title="设置"]')).toBeVisible();
-
-    const sidebar = page.locator('aside').first();
-    await expect(sidebar).not.toContainText('天演');
-  });
-
-  test('expanded sidebar shows nav labels and brand', async ({ page }) => {
-    await expect(page.locator('aside').first()).toContainText('天演');
-    await expect(page.locator('aside').first()).toContainText('会话');
-    await expect(page.locator('aside').first()).toContainText('技能');
+    await expect(page.locator('div[title="天演"]')).toBeVisible();
   });
 
   test('nav items navigation', async ({ page }) => {
