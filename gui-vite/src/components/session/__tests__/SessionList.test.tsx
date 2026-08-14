@@ -193,6 +193,36 @@ describe('SessionList', () => {
     expect(useAppStore.getState().currentSessionId).toBe('s1');
   });
 
+  it('添加新工作区后左栏立即出现新分组（已有会话时也不覆盖）', async () => {
+    const user = userEvent.setup();
+    mockSessions([makeSession({ id: 's1', title: '项目A会话', working_directory: 'C:/proj/a' })]);
+    renderSessionList();
+
+    // 已有分组可见
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '分组 a' })).toBeInTheDocument();
+    });
+
+    // 添加新工作区：目录选择器 → 选目录
+    await user.click(screen.getByRole('button', { name: '新目录' }));
+    const dialog = screen.getByRole('dialog', { name: '选择目录' });
+    await waitFor(() => {
+      expect(within(dialog).getByRole('button', { name: '目录 C:\\' })).toBeInTheDocument();
+    });
+    await user.dblClick(within(dialog).getByRole('button', { name: '目录 C:\\' }));
+    const subDir = await within(dialog).findByRole('button', { name: '目录 sub1' });
+    await user.click(subDir);
+    await user.click(within(dialog).getByRole('button', { name: '确认选择' }));
+
+    // 新分组（sub1）出现 + 占位条目在其下；已有分组 a 仍在
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '分组 sub1' })).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: '新会话' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '分组 a' })).toBeInTheDocument();
+    expect(useAppStore.getState().newSessionWorkspace).toBe('C:\\sub1');
+  });
+
   it('文件视图 button navigates to /workspace', async () => {
     const user = userEvent.setup();
     mockSessions([]);

@@ -106,9 +106,21 @@ export default function SessionList() {
   // 左栏在对应分组下显示「新会话」占位条目，用户可感知新会话属于哪个目录。
   // 仅当用户点击过「新建会话」后才显示占位（初始空列表仍显示「暂无会话」）。
   const pendingGroupKey = newChatStarted ? (newSessionWorkspace ?? '') : null;
-  // 无任何会话但有待绑定目录时：仍渲染该目录的临时分组 + 占位条目
-  const groupsToRender: [string, Session[]][] =
-    sessions.length === 0 && pendingGroupKey !== null ? [[pendingGroupKey, []]] : sessionGroups;
+  // 待绑定目录的分组必须可见：不在现有分组中时合成临时分组（含占位条目）。
+  // 这样「添加新工作区」后左栏立即出现新分组，用户可见新会话归属。
+  const groupsToRender: [string, Session[]][] = (() => {
+    if (pendingGroupKey === null) return sessionGroups;
+    const has = sessionGroups.some(([k]) => k === pendingGroupKey);
+    if (has) return sessionGroups;
+    const merged: [string, Session[]][] = [...sessionGroups];
+    merged.push([pendingGroupKey, []]);
+    merged.sort((a, b) => {
+      if (a[0] === '') return 1;
+      if (b[0] === '') return -1;
+      return a[0].localeCompare(b[0]);
+    });
+    return merged;
+  })();
 
   /** 开启新会话：绑定到指定目录（空串 = 默认组），零弹窗。 */
   const startNewSession = useCallback(
@@ -230,7 +242,7 @@ export default function SessionList() {
           <button
             type="button"
             onClick={() => setPickerOpen(true)}
-            title="新目录（添加工作区分组）"
+            title="添加新工作区"
             aria-label="新目录"
             className="p-1.5 rounded-md hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]"
           >

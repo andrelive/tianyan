@@ -31,6 +31,37 @@ test.describe('session page left column', () => {
       await route.fulfill({ json: { success: true } });
     });
 
+    // Mock 目录选择器（目录浏览）：浏览根 → C:\ → sub1/sub2
+    await page.route('**/api/v1/workspace/dirs*', async (route) => {
+      const url = new URL(route.request().url());
+      const path = url.searchParams.get('path');
+      if (!path) {
+        await route.fulfill({
+          json: {
+            current: '浏览根',
+            parent: null,
+            entries: [
+              { name: 'C:\\', path: 'C:\\', is_root: true },
+              { name: 'D:\\', path: 'D:\\', is_root: true },
+            ],
+          },
+        });
+      } else if (path === 'C:\\') {
+        await route.fulfill({
+          json: {
+            current: 'C:\\',
+            parent: null,
+            entries: [
+              { name: 'sub1', path: 'C:\\sub1' },
+              { name: 'sub2', path: 'C:\\sub2' },
+            ],
+          },
+        });
+      } else {
+        await route.fulfill({ json: { current: path, parent: null, entries: [] } });
+      }
+    });
+
     await page.goto('/');
   });
 
@@ -58,9 +89,21 @@ test.describe('session page left column', () => {
     await expect(page.getByRole('button', { name: '分组 默认' })).toBeVisible();
   });
 
-  test('新目录 opens the directory picker dialog', async ({ page }) => {
+  test('新目录 picks a directory and shows the new group with a placeholder', async ({ page }) => {
     await page.getByRole('button', { name: '新目录' }).click();
-    await expect(page.getByRole('dialog', { name: '选择目录' })).toBeVisible({ timeout: 5000 });
+    const dialog = page.getByRole('dialog', { name: '选择目录' });
+    await expect(dialog).toBeVisible({ timeout: 5000 });
+
+    // 浏览根 → 双击 C:\ → 选中 sub1 → 确认
+    await page.getByRole('button', { name: '目录 C:\\' }).dblclick();
+    await expect(page.getByRole('button', { name: '目录 sub1' })).toBeVisible();
+    await page.getByRole('button', { name: '目录 sub1' }).click();
+    await page.getByRole('button', { name: '确认选择' }).click();
+
+    // 左栏立即出现新分组（sub1）+「新会话」占位；原有「默认」分组仍在
+    await expect(page.getByRole('button', { name: '分组 sub1' })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('button', { name: '新会话' })).toBeVisible();
+    await expect(page.getByRole('button', { name: '分组 默认' })).toBeVisible();
   });
 
   test('文件视图 button navigates to /workspace', async ({ page }) => {
