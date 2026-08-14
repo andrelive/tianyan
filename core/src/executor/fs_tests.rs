@@ -48,6 +48,52 @@ fn result_names(out: &GlobOutput) -> Vec<String> {
 
 // ── glob ────────────────────────────────────────────────────────────────
 
+#[test]
+fn test_expand_braces_single_group() {
+    let pats = expand_braces("**/*.{rs,ts}");
+    assert_eq!(pats, vec!["**/*.rs".to_string(), "**/*.ts".to_string()]);
+}
+
+#[test]
+fn test_expand_braces_multiple_groups_and_nested() {
+    let pats = expand_braces("{src,test}/**/*.{rs,toml}");
+    assert_eq!(
+        pats,
+        vec![
+            "src/**/*.rs".to_string(),
+            "src/**/*.toml".to_string(),
+            "test/**/*.rs".to_string(),
+            "test/**/*.toml".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_expand_braces_no_braces_unchanged() {
+    assert_eq!(expand_braces("**/*.rs"), vec!["**/*.rs".to_string()]);
+    assert_eq!(expand_braces("a{b"), vec!["a{b".to_string()]);
+}
+
+#[tokio::test]
+async fn test_glob_brace_pattern_matches_without_rg() {
+    // 回归：rg 缺失时手工遍历回退必须支持 `{a,b}` 花括号模式
+    // （此前 `**/*.{rs,ts}` 永远零命中，模型审查任务因此拿不到文件列表）。
+    let dir = tempfile::tempdir().unwrap();
+    create_file(&dir.path().join("a.rs"), "");
+    create_file(&dir.path().join("b.ts"), "");
+    create_file(&dir.path().join("c.txt"), "");
+    create_file(&dir.path().join("sub/d.rs"), "");
+
+    let out = execute_glob("**/*.{rs,ts}", Some(dir.path()))
+        .await
+        .unwrap();
+    let names = result_names(&out);
+    assert_eq!(out.count, 3, "brace 模式应匹配 rs/ts 文件: {names:?}");
+    assert!(names.contains(&"a.rs".to_string()));
+    assert!(names.contains(&"b.ts".to_string()));
+    assert!(names.contains(&"d.rs".to_string()));
+}
+
 #[tokio::test]
 async fn test_glob_finds_nested_files() {
     let dir = tempfile::tempdir().unwrap();

@@ -505,7 +505,7 @@ impl AgentLoop {
                 trace.set_current_turn(session_id, turn as i64);
             }
 
-            let (assistant_msg, turn_usage, finish_reason) =
+            let mut step_result =
                 match step(self, model, stream_sender, messages.clone(), cancel).await {
                     Ok(v) => v,
                     Err(e) => {
@@ -520,6 +520,39 @@ impl AgentLoop {
                         return Err(e);
                     }
                 };
+
+            // 空响应重试（用户轮）：LLM 偶发返回既无正文也无工具调用的空响应
+            // （思考模型"想完没说话"），直接报错会让任务在工具循环中途静默终止。
+            // 消息历史此时未变（空响应尚未入史），重试一次通常能恢复；
+            // 重试仍空则按原有空响应错误路径处理。唤醒轮（allow_empty_answer）不重试。
+            if !self.config.allow_empty_answer {
+                let empty = matches!(
+                    &step_result,
+                    (m, _, _) if m.content.is_empty() && m.tool_calls.is_none()
+                );
+                if empty {
+                    tracing::warn!(
+                        session = %session_id,
+                        turn,
+                        "LLM 返回空响应，重试一次"
+                    );
+                    step_result =
+                        match step(self, model, stream_sender, messages.clone(), cancel).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                if Self::is_cancelled(cancel) {
+                                    return Ok(AgentLoopResult::Cancelled {
+                                        total_tokens,
+                                        turns: turn + 1,
+                                    });
+                                }
+                                return Err(e);
+                            }
+                        };
+                }
+            }
+
+            let (assistant_msg, turn_usage, finish_reason) = step_result;
 
             let mut ctx = TurnContext {
                 session_id,

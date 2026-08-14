@@ -245,6 +245,27 @@ impl ToolRegistry {
         self
     }
 
+    /// 解析工具文件路径：相对路径（非绝对）基于**会话绑定的工作目录**解析
+    /// （缺省回退进程 cwd 语义，原样返回）；绝对路径原样返回。
+    ///
+    /// 与 execute_command 默认 cwd 同一套归属规则：模型在会话工作区内工作时，
+    /// `read_file ".git/HEAD"`、`glob path="."` 等相对路径落在工作区而非
+    /// 进程 cwd（如天演仓库根）。
+    pub(crate) async fn resolve_tool_path(&self, session_id: &str, path: &str) -> String {
+        let p = std::path::Path::new(path);
+        if p.is_absolute() {
+            return path.to_string();
+        }
+        if let Some(sm) = &self.session_manager {
+            if let Ok(Some(session)) = sm.get_session(session_id).await {
+                if let Some(wd) = session.working_directory(None) {
+                    return wd.join(path).to_string_lossy().into_owned();
+                }
+            }
+        }
+        path.to_string()
+    }
+
     /// 设置委托子 Agent 使用的模型名称。
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
@@ -725,7 +746,7 @@ impl ToolRegistry {
 
         // 管线阶段 3：工具执行（动态工具与内置工具同一路径）。
         let mut result = match call.function.name.as_str() {
-            "read_file" => self.execute_read_file(arguments).await,
+            "read_file" => self.execute_read_file(arguments, session_id).await,
             "write_file" => {
                 self.execute_write_file(arguments, session_id, subagent)
                     .await
@@ -764,8 +785,8 @@ impl ToolRegistry {
             "delegate_to_agent" => self.execute_delegate_to_agent(arguments, session_id).await,
             "task_status" => self.execute_task_status(arguments).await,
             "task_cancel" => self.execute_task_cancel(arguments).await,
-            "glob" => self.execute_glob(arguments).await,
-            "list_dir" => self.execute_list_dir(arguments).await,
+            "glob" => self.execute_glob(arguments, session_id).await,
+            "list_dir" => self.execute_list_dir(arguments, session_id).await,
             "symbol_outline" => self.execute_symbol_outline(arguments).await,
             "lsp" => self.execute_lsp(arguments).await,
             name => match self.dynamic_tools.lock().await.get(name).cloned() {

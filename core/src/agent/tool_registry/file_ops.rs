@@ -14,16 +14,17 @@ use super::{parse_params, safety_violation, vfs_content_field, wrap_tool_error, 
 
 impl ToolRegistry {
     /// 执行 read_file 工具：读取文件内容。
+    ///
+    /// 相对路径按会话工作目录解析（[`Self::resolve_tool_path`]）。
     pub(crate) async fn execute_read_file(
         &self,
         arguments: &str,
+        session_id: &str,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: ReadFileParams = parse_params(arguments)?;
-        safety_violation(
-            self.security_policy
-                .check_path(std::path::Path::new(&params.path)),
-        )?;
-        crate::executor::execute_read_file(&params.path, params.offset, params.limit)
+        let path = self.resolve_tool_path(session_id, &params.path).await;
+        safety_violation(self.security_policy.check_path(std::path::Path::new(&path)))?;
+        crate::executor::execute_read_file(&path, params.offset, params.limit)
             .await
             .map_err(wrap_tool_error)
     }
@@ -36,7 +37,9 @@ impl ToolRegistry {
         session_id: &str,
         subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: WriteFileParams = parse_params(arguments)?;
+        let mut params: WriteFileParams = parse_params(arguments)?;
+        // 相对路径按会话工作目录解析（与 read_file 同一套归属规则）
+        params.path = self.resolve_tool_path(session_id, &params.path).await;
         safety_violation(self.security_policy.check_file_write())?;
         safety_violation(
             self.security_policy
@@ -70,7 +73,8 @@ impl ToolRegistry {
         session_id: &str,
         subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: ApplyEditParams = parse_params(arguments)?;
+        let mut params: ApplyEditParams = parse_params(arguments)?;
+        params.path = self.resolve_tool_path(session_id, &params.path).await;
         safety_violation(self.security_policy.check_file_write())?;
         safety_violation(
             self.security_policy
@@ -118,8 +122,27 @@ impl ToolRegistry {
         // 绝对路径按字面检查（executor 层随后统一拒绝绝对路径）。
         let patch_paths = crate::executor::patch::collect_patch_paths(&params.patch);
         let first_path = patch_paths.first().cloned().unwrap_or_default();
-        let base_dir = std::env::current_dir()
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：无法获取工作目录: {e}")))?;
+        // 补丁基准目录：会话绑定的工作目录优先，缺省回退进程 cwd
+        // （与 read_file/write_file 同一套归属规则）
+        let base_dir = match &self.session_manager {
+            Some(sm) => match sm.get_session(session_id).await {
+                Ok(Some(session)) => {
+                    if let Some(wd) = session.working_directory(None) {
+                        wd
+                    } else {
+                        std::env::current_dir().map_err(|e| {
+                            TianyanError::Custom(format!("tool: 执行失败：无法获取工作目录: {e}"))
+                        })?
+                    }
+                }
+                _ => std::env::current_dir().map_err(|e| {
+                    TianyanError::Custom(format!("tool: 执行失败：无法获取工作目录: {e}"))
+                })?,
+            },
+            None => std::env::current_dir().map_err(|e| {
+                TianyanError::Custom(format!("tool: 执行失败：无法获取工作目录: {e}"))
+            })?,
+        };
         for path in &patch_paths {
             let resolved = if std::path::Path::new(path).is_absolute() {
                 std::path::PathBuf::from(path)

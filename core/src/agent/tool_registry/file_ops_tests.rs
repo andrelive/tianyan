@@ -83,7 +83,7 @@ async fn test_read_file_success() {
 
     let registry = ToolRegistry::new(file_policy(vec![dir.path().to_path_buf()], vec![]));
     let result = registry
-        .execute_read_file(&read_file_args(&path))
+        .execute_read_file(&read_file_args(&path), "test-session")
         .await
         .unwrap();
     // 新契约：结构化 JSON（不再是纯字符串）
@@ -100,7 +100,7 @@ async fn test_read_file_success() {
 #[tokio::test]
 async fn test_read_file_rejects_missing_arguments() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_read_file(r#"{}"#).await;
+    let result = registry.execute_read_file(r#"{}"#, "test-session").await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -116,7 +116,9 @@ async fn test_read_file_rejects_path_traversal() {
     // 位于 allowed 目录之外，必须被安全策略拒绝。
     let escape = allowed.join("..").join("secret.txt");
     let registry = ToolRegistry::new(file_policy(vec![allowed.to_path_buf()], vec![]));
-    let result = registry.execute_read_file(&read_file_args(&escape)).await;
+    let result = registry
+        .execute_read_file(&read_file_args(&escape), "test-session")
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
 }
@@ -130,7 +132,9 @@ async fn test_read_file_rejects_path_outside_allowlist() {
     std::fs::write(&secret, "secret").unwrap();
 
     let registry = ToolRegistry::new(file_policy(vec![allowed.to_path_buf()], vec![]));
-    let result = registry.execute_read_file(&read_file_args(&secret)).await;
+    let result = registry
+        .execute_read_file(&read_file_args(&secret), "test-session")
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
 }
@@ -141,7 +145,9 @@ async fn test_read_file_missing_file_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     let registry = ToolRegistry::new(default_strict_policy());
     let missing = dir.path().join("does_not_exist.txt");
-    let result = registry.execute_read_file(&read_file_args(&missing)).await;
+    let result = registry
+        .execute_read_file(&read_file_args(&missing), "test-session")
+        .await;
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("执行失败"));
@@ -156,7 +162,7 @@ async fn test_read_file_missing_file_is_not_found() {
     let registry = ToolRegistry::new(default_strict_policy());
     let missing = dir.path().join("does_not_exist.txt");
     let err = registry
-        .execute_read_file(&read_file_args(&missing))
+        .execute_read_file(&read_file_args(&missing), "test-session")
         .await
         .unwrap_err();
     assert!(err.is_not_found(), "缺失文件应分类为 not_found：{err}");
@@ -170,7 +176,10 @@ async fn test_read_file_offset_limit_slicing() {
 
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_read_file(&read_file_window_args(&path, Some(2), Some(2)))
+        .execute_read_file(
+            &read_file_window_args(&path, Some(2), Some(2)),
+            "test-session",
+        )
         .await
         .unwrap();
     assert_eq!(result["total_lines"].as_u64(), Some(4));
@@ -206,7 +215,10 @@ async fn test_read_file_hashline_anchor_roundtrip() {
 
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_read_file(&read_file_window_args(&path, Some(2), Some(1)))
+        .execute_read_file(
+            &read_file_window_args(&path, Some(2), Some(1)),
+            "test-session",
+        )
         .await
         .unwrap();
     let content = result["content"].as_str().unwrap();
@@ -227,7 +239,7 @@ async fn test_read_file_offset_beyond_total_errors() {
 
     let registry = ToolRegistry::new(default_strict_policy());
     let err = registry
-        .execute_read_file(&read_file_window_args(&path, Some(5), None))
+        .execute_read_file(&read_file_window_args(&path, Some(5), None), "test-session")
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -244,7 +256,7 @@ async fn test_read_file_missing_suggests_similar() {
 
     let registry = ToolRegistry::new(default_strict_policy());
     let err = registry
-        .execute_read_file(&read_file_args(&missing))
+        .execute_read_file(&read_file_args(&missing), "test-session")
         .await
         .unwrap_err();
     let msg = err.to_string();
@@ -261,7 +273,7 @@ async fn test_read_file_binary_detected() {
 
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_read_file(&read_file_args(&path))
+        .execute_read_file(&read_file_args(&path), "test-session")
         .await
         .unwrap();
     assert_eq!(result["binary"].as_bool(), Some(true));
@@ -286,7 +298,7 @@ async fn test_read_file_directory_lists_sorted() {
 
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_read_file(&read_file_args(&root))
+        .execute_read_file(&read_file_args(&root), "test-session")
         .await
         .unwrap();
     // 目录模式统一输出 list_dir 形状（ListDirOutput：entries/count/truncated/total）
@@ -321,7 +333,7 @@ async fn test_read_file_long_line_truncated_with_marker() {
 
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_read_file(&read_file_args(&path))
+        .execute_read_file(&read_file_args(&path), "test-session")
         .await
         .unwrap();
     let content = result["content"].as_str().unwrap();
@@ -351,7 +363,7 @@ async fn test_read_file_default_limit_2000() {
 
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_read_file(&read_file_args(&path))
+        .execute_read_file(&read_file_args(&path), "test-session")
         .await
         .unwrap();
     assert_eq!(result["total_lines"].as_u64(), Some(2500));
@@ -374,7 +386,7 @@ async fn test_read_file_empty_file_returns_empty_content() {
 
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_read_file(&read_file_args(&path))
+        .execute_read_file(&read_file_args(&path), "test-session")
         .await
         .unwrap();
     assert_eq!(result["content"].as_str().unwrap(), "");

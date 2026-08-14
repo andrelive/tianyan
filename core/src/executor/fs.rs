@@ -211,10 +211,34 @@ async fn collect_rg_files(
     Ok(Some(paths))
 }
 
+/// 展开 glob 模式中的 `{a,b,c}` 花括号组（如 `*.{rs,ts}` → `*.rs`、`*.ts`）。
+///
+/// rg 原生支持 brace，但手工遍历回退（rg 缺失）的 [`glob_match`] 只做字面
+/// 匹配——不展开则 `**/*.{rs,ts}` 这类模型常用模式永远零命中。递归处理多组。
+fn expand_braces(pattern: &str) -> Vec<String> {
+    let Some(start) = pattern.find('{') else {
+        return vec![pattern.to_string()];
+    };
+    let Some(rel_end) = pattern[start..].find('}') else {
+        return vec![pattern.to_string()];
+    };
+    let end = start + rel_end;
+    let pre = &pattern[..start];
+    let rest = &pattern[end + 1..];
+    let mut out = Vec::new();
+    for opt in pattern[start + 1..end].split(',') {
+        let combined = format!("{pre}{opt}{rest}");
+        out.extend(expand_braces(&combined));
+    }
+    out
+}
+
 /// 手工递归遍历回退：跳过隐藏条目与 [`EXCLUDED_DIRS`]，不支持 .gitignore
-/// （文档化降级行为，与 rg 语义的差异点）。
+/// （文档化降级行为，与 rg 语义的差异点）。brace 模式先展开（见
+/// [`expand_braces`]），任一展开模式命中即计入。
 async fn collect_walk_files(base: &Path, pattern: &str) -> Result<Vec<PathBuf>, TianyanError> {
     let mut out = Vec::new();
+    let patterns = expand_braces(pattern);
     // 迭代式 DFS（显式栈，避免 async 递归）
     let mut stack = vec![base.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -241,7 +265,7 @@ async fn collect_walk_files(base: &Path, pattern: &str) -> Result<Vec<PathBuf>, 
             } else if file_type.is_file() {
                 if let Ok(rel) = path.strip_prefix(base) {
                     let rel_str = rel.to_string_lossy().replace('\\', "/");
-                    if glob_match(pattern, &rel_str) {
+                    if patterns.iter().any(|p| glob_match(p, &rel_str)) {
                         out.push(rel.to_path_buf());
                     }
                 }

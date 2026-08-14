@@ -63,7 +63,7 @@ async fn test_execute_glob_success() {
 
     let registry = ToolRegistry::new(file_policy(vec![dir.path().to_path_buf()]));
     let result = registry
-        .execute_glob(&glob_args(dir.path(), "**/*.rs"))
+        .execute_glob(&glob_args(dir.path(), "**/*.rs"), "test-session")
         .await
         .unwrap();
     assert_eq!(result["count"].as_u64(), Some(2));
@@ -83,7 +83,7 @@ async fn test_execute_glob_missing_pattern() {
     let dir = tempfile::tempdir().unwrap();
     let registry = ToolRegistry::new(default_strict_policy());
     let args = json!({ "path": dir.path().to_string_lossy() }).to_string();
-    let result = registry.execute_glob(&args).await;
+    let result = registry.execute_glob(&args, "test-session").await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -96,7 +96,7 @@ async fn test_execute_glob_rejects_path_outside_allowlist() {
 
     let registry = ToolRegistry::new(file_policy(vec![allowed.to_path_buf()]));
     let result = registry
-        .execute_glob(&glob_args(dir.path(), "**/*.rs"))
+        .execute_glob(&glob_args(dir.path(), "**/*.rs"), "test-session")
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
@@ -112,7 +112,7 @@ async fn test_execute_list_dir_success() {
 
     let registry = ToolRegistry::new(file_policy(vec![dir.path().to_path_buf()]));
     let result = registry
-        .execute_list_dir(&list_dir_args(dir.path()))
+        .execute_list_dir(&list_dir_args(dir.path()), "test-session")
         .await
         .unwrap();
     assert_eq!(result["count"].as_u64(), Some(2));
@@ -128,7 +128,7 @@ async fn test_execute_list_dir_success() {
 #[tokio::test]
 async fn test_execute_list_dir_missing_path() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_list_dir(r#"{}"#).await;
+    let result = registry.execute_list_dir(r#"{}"#, "test-session").await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -140,7 +140,9 @@ async fn test_execute_list_dir_rejects_path_outside_allowlist() {
     std::fs::create_dir_all(&allowed).unwrap();
 
     let registry = ToolRegistry::new(file_policy(vec![allowed.to_path_buf()]));
-    let result = registry.execute_list_dir(&list_dir_args(dir.path())).await;
+    let result = registry
+        .execute_list_dir(&list_dir_args(dir.path()), "test-session")
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
 }
@@ -150,7 +152,9 @@ async fn test_execute_list_dir_nonexistent_path() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("nope");
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_list_dir(&list_dir_args(&missing)).await;
+    let result = registry
+        .execute_list_dir(&list_dir_args(&missing), "test-session")
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("执行失败"));
 }
