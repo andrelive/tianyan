@@ -130,13 +130,23 @@ impl ChatService {
                 Ok(chunk) => {
                     let skill_calls = chunk.skill_calls.map(convert_skill_calls);
 
-                    // 思考增量（Thought chunk）走 thinking 字段，正文（Answer/观察等）
-                    // 走 delta——前端分开渲染，思考/输出/工具调用按序轮番出现。
-                    let is_thought = chunk.chunk_type == tianyan::agent::StreamChunkType::Thought;
+                    // 增量分发规则（前端正文只收真正的回答/错误文本）：
+                    // - Thought → thinking 字段（思考块，折叠渲染）
+                    // - ToolCall → tool_call 字段（A2 工具卡片），delta 丢弃
+                    //   （"调用: xxx" 描述不再进正文）
+                    // - Observation → 丢弃（工具结果 JSON 不再淹没正文）
+                    // - Answer / Error → delta（正文增量）
+                    let chunk_type = chunk.chunk_type;
+                    let is_thought = chunk_type == tianyan::agent::StreamChunkType::Thought;
+                    let is_observational = matches!(
+                        chunk_type,
+                        tianyan::agent::StreamChunkType::ToolCall
+                            | tianyan::agent::StreamChunkType::Observation
+                    );
                     let event = ChatStreamEvent {
                         id: stream_id.clone(),
                         session_id: session_id.clone(),
-                        delta: if is_thought {
+                        delta: if is_thought || is_observational {
                             String::new()
                         } else {
                             chunk.delta.clone()
@@ -151,7 +161,7 @@ impl ChatService {
                         } else {
                             None
                         },
-                        chunk_type: chunk.chunk_type,
+                        chunk_type,
                         skill_calls,
                         tool_call: chunk.tool_call,
                     };
