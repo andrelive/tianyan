@@ -128,44 +128,7 @@ impl ChatService {
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
                 Ok(chunk) => {
-                    let skill_calls = chunk.skill_calls.map(convert_skill_calls);
-
-                    // 增量分发规则（前端正文只收真正的回答/错误文本）：
-                    // - Thought → thinking 字段（思考块，折叠渲染）
-                    // - ToolCall → tool_call 字段（A2 工具卡片），delta 丢弃
-                    //   （"调用: xxx" 描述不再进正文）
-                    // - Observation → 丢弃（工具结果 JSON 不再淹没正文）
-                    // - Answer / Error → delta（正文增量）
-                    let chunk_type = chunk.chunk_type;
-                    let is_thought = chunk_type == tianyan::agent::StreamChunkType::Thought;
-                    let is_observational = matches!(
-                        chunk_type,
-                        tianyan::agent::StreamChunkType::ToolCall
-                            | tianyan::agent::StreamChunkType::Observation
-                    );
-                    let event = ChatStreamEvent {
-                        id: stream_id.clone(),
-                        session_id: session_id.clone(),
-                        delta: if is_thought || is_observational {
-                            String::new()
-                        } else {
-                            chunk.delta.clone()
-                        },
-                        thinking: if is_thought {
-                            Some(chunk.delta.clone())
-                        } else {
-                            None
-                        },
-                        finish_reason: if chunk.is_complete {
-                            map_finish_reason(chunk.finish_reason.clone())
-                        } else {
-                            None
-                        },
-                        chunk_type,
-                        skill_calls,
-                        tool_call: chunk.tool_call,
-                    };
-
+                    let event = map_chunk_to_event(chunk, &stream_id, &session_id);
                     if tx.send(event).await.is_err() {
                         debug!("客户端断开流式连接");
                         break;
@@ -196,6 +159,54 @@ impl ChatService {
         Ok(())
     }
 
+    /// 处理用户对追问的回答（流式，SSE）。
+    ///
+    /// 与非流式 [`Self::handle_clarification`] 共用确认语义；增量经事件通道
+    /// 逐块推送（思考/工具/输出可见），避免整轮等待超过 HTTP 超时。
+    pub async fn handle_clarification_stream(
+        &self,
+        session_id: &str,
+        answer: &str,
+        tx: mpsc::Sender<ChatStreamEvent>,
+    ) -> Result<(), ApiError> {
+        let mut stream = self
+            .agent
+            .handle_clarification_stream(session_id, answer)
+            .await?;
+        let stream_id = format!("chatcmpl-{}", short_uuid());
+
+        while let Some(chunk_result) = stream.recv().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    let event = map_chunk_to_event(chunk, &stream_id, session_id);
+                    if tx.send(event).await.is_err() {
+                        debug!("客户端断开流式连接");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("流式处理错误: {}", e);
+                    let event = ChatStreamEvent {
+                        id: stream_id.clone(),
+                        session_id: session_id.to_string(),
+                        delta: format!("错误: {}", e),
+                        thinking: None,
+                        finish_reason: Some("error".to_string()),
+                        chunk_type: tianyan::agent::StreamChunkType::Error,
+                        skill_calls: None,
+                        tool_call: None,
+                    };
+                    if tx.send(event).await.is_err() {
+                        debug!("客户端已断开，错误事件未送达");
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// 处理用户对追问的回答（非流式）。
     ///
     /// 会话必须存在待处理的追问（由 AgentLoop 在 ask_user 工具触发时设置）。
@@ -206,6 +217,47 @@ impl ChatService {
     ) -> Result<ChatResponse, ApiError> {
         let response = self.agent.handle_clarification(session_id, answer).await?;
         Ok(to_chat_response(session_id, response))
+    }
+}
+
+/// 核心流式 chunk → API 事件映射（正文只收真正的回答/错误文本）：
+/// - Thought → thinking 字段（思考块，折叠渲染）
+/// - ToolCall → tool_call 字段（A2 工具卡片），delta 丢弃（"调用: xxx" 不进正文）
+/// - Observation → 丢弃（工具结果 JSON 不再淹没正文）
+/// - Answer / Error → delta（正文增量）
+fn map_chunk_to_event(
+    chunk: tianyan::agent::AgentStreamChunk,
+    stream_id: &str,
+    session_id: &str,
+) -> ChatStreamEvent {
+    let skill_calls = chunk.skill_calls.map(convert_skill_calls);
+    let chunk_type = chunk.chunk_type;
+    let is_thought = chunk_type == tianyan::agent::StreamChunkType::Thought;
+    let is_observational = matches!(
+        chunk_type,
+        tianyan::agent::StreamChunkType::ToolCall | tianyan::agent::StreamChunkType::Observation
+    );
+    ChatStreamEvent {
+        id: stream_id.to_string(),
+        session_id: session_id.to_string(),
+        delta: if is_thought || is_observational {
+            String::new()
+        } else {
+            chunk.delta.clone()
+        },
+        thinking: if is_thought {
+            Some(chunk.delta.clone())
+        } else {
+            None
+        },
+        finish_reason: if chunk.is_complete {
+            map_finish_reason(chunk.finish_reason.clone())
+        } else {
+            None
+        },
+        chunk_type,
+        skill_calls,
+        tool_call: chunk.tool_call,
     }
 }
 

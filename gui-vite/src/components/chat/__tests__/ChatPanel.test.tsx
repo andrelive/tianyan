@@ -270,7 +270,7 @@ describe('ChatPanel', () => {
     expect(screen.getByRole('button', { name: '提交回答' })).toBeInTheDocument();
   });
 
-  it('submits a clarification answer via /chat/clarify, appends messages and clears the bubble', async () => {
+  it('submits a clarification answer via /chat/clarify/stream, streams the reply and clears the bubble', async () => {
     const user = userEvent.setup();
     useAppStore.setState({
       currentSessionId: 'session-1',
@@ -284,20 +284,21 @@ describe('ChatPanel', () => {
 
     await user.click(screen.getByRole('button', { name: '提交回答' }));
 
+    // 流式：思考增量进 thinking、正文增量进 content
+    await waitFor(() => {
+      const messages = useAppStore.getState().messages;
+      const assistant = messages.filter((m) => m.role === 'assistant');
+      expect(assistant[assistant.length - 1]?.thinking).toBe('确认用户意图');
+      expect(assistant[assistant.length - 1]?.content).toBe('好的，我来继续处理。');
+    });
+
+    // 流结束：追问气泡消失
     await waitFor(() => {
       expect(useAppStore.getState().pendingClarification).toBeNull();
     });
-
-    // 回答作为 user 消息、继续处理结果作为 assistant 消息追加
     const messages = useAppStore.getState().messages;
     expect(messages).toHaveLength(2);
     expect(messages[0]).toMatchObject({ role: 'user', content: '确认删除' });
-    expect(messages[1]).toMatchObject({
-      role: 'assistant',
-      content: '好的，我来继续处理。',
-    });
-
-    // 追问气泡消失
     expect(screen.queryByText('请确认是否删除该文件？')).not.toBeInTheDocument();
   });
 

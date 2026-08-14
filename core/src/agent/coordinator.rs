@@ -131,6 +131,19 @@ pub trait AgentCoordinator: Send + Sync {
     /// 处理用户对追问的回答。
     async fn handle_clarification(&self, session_id: &str, answers: &str) -> Result<AgentResponse>;
 
+    /// 处理用户对追问的回答（流式响应）：增量逐块推送，避免整轮等待。
+    ///
+    /// 默认实现返回错误（不支持流式澄清的适配器/测试替身直接继承）。
+    async fn handle_clarification_stream(
+        &self,
+        _session_id: &str,
+        _answers: &str,
+    ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
+        Err(crate::common::error::TianyanError::Custom(
+            "当前智能体不支持流式追问回答".to_string(),
+        ))
+    }
+
     /// 初始化智能体。
     ///
     /// 默认空实现（无初始化资源的适配器/测试替身直接继承；
@@ -305,6 +318,31 @@ impl AgentCoordinator for Agent {
         let _turn_guard = self.turn_guard(session_id).await;
         let state = self.load_and_build_state(session_id).await?;
         self.handle_clarification_response(&state, answers).await
+    }
+
+    async fn handle_clarification_stream(
+        &self,
+        session_id: &str,
+        answers: &str,
+    ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
+        let state = self.load_and_build_state(session_id).await?;
+        let answers = answers.to_string();
+        let (tx, rx) = mpsc::channel(100);
+        let self_clone = Arc::new(self.clone());
+        let sender = StreamEventSender::new(tx.clone());
+        let state_clone = state.clone();
+        let session_id = session_id.to_string();
+
+        tokio::spawn(async move {
+            // ADR-013 串行化：澄清回答是用户轮的延续，占用会话轮次锁
+            let _turn_guard = self_clone.turn_guard(&session_id).await;
+            self_clone
+                .handle_clarification_response_stream(&state_clone, &answers, sender)
+                .await;
+            self_clone.learn_skills_from_session(&session_id).await;
+        });
+
+        Ok(rx)
     }
 
     async fn compress_session(&self, session_id: &str) -> Result<bool> {

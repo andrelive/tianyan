@@ -64,6 +64,68 @@ pub async fn chat_clarify_handler(
         .map(Json)
 }
 
+/// 追问回答处理器（流式/SSE via POST）。
+///
+/// 用户确认（如审批追问回答"允许"）后，澄清轮以流式执行：思考/工具/输出
+/// 逐块到达，避免整轮等待超过 HTTP 超时（此前非流式路径在前端表现为
+/// "按钮转圈后报错"）。
+pub async fn chat_clarify_stream_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ClarifyRequest>,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
+
+    if let Err(e) = request.validate() {
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            let event = ChatStreamEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: String::new(),
+                delta: e,
+                thinking: None,
+                finish_reason: None,
+                chunk_type: tianyan::agent::StreamChunkType::Error,
+                skill_calls: None,
+                tool_call: None,
+            };
+            if let Ok(json) = serde_json::to_string(&event) {
+                if tx_clone
+                    .send(Ok(Event::default().data(json)))
+                    .await
+                    .is_err()
+                {
+                    debug!("SSE 客户端已断开，错误事件未送达");
+                }
+            }
+        });
+        return Sse::new(ReceiverStream::new(rx));
+    }
+
+    info!("流式追问回答请求: 会话={}", request.session_id);
+
+    let (event_tx, event_rx) = mpsc::channel::<ChatStreamEvent>(SSE_CHANNEL_BUFFER);
+    let agent = state.agent().await;
+    let session_manager = state.session_manager();
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_flag = state.shutdown_flag();
+
+    let session_id = request.session_id.clone();
+    let answer = request.answer.clone();
+    tokio::spawn(async move {
+        let service = ChatService::new(agent, session_manager);
+        if let Err(e) = service
+            .handle_clarification_stream(&session_id, &answer, event_tx)
+            .await
+        {
+            error!("流式追问处理错误: {}", e);
+        }
+    });
+
+    spawn_sse_forwarder(event_rx, tx, cancel, shutdown_flag);
+
+    Sse::new(ReceiverStream::new(rx))
+}
+
 /// 对话完成处理器（流式/SSE via POST）
 pub async fn chat_stream_handler(
     State(state): State<Arc<AppState>>,
@@ -111,7 +173,7 @@ pub async fn chat_stream_handler(
         request.message.content.len()
     );
 
-    let (event_tx, mut event_rx) = mpsc::channel::<ChatStreamEvent>(SSE_CHANNEL_BUFFER);
+    let (event_tx, event_rx) = mpsc::channel::<ChatStreamEvent>(SSE_CHANNEL_BUFFER);
 
     let agent = state.agent().await;
     let session_manager = state.session_manager();
@@ -133,7 +195,22 @@ pub async fn chat_stream_handler(
         }
     });
 
-    // 转发事件到 SSE，同时发送 15 秒间隔心跳防止连接超时
+    spawn_sse_forwarder(event_rx, tx, cancel, shutdown_flag);
+
+    Sse::new(ReceiverStream::new(rx))
+}
+
+/// 把事件通道转发为 SSE 输出（共享：chat/stream 与 chat/clarify/stream）。
+///
+/// - 15 秒间隔心跳（`:ping` 注释事件）防止连接超时；
+/// - 客户端断开或服务关停时置位取消标志，停止后台 AgentLoop；
+/// - `finish_reason` 非空表示流结束，追加 `[DONE]`。
+fn spawn_sse_forwarder(
+    mut event_rx: mpsc::Receiver<ChatStreamEvent>,
+    tx: mpsc::Sender<Result<Event, Infallible>>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+) {
     let tx_clone = tx.clone();
     let ping_tx = tx.clone();
     let cancel_for_sse = cancel.clone();
@@ -147,12 +224,10 @@ pub async fn chat_stream_handler(
                         Some(event) => {
                             if let Ok(json) = serde_json::to_string(&event) {
                                 if tx_clone.send(Ok(Event::default().data(json))).await.is_err() {
-                                    // 客户端断开：取消后台 AgentLoop
                                     cancel_for_sse.store(true, std::sync::atomic::Ordering::Relaxed);
                                     break;
                                 }
                             }
-                            // finish_reason 非空表示流结束
                             if event.finish_reason.is_some() {
                                 if let Err(e) = tx_clone.send(Ok(Event::default().data("[DONE]"))).await {
                                     tracing::warn!(error = %e, "SSE [DONE] 发送失败");
@@ -164,7 +239,6 @@ pub async fn chat_stream_handler(
                     }
                 }
                 _ = shutdown_poll.tick() => {
-                    // 服务关停：立即结束 SSE 并取消后台循环，避免阻塞优雅关停
                     if shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
                         cancel_for_sse.store(true, std::sync::atomic::Ordering::Relaxed);
                         break;
@@ -172,7 +246,6 @@ pub async fn chat_stream_handler(
                 }
                 _ = interval.tick() => {
                     if ping_tx.send(Ok(Event::default().data(":ping"))).await.is_err() {
-                        // 客户端断开：取消后台 AgentLoop
                         cancel_for_sse.store(true, std::sync::atomic::Ordering::Relaxed);
                         break;
                     }
@@ -180,6 +253,4 @@ pub async fn chat_stream_handler(
             }
         }
     });
-
-    Sse::new(ReceiverStream::new(rx))
 }

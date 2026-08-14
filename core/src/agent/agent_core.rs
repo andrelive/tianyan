@@ -769,6 +769,65 @@ impl Agent {
         .await
     }
 
+    /// 处理用户对追问的回答（流式版）：确认审批 + 以 Stream 模式跑澄清轮。
+    ///
+    /// 与 [`Self::handle_clarification_response`] 的区别：增量经 sender 推送
+    /// （思考/工具/输出逐块到达），前端可实时展示而非等待整轮完成。
+    pub(crate) async fn handle_clarification_response_stream(
+        &self,
+        state: &Arc<RwLock<SessionState>>,
+        clarification_answers: &str,
+        sender: StreamEventSender,
+    ) {
+        if state.read().await.pending_clarification.is_none() {
+            sender
+                .send_complete(
+                    "当前没有待处理的追问",
+                    StreamChunkType::Answer,
+                    None,
+                    Some("stop".to_string()),
+                )
+                .await;
+            return;
+        }
+        state.write().await.pending_clarification = None;
+
+        let session_id = state.read().await.session_id.clone();
+
+        // 审批降级链路：与非流式路径一致的确认语义（指纹放行被拒操作）
+        let approved = crate::executor::approval::is_user_confirmation(clarification_answers);
+        if self
+            .agent_loop
+            .tool_registry()
+            .confirm_pending_approval(approved)
+            .await
+        {
+            tracing::info!(
+                approved,
+                answer = %clarification_answers,
+                "已记录用户对审批追问的回应（流式）"
+            );
+        }
+
+        let clarification_msg = Message::user(clarification_answers);
+        let start = Instant::now();
+        let _ = self
+            .run_agent_turn(
+                state,
+                &session_id,
+                &clarification_msg,
+                &self.default_model,
+                start,
+                None,
+                TurnOptions {
+                    mode: TurnMode::Stream { sender },
+                    do_snapshot: false,
+                    do_compress: false,
+                },
+            )
+            .await;
+    }
+
     /// 从会话执行历史中自动学习新技能（GEPA 进化引擎）。
     pub(crate) async fn learn_skills_from_session(&self, session_id: &str) {
         if let Some(ref engine) = self.skill_learning_engine {

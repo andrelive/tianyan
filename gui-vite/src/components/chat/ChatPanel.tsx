@@ -3,7 +3,6 @@ import { useParams } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
 import {
   apiGet,
-  clarifyChat,
   compressSession,
   deleteSessionMessage,
   getApiBase,
@@ -15,7 +14,7 @@ import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
 import ModelSelector from './ModelSelector';
-import type { ChatMessage } from '@/lib/types';
+import type { ChatMessage, ChatStreamEvent } from '@/lib/types';
 
 export default function ChatPanel() {
   const { sessionId: urlSessionId } = useParams<{ sessionId: string }>();
@@ -255,7 +254,8 @@ export default function ChatPanel() {
     }
   }, []);
 
-  // 提交对 Agent 追问的回答，并追加继续处理的结果
+  // 提交对 Agent 追问的回答（流式）：确认后思考/工具/输出逐块渲染，
+  // 避免整轮等待超过 HTTP 超时（此前非流式路径表现为"按钮转圈后报错"）。
   const handleClarify = useCallback(
     async (answer: string) => {
       if (streamStatus === 'streaming' || submittingClarify) return;
@@ -270,17 +270,63 @@ export default function ChatPanel() {
         content: answer,
         timestamp: new Date().toISOString(),
       });
+      // 助手占位消息：流式增量累积其上
+      addMessage({
+        role: 'assistant',
+        content: '',
+        timestamp: new Date().toISOString(),
+      });
       setSubmittingClarify(true);
       try {
-        const resp = await clarifyChat(sessionId, answer);
-        addMessage({
-          role: 'assistant',
-          content: resp.message.content,
-          timestamp: resp.message.timestamp || new Date().toISOString(),
+        const response = await fetch(`${getApiBase()}/chat/clarify/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sessionId, answer }),
         });
-        state.setPendingClarification(null);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('Response body is not readable');
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) continue;
+            const data = trimmed.slice(6).trim();
+            if (data === '[DONE]') continue;
+            try {
+              const event = JSON.parse(data) as ChatStreamEvent;
+              if (event.thinking) useAppStore.getState().appendThinking(event.thinking);
+              if (event.delta) useAppStore.getState().updateLastMessage(event.delta);
+              if (event.tool_call) useAppStore.getState().appendToolCalls([event.tool_call]);
+              if (event.skill_calls && event.skill_calls.length > 0) {
+                useAppStore.getState().appendSkillCalls(event.skill_calls);
+              }
+              if (event.finish_reason === 'length') {
+                useAppStore.getState().markLastMessageTruncated();
+              }
+              if (event.chunk_type === 'error') {
+                useAppStore.getState().removeEmptyAssistantMessage();
+                useAppStore.getState().showToast(event.delta || '追问回答失败', 'error');
+              }
+            } catch {
+              /* skip malformed SSE data */
+            }
+          }
+        }
+        // 流正常结束：追问气泡消失
+        useAppStore.getState().setPendingClarification(null);
       } catch (err) {
-        state.showToast(
+        useAppStore.getState().removeEmptyAssistantMessage();
+        useAppStore.getState().showToast(
           `追问回答失败: ${err instanceof Error ? err.message : '未知错误'}`,
           'error',
         );

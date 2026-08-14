@@ -1030,6 +1030,25 @@ export const handlers = [
     });
   }),
 
+  // Chat clarify stream（追问回答，流式）：思考 + 正文增量
+  http.post(`${API_BASE}/chat/clarify/stream`, () => {
+    const encoder = new TextEncoder();
+    const chunks = [
+      'data: {"id":"msg-2","session_id":"session-1","delta":"","thinking":"确认用户意图","chunk_type":"thought"}\n\n',
+      'data: {"id":"msg-2","session_id":"session-1","delta":"好的，我来继续处理。","chunk_type":"answer"}\n\n',
+      'data: {"id":"msg-2","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',
+    ];
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+        controller.close();
+      },
+    });
+    return new HttpResponse(stream, {
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  }),
+
   // Knowledge search（后端为 GET /knowledge/search?q=）
   http.get(`${API_BASE}/knowledge/search`, ({ request }) => {
     const url = new URL(request.url);
