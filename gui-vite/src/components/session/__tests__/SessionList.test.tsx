@@ -121,9 +121,16 @@ describe('SessionList', () => {
     expect(useAppStore.getState().newSessionWorkspace).toBe('C:/proj/a');
     expect(useAppStore.getState().currentSessionId).toBeNull();
     expect(screen.getByTestId('location-display').textContent).toBe('/chat');
+
+    // 对应分组下出现「新会话」占位条目（用户可感知新会话归属）
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '新会话' })).toBeInTheDocument();
+    });
+    // 占位在 a 分组下、不在默认组下（默认组无会话且未选中）
+    expect(screen.queryByRole('button', { name: '分组 默认' })).not.toBeInTheDocument();
   });
 
-  it('clicking top 新建会话 clears pending workspace and navigates to /chat', async () => {
+  it('clicking top 新建会话 clears pending workspace, navigates to /chat and shows placeholder', async () => {
     const user = userEvent.setup();
     useAppStore.setState({ newSessionWorkspace: 'C:/old' });
     mockSessions([]);
@@ -133,6 +140,13 @@ describe('SessionList', () => {
 
     expect(useAppStore.getState().newSessionWorkspace).toBeNull();
     expect(screen.getByTestId('location-display').textContent).toBe('/chat');
+
+    // 无会话 + 待新建 → 渲染临时「默认」分组 + 占位条目
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '分组 默认' })).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: '新会话' })).toBeInTheDocument();
+    expect(screen.queryByText('暂无会话')).not.toBeInTheDocument();
   });
 
   it('新目录 opens the picker; selecting a directory starts a new session bound to it', async () => {
@@ -153,6 +167,30 @@ describe('SessionList', () => {
 
     expect(useAppStore.getState().newSessionWorkspace).toBe('C:\\sub1');
     expect(screen.getByTestId('location-display').textContent).toBe('/chat');
+  });
+
+  it('placeholder disappears once a session is selected', async () => {
+    const user = userEvent.setup();
+    mockSessions([makeSession({ id: 's1', title: '项目A会话', working_directory: 'C:/proj/a' })]);
+    renderSessionList();
+
+    // 先通过分组「＋」发起新建（占位出现）
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '分组 a' })).toBeInTheDocument();
+    });
+    const groupRow = screen.getByRole('button', { name: '分组 a' });
+    fireEvent.mouseEnter(groupRow);
+    await user.click(await screen.findByRole('button', { name: '在 a 新建会话' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '新会话' })).toBeInTheDocument();
+    });
+
+    // 选中已有会话 → 占位消失（新会话不再进行中）
+    await user.click(screen.getByText('项目A会话'));
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: '新会话' })).not.toBeInTheDocument();
+    });
+    expect(useAppStore.getState().currentSessionId).toBe('s1');
   });
 
   it('文件视图 button navigates to /workspace', async () => {

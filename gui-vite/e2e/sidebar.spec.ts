@@ -65,11 +65,6 @@ test.describe('sidebar', () => {
     await expect(page.locator('aside').first()).toContainText('技能');
   });
 
-  test('clicking 新建会话 navigates to /chat', async ({ page }) => {
-    await page.getByRole('navigation', { name: '导航' }).getByLabel('新建会话').click();
-    await expect(page).toHaveURL('/chat');
-  });
-
   test('nav items navigation', async ({ page }) => {
     await page.getByRole('button', { name: '技能', exact: true }).click();
     await expect(page).toHaveURL('/skills');

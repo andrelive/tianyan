@@ -31,7 +31,8 @@ test.describe('real backend chat', () => {
     request,
   }) => {
     await page.goto('/');
-    await page.getByRole('navigation', { name: '导航' }).getByLabel('新建会话').click();
+    // 新建会话入口在会话页左栏（全局侧边栏已移除该按钮）
+    await page.getByRole('complementary', { name: '会话列表' }).getByLabel('新建会话').click();
     await expect(page).toHaveURL('/chat');
 
     const textarea = page.getByRole('textbox', { name: '输入消息' });

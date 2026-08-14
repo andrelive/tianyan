@@ -67,9 +67,4 @@ describe('AppLayout', () => {
     // Nav icon buttons should still be visible (icon-only mode)
     expect(screen.getByTitle('会话')).toBeInTheDocument();
   });
-
-  it('renders new chat button in sidebar', () => {
-    renderAppLayoutWithChild();
-    expect(screen.getByTitle('新建会话')).toBeInTheDocument();
-  });
 });

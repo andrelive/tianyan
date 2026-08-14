@@ -10,6 +10,7 @@ import {
   FileText,
   FolderOpen,
   FolderPlus,
+  MessageSquare,
   Plus,
   Trash2,
 } from 'lucide-react';
@@ -47,6 +48,8 @@ export default function SessionList() {
   const [editingTitle, setEditingTitle] = useState('');
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [pickerOpen, setPickerOpen] = useState(false);
+  /** 用户是否已发起新会话（点击「＋ 新建会话」/分组「＋」/「新目录」后为 true）。 */
+  const [newChatStarted, setNewChatStarted] = useState(false);
   const sessionListRef = useRef<HTMLDivElement>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
 
@@ -57,6 +60,22 @@ export default function SessionList() {
         /* sessions optional for now */
       });
   }, [setSessions]);
+
+  // 新会话创建完成（currentSessionId 从 null → 非 null）后刷新列表：
+  // 让刚创建的真实会话条目出现在对应分组下（占位条目随之消失）
+  const prevSessionId = useRef<string | null>(null);
+  useEffect(() => {
+    if (currentSessionId && currentSessionId !== prevSessionId.current) {
+      // 会话已创建/选中：新会话占位消失 + 刷新列表（真实条目出现）
+      setNewChatStarted(false);
+      apiGet<ListSessionsResponse>('/sessions')
+        .then((data) => setSessions(data.sessions))
+        .catch(() => {
+          /* refresh best-effort */
+        });
+    }
+    prevSessionId.current = currentSessionId;
+  }, [currentSessionId, setSessions]);
 
   // 进入编辑模式时聚焦输入框
   useEffect(() => {
@@ -83,12 +102,21 @@ export default function SessionList() {
   }, [sessions]);
   const flatSessions = useMemo(() => sessionGroups.flatMap(([, list]) => list), [sessionGroups]);
 
+  // 进行中的新会话（用户已发起、尚未持久化）：分组归属由待绑定目录决定。
+  // 左栏在对应分组下显示「新会话」占位条目，用户可感知新会话属于哪个目录。
+  // 仅当用户点击过「新建会话」后才显示占位（初始空列表仍显示「暂无会话」）。
+  const pendingGroupKey = newChatStarted ? (newSessionWorkspace ?? '') : null;
+  // 无任何会话但有待绑定目录时：仍渲染该目录的临时分组 + 占位条目
+  const groupsToRender: [string, Session[]][] =
+    sessions.length === 0 && pendingGroupKey !== null ? [[pendingGroupKey, []]] : sessionGroups;
+
   /** 开启新会话：绑定到指定目录（空串 = 默认组），零弹窗。 */
   const startNewSession = useCallback(
     (workdir: string) => {
       setNewSessionWorkspace(workdir || null);
       setCurrentSession(null);
       setMessages([]);
+      setNewChatStarted(true);
       setView('chat');
       navigate('/chat');
     },
@@ -213,7 +241,7 @@ export default function SessionList() {
 
       {/* 会话列表（工作区分组 + 会话子项） */}
       <div ref={sessionListRef} className="flex-1 overflow-y-auto px-2 py-2">
-        {sessions.length === 0 ? (
+        {sessions.length === 0 && pendingGroupKey === null ? (
           <p
             className="text-xs text-[var(--color-text-tertiary)] text-center mt-8"
             aria-live="polite"
@@ -222,7 +250,7 @@ export default function SessionList() {
           </p>
         ) : (
           <div className="flex flex-col gap-1.5" role="list" aria-label="会话列表">
-            {sessionGroups.map(([workdir, groupSessions]) => {
+            {groupsToRender.map(([workdir, groupSessions]) => {
               const collapsed = collapsedGroups.has(workdir);
               const label = groupLabel(workdir);
               return (
@@ -279,6 +307,19 @@ export default function SessionList() {
                       </button>
                     )}
                   </div>
+
+                  {/* 进行中的新会话占位条目（归属当前分组） */}
+                  {!collapsed && pendingGroupKey === workdir && (
+                    <div
+                      role="button"
+                      aria-label="新会话"
+                      title="新会话（发送首条消息后创建）"
+                      className="flex items-center gap-2 pl-7 pr-2 py-1.5 rounded-md text-sm border border-dashed border-blue-400/50 bg-blue-50/40 dark:bg-blue-900/10 text-blue-700 dark:text-blue-300"
+                    >
+                      <MessageSquare size={13} className="shrink-0" />
+                      <span className="truncate">新会话</span>
+                    </div>
+                  )}
 
                   {/* 会话子项（二级） */}
                   {!collapsed &&

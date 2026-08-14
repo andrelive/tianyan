@@ -51,6 +51,13 @@ test.describe('session page left column', () => {
     await expect(page.locator('button[title="删除会话"]')).toBeVisible();
   });
 
+  test('clicking 新建会话 shows the 新会话 placeholder in the 默认 group', async ({ page }) => {
+    await page.getByRole('complementary', { name: '会话列表' }).getByLabel('新建会话').click();
+    // 占位条目出现在默认分组下（用户可感知新会话归属）
+    await expect(page.getByRole('button', { name: '新会话' })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('button', { name: '分组 默认' })).toBeVisible();
+  });
+
   test('新目录 opens the directory picker dialog', async ({ page }) => {
     await page.getByRole('button', { name: '新目录' }).click();
     await expect(page.getByRole('dialog', { name: '选择目录' })).toBeVisible({ timeout: 5000 });

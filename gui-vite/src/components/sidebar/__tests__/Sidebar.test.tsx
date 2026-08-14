@@ -102,10 +102,10 @@ describe('Sidebar', () => {
       expect(screen.getByText('天演')).toBeInTheDocument();
     });
 
-    it('shows Plus (new session) and PanelLeftClose (collapse) buttons', () => {
+    it('shows the collapse button only (new-session entry lives in the session page)', () => {
       renderSidebar();
-      expect(screen.getByTitle('新建会话')).toBeInTheDocument();
       expect(screen.getByTitle('收起侧边栏')).toBeInTheDocument();
+      expect(screen.queryByTitle('新建会话')).not.toBeInTheDocument();
     });
 
     it('shows NAV_ITEMS with labels', () => {
@@ -121,26 +121,6 @@ describe('Sidebar', () => {
       // 会话列表已迁入会话页左栏（SessionList）；全局侧边栏为纯一级导航
       expect(screen.queryByText('工作区')).not.toBeInTheDocument();
       expect(screen.queryByText('暂无会话')).not.toBeInTheDocument();
-    });
-
-    it('clicking "新建会话" resets session/messages/view and navigates to /chat', async () => {
-      const user = userEvent.setup();
-      // Pre-set state to verify it gets reset（零弹窗：直接进入会话页空状态）
-      useAppStore.setState({
-        currentSessionId: 'session-1',
-        messages: [{ role: 'user', content: 'hello', timestamp: '2026-01-01T00:00:00Z' }],
-        currentView: 'settings',
-        newSessionWorkspace: 'C:/old-dir',
-      });
-      renderSidebar();
-
-      await user.click(screen.getByTitle('新建会话'));
-
-      expect(useAppStore.getState().currentSessionId).toBeNull();
-      expect(useAppStore.getState().messages).toEqual([]);
-      expect(useAppStore.getState().currentView).toBe('chat');
-      expect(useAppStore.getState().newSessionWorkspace).toBeNull();
-      expect(screen.getByTestId('location-display').textContent).toBe('/chat');
     });
 
     it('clicking collapse button toggles sidebar closed', async () => {

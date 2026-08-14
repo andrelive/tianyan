@@ -10,13 +10,13 @@ import {
   ListTodo,
   Gauge,
   Settings,
-  Plus,
   PanelLeftClose,
   PanelLeft,
 } from 'lucide-react';
 
 /**
  * 全局一级导航侧边栏：纯导航，不含会话列表（会话列表在会话页左栏，见 SessionList）。
+ * 新建会话入口在会话页左栏（每个目录分组「＋」/ 顶部「＋ 新建会话」）。
  */
 const NAV_ITEMS = [
   { id: 'chat' as const, label: '会话', icon: MessageSquare, path: '/chat' },
@@ -63,21 +63,10 @@ const NAV_ITEMS = [
 export default function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
+
   const isSidebarOpen = useAppStore((s) => s.isSidebarOpen);
   const toggleSidebar = useAppStore((s) => s.toggleSidebar);
-  const setCurrentSession = useAppStore((s) => s.setCurrentSession);
-  const setMessages = useAppStore((s) => s.setMessages);
   const setView = useAppStore((s) => s.setView);
-  const setNewSessionWorkspace = useAppStore((s) => s.setNewSessionWorkspace);
-
-  /** 新建会话：进入会话页空状态（默认组，零弹窗；会话页左栏可再选目录）。 */
-  const handleNewChat = () => {
-    setNewSessionWorkspace(null);
-    setCurrentSession(null);
-    setMessages([]);
-    setView('chat');
-    navigate('/chat');
-  };
 
   const handleNavClick = (item: (typeof NAV_ITEMS)[number]) => {
     setView(item.id);
@@ -134,14 +123,6 @@ export default function Sidebar() {
       <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
         <h1 className="text-base font-semibold text-[var(--color-text-primary)]">天演</h1>
         <div className="flex items-center gap-1">
-          <button
-            onClick={handleNewChat}
-            className="p-1.5 rounded-md hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]"
-            title="新建会话"
-            aria-label="新建会话"
-          >
-            <Plus size={18} />
-          </button>
           <button
             onClick={toggleSidebar}
             className="p-1.5 rounded-md hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)]"
