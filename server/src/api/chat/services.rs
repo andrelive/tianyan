@@ -130,10 +130,22 @@ impl ChatService {
                 Ok(chunk) => {
                     let skill_calls = chunk.skill_calls.map(convert_skill_calls);
 
+                    // 思考增量（Thought chunk）走 thinking 字段，正文（Answer/观察等）
+                    // 走 delta——前端分开渲染，思考/输出/工具调用按序轮番出现。
+                    let is_thought = chunk.chunk_type == tianyan::agent::StreamChunkType::Thought;
                     let event = ChatStreamEvent {
                         id: stream_id.clone(),
                         session_id: session_id.clone(),
-                        delta: chunk.delta,
+                        delta: if is_thought {
+                            String::new()
+                        } else {
+                            chunk.delta.clone()
+                        },
+                        thinking: if is_thought {
+                            Some(chunk.delta.clone())
+                        } else {
+                            None
+                        },
                         finish_reason: if chunk.is_complete {
                             map_finish_reason(chunk.finish_reason.clone())
                         } else {
@@ -155,6 +167,7 @@ impl ChatService {
                         id: stream_id.clone(),
                         session_id: session_id.clone(),
                         delta: format!("错误: {}", e),
+                        thinking: None,
                         finish_reason: Some("error".to_string()),
                         chunk_type: tianyan::agent::StreamChunkType::Error,
                         skill_calls: None,
@@ -200,6 +213,7 @@ fn to_chat_response(session_id: &str, response: tianyan::agent::AgentResponse) -
         message: ChatMessage {
             role: MessageRole::Assistant,
             content: response.content,
+            thinking: None,
             images: None,
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
         },

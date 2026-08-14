@@ -120,6 +120,10 @@ export default function ChatPanel() {
       if (event.delta) {
         useAppStore.getState().updateLastMessage(event.delta);
       }
+      // 思考增量（Thought chunk）单独累积到 thinking 字段（与正文分开渲染）
+      if (event.thinking) {
+        useAppStore.getState().appendThinking(event.thinking);
+      }
       // Attach skill calls to the current assistant message
       if (event.skill_calls && event.skill_calls.length > 0) {
         useAppStore.getState().appendSkillCalls(event.skill_calls);

@@ -9,6 +9,8 @@ export interface ChatMessage {
   id?: string;
   role: MessageRole;
   content: string;
+  /** 思考过程文本（模型 reasoning；正文在 content，前端折叠展示） */
+  thinking?: string;
   /** 图片 data URL 列表（仅用户消息），如 data:image/png;base64,... */
   images?: string[];
   timestamp?: string;
@@ -49,6 +51,8 @@ export interface ChatStreamEvent {
   id: string;
   session_id: string;
   delta: string;
+  /** 思考过程增量（Thought chunk 携带；正文在 delta，分开渲染） */
+  thinking?: string | null;
   finish_reason?: string | null;
   skill_calls?: SkillCallInfo[] | null;
   chunk_type: StreamChunkType;

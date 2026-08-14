@@ -24,6 +24,9 @@ pub struct ChatMessage {
     pub role: MessageRole,
     /// 消息内容
     pub content: String,
+    /// 思考过程文本（模型 reasoning；正文在 content，前端分开渲染）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub thinking: Option<String>,
     /// 图片 data URL 列表（`data:image/png;base64,...`），仅用户消息使用。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub images: Option<Vec<String>>,
@@ -44,6 +47,7 @@ impl ChatMessage {
         Self {
             role: MessageRole::System,
             content: content.to_string(),
+            thinking: None,
             images: None,
             timestamp: None,
         }
@@ -60,6 +64,7 @@ impl ChatMessage {
         Self {
             role: MessageRole::User,
             content: content.to_string(),
+            thinking: None,
             images: None,
             timestamp: None,
         }
@@ -76,6 +81,7 @@ impl ChatMessage {
         Self {
             role: MessageRole::Assistant,
             content: content.to_string(),
+            thinking: None,
             images: None,
             timestamp: None,
         }

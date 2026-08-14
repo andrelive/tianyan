@@ -219,7 +219,7 @@ async fn test_run_tests_command_metacharacters_blocked() {
 
 #[tokio::test]
 async fn test_run_tests_filter_metacharacters_blocked() {
-    // filter 拼接进默认命令（cargo test <filter>）后含 shell 元字符（;）→
+    // filter 拼接进默认命令（cargo test <filter>）后含命令链元字符（&&）→
     // 对解析后的完整命令执行 check_command 拦截，阻止注入。
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -232,7 +232,7 @@ async fn test_run_tests_filter_metacharacters_blocked() {
     let registry = ToolRegistry::new(default_strict_policy());
     let args = json!({
         "cwd": dir.path().to_string_lossy(),
-        "filter": "x\"; del *",
+        "filter": "x\" && del *",
     })
     .to_string();
     let result = registry
@@ -342,10 +342,14 @@ async fn test_verify_build_approval_approved_unattended() {
 
 #[tokio::test]
 async fn test_verify_build_command_metacharacters_blocked() {
-    // 命令分隔符（;）→ check_command 拦截，不执行。
+    // 命令链元字符（&&）→ check_command 拦截，不执行。
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_verify_build(r#"{"command":"echo hi; echo bye"}"#, "test-session", false)
+        .execute_verify_build(
+            r#"{"command":"echo hi && echo bye"}"#,
+            "test-session",
+            false,
+        )
         .await;
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("安全违规"), "应报安全违规: {msg}");

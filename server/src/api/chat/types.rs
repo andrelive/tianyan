@@ -94,6 +94,7 @@ impl ChatResponse {
             message: ChatMessage {
                 role: MessageRole::Assistant,
                 content: message.to_string(),
+                thinking: None,
                 images: None,
                 timestamp: Some(chrono::Utc::now().to_rfc3339()),
             },
@@ -153,6 +154,9 @@ pub struct ChatStreamEvent {
     /// 数据块类型
     pub chunk_type: tianyan::agent::StreamChunkType,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 思考过程增量（Thought chunk 携带；正文走 delta，前端分开渲染）
+    pub thinking: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     /// 技能调用列表
     pub skill_calls: Option<Vec<SkillCallInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,6 +192,7 @@ mod tests {
             message: ChatMessage {
                 role: MessageRole::Assistant,
                 content: "Hello!".to_string(),
+                thinking: None,
                 images: None,
                 timestamp: Some("2026-02-20T10:00:00Z".to_string()),
             },
@@ -239,6 +244,7 @@ mod tests {
             id: "chatcmpl-1".to_string(),
             session_id: "session-123".to_string(),
             delta: "Hello".to_string(),
+            thinking: None,
             finish_reason: None,
             chunk_type: tianyan::agent::StreamChunkType::Answer,
             skill_calls: None,

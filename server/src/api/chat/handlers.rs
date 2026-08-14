@@ -80,6 +80,7 @@ pub async fn chat_stream_handler(
                 id: uuid::Uuid::new_v4().to_string(),
                 session_id: String::new(),
                 delta: e,
+                thinking: None,
                 finish_reason: None,
                 chunk_type: tianyan::agent::StreamChunkType::Error,
                 skill_calls: None,

@@ -37,6 +37,8 @@ interface AppState {
   appendSkillCalls: (calls: SkillCallInfo[]) => void;
   /** A2：累积工具调用事件到当前 assistant 消息（渲染 tool card） */
   appendToolCalls: (calls: ToolCallEvent[]) => void;
+  /** 累积思考增量到当前 assistant 消息（thinking 字段，折叠展示） */
+  appendThinking: (delta: string) => void;
   /** 标记最后一条 assistant 消息为截断（finish_reason === 'length'） */
   markLastMessageTruncated: () => void;
   clearMessages: () => void;
@@ -156,6 +158,19 @@ export const useAppStore = create<AppState>()(
                 tool_calls: [...prev, ...fresh],
               };
             }
+          }
+          return { messages };
+        }),
+      appendThinking: (delta) =>
+        set((s) => {
+          const messages = [...s.messages];
+          let lastIdx = messages.length - 1;
+          while (lastIdx >= 0 && messages[lastIdx].role !== 'assistant') {
+            lastIdx--;
+          }
+          if (lastIdx >= 0) {
+            const prev = messages[lastIdx].thinking ?? '';
+            messages[lastIdx] = { ...messages[lastIdx], thinking: prev + delta };
           }
           return { messages };
         }),

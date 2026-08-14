@@ -2,7 +2,7 @@ import { useState, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { Copy, Check, Undo2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Copy, Check, Undo2 } from 'lucide-react';
 import type { ChatMessage } from '@/lib/types';
 import { cn, formatTime } from '@/lib/utils';
 import SkillCallCard from './SkillCallCard';
@@ -17,6 +17,7 @@ interface Props {
 
 function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
   const [copied, setCopied] = useState(false);
+  const [thinkingOpen, setThinkingOpen] = useState(true);
 
   const isUser = message.role === 'user';
 
@@ -53,6 +54,30 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
                 className="max-w-[240px] max-h-[240px] rounded-lg object-contain border border-white/10"
               />
             ))}
+          </div>
+        )}
+
+        {/* 思考过程（可折叠，与正文分开渲染，按序轮番出现） */}
+        {!isUser && message.thinking && (
+          <div className="mb-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-tertiary)]/60 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setThinkingOpen((v) => !v)}
+              aria-expanded={thinkingOpen}
+              className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors"
+            >
+              {thinkingOpen ? (
+                <ChevronDown size={12} className="shrink-0" />
+              ) : (
+                <ChevronRight size={12} className="shrink-0" />
+              )}
+              <span>思考过程</span>
+            </button>
+            {thinkingOpen && (
+              <div className="px-3 pb-2 text-xs leading-relaxed whitespace-pre-wrap text-[var(--color-text-secondary)] italic opacity-80 max-h-64 overflow-y-auto">
+                {message.thinking}
+              </div>
+            )}
           </div>
         )}
 

@@ -84,6 +84,9 @@ impl SessionService {
             .messages
             .into_iter()
             .map(|m| {
+                // 思考（Part::Reasoning）单独收集到 thinking 字段，正文（Part::Text）
+                // 进 content——前端分开渲染（思考块可折叠），不再拼成 [思考] 前缀。
+                let mut thinking = String::new();
                 let content = m.parts.iter().fold(String::new(), |mut acc, p| {
                     match p {
                         Part::Text { text, .. } => {
@@ -93,10 +96,10 @@ impl SessionService {
                             acc.push_str(text);
                         }
                         Part::Reasoning { text, .. } => {
-                            if !acc.is_empty() {
-                                acc.push('\n');
+                            if !thinking.is_empty() {
+                                thinking.push('\n');
                             }
-                            acc.push_str(&format!("[思考] {}", text));
+                            thinking.push_str(text);
                         }
                         Part::ToolCall {
                             name, arguments, ..
@@ -148,6 +151,11 @@ impl SessionService {
                         role => role,
                     },
                     content,
+                    thinking: if thinking.is_empty() {
+                        None
+                    } else {
+                        Some(thinking)
+                    },
                     images: if images.is_empty() {
                         None
                     } else {

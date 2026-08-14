@@ -43,8 +43,9 @@ test.describe('real backend chat', () => {
     // 用户消息立即渲染
     await expect(page.getByText(uniqueMessage)).toBeVisible();
 
-    // 后端 agent loop 首轮往返：mock 回复流式到达（SSE 3 块 + 终止块）
-    await expect(page.getByText(MOCK_REPLY)).toBeVisible({ timeout: 60000 });
+    // 后端 agent loop 首轮往返：mock 回复流式到达（SSE 3 块 + 终止块）。
+    // .first()：流式期间 sr-only live region 会复制正文文本，避免 strict 冲突
+    await expect(page.getByText(MOCK_REPLY).first()).toBeVisible({ timeout: 60000 });
 
     // 后端已持久化会话（标题默认"新对话"，以会话数增长为凭据）
     await expect

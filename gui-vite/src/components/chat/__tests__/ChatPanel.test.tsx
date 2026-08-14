@@ -400,4 +400,48 @@ describe('ChatPanel', () => {
     });
     expect(screen.queryByText(/输出已达上限/)).not.toBeInTheDocument();
   });
+
+  it('accumulates thinking deltas separately and renders the collapsible block', async () => {
+    const user = userEvent.setup();
+    // 覆盖 SSE：thought chunk 携带 thinking 增量，answer chunk 携带正文
+    server.use(
+      http.post('/api/v1/chat/stream', () => {
+        const encoder = new TextEncoder();
+        const chunks = [
+          'data: {"id":"msg-1","session_id":"session-1","delta":"","thinking":"先分析","chunk_type":"thought"}\n\n',
+          'data: {"id":"msg-1","session_id":"session-1","delta":"","thinking":"再想想","chunk_type":"thought"}\n\n',
+          'data: {"id":"msg-1","session_id":"session-1","delta":"最终输出","chunk_type":"answer"}\n\n',
+          'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',
+        ];
+        const stream = new ReadableStream({
+          start(controller) {
+            for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+            controller.close();
+          },
+        });
+        return new HttpResponse(stream, {
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+      }),
+    );
+    renderChatPanel();
+
+    const textarea = screen.getByPlaceholderText(/输入消息/);
+    fireEvent.change(textarea, { target: { value: '带思考的问题' } });
+    await user.click(screen.getByRole('button', { name: /发送/i }));
+
+    // 思考增量与正文分开累积（思考不入 content）
+    await waitFor(() => {
+      const assistant = useAppStore
+        .getState()
+        .messages.filter((m) => m.role === 'assistant');
+      const last = assistant[assistant.length - 1];
+      expect(last?.thinking).toBe('先分析再想想');
+      expect(last?.content).toBe('最终输出');
+    });
+
+    // 思考块（可折叠）渲染在消息气泡中
+    expect(await screen.findByRole('button', { name: /思考过程/ })).toBeInTheDocument();
+    expect(screen.getByText('先分析再想想')).toBeInTheDocument();
+  });
 });

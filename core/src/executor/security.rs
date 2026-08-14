@@ -235,6 +235,11 @@ pub(crate) fn check_path_rules(
 ) -> PathCheckOutcome {
     let canonical = resolve_canonical(path);
     for dir in blocked {
+        // Windows 上 POSIX 根（如 "/"）会被 canonicalize 解析为当前盘根（如 F:\\），
+        // 导致整盘被黑名单误拒；此类条目在本平台无对应语义，跳过。
+        if is_meaningless_blocked_dir(dir) {
+            continue;
+        }
         if canonical.starts_with(normalize_dir_for_check(dir)) {
             return PathCheckOutcome::Blocked(dir.clone());
         }
@@ -264,6 +269,25 @@ fn resolve_canonical(path: &std::path::Path) -> std::path::PathBuf {
 /// 规范化目录用于前缀比较：`canonicalize` 失败回退原值，并剥离 Windows verbatim 前缀。
 fn normalize_dir_for_check(dir: &std::path::Path) -> std::path::PathBuf {
     normalize_path_for_check(&dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()))
+}
+
+/// 黑名单目录条目在本平台是否无意义（应跳过）。
+///
+/// Windows 上 POSIX 根路径（如 `"/"`）无对应目录语义，且 `canonicalize`
+/// 会把它解析为**当前驱动器根**（如 `F:\\`），前缀匹配将拒绝整个盘——
+/// 配置从 POSIX 迁移而来时必然误伤。仅含根组件的条目直接跳过。
+#[cfg(target_os = "windows")]
+fn is_meaningless_blocked_dir(dir: &std::path::Path) -> bool {
+    matches!(
+        dir.components().collect::<Vec<_>>().as_slice(),
+        [std::path::Component::RootDir]
+    )
+}
+
+/// 非 Windows 平台无此问题（"/" 就是根，禁止根是合法意图）。
+#[cfg(not(target_os = "windows"))]
+fn is_meaningless_blocked_dir(_dir: &std::path::Path) -> bool {
+    false
 }
 
 impl SecurityPolicy {
@@ -318,18 +342,19 @@ impl SecurityPolicy {
 
     /// 检测命令中是否包含命令链或命令替换元字符。
     ///
-    /// 阻止的模式：`&&`（命令链）、`||`（条件链）、`;`（分隔符）、
-    /// `&`（Windows cmd 分隔符 / Unix 后台符）、`` ` ``（反引号替换）、
-    /// `$(`（命令替换）。
+    /// 阻止的模式：`&&`（命令链）、`||`（条件链）、`` ` ``（反引号替换）、
+    /// `$(`（命令替换）；`;` 仅在 POSIX shell 中为分隔符（Windows cmd 无此
+    /// 语义，不阻止——模型在 Windows 上沿用 POSIX 习惯写 `;` 不应被误拒）。
+    /// 单个 `&` 不阻止：它同时是 URL/参数的常见字符，误伤大于收益
+    /// （真正的链式注入由 `&&` 覆盖）。
     /// 管道 `|` 和重定向 `>` `<` 不在阻止范围内，因为它们是合法的
     /// 单命令操作。
     fn has_shell_metacharacters(command: &str) -> bool {
         command.contains("&&")
             || command.contains("||")
-            || command.contains(';')
-            || command.contains('&')
             || command.contains('`')
             || command.contains("$(")
+            || (!cfg!(target_os = "windows") && command.contains(';'))
     }
 
     /// 检查文件写入是否被允许。
@@ -555,6 +580,61 @@ mod tests {
             .check_path(&path)
             .unwrap_err();
         assert!(err.to_string().contains("黑名单"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_check_path_posix_root_blacklist_does_not_block_whole_drive() {
+        // Windows 回归：黑名单含 POSIX 根 "/" 时不得把整盘（当前盘根）误拒。
+        // canonicalize("/") 会解析为当前驱动器根（如 F:\），旧实现前缀匹配
+        // 拒绝一切路径；修复后跳过该条目。
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("x.txt");
+        std::fs::write(&p, "x").unwrap();
+        let policy = policy_with(vec![], vec![PathBuf::from("/")]);
+        assert!(
+            policy.check_path(&p).is_ok(),
+            "POSIX 根黑名单在 Windows 上不应误拒工作目录文件"
+        );
+    }
+
+    #[test]
+    fn test_check_path_existing_blocked_dir_still_blocked() {
+        // 真实黑名单目录（非根组件）仍生效
+        let dir = tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        let path = blocked.join("x.txt");
+        std::fs::write(&path, "x").unwrap();
+        let err = policy_with(vec![], vec![blocked.clone()])
+            .check_path(&path)
+            .unwrap_err();
+        assert!(err.to_string().contains("黑名单"));
+    }
+
+    #[test]
+    fn test_shell_metacharacters_allow_single_ampersand() {
+        // 单个 &（URL/参数常见字符）不再视为注入元字符
+        let policy = policy_with(vec![], vec![]);
+        assert!(policy.check_command("curl http://x?a=1&b=2").is_ok());
+        assert!(policy.check_command("echo AT&T").is_ok());
+    }
+
+    #[test]
+    fn test_shell_metacharacters_still_block_chains() {
+        // 命令链/命令替换仍阻止
+        let policy = policy_with(vec![], vec![]);
+        assert!(policy.check_command("rm a && rm b").is_err());
+        assert!(policy.check_command("a || b").is_err());
+        assert!(policy.check_command("echo $(id)").is_err());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_shell_metacharacters_posix_semicolon_blocked() {
+        // POSIX 上 ; 是分隔符，阻止
+        let policy = policy_with(vec![], vec![]);
+        assert!(policy.check_command("cd /tmp; rm x").is_err());
     }
 
     #[test]
