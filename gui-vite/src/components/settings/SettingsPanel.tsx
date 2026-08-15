@@ -348,7 +348,10 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
   /* ── Main render ── */
 
   return (
-    <div className="flex-1 flex overflow-hidden">
+    // min-h-0：flex-col 子项默认 min-height:auto，高内容（模型服务页）时
+    // 会把容器撑开并向 document 泄漏滚动（整个设置界面随 body 滚动），
+    // 导致滚到底后左栏 tab 导航等被滚出视野
+    <div className="flex-1 flex overflow-hidden min-h-0">
       {/* Left: tab navigation */}
       <nav
         role="tablist"
@@ -441,7 +444,7 @@ export default function SettingsPanel() {
   if (loading) {
     return (
       <div
-        className="flex-1 flex items-center justify-center"
+        className="flex-1 flex items-center justify-center min-h-0"
         aria-live="polite"
         aria-label="正在加载设置"
       >
@@ -452,7 +455,7 @@ export default function SettingsPanel() {
 
   if (loadError || !config) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-3 p-8" role="alert">
+      <div className="flex-1 flex flex-col items-center justify-center gap-3 p-8 min-h-0" role="alert">
         <X size={32} className="text-[var(--color-error)]" />
         <p className="text-[var(--color-error)] text-sm">{loadError || '无法加载配置'}</p>
         <button

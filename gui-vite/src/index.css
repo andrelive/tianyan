@@ -48,6 +48,10 @@ html,
 body,
 #root {
   height: 100%;
+  /* SPA 布局：应用内滚动全部收敛到各自的 overflow 容器（侧边栏/面板），
+     禁止内容高度变化（如字体就绪后行高撑开）向 body 泄漏滚动——
+     否则滚到底后整个界面（含左栏导航）会随 body 一起滚出视野 */
+  overflow: hidden;
   font-family:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   font-size: 14px;
