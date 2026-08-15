@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertCircle, Bot, ChevronRight, Clock, Loader2, RotateCcw, Trash2, Users } from 'lucide-react';
-import { apiDelete, apiPost, getRoleDetail, getRoles } from '@/lib/api-client';
-import type { RoleDetail, RoleSummary } from '@/lib/types';
+import { apiDelete, apiPost, getRoleDetail, getRoles, getRolesStats } from '@/lib/api-client';
+import type { RoleDetail, RoleSummary, RolesStatsResponse } from '@/lib/types';
+
+const TYPE_LABEL: Record<string, string> = {
+  delegation: '委托',
+  web_research: '网络调研',
+  search: '搜索',
+  code_edit: '代码编辑',
+  verify: '验证',
+  command: '命令执行',
+  general: '通用',
+};
 
 const SOURCE_LABEL: Record<string, string> = {
   builtin: '内置',
@@ -37,6 +47,7 @@ export default function RolesPanel() {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [stats, setStats] = useState<RolesStatsResponse | null>(null);
 
   const selectedRole = roles.find((r) => r.name === selectedName);
 
@@ -54,9 +65,19 @@ export default function RolesPanel() {
     }
   }, []);
 
+  const loadStats = useCallback(async () => {
+    try {
+      const s = await getRolesStats();
+      setStats(s);
+    } catch {
+      // 统计加载失败不阻塞面板
+    }
+  }, []);
+
   useEffect(() => {
     void loadRoles();
-  }, [loadRoles]);
+    void loadStats();
+  }, [loadRoles, loadStats]);
 
   // 选中角色 → 加载详情
   const loadDetail = useCallback(async (name: string) => {
@@ -84,6 +105,7 @@ export default function RolesPanel() {
       await apiPost(`/roles/${encodeURIComponent(selectedName)}/reset`, {});
       setActionMessage('已回退内置种子（下次会话边界生效）');
       void loadRoles();
+      void loadStats();
       await loadDetail(selectedName);
     } catch (err) {
       setActionMessage(err instanceof Error ? `操作失败：${err.message}` : '操作失败');
@@ -104,6 +126,7 @@ export default function RolesPanel() {
       setSelectedName(null);
       setDetail(null);
       void loadRoles();
+      void loadStats();
     } catch (err) {
       setActionMessage(err instanceof Error ? `操作失败：${err.message}` : '操作失败');
     } finally {
@@ -112,7 +135,46 @@ export default function RolesPanel() {
   };
 
   return (
-    <div className="flex h-full">
+    <div className="flex flex-col h-full">
+      {/* 统计概览区（ADR-016：委托统计面板） */}
+      <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center gap-4 flex-wrap shrink-0">
+        {stats && stats.total_calls > 0 ? (
+          <>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-[var(--color-text-secondary)]">累计委托</span>
+              <span className="font-semibold text-[var(--color-text-primary)]">{stats.total_calls} 次</span>
+            </div>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-[var(--color-text-secondary)]">成功率</span>
+              <span className={`font-semibold ${stats.success_rate < 0.5 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                {Math.round(stats.success_rate * 100)}%
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-xs text-[var(--color-text-tertiary)]">任务类型：</span>
+              {stats.by_task_type.map(([type, count]) => (
+                <span key={type} className="inline-block px-1.5 py-0.5 text-[10px] rounded bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-secondary)]" title={type}>
+                  {TYPE_LABEL[type] ?? type} {count}
+                </span>
+              ))}
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-xs text-[var(--color-text-tertiary)]">按角色：</span>
+              {stats.by_role.map((r) => (
+                <span key={r.name} className="inline-block px-1.5 py-0.5 text-[10px] rounded bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-secondary)]" title={`${r.success}/${r.calls} 次成功`}>
+                  {r.name} {r.calls} 次
+                </span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <span className="text-xs text-[var(--color-text-tertiary)]">
+            暂无委托统计——主智能体委托子智能体后，这里会展示任务类型分布、各角色调用次数与成功率
+          </span>
+        )}
+      </div>
+
+      <div className="flex flex-1 min-h-0">
       {/* 左列：角色列表 */}
       <div className="w-[40%] min-w-[260px] max-w-[360px] flex flex-col border-r border-[var(--color-border)]">
         <div className="px-4 py-4 border-b border-[var(--color-border)]">
@@ -283,6 +345,29 @@ export default function RolesPanel() {
                     </pre>
                   </section>
                   <section>
+                    <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">最近委托</h3>
+                    {stats && stats.recent.some((r) => r.role === selectedRole.name) ? (
+                      <ul className="space-y-1.5">
+                        {stats.recent
+                          .filter((r) => r.role === selectedRole.name)
+                          .slice(0, 8)
+                          .map((r, i) => (
+                            <li key={`${r.ts}-${i}`} className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+                              <span className={`shrink-0 inline-block px-1.5 py-0.5 text-[10px] rounded ${r.success ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : 'bg-red-50 text-red-700 dark:bg-red-900/40 dark:text-red-300'}`}>
+                                {r.success ? '成功' : '失败'}
+                              </span>
+                              <span className="min-w-0 flex-1 truncate" title={r.task}>{r.task}</span>
+                              <span className="shrink-0 text-[var(--color-text-tertiary)]">{formatTime(r.ts)}</span>
+                              <span className="shrink-0 text-[var(--color-text-tertiary)]">{r.duration_ms}ms</span>
+                              <span className="shrink-0 text-[var(--color-text-tertiary)]">{r.tokens}t</span>
+                            </li>
+                          ))}
+                      </ul>
+                    ) : (
+                      <p className="text-xs text-[var(--color-text-tertiary)]">暂无委托记录</p>
+                    )}
+                  </section>
+                  <section>
                     <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">工具白名单</h3>
                     {detail?.tools && detail.tools.length > 0 ? (
                       <div className="flex flex-wrap gap-1.5">
@@ -301,6 +386,7 @@ export default function RolesPanel() {
             </div>
           </>
         )}
+      </div>
       </div>
     </div>
   );

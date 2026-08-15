@@ -32,7 +32,9 @@ pub use agent_core::AgentWakeForwarder;
 pub use builder::AgentBuilder;
 pub use coordinator::AgentCoordinator;
 pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopResult};
-pub use role_learning::{LearnedRole, RoleLearningConfig, RoleLearningEngine};
+pub use role_learning::{
+    categorize_task_by_keyword, LearnedRole, RoleLearningConfig, RoleLearningEngine,
+};
 pub use role_router::{RoleMatch, RoleRouter};
 pub use role_store::RoleStore;
 pub use roles::{AgentRole, RoleRegistry, RoleSource, RoleStatus};

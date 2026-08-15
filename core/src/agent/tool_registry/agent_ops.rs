@@ -383,6 +383,8 @@ impl ToolRegistry {
         }
         sub_messages.push(Message::user(&params.task));
 
+        let delegation_start = std::time::Instant::now();
+
         let run_loop = async {
             let mut total_tokens: usize = 0;
 
@@ -489,6 +491,37 @@ impl ToolRegistry {
                     .await
                 {
                     tracing::warn!(role = %name, error = %e, "角色会话保存失败");
+                }
+            }
+        }
+
+        // ADR-016：委托历史明细（统计面板；成功/失败均记录）
+        if let Some(name) = role_name.as_deref() {
+            if let Some(store) = self.role_session_store() {
+                let (success, tokens) = match &outcome {
+                    Ok((value, _)) => (
+                        true,
+                        value
+                            .get("total_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize,
+                    ),
+                    Err(_) => (false, 0),
+                };
+                let record = crate::agent::role_store::DelegationRecord {
+                    ts: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                    role: name.to_string(),
+                    task: crate::common::llm_judge::truncate_output(&params.task, 120),
+                    success,
+                    mode: session_mode.to_string(),
+                    duration_ms: delegation_start.elapsed().as_millis() as u64,
+                    tokens,
+                };
+                if let Err(e) = store.append_delegation_record(&record).await {
+                    tracing::warn!(role = %name, error = %e, "委托历史记录失败");
                 }
             }
         }

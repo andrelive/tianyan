@@ -252,6 +252,34 @@ export interface ListRolesResponse {
   roles: RoleSummary[];
 }
 
+export interface DelegationRecord {
+  ts: number;
+  role: string;
+  task: string;
+  success: boolean;
+  mode: string;
+  duration_ms: number;
+  tokens: number;
+}
+
+export interface RoleUsageEntry {
+  name: string;
+  calls: number;
+  success: number;
+  failed: number;
+  success_rate: number;
+  last_used: number;
+}
+
+export interface RolesStatsResponse {
+  total_calls: number;
+  total_success: number;
+  success_rate: number;
+  by_role: RoleUsageEntry[];
+  by_task_type: [string, number][];
+  recent: DelegationRecord[];
+}
+
 export interface RoleActionResponse {
   name: string;
   status: string;

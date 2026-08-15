@@ -16,6 +16,7 @@ import type {
   RetrievalTracesResponse,
   RoleActionResponse,
   RoleDetail,
+  RolesStatsResponse,
   SchedulerStatus,
   SearchSuggestionsResponse,
   Session,
@@ -146,6 +147,10 @@ export async function getRoles(): Promise<ListRolesResponse> {
 
 export async function getRoleDetail(name: string): Promise<RoleDetail> {
   return apiGet<RoleDetail>(`/roles/${encodeURIComponent(name)}`);
+}
+
+export async function getRolesStats(): Promise<RolesStatsResponse> {
+  return apiGet<RolesStatsResponse>('/roles/stats');
 }
 
 export async function resetRole(name: string): Promise<RoleActionResponse> {

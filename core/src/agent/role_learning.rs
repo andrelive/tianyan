@@ -248,29 +248,7 @@ impl RoleLearningEngine {
 
     /// 任务分类（关键词匹配；与技能引擎同源简化版，分类失败不影响学习回路）。
     async fn categorize_task(&self, description: &str) -> String {
-        let lower = description.to_lowercase();
-        if lower.contains("delegate_to_agent") {
-            return "delegation".to_string();
-        }
-        if lower.contains("web_search") || lower.contains("web_fetch") {
-            return "web_research".to_string();
-        }
-        if lower.contains("search_code") || lower.contains("search_knowledge") {
-            return "search".to_string();
-        }
-        if lower.contains("apply_edit")
-            || lower.contains("apply_patch")
-            || lower.contains("write_file")
-        {
-            return "code_edit".to_string();
-        }
-        if lower.contains("run_tests") || lower.contains("verify_build") {
-            return "verify".to_string();
-        }
-        if lower.contains("execute_command") {
-            return "command".to_string();
-        }
-        "general".to_string()
+        categorize_task_by_keyword(description)
     }
 
     /// 生成角色候选（LLM）。
@@ -453,6 +431,34 @@ impl RoleLearningEngine {
         self.vfs.write_abstract(&uri, &abstract_content).await?;
         Ok(candidate.orchestration_skill_id.clone())
     }
+}
+
+/// 任务类型关键词分类（学习/统计面板共用；失败回落 general）。
+///
+/// 类别：delegation（委托）/ web_research（网络调研）/ search（搜索）/
+/// code_edit（代码编辑）/ verify（验证）/ command（命令执行）/ general（通用）。
+pub fn categorize_task_by_keyword(description: &str) -> String {
+    let lower = description.to_lowercase();
+    if lower.contains("delegate_to_agent") {
+        return "delegation".to_string();
+    }
+    if lower.contains("web_search") || lower.contains("web_fetch") {
+        return "web_research".to_string();
+    }
+    if lower.contains("search_code") || lower.contains("search_knowledge") {
+        return "search".to_string();
+    }
+    if lower.contains("apply_edit") || lower.contains("apply_patch") || lower.contains("write_file")
+    {
+        return "code_edit".to_string();
+    }
+    if lower.contains("run_tests") || lower.contains("verify_build") {
+        return "verify".to_string();
+    }
+    if lower.contains("execute_command") {
+        return "command".to_string();
+    }
+    "general".to_string()
 }
 
 /// 角色生成提示词：给定任务类型与成功执行，产出角色定义 + 编排技能。

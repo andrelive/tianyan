@@ -73,6 +73,40 @@ impl RoleUsage {
     }
 }
 
+/// 单次委托记录（ADR-016：统计面板明细）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DelegationRecord {
+    /// 委托时间（epoch 毫秒）。
+    pub ts: i64,
+    /// 角色名。
+    pub role: String,
+    /// 任务描述（截断）。
+    pub task: String,
+    /// 是否成功。
+    pub success: bool,
+    /// 会话模式（continue/new/discard）。
+    pub mode: String,
+    /// 委托耗时（毫秒）。
+    pub duration_ms: u64,
+    /// 子 Agent token 消耗。
+    pub tokens: usize,
+}
+
+/// 委托历史保留上限（超出重写截断）。
+const DELEGATION_HISTORY_MAX: usize = 500;
+
+/// 委托历史文件 URI（`tianyan://agent/roles/_history/delegations.jsonl`）。
+fn delegation_history_uri() -> TianyanUri {
+    TianyanUri::new(
+        ContextNamespace::Agent,
+        vec![
+            "roles".to_string(),
+            HISTORY_PREFIX.to_string(),
+            "delegations.jsonl".to_string(),
+        ],
+    )
+}
+
 /// 角色存储的路径前缀（`tianyan://agent/roles/`）。
 pub const ROLES_PREFIX: &str = "roles";
 
@@ -81,6 +115,9 @@ const META_NAME: &str = "_meta";
 
 /// 角色使用统计元目录名（list 时过滤）。
 pub const USAGE_PREFIX: &str = "_usage";
+
+/// 委托历史元目录名（list 时过滤）。
+pub const HISTORY_PREFIX: &str = "_history";
 
 /// 角色 VFS 存储：保存 / 加载 / 删除学习与配置角色，维护配置签名。
 #[derive(Clone)]
@@ -153,7 +190,7 @@ impl RoleStore {
             let Some(name) = entry.uri().path().last().cloned() else {
                 continue;
             };
-            if name == META_NAME || name == USAGE_PREFIX {
+            if name == META_NAME || name == USAGE_PREFIX || name == HISTORY_PREFIX {
                 continue;
             }
             match self.load_role(&name).await {
@@ -314,6 +351,42 @@ impl RoleStore {
         let json = serde_json::to_string_pretty(usage)
             .map_err(|e| TianyanError::Custom(format!("role_store: 使用统计序列化失败：{e}")))?;
         self.vfs.write_content(&uri, &json).await
+    }
+
+    /// 追加一条委托记录（统计面板明细；超上限重写截断保留最近 N 条）。
+    pub async fn append_delegation_record(&self, record: &DelegationRecord) -> Result<()> {
+        let uri = delegation_history_uri();
+        if let Some(parent) = uri.parent() {
+            if !self.vfs.exists(&parent).await? {
+                self.vfs.create_directory(&parent).await?;
+            }
+        }
+        let mut records = self.load_delegation_records().await?;
+        records.push(record.clone());
+        if records.len() > DELEGATION_HISTORY_MAX {
+            let drop = records.len() - DELEGATION_HISTORY_MAX;
+            records.drain(..drop);
+        }
+        let jsonl = records
+            .iter()
+            .filter_map(|r| serde_json::to_string(r).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.vfs.write_content(&uri, &jsonl).await
+    }
+
+    /// 读取全部委托记录（无历史时返回空；解析失败行跳过）。
+    pub async fn load_delegation_records(&self) -> Result<Vec<DelegationRecord>> {
+        let uri = delegation_history_uri();
+        if !self.vfs.exists(&uri).await? {
+            return Ok(Vec::new());
+        }
+        let content = self.vfs.read_content(&uri, ContentLevel::Detail).await?;
+        Ok(content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<DelegationRecord>(l.trim()).ok())
+            .collect())
     }
 
     /// 保存用户配置签名（`[agent_roles]` 序列化文本；配置变更检测用）。

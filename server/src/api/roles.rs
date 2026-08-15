@@ -97,6 +97,33 @@ pub struct ListRolesResponse {
     pub roles: Vec<RoleSummary>,
 }
 
+/// 按角色统计条目。
+#[derive(Debug, Clone, Serialize)]
+pub struct RoleUsageEntry {
+    /// 角色名。
+    pub name: String,
+    /// 使用统计。
+    #[serde(flatten)]
+    pub usage: RoleUsageSummary,
+}
+
+/// 角色统计响应（ADR-016 统计面板）。
+#[derive(Debug, Serialize)]
+pub struct RolesStatsResponse {
+    /// 累计委托次数。
+    pub total_calls: u32,
+    /// 累计成功次数。
+    pub total_success: u32,
+    /// 总体成功率（0-1；无调用时 0）。
+    pub success_rate: f32,
+    /// 按角色统计（有调用记录的角色）。
+    pub by_role: Vec<RoleUsageEntry>,
+    /// 按任务类型统计（分类计数；类别见 [`tianyan::agent::categorize_task_by_keyword`]）。
+    pub by_task_type: Vec<(String, usize)>,
+    /// 最近委托记录（时间倒序，最多 10 条）。
+    pub recent: Vec<tianyan::agent::role_store::DelegationRecord>,
+}
+
 /// 角色列表（含会话摘要）。
 pub async fn list_roles(
     State(state): State<Arc<AppState>>,
@@ -163,6 +190,66 @@ pub async fn delete_role(
     Ok(Json(
         serde_json::json!({ "name": name, "status": "deleted" }),
     ))
+}
+
+/// 角色使用统计（总览 + 按角色 + 按任务类型 + 最近委托）。
+pub async fn get_roles_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<RolesStatsResponse>, ApiError> {
+    let store = state.role_store();
+    let mut total_calls: u32 = 0;
+    let mut total_success: u32 = 0;
+    let mut by_role: Vec<RoleUsageEntry> = Vec::new();
+    for role in store
+        .load_roles()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+    {
+        let usage = store
+            .load_role_usage(&role.name)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        if usage.calls > 0 {
+            total_calls += usage.calls;
+            total_success += usage.success;
+            by_role.push(RoleUsageEntry {
+                name: role.name.clone(),
+                usage: RoleUsageSummary {
+                    calls: usage.calls,
+                    success: usage.success,
+                    failed: usage.failed,
+                    success_rate: usage.success_rate(),
+                    last_used: usage.last_used,
+                },
+            });
+        }
+    }
+    // 按任务类型（委托历史分类计数，键序稳定）
+    let records = store
+        .load_delegation_records()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut by_type: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for r in &records {
+        let t = tianyan::agent::categorize_task_by_keyword(&r.task);
+        *by_type.entry(t).or_default() += 1;
+    }
+    let by_task_type: Vec<(String, usize)> = by_type.into_iter().collect();
+    let recent: Vec<tianyan::agent::role_store::DelegationRecord> =
+        records.iter().rev().take(10).cloned().collect();
+    let success_rate = if total_calls == 0 {
+        0.0
+    } else {
+        total_success as f32 / total_calls as f32
+    };
+    Ok(Json(RolesStatsResponse {
+        total_calls,
+        total_success,
+        success_rate,
+        by_role,
+        by_task_type,
+        recent,
+    }))
 }
 
 async fn to_summary(store: &RoleStore, role: &tianyan::agent::AgentRole) -> RoleSummary {
@@ -240,6 +327,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
     use axum::routing::{get, post};
     axum::Router::new()
         .route("/roles", get(list_roles))
+        .route("/roles/stats", get(get_roles_stats))
         .route("/roles/{name}", get(get_role_detail).delete(delete_role))
         .route("/roles/{name}/reset", post(reset_role))
 }
