@@ -463,6 +463,8 @@ export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
 export interface ProviderModelEntry {
   name: string;
   capabilities: ModelCapability[];
+  /** 该模型支持的思考强度档位（每个模型自己的；缺省查后端内置模型表） */
+  reasoning_efforts?: ThinkingEffort[];
   /** 上下文窗口长度（token）。未配置时由后端内置模型表自动匹配。 */
   context_length?: number;
   /** 最大输出 token 数。未配置时走内置默认。 */
@@ -589,6 +591,8 @@ export interface ModelInfo {
   name: string;
   provider: string;
   capabilities: string[];
+  /** 该模型支持的思考强度档位（每个模型自己的；缺省/空 = 不支持思考） */
+  reasoning_efforts?: ThinkingEffort[] | null;
 }
 
 export interface ModelsResponse {

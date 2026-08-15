@@ -279,11 +279,18 @@ export const mockConfigStatus = { configured: true };
 
 export const mockModelsResponse: ModelsResponse = {
   providers: [
-    { name: 'openai', endpoint: 'https://api.openai.com/v1', enabled: true, model_count: 2 },
+    { name: 'openai', endpoint: 'https://api.openai.com/v1', enabled: true, model_count: 3 },
+    { name: 'deepseek', endpoint: 'https://api.deepseek.com/v1', enabled: true, model_count: 1 },
   ],
   models: [
     { name: 'gpt-4o', provider: 'openai', capabilities: ['chat', 'vision'] },
     { name: 'text-embedding-3-small', provider: 'openai', capabilities: ['text-embedding'] },
+    {
+      name: 'deepseek-v4-flash',
+      provider: 'deepseek',
+      capabilities: ['chat'],
+      reasoning_efforts: ['off', 'low', 'medium', 'high'],
+    },
   ],
   preferences: {
     chat: { provider: 'openai', model: 'gpt-4o' },

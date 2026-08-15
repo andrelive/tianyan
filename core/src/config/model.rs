@@ -11,8 +11,10 @@
 //! api_key = "${OPENAI_API_KEY}"
 //!
 //! [[models.providers.models]]
-//! name = "gpt-4"
+//! name = "deepseek-v4-flash"
 //! capabilities = ["chat"]
+//! # 思考强度档位（每个模型自己的；缺省查内置模型表，不支持思考的模型不配置）
+//! reasoning_efforts = ["off", "low", "medium", "high"]
 //!
 //! [[models.providers.models]]
 //! name = "text-embedding-3-small"
@@ -24,6 +26,8 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
+
+use crate::model::types::ThinkingEffort;
 use std::collections::HashMap;
 
 // ─── 模型能力标签 ───
@@ -178,6 +182,10 @@ pub struct ModelEntry {
     /// 单次嵌入输入上限（仅 embedding 模型生效）。缺省查内置规格表。
     #[serde(default)]
     pub max_input_tokens: Option<usize>,
+    /// 该模型支持的思考强度档位（每个模型自己的档位集；None 时查内置模型表，
+    /// 内置表也没有则视为不支持思考）。档位取值 off|low|medium|high。
+    #[serde(default)]
+    pub reasoning_efforts: Option<Vec<ThinkingEffort>>,
 }
 
 // ─── 模型偏好 ───

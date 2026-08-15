@@ -7,6 +7,7 @@ import type {
   Theme,
   FontSize,
   ChatMessage,
+  ModelInfo,
   MessageSegment,
   Session,
   Skill,
@@ -86,6 +87,10 @@ interface AppState {
   // 会话级思考强度（对话时选择，随每次请求下发；仅对支持思考的模型生效）
   thinkingEffort: ThinkingEffort;
   setThinkingEffort: (effort: ThinkingEffort) => void;
+
+  // 聊天模型目录（含每模型思考档位；ThinkingSelect 按当前模型档位渲染）
+  chatModels: ModelInfo[];
+  setChatModels: (models: ModelInfo[]) => void;
 
   // App mode
   configured: boolean | null;
@@ -263,6 +268,8 @@ export const useAppStore = create<AppState>()(
       // 会话级思考强度（默认关闭；非 off 时对支持思考的模型生效）
       thinkingEffort: 'off',
       setThinkingEffort: (effort) => set({ thinkingEffort: effort }),
+      chatModels: [],
+      setChatModels: (models) => set({ chatModels: models }),
 
       // App mode
       configured: null,

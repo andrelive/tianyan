@@ -29,6 +29,10 @@ pub struct ModelInfo {
     pub provider: String,
     /// 能力标签列表。
     pub capabilities: Vec<ModelCapability>,
+    /// 该模型支持的思考强度档位（每个模型自己的；None = 不支持思考）。
+    /// 取值 off|low|medium|high，与 ThinkingEffort 序列化对齐。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 /// 模型服务列表响应。

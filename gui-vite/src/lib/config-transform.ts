@@ -20,6 +20,7 @@ import type {
   ModelPreferencesState,
   ModelRef,
   ResolvedModelSpec,
+  ThinkingEffort,
 } from '@/lib/types';
 
 /* ─────── Default values ─────── */
@@ -113,6 +114,8 @@ interface BackendAgentConfig {
 interface BackendModelEntry {
   name: string;
   capabilities: string[];
+  /** 思考强度档位（每个模型自己的；缺省查内置模型表） */
+  reasoning_efforts?: ThinkingEffort[];
   context_length?: number;
   max_output_tokens?: number;
   max_input_tokens?: number;
@@ -371,6 +374,9 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
       models: (p.models || []).map((m) => ({
         name: m.name ?? '',
         capabilities: (m.capabilities || []) as ModelCapability[],
+        reasoning_efforts: m.reasoning_efforts && m.reasoning_efforts.length > 0
+          ? m.reasoning_efforts
+          : undefined,
         context_length: m.context_length ?? undefined,
         max_output_tokens: m.max_output_tokens ?? undefined,
         max_input_tokens: m.max_input_tokens ?? undefined,

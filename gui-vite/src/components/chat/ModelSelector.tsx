@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '@/lib/store';
 import { ChevronDown, Loader2 } from 'lucide-react';
 import { apiGet, switchModel } from '@/lib/api-client';
-import type { ModelsResponse, ModelRef } from '@/lib/types';
+import type { ModelsResponse } from '@/lib/types';
 
 export default function ModelSelector() {
   const selectedModel = useAppStore((s) => s.selectedModel);
@@ -11,19 +11,17 @@ export default function ModelSelector() {
   const ref = useRef<HTMLDivElement>(null);
 
   // Fetch models from backend
-  const [chatModels, setChatModels] = useState<ModelRef[]>([]);
   const [loading, setLoading] = useState(true);
+  const setChatModelsStore = useAppStore((s) => s.setChatModels);
 
   useEffect(() => {
     let cancelled = false;
     apiGet<ModelsResponse>('/config/models')
       .then((data) => {
         if (cancelled) return;
-        // Filter models with "chat" capability
-        const chat = data.models
-          .filter((m) => m.capabilities.includes('chat'))
-          .map((m) => ({ provider: m.provider, model: m.name }));
-        setChatModels(chat);
+        // Filter models with "chat" capability；保留完整信息（含每模型思考档位）
+        const chat = data.models.filter((m) => m.capabilities.includes('chat'));
+        setChatModelsStore(chat);
         setLoading(false);
 
         // Auto-select first model if none selected
@@ -32,7 +30,7 @@ export default function ModelSelector() {
           if (preferred) {
             setModel(preferred.model);
           } else {
-            setModel(chat[0].model);
+            setModel(chat[0].name);
           }
         }
       })
@@ -43,7 +41,7 @@ export default function ModelSelector() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
-  }, []);
+  }, [setChatModelsStore]);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -62,8 +60,8 @@ export default function ModelSelector() {
     };
   }, []);
 
-  const currentModel = selectedModel || chatModels[0]?.model || '选择模型';
-  const displayModels = chatModels.length > 0 ? chatModels.map((m) => m.model) : [];
+  const displayModels = useAppStore((s) => s.chatModels);
+  const currentModel = selectedModel || displayModels[0]?.name || '选择模型';
 
   return (
     <div ref={ref} className="relative">
@@ -88,25 +86,24 @@ export default function ModelSelector() {
         >
           {displayModels.map((model) => (
             <button
-              key={model}
+              key={model.name}
               role="option"
-              aria-selected={model === currentModel}
+              aria-selected={model.name === currentModel}
               onClick={() => {
-                setModel(model);
+                setModel(model.name);
                 setOpen(false);
                 // 本地状态先行（UI 不依赖网络），后端持久化失败不阻塞交互
-                switchModel(model, 'chat').catch((err: unknown) => {
+                switchModel(model.name, 'chat').catch((err: unknown) => {
                   const message = err instanceof Error ? err.message : '未知错误';
-                  useAppStore.getState().showToast(`切换模型失败: ${message}`, 'error');
+                  useAppStore.getState().showToast('切换模型失败: ' + message, 'error');
                 });
               }}
-              className={`w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)] transition-colors ${
-                model === currentModel
+              className={'w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)] transition-colors ' +
+                (model.name === currentModel
                   ? 'text-blue-600 dark:text-blue-400 font-medium'
-                  : 'text-[var(--color-text-primary)]'
-              }`}
+                  : 'text-[var(--color-text-primary)]')}
             >
-              {model}
+              {model.name}
             </button>
           ))}
         </div>

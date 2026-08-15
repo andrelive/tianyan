@@ -53,7 +53,7 @@ impl ChatService for AsyncOpenAIClient {
                 let mut body = serde_json::to_value(&oa_request).map_err(|e| {
                     TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e))
                 })?;
-                apply_thinking_params(&mut body, effort);
+                apply_thinking_params(&mut body, effort, &request.model);
                 self.client.chat().create_byot(body).await
             }
         } else {
@@ -139,22 +139,37 @@ impl ChatService for AsyncOpenAIClient {
             .map_err(|e| TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e)))?;
         if let Some(effort) = request.thinking_effort {
             if !effort.is_off() {
-                apply_thinking_params(&mut body, effort);
+                apply_thinking_params(&mut body, effort, &request.model);
             }
         }
         self.create_raw_stream(body).await
     }
 }
 
-/// 把思考强度映射为请求体参数：
-/// - `enable_thinking: true`（Qwen 系思考模型开关）
-/// - `reasoning_effort: low|medium|high`（OpenAI 系思考强度标准参数）
+/// 把思考强度映射为请求体参数（按模型族区分，档位为模型自己声明的集合）：
+/// - Qwen 思考族（模型名含 qwen）：`enable_thinking: true` + `thinking_budget`（DashScope 原生强度参数）
+/// - 其余 OpenAI 兼容族：`enable_thinking: true` + `reasoning_effort`（OpenAI 标准强度参数，
+///   DeepSeek 等已实测容忍附加参数）
 ///
-/// 双参数同时下发：OpenAI 兼容端点忽略未知键，Qwen 系忽略 reasoning_effort，
-/// DeepSeek 等已实测容忍附加参数；关闭时不附加任何参数（模型默认行为）。
-fn apply_thinking_params(body: &mut Value, effort: crate::model::types::ThinkingEffort) {
+/// 关闭（Off）时调用方不进入本函数，不附加任何参数（模型默认行为）。
+fn apply_thinking_params(
+    body: &mut Value,
+    effort: crate::model::types::ThinkingEffort,
+    model: &str,
+) {
     body["enable_thinking"] = Value::Bool(true);
-    body["reasoning_effort"] = Value::String(effort.as_str().to_string());
+    let lower = model.to_lowercase();
+    if lower.contains("qwen") {
+        let budget = match effort {
+            crate::model::types::ThinkingEffort::Low => 1024,
+            crate::model::types::ThinkingEffort::Medium => 4096,
+            crate::model::types::ThinkingEffort::High => 16384,
+            crate::model::types::ThinkingEffort::Off => 0,
+        };
+        body["thinking_budget"] = Value::Number(budget.into());
+    } else {
+        body["reasoning_effort"] = Value::String(effort.as_str().to_string());
+    }
 }
 
 impl AsyncOpenAIClient {

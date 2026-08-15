@@ -10,6 +10,7 @@ import type {
   DiscoveredModelInfo,
   ProviderProtocol,
   ResolvedModelSpec,
+  ThinkingEffort,
 } from '@/lib/types';
 import { MODEL_CAPABILITIES } from '@/lib/types';
 import { scanProviderModels } from '@/lib/api-client';
@@ -48,6 +49,15 @@ const CAPABILITY_LABELS: Record<ModelCapability, string> = {
   vision: '视觉 (Vision)',
   'text-embedding': '文本嵌入',
   'multimodal-embedding': '多模态嵌入',
+};
+
+/** 思考强度档位（每个模型自己的档位集；空 = 不支持思考，走后端内置表判断）。 */
+const THINKING_EFFORTS: ThinkingEffort[] = ['off', 'low', 'medium', 'high'];
+const THINKING_LABELS: Record<ThinkingEffort, string> = {
+  off: '关闭',
+  low: '低',
+  medium: '中',
+  high: '高',
 };
 
 /* ── Helpers ── */
@@ -491,6 +501,36 @@ export default function ModelsTab({
                       </label>
                     ))}
                   </div>
+                  {/* 思考强度档位：每个模型自己的；空 = 未配置 = 走后端内置模型表判断 */}
+                  {m.capabilities.some((cap) => cap === 'chat' || cap === 'vision') && (
+                    <div className="flex flex-wrap gap-1 mt-1.5 items-center">
+                      <span className="text-xs text-[var(--color-text-tertiary)] mr-1">思考档位</span>
+                      {THINKING_EFFORTS.map((eff) => (
+                        <label
+                          key={eff}
+                          className={"inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded cursor-pointer border transition-colors " +
+                            ((m.reasoning_efforts ?? []).includes(eff)
+                              ? 'border-accent bg-accent-light text-accent'
+                              : 'border-[var(--color-border)] text-[var(--color-text-tertiary)] hover:border-[var(--color-text-tertiary)]')}
+                          title={eff === 'off' ? '关闭思考' : '思考强度 ' + THINKING_LABELS[eff]}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={(m.reasoning_efforts ?? []).includes(eff)}
+                            onChange={() => {
+                              const cur = m.reasoning_efforts ?? [];
+                              const next = cur.includes(eff)
+                                ? cur.filter((e) => e !== eff)
+                                : [...cur, eff];
+                              onUpdateModel(pi, mi, 'reasoning_efforts', next);
+                            }}
+                            className="sr-only"
+                          />
+                          {THINKING_LABELS[eff]}
+                        </label>
+                      ))}
+                    </div>
+                  )}
                   {/* 模型规格字段：按 capability 显示；留空 = 未配置 = 走后端内置模型表默认 */}
                   {m.capabilities.some((cap) => cap === 'chat' || cap === 'vision') && (
                     <div className="grid grid-cols-2 gap-1.5 mt-1.5">
