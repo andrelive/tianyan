@@ -125,10 +125,26 @@ impl TianyanConfig {
             .try_deserialize()
             .map_err(|e| TianyanError::Custom(format!("配置加载失败：反序列化配置失败：{}", e)))?;
 
-        // 规范化 data_dir：展开 `~` 前缀（配置常见写法 `~/.tianyan`；
+        // 规范化路径类配置：展开 `~` 前缀（`~/.tianyan` 等常见写法；
         // 不展开时会被当作相对路径落在进程 cwd 下——历史上数据落到了
         // `{cwd}/~/.tianyan`）。
         config.storage.data_dir = expand_user_dir(&config.storage.data_dir);
+        if let Some(ref sqlite_path) = config.storage.sqlite_path {
+            config.storage.sqlite_path = Some(expand_user_dir(sqlite_path));
+        }
+        config.security.trash_directory = expand_user_dir(&config.security.trash_directory);
+        config.security.allowed_directories = config
+            .security
+            .allowed_directories
+            .iter()
+            .map(|p| expand_user_dir(p))
+            .collect();
+        config.security.blocked_directories = config
+            .security
+            .blocked_directories
+            .iter()
+            .map(|p| expand_user_dir(p))
+            .collect();
 
         config
             .validate()
@@ -348,6 +364,54 @@ mod tests {
         // 非前缀 `~` 不展开
         let rel = std::path::PathBuf::from("a~b");
         assert_eq!(expand_user_dir(&rel), rel);
+    }
+    #[test]
+    fn test_load_from_file_expands_tilde_in_path_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tianyan.toml");
+        let home = dirs::home_dir().unwrap();
+        let toml = r#"
+            [storage]
+            data_dir = "~/data"
+            backend = "sqlite"
+            sqlite_path = "~/db.sqlite"
+
+            [storage.vector]
+            collection_name = "t"
+            vector_dimension = 768
+
+            [security]
+            trash_directory = "~/trash"
+            allowed_directories = ['~/docs', 'C:\abs']
+            blocked_directories = ["~/etc", "/"]
+
+            [[models.providers]]
+            name = "mock"
+            endpoint = "http://127.0.0.1:9/v1"
+            api_key = "k"
+            timeout = 10
+            enabled = true
+
+            [[models.providers.models]]
+            name = "m"
+            capabilities = ["chat"]
+        "#;
+        std::fs::write(&path, toml).unwrap();
+
+        let config = TianyanConfig::load_from_file(&path).unwrap();
+        assert_eq!(config.storage.data_dir, home.join("data"));
+        assert_eq!(config.storage.sqlite_path, Some(home.join("db.sqlite")));
+        assert_eq!(config.security.trash_directory, home.join("trash"));
+        assert_eq!(config.security.allowed_directories[0], home.join("docs"));
+        assert_eq!(
+            config.security.allowed_directories[1],
+            std::path::PathBuf::from("C:\\abs")
+        );
+        assert_eq!(config.security.blocked_directories[0], home.join("etc"));
+        assert_eq!(
+            config.security.blocked_directories[1],
+            std::path::PathBuf::from("/")
+        );
     }
 
     #[test]
