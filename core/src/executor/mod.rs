@@ -38,7 +38,7 @@ pub mod web;
 
 pub use actions::{
     execute_command_action, execute_read_file, execute_verify_build, execute_write_file,
-    SecurityPolicy,
+    CommandManager, CommandTask, CommandTaskStatus, SecurityPolicy,
 };
 pub use judge::LlmJudge;
 pub use security::DEFAULT_BLOCKED_COMMANDS;

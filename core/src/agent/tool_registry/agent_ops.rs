@@ -96,6 +96,23 @@ impl ToolRegistry {
             },
         )
         .await?;
+        // 后台模式：立即返回任务快照（task_id/log_file/pid），进程独立运行。
+        // 观测：command_status 查询（输出尾部）/ 日志文件 read_file；终止：command_kill。
+        if params.background == Some(true) {
+            let task = self
+                .command_tasks
+                .spawn_background(&params.command, cwd.as_deref())
+                .await
+                .map_err(wrap_tool_error)?;
+            return Ok(serde_json::json!({
+                "task_id": task.id,
+                "pid": task.pid,
+                "log_file": task.log_file,
+                "status": "running",
+                "message": "后台命令已启动，不等待退出。可用 command_status 查询状态与输出尾部，command_kill 终止（杀进程树）。",
+            }));
+        }
+
         crate::executor::execute_command_action(
             &params.command,
             cwd.as_deref(),
@@ -513,6 +530,62 @@ impl ToolRegistry {
             "task_id": params.task_id,
             "status": "cancelled",
             "message": "后台任务已取消",
+        }))
+    }
+
+    /// 执行 command_status 工具：查询后台命令任务状态与输出尾部（非阻塞快照）。
+    pub(crate) async fn execute_command_status(
+        &self,
+        arguments: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        #[derive(serde::Deserialize)]
+        struct Params {
+            task_id: String,
+        }
+        let params: Params = serde_json::from_str(arguments)
+            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+
+        let task = self
+            .command_tasks
+            .get(&params.task_id)
+            .await
+            .ok_or_else(|| TianyanError::Custom(format!("tool: 任务不存在：{}", params.task_id)))?;
+
+        serde_json::to_value(task)
+            .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))
+    }
+
+    /// 执行 command_list 工具：列出全部后台命令任务（按注册序号升序）。
+    pub(crate) async fn execute_command_list(
+        &self,
+        _arguments: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        let tasks = self.command_tasks.list().await;
+        serde_json::to_value(tasks)
+            .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))
+    }
+
+    /// 执行 command_kill 工具：终止后台命令（杀进程树；终态任务为幂等空操作）。
+    pub(crate) async fn execute_command_kill(
+        &self,
+        arguments: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        #[derive(serde::Deserialize)]
+        struct Params {
+            task_id: String,
+        }
+        let params: Params = serde_json::from_str(arguments)
+            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+
+        self.command_tasks
+            .kill(&params.task_id)
+            .await
+            .map_err(wrap_tool_error)?;
+
+        Ok(serde_json::json!({
+            "task_id": params.task_id,
+            "status": "cancelled",
+            "message": "后台命令已终止（进程树已杀）",
         }))
     }
     /// 执行 web_search 工具：搜索网页并返回结构化结果（标题/URL/摘要）。

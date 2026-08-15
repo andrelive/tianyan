@@ -3,7 +3,9 @@ use serde_json::{json, Value};
 use crate::common::binary::sniff_binary;
 use crate::common::error::TianyanError;
 
-pub use crate::executor::command::execute_command_action;
+pub use crate::executor::command::{
+    execute_command_action, CommandManager, CommandTask, CommandTaskStatus,
+};
 pub use crate::executor::security::SecurityPolicy;
 
 use std::path::Path;

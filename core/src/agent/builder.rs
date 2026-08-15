@@ -65,6 +65,8 @@ pub struct AgentBuilder {
     trace_collector: Option<Arc<crate::observability::trace::TraceCollector>>,
     /// 聊天模型上下文规格（T5；注入 AgentLoop 并联动压缩窗口；None 时走默认窗口）。
     chat_model_spec: Option<ModelSpec>,
+    /// 后台命令日志目录（execute_command(background) 日志落盘；None 时仅内存尾部）。
+    command_logs_dir: Option<PathBuf>,
 }
 
 impl AgentBuilder {
@@ -90,6 +92,7 @@ impl AgentBuilder {
             agent_roles: None,
             trace_collector: None,
             chat_model_spec: None,
+            command_logs_dir: None,
         }
     }
 
@@ -132,6 +135,12 @@ impl AgentBuilder {
     /// 设置会话管理器。
     pub fn with_session_manager(mut self, session_manager: Arc<dyn SessionManager>) -> Self {
         self.session_manager = Some(session_manager);
+        self
+    }
+
+    /// 设置后台命令日志目录（execute_command(background) 工具日志落盘位置）。
+    pub fn with_command_logs_dir(mut self, dir: PathBuf) -> Self {
+        self.command_logs_dir = Some(dir);
         self
     }
 
@@ -309,6 +318,10 @@ impl AgentBuilder {
             .with_rule_recorder(rule_recorder)
             .with_lsp_manager(Arc::new(LspManager::new()))
             .with_session_manager(session_manager.clone());
+        // 后台命令日志目录（execute_command(background) 日志落盘）
+        if let Some(dir) = self.command_logs_dir {
+            tool_registry = tool_registry.with_command_logs_dir(dir);
+        }
         // 子 Agent 角色注册表（delegate_to_agent role 参数）
         if let Some(agent_roles) = self.agent_roles {
             tool_registry = tool_registry.with_role_registry(Arc::new(

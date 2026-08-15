@@ -6,11 +6,12 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::agent::tool_params::{
-    ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
-    DiscoverTestsParams, ExecuteCommandParams, GlobParams, KnowledgeIngestParams, ListDirParams,
-    LspParams, ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams,
-    SelfCheckParams, SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VerifyBuildParams,
-    VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
+    ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, CommandKillParams,
+    CommandListParams, CommandStatusParams, DelegateToAgentParams, DiscoverTestsParams,
+    ExecuteCommandParams, GlobParams, KnowledgeIngestParams, ListDirParams, LspParams,
+    ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams, SelfCheckParams,
+    SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VerifyBuildParams, VfsListParams,
+    VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
 };
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
@@ -158,6 +159,8 @@ pub struct ToolRegistry {
     pub(crate) web_client: Option<Arc<WebSearchClient>>,
     /// 后台任务管理器（delegate_to_agent(background) / task_status / task_cancel）。
     pub(crate) background_tasks: Arc<crate::agent::background::BackgroundTaskManager>,
+    /// 后台命令管理器（execute_command(background) / command_status / command_list / command_kill）。
+    pub(crate) command_tasks: Arc<crate::executor::CommandManager>,
     /// 工具执行管线：pre-execute 监听器（fail-closed，按注册顺序；A1）。
     pre_execute_listeners: Vec<Arc<dyn ToolPreExecuteListener>>,
     /// 工具执行管线：单调守卫（只允许拒绝；A4）。
@@ -196,6 +199,7 @@ impl ToolRegistry {
             observability: observability::ToolObservabilityListener::default(),
             web_client: None,
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
+            command_tasks: Arc::new(crate::executor::CommandManager::new(None)),
             pre_execute_listeners: Vec::new(),
             guards: Vec::new(),
             post_execute_listeners: Vec::new(),
@@ -278,6 +282,14 @@ impl ToolRegistry {
     /// `[agent_roles]` 覆盖/扩展后的注册表。
     pub fn with_role_registry(mut self, registry: Arc<RoleRegistry>) -> Self {
         self.role_registry = registry;
+        self
+    }
+
+    /// 设置后台命令日志目录（execute_command(background) 的日志文件落盘位置）。
+    ///
+    /// 缺省为 None（仅内存输出尾部缓冲，不落盘）。
+    pub fn with_command_logs_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.command_tasks = Arc::new(crate::executor::CommandManager::new(Some(dir)));
         self
     }
 
@@ -563,6 +575,9 @@ impl ToolRegistry {
         "delegate_to_agent",
         "task_status",
         "task_cancel",
+        "command_status",
+        "command_list",
+        "command_kill",
         "search_knowledge",
         "vfs_read",
         "vfs_list",
@@ -785,6 +800,9 @@ impl ToolRegistry {
             "delegate_to_agent" => self.execute_delegate_to_agent(arguments, session_id).await,
             "task_status" => self.execute_task_status(arguments).await,
             "task_cancel" => self.execute_task_cancel(arguments).await,
+            "command_status" => self.execute_command_status(arguments).await,
+            "command_list" => self.execute_command_list(arguments).await,
+            "command_kill" => self.execute_command_kill(arguments).await,
             "glob" => self.execute_glob(arguments, session_id).await,
             "list_dir" => self.execute_list_dir(arguments, session_id).await,
             "symbol_outline" => self.execute_symbol_outline(arguments).await,
@@ -945,6 +963,27 @@ impl ToolRegistry {
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                CommandStatusParams,
+            >(
+                "command_status",
+                "Query the status, exit code and recent output tail of a background command task by its task_id (cmd_xxx). Non-blocking snapshot; the full output is in the log file (log_file path) — use read_file to read more.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                CommandListParams,
+            >(
+                "command_list",
+                "List all background command tasks (cmd_xxx) with their status, pid and log file. Use command_status for one task's output tail, command_kill to terminate.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                CommandKillParams,
+            >(
+                "command_kill",
+                "Terminate a running background command task by its task_id (kills the whole process tree, e.g. a dev server started via execute_command with background=true). Cancelling an already finished task is a no-op.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
                 WebSearchParams,
             >(
                 "web_search",
@@ -1028,7 +1067,8 @@ impl ToolRegistry {
             "read_file" | "vfs_read" => ToolPresentation::Read,
             "write_file" => ToolPresentation::Write,
             "apply_edit" | "apply_patch" => ToolPresentation::Diff,
-            "execute_command" | "run_tests" | "verify_build" => ToolPresentation::Terminal,
+            "execute_command" | "run_tests" | "verify_build" | "command_status"
+            | "command_list" | "command_kill" => ToolPresentation::Terminal,
             "search_code" | "search_knowledge" | "glob" | "list_dir" | "discover_tests" => {
                 ToolPresentation::Search
             }
@@ -1276,9 +1316,9 @@ mod tests {
     async fn test_shortlist_none_query_returns_all() {
         // 无查询信号：保守全量
         let registry = ToolRegistry::new(SecurityPolicy::default());
-        register_mock_tools(&registry, 20).await; // 25 + 20 = 45 > 40
+        register_mock_tools(&registry, 20).await; // 28 + 20 = 48 > 40
         let defs = registry.definitions_shortlisted(None).await;
-        assert_eq!(defs.len(), 45);
+        assert_eq!(defs.len(), 48);
     }
 
     #[tokio::test]
@@ -1304,6 +1344,9 @@ mod tests {
             "delegate_to_agent",
             "task_status",
             "task_cancel",
+            "command_status",
+            "command_list",
+            "command_kill",
             "search_knowledge",
             "vfs_read",
             "vfs_list",

@@ -97,6 +97,7 @@ impl AgentBuilderFactory {
             .with_default_working_directory(
                 config.agent.working_directory.clone().map(PathBuf::from),
             )
+            .with_command_logs_dir(config.storage.data_dir.join("command_logs"))
             .with_session_manager(session_manager);
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),

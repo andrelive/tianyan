@@ -1,16 +1,401 @@
-use std::time::Duration;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{Mutex, Semaphore};
 
-use crate::common::error::TianyanError;
+use crate::common::error::{Result, TianyanError};
 
 pub(super) const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 
+/// 后台命令任务 ID 前缀（`cmd_`；与委托后台任务的 `bt_` 区分）。
+pub const COMMAND_TASK_PREFIX: &str = "cmd_";
+
+/// 后台命令并发上限（防失控扇出；超出时排队等待许可）。
+pub const DEFAULT_MAX_CONCURRENT_COMMANDS: usize = 8;
+
+/// 注册表保留上限：超出逐出最旧的终态任务（防无限增长）。
+pub const MAX_RETAINED_TASKS: usize = 100;
+
+/// 内存输出尾部上限（完整输出写入日志文件，内存仅保留尾部供状态快照）。
+const OUTPUT_TAIL_MAX_BYTES: usize = 32 * 1024;
+
+/// 后台命令任务状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandTaskStatus {
+    /// 运行中。
+    Running,
+    /// 正常退出（exit code 0）。
+    Completed,
+    /// 非零退出或异常终止。
+    Failed,
+    /// 已由 kill 终止。
+    Cancelled,
+}
+
+/// 后台命令任务快照（状态查询 / 列表返回）。
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandTask {
+    /// 任务 ID（`cmd_` 前缀）。
+    pub id: String,
+    /// 原始命令。
+    pub command: String,
+    /// 工作目录。
+    pub cwd: Option<String>,
+    /// 状态。
+    pub status: CommandTaskStatus,
+    /// 退出码（Cancelled 时为 None）。
+    pub exit_code: Option<i32>,
+    /// 进程 PID（spawn 成功后 Some）。
+    pub pid: Option<u32>,
+    /// 日志文件路径（完整输出；配置了 logs_dir 时 Some）。
+    pub log_file: Option<String>,
+    /// 输出尾部（截断，UTF-8 安全）。
+    pub output_tail: String,
+    /// 创建时间（epoch 毫秒）。
+    pub created_at: i64,
+    /// 完成时间（epoch 毫秒）。
+    pub completed_at: Option<i64>,
+    /// 注册序号（单调递增，排序键）。
+    pub seq: u64,
+}
+
+/// 注册表内部条目（快照 + 内部标志）。
+struct TaskEntry {
+    task: CommandTask,
+    cancelled: bool,
+}
+
+/// 后台命令管理器（fire-and-forget 进程原语，对标 DSH 后台任务语义）。
+///
+/// - **立即返回**：`spawn_background` 只负责拉起进程并返回任务快照，调用方不被阻塞；
+/// - **输出观测**：stdout/stderr 追加写入日志文件（logs_dir 存在时）+ 内存尾部缓冲，
+///   通过 `get`/`list` 非阻塞读取尾部，完整输出用日志文件路径 + read_file 读取；
+/// - **显式终止**：`kill` 按 PID 杀进程树（Windows taskkill /T；Unix 进程组 kill），
+///   终态任务为幂等空操作；
+/// - **防失控**：并发上限信号量 + 注册表保留上限（逐出最旧终态任务）。
+///
+/// 与 [`crate::agent::background::BackgroundTaskManager`]（委托任务）相互独立：
+/// 本管理器只负责进程生命周期，不涉及会话通知/唤醒（完成通知属后续演进）。
+#[derive(Clone)]
+pub struct CommandManager {
+    tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
+    seq: Arc<AtomicU64>,
+    logs_dir: Option<PathBuf>,
+    semaphore: Arc<Semaphore>,
+}
+
+impl CommandManager {
+    /// 创建管理器。`logs_dir` 为后台命令日志目录（None 时仅内存尾部缓冲，不落盘）。
+    pub fn new(logs_dir: Option<PathBuf>) -> Self {
+        Self {
+            tasks: Arc::new(Mutex::new(HashMap::new())),
+            seq: Arc::new(AtomicU64::new(0)),
+            logs_dir,
+            semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_COMMANDS)),
+        }
+    }
+
+    /// 后台启动命令：立即返回任务快照，进程在独立任务中运行。
+    ///
+    /// 输出写日志文件 + 内存尾部；进程退出后由 watcher 任务更新终态。
+    pub async fn spawn_background(&self, command: &str, cwd: Option<&str>) -> Result<CommandTask> {
+        // 并发许可：排队等待（防失控扇出；许可随 watcher 任务结束自动释放）
+        let _permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| TianyanError::Custom("executor: 后台命令调度器已关闭".to_string()))?;
+
+        let id = format!(
+            "{}{}",
+            COMMAND_TASK_PREFIX,
+            self.seq.fetch_add(1, AtomicOrdering::SeqCst)
+        );
+        let now = now_ms();
+        let log_file = self
+            .logs_dir
+            .as_ref()
+            .map(|dir| dir.join(format!("{id}.log")));
+
+        // 预写命令回显头
+        if let Some(path) = &log_file {
+            if let Some(parent) = path.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            let header = format!(
+                "> $ {}{}\n",
+                cwd.map(|d| format!("({d}) ")).unwrap_or_default(),
+                command
+            );
+            let _ = tokio::fs::write(path, header).await;
+        }
+
+        let mut cmd = build_shell_command(command);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| TianyanError::Custom(format!("executor: 后台命令启动失败：{e}")))?;
+        let pid = child.id();
+
+        let tail: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let file: Arc<Mutex<Option<tokio::fs::File>>> = Arc::new(Mutex::new(None));
+        if let Some(path) = &log_file {
+            match tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .await
+            {
+                Ok(f) => {
+                    *file.lock().await = Some(f);
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "打开后台命令日志文件失败");
+                }
+            }
+        }
+
+        let out_reader = child
+            .stdout
+            .take()
+            .map(|r| tokio::spawn(drain_output(r, tail.clone(), file.clone())));
+        let err_reader = child
+            .stderr
+            .take()
+            .map(|r| tokio::spawn(drain_output(r, tail.clone(), file.clone())));
+
+        let task = CommandTask {
+            id: id.clone(),
+            command: command.to_string(),
+            cwd: cwd.map(str::to_string),
+            status: CommandTaskStatus::Running,
+            exit_code: None,
+            pid,
+            log_file: log_file.map(|p| p.to_string_lossy().into_owned()),
+            output_tail: String::new(),
+            created_at: now,
+            completed_at: None,
+            seq: self.seq.load(AtomicOrdering::SeqCst) - 1,
+        };
+        self.tasks.lock().await.insert(
+            id.clone(),
+            TaskEntry {
+                task: task.clone(),
+                cancelled: false,
+            },
+        );
+        self.evict_if_needed().await;
+
+        // watcher：等进程退出 → 收 reader → 写退出标记 → 更新终态
+        let manager = self.clone();
+        let tail_w = tail;
+        let file_w = file;
+        tokio::spawn(async move {
+            let wait_result = child.wait().await;
+            if let Some(h) = out_reader {
+                let _ = h.await;
+            }
+            if let Some(h) = err_reader {
+                let _ = h.await;
+            }
+            let exit_code = wait_result.ok().and_then(|s| s.code());
+
+            let mut tasks = manager.tasks.lock().await;
+            let is_cancelled = tasks.get(&id).map(|e| e.cancelled).unwrap_or(false);
+            let marker = if is_cancelled {
+                "--- terminated (killed) ---\n".to_string()
+            } else {
+                format!("--- exit code: {} ---\n", exit_code.unwrap_or(-1))
+            };
+            {
+                let mut t = tail_w.lock().await;
+                t.push_str(&marker);
+                if t.len() > OUTPUT_TAIL_MAX_BYTES {
+                    let excess = t.len() - OUTPUT_TAIL_MAX_BYTES;
+                    t.drain(..excess);
+                }
+                let mut f = file_w.lock().await;
+                if let Some(f) = f.as_mut() {
+                    let _ = f.write_all(marker.as_bytes()).await;
+                }
+            }
+            if let Some(entry) = tasks.get_mut(&id) {
+                if !is_cancelled {
+                    entry.task.status = if exit_code == Some(0) {
+                        CommandTaskStatus::Completed
+                    } else {
+                        CommandTaskStatus::Failed
+                    };
+                    entry.task.exit_code = exit_code;
+                }
+                entry.task.completed_at = Some(now_ms());
+                entry.task.output_tail = tail_w.lock().await.clone();
+            }
+        });
+
+        Ok(task)
+    }
+
+    /// 按任务 ID 获取快照（None 表示不存在）。
+    pub async fn get(&self, task_id: &str) -> Option<CommandTask> {
+        self.tasks.lock().await.get(task_id).map(|e| e.task.clone())
+    }
+
+    /// 全部任务快照（按注册序号升序）。
+    pub async fn list(&self) -> Vec<CommandTask> {
+        let tasks = self.tasks.lock().await;
+        let mut v: Vec<CommandTask> = tasks.values().map(|e| e.task.clone()).collect();
+        v.sort_by_key(|t| t.seq);
+        v
+    }
+
+    /// 终止运行中的后台命令（杀进程树）。终态任务为幂等空操作。
+    pub async fn kill(&self, task_id: &str) -> Result<()> {
+        let pid = {
+            let mut tasks = self.tasks.lock().await;
+            let entry = tasks
+                .get_mut(task_id)
+                .ok_or_else(|| TianyanError::Custom(format!("executor: 任务不存在：{task_id}")))?;
+            if entry.task.status != CommandTaskStatus::Running {
+                return Ok(());
+            }
+            entry.cancelled = true;
+            entry.task.status = CommandTaskStatus::Cancelled;
+            entry.task.completed_at = Some(now_ms());
+            entry.task.pid
+        };
+        if let Some(pid) = pid {
+            kill_process_tree(pid).await;
+        }
+        Ok(())
+    }
+
+    /// 注册表保留上限：逐出最旧的终态任务。
+    async fn evict_if_needed(&self) {
+        let mut tasks = self.tasks.lock().await;
+        if tasks.len() <= MAX_RETAINED_TASKS {
+            return;
+        }
+        let mut candidates: Vec<(u64, String)> = tasks
+            .iter()
+            .filter(|(_, e)| e.task.status != CommandTaskStatus::Running)
+            .map(|(id, e)| (e.task.seq, id.clone()))
+            .collect();
+        candidates.sort_by_key(|(seq, _)| *seq);
+        let excess = tasks.len() - MAX_RETAINED_TASKS;
+        for (_, id) in candidates.into_iter().take(excess) {
+            tasks.remove(&id);
+        }
+    }
+}
+
+/// 跨平台 shell 包装命令构造（Unix: `sh -c`，Windows: `cmd /C`）。
+fn build_shell_command(command: &str) -> tokio::process::Command {
+    if cfg!(target_os = "windows") {
+        let mut c = tokio::process::Command::new("cmd");
+        c.arg("/C").arg(command);
+        c
+    } else {
+        let mut c = tokio::process::Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    }
+}
+
+/// 按 PID 杀进程树（Windows: taskkill /T /F；Unix: 进程组 kill -9 -pgid）。
+///
+/// Unix 侧依赖 spawn 时 `process_group(0)`：子进程成为新进程组组长，
+/// 负 PID 信号作用于整个组——shell 派生的服务进程一并终止（对齐
+/// opencode #30868 教训：只杀 shell 会留孤儿服务进程）。
+async fn kill_process_tree(pid: u32) {
+    let result = if cfg!(target_os = "windows") {
+        tokio::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+    } else {
+        tokio::process::Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+    };
+    if let Err(e) = result {
+        tracing::warn!(pid, error = %e, "终止进程树失败");
+    }
+}
+
+/// 读取子进程输出流：追加到内存尾部缓冲（截断）+ 日志文件。
+///
+/// 锁顺序固定为 tail → file（与 watcher 的标记写入一致，避免死锁）。
+async fn drain_output<R>(
+    mut reader: R,
+    tail: Arc<Mutex<String>>,
+    file: Arc<Mutex<Option<tokio::fs::File>>>,
+) where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                let chunk = &buf[..n];
+                {
+                    let mut t = tail.lock().await;
+                    t.push_str(&String::from_utf8_lossy(chunk));
+                    if t.len() > OUTPUT_TAIL_MAX_BYTES {
+                        let excess = t.len() - OUTPUT_TAIL_MAX_BYTES;
+                        t.drain(..excess);
+                    }
+                }
+                let mut f = file.lock().await;
+                if let Some(f) = f.as_mut() {
+                    if f.write_all(chunk).await.is_err() {
+                        tracing::warn!("写入后台命令日志失败");
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "读取后台命令输出失败");
+                break;
+            }
+        }
+    }
+}
+
+/// 当前 epoch 毫秒。
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 async fn read_reader_to_vec<R>(mut reader: R) -> Vec<u8>
 where
-    R: tokio::io::AsyncRead + Unpin,
+    R: AsyncRead + Unpin,
 {
-    use tokio::io::AsyncReadExt;
     let mut buf = Vec::new();
     if let Err(e) = reader.read_to_end(&mut buf).await {
         tracing::warn!(error = %e, "读取命令输出失败");
@@ -32,25 +417,21 @@ pub(super) fn extract_command_base(cmd: &str) -> String {
 /// 执行 ExecuteCommand 动作（无安全策略依赖，纯函数）。
 ///
 /// 跨平台：Unix (Linux/macOS) 用 `sh -c`，Windows 用 `cmd /C`。
+/// 超时后**杀进程树**（不只 shell）：Windows taskkill /T /F，Unix 进程组 kill，
+/// 避免派生服务进程残留为孤儿（opencode #30868 同款问题）。
 pub async fn execute_command_action(
     command: &str,
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
-) -> Result<Value, TianyanError> {
+) -> Result<Value> {
     let timeout = timeout_secs.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS);
 
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/C");
-        c
-    } else {
-        let mut c = tokio::process::Command::new("sh");
-        c.arg("-c");
-        c
-    };
-    cmd.arg(command)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+    let mut cmd = build_shell_command(command);
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -107,8 +488,9 @@ pub async fn execute_command_action(
             e
         ))),
         Err(_elapsed) => {
-            if let Err(e) = child.kill().await {
-                tracing::warn!(error = %e, "终止超时子进程失败");
+            // 杀进程树（taskkill /T 或 kill -9 -pgid），再回收子进程
+            if let Some(pid) = child.id() {
+                kill_process_tree(pid).await;
             }
             if let Err(e) = child.wait().await {
                 tracing::warn!(error = %e, "等待超时子进程退出失败");
@@ -121,6 +503,23 @@ pub async fn execute_command_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// 有限轮询等待任务进入终态（避免测试卡死）。
+    async fn wait_terminal(manager: &CommandManager, id: &str) -> CommandTask {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let t = manager.get(id).await.expect("任务应存在");
+            if t.status != CommandTaskStatus::Running {
+                return t;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "后台任务未在期限内进入终态"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 
     #[tokio::test]
     async fn test_execute_command() {
@@ -144,6 +543,59 @@ mod tests {
         assert!(
             err.is_timeout(),
             "执行超时应分类为 timeout（ADR-014）：{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_background_echo_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = CommandManager::new(Some(dir.path().to_path_buf()));
+        let task = manager.spawn_background("echo Hello", None).await.unwrap();
+        assert!(
+            task.id.starts_with(COMMAND_TASK_PREFIX),
+            "ID 应带 cmd_ 前缀"
+        );
+        assert!(task.pid.is_some(), "spawn 后应有 PID");
+        assert!(task.log_file.is_some(), "配置 logs_dir 后应有日志文件");
+
+        let t = wait_terminal(&manager, &task.id).await;
+        assert_eq!(t.status, CommandTaskStatus::Completed);
+        assert_eq!(t.exit_code, Some(0));
+        assert!(t.output_tail.contains("Hello"), "输出尾部应含命令输出");
+        assert!(t.completed_at.is_some());
+
+        let log = tokio::fs::read_to_string(t.log_file.clone().unwrap())
+            .await
+            .unwrap();
+        assert!(log.contains("Hello"), "日志文件应含完整输出");
+    }
+
+    #[tokio::test]
+    async fn test_background_kill_marks_cancelled() {
+        let manager = CommandManager::new(None);
+        let cmd = if cfg!(target_os = "windows") {
+            "ping -n 20 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
+        let task = manager.spawn_background(cmd, None).await.unwrap();
+        manager.kill(&task.id).await.unwrap();
+
+        let t = manager.get(&task.id).await.unwrap();
+        assert_eq!(t.status, CommandTaskStatus::Cancelled);
+        // 终态幂等：再次 kill 为 no-op 不报错
+        manager.kill(&task.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_background_list_and_unknown() {
+        let manager = CommandManager::new(None);
+        let task = manager.spawn_background("echo A", None).await.unwrap();
+        let list = manager.list().await;
+        assert!(list.iter().any(|t| t.id == task.id), "列表应包含新任务");
+        assert!(
+            manager.get("cmd_nope").await.is_none(),
+            "未知 ID 应返回 None"
         );
     }
 }

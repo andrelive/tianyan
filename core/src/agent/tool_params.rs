@@ -46,7 +46,28 @@ pub struct ExecuteCommandParams {
     /// 超时秒数。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// 后台运行（true 时立即返回 task_id/log_file，进程独立运行，不等待退出）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
 }
+
+/// 后台命令状态查询参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CommandStatusParams {
+    /// 任务 ID（cmd_ 前缀）。
+    pub task_id: String,
+}
+
+/// 后台命令终止参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CommandKillParams {
+    /// 任务 ID（cmd_ 前缀）。
+    pub task_id: String,
+}
+
+/// 后台命令列表参数（无字段）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CommandListParams {}
 
 /// 搜索代码参数。
 ///
