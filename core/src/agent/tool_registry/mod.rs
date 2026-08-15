@@ -986,31 +986,59 @@ impl ToolRegistry {
 
         // A2 展示契约：内置工具默认展示意图（与上方定义一一对应；
         // 装配层可用 with_presentations 覆盖/补充）。
-        self.presentations = [
-            ("read_file", ToolPresentation::Read),
-            ("vfs_read", ToolPresentation::Read),
-            ("write_file", ToolPresentation::Write),
-            ("apply_edit", ToolPresentation::Diff),
-            ("apply_patch", ToolPresentation::Diff),
-            ("execute_command", ToolPresentation::Terminal),
-            ("run_tests", ToolPresentation::Terminal),
-            ("verify_build", ToolPresentation::Terminal),
-            ("search_code", ToolPresentation::Search),
-            ("search_knowledge", ToolPresentation::Search),
-            ("glob", ToolPresentation::Search),
-            ("list_dir", ToolPresentation::Search),
-            ("discover_tests", ToolPresentation::Search),
-            ("web_search", ToolPresentation::Web),
-            ("web_fetch", ToolPresentation::Web),
-            ("call_skill", ToolPresentation::Skill),
-            ("knowledge_ingest", ToolPresentation::Knowledge),
-            ("delegate_to_agent", ToolPresentation::Delegate),
-            ("lsp", ToolPresentation::Code),
-            ("symbol_outline", ToolPresentation::Code),
+        // 单一事实源：映射规则见 Self::default_presentation。
+        self.presentations = Self::default_presentations();
+    }
+
+    /// 内置工具默认展示意图表（A2；装配层可用 with_presentations 覆盖/补充）。
+    fn default_presentations() -> HashMap<String, ToolPresentation> {
+        [
+            "read_file",
+            "vfs_read",
+            "write_file",
+            "apply_edit",
+            "apply_patch",
+            "execute_command",
+            "run_tests",
+            "verify_build",
+            "search_code",
+            "search_knowledge",
+            "glob",
+            "list_dir",
+            "discover_tests",
+            "web_search",
+            "web_fetch",
+            "call_skill",
+            "knowledge_ingest",
+            "delegate_to_agent",
+            "lsp",
+            "symbol_outline",
         ]
         .into_iter()
-        .map(|(name, presentation)| (name.to_string(), presentation))
-        .collect();
+        .map(|name| (name.to_string(), Self::default_presentation(name)))
+        .collect()
+    }
+
+    /// 查询内置工具默认展示意图（未知工具返回 Generic）。
+    ///
+    /// 与 Self::presentation 的注册表默认一致；供无 ToolRegistry 实例的
+    /// 调用方（如 server 历史消息转换）复用，避免维护第二份映射。
+    pub fn default_presentation(name: &str) -> ToolPresentation {
+        match name {
+            "read_file" | "vfs_read" => ToolPresentation::Read,
+            "write_file" => ToolPresentation::Write,
+            "apply_edit" | "apply_patch" => ToolPresentation::Diff,
+            "execute_command" | "run_tests" | "verify_build" => ToolPresentation::Terminal,
+            "search_code" | "search_knowledge" | "glob" | "list_dir" | "discover_tests" => {
+                ToolPresentation::Search
+            }
+            "web_search" | "web_fetch" => ToolPresentation::Web,
+            "call_skill" => ToolPresentation::Skill,
+            "knowledge_ingest" => ToolPresentation::Knowledge,
+            "delegate_to_agent" => ToolPresentation::Delegate,
+            "lsp" | "symbol_outline" => ToolPresentation::Code,
+            _ => ToolPresentation::Generic,
+        }
     }
 }
 

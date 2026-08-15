@@ -19,6 +19,8 @@ export interface ChatMessage {
   skill_calls?: SkillCallInfo[];
   /** 工具调用卡片（A2 展示契约；流式 chunk 累积到当前 assistant 消息） */
   tool_calls?: ToolCallEvent[];
+  /** 工具执行结果（历史消息结构化展示：完整内容，折叠渲染；流式阶段不携带） */
+  tool_results?: ToolResultEvent[];
   chunk_type?: StreamChunkType;
   /** 流结束事件 finish_reason === 'length'：输出达到 token 上限被截断（前端本地标记） */
   truncated_by_length?: boolean;
@@ -76,6 +78,12 @@ export interface ToolCallEvent {
   arguments: string;
   /** generic/read/write/terminal/diff/search/web/skill/knowledge/delegate/code */
   presentation: string;
+}
+
+/** 工具执行结果（历史消息展示用；content 为完整原始内容，前端折叠展示） */
+export interface ToolResultEvent {
+  tool_call_id: string;
+  content: string;
 }
 
 /**

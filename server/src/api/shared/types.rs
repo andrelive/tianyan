@@ -27,12 +27,27 @@ pub struct ChatMessage {
     /// 思考过程文本（模型 reasoning；正文在 content，前端分开渲染）。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub thinking: Option<String>,
+    /// 工具调用（A2 展示契约：名称 + 参数 + 展示意图；历史消息由 parts 转换）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_calls: Option<Vec<tianyan::agent::ToolCallEvent>>,
+    /// 工具执行结果（完整内容不截断，前端折叠展示——仅展示层，与 LLM 上下文无关）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_results: Option<Vec<ToolResultEvent>>,
     /// 图片 data URL 列表（`data:image/png;base64,...`），仅用户消息使用。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub images: Option<Vec<String>>,
     /// 可选的时间戳（RFC3339 格式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
+}
+
+/// 工具执行结果（历史消息展示用；content 为完整原始内容，前端折叠展示）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResultEvent {
+    /// 对应工具调用 ID。
+    pub tool_call_id: String,
+    /// 执行结果完整内容（不截断）。
+    pub content: String,
 }
 
 impl ChatMessage {
@@ -48,6 +63,8 @@ impl ChatMessage {
             role: MessageRole::System,
             content: content.to_string(),
             thinking: None,
+            tool_calls: None,
+            tool_results: None,
             images: None,
             timestamp: None,
         }
@@ -65,6 +82,8 @@ impl ChatMessage {
             role: MessageRole::User,
             content: content.to_string(),
             thinking: None,
+            tool_calls: None,
+            tool_results: None,
             images: None,
             timestamp: None,
         }
@@ -82,6 +101,8 @@ impl ChatMessage {
             role: MessageRole::Assistant,
             content: content.to_string(),
             thinking: None,
+            tool_calls: None,
+            tool_results: None,
             images: None,
             timestamp: None,
         }

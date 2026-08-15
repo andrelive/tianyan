@@ -276,6 +276,8 @@ fn to_chat_response(session_id: &str, response: tianyan::agent::AgentResponse) -
             role: MessageRole::Assistant,
             content: response.content,
             thinking: None,
+            tool_calls: None,
+            tool_results: None,
             images: None,
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
         },

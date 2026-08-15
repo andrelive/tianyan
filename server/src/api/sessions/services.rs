@@ -11,7 +11,7 @@ use crate::api::sessions::types::{
     SessionDetail, SessionMessagesResponse, SessionMetadata, UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
-use crate::api::shared::types::ChatMessage;
+use crate::api::shared::types::{ChatMessage, ToolResultEvent};
 use tianyan::common::types::{MessageRole, StructuredMessage};
 use tianyan::snapshot::SnapshotManager;
 
@@ -84,16 +84,24 @@ impl SessionService {
             .messages
             .into_iter()
             .map(|m| {
-                // 思考（Part::Reasoning）单独收集到 thinking 字段，正文（Part::Text）
-                // 进 content——前端分开渲染（思考块可折叠），不再拼成 [思考] 前缀。
+                // 结构化转换（与流式 A2 展示契约对齐，前端时间线渲染）：
+                // - Part::Text → content（正文）
+                // - Part::Reasoning → thinking（可折叠思考块）
+                // - Part::ToolCall → tool_calls（工具卡片：名称 + 参数 + 展示意图）
+                // - Part::ToolResult → tool_results（完整内容不截断，前端折叠展示）
+                // 工具结果/参数不再拼进正文，也不做展示层截断——LLM 上下文
+                // 组装走原始 StructuredMessage（JSONL），与本展示转换无关。
                 let mut thinking = String::new();
-                let content = m.parts.iter().fold(String::new(), |mut acc, p| {
+                let mut content = String::new();
+                let mut tool_calls: Vec<tianyan::agent::ToolCallEvent> = Vec::new();
+                let mut tool_results: Vec<ToolResultEvent> = Vec::new();
+                for p in &m.parts {
                     match p {
                         Part::Text { text, .. } => {
-                            if !acc.is_empty() {
-                                acc.push('\n');
+                            if !content.is_empty() {
+                                content.push('\n');
                             }
-                            acc.push_str(text);
+                            content.push_str(text);
                         }
                         Part::Reasoning { text, .. } => {
                             if !thinking.is_empty() {
@@ -104,40 +112,30 @@ impl SessionService {
                         Part::ToolCall {
                             name, arguments, ..
                         } => {
-                            if !acc.is_empty() {
-                                acc.push('\n');
-                            }
-                            let truncated_args = if arguments.len() > 200 {
-                                // 按字符边界截断：直接按字节切会在多字节 UTF-8
-                                // （中文等）中间 panic
-                                format!("{}...", &arguments[..arguments.floor_char_boundary(200)])
-                            } else {
-                                arguments.clone()
-                            };
-                            acc.push_str(&format!("[调用工具: {}({})]", name, truncated_args));
+                            tool_calls.push(tianyan::agent::ToolCallEvent {
+                                name: name.clone(),
+                                arguments: arguments.clone(),
+                                presentation: tianyan::agent::ToolRegistry::default_presentation(
+                                    name,
+                                )
+                                .as_str()
+                                .to_string(),
+                            });
                         }
                         Part::ToolResult {
                             tool_call_id,
-                            content,
+                            content: result_content,
                             ..
                         } => {
-                            if !acc.is_empty() {
-                                acc.push('\n');
-                            }
-                            let truncated = if content.len() > 500 {
-                                // 按字符边界截断：直接按字节切会在多字节 UTF-8
-                                // （中文等）中间 panic
-                                format!("{}...", &content[..content.floor_char_boundary(500)])
-                            } else {
-                                content.clone()
-                            };
-                            acc.push_str(&format!("[工具结果 {}] {}", tool_call_id, truncated));
+                            tool_results.push(ToolResultEvent {
+                                tool_call_id: tool_call_id.clone(),
+                                content: result_content.clone(),
+                            });
                         }
                         // 图片不进文本拼接（前端经 images 字段渲染）
                         Part::Image { .. } => {}
                     }
-                    acc
-                });
+                }
                 // 提取历史消息中的图片 data URL（Part::Image → API images 字段）
                 let images = m
                     .parts
@@ -149,7 +147,7 @@ impl SessionService {
                     .collect::<Vec<_>>();
                 ChatMessage {
                     // Tool 角色在 API 层映射为 Assistant（与旧 core_bridge 转换一致），
-                    // 工具结果已展平为 [工具结果] 文本，前端不消费 tool 角色。
+                    // 工具结果以结构化 tool_results 字段呈现，前端不消费 tool 角色。
                     role: match m.role {
                         MessageRole::Tool => MessageRole::Assistant,
                         role => role,
@@ -159,6 +157,16 @@ impl SessionService {
                         None
                     } else {
                         Some(thinking)
+                    },
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
+                    tool_results: if tool_results.is_empty() {
+                        None
+                    } else {
+                        Some(tool_results)
                     },
                     images: if images.is_empty() {
                         None
@@ -530,12 +538,13 @@ mod tests {
         // 编译时测试
     }
 
-    /// 回归：多字节 UTF-8（中文）工具结果/参数超过截断阈值时，
-    /// 按字节切片会在字符中间 panic（此前导致 GET /sessions/{id}/messages 500）。
+    /// 回归：历史消息结构化转换 —— 工具调用/结果独立字段输出，
+    /// 工具结果保持完整内容不截断（多字节 UTF-8 中文内容完整保留，
+    /// 且不再有按字节切片导致的 panic，此前会导致 GET /sessions/{id}/messages 500）。
     #[tokio::test]
-    async fn test_get_session_detail_truncates_multibyte_utf8_safely() {
-        let chinese_result = "中文结果".repeat(300); // 900 字符 ≈ 2700 字节 > 500
-        let chinese_args = "中文参数".repeat(150); // 450 字符 ≈ 1350 字节 > 200
+    async fn test_get_session_detail_structured_tool_parts_with_multibyte_content() {
+        let chinese_result = "中文结果".repeat(300); // 900 字符 ≈ 2700 字节
+        let chinese_args = "中文参数".repeat(150); // 450 字符 ≈ 1350 字节
         let msg = StructuredMessage {
             id: "msg_1".to_string(),
             parent_id: None,
@@ -570,20 +579,33 @@ mod tests {
             None,
         );
 
-        // 不 panic 且截断标记存在（截断点落在完整字符边界上）
+        // 不 panic；结构化输出：正文不含工具文本，工具调用/结果独立字段，
+        // 工具结果保持完整内容（不做展示层截断）
         let detail = service
             .get_session_detail("session-test")
             .await
             .expect("get_session_detail 不应失败");
-        let content = &detail.messages[0].content;
-        assert!(
-            content.contains("[调用工具: read_file("),
-            "工具调用应拼入正文"
+        let msg = &detail.messages[0];
+        assert_eq!(msg.content, "", "正文只含文本 parts，不含工具调用/结果文本");
+        assert!(msg.thinking.is_none(), "无思考 parts 时 thinking 为空");
+
+        let calls = msg.tool_calls.as_ref().expect("应输出 tool_calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments.len(), 1800, "参数保持完整不截断");
+        assert_eq!(calls[0].presentation, "read", "展示意图来自 core 默认映射");
+
+        let results = msg.tool_results.as_ref().expect("应输出 tool_results");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_call_id, "call_1");
+        assert_eq!(
+            results[0].content.len(),
+            3600,
+            "工具结果保持完整内容（不截断）"
         );
-        assert!(content.contains("[工具结果 call_1]"), "工具结果应拼入正文");
-        assert!(content.contains("..."), "超长内容应带截断标记");
-        // 截断点必须是完整字符边界（UTF-8 安全；按字节切片会在此 panic）
-        let dot_idx = content.find("...").expect("应有截断标记");
-        assert!(content.is_char_boundary(dot_idx), "截断点必须是字符边界");
+        assert!(
+            results[0].content.starts_with("中文结果"),
+            "中文内容完整保留"
+        );
     }
 }
