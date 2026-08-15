@@ -229,7 +229,7 @@ mod tests {
             _session_id: &str,
             _message: &Message,
             _model: Option<&str>,
-            _enable_thinking: Option<bool>,
+            _thinking_effort: Option<tianyan::model::types::ThinkingEffort>,
         ) -> tianyan::Result<AgentResponse> {
             Err(tianyan::TianyanError::Custom("测试桩".to_string()))
         }
@@ -239,7 +239,7 @@ mod tests {
             _message: &Message,
             _model: Option<&str>,
             _cancel: Option<Arc<AtomicBool>>,
-            _enable_thinking: Option<bool>,
+            _thinking_effort: Option<tianyan::model::types::ThinkingEffort>,
         ) -> tianyan::Result<tokio::sync::mpsc::Receiver<tianyan::Result<AgentStreamChunk>>>
         {
             Err(tianyan::TianyanError::Custom("测试桩".to_string()))

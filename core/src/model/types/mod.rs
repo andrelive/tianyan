@@ -8,7 +8,7 @@ mod vision;
 
 pub use crate::common::types::{ContentPart, ImageUrl};
 pub use api_error::{ApiError, ApiErrorResponse};
-pub use chat::{ChatChoice, ChatCompletionRequest, ChatCompletionResponse};
+pub use chat::{ChatChoice, ChatCompletionRequest, ChatCompletionResponse, ThinkingEffort};
 pub use embedding::{
     embedding_dimension, EmbeddingData, EmbeddingInput, EmbeddingRequest, EmbeddingResponse,
 };

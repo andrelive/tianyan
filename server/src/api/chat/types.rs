@@ -24,10 +24,10 @@ pub struct ChatRequest {
     /// 指定使用的模型。未提供时使用配置中的默认模型。
     #[serde(default)]
     pub model: Option<String>,
-    /// 本会话是否启用思考模式（会话时选择；None 时使用模型默认）。
-    /// 仅对支持思考的模型生效，与全局配置无关。
+    /// 本会话思考强度（会话时选择；None 时使用模型默认）。
+    /// 取值 off|low|medium|high；仅对支持思考的模型生效，与全局配置无关。
     #[serde(default)]
-    pub thinking: Option<bool>,
+    pub thinking: Option<tianyan::model::types::ThinkingEffort>,
     /// 新会话绑定的工作目录（工作区归属：会话的父级分组）。
     /// 仅新建会话时生效；已存在会话忽略此字段。
     #[serde(default)]

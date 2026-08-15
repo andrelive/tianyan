@@ -46,12 +46,16 @@ impl ChatService for AsyncOpenAIClient {
             .build()
             .map_err(|e| TianyanError::Custom(format!("模型服务错误：构建请求失败：{}", e)))?;
 
-        let response = if request.enable_thinking == Some(true) {
-            let mut body = serde_json::to_value(&oa_request).map_err(|e| {
-                TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e))
-            })?;
-            body["enable_thinking"] = Value::Bool(true);
-            self.client.chat().create_byot(body).await
+        let response = if let Some(effort) = request.thinking_effort {
+            if effort.is_off() {
+                self.client.chat().create(oa_request).await
+            } else {
+                let mut body = serde_json::to_value(&oa_request).map_err(|e| {
+                    TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e))
+                })?;
+                apply_thinking_params(&mut body, effort);
+                self.client.chat().create_byot(body).await
+            }
         } else {
             self.client.chat().create(oa_request).await
         }
@@ -133,11 +137,24 @@ impl ChatService for AsyncOpenAIClient {
         // 非思考模型不携带，行为与原有 async-openai 路径一致。
         let mut body = serde_json::to_value(&oa_request)
             .map_err(|e| TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e)))?;
-        if request.enable_thinking == Some(true) {
-            body["enable_thinking"] = Value::Bool(true);
+        if let Some(effort) = request.thinking_effort {
+            if !effort.is_off() {
+                apply_thinking_params(&mut body, effort);
+            }
         }
         self.create_raw_stream(body).await
     }
+}
+
+/// 把思考强度映射为请求体参数：
+/// - `enable_thinking: true`（Qwen 系思考模型开关）
+/// - `reasoning_effort: low|medium|high`（OpenAI 系思考强度标准参数）
+///
+/// 双参数同时下发：OpenAI 兼容端点忽略未知键，Qwen 系忽略 reasoning_effort，
+/// DeepSeek 等已实测容忍附加参数；关闭时不附加任何参数（模型默认行为）。
+fn apply_thinking_params(body: &mut Value, effort: crate::model::types::ThinkingEffort) {
+    body["enable_thinking"] = Value::Bool(true);
+    body["reasoning_effort"] = Value::String(effort.as_str().to_string());
 }
 
 impl AsyncOpenAIClient {

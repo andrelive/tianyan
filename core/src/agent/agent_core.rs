@@ -56,8 +56,8 @@ pub(crate) struct TurnOptions {
     pub do_snapshot: bool,
     /// 轮后是否执行压缩检查（用户轮与流式轮 true；澄清回答轮 false）。
     pub do_compress: bool,
-    /// 本会话是否启用思考模式（会话时选择；None 时使用模型默认）。
-    pub enable_thinking: Option<bool>,
+    /// 本会话思考强度（会话时选择；None 时使用模型默认）。
+    pub thinking_effort: Option<crate::model::types::ThinkingEffort>,
 }
 
 /// 智能体协调器的默认实现。
@@ -562,7 +562,7 @@ impl Agent {
                         parent_id.as_deref(),
                         model,
                         cancel,
-                        options.enable_thinking,
+                        options.thinking_effort,
                     )
                     .await
             }
@@ -576,7 +576,7 @@ impl Agent {
                         parent_id.as_deref(),
                         model,
                         cancel,
-                        options.enable_thinking,
+                        options.thinking_effort,
                     )
                     .await
             }
@@ -770,7 +770,7 @@ impl Agent {
                 mode: TurnMode::Plain,
                 do_snapshot: false,
                 do_compress: false,
-                enable_thinking: None,
+                thinking_effort: None,
             },
         )
         .await
@@ -830,7 +830,7 @@ impl Agent {
                     mode: TurnMode::Stream { sender },
                     do_snapshot: false,
                     do_compress: false,
-                    enable_thinking: None,
+                    thinking_effort: None,
                 },
             )
             .await;

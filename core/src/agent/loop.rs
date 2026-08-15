@@ -208,7 +208,7 @@ impl AgentLoop {
         initial_parent_id: Option<&str>,
         model: &str,
         cancel: Option<&AtomicBool>,
-        enable_thinking: Option<bool>,
+        thinking_effort: Option<crate::model::types::ThinkingEffort>,
     ) -> Result<AgentLoopResult, TianyanError> {
         self.run_turns(
             messages,
@@ -242,8 +242,8 @@ impl AgentLoop {
                     });
 
                     let request = ChatCompletionRequest::new(model, msgs).with_tools(tools);
-                    let request = if let Some(t) = enable_thinking {
-                        request.with_enable_thinking(t)
+                    let request = if let Some(t) = thinking_effort {
+                        request.with_thinking_effort(t)
                     } else {
                         request
                     };
@@ -305,7 +305,7 @@ impl AgentLoop {
         initial_parent_id: Option<&str>,
         model: &str,
         cancel: Option<&AtomicBool>,
-        enable_thinking: Option<bool>,
+        thinking_effort: Option<crate::model::types::ThinkingEffort>,
     ) -> Result<AgentLoopResult, TianyanError> {
         self.run_turns(
             messages,
@@ -343,8 +343,8 @@ impl AgentLoop {
                     let request = ChatCompletionRequest::new(model, msgs)
                         .with_stream(true)
                         .with_tools(tools);
-                    let request = if let Some(t) = enable_thinking {
-                        request.with_enable_thinking(t)
+                    let request = if let Some(t) = thinking_effort {
+                        request.with_thinking_effort(t)
                     } else {
                         request
                     };

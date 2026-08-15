@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type {
+  ThinkingEffort,
   View,
   StreamStatus,
   Theme,
@@ -82,9 +83,9 @@ interface AppState {
   selectedModel: string | null;
   setModel: (model: string | null) => void;
 
-  // 会话级思考模式（对话时选择，随每次请求下发；仅对支持思考的模型生效）
-  thinkingOn: boolean;
-  setThinkingOn: (on: boolean) => void;
+  // 会话级思考强度（对话时选择，随每次请求下发；仅对支持思考的模型生效）
+  thinkingEffort: ThinkingEffort;
+  setThinkingEffort: (effort: ThinkingEffort) => void;
 
   // App mode
   configured: boolean | null;
@@ -259,9 +260,9 @@ export const useAppStore = create<AppState>()(
       selectedModel: null,
       setModel: (model) => set({ selectedModel: model }),
 
-      // 会话级思考模式（默认关闭；开启后对支持思考的模型生效）
-      thinkingOn: false,
-      setThinkingOn: (on) => set({ thinkingOn: on }),
+      // 会话级思考强度（默认关闭；非 off 时对支持思考的模型生效）
+      thinkingEffort: 'off',
+      setThinkingEffort: (effort) => set({ thinkingEffort: effort }),
 
       // App mode
       configured: null,
@@ -273,7 +274,7 @@ export const useAppStore = create<AppState>()(
       partialize: (state) => ({
         theme: state.theme,
         fontSize: state.fontSize,
-        thinkingOn: state.thinkingOn,
+        thinkingEffort: state.thinkingEffort,
       }),
     },
   ),

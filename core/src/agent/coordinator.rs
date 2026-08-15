@@ -109,27 +109,27 @@ pub trait AgentCoordinator: Send + Sync {
     /// 处理用户消息。
     /// - `message` — 完整消息（含可选的多模态图片片段，`content` 为纯文本）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
-    /// - `enable_thinking` — 本会话是否启用思考模式（会话时选择；None 时使用模型默认）。
+    /// - `thinking_effort` — 本会话思考强度（会话时选择；None 时使用模型默认）。
     async fn process_message(
         &self,
         session_id: &str,
         message: &Message,
         model: Option<&str>,
-        enable_thinking: Option<bool>,
+        thinking_effort: Option<crate::model::types::ThinkingEffort>,
     ) -> Result<AgentResponse>;
 
     /// 处理用户消息（流式响应）。
     /// - `message` — 完整消息（含可选的多模态图片片段）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
     /// - `cancel` — 取消标志（客户端断开/服务关停时置位）；`None` 表示不可取消。
-    /// - `enable_thinking` — 本会话是否启用思考模式（会话时选择；None 时使用模型默认）。
+    /// - `thinking_effort` — 本会话思考强度（会话时选择；None 时使用模型默认）。
     async fn process_message_stream(
         &self,
         session_id: &str,
         message: &Message,
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
-        enable_thinking: Option<bool>,
+        thinking_effort: Option<crate::model::types::ThinkingEffort>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
 
     /// 处理用户对追问的回答。
@@ -222,7 +222,7 @@ impl AgentCoordinator for Agent {
         session_id: &str,
         message: &Message,
         model: Option<&str>,
-        enable_thinking: Option<bool>,
+        thinking_effort: Option<crate::model::types::ThinkingEffort>,
     ) -> Result<AgentResponse> {
         let start = Instant::now();
 
@@ -249,7 +249,7 @@ impl AgentCoordinator for Agent {
                     mode: crate::agent::agent_core::TurnMode::Plain,
                     do_snapshot: true,
                     do_compress: true,
-                    enable_thinking,
+                    thinking_effort,
                 },
             )
             .await?;
@@ -272,7 +272,7 @@ impl AgentCoordinator for Agent {
         message: &Message,
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
-        enable_thinking: Option<bool>,
+        thinking_effort: Option<crate::model::types::ThinkingEffort>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
         let state = self.load_and_build_state(session_id).await?;
         let model = model.unwrap_or(&self.default_model).to_string();
@@ -309,7 +309,7 @@ impl AgentCoordinator for Agent {
                         },
                         do_snapshot: true,
                         do_compress: true,
-                        enable_thinking,
+                        thinking_effort,
                     },
                 )
                 .await;

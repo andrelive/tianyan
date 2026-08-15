@@ -25,6 +25,9 @@ export interface ChatMessage {
   truncated_by_length?: boolean;
 }
 
+/** 思考强度等级（与后端 ThinkingEffort 对齐，off|low|medium|high）。 */
+export type ThinkingEffort = 'off' | 'low' | 'medium' | 'high';
+
 export interface ChatRequest {
   session_id?: string | null;
   /** 本轮输入消息（单条）——历史由服务端会话持久化提供，请求不携带全量历史 */
@@ -33,8 +36,8 @@ export interface ChatRequest {
   temperature: number;
   max_tokens: number;
   model?: string | null;
-  /** 本会话是否启用思考模式（会话时选择；仅对支持思考的模型生效） */
-  thinking?: boolean;
+  /** 本会话思考强度（会话时选择；off 不附加思考参数，仅对支持思考的模型生效） */
+  thinking?: ThinkingEffort;
   /** 新会话绑定的工作目录（仅新建会话时生效） */
   working_directory?: string | null;
 }

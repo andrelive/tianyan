@@ -137,8 +137,7 @@ async fn test_model_connection(
     )
     .with_temperature(0.7)
     .with_max_tokens(10)
-    .with_stream(false)
-    .with_enable_thinking(false);
+    .with_stream(false);
 
     use tianyan::model::ChatService;
     match client.chat_completion(request).await {

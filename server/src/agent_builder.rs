@@ -245,7 +245,7 @@ impl AgentCoordinator for WizardModeAgent {
         _session_id: &str,
         _message: &tianyan::Message,
         _model: Option<&str>,
-        _enable_thinking: Option<bool>,
+        _thinking_effort: Option<tianyan::model::types::ThinkingEffort>,
     ) -> TianyanResult<AgentResponse> {
         Err(TianyanError::Custom(
             "模型服务错误：应用未配置。请先完成配置向导。".to_string(),
@@ -258,7 +258,7 @@ impl AgentCoordinator for WizardModeAgent {
         _message: &tianyan::Message,
         _model: Option<&str>,
         _cancel: Option<Arc<AtomicBool>>,
-        _enable_thinking: Option<bool>,
+        _thinking_effort: Option<tianyan::model::types::ThinkingEffort>,
     ) -> TianyanResult<mpsc::Receiver<TianyanResult<AgentStreamChunk>>> {
         Err(TianyanError::Custom(
             "模型服务错误：应用未配置。请先完成配置向导。".to_string(),

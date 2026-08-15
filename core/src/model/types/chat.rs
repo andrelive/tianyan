@@ -3,6 +3,38 @@ use serde::{Deserialize, Serialize};
 use crate::common::types::{Message, TokenUsage};
 use crate::model::types::{ToolChoice, ToolDefinition};
 
+/// 思考强度等级（会话时选择；按 OpenAI reasoning_effort 惯例命名，
+/// 非 OpenAI 兼容端点（如 Qwen 系）由 provider 映射为等效参数）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingEffort {
+    /// 关闭思考（不附加任何思考参数）。
+    Off,
+    /// 低强度思考。
+    Low,
+    /// 中强度思考。
+    Medium,
+    /// 高强度思考。
+    High,
+}
+
+impl ThinkingEffort {
+    /// 是否关闭思考。
+    pub fn is_off(&self) -> bool {
+        matches!(self, ThinkingEffort::Off)
+    }
+
+    /// OpenAI reasoning_effort 参数字面量。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThinkingEffort::Off => "off",
+            ThinkingEffort::Low => "low",
+            ThinkingEffort::Medium => "medium",
+            ThinkingEffort::High => "high",
+        }
+    }
+}
+
 /// 聊天补全请求。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionRequest {
@@ -37,9 +69,9 @@ pub struct ChatCompletionRequest {
     /// 用户标识。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    /// 是否启用思维链。
+    /// 思考强度（会话时选择；None 或 Off 时不附加思考参数，使用模型默认行为）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub enable_thinking: Option<bool>,
+    pub thinking_effort: Option<ThinkingEffort>,
     /// 可调用的工具列表。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
@@ -63,7 +95,7 @@ impl ChatCompletionRequest {
             presence_penalty: None,
             frequency_penalty: None,
             user: None,
-            enable_thinking: None,
+            thinking_effort: None,
             tools: None,
             tool_choice: None,
         }
@@ -92,9 +124,9 @@ impl ChatCompletionRequest {
         self
     }
 
-    /// 设置是否启用思维链。
-    pub fn with_enable_thinking(mut self, enable_thinking: bool) -> Self {
-        self.enable_thinking = Some(enable_thinking);
+    /// 设置思考强度（会话时选择；Off 与 None 等价，不附加思考参数）。
+    pub fn with_thinking_effort(mut self, thinking_effort: ThinkingEffort) -> Self {
+        self.thinking_effort = Some(thinking_effort);
         self
     }
 
