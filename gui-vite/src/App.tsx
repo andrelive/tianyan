@@ -10,6 +10,7 @@ import ErrorBoundary from '@/components/layout/ErrorBoundary';
 import Toast from '@/components/layout/Toast';
 import SessionPage from '@/components/session/SessionPage';
 import SkillsPanel from '@/components/skills/SkillsPanel';
+import ToolsPanel from '@/components/tools/ToolsPanel';
 import KnowledgePanel from '@/components/knowledge/KnowledgePanel';
 import WorkspacePanel from '@/components/workspace/WorkspacePanel';
 import MemoryPanel from '@/components/memory/MemoryPanel';
@@ -83,6 +84,7 @@ function App() {
           <Route path="/chat" element={<SessionPage />} />
           <Route path="/chat/:sessionId" element={<SessionPage />} />
           <Route path="/skills" element={<SkillsPanel />} />
+          <Route path="/tools" element={<ToolsPanel />} />
           <Route path="/knowledge" element={<KnowledgePanel />} />
           <Route path="/workspace" element={<WorkspacePanel />} />
           <Route path="/memory" element={<MemoryPanel />} />

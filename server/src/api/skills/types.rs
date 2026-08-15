@@ -22,6 +22,38 @@ pub struct Skill {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// 图标
     pub icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 创建时间（RFC3339；来自 VFS 存储，内置技能为 None）
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 更新时间（RFC3339；来自 VFS 存储，内置技能为 None）
+    pub updated_at: Option<String>,
+}
+
+/// 技能详情（含完整内容与时间元数据）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillDetail {
+    /// 技能标识
+    pub id: String,
+    /// 技能名称
+    pub name: String,
+    /// 技能描述
+    pub description: String,
+    /// 技能类别
+    pub category: String,
+    /// 版本号
+    pub version: String,
+    /// 是否启用
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 完整内容（markdown；仅 VFS 存储的技能有）
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 创建时间（RFC3339）
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 更新时间（RFC3339）
+    pub updated_at: Option<String>,
 }
 
 /// 技能参数定义
@@ -118,6 +150,8 @@ mod tests {
             enabled: true,
             parameters: None,
             icon: None,
+            created_at: None,
+            updated_at: None,
         };
         let json = serde_json::to_string(&skill).unwrap();
         assert!(json.contains("test-skill"));

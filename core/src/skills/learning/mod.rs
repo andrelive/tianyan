@@ -1,7 +1,7 @@
 mod generator;
 mod types;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::common::error::Result;
@@ -58,6 +58,10 @@ pub struct SkillLearningConfig {
     pub candidate_verification: bool,
     /// 候选技能正式注册的分数阈值（0-10，默认 6）。
     pub candidate_score_threshold: u8,
+    /// 技能去重阈值（0-1）：候选技能与已有技能摘要的字符 bigram Jaccard
+    /// 相似度 ≥ 阈值时，不再新建技能，而是完善（覆盖更新）已有技能——
+    /// 防止同类技能持续膨胀（如多个"项目探索"近似技能）。
+    pub dedup_threshold: f64,
 }
 
 impl Default for SkillLearningConfig {
@@ -70,6 +74,7 @@ impl Default for SkillLearningConfig {
             skill_storage_prefix: "skill/learned".to_string(),
             candidate_verification: true,
             candidate_score_threshold: 6,
+            dedup_threshold: 0.45,
         }
     }
 }
@@ -133,18 +138,39 @@ impl SkillLearningEngine {
                             .map(|v| v.score < self.config.candidate_score_threshold)
                             .unwrap_or(false);
 
-                        if let Err(e) = self.store_skill(&skill, experimental).await {
-                            tracing::warn!(skill_id = %skill.id, error = %e, "存储技能失败");
-                        } else {
-                            if experimental {
+                        // 去重门：候选技能与已有技能相似（摘要 bigram 相似度
+                        // ≥ dedup_threshold）时完善已有技能，不再新建——防止
+                        // 同类技能持续膨胀（如多个"项目探索"近似技能）。
+                        let similar = self.find_similar_existing(&skill).await?;
+                        let stored = match similar {
+                            Some((existing_id, score)) => {
                                 tracing::info!(
-                                    skill_id = %skill.id,
-                                    score = %verification.as_ref().map(|v| v.score).unwrap_or(0),
-                                    issues = ?verification.as_ref().map(|v| v.issues.clone()).unwrap_or_default(),
-                                    "技能标记为试验性（未达正式阈值）"
+                                    candidate = %skill.id,
+                                    existing = %existing_id,
+                                    score,
+                                    "检测到相似技能，完善已有技能而非新建"
                                 );
+                                self.update_existing_skill(&existing_id, &skill, experimental)
+                                    .await
+                                    .map(|_| true)
                             }
-                            generated_skills.push(skill);
+                            None => self.store_skill(&skill, experimental).await.map(|_| true),
+                        };
+                        match stored {
+                            Ok(_) => {
+                                if experimental {
+                                    tracing::info!(
+                                        skill_id = %skill.id,
+                                        score = %verification.as_ref().map(|v| v.score).unwrap_or(0),
+                                        issues = ?verification.as_ref().map(|v| v.issues.clone()).unwrap_or_default(),
+                                        "技能标记为试验性（未达正式阈值）"
+                                    );
+                                }
+                                generated_skills.push(skill);
+                            }
+                            Err(e) => {
+                                tracing::warn!(skill_id = %skill.id, error = %e, "存储技能失败");
+                            }
                         }
                     }
                     Err(e) => {
@@ -357,6 +383,91 @@ impl SkillLearningEngine {
         Ok(())
     }
 
+    /// 查找与候选技能相似（摘要 bigram Jaccard ≥ dedup_threshold）的已有技能。
+    ///
+    /// 返回 `(已有技能 id, 相似度)`；无相似技能时返回 None。
+    async fn find_similar_existing(
+        &self,
+        candidate: &GeneratedSkill,
+    ) -> Result<Option<(String, f64)>> {
+        if self.config.dedup_threshold <= 0.0 {
+            return Ok(None);
+        }
+        let skill_root = TianyanUri::new(ContextNamespace::Skill, vec![]);
+        let entries = self.vfs.list(&skill_root).await?;
+
+        let candidate_text = format!(
+            "{} {} {}",
+            candidate.name,
+            candidate.description,
+            candidate.applicable_scenarios.join(" ")
+        );
+
+        let mut best: Option<(String, f64)> = None;
+        for entry in entries {
+            if !entry.is_directory() {
+                continue;
+            }
+            let Some(id) = entry.uri().path().last().cloned() else {
+                continue;
+            };
+            let abstract_text = self
+                .vfs
+                .read_abstract(entry.uri())
+                .await
+                .unwrap_or_default();
+            if abstract_text.is_empty() {
+                continue;
+            }
+            let score = text_similarity(&candidate_text, &abstract_text);
+            if score >= self.config.dedup_threshold
+                && best.as_ref().map(|(_, s)| score > *s).unwrap_or(true)
+            {
+                best = Some((id, score));
+            }
+        }
+        Ok(best)
+    }
+
+    /// 完善已有技能：用候选技能的内容/摘要覆盖更新（保留原 id，刷新存储时间）。
+    ///
+    /// 与 [Self::store_skill] 同写路径（content.md + abstract.md），
+    /// 仅目标 id 不同——技能数量不膨胀，且注册表引用不变。
+    async fn update_existing_skill(
+        &self,
+        existing_id: &str,
+        skill: &GeneratedSkill,
+        experimental: bool,
+    ) -> Result<()> {
+        let uri = TianyanUri::new(ContextNamespace::Skill, vec![existing_id.to_string()]);
+
+        let mut skill_md = self.format_skill_as_markdown(skill, experimental);
+        // 内容头部的 ID 保留已有技能 id（注册表/引用不受影响）
+        skill_md = skill_md.replace(
+            &format!("**ID**: `{}`", skill.id),
+            &format!("**ID**: `{}`", existing_id),
+        );
+        self.vfs.write_content(&uri, &skill_md).await?;
+
+        let mut abstract_content = format!(
+            "{} | 适用场景: {}",
+            skill.description,
+            skill.applicable_scenarios.join(", ")
+        );
+        if experimental {
+            abstract_content = format!("[试验性] {}", abstract_content);
+        }
+        self.vfs.write_abstract(&uri, &abstract_content).await?;
+
+        tracing::info!(
+            existing_id = %existing_id,
+            source = %skill.id,
+            experimental,
+            "技能已完善（去重合并）"
+        );
+        Ok(())
+    }
+
     fn format_skill_as_markdown(&self, skill: &GeneratedSkill, experimental: bool) -> String {
         let mut md = String::new();
 
@@ -501,6 +612,28 @@ impl SkillLearningEngine {
     }
 }
 
+/// 文本相似度（字符 bigram Jaccard，0-1）。
+///
+/// 用于技能去重：候选技能与已有技能摘要的相似度判断。
+/// 空串或单字符文本无法构成 bigram，返回 0。
+fn text_similarity(a: &str, b: &str) -> f64 {
+    fn bigrams(s: &str) -> HashSet<String> {
+        let chars: Vec<char> = s.chars().collect();
+        chars
+            .windows(2)
+            .map(|w| w.iter().collect::<String>())
+            .collect()
+    }
+    let ba = bigrams(a);
+    let bb = bigrams(b);
+    if ba.is_empty() || bb.is_empty() {
+        return 0.0;
+    }
+    let intersection = ba.intersection(&bb).count();
+    let union = ba.union(&bb).count();
+    intersection as f64 / union as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +643,24 @@ mod tests {
         let config = SkillLearningConfig::default();
         assert!(config.enable_auto_learning);
         assert_eq!(config.success_threshold, 2);
+        assert!(config.dedup_threshold > 0.0);
+    }
+
+    #[test]
+    fn test_text_similarity() {
+        // 完全相同 → 1.0
+        assert!((text_similarity("项目结构探索", "项目结构探索") - 1.0).abs() < 1e-9);
+        // 高度相似（共享"项目结构"等 bigram）
+        assert!(
+            text_similarity(
+                "通过列目录和读文件了解项目结构",
+                "快速了解项目目录和文件结构"
+            ) > 0.3
+        );
+        // 完全不同
+        assert!(text_similarity("获取当前工作目录路径", "天气晴朗适合出行") < 0.2);
+        // 空串
+        assert_eq!(text_similarity("", "项目结构"), 0.0);
     }
 
     #[tokio::test]

@@ -151,6 +151,39 @@ export interface Skill {
   category: string;
   version: string;
   enabled: boolean;
+  /** 创建时间（RFC3339；内置技能无） */
+  created_at?: string;
+  /** 更新时间（RFC3339；内置技能无） */
+  updated_at?: string;
+}
+
+/** 技能详情（完整内容 + 时间元数据） */
+export interface SkillDetail {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  version: string;
+  enabled: boolean;
+  /** 完整内容（markdown；仅 VFS 存储的技能有） */
+  content?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// ========== Tool Types ==========
+
+/** 系统工具信息（工具目录：与 LLM tools 列表同源） */
+export interface ToolInfo {
+  name: string;
+  description: string;
+  /** 参数 JSON Schema */
+  parameters: Record<string, unknown>;
+}
+
+export interface ListToolsResponse {
+  tools: ToolInfo[];
+  total: number;
 }
 
 export interface SkillExecutionStatus {
@@ -690,6 +723,7 @@ export interface WorkspaceApplyPatchResponse {
 export type View =
   | 'chat'
   | 'skills'
+  | 'tools'
   | 'knowledge'
   | 'workspace'
   | 'settings'

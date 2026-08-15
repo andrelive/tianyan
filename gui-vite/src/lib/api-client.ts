@@ -6,6 +6,7 @@ import type {
   CancelTaskResponse,
   ChatMessage,
   CompressSessionResponse,
+  ListToolsResponse,
   McpServerEntry,
   McpTestResponse,
   MemoryListResponse,
@@ -15,6 +16,7 @@ import type {
   SchedulerStatus,
   SearchSuggestionsResponse,
   Session,
+  SkillDetail,
   SessionMessagesResponse,
   UsageStatsSummary,
   WorkspaceDiffListResponse,
@@ -121,6 +123,18 @@ export async function apiPostMultipart<T>(path: string, formData: FormData): Pro
     throw new ApiError(`HTTP ${response.status}: ${text}`, String(response.status));
   }
   return response.json();
+}
+
+// ========== Tools & Skills ==========
+
+/** 列出全部系统工具（工具目录：与 LLM tools 列表同源） */
+export async function getTools(): Promise<ListToolsResponse> {
+  return apiGet<ListToolsResponse>('/tools');
+}
+
+/** 获取技能详情（完整内容 + 创建/更新时间） */
+export async function getSkillDetail(skillId: string): Promise<SkillDetail> {
+  return apiGet<SkillDetail>(`/skills/${encodeURIComponent(skillId)}`);
 }
 
 // ========== Session messages ==========

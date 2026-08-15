@@ -210,6 +210,16 @@ impl StorageBackend for LocalFileBackend {
 
         let mut metadata = crate::common::types::EntryMetadata::new(uri.clone(), "unknown");
         metadata.is_directory = is_directory;
+        // 本地后端时间来自文件系统（此前为 EntryMetadata::new 的当前时间，
+        // 所有条目时间戳恒等于查询时刻，无法反映真实创建/更新时间）
+        metadata.created_at = meta
+            .created()
+            .map(chrono::DateTime::<chrono::Utc>::from)
+            .unwrap_or_else(|_| chrono::Utc::now());
+        metadata.updated_at = meta
+            .modified()
+            .map(chrono::DateTime::<chrono::Utc>::from)
+            .unwrap_or_else(|_| chrono::Utc::now());
 
         Ok(ContextEntry {
             schema_version: crate::vfs::types::CURRENT_SCHEMA_VERSION,
@@ -397,6 +407,25 @@ mod tests {
         assert_eq!(read_entry.abstract_content, Some("测试摘要".to_string()));
         assert_eq!(read_entry.overview_content, Some("测试概览".to_string()));
         assert_eq!(read_entry.detail_content, Some("测试详细内容".to_string()));
+        // 时间应来自文件系统（真实创建/修改时间，RFC3339 序列化）
+        assert!(
+            read_entry
+                .metadata
+                .created_at
+                .to_rfc3339()
+                .starts_with("20"),
+            "created_at 应为 RFC3339，实际: {}",
+            read_entry.metadata.created_at.to_rfc3339()
+        );
+        assert!(
+            read_entry
+                .metadata
+                .updated_at
+                .to_rfc3339()
+                .starts_with("20"),
+            "updated_at 应为 RFC3339，实际: {}",
+            read_entry.metadata.updated_at.to_rfc3339()
+        );
     }
 
     #[tokio::test]

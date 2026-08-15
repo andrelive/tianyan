@@ -27,6 +27,7 @@ pub mod sessions;
 pub mod shared;
 pub mod skills;
 pub mod tasks;
+pub mod tools;
 pub mod traces;
 pub mod workspace;
 
@@ -66,6 +67,7 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .merge(insights::routes())
         .merge(workspace::routes())
         .merge(tasks::routes())
+        .merge(tools::routes())
         .merge(traces::routes())
         .merge(clipboard::routes())
         .merge(events::routes())
