@@ -73,18 +73,6 @@ export default function AgentTab({ config, onUpdateField }: AgentTabProps) {
               className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
             />
           </FieldRow>
-          <FieldRow label="学习规则最大 Token">
-            <input
-              type="number"
-              min={100}
-              max={10000}
-              value={config.learned_rules_max_tokens}
-              onChange={(e) =>
-                onUpdateField('learned_rules_max_tokens', parseInt(e.target.value) || 800)
-              }
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
-            />
-          </FieldRow>
         </div>
 
         {/* 工作目录：Agent 执行命令/读写文件的基础目录，会话回退快照的根目录 */}

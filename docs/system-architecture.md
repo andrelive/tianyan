@@ -298,7 +298,7 @@ Scheduler 定时触发
 TianyanConfig
 ├── models      # 模型配置（服务列表）
 ├── storage     # 存储配置（数据目录、向量数据库）
-├── agent       # 智能体配置（learned_rules_top_k: 5, learned_rules_max_tokens: 800）
+├── agent       # 智能体配置（learned_rules_top_k: 5）
 ├── memory      # 记忆配置
 ├── retrieval   # 检索配置
 ├── security    # 安全配置

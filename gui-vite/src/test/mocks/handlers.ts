@@ -308,7 +308,6 @@ export const mockTianyanConfig = {
     enable_thinking: false,
     default_top_k: 5,
     loaded_rules_top_k: 5,
-    loaded_rules_max_tokens: 800,
     max_turns: 200,
   },
   models: {

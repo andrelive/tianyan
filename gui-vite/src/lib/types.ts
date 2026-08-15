@@ -521,7 +521,6 @@ export interface ConfigState {
   default_top_k: number;
   max_turns: number;
   learned_rules_top_k: number;
-  learned_rules_max_tokens: number;
   working_directory: string;
 
   // -- Storage config (storage.*) --

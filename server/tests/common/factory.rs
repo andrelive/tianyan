@@ -19,7 +19,6 @@ pub fn test_agent_config() -> AgentConfig {
         enable_thinking: false,
         default_top_k: 3,
         learned_rules_top_k: 5,
-        learned_rules_max_tokens: 800,
         ..Default::default()
     }
 }

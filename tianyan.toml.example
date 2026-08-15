@@ -15,7 +15,6 @@ stream_responses = true
 enable_thinking = false
 default_top_k = 5
 learned_rules_top_k = 5
-learned_rules_max_tokens = 800
 max_turns = 200
 shortlist_tools = true
 background_self_review = false

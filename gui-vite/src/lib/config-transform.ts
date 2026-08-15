@@ -65,7 +65,6 @@ export function emptyConfigState(): ConfigState {
     default_top_k: 5,
     max_turns: 20,
     learned_rules_top_k: 5,
-    learned_rules_max_tokens: 1000,
     working_directory: '',
     data_dir: '',
     collection_name: 'tianyan_data',
@@ -115,7 +114,6 @@ interface BackendAgentConfig {
   enable_thinking: boolean;
   default_top_k: number;
   loaded_rules_top_k: number;
-  loaded_rules_max_tokens: number;
   working_directory?: string | null;
   max_turns: number;
 }
@@ -270,7 +268,6 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
         enable_thinking: cs.enable_thinking,
         default_top_k: cs.default_top_k,
         loaded_rules_top_k: cs.learned_rules_top_k,
-        loaded_rules_max_tokens: cs.learned_rules_max_tokens,
         max_turns: cs.max_turns,
         working_directory: cs.working_directory || null,
       },
@@ -414,12 +411,6 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
       return typeof agentRecord.loaded_rules_top_k === 'number'
         ? agentRecord.loaded_rules_top_k
         : defaults.learned_rules_top_k;
-    })(),
-    learned_rules_max_tokens: (() => {
-      const agentRecord = agent as unknown as Record<string, unknown>;
-      return typeof agentRecord.loaded_rules_max_tokens === 'number'
-        ? agentRecord.loaded_rules_max_tokens
-        : defaults.learned_rules_max_tokens;
     })(),
     working_directory: agent.working_directory ?? defaults.working_directory,
 
