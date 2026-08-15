@@ -69,6 +69,16 @@ pub struct CommandKillParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CommandListParams {}
 
+/// 角色匹配建议参数（ADR-016 P3 向量路由）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SuggestRoleParams {
+    /// 任务描述（委托前调用：让系统按角色摘要语义匹配给出建议）。
+    pub task: String,
+    /// 返回前几名（默认 3）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<usize>,
+}
+
 /// 搜索代码参数。
 ///
 /// 字段命名对齐 ripgrep 参数：`pattern` 为正式字段名（serde alias 兼容旧载荷的

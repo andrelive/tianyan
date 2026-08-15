@@ -35,11 +35,52 @@ struct RoleSessionMeta {
     updated_at: i64,
 }
 
+/// 角色使用统计（ADR-016 P3：退役信号/演化门控输入）。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RoleUsage {
+    /// 累计调用次数。
+    pub calls: u32,
+    /// 成功次数。
+    pub success: u32,
+    /// 失败次数。
+    pub failed: u32,
+    /// 最后使用时间（epoch 毫秒）。
+    pub last_used: i64,
+}
+
+impl RoleUsage {
+    /// 记录一次调用结果（success 决定成功/失败计数）。
+    pub fn record(&mut self, success: bool) {
+        self.calls += 1;
+        if success {
+            self.success += 1;
+        } else {
+            self.failed += 1;
+        }
+        self.last_used = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+    }
+
+    /// 成功率（无调用时 0）。
+    pub fn success_rate(&self) -> f32 {
+        if self.calls == 0 {
+            0.0
+        } else {
+            self.success as f32 / self.calls as f32
+        }
+    }
+}
+
 /// 角色存储的路径前缀（`tianyan://agent/roles/`）。
 pub const ROLES_PREFIX: &str = "roles";
 
 /// 配置签名元条目名（list 时过滤）。
 const META_NAME: &str = "_meta";
+
+/// 角色使用统计元目录名（list 时过滤）。
+pub const USAGE_PREFIX: &str = "_usage";
 
 /// 角色 VFS 存储：保存 / 加载 / 删除学习与配置角色，维护配置签名。
 #[derive(Clone)]
@@ -112,7 +153,7 @@ impl RoleStore {
             let Some(name) = entry.uri().path().last().cloned() else {
                 continue;
             };
-            if name == META_NAME {
+            if name == META_NAME || name == USAGE_PREFIX {
                 continue;
             }
             match self.load_role(&name).await {
@@ -241,6 +282,38 @@ impl RoleStore {
             self.vfs.delete(&uri).await?;
         }
         Ok(())
+    }
+
+    /// 角色使用统计 URI（`tianyan://agent/roles/_usage/<name>`）。
+    fn role_usage_uri(name: &str) -> TianyanUri {
+        TianyanUri::new(
+            ContextNamespace::Agent,
+            vec!["roles".to_string(), "_usage".to_string(), name.to_string()],
+        )
+    }
+
+    /// 加载角色使用统计（无记录时返回默认空统计）。
+    pub async fn load_role_usage(&self, name: &str) -> Result<RoleUsage> {
+        let uri = Self::role_usage_uri(name);
+        if !self.vfs.exists(&uri).await? {
+            return Ok(RoleUsage::default());
+        }
+        let content = self.vfs.read_content(&uri, ContentLevel::Detail).await?;
+        serde_json::from_str(&content)
+            .map_err(|e| TianyanError::Custom(format!("role_store: 使用统计解析失败：{e}")))
+    }
+
+    /// 保存角色使用统计（覆盖写）。
+    pub async fn save_role_usage(&self, name: &str, usage: &RoleUsage) -> Result<()> {
+        let uri = Self::role_usage_uri(name);
+        if let Some(parent) = uri.parent() {
+            if !self.vfs.exists(&parent).await? {
+                self.vfs.create_directory(&parent).await?;
+            }
+        }
+        let json = serde_json::to_string_pretty(usage)
+            .map_err(|e| TianyanError::Custom(format!("role_store: 使用统计序列化失败：{e}")))?;
+        self.vfs.write_content(&uri, &json).await
     }
 
     /// 保存用户配置签名（`[agent_roles]` 序列化文本；配置变更检测用）。

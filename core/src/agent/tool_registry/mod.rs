@@ -10,8 +10,8 @@ use crate::agent::tool_params::{
     CommandListParams, CommandStatusParams, DelegateToAgentParams, DiscoverTestsParams,
     ExecuteCommandParams, GlobParams, KnowledgeIngestParams, ListDirParams, LspParams,
     ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams, SelfCheckParams,
-    SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VerifyBuildParams, VfsListParams,
-    VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
+    SuggestRoleParams, SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VerifyBuildParams,
+    VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
 };
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
@@ -161,6 +161,8 @@ pub struct ToolRegistry {
     pub(crate) background_tasks: Arc<crate::agent::background::BackgroundTaskManager>,
     /// 后台命令管理器（execute_command(background) / command_status / command_list / command_kill）。
     pub(crate) command_tasks: Arc<crate::executor::CommandManager>,
+    /// 角色向量路由器（ADR-016 P3：suggest_role 工具依赖；None 时工具不可用）。
+    pub(crate) role_router: Option<Arc<crate::agent::role_router::RoleRouter>>,
     /// 工具执行管线：pre-execute 监听器（fail-closed，按注册顺序；A1）。
     pre_execute_listeners: Vec<Arc<dyn ToolPreExecuteListener>>,
     /// 工具执行管线：单调守卫（只允许拒绝；A4）。
@@ -200,6 +202,7 @@ impl ToolRegistry {
             web_client: None,
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
             command_tasks: Arc::new(crate::executor::CommandManager::new(None)),
+            role_router: None,
             pre_execute_listeners: Vec::new(),
             guards: Vec::new(),
             post_execute_listeners: Vec::new(),
@@ -282,6 +285,12 @@ impl ToolRegistry {
     /// `[agent_roles]` 覆盖/扩展后的注册表。
     pub fn with_role_registry(mut self, registry: Arc<RoleRegistry>) -> Self {
         self.role_registry = registry;
+        self
+    }
+
+    /// 设置角色向量路由器（suggest_role 工具依赖）。
+    pub fn with_role_router(mut self, router: Arc<crate::agent::role_router::RoleRouter>) -> Self {
+        self.role_router = Some(router);
         self
     }
 
@@ -827,6 +836,7 @@ impl ToolRegistry {
             "command_status" => self.execute_command_status(arguments).await,
             "command_list" => self.execute_command_list(arguments).await,
             "command_kill" => self.execute_command_kill(arguments).await,
+            "suggest_role" => self.execute_suggest_role(arguments).await,
             "glob" => self.execute_glob(arguments, session_id).await,
             "list_dir" => self.execute_list_dir(arguments, session_id).await,
             "symbol_outline" => self.execute_symbol_outline(arguments).await,
@@ -1005,6 +1015,13 @@ impl ToolRegistry {
             >(
                 "command_kill",
                 "Terminate a running background command task by its task_id (kills the whole process tree, e.g. a dev server started via execute_command with background=true). Cancelling an already finished task is a no-op.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                SuggestRoleParams,
+            >(
+                "suggest_role",
+                "Suggest the best matching sub-agent roles for a task by semantic similarity between the task description and each role's summary. Call BEFORE delegate_to_agent when deciding which role fits: pass the task text, get ranked roles (name, score, purpose, [experimental] means not callable yet). The final choice is always yours.",
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
@@ -1340,9 +1357,9 @@ mod tests {
     async fn test_shortlist_none_query_returns_all() {
         // 无查询信号：保守全量
         let registry = ToolRegistry::new(SecurityPolicy::default());
-        register_mock_tools(&registry, 20).await; // 28 + 20 = 48 > 40
+        register_mock_tools(&registry, 20).await; // 29 + 20 = 49 > 40
         let defs = registry.definitions_shortlisted(None).await;
-        assert_eq!(defs.len(), 48);
+        assert_eq!(defs.len(), 49);
     }
 
     #[tokio::test]

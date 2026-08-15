@@ -204,6 +204,14 @@ export interface SkillListResponse {
 
 // ── 子智能体角色（ADR-016）────────────────────────────────────────────
 
+export interface RoleUsageSummary {
+  calls: number;
+  success: number;
+  failed: number;
+  success_rate: number;
+  last_used: number;
+}
+
 export interface RoleSessionSummary {
   /** 累计任务数 */
   task_count: number;
@@ -229,6 +237,8 @@ export interface RoleSummary {
   max_turns?: number | null;
   /** durable 角色会话（无会话时为 null） */
   session?: RoleSessionSummary | null;
+  /** 使用统计（无记录时为 null） */
+  usage?: RoleUsageSummary | null;
 }
 
 export interface RoleDetail extends RoleSummary {

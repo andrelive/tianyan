@@ -691,6 +691,47 @@ impl ToolRegistry {
             "message": "后台命令已终止（进程树已杀）",
         }))
     }
+    /// 执行 suggest_role 工具（ADR-016 P3）：任务描述 → 角色语义匹配建议。
+    pub(crate) async fn execute_suggest_role(
+        &self,
+        arguments: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        let router = self.role_router.as_ref().ok_or_else(|| {
+            TianyanError::Custom(format!("tool: 执行失败：{}", "RoleRouter not configured"))
+        })?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            task: String,
+            top_k: Option<usize>,
+        }
+        let params: Params = serde_json::from_str(arguments)
+            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+
+        let matches = router
+            .suggest(&params.task, params.top_k.unwrap_or(3))
+            .await?;
+        let items: Vec<serde_json::Value> = matches
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": m.name,
+                    "score": m.score,
+                    "purpose": m.purpose,
+                    "status": if m.status == crate::agent::RoleStatus::Experimental {
+                        "experimental"
+                    } else {
+                        "active"
+                    },
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "task": params.task,
+            "suggestions": items,
+            "message": "建议仅供决策参考——最终选择由你决定；[experimental] 角色暂不可调用。",
+        }))
+    }
+
     /// 执行 web_search 工具：搜索网页并返回结构化结果（标题/URL/摘要）。
     pub(crate) async fn execute_web_search(
         &self,

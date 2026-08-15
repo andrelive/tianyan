@@ -198,7 +198,10 @@ impl RoleLearningEngine {
         Ok(learned)
     }
 
-    /// 记录已有角色的使用统计（delegate 轨迹解析 role 参数；P1 仅日志）。
+    /// 记录已有角色的使用统计（delegate 轨迹解析 role 参数；ADR-016 P3 持久化）。
+    ///
+    /// 统计写入 VFS（`agent/roles/_usage/<name>`）：成功率是退役信号与
+    /// 演化门控输入；调用频率是「角色已建立分工」的证据。
     async fn record_role_usage(&self, history: &[ExecutionHistory]) {
         let mut usage: HashMap<String, (usize, usize)> = HashMap::new();
         for exec in history {
@@ -223,7 +226,23 @@ impl RoleLearningEngine {
             }
         }
         for (role, (total, ok)) in usage {
-            tracing::info!(role = %role, total, success = ok, "角色使用统计");
+            // 合并进持久化统计（原值 + 本次增量）
+            let mut persisted = self.store.load_role_usage(&role).await.unwrap_or_default();
+            for _ in 0..ok {
+                persisted.record(true);
+            }
+            for _ in 0..(total - ok) {
+                persisted.record(false);
+            }
+            if let Err(e) = self.store.save_role_usage(&role, &persisted).await {
+                tracing::warn!(role = %role, error = %e, "角色使用统计保存失败");
+            }
+            tracing::info!(
+                role = %role,
+                calls = persisted.calls,
+                success_rate = persisted.success_rate(),
+                "角色使用统计已更新"
+            );
         }
     }
 

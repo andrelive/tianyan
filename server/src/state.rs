@@ -392,6 +392,12 @@ impl AppState {
         let role_registry = Arc::new(
             tianyan::agent::RoleRegistry::load_persisted(&role_store, &config.agent_roles).await?,
         );
+        // ADR-016 P3：角色向量路由（suggest_role 工具）
+        let role_router = Arc::new(tianyan::agent::RoleRouter::new(
+            role_store.clone(),
+            model_services.embedding.clone(),
+            resolve_embedding_model(&config),
+        ));
 
         // 创建持久化会话管理器（唯一实例：Agent 与 API 层共享，避免双写）
         let session_manager = Arc::new(PersistentSessionManager::new(vfs.clone()));
@@ -412,6 +418,7 @@ impl AppState {
             session_manager.clone(),
             Some(trace_collector.clone()),
             role_registry.clone(),
+            role_router,
         )
         .await?;
 
@@ -530,6 +537,12 @@ impl AppState {
         self.role_registry
             .apply_persisted(&self.role_store, &config.agent_roles)
             .await?;
+        // ADR-016 P3：热重载重建路由器（embedding 模型可能变化）
+        let role_router = Arc::new(tianyan::agent::RoleRouter::new(
+            self.role_store.clone(),
+            model_services.embedding.clone(),
+            resolve_embedding_model(&config),
+        ));
         let new_agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -544,6 +557,7 @@ impl AppState {
             self.session_manager.clone(),
             Some(self.trace_collector.clone()),
             self.role_registry.clone(),
+            role_router,
         )
         .await?;
 

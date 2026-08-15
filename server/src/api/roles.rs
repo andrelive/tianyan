@@ -56,6 +56,24 @@ pub struct RoleSummary {
     /// durable 角色会话（无会话时为 None）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<RoleSessionSummary>,
+    /// 使用统计（调用/成功/失败/成功率；无记录时为 None）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RoleUsageSummary>,
+}
+
+/// 角色使用统计摘要（ADR-016 P3）。
+#[derive(Debug, Clone, Serialize)]
+pub struct RoleUsageSummary {
+    /// 累计调用次数。
+    pub calls: u32,
+    /// 成功次数。
+    pub success: u32,
+    /// 失败次数。
+    pub failed: u32,
+    /// 成功率（0-1）。
+    pub success_rate: f32,
+    /// 最后使用时间（epoch 毫秒）。
+    pub last_used: i64,
 }
 
 /// 角色详情（列表字段 + 完整系统提示 + 工具白名单）。
@@ -164,6 +182,19 @@ async fn to_summary(store: &RoleStore, role: &tianyan::agent::AgentRole) -> Role
             created_at: s.created_at,
             updated_at: s.updated_at,
         });
+    // ADR-016 P3：使用统计（退役信号 / 演化门控可见性）
+    let usage = store
+        .load_role_usage(&role.name)
+        .await
+        .ok()
+        .filter(|u| u.calls > 0)
+        .map(|u| RoleUsageSummary {
+            calls: u.calls,
+            success: u.success,
+            failed: u.failed,
+            success_rate: u.success_rate(),
+            last_used: u.last_used,
+        });
     RoleSummary {
         name: role.name.clone(),
         source: source_str(role.source),
@@ -175,6 +206,7 @@ async fn to_summary(store: &RoleStore, role: &tianyan::agent::AgentRole) -> Role
         model: role.model.clone(),
         max_turns: role.max_turns,
         session,
+        usage,
     }
 }
 

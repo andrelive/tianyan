@@ -67,6 +67,7 @@ impl AgentBuilderFactory {
         session_manager: Arc<dyn SessionManager>,
         trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,
         role_registry: Arc<tianyan::agent::RoleRegistry>,
+        role_router: Arc<tianyan::agent::RoleRouter>,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
@@ -88,6 +89,7 @@ impl AgentBuilderFactory {
             .with_chat_model_spec(chat_model_spec)
             .with_model_service(model_services.chat)
             .with_role_registry(role_registry)
+            .with_role_router(role_router)
             .with_vfs(vfs.clone())
             .with_retriever(Arc::new(retriever))
             .with_skill_executor(skill_executor)
@@ -155,6 +157,7 @@ impl AgentBuilderFactory {
         session_manager: Arc<dyn SessionManager>,
         trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,
         role_registry: Arc<tianyan::agent::RoleRegistry>,
+        role_router: Arc<tianyan::agent::RoleRouter>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -170,6 +173,7 @@ impl AgentBuilderFactory {
             session_manager,
             trace_collector,
             role_registry,
+            role_router,
         )
         .await
         {

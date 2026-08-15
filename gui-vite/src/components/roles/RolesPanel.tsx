@@ -173,6 +173,14 @@ export default function RolesPanel() {
                         {role.session && role.session.task_count > 0 && (
                           <span>会话 {role.session.task_count} 任务</span>
                         )}
+                        {role.usage && role.usage.calls > 0 && (
+                          <span
+                            className={role.usage.success_rate < 0.5 ? 'text-red-600 dark:text-red-400' : ''}
+                            title={`${role.usage.success}/${role.usage.calls} 次成功`}
+                          >
+                            成功率 {Math.round(role.usage.success_rate * 100)}%
+                          </span>
+                        )}
                       </p>
                     </div>
                     {selectedName === role.name && <ChevronRight size={14} className="shrink-0 ml-2 text-blue-500" />}
@@ -219,6 +227,14 @@ export default function RolesPanel() {
                   <span className="inline-flex items-center gap-1">
                     <Clock size={11} />
                     会话 {selectedRole.session.task_count} 任务 / {selectedRole.session.message_count} 消息，最后使用 {formatTime(selectedRole.session.updated_at)}
+                  </span>
+                )}
+                {selectedRole.usage && selectedRole.usage.calls > 0 && (
+                  <span
+                    className={selectedRole.usage.success_rate < 0.5 ? 'text-red-600 dark:text-red-400' : ''}
+                    title={`${selectedRole.usage.success}/${selectedRole.usage.calls} 次成功 / ${selectedRole.usage.failed} 次失败`}
+                  >
+                    调用 {selectedRole.usage.calls} 次，成功率 {Math.round(selectedRole.usage.success_rate * 100)}%
                   </span>
                 )}
               </div>

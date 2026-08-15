@@ -7,7 +7,7 @@ use crate::agent::r#loop::{AgentLoop, AgentLoopConfig};
 use crate::agent::role_learning::{RoleLearningConfig, RoleLearningEngine};
 use crate::agent::role_store::RoleStore;
 use crate::agent::tool_registry::ToolRegistry;
-use crate::agent::RoleRegistry;
+use crate::agent::{RoleRegistry, RoleRouter};
 use crate::common::error::{Result, TianyanError};
 use crate::config::AgentConfig;
 use crate::config::AgentRolesConfig;
@@ -66,6 +66,8 @@ pub struct AgentBuilder {
     agent_roles: Option<AgentRolesConfig>,
     /// 注入的角色注册表（ADR-016：VFS 加载的持久化注册表；优先于 [agent_roles] 合成）。
     role_registry: Option<Arc<RoleRegistry>>,
+    /// 角色向量路由器（ADR-016 P3：suggest_role 工具依赖）。
+    role_router: Option<Arc<RoleRouter>>,
     /// 结构化 Trace 收集器（G6；None 时不记录 span）。
     trace_collector: Option<Arc<crate::observability::trace::TraceCollector>>,
     /// 聊天模型上下文规格（T5；注入 AgentLoop 并联动压缩窗口；None 时走默认窗口）。
@@ -99,6 +101,7 @@ impl AgentBuilder {
             chat_model_spec: None,
             command_logs_dir: None,
             role_registry: None,
+            role_router: None,
         }
     }
 
@@ -225,6 +228,12 @@ impl AgentBuilder {
         self
     }
 
+    /// 注入角色向量路由器（ADR-016 P3：suggest_role 工具依赖）。
+    pub fn with_role_router(mut self, router: Arc<RoleRouter>) -> Self {
+        self.role_router = Some(router);
+        self
+    }
+
     /// 设置结构化 Trace 收集器（G6：轮次/工具/任务 span 持久化）。
     pub fn with_trace_collector(
         mut self,
@@ -333,6 +342,10 @@ impl AgentBuilder {
         // 后台命令日志目录（execute_command(background) 日志落盘）
         if let Some(dir) = self.command_logs_dir {
             tool_registry = tool_registry.with_command_logs_dir(dir);
+        }
+        // 角色向量路由器（suggest_role 工具）
+        if let Some(router) = self.role_router {
+            tool_registry = tool_registry.with_role_router(router);
         }
         // 子 Agent 角色注册表（delegate_to_agent role 参数）
         if let Some(registry) = self.role_registry {
