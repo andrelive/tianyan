@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
+use crate::agent::role_store::RoleStore;
 use crate::agent::tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams,
 };
@@ -252,6 +253,11 @@ impl ToolRegistry {
         })
     }
 
+    /// 角色会话存储（ADR-016 决策 5；VFS 未配置时 None——无会话语义，行为同现状）。
+    fn role_session_store(&self) -> Option<RoleStore> {
+        self.vfs.clone().map(RoleStore::new)
+    }
+
     /// 委托核心循环（前台/后台共用）。
     ///
     /// 深度保护由调用方负责（前台在入口，后台任务内由内层委托自行检查）。
@@ -326,10 +332,53 @@ impl ToolRegistry {
         let role_tools: Option<Vec<String>> = role.as_ref().and_then(|r| r.tools.clone());
         let role_name: Option<String> = role.as_ref().map(|r| r.name.clone());
 
+        // ADR-016 决策 5：durable 角色会话（仅 role 委托生效；主 agent 自主决策）
+        let session_mode = params.session.as_deref().unwrap_or("continue");
+        // (role, 历史任务数, 加载消息数)——返回时附加给主 agent 作决策依据
+        let mut session_meta: Option<(String, u32, usize)> = None;
         let mut sub_messages: Vec<Message> = Vec::new();
-        if let Some(prompt) = system_prompt.as_deref() {
-            if !prompt.is_empty() {
-                sub_messages.push(Message::system(prompt));
+        if let Some(role_name) = role_name.as_deref() {
+            match session_mode {
+                "new" => {
+                    // 新会话：干净上下文（不加载历史；执行后覆盖保存）
+                }
+                "discard" => {
+                    // 显式废弃旧会话（旧事实已过期），再开新会话执行
+                    if let Some(store) = self.role_session_store() {
+                        if let Err(e) = store.clear_role_session(role_name).await {
+                            tracing::warn!(role = %role_name, error = %e, "角色会话废弃失败");
+                        }
+                    }
+                }
+                _ => {
+                    // continue（默认）：续用持久会话（领域记忆复用）
+                    if let Some(store) = self.role_session_store() {
+                        if let Ok(Some(session)) = store.load_role_session(role_name).await {
+                            let loaded = session.messages.len();
+                            let mut history = session.messages;
+                            // 截断保护：保留首条（系统提示）+ 最近 N-1 条
+                            const MAX_SESSION_MESSAGES: usize = 60;
+                            if history.len() > MAX_SESSION_MESSAGES {
+                                let first = history[0].clone();
+                                let tail =
+                                    history.split_off(history.len() - (MAX_SESSION_MESSAGES - 1));
+                                history = tail;
+                                history.insert(0, first);
+                            }
+                            sub_messages = history;
+                            session_meta =
+                                Some((role_name.to_string(), session.task_count, loaded));
+                        }
+                    }
+                }
+            }
+        }
+        // 无历史（首委托 / new / discard 或无会话存储）时注入系统提示
+        if sub_messages.is_empty() {
+            if let Some(prompt) = system_prompt.as_deref() {
+                if !prompt.is_empty() {
+                    sub_messages.push(Message::system(prompt));
+                }
             }
         }
         sub_messages.push(Message::user(&params.task));
@@ -394,20 +443,29 @@ impl ToolRegistry {
                 } else {
                     // LLM provided a final answer — record it and return.
                     sub_messages.push(Message::assistant(assistant_msg.content.clone()));
-                    return Ok(serde_json::json!({
-                        "result": assistant_msg.content,
-                        "total_tokens": total_tokens,
-                    }));
+                    return Ok((
+                        serde_json::json!({
+                            "result": assistant_msg.content,
+                            "total_tokens": total_tokens,
+                        }),
+                        sub_messages.clone(),
+                    ));
                 }
             }
 
-            Ok(serde_json::json!({
-                "result": format!("sub-task reached max turns ({}) without final answer", max_turns),
-                "total_tokens": total_tokens,
-            }))
+            Ok((
+                serde_json::json!({
+                    "result": format!(
+                        "sub-task reached max turns ({}) without final answer",
+                        max_turns
+                    ),
+                    "total_tokens": total_tokens,
+                }),
+                sub_messages.clone(),
+            ))
         };
 
-        match timeout_secs {
+        let outcome = match timeout_secs {
             Some(secs) => {
                 let result =
                     tokio::time::timeout(std::time::Duration::from_secs(secs), run_loop).await;
@@ -420,6 +478,35 @@ impl ToolRegistry {
                 }
             }
             None => run_loop.await,
+        };
+
+        // ADR-016 决策 5：成功路径持久化角色会话（continue/new/discard 统一覆盖保存）
+        if let (Some(name), Some(store)) = (role_name.as_deref(), self.role_session_store()) {
+            if let Ok((_, final_messages)) = &outcome {
+                let task_count = session_meta.as_ref().map(|(_, n, _)| *n).unwrap_or(0) + 1;
+                if let Err(e) = store
+                    .save_role_session(name, final_messages, task_count)
+                    .await
+                {
+                    tracing::warn!(role = %name, error = %e, "角色会话保存失败");
+                }
+            }
+        }
+
+        // 返回时附加会话决策信息（主 agent 下一轮决策依据）
+        match outcome {
+            Ok((mut value, _)) => {
+                if let Some((name, prev_count, loaded)) = session_meta {
+                    value["role_session"] = serde_json::json!({
+                        "role": name,
+                        "mode": session_mode,
+                        "task_count": prev_count + 1,
+                        "loaded_messages": loaded,
+                    });
+                }
+                Ok(value)
+            }
+            Err(e) => Err(e),
         }
     }
 

@@ -11,8 +11,29 @@ use std::sync::Arc;
 
 use crate::agent::roles::{AgentRole, RoleStatus};
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
+use crate::common::types::{ContentLevel, ContextNamespace, Message, TianyanUri};
 use crate::vfs::VirtualFileSystem;
+
+/// 角色会话快照（ADR-016 决策 5：durable 角色会话）。
+#[derive(Debug, Clone, Default)]
+pub struct RoleSession {
+    /// 消息历史（JSONL 持久化；第一条为角色系统提示）。
+    pub messages: Vec<Message>,
+    /// 累计任务数（主 agent 决策依据）。
+    pub task_count: u32,
+    /// 会话创建时间（epoch 毫秒）。
+    pub created_at: i64,
+    /// 最后更新时间（epoch 毫秒）。
+    pub updated_at: i64,
+}
+
+/// 角色会话元信息（L0 存储）。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct RoleSessionMeta {
+    task_count: u32,
+    created_at: i64,
+    updated_at: i64,
+}
 
 /// 角色存储的路径前缀（`tianyan://agent/roles/`）。
 pub const ROLES_PREFIX: &str = "roles";
@@ -127,6 +148,101 @@ impl RoleStore {
         Ok(())
     }
 
+    /// 角色会话 URI（`tianyan://agent/role_sessions/<name>`）。
+    fn role_session_uri(name: &str) -> TianyanUri {
+        TianyanUri::new(
+            ContextNamespace::Agent,
+            vec!["role_sessions".to_string(), name.to_string()],
+        )
+    }
+
+    /// 加载角色会话（ADR-016 决策 5：durable 角色会话）。
+    ///
+    /// 消息存 L2（JSONL），元信息（任务数/时间戳）存 L0。None = 无会话。
+    pub async fn load_role_session(&self, name: &str) -> Result<Option<RoleSession>> {
+        let uri = Self::role_session_uri(name);
+        if !self.vfs.exists(&uri).await? {
+            return Ok(None);
+        }
+        let jsonl = self
+            .vfs
+            .read_content(&uri, ContentLevel::Detail)
+            .await
+            .map_err(|e| TianyanError::Custom(format!("role_store: 角色会话读取失败：{e}")))?;
+        let messages: Vec<Message> = jsonl
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<Message>(l.trim()).ok())
+            .collect();
+        if messages.is_empty() {
+            return Ok(None);
+        }
+        // 元信息（L0）解析失败时使用默认值（会话仍可用）
+        let meta = self
+            .vfs
+            .read_abstract(&uri)
+            .await
+            .ok()
+            .and_then(|m| serde_json::from_str::<RoleSessionMeta>(&m).ok())
+            .unwrap_or_default();
+        Ok(Some(RoleSession {
+            messages,
+            task_count: meta.task_count,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+        }))
+    }
+
+    /// 保存角色会话（覆盖写；消息截断由调用方负责）。
+    pub async fn save_role_session(
+        &self,
+        name: &str,
+        messages: &[Message],
+        task_count: u32,
+    ) -> Result<()> {
+        let uri = Self::role_session_uri(name);
+        if let Some(parent) = uri.parent() {
+            if !self.vfs.exists(&parent).await? {
+                self.vfs.create_directory(&parent).await?;
+            }
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        // 首次创建时间保留（写入前读取旧会话——写后读取会拿到尚未写入的新 meta）
+        let prev_created = self
+            .load_role_session(name)
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.created_at)
+            .unwrap_or(now);
+        let jsonl = messages
+            .iter()
+            .filter_map(|m| serde_json::to_string(m).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.vfs.write_content(&uri, &jsonl).await?;
+        let meta = RoleSessionMeta {
+            task_count,
+            created_at: prev_created,
+            updated_at: now,
+        };
+        let meta_json = serde_json::to_string(&meta)
+            .map_err(|e| TianyanError::Custom(format!("role_store: 会话元信息序列化失败：{e}")))?;
+        self.vfs.write_abstract(&uri, &meta_json).await
+    }
+
+    /// 废弃角色会话（discard 语义：删除消息与元信息）。
+    pub async fn clear_role_session(&self, name: &str) -> Result<()> {
+        let uri = Self::role_session_uri(name);
+        if self.vfs.exists(&uri).await? {
+            self.vfs.delete(&uri).await?;
+        }
+        Ok(())
+    }
+
     /// 保存用户配置签名（`[agent_roles]` 序列化文本；配置变更检测用）。
     pub async fn save_config_sig(&self, sig: &str) -> Result<()> {
         let uri = TianyanUri::new(
@@ -217,5 +333,67 @@ mod tests {
         store.delete_role("data-analyst").await.unwrap();
         let roles = store.load_roles().await.unwrap();
         assert!(roles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_role_session_roundtrip_and_clear() {
+        // durable 角色会话：消息 JSONL + 元信息（task_count/时间戳）往返
+        let (vfs, _dir) = real_vfs().await;
+        let store = RoleStore::new(vfs);
+        let msgs = vec![
+            Message::system("你是检索助手。"),
+            Message::user("调研 A"),
+            Message::assistant("完成 A"),
+        ];
+        store
+            .save_role_session("researcher", &msgs, 1)
+            .await
+            .unwrap();
+
+        let session = store
+            .load_role_session("researcher")
+            .await
+            .unwrap()
+            .expect("会话应存在");
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages[1].content, "调研 A");
+        assert_eq!(session.task_count, 1);
+        assert!(session.created_at > 0);
+        assert_eq!(session.updated_at, session.created_at);
+
+        // 续写：追加任务，task_count 递增
+        let mut msgs2 = session.messages.clone();
+        msgs2.push(Message::user("调研 B"));
+        msgs2.push(Message::assistant("完成 B"));
+        store
+            .save_role_session("researcher", &msgs2, 2)
+            .await
+            .unwrap();
+        let session2 = store
+            .load_role_session("researcher")
+            .await
+            .unwrap()
+            .expect("会话应存在");
+        assert_eq!(session2.messages.len(), 5);
+        assert_eq!(session2.task_count, 2);
+        assert_eq!(
+            session2.created_at, session.created_at,
+            "created_at 应保留首次创建时间"
+        );
+
+        // discard 语义：clear 后会话消失
+        store.clear_role_session("researcher").await.unwrap();
+        assert!(store
+            .load_role_session("researcher")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_role_session_missing_returns_none() {
+        let (vfs, _dir) = real_vfs().await;
+        let store = RoleStore::new(vfs);
+        assert!(store.load_role_session("ghost").await.unwrap().is_none());
     }
 }

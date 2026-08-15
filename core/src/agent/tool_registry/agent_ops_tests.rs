@@ -20,6 +20,7 @@ use crate::observability::AgentMetrics;
 use crate::skills::{
     ExecutionContext, Skill, SkillExecutionResult, SkillExecutor, SkillHandler, SkillRegistry,
 };
+use crate::vfs::VirtualFileSystem;
 
 use super::*;
 
@@ -644,6 +645,116 @@ async fn test_delegate_explicit_system_prompt_beats_role() {
 }
 
 #[tokio::test]
+async fn test_delegate_role_session_continue_loads_history() {
+    // ADR-016 决策 5：durable 角色会话——第二次 continue 委托加载历史，
+    // 请求消息含首次任务的 user 消息与 assistant 回答；返回带 role_session 决策信息
+    let mut roles = HashMap::new();
+    roles.insert(
+        "researcher".to_string(),
+        AgentRole {
+            name: "researcher".to_string(),
+            system_prompt: Some("你是检索助手。".to_string()),
+            ..Default::default()
+        },
+    );
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .times(1)
+        .returning(|_| Ok(chat_response("answer1")));
+    mock.expect_chat_completion()
+        .times(1)
+        .withf(|req: &ChatCompletionRequest| {
+            // 第二次请求应携带首次委托的历史（t1 的 user 消息 + answer1）
+            req.messages.iter().any(|m| m.content.contains("t1"))
+                && req.messages.iter().any(|m| m.content.contains("answer1"))
+                && req.messages.iter().any(|m| m.content.contains("t2"))
+        })
+        .returning(|_| Ok(chat_response("answer2")));
+
+    let (vfs, _dir) = real_vfs().await;
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("main-model")
+        .with_vfs(vfs)
+        .with_role_registry(Arc::new(RoleRegistry::from_config(&AgentRolesConfig {
+            roles,
+        })));
+
+    // 第一次委托（默认 continue，无历史 → 相当于首次）
+    let r1 = registry
+        .execute_delegate_to_agent(r#"{"task":"t1","role":"researcher"}"#, "session-1")
+        .await
+        .unwrap();
+    assert_eq!(r1["result"].as_str().unwrap(), "answer1");
+
+    // 第二次 continue：加载历史执行
+    let r2 = registry
+        .execute_delegate_to_agent(
+            r#"{"task":"t2","role":"researcher","session":"continue"}"#,
+            "session-1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r2["result"].as_str().unwrap(), "answer2");
+    // 决策信息：task_count 累计、loaded_messages 为历史条数（system + t1 + answer1 = 3）
+    let session_info = &r2["role_session"];
+    assert_eq!(session_info["role"].as_str().unwrap(), "researcher");
+    assert_eq!(session_info["mode"].as_str().unwrap(), "continue");
+    assert_eq!(session_info["task_count"].as_u64().unwrap(), 2);
+    assert_eq!(session_info["loaded_messages"].as_u64().unwrap(), 3);
+}
+
+#[tokio::test]
+async fn test_delegate_role_session_discard_starts_fresh() {
+    // discard：废弃旧会话（历史不再加载），且 role_session 信息不携带历史计数
+    let mut roles = HashMap::new();
+    roles.insert(
+        "researcher".to_string(),
+        AgentRole {
+            name: "researcher".to_string(),
+            system_prompt: Some("你是检索助手。".to_string()),
+            ..Default::default()
+        },
+    );
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .times(1)
+        .returning(|_| Ok(chat_response("answer1")));
+    mock.expect_chat_completion()
+        .times(1)
+        .withf(|req: &ChatCompletionRequest| {
+            // discard 后是干净上下文：不含历史任务 t1
+            !req.messages.iter().any(|m| m.content.contains("t1"))
+                && req.messages.iter().any(|m| m.content.contains("t3"))
+        })
+        .returning(|_| Ok(chat_response("answer3")));
+
+    let (vfs, _dir) = real_vfs().await;
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("main-model")
+        .with_vfs(vfs)
+        .with_role_registry(Arc::new(RoleRegistry::from_config(&AgentRolesConfig {
+            roles,
+        })));
+
+    let _ = registry
+        .execute_delegate_to_agent(r#"{"task":"t1","role":"researcher"}"#, "session-1")
+        .await
+        .unwrap();
+    let r3 = registry
+        .execute_delegate_to_agent(
+            r#"{"task":"t3","role":"researcher","session":"discard"}"#,
+            "session-1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(r3["result"].as_str().unwrap(), "answer3");
+    // discard 无历史加载：role_session 信息不存在（新会话从头计数）
+    assert!(r3.get("role_session").is_none());
+}
+
+#[tokio::test]
 async fn test_delegate_role_filters_disallowed_tools() {
     // 角色白名单外的工具：不执行，合成错误结果回喂模型（循环继续，不硬失败）
     let mut mock = MockChatService::new();
@@ -920,4 +1031,22 @@ async fn test_background_assigns_correct_parent_session() {
         task_b.parent_session_id, "session-b",
         "任务 B 应归属 session-b"
     );
+}
+
+/// 真实文件后端 + tempdir 的 VFS（角色会话存储用）。
+async fn real_vfs() -> (Arc<dyn VirtualFileSystem>, tempfile::TempDir) {
+    use crate::config::StorageConfig;
+    use crate::vfs::backend::LocalFileBackend;
+    use crate::vfs::{MockVectorStorage, VectorStorage, VfsCore, VirtualFileSystemImpl};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        data_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let storage = Arc::new(LocalFileBackend::new(config.clone()));
+    let vector_storage: Arc<dyn VectorStorage> = Arc::new(MockVectorStorage::new());
+    let vfs = VirtualFileSystemImpl::new(storage, vector_storage, config);
+    vfs.initialize().await.unwrap();
+    (Arc::new(vfs), dir)
 }
