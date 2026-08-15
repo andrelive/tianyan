@@ -121,9 +121,14 @@ impl TianyanConfig {
             .build()
             .map_err(|e| TianyanError::Custom(format!("配置加载失败：构建配置失败：{}", e)))?;
 
-        let config: TianyanConfig = config_raw
+        let mut config: TianyanConfig = config_raw
             .try_deserialize()
             .map_err(|e| TianyanError::Custom(format!("配置加载失败：反序列化配置失败：{}", e)))?;
+
+        // 规范化 data_dir：展开 `~` 前缀（配置常见写法 `~/.tianyan`；
+        // 不展开时会被当作相对路径落在进程 cwd 下——历史上数据落到了
+        // `{cwd}/~/.tianyan`）。
+        config.storage.data_dir = expand_user_dir(&config.storage.data_dir);
 
         config
             .validate()
@@ -221,6 +226,24 @@ impl TianyanConfig {
     }
 }
 
+/// 展开用户目录前缀 `~`（`~` / `~/x` / `~\x`）；无 `~` 前缀时原样返回。
+///
+/// 配置中的 data_dir 常见写法 `~/.tianyan`：不展开会被当作相对路径落在
+/// 进程 cwd 下（历史上数据落在了 `{cwd}/~/.tianyan`）。
+fn expand_user_dir(path: &std::path::Path) -> std::path::PathBuf {
+    let Some(home) = dirs::home_dir() else {
+        return path.to_path_buf();
+    };
+    if path == std::path::Path::new("~") {
+        return home;
+    }
+    match path.strip_prefix("~") {
+        Ok(rest) if rest.as_os_str().is_empty() => home,
+        Ok(rest) => home.join(rest),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
 /// 全局静态配置实例。
 ///
 /// 使用 `std::sync::OnceLock` 实现延迟加载，配置只在首次访问时加载。
@@ -308,6 +331,23 @@ mod tests {
     fn test_default_config() {
         let config = TianyanConfig::default();
         assert!(!config.storage.data_dir.as_os_str().is_empty());
+    }
+    #[test]
+    fn test_expand_user_dir() {
+        let home = dirs::home_dir().unwrap();
+        // 纯 `~` → home
+        assert_eq!(expand_user_dir(std::path::Path::new("~")), home);
+        // `~/x` → home/x
+        assert_eq!(
+            expand_user_dir(std::path::Path::new("~/tianyan")),
+            home.join("tianyan")
+        );
+        // 无 `~` 前缀原样
+        let abs = std::path::PathBuf::from("C:\\data\\tianyan");
+        assert_eq!(expand_user_dir(&abs), abs);
+        // 非前缀 `~` 不展开
+        let rel = std::path::PathBuf::from("a~b");
+        assert_eq!(expand_user_dir(&rel), rel);
     }
 
     #[test]
