@@ -208,7 +208,7 @@ impl AgentLoop {
         initial_parent_id: Option<&str>,
         model: &str,
         cancel: Option<&AtomicBool>,
-        thinking_effort: Option<crate::model::types::ThinkingEffort>,
+        thinking_effort: Option<String>,
     ) -> Result<AgentLoopResult, TianyanError> {
         self.run_turns(
             messages,
@@ -218,6 +218,8 @@ impl AgentLoop {
             model,
             cancel,
             |this, model, _sender, msgs, _cancel| {
+                // FnMut 闭包按值捕获 thinking_effort，每次调用 clone 供本轮使用
+                let thinking_effort = thinking_effort.clone();
                 Box::pin(async move {
                     let tools = this.tools_for_turn(&msgs).await;
 
@@ -305,7 +307,7 @@ impl AgentLoop {
         initial_parent_id: Option<&str>,
         model: &str,
         cancel: Option<&AtomicBool>,
-        thinking_effort: Option<crate::model::types::ThinkingEffort>,
+        thinking_effort: Option<String>,
     ) -> Result<AgentLoopResult, TianyanError> {
         self.run_turns(
             messages,
@@ -315,6 +317,8 @@ impl AgentLoop {
             model,
             cancel,
             |this, model, sender, msgs, cancel| {
+                // FnMut 闭包按值捕获 thinking_effort，每次调用 clone 供本轮使用
+                let thinking_effort = thinking_effort.clone();
                 Box::pin(async move {
                     let sender = sender.ok_or_else(|| {
                         TianyanError::Custom("agent_loop: 流式路径缺少 stream_sender".to_string())

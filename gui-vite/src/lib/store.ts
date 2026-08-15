@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type {
-  ThinkingEffort,
   View,
   StreamStatus,
   Theme,
@@ -84,9 +83,9 @@ interface AppState {
   selectedModel: string | null;
   setModel: (model: string | null) => void;
 
-  // 会话级思考强度（对话时选择，随每次请求下发；仅对支持思考的模型生效）
-  thinkingEffort: ThinkingEffort;
-  setThinkingEffort: (effort: ThinkingEffort) => void;
+  // 会话级思考强度档位（对话时选择，随每次请求下发；值为当前模型声明的档位）
+  thinkingEffort: string;
+  setThinkingEffort: (effort: string) => void;
 
   // 聊天模型目录（含每模型思考档位；ThinkingSelect 按当前模型档位渲染）
   chatModels: ModelInfo[];

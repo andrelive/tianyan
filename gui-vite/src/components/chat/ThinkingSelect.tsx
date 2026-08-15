@@ -2,28 +2,14 @@ import { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '@/lib/store';
 import { Brain, ChevronDown, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { ThinkingEffort } from '@/lib/types';
 
-/** 档位显示名（未知档位回退显示原 id）。 */
-const EFFORT_LABELS: Record<string, string> = {
-  off: '关闭',
-  low: '低',
-  medium: '中',
-  high: '高',
-};
-
-/** 档位说明。 */
-const EFFORT_HINTS: Record<string, string> = {
-  off: '不附加思考参数，使用模型默认行为',
-  low: '低强度思考',
-  medium: '中强度思考',
-  high: '高强度思考',
-};
+/** 内置"关闭"档位（不附加思考参数；不属于模型声明，恒提供）。 */
+const OFF_EFFORT = 'off';
 
 /**
- * 会话级思考强度选择（参考 DSH ModelSelect 的 Effort 选择、opencode 的
- * variants 切换）：档位集来自**当前模型自己的声明**（后端 /config/models
- * 返回 reasoning_efforts，显式配置 > 内置模型表），模型不支持思考时隐藏。
+ * 会话级思考强度选择：档位集来自**当前模型自己声明的值**（后端 /config/models
+ * 返回 reasoning_efforts，显式配置 > 内置模型表），**原样展示不做本地翻译**
+ * （厂商档位可能为 low/high/max 等任意值）；模型不支持思考时隐藏。
  */
 export default function ThinkingSelect() {
   const thinkingEffort = useAppStore((s) => s.thinkingEffort);
@@ -33,18 +19,24 @@ export default function ThinkingSelect() {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
-  // 当前模型声明的档位（每个模型自己的；缺省 = 不支持思考 → 隐藏）
-  const efforts: ThinkingEffort[] | undefined = chatModels.find(
+  // 当前模型声明的档位值（每个模型自己的；缺省 = 不支持思考 → 隐藏）
+  const declared: string[] | undefined = chatModels.find(
     (m) => m.name === selectedModel,
   )?.reasoning_efforts ?? undefined;
-  const supportsThinking = !!efforts && efforts.length > 0 && !(efforts.length === 1 && efforts[0] === 'off');
+  const supportsThinking =
+    !!declared && declared.length > 0 && !(declared.length === 1 && declared[0] === OFF_EFFORT);
 
-  // 模型切换后若已选档位不在新模型档位集内 → 重置为 off
+  // 选项：恒含"关闭"，外加模型声明的档位值（去重、原样显示）
+  const options: string[] = supportsThinking
+    ? [OFF_EFFORT, ...declared!.filter((v) => v !== OFF_EFFORT)]
+    : [];
+
+  // 模型切换后若已选档位不在新模型档位集内 → 重置为关闭
   useEffect(() => {
-    if (efforts && !efforts.includes(thinkingEffort)) {
-      setThinkingEffort('off');
+    if (supportsThinking && !options.includes(thinkingEffort)) {
+      setThinkingEffort(OFF_EFFORT);
     }
-  }, [efforts, thinkingEffort, setThinkingEffort]);
+  }, [declared, thinkingEffort, setThinkingEffort]); // eslint-disable-line react-hooks/exhaustive-deps -- options 由 declared 派生
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -61,10 +53,10 @@ export default function ThinkingSelect() {
     };
   }, []);
 
-  if (!supportsThinking || !efforts) return null;
+  if (!supportsThinking) return null;
 
   const current = thinkingEffort;
-  const active = current !== 'off';
+  const active = current !== OFF_EFFORT;
 
   return (
     <div ref={ref} className="relative">
@@ -74,7 +66,7 @@ export default function ThinkingSelect() {
         aria-label="思考强度"
         aria-expanded={open}
         aria-haspopup="listbox"
-        title={'思考强度：' + (EFFORT_LABELS[current] ?? current) + '（当前模型支持思考）'}
+        title={'思考强度：' + current + '（当前模型声明的档位）'}
         className={cn(
           'flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition-colors',
           active
@@ -83,7 +75,7 @@ export default function ThinkingSelect() {
         )}
       >
         <Brain size={14} className={cn(active ? '' : 'opacity-60')} />
-        <span>{'思考 ' + (EFFORT_LABELS[current] ?? current)}</span>
+        <span>{'思考 ' + current}</span>
         <ChevronDown className={cn('w-3.5 h-3.5 transition-transform', open && 'rotate-180')} />
       </button>
 
@@ -91,9 +83,9 @@ export default function ThinkingSelect() {
         <div
           role="listbox"
           aria-label="思考强度列表"
-          className="absolute right-0 top-full mt-1 w-56 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg shadow-lg z-50 py-1"
+          className="absolute right-0 top-full mt-1 w-48 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg shadow-lg z-50 py-1"
         >
-          {efforts.map((opt) => (
+          {options.map((opt) => (
             <button
               key={opt}
               role="option"
@@ -109,12 +101,7 @@ export default function ThinkingSelect() {
                   : 'text-[var(--color-text-primary)]',
               )}
             >
-              <span className="flex flex-col items-start">
-                <span>{EFFORT_LABELS[opt] ?? opt}</span>
-                <span className="text-xs text-[var(--color-text-tertiary)] font-normal">
-                  {EFFORT_HINTS[opt] ?? '思考强度档位'}
-                </span>
-              </span>
+              <span>{opt === OFF_EFFORT ? '关闭' : opt}</span>
               {opt === current && <Check size={14} className="shrink-0" />}
             </button>
           ))}

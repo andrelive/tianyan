@@ -14,7 +14,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::common::token_estimator::TokenEstimator;
-use crate::model::types::ThinkingEffort;
 
 /// 模型上下文规格。
 ///
@@ -51,8 +50,9 @@ pub struct BuiltinEntry {
     pub model_prefix: &'static str,
     /// 上下文规格。
     pub spec: ModelSpec,
-    /// 该模型支持的思考强度档位（每个模型自己的档位集；None 表示不支持思考）。
-    pub reasoning_efforts: Option<&'static [ThinkingEffort]>,
+    /// 该模型支持的思考强度档位值（每个模型自己声明的档位集，如 "low"/"high"/"max"；
+    /// None 表示不支持思考）。
+    pub reasoning_efforts: Option<&'static [&'static str]>,
 }
 
 /// 内置规格表。
@@ -68,12 +68,7 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 32_000,
             max_input_tokens: 968_000,
         },
-        reasoning_efforts: Some(&[
-            ThinkingEffort::Off,
-            ThinkingEffort::Low,
-            ThinkingEffort::Medium,
-            ThinkingEffort::High,
-        ]),
+        reasoning_efforts: Some(&["off", "low", "high", "max"]),
     },
     BuiltinEntry {
         provider_prefix: "deepseek",
@@ -83,12 +78,8 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 32_000,
             max_input_tokens: 96_000,
         },
-        reasoning_efforts: Some(&[
-            ThinkingEffort::Off,
-            ThinkingEffort::Low,
-            ThinkingEffort::Medium,
-            ThinkingEffort::High,
-        ]),
+        // R1 为固定深度思考模型，官方不支持强度档位
+        reasoning_efforts: None,
     },
     BuiltinEntry {
         provider_prefix: "openai",
@@ -119,12 +110,7 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 32_000,
             max_input_tokens: 99_000,
         },
-        reasoning_efforts: Some(&[
-            ThinkingEffort::Off,
-            ThinkingEffort::Low,
-            ThinkingEffort::Medium,
-            ThinkingEffort::High,
-        ]),
+        reasoning_efforts: Some(&["off", "low", "medium", "high"]),
     },
     BuiltinEntry {
         provider_prefix: "qwen",
@@ -191,7 +177,7 @@ pub fn builtin_spec(provider: &str, model: &str) -> Option<ModelSpec> {
 /// 在内置表中查找模型声明的思考强度档位（三级匹配与 [`builtin_spec`] 相同）。
 ///
 /// 每个模型自己的档位集：返回 None 表示该模型不支持思考（前端不显示思考选择）。
-pub fn builtin_reasoning_efforts(provider: &str, model: &str) -> Option<&'static [ThinkingEffort]> {
+pub fn builtin_reasoning_efforts(provider: &str, model: &str) -> Option<&'static [&'static str]> {
     for entry in BUILTIN_SPECS {
         if provider.eq_ignore_ascii_case(entry.provider_prefix)
             && model.eq_ignore_ascii_case(entry.model_prefix)

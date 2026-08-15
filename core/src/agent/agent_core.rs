@@ -56,8 +56,8 @@ pub(crate) struct TurnOptions {
     pub do_snapshot: bool,
     /// 轮后是否执行压缩检查（用户轮与流式轮 true；澄清回答轮 false）。
     pub do_compress: bool,
-    /// 本会话思考强度（会话时选择；None 时使用模型默认）。
-    pub thinking_effort: Option<crate::model::types::ThinkingEffort>,
+    /// 本会话思考强度档位（会话时选择；None 时使用模型默认）。
+    pub thinking_effort: Option<String>,
 }
 
 /// 智能体协调器的默认实现。

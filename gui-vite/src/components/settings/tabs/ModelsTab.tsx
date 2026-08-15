@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { useAppStore } from '@/lib/store';
 import { Plus, Trash2, TestTube, Check, X, Loader2, RefreshCw } from 'lucide-react';
 import { Toggle, FieldRow, SectionTitle } from './shared';
 import type {
@@ -11,7 +10,6 @@ import type {
   DiscoveredModelInfo,
   ProviderProtocol,
   ResolvedModelSpec,
-  ThinkingEffort,
 } from '@/lib/types';
 import { MODEL_CAPABILITIES } from '@/lib/types';
 import { scanProviderModels } from '@/lib/api-client';
@@ -54,21 +52,18 @@ const CAPABILITY_LABELS: Record<ModelCapability, string> = {
 
 
 
-/** 合法思考强度档位词汇（OpenAI reasoning_effort 标准；模型声明自己的子集）。 */
-const VALID_EFFORTS = new Set<string>(['off', 'low', 'medium', 'high']);
-
 /**
- * 模型的思考强度档位值编辑器（每个模型自己的设置值，逗号分隔）：
- * 输入自由文本，失焦时解析并过滤非法值后提交；留空 = 走后端内置模型表自动匹配。
+ * 模型的思考强度档位值编辑器（每个模型自己声明的档位集，逗号分隔）：
+ * 值完全自由（如 low/high/max，由厂商/用户定义），不做任何本地映射或过滤；
+ * 留空 = 走后端内置模型表自动匹配。对话中选择强度时原样展示这些值。
  */
 function EffortInput({
   value,
   onChange,
 }: {
   value: string;
-  onChange: (efforts: ThinkingEffort[] | undefined) => void;
+  onChange: (efforts: string[] | undefined) => void;
 }) {
-  const showToast = useAppStore((s) => s.showToast);
   const [draft, setDraft] = useState(value);
 
   // 外部（保存/重载）更新时同步草稿
@@ -78,12 +73,7 @@ function EffortInput({
 
   const commit = () => {
     const tokens = draft.split(/[,，]/).map((v) => v.trim()).filter(Boolean);
-    const invalid = tokens.filter((v) => !VALID_EFFORTS.has(v));
-    const valid = tokens.filter((v) => VALID_EFFORTS.has(v)) as ThinkingEffort[];
-    if (invalid.length > 0) {
-      showToast('忽略无效思考档位值：' + invalid.join('、') + '（支持 off|low|medium|high）', 'info');
-    }
-    const next = valid.length > 0 ? valid : undefined;
+    const next = tokens.length > 0 ? tokens : undefined;
     setDraft((next ?? []).join(', '));
     onChange(next);
   };

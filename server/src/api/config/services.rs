@@ -98,15 +98,10 @@ impl ConfigService {
             .flat_map(|p| {
                 p.models.iter().map(|m| {
                     // 每个模型自己的思考档位：显式配置 > 内置模型表 > 无（不支持思考）
-                    let reasoning_efforts = m
-                        .reasoning_efforts
-                        .as_ref()
-                        .map(|e| e.iter().map(|effort| effort.as_str().to_string()).collect())
-                        .or_else(|| {
-                            tianyan::model::spec::builtin_reasoning_efforts(&p.name, &m.name).map(
-                                |e| e.iter().map(|effort| effort.as_str().to_string()).collect(),
-                            )
-                        });
+                    let reasoning_efforts = m.reasoning_efforts.clone().or_else(|| {
+                        tianyan::model::spec::builtin_reasoning_efforts(&p.name, &m.name)
+                            .map(|e| e.iter().map(|effort| (*effort).to_string()).collect())
+                    });
                     ModelInfo {
                         name: m.name.clone(),
                         provider: p.name.clone(),

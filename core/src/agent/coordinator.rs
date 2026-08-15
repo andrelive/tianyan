@@ -115,7 +115,7 @@ pub trait AgentCoordinator: Send + Sync {
         session_id: &str,
         message: &Message,
         model: Option<&str>,
-        thinking_effort: Option<crate::model::types::ThinkingEffort>,
+        thinking_effort: Option<String>,
     ) -> Result<AgentResponse>;
 
     /// 处理用户消息（流式响应）。
@@ -129,7 +129,7 @@ pub trait AgentCoordinator: Send + Sync {
         message: &Message,
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
-        thinking_effort: Option<crate::model::types::ThinkingEffort>,
+        thinking_effort: Option<String>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
 
     /// 处理用户对追问的回答。
@@ -222,7 +222,7 @@ impl AgentCoordinator for Agent {
         session_id: &str,
         message: &Message,
         model: Option<&str>,
-        thinking_effort: Option<crate::model::types::ThinkingEffort>,
+        thinking_effort: Option<String>,
     ) -> Result<AgentResponse> {
         let start = Instant::now();
 
@@ -272,7 +272,7 @@ impl AgentCoordinator for Agent {
         message: &Message,
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
-        thinking_effort: Option<crate::model::types::ThinkingEffort>,
+        thinking_effort: Option<String>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
         let state = self.load_and_build_state(session_id).await?;
         let model = model.unwrap_or(&self.default_model).to_string();

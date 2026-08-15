@@ -25,9 +25,6 @@ export interface ChatMessage {
   truncated_by_length?: boolean;
 }
 
-/** 思考强度等级（与后端 ThinkingEffort 对齐，off|low|medium|high）。 */
-export type ThinkingEffort = 'off' | 'low' | 'medium' | 'high';
-
 export interface ChatRequest {
   session_id?: string | null;
   /** 本轮输入消息（单条）——历史由服务端会话持久化提供，请求不携带全量历史 */
@@ -36,8 +33,8 @@ export interface ChatRequest {
   temperature: number;
   max_tokens: number;
   model?: string | null;
-  /** 本会话思考强度（会话时选择；off 不附加思考参数，仅对支持思考的模型生效） */
-  thinking?: ThinkingEffort;
+  /** 本会话思考强度档位（会话时选择；值为当前模型声明的档位，如 "high"/"max"，"off" 关闭） */
+  thinking?: string;
   /** 新会话绑定的工作目录（仅新建会话时生效） */
   working_directory?: string | null;
 }
@@ -463,8 +460,8 @@ export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
 export interface ProviderModelEntry {
   name: string;
   capabilities: ModelCapability[];
-  /** 该模型支持的思考强度档位（每个模型自己的；缺省查后端内置模型表） */
-  reasoning_efforts?: ThinkingEffort[];
+  /** 该模型支持的思考强度档位值（每个模型自己声明的，如 ["low","high","max"]；缺省查后端内置模型表） */
+  reasoning_efforts?: string[];
   /** 上下文窗口长度（token）。未配置时由后端内置模型表自动匹配。 */
   context_length?: number;
   /** 最大输出 token 数。未配置时走内置默认。 */
@@ -591,8 +588,8 @@ export interface ModelInfo {
   name: string;
   provider: string;
   capabilities: string[];
-  /** 该模型支持的思考强度档位（每个模型自己的；缺省/空 = 不支持思考） */
-  reasoning_efforts?: ThinkingEffort[] | null;
+  /** 该模型支持的思考强度档位值（每个模型自己声明的；缺省/空 = 不支持思考） */
+  reasoning_efforts?: string[] | null;
 }
 
 export interface ModelsResponse {

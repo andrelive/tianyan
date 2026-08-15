@@ -20,7 +20,6 @@ import type {
   ModelPreferencesState,
   ModelRef,
   ResolvedModelSpec,
-  ThinkingEffort,
 } from '@/lib/types';
 
 /* ─────── Default values ─────── */
@@ -114,8 +113,8 @@ interface BackendAgentConfig {
 interface BackendModelEntry {
   name: string;
   capabilities: string[];
-  /** 思考强度档位（每个模型自己的；缺省查内置模型表） */
-  reasoning_efforts?: ThinkingEffort[];
+  /** 思考强度档位值（每个模型自己声明的，如 ["low","high","max"]；缺省查内置模型表） */
+  reasoning_efforts?: string[];
   context_length?: number;
   max_output_tokens?: number;
   max_input_tokens?: number;
