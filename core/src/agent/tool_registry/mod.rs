@@ -293,6 +293,15 @@ impl ToolRegistry {
         self
     }
 
+    /// 设置后台命令完成通知器（execute_command(background) 完成时注入父会话）。
+    pub fn with_command_notifier(
+        mut self,
+        notifier: Arc<dyn crate::executor::CommandNotifier>,
+    ) -> Self {
+        self.command_tasks = Arc::new((*self.command_tasks).clone().with_notifier(notifier));
+        self
+    }
+
     /// 设置可观测性指标（self_check 工具依赖）。
     pub fn with_metrics(mut self, metrics: Arc<AgentMetrics>) -> Self {
         self.metrics = Some(metrics);

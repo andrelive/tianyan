@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -39,6 +40,25 @@ pub enum CommandTaskStatus {
     Cancelled,
 }
 
+/// 后台命令终态通知器（Agent 装配层注入；默认实现把通知持久化到父会话）。
+///
+/// `remaining` 为父会话中仍运行中的命令任务数（join 信号）。
+#[async_trait]
+pub trait CommandNotifier: Send + Sync {
+    /// 命令任务进入终态时调用（Completed / Failed / Cancelled）。
+    async fn on_command_terminal(&self, session_id: &str, task: &CommandTask, remaining: usize);
+}
+
+/// 后台命令唤醒器（ADR-013 语义：全部完成/失败时触发主 agent 新一轮生成）。
+///
+/// 由 Agent 装配层注入（Agent 侧转发到 process_wake）；判定规则在
+/// [`CommandManager`] 的 watcher：`should_wake = remaining == 0 || Failed`。
+#[async_trait]
+pub trait CommandWaker: Send + Sync {
+    /// 唤醒指定会话的主 agent。
+    async fn wake(&self, session_id: &str);
+}
+
 /// 后台命令任务快照（状态查询 / 列表返回）。
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandTask {
@@ -48,6 +68,8 @@ pub struct CommandTask {
     pub command: String,
     /// 工作目录。
     pub cwd: Option<String>,
+    /// 发起任务的父会话 ID（完成通知归属）。
+    pub parent_session_id: String,
     /// 状态。
     pub status: CommandTaskStatus,
     /// 退出码（Cancelled 时为 None）。
@@ -89,6 +111,12 @@ pub struct CommandManager {
     seq: Arc<AtomicU64>,
     logs_dir: Option<PathBuf>,
     semaphore: Arc<Semaphore>,
+    /// 完成通知器（Agent 装配层注入；None 时静默）。
+    notifier: Option<Arc<dyn CommandNotifier>>,
+    /// 唤醒器槽（ADR-013 语义：全部完成/失败时唤醒主 agent；构建后注入）。
+    waker: Arc<Mutex<Option<Arc<dyn CommandWaker>>>>,
+    /// 会话内运行中命令任务计数（remaining 信号）。
+    session_counts: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 impl CommandManager {
@@ -99,13 +127,24 @@ impl CommandManager {
             seq: Arc::new(AtomicU64::new(0)),
             logs_dir,
             semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_COMMANDS)),
+            notifier: None,
+            waker: Arc::new(Mutex::new(None)),
+            session_counts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// 后台启动命令：立即返回任务快照，进程在独立任务中运行。
     ///
-    /// 输出写日志文件 + 内存尾部；进程退出后由 watcher 任务更新终态。
-    pub async fn spawn_background(&self, command: &str, cwd: Option<&str>) -> Result<CommandTask> {
+    /// 输出写日志文件 + 内存尾部；进程退出后由 watcher 任务更新终态，
+    /// 并触发完成通知（注入父会话）+ 唤醒（ADR-013 语义）。
+    ///
+    /// `session_id` 为发起命令的父会话（完成通知归属）。
+    pub async fn spawn_background(
+        &self,
+        session_id: &str,
+        command: &str,
+        cwd: Option<&str>,
+    ) -> Result<CommandTask> {
         // 并发许可：排队等待（防失控扇出；许可随 watcher 任务结束自动释放）
         let _permit = self
             .semaphore
@@ -184,6 +223,7 @@ impl CommandManager {
             id: id.clone(),
             command: command.to_string(),
             cwd: cwd.map(str::to_string),
+            parent_session_id: session_id.to_string(),
             status: CommandTaskStatus::Running,
             exit_code: None,
             pid,
@@ -200,6 +240,12 @@ impl CommandManager {
                 cancelled: false,
             },
         );
+        *self
+            .session_counts
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_insert(0) += 1;
         self.evict_if_needed().await;
 
         // watcher：等进程退出 → 收 reader → 写退出标记 → 更新终态
@@ -235,17 +281,45 @@ impl CommandManager {
                     let _ = f.write_all(marker.as_bytes()).await;
                 }
             }
-            if let Some(entry) = tasks.get_mut(&id) {
-                if !is_cancelled {
-                    entry.task.status = if exit_code == Some(0) {
-                        CommandTaskStatus::Completed
-                    } else {
-                        CommandTaskStatus::Failed
-                    };
-                    entry.task.exit_code = exit_code;
+            let task_snapshot = {
+                if let Some(entry) = tasks.get_mut(&id) {
+                    if !is_cancelled {
+                        entry.task.status = if exit_code == Some(0) {
+                            CommandTaskStatus::Completed
+                        } else {
+                            CommandTaskStatus::Failed
+                        };
+                        entry.task.exit_code = exit_code;
+                    }
+                    entry.task.completed_at = Some(now_ms());
+                    entry.task.output_tail = tail_w.lock().await.clone();
                 }
-                entry.task.completed_at = Some(now_ms());
-                entry.task.output_tail = tail_w.lock().await.clone();
+                tasks.get(&id).map(|e| e.task.clone())
+            };
+            // 锁外收尾：remaining 计数 → 完成通知 → 唤醒（ADR-013）
+            if let Some(task) = task_snapshot {
+                let session_id = task.parent_session_id.clone();
+                let remaining = {
+                    let mut counts = manager.session_counts.lock().await;
+                    let n = counts
+                        .get(&session_id)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_sub(1);
+                    counts.insert(session_id.clone(), n);
+                    n
+                };
+                if let Some(notifier) = &manager.notifier {
+                    notifier
+                        .on_command_terminal(&session_id, &task, remaining)
+                        .await;
+                }
+                // should_wake = allComplete || failure（部分完成保持静默）
+                if remaining == 0 || task.status == CommandTaskStatus::Failed {
+                    if let Some(waker) = manager.waker.lock().await.clone() {
+                        waker.wake(&session_id).await;
+                    }
+                }
             }
         });
 
@@ -284,6 +358,17 @@ impl CommandManager {
             kill_process_tree(pid).await;
         }
         Ok(())
+    }
+
+    /// 设置完成通知器（Agent 装配层注入；None 时静默）。
+    pub fn with_notifier(mut self, notifier: Arc<dyn CommandNotifier>) -> Self {
+        self.notifier = Some(notifier);
+        self
+    }
+
+    /// 设置唤醒器（构建后注入；Agent 构建完成后注册自引用转发器）。
+    pub async fn set_waker(&self, waker: Arc<dyn CommandWaker>) {
+        *self.waker.lock().await = Some(waker);
     }
 
     /// 注册表保留上限：逐出最旧的终态任务。
@@ -550,7 +635,10 @@ mod tests {
     async fn test_spawn_background_echo_completes() {
         let dir = tempfile::tempdir().unwrap();
         let manager = CommandManager::new(Some(dir.path().to_path_buf()));
-        let task = manager.spawn_background("echo Hello", None).await.unwrap();
+        let task = manager
+            .spawn_background("sess-1", "echo Hello", None)
+            .await
+            .unwrap();
         assert!(
             task.id.starts_with(COMMAND_TASK_PREFIX),
             "ID 应带 cmd_ 前缀"
@@ -578,7 +666,7 @@ mod tests {
         } else {
             "sleep 30"
         };
-        let task = manager.spawn_background(cmd, None).await.unwrap();
+        let task = manager.spawn_background("sess-1", cmd, None).await.unwrap();
         manager.kill(&task.id).await.unwrap();
 
         let t = manager.get(&task.id).await.unwrap();
@@ -590,12 +678,102 @@ mod tests {
     #[tokio::test]
     async fn test_background_list_and_unknown() {
         let manager = CommandManager::new(None);
-        let task = manager.spawn_background("echo A", None).await.unwrap();
+        let task = manager
+            .spawn_background("sess-1", "echo A", None)
+            .await
+            .unwrap();
         let list = manager.list().await;
         assert!(list.iter().any(|t| t.id == task.id), "列表应包含新任务");
         assert!(
             manager.get("cmd_nope").await.is_none(),
             "未知 ID 应返回 None"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_background_completion_notifies_with_remaining() {
+        // 完成通知：终态触发 on_command_terminal，remaining 计数随任务数递减
+        #[derive(Clone)]
+        struct CountingNotifier {
+            calls: Arc<tokio::sync::Mutex<Vec<(String, String, usize)>>>,
+        }
+        #[async_trait]
+        impl CommandNotifier for CountingNotifier {
+            async fn on_command_terminal(
+                &self,
+                session_id: &str,
+                task: &CommandTask,
+                remaining: usize,
+            ) {
+                self.calls
+                    .lock()
+                    .await
+                    .push((session_id.to_string(), task.id.clone(), remaining));
+            }
+        }
+        let calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let manager = CommandManager::new(None).with_notifier(Arc::new(CountingNotifier {
+            calls: calls.clone(),
+        }));
+
+        let t1 = manager
+            .spawn_background("sess-1", "echo A", None)
+            .await
+            .unwrap();
+        let t2 = manager
+            .spawn_background("sess-1", "echo B", None)
+            .await
+            .unwrap();
+        wait_terminal(&manager, &t1.id).await;
+        wait_terminal(&manager, &t2.id).await;
+
+        let calls = calls.lock().await.clone();
+        assert_eq!(calls.len(), 2, "两个任务各触发一次通知");
+        assert!(calls.iter().all(|(s, _, _)| s == "sess-1"));
+        // remaining 单调递减：先完成的任务 remaining=1，后完成 remaining=0
+        let mut remainings: Vec<usize> = calls.iter().map(|(_, _, r)| *r).collect();
+        remainings.sort();
+        assert_eq!(remainings, vec![0, 1], "remaining 应为 1 → 0");
+    }
+
+    #[tokio::test]
+    async fn test_background_completion_wakes_on_all_done() {
+        // 唤醒：会话内全部命令完成后触发 waker（ADR-013：remaining == 0）
+        #[derive(Clone)]
+        struct CountingWaker {
+            wakes: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl CommandWaker for CountingWaker {
+            async fn wake(&self, session_id: &str) {
+                let _ = session_id;
+                self.wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let manager = CommandManager::new(None);
+        manager
+            .set_waker(Arc::new(CountingWaker {
+                wakes: wakes.clone(),
+            }))
+            .await;
+
+        let t1 = manager
+            .spawn_background("sess-w", "echo A", None)
+            .await
+            .unwrap();
+        let t2 = manager
+            .spawn_background("sess-w", "echo B", None)
+            .await
+            .unwrap();
+        wait_terminal(&manager, &t1.id).await;
+        wait_terminal(&manager, &t2.id).await;
+        // watcher 是异步收尾，稍等让唤醒回调执行
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            wakes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "全部完成后应唤醒恰好一次"
         );
     }
 }

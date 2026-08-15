@@ -87,6 +87,8 @@ pub struct Agent {
     /// 与工具执行路径共享状态）——避免 `Agent → AgentLoop → ToolRegistry`
     /// 三层穿透。
     pub(crate) background_tasks: Arc<BackgroundTaskManager>,
+    /// 后台命令管理器（execute_command(background) 状态机；与 ToolRegistry 共享同一 Arc）。
+    pub(crate) command_tasks: Arc<crate::executor::CommandManager>,
     /// 审批工作流（危险操作门控）。协调器响应/状态查询直接持有
     /// （与 ToolRegistry 共享同一 Arc）。
     pub(crate) approval_workflow: Option<Arc<ApprovalWorkflow>>,
@@ -115,6 +117,7 @@ impl Agent {
         // 协调器对后台任务/审批的直接入口，避免逐调用三层穿透。
         let tool_registry = agent_loop.tool_registry();
         let background_tasks = tool_registry.background_tasks.clone();
+        let command_tasks = tool_registry.command_tasks.clone();
         let approval_workflow = tool_registry.approval_workflow.clone();
         let pending_approval_fingerprints = tool_registry.pending_approval_fingerprints.clone();
         Self {
@@ -130,6 +133,7 @@ impl Agent {
             skill_refresher,
             turn_locks: Arc::new(TokioMutex::new(HashMap::new())),
             background_tasks,
+            command_tasks,
             approval_workflow,
             pending_approval_fingerprints,
         }
@@ -154,7 +158,11 @@ impl Agent {
     /// 由 server 装配层在 Agent 构建完成后调用（传入自引用转发器
     /// [`AgentWakeForwarder`]——Weak 打破循环引用）。
     pub async fn register_task_waker(&self, waker: Arc<dyn TaskWaker>) {
-        self.background_tasks.set_waker(waker).await;
+        self.background_tasks.set_waker(waker.clone()).await;
+        // 后台命令唤醒复用同一转发器（CommandWaker 适配）
+        self.command_tasks
+            .set_waker(Arc::new(CommandWakeAdapter(waker)))
+            .await;
     }
 
     /// 唤醒轮（ADR-013）：后台任务全部完成或失败时触发主 agent 新一轮。
@@ -1419,5 +1427,15 @@ impl TaskWaker for AgentWakeForwarder {
         tokio::spawn(async move {
             agent.process_wake(&session_id).await;
         });
+    }
+}
+
+/// TaskWaker → CommandWaker 适配器（后台命令唤醒复用委托层唤醒器）。
+struct CommandWakeAdapter(Arc<dyn TaskWaker>);
+
+#[async_trait::async_trait]
+impl crate::executor::CommandWaker for CommandWakeAdapter {
+    async fn wake(&self, session_id: &str) {
+        self.0.wake(session_id).await;
     }
 }

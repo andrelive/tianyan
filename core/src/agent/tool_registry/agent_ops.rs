@@ -101,7 +101,7 @@ impl ToolRegistry {
         if params.background == Some(true) {
             let task = self
                 .command_tasks
-                .spawn_background(&params.command, cwd.as_deref())
+                .spawn_background(session_id, &params.command, cwd.as_deref())
                 .await
                 .map_err(wrap_tool_error)?;
             return Ok(serde_json::json!({

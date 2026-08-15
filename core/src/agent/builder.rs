@@ -354,6 +354,10 @@ impl AgentBuilder {
         tool_registry = tool_registry.with_task_notifier(Arc::new(
             crate::agent::background::SessionTaskNotifier::new(session_manager.clone()),
         ));
+        // 后台命令完成通知器（execute_command(background) 终态注入父会话）
+        tool_registry = tool_registry.with_command_notifier(Arc::new(
+            crate::agent::background::SessionCommandNotifier::new(session_manager.clone()),
+        ));
         // 后台任务系统通知通道（全部完成/失败时桌面通知）
         if let Some(ref sink) = self.notification_sink {
             tool_registry = tool_registry.with_notification_sink(sink.clone());

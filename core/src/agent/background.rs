@@ -30,6 +30,7 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use crate::common::error::{Result, TianyanError};
 use crate::common::llm_judge::truncate_output;
 use crate::common::types::StructuredMessage;
+use crate::executor::{CommandTask, CommandTaskStatus};
 use crate::notification::SharedNotificationSink;
 use crate::session::SessionManager;
 use crate::vfs::backend::sqlite_db::SqliteDb;
@@ -611,6 +612,81 @@ pub fn build_notification_text(task: &BackgroundTask, remaining: usize) -> Strin
         ));
     } else {
         text.push_str("\n该会话的所有后台任务均已完成，请汇总各任务结果并继续原有工作。");
+    }
+    text
+}
+
+/// 默认命令通知器：把完成通知作为 System 消息持久化到父会话。
+///
+/// 与 [`SessionTaskNotifier`] 同构：持久化后通知随会话历史进入下一次
+/// 上下文组装（主 LLM 下一轮看到）；`waker` 槽由 Agent 构建完成后注入
+/// （[`AgentWakeForwarder`] 经 `CommandWaker` 适配转发）。
+pub struct SessionCommandNotifier {
+    session_manager: Arc<dyn SessionManager>,
+    waker: Arc<Mutex<Option<Arc<dyn TaskWaker>>>>,
+}
+
+impl SessionCommandNotifier {
+    /// 创建通知器。
+    pub fn new(session_manager: Arc<dyn SessionManager>) -> Self {
+        Self {
+            session_manager,
+            waker: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// 设置唤醒器（Agent 构建完成后注入）。
+    pub async fn set_waker(&self, waker: Arc<dyn TaskWaker>) {
+        *self.waker.lock().await = Some(waker);
+    }
+}
+
+#[async_trait]
+impl crate::executor::CommandNotifier for SessionCommandNotifier {
+    async fn on_command_terminal(&self, session_id: &str, task: &CommandTask, remaining: usize) {
+        let text = build_command_notification_text(task, remaining);
+        let sm = StructuredMessage::system(session_id.to_string(), text);
+        if let Err(e) = self
+            .session_manager
+            .add_structured_message(session_id, sm)
+            .await
+        {
+            tracing::warn!(task_id = %task.id, error = %e, "后台命令通知持久化失败");
+        }
+    }
+}
+
+/// 构建命令通知文本（join 信号：携带剩余计数；不含输出正文——输出经
+/// command_status / 日志文件按需读取，避免大输出污染会话上下文）。
+pub fn build_command_notification_text(task: &CommandTask, remaining: usize) -> String {
+    let status_label = match task.status {
+        CommandTaskStatus::Completed => "完成",
+        CommandTaskStatus::Failed => "失败",
+        CommandTaskStatus::Cancelled => "已取消",
+        _ => "结束",
+    };
+    let exit = match (task.status, task.exit_code) {
+        (CommandTaskStatus::Completed, Some(0)) => String::new(),
+        (_, Some(code)) => format!("，退出码 {code}"),
+        (_, None) => String::new(),
+    };
+    let mut text = format!(
+        "[后台命令{status_label}] {}（{}{}）",
+        truncate_output(&task.command, 120),
+        task.id,
+        exit
+    );
+    if let Some(path) = &task.log_file {
+        text.push_str(&format!(
+            "\n日志：{path}（输出尾部可用 command_status 查询）"
+        ));
+    }
+    if remaining > 0 {
+        text.push_str(&format!(
+            "\n该会话还有 {remaining} 个后台命令进行中，全部完成后请汇总各任务结果。"
+        ));
+    } else {
+        text.push_str("\n该会话的所有后台命令均已完成，请汇总并继续原有工作。");
     }
     text
 }
