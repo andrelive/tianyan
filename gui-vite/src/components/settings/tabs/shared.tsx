@@ -12,12 +12,13 @@ export function Toggle({
   label?: string;
 }) {
   return (
-    <label className="inline-flex items-center gap-2 cursor-pointer group">
+    <label className="relative inline-flex items-center gap-2 cursor-pointer group">
       <input
         type="checkbox"
         checked={checked}
+        // 铺满 label：几何位置与可见标签重合，聚焦不会滚动页面
+        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer peer"
         onChange={(e) => onChange(e.target.checked)}
-        className="sr-only peer"
       />
       <div className="relative w-10 h-5 rounded-full bg-[var(--color-bg-tertiary)] peer-checked:bg-accent transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-4 after:h-4 after:bg-white after:rounded-full after:shadow-sm after:transition-all peer-checked:after:translate-x-5" />
       {label && <span className="text-sm text-[var(--color-text-secondary)]">{label}</span>}

@@ -20,7 +20,7 @@ export default function AppearanceTab() {
           {(['light', 'dark', 'system'] as Theme[]).map((t) => (
             <label
               key={t}
-              className={`flex items-center gap-2 px-4 py-2.5 rounded-lg border cursor-pointer transition-colors ${
+              className={`relative flex items-center gap-2 px-4 py-2.5 rounded-lg border cursor-pointer transition-colors ${
                 theme === t
                   ? 'border-accent bg-accent-light text-accent'
                   : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-text-tertiary)]'
@@ -31,8 +31,9 @@ export default function AppearanceTab() {
                 name="theme"
                 value={t}
                 checked={theme === t}
+                // 铺满 label：几何位置与可见标签重合，聚焦不会滚动页面
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 onChange={() => setTheme(t)}
-                className="sr-only"
               />
               <div
                 className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center ${
@@ -57,7 +58,7 @@ export default function AppearanceTab() {
           {(['small', 'medium', 'large'] as FontSize[]).map((s) => (
             <label
               key={s}
-              className={`flex items-center gap-2 px-4 py-2.5 rounded-lg border cursor-pointer transition-colors ${
+              className={`relative flex items-center gap-2 px-4 py-2.5 rounded-lg border cursor-pointer transition-colors ${
                 fontSize === s
                   ? 'border-accent bg-accent-light text-accent'
                   : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-text-tertiary)]'
@@ -68,8 +69,9 @@ export default function AppearanceTab() {
                 name="fontSize"
                 value={s}
                 checked={fontSize === s}
+                // 铺满 label：几何位置与可见标签重合，聚焦不会滚动页面
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 onChange={() => setFontSize(s)}
-                className="sr-only"
               />
               <div
                 className={`w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center ${

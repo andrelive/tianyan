@@ -485,7 +485,7 @@ export default function ModelsTab({
                     {MODEL_CAPABILITIES.map((cap) => (
                       <label
                         key={cap}
-                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded cursor-pointer border transition-colors ${
+                        className={`relative inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded cursor-pointer border transition-colors ${
                           m.capabilities.includes(cap)
                             ? 'border-accent bg-accent-light text-accent'
                             : 'border-[var(--color-border)] text-[var(--color-text-tertiary)] hover:border-[var(--color-text-tertiary)]'
@@ -494,8 +494,9 @@ export default function ModelsTab({
                         <input
                           type="checkbox"
                           checked={m.capabilities.includes(cap)}
+                          // 铺满 label：几何位置与可见标签重合，聚焦不会滚动页面
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                           onChange={() => onToggleModelCapability(pi, mi, cap)}
-                          className="sr-only"
                         />
                         {CAPABILITY_LABELS[cap]}
                       </label>
@@ -508,7 +509,7 @@ export default function ModelsTab({
                       {THINKING_EFFORTS.map((eff) => (
                         <label
                           key={eff}
-                          className={"inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded cursor-pointer border transition-colors " +
+                          className={"relative inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded cursor-pointer border transition-colors " +
                             ((m.reasoning_efforts ?? []).includes(eff)
                               ? 'border-accent bg-accent-light text-accent'
                               : 'border-[var(--color-border)] text-[var(--color-text-tertiary)] hover:border-[var(--color-text-tertiary)]')}
@@ -517,6 +518,9 @@ export default function ModelsTab({
                           <input
                             type="checkbox"
                             checked={(m.reasoning_efforts ?? []).includes(eff)}
+                            // 铺满 label：几何位置与可见标签重合，聚焦不会滚动页面
+                            // （sr-only absolute 定位的几何会落到文档底部，点击聚焦把页面顶走）
+                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                             onChange={() => {
                               const cur = m.reasoning_efforts ?? [];
                               const next = cur.includes(eff)
@@ -524,7 +528,6 @@ export default function ModelsTab({
                                 : [...cur, eff];
                               onUpdateModel(pi, mi, 'reasoning_efforts', next);
                             }}
-                            className="sr-only"
                           />
                           {THINKING_LABELS[eff]}
                         </label>

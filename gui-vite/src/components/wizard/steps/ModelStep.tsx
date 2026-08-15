@@ -96,7 +96,7 @@ export default function ModelStep({
             {MODEL_CAPABILITIES.map((cap) => (
               <label
                 key={cap}
-                className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md cursor-pointer border transition-colors ${
+                className={`relative inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md cursor-pointer border transition-colors ${
                   data.modelCaps.includes(cap)
                     ? 'border-accent bg-accent-light text-accent'
                     : 'border-[var(--color-border)] text-[var(--color-text-tertiary)] hover:border-[var(--color-text-tertiary)]'
@@ -105,8 +105,9 @@ export default function ModelStep({
                 <input
                   type="checkbox"
                   checked={data.modelCaps.includes(cap)}
+                  // 铺满 label：几何位置与可见标签重合，聚焦不会滚动页面
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                   onChange={() => toggleCap(cap)}
-                  className="sr-only"
                 />
                 {CAPABILITY_LABELS[cap]}
               </label>
