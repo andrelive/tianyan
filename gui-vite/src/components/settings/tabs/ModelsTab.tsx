@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useAppStore } from '@/lib/store';
 import { Plus, Trash2, TestTube, Check, X, Loader2, RefreshCw } from 'lucide-react';
 import { Toggle, FieldRow, SectionTitle } from './shared';
 import type {
@@ -51,14 +52,57 @@ const CAPABILITY_LABELS: Record<ModelCapability, string> = {
   'multimodal-embedding': '多模态嵌入',
 };
 
-/** 思考强度档位（每个模型自己的档位集；空 = 不支持思考，走后端内置表判断）。 */
-const THINKING_EFFORTS: ThinkingEffort[] = ['off', 'low', 'medium', 'high'];
-const THINKING_LABELS: Record<ThinkingEffort, string> = {
-  off: '关闭',
-  low: '低',
-  medium: '中',
-  high: '高',
-};
+
+
+/** 合法思考强度档位词汇（OpenAI reasoning_effort 标准；模型声明自己的子集）。 */
+const VALID_EFFORTS = new Set<string>(['off', 'low', 'medium', 'high']);
+
+/**
+ * 模型的思考强度档位值编辑器（每个模型自己的设置值，逗号分隔）：
+ * 输入自由文本，失焦时解析并过滤非法值后提交；留空 = 走后端内置模型表自动匹配。
+ */
+function EffortInput({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (efforts: ThinkingEffort[] | undefined) => void;
+}) {
+  const showToast = useAppStore((s) => s.showToast);
+  const [draft, setDraft] = useState(value);
+
+  // 外部（保存/重载）更新时同步草稿
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+
+  const commit = () => {
+    const tokens = draft.split(/[,，]/).map((v) => v.trim()).filter(Boolean);
+    const invalid = tokens.filter((v) => !VALID_EFFORTS.has(v));
+    const valid = tokens.filter((v) => VALID_EFFORTS.has(v)) as ThinkingEffort[];
+    if (invalid.length > 0) {
+      showToast('忽略无效思考档位值：' + invalid.join('、') + '（支持 off|low|medium|high）', 'info');
+    }
+    const next = valid.length > 0 ? valid : undefined;
+    setDraft((next ?? []).join(', '));
+    onChange(next);
+  };
+
+  return (
+    <input
+      type="text"
+      aria-label="思考强度档位"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+      }}
+      placeholder="留空 = 内置表自动匹配（如 off, low, high）"
+      className="w-full px-2 py-1 text-xs rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+    />
+  );
+}
 
 /* ── Helpers ── */
 
@@ -502,39 +546,7 @@ export default function ModelsTab({
                       </label>
                     ))}
                   </div>
-                  {/* 思考强度档位：每个模型自己的；空 = 未配置 = 走后端内置模型表判断 */}
-                  {m.capabilities.some((cap) => cap === 'chat' || cap === 'vision') && (
-                    <div className="flex flex-wrap gap-1 mt-1.5 items-center">
-                      <span className="text-xs text-[var(--color-text-tertiary)] mr-1">思考档位</span>
-                      {THINKING_EFFORTS.map((eff) => (
-                        <label
-                          key={eff}
-                          className={"relative inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded cursor-pointer border transition-colors " +
-                            ((m.reasoning_efforts ?? []).includes(eff)
-                              ? 'border-accent bg-accent-light text-accent'
-                              : 'border-[var(--color-border)] text-[var(--color-text-tertiary)] hover:border-[var(--color-text-tertiary)]')}
-                          title={eff === 'off' ? '关闭思考' : '思考强度 ' + THINKING_LABELS[eff]}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={(m.reasoning_efforts ?? []).includes(eff)}
-                            // 铺满 label：几何位置与可见标签重合，聚焦不会滚动页面
-                            // （sr-only absolute 定位的几何会落到文档底部，点击聚焦把页面顶走）
-                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                            onChange={() => {
-                              const cur = m.reasoning_efforts ?? [];
-                              const next = cur.includes(eff)
-                                ? cur.filter((e) => e !== eff)
-                                : [...cur, eff];
-                              onUpdateModel(pi, mi, 'reasoning_efforts', next);
-                            }}
-                          />
-                          {THINKING_LABELS[eff]}
-                        </label>
-                      ))}
-                    </div>
-                  )}
-                  {/* 模型规格字段：按 capability 显示；留空 = 未配置 = 走后端内置模型表默认 */}
+                                    {/* 模型规格字段：按 capability 显示；留空 = 未配置 = 走后端内置模型表默认 */}
                   {m.capabilities.some((cap) => cap === 'chat' || cap === 'vision') && (
                     <div className="grid grid-cols-2 gap-1.5 mt-1.5">
                       <input
@@ -568,6 +580,16 @@ export default function ModelsTab({
                         }
                         className="w-full px-2 py-1 text-xs rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
                         placeholder="默认 8192"
+                      />
+                    </div>
+                  )}
+                  {/* 思考强度档位（每个模型自己的值）：留空 = 内置模型表自动匹配；
+                      支持 off|low|medium|high，逗号分隔，如 "off, low, high" */}
+                  {m.capabilities.some((cap) => cap === 'chat' || cap === 'vision') && (
+                    <div className="mt-1.5">
+                      <EffortInput
+                        value={(m.reasoning_efforts ?? []).join(', ')}
+                        onChange={(efforts) => onUpdateModel(pi, mi, 'reasoning_efforts', efforts)}
                       />
                     </div>
                   )}
