@@ -302,10 +302,6 @@ export function resetModelSwitchMocks() {
 
 export const mockTianyanConfig = {
   agent: {
-    enable_skills: true,
-    enable_memory: true,
-    stream_responses: true,
-    enable_thinking: false,
     default_top_k: 5,
     loaded_rules_top_k: 5,
     max_turns: 200,

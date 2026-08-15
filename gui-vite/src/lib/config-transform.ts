@@ -58,10 +58,6 @@ export function emptyConfigState(): ConfigState {
     preferences: emptyPreferences(),
     resolvedSpecs: {},
     mcpServers: [],
-    enable_skills: true,
-    enable_memory: true,
-    stream_responses: true,
-    enable_thinking: false,
     default_top_k: 5,
     max_turns: 20,
     learned_rules_top_k: 5,
@@ -108,10 +104,6 @@ export function emptyConfigState(): ConfigState {
 /* ─────── Backend TianyanConfig shape (for serialization) ─────── */
 
 interface BackendAgentConfig {
-  enable_skills: boolean;
-  enable_memory: boolean;
-  stream_responses: boolean;
-  enable_thinking: boolean;
   default_top_k: number;
   loaded_rules_top_k: number;
   working_directory?: string | null;
@@ -262,10 +254,6 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
   return {
     config: {
       agent: {
-        enable_skills: cs.enable_skills,
-        enable_memory: cs.enable_memory,
-        stream_responses: cs.stream_responses,
-        enable_thinking: cs.enable_thinking,
         default_top_k: cs.default_top_k,
         loaded_rules_top_k: cs.learned_rules_top_k,
         max_turns: cs.max_turns,
@@ -400,10 +388,6 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     },
 
     // Agent
-    enable_skills: agent.enable_skills ?? defaults.enable_skills,
-    enable_memory: agent.enable_memory ?? defaults.enable_memory,
-    stream_responses: agent.stream_responses ?? defaults.stream_responses,
-    enable_thinking: agent.enable_thinking ?? defaults.enable_thinking,
     default_top_k: agent.default_top_k ?? defaults.default_top_k,
     max_turns: agent.max_turns ?? defaults.max_turns,
     learned_rules_top_k: (() => {

@@ -82,6 +82,10 @@ interface AppState {
   selectedModel: string | null;
   setModel: (model: string | null) => void;
 
+  // 会话级思考模式（对话时选择，随每次请求下发；仅对支持思考的模型生效）
+  thinkingOn: boolean;
+  setThinkingOn: (on: boolean) => void;
+
   // App mode
   configured: boolean | null;
   setConfigured: (val: boolean) => void;
@@ -255,6 +259,10 @@ export const useAppStore = create<AppState>()(
       selectedModel: null,
       setModel: (model) => set({ selectedModel: model }),
 
+      // 会话级思考模式（默认关闭；开启后对支持思考的模型生效）
+      thinkingOn: false,
+      setThinkingOn: (on) => set({ thinkingOn: on }),
+
       // App mode
       configured: null,
       setConfigured: (val) => set({ configured: val }),
@@ -265,6 +273,7 @@ export const useAppStore = create<AppState>()(
       partialize: (state) => ({
         theme: state.theme,
         fontSize: state.fontSize,
+        thinkingOn: state.thinkingOn,
       }),
     },
   ),

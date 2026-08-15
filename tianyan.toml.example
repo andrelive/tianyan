@@ -9,10 +9,6 @@
 # 完整字段说明见 config.example.toml
 
 [agent]
-enable_skills = true
-enable_memory = true
-stream_responses = true
-enable_thinking = false
 default_top_k = 5
 learned_rules_top_k = 5
 max_turns = 200

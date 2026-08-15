@@ -8,10 +8,6 @@ export interface WizardData {
   modelCaps: ModelCapability[];
   dataDir: string;
   vectorDim: number;
-  enableSkills: boolean;
-  enableMemory: boolean;
-  streamResponses: boolean;
-  enableThinking: boolean;
   maxTurns: number;
 }
 

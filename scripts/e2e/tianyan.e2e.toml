@@ -47,10 +47,6 @@ vector_dimension = 768
 
 # ==================== 智能体配置 ====================
 [agent]
-enable_thinking = false
-enable_skills = true
-stream_responses = true
-enable_memory = false
 default_top_k = 2
 max_turns = 50
 # working_directory 相对进程启动目录解析：

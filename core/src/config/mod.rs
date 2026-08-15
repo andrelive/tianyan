@@ -503,8 +503,8 @@ mod tests {
             "data_dir 应继承默认层"
         );
         assert_eq!(
-            config.agent.enable_skills,
-            AgentConfig::default().enable_skills,
+            config.agent.max_turns,
+            AgentConfig::default().max_turns,
             "agent 应继承默认层"
         );
         assert!(config.mcp.servers.is_empty(), "mcp 应继承默认层（空）");

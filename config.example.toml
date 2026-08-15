@@ -3,7 +3,6 @@
 
 # ==================== 智能体配置 ====================
 [agent]
-enable_skills = true
 # 工具短路选择（G1，默认开启）：LLM 可见工具数超过阈值（40）时按 query
 # 相关性过滤工具 schema（核心工具恒存 + 关键词匹配）。执行层保留全部工具，
 # 被过滤工具若被模型调用仍可正常执行——过滤仅影响 LLM 可见性。
@@ -12,9 +11,6 @@ shortlist_tools = true
 # 经 LLM 自审，未通过则结果带 [自审未通过] 标记，由主 agent 复核
 # （每个后台任务多一次小调用）。
 # background_self_review = false
-enable_memory = true
-stream_responses = true
-enable_thinking = false
 default_top_k = 5
 # 工作目录：Agent 执行命令/读写文件的基础目录，也是会话回退时文件快照的根目录。
 # 未配置时使用进程当前目录，且不启用文件快照回退。

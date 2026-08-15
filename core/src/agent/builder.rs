@@ -400,19 +400,15 @@ impl AgentBuilder {
             self.config.learned_rules_top_k,
         );
 
-        // 构建技能学习引擎
-        let skill_learning_engine = if self.config.enable_skills {
-            Some(SkillLearningEngine::new(
-                model_service.clone(),
-                vfs.clone(),
-                SkillLearningConfig {
-                    generation_model: chat_model.clone(),
-                    ..SkillLearningConfig::default()
-                },
-            ))
-        } else {
-            None
-        };
+        // 构建技能学习引擎（技能学习是智能体的固有能力，始终启用）
+        let skill_learning_engine = Some(SkillLearningEngine::new(
+            model_service.clone(),
+            vfs.clone(),
+            SkillLearningConfig {
+                generation_model: chat_model.clone(),
+                ..SkillLearningConfig::default()
+            },
+        ));
 
         Ok(Agent::new(
             chat_model,
@@ -505,8 +501,7 @@ mod tests {
     #[test]
     fn test_agent_builder() {
         let builder = AgentBuilder::new();
-        assert!(builder.config.enable_skills);
-        assert!(builder.config.enable_memory);
+        assert_eq!(builder.config.max_turns, 200);
     }
 
     #[tokio::test]

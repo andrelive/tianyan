@@ -94,10 +94,8 @@ export default function ConfirmStep({
             Agent 行为
           </div>
           <div className="px-3 py-2 space-y-1 text-sm">
-            <SummaryRow label="技能" value={data.enableSkills ? '启用' : '禁用'} />
-            <SummaryRow label="记忆" value={data.enableMemory ? '启用' : '禁用'} />
-            <SummaryRow label="流式响应" value={data.streamResponses ? '启用' : '禁用'} />
-            <SummaryRow label="思考过程" value={data.enableThinking ? '显示' : '隐藏'} />
+            <SummaryRow label="技能/记忆/流式" value="始终开启" />
+            <SummaryRow label="思考模式" value="会话时选择" />
             <SummaryRow label="最大轮次" value={String(data.maxTurns)} />
           </div>
         </div>

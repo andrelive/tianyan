@@ -136,7 +136,7 @@ describe('ConfigWizard', () => {
           data_dir: '~/.local/share/tianyan-test',
           vector: { vector_dimension: 1536 },
         },
-        agent: { enable_skills: true, enable_memory: true, max_turns: 200 },
+        agent: { max_turns: 200 },
       },
     });
 

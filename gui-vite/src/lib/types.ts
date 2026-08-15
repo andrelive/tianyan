@@ -33,6 +33,8 @@ export interface ChatRequest {
   temperature: number;
   max_tokens: number;
   model?: string | null;
+  /** 本会话是否启用思考模式（会话时选择；仅对支持思考的模型生效） */
+  thinking?: boolean;
   /** 新会话绑定的工作目录（仅新建会话时生效） */
   working_directory?: string | null;
 }
@@ -514,10 +516,6 @@ export interface ConfigState {
   resolvedSpecs: Record<string, ResolvedModelSpec>;
 
   // -- Agent config (agent.*) --
-  enable_skills: boolean;
-  enable_memory: boolean;
-  stream_responses: boolean;
-  enable_thinking: boolean;
   default_top_k: number;
   max_turns: number;
   learned_rules_top_k: number;

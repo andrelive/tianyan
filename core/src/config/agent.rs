@@ -1,26 +1,10 @@
 //! 智能体配置管理。
-//!
-//! 本模块提供智能体的配置结构，包括技能、记忆等配置项。
 
 use serde::{Deserialize, Serialize};
 
 /// 智能体配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// 是否启用技能执行。
-    #[serde(default = "default_enable_skills")]
-    pub enable_skills: bool,
-    /// 是否启用记忆持久化。
-    #[serde(default = "default_enable_memory")]
-    pub enable_memory: bool,
-    /// 是否流式输出响应。
-    #[serde(default = "default_stream_responses")]
-    pub stream_responses: bool,
-    /// 是否启用模型的思考模式（Qwen3.5+ 支持）。
-    /// 启用后模型会进行更深入的推理，但首字符响应会变慢。
-    /// 默认禁用以获得更快的响应速度。
-    #[serde(default = "default_enable_thinking")]
-    pub enable_thinking: bool,
     /// 默认检索结果数量。
     #[serde(default = "default_default_top_k")]
     pub default_top_k: usize,
@@ -50,10 +34,6 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            enable_skills: default_enable_skills(),
-            enable_memory: default_enable_memory(),
-            stream_responses: default_stream_responses(),
-            enable_thinking: default_enable_thinking(),
             default_top_k: default_default_top_k(),
             learned_rules_top_k: default_learned_rules_top_k(),
             max_turns: default_max_turns(),
@@ -70,18 +50,6 @@ impl AgentConfig {
         Self::default()
     }
 
-    /// 启用或禁用技能。
-    pub fn with_skills(mut self, enable: bool) -> Self {
-        self.enable_skills = enable;
-        self
-    }
-
-    /// 启用或禁用记忆。
-    pub fn with_memory(mut self, enable: bool) -> Self {
-        self.enable_memory = enable;
-        self
-    }
-
     /// 验证配置。
     pub fn validate(&self) -> Result<(), String> {
         if self.default_top_k == 0 {
@@ -95,22 +63,6 @@ impl AgentConfig {
         }
         Ok(())
     }
-}
-
-fn default_enable_skills() -> bool {
-    true
-}
-
-fn default_enable_memory() -> bool {
-    true
-}
-
-fn default_stream_responses() -> bool {
-    true
-}
-
-fn default_enable_thinking() -> bool {
-    false
 }
 
 fn default_default_top_k() -> usize {
@@ -140,18 +92,17 @@ mod tests {
     #[test]
     fn test_agent_config_default() {
         let config = AgentConfig::default();
-        assert!(config.enable_skills);
-        assert!(config.enable_memory);
-        assert!(config.stream_responses);
-        assert!(!config.enable_thinking);
+        assert_eq!(config.default_top_k, 5);
+        assert_eq!(config.learned_rules_top_k, 5);
+        assert!(config.shortlist_tools);
+        assert!(!config.background_self_review);
     }
 
     #[test]
     fn test_agent_config_builder() {
-        let config = AgentConfig::new().with_skills(false).with_memory(false);
+        let config = AgentConfig::new();
 
-        assert!(!config.enable_skills);
-        assert!(!config.enable_memory);
+        assert_eq!(config.max_turns, 200);
     }
 
     #[test]
@@ -165,7 +116,7 @@ mod tests {
         let config = AgentConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: AgentConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(config.enable_skills, parsed.enable_skills);
-        assert_eq!(config.enable_memory, parsed.enable_memory);
+        assert_eq!(config.max_turns, parsed.max_turns);
+        assert_eq!(config.working_directory, parsed.working_directory);
     }
 }

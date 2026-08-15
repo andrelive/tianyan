@@ -199,6 +199,7 @@ impl AgentLoop {
     ///
     /// `cancel` 为 `Some` 时，每轮开始前检查取消标志；被取消返回
     /// [`AgentLoopResult::Cancelled`]（而非错误），调用方可区分"用户取消"与"失败"。
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
         messages: &mut Vec<Message>,
@@ -207,6 +208,7 @@ impl AgentLoop {
         initial_parent_id: Option<&str>,
         model: &str,
         cancel: Option<&AtomicBool>,
+        enable_thinking: Option<bool>,
     ) -> Result<AgentLoopResult, TianyanError> {
         self.run_turns(
             messages,
@@ -240,6 +242,11 @@ impl AgentLoop {
                     });
 
                     let request = ChatCompletionRequest::new(model, msgs).with_tools(tools);
+                    let request = if let Some(t) = enable_thinking {
+                        request.with_enable_thinking(t)
+                    } else {
+                        request
+                    };
                     let request = if let Some(n) = max_tokens {
                         request.with_max_tokens(n)
                     } else if this.chat_spec.is_some() {
@@ -289,6 +296,7 @@ impl AgentLoop {
     /// 文本 delta 通过 `stream_sender` 逐 token 发送，实现打字机效果。
     /// tool call 检测和执行仍为非流式（在完整消息累积后处理）。
     /// `cancel` 为 `Some` 时，chunk 接收循环与轮次边界都会检查取消标志。
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_stream(
         &self,
         messages: &mut Vec<Message>,
@@ -297,6 +305,7 @@ impl AgentLoop {
         initial_parent_id: Option<&str>,
         model: &str,
         cancel: Option<&AtomicBool>,
+        enable_thinking: Option<bool>,
     ) -> Result<AgentLoopResult, TianyanError> {
         self.run_turns(
             messages,
@@ -334,6 +343,11 @@ impl AgentLoop {
                     let request = ChatCompletionRequest::new(model, msgs)
                         .with_stream(true)
                         .with_tools(tools);
+                    let request = if let Some(t) = enable_thinking {
+                        request.with_enable_thinking(t)
+                    } else {
+                        request
+                    };
                     let request = if let Some(n) = max_tokens {
                         request.with_max_tokens(n)
                     } else if this.chat_spec.is_some() {
@@ -941,7 +955,15 @@ mod tests {
 
         let mut messages = vec![Message::user("帮我做点事")];
         let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -976,7 +998,15 @@ mod tests {
 
         let mut messages = vec![Message::user("帮我决定一下")];
         let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1031,7 +1061,15 @@ mod tests {
 
         let mut messages = vec![Message::user("请帮我写入文件")];
         let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1055,7 +1093,15 @@ mod tests {
 
         let mut messages = vec![Message::user("你好")];
         let err = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("空响应"));
@@ -1071,7 +1117,15 @@ mod tests {
 
         let mut messages = vec![Message::user("循环测试")];
         let err = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("最大轮数"));
@@ -1086,7 +1140,15 @@ mod tests {
 
         let mut messages = vec![Message::user("测试")];
         let err = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("LLM 调用失败"));
@@ -1110,6 +1172,7 @@ mod tests {
                 None,
                 "test-model",
                 Some(&cancel),
+                None,
             )
             .await
             .unwrap();
@@ -1180,6 +1243,7 @@ mod tests {
                 None,
                 "test-model",
                 Some(&cancel),
+                None,
             )
             .await
             .unwrap();
@@ -1291,7 +1355,15 @@ mod tests {
 
         let mut messages = vec![Message::user("流式测试")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1332,7 +1404,15 @@ mod tests {
 
         let mut messages = vec![Message::user("审查项目")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1428,7 +1508,15 @@ mod tests {
 
         let mut messages = vec![Message::user("北京天气如何？")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1474,7 +1562,15 @@ mod tests {
 
         let mut messages = vec![Message::user("测试")];
         let err = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -1497,7 +1593,15 @@ mod tests {
 
         let mut messages = vec![Message::user("流式测试")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1527,7 +1631,15 @@ mod tests {
 
         let mut messages = vec![Message::user("顺序测试")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(matches!(result, AgentLoopResult::Answer { .. }));
@@ -1551,7 +1663,15 @@ mod tests {
 
         let mut messages = vec![Message::user("测试")];
         let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1579,7 +1699,15 @@ mod tests {
 
         let mut messages = vec![Message::user("流式测试")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1607,7 +1735,15 @@ mod tests {
 
         let mut messages = vec![Message::user("流式测试")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -1648,7 +1784,15 @@ mod tests {
 
         let mut messages = vec![Message::user("帮我做点事")];
         let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(matches!(result, AgentLoopResult::Answer { .. }));
@@ -1689,11 +1833,27 @@ mod tests {
 
         let mut messages = vec![Message::user("帮我做点事")];
         let r1 = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
         let r2 = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(matches!(r1, AgentLoopResult::Answer { .. }));
@@ -1724,7 +1884,15 @@ mod tests {
 
         let mut messages = vec![Message::user("流式测试")];
         let result = agent_loop
-            .run_stream(&mut messages, sender, "session-1", None, "test-model", None)
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(matches!(result, AgentLoopResult::Answer { .. }));
@@ -1744,7 +1912,15 @@ mod tests {
 
         let mut messages = vec![Message::user("测试")];
         let err = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1765,7 +1941,15 @@ mod tests {
 
         let mut messages = vec![Message::user("测试")];
         let result = agent_loop
-            .run(&mut messages, None, "session-1", None, "test-model", None)
+            .run(
+                &mut messages,
+                None,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(matches!(result, AgentLoopResult::Answer { .. }));

@@ -18,6 +18,7 @@ import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
 import ModelSelector from './ModelSelector';
+import ThinkingToggle from './ThinkingToggle';
 import type { ChatMessage, ChatStreamEvent } from '@/lib/types';
 
 export default function ChatPanel() {
@@ -272,6 +273,8 @@ export default function ChatPanel() {
         temperature: 0.7,
         max_tokens: 2048,
         model: state.selectedModel,
+        // 会话级思考模式（对话时选择；仅对支持思考的模型生效）
+        thinking: state.thinkingOn || undefined,
         // 新会话绑定工作区（工作区 = 会话的父级分组；服务端固化到会话头部）
         working_directory: isNewSession ? (state.newSessionWorkspace ?? undefined) : undefined,
       });
@@ -465,6 +468,7 @@ export default function ChatPanel() {
             压缩会话
           </button>
           <ModelSelector />
+          <ThinkingToggle />
         </div>
       </div>
 

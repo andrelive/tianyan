@@ -13,10 +13,6 @@ use tianyan::config::{
 
 pub fn test_agent_config() -> AgentConfig {
     AgentConfig {
-        enable_skills: true,
-        enable_memory: true,
-        stream_responses: false,
-        enable_thinking: false,
         default_top_k: 3,
         learned_rules_top_k: 5,
         ..Default::default()

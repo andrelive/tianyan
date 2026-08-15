@@ -1,4 +1,4 @@
-import { Toggle, FieldRow, SectionTitle } from './shared';
+import { FieldRow, SectionTitle } from './shared';
 import type { ConfigState } from '@/lib/types';
 
 interface AgentTabProps {
@@ -11,36 +11,10 @@ export default function AgentTab({ config, onUpdateField }: AgentTabProps) {
     <div>
       <SectionTitle title="Agent 行为" />
       <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-[var(--color-text-primary)] w-32">启用技能</label>
-            <Toggle
-              checked={config.enable_skills}
-              onChange={(v) => onUpdateField('enable_skills', v)}
-            />
-          </div>
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-[var(--color-text-primary)] w-32">启用记忆</label>
-            <Toggle
-              checked={config.enable_memory}
-              onChange={(v) => onUpdateField('enable_memory', v)}
-            />
-          </div>
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-[var(--color-text-primary)] w-32">流式响应</label>
-            <Toggle
-              checked={config.stream_responses}
-              onChange={(v) => onUpdateField('stream_responses', v)}
-            />
-          </div>
-          <div className="flex items-center gap-3">
-            <label className="text-sm text-[var(--color-text-primary)] w-32">启用思考</label>
-            <Toggle
-              checked={config.enable_thinking}
-              onChange={(v) => onUpdateField('enable_thinking', v)}
-            />
-          </div>
-        </div>
+        <p className="text-xs text-[var(--color-text-tertiary)]">
+          技能执行、记忆持久化与流式响应是智能体的固有能力，始终开启；
+          思考模式在会话输入区按对话选择（仅对支持思考的模型生效）。
+        </p>
 
         <div className="grid grid-cols-2 gap-4 pt-2">
           <FieldRow label="默认 Top-K">

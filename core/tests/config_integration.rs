@@ -37,8 +37,6 @@ async fn test_config_save_and_reload_roundtrip() {
     assert!(config_path.exists());
 
     let reloaded = TianyanConfig::load_from_file(&config_path).unwrap();
-    assert_eq!(reloaded.agent.enable_skills, original.agent.enable_skills);
-    assert_eq!(reloaded.agent.enable_memory, original.agent.enable_memory);
     assert_eq!(reloaded.agent.default_top_k, original.agent.default_top_k);
     assert_eq!(
         reloaded.storage.vector.vector_dimension,

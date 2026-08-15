@@ -52,10 +52,6 @@ export default function ConfigWizard() {
   const [vectorDim, setVectorDim] = useState(1536);
 
   /* ── Agent (step 3) ── */
-  const [enableSkills, setEnableSkills] = useState(true);
-  const [enableMemory, setEnableMemory] = useState(true);
-  const [streamResponses, setStreamResponses] = useState(true);
-  const [enableThinking, setEnableThinking] = useState(false);
   const [maxTurns, setMaxTurns] = useState(200);
 
   /* ── Build WizardData from state ── */
@@ -68,10 +64,6 @@ export default function ConfigWizard() {
     modelCaps,
     dataDir,
     vectorDim,
-    enableSkills,
-    enableMemory,
-    streamResponses,
-    enableThinking,
     maxTurns,
   };
 
@@ -85,10 +77,6 @@ export default function ConfigWizard() {
     if (updates.modelCaps !== undefined) setModelCaps(updates.modelCaps);
     if (updates.dataDir !== undefined) setDataDir(updates.dataDir);
     if (updates.vectorDim !== undefined) setVectorDim(updates.vectorDim);
-    if (updates.enableSkills !== undefined) setEnableSkills(updates.enableSkills);
-    if (updates.enableMemory !== undefined) setEnableMemory(updates.enableMemory);
-    if (updates.streamResponses !== undefined) setStreamResponses(updates.streamResponses);
-    if (updates.enableThinking !== undefined) setEnableThinking(updates.enableThinking);
     if (updates.maxTurns !== undefined) setMaxTurns(updates.maxTurns);
   }, []);
 
@@ -140,10 +128,6 @@ export default function ConfigWizard() {
       },
       data_dir: dataDir.trim(),
       vector_dimension: vectorDim,
-      enable_skills: enableSkills,
-      enable_memory: enableMemory,
-      stream_responses: streamResponses,
-      enable_thinking: enableThinking,
       max_turns: maxTurns,
     };
 
@@ -211,10 +195,6 @@ export default function ConfigWizard() {
     modelCaps,
     dataDir,
     vectorDim,
-    enableSkills,
-    enableMemory,
-    streamResponses,
-    enableThinking,
     maxTurns,
     showToast,
     setConfigured,
