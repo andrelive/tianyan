@@ -15,6 +15,10 @@ pub mod background;
 mod builder;
 mod coordinator;
 mod r#loop;
+/// 角色学习引擎（ADR-016：自演化分工的角色侧）。
+pub mod role_learning;
+/// 角色 VFS 存储（ADR-016：注册表持久化）。
+pub mod role_store;
 /// 角色化子 Agent 委托（delegate_to_agent role 参数）。
 pub mod roles;
 mod tool_params;
@@ -26,7 +30,9 @@ pub use agent_core::AgentWakeForwarder;
 pub use builder::AgentBuilder;
 pub use coordinator::AgentCoordinator;
 pub use r#loop::{AgentLoop, AgentLoopConfig, AgentLoopResult};
-pub use roles::{AgentRole, RoleRegistry};
+pub use role_learning::{LearnedRole, RoleLearningConfig, RoleLearningEngine};
+pub use role_store::RoleStore;
+pub use roles::{AgentRole, RoleRegistry, RoleSource, RoleStatus};
 pub use session_state::SessionState;
 pub use tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, ReadFileParams,

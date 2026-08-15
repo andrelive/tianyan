@@ -553,8 +553,23 @@ impl ToolRegistry {
     }
 
     /// 获取所有工具定义（内置 + 动态注册）。
+    ///
+    /// ADR-016 渐进披露：delegate_to_agent 的描述动态追加角色 L0 摘要段
+    /// （名字 + 一句话职责 + 工具数 + 状态；完整提示仅委托时加载）。
     pub async fn definitions(&self) -> Vec<ToolDefinition> {
         let mut defs = self.definitions.clone();
+        if let Some(def) = defs
+            .iter_mut()
+            .find(|d| d.function.name == "delegate_to_agent")
+        {
+            let segment = self.role_registry.delegate_role_segment();
+            if !segment.is_empty() {
+                def.function.description = format!(
+                    "{}\n\n可用角色（来源含内置/配置/学习，[试验性] 不可调用）：\n{}",
+                    def.function.description, segment
+                );
+            }
+        }
         for executor in self.dynamic_tools.lock().await.values() {
             defs.push(executor.definition());
         }

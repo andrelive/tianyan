@@ -1,14 +1,56 @@
-//! 角色化子 Agent 委托：内置角色（researcher / editor / reviewer）+ 用户配置覆盖。
+//! 角色化子 Agent 委托（ADR-016：统一角色实体模型）。
 //!
 //! `delegate_to_agent` 工具的 `role` 参数按名字从 [`RoleRegistry`] 解析角色；
 //! 角色提供模型、系统提示、工具白名单、最大轮数与整体超时，替代逐次手写参数。
-//! 用户可在 `tianyan.toml` 的 `[agent_roles]` 节覆盖内置角色或新增自定义角色。
+//! 角色来源三类且平级：内置种子（Builtin）/ 用户配置（User）/ 学习演化（Learned），
+//! 来源只是元数据；注册表 VFS 持久化后以演化实体为准。
+//! 试验性角色（status = Experimental）只展示不可调用。
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::role_store::RoleStore;
+use crate::common::error::Result;
 use crate::config::AgentRolesConfig;
+
+/// 角色来源（ADR-016：三类来源平级，来源只是元数据）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoleSource {
+    /// 内置种子（researcher / editor / reviewer；首次启动写入 VFS）。
+    Builtin,
+    /// 用户配置（`[agent_roles]` 节；降级为种子来源）。
+    #[default]
+    User,
+    /// 学习演化（GEPA 角色管线产物）。
+    Learned,
+}
+
+/// 角色激活状态（ADR-016：试验性只展示不可调用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoleStatus {
+    /// 正式：可被 delegate_to_agent 调用。
+    #[default]
+    Active,
+    /// 试验性：出现在 delegate 描述中供评估，调用被拒绝。
+    Experimental,
+}
+
+impl RoleSource {
+    /// 是否用户来源（配置序列化时省略该字段）。
+    pub(crate) fn is_user(&self) -> bool {
+        *self == Self::User
+    }
+}
+
+impl RoleStatus {
+    /// 是否正式（配置序列化时省略该字段）。
+    pub(crate) fn is_active(&self) -> bool {
+        *self == Self::Active
+    }
+}
 
 /// 子 Agent 角色定义。
 ///
@@ -34,6 +76,46 @@ pub struct AgentRole {
     /// 委托整体超时（秒；缺省不限制）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// 来源（内置种子 / 用户配置 / 学习演化；缺省 User）。
+    #[serde(default, skip_serializing_if = "RoleSource::is_user")]
+    pub source: RoleSource,
+    /// 进化版本（1 起始；学习更新时递增；缺省视为 1——roundtrip 保真）。
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub version: u32,
+    /// 激活状态（缺省 Active）。
+    #[serde(default, skip_serializing_if = "RoleStatus::is_active")]
+    pub status: RoleStatus,
+    /// 进化来源角色名（回退链；内置/用户配置为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<String>,
+}
+
+/// 版本 1 判定（序列化省略）。
+fn is_one(v: &u32) -> bool {
+    *v == 1
+}
+
+/// 版本缺省值（1）。
+fn one() -> u32 {
+    1
+}
+
+/// 用户配置签名：排序后的角色序列化文本（配置变更检测）。
+fn config_sig(config: &AgentRolesConfig) -> String {
+    let mut entries: Vec<(String, String)> = config
+        .roles
+        .iter()
+        .map(|(name, role)| {
+            let v = serde_json::to_value(role).unwrap_or_default();
+            (name.clone(), v.to_string())
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+        .iter()
+        .map(|(n, v)| format!("{n}={v}"))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 /// 角色注册表：按名字索引角色定义，供委托循环解析。
@@ -75,6 +157,10 @@ impl RoleRegistry {
                 ]),
                 max_turns: None,
                 timeout_secs: None,
+                source: RoleSource::Builtin,
+                status: RoleStatus::Active,
+                version: 1,
+                lineage: None,
             },
         );
         roles.insert(
@@ -111,6 +197,10 @@ impl RoleRegistry {
                 ]),
                 max_turns: None,
                 timeout_secs: None,
+                source: RoleSource::Builtin,
+                status: RoleStatus::Active,
+                version: 1,
+                lineage: None,
             },
         );
         roles.insert(
@@ -141,6 +231,10 @@ impl RoleRegistry {
                 ]),
                 max_turns: None,
                 timeout_secs: None,
+                source: RoleSource::Builtin,
+                status: RoleStatus::Active,
+                version: 1,
+                lineage: None,
             },
         );
         Self { roles }
@@ -148,6 +242,9 @@ impl RoleRegistry {
 
     /// 从用户配置构建注册表：先取内置角色，再叠加用户角色——
     /// 同名角色**整体覆盖**内置定义，新名字直接插入。
+    ///
+    /// 注：ADR-016 装配路径优先使用 [`Self::load_persisted`]（VFS 持久化）；
+    /// 本方法保留为无 VFS 环境的轻量构造。
     pub fn from_config(config: &AgentRolesConfig) -> Self {
         let mut registry = Self::builtin();
         for (name, mut role) in config.roles.clone() {
@@ -157,9 +254,97 @@ impl RoleRegistry {
         registry
     }
 
-    /// 按名字获取角色定义（返回克隆）。
+    /// ADR-016 装配：内置种子 + 用户配置（签名变更才 upsert）+ VFS 演化实体。
+    ///
+    /// 规则：
+    /// - **VFS 角色为权威**：持久化的演化产物（含学习更新）直接加载；
+    /// - **内置种子**：VFS 中缺失的内置角色首次写入（出厂种子落盘）；
+    /// - **用户配置降级为种子**：配置签名（`[agent_roles]` 序列化）与上次不同时
+    ///   覆盖对应角色（用户新意图生效）；签名相同不覆盖（演化产物保留）。
+    pub async fn load_persisted(store: &RoleStore, config: &AgentRolesConfig) -> Result<Self> {
+        // 1. VFS 现有角色（权威）
+        let mut registry = Self::builtin();
+        for role in store.load_roles().await? {
+            registry.insert(role);
+        }
+        // 2. 内置种子写入 VFS（首次启动）
+        for name in registry.names() {
+            if store.load_role(&name).await?.is_none() {
+                if let Some(role) = registry.get(&name) {
+                    store.save_role(&role).await?;
+                }
+            }
+        }
+        // 3. 用户配置：签名变更 → 覆盖（用户新意图生效）
+        let sig = config_sig(config);
+        let prev = store.load_config_sig().await?;
+        if prev.as_deref() != Some(sig.as_str()) {
+            for (name, mut role) in config.roles.clone() {
+                role.name = name.clone();
+                role.source = RoleSource::User;
+                role.version = 1;
+                registry.insert(role);
+                if let Some(saved) = registry.get(&name) {
+                    store.save_role(&saved).await?;
+                }
+            }
+            store.save_config_sig(&sig).await?;
+        }
+        Ok(registry)
+    }
+
+    /// 注册或覆盖角色（含来源元数据；VFS 持久化由 RoleStore 负责）。
+    pub fn insert(&mut self, role: AgentRole) {
+        self.roles.insert(role.name.clone(), role);
+    }
+
+    /// 按名字获取角色定义（含试验性；委托解析用 [`Self::get_active`]）。
     pub fn get(&self, name: &str) -> Option<AgentRole> {
         self.roles.get(name).cloned()
+    }
+
+    /// 按名字获取**可调用**角色（ADR-016：过滤试验性——只展示不可调用）。
+    pub fn get_active(&self, name: &str) -> Option<AgentRole> {
+        self.roles
+            .get(name)
+            .cloned()
+            .filter(|r| r.status != RoleStatus::Experimental)
+    }
+
+    /// 可调用角色名（过滤试验性，字典序）。
+    pub fn active_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .roles
+            .values()
+            .filter(|r| r.status != RoleStatus::Experimental)
+            .map(|r| r.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// delegate 工具描述的角色 L0 摘要段（ADR-016 渐进披露）。
+    ///
+    /// 每行：`- 名字：职责一句话（N 工具）[试验性]`；完整提示仅委托时加载。
+    pub fn delegate_role_segment(&self) -> String {
+        let mut roles: Vec<&AgentRole> = self.roles.values().collect();
+        roles.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut lines = Vec::new();
+        for role in roles {
+            let purpose = role
+                .system_prompt
+                .as_deref()
+                .map(|p| p.lines().next().unwrap_or("").trim())
+                .unwrap_or("无系统提示")
+                .to_string();
+            let tool_count = role.tools.as_ref().map(|t| t.len()).unwrap_or(0);
+            let mut line = format!("- {}：{}（{} 工具）", role.name, purpose, tool_count);
+            if role.status == RoleStatus::Experimental {
+                line.push_str(" [试验性]");
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
     }
 
     /// 所有角色名（字典序，便于生成稳定的可用角色列表）。
@@ -227,6 +412,7 @@ mod tests {
                 tools: None,
                 max_turns: Some(10),
                 timeout_secs: Some(60),
+                ..Default::default()
             },
         );
         let registry = RoleRegistry::from_config(&config_with_roles(roles));
@@ -257,6 +443,10 @@ mod tests {
                 tools: Some(vec!["read_file".to_string()]),
                 max_turns: None,
                 timeout_secs: None,
+                source: RoleSource::Builtin,
+                status: RoleStatus::Active,
+                version: 1,
+                lineage: None,
             },
         );
         let registry = RoleRegistry::from_config(&config_with_roles(roles));
@@ -297,6 +487,7 @@ mod tests {
                 tools: Some(vec!["read_file".to_string()]),
                 max_turns: Some(20),
                 timeout_secs: Some(120),
+                ..Default::default()
             },
         );
         let config = config_with_roles(roles);

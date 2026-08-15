@@ -81,11 +81,19 @@ impl AgentBuilderFactory {
             vfs.clone() as Arc<dyn tianyan::vfs::VirtualFileSystem>,
         );
 
+        // ADR-016：角色注册表从 VFS 加载（内置种子 + 配置签名 upsert + 演化实体）
+        let role_store = tianyan::agent::RoleStore::new(vfs.clone());
+        let role_registry =
+            tianyan::agent::RoleRegistry::load_persisted(&role_store, &config.agent_roles)
+                .await
+                .map_err(|e| TianyanError::Custom(format!("内部错误：角色注册表加载失败：{e}")))?;
+
         let agent = AgentBuilder::new()
             .with_config(config.agent.clone())
             .with_model(&chat_model)
             .with_chat_model_spec(chat_model_spec)
             .with_model_service(model_services.chat)
+            .with_role_registry(Arc::new(role_registry))
             .with_vfs(vfs.clone())
             .with_retriever(Arc::new(retriever))
             .with_skill_executor(skill_executor)
@@ -93,7 +101,6 @@ impl AgentBuilderFactory {
             .with_security_config(config.security.clone())
             .with_web_config(config.web.clone())
             .with_usage_stats(usage_stats)
-            .with_agent_roles(config.agent_roles.clone())
             .with_default_working_directory(
                 config.agent.working_directory.clone().map(PathBuf::from),
             )

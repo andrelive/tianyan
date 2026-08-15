@@ -4,7 +4,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::agent::r#loop::{AgentLoop, AgentLoopConfig};
+use crate::agent::role_learning::{RoleLearningConfig, RoleLearningEngine};
+use crate::agent::role_store::RoleStore;
 use crate::agent::tool_registry::ToolRegistry;
+use crate::agent::RoleRegistry;
 use crate::common::error::{Result, TianyanError};
 use crate::config::AgentConfig;
 use crate::config::AgentRolesConfig;
@@ -61,6 +64,8 @@ pub struct AgentBuilder {
     notification_sink: Option<crate::notification::SharedNotificationSink>,
     /// 子 Agent 角色配置（delegate_to_agent role 参数；None 时使用内置角色）。
     agent_roles: Option<AgentRolesConfig>,
+    /// 注入的角色注册表（ADR-016：VFS 加载的持久化注册表；优先于 [agent_roles] 合成）。
+    role_registry: Option<Arc<RoleRegistry>>,
     /// 结构化 Trace 收集器（G6；None 时不记录 span）。
     trace_collector: Option<Arc<crate::observability::trace::TraceCollector>>,
     /// 聊天模型上下文规格（T5；注入 AgentLoop 并联动压缩窗口；None 时走默认窗口）。
@@ -93,6 +98,7 @@ impl AgentBuilder {
             trace_collector: None,
             chat_model_spec: None,
             command_logs_dir: None,
+            role_registry: None,
         }
     }
 
@@ -213,6 +219,12 @@ impl AgentBuilder {
         self
     }
 
+    /// 注入角色注册表（ADR-016：VFS 加载的持久化注册表；优先于 [agent_roles] 合成）。
+    pub fn with_role_registry(mut self, registry: Arc<RoleRegistry>) -> Self {
+        self.role_registry = Some(registry);
+        self
+    }
+
     /// 设置结构化 Trace 收集器（G6：轮次/工具/任务 span 持久化）。
     pub fn with_trace_collector(
         mut self,
@@ -323,10 +335,12 @@ impl AgentBuilder {
             tool_registry = tool_registry.with_command_logs_dir(dir);
         }
         // 子 Agent 角色注册表（delegate_to_agent role 参数）
-        if let Some(agent_roles) = self.agent_roles {
-            tool_registry = tool_registry.with_role_registry(Arc::new(
-                crate::agent::RoleRegistry::from_config(&agent_roles),
-            ));
+        if let Some(registry) = self.role_registry {
+            // ADR-016：VFS 持久化注册表（内置种子 + 配置签名 + 演化实体）
+            tool_registry = tool_registry.with_role_registry(registry);
+        } else if let Some(agent_roles) = self.agent_roles {
+            tool_registry =
+                tool_registry.with_role_registry(Arc::new(RoleRegistry::from_config(&agent_roles)));
         }
         if let Some(ref stats) = self.usage_stats {
             tool_registry = tool_registry.with_usage_stats(stats.clone());
@@ -426,12 +440,23 @@ impl AgentBuilder {
                 ..SkillLearningConfig::default()
             },
         ));
+        // 构建角色学习引擎（ADR-016 双管线共生：同一份轨迹，角色侧产物）
+        let role_learning_engine = Some(RoleLearningEngine::new(
+            model_service.clone(),
+            vfs.clone(),
+            RoleStore::new(vfs.clone()),
+            RoleLearningConfig {
+                generation_model: chat_model.clone(),
+                ..RoleLearningConfig::default()
+            },
+        ));
 
         Ok(Agent::new(
             chat_model,
             context_pipeline,
             metrics,
             skill_learning_engine,
+            role_learning_engine,
             agent_loop,
             session_manager,
             self.snapshot_manager,

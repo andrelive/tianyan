@@ -483,6 +483,7 @@ fn role_registry_with(model: Option<&str>, tools: Option<Vec<&str>>) -> Arc<Role
             tools: tools.map(|ts| ts.into_iter().map(str::to_string).collect()),
             max_turns: None,
             timeout_secs: None,
+            ..Default::default()
         },
     );
     Arc::new(RoleRegistry::from_config(&AgentRolesConfig { roles }))
@@ -577,6 +578,7 @@ async fn test_delegate_role_system_prompt_injected() {
             tools: None,
             max_turns: None,
             timeout_secs: None,
+            ..Default::default()
         },
     );
     let mut mock = MockChatService::new();
@@ -614,6 +616,7 @@ async fn test_delegate_explicit_system_prompt_beats_role() {
             tools: None,
             max_turns: None,
             timeout_secs: None,
+            ..Default::default()
         },
     );
     let mut mock = MockChatService::new();

@@ -274,12 +274,28 @@ impl ToolRegistry {
         })?;
 
         let role = match params.role.as_deref() {
-            Some(name) => Some(self.role_registry.get(name).ok_or_else(|| {
-                TianyanError::Custom(format!(
-                    "tool: 角色不存在：{name}。可用角色：{}",
-                    self.role_registry.names().join("、")
-                ))
-            })?),
+            Some(name) => {
+                let active = self.role_registry.get_active(name);
+                match active {
+                    Some(role) => Some(role),
+                    None => {
+                        // 区分：角色不存在 vs 试验性不可调用（ADR-016）
+                        let experimental = self
+                            .role_registry
+                            .get(name)
+                            .map(|r| r.status == crate::agent::RoleStatus::Experimental)
+                            .unwrap_or(false);
+                        return Err(TianyanError::Custom(if experimental {
+                            format!("tool: 角色 {name} 为试验性，不可调用（仅展示供评估）")
+                        } else {
+                            format!(
+                                "tool: 角色不存在：{name}。可用角色：{}",
+                                self.role_registry.active_names().join("、")
+                            )
+                        }));
+                    }
+                }
+            }
             None => None,
         };
 
