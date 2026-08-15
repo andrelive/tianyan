@@ -66,6 +66,7 @@ impl AgentBuilderFactory {
         notification_sink: tianyan::notification::SharedNotificationSink,
         session_manager: Arc<dyn SessionManager>,
         trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,
+        role_registry: Arc<tianyan::agent::RoleRegistry>,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
@@ -81,19 +82,12 @@ impl AgentBuilderFactory {
             vfs.clone() as Arc<dyn tianyan::vfs::VirtualFileSystem>,
         );
 
-        // ADR-016：角色注册表从 VFS 加载（内置种子 + 配置签名 upsert + 演化实体）
-        let role_store = tianyan::agent::RoleStore::new(vfs.clone());
-        let role_registry =
-            tianyan::agent::RoleRegistry::load_persisted(&role_store, &config.agent_roles)
-                .await
-                .map_err(|e| TianyanError::Custom(format!("内部错误：角色注册表加载失败：{e}")))?;
-
         let agent = AgentBuilder::new()
             .with_config(config.agent.clone())
             .with_model(&chat_model)
             .with_chat_model_spec(chat_model_spec)
             .with_model_service(model_services.chat)
-            .with_role_registry(Arc::new(role_registry))
+            .with_role_registry(role_registry)
             .with_vfs(vfs.clone())
             .with_retriever(Arc::new(retriever))
             .with_skill_executor(skill_executor)
@@ -160,6 +154,7 @@ impl AgentBuilderFactory {
         notification_sink: tianyan::notification::SharedNotificationSink,
         session_manager: Arc<dyn SessionManager>,
         trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,
+        role_registry: Arc<tianyan::agent::RoleRegistry>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -174,6 +169,7 @@ impl AgentBuilderFactory {
             notification_sink,
             session_manager,
             trace_collector,
+            role_registry,
         )
         .await
         {

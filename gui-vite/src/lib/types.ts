@@ -202,6 +202,51 @@ export interface SkillListResponse {
   total?: number;
 }
 
+// ── 子智能体角色（ADR-016）────────────────────────────────────────────
+
+export interface RoleSessionSummary {
+  /** 累计任务数 */
+  task_count: number;
+  /** 会话消息条数 */
+  message_count: number;
+  /** 会话创建时间（epoch 毫秒） */
+  created_at: number;
+  /** 最后使用时间（epoch 毫秒） */
+  updated_at: number;
+}
+
+export interface RoleSummary {
+  name: string;
+  source: 'builtin' | 'user' | 'learned';
+  status: 'active' | 'experimental';
+  version: number;
+  lineage?: string | null;
+  /** 职责一句话 */
+  purpose: string;
+  /** 工具白名单数量（null = 不限制） */
+  tool_count?: number | null;
+  model?: string | null;
+  max_turns?: number | null;
+  /** durable 角色会话（无会话时为 null） */
+  session?: RoleSessionSummary | null;
+}
+
+export interface RoleDetail extends RoleSummary {
+  /** 完整系统提示 */
+  system_prompt?: string | null;
+  /** 工具白名单（null = 不限制） */
+  tools?: string[] | null;
+}
+
+export interface ListRolesResponse {
+  roles: RoleSummary[];
+}
+
+export interface RoleActionResponse {
+  name: string;
+  status: string;
+}
+
 export interface SkillExecuteResponse {
   success: boolean;
   job_id: string;
@@ -724,6 +769,7 @@ export interface WorkspaceApplyPatchResponse {
 export type View =
   | 'chat'
   | 'skills'
+  | 'roles'
   | 'tools'
   | 'knowledge'
   | 'workspace'

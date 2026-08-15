@@ -99,16 +99,16 @@ impl RoleStore {
     /// 加载全部角色（排除 `_meta` 元条目；解析失败跳过并告警）。
     pub async fn load_roles(&self) -> Result<Vec<AgentRole>> {
         let root = Self::root_uri();
-        // 目录未创建（从未保存过角色）时视为空，不报错
-        if !self.vfs.exists(&root).await? {
-            return Ok(Vec::new());
-        }
-        let entries = self.vfs.list(&root).await?;
+        // 目录未创建（从未保存过角色）时视为空，不报错（ADR-014 语义谓词）
+        let entries = match self.vfs.list(&root).await {
+            Ok(entries) => entries,
+            Err(e) if e.is_not_found() => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
         let mut roles = Vec::new();
         for entry in entries {
-            if !entry.is_directory() {
-                continue;
-            }
+            // 不做目录标记过滤：SQLite 后端条目为单行（is_directory 与内容互斥），
+            // 角色条目可能是内容行——按名加载即可，两种后端统一
             let Some(name) = entry.uri().path().last().cloned() else {
                 continue;
             };

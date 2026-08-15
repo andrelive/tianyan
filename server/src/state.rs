@@ -208,6 +208,23 @@ impl SkillRefresher for SkillSync {
     }
 }
 
+/// 角色注册表会话边界刷新（ADR-016：学习产物新会话立即可见）。
+///
+/// 与 [`SkillSync`] 同构：新会话创建时把 VFS 中角色（学习产物）增量合并进
+/// 注册表；会话内不刷新（前缀稳定，prompt 缓存不失效）。
+#[derive(Clone)]
+pub struct RoleSync {
+    store: tianyan::agent::RoleStore,
+    registry: Arc<tianyan::agent::RoleRegistry>,
+}
+
+impl RoleSync {
+    /// 将 VFS 角色增量合并进注册表，返回新增角色数。
+    pub async fn refresh(&self) -> TianyanResult<usize> {
+        self.registry.refresh_from_store(&self.store).await
+    }
+}
+
 /// 共享应用状态
 ///
 /// 管理服务器核心组件的生命周期，包括 Agent、会话管理器、虚拟文件系统和摘要服务。
@@ -230,6 +247,10 @@ pub struct AppState {
     skill_executor: Arc<SkillExecutor>,
     /// 技能管理器（VFS 命名空间访问；会话边界刷新已学习技能用）
     skill_manager: Arc<SkillManager>,
+    /// 角色 VFS 存储（ADR-016：角色列表/详情/会话 API 的权威数据源）。
+    role_store: tianyan::agent::RoleStore,
+    /// 角色注册表（ADR-016：与 Agent 共享同一 Arc；会话边界刷新目标）。
+    role_registry: Arc<tianyan::agent::RoleRegistry>,
     /// 使用统计追踪器
     usage_stats: Arc<UsageStats>,
     /// 结构化 Trace 收集器（G6：span 持久化与回放查询）
@@ -366,6 +387,12 @@ impl AppState {
         let model_services = create_model_services(&config)
             .await
             .map_err(model_services_error)?;
+        // ADR-016：角色注册表从 VFS 加载（内置种子 + 配置签名 upsert + 演化实体）
+        let role_store = tianyan::agent::RoleStore::new(vfs.clone());
+        let role_registry = Arc::new(
+            tianyan::agent::RoleRegistry::load_persisted(&role_store, &config.agent_roles).await?,
+        );
+
         // 创建持久化会话管理器（唯一实例：Agent 与 API 层共享，避免双写）
         let session_manager = Arc::new(PersistentSessionManager::new(vfs.clone()));
         let agent = AgentBuilderFactory::build_agent_or_wizard(
@@ -384,6 +411,7 @@ impl AppState {
             crate::notification::global_notification_sink(),
             session_manager.clone(),
             Some(trace_collector.clone()),
+            role_registry.clone(),
         )
         .await?;
 
@@ -395,6 +423,8 @@ impl AppState {
             skill_registry,
             skill_executor,
             skill_manager,
+            role_store,
+            role_registry,
             usage_stats,
             trace_collector,
             snapshot_manager,
@@ -444,6 +474,19 @@ impl AppState {
         }
     }
 
+    /// 获取角色注册表同步句柄（ADR-016：新会话创建时刷新学习角色）。
+    pub fn role_sync(&self) -> RoleSync {
+        RoleSync {
+            store: self.role_store.clone(),
+            registry: self.role_registry.clone(),
+        }
+    }
+
+    /// 角色 VFS 存储（角色 API 的权威数据源）。
+    pub fn role_store(&self) -> tianyan::agent::RoleStore {
+        self.role_store.clone()
+    }
+
     /// 获取结构化 Trace 收集器（G6 回放查询）。
     pub fn trace_collector(&self) -> Arc<tianyan::observability::trace::TraceCollector> {
         self.trace_collector.clone()
@@ -483,6 +526,10 @@ impl AppState {
         let model_services = create_model_services(&config)
             .await
             .map_err(model_services_error)?;
+        // ADR-016：配置热重载时应用持久化状态（配置签名变更 → 用户种子生效）
+        self.role_registry
+            .apply_persisted(&self.role_store, &config.agent_roles)
+            .await?;
         let new_agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -496,6 +543,7 @@ impl AppState {
             crate::notification::global_notification_sink(),
             self.session_manager.clone(),
             Some(self.trace_collector.clone()),
+            self.role_registry.clone(),
         )
         .await?;
 

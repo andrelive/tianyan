@@ -33,7 +33,9 @@ pub async fn chat_handler(
     let agent = state.agent().await;
     let session_manager = state.session_manager();
 
-    let service = ChatService::new(agent, session_manager).with_skill_sync(state.skill_sync());
+    let service = ChatService::new(agent, session_manager)
+        .with_skill_sync(state.skill_sync())
+        .with_role_sync(state.role_sync());
 
     service
         .process_message(request)
@@ -184,8 +186,11 @@ pub async fn chat_stream_handler(
     // 生成任务处理流式响应
     let cancel_for_service = cancel.clone();
     let skill_sync = state.skill_sync();
+    let role_sync = state.role_sync();
     tokio::spawn(async move {
-        let service = ChatService::new(agent, session_manager).with_skill_sync(skill_sync);
+        let service = ChatService::new(agent, session_manager)
+            .with_skill_sync(skill_sync)
+            .with_role_sync(role_sync);
 
         if let Err(e) = service
             .process_message_stream(request, event_tx, cancel_for_service)

@@ -7,6 +7,7 @@
 //! 试验性角色（status = Experimental）只展示不可调用。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -119,9 +120,12 @@ fn config_sig(config: &AgentRolesConfig) -> String {
 }
 
 /// 角色注册表：按名字索引角色定义，供委托循环解析。
+///
+/// 内部 `std::sync::RwLock`（短临界区、无异步持有）：注册表以 `Arc` 共享，
+/// 运行期可增量刷新（ADR-016：会话边界从 VFS 合并学习产物，新会话立即可见）。
 #[derive(Debug, Clone, Default)]
 pub struct RoleRegistry {
-    roles: HashMap<String, AgentRole>,
+    roles: Arc<std::sync::RwLock<HashMap<String, AgentRole>>>,
 }
 
 impl RoleRegistry {
@@ -237,7 +241,9 @@ impl RoleRegistry {
                 lineage: None,
             },
         );
-        Self { roles }
+        Self {
+            roles: Arc::new(std::sync::RwLock::new(roles)),
+        }
     }
 
     /// 从用户配置构建注册表：先取内置角色，再叠加用户角色——
@@ -246,10 +252,10 @@ impl RoleRegistry {
     /// 注：ADR-016 装配路径优先使用 [`Self::load_persisted`]（VFS 持久化）；
     /// 本方法保留为无 VFS 环境的轻量构造。
     pub fn from_config(config: &AgentRolesConfig) -> Self {
-        let mut registry = Self::builtin();
+        let registry = Self::builtin();
         for (name, mut role) in config.roles.clone() {
             role.name = name.clone();
-            registry.roles.insert(name, role);
+            registry.insert(role);
         }
         registry
     }
@@ -262,15 +268,28 @@ impl RoleRegistry {
     /// - **用户配置降级为种子**：配置签名（`[agent_roles]` 序列化）与上次不同时
     ///   覆盖对应角色（用户新意图生效）；签名相同不覆盖（演化产物保留）。
     pub async fn load_persisted(store: &RoleStore, config: &AgentRolesConfig) -> Result<Self> {
-        // 1. VFS 现有角色（权威）
-        let mut registry = Self::builtin();
+        let registry = Self::builtin();
+        registry.apply_persisted(store, config).await?;
+        Ok(registry)
+    }
+
+    /// 就地应用持久化状态（ADR-016 装配规则；与 [`Self::load_persisted`] 同规则，
+    /// 供配置热重载在共享注册表上执行）。
+    ///
+    /// 规则：VFS 角色权威覆盖 → 内置种子首次落盘 → 用户配置按签名 upsert。
+    pub async fn apply_persisted(
+        &self,
+        store: &RoleStore,
+        config: &AgentRolesConfig,
+    ) -> Result<()> {
+        // 1. VFS 现有角色（权威）覆盖
         for role in store.load_roles().await? {
-            registry.insert(role);
+            self.insert(role);
         }
         // 2. 内置种子写入 VFS（首次启动）
-        for name in registry.names() {
+        for name in self.names() {
             if store.load_role(&name).await?.is_none() {
-                if let Some(role) = registry.get(&name) {
+                if let Some(role) = self.get(&name) {
                     store.save_role(&role).await?;
                 }
             }
@@ -283,29 +302,53 @@ impl RoleRegistry {
                 role.name = name.clone();
                 role.source = RoleSource::User;
                 role.version = 1;
-                registry.insert(role);
-                if let Some(saved) = registry.get(&name) {
+                self.insert(role);
+                if let Some(saved) = self.get(&name) {
                     store.save_role(&saved).await?;
                 }
             }
             store.save_config_sig(&sig).await?;
         }
-        Ok(registry)
+        Ok(())
     }
 
     /// 注册或覆盖角色（含来源元数据；VFS 持久化由 RoleStore 负责）。
-    pub fn insert(&mut self, role: AgentRole) {
-        self.roles.insert(role.name.clone(), role);
+    pub fn insert(&self, role: AgentRole) {
+        self.roles
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(role.name.clone(), role);
+    }
+
+    /// 从 VFS 增量合并角色（ADR-016：会话边界刷新——学习产物新会话立即可见）。
+    ///
+    /// 幂等：已存在的同名角色被覆盖（VFS 为权威），返回本次新增的角色数。
+    pub async fn refresh_from_store(&self, store: &RoleStore) -> Result<usize> {
+        let vfs_roles = store.load_roles().await?;
+        let mut new_count = 0usize;
+        for role in vfs_roles {
+            if self.get(&role.name).is_none() {
+                new_count += 1;
+            }
+            self.insert(role);
+        }
+        Ok(new_count)
     }
 
     /// 按名字获取角色定义（含试验性；委托解析用 [`Self::get_active`]）。
     pub fn get(&self, name: &str) -> Option<AgentRole> {
-        self.roles.get(name).cloned()
+        self.roles
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .cloned()
     }
 
     /// 按名字获取**可调用**角色（ADR-016：过滤试验性——只展示不可调用）。
     pub fn get_active(&self, name: &str) -> Option<AgentRole> {
         self.roles
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .get(name)
             .cloned()
             .filter(|r| r.status != RoleStatus::Experimental)
@@ -313,8 +356,8 @@ impl RoleRegistry {
 
     /// 可调用角色名（过滤试验性，字典序）。
     pub fn active_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .roles
+        let roles = self.roles.read().unwrap_or_else(|e| e.into_inner());
+        let mut names: Vec<String> = roles
             .values()
             .filter(|r| r.status != RoleStatus::Experimental)
             .map(|r| r.name.clone())
@@ -327,7 +370,8 @@ impl RoleRegistry {
     ///
     /// 每行：`- 名字：职责一句话（N 工具）[试验性]`；完整提示仅委托时加载。
     pub fn delegate_role_segment(&self) -> String {
-        let mut roles: Vec<&AgentRole> = self.roles.values().collect();
+        let roles = self.roles.read().unwrap_or_else(|e| e.into_inner());
+        let mut roles: Vec<&AgentRole> = roles.values().collect();
         roles.sort_by(|a, b| a.name.cmp(&b.name));
         let mut lines = Vec::new();
         for role in roles {
@@ -349,7 +393,8 @@ impl RoleRegistry {
 
     /// 所有角色名（字典序，便于生成稳定的可用角色列表）。
     pub fn names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.roles.keys().cloned().collect();
+        let roles = self.roles.read().unwrap_or_else(|e| e.into_inner());
+        let mut names: Vec<String> = roles.keys().cloned().collect();
         names.sort();
         names
     }

@@ -23,6 +23,7 @@ pub mod config;
 pub mod events;
 pub mod insights;
 pub mod knowledge;
+pub mod roles;
 pub mod sessions;
 pub mod shared;
 pub mod skills;
@@ -68,6 +69,7 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .merge(workspace::routes())
         .merge(tasks::routes())
         .merge(tools::routes())
+        .merge(roles::routes())
         .merge(traces::routes())
         .merge(clipboard::routes())
         .merge(events::routes())

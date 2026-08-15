@@ -3,6 +3,7 @@ import { useAppStore } from '@/lib/store';
 import {
   MessageSquare,
   Wrench,
+  Users,
   Hammer,
   BookOpen,
   MemoryStick,
@@ -20,6 +21,7 @@ import {
 const NAV_ITEMS = [
   { id: 'chat' as const, label: '会话', icon: MessageSquare, path: '/chat' },
   { id: 'skills' as const, label: '技能', icon: Wrench, path: '/skills' },
+  { id: 'roles' as const, label: '子智能体', icon: Users, path: '/roles' },
   { id: 'tools' as const, label: '工具', icon: Hammer, path: '/tools' },
   { id: 'knowledge' as const, label: '知识', icon: BookOpen, path: '/knowledge' },
   { id: 'memory' as const, label: '记忆', icon: MemoryStick, path: '/memory' },

@@ -13,7 +13,7 @@ use crate::api::chat::types::{ChatRequest, ChatResponse, ChatStreamEvent, SkillC
 use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
 use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
-use crate::state::SkillSync;
+use crate::state::{RoleSync, SkillSync};
 
 /// 把 API 层消息转换为 core 消息：携带图片时构造多模态消息。
 fn to_core_message(msg: &ChatMessage) -> CoreMessage {
@@ -31,6 +31,8 @@ pub struct ChatService {
     session_manager: Arc<dyn SessionManager>,
     /// 技能注册表同步句柄：新会话创建时刷新已学习技能（会话边界刷新）。
     skill_sync: Option<SkillSync>,
+    /// 角色注册表同步句柄（ADR-016）：新会话创建时刷新学习角色。
+    role_sync: Option<RoleSync>,
 }
 
 impl ChatService {
@@ -40,12 +42,19 @@ impl ChatService {
             agent,
             session_manager,
             skill_sync: None,
+            role_sync: None,
         }
     }
 
     /// 挂载技能注册表同步句柄（新会话创建时刷新已学习技能）。
     pub fn with_skill_sync(mut self, sync: SkillSync) -> Self {
         self.skill_sync = Some(sync);
+        self
+    }
+
+    /// 挂载角色注册表同步句柄（ADR-016：新会话创建时刷新学习角色）。
+    pub fn with_role_sync(mut self, sync: RoleSync) -> Self {
+        self.role_sync = Some(sync);
         self
     }
 
@@ -56,6 +65,17 @@ impl ChatService {
         if let Some(sync) = &self.skill_sync {
             if let Err(e) = sync.refresh().await {
                 tracing::warn!(error = %e, "新会话技能刷新失败（不影响对话）");
+            }
+        }
+    }
+
+    /// 会话边界刷新（ADR-016）：新会话创建后把 VFS 学习角色增量合并进注册表。
+    ///
+    /// 幂等；失败仅告警，不影响对话。
+    async fn refresh_learned_roles(&self) {
+        if let Some(sync) = &self.role_sync {
+            if let Err(e) = sync.refresh().await {
+                tracing::warn!(error = %e, "新会话角色刷新失败（不影响对话）");
             }
         }
     }
@@ -76,6 +96,7 @@ impl ChatService {
         .await?;
         if is_new {
             self.refresh_learned_skills().await;
+            self.refresh_learned_roles().await;
         }
 
         let response = self
@@ -114,6 +135,7 @@ impl ChatService {
         .await?;
         if is_new {
             self.refresh_learned_skills().await;
+            self.refresh_learned_roles().await;
         }
 
         let mut stream = self

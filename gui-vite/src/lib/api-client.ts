@@ -12,7 +12,10 @@ import type {
   MemoryListResponse,
   ProviderProtocol,
   ProviderScanResponse,
+  ListRolesResponse,
   RetrievalTracesResponse,
+  RoleActionResponse,
+  RoleDetail,
   SchedulerStatus,
   SearchSuggestionsResponse,
   Session,
@@ -135,6 +138,22 @@ export async function getTools(): Promise<ListToolsResponse> {
 /** 获取技能详情（完整内容 + 创建/更新时间） */
 export async function getSkillDetail(skillId: string): Promise<SkillDetail> {
   return apiGet<SkillDetail>(`/skills/${encodeURIComponent(skillId)}`);
+}
+
+export async function getRoles(): Promise<ListRolesResponse> {
+  return apiGet<ListRolesResponse>('/roles');
+}
+
+export async function getRoleDetail(name: string): Promise<RoleDetail> {
+  return apiGet<RoleDetail>(`/roles/${encodeURIComponent(name)}`);
+}
+
+export async function resetRole(name: string): Promise<RoleActionResponse> {
+  return apiPost<RoleActionResponse>(`/roles/${encodeURIComponent(name)}/reset`, {});
+}
+
+export async function deleteRole(name: string): Promise<RoleActionResponse> {
+  return apiDelete<RoleActionResponse>(`/roles/${encodeURIComponent(name)}`);
 }
 
 // ========== Session messages ==========
