@@ -108,7 +108,9 @@ impl SessionService {
                                 acc.push('\n');
                             }
                             let truncated_args = if arguments.len() > 200 {
-                                format!("{}...", &arguments[..200])
+                                // 按字符边界截断：直接按字节切会在多字节 UTF-8
+                                // （中文等）中间 panic
+                                format!("{}...", &arguments[..arguments.floor_char_boundary(200)])
                             } else {
                                 arguments.clone()
                             };
@@ -123,7 +125,9 @@ impl SessionService {
                                 acc.push('\n');
                             }
                             let truncated = if content.len() > 500 {
-                                format!("{}...", &content[..500])
+                                // 按字符边界截断：直接按字节切会在多字节 UTF-8
+                                // （中文等）中间 panic
+                                format!("{}...", &content[..content.floor_char_boundary(500)])
                             } else {
                                 content.clone()
                             };
@@ -443,8 +447,143 @@ impl SessionService {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use tianyan::common::types::{MessageRole, Part, PartTime, StructuredMessage};
+    use tianyan::session::{Session, SessionManager};
+
+    use crate::api::sessions::services::SessionService;
+
+    /// 内存会话管理器 mock（get_session_detail 回归测试用）。
+    struct MockSessionManager {
+        sessions: Mutex<HashMap<String, Session>>,
+    }
+
+    impl MockSessionManager {
+        fn with_sessions(sessions: Vec<Session>) -> Self {
+            let map = sessions
+                .into_iter()
+                .map(|s| (s.session_id.clone(), s))
+                .collect();
+            Self {
+                sessions: Mutex::new(map),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionManager for MockSessionManager {
+        async fn create_session(
+            &self,
+            id: &str,
+            _message: tianyan::Message,
+        ) -> tianyan::Result<Session> {
+            let session = Session::new(id);
+            self.sessions
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), session.clone());
+            Ok(session)
+        }
+
+        async fn get_session(&self, id: &str) -> tianyan::Result<Option<Session>> {
+            Ok(self.sessions.lock().unwrap().get(id).cloned())
+        }
+
+        async fn update_session(&self, session: &Session) -> tianyan::Result<()> {
+            self.sessions
+                .lock()
+                .unwrap()
+                .insert(session.session_id.clone(), session.clone());
+            Ok(())
+        }
+
+        async fn add_structured_message(
+            &self,
+            _session_id: &str,
+            _msg: StructuredMessage,
+        ) -> tianyan::Result<()> {
+            Ok(())
+        }
+
+        async fn rewrite_messages(
+            &self,
+            _session_id: &str,
+            _messages: &[StructuredMessage],
+        ) -> tianyan::Result<()> {
+            Ok(())
+        }
+
+        async fn list_sessions(&self) -> tianyan::Result<Vec<Session>> {
+            Ok(self.sessions.lock().unwrap().values().cloned().collect())
+        }
+
+        async fn delete_session(&self, id: &str) -> tianyan::Result<()> {
+            self.sessions.lock().unwrap().remove(id);
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_session_service_creation() {
         // 编译时测试
+    }
+
+    /// 回归：多字节 UTF-8（中文）工具结果/参数超过截断阈值时，
+    /// 按字节切片会在字符中间 panic（此前导致 GET /sessions/{id}/messages 500）。
+    #[tokio::test]
+    async fn test_get_session_detail_truncates_multibyte_utf8_safely() {
+        let chinese_result = "中文结果".repeat(300); // 900 字符 ≈ 2700 字节 > 500
+        let chinese_args = "中文参数".repeat(150); // 450 字符 ≈ 1350 字节 > 200
+        let msg = StructuredMessage {
+            id: "msg_1".to_string(),
+            parent_id: None,
+            role: MessageRole::Assistant,
+            parts: vec![
+                Part::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: chinese_args,
+                    time: PartTime::default(),
+                },
+                Part::ToolResult {
+                    tool_call_id: "call_1".to_string(),
+                    content: chinese_result,
+                    time: PartTime::default(),
+                },
+            ],
+            tokens: Default::default(),
+            cost: 0.0,
+            model_id: None,
+            time: Default::default(),
+            session_id: "session-test".to_string(),
+            finish: None,
+            compression_marker: false,
+        };
+        let mut session = Session::new("session-test");
+        session.messages.push(msg);
+
+        let service = SessionService::new(
+            Arc::new(MockSessionManager::with_sessions(vec![session])),
+            None,
+            None,
+        );
+
+        // 不 panic 且截断标记存在（截断点落在完整字符边界上）
+        let detail = service
+            .get_session_detail("session-test")
+            .await
+            .expect("get_session_detail 不应失败");
+        let content = &detail.messages[0].content;
+        assert!(
+            content.contains("[调用工具: read_file("),
+            "工具调用应拼入正文"
+        );
+        assert!(content.contains("[工具结果 call_1]"), "工具结果应拼入正文");
+        assert!(content.contains("..."), "超长内容应带截断标记");
+        // 截断点必须是完整字符边界（UTF-8 安全；按字节切片会在此 panic）
+        let dot_idx = content.find("...").expect("应有截断标记");
+        assert!(content.is_char_boundary(dot_idx), "截断点必须是字符边界");
     }
 }
