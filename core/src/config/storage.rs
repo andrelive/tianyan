@@ -5,14 +5,15 @@ use std::path::PathBuf;
 
 /// VFS 结构化存储后端类型（ADR-005）。
 ///
-/// 默认使用本地文件系统；配置 `backend = "sqlite"` 切换为 SQLite。
+/// SQLite 为默认后端（e2e 全量在 sqlite 上验证通过后翻转，2026-08-15）；
+/// 配置 `backend = "local"` 可回退本地文件系统。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageBackendType {
-    /// 本地文件系统后端（默认）。
-    #[default]
+    /// 本地文件系统后端。
     Local,
-    /// SQLite 后端（替代 LocalFileBackend，需共享 SqliteDb 连接）。
+    /// SQLite 后端（替代 LocalFileBackend，需共享 SqliteDb 连接；默认）。
+    #[default]
     Sqlite,
 }
 

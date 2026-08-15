@@ -44,12 +44,16 @@ test.describe('real backend boot', () => {
     // 数据源校验：后端真实返回技能列表（非空）
     const res = await request.get('/api/v1/skills');
     expect(res.ok()).toBeTruthy();
-    const body = (await res.json()) as { skills: Array<{ id: string; name: string }> };
+    const body = (await res.json()) as {
+      skills: Array<{ id: string; name: string; category: string }>;
+    };
     expect(body.skills.length).toBeGreaterThan(0);
 
-    // UI 渲染出至少一行技能（按钮包含技能名）
-    const firstSkill = body.skills[0].name;
-    await expect(page.locator('button', { hasText: firstSkill }).first()).toBeVisible({
+    // 面板只展示方法论技能（custom 类：GEPA 学习技能 + planning）；
+    // 内置桥接技能（file/system/network）不渲染
+    const methodology =
+      body.skills.find((s) => s.category === 'custom') ?? body.skills[0];
+    await expect(page.locator('button', { hasText: methodology.name }).first()).toBeVisible({
       timeout: 15000,
     });
     await expect(page.locator('[role="alert"]')).toHaveCount(0);

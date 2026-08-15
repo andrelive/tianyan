@@ -35,7 +35,10 @@ embedding = { provider = "e2e-mock", model = "e2e-embed" }
 # 注意：此处故意不设置 data_dir —— 由环境变量 TIANYAN_DATA_DIR 提供
 # （core/src/config/storage.rs default_data_dir 已读取该环境变量，2026-08-13 实现）。
 # 无需复制本文件；直接以 TIANYAN_CONFIG 指向本文件、TIANYAN_DATA_DIR 指向临时目录启动。
+# backend = "sqlite"：e2e 全量在 SQLite 存储后端上验证（ADR-005 切换目标；
+# 验证通过后本地/默认配置一并切换）。
 [storage]
+backend = "sqlite"
 
 [storage.vector]
 # 向量维度必须与 mock 嵌入向量长度一致（mock-llm.mjs 默认 768）

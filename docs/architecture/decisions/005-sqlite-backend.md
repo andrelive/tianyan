@@ -1,8 +1,8 @@
 # ADR-005: SQLite 作为主存储后端
 
 **日期**: 2026-07  
-**状态**: ⚠️ 部分落地 —— `SqliteBackend` 已实现并接入 `StorageBackend` seam；`LocalFileBackend` 仍为默认后端，SQLite 通过配置 `[storage] backend = "sqlite"` 启用。  
-**影响范围**: 全局存储 — 结构化数据存储的 adapter seam（`StorageBackend`），最终目标为 SQLite 默认
+**状态**: ✅ 已落地 —— `SqliteBackend` 已实现并接入 `StorageBackend` seam；e2e 全量（26 用例）在 sqlite 后端验证通过后（2026-08-15），默认后端翻转：`StorageBackendType::default = Sqlite`，本地配置与 e2e 配置均显式 `backend = "sqlite"`。`backend = "local"` 仍可回退本地文件系统。  
+**影响范围**: 全局存储 — 结构化数据存储的 adapter seam（`StorageBackend`），默认后端为 SQLite
 
 ---
 
