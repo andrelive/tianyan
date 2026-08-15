@@ -27,12 +27,10 @@ pub struct ChatMessage {
     /// 思考过程文本（模型 reasoning；正文在 content，前端分开渲染）。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub thinking: Option<String>,
-    /// 工具调用（A2 展示契约：名称 + 参数 + 展示意图；历史消息由 parts 转换）。
+    /// 工具调用卡片（A2 展示契约：名称 + 参数 + 展示意图 + 对应执行结果，
+    /// 调用与结果合并渲染；历史消息由 parts 转换，结果为完整内容不截断）。
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub tool_calls: Option<Vec<tianyan::agent::ToolCallEvent>>,
-    /// 工具执行结果（完整内容不截断，前端折叠展示——仅展示层，与 LLM 上下文无关）。
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub tool_results: Option<Vec<ToolResultEvent>>,
+    pub tool_calls: Option<Vec<ToolCallWithResult>>,
     /// 图片 data URL 列表（`data:image/png;base64,...`），仅用户消息使用。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub images: Option<Vec<String>>,
@@ -41,13 +39,19 @@ pub struct ChatMessage {
     pub timestamp: Option<String>,
 }
 
-/// 工具执行结果（历史消息展示用；content 为完整原始内容，前端折叠展示）。
+/// 历史消息中的工具调用卡片（调用信息与对应执行结果合并渲染）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResultEvent {
-    /// 对应工具调用 ID。
-    pub tool_call_id: String,
-    /// 执行结果完整内容（不截断）。
-    pub content: String,
+pub struct ToolCallWithResult {
+    /// 工具调用 ID（关联工具结果）。
+    pub id: String,
+    /// 工具名称。
+    pub name: String,
+    /// 参数 JSON 字符串（原始 arguments）。
+    pub arguments: String,
+    /// 展示意图（A2：generic/read/write/terminal/diff/search/web/skill/knowledge/delegate/code）。
+    pub presentation: String,
+    /// 对应工具执行结果（完整内容不截断；无结果时为 None）。
+    pub result: Option<String>,
 }
 
 impl ChatMessage {
@@ -64,7 +68,6 @@ impl ChatMessage {
             content: content.to_string(),
             thinking: None,
             tool_calls: None,
-            tool_results: None,
             images: None,
             timestamp: None,
         }
@@ -83,7 +86,6 @@ impl ChatMessage {
             content: content.to_string(),
             thinking: None,
             tool_calls: None,
-            tool_results: None,
             images: None,
             timestamp: None,
         }
@@ -102,7 +104,6 @@ impl ChatMessage {
             content: content.to_string(),
             thinking: None,
             tool_calls: None,
-            tool_results: None,
             images: None,
             timestamp: None,
         }

@@ -1,6 +1,7 @@
 import { useState, memo, type ComponentType } from 'react';
 import {
   ChevronDown,
+  ChevronRight,
   Terminal,
   FileText,
   Search,
@@ -32,6 +33,8 @@ const PRESENTATION_ICONS: Record<string, ComponentType<{ className?: string }>> 
 interface Props {
   /** 工具调用事件（名称/参数/展示意图） */
   event: ToolCallEvent;
+  /** 对应执行结果（完整内容；有值时在卡片内渲染可展开的结果区） */
+  result?: string | null;
 }
 
 /**
@@ -40,8 +43,9 @@ interface Props {
  * 数据驱动：按 event.presentation 选择图标与标签，展开可查看参数 JSON。
  * 后端在 ToolRegistry 注册展示意图（内置工具一一对应），前端只做投影。
  */
-function ToolCallCard({ event }: Props) {
+function ToolCallCard({ event, result }: Props) {
   const [expanded, setExpanded] = useState(false);
+  const [resultOpen, setResultOpen] = useState(false);
   const Icon = PRESENTATION_ICONS[event.presentation] ?? Wrench;
   const label = TOOL_PRESENTATION_LABELS[event.presentation] ?? '工具';
 
@@ -59,9 +63,13 @@ function ToolCallCard({ event }: Props) {
           <Icon className="w-3.5 h-3.5 text-[var(--color-text-tertiary)]" />
         </span>
         <span className="text-xs font-medium text-[var(--color-text-secondary)]">{label}</span>
-        <code className="text-xs text-[var(--color-text-primary)] font-mono truncate">
-          {event.name}
-        </code>
+        {event.name ? (
+          <code className="text-xs text-[var(--color-text-primary)] font-mono truncate">
+            {event.name}
+          </code>
+        ) : (
+          <span className="text-xs text-[var(--color-text-primary)]">工具结果</span>
+        )}
         <span className="ml-auto shrink-0 flex items-center gap-1">
           {expanded ? (
             <ChevronDown className="w-3.5 h-3.5 text-[var(--color-text-tertiary)] rotate-180 transition-transform" />
@@ -76,6 +84,30 @@ function ToolCallCard({ event }: Props) {
         <pre className="max-h-48 overflow-auto px-3 py-2 text-xs font-mono text-[var(--color-text-secondary)] bg-[var(--color-bg-hover)]/40 whitespace-pre-wrap break-words">
           {formatArguments(event.arguments)}
         </pre>
+      )}
+
+      {/* 工具结果区：调用与结果合并渲染（完整内容，默认收起） */}
+      {result != null && (
+        <div className="border-t border-[var(--color-border)]">
+          <button
+            type="button"
+            onClick={() => setResultOpen((v) => !v)}
+            aria-expanded={resultOpen}
+            className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors"
+          >
+            {resultOpen ? (
+              <ChevronDown size={12} className="shrink-0" />
+            ) : (
+              <ChevronRight size={12} className="shrink-0" />
+            )}
+            <span>工具结果</span>
+          </button>
+          {resultOpen && (
+            <pre className="max-h-96 overflow-auto px-3 pb-2 text-xs leading-relaxed whitespace-pre-wrap break-words font-mono text-[var(--color-text-secondary)]">
+              {result}
+            </pre>
+          )}
+        </div>
       )}
     </div>
   );

@@ -17,10 +17,9 @@ export interface ChatMessage {
   images?: string[];
   timestamp?: string;
   skill_calls?: SkillCallInfo[];
-  /** 工具调用卡片（A2 展示契约；流式 chunk 累积到当前 assistant 消息） */
-  tool_calls?: ToolCallEvent[];
-  /** 工具执行结果（历史消息结构化展示：完整内容，折叠渲染；流式阶段不携带） */
-  tool_results?: ToolResultEvent[];
+  /** 工具调用卡片（A2 展示契约；流式 chunk 累积 / 历史消息由后端按
+   * tool_call_id 合并调用与结果，result 完整内容不截断） */
+  tool_calls?: ToolCallWithResult[];
   chunk_type?: StreamChunkType;
   /** 流结束事件 finish_reason === 'length'：输出达到 token 上限被截断（前端本地标记） */
   truncated_by_length?: boolean;
@@ -80,10 +79,12 @@ export interface ToolCallEvent {
   presentation: string;
 }
 
-/** 工具执行结果（历史消息展示用；content 为完整原始内容，前端折叠展示） */
-export interface ToolResultEvent {
-  tool_call_id: string;
-  content: string;
+/** 工具调用卡片（历史消息：调用信息与对应执行结果合并渲染） */
+export interface ToolCallWithResult extends ToolCallEvent {
+  /** 工具调用 ID（关联工具结果） */
+  id?: string;
+  /** 对应执行结果（完整内容不截断；无结果时为 null/undefined） */
+  result?: string | null;
 }
 
 /**

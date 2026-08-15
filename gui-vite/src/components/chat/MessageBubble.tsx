@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { ChevronDown, ChevronRight, Copy, Check, Undo2 } from 'lucide-react';
-import type { ChatMessage, MessageSegment, ToolResultEvent } from '@/lib/types';
+import type { ChatMessage, MessageSegment } from '@/lib/types';
 import { cn, formatTime } from '@/lib/utils';
 import SkillCallCard from './SkillCallCard';
 import ToolCallCard from './ToolCallCard';
@@ -38,29 +38,6 @@ function ThinkingBlock({ text }: { text: string }) {
         <div className="px-3 pb-2 text-xs leading-relaxed whitespace-pre-wrap text-[var(--color-text-secondary)] italic opacity-80 max-h-64 overflow-y-auto">
           {text}
         </div>
-      )}
-    </div>
-  );
-}
-
-/** 工具结果折叠块（历史消息：完整内容，默认收起，展开查看原文）。 */
-function ToolResultBlock({ result }: { result: ToolResultEvent }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="mt-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-tertiary)]/50 overflow-hidden">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors"
-      >
-        {open ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
-        <span>工具结果</span>
-      </button>
-      {open && (
-        <pre className="px-3 pb-2 text-xs leading-relaxed whitespace-pre-wrap break-words font-mono text-[var(--color-text-secondary)] max-h-96 overflow-y-auto">
-          {result.content}
-        </pre>
       )}
     </div>
   );
@@ -215,20 +192,16 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
 
             <MarkdownContent text={message.content} isUser={isUser} />
 
-            {/* Tool calls（A2 展示契约：按展示意图渲染卡片） */}
+            {/* Tool calls（A2 展示契约：按展示意图渲染卡片；调用与结果合并，
+                结果完整内容折叠展示，不截断） */}
             {message.tool_calls && message.tool_calls.length > 0 && (
               <div className="mt-2 space-y-1">
                 {message.tool_calls.map((call, i) => (
-                  <ToolCallCard key={`${call.name}-${call.arguments}-${i}`} event={call} />
-                ))}
-              </div>
-            )}
-
-            {/* Tool results（历史消息：完整内容折叠展示，不截断） */}
-            {message.tool_results && message.tool_results.length > 0 && (
-              <div className="mt-2 space-y-1">
-                {message.tool_results.map((tr, i) => (
-                  <ToolResultBlock key={`${tr.tool_call_id}-${i}`} result={tr} />
+                  <ToolCallCard
+                    key={`${call.name}-${call.arguments}-${i}`}
+                    event={call}
+                    result={call.result}
+                  />
                 ))}
               </div>
             )}

@@ -11,7 +11,7 @@ use crate::api::sessions::types::{
     SessionDetail, SessionMessagesResponse, SessionMetadata, UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
-use crate::api::shared::types::{ChatMessage, ToolResultEvent};
+use crate::api::shared::types::{ChatMessage, ToolCallWithResult};
 use tianyan::common::types::{MessageRole, StructuredMessage};
 use tianyan::snapshot::SnapshotManager;
 
@@ -80,21 +80,38 @@ impl SessionService {
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
 
+        // 跨消息收集工具结果：JSONL 中工具结果位于独立的 role=tool 消息
+        // （工具执行后单独持久化），转换时按 tool_call_id 上挂到对应调用卡片，
+        // 实现"调用 + 结果"合并渲染。
+        let mut result_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for m in &core_session.messages {
+            for p in &m.parts {
+                if let Part::ToolResult {
+                    tool_call_id,
+                    content,
+                    ..
+                } = p
+                {
+                    result_map.insert(tool_call_id.clone(), content.clone());
+                }
+            }
+        }
+
         let messages = core_session
             .messages
             .into_iter()
-            .map(|m| {
+            .filter_map(|m| {
                 // 结构化转换（与流式 A2 展示契约对齐，前端时间线渲染）：
                 // - Part::Text → content（正文）
                 // - Part::Reasoning → thinking（可折叠思考块）
-                // - Part::ToolCall → tool_calls（工具卡片：名称 + 参数 + 展示意图）
-                // - Part::ToolResult → tool_results（完整内容不截断，前端折叠展示）
-                // 工具结果/参数不再拼进正文，也不做展示层截断——LLM 上下文
+                // - Part::ToolCall + Part::ToolResult → tool_calls（工具卡片，
+                //   调用信息与对应执行结果按 tool_call_id 合并渲染）
+                // 工具结果/参数不拼进正文，也不做展示层截断——LLM 上下文
                 // 组装走原始 StructuredMessage（JSONL），与本展示转换无关。
                 let mut thinking = String::new();
                 let mut content = String::new();
-                let mut tool_calls: Vec<tianyan::agent::ToolCallEvent> = Vec::new();
-                let mut tool_results: Vec<ToolResultEvent> = Vec::new();
+                let mut tool_calls: Vec<ToolCallWithResult> = Vec::new();
                 for p in &m.parts {
                     match p {
                         Part::Text { text, .. } => {
@@ -110,9 +127,13 @@ impl SessionService {
                             thinking.push_str(text);
                         }
                         Part::ToolCall {
-                            name, arguments, ..
+                            id,
+                            name,
+                            arguments,
+                            ..
                         } => {
-                            tool_calls.push(tianyan::agent::ToolCallEvent {
+                            tool_calls.push(ToolCallWithResult {
+                                id: id.clone(),
                                 name: name.clone(),
                                 arguments: arguments.clone(),
                                 presentation: tianyan::agent::ToolRegistry::default_presentation(
@@ -120,6 +141,8 @@ impl SessionService {
                                 )
                                 .as_str()
                                 .to_string(),
+                                // 结果已跨消息收集：此处取出挂到卡片上
+                                result: result_map.remove(&id.clone()),
                             });
                         }
                         Part::ToolResult {
@@ -127,10 +150,18 @@ impl SessionService {
                             content: result_content,
                             ..
                         } => {
-                            tool_results.push(ToolResultEvent {
-                                tool_call_id: tool_call_id.clone(),
-                                content: result_content.clone(),
-                            });
+                            // remove 返回 None：结果已被前置调用卡片消费（已合并
+                            // 进调用卡片）→ 跳过；返回 Some：结果仍在 map 中
+                            // （无对应调用，孤立结果）→ 输出结果-only 卡片。
+                            if result_map.remove(tool_call_id).is_some() {
+                                tool_calls.push(ToolCallWithResult {
+                                    id: tool_call_id.clone(),
+                                    name: String::new(),
+                                    arguments: String::new(),
+                                    presentation: "generic".to_string(),
+                                    result: Some(result_content.clone()),
+                                });
+                            }
                         }
                         // 图片不进文本拼接（前端经 images 字段渲染）
                         Part::Image { .. } => {}
@@ -145,9 +176,18 @@ impl SessionService {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                ChatMessage {
+                // 工具结果被合并进调用卡片后，原 role=tool 消息无任何可展示
+                // 内容 → 跳过该消息（避免空气泡）；孤立结果消息保留。
+                if content.is_empty()
+                    && thinking.is_empty()
+                    && tool_calls.is_empty()
+                    && images.is_empty()
+                {
+                    return None;
+                }
+                Some(ChatMessage {
                     // Tool 角色在 API 层映射为 Assistant（与旧 core_bridge 转换一致），
-                    // 工具结果以结构化 tool_results 字段呈现，前端不消费 tool 角色。
+                    // 工具结果已合并进 tool_calls.result，前端不消费 tool 角色。
                     role: match m.role {
                         MessageRole::Tool => MessageRole::Assistant,
                         role => role,
@@ -163,18 +203,13 @@ impl SessionService {
                     } else {
                         Some(tool_calls)
                     },
-                    tool_results: if tool_results.is_empty() {
-                        None
-                    } else {
-                        Some(tool_results)
-                    },
                     images: if images.is_empty() {
                         None
                     } else {
                         Some(images)
                     },
                     timestamp: None,
-                }
+                })
             })
             .collect();
 
@@ -579,8 +614,8 @@ mod tests {
             None,
         );
 
-        // 不 panic；结构化输出：正文不含工具文本，工具调用/结果独立字段，
-        // 工具结果保持完整内容（不做展示层截断）
+        // 不 panic；结构化输出：正文不含工具文本，工具调用与结果按 id 合并
+        // 进同一张卡片，工具结果保持完整内容（不做展示层截断）
         let detail = service
             .get_session_detail("session-test")
             .await
@@ -590,22 +625,131 @@ mod tests {
         assert!(msg.thinking.is_none(), "无思考 parts 时 thinking 为空");
 
         let calls = msg.tool_calls.as_ref().expect("应输出 tool_calls");
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 1, "调用与结果合并为一张卡片");
+        assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[0].arguments.len(), 1800, "参数保持完整不截断");
         assert_eq!(calls[0].presentation, "read", "展示意图来自 core 默认映射");
+        let result = calls[0].result.as_ref().expect("结果应合并进调用卡片");
+        assert_eq!(result.len(), 3600, "工具结果保持完整内容（不截断）");
+        assert!(result.starts_with("中文结果"), "中文内容完整保留");
+    }
 
-        let results = msg.tool_results.as_ref().expect("应输出 tool_results");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].tool_call_id, "call_1");
-        assert_eq!(
-            results[0].content.len(),
-            3600,
-            "工具结果保持完整内容（不截断）"
+    /// 孤立工具结果（无对应 ToolCall part）仍以结果-only 卡片保留。
+    #[tokio::test]
+    async fn test_get_session_detail_keeps_orphan_tool_result() {
+        let msg = StructuredMessage {
+            id: "msg_1".to_string(),
+            parent_id: None,
+            role: MessageRole::Assistant,
+            parts: vec![Part::ToolResult {
+                tool_call_id: "call_x".to_string(),
+                content: "孤立结果".to_string(),
+                time: PartTime::default(),
+            }],
+            tokens: Default::default(),
+            cost: 0.0,
+            model_id: None,
+            time: Default::default(),
+            session_id: "session-test".to_string(),
+            finish: None,
+            compression_marker: false,
+        };
+        let mut session = Session::new("session-test");
+        session.messages.push(msg);
+
+        let service = SessionService::new(
+            Arc::new(MockSessionManager::with_sessions(vec![session])),
+            None,
+            None,
         );
-        assert!(
-            results[0].content.starts_with("中文结果"),
-            "中文内容完整保留"
+        let detail = service
+            .get_session_detail("session-test")
+            .await
+            .expect("get_session_detail 不应失败");
+        let calls = detail.messages[0]
+            .tool_calls
+            .as_ref()
+            .expect("应输出 tool_calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_x");
+        assert_eq!(calls[0].name, "", "孤立结果无工具名");
+        assert_eq!(calls[0].result.as_deref(), Some("孤立结果"));
+    }
+
+    /// 跨消息合并：工具结果位于独立的 role=tool 消息（工具执行后单独
+    /// 持久化），应上挂到前一条 assistant 消息的调用卡片，且原 tool 消息
+    /// 不再产生空气泡。
+    #[tokio::test]
+    async fn test_get_session_detail_merges_result_across_messages() {
+        let call_msg = StructuredMessage {
+            id: "msg_1".to_string(),
+            parent_id: None,
+            role: MessageRole::Assistant,
+            parts: vec![
+                Part::Text {
+                    text: "先看看目录".to_string(),
+                    time: PartTime::default(),
+                },
+                Part::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: r#"{"path":"."}"#.to_string(),
+                    time: PartTime::default(),
+                },
+            ],
+            tokens: Default::default(),
+            cost: 0.0,
+            model_id: None,
+            time: Default::default(),
+            session_id: "session-test".to_string(),
+            finish: None,
+            compression_marker: false,
+        };
+        let result_msg = StructuredMessage {
+            id: "msg_2".to_string(),
+            parent_id: Some("msg_1".to_string()),
+            role: MessageRole::Tool,
+            parts: vec![Part::ToolResult {
+                tool_call_id: "call_1".to_string(),
+                content: r#"{"count":2}"#.to_string(),
+                time: PartTime::default(),
+            }],
+            tokens: Default::default(),
+            cost: 0.0,
+            model_id: None,
+            time: Default::default(),
+            session_id: "session-test".to_string(),
+            finish: None,
+            compression_marker: false,
+        };
+        let mut session = Session::new("session-test");
+        session.messages.push(call_msg);
+        session.messages.push(result_msg);
+
+        let service = SessionService::new(
+            Arc::new(MockSessionManager::with_sessions(vec![session])),
+            None,
+            None,
+        );
+        let detail = service
+            .get_session_detail("session-test")
+            .await
+            .expect("get_session_detail 不应失败");
+
+        // 只有 1 条消息（role=tool 消息被合并消费后跳过）
+        assert_eq!(detail.messages.len(), 1, "tool 结果消息应被合并后跳过");
+        let msg = &detail.messages[0];
+        assert_eq!(msg.content, "先看看目录");
+        let calls = msg.tool_calls.as_ref().expect("应输出 tool_calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "list_dir");
+        assert_eq!(calls[0].presentation, "search");
+        assert_eq!(
+            calls[0].result.as_deref(),
+            Some(r#"{"count":2}"#),
+            "结果应跨消息合并进调用卡片"
         );
     }
 }
