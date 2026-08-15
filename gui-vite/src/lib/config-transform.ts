@@ -269,6 +269,9 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
           models: p.models.map((m) => ({
             name: m.name,
             capabilities: m.capabilities as string[],
+            ...(m.reasoning_efforts && m.reasoning_efforts.length > 0
+              ? { reasoning_efforts: m.reasoning_efforts }
+              : {}),
             ...(m.context_length !== undefined ? { context_length: m.context_length } : {}),
             ...(m.max_output_tokens !== undefined
               ? { max_output_tokens: m.max_output_tokens }

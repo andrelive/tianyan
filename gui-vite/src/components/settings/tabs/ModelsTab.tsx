@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Plus, Trash2, TestTube, Check, X, Loader2, RefreshCw } from 'lucide-react';
 import { Toggle, FieldRow, SectionTitle } from './shared';
 import type {
@@ -55,7 +55,12 @@ const CAPABILITY_LABELS: Record<ModelCapability, string> = {
 /**
  * 模型的思考强度档位值编辑器（每个模型自己声明的档位集，逗号分隔）：
  * 值完全自由（如 low/high/max，由厂商/用户定义），不做任何本地映射或过滤；
- * 留空 = 走后端内置模型表自动匹配。对话中选择强度时原样展示这些值。
+ * 留空 = 不支持思考。对话中选择强度时原样展示这些值。
+ *
+ * 实时提交（随输入同步 config，而非失焦提交）：失焦提交会与"保存"按钮
+ * 的闭包 config 产生竞态——blur 的 setState 未重渲染时保存读到旧值，
+ * 导致刚配置的档位保存后被覆盖为空。localJoin 标记本地产生的值，
+ * 避免受控回写把用户输入原文（如尾逗号）重置掉。
  */
 function EffortInput({
   value,
@@ -65,17 +70,22 @@ function EffortInput({
   onChange: (efforts: string[] | undefined) => void;
 }) {
   const [draft, setDraft] = useState(value);
+  // 本地输入产生的规范化值：外部变化（重载）与之不同才回填草稿
+  const localJoin = useRef(value);
 
-  // 外部（保存/重载）更新时同步草稿
   useEffect(() => {
-    setDraft(value);
+    if (value !== localJoin.current) {
+      setDraft(value);
+      localJoin.current = value;
+    }
   }, [value]);
 
-  const commit = () => {
-    const tokens = draft.split(/[,，]/).map((v) => v.trim()).filter(Boolean);
-    const next = tokens.length > 0 ? tokens : undefined;
-    setDraft((next ?? []).join(', '));
-    onChange(next);
+  const handleChange = (raw: string) => {
+    setDraft(raw);
+    const tokens = raw.split(/[,，]/).map((v) => v.trim()).filter(Boolean);
+    const joined = (tokens.length > 0 ? tokens : []).join(', ');
+    localJoin.current = joined;
+    onChange(tokens.length > 0 ? tokens : undefined);
   };
 
   return (
@@ -83,12 +93,8 @@ function EffortInput({
       type="text"
       aria-label="思考强度档位"
       value={draft}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-      }}
-      placeholder="留空 = 内置表自动匹配（如 off, low, high）"
+      onChange={(e) => handleChange(e.target.value)}
+      placeholder="留空 = 不支持思考（如 low, high, max）"
       className="w-full px-2 py-1 text-xs rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
     />
   );
@@ -573,8 +579,8 @@ export default function ModelsTab({
                       />
                     </div>
                   )}
-                  {/* 思考强度档位（每个模型自己的值）：留空 = 内置模型表自动匹配；
-                      支持 off|low|medium|high，逗号分隔，如 "off, low, high" */}
+                  {/* 思考强度档位（每个模型自己的值）：逗号分隔任意档位值，如 "low, high, max"；
+                      留空 = 不支持思考（显示严格等于配置，无内置注入） */}
                   {m.capabilities.some((cap) => cap === 'chat' || cap === 'vision') && (
                     <div className="mt-1.5">
                       <EffortInput

@@ -181,7 +181,7 @@ pub struct ModelEntry {
     #[serde(default)]
     pub max_input_tokens: Option<usize>,
     /// 该模型支持的思考强度档位值（每个模型自己声明的档位集，如 ["low","high","max"]，
-    /// 值由厂商/用户自由定义；None 时查内置模型表，内置表也没有则视为不支持思考）。
+    /// 值由厂商/用户自由定义；None = 不支持思考，对话中不显示思考选择）。
     /// "off" 为内置语义：不附加思考参数。
     #[serde(default)]
     pub reasoning_efforts: Option<Vec<String>>,

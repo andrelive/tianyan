@@ -50,9 +50,6 @@ pub struct BuiltinEntry {
     pub model_prefix: &'static str,
     /// 上下文规格。
     pub spec: ModelSpec,
-    /// 该模型支持的思考强度档位值（每个模型自己声明的档位集，如 "low"/"high"/"max"；
-    /// None 表示不支持思考）。
-    pub reasoning_efforts: Option<&'static [&'static str]>,
 }
 
 /// 内置规格表。
@@ -68,7 +65,6 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 32_000,
             max_input_tokens: 968_000,
         },
-        reasoning_efforts: Some(&["off", "low", "high", "max"]),
     },
     BuiltinEntry {
         provider_prefix: "deepseek",
@@ -79,7 +75,6 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_input_tokens: 96_000,
         },
         // R1 为固定深度思考模型，官方不支持强度档位
-        reasoning_efforts: None,
     },
     BuiltinEntry {
         provider_prefix: "openai",
@@ -89,7 +84,6 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 16_000,
             max_input_tokens: 112_000,
         },
-        reasoning_efforts: None,
     },
     BuiltinEntry {
         provider_prefix: "anthropic",
@@ -99,7 +93,6 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 8_000,
             max_input_tokens: 192_000,
         },
-        reasoning_efforts: None,
     },
     // qwen3 思考族须排在 qwen 通用条目之前（长前缀优先命中，qwen2.x 仍命中 qwen）
     BuiltinEntry {
@@ -110,7 +103,6 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 32_000,
             max_input_tokens: 99_000,
         },
-        reasoning_efforts: Some(&["off", "low", "medium", "high"]),
     },
     BuiltinEntry {
         provider_prefix: "qwen",
@@ -120,7 +112,6 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 8_000,
             max_input_tokens: 123_000,
         },
-        reasoning_efforts: None,
     },
     BuiltinEntry {
         provider_prefix: "llama",
@@ -130,7 +121,6 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 8_000,
             max_input_tokens: 120_000,
         },
-        reasoning_efforts: None,
     },
 ];
 
@@ -169,37 +159,6 @@ pub fn builtin_spec(provider: &str, model: &str) -> Option<ModelSpec> {
             .is_some_and(|head| head.eq_ignore_ascii_case(entry.model_prefix))
         {
             return Some(entry.spec);
-        }
-    }
-    None
-}
-
-/// 在内置表中查找模型声明的思考强度档位（三级匹配与 [`builtin_spec`] 相同）。
-///
-/// 每个模型自己的档位集：返回 None 表示该模型不支持思考（前端不显示思考选择）。
-pub fn builtin_reasoning_efforts(provider: &str, model: &str) -> Option<&'static [&'static str]> {
-    for entry in BUILTIN_SPECS {
-        if provider.eq_ignore_ascii_case(entry.provider_prefix)
-            && model.eq_ignore_ascii_case(entry.model_prefix)
-        {
-            return entry.reasoning_efforts;
-        }
-    }
-    for entry in BUILTIN_SPECS {
-        if provider.eq_ignore_ascii_case(entry.provider_prefix)
-            && model
-                .get(..entry.model_prefix.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(entry.model_prefix))
-        {
-            return entry.reasoning_efforts;
-        }
-    }
-    for entry in BUILTIN_SPECS {
-        if model
-            .get(..entry.model_prefix.len())
-            .is_some_and(|head| head.eq_ignore_ascii_case(entry.model_prefix))
-        {
-            return entry.reasoning_efforts;
         }
     }
     None
