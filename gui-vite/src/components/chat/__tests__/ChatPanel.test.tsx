@@ -235,13 +235,15 @@ describe('ChatPanel', () => {
 
     renderChatPanel();
 
-    // 回退到第二条消息（assistant）→ 剩余只有第一条
-    await user.click(screen.getAllByRole('button', { name: /回退到此/ })[1]);
+    // 回退按钮仅出现在用户消息上（回退到该用户输入之前）；
+    // assistant 消息不提供回退（避免回退到模型单轮输出的无意义粒度）
+    const rollbackButtons = screen.getAllByRole('button', { name: /回退到此/ });
+    expect(rollbackButtons).toHaveLength(1);
+    await user.click(rollbackButtons[0]);
 
     await waitFor(() => {
       const messages = useAppStore.getState().messages;
-      expect(messages).toHaveLength(1);
-      expect(messages[0].content).toBe('你好');
+      expect(messages).toHaveLength(0);
     });
 
     // 回退后可撤销回退

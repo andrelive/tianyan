@@ -923,16 +923,17 @@ export const handlers = [
   }),
 
   // Session message delete: 删除该消息及其后，返回剩余消息
-  http.post(`${API_BASE}/sessions/:id/messages/delete`, ({ params }) => {
+  http.post(`${API_BASE}/sessions/:id/messages/delete`, async ({ params, request }) => {
+    // 模拟真实后端语义：truncate(message_index)——保留 index 之前的消息
+    const body = (await request.json()) as { message_index?: number } | null;
+    const index = body?.message_index ?? 1;
+    const all = [
+      { role: 'user' as const, content: '你好', timestamp: '2026-07-23T10:00:00Z' },
+      { role: 'assistant' as const, content: '你好！我是天演', timestamp: '2026-07-23T10:00:05Z' },
+    ];
     return HttpResponse.json({
       session_id: params.id,
-      messages: [
-        {
-          role: 'user',
-          content: '你好',
-          timestamp: '2026-07-23T10:00:00Z',
-        },
-      ],
+      messages: all.slice(0, index),
     });
   }),
 

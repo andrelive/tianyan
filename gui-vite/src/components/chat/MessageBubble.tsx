@@ -295,12 +295,14 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
           )}
         </button>
 
-        {/* Rollback - both roles: 回退到该消息之前 */}
-        {!isStreaming && (
+        {/* Rollback - 仅用户消息：回退到该用户输入之前（删除该消息及其后的
+            所有内容——包括大模型的多轮输出；不对 assistant 输出提供回退，
+            避免回退到模型单轮输出这种无意义粒度） */}
+        {!isStreaming && isUser && (
           <button
             onClick={() => onRollback(index)}
             className="p-1.5 rounded-md hover:bg-red-50 dark:hover:bg-red-950/30 text-[var(--color-text-tertiary)] hover:text-red-500 transition-colors"
-            title="回退到此（删除该消息及其后的所有消息）"
+            title="回退到此（删除该消息及其后的所有内容）"
             aria-label="回退到此"
           >
             <Undo2 className="w-3.5 h-3.5" />

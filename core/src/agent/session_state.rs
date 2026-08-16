@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn test_session_state_cleanup() {
         let mut state = SessionState::new("test-session");
-        for i in 0..101 {
+        for i in 0..MAX_SESSION_MESSAGES + 1 {
             state.add_user_message(format!("Message {}", i));
         }
         state.cleanup();
@@ -174,7 +174,7 @@ mod tests {
         };
         state.add_structured_message(marker);
         // 后续消息撑过 MAX_SESSION_MESSAGES，使 marker 落在保留窗口之前
-        for i in 0..80 {
+        for i in 0..MAX_SESSION_MESSAGES + 1 {
             state.add_user_message(format!("later {}", i));
         }
         state.cleanup();
