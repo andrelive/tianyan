@@ -189,6 +189,33 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().messages).toEqual([]);
   });
 
+  it('startNewAssistantTurn opens a new message after a completed turn', () => {
+    // 上一轮已有正文 → 新开消息（轮次边界）
+    useAppStore.setState({
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: '完成回答', tool_calls: [] },
+      ],
+    });
+    useAppStore.getState().startNewAssistantTurn();
+    const msgs = useAppStore.getState().messages;
+    expect(msgs).toHaveLength(3);
+    expect(msgs[2].role).toBe('assistant');
+    expect(msgs[2].content).toBe('');
+  });
+
+  it('startNewAssistantTurn reuses an empty placeholder', () => {
+    // 空占位（流式初始）→ 复用，不新开
+    useAppStore.setState({
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: '', tool_calls: [] },
+      ],
+    });
+    useAppStore.getState().startNewAssistantTurn();
+    expect(useAppStore.getState().messages).toHaveLength(2);
+  });
+
   it('clearMessages empties the messages array', () => {
     useAppStore.setState({ messages: [{ role: 'user', content: 'x' }] });
 

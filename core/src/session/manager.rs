@@ -7,7 +7,7 @@ use serde_json;
 use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{ContentLevel, Message, StructuredMessage, TianyanUri};
+use crate::common::types::{ContentLevel, Message, MessageRole, StructuredMessage, TianyanUri};
 use crate::vfs::VirtualFileSystem;
 
 use super::types::parse_message_lines;
@@ -137,15 +137,36 @@ impl PersistentSessionManager {
             }
         }
 
-        // 限制加载的消息数量，保留最近的 MAX_SESSION_MESSAGES 条（安全上限）
+        // 限制加载的消息数量，保留最近的 MAX_SESSION_MESSAGES 条（安全上限）。
+        // 截断优先丢弃 assistant/tool/system——**用户消息是上下文锚点，
+        // 必须保留**（否则切回会话找不到自己的输入）；仅当用户消息本身
+        // 超限时才从最旧处丢弃 user 消息。
         if session.messages.len() > MAX_SESSION_MESSAGES {
-            let skipped = session.messages.len() - MAX_SESSION_MESSAGES;
-            session.messages = session.messages.split_off(skipped);
+            let mut skipped = 0usize;
+            while session.messages.len() > MAX_SESSION_MESSAGES {
+                let over = session.messages.len() - MAX_SESSION_MESSAGES;
+                // 第一遍：从最旧开始丢弃非 user 消息
+                let dropped = session
+                    .messages
+                    .iter()
+                    .take(over)
+                    .take_while(|m| m.role != MessageRole::User)
+                    .count();
+                if dropped == 0 {
+                    // 无可丢弃的非 user 消息（user 消息本身超限）：
+                    // 退化为从最旧丢弃 user 消息
+                    session.messages.remove(0);
+                    skipped += 1;
+                    continue;
+                }
+                session.messages.drain(..dropped);
+                skipped += dropped;
+            }
             tracing::info!(
                 skipped_messages = skipped,
                 session_id = %id,
-                "会话消息超过上限，截断至最近 {} 条",
-                MAX_SESSION_MESSAGES
+                "会话消息超过上限，截断至最近 {} 条（保留用户消息）",
+                session.messages.len(),
             );
         }
 

@@ -204,8 +204,17 @@ export default function ChatPanel() {
       if (event.delta) {
         useAppStore.getState().updateLastMessage(event.delta);
       }
-      // 思考增量（Thought chunk）单独累积到 thinking 字段（与正文分开渲染）
+      // 思考增量（Thought chunk）单独累积到 thinking 字段（与正文分开渲染）。
+      // 轮次边界：新一轮思考到达且上一轮已产出内容（正文/工具调用）时，
+      // 新开一条 assistant 消息——与历史加载“一轮一条消息”的渲染一致
+      // （流式不再整个会话一个大框）。
       if (event.thinking) {
+        const st = useAppStore.getState();
+        const last = st.messages[st.messages.length - 1];
+        const hasPrevTurn =
+          last?.role === 'assistant' &&
+          (last.content !== '' || (last.tool_calls && last.tool_calls.length > 0));
+        if (hasPrevTurn) st.startNewAssistantTurn();
         useAppStore.getState().appendThinking(event.thinking);
       }
       // Attach skill calls to the current assistant message

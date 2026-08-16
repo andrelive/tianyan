@@ -41,6 +41,8 @@ interface AppState {
   appendToolCalls: (calls: ToolCallEvent[]) => void;
   /** 累积思考增量到当前 assistant 消息（thinking 字段，折叠展示） */
   appendThinking: (delta: string) => void;
+  /** 开启新的 assistant 轮次消息（流式轮次边界：新一轮 thinking 到达时调用） */
+  startNewAssistantTurn: () => void;
   /** 标记最后一条 assistant 消息为截断（finish_reason === 'length'） */
   markLastMessageTruncated: () => void;
   clearMessages: () => void;
@@ -197,6 +199,28 @@ export const useAppStore = create<AppState>()(
             };
           }
           return { messages };
+        }),
+      startNewAssistantTurn: () =>
+        set((s) => {
+          // 轮次边界：新开一条 assistant 消息（与历史“一轮一条消息”语义对齐）。
+          // 只在前一条是空占位时复用（流式初始占位），否则追加新消息。
+          const last = s.messages[s.messages.length - 1];
+          const isEmptyPlaceholder =
+            last?.role === 'assistant' &&
+            last.content === '' &&
+            !last.thinking &&
+            (!last.tool_calls || last.tool_calls.length === 0);
+          if (isEmptyPlaceholder) return { messages: s.messages };
+          return {
+            messages: [
+              ...s.messages,
+              {
+                role: 'assistant',
+                content: '',
+                timestamp: new Date().toISOString(),
+              },
+            ],
+          };
         }),
       markLastMessageTruncated: () =>
         set((s) => {

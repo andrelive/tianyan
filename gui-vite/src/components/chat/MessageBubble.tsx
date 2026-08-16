@@ -1,6 +1,7 @@
 import { useState, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import remarkGfm from 'remark-gfm';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { ChevronDown, ChevronRight, Copy, Check, Undo2 } from 'lucide-react';
 import type { ChatMessage, MessageSegment } from '@/lib/types';
@@ -64,7 +65,21 @@ function MarkdownContent({ text, isUser }: { text: string; isUser: boolean }) {
       )}
     >
       <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
         components={{
+          table: ({ children }) => (
+            <div className="my-2 overflow-x-auto">
+              <table className="min-w-full border-collapse text-sm">{children}</table>
+            </div>
+          ),
+          th: ({ children }) => (
+            <th className="border border-[var(--color-border)] px-2 py-1 text-left font-semibold bg-[var(--color-bg-tertiary)]">
+              {children}
+            </th>
+          ),
+          td: ({ children }) => (
+            <td className="border border-[var(--color-border)] px-2 py-1">{children}</td>
+          ),
           code: ({ className, children, ...props }: React.ComponentPropsWithoutRef<'code'>) => {
             const match = /language-(\w+)/.exec(className || '');
             const codeString = String(children).replace(/\n$/, '');
