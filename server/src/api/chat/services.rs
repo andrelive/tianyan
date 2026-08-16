@@ -306,6 +306,7 @@ fn to_chat_response(session_id: &str, response: tianyan::agent::AgentResponse) -
             thinking: None,
             tool_calls: None,
             images: None,
+            truncated_by_length: false,
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
         },
         usage: TokenUsage {

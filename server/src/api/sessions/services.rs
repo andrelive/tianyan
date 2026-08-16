@@ -208,6 +208,9 @@ impl SessionService {
                     } else {
                         Some(images)
                     },
+                    // finish=length（token 上限或流式中断）：历史加载与流式
+                    // 渲染一致地显示截断提示。
+                    truncated_by_length: m.finish.as_deref() == Some("length"),
                     timestamp: None,
                 })
             })

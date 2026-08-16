@@ -224,12 +224,19 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
           </p>
         )}
 
-        {/* Streaming cursor for empty content */}
+        {/* Streaming feedback: 思考期间正文为空——显示可见的“思考中…”指示
+            （含已产出思考量，避免首字符前的长静默被误认为卡住） */}
         {isStreaming && message.content === '' && (
           <span
-            className="inline-block w-2 h-4 bg-current animate-pulse rounded-sm"
+            className="inline-flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)] animate-pulse"
             aria-label="AI 正在思考中..."
-          />
+          >
+            <span className="inline-block w-2 h-2 bg-current rounded-full" />
+            思考中
+            {message.thinking && message.thinking.length > 0
+              ? ` · ${message.thinking.length} 字`
+              : '…'}
+          </span>
         )}
 
         {/* Live region for streaming content updates */}

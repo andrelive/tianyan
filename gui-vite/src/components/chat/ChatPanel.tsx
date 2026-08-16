@@ -494,11 +494,14 @@ export default function ChatPanel() {
               />
             ))}
 
-            {/* Loading indicator: streaming started but no content yet */}
+            {/* Loading indicator: streaming started but no content yet.
+                思考已产出内容（message.thinking 非空）时由气泡内指示接管，
+                避免转圈与气泡内“思考中 · N 字”重复。 */}
             {streamStatus === 'streaming' &&
               messages.length > 0 &&
               messages[messages.length - 1].role === 'assistant' &&
-              messages[messages.length - 1].content === '' && (
+              messages[messages.length - 1].content === '' &&
+              !messages[messages.length - 1].thinking && (
                 <div
                   className="flex items-center gap-2 text-[var(--color-text-tertiary)] py-2"
                   aria-live="polite"

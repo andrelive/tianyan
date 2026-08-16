@@ -102,6 +102,7 @@ impl ChatResponse {
                 thinking: None,
                 tool_calls: None,
                 images: None,
+                truncated_by_length: false,
                 timestamp: Some(chrono::Utc::now().to_rfc3339()),
             },
             usage: TokenUsage::empty(),
@@ -201,6 +202,7 @@ mod tests {
                 thinking: None,
                 tool_calls: None,
                 images: None,
+                truncated_by_length: false,
                 timestamp: Some("2026-02-20T10:00:00Z".to_string()),
             },
             usage: TokenUsage {

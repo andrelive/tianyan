@@ -34,6 +34,10 @@ pub struct ChatMessage {
     /// 图片 data URL 列表（`data:image/png;base64,...`），仅用户消息使用。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub images: Option<Vec<String>>,
+    /// 输出被截断（finish=length：token 上限或流式中断保留部分输出）。
+    /// 流式事件经 finish_reason 标记；历史消息由 StructuredMessage.finish 映射。
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub truncated_by_length: bool,
     /// 可选的时间戳（RFC3339 格式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
@@ -69,6 +73,7 @@ impl ChatMessage {
             thinking: None,
             tool_calls: None,
             images: None,
+            truncated_by_length: false,
             timestamp: None,
         }
     }
@@ -87,6 +92,7 @@ impl ChatMessage {
             thinking: None,
             tool_calls: None,
             images: None,
+            truncated_by_length: false,
             timestamp: None,
         }
     }
@@ -105,6 +111,7 @@ impl ChatMessage {
             thinking: None,
             tool_calls: None,
             images: None,
+            truncated_by_length: false,
             timestamp: None,
         }
     }

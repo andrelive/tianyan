@@ -299,6 +299,14 @@ impl AsyncOpenAIClient {
 
 /// 从 SSE 缓冲中逐行提取完整的 data: 事件并送入 channel；
 /// 缓冲中未以换行结尾的残留数据留待后续字节到达或流结束时再处理。
+///
+/// 容错契约（对齐 DSH 流式协议：usage 可附着 finish chunk 或作为尾随的
+/// usage-only chunk 到达，两者都不应中断或刷屏）：
+/// - `[DONE]`：正常流结束标记；
+/// - usage-only 块（`{"choices":[],"usage":...}` / 兼容层 `{"choices":[],
+///   "cost":"..."}`）：结构化识别后静默跳过（非错误）；
+/// - 真正的错误对象（带 `error` 字段）：照常上报并终止；
+/// - 其它无法解析的行：debug 级记录后跳过（兼容未知扩展字段）。
 async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatCompletionChunk>>) {
     loop {
         let Some(nl) = buf.iter().position(|&b| b == b'\n') else {
@@ -324,24 +332,39 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
                     return;
                 }
             }
-            Err(e) => {
-                // 部分兼容层（如 opencode）会在 [DONE] 后追加成本统计块
-                // （{"choices":[],"cost":"..."}），其结构缺少 id 等必填字段，
-                // 被严格反序列化拒绝。此类行跳过并告警，不中断整个流；
-                // 若负载是真正的错误对象则照常上报。
-                if let Ok(value) = serde_json::from_str::<Value>(data) {
-                    if let Some(err_obj) = value.get("error") {
-                        let _ = tx
-                            .send(Err(TianyanError::Custom(format!(
-                                "模型服务错误：提供商返回错误：{}",
-                                err_obj
-                            ))))
-                            .await;
-                        return;
+            Err(_) => {
+                // 结构化分流：先识别 usage-only / cost 块（正常流尾，静默跳过），
+                // 再识别错误对象（上报），其余按 debug 记录（不刷屏）。
+                match serde_json::from_str::<Value>(data) {
+                    Ok(value) => {
+                        if value.get("error").is_some() {
+                            let _ = tx
+                                .send(Err(TianyanError::Custom(format!(
+                                    "模型服务错误：提供商返回错误：{}",
+                                    value
+                                ))))
+                                .await;
+                            return;
+                        }
+                        // usage-only / cost 块：choices 为空（或缺失）且无 delta 内容
+                        let choices_empty = value
+                            .get("choices")
+                            .and_then(|c| c.as_array())
+                            .map(|c| c.is_empty())
+                            .unwrap_or(true);
+                        let has_usage = value.get("usage").is_some() || value.get("cost").is_some();
+                        if choices_empty && has_usage {
+                            tracing::debug!(line = %data, "流式 usage-only 块（正常流尾）");
+                            continue;
+                        }
+                        tracing::debug!(line = %data, "跳过无法解析的流式数据行");
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::debug!(line = %data, "跳过非 JSON 流式数据行");
+                        continue;
                     }
                 }
-                tracing::warn!(line = %data, "跳过无法解析的流式数据行: {}", e);
-                continue;
             }
         }
     }

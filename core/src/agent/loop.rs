@@ -444,12 +444,32 @@ impl AgentLoop {
                         }
                     }
 
-                    // If streaming failed mid-response, report error rather than using partial data
-                    if let Some(err_msg) = stream_error {
-                        return Err(TianyanError::Custom(format!(
-                            "agent_loop: LLM 调用失败：{}",
-                            err_msg
-                        )));
+                    // 流式中断容错（对齐 DSH：中断不丢弃已收内容）：
+                    // - 已有内容累积（正文/推理/工具调用）→ 保留为截断输出
+                    //   （finish=length 语义，前端可提示截断），不再整体报错；
+                    // - 完全无内容（流一开始就断）→ 按失败上报。
+                    let stream_interrupted = stream_error.is_some();
+                    if let Some(err_msg) = &stream_error {
+                        let has_partial = !accumulated_content.is_empty()
+                            || !accumulated_reasoning.is_empty()
+                            || !accumulated_tool_calls.is_empty();
+                        if !has_partial {
+                            return Err(TianyanError::Custom(format!(
+                                "agent_loop: LLM 调用失败：{}",
+                                err_msg
+                            )));
+                        }
+                        tracing::warn!(
+                            error = %err_msg,
+                            content_len = accumulated_content.len(),
+                            "流式中断，保留已收部分输出（截断）"
+                        );
+                    }
+
+                    // 流式中断：已收内容保留为截断输出——finish 标记 length，
+                    // 前端据此显示截断提示（与 token 上限截断同语义）。
+                    if stream_interrupted && finish_reason.is_none() {
+                        finish_reason = Some("length".to_string());
                     }
 
                     // Build assistant message from accumulated content + tool calls
@@ -1544,9 +1564,10 @@ mod tests {
         assert_eq!(tool_calls[0].function.arguments, r#"{"city":"北京"}"#);
     }
 
-    /// 流式路径：第 2 个 chunk 后流中断 —— 返回 agent_loop 前缀的 Custom 错误。
+    /// 流式路径：已有部分内容后流中断 —— 保留已收内容为截断输出
+    /// （finish=length），不再整体报错（对齐 DSH 中断不丢内容）。
     #[tokio::test]
-    async fn test_run_stream_mid_stream_error_returns_custom() {
+    async fn test_run_stream_mid_stream_error_keeps_partial() {
         let mut mock = MockChatService::new();
         mock.expect_chat_completion_stream().returning(|_| {
             let (tx, rx) = tokio::sync::mpsc::channel(16);
@@ -1555,6 +1576,42 @@ mod tests {
             tx.try_send(Ok(stream_chunk(Some("继续"), None, None)))
                 .unwrap();
             // 第 2 个 chunk 之后流中断
+            tx.try_send(Err(TianyanError::Custom("网络中断".to_string())))
+                .unwrap();
+            Ok(rx)
+        });
+        let agent_loop = make_loop(mock, 5);
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamEventSender::new(event_tx);
+
+        let mut messages = vec![Message::user("测试")];
+        let result = agent_loop
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        match result {
+            AgentLoopResult::Answer { content, .. } => {
+                assert_eq!(content, "部分回答继续", "应保留已收内容");
+            }
+            other => panic!("应返回 Answer（保留部分内容），得到 {other:?}"),
+        }
+    }
+
+    /// 流式路径：无任何内容时流中断 —— 按失败上报（无内容可保留）。
+    #[tokio::test]
+    async fn test_run_stream_immediate_error_returns_custom() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion_stream().returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
             tx.try_send(Err(TianyanError::Custom("网络中断".to_string())))
                 .unwrap();
             Ok(rx)
