@@ -652,6 +652,7 @@ export interface ConfigState {
   security_enabled: boolean;
   confirm_commands: boolean;
   audit_logging: boolean;
+  allow_all_operations: boolean;
   max_file_size: number;
   allowed_directories: string;
   blocked_directories: string;

@@ -572,11 +572,23 @@ impl ApprovalWorkflow {
     fn matches_pattern(&self, action: &Action, pattern: &ActionPattern) -> bool {
         match (action, pattern) {
             (_, ActionPattern::Any) => true,
-            (Action::ExecuteCommand { command, .. }, ActionPattern::CommandPattern(pat)) => command
-                .split_whitespace()
-                .next()
-                .map(|cmd| cmd == pat || cmd.ends_with(&format!(".{}", pat)))
-                .unwrap_or(false),
+            (Action::ExecuteCommand { command, .. }, ActionPattern::CommandPattern(pat)) => {
+                // 多词模式（如 `rm -rf /`）按整条命令前缀匹配（大小写不敏感，
+                // 兼容 Windows 命令），使全目录删除类黑名单生效；
+                // 单词模式保持首词精确匹配（兼容既有行为）。
+                if pat.contains(' ') {
+                    command
+                        .to_lowercase()
+                        .trim_start()
+                        .starts_with(&pat.to_lowercase())
+                } else {
+                    command
+                        .split_whitespace()
+                        .next()
+                        .map(|cmd| cmd == pat || cmd.ends_with(&format!(".{}", pat)))
+                        .unwrap_or(false)
+                }
+            }
             (Action::WriteFile { path, .. }, ActionPattern::WriteFilePattern(pat)) => {
                 path.starts_with(pat)
             }

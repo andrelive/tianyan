@@ -87,6 +87,10 @@ pub struct SecurityConfig {
     /// 工具路径不受影响（走审批/询问降级链路）。
     #[serde(default)]
     pub allow_dangerous_skills: bool,
+    /// 完全放开模式：所有操作自动批准（黑名单 Deny 规则仍优先）。
+    /// 开启后不再弹授权/追问——只保留 blocked_commands 黑名单兜底。
+    #[serde(default)]
+    pub allow_all_operations: bool,
 }
 
 fn default_true() -> bool {
@@ -155,6 +159,7 @@ impl Default for SecurityConfig {
             wait_for_approval: false,
             prompt_commands: Vec::new(),
             allow_dangerous_skills: false,
+            allow_all_operations: false,
         }
     }
 }

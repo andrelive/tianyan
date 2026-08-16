@@ -77,6 +77,7 @@ export function emptyConfigState(): ConfigState {
     security_enabled: true,
     confirm_commands: true,
     audit_logging: true,
+    allow_all_operations: false,
     max_file_size: 10485760,
     allowed_directories: '',
     blocked_directories: '',
@@ -171,6 +172,7 @@ interface BackendSecurityConfig {
   enabled: boolean;
   confirm_commands: boolean;
   audit_logging: boolean;
+  allow_all_operations?: boolean;
   max_file_size: number;
   allowed_directories: string[];
   blocked_directories: string[];
@@ -311,6 +313,7 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
         enabled: cs.security_enabled,
         confirm_commands: cs.confirm_commands,
         audit_logging: cs.audit_logging,
+        allow_all_operations: cs.allow_all_operations,
         max_file_size: cs.max_file_size,
         allowed_directories: splitLines(cs.allowed_directories),
         blocked_directories: splitLines(cs.blocked_directories),
@@ -427,6 +430,7 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     security_enabled: security.enabled ?? defaults.security_enabled,
     confirm_commands: security.confirm_commands ?? defaults.confirm_commands,
     audit_logging: security.audit_logging ?? defaults.audit_logging,
+    allow_all_operations: security.allow_all_operations ?? defaults.allow_all_operations,
     max_file_size: security.max_file_size ?? defaults.max_file_size,
     allowed_directories: (security.allowed_directories || []).join('\n'),
     blocked_directories: (security.blocked_directories || []).join('\n'),

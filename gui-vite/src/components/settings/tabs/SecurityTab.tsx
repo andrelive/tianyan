@@ -33,6 +33,13 @@ export default function SecurityTab({ config, onUpdateField }: SecurityTabProps)
               onChange={(v) => onUpdateField('audit_logging', v)}
             />
           </div>
+          <div className="flex items-center gap-3">
+            <label className="text-sm text-[var(--color-text-primary)] w-36">完全放开（不询问）</label>
+            <Toggle
+              checked={config.allow_all_operations}
+              onChange={(v) => onUpdateField('allow_all_operations', v)}
+            />
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-4 pt-2">

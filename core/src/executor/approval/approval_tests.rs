@@ -116,6 +116,71 @@ async fn test_unattended_mode_keeps_critical_denied() {
 }
 
 #[tokio::test]
+async fn test_allow_all_operations_approves_everything_except_blocked() {
+    // 完全放开模式：注入 Any+Always+Approve 规则——除 Deny 规则（黑名单）
+    // 外全部自动批准，不等待、不追问。
+    let config = ApprovalWorkflowConfig {
+        auto_approval_rules: vec![
+            // 黑名单 Deny（模拟 security_blocked_ 注入）
+            AutoApprovalRule {
+                name: "security_blocked_rm_rf".to_string(),
+                action_pattern: ActionPattern::CommandPattern("rm -rf /".to_string()),
+                condition: ApprovalCondition::Always,
+                decision: ApprovalDecision::Deny,
+                enabled: true,
+            },
+            // 完全放开 Approve（模拟 allow_all_operations 注入）
+            AutoApprovalRule {
+                name: "allow_all_operations".to_string(),
+                action_pattern: ActionPattern::Any,
+                condition: ApprovalCondition::Always,
+                decision: ApprovalDecision::Approve,
+                enabled: true,
+            },
+        ],
+        ..Default::default()
+    };
+    let workflow = Arc::new(ApprovalWorkflow::new(config));
+
+    // 日常命令（git 为 Medium）→ 直接批准
+    let git = Action::ExecuteCommand {
+        command: "git status".to_string(),
+        cwd: None,
+        timeout_secs: None,
+    };
+    let resp = workflow.request_approval("s1", &git).await.unwrap();
+    assert_eq!(resp.decision, ApprovalDecision::Approve);
+    assert_eq!(resp.approved_by, "auto");
+
+    // 危险但非黑名单（普通 rm 单文件）→ 也批准（完全放开）
+    let rm_file = Action::ExecuteCommand {
+        command: "rm file.txt".to_string(),
+        cwd: None,
+        timeout_secs: None,
+    };
+    let resp = workflow.request_approval("s1", &rm_file).await.unwrap();
+    assert_eq!(resp.decision, ApprovalDecision::Approve);
+
+    // 黑名单（rm -rf /，Critical）→ 仍强制拒绝（Deny 规则优先）
+    let rm_rf = Action::ExecuteCommand {
+        command: "rm -rf /".to_string(),
+        cwd: None,
+        timeout_secs: None,
+    };
+    let resp = workflow.request_approval("s1", &rm_rf).await.unwrap();
+    assert_eq!(resp.decision, ApprovalDecision::Deny);
+
+    // 多词黑名单前缀匹配：rm -rf /etc 也应拒绝（全目录删除类）
+    let rm_rf_etc = Action::ExecuteCommand {
+        command: "rm -rf /etc".to_string(),
+        cwd: None,
+        timeout_secs: None,
+    };
+    let resp = workflow.request_approval("s1", &rm_rf_etc).await.unwrap();
+    assert_eq!(resp.decision, ApprovalDecision::Deny);
+}
+
+#[tokio::test]
 async fn test_attended_mode_denies_without_confirmation() {
     // 默认（attended、无审批通道）：Medium 风险应立即拒绝，由上层降级为追问
     let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));

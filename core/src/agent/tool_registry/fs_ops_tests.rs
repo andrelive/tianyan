@@ -31,6 +31,7 @@ fn default_strict_policy() -> SecurityPolicy {
         max_command_timeout_secs: 30,
         max_file_size: 1024 * 1024,
         block_interpreters: true,
+        allow_all_operations: false,
     }
 }
 

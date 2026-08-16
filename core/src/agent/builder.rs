@@ -309,6 +309,18 @@ impl AgentBuilder {
                 enabled: true,
             });
         }
+        // 完全放开模式：除 Deny 规则（黑名单）外全部自动批准。
+        // 评估顺序保证 Deny 优先（check_auto_approval 第一遍先跑拒绝规则），
+        // 因此 blocked_commands 黑名单在任何模式下都强制生效。
+        if security_config.allow_all_operations {
+            approval_config.auto_approval_rules.push(AutoApprovalRule {
+                name: "allow_all_operations".to_string(),
+                action_pattern: ActionPattern::Any,
+                condition: ApprovalCondition::Always,
+                decision: ApprovalDecision::Approve,
+                enabled: true,
+            });
+        }
         let mut approval_notifier = SessionApprovalNotifier::new(session_manager.clone());
         if let Some(ref sink) = self.notification_sink {
             approval_notifier = approval_notifier.with_notification_sink(sink.clone());

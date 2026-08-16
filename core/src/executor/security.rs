@@ -31,6 +31,9 @@ pub struct SecurityPolicy {
     pub max_file_size: u64,
     /// 是否允许通过解释器执行命令。
     pub block_interpreters: bool,
+    /// 完全放开模式：跳过元字符/解释器检查，仅保留黑名单（与审批层
+    /// allow_all_operations 配套；默认关闭）。
+    pub allow_all_operations: bool,
 }
 
 impl SecurityPolicy {
@@ -60,6 +63,7 @@ impl SecurityPolicy {
             max_command_timeout_secs: DEFAULT_COMMAND_TIMEOUT_SECS,
             max_file_size: config.max_file_size,
             block_interpreters: config.safety_mode != SafetyMode::Permissive,
+            allow_all_operations: config.allow_all_operations,
         }
     }
 
@@ -299,7 +303,8 @@ impl SecurityPolicy {
         }
 
         // 检测命令链和命令替换元字符，防止注入
-        if Self::has_shell_metacharacters(command) {
+        // （完全放开模式跳过：仅保留黑名单兜底）
+        if !self.allow_all_operations && Self::has_shell_metacharacters(command) {
             return Err(TianyanError::Custom(
                 "executor: 安全策略违规：命令包含不被允许的 shell 元字符（&&、||、;、`、$() 等）"
                     .to_string(),
@@ -309,7 +314,7 @@ impl SecurityPolicy {
         let cmd_name = command.split_whitespace().next().unwrap_or(command);
         let pure_name = extract_command_base(cmd_name);
 
-        if self.block_interpreters {
+        if self.block_interpreters && !self.allow_all_operations {
             let interpreters = ["cmd", "powershell", "pwsh", "bash", "sh", "wsl", "wsl.exe"];
             if interpreters.contains(&pure_name.as_str()) {
                 return Err(TianyanError::Custom(format!(
@@ -321,7 +326,18 @@ impl SecurityPolicy {
 
         for blocked in &self.blocked_commands {
             let blocked_lower = blocked.to_lowercase();
-            if pure_name == blocked_lower {
+            // 匹配语义：单词条目按命令名精确匹配（兼容既有行为）；
+            // 多词条目（如 `rm -rf /`、`del /s`）按整条命令前缀匹配——
+            // 使"全目录删除"类黑名单真正生效（此前仅首词比较导致永不命中）。
+            let hit = if blocked_lower.contains(' ') {
+                command
+                    .to_lowercase()
+                    .trim_start()
+                    .starts_with(&blocked_lower)
+            } else {
+                pure_name == blocked_lower
+            };
+            if hit {
                 return Err(TianyanError::Custom(format!(
                     "executor: 安全策略违规：命令被安全策略禁止：{}",
                     cmd_name
@@ -390,6 +406,7 @@ mod tests {
             max_command_timeout_secs: 30,
             max_file_size: 1024 * 1024,
             block_interpreters: true,
+            allow_all_operations: false,
         }
     }
 
@@ -635,6 +652,43 @@ mod tests {
         // POSIX 上 ; 是分隔符，阻止
         let policy = policy_with(vec![], vec![]);
         assert!(policy.check_command("cd /tmp; rm x").is_err());
+    }
+
+    #[test]
+    fn test_blocked_multiword_prefix_match() {
+        // 多词黑名单（如 `rm -rf /`、`del /s`）按整条命令前缀匹配——
+        // 此前仅首词比较导致这些条目永不命中。
+        let policy = SecurityPolicy::from_config(&SecurityConfig {
+            blocked_commands: vec![
+                "rm -rf /".to_string(),
+                "del /s".to_string(),
+                "Remove-Item -Recurse".to_string(),
+            ],
+            ..Default::default()
+        });
+        // 全目录删除 → 命中
+        assert!(policy.check_command("rm -rf /").is_err());
+        assert!(policy.check_command("rm -rf /etc").is_err());
+        assert!(policy.check_command("del /s /q C:\\x").is_err());
+        assert!(policy.check_command("remove-item -recurse c:\\").is_err());
+        // 单文件删除（非递归、非根目录）→ 放行（完全放开语义）
+        assert!(policy.check_command("rm file.txt").is_ok());
+        assert!(policy.check_command("del old.log").is_ok());
+    }
+
+    #[test]
+    fn test_allow_all_operations_skips_metachar_but_keeps_blocklist() {
+        // 完全放开：跳过元字符/解释器检查，但黑名单仍生效
+        let policy = SecurityPolicy::from_config(&SecurityConfig {
+            allow_all_operations: true,
+            blocked_commands: vec!["rm -rf /".to_string()],
+            ..Default::default()
+        });
+        // 链式命令不再被元字符拦截
+        assert!(policy.check_command("git status && git log").is_ok());
+        assert!(policy.check_command("echo $(id)").is_ok());
+        // 黑名单仍然命中
+        assert!(policy.check_command("rm -rf /").is_err());
     }
 
     #[test]
