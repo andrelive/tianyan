@@ -202,6 +202,22 @@ export interface SkillListResponse {
   total?: number;
 }
 
+export interface SkillStatsEntry {
+  skill_id: string;
+  total_calls: number;
+  success_calls: number;
+  success_rate: number;
+  avg_time_ms: number;
+  last_called_at: string;
+}
+
+export interface SkillsStatsResponse {
+  skills: SkillStatsEntry[];
+  total_calls: number;
+  total_success: number;
+  success_rate: number;
+}
+
 // ── 子智能体角色（ADR-016）────────────────────────────────────────────
 
 export interface RoleUsageSummary {

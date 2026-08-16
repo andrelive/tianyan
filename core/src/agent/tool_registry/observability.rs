@@ -87,7 +87,16 @@ impl ToolPostExecuteListener for ToolObservabilityListener {
 
         // Record usage stats for tool call
         if let Some(ref stats) = usage_stats {
-            stats.record_skill_call(&call.function.name, success, elapsed.as_micros() as u64);
+            // 技能级统计：call_skill 以 skill_id 为键（前缀 skill: 区分工具级）——
+            // 统计面板「哪些技能被调用多/成功率高」的数据源
+            let stats_key = if call.function.name == "call_skill" {
+                serde_json::from_str::<CallSkillParams>(arguments)
+                    .map(|p| format!("skill:{}", p.skill_id))
+                    .unwrap_or_else(|_| call.function.name.clone())
+            } else {
+                call.function.name.clone()
+            };
+            stats.record_skill_call(&stats_key, success, elapsed.as_micros() as u64);
         }
 
         // G6 结构化 Trace：工具 span（归属当前轮；参数摘要截断控制体积）

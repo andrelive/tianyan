@@ -21,6 +21,7 @@ import type {
   SearchSuggestionsResponse,
   Session,
   SkillDetail,
+  SkillsStatsResponse,
   SessionMessagesResponse,
   UsageStatsSummary,
   WorkspaceDiffListResponse,
@@ -139,6 +140,10 @@ export async function getTools(): Promise<ListToolsResponse> {
 /** 获取技能详情（完整内容 + 创建/更新时间） */
 export async function getSkillDetail(skillId: string): Promise<SkillDetail> {
   return apiGet<SkillDetail>(`/skills/${encodeURIComponent(skillId)}`);
+}
+
+export async function getSkillsStats(): Promise<SkillsStatsResponse> {
+  return apiGet<SkillsStatsResponse>('/skills/stats');
 }
 
 export async function getRoles(): Promise<ListRolesResponse> {
