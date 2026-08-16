@@ -25,8 +25,10 @@ pub mod hashline;
 pub mod patch;
 /// 项目格式探测注册表（verify_build / discover_tests 共享）。
 pub mod project;
-/// 代码搜索执行器（ripgrep 封装：输出守卫 + 分页语义）。
+/// 代码搜索执行器（内嵌引擎：输出守卫 + 分页语义）。
 pub mod search;
+/// 内嵌搜索引擎实现（ignore 遍历 + regex 匹配，替代外部 ripgrep）。
+pub mod search_engine;
 /// 符号大纲提取引擎（tree-sitter）。
 pub mod symbols;
 /// 测试发现与测试结果解析（discover_tests 工具 + run_tests 结果增强）。

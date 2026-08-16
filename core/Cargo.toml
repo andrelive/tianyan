@@ -81,6 +81,9 @@ dashmap = { workspace = true }
 
 # Regular expressions
 regex = { workspace = true }
+
+# 目录遍历（rg 同作者：.gitignore/隐藏文件语义，搜索内嵌用）
+ignore = { workspace = true }
 arrow-array = "58.4.0"
 arrow-schema = "58.4.0"
 

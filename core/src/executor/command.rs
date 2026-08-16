@@ -390,11 +390,20 @@ impl CommandManager {
     }
 }
 
-/// 跨平台 shell 包装命令构造（Unix: `sh -c`，Windows: `cmd /C`）。
+/// 跨平台 shell 包装命令构造（Unix: `sh -c`，Windows: `powershell`）。
+///
+/// Windows 用 PowerShell（Win10/11 默认自带）：与工具描述、系统提示词的
+/// PowerShell 语义一致（管道/Out-File/Select-String 等 cmdlet 可用），
+/// 避免模型按 PowerShell 语法写命令却在 cmd.exe 下失败。
+/// `-NoProfile -NonInteractive` 跳过用户配置加载并禁止交互提示（后台/
+/// 自动化场景下防挂起）；`-Command` 直接执行整条命令串。
 fn build_shell_command(command: &str) -> tokio::process::Command {
     if cfg!(target_os = "windows") {
-        let mut c = tokio::process::Command::new("cmd");
-        c.arg("/C").arg(command);
+        let mut c = tokio::process::Command::new("powershell");
+        c.arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(command);
         c
     } else {
         let mut c = tokio::process::Command::new("sh");
@@ -501,7 +510,7 @@ pub(super) fn extract_command_base(cmd: &str) -> String {
 
 /// 执行 ExecuteCommand 动作（无安全策略依赖，纯函数）。
 ///
-/// 跨平台：Unix (Linux/macOS) 用 `sh -c`，Windows 用 `cmd /C`。
+/// 跨平台：Unix (Linux/macOS) 用 `sh -c`，Windows 用 `powershell -NoProfile -NonInteractive -Command`。
 /// 超时后**杀进程树**（不只 shell）：Windows taskkill /T /F，Unix 进程组 kill，
 /// 避免派生服务进程残留为孤儿（opencode #30868 同款问题）。
 pub async fn execute_command_action(

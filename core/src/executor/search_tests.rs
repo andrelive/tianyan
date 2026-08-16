@@ -1,14 +1,7 @@
-//! 搜索执行器测试：真实 ripgrep + 临时目录夹具。
-//!
-//! 依赖 `rg` 可执行（本机不在 PATH，由 `ensure_rg_available` 注入）。
+//! 搜索执行器测试：内嵌引擎 + 临时目录夹具（无外部 rg 依赖）。
 
 use super::*;
 use tempfile::TempDir;
-
-/// 测试前确保 rg 可调用（幂等，重复调用无副作用）。
-fn init() {
-    ensure_rg_available();
-}
 
 /// 基础夹具：a.rs（两行匹配）+ b.txt（一行匹配），均含 "foo"。
 fn fixture() -> TempDir {
@@ -35,7 +28,6 @@ fn content_opts(dir: &TempDir) -> SearchOptions {
 
 #[tokio::test]
 async fn content_search_returns_line_number_and_text() {
-    init();
     let dir = fixture();
     let opts = content_opts(&dir);
     let out = execute_search_code("foo", &opts).await.unwrap();
@@ -59,7 +51,6 @@ async fn content_search_returns_line_number_and_text() {
 
 #[tokio::test]
 async fn default_mode_lists_files_with_matches() {
-    init();
     let dir = fixture();
     let opts = SearchOptions {
         path: Some(dir.path().to_string_lossy().into_owned()),
@@ -81,7 +72,6 @@ async fn default_mode_lists_files_with_matches() {
 
 #[tokio::test]
 async fn ignore_case_matches_lowercase() {
-    init();
     let dir = fixture();
     let mut opts = content_opts(&dir);
     opts.ignore_case = true;
@@ -92,7 +82,6 @@ async fn ignore_case_matches_lowercase() {
 
 #[tokio::test]
 async fn context_includes_neighbor_lines() {
-    init();
     let dir = fixture();
     let mut opts = content_opts(&dir);
     opts.context = Some(1);
@@ -108,7 +97,6 @@ async fn context_includes_neighbor_lines() {
 
 #[tokio::test]
 async fn glob_filter_limits_file_types() {
-    init();
     let dir = fixture();
     let mut opts = content_opts(&dir);
     opts.glob = Some("*.rs".to_string());
@@ -121,7 +109,6 @@ async fn glob_filter_limits_file_types() {
 
 #[tokio::test]
 async fn type_filter_restricts_language() {
-    init();
     let dir = fixture();
     let mut opts = content_opts(&dir);
     opts.type_ = Some("rust".to_string());
@@ -136,7 +123,6 @@ async fn type_filter_restricts_language() {
 
 #[tokio::test]
 async fn invalid_regex_reports_error() {
-    init();
     let dir = fixture();
     let opts = content_opts(&dir);
     let err = execute_search_code("[", &opts).await.unwrap_err();
@@ -145,7 +131,6 @@ async fn invalid_regex_reports_error() {
 
 #[tokio::test]
 async fn no_matches_returns_empty_not_exhausted() {
-    init();
     let dir = fixture();
     let opts = content_opts(&dir);
     let out = execute_search_code("zzzz_nothing", &opts).await.unwrap();
@@ -158,7 +143,6 @@ async fn no_matches_returns_empty_not_exhausted() {
 
 #[tokio::test]
 async fn offset_beyond_total_is_exhausted() {
-    init();
     let dir = fixture();
     let mut opts = content_opts(&dir);
     opts.offset = 5; // 仅有 2 条匹配
@@ -173,7 +157,6 @@ async fn offset_beyond_total_is_exhausted() {
 
 #[tokio::test]
 async fn pagination_applies_offset_and_head_limit() {
-    init();
     let dir = tempfile::tempdir().unwrap();
     let lines: Vec<String> = (1..=5).map(|i| format!("match line {i}")).collect();
     std::fs::write(dir.path().join("p.rs"), lines.join("\n") + "\n").unwrap();
@@ -205,7 +188,6 @@ async fn pagination_applies_offset_and_head_limit() {
 
 #[tokio::test]
 async fn long_line_is_truncated_with_marker() {
-    init();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("long.rs"),
@@ -223,7 +205,6 @@ async fn long_line_is_truncated_with_marker() {
 
 #[tokio::test]
 async fn multiline_pattern_matches_across_lines() {
-    init();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("m.rs"), "let a = 1;\nlet b = 2;\n").unwrap();
     let mut opts = content_opts(&dir);
@@ -236,7 +217,6 @@ async fn multiline_pattern_matches_across_lines() {
 
 #[tokio::test]
 async fn git_directory_is_excluded() {
-    init();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("ok.rs"), "fn foo() {}\n").unwrap();
     std::fs::create_dir_all(dir.path().join(".git").join("hooks")).unwrap();

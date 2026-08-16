@@ -74,6 +74,9 @@ dashmap = "6.1"
 # Regular expressions
 regex = "1.10"
 
+# 目录遍历（rg 同作者：.gitignore/隐藏文件语义，搜索内嵌用）
+ignore = "0.4"
+
 # 文本相似度比较
 similar = "3.1.2"
 

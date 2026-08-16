@@ -28,6 +28,15 @@ use crate::observability::trace::TraceCollector;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
 use crate::scheduler::tasks::RuleRecorder;
+
+/// 当前平台的 shell 事实（注入 execute_command 工具描述，消除模型试错）。
+fn shell_platform_hint() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Platform: Windows. Shell is PowerShell (5.1+), NOT cmd.exe — PowerShell cmdlets like Out-File, Select-String, Get-ChildItem and pipelines work; use PS syntax."
+    } else {
+        "Platform: Unix. Shell is sh -c (POSIX); standard Unix pipes and redirects work."
+    }
+}
 use crate::skills::learning::ExecutionHistory;
 use crate::skills::SkillExecutor;
 use crate::vfs::VirtualFileSystem;
@@ -895,14 +904,17 @@ impl ToolRegistry {
                 ExecuteCommandParams,
             >(
                 "execute_command",
-                "Execute a shell command with optional working directory and timeout.",
+                &format!(
+                    "Execute a shell command with optional working directory and timeout. {}",
+                    shell_platform_hint(),
+                ),
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
                 SearchCodeParams,
             >(
                 "search_code",
-                "Search for code patterns using ripgrep.",
+                "Search for code patterns (regex) in project files. Built-in engine, no external ripgrep needed. Returns matching lines with line numbers and match offsets; supports glob filters, language types, context lines and pagination.",
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<

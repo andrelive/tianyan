@@ -62,7 +62,6 @@ fn file_policy(allowed: Vec<std::path::PathBuf>) -> SecurityPolicy {
 
 #[tokio::test]
 async fn test_search_code_basic_success() {
-    crate::executor::search::ensure_rg_available();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.rs"), "fn foo() {}\n").unwrap();
     let registry = ToolRegistry::new(default_strict_policy());
@@ -80,7 +79,6 @@ async fn test_search_code_basic_success() {
 
 #[tokio::test]
 async fn test_search_code_rejects_path_outside_allowlist() {
-    crate::executor::search::ensure_rg_available();
     let dir = tempfile::tempdir().unwrap();
     let allowed = dir.path().join("allowed");
     std::fs::create_dir(&allowed).unwrap();
@@ -98,7 +96,6 @@ async fn test_search_code_rejects_path_outside_allowlist() {
 
 #[tokio::test]
 async fn test_search_code_serde_alias_old_payload() {
-    crate::executor::search::ensure_rg_available();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.rs"), "fn foo() {}\n").unwrap();
     let registry = ToolRegistry::new(default_strict_policy());

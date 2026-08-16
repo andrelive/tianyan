@@ -154,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_failure_exit_code_nonzero() {
-        // `exit 3` 在 cmd /C 和 sh -c 下都以 3 退出
+        // `exit 3` 在 PowerShell 和 sh -c 下都以 3 退出
         let handler = SystemCommandHandler::new(Vec::new());
         let result = handler
             .execute(params("exit 3"), ExecutionContext::default())
@@ -206,9 +206,9 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("marker.txt"), "x").unwrap();
 
-        // 在工作目录内列出文件，验证 current_dir 生效（跨平台：Windows 用 dir，Unix 用 ls）
+        // 在工作目录内列出文件，验证 current_dir 生效（跨平台：Windows 用 PowerShell 的 Get-ChildItem -Name，Unix 用 ls -A）
         let cmd = if cfg!(target_os = "windows") {
-            "dir /b"
+            "Get-ChildItem -Name"
         } else {
             "ls -A"
         };
