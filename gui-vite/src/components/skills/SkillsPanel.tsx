@@ -111,14 +111,8 @@ export default function SkillsPanel() {
               <span className="text-[var(--color-text-secondary)]">技能累计调用</span>
               <span className="font-semibold text-[var(--color-text-primary)]">{stats.total_calls} 次</span>
             </div>
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-[var(--color-text-secondary)]">成功率</span>
-              <span className={`font-semibold ${stats.success_rate < 0.5 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                {Math.round(stats.success_rate * 100)}%
-              </span>
-            </div>
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-xs text-[var(--color-text-tertiary)]">调用排行：</span>
+              <span className="text-xs text-[var(--color-text-tertiary)]">使用排行（方法论技能无执行成败语义，仅统计采纳频率）：</span>
               {stats.skills.slice(0, 8).map((s) => (
                 <span key={s.skill_id} className="inline-block px-1.5 py-0.5 text-[10px] rounded bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-secondary)]" title={`${s.success_calls}/${s.total_calls} 次成功`}>
                   {s.skill_id} {s.total_calls} 次
@@ -128,7 +122,7 @@ export default function SkillsPanel() {
           </>
         ) : (
           <span className="text-xs text-[var(--color-text-tertiary)]">
-            暂无技能调用统计——智能体调用技能后，这里会展示调用排行、成功率与平均耗时
+            暂无技能调用统计——智能体调用技能后，这里会展示调用排行与平均耗时
           </span>
         )}
       </div>
@@ -193,10 +187,12 @@ export default function SkillsPanel() {
                         return (
                           <p className="text-xs mt-1 flex items-center gap-2">
                             <span className="text-[var(--color-text-tertiary)]">调用 {st.total_calls} 次</span>
-                            <span className={st.success_rate < 0.5 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}>
-                              成功率 {Math.round(st.success_rate * 100)}%
-                            </span>
                             <span className="text-[var(--color-text-tertiary)]/70">均值 {Math.round(st.avg_time_ms)}ms</span>
+                            {st.total_calls - st.success_calls > 0 && (
+                              <span className="text-red-600 dark:text-red-400" title="handler 执行异常（存储/模型故障），非方法论本身成败">
+                                执行异常 {st.total_calls - st.success_calls} 次
+                              </span>
+                            )}
                           </p>
                         );
                       })()}

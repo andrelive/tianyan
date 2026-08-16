@@ -28,8 +28,10 @@ pub async fn list_skills(
         .map(Json)
 }
 
-/// 技能使用统计（调用次数/成功率/平均耗时——哪些技能被用得多）。
+/// 技能使用统计（调用次数/平均耗时/执行异常——哪些技能被用得多）。
 ///
+/// 语义说明：技能是方法论文档，调用本身无成败语义；`success_calls` 仅表示
+/// handler 执行未抛异常（异常 = 存储/模型故障的健康信号），**不是**技能成功率。
 /// 数据源为 UsageStats 持久化统计（`skill:` 前缀 = 技能级，工具级忽略）。
 pub async fn get_skills_stats(
     State(state): State<Arc<AppState>>,
