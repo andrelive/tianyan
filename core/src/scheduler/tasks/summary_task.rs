@@ -286,9 +286,23 @@ mod tests {
     fn make_context(vfs: Arc<MockVfs>, chat: MockChatService) -> TaskContext {
         let chat: Arc<dyn ChatService> = Arc::new(chat);
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
-        let memory_extractor = Arc::new(MemoryExtractor::new(chat, ExtractionConfig::default()));
+        let memory_extractor = Arc::new(MemoryExtractor::new(
+            chat.clone(),
+            ExtractionConfig::default(),
+        ));
+        let skill_reviewer = Arc::new(crate::skills::SkillReviewer::new(
+            chat,
+            vfs.clone(),
+            "test-model".to_string(),
+        ));
         let config = Arc::new(crate::config::TianyanConfig::default());
-        TaskContext::new(vfs, summary_engine, memory_extractor, config)
+        TaskContext::new(
+            vfs,
+            summary_engine,
+            memory_extractor,
+            skill_reviewer,
+            config,
+        )
     }
 
     /// 约 100 个汉字的中文文本（字节 < 400 且 token < 100）。

@@ -688,6 +688,20 @@ impl AppState {
         Ok(Arc::new(extractor))
     }
 
+    /// 创建技能使用评审器（记忆提取同周期复审；chat + vfs + 聊天模型）。
+    pub async fn create_skill_reviewer(
+        &self,
+    ) -> TianyanResult<Arc<tianyan::skills::SkillReviewer>> {
+        let config = self.config.read().await.clone();
+        let model_services = self.shared_model_services().await?;
+        let chat_model = resolve_chat_model(&config);
+        Ok(Arc::new(tianyan::skills::SkillReviewer::new(
+            model_services.chat,
+            self.vfs.clone(),
+            chat_model,
+        )))
+    }
+
     /// 创建知识导入器（复用共享模型服务与唯一构造点 [`build_knowledge_ingestor`]）。
     pub async fn create_knowledge_ingestor(&self) -> TianyanResult<KnowledgeIngestor> {
         let config = self.config.read().await.clone();

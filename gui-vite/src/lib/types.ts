@@ -213,9 +213,19 @@ export interface SkillStatsEntry {
 
 export interface SkillsStatsResponse {
   skills: SkillStatsEntry[];
+  reviews: SkillReviewEntry[];
   total_calls: number;
   total_success: number;
   success_rate: number;
+}
+
+export interface SkillReviewEntry {
+  skill_id: string;
+  score: number;
+  verdict: string;
+  user_feedback: string;
+  reason: string;
+  ts: number;
 }
 
 // ── 子智能体角色（ADR-016）────────────────────────────────────────────

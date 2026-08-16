@@ -65,9 +65,20 @@ mod tests {
     fn make_context(vfs: Arc<MockVfs>) -> TaskContext {
         let chat: Arc<dyn ChatService> = Arc::new(MockChatService::new());
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
+        let skill_reviewer = Arc::new(crate::skills::SkillReviewer::new(
+            chat.clone(),
+            vfs.clone(),
+            "test-model".to_string(),
+        ));
         let memory_extractor = Arc::new(MemoryExtractor::new(chat, ExtractionConfig::default()));
         let config = Arc::new(crate::config::TianyanConfig::default());
-        TaskContext::new(vfs, summary_engine, memory_extractor, config)
+        TaskContext::new(
+            vfs,
+            summary_engine,
+            memory_extractor,
+            skill_reviewer,
+            config,
+        )
     }
 
     /// 构造隔离的 UsageStats（内存 SQLite，模式同 `usage_stats::tests::setup`）。

@@ -240,6 +240,15 @@ impl MemoryTask {
             .extract(&conversation, &source_message_ids)
             .await?;
 
+        // 技能使用复审（顺路：会话内容已在内存；失败不影响记忆提取）
+        if let Err(e) = ctx
+            .skill_reviewer
+            .review_conversation(session_uri.as_ref(), &conversation)
+            .await
+        {
+            tracing::warn!(session_uri = %session_uri, error = %e, "技能使用复审失败（不影响记忆提取）");
+        }
+
         let mut stored_count = 0;
         for mut memory in memories {
             memory.source_session = Some(session_uri.to_string());
@@ -386,9 +395,23 @@ mod tests {
     fn make_context(vfs: Arc<MockVfs>) -> TaskContext {
         let chat: Arc<dyn ChatService> = Arc::new(MockChatService::new());
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
-        let memory_extractor = Arc::new(MemoryExtractor::new(chat, ExtractionConfig::default()));
+        let memory_extractor = Arc::new(MemoryExtractor::new(
+            chat.clone(),
+            ExtractionConfig::default(),
+        ));
+        let skill_reviewer = Arc::new(crate::skills::SkillReviewer::new(
+            chat,
+            vfs.clone(),
+            "test-model".to_string(),
+        ));
         let config = Arc::new(crate::config::TianyanConfig::default());
-        TaskContext::new(vfs, summary_engine, memory_extractor, config)
+        TaskContext::new(
+            vfs,
+            summary_engine,
+            memory_extractor,
+            skill_reviewer,
+            config,
+        )
     }
 
     /// 构造单条消息（测试辅助）。

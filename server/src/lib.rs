@@ -381,12 +381,14 @@ async fn start_server_inner(
         let vfs = state.vfs();
         let summary_engine = state.create_summary_engine().await?;
         let memory_extractor = state.create_memory_extractor().await?;
+        let skill_reviewer = state.create_skill_reviewer().await?;
         let app_config = Arc::new(state.config().read().await.clone());
 
         let task_ctx = Arc::new(TaskContext::new(
             vfs.clone(),
             summary_engine,
             memory_extractor,
+            skill_reviewer,
             app_config.clone(),
         ));
 

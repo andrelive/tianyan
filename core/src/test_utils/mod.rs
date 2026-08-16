@@ -141,13 +141,20 @@ impl VfsCore for MockVfs {
     }
 
     async fn exists(&self, uri: &TianyanUri) -> Result<bool> {
+        let s = uri.to_string();
         Ok(self
             .exists
             .read()
             .unwrap()
-            .get(&uri.to_string())
+            .get(&s)
             .copied()
-            .unwrap_or(self.entries.read().unwrap().contains_key(&uri.to_string())))
+            .unwrap_or_else(|| {
+                // 真实后端（Sqlite/Local）写内容时自动建条目；Mock 同样把
+                // 有内容的 URI 视为存在（delete 会同步清理内容，保持一致）。
+                let entries = self.entries.read().unwrap();
+                entries.contains_key(&s)
+                    || self.content.read().unwrap().keys().any(|(u, _)| *u == s)
+            }))
     }
 
     async fn get_entry(&self, uri: &TianyanUri) -> Result<ContextEntry> {

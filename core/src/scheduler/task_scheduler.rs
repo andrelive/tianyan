@@ -13,6 +13,7 @@ use crate::common::error::TianyanError;
 use crate::config::TianyanConfig;
 use crate::memory::MemoryExtractor;
 use crate::scheduler::TaskStateStore;
+use crate::skills::SkillReviewer;
 use crate::vfs::{SummaryService, VirtualFileSystem};
 
 /// 任务优先级。
@@ -71,6 +72,8 @@ pub struct TaskContext {
     pub summary_engine: Arc<dyn SummaryService>,
     /// 记忆提取器。
     pub memory_extractor: Arc<MemoryExtractor>,
+    /// 技能使用评审器（记忆提取同周期顺路复审技能使用效果）。
+    pub skill_reviewer: Arc<SkillReviewer>,
     /// 配置。
     pub config: Arc<TianyanConfig>,
     /// 任务作用域状态存储（G5：定时任务跨运行状态——读写自己的持久状态）。
@@ -83,6 +86,7 @@ impl TaskContext {
         vfs: Arc<dyn VirtualFileSystem>,
         summary_engine: Arc<dyn SummaryService>,
         memory_extractor: Arc<MemoryExtractor>,
+        skill_reviewer: Arc<SkillReviewer>,
         config: Arc<TianyanConfig>,
     ) -> Self {
         let task_state = Arc::new(TaskStateStore::new(vfs.clone()));
@@ -90,6 +94,7 @@ impl TaskContext {
             vfs,
             summary_engine,
             memory_extractor,
+            skill_reviewer,
             config,
             task_state,
         }

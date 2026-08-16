@@ -49,6 +49,10 @@ impl SkillManager {
         for entry in entries {
             if entry.is_directory() {
                 let id = entry.uri().path().last().cloned().unwrap_or_default();
+                // 技能评审记录目录（`_reviews`）不是技能，跳过
+                if id == crate::skills::REVIEWS_PREFIX {
+                    continue;
+                }
                 let description = self
                     .vfs
                     .read_abstract(entry.uri())

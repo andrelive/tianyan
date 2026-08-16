@@ -205,9 +205,23 @@ mod tests {
     fn make_context(vfs: Arc<MockVfs>) -> TaskContext {
         let chat: Arc<dyn ChatService> = Arc::new(MockChatService::new());
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
-        let memory_extractor = Arc::new(MemoryExtractor::new(chat, ExtractionConfig::default()));
+        let memory_extractor = Arc::new(MemoryExtractor::new(
+            chat.clone(),
+            ExtractionConfig::default(),
+        ));
+        let skill_reviewer = Arc::new(crate::skills::SkillReviewer::new(
+            chat,
+            vfs.clone(),
+            "test-model".to_string(),
+        ));
         let config = Arc::new(crate::config::TianyanConfig::default());
-        TaskContext::new(vfs, summary_engine, memory_extractor, config)
+        TaskContext::new(
+            vfs,
+            summary_engine,
+            memory_extractor,
+            skill_reviewer,
+            config,
+        )
     }
 
     fn learned_uri(name: &str) -> TianyanUri {

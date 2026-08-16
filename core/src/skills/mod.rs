@@ -36,6 +36,8 @@ pub mod handlers;
 pub(crate) mod learning;
 mod manager;
 mod registry;
+/// 技能使用复审（基于会话证据：执行结果 + 用户反馈；记忆任务顺路）。
+pub mod reviewer;
 mod types;
 
 pub use definition::{
@@ -52,6 +54,7 @@ pub use learning::{
 };
 pub use manager::{SkillManager, SkillRefresher, SkillSummary};
 pub use registry::{create_builtin_skills, register_builtin_skills};
+pub use reviewer::{SkillReview, SkillReviewer, REVIEWS_PREFIX};
 pub use types::{
     ExecutionContext, SecurityLevel, SkillCategory, SkillExample, SkillExecutionRequest,
     SkillExecutionResult,
