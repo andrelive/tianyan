@@ -608,7 +608,7 @@ impl ToolRegistry {
         "apply_edit",
         "apply_patch",
         "execute_command",
-        "search_code",
+        "grep",
         "glob",
         "list_dir",
         "call_skill",
@@ -820,7 +820,7 @@ impl ToolRegistry {
                 self.execute_execute_command(arguments, session_id, subagent)
                     .await
             }
-            "search_code" => self.execute_search_code(arguments).await,
+            "grep" => self.execute_search_code(arguments).await,
             "search_knowledge" => self.execute_search_knowledge(arguments).await,
             "vfs_read" => self.execute_vfs_read(arguments).await,
             "vfs_list" => self.execute_vfs_list(arguments).await,
@@ -913,8 +913,8 @@ impl ToolRegistry {
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
                 SearchCodeParams,
             >(
-                "search_code",
-                "Search for code patterns (regex) in project files. Built-in engine, no external ripgrep needed. Returns matching lines with line numbers and match offsets; supports glob filters, language types, context lines and pagination.",
+                "grep",
+                "Search file contents for a regex pattern (like ripgrep). Returns matching files/lines with line numbers and match offsets. Supports glob filters (include), language types (type), context lines, ignore-case and pagination.",
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
@@ -1093,7 +1093,7 @@ impl ToolRegistry {
             "execute_command",
             "run_tests",
             "verify_build",
-            "search_code",
+            "grep",
             "search_knowledge",
             "glob",
             "list_dir",
@@ -1122,7 +1122,7 @@ impl ToolRegistry {
             "apply_edit" | "apply_patch" => ToolPresentation::Diff,
             "execute_command" | "run_tests" | "verify_build" | "command_status"
             | "command_list" | "command_kill" => ToolPresentation::Terminal,
-            "search_code" | "search_knowledge" | "glob" | "list_dir" | "discover_tests" => {
+            "grep" | "search_knowledge" | "glob" | "list_dir" | "discover_tests" => {
                 ToolPresentation::Search
             }
             "web_search" | "web_fetch" => ToolPresentation::Web,
@@ -1171,10 +1171,7 @@ mod tests {
             ToolPresentation::Terminal
         );
         assert_eq!(registry.presentation("apply_edit"), ToolPresentation::Diff);
-        assert_eq!(
-            registry.presentation("search_code"),
-            ToolPresentation::Search
-        );
+        assert_eq!(registry.presentation("grep"), ToolPresentation::Search);
         assert_eq!(registry.presentation("web_fetch"), ToolPresentation::Web);
         assert_eq!(registry.presentation("call_skill"), ToolPresentation::Skill);
         assert_eq!(
@@ -1388,7 +1385,7 @@ mod tests {
             "apply_edit",
             "apply_patch",
             "execute_command",
-            "search_code",
+            "grep",
             "glob",
             "list_dir",
             "call_skill",

@@ -16,7 +16,7 @@
 - **read_file** — 读取文件内容。参数：`{ "path": "文件路径" }`
 - **write_file** — 写入文件内容。参数：`{ "path": "文件路径", "content": "内容" }`
 - **execute_command** — 执行系统命令。参数：`{ "command": "命令", "cwd": "可选工作目录", "timeout_secs": 可选超时 }`
-- **search_code** — 用 ripgrep 搜索代码。参数：`{ "query": "查询", "scope": "可选范围" }`
+- **grep** — 正则搜索文件内容（内嵌引擎，无外部依赖）。参数：`{ "pattern": "正则", "path": "可选目录", "include": "可选 glob 过滤", "context": 可选上下文行数 }`
 
 ### 知识库与 VFS
 - **search_knowledge** — 语义搜索知识库（文档、记忆、规则、技能），返回摘要和 URI。参数：`{ "query": "查询", "top_k": 可选结果数 }`

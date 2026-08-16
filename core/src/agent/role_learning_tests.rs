@@ -51,7 +51,7 @@ mod tests {
     fn history(n: usize) -> Vec<ExecutionHistory> {
         (0..n)
             .map(|i| ExecutionHistory {
-                task_description: format!("search_code: 查找符号 {}", i),
+                task_description: format!("grep: 查找符号 {}", i),
                 steps: vec![],
                 result: "找到 3 处引用".to_string(),
                 success: true,
@@ -70,7 +70,7 @@ mod tests {
   "role_name": "symbol-hunter",
   "purpose": "代码符号定位与引用分析",
   "system_prompt": "你是代码符号检索专家。负责定位符号定义与引用，输出结构化结果。只检索不修改。",
-  "tools": ["search_code", "read_file"],
+  "tools": ["grep", "read_file"],
   "max_turns": 100,
   "orchestration_skill_id": "role-symbol-hunter-guide",
   "orchestration_skill_description": "符号定位任务委托指南",
@@ -104,7 +104,7 @@ mod tests {
         assert_eq!(outcome.role.status, RoleStatus::Active);
         assert_eq!(
             outcome.role.tools.as_deref().unwrap(),
-            &["search_code".to_string(), "read_file".to_string()]
+            &["grep".to_string(), "read_file".to_string()]
         );
         assert!(!outcome.updated_existing);
         assert_eq!(

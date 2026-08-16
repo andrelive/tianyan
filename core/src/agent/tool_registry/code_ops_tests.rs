@@ -1,4 +1,4 @@
-//! 代码类工具执行器测试：search_code / run_tests / verify_build。
+//! 代码类工具执行器测试：grep / run_tests / verify_build。
 
 use std::sync::Arc;
 
@@ -33,7 +33,7 @@ fn default_strict_policy() -> SecurityPolicy {
     }
 }
 
-// ── search_code ──────────────────────────────────────────────────────────
+// ── grep ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_search_code_rejects_missing_arguments() {

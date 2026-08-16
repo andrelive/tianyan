@@ -445,7 +445,7 @@ pub fn categorize_task_by_keyword(description: &str) -> String {
     if lower.contains("web_search") || lower.contains("web_fetch") {
         return "web_research".to_string();
     }
-    if lower.contains("search_code") || lower.contains("search_knowledge") {
+    if lower.contains("grep") || lower.contains("search_knowledge") {
         return "search".to_string();
     }
     if lower.contains("apply_edit") || lower.contains("apply_patch") || lower.contains("write_file")

@@ -1,4 +1,4 @@
-//! 代码类工具执行器：search_code / run_tests / verify_build。
+//! 代码类工具执行器：grep / run_tests / verify_build。
 
 use crate::agent::tool_params::{RunTestsParams, SearchCodeParams, VerifyBuildParams};
 use crate::common::error::TianyanError;
@@ -8,7 +8,7 @@ use crate::executor::Action;
 use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
 
 impl ToolRegistry {
-    /// 执行 search_code 工具：使用 ripgrep 搜索代码模式。
+    /// 执行 grep 工具：正则搜索文件内容（内嵌引擎，无外部 rg 依赖）。
     ///
     /// 三步：参数解析 → 路径安全检查（提供 `path` 时校验搜索根目录是否在
     /// 允许/禁止目录范围内）→ 委托 [`execute_search`] 执行。

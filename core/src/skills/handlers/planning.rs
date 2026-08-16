@@ -21,7 +21,7 @@ use crate::skills::types::{ExecutionContext, SkillExecutionResult};
 const PLANNING_GUIDANCE: &str = "\
 你已进入计划阶段（用户要求先规划再执行）。遵守以下约束：
 
-1. **只读研究**：只使用只读工具收集信息（read_file / search_code / search_knowledge /
+1. **只读研究**：只使用只读工具收集信息（read_file / grep / search_knowledge /
    vfs_read / vfs_list / glob / list_dir / symbol_outline / lsp / web_search / web_fetch /
    discover_tests）。不得调用 write_file / apply_edit / apply_patch / execute_command /
    run_tests / verify_build / knowledge_ingest / delegate_to_agent（后台任务）。
