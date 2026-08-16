@@ -225,12 +225,26 @@ impl UsageStats {
         let conn = self.db.lock().await;
         let tx = conn.unchecked_transaction().map_err(sqlite_error)?;
         let now = Utc::now().to_rfc3339();
-        for (skill_id, calls, _succ, time) in &skill_batch {
-            tx.execute(
-                "INSERT INTO skill_calls (skill_id, success, time_us, recorded_at) VALUES (?1,1,?2,?3)",
-                rusqlite::params![skill_id, if *calls > 0 { time / calls } else { 0 }, now],
-            )
-            .map_err(sqlite_error)?;
+        for (skill_id, calls, successes, time) in &skill_batch {
+            // 成功计数真实落库：按调用次数逐行展开（此前每批聚合只插
+            // 一行且 success 硬编码 1——失败调用被记为成功，成功率恒为
+            // 100%、执行异常统计失真）。逐行展开保证 COUNT(*)/SUM(success)
+            // 与真实调用一一对应；批量 flush 在单事务内，开销可接受。
+            let avg_time_us = if *calls > 0 { time / calls } else { 0 };
+            for _ in 0..*successes {
+                tx.execute(
+                    "INSERT INTO skill_calls (skill_id, success, time_us, recorded_at) VALUES (?1,1,?2,?3)",
+                    rusqlite::params![skill_id, avg_time_us, now],
+                )
+                .map_err(sqlite_error)?;
+            }
+            for _ in *successes..*calls {
+                tx.execute(
+                    "INSERT INTO skill_calls (skill_id, success, time_us, recorded_at) VALUES (?1,0,?2,?3)",
+                    rusqlite::params![skill_id, avg_time_us, now],
+                )
+                .map_err(sqlite_error)?;
+            }
         }
         for (uri, _hits, avg_score) in &doc_batch {
             tx.execute(
@@ -282,14 +296,18 @@ impl UsageStats {
     }
 
     /// 查询调用次数最多的技能列表。
+    ///
+    /// 口径：只统计真技能（`skill:` 前缀键），普通工具调用不混入；
+    /// 返回的 skill_id 剥离前缀（与技能注册名对齐，如 `planning`）。
     pub async fn query_top_skills(&self, limit: usize) -> Vec<SkillStats> {
         self.flush_pending().await;
         let conn = self.db.lock().await;
         let mut stmt = match conn.prepare(
-            "SELECT skill_id, COUNT(*), SUM(success),
+            "SELECT substr(skill_id, 7), COUNT(*), SUM(success),
                 CAST(SUM(success) AS REAL) / MAX(COUNT(*),1),
                 AVG(time_us)/1000.0, MAX(recorded_at)
-         FROM skill_calls GROUP BY skill_id ORDER BY 2 DESC LIMIT ?1",
+         FROM skill_calls WHERE skill_id LIKE 'skill:%'
+         GROUP BY skill_id ORDER BY 2 DESC LIMIT ?1",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -371,13 +389,17 @@ impl UsageStats {
         serde_json::json!({"period":"7d","namespaces":rows})
     }
 
-    /// 查询全局统计概览（技能数、调用数、文档数、搜索数）。
+    /// 查询全局统计概览（技能数、调用数、工具数、文档数、搜索数）。
+    ///
+    /// 口径：`skill_calls` 表同时记录真技能（`skill:<id>` 键）与普通工具
+    /// （工具名键）。技能指标只统计 `skill:` 前缀，工具指标统计其余——
+    /// 工具是工具，技能是技能。
     pub async fn query_summary(&self) -> serde_json::Value {
         self.flush_pending().await;
         let conn = self.db.lock().await;
         let skills: i64 = Self::log_query_err(
             conn.query_row(
-                "SELECT COUNT(DISTINCT skill_id) FROM skill_calls",
+                "SELECT COUNT(DISTINCT skill_id) FROM skill_calls WHERE skill_id LIKE 'skill:%'",
                 [],
                 |r| r.get(0),
             ),
@@ -385,8 +407,30 @@ impl UsageStats {
         )
         .unwrap_or(0);
         let calls: i64 = Self::log_query_err(
-            conn.query_row("SELECT COUNT(*) FROM skill_calls", [], |r| r.get(0)),
+            conn.query_row(
+                "SELECT COUNT(*) FROM skill_calls WHERE skill_id LIKE 'skill:%'",
+                [],
+                |r| r.get(0),
+            ),
             "query_summary.calls",
+        )
+        .unwrap_or(0);
+        let tools: i64 = Self::log_query_err(
+            conn.query_row(
+                "SELECT COUNT(DISTINCT skill_id) FROM skill_calls WHERE skill_id NOT LIKE 'skill:%'",
+                [],
+                |r| r.get(0),
+            ),
+            "query_summary.tools",
+        )
+        .unwrap_or(0);
+        let tool_calls: i64 = Self::log_query_err(
+            conn.query_row(
+                "SELECT COUNT(*) FROM skill_calls WHERE skill_id NOT LIKE 'skill:%'",
+                [],
+                |r| r.get(0),
+            ),
+            "query_summary.tool_calls",
         )
         .unwrap_or(0);
         let docs: i64 = Self::log_query_err(
@@ -403,7 +447,7 @@ impl UsageStats {
             "query_summary.searches",
         )
         .unwrap_or(0);
-        serde_json::json!({"total_skills_tracked":skills,"total_skill_calls":calls,"total_docs_tracked":docs,"total_searches":searches})
+        serde_json::json!({"total_skills_tracked":skills,"total_skill_calls":calls,"total_tools_tracked":tools,"total_tool_calls":tool_calls,"total_docs_tracked":docs,"total_searches":searches})
     }
 
     /// 查询最近的检索轨迹（完整过程快照，供调试界面使用）。
@@ -456,12 +500,36 @@ mod tests {
     #[tokio::test]
     async fn test_record_and_flush_skill() {
         let stats = setup().await;
-        stats.record_skill_call("read_file", true, 5000);
-        stats.record_skill_call("read_file", false, 10000);
-        stats.record_skill_call("write_file", true, 3000);
+        stats.record_skill_call("skill:planning", true, 5000);
+        stats.record_skill_call("skill:planning", false, 10000);
+        stats.record_skill_call("skill:file_read", true, 3000);
+        stats.record_skill_call("read_file", true, 3000); // 工具调用，不计入技能
         stats.flush().await.unwrap();
         let top = stats.query_top_skills(10).await;
-        assert_eq!(top.len(), 2);
+        assert_eq!(top.len(), 2, "只有 skill: 前缀计入技能");
+        // 前缀剥离：返回 planning 而非 skill:planning
+        assert!(top.iter().any(|s| s.skill_id == "planning"));
+        assert!(!top.iter().any(|s| s.skill_id.contains(":")));
+        // planning 1 成功 1 失败 → 成功率 0.5
+        let p = top.iter().find(|s| s.skill_id == "planning").unwrap();
+        assert_eq!(p.total_calls, 2);
+        assert_eq!(p.success_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn test_summary_splits_skills_and_tools() {
+        // 口径：工具是工具，技能是技能——summary 分别计数
+        let stats = setup().await;
+        stats.record_skill_call("skill:planning", true, 5000);
+        stats.record_skill_call("skill:planning", true, 3000);
+        stats.record_skill_call("skill:code_review", true, 2000);
+        stats.record_skill_call("read_file", true, 4000);
+        stats.record_skill_call("execute_command", false, 6000);
+        let s = stats.query_summary().await;
+        assert_eq!(s["total_skills_tracked"], 2, "2 个不同技能");
+        assert_eq!(s["total_skill_calls"], 3, "技能调用 3 次");
+        assert_eq!(s["total_tools_tracked"], 2, "2 个不同工具");
+        assert_eq!(s["total_tool_calls"], 2, "工具调用 2 次");
     }
 
     #[tokio::test]

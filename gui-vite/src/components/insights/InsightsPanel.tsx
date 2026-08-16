@@ -11,6 +11,7 @@ import {
   FileText,
   Search,
   Clock,
+  Terminal,
 } from 'lucide-react';
 
 /** 距上次执行秒数 → 中文显示（null = 从未执行）。 */
@@ -224,6 +225,24 @@ export default function InsightsPanel() {
                   </p>
                   <p className="text-xl font-semibold text-[var(--color-text-primary)] mt-1">
                     {formatNumber(stats.total_skill_calls)}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                  <p className="flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)]">
+                    <Terminal size={12} />
+                    工具追踪数
+                  </p>
+                  <p className="text-xl font-semibold text-[var(--color-text-primary)] mt-1">
+                    {formatNumber(stats.total_tools_tracked)}
+                  </p>
+                </div>
+                <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                  <p className="flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)]">
+                    <Terminal size={12} />
+                    工具调用数
+                  </p>
+                  <p className="text-xl font-semibold text-[var(--color-text-primary)] mt-1">
+                    {formatNumber(stats.total_tool_calls)}
                   </p>
                 </div>
                 <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">

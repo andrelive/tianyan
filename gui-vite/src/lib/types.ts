@@ -541,8 +541,14 @@ export interface SchedulerStatus {
 
 /** 使用统计摘要（GET /stats）。 */
 export interface UsageStatsSummary {
+  /** 真技能（call_skill 调用）去重数。 */
   total_skills_tracked: number;
+  /** 真技能调用总次数。 */
   total_skill_calls: number;
+  /** 普通工具（read_file 等）去重数。 */
+  total_tools_tracked: number;
+  /** 普通工具调用总次数。 */
+  total_tool_calls: number;
   total_docs_tracked: number;
   total_searches: number;
 }

@@ -852,6 +852,8 @@ export const mockSchedulerStatus: SchedulerStatus = {
 export const mockUsageStats: UsageStatsSummary = {
   total_skills_tracked: 7,
   total_skill_calls: 124,
+  total_tools_tracked: 9,
+  total_tool_calls: 856,
   total_docs_tracked: 45,
   total_searches: 230,
 };

@@ -61,6 +61,10 @@ describe('InsightsPanel', () => {
 
     expect(screen.getByText('技能追踪数')).toBeInTheDocument();
     expect(screen.getByText('技能调用数')).toBeInTheDocument();
+    expect(screen.getByText('工具追踪数')).toBeInTheDocument();
+    expect(screen.getByText('工具调用数')).toBeInTheDocument();
+    expect(screen.getByText('9')).toBeInTheDocument();
+    expect(screen.getByText('856')).toBeInTheDocument();
     expect(screen.getByText('文档追踪数')).toBeInTheDocument();
     expect(screen.getByText('搜索次数')).toBeInTheDocument();
   });

@@ -99,7 +99,8 @@ mod tests {
     #[tokio::test]
     async fn test_flush_task_execute_persists_counters() {
         let stats = make_stats().await;
-        stats.record_skill_call("read_file", true, 5000);
+        stats.record_skill_call("skill:planning", true, 5000);
+        stats.record_skill_call("read_file", true, 3000); // 工具不计入技能口径
         stats.record_doc_hit("tianyan://knowledge/code/main.rs", 0.8);
 
         let task = UsageStatsFlushTask::new(stats.clone());
@@ -107,10 +108,11 @@ mod tests {
 
         assert!(result.success, "刷盘应成功");
         assert!(result.error.is_none());
-        // 计数器已落库：查询可见（查询前自动刷盘 + 本任务刷盘双保险）
+        // 计数器已落库：查询可见（查询前自动刷盘 + 本任务刷盘双保险）；
+        // 口径：只有 skill: 前缀计入技能
         let top = stats.query_top_skills(10).await;
         assert_eq!(top.len(), 1, "技能计数应已持久化并可查询");
-        assert_eq!(top[0].skill_id, "read_file");
+        assert_eq!(top[0].skill_id, "planning");
         assert_eq!(top[0].total_calls, 1);
     }
 

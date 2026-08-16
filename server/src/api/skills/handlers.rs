@@ -36,16 +36,10 @@ pub async fn list_skills(
 pub async fn get_skills_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let stats = state.usage_stats().query_top_skills(100).await;
-    // 技能级统计：call_skill 以 `skill:<id>` 为键记录
-    let skills: Vec<tianyan::observability::usage_stats::SkillStats> = stats
-        .into_iter()
-        .filter(|s| s.skill_id.starts_with("skill:"))
-        .map(|mut s| {
-            s.skill_id = s.skill_id.trim_start_matches("skill:").to_string();
-            s
-        })
-        .collect();
+    // 技能级统计：query_top_skills 已在 SQL 层按 `skill:` 前缀过滤并剥离
+    // 前缀（工具调用不混入，返回的 skill_id 与技能注册名对齐）。
+    let skills: Vec<tianyan::observability::usage_stats::SkillStats> =
+        state.usage_stats().query_top_skills(100).await;
     let total_calls: u64 = skills.iter().map(|s| s.total_calls).sum();
     let total_success: u64 = skills.iter().map(|s| s.success_calls).sum();
     let success_rate = if total_calls == 0 {
