@@ -170,13 +170,19 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
 
   return (
     <div className={cn('flex items-start gap-2 group', isUser ? 'flex-row-reverse' : 'flex-row')}>
-      {/* Bubble */}
+      {/*
+       * 用户消息：蓝色气泡；
+       * 助手消息：无外层框——思考/正文/工具卡片各自独立成块平铺
+       * （同轮多轮次之间无框、宽度统一，避免割裂感与宽窄不一）。
+       */}
       <div
         className={cn(
-          'max-w-[80%] rounded-2xl px-4 py-2.5 relative',
+          'relative',
           isUser
-            ? 'bg-blue-500 text-white rounded-br-sm'
-            : 'bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)] rounded-bl-sm border border-[var(--color-border)]',
+            ? 'max-w-[80%] rounded-2xl px-4 py-2.5 bg-blue-500 text-white rounded-br-sm'
+            // flex-1 + min-w-0：内容撑满剩余宽度（hover 按钮不挤压文本），
+            // 同一轮内多条助手消息等宽对齐
+            : 'flex-1 min-w-0 w-full text-[var(--color-text-primary)]',
         )}
       >
         {/* 用户消息图片（data URL） */}
