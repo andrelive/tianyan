@@ -71,7 +71,7 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
         className={cn(
           'flex items-center gap-1.5 px-2.5 py-1.5 text-sm rounded-lg transition-colors',
           active
-            ? 'bg-blue-500/10 text-blue-600 dark:text-blue-300'
+            ? 'text-blue-600 dark:text-blue-300 font-medium'
             : ghost
               ? 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)]'
               : 'border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]',
