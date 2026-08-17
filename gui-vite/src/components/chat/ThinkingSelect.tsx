@@ -73,7 +73,7 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
           active
             ? 'bg-blue-500/10 text-blue-600 dark:text-blue-300'
             : ghost
-              ? 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
+              ? 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)]'
               : 'border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]',
         )}
       >

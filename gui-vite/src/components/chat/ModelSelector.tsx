@@ -77,7 +77,7 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
         className={cn(
           'flex items-center gap-2 px-2.5 py-1.5 text-sm rounded-lg transition-colors disabled:opacity-50',
           ghost
-            ? 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
+            ? 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
             : 'border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]',
         )}
       >
