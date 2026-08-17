@@ -50,6 +50,21 @@ export interface TokenUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** 缓存命中（读取）token 数（提供商返回缓存明细时才有意义） */
+  cache_read?: number;
+  /** 缓存写入 token 数 */
+  cache_write?: number;
+}
+
+/** 流式事件携带的 token 用量（完成 chunk 附带；上下文占用 / 缓存命中展示） */
+export interface StreamUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_read: number;
+  cache_write: number;
+  /** 当前聊天模型上下文窗口（token） */
+  context_window: number;
 }
 
 export interface ChatStreamEvent {
@@ -63,6 +78,8 @@ export interface ChatStreamEvent {
   chunk_type: StreamChunkType;
   /** A2：结构化工具调用事件（tool_call chunk 携带） */
   tool_call?: ToolCallEvent | null;
+  /** 本轮 token 用量（完成 chunk 携带；上下文占用 / 缓存命中展示用） */
+  usage?: StreamUsage | null;
 }
 
 export interface SkillCallInfo {

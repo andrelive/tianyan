@@ -89,6 +89,7 @@ pub async fn chat_clarify_stream_handler(
                 chunk_type: tianyan::agent::StreamChunkType::Error,
                 skill_calls: None,
                 tool_call: None,
+                usage: None,
             };
             if let Ok(json) = serde_json::to_string(&event) {
                 if tx_clone
@@ -113,8 +114,12 @@ pub async fn chat_clarify_stream_handler(
 
     let session_id = request.session_id.clone();
     let answer = request.answer.clone();
+    let config_arc = state.config();
+    let config_guard = config_arc.read().await;
+    let context_window = crate::state::resolve_chat_model_spec(&config_guard).context_length as u64;
+    drop(config_guard);
     tokio::spawn(async move {
-        let service = ChatService::new(agent, session_manager);
+        let service = ChatService::new(agent, session_manager).with_context_window(context_window);
         if let Err(e) = service
             .handle_clarification_stream(&session_id, &answer, event_tx)
             .await
@@ -149,6 +154,7 @@ pub async fn chat_stream_handler(
                 chunk_type: tianyan::agent::StreamChunkType::Error,
                 skill_calls: None,
                 tool_call: None,
+                usage: None,
             };
             if let Ok(json) = serde_json::to_string(&event) {
                 if tx_clone
@@ -187,10 +193,15 @@ pub async fn chat_stream_handler(
     let cancel_for_service = cancel.clone();
     let skill_sync = state.skill_sync();
     let role_sync = state.role_sync();
+    let config_arc = state.config();
+    let config_guard = config_arc.read().await;
+    let context_window = crate::state::resolve_chat_model_spec(&config_guard).context_length as u64;
+    drop(config_guard);
     tokio::spawn(async move {
         let service = ChatService::new(agent, session_manager)
             .with_skill_sync(skill_sync)
-            .with_role_sync(role_sync);
+            .with_role_sync(role_sync)
+            .with_context_window(context_window);
 
         if let Err(e) = service
             .process_message_stream(request, event_tx, cancel_for_service)

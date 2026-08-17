@@ -9,7 +9,7 @@ use tianyan::session::SessionManager;
 use tianyan::Message as CoreMessage;
 use tianyan::MessageRole as CoreMessageRole;
 
-use crate::api::chat::types::{ChatRequest, ChatResponse, ChatStreamEvent, SkillCallInfo};
+use crate::api::chat::types::{ChatRequest, ChatResponse, ChatStreamEvent, SkillCallInfo, StreamUsage};
 use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
 use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
@@ -33,6 +33,8 @@ pub struct ChatService {
     skill_sync: Option<SkillSync>,
     /// 角色注册表同步句柄（ADR-016）：新会话创建时刷新学习角色。
     role_sync: Option<RoleSync>,
+    /// 当前聊天模型上下文窗口（token），随流式 usage 事件下发供前端计算占用百分比。
+    context_window: u64,
 }
 
 impl ChatService {
@@ -43,7 +45,14 @@ impl ChatService {
             session_manager,
             skill_sync: None,
             role_sync: None,
+            context_window: tianyan::model::spec::ModelSpec::default().context_length as u64,
         }
+    }
+
+    /// 设置聊天模型上下文窗口（由调用方按模型规格解析注入）。
+    pub fn with_context_window(mut self, context_window: u64) -> Self {
+        self.context_window = context_window;
+        self
     }
 
     /// 挂载技能注册表同步句柄（新会话创建时刷新已学习技能）。
@@ -156,7 +165,7 @@ impl ChatService {
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
                 Ok(chunk) => {
-                    let event = map_chunk_to_event(chunk, &stream_id, &session_id);
+                    let event = map_chunk_to_event(chunk, &stream_id, &session_id, self.context_window);
                     if tx.send(event).await.is_err() {
                         debug!("客户端断开流式连接");
                         break;
@@ -173,6 +182,7 @@ impl ChatService {
                         chunk_type: tianyan::agent::StreamChunkType::Error,
                         skill_calls: None,
                         tool_call: None,
+                        usage: None,
                     };
                     if tx.send(event).await.is_err() {
                         debug!("客户端已断开，错误事件未送达");
@@ -206,7 +216,7 @@ impl ChatService {
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
                 Ok(chunk) => {
-                    let event = map_chunk_to_event(chunk, &stream_id, session_id);
+                    let event = map_chunk_to_event(chunk, &stream_id, session_id, self.context_window);
                     if tx.send(event).await.is_err() {
                         debug!("客户端断开流式连接");
                         break;
@@ -223,6 +233,7 @@ impl ChatService {
                         chunk_type: tianyan::agent::StreamChunkType::Error,
                         skill_calls: None,
                         tool_call: None,
+                        usage: None,
                     };
                     if tx.send(event).await.is_err() {
                         debug!("客户端已断开，错误事件未送达");
@@ -257,6 +268,7 @@ fn map_chunk_to_event(
     chunk: tianyan::agent::AgentStreamChunk,
     stream_id: &str,
     session_id: &str,
+    context_window: u64,
 ) -> ChatStreamEvent {
     let skill_calls = chunk.skill_calls.map(convert_skill_calls);
     let chunk_type = chunk.chunk_type;
@@ -286,6 +298,14 @@ fn map_chunk_to_event(
         chunk_type,
         skill_calls,
         tool_call: chunk.tool_call,
+        usage: chunk.token_usage.map(|u| StreamUsage {
+            prompt_tokens: u.prompt_tokens as u64,
+            completion_tokens: u.completion_tokens as u64,
+            total_tokens: u.total_tokens as u64,
+            cache_read: u.cache_read as u64,
+            cache_write: u.cache_write as u64,
+            context_window,
+        }),
     }
 }
 

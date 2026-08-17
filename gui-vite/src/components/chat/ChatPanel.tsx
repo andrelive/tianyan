@@ -19,7 +19,8 @@ import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
 import ModelSelector from './ModelSelector';
 import ThinkingSelect from './ThinkingSelect';
-import type { ChatMessage, ChatStreamEvent } from '@/lib/types';
+import UsageMeter from './UsageMeter';
+import type { ChatMessage, ChatStreamEvent, StreamUsage } from '@/lib/types';
 
 export default function ChatPanel() {
   const { sessionId: urlSessionId } = useParams<{ sessionId: string }>();
@@ -47,6 +48,8 @@ export default function ChatPanel() {
     ApprovalStatusSnapshot['pending_approvals'][number] | null
   >(null);
   const [approvalBusy, setApprovalBusy] = useState(false);
+  /** 最近一轮完成 chunk 的 token 用量（上下文占用 / 缓存命中展示）。 */
+  const [lastUsage, setLastUsage] = useState<StreamUsage | null>(null);
 
   // Sync URL sessionId to store on mount / navigation
   useEffect(() => {
@@ -224,6 +227,10 @@ export default function ChatPanel() {
       // A2：结构化工具调用事件 → tool card 渲染（含展示意图）
       if (event.tool_call) {
         useAppStore.getState().appendToolCalls([event.tool_call]);
+      }
+      // 完成 chunk 携带 token 用量 → 更新上下文占用 / 缓存命中指示
+      if (event.usage) {
+        setLastUsage(event.usage);
       }
       // 输出达到 token 上限（finish_reason === 'length'）：标记消息为截断，
       // 在助手消息下方渲染提示；'stop'/'tool_calls' 等不处理
@@ -601,6 +608,9 @@ export default function ChatPanel() {
           </div>
         </div>
       )}
+
+      {/* 上下文占用 / 缓存命中指示（最近一轮完成 chunk 的 token 用量） */}
+      <UsageMeter usage={lastUsage} />
 
       {/* Input area */}
       <ChatInput

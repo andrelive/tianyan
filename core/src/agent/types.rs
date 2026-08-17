@@ -295,11 +295,12 @@ impl StreamEventSender {
         chunk_type: StreamChunkType,
         skill_calls: Option<Vec<SkillCallInfo>>,
         finish_reason: Option<String>,
+        token_usage: Option<TokenUsage>,
     ) {
         self.try_send(AgentStreamChunk {
             delta: content.to_string(),
             is_complete: true,
-            token_usage: None,
+            token_usage,
             chunk_type,
             skill_calls,
             finish_reason,
@@ -678,7 +679,7 @@ mod tests {
         }]);
 
         sender
-            .send_complete("finished", StreamChunkType::Answer, calls, None)
+            .send_complete("finished", StreamChunkType::Answer, calls, None, None)
             .await;
         let msg = rx.recv().await.unwrap().unwrap();
         assert_eq!(msg.delta, "finished");
@@ -700,6 +701,7 @@ mod tests {
                 StreamChunkType::Answer,
                 None,
                 Some("stop".to_string()),
+                None,
             )
             .await;
         let msg = rx.recv().await.unwrap().unwrap();

@@ -147,6 +147,26 @@ pub struct SkillCallInfo {
     pub error: Option<String>,
 }
 
+/// 流式事件携带的 token 用量（完成 chunk 附带；提供商未返回时缺省）。
+///
+/// 展示语义（对齐 DSH ContextMeter）：上下文占用 = prompt_tokens（含缓存命中部分），
+/// 缓存命中率 = cache_read / prompt_tokens；context_window 供前端计算占用百分比。
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamUsage {
+    /// 提示词 token 数（含缓存命中部分）。
+    pub prompt_tokens: u64,
+    /// 完成 token 数。
+    pub completion_tokens: u64,
+    /// 总 token 数。
+    pub total_tokens: u64,
+    /// 缓存命中（读取）token 数（提供商返回缓存明细时才有意义，否则为 0）。
+    pub cache_read: u64,
+    /// 缓存写入 token 数（提供商一般不下发，保持 0）。
+    pub cache_write: u64,
+    /// 当前聊天模型上下文窗口（token；规格解析失败时取默认 32K）。
+    pub context_window: u64,
+}
+
 /// SSE 流式事件
 #[derive(Debug, Serialize)]
 pub struct ChatStreamEvent {
@@ -169,6 +189,9 @@ pub struct ChatStreamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// 结构化工具调用信息（A2 展示契约；前端据此渲染 tool card）
     pub tool_call: Option<tianyan::agent::ToolCallEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 本轮 token 用量（完成 chunk 携带；上下文占用 / 缓存命中展示用）。
+    pub usage: Option<StreamUsage>,
 }
 
 #[cfg(test)]
@@ -258,6 +281,7 @@ mod tests {
             chunk_type: tianyan::agent::StreamChunkType::Answer,
             skill_calls: None,
             tool_call: None,
+            usage: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Hello"));

@@ -101,7 +101,14 @@ impl ChatService for AsyncOpenAIClient {
             .collect();
 
         let usage = response.usage.map_or_else(TokenUsage::default, |u| {
-            TokenUsage::new(u.prompt_tokens as usize, u.completion_tokens as usize)
+            let mut tu = TokenUsage::new(u.prompt_tokens as usize, u.completion_tokens as usize);
+            // 非流式路径走 async-openai 类型化反序列化：缓存命中只有 OpenAI 标准
+            // prompt_tokens_details.cached_tokens 可用（DeepSeek 顶层 prompt_cache_hit_tokens
+            // 会被丢弃；流式路径在 drain_sse_lines 中从原始 JSON 提取，见 extract_cache_tokens）。
+            if let Some(ref details) = u.prompt_tokens_details {
+                tu.cache_read = details.cached_tokens.unwrap_or(0) as usize;
+            }
+            tu
         });
 
         Ok(ChatCompletionResponse {
@@ -326,8 +333,18 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
         if data == "[DONE]" {
             continue;
         }
-        match serde_json::from_str::<ChatCompletionChunk>(data) {
-            Ok(chunk) => {
+        // 先解析原始 JSON：既能反序列化 chunk，又能从 usage 原始字段提取缓存命中
+        // （DeepSeek prompt_cache_hit_tokens 等不进 async-openai 类型，须在此补充）。
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            tracing::debug!(line = %data, "跳过非 JSON 流式数据行");
+            continue;
+        };
+        match serde_json::from_value::<ChatCompletionChunk>(value.clone()) {
+            Ok(mut chunk) => {
+                if let (Some(usage_value), Some(usage)) = (value.get("usage"), chunk.usage.as_mut())
+                {
+                    extract_cache_tokens(usage_value, usage);
+                }
                 if tx.send(Ok(chunk)).await.is_err() {
                     return;
                 }
@@ -335,38 +352,52 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
             Err(_) => {
                 // 结构化分流：先识别 usage-only / cost 块（正常流尾，静默跳过），
                 // 再识别错误对象（上报），其余按 debug 记录（不刷屏）。
-                match serde_json::from_str::<Value>(data) {
-                    Ok(value) => {
-                        if value.get("error").is_some() {
-                            let _ = tx
-                                .send(Err(TianyanError::Custom(format!(
-                                    "模型服务错误：提供商返回错误：{}",
-                                    value
-                                ))))
-                                .await;
-                            return;
-                        }
-                        // usage-only / cost 块：choices 为空（或缺失）且无 delta 内容
-                        let choices_empty = value
-                            .get("choices")
-                            .and_then(|c| c.as_array())
-                            .map(|c| c.is_empty())
-                            .unwrap_or(true);
-                        let has_usage = value.get("usage").is_some() || value.get("cost").is_some();
-                        if choices_empty && has_usage {
-                            tracing::debug!(line = %data, "流式 usage-only 块（正常流尾）");
-                            continue;
-                        }
-                        tracing::debug!(line = %data, "跳过无法解析的流式数据行");
-                        continue;
-                    }
-                    Err(_) => {
-                        tracing::debug!(line = %data, "跳过非 JSON 流式数据行");
-                        continue;
-                    }
+                if value.get("error").is_some() {
+                    let _ = tx
+                        .send(Err(TianyanError::Custom(format!(
+                            "模型服务错误：提供商返回错误：{}",
+                            value
+                        ))))
+                        .await;
+                    return;
                 }
+                // usage-only / cost 块：choices 为空（或缺失）且无 delta 内容
+                let choices_empty = value
+                    .get("choices")
+                    .and_then(|c| c.as_array())
+                    .map(|c| c.is_empty())
+                    .unwrap_or(true);
+                let has_usage = value.get("usage").is_some() || value.get("cost").is_some();
+                if choices_empty && has_usage {
+                    tracing::debug!(line = %data, "流式 usage-only 块（正常流尾）");
+                    continue;
+                }
+                tracing::debug!(line = %data, "跳过无法解析的流式数据行");
+                continue;
             }
         }
+    }
+}
+
+/// 从提供商原始 usage JSON 提取缓存命中 token 数（各提供商标识不同）：
+/// - DeepSeek：顶层 `prompt_cache_hit_tokens`
+/// - DashScope（阿里云百炼 OpenAI 兼容）：顶层 `input_cache_hit_tokens`
+/// - OpenAI 标准：`prompt_tokens_details.cached_tokens`
+///
+/// 命中任一即填充 `cache_read`；`cache_write` 提供商一般不下发，保持 0。
+fn extract_cache_tokens(usage_value: &Value, usage: &mut TokenUsage) {
+    let hit = usage_value
+        .get("prompt_cache_hit_tokens")
+        .or_else(|| usage_value.get("input_cache_hit_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage_value
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(Value::as_u64)
+        });
+    if let Some(hit) = hit {
+        usage.cache_read = hit as usize;
     }
 }
 

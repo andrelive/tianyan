@@ -112,9 +112,10 @@ impl ContextPipeline {
         &self,
         query: &str,
         conversation: &mut Vec<Message>,
+        recent_input_tokens: usize,
     ) -> Result<(InjectableContext, Option<String>)> {
         let injectable = self.load_injectable(query).await?;
-        let summary = self.compress_if_needed(conversation, 0).await?;
+        let summary = self.compress_if_needed(conversation, recent_input_tokens).await?;
         Ok((injectable, summary))
     }
 
@@ -125,7 +126,9 @@ impl ContextPipeline {
         recent_input_tokens: usize,
     ) -> Result<Option<String>> {
         let mut compressor = self.compressor.lock().await;
-        if !compressor.should_compress(recent_input_tokens) {}
+        if !compressor.should_compress(recent_input_tokens) {
+            return Ok(None);
+        }
 
         let result = compressor.compress(conversation).await?;
         let summary = if result.summary.is_empty() {
@@ -354,7 +357,7 @@ mod tests {
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![];
 
-        let (ctx, _summary) = pipeline.run("test", &mut conversation).await.unwrap();
+        let (ctx, _summary) = pipeline.run("test", &mut conversation, 0).await.unwrap();
 
         assert_eq!(ctx.soul, "You are a helpful AI.");
     }
@@ -365,7 +368,7 @@ mod tests {
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![];
 
-        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+        let (ctx, _) = pipeline.run("test", &mut conversation, 0).await.unwrap();
         assert!(ctx.soul.is_empty());
     }
 
@@ -385,7 +388,7 @@ mod tests {
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![];
 
-        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+        let (ctx, _) = pipeline.run("test", &mut conversation, 0).await.unwrap();
 
         assert_eq!(ctx.rules_and_experiences, vec!["Always be concise."]);
     }
@@ -401,7 +404,7 @@ mod tests {
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![];
 
-        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+        let (ctx, _) = pipeline.run("test", &mut conversation, 0).await.unwrap();
 
         assert!(ctx.rules_and_experiences.is_empty());
     }
@@ -422,7 +425,7 @@ mod tests {
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![];
 
-        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+        let (ctx, _) = pipeline.run("test", &mut conversation, 0).await.unwrap();
 
         assert_eq!(ctx.rules_and_experiences, vec!["Fallback rule content."]);
     }
@@ -441,7 +444,7 @@ mod tests {
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![];
 
-        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+        let (ctx, _) = pipeline.run("test", &mut conversation, 0).await.unwrap();
 
         assert!(ctx.rules_and_experiences.is_empty());
     }
@@ -462,7 +465,7 @@ mod tests {
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![];
 
-        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+        let (ctx, _) = pipeline.run("test", &mut conversation, 0).await.unwrap();
 
         assert_eq!(ctx.memories, vec!["User prefers dark mode."]);
     }
@@ -479,7 +482,7 @@ mod tests {
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![];
 
-        let (ctx, _) = pipeline.run("test", &mut conversation).await.unwrap();
+        let (ctx, _) = pipeline.run("test", &mut conversation, 0).await.unwrap();
 
         assert!(ctx.memories.is_empty());
     }
@@ -497,7 +500,7 @@ mod tests {
         let (pipeline, _) = make_pipeline(vfs);
         let mut conversation = vec![Message::user("hello"), Message::assistant("hi")];
 
-        let (_, summary) = pipeline.run("test", &mut conversation).await.unwrap();
+        let (_, summary) = pipeline.run("test", &mut conversation, 0).await.unwrap();
 
         assert!(
             summary.is_none(),
@@ -532,11 +535,12 @@ mod tests {
             Message::assistant("You're welcome."),
         ];
 
-        let (_, summary) = pipeline.run("test", &mut conversation).await.unwrap();
+        // 真实 usage：窗口 100 × 阈值 0.5 = 触发线 50（60 > 50 应压缩）
+        let (_, summary) = pipeline.run("test", &mut conversation, 60).await.unwrap();
 
         assert!(
             summary.is_some(),
-            "compression should trigger with 6 messages and 100 token window"
+            "compression should trigger with 6 messages and 60 input tokens > 50 threshold"
         );
         assert!(conversation.len() < 6);
     }

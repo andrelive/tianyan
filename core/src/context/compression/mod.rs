@@ -50,10 +50,6 @@ const DEFAULT_COMPRESSION_THRESHOLD: f32 = 0.5;
 const DEFAULT_PRESERVE_RECENT: usize = 10;
 /// 默认最小压缩消息数。
 const DEFAULT_MIN_MESSAGES_TO_COMPRESS: usize = 6;
-/// Hybrid 压缩的消息数分割点。
-const HYBRID_SPLIT_THRESHOLD: usize = 20;
-/// Hybrid 中保留的最近消息数。
-const HYBRID_PRESERVE_RECENT: usize = 10;
 /// 临界阈值（窗口的百分比）。
 const CRITICAL_THRESHOLD_RATIO: f32 = 0.8;
 

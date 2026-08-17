@@ -64,6 +64,8 @@ impl VlmService for AsyncOpenAIClient {
                 prompt_tokens: u.prompt_tokens as usize,
                 completion_tokens: u.completion_tokens as usize,
                 total_tokens: u.total_tokens as usize,
+                cache_read: 0,
+                cache_write: 0,
             },
             None => TokenUsage::default(),
         };

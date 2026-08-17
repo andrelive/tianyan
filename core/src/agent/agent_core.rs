@@ -659,7 +659,13 @@ impl Agent {
                     }
                     TurnMode::Stream { sender } => {
                         sender
-                            .send_complete("", StreamChunkType::Answer, None, finish_reason)
+                            .send_complete(
+                                "",
+                                StreamChunkType::Answer,
+                                None,
+                                finish_reason,
+                                Some(total_tokens.clone()),
+                            )
                             .await;
                         let mut resp = AgentResponse::simple(content);
                         resp.token_usage = total_tokens.clone();
@@ -691,7 +697,7 @@ impl Agent {
                     }
                     TurnMode::Stream { sender } => {
                         sender
-                            .send_complete(&formatted, StreamChunkType::Clarification, None, None)
+                            .send_complete(&formatted, StreamChunkType::Clarification, None, None, None)
                             .await;
                         let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
                         resp.token_usage = total_tokens.clone();
@@ -717,7 +723,7 @@ impl Agent {
                     }
                     TurnMode::Stream { sender } => {
                         sender
-                            .send_complete("任务已取消", StreamChunkType::Answer, None, None)
+                            .send_complete("任务已取消", StreamChunkType::Answer, None, None, None)
                             .await;
                         let mut resp = AgentResponse::simple("任务已取消".to_string());
                         resp.cancelled = true;
@@ -816,6 +822,7 @@ impl Agent {
                     StreamChunkType::Answer,
                     None,
                     Some("stop".to_string()),
+                    None,
                 )
                 .await;
             return;
@@ -1303,15 +1310,16 @@ mod tests {
             rules_and_experiences: vec!["旧规则".to_string()],
             ..Default::default()
         };
-        // 添加 ≥6 条大消息（token 估算超窗口阈值）
+        // 添加 ≥6 条大消息，并携带真实 usage（窗口 2000 × 阈值 1.0 → 触发线 2000）
         let big = "字".repeat(12_000);
         for _ in 0..7 {
-            let sm = ContextAssembler::message_to_structured(
+            let mut sm = ContextAssembler::message_to_structured(
                 &Message::user(big.clone()),
                 "session-1",
                 None,
                 None,
             );
+            sm.tokens.input = 3_000;
             state.write().await.add_structured_message(sm);
         }
 
