@@ -86,7 +86,7 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
         <div
           role="listbox"
           aria-label="思考强度列表"
-          className="absolute right-0 top-full mt-1 w-48 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg shadow-lg z-50 py-1"
+          className="absolute right-0 bottom-full mb-1 w-48 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg shadow-lg z-50 py-1"
         >
           {options.map((opt) => (
             <button

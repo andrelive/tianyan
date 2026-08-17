@@ -89,7 +89,7 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
         <div
           role="listbox"
           aria-label="模型列表"
-          className="absolute right-0 top-full mt-1 w-56 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg shadow-lg z-50 py-1"
+          className="absolute right-0 bottom-full mb-1 w-56 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg shadow-lg z-50 py-1"
         >
           {displayModels.map((model) => (
             <button

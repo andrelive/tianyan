@@ -207,7 +207,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage, onCompre
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder={dragOver ? '松开鼠标添加图片' : '输入消息... (Shift+Enter 换行，可粘贴/拖拽图片)'}
-          rows={1}
+          rows={2}
           disabled={isStreaming}
           aria-label="输入消息"
           className={cn(
@@ -220,11 +220,9 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage, onCompre
           )}
         />
 
-        {/* 底部控件行：左 = 模型 / 思考 / 图片；右 = 圆环 + 发送 */}
+        {/* 底部控件行：左 = 图片；右 = 模型 / 思考 / 上下文圆环 / 发送 */}
         <div className="flex items-center justify-between gap-2 flex-wrap px-2 pb-2 pt-1">
           <div className="flex items-center gap-0.5 min-w-0">
-            <ModelSelector ghost />
-            <ThinkingSelect ghost />
             {!isStreaming && (
               <>
                 <input
@@ -252,6 +250,8 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage, onCompre
           </div>
 
           <div className="flex items-center gap-1.5">
+            <ModelSelector ghost />
+            <ThinkingSelect ghost />
             <ContextRing usage={usage} onCompress={onCompress} />
             {isStreaming ? (
               <button
