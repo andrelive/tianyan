@@ -17,9 +17,6 @@ import { MessageSquare, Loader2, Undo2, Minimize2 } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
-import ModelSelector from './ModelSelector';
-import ThinkingSelect from './ThinkingSelect';
-import UsageMeter from './UsageMeter';
 import type { ChatMessage, ChatStreamEvent, StreamUsage } from '@/lib/types';
 
 export default function ChatPanel() {
@@ -514,8 +511,6 @@ export default function ChatPanel() {
             {compressing ? <Loader2 size={12} className="animate-spin" /> : <Minimize2 size={12} />}
             压缩会话
           </button>
-          <ModelSelector />
-          <ThinkingSelect />
         </div>
       </div>
 
@@ -640,14 +635,12 @@ export default function ChatPanel() {
         </div>
       )}
 
-      {/* 上下文占用 / 缓存命中指示（最近一轮完成 chunk 的 token 用量） */}
-      <UsageMeter usage={lastUsage} />
-
-      {/* Input area */}
+      {/* Input area（模型/思考强度/上下文圆环 + 发送：DSH 布局） */}
       <ChatInput
         onSend={handleSend}
         onStop={handleStop}
         isStreaming={streamStatus === 'streaming'}
+        usage={lastUsage}
       />
     </div>
   );

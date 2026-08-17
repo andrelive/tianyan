@@ -1,11 +1,17 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Send, Square, ImagePlus, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { StreamUsage } from '@/lib/types';
+import ModelSelector from './ModelSelector';
+import ThinkingSelect from './ThinkingSelect';
+import ContextRing from './ContextRing';
 
 interface Props {
   onSend: (content: string, images: string[]) => void;
   onStop: () => void;
   isStreaming: boolean;
+  /** 当前会话上下文占用（近一轮完成的 token 用量；切会话随之更新） */
+  usage: StreamUsage | null;
 }
 
 /** 单张图片大小上限（4MB，data URL base64 膨胀约 1.33 倍后约 5.3MB 文本） */
@@ -27,7 +33,7 @@ function fileToDataUrl(file: File): Promise<string | null> {
   });
 }
 
-export default function ChatInput({ onSend, onStop, isStreaming }: Props) {
+export default function ChatInput({ onSend, onStop, isStreaming, usage }: Props) {
   const [input, setInput] = useState('');
   const [images, setImages] = useState<string[]>([]);
   const [rejected, setRejected] = useState<string | null>(null);
@@ -69,13 +75,13 @@ export default function ChatInput({ onSend, onStop, isStreaming }: Props) {
       }
     }
     if (tooLarge.length > 0) {
-      setRejected(`图片过大（超过 4MB）：${tooLarge.join('、')}`);
+      setRejected('图片过大（超过 4MB）：' + tooLarge.join('、'));
     }
 
     setImages((prev) => {
       const room = MAX_IMAGES - prev.length;
       if (urls.length > room) {
-        setRejected(`最多上传 ${MAX_IMAGES} 张图片`);
+        setRejected('最多上传 ' + MAX_IMAGES + ' 张图片');
       }
       return [...prev, ...urls.slice(0, Math.max(room, 0))];
     });
@@ -146,11 +152,11 @@ export default function ChatInput({ onSend, onStop, isStreaming }: Props) {
   }, []);
 
   return (
-    <div className="border-t border-[var(--color-border)] p-4 bg-[var(--color-bg-primary)]">
+    <div className="border-t border-[var(--color-border)] bg-[var(--color-bg-primary)]">
       <div
         className={cn(
-          'max-w-4xl mx-auto transition-colors rounded-xl',
-          dragOver && 'ring-2 ring-blue-500/50 bg-blue-500/5',
+          'relative mx-auto max-w-4xl px-4 pt-3 pb-2 transition-colors',
+          dragOver && 'rounded-xl ring-2 ring-blue-500/50 bg-blue-500/5',
         )}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
@@ -161,10 +167,10 @@ export default function ChatInput({ onSend, onStop, isStreaming }: Props) {
         {images.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2">
             {images.map((src, i) => (
-              <div key={`${src.slice(0, 32)}-${i}`} className="relative group">
+              <div key={src.slice(0, 32) + '-' + i} className="relative group">
                 <img
                   src={src}
-                  alt={`待发送图片 ${i + 1}`}
+                  alt={'待发送图片 ' + (i + 1)}
                   className="w-16 h-16 rounded-lg object-cover border border-[var(--color-border)]"
                 />
                 <button
@@ -178,7 +184,7 @@ export default function ChatInput({ onSend, onStop, isStreaming }: Props) {
             ))}
             {dragOver && (
               <div className="w-16 h-16 rounded-lg border-2 border-dashed border-blue-500/50 flex items-center justify-center text-xs text-blue-500">
-                松开放入
+                松放放入
               </div>
             )}
           </div>
@@ -190,82 +196,86 @@ export default function ChatInput({ onSend, onStop, isStreaming }: Props) {
           </p>
         )}
 
-        <div className="flex items-end gap-3">
-          <div className="relative flex-1">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={
-                dragOver ? '松开鼠标添加图片' : '输入消息... (Shift+Enter 换行，可粘贴/拖拽图片)'
-              }
-              rows={1}
-              disabled={isStreaming}
-              aria-label="输入消息"
-              className={cn(
-                'w-full resize-none rounded-xl border border-[var(--color-border)]',
-                'bg-[var(--color-bg-secondary)] px-4 py-3',
-                'text-sm text-[var(--color-text-primary)]',
-                'placeholder:text-[var(--color-text-tertiary)]',
-                'focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500',
-                'disabled:opacity-50 disabled:cursor-not-allowed',
-                'transition-colors',
-              )}
-            />
+        <textarea
+          ref={textareaRef}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          placeholder={dragOver ? '松开鼠标添加图片' : '输入消息... (Shift+Enter 换行，可粘贴/拖拽图片)'}
+          rows={1}
+          disabled={isStreaming}
+          aria-label="输入消息"
+          className={cn(
+            'w-full resize-none rounded-xl border border-[var(--color-border)]',
+            'bg-[var(--color-bg-secondary)] px-4 py-3',
+            'text-sm text-[var(--color-text-primary)]',
+            'placeholder:text-[var(--color-text-tertiary)]',
+            'focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500',
+            'disabled:opacity-50 disabled:cursor-not-allowed',
+            'transition-colors',
+          )}
+        />
+
+        {/* 底部控件行：左 = 模型 / 思考强度 / 图片；右 = 上下文圆环 + 发送（DSH 布局） */}
+        <div className="mt-2 flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <ModelSelector />
+            <ThinkingSelect />
+            {!isStreaming && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    if (e.target.files?.length) void addImages(e.target.files);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={images.length >= MAX_IMAGES}
+                  className="p-2 rounded-lg text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  aria-label="添加图片"
+                  title="添加图片（最多 4 张，单张 4MB）"
+                >
+                  <ImagePlus className="w-4 h-4" />
+                </button>
+              </>
+            )}
           </div>
 
-          {!isStreaming && (
-            <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files?.length) void addImages(e.target.files);
-                  e.target.value = '';
-                }}
-              />
+          <div className="flex items-center gap-1.5">
+            <ContextRing usage={usage} />
+            {isStreaming ? (
               <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={images.length >= MAX_IMAGES}
-                className="p-3 rounded-xl text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
-                aria-label="添加图片"
-                title="添加图片（最多 4 张，单张 4MB）"
+                onClick={onStop}
+                className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-sm font-medium transition-colors"
+                aria-label="停止生成"
               >
-                <ImagePlus className="w-4 h-4" />
+                <Square className="w-4 h-4 fill-current" />
+                停止
               </button>
-            </>
-          )}
-
-          {isStreaming ? (
-            <button
-              onClick={onStop}
-              className="flex items-center gap-2 px-4 py-3 rounded-xl bg-red-500 hover:bg-red-600 text-white text-sm font-medium transition-colors shrink-0"
-              aria-label="停止生成"
-            >
-              <Square className="w-4 h-4 fill-current" />
-              停止
-            </button>
-          ) : (
-            <button
-              onClick={handleSend}
-              disabled={!canSend}
-              aria-label="发送消息"
-              className={cn(
-                'flex items-center gap-2 px-4 py-3 rounded-xl text-white text-sm font-medium transition-colors shrink-0',
-                canSend
-                  ? 'bg-blue-500 hover:bg-blue-600'
-                  : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-tertiary)] cursor-not-allowed',
-              )}
-            >
-              <Send className="w-4 h-4" />
-              发送
-            </button>
-          )}
+            ) : (
+              <button
+                onClick={handleSend}
+                disabled={!canSend}
+                aria-label="发送消息"
+                className={cn(
+                  'flex items-center gap-2 px-3.5 py-2 rounded-xl text-white text-sm font-medium transition-colors',
+                  canSend
+                    ? 'bg-blue-500 hover:bg-blue-600'
+                    : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-tertiary)] cursor-not-allowed',
+                )}
+              >
+                <Send className="w-4 h-4" />
+                发送
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
