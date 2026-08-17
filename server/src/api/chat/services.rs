@@ -327,12 +327,21 @@ fn to_chat_response(session_id: &str, response: tianyan::agent::AgentResponse) -
             tool_calls: None,
             images: None,
             truncated_by_length: false,
+            usage: Some(TokenUsage {
+                prompt_tokens: response.token_usage.prompt_tokens as u32,
+                completion_tokens: response.token_usage.completion_tokens as u32,
+                total_tokens: response.token_usage.total_tokens as u32,
+                cache_read: response.token_usage.cache_read as u32,
+                cache_write: response.token_usage.cache_write as u32,
+            }),
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
         },
         usage: TokenUsage {
             prompt_tokens: response.token_usage.prompt_tokens as u32,
             completion_tokens: response.token_usage.completion_tokens as u32,
             total_tokens: response.token_usage.total_tokens as u32,
+            cache_read: response.token_usage.cache_read as u32,
+            cache_write: response.token_usage.cache_write as u32,
         },
     }
 }

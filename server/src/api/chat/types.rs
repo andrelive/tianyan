@@ -103,6 +103,7 @@ impl ChatResponse {
                 tool_calls: None,
                 images: None,
                 truncated_by_length: false,
+                usage: None,
                 timestamp: Some(chrono::Utc::now().to_rfc3339()),
             },
             usage: TokenUsage::empty(),
@@ -226,12 +227,15 @@ mod tests {
                 tool_calls: None,
                 images: None,
                 truncated_by_length: false,
+                usage: None,
                 timestamp: Some("2026-02-20T10:00:00Z".to_string()),
             },
             usage: TokenUsage {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                cache_read: 0,
+                cache_write: 0,
             },
         };
         let json = serde_json::to_string(&response).unwrap();

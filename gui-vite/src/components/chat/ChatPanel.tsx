@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useState } from 'react';
+import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
 import {
@@ -48,8 +48,33 @@ export default function ChatPanel() {
     ApprovalStatusSnapshot['pending_approvals'][number] | null
   >(null);
   const [approvalBusy, setApprovalBusy] = useState(false);
-  /** 最近一轮完成 chunk 的 token 用量（上下文占用 / 缓存命中展示）。 */
-  const [lastUsage, setLastUsage] = useState<StreamUsage | null>(null);
+  const selectedModel = useAppStore((s) => s.selectedModel);
+  const chatModels = useAppStore((s) => s.chatModels);
+  /** 最近一次流式完成 chunk 携带的真实窗口（会话流式时的权威值；
+      历史会话回退到 chatModels[selectedModel].context_length）。 */
+  const liveWindowRef = useRef(0);
+
+  /** 当前会话自己的上下文占用：取本会话最后一条带 usage 的消息（消息级独立计算，
+      切换会话随 messages 变化——每个会话显示各自的占用，不再串值）。 */
+  const lastUsage = useMemo<StreamUsage | null>(() => {
+    const modelWindow =
+      chatModels.find((m) => m.name === selectedModel)?.context_length ??
+      liveWindowRef.current;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const u = messages[i].usage;
+      if (u && u.prompt_tokens > 0) {
+        return {
+          prompt_tokens: u.prompt_tokens,
+          completion_tokens: u.completion_tokens,
+          total_tokens: u.total_tokens,
+          cache_read: u.cache_read ?? 0,
+          cache_write: u.cache_write ?? 0,
+          context_window: modelWindow || 0,
+        };
+      }
+    }
+    return null;
+  }, [messages, chatModels, selectedModel]);
 
   // Sync URL sessionId to store on mount / navigation
   useEffect(() => {
@@ -228,9 +253,15 @@ export default function ChatPanel() {
       if (event.tool_call) {
         useAppStore.getState().appendToolCalls([event.tool_call]);
       }
-      // 完成 chunk 携带 token 用量 → 更新上下文占用 / 缓存命中指示
+      // 完成 chunk 携带 token 用量 → 附加到当前 assistant 消息（前端按会话取数，
+      // 切换会话显示各自占用）；同时记录本次流式的真实窗口
       if (event.usage) {
-        setLastUsage(event.usage);
+        liveWindowRef.current = event.usage.context_window;
+        const { prompt_tokens, completion_tokens, total_tokens, cache_read, cache_write } =
+          event.usage;
+        useAppStore
+          .getState()
+          .attachLastMessageUsage({ prompt_tokens, completion_tokens, total_tokens, cache_read, cache_write });
       }
       // 输出达到 token 上限（finish_reason === 'length'）：标记消息为截断，
       // 在助手消息下方渲染提示；'stop'/'tool_calls' 等不处理

@@ -23,6 +23,8 @@ export interface ChatMessage {
   chunk_type?: StreamChunkType;
   /** 流结束事件 finish_reason === 'length'：输出达到 token 上限被截断（前端本地标记） */
   truncated_by_length?: boolean;
+  /** 本条消息的 token 用量（历史加载/完成 chunk 携带；前端按会话独立计算上下文占用） */
+  usage?: TokenUsage | null;
 }
 
 export interface ChatRequest {
@@ -723,6 +725,10 @@ export interface ModelInfo {
   capabilities: string[];
   /** 该模型支持的思考强度档位值（每个模型自己声明的；缺省/空 = 不支持思考） */
   reasoning_efforts?: string[] | null;
+  /** 上下文窗口长度（token；配置了该字段时下发，前端计算上下文占用百分比） */
+  context_length?: number;
+  /** 单次最大输出 token 数（配置了该字段时下发） */
+  max_output_tokens?: number;
 }
 
 export interface ModelsResponse {

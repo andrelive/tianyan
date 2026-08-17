@@ -103,6 +103,8 @@ impl ConfigService {
                         provider: p.name.clone(),
                         capabilities: m.capabilities.clone(),
                         reasoning_efforts: m.reasoning_efforts.clone(),
+                        context_length: m.context_length,
+                        max_output_tokens: m.max_output_tokens,
                     }
                 })
             })

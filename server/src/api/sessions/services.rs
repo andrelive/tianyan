@@ -11,7 +11,7 @@ use crate::api::sessions::types::{
     SessionDetail, SessionMessagesResponse, SessionMetadata, UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
-use crate::api::shared::types::{ChatMessage, ToolCallWithResult};
+use crate::api::shared::types::{ChatMessage, TokenUsage, ToolCallWithResult};
 use tianyan::common::types::{MessageRole, StructuredMessage};
 use tianyan::snapshot::SnapshotManager;
 
@@ -185,6 +185,15 @@ impl SessionService {
                 {
                     return None;
                 }
+                // 历史消息携带持久化 usage（DetailedTokenUsage → API TokenUsage）：
+                // 前端按会话独立计算上下文占用 / 缓存命中，避免跨会话串值。
+                let usage = (m.tokens.total > 0 || m.tokens.input > 0).then(|| TokenUsage {
+                    prompt_tokens: m.tokens.input as u32,
+                    completion_tokens: m.tokens.output as u32,
+                    total_tokens: m.tokens.total as u32,
+                    cache_read: m.tokens.cache.read as u32,
+                    cache_write: m.tokens.cache.write as u32,
+                });
                 Some(ChatMessage {
                     // Tool 角色在 API 层映射为 Assistant（与旧 core_bridge 转换一致），
                     // 工具结果已合并进 tool_calls.result，前端不消费 tool 角色。
@@ -211,6 +220,7 @@ impl SessionService {
                     // finish=length（token 上限或流式中断）：历史加载与流式
                     // 渲染一致地显示截断提示。
                     truncated_by_length: m.finish.as_deref() == Some("length"),
+                    usage,
                     timestamp: None,
                 })
             })

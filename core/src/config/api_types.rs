@@ -33,6 +33,12 @@ pub struct ModelInfo {
     /// None = 不支持思考）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_efforts: Option<Vec<String>>,
+    /// 上下文窗口长度（token）。配置了该字段时下发，供前端计算上下文占用百分比。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<usize>,
+    /// 单次最大输出 token 数（配置了该字段时下发）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
 }
 
 /// 模型服务列表响应。

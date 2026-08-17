@@ -38,6 +38,10 @@ pub struct ChatMessage {
     /// 流式事件经 finish_reason 标记；历史消息由 StructuredMessage.finish 映射。
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub truncated_by_length: bool,
+    /// 本条消息的 token 用量（历史消息由持久化 usage 映射；前端按会话独立
+    /// 计算上下文占用 / 缓存命中）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub usage: Option<TokenUsage>,
     /// 可选的时间戳（RFC3339 格式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
@@ -74,6 +78,7 @@ impl ChatMessage {
             tool_calls: None,
             images: None,
             truncated_by_length: false,
+            usage: None,
             timestamp: None,
         }
     }
@@ -93,6 +98,7 @@ impl ChatMessage {
             tool_calls: None,
             images: None,
             truncated_by_length: false,
+            usage: None,
             timestamp: None,
         }
     }
@@ -112,6 +118,7 @@ impl ChatMessage {
             tool_calls: None,
             images: None,
             truncated_by_length: false,
+            usage: None,
             timestamp: None,
         }
     }
@@ -128,6 +135,12 @@ pub struct TokenUsage {
     pub completion_tokens: u32,
     /// 总 token 数量
     pub total_tokens: u32,
+    /// 缓存命中（读取）token 数（提供商返回缓存明细时才有意义，否则为 0）。
+    #[serde(default)]
+    pub cache_read: u32,
+    /// 缓存写入 token 数（提供商一般不下发，保持 0）。
+    #[serde(default)]
+    pub cache_write: u32,
 }
 
 impl TokenUsage {
@@ -140,6 +153,8 @@ impl TokenUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
+            cache_read: 0,
+            cache_write: 0,
         }
     }
 
@@ -157,6 +172,8 @@ impl TokenUsage {
             prompt_tokens,
             completion_tokens,
             total_tokens,
+            cache_read: 0,
+            cache_write: 0,
         }
     }
 }

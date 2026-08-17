@@ -12,6 +12,7 @@ import type {
   Skill,
   SkillCallInfo,
   ToastMessage,
+  TokenUsage,
   ToolCallEvent,
 } from './types';
 
@@ -45,6 +46,8 @@ interface AppState {
   startNewAssistantTurn: () => void;
   /** 标记最后一条 assistant 消息为截断（finish_reason === 'length'） */
   markLastMessageTruncated: () => void;
+  /** 附加 token 用量到当前 assistant 消息（完成 chunk 携带；前端按会话取数） */
+  attachLastMessageUsage: (usage: TokenUsage) => void;
   clearMessages: () => void;
   deleteMessagesFrom: (index: number) => void;
 
@@ -231,6 +234,21 @@ export const useAppStore = create<AppState>()(
           }
           if (lastIdx >= 0) {
             messages[lastIdx] = { ...messages[lastIdx], truncated_by_length: true };
+          }
+          return { messages };
+        }),
+      attachLastMessageUsage: (usage) =>
+        set((s) => {
+          const messages = [...s.messages];
+          let lastIdx = messages.length - 1;
+          while (lastIdx >= 0 && messages[lastIdx].role !== 'assistant') {
+            lastIdx--;
+          }
+          if (lastIdx >= 0) {
+            messages[lastIdx] = {
+              ...messages[lastIdx],
+              usage: { ...messages[lastIdx].usage, ...usage },
+            };
           }
           return { messages };
         }),
