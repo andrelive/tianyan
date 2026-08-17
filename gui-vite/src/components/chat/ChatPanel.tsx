@@ -13,7 +13,7 @@ import {
 import { ShieldAlert, Check, X } from 'lucide-react';
 import type { ApprovalDecision, ApprovalStatusSnapshot } from '@/lib/types';
 import { useChatStream } from '@/hooks/useChatStream';
-import { MessageSquare, Loader2, Undo2, Minimize2 } from 'lucide-react';
+import { MessageSquare, Loader2, Undo2 } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
@@ -500,18 +500,7 @@ export default function ChatPanel() {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] shrink-0">
         <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">会话</h1>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => void handleCompress()}
-            disabled={!currentSessionId || streamStatus === 'streaming' || compressing}
-            title="压缩会话（手动压缩当前会话上下文）"
-            aria-label="压缩会话"
-            className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            {compressing ? <Loader2 size={12} className="animate-spin" /> : <Minimize2 size={12} />}
-            压缩会话
-          </button>
-        </div>
+        <div className="flex items-center gap-2" />
       </div>
 
       {/* Messages area */}
@@ -641,6 +630,7 @@ export default function ChatPanel() {
         onStop={handleStop}
         isStreaming={streamStatus === 'streaming'}
         usage={lastUsage}
+        onCompress={() => void handleCompress()}
       />
     </div>
   );

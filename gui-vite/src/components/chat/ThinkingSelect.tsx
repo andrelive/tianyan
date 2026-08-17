@@ -11,7 +11,8 @@ const OFF_EFFORT = 'off';
  * 返回 reasoning_efforts，显式配置 > 内置模型表），**原样展示不做本地翻译**
  * （厂商档位可能为 low/high/max 等任意值）；模型不支持思考时隐藏。
  */
-export default function ThinkingSelect() {
+/** ghost：一体式输入卡片内的无边框变体。 */
+export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
   const thinkingEffort = useAppStore((s) => s.thinkingEffort);
   const setThinkingEffort = useAppStore((s) => s.setThinkingEffort);
   const selectedModel = useAppStore((s) => s.selectedModel);
@@ -68,10 +69,12 @@ export default function ThinkingSelect() {
         aria-haspopup="listbox"
         title={'思考强度：' + current + '（当前模型声明的档位）'}
         className={cn(
-          'flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition-colors',
+          'flex items-center gap-1.5 px-2.5 py-1.5 text-sm rounded-lg transition-colors',
           active
-            ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
-            : 'border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]',
+            ? 'bg-blue-500/10 text-blue-600 dark:text-blue-300'
+            : ghost
+              ? 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
+              : 'border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]',
         )}
       >
         <Brain size={14} className={cn(active ? '' : 'opacity-60')} />

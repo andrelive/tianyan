@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { Minimize2 } from 'lucide-react';
 import type { StreamUsage } from '@/lib/types';
 
 /** 圆环半径（viewBox 32×32）。 */
@@ -17,12 +18,18 @@ function fmt(n: number): string {
 }
 
 /**
- * 上下文占用圆环（DSH ContextMeter 风格）：置于提交按钮旁，
- * 环径 = 上下文占用百分比（prompt / 模型窗口），中心数字为百分比；
- * 点击展开详情面板（占用 / 缓存命中 / 输出 token）。
- * 无数据（尚未完成一轮）时显示灰色的占位环。
+ * 上下文占用圆环（DSH ContextMeter 风格）：环径 = 占用百分比，
+ * 中心数字 = 百分比；点击展开详情面板（占用 / 缓存命中 / 输出）
+ * 并提供「压缩会话」快捷操作。
  */
-export default function ContextRing({ usage }: { usage: StreamUsage | null }) {
+export default function ContextRing({
+  usage,
+  onCompress,
+}: {
+  usage: StreamUsage | null;
+  /** 压缩当前会话（由父组件提供，卧交给元组件） */
+  onCompress: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -63,7 +70,7 @@ export default function ContextRing({ usage }: { usage: StreamUsage | null }) {
         onClick={() => setOpen(!open)}
         aria-label="上下文占用"
         aria-expanded={open}
-        title="上下文占用（点击查看详情）"
+        title="上下文占用（点击查看详情 / 压缩）"
         className="block p-1 rounded-lg hover:bg-[var(--color-bg-hover)] transition-colors"
       >
         <svg viewBox="0 0 32 32" className="w-8 h-8 -rotate-90">
@@ -113,15 +120,23 @@ export default function ContextRing({ usage }: { usage: StreamUsage | null }) {
                 : '0（提供商未返回明细）'}
             </span>
           </div>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between mb-2">
             <span className="text-[var(--color-text-tertiary)]">输出</span>
             <span className="font-mono text-[var(--color-text-primary)]">
               {fmt(usage.completion_tokens)} token
             </span>
           </div>
-          <p className="mt-2 text-[10px] leading-snug text-[var(--color-text-tertiary)]">
-            占用 = 本轮请求 prompt token（含缓存命中）；缓存命中仅在提供商返回明细时有效。
-          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false);
+              onCompress();
+            }}
+            className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors"
+          >
+            <Minimize2 className="w-3.5 h-3.5" />
+            压缩会话（当前占用 {Math.round(pct)}%）
+          </button>
         </div>
       )}
     </div>

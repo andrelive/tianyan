@@ -2,9 +2,11 @@ import { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '@/lib/store';
 import { ChevronDown, Loader2 } from 'lucide-react';
 import { apiGet, switchModel } from '@/lib/api-client';
+import { cn } from '@/lib/utils';
 import type { ModelsResponse } from '@/lib/types';
 
-export default function ModelSelector() {
+/** ghost：一体式输入卡片内的无边框变体（外框由父组件统一提供）。 */
+export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
   const selectedModel = useAppStore((s) => s.selectedModel);
   const setModel = useAppStore((s) => s.setModel);
   const [open, setOpen] = useState(false);
@@ -72,7 +74,12 @@ export default function ModelSelector() {
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-label="选择模型"
-        className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] transition-colors disabled:opacity-50"
+        className={cn(
+          'flex items-center gap-2 px-2.5 py-1.5 text-sm rounded-lg transition-colors disabled:opacity-50',
+          ghost
+            ? 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]'
+            : 'border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]',
+        )}
       >
         {loading ? <Loader2 size={14} className="animate-spin" /> : <span>{currentModel}</span>}
         <ChevronDown className="w-4 h-4 text-[var(--color-text-tertiary)]" />

@@ -12,6 +12,8 @@ interface Props {
   isStreaming: boolean;
   /** 当前会话上下文占用（近一轮完成的 token 用量；切会话随之更新） */
   usage: StreamUsage | null;
+  /** 压缩当前会话（圆环详情面板内的快捷操作） */
+  onCompress: () => void;
 }
 
 /** 单张图片大小上限（4MB，data URL base64 膨胀约 1.33 倍后约 5.3MB 文本） */
@@ -33,7 +35,7 @@ function fileToDataUrl(file: File): Promise<string | null> {
   });
 }
 
-export default function ChatInput({ onSend, onStop, isStreaming, usage }: Props) {
+export default function ChatInput({ onSend, onStop, isStreaming, usage, onCompress }: Props) {
   const [input, setInput] = useState('');
   const [images, setImages] = useState<string[]>([]);
   const [rejected, setRejected] = useState<string | null>(null);
@@ -151,12 +153,14 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage }: Props)
     setImages((prev) => prev.filter((_, i) => i !== idx));
   }, []);
 
+  // 一体式输入卡片（DSH 布局）：字段、模型、思考、图片、圆环、发送都在同一个圆角矩形外框内，
+  // 各组件不再独立戴框。
   return (
-    <div className="border-t border-[var(--color-border)] bg-[var(--color-bg-primary)]">
+    <div className="border-t border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 pt-3 pb-3">
       <div
         className={cn(
-          'relative mx-auto max-w-4xl px-4 pt-3 pb-2 transition-colors',
-          dragOver && 'rounded-xl ring-2 ring-blue-500/50 bg-blue-500/5',
+          'mx-auto max-w-4xl rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-secondary)] transition-colors',
+          dragOver && 'ring-2 ring-blue-500/40 bg-blue-500/5',
         )}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
@@ -165,7 +169,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage }: Props)
       >
         {/* 图片预览 */}
         {images.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-2">
+          <div className="flex flex-wrap gap-2 px-3 pt-3 pb-1">
             {images.map((src, i) => (
               <div key={src.slice(0, 32) + '-' + i} className="relative group">
                 <img
@@ -191,7 +195,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage }: Props)
         )}
 
         {rejected && (
-          <p className="text-xs text-red-500 mb-2" role="alert">
+          <p className="text-xs text-red-500 px-3 pt-2" role="alert">
             {rejected}
           </p>
         )}
@@ -207,21 +211,20 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage }: Props)
           disabled={isStreaming}
           aria-label="输入消息"
           className={cn(
-            'w-full resize-none rounded-xl border border-[var(--color-border)]',
-            'bg-[var(--color-bg-secondary)] px-4 py-3',
+            'w-full resize-none bg-transparent px-3.5 pt-3 pb-1',
             'text-sm text-[var(--color-text-primary)]',
             'placeholder:text-[var(--color-text-tertiary)]',
-            'focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500',
+            'focus:outline-none',
             'disabled:opacity-50 disabled:cursor-not-allowed',
             'transition-colors',
           )}
         />
 
-        {/* 底部控件行：左 = 模型 / 思考强度 / 图片；右 = 上下文圆环 + 发送（DSH 布局） */}
-        <div className="mt-2 flex items-center justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <ModelSelector />
-            <ThinkingSelect />
+        {/* 底部控件行：左 = 模型 / 思考 / 图片；右 = 圆环 + 发送 */}
+        <div className="flex items-center justify-between gap-2 flex-wrap px-2 pb-2 pt-1">
+          <div className="flex items-center gap-0.5 min-w-0">
+            <ModelSelector ghost />
+            <ThinkingSelect ghost />
             {!isStreaming && (
               <>
                 <input
@@ -249,7 +252,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage }: Props)
           </div>
 
           <div className="flex items-center gap-1.5">
-            <ContextRing usage={usage} />
+            <ContextRing usage={usage} onCompress={onCompress} />
             {isStreaming ? (
               <button
                 onClick={onStop}
