@@ -604,7 +604,7 @@ mod tests {
             .compressor()
             .lock()
             .await
-            .get_status(&[]);
+            .get_status(0);
         assert_eq!(
             status.context_window, spec.context_length,
             "压缩器 context_window 应与 spec.context_length 联动"
@@ -622,7 +622,7 @@ mod tests {
             .compressor()
             .lock()
             .await
-            .get_status(&[]);
+            .get_status(0);
         assert_eq!(status.context_window, 128_000);
     }
 }

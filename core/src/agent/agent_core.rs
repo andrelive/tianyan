@@ -493,9 +493,19 @@ impl Agent {
             .flat_map(ContextAssembler::structured_to_messages)
             .collect();
 
+        // 真实上下文占用：最近一次请求的 prompt 侧 token（input + cache.read）。
+        // 从消息持久化的 usage 聚合——最后一条带 usage 的 assistant 消息即
+        // 最近一次请求的完整输入统计。
+        let recent_input_tokens = messages_since_marker
+            .iter()
+            .rev()
+            .find(|m| m.tokens.input > 0 || m.tokens.cache.read > 0)
+            .map(|m| m.tokens.input + m.tokens.cache.read)
+            .unwrap_or(0);
+
         let Some(summary_sm) = self
             .context_pipeline
-            .compress_for_session(&conversation, session_id)
+            .compress_for_session(&conversation, session_id, recent_input_tokens)
             .await
         else {
             return false;

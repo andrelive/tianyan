@@ -85,7 +85,7 @@ impl Default for CompressionConfig {
             preserve_recent_messages: DEFAULT_PRESERVE_RECENT,
             summary_model: String::new(),
             min_messages_to_compress: DEFAULT_MIN_MESSAGES_TO_COMPRESS,
-            max_summary_tokens: 500,
+            max_summary_tokens: 4000,
         }
     }
 }
@@ -120,22 +120,21 @@ impl CompressionResult {
 ///
 /// 要求输出固定四字段结构（意图/已执行步骤/当前状态/下一步），
 /// 保证 resume 时 LLM 能恢复"任务指针"而不只是事实摘要。
-const DEFAULT_SUMMARY_PROMPT: &str = r##"请将以下对话历史压缩为结构化摘要。要求：
+const DEFAULT_SUMMARY_PROMPT: &str = r##"请将以下对话历史压缩为分级摘要。要求：
 
-1. 保留所有重要的事实、决策和结论
-2. 保留用户明确表达的需求和偏好
-3. 保留已完成的任务和取得的结果
-4. 保留遇到的错误和解决方案
-5. 删除重复信息和闲聊内容
-6. 使用第三人称客观描述
+1. **用户意图与进度是最高优先级**：完整保留用户的目标、追加/修正的需求、当前进度、已完成与未完成事项
+2. **时间分级**：近期（最后几轮）的关键事件详细记录（工具结果要点、重要输出、决策）；越早期越概略，只保留结论性信息
+3. 保留重要的事实、决策、错误与解决方案
+4. 删除重复信息、思考过程（reasoning）与闲聊
+5. 使用第三人称客观描述
 
-必须严格按以下四个字段输出（每字段都以 ## 开头的标题行分隔，字段内容为简洁要点列表）：
+必须严格按以下四个字段输出（每字段以 ## 开头的标题行分隔，字段内容为简洁要点列表）：
 
 ## 用户意图
 用户最初想达成的目标，以及后续追加或修正的需求（原话要点）
 
 ## 已执行步骤
-已经完成的任务、采取的行动和取得的结果
+已经完成的任务、采取的行动和取得的结果（近期详细，早期概略）
 
 ## 当前状态
 当前进度：已完成部分、进行中的部分、尚未解决的问题
@@ -146,9 +145,7 @@ const DEFAULT_SUMMARY_PROMPT: &str = r##"请将以下对话历史压缩为结构
 对话历史：
 {conversation}
 
-请输出结构化摘要（不超过 500 字）："##;
-
-/// 增量摘要提示词模板。
+请输出结构化摘要（不超过 {max_tokens} 字）："##;
 const INCREMENTAL_SUMMARY_PROMPT: &str = r##"请将以下新对话内容合并到已有摘要中，生成更新后的摘要。
 
 已有摘要：
@@ -193,16 +190,16 @@ impl ContextCompressor {
     }
 
     /// 检查是否需要压缩。
-    pub fn should_compress(&self, messages: &[Message]) -> bool {
-        if messages.len() < self.config.min_messages_to_compress {
-            return false;
-        }
-
-        let estimated_tokens = self.estimator.estimate_messages(messages);
+    ///
+    /// 基于**真实 usage**（provider 返回的最近一次请求 prompt 侧 token 数），
+    /// 而非字符估算：`prompt_tokens` 是本次请求的全部输入（含全部历史），
+    /// 即为当前上下文真实占用。缓存命中部分（cache.read）也算占用（它仍
+    /// 占据窗口）。
+    ///
+    pub fn should_compress(&self, recent_input_tokens: usize) -> bool {
         let threshold =
             (self.config.context_window as f32 * self.config.compression_threshold) as usize;
-
-        estimated_tokens > threshold
+        recent_input_tokens > threshold
     }
 
     /// 压缩消息列表。
@@ -346,49 +343,42 @@ impl ContextCompressor {
 
     /// 混合压缩：先摘要，再保留关键消息。
     async fn compress_hybrid(&mut self, messages: &[Message]) -> Result<(Vec<Message>, String)> {
-        if messages.len() > HYBRID_SPLIT_THRESHOLD {
-            let summary_point = messages.len() - HYBRID_PRESERVE_RECENT;
-            let to_summarize = &messages[..summary_point];
-            let to_preserve = &messages[summary_point..];
+        // 全量摘要：所有消息进一条摘要，不保留原样。
+        // 前缀缓存考量：保留原样会让请求前缀随轮次增长且压缩后缓存失效；
+        // 全量摘要 + 稳定前缀（soul/rules/摘要）跨请求不变，命中率最高。
+        // 用户意图与进度由摘要提示词专门承载（见 DEFAULT_SUMMARY_PROMPT）。
+        let summary = if let Some(ref cached) = self.cached_summary {
+            self.incremental_summarize(cached, messages).await?
+        } else {
+            self.summarize(messages).await?
+        };
 
-            let summary = if let Some(ref cached) = self.cached_summary {
-                self.incremental_summarize(cached, to_summarize).await?
-            } else {
-                self.summarize(to_summarize).await?
-            };
+        self.cached_summary = Some(summary.clone());
+        let summary_message = Message::system(format!(
+            "[对话摘要] 以下是对早期对话的摘要：
+{}
+[摘要结束]",
+            summary
+        ));
 
-            self.cached_summary = Some(summary.clone());
-            let summary_message = Message::system(format!(
-                "[对话摘要] 以下是对早期对话的摘要：\n{}\n[摘要结束]",
-                summary
-            ));
-
-            let mut result = vec![summary_message];
-            result.extend_from_slice(to_preserve);
-
-            return Ok((result, summary));
-        }
-
-        // 消息不多时，使用选择策略
-        self.compress_by_selection(messages).await
+        Ok((vec![summary_message], summary))
     }
 
     /// 获取压缩状态信息。
-    pub fn get_status(&self, messages: &[Message]) -> CompressionStatus {
-        let estimated_tokens = self.estimator.estimate_messages(messages);
+    pub fn get_status(&self, recent_input_tokens: usize) -> CompressionStatus {
         let threshold =
             (self.config.context_window as f32 * self.config.compression_threshold) as usize;
         let critical_threshold =
             (self.config.context_window as f32 * CRITICAL_THRESHOLD_RATIO) as usize;
 
         CompressionStatus {
-            estimated_tokens,
+            estimated_tokens: recent_input_tokens,
             context_window: self.config.context_window,
             threshold,
             critical_threshold,
-            should_compress: estimated_tokens > threshold,
-            is_critical: estimated_tokens > critical_threshold,
-            message_count: messages.len(),
+            should_compress: recent_input_tokens > threshold,
+            is_critical: recent_input_tokens > critical_threshold,
+            message_count: 0,
         }
     }
 }
@@ -535,14 +525,14 @@ mod tests {
     fn test_should_compress_below_min_messages() {
         let compressor = make_compressor(CompressionStrategy::Select);
         let msgs = vec![msg_user("hi"), msg_assistant("hello")];
-        assert!(!compressor.should_compress(&msgs));
+        assert!(!compressor.should_compress(0));
     }
 
     #[test]
     fn test_should_compress_below_threshold() {
         let compressor = make_compressor(CompressionStrategy::Select);
         let msgs = vec![msg_user("a"), msg_assistant("b"), msg_user("c")];
-        assert!(!compressor.should_compress(&msgs));
+        assert!(!compressor.should_compress(0));
     }
 
     #[test]
@@ -554,7 +544,7 @@ mod tests {
             msg_assistant("response text"),
             msg_user("more content"),
         ];
-        assert!(compressor.should_compress(&msgs));
+        assert!(compressor.should_compress(10000));
     }
 
     // ── compress_by_selection ───────────────────────────────────────
@@ -640,12 +630,15 @@ mod tests {
     // ── get_status ──────────────────────────────────────────────────
 
     #[test]
-    fn test_get_status_reflects_messages() {
-        let compressor = make_compressor(CompressionStrategy::Select);
-        let msgs = vec![msg_user("hello world"), msg_assistant("response text")];
-        let status = compressor.get_status(&msgs);
-        assert_eq!(status.message_count, 2);
-        // 2 short messages < 64000 threshold — should not trigger compression
+    fn test_get_status_reflects_real_usage() {
+        // 窗口 100 × 阈值 0.5 → 触发线 50；临界 100 × 0.8 = 80
+        let compressor = make_compressor_with_threshold(CompressionStrategy::Select, 100, 0.5, 3);
+        let status = compressor.get_status(30);
+        assert_eq!(status.estimated_tokens, 30);
         assert!(!status.should_compress);
+        let status = compressor.get_status(60);
+        assert!(status.should_compress);
+        let status = compressor.get_status(90);
+        assert!(status.is_critical);
     }
 }

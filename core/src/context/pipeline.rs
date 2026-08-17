@@ -114,7 +114,7 @@ impl ContextPipeline {
         conversation: &mut Vec<Message>,
     ) -> Result<(InjectableContext, Option<String>)> {
         let injectable = self.load_injectable(query).await?;
-        let summary = self.compress_if_needed(conversation).await?;
+        let summary = self.compress_if_needed(conversation, 0).await?;
         Ok((injectable, summary))
     }
 
@@ -122,11 +122,10 @@ impl ContextPipeline {
     pub async fn compress_if_needed(
         &self,
         conversation: &mut Vec<Message>,
+        recent_input_tokens: usize,
     ) -> Result<Option<String>> {
         let mut compressor = self.compressor.lock().await;
-        if !compressor.should_compress(conversation) {
-            return Ok(None);
-        }
+        if !compressor.should_compress(recent_input_tokens) {}
 
         let result = compressor.compress(conversation).await?;
         let summary = if result.summary.is_empty() {
@@ -152,10 +151,14 @@ impl ContextPipeline {
         &self,
         messages: &[Message],
         session_id: &str,
+        recent_input_tokens: usize,
     ) -> Option<StructuredMessage> {
         let mut conversation = messages.to_vec();
-        // 压缩失败不阻断会话（降级为不压缩），但必须记录日志以便诊断 token 膨胀
-        let summary = match self.compress_if_needed(&mut conversation).await {
+
+        let summary = match self
+            .compress_if_needed(&mut conversation, recent_input_tokens)
+            .await
+        {
             Ok(Some(summary)) => summary,
             Ok(None) => return None,
             Err(e) => {
