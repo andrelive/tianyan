@@ -70,11 +70,9 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
         title={'思考强度：' + current + '（当前模型声明的档位）'}
         className={cn(
           'flex items-center gap-1.5 px-2.5 py-1.5 text-sm rounded-lg transition-colors',
-          active
-            ? 'text-blue-600 dark:text-blue-300 font-medium'
-            : ghost
-              ? 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)]'
-              : 'border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]',
+          ghost
+            ? 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-secondary)]'
+            : 'border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]',
         )}
       >
         <Brain size={14} className={cn(active ? '' : 'opacity-60')} />
