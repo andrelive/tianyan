@@ -40,7 +40,7 @@ export default function UsageMeter({ usage }: { usage: StreamUsage | null }) {
           <span className="ml-1.5">{cachePct}%</span>
         </span>
       </div>
-      <div className="mt-1 h-1 rounded-full bg-[var(--color-border)]/40 overflow-hidden">
+      <div className="mt-1 h-1 rounded-full bg-[var(--color-bg-hover)] overflow-hidden">
         <div
           className="h-full rounded-full bg-[var(--color-accent)] transition-[width] duration-300"
           style={{ width: `${pct}%` }}
