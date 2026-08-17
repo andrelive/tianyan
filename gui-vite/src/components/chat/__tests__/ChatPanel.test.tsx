@@ -323,20 +323,34 @@ describe('ChatPanel', () => {
     expect(screen.queryByText('请确认是否删除该文件？')).not.toBeInTheDocument();
   });
 
-  it('disables the compress button when there is no session', () => {
+  it('shows no compress action in the ring popover without a session', () => {
     renderChatPanel();
 
-    // 默认 store 无会话 → 按钮禁用
-    expect(screen.getByRole('button', { name: '压缩会话' })).toBeDisabled();
+    // 默认 store 无会话且无 usage → 圆环点击后不渲染压缩面板
+    fireEvent.click(screen.getByRole('button', { name: '上下文占用' }));
+    expect(screen.queryByRole('dialog', { name: '上下文占用详情' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /压缩会话/ })).not.toBeInTheDocument();
   });
 
   it('compresses the current session and shows a success toast', async () => {
     const user = userEvent.setup();
-    useAppStore.setState({ currentSessionId: 'session-1' });
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      messages: [
+        {
+          role: 'assistant',
+          content: 'ok',
+          timestamp: new Date().toISOString(),
+          usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
+        },
+      ],
+    });
 
     renderChatPanel();
 
-    await user.click(screen.getByRole('button', { name: '压缩会话' }));
+    // 打开上下文圆环详情 → 点压缩
+    await user.click(screen.getByRole('button', { name: '上下文占用' }));
+    await user.click(screen.getByRole('button', { name: /压缩会话/ }));
 
     // compress API 被调用
     await waitFor(() => {
@@ -352,7 +366,17 @@ describe('ChatPanel', () => {
 
   it('shows 无需压缩 when the backend reports nothing to compress', async () => {
     const user = userEvent.setup();
-    useAppStore.setState({ currentSessionId: 'session-1' });
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      messages: [
+        {
+          role: 'assistant',
+          content: 'ok',
+          timestamp: new Date().toISOString(),
+          usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
+        },
+      ],
+    });
     server.use(
       http.post('/api/v1/sessions/:id/compress', () => {
         return HttpResponse.json({ compressed: false });
@@ -361,7 +385,8 @@ describe('ChatPanel', () => {
 
     renderChatPanel();
 
-    await user.click(screen.getByRole('button', { name: '压缩会话' }));
+    await user.click(screen.getByRole('button', { name: '上下文占用' }));
+    await user.click(screen.getByRole('button', { name: /压缩会话/ }));
 
     await waitFor(() => {
       expect(useAppStore.getState().toast?.message).toBe('无需压缩');
@@ -370,7 +395,17 @@ describe('ChatPanel', () => {
 
   it('shows an error toast when compression fails', async () => {
     const user = userEvent.setup();
-    useAppStore.setState({ currentSessionId: 'session-1' });
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      messages: [
+        {
+          role: 'assistant',
+          content: 'ok',
+          timestamp: new Date().toISOString(),
+          usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
+        },
+      ],
+    });
     server.use(
       http.post('/api/v1/sessions/:id/compress', () => {
         return new HttpResponse(null, { status: 500 });
@@ -379,7 +414,8 @@ describe('ChatPanel', () => {
 
     renderChatPanel();
 
-    await user.click(screen.getByRole('button', { name: '压缩会话' }));
+    await user.click(screen.getByRole('button', { name: '上下文占用' }));
+    await user.click(screen.getByRole('button', { name: /压缩会话/ }));
 
     await waitFor(() => {
       expect(useAppStore.getState().toast?.message).toContain('压缩失败');

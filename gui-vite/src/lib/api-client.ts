@@ -251,8 +251,14 @@ export { getApiBase };
 export async function scanProviderModels(
   endpoint: string,
   protocol: ProviderProtocol = 'openai',
+  /** Provider 名称：命中内置目录时后端零网络直接返回目录模型。 */
+  provider?: string,
 ): Promise<ProviderScanResponse> {
-  return apiPost<ProviderScanResponse>('/config/providers/scan', { endpoint, protocol });
+  return apiPost<ProviderScanResponse>('/config/providers/scan', {
+    endpoint,
+    protocol,
+    ...(provider && provider.trim() ? { provider } : {}),
+  });
 }
 
 // ========== Model switch API ==========

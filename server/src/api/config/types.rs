@@ -6,7 +6,7 @@ use tianyan::model::spec::ModelSpec;
 
 // Re-export shared types from core so server API can use them directly
 pub use tianyan::config::api_types::{
-    ModelInfo, ModelsResponse, PreferencesInfo, ProviderInfo, SwitchModelRequest,
+    ModelCatalogInfo, ModelInfo, ModelsResponse, PreferencesInfo, ProviderInfo, SwitchModelRequest,
     UpdateConfigResponse,
 };
 
@@ -19,6 +19,10 @@ pub struct ConfigResponse {
     /// 缺省时省略该字段以兼容旧客户端）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_specs: Option<HashMap<String, ModelSpec>>,
+    /// 各模型的内置目录命中信息（advisory：显示名 + 默认档位；
+    /// key = "{provider}/{model}"；缺省时省略该字段以兼容旧客户端）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_catalog: Option<HashMap<String, ModelCatalogInfo>>,
 }
 
 /// 更新配置请求 — 接受完整的 TianyanConfig
@@ -50,6 +54,7 @@ mod tests {
         let response = ConfigResponse {
             config,
             model_specs: None,
+            model_catalog: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("agent"));
@@ -71,6 +76,7 @@ mod tests {
         let response = ConfigResponse {
             config: config.clone(),
             model_specs: Some(specs),
+            model_catalog: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"model_specs\""));
@@ -79,6 +85,7 @@ mod tests {
         let response = ConfigResponse {
             config,
             model_specs: None,
+            model_catalog: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(!json.contains("model_specs"));

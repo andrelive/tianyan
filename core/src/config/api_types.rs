@@ -39,6 +39,23 @@ pub struct ModelInfo {
     /// 单次最大输出 token 数（配置了该字段时下发）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<usize>,
+    /// 内置目录命中信息（advisory：显示名 + 默认档位；未命中时缺省）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<ModelCatalogInfo>,
+}
+
+/// 内置目录命中信息（advisory：显示名 + 默认档位）。
+///
+/// 仅用于展示与扫描预填，不改变任何运行时行为（规格解析仍走
+/// 显式配置 > 内置规格表 > 默认 的既有链路）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelCatalogInfo {
+    /// 内置目录显示名（如 "DeepSeek V4 Flash"）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// 内置目录默认思考档位（如 ["low","high","max"]；advisory，UI 自动附加 "off"）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 /// 模型服务列表响应。

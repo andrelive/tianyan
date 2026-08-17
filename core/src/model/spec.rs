@@ -43,11 +43,48 @@ impl Default for ModelSpec {
 }
 
 /// 内置规格条目（provider 前缀 + 模型名前缀）。
+///
+/// 条目同时是"内置模型目录"（advisory）的组成部分：display_name 提供展示名，
+/// advertise 决定该条目是否作为完整模型 id 进入 provider 目录（零网络扫描列表），
+/// reasoning_efforts 提供默认思考档位（advisory，仅展示/预填，不改变运行时行为）。
 pub struct BuiltinEntry {
     /// provider 名称前缀（匹配忽略大小写）。
     pub provider_prefix: &'static str,
     /// 模型名称前缀（匹配忽略大小写）。
     pub model_prefix: &'static str,
+    /// 上下文规格。
+    pub spec: ModelSpec,
+    /// 目录显示名（如 "DeepSeek V4 Flash"；None = 无显示名）。
+    pub display_name: Option<&'static str>,
+    /// 是否作为完整模型 id 进入 provider 目录（零网络扫描列表）。
+    ///
+    /// 仅当 model_prefix 本身是完整模型 id 时为 true；纯前缀条目
+    /// （如 "claude"、"qwen"）只参与规格回退，不参与目录列表。
+    pub advertise: bool,
+    /// 目录默认思考档位（如 ["low","high","max"]；advisory，UI 自动附加 "off"）。
+    pub reasoning_efforts: Option<&'static [&'static str]>,
+}
+
+/// 内置目录命中信息（advisory：显示名 + 默认档位 + 规格）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinCatalogInfo {
+    /// 目录显示名。
+    pub display_name: Option<&'static str>,
+    /// 目录默认思考档位。
+    pub reasoning_efforts: Option<&'static [&'static str]>,
+    /// 上下文规格。
+    pub spec: ModelSpec,
+}
+
+/// 内置目录中的一条模型（provider 级零网络扫描列表）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinCatalogModel {
+    /// 模型 id。
+    pub name: &'static str,
+    /// 目录显示名。
+    pub display_name: Option<&'static str>,
+    /// 目录默认思考档位。
+    pub reasoning_efforts: Option<&'static [&'static str]>,
     /// 上下文规格。
     pub spec: ModelSpec,
 }
@@ -65,6 +102,9 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 32_000,
             max_input_tokens: 968_000,
         },
+        display_name: Some("DeepSeek V4 Flash"),
+        advertise: true,
+        reasoning_efforts: Some(&["low", "high", "max"]),
     },
     BuiltinEntry {
         provider_prefix: "deepseek",
@@ -75,6 +115,9 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_input_tokens: 96_000,
         },
         // R1 为固定深度思考模型，官方不支持强度档位
+        display_name: Some("DeepSeek R1"),
+        advertise: true,
+        reasoning_efforts: None,
     },
     BuiltinEntry {
         provider_prefix: "openai",
@@ -84,6 +127,9 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 16_000,
             max_input_tokens: 112_000,
         },
+        display_name: Some("GPT-4o"),
+        advertise: true,
+        reasoning_efforts: None,
     },
     BuiltinEntry {
         provider_prefix: "anthropic",
@@ -93,6 +139,9 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 8_000,
             max_input_tokens: 192_000,
         },
+        display_name: Some("Claude"),
+        advertise: false,
+        reasoning_efforts: None,
     },
     // qwen3 思考族须排在 qwen 通用条目之前（长前缀优先命中，qwen2.x 仍命中 qwen）
     BuiltinEntry {
@@ -103,6 +152,9 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 32_000,
             max_input_tokens: 99_000,
         },
+        display_name: Some("Qwen3"),
+        advertise: false,
+        reasoning_efforts: None,
     },
     BuiltinEntry {
         provider_prefix: "qwen",
@@ -112,6 +164,9 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 8_000,
             max_input_tokens: 123_000,
         },
+        display_name: Some("通义千问 Qwen"),
+        advertise: false,
+        reasoning_efforts: None,
     },
     BuiltinEntry {
         provider_prefix: "llama",
@@ -121,10 +176,13 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
             max_output_tokens: 8_000,
             max_input_tokens: 120_000,
         },
+        display_name: Some("Llama"),
+        advertise: false,
+        reasoning_efforts: None,
     },
 ];
 
-/// 在内置规格表中查找规格。
+/// 在内置规格表中查找条目。
 ///
 /// 三级匹配（按序，均为 `eq_ignore_ascii_case` 前缀比较）：
 ///
@@ -132,13 +190,13 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
 /// 2. provider 前缀匹配 + 模型名前缀匹配（如 qwen2.5-72b-instruct 命中 "qwen" 前缀）
 /// 3. 兜底：provider 前缀不匹配时，仅按模型名前缀匹配。模型名本身具强标识性，
 ///    网关 provider（如 "opencode"）挂载知名模型（如 "deepseek-v4-flash"）时也能命中。
-pub fn builtin_spec(provider: &str, model: &str) -> Option<ModelSpec> {
+fn match_builtin(provider: &str, model: &str) -> Option<&'static BuiltinEntry> {
     // 第一级：provider 前缀匹配 + 模型名精确匹配（如 deepseek-v4-flash 用完整模型名）
     for entry in BUILTIN_SPECS {
         if provider.eq_ignore_ascii_case(entry.provider_prefix)
             && model.eq_ignore_ascii_case(entry.model_prefix)
         {
-            return Some(entry.spec);
+            return Some(entry);
         }
     }
     // 第二级：provider 前缀匹配 + 模型名前缀匹配（如 qwen2.5-72b-instruct 命中 "qwen" 前缀）
@@ -148,7 +206,7 @@ pub fn builtin_spec(provider: &str, model: &str) -> Option<ModelSpec> {
                 .get(..entry.model_prefix.len())
                 .is_some_and(|head| head.eq_ignore_ascii_case(entry.model_prefix))
         {
-            return Some(entry.spec);
+            return Some(entry);
         }
     }
     // 第三级（兜底）：provider 前缀不匹配时，仅按模型名前缀匹配。
@@ -158,10 +216,44 @@ pub fn builtin_spec(provider: &str, model: &str) -> Option<ModelSpec> {
             .get(..entry.model_prefix.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(entry.model_prefix))
         {
-            return Some(entry.spec);
+            return Some(entry);
         }
     }
     None
+}
+
+/// 在内置规格表中查找规格（见 match_builtin 的三级匹配语义）。
+pub fn builtin_spec(provider: &str, model: &str) -> Option<ModelSpec> {
+    match_builtin(provider, model).map(|entry| entry.spec)
+}
+
+/// 查询内置目录命中（显示名 + 默认档位 + 规格）。
+///
+/// 与 builtin_spec 共用三级匹配；未命中返回 None。
+/// 结果为 advisory：仅用于展示与扫描预填，不改变任何运行时行为。
+pub fn builtin_catalog(provider: &str, model: &str) -> Option<BuiltinCatalogInfo> {
+    match_builtin(provider, model).map(|entry| BuiltinCatalogInfo {
+        display_name: entry.display_name,
+        reasoning_efforts: entry.reasoning_efforts,
+        spec: entry.spec,
+    })
+}
+
+/// 列出内置目录中 provider 级可广告的模型（零网络扫描列表）。
+///
+/// 仅返回 advertise = true 的条目（model_prefix 即完整模型 id），
+/// 按目录顺序排列；provider 无目录条目时返回空 Vec。
+pub fn builtin_catalog_models(provider: &str) -> Vec<BuiltinCatalogModel> {
+    BUILTIN_SPECS
+        .iter()
+        .filter(|entry| entry.advertise && provider.eq_ignore_ascii_case(entry.provider_prefix))
+        .map(|entry| BuiltinCatalogModel {
+            name: entry.model_prefix,
+            display_name: entry.display_name,
+            reasoning_efforts: entry.reasoning_efforts,
+            spec: entry.spec,
+        })
+        .collect()
 }
 
 /// 解析最终规格。
@@ -344,6 +436,64 @@ mod tests {
         assert_eq!(spec.context_length, 128_000);
         assert_eq!(spec.max_output_tokens, 8_000);
         assert_eq!(spec.max_input_tokens, 120_000);
+    }
+
+    #[test]
+    fn test_builtin_catalog_hit_display_and_efforts() {
+        // deepseek-v4-flash：显示名 + 默认档位 + 规格
+        let hit = builtin_catalog("deepseek", "deepseek-v4-flash").unwrap();
+        assert_eq!(hit.display_name, Some("DeepSeek V4 Flash"));
+        assert_eq!(hit.reasoning_efforts, Some(&["low", "high", "max"][..]));
+        assert_eq!(hit.spec.context_length, 1_000_000);
+
+        // 网关 provider 兜底：opencode 挂载 deepseek-v4-flash 同样命中
+        let hit = builtin_catalog("opencode", "deepseek-v4-flash").unwrap();
+        assert_eq!(hit.display_name, Some("DeepSeek V4 Flash"));
+
+        // 前缀条目（claude）也能提供显示名
+        let hit = builtin_catalog("anthropic", "claude-sonnet-4-5").unwrap();
+        assert_eq!(hit.display_name, Some("Claude"));
+        assert_eq!(hit.reasoning_efforts, None);
+
+        // 未命中 → None
+        assert!(builtin_catalog("deepseek", "deepseek-chat").is_none());
+        assert!(builtin_catalog("unknown", "totally-unknown").is_none());
+    }
+
+    #[test]
+    fn test_builtin_catalog_models_deepseek() {
+        // deepseek 目录：两个完整模型 id（v4-flash + r1），带规格
+        let models = builtin_catalog_models("deepseek");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].name, "deepseek-v4-flash");
+        assert_eq!(models[0].spec.context_length, 1_000_000);
+        assert_eq!(
+            models[0].reasoning_efforts,
+            Some(&["low", "high", "max"][..])
+        );
+        assert_eq!(models[1].name, "deepseek-r1");
+        assert_eq!(models[1].reasoning_efforts, None);
+
+        // 大小写不敏感
+        assert_eq!(builtin_catalog_models("DeepSeek").len(), 2);
+    }
+
+    #[test]
+    fn test_builtin_catalog_models_gpt4o_advertised_only() {
+        // openai 目录只有 advertise 条目（gpt-4o）
+        let models = builtin_catalog_models("openai");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "gpt-4o");
+    }
+
+    #[test]
+    fn test_builtin_catalog_models_not_advertised_empty() {
+        // 纯前缀条目（claude/qwen/llama）不进入目录列表；未知 provider 为空
+        assert!(builtin_catalog_models("anthropic").is_empty());
+        assert!(builtin_catalog_models("qwen").is_empty());
+        assert!(builtin_catalog_models("llama").is_empty());
+        assert!(builtin_catalog_models("opencode").is_empty());
+        assert!(builtin_catalog_models("").is_empty());
     }
 
     #[test]

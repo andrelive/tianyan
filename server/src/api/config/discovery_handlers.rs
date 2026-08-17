@@ -41,6 +41,9 @@ pub struct ProviderEndpointRequest {
     /// API 密钥（openai 协议连接测试时可选携带）。
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Provider 名称（scan 可选携带：命中内置目录时零网络直接返回目录模型）。
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 /// 单个 Provider 模型信息。
@@ -53,6 +56,18 @@ pub struct ProviderModelInfo {
     pub size: Option<String>,
     /// 能力标签。
     pub capabilities: Vec<String>,
+    /// 显示名（端点/目录提供时下发；未提供时缺省，前端以 name 兜底显示）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// 上下文窗口长度（token；端点/内置目录提供时下发，供 adopt 预填模型配置）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
+    /// 单次最大输出 token 数（端点/内置目录提供时下发，供 adopt 预填模型配置）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
+    /// 内置目录默认思考档位（仅目录扫描返回；advisory，UI 自动附加 "off"）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 /// 扫描结果响应。
@@ -103,6 +118,21 @@ struct OpenAiModelsResponse {
 #[derive(Debug, Deserialize)]
 struct OpenAiModel {
     id: String,
+    /// 显示名（OpenRouter 等网关的扩展字段）。
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    /// 上下文窗口（OpenRouter/Together 等网关扩展字段）。
+    #[serde(default)]
+    context_window: Option<u64>,
+    #[serde(default)]
+    context_length: Option<u64>,
+    /// 单次最大输出 token 数（扩展字段）。
+    #[serde(default)]
+    max_output_tokens: Option<u64>,
+    #[serde(default)]
+    max_tokens: Option<u64>,
 }
 
 /// Ollama `/api/tags` 的响应结构。
@@ -253,6 +283,40 @@ pub async fn scan_provider_models(
         format!("{endpoint}/models")
     };
 
+    // 内置目录零网络路径：协议为 openai 且 provider 名命中内置目录时，
+    // 直接返回目录模型（规格 + 默认档位），不发起网络请求。
+    if protocol == "openai" {
+        let catalog = tianyan::model::spec::builtin_catalog_models(
+            request.provider.as_deref().unwrap_or("").trim(),
+        );
+        if !catalog.is_empty() {
+            let models: Vec<ProviderModelInfo> = catalog
+                .into_iter()
+                .map(|m| ProviderModelInfo {
+                    name: m.name.to_string(),
+                    size: None,
+                    capabilities: infer_capabilities(m.name),
+                    display_name: m.display_name.map(str::to_string),
+                    context_length: Some(m.spec.context_length as u64),
+                    max_output_tokens: Some(m.spec.max_output_tokens as u64),
+                    reasoning_efforts: m
+                        .reasoning_efforts
+                        .map(|efforts| efforts.iter().map(|s| s.to_string()).collect()),
+                })
+                .collect();
+            info!(
+                provider = %request.provider.as_deref().unwrap_or(""),
+                count = models.len(),
+                "内置目录命中，跳过网络扫描"
+            );
+            return Ok(Json(ProviderScanResponse {
+                success: true,
+                models,
+                error: None,
+            }));
+        }
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -280,6 +344,10 @@ pub async fn scan_provider_models(
                         capabilities: infer_capabilities(&m.name),
                         name: m.name,
                         size: Some(format_size(m.size)),
+                        display_name: None,
+                        context_length: None,
+                        max_output_tokens: None,
+                        reasoning_efforts: None,
                     })
                     .collect()
             } else {
@@ -288,8 +356,14 @@ pub async fn scan_provider_models(
                     .into_iter()
                     .map(|m| ProviderModelInfo {
                         capabilities: infer_capabilities(&m.id),
-                        name: m.id,
+                        name: m.id.clone(),
                         size: None,
+                        display_name: m.display_name.or(m.name).or(Some(m.id)),
+                        // 网关扩展字段：context_window/context_length、
+                        // max_output_tokens/max_tokens（OpenRouter/Together 等提供）
+                        context_length: m.context_window.or(m.context_length),
+                        max_output_tokens: m.max_output_tokens.or(m.max_tokens),
+                        reasoning_efforts: None,
                     })
                     .collect()
             };

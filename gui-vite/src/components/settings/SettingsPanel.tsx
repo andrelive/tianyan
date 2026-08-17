@@ -32,6 +32,7 @@ import type {
   ModelCapability,
   ModelPreferencesState,
   ModelRef,
+  DiscoveredModelInfo,
 } from '@/lib/types';
 import type { BackendConfigResponse } from '@/lib/config-transform';
 
@@ -197,16 +198,30 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
     [],
   );
 
-  /* Add a scanned model (from provider discovery) into the provider's model list */
-  const addScannedModel = useCallback(
-    (providerIndex: number, name: string, capabilities: string[]) => {
+  /* Add scanned models (from provider discovery) into the provider's model list,
+     carrying endpoint/catalog-provided spec fields (context/max output/efforts) */
+  const addScannedModels = useCallback(
+    (providerIndex: number, scanned: DiscoveredModelInfo[]) => {
+      if (scanned.length === 0) return;
       setConfig((prev) => {
         if (!prev) return prev;
         const providers = prev.providers.map((p, i) =>
           i === providerIndex
             ? {
                 ...p,
-                models: [...p.models, { name, capabilities: capabilities as ModelCapability[] }],
+                models: [
+                  ...p.models,
+                  ...scanned.map((m) => ({
+                    name: m.name,
+                    capabilities: m.capabilities as ModelCapability[],
+                    context_length: m.context_length,
+                    max_output_tokens: m.max_output_tokens,
+                    reasoning_efforts:
+                      m.reasoning_efforts && m.reasoning_efforts.length > 0
+                        ? m.reasoning_efforts
+                        : undefined,
+                  })),
+                ],
               }
             : p,
         );
@@ -315,7 +330,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
             onUpdatePreference={updatePreference}
             onTestConnection={testConnection}
             testStatus={testStatus}
-            onAddScannedModel={addScannedModel}
+            onAddScannedModels={addScannedModels}
           />
         );
       case 'storage':

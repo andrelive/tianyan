@@ -405,8 +405,18 @@ export const mockMcpTestResult: McpTestResponse = { success: true, tools: 12 };
 export const mockProviderScanResult: ProviderScanResponse = {
   success: true,
   models: [
-    { name: 'llama3:8b', size: '4.7 GB', capabilities: ['chat'] },
-    { name: 'nomic-embed-text', size: '274 MB', capabilities: ['text-embedding'] },
+    {
+      name: 'llama3:8b',
+      size: '4.7 GB',
+      capabilities: ['chat'],
+      context_length: 8192,
+      max_output_tokens: 2048,
+    },
+    {
+      name: 'nomic-embed-text',
+      size: '274 MB',
+      capabilities: ['text-embedding'],
+    },
   ],
 };
 

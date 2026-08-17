@@ -6,6 +6,7 @@ import type {
   ProviderConfigState,
   ProviderModelEntry,
   ModelCapability,
+  ModelCatalogInfo,
   ModelPreferencesState,
   DiscoveredModelInfo,
   ProviderProtocol,
@@ -38,7 +39,7 @@ interface ModelsTabProps {
   onUpdatePreference: (key: keyof ModelPreferencesState, provider: string, model: string) => void;
   onTestConnection: (index: number) => void;
   testStatus: Record<number, 'idle' | 'testing' | 'success' | 'error'>;
-  onAddScannedModel: (providerIndex: number, name: string, capabilities: string[]) => void;
+  onAddScannedModels: (providerIndex: number, models: DiscoveredModelInfo[]) => void;
 }
 
 /* ── Capability labels ── */
@@ -111,6 +112,14 @@ function formatCompactNumber(n: number): string {
   return String(n);
 }
 
+/** 发现模型的规格摘要（上下文/输出存在时展示）。 */
+function formatDiscoveredSpecs(m: DiscoveredModelInfo): string {
+  const parts: string[] = [];
+  if (m.context_length) parts.push(`${formatCompactNumber(m.context_length)} 上下文`);
+  if (m.max_output_tokens) parts.push(`${formatCompactNumber(m.max_output_tokens)} 输出`);
+  return parts.join(' / ');
+}
+
 function getSelectableModels(
   providers: ProviderConfigState[],
   caps: ModelCapability[],
@@ -135,9 +144,11 @@ function getSelectableModels(
 function ResolvedSpecRow({
   spec,
   model,
+  catalog,
 }: {
   spec: ResolvedModelSpec;
   model: ProviderModelEntry;
+  catalog?: ModelCatalogInfo;
 }) {
   const isChatOrVision = model.capabilities.some(
     (cap) => cap === 'chat' || cap === 'vision',
@@ -157,10 +168,18 @@ function ResolvedSpecRow({
 
   const hasExplicit = model.context_length ?? model.max_output_tokens ?? model.max_input_tokens;
   return (
-    <div className="flex items-center gap-2 mt-1.5">
+    <div className="flex items-center gap-2 mt-1.5 flex-wrap">
       <span className="text-xs text-[var(--color-text-tertiary)]">
         生效规格：{parts.join(' / ')}
       </span>
+      {catalog && (
+        <span className="text-xs text-[var(--color-text-tertiary)]">
+          · {catalog.display_name ?? '内置目录'}
+          {catalog.reasoning_efforts && catalog.reasoning_efforts.length > 0
+            ? `（默认档位：${catalog.reasoning_efforts.join(', ')}）`
+            : ''}
+        </span>
+      )}
       {hasExplicit ? (
         <span className="px-1.5 py-0.5 text-[10px] rounded-md bg-accent/10 text-accent border border-accent/20">
           自定义
@@ -188,7 +207,7 @@ export default function ModelsTab({
   onUpdatePreference,
   onTestConnection,
   testStatus,
-  onAddScannedModel,
+  onAddScannedModels,
 }: ModelsTabProps) {
   /* Scan state per provider (runtime only, not persisted) */
   const [scanState, setScanState] = useState<
@@ -198,42 +217,80 @@ export default function ModelsTab({
         protocol: ProviderProtocol;
         scanning: boolean;
         models: DiscoveredModelInfo[];
+        picked: string[];
         error: string | null;
       }
     >
   >({});
 
-  const handleScanModels = async (pi: number, endpoint: string, protocol: ProviderProtocol) => {
+  const handleScanModels = async (
+    pi: number,
+    endpoint: string,
+    protocol: ProviderProtocol,
+    providerName: string,
+  ) => {
     setScanState((prev) => ({
       ...prev,
       [pi]: {
-        ...(prev[pi] ?? { protocol, models: [], error: null }),
+        ...(prev[pi] ?? { protocol, models: [], error: null, picked: [] }),
         scanning: true,
         error: null,
       },
     }));
     try {
-      const resp = await scanProviderModels(endpoint, protocol);
-      setScanState((prev) => ({
-        ...prev,
-        [pi]: {
-          ...(prev[pi] ?? { protocol, models: [], error: null }),
-          scanning: false,
-          models: resp.success ? resp.models : [],
-          error: resp.success ? null : (resp.error ?? '扫描失败'),
-        },
-      }));
+      const resp = await scanProviderModels(endpoint, protocol, providerName);
+      setScanState((prev) => {
+        const base = prev[pi] ?? { protocol, models: [], error: null, picked: [] };
+        const known = new Set((config.providers[pi]?.models ?? []).map((m) => m.name.trim()));
+        const models = resp.success ? resp.models : [];
+        // 新模型默认勾选；已配置的模型排除在可勾选外
+        const picked = models.filter((m) => !known.has(m.name)).map((m) => m.name);
+        return {
+          ...prev,
+          [pi]: {
+            ...base,
+            scanning: false,
+            models,
+            picked,
+            error: resp.success ? null : (resp.error ?? '扫描失败'),
+          },
+        };
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '扫描请求失败';
       setScanState((prev) => ({
         ...prev,
         [pi]: {
-          ...(prev[pi] ?? { protocol, models: [], error: null }),
+          ...(prev[pi] ?? { protocol, models: [], error: null, picked: [] }),
           scanning: false,
           error: msg,
         },
       }));
     }
+  };
+
+  const togglePicked = (pi: number, name: string) => {
+    setScanState((prev) => {
+      const st = prev[pi];
+      if (!st) return prev;
+      const picked = st.picked.includes(name)
+        ? st.picked.filter((n) => n !== name)
+        : [...st.picked, name];
+      return { ...prev, [pi]: { ...st, picked } };
+    });
+  };
+
+  const adoptPicked = (pi: number) => {
+    const st = scanState[pi];
+    if (!st) return;
+    const models = st.models.filter((m) => st.picked.includes(m.name));
+    if (models.length === 0) return;
+    onAddScannedModels(pi, models);
+    setScanState((prev) => {
+      const cur = prev[pi];
+      if (!cur) return prev;
+      return { ...prev, [pi]: { ...cur, models: [], picked: [], error: null } };
+    });
   };
 
   return (
@@ -405,7 +462,7 @@ export default function ModelsTab({
                     ...prev,
                     [pi]: prev[pi]
                       ? { ...prev[pi], protocol }
-                      : { protocol, scanning: false, models: [], error: null },
+                      : { protocol, scanning: false, models: [], error: null, picked: [] },
                   }));
                 }}
                 className="px-2 py-1.5 text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
@@ -414,7 +471,7 @@ export default function ModelsTab({
                 <option value="ollama">Ollama 原生</option>
               </select>
               <button
-                onClick={() => handleScanModels(pi, p.endpoint, st.protocol)}
+                onClick={() => handleScanModels(pi, p.endpoint, st.protocol, p.name)}
                 disabled={st.scanning || !p.endpoint}
                 title={!p.endpoint ? '请先填写端点 URL' : undefined}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] transition-colors disabled:opacity-50"
@@ -426,6 +483,11 @@ export default function ModelsTab({
                 )}
                 扫描模型
               </button>
+              {p.name && (
+                <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                  内置目录命中时零网络返回
+                </span>
+              )}
             </div>
 
             {/* Scan error */}
@@ -435,22 +497,49 @@ export default function ModelsTab({
               </div>
             )}
 
-            {/* Discovered models */}
+            {/* Discovered models (bulk adopt) */}
             {st.models.length > 0 && (
               <div className="mt-3">
-                <h4 className="text-xs font-medium text-[var(--color-text-primary)] mb-2">
-                  已发现模型 ({st.models.length})
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="text-xs font-medium text-[var(--color-text-primary)]">
+                    已发现模型 ({st.models.length})
+                  {st.picked.length > 0 && <span> · 新选 {st.picked.length}</span>}
                 </h4>
-                <div className="space-y-1.5">
-                  {st.models.map((m) => (
+                <button
+                  onClick={() => adoptPicked(pi)}
+                  disabled={st.picked.length === 0}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Plus size={12} />
+                  添加选中 {st.picked.length} 个
+                </button>
+              </div>
+              <div className="space-y-1.5 mt-2">
+                {st.models.map((m) => {
+                  const already = (config.providers[pi]?.models ?? []).some(
+                    (em) => em.name === m.name,
+                  );
+                  const checked = already || st.picked.includes(m.name);
+                  return (
                     <div
                       key={m.name}
-                      className="flex items-center justify-between p-2 rounded-md bg-[var(--color-bg-secondary)] border border-[var(--color-border)]"
+                      className={
+                        'p-2 rounded-md bg-[var(--color-bg-secondary)] border border-[var(--color-border)]' +
+                        (already ? ' opacity-60' : '')
+                      }
                     >
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={already}
+                            onChange={() => togglePicked(pi, m.name)}
+                            className="accent-accent shrink-0 cursor-pointer"
+                            aria-label={`选择 ${m.name}`}
+                          />
                           <span className="text-xs font-medium text-[var(--color-text-primary)] truncate">
-                            {m.name}
+                            {m.display_name ?? m.name}
                           </span>
                           {m.size && (
                             <span className="text-[10px] text-[var(--color-text-tertiary)] shrink-0">
@@ -470,25 +559,34 @@ export default function ModelsTab({
                             ))}
                           </div>
                         )}
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1">
+                          {(() => {
+                            const specLine = formatDiscoveredSpecs(m);
+                            if (specLine) {
+                              return (
+                                <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                                  {specLine}
+                                </span>
+                              );
+                            }
+                            return null;
+                          })()}
+                          {m.reasoning_efforts && m.reasoning_efforts.length > 0 && (
+                            <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                              档位：{m.reasoning_efforts.join(', ')}
+                            </span>
+                          )}
+                          {already && (
+                            <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                              已配置
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <button
-                        onClick={() =>
-                          onAddScannedModel(
-                            pi,
-                            m.name,
-                            m.capabilities.filter((c) =>
-                              MODEL_CAPABILITIES.includes(c as ModelCapability),
-                            ),
-                          )
-                        }
-                        className="flex items-center gap-1 ml-2 px-2 py-1 text-xs rounded-md bg-accent text-white hover:bg-accent-hover transition-colors shrink-0"
-                      >
-                        <Plus size={12} />
-                        添加到配置
-                      </button>
                     </div>
-                  ))}
-                </div>
+                  );
+                })}
+              </div>
               </div>
             )}
           </div>
@@ -612,7 +710,10 @@ export default function ModelsTab({
                   {/* 生效规格（只读；后端解析结果，key = "{provider}/{model}"；旧后端无数据时不渲染） */}
                   {(() => {
                     const spec = config.resolvedSpecs[`${p.name}/${m.name}`];
-                    return spec ? <ResolvedSpecRow spec={spec} model={m} /> : null;
+                    const cat = config.modelCatalog?.[`${p.name}/${m.name}`];
+                    return spec ? (
+                      <ResolvedSpecRow spec={spec} model={m} catalog={cat} />
+                    ) : null;
                   })()}
                 </div>
                 <button

@@ -386,18 +386,24 @@ describe('SettingsPanel tabs', () => {
     await user.click(screen.getAllByRole('button', { name: '扫描模型' })[0]);
 
     await waitFor(() => {
-      expect(scanBody).toEqual({ endpoint: 'https://api.openai.com/v1', protocol: 'ollama' });
+      expect(scanBody).toEqual({
+        endpoint: 'https://api.openai.com/v1',
+        protocol: 'ollama',
+        // scan 携带 provider 名：命中内置目录时后端零网络返回目录模型
+        provider: 'openai',
+      });
     });
     await waitFor(() => {
       expect(screen.getByText('llama3:8b')).toBeInTheDocument();
     });
     expect(screen.getByText('nomic-embed-text')).toBeInTheDocument();
-    expect(screen.getByText('已发现模型 (2)')).toBeInTheDocument();
+    expect(screen.getByText(/已发现模型 \(2\)/)).toBeInTheDocument();
     expect(screen.getByText('4.7 GB')).toBeInTheDocument();
 
-    // 点击「添加到配置」→ 模型写入对应 provider 的模型输入框
-    await user.click(screen.getAllByRole('button', { name: '添加到配置' })[0]);
+    // 批量 adopt：新模型默认勾选 → 点「添加选中 N 个」→ 模型写入对应 provider
+    await user.click(screen.getByRole('button', { name: /添加选中/ }));
     expect(screen.getByDisplayValue('llama3:8b')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('nomic-embed-text')).toBeInTheDocument();
   });
 
   it('loads soul content and saves edited content via PUT /config/soul', async () => {

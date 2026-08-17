@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
+use tianyan::config::api_types::ModelCatalogInfo;
 use tianyan::config::{McpServerEntry, ModelsConfig, TianyanConfig};
 use tianyan::model::spec::ModelSpec;
 
@@ -30,6 +31,30 @@ fn resolve_all_model_specs(models: &ModelsConfig) -> HashMap<String, ModelSpec> 
         .collect()
 }
 
+/// 解析配置中全部模型的内置目录命中（advisory：显示名 + 默认档位；
+/// key = "{provider}/{model}"，未命中目录的模型不出现）。
+fn resolve_all_model_catalogs(models: &ModelsConfig) -> HashMap<String, ModelCatalogInfo> {
+    models
+        .providers
+        .iter()
+        .flat_map(|p| {
+            p.models.iter().filter_map(|m| {
+                tianyan::model::spec::builtin_catalog(&p.name, &m.name).map(|c| {
+                    (
+                        format!("{}/{}", p.name, m.name),
+                        ModelCatalogInfo {
+                            display_name: c.display_name.map(str::to_string),
+                            reasoning_efforts: c
+                                .reasoning_efforts
+                                .map(|efforts| efforts.iter().map(|s| s.to_string()).collect()),
+                        },
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
 /// 配置服务，管理应用配置的读取、保存与热重载
 pub struct ConfigService {
     state: Arc<AppState>,
@@ -46,6 +71,7 @@ impl ConfigService {
         let config = self.state.config().read().await.clone();
         Ok(ConfigResponse {
             model_specs: Some(resolve_all_model_specs(&config.models)),
+            model_catalog: Some(resolve_all_model_catalogs(&config.models)),
             config,
         })
     }
@@ -98,6 +124,16 @@ impl ConfigService {
             .flat_map(|p| {
                 p.models.iter().map(|m| {
                     // 每个模型自己的思考档位：只来自模型配置（显示 = 配置，无内置注入）
+                    // 内置目录命中（advisory：显示名 + 默认档位，仅展示）
+                    let catalog =
+                        tianyan::model::spec::builtin_catalog(&p.name, &m.name).map(|c| {
+                            ModelCatalogInfo {
+                                display_name: c.display_name.map(str::to_string),
+                                reasoning_efforts: c
+                                    .reasoning_efforts
+                                    .map(|efforts| efforts.iter().map(|s| s.to_string()).collect()),
+                            }
+                        });
                     ModelInfo {
                         name: m.name.clone(),
                         provider: p.name.clone(),
@@ -105,6 +141,7 @@ impl ConfigService {
                         reasoning_efforts: m.reasoning_efforts.clone(),
                         context_length: m.context_length,
                         max_output_tokens: m.max_output_tokens,
+                        catalog,
                     }
                 })
             })
@@ -383,6 +420,32 @@ mod tests {
             capabilities: vec![ModelCapability::Chat],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_resolve_all_model_catalogs_maps_only_matches() {
+        let models = ModelsConfig {
+            providers: vec![
+                provider_with("deepseek", vec![chat_entry("deepseek-v4-flash")]),
+                provider_with("openai", vec![chat_entry("custom-chat")]),
+            ],
+            ..Default::default()
+        };
+        let catalogs = resolve_all_model_catalogs(&models);
+        // deepseek-v4-flash 命中目录（显示名 + 默认档位）；custom-chat 未命中不出现
+        assert_eq!(catalogs.len(), 1);
+        let hit = &catalogs["deepseek/deepseek-v4-flash"];
+        assert_eq!(hit.display_name.as_deref(), Some("DeepSeek V4 Flash"));
+        assert_eq!(
+            hit.reasoning_efforts.as_deref(),
+            Some(
+                &[
+                    String::from("low"),
+                    String::from("high"),
+                    String::from("max")
+                ][..]
+            )
+        );
     }
 
     #[test]

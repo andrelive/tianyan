@@ -17,6 +17,7 @@ import type {
   ProviderConfigState,
   ProviderModelEntry,
   ModelCapability,
+  ModelCatalogInfo,
   ModelPreferencesState,
   ModelRef,
   ResolvedModelSpec,
@@ -57,6 +58,7 @@ export function emptyConfigState(): ConfigState {
     providers: [],
     preferences: emptyPreferences(),
     resolvedSpecs: {},
+    modelCatalog: {},
     mcpServers: [],
     default_top_k: 5,
     max_turns: 20,
@@ -238,6 +240,8 @@ export interface BackendConfigResponse {
   config: BackendTianyanConfig;
   /** 后端解析出的模型生效规格（显式 > 内置表 > 默认），key = "{provider}/{model}"。旧后端可能缺省。 */
   model_specs?: Record<string, ResolvedModelSpec>;
+  /** 后端解析出的内置目录命中（advisory），key = "{provider}/{model}"。旧后端可能缺省。 */
+  model_catalog?: Record<string, ModelCatalogInfo>;
 }
 
 /* ─────── Form → Backend (ConfigState → { config: TianyanConfig }) ─────── */
@@ -392,6 +396,7 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
       headers: p.headers ?? {},
     })),
     resolvedSpecs: response.model_specs ?? {},
+    modelCatalog: response.model_catalog ?? {},
     preferences: {
       chat: models.preferences?.chat ?? null,
       embedding: models.preferences?.embedding ?? null,

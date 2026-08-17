@@ -650,6 +650,8 @@ export interface ConfigState {
   preferences: ModelPreferencesState;
   /** 后端解析出的模型生效规格，key = "{provider}/{model}"。旧后端无该字段时为空对象。 */
   resolvedSpecs: Record<string, ResolvedModelSpec>;
+  /** 后端解析出的内置目录命中（advisory），key = "{provider}/{model}"。旧后端无该字段时为空对象。 */
+  modelCatalog: Record<string, ModelCatalogInfo>;
 
   // -- Agent config (agent.*) --
   default_top_k: number;
@@ -888,11 +890,25 @@ export interface ToastMessage {
 }
 
 // ========== Provider Discovery Types ==========
+/** 内置目录命中信息（advisory：显示名 + 默认档位），来自后端 model_catalog。 */
+export interface ModelCatalogInfo {
+  display_name?: string;
+  reasoning_efforts?: string[];
+}
+
 export type ProviderProtocol = 'openai' | 'ollama';
 export interface DiscoveredModelInfo {
   name: string;
   size?: string;
   capabilities: string[];
+  /** 显示名（端点/目录提供时下发；缺省以 name 兜底展示）。 */
+  display_name?: string;
+  /** 上下文窗口长度（token；端点/目录提供时下发，adopt 时预填模型配置）。 */
+  context_length?: number;
+  /** 单次最大输出 token 数（端点/目录提供时下发，adopt 时预填模型配置）。 */
+  max_output_tokens?: number;
+  /** 内置目录默认思考档位（仅目录扫描返回；advisory，UI 自动附加 "off"）。 */
+  reasoning_efforts?: string[];
 }
 export interface ProviderScanResponse {
   success: boolean;
