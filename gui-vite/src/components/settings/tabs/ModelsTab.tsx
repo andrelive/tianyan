@@ -466,6 +466,17 @@ export default function ModelsTab({
           {/* ── Provider discovery (scan models) ── */}
           <div className="pt-2 border-t border-[var(--color-border)]">
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCollapsed((prev) => ({ ...prev, [pi]: !(prev[pi] ?? true) }))}
+                aria-label={`${p.name} ${isCollapsed ? '展开' : '收起'}模型列表`}
+                aria-expanded={!isCollapsed}
+                title={isCollapsed ? '展开模型列表' : '收起模型列表'}
+                className="flex items-center gap-1 px-2 py-1.5 rounded-md text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors"
+              >
+                {isCollapsed ? <ChevronLeft size={16} /> : <ChevronDown size={16} />}
+                <span className="text-[10px] font-medium">{p.models.length}</span>
+              </button>
               <select
                 aria-label={`${p.name} 扫描协议`}
                 value={st.protocol}
@@ -501,17 +512,6 @@ export default function ModelsTab({
                   内置目录命中时零网络返回
                 </span>
               )}
-              <button
-                type="button"
-                onClick={() => setCollapsed((prev) => ({ ...prev, [pi]: !(prev[pi] ?? true) }))}
-                aria-label={`${p.name} ${isCollapsed ? '展开' : '收起'}模型列表`}
-                aria-expanded={!isCollapsed}
-                title={isCollapsed ? '展开模型列表' : '收起模型列表'}
-                className="flex items-center gap-1 ml-auto px-2 py-1.5 rounded-md text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors"
-              >
-                {isCollapsed ? <ChevronLeft size={16} /> : <ChevronDown size={16} />}
-                <span className="text-[10px] font-medium">{p.models.length}</span>
-              </button>
             </div>
 
             {/* Scan error */}
