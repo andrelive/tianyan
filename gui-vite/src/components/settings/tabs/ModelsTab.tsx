@@ -8,7 +8,7 @@ import {
   Loader2,
   RefreshCw,
   ChevronDown,
-  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 import { Toggle, FieldRow, SectionTitle } from './shared';
 import type {
@@ -474,7 +474,7 @@ export default function ModelsTab({
                 title={isCollapsed ? '展开模型列表' : '收起模型列表'}
                 className="flex items-center gap-1 px-2 py-1.5 rounded-md text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors"
               >
-                {isCollapsed ? <ChevronLeft size={16} /> : <ChevronDown size={16} />}
+                {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
                 <span className="text-[10px] font-medium">{p.models.length}</span>
               </button>
               <select
