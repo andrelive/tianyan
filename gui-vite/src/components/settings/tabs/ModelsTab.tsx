@@ -489,7 +489,7 @@ export default function ModelsTab({
                       : { protocol, scanning: false, models: [], error: null, picked: [] },
                   }));
                 }}
-                className="px-2 py-1.5 text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+                className="ml-auto px-2 py-1.5 text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
               >
                 <option value="openai">OpenAI 兼容</option>
                 <option value="ollama">Ollama 原生</option>
@@ -507,11 +507,6 @@ export default function ModelsTab({
                 )}
                 扫描模型
               </button>
-              {p.name && (
-                <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                  内置目录命中时零网络返回
-                </span>
-              )}
             </div>
 
             {/* Scan error */}
