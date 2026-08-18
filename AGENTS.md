@@ -126,7 +126,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 - `DEFAULT_SOUL` 在 `core/src/agent/mod.rs`，通过 `include_str!` 构建
 - VFS 初始化分离：基础设施 → `vfs_impl.rs::initialize()`；应用内容 → `server/src/lib.rs::bootstrap_app_vfs()`
 - VFS write/append 自带容错，上层不重复检查目录/文件是否存在
-- Provider 请求失败内置指数退避重试（全局默认 maxRetries=2、退避 500ms → 10s + 抖动，
+- Provider 请求失败内置指数退避重试（全局默认重试 5 次、1s 起点指数退避（2x）+ 抖动，
   对齐 opencode/DSH；HTTP 429/5xx 与网络/超时类错误可重试）。"fail fast" 仅指不跨 Agent
   层/不跨任务重试——请求层的自我保护默认全局生效，不做每 provider 前置配置
 - 工具不做自主多轮决策，决策权在 LLM

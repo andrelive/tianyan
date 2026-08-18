@@ -9,12 +9,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 全局内置默认最大重试次数（首次请求不计入；对齐 DSH DEFAULT_MAX_RETRIES=2）。
-pub const DEFAULT_MAX_RETRIES: u32 = 2;
+/// 全局内置默认最大重试次数（首次请求不计入；重试 5 次、1s 起点指数退避）。
+pub const DEFAULT_MAX_RETRIES: u32 = 5;
 /// 全局内置默认首次退避延迟（毫秒）。
-pub const DEFAULT_INITIAL_DELAY_MS: u64 = 500;
+pub const DEFAULT_INITIAL_DELAY_MS: u64 = 1_000;
 /// 全局内置默认退避延迟上限（毫秒）。
-pub const DEFAULT_MAX_DELAY_MS: u64 = 10_000;
+pub const DEFAULT_MAX_DELAY_MS: u64 = 60_000;
 /// 全局内置默认抖动比例 [0,1]。
 pub const DEFAULT_JITTER_RATIO: f64 = 0.1;
 
@@ -134,9 +134,9 @@ mod tests {
     #[test]
     fn test_default_policy_values() {
         let p = RetryPolicy::default();
-        assert_eq!(p.max_retries, 2);
-        assert_eq!(p.initial_delay_ms, 500);
-        assert_eq!(p.max_delay_ms, 10_000);
+        assert_eq!(p.max_retries, 5);
+        assert_eq!(p.initial_delay_ms, 1_000);
+        assert_eq!(p.max_delay_ms, 60_000);
         assert_eq!(p.jitter_ratio, 0.1);
     }
 
@@ -175,7 +175,7 @@ mod tests {
         // jitter > 0 时结果在 [base*(1-r), base*(1+r)] 内
         let d = RetryPolicy::default();
         let v = d.delay_ms(1);
-        assert!(v >= 450 && v <= 550, "delay={v}");
+        assert!(v >= 900 && v <= 1100, "delay={v}");
         assert!(d.delay_ms(20) <= d.max_delay_ms);
     }
 
