@@ -3,6 +3,7 @@ use async_openai::{config::OpenAIConfig, Client};
 
 use crate::common::error::{Result, TianyanError};
 use crate::config::ProviderConfig;
+use crate::model::retry::RetryPolicy;
 
 /// 基于 async-openai 的模型服务客户端。
 ///
@@ -21,6 +22,8 @@ pub struct AsyncOpenAIClient {
     pub(crate) api_key: String,
     /// 额外请求头（ProviderConfig.headers）。
     pub(crate) headers: std::collections::HashMap<String, String>,
+    /// 请求重试策略（指数退避 + 最大重试次数；内置全局默认，对全部 provider 生效）。
+    pub(crate) retry_policy: RetryPolicy,
 }
 
 impl AsyncOpenAIClient {
@@ -54,6 +57,7 @@ impl AsyncOpenAIClient {
             base_url,
             api_key,
             headers: config.headers.clone(),
+            retry_policy: RetryPolicy::default(),
         })
     }
 

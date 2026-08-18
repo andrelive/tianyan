@@ -31,35 +31,55 @@ impl ChatService for AsyncOpenAIClient {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
-        let messages = convert_messages(&request.messages);
+        // 请求构建与调用在下方重试闭包内完成（每次重试重建请求）。
 
-        let mut builder = CreateChatCompletionRequestArgs::default();
-        builder.model(&request.model);
-        builder.messages(messages);
-        builder.stream(false);
-        if let Some(n) = request.n {
-            builder.n(n.min(u8::MAX as usize) as u8);
-        }
-        Self::apply_shared_params(&mut builder, &request);
-
-        let oa_request = builder
-            .build()
-            .map_err(|e| TianyanError::Custom(format!("模型服务错误：构建请求失败：{}", e)))?;
-
-        let response = if let Some(effort) = request.thinking_effort.as_deref() {
-            if effort == "off" {
-                self.client.chat().create(oa_request).await
-            } else {
-                let mut body = serde_json::to_value(&oa_request).map_err(|e| {
-                    TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e))
+        // 非流式调用内置指数退避重试（全局默认策略，对齐 opencode/dsh-llm-retry）：
+        // 网络/传输/超时类错误自动退避重试；async-openai API 错误不暴露 HTTP 状态码、
+        // 无法区分 429/5xx 与 4xx，归类不可重试以避免重复计费与误伤。
+        let response = crate::model::retry::with_retry(
+            &self.retry_policy,
+            |e: &RetryableFailure| e.retryable,
+            || async {
+                let mut builder = CreateChatCompletionRequestArgs::default();
+                builder.model(&request.model);
+                builder.messages(convert_messages(&request.messages));
+                builder.stream(false);
+                if let Some(n) = request.n {
+                    builder.n(n.min(u8::MAX as usize) as u8);
+                }
+                Self::apply_shared_params(&mut builder, &request);
+                let oa_request = builder.build().map_err(|e| RetryableFailure {
+                    retryable: false,
+                    message: format!("构建请求失败：{}", e),
                 })?;
-                apply_thinking_params(&mut body, effort, &request.model);
-                self.client.chat().create_byot(body).await
-            }
-        } else {
-            self.client.chat().create(oa_request).await
-        }
-        .map_err(|e| TianyanError::Custom(format!("模型服务错误：聊天补全失败：{}", e)))?;
+                let attempted = if let Some(effort) = request.thinking_effort.as_deref() {
+                    if effort == "off" {
+                        self.client.chat().create(oa_request).await
+                    } else {
+                        let mut body =
+                            serde_json::to_value(&oa_request).map_err(|e| RetryableFailure {
+                                retryable: false,
+                                message: format!("序列化请求失败：{}", e),
+                            })?;
+                        apply_thinking_params(&mut body, effort, &request.model);
+                        self.client.chat().create_byot(body).await
+                    }
+                } else {
+                    self.client.chat().create(oa_request).await
+                };
+                attempted.map_err(|e| RetryableFailure {
+                    retryable: match &e {
+                        async_openai::error::OpenAIError::Reqwest(r) => {
+                            crate::model::retry::should_retry_transport(r)
+                        }
+                        _ => false,
+                    },
+                    message: format!("聊天补全失败：{}", e),
+                })
+            },
+        )
+        .await
+        .map_err(|e| TianyanError::Custom(format!("模型服务错误：{}", e.message)))?;
 
         let choices = response
             .choices
@@ -182,6 +202,14 @@ fn apply_thinking_params(body: &mut Value, effort: &str, model: &str) {
     }
 }
 
+/// 请求发送阶段的失败（携带是否可重试的类别标记）；重试是请求层自我保护。
+#[derive(Debug)]
+struct RetryableFailure {
+    /// 是否属于可重试的临时失败（HTTP 429 / 5xx / 网络 / 超时）。
+    retryable: bool,
+    message: String,
+}
+
 impl AsyncOpenAIClient {
     /// 手写 SSE 流式补全：POST {base_url}/chat/completions（body 已含 stream: true），
     /// 逐行解析 data: 事件为内部 ChatCompletionChunk 并经 channel 返回。
@@ -195,27 +223,16 @@ impl AsyncOpenAIClient {
         body: Value,
     ) -> Result<mpsc::Receiver<Result<ChatCompletionChunk>>> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let mut req = self.http.post(&url).json(&body);
-        for (k, v) in &self.headers {
-            req = req.header(k.as_str(), v.as_str());
-        }
-        if !self.api_key.is_empty() && !self.headers.contains_key("Authorization") {
-            req = req.bearer_auth(&self.api_key);
-        }
 
-        let response = req
-            .send()
-            .await
-            .map_err(|e| TianyanError::Custom(format!("模型服务错误：流式请求失败：{}", e)))?;
-        let status = response.status();
-        if !status.is_success() {
-            let detail = response.text().await.unwrap_or_default();
-            let detail: String = detail.chars().take(300).collect();
-            return Err(TianyanError::Custom(format!(
-                "模型服务错误：流式请求被拒绝（HTTP {}）：{}",
-                status, detail
-            )));
-        }
+        // 请求发送阶段内置指数退避重试（全局默认策略，对齐 opencode/dsh-llm-retry）：
+        // HTTP 429 / 5xx / 网络 / 超时 自动退避重试；一旦进入 2xx，流读取失败不再整段重发。
+        let response = crate::model::retry::with_retry(
+            &self.retry_policy,
+            |e: &RetryableFailure| e.retryable,
+            || self.send_chat_request(&url, &body),
+        )
+        .await
+        .map_err(|e| TianyanError::Custom(format!("模型服务错误：{}", e.message)))?;
 
         let mut byte_stream = response.bytes_stream();
         let (tx, rx) = mpsc::channel(100);
@@ -247,6 +264,39 @@ impl AsyncOpenAIClient {
         });
 
         Ok(rx)
+    }
+
+    /// 发送一次流式补全请求并检查状态（供重试循环调用；每次调用重建请求）。
+    async fn send_chat_request(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> std::result::Result<reqwest::Response, RetryableFailure> {
+        let mut req = self.http.post(url).json(body);
+        for (k, v) in &self.headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        if !self.api_key.is_empty() && !self.headers.contains_key("Authorization") {
+            req = req.bearer_auth(&self.api_key);
+        }
+        let response = req.send().await.map_err(|e| {
+            let retryable = crate::model::retry::should_retry_transport(&e);
+            RetryableFailure {
+                retryable,
+                message: format!("流式请求失败：{}", e),
+            }
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            let detail: String = detail.chars().take(300).collect();
+            let retryable = crate::model::retry::should_retry_http(status);
+            return Err(RetryableFailure {
+                retryable,
+                message: format!("流式请求被拒绝（HTTP {}）：{}", status, detail),
+            });
+        }
+        Ok(response)
     }
 
     fn apply_shared_params(

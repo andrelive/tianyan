@@ -429,21 +429,7 @@ export default function ModelsTab({
                 placeholder="sk-... 或 ${ENV_VAR}"
               />
             </FieldRow>
-            <div className="flex items-end gap-2">
-              <div className="flex-1">
-                <FieldRow label="超时 (秒)">
-                  <input
-                    type="number"
-                    min={1}
-                    max={3600}
-                    value={p.timeout}
-                    onChange={(e) =>
-                      onUpdateProvider(pi, 'timeout', parseInt(e.target.value) || 60)
-                    }
-                    className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
-                  />
-                </FieldRow>
-              </div>
+            <div className="flex items-end">
               <button
                 onClick={() => onTestConnection(pi)}
                 disabled={testStatus[pi] === 'testing'}

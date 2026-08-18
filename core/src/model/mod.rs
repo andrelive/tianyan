@@ -40,8 +40,10 @@
 //! ```
 
 pub(crate) mod provider;
-mod services;
 /// 模型上下文规格与内置规格表。
+/// Provider 请求重试策略（指数退避 + 最大重试次数，全局内置默认）。
+pub mod retry;
+mod services;
 pub mod spec;
 mod traits;
 /// 模型类型定义（请求/响应/工具）。
