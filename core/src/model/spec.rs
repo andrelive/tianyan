@@ -120,6 +120,19 @@ pub static BUILTIN_SPECS: &[BuiltinEntry] = &[
         reasoning_efforts: None,
     },
     BuiltinEntry {
+        provider_prefix: "kimi",
+        model_prefix: "kimi-k3",
+        spec: ModelSpec {
+            context_length: 1_000_000,
+            max_output_tokens: 128_000,
+            max_input_tokens: 872_000,
+        },
+        // Kimi K3 官方：always reasons，top-level reasoning_effort 支持 low/high/max
+        display_name: Some("Kimi K3"),
+        advertise: true,
+        reasoning_efforts: Some(&["low", "high", "max"]),
+    },
+    BuiltinEntry {
         provider_prefix: "openai",
         model_prefix: "gpt-4o",
         spec: ModelSpec {
@@ -476,6 +489,29 @@ mod tests {
 
         // 大小写不敏感
         assert_eq!(builtin_catalog_models("DeepSeek").len(), 2);
+    }
+
+    #[test]
+    fn test_builtin_catalog_kimi_k3() {
+        // 官方 kimi provider：目录列表含 kimi-k3（1M 上下文 / 128K 输出 / 档位）
+        let models = builtin_catalog_models("kimi");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "kimi-k3");
+        assert_eq!(models[0].spec.context_length, 1_000_000);
+        assert_eq!(models[0].spec.max_output_tokens, 128_000);
+        assert_eq!(
+            models[0].reasoning_efforts,
+            Some(&["low", "high", "max"][..])
+        );
+
+        // 网关兜底：opencode 挂载 kimi-k3 也能命中（第三级模型名前缀匹配）
+        let hit = builtin_catalog("opencode", "kimi-k3").unwrap();
+        assert_eq!(hit.display_name, Some("Kimi K3"));
+        assert_eq!(hit.spec.context_length, 1_000_000);
+        assert_eq!(hit.reasoning_efforts, Some(&["low", "high", "max"][..]));
+
+        // 同族其他版本（kimi-k2.7-code 等）不命中 kimi-k3 条目
+        assert!(builtin_catalog("opencode", "kimi-k2.7-code").is_none());
     }
 
     #[test]

@@ -1,5 +1,15 @@
 import { useState, useEffect, useRef } from 'react';
-import { Plus, Trash2, TestTube, Check, X, Loader2, RefreshCw } from 'lucide-react';
+import {
+  Plus,
+  Trash2,
+  TestTube,
+  Check,
+  X,
+  Loader2,
+  RefreshCw,
+  ChevronDown,
+  ChevronUp,
+} from 'lucide-react';
 import { Toggle, FieldRow, SectionTitle } from './shared';
 import type {
   ConfigState,
@@ -222,6 +232,8 @@ export default function ModelsTab({
       }
     >
   >({});
+  /* 每个 provider 的模型列表折叠态（默认收起；仅 UI state，不持久化） */
+  const [collapsed, setCollapsed] = useState<Record<number, boolean>>({});
 
   const handleScanModels = async (
     pi: number,
@@ -366,12 +378,24 @@ export default function ModelsTab({
           models: [],
           error: null,
         };
+        const isCollapsed = collapsed[pi] ?? true;
         return (
         <div
           key={p.name || pi}
           className="border border-[var(--color-border)] rounded-lg p-4 mb-3 space-y-3"
         >
-          <div className="grid grid-cols-[1fr_1fr_auto_auto] gap-3 items-end">
+          <div className="grid grid-cols-[auto_1fr_1fr_auto_auto] gap-3 items-end">
+            <button
+              type="button"
+              onClick={() => setCollapsed((prev) => ({ ...prev, [pi]: !(prev[pi] ?? true) }))}
+              aria-label={`${p.name} ${isCollapsed ? '展开' : '收起'}模型列表`}
+              aria-expanded={!isCollapsed}
+              title={isCollapsed ? '展开模型列表' : '收起模型列表'}
+              className="flex items-center gap-1 px-2 py-1.5 rounded-md text-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors self-end"
+            >
+              {isCollapsed ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+              <span className="text-[10px] font-medium">{p.models.length}</span>
+            </button>
             <FieldRow label="名称">
               <input
                 type="text"
@@ -592,6 +616,7 @@ export default function ModelsTab({
           </div>
 
           {/* ── Models under this provider ── */}
+          {!isCollapsed && (
           <div className="pt-2 border-t border-[var(--color-border)]">
             <div className="flex items-center justify-between mb-2">
               <span className="text-sm font-medium text-[var(--color-text-primary)]">模型列表</span>
@@ -726,6 +751,7 @@ export default function ModelsTab({
               </div>
             ))}
           </div>
+          )}
         </div>
         );
       })}

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
@@ -14,6 +14,15 @@ function renderSettingsPanel() {
       <SettingsPanel />
     </MemoryRouter>,
   );
+}
+
+/** 模型列表默认折叠 → 展开指定 provider 的模型列表（aria-label: name + 展开模型列表）。 */
+/** 模型列表默认折叠 → 展开指定 provider 的模型列表（等待渲染后点击）。 */
+async function expandModelList(name: string) {
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: name + ' 展开模型列表' })).toBeInTheDocument();
+  });
+  fireEvent.click(screen.getByRole('button', { name: name + ' 展开模型列表' }));
 }
 
 /** 覆盖 GET /config 为 2 个 provider / 3 个 model 的配置。 */
@@ -189,6 +198,8 @@ describe('SettingsPanel tabs', () => {
   it('renders provider and model lists from config (2 providers / 3 models)', async () => {
     useTwoProviderConfig();
     renderSettingsPanel();
+    await expandModelList('openai');
+    await expandModelList('deepseek');
 
     // 模型列表：3 个模型名称 + 2 个 provider 端点
     await waitFor(() => {
@@ -402,6 +413,7 @@ describe('SettingsPanel tabs', () => {
 
     // 批量 adopt：新模型默认勾选 → 点「添加选中 N 个」→ 模型写入对应 provider
     await user.click(screen.getByRole('button', { name: /添加选中/ }));
+    await expandModelList('openai');
     expect(screen.getByDisplayValue('llama3:8b')).toBeInTheDocument();
     expect(screen.getByDisplayValue('nomic-embed-text')).toBeInTheDocument();
   });
@@ -478,6 +490,7 @@ describe('SettingsPanel tabs', () => {
     );
 
     renderSettingsPanel();
+    await expandModelList('openai');
     await waitFor(() => {
       expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
     });
@@ -508,6 +521,8 @@ describe('SettingsPanel tabs', () => {
   it('gates spec inputs by model capability: chat/vision vs embedding', async () => {
     useSpecConfig();
     renderSettingsPanel();
+    await expandModelList('openai');
+    await expandModelList('deepseek');
     await waitFor(() => {
       expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
     });
@@ -521,6 +536,7 @@ describe('SettingsPanel tabs', () => {
 
   it('shows built-in default placeholders on unconfigured spec inputs', async () => {
     renderSettingsPanel(); // mockTianyanConfig：模型无规格字段
+    await expandModelList('openai');
     await waitFor(() => {
       expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
     });
@@ -536,6 +552,8 @@ describe('SettingsPanel tabs', () => {
   it('renders resolved spec rows with compact number abbreviations from model_specs', async () => {
     useResolvedSpecConfig();
     renderSettingsPanel();
+    await expandModelList('openai');
+    await expandModelList('deepseek');
     await waitFor(() => {
       expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
     });
@@ -551,6 +569,8 @@ describe('SettingsPanel tabs', () => {
   it('shows 自定义 badge for models with explicit fields and 自动匹配 for auto-matched ones', async () => {
     useResolvedSpecConfig();
     renderSettingsPanel();
+    await expandModelList('openai');
+    await expandModelList('deepseek');
     await waitFor(() => {
       expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
     });
@@ -562,6 +582,7 @@ describe('SettingsPanel tabs', () => {
 
   it('does not render resolved spec rows when response has no model_specs (old backend)', async () => {
     renderSettingsPanel(); // mockTianyanConfig：响应无 model_specs
+    await expandModelList('openai');
     await waitFor(() => {
       expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
     });
@@ -575,6 +596,8 @@ describe('SettingsPanel tabs', () => {
   it('gates resolved spec row fields by capability: embedding shows only input limit', async () => {
     useResolvedSpecConfig();
     renderSettingsPanel();
+    await expandModelList('openai');
+    await expandModelList('deepseek');
     await waitFor(() => {
       expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
     });
@@ -641,6 +664,7 @@ describe('SettingsPanel tabs', () => {
     );
 
     renderSettingsPanel();
+    await expandModelList('openai');
     await waitFor(() => {
       expect(screen.getByDisplayValue('gpt-4o')).toBeInTheDocument();
     });

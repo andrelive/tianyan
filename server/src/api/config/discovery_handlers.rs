@@ -277,6 +277,7 @@ pub async fn scan_provider_models(
 ) -> Result<Json<ProviderScanResponse>, ApiError> {
     let protocol = resolve_protocol(request.protocol.as_deref())?;
     let endpoint = normalize_endpoint(request.endpoint.as_deref(), protocol);
+    let provider = request.provider.as_deref().unwrap_or("").trim();
     let url = if protocol == "ollama" {
         format!("{endpoint}/api/tags")
     } else {
@@ -286,9 +287,7 @@ pub async fn scan_provider_models(
     // 内置目录零网络路径：协议为 openai 且 provider 名命中内置目录时，
     // 直接返回目录模型（规格 + 默认档位），不发起网络请求。
     if protocol == "openai" {
-        let catalog = tianyan::model::spec::builtin_catalog_models(
-            request.provider.as_deref().unwrap_or("").trim(),
-        );
+        let catalog = tianyan::model::spec::builtin_catalog_models(provider);
         if !catalog.is_empty() {
             let models: Vec<ProviderModelInfo> = catalog
                 .into_iter()
@@ -304,11 +303,7 @@ pub async fn scan_provider_models(
                         .map(|efforts| efforts.iter().map(|s| s.to_string()).collect()),
                 })
                 .collect();
-            info!(
-                provider = %request.provider.as_deref().unwrap_or(""),
-                count = models.len(),
-                "内置目录命中，跳过网络扫描"
-            );
+            info!(provider, count = models.len(), "内置目录命中，跳过网络扫描");
             return Ok(Json(ProviderScanResponse {
                 success: true,
                 models,
@@ -354,16 +349,34 @@ pub async fn scan_provider_models(
                 let body: OpenAiModelsResponse = resp.json().await.map_err(provider_parse_error)?;
                 body.data
                     .into_iter()
-                    .map(|m| ProviderModelInfo {
-                        capabilities: infer_capabilities(&m.id),
-                        name: m.id.clone(),
-                        size: None,
-                        display_name: m.display_name.or(m.name).or(Some(m.id)),
-                        // 网关扩展字段：context_window/context_length、
-                        // max_output_tokens/max_tokens（OpenRouter/Together 等提供）
-                        context_length: m.context_window.or(m.context_length),
-                        max_output_tokens: m.max_output_tokens.or(m.max_tokens),
-                        reasoning_efforts: None,
+                    .map(|m| {
+                        // 端点扩展字段优先（OpenRouter/Together 等网关提供）；
+                        // 标准 OpenAI /models 不返回容量 → 用内置规格表按模型名兜底
+                        // （builtin_catalog 三级前缀匹配，网关挂载知名模型也能命中）。
+                        let catalog = tianyan::model::spec::builtin_catalog(&provider, &m.id);
+                        ProviderModelInfo {
+                            capabilities: infer_capabilities(&m.id),
+                            name: m.id.clone(),
+                            size: None,
+                            display_name: m
+                                .display_name
+                                .or(m.name)
+                                .or_else(|| {
+                                    catalog.and_then(|c| c.display_name.map(str::to_string))
+                                })
+                                .or(Some(m.id)),
+                            context_length: m
+                                .context_window
+                                .or(m.context_length)
+                                .or(catalog.map(|c| c.spec.context_length as u64)),
+                            max_output_tokens: m
+                                .max_output_tokens
+                                .or(m.max_tokens)
+                                .or(catalog.map(|c| c.spec.max_output_tokens as u64)),
+                            reasoning_efforts: catalog
+                                .and_then(|c| c.reasoning_efforts)
+                                .map(|efforts| efforts.iter().map(|s| s.to_string()).collect()),
+                        }
                     })
                     .collect()
             };
