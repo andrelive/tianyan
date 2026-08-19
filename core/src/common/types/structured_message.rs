@@ -296,6 +296,12 @@ impl StructuredMessage {
                     input: tu.prompt_tokens,
                     output: tu.completion_tokens,
                     total: tu.total_tokens,
+                    // 缓存明细必须保留：历史加载/全局统计依赖 cache.read/write，
+                    // 此前 ..Default::default() 把缓存命中信息丢弃（刷新后显示 0）
+                    cache: CacheUsage {
+                        read: tu.cache_read,
+                        write: tu.cache_write,
+                    },
                     ..Default::default()
                 })
                 .unwrap_or_default(),

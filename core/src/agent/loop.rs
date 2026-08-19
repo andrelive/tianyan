@@ -49,6 +49,9 @@ pub enum AgentLoopResult {
         content: String,
         /// Token 用量。
         total_tokens: TokenUsage,
+        /// 最后一轮 LLM 调用的单轮用量（上下文占用语义：prompt_tokens 即
+        /// 当前请求实际输入窗口；total_tokens 为跨轮累计，仅用于计费统计）。
+        last_turn_usage: Option<TokenUsage>,
         /// 循环轮数。
         turns: usize,
         /// AgentLoop 已持久化的 StructuredMessage，coordinator 直接复用此消息加入状态，避免重复创建。
@@ -60,6 +63,8 @@ pub enum AgentLoopResult {
         question: String,
         /// Token 用量。
         total_tokens: TokenUsage,
+        /// 最后一轮 LLM 调用的单轮用量（语义同 Answer）。
+        last_turn_usage: Option<TokenUsage>,
         /// 循环轮数。
         turns: usize,
     },
@@ -67,6 +72,8 @@ pub enum AgentLoopResult {
     Cancelled {
         /// Token 用量。
         total_tokens: TokenUsage,
+        /// 最后一轮 LLM 调用的单轮用量（语义同 Answer）。
+        last_turn_usage: Option<TokenUsage>,
         /// 已执行的循环轮数。
         turns: usize,
     },
@@ -548,6 +555,7 @@ impl AgentLoop {
             if Self::is_cancelled(cancel) {
                 return Ok(AgentLoopResult::Cancelled {
                     total_tokens,
+                    last_turn_usage: None,
                     turns: turn,
                 });
             }
@@ -567,6 +575,7 @@ impl AgentLoop {
                         if Self::is_cancelled(cancel) {
                             return Ok(AgentLoopResult::Cancelled {
                                 total_tokens,
+                                last_turn_usage: None,
                                 turns: turn + 1,
                             });
                         }
@@ -596,6 +605,7 @@ impl AgentLoop {
                                 if Self::is_cancelled(cancel) {
                                     return Ok(AgentLoopResult::Cancelled {
                                         total_tokens,
+                                        last_turn_usage: None,
                                         turns: turn + 1,
                                     });
                                 }
@@ -684,6 +694,7 @@ impl AgentLoop {
                 return Ok(Some(AgentLoopResult::NeedsClarification {
                     question: params.question,
                     total_tokens: ctx.total_tokens.clone(),
+                    last_turn_usage: turn_usage.clone(),
                     turns: ctx.turn + 1,
                 }));
             }
@@ -696,7 +707,7 @@ impl AgentLoop {
         // Clone before moving into persist_message — needed for the
         // Answer result in the no-tool-calls branch below.
         let persisted = self
-            .persist_message(ctx, assistant_msg, turn_usage, finish_reason)
+            .persist_message(ctx, assistant_msg, turn_usage.clone(), finish_reason)
             .await;
 
         if let Some(tool_calls) = tool_calls {
@@ -748,6 +759,7 @@ impl AgentLoop {
                         err_msg
                     ),
                     total_tokens: ctx.total_tokens.clone(),
+                    last_turn_usage: turn_usage.clone(),
                     turns: ctx.turn + 1,
                 }));
             }
@@ -779,6 +791,7 @@ impl AgentLoop {
                 Ok(Some(AgentLoopResult::Answer {
                     content: String::new(),
                     total_tokens: ctx.total_tokens.clone(),
+                    last_turn_usage: turn_usage.clone(),
                     turns: ctx.turn + 1,
                     persisted_message: Box::new(persisted),
                 }))
@@ -795,6 +808,7 @@ impl AgentLoop {
             Ok(Some(AgentLoopResult::Answer {
                 content: assistant_msg.content.clone(),
                 total_tokens: ctx.total_tokens.clone(),
+                last_turn_usage: turn_usage.clone(),
                 turns: ctx.turn + 1,
                 persisted_message: Box::new(persisted),
             }))

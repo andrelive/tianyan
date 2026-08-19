@@ -629,6 +629,7 @@ impl Agent {
             Ok(AgentLoopResult::Answer {
                 content,
                 total_tokens,
+                last_turn_usage,
                 persisted_message,
                 ..
             }) => {
@@ -650,13 +651,19 @@ impl Agent {
                         resp
                     }
                     TurnMode::Stream { sender } => {
+                        // 上下文占用语义用最后一轮单轮用量（跨轮累计值只用于
+                        // 计费统计，不能当当前输入窗口展示——否则多轮工具
+                        // 循环后前端显示超过 100% 的假占用）
+                        let usage = last_turn_usage
+                            .clone()
+                            .unwrap_or_else(|| total_tokens.clone());
                         sender
                             .send_complete(
                                 "",
                                 StreamChunkType::Answer,
                                 None,
                                 finish_reason,
-                                Some(total_tokens.clone()),
+                                Some(usage),
                             )
                             .await;
                         let mut resp = AgentResponse::simple(content);
@@ -706,6 +713,7 @@ impl Agent {
             }
             Ok(AgentLoopResult::Cancelled {
                 total_tokens,
+                last_turn_usage: _,
                 turns,
             }) => {
                 tracing::info!(turns, "AgentLoop 被取消");
