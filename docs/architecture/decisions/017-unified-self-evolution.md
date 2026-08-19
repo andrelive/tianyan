@@ -1,180 +1,191 @@
-# ADR-017: 统一自演化任务（EvolutionTask）—— 一个交给智能体自己的自我总结与演化
+# ADR-017: 统一自演化架构（摘要独立 + 每日演化智能体任务 + GEPA 数据层 + FTS5 会话回忆）
 
 **日期**: 2026-08-19
-**状态**: 提议（待评审）
-**影响范围**: 调度任务（`core/src/scheduler/tasks/evolution_task.rs` 新增，`summary_task.rs` / `memory_task.rs` / `rule_task.rs` 并入或移除）、
-技能学习（`core/src/skills/learning/`）、记忆提取（`core/src/memory/`）、
-会话末演化触发（`core/src/agent/coordinator.rs` / `agent_core.rs`）、
-角色注册表（`core/src/agent/roles.rs`）、配置（`core/src/config/`）、
-任务注册装配（`server/src/lib.rs`）
+**状态**: 已采纳（设计定稿，待实施）
+**影响范围**: 调度任务（`core/src/scheduler/tasks/`）、技能学习（`core/src/skills/learning/`）、
+记忆提取（`core/src/memory/`）、会话存储与检索（`core/src/session/`）、
+检索路由（`core/src/context/retrieval/`）、可观测性（`core/src/agent/tool_registry/observability.rs`）、
+角色注册表（`core/src/agent/roles.rs`）、配置（`core/src/config/`）、任务注册装配（`server/src/lib.rs`）
 
 ---
 
 ## 背景
 
-1. **现状：四类加工任务各自为政，产物互不收敛。** 天演现有三类定时加工任务
-   （`summary_generation` 每 5 分钟、`memory_extraction` 每 10 分钟、`rule_extraction`
-   每 15 分钟）加上会话末的 GEPA 技能/角色学习 hook（`learn_skills_from_session`）。
-   它们的输入维度不同（全文 / 轨迹 / 摘要）、频率不同、产物互相独立：
-   - 记忆（`memory/`）只写不合并去重、无冲突消解、无退役；
-   - 技能（`skill/learned/`）与规则（`agent/learned/`）只能由模板类轨迹重复触发，没有
-     "回头扫所有历史、对照现有注册表全局收敛"的视角；
-   - 事实/记忆与技能/规则由两条不相交的输入（会话正文 vs 工具轨迹）生成，互不见面。
-2. **缺口即讨论结论**：天演缺"跨会话综合提炼层"——一个定时/低频、把"未总结/未抽象的会话"
-   与当前 智能体/技能/事实/记忆 注册表对照、逐个增删改的环节。现有水位线机制
-   （`memory/events/extraction_state/{session_id}` 的 `last_extracted_message_count`、
-   摘要的 metadata updated_at 比对）已经承担"找未处理增量"，但它们只做单点加工，不做全局收敛。
-3. **目标形态（用户愿景）**：不再有记忆提取任务、技能提取任务、子智能体提取任务——
-   只有**一个交给智能体自己的自我总结演化任务**。归纳机制（GEPA 或其它统计）可替换。
-4. **承载能力已全部存在**：`process_wake`（ADR-013 唤醒轮：外部触发主 agent 跑一轮）、
-   `delegate_to_agent` + 角色（ADR-016：三类来源平级、注册表 VFS 持久化）、
-   `TaskScheduler` + `SchedulerTaskTrigger`（事件 `task:` 动作可触发任意调度任务）、
-   VFS 双层摘要（L0/L1）。本 ADR 只做"收口"，不发明新积木。
+1. **现状：四类加工任务各自为政。** `summary_generation`（5min）、`memory_extraction`（10min）、
+   `rule_extraction`（15min）三个定时任务 + 会话末 GEPA 技能/角色学习 hook，输入维度不同
+   （全文/轨迹/摘要）、频率不同、产物互不收敛：记忆只写不合并去重、技能/规则只能由模板类
+   轨迹重复触发、事实与技能由两条不相交的输入生成。
+2. **"会话末"是伪概念。** `Session.end()` / `ended_at` 是死代码（仅测试调用），无 API/GUI 入口；
+   会话是跨天跨周的长期 JSONL 文件。任何依赖"会话结束"事件的设计都不可靠。
+3. **四项演化工作圈定**（讨论确认）：
+   - **记忆**：从会话内容绘制用户画像、总结喜好（`memory/`）；
+   - **摘要**：对 VFS 内容摘要化，支撑 L0/L1 向量检索；
+   - **技能**：从执行数据、对话材料总结工作经验与方法论（`skill/learned/`，规则 `agent/learned/` 归入）；
+   - **子智能体**：从协作数据探索组织协作模式（`agent_role/`）。
+4. **目标形态（用户愿景）**：不再有记忆提取任务、技能提取任务、子智能体提取任务——
+   只有一个交给智能体自己的自我总结演化任务。归纳机制（GEPA 或其它统计）可替换。
+5. **检索现状**：会话回忆（"刚才/之前/上次"）走向量检索会话 L0/L1——语义弱（关键词指代）、
+   成本高（embedding + 摘要生成）。
 
 ---
 
 ## 决策
 
-### 1. 统一演化任务 `evolution`
+### 1. 摘要独立（业务逻辑不变，降频 6-8 小时）
+
+- `SummaryTask` 保留，cron 从每 5 分钟改为每 6-8 小时（`0 0 */6 * * *` / `0 0 */8 * * *`；
+  自研 cron 仅支持 `*/N` 间隔）；
+- 低风险依据：知识导入路径**同步生成摘要**（`knowledge/ingestor` 内联 `generate_summaries`），
+  记忆/技能/角色/规则写入时内联写 abstract——SummaryTask 只是兜底（补缺摘要/过期摘要）；
+- **范围排除 Session 命名空间**：会话不再生成 L0/L1（回忆改 FTS5，见决策 6）。
+
+### 2. 每日演化智能体任务（`evolution`）
 
 新增 `TaskHandler`（`EvolutionTask`），注册进 `TaskScheduler`：
 
-- 任务 ID：`evolution`，显示名"自演化综述"；
-- Cron：默认 `0 0 */24 * * *`（**每天一次**；自研 cron 只支持 `*/N` 间隔，
-  小时位 `*/24` = 86400s，见 `parse_cron_interval`。可配置调高频率）；
-- 仍受 `has_providers` 门控（与现状一致：无启用模型 provider 时不装配）。
-
-任务内部固定四阶段（单实例、串行执行）：
+- 任务 ID：`evolution`，cron 默认 `0 0 */24 * * *`（每天一次），仍受 `has_providers` 门控；
+- 内部三阶段（单实例、串行）：
 
 ```
-Phase 0 采集    读未消费执行轨迹 + 未提取会话 + 缺摘要条目（增量，水位线驱动）
-Phase 1 归纳    轨迹 → GEPA 技能/角色引擎；缺摘要条目 → 摘要引擎生成 L0/L1
-Phase 2 综述    交给智能体自己：对照注册表，产出"增/改/删"diff 计划（只读，不落库）
-Phase 3 守卫提交 逐类型验证门 + 软删除/版本回退保障 + 应用到 VFS + 演化报告
+阶段 0 采集    水位线驱动的"新材料"清单：新消息批次（消息索引 seq 水位线）、
+              新执行记录（GEPA 数据层时间水位线）、新委托记录
+阶段 1 综述    演化智能体（delegate 到内置角色 evolution_reviewer）：
+              读统计工具 + 自行查看历史记忆/技能/组织形态 → 输出增删改 diff 计划
+阶段 2 记账提交 软删除/归档 + 版本链 + 演化报告（无机械阈值，仅记账）
 ```
 
-### 2. 阶段定义
+- **演化智能体**：`delegate_to_agent` 到内置新角色 `evolution_reviewer`
+  （工具白名单 = 只读 VFS + 统计查询 + 会话回忆，无写注册表工具）；专门提示词约束：
+  写新技能前查现有技能（语义重复则完善而非新建）、只把稳定跨会话偏好写入画像、删除需证据；
+- **无机械阈值**：去重（Jaccard）、偏好校验（verify_preference）、G2b 打分全部移除——
+  由智能体判断 + 提示词承担（智能体具备查看历史的能力）；
+- **幂等**：`TaskStateStore` + 水位线；阶段 2 仅应用"引用的条目仍存在"的变更。
 
-**Phase 0 — 采集（增量）**
-- 执行轨迹：会话结束时的行为从"即时喂 GEPA 学习"降级为"**持久化轨迹**"（廉价 hook、
-  无 LLM、类似 `RuleRecorder`）：把本会话 `drain_execution_history()` 的批次追加到
-  `tianyan://agent/_evolution/traces/{session_id}.jsonl`。演化任务读全部未消费轨迹
-  （消费水位线见"状态与水位线"）。
-- 未提取会话：复用 `memory/events/extraction_state/{session_id}` 水位线找
-  `current_count > last_extracted_message_count` 的会话（现 `MemoryTask.scan_sessions` 逻辑原样搬入）。
-- 缺摘要条目：复用 `SummaryTask.needs_summary`（Detail 比 Abstract/Overview 更新即缺）——metadata 驱动，无状态。
+### 3. GEPA 数据层（不再生成；完整 GEPA = 数据层 + 判断层 + 记账层）
 
-**Phase 1 — 归纳**
-- 轨迹 → `SkillLearningEngine.learn_from_history` + `RoleLearningEngine.learn_from_history`
-  （ADR-016 双管线，原样保留内部守卫：分类聚类、G2b 候选验证门、bigram dedup 门、成功率门控）。
-- 缺摘要条目 → `SummaryEngine.generate_summaries` 写 L0/L1（**先补摘要再过综述**，
-  让 Phase 2 读 L0/L1 而非全文，控制 token 成本）。
+- **数据层**：observability 监听器把每次工具执行记录持久化到 SQLite（`executions` 表：
+  task_description、category、success、耗时、skills_used、session_id、时间戳、steps JSON）；零 LLM；
+- **统计查询工具**（供演化智能体调用）：`execution_stats`（按类别/时间/成功率，支持 since 参数）、
+  `execution_detail`（原始记录）、`delegation_stats`（角色使用统计，复用 `record_role_usage` 数据）；
+- **移除**：`SkillLearningEngine` / `RoleLearningEngine` 的 LLM 生成、G2b 门、Jaccard 门、
+  成功率门控——生成与判断并入演化智能体；
+- **完整 GEPA 定义**：演化循环 = 环境感知（数据层统计）→ 生成候选（智能体）→ 评估（智能体对照历史）
+  → 选择（智能体决定）→ 保留/淘汰（版本链/归档）。现在的机械流水线是残缺版，
+  加上智能体判断层才是完整 GEPA。
 
-**Phase 2 — 综述（交给智能体自己）**
-- 机制（可配置，默认 B）：
-  - **B（推荐）**：`delegate_to_agent` 到内置新角色 `evolution_reviewer`
-    （工具白名单 = 只读 VFS 检索 + JSON 输出，无任何写注册表工具）；
-  - A：`process_wake` 唤醒主 agent + 演化指令系统消息（复用 ADR-013 唤醒轮）。
-- 提示词输入：① Phase 0 找出的"未摘要/未提取"会话的 L0/L1 摘要 + 来源溯源；② 当前注册表清单
-  （`memory/*`、`skill/learned/*`、`agent/learned/*`、`agent_role/*`）。
-- 输出：**结构化 diff 计划**（JSON）：
-  `{ "adds": [{type, content, importance, source_ids}], "updates": [{id, new_content, reason}], "deletes": [{id, reason, evidence}], "conflicts": [{id_a, id_b, description}], "new_roles": [...] }`
-- 边界：每轮处理条目数上限（config `max_items_per_run`，默认如 200），防止单次任务 token 爆炸；
-  综述角色**只产出计划、不直接改库**——"提议"与"提交"分离是本 ADR 的核心守卫。
+### 4. 片段模型（替代"会话末"）
 
-**Phase 3 — 守卫提交**
-- 逐类型验证门（迁移+保留现状守卫，位置从各任务尾部统一到提交前）：
-  - preference 写前校验（`memory_extractor.verify_preference`，opt-in `verify_preferences`）；
-  - skill/role 新增仍走 dedup（与已有技能摘要 bigram Jaccard ≥ 阈值 → 完善而非新建）；
-  - **delete 必须有证据**：被新条目取代 / 评审低分（`skill/_reviews/` 复用）/ 用户确认；
-    满足才算合法删除。默认 `delete_requires_evidence = true`。
-- 删除一律**软删除**：条目移入 `_archive/`（保 lineage 与 version，可回退；对 ADR-016 版本链）。
-- 应用 diff → VFS 写入、版本号递增、记录 `lineage` 理由；
-- 写演化报告 `memory/events/evolution_reports/{ts}.md`（本周期新增/更新/删除/冲突清单 +
-  统计），既是可观测性，也是回退依据。
+- 处理单元 = **片段（episode）**：压缩点 marker ∪ 空闲间隔（>24h）∪ 新会话；
+- 会话 = 片段序列；跨天会话的"周一聊 X、周三聊 Y"各自成片段，独立总结/对照注册表；
+- 增量 = 水位线：消息 seq 水位线（自上次提取以来的新消息）、执行记录时间水位线；
+- 不依赖任何"会话结束"事件。
 
-### 3. 被替换 / 保留清单
+### 5. 规则归入技能 + 实时记录保留
+
+- `RuleRecorder`（工具失败即时记录，无 LLM、管线内）**保留**——"同一失败别犯第二次"不能等每日任务；
+- 规则**提炼**（聚类 → 规则升级，原 `RuleTask`）并入演化任务阶段 1；
+- 规则产物 `agent/learned/` 与技能 `skill/learned/` 同属"经验方法论"，同一演化管线管理。
+
+### 6. FTS5 会话回忆（方案 A：JSONL 权威 + 派生消息索引）
+
+- **会话不进向量检索**：不再生成会话 L0/L1，省掉摘要 + embedding 成本；
+- **JSONL 保持权威**（VFS 不变，会话加载/压缩/快照零改动）；
+- **派生消息索引**（SQLite，可重建）：`messages` 表（session_id、seq、message_id、role、
+  text——仅 user/assistant 文本、time、tokens、has_tool）+ FTS5 倒排索引
+  （trigram tokenizer 支持中文子串匹配，BM25 排序）；
+- **写入**：`append_message_to_vfs` 同步插索引行（hook，零 LLM）；
+- **回忆流程**：intent 路由 Session 关键词 → `SessionRecall` 服务 → FTS5 搜索 → 命中定位（seq）
+  → 取附近窗口（`seq BETWEEN hit±N AND role IN ('user','assistant')`）→
+  **工具调用/结果天然被过滤**（未进 text 列）；
+- **记忆提取**：保留工具结果但**截断到要点**（前 N 字符）——工具结果有时是关键信息
+  （失败教训来源）；回忆检索完全忽略工具；
+- **架构落位**：`SessionRecall` 是 session 模块能力（共享 SqliteDb，派生数据），
+  **不新增平行检索抽象**——"VFS 是唯一检索抽象"约束不破；
+- **检索分工**：向量 = 知识/记忆/技能/画像（语义）；FTS5 = 会话回忆（关键词）。
+  两者互补，唯一交汇点是 intent 路由；未来可 RRF 融合（VFS 已有 RRF 机制）。
+
+### 7. 保留 / 移除清单
 
 | 现有项 | 处理 |
 |--------|------|
-| `summary_generation`（5min） | **移除注册**，逻辑并入 Phase 1 |
-| `memory_extraction`（10min） | **移除注册**，逻辑并入 Phase 0/1/2 |
-| `rule_extraction`（15min） | **移除注册**，`RuleSuggester` 聚类→规则提炼并入 Phase 1/3 |
-| 会话末 `learn_skills_from_session`（GEPA/角色） | 从 coordinator 移除，改为"轨迹持久化 hook"（Phase 0 输入源） |
-| `RuleRecorder`（失败即时记录） | **保留**（实时、管线内、无 LLM；"别犯第二次"不能等到每天） |
-| ToolRegistry observability 轨迹采集 | **保留**（GEPA 输入源，非任务） |
-| `garbage_collection` / `snapshot_gc` / `usage_stats_flush` / `reminder` | **保留**（工程维护/独立功能，明确不属于演化，不并入） |
+| `summary_generation`（5min） | **保留**，降频 6-8h，范围排除 Session |
+| `memory_extraction`（10min） | **移除注册**，并入演化任务（智能体经消息索引提取） |
+| `rule_extraction`（15min） | **移除注册**，提炼并入演化任务 |
+| 会话末 `learn_skills_from_session`（GEPA/角色） | **移除**，改为轨迹持久化 hook（GEPA 数据层输入） |
+| `RuleRecorder`（失败即时记录） | **保留**（实时、管线内、无 LLM） |
+| ToolRegistry observability 轨迹采集 | **保留**，改为持久化到 SQLite |
+| `garbage_collection` / `snapshot_gc` / `usage_stats_flush` / `reminder` | **保留**（工程维护/独立功能，不并入） |
+| 会话 L0/L1 向量化 | **移除**（FTS5 回忆替代） |
 
-### 4. 状态与水位线
+### 8. 软删除与版本链（记账层，非判断门）
 
-- 复用 `TaskStateStore`（G5）：`evolution` 任务跨运行状态读写；
-- 轨迹消费水位线：`agent/_evolution/state`（已处理到哪个批次的 URI/timestamp）——
-  服务器重启不丢轨迹（轨迹已持久化，水位线保证续跑幂等）；
-- 会话提取水位线：复用现有 `extraction_state/{session_id}`；
-- 摘要：metadata（updated_at）驱动，无状态。
-- **幂等**：Phase 2 产出前先对照当前注册表核对；Phase 3 仅应用"引用的条目仍存在且未被并发修改"的
-  变更（写前 exists/updated_at 复核）。演化任务单实例串行，天然无自竞争。
+- 记忆/技能/角色/规则的删除一律**软删除**：条目移入 `_archive/`，保留 `lineage` 与 `version`
+  （可回退，对 ADR-016 版本链）；
+- 每次演化任务写演化报告（`memory/events/evolution_reports/{ts}.md`：增删改清单 + 统计），
+  可观测性 + 回退依据；
+- 组织形态（角色）退役尤其保守：长期会话中智能体稳定性优先，未必立刻删除。
 
-### 5. 配置
+### 9. 配置
 
-新增 `[evolution]` 节（`core/src/config/`）：
-`enabled`（默认 true）、`cron`（默认 `0 0 */24 * * *`）、`max_items_per_run`（默认 200）、
+新增 `[evolution]` 节：`enabled`（默认 true）、`cron`（默认 `0 0 */24 * * *`）、
 `review_role`（默认 `evolution_reviewer`）、`mechanism`（`delegate` | `wake`，默认 delegate）、
-`delete_requires_evidence`（默认 true）。与记忆/提醒配置同模式（serde default fn + validate）。
-
-### 6. 归纳器可替换（用户关于"GEPA 或其它统计"的确认）
-
-本 ADR 将"归纳器"视为**可替换的实现**：GEPA（轨迹→技能/角色）是默认实现，
-任何"从轨迹/文本到结构化产物"的方案（关键词统计、模板聚类、纯 LLM 生成等）都可在 Phase 1
-内部替换。**守卫管线**（验证门/去重门/成功率门控/diff 提交分离）是架构价值，与具体归纳器解耦、
-保留不变——换归纳器不影响本 ADR 的其余部分。
+`max_items_per_run`（默认 200）、`idle_episode_hours`（默认 24）。
+摘要任务 cron 与记忆/提醒配置同模式（serde default fn + validate）。
 
 ---
 
 ## 后果
 
 ### 正面
-- 加工任务收敛为**一个**："只有一次交给智能体自己的自我总结演化任务"，符合用户愿景；
-- 跨会话综合提炼层落地：去重/合并/冲突消解/退役/全局对照注册表的增删改；
-- 统一演化节奏后，产物之间不再有"谁先谁后"的时序竞态；
+- 加工任务收敛为一个：只有一次交给智能体自己的自我总结演化任务；
+- 跨会话综合提炼层落地：去重/合并/冲突消解/退役/全局对照注册表；
+- 会话回忆成本大幅下降（FTS5 零 embedding，省掉会话向量化）；
+- "会话末"伪概念消除，片段模型对齐压缩点（ADR-012 刷新点）；
 - 会话末零 LLM（GEPA 移到低频任务），日常对话延迟与 token 消耗下降。
 
 ### 负面 / 代价
-- 技能/角色学习从"会话末即时"变成"每天一次"：新技能/角色当天不可见
-  （产物在 ADR-012 的会话边界/启动/压缩点刷新，次日自然可用；config 可调高频率缓解）；
-- 全量综述 token 成本集中在单次运行（L0/L1 + `max_items_per_run` 控制）；
+- 技能/角色学习从"会话末即时"变成"每天一次"：新技能/角色当天不可见（config 可调频缓解）；
+- 全量综述 token 成本集中在单次运行（统计工具 + 片段摘要 + `max_items_per_run` 控制）；
 - 单点风险：演化任务失败则该周期无加工（水位线保证下周期续跑不丢数据）；
-- 综述的 LLM 判断仍有劣化风险——靠 diff 提议/提交分离 + 删除证据门 + 软删除回退兜底，
-  ADR-016 的 `version/lineage` 回退链原样保留。
+- 智能体判断非确定性：跨运行可能不一致——靠演化报告 + 版本链回退兜底；
+- 消息索引与 JSONL 可能短暂漂移（append hook 失败）——索引可重建，无害。
 
 ## 边界条件（违反即重新评估）
 
-- 综述导致注册表错删/劣化且回退未兜底 → 强化"delete 需要证据 + 软删除"策略，或改人工确认删除；
-- 每天一次导致技能/角色时效性明显不足（用户体感）→ 拆出增量触发点（会话边界或低水位即时触发归纳）；
-- `evolution` 单次运行超过成本上限 → 分片处理（分段水位线）或回退多任务拆分。
+- 综述导致注册表错删/劣化且回退未兜底 → 强化删除证据要求或改人工确认；
+- 每天一次导致技能/角色时效性明显不足 → 拆出增量触发点（会话边界或低水位即时触发）；
+- FTS5 回忆命中率不足（用户体感）→ 会话命名空间恢复向量化或 FTS5+向量 RRF 融合；
+- `evolution` 单次运行超过成本上限 → 分片处理或回退多任务拆分。
 
 ## 与既有决策的关系
 
 | 决策 | 关系 |
 |------|------|
-| ADR-013（唤醒轮） | Phase 2 机制 A 直接使用 `process_wake`；演化任务完成后可用 `AgentWakeForwarder` 通知 |
-| ADR-016（角色化自演化） | Phase 2 机制 B 使用 `delegate_to_agent`；演进产物落 `agent_role/`；本 ADR 补上 P2/P3 占位的"综合提炼/机会检测"环节 |
-| ADR-012（前缀快照） | 技能/角色更新仍在会话边界/启动/压缩点刷新——演化任务产物在这三个免费刷新点自然可见 |
-| ADR-001（VFS 双层摘要） | Phase 2 综述只读 L0/L1，不引入任何独立检索/存储 |
-| REJECTED #17（全事件驱动） | 不冲突：`SchedulerTaskTrigger` 的 `task:` 动作只是"触发该任务"的入口，不引入事件总线 |
+| ADR-001（VFS 双层摘要） | 摘要任务保留（降频、排除 Session）；会话回忆改 FTS5，不引入独立向量库 |
+| ADR-005（SQLite 后端） | 消息索引/执行记录为派生数据，共享 SqliteDb；内容权威仍在 VFS |
+| ADR-012（前缀快照） | 技能/角色更新仍在会话边界/启动/压缩点刷新——演化任务产物在免费刷新点自然可见 |
+| ADR-013（唤醒轮） | 演化任务可选用 `process_wake` 机制（mechanism=wake） |
+| ADR-016（角色化自演化） | 演化智能体经 `delegate_to_agent` 运行；角色产物落 `agent_role/`；本 ADR 补上综合提炼环节 |
+| REJECTED #17（全事件驱动） | 不冲突：`SchedulerTaskTrigger` 的 `task:` 动作只是触发入口 |
 
 ## 后续演进（占位）
 
-- 演化报告进 GUI（面板展示最近 N 次演化增删改统计 + 单条 lineage 回退按钮）；
-- `delete` 待人工确认模式（高风险条目走审批，复用 `executor/approval`）；
-- 冲突消解结果沉淀为新记忆类别（如 `resolution`）供检索。
+- 演化报告进 GUI（最近 N 次演化统计 + lineage 回退按钮）；
+- 高风险删除走人工确认（复用 `executor/approval`）；
+- 会话回忆 RRF 融合（FTS5 BM25 + 向量相似度）；
+- 冲突消解结果沉淀为新记忆类别。
 
 ## 关键文件
 
-- `core/src/scheduler/tasks/evolution_task.rs` — 新增：四阶段编排（采集/归纳/综述/守卫提交）
-- `core/src/scheduler/tasks/{summary_task.rs,memory_task.rs,rule_task.rs}` — 并入后移除注册（逻辑迁入 EvolutionTask 各阶段）
-- `core/src/agent/coordinator.rs` + `core/src/agent/agent_core.rs` — 移除会话末 `learn_skills_from_session`，改为轨迹持久化 hook
-- `core/src/agent/tool_registry/observability.rs` — 轨迹持久化写入 `agent/_evolution/traces/`
-- `core/src/agent/roles.rs` — 新增内置角色 `evolution_reviewer`（只读白名单 + JSON diff 输出）
+- `core/src/scheduler/tasks/evolution_task.rs` — 新增：三阶段编排（采集/综述/记账提交）
+- `core/src/scheduler/tasks/summary_task.rs` — 降频 + 排除 Session 命名空间
+- `core/src/scheduler/tasks/{memory_task.rs,rule_task.rs}` — 移除注册（逻辑并入演化任务）
+- `core/src/agent/coordinator.rs` + `agent_core.rs` — 移除会话末 `learn_skills_from_session`，改轨迹持久化 hook
+- `core/src/agent/tool_registry/observability.rs` — 执行记录持久化到 SQLite（GEPA 数据层）
+- `core/src/agent/roles.rs` — 新增内置角色 `evolution_reviewer`（只读 + 统计 + 回忆工具白名单）
+- `core/src/session/search.rs` — 新增 `SessionRecall`（messages 表 + FTS5 索引 + 回忆查询）
+- `core/src/session/manager.rs` — append hook 同步消息索引
+- `core/src/context/retrieval/intent.rs` — Session 分支改走 FTS5 回忆
 - `core/src/config/` — 新增 `[evolution]` 配置节
-- `server/src/lib.rs` — 任务注册改为 `evolution`（移除 summary/memory/rule 三个注册）
+- `server/src/lib.rs` — 任务注册收敛（evolution + summary 降频）
+- `AGENTS.md` — 补"派生索引模式"说明（内容权威在 VFS，索引/统计共享 SqliteDb）
