@@ -11,6 +11,7 @@ mod agent;
 pub mod api_types;
 mod clipboard;
 mod events;
+mod evolution;
 pub mod mcp;
 mod memory;
 mod model;
@@ -27,6 +28,7 @@ pub use crate::common::logging::LoggingConfig;
 pub use agent::AgentConfig;
 pub use clipboard::ClipboardConfig;
 pub use events::EventsConfig;
+pub use evolution::EvolutionConfig;
 pub use mcp::{McpConfig, McpServerEntry};
 pub use memory::MemoryConfig;
 pub use model::{
@@ -81,6 +83,9 @@ pub struct TianyanConfig {
     /// 事件驱动触发配置（文件监听 + webhook；默认关闭）。
     #[serde(default)]
     pub events: EventsConfig,
+    /// 自演化任务配置（ADR-017：每日演化智能体任务；默认启用）。
+    #[serde(default)]
+    pub evolution: EvolutionConfig,
     /// 主动提醒配置（记忆/规则 relevant-now 评估；默认关闭）。
     #[serde(default)]
     pub reminder: ReminderConfig,
@@ -216,6 +221,7 @@ impl TianyanConfig {
         self.logging.validate()?;
         self.security.validate()?;
         self.memory.validate()?;
+        self.evolution.validate()?;
         self.retrieval.validate()?;
         self.mcp.validate().map_err(|e| e.to_string())?;
         Ok(())

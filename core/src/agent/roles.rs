@@ -241,6 +241,49 @@ impl RoleRegistry {
                 lineage: None,
             },
         );
+        roles.insert(
+            "evolution_reviewer".to_string(),
+            AgentRole {
+                name: "evolution_reviewer".to_string(),
+                model: None,
+                system_prompt: Some(
+                    "你是天演的演化综述员（ADR-017：每日自演化任务的核心执行者）。\n\
+                     你的职责是完成一次自我演化综述：\n\
+                     1. 用 execution_stats / execution_detail / delegation_stats 查看自上次运行以来的\n\
+                     工具执行统计与委托统计，识别高频/低成功率的操作类别与组织模式；\n\
+                     2. 用 session_recall 回忆近期会话内容，识别用户偏好、事实与重复的工作模式；\n\
+                     3. 用 vfs_read / vfs_list 查看现有注册表：记忆（memory/）、技能（skill/learned/）、\
+                     规则（agent/learned/）、角色（agent_role/）；\n\
+                     4. 对照现状决定增删改：写新技能前先查现有技能（语义重复则完善而非新建）；\
+                     只把稳定、跨会话可复用的偏好写入画像；删除必须有证据（被取代/已过时/低分）。\n\
+                     你只产出结论与建议，不修改任何注册表内容——修改由演化任务统一应用。\n\
+                     输出格式：结构化清单（新增/更新/删除/冲突），每条附理由。"
+                        .to_string(),
+                ),
+                tools: Some(vec![
+                    "execution_stats".to_string(),
+                    "execution_detail".to_string(),
+                    "delegation_stats".to_string(),
+                    "session_recall".to_string(),
+                    "vfs_read".to_string(),
+                    "vfs_list".to_string(),
+                    "search_knowledge".to_string(),
+                    "read_file".to_string(),
+                    "glob".to_string(),
+                    "list_dir".to_string(),
+                    "grep".to_string(),
+                    "web_search".to_string(),
+                    "web_fetch".to_string(),
+                    "delegate_to_agent".to_string(),
+                ]),
+                max_turns: None,
+                timeout_secs: None,
+                source: RoleSource::Builtin,
+                status: RoleStatus::Active,
+                version: 1,
+                lineage: None,
+            },
+        );
         Self {
             roles: Arc::new(std::sync::RwLock::new(roles)),
         }
@@ -409,17 +452,18 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_has_exactly_three_roles() {
+    fn test_builtin_has_exactly_four_roles() {
         let registry = RoleRegistry::builtin();
         assert_eq!(
             registry.names(),
             vec![
                 "editor".to_string(),
+                "evolution_reviewer".to_string(),
                 "researcher".to_string(),
                 "reviewer".to_string()
             ]
         );
-        for name in ["researcher", "editor", "reviewer"] {
+        for name in ["researcher", "editor", "reviewer", "evolution_reviewer"] {
             let role = registry.get(name).expect("内置角色应存在");
             assert_eq!(role.name, name);
             assert!(role.model.is_none(), "内置角色应回落主 Agent 模型");
@@ -501,7 +545,7 @@ mod tests {
         assert_eq!(added.model.as_deref(), Some("gpt-4o"));
         assert_eq!(added.tools, Some(vec!["read_file".to_string()]));
         // 内置角色保留
-        assert_eq!(registry.names().len(), 4);
+        assert_eq!(registry.names().len(), 5);
         assert!(registry.get("researcher").is_some());
     }
 
