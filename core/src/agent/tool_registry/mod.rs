@@ -10,9 +10,9 @@ use crate::agent::tool_params::{
     CommandListParams, CommandStatusParams, DelegateToAgentParams, DelegationStatsParams,
     DiscoverTestsParams, ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams,
     GlobParams, KnowledgeIngestParams, ListDirParams, LspParams, ReadFileParams, RunTestsParams,
-    SearchCodeParams, SearchKnowledgeParams, SelfCheckParams, SuggestRoleParams,
-    SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VerifyBuildParams, VfsListParams,
-    VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
+    SearchCodeParams, SearchKnowledgeParams, SelfCheckParams, SessionRecallParams,
+    SuggestRoleParams, SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VerifyBuildParams,
+    VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
 };
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
@@ -30,6 +30,7 @@ use crate::observability::trace::TraceCollector;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
 use crate::scheduler::tasks::RuleRecorder;
+use crate::session::search::SessionRecall;
 
 /// 当前平台的 shell 事实（注入 execute_command 工具描述，消除模型试错）。
 fn shell_platform_hint() -> &'static str {
@@ -178,6 +179,8 @@ pub struct ToolRegistry {
     pub(crate) role_router: Option<Arc<crate::agent::role_router::RoleRouter>>,
     /// 执行记录日志（ADR-017 GEPA 数据层：execution_stats 等工具依赖；None 时工具不可用）。
     pub(crate) execution_log: Option<Arc<ExecutionLog>>,
+    /// 会话回忆服务（ADR-017 决策 6：session_recall 工具依赖；None 时工具不可用）。
+    pub(crate) session_recall: Option<Arc<SessionRecall>>,
     /// 工具执行管线：pre-execute 监听器（fail-closed，按注册顺序；A1）。
     pre_execute_listeners: Vec<Arc<dyn ToolPreExecuteListener>>,
     /// 工具执行管线：单调守卫（只允许拒绝；A4）。
@@ -219,6 +222,7 @@ impl ToolRegistry {
             command_tasks: Arc::new(crate::executor::CommandManager::new(None)),
             role_router: None,
             execution_log: None,
+            session_recall: None,
             pre_execute_listeners: Vec::new(),
             guards: Vec::new(),
             post_execute_listeners: Vec::new(),
@@ -459,6 +463,12 @@ impl ToolRegistry {
     pub fn with_execution_log(mut self, log: Arc<ExecutionLog>) -> Self {
         self.execution_log = Some(log.clone());
         self.observability.set_execution_log(log);
+        self
+    }
+
+    /// 设置会话回忆服务（ADR-017 决策 6：session_recall 工具依赖）。
+    pub fn with_session_recall(mut self, recall: Arc<SessionRecall>) -> Self {
+        self.session_recall = Some(recall);
         self
     }
 
@@ -864,6 +874,7 @@ impl ToolRegistry {
             "execution_stats" => self.execute_execution_stats(arguments).await,
             "execution_detail" => self.execute_execution_detail(arguments).await,
             "delegation_stats" => self.execute_delegation_stats(arguments).await,
+            "session_recall" => self.execute_session_recall(arguments).await,
             "glob" => self.execute_glob(arguments, session_id).await,
             "list_dir" => self.execute_list_dir(arguments, session_id).await,
             "symbol_outline" => self.execute_symbol_outline(arguments).await,
@@ -1073,6 +1084,13 @@ impl ToolRegistry {
             >(
                 "delegation_stats",
                 "Query sub-agent delegation statistics by role (from delegate_to_agent records): per-role counts and success rates. Optional since (RFC3339). Use to evaluate whether the current role organization (agent_role registry) should evolve: split, merge, promote or retire roles.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                SessionRecallParams,
+            >(
+                "session_recall",
+                "Recall past conversation content by keyword (FTS5 inverted index over session messages, Chinese substring matching without tokenization). Returns top hits each with a window of nearby user/assistant messages (tool calls and results are excluded). Use when the user refers to something said earlier (刚才/之前/上次) or when you need to check what was discussed in past sessions.",
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
@@ -1405,9 +1423,9 @@ mod tests {
     async fn test_shortlist_none_query_returns_all() {
         // 无查询信号：保守全量
         let registry = ToolRegistry::new(SecurityPolicy::default());
-        register_mock_tools(&registry, 20).await; // 32 + 20 = 52 > 40
+        register_mock_tools(&registry, 20).await; // 33 + 20 = 53 > 40
         let defs = registry.definitions_shortlisted(None).await;
-        assert_eq!(defs.len(), 52);
+        assert_eq!(defs.len(), 53);
     }
 
     #[tokio::test]

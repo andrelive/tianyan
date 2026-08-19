@@ -10,6 +10,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, Message, MessageRole, StructuredMessage, TianyanUri};
 use crate::vfs::VirtualFileSystem;
 
+use super::search::SessionRecall;
 use super::types::parse_message_lines;
 use super::types::SessionHeader;
 use super::{types::Session, MAX_SESSION_MESSAGES};
@@ -58,12 +59,20 @@ pub trait SessionManager: Send + Sync {
 #[derive(Clone)]
 pub struct PersistentSessionManager {
     vfs: Arc<dyn VirtualFileSystem>,
+    /// 会话消息索引（ADR-017 决策 6：FTS5 回忆；None 时不索引）。
+    recall: Option<Arc<SessionRecall>>,
 }
 
 impl PersistentSessionManager {
     /// 创建新的持久化会话管理器。
     pub fn new(vfs: Arc<dyn VirtualFileSystem>) -> Self {
-        Self { vfs }
+        Self { vfs, recall: None }
+    }
+
+    /// 设置会话消息索引（append 时同步索引；ADR-017 决策 6）。
+    pub fn with_recall(mut self, recall: Arc<SessionRecall>) -> Self {
+        self.recall = Some(recall);
+        self
     }
 
     /// 从 VFS 加载会话。
@@ -173,12 +182,33 @@ impl PersistentSessionManager {
         Ok(Some(session))
     }
 
-    /// 追加消息到 VFS。
+    /// 追加消息到 VFS（ADR-017 决策 6：装配消息索引时同步索引，零 LLM）。
     async fn append_message_to_vfs(&self, uri: &TianyanUri, msg: &StructuredMessage) -> Result<()> {
         let json_line = serde_json::to_string(msg)
             .map_err(|e| TianyanError::Custom(format!("序列化错误：{}", e)))?;
         let jsonl_line = format!("{}\n", json_line);
+        // seq = 追加前消息数（JSONL 行号语义；头部行不计入）
+        let seq = if self.recall.is_some() {
+            let existing = self
+                .vfs
+                .read_content(uri, ContentLevel::Detail)
+                .await
+                .unwrap_or_default();
+            parse_message_lines(&existing).len() as i64
+        } else {
+            0
+        };
         self.vfs.append_content(uri, &jsonl_line).await?;
+        if let Some(ref recall) = self.recall {
+            let session_id = uri.path().last().cloned().unwrap_or_default();
+            if let Err(e) = recall.index_message(&session_id, seq, msg).await {
+                tracing::debug!(
+                    session_id = %session_id,
+                    error = %e,
+                    "会话消息索引失败（回忆检索跳过该消息）"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -333,6 +363,16 @@ impl SessionManager for PersistentSessionManager {
             content.push('\n');
         }
         self.vfs.write_content(&uri, &content).await?;
+        // ADR-017 决策 6：全量覆写后重建消息索引（幂等）
+        if let Some(ref recall) = self.recall {
+            if let Err(e) = recall.rebuild_session(session_id, &content).await {
+                tracing::debug!(
+                    session_id = %session_id,
+                    error = %e,
+                    "会话消息索引重建失败（回忆检索可能过期）"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -372,6 +412,12 @@ impl SessionManager for PersistentSessionManager {
             .ok_or_else(|| TianyanError::not_found(format!("会话存储错误：会话未找到：{}", id)))?;
 
         self.vfs.delete(&session.uri()).await?;
+        // ADR-017 决策 6：删除会话消息索引
+        if let Some(ref recall) = self.recall {
+            if let Err(e) = recall.delete_session(id).await {
+                tracing::debug!(session_id = %id, error = %e, "会话消息索引删除失败");
+            }
+        }
 
         Ok(())
     }

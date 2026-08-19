@@ -26,6 +26,8 @@
 //! ```
 
 mod manager;
+/// 会话消息索引与回忆检索（ADR-017 决策 6：FTS5 会话回忆）。
+pub mod search;
 mod types;
 
 /// 会话消息数量上限（持久态安全上限）。

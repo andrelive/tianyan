@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::agent::tool_params::{
-    DelegationStatsParams, ExecutionDetailParams, ExecutionStatsParams,
+    DelegationStatsParams, ExecutionDetailParams, ExecutionStatsParams, SessionRecallParams,
 };
 use crate::common::error::TianyanError;
 use crate::observability::execution_log::ExecutionLog;
@@ -90,6 +90,48 @@ impl ToolRegistry {
         Ok(serde_json::json!({
             "count": stats.len(),
             "stats": stats,
+        }))
+    }
+
+    /// 执行 session_recall 工具：FTS5 关键词回忆（ADR-017 决策 6）。
+    ///
+    /// 返回命中列表，每个命中附带附近窗口（user/assistant 文本；
+    /// 工具调用/结果被过滤——只进 tool_text 列，不进 FTS 索引）。
+    pub(crate) async fn execute_session_recall(
+        &self,
+        arguments: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        let params: SessionRecallParams = parse_params(arguments)?;
+        let recall = self.session_recall.clone().ok_or_else(|| {
+            TianyanError::Custom(
+                "tool: 执行失败：会话回忆服务未装配（FTS5 索引不可用）".to_string(),
+            )
+        })?;
+        let limit = params.limit.unwrap_or(5).min(20);
+        let radius = params
+            .radius
+            .unwrap_or(crate::session::search::DEFAULT_WINDOW_RADIUS)
+            .max(0);
+        let hits = recall
+            .search(&params.query, limit)
+            .await
+            .map_err(wrap_tool_error)?;
+        // 每个命中附带附近窗口
+        let mut results = Vec::new();
+        for hit in &hits {
+            let window = recall
+                .window(&hit.session_id, hit.seq, radius)
+                .await
+                .map_err(wrap_tool_error)?;
+            results.push(serde_json::json!({
+                "hit": hit,
+                "window": window,
+            }));
+        }
+        Ok(serde_json::json!({
+            "query": params.query,
+            "count": results.len(),
+            "results": results,
         }))
     }
 }

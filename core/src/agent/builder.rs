@@ -73,6 +73,8 @@ pub struct AgentBuilder {
     trace_collector: Option<Arc<crate::observability::trace::TraceCollector>>,
     /// 执行记录日志（ADR-017 GEPA 数据层；None 时统计工具不可用、不持久化）。
     execution_log: Option<Arc<ExecutionLog>>,
+    /// 会话回忆服务（ADR-017 决策 6：session_recall 工具依赖；None 时工具不可用）。
+    session_recall: Option<Arc<crate::session::search::SessionRecall>>,
     /// 聊天模型上下文规格（T5；注入 AgentLoop 并联动压缩窗口；None 时走默认窗口）。
     chat_model_spec: Option<ModelSpec>,
     /// 后台命令日志目录（execute_command(background) 日志落盘；None 时仅内存尾部）。
@@ -102,6 +104,7 @@ impl AgentBuilder {
             agent_roles: None,
             trace_collector: None,
             execution_log: None,
+            session_recall: None,
             chat_model_spec: None,
             command_logs_dir: None,
             role_registry: None,
@@ -251,6 +254,15 @@ impl AgentBuilder {
     /// 执行记录持久化依赖；None 时工具不可用）。
     pub fn with_execution_log(mut self, log: Arc<ExecutionLog>) -> Self {
         self.execution_log = Some(log);
+        self
+    }
+
+    /// 设置会话回忆服务（ADR-017 决策 6：session_recall 工具依赖）。
+    pub fn with_session_recall(
+        mut self,
+        recall: Arc<crate::session::search::SessionRecall>,
+    ) -> Self {
+        self.session_recall = Some(recall);
         self
     }
 
@@ -430,6 +442,10 @@ impl AgentBuilder {
         // 执行记录日志（ADR-017 GEPA 数据层：execution_stats 等统计工具 + 持久化）
         if let Some(ref log) = self.execution_log {
             tool_registry = tool_registry.with_execution_log(log.clone());
+        }
+        // 会话回忆服务（ADR-017 决策 6：session_recall 工具）
+        if let Some(ref recall) = self.session_recall {
+            tool_registry = tool_registry.with_session_recall(recall.clone());
         }
 
         let mut agent_loop = AgentLoop::new(

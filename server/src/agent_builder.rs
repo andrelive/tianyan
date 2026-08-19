@@ -68,6 +68,7 @@ impl AgentBuilderFactory {
         session_manager: Arc<dyn SessionManager>,
         trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,
         execution_log: Arc<ExecutionLog>,
+        session_recall: Arc<tianyan::session::search::SessionRecall>,
         role_registry: Arc<tianyan::agent::RoleRegistry>,
         role_router: Arc<tianyan::agent::RoleRouter>,
     ) -> TianyanResult<Arc<Agent>> {
@@ -104,7 +105,8 @@ impl AgentBuilderFactory {
             )
             .with_command_logs_dir(config.storage.data_dir.join("command_logs"))
             .with_session_manager(session_manager)
-            .with_execution_log(execution_log);
+            .with_execution_log(execution_log)
+            .with_session_recall(session_recall);
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),
             None => agent,
@@ -160,6 +162,7 @@ impl AgentBuilderFactory {
         session_manager: Arc<dyn SessionManager>,
         trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,
         execution_log: Arc<ExecutionLog>,
+        session_recall: Arc<tianyan::session::search::SessionRecall>,
         role_registry: Arc<tianyan::agent::RoleRegistry>,
         role_router: Arc<tianyan::agent::RoleRouter>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
@@ -177,6 +180,7 @@ impl AgentBuilderFactory {
             session_manager,
             trace_collector,
             execution_log,
+            session_recall,
             role_registry,
             role_router,
         )

@@ -18,6 +18,7 @@ use tianyan::model::spec::ModelSpec;
 use tianyan::observability::execution_log::ExecutionLog;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::scheduler::TaskScheduler;
+use tianyan::session::search::SessionRecall;
 use tianyan::session::{PersistentSessionManager, SessionManager};
 use tianyan::skills::{
     register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRefresher,
@@ -258,6 +259,8 @@ pub struct AppState {
     trace_collector: Arc<tianyan::observability::trace::TraceCollector>,
     /// 执行记录日志（ADR-017 GEPA 数据层：execution_stats 等统计工具）
     execution_log: Arc<ExecutionLog>,
+    /// 会话回忆服务（ADR-017 决策 6：FTS5 消息索引）
+    session_recall: Arc<SessionRecall>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// 模型服务（chat/embedding/vision，全组件共享；配置热更新时重建）
@@ -358,6 +361,9 @@ impl AppState {
         // 初始化执行记录日志（ADR-017 GEPA 数据层；共享 SqliteDb 连接）
         let execution_log = ExecutionLog::new(sqlite_db.clone())?;
 
+        // 初始化会话回忆服务（ADR-017 决策 6：FTS5 消息索引；共享 SqliteDb 连接）
+        let session_recall = SessionRecall::new(sqlite_db.clone())?;
+
         // 初始化工作区快照管理器（配置了 working_directory 时启用）
         let snapshot_manager = config.agent.working_directory.clone().map(|workdir| {
             let root = config.storage.data_dir.join("snapshots");
@@ -405,8 +411,11 @@ impl AppState {
             resolve_embedding_model(&config),
         ));
 
-        // 创建持久化会话管理器（唯一实例：Agent 与 API 层共享，避免双写）
-        let session_manager = Arc::new(PersistentSessionManager::new(vfs.clone()));
+        // 创建持久化会话管理器（唯一实例：Agent 与 API 层共享，避免双写；
+        // ADR-017 决策 6：装配 FTS5 消息索引，append 时同步索引）
+        let session_manager = Arc::new(
+            PersistentSessionManager::new(vfs.clone()).with_recall(session_recall.clone()),
+        );
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -424,6 +433,7 @@ impl AppState {
             session_manager.clone(),
             Some(trace_collector.clone()),
             execution_log.clone(),
+            session_recall.clone(),
             role_registry.clone(),
             role_router,
         )
@@ -442,6 +452,7 @@ impl AppState {
             usage_stats,
             trace_collector,
             execution_log,
+            session_recall,
             snapshot_manager,
             model_services: Arc::new(RwLock::new(model_services)),
             mcp_tools,
@@ -565,6 +576,7 @@ impl AppState {
             self.session_manager.clone(),
             Some(self.trace_collector.clone()),
             self.execution_log.clone(),
+            self.session_recall.clone(),
             self.role_registry.clone(),
             role_router,
         )
@@ -645,6 +657,11 @@ impl AppState {
     /// 获取执行记录日志（ADR-017 GEPA 数据层）。
     pub fn execution_log(&self) -> Arc<ExecutionLog> {
         self.execution_log.clone()
+    }
+
+    /// 获取会话回忆服务（ADR-017 决策 6）。
+    pub fn session_recall(&self) -> Arc<SessionRecall> {
+        self.session_recall.clone()
     }
 
     /// 装配定时任务调度器（`start_server` 在创建并注册任务后调用）。

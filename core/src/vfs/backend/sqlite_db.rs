@@ -181,4 +181,27 @@ const SCHEMA_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_executions_cat_ts ON executions(category, ts);
     CREATE INDEX IF NOT EXISTS idx_executions_tool_ts ON executions(tool_name, ts);
     CREATE INDEX IF NOT EXISTS idx_executions_session_ts ON executions(session_id, ts);
+
+    -- 会话消息索引（ADR-017 决策 6：FTS5 会话回忆，方案 A；派生数据，可重建。
+    -- JSONL 保持权威；text 仅 user/assistant 文本，工具调用/结果截断存 tool_text）
+    CREATE TABLE IF NOT EXISTS session_messages (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id  TEXT    NOT NULL,
+        seq         INTEGER NOT NULL,
+        message_id  TEXT    NOT NULL,
+        role        TEXT    NOT NULL,
+        text        TEXT    NOT NULL DEFAULT '',
+        tool_text   TEXT    NOT NULL DEFAULT '',
+        tokens      INTEGER NOT NULL DEFAULT 0,
+        ts          INTEGER NOT NULL,
+        recorded_at TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_uniq ON session_messages(session_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_session_messages_session_ts ON session_messages(session_id, ts);
+
+    -- FTS5 倒排索引（trigram tokenizer：中文子串匹配；rowid 对应 session_messages.id）
+    CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
+        text,
+        tokenize = 'trigram'
+    );
 ";

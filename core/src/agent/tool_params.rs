@@ -412,3 +412,16 @@ pub struct DelegationStatsParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
 }
+
+/// 会话回忆查询参数（session_recall；FTS5 倒排索引，ADR-017 决策 6）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SessionRecallParams {
+    /// 回忆关键词（中文子串匹配，无需分词；至少 3 个字符）。
+    pub query: String,
+    /// 最大命中数（默认 5，上限 20）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// 每个命中附近的窗口半径（前后各 N 条消息，默认 5）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<i64>,
+}
