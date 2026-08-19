@@ -91,38 +91,6 @@ impl ChatService {
         }
     }
 
-    /// 处理对话消息（非流式）
-    ///
-    /// 如果 `session_id` 未提供，会自动创建新会话。
-    pub async fn process_message(&self, request: ChatRequest) -> Result<ChatResponse, ApiError> {
-        let last_text = request.message.content.clone();
-        let last_message = to_core_message(&request.message);
-
-        let (session_id, is_new) = resolve_or_create_session(
-            self.session_manager.as_ref(),
-            request.session_id.as_deref(),
-            &last_text,
-            request.working_directory.as_deref(),
-        )
-        .await?;
-        if is_new {
-            self.refresh_learned_skills().await;
-            self.refresh_learned_roles().await;
-        }
-
-        let response = self
-            .agent
-            .process_message(
-                &session_id,
-                &last_message,
-                request.model.as_deref(),
-                request.thinking,
-            )
-            .await?;
-
-        Ok(to_chat_response(&session_id, response))
-    }
-
     /// 处理对话消息（流式响应）
     ///
     /// 如果 `session_id` 未提供，会自动创建新会话。

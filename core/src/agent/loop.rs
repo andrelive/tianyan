@@ -666,8 +666,12 @@ impl AgentLoop {
             ctx.total_tokens.accumulate(usage);
         }
 
+        // 归一化：空 tool_calls 数组视为无工具调用（部分 provider 在无工具时
+        // 返回 [] 而非 null——否则会走进"执行 0 个工具 → 继续循环"的死路）
+        let tool_calls = assistant_msg.tool_calls.as_ref().filter(|c| !c.is_empty());
+
         // Check for ask_user before adding to history
-        if let Some(ref tool_calls) = assistant_msg.tool_calls {
+        if let Some(tool_calls) = tool_calls {
             if let Some(ask_call) = tool_calls.iter().find(|tc| tc.function.name == "ask_user") {
                 let params: AskUserParams = serde_json::from_str(&ask_call.function.arguments)
                     .map_err(|e| {
@@ -691,7 +695,7 @@ impl AgentLoop {
             .persist_message(ctx, assistant_msg, turn_usage, finish_reason)
             .await;
 
-        if let Some(ref tool_calls) = assistant_msg.tool_calls {
+        if let Some(tool_calls) = tool_calls {
             // Notify about tool calls if sender is available
             if let Some(sender) = ctx.stream_sender {
                 for tc in tool_calls {

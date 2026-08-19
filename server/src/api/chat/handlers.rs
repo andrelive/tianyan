@@ -18,32 +18,6 @@ use crate::state::AppState;
 /// SSE 流式通道缓冲区大小。
 const SSE_CHANNEL_BUFFER: usize = 100;
 
-/// 对话完成处理器（非流式）
-pub async fn chat_handler(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<ChatRequest>,
-) -> Result<Json<ChatResponse>, ApiError> {
-    if let Err(e) = request.validate() {
-        return Err(ApiError::BadRequest(e));
-    }
-
-    info!("收到对话请求，会话: {:?}", request.session_id);
-    debug!("消息长度: {}", request.message.content.len());
-
-    let agent = state.agent().await;
-    let session_manager = state.session_manager();
-
-    let service = ChatService::new(agent, session_manager)
-        .with_skill_sync(state.skill_sync())
-        .with_role_sync(state.role_sync());
-
-    service
-        .process_message(request)
-        .await
-        .inspect_err(|e| error!("对话处理错误: {}", e))
-        .map(Json)
-}
-
 /// 追问回答处理器（非流式）
 pub async fn chat_clarify_handler(
     State(state): State<Arc<AppState>>,

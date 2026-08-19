@@ -257,6 +257,9 @@ impl TaskScheduler {
             let handle = tokio::spawn(async move {
                 let mut interval =
                     tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+                // 消费首个立即 tick：任务不在启动时触发（cron 语义对齐——
+                // 首次执行在第一个完整间隔后；防止 evolution 等长任务启动即跑）
+                interval.tick().await;
 
                 loop {
                     interval.tick().await;
@@ -406,17 +409,29 @@ impl TaskScheduler {
     /// # 返回
     /// 任务执行结果
     pub async fn execute_task(&self, task_id: &str, ctx: &TaskContext) -> Option<TaskResult> {
-        let mut tasks = self.tasks.write().await;
+        // 先取 handler 即释放写锁：长任务（如演化综述的 LLM 调用）执行期间
+        // 不得阻塞 snapshot()/get_task_ids() 等读路径（修复：状态查询被任务卡死）。
+        let (name, handler) = {
+            let mut tasks = self.tasks.write().await;
+            let task = tasks.get_mut(task_id)?;
+            (
+                task.definition.name.clone(),
+                task.definition.handler.clone(),
+            )
+        };
 
-        let task = tasks.get_mut(task_id)?;
-        let handler = task.definition.handler.clone();
-
-        tracing::debug!("执行任务：{} ({})", task.definition.name, task_id);
+        tracing::debug!("执行任务：{} ({})", name, task_id);
 
         let result = handler.execute(ctx).await;
 
-        task.last_run = Some(std::time::Instant::now());
-        task.run_count += 1;
+        // 执行完成后补记运行统计（重新获取写锁，短临界区）
+        {
+            let mut tasks = self.tasks.write().await;
+            if let Some(task) = tasks.get_mut(task_id) {
+                task.last_run = Some(std::time::Instant::now());
+                task.run_count += 1;
+            }
+        }
 
         if result.success {
             tracing::info!(
