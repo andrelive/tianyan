@@ -3,7 +3,7 @@
 # 使用方式：
 #   1. 复制本文件为 tianyan.toml（已被 .gitignore 忽略，不会提交到仓库）
 #   2. 设置以下环境变量后启动：
-#      - BAILIAN_API_KEY   阿里云百炼 API Key
+#      - DASHSCOPE_API_KEY   阿里云百炼 API Key
 #      - OPENCODE_API_KEY  opencode.ai 网关 API Key
 #   3. 本机路径类字段（如 security.trash_directory）按需修改
 # 完整字段说明见 config.example.toml
@@ -29,7 +29,7 @@ vector_dimension = 2048
 [[models.providers]]
 name = "bailian"
 endpoint = "https://llm-0kacxy8o62q1skhc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-api_key = "${BAILIAN_API_KEY}"
+api_key = "${DASHSCOPE_API_KEY}"
 timeout = 60
 enabled = true
 
