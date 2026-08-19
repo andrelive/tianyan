@@ -4,6 +4,7 @@
 //! 让智能体可以反思自己的执行历史，实现 Harness Engineering 原则 2
 //! 的"环境可读性"。
 
+pub mod execution_log;
 pub mod trace;
 pub mod usage_stats;
 

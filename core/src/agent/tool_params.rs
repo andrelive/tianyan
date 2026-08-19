@@ -379,3 +379,36 @@ pub struct LspParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
 }
+/// 执行统计查询参数（execution_stats；GEPA 数据层，ADR-017）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExecutionStatsParams {
+    /// 起始时间（RFC3339，如 2026-08-18T00:00:00Z；缺省 = 全部历史）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// 类别过滤（file_operation / code_operation / search_operation /
+    /// test_operation / deploy_operation / analysis_operation / general_operation）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
+/// 执行明细查询参数（execution_detail；GEPA 数据层，ADR-017）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExecutionDetailParams {
+    /// 起始时间（RFC3339；缺省 = 全部历史）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// 类别过滤。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// 最大返回条数（默认 20，上限 50）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+/// 角色委托统计查询参数（delegation_stats；GEPA 数据层，ADR-017）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DelegationStatsParams {
+    /// 起始时间（RFC3339；缺省 = 全部历史）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}

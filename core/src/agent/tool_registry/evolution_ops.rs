@@ -1,0 +1,95 @@
+//! 演化数据查询工具执行器（ADR-017 GEPA 数据层）。
+//!
+//! execution_stats / execution_detail / delegation_stats —— 供演化智能体
+//! 查询执行统计数据（只读，不修改任何内容）。统计查询经共享 SqliteDb
+//! （派生数据，可重建）。
+
+use std::sync::Arc;
+
+use crate::agent::tool_params::{
+    DelegationStatsParams, ExecutionDetailParams, ExecutionStatsParams,
+};
+use crate::common::error::TianyanError;
+use crate::observability::execution_log::ExecutionLog;
+
+use super::{parse_params, wrap_tool_error, ToolRegistry};
+
+/// 解析 RFC3339 since 参数为 epoch 秒。
+///
+/// # Errors
+/// * 格式非法时返回 TianyanError::invalid_input（ADR-014 语义分类）。
+fn parse_since(since: Option<&str>) -> Result<Option<i64>, TianyanError> {
+    match since {
+        None => Ok(None),
+        Some(s) => chrono::DateTime::parse_from_rfc3339(s)
+            .map(|dt| Some(dt.timestamp()))
+            .map_err(|e| {
+                TianyanError::invalid_input(format!(
+                    "tool: 参数无效：since 需为 RFC3339 时间（如 2026-08-18T00:00:00Z）：{e}"
+                ))
+            }),
+    }
+}
+
+impl ToolRegistry {
+    /// 获取执行记录日志（GEPA 数据层；未装配时工具不可用）。
+    fn execution_log(&self) -> Result<Arc<ExecutionLog>, TianyanError> {
+        self.execution_log.clone().ok_or_else(|| {
+            TianyanError::Custom(
+                "tool: 执行失败：执行记录日志未装配（GEPA 数据层不可用）".to_string(),
+            )
+        })
+    }
+
+    /// 执行 execution_stats 工具：按类别统计工具执行情况。
+    pub(crate) async fn execute_execution_stats(
+        &self,
+        arguments: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        let params: ExecutionStatsParams = parse_params(arguments)?;
+        let log = self.execution_log()?;
+        let since = parse_since(params.since.as_deref())?;
+        let stats = log
+            .stats(since, params.category.as_deref())
+            .await
+            .map_err(wrap_tool_error)?;
+        Ok(serde_json::json!({
+            "count": stats.len(),
+            "stats": stats,
+        }))
+    }
+
+    /// 执行 execution_detail 工具：查询原始执行记录。
+    pub(crate) async fn execute_execution_detail(
+        &self,
+        arguments: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        let params: ExecutionDetailParams = parse_params(arguments)?;
+        let log = self.execution_log()?;
+        let since = parse_since(params.since.as_deref())?;
+        let limit = params.limit.unwrap_or(20).min(50);
+        let items = log
+            .detail(since, params.category.as_deref(), limit)
+            .await
+            .map_err(wrap_tool_error)?;
+        Ok(serde_json::json!({
+            "count": items.len(),
+            "executions": items,
+        }))
+    }
+
+    /// 执行 delegation_stats 工具：按角色统计委托使用情况。
+    pub(crate) async fn execute_delegation_stats(
+        &self,
+        arguments: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
+        let params: DelegationStatsParams = parse_params(arguments)?;
+        let log = self.execution_log()?;
+        let since = parse_since(params.since.as_deref())?;
+        let stats = log.delegation_stats(since).await.map_err(wrap_tool_error)?;
+        Ok(serde_json::json!({
+            "count": stats.len(),
+            "stats": stats,
+        }))
+    }
+}

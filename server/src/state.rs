@@ -15,6 +15,7 @@ use tianyan::config::{ModelEntry, TianyanConfig};
 use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
 use tianyan::model::spec::ModelSpec;
+use tianyan::observability::execution_log::ExecutionLog;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::scheduler::TaskScheduler;
 use tianyan::session::{PersistentSessionManager, SessionManager};
@@ -255,6 +256,8 @@ pub struct AppState {
     usage_stats: Arc<UsageStats>,
     /// 结构化 Trace 收集器（G6：span 持久化与回放查询）
     trace_collector: Arc<tianyan::observability::trace::TraceCollector>,
+    /// 执行记录日志（ADR-017 GEPA 数据层：execution_stats 等统计工具）
+    execution_log: Arc<ExecutionLog>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// 模型服务（chat/embedding/vision，全组件共享；配置热更新时重建）
@@ -352,6 +355,9 @@ impl AppState {
         let trace_collector = tianyan::observability::trace::TraceCollector::new(sqlite_db.clone())
             .map_err(|e| TianyanError::Custom(format!("TraceCollector 初始化失败：{e}")))?;
 
+        // 初始化执行记录日志（ADR-017 GEPA 数据层；共享 SqliteDb 连接）
+        let execution_log = ExecutionLog::new(sqlite_db.clone())?;
+
         // 初始化工作区快照管理器（配置了 working_directory 时启用）
         let snapshot_manager = config.agent.working_directory.clone().map(|workdir| {
             let root = config.storage.data_dir.join("snapshots");
@@ -417,6 +423,7 @@ impl AppState {
             crate::notification::global_notification_sink(),
             session_manager.clone(),
             Some(trace_collector.clone()),
+            execution_log.clone(),
             role_registry.clone(),
             role_router,
         )
@@ -434,6 +441,7 @@ impl AppState {
             role_registry,
             usage_stats,
             trace_collector,
+            execution_log,
             snapshot_manager,
             model_services: Arc::new(RwLock::new(model_services)),
             mcp_tools,
@@ -556,6 +564,7 @@ impl AppState {
             crate::notification::global_notification_sink(),
             self.session_manager.clone(),
             Some(self.trace_collector.clone()),
+            self.execution_log.clone(),
             self.role_registry.clone(),
             role_router,
         )
@@ -631,6 +640,11 @@ impl AppState {
     /// * `Arc<UsageStats>` - 使用统计追踪器实例
     pub fn usage_stats(&self) -> Arc<UsageStats> {
         self.usage_stats.clone()
+    }
+
+    /// 获取执行记录日志（ADR-017 GEPA 数据层）。
+    pub fn execution_log(&self) -> Arc<ExecutionLog> {
+        self.execution_log.clone()
     }
 
     /// 装配定时任务调度器（`start_server` 在创建并注册任务后调用）。

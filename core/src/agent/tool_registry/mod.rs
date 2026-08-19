@@ -7,11 +7,12 @@ use tokio::sync::Mutex;
 
 use crate::agent::tool_params::{
     ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, CommandKillParams,
-    CommandListParams, CommandStatusParams, DelegateToAgentParams, DiscoverTestsParams,
-    ExecuteCommandParams, GlobParams, KnowledgeIngestParams, ListDirParams, LspParams,
-    ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams, SelfCheckParams,
-    SuggestRoleParams, SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VerifyBuildParams,
-    VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
+    CommandListParams, CommandStatusParams, DelegateToAgentParams, DelegationStatsParams,
+    DiscoverTestsParams, ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams,
+    GlobParams, KnowledgeIngestParams, ListDirParams, LspParams, ReadFileParams, RunTestsParams,
+    SearchCodeParams, SearchKnowledgeParams, SelfCheckParams, SuggestRoleParams,
+    SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VerifyBuildParams, VfsListParams,
+    VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
 };
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
@@ -24,6 +25,7 @@ use crate::knowledge::KnowledgeIngestor;
 use crate::lsp::diagnostics::LspManager;
 use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition, ToolPresentation};
 use crate::model::ChatService;
+use crate::observability::execution_log::ExecutionLog;
 use crate::observability::trace::TraceCollector;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
@@ -43,6 +45,8 @@ use crate::vfs::VirtualFileSystem;
 
 mod agent_ops;
 mod code_ops;
+/// 演化数据查询工具执行器（ADR-017 GEPA 数据层：execution_stats 等）。
+mod evolution_ops;
 /// 工具执行器实现（按工具域拆分，14 个 `execute_*` 方法）。
 mod file_ops;
 /// 文件系统浏览工具执行器（glob / list_dir）。
@@ -172,6 +176,8 @@ pub struct ToolRegistry {
     pub(crate) command_tasks: Arc<crate::executor::CommandManager>,
     /// 角色向量路由器（ADR-016 P3：suggest_role 工具依赖；None 时工具不可用）。
     pub(crate) role_router: Option<Arc<crate::agent::role_router::RoleRouter>>,
+    /// 执行记录日志（ADR-017 GEPA 数据层：execution_stats 等工具依赖；None 时工具不可用）。
+    pub(crate) execution_log: Option<Arc<ExecutionLog>>,
     /// 工具执行管线：pre-execute 监听器（fail-closed，按注册顺序；A1）。
     pre_execute_listeners: Vec<Arc<dyn ToolPreExecuteListener>>,
     /// 工具执行管线：单调守卫（只允许拒绝；A4）。
@@ -212,6 +218,7 @@ impl ToolRegistry {
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
             command_tasks: Arc::new(crate::executor::CommandManager::new(None)),
             role_router: None,
+            execution_log: None,
             pre_execute_listeners: Vec::new(),
             guards: Vec::new(),
             post_execute_listeners: Vec::new(),
@@ -444,6 +451,14 @@ impl ToolRegistry {
     /// 设置使用统计追踪器（委托给内置可观测性监听器）。
     pub fn with_usage_stats(self, stats: Arc<UsageStats>) -> Self {
         self.observability.set_usage_stats(stats);
+        self
+    }
+
+    /// 设置执行记录日志（ADR-017 GEPA 数据层：execution_stats / execution_detail /
+    /// delegation_stats 工具与执行记录持久化依赖）。
+    pub fn with_execution_log(mut self, log: Arc<ExecutionLog>) -> Self {
+        self.execution_log = Some(log.clone());
+        self.observability.set_execution_log(log);
         self
     }
 
@@ -846,6 +861,9 @@ impl ToolRegistry {
             "command_list" => self.execute_command_list(arguments).await,
             "command_kill" => self.execute_command_kill(arguments).await,
             "suggest_role" => self.execute_suggest_role(arguments).await,
+            "execution_stats" => self.execute_execution_stats(arguments).await,
+            "execution_detail" => self.execute_execution_detail(arguments).await,
+            "delegation_stats" => self.execute_delegation_stats(arguments).await,
             "glob" => self.execute_glob(arguments, session_id).await,
             "list_dir" => self.execute_list_dir(arguments, session_id).await,
             "symbol_outline" => self.execute_symbol_outline(arguments).await,
@@ -1034,6 +1052,27 @@ impl ToolRegistry {
             >(
                 "suggest_role",
                 "Suggest the best matching sub-agent roles for a task by semantic similarity between the task description and each role's summary. Call BEFORE delegate_to_agent when deciding which role fits: pass the task text, get ranked roles (name, score, purpose, [experimental] means not callable yet). The final choice is always yours.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                ExecutionStatsParams,
+            >(
+                "execution_stats",
+                "Query tool execution statistics (GEPA data layer): per-category counts, success rates, average durations. Optional since (RFC3339 time) filters to executions after that time; optional category filters one operation class (file_operation/code_operation/search_operation/test_operation/deploy_operation/analysis_operation/general_operation). Use to detect recurring or failing operation patterns before proposing a new skill or rule.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                ExecutionDetailParams,
+            >(
+                "execution_detail",
+                "Query raw tool execution records (GEPA data layer): recent executions with tool name, task description, result, duration, skills used. Optional since/category/limit. Use to inspect concrete examples of an operation category when deciding whether to extract a reusable skill.",
+            )));
+        self.definitions
+            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
+                DelegationStatsParams,
+            >(
+                "delegation_stats",
+                "Query sub-agent delegation statistics by role (from delegate_to_agent records): per-role counts and success rates. Optional since (RFC3339). Use to evaluate whether the current role organization (agent_role registry) should evolve: split, merge, promote or retire roles.",
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
@@ -1366,9 +1405,9 @@ mod tests {
     async fn test_shortlist_none_query_returns_all() {
         // 无查询信号：保守全量
         let registry = ToolRegistry::new(SecurityPolicy::default());
-        register_mock_tools(&registry, 20).await; // 29 + 20 = 49 > 40
+        register_mock_tools(&registry, 20).await; // 32 + 20 = 52 > 40
         let defs = registry.definitions_shortlisted(None).await;
-        assert_eq!(defs.len(), 49);
+        assert_eq!(defs.len(), 52);
     }
 
     #[tokio::test]

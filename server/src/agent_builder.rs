@@ -19,6 +19,7 @@ use tianyan::agent::{
 use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::context::DualLayerRetriever;
 use tianyan::model::ModelServices;
+use tianyan::observability::execution_log::ExecutionLog;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::session::SessionManager;
 use tianyan::skills::{SkillExecutor, SkillRefresher};
@@ -66,6 +67,7 @@ impl AgentBuilderFactory {
         notification_sink: tianyan::notification::SharedNotificationSink,
         session_manager: Arc<dyn SessionManager>,
         trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,
+        execution_log: Arc<ExecutionLog>,
         role_registry: Arc<tianyan::agent::RoleRegistry>,
         role_router: Arc<tianyan::agent::RoleRouter>,
     ) -> TianyanResult<Arc<Agent>> {
@@ -101,7 +103,8 @@ impl AgentBuilderFactory {
                 config.agent.working_directory.clone().map(PathBuf::from),
             )
             .with_command_logs_dir(config.storage.data_dir.join("command_logs"))
-            .with_session_manager(session_manager);
+            .with_session_manager(session_manager)
+            .with_execution_log(execution_log);
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),
             None => agent,
@@ -156,6 +159,7 @@ impl AgentBuilderFactory {
         notification_sink: tianyan::notification::SharedNotificationSink,
         session_manager: Arc<dyn SessionManager>,
         trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,
+        execution_log: Arc<ExecutionLog>,
         role_registry: Arc<tianyan::agent::RoleRegistry>,
         role_router: Arc<tianyan::agent::RoleRouter>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
@@ -172,6 +176,7 @@ impl AgentBuilderFactory {
             notification_sink,
             session_manager,
             trace_collector,
+            execution_log,
             role_registry,
             role_router,
         )

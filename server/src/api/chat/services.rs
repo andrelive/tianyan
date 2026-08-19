@@ -9,7 +9,9 @@ use tianyan::session::SessionManager;
 use tianyan::Message as CoreMessage;
 use tianyan::MessageRole as CoreMessageRole;
 
-use crate::api::chat::types::{ChatRequest, ChatResponse, ChatStreamEvent, SkillCallInfo, StreamUsage};
+use crate::api::chat::types::{
+    ChatRequest, ChatResponse, ChatStreamEvent, SkillCallInfo, StreamUsage,
+};
 use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
 use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
@@ -165,7 +167,8 @@ impl ChatService {
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
                 Ok(chunk) => {
-                    let event = map_chunk_to_event(chunk, &stream_id, &session_id, self.context_window);
+                    let event =
+                        map_chunk_to_event(chunk, &stream_id, &session_id, self.context_window);
                     if tx.send(event).await.is_err() {
                         debug!("客户端断开流式连接");
                         break;
@@ -216,7 +219,8 @@ impl ChatService {
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
                 Ok(chunk) => {
-                    let event = map_chunk_to_event(chunk, &stream_id, session_id, self.context_window);
+                    let event =
+                        map_chunk_to_event(chunk, &stream_id, session_id, self.context_window);
                     if tx.send(event).await.is_err() {
                         debug!("客户端断开流式连接");
                         break;

@@ -697,7 +697,13 @@ impl Agent {
                     }
                     TurnMode::Stream { sender } => {
                         sender
-                            .send_complete(&formatted, StreamChunkType::Clarification, None, None, None)
+                            .send_complete(
+                                &formatted,
+                                StreamChunkType::Clarification,
+                                None,
+                                None,
+                                None,
+                            )
                             .await;
                         let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
                         resp.token_usage = total_tokens.clone();

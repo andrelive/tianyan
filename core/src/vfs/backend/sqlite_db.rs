@@ -161,4 +161,24 @@ const SCHEMA_SQL: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_trace_spans_session ON trace_spans(session_id, id);
     CREATE INDEX IF NOT EXISTS idx_trace_spans_task ON trace_spans(task_id, id);
+
+    -- GEPA 执行记录（ADR-017：GEPA 数据层；派生统计数据，可重建。
+    -- 由 ToolObservabilityListener 每次工具执行后写入，供演化智能体查询）
+    CREATE TABLE IF NOT EXISTS executions (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id        TEXT    NOT NULL,
+        tool_name         TEXT    NOT NULL,
+        category          TEXT    NOT NULL,
+        task_description  TEXT    NOT NULL,
+        success           INTEGER NOT NULL,
+        execution_time_ms INTEGER NOT NULL,
+        skills_used       TEXT    NOT NULL DEFAULT '[]',
+        steps_json        TEXT    NOT NULL DEFAULT '[]',
+        result            TEXT    NOT NULL DEFAULT '',
+        ts                INTEGER NOT NULL,
+        recorded_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_executions_cat_ts ON executions(category, ts);
+    CREATE INDEX IF NOT EXISTS idx_executions_tool_ts ON executions(tool_name, ts);
+    CREATE INDEX IF NOT EXISTS idx_executions_session_ts ON executions(session_id, ts);
 ";

@@ -115,7 +115,9 @@ impl ContextPipeline {
         recent_input_tokens: usize,
     ) -> Result<(InjectableContext, Option<String>)> {
         let injectable = self.load_injectable(query).await?;
-        let summary = self.compress_if_needed(conversation, recent_input_tokens).await?;
+        let summary = self
+            .compress_if_needed(conversation, recent_input_tokens)
+            .await?;
         Ok((injectable, summary))
     }
 

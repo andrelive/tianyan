@@ -25,6 +25,7 @@ use crate::knowledge::KnowledgeIngestor;
 use crate::lsp::diagnostics::LspManager;
 use crate::model::spec::ModelSpec;
 use crate::model::ChatService;
+use crate::observability::execution_log::ExecutionLog;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
 use crate::scheduler::tasks::RuleRecorder;
@@ -70,6 +71,8 @@ pub struct AgentBuilder {
     role_router: Option<Arc<RoleRouter>>,
     /// 结构化 Trace 收集器（G6；None 时不记录 span）。
     trace_collector: Option<Arc<crate::observability::trace::TraceCollector>>,
+    /// 执行记录日志（ADR-017 GEPA 数据层；None 时统计工具不可用、不持久化）。
+    execution_log: Option<Arc<ExecutionLog>>,
     /// 聊天模型上下文规格（T5；注入 AgentLoop 并联动压缩窗口；None 时走默认窗口）。
     chat_model_spec: Option<ModelSpec>,
     /// 后台命令日志目录（execute_command(background) 日志落盘；None 时仅内存尾部）。
@@ -98,6 +101,7 @@ impl AgentBuilder {
             notification_sink: None,
             agent_roles: None,
             trace_collector: None,
+            execution_log: None,
             chat_model_spec: None,
             command_logs_dir: None,
             role_registry: None,
@@ -240,6 +244,13 @@ impl AgentBuilder {
         collector: Arc<crate::observability::trace::TraceCollector>,
     ) -> Self {
         self.trace_collector = Some(collector);
+        self
+    }
+
+    /// 设置执行记录日志（ADR-017 GEPA 数据层：execution_stats 等工具与
+    /// 执行记录持久化依赖；None 时工具不可用）。
+    pub fn with_execution_log(mut self, log: Arc<ExecutionLog>) -> Self {
+        self.execution_log = Some(log);
         self
     }
 
@@ -415,6 +426,10 @@ impl AgentBuilder {
         // 结构化 Trace（G6）：轮次/工具/任务 span 持久化（工具 + 后台任务）
         if let Some(ref trace) = self.trace_collector {
             tool_registry = tool_registry.with_trace_collector(trace.clone());
+        }
+        // 执行记录日志（ADR-017 GEPA 数据层：execution_stats 等统计工具 + 持久化）
+        if let Some(ref log) = self.execution_log {
+            tool_registry = tool_registry.with_execution_log(log.clone());
         }
 
         let mut agent_loop = AgentLoop::new(
