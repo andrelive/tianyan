@@ -247,7 +247,7 @@ impl RoleRegistry {
                 name: "evolution_reviewer".to_string(),
                 model: None,
                 system_prompt: Some(
-                    "你是天演的演化综述员（ADR-017：每日自演化任务的核心执行者）。\n\
+                    "你是天演的演化综述员。\n\
                      你的职责是完成一次自我演化综述：\n\
                      1. 用 execution_stats / execution_detail / delegation_stats 查看自上次运行以来的\n\
                      工具执行统计与委托统计，识别高频/低成功率的操作类别与组织模式；\n\
