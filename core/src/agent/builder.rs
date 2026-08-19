@@ -4,8 +4,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::agent::r#loop::{AgentLoop, AgentLoopConfig};
-use crate::agent::role_learning::{RoleLearningConfig, RoleLearningEngine};
-use crate::agent::role_store::RoleStore;
 use crate::agent::tool_registry::ToolRegistry;
 use crate::agent::{RoleRegistry, RoleRouter};
 use crate::common::error::{Result, TianyanError};
@@ -30,7 +28,6 @@ use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
 use crate::scheduler::tasks::RuleRecorder;
 use crate::session::SessionManager;
-use crate::skills::learning::{SkillLearningConfig, SkillLearningEngine};
 use crate::skills::{SkillExecutor, SkillRefresher};
 use crate::snapshot::SnapshotManager;
 use crate::vfs::VirtualFileSystem;
@@ -487,32 +484,14 @@ impl AgentBuilder {
             self.config.learned_rules_top_k,
         );
 
-        // 构建技能学习引擎（技能学习是智能体的固有能力，始终启用）
-        let skill_learning_engine = Some(SkillLearningEngine::new(
-            model_service.clone(),
-            vfs.clone(),
-            SkillLearningConfig {
-                generation_model: chat_model.clone(),
-                ..SkillLearningConfig::default()
-            },
-        ));
-        // 构建角色学习引擎（ADR-016 双管线共生：同一份轨迹，角色侧产物）
-        let role_learning_engine = Some(RoleLearningEngine::new(
-            model_service.clone(),
-            vfs.clone(),
-            RoleStore::new(vfs.clone()),
-            RoleLearningConfig {
-                generation_model: chat_model.clone(),
-                ..RoleLearningConfig::default()
-            },
-        ));
+        // ADR-017：会话末 GEPA 引擎移除——技能/角色演化统一由每日演化任务
+        // （EvolutionTask + 演化智能体综述）驱动；执行轨迹持久化在
+        // ToolObservabilityListener（GEPA 数据层）。
 
         Ok(Agent::new(
             chat_model,
             context_pipeline,
             metrics,
-            skill_learning_engine,
-            role_learning_engine,
             agent_loop,
             session_manager,
             self.snapshot_manager,

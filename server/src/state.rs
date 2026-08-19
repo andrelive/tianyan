@@ -488,6 +488,11 @@ impl AppState {
         self.agent.read().await.clone()
     }
 
+    /// 获取 Agent 共享句柄（配置热重载后自动指向新实例；演化综述执行器用）。
+    pub fn agent_lock(&self) -> Arc<RwLock<Arc<dyn AgentCoordinator>>> {
+        self.agent.clone()
+    }
+
     /// 获取技能注册表同步句柄。
     ///
     /// ChatService 在新会话创建时调用 [`SkillSync::refresh`]，把 GEPA 在

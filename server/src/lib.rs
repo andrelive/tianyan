@@ -15,16 +15,18 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
 use tianyan::scheduler::tasks::{
-    GcTask, MemoryTask, RuleTask, SnapshotGcTask, SummaryTask, UsageStatsFlushTask,
+    EvolutionTask, GcTask, SnapshotGcTask, SummaryTask, UsageStatsFlushTask,
 };
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 
 use crate::agent_builder::create_model_services;
 use crate::api::events::processor as event_processor;
+use crate::evolution_executor::AgentEvolutionExecutor;
 
 // Import API module
 pub mod agent_builder;
 pub mod api;
+pub mod evolution_executor;
 pub mod mcp_bridge;
 pub mod notification;
 pub mod state;
@@ -392,42 +394,43 @@ async fn start_server_inner(
             app_config.clone(),
         ));
 
-        // 注册摘要任务（每 5 分钟）
+        // 注册摘要任务（ADR-017：降频每 6 小时；知识导入同步摘要，本任务仅兜底；
+        // 范围排除 Session 命名空间——会话回忆改 FTS5）
         scheduler
             .register_task(TaskDefinition::new(
                 "summary_generation",
                 "摘要生成",
-                "0 */5 * * * *",
+                "0 0 */6 * * *",
                 Arc::new(SummaryTask::new()),
             ))
             .await?;
 
-        // 注册记忆任务（每 10 分钟）
-        scheduler
-            .register_task(TaskDefinition::new(
-                "memory_extraction",
-                "记忆提取",
-                "0 */10 * * * *",
-                Arc::new(MemoryTask::new()),
-            ))
-            .await?;
-
-        // 注册规则提炼任务（每 15 分钟）
+        // 注册自演化任务（ADR-017：每日一次；移除 memory_extraction / rule_extraction，
+        // 记忆/技能/规则/组织形态的演化统一由演化智能体综述驱动）
         {
-            // 复用共享 ModelServices（不重复创建 HTTP client 池）
-            let model_services = state.shared_model_services().await?;
             let cfg = state.config().read().await.clone();
-            let chat_model = state::resolve_chat_model(&cfg);
-            scheduler
-                .register_task(TaskDefinition::new(
-                    "rule_extraction",
-                    "规则提炼",
-                    "30 */15 * * * *",
-                    Arc::new(RuleTask::new(vfs, model_services.chat, chat_model)),
-                ))
-                .await?;
+            if cfg.evolution.enabled {
+                let executor = Arc::new(AgentEvolutionExecutor::new(
+                    state.agent_lock(),
+                    state.session_manager(),
+                    state::resolve_chat_model(&cfg),
+                    cfg.evolution.review_role.clone(),
+                ));
+                scheduler
+                    .register_task(TaskDefinition::new(
+                        "evolution",
+                        "自演化综述",
+                        cfg.evolution.cron.clone(),
+                        Arc::new(EvolutionTask::new(
+                            executor,
+                            cfg.evolution.max_items_per_run,
+                        )),
+                    ))
+                    .await?;
+            }
         }
 
+        // 注册垃圾回收任务（每 6 小时；auto_cleanup 来自存储配置）
         // 注册垃圾回收任务（每 6 小时；auto_cleanup 来自存储配置）
         scheduler
             .register_task(TaskDefinition::new(

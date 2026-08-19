@@ -62,6 +62,10 @@ impl SummaryTask {
     ) -> crate::common::error::Result<Vec<TianyanUri>> {
         let mut missing = Vec::new();
         for &category in ContextNamespace::ALL {
+            // ADR-017：会话回忆改 FTS5 倒排索引，会话命名空间不再生成 L0/L1
+            if category == ContextNamespace::Session {
+                continue;
+            }
             let root_uri = TianyanUri::new(category, vec![]);
             self.scan_directory_recursive(ctx, &root_uri, &mut missing)
                 .await?;

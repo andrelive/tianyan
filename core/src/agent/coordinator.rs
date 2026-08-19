@@ -254,15 +254,6 @@ impl AgentCoordinator for Agent {
             )
             .await?;
 
-        // 7. Background: GEPA skill learning
-        {
-            let agent = self.clone();
-            let sid = session_id.to_string();
-            tokio::spawn(async move {
-                agent.learn_skills_from_session(&sid).await;
-            });
-        }
-
         Ok(response)
     }
 
@@ -313,9 +304,6 @@ impl AgentCoordinator for Agent {
                     },
                 )
                 .await;
-
-            // Background: GEPA skill learning（保持原流式路径语义：await 而非 spawn）
-            self_clone.learn_skills_from_session(&session_id_str).await;
         });
 
         Ok(rx)
@@ -347,7 +335,6 @@ impl AgentCoordinator for Agent {
             self_clone
                 .handle_clarification_response_stream(&state_clone, &answers, sender)
                 .await;
-            self_clone.learn_skills_from_session(&session_id).await;
         });
 
         Ok(rx)

@@ -10,6 +10,7 @@
 //! - [`SnapshotGcTask`][]: 快照垃圾回收任务，清理孤儿快照对象。
 //! - [`UsageStatsFlushTask`][]: 使用统计刷盘任务，内存计数器批量落库。
 
+mod evolution_task;
 mod gc_task;
 mod memory_task;
 mod reminder_task;
@@ -20,6 +21,7 @@ mod snapshot_gc_task;
 mod summary_task;
 mod usage_stats_flush_task;
 
+pub use evolution_task::{EvolutionReviewExecutor, EvolutionTask};
 pub use gc_task::GcTask;
 pub use memory_task::MemoryTask;
 pub use reminder_task::ReminderTask;

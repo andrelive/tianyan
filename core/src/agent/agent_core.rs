@@ -14,7 +14,6 @@ use tokio::sync::{OwnedMutexGuard, RwLock};
 
 use crate::agent::background::{BackgroundTaskManager, TaskWaker};
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
-use crate::agent::role_learning::RoleLearningEngine;
 use crate::agent::session_state::SessionState;
 use crate::agent::tool_registry::DynamicToolExecutor;
 use crate::agent::types::{
@@ -30,7 +29,7 @@ use crate::executor::approval::ApprovalWorkflow;
 use crate::observability::AgentMetrics;
 use crate::observability::TokenRecord;
 use crate::session::{Session, SessionManager};
-use crate::skills::{SkillLearningEngine, SkillRefresher};
+use crate::skills::SkillRefresher;
 use crate::snapshot::SnapshotManager;
 
 /// compression_marker 之后至少积累多少条消息才触发压缩。
@@ -68,9 +67,6 @@ pub struct Agent {
     pub(crate) default_model: String,
     pub(crate) context_pipeline: ContextPipeline,
     pub(crate) metrics: Arc<AgentMetrics>,
-    pub(crate) skill_learning_engine: Option<SkillLearningEngine>,
-    /// 角色学习引擎（ADR-016：双管线共生的角色侧；None 时不学习）。
-    pub(crate) role_learning_engine: Option<RoleLearningEngine>,
     pub(crate) state: Arc<RwLock<AgentState>>,
     pub(crate) agent_loop: AgentLoop,
     pub(crate) session_manager: Arc<dyn SessionManager>,
@@ -109,8 +105,6 @@ impl Agent {
         default_model: String,
         context_pipeline: ContextPipeline,
         metrics: Arc<AgentMetrics>,
-        skill_learning_engine: Option<SkillLearningEngine>,
-        role_learning_engine: Option<RoleLearningEngine>,
         agent_loop: AgentLoop,
         session_manager: Arc<dyn SessionManager>,
         snapshot_manager: Option<Arc<SnapshotManager>>,
@@ -128,8 +122,6 @@ impl Agent {
             default_model,
             context_pipeline,
             metrics,
-            skill_learning_engine,
-            role_learning_engine,
             state: Arc::new(RwLock::new(AgentState::default())),
             agent_loop,
             session_manager,
@@ -872,55 +864,6 @@ impl Agent {
             .await;
     }
 
-    /// 从会话执行历史中自动学习（ADR-016 双管线共生：技能 + 角色）。
-    ///
-    /// 同一份执行轨迹分别喂给技能引擎（GEPA）与角色引擎；
-    /// 任一引擎失败/跳过不影响另一侧（双管线独立容错）。
-    pub(crate) async fn learn_skills_from_session(&self, session_id: &str) {
-        let history = self
-            .agent_loop
-            .tool_registry()
-            .drain_execution_history()
-            .await;
-        if history.is_empty() {
-            return;
-        }
-        if let Some(ref engine) = self.skill_learning_engine {
-            match engine.learn_from_history(&history).await {
-                Ok(skills) => {
-                    if !skills.is_empty() {
-                        tracing::info!(
-                            session_id = %session_id,
-                            count = skills.len(),
-                            history_len = history.len(),
-                            "GEPA 引擎生成新技能"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(session_id = %session_id, error = %e, "GEPA 学习跳过（历史不足或未启用）");
-                }
-            }
-        }
-        if let Some(ref engine) = self.role_learning_engine {
-            match engine.learn_from_history(&history).await {
-                Ok(roles) => {
-                    if !roles.is_empty() {
-                        tracing::info!(
-                            session_id = %session_id,
-                            count = roles.len(),
-                            history_len = history.len(),
-                            "角色引擎生成/更新角色"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(session_id = %session_id, error = %e, "角色学习跳过（历史不足或未启用）");
-                }
-            }
-        }
-    }
-
     /// 更新全局 Agent 指标（对话计数、token 统计）。
     pub(crate) async fn update_agent_metrics(
         &self,
@@ -1137,8 +1080,6 @@ mod tests {
             "test-model".to_string(),
             context_pipeline,
             AgentMetrics::new(),
-            None,
-            None,
             agent_loop,
             Arc::new(MockSessionManager),
             None,

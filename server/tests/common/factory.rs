@@ -110,6 +110,7 @@ pub fn test_tianyan_config_with_data_dir(data_dir: std::path::PathBuf) -> Tianya
         web: Default::default(),
         clipboard: Default::default(),
         events: Default::default(),
+        evolution: Default::default(),
         reminder: Default::default(),
     }
 }
