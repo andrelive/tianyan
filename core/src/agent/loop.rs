@@ -403,15 +403,19 @@ impl AgentLoop {
                                     if let Some(ref fr) = choice.finish_reason {
                                         finish_reason = Some(fr.clone());
                                     }
-                                    if let Some(ref content) = choice.delta.content {
-                                        accumulated_content.push_str(content);
-                                        sender.send_answer_delta(content).await;
-                                    }
+                                    // 顺序：reasoning 先于 content——同一 chunk 同时携带
+                                    // reasoning_content 与 content（推理→正文切换边界）时，
+                                    // 思考增量必须先发，正文后发，否则前端出现
+                                    // "思考未结束正文已插入"的乱序。
                                     if let Some(ref reasoning) = choice.delta.reasoning_content {
                                         if !reasoning.is_empty() {
                                             accumulated_reasoning.push_str(reasoning);
                                             sender.send_thought(reasoning).await;
                                         }
+                                    }
+                                    if let Some(ref content) = choice.delta.content {
+                                        accumulated_content.push_str(content);
+                                        sender.send_answer_delta(content).await;
                                     }
                                     if let Some(ref tc_deltas) = choice.delta.tool_calls {
                                         for tc in tc_deltas {
@@ -1468,6 +1472,74 @@ mod tests {
             }
         }
         assert_eq!(thoughts, vec!["先分析项目结构", "再检查测试"]);
+    }
+
+    /// 流式路径：同一 chunk 同时携带 reasoning_content 与 content（推理→正文
+    /// 切换边界）时，Thought 事件必须先于 Answer 事件——否则前端出现
+    /// "思考未结束正文已插入"的乱序。
+    #[tokio::test]
+    async fn test_run_stream_reasoning_before_content_in_same_chunk() {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion_stream().returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            // 边界 chunk：同一 delta 同时携带 reasoning 结尾与正文开头
+            tx.try_send(Ok(ChatCompletionChunk {
+                id: "chunk-edge".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 0,
+                model: "test".to_string(),
+                choices: vec![ChunkChoice {
+                    index: 0,
+                    delta: DeltaContent {
+                        role: None,
+                        content: Some("正文开头".to_string()),
+                        reasoning_content: Some("思考结尾".to_string()),
+                        tool_calls: None,
+                    },
+                    finish_reason: None,
+                }],
+                usage: None,
+            }))
+            .unwrap();
+            tx.try_send(Ok(stream_chunk(Some("正文继续"), None, None)))
+                .unwrap();
+            tx.try_send(Ok(stream_chunk(None, None, Some(TokenUsage::default()))))
+                .unwrap();
+            Ok(rx)
+        });
+        let agent_loop = make_loop(mock, 5);
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamEventSender::new(event_tx);
+
+        let mut messages = vec![Message::user("测试")];
+        let result = agent_loop
+            .run_stream(
+                &mut messages,
+                sender,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        match result {
+            AgentLoopResult::Answer { content, .. } => assert_eq!(content, "正文开头正文继续"),
+            other => panic!("期望 Answer，得到 {:?}", other),
+        }
+
+        // 事件顺序：Thought 必须先于 Answer（同一 chunk 内 reasoning 先发）
+        let mut order = Vec::new();
+        while let Some(Ok(chunk)) = event_rx.recv().await {
+            match chunk.chunk_type {
+                StreamChunkType::Thought => order.push("thought"),
+                StreamChunkType::Answer => order.push("answer"),
+                _ => {}
+            }
+        }
+        assert_eq!(order, vec!["thought", "answer", "answer"]);
     }
 
     /// 流式路径：tool_calls delta 按 index 累积 —— 分片 id/name/arguments 最终完整。
