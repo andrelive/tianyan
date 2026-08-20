@@ -88,9 +88,15 @@ pub async fn list_traces_handler(
 /// LLM 用量统计查询参数。
 #[derive(Debug, Deserialize)]
 pub struct UsageStatsQuery {
-    /// 统计时段（天）：7 / 30 / 0=全部；默认 7。
+    /// 快捷时段（天）：1 / 3 / 7 / 30；0=全部；缺省 7。
     #[serde(default = "default_usage_days")]
     pub days: i64,
+    /// 自定义起始时间（epoch 秒；指定后优先于 days）。
+    #[serde(default)]
+    pub start_ts: Option<i64>,
+    /// 自定义结束时间（epoch 秒；与 start_ts 成对）。
+    #[serde(default)]
+    pub end_ts: Option<i64>,
     /// 按 provider 过滤（可选）。
     #[serde(default)]
     pub provider: Option<String>,
@@ -113,17 +119,29 @@ pub async fn get_usage_stats_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<UsageStatsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let since_ts = if query.days > 0 {
-        Some(chrono::Utc::now().timestamp() - query.days * 86400)
+    // 自定义时间段优先；否则按 days 快捷时段。
+    let (since_ts, until_ts) = if let (Some(start), Some(end)) = (query.start_ts, query.end_ts) {
+        (Some(start), Some(end))
     } else {
-        None
+        let since = if query.days > 0 {
+            Some(chrono::Utc::now().timestamp() - query.days * 86400)
+        } else {
+            None
+        };
+        (since, None)
     };
     let group_by = query.group_by.as_deref().unwrap_or("model");
     let log = state.usage_log();
-    let total = log.stats(since_ts, query.provider.as_deref(), query.model.as_deref(), "none").await;
-    let grouped = log.stats(since_ts, query.provider.as_deref(), query.model.as_deref(), group_by).await;
+    let total = log
+        .stats(since_ts, until_ts, query.provider.as_deref(), query.model.as_deref(), "none")
+        .await;
+    let grouped = log
+        .stats(since_ts, until_ts, query.provider.as_deref(), query.model.as_deref(), group_by)
+        .await;
     Ok(Json(json!({
         "days": query.days,
+        "start_ts": since_ts,
+        "end_ts": until_ts,
         "total": total.first().map(|s| serde_json::to_value(s).unwrap_or_default()),
         "grouped": grouped,
     })))

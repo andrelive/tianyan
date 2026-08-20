@@ -93,6 +93,7 @@ impl UsageLog {
     pub async fn stats(
         &self,
         since_ts: Option<i64>,
+        until_ts: Option<i64>,
         provider: Option<&str>,
         model: Option<&str>,
         group_by: &str,
@@ -107,6 +108,10 @@ impl UsageLog {
         let mut params: Vec<Box<dyn rusqlite::types::ToSql + Send + Sync>> = Vec::new();
         if let Some(ts) = since_ts {
             conds.push("ts >= ?");
+            params.push(Box::new(ts));
+        }
+        if let Some(ts) = until_ts {
+            conds.push("ts <= ?");
             params.push(Box::new(ts));
         }
         if let Some(p) = provider {
@@ -190,9 +195,12 @@ impl UsageLog {
                 parts.push("ts >= ?");
             }
             if conds.len() >= 2 {
-                parts.push("provider = ?");
+                parts.push("ts <= ?");
             }
             if conds.len() >= 3 {
+                parts.push("provider = ?");
+            }
+            if conds.len() >= 4 {
                 parts.push("model = ?");
             }
             agg.push_str(&parts.join(" AND "));
@@ -274,7 +282,7 @@ mod tests {
         log.record("s1", "opencode", "deepseek-v4-flash", &usage(500, 100, 300)).await;
         log.record("evolution-1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400)).await;
 
-        let stats = log.stats(None, None, None, "none").await;
+        let stats = log.stats(None, None, None, None, "none").await;
         assert_eq!(stats.len(), 1);
         let s = &stats[0];
         assert_eq!(s.calls, 3);
@@ -293,7 +301,7 @@ mod tests {
         log.record("s1", "opencode", "deepseek-v4-flash", &usage(1000, 800, 200)).await;
         log.record("s1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400)).await;
 
-        let stats = log.stats(None, None, None, "model").await;
+        let stats = log.stats(None, None, None, None, "model").await;
         assert_eq!(stats.len(), 2);
         // 按 total 降序：bailian 2400 > opencode 1200
         assert_eq!(stats[0].group, "bailian/qwen3.7-plus");
@@ -309,13 +317,13 @@ mod tests {
         log.record("s1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400)).await;
 
         // 按 provider 过滤
-        let stats = log.stats(None, Some("opencode"), None, "model").await;
+        let stats = log.stats(None, None, Some("opencode"), None, "model").await;
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].group, "opencode/deepseek-v4-flash");
 
         // since = 未来时间 → 无记录
         let stats = log
-            .stats(Some(chrono::Utc::now().timestamp() + 100000), None, None, "none")
+            .stats(Some(chrono::Utc::now().timestamp() + 100000), None, None, None, "none")
             .await;
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].calls, 0);

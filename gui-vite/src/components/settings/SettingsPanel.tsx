@@ -313,6 +313,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
     activeTab !== 'connection' &&
     activeTab !== 'soul' &&
     activeTab !== 'mcp' &&
+    activeTab !== 'usage' &&
     activeTab !== 'about';
 
   /* ── Render active tab ── */
