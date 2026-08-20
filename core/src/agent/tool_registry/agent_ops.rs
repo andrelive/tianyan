@@ -24,6 +24,10 @@ use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
 /// 委托链最大深度（主循环为 0；1 = 一层子 Agent，以此类推）。
 pub(crate) const MAX_DELEGATION_DEPTH: usize = 3;
 
+/// 同步委托默认时间预算（秒）：预算内完成直接返回结果；
+/// 超预算自动升级为后台任务继续运行（不杀死子代理，完成后通知）。
+const DEFAULT_SYNC_DELEGATION_BUDGET_SECS: u64 = 120;
+
 /// 委托深度 RAII guard：Drop 时自动递减，保证异常路径不泄漏深度计数。
 pub(crate) struct DelegationDepthGuard(pub(crate) Arc<AtomicUsize>);
 
@@ -406,10 +410,24 @@ impl ToolRegistry {
 
         let delegation_start = std::time::Instant::now();
 
-        let run_loop = async {
+        // 子代理循环可 spawn（同步预算自动转后台需要脱离调用栈继续跑）：
+        // clone self / owned 会话 id / 角色名，闭包 move 捕获（'static 约束）。
+        let this_for_loop = self.clone();
+        let session_owned = session_id.to_string();
+        let role_name_for_loop = role_name.clone();
+        let run_loop = async move {
             let mut total_tokens: usize = 0;
 
             for _turn in 0..max_turns {
+                // 主循环取消（用户点停止）：子代理循环也及时响应
+                if this_for_loop
+                    .delegation_cancelled(&session_owned)
+                    .await
+                {
+                    return Err(TianyanError::Custom(
+                        "tool: 委托已取消（主循环停止）".to_string(),
+                    ));
+                }
                 // T12 延期决策：子 agent 请求未应用 dynamic_max_tokens。
                 // 原因：ToolRegistry 仅持有模型名字符串（self.model），既不持有
                 // chat_spec（主 agent 的 ModelSpec 经 AgentLoop::with_chat_spec 注入，
@@ -476,12 +494,12 @@ impl ToolRegistry {
                         if !tool_calls.is_empty() {
                             // subagent=true：子任务工具执行——审批不交互，
                             // 未授权操作拒绝并上报主 agent 确认
-                            let results = self
+                            let results = this_for_loop
                                 .execute_tool_calls_with_role(
                                     tool_calls,
-                                    session_id,
+                                    &session_owned,
                                     role_tools.as_deref(),
-                                    role_name.as_deref(),
+                                    role_name_for_loop.as_deref(),
                                 )
                                 .await;
                             for (call_id, result) in results {
@@ -527,19 +545,82 @@ impl ToolRegistry {
             ))
         };
 
-        let outcome = match timeout_secs {
-            Some(secs) => {
-                let result =
-                    tokio::time::timeout(std::time::Duration::from_secs(secs), run_loop).await;
-                match result {
-                    Ok(inner) => inner,
-                    Err(_) => Err(TianyanError::Custom(format!(
-                        "tool: 委托执行超时（{}s）",
-                        secs
-                    ))),
+        // 同步委托（缺省）：时间预算 + 超时自动升级为后台任务（不杀死子代理）。
+        // 后台委托：保持原语义——timeout_secs 超时即失败。
+        // 用 spawn + channel 而非 tokio::time::timeout：timeout 会 drop 内部
+        // future（子代理循环被杀），自动转后台必须让循环脱离调用栈继续跑。
+        let is_background = params.background == Some(true);
+        let outcome = if is_background {
+            match timeout_secs {
+                Some(secs) => {
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(secs),
+                        run_loop,
+                    )
+                    .await;
+                    match result {
+                        Ok(inner) => inner,
+                        Err(_) => Err(TianyanError::Custom(format!(
+                            "tool: 委托执行超时（{}s）",
+                            secs
+                        ))),
+                    }
+                }
+                None => run_loop.await,
+            }
+        } else {
+            // 同步预算：模型可显式设置 timeout_secs；缺省 120s。
+            let budget_secs = timeout_secs.unwrap_or(DEFAULT_SYNC_DELEGATION_BUDGET_SECS);
+            let (done_tx, done_rx) = tokio::sync::mpsc::channel::<
+                Result<(serde_json::Value, Vec<Message>), TianyanError>,
+            >(1);
+            tokio::spawn(async move {
+                let result = run_loop.await;
+                let _ = done_tx.send(result).await;
+            });
+            let mut done_rx = Some(done_rx);
+            tokio::select! {
+                res = async { done_rx.as_mut().unwrap().recv().await.unwrap_or_else(|| {
+                    Err(TianyanError::Custom("tool: 委托通道关闭".to_string()))
+                }) } => res,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(budget_secs)) => {
+                    // 预算耗尽：升级为后台任务。子代理循环仍在跑（handle 未 abort），
+                    // 移交后台管理器：完成/失败经既有通知链路注入父会话 + 唤醒。
+                    let task_id = self
+                        .background_tasks
+                        .register(params.task.clone(), session_id.to_string())
+                        .await;
+                    self.background_tasks.mark_running(&task_id).await;
+                    let mgr = self.background_tasks.clone();
+                    let task_id_watch = task_id.clone();
+                    let mut rx = done_rx.take().unwrap();
+                    tokio::spawn(async move {
+                        match rx.recv().await {
+                            Some(Ok((value, _))) => {
+                                mgr.complete(&task_id_watch, value.to_string()).await;
+                            }
+                            Some(Err(e)) => {
+                                mgr.fail(&task_id_watch, e.to_string()).await;
+                            }
+                            _ => {
+                                mgr.fail(
+                                    &task_id_watch,
+                                    "同步执行失败（通道关闭）".to_string(),
+                                )
+                                .await;
+                            }
+                        }
+                    });
+                    return Ok(serde_json::json!({
+                        "status": "promoted_to_background",
+                        "task_id": task_id,
+                        "message": format!(
+                            "子任务超过同步预算（{}s）已转入后台继续运行（{}），完成后自动通知本会话。",
+                            budget_secs, task_id
+                        ),
+                    }));
                 }
             }
-            None => run_loop.await,
         };
 
         // ADR-016 决策 5：成功路径持久化角色会话（continue/new/discard 统一覆盖保存）

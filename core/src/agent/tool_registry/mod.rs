@@ -199,6 +199,9 @@ pub struct ToolRegistry {
     /// 会话管理器（execute_command 默认 cwd 解析：模型未指定时使用会话
     /// 绑定的工作目录，而非进程当前目录）。
     pub(crate) session_manager: Option<Arc<dyn crate::session::SessionManager>>,
+    /// 主循环取消标志槽（按会话：coordinator 每请求注入/清理；
+    /// 委托循环据此中断——同步委托期间用户点停止也能及时停）。
+    delegation_cancel: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
 }
 
 impl ToolRegistry {
@@ -232,6 +235,7 @@ impl ToolRegistry {
             delegation_depth: Arc::new(AtomicUsize::new(0)),
             role_registry: Arc::new(RoleRegistry::builtin()),
             session_manager: None,
+            delegation_cancel: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         };
         // A1：内置可观测性监听器注册为第一个 post-execute 监听器——
         // 原 execute_single 尾部的统计/Trace/GEPA/规则学习自此是管线消费者。
@@ -593,6 +597,34 @@ impl ToolRegistry {
         }
         map.insert(name.clone(), executor);
         tracing::info!(tool = %name, "已注册动态工具");
+    }
+
+    /// 注入/清理会话取消标志（coordinator 每请求进入前设置、退出后清理；
+    /// 委托循环按会话检查——多会话并发互不串扰）。
+    pub(crate) async fn set_delegation_cancel(
+        &self,
+        session_id: &str,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        let mut map = self.delegation_cancel.lock().await;
+        match cancel {
+            Some(c) => {
+                map.insert(session_id.to_string(), c);
+            }
+            None => {
+                map.remove(session_id);
+            }
+        }
+    }
+
+    /// 指定会话的主循环是否已请求取消（委托循环每轮检查）。
+    pub(crate) async fn delegation_cancelled(&self, session_id: &str) -> bool {
+        self.delegation_cancel
+            .lock()
+            .await
+            .get(session_id)
+            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(false)
     }
 
     /// 获取所有工具定义（内置 + 动态注册）。

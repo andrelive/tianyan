@@ -284,6 +284,13 @@ impl AgentCoordinator for Agent {
             let _turn_guard = self_clone.turn_guard(&session_id_str).await;
 
             let start = Instant::now();
+            // 注入取消标志：工具执行（含同步委托）期间也能响应停止
+            // （此前 cancel 只在 chunk 循环/轮顶检查，长工具调用点停止无效）。
+            self_clone
+                .agent_loop
+                .tool_registry()
+                .set_delegation_cancel(&session_id_str, cancel.clone())
+                .await;
             // 共享编排骨架：快照 → 持久化 → 上下文 → run_stream → 流式事件 → 指标 → 压缩
             // （do_compress = true：修复流式路径缺失压缩检查的漂移，与 process_message 对齐）
             let _ = self_clone
@@ -303,6 +310,12 @@ impl AgentCoordinator for Agent {
                         thinking_effort,
                     },
                 )
+                .await;
+            // 清理会话取消槽（避免跨请求残留）
+            self_clone
+                .agent_loop
+                .tool_registry()
+                .set_delegation_cancel(&session_id_str, None)
                 .await;
         });
 

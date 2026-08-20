@@ -1011,6 +1011,52 @@ async fn test_delegate_background_starts_and_completes() {
     assert_eq!(status["status"].as_str(), Some("completed"));
 }
 
+// 多线程 flavor：mock 内 thread::sleep 只阻塞当前 worker，
+// select 的预算 sleep 在另一 worker 正常触发（current_thread 下会互相饿死）。
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delegate_sync_budget_promotes_to_background() {
+    // 同步委托超预算：子代理未完成 → 自动升级为后台任务（不杀死子代理），
+    // 返回 promoted_to_background + task_id。
+    use crate::agent::background::TaskStatus;
+
+    let mut mock = MockChatService::new();
+    // 子代理永不完成（每轮输出开场白不提交），每轮 mock 阻塞 20ms 放慢循环
+    // （200 轮 ≈ 4s > 1s 预算，保证升级在 max_turns 前触发）。
+    mock.expect_chat_completion()
+        .returning(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            Ok(chat_response("我先看看"))
+        });
+
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("test-model");
+
+    let result = registry
+        .execute_delegate_to_agent(
+            r#"{"task":"slow job","timeout_secs":1}"#,
+            "session-1",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result["status"].as_str(),
+        Some("promoted_to_background"),
+        "预算耗尽应升级为后台: {result}",
+    );
+    let task_id = result["task_id"].as_str().unwrap().to_string();
+    assert!(task_id.starts_with("bt_"), "任务 ID 应为 bt_ 前缀: {task_id}");
+
+    // 后台任务已注册且处于运行态（子代理循环已脱离调用栈继续跑）
+    let task = registry.background_tasks.get(&task_id).await;
+    assert!(task.is_some(), "升级后任务应注册到后台管理器");
+    let task = task.unwrap();
+    assert_eq!(task.status, TaskStatus::Running);
+    assert_eq!(task.parent_session_id, "session-1");
+    // 取消后台任务，终止无限循环（测试收尾）
+    registry.background_tasks.cancel(&task_id).await.unwrap();
+}
+
 #[tokio::test]
 async fn test_task_cancel_via_tool() {
     use crate::agent::background::TaskStatus;
