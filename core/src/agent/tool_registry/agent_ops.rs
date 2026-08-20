@@ -273,11 +273,6 @@ impl ToolRegistry {
         })
     }
 
-    /// 角色会话存储（ADR-016 决策 5；VFS 未配置时 None——无会话语义，行为同现状）。
-    fn role_session_store(&self) -> Option<RoleStore> {
-        self.vfs.clone().map(RoleStore::new)
-    }
-
     /// 委托核心循环（前台/后台共用）。
     ///
     /// 深度保护由调用方负责（前台在入口，后台任务内由内层委托自行检查）。
@@ -352,53 +347,14 @@ impl ToolRegistry {
         let role_tools: Option<Vec<String>> = role.as_ref().and_then(|r| r.tools.clone());
         let role_name: Option<String> = role.as_ref().map(|r| r.name.clone());
 
-        // ADR-016 决策 5：durable 角色会话（仅 role 委托生效；主 agent 自主决策）
-        let session_mode = params.session.as_deref().unwrap_or("continue");
-        // (role, 历史任务数, 加载消息数)——返回时附加给主 agent 作决策依据
-        let mut session_meta: Option<(String, u32, usize)> = None;
+        // 一次性子代理（2026-08 决策：移除 durable 角色会话 continue 模式）：
+        // 每次委托都是干净上下文——不加载角色历史（旧任务上下文会污染当前
+        // 任务，子代理顺着旧对话跑偏），也不持久化。上下文 = 角色系统提示
+        // + 当前任务指令。任务间记忆由主 agent 承担（主对话是唯一记忆载体）。
         let mut sub_messages: Vec<Message> = Vec::new();
-        if let Some(role_name) = role_name.as_deref() {
-            match session_mode {
-                "new" => {
-                    // 新会话：干净上下文（不加载历史；执行后覆盖保存）
-                }
-                "discard" => {
-                    // 显式废弃旧会话（旧事实已过期），再开新会话执行
-                    if let Some(store) = self.role_session_store() {
-                        if let Err(e) = store.clear_role_session(role_name).await {
-                            tracing::warn!(role = %role_name, error = %e, "角色会话废弃失败");
-                        }
-                    }
-                }
-                _ => {
-                    // continue（默认）：续用持久会话（领域记忆复用）
-                    if let Some(store) = self.role_session_store() {
-                        if let Ok(Some(session)) = store.load_role_session(role_name).await {
-                            let loaded = session.messages.len();
-                            let mut history = session.messages;
-                            // 截断保护：保留首条（系统提示）+ 最近 N-1 条
-                            const MAX_SESSION_MESSAGES: usize = 60;
-                            if history.len() > MAX_SESSION_MESSAGES {
-                                let first = history[0].clone();
-                                let tail =
-                                    history.split_off(history.len() - (MAX_SESSION_MESSAGES - 1));
-                                history = tail;
-                                history.insert(0, first);
-                            }
-                            sub_messages = history;
-                            session_meta =
-                                Some((role_name.to_string(), session.task_count, loaded));
-                        }
-                    }
-                }
-            }
-        }
-        // 无历史（首委托 / new / discard 或无会话存储）时注入系统提示
-        if sub_messages.is_empty() {
-            if let Some(prompt) = system_prompt.as_deref() {
-                if !prompt.is_empty() {
-                    sub_messages.push(Message::system(prompt));
-                }
+        if let Some(prompt) = system_prompt.as_deref() {
+            if !prompt.is_empty() {
+                sub_messages.push(Message::system(prompt));
             }
         }
         sub_messages.push(Message::user(&params.task));
@@ -646,22 +602,9 @@ impl ToolRegistry {
             }
         };
 
-        // ADR-016 决策 5：成功路径持久化角色会话（continue/new/discard 统一覆盖保存）
-        if let (Some(name), Some(store)) = (role_name.as_deref(), self.role_session_store()) {
-            if let Ok((_, final_messages)) = &outcome {
-                let task_count = session_meta.as_ref().map(|(_, n, _)| *n).unwrap_or(0) + 1;
-                if let Err(e) = store
-                    .save_role_session(name, final_messages, task_count)
-                    .await
-                {
-                    tracing::warn!(role = %name, error = %e, "角色会话保存失败");
-                }
-            }
-        }
-
-        // ADR-016：委托历史明细（统计面板；成功/失败均记录）
+        // 委托历史明细（统计面板；成功/失败均记录）
         if let Some(name) = role_name.as_deref() {
-            if let Some(store) = self.role_session_store() {
+            if let Some(store) = self.vfs.clone().map(RoleStore::new) {
                 let (success, tokens) = match &outcome {
                     Ok((value, _)) => (
                         true,
@@ -680,7 +623,7 @@ impl ToolRegistry {
                     role: name.to_string(),
                     task: crate::common::llm_judge::truncate_output(&params.task, 120),
                     success,
-                    mode: session_mode.to_string(),
+                    mode: "once".to_string(),
                     duration_ms: delegation_start.elapsed().as_millis() as u64,
                     tokens,
                 };
@@ -690,19 +633,8 @@ impl ToolRegistry {
             }
         }
 
-        // 返回时附加会话决策信息（主 agent 下一轮决策依据）
         match outcome {
-            Ok((mut value, _)) => {
-                if let Some((name, prev_count, loaded)) = session_meta {
-                    value["role_session"] = serde_json::json!({
-                        "role": name,
-                        "mode": session_mode,
-                        "task_count": prev_count + 1,
-                        "loaded_messages": loaded,
-                    });
-                }
-                Ok(value)
-            }
+            Ok((value, _)) => Ok(value),
             Err(e) => Err(e),
         }
     }

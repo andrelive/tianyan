@@ -284,17 +284,6 @@ export interface RoleUsageSummary {
   last_used: number;
 }
 
-export interface RoleSessionSummary {
-  /** 累计任务数 */
-  task_count: number;
-  /** 会话消息条数 */
-  message_count: number;
-  /** 会话创建时间（epoch 毫秒） */
-  created_at: number;
-  /** 最后使用时间（epoch 毫秒） */
-  updated_at: number;
-}
-
 export interface RoleSummary {
   name: string;
   source: 'builtin' | 'user' | 'learned';
@@ -307,8 +296,6 @@ export interface RoleSummary {
   tool_count?: number | null;
   model?: string | null;
   max_turns?: number | null;
-  /** durable 角色会话（无会话时为 null） */
-  session?: RoleSessionSummary | null;
   /** 使用统计（无记录时为 null） */
   usage?: RoleUsageSummary | null;
 }

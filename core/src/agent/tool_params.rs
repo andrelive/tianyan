@@ -245,12 +245,6 @@ pub struct DelegateToAgentParams {
     /// max_turns 与 timeout_secs；同名参数显式指定时优先于角色值。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    /// 会话语义（ADR-016 决策 5；仅 role 委托生效，默认 "continue"）：
-    /// - "continue"：续用该角色的持久会话（子智能体记得前因后果——同类连续任务、长链条工作）；
-    /// - "new"：开新会话执行并覆盖保存（干净上下文——新领域、状态可疑时）；
-    /// - "discard"：废弃旧会话并开新会话执行（旧事实已过期时）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session: Option<String>,
     /// 子 Agent 模型名称（与主 Agent 模型同空间；优先级：
     /// 显式 model > role.model > 主 Agent 模型）。
     #[serde(skip_serializing_if = "Option::is_none")]

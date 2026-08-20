@@ -16,19 +16,6 @@ use tianyan::agent::{RoleRegistry, RoleSource, RoleStatus, RoleStore};
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
 
-/// 角色会话摘要（决策信息：任务数 / 时间戳 / 消息数）。
-#[derive(Debug, Clone, Serialize)]
-pub struct RoleSessionSummary {
-    /// 累计任务数。
-    pub task_count: u32,
-    /// 消息条数。
-    pub message_count: usize,
-    /// 会话创建时间（epoch 毫秒）。
-    pub created_at: i64,
-    /// 最后使用时间（epoch 毫秒）。
-    pub updated_at: i64,
-}
-
 /// 角色列表项（L0 渐进披露粒度）。
 #[derive(Debug, Clone, Serialize)]
 pub struct RoleSummary {
@@ -53,9 +40,6 @@ pub struct RoleSummary {
     /// 最大轮数。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
-    /// durable 角色会话（无会话时为 None）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session: Option<RoleSessionSummary>,
     /// 使用统计（调用/成功/失败/成功率；无记录时为 None）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<RoleUsageSummary>,
@@ -182,11 +166,7 @@ pub async fn delete_role(
         .delete_role(&name)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    store
-        .clear_role_session(&name)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    tracing::info!(role = %name, "角色已退役（定义与会话已删除）");
+    tracing::info!(role = %name, "角色已退役（定义已删除）");
     Ok(Json(
         serde_json::json!({ "name": name, "status": "deleted" }),
     ))
@@ -258,18 +238,7 @@ async fn to_summary(store: &RoleStore, role: &tianyan::agent::AgentRole) -> Role
         .as_deref()
         .map(|p| p.lines().next().unwrap_or("").trim().to_string())
         .unwrap_or_else(|| "无系统提示".to_string());
-    let session = store
-        .load_role_session(&role.name)
-        .await
-        .ok()
-        .flatten()
-        .map(|s| RoleSessionSummary {
-            task_count: s.task_count,
-            message_count: s.messages.len(),
-            created_at: s.created_at,
-            updated_at: s.updated_at,
-        });
-    // ADR-016 P3：使用统计（退役信号 / 演化门控可见性）
+    // 使用统计（退役信号 / 演化门控可见性）
     let usage = store
         .load_role_usage(&role.name)
         .await
@@ -292,7 +261,6 @@ async fn to_summary(store: &RoleStore, role: &tianyan::agent::AgentRole) -> Role
         tool_count: role.tools.as_ref().map(|t| t.len()),
         model: role.model.clone(),
         max_turns: role.max_turns,
-        session,
         usage,
     }
 }
