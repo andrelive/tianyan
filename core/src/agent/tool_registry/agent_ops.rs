@@ -103,7 +103,7 @@ impl ToolRegistry {
         )
         .await?;
         // 后台模式：立即返回任务快照（task_id/log_file/pid），进程独立运行。
-        // 观测：command_status 查询（输出尾部）/ 日志文件 read_file；终止：command_kill。
+        // 观测：task_status 查询（输出尾部）/ 日志文件 read_file；终止：task_cancel。
         if params.background == Some(true) {
             // 就绪探测规格（可选）：端口/日志关键词就绪后自动通知主 agent；
             // 长驻服务（server/dev server 等）必须配置，否则只能等进程退出通知。
@@ -121,7 +121,7 @@ impl ToolRegistry {
             let ready_msg = if params.ready.is_some() {
                 "已配置就绪探测：端口监听/日志关键词出现后自动通知本会话。"
             } else {
-                "可用 command_status 查询状态与输出尾部，command_kill 终止（杀进程树）。"
+                "可用 task_status 查询状态与输出尾部，task_cancel 终止（杀进程树）。"
             };
             return Ok(serde_json::json!({
                 "task_id": task.id,
@@ -858,61 +858,6 @@ impl ToolRegistry {
         }))
     }
 
-    /// 执行 command_status 工具：查询后台命令任务状态与输出尾部（非阻塞快照）。
-    pub(crate) async fn execute_command_status(
-        &self,
-        arguments: &str,
-    ) -> Result<serde_json::Value, TianyanError> {
-        #[derive(serde::Deserialize)]
-        struct Params {
-            task_id: String,
-        }
-        let params: Params = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
-
-        let task = self
-            .command_tasks
-            .get(&params.task_id)
-            .await
-            .ok_or_else(|| TianyanError::Custom(format!("tool: 任务不存在：{}", params.task_id)))?;
-
-        serde_json::to_value(task)
-            .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))
-    }
-
-    /// 执行 command_list 工具：列出全部后台命令任务（按注册序号升序）。
-    pub(crate) async fn execute_command_list(
-        &self,
-        _arguments: &str,
-    ) -> Result<serde_json::Value, TianyanError> {
-        let tasks = self.command_tasks.list().await;
-        serde_json::to_value(tasks)
-            .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))
-    }
-
-    /// 执行 command_kill 工具：终止后台命令（杀进程树；终态任务为幂等空操作）。
-    pub(crate) async fn execute_command_kill(
-        &self,
-        arguments: &str,
-    ) -> Result<serde_json::Value, TianyanError> {
-        #[derive(serde::Deserialize)]
-        struct Params {
-            task_id: String,
-        }
-        let params: Params = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
-
-        self.command_tasks
-            .kill(&params.task_id)
-            .await
-            .map_err(wrap_tool_error)?;
-
-        Ok(serde_json::json!({
-            "task_id": params.task_id,
-            "status": "cancelled",
-            "message": "后台命令已终止（进程树已杀）",
-        }))
-    }
     /// 执行 suggest_role 工具（ADR-016 P3）：任务描述 → 角色语义匹配建议。
     pub(crate) async fn execute_suggest_role(
         &self,

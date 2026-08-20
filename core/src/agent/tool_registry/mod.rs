@@ -6,8 +6,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::agent::tool_params::{
-    ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, CommandKillParams,
-    CommandListParams, CommandStatusParams, DelegateToAgentParams, DelegationStatsParams,
+    ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams, DelegationStatsParams,
     DiscoverTestsParams, ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams,
     GlobParams, KnowledgeIngestParams, ListDirParams, LspParams, ReadFileParams, RunTestsParams,
     SearchCodeParams, SearchKnowledgeParams, SelfCheckParams, SessionRecallParams,
@@ -173,7 +172,7 @@ pub struct ToolRegistry {
     pub(crate) web_client: Option<Arc<WebSearchClient>>,
     /// 后台任务管理器（delegate_to_agent(background) / task_status / task_cancel）。
     pub(crate) background_tasks: Arc<crate::agent::background::BackgroundTaskManager>,
-    /// 后台命令管理器（execute_command(background) / command_status / command_list / command_kill）。
+    /// 后台命令管理器（execute_command(background)；查询/终止经统一 task_status / task_cancel）。
     pub(crate) command_tasks: Arc<crate::executor::CommandManager>,
     /// 角色向量路由器（ADR-016 P3：suggest_role 工具依赖；None 时工具不可用）。
     pub(crate) role_router: Option<Arc<crate::agent::role_router::RoleRouter>>,
@@ -674,9 +673,6 @@ impl ToolRegistry {
         "delegate_to_agent",
         "task_status",
         "task_cancel",
-        "command_status",
-        "command_list",
-        "command_kill",
         "search_knowledge",
         "vfs_read",
         "vfs_list",
@@ -899,9 +895,6 @@ impl ToolRegistry {
             "delegate_to_agent" => self.execute_delegate_to_agent(arguments, session_id).await,
             "task_status" => self.execute_task_status(arguments).await,
             "task_cancel" => self.execute_task_cancel(arguments).await,
-            "command_status" => self.execute_command_status(arguments).await,
-            "command_list" => self.execute_command_list(arguments).await,
-            "command_kill" => self.execute_command_kill(arguments).await,
             "suggest_role" => self.execute_suggest_role(arguments).await,
             "execution_stats" => self.execute_execution_stats(arguments).await,
             "execution_detail" => self.execute_execution_detail(arguments).await,
@@ -1073,27 +1066,6 @@ impl ToolRegistry {
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                CommandStatusParams,
-            >(
-                "command_status",
-                "Query the status, exit code and recent output tail of a background command task by its task_id (cmd_xxx). Non-blocking snapshot; the full output is in the log file (log_file path) — use read_file to read more.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                CommandListParams,
-            >(
-                "command_list",
-                "List all background command tasks (cmd_xxx) with their status, pid and log file. Use command_status for one task's output tail, command_kill to terminate.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                CommandKillParams,
-            >(
-                "command_kill",
-                "Terminate a running background command task by its task_id (kills the whole process tree, e.g. a dev server started via execute_command with background=true). Cancelling an already finished task is a no-op.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
                 SuggestRoleParams,
             >(
                 "suggest_role",
@@ -1212,8 +1184,7 @@ impl ToolRegistry {
             "read_file" | "vfs_read" => ToolPresentation::Read,
             "write_file" => ToolPresentation::Write,
             "apply_edit" | "apply_patch" => ToolPresentation::Diff,
-            "execute_command" | "run_tests" | "verify_build" | "command_status"
-            | "command_list" | "command_kill" => ToolPresentation::Terminal,
+            "execute_command" | "run_tests" | "verify_build" => ToolPresentation::Terminal,
             "grep" | "search_knowledge" | "glob" | "list_dir" | "discover_tests" => {
                 ToolPresentation::Search
             }
@@ -1458,9 +1429,9 @@ mod tests {
     async fn test_shortlist_none_query_returns_all() {
         // 无查询信号：保守全量
         let registry = ToolRegistry::new(SecurityPolicy::default());
-        register_mock_tools(&registry, 20).await; // 33 + 20 = 53 > 40
+        register_mock_tools(&registry, 20).await; // 30 + 20 = 50 > 40
         let defs = registry.definitions_shortlisted(None).await;
-        assert_eq!(defs.len(), 53);
+        assert_eq!(defs.len(), 50);
     }
 
     #[tokio::test]
@@ -1486,9 +1457,6 @@ mod tests {
             "delegate_to_agent",
             "task_status",
             "task_cancel",
-            "command_status",
-            "command_list",
-            "command_kill",
             "search_knowledge",
             "vfs_read",
             "vfs_list",

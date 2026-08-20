@@ -72,23 +72,6 @@ pub struct ReadyProbeParams {
     pub timeout_ms: Option<u64>,
 }
 
-/// 后台命令状态查询参数。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CommandStatusParams {
-    /// 任务 ID（cmd_ 前缀）。
-    pub task_id: String,
-}
-
-/// 后台命令终止参数。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CommandKillParams {
-    /// 任务 ID（cmd_ 前缀）。
-    pub task_id: String,
-}
-
-/// 后台命令列表参数（无字段）。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CommandListParams {}
 
 /// 角色匹配建议参数（ADR-016 P3 向量路由）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

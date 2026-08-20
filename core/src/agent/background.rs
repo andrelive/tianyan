@@ -712,7 +712,7 @@ impl crate::executor::CommandNotifier for SessionCommandNotifier {
 }
 
 /// 构建命令通知文本（join 信号：携带剩余计数；不含输出正文——输出经
-/// command_status / 日志文件按需读取，避免大输出污染会话上下文）。
+/// task_status / 日志文件按需读取，避免大输出污染会话上下文）。
 pub fn build_command_notification_text(task: &CommandTask, remaining: usize) -> String {
     let status_label = match task.status {
         CommandTaskStatus::Completed => "完成",
@@ -733,7 +733,7 @@ pub fn build_command_notification_text(task: &CommandTask, remaining: usize) -> 
     );
     if let Some(path) = &task.log_file {
         text.push_str(&format!(
-            "\n日志：{path}（输出尾部可用 command_status 查询）"
+            "\n日志：{path}（输出尾部可用 task_status 查询）"
         ));
     }
     if remaining > 0 {
