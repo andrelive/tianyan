@@ -34,10 +34,12 @@ function App() {
 
   useTheme(theme);
 
-  // Font size
+  // Font size（三档整体升档：小=14px、中=16px、大=18px——
+  // 小取原中档、中取原大档、大按比例（16/14≈1.143）再高一级；
+  // 对话历史字号类（text-lg/text-base）保持不变，随根字号等比缩放）
   useEffect(() => {
     document.documentElement.style.fontSize =
-      fontSize === 'small' ? '12px' : fontSize === 'large' ? '16px' : '14px';
+      fontSize === 'small' ? '14px' : fontSize === 'large' ? '18px' : '16px';
   }, [fontSize]);
 
   // Check config status on mount
