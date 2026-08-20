@@ -14,6 +14,7 @@ use crate::model::spec::ModelSpec;
 use crate::model::types::ChatCompletionRequest;
 use crate::model::ChatService;
 use crate::observability::trace::TraceCollector;
+use crate::observability::usage_log::UsageLog;
 use crate::session::SessionManager;
 
 /// Agent 循环配置。
@@ -126,6 +127,8 @@ pub struct AgentLoop {
     ///
     /// `Arc` 保证 AgentLoop 克隆后校准值共享；0 表示尚无实测（退化为估算）。
     pub(crate) last_input_usage: Arc<AtomicUsize>,
+    /// LLM 用量日志（token 统计：每轮调用落库；None 时不记录）。
+    usage_log: Option<Arc<UsageLog>>,
 }
 
 impl AgentLoop {
@@ -144,6 +147,7 @@ impl AgentLoop {
             trace: None,
             chat_spec: None,
             last_input_usage: Arc::new(AtomicUsize::new(0)),
+            usage_log: None,
         }
     }
 
@@ -156,6 +160,12 @@ impl AgentLoop {
     /// 设置结构化 Trace 收集器（G6：轮次 span 记录；None 时不记录）。
     pub fn with_trace_collector(mut self, collector: Arc<TraceCollector>) -> Self {
         self.trace = Some(collector);
+        self
+    }
+
+    /// 设置 LLM 用量日志（token 统计；None 时不记录）。
+    pub fn with_usage_log(mut self, log: Arc<UsageLog>) -> Self {
+        self.usage_log = Some(log);
         self
     }
 
@@ -616,6 +626,15 @@ impl AgentLoop {
             }
 
             let (assistant_msg, turn_usage, finish_reason) = step_result;
+
+            // LLM 用量日志：每轮一次（聊天/子代理/演化任务统一记录）。
+            // provider 由 model 名约定前缀推导（provider/model 命名）。
+            if let Some(ref usage_log) = self.usage_log {
+                if let Some(usage) = &turn_usage {
+                    let provider = model.split("/").next().unwrap_or("unknown");
+                    usage_log.record(session_id, provider, model, usage).await;
+                }
+            }
 
             let mut ctx = TurnContext {
                 session_id,

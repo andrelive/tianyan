@@ -199,6 +199,23 @@ const SCHEMA_SQL: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_uniq ON session_messages(session_id, seq);
     CREATE INDEX IF NOT EXISTS idx_session_messages_session_ts ON session_messages(session_id, ts);
 
+    -- LLM 用量日志（token 统计：每次 LLM 调用一行，覆盖聊天/子代理/演化任务；
+    -- 由 AgentLoop 每轮拿到 turn_usage 后写入，供统计面板按 provider/model/时段聚合）
+    CREATE TABLE IF NOT EXISTS usage_logs (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id        TEXT    NOT NULL,
+        provider          TEXT    NOT NULL DEFAULT '',
+        model             TEXT    NOT NULL DEFAULT '',
+        uncached_input    INTEGER NOT NULL DEFAULT 0,
+        cached_input      INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens      INTEGER NOT NULL DEFAULT 0,
+        ts                INTEGER NOT NULL,
+        recorded_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_usage_logs_ts ON usage_logs(ts);
+    CREATE INDEX IF NOT EXISTS idx_usage_logs_model ON usage_logs(provider, model);
+
     -- FTS5 倒排索引（trigram tokenizer：中文子串匹配；rowid 对应 session_messages.id）
     CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
         text,

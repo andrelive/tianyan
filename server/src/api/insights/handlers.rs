@@ -85,6 +85,50 @@ pub async fn list_traces_handler(
     Ok(Json(json!({ "traces": traces, "total": traces.len() })))
 }
 
+/// LLM 用量统计查询参数。
+#[derive(Debug, Deserialize)]
+pub struct UsageStatsQuery {
+    /// 统计时段（天）：7 / 30 / 0=全部；默认 7。
+    #[serde(default = "default_usage_days")]
+    pub days: i64,
+    /// 按 provider 过滤（可选）。
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// 按 model 过滤（可选）。
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 分组维度：provider | model（可选；缺省按 model）。
+    #[serde(default)]
+    pub group_by: Option<String>,
+}
+
+fn default_usage_days() -> i64 {
+    7
+}
+
+/// 返回 LLM 用量统计（总计 + 按 provider/model 分组）。
+///
+/// 覆盖聊天、子代理委托、演化任务等所有走 AgentLoop 的调用。
+pub async fn get_usage_stats_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<UsageStatsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let since_ts = if query.days > 0 {
+        Some(chrono::Utc::now().timestamp() - query.days * 86400)
+    } else {
+        None
+    };
+    let group_by = query.group_by.as_deref().unwrap_or("model");
+    let log = state.usage_log();
+    let total = log.stats(since_ts, query.provider.as_deref(), query.model.as_deref(), "none").await;
+    let grouped = log.stats(since_ts, query.provider.as_deref(), query.model.as_deref(), group_by).await;
+    Ok(Json(json!({
+        "days": query.days,
+        "total": total.first().map(|s| serde_json::to_value(s).unwrap_or_default()),
+        "grouped": grouped,
+    })))
+}
+
 /// 返回定时任务调度器状态。
 ///
 /// 无启用的模型 Provider 时调度器未装配，返回空状态（running=false、tasks=[]）。

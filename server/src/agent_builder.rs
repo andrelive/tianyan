@@ -20,6 +20,7 @@ use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::context::DualLayerRetriever;
 use tianyan::model::ModelServices;
 use tianyan::observability::execution_log::ExecutionLog;
+use tianyan::observability::usage_log::UsageLog;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::session::SessionManager;
 use tianyan::skills::{SkillExecutor, SkillRefresher};
@@ -71,6 +72,7 @@ impl AgentBuilderFactory {
         session_recall: Arc<tianyan::session::search::SessionRecall>,
         role_registry: Arc<tianyan::agent::RoleRegistry>,
         role_router: Arc<tianyan::agent::RoleRouter>,
+        usage_log: Arc<UsageLog>,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
@@ -106,7 +108,8 @@ impl AgentBuilderFactory {
             .with_command_logs_dir(config.storage.data_dir.join("command_logs"))
             .with_session_manager(session_manager)
             .with_execution_log(execution_log)
-            .with_session_recall(session_recall);
+            .with_session_recall(session_recall)
+            .with_usage_log(usage_log);
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),
             None => agent,
@@ -165,6 +168,7 @@ impl AgentBuilderFactory {
         session_recall: Arc<tianyan::session::search::SessionRecall>,
         role_registry: Arc<tianyan::agent::RoleRegistry>,
         role_router: Arc<tianyan::agent::RoleRouter>,
+        usage_log: Arc<UsageLog>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -183,6 +187,7 @@ impl AgentBuilderFactory {
             session_recall,
             role_registry,
             role_router,
+            usage_log,
         )
         .await
         {

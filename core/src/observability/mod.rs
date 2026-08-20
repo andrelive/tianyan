@@ -6,6 +6,7 @@
 
 pub mod execution_log;
 pub mod trace;
+pub mod usage_log;
 pub mod usage_stats;
 
 use std::sync::Arc;

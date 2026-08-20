@@ -72,6 +72,7 @@ pub struct AgentBuilder {
     execution_log: Option<Arc<ExecutionLog>>,
     /// 会话回忆服务（ADR-017 决策 6：session_recall 工具依赖；None 时工具不可用）。
     session_recall: Option<Arc<crate::session::search::SessionRecall>>,
+    usage_log: Option<Arc<crate::observability::usage_log::UsageLog>>,
     /// 聊天模型上下文规格（T5；注入 AgentLoop 并联动压缩窗口；None 时走默认窗口）。
     chat_model_spec: Option<ModelSpec>,
     /// 后台命令日志目录（execute_command(background) 日志落盘；None 时仅内存尾部）。
@@ -102,6 +103,7 @@ impl AgentBuilder {
             trace_collector: None,
             execution_log: None,
             session_recall: None,
+            usage_log: None,
             chat_model_spec: None,
             command_logs_dir: None,
             role_registry: None,
@@ -260,6 +262,12 @@ impl AgentBuilder {
         recall: Arc<crate::session::search::SessionRecall>,
     ) -> Self {
         self.session_recall = Some(recall);
+        self
+    }
+
+    /// 设置 LLM 用量日志（token 统计：每轮调用落库；None 时不记录）。
+    pub fn with_usage_log(mut self, log: Arc<crate::observability::usage_log::UsageLog>) -> Self {
+        self.usage_log = Some(log);
         self
     }
 
@@ -458,6 +466,10 @@ impl AgentBuilder {
         // 结构化 Trace（G6）：轮次 span
         if let Some(ref trace) = self.trace_collector {
             agent_loop = agent_loop.with_trace_collector(trace.clone());
+        }
+        // LLM 用量日志（token 统计）
+        if let Some(ref usage_log) = self.usage_log {
+            agent_loop = agent_loop.with_usage_log(usage_log.clone());
         }
         // 聊天模型上下文规格注入（T5）：None 时 AgentLoop 内部走默认窗口
         agent_loop = agent_loop.with_chat_spec(self.chat_model_spec);

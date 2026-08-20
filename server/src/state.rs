@@ -16,6 +16,7 @@ use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
 use tianyan::model::spec::ModelSpec;
 use tianyan::observability::execution_log::ExecutionLog;
+use tianyan::observability::usage_log::UsageLog;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::scheduler::TaskScheduler;
 use tianyan::session::search::SessionRecall;
@@ -261,6 +262,7 @@ pub struct AppState {
     execution_log: Arc<ExecutionLog>,
     /// 会话回忆服务（ADR-017 决策 6：FTS5 消息索引）
     session_recall: Arc<SessionRecall>,
+    usage_log: Arc<UsageLog>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
     snapshot_manager: Option<Arc<SnapshotManager>>,
     /// 模型服务（chat/embedding/vision，全组件共享；配置热更新时重建）
@@ -364,6 +366,9 @@ impl AppState {
         // 初始化会话回忆服务（ADR-017 决策 6：FTS5 消息索引；共享 SqliteDb 连接）
         let session_recall = SessionRecall::new(sqlite_db.clone())?;
 
+        // 初始化 LLM 用量日志（token 统计；共享 SqliteDb 连接）
+        let usage_log = UsageLog::new(sqlite_db.clone())?;
+
         // 初始化工作区快照管理器（配置了 working_directory 时启用）
         let snapshot_manager = config.agent.working_directory.clone().map(|workdir| {
             let root = config.storage.data_dir.join("snapshots");
@@ -436,6 +441,7 @@ impl AppState {
             session_recall.clone(),
             role_registry.clone(),
             role_router,
+            usage_log.clone(),
         )
         .await?;
 
@@ -453,6 +459,7 @@ impl AppState {
             trace_collector,
             execution_log,
             session_recall,
+            usage_log,
             snapshot_manager,
             model_services: Arc::new(RwLock::new(model_services)),
             mcp_tools,
@@ -584,6 +591,7 @@ impl AppState {
             self.session_recall.clone(),
             self.role_registry.clone(),
             role_router,
+            self.usage_log.clone(),
         )
         .await?;
 
@@ -667,6 +675,11 @@ impl AppState {
     /// 获取会话回忆服务（ADR-017 决策 6）。
     pub fn session_recall(&self) -> Arc<SessionRecall> {
         self.session_recall.clone()
+    }
+
+    /// LLM 用量日志访问器（token 统计 API 依赖）。
+    pub fn usage_log(&self) -> Arc<UsageLog> {
+        self.usage_log.clone()
     }
 
     /// 装配定时任务调度器（`start_server` 在创建并注册任务后调用）。
