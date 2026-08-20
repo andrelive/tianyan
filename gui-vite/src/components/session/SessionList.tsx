@@ -36,6 +36,7 @@ export default function SessionList() {
   const setSessions = useAppStore((s) => s.setSessions);
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
+  const clearMessages = useAppStore((s) => s.clearMessages);
   const setMessages = useAppStore((s) => s.setMessages);
   const setView = useAppStore((s) => s.setView);
   const showToast = useAppStore((s) => s.showToast);
@@ -127,12 +128,12 @@ export default function SessionList() {
     (workdir: string) => {
       setNewSessionWorkspace(workdir || null);
       setCurrentSession(null);
-      setMessages([]);
+      clearMessages();
       setNewChatStarted(true);
       setView('chat');
       navigate('/chat');
     },
-    [navigate, setCurrentSession, setMessages, setNewSessionWorkspace, setView],
+    [navigate, setCurrentSession, clearMessages, setNewSessionWorkspace, setView],
   );
 
   /** 添加新目录分组：目录选择器（唯一弹窗）→ 进入该目录的新会话。 */
@@ -149,6 +150,8 @@ export default function SessionList() {
       setCurrentSession(session.id);
       setView('chat');
       navigate(`/chat/${session.id}`);
+      // 本地已有缓存（流式累积/之前看过）→ 直接显示；无缓存才拉历史
+      if (useAppStore.getState().hasSessionMessages(session.id)) return;
       try {
         const data = await apiGet<SessionMessagesResponse>(`/sessions/${session.id}/messages`);
         setMessages(data.messages);

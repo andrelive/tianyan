@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useAppStore } from '@/lib/store';
+import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
 import type { ChatMessage, Session, Skill, SkillCallInfo } from '@/lib/types';
 
 describe('useAppStore', () => {
@@ -10,7 +10,8 @@ describe('useAppStore', () => {
       currentSessionId: null,
       sessions: [],
       messages: [],
-      streamStatus: 'idle',
+      sessionMessages: {},
+      streamStatus: {},
       isSidebarOpen: true,
       theme: 'system',
       fontSize: 'medium',
@@ -30,7 +31,8 @@ describe('useAppStore', () => {
     expect(state.currentSessionId).toBeNull();
     expect(state.sessions).toEqual([]);
     expect(state.messages).toEqual([]);
-    expect(state.streamStatus).toBe('idle');
+    expect(state.sessionMessages).toEqual({});
+    expect(state.streamStatus).toEqual({});
     expect(state.isSidebarOpen).toBe(true);
     expect(state.theme).toBe('system');
     expect(state.fontSize).toBe('medium');
@@ -223,20 +225,20 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().messages).toEqual([]);
   });
 
-  it('deleteMessagesFrom removes messages from index onward and resets stream status', () => {
+  it('deleteMessagesFrom removes messages from index and resets stream status', () => {
     useAppStore.setState({
       messages: [
         { role: 'user', content: 'a' },
         { role: 'assistant', content: 'b' },
         { role: 'user', content: 'c' },
       ],
-      streamStatus: 'streaming',
+      streamStatus: { [PENDING_SESSION_KEY]: 'streaming' },
     });
 
     useAppStore.getState().deleteMessagesFrom(1);
     expect(useAppStore.getState().messages).toHaveLength(1);
     expect(useAppStore.getState().messages[0].content).toBe('a');
-    expect(useAppStore.getState().streamStatus).toBe('idle');
+    expect(useAppStore.getState().streamStatus).toEqual({ [PENDING_SESSION_KEY]: 'idle' });
   });
 
   // ── Skill Calls ──
@@ -308,17 +310,17 @@ describe('useAppStore', () => {
 
   // ── Streaming ──
 
-  it('setStreamStatus updates streamStatus', () => {
+  it('setStreamStatus updates streamStatus per session', () => {
     const { setStreamStatus } = useAppStore.getState();
 
     setStreamStatus('streaming');
-    expect(useAppStore.getState().streamStatus).toBe('streaming');
+    expect(useAppStore.getState().streamStatus).toEqual({ [PENDING_SESSION_KEY]: 'streaming' });
 
     setStreamStatus('error');
-    expect(useAppStore.getState().streamStatus).toBe('error');
+    expect(useAppStore.getState().streamStatus).toEqual({ [PENDING_SESSION_KEY]: 'error' });
 
     setStreamStatus('idle');
-    expect(useAppStore.getState().streamStatus).toBe('idle');
+    expect(useAppStore.getState().streamStatus).toEqual({ [PENDING_SESSION_KEY]: 'idle' });
   });
 
   // ── Toast ──

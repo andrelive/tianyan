@@ -18,19 +18,21 @@ import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
 import type { ChatMessage, ChatStreamEvent, StreamUsage } from '@/lib/types';
+import { PENDING_SESSION_KEY } from '@/lib/store';
 
 export default function ChatPanel() {
   const { sessionId: urlSessionId } = useParams<{ sessionId: string }>();
 
   // Store state - individual selectors for minimal re-renders
   const messages = useAppStore((s) => s.messages);
-  const streamStatus = useAppStore((s) => s.streamStatus);
+  const streamStatusMap = useAppStore((s) => s.streamStatus);
   const currentSessionId = useAppStore((s) => s.currentSessionId);
+  /** 当前会话流式状态（按会话归属：切到原会话的流继续，互不阻塞） */
+  const streamStatus = streamStatusMap[currentSessionId ?? PENDING_SESSION_KEY] ?? 'idle';
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
   const addMessage = useAppStore((s) => s.addMessage);
   const setStreamStatus = useAppStore((s) => s.setStreamStatus);
   const deleteMessagesFrom = useAppStore((s) => s.deleteMessagesFrom);
-  const setMessages = useAppStore((s) => s.setMessages);
   const lastRollbackIndex = useAppStore((s) => s.lastRollbackIndex);
   const setLastRollbackIndex = useAppStore((s) => s.setLastRollbackIndex);
   const pendingClarification = useAppStore((s) => s.pendingClarification);
@@ -50,10 +52,9 @@ export default function ChatPanel() {
   /** 最近一次流式完成 chunk 携带的真实窗口（会话流式时的权威值；
       历史会话回退到 chatModels[selectedModel].context_length）。 */
   const liveWindowRef = useRef(0);
-  /** 实时当前会话 ID（ref 镜像：SSE chunk 回调里读取，避免闭包过期）。
-      用于会话守卫——切换会话/界面后到达的残留 chunk 直接丢弃，
-      防污染新会话的消息列表。 */
-  const sessionIdRef = useRef<string | null>(null);
+  /** 当前在途流的归属会话（首个 chunk 到达时记录；onComplete/onError 按此
+      会话清除流式状态——UI 可能已切走，不能用 currentSessionId 闭包值）。 */
+  const streamSessionRef = useRef<string | null>(null);
 
   /** 当前会话自己的上下文占用：取本会话最后一条带 usage 的消息（消息级独立计算，
       切换会话随 messages 变化——每个会话显示各自的占用，不再串值）。 */
@@ -98,10 +99,9 @@ export default function ChatPanel() {
   useEffect(() => {
     if (urlSessionId && urlSessionId !== currentSessionId) {
       setCurrentSession(urlSessionId);
-      setMessages([]);
       setPendingClarification(null);
     }
-  }, [urlSessionId, currentSessionId, setCurrentSession, setMessages, setPendingClarification]);
+  }, [urlSessionId, currentSessionId, setCurrentSession, setPendingClarification]);
 
   // 刷新/直达 URL（如 /chat/{id}）时恢复历史消息：仅在挂载时执行一次。
   // 列表点击路径由 SessionList.handleSelectSession 负责加载（导航后
@@ -119,6 +119,8 @@ export default function ChatPanel() {
     if (!urlSessionId) return;
     const sessionId = urlSessionId;
     (async () => {
+      // 本地已有缓存（流式累积/之前看过）→ 直接显示，不重复拉历史
+      if (useAppStore.getState().hasSessionMessages(sessionId)) return;
       try {
         const data = await apiGet<{ messages: ChatMessage[] }>(`/sessions/${sessionId}/messages`);
         if (activeUrlSessionRef.current === sessionId) {
@@ -227,15 +229,12 @@ export default function ChatPanel() {
   const { startStream, stopStream } = useChatStream({
     streamUrl: `${getApiBase()}/chat/stream`,
     onChunk: (event) => {
-      // 会话守卫：残留 chunk（会话切换/界面切换后到达，abort 有竞态窗口）
-      // 直接丢弃——否则思考/工具结果会追加到当前（错误）会话的消息列表
-      const activeSession = sessionIdRef.current;
-      if (event.session_id && activeSession && event.session_id !== activeSession) {
-        return;
-      }
-      // Update session ID from server response
-      if (event.session_id) {
-        useAppStore.getState().setCurrentSession(event.session_id);
+      // 流归属会话：消息按 session_id 写入各自缓存——切走会话流继续跑，
+      // 切回直接显示累积内容（含思考/工具/结果全过程）
+      const sid = event.session_id || null;
+      if (sid) {
+        streamSessionRef.current = sid;
+        useAppStore.getState().setCurrentSession(sid);
       }
       // Server-side error (validation / processing failure): surface to user
       if (event.chunk_type === 'error') {
@@ -246,76 +245,71 @@ export default function ChatPanel() {
       }
       // Clarification: 不追加 delta，改为展示追问气泡等待用户回答
       if (event.chunk_type === 'clarification') {
-        useAppStore.getState().removeEmptyAssistantMessage();
+        useAppStore.getState().removeEmptyAssistantMessage(sid);
         useAppStore.getState().setPendingClarification(event.delta);
         return;
       }
-      // Append content delta to the last assistant message
+      // Append content delta to the last assistant message（按流归属会话）
       if (event.delta) {
-        useAppStore.getState().updateLastMessage(event.delta);
+        useAppStore.getState().updateLastMessage(event.delta, sid);
       }
       // 思考增量（Thought chunk）单独累积到 thinking 字段（与正文分开渲染）。
       // 轮次边界：新一轮思考到达且上一轮已产出内容（正文/工具调用）时，
-      // 新开一条 assistant 消息——与历史加载“一轮一条消息”的渲染一致
-      // （流式不再整个会话一个大框）。
+      // 新开一条 assistant 消息——与历史加载“一轮一条消息”的渲染一致。
+      // 轮次判断读流归属会话的消息（切走后仍正确）。
       if (event.thinking) {
         const st = useAppStore.getState();
-        const last = st.messages[st.messages.length - 1];
+        const msgs = sid ? (st.sessionMessages[sid] ?? []) : st.messages;
+        const last = msgs[msgs.length - 1];
         const hasPrevTurn =
           last?.role === 'assistant' &&
           (last.content !== '' || (last.tool_calls && last.tool_calls.length > 0));
-        if (hasPrevTurn) st.startNewAssistantTurn();
-        useAppStore.getState().appendThinking(event.thinking);
+        if (hasPrevTurn) st.startNewAssistantTurn(sid);
+        useAppStore.getState().appendThinking(event.thinking, sid);
       }
-      // Attach skill calls to the current assistant message
+      // Attach skill calls to the streaming session message
       if (event.skill_calls && event.skill_calls.length > 0) {
-        useAppStore.getState().appendSkillCalls(event.skill_calls);
+        useAppStore.getState().appendSkillCalls(event.skill_calls, sid);
       }
       // A2：结构化工具调用事件 → tool card 渲染（含展示意图）
       if (event.tool_call) {
-        useAppStore.getState().appendToolCalls([event.tool_call]);
+        useAppStore.getState().appendToolCalls([event.tool_call], sid);
       }
-      // 完成 chunk 携带 token 用量 → 附加到当前 assistant 消息（前端按会话取数，
-      // 切换会话显示各自占用）；同时记录本次流式的真实窗口
+      // 完成 chunk 携带 token 用量 → 附加到流归属会话的 assistant 消息
+      // （按会话独立取数，切换会话显示各自占用）；同时记录真实窗口
       if (event.usage) {
         liveWindowRef.current = event.usage.context_window;
         const { prompt_tokens, completion_tokens, total_tokens, cache_read, cache_write } =
           event.usage;
-        useAppStore.getState().attachLastMessageUsage({
-          prompt_tokens,
-          completion_tokens,
-          total_tokens,
-          cache_read,
-          cache_write,
-        });
+        useAppStore.getState().attachLastMessageUsage(
+          {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            cache_read,
+            cache_write,
+          },
+          sid,
+        );
       }
       // 输出达到 token 上限（finish_reason === 'length'）：标记消息为截断，
       // 在助手消息下方渲染提示；'stop'/'tool_calls' 等不处理
       if (event.finish_reason === 'length') {
-        useAppStore.getState().markLastMessageTruncated();
+        useAppStore.getState().markLastMessageTruncated(sid);
       }
     },
     onError: (error) => {
-      useAppStore.getState().setStreamStatus('idle');
+      // 流结束按归属会话置 idle（UI 可能已切走，不能用 currentSessionId 闭包值）
+      useAppStore.getState().setStreamStatus('idle', streamSessionRef.current);
       useAppStore.getState().showToast(`发送失败: ${error.message}`, 'error');
     },
     onComplete: () => {
-      useAppStore.getState().setStreamStatus('idle');
+      useAppStore.getState().setStreamStatus('idle', streamSessionRef.current);
     },
   });
 
-  // 会话守卫镜像：currentSessionId 变化时同步 ref（SSE 回调读 ref 不闭包过期）
-  useEffect(() => {
-    sessionIdRef.current = currentSessionId;
-  }, [currentSessionId]);
-
-  // 会话切换或组件卸载：中止在途流——旧流的 chunk 不得写入新会话的消息列表
-  // （此前无任何清理点，残留 chunk 会把思考/工具结果追加到错误的消息）
-  useEffect(() => {
-    return () => {
-      stopStream();
-    };
-  }, [stopStream, currentSessionId]);
+  // 切走会话/界面后流继续在后台跑（fetch 循环持有闭包，回调按 session_id
+  // 写入各自会话缓存）——不在此中止流，切回时直接显示累积内容。
 
   // ─── Handlers ───────────────────────────────────────────────────
 
@@ -477,21 +471,23 @@ export default function ChatPanel() {
             if (data === '[DONE]') continue;
             try {
               const event = JSON.parse(data) as ChatStreamEvent;
-              if (event.thinking) useAppStore.getState().appendThinking(event.thinking);
-              if (event.delta) useAppStore.getState().updateLastMessage(event.delta);
-              if (event.tool_call) useAppStore.getState().appendToolCalls([event.tool_call]);
+              // 追问流同样按 session_id 归属写入（与主对话流一致）
+              const sid = event.session_id || null;
+              if (event.thinking) useAppStore.getState().appendThinking(event.thinking, sid);
+              if (event.delta) useAppStore.getState().updateLastMessage(event.delta, sid);
+              if (event.tool_call) useAppStore.getState().appendToolCalls([event.tool_call], sid);
               // 工具结果事件：耗时/成败 + 结果内容（后端已随事件透传）挂到卡片
               if (event.tool_result) {
-                useAppStore.getState().applyToolResult(event.tool_result);
+                useAppStore.getState().applyToolResult(event.tool_result, sid);
               }
               if (event.skill_calls && event.skill_calls.length > 0) {
-                useAppStore.getState().appendSkillCalls(event.skill_calls);
+                useAppStore.getState().appendSkillCalls(event.skill_calls, sid);
               }
               if (event.finish_reason === 'length') {
-                useAppStore.getState().markLastMessageTruncated();
+                useAppStore.getState().markLastMessageTruncated(sid);
               }
               if (event.chunk_type === 'error') {
-                useAppStore.getState().removeEmptyAssistantMessage();
+                useAppStore.getState().removeEmptyAssistantMessage(sid);
                 useAppStore.getState().showToast(event.delta || '追问回答失败', 'error');
               }
             } catch {

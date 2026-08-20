@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { useAppStore } from '@/lib/store';
+import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
 import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
 import { resetTaskMocks, mockSessionCompressCalls } from '@/test/mocks/handlers';
@@ -60,7 +60,7 @@ describe('ChatPanel', () => {
         timestamp: new Date().toISOString(),
       },
     ];
-    useAppStore.setState({ messages, streamStatus: 'idle' });
+    useAppStore.setState({ messages, streamStatus: {} });
 
     renderChatPanel();
 
@@ -71,7 +71,7 @@ describe('ChatPanel', () => {
 
   it('shows streaming indicator when streamStatus is streaming and last message is empty assistant', () => {
     useAppStore.setState({
-      streamStatus: 'streaming',
+      streamStatus: { [PENDING_SESSION_KEY]: 'streaming' },
       messages: [
         {
           role: 'user',
@@ -94,7 +94,7 @@ describe('ChatPanel', () => {
 
   it('does not show streaming indicator when last message has content', () => {
     useAppStore.setState({
-      streamStatus: 'streaming',
+      streamStatus: { [PENDING_SESSION_KEY]: 'streaming' },
       messages: [
         {
           role: 'user',
@@ -140,7 +140,10 @@ describe('ChatPanel', () => {
 
     // After the stream completes, status returns to 'idle'
     await vi.waitFor(() => {
-      expect(useAppStore.getState().streamStatus).toBe('idle');
+      // streamStatus 按会话归属（Record）：断言所有会话均为 idle
+      expect(Object.values(useAppStore.getState().streamStatus).every((s) => s === 'idle')).toBe(
+        true,
+      );
     });
   });
 
@@ -179,7 +182,8 @@ describe('ChatPanel', () => {
         (m) => m.role === 'assistant' && m.content === '',
       );
       expect(emptyAssistant).toHaveLength(0);
-      expect(state.streamStatus).toBe('idle');
+      // streamStatus 按会话归属（Record）：断言所有会话均为 idle
+      expect(Object.values(state.streamStatus).every((s) => s === 'idle')).toBe(true);
       expect(state.toast?.message).toContain('请求校验失败');
     });
   });
@@ -187,7 +191,7 @@ describe('ChatPanel', () => {
   it('is disabled from sending when already streaming', async () => {
     // Pre-set streaming state
     useAppStore.setState({
-      streamStatus: 'streaming',
+      streamStatus: { [PENDING_SESSION_KEY]: 'streaming' },
       messages: [
         {
           role: 'user',
@@ -439,7 +443,10 @@ describe('ChatPanel', () => {
 
     // 流结束后提示仍然保留
     await waitFor(() => {
-      expect(useAppStore.getState().streamStatus).toBe('idle');
+      // streamStatus 按会话归属（Record）：断言所有会话均为 idle
+      expect(Object.values(useAppStore.getState().streamStatus).every((s) => s === 'idle')).toBe(
+        true,
+      );
     });
     expect(screen.getByText(/输出已达上限/)).toBeInTheDocument();
   });
@@ -454,7 +461,10 @@ describe('ChatPanel', () => {
 
     // 流正常结束后（finish_reason='stop'）不显示截断提示
     await waitFor(() => {
-      expect(useAppStore.getState().streamStatus).toBe('idle');
+      // streamStatus 按会话归属（Record）：断言所有会话均为 idle
+      expect(Object.values(useAppStore.getState().streamStatus).every((s) => s === 'idle')).toBe(
+        true,
+      );
     });
     expect(screen.queryByText(/输出已达上限/)).not.toBeInTheDocument();
   });
@@ -490,9 +500,7 @@ describe('ChatPanel', () => {
 
     // 思考增量与正文分开累积（思考不入 content）
     await waitFor(() => {
-      const assistant = useAppStore
-        .getState()
-        .messages.filter((m) => m.role === 'assistant');
+      const assistant = useAppStore.getState().messages.filter((m) => m.role === 'assistant');
       const last = assistant[assistant.length - 1];
       expect(last?.thinking).toBe('先分析再想想');
       expect(last?.content).toBe('最终输出');
