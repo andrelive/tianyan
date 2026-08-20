@@ -449,7 +449,10 @@ impl BackgroundTaskManager {
         // （oh-my-openagent 实证：shouldReply = allComplete || isTaskFailure）。
         // 部分完成保持静默（消息已注入 transcript，等待语义靠消息积累）；
         // 全部完成或失败才触发主 agent 新一轮生成 + 桌面系统通知。
-        let should_wake = remaining == 0 || task.status == TaskStatus::Failed;
+        // 例外：Cancelled（用户停止传播）不唤醒——用户主动停止后不应自动
+        // 触发汇总轮（否则"停止"后又自动生成一轮，打扰）。
+        let should_wake = task.status != TaskStatus::Cancelled
+            && (remaining == 0 || task.status == TaskStatus::Failed);
         if should_wake {
             // 系统通知：桌面原生提醒（非阻塞；sink 内部自行处理线程/队列）
             if let Some(sink) = &*self.notification.lock().await {

@@ -434,11 +434,11 @@ impl ToolRegistry {
             let mut total_tokens: usize = 0;
 
             for _turn in 0..max_turns {
-                // 主循环取消（用户点停止）：子代理循环也及时响应
+                // 主循环取消（用户点停止）：子代理循环也及时响应。
+                // cancelled 语义错误：转后台 watcher 据此标 Cancelled（不唤醒），
+                // 而非 Failed（会触发自动汇总轮，打扰已停止的用户）。
                 if this_for_loop.delegation_cancelled(&session_owned).await {
-                    return Err(TianyanError::Custom(
-                        "tool: 委托已取消（主循环停止）".to_string(),
-                    ));
+                    return Err(TianyanError::cancelled("委托已取消（主循环停止）"));
                 }
                 // T12 延期决策：子 agent 请求未应用 dynamic_max_tokens。
                 // 原因：ToolRegistry 仅持有模型名字符串（self.model），既不持有
@@ -618,7 +618,12 @@ impl ToolRegistry {
                                 mgr.complete(&task_id_watch, value.to_string()).await;
                             }
                             Some(Err(e)) => {
-                                mgr.fail(&task_id_watch, e.to_string()).await;
+                                if e.is_cancelled() {
+                                    // 用户停止 → 任务取消（不触发唤醒/汇总轮）
+                                    mgr.cancel(&task_id_watch).await.ok();
+                                } else {
+                                    mgr.fail(&task_id_watch, e.to_string()).await;
+                                }
                             }
                             _ => {
                                 mgr.fail(

@@ -311,12 +311,20 @@ impl AgentCoordinator for Agent {
                     },
                 )
                 .await;
-            // 清理会话取消槽（避免跨请求残留）
-            self_clone
-                .agent_loop
-                .tool_registry()
-                .set_delegation_cancel(&session_id_str, None)
-                .await;
+            // 清理会话取消槽：仅正常结束时清理。用户停止（cancel 置位）时保留——
+            // 已转入后台的委托子代理仍要看到取消标志并退出（否则"停止"对
+            // 后台任务无效）；下次请求会注入新的取消槽覆盖本槽。
+            let cancelled = cancel
+                .as_ref()
+                .map(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+                .unwrap_or(false);
+            if !cancelled {
+                self_clone
+                    .agent_loop
+                    .tool_registry()
+                    .set_delegation_cancel(&session_id_str, None)
+                    .await;
+            }
         });
 
         Ok(rx)

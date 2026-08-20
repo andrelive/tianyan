@@ -54,6 +54,9 @@ impl TianyanError {
     /// "操作超时"类错误的统一消息前缀（请求超时/调用超时）。
     pub const KIND_TIMEOUT: &str = "操作超时";
 
+    /// "操作已取消"类错误的统一消息前缀（用户停止/任务取消）。
+    pub const KIND_CANCELLED: &str = "操作已取消";
+
     /// 构造"条目未找到"错误（与"不存在"语义统一的入口）。
     pub fn not_found<T: std::fmt::Display>(detail: T) -> Self {
         TianyanError::Custom(format!("{}：{}", Self::NOT_FOUND_PREFIX, detail))
@@ -77,6 +80,11 @@ impl TianyanError {
     /// 构造"操作超时"错误（请求/调用超时；判断用 [`Self::is_timeout`]）。
     pub fn timeout<T: std::fmt::Display>(detail: T) -> Self {
         TianyanError::Custom(format!("{}：{}", Self::KIND_TIMEOUT, detail))
+    }
+
+    /// 构造"操作已取消"错误（用户停止/任务取消；判断用 [`Self::is_cancelled`]）。
+    pub fn cancelled<T: std::fmt::Display>(detail: T) -> Self {
+        TianyanError::Custom(format!("{}：{}", Self::KIND_CANCELLED, detail))
     }
 
     /// 判断是否为"目标不存在"类错误（条目未找到 / 目录未找到 / IO NotFound）。
@@ -113,6 +121,11 @@ impl TianyanError {
     /// 判断是否为"操作超时"类错误（请求/调用超时）。
     pub fn is_timeout(&self) -> bool {
         matches!(self, TianyanError::Custom(msg) if msg.starts_with(Self::KIND_TIMEOUT))
+    }
+
+    /// 判断是否为"操作已取消"类错误（用户停止/任务取消）。
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, TianyanError::Custom(msg) if msg.starts_with(Self::KIND_CANCELLED))
     }
 }
 
