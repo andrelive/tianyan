@@ -49,6 +49,27 @@ pub struct ExecuteCommandParams {
     /// 后台运行（true 时立即返回 task_id/log_file，进程独立运行，不等待退出）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<bool>,
+    /// 后台就绪探测（仅 background=true 生效）：端口监听或日志关键词匹配后
+    /// 自动通知主 agent「服务已就绪」；不探测则只有进程退出才通知。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<ReadyProbeParams>,
+}
+
+/// 后台命令就绪探测参数。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReadyProbeParams {
+    /// 就绪判定端口：TCP 连接成功即就绪（如 3000）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// 就绪判定日志关键词：日志出现该文本即就绪（如 "Listening"）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    /// 首次探测等待（毫秒；指数退避起点；缺省 500）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_delay_ms: Option<u64>,
+    /// 就绪探测总超时（毫秒；超时未就绪 → 通知主 agent 失败；缺省 300000）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 /// 后台命令状态查询参数。

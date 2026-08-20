@@ -1,6 +1,6 @@
 mod actions;
 /// 命令执行（ExecuteCommand 动作，无安全策略依赖）。
-mod command;
+pub mod command;
 /// 命令输出解析工具（构建错误提取 / 测试输出解析）。
 mod output_parse;
 /// Executor 安全策略（`pub(crate)`：`check_path_rules` 供 skills 路径沙箱复用）。

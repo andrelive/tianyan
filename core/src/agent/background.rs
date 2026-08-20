@@ -691,6 +691,24 @@ impl crate::executor::CommandNotifier for SessionCommandNotifier {
             tracing::warn!(task_id = %task.id, error = %e, "后台命令通知持久化失败");
         }
     }
+
+    async fn on_command_ready(&self, session_id: &str, task: &CommandTask, note: &str) {
+        let text = format!(
+            "[后台服务{}] {}（{}）——{}",
+            if note.contains("超时") { "未就绪" } else { "就绪" },
+            truncate_output(&task.command, 120),
+            task.id,
+            note
+        );
+        let sm = StructuredMessage::system(session_id.to_string(), text);
+        if let Err(e) = self
+            .session_manager
+            .add_structured_message(session_id, sm)
+            .await
+        {
+            tracing::warn!(task_id = %task.id, error = %e, "后台服务就绪通知持久化失败");
+        }
+    }
 }
 
 /// 构建命令通知文本（join 信号：携带剩余计数；不含输出正文——输出经

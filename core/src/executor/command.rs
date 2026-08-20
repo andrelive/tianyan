@@ -47,6 +47,14 @@ pub enum CommandTaskStatus {
 pub trait CommandNotifier: Send + Sync {
     /// 命令任务进入终态时调用（Completed / Failed / Cancelled）。
     async fn on_command_terminal(&self, session_id: &str, task: &CommandTask, remaining: usize);
+    /// 就绪探测通过/超时通知（默认静默；实现方写入父会话）。
+    async fn on_command_ready(
+        &self,
+        _session_id: &str,
+        _task: &CommandTask,
+        _note: &str,
+    ) {
+    }
 }
 
 /// 后台命令唤醒器（ADR-013 语义：全部完成/失败时触发主 agent 新一轮生成）。
@@ -86,9 +94,26 @@ pub struct CommandTask {
     pub completed_at: Option<i64>,
     /// 注册序号（单调递增，排序键）。
     pub seq: u64,
+    /// 就绪探测是否已通过（服务可用的信号）。
+    pub ready: bool,
+    /// 就绪/超时说明（如 "端口 3000 已监听" / "就绪探测超时"）。
+    pub ready_note: Option<String>,
 }
 
-/// 注册表内部条目（快照 + 内部标志）。
+/// 后台命令就绪探测规格（execute_command(background).ready 解析）。
+#[derive(Debug, Clone, Default)]
+pub struct ReadySpec {
+    /// 就绪判定端口（TCP 连接成功即就绪）。
+    pub port: Option<u16>,
+    /// 就绪判定日志关键词（日志尾部出现即就绪）。
+    pub pattern: Option<String>,
+    /// 首次探测等待（指数退避起点，毫秒；缺省 500）。
+    pub initial_delay_ms: u64,
+    /// 探测总超时（毫秒；缺省 300000）。
+    pub timeout_ms: u64,
+}
+
+/// 注册表内条目（保留 + 内部标志）。
 struct TaskEntry {
     task: CommandTask,
     cancelled: bool,
@@ -144,6 +169,7 @@ impl CommandManager {
         session_id: &str,
         command: &str,
         cwd: Option<&str>,
+        ready: Option<ReadySpec>,
     ) -> Result<CommandTask> {
         // 并发许可：排队等待（防失控扇出；许可随 watcher 任务结束自动释放）
         let _permit = self
@@ -232,6 +258,8 @@ impl CommandManager {
             created_at: now,
             completed_at: None,
             seq: self.seq.load(AtomicOrdering::SeqCst) - 1,
+            ready: false,
+            ready_note: None,
         };
         self.tasks.lock().await.insert(
             id.clone(),
@@ -250,8 +278,9 @@ impl CommandManager {
 
         // watcher：等进程退出 → 收 reader → 写退出标记 → 更新终态
         let manager = self.clone();
-        let tail_w = tail;
-        let file_w = file;
+        let tail_w = tail.clone();
+        let file_w = file.clone();
+        let id_w = id.clone();
         tokio::spawn(async move {
             let wait_result = child.wait().await;
             if let Some(h) = out_reader {
@@ -263,7 +292,7 @@ impl CommandManager {
             let exit_code = wait_result.ok().and_then(|s| s.code());
 
             let mut tasks = manager.tasks.lock().await;
-            let is_cancelled = tasks.get(&id).map(|e| e.cancelled).unwrap_or(false);
+            let is_cancelled = tasks.get(&id_w).map(|e| e.cancelled).unwrap_or(false);
             let marker = if is_cancelled {
                 "--- terminated (killed) ---\n".to_string()
             } else {
@@ -282,7 +311,7 @@ impl CommandManager {
                 }
             }
             let task_snapshot = {
-                if let Some(entry) = tasks.get_mut(&id) {
+                if let Some(entry) = tasks.get_mut(&id_w) {
                     if !is_cancelled {
                         entry.task.status = if exit_code == Some(0) {
                             CommandTaskStatus::Completed
@@ -294,7 +323,7 @@ impl CommandManager {
                     entry.task.completed_at = Some(now_ms());
                     entry.task.output_tail = tail_w.lock().await.clone();
                 }
-                tasks.get(&id).map(|e| e.task.clone())
+                tasks.get(&id_w).map(|e| e.task.clone())
             };
             // 锁外收尾：remaining 计数 → 完成通知 → 唤醒（ADR-013）
             if let Some(task) = task_snapshot {
@@ -323,10 +352,99 @@ impl CommandManager {
             }
         });
 
+        // 就绪探测：端口监听 / 日志关键词匹配后通知主 agent 服务已就绪。
+        // 指数退避（起点 initial_delay_ms，×2，抖动 ±20%）；总超时后通知未就绪
+        // （不杀进程——服务可能仍在启动，退出由 watcher 另行通知）。
+        if let Some(spec) = ready {
+            let manager = self.clone();
+            let tail_r = tail.clone();
+            let task_id = id.clone();
+            tokio::spawn(async move {
+                let mut delay_ms = spec.initial_delay_ms.max(50);
+                let start = now_ms();
+                let timeout_ms = spec.timeout_ms.max(delay_ms);
+                loop {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    // 进程已退出：停止探测（watcher 已发终态通知）
+                    let terminal = manager
+                        .tasks
+                        .lock()
+                        .await
+                        .get(&task_id)
+                        .map(|e| e.task.status != CommandTaskStatus::Running)
+                        .unwrap_or(true);
+                    if terminal {
+                        break;
+                    }
+                    // 判定 1：端口 TCP 连接成功
+                    let port_ok = match spec.port {
+                        Some(port) => tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok(),
+                        None => false,
+                    };
+                    // 判定 2：日志尾部关键词
+                    let pattern_ok = if let Some(p) = spec.pattern.as_deref() {
+                        if p.is_empty() {
+                            false
+                        } else {
+                            tail_r.lock().await.contains(p)
+                        }
+                    } else {
+                        false
+                    };
+                    if port_ok || pattern_ok {
+                        let note = if port_ok {
+                            format!("端口 {} 已监听", spec.port.unwrap_or(0))
+                        } else {
+                            format!("日志出现关键词 \"{}\"", spec.pattern.as_deref().unwrap_or(""))
+                        };
+                        Self::mark_ready(&manager, &task_id, Some(note.clone())).await;
+                        Self::notify_ready(&manager, &task_id, &note).await;
+                        break;
+                    }
+                    // 超时：通知未就绪（不杀进程）
+                    if now_ms() - start >= timeout_ms as i64 {
+                        let note = format!("就绪探测超时（{} ms）", timeout_ms);
+                        Self::mark_ready(&manager, &task_id, Some(note.clone())).await;
+                        Self::notify_ready(&manager, &task_id, &note).await;
+                        break;
+                    }
+                    // 指数退避：×2 + ±20% 抖动
+                    delay_ms = (delay_ms * 2).min(30_000);
+                    // 纯指数退避（无抖动依赖）
+                }
+            });
+        }
+
         Ok(task)
     }
 
+
+    /// 标记任务就绪状态（就绪 / 超时说明）。
+    async fn mark_ready(manager: &CommandManager, task_id: &str, note: Option<String>) {
+        if let Some(entry) = manager.tasks.lock().await.get_mut(task_id) {
+            entry.task.ready = true;
+            entry.task.ready_note = note;
+        }
+    }
+
+    /// 就绪/超时通知 + 唤醒（就绪是重要事件：主 agent 可开始后续工作；
+    /// 超时同样需要主 agent 知情）。
+    async fn notify_ready(manager: &CommandManager, task_id: &str, note: &str) {
+        let task = manager.get(task_id).await;
+        let Some(task) = task else {
+            return;
+        };
+        let session_id = task.parent_session_id.clone();
+        if let Some(notifier) = &manager.notifier {
+            notifier.on_command_ready(&session_id, &task, note).await;
+        }
+        if let Some(waker) = manager.waker.lock().await.clone() {
+            waker.wake(&session_id).await;
+        }
+    }
+
     /// 按任务 ID 获取快照（None 表示不存在）。
+
     pub async fn get(&self, task_id: &str) -> Option<CommandTask> {
         self.tasks.lock().await.get(task_id).map(|e| e.task.clone())
     }
@@ -641,11 +759,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ready_probe_pattern_marks_ready() {
+        // 日志关键词就绪探测：进程输出匹配 pattern 后任务标记 ready 并通知。
+        let dir = tempfile::tempdir().unwrap();
+        let manager = CommandManager::new(Some(dir.path().to_path_buf()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
+        let notifier = TestReadyNotifier { tx };
+        let manager = manager.with_notifier(Arc::new(notifier));
+
+        // 输出 READY 后持续运行的命令（模拟长驻服务：就绪后不退出）
+        let cmd = if cfg!(target_os = "windows") {
+            "echo READY_SIGNAL; Start-Sleep -Seconds 30"
+        } else {
+            "echo READY_SIGNAL && sleep 30"
+        };
+        let spec = ReadySpec {
+            port: None,
+            pattern: Some("READY_SIGNAL".to_string()),
+            initial_delay_ms: 100,
+            timeout_ms: 10_000,
+        };
+        let task = manager
+            .spawn_background("sess-r", cmd, None, Some(spec))
+            .await
+            .unwrap();
+
+        // 等待就绪通知（探测循环异步执行）
+        let note = tokio::time::timeout(Duration::from_secs(15), rx.recv())
+            .await
+            .expect("就绪通知超时");
+        assert!(
+            note.as_deref().unwrap_or("").contains("READY_SIGNAL"),
+            "通知应包含日志关键词: {:?}",
+            note
+        );
+        let t = manager.get(&task.id).await.unwrap();
+        assert!(t.ready, "任务应标记为已就绪");
+        assert_eq!(t.status, CommandTaskStatus::Running, "长驻服务就绪后仍应运行中");
+
+        // 收尾：杀掉进程
+        manager.kill(&task.id).await.unwrap();
+    }
+
+    /// 测试就绪通知器（channel 转发通知内容）。
+    struct TestReadyNotifier {
+        tx: tokio::sync::mpsc::Sender<String>,
+    }
+    #[async_trait]
+    impl CommandNotifier for TestReadyNotifier {
+        async fn on_command_terminal(&self, _s: &str, _t: &CommandTask, _r: usize) {}
+        async fn on_command_ready(&self, _s: &str, _t: &CommandTask, note: &str) {
+            let _ = self.tx.send(note.to_string()).await;
+        }
+    }
+
+    #[tokio::test]
     async fn test_spawn_background_echo_completes() {
         let dir = tempfile::tempdir().unwrap();
         let manager = CommandManager::new(Some(dir.path().to_path_buf()));
         let task = manager
-            .spawn_background("sess-1", "echo Hello", None)
+            .spawn_background("sess-1", "echo Hello", None, None)
             .await
             .unwrap();
         assert!(
@@ -675,7 +848,7 @@ mod tests {
         } else {
             "sleep 30"
         };
-        let task = manager.spawn_background("sess-1", cmd, None).await.unwrap();
+        let task = manager.spawn_background("sess-1", cmd, None, None).await.unwrap();
         manager.kill(&task.id).await.unwrap();
 
         let t = manager.get(&task.id).await.unwrap();
@@ -688,7 +861,7 @@ mod tests {
     async fn test_background_list_and_unknown() {
         let manager = CommandManager::new(None);
         let task = manager
-            .spawn_background("sess-1", "echo A", None)
+            .spawn_background("sess-1", "echo A", None, None)
             .await
             .unwrap();
         let list = manager.list().await;
@@ -726,11 +899,11 @@ mod tests {
         }));
 
         let t1 = manager
-            .spawn_background("sess-1", "echo A", None)
+            .spawn_background("sess-1", "echo A", None, None)
             .await
             .unwrap();
         let t2 = manager
-            .spawn_background("sess-1", "echo B", None)
+            .spawn_background("sess-1", "echo B", None, None)
             .await
             .unwrap();
         wait_terminal(&manager, &t1.id).await;
@@ -768,11 +941,11 @@ mod tests {
             .await;
 
         let t1 = manager
-            .spawn_background("sess-w", "echo A", None)
+            .spawn_background("sess-w", "echo A", None, None)
             .await
             .unwrap();
         let t2 = manager
-            .spawn_background("sess-w", "echo B", None)
+            .spawn_background("sess-w", "echo B", None, None)
             .await
             .unwrap();
         wait_terminal(&manager, &t1.id).await;

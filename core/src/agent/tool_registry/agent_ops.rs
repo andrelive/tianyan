@@ -105,17 +105,30 @@ impl ToolRegistry {
         // 后台模式：立即返回任务快照（task_id/log_file/pid），进程独立运行。
         // 观测：command_status 查询（输出尾部）/ 日志文件 read_file；终止：command_kill。
         if params.background == Some(true) {
+            // 就绪探测规格（可选）：端口/日志关键词就绪后自动通知主 agent；
+            // 长驻服务（server/dev server 等）必须配置，否则只能等进程退出通知。
+            let ready_spec = params.ready.as_ref().map(|r| crate::executor::command::ReadySpec {
+                port: r.port,
+                pattern: r.pattern.clone(),
+                initial_delay_ms: r.initial_delay_ms.unwrap_or(500),
+                timeout_ms: r.timeout_ms.unwrap_or(300_000),
+            });
             let task = self
                 .command_tasks
-                .spawn_background(session_id, &params.command, cwd.as_deref())
+                .spawn_background(session_id, &params.command, cwd.as_deref(), ready_spec)
                 .await
                 .map_err(wrap_tool_error)?;
+            let ready_msg = if params.ready.is_some() {
+                "已配置就绪探测：端口监听/日志关键词出现后自动通知本会话。"
+            } else {
+                "可用 command_status 查询状态与输出尾部，command_kill 终止（杀进程树）。"
+            };
             return Ok(serde_json::json!({
                 "task_id": task.id,
                 "pid": task.pid,
                 "log_file": task.log_file,
                 "status": "running",
-                "message": "后台命令已启动，不等待退出。可用 command_status 查询状态与输出尾部，command_kill 终止（杀进程树）。",
+                "message": format!("后台命令已启动，不等待退出。{ready_msg}"),
             }));
         }
 
