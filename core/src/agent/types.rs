@@ -213,6 +213,10 @@ pub struct ToolResultEvent {
     /// 失败原因（成功时为 None）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// 工具执行结果内容（Observation 的正文 delta 在转发层被丢弃，
+    /// 结果内容由此字段透传，前端挂到对应工具卡片）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// 工具调用事件（A2 展示契约：工具自描述 UI 渲染意图）。
@@ -320,6 +324,7 @@ impl StreamEventSender {
                 duration_ms,
                 success,
                 error,
+                content: Some(content.to_string()),
             }),
         })
         .await;

@@ -191,6 +191,10 @@ pub struct ChatStreamEvent {
     /// 结构化工具调用信息（A2 展示契约；前端据此渲染 tool card）
     pub tool_call: Option<tianyan::agent::ToolCallEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 结构化工具结果信息（Observation chunk 携带；耗时/成败 + 结果内容，
+    /// 前端实时挂到对应工具卡片）。
+    pub tool_result: Option<tianyan::agent::ToolResultEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     /// 本轮 token 用量（完成 chunk 携带；上下文占用 / 缓存命中展示用）。
     pub usage: Option<StreamUsage>,
 }
@@ -285,6 +289,7 @@ mod tests {
             chunk_type: tianyan::agent::StreamChunkType::Answer,
             skill_calls: None,
             tool_call: None,
+            tool_result: None,
             usage: None,
         };
         let json = serde_json::to_string(&event).unwrap();

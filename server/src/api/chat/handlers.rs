@@ -63,6 +63,7 @@ pub async fn chat_clarify_stream_handler(
                 chunk_type: tianyan::agent::StreamChunkType::Error,
                 skill_calls: None,
                 tool_call: None,
+                tool_result: None,
                 usage: None,
             };
             if let Ok(json) = serde_json::to_string(&event) {
@@ -128,6 +129,7 @@ pub async fn chat_stream_handler(
                 chunk_type: tianyan::agent::StreamChunkType::Error,
                 skill_calls: None,
                 tool_call: None,
+                tool_result: None,
                 usage: None,
             };
             if let Ok(json) = serde_json::to_string(&event) {

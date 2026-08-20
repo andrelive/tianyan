@@ -50,6 +50,10 @@ export default function ChatPanel() {
   /** 最近一次流式完成 chunk 携带的真实窗口（会话流式时的权威值；
       历史会话回退到 chatModels[selectedModel].context_length）。 */
   const liveWindowRef = useRef(0);
+  /** 实时当前会话 ID（ref 镜像：SSE chunk 回调里读取，避免闭包过期）。
+      用于会话守卫——切换会话/界面后到达的残留 chunk 直接丢弃，
+      防污染新会话的消息列表。 */
+  const sessionIdRef = useRef<string | null>(null);
 
   /** 当前会话自己的上下文占用：取本会话最后一条带 usage 的消息（消息级独立计算，
       切换会话随 messages 变化——每个会话显示各自的占用，不再串值）。 */
@@ -223,7 +227,13 @@ export default function ChatPanel() {
   const { startStream, stopStream } = useChatStream({
     streamUrl: `${getApiBase()}/chat/stream`,
     onChunk: (event) => {
-      // Update session_id from server response
+      // 会话守卫：残留 chunk（会话切换/界面切换后到达，abort 有竞态窗口）
+      // 直接丢弃——否则思考/工具结果会追加到当前（错误）会话的消息列表
+      const activeSession = sessionIdRef.current;
+      if (event.session_id && activeSession && event.session_id !== activeSession) {
+        return;
+      }
+      // Update session ID from server response
       if (event.session_id) {
         useAppStore.getState().setCurrentSession(event.session_id);
       }
@@ -293,6 +303,19 @@ export default function ChatPanel() {
       useAppStore.getState().setStreamStatus('idle');
     },
   });
+
+  // 会话守卫镜像：currentSessionId 变化时同步 ref（SSE 回调读 ref 不闭包过期）
+  useEffect(() => {
+    sessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
+  // 会话切换或组件卸载：中止在途流——旧流的 chunk 不得写入新会话的消息列表
+  // （此前无任何清理点，残留 chunk 会把思考/工具结果追加到错误的消息）
+  useEffect(() => {
+    return () => {
+      stopStream();
+    };
+  }, [stopStream, currentSessionId]);
 
   // ─── Handlers ───────────────────────────────────────────────────
 
@@ -457,11 +480,9 @@ export default function ChatPanel() {
               if (event.thinking) useAppStore.getState().appendThinking(event.thinking);
               if (event.delta) useAppStore.getState().updateLastMessage(event.delta);
               if (event.tool_call) useAppStore.getState().appendToolCalls([event.tool_call]);
-              // 工具结果事件：耗时/成败 + 结果内容（observation delta）一并挂到卡片
+              // 工具结果事件：耗时/成败 + 结果内容（后端已随事件透传）挂到卡片
               if (event.tool_result) {
-                useAppStore
-                  .getState()
-                  .applyToolResult({ ...event.tool_result, content: event.delta });
+                useAppStore.getState().applyToolResult(event.tool_result);
               }
               if (event.skill_calls && event.skill_calls.length > 0) {
                 useAppStore.getState().appendSkillCalls(event.skill_calls);

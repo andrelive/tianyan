@@ -153,6 +153,7 @@ impl ChatService {
                         chunk_type: tianyan::agent::StreamChunkType::Error,
                         skill_calls: None,
                         tool_call: None,
+                        tool_result: None,
                         usage: None,
                     };
                     if tx.send(event).await.is_err() {
@@ -205,6 +206,7 @@ impl ChatService {
                         chunk_type: tianyan::agent::StreamChunkType::Error,
                         skill_calls: None,
                         tool_call: None,
+                        tool_result: None,
                         usage: None,
                     };
                     if tx.send(event).await.is_err() {
@@ -270,6 +272,7 @@ fn map_chunk_to_event(
         chunk_type,
         skill_calls,
         tool_call: chunk.tool_call,
+        tool_result: chunk.tool_result,
         usage: chunk.token_usage.map(|u| StreamUsage {
             prompt_tokens: u.prompt_tokens as u64,
             completion_tokens: u.completion_tokens as u64,
