@@ -966,7 +966,10 @@ impl ToolRegistry {
             >(
                 "execute_command",
                 &format!(
-                    "Execute a shell command with optional working directory and timeout. {}",
+                    "Execute a shell command with optional working directory and timeout. {} {} {} {}",
+                    "Use background:true for long-running or persistent processes (dev servers, services, watchers): it returns immediately with task_id/log_file and does not wait for exit.",
+                    "For persistent services set ready with a port and/or log pattern: the system probes (exponential backoff from initial_delay_ms, total timeout_ms) and notifies you when the port listens or the pattern appears in the log.",
+                    "Query progress with task_status or read the log file; terminate with task_cancel.",
                     shell_platform_hint(),
                 ),
             )));
@@ -1052,14 +1055,14 @@ impl ToolRegistry {
                     DelegateToAgentParams,
                 >(
                     "delegate_to_agent",
-                    "Delegate a sub-task to an isolated sub-agent with its own context. Use role (researcher for research, editor for code editing, reviewer for verification/review, or custom roles configured in [agent_roles] or learned by the system) to pick a preset model, system prompt, tool allowlist, max_turns and timeout; use model to explicitly override the sub-agent model. Role delegation keeps a durable per-role session (the sub-agent remembers prior tasks): session=\"continue\" (default) resumes its memory for related consecutive work; session=\"new\" starts a clean context (new domain or when its remembered state looks stale); session=\"discard\" throws away its old session and starts fresh (when its remembered facts are outdated). The response includes role_session info (task_count, loaded_messages) to help you decide next time. Set background=true to run it as a fire-and-forget background task: the tool returns a task_id immediately, and a completion notification (with the result summary) is injected into this session automatically — do NOT poll, just continue working until notified. Use task_status to query a task, task_cancel to abort it.",
+                    "Delegate a sub-task to an isolated sub-agent with its own context. Use role (researcher for research, editor for code editing, reviewer for verification/review, or custom roles configured in [agent_roles] or learned by the system) to pick a preset model, system prompt, tool allowlist, max_turns and timeout; use model to explicitly override the sub-agent model. Role delegation keeps a durable per-role session (the sub-agent remembers prior tasks): session=\"continue\" (default) resumes its memory for related consecutive work; session=\"new\" starts a clean context (new domain or when its remembered state looks stale); session=\"discard\" throws away its old session and starts fresh (when its remembered facts are outdated). The response includes role_session info (task_count, loaded_messages) to help you decide next time. The sub-agent must call submit_result to deliver its final result; unsubmitted text is never accepted as final. Sync delegation (default) blocks until the sub-agent submits, with timeout_secs as budget (default 120s): if it exceeds the budget it is automatically promoted to a background task (you get task_id and keep working; completion is notified). For long-running or parallel sub-tasks set background=true: returns task_id immediately, completion notification (with result summary) is injected into this session automatically — do NOT poll, just continue working until notified. Use task_status to query, task_cancel to abort.",
                 )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<
                 TaskStatusParams,
             >(
                 "task_status",
-                "Query the status and result of a background task by its task_id (bt_xxx). Returns a non-blocking snapshot. Prefer waiting for the automatic completion notification over polling this tool repeatedly.",
+                "Query background tasks (delegate bt_xxx and command cmd_xxx, unified). With task_id: returns that task snapshot (status/result/exit/log). Without task_id: lists all tasks, optional kind filter (delegate|command). Prefer waiting for the automatic completion/ready notification over polling this tool repeatedly.",
             )));
         self.definitions
             .push(ToolDefinition::function(FunctionDefinition::from_schema::<

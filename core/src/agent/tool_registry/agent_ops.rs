@@ -786,26 +786,55 @@ impl ToolRegistry {
         }))
     }
 
-    /// 执行 task_status 工具：查询后台任务状态与结果（非阻塞快照）。
+    /// 执行 task_status 工具：查询后台任务状态与结果（统一：委托 + 命令）。
+    ///
+    /// 参数：task_id 可选——给定则查询单任务（委托/命令自动识别）；
+    /// 缺省则列出全部任务（kind 可选过滤：delegate | command）。
     pub(crate) async fn execute_task_status(
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
         #[derive(serde::Deserialize)]
         struct Params {
-            task_id: String,
+            #[serde(default)]
+            task_id: Option<String>,
+            #[serde(default)]
+            kind: Option<String>,
         }
         let params: Params = serde_json::from_str(arguments)
             .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
 
-        let task = self
-            .background_tasks
-            .get(&params.task_id)
-            .await
-            .ok_or_else(|| TianyanError::Custom(format!("tool: 任务不存在：{}", params.task_id)))?;
+        // 单任务查询：按 ID 先查委托表再查命令表（前缀不互斥，双表探测）。
+        if let Some(task_id) = params.task_id.as_deref() {
+            if let Some(task) = self.background_tasks.get(task_id).await {
+                return serde_json::to_value(task)
+                    .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")));
+            }
+            if let Some(task) = self.command_tasks.get(task_id).await {
+                return serde_json::to_value(task)
+                    .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")));
+            }
+            return Err(TianyanError::Custom(format!("tool: 任务不存在：{task_id}")));
+        }
 
-        serde_json::to_value(task)
-            .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))
+        // 列表：委托任务 + 命令任务（kind 过滤）。
+        let mut entries: Vec<serde_json::Value> = Vec::new();
+        let kind_filter = params.kind.as_deref().unwrap_or("");
+        if kind_filter.is_empty() || kind_filter == "delegate" {
+            for t in self.background_tasks.snapshot().await {
+                if let Ok(v) = serde_json::to_value(t) {
+                    entries.push(v);
+                }
+            }
+        }
+        if kind_filter.is_empty() || kind_filter == "command" {
+            for t in self.command_tasks.list().await {
+                if let Ok(v) = serde_json::to_value(t) {
+                    entries.push(v);
+                }
+            }
+        }
+        Ok(serde_json::json!({ "tasks": entries, "total": entries.len() }))
     }
 
     /// 执行 task_cancel 工具：取消后台任务（终态任务为幂等空操作）。
