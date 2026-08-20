@@ -588,7 +588,11 @@ impl ToolRegistry {
                     // 移交后台管理器：完成/失败经既有通知链路注入父会话 + 唤醒。
                     let task_id = self
                         .background_tasks
-                        .register(params.task.clone(), session_id.to_string())
+                        .register(
+                            crate::agent::background::TaskKind::Delegate,
+                            params.task.clone(),
+                            session_id.to_string(),
+                        )
                         .await;
                     self.background_tasks.mark_running(&task_id).await;
                     let mgr = self.background_tasks.clone();
@@ -740,7 +744,9 @@ impl ToolRegistry {
         let _permit = manager.try_acquire().await?;
 
         let desc = params.task.clone();
-        let task_id = manager.register(desc.clone(), session_id.clone()).await;
+        let task_id = manager
+            .register(crate::agent::background::TaskKind::Delegate, desc.clone(), session_id.clone())
+            .await;
         manager.mark_running(&task_id).await;
 
         let this = self.clone();

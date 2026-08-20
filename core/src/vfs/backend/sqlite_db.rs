@@ -131,6 +131,7 @@ const SCHEMA_SQL: &str = "
     -- 重启可查询可恢复；Running/Pending 任务重启后标记为 Failed）
     CREATE TABLE IF NOT EXISTS background_tasks (
         id                 TEXT PRIMARY KEY,
+        kind               TEXT    NOT NULL DEFAULT 'delegate',
         description        TEXT    NOT NULL,
         status             TEXT    NOT NULL,
         parent_session_id  TEXT    NOT NULL,

@@ -1059,12 +1059,12 @@ async fn test_delegate_sync_budget_promotes_to_background() {
 
 #[tokio::test]
 async fn test_task_cancel_via_tool() {
-    use crate::agent::background::TaskStatus;
+    use crate::agent::background::{TaskKind, TaskStatus};
 
     let registry = ToolRegistry::new(default_strict_policy());
     let id = registry
         .background_tasks
-        .register("task".to_string(), "s1".to_string())
+        .register(TaskKind::Delegate, "task".to_string(), "s1".to_string())
         .await;
     registry.background_tasks.mark_running(&id).await;
 
