@@ -117,6 +117,8 @@ export interface ToolResultEvent {
   success: boolean;
   /** 失败原因（成功时为 null/undefined） */
   error?: string | null;
+  /** 工具执行结果内容（observation delta；前端挂到对应卡片 result） */
+  content?: string | null;
 }
 
 /** 工具调用卡片（历史消息：调用信息与对应执行结果合并渲染） */

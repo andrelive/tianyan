@@ -200,6 +200,8 @@ export const useAppStore = create<AppState>()(
                 duration_ms: result.duration_ms,
                 success: result.success,
                 error: result.error ?? null,
+                // 结果内容随 observation 到达：挂到卡片（流式实时显示）
+                result: result.content ?? c.result ?? null,
               };
             });
             return changed ? { ...m, tool_calls } : m;

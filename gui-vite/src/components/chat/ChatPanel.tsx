@@ -457,7 +457,12 @@ export default function ChatPanel() {
               if (event.thinking) useAppStore.getState().appendThinking(event.thinking);
               if (event.delta) useAppStore.getState().updateLastMessage(event.delta);
               if (event.tool_call) useAppStore.getState().appendToolCalls([event.tool_call]);
-              if (event.tool_result) useAppStore.getState().applyToolResult(event.tool_result);
+              // 工具结果事件：耗时/成败 + 结果内容（observation delta）一并挂到卡片
+              if (event.tool_result) {
+                useAppStore
+                  .getState()
+                  .applyToolResult({ ...event.tool_result, content: event.delta });
+              }
               if (event.skill_calls && event.skill_calls.length > 0) {
                 useAppStore.getState().appendSkillCalls(event.skill_calls);
               }
