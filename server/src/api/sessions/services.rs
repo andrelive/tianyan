@@ -288,36 +288,38 @@ impl SessionService {
 
     /// 删除消息及其后的所有消息（与编辑/重新生成一致的截断语义）。
     ///
-    /// 保留 `message_index` 之前的消息，删除该消息及之后，持久化后返回剩余消息。
+    /// 按消息 ID 定位原始索引后截断——前端展示列表经合并/过滤（tool/system
+    /// 消息）后索引与服务端消息列表错位，数字索引会删过头；ID 是稳定定位键。
     pub async fn delete_message(
         &self,
         session_id: &str,
         request: DeleteMessageRequest,
     ) -> Result<SessionMessagesResponse, ApiError> {
-        info!(
-            "删除消息: 会话={}, 索引={}",
-            session_id, request.message_index
-        );
-
         let mut session = self
             .session_manager
             .get_session(session_id)
             .await?
             .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
 
-        if request.message_index >= session.messages.len() {
-            return Err(ApiError::BadRequest("消息索引超出范围".to_string()));
-        }
+        // 消息 ID → 服务端原始列表索引（快照/截断仍按索引，恢复语义不变）
+        let message_index = session
+            .messages
+            .iter()
+            .position(|m| m.id == request.message_id)
+            .ok_or_else(|| ApiError::NotFound(format!("消息不存在: {}", request.message_id)))?;
+        info!(
+            "删除消息: 会话={}, 消息={}, 索引={}",
+            session_id, request.message_id, message_index
+        );
 
-        // 保存重做状态：当前工作区 + 被截断的消息（配置了 working_directory 时；
-        // 快照根取会话生效的工作目录）
+        // 保存重做状态：当前工作区 + 被截断的消息（按消息 ID 组织；
+        // 配置了 working_directory 时快照根取会话生效的工作目录）
         if let Some(sm) = &self.snapshot_manager {
-            let truncated: Vec<StructuredMessage> =
-                session.messages[request.message_index..].to_vec();
+            let truncated: Vec<StructuredMessage> = session.messages[message_index..].to_vec();
             if let Some(workdir) = self.resolve_workdir(&session) {
                 if let Err(e) = sm
                     .with_workdir(workdir)
-                    .save_redo(session_id, request.message_index, &truncated)
+                    .save_redo(session_id, &request.message_id, &truncated)
                     .await
                 {
                     tracing::warn!(error = %e, "保存重做状态失败");
@@ -326,7 +328,7 @@ impl SessionService {
         }
 
         // 截断到该消息之前（不含）
-        session.messages.truncate(request.message_index);
+        session.messages.truncate(message_index);
 
         if let Err(e) = self.session_manager.update_session(&session).await {
             tracing::error!("更新会话失败: {}", e);
@@ -349,20 +351,20 @@ impl SessionService {
             };
             match sm
                 .with_workdir(workdir)
-                .restore(session_id, request.message_index)
+                .restore(session_id, message_index)
                 .await
             {
                 Ok(n) => {
                     info!(
-                        "回退工作区文件: 会话={}, 索引={}, 恢复 {} 个文件",
-                        session_id, request.message_index, n
+                        "回退工作区: 会话={}, 索引={}, 恢复 {} 个文件",
+                        session_id, message_index, n
                     );
                 }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
                         session = %session_id,
-                        index = request.message_index,
+                        index = message_index,
                         "工作区快照恢复失败（会话已回退，文件未回退）"
                     );
                 }
@@ -379,13 +381,10 @@ impl SessionService {
         session_id: &str,
         request: RedoRequest,
     ) -> Result<SessionMessagesResponse, ApiError> {
-        info!(
-            "重做消息: 会话={}, 索引={}",
-            session_id, request.message_index
-        );
+        info!("重做消息: 会话={}, 消息={}", session_id, request.message_id);
 
         // 0. 存在性检查：不存在的会话 → 404（优先于重做状态检查）；
-        //    同时解析会话生效的工作目录（快照根，会话级绑定优先）
+        //    同时解析当前会话生效的工作目录（快照根，会话级绑定优先）
         let session = self
             .session_manager
             .get_session(session_id)
@@ -395,13 +394,14 @@ impl SessionService {
             .resolve_workdir(&session)
             .ok_or_else(|| ApiError::BadRequest("未启用工作区快照，无法重做".to_string()))?;
 
-        // 1. 恢复工作区文件 + 取出被截断的消息（快照管理器一次性语义）
+        // 1. 恢复工作区文件 + 取出被截断的消息（快照管理器一次性语义，
+        //    重做数据按被回退消息的 ID 组织）
         let Some((messages, restored)) = self
             .snapshot_manager
             .as_ref()
             .ok_or_else(|| ApiError::BadRequest("未启用工作区快照，无法重做".to_string()))?
             .with_workdir(workdir)
-            .load_redo(session_id, request.message_index)
+            .load_redo(session_id, &request.message_id)
             .await?
         else {
             return Err(ApiError::BadRequest("没有可重做的状态".to_string()));

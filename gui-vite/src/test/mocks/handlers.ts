@@ -934,16 +934,21 @@ export const handlers = [
 
   // Session message delete: 删除该消息及其后，返回剩余消息
   http.post(`${API_BASE}/sessions/:id/messages/delete`, async ({ params, request }) => {
-    // 模拟真实后端语义：truncate(message_index)——保留 index 之前的消息
-    const body = (await request.json()) as { message_index?: number } | null;
-    const index = body?.message_index ?? 1;
+    // 模拟真实后端语义：按 message_id 定位索引后 truncate
+    const body = (await request.json()) as { message_id?: string } | null;
     const all = [
-      { role: 'user' as const, content: '你好', timestamp: '2026-07-23T10:00:00Z' },
-      { role: 'assistant' as const, content: '你好！我是天演', timestamp: '2026-07-23T10:00:05Z' },
+      { id: 'msg_0', role: 'user' as const, content: '你好', timestamp: '2026-07-23T10:00:00Z' },
+      {
+        id: 'msg_1',
+        role: 'assistant' as const,
+        content: '你好！我是天演',
+        timestamp: '2026-07-23T10:00:05Z',
+      },
     ];
+    const index = body?.message_id ? all.findIndex((m) => m.id === body.message_id) : 0;
     return HttpResponse.json({
       session_id: params.id,
-      messages: all.slice(0, index),
+      messages: index >= 0 ? all.slice(0, index) : [],
     });
   }),
 

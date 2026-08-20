@@ -121,18 +121,21 @@ impl UpdateWorkspaceRequest {
     }
 }
 
-/// 删除消息请求 —— 删除指定索引的消息及其后的所有消息。
+/// 删除消息请求 —— 删除指定消息及其后的所有消息。
+///
+/// 按消息 ID 定位（前端展示列表经合并/过滤后与服务端消息列表索引错位，
+/// 数字索引不可靠；ID 是两端共享的稳定键）。
 #[derive(Debug, Deserialize)]
 pub struct DeleteMessageRequest {
-    /// 要删除的消息索引（该消息及其后的消息都会被删除）。
-    pub message_index: usize,
+    /// 要删除的消息 ID（该消息及其后的消息都会被删除）。
+    pub message_id: String,
 }
 
 /// 重做请求 —— 恢复被回退的消息与工作区文件。
 #[derive(Debug, Deserialize)]
 pub struct RedoRequest {
-    /// 回退时的消息索引。
-    pub message_index: usize,
+    /// 回退时被删除的消息 ID（重做数据的定位键）。
+    pub message_id: String,
 }
 
 #[cfg(test)]

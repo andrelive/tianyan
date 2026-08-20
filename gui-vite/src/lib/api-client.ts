@@ -169,32 +169,34 @@ export async function deleteRole(name: string): Promise<RoleActionResponse> {
 // ========== Session messages ==========
 
 export interface DeleteMessageRequest {
-  message_index: number;
+  message_id: string;
 }
 
-/** 删除指定索引的消息及其后的所有消息，返回剩余消息。 */
+/** 删除指定消息及其后的所有消息（按消息 ID 定位，返回剩余消息）。
+ * 前端展示列表经合并/过滤后索引与服务端错位，数字索引会删过头；
+ * 消息 ID 是两端共享的稳定键。 */
 export async function deleteSessionMessage(
   sessionId: string,
-  messageIndex: number,
+  messageId: string,
 ): Promise<SessionMessagesResponse> {
   return apiPost<SessionMessagesResponse>(
     `/sessions/${encodeURIComponent(sessionId)}/messages/delete`,
-    { message_index: messageIndex } satisfies DeleteMessageRequest,
+    { message_id: messageId } satisfies DeleteMessageRequest,
   );
 }
 
 export interface RedoRequest {
-  message_index: number;
+  message_id: string;
 }
 
-/** 重做被回退的消息与工作区文件，返回恢复后的消息。 */
+/** 重做被删除的消息与工作区文件，返回恢复后的消息。 */
 export async function redoSessionMessage(
   sessionId: string,
-  messageIndex: number,
+  messageId: string,
 ): Promise<SessionMessagesResponse> {
   return apiPost<SessionMessagesResponse>(
     `/sessions/${encodeURIComponent(sessionId)}/messages/redo`,
-    { message_index: messageIndex } satisfies RedoRequest,
+    { message_id: messageId } satisfies RedoRequest,
   );
 }
 

@@ -321,14 +321,17 @@ impl SnapshotManager {
 
     /// 回退时保存重做状态：捕获当前工作区树 + 被截断的消息。
     ///
-    /// 重做数据存于 `{root}/{session_id}/redo/` 下，按消息索引组织。
+    /// 重做数据存于 `{root}/{session_id}/redo/` 下，按被回退消息的 ID 组织
+    /// （前端索引与服务端消息列表可能错位——tool/system 消息被前端合并过滤，
+    /// 数字索引不可靠；消息 ID 是稳定的定位键）。
     pub async fn save_redo(
         &self,
         session_id: &str,
-        index: usize,
+        message_id: &str,
         messages: &[StructuredMessage],
     ) -> Result<()> {
         self.validate_session_id(session_id)?;
+        let key = sanitize_redo_key(message_id);
 
         let redo_dir = self.redo_dir(session_id);
         fs::create_dir_all(&redo_dir)
@@ -337,43 +340,44 @@ impl SnapshotManager {
 
         // 1. 捕获当前工作区树（对象库全局去重,内容已存在则不重复存储）
         if self.workdir.exists() {
-            let tree_path = redo_dir.join(format!("tree-{}.json", index));
-            let cache_path = redo_dir.join(format!("tree-{}.cache.json", index));
+            let tree_path = redo_dir.join(format!("tree-{key}.json"));
+            let cache_path = redo_dir.join(format!("tree-{key}.cache.json"));
             self.capture_tree_to(&self.workdir, &tree_path, &cache_path, None)
                 .await?;
         }
 
         // 2. 保存被截断的消息
-        let messages_path = redo_dir.join(format!("messages-{}.json", index));
+        let messages_path = redo_dir.join(format!("messages-{key}.json"));
         let json = serde_json::to_string(messages)
             .map_err(|e| TianyanError::Custom(format!("snapshot: 序列化重做消息失败: {e}")))?;
         fs::write(&messages_path, json)
             .await
             .map_err(|e| TianyanError::Custom(format!("snapshot: 写入重做消息失败: {e}")))?;
 
-        tracing::debug!(session = %session_id, index, "已保存重做状态");
+        tracing::debug!(session = %session_id, message_id, "已保存重做状态");
         Ok(())
     }
 
     /// 重做：恢复重做工作区树,返回被截断的消息与恢复的文件数。
     ///
-    /// 重做成功后自动清理该索引的重做数据（一次性语义）。
+    /// 重做成功后自动清理该消息的重做数据（一次性语义）。
     pub async fn load_redo(
         &self,
         session_id: &str,
-        index: usize,
+        message_id: &str,
     ) -> Result<Option<(Vec<StructuredMessage>, usize)>> {
         self.validate_session_id(session_id)?;
 
+        let key = sanitize_redo_key(message_id);
         let redo_dir = self.redo_dir(session_id);
-        let messages_path = redo_dir.join(format!("messages-{}.json", index));
+        let messages_path = redo_dir.join(format!("messages-{key}.json"));
         if !messages_path.exists() {
             return Ok(None);
         }
 
         // 1. 恢复工作区树
         let mut restored = 0usize;
-        let tree_path = redo_dir.join(format!("tree-{}.json", index));
+        let tree_path = redo_dir.join(format!("tree-{key}.json"));
         if tree_path.exists() {
             let content = fs::read_to_string(&tree_path)
                 .await
@@ -398,14 +402,14 @@ impl SnapshotManager {
             tracing::debug!(error = %e, session = %session_id, "snapshot: 清理重做树文件失败");
         }
 
-        tracing::info!(session = %session_id, index, restored, "已重做工作区文件");
+        tracing::info!(session = %session_id, message_id, restored, "已重做工作区文件");
         Ok(Some((messages, restored)))
     }
 
-    /// 检查指定索引的重做状态是否存在。
-    pub async fn has_redo(&self, session_id: &str, index: usize) -> bool {
+    /// 检查指定消息的重做状态是否存在。
+    pub async fn has_redo(&self, session_id: &str, message_id: &str) -> bool {
         self.redo_dir(session_id)
-            .join(format!("messages-{}.json", index))
+            .join(format!("messages-{}.json", sanitize_redo_key(message_id)))
             .exists()
     }
 
@@ -531,7 +535,7 @@ impl SnapshotManager {
                 let Some(index) = index_part.strip_prefix("tree-") else {
                     continue;
                 };
-                if index.parse::<usize>().is_err() {
+                if index.is_empty() {
                     continue;
                 }
                 if !redo_dir.join(format!("{index_part}.json")).exists() {
@@ -907,11 +911,12 @@ impl SnapshotManager {
     }
 }
 
-/// 解析目录下形如 `{prefix}{index}.json` 的树文件,收集其引用的对象哈希（GC 标记阶段）。
+/// 例如解析目录下形如 `{prefix}{key}.json` 的树文件,收集其引用的对象哈希（GC 标记阶段）。
 ///
-/// 仅处理 `{prefix}` 后为纯数字索引的文件：`trees/` 传空前缀匹配 `0.json`,
-/// `redo/` 传 `tree-` 匹配 `tree-0.json`。`.cache.json` 等缓存文件不匹配命名规则,
-/// 直接忽略；格式损坏的树文件以 warn 日志跳过（不影响其余文件的回收）。
+/// `trees/` 传空前缀匹配 `0.json`（消息处理前快照，数字索引）；
+/// `redo/` 传 `tree-` 匹配 `tree-{message_id}.json`（重做树，消息 ID 键）。
+/// `.cache.json` 等缓存文件不匹配命名规则,直接忽略；格式损坏的树文件以
+/// warn 日志跳过（不影响其余文件的回收）。
 async fn collect_tree_hashes(dir: &Path, prefix: &str, reachable: &mut HashSet<String>) {
     let Ok(mut entries) = fs::read_dir(dir).await else {
         return;
@@ -924,7 +929,7 @@ async fn collect_tree_hashes(dir: &Path, prefix: &str, reachable: &mut HashSet<S
         let Some(index) = index_part.strip_prefix(prefix) else {
             continue;
         };
-        if index.parse::<usize>().is_err() {
+        if index.is_empty() {
             continue;
         }
         match fs::read_to_string(entry.path()).await {
@@ -938,6 +943,26 @@ async fn collect_tree_hashes(dir: &Path, prefix: &str, reachable: &mut HashSet<S
                 tracing::warn!(path = %name, error = %e, "snapshot: GC 读取树文件失败");
             }
         }
+    }
+}
+
+/// 重做文件 key 消毒：消息 ID 仅作文件名，剔除路径分隔符与危险片段
+/// （消息 ID 由服务端生成，但文件名安全是底线）。
+fn sanitize_redo_key(message_id: &str) -> String {
+    let cleaned: String = message_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "_".to_string()
+    } else {
+        cleaned
     }
 }
 
@@ -1157,20 +1182,20 @@ mod tests {
         mgr.capture("s1", 1).await.unwrap();
 
         // 回退:保存 redo(当前=v1) + 恢复快照0(原始)
-        mgr.save_redo("s1", 1, &[]).await.unwrap();
-        assert!(mgr.has_redo("s1", 1).await);
+        mgr.save_redo("s1", "msg_1", &[]).await.unwrap();
+        assert!(mgr.has_redo("s1", "msg_1").await);
         mgr.restore("s1", 0).await.unwrap();
         assert_eq!(read(&mgr.workdir, "a.txt"), "原始");
 
         // 重做:恢复 v1 + 取回消息
-        let (msgs, restored) = mgr.load_redo("s1", 1).await.unwrap().unwrap();
+        let (msgs, restored) = mgr.load_redo("s1", "msg_1").await.unwrap().unwrap();
         assert!(msgs.is_empty());
         assert_eq!(restored, 1);
         assert_eq!(read(&mgr.workdir, "a.txt"), "v1");
 
         // 重做数据一次性:再次加载返回 None
-        assert!(!mgr.has_redo("s1", 1).await);
-        assert!(mgr.load_redo("s1", 1).await.unwrap().is_none());
+        assert!(!mgr.has_redo("s1", "msg_1").await);
+        assert!(mgr.load_redo("s1", "msg_1").await.unwrap().is_none());
     }
 
     /// 读取对象库中指定哈希的原始字节（不做解压）。
@@ -1348,27 +1373,27 @@ mod tests {
         mgr.capture("s1", 0).await.unwrap();
 
         // 模拟泄漏:save_redo 写入 tree/cache/messages,load_redo 消费后遗留孤儿 cache
-        mgr.save_redo("s1", 0, &[]).await.unwrap();
-        mgr.load_redo("s1", 0).await.unwrap();
-        // 对照组:tree-1.json 与其 cache 同时存在（不应被 GC 删除）
-        mgr.save_redo("s1", 1, &[]).await.unwrap();
+        mgr.save_redo("s1", "msg_0", &[]).await.unwrap();
+        mgr.load_redo("s1", "msg_0").await.unwrap();
+        // 对照组:tree-msg_1.json 与其 cache 同时存在（不应被 GC 删除）
+        mgr.save_redo("s1", "msg_1", &[]).await.unwrap();
 
         let redo_dir = mgr.redo_dir("s1");
         assert!(
-            redo_dir.join("tree-0.cache.json").exists(),
+            redo_dir.join("tree-msg_0.cache.json").exists(),
             "孤儿重做缓存必须存在"
         );
-        assert!(redo_dir.join("tree-1.cache.json").exists());
-        assert!(redo_dir.join("tree-1.json").exists());
+        assert!(redo_dir.join("tree-msg_1.cache.json").exists());
+        assert!(redo_dir.join("tree-msg_1.json").exists());
 
         let stats = mgr.gc().await.unwrap();
         assert_eq!(stats.cache_files_removed, 1);
-        assert!(!redo_dir.join("tree-0.cache.json").exists());
+        assert!(!redo_dir.join("tree-msg_0.cache.json").exists());
         assert!(
-            redo_dir.join("tree-1.cache.json").exists(),
+            redo_dir.join("tree-msg_1.cache.json").exists(),
             "匹配的重做缓存不应被删除"
         );
-        assert!(redo_dir.join("tree-1.json").exists());
+        assert!(redo_dir.join("tree-msg_1.json").exists());
     }
 
     #[tokio::test]
@@ -1392,7 +1417,7 @@ mod tests {
         mgr.capture("s1", 1).await.unwrap();
         write(&mgr.workdir, "a.txt", "v2");
         mgr.capture("s1", 2).await.unwrap();
-        mgr.save_redo("s1", 0, &[]).await.unwrap();
+        mgr.save_redo("s1", "msg_0", &[]).await.unwrap();
 
         let stats = mgr.gc().await.unwrap();
         assert_eq!(stats.objects_removed, 0);

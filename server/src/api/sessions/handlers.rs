@@ -117,8 +117,8 @@ pub async fn delete_message(
     }
 
     info!(
-        "删除消息请求: 会话={}, 索引={}",
-        session_id, request.message_index
+        "删除消息请求: 会话={}, 消息={}",
+        session_id, request.message_id
     );
 
     let service = SessionService::new(
@@ -142,8 +142,8 @@ pub async fn redo_message(
     }
 
     info!(
-        "重做消息请求: 会话={}, 索引={}",
-        session_id, request.message_index
+        "重做消息请求: 会话={}, 消息={}",
+        session_id, request.message_id
     );
 
     let service = SessionService::new(

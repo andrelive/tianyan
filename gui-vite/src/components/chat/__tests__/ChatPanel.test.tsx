@@ -225,11 +225,13 @@ describe('ChatPanel', () => {
       currentSessionId: 'session-1',
       messages: [
         {
+          id: 'msg_0',
           role: 'user',
           content: '你好',
           timestamp: new Date().toISOString(),
         },
         {
+          id: 'msg_1',
           role: 'assistant',
           content: '你好！我是天演',
           timestamp: new Date().toISOString(),
@@ -258,7 +260,7 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     useAppStore.setState({
       currentSessionId: 'session-1',
-      lastRollbackIndex: 1,
+      lastRollbackMessageId: 'msg_deleted',
       messages: [
         {
           role: 'user',
@@ -277,7 +279,7 @@ describe('ChatPanel', () => {
       expect(messages).toHaveLength(2);
       expect(messages[1].content).toBe('你好！我是天演，有什么可以帮助你的？');
     });
-    expect(useAppStore.getState().lastRollbackIndex).toBeNull();
+    expect(useAppStore.getState().lastRollbackMessageId).toBeNull();
   });
 
   it('shows the clarification bubble when a clarification is pending', () => {

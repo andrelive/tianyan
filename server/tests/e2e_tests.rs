@@ -209,7 +209,7 @@ async fn test_e2e_sessions_error_paths() {
     let resp = server
         .post(
             "/api/v1/sessions/missing-001/messages/delete",
-            &serde_json::json!({ "message_index": 0 }),
+            &serde_json::json!({ "message_id": "msg_missing" }),
         )
         .await;
     assert_eq!(resp.status(), 404, "删除消息：会话不存在应 404");
@@ -217,7 +217,7 @@ async fn test_e2e_sessions_error_paths() {
     let resp = server
         .post(
             "/api/v1/sessions/missing-001/messages/redo",
-            &serde_json::json!({ "message_index": 0 }),
+            &serde_json::json!({ "message_id": "msg_missing" }),
         )
         .await;
     assert_eq!(resp.status(), 404, "重做消息：会话不存在应 404");

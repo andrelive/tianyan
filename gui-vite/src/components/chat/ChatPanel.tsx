@@ -33,8 +33,8 @@ export default function ChatPanel() {
   const addMessage = useAppStore((s) => s.addMessage);
   const setStreamStatus = useAppStore((s) => s.setStreamStatus);
   const deleteMessagesFrom = useAppStore((s) => s.deleteMessagesFrom);
-  const lastRollbackIndex = useAppStore((s) => s.lastRollbackIndex);
-  const setLastRollbackIndex = useAppStore((s) => s.setLastRollbackIndex);
+  const lastRollbackMessageId = useAppStore((s) => s.lastRollbackMessageId);
+  const setLastRollbackMessageId = useAppStore((s) => s.setLastRollbackMessageId);
   const pendingClarification = useAppStore((s) => s.pendingClarification);
   const setPendingClarification = useAppStore((s) => s.setPendingClarification);
 
@@ -377,39 +377,46 @@ export default function ChatPanel() {
         return;
       }
 
+      // 被回退消息的 ID：重做数据的定位键（前端索引与服务端列表错位，
+      // 数字索引不可靠——按 ID 定位删除）
+      const target = messages[index];
+      if (!target?.id) {
+        state.showToast('该消息缺少 ID，无法回退', 'error');
+        return;
+      }
+
       // 乐观更新：回退到该消息之前（删除该消息及其后）
       deleteMessagesFrom(index);
       try {
-        const resp = await deleteSessionMessage(sessionId, index);
+        const resp = await deleteSessionMessage(sessionId, target.id);
         state.setMessages(resp.messages);
-        setLastRollbackIndex(index);
+        setLastRollbackMessageId(target.id);
       } catch (err: unknown) {
         state.showToast(`回退失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
         await reloadSession(sessionId);
       }
     },
-    [streamStatus, deleteMessagesFrom, setLastRollbackIndex],
+    [streamStatus, deleteMessagesFrom, setLastRollbackMessageId, messages],
   );
 
-  // 撤销回退：恢复被回退的消息与工作区文件
+  // 撤销回滚：恢复被删除的消息与工作区文件
   const handleRedo = useCallback(async () => {
-    if (streamStatus === 'streaming' || lastRollbackIndex === null) return;
+    if (streamStatus === 'streaming' || lastRollbackMessageId === null) return;
 
     const state = useAppStore.getState();
     const sessionId = state.currentSessionId;
     if (!sessionId) return;
 
-    const index = lastRollbackIndex;
     try {
-      const resp = await redoSessionMessage(sessionId, index);
+      const resp = await redoSessionMessage(sessionId, lastRollbackMessageId);
       state.setMessages(resp.messages);
-      setLastRollbackIndex(null);
+      setLastRollbackMessageId(null);
       state.showToast('已撤销回退', 'success');
     } catch (err: unknown) {
       state.showToast(`撤销回退失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
       await reloadSession(sessionId);
     }
-  }, [streamStatus, lastRollbackIndex, setLastRollbackIndex]);
+  }, [streamStatus, lastRollbackMessageId, setLastRollbackMessageId]);
 
   // 从后端重新加载会话消息（失败回滚，恢复与持久化一致的状态）
   const reloadSession = useCallback(async (sessionId: string) => {
@@ -610,7 +617,7 @@ export default function ChatPanel() {
         )}
 
         {/* Redo banner: 回退后可撤销 */}
-        {lastRollbackIndex !== null && streamStatus !== 'streaming' && (
+        {lastRollbackMessageId !== null && streamStatus !== 'streaming' && (
           <div className="flex justify-center pb-1">
             <button
               onClick={handleRedo}

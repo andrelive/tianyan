@@ -141,10 +141,10 @@ mod tests {
         mgr.capture("s1", 0).await.unwrap();
 
         // 模拟泄漏：save_redo 写入后 load_redo 消费，遗留孤儿 cache 文件
-        mgr.save_redo("s1", 0, &[]).await.unwrap();
-        mgr.load_redo("s1", 0).await.unwrap();
+        mgr.save_redo("s1", "msg_0", &[]).await.unwrap();
+        mgr.load_redo("s1", "msg_0").await.unwrap();
         assert!(
-            mgr.root().join("s1/redo/tree-0.cache.json").exists(),
+            mgr.root().join("s1/redo/tree-msg_0.cache.json").exists(),
             "孤儿重做缓存必须存在"
         );
 

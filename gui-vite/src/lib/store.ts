@@ -70,9 +70,10 @@ interface AppState {
   setPendingClarification: (question: string | null) => void;
   removeEmptyAssistantMessage: (sessionId?: string | null) => void;
 
-  // Rollback / redo
-  lastRollbackIndex: number | null;
-  setLastRollbackIndex: (index: number | null) => void;
+  // Rollback / redo（按消息 ID 定位：前端索引与服务端消息列表错位，
+  // 数字索引会删过头——回退/重做都以被删除消息的 ID 为键）
+  lastRollbackMessageId: string | null;
+  setLastRollbackMessageId: (id: string | null) => void;
 
   // Streaming（按会话归属：会话 A 流式时切到 B 可继续发消息，互不阻塞）
   streamStatus: Record<string, StreamStatus>;
@@ -390,8 +391,8 @@ export const useAppStore = create<AppState>()(
         ),
 
       // Rollback / redo
-      lastRollbackIndex: null,
-      setLastRollbackIndex: (index) => set({ lastRollbackIndex: index }),
+      lastRollbackMessageId: null,
+      setLastRollbackMessageId: (id) => set({ lastRollbackMessageId: id }),
 
       // Streaming（按会话：切走流继续跑，切回直接显示累积内容）
       streamStatus: {},
