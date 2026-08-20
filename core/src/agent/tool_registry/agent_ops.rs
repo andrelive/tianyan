@@ -9,8 +9,7 @@ use futures::future::BoxFuture;
 
 use crate::agent::role_store::RoleStore;
 use crate::agent::tool_params::{
-    AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams,
-    SubmitResultParams,
+    AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, SubmitResultParams,
 };
 use crate::common::error::TianyanError;
 use crate::common::types::Message;
@@ -107,12 +106,15 @@ impl ToolRegistry {
         if params.background == Some(true) {
             // 就绪探测规格（可选）：端口/日志关键词就绪后自动通知主 agent；
             // 长驻服务（server/dev server 等）必须配置，否则只能等进程退出通知。
-            let ready_spec = params.ready.as_ref().map(|r| crate::executor::command::ReadySpec {
-                port: r.port,
-                pattern: r.pattern.clone(),
-                initial_delay_ms: r.initial_delay_ms.unwrap_or(500),
-                timeout_ms: r.timeout_ms.unwrap_or(300_000),
-            });
+            let ready_spec = params
+                .ready
+                .as_ref()
+                .map(|r| crate::executor::command::ReadySpec {
+                    port: r.port,
+                    pattern: r.pattern.clone(),
+                    initial_delay_ms: r.initial_delay_ms.unwrap_or(500),
+                    timeout_ms: r.timeout_ms.unwrap_or(300_000),
+                });
             let task = self
                 .command_tasks
                 .spawn_background(session_id, &params.command, cwd.as_deref(), ready_spec)
@@ -433,10 +435,7 @@ impl ToolRegistry {
 
             for _turn in 0..max_turns {
                 // 主循环取消（用户点停止）：子代理循环也及时响应
-                if this_for_loop
-                    .delegation_cancelled(&session_owned)
-                    .await
-                {
+                if this_for_loop.delegation_cancelled(&session_owned).await {
                     return Err(TianyanError::Custom(
                         "tool: 委托已取消（主循环停止）".to_string(),
                     ));
@@ -566,11 +565,8 @@ impl ToolRegistry {
         let outcome = if is_background {
             match timeout_secs {
                 Some(secs) => {
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_secs(secs),
-                        run_loop,
-                    )
-                    .await;
+                    let result =
+                        tokio::time::timeout(std::time::Duration::from_secs(secs), run_loop).await;
                     match result {
                         Ok(inner) => inner,
                         Err(_) => Err(TianyanError::Custom(format!(
@@ -758,7 +754,11 @@ impl ToolRegistry {
 
         let desc = params.task.clone();
         let task_id = manager
-            .register(crate::agent::background::TaskKind::Delegate, desc.clone(), session_id.clone())
+            .register(
+                crate::agent::background::TaskKind::Delegate,
+                desc.clone(),
+                session_id.clone(),
+            )
             .await;
         manager.mark_running(&task_id).await;
 

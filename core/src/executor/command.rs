@@ -48,13 +48,7 @@ pub trait CommandNotifier: Send + Sync {
     /// 命令任务进入终态时调用（Completed / Failed / Cancelled）。
     async fn on_command_terminal(&self, session_id: &str, task: &CommandTask, remaining: usize);
     /// 就绪探测通过/超时通知（默认静默；实现方写入父会话）。
-    async fn on_command_ready(
-        &self,
-        _session_id: &str,
-        _task: &CommandTask,
-        _note: &str,
-    ) {
-    }
+    async fn on_command_ready(&self, _session_id: &str, _task: &CommandTask, _note: &str) {}
 }
 
 /// 后台命令唤醒器（ADR-013 语义：全部完成/失败时触发主 agent 新一轮生成）。
@@ -378,7 +372,9 @@ impl CommandManager {
                     }
                     // 判定 1：端口 TCP 连接成功
                     let port_ok = match spec.port {
-                        Some(port) => tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok(),
+                        Some(port) => tokio::net::TcpStream::connect(("127.0.0.1", port))
+                            .await
+                            .is_ok(),
                         None => false,
                     };
                     // 判定 2：日志尾部关键词
@@ -395,7 +391,10 @@ impl CommandManager {
                         let note = if port_ok {
                             format!("端口 {} 已监听", spec.port.unwrap_or(0))
                         } else {
-                            format!("日志出现关键词 \"{}\"", spec.pattern.as_deref().unwrap_or(""))
+                            format!(
+                                "日志出现关键词 \"{}\"",
+                                spec.pattern.as_deref().unwrap_or("")
+                            )
                         };
                         Self::mark_ready(&manager, &task_id, Some(note.clone())).await;
                         Self::notify_ready(&manager, &task_id, &note).await;
@@ -417,7 +416,6 @@ impl CommandManager {
 
         Ok(task)
     }
-
 
     /// 标记任务就绪状态（就绪 / 超时说明）。
     async fn mark_ready(manager: &CommandManager, task_id: &str, note: Option<String>) {
@@ -795,7 +793,11 @@ mod tests {
         );
         let t = manager.get(&task.id).await.unwrap();
         assert!(t.ready, "任务应标记为已就绪");
-        assert_eq!(t.status, CommandTaskStatus::Running, "长驻服务就绪后仍应运行中");
+        assert_eq!(
+            t.status,
+            CommandTaskStatus::Running,
+            "长驻服务就绪后仍应运行中"
+        );
 
         // 收尾：杀掉进程
         manager.kill(&task.id).await.unwrap();
@@ -848,7 +850,10 @@ mod tests {
         } else {
             "sleep 30"
         };
-        let task = manager.spawn_background("sess-1", cmd, None, None).await.unwrap();
+        let task = manager
+            .spawn_background("sess-1", cmd, None, None)
+            .await
+            .unwrap();
         manager.kill(&task.id).await.unwrap();
 
         let t = manager.get(&task.id).await.unwrap();

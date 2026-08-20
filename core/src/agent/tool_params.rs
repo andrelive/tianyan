@@ -72,7 +72,6 @@ pub struct ReadyProbeParams {
     pub timeout_ms: Option<u64>,
 }
 
-
 /// 角色匹配建议参数（ADR-016 P3 向量路由）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SuggestRoleParams {

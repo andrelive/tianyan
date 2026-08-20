@@ -6,12 +6,13 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::agent::tool_params::{
-    ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams, DelegationStatsParams,
-    DiscoverTestsParams, ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams,
-    GlobParams, KnowledgeIngestParams, ListDirParams, LspParams, ReadFileParams, RunTestsParams,
-    SearchCodeParams, SearchKnowledgeParams, SelfCheckParams, SessionRecallParams,
-    SuggestRoleParams, SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VerifyBuildParams,
-    VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams, WriteFileParams,
+    ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
+    DelegationStatsParams, DiscoverTestsParams, ExecuteCommandParams, ExecutionDetailParams,
+    ExecutionStatsParams, GlobParams, KnowledgeIngestParams, ListDirParams, LspParams,
+    ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams, SelfCheckParams,
+    SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
+    TaskStatusParams, VerifyBuildParams, VfsListParams, VfsReadParams, WebFetchParams,
+    WebSearchParams, WriteFileParams,
 };
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
@@ -200,7 +201,9 @@ pub struct ToolRegistry {
     pub(crate) session_manager: Option<Arc<dyn crate::session::SessionManager>>,
     /// 主循环取消标志槽（按会话：coordinator 每请求注入/清理；
     /// 委托循环据此中断——同步委托期间用户点停止也能及时停）。
-    delegation_cancel: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    delegation_cancel: Arc<
+        tokio::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
+    >,
 }
 
 impl ToolRegistry {

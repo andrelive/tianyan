@@ -133,10 +133,22 @@ pub async fn get_usage_stats_handler(
     let group_by = query.group_by.as_deref().unwrap_or("model");
     let log = state.usage_log();
     let total = log
-        .stats(since_ts, until_ts, query.provider.as_deref(), query.model.as_deref(), "none")
+        .stats(
+            since_ts,
+            until_ts,
+            query.provider.as_deref(),
+            query.model.as_deref(),
+            "none",
+        )
         .await;
     let grouped = log
-        .stats(since_ts, until_ts, query.provider.as_deref(), query.model.as_deref(), group_by)
+        .stats(
+            since_ts,
+            until_ts,
+            query.provider.as_deref(),
+            query.model.as_deref(),
+            group_by,
+        )
         .await;
     Ok(Json(json!({
         "days": query.days,

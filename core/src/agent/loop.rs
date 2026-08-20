@@ -1,6 +1,6 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -643,13 +643,13 @@ impl AgentLoop {
             // 未命中时按 model 名前缀推导（provider/model 命名）。
             if let Some(ref usage_log) = self.usage_log {
                 if let Some(usage) = &turn_usage {
-                    let provider = self
-                        .provider_by_model
-                        .get(model)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            model.split("/").next().unwrap_or("unknown").to_string()
-                        });
+                    let provider =
+                        self.provider_by_model
+                            .get(model)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                model.split("/").next().unwrap_or("unknown").to_string()
+                            });
                     usage_log.record(session_id, &provider, model, usage).await;
                 }
             }

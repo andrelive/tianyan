@@ -717,7 +717,9 @@ async fn test_delegate_role_session_continue_loads_history() {
             req.messages.iter().any(|m| m.content.contains("t1"))
                 && req.messages.iter().any(|m| {
                     m.tool_calls.as_ref().map_or(false, |calls| {
-                        calls.iter().any(|tc| tc.function.arguments.contains("answer1"))
+                        calls
+                            .iter()
+                            .any(|tc| tc.function.arguments.contains("answer1"))
                     })
                 })
                 && req.messages.iter().any(|m| m.content.contains("t2"))
@@ -1022,21 +1024,17 @@ async fn test_delegate_sync_budget_promotes_to_background() {
     let mut mock = MockChatService::new();
     // 子代理永不完成（每轮输出开场白不提交），每轮 mock 阻塞 20ms 放慢循环
     // （200 轮 ≈ 4s > 1s 预算，保证升级在 max_turns 前触发）。
-    mock.expect_chat_completion()
-        .returning(|_| {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            Ok(chat_response("我先看看"))
-        });
+    mock.expect_chat_completion().returning(|_| {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        Ok(chat_response("我先看看"))
+    });
 
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
         .with_model("test-model");
 
     let result = registry
-        .execute_delegate_to_agent(
-            r#"{"task":"slow job","timeout_secs":1}"#,
-            "session-1",
-        )
+        .execute_delegate_to_agent(r#"{"task":"slow job","timeout_secs":1}"#, "session-1")
         .await
         .unwrap();
     assert_eq!(
@@ -1045,7 +1043,10 @@ async fn test_delegate_sync_budget_promotes_to_background() {
         "预算耗尽应升级为后台: {result}",
     );
     let task_id = result["task_id"].as_str().unwrap().to_string();
-    assert!(task_id.starts_with("bt_"), "任务 ID 应为 bt_ 前缀: {task_id}");
+    assert!(
+        task_id.starts_with("bt_"),
+        "任务 ID 应为 bt_ 前缀: {task_id}"
+    );
 
     // 后台任务已注册且处于运行态（子代理循环已脱离调用栈继续跑）
     let task = registry.background_tasks.get(&task_id).await;

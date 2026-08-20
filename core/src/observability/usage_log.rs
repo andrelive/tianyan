@@ -50,13 +50,7 @@ impl UsageLog {
     ///
     /// provider 由 model 名推导（约定 `provider/model` 前缀命名，
     /// 如 `opencode/deepseek-v4-flash`）。写失败仅告警，不影响主流程。
-    pub async fn record(
-        &self,
-        session_id: &str,
-        provider: &str,
-        model: &str,
-        usage: &TokenUsage,
-    ) {
+    pub async fn record(&self, session_id: &str, provider: &str, model: &str, usage: &TokenUsage) {
         let uncached = usage.prompt_tokens.saturating_sub(usage.cache_read);
         let conn = match self.db.try_lock() {
             Ok(c) => c,
@@ -242,7 +236,11 @@ impl UsageLog {
     fn stat_from(t: (String, u64, u64, u64, u64, u64)) -> UsageStat {
         let (group, calls, uncached, cached, completion, total) = t;
         let input = uncached + cached;
-        let hit = if input > 0 { cached as f64 / input as f64 } else { 0.0 };
+        let hit = if input > 0 {
+            cached as f64 / input as f64
+        } else {
+            0.0
+        };
         UsageStat {
             group,
             calls,
@@ -278,9 +276,22 @@ mod tests {
     #[tokio::test]
     async fn test_record_and_stats_total() {
         let log = setup().await;
-        log.record("s1", "opencode", "deepseek-v4-flash", &usage(1000, 800, 200)).await;
-        log.record("s1", "opencode", "deepseek-v4-flash", &usage(500, 100, 300)).await;
-        log.record("evolution-1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400)).await;
+        log.record(
+            "s1",
+            "opencode",
+            "deepseek-v4-flash",
+            &usage(1000, 800, 200),
+        )
+        .await;
+        log.record("s1", "opencode", "deepseek-v4-flash", &usage(500, 100, 300))
+            .await;
+        log.record(
+            "evolution-1",
+            "bailian",
+            "qwen3.7-plus",
+            &usage(2000, 0, 400),
+        )
+        .await;
 
         let stats = log.stats(None, None, None, None, "none").await;
         assert_eq!(stats.len(), 1);
@@ -298,8 +309,15 @@ mod tests {
     #[tokio::test]
     async fn test_stats_group_by_model() {
         let log = setup().await;
-        log.record("s1", "opencode", "deepseek-v4-flash", &usage(1000, 800, 200)).await;
-        log.record("s1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400)).await;
+        log.record(
+            "s1",
+            "opencode",
+            "deepseek-v4-flash",
+            &usage(1000, 800, 200),
+        )
+        .await;
+        log.record("s1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400))
+            .await;
 
         let stats = log.stats(None, None, None, None, "model").await;
         assert_eq!(stats.len(), 2);
@@ -313,8 +331,15 @@ mod tests {
     #[tokio::test]
     async fn test_stats_filter_provider_and_since() {
         let log = setup().await;
-        log.record("s1", "opencode", "deepseek-v4-flash", &usage(1000, 800, 200)).await;
-        log.record("s1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400)).await;
+        log.record(
+            "s1",
+            "opencode",
+            "deepseek-v4-flash",
+            &usage(1000, 800, 200),
+        )
+        .await;
+        log.record("s1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400))
+            .await;
 
         // 按 provider 过滤
         let stats = log.stats(None, None, Some("opencode"), None, "model").await;
@@ -323,7 +348,13 @@ mod tests {
 
         // since = 未来时间 → 无记录
         let stats = log
-            .stats(Some(chrono::Utc::now().timestamp() + 100000), None, None, None, "none")
+            .stats(
+                Some(chrono::Utc::now().timestamp() + 100000),
+                None,
+                None,
+                None,
+                "none",
+            )
             .await;
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].calls, 0);

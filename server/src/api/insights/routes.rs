@@ -11,8 +11,7 @@ use crate::state::AppState;
 
 use super::handlers::{
     get_approval_status_handler, get_scheduler_status_handler, get_stats_handler,
-    get_usage_stats_handler, list_memories_handler, list_traces_handler,
-    respond_approval_handler,
+    get_usage_stats_handler, list_memories_handler, list_traces_handler, respond_approval_handler,
 };
 
 /// 构建内部状态视图路由。
