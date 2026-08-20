@@ -13,7 +13,7 @@ export default function SkillCallCard({ info }: Props) {
   return (
     <div
       className={cn(
-        'rounded-lg border-l-4 p-3 my-2 text-sm',
+        'rounded-lg border-l-4 p-3 my-2 text-lg',
         info.success
           ? 'border-l-green-500 bg-green-50 dark:bg-green-950/30'
           : 'border-l-red-500 bg-red-50 dark:bg-red-950/30',
@@ -36,7 +36,7 @@ export default function SkillCallCard({ info }: Props) {
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <span className="flex items-center gap-1 text-xs text-[var(--color-text-tertiary)]">
+          <span className="flex items-center gap-1 text-base text-[var(--color-text-tertiary)]">
             <Clock className="w-3 h-3" />
             {info.execution_time_ms}ms
           </span>
@@ -50,11 +50,11 @@ export default function SkillCallCard({ info }: Props) {
 
       {expanded && (
         <div className="mt-2 pt-2 border-t border-[var(--color-border)] space-y-1">
-          <p className="text-xs text-[var(--color-text-secondary)]">
+          <p className="text-base text-[var(--color-text-secondary)]">
             <span className="font-medium">技能 ID:</span> {info.skill_id}
           </p>
           {info.error && (
-            <p className="text-xs text-red-600 dark:text-red-400">
+            <p className="text-base text-red-600 dark:text-red-400">
               <span className="font-medium">错误:</span> {info.error}
             </p>
           )}

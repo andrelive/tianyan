@@ -62,13 +62,13 @@ function ToolCallCard({ event, result }: Props) {
         <span className="shrink-0">
           <Icon className="w-3.5 h-3.5 text-[var(--color-text-tertiary)]" />
         </span>
-        <span className="text-xs font-medium text-[var(--color-text-secondary)]">{label}</span>
+        <span className="text-base font-medium text-[var(--color-text-secondary)]">{label}</span>
         {event.name ? (
-          <code className="text-xs text-[var(--color-text-primary)] font-mono truncate">
+          <code className="text-base text-[var(--color-text-primary)] font-mono truncate">
             {event.name}
           </code>
         ) : (
-          <span className="text-xs text-[var(--color-text-primary)]">工具结果</span>
+          <span className="text-base text-[var(--color-text-primary)]">工具结果</span>
         )}
         <span className="ml-auto shrink-0 flex items-center gap-1">
           {expanded ? (
@@ -81,7 +81,7 @@ function ToolCallCard({ event, result }: Props) {
 
       {/* 展开区：参数 JSON */}
       {expanded && (
-        <pre className="max-h-48 overflow-auto px-3 py-2 text-xs font-mono text-[var(--color-text-secondary)] bg-[var(--color-bg-hover)]/40 whitespace-pre-wrap break-words">
+        <pre className="max-h-48 overflow-auto px-3 py-2 text-base font-mono text-[var(--color-text-secondary)] bg-[var(--color-bg-hover)]/40 whitespace-pre-wrap break-words">
           {formatArguments(event.arguments)}
         </pre>
       )}
@@ -93,7 +93,7 @@ function ToolCallCard({ event, result }: Props) {
             type="button"
             onClick={() => setResultOpen((v) => !v)}
             aria-expanded={resultOpen}
-            className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors"
+            className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-base text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors"
           >
             {resultOpen ? (
               <ChevronDown size={12} className="shrink-0" />

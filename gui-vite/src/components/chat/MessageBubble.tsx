@@ -26,7 +26,7 @@ function ThinkingBlock({ text }: { text: string }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors"
+        className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-base text-[var(--color-text-tertiary)] hover:text-[var(--color-text-secondary)] transition-colors"
       >
         {open ? (
           <ChevronDown size={12} className="shrink-0" />
@@ -36,7 +36,7 @@ function ThinkingBlock({ text }: { text: string }) {
         <span>思考过程</span>
       </button>
       {open && (
-        <div className="px-3 pb-2 text-xs leading-relaxed whitespace-pre-wrap text-[var(--color-text-secondary)] italic opacity-80 max-h-64 overflow-y-auto">
+        <div className="px-3 pb-2 text-base leading-relaxed whitespace-pre-wrap text-[var(--color-text-secondary)] italic opacity-80 max-h-64 overflow-y-auto">
           {text}
         </div>
       )}
@@ -49,13 +49,13 @@ function MarkdownContent({ text, isUser }: { text: string; isUser: boolean }) {
   return (
     <div
       className={cn(
-        'text-sm leading-relaxed break-words',
+        'text-lg leading-relaxed break-words',
         '[&_p]:mb-2 [&_p:last-child]:mb-0',
         '[&_ul]:mb-2 [&_ol]:mb-2',
         '[&_ul]:pl-5 [&_ol]:pl-5',
         '[&_ul]:list-disc [&_ol]:list-decimal',
         '[&_li]:mb-0.5',
-        '[&_h1]:text-base [&_h2]:text-sm',
+        '[&_h1]:text-xl [&_h2]:text-lg',
         '[&_h1]:font-bold [&_h2]:font-semibold',
         '[&_blockquote]:border-l-2 [&_blockquote]:border-current',
         '[&_blockquote]:pl-3 [&_blockquote]:italic [&_blockquote]:opacity-80',
@@ -69,7 +69,7 @@ function MarkdownContent({ text, isUser }: { text: string; isUser: boolean }) {
         components={{
           table: ({ children }) => (
             <div className="my-2 overflow-x-auto">
-              <table className="min-w-full border-collapse text-sm">{children}</table>
+              <table className="min-w-full border-collapse text-lg">{children}</table>
             </div>
           ),
           th: ({ children }) => (
@@ -102,7 +102,7 @@ function MarkdownContent({ text, isUser }: { text: string; isUser: boolean }) {
             return (
               <code
                 className={cn(
-                  'px-1.5 py-0.5 rounded text-sm font-mono',
+                  'px-1.5 py-0.5 rounded text-lg font-mono',
                   isUser ? 'bg-blue-600/30' : 'bg-[var(--color-bg-tertiary)]',
                 )}
                 {...props}
@@ -240,7 +240,7 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
 
         {/* 输出达到 token 上限被截断的提示（finish_reason === 'length'） */}
         {message.truncated_by_length && (
-          <p className="mt-2 text-xs text-[var(--color-text-tertiary)] flex items-center gap-1">
+          <p className="mt-2 text-base text-[var(--color-text-tertiary)] flex items-center gap-1">
             <span aria-hidden="true">⚠️</span> 输出已达上限
           </p>
         )}
@@ -249,7 +249,7 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
             （含已产出思考量，避免首字符前的长静默被误认为卡住） */}
         {isStreaming && message.content === '' && (
           <span
-            className="inline-flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)] animate-pulse"
+            className="inline-flex items-center gap-1.5 text-base text-[var(--color-text-tertiary)] animate-pulse"
             aria-label="AI 正在思考中..."
           >
             <span className="inline-block w-2 h-2 bg-current rounded-full" />
@@ -271,7 +271,7 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
         {message.timestamp && (
           <p
             className={cn(
-              'text-xs mt-1 opacity-60',
+              'text-base mt-1 opacity-60',
               isUser ? 'text-right text-blue-100' : 'text-left text-[var(--color-text-tertiary)]',
             )}
           >
