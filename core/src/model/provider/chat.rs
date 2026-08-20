@@ -110,6 +110,8 @@ impl ChatService for AsyncOpenAIClient {
                         content_parts: None,
                         tool_calls,
                         tool_call_id: None,
+                        tool_duration_ms: None,
+                        tool_error: None,
                         reasoning_content: None,
                     },
                     finish_reason: c

@@ -143,6 +143,8 @@ impl ContextAssembler {
                             Some(tool_calls)
                         },
                         tool_call_id: None,
+                        tool_duration_ms: None,
+                        tool_error: None,
                         reasoning_content,
                     };
                     messages.push(msg);
@@ -327,6 +329,8 @@ mod tests {
             content_parts: None,
             tool_calls: None,
             tool_call_id: None,
+            tool_duration_ms: None,
+            tool_error: None,
             reasoning_content: None,
         };
         let sm = ContextAssembler::message_to_structured(&msg, "ses_1", None, None);
@@ -362,6 +366,7 @@ mod tests {
             parts: vec![Part::ToolResult {
                 tool_call_id: "call_1".to_string(),
                 content: r#"{"result":"ok"}"#.to_string(),
+                error: None,
                 time: PartTime::default(),
             }],
             tokens: DetailedTokenUsage::default(),
@@ -410,6 +415,8 @@ mod tests {
             content_parts: None,
             tool_calls: None,
             tool_call_id: Some("call_1".to_string()),
+            tool_duration_ms: None,
+            tool_error: None,
             reasoning_content: None,
         };
         let sm = ContextAssembler::message_to_structured(&msg, "ses_1", None, None);

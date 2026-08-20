@@ -12,6 +12,9 @@ import {
   GitBranch,
   Code2,
   Wrench,
+  CheckCircle2,
+  XCircle,
+  Clock,
 } from 'lucide-react';
 import type { ToolCallEvent } from '@/lib/types';
 import { TOOL_PRESENTATION_LABELS } from '@/lib/types';
@@ -29,6 +32,12 @@ const PRESENTATION_ICONS: Record<string, ComponentType<{ className?: string }>> 
   delegate: GitBranch,
   code: Code2,
 };
+
+/** 毫秒 → 人类可读耗时。 */
+function formatDuration(ms: number): string {
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
+  return `${ms}ms`;
+}
 
 interface Props {
   /** 工具调用事件（名称/参数/展示意图） */
@@ -48,9 +57,18 @@ function ToolCallCard({ event, result }: Props) {
   const [resultOpen, setResultOpen] = useState(false);
   const Icon = PRESENTATION_ICONS[event.presentation] ?? Wrench;
   const label = TOOL_PRESENTATION_LABELS[event.presentation] ?? '工具';
+  // 计时/成败元数据：observation 事件实时填充（流式）或后端透传（历史）
+  const hasStatus = event.success !== undefined || event.duration_ms !== undefined;
+  const failed = event.success === false || (event.error != null && event.error.length > 0);
 
   return (
-    <div className="border border-[var(--color-border)] rounded-lg overflow-hidden">
+    <div
+      className={`border rounded-lg overflow-hidden ${
+        failed
+          ? 'border-red-500/50 bg-red-50/40 dark:bg-red-950/20'
+          : 'border-[var(--color-border)]'
+      }`}
+    >
       {/* 卡片头：图标 + 标签 + 工具名 + 展开开关 */}
       <button
         type="button"
@@ -70,6 +88,28 @@ function ToolCallCard({ event, result }: Props) {
         ) : (
           <span className="text-base text-[var(--color-text-primary)]">工具结果</span>
         )}
+        {/* 状态区：失败红色 / 成功绿色标记 + 耗时（observation 到达后显示） */}
+        {hasStatus && (
+          <span className="shrink-0 flex items-center gap-2 text-base">
+            {failed ? (
+              <span className="flex items-center gap-1 text-red-600 dark:text-red-400">
+                <XCircle className="w-3.5 h-3.5" />
+                <span>失败</span>
+              </span>
+            ) : event.success === true ? (
+              <span className="flex items-center gap-1 text-green-600 dark:text-green-400">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>成功</span>
+              </span>
+            ) : null}
+            {event.duration_ms !== undefined && (
+              <span className="flex items-center gap-1 text-[var(--color-text-tertiary)]">
+                <Clock className="w-3.5 h-3.5" />
+                {formatDuration(event.duration_ms)}
+              </span>
+            )}
+          </span>
+        )}
         <span className="ml-auto shrink-0 flex items-center gap-1">
           {expanded ? (
             <ChevronDown className="w-3.5 h-3.5 text-[var(--color-text-tertiary)] rotate-180 transition-transform" />
@@ -78,6 +118,13 @@ function ToolCallCard({ event, result }: Props) {
           )}
         </span>
       </button>
+
+      {/* 失败原因（失败时展示在参数区上方） */}
+      {failed && event.error && (
+        <div className="px-3 py-2 text-base text-red-600 dark:text-red-400 border-t border-red-500/30 bg-red-50/50 dark:bg-red-950/30 whitespace-pre-wrap break-words">
+          {event.error}
+        </div>
+      )}
 
       {/* 展开区：参数 JSON */}
       {expanded && (

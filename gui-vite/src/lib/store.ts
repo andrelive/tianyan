@@ -14,6 +14,7 @@ import type {
   ToastMessage,
   TokenUsage,
   ToolCallEvent,
+  ToolResultEvent,
 } from './types';
 
 interface AppState {
@@ -40,6 +41,9 @@ interface AppState {
   appendSkillCalls: (calls: SkillCallInfo[]) => void;
   /** A2：累积工具调用事件到当前 assistant 消息（渲染 tool card） */
   appendToolCalls: (calls: ToolCallEvent[]) => void;
+  /** 工具执行结果事件（observation chunk）：按 tool_call_id 关联调用卡片，
+   * 填充耗时/成败（实时显示 ✓/✗ + 耗时） */
+  applyToolResult: (result: ToolResultEvent) => void;
   /** 累积思考增量到当前 assistant 消息（thinking 字段，折叠展示） */
   appendThinking: (delta: string) => void;
   /** 开启新的 assistant 轮次消息（流式轮次边界：新一轮 thinking 到达时调用） */
@@ -176,13 +180,30 @@ export const useAppStore = create<AppState>()(
                 // 时间线：工具调用按到达顺序追加
                 segments: [
                   ...(messages[lastIdx].segments ?? []),
-                  ...fresh.map(
-                    (call): MessageSegment => ({ type: 'tool', tool_call: call }),
-                  ),
+                  ...fresh.map((call): MessageSegment => ({ type: 'tool', tool_call: call })),
                 ],
               };
             }
           }
+          return { messages };
+        }),
+      applyToolResult: (result) =>
+        set((s) => {
+          const messages = s.messages.map((m) => {
+            if (!m.tool_calls || m.tool_calls.length === 0) return m;
+            let changed = false;
+            const tool_calls = m.tool_calls.map((c) => {
+              if (c.id !== result.tool_call_id) return c;
+              changed = true;
+              return {
+                ...c,
+                duration_ms: result.duration_ms,
+                success: result.success,
+                error: result.error ?? null,
+              };
+            });
+            return changed ? { ...m, tool_calls } : m;
+          });
           return { messages };
         }),
       appendThinking: (delta) =>

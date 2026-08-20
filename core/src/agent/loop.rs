@@ -526,6 +526,8 @@ impl AgentLoop {
                         content_parts: None,
                         tool_calls,
                         tool_call_id: None,
+                        tool_duration_ms: None,
+                        tool_error: None,
                         reasoning_content: if accumulated_reasoning.is_empty() {
                             None
                         } else {
@@ -782,10 +784,12 @@ impl AgentLoop {
             // 不再继续循环，直接转为追问用户（用户批准后重试工具调用）。
             // 通过 has_pending_approval() 类型化信号判断，而非解析错误字符串。
             let denied_action = if self.tool_registry.has_pending_approval().await {
-                results.iter().find_map(|(_call_id, result)| match result {
-                    Err(e) => Some(e.to_string()),
-                    _ => None,
-                })
+                results
+                    .iter()
+                    .find_map(|(_call_id, outcome)| match &outcome.result {
+                        Err(e) => Some(e.to_string()),
+                        _ => None,
+                    })
             } else {
                 None
             };
@@ -801,22 +805,37 @@ impl AgentLoop {
                 }));
             }
 
-            for (call_id, result) in results {
-                let content = match result {
+            for (call_id, outcome) in results {
+                let content = match &outcome.result {
                     Ok(ref value) => serde_json::to_string(value).unwrap_or_else(|e| {
                         format!(r#"{{"error": "serialization failed: {}"}}"#, e)
                     }),
                     Err(ref e) => serde_json::json!({ "error": e.to_string() }).to_string(),
                 };
 
-                // Persist tool result
-                let tool_msg = Message::tool(&call_id, &content);
+                // Persist tool result（携带耗时/成败元数据：Part::ToolResult.time
+                // 与 error 由 from_message 从消息级字段接线，历史回放可见）
+                let tool_msg = Message::tool_result(
+                    &call_id,
+                    &content,
+                    Some(outcome.duration_ms),
+                    outcome.error(),
+                );
                 self.persist_message(ctx, &tool_msg, None, None).await;
 
                 ctx.messages.push(tool_msg);
 
+                // 流式下发工具结果事件（耗时/成败结构化，前端卡片实时显示）
                 if let Some(sender) = ctx.stream_sender {
-                    sender.send_observation(&content).await;
+                    sender
+                        .send_tool_result(
+                            &content,
+                            &call_id,
+                            outcome.duration_ms,
+                            outcome.is_ok(),
+                            outcome.error(),
+                        )
+                        .await;
                 }
             }
 

@@ -130,6 +130,40 @@ fn truncate_trace_params(arguments: &str) -> String {
     format!("{}…", &arguments[..end])
 }
 
+/// 单个工具调用的执行结果（含耗时元数据）。
+///
+/// 耗时是消息级计时的输入源：主循环据此构造 `Part::ToolResult.time`
+/// 与 SSE tool_result 事件，前端在工具卡片上显示耗时/成败。
+#[derive(Debug)]
+pub struct ToolExecutionOutcome {
+    /// 执行耗时（毫秒）。
+    pub duration_ms: i64,
+    /// 执行结果（成功为 JSON 值；失败为结构化错误）。
+    pub result: Result<serde_json::Value, TianyanError>,
+}
+
+impl ToolExecutionOutcome {
+    /// 是否执行成功。
+    pub fn is_ok(&self) -> bool {
+        self.result.is_ok()
+    }
+
+    /// 失败原因（成功时为 None）。
+    pub fn error(&self) -> Option<String> {
+        self.result.as_ref().err().map(|e| e.to_string())
+    }
+
+    /// 借用内部结果（镜像 `Result::as_ref`，消费方无需触碰字段）。
+    pub fn as_ref(&self) -> Result<&serde_json::Value, &TianyanError> {
+        self.result.as_ref()
+    }
+
+    /// 是否失败。
+    pub fn is_err(&self) -> bool {
+        self.result.is_err()
+    }
+}
+
 /// 动态工具执行器：供外部桥接（如 MCP 工具桥接）扩展工具注册表。
 ///
 /// 注册的动态工具与内置工具享有同等地位：定义进入 LLM 可见的
@@ -795,6 +829,8 @@ impl ToolRegistry {
 
     /// 并行执行多个 tool_call。
     ///
+    /// 每个调用返回 [`ToolExecution`]（含耗时与结果）——耗时是消息级计时
+    /// 元数据的输入源（Part::ToolResult.time / SSE tool_result 事件）。
     /// `session_id` 随调用链传递（后台委托归属父会话用；不依赖共享可变状态，
     /// 多会话并发 turn 安全）。`subagent` 标记子 agent 执行上下文——子任务
     /// 是主 agent 意图的执行器，审批不交互（未授权操作拒绝并上报主 agent）。
@@ -803,21 +839,28 @@ impl ToolRegistry {
         calls: &[ToolCall],
         session_id: &str,
         subagent: bool,
-    ) -> Vec<(String, Result<serde_json::Value, TianyanError>)> {
+    ) -> Vec<(String, ToolExecutionOutcome)> {
         let mut set = tokio::task::JoinSet::new();
         for call in calls {
             let call: ToolCall = call.clone();
             let this = self.clone();
             let session_id = session_id.to_string();
             set.spawn(async move {
+                let start = std::time::Instant::now();
                 let result = this.execute_single(&call, &session_id, subagent).await;
-                (call.id, result)
+                (
+                    call.id,
+                    ToolExecutionOutcome {
+                        duration_ms: start.elapsed().as_millis() as i64,
+                        result,
+                    },
+                )
             });
         }
         let mut results = Vec::new();
         while let Some(res) = set.join_next().await {
-            if let Ok((id, result)) = res {
-                results.push((id, result));
+            if let Ok((id, outcome)) = res {
+                results.push((id, outcome));
             }
         }
         results

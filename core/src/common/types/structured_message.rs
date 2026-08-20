@@ -98,6 +98,9 @@ pub enum Part {
         tool_call_id: String,
         /// 执行结果内容。
         content: String,
+        /// 执行失败原因（None = 成功；旧数据缺失视为成功）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
         /// 时间戳。
         #[serde(default)]
         time: PartTime,
@@ -238,10 +241,17 @@ impl StructuredMessage {
 
         match role {
             MessageRole::Tool => {
+                // 计时接线：工具执行耗时写入 Part 级时间戳（start = 完成时刻 - 耗时），
+                // 失败原因结构化存储（此前 time 恒为 0、失败只能从 content 解析）。
+                let duration = msg.tool_duration_ms.unwrap_or(0).max(0);
                 parts.push(Part::ToolResult {
                     tool_call_id: msg.tool_call_id.clone().unwrap_or_default(),
                     content: msg.content.clone(),
-                    time: default_time,
+                    error: msg.tool_error.clone(),
+                    time: PartTime {
+                        start: now_ms - duration,
+                        end: now_ms,
+                    },
                 });
             }
             _ => {
@@ -456,6 +466,7 @@ mod tests {
         let part = Part::ToolResult {
             tool_call_id: "tc-1".to_string(),
             content: "result data".to_string(),
+            error: None,
             time: PartTime::default(),
         };
         let json = serde_json::to_string(&part).unwrap();
@@ -588,6 +599,49 @@ mod tests {
     }
 
     #[test]
+    fn test_from_message_tool_result_timing_and_error_wiring() {
+        // 计时/成败接线：tool_duration_ms → Part::ToolResult.time（start = 完成 - 耗时），
+        // tool_error → error 字段（消息级元数据的持久化落点）。
+        let msg = Message::tool_result("call_t", r#"{"result":"ok"}"#, Some(1200), None);
+        let sm = StructuredMessage::from_message(&msg, "ses_1", None, None);
+        let (start, end, error) = match &sm.parts[0] {
+            Part::ToolResult { time, error, .. } => (time.start, time.end, error),
+            other => panic!("应为 ToolResult: {:?}", other),
+        };
+        assert_eq!(error, &None, "成功时 error 应为 None");
+        assert!(end > 0, "end 应为真实完成时刻");
+        assert_eq!(end - start, 1200, "耗时差应等于 duration_ms");
+
+        let failed = Message::tool_result(
+            "call_t",
+            r#"{"error":"boom"}"#,
+            Some(50),
+            Some("权限拒绝".into()),
+        );
+        let sm2 = StructuredMessage::from_message(&failed, "ses_1", None, None);
+        let (start2, end2, error2) = match &sm2.parts[0] {
+            Part::ToolResult { time, error, .. } => (time.start, time.end, error),
+            other => panic!("应为 ToolResult: {:?}", other),
+        };
+        assert_eq!(error2.as_deref(), Some("权限拒绝"));
+        assert_eq!(end2 - start2, 50);
+
+        // 旧数据兼容：无元数据的 tool() 构造 → error None、time 为完成时刻自身
+        let legacy = Message::tool("call_1", r#"{"result":"ok"}"#);
+        let sm3 = StructuredMessage::from_message(&legacy, "ses_1", None, None);
+        let Part::ToolResult {
+            time: t3,
+            error: er3,
+            ..
+        } = &sm3.parts[0]
+        else {
+            panic!("应为 ToolResult")
+        };
+        assert!(er3.is_none(), "旧数据缺失 error 应视为成功");
+        assert_eq!(t3.start, t3.end, "无耗时信息时 start == end");
+    }
+
+    #[test]
     fn test_from_message_fidelity_assistant_reasoning_text_image_tool_call_order() {
         let msg = Message {
             role: MessageRole::Assistant,
@@ -604,6 +658,8 @@ mod tests {
                     arguments: r#"{"path":"a.rs"}"#.to_string(),
                 },
             }]),
+            tool_duration_ms: None,
+            tool_error: None,
             tool_call_id: None,
             reasoning_content: Some("先思考".to_string()),
         };
@@ -654,6 +710,8 @@ mod tests {
             content_parts: None,
             tool_calls: None,
             tool_call_id: None,
+            tool_duration_ms: None,
+            tool_error: None,
             reasoning_content: Some("".to_string()),
         };
         let sm2 = StructuredMessage::from_message(&empty_reasoning, "ses_1", None, None);

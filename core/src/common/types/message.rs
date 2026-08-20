@@ -47,6 +47,12 @@ pub struct Message {
     /// 当 role 为 Tool 时，对应哪个 tool_call 的 ID。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub tool_call_id: Option<String>,
+    /// 工具执行耗时（毫秒；仅 role 为 Tool 时使用，消息级计时元数据）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_duration_ms: Option<i64>,
+    /// 工具执行失败原因（仅 role 为 Tool 时使用；None = 成功）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_error: Option<String>,
     /// 模型推理内容（reasoning_content），仅 DeepSeek 等支持思维链的模型使用。
     /// 上一轮 assistant 含 tool_calls 时，下一轮必须原样保留。
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -62,6 +68,8 @@ impl Message {
             content_parts: None,
             tool_calls: None,
             tool_call_id: None,
+            tool_duration_ms: None,
+            tool_error: None,
             reasoning_content: None,
         }
     }
@@ -94,6 +102,8 @@ impl Message {
             content_parts: Some(parts),
             tool_calls: None,
             tool_call_id: None,
+            tool_duration_ms: None,
+            tool_error: None,
             reasoning_content: None,
         }
     }
@@ -111,6 +121,8 @@ impl Message {
             content_parts: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
+            tool_duration_ms: None,
+            tool_error: None,
             reasoning_content: None,
         }
     }
@@ -126,6 +138,33 @@ impl Message {
             content_parts: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            tool_duration_ms: None,
+            tool_error: None,
+            reasoning_content: None,
+        }
+    }
+
+    /// 创建携带执行元数据的工具结果消息（消息级计时/成败信息，
+    /// 持久化后供历史回放展示——Part::ToolResult 的 time 与 error 输入源）。
+    ///
+    /// - `tool_call_id` - 对应 Assistant 消息中 `ToolCall.id`
+    /// - `content` - 工具执行结果（通常为 JSON 字符串）
+    /// - `duration_ms` - 执行耗时（毫秒；None 表示未知）
+    /// - `error` - 失败原因（None = 成功）
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+        duration_ms: Option<i64>,
+        error: Option<String>,
+    ) -> Self {
+        Self {
+            role: MessageRole::Tool,
+            content: content.into(),
+            content_parts: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+            tool_duration_ms: duration_ms,
+            tool_error: error,
             reasoning_content: None,
         }
     }

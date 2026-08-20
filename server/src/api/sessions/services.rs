@@ -81,19 +81,40 @@ impl SessionService {
             .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
 
         // 跨消息收集工具结果：JSONL 中工具结果位于独立的 role=tool 消息
-        // （工具执行后单独持久化），转换时按 tool_call_id 上挂到对应调用卡片，
+        // （工具执行后单独持久化），按 tool_call_id 上挂到对应调用卡片，
         // 实现"调用 + 结果"合并渲染。
-        let mut result_map: std::collections::HashMap<String, String> =
+        // 元数据：耗时由 Part::ToolResult.time（start/end 毫秒）差值推导，
+        // 失败原因经 error 字段透传（历史数据缺失时均为 None，前端不显示）。
+        #[derive(Clone)]
+        struct ToolResultMeta {
+            content: String,
+            duration_ms: Option<i64>,
+            error: Option<String>,
+        }
+        let mut result_map: std::collections::HashMap<String, ToolResultMeta> =
             std::collections::HashMap::new();
         for m in &core_session.messages {
             for p in &m.parts {
                 if let Part::ToolResult {
                     tool_call_id,
                     content,
-                    ..
+                    error,
+                    time,
                 } = p
                 {
-                    result_map.insert(tool_call_id.clone(), content.clone());
+                    let duration_ms = if time.end > 0 && time.start > 0 {
+                        Some((time.end - time.start).max(0))
+                    } else {
+                        None
+                    };
+                    result_map.insert(
+                        tool_call_id.clone(),
+                        ToolResultMeta {
+                            content: content.clone(),
+                            duration_ms,
+                            error: error.clone(),
+                        },
+                    );
                 }
             }
         }
@@ -132,6 +153,9 @@ impl SessionService {
                             arguments,
                             ..
                         } => {
+                            // 结果已跨消息收集：此处取出挂到卡片上
+                            // （含耗时/失败元数据，前端卡片显示 ✓/✗ + 耗时）
+                            let meta = result_map.remove(&id.clone());
                             tool_calls.push(ToolCallWithResult {
                                 id: id.clone(),
                                 name: name.clone(),
@@ -141,25 +165,34 @@ impl SessionService {
                                 )
                                 .as_str()
                                 .to_string(),
-                                // 结果已跨消息收集：此处取出挂到卡片上
-                                result: result_map.remove(&id.clone()),
+                                result: meta.as_ref().map(|m| m.content.clone()),
+                                duration_ms: meta.as_ref().and_then(|m| m.duration_ms),
+                                error: meta.as_ref().and_then(|m| m.error.clone()),
                             });
                         }
                         Part::ToolResult {
                             tool_call_id,
                             content: result_content,
-                            ..
+                            error,
+                            time,
                         } => {
                             // remove 返回 None：结果已被前置调用卡片消费（已合并
                             // 进调用卡片）→ 跳过；返回 Some：结果仍在 map 中
                             // （无对应调用，孤立结果）→ 输出结果-only 卡片。
                             if result_map.remove(tool_call_id).is_some() {
+                                let duration_ms = if time.end > 0 && time.start > 0 {
+                                    Some((time.end - time.start).max(0))
+                                } else {
+                                    None
+                                };
                                 tool_calls.push(ToolCallWithResult {
                                     id: tool_call_id.clone(),
                                     name: String::new(),
                                     arguments: String::new(),
                                     presentation: "generic".to_string(),
                                     result: Some(result_content.clone()),
+                                    duration_ms,
+                                    error: error.clone(),
                                 });
                             }
                         }
@@ -607,6 +640,7 @@ mod tests {
                 Part::ToolResult {
                     tool_call_id: "call_1".to_string(),
                     content: chinese_result,
+                    error: None,
                     time: PartTime::default(),
                 },
             ],
@@ -658,6 +692,7 @@ mod tests {
             parts: vec![Part::ToolResult {
                 tool_call_id: "call_x".to_string(),
                 content: "孤立结果".to_string(),
+                error: None,
                 time: PartTime::default(),
             }],
             tokens: Default::default(),
@@ -726,6 +761,7 @@ mod tests {
             parts: vec![Part::ToolResult {
                 tool_call_id: "call_1".to_string(),
                 content: r#"{"count":2}"#.to_string(),
+                error: None,
                 time: PartTime::default(),
             }],
             tokens: Default::default(),

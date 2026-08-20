@@ -192,6 +192,27 @@ pub struct AgentStreamChunk {
     /// 结构化工具调用信息（A2 展示契约；ToolCall chunk 携带，供前端渲染 card）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call: Option<ToolCallEvent>,
+    /// 结构化工具结果信息（Observation chunk 携带；前端在工具卡片上
+    /// 显示耗时/成败）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<ToolResultEvent>,
+}
+
+/// 工具执行结果事件（Observation chunk 携带）。
+///
+/// 工具执行完成后随观察结果透传：耗时/成败/错误结构化下发，
+/// 前端在对应工具卡片上实时显示（消息级计时元数据的流式通道）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResultEvent {
+    /// 对应的工具调用 ID（关联 ToolCall 事件）。
+    pub tool_call_id: String,
+    /// 执行耗时（毫秒）。
+    pub duration_ms: i64,
+    /// 是否成功。
+    pub success: bool,
+    /// 失败原因（成功时为 None）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// 工具调用事件（A2 展示契约：工具自描述 UI 渲染意图）。
@@ -242,6 +263,7 @@ impl StreamEventSender {
             skill_calls: None,
             finish_reason: None,
             tool_call: None,
+            tool_result: None,
         })
         .await;
     }
@@ -256,6 +278,7 @@ impl StreamEventSender {
             skill_calls: None,
             finish_reason: None,
             tool_call,
+            tool_result: None,
         })
         .await;
     }
@@ -270,6 +293,34 @@ impl StreamEventSender {
             skill_calls: None,
             finish_reason: None,
             tool_call: None,
+            tool_result: None,
+        })
+        .await;
+    }
+
+    /// 发送带执行元数据的观察结果事件（工具结果 + 耗时/成败）。
+    pub async fn send_tool_result(
+        &self,
+        content: &str,
+        tool_call_id: &str,
+        duration_ms: i64,
+        success: bool,
+        error: Option<String>,
+    ) {
+        self.try_send(AgentStreamChunk {
+            delta: content.to_string(),
+            is_complete: false,
+            token_usage: None,
+            chunk_type: StreamChunkType::Observation,
+            skill_calls: None,
+            finish_reason: None,
+            tool_call: None,
+            tool_result: Some(ToolResultEvent {
+                tool_call_id: tool_call_id.to_string(),
+                duration_ms,
+                success,
+                error,
+            }),
         })
         .await;
     }
@@ -284,6 +335,7 @@ impl StreamEventSender {
             skill_calls: None,
             finish_reason: None,
             tool_call: None,
+            tool_result: None,
         })
         .await;
     }
@@ -305,6 +357,7 @@ impl StreamEventSender {
             skill_calls,
             finish_reason,
             tool_call: None,
+            tool_result: None,
         })
         .await;
     }
@@ -319,6 +372,7 @@ impl StreamEventSender {
             skill_calls: None,
             finish_reason: None,
             tool_call: None,
+            tool_result: None,
         })
         .await;
     }
@@ -397,6 +451,7 @@ mod tests {
             skill_calls: None,
             finish_reason: None,
             tool_call: None,
+            tool_result: None,
         };
         assert_eq!(chunk.delta, "你好");
         assert!(!chunk.is_complete);
@@ -421,6 +476,7 @@ mod tests {
             skill_calls: Some(calls.clone()),
             finish_reason: None,
             tool_call: None,
+            tool_result: None,
         };
         assert_eq!(chunk.delta, "调用技能");
         assert!(chunk.is_complete);
@@ -439,6 +495,7 @@ mod tests {
             skill_calls: None,
             finish_reason: None,
             tool_call: None,
+            tool_result: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
@@ -458,6 +515,7 @@ mod tests {
             skill_calls: None,
             finish_reason: None,
             tool_call: None,
+            tool_result: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         // skill_calls 为 None 时不应出现在 JSON 中

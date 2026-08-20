@@ -60,6 +60,12 @@ pub struct ToolCallWithResult {
     pub presentation: String,
     /// 对应工具执行结果（完整内容不截断；无结果时为 None）。
     pub result: Option<String>,
+    /// 执行耗时（毫秒；由 Part::ToolResult.time 差值推导，缺失时为 None）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub duration_ms: Option<i64>,
+    /// 执行失败原因（由 Part::ToolResult.error 透传；None = 成功）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
 }
 
 impl ChatMessage {

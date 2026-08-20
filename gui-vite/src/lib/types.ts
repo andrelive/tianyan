@@ -80,6 +80,8 @@ export interface ChatStreamEvent {
   chunk_type: StreamChunkType;
   /** A2：结构化工具调用事件（tool_call chunk 携带） */
   tool_call?: ToolCallEvent | null;
+  /** 工具执行结果事件（observation chunk 携带；耗时/成败结构化下发） */
+  tool_result?: ToolResultEvent | null;
   /** 本轮 token 用量（完成 chunk 携带；上下文占用 / 缓存命中展示用） */
   usage?: StreamUsage | null;
 }
@@ -98,6 +100,23 @@ export interface ToolCallEvent {
   arguments: string;
   /** generic/read/write/terminal/diff/search/web/skill/knowledge/delegate/code */
   presentation: string;
+  /** 执行耗时（毫秒；observation 事件到达后填充；历史消息由后端透传） */
+  duration_ms?: number;
+  /** 执行是否成功（observation 事件到达后填充；缺失 = 未知） */
+  success?: boolean;
+  /** 执行失败原因（成功/未知时为 null/undefined） */
+  error?: string | null;
+}
+
+/** 工具执行结果事件（observation chunk 携带） */
+export interface ToolResultEvent {
+  tool_call_id: string;
+  /** 执行耗时（毫秒） */
+  duration_ms: number;
+  /** 是否成功 */
+  success: boolean;
+  /** 失败原因（成功时为 null/undefined） */
+  error?: string | null;
 }
 
 /** 工具调用卡片（历史消息：调用信息与对应执行结果合并渲染） */
@@ -106,6 +125,10 @@ export interface ToolCallWithResult extends ToolCallEvent {
   id?: string;
   /** 对应执行结果（完整内容不截断；无结果时为 null/undefined） */
   result?: string | null;
+  /** 执行耗时（毫秒；Part::ToolResult.time 差值，历史缺失时为 undefined） */
+  duration_ms?: number;
+  /** 执行失败原因（Part::ToolResult.error 透传；None = 成功） */
+  error?: string | null;
 }
 
 /**

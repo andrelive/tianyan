@@ -400,6 +400,7 @@ mod tests {
             parts.push(Part::ToolResult {
                 tool_call_id: format!("call-{id}"),
                 content: format!("结果-{id}"),
+                error: None,
                 time: PartTime::default(),
             });
         }

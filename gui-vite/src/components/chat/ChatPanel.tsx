@@ -55,8 +55,7 @@ export default function ChatPanel() {
       切换会话随 messages 变化——每个会话显示各自的占用，不再串值）。 */
   const lastUsage = useMemo<StreamUsage | null>(() => {
     const modelWindow =
-      chatModels.find((m) => m.name === selectedModel)?.context_length ??
-      liveWindowRef.current;
+      chatModels.find((m) => m.name === selectedModel)?.context_length ?? liveWindowRef.current;
     for (let i = messages.length - 1; i >= 0; i--) {
       const u = messages[i].usage;
       if (u && u.prompt_tokens > 0) {
@@ -117,9 +116,7 @@ export default function ChatPanel() {
     const sessionId = urlSessionId;
     (async () => {
       try {
-        const data = await apiGet<{ messages: ChatMessage[] }>(
-          `/sessions/${sessionId}/messages`,
-        );
+        const data = await apiGet<{ messages: ChatMessage[] }>(`/sessions/${sessionId}/messages`);
         if (activeUrlSessionRef.current === sessionId) {
           useAppStore.getState().setMessages(data.messages);
         }
@@ -274,9 +271,13 @@ export default function ChatPanel() {
         liveWindowRef.current = event.usage.context_window;
         const { prompt_tokens, completion_tokens, total_tokens, cache_read, cache_write } =
           event.usage;
-        useAppStore
-          .getState()
-          .attachLastMessageUsage({ prompt_tokens, completion_tokens, total_tokens, cache_read, cache_write });
+        useAppStore.getState().attachLastMessageUsage({
+          prompt_tokens,
+          completion_tokens,
+          total_tokens,
+          cache_read,
+          cache_write,
+        });
       }
       // 输出达到 token 上限（finish_reason === 'length'）：标记消息为截断，
       // 在助手消息下方渲染提示；'stop'/'tool_calls' 等不处理
@@ -456,6 +457,7 @@ export default function ChatPanel() {
               if (event.thinking) useAppStore.getState().appendThinking(event.thinking);
               if (event.delta) useAppStore.getState().updateLastMessage(event.delta);
               if (event.tool_call) useAppStore.getState().appendToolCalls([event.tool_call]);
+              if (event.tool_result) useAppStore.getState().applyToolResult(event.tool_result);
               if (event.skill_calls && event.skill_calls.length > 0) {
                 useAppStore.getState().appendSkillCalls(event.skill_calls);
               }
@@ -475,10 +477,9 @@ export default function ChatPanel() {
         useAppStore.getState().setPendingClarification(null);
       } catch (err) {
         useAppStore.getState().removeEmptyAssistantMessage();
-        useAppStore.getState().showToast(
-          `追问回答失败: ${err instanceof Error ? err.message : '未知错误'}`,
-          'error',
-        );
+        useAppStore
+          .getState()
+          .showToast(`追问回答失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
         await reloadSession(sessionId);
       } finally {
         setSubmittingClarify(false);

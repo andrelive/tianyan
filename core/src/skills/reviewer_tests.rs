@@ -69,6 +69,7 @@ fn conversation_jsonl() -> String {
             vec![Part::ToolResult {
                 tool_call_id: "tc1".to_string(),
                 content: "计划指南已返回".to_string(),
+                error: None,
                 time: PartTime::default(),
             }],
         ),

@@ -18,7 +18,7 @@ use crate::model::types::ChatCompletionRequest;
 use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition};
 use crate::skills::SkillExecutionRequest;
 
-use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
+use super::{parse_params, safety_violation, wrap_tool_error, ToolExecutionOutcome, ToolRegistry};
 
 /// 委托链最大深度（主循环为 0；1 = 一层子 Agent，以此类推）。
 pub(crate) const MAX_DELEGATION_DEPTH: usize = 3;
@@ -514,12 +514,17 @@ impl ToolRegistry {
                                     role_name_for_loop.as_deref(),
                                 )
                                 .await;
-                            for (call_id, result) in results {
-                                let content = match result {
+                            for (call_id, outcome) in results {
+                                let content = match &outcome.result {
                                     Ok(val) => val.to_string(),
                                     Err(e) => format!("Error: {}", e),
                                 };
-                                sub_messages.push(Message::tool(call_id, content));
+                                sub_messages.push(Message::tool_result(
+                                    call_id,
+                                    content,
+                                    Some(outcome.duration_ms),
+                                    outcome.error(),
+                                ));
                             }
                         }
                         continue;
@@ -709,12 +714,12 @@ impl ToolRegistry {
         session_id: &str,
         role_tools: Option<&[String]>,
         role_name: Option<&str>,
-    ) -> Vec<(String, Result<serde_json::Value, TianyanError>)> {
+    ) -> Vec<(String, ToolExecutionOutcome)> {
         let Some(allowed) = role_tools else {
             return self.execute_parallel(tool_calls, session_id, true).await;
         };
 
-        let (allowed_refs, blocked): (Vec<&ToolCall>, Vec<&ToolCall>) = tool_calls
+        let (allowed_refs, blocked_refs): (Vec<&ToolCall>, Vec<&ToolCall>) = tool_calls
             .iter()
             .partition(|call| allowed.iter().any(|t| t == &call.function.name));
         let allowed_calls: Vec<ToolCall> = allowed_refs.into_iter().cloned().collect();
@@ -722,15 +727,18 @@ impl ToolRegistry {
         let mut results = self
             .execute_parallel(&allowed_calls, session_id, true)
             .await;
-        for call in blocked {
+        for call in blocked_refs {
             results.push((
                 call.id.clone(),
-                Err(TianyanError::Custom(format!(
-                    "tool: 角色 {} 不允许使用工具 {}（允许：{}）",
-                    role_name.unwrap_or("?"),
-                    call.function.name,
-                    allowed.join("、")
-                ))),
+                ToolExecutionOutcome {
+                    duration_ms: 0,
+                    result: Err(TianyanError::Custom(format!(
+                        "tool: 角色 {} 不允许使用工具 {}（允许：{}）",
+                        role_name.unwrap_or("?"),
+                        call.function.name,
+                        allowed.join("、")
+                    ))),
+                },
             ));
         }
         results
