@@ -12,6 +12,8 @@ interface Props {
   isStreaming: boolean;
   /** 当前会话上下文占用（近一轮完成的 token 用量；切会话随之更新） */
   usage: StreamUsage | null;
+  /** 当前会话 token 消耗汇总（跨全部消息累加；底部小字展示） */
+  sessionUsage: { uncachedInput: number; cachedInput: number; completion: number } | null;
   /** 压缩当前会话（圆环详情面板内的快捷操作） */
   onCompress: () => void;
 }
@@ -35,7 +37,7 @@ function fileToDataUrl(file: File): Promise<string | null> {
   });
 }
 
-export default function ChatInput({ onSend, onStop, isStreaming, usage, onCompress }: Props) {
+export default function ChatInput({ onSend, onStop, isStreaming, usage, sessionUsage, onCompress }: Props) {
   const [input, setInput] = useState('');
   const [images, setImages] = useState<string[]>([]);
   const [rejected, setRejected] = useState<string | null>(null);
@@ -281,6 +283,26 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage, onCompre
           </div>
         </div>
       </div>
+
+      {/* 会话 token 统计小字（DSH 风格）：缓存未命中输入 / 缓存命中输入 / 输出 / 缓存命中率 */}
+      {sessionUsage && (
+        <div className="px-4 pb-2 text-[11px] leading-relaxed text-[var(--color-text-tertiary)] select-none">
+          会话用量 
+          <span className="font-mono">{sessionUsage.uncachedInput.toLocaleString('en-US')}</span> 输入
+          <span className="mx-1 opacity-40">·</span>
+          <span className="font-mono">{sessionUsage.cachedInput.toLocaleString('en-US')}</span> 缓存命中输入
+          <span className="mx-1 opacity-40">·</span>
+          <span className="font-mono">{sessionUsage.completion.toLocaleString('en-US')}</span> 输出
+          <span className="mx-1 opacity-40">·</span>
+          缓存命中率 
+          <span className="font-mono">
+            {(() => {
+              const total = sessionUsage.uncachedInput + sessionUsage.cachedInput;
+              return total > 0 ? Math.round((sessionUsage.cachedInput / total) * 100) + '%' : '0%';
+            })()}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

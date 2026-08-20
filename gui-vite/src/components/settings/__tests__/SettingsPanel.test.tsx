@@ -7,7 +7,7 @@ import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
 import SettingsPanel from '../SettingsPanel';
 
-/** 12 个 tab 的名称（与 SettingsPanel 中 TABS 定义一致）。 */
+/** 13 个 tab 的名称（与 SettingsPanel 中 TABS 定义一致）。 */
 const TAB_LABELS = [
   '模型服务',
   '数据存储',
@@ -20,6 +20,7 @@ const TAB_LABELS = [
   '外观',
   '连接',
   'MCP',
+  '用量统计',
   '关于',
 ];
 
@@ -39,9 +40,9 @@ describe('SettingsPanel', () => {
   it('renders the settings panel with the full tab list after config loads', async () => {
     renderSettingsPanel();
 
-    // 配置加载完成后渲染 12 个 tab
+    // 配置加载完成后渲染 13 个 tab
     await waitFor(() => {
-      expect(screen.getAllByRole('tab')).toHaveLength(12);
+      expect(screen.getAllByRole('tab')).toHaveLength(13);
     });
     for (const label of TAB_LABELS) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);

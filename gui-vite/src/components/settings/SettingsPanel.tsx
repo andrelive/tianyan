@@ -15,6 +15,7 @@ import {
   X,
   Server,
   User,
+  PieChart,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
@@ -48,6 +49,7 @@ import ConnectionTab from './tabs/ConnectionTab';
 import AboutTab from './tabs/AboutTab';
 import McpTab from './tabs/McpTab';
 import SoulTab from './tabs/SoulTab';
+import UsageTab from './tabs/UsageTab';
 
 /* ───────── Tab definitions ───────── */
 
@@ -69,6 +71,7 @@ const TABS: TabDef[] = [
   { id: 'appearance', label: '外观', icon: Palette },
   { id: 'connection', label: '连接', icon: Wifi },
   { id: 'mcp', label: 'MCP', icon: Server },
+  { id: 'usage', label: '用量统计', icon: PieChart },
   { id: 'about', label: '关于', icon: Info },
 ];
 
@@ -353,6 +356,8 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
         return <ConnectionTab />;
       case 'mcp':
         return <McpTab />;
+      case 'usage':
+        return <UsageTab />;
       case 'about':
         return <AboutTab />;
       default:

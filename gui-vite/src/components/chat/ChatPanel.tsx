@@ -73,6 +73,24 @@ export default function ChatPanel() {
     return null;
   }, [messages, chatModels, selectedModel]);
 
+  /** 当前会话 token 消耗汇总（跨全部消息 usage 累加；DSH 风格小字展示：
+   缓存未命中输入 / 缓存命中输入 / 输出 / 缓存命中率）。 */
+  const sessionUsage = useMemo(() => {
+    let uncachedInput = 0;
+    let cachedInput = 0;
+    let completion = 0;
+    for (const m of messages) {
+      const u = m.usage;
+      if (!u || u.prompt_tokens <= 0) continue;
+      const cached = u.cache_read ?? 0;
+      cachedInput += cached;
+      uncachedInput += Math.max(0, u.prompt_tokens - cached);
+      completion += u.completion_tokens;
+    }
+    if (uncachedInput + cachedInput + completion === 0) return null;
+    return { uncachedInput, cachedInput, completion };
+  }, [messages]);
+
   // Sync URL sessionId to store on mount / navigation
   useEffect(() => {
     if (urlSessionId && urlSessionId !== currentSessionId) {
@@ -630,6 +648,7 @@ export default function ChatPanel() {
         onStop={handleStop}
         isStreaming={streamStatus === 'streaming'}
         usage={lastUsage}
+        sessionUsage={sessionUsage}
         onCompress={() => void handleCompress()}
       />
     </div>
