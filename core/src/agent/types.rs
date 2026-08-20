@@ -224,8 +224,12 @@ pub struct ToolResultEvent {
 /// 随 [`StreamChunkType::ToolCall`] chunk 透传：工具名 + 参数 + 展示意图。
 /// 前端按 `presentation` 渲染 card（read/terminal/diff/search/web/...），
 /// 工具与 UI 解耦（DSH presentCall 吸收）。
+/// `id` 为工具调用 ID（对应 `ToolResultEvent.tool_call_id`）：流式卡片
+/// 据此关联执行结果事件（耗时/成败/结果内容），否则结果永远匹配不上。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallEvent {
+    /// 工具调用 ID（关联 ToolResultEvent.tool_call_id）。
+    pub id: String,
     /// 工具名称。
     pub name: String,
     /// 参数 JSON 字符串（原始 arguments）。
@@ -694,6 +698,7 @@ mod tests {
             .send_tool_call(
                 "调用: read_file",
                 Some(crate::agent::types::ToolCallEvent {
+                    id: "call_test".into(),
                     name: "read_file".into(),
                     arguments: r#"{"path":"a.txt"}"#.into(),
                     presentation: "read".into(),

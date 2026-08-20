@@ -96,6 +96,8 @@ export interface SkillCallInfo {
 
 /** 工具调用事件（A2 展示契约）：工具名 + 参数 + 展示意图 */
 export interface ToolCallEvent {
+  /** 工具调用 ID（关联 ToolResultEvent.tool_call_id；流式卡片据此挂结果） */
+  id?: string;
   name: string;
   arguments: string;
   /** generic/read/write/terminal/diff/search/web/skill/knowledge/delegate/code */

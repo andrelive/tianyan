@@ -753,9 +753,10 @@ impl AgentLoop {
             // Notify about tool calls if sender is available
             if let Some(sender) = ctx.stream_sender {
                 for tc in tool_calls {
-                    // A2 展示契约：携带结构化工具信息（名称/参数/展示意图），
-                    // 前端据此渲染 tool card；delta 保持人类可读文本。
+                    // A2 展示契约：携带结构化工具信息（ID/名称/参数/展示意图），
+                    // 前端据此渲染 tool card 并按 ID 关联执行结果；delta 保持人类可读文本。
                     let event = crate::agent::types::ToolCallEvent {
+                        id: tc.id.clone(),
                         name: tc.function.name.clone(),
                         arguments: tc.function.arguments.clone(),
                         presentation: self

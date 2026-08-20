@@ -256,9 +256,11 @@ export const useAppStore = create<AppState>()(
             const idx = lastAssistantIndex(msgs);
             if (idx < 0) return msgs;
             const prev = msgs[idx].tool_calls ?? [];
-            // 去重：同一次调用事件只追加一次（chunk 只携带完整事件，无增量合并）
-            const existing = new Set(prev.map((c) => c.name + c.arguments));
-            const fresh = calls.filter((c) => !existing.has(c.name + c.arguments));
+            // 去重：同一次调用事件只追加一次（chunk 只携带完整事件，无增量合并）。
+            // 优先按调用 ID（精确）；无 ID（旧事件/测试）回退 名称+参数。
+            const callKey = (c: ToolCallEvent) => c.id ?? `${c.name}${c.arguments}`;
+            const existing = new Set(prev.map(callKey));
+            const fresh = calls.filter((c) => !existing.has(callKey(c)));
             if (fresh.length === 0) return msgs;
             const updated = [...msgs];
             updated[idx] = {

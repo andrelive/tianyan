@@ -308,6 +308,41 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().messages[0].tool_calls).toBeUndefined();
   });
 
+  it('applyToolResult matches tool call by id (流式结果挂卡)', () => {
+    useAppStore.setState({
+      messages: [
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: '' },
+      ],
+    });
+    // 流式 tool_call 事件带调用 ID
+    useAppStore
+      .getState()
+      .appendToolCalls([
+        { id: 'call_abc', name: 'read_file', arguments: '{}', presentation: 'read' },
+      ]);
+    // observation 结果事件按 tool_call_id 关联
+    useAppStore.getState().applyToolResult({
+      tool_call_id: 'call_abc',
+      duration_ms: 120,
+      success: true,
+      content: '{"content":"file body"}',
+    });
+    const card = useAppStore.getState().messages[1].tool_calls?.[0];
+    expect(card?.duration_ms).toBe(120);
+    expect(card?.success).toBe(true);
+    expect(card?.result).toBe('{"content":"file body"}');
+
+    // 不匹配的 tool_call_id 不更新任何卡片
+    useAppStore.getState().applyToolResult({
+      tool_call_id: 'call_zzz',
+      duration_ms: 5,
+      success: false,
+      error: 'boom',
+    });
+    expect(useAppStore.getState().messages[1].tool_calls?.[0]?.duration_ms).toBe(120);
+  });
+
   // ── Streaming ──
 
   it('setStreamStatus updates streamStatus per session', () => {
