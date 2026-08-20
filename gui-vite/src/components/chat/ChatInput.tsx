@@ -284,22 +284,30 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage, sessionU
         </div>
       </div>
 
-      {/* 会话 token 统计小字（DSH 风格）：缓存未命中输入 / 缓存命中输入 / 输出 / 缓存命中率 */}
+      {/* 会话 token 统计小字（DSH 风格，水平居中）：
+         未命中输入 / 缓存命中输入 / 输出 / 缓存命中率 */}
       {sessionUsage && (
-        <div className="px-4 pb-2 text-[11px] leading-relaxed text-[var(--color-text-tertiary)] select-none">
-          会话用量 
-          <span className="font-mono">{sessionUsage.uncachedInput.toLocaleString('en-US')}</span> 输入
-          <span className="mx-1 opacity-40">·</span>
-          <span className="font-mono">{sessionUsage.cachedInput.toLocaleString('en-US')}</span> 缓存命中输入
-          <span className="mx-1 opacity-40">·</span>
-          <span className="font-mono">{sessionUsage.completion.toLocaleString('en-US')}</span> 输出
-          <span className="mx-1 opacity-40">·</span>
-          缓存命中率 
-          <span className="font-mono">
-            {(() => {
-              const total = sessionUsage.uncachedInput + sessionUsage.cachedInput;
-              return total > 0 ? Math.round((sessionUsage.cachedInput / total) * 100) + '%' : '0%';
-            })()}
+        <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 px-4 pb-2 text-[11px] leading-relaxed text-[var(--color-text-tertiary)] select-none">
+          <span>
+            未命中输入 <span className="font-mono">{sessionUsage.uncachedInput.toLocaleString('en-US')}</span>
+          </span>
+          <span className="opacity-40">·</span>
+          <span>
+            缓存命中输入 <span className="font-mono">{sessionUsage.cachedInput.toLocaleString('en-US')}</span>
+          </span>
+          <span className="opacity-40">·</span>
+          <span>
+            输出 <span className="font-mono">{sessionUsage.completion.toLocaleString('en-US')}</span>
+          </span>
+          <span className="opacity-40">·</span>
+          <span>
+            缓存命中率 
+            <span className="font-mono">
+              {(() => {
+                const total = sessionUsage.uncachedInput + sessionUsage.cachedInput;
+                return total > 0 ? Math.round((sessionUsage.cachedInput / total) * 100) + '%' : '0%';
+              })()}
+            </span>
           </span>
         </div>
       )}
