@@ -10,12 +10,13 @@ use futures::future::BoxFuture;
 use crate::agent::role_store::RoleStore;
 use crate::agent::tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams,
+    SubmitResultParams,
 };
 use crate::common::error::TianyanError;
 use crate::common::types::Message;
 use crate::executor::Action;
 use crate::model::types::ChatCompletionRequest;
-use crate::model::types::ToolCall;
+use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition};
 use crate::skills::SkillExecutionRequest;
 
 use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
@@ -383,6 +384,26 @@ impl ToolRegistry {
         }
         sub_messages.push(Message::user(&params.task));
 
+        // 委托工具列表：角色白名单过滤（无白名单则全量）+ submit_result 恒在。
+        // 此前请求未携带工具定义（ChatCompletionRequest::new 默认 tools=None）——
+        // 子代理 LLM 看不到任何工具，只能凭空输出，这是"子代理报告与代码不符"
+        // 的根本原因。
+        let mut delegate_tools: Vec<ToolDefinition> = match role_tools.as_deref() {
+            Some(allowed) => {
+                let all = self.definitions().await;
+                all.into_iter()
+                    .filter(|d| allowed.iter().any(|t| t == &d.function.name))
+                    .collect::<Vec<_>>()
+            }
+            None => self.definitions().await,
+        };
+        delegate_tools.push(ToolDefinition::function(
+            FunctionDefinition::from_schema::<SubmitResultParams>(
+                "submit_result",
+                "当你的任务完成时，调用本工具提交最终结果（result 为完整报告/结论，summary 为可选一句话摘要）。这是任务完成的唯一信号：不调用本工具的输出不会被接受为最终结果；提交后任务即结束。",
+            ),
+        ));
+
         let delegation_start = std::time::Instant::now();
 
         let run_loop = async {
@@ -399,7 +420,8 @@ impl ToolRegistry {
                 // dynamic_max_tokens(&spec, None, &sub_messages) 设置 max_tokens
                 // （子 agent 无实测输入，退化为 TokenEstimator 估算）。
                 // 主 agent 请求已应用动态 max_tokens（agent/loop.rs），本处保持默认。
-                let request = ChatCompletionRequest::new(&model, sub_messages.clone());
+                let request = ChatCompletionRequest::new(&model, sub_messages.clone())
+                    .with_tools(delegate_tools.clone());
                 let response = model_service
                     .chat_completion(request)
                     .await
@@ -411,6 +433,36 @@ impl ToolRegistry {
                 })?;
 
                 let assistant_msg = choice.message;
+
+                // 显式完成信号：子代理调用 submit_result 视为任务完成——
+                // 写入任务结果，委托循环终止。不依赖"是否调用过工具"或
+                // "输出非空文本"等隐式判断（此前纯文本即被当最终答案，
+                // 子代理凭空编造报告或只输出开场白即被截断）。
+                if let Some(ref tool_calls) = assistant_msg.tool_calls {
+                    if let Some(submit) = tool_calls
+                        .iter()
+                        .find(|tc| tc.function.name == "submit_result")
+                    {
+                        let params: SubmitResultParams =
+                            serde_json::from_str(&submit.function.arguments).map_err(|e| {
+                                TianyanError::Custom(format!("tool: submit_result 参数无效：{e}"))
+                            })?;
+                        sub_messages.push(Message::assistant_with_tools(
+                            String::new(),
+                            tool_calls.clone(),
+                        ));
+                        return Ok((
+                            serde_json::json!({
+                                "result": params.result,
+                                "summary": params.summary,
+                                "submitted": true,
+                                "total_tokens": total_tokens,
+                            }),
+                            sub_messages.clone(),
+                        ));
+                    }
+                }
+
                 if assistant_msg.content.is_empty() {
                     if let Some(ref tool_calls) = assistant_msg.tool_calls {
                         // LLM requested tools — execute them in parallel, feed results back.
@@ -443,24 +495,32 @@ impl ToolRegistry {
                         continue;
                     }
                 } else {
-                    // LLM provided a final answer — record it and return.
+                    // 未提交的纯文本输出：不再是最终答案。记录入史并继续循环，
+                    // 让模型有机会调用工具收集证据，最终以 submit_result 显式提交；
+                    // 达到 max_turns 时兜底返回（见循环尾）。
                     sub_messages.push(Message::assistant(assistant_msg.content.clone()));
-                    return Ok((
-                        serde_json::json!({
-                            "result": assistant_msg.content,
-                            "total_tokens": total_tokens,
-                        }),
-                        sub_messages.clone(),
+                    sub_messages.push(Message::system(
+                        "你上一条回复没有被接受为最终结果。如果你认为任务已完成，请调用 submit_result 工具提交最终结果；否则请继续使用工具收集信息。",
                     ));
+                    continue;
                 }
             }
 
+            // 兜底：达到 max_turns 仍未显式提交——返回最后一条非空 assistant
+            // 输出（若存在），并标记 submitted=false 让主 agent 知情。
+            let last_content = sub_messages
+                .iter()
+                .rev()
+                .find(|m| m.role == crate::common::types::MessageRole::Assistant)
+                .map(|m| m.content.clone())
+                .filter(|c| !c.is_empty());
             Ok((
                 serde_json::json!({
-                    "result": format!(
+                    "result": last_content.unwrap_or_else(|| format!(
                         "sub-task reached max turns ({}) without final answer",
                         max_turns
-                    ),
+                    )),
+                    "submitted": false,
                     "total_tokens": total_tokens,
                 }),
                 sub_messages.clone(),

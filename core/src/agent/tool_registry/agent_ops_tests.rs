@@ -287,7 +287,7 @@ async fn test_delegate_to_agent_rejects_missing_arguments() {
 async fn test_delegate_to_agent_success() {
     let mut mock = MockChatService::new();
     mock.expect_chat_completion()
-        .returning(|_| Ok(chat_response("final answer")));
+        .returning(|_| Ok(submit_response("final answer")));
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
         .with_model("test-model");
@@ -297,6 +297,7 @@ async fn test_delegate_to_agent_success() {
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "final answer");
+    assert_eq!(result["submitted"].as_bool(), Some(true));
     assert_eq!(result["total_tokens"].as_u64(), Some(0));
 }
 
@@ -314,6 +315,18 @@ fn chat_response(content: &str) -> ChatCompletionResponse {
         }],
         usage: TokenUsage::default(),
     }
+}
+
+/// 构造子代理显式提交结果的响应（submit_result 工具调用）。
+fn submit_response(result: &str) -> ChatCompletionResponse {
+    chat_response_with_tools(vec![ToolCall {
+        id: "s1".to_string(),
+        call_type: ToolCallType::Function,
+        function: FunctionCall {
+            name: "submit_result".to_string(),
+            arguments: format!(r#"{{"result":"{result}"}}"#),
+        },
+    }])
 }
 
 /// 构造返回工具调用的 ChatCompletionResponse（content 为空）。
@@ -361,16 +374,16 @@ async fn test_delegate_nested_delegation_executes_and_depth_released() {
                 "inner task",
             )]))
         });
-    // 第 2 轮：内层委托子循环直接返回答案
+    // 第 2 轮：内层子循环显式提交结果
     mock.expect_chat_completion()
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|_| Ok(chat_response("inner done")));
-    // 第 3 轮：外层子循环收到工具结果后返回最终答案
+        .returning(|_| Ok(submit_response("inner done")));
+    // 第 3 轮：外层子循环收到工具结果后显式提交最终结果
     mock.expect_chat_completion()
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|_| Ok(chat_response("outer done")));
+        .returning(|_| Ok(submit_response("outer done")));
 
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
@@ -454,7 +467,7 @@ async fn test_delegate_timeout_param_accepted() {
     let mut mock = MockChatService::new();
     mock.expect_chat_completion()
         .times(1)
-        .returning(|_| Ok(chat_response("quick answer")));
+        .returning(|_| Ok(submit_response("quick answer")));
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
         .with_model("test-model");
@@ -469,6 +482,40 @@ async fn test_delegate_timeout_param_accepted() {
         0,
         "正常完成后深度应恢复为 0"
     );
+}
+
+#[tokio::test]
+async fn test_delegate_plain_text_not_accepted_as_final() {
+    // 未调用 submit_result 的纯文本输出不被接受为最终结果：
+    // 第一轮输出文本 → 循环继续（注入提示）；第二轮调用 submit_result 才结束。
+    use mockall::Sequence;
+    let mut mock = MockChatService::new();
+    let mut seq = Sequence::new();
+    mock.expect_chat_completion()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| Ok(chat_response("我先说说我的看法")));
+    mock.expect_chat_completion()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(|req: &ChatCompletionRequest| {
+            // 第二轮请求应携带"未接受"提示（引导调用 submit_result）
+            req.messages
+                .iter()
+                .any(|m| m.content.contains("没有被接受为最终结果"))
+        })
+        .returning(|_| Ok(submit_response("最终报告")));
+
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_model("test-model");
+
+    let result = registry
+        .execute_delegate_to_agent(r#"{"task":"审查"}"#, "session-1")
+        .await
+        .unwrap();
+    assert_eq!(result["result"].as_str().unwrap(), "最终报告");
+    assert_eq!(result["submitted"].as_bool(), Some(true));
 }
 
 // ── 角色化委托（delegate role / model）───────────────────────────────────
@@ -509,7 +556,7 @@ async fn test_delegate_role_model_used() {
     let mut mock = MockChatService::new();
     mock.expect_chat_completion()
         .withf(|req: &ChatCompletionRequest| req.model == "role-model")
-        .returning(|_| Ok(chat_response("researched")));
+        .returning(|_| Ok(submit_response("researched")));
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
         .with_model("main-model")
@@ -533,7 +580,7 @@ async fn test_delegate_no_role_uses_self_model() {
     let mut mock = MockChatService::new();
     mock.expect_chat_completion()
         .withf(|req: &ChatCompletionRequest| req.model == "main-model")
-        .returning(|_| Ok(chat_response("answer")));
+        .returning(|_| Ok(submit_response("answer")));
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
         .with_model("main-model");
@@ -551,7 +598,7 @@ async fn test_delegate_explicit_model_beats_role_model() {
     let mut mock = MockChatService::new();
     mock.expect_chat_completion()
         .withf(|req: &ChatCompletionRequest| req.model == "explicit-model")
-        .returning(|_| Ok(chat_response("answer")));
+        .returning(|_| Ok(submit_response("answer")));
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
         .with_model("main-model")
@@ -590,7 +637,7 @@ async fn test_delegate_role_system_prompt_injected() {
                 .iter()
                 .any(|m| m.content.contains("检索调研助手"))
         })
-        .returning(|_| Ok(chat_response("answer")));
+        .returning(|_| Ok(submit_response("answer")));
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
         .with_model("main-model")
@@ -627,7 +674,7 @@ async fn test_delegate_explicit_system_prompt_beats_role() {
             req.messages.iter().any(|m| m.content.contains("显式提示"))
                 && !req.messages.iter().any(|m| m.content.contains("角色提示"))
         })
-        .returning(|_| Ok(chat_response("answer")));
+        .returning(|_| Ok(submit_response("answer")));
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
         .with_model("main-model")
@@ -661,16 +708,21 @@ async fn test_delegate_role_session_continue_loads_history() {
     let mut mock = MockChatService::new();
     mock.expect_chat_completion()
         .times(1)
-        .returning(|_| Ok(chat_response("answer1")));
+        .returning(|_| Ok(submit_response("answer1")));
     mock.expect_chat_completion()
         .times(1)
         .withf(|req: &ChatCompletionRequest| {
-            // 第二次请求应携带首次委托的历史（t1 的 user 消息 + answer1）
+            // 第二次请求应携带首次委托的历史（t1 的 user 消息 + answer1
+            // 在 submit_result arguments 中，而非 content）
             req.messages.iter().any(|m| m.content.contains("t1"))
-                && req.messages.iter().any(|m| m.content.contains("answer1"))
+                && req.messages.iter().any(|m| {
+                    m.tool_calls.as_ref().map_or(false, |calls| {
+                        calls.iter().any(|tc| tc.function.arguments.contains("answer1"))
+                    })
+                })
                 && req.messages.iter().any(|m| m.content.contains("t2"))
         })
-        .returning(|_| Ok(chat_response("answer2")));
+        .returning(|_| Ok(submit_response("answer2")));
 
     let (vfs, _dir) = real_vfs().await;
     let registry = ToolRegistry::new(default_strict_policy())
@@ -720,7 +772,7 @@ async fn test_delegate_role_session_discard_starts_fresh() {
     let mut mock = MockChatService::new();
     mock.expect_chat_completion()
         .times(1)
-        .returning(|_| Ok(chat_response("answer1")));
+        .returning(|_| Ok(submit_response("answer1")));
     mock.expect_chat_completion()
         .times(1)
         .withf(|req: &ChatCompletionRequest| {
@@ -728,7 +780,7 @@ async fn test_delegate_role_session_discard_starts_fresh() {
             !req.messages.iter().any(|m| m.content.contains("t1"))
                 && req.messages.iter().any(|m| m.content.contains("t3"))
         })
-        .returning(|_| Ok(chat_response("answer3")));
+        .returning(|_| Ok(submit_response("answer3")));
 
     let (vfs, _dir) = real_vfs().await;
     let registry = ToolRegistry::new(default_strict_policy())
@@ -773,7 +825,7 @@ async fn test_delegate_role_filters_disallowed_tools() {
                 .iter()
                 .any(|m| m.content.contains("不允许使用工具 write_file"))
         })
-        .returning(|_| Ok(chat_response("fixed answer")));
+        .returning(|_| Ok(submit_response("fixed answer")));
 
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
@@ -808,7 +860,7 @@ async fn test_delegate_role_allows_allowlisted_tool() {
                 m.tool_call_id.as_deref() == Some("c1") && !m.content.contains("不允许使用工具")
             })
         })
-        .returning(|_| Ok(chat_response("done")));
+        .returning(|_| Ok(submit_response("done")));
 
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
@@ -866,7 +918,7 @@ async fn test_delegate_background_role_applies() {
                 .iter()
                 .any(|m| m.content.contains("不允许使用工具"))
         })
-        .returning(|_| Ok(chat_response("bg done")));
+        .returning(|_| Ok(submit_response("bg done")));
 
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
@@ -913,7 +965,7 @@ async fn test_delegate_background_starts_and_completes() {
 
     let mut mock = MockChatService::new();
     mock.expect_chat_completion()
-        .returning(|_| Ok(chat_response("bg done")));
+        .returning(|_| Ok(submit_response("bg done")));
     let registry = ToolRegistry::new(default_strict_policy())
         .with_model_service(Arc::new(mock))
         .with_model("test-model");

@@ -182,6 +182,16 @@ pub struct AskUserParams {
     pub question: String,
 }
 
+/// 子代理提交结果参数（委托循环显式完成信号）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SubmitResultParams {
+    /// 最终结果全文（Markdown 报告 / 结论）。
+    pub result: String,
+    /// 一句话摘要（可选；通知展示用）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
 /// 搜索知识库参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchKnowledgeParams {
