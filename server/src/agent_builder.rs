@@ -82,6 +82,15 @@ impl AgentBuilderFactory {
         // （resolve_chat_model / resolve_chat_model_spec / build_knowledge_ingestor）
         let chat_model = resolve_chat_model(config);
         let chat_model_spec = resolve_chat_model_spec(config);
+
+        // 用量日志的 provider 维度：从配置构建 model → provider 映射
+        // （模型名可能不含 provider 前缀，如 deepseek-v4-flash → opencode）。
+        let mut provider_by_model = std::collections::HashMap::new();
+        for provider in &config.models.providers {
+            for model in &provider.models {
+                provider_by_model.insert(model.name.clone(), provider.name.clone());
+            }
+        }
         let knowledge_ingestor = build_knowledge_ingestor(
             config,
             &model_services,
@@ -109,7 +118,8 @@ impl AgentBuilderFactory {
             .with_session_manager(session_manager)
             .with_execution_log(execution_log)
             .with_session_recall(session_recall)
-            .with_usage_log(usage_log);
+            .with_usage_log(usage_log)
+            .with_provider_by_model(provider_by_model);
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),
             None => agent,

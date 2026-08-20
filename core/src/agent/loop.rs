@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -129,6 +130,8 @@ pub struct AgentLoop {
     pub(crate) last_input_usage: Arc<AtomicUsize>,
     /// LLM 用量日志（token 统计：每轮调用落库；None 时不记录）。
     usage_log: Option<Arc<UsageLog>>,
+    /// model → provider 映射（配置注入；用量日志的 provider 维度）。
+    provider_by_model: HashMap<String, String>,
 }
 
 impl AgentLoop {
@@ -148,6 +151,7 @@ impl AgentLoop {
             chat_spec: None,
             last_input_usage: Arc::new(AtomicUsize::new(0)),
             usage_log: None,
+            provider_by_model: HashMap::new(),
         }
     }
 
@@ -166,6 +170,13 @@ impl AgentLoop {
     /// 设置 LLM 用量日志（token 统计；None 时不记录）。
     pub fn with_usage_log(mut self, log: Arc<UsageLog>) -> Self {
         self.usage_log = Some(log);
+        self
+    }
+
+    /// 设置 model → provider 映射（用量日志的 provider 维度；
+    /// 空表时回落 model 名前缀推导）。
+    pub fn with_provider_by_model(mut self, map: HashMap<String, String>) -> Self {
+        self.provider_by_model = map;
         self
     }
 
@@ -628,11 +639,18 @@ impl AgentLoop {
             let (assistant_msg, turn_usage, finish_reason) = step_result;
 
             // LLM 用量日志：每轮一次（聊天/子代理/演化任务统一记录）。
-            // provider 由 model 名约定前缀推导（provider/model 命名）。
+            // provider 优先查配置映射（模型名可能不含前缀），
+            // 未命中时按 model 名前缀推导（provider/model 命名）。
             if let Some(ref usage_log) = self.usage_log {
                 if let Some(usage) = &turn_usage {
-                    let provider = model.split("/").next().unwrap_or("unknown");
-                    usage_log.record(session_id, provider, model, usage).await;
+                    let provider = self
+                        .provider_by_model
+                        .get(model)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            model.split("/").next().unwrap_or("unknown").to_string()
+                        });
+                    usage_log.record(session_id, &provider, model, usage).await;
                 }
             }
 

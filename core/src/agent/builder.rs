@@ -73,6 +73,7 @@ pub struct AgentBuilder {
     /// 会话回忆服务（ADR-017 决策 6：session_recall 工具依赖；None 时工具不可用）。
     session_recall: Option<Arc<crate::session::search::SessionRecall>>,
     usage_log: Option<Arc<crate::observability::usage_log::UsageLog>>,
+    provider_by_model: std::collections::HashMap<String, String>,
     /// 聊天模型上下文规格（T5；注入 AgentLoop 并联动压缩窗口；None 时走默认窗口）。
     chat_model_spec: Option<ModelSpec>,
     /// 后台命令日志目录（execute_command(background) 日志落盘；None 时仅内存尾部）。
@@ -104,6 +105,7 @@ impl AgentBuilder {
             execution_log: None,
             session_recall: None,
             usage_log: None,
+            provider_by_model: std::collections::HashMap::new(),
             chat_model_spec: None,
             command_logs_dir: None,
             role_registry: None,
@@ -268,6 +270,15 @@ impl AgentBuilder {
     /// 设置 LLM 用量日志（token 统计：每轮调用落库；None 时不记录）。
     pub fn with_usage_log(mut self, log: Arc<crate::observability::usage_log::UsageLog>) -> Self {
         self.usage_log = Some(log);
+        self
+    }
+
+    /// 设置 model → provider 映射（用量日志 provider 维度；空表回落前缀推导）。
+    pub fn with_provider_by_model(
+        mut self,
+        map: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.provider_by_model = map;
         self
     }
 
@@ -470,6 +481,9 @@ impl AgentBuilder {
         // LLM 用量日志（token 统计）
         if let Some(ref usage_log) = self.usage_log {
             agent_loop = agent_loop.with_usage_log(usage_log.clone());
+        }
+        if !self.provider_by_model.is_empty() {
+            agent_loop = agent_loop.with_provider_by_model(self.provider_by_model.clone());
         }
         // 聊天模型上下文规格注入（T5）：None 时 AgentLoop 内部走默认窗口
         agent_loop = agent_loop.with_chat_spec(self.chat_model_spec);
