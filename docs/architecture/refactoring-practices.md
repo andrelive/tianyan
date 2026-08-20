@@ -14,7 +14,7 @@
 2. 相关 ADR（尤其 ADR-001 VFS / ADR-007 依赖环 / ADR-013 唤醒 / ADR-014 错误语义化）。
 3. `docs/architecture/principles.md` — 项目设计原则（seam 原则、不叠加抽象、共享基础设施归属被依赖方）。
 
-**教训来源**：本次审查初期提出的 `pipeline.run` 删除、eval 模块删除等方向，实际是**有意的延后/保留**（文档注释已声明）。先读 REJECTED 和模块文档可避免浪费一轮探索。
+**教训来源**：本次审查初期提出的 `pipeline.run` 删除方向，实际是**有意的延后/保留**（文档注释已声明）。先读 REJECTED 和模块文档可避免浪费一轮探索。（`eval/` 模块例外：2026-08 已实际删除——回答质量离线评测与本地自演化定位不匹配，判断职责并入演化智能体。）
 
 > **文档漂移是常态**：`docs/` 声称 LocalFileBackend "已删除"，实际它是生产默认后端（ADR-005 部分落地）。**一切以代码为准**（AGENTS.md 开头规则），发现漂移顺手在文档加注或修正。
 
@@ -33,7 +33,7 @@
 - **同一波内不做相互依赖的变更**（例：executor 错误发射与 server 消费必须一次原子落地，否则中间态把 409 降级成 500）。
 - **重名符号按符号全库 `rg`，不要按文件删**。本次 `search_by_visual` 同时存在于 `DualLayerRetriever` 与 `VfsSearch` trait——只删了前者，trait 上的副本漏网直到 Oracle 复审才发现。
 - 删除死代码的验证协议：`rg "<symbol>" --type rust`（含测试）→ 仅剩定义 → 编译通过。编译器是删除操作的最终验证器。
-- 保留有意的死代码（`eval/` 模块、`LocalFileBackend`）时，在提交说明/文档注释中写明"有意的"。（`ClipboardWriteTool` 不再属于此类：已接线进组合根 `server/src/state.rs` 的 `dynamic_tools`，`AppState::new` 与 `reload_agent` 双点装配，与 MCP 工具同列注入。）
+- 保留有意的死代码（`LocalFileBackend`）时，在提交说明/文档注释中写明"有意的"。（`ClipboardWriteTool` 不再属于此类：已接线进组合根 `server/src/state.rs` 的 `dynamic_tools`，`AppState::new` 与 `reload_agent` 双点装配，与 MCP 工具同列注入。）
 
 ## 3. 错误分类：只用语义谓词
 

@@ -108,14 +108,13 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `model` | `core/src/model/` | `ModelServices` 容器（不路由、不重试） | — |
 | `scheduler` | `core/src/scheduler/` | 定时任务（RuleTask、MemoryTask、SummaryTask、GcTask、SnapshotGcTask、ReminderTask、UsageStatsFlushTask） | 定时任务产物写入 VFS |
 | `observability` | `core/src/observability/` | `AgentMetrics` 可观测性存储 | — |
-| `eval` | `core/src/eval/` | 回答质量评测（LLM-as-Judge 评分式：四维度 1-10 + 黄金用例批处理；离线基准用） | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 语义化编辑（hashline/edit/patch）、文件浏览（fs/search）、代码智能（symbols/project/test_discovery） | — |
 | `lsp` | `core/src/lsp/` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储；lsp 工具：诊断/跳转/符号） | — |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | ⚠️ **ADR-006 例外**：独立文件存储于 `{data_dir}/snapshots/`，不经 VFS |
 
 > **注**：MCP 桥接（`server/src/mcp_bridge.rs`）返回的图片（浏览器截图等）落盘于 `{data_dir}/mcp_images/`，与 snapshot 同级运行时产物例外，不经 VFS（ADR-010）。
 
-已删除组件：`planner/`、`ModelRouter`、`TokenBudget`、`Chunker`、`AgentHarness` wrapper、`AgentSkills` wrapper。
+已删除组件：`planner/`、`ModelRouter`、`TokenBudget`、`Chunker`、`AgentHarness` wrapper、`AgentSkills` wrapper、`eval/`（回答质量离线评测，判断归入演化智能体）。
 
 ## 常见陷阱
 

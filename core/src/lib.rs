@@ -42,8 +42,6 @@ pub mod agent;
 pub mod common;
 pub mod config;
 pub mod context;
-/// 回答质量评测（LLM-as-Judge 评分式，离线基准用）。
-pub(crate) mod eval;
 /// 事件驱动触发（文件监听 + webhook → 事件总线 → 规则动作，T1 路线）。
 pub mod events;
 /// 执行器（独立执行函数 + Action）。

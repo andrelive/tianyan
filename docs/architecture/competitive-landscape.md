@@ -66,7 +66,7 @@ Dispatch（VM 沙箱 + 默认拒网 + 文件夹授权，但不支持后台）、
 | 对话回退 | 消息重做 ✓，无"回退到指定 prompt" | Claude Code rewind（代码+对话） | 维持现状（Checkpoint 决策已收敛，不追） |
 | worktree 隔离并行 | 无（后台任务同工作区） | Cursor /multitask + worktree；Cline worktree 会话 | **T3** 可选 |
 | 大任务自动分解 | 手动 delegate | Cursor /multitask 自动拆分 | **T3** 可选 |
-| 外部基准评测 | LLM-as-Judge 四维（离线） | Aider leaderboard / OpenHands SWE-bench harness | ◐ 后置（与 CI 评测闭环一并） |
+| 外部基准评测 | 已删除（离线打分与自演化定位不匹配，判断归入演化智能体 ADR-017） | Aider leaderboard / OpenHands SWE-bench harness | ◐ 后置（与 CI 评测闭环一并） |
 | 执行沙箱 | 无（裸命令） | Codex OS 级 / Claude SandboxSettings / Devin Local | 🚫 过滤（见 §4） |
 | 网络访问策略 | 无 | Codex 默认断网 + 域名 allowlist；Devin deny/ask/allow | 🚫 过滤（本地信任模型；web 工具受审批管控） |
 | 云任务/多设备 | 无（本地定位） | Codex cloud / Cursor Cloud Agents / Devin fleet | 🚫 定位违背 |
@@ -121,7 +121,7 @@ Dispatch（VM 沙箱 + 默认拒网 + 文件夹授权，但不支持后台）、
 ### 后置（与既有后置项合并）
 
 - 屏幕感知/OCR（含浏览器交互自动化升级）——已有 ADR-010 图片输入，后置为统一"视觉理解"项
-- 外部基准评测（SWE-bench 类）——与 CI 评测闭环一并
+- 外部基准评测（SWE-bench 类）——与 CI 评测闭环一并（离线打分评测已删除，若落地以 trace 回放为基线）
 
 ---
 

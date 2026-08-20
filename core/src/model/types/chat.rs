@@ -132,8 +132,8 @@ pub struct ChatCompletionResponse {
 impl ChatCompletionResponse {
     /// 提取第一个候选的文本内容。
     ///
-    /// LLM-as-Judge 等单轮判断场景的通用取数原语（此前在 eval/executor
-    /// 的 judge 中各有复制）；无候选时返回 `None`，由调用方决定回退语义。
+    /// LLM-as-Judge 等单轮判断场景的通用取数原语（此前在 executor 的
+    /// judge 中各有复制）；无候选时返回 `None`，由调用方决定回退语义。
     pub fn first_choice_content(&self) -> Option<String> {
         self.choices.first().map(|c| c.message.content.clone())
     }

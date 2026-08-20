@@ -1,8 +1,8 @@
 //! LLM 输出处理的共享原语（judge-plumbing）。
 //!
-//! 供多个 LLM-as-Judge / LLM 输出消费方（回答评测、构建判断、任务自审、
-//! 后台任务摘要、网页抓取文本）复用的纯函数。历史上存在 4 份逐字复制
-//! （eval/judge.rs、executor/judge.rs、agent/background.rs、executor/web.rs），
+//! 供多个 LLM-as-Judge / LLM 输出消费方（构建判断、任务自审、
+//! 后台任务摘要、网页抓取文本）复用的纯函数。历史上存在 3 份逐字复制
+//! （executor/judge.rs、agent/background.rs、executor/web.rs），
 //! 统一收敛于此——共享基础设施归属被依赖方（ADR-007 先例）。
 
 /// 剥离 LLM 输出的代码围栏并解析为 JSON 值。

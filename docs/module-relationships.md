@@ -57,7 +57,6 @@ core/src/
 ├── common/      (error, logging, token_estimator, types/ 子模块，含 content_part.rs)
 ├── config/      (TOML 配置；LoggingConfig 自 common::logging re-export)
 ├── context/     (pipeline, assembler, compression/, retrieval/)
-├── eval/        (judge, runner, golden —— 回答质量评测，依赖 model + common)
 ├── executor/    (工具执行：Action、审批、LLM-as-Judge、验证门控)
 ├── knowledge/   (parser, image/, ingestor/, types)
 ├── memory/      (extractor.rs)
@@ -121,7 +120,6 @@ core/src/
 - `context` → 依赖 vfs 和 model，提供检索+组装+压缩管线
 - `agent` → 协调者，聚合 context、model、session、vfs
 - `skills / scheduler` → 被 agent 调用，scheduler 独立运行后台任务
-- `eval` → 依赖 `model`（ChatService）与 `common`（Message 等类型）；与 `executor::judge`（工具执行二值门控）正交，与 agent 无耦合（离线评测工具）
 
 **依赖环现状（Wave 6 重构后，详见 [ADR-007](architecture/decisions/007-core-dependency-cycle-removal.md)）**：
 

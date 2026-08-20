@@ -131,7 +131,7 @@ DSH 基于 vendored 的 **Cordis**（Koishi 生态的 TypeScript 插件框架，
 | 插件生态 | 🚫 否决（#6） | ✅ dsh-plugin 分发 | 定位差异 |
 | 子 agent provider 多样性 | ◐ 单实现 + 角色 | ✅ 6 种 provider（含外部产品） | 定位差异 |
 | 多模态 | ✅ 图片输入 + MCP 截图 | ◐（未深查） | 天演持平/领先 |
-| 评测 | ✅ LLM-as-Judge 四维（离线，pub(crate)） | ◐ 未发现独立 eval 包（trace 可回放，具备 trace-grading 基础） | 天演持平 |
+| 评测 | ✅ 工具执行验证门控（VERDICT）+ 后台任务自审（LlmTaskReviewer）+ 演化智能体综述（ADR-017）；离线打分评测已删除（判断归入演化智能体） | ◐ 未发现独立 eval 包（trace 可回放，具备 trace-grading 基础） | 天演持平 |
 | 文档-代码一致性 | ◐ 人工维护（已漂移 3 处） | ✅ 生成目录 + CI 校验 | **DSH 领先 → 可吸收** |
 
 ---
@@ -210,7 +210,7 @@ DSH 的工程纪律（约 100+ 个 `scripts/*.ts` 每个带 `.spec.ts`）本质�
 - 技能数：文档 6 vs 代码 7（handlers/ 7 个文件）。
 - chat 路由：system-architecture.md 列的 `/chat/regenerate`、`/chat/edit` 已不在路由中。
 - harness-engineering-overview.md §13.1 说"架构约束未实现"，但 `core/tests/structural.rs`（rg 依赖方向检查）已存在——已推翻。
-- `eval` 模块：`pub(crate)` + `allow(dead_code)`，离线定位未暴露到 API。
+- `eval` 模块：已删除（2026-08 决策：回答质量离线打分与本地单用户 + 自演化定位不匹配，判断职责归入演化智能体）。
 
 > **漂移治理状态（2026-08 落地）**：工具清单漂移已由 A3 生成式目录根治——
 > `docs/architecture/tool-catalog.md` 由 `cargo run -p tianyan-core --example tool_catalog` 从

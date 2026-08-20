@@ -73,7 +73,7 @@
 | 屏幕级感知 | 浏览器 MCP 覆盖不了无 API 桌面应用；需权限分层 + PI 扫描基线 | Claude/OpenAI Computer Use、Nova Act |
 | 插件/技能市场 | 有技能+GEPA，缺可分发插件包+目录（OpenClaw 32.6K MCP/10.7K 技能为形态标杆） | OpenClaw ClawHub、Cursor marketplace |
 | 跨应用连接器 | 行业原则"连接器优先于屏幕操作"；天演仅 MCP | Claude Connectors、Gemini Connected Apps |
-| CI 评测闭环 | eval 模块已有，缺 CI Quality Gate + 在线评估 + Dataset 管理 | Promptfoo GitHub Action、Langfuse |
+| CI 评测闭环 | 离线打分评测已删除（判断归入演化智能体，ADR-017）；若需 CI 质量门，以 trace 回放 + 演化报告为基线 | Promptfoo GitHub Action、Langfuse |
 | 任务状态持久化 | 无 durable work ledger/heartbeat（长任务场景才需要） | Temporal、LangGraph durable execution |
 
 ### ✅ 已与业界平齐（非缺口）
@@ -82,7 +82,7 @@
 - 同轮多 delegate 并行（JoinSet 与 asyncio.gather 同构）
 - MCP 桥接（+ ACP 可作加分项）
 - 图片输入全链路
-- 评分式回答 eval（四维度，对标 Cursor evals SDK 方向）
+- 工具执行验证门控（VERDICT）+ 后台任务自审（TaskReviewer，G4）——回答质量判断归入演化智能体（ADR-017）
 
 ## 5. 行业共识要点（决策参考）
 
