@@ -128,28 +128,44 @@ impl ChatService {
             )
             .await?;
 
-        // 用户消息 id（回退定位键）：resolve_or_create_session 已把用户消息入库，
-        // 取会话最后一条消息（即刚追加的用户消息）的 id，随事件下发。
-        let user_message_id = self
+        // 消息边界（统一结构）：resolve_or_create_session 已把用户消息入库，
+        // 取会话最后一条消息（即刚追加的用户消息），流开始前以完整 ChatMessage
+        // 结构下发——前端本地用户消息 id/内容直接来自服务端，不做补丁同步。
+        let user_message = self
             .session_manager
             .get_session(&session_id)
             .await?
-            .and_then(|s| s.messages.last().map(|m| m.id.clone()));
+            .and_then(|s| s.messages.last().cloned());
 
         // 一次流式响应用一个响应 id（与非流式 ChatResponse.id 语义一致）。
         // SSE 事件 id 用于 Last-Event-ID 重连，同一响应流的所有 chunk 共享该 id。
         let stream_id = format!("chatcmpl-{}", short_uuid());
 
+        if let Some(um) = user_message {
+            let event = ChatStreamEvent {
+                id: stream_id.clone(),
+                session_id: session_id.clone(),
+                message: Some(ChatMessage::from_structured_light(&um)),
+                delta: String::new(),
+                thinking: None,
+                finish_reason: None,
+                chunk_type: tianyan::agent::StreamChunkType::Message,
+                skill_calls: None,
+                tool_call: None,
+                tool_result: None,
+                usage: None,
+            };
+            if tx.send(event).await.is_err() {
+                debug!("客户端断开流式连接");
+                return Ok(());
+            }
+        }
+
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
                 Ok(chunk) => {
-                    let event = map_chunk_to_event(
-                        chunk,
-                        &stream_id,
-                        &session_id,
-                        self.context_window,
-                        user_message_id.clone(),
-                    );
+                    let event =
+                        map_chunk_to_event(chunk, &stream_id, &session_id, self.context_window);
                     if tx.send(event).await.is_err() {
                         debug!("客户端断开流式连接");
                         break;
@@ -160,7 +176,7 @@ impl ChatService {
                     let event = ChatStreamEvent {
                         id: stream_id.clone(),
                         session_id: session_id.clone(),
-                        user_message_id: user_message_id.clone(),
+                        message: None,
                         delta: format!("错误: {}", e),
                         thinking: None,
                         finish_reason: Some("error".to_string()),
@@ -175,6 +191,38 @@ impl ChatService {
                     }
                     return Err(e.into());
                 }
+            }
+        }
+
+        // 消息边界（统一结构）：流结束后取最后一条 assistant 消息，以完整
+        // ChatMessage 结构下发——前端本地 assistant 消息 id 同步为服务端 id。
+        if let Some(am) = self
+            .session_manager
+            .get_session(&session_id)
+            .await?
+            .and_then(|s| {
+                s.messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == MessageRole::Assistant)
+                    .cloned()
+            })
+        {
+            let event = ChatStreamEvent {
+                id: stream_id.clone(),
+                session_id: session_id.clone(),
+                message: Some(ChatMessage::from_structured_light(&am)),
+                delta: String::new(),
+                thinking: None,
+                finish_reason: None,
+                chunk_type: tianyan::agent::StreamChunkType::Message,
+                skill_calls: None,
+                tool_call: None,
+                tool_result: None,
+                usage: None,
+            };
+            if tx.send(event).await.is_err() {
+                debug!("客户端断开流式连接");
             }
         }
 
@@ -197,24 +245,39 @@ impl ChatService {
             .agent
             .handle_clarification_stream(session_id, answer)
             .await?;
-        // 追问回答同样入库为用户消息：下发其 id（回退定位键）
-        let user_message_id = self
+        // 追问回答同样入库为用户消息：流开始前以完整 ChatMessage 结构下发
+        let user_message = self
             .session_manager
             .get_session(session_id)
             .await?
-            .and_then(|s| s.messages.last().map(|m| m.id.clone()));
+            .and_then(|s| s.messages.last().cloned());
         let stream_id = format!("chatcmpl-{}", short_uuid());
+
+        if let Some(um) = user_message {
+            let event = ChatStreamEvent {
+                id: stream_id.clone(),
+                session_id: session_id.to_string(),
+                message: Some(ChatMessage::from_structured_light(&um)),
+                delta: String::new(),
+                thinking: None,
+                finish_reason: None,
+                chunk_type: tianyan::agent::StreamChunkType::Message,
+                skill_calls: None,
+                tool_call: None,
+                tool_result: None,
+                usage: None,
+            };
+            if tx.send(event).await.is_err() {
+                debug!("客户端断开流式连接");
+                return Ok(());
+            }
+        }
 
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
                 Ok(chunk) => {
-                    let event = map_chunk_to_event(
-                        chunk,
-                        &stream_id,
-                        session_id,
-                        self.context_window,
-                        user_message_id.clone(),
-                    );
+                    let event =
+                        map_chunk_to_event(chunk, &stream_id, session_id, self.context_window);
                     if tx.send(event).await.is_err() {
                         debug!("客户端断开流式连接");
                         break;
@@ -225,7 +288,7 @@ impl ChatService {
                     let event = ChatStreamEvent {
                         id: stream_id.clone(),
                         session_id: session_id.to_string(),
-                        user_message_id: user_message_id.clone(),
+                        message: None,
                         delta: format!("错误: {}", e),
                         thinking: None,
                         finish_reason: Some("error".to_string()),
@@ -240,6 +303,37 @@ impl ChatService {
                     }
                     return Err(e.into());
                 }
+            }
+        }
+
+        // 消息边界（统一结构）：流结束后下发最后一条 assistant 消息
+        if let Some(am) = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .and_then(|s| {
+                s.messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == MessageRole::Assistant)
+                    .cloned()
+            })
+        {
+            let event = ChatStreamEvent {
+                id: stream_id.clone(),
+                session_id: session_id.to_string(),
+                message: Some(ChatMessage::from_structured_light(&am)),
+                delta: String::new(),
+                thinking: None,
+                finish_reason: None,
+                chunk_type: tianyan::agent::StreamChunkType::Message,
+                skill_calls: None,
+                tool_call: None,
+                tool_result: None,
+                usage: None,
+            };
+            if tx.send(event).await.is_err() {
+                debug!("客户端断开流式连接");
             }
         }
 
@@ -269,7 +363,6 @@ fn map_chunk_to_event(
     stream_id: &str,
     session_id: &str,
     context_window: u64,
-    user_message_id: Option<String>,
 ) -> ChatStreamEvent {
     let skill_calls = chunk.skill_calls.map(convert_skill_calls);
     let chunk_type = chunk.chunk_type;
@@ -281,7 +374,7 @@ fn map_chunk_to_event(
     ChatStreamEvent {
         id: stream_id.to_string(),
         session_id: session_id.to_string(),
-        user_message_id,
+        message: None,
         delta: if is_thought || is_observational {
             String::new()
         } else {

@@ -169,6 +169,9 @@ pub enum StreamChunkType {
     Error,
     /// 追问需求。
     Clarification,
+    /// 消息边界（流开始/结束：携带完整 ChatMessage 元数据，与历史加载同构；
+    /// 前端据此用服务端消息结构同步本地消息 id/内容）。
+    Message,
 }
 
 /// 流式响应块。
@@ -419,6 +422,7 @@ mod tests {
             StreamChunkType::Answer,
             StreamChunkType::Error,
             StreamChunkType::Clarification,
+            StreamChunkType::Message,
         ];
         for variant in variants {
             let json = serde_json::to_string(&variant).unwrap();

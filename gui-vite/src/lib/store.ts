@@ -48,9 +48,10 @@ interface AppState {
    * 用于流结束/失败后从服务端同步真实消息 ID（回退定位键），或后台流
    * 归属非当前会话时的缓存更新。 */
   setSessionMessages: (sessionId: string, messages: ChatMessage[]) => void;
-  /** 把指定会话最后一条 user 消息的临时 id 替换为服务端消息 id
-   * （流式首事件 user_message_id 同步；回退定位键）。 */
-  attachUserMessageId: (sessionId: string | null, id: string) => void;
+  /** 应用服务端消息边界（chunk_type=message）：按 role 合并到本地最后一条
+   * 同角色消息——id/内容以服务端统一结构为准，本地累积的 tool_calls/
+   * segments 保留（流式期间已含完整工具结果）。 */
+  applyServerMessage: (sessionId: string | null, msg: ChatMessage) => void;
   addMessage: (message: ChatMessage, sessionId?: string | null) => void;
   updateLastMessage: (delta: string, sessionId?: string | null) => void;
   appendSkillCalls: (calls: SkillCallInfo[], sessionId?: string | null) => void;
@@ -233,22 +234,32 @@ export const useAppStore = create<AppState>()(
             ...(isCurrent ? { messages } : {}),
           };
         }),
-      attachUserMessageId: (sessionId, id) =>
+      applyServerMessage: (sessionId, msg) =>
         set((s) => {
           const key = sessionId ?? resolveSessionKey(s);
           const base = s.sessionMessages[key] ?? (key === resolveSessionKey(s) ? s.messages : []);
-          // 从后向前找最后一条 user 消息；已带服务端 id（msg_ 前缀）则跳过
+          // 按 role 定位最后一条同角色消息；找不到则追加
           let target = -1;
           for (let i = base.length - 1; i >= 0; i--) {
-            const m = base[i];
-            if (m.role === 'user' && (!m.id || !m.id.startsWith('msg_'))) {
+            if (base[i].role === msg.role) {
               target = i;
               break;
             }
           }
-          if (target < 0) return {};
           const next = [...base];
-          next[target] = { ...next[target], id };
+          if (target >= 0) {
+            // 合并：id/内容以服务端统一结构为准；本地累积的 tool_calls（含
+            // 工具结果）与 segments（时间线）保留——流式期间已完整
+            next[target] = {
+              ...base[target],
+              ...msg,
+              id: msg.id ?? base[target].id,
+              tool_calls: base[target].tool_calls ?? msg.tool_calls,
+              segments: base[target].segments,
+            };
+          } else {
+            next.push(msg);
+          }
           const isCurrent = key === resolveSessionKey(s);
           return {
             sessionMessages: { ...s.sessionMessages, [key]: next },

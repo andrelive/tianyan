@@ -57,7 +57,7 @@ pub async fn chat_clarify_stream_handler(
             let event = ChatStreamEvent {
                 id: uuid::Uuid::new_v4().to_string(),
                 session_id: String::new(),
-                user_message_id: None,
+                message: None,
                 delta: e,
                 thinking: None,
                 finish_reason: None,
@@ -124,7 +124,7 @@ pub async fn chat_stream_handler(
             let event = ChatStreamEvent {
                 id: uuid::Uuid::new_v4().to_string(),
                 session_id: String::new(),
-                user_message_id: None,
+                message: None,
                 delta: e,
                 thinking: None,
                 finish_reason: None,

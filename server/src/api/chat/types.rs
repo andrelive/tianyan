@@ -177,9 +177,10 @@ pub struct ChatStreamEvent {
     /// 会话标识
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    /// 本次输入的用户消息 ID（msg_xxx；流开始前已入库。前端据此把本地
-    /// 用户消息的临时 id 替换为服务端 id——回退/重做的定位键）。
-    pub user_message_id: Option<String>,
+    /// 消息边界载荷（chunk_type=message）：流开始携带用户消息、流结束携带
+    /// assistant 消息的完整结构（与历史加载 ChatMessage 同构）——前端本地
+    /// 消息 id/内容直接来自服务端统一结构，不做两套形态的补丁同步。
+    pub message: Option<ChatMessage>,
     /// 增量内容
     pub delta: String,
     /// 结束原因
@@ -289,7 +290,7 @@ mod tests {
         let event = ChatStreamEvent {
             id: "chatcmpl-1".to_string(),
             session_id: "session-123".to_string(),
-            user_message_id: Some("msg-1".to_string()),
+            message: None,
             delta: "Hello".to_string(),
             thinking: None,
             finish_reason: None,

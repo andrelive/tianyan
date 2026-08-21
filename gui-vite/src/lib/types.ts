@@ -3,7 +3,13 @@
 export type MessageRole = 'system' | 'user' | 'assistant';
 
 export type StreamChunkType =
-  'answer' | 'thought' | 'tool_call' | 'observation' | 'clarification' | 'error';
+  | 'answer'
+  | 'thought'
+  | 'tool_call'
+  | 'observation'
+  | 'clarification'
+  | 'error'
+  | 'message';
 
 export interface ChatMessage {
   id?: string;
@@ -72,9 +78,10 @@ export interface StreamUsage {
 export interface ChatStreamEvent {
   id: string;
   session_id: string;
-  /** 本次输入的用户消息 ID（msg_xxx，流开始前已入库）；前端据此把本地
-   * 用户消息的临时 id 替换为服务端 id——回退/重做的定位键 */
-  user_message_id?: string | null;
+  /** 消息边界载荷（chunk_type=message）：流开始携带用户消息、流结束携带
+   * assistant 消息的完整结构（与历史加载 ChatMessage 同构）——本地消息
+   * id/内容直接来自服务端统一结构，不做两套形态的补丁同步 */
+  message?: ChatMessage | null;
   delta: string;
   /** 思考过程增量（Thought chunk 携带；正文在 delta，分开渲染） */
   thinking?: string | null;

@@ -249,9 +249,10 @@ export default function ChatPanel() {
         useAppStore.getState().setPendingClarification(event.delta);
         return;
       }
-      // 用户消息 id 同步：本地临时 id（uuid）替换为服务端 msg_xxx（回退定位键）
-      if (event.user_message_id) {
-        useAppStore.getState().attachUserMessageId(sid, event.user_message_id);
+      // 消息边界（统一结构）：流开始/结束携带完整 ChatMessage——本地消息
+      // id/内容直接来自服务端结构（与历史加载同构），回退定位键天然正确
+      if (event.message) {
+        useAppStore.getState().applyServerMessage(sid, event.message);
       }
       // Append content delta to the last assistant message（按流归属会话）
       if (event.delta) {
@@ -489,9 +490,9 @@ export default function ChatPanel() {
               const event = JSON.parse(data) as ChatStreamEvent;
               // 追问流同样按 session_id 归属写入（与主对话流一致）
               const sid = event.session_id || null;
-              // 追问回答的用户消息 id 同步（回退定位键）
-              if (event.user_message_id) {
-                useAppStore.getState().attachUserMessageId(sid, event.user_message_id);
+              // 消息边界（统一结构）：追问回答/回复的完整 ChatMessage 同步
+              if (event.message) {
+                useAppStore.getState().applyServerMessage(sid, event.message);
               }
               if (event.thinking) useAppStore.getState().appendThinking(event.thinking, sid);
               if (event.delta) useAppStore.getState().updateLastMessage(event.delta, sid);

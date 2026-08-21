@@ -75,6 +75,59 @@ pub struct ToolCallWithResult {
 }
 
 impl ChatMessage {
+    /// 从核心消息构造 API 消息（流式边界事件用，与历史加载同构的轻量版）：
+    /// id/role/content/thinking/images/usage/truncated/timestamp；
+    /// tool_calls 不填——流式期间前端已累积完整工具卡片（含结果），
+    /// 历史加载走 sessions 服务的完整转换（跨消息合并工具结果）。
+    pub(crate) fn from_structured_light(m: &tianyan::common::types::StructuredMessage) -> Self {
+        let mut thinking = String::new();
+        let mut content = String::new();
+        let mut images = Vec::new();
+        for p in &m.parts {
+            match p {
+                tianyan::common::types::Part::Text { text, .. } => {
+                    if !content.is_empty() {
+                        content.push('\n');
+                    }
+                    content.push_str(text);
+                }
+                tianyan::common::types::Part::Reasoning { text, .. } => {
+                    if !thinking.is_empty() {
+                        thinking.push('\n');
+                    }
+                    thinking.push_str(text);
+                }
+                tianyan::common::types::Part::Image { url, .. } => images.push(url.clone()),
+                _ => {}
+            }
+        }
+        Self {
+            id: Some(m.id.clone()),
+            role: m.role,
+            content,
+            thinking: if thinking.is_empty() {
+                None
+            } else {
+                Some(thinking)
+            },
+            tool_calls: None,
+            images: if images.is_empty() {
+                None
+            } else {
+                Some(images)
+            },
+            truncated_by_length: m.finish.as_deref() == Some("length"),
+            usage: (m.tokens.total > 0 || m.tokens.input > 0).then(|| TokenUsage {
+                prompt_tokens: m.tokens.input as u32,
+                completion_tokens: m.tokens.output as u32,
+                total_tokens: m.tokens.total as u32,
+                cache_read: m.tokens.cache.read as u32,
+                cache_write: m.tokens.cache.write as u32,
+            }),
+            timestamp: None,
+        }
+    }
+
     /// 创建新的系统消息
     ///
     /// # Arguments
