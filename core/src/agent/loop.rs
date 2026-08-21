@@ -498,10 +498,12 @@ impl AgentLoop {
                         );
                     }
 
-                    // 流式中断：已收内容保留为截断输出——finish 标记 length，
-                    // 前端据此显示截断提示（与 token 上限截断同语义）。
+                    // 流式中断：已收内容保留为截断输出——finish 标记独立值
+                    // "interrupted"（区别于 token 上限的 length：用户配置的
+                    // max_tokens 远未触顶时显示"已达上限"是误导，前端据此
+                    // 显示"流式中断"提示）。
                     if stream_interrupted && finish_reason.is_none() {
-                        finish_reason = Some("length".to_string());
+                        finish_reason = Some("interrupted".to_string());
                     }
 
                     // Build assistant message from accumulated content + tool calls

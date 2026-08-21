@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::message::{Message, MessageRole};
 use super::token::TokenUsage;
@@ -150,10 +151,20 @@ pub struct StructuredMessage {
     pub compression_marker: bool,
 }
 
+/// 全局消息 ID 序号（防并发碰撞：并发工具结果/消息在相同毫秒生成时
+/// 追加原子序号，避免重复 id 破坏回退定位与前端 key）。
+static MESSAGE_ID_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 生成全局唯一消息 ID：`msg_{epoch_ms}_{seq}`。
+fn next_message_id(now_ms: i64) -> String {
+    let seq = MESSAGE_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("msg_{now_ms}_{seq}")
+}
+
 impl StructuredMessage {
     /// 构造纯文本单 part 消息（`system` / `user` / `assistant` 共用内部实现）。
     ///
-    /// 统一规则：`id = msg_{now}`（now 为 epoch 毫秒）、
+    /// 统一规则：`id = msg_{now}_{seq}`（now 为 epoch 毫秒，seq 为原子序号）、
     /// `time.created == time.completed == now`、token/成本/模型/finish/压缩标记
     /// 取默认值、`parent_id = None`。
     fn text_message(
@@ -163,7 +174,7 @@ impl StructuredMessage {
     ) -> Self {
         let now = chrono::Utc::now().timestamp_millis();
         Self {
-            id: format!("msg_{now}"),
+            id: next_message_id(now),
             parent_id: None,
             role,
             parts: vec![Part::Text {
@@ -297,7 +308,7 @@ impl StructuredMessage {
         }
 
         Self {
-            id: format!("msg_{now_ms}"),
+            id: next_message_id(now_ms),
             parent_id: parent_id.map(|s| s.to_string()),
             role,
             parts,

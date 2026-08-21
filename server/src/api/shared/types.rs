@@ -40,10 +40,14 @@ pub struct ChatMessage {
     /// 图片 data URL 列表（`data:image/png;base64,...`），仅用户消息使用。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub images: Option<Vec<String>>,
-    /// 输出被截断（finish=length：token 上限或流式中断保留部分输出）。
+    /// 输出被截断（finish=length：token 上限保留部分输出）。
     /// 流式事件经 finish_reason 标记；历史消息由 StructuredMessage.finish 映射。
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub truncated_by_length: bool,
+    /// 流式中断（finish=interrupted：网络/服务中断保留部分输出；区别于
+    /// token 上限截断——配置的 max_tokens 远未触顶时不该显示"已达上限"）。
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub interrupted: bool,
     /// 本条消息的 token 用量（历史消息由持久化 usage 映射；前端按会话独立
     /// 计算上下文占用 / 缓存命中）。
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -117,6 +121,7 @@ impl ChatMessage {
                 Some(images)
             },
             truncated_by_length: m.finish.as_deref() == Some("length"),
+            interrupted: m.finish.as_deref() == Some("interrupted"),
             usage: (m.tokens.total > 0 || m.tokens.input > 0).then(|| TokenUsage {
                 prompt_tokens: m.tokens.input as u32,
                 completion_tokens: m.tokens.output as u32,
@@ -144,6 +149,7 @@ impl ChatMessage {
             tool_calls: None,
             images: None,
             truncated_by_length: false,
+            interrupted: false,
             usage: None,
             timestamp: None,
         }
@@ -165,6 +171,7 @@ impl ChatMessage {
             tool_calls: None,
             images: None,
             truncated_by_length: false,
+            interrupted: false,
             usage: None,
             timestamp: None,
         }
@@ -186,6 +193,7 @@ impl ChatMessage {
             tool_calls: None,
             images: None,
             truncated_by_length: false,
+            interrupted: false,
             usage: None,
             timestamp: None,
         }

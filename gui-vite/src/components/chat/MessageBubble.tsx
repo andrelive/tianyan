@@ -4,7 +4,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import remarkGfm from 'remark-gfm';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { ChevronDown, ChevronRight, Copy, Check, Undo2 } from 'lucide-react';
-import type { ChatMessage, MessageSegment } from '@/lib/types';
+import type { ChatMessage, MessageSegment, ToolCallWithResult } from '@/lib/types';
 import { cn, formatTime } from '@/lib/utils';
 import SkillCallCard from './SkillCallCard';
 import ToolCallCard from './ToolCallCard';
@@ -121,8 +121,19 @@ function MarkdownContent({ text, isUser }: { text: string; isUser: boolean }) {
   );
 }
 
-/** 时间线段渲染：按到达顺序轮番展示（相邻同类段合并，保持 markdown 连续）。 */
-function SegmentBlocks({ segments, isUser }: { segments: MessageSegment[]; isUser: boolean }) {
+/** 时间线段渲染：按到达顺序轮番展示（相邻同类段合并，保持 markdown 连续）。
+ * toolCalls：当前消息的工具调用列表（含 observation 挂载的结果）——
+ * 流式 tool 段按 id 关联 result（applyToolResult 更新在 tool_calls 上，
+ * 段自身不携带结果）。 */
+function SegmentBlocks({
+  segments,
+  toolCalls,
+  isUser,
+}: {
+  segments: MessageSegment[];
+  toolCalls?: ToolCallWithResult[];
+  isUser: boolean;
+}) {
   const blocks: React.ReactNode[] = [];
   let i = 0;
   let key = 0;
@@ -145,7 +156,14 @@ function SegmentBlocks({ segments, isUser }: { segments: MessageSegment[]; isUse
       }
       blocks.push(<MarkdownContent key={key++} text={texts.join('')} isUser={isUser} />);
     } else {
-      blocks.push(<ToolCallCard key={key++} event={seg.tool_call} />);
+      // 按调用 ID 关联结果（observation 已回填到 tool_calls；无 ID 回退名称+参数）
+      const segCall = seg.tool_call;
+      const merged: ToolCallWithResult = toolCalls?.find((c) => c.id === segCall.id) ??
+        toolCalls?.find((c) => c.id === undefined && c.name === segCall.name) ?? {
+          ...segCall,
+          result: null,
+        };
+      blocks.push(<ToolCallCard key={key++} event={merged} result={merged.result} />);
       i++;
     }
   }
@@ -202,7 +220,11 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
         {/* 时间线渲染：有 segments（流式）时按事件到达顺序轮番展示
             思考/文本/工具调用；历史消息（无 segments）回退固定顺序 */}
         {message.segments && message.segments.length > 0 ? (
-          <SegmentBlocks segments={message.segments} isUser={isUser} />
+          <SegmentBlocks
+            segments={message.segments}
+            toolCalls={message.tool_calls}
+            isUser={isUser}
+          />
         ) : (
           <>
             {/* 思考过程（可折叠，与正文分开渲染，按序轮番出现） */}
@@ -239,6 +261,13 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
         {message.truncated_by_length && (
           <p className="mt-2 text-base text-[var(--color-text-tertiary)] flex items-center gap-1">
             <span aria-hidden="true">⚠️</span> 输出已达上限
+          </p>
+        )}
+
+        {/* 流式中断提示（finish=interrupted：网络/服务中断保留部分输出） */}
+        {message.interrupted && (
+          <p className="mt-2 text-base text-red-500/80 flex items-center gap-1">
+            <span aria-hidden="true">⚠️</span> 流式中断，已保留部分输出
           </p>
         )}
 

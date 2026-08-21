@@ -425,6 +425,7 @@ fn to_chat_response(session_id: &str, response: tianyan::agent::AgentResponse) -
             tool_calls: None,
             images: None,
             truncated_by_length: false,
+            interrupted: false,
             usage: Some(TokenUsage {
                 prompt_tokens: response.token_usage.prompt_tokens as u32,
                 completion_tokens: response.token_usage.completion_tokens as u32,

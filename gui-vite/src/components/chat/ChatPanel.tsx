@@ -302,6 +302,11 @@ export default function ChatPanel() {
       if (event.finish_reason === 'length') {
         useAppStore.getState().markLastMessageTruncated(sid);
       }
+      // 流式中断（finish_reason === 'interrupted'）：网络/服务中断保留部分输出
+      // ——提示用户，但不误报为 token 上限截断
+      if (event.finish_reason === 'interrupted') {
+        useAppStore.getState().showToast('流式中断，已保留部分输出', 'error');
+      }
     },
     onError: (error) => {
       // 流结束按归属会话置 idle（UI 可能已切走，不能用 currentSessionId 闭包值）

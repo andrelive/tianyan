@@ -3,13 +3,7 @@
 export type MessageRole = 'system' | 'user' | 'assistant';
 
 export type StreamChunkType =
-  | 'answer'
-  | 'thought'
-  | 'tool_call'
-  | 'observation'
-  | 'clarification'
-  | 'error'
-  | 'message';
+  'answer' | 'thought' | 'tool_call' | 'observation' | 'clarification' | 'error' | 'message';
 
 export interface ChatMessage {
   id?: string;
@@ -29,6 +23,8 @@ export interface ChatMessage {
   chunk_type?: StreamChunkType;
   /** 流结束事件 finish_reason === 'length'：输出达到 token 上限被截断（前端本地标记） */
   truncated_by_length?: boolean;
+  /** 流式中断（finish=interrupted：网络/服务中断保留部分输出；区别于 token 上限截断） */
+  interrupted?: boolean;
   /** 本条消息的 token 用量（历史加载/完成 chunk 携带；前端按会话独立计算上下文占用） */
   usage?: TokenUsage | null;
 }
