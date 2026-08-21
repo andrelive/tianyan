@@ -19,6 +19,14 @@
 | 对内容做 chunk 分块 | `Chunker` 已移除。VFS 双层检索替代 | 完整内容写入 L2，由 `SummaryEngine` 生成结构化摘要 |
 | 绕过 VFS 引入独立存储（独立 SQLite 连接、Redis、独立文件存储） | VFS 是唯一的存储入口。SQLite 是 VFS 的底层实现（`SqliteBackend`），模块不得绕过 VFS trait 直接操作 `SqliteDb` | 仅用 VFS（`SqliteBackend`）+ LanceDB（嵌入式向量）；统计模块可共享 `SqliteDb` 连接但必须通过 VFS trait 写入内容 |
 
+> **⚠️ 例外（ADR-018）：会话内容不经 VFS。** 会话权威存储是 SQLite 表
+> （`session_messages` 完整消息 + `session_meta` 会话级状态，共享 `SqliteDb` 连接），
+> 由 `SessionStore` 统一读写（原子取号、失败上抛）；回忆检索 `SessionRecall`
+> 读同一张表。VFS 不再存会话（`tianyan://session/{id}` 仅作逻辑标识，
+> `vfs_read` 经兼容层导出 JSONL）。此例外与快照（ADR-006/008）同类：
+> 结构性不匹配（流式追加 vs 整块文档）时允许专用存储。**其他内容类型
+> （知识库/记忆/技能/角色）仍必须走 VFS，没有第二条路径。**
+
 ### VFS 统一模型（每次设计前先看）
 
 ```
@@ -84,6 +92,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-011: 子任务授权边界](docs/architecture/decisions/011-subagent-approval-boundary.md) — 子 agent 无交互审批（任务下发即授权边界，交互只在主 agent 与用户之间）
 - [ADR-012: 注入上下文快照持久化](docs/architecture/decisions/012-injectable-snapshot-persistence.md) — 前缀零漂移（JSONL SessionHeader）+ 会话边界/压缩点技能刷新
 - [ADR-013: 统一消息通知与唤醒原语](docs/architecture/decisions/013-unified-message-notification-wake.md) — 消息入库 + 唤醒语义（shouldReply = allComplete || failure；任务持久化前置）
+- [ADR-018: 会话权威存储迁至 SQLite](docs/architecture/decisions/018-session-authoritative-sqlite.md) — 会话迁出 VFS（流式 vs 文档）；`SessionStore` 原子取号 + 失败上抛；VFS 恢复纯文档基座
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 
@@ -104,9 +113,9 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `knowledge` | `core/src/knowledge/` | 知识库导入管道 | ❌ **不建独立检索管道**，导入→VFS→SummaryEngine |
 | `memory` | `core/src/memory/` | `MemoryExtractor` 长期记忆提取 | ❌ **不建独立存储**，提取→VFS write |
 | `skills` | `core/src/skills/` | 技能定义 + 执行 + GEPA 进化引擎 | ❌ **不全量加载**，L0 发现→L2 按需 |
-| `session` | `core/src/session/` | `PersistentSessionManager` — JSONL 持久化 | 会话文件仅通过 VFS 读写 |
+| `session` | `core/src/session/` | `SessionStore`（SQLite 权威存储，ADR-018）+ `PersistentSessionManager` + `SessionRecall`（FTS 回忆） | ⚠️ 例外：会话内容不经 VFS（ADR-018）；`tianyan://session/{id}` 仅作逻辑标识 |
 | `model` | `core/src/model/` | `ModelServices` 容器（不路由、不重试） | — |
-| `scheduler` | `core/src/scheduler/` | 定时任务（RuleTask、MemoryTask、SummaryTask、GcTask、SnapshotGcTask、ReminderTask、UsageStatsFlushTask） | 定时任务产物写入 VFS |
+| `scheduler` | `core/src/scheduler/` | 定时任务（SummaryTask、EvolutionTask、GcTask、SnapshotGcTask、ReminderTask、UsageStatsFlushTask） | 定时任务产物写入 VFS |
 | `observability` | `core/src/observability/` | `AgentMetrics` 可观测性存储 | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 语义化编辑（hashline/edit/patch）、文件浏览（fs/search）、代码智能（symbols/project/test_discovery） | — |
 | `lsp` | `core/src/lsp/` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储；lsp 工具：诊断/跳转/符号） | — |

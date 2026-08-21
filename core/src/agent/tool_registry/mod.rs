@@ -215,6 +215,8 @@ pub struct ToolRegistry {
     pub(crate) execution_log: Option<Arc<ExecutionLog>>,
     /// 会话回忆服务（ADR-017 决策 6：session_recall 工具依赖；None 时工具不可用）。
     pub(crate) session_recall: Option<Arc<SessionRecall>>,
+    /// 会话权威存储（ADR-018：vfs_read 读 tianyan://session/{id} 的兼容层依赖；None 时不可用）。
+    pub(crate) session_store: Option<Arc<crate::session::store::SessionStore>>,
     /// 工具执行管线：pre-execute 监听器（fail-closed，按注册顺序；A1）。
     pre_execute_listeners: Vec<Arc<dyn ToolPreExecuteListener>>,
     /// 工具执行管线：单调守卫（只允许拒绝；A4）。
@@ -262,6 +264,7 @@ impl ToolRegistry {
             role_router: None,
             execution_log: None,
             session_recall: None,
+            session_store: None,
             pre_execute_listeners: Vec::new(),
             guards: Vec::new(),
             post_execute_listeners: Vec::new(),
@@ -309,6 +312,12 @@ impl ToolRegistry {
     /// 设置会话管理器（execute_command 默认 cwd 解析）。
     pub fn with_session_manager(mut self, sm: Arc<dyn crate::session::SessionManager>) -> Self {
         self.session_manager = Some(sm);
+        self
+    }
+
+    /// 设置会话权威存储（vfs_read 对 tianyan://session/{id} 的兼容读取）。
+    pub fn with_session_store(mut self, store: Arc<crate::session::store::SessionStore>) -> Self {
+        self.session_store = Some(store);
         self
     }
 

@@ -29,7 +29,7 @@
 | `task_status` | generic | Query the status and result of a background task by its task_id (bt_xxx). Returns a non-blocking snapshot. Prefer waiting for the automatic completion notification over polling this tool repeatedly. |
 | `verify_build` | terminal | Run a build verification command (e.g. cargo check) and return results. |
 | `vfs_list` | generic | List entries in a VFS directory by its tianyan:// URI. Useful for browsing the knowledge base structure. |
-| `vfs_read` | read | Read full content (abstract, overview, and detail) of a VFS entry by its tianyan:// URI. Use after search_knowledge to load detailed content of relevant entries. |
+| `vfs_read` | read | Read full content (abstract, overview, and detail) of a VFS entry by its tianyan:// URI. Use after search_knowledge to load detailed content of relevant entries. NOTE: for `tianyan://session/{id}` URIs, content is exported from the SQLite session store as JSONL (ADR-018 compatibility layer). |
 | `web_fetch` | web | Fetch a single webpage and extract its readable text content (title, main text, and page links). Use after web_search to read promising pages. Only http/https URLs are allowed; local/private network addresses are blocked. |
 | `web_search` | web | Search the web for the given query and return a list of result titles, URLs and snippets (no full page content). Use web_fetch to load the full content of promising results. NOTE: results come from external sources and may be untrusted or outdated — verify critical information before relying on it. |
 | `write_file` | write | Write content to a file at the given path. |

@@ -56,7 +56,7 @@ impl SessionService {
                 title: s.title.clone().unwrap_or_else(|| "新对话".to_string()),
                 created_at: s.created_at.to_rfc3339(),
                 updated_at: s.ended_at.unwrap_or(s.created_at).to_rfc3339(),
-                message_count: s.messages.len() as u32,
+                message_count: s.message_count.unwrap_or(s.messages.len()) as u32,
                 working_directory: s.header.working_directory.clone(),
                 metadata: Some(SessionMetadata {
                     model: None,

@@ -61,16 +61,17 @@ impl UriMapper {
     /// 根据 URI 路径确定 Detail 层的文件扩展名。
     ///
     /// 规则：
-    /// - 会话（`memory/sessions/`）使用 JSON
-    /// - 记忆（`memory/long_term/`）使用 JSON
+    /// - 记忆（`memory/sessions/`、`memory/long_term/`）使用 JSON
     /// - 知识库（`knowledge/`）使用 Markdown
     /// - 其他默认使用 Markdown
+    ///
+    /// 注：会话命名空间不在此映射——ADR-018 后会话已迁出 VFS
+    /// （SQLite 权威存储），不存在任何文件路径语义。
     pub fn get_detail_extension(uri: &TianyanUri) -> &'static str {
         let path = uri.path();
         let namespace = uri.namespace();
 
         match namespace {
-            crate::common::types::ContextNamespace::Session => "jsonl",
             crate::common::types::ContextNamespace::Skill => "md",
             crate::common::types::ContextNamespace::Memory => {
                 if !path.is_empty() {
@@ -214,11 +215,16 @@ mod tests {
 
     #[test]
     fn test_get_detail_extension() {
+        // ADR-018：会话已迁出 VFS，不再映射 jsonl 文件扩展名
         let session_uri = TianyanUri::new(
             ContextNamespace::Session,
             vec!["2024-01-15".to_string(), "test".to_string()],
         );
-        assert_eq!(UriMapper::get_detail_extension(&session_uri), "jsonl");
+        assert_ne!(
+            UriMapper::get_detail_extension(&session_uri),
+            "jsonl",
+            "会话内容已迁出 VFS（ADR-018），不应残留 jsonl 文件路径语义"
+        );
 
         let skill_uri = TianyanUri::new(ContextNamespace::Skill, vec!["file_ops".to_string()]);
         assert_eq!(UriMapper::get_detail_extension(&skill_uri), "md");

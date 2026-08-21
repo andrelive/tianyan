@@ -72,6 +72,8 @@ pub struct AgentBuilder {
     execution_log: Option<Arc<ExecutionLog>>,
     /// 会话回忆服务（ADR-017 决策 6：session_recall 工具依赖；None 时工具不可用）。
     session_recall: Option<Arc<crate::session::search::SessionRecall>>,
+    /// 会话权威存储（ADR-018：vfs_read 读 tianyan://session/{id} 兼容层；None 时不可用）。
+    session_store: Option<Arc<crate::session::store::SessionStore>>,
     usage_log: Option<Arc<crate::observability::usage_log::UsageLog>>,
     provider_by_model: std::collections::HashMap<String, String>,
     /// 聊天模型上下文规格（T5；注入 AgentLoop 并联动压缩窗口；None 时走默认窗口）。
@@ -104,6 +106,7 @@ impl AgentBuilder {
             trace_collector: None,
             execution_log: None,
             session_recall: None,
+            session_store: None,
             usage_log: None,
             provider_by_model: std::collections::HashMap::new(),
             chat_model_spec: None,
@@ -264,6 +267,12 @@ impl AgentBuilder {
         recall: Arc<crate::session::search::SessionRecall>,
     ) -> Self {
         self.session_recall = Some(recall);
+        self
+    }
+
+    /// 设置会话权威存储（ADR-018：vfs_read 对 tianyan://session/{id} 的兼容读取）。
+    pub fn with_session_store(mut self, store: Arc<crate::session::store::SessionStore>) -> Self {
+        self.session_store = Some(store);
         self
     }
 
@@ -462,6 +471,10 @@ impl AgentBuilder {
         // 会话回忆服务（ADR-017 决策 6：session_recall 工具）
         if let Some(ref recall) = self.session_recall {
             tool_registry = tool_registry.with_session_recall(recall.clone());
+        }
+        // 会话权威存储（ADR-018：vfs_read 会话 URI 兼容层）
+        if let Some(ref store) = self.session_store {
+            tool_registry = tool_registry.with_session_store(store.clone());
         }
 
         let mut agent_loop = AgentLoop::new(

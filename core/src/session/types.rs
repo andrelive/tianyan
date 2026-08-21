@@ -108,9 +108,12 @@ pub struct Session {
     pub summary: Option<String>,
     /// 会话标题（可选）。
     pub title: Option<String>,
-    /// 会话级状态头部（JSONL 首行，存注入上下文快照 + 会话元数据）。
+    /// 会话级状态头部（存注入上下文快照 + 会话元数据；ADR-018 后存 session_meta 表）。
     #[serde(default)]
     pub header: SessionHeader,
+    /// 消息数（轻量列表时预填；None = 未加载消息，按需经 get_session 获取）。
+    #[serde(default)]
+    pub message_count: Option<usize>,
 }
 
 impl Session {
@@ -124,6 +127,7 @@ impl Session {
             summary: None,
             title: None,
             header: SessionHeader::default(),
+            message_count: None,
         }
     }
 

@@ -68,6 +68,34 @@ impl SqliteDb {
     /// 初始化所有表的 Schema。
     pub async fn init_all_schemas(&self) -> Result<(), rusqlite::Error> {
         let conn = self.lock().await;
+        // ADR-018：会话权威存储迁出 VFS（pre-release 本地数据，直接重建）。
+        // 1) 清理 VFS 中残留的会话条目（旧 JSONL 伪文件）；
+        // 2) 旧结构 session_messages（无 content_parts 列）直接 DROP 重建。
+        let has_vfs_entries: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='vfs_entries')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if has_vfs_entries {
+            conn.execute(
+                "DELETE FROM vfs_entries WHERE uri LIKE 'tianyan://session/%'",
+                [],
+            )?;
+        }
+        let has_content_parts: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(session_messages)")?;
+            let cols = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            cols.iter().any(|c| c == "content_parts")
+        };
+        if !has_content_parts {
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS session_messages_fts; DROP TABLE IF EXISTS session_messages;",
+            )?;
+        }
         conn.execute_batch(SCHEMA_SQL)?;
         Ok(())
     }
@@ -183,22 +211,34 @@ const SCHEMA_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_executions_tool_ts ON executions(tool_name, ts);
     CREATE INDEX IF NOT EXISTS idx_executions_session_ts ON executions(session_id, ts);
 
-    -- 会话消息索引（ADR-017 决策 6：FTS5 会话回忆，方案 A；派生数据，可重建。
-    -- JSONL 保持权威；text 仅 user/assistant 文本，工具调用/结果截断存 tool_text）
+    -- 会话消息权威存储（ADR-018：迁出 VFS，JSONL 不再保存）。
+    -- seq 为会话内消息序号（追加顺序；唯一索引防并发撞号）；
+    -- content_parts 为完整 StructuredMessage JSON（唯一真相）；
+    -- text/tool_text 为派生列（FTS 回忆/窗口查询用；空消息占 seq 但不进 FTS）。
     CREATE TABLE IF NOT EXISTS session_messages (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id  TEXT    NOT NULL,
-        seq         INTEGER NOT NULL,
-        message_id  TEXT    NOT NULL,
-        role        TEXT    NOT NULL,
-        text        TEXT    NOT NULL DEFAULT '',
-        tool_text   TEXT    NOT NULL DEFAULT '',
-        tokens      INTEGER NOT NULL DEFAULT 0,
-        ts          INTEGER NOT NULL,
-        recorded_at TEXT    NOT NULL DEFAULT (datetime('now'))
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id    TEXT    NOT NULL,
+        seq           INTEGER NOT NULL,
+        message_id    TEXT    NOT NULL,
+        role          TEXT    NOT NULL,
+        text          TEXT    NOT NULL DEFAULT '',
+        tool_text     TEXT    NOT NULL DEFAULT '',
+        tokens        INTEGER NOT NULL DEFAULT 0,
+        ts            INTEGER NOT NULL,
+        content_parts TEXT    NOT NULL DEFAULT '',
+        recorded_at   TEXT    NOT NULL DEFAULT (datetime('now'))
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_uniq ON session_messages(session_id, seq);
     CREATE INDEX IF NOT EXISTS idx_session_messages_session_ts ON session_messages(session_id, ts);
+
+    -- 会话级状态（ADR-018：替代 JSONL 首行 SessionHeader；
+    -- injectable 快照 + title/ended_at/created_at 唯一持久化 home）
+    CREATE TABLE IF NOT EXISTS session_meta (
+        session_id  TEXT PRIMARY KEY,
+        header_json TEXT NOT NULL DEFAULT '{}',
+        created_at  INTEGER,
+        updated_at  TEXT DEFAULT (datetime('now'))
+    );
 
     -- LLM 用量日志（token 统计：每次 LLM 调用一行，覆盖聊天/子代理/演化任务；
     -- 由 AgentLoop 每轮拿到 turn_usage 后写入，供统计面板按 provider/model/时段聚合）

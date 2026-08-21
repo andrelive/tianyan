@@ -1,7 +1,7 @@
 # ADR-012: 注入上下文快照持久化 —— 前缀零漂移 + 会话边界/压缩点技能刷新
 
 **日期**: 2026-08-09
-**状态**: ✅ 已采纳
+**状态**: ✅ 已采纳（存储载体更新：SessionHeader 存 `session_meta.header_json`，ADR-018；注入/刷新语义不变）
 **影响范围**: 会话存储（`session/`）、上下文管线（`context/`）、Agent 编排（`agent/agent_core.rs`）、server 装配（`server/src/state.rs`）
 
 ---

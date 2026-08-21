@@ -1,7 +1,7 @@
 # ADR-015: 会话工作区绑定 —— 工作区是会话的父级分组
 
 **日期**: 2026-08-15
-**状态**: ✅ 已采纳
+**状态**: ✅ 已采纳（存储载体更新：`working_directory` 随 SessionHeader 存 `session_meta.header_json`，ADR-018）
 **影响范围**: 会话模型（`session/types.rs`）、快照体系（`snapshot/mod.rs`）、Agent 快照捕获（`agent/agent_core.rs`）、会话/工作区 API（`server/src/api/{sessions,workspace,chat}/`）、前端侧边栏与工作区面板（`gui-vite/src/components/{sidebar,workspace}/`）
 
 ---

@@ -11,7 +11,7 @@
 ## 0. 结论摘要（TL;DR）
 
 1. **定位不同，差距不等于缺陷**。DSH 是 DeepSeek 开源发布的 **harness 产品/生态平台**（开发者预览，快速迭代，面向第三方插件作者，npm 分发 + Python SDK + ACP/JSON-RPC 例子）；天演是**本地优先、单用户、综合智能体**（Rust 桌面应用）。DSH 的"一切皆插件"是其**产品形态本身**（可分发、可组合、可替换），天演的静态组合是"本地单机产品"的合理形态。多数 DSH 能力天演没有，属于**定位性差异**而非疏忽——天演 REJECTED.md 已对其中多项（插件市场 #6、OS 沙箱 #11、网络策略 #12、ACP #14、全异步事件 #17）做过明确决策。
-2. **天演与 DSH 在核心机制上高度同构**（独立收敛的证据）：会话日志即单一真相源（天演 JSONL StructuredMessage ≈ DSH append-only SessionEvent log + surface 投影）、压缩锚点（compression_marker ≈ compaction replace 语义）、工具化（ToolRegistry ≈ ctx.tools）、前缀稳定缓存（天演 ADR-012 前缀快照 ≈ DSH KV-cache 意识的设计）。**天演在记忆/检索层（VFS L0/L1/L2 + RRF）反而领先 DSH**（DSH 的 context 家族只是 session-reference/agent-instructions/time-context，无向量检索）。
+2. **天演与 DSH 在核心机制上高度同构**（独立收敛的证据）：会话日志即单一真相源（天演 SQLite `session_messages` 完整消息，ADR-018 ≈ DSH append-only SessionEvent log + surface 投影）、压缩锚点（compression_marker ≈ compaction replace 语义）、工具化（ToolRegistry ≈ ctx.tools）、前缀稳定缓存（天演 ADR-012 前缀快照 ≈ DSH KV-cache 意识的设计）。**天演在记忆/检索层（VFS L0/L1/L2 + RRF）反而领先 DSH**（DSH 的 context 家族只是 session-reference/agent-instructions/time-context，无向量检索）。
 3. **插件化架构是 DSH 最值得学习的部分，但正确姿势不是"引入插件框架"，而是"把 DSH 插件化背后的五个具体机制拆出来，逐个评估吸收"**：
    - ① 工具执行管线瀑布化（pre-execute → guard → execute → post-execute → result 的可插拔监听）
    - ② 工具展示契约（presentCall/presentResult：工具自描述 UI 渲染意图）
@@ -47,7 +47,7 @@
 | 组合方式 | 编译期模块 + 启动期 builder 注入（`agent_builder.rs`、`with_approval_workflow`） | 运行时 Cordis 插件树：profile（命名组合）→ bundle（分发层）→ patch（覆盖层，按行 id 整行替换 config） | 天演：无运行时可替换；DSH：`dsh --dump-config` 打印整棵树，任何一行可 patch |
 | 扩展点 | ToolRegistry 静态注册（改 5 处加一个工具）+ `DynamicToolExecutor`（仅 MCP 用）+ 技能（call_skill） | 类型化事件（emit/waterfall/parallel/serial）+ Service 注册表（ctx.*）+ scope 化注册 | DSH 的"每个产品特性 = 某个文档化扩展点上的监听器"是可检验的 microkernel 声明 |
 | 工具管线 | 固定管线：SecurityPolicy → ApprovalWorkflow（五级）→ VerificationGate，启动注入，策略固定 | 可插拔瀑布：`tools/pre-execute`（allow/deny/ask）→ 单调 guard → `tools/execute`（包装）→ `tools/post-execute`（改结果）→ `tools/result`（只读观察） | DSH 的 guard 是**单调的**（只能 deny 不能 allow），这是防竞态的高明设计 |
-| 会话真相源 | JSONL `StructuredMessage` + SessionHeader 前缀快照（ADR-002/012） | append-only `SessionEvent` log + surface 投影（`deriveMessages()`），"model-visible means logged" 不变量 | **概念同构**；DSH 把"派生历史"与"人类回放"分两个投影，天演 marker 截断类似 |
+| 会话真相源 | SQLite `session_messages`（完整 `StructuredMessage`）+ `session_meta` 前缀快照（ADR-018，迁出 VFS） | append-only `SessionEvent` log + surface 投影（`deriveMessages()`），"model-visible means logged" 不变量 | **概念同构**；DSH 把"派生历史"与"人类回放"分两个投影，天演 marker 截断类似 |
 | 上下文工程 | VFS L0/L1/L2 双层摘要 + RRF 融合 + 前缀缓存（**强项**） | session-reference（从日志派生）+ agent-instructions（AGENTS.md）+ time/tmux context（**弱项**） | 天演领先；DSH 没有向量检索/记忆层（靠 session log 全量 + compaction） |
 | 多 agent | `delegate_to_agent`（角色化 roles.rs、嵌套 3、后台、join 信号） | subagent provider registry（in-process/fork/ACP/Codex/Claude Code/dsh-sdk 多种 provider）+ workflow 引擎 | 天演同构能力 ✓；DSH 多 provider 与模型可写 workflow 是天演没有的 |
 | 安全 | 审批流 + 快照回退 + 命令级审批策略（信任模型：本地单用户） | sandbox seam（landlock/sandbox-exec/Windows ACL 受限令牌）+ guard + 权限切换器 + approval 服务 | 定位差异（天演 REJECTED #11/#12）；DSH 的 monotonic guard 思想可学 |
@@ -115,7 +115,7 @@ DSH 基于 vendored 的 **Cordis**（Koishi 生态的 TypeScript 插件框架，
 
 | 能力 | 天演 | DSH | 判定 |
 |------|------|-----|------|
-| 会话单一真相源 | ✅ JSONL + marker | ✅ event log + surface | 同构（天演略简） |
+| 会话单一真相源 | ✅ SQLite `session_messages` + marker（ADR-018） | ✅ event log + surface | 同构（天演略简） |
 | 记忆/检索 | ✅✅ VFS L0/L1/L2 + RRF（**领先**） | ◐ 无向量层 | 天演领先 |
 | 技能 | ✅✅ GEPA 进化（**业界独有**） | ✅ provider 目录 | 天演领先 |
 | 前缀缓存工程 | ✅ ADR-012 快照 + 固定前缀顺序 | ✅ KV-cache 意识（request/header 重建） | 同构 |
@@ -177,7 +177,7 @@ DSH 基于 vendored 的 **Cordis**（Koishi 生态的 TypeScript 插件框架，
 | 3 | inject 依赖声明驱动加载顺序（notify 唤醒） | ✗ 不需要——Rust 编译期 + builder 组合已足够，运行时 DI 图收益为零 | （若未来需要）`dyn Any` 服务仓库 + 依赖图唤醒；当前不做 |
 | 4 | 事件分派模式化（5 模式 + @mode + scope 过滤） | ✅ 吸收：工具管线 pre/post 监听器 + 单调 guard（A1/A4），进程内同步即可 | `enum DispatchMode {Emit, Parallel, Serial, Bail, Waterfall}` + 注册时声明模式 |
 | 5 | capability seam 三分法（Definition/Provider/Consumer） | ◐ 已有雏形（`StorageBackend` seam，ADR-005），显式化为通用模式即可 | trait + 默认实现 + 消费者只依赖 trait |
-| 6 | 会话日志唯一真相源 + "模型可见 ⟺ 已入日志" | ✅ **已同构**（StructuredMessage JSONL + 实时持久化）；可补硬不变量文档化 | append-only 事件流 + 从事件流派生 `Vec<Message>` 的纯函数 + 快照检查点 |
+| 6 | 会话日志唯一真相源 + "模型可见 ⟺ 已入日志" | ✅ **已同构**（StructuredMessage 实时持久化至 SQLite，ADR-018）；可补硬不变量文档化 | append-only 事件流 + 从事件流派生 `Vec<Message>` 的纯函数 + 快照检查点 |
 | 7 | 工具七段管线 + 单调 guard + 审批 fail-closed | ✅ 吸收（A1/A4）——天演审批链可对齐 fail-closed 语义 | `enum PreDecision {Allow, Deny, Ask}` + `fn guard(&self, exec) -> Option<String>` |
 | 8 | 配置 = patch 层组合 + `!!js` 延迟求值 + `--dump-config` 等价 | ◐ 吸收简化版：默认层 + 用户层 merge（B5）；dump-config 等价性天演无需求 | TOML 分层 + id 定向 merge + `--dump-config` 测试断言 |
 | 9 | 生成器 + 校验器对（gen-X + --check + verify-spec，文档永不漂移） | ✅ 吸收（A3）——这是 DSH 工程纪律的核心资产 | build.rs/xtask 生成 + `trybuild`/`cargo test` 门禁 + 从代码生成 API 文档 |

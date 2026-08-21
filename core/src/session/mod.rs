@@ -26,8 +26,10 @@
 //! ```
 
 mod manager;
-/// 会话消息索引与回忆检索（ADR-017 决策 6：FTS5 会话回忆）。
+/// 会话回忆检索（ADR-017 决策 6：FTS5 会话回忆；读 store 同一张表）。
 pub mod search;
+/// 会话权威存储（ADR-018：SQLite 表为唯一真相，VFS 会话例外）。
+pub mod store;
 mod types;
 
 /// 会话消息数量上限（持久态安全上限）。

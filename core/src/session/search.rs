@@ -1,23 +1,18 @@
-//! 会话消息索引与回忆检索（ADR-017 决策 6：FTS5 会话回忆，方案 A）。
+//! 会话回忆检索（ADR-017 决策 6：FTS5 会话回忆，方案 A）。
 //!
-//! JSONL 保持权威（VFS）；本模块是派生消息索引（SQLite，可重建）：
-//! - session_messages 表：逐条消息（text 仅 user/assistant 文本；工具调用/结果
-//!   截断存 tool_text，供记忆提取保留要点）；
-//! - FTS5 倒排索引（trigram tokenizer：中文子串匹配，BM25 排序）；
-//! - 回忆流程：关键词 → BM25 命中 → 附近窗口（user/assistant 文本，忽略工具）。
+//! 会话权威存储已迁入 SQLite（ADR-018，`crate::session::store::SessionStore`）；
+//! 本模块是回忆检索服务，读同一张 `session_messages` 表：
+//! - FTS5 倒排索引（trigram tokenizer：中文子串匹配，BM25 排序；rowid 对应消息行）；
+//! - 回忆流程：关键词 → BM25 命中 → 附近窗口（user/assistant 文本，忽略工具）；
+//! - 消息写入（含 FTS 维护）由 SessionStore 负责，本模块只读。
 //!
-//! 架构落位：session 模块能力（共享 SqliteDb，派生数据），不新增平行检索抽象。
+//! 架构落位：session 模块能力（共享 SqliteDb，权威数据），不新增平行检索抽象。
 
 use std::sync::Arc;
 
 use crate::common::error::TianyanError;
-use crate::common::types::{Part, StructuredMessage};
 use crate::vfs::backend::sqlite_db::SqliteDb;
 
-/// 文本列截断上限（FTS 索引体积控制）。
-const MAX_TEXT_CHARS: usize = 4000;
-/// 工具文本截断上限（记忆提取保留要点）。
-const MAX_TOOL_TEXT_CHARS: usize = 500;
 /// 回忆窗口默认半径（命中前后各 N 条）。
 pub const DEFAULT_WINDOW_RADIUS: i64 = 5;
 
@@ -51,13 +46,13 @@ pub struct RecallMessage {
     pub role: String,
     /// 文本内容（user/assistant）。
     pub text: String,
-    /// 工具调用/结果（截断；记忆提取保留要点用）。
+    /// 工具调用/结果（截断；回忆窗口展示用）。
     pub tool_text: String,
     /// 消息创建时间（epoch 毫秒）。
     pub ts: i64,
 }
 
-/// 会话消息索引与回忆检索服务。
+/// 会话回忆检索服务。
 #[derive(Clone)]
 pub struct SessionRecall {
     db: SqliteDb,
@@ -70,51 +65,6 @@ impl SessionRecall {
     /// * 返回 TianyanError（本方法当前不失败，签名保持与全库统一错误类型）。
     pub fn new(db: SqliteDb) -> Result<Arc<Self>, TianyanError> {
         Ok(Arc::new(Self { db }))
-    }
-
-    /// 索引一条消息（append hook 调用；零 LLM）。
-    ///
-    /// text 为空且 tool_text 为空（如纯图片消息）时跳过。
-    ///
-    /// # Errors
-    /// * SQLite 写入失败时返回 TianyanError::Custom（带 session 前缀）。
-    pub async fn index_message(
-        &self,
-        session_id: &str,
-        seq: i64,
-        msg: &StructuredMessage,
-    ) -> Result<(), TianyanError> {
-        let (text, tool_text) = extract_parts(msg);
-        if text.is_empty() && tool_text.is_empty() {
-            return Ok(());
-        }
-        let conn = self.db.lock().await;
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| sqlite_error("索引事务开启失败", e))?;
-        tx.execute(
-            "INSERT INTO session_messages (session_id, seq, message_id, role, text, tool_text, tokens, ts) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            rusqlite::params![
-                session_id,
-                seq,
-                msg.id,
-                msg.role.to_string(),
-                text,
-                tool_text,
-                msg.tokens.total as i64,
-                msg.time.created,
-            ],
-        )
-        .map_err(|e| sqlite_error("消息索引写入失败", e))?;
-        let rowid = tx.last_insert_rowid();
-        tx.execute(
-            "INSERT INTO session_messages_fts (rowid, text) VALUES (?1, ?2)",
-            rusqlite::params![rowid, text],
-        )
-        .map_err(|e| sqlite_error("FTS 索引写入失败", e))?;
-        tx.commit()
-            .map_err(|e| sqlite_error("索引事务提交失败", e))?;
-        Ok(())
     }
 
     /// 关键词回忆：FTS5 BM25 命中（trigram 子串匹配，中文无需分词）。
@@ -151,7 +101,7 @@ impl SessionRecall {
     }
 
     /// 命中附近窗口（user/assistant 文本 + tool_text 截断；忽略工具过滤由
-    /// text 列天然保证——工具调用/结果只进 tool_text）。
+    /// text 列天然保证——工具调用/结果只进 tool_text；空正文消息不参与）。
     ///
     /// # Errors
     /// * SQLite 查询失败时返回 TianyanError::Custom（带 session 前缀）。
@@ -162,7 +112,7 @@ impl SessionRecall {
         radius: i64,
     ) -> Result<Vec<RecallMessage>, TianyanError> {
         let conn = self.db.lock().await;
-        let sql = "SELECT session_id, seq, message_id, role, text, tool_text, ts                    FROM session_messages                    WHERE session_id = ?1 AND seq BETWEEN ?2 AND ?3                    ORDER BY seq";
+        let sql = "SELECT session_id, seq, message_id, role, text, tool_text, ts                    FROM session_messages                    WHERE session_id = ?1 AND seq BETWEEN ?2 AND ?3                      AND (text != '' OR tool_text != '')                    ORDER BY seq";
         let mut stmt = conn
             .prepare(sql)
             .map_err(|e| sqlite_error("窗口查询准备失败", e))?;
@@ -186,7 +136,7 @@ impl SessionRecall {
         limit: usize,
     ) -> Result<Vec<RecallMessage>, TianyanError> {
         let conn = self.db.lock().await;
-        let sql = "SELECT session_id, seq, message_id, role, text, tool_text, ts                    FROM session_messages                    WHERE session_id = ?1 AND seq > ?2                    ORDER BY seq LIMIT ?3";
+        let sql = "SELECT session_id, seq, message_id, role, text, tool_text, ts                    FROM session_messages                    WHERE session_id = ?1 AND seq > ?2                      AND (text != '' OR tool_text != '')                    ORDER BY seq LIMIT ?3";
         let mut stmt = conn
             .prepare(sql)
             .map_err(|e| sqlite_error("增量查询准备失败", e))?;
@@ -197,85 +147,6 @@ impl SessionRecall {
             )
             .map_err(|e| sqlite_error("增量查询执行失败", e))?;
         collect(rows, "增量查询行读取失败")
-    }
-
-    /// 从 JSONL 重建某会话索引（幂等：先清后建；seq 按消息行号）。
-    ///
-    /// # Errors
-    /// * SQLite 写入失败时返回 TianyanError::Custom（带 session 前缀）。
-    pub async fn rebuild_session(
-        &self,
-        session_id: &str,
-        jsonl: &str,
-    ) -> Result<usize, TianyanError> {
-        let messages = crate::session::parse_message_lines(jsonl);
-        let conn = self.db.lock().await;
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| sqlite_error("重建事务开启失败", e))?;
-        tx.execute(
-            "DELETE FROM session_messages WHERE session_id = ?1",
-            rusqlite::params![session_id],
-        )
-        .map_err(|e| sqlite_error("重建清理失败", e))?;
-        tx.execute(
-            "DELETE FROM session_messages_fts WHERE rowid IN              (SELECT id FROM session_messages WHERE session_id = ?1)",
-            rusqlite::params![session_id],
-        )
-        .map_err(|e| sqlite_error("重建 FTS 清理失败", e))?;
-        for (i, msg) in messages.iter().enumerate() {
-            let (text, tool_text) = extract_parts(msg);
-            if text.is_empty() && tool_text.is_empty() {
-                continue;
-            }
-            tx.execute(
-                "INSERT INTO session_messages (session_id, seq, message_id, role, text, tool_text, tokens, ts) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                rusqlite::params![
-                    session_id,
-                    i as i64,
-                    msg.id,
-                    msg.role.to_string(),
-                    text,
-                    tool_text,
-                    msg.tokens.total as i64,
-                    msg.time.created,
-                ],
-            )
-            .map_err(|e| sqlite_error("重建消息写入失败", e))?;
-            let rowid = tx.last_insert_rowid();
-            tx.execute(
-                "INSERT INTO session_messages_fts (rowid, text) VALUES (?1, ?2)",
-                rusqlite::params![rowid, text],
-            )
-            .map_err(|e| sqlite_error("重建 FTS 写入失败", e))?;
-        }
-        tx.commit()
-            .map_err(|e| sqlite_error("重建事务提交失败", e))?;
-        Ok(messages.len())
-    }
-
-    /// 删除会话索引（delete_session 时调用）。
-    ///
-    /// # Errors
-    /// * SQLite 写入失败时返回 TianyanError::Custom（带 session 前缀）。
-    pub async fn delete_session(&self, session_id: &str) -> Result<(), TianyanError> {
-        let conn = self.db.lock().await;
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| sqlite_error("删除事务开启失败", e))?;
-        tx.execute(
-            "DELETE FROM session_messages_fts WHERE rowid IN              (SELECT id FROM session_messages WHERE session_id = ?1)",
-            rusqlite::params![session_id],
-        )
-        .map_err(|e| sqlite_error("删除 FTS 清理失败", e))?;
-        tx.execute(
-            "DELETE FROM session_messages WHERE session_id = ?1",
-            rusqlite::params![session_id],
-        )
-        .map_err(|e| sqlite_error("删除消息清理失败", e))?;
-        tx.commit()
-            .map_err(|e| sqlite_error("删除事务提交失败", e))?;
-        Ok(())
     }
 }
 
@@ -307,42 +178,6 @@ fn collect(
     Ok(out)
 }
 
-/// 从消息提取 (text, tool_text)：text 仅 user/assistant 文本；工具调用/结果
-/// 截断进 tool_text（记忆提取保留要点）。
-fn extract_parts(msg: &StructuredMessage) -> (String, String) {
-    let mut text = String::new();
-    let mut tool_text = String::new();
-    for part in &msg.parts {
-        match part {
-            Part::Text { text: t, .. } => {
-                if !text.is_empty() {
-                    text.push('\n');
-                }
-                text.push_str(t);
-            }
-            Part::ToolCall {
-                name, arguments, ..
-            } => {
-                if !tool_text.is_empty() {
-                    tool_text.push('\n');
-                }
-                tool_text.push_str(&format!("[调用 {name}] {arguments}"));
-            }
-            Part::ToolResult { content, .. } => {
-                if !tool_text.is_empty() {
-                    tool_text.push('\n');
-                }
-                tool_text.push_str(&format!("[结果] {content}"));
-            }
-            Part::Reasoning { .. } | Part::Image { .. } => {}
-        }
-    }
-    (
-        truncate_utf8(&text, MAX_TEXT_CHARS),
-        truncate_utf8(&tool_text, MAX_TOOL_TEXT_CHARS),
-    )
-}
-
 /// FTS5 查询净化：trigram 短语匹配（去引号防注入；过短查询返回空）。
 fn sanitize_fts_query(query: &str) -> String {
     let cleaned: String = query
@@ -355,18 +190,6 @@ fn sanitize_fts_query(query: &str) -> String {
     format!("\"{cleaned}\"")
 }
 
-/// UTF-8 边界安全的截断。
-fn truncate_utf8(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
-}
-
 /// SQLite 错误包装（带 session 前缀）。
 fn sqlite_error(context: &str, e: rusqlite::Error) -> TianyanError {
     TianyanError::Custom(format!("session: session_recall: {context}：{e}"))
@@ -375,7 +198,10 @@ fn sqlite_error(context: &str, e: rusqlite::Error) -> TianyanError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::{DetailedTokenUsage, MessageRole, MessageTime, PartTime};
+    use crate::common::types::{
+        DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
+    };
+    use crate::session::store::SessionStore;
 
     fn msg(
         id: &str,
@@ -425,33 +251,35 @@ mod tests {
         }
     }
 
-    async fn make_recall() -> Arc<SessionRecall> {
+    /// 建内存库：store（写数据）+ recall（查数据）共享同一 SqliteDb。
+    async fn make_pair() -> (Arc<SessionStore>, Arc<SessionRecall>) {
         let db = SqliteDb::open_in_memory().unwrap();
         db.init_all_schemas().await.unwrap();
-        SessionRecall::new(db).unwrap()
+        (
+            SessionStore::new(db.clone()).unwrap(),
+            SessionRecall::new(db).unwrap(),
+        )
     }
 
     #[tokio::test]
     async fn test_index_and_search_chinese_substring() {
-        let recall = make_recall().await;
-        recall
-            .index_message(
+        let (store, recall) = make_pair().await;
+        store
+            .append_message(
                 "s1",
-                0,
                 &msg("m1", MessageRole::User, "我们讨论部署方案", None),
             )
             .await
             .unwrap();
-        recall
-            .index_message(
+        store
+            .append_message(
                 "s1",
-                1,
                 &msg("m2", MessageRole::Assistant, "建议用 docker 部署", None),
             )
             .await
             .unwrap();
-        recall
-            .index_message("s1", 2, &msg("m3", MessageRole::User, "今天天气不错", None))
+        store
+            .append_message("s1", &msg("m3", MessageRole::User, "今天天气不错", None))
             .await
             .unwrap();
 
@@ -473,11 +301,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_parts_not_in_fts() {
-        let recall = make_recall().await;
-        recall
-            .index_message(
+        let (store, recall) = make_pair().await;
+        store
+            .append_message(
                 "s1",
-                0,
                 &msg(
                     "m1",
                     MessageRole::Assistant,
@@ -494,7 +321,7 @@ mod tests {
         let hits = recall.search("我来查一下", 5).await.unwrap();
         assert_eq!(hits.len(), 1);
 
-        // tool_text 保留（记忆提取用）
+        // tool_text 保留（回忆窗口展示）
         let since = recall.messages_since("s1", -1, 10).await.unwrap();
         assert_eq!(since.len(), 1);
         assert!(since[0].tool_text.contains("read_file"));
@@ -503,12 +330,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_around_hit() {
-        let recall = make_recall().await;
+        let (store, recall) = make_pair().await;
         for i in 0..10 {
-            recall
-                .index_message(
+            store
+                .append_message(
                     "s1",
-                    i,
                     &msg(
                         &format!("m{i}"),
                         MessageRole::User,
@@ -527,12 +353,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_messages_since_watermark() {
-        let recall = make_recall().await;
+        let (store, recall) = make_pair().await;
         for i in 0..5 {
-            recall
-                .index_message(
+            store
+                .append_message(
                     "s1",
-                    i,
                     &msg(
                         &format!("m{i}"),
                         MessageRole::User,
@@ -550,43 +375,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rebuild_session_idempotent() {
-        let recall = make_recall().await;
-        // 先索引两条
-        recall
-            .index_message("s1", 0, &msg("m1", MessageRole::User, "第一条", None))
+    async fn test_empty_message_excluded_from_recall_queries() {
+        let (store, recall) = make_pair().await;
+        // 空正文消息占 seq 但不参与窗口/增量查询
+        store
+            .append_message("s1", &msg("m-empty", MessageRole::User, "", None))
             .await
             .unwrap();
-        recall
-            .index_message("s1", 1, &msg("m2", MessageRole::User, "第二条", None))
+        store
+            .append_message("s1", &msg("m2", MessageRole::User, "有正文", None))
             .await
             .unwrap();
-        // 重建（模拟 rewrite_messages 全量覆写）
-        let jsonl = format!(
-            "{}
-{}
-",
-            serde_json::to_string(&msg("m1", MessageRole::User, "第一条", None)).unwrap(),
-            serde_json::to_string(&msg("m2", MessageRole::User, "第二条", None)).unwrap(),
-        );
-        let count = recall.rebuild_session("s1", &jsonl).await.unwrap();
-        assert_eq!(count, 2);
         let since = recall.messages_since("s1", -1, 10).await.unwrap();
-        assert_eq!(since.len(), 2, "重建后不应重复");
-    }
-
-    #[tokio::test]
-    async fn test_delete_session() {
-        let recall = make_recall().await;
-        recall
-            .index_message("s1", 0, &msg("m1", MessageRole::User, "要删的", None))
-            .await
-            .unwrap();
-        recall.delete_session("s1").await.unwrap();
-        let hits = recall.search("要删的", 5).await.unwrap();
-        assert!(hits.is_empty());
-        let since = recall.messages_since("s1", -1, 10).await.unwrap();
-        assert!(since.is_empty());
+        assert_eq!(since.len(), 1);
+        assert_eq!(since[0].message_id, "m2");
+        let win = recall.window("s1", 1, 1).await.unwrap();
+        assert_eq!(win.len(), 1);
+        assert_eq!(win[0].message_id, "m2");
     }
 
     #[test]
@@ -595,14 +400,5 @@ mod tests {
         assert_eq!(sanitize_fts_query("a b c"), "\"abc\"");
         assert_eq!(sanitize_fts_query("ab"), "");
         assert_eq!(sanitize_fts_query("带\"引号\"的词"), "\"带引号的词\"");
-    }
-
-    #[test]
-    fn test_extract_parts() {
-        let m = msg("m1", MessageRole::Assistant, "正文", Some(("grep", "{}")));
-        let (text, tool_text) = extract_parts(&m);
-        assert_eq!(text, "正文");
-        assert!(tool_text.contains("[调用 grep]"));
-        assert!(tool_text.contains("[结果] 结果-m1"));
     }
 }

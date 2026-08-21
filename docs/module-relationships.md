@@ -160,8 +160,9 @@ Tauri App 启动
     │     │         └─ AgentBuilder::build()
     │     │
     │     ├─ 3.3 TaskScheduler 启动
-    │     │     ├─ SummaryTask（每 5 分钟）
-    │     │     └─ MemoryTask（每 10 分钟）
+    │     │     ├─ SummaryTask（每 6 小时；ADR-017 降频）
+    │     │     ├─ EvolutionTask（每日；ADR-017 统一演化）
+    │     │     └─ GcTask / SnapshotGcTask / ReminderTask / UsageStatsFlushTask
     │     │
     │     └─ 3.4 axum::serve()              [监听 127.0.0.1:3000]
     │
@@ -220,8 +221,7 @@ Agent::process_message()                  [core/src/agent/coordinator.rs]
 React Frontend 按 chunk_type 差异化渲染
 ```
 
-> **注意**：RuleRecorder/RuleSuggester 已移至 `scheduler/tasks/`，作为定时任务独立运行；
-> MemoryExtraction 由 `scheduler/tasks/memory_task.rs` 定时触发。
+> **注意**：规则记录经工具执行管线内联写入（`RuleRecorder`）；记忆/技能/规则/组织形态的演化统一由 `EvolutionTask` 承担（ADR-017；`memory_task.rs`/`rule_task.rs`/`rule_suggester.rs` 已删除，ADR-018 落实）。
 
 ### 3.3 消息编辑/重新生成流程
 
@@ -269,11 +269,10 @@ React Frontend 按 chunk_type 差异化渲染
 ```
 TaskScheduler 触发
     │
-    ├─ MemoryTask::handle()               [core/src/scheduler/tasks/memory_task.rs]
-    │     └─ MemoryExtractor::extract_from_text()
-    │           ├─ ChatService::chat_completion()（提取记忆）
-    │           └─ 返回 Vec<MemoryEntry>
-    │           └─ VFS::write() 持久化到 tianyan://memory/
+    ├─ EvolutionTask::handle()            [core/src/scheduler/tasks/evolution_task.rs]
+    │     ├─ 采集：注册表清单 + 会话回忆（session_recall，FTS5）
+    │     ├─ 综述：演化智能体（delegate 到 evolution_reviewer）产出 diff 计划
+    │     └─ 记账提交：记忆/技能/规则/角色增删改 → VFS 写入
     │
     └─ SummaryTask::handle()              [core/src/scheduler/tasks/summary_task.rs]
           └─ SummaryEngine::process_all()
@@ -347,10 +346,10 @@ TaskScheduler 触发
 | `VfsCore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `context/pipeline.rs` |
 | `ContentStore` | `core/src/vfs/traits.rs` | `VfsImpl` | `vfs/vfs_impl.rs`, `scheduler/tasks/` |
 | `VfsSearch` | `core/src/vfs/traits.rs` | `VfsImpl` | `context/retrieval/retriever.rs` |
-| `VirtualFileSystem` | `core/src/vfs/traits.rs` | 实现 VfsCore+ContentStore+VfsSearch 的类型自动获得 | `server/state.rs`, `agent/coordinator.rs`, `session/manager.rs` |
+| `VirtualFileSystem` | `core/src/vfs/traits.rs` | 实现 VfsCore+ContentStore+VfsSearch 的类型自动获得 | `server/state.rs`, `agent/coordinator.rs`（session/manager 已迁出 VFS，见 ADR-018） |
 | `SqliteBackend` | `core/src/vfs/backend/sqlite.rs` | SQLite 存储后端（具体类型） | `vfs/vfs_impl.rs` |
 | `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore`（`vfs/vector/lancedb/`） | `vfs/vfs_impl.rs`, `context/retrieval/` |
-| `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager` | `server/state.rs`, `agent/coordinator.rs` |
+| `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`（基于 `SessionStore`，ADR-018） | `server/state.rs`, `agent/coordinator.rs` |
 | `SkillExecutor` | `core/src/skills/executor.rs` | `SkillExecutor` | `agent/tool_registry/`（通过 call_skill 工具桥接） |
 
 > **注意**：`ModelServices` 不是 trait，是 `core/src/model/services.rs` 中的 struct，聚合 `Arc<dyn ChatService>` + `Arc<dyn EmbeddingService>` + `Arc<dyn VlmService>`。
@@ -395,7 +394,7 @@ TaskScheduler 触发
 
 | 原偏差项 | 原描述 | 现状 |
 |--------|------|------|
-| SessionManager | `PlaceholderSessionManager`（空实现） | 已删除；仅存 `PersistentSessionManager`，会话经 VFS 持久化（`core/src/session/manager.rs`） |
+| SessionManager | `PlaceholderSessionManager`（空实现） | 已删除；仅存 `PersistentSessionManager`，会话经 `SessionStore`（SQLite 权威存储，ADR-018）持久化（`core/src/session/manager.rs`） |
 | 前端 Knowledge UI | 无前端 UI 对应 | 已有知识管理面板 `gui-vite/src/components/knowledge/KnowledgePanel.tsx` |
 | 前端 Runtime Config UI | 无前端 UI 对应 | 设置面板 `gui-vite/src/components/settings/`（13 Tab）经 `lib/api-client.ts` 覆盖运行时配置 |
 
@@ -456,7 +455,7 @@ soul → rules+memories → history(from compression_marker) → current input
 
 ## 8. 已知待办事项
 
-> 当前无已知架构待办（2026-08-13 架构深化核查：sessions/knowledge/config 的旧 TODO 均已随迭代消除——会话 CRUD 经 `PersistentSessionManager`（VFS），知识导入/检索经 `KnowledgeIngestor` + `DualLayerRetriever`，配置读写经 `ConfigService` → core `TianyanConfig`）。
+> 当前无已知架构待办（2026-08-13 架构深化核查：sessions/knowledge/config 的旧 TODO 均已随迭代消除——会话 CRUD 经 `PersistentSessionManager`（`SessionStore` SQLite 权威存储，ADR-018），知识导入/检索经 `KnowledgeIngestor` + `DualLayerRetriever`，配置读写经 `ConfigService` → core `TianyanConfig`）。
 
 ---
 

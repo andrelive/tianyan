@@ -22,7 +22,7 @@
 | 记忆/知识 | VFS L0/L1/L2 双层摘要索引、记忆提取、GEPA 技能进化、会话压缩 |
 | 评测 | `core/src/eval` 评分式离线评测（黄金用例）、verify_build LLM-as-Judge 门控 |
 | 可观测性 | AgentMetrics（内存态）、UsageStats（SQLite）、检索轨迹 FIFO |
-| 状态管理 | JSONL 会话持久化、消息级快照回退/重做、取消/优雅关停 |
+| 状态管理 | SQLite 会话持久化（ADR-018）、消息级快照回退/重做、取消/优雅关停 |
 | 界面 | Tauri 桌面 + 聊天 UI + 编程工作台（只读+编辑）+ 管理面板 |
 | 定时 | scheduler（规则/记忆/摘要/GC） |
 
@@ -117,7 +117,7 @@ Phase 3（P2）
 | Web 搜索工具（Phase 1） | ✅ 已实施 | `core/src/executor/web.rs`：web_search（DuckDuckGo/SearXNG 双后端）+ web_fetch（可读正文提取）+ SSRF 防护 + TTL 缓存；`[web]` 配置节；25 个内置工具 |
 | 后台长任务 + 结果聚合（Phase 2） | ✅ 已实施 | `core/src/agent/background.rs`：delegate(background) fire-and-forget + 任务注册表（状态机/并发上限 4）+ 完成通知注入父会话（结果摘要 + 剩余计数 join 信号）；task_status/task_cancel 工具 + GET /api/v1/tasks |
 | 结果聚合工具（P1） | ✅ 已消除（设计替代） | 2026-08-08 审查：事件驱动 + LLM 聚合完整覆盖——完成通知携带**完整结果** + join 信号（剩余计数/汇总指令）；`task_status` 返回完整任务（含 result，serde 全量）作兜底；前台并行委托同轮直接返回聚合。业界代码级 fan-in（collect_delegations）面向 20-100 扇出规模，天演并发上限 4 + LLM 合成质量更高，无需工具级实现 |
-| 注入上下文快照持久化 + 会话边界/压缩点技能刷新 | ✅ 已实施 | JSONL 首行 SessionHeader 固化 soul/rules/memories 快照（重启后旧会话零漂移）；新会话边界增量注册 GEPA 技能（`SkillManager::refresh_registry` 幂等）；压缩点（自动/手动 `POST /sessions/{id}/compress`）清空快照 + 刷新注册表（会话内唯一免费刷新点） |
+| 注入上下文快照持久化 + 会话边界/压缩点技能刷新 | ✅ 已实施 | `session_meta.header_json`（SessionHeader）固化 soul/rules/memories 快照（重启后旧会话零漂移；ADR-018 后存 SQLite 表）；新会话边界增量注册 GEPA 技能（`SkillManager::refresh_registry` 幂等）；压缩点（自动/手动 `POST /sessions/{id}/compress`）清空快照 + 刷新注册表（会话内唯一免费刷新点） |
 
 ## 8. 第三轮差距审查（2026-08-10，T1+T2 全量落地后）
 
@@ -135,9 +135,9 @@ Phase 3（P2）
 |---|--------|------|--------------------|---------|------|
 | **G1** | P0 | 工具/技能短路选择层 | IBM 评测：工具数 >128 且无 shortlisting 时，GPT-5.2 在 AppWorld（468 工具）得分 **0.00** | ✅ **已实施（2026-08-10）** | 阈值驱动（40）短路选择：核心集恒存 + 条件工具关键词表 + MCP 名称/描述匹配（英文分词 + 中文片段）；执行层全量保留（被过滤工具调用仍可执行，无"未加载"错误路径）；`[agent] shortlist_tools` 默认开启。实现：`tool_registry/definitions_shortlisted` + `AgentLoop::tools_for_turn`。技能 L0 摘要短路留待 G2b 后置 |
 | **G2** | P0 | 技能激活率评测与保障 | Vercel agent evals：**56% 测试用例中技能从未被调用**——渐进式披露的激活可靠性是全行业未解问题 | ✅ **G2a+G2b 已实施（2026-08-10）** | ① G2a 可观测性：AgentMetrics 技能激活统计 + self_check 暴露 `skills_invoked`/`skill_calls_total`；② G2b 候选验证门：GEPA 新技能注册前 LLM 质量审查（`verify_candidate` 0-10 打分 + 问题清单），<6 分标记"试验性"（分级注册：L2 状态标记 + L0 `[试验性]` 前缀，仍可发现但提示谨慎使用），验证不可用降级正式不阻塞学习回路；`SkillLearningConfig.candidate_verification`（默认 true）+ `candidate_score_threshold`（默认 6）。③ golden 会话回归（必须调用技能 X 的场景）留待 eval 模块扩展 |
-| **G3** | P0 | 记忆溯源/引用 | GitHub Copilot 记忆系统加入实时引用验证（记忆携带出处、注入前校验），PR 合并率 **+7%** | ✅ **已实施（2026-08-10）** | 消息级引用：`MemoryEntry.source_message_ids`（MemoryTask 解析会话 JSONL 注入）；注入出处：L1 摘要携带 `来源会话`（LLM 可见）；偏好类写前校验：`[memory] verify_preferences`（默认关闭 opt-in，`MemoryExtractor::verify_preference` 保守拒绝）。实现：`core/src/memory/extractor.rs` + `scheduler/tasks/memory_task.rs` + `common/types/memory.rs` + `config/memory.rs` |
+| **G3** | P0 | 记忆溯源/引用 | GitHub Copilot 记忆系统加入实时引用验证（记忆携带出处、注入前校验），PR 合并率 **+7%** | ⚠️ 能力保留，载体调整（2026-01-01） | 消息级引用：`MemoryEntry.source_message_ids`（`MemoryExtractor` 能力保留；原 `MemoryTask` 载体已随 ADR-018 死代码清理删除，待演化流程复用）；注入出处：L1 摘要携带 `来源会话`（LLM 可见）；偏好类写前校验：`[memory] verify_preferences`（默认关闭 opt-in，`MemoryExtractor::verify_preference` 保守拒绝）。实现：`core/src/memory/extractor.rs` + `common/types/memory.rs` + `config/memory.rs` |
 | **G4** | P1 | 循环内自审门 | OSWorld 2.0 核心发现：agent 普遍"跳过验证"；Devin/Factory/Copilot 均把 self-review/QA 自纠作为交付前必经环节 | ✅ **已实施（2026-08-10）** | `BackgroundTaskManager` 可选 `TaskReviewer`（`LlmTaskReviewer` 复用 VERDICT 判定）：后台任务完成通知注入前自审，未通过结果带 `[自审未通过]` 标记（通知 + task_status 携带），主 agent 复核，不自动重跑；空结果/LLM 故障默认通过不阻塞。配置：`[agent] background_self_review`（默认 false opt-in）。实现：`executor/judge.rs`（TaskReviewer/LlmTaskReviewer）+ `agent/background.rs`（maybe_self_review）。主对话最终答案自审留待评估后决定 |
-| **G5** | P1 | 定时任务跨运行状态 | Devin Scheduled Devins "**carries state between runs**"（任务读/写自己的笔记） | ✅ **已实施（2026-08-10）** | `TaskStateStore`（VFS `memory/events/task_states/` 命名空间，容错读写/删除）+ `TaskContext.task_state` 注入；MemoryTask 示范：运行首尾读写周期摘要（上次/本次提取概况）。面向自定义周期任务的跨轮上下文延续；内置任务自包含不受影响。实现：`core/src/scheduler/task_state.rs` + `task_scheduler.rs` + `tasks/memory_task.rs` |
+| **G5** | P1 | 定时任务跨运行状态 | Devin Scheduled Devins "**carries state between runs**"（任务读/写自己的笔记） | ✅ **已实施（2026-08-10）** | `TaskStateStore`（VFS `memory/events/task_states/` 命名空间，容错读写/删除）+ `TaskContext.task_state` 注入；`EvolutionTask` 示范：读写上次综述水位线/摘要。面向自定义周期任务的跨轮上下文延续；内置任务自包含不受影响。实现：`core/src/scheduler/task_state.rs` + `task_scheduler.rs` + `tasks/evolution_task.rs` |
 | **G6** | P1 | 结构化 Trace/span 树 | trace-grading 已成核心原语（OpenAI evals、LangSmith run/trace/thread）；benchmark gaming 审计依赖可回放 trace | ✅ **已实施（2026-08-10）** | `observability/trace.rs`：turn/tool/task 三类 span 持久化 SQLite（热路径缓冲 + 查询前 flush + 窗口清理），埋点覆盖 AgentLoop 轮次/execute_single 工具/后台任务终态；`GET /api/v1/traces` 分组回放（session/task 过滤）。实现：`core/src/observability/trace.rs` + `sqlite_db.rs` SCHEMA + `server/src/api/traces/`。trace-grading（CI 评测闭环 G9）留待后续 |
 | **G7** | P1 | MCP 现代化 | **2026-07-28 规范重大变更**：stateless 核心 + AWS Tasks 扩展；远程服务器 **17% 死端点** | ✅ **已实施（2026-08-10）** | `McpClient::connect_http`（rust-mcp-sdk streamable-http feature + `with_transport_options`，对齐 stateless 核心规范）；`[[mcp.servers]] transport = "http"` + `url` 配置（非 http 前缀连接前拒绝）；server sync 与 test API 按传输分流，旧配置兼容（默认 stdio）。实现：`mcp/src/client.rs` + `core/src/config/mcp.rs` + `server/src/mcp_bridge.rs` + `api/config/services.rs`。Tasks 扩展（AWS 长任务）跟踪评估中 |
 | **G8** | P2 | 子任务模型指定 | 多模型编排成 2026 主流差异化（Perplexity 19 模型编排、Devin Fusion 成本 -35~60%、Genspark mixture-of-agents） | ✅ **已实施（2026-08-10）** | 角色化委托：`delegate_to_agent` 新增 `role`（内置 researcher/editor/reviewer + `[agent_roles]` 节自定义，角色携带模型/系统提示/工具白名单/轮数/超时）+ `model` 显式逃生舱；优先级：显式 > 角色 > 主模型。实现：`core/src/agent/roles.rs` + `core/src/config/roles.rs`；边界澄清见 REJECTED #2 复核节 |

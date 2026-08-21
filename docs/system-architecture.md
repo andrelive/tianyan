@@ -76,8 +76,8 @@ tianyan/
 │   │   ├── services.rs  # ModelServices（替代 ModelRouter 的容器）
 │   │   └── provider/    # AsyncOpenAIClient 等统一客户端
 │   ├── observability/ # AgentMetrics 可观测性存储和自省接口
-│   ├── scheduler/  # 定时任务调度器 + tasks/（RuleTask、MemoryTask 等）
-│   ├── session/    # 会话管理（PersistentSessionManager）
+│   ├── scheduler/  # 定时任务调度器 + tasks/（SummaryTask、EvolutionTask、GcTask 等）
+│   ├── session/    # 会话管理（SessionStore SQLite 权威存储 + PersistentSessionManager + SessionRecall）
 │   ├── skills/     # 技能系统（definition、executor、handlers/、learning/）
 │   └── vfs/        # 虚拟文件系统（traits、vfs_impl、backend/、vector/、summary/）
 ├── server/         # Axum HTTP 服务
@@ -163,9 +163,9 @@ pub struct StructuredMessage {
 
 **四个核心职责**：
 
-1. **持久化**：JSONL 格式写入 VFS。`AgentLoop` 每产生一条消息，实时调 `SessionManager::add_structured_message()` 落盘。
+1. **持久化**：完整消息写入 SQLite 权威存储（ADR-018，`SessionStore`，单事务原子取号 + FTS 同步）。`AgentLoop` 每产生一条消息，实时调 `SessionManager::add_structured_message()` 落盘。
 2. **会话组装**：存储与传输分离 — `StructuredMessage`（存储层）↔ `Message`（传输层）。`ContextAssembler::assemble()` 转换。
-3. **会话跟踪**：`compression_marker` 标记压缩产生的摘要消息。加载会话时反向扫描到最近 marker，只加载 marker 及之后的的消息（旧消息保留在磁盘）。
+3. **会话跟踪**：`compression_marker` 标记压缩产生的摘要消息。加载会话时反向扫描到最近 marker，只加载 marker 及之后的的消息（旧消息仍完整保留在 SQLite 中）。
 4. **Token 统计**：LLM 响应 `TokenUsage` → `AgentLoop` 捕获 → `DetailedTokenUsage` → 持久化 → 聚合到 `AgentState.total_tokens`。
 
 ### 3.3 决策 3: 组件工具化（待实现）
@@ -198,7 +198,7 @@ soul → rules+memories → history(from compression_marker) → current input
 Agent :: process_message(session_id, msg)
   │
   ├─ SessionManager::get_session(session_id) → SessionState
-  │     └─ load_session_from_vfs()：解析 JSONL → compression_marker 截断
+  │     └─ SessionStore::load()：SQLite 按 seq 查询 → compression_marker 截断
   │
   ├─ ContextPipeline::prepare_context()
   │     ├─ ContextAssembler::assemble()：soul → rules+memories → history → input
@@ -213,9 +213,8 @@ Agent :: process_message(session_id, msg)
   │     └─ 返回 content → Answer，循环结束
   │
   └─ 后台异步（不阻塞响应）：
-        ├─ MemoryExtractor::extract_and_store()
-        ├─ SkillLearningEngine::learn_from_history()
-        └─ Scheduler: RuleTask → RuleSuggester → RuleRecorder
+        ├─ EvolutionTask（ADR-017）：每日演化综述（记忆/技能/规则/组织形态统一演化）
+        └─ Scheduler 其他定时任务：SummaryTask / GcTask / SnapshotGcTask / ReminderTask
 ```
 
 ### 4.2 ToolRegistry 实现
@@ -271,9 +270,9 @@ SSE stream: 6 种 chunk_type 差异化渲染
 
 ```
 Scheduler 定时触发
-  ├─ MemoryTask: MemoryExtractor.extract() → LLM 提取 → VFS (tianyan://memory/)
+  ├─ EvolutionTask: 综述智能体 → 记忆/技能/规则/角色 diff → 记账提交 VFS
   ├─ SummaryTask: SummaryEngine.generate() → VFS 三级摘要 (L0/L1)
-  └─ RuleTask: RuleSuggester.scan() → RuleRecorder.record() → VFS (agent/learned/)
+  └─ GcTask / SnapshotGcTask / ReminderTask / UsageStatsFlushTask
 ```
 
 ### 5.3 VFS 数据流

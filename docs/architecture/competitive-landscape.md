@@ -29,7 +29,7 @@
 | 层 | 代表 | 特征 | 天演位置 |
 |----|------|------|---------|
 | 推理基座 | Ollama / LM Studio / LocalAI | 无记忆、无 UI、无主动 | 天演通过 config 接入 ✓ |
-| 记忆基础设施 | Mem0 / Zep-Graphiti / Letta | 有记忆无产品；时序图谱 / 事实提取 / sleep-time 整理 | **天演已覆盖第二层并更强**（VFS L0/L1 + MemoryExtractor + MemoryTask；双摘要检索远超 Mem0 单向量） |
+| 记忆基础设施 | Mem0 / Zep-Graphiti / Letta | 有记忆无产品；时序图谱 / 事实提取 / sleep-time 整理 | **天演已覆盖第二层并更强**（VFS L0/L1 + 演化综述流程；双摘要检索远超 Mem0 单向量） |
 | RAG/对话产品 | AnythingLLM / Jan / Khoj | 有 UI 记忆浅；cron 调度 | 天演覆盖第三层（GUI + 知识库 + 调度） |
 | 系统级/主动型 | Recall / Rewind（已死）/ Dot / HA / n8n | 捕获形态 / 主动提醒 / 事件驱动 | **天演缺第四层——本报告核心差距区** |
 
@@ -49,11 +49,11 @@ Dispatch（VM 沙箱 + 默认拒网 + 文件夹授权，但不支持后台）、
 |---------|-------------------|-------------|------|
 | 本地推理 | Provider 发现（test/scan/add-model，含 Ollama 原生协议） | Cline/Aider 同款；主流商业产品反而不支持 | ✅ 差异化 |
 | 双层摘要 RAG | VFS L0/L1/L2 + RRF 融合 | 无同构（OpenHands 两层记忆最接近） | ✅ 领先 |
-| 记忆提取/整理 | MemoryExtractor + MemoryTask | Letta sleep-time agent（同构） | ✅ |
+| 记忆提取/整理 | EvolutionTask 综述智能体（ADR-017；原 MemoryExtractor+MemoryTask 链路并入） | Letta sleep-time agent（同构） | ✅ |
 | 子任务编排 | delegate 并行 + 嵌套 3 层 + 后台 + 取消 | Claude subagents / Cursor multitask | ✅（嵌套深度与后台等同业水准） |
 | 快照回退 | 工作区快照（gzip+GC+similar diff） | Cline shadow git / Claude checkpoint | ✅ |
 | 会话压缩 | 自动 + 手动 + 压缩点刷新 | Claude auto-compaction | ✅ |
-| 定时任务 | RuleTask/MemoryTask/SummaryTask/GcTask | AnythingLLM cron / Perplexity cron | ✅ |
+| 定时任务 | SummaryTask/EvolutionTask/GcTask/SnapshotGcTask/ReminderTask | AnythingLLM cron / Perplexity cron | ✅ |
 | 浏览器感知 | MCP Playwright 截图（只读） | Cline Puppeteer 点击/输入；computer use | ◐ 后置（屏幕感知后置项） |
 | 代码结构感知 | LSP（symbols/跳转/诊断） | Aider repo map（tree-sitter 图） | ◐ 半覆盖（LSP 更准但无 token 预算自适应注入） |
 | **事件驱动触发** | 仅定时（scheduler） | n8n 文件监听/webhook；Cline connectors；HA 事件触发器 | **T1** |
@@ -91,7 +91,7 @@ Dispatch（VM 沙箱 + 默认拒网 + 文件夹授权，但不支持后台）、
    - 价值：自动化从"定时"升级为"感知环境"，是"主动"的第一步
 2. **主动提醒（记忆 → 相关时刻推送）**：
    - 通知通道：Tauri 系统通知（已有托盘基建，通知 API 轻量）
-   - 触发评估循环：扩展 scheduler（新任务类型或 RuleTask 加条件），对记忆/规则做"relevant-now"评估，命中则经统一消息队列唤醒主 agent
+   - 触发评估循环：扩展 scheduler（新任务类型或现有任务加条件），对记忆/规则做"relevant-now"评估，命中则经统一消息队列唤醒主 agent
    - 价值：行业最薄点；"个人助理"与"聊天机器人"的分水岭（Dot/Vellum 验证了需求，但都是云服务）
 3. **剪贴板 I/O**（行业空白，低工作量高差异化）：
    - 输入侧：复制内容 → 快捷导入知识/上下文（"复制即记忆"）——系统剪贴板监听 + 确认条，用户确认后才沉淀（**不自动存储**）

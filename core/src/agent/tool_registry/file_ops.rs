@@ -202,6 +202,28 @@ impl ToolRegistry {
         })?;
         let parsed = TianyanUri::parse(&params.uri)
             .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：无效 URI: {}", e)))?;
+        // ADR-018 兼容层：会话内容已迁出 VFS（SQLite 权威存储）——
+        // 对 tianyan://session/{id} 特判，经 SessionStore 导出 JSONL 返回，
+        // 保持 LLM「读取压缩前原始记录」的能力与提示语不变。
+        if parsed.namespace() == ContextNamespace::Session {
+            let session_id = parsed.path().last().cloned().unwrap_or_default();
+            let Some(store) = &self.session_store else {
+                return Err(TianyanError::Custom(
+                    "tool: 执行失败：会话存储未配置".to_string(),
+                ));
+            };
+            let detail = match store.export_jsonl(&session_id).await {
+                Ok(Some(jsonl)) => jsonl,
+                Ok(None) => String::new(),
+                Err(e) => return Err(wrap_tool_error(e)),
+            };
+            return Ok(serde_json::json!({
+                "uri": params.uri,
+                "abstract": "",
+                "overview": "",
+                "detail": detail,
+            }));
+        }
         // 加载三层内容，让 LLM 按需使用
         let (l0, l1, l2) = tokio::join!(
             vfs.read_content(&parsed, ContentLevel::Abstract),

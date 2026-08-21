@@ -33,7 +33,7 @@
 | `model` | `core/src/model/` | 模型服务容器（`ModelServices`）+ provider 实现 | `traits.rs`, `services.rs`, `provider/` |
 | `observability` | `core/src/observability/` | 可观测性 + 使用统计（`AgentMetrics`、`UsageStats`；SQLite 连接经 `vfs::backend::sqlite_db` 复用） | `mod.rs`, `usage_stats.rs` |
 | `scheduler` | `core/src/scheduler/` | 定时任务调度器 + 任务实现 | `task_scheduler.rs`, `tasks/` |
-| `session` | `core/src/session/` | 会话管理（PersistentSessionManager，基于 VFS）；JSONL 首行 SessionHeader（注入上下文快照持久化）；截断常量单点（`MAX_SESSION_MESSAGES`/`KEEP_RECENT_MESSAGES`） | `manager.rs`, `types.rs` |
+| `session` | `core/src/session/` | 会话管理（⚠️ ADR-018 VFS 例外：`SessionStore` SQLite 权威存储，原子取号 + 失败上抛；`PersistentSessionManager` 业务语义；`SessionRecall` FTS 回忆；`session_meta` 存 SessionHeader/injectable 快照）；截断常量单点（`MAX_SESSION_MESSAGES`/`KEEP_RECENT_MESSAGES`） | `store.rs`, `manager.rs`, `search.rs`, `types.rs` |
 | `skills` | `core/src/skills/` | 技能定义、执行、学习（GEPA 进化引擎） | `definition.rs`, `executor.rs`, `manager.rs`, `handlers/`, `learning/` |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退，⚠️ ADR-006 VFS 例外） | `mod.rs` |
 | `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `backend/sqlite_db.rs`, `vector/lancedb/`, `summary/engine.rs` |
@@ -80,7 +80,7 @@
 | `ModelRouter` | 已删除 | `ModelServices` |
 | `TokenBudget` | 已删除 | `ContentLoadStrategy::from_score()` |
 | `Chunker` | 已删除 | VFS 双层检索替代 chunk-based RAG |
-| `SqliteSessionStore` | 已删除 | `PersistentSessionManager`（基于 VFS） |
+| `SqliteSessionStore` | 已删除 | `PersistentSessionManager`（基于 VFS）；ADR-018 后其思想以 `SessionStore` 形式回归（会话迁出 VFS） |
 | `server/src/api/vfs/` | 已删除 | VFS 管理 API 未完成，已移除 |
 | `AgentHarness` wrapper | 已删除 | 功能由 `Agent` 直接持有 |
 | `AgentSkills` wrapper | 已删除 | 功能由 `Agent` 直接持有 |
@@ -104,7 +104,8 @@
 - [ADR-008: 快照升级](decisions/008-snapshot-upgrade.md) — gzip 压缩 + GC + similar diff（扩展 ADR-006）
 - [ADR-010: 对话多模态链路](decisions/010-multimodal-message-chain.md) — 图片输入（Message.content_parts + Part::Image）+ MCP 截图落盘
 - [ADR-011: 子任务授权边界](decisions/011-subagent-approval-boundary.md) — 子 agent 无交互审批
-- [ADR-012: 注入上下文快照持久化](decisions/012-injectable-snapshot-persistence.md) — 前缀零漂移（JSONL SessionHeader）
+- [ADR-012: 注入上下文快照持久化](decisions/012-injectable-snapshot-persistence.md) — 前缀零漂移（SessionHeader；ADR-018 后存 `session_meta` 表）
+- [ADR-018: 会话权威存储迁至 SQLite](decisions/018-session-authoritative-sqlite.md) — 会话迁出 VFS；`SessionStore` 原子取号 + 失败上抛
 - [ADR-013: 统一消息通知与唤醒原语](decisions/013-unified-message-notification-wake.md) — 消息入库 + 唤醒语义
 - [ADR-014: 错误分类语义谓词](decisions/014-error-classification.md) — not_found/conflict/invalid_input 语义谓词
 - [ADR-015: 会话工作区绑定](decisions/015-session-workspace-binding.md) — 工作区是会话的父级分组

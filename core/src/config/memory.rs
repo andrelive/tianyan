@@ -25,7 +25,7 @@ pub struct MemoryConfig {
     pub decay_rate: f32,
     /// 偏好类记忆写前校验（G3，默认关闭 opt-in）。
     ///
-    /// 开启后 MemoryTask 对 `preferences` 类别记忆先经 LLM 校验
+    /// 开启后对 `preferences` 类别记忆先经 LLM 校验（演化流程复用）
     /// （是否稳定长期偏好）再持久化；未通过/校验失败的记忆被丢弃。
     /// 每提取周期仅对偏好类记忆多一次小调用，成本可控。
     #[serde(default = "default_false")]

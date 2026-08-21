@@ -25,7 +25,7 @@ const EVAL_SYSTEM_PROMPT: &str = "\
 若有，输出最多 {max_per_run} 条提醒，每条单独一行，以「提醒：」开头，简明扼要（每行不超过 100 字）。";
 /// 主动提醒任务。
 ///
-/// 依赖注入（与 RuleTask 同模式）：model_service 做评估、notification 推送、
+/// 依赖注入：model_service 做评估、notification 推送、
 /// session_manager 注入会话；vfs 从 [`TaskContext`] 读取记忆。
 pub struct ReminderTask {
     /// 评估用聊天模型服务。

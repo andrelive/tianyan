@@ -88,12 +88,16 @@
 
 ### 6. FTS5 会话回忆（方案 A：JSONL 权威 + 派生消息索引）
 
+> ⚠️ **存储部分已被 ADR-018 取代**（2026-01-01）：会话权威存储从 JSONL 迁至 SQLite
+> （`session_messages` 完整消息 + `session_meta`，`SessionStore` 原子取号），
+> FTS5 回忆检索读同一张表，不再有"JSONL 权威 + 派生索引"双存储。
+> 本节回忆语义（不进向量检索 / trigram FTS / 工具过滤 / 窗口）全部保留。
+
 - **会话不进向量检索**：不再生成会话 L0/L1，省掉摘要 + embedding 成本；
-- **JSONL 保持权威**（VFS 不变，会话加载/压缩/快照零改动）；
-- **派生消息索引**（SQLite，可重建）：`messages` 表（session_id、seq、message_id、role、
-  text——仅 user/assistant 文本、time、tokens、has_tool）+ FTS5 倒排索引
+- ~~**JSONL 保持权威**（VFS 不变，会话加载/压缩/快照零改动）~~ → **ADR-018：SQLite 表为唯一真相**（`session_messages.content_parts` 完整消息 + `session_meta` 会话级状态）；
+- **消息表**（SQLite）：`session_messages`（session_id、seq、message_id、role、text、tool_text、tokens、ts、content_parts）+ FTS5 倒排索引
   （trigram tokenizer 支持中文子串匹配，BM25 排序）；
-- **写入**：`append_message_to_vfs` 同步插索引行（hook，零 LLM）；
+- **写入**：`SessionStore::append_message` 单事务原子取号（`MAX(seq)+1`）+ 同步写 FTS（失败上抛，不吞错）；
 - **回忆流程**：intent 路由 Session 关键词 → `SessionRecall` 服务 → FTS5 搜索 → 命中定位（seq）
   → 取附近窗口（`seq BETWEEN hit±N AND role IN ('user','assistant')`）→
   **工具调用/结果天然被过滤**（未进 text 列）；
@@ -148,7 +152,7 @@
 - 全量综述 token 成本集中在单次运行（统计工具 + 片段摘要 + `max_items_per_run` 控制）；
 - 单点风险：演化任务失败则该周期无加工（水位线保证下周期续跑不丢数据）；
 - 智能体判断非确定性：跨运行可能不一致——靠演化报告 + 版本链回退兜底；
-- 消息索引与 JSONL 可能短暂漂移（append hook 失败）——索引可重建，无害。
+- ~~消息索引与 JSONL 可能短暂漂移（append hook 失败）——索引可重建，无害~~ → **已消除（ADR-018）**：单一真相表 + 原子取号 + 失败上抛，无双存储漂移问题。
 
 ## 边界条件（违反即重新评估）
 
@@ -162,7 +166,7 @@
 | 决策 | 关系 |
 |------|------|
 | ADR-001（VFS 双层摘要） | 摘要任务保留（降频、排除 Session）；会话回忆改 FTS5，不引入独立向量库 |
-| ADR-005（SQLite 后端） | 消息索引/执行记录为派生数据，共享 SqliteDb；内容权威仍在 VFS |
+| ADR-005（SQLite 后端） | 消息索引/执行记录为派生数据，共享 SqliteDb；内容权威仍在 VFS（会话内容权威已迁 SQLite，见 ADR-018） |
 | ADR-012（前缀快照） | 技能/角色更新仍在会话边界/启动/压缩点刷新——演化任务产物在免费刷新点自然可见 |
 | ADR-013（唤醒轮） | 演化任务可选用 `process_wake` 机制（mechanism=wake） |
 | ADR-016（角色化自演化） | 演化智能体经 `delegate_to_agent` 运行；角色产物落 `agent_role/`；本 ADR 补上综合提炼环节 |
@@ -184,7 +188,7 @@
 - `core/src/agent/tool_registry/observability.rs` — 执行记录持久化到 SQLite（GEPA 数据层）
 - `core/src/agent/roles.rs` — 新增内置角色 `evolution_reviewer`（只读 + 统计 + 回忆工具白名单）
 - `core/src/session/search.rs` — 新增 `SessionRecall`（messages 表 + FTS5 索引 + 回忆查询）
-- `core/src/session/manager.rs` — append hook 同步消息索引
+- `core/src/session/manager.rs` — append 落库（ADR-018 后：`SessionStore::append_message` 单事务原子取号 + 同步 FTS）
 - `core/src/context/retrieval/intent.rs` — Session 分支改走 FTS5 回忆
 - `core/src/config/` — 新增 `[evolution]` 配置节
 - `server/src/lib.rs` — 任务注册收敛（evolution + summary 降频）

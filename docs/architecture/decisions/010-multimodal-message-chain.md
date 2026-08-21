@@ -1,7 +1,7 @@
 # ADR-010: 对话多模态链路 —— 图片输入 + MCP 截图落盘
 
 **日期**: 2026-08
-**状态**: ✅ 已采纳
+**状态**: ✅ 已采纳（持久化载体更新：图片随完整消息存 `session_messages.content_parts`，ADR-018）
 **影响范围**: 消息模型（`common/types/`）、协调器签名（`agent/`）、provider 序列化（`model/provider/`）、MCP 桥接（`server/src/mcp_bridge.rs`）
 
 ---

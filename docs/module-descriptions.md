@@ -254,10 +254,7 @@ soul → rules+memories → history(from compression_marker) → current input
 - **可变后缀（history）**：compression_marker 决定拼接起点，最近 marker 之后的消息
 - **绝对禁止**：把 soul/rules/memories 放在 history 之后——破坏前缀缓存，每次请求重新计算全部 token
 
-**规则管线**：规则记录/提炼逻辑通过 Scheduler 定时运行：
-- `RuleTask` (`scheduler/tasks/rule_task.rs`) — 规则提炼的 cron 壳
-- `RuleSuggester` (`scheduler/tasks/rule_suggester.rs`) — 扫描聚类 + LLM 提炼
-- `RuleRecorder` (`scheduler/tasks/rule_recorder.rs`) — 去重 + 写入 learned rule
+**规则管线**：规则记录经工具执行管线内联写入（`RuleRecorder`），提炼/升级统一并入 `EvolutionTask`（ADR-017；原 `RuleTask`/`RuleSuggester` 已删除）。
 
 ### 1.9 skills 子模块
 
@@ -316,10 +313,10 @@ soul → rules+memories → history(from compression_marker) → current input
 |--------|---------|------|
 | `config` | `TianyanConfig`, `AgentConfig`, `ModelsConfig`, `ConfigStatus` | 全局配置管理，支持 TOML + env。查找顺序：`./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml` |
 | `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage`, `ContentPart`, `ImageUrl`, `LoggingConfig`, `TokenEstimator` | 通用错误（禁止引入新错误类型）、URI、向量、消息（含多模态 `content_parts`，ADR-010）、记忆类型、日志配置、token 估算（叶模块，无 core 内部依赖） |
-| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager` | 会话管理，支持 VFS 持久化；`load_session_from_vfs()` 用 `compression_marker` 截断；截断常量单点定义于 `session/mod.rs`（`MAX_SESSION_MESSAGES=100` / `KEEP_RECENT_MESSAGES=50`）；JSONL 首行 SessionHeader 承载注入上下文快照（ADR-012）+ 会话元数据（created_at/title/ended_at，重启恢复；`list_sessions` 按目录条目过滤防幽灵会话） |
+| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager`, `SessionStore`, `SessionRecall` | 会话管理，⚠️ ADR-018 VFS 例外：`SessionStore`（SQLite 权威存储，`session_messages` 完整消息 + `session_meta` 会话级状态，单事务原子取号 `MAX(seq)+1`，失败上抛）；`PersistentSessionManager::load_session_from_store()` 用 `compression_marker` 截断；截断常量单点定义于 `session/mod.rs`（`MAX_SESSION_MESSAGES=5000` / `KEEP_RECENT_MESSAGES=4800`）；`session_meta.header_json` 承载注入上下文快照（ADR-012）+ 会话元数据（created_at/title/ended_at，重启恢复；`list_sessions` 轻量元数据 + message_count，无幽灵会话） |
 | `memory` | `MemoryExtractor`, `ExtractionConfig` | 从会话文本中提取结构化记忆的纯功能，与调度/持久化解耦 |
 | `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（已通过 `knowledge_ingest` 工具集成到 Agent 流程）。ingestor/ 拆分为 mod + builder；`image/` 拆分为 types/processor/analyzer |
-| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `RuleTask`, `GcTask`, `MemoryTask`, `SummaryTask`, `RuleRecorder`, `RuleSuggester`, `UsageStatsFlushTask` | 定时任务调度框架 + 所有任务实现，位于 `scheduler/tasks/`；`TaskResult.error: Option<TianyanError>`（结构化错误）；GcTask 职责为规则归档 + 记忆 TTL 清理（文档漂移检测/质量报告投机代码已删除）；UsageStatsFlushTask 定期把使用统计内存计数器刷入 SQLite（构造器注入，同 SnapshotGcTask 模式） |
+| `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `EvolutionTask`, `GcTask`, `SummaryTask`, `ReminderTask`, `SnapshotGcTask`, `UsageStatsFlushTask` | 定时任务调度框架 + 任务实现，位于 `scheduler/tasks/`（memory_task/rule_task/rule_suggester 已删除——ADR-017 后演化统一由 EvolutionTask 承担）；`TaskResult.error: Option<TianyanError>`（结构化错误）；GcTask 职责为规则归档 + 记忆 TTL 清理；UsageStatsFlushTask 定期把使用统计内存计数器刷入 SQLite（构造器注入，同 SnapshotGcTask 模式） |
 
 ---
 
@@ -332,10 +329,10 @@ soul → rules+memories → history(from compression_marker) → current input
 | context | ✅ 完整集成 | ContextPipeline + DualLayerRetriever + ContextAssembler 在 Agent 中完整集成 |
 | skills | ✅ 完整集成 | 含 GEPA 进化引擎，通过 call_skill 工具桥接 |
 | vfs | ✅ 完整集成 | VirtualFileSystemImpl + SqliteBackend + LanceDbVectorStore；双层摘要索引 |
-| scheduler | ✅ 完整集成 | TaskScheduler + RuleTask + MemoryTask + SummaryTask + GcTask + UsageStatsFlushTask |
+| scheduler | ✅ 完整集成 | TaskScheduler + SummaryTask + EvolutionTask + GcTask + SnapshotGcTask + ReminderTask + UsageStatsFlushTask |
 | config | ✅ 完整集成 | 配置加载器和验证器 |
 | common | ✅ 完整集成 | 错误类型和通用工具 |
-| session | ✅ 已集成 | `PersistentSessionManager` 持久化到 VFS |
+| session | ✅ 已集成 | `PersistentSessionManager` 基于 `SessionStore`（SQLite 权威存储，ADR-018）；回忆检索 `SessionRecall`（FTS5） |
 | memory | ✅ 已集成 | `MemoryExtractor` 提取结构化记忆 |
 | observability | ✅ 已集成 | AgentMetrics 提供可观测性存储和自省接口 |
 | executor | ✅ 正常使用 | 独立执行函数、审批工作流、验证门控均被 agent 模块使用 |

@@ -391,8 +391,8 @@ Harness Engineering 不是凭空出现的。它是智能体开发方法的第三
 | 理论概念 | 天演实现 | 位置 | 状态 |
 |---------|---------|------|:---:|
 | 隐性提示（失败 → 规则） | `RuleRecorder` | `core/src/scheduler/tasks/rule_recorder.rs` | ✅ 已实现 |
-| 记忆聚类 → 规则提炼 | `RuleSuggester` | `core/src/scheduler/tasks/rule_suggester.rs` | ✅ 已实现 |
-| 规则定时调度 | `RuleTask` | `core/src/scheduler/tasks/rule_task.rs` | ✅ 已实现 |
+| 记忆聚类 → 规则提炼 | ~~`RuleSuggester`~~ → EvolutionTask 阶段 1（ADR-017） | ~~`scheduler/tasks/rule_suggester.rs`~~（已删除，ADR-018 落实） | ✅ 由演化任务承担 |
+| 规则定时调度 | ~~`RuleTask`~~ → EvolutionTask（每日综述） | ~~`scheduler/tasks/rule_task.rs`~~（已删除） | ✅ 由演化任务承担 |
 | 可观测性（Metrics） | `AgentMetrics` | `core/src/observability/mod.rs` | ✅ 已实现 |
 | 上下文工程 | `ContextPipeline` | `core/src/context/pipeline.rs` | ✅ 已实现 |
 | Sensors（反馈控制） | `VerificationGate` + `LlmJudge` | `core/src/executor/` | ✅ 已实现 |
@@ -400,24 +400,22 @@ Harness Engineering 不是凭空出现的。它是智能体开发方法的第三
 | GC / 熵减 | `GcTask` | `core/src/scheduler/tasks/gc_task.rs` | ✅ 已实现 |
 | 架构约束 | 待实现（linter + 结构测试） | — | ❌ 未实现 |
 
-> **注意**：`AgentHarness` 和 `AgentSkills` wrapper 结构体已删除，功能由 `Agent` 直接持有。规则记录不再通过 Agent 的即时路径，而是通过 Scheduler 的 `RuleTask`。详见 [module-map.md](../architecture/module-map.md) 中的"已删除/废弃组件"。
+> **注意**：`AgentHarness` 和 `AgentSkills` wrapper 结构体已删除，功能由 `Agent` 直接持有。规则记录经工具执行管线内联写入（`RuleRecorder`）；规则提炼/记忆/技能/组织形态的演化统一由 `EvolutionTask`（ADR-017，每日）承担——`RuleTask`/`RuleSuggester`/`MemoryTask` 均已删除（ADR-018 落实）。详见 [module-map.md](../architecture/module-map.md) 中的"已删除/废弃组件"。
 
-### 13.2 规则管线架构
+### 13.2 规则管线架构（ADR-017 后：统一演化任务）
 
-规则提炼链路已从 Agent 的同步后台任务重构为 Scheduler 的 cron 定时任务：
+规则提炼链路已从 Scheduler 的 cron 定时任务（`RuleTask`/`RuleSuggester`，已删除）并入 `EvolutionTask`：
 
 ```
-TaskScheduler (每 15 分钟)
-  └── RuleTask (TaskHandler)
-        └── RuleSuggester
-              ├── scan()  → 扫描 patterns/ + failed_tasks/
-              └── promote_to_rule()  → LLM 聚类 → RuleRecorder
-                                           └── record_with_kind()  → VFS agent/learned/
+TaskScheduler (每日)
+  └── EvolutionTask (TaskHandler)
+        ├── 阶段 0 采集：注册表清单 + 会话回忆（session_recall FTS5）
+        ├── 阶段 1 综述：演化智能体（evolution_reviewer）产出 diff 计划
+        └── 阶段 2 记账提交：记忆/技能/规则/角色增删改 → VFS
 ```
 
-数据源：`MemoryTask`（定时）→ `MemoryExtractor`(LLM) → 分类记忆写入 VFS：
-- `MemoryCategory::Pattern` → `agent/patterns/`
-- `MemoryCategory::FailedCase` → `memory/cases/failed_tasks/`
+规则**记录**仍即时：工具执行失败 → `RuleRecorder`（管线内，零 LLM）→ VFS `agent/learned/`；
+规则**提炼**（聚类 → 升级）由每日演化综述承担。
 
 ### 13.3 可观测性（原 AgentHarness 已移除）
 
@@ -438,22 +436,17 @@ Agent {
 
 ```
                         ┌───────────────────────┐
-1. 执行失败              │ AgentLoop 失败 + MemoryTask 提取记忆 │
+1. 执行失败              │ AgentLoop 失败 → RuleRecorder（管线内即时记录） │
                         └───────────┬───────────┘
                                     │
-2. MemoryTask (scheduler)           ▼
-   MemoryCategory::                 ┌───────────────────┐
-   FailedCase / Pattern             │ 写入 VFS           │
-                                    │ patterns/         │
-                                    │ failed_tasks/     │
-                                    └─────────┬─────────┘
-                                              │
-3. RuleTask (scheduler, 每15分钟)             ▼
-   RuleSuggester.scan()           ┌───────────────────┐
-   → LLM 聚类                     │ 跨会话模式识别      │
-   → RuleRecorder.record_with_kind│ 去重 + 写入        │
-                                    │ agent/learned/     │
-                                    └─────────┬─────────┘
+2. EvolutionTask (每日)             ▼
+   综述智能体             ┌───────────────────┐
+   （session_recall）     │ 记忆/规则提炼      │
+   聚类 → diff 计划       │ 去重 + 写入 VFS    │
+                          │ patterns/         │
+                          │ failed_tasks/     │
+                          │ agent/learned/    │
+                          └─────────┬─────────┘
                                               │
 4. ContextPipeline.run()                     ▼
    (下次对话时)                   ┌───────────────────┐
@@ -491,4 +484,4 @@ pub enum FailureKind {
 ---
 
 **文档版本**: 2026-05-30
-**最后更新**: 2026-05-30（规则管线重构：RuleRecorder/RuleSuggester 移至 scheduler/tasks/，新增 RuleTask，AgentHarness 精简，FailureKind 类型更新）
+**最后更新**: 2026-01-01（ADR-017/018 同步：RuleTask/RuleSuggester/MemoryTask 删除，演化统一由 EvolutionTask 承担；会话存储迁出 VFS）

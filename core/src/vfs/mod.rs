@@ -9,7 +9,7 @@
 //! - **StorageConfig**: 存储后端配置（定义在 `crate::config`）
 //! - **UriMapper**: URI 到文件系统路径的映射
 //! - **StorageBackend**: 结构化存储 adapter seam（ADR-005）
-//! - **LocalFileBackend**: 本地文件系统存储后端（默认）
+//! - **LocalFileBackend**: 本地文件系统存储后端（ADR-005 后默认改为 SqliteBackend，保留作可选/测试后端）
 //! - **SqliteBackend**: SQLite 存储后端（配置 `backend = "sqlite"` 启用）
 //! - **VectorStorage**: 向量存储后端 trait（支持 LanceDB 嵌入式向量存储。
 //! - **VirtualFileSystem**: 统一的上下文存储接口

@@ -25,7 +25,7 @@ Trait 实现直接在 `impl Trait for Struct` 中完成，不定义中间 inhere
 位于 crate 边界（被其他 crate 实例化）的类型，优先使用 `Arc<dyn Trait>` 而非泛型参数。泛型适用于模块内部封装，但对外暴露时应考虑 trait object 兼容性。
 
 ### 已有链路不叠加抽象
-当现有组件已形成功能闭环（如 MemoryTask → MemoryExtractor → ContextPipeline 的记忆链路），不需要额外封装 Manager/Coordinator 层。
+当现有组件已形成功能闭环（如 EvolutionTask → 综述智能体 → VFS 记账提交的演化链路），不需要额外封装 Manager/Coordinator 层。
 
 ### 共享基础设施归属被依赖方
 跨模块共享的基础设施（类型、连接、估算器）放在**被依赖方/叶模块**，而非依赖方——消费方经单向 re-export 保留下游兼容路径。先例：`SqliteDb` → `vfs::backend`、`RetrievalTrace`/`LoggingConfig`/`TokenEstimator` → `common`。目标是无依赖环（见 [ADR-007](decisions/007-core-dependency-cycle-removal.md)）。
