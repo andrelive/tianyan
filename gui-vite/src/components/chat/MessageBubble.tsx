@@ -16,7 +16,6 @@ interface Props {
   onRollback: (index: number) => void;
 }
 
-
 /** 可折叠思考块。 */
 function ThinkingBlock({ text }: { text: string }) {
   const [open, setOpen] = useState(true);
@@ -180,9 +179,9 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
           'relative',
           isUser
             ? 'max-w-[80%] rounded-2xl px-4 py-2.5 bg-blue-500 text-white rounded-br-sm'
-            // flex-1 + min-w-0：内容撑满剩余宽度（hover 按钮不挤压文本），
-            // 同一轮内多条助手消息等宽对齐
-            : 'flex-1 min-w-0 w-full text-[var(--color-text-primary)]',
+            : // flex-1 + min-w-0：内容撑满剩余宽度（hover 按钮不挤压文本），
+              // 同一轮内多条助手消息等宽对齐
+              'flex-1 min-w-0 w-full text-[var(--color-text-primary)]',
         )}
       >
         {/* 用户消息图片（data URL） */}
@@ -207,9 +206,7 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
         ) : (
           <>
             {/* 思考过程（可折叠，与正文分开渲染，按序轮番出现） */}
-            {!isUser && message.thinking && (
-              <ThinkingBlock text={message.thinking} />
-            )}
+            {!isUser && message.thinking && <ThinkingBlock text={message.thinking} />}
 
             <MarkdownContent text={message.content} isUser={isUser} />
 
@@ -246,8 +243,10 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
         )}
 
         {/* Streaming feedback: 思考期间正文为空——显示可见的“思考中…”指示
-            （含已产出思考量，避免首字符前的长静默被误认为卡住） */}
-        {isStreaming && message.content === '' && (
+            （含已产出思考量，避免首字符前的长静默被误认为卡住）。
+            仅 thinking 非空时显示（气泡内接管）；thinking 为空时由 ChatPanel
+            列表底部的流式指示器（“思考中...”）负责，两者互斥不重复。 */}
+        {isStreaming && message.content === '' && message.thinking && (
           <span
             className="inline-flex items-center gap-1.5 text-base text-[var(--color-text-tertiary)] animate-pulse"
             aria-label="AI 正在思考中..."
