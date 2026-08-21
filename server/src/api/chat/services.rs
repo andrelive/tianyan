@@ -128,15 +128,28 @@ impl ChatService {
             )
             .await?;
 
-        // 一次流式响应对应一个响应 id（与非流式 ChatResponse.id 语义一致）。
+        // 用户消息 id（回退定位键）：resolve_or_create_session 已把用户消息入库，
+        // 取会话最后一条消息（即刚追加的用户消息）的 id，随事件下发。
+        let user_message_id = self
+            .session_manager
+            .get_session(&session_id)
+            .await?
+            .and_then(|s| s.messages.last().map(|m| m.id.clone()));
+
+        // 一次流式响应用一个响应 id（与非流式 ChatResponse.id 语义一致）。
         // SSE 事件 id 用于 Last-Event-ID 重连，同一响应流的所有 chunk 共享该 id。
         let stream_id = format!("chatcmpl-{}", short_uuid());
 
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
                 Ok(chunk) => {
-                    let event =
-                        map_chunk_to_event(chunk, &stream_id, &session_id, self.context_window);
+                    let event = map_chunk_to_event(
+                        chunk,
+                        &stream_id,
+                        &session_id,
+                        self.context_window,
+                        user_message_id.clone(),
+                    );
                     if tx.send(event).await.is_err() {
                         debug!("客户端断开流式连接");
                         break;
@@ -147,6 +160,7 @@ impl ChatService {
                     let event = ChatStreamEvent {
                         id: stream_id.clone(),
                         session_id: session_id.clone(),
+                        user_message_id: user_message_id.clone(),
                         delta: format!("错误: {}", e),
                         thinking: None,
                         finish_reason: Some("error".to_string()),
@@ -183,13 +197,24 @@ impl ChatService {
             .agent
             .handle_clarification_stream(session_id, answer)
             .await?;
+        // 追问回答同样入库为用户消息：下发其 id（回退定位键）
+        let user_message_id = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .and_then(|s| s.messages.last().map(|m| m.id.clone()));
         let stream_id = format!("chatcmpl-{}", short_uuid());
 
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
                 Ok(chunk) => {
-                    let event =
-                        map_chunk_to_event(chunk, &stream_id, session_id, self.context_window);
+                    let event = map_chunk_to_event(
+                        chunk,
+                        &stream_id,
+                        session_id,
+                        self.context_window,
+                        user_message_id.clone(),
+                    );
                     if tx.send(event).await.is_err() {
                         debug!("客户端断开流式连接");
                         break;
@@ -200,6 +225,7 @@ impl ChatService {
                     let event = ChatStreamEvent {
                         id: stream_id.clone(),
                         session_id: session_id.to_string(),
+                        user_message_id: user_message_id.clone(),
                         delta: format!("错误: {}", e),
                         thinking: None,
                         finish_reason: Some("error".to_string()),
@@ -243,6 +269,7 @@ fn map_chunk_to_event(
     stream_id: &str,
     session_id: &str,
     context_window: u64,
+    user_message_id: Option<String>,
 ) -> ChatStreamEvent {
     let skill_calls = chunk.skill_calls.map(convert_skill_calls);
     let chunk_type = chunk.chunk_type;
@@ -254,6 +281,7 @@ fn map_chunk_to_event(
     ChatStreamEvent {
         id: stream_id.to_string(),
         session_id: session_id.to_string(),
+        user_message_id,
         delta: if is_thought || is_observational {
             String::new()
         } else {
@@ -296,6 +324,8 @@ fn to_chat_response(session_id: &str, response: tianyan::agent::AgentResponse) -
         id: format!("chatcmpl-{}", short_uuid()),
         session_id: session_id.to_string(),
         message: ChatMessage {
+            // AgentResponse 无持久化消息 ID（非流式路径前端不依赖回退）
+            id: None,
             role: MessageRole::Assistant,
             content: response.content,
             thinking: None,

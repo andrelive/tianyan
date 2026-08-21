@@ -249,6 +249,10 @@ export default function ChatPanel() {
         useAppStore.getState().setPendingClarification(event.delta);
         return;
       }
+      // 用户消息 id 同步：本地临时 id（uuid）替换为服务端 msg_xxx（回退定位键）
+      if (event.user_message_id) {
+        useAppStore.getState().attachUserMessageId(sid, event.user_message_id);
+      }
       // Append content delta to the last assistant message（按流归属会话）
       if (event.delta) {
         useAppStore.getState().updateLastMessage(event.delta, sid);
@@ -302,9 +306,13 @@ export default function ChatPanel() {
       // 流结束按归属会话置 idle（UI 可能已切走，不能用 currentSessionId 闭包值）
       useAppStore.getState().setStreamStatus('idle', streamSessionRef.current);
       useAppStore.getState().showToast(`发送失败: ${error.message}`, 'error');
+      // 同步服务端消息（本地消息 id 为 uuid，回退需服务端 msg_xxx 定位键；
+      // 顺带清理失败残留的空 assistant 占位）
+      if (streamSessionRef.current) reloadSession(streamSessionRef.current);
     },
     onComplete: () => {
       useAppStore.getState().setStreamStatus('idle', streamSessionRef.current);
+      // 用户消息 id 已随流事件同步（user_message_id）；无需 reload 覆盖本地
     },
   });
 
@@ -418,13 +426,14 @@ export default function ChatPanel() {
     }
   }, [streamStatus, lastRollbackMessageId, setLastRollbackMessageId]);
 
-  // 从后端重新加载会话消息（失败回滚，恢复与持久化一致的状态）
+  // 从后端重新加载会话消息（失败回滚，恢复与持久化一致的状态）。
+  // 按目标会话更新缓存：流归属会话非当前会话时也只写对应字典，不污染当前投影。
   const reloadSession = useCallback(async (sessionId: string) => {
     try {
       const data = await apiGet<{ messages: ChatMessage[] }>(`/sessions/${sessionId}/messages`);
-      useAppStore.getState().setMessages(data.messages);
+      useAppStore.getState().setSessionMessages(sessionId, data.messages);
     } catch {
-      useAppStore.getState().setMessages([]);
+      useAppStore.getState().setSessionMessages(sessionId, []);
     }
   }, []);
 
@@ -480,6 +489,10 @@ export default function ChatPanel() {
               const event = JSON.parse(data) as ChatStreamEvent;
               // 追问流同样按 session_id 归属写入（与主对话流一致）
               const sid = event.session_id || null;
+              // 追问回答的用户消息 id 同步（回退定位键）
+              if (event.user_message_id) {
+                useAppStore.getState().attachUserMessageId(sid, event.user_message_id);
+              }
               if (event.thinking) useAppStore.getState().appendThinking(event.thinking, sid);
               if (event.delta) useAppStore.getState().updateLastMessage(event.delta, sid);
               if (event.tool_call) useAppStore.getState().appendToolCalls([event.tool_call], sid);

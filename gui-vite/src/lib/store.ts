@@ -44,6 +44,13 @@ interface AppState {
   sessionMessages: Record<string, ChatMessage[]>;
   messages: ChatMessage[];
   setMessages: (messages: ChatMessage[]) => void;
+  /** 按会话设置消息（更新指定会话缓存；目标会话为当前会话时同步投影）。
+   * 用于流结束/失败后从服务端同步真实消息 ID（回退定位键），或后台流
+   * 归属非当前会话时的缓存更新。 */
+  setSessionMessages: (sessionId: string, messages: ChatMessage[]) => void;
+  /** 把指定会话最后一条 user 消息的临时 id 替换为服务端消息 id
+   * （流式首事件 user_message_id 同步；回退定位键）。 */
+  attachUserMessageId: (sessionId: string | null, id: string) => void;
   addMessage: (message: ChatMessage, sessionId?: string | null) => void;
   updateLastMessage: (delta: string, sessionId?: string | null) => void;
   appendSkillCalls: (calls: SkillCallInfo[], sessionId?: string | null) => void;
@@ -216,6 +223,36 @@ export const useAppStore = create<AppState>()(
           return {
             sessionMessages: { ...s.sessionMessages, [key]: messages },
             messages,
+          };
+        }),
+      setSessionMessages: (sessionId, messages) =>
+        set((s) => {
+          const isCurrent = sessionId === resolveSessionKey(s);
+          return {
+            sessionMessages: { ...s.sessionMessages, [sessionId]: messages },
+            ...(isCurrent ? { messages } : {}),
+          };
+        }),
+      attachUserMessageId: (sessionId, id) =>
+        set((s) => {
+          const key = sessionId ?? resolveSessionKey(s);
+          const base = s.sessionMessages[key] ?? (key === resolveSessionKey(s) ? s.messages : []);
+          // 从后向前找最后一条 user 消息；已带服务端 id（msg_ 前缀）则跳过
+          let target = -1;
+          for (let i = base.length - 1; i >= 0; i--) {
+            const m = base[i];
+            if (m.role === 'user' && (!m.id || !m.id.startsWith('msg_'))) {
+              target = i;
+              break;
+            }
+          }
+          if (target < 0) return {};
+          const next = [...base];
+          next[target] = { ...next[target], id };
+          const isCurrent = key === resolveSessionKey(s);
+          return {
+            sessionMessages: { ...s.sessionMessages, [key]: next },
+            ...(isCurrent ? { messages: next } : {}),
           };
         }),
       addMessage: (message, sessionId) =>

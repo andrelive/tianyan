@@ -57,6 +57,7 @@ pub async fn chat_clarify_stream_handler(
             let event = ChatStreamEvent {
                 id: uuid::Uuid::new_v4().to_string(),
                 session_id: String::new(),
+                user_message_id: None,
                 delta: e,
                 thinking: None,
                 finish_reason: None,
@@ -118,11 +119,12 @@ pub async fn chat_stream_handler(
     if let Err(e) = request.validate() {
         let tx_clone = tx.clone();
         tokio::spawn(async move {
-            // 以标准 ChatStreamEvent 发送错误（chunk_type=error），
+            // 以标准 ChatStreamEvent 发送 error（chunk_type=error），
             // 前端据此展示错误并清理占位消息。
             let event = ChatStreamEvent {
                 id: uuid::Uuid::new_v4().to_string(),
                 session_id: String::new(),
+                user_message_id: None,
                 delta: e,
                 thinking: None,
                 finish_reason: None,

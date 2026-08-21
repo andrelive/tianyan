@@ -97,6 +97,7 @@ impl ChatResponse {
             id: format!("chatcmpl-{}", crate::api::shared::short_uuid()),
             session_id: "error".to_string(),
             message: ChatMessage {
+                id: None,
                 role: MessageRole::Assistant,
                 content: message.to_string(),
                 thinking: None,
@@ -175,6 +176,10 @@ pub struct ChatStreamEvent {
     pub id: String,
     /// 会话标识
     pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 本次输入的用户消息 ID（msg_xxx；流开始前已入库。前端据此把本地
+    /// 用户消息的临时 id 替换为服务端 id——回退/重做的定位键）。
+    pub user_message_id: Option<String>,
     /// 增量内容
     pub delta: String,
     /// 结束原因
@@ -225,6 +230,7 @@ mod tests {
             id: "chatcmpl-123".to_string(),
             session_id: "session-456".to_string(),
             message: ChatMessage {
+                id: Some("test-msg".to_string()),
                 role: MessageRole::Assistant,
                 content: "Hello!".to_string(),
                 thinking: None,
@@ -283,6 +289,7 @@ mod tests {
         let event = ChatStreamEvent {
             id: "chatcmpl-1".to_string(),
             session_id: "session-123".to_string(),
+            user_message_id: Some("msg-1".to_string()),
             delta: "Hello".to_string(),
             thinking: None,
             finish_reason: None,

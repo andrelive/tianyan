@@ -72,6 +72,9 @@ export interface StreamUsage {
 export interface ChatStreamEvent {
   id: string;
   session_id: string;
+  /** 本次输入的用户消息 ID（msg_xxx，流开始前已入库）；前端据此把本地
+   * 用户消息的临时 id 替换为服务端 id——回退/重做的定位键 */
+  user_message_id?: string | null;
   delta: string;
   /** 思考过程增量（Thought chunk 携带；正文在 delta，分开渲染） */
   thinking?: string | null;

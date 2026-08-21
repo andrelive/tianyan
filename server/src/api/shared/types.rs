@@ -20,6 +20,12 @@ pub use tianyan::common::types::MessageRole;
 /// 表示对话中的单条消息，包含角色、内容和可选的时间戳。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
+    /// 消息 ID（服务端 msg_xxx；回退/重做的定位键——前端索引与服务端列表
+    /// 错位时按 ID 删除；流式本地消息经 user_message_id 事件同步后获得真实 ID）。
+    /// 请求方向（ChatRequest.message）不携带；响应方向历史消息必有、
+    /// 错误/非流式响应为 None（序列化时跳过）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// 消息角色
     pub role: MessageRole,
     /// 消息内容
@@ -78,6 +84,7 @@ impl ChatMessage {
     /// * `Self` - 新创建的系统消息
     pub fn system(content: &str) -> Self {
         Self {
+            id: None,
             role: MessageRole::System,
             content: content.to_string(),
             thinking: None,
@@ -98,6 +105,7 @@ impl ChatMessage {
     /// * `Self` - 新创建的用户消息
     pub fn user(content: &str) -> Self {
         Self {
+            id: None,
             role: MessageRole::User,
             content: content.to_string(),
             thinking: None,
@@ -118,6 +126,7 @@ impl ChatMessage {
     /// * `Self` - 新创建的助手消息
     pub fn assistant(content: &str) -> Self {
         Self {
+            id: None,
             role: MessageRole::Assistant,
             content: content.to_string(),
             thinking: None,

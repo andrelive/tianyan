@@ -228,6 +228,8 @@ impl SessionService {
                     cache_write: m.tokens.cache.write as u32,
                 });
                 Some(ChatMessage {
+                    // 消息 ID：回退/重做的定位键（前端按 ID 调删除/恢复）
+                    id: Some(m.id),
                     // Tool 角色在 API 层映射为 Assistant（与旧 core_bridge 转换一致），
                     // 工具结果已合并进 tool_calls.result，前端不消费 tool 角色。
                     role: match m.role {
