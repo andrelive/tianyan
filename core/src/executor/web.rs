@@ -3,7 +3,7 @@
 //! 业界定位（对标 Claude Code WebSearch/WebFetch、Codex web_search、
 //! fetch-mcp）：
 //! - `web_search` 返回结构化结果（标题/URL/摘要），不进全文——省 token；
-//!   搜索后端零配置走 DuckDuckGo HTML 端点，可切换 SearXNG 自托管端点。
+//!   搜索后端零配置走 DuckDuckGo HTML 端点，可切换 Bing RSS（国内可达）/ SearXNG 自托管端点。
 //! - `web_fetch` 抓取单 URL 并提取可读正文（标题 + 主文本 + 链接列表），
 //!   替代 http_request 的裸 HTML 输出。
 //! - 安全：仅 http/https；SSRF 防护（拒绝本地/内网地址，与 http_request
@@ -37,16 +37,19 @@ pub struct SearchResult {
 /// 搜索后端。
 #[derive(Debug, Clone)]
 enum SearchBackend {
-    /// DuckDuckGo HTML 端点（零配置）。
+    /// DuckDuckGo HTML 端点（零配置；部分地区网络不可达）。
     DuckDuckGo,
     /// SearXNG 自托管/公共实例（JSON API）。
     Searxng(String),
+    /// Bing RSS 端点（`cn.bing.com` 国内可达；`format=rss` 结构稳定）。
+    Bing,
 }
 
 impl SearchBackend {
     fn from_config(config: &WebConfig) -> Result<Self> {
         match config.search_backend.as_str() {
             "duckduckgo" => Ok(Self::DuckDuckGo),
+            "bing" => Ok(Self::Bing),
             "searxng" => {
                 let endpoint = config.searxng_endpoint.clone().ok_or_else(|| {
                     TianyanError::Custom(
@@ -57,7 +60,7 @@ impl SearchBackend {
                 Ok(Self::Searxng(endpoint.trim_end_matches('/').to_string()))
             }
             other => Err(TianyanError::Custom(format!(
-                "配置错误：未知的 search_backend: {other}（支持 duckduckgo / searxng）"
+                "配置错误：未知的 search_backend: {other}（支持 duckduckgo / bing / searxng）"
             ))),
         }
     }
@@ -138,6 +141,12 @@ impl WebSearchClient {
                 let url = format!("{endpoint}/search?q={}&format=json", urlencode(query));
                 let body = self.http_get(&url).await?;
                 let results = parse_searxng_json(&body);
+                (url, results)
+            }
+            SearchBackend::Bing => {
+                let url = bing_search_url(query);
+                let body = self.http_get(&url).await?;
+                let results = parse_bing_rss(&body);
                 (url, results)
             }
         };
@@ -313,6 +322,61 @@ pub fn validate_public_url(url: &str) -> Result<()> {
 /// 构造 DuckDuckGo HTML 搜索 URL。
 fn ddg_search_url(query: &str) -> String {
     format!("https://html.duckduckgo.com/html/?q={}", urlencode(query))
+}
+
+/// 构造 Bing RSS 搜索 URL（`cn.bing.com` 国内可达；RSS 输出结构稳定，
+/// 标题/链接/摘要语义明确，解析不易碎）。
+fn bing_search_url(query: &str) -> String {
+    format!(
+        "https://cn.bing.com/search?q={}&format=rss",
+        urlencode(query)
+    )
+}
+
+/// 解析 Bing RSS 搜索结果（RSS 2.0：`channel > item`，item 含
+/// `title` / `link` / `description`）。
+///
+/// 手动字符串解析而非 scraper：Bing RSS 的 `<link>` 标签会被 HTML5
+/// 解析器当作 void 元素吞掉内容，字符串提取对固定结构的 RSS 更可靠。
+fn parse_bing_rss(xml: &str) -> Vec<SearchResult> {
+    let mut results: Vec<SearchResult> = Vec::new();
+    for item in xml.split("<item>").skip(1) {
+        let item = item.split("</item>").next().unwrap_or("");
+        let title = extract_rss_tag(item, "title");
+        let url = extract_rss_tag(item, "link");
+        let snippet = extract_rss_tag(item, "description");
+        if title.is_empty() || url.is_empty() {
+            continue;
+        }
+        results.push(SearchResult {
+            title,
+            url,
+            snippet,
+        });
+    }
+    results
+}
+
+/// 提取 RSS item 内指定标签的文本并解码 XML 实体。
+fn extract_rss_tag(xml: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    xml.find(&open)
+        .and_then(|s| {
+            let rest = &xml[s + open.len()..];
+            rest.find(&close).map(|e| &rest[..e])
+        })
+        .map(|s| decode_xml_entities(s.trim()))
+        .unwrap_or_default()
+}
+
+/// 解码常见 XML 实体（&amp; &lt; &gt; &quot; &#39;）。
+fn decode_xml_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
 }
 
 /// URL 编码（查询参数安全）。
@@ -674,6 +738,32 @@ mod tests {
     fn test_ddg_search_url() {
         let url = ddg_search_url("rust agent");
         assert_eq!(url, "https://html.duckduckgo.com/html/?q=rust+agent");
+    }
+
+    // ── Bing RSS 解析 ────────────────────────────────────────────────
+
+    #[test]
+    fn test_bing_search_url() {
+        let url = bing_search_url("rust agent");
+        assert_eq!(url, "https://cn.bing.com/search?q=rust+agent&format=rss");
+    }
+
+    #[test]
+    fn test_parse_bing_rss() {
+        // 真实 Bing RSS 响应结构（2026-08 抓取）
+        let xml = r#"<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel><title>必应：rust agent</title><item><title>Example &amp; Title</title><link>https://example.com/page?a=1&amp;b=2</link><description>snippet about example</description><pubDate>周四, 20 8月 2026 13:08:00 GMT</pubDate></item><item><title>Second</title><link>https://other.com/x</link><description></description></item><item><title></title><link>https://empty.com</link><description>x</description></item></channel></rss>"#;
+        let results = parse_bing_rss(xml);
+        assert_eq!(results.len(), 2, "空标题应被过滤");
+        assert_eq!(results[0].title, "Example & Title", "XML 实体应解码");
+        assert_eq!(results[0].url, "https://example.com/page?a=1&b=2");
+        assert_eq!(results[0].snippet, "snippet about example");
+        assert_eq!(results[1].title, "Second");
+        assert_eq!(results[1].url, "https://other.com/x");
+    }
+
+    #[test]
+    fn test_parse_bing_rss_garbage() {
+        assert!(parse_bing_rss("not xml at all").is_empty());
     }
 
     // ── SearXNG 解析 ──────────────────────────────────────────────────
