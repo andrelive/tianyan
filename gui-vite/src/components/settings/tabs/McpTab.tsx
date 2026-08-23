@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { Loader2, Plus, Trash2, WifiOff, Play, X, Check } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
+import { useResource } from '@/hooks/use-resource';
 import {
   listMcpServers,
   addMcpServer,
@@ -22,9 +23,19 @@ interface ServerTestStatus {
 export default function McpTab() {
   const showToast = useAppStore((s) => s.showToast);
 
+  // 服务器列表加载（useResource：加载/错误/reload 收敛）；本地镜像承接乐观变更
+  const {
+    data,
+    loading,
+    error: loadError,
+    reload,
+  } = useResource(() => listMcpServers(), [], {
+    errorFallback: '无法加载 MCP 服务器列表',
+  });
   const [servers, setServers] = useState<McpServerEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  useEffect(() => {
+    if (data) setServers(data);
+  }, [data]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [testStatuses, setTestStatuses] = useState<Record<string, ServerTestStatus>>({});
   const [removing, setRemoving] = useState<string | null>(null);
@@ -38,24 +49,6 @@ export default function McpTab() {
   const [formDescription, setFormDescription] = useState('');
   const [formEnv, setFormEnv] = useState('');
   const [formSaving, setFormSaving] = useState(false);
-
-  const fetchServers = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const data = await listMcpServers();
-      setServers(data);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '无法加载 MCP 服务器列表';
-      setLoadError(msg);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchServers();
-  }, [fetchServers]);
 
   const handleToggle = async (server: McpServerEntry) => {
     try {
@@ -192,7 +185,7 @@ export default function McpTab() {
         <X size={24} className="text-[var(--color-error)]" />
         <p className="text-sm text-[var(--color-error)]">{loadError}</p>
         <button
-          onClick={fetchServers}
+          onClick={reload}
           className="px-3 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover transition-colors"
         >
           重试

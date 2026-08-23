@@ -1,17 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   fetchKnowledgeEntries,
   fetchKnowledgeEntryContent,
   deleteKnowledgeEntry,
   type KnowledgeEntryItem,
 } from '@/lib/api-client';
+import { useResource } from '@/hooks/use-resource';
 import { ChevronRight, Folder, File, Trash2, Loader2, AlertCircle } from 'lucide-react';
 
 /** 知识库浏览（目录导航 + 层级查看 + 二次确认删除）。 */
 export default function KnowledgeBrowseTab() {
-  const [browseEntries, setBrowseEntries] = useState<KnowledgeEntryItem[]>([]);
-  const [browseLoading, setBrowseLoading] = useState(false);
-  const [browseError, setBrowseError] = useState<string | null>(null);
   const [selectedBrowseEntry, setSelectedBrowseEntry] = useState<KnowledgeEntryItem | null>(null);
   const [browseContent, setBrowseContent] = useState('');
   const [browseLevel, setBrowseLevel] = useState('detail');
@@ -23,6 +21,7 @@ export default function KnowledgeBrowseTab() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const confirmTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
+  // 卸载时清理删除确认自动消失计时器
   useEffect(() => {
     return () => {
       if (confirmTimerRef.current) {
@@ -31,24 +30,21 @@ export default function KnowledgeBrowseTab() {
     };
   }, []);
 
-  const loadBrowseEntries = useCallback(async () => {
-    setBrowseLoading(true);
-    setBrowseError(null);
-    setDeleteError(null);
-    try {
-      const res = await fetchKnowledgeEntries(browsePath.join('/') || undefined);
-      setBrowseEntries(res.entries);
-    } catch (err: unknown) {
-      setBrowseError(err instanceof Error ? err.message : '加载失败');
-    } finally {
-      setBrowseLoading(false);
-    }
-  }, [browsePath]);
-
-  // 挂载（切换到此 tab）时加载列表
-  useEffect(() => {
-    void loadBrowseEntries();
-  }, [loadBrowseEntries]);
+  // 目录列表加载（useResource：路径变化自动重取 + 加载/错误/reload 收敛）
+  const {
+    data: browseData,
+    loading: browseLoading,
+    error: browseError,
+    reload: reloadBrowse,
+  } = useResource(
+    async () => {
+      setDeleteError(null);
+      return fetchKnowledgeEntries(browsePath.join('/') || undefined);
+    },
+    [browsePath],
+    { errorFallback: '加载失败' },
+  );
+  const browseEntries = browseData?.entries ?? [];
 
   const handleBrowseView = async (entry: KnowledgeEntryItem) => {
     // VFS 中已 ingest 的文档以目录节点形态列出（is_directory=true 但携带 L0/L1/L2 内容）。
@@ -107,7 +103,7 @@ export default function KnowledgeBrowseTab() {
         if (prev.uri === entry.uri || prev.uri.startsWith(`${entry.uri}/`)) return null;
         return prev;
       });
-      await loadBrowseEntries();
+      reloadBrowse();
     } catch (err: unknown) {
       setDeleteError(err instanceof Error ? err.message : '删除失败');
     } finally {
@@ -149,7 +145,7 @@ export default function KnowledgeBrowseTab() {
           </button>
         ))}
         <button
-          onClick={loadBrowseEntries}
+          onClick={reloadBrowse}
           disabled={browseLoading}
           className="ml-auto px-2 py-0.5 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
         >

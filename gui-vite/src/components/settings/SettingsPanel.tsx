@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useResource } from '@/hooks/use-resource';
 import {
   Cpu,
   Database,
@@ -430,34 +431,17 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
 /* ══════════ Outer component (loading / error / content) ══════════ */
 
 export default function SettingsPanel() {
-  const [config, setConfig] = useState<ConfigState | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  /* Load config on mount */
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setLoadError(null);
-    apiGet<BackendConfigResponse>('/config')
-      .then((data) => {
-        if (!cancelled) {
-          const formConfig = fromBackendConfig(data);
-          setConfig(formConfig);
-          setLoading(false);
-        }
-      })
-      .catch((err: Error) => {
-        if (!cancelled) {
-          setLoadError(err.message || '无法加载配置');
-          setConfig(null);
-          setLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // 配置加载（useResource：加载/错误/reload 收敛；fetcher 内做后端 → 表单转换）
+  const {
+    data: config,
+    loading,
+    error: loadError,
+    reload,
+  } = useResource(
+    async () => fromBackendConfig(await apiGet<BackendConfigResponse>('/config')),
+    [],
+    { errorFallback: '无法加载配置' },
+  );
 
   if (loading) {
     return (
@@ -480,7 +464,7 @@ export default function SettingsPanel() {
         <X size={32} className="text-[var(--color-error)]" />
         <p className="text-[var(--color-error)] text-sm">{loadError || '无法加载配置'}</p>
         <button
-          onClick={() => window.location.reload()}
+          onClick={reload}
           className="px-4 py-1.5 text-sm rounded-md bg-accent text-white hover:bg-accent-hover transition-colors"
         >
           重新加载

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { BarChart3, Loader2, Search } from 'lucide-react';
 import { apiGet } from '@/lib/api-client';
+import { useResource } from '@/hooks/use-resource';
 import { formatNumber } from '@/lib/utils';
 import { SectionTitle } from './shared';
 
@@ -46,9 +47,8 @@ export default function UsageTab() {
   const [endDate, setEndDate] = useState('');
   // 生效查询：点击快捷按钮或「查询」后固化
   const [activeQuery, setActiveQuery] = useState<ActiveQuery>({ kind: 'quick', days: 7 });
-  const [data, setData] = useState<UsageStatsResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // 表单校验错误（非请求错误；请求错误由 useResource 持有）
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   // 当前查询的 API 参数串
   const queryRange =
@@ -59,39 +59,29 @@ export default function UsageTab() {
         '&end_ts=' +
         Math.floor(new Date(activeQuery.end + 'T23:59:59').getTime() / 1000);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    apiGet<UsageStatsResponse>('/usage/stats?' + queryRange)
-      .then((resp) => {
-        if (!cancelled) setData(resp);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : '加载失败');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [queryRange]);
+  // 查询加载（useResource：参数变化自动重取 + 竞态收敛）
+  const { data, loading, error } = useResource(
+    () => apiGet<UsageStatsResponse>('/usage/stats?' + queryRange),
+    [queryRange],
+    { errorFallback: '加载失败' },
+  );
+  const shownError = error ?? validationError;
 
   const pickQuick = (d: number) => {
+    setValidationError(null);
     setActiveQuery({ kind: 'quick', days: d });
   };
 
   const applyCustom = () => {
     if (!startDate || !endDate) {
-      setError('请选择起止日期');
+      setValidationError('请选择起止日期');
       return;
     }
     if (startDate > endDate) {
-      setError('起始日期不能晚于结束日期');
+      setValidationError('起始日期不能晚于结束日期');
       return;
     }
-    setError(null);
+    setValidationError(null);
     setActiveQuery({ kind: 'custom', start: startDate, end: endDate });
   };
 
@@ -161,13 +151,13 @@ export default function UsageTab() {
           加载中…
         </div>
       )}
-      {error && (
+      {shownError && (
         <p className="text-xs text-red-500 py-3" role="alert">
-          {error}
+          {shownError}
         </p>
       )}
 
-      {!loading && !error && total && (
+      {!loading && !shownError && total && (
         <>
           <div className="text-[11px] text-[var(--color-text-tertiary)] mb-2">
             {rangeLabel} · {total.calls} 次 LLM 调用

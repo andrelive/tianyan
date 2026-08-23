@@ -1,9 +1,9 @@
-import { useState, useCallback } from 'react';
+import { useState } from 'react';
 import { useResource } from '@/hooks/use-resource';
 import ReactMarkdown from 'react-markdown';
 import { useAppStore } from '@/lib/store';
 import { apiGet, getSkillDetail, getSkillsStats } from '@/lib/api-client';
-import type { Skill, SkillDetail, SkillListResponse } from '@/lib/types';
+import type { Skill, SkillListResponse } from '@/lib/types';
 import { Wrench, Loader2, AlertCircle, ChevronRight, Clock } from 'lucide-react';
 import { formatDateTime, formatTimestamp } from '@/lib/utils';
 
@@ -19,9 +19,6 @@ export default function SkillsPanel() {
   const skills = useAppStore((s) => s.skills);
 
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<SkillDetail | null>(null);
-  const [loadingDetail, setLoadingDetail] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
 
   // 只展示方法论技能（custom 类）
   const methodologySkills = skills.filter((s) => s.category === 'custom');
@@ -45,21 +42,15 @@ export default function SkillsPanel() {
 
   const skillStats = (id: string) => stats?.skills.find((s) => s.skill_id === id);
 
-  // 选中技能 → 加载详情
-  const loadDetail = useCallback(async (skillId: string) => {
-    setSelectedSkillId(skillId);
-    setLoadingDetail(true);
-    setDetailError(null);
-    setDetail(null);
-    try {
-      const d = await getSkillDetail(skillId);
-      setDetail(d);
-    } catch (err) {
-      setDetailError(err instanceof Error ? err.message : '加载技能详情失败');
-    } finally {
-      setLoadingDetail(false);
-    }
-  }, []);
+  // 详情加载（useResource + enabled：选中即取、切换重取、未选中不取）
+  const {
+    data: detail,
+    loading: loadingDetail,
+    error: detailError,
+  } = useResource(() => getSkillDetail(selectedSkillId ?? ''), [selectedSkillId], {
+    enabled: !!selectedSkillId,
+    errorFallback: '加载技能详情失败',
+  });
 
   return (
     <div className="flex flex-col h-full">
@@ -136,7 +127,7 @@ export default function SkillsPanel() {
                 {methodologySkills.map((skill) => (
                   <button
                     key={skill.id}
-                    onClick={() => loadDetail(skill.id)}
+                    onClick={() => setSelectedSkillId(skill.id)}
                     className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
                       selectedSkillId === skill.id
                         ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'

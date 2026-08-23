@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Tree, type NodeRendererProps } from 'react-arborist';
+import { useResource } from '@/hooks/use-resource';
 import { ChevronRight, File, Folder, Loader2, RefreshCw } from 'lucide-react';
 import { fetchWorkspaceTree } from '@/lib/api-client';
 import type { WorkspaceEntry } from '@/lib/types';
@@ -125,29 +126,26 @@ export default function WorkspaceTree({
   height = DEFAULT_HEIGHT,
   sessionId,
 }: WorkspaceTreeProps) {
-  const [rootEntries, setRootEntries] = useState<WorkspaceEntry[]>([]);
   const [childrenMap, setChildrenMap] = useState<Record<string, WorkspaceNodeData[]>>({});
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [expandingPath, setExpandingPath] = useState<string | null>(null);
 
-  const loadRoot = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
+  // 根加载（useResource：加载/错误/竞态收敛；sessionId 变化自动重取）
+  const {
+    data: rootResp,
+    loading,
+    error,
+    reload,
+  } = useResource(
+    async () => {
       const res = await fetchWorkspaceTree('', 1, sessionId);
-      setRootEntries(res.entries);
       setChildrenMap({});
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [sessionId]);
-
-  useEffect(() => {
-    loadRoot();
-  }, [loadRoot]);
+      return res;
+    },
+    [sessionId],
+    { errorFallback: '加载失败' },
+  );
+  // 派生数组 useMemo 化：useMemo 的 data 依赖需要稳定引用（?? [] 每次渲染新建数组）
+  const rootEntries = useMemo(() => rootResp?.entries ?? [], [rootResp]);
 
   const loadChildren = useCallback(
     async (path: string) => {
@@ -189,7 +187,7 @@ export default function WorkspaceTree({
         </p>
         <button
           type="button"
-          onClick={loadRoot}
+          onClick={reload}
           className="flex items-center gap-1 px-3 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
         >
           <RefreshCw size={12} />

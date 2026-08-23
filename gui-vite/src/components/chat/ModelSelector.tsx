@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '@/lib/store';
+import { useResource } from '@/hooks/use-resource';
 import { ChevronDown, Loader2 } from 'lucide-react';
 import { apiGet, switchModel } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
@@ -12,38 +13,29 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
-  // Fetch models from backend
-  const [loading, setLoading] = useState(true);
+  // 模型列表加载（useResource：加载/竞态收敛；副作用留在 fetcher 内：
+  // 过滤 chat 能力 + 写入 store + 首次自动选中；失败静默——按钮禁用态解除即可）
   const setChatModelsStore = useAppStore((s) => s.setChatModels);
-
-  useEffect(() => {
-    let cancelled = false;
-    apiGet<ModelsResponse>('/config/models')
-      .then((data) => {
-        if (cancelled) return;
-        // Filter models with "chat" capability；保留完整信息（含每模型思考档位）
-        const chat = data.models.filter((m) => m.capabilities.includes('chat'));
-        setChatModelsStore(chat);
-        setLoading(false);
-
-        // Auto-select first model if none selected
-        if (chat.length > 0 && !selectedModel) {
-          const preferred = data.preferences.chat;
-          if (preferred) {
-            setModel(preferred.model);
-          } else {
-            setModel(chat[0].name);
-          }
+  const { loading } = useResource(
+    async () => {
+      const data = await apiGet<ModelsResponse>('/config/models');
+      // Filter models with "chat" capability；保留完整信息（含每模型思考档位）
+      const chat = data.models.filter((m) => m.capabilities.includes('chat'));
+      setChatModelsStore(chat);
+      // Auto-select first model if none selected
+      if (chat.length > 0 && !selectedModel) {
+        const preferred = data.preferences.chat;
+        if (preferred) {
+          setModel(preferred.model);
+        } else {
+          setModel(chat[0].name);
         }
-      })
-      .catch(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
-  }, [setChatModelsStore]);
+      }
+      return data;
+    },
+    [],
+    { errorFallback: '加载模型列表失败' },
+  );
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {

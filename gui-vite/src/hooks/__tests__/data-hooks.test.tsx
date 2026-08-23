@@ -196,3 +196,63 @@ describe('useChatStream', () => {
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('useResource enabled', () => {
+  it('pauses while disabled and fetches when enabled flips', async () => {
+    const fetcher = vi.fn().mockResolvedValue('ok');
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useResource(fetcher, [], { enabled }),
+      { initialProps: { enabled: false } },
+    );
+
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(result.current.loading).toBe(false);
+    expect(result.current.data).toBeNull();
+
+    await act(async () => {
+      rerender({ enabled: true });
+    });
+    await waitFor(() => {
+      expect(result.current.data).toBe('ok');
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('clears error and loading when disabled mid-flight', async () => {
+    const fetcher = vi.fn().mockRejectedValue(new Error('boom'));
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useResource(fetcher, [], { enabled }),
+      { initialProps: { enabled: true } },
+    );
+
+    await waitFor(() => {
+      expect(result.current.error).toBe('boom');
+    });
+
+    await act(async () => {
+      rerender({ enabled: false });
+    });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBeNull();
+  });
+
+  it('refetches when deps change while enabled', async () => {
+    const fetcher = vi.fn().mockImplementation(async (id: string) => 'detail-' + id);
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useResource(() => fetcher(id), [id]),
+      { initialProps: { id: 'a' } },
+    );
+
+    await waitFor(() => {
+      expect(result.current.data).toBe('detail-a');
+    });
+    await act(async () => {
+      rerender({ id: 'b' });
+    });
+    await waitFor(() => {
+      expect(result.current.data).toBe('detail-b');
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+});

@@ -1,10 +1,9 @@
-import { useCallback, useState } from 'react';
+import { useState } from 'react';
 import { useResource } from '@/hooks/use-resource';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { AlertCircle, Bot, ChevronRight, Loader2, RotateCcw, Trash2, Users } from 'lucide-react';
 import { apiDelete, apiPost, getRoleDetail, getRoles, getRolesStats } from '@/lib/api-client';
 import { formatTimestamp } from '@/lib/utils';
-import type { RoleDetail } from '@/lib/types';
 
 const TYPE_LABEL: Record<string, string> = {
   delegation: '委托',
@@ -36,9 +35,6 @@ const SOURCE_STYLE: Record<string, string> = {
  */
 export default function RolesPanel() {
   const [selectedName, setSelectedName] = useState<string | null>(null);
-  const [detail, setDetail] = useState<RoleDetail | null>(null);
-  const [loadingDetail, setLoadingDetail] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
@@ -56,21 +52,16 @@ export default function RolesPanel() {
 
   const selectedRole = roles.find((r) => r.name === selectedName);
 
-  // 选中角色 → 加载详情
-  const loadDetail = useCallback(async (name: string) => {
-    setSelectedName(name);
-    setLoadingDetail(true);
-    setDetailError(null);
-    setDetail(null);
-    try {
-      const d = await getRoleDetail(name);
-      setDetail(d);
-    } catch (err) {
-      setDetailError(err instanceof Error ? err.message : '加载角色详情失败');
-    } finally {
-      setLoadingDetail(false);
-    }
-  }, []);
+  // 详情加载（useResource + enabled：选中即取、切换重取、未选中不取）
+  const {
+    data: detail,
+    loading: loadingDetail,
+    error: detailError,
+    reload: reloadDetail,
+  } = useResource(() => getRoleDetail(selectedName ?? ''), [selectedName], {
+    enabled: !!selectedName,
+    errorFallback: '加载角色详情失败',
+  });
 
   /** 待确认操作（ConfirmDialog 状态机；替代 window.confirm——jsdom 可测） */
   const [confirm, setConfirm] = useState<{
@@ -98,7 +89,7 @@ export default function RolesPanel() {
       setActionMessage('已回退内置种子（下次会话边界生效）');
       void reloadRoles();
       void reloadStats();
-      await loadDetail(selectedName);
+      reloadDetail();
     } catch (err) {
       setActionMessage(err instanceof Error ? `操作失败：${err.message}` : '操作失败');
     } finally {
@@ -124,7 +115,6 @@ export default function RolesPanel() {
       await apiDelete(`/roles/${encodeURIComponent(selectedName)}`);
       setActionMessage('角色已退役删除');
       setSelectedName(null);
-      setDetail(null);
       void reloadRoles();
       void reloadStats();
     } catch (err) {
@@ -229,7 +219,7 @@ export default function RolesPanel() {
                 {roles.map((role) => (
                   <button
                     key={role.name}
-                    onClick={() => void loadDetail(role.name)}
+                    onClick={() => setSelectedName(role.name)}
                     className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
                       selectedName === role.name
                         ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
