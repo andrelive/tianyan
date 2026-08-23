@@ -213,12 +213,12 @@ Agent::process_message()                  [core/src/agent/coordinator.rs]
     │     └─ SkillLearningEngine::learn_from_history()（GEPA 进化）
     │
     └─ AgentStreamChunk 通过 mpsc 通道逐块输出
-          │ 每个 chunk 含 chunk_type (Thought/ToolCall/Observation/Answer/Error)
+          │ 每个 chunk 含 chunk_type (Thought/ToolCall/Observation/Answer/Error/Clarification/Message)
           │
-          ▼ ChatService 构造 ChatStreamEvent (含 chunk_type)
+          ▼ ChatService 构造 ChatStreamEvent（chunk_type + tool_call/tool_result/usage）
           │
-          ▼ SSE 流式响应
-React Frontend 按 chunk_type 差异化渲染
+          ▼ SSE 流式响应：流结束携带 message 边界事件（完整 ChatMessage + segments 时间线）
+React Frontend：增量按 chunk_type 渲染；历史/流式共用服务端 segments 时间线统一渲染（ADR-019）
 ```
 
 > **注意**：规则记录经工具执行管线内联写入（`RuleRecorder`）；记忆/技能/规则/组织形态的演化统一由 `EvolutionTask` 承担（ADR-017；`memory_task.rs`/`rule_task.rs`/`rule_suggester.rs` 已删除，ADR-018 落实）。
@@ -326,8 +326,9 @@ TaskScheduler 触发
   → [Trait] → ChatService::chat_completion_stream()
   → [Rust] → ToolRegistry::execute_parallel()（并行工具执行）
   → [Rust] → AgentStreamChunk (含 chunk_type)
-  → [Rust] → ChatStreamEvent（透传 chunk_type）
-  → [HTTP SSE] → Frontend 按 chunk_type 差异化渲染
+  → [Rust] → ChatStreamEvent（透传 chunk_type + tool_call/tool_result/usage）
+  → [HTTP SSE] → Frontend：增量按 chunk_type 渲染；边界 message 按服务端
+    segments 时间线统一渲染（历史/流式同构，ADR-019）
 ```
 
 ---
@@ -360,20 +361,36 @@ TaskScheduler 触发
 
 ### 5.3 流式数据契约（ChatStreamEvent）
 
+SSE 事件（`server/src/api/chat/types.rs`，逐行 `data:` JSON），完整字段：
+
 ```json
 {
     "id": "chatcmpl-0",
     "session_id": "uuid",
+    "chunk_type": "answer",
     "delta": "增量文本",
     "finish_reason": null,
-    "chunk_type": "Answer",
-    "skill_calls": null
+    "thinking": null,
+    "message": null,
+    "tool_call": null,
+    "tool_result": null,
+    "skill_calls": null,
+    "usage": null
 }
 ```
 
-- `chunk_type` 6 种：`Thought` / `ToolCall` / `Observation` / `Answer` / `Error` / `Clarification`
-- 后端从 `AgentStreamChunk.chunk_type` 透传，前端据此差异化渲染
-- `[DONE]` 或 `finish_reason` 有值时表示流结束
+- `chunk_type` 7 种（核心 `StreamChunkType`，snake_case 序列化）：
+  `thought` / `tool_call` / `observation` / `answer` / `error` / `clarification` / `message`；
+  后端从 `AgentStreamChunk.chunk_type` 透传
+- 字段按 chunk_type 填充：`delta`（正文增量）、`thinking`（思考增量，与正文分开渲染）、
+  `tool_call`（A2 展示契约，前端渲染 tool card）、`tool_result`（耗时/成败 + 结果，
+  实时挂到对应卡片）、`skill_calls`、`usage`（完成 chunk 携带本轮 token 用量）
+- **消息边界事件（chunk_type=message）**：流开始携带用户消息、流结束携带 assistant
+  消息的完整 `ChatMessage`——与历史加载同构（含 `segments` 时间线，ADR-019）。
+  前端本地消息 id/内容直接来自服务端统一结构，不做两套形态补丁
+- 流结束语义：`[DONE]` 或 `finish_reason` 有值
+- 前端解析与归约集中在 `gui-vite/src/lib/chat-stream.ts`（唯一 SSE 解析器 +
+  事件归约器，主对话流/追问流共用）
 
 ### 5.4 错误响应契约
 

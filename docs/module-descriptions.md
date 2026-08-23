@@ -9,9 +9,10 @@
 ## 目录
 
 - [1. Core 模块 (tianyan-core)](#1-core-模块-tianyan-core)
-- [2. Server 模块 (tianyan-server)](#2-server-模块-tianyan-server)
-- [3. GUI 模块 (tianyan-gui)](#3-gui-模块-tianyan-gui)
-- [4. Tauri 模块 (tianyan-tauri)](#4-tauri-模块-tianyan-tauri)
+- [2. 集成状态汇总](#2-集成状态汇总)
+- [3. Server 模块 (tianyan-server)](#3-server-模块-tianyan-server)
+- [4. GUI 模块 (gui-vite)](#4-gui-模块-gui-vite)
+- [5. Tauri 模块 (tianyan-tauri)](#5-tauri-模块-tianyan-tauri)
 
 ---
 
@@ -56,8 +57,8 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `SessionState` | 会话状态容器（对话历史为唯一真相源，上下文窗口、待持久化记忆） |
 | `SessionStateManager` | 多会话状态管理器（线程安全，Arc<RwLock<HashMap>>） |
 | `AgentResponse` | Agent 响应（内容、追问、Token 使用量、技能调用信息、处理时间） |
-| `AgentStreamChunk` | 流式响应块（含 chunk_type 区分 6 种类型） |
-| `StreamChunkType` | 流式块类型：Thought / ToolCall / Observation / Answer / Error / Clarification |
+| `AgentStreamChunk` | 流式响应块（含 chunk_type 区分 7 种类型） |
+| `StreamChunkType` | 流式块类型：Thought / ToolCall / Observation / Answer / Error / Clarification / Message（消息边界事件） |
 | `StreamEventSender` | 便捷构造各类 AgentStreamChunk 的辅助发送器 |
 | `AgentTool` | 工具定义枚举（VFS CRUD + 技能调用） |
 | `SkillCallInfo` | 技能调用结果信息（skill_id、success、execution_time_ms、error） |
@@ -489,13 +490,14 @@ SSE 协议知识集中在 `lib/chat-stream.ts`（C1 深模块化）：
 - **事件归约器**（createChatStreamReducer）：主对话流与追问流共用，处理
   message/delta/thinking/tool_call/tool_result/skill_calls/usage/finish_reason
   全事件 → store 动作（含轮次边界、截断/中断语义、usage 归位、工具结果挂卡）。
-- **历史/流式同构（方案 B）**：服务端 `ChatMessage.segments` 由
+- **历史/流式同构（方案 B，ADR-019）**：服务端 `ChatMessage.segments` 由
   StructuredMessage.parts 顺序生成（思考/正文/工具调用的真实到达顺序），
-  历史加载与流式边界事件携带同一权威时间线；前端 applyServerMessage 以
-  服务端为准——两条路径共用 SegmentBlocks 渲染，消除显示分叉。
+  历史加载与流式边界事件（chunk_type=message）携带同一权威时间线；前端
+  applyServerMessage 以服务端为准——两条路径共用 SegmentBlocks 渲染，
+  消除显示分叉（固定顺序分支仅旧数据兜底）。
 - **可中断**：AbortController 停止生成；错误按流归属会话复位。
 
-### 4.4 测试
+### 4.5 测试
 
 - vitest + RTL + MSW（共享 server；SSE mock 含 error/length 分支）；
 - 契约快照测试（src/test/fixtures/contract/）防 DTO 漂移（C5）；

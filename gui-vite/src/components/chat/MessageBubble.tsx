@@ -217,8 +217,8 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
           </div>
         )}
 
-        {/* 时间线渲染：有 segments（流式）时按事件到达顺序轮番展示
-            思考/文本/工具调用；历史消息（无 segments）回退固定顺序 */}
+        {/* 时间线渲染：服务端权威 segments（历史/流式同构，ADR-019）按真实
+            到达顺序轮番展示思考/文本/工具调用；固定顺序仅旧数据兜底 */}
         {message.segments && message.segments.length > 0 ? (
           <SegmentBlocks
             segments={message.segments}

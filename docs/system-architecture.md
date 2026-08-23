@@ -31,7 +31,7 @@
 | **组件工具化** | 25 个 OpenAI function calling 兼容工具，`call_skill` 桥接到技能系统 |
 | **前缀匹配缓存** | soul+rules+memories 固定前缀 → history 可变后缀，利用 LLM Provider 缓存 |
 | **技能系统** | 6 个内置技能 + GEPA 进化引擎自动学习 |
-| **流式响应** | SSE 流式输出，6 种 chunk_type 差异化渲染 |
+| **流式响应** | SSE 流式输出，7 种 chunk_type（含 message 边界事件）；历史/流式共用服务端权威时间线（segments，ADR-019） |
 
 ---
 
@@ -164,7 +164,7 @@ pub struct StructuredMessage {
 **四个核心职责**：
 
 1. **持久化**：完整消息写入 SQLite 权威存储（ADR-018，`SessionStore`，单事务原子取号 + FTS 同步）。`AgentLoop` 每产生一条消息，实时调 `SessionManager::add_structured_message()` 落盘。
-2. **会话组装**：存储与传输分离 — `StructuredMessage`（存储层）↔ `Message`（传输层）。`ContextAssembler::assemble()` 转换。
+2. **会话组装**：存储与传输分离 — `StructuredMessage`（存储层）↔ `Message`（传输层）。`ContextAssembler::assemble()` 转换。API 层序列化为 `ChatMessage` 时按 parts 顺序生成 `segments` 时间线（思考/正文/工具调用真实到达顺序），随历史加载与流式边界事件送达前端——渲染层不再本地重排（ADR-019）。
 3. **会话跟踪**：`compression_marker` 标记压缩产生的摘要消息。加载会话时反向扫描到最近 marker，只加载 marker 及之后的的消息（旧消息仍完整保留在 SQLite 中）。
 4. **Token 统计**：LLM 响应 `TokenUsage` → `AgentLoop` 捕获 → `DetailedTokenUsage` → 持久化 → 聚合到 `AgentState.total_tokens`。
 
@@ -262,8 +262,9 @@ AgentLoop 迭代循环
   ├─ ToolRegistry.execute_parallel() → 实时持久化 StructuredMessage
   └─ 重复直到 Answer 或 NeedsClarification
          ↓
-SSE stream: 6 种 chunk_type 差异化渲染
-→ React Frontend 展示
+SSE stream: 7 种 chunk_type 差异化渲染（增量）
+  └─ 流结束 message 边界事件：完整 ChatMessage + segments（parts 顺序时间线）
+→ React Frontend：历史加载与流式共用 segments 时间线统一渲染（ADR-019）
 ```
 
 ### 5.2 记忆持久化流程

@@ -51,7 +51,7 @@
 | 上下文工程 | VFS L0/L1/L2 双层摘要 + RRF 融合 + 前缀缓存（**强项**） | session-reference（从日志派生）+ agent-instructions（AGENTS.md）+ time/tmux context（**弱项**） | 天演领先；DSH 没有向量检索/记忆层（靠 session log 全量 + compaction） |
 | 多 agent | `delegate_to_agent`（角色化 roles.rs、嵌套 3、后台、join 信号） | subagent provider registry（in-process/fork/ACP/Codex/Claude Code/dsh-sdk 多种 provider）+ workflow 引擎 | 天演同构能力 ✓；DSH 多 provider 与模型可写 workflow 是天演没有的 |
 | 安全 | 审批流 + 快照回退 + 命令级审批策略（信任模型：本地单用户） | sandbox seam（landlock/sandbox-exec/Windows ACL 受限令牌）+ guard + 权限切换器 + approval 服务 | 定位差异（天演 REJECTED #11/#12）；DSH 的 monotonic guard 思想可学 |
-| UI 渲染 | 前端按 chunk_type 硬编码渲染（tool_calls 基本不渲染） | 工具自带 `presentCall`/`presentResult` 展示契约（card 词汇表：generic/terminal/diff/search/read/web），host/client 各自投影 | **真差距**：DSH 让工具自描述 UI，UI 与工具解耦 |
+| UI 渲染 | 前端按 chunk_type 渲染增量 + 服务端 segments 时间线统一渲染历史/流式（A2 ✅：`tool_call`/`tool_result` 事件透传 + `ToolCallCard` 按展示契约渲染 + 边界 message 携带权威时间线，ADR-019） | 工具自带 `presentCall`/`presentResult` 展示契约（card 词汇表：generic/terminal/diff/search/read/web），host/client 各自投影 | A2 已落地（§7.5）：工具展示意图集中映射（ToolRegistry）；剩余差距为 DSH 由工具自带展示（声明式、多端复用），天演为服务端集中映射 |
 | 技能 | 内置 7 技能 + GEPA 进化引擎（业界独有） | skill provider 注册表（filesystem/embedded/remote provider）+ 目录快照 | 天演 GEPA 领先；DSH 的 provider 中立可学 |
 | 调度/提醒 | scheduler（cron 任务族 + reminder） | schedule（session 本地提醒，状态存于会话日志） | 同构 |
 | 目标/计划 | `current_goal` 死字段（REJECTED 后置） | `ctx.goals` 持久化同会话目标 + round-driver | DSH 有、天演后置 |
