@@ -40,44 +40,23 @@ export default function ConfigWizard() {
   const [step, setStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
 
-  /* ── Model (step 1) ── */
-  const [providerName, setProviderName] = useState('');
-  const [providerEndpoint, setProviderEndpoint] = useState('');
-  const [providerApiKey, setProviderApiKey] = useState('');
-  const [modelName, setModelName] = useState('');
-  const [modelCaps, setModelCaps] = useState<ModelCapability[]>(['chat' as ModelCapability]);
-
-  /* ── Data (step 2) ── */
-  const [dataDir, setDataDir] = useState('');
-  const [vectorDim, setVectorDim] = useState(1536);
-
-  /* ── Agent (step 3) ── */
-  const [maxTurns, setMaxTurns] = useState(200);
-
-  /* ── Build WizardData from state ── */
-
-  const wizardData: WizardData = {
-    providerName,
-    providerEndpoint,
-    providerApiKey,
-    modelName,
-    modelCaps,
-    dataDir,
-    vectorDim,
-    maxTurns,
-  };
+  /* 单一 WizardData 状态（E6：8 个 useState + 扇出合并收敛为一个对象——
+     对象即真相源，handleChange 收敛为 spread 合并） */
+  const [wizardData, setWizardData] = useState<WizardData>({
+    providerName: '',
+    providerEndpoint: '',
+    providerApiKey: '',
+    modelName: '',
+    modelCaps: ['chat' as ModelCapability],
+    dataDir: '',
+    vectorDim: 1536,
+    maxTurns: 200,
+  });
 
   /* ── Handle partial updates from step components ── */
 
   const handleChange = useCallback((updates: Partial<WizardData>) => {
-    if (updates.providerName !== undefined) setProviderName(updates.providerName);
-    if (updates.providerEndpoint !== undefined) setProviderEndpoint(updates.providerEndpoint);
-    if (updates.providerApiKey !== undefined) setProviderApiKey(updates.providerApiKey);
-    if (updates.modelName !== undefined) setModelName(updates.modelName);
-    if (updates.modelCaps !== undefined) setModelCaps(updates.modelCaps);
-    if (updates.dataDir !== undefined) setDataDir(updates.dataDir);
-    if (updates.vectorDim !== undefined) setVectorDim(updates.vectorDim);
-    if (updates.maxTurns !== undefined) setMaxTurns(updates.maxTurns);
+    setWizardData((prev) => ({ ...prev, ...updates }));
   }, []);
 
   /* ── Navigation ── */
@@ -87,13 +66,13 @@ export default function ConfigWizard() {
         return true;
       case 1:
         return (
-          providerName.trim().length > 0 &&
-          providerEndpoint.trim().length > 0 &&
-          providerApiKey.trim().length > 0 &&
-          modelName.trim().length > 0
+          wizardData.providerName.trim().length > 0 &&
+          wizardData.providerEndpoint.trim().length > 0 &&
+          wizardData.providerApiKey.trim().length > 0 &&
+          wizardData.modelName.trim().length > 0
         );
       case 2:
-        return dataDir.trim().length > 0;
+        return wizardData.dataDir.trim().length > 0;
       case 3:
         return true;
       case 4:
@@ -101,7 +80,7 @@ export default function ConfigWizard() {
       default:
         return false;
     }
-  }, [step, providerName, providerEndpoint, providerApiKey, modelName, dataDir]);
+  }, [step, wizardData]);
 
   const handleNext = useCallback(() => {
     if (!canGoNext()) {
@@ -118,6 +97,16 @@ export default function ConfigWizard() {
   /* ── Finish ── */
   const handleFinish = useCallback(async () => {
     // Build ConfigState from wizard state
+    const {
+      providerName,
+      providerEndpoint,
+      providerApiKey,
+      modelName,
+      modelCaps,
+      dataDir,
+      vectorDim,
+      maxTurns,
+    } = wizardData;
     const config: ConfigState = {
       ...emptyConfigState(),
       providers: [],
@@ -187,18 +176,7 @@ export default function ConfigWizard() {
       showToast(`配置保存失败: ${msg}`, 'error');
       setSubmitting(false);
     }
-  }, [
-    providerName,
-    providerEndpoint,
-    providerApiKey,
-    modelName,
-    modelCaps,
-    dataDir,
-    vectorDim,
-    maxTurns,
-    showToast,
-    setConfigured,
-  ]);
+  }, [wizardData, showToast, setConfigured]);
 
   /* ─────── Render ─────── */
 
