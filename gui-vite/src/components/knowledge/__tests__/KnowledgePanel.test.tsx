@@ -48,16 +48,16 @@ describe('KnowledgePanel', () => {
     expect(screen.getByRole('button', { name: '删除 ownership' })).toBeInTheDocument();
   });
 
-  it('deletes an entry after inline confirmation, calls the API and refreshes the list', async () => {
+  it('deletes an entry via ConfirmDialog, calls the API and refreshes the list', async () => {
     const user = userEvent.setup();
     renderKnowledgePanel();
     await openBrowseTab(user);
 
-    // 目录条目删除确认文案说明递归删除子条目
+    // 删除按钮打开统一确认对话框（ConfirmDialog 原语）；目录条目文案说明递归删除子条目
     await user.click(screen.getByRole('button', { name: '删除 architecture' }));
-    expect(screen.getByText('将同时删除其全部子条目')).toBeInTheDocument();
+    expect(screen.getByText(/将被永久删除（含全部子条目）/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: '确认删除 architecture' }));
+    await user.click(screen.getByRole('button', { name: '删除' }));
 
     // 调用了 delete API，uri 正确
     await waitFor(() => {
@@ -81,13 +81,13 @@ describe('KnowledgePanel', () => {
     await openBrowseTab(user);
 
     await user.click(screen.getByRole('button', { name: '删除 ownership' }));
-    expect(screen.getByRole('button', { name: '确认删除 ownership' })).toBeInTheDocument();
+    expect(screen.getByText(/将被永久删除/)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '取消' }));
 
-    // 未调用 API，确认态消失，条目仍在
+    // 未调用 API，对话框关闭，条目仍在
     expect(mockKnowledgeDeleteCalls).toHaveLength(0);
-    expect(screen.queryByRole('button', { name: '确认删除 ownership' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/将被永久删除/)).not.toBeInTheDocument();
     expect(screen.getByText('ownership')).toBeInTheDocument();
   });
 
@@ -103,7 +103,7 @@ describe('KnowledgePanel', () => {
     await openBrowseTab(user);
 
     await user.click(screen.getByRole('button', { name: '删除 ownership' }));
-    await user.click(screen.getByRole('button', { name: '确认删除 ownership' }));
+    await user.click(screen.getByRole('button', { name: '删除' }));
 
     await waitFor(() => {
       expect(screen.getByRole('alert')).toBeInTheDocument();
@@ -127,11 +127,9 @@ describe('KnowledgePanel', () => {
     renderKnowledgePanel();
     await openBrowseTab(user);
 
-    // 点击条目行本身（非删除按钮）不会进入确认态，也不触发删除
+    // 点击条目行本身（非删除按钮）不会打开确认对话框，也不触发删除
     await user.click(screen.getByRole('button', { name: 'dual-layer-index' }));
-    expect(
-      screen.queryByRole('button', { name: '确认删除 dual-layer-index' }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/将被永久删除/)).not.toBeInTheDocument();
     expect(mockKnowledgeDeleteCalls).toHaveLength(0);
     expect(screen.getByText('mock content')).toBeInTheDocument();
   });

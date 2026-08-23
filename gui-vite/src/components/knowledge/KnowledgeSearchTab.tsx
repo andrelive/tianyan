@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { apiGet, fetchKnowledgeSuggestions } from '@/lib/api-client';
 import type { KnowledgeSearchResult, KnowledgeSearchResponse } from '@/lib/types';
 import { Search, Loader2, AlertCircle, ChevronDown, ChevronUp, BookOpen } from 'lucide-react';
@@ -34,70 +35,65 @@ export default function KnowledgeSearchTab() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [expandedResultId, setExpandedResultId] = useState<string | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+
+  // 防抖统一收敛（useDebouncedValue）：搜索 + 建议共享同一稳定值，
+  // 两段手写 debounceRef 样板消失；请求级竞态仍由各自 cancelled 守卫
+  const debouncedQuery = useDebouncedValue(searchQuery, 300);
+  const query = debouncedQuery.trim();
 
   useEffect(() => {
-    if (!searchQuery.trim()) {
+    if (!query) {
       setSearchResults([]);
       setTotalResults(0);
       return;
     }
 
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-    }
-
-    const query = searchQuery.trim();
-    debounceRef.current = setTimeout(async () => {
-      setIsSearching(true);
-      setSearchError(null);
-      try {
-        const res = await apiGet<KnowledgeSearchResponse>(
-          `/knowledge/search?q=${encodeURIComponent(query)}&limit=10`,
-        );
-        setSearchResults(res.results);
-        setTotalResults(res.total);
-      } catch (err) {
-        setSearchError(err instanceof Error ? err.message : '搜索失败');
-        setSearchResults([]);
-      } finally {
-        setIsSearching(false);
-      }
-    }, 300);
-
+    let cancelled = false;
+    setIsSearching(true);
+    setSearchError(null);
+    apiGet<KnowledgeSearchResponse>(`/knowledge/search?q=${encodeURIComponent(query)}&limit=10`)
+      .then((res) => {
+        if (!cancelled) {
+          setSearchResults(res.results);
+          setTotalResults(res.total);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setSearchError(err instanceof Error ? err.message : '搜索失败');
+          setSearchResults([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsSearching(false);
+      });
     return () => {
-      if (debounceRef.current) {
-        clearTimeout(debounceRef.current);
-      }
+      cancelled = true;
     };
-  }, [searchQuery]);
+  }, [query]);
 
   useEffect(() => {
-    const query = searchQuery.trim();
     if (!query) {
       setSuggestions([]);
       return;
     }
 
     let cancelled = false;
-    const timer = setTimeout(async () => {
-      try {
-        const res = await fetchKnowledgeSuggestions(query);
+    fetchKnowledgeSuggestions(query)
+      .then((res) => {
         if (!cancelled) {
           setSuggestions(res.suggestions);
         }
-      } catch {
+      })
+      .catch(() => {
         if (!cancelled) {
           setSuggestions([]);
         }
-      }
-    }, 300);
-
+      });
     return () => {
       cancelled = true;
-      clearTimeout(timer);
     };
-  }, [searchQuery]);
+  }, [query]);
 
   const toggleResultExpand = (id: string) => {
     setExpandedResultId((prev) => (prev === id ? null : id));

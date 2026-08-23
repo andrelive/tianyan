@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   fetchKnowledgeEntries,
   fetchKnowledgeEntryContent,
@@ -6,6 +6,7 @@ import {
   type KnowledgeEntryItem,
 } from '@/lib/api-client';
 import { useResource } from '@/hooks/use-resource';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { ChevronRight, Folder, File, Trash2, Loader2, AlertCircle } from 'lucide-react';
 
 /** 知识库浏览（目录导航 + 层级查看 + 二次确认删除）。 */
@@ -15,20 +16,21 @@ export default function KnowledgeBrowseTab() {
   const [browseLevel, setBrowseLevel] = useState('detail');
   const [browseContentLoading, setBrowseContentLoading] = useState(false);
   const [browsePath, setBrowsePath] = useState<string[]>([]);
-  // Browse delete state
-  const [confirmDeleteUri, setConfirmDeleteUri] = useState<string | null>(null);
+  // Browse delete state（确认走统一 ConfirmDialog 原语——E3：对齐 RolesPanel/McpTab）
+  const [confirmTarget, setConfirmTarget] = useState<{
+    uri: string;
+    name: string;
+    isDirectory: boolean;
+  } | null>(null);
   const [deletingUri, setDeletingUri] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const confirmTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
-  // 卸载时清理删除确认自动消失计时器
+  // 确认框 5 秒未操作自动取消（保留原内联确认的自动消失语义）
   useEffect(() => {
-    return () => {
-      if (confirmTimerRef.current) {
-        clearTimeout(confirmTimerRef.current);
-      }
-    };
-  }, []);
+    if (!confirmTarget) return;
+    const timer = setTimeout(() => setConfirmTarget(null), 5000);
+    return () => clearTimeout(timer);
+  }, [confirmTarget]);
 
   // 目录列表加载（useResource：路径变化自动重取 + 加载/错误/reload 收敛）
   const {
@@ -70,25 +72,11 @@ export default function KnowledgeBrowseTab() {
 
   const handleDeleteClick = (entry: KnowledgeEntryItem) => {
     setDeleteError(null);
-    setConfirmDeleteUri(entry.uri);
-    if (confirmTimerRef.current) {
-      clearTimeout(confirmTimerRef.current);
-    }
-    confirmTimerRef.current = setTimeout(() => setConfirmDeleteUri(null), 5000);
+    setConfirmTarget({ uri: entry.uri, name: entry.name, isDirectory: entry.is_directory });
   };
 
-  const handleCancelDelete = () => {
-    if (confirmTimerRef.current) {
-      clearTimeout(confirmTimerRef.current);
-    }
-    setConfirmDeleteUri(null);
-  };
-
-  const handleConfirmDelete = async (entry: KnowledgeEntryItem) => {
-    if (confirmTimerRef.current) {
-      clearTimeout(confirmTimerRef.current);
-    }
-    setConfirmDeleteUri(null);
+  const handleConfirmDelete = async (entry: { uri: string }) => {
+    setConfirmTarget(null);
     setDeletingUri(entry.uri);
     setDeleteError(null);
     try {
@@ -196,55 +184,24 @@ export default function KnowledgeBrowseTab() {
                   {entry.name}
                 </span>
               </button>
-              {confirmDeleteUri === entry.uri ? (
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {entry.is_directory && (
-                    <span className="text-xs text-red-600 dark:text-red-400">
-                      将同时删除其全部子条目
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => handleConfirmDelete(entry)}
-                    disabled={deletingUri === entry.uri}
-                    aria-label={`确认删除 ${entry.name}`}
-                    className="flex items-center gap-1 px-2 py-1 text-xs rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
-                  >
-                    {deletingUri === entry.uri ? (
-                      <Loader2 size={12} className="animate-spin" />
-                    ) : (
-                      <Trash2 size={12} />
-                    )}
-                    确认删除？
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleCancelDelete}
-                    className="px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
-                  >
-                    取消
-                  </button>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => handleDeleteClick(entry)}
-                  disabled={deletingUri !== null}
-                  aria-label={`删除 ${entry.name}`}
-                  title={
-                    entry.is_directory
-                      ? `删除 ${entry.name}（将同时删除其全部子条目）`
-                      : `删除 ${entry.name}`
-                  }
-                  className="p-1.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-[var(--color-text-tertiary)] hover:text-red-500 disabled:opacity-50 shrink-0"
-                >
-                  {deletingUri === entry.uri ? (
-                    <Loader2 size={14} className="animate-spin" />
-                  ) : (
-                    <Trash2 size={14} />
-                  )}
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => handleDeleteClick(entry)}
+                disabled={deletingUri !== null}
+                aria-label={`删除 ${entry.name}`}
+                title={
+                  entry.is_directory
+                    ? `删除 ${entry.name}（将同时删除其全部子条目）`
+                    : `删除 ${entry.name}`
+                }
+                className="p-1.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-[var(--color-text-tertiary)] hover:text-red-500 disabled:opacity-50 shrink-0"
+              >
+                {deletingUri === entry.uri ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Trash2 size={14} />
+                )}
+              </button>
             </div>
           ))}
           {browseEntries.length === 0 && !browseLoading && !browseError && (
@@ -273,6 +230,26 @@ export default function KnowledgeBrowseTab() {
           )}
         </div>
       )}
+
+      {/* 删除确认（统一 ConfirmDialog 原语；5 秒未操作自动取消） */}
+      <ConfirmDialog
+        open={confirmTarget !== null}
+        title="删除知识条目"
+        message={
+          confirmTarget
+            ? `${confirmTarget.name} 将被永久删除${confirmTarget.isDirectory ? '（含全部子条目）' : ''}，5 秒后自动取消。`
+            : ''
+        }
+        danger
+        confirmLabel="删除"
+        busy={deletingUri !== null}
+        onConfirm={() => {
+          if (confirmTarget) {
+            void handleConfirmDelete(confirmTarget);
+          }
+        }}
+        onCancel={() => setConfirmTarget(null)}
+      />
     </div>
   );
 }
