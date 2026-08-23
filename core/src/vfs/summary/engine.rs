@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_mock_summary_engine_default() {
-        let engine = MockSummaryEngine::default();
+        let engine = MockSummaryEngine;
         let content = "Test content";
         // SummaryService 是 async trait——同步测试只验证默认构造
         let _ = &engine;

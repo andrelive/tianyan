@@ -143,17 +143,25 @@ mod tests {
     #[test]
     fn test_validate_policies() {
         assert!(RetryPolicy::default().validate().is_ok());
-        let mut p = RetryPolicy::default();
-        p.max_retries = 21;
+        let p = RetryPolicy {
+            max_retries: 21,
+            ..RetryPolicy::default()
+        };
         assert!(p.validate().is_err());
-        let mut p = RetryPolicy::default();
-        p.initial_delay_ms = 0;
+        let p = RetryPolicy {
+            initial_delay_ms: 0,
+            ..RetryPolicy::default()
+        };
         assert!(p.validate().is_err());
-        let mut p = RetryPolicy::default();
-        p.max_delay_ms = p.initial_delay_ms - 1;
+        let p = RetryPolicy {
+            max_delay_ms: RetryPolicy::default().initial_delay_ms - 1,
+            ..RetryPolicy::default()
+        };
         assert!(p.validate().is_err());
-        let mut p = RetryPolicy::default();
-        p.jitter_ratio = 1.5;
+        let p = RetryPolicy {
+            jitter_ratio: 1.5,
+            ..RetryPolicy::default()
+        };
         assert!(p.validate().is_err());
     }
 
@@ -175,7 +183,7 @@ mod tests {
         // jitter > 0 时结果在 [base*(1-r), base*(1+r)] 内
         let d = RetryPolicy::default();
         let v = d.delay_ms(1);
-        assert!(v >= 900 && v <= 1100, "delay={v}");
+        assert!((900..=1100).contains(&v), "delay={v}");
         assert!(d.delay_ms(20) <= d.max_delay_ms);
     }
 

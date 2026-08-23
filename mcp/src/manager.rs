@@ -225,8 +225,10 @@ mod tests {
             url: None,
         };
         let result = futures::executor::block_on(manager.connect_from_config(&config));
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+        let Err(err) = result else {
+            panic!("transport=http 且未配置 url 应失败，实际成功");
+        };
+        let msg = err.to_string();
         assert!(
             msg.contains("transport=http 但未配置 url"),
             "错误应携带原因: {msg}"

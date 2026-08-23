@@ -237,9 +237,7 @@ pub struct ToolRegistry {
     pub(crate) session_manager: Option<Arc<dyn crate::session::SessionManager>>,
     /// 主循环取消标志槽（按会话：coordinator 每请求注入/清理；
     /// 委托循环据此中断——同步委托期间用户点停止也能及时停）。
-    delegation_cancel: Arc<
-        tokio::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>,
-    >,
+    delegation_cancel: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
 }
 
 impl ToolRegistry {
@@ -274,7 +272,7 @@ impl ToolRegistry {
             delegation_depth: Arc::new(AtomicUsize::new(0)),
             role_registry: Arc::new(RoleRegistry::builtin()),
             session_manager: None,
-            delegation_cancel: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            delegation_cancel: Arc::new(Mutex::new(HashMap::new())),
         };
         // A1：内置可观测性监听器注册为第一个 post-execute 监听器——
         // 原 execute_single 尾部的统计/Trace/GEPA/规则学习自此是管线消费者。

@@ -550,9 +550,15 @@ impl ToolRegistry {
             });
             let mut done_rx = Some(done_rx);
             tokio::select! {
-                res = async { done_rx.as_mut().unwrap().recv().await.unwrap_or_else(|| {
-                    Err(TianyanError::Custom("tool: 委托通道关闭".to_string()))
-                }) } => res,
+                res = async {
+                    if let Some(rx) = done_rx.as_mut() {
+                        rx.recv().await.unwrap_or_else(|| {
+                            Err(TianyanError::Custom("tool: 委托通道关闭".to_string()))
+                        })
+                    } else {
+                        Err(TianyanError::Custom("tool: 委托通道关闭".to_string()))
+                    }
+                } => res,
                 _ = tokio::time::sleep(std::time::Duration::from_secs(budget_secs)) => {
                     // 预算耗尽：升级为后台任务。子代理循环仍在跑（handle 未 abort），
                     // 移交后台管理器：完成/失败经既有通知链路注入父会话 + 唤醒。
@@ -567,7 +573,11 @@ impl ToolRegistry {
                     self.background_tasks.mark_running(&task_id).await;
                     let mgr = self.background_tasks.clone();
                     let task_id_watch = task_id.clone();
-                    let mut rx = done_rx.take().unwrap();
+                    let Some(mut rx) = done_rx.take() else {
+                        return Err(TianyanError::Custom(
+                            "tool: 委托通道关闭".to_string(),
+                        ));
+                    };
                     tokio::spawn(async move {
                         match rx.recv().await {
                             Some(Ok((value, _))) => {

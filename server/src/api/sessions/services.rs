@@ -220,7 +220,7 @@ impl SessionService {
                 }
                 // 历史消息携带持久化 usage（DetailedTokenUsage → API TokenUsage）：
                 // 前端按会话独立计算上下文占用 / 缓存命中，避免跨会话串值。
-                let usage = (m.tokens.total > 0 || m.tokens.input > 0).then(|| TokenUsage {
+                let usage = (m.tokens.total > 0 || m.tokens.input > 0).then_some(TokenUsage {
                     prompt_tokens: m.tokens.input as u32,
                     completion_tokens: m.tokens.output as u32,
                     total_tokens: m.tokens.total as u32,

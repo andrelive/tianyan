@@ -151,7 +151,7 @@ mod tests {
         };
         assert_eq!(
             config.data_dir,
-            std::path::PathBuf::from("C:\\tianyan-e2e-data"),
+            PathBuf::from("C:\\tianyan-e2e-data"),
             "TIANYAN_DATA_DIR 应覆盖默认数据目录"
         );
         restored();

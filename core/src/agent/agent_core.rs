@@ -956,6 +956,65 @@ pub(crate) fn format_clarification_questions(questions: &[ClarificationQuestion]
     content
 }
 
+/// 向消息列表注入会话定位信息（prepare_context / prepare_wake_context 共用）。
+///
+/// 告知 LLM 当前会话 URI，使其可用 `vfs_read` 检索被压缩的原始记录。
+/// 位置固定在 system 前缀（soul/rules）之后、历史消息之前；
+/// 同会话内内容恒定，不影响 DeepSeek 前缀缓存。
+fn insert_session_hint(messages: &mut Vec<Message>, session_id: &str) {
+    let hint = format!(
+        "## 会话定位\n当前会话 ID：{}\n若早期对话已被压缩且摘要信息不足，可用 vfs_read 工具读取 tianyan://session/{} 查看原始对话记录（JSONL 格式，含压缩前的完整消息）。",
+        session_id, session_id
+    );
+    let insert_at = messages
+        .iter()
+        .position(|m| m.role != MessageRole::System)
+        .unwrap_or(messages.len());
+    messages.insert(insert_at, Message::system(hint));
+}
+
+/// 任务唤醒转发器（ADR-013：BackgroundTaskManager → [`Agent::process_wake`]）。
+///
+/// 用 `Weak<Agent>` 打破循环引用（Agent → AgentLoop → ToolRegistry →
+/// BackgroundTaskManager → TaskWaker → Agent）；Agent 已销毁时唤醒静默丢弃。
+/// `wake` 内部 spawn 独立任务执行唤醒轮，不阻塞任务完成收尾。
+pub struct AgentWakeForwarder {
+    agent: std::sync::Weak<Agent>,
+}
+
+impl AgentWakeForwarder {
+    /// 创建转发器（引用持有方必须与 `agent` 同一 Arc）。
+    pub fn new(agent: &Arc<Agent>) -> Self {
+        Self {
+            agent: Arc::downgrade(agent),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TaskWaker for AgentWakeForwarder {
+    async fn wake(&self, session_id: &str) {
+        let Some(agent) = self.agent.upgrade() else {
+            tracing::debug!("唤醒被丢弃：Agent 已销毁");
+            return;
+        };
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            agent.process_wake(&session_id).await;
+        });
+    }
+}
+
+/// TaskWaker → CommandWaker 适配器（后台命令唤醒复用委托层唤醒器）。
+struct CommandWakeAdapter(Arc<dyn TaskWaker>);
+
+#[async_trait::async_trait]
+impl crate::executor::CommandWaker for CommandWakeAdapter {
+    async fn wake(&self, session_id: &str) {
+        self.0.wake(session_id).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1377,64 +1436,5 @@ mod tests {
 
         let state = agent.state.read().await;
         assert_eq!(state.conversations_processed, 0, "失败重试后不记成功");
-    }
-}
-
-/// 向消息列表注入会话定位信息（prepare_context / prepare_wake_context 共用）。
-///
-/// 告知 LLM 当前会话 URI，使其可用 `vfs_read` 检索被压缩的原始记录。
-/// 位置固定在 system 前缀（soul/rules）之后、历史消息之前；
-/// 同会话内内容恒定，不影响 DeepSeek 前缀缓存。
-fn insert_session_hint(messages: &mut Vec<Message>, session_id: &str) {
-    let hint = format!(
-        "## 会话定位\n当前会话 ID：{}\n若早期对话已被压缩且摘要信息不足，可用 vfs_read 工具读取 tianyan://session/{} 查看原始对话记录（JSONL 格式，含压缩前的完整消息）。",
-        session_id, session_id
-    );
-    let insert_at = messages
-        .iter()
-        .position(|m| m.role != MessageRole::System)
-        .unwrap_or(messages.len());
-    messages.insert(insert_at, Message::system(hint));
-}
-
-/// 任务唤醒转发器（ADR-013：BackgroundTaskManager → [`Agent::process_wake`]）。
-///
-/// 用 `Weak<Agent>` 打破循环引用（Agent → AgentLoop → ToolRegistry →
-/// BackgroundTaskManager → TaskWaker → Agent）；Agent 已销毁时唤醒静默丢弃。
-/// `wake` 内部 spawn 独立任务执行唤醒轮，不阻塞任务完成收尾。
-pub struct AgentWakeForwarder {
-    agent: std::sync::Weak<Agent>,
-}
-
-impl AgentWakeForwarder {
-    /// 创建转发器（引用持有方必须与 `agent` 同一 Arc）。
-    pub fn new(agent: &Arc<Agent>) -> Self {
-        Self {
-            agent: Arc::downgrade(agent),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl TaskWaker for AgentWakeForwarder {
-    async fn wake(&self, session_id: &str) {
-        let Some(agent) = self.agent.upgrade() else {
-            tracing::debug!("唤醒被丢弃：Agent 已销毁");
-            return;
-        };
-        let session_id = session_id.to_string();
-        tokio::spawn(async move {
-            agent.process_wake(&session_id).await;
-        });
-    }
-}
-
-/// TaskWaker → CommandWaker 适配器（后台命令唤醒复用委托层唤醒器）。
-struct CommandWakeAdapter(Arc<dyn TaskWaker>);
-
-#[async_trait::async_trait]
-impl crate::executor::CommandWaker for CommandWakeAdapter {
-    async fn wake(&self, session_id: &str) {
-        self.0.wake(session_id).await;
     }
 }

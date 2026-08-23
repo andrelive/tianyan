@@ -701,7 +701,7 @@ mod tests {
         sender
             .send_tool_call(
                 "调用: read_file",
-                Some(crate::agent::types::ToolCallEvent {
+                Some(ToolCallEvent {
                     id: "call_test".into(),
                     name: "read_file".into(),
                     arguments: r#"{"path":"a.txt"}"#.into(),

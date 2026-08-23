@@ -442,7 +442,6 @@ impl CommandManager {
     }
 
     /// 按任务 ID 获取快照（None 表示不存在）。
-
     pub async fn get(&self, task_id: &str) -> Option<CommandTask> {
         self.tasks.lock().await.get(task_id).map(|e| e.task.clone())
     }
@@ -882,7 +881,7 @@ mod tests {
         // 完成通知：终态触发 on_command_terminal，remaining 计数随任务数递减
         #[derive(Clone)]
         struct CountingNotifier {
-            calls: Arc<tokio::sync::Mutex<Vec<(String, String, usize)>>>,
+            calls: Arc<Mutex<Vec<(String, String, usize)>>>,
         }
         #[async_trait]
         impl CommandNotifier for CountingNotifier {
@@ -898,7 +897,7 @@ mod tests {
                     .push((session_id.to_string(), task.id.clone(), remaining));
             }
         }
-        let calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(Vec::new()));
         let manager = CommandManager::new(None).with_notifier(Arc::new(CountingNotifier {
             calls: calls.clone(),
         }));

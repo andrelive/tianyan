@@ -353,7 +353,7 @@ pub async fn scan_provider_models(
                         // 端点扩展字段优先（OpenRouter/Together 等网关提供）；
                         // 标准 OpenAI /models 不返回容量 → 用内置规格表按模型名兜底
                         // （builtin_catalog 三级前缀匹配，网关挂载知名模型也能命中）。
-                        let catalog = tianyan::model::spec::builtin_catalog(&provider, &m.id);
+                        let catalog = tianyan::model::spec::builtin_catalog(provider, &m.id);
                         ProviderModelInfo {
                             capabilities: infer_capabilities(&m.id),
                             name: m.id.clone(),

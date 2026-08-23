@@ -185,7 +185,7 @@ impl UsageLog {
         if !conds.is_empty() {
             agg.push_str(" WHERE ");
             let mut parts = Vec::new();
-            if conds.len() >= 1 {
+            if !conds.is_empty() {
                 parts.push("ts >= ?");
             }
             if conds.len() >= 2 {

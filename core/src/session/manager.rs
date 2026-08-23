@@ -219,7 +219,7 @@ impl SessionManager for PersistentSessionManager {
         let mut sessions = Vec::with_capacity(metas.len());
         for meta in metas {
             let mut session = Session::new(meta.session_id);
-            session.created_at = meta.header.created_at.unwrap_or_else(|| session.created_at);
+            session.created_at = meta.header.created_at.unwrap_or(session.created_at);
             session.title = meta.header.title.clone();
             session.ended_at = meta.header.ended_at;
             session.header = meta.header;
@@ -255,7 +255,7 @@ mod tests {
     async fn make_manager() -> Arc<PersistentSessionManager> {
         let db = SqliteDb::open_in_memory().unwrap();
         db.init_all_schemas().await.unwrap();
-        let store = crate::session::store::SessionStore::new(db).unwrap();
+        let store = SessionStore::new(db).unwrap();
         Arc::new(PersistentSessionManager::new(store))
     }
 

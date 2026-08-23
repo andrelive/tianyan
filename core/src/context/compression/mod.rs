@@ -520,14 +520,12 @@ mod tests {
     #[test]
     fn test_should_compress_below_min_messages() {
         let compressor = make_compressor(CompressionStrategy::Select);
-        let msgs = vec![msg_user("hi"), msg_assistant("hello")];
         assert!(!compressor.should_compress(0));
     }
 
     #[test]
     fn test_should_compress_below_threshold() {
         let compressor = make_compressor(CompressionStrategy::Select);
-        let msgs = vec![msg_user("a"), msg_assistant("b"), msg_user("c")];
         assert!(!compressor.should_compress(0));
     }
 
@@ -535,11 +533,6 @@ mod tests {
     fn test_should_compress_above_threshold() {
         // Use very low threshold so even a few messages trigger compression
         let compressor = make_compressor_with_threshold(CompressionStrategy::Select, 100, 0.05, 3);
-        let msgs = vec![
-            msg_user("trigger compression"),
-            msg_assistant("response text"),
-            msg_user("more content"),
-        ];
         assert!(compressor.should_compress(10000));
     }
 

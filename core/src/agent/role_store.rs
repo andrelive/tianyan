@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::agent::roles::{AgentRole, RoleStatus};
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{ContentLevel, ContextNamespace, Message, TianyanUri};
+use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::vfs::VirtualFileSystem;
 
 /// 角色使用统计（ADR-016 P3：退役信号/演化门控输入）。

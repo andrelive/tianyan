@@ -214,7 +214,7 @@ impl ChatMessage {
             },
             truncated_by_length: m.finish.as_deref() == Some("length"),
             interrupted: m.finish.as_deref() == Some("interrupted"),
-            usage: (m.tokens.total > 0 || m.tokens.input > 0).then(|| TokenUsage {
+            usage: (m.tokens.total > 0 || m.tokens.input > 0).then_some(TokenUsage {
                 prompt_tokens: m.tokens.input as u32,
                 completion_tokens: m.tokens.output as u32,
                 total_tokens: m.tokens.total as u32,

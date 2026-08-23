@@ -557,8 +557,10 @@ mod tests {
     #[tokio::test]
     async fn test_rewrite_preserves_order_and_header() {
         let store = make_store().await;
-        let mut header = SessionHeader::default();
-        header.title = Some("标题".to_string());
+        let header = SessionHeader {
+            title: Some("标题".to_string()),
+            ..SessionHeader::default()
+        };
         store.create("s1", &header).await.unwrap();
         store
             .append_message("s1", &msg("m1", MessageRole::User, "旧"))

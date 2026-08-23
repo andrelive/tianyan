@@ -17,9 +17,13 @@ use tianyan::model::types::ToolPresentation;
 fn main() {
     let check = std::env::args().any(|a| a == "--check");
     let registry = ToolRegistry::new(SecurityPolicy::default());
-    let defs = tokio::runtime::Runtime::new()
-        .expect("runtime 创建失败")
-        .block_on(async { registry.definitions().await });
+    let defs = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt.block_on(async { registry.definitions().await }),
+        Err(e) => {
+            eprintln!("tool_catalog: 运行时创建失败: {e}");
+            std::process::exit(2);
+        }
+    };
 
     let mut md = String::new();
     md.push_str("# 天演工具目录（自动生成）\n\n");
@@ -33,10 +37,10 @@ fn main() {
     let mut names: Vec<_> = defs.iter().map(|d| d.function.name.clone()).collect();
     names.sort();
     for name in names {
-        let def = defs
-            .iter()
-            .find(|d| d.function.name == name)
-            .expect("定义存在");
+        let Some(def) = defs.iter().find(|d| d.function.name == name) else {
+            eprintln!("tool_catalog: 定义缺失: {name}");
+            std::process::exit(2);
+        };
         let presentation = match registry.presentation(&name) {
             ToolPresentation::Generic => "generic",
             ToolPresentation::Read => "read",

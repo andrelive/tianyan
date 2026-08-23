@@ -565,9 +565,10 @@ mod tests {
     #[tokio::test]
     async fn test_connect_http_rejects_non_http_url() {
         // G7：非 http/https URL 在发起连接前即被拒绝（不触网）
-        let err = McpClient::connect_http("remote", "ftp://example.com/mcp")
-            .await
-            .unwrap_err();
+        let result = McpClient::connect_http("remote", "ftp://example.com/mcp").await;
+        let Err(err) = result else {
+            panic!("非 http URL 应被拒绝，实际成功");
+        };
         assert!(
             err.to_string().contains("http"),
             "应提示 URL 必须为 http/https: {err}"

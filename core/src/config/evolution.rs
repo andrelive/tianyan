@@ -110,14 +110,20 @@ mod tests {
     #[test]
     fn test_evolution_config_validate() {
         assert!(EvolutionConfig::default().validate().is_ok());
-        let mut cfg = EvolutionConfig::default();
-        cfg.max_items_per_run = 0;
+        let cfg = EvolutionConfig {
+            max_items_per_run: 0,
+            ..EvolutionConfig::default()
+        };
         assert!(cfg.validate().is_err());
-        let mut cfg = EvolutionConfig::default();
-        cfg.idle_episode_hours = 0;
+        let cfg = EvolutionConfig {
+            idle_episode_hours: 0,
+            ..EvolutionConfig::default()
+        };
         assert!(cfg.validate().is_err());
-        let mut cfg = EvolutionConfig::default();
-        cfg.cron = "bad".to_string();
+        let cfg = EvolutionConfig {
+            cron: "bad".to_string(),
+            ..EvolutionConfig::default()
+        };
         assert!(cfg.validate().is_err());
     }
 

@@ -47,7 +47,7 @@ fn rand_id() -> u64 {
 }
 
 fn conversation_jsonl() -> String {
-    let messages = vec![
+    let messages = [
         msg(
             MessageRole::User,
             vec![Part::Text {
