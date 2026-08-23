@@ -451,7 +451,8 @@ Zustand 全局状态（三切片）+ Tailwind 主题变量 + react-router 路由
 | lib/token-usage.ts | token 用量纯函数（最近一轮占用 / 会话汇总；渲染层只做 useMemo 包装） | token-usage.ts |
 | lib/api-client.ts | API 客户端（fetch 封装 + 语义错误谓词 + 契约快照） | api-client.ts |
 | lib/config-transform.ts | 配置表单模型 ↔ 后端 TianyanConfig 双向映射 | config-transform.ts |
-| hooks/ | useChatStream（主对话/追问流共用生命周期）/ useSessionHistory / useResource（含 enabled 条件加载）/ usePolling / useProviderScan（模型扫描状态机）/ useTheme / useKeyboardShortcuts | hooks/ |
+| hooks/ | useChatStream（主对话/追问流共用生命周期）/ useSessionHistory / useResource（含 enabled 条件加载）/ usePolling / useProviderScan（模型扫描状态机）/ useDebouncedValue（防抖）/ useTheme / useKeyboardShortcuts | hooks/ |
+| lib/errors.ts | 错误 → 人类可读消息唯一提取点（toErrorMessage；E5 收敛 33 处样板） | lib/errors.ts |
 | components/ui/FieldRow | 表单字段行原语（settings 与 wizard 共用；E4 收敛 ×4 拷贝） | components/ui/FieldRow.tsx |
 | components/chat | 聊天域（ChatPanel 编排层/SessionPage/MessageBubble/工具卡片/思考选择/ApprovalBanner…） | components/chat/ |
 | components/settings | 设置面板（模型/存储/安全/日志/记忆/检索/外观/连接/MCP/人格等 tab） | components/settings/ |
