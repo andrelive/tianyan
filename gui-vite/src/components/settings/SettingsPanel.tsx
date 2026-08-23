@@ -321,7 +321,6 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
         return (
           <ModelsTab
             config={config}
-            onUpdateField={updateField}
             onAddProvider={addProvider}
             onRemoveProvider={removeProvider}
             onUpdateProvider={updateProvider}
