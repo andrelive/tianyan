@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { AlertCircle, GitCompareArrows, Loader2, PanelRightClose } from 'lucide-react';
 import { fetchWorkspaceDiff, fetchWorkspaceDiffList } from '@/lib/api-client';
 import { toErrorMessage } from '@/lib/errors';
@@ -61,74 +61,74 @@ export default function DiffPanel({ filePath, onClose }: DiffPanelProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadFileDiff = async (path: string, session: string) => {
-    const indexNum = Number(indexText);
+  /** 统一加载信封（F4）：setLoading/setError/try-catch-finally 唯一定义点。 */
+  const runLoad = useCallback(async (task: () => Promise<void>, fallback: string) => {
     setLoading(true);
     setError(null);
     try {
+      await task();
+    } catch (err: unknown) {
+      setError(toErrorMessage(err, fallback));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  /** 会话 ID 校验（三个入口共用）：空 → 置错并返回 null。 */
+  const requireSession = useCallback((): string | null => {
+    const trimmed = sessionId.trim();
+    if (!trimmed) {
+      setSessionIdError('请填写会话 ID');
+      return null;
+    }
+    setSessionIdError(null);
+    return trimmed;
+  }, [sessionId]);
+
+  const loadFileDiff = async (path: string, session: string) => {
+    const indexNum = Number(indexText);
+    await runLoad(async () => {
+      setDiff(null);
       const res = await fetchWorkspaceDiff(
         path,
         session,
         Number.isFinite(indexNum) ? indexNum : undefined,
       );
       setDiff(res);
-    } catch (err: unknown) {
-      setDiff(null);
-      setError(toErrorMessage(err, '加载 diff 失败'));
-    } finally {
-      setLoading(false);
-    }
+    }, '加载 diff 失败');
   };
 
   const handleLoad = async () => {
     if (!filePath) return;
-    const trimmed = sessionId.trim();
-    if (!trimmed) {
-      setSessionIdError('请填写会话 ID');
-      return;
-    }
-    setSessionIdError(null);
-    await loadFileDiff(filePath, trimmed);
+    const session = requireSession();
+    if (session === null) return;
+    await loadFileDiff(filePath, session);
   };
 
   /** 切到整体差异：无 path 调用后端，返回工作区全部变更文件。 */
   const handleWorkspaceMode = async () => {
-    const trimmed = sessionId.trim();
-    if (!trimmed) {
-      setSessionIdError('请填写会话 ID');
-      return;
-    }
-    setSessionIdError(null);
+    const session = requireSession();
+    if (session === null) return;
     setMode('workspace');
     const indexNum = Number(indexText);
-    setLoading(true);
-    setError(null);
-    setDiff(null);
-    try {
+    setDiffList(null);
+    await runLoad(async () => {
+      setDiff(null);
       const res = await fetchWorkspaceDiffList(
-        trimmed,
+        session,
         Number.isFinite(indexNum) ? indexNum : undefined,
       );
       setDiffList(res);
-    } catch (err: unknown) {
-      setDiffList(null);
-      setError(toErrorMessage(err, '加载整体 diff 失败'));
-    } finally {
-      setLoading(false);
-    }
+    }, '加载整体 diff 失败');
   };
 
   /** 点击整体差异列表中的文件行 → 切回单文件模式并加载该文件 diff。 */
   const selectFileFromList = async (item: WorkspaceDiffResponse) => {
     if (!item.path) return;
-    const trimmed = sessionId.trim();
-    if (!trimmed) {
-      setSessionIdError('请填写会话 ID');
-      return;
-    }
-    setSessionIdError(null);
+    const session = requireSession();
+    if (session === null) return;
     setMode('file');
-    await loadFileDiff(item.path, trimmed);
+    await loadFileDiff(item.path, session);
   };
 
   const toggleButtonClass = (active: boolean) =>
