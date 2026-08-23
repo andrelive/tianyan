@@ -105,10 +105,12 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
                   useAppStore.getState().showToast('切换模型失败: ' + message, 'error');
                 });
               }}
-              className={'w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)] transition-colors ' +
+              className={
+                'w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)] transition-colors ' +
                 (model.name === currentModel
                   ? 'text-blue-600 dark:text-blue-400 font-medium'
-                  : 'text-[var(--color-text-primary)]')}
+                  : 'text-[var(--color-text-primary)]')
+              }
             >
               {model.name}
             </button>

@@ -11,7 +11,10 @@ export default function StorageTab({ config, onUpdateField }: StorageTabProps) {
     <div>
       <SectionTitle title="数据存储" />
       <div className="grid grid-cols-2 gap-4">
-        <FieldRow label="数据目录" description="数据库（tianyan.db）、向量索引、快照等所有本地数据的存储路径">
+        <FieldRow
+          label="数据目录"
+          description="数据库（tianyan.db）、向量索引、快照等所有本地数据的存储路径"
+        >
           <input
             type="text"
             value={config.data_dir}

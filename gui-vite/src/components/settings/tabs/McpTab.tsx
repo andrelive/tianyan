@@ -28,8 +28,8 @@ export default function McpTab() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [testStatuses, setTestStatuses] = useState<Record<string, ServerTestStatus>>({});
   const [removing, setRemoving] = useState<string | null>(null);
-/** 待移除确认的服务器（ConfirmDialog 状态机；替代 window.confirm） */
-const [removeTarget, setRemoveTarget] = useState<string | null>(null);
+  /** 待移除确认的服务器（ConfirmDialog 状态机；替代 window.confirm） */
+  const [removeTarget, setRemoveTarget] = useState<string | null>(null);
 
   // Add form state
   const [formName, setFormName] = useState('');

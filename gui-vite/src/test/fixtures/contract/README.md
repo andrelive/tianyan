@@ -17,8 +17,8 @@ scripts/capture-contract-fixtures.ps1
 
 ## 覆盖的端点
 
-| 文件 | 端点 | 用途 |
-|------|------|------|
-| config.json | GET /api/v1/config | 配置 DTO（字段名/透传/往返） |
-| models.json | GET /api/v1/config/models | 模型目录 |
-| sessions.json | GET /api/v1/sessions | 会话列表 DTO |
+| 文件          | 端点                      | 用途                         |
+| ------------- | ------------------------- | ---------------------------- |
+| config.json   | GET /api/v1/config        | 配置 DTO（字段名/透传/往返） |
+| models.json   | GET /api/v1/config/models | 模型目录                     |
+| sessions.json | GET /api/v1/sessions      | 会话列表 DTO                 |

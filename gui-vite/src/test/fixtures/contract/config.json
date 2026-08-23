@@ -1,1 +1,205 @@
-{"config":{"agent":{"default_top_k":5,"learned_rules_top_k":5,"max_turns":200,"shortlist_tools":true,"background_self_review":false,"working_directory":"F:\\\\work\\\\example"},"storage":{"data_dir":"C:\\\\Users\\\\example","backend":"sqlite","sqlite_path":null,"max_storage_size":0,"auto_cleanup":true,"cleanup_days":365,"vector":{"collection_name":"tianyan_contexts","vector_dimension":2048}},"models":{"providers":[{"name":"bailian","endpoint":"https://llm-0kacxy8o62q1skhc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1","api_key":"REDACTED","models":[{"name":"qwen3.7-plus","capabilities":["chat","vision"],"context_length":131000,"max_output_tokens":32000,"max_input_tokens":null,"reasoning_efforts":null},{"name":"text-embedding-v4","capabilities":["text-embedding","multimodal-embedding"],"context_length":null,"max_output_tokens":null,"max_input_tokens":null,"reasoning_efforts":null}],"timeout":60,"enabled":true,"headers":{}},{"name":"opencode","endpoint":"https://opencode.ai/zen/go/v1","api_key":"REDACTED","models":[{"name":"deepseek-v4-flash","capabilities":["chat"],"context_length":1000000,"max_output_tokens":384000,"max_input_tokens":null,"reasoning_efforts":["low","high","max"]},{"name":"deepseek-v4-pro","capabilities":["chat"],"context_length":1000000,"max_output_tokens":384000,"max_input_tokens":null,"reasoning_efforts":["low","high","max"]}],"timeout":120,"enabled":true,"headers":{}}],"preferences":{"chat":{"provider":"opencode","model":"deepseek-v4-flash"},"embedding":{"provider":"bailian","model":"text-embedding-v4"},"vision":{"provider":"bailian","model":"qwen3.5-plus"}}},"logging":{"level":"info","format":"text","max_file_size":10,"max_files":5,"include_timestamp":true,"include_location":false},"security":{"enabled":true,"safety_mode":"strict","trash_directory":"C:\\\\Users\\\\example","allowed_directories":[],"blocked_directories":["/","/etc","/bin","/sbin","/usr/bin","/usr/sbin"],"allowed_commands":[],"blocked_commands":["rm -rf /","rm -rf C:\\","rd /s","del /s","format","rmdir /s","Remove-Item -Recurse"],"confirm_commands":false,"max_file_size":104857600,"audit_logging":true,"skill_file_read_max_size":52428800,"skill_file_read_timeout_secs":30,"skill_file_write_max_size":10485760,"skill_file_write_timeout_secs":30,"skill_file_list_max_entries":10000,"skill_http_timeout_secs":60,"skill_command_timeout_secs":300,"wait_for_approval":false,"prompt_commands":[],"allow_dangerous_skills":false,"allow_all_operations":true},"memory":{"max_session_memory":8000,"max_long_term_memory":10000,"importance_threshold":0.5,"auto_consolidation":true,"consolidation_interval":3600,"decay_rate":0.01,"verify_preferences":false},"retrieval":{"default_top_k":10,"min_score":0.5,"two_stage_retrieval":true,"l0_multiplier":3,"max_context_tokens":4000,"enable_cache":true,"cache_ttl":300},"mcp":{"servers":[]},"web":{"enabled":true,"search_backend":"bing","searxng_endpoint":null,"timeout_secs":15,"cache_ttl_secs":600,"max_fetch_bytes":2097152},"clipboard":{"enabled":false,"auto_capture":false,"prompt_confirm":true,"poll_interval_ms":1000},"events":{"enabled":false,"watch_dirs":[],"watch_events":["create","write","remove"],"rules":[],"webhook_token":""},"evolution":{"enabled":true,"cron":"0 0 */24 * * *","review_role":"evolution_reviewer","mechanism":"delegate","max_items_per_run":200,"idle_episode_hours":24},"reminder":{"enabled":false,"interval_secs":3600,"max_per_run":1,"inject_to_session":true},"agent_roles":{}},"model_specs":{"bailian/qwen3.7-plus":{"context_length":131000,"max_output_tokens":32000,"max_input_tokens":8192},"opencode/deepseek-v4-flash":{"context_length":1000000,"max_output_tokens":384000,"max_input_tokens":8192},"opencode/deepseek-v4-pro":{"context_length":1000000,"max_output_tokens":384000,"max_input_tokens":8192},"bailian/text-embedding-v4":{"context_length":32768,"max_output_tokens":8192,"max_input_tokens":8192}},"model_catalog":{"bailian/qwen3.7-plus":{"display_name":"Qwen3"},"opencode/deepseek-v4-flash":{"display_name":"DeepSeek V4 Flash","reasoning_efforts":["low","high","max"]}}}
+{
+  "config": {
+    "agent": {
+      "default_top_k": 5,
+      "learned_rules_top_k": 5,
+      "max_turns": 200,
+      "shortlist_tools": true,
+      "background_self_review": false,
+      "working_directory": "F:\\\\work\\\\example"
+    },
+    "storage": {
+      "data_dir": "C:\\\\Users\\\\example",
+      "backend": "sqlite",
+      "sqlite_path": null,
+      "max_storage_size": 0,
+      "auto_cleanup": true,
+      "cleanup_days": 365,
+      "vector": { "collection_name": "tianyan_contexts", "vector_dimension": 2048 }
+    },
+    "models": {
+      "providers": [
+        {
+          "name": "bailian",
+          "endpoint": "https://llm-0kacxy8o62q1skhc.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+          "api_key": "REDACTED",
+          "models": [
+            {
+              "name": "qwen3.7-plus",
+              "capabilities": ["chat", "vision"],
+              "context_length": 131000,
+              "max_output_tokens": 32000,
+              "max_input_tokens": null,
+              "reasoning_efforts": null
+            },
+            {
+              "name": "text-embedding-v4",
+              "capabilities": ["text-embedding", "multimodal-embedding"],
+              "context_length": null,
+              "max_output_tokens": null,
+              "max_input_tokens": null,
+              "reasoning_efforts": null
+            }
+          ],
+          "timeout": 60,
+          "enabled": true,
+          "headers": {}
+        },
+        {
+          "name": "opencode",
+          "endpoint": "https://opencode.ai/zen/go/v1",
+          "api_key": "REDACTED",
+          "models": [
+            {
+              "name": "deepseek-v4-flash",
+              "capabilities": ["chat"],
+              "context_length": 1000000,
+              "max_output_tokens": 384000,
+              "max_input_tokens": null,
+              "reasoning_efforts": ["low", "high", "max"]
+            },
+            {
+              "name": "deepseek-v4-pro",
+              "capabilities": ["chat"],
+              "context_length": 1000000,
+              "max_output_tokens": 384000,
+              "max_input_tokens": null,
+              "reasoning_efforts": ["low", "high", "max"]
+            }
+          ],
+          "timeout": 120,
+          "enabled": true,
+          "headers": {}
+        }
+      ],
+      "preferences": {
+        "chat": { "provider": "opencode", "model": "deepseek-v4-flash" },
+        "embedding": { "provider": "bailian", "model": "text-embedding-v4" },
+        "vision": { "provider": "bailian", "model": "qwen3.5-plus" }
+      }
+    },
+    "logging": {
+      "level": "info",
+      "format": "text",
+      "max_file_size": 10,
+      "max_files": 5,
+      "include_timestamp": true,
+      "include_location": false
+    },
+    "security": {
+      "enabled": true,
+      "safety_mode": "strict",
+      "trash_directory": "C:\\\\Users\\\\example",
+      "allowed_directories": [],
+      "blocked_directories": ["/", "/etc", "/bin", "/sbin", "/usr/bin", "/usr/sbin"],
+      "allowed_commands": [],
+      "blocked_commands": [
+        "rm -rf /",
+        "rm -rf C:\\",
+        "rd /s",
+        "del /s",
+        "format",
+        "rmdir /s",
+        "Remove-Item -Recurse"
+      ],
+      "confirm_commands": false,
+      "max_file_size": 104857600,
+      "audit_logging": true,
+      "skill_file_read_max_size": 52428800,
+      "skill_file_read_timeout_secs": 30,
+      "skill_file_write_max_size": 10485760,
+      "skill_file_write_timeout_secs": 30,
+      "skill_file_list_max_entries": 10000,
+      "skill_http_timeout_secs": 60,
+      "skill_command_timeout_secs": 300,
+      "wait_for_approval": false,
+      "prompt_commands": [],
+      "allow_dangerous_skills": false,
+      "allow_all_operations": true
+    },
+    "memory": {
+      "max_session_memory": 8000,
+      "max_long_term_memory": 10000,
+      "importance_threshold": 0.5,
+      "auto_consolidation": true,
+      "consolidation_interval": 3600,
+      "decay_rate": 0.01,
+      "verify_preferences": false
+    },
+    "retrieval": {
+      "default_top_k": 10,
+      "min_score": 0.5,
+      "two_stage_retrieval": true,
+      "l0_multiplier": 3,
+      "max_context_tokens": 4000,
+      "enable_cache": true,
+      "cache_ttl": 300
+    },
+    "mcp": { "servers": [] },
+    "web": {
+      "enabled": true,
+      "search_backend": "bing",
+      "searxng_endpoint": null,
+      "timeout_secs": 15,
+      "cache_ttl_secs": 600,
+      "max_fetch_bytes": 2097152
+    },
+    "clipboard": {
+      "enabled": false,
+      "auto_capture": false,
+      "prompt_confirm": true,
+      "poll_interval_ms": 1000
+    },
+    "events": {
+      "enabled": false,
+      "watch_dirs": [],
+      "watch_events": ["create", "write", "remove"],
+      "rules": [],
+      "webhook_token": ""
+    },
+    "evolution": {
+      "enabled": true,
+      "cron": "0 0 */24 * * *",
+      "review_role": "evolution_reviewer",
+      "mechanism": "delegate",
+      "max_items_per_run": 200,
+      "idle_episode_hours": 24
+    },
+    "reminder": {
+      "enabled": false,
+      "interval_secs": 3600,
+      "max_per_run": 1,
+      "inject_to_session": true
+    },
+    "agent_roles": {}
+  },
+  "model_specs": {
+    "bailian/qwen3.7-plus": {
+      "context_length": 131000,
+      "max_output_tokens": 32000,
+      "max_input_tokens": 8192
+    },
+    "opencode/deepseek-v4-flash": {
+      "context_length": 1000000,
+      "max_output_tokens": 384000,
+      "max_input_tokens": 8192
+    },
+    "opencode/deepseek-v4-pro": {
+      "context_length": 1000000,
+      "max_output_tokens": 384000,
+      "max_input_tokens": 8192
+    },
+    "bailian/text-embedding-v4": {
+      "context_length": 32768,
+      "max_output_tokens": 8192,
+      "max_input_tokens": 8192
+    }
+  },
+  "model_catalog": {
+    "bailian/qwen3.7-plus": { "display_name": "Qwen3" },
+    "opencode/deepseek-v4-flash": {
+      "display_name": "DeepSeek V4 Flash",
+      "reasoning_efforts": ["low", "high", "max"]
+    }
+  }
+}

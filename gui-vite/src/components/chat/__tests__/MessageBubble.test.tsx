@@ -20,12 +20,7 @@ describe('MessageBubble history rendering', () => {
       ],
     };
     render(
-      <MessageBubble
-        message={historyMsg}
-        index={0}
-        isStreaming={false}
-        onRollback={() => {}}
-      />,
+      <MessageBubble message={historyMsg} index={0} isStreaming={false} onRollback={() => {}} />,
     );
 
     // 工具卡片应出现
@@ -36,15 +31,12 @@ describe('MessageBubble history rendering', () => {
     const streamMsg: ChatMessage = {
       role: 'assistant',
       content: '',
-      segments: [{ type: 'tool', tool_call: { name: 'read_file', arguments: '{}', presentation: 'read' } }],
+      segments: [
+        { type: 'tool', tool_call: { name: 'read_file', arguments: '{}', presentation: 'read' } },
+      ],
     };
     render(
-      <MessageBubble
-        message={streamMsg}
-        index={0}
-        isStreaming={false}
-        onRollback={() => {}}
-      />,
+      <MessageBubble message={streamMsg} index={0} isStreaming={false} onRollback={() => {}} />,
     );
     expect(screen.getByText('读取文件')).toBeInTheDocument();
   });
@@ -68,17 +60,20 @@ describe('MessageBubble history rendering', () => {
       segments: [
         { type: 'thinking', text: '先想一步' },
         { type: 'text', text: '工具前的正文' },
-        { type: 'tool', tool_call: { id: 'call_1', name: 'read_file', arguments: '{"path":"a.txt"}', presentation: 'read' } },
+        {
+          type: 'tool',
+          tool_call: {
+            id: 'call_1',
+            name: 'read_file',
+            arguments: '{"path":"a.txt"}',
+            presentation: 'read',
+          },
+        },
         { type: 'text', text: '工具后的正文' },
       ],
     };
     render(
-      <MessageBubble
-        message={historyMsg}
-        index={0}
-        isStreaming={false}
-        onRollback={() => {}}
-      />,
+      <MessageBubble message={historyMsg} index={0} isStreaming={false} onRollback={() => {}} />,
     );
 
     // 时间线渲染：思考块 + 工具卡片（带结果）+ 工具后正文

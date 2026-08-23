@@ -203,36 +203,33 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
 
   /* Add scanned models (from provider discovery) into the provider's model list,
      carrying endpoint/catalog-provided spec fields (context/max output/efforts) */
-  const addScannedModels = useCallback(
-    (providerIndex: number, scanned: DiscoveredModelInfo[]) => {
-      if (scanned.length === 0) return;
-      setConfig((prev) => {
-        if (!prev) return prev;
-        const providers = prev.providers.map((p, i) =>
-          i === providerIndex
-            ? {
-                ...p,
-                models: [
-                  ...p.models,
-                  ...scanned.map((m) => ({
-                    name: m.name,
-                    capabilities: m.capabilities as ModelCapability[],
-                    context_length: m.context_length,
-                    max_output_tokens: m.max_output_tokens,
-                    reasoning_efforts:
-                      m.reasoning_efforts && m.reasoning_efforts.length > 0
-                        ? m.reasoning_efforts
-                        : undefined,
-                  })),
-                ],
-              }
-            : p,
-        );
-        return { ...prev, providers };
-      });
-    },
-    [],
-  );
+  const addScannedModels = useCallback((providerIndex: number, scanned: DiscoveredModelInfo[]) => {
+    if (scanned.length === 0) return;
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const providers = prev.providers.map((p, i) =>
+        i === providerIndex
+          ? {
+              ...p,
+              models: [
+                ...p.models,
+                ...scanned.map((m) => ({
+                  name: m.name,
+                  capabilities: m.capabilities as ModelCapability[],
+                  context_length: m.context_length,
+                  max_output_tokens: m.max_output_tokens,
+                  reasoning_efforts:
+                    m.reasoning_efforts && m.reasoning_efforts.length > 0
+                      ? m.reasoning_efforts
+                      : undefined,
+                })),
+              ],
+            }
+          : p,
+      );
+      return { ...prev, providers };
+    });
+  }, []);
 
   /* ── Preferences helpers ── */
 
@@ -476,7 +473,10 @@ export default function SettingsPanel() {
 
   if (loadError || !config) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-3 p-8 min-h-0" role="alert">
+      <div
+        className="flex-1 flex flex-col items-center justify-center gap-3 p-8 min-h-0"
+        role="alert"
+      >
         <X size={32} className="text-[var(--color-error)]" />
         <p className="text-[var(--color-error)] text-sm">{loadError || '无法加载配置'}</p>
         <button

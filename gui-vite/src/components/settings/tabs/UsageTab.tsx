@@ -23,7 +23,6 @@ interface UsageStatsResponse {
   grouped: UsageStat[];
 }
 
-
 function pct(n: number): string {
   return Math.round(n * 100) + '%';
 }
@@ -37,9 +36,7 @@ const QUICK_RANGES: { label: string; days: number }[] = [
   { label: '全部', days: 0 },
 ];
 
-type ActiveQuery =
-  | { kind: 'quick'; days: number }
-  | { kind: 'custom'; start: string; end: string };
+type ActiveQuery = { kind: 'quick'; days: number } | { kind: 'custom'; start: string; end: string };
 
 /** 统计面板：LLM token 消耗（未命中输入 / 缓存命中输入 / 输出 / 命中率）。
  *  支持快捷时段与自定义起止日期查询。 */
@@ -183,8 +180,7 @@ export default function UsageTab() {
             <MetricCard label="缓存命中率" value={pct(total.cache_hit_rate)} />
           </div>
           <div className="flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)] mb-3">
-            <BarChart3 className="w-3.5 h-3.5" />
-            总 {formatNumber(total.total_tokens)} token
+            <BarChart3 className="w-3.5 h-3.5" />总 {formatNumber(total.total_tokens)} token
           </div>
 
           {/* 按模型分组 */}
@@ -208,9 +204,15 @@ export default function UsageTab() {
                   >
                     <td className="py-1.5 pr-2 font-mono text-xs">{s.group}</td>
                     <td className="py-1.5 pr-2 text-right font-mono text-xs">{s.calls}</td>
-                    <td className="py-1.5 pr-2 text-right font-mono text-xs">{formatNumber(s.uncached_input)}</td>
-                    <td className="py-1.5 pr-2 text-right font-mono text-xs">{formatNumber(s.cached_input)}</td>
-                    <td className="py-1.5 pr-2 text-right font-mono text-xs">{formatNumber(s.completion_tokens)}</td>
+                    <td className="py-1.5 pr-2 text-right font-mono text-xs">
+                      {formatNumber(s.uncached_input)}
+                    </td>
+                    <td className="py-1.5 pr-2 text-right font-mono text-xs">
+                      {formatNumber(s.cached_input)}
+                    </td>
+                    <td className="py-1.5 pr-2 text-right font-mono text-xs">
+                      {formatNumber(s.completion_tokens)}
+                    </td>
                     <td className="py-1.5 text-right font-mono text-xs">{pct(s.cache_hit_rate)}</td>
                   </tr>
                 ))}

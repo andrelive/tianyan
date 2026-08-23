@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { fetchMemories } from '@/lib/api-client';
 import { useResource } from '@/hooks/use-resource';
 import type { MemoryEntry } from '@/lib/types';
@@ -19,7 +19,8 @@ export default function MemoryPanel() {
   const { data, loading, error, reload } = useResource(() => fetchMemories(), [], {
     errorFallback: '加载失败',
   });
-  const memories = data?.memories ?? [];
+  // 派生数组 useMemo 化：useEffect deps 需要稳定引用（?? [] 每次渲染新建数组）
+  const memories = useMemo(() => data?.memories ?? [], [data]);
 
   // 刷新后重定位选中项（按 uri；已消失则清空选择）
   useEffect(() => {

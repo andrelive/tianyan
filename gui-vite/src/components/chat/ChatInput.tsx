@@ -37,7 +37,14 @@ function fileToDataUrl(file: File): Promise<string | null> {
   });
 }
 
-export default function ChatInput({ onSend, onStop, isStreaming, usage, sessionUsage, onCompress }: Props) {
+export default function ChatInput({
+  onSend,
+  onStop,
+  isStreaming,
+  usage,
+  sessionUsage,
+  onCompress,
+}: Props) {
   const [input, setInput] = useState('');
   const [images, setImages] = useState<string[]>([]);
   const [rejected, setRejected] = useState<string | null>(null);
@@ -208,7 +215,9 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage, sessionU
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          placeholder={dragOver ? '松开鼠标添加图片' : '输入消息... (Shift+Enter 换行，可粘贴/拖拽图片)'}
+          placeholder={
+            dragOver ? '松开鼠标添加图片' : '输入消息... (Shift+Enter 换行，可粘贴/拖拽图片)'
+          }
           rows={2}
           disabled={isStreaming}
           aria-label="输入消息"
@@ -301,11 +310,13 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage, sessionU
           </span>
           <span className="opacity-40">·</span>
           <span>
-            缓存命中率 
+            缓存命中率
             <span className="font-mono">
               {(() => {
                 const total = sessionUsage.uncachedInput + sessionUsage.cachedInput;
-                return total > 0 ? Math.round((sessionUsage.cachedInput / total) * 100) + '%' : '0%';
+                return total > 0
+                  ? Math.round((sessionUsage.cachedInput / total) * 100) + '%'
+                  : '0%';
               })()}
             </span>
           </span>

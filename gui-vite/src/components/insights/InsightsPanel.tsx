@@ -16,7 +16,6 @@ function formatLastRun(secs: number | null): string {
   return `${minutes} 分前`;
 }
 
-
 /** 优先级 → badge 颜色（Tailwind 明暗双主题）。 */
 const PRIORITY_BADGE_CLASSES: Record<string, string> = {
   Low: 'bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700',

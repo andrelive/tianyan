@@ -44,7 +44,6 @@ function RiskBadge({ riskLevel }: { riskLevel: string }) {
   );
 }
 
-
 /** 审批决策 → 中文标签（response 可能为 null）。 */
 function decisionLabel(decision: string | null | undefined): string {
   if (!decision) return '未响应';

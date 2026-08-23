@@ -1,8 +1,4 @@
-import {
-  MODEL_CAPABILITIES,
-  MODEL_CAPABILITY_LABELS,
-  type ModelCapability,
-} from '@/lib/types';
+import { MODEL_CAPABILITIES, MODEL_CAPABILITY_LABELS, type ModelCapability } from '@/lib/types';
 import type { StepProps } from './wizard.types';
 
 interface FieldRowProps {

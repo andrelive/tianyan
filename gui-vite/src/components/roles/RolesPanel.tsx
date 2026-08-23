@@ -30,7 +30,6 @@ const SOURCE_STYLE: Record<string, string> = {
     'bg-purple-50 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300 border-purple-200 dark:border-purple-800',
 };
 
-
 /**
  * 子智能体角色面板（ADR-016）：展示统一角色注册表（内置种子 / 用户配置 /
  * 学习演化三源平级），含 durable 角色会话信息；支持回退内置种子与退役删除。
@@ -74,7 +73,11 @@ export default function RolesPanel() {
   }, []);
 
   /** 待确认操作（ConfirmDialog 状态机；替代 window.confirm——jsdom 可测） */
-  const [confirm, setConfirm] = useState<{ title: string; message: string; action: 'reset' | 'delete' } | null>(null);
+  const [confirm, setConfirm] = useState<{
+    title: string;
+    message: string;
+    action: 'reset' | 'delete';
+  } | null>(null);
 
   // 回退内置种子（先确认）
   const requestReset = () => {
@@ -473,9 +476,7 @@ export default function RolesPanel() {
         danger
         confirmLabel={confirm?.action === 'delete' ? '删除' : '回退'}
         busy={actionPending}
-        onConfirm={() =>
-          void (confirm?.action === 'delete' ? executeDelete() : executeReset())
-        }
+        onConfirm={() => void (confirm?.action === 'delete' ? executeDelete() : executeReset())}
         onCancel={() => setConfirm(null)}
       />
     </div>

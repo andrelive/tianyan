@@ -7,7 +7,6 @@ import type { Skill, SkillDetail, SkillListResponse } from '@/lib/types';
 import { Wrench, Loader2, AlertCircle, ChevronRight, Clock } from 'lucide-react';
 import { formatDateTime, formatTimestamp } from '@/lib/utils';
 
-
 /**
  * 技能面板：只展示方法论技能（custom 类：GEPA 学习技能 + planning）。
  *

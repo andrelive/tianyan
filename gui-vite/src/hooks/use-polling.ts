@@ -1,8 +1,9 @@
 /**
  * usePolling —— 轮询 hook（interval + cleanup + 竞态收敛的唯一实现）。
  *
- * 三个轮询组件（任务/审批/剪贴板）此前各自手写「setInterval + ref 持有 +
- * cleanup + 立即执行一次」，间隔与错误策略互不一致。本 hook 收敛：
+ * 五个轮询场景（任务/审批/剪贴板/唤醒轮/会话审批卡）此前各自手写
+ * 「setInterval + ref 持有 + cleanup + 立即执行一次」，间隔与错误策略互不
+ * 一致。本 hook 收敛（ChatPanel 的两个轮询于 D3 迁入）：
  * - fn 经 ref 读取：调用方无需 useCallback 稳定身份，组件重渲染不重启轮询；
  * - 立即执行一次（immediate=true）+ interval；enabled=false 时整体暂停；
  * - 错误策略由 onError 单一决策点决定（默认静默保留旧数据）；

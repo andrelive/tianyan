@@ -54,7 +54,6 @@ function StatusBadge({ status }: { status: TaskStatus }) {
   );
 }
 
-
 /** 截断长文本为摘要（超过长度补 …）。 */
 function truncate(text: string, maxLen = RESULT_MAX_LEN): string {
   if (text.length <= maxLen) return text;

@@ -6,7 +6,11 @@ import ClarificationBubble from '@/components/chat/ClarificationBubble';
 describe('ClarificationBubble', () => {
   it('renders the question and the answer input', () => {
     render(
-      <ClarificationBubble question="请确认是否删除该文件？" submitting={false} onSubmit={() => {}} />,
+      <ClarificationBubble
+        question="请确认是否删除该文件？"
+        submitting={false}
+        onSubmit={() => {}}
+      />,
     );
     expect(screen.getByText('AI 需要确认')).toBeInTheDocument();
     expect(screen.getByText('请确认是否删除该文件？')).toBeInTheDocument();

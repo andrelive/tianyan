@@ -92,55 +92,55 @@ export function SaveConfirmDialog({
       ariaLabel="保存确认"
       panelClassName="flex flex-col w-full max-w-3xl h-[70vh]"
     >
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--color-border)] shrink-0">
-          <h3 className="text-sm font-medium text-[var(--color-text-primary)] truncate">
-            保存修改 · <span className="font-mono">{path}</span>
-          </h3>
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--color-border)] shrink-0">
+        <h3 className="text-sm font-medium text-[var(--color-text-primary)] truncate">
+          保存修改 · <span className="font-mono">{path}</span>
+        </h3>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          aria-label="关闭保存确认"
+          className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] disabled:opacity-50"
+        >
+          <X size={16} />
+        </button>
+      </div>
+
+      <div className="flex-1 min-h-0 border-b border-[var(--color-border)]">
+        <DiffView original={original} modified={modified} language={language ?? undefined} />
+      </div>
+
+      <div className="shrink-0 px-4 py-3 space-y-2">
+        {error && (
+          <div
+            role="alert"
+            className="flex items-center gap-2 p-2.5 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-xs"
+          >
+            <AlertCircle size={14} className="shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+        <div className="flex items-center justify-end gap-2">
           <button
             type="button"
             onClick={onCancel}
             disabled={saving}
-            aria-label="关闭保存确认"
-            className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] disabled:opacity-50"
+            className="px-3 py-1.5 text-xs font-medium rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
           >
-            <X size={16} />
+            取消
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={saving}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+            {saving ? '保存中…' : '确认保存'}
           </button>
         </div>
-
-        <div className="flex-1 min-h-0 border-b border-[var(--color-border)]">
-          <DiffView original={original} modified={modified} language={language ?? undefined} />
-        </div>
-
-        <div className="shrink-0 px-4 py-3 space-y-2">
-          {error && (
-            <div
-              role="alert"
-              className="flex items-center gap-2 p-2.5 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-xs"
-            >
-              <AlertCircle size={14} className="shrink-0" />
-              <span>{error}</span>
-            </div>
-          )}
-          <div className="flex items-center justify-end gap-2">
-            <button
-              type="button"
-              onClick={onCancel}
-              disabled={saving}
-              className="px-3 py-1.5 text-xs font-medium rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              onClick={onConfirm}
-              disabled={saving}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-              {saving ? '保存中…' : '确认保存'}
-            </button>
-          </div>
-        </div>
+      </div>
     </Modal>
   );
 }

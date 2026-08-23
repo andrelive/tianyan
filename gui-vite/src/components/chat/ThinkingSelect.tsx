@@ -21,9 +21,8 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
 
   // 当前模型声明的档位值（每个模型自己的；缺省 = 不支持思考 → 隐藏）
-  const declared: string[] | undefined = chatModels.find(
-    (m) => m.name === selectedModel,
-  )?.reasoning_efforts ?? undefined;
+  const declared: string[] | undefined =
+    chatModels.find((m) => m.name === selectedModel)?.reasoning_efforts ?? undefined;
   const supportsThinking =
     !!declared && declared.length > 0 && !(declared.length === 1 && declared[0] === OFF_EFFORT);
 

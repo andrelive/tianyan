@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { fetchRetrievalTraces } from '@/lib/api-client';
 import { useResource } from '@/hooks/use-resource';
 import type { RetrievalTrace, RetrievalStepType } from '@/lib/types';
@@ -32,7 +32,8 @@ export default function RetrievalTracesPanel() {
   const { data, loading, error, reload } = useResource(() => fetchRetrievalTraces(), [], {
     errorFallback: '加载失败',
   });
-  const traces = data?.traces ?? [];
+  // 派生数组 useMemo 化：useEffect deps 需要稳定引用（?? [] 每次渲染新建数组）
+  const traces = useMemo(() => data?.traces ?? [], [data]);
 
   // 刷新后重定位选中项（按 timestamp；已消失则清空选择）
   useEffect(() => {

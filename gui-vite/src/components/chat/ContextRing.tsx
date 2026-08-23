@@ -15,7 +15,6 @@ function ringColor(pct: number): string {
   return 'var(--color-success)';
 }
 
-
 /**
  * 上下文占用圆环（DSH ContextMeter 风格）：环径 = 占用百分比，
  * 中心数字 = 百分比；点击展开详情面板（占用 / 缓存命中 / 输出）
@@ -108,7 +107,8 @@ export default function ContextRing({
           <div className="flex items-center justify-between mb-1">
             <span className="text-[var(--color-text-tertiary)]">上下文占用</span>
             <span className="font-mono text-[var(--color-text-primary)]">
-              {formatNumber(usage.prompt_tokens)} / {formatNumber(usage.context_window)} ({Math.round(pct)}%)
+              {formatNumber(usage.prompt_tokens)} / {formatNumber(usage.context_window)} (
+              {Math.round(pct)}%)
             </span>
           </div>
           <div className="flex items-center justify-between mb-1">

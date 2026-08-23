@@ -117,8 +117,7 @@ export default function ChatPanel() {
     async () => {
       if (!currentSessionId) return;
       const status = await fetchApprovalStatus();
-      const mine =
-        status.pending_approvals.find((p) => p.session_id === currentSessionId) ?? null;
+      const mine = status.pending_approvals.find((p) => p.session_id === currentSessionId) ?? null;
       setPendingApproval((prev) => {
         if (prev?.request_id !== mine?.request_id) return mine;
         return prev;
@@ -174,9 +173,7 @@ export default function ChatPanel() {
       // 失败：移除空占位 + 服务端消息同步（本地消息 id 为 uuid，回退需
       // 服务端 msg_xxx 定位键）
       useAppStore.getState().removeEmptyAssistantMessage();
-      useAppStore
-        .getState()
-        .showToast(`追问回答失败: ${error.message}`, 'error');
+      useAppStore.getState().showToast(`追问回答失败: ${error.message}`, 'error');
       if (sessionId) void reloadSession(sessionId);
     },
   });
@@ -312,8 +309,6 @@ export default function ChatPanel() {
       await reloadSession(sessionId);
     }
   }, [streamStatus, lastRollbackMessageId, setLastRollbackMessageId, reloadSession]);
-
-
 
   // 提交对 Agent 追问的回答（流式）：确认后思考/工具/输出逐块渲染，
   // 避免整轮等待超过 HTTP 超时（此前非流式路径表现为"按钮转圈后报错"）。

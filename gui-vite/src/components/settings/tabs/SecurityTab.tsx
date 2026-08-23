@@ -34,7 +34,9 @@ export default function SecurityTab({ config, onUpdateField }: SecurityTabProps)
             />
           </div>
           <div className="flex items-center gap-3">
-            <label className="text-sm text-[var(--color-text-primary)] w-36">完全放开（不询问）</label>
+            <label className="text-sm text-[var(--color-text-primary)] w-36">
+              完全放开（不询问）
+            </label>
             <Toggle
               checked={config.allow_all_operations}
               onChange={(v) => onUpdateField('allow_all_operations', v)}
@@ -104,7 +106,9 @@ export default function SecurityTab({ config, onUpdateField }: SecurityTabProps)
             />
           </div>
           <div className="flex items-center gap-3">
-            <label className="text-sm text-[var(--color-text-primary)] w-36">自动沉淀（跳过确认）</label>
+            <label className="text-sm text-[var(--color-text-primary)] w-36">
+              自动沉淀（跳过确认）
+            </label>
             <Toggle
               checked={config.clipboard_auto_capture}
               onChange={(v) => onUpdateField('clipboard_auto_capture', v)}
