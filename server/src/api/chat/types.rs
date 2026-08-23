@@ -107,6 +107,7 @@ impl ChatResponse {
                 interrupted: false,
                 usage: None,
                 timestamp: Some(chrono::Utc::now().to_rfc3339()),
+                segments: None,
             },
             usage: TokenUsage::empty(),
         }
@@ -242,6 +243,7 @@ mod tests {
                 interrupted: false,
                 usage: None,
                 timestamp: Some("2026-02-20T10:00:00Z".to_string()),
+                segments: None,
             },
             usage: TokenUsage {
                 prompt_tokens: 10,

@@ -210,7 +210,9 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
           ...msg,
           id: msg.id ?? base[target].id,
           tool_calls: base[target].tool_calls ?? msg.tool_calls,
-          segments: base[target].segments,
+          // 时间线以服务端权威为准（方案 B：历史/流式同构）——本地累积与
+          // 服务端 parts 顺序一致；老数据（无 segments）回退保留本地累积
+          segments: msg.segments ?? base[target].segments,
         };
       } else {
         next.push(msg);

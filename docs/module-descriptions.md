@@ -489,6 +489,10 @@ SSE 协议知识集中在 `lib/chat-stream.ts`（C1 深模块化）：
 - **事件归约器**（createChatStreamReducer）：主对话流与追问流共用，处理
   message/delta/thinking/tool_call/tool_result/skill_calls/usage/finish_reason
   全事件 → store 动作（含轮次边界、截断/中断语义、usage 归位、工具结果挂卡）。
+- **历史/流式同构（方案 B）**：服务端 `ChatMessage.segments` 由
+  StructuredMessage.parts 顺序生成（思考/正文/工具调用的真实到达顺序），
+  历史加载与流式边界事件携带同一权威时间线；前端 applyServerMessage 以
+  服务端为准——两条路径共用 SegmentBlocks 渲染，消除显示分叉。
 - **可中断**：AbortController 停止生成；错误按流归属会话复位。
 
 ### 4.4 测试

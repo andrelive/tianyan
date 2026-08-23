@@ -55,6 +55,98 @@ pub struct ChatMessage {
     /// 可选的时间戳（RFC3339 格式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
+    /// 消息时间线段（历史与流式共用同一渲染管线）：由
+    /// StructuredMessage.parts 的顺序生成——思考/正文/工具调用的真实
+    /// 到达顺序（方案 B：后端权威时间线，消除历史/流式显示分叉）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub segments: Option<Vec<MessageSegment>>,
+}
+
+/// 消息时间线段（与前端 MessageSegment 类型对齐：type=thinking/text/tool）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MessageSegment {
+    /// 思考增量。
+    Thinking {
+        /// 思考文本。
+        text: String,
+    },
+    /// 正文增量。
+    Text {
+        /// 文本内容。
+        text: String,
+    },
+    /// 工具调用段（id 关联消息级 tool_calls 卡片；前端按 id 合并执行结果）。
+    Tool {
+        /// 工具调用信息。
+        tool_call: SegmentToolCall,
+    },
+}
+
+/// 工具调用段内容。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SegmentToolCall {
+    /// 调用 ID（关联 ToolCallWithResult.id）。
+    pub id: String,
+    /// 工具名称。
+    pub name: String,
+    /// 调用参数 JSON。
+    pub arguments: String,
+    /// 展示意图（A2；历史/流式一致的卡片图标与标签）。
+    pub presentation: String,
+}
+
+impl ChatMessage {
+    /// 从结构化消息的 parts 生成时间线段（历史加载与流式边界事件共用；
+    /// 顺序 = 持久化 parts 顺序 = 真实到达顺序）。
+    ///
+    /// - Part::Reasoning → Thinking 段
+    /// - Part::Text → Text 段
+    /// - Part::ToolCall → Tool 段（结果挂到 tool_calls 卡片，不产生段）
+    /// - Part::ToolResult / Part::Image → 不产生段（结果合并/图片独立渲染）
+    pub(crate) fn segments_from_parts(
+        role: &MessageRole,
+        parts: &[tianyan::common::types::Part],
+    ) -> Option<Vec<MessageSegment>> {
+        // 时间线语义只属于 assistant 消息（思考/工具调用仅 assistant 产生）
+        if !matches!(role, MessageRole::Assistant) {
+            return None;
+        }
+        let mut segments = Vec::new();
+        for p in parts {
+            match p {
+                tianyan::common::types::Part::Reasoning { text, .. } => {
+                    segments.push(MessageSegment::Thinking { text: text.clone() });
+                }
+                tianyan::common::types::Part::Text { text, .. } => {
+                    segments.push(MessageSegment::Text { text: text.clone() });
+                }
+                tianyan::common::types::Part::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                    ..
+                } => {
+                    segments.push(MessageSegment::Tool {
+                        tool_call: SegmentToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                            presentation: tianyan::agent::ToolRegistry::default_presentation(name)
+                                .as_str()
+                                .to_string(),
+                        },
+                    });
+                }
+                _ => {}
+            }
+        }
+        if segments.is_empty() {
+            None
+        } else {
+            Some(segments)
+        }
+    }
 }
 
 /// 历史消息中的工具调用卡片（调用信息与对应执行结果合并渲染）。
@@ -130,6 +222,9 @@ impl ChatMessage {
                 cache_write: m.tokens.cache.write as u32,
             }),
             timestamp: None,
+            // 时间线：与历史加载同构（方案 B）——流式边界事件携带服务端
+            // 权威 segments，前端 applyServerMessage 以服务端为准
+            segments: Self::segments_from_parts(&m.role, &m.parts),
         }
     }
 
@@ -152,6 +247,7 @@ impl ChatMessage {
             interrupted: false,
             usage: None,
             timestamp: None,
+            segments: None,
         }
     }
 
@@ -174,6 +270,7 @@ impl ChatMessage {
             interrupted: false,
             usage: None,
             timestamp: None,
+            segments: None,
         }
     }
 
@@ -196,6 +293,7 @@ impl ChatMessage {
             interrupted: false,
             usage: None,
             timestamp: None,
+            segments: None,
         }
     }
 }
@@ -288,6 +386,66 @@ mod tests {
         msg.timestamp = Some("2026-03-17T10:00:00Z".to_string());
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("2026-03-17T10:00:00Z"));
+    }
+
+    #[test]
+    fn test_segments_from_parts_preserves_order() {
+        use tianyan::common::types::{MessageRole, Part, StructuredMessage};
+        let mut sm = StructuredMessage::system("sess-1", "占位");
+        sm.role = MessageRole::Assistant;
+        sm.parts = vec![
+            Part::Reasoning {
+                text: "先想一步".to_string(),
+                time: Default::default(),
+            },
+            Part::Text {
+                text: "工具前的正文".to_string(),
+                time: Default::default(),
+            },
+            Part::ToolCall {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                arguments: "{}".to_string(),
+                time: Default::default(),
+            },
+            Part::Text {
+                text: "工具后的正文".to_string(),
+                time: Default::default(),
+            },
+        ];
+        let segments = ChatMessage::segments_from_parts(&sm.role, &sm.parts).expect("segments");
+        // 顺序 = parts 顺序（真实到达顺序），不按类型重排
+        assert_eq!(segments.len(), 4);
+        match &segments[0] {
+            MessageSegment::Thinking { text } => assert_eq!(text, "先想一步"),
+            _ => panic!("expected thinking"),
+        }
+        match &segments[1] {
+            MessageSegment::Text { text } => assert_eq!(text, "工具前的正文"),
+            _ => panic!("expected text"),
+        }
+        match &segments[2] {
+            MessageSegment::Tool { tool_call } => {
+                assert_eq!(tool_call.id, "call-1");
+                assert_eq!(tool_call.name, "read_file");
+                assert_eq!(tool_call.presentation, "read");
+            }
+            _ => panic!("expected tool"),
+        }
+        match &segments[3] {
+            MessageSegment::Text { text } => assert_eq!(text, "工具后的正文"),
+            _ => panic!("expected text"),
+        }
+        // 序列化契约：type 标签 snake_case（对齐前端 MessageSegment）
+        let json = serde_json::to_string(&segments).unwrap();
+        assert!(json.contains("\"type\":\"thinking\""));
+        assert!(json.contains("\"type\":\"tool\""));
+    }
+
+    #[test]
+    fn test_segments_none_for_plain_messages() {
+        let sm = tianyan::common::types::StructuredMessage::system("sess-1", "系统消息");
+        assert!(ChatMessage::segments_from_parts(&sm.role, &sm.parts).is_none());
     }
 
     #[test]

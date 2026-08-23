@@ -258,6 +258,9 @@ impl SessionService {
                     interrupted: m.finish.as_deref() == Some("interrupted"),
                     usage,
                     timestamp: None,
+                    // 时间线（方案 B）：parts 顺序 = 真实到达顺序——历史与
+                    // 流式共用同一渲染管线（前端 SegmentBlocks）
+                    segments: ChatMessage::segments_from_parts(&m.role, &m.parts),
                 })
             })
             .collect();

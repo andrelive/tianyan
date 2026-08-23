@@ -434,6 +434,7 @@ fn to_chat_response(session_id: &str, response: tianyan::agent::AgentResponse) -
                 cache_write: response.token_usage.cache_write as u32,
             }),
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
+            segments: None,
         },
         usage: TokenUsage {
             prompt_tokens: response.token_usage.prompt_tokens as u32,
