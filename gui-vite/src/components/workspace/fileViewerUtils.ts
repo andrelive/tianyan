@@ -33,5 +33,5 @@ const HASHLINE_RE = /^\d+#[0-9a-f]{2}\|/;
 
 /** 剥离单行 hashline 前缀；不匹配的行原样返回。 */
 export function stripHashline(line: string): string {
-  return HASHLINE_RE.test(line) ? line.replace(HASHLINE_RE, "") : line;
+  return HASHLINE_RE.test(line) ? line.replace(HASHLINE_RE, '') : line;
 }

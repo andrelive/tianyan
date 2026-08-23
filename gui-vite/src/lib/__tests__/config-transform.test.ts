@@ -34,9 +34,7 @@ describe('fromBackendConfig edge cases', () => {
   });
 
   it('falls back per-section when a section is missing', () => {
-    const state = fromBackendConfig(
-      makeResponse({ models: { providers: [], preferences: {} } }),
-    );
+    const state = fromBackendConfig(makeResponse({ models: { providers: [], preferences: {} } }));
     expect(state.providers).toEqual([]);
     expect(state.default_top_k).toBe(5);
     expect(state.data_dir).toBe('');
@@ -242,7 +240,14 @@ describe('toBackendConfig edge cases', () => {
     const req = toBackendConfig(
       stateWith({
         mcpServers: [
-          { name: 's1', command: 'npx', args: ['-y'], env: { A: '1' }, enabled: true, description: 'd' },
+          {
+            name: 's1',
+            command: 'npx',
+            args: ['-y'],
+            env: { A: '1' },
+            enabled: true,
+            description: 'd',
+          },
           { name: 's2', command: 'echo', args: [], env: {}, enabled: false, description: '' },
         ],
       }),
