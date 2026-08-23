@@ -1,7 +1,9 @@
 import { useCallback, useState } from 'react';
 import { useResource } from '@/hooks/use-resource';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { AlertCircle, Bot, ChevronRight, Loader2, RotateCcw, Trash2, Users } from 'lucide-react';
 import { apiDelete, apiPost, getRoleDetail, getRoles, getRolesStats } from '@/lib/api-client';
+import { formatTimestamp } from '@/lib/utils';
 import type { RoleDetail } from '@/lib/types';
 
 const TYPE_LABEL: Record<string, string> = {
@@ -28,12 +30,6 @@ const SOURCE_STYLE: Record<string, string> = {
     'bg-purple-50 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300 border-purple-200 dark:border-purple-800',
 };
 
-function formatTime(ts?: number): string {
-  if (!ts || ts <= 0) return '';
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleString('zh-CN', { hour12: false });
-}
 
 /**
  * 子智能体角色面板（ADR-016）：展示统一角色注册表（内置种子 / 用户配置 /
@@ -77,10 +73,21 @@ export default function RolesPanel() {
     }
   }, []);
 
-  // 回退内置种子
-  const handleReset = async () => {
+  /** 待确认操作（ConfirmDialog 状态机；替代 window.confirm——jsdom 可测） */
+  const [confirm, setConfirm] = useState<{ title: string; message: string; action: 'reset' | 'delete' } | null>(null);
+
+  // 回退内置种子（先确认）
+  const requestReset = () => {
     if (!selectedName) return;
-    if (!window.confirm(`将 ${selectedName} 回退到内置种子定义（学习演化结果会被覆盖）？`)) return;
+    setConfirm({
+      title: '回退内置种子',
+      message: `将 ${selectedName} 回退到内置种子定义（学习演化结果会被覆盖）？`,
+      action: 'reset',
+    });
+  };
+  const executeReset = async () => {
+    if (!selectedName) return;
+    setConfirm(null);
     setActionPending(true);
     setActionMessage(null);
     try {
@@ -96,10 +103,18 @@ export default function RolesPanel() {
     }
   };
 
-  // 退役删除
-  const handleDelete = async () => {
+  // 退役删除（先确认）
+  const requestDelete = () => {
     if (!selectedName) return;
-    if (!window.confirm(`退役并删除角色 ${selectedName}（定义与会话一并删除）？`)) return;
+    setConfirm({
+      title: '退役删除角色',
+      message: `退役并删除角色 ${selectedName}（定义与会话一并删除）？`,
+      action: 'delete',
+    });
+  };
+  const executeDelete = async () => {
+    if (!selectedName) return;
+    setConfirm(null);
     setActionPending(true);
     setActionMessage(null);
     try {
@@ -330,7 +345,7 @@ export default function RolesPanel() {
               {/* 操作栏 */}
               <div className="px-6 py-2 border-b border-[var(--color-border)] flex items-center gap-2">
                 <button
-                  onClick={() => void handleReset()}
+                  onClick={requestReset}
                   disabled={
                     actionPending ||
                     (selectedRole.source === 'builtin' && selectedRole.version === 1)
@@ -342,7 +357,7 @@ export default function RolesPanel() {
                   回退内置种子
                 </button>
                 <button
-                  onClick={() => void handleDelete()}
+                  onClick={requestDelete}
                   disabled={actionPending}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   title="删除角色定义与会话（退役）"
@@ -406,7 +421,7 @@ export default function RolesPanel() {
                                   {r.task}
                                 </span>
                                 <span className="shrink-0 text-[var(--color-text-tertiary)]">
-                                  {formatTime(r.ts)}
+                                  {formatTimestamp(r.ts)}
                                 </span>
                                 <span className="shrink-0 text-[var(--color-text-tertiary)]">
                                   {r.duration_ms}ms
@@ -449,6 +464,20 @@ export default function RolesPanel() {
           )}
         </div>
       </div>
+
+      {/* 破坏性操作确认（统一 ConfirmDialog 原语） */}
+      <ConfirmDialog
+        open={confirm !== null}
+        title={confirm?.title ?? ''}
+        message={confirm?.message ?? ''}
+        danger
+        confirmLabel={confirm?.action === 'delete' ? '删除' : '回退'}
+        busy={actionPending}
+        onConfirm={() =>
+          void (confirm?.action === 'delete' ? executeDelete() : executeReset())
+        }
+        onCancel={() => setConfirm(null)}
+      />
     </div>
   );
 }

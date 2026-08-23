@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BarChart3, Loader2, Search } from 'lucide-react';
 import { apiGet } from '@/lib/api-client';
+import { formatNumber } from '@/lib/utils';
 import { SectionTitle } from './shared';
 
 /** 单条用量统计（总计或按 provider/model 分组）。 */
@@ -22,9 +23,6 @@ interface UsageStatsResponse {
   grouped: UsageStat[];
 }
 
-function fmt(n: number): string {
-  return n.toLocaleString('en-US');
-}
 
 function pct(n: number): string {
   return Math.round(n * 100) + '%';
@@ -179,14 +177,14 @@ export default function UsageTab() {
           </div>
           {/* 总计卡片 */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
-            <MetricCard label="未命中输入" value={fmt(total.uncached_input)} />
-            <MetricCard label="缓存命中输入" value={fmt(total.cached_input)} />
-            <MetricCard label="输出" value={fmt(total.completion_tokens)} />
+            <MetricCard label="未命中输入" value={formatNumber(total.uncached_input)} />
+            <MetricCard label="缓存命中输入" value={formatNumber(total.cached_input)} />
+            <MetricCard label="输出" value={formatNumber(total.completion_tokens)} />
             <MetricCard label="缓存命中率" value={pct(total.cache_hit_rate)} />
           </div>
           <div className="flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)] mb-3">
             <BarChart3 className="w-3.5 h-3.5" />
-            总 {fmt(total.total_tokens)} token
+            总 {formatNumber(total.total_tokens)} token
           </div>
 
           {/* 按模型分组 */}
@@ -210,9 +208,9 @@ export default function UsageTab() {
                   >
                     <td className="py-1.5 pr-2 font-mono text-xs">{s.group}</td>
                     <td className="py-1.5 pr-2 text-right font-mono text-xs">{s.calls}</td>
-                    <td className="py-1.5 pr-2 text-right font-mono text-xs">{fmt(s.uncached_input)}</td>
-                    <td className="py-1.5 pr-2 text-right font-mono text-xs">{fmt(s.cached_input)}</td>
-                    <td className="py-1.5 pr-2 text-right font-mono text-xs">{fmt(s.completion_tokens)}</td>
+                    <td className="py-1.5 pr-2 text-right font-mono text-xs">{formatNumber(s.uncached_input)}</td>
+                    <td className="py-1.5 pr-2 text-right font-mono text-xs">{formatNumber(s.cached_input)}</td>
+                    <td className="py-1.5 pr-2 text-right font-mono text-xs">{formatNumber(s.completion_tokens)}</td>
                     <td className="py-1.5 text-right font-mono text-xs">{pct(s.cache_hit_rate)}</td>
                   </tr>
                 ))}

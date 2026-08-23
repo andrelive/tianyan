@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Minimize2 } from 'lucide-react';
 import type { StreamUsage } from '@/lib/types';
+import { formatNumber } from '@/lib/utils';
 
 /** 圆环半径（viewBox 32×32）。 */
 const R = 13;
@@ -14,9 +15,6 @@ function ringColor(pct: number): string {
   return 'var(--color-success)';
 }
 
-function fmt(n: number): string {
-  return n.toLocaleString('en-US');
-}
 
 /**
  * 上下文占用圆环（DSH ContextMeter 风格）：环径 = 占用百分比，
@@ -110,21 +108,21 @@ export default function ContextRing({
           <div className="flex items-center justify-between mb-1">
             <span className="text-[var(--color-text-tertiary)]">上下文占用</span>
             <span className="font-mono text-[var(--color-text-primary)]">
-              {fmt(usage.prompt_tokens)} / {fmt(usage.context_window)} ({Math.round(pct)}%)
+              {formatNumber(usage.prompt_tokens)} / {formatNumber(usage.context_window)} ({Math.round(pct)}%)
             </span>
           </div>
           <div className="flex items-center justify-between mb-1">
             <span className="text-[var(--color-text-tertiary)]">缓存命中</span>
             <span className="font-mono text-[var(--color-text-primary)]">
               {usage.cache_read > 0
-                ? fmt(usage.cache_read) + ' token (' + Math.round(cachePct) + '%)'
+                ? formatNumber(usage.cache_read) + ' token (' + Math.round(cachePct) + '%)'
                 : '0（提供商未返回明细）'}
             </span>
           </div>
           <div className="flex items-center justify-between mb-2">
             <span className="text-[var(--color-text-tertiary)]">输出</span>
             <span className="font-mono text-[var(--color-text-primary)]">
-              {fmt(usage.completion_tokens)} token
+              {formatNumber(usage.completion_tokens)} token
             </span>
           </div>
           <button

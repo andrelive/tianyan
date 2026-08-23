@@ -5,7 +5,7 @@ import { Search, Loader2, AlertCircle, ChevronDown, ChevronUp, BookOpen } from '
 
 function HighlightedText({ text, query }: { text: string; query: string }) {
   if (!query.trim()) return <>{text}</>;
-  const escaped = query.replace(/[.*+?^${}()|[]\]/g, '\$&');
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '$&');
   const parts = text.split(new RegExp(`(${escaped})`, 'gi'));
   return (
     <>

@@ -291,7 +291,7 @@ export default function ChatPanel() {
         await reloadSession(sessionId);
       }
     },
-    [streamStatus, deleteMessagesFrom, setLastRollbackMessageId, messages],
+    [streamStatus, deleteMessagesFrom, setLastRollbackMessageId, messages, reloadSession],
   );
 
   // 撤销回滚：恢复被删除的消息与工作区文件
@@ -311,7 +311,7 @@ export default function ChatPanel() {
       state.showToast(`撤销回退失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
       await reloadSession(sessionId);
     }
-  }, [streamStatus, lastRollbackMessageId, setLastRollbackMessageId]);
+  }, [streamStatus, lastRollbackMessageId, setLastRollbackMessageId, reloadSession]);
 
 
 

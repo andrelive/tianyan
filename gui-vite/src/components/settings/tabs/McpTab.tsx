@@ -10,6 +10,7 @@ import {
 } from '@/lib/api-client';
 import type { McpServerEntry } from '@/lib/types';
 import { Toggle, FieldRow, SectionTitle } from './shared';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 
 interface ServerTestStatus {
   name: string;
@@ -27,6 +28,8 @@ export default function McpTab() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [testStatuses, setTestStatuses] = useState<Record<string, ServerTestStatus>>({});
   const [removing, setRemoving] = useState<string | null>(null);
+/** 待移除确认的服务器（ConfirmDialog 状态机；替代 window.confirm） */
+const [removeTarget, setRemoveTarget] = useState<string | null>(null);
 
   // Add form state
   const [formName, setFormName] = useState('');
@@ -270,11 +273,7 @@ export default function McpTab() {
                     )}
                   </button>
                   <button
-                    onClick={() => {
-                      if (window.confirm(`确定要移除 "${server.name}" 吗？`)) {
-                        handleRemove(server.name);
-                      }
-                    }}
+                    onClick={() => setRemoveTarget(server.name)}
                     disabled={removing === server.name}
                     className="p-1.5 rounded-md text-[var(--color-text-tertiary)] hover:text-red-400 hover:bg-red-500/10 disabled:opacity-50 transition-colors"
                     title="移除服务器"
@@ -386,6 +385,20 @@ export default function McpTab() {
           </div>
         </div>
       )}
+
+      {/* 移除确认（统一 ConfirmDialog 原语） */}
+      <ConfirmDialog
+        open={removeTarget !== null}
+        title="移除 MCP 服务器"
+        message={removeTarget ? `确定要移除 "${removeTarget}" 吗？` : ''}
+        danger
+        confirmLabel="移除"
+        busy={removing === removeTarget}
+        onConfirm={() => {
+          if (removeTarget) void handleRemove(removeTarget);
+        }}
+        onCancel={() => setRemoveTarget(null)}
+      />
     </div>
   );
 }

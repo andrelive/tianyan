@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Send, Square, ImagePlus, X } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, formatNumber } from '@/lib/utils';
 import type { StreamUsage } from '@/lib/types';
 import ModelSelector from './ModelSelector';
 import ThinkingSelect from './ThinkingSelect';
@@ -289,15 +289,15 @@ export default function ChatInput({ onSend, onStop, isStreaming, usage, sessionU
       {sessionUsage && (
         <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 px-4 pb-2 text-[11px] leading-relaxed text-[var(--color-text-tertiary)] select-none">
           <span>
-            未命中输入 <span className="font-mono">{sessionUsage.uncachedInput.toLocaleString('en-US')}</span>
+            未命中输入 <span className="font-mono">{formatNumber(sessionUsage.uncachedInput)}</span>
           </span>
           <span className="opacity-40">·</span>
           <span>
-            缓存命中输入 <span className="font-mono">{sessionUsage.cachedInput.toLocaleString('en-US')}</span>
+            缓存命中输入 <span className="font-mono">{formatNumber(sessionUsage.cachedInput)}</span>
           </span>
           <span className="opacity-40">·</span>
           <span>
-            输出 <span className="font-mono">{sessionUsage.completion.toLocaleString('en-US')}</span>
+            输出 <span className="font-mono">{formatNumber(sessionUsage.completion)}</span>
           </span>
           <span className="opacity-40">·</span>
           <span>

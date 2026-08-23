@@ -1,13 +1,9 @@
-import type { ModelCapability } from '@/lib/types';
-import { MODEL_CAPABILITIES } from '@/lib/types';
+import {
+  MODEL_CAPABILITIES,
+  MODEL_CAPABILITY_LABELS,
+  type ModelCapability,
+} from '@/lib/types';
 import type { StepProps } from './wizard.types';
-
-const CAPABILITY_LABELS: Record<ModelCapability, string> = {
-  chat: '对话 (Chat)',
-  vision: '视觉 (Vision)',
-  'text-embedding': '文本嵌入',
-  'multimodal-embedding': '多模态嵌入',
-};
 
 interface FieldRowProps {
   label: string;
@@ -109,7 +105,7 @@ export default function ModelStep({
                   className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                   onChange={() => toggleCap(cap)}
                 />
-                {CAPABILITY_LABELS[cap]}
+                {MODEL_CAPABILITY_LABELS[cap]}
               </label>
             ))}
           </div>

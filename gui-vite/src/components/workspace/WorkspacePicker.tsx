@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Folder, FolderOpen, ChevronRight, ArrowUp, X, Loader2, Check } from 'lucide-react';
 import { fetchWorkspaceDirs } from '@/lib/api-client';
+import Modal from '@/components/ui/Modal';
 import type { WorkspaceDirsResponse } from '@/lib/types';
 
 interface Props {
@@ -63,16 +64,12 @@ export default function WorkspacePicker({
   if (!open) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-      role="dialog"
-      aria-modal="true"
-      aria-label="选择目录"
-      onClick={(e) => {
-        if (e.target === e.currentTarget && !saving) onClose();
-      }}
+    <Modal
+      onClose={onClose}
+      closeDisabled={saving}
+      ariaLabel="选择目录"
+      panelClassName="w-[520px] max-h-[70vh] flex flex-col"
     >
-      <div className="w-[520px] max-h-[70vh] flex flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-xl">
         {/* 头部 */}
         <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--color-border)]">
           <FolderOpen className="w-4 h-4 text-accent" />
@@ -194,7 +191,6 @@ export default function WorkspacePicker({
             </button>
           </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

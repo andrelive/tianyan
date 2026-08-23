@@ -3,6 +3,7 @@ import { useResource } from '@/hooks/use-resource';
 import { Save, RotateCcw, Loader2, AlertCircle } from 'lucide-react';
 import { fetchSoulContent, updateSoulContent, fetchDefaultSoul } from '@/lib/api-client';
 import { useAppStore } from '@/lib/store';
+import { formatNumber } from '@/lib/utils';
 
 export default function SoulTab() {
   const showToast = useAppStore((s) => s.showToast);
@@ -71,7 +72,7 @@ export default function SoulTab() {
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-base font-semibold text-[var(--color-text-primary)]">智能体人格</h3>
         <div className="text-xs text-[var(--color-text-tertiary)]">
-          {lineCount} 行 · {charCount.toLocaleString()} 字符
+          {lineCount} 行 · {formatNumber(charCount)} 字符
         </div>
       </div>
 

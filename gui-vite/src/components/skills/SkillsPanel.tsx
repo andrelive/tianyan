@@ -5,13 +5,8 @@ import { useAppStore } from '@/lib/store';
 import { apiGet, getSkillDetail, getSkillsStats } from '@/lib/api-client';
 import type { Skill, SkillDetail, SkillListResponse } from '@/lib/types';
 import { Wrench, Loader2, AlertCircle, ChevronRight, Clock } from 'lucide-react';
+import { formatDateTime, formatTimestamp } from '@/lib/utils';
 
-function formatTime(iso?: string): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleString('zh-CN', { hour12: false });
-}
 
 /**
  * 技能面板：只展示方法论技能（custom 类：GEPA 学习技能 + planning）。
@@ -203,7 +198,7 @@ export default function SkillsPanel() {
                         {skill.updated_at && (
                           <p className="text-xs text-[var(--color-text-tertiary)]/80 flex items-center gap-1 mt-1">
                             <Clock size={11} />
-                            更新于 {formatTime(skill.updated_at)}
+                            更新于 {formatDateTime(skill.updated_at)}
                           </p>
                         )}
                       </div>
@@ -242,13 +237,13 @@ export default function SkillsPanel() {
                   {detail?.created_at && (
                     <span className="inline-flex items-center gap-1 text-xs text-[var(--color-text-tertiary)]">
                       <Clock size={11} />
-                      创建于 {formatTime(detail.created_at)}
+                      创建于 {formatDateTime(detail.created_at)}
                     </span>
                   )}
                   {detail?.updated_at && (
                     <span className="inline-flex items-center gap-1 text-xs text-[var(--color-text-tertiary)]">
                       <Clock size={11} />
-                      更新于 {formatTime(detail.updated_at)}
+                      更新于 {formatDateTime(detail.updated_at)}
                     </span>
                   )}
                 </div>
@@ -270,7 +265,7 @@ export default function SkillsPanel() {
                           <span className="text-red-600 dark:text-red-400">用户反馈负面</span>
                         )}
                         <span className="text-[var(--color-text-tertiary)]">
-                          复审于 {new Date(rv.ts).toLocaleString('zh-CN', { hour12: false })}
+                          复审于 {formatTimestamp(rv.ts)}
                         </span>
                       </div>
                       {rv.reason && (

@@ -4,6 +4,7 @@ import { EditorView } from '@codemirror/view';
 import { unifiedMergeView } from '@codemirror/merge';
 import type { LanguageSupport } from '@codemirror/language';
 import { AlertCircle, Loader2, Save, X } from 'lucide-react';
+import Modal from '@/components/ui/Modal';
 
 interface DiffViewProps {
   /** 磁盘上的原始内容（构造快照；变化时必须重建视图）。 */
@@ -85,20 +86,12 @@ export function SaveConfirmDialog({
   onConfirm,
 }: SaveConfirmDialogProps) {
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      role="presentation"
-      onClick={() => {
-        if (!saving) onCancel();
-      }}
+    <Modal
+      onClose={onCancel}
+      closeDisabled={saving}
+      ariaLabel="保存确认"
+      panelClassName="flex flex-col w-full max-w-3xl h-[70vh]"
     >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="保存确认"
-        onClick={(e) => e.stopPropagation()}
-        className="flex flex-col w-full max-w-3xl h-[70vh] rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] shadow-xl"
-      >
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-[var(--color-border)] shrink-0">
           <h3 className="text-sm font-medium text-[var(--color-text-primary)] truncate">
             保存修改 · <span className="font-mono">{path}</span>
@@ -148,7 +141,6 @@ export function SaveConfirmDialog({
             </button>
           </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { usePolling } from '@/hooks/use-polling';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';
 import { fetchApprovalStatus, respondApproval } from '@/lib/api-client';
+import { formatDateTime } from '@/lib/utils';
 import type { ApprovalDecision, ApprovalStatusSnapshot } from '@/lib/types';
 import { Loader2, ShieldCheck, RefreshCw, Check, X, ShieldAlert, Pencil } from 'lucide-react';
 
@@ -43,12 +44,6 @@ function RiskBadge({ riskLevel }: { riskLevel: string }) {
   );
 }
 
-/** RFC3339 时间戳 → 本地时间（yyyy/M/d HH:mm:ss）。 */
-function formatDateTime(ts: string): string {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleString('zh-CN', { hour12: false });
-}
 
 /** 审批决策 → 中文标签（response 可能为 null）。 */
 function decisionLabel(decision: string | null | undefined): string {

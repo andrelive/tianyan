@@ -3,6 +3,7 @@ import { usePolling } from '@/hooks/use-polling';
 import { Spinner } from '@/components/ui/Spinner';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { fetchTasks, cancelTask } from '@/lib/api-client';
+import { formatTimestamp } from '@/lib/utils';
 import type { BackgroundTask, TaskStatus } from '@/lib/types';
 import {
   Loader2,
@@ -53,12 +54,6 @@ function StatusBadge({ status }: { status: TaskStatus }) {
   );
 }
 
-/** epoch 毫秒 → 本地时间（yyyy/M/d HH:mm:ss）。 */
-function formatEpochMs(ts: number): string {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return String(ts);
-  return d.toLocaleString('zh-CN', { hour12: false });
-}
 
 /** 截断长文本为摘要（超过长度补 …）。 */
 function truncate(text: string, maxLen = RESULT_MAX_LEN): string {
@@ -142,9 +137,9 @@ export default function TasksPanel() {
                       <div className="flex items-center gap-2 mt-1.5 text-xs text-[var(--color-text-tertiary)]">
                         <StatusBadge status={task.status} />
                         <span>会话 {task.parent_session_id ?? '—'}</span>
-                        <span>{formatEpochMs(task.created_at)}</span>
+                        <span>{formatTimestamp(task.created_at)}</span>
                         {task.completed_at !== null && (
-                          <span>完成于 {formatEpochMs(task.completed_at)}</span>
+                          <span>完成于 {formatTimestamp(task.completed_at)}</span>
                         )}
                       </div>
                     </div>

@@ -1,13 +1,6 @@
 import { Cpu, Database, Bot, Loader2 } from 'lucide-react';
-import type { ModelCapability } from '@/lib/types';
+import { MODEL_CAPABILITY_LABELS } from '@/lib/types';
 import type { StepProps } from './wizard.types';
-
-const CAPABILITY_LABELS: Record<ModelCapability, string> = {
-  chat: '对话 (Chat)',
-  vision: '视觉 (Vision)',
-  'text-embedding': '文本嵌入',
-  'multimodal-embedding': '多模态嵌入',
-};
 
 interface SummaryRowProps {
   label: string;
@@ -63,7 +56,7 @@ export default function ConfirmStep({
                 <SummaryRow label="模型" value={data.modelName || '(未设置)'} />
                 <SummaryRow
                   label="能力标签"
-                  value={data.modelCaps.map((c) => CAPABILITY_LABELS[c]).join(', ') || '无'}
+                  value={data.modelCaps.map((c) => MODEL_CAPABILITY_LABELS[c]).join(', ') || '无'}
                 />
               </>
             ) : (

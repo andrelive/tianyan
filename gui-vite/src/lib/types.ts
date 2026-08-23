@@ -610,6 +610,14 @@ export const MODEL_CAPABILITIES = [
 
 export type ModelCapability = (typeof MODEL_CAPABILITIES)[number];
 
+/** 能力 → 中文标签（全前端唯一词汇表；曾散落 ModelsTab/ConfirmStep/ModelStep 三处）。 */
+export const MODEL_CAPABILITY_LABELS: Record<ModelCapability, string> = {
+  chat: '对话 (Chat)',
+  vision: '视觉 (Vision)',
+  'text-embedding': '文本嵌入',
+  'multimodal-embedding': '多模态嵌入',
+};
+
 // ── Model Entry (matches backend ModelEntry) ──
 
 export interface ProviderModelEntry {

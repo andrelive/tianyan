@@ -22,7 +22,7 @@ import type {
   ProviderProtocol,
   ResolvedModelSpec,
 } from '@/lib/types';
-import { MODEL_CAPABILITIES } from '@/lib/types';
+import { MODEL_CAPABILITIES, MODEL_CAPABILITY_LABELS } from '@/lib/types';
 import { scanProviderModels } from '@/lib/api-client';
 
 /* ── Props ── */
@@ -51,17 +51,6 @@ interface ModelsTabProps {
   testStatus: Record<number, 'idle' | 'testing' | 'success' | 'error'>;
   onAddScannedModels: (providerIndex: number, models: DiscoveredModelInfo[]) => void;
 }
-
-/* ── Capability labels ── */
-
-const CAPABILITY_LABELS: Record<ModelCapability, string> = {
-  chat: '对话 (Chat)',
-  vision: '视觉 (Vision)',
-  'text-embedding': '文本嵌入',
-  'multimodal-embedding': '多模态嵌入',
-};
-
-
 
 /**
  * 模型的思考强度档位值编辑器（每个模型自己声明的档位集，逗号分隔）：
@@ -642,7 +631,7 @@ export default function ModelsTab({
                           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                           onChange={() => onToggleModelCapability(pi, mi, cap)}
                         />
-                        {CAPABILITY_LABELS[cap]}
+                        {MODEL_CAPABILITY_LABELS[cap]}
                       </label>
                     ))}
                   </div>

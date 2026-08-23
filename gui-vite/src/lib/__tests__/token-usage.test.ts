@@ -49,7 +49,9 @@ describe('sumSessionUsage', () => {
   it('returns null when nothing consumed', () => {
     expect(sumSessionUsage([msg({ content: 'a' })])).toBeNull();
     expect(
-      sumSessionUsage([msg({ usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } })]),
+      sumSessionUsage([
+        msg({ usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } }),
+      ]),
     ).toBeNull();
   });
 

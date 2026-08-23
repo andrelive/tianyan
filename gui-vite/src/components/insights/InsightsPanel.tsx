@@ -1,5 +1,5 @@
-import {} from 'react';
 import { fetchSchedulerStatus, fetchUsageStats } from '@/lib/api-client';
+import { formatNumber } from '@/lib/utils';
 import { useResource } from '@/hooks/use-resource';
 import { Spinner } from '@/components/ui/Spinner';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';
@@ -16,10 +16,6 @@ function formatLastRun(secs: number | null): string {
   return `${minutes} 分前`;
 }
 
-/** 大数 → 千分位显示。 */
-function formatNumber(n: number): string {
-  return n.toLocaleString('zh-CN');
-}
 
 /** 优先级 → badge 颜色（Tailwind 明暗双主题）。 */
 const PRIORITY_BADGE_CLASSES: Record<string, string> = {

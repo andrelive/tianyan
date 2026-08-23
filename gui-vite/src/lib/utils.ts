@@ -5,7 +5,29 @@ export function formatDate(iso: string): string {
 
 export function formatTime(iso: string): string {
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+
+/** epoch 毫秒 → 本地日期时间（yyyy/M/d HH:mm:ss；空/非法返回 ''）。 */
+export function formatTimestamp(ts?: number): string {
+  if (!ts || ts <= 0) return '';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+
+/** RFC3339 → 本地日期时间（yyyy/M/d HH:mm:ss；非法返回原文）。 */
+export function formatDateTime(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+
+/** 大数 → 千分位（en-US 分组，全前端统一口径）。 */
+export function formatNumber(n: number): string {
+  return n.toLocaleString('en-US');
 }
 
 export function formatRelativeTime(iso: string): string {
