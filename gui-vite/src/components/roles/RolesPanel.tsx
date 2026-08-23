@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useResource } from '@/hooks/use-resource';
+import { toErrorMessage } from '@/lib/errors';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { AlertCircle, Bot, ChevronRight, Loader2, RotateCcw, Trash2, Users } from 'lucide-react';
 import { apiDelete, apiPost, getRoleDetail, getRoles, getRolesStats } from '@/lib/api-client';
@@ -20,6 +21,12 @@ const SOURCE_LABEL: Record<string, string> = {
   user: '用户配置',
   learned: '学习演化',
 };
+
+/** 操作失败消息（前缀 + 错误消息；非 Error 时仅前缀文案）。 */
+function actionErrorMessage(err: unknown): string {
+  const msg = toErrorMessage(err, '');
+  return msg ? `操作失败：${msg}` : '操作失败';
+}
 
 const SOURCE_STYLE: Record<string, string> = {
   builtin:
@@ -91,7 +98,7 @@ export default function RolesPanel() {
       void reloadStats();
       reloadDetail();
     } catch (err) {
-      setActionMessage(err instanceof Error ? `操作失败：${err.message}` : '操作失败');
+      setActionMessage(actionErrorMessage(err));
     } finally {
       setActionPending(false);
     }
@@ -118,7 +125,7 @@ export default function RolesPanel() {
       void reloadRoles();
       void reloadStats();
     } catch (err) {
-      setActionMessage(err instanceof Error ? `操作失败：${err.message}` : '操作失败');
+      setActionMessage(actionErrorMessage(err));
     } finally {
       setActionPending(false);
     }

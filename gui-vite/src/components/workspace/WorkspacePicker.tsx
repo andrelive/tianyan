@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Folder, FolderOpen, ChevronRight, ArrowUp, X, Loader2, Check } from 'lucide-react';
 import { fetchWorkspaceDirs } from '@/lib/api-client';
+import { toErrorMessage } from '@/lib/errors';
 import Modal from '@/components/ui/Modal';
 import type { WorkspaceDirsResponse } from '@/lib/types';
 
@@ -47,7 +48,7 @@ export default function WorkspacePicker({
       setDirs(resp);
       setSelected('');
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '目录加载失败');
+      setError(toErrorMessage(err, '目录加载失败'));
     } finally {
       setLoading(false);
     }

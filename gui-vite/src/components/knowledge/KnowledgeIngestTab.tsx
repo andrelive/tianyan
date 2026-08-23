@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { apiPostMultipart } from '@/lib/api-client';
+import { toErrorMessage } from '@/lib/errors';
 import type { IngestResponse } from '@/lib/types';
 import { Inbox, File, X, Loader2, CheckCircle2, AlertCircle, Upload } from 'lucide-react';
 
@@ -88,7 +89,7 @@ export default function KnowledgeIngestTab() {
         setIngestError(`${failed.length} 个文件导入失败：${detail}`);
       }
     } catch (err) {
-      setIngestError(err instanceof Error ? err.message : '导入失败');
+      setIngestError(toErrorMessage(err, '导入失败'));
     } finally {
       setIsIngesting(false);
     }

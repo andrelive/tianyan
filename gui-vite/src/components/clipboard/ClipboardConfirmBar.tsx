@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { usePolling } from '@/hooks/use-polling';
+import { toErrorMessage } from '@/lib/errors';
 import { ClipboardList, X } from 'lucide-react';
 import { fetchClipboardPending, respondClipboard } from '@/lib/api-client';
 import { useAppStore } from '@/lib/store';
@@ -58,7 +59,7 @@ export default function ClipboardConfirmBar() {
       setPending(null);
       void resp;
     } catch (err: unknown) {
-      showToast(`剪贴板操作失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
+      showToast(`剪贴板操作失败: ${toErrorMessage(err, '未知错误')}`, 'error');
     } finally {
       setSubmitting(false);
     }

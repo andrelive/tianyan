@@ -14,6 +14,7 @@ import type { ApprovalDecision, ApprovalStatusSnapshot } from '@/lib/types';
 import { useChatStream } from '@/hooks/useChatStream';
 import { usePolling } from '@/hooks/use-polling';
 import { useSessionHistory } from '@/hooks/use-session-history';
+import { toErrorMessage } from '@/lib/errors';
 import { lastMessageUsage, sumSessionUsage } from '@/lib/token-usage';
 import { MessageSquare, Loader2, Undo2 } from 'lucide-react';
 import ChatInput from './ChatInput';
@@ -138,9 +139,7 @@ export default function ChatPanel() {
       await respondApproval(pendingApproval.request_id, decision);
       setPendingApproval(null);
     } catch (err: unknown) {
-      useAppStore
-        .getState()
-        .showToast(`审批响应失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
+      useAppStore.getState().showToast(`审批响应失败: ${toErrorMessage(err, '未知错误')}`, 'error');
     } finally {
       setApprovalBusy(false);
     }
@@ -284,7 +283,7 @@ export default function ChatPanel() {
         state.setMessages(resp.messages);
         setLastRollbackMessageId(target.id);
       } catch (err: unknown) {
-        state.showToast(`回退失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
+        state.showToast(`回退失败: ${toErrorMessage(err, '未知错误')}`, 'error');
         await reloadSession(sessionId);
       }
     },
@@ -305,7 +304,7 @@ export default function ChatPanel() {
       setLastRollbackMessageId(null);
       state.showToast('已撤销回退', 'success');
     } catch (err: unknown) {
-      state.showToast(`撤销回退失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
+      state.showToast(`撤销回退失败: ${toErrorMessage(err, '未知错误')}`, 'error');
       await reloadSession(sessionId);
     }
   }, [streamStatus, lastRollbackMessageId, setLastRollbackMessageId, reloadSession]);
@@ -353,7 +352,7 @@ export default function ChatPanel() {
       const resp = await compressSession(sessionId);
       state.showToast(resp.compressed ? '已压缩' : '无需压缩', 'success');
     } catch (err: unknown) {
-      state.showToast(`压缩失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
+      state.showToast(`压缩失败: ${toErrorMessage(err, '未知错误')}`, 'error');
     } finally {
       setCompressing(false);
     }

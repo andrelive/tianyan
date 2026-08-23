@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useResource } from '@/hooks/use-resource';
+import { toErrorMessage } from '@/lib/errors';
 import {
   Cpu,
   Database,
@@ -278,7 +279,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
         }
       } catch (err: unknown) {
         setTestStatus((prev) => ({ ...prev, [index]: 'error' }));
-        const msg = err instanceof Error ? err.message : '未知错误';
+        const msg = toErrorMessage(err, '未知错误');
         showToast(`${p.name} 连接失败: ${msg}`, 'error');
       }
     },
@@ -298,7 +299,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
       const fresh = await apiGet<BackendConfigResponse>('/config');
       setConfig(fromBackendConfig(fresh));
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '保存失败';
+      const msg = toErrorMessage(err, '保存失败');
       showToast(`保存失败: ${msg}`, 'error');
     } finally {
       setSaving(false);

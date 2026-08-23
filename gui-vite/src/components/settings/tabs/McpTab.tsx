@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Loader2, Plus, Trash2, WifiOff, Play, X, Check } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
 import { useResource } from '@/hooks/use-resource';
+import { toErrorMessage } from '@/lib/errors';
 import {
   listMcpServers,
   addMcpServer,
@@ -58,7 +59,7 @@ export default function McpTab() {
       );
       showToast(`${server.name} 已${server.enabled ? '禁用' : '启用'}`, 'success');
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '操作失败';
+      const msg = toErrorMessage(err, '操作失败');
       showToast(msg, 'error');
     }
   };
@@ -92,7 +93,7 @@ export default function McpTab() {
         showToast(`${server.name} 连接失败: ${resp.error}`, 'error');
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '测试失败';
+      const msg = toErrorMessage(err, '测试失败');
       setTestStatuses((prev) => ({
         ...prev,
         [server.name]: { name: server.name, status: 'error', error: msg },
@@ -108,7 +109,7 @@ export default function McpTab() {
       setServers((prev) => prev.filter((s) => s.name !== name));
       showToast(`${name} 已移除`, 'success');
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '移除失败';
+      const msg = toErrorMessage(err, '移除失败');
       showToast(`移除失败: ${msg}`, 'error');
     } finally {
       setRemoving(null);
@@ -153,7 +154,7 @@ export default function McpTab() {
       setFormEnv('');
       showToast(`${newServer.name} 已添加`, 'success');
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '添加失败';
+      const msg = toErrorMessage(err, '添加失败');
       showToast(`添加失败: ${msg}`, 'error');
     } finally {
       setFormSaving(false);

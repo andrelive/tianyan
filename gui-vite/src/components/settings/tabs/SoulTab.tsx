@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useResource } from '@/hooks/use-resource';
+import { toErrorMessage } from '@/lib/errors';
 import { Save, RotateCcw, Loader2, AlertCircle } from 'lucide-react';
 import { fetchSoulContent, updateSoulContent, fetchDefaultSoul } from '@/lib/api-client';
 import { useAppStore } from '@/lib/store';
@@ -30,7 +31,7 @@ export default function SoulTab() {
       await updateSoulContent(content);
       showToast('智能体人格已保存，下次对话生效', 'success');
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '保存失败';
+      const msg = toErrorMessage(err, '保存失败');
       setError(msg);
     } finally {
       setSaving(false);
@@ -45,7 +46,7 @@ export default function SoulTab() {
       setContent(res.content);
       showToast('已恢复默认人格（尚未保存，请点击保存）', 'info');
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '加载默认人格失败';
+      const msg = toErrorMessage(err, '加载默认人格失败');
       setError(msg);
     } finally {
       setRestoring(false);

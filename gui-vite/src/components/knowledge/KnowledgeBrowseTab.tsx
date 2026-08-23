@@ -7,6 +7,7 @@ import {
 } from '@/lib/api-client';
 import { useResource } from '@/hooks/use-resource';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import { toErrorMessage } from '@/lib/errors';
 import { ChevronRight, Folder, File, Trash2, Loader2, AlertCircle } from 'lucide-react';
 
 /** 知识库浏览（目录导航 + 层级查看 + 二次确认删除）。 */
@@ -64,7 +65,7 @@ export default function KnowledgeBrowseTab() {
       const res = await fetchKnowledgeEntryContent(entry.uri, browseLevel);
       setBrowseContent(res.content);
     } catch (err: unknown) {
-      setBrowseContent(`加载失败: ${err instanceof Error ? err.message : '未知错误'}`);
+      setBrowseContent(`加载失败: ${toErrorMessage(err, '未知错误')}`);
     } finally {
       setBrowseContentLoading(false);
     }
@@ -93,7 +94,7 @@ export default function KnowledgeBrowseTab() {
       });
       reloadBrowse();
     } catch (err: unknown) {
-      setDeleteError(err instanceof Error ? err.message : '删除失败');
+      setDeleteError(toErrorMessage(err, '删除失败'));
     } finally {
       setDeletingUri(null);
     }

@@ -4,6 +4,7 @@ import { useResource } from '@/hooks/use-resource';
 import { ChevronDown, Loader2 } from 'lucide-react';
 import { apiGet, switchModel } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
+import { toErrorMessage } from '@/lib/errors';
 import type { ModelsResponse } from '@/lib/types';
 
 /** ghost：一体式输入卡片内的无边框变体（外框由父组件统一提供）。 */
@@ -93,7 +94,7 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
                 setOpen(false);
                 // 本地状态先行（UI 不依赖网络），后端持久化失败不阻塞交互
                 switchModel(model.name, 'chat').catch((err: unknown) => {
-                  const message = err instanceof Error ? err.message : '未知错误';
+                  const message = toErrorMessage(err, '未知错误');
                   useAppStore.getState().showToast('切换模型失败: ' + message, 'error');
                 });
               }}

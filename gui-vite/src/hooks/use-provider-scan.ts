@@ -9,6 +9,7 @@
 
 import { useCallback, useRef, useState } from 'react';
 import { scanProviderModels } from '@/lib/api-client';
+import { toErrorMessage } from '@/lib/errors';
 import type { DiscoveredModelInfo, ProviderProtocol } from '@/lib/types';
 
 export interface ProviderScanState {
@@ -68,7 +69,7 @@ export function useProviderScan(getKnownNames: (providerIndex: number) => Set<st
           };
         });
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : '扫描请求失败';
+        const msg = toErrorMessage(err, '扫描请求失败');
         setScanState((prev) => ({
           ...prev,
           [pi]: { ...(prev[pi] ?? EMPTY_SCAN), scanning: false, error: msg },

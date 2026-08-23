@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { FolderTree, FolderOpen, GitCompareArrows, PanelLeft, PanelLeftClose } from 'lucide-react';
 import { createTwoFilesPatch } from 'diff';
 import { isConflict, fetchWorkspaceApplyPatch, updateSessionWorkspace } from '@/lib/api-client';
+import { toErrorMessage } from '@/lib/errors';
 import { useAppStore } from '@/lib/store';
 import WorkspaceTree from './WorkspaceTree';
 import WorkspacePicker from './WorkspacePicker';
@@ -78,7 +79,7 @@ export default function WorkspacePanel() {
       setPickerOpen(false);
       setReloadKey((k) => k + 1);
     } catch (err: unknown) {
-      setWorkspaceError(err instanceof Error ? err.message : '保存工作目录失败');
+      setWorkspaceError(toErrorMessage(err, '保存工作目录失败'));
     } finally {
       setPickerSaving(false);
     }

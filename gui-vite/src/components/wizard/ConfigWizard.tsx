@@ -13,6 +13,7 @@ import {
 import { useAppStore } from '@/lib/store';
 import { apiPut } from '@/lib/api-client';
 import { toBackendConfig, emptyConfigState } from '@/lib/config-transform';
+import { toErrorMessage } from '@/lib/errors';
 import type { ConfigState, ModelCapability } from '@/lib/types';
 
 import type { WizardData } from './steps/wizard.types';
@@ -172,7 +173,7 @@ export default function ConfigWizard() {
       showToast('配置完成！正在启动天演...', 'success');
       setConfigured(true);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '配置保存失败';
+      const msg = toErrorMessage(err, '配置保存失败');
       showToast(`配置保存失败: ${msg}`, 'error');
       setSubmitting(false);
     }

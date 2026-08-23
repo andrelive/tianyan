@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AlertCircle, GitCompareArrows, Loader2, PanelRightClose } from 'lucide-react';
 import { fetchWorkspaceDiff, fetchWorkspaceDiffList } from '@/lib/api-client';
+import { toErrorMessage } from '@/lib/errors';
 import type { WorkspaceDiffListResponse, WorkspaceDiffResponse } from '@/lib/types';
 import { useAppStore } from '@/lib/store';
 
@@ -73,7 +74,7 @@ export default function DiffPanel({ filePath, onClose }: DiffPanelProps) {
       setDiff(res);
     } catch (err: unknown) {
       setDiff(null);
-      setError(err instanceof Error ? err.message : '加载 diff 失败');
+      setError(toErrorMessage(err, '加载 diff 失败'));
     } finally {
       setLoading(false);
     }
@@ -111,7 +112,7 @@ export default function DiffPanel({ filePath, onClose }: DiffPanelProps) {
       setDiffList(res);
     } catch (err: unknown) {
       setDiffList(null);
-      setError(err instanceof Error ? err.message : '加载整体 diff 失败');
+      setError(toErrorMessage(err, '加载整体 diff 失败'));
     } finally {
       setLoading(false);
     }

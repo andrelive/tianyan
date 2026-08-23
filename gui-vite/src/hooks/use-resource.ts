@@ -11,6 +11,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type DependencyList } from 'react';
+import { toErrorMessage } from '@/lib/errors';
 
 export interface UseResourceOptions {
   /** 错误兜底文案（error 非 Error 实例时）。 */
@@ -63,7 +64,7 @@ export function useResource<T>(
         },
         (err: unknown) => {
           if (!cancelled) {
-            setError(err instanceof Error ? err.message : fallbackRef.current);
+            setError(toErrorMessage(err, fallbackRef.current));
           }
         },
       )

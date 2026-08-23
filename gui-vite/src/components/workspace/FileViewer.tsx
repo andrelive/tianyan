@@ -31,6 +31,7 @@ import {
   Save,
 } from 'lucide-react';
 import { fetchWorkspaceRead } from '@/lib/api-client';
+import { toErrorMessage } from '@/lib/errors';
 import type { WorkspaceReadResponse } from '@/lib/types';
 import { languageForPath } from './fileLanguage';
 
@@ -129,7 +130,7 @@ export default function FileViewer({
           setNextOffset(computeNextOffset(res));
         }
       } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : '加载失败');
+        setError(toErrorMessage(err, '加载失败'));
       } finally {
         setLoading(false);
       }
@@ -164,7 +165,7 @@ export default function FileViewer({
         setNextOffset(computeNextOffset(res));
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '加载失败');
+      setError(toErrorMessage(err, '加载失败'));
     } finally {
       setLoadMoreLoading(false);
     }
@@ -198,7 +199,7 @@ export default function FileViewer({
       setDirty(false);
       setEditing(true);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '加载完整内容失败');
+      setError(toErrorMessage(err, '加载完整内容失败'));
     } finally {
       setEditLoading(false);
     }

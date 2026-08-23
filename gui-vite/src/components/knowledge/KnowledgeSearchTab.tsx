@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
+import { toErrorMessage } from '@/lib/errors';
 import { apiGet, fetchKnowledgeSuggestions } from '@/lib/api-client';
 import type { KnowledgeSearchResult, KnowledgeSearchResponse } from '@/lib/types';
 import { Search, Loader2, AlertCircle, ChevronDown, ChevronUp, BookOpen } from 'lucide-react';
@@ -60,7 +61,7 @@ export default function KnowledgeSearchTab() {
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setSearchError(err instanceof Error ? err.message : '搜索失败');
+          setSearchError(toErrorMessage(err, '搜索失败'));
           setSearchResults([]);
         }
       })

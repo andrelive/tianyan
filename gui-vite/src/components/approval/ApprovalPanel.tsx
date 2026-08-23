@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { usePolling } from '@/hooks/use-polling';
+import { toErrorMessage } from '@/lib/errors';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';
 import { fetchApprovalStatus, respondApproval } from '@/lib/api-client';
 import { formatDateTime } from '@/lib/utils';
@@ -89,7 +90,7 @@ export default function ApprovalPanel() {
       setSnapshot(res);
       setError(null);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '加载审批状态失败');
+      setError(toErrorMessage(err, '加载审批状态失败'));
     }
   }, []);
   const { loading, refresh } = usePolling(pollStatus, 2000);
@@ -102,7 +103,7 @@ export default function ApprovalPanel() {
         await refresh();
         setEditingId(null);
       } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : '响应审批失败');
+        setError(toErrorMessage(err, '响应审批失败'));
       } finally {
         setRespondingId(null);
       }
