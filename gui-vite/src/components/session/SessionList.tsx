@@ -2,8 +2,8 @@ import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useResource } from '@/hooks/use-resource';
 import { useAppStore } from '@/lib/store';
-import { apiGet, apiDelete, updateSessionTitle } from '@/lib/api-client';
-import type { Session, ListSessionsResponse, SessionMessagesResponse } from '@/lib/types';
+import { apiGet, deleteSession, fetchSessionMessages, updateSessionTitle } from '@/lib/api-client';
+import type { Session, ListSessionsResponse } from '@/lib/types';
 import { formatRelativeTime } from '@/lib/utils';
 import {
   ChevronDown,
@@ -149,7 +149,7 @@ export default function SessionList() {
       // 本地已有缓存（流式累积/之前看过）→ 直接显示；无缓存才拉历史
       if (useAppStore.getState().hasSessionMessages(session.id)) return;
       try {
-        const data = await apiGet<SessionMessagesResponse>(`/sessions/${session.id}/messages`);
+        const data = await fetchSessionMessages(session.id);
         setMessages(data.messages);
       } catch {
         showToast('加载会话消息失败', 'error');
@@ -184,7 +184,7 @@ export default function SessionList() {
   const handleDeleteSession = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     try {
-      await apiDelete(`/sessions/${id}`);
+      await deleteSession(id);
       useAppStore.getState().removeSession(id);
     } catch {
       showToast('删除会话失败', 'error');

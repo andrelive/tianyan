@@ -2,10 +2,10 @@ import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
 import {
-  apiGet,
   compressSession,
   deleteSessionMessage,
   fetchApprovalStatus,
+  fetchSessionMessages,
   getApiBase,
   redoSessionMessage,
   respondApproval,
@@ -13,12 +13,11 @@ import {
 import { ShieldAlert, Check, X } from 'lucide-react';
 import type { ApprovalDecision, ApprovalStatusSnapshot } from '@/lib/types';
 import { useChatStream } from '@/hooks/useChatStream';
-import { consumeSseStream, createChatStreamReducer } from '@/lib/chat-stream';
 import { MessageSquare, Loader2, Undo2 } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
-import type { ChatMessage, StreamUsage } from '@/lib/types';
+import type { StreamUsage } from '@/lib/types';
 import { PENDING_SESSION_KEY } from '@/lib/store';
 
 export default function ChatPanel() {
@@ -40,7 +39,6 @@ export default function ChatPanel() {
   const setPendingClarification = useAppStore((s) => s.setPendingClarification);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [submittingClarify, setSubmittingClarify] = useState(false);
   const [compressing, setCompressing] = useState(false);
   const [wakePolling, setWakePolling] = useState(false);
   /** 当前会话待审批操作（应用层授权卡片；wait_for_approval 模式挂起时出现） */
@@ -120,7 +118,7 @@ export default function ChatPanel() {
       // 本地已有缓存（流式累积/之前看过）→ 直接显示，不重复拉历史
       if (useAppStore.getState().hasSessionMessages(sessionId)) return;
       try {
-        const data = await apiGet<{ messages: ChatMessage[] }>(`/sessions/${sessionId}/messages`);
+        const data = await fetchSessionMessages(sessionId);
         if (activeUrlSessionRef.current === sessionId) {
           useAppStore.getState().setMessages(data.messages);
         }
@@ -141,9 +139,7 @@ export default function ChatPanel() {
     setWakePolling(true);
     const timer = setInterval(async () => {
       try {
-        const data = await apiGet<{ messages: ChatMessage[] }>(
-          `/sessions/${currentSessionId}/messages`,
-        );
+        const data = await fetchSessionMessages(currentSessionId);
         const serverMessages = data.messages;
         const lastServer = serverMessages[serverMessages.length - 1];
         // 唤醒轮结果（非空 assistant）出现 → 刷新并停止轮询
@@ -221,6 +217,26 @@ export default function ChatPanel() {
       }
     }
   }, [messages, pendingClarification]);
+
+  // 追问流与主对话流共用同一 hook 生命周期（fetch + 唯一 SSE 解析器 +
+  // 事件归约器）；协议事件 → store 动作的唯一定义点在 lib/chat-stream
+  const clarifyStream = useChatStream({
+    streamUrl: `${getApiBase()}/chat/clarify/stream`,
+    errorFallbackText: '追问回答失败',
+    onComplete: () => {
+      // 流正常结束：追问气泡消失
+      useAppStore.getState().setPendingClarification(null);
+    },
+    onError: (sessionId, error) => {
+      // 失败：移除空占位 + 服务端消息同步（本地消息 id 为 uuid，回退需
+      // 服务端 msg_xxx 定位键）
+      useAppStore.getState().removeEmptyAssistantMessage();
+      useAppStore
+        .getState()
+        .showToast(`追问回答失败: ${error.message}`, 'error');
+      if (sessionId) void reloadSession(sessionId);
+    },
+  });
 
   // ─── Custom streaming via fetch + ReadableStream ─────────────────
 
@@ -358,7 +374,7 @@ export default function ChatPanel() {
   // 按目标会话更新缓存：流归属会话非当前会话时也只写对应字典，不污染当前投影。
   const reloadSession = useCallback(async (sessionId: string) => {
     try {
-      const data = await apiGet<{ messages: ChatMessage[] }>(`/sessions/${sessionId}/messages`);
+      const data = await fetchSessionMessages(sessionId);
       useAppStore.getState().setSessionMessages(sessionId, data.messages);
     } catch {
       useAppStore.getState().setSessionMessages(sessionId, []);
@@ -367,9 +383,10 @@ export default function ChatPanel() {
 
   // 提交对 Agent 追问的回答（流式）：确认后思考/工具/输出逐块渲染，
   // 避免整轮等待超过 HTTP 超时（此前非流式路径表现为"按钮转圈后报错"）。
+  // 生命周期交给 clarifyStream hook（fetch/consume/错误语义与主对话流一致）
   const handleClarify = useCallback(
     async (answer: string) => {
-      if (streamStatus === 'streaming' || submittingClarify) return;
+      if (streamStatus === 'streaming' || clarifyStream.isStreaming) return;
       const state = useAppStore.getState();
       const sessionId = state.currentSessionId;
       if (!sessionId) {
@@ -387,33 +404,9 @@ export default function ChatPanel() {
         content: '',
         timestamp: new Date().toISOString(),
       });
-      setSubmittingClarify(true);
-      try {
-        const response = await fetch(`${getApiBase()}/chat/clarify/stream`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: sessionId, answer }),
-        });
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        // 追问流与主对话流共用同一解析器 + 事件归约器
-        // （协议事件 → store 动作的唯一定义点在 lib/chat-stream）
-        const reducer = createChatStreamReducer({ errorFallbackText: '追问回答失败' });
-        await consumeSseStream(response, (event) => reducer.handleEvent(event));
-        // 流正常结束：追问气泡消失
-        useAppStore.getState().setPendingClarification(null);
-      } catch (err) {
-        useAppStore.getState().removeEmptyAssistantMessage();
-        useAppStore
-          .getState()
-          .showToast(`追问回答失败: ${err instanceof Error ? err.message : '未知错误'}`, 'error');
-        await reloadSession(sessionId);
-      } finally {
-        setSubmittingClarify(false);
-      }
+      await clarifyStream.startStream({ session_id: sessionId, answer });
     },
-    [streamStatus, submittingClarify, addMessage, reloadSession],
+    [streamStatus, addMessage, clarifyStream],
   );
 
   const handleStop = useCallback(() => {
@@ -509,7 +502,7 @@ export default function ChatPanel() {
           <div className="flex justify-end">
             <ClarificationBubble
               question={pendingClarification}
-              submitting={submittingClarify}
+              submitting={clarifyStream.isStreaming}
               onSubmit={handleClarify}
             />
           </div>

@@ -1,5 +1,4 @@
 import { useCallback, useRef, useState } from 'react';
-import type { ChatRequest } from '@/lib/types';
 import { consumeSseStream, createChatStreamReducer } from '@/lib/chat-stream';
 import { fetchWithSignal } from '@/lib/fetch-with-signal';
 
@@ -21,7 +20,8 @@ interface UseChatStreamOptions {
  *
  * 协议事件 → store 的归约逻辑不在本 hook——由 `lib/chat-stream` 的
  * `createChatStreamReducer` 承担（主对话流与追问流共用同一归约）。
- * 返回 start/stop 控制与 isStreaming 状态。
+ * 返回 start/stop 控制与 isStreaming 状态。主对话流与追问流各持一个实例，
+ * 生命周期（fetch/consume/错误语义）只在 hook 内实现一次。
  */
 export function useChatStream(options: UseChatStreamOptions) {
   const { streamUrl, errorFallbackText, onUsageWindow, onError, onComplete } = options;
@@ -29,7 +29,9 @@ export function useChatStream(options: UseChatStreamOptions) {
   const [isStreaming, setIsStreaming] = useState(false);
 
   const startStream = useCallback(
-    async (body: ChatRequest) => {
+    // body 为端点私有形状（主对话 ChatRequest / 追问 {session_id, answer}）——
+    // hook 只负责 JSON 序列化与流消费，不关心载荷结构
+    async (body: object) => {
       const reducer = createChatStreamReducer({ errorFallbackText });
       const controller = new AbortController();
       abortRef.current = controller;

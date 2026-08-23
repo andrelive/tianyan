@@ -211,6 +211,17 @@ export async function deleteRole(name: string): Promise<RoleActionResponse> {
 
 // ========== Session messages ==========
 
+/** 获取会话全部消息（历史加载；与流式边界事件同构——均携带 segments 时间线）。
+ * 前端展示列表经合并/过滤后索引与服务端错位，历史加载按服务端权威结构覆盖本地。 */
+export async function fetchSessionMessages(sessionId: string): Promise<SessionMessagesResponse> {
+  return apiGet<SessionMessagesResponse>(`/sessions/${encodeURIComponent(sessionId)}/messages`);
+}
+
+/** 删除会话（级联删除消息与工作区绑定）。 */
+export async function deleteSession(sessionId: string): Promise<void> {
+  return apiDelete<void>(`/sessions/${encodeURIComponent(sessionId)}`);
+}
+
 export interface DeleteMessageRequest {
   message_id: string;
 }
