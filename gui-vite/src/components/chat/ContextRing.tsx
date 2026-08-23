@@ -8,9 +8,10 @@ const CIRCUMFERENCE = 2 * Math.PI * R;
 
 /** 上下文占用阈值配色（对齐 DSH ContextMeter：临界 80% 红 / 高 50% 琥珀 / 正常绿） */
 function ringColor(pct: number): string {
-  if (pct >= 80) return '#ef4444';
-  if (pct >= 50) return '#f59e0b';
-  return '#22c55e';
+  // 引用主题变量（--color-error/warning/success），不再硬编码 hex
+  if (pct >= 80) return 'var(--color-error)';
+  if (pct >= 50) return 'var(--color-warning)';
+  return 'var(--color-success)';
 }
 
 function fmt(n: number): string {

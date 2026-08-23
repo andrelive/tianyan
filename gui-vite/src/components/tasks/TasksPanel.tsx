@@ -1,4 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useCallback } from 'react';
+import { usePolling } from '@/hooks/use-polling';
+import { Spinner } from '@/components/ui/Spinner';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { fetchTasks, cancelTask } from '@/lib/api-client';
 import type { BackgroundTask, TaskStatus } from '@/lib/types';
 import {
@@ -65,36 +68,19 @@ function truncate(text: string, maxLen = RESULT_MAX_LEN): string {
 
 export default function TasksPanel() {
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
-  const [loading, setLoading] = useState(true);
   // 正在取消的 task_id，用于禁用按钮防重复点击
   const [cancellingId, setCancellingId] = useState<string | null>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const loadTasks = useCallback(async (showLoading = false) => {
-    if (showLoading) setLoading(true);
+  // 挂载后立即加载 + 每 3s 轮询（后台任务状态变化）；轮询失败静默保留旧数据
+  const pollTasks = useCallback(async () => {
     try {
       const data = await fetchTasks();
       setTasks(data);
     } catch {
       // 轮询失败静默保留旧数据，面板不因后端异常崩溃
-    } finally {
-      if (showLoading) setLoading(false);
     }
   }, []);
-
-  // 挂载后立即加载 + 每 3s 轮询（后台任务状态变化），卸载时清理
-  useEffect(() => {
-    void loadTasks(true);
-    pollTimerRef.current = setInterval(() => {
-      void loadTasks(false);
-    }, POLL_INTERVAL_MS);
-    return () => {
-      if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
-    };
-  }, [loadTasks]);
+  const { loading, refresh } = usePolling(pollTasks, POLL_INTERVAL_MS);
 
   const handleCancel = useCallback(
     async (taskId: string) => {
@@ -102,14 +88,14 @@ export default function TasksPanel() {
       try {
         await cancelTask(taskId);
         // 取消后立即刷新列表
-        await loadTasks(false);
+        await refresh();
       } catch {
         // 取消失败（如任务已结束）：保留旧数据，下次轮询自然更新
       } finally {
         setCancellingId(null);
       }
     },
-    [loadTasks],
+    [refresh],
   );
 
   return (
@@ -118,7 +104,7 @@ export default function TasksPanel() {
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border)]">
         <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">任务</h2>
         <button
-          onClick={() => void loadTasks(true)}
+          onClick={() => void refresh(true)}
           disabled={loading}
           className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
         >
@@ -129,18 +115,9 @@ export default function TasksPanel() {
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-6">
-        {loading && (
-          <div className="flex items-center justify-center py-16">
-            <Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" />
-          </div>
-        )}
+        {loading && <Spinner />}
 
-        {!loading && tasks.length === 0 && (
-          <div className="flex flex-col items-center justify-center py-16 text-[var(--color-text-tertiary)]">
-            <ListTodo size={40} className="mb-3 opacity-40" />
-            <p className="text-sm">暂无任务</p>
-          </div>
-        )}
+        {!loading && tasks.length === 0 && <EmptyState icon={ListTodo} title="暂无任务" />}
 
         {!loading && tasks.length > 0 && (
           <div className="space-y-2">

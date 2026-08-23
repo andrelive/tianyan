@@ -1,16 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useCallback } from 'react';
+import { usePolling } from '@/hooks/use-polling';
+import { ErrorBanner } from '@/components/ui/ErrorBanner';
 import { fetchApprovalStatus, respondApproval } from '@/lib/api-client';
 import type { ApprovalDecision, ApprovalStatusSnapshot } from '@/lib/types';
-import {
-  Loader2,
-  AlertCircle,
-  ShieldCheck,
-  RefreshCw,
-  Check,
-  X,
-  ShieldAlert,
-  Pencil,
-} from 'lucide-react';
+import { Loader2, ShieldCheck, RefreshCw, Check, X, ShieldAlert, Pencil } from 'lucide-react';
 
 /** 风险等级 → 中文标签。 */
 const RISK_LABELS: Record<string, string> = {
@@ -86,49 +79,33 @@ function extractCommand(action: unknown): string | null {
 
 export default function ApprovalPanel() {
   const [snapshot, setSnapshot] = useState<ApprovalStatusSnapshot | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // 正在响应的 request_id，用于禁用按钮防重复点击
+  // 正在响应的请求_id，用于禁用按钮防重复点击
   const [respondingId, setRespondingId] = useState<string | null>(null);
   // 正在内联编辑命令的 request_id（null = 未在编辑）
   const [editingId, setEditingId] = useState<string | null>(null);
   // 内联编辑草稿
   const [editText, setEditText] = useState('');
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const loadStatus = useCallback(async (showLoading = false) => {
-    if (showLoading) setLoading(true);
-    setError(null);
+  // 挂载后立即加载 + 每 2s 轮询（审批需及时出现）；失败显错（与任务面板
+  // 的静默策略不同——审批超时会影响安全性，错误需要可见 + 可重试）
+  const pollStatus = useCallback(async () => {
     try {
       const res = await fetchApprovalStatus();
       setSnapshot(res);
+      setError(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '加载审批状态失败');
-    } finally {
-      if (showLoading) setLoading(false);
     }
   }, []);
-
-  // 挂载后立即加载 + 每 2s 轮询（审批需及时出现），卸载时清理
-  useEffect(() => {
-    void loadStatus(true);
-    pollTimerRef.current = setInterval(() => {
-      void loadStatus(false);
-    }, 2000);
-    return () => {
-      if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
-    };
-  }, [loadStatus]);
+  const { loading, refresh } = usePolling(pollStatus, 2000);
 
   const handleRespond = useCallback(
     async (requestId: string, decision: ApprovalDecision, editedCommand?: string) => {
       setRespondingId(requestId);
       try {
         await respondApproval(requestId, decision, undefined, editedCommand);
-        await loadStatus(false);
+        await refresh();
         setEditingId(null);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : '响应审批失败');
@@ -136,7 +113,7 @@ export default function ApprovalPanel() {
         setRespondingId(null);
       }
     },
-    [loadStatus],
+    [refresh],
   );
 
   // 开始内联编辑：预填原命令
@@ -156,7 +133,7 @@ export default function ApprovalPanel() {
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border)]">
         <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">审批</h2>
         <button
-          onClick={() => void loadStatus(true)}
+          onClick={() => void refresh(true)}
           disabled={loading}
           className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
         >
@@ -167,23 +144,7 @@ export default function ApprovalPanel() {
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
-        {error && (
-          <div
-            role="alert"
-            className="flex items-center justify-between gap-3 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
-          >
-            <span className="flex items-center gap-2">
-              <AlertCircle size={16} className="shrink-0" />
-              <span>{error}</span>
-            </span>
-            <button
-              onClick={() => void loadStatus(true)}
-              className="shrink-0 px-2 py-1 text-xs rounded border border-red-300 dark:border-red-700 hover:bg-red-100 dark:hover:bg-red-900/40"
-            >
-              重试
-            </button>
-          </div>
-        )}
+        {error && <ErrorBanner message={error} onRetry={() => void refresh(true)} />}
 
         {!error && loading && (
           <div className="flex items-center justify-center py-16">

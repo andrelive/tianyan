@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useResource } from '@/hooks/use-resource';
 import { useAppStore } from '@/lib/store';
 import { apiGet, apiDelete, updateSessionTitle } from '@/lib/api-client';
 import type { Session, ListSessionsResponse, SessionMessagesResponse } from '@/lib/types';
@@ -33,7 +34,6 @@ function groupLabel(workdir: string): string {
 export default function SessionList() {
   const navigate = useNavigate();
   const sessions = useAppStore((s) => s.sessions);
-  const setSessions = useAppStore((s) => s.setSessions);
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
   const clearMessages = useAppStore((s) => s.clearMessages);
@@ -54,13 +54,13 @@ export default function SessionList() {
   const sessionListRef = useRef<HTMLDivElement>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    apiGet<ListSessionsResponse>('/sessions')
-      .then((data) => setSessions(data.sessions))
-      .catch(() => {
-        /* sessions optional for now */
-      });
-  }, [setSessions]);
+  // 会话列表加载：隐藏在本组件内（useResource 收敛加载/竞态）；
+  // 数据写入 store（sessions 分组渲染的真相源）
+  const { reload: reloadSessions } = useResource(async () => {
+    const data = await apiGet<ListSessionsResponse>('/sessions');
+    useAppStore.getState().setSessions(data.sessions);
+    return data;
+  }, []);
 
   // 新会话创建完成（currentSessionId 从 null → 非 null）后刷新列表：
   // 让刚创建的真实会话条目出现在对应分组下（占位条目随之消失）
@@ -69,14 +69,10 @@ export default function SessionList() {
     if (currentSessionId && currentSessionId !== prevSessionId.current) {
       // 会话已创建/选中：新会话占位消失 + 刷新列表（真实条目出现）
       setNewChatStarted(false);
-      apiGet<ListSessionsResponse>('/sessions')
-        .then((data) => setSessions(data.sessions))
-        .catch(() => {
-          /* refresh best-effort */
-        });
+      void reloadSessions();
     }
     prevSessionId.current = currentSessionId;
-  }, [currentSessionId, setSessions]);
+  }, [currentSessionId, reloadSessions]);
 
   // 进入编辑模式时聚焦输入框
   useEffect(() => {

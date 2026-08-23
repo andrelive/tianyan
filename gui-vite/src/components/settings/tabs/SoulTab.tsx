@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { useResource } from '@/hooks/use-resource';
 import { Save, RotateCcw, Loader2, AlertCircle } from 'lucide-react';
 import { fetchSoulContent, updateSoulContent, fetchDefaultSoul } from '@/lib/api-client';
 import { useAppStore } from '@/lib/store';
@@ -7,32 +8,19 @@ export default function SoulTab() {
   const showToast = useAppStore((s) => s.showToast);
 
   const [content, setContent] = useState('');
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 初始加载：只写一次 content（此后文本由用户编辑；handleRestore 另行覆盖）
+  const {
+    data: loaded,
+    loading,
+    error: loadError,
+  } = useResource(() => fetchSoulContent(), [], { errorFallback: '加载失败' });
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    fetchSoulContent()
-      .then((res) => {
-        if (!cancelled) {
-          setContent(res.content);
-          setLoading(false);
-        }
-      })
-      .catch((err: Error) => {
-        if (!cancelled) {
-          setError(err.message || '加载失败');
-          setLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (loaded) setContent(loaded.content);
+  }, [loaded]);
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -102,13 +90,13 @@ export default function SoulTab() {
         aria-label="智能体人格内容"
       />
 
-      {error && (
+      {(error || loadError) && (
         <div
           role="alert"
           className="mt-3 flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
         >
           <AlertCircle size={16} />
-          <span>{error}</span>
+          <span>{error ?? loadError}</span>
         </div>
       )}
 

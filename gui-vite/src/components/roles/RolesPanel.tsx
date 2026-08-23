@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
+import { useResource } from '@/hooks/use-resource';
 import { AlertCircle, Bot, ChevronRight, Loader2, RotateCcw, Trash2, Users } from 'lucide-react';
 import { apiDelete, apiPost, getRoleDetail, getRoles, getRolesStats } from '@/lib/api-client';
-import type { RoleDetail, RoleSummary, RolesStatsResponse } from '@/lib/types';
+import type { RoleDetail } from '@/lib/types';
 
 const TYPE_LABEL: Record<string, string> = {
   delegation: '委托',
@@ -39,47 +40,26 @@ function formatTime(ts?: number): string {
  * 学习演化三源平级），含 durable 角色会话信息；支持回退内置种子与退役删除。
  */
 export default function RolesPanel() {
-  const [roles, setRoles] = useState<RoleSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [detail, setDetail] = useState<RoleDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
-  const [stats, setStats] = useState<RolesStatsResponse | null>(null);
+
+  // 角色列表 + 使用统计（useResource：加载/错误/reload 收敛）
+  const {
+    data: rolesData,
+    loading,
+    error,
+    reload: reloadRoles,
+  } = useResource(() => getRoles(), [], { errorFallback: '加载角色失败' });
+  const roles = rolesData?.roles ?? [];
+  const { data: stats, reload: reloadStats } = useResource(() => getRolesStats(), [], {
+    errorFallback: '加载角色统计失败',
+  });
 
   const selectedRole = roles.find((r) => r.name === selectedName);
-
-  // 加载角色列表
-  const loadRoles = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await getRoles();
-      setRoles(res.roles);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '加载角色失败');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const loadStats = useCallback(async () => {
-    try {
-      const s = await getRolesStats();
-      setStats(s);
-    } catch {
-      // 统计加载失败不阻塞面板
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadRoles();
-    void loadStats();
-  }, [loadRoles, loadStats]);
 
   // 选中角色 → 加载详情
   const loadDetail = useCallback(async (name: string) => {
@@ -106,8 +86,8 @@ export default function RolesPanel() {
     try {
       await apiPost(`/roles/${encodeURIComponent(selectedName)}/reset`, {});
       setActionMessage('已回退内置种子（下次会话边界生效）');
-      void loadRoles();
-      void loadStats();
+      void reloadRoles();
+      void reloadStats();
       await loadDetail(selectedName);
     } catch (err) {
       setActionMessage(err instanceof Error ? `操作失败：${err.message}` : '操作失败');
@@ -127,8 +107,8 @@ export default function RolesPanel() {
       setActionMessage('角色已退役删除');
       setSelectedName(null);
       setDetail(null);
-      void loadRoles();
-      void loadStats();
+      void reloadRoles();
+      void reloadStats();
     } catch (err) {
       setActionMessage(err instanceof Error ? `操作失败：${err.message}` : '操作失败');
     } finally {

@@ -13,11 +13,12 @@ import {
 import { ShieldAlert, Check, X } from 'lucide-react';
 import type { ApprovalDecision, ApprovalStatusSnapshot } from '@/lib/types';
 import { useChatStream } from '@/hooks/useChatStream';
+import { consumeSseStream, createChatStreamReducer } from '@/lib/chat-stream';
 import { MessageSquare, Loader2, Undo2 } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
-import type { ChatMessage, ChatStreamEvent, StreamUsage } from '@/lib/types';
+import type { ChatMessage, StreamUsage } from '@/lib/types';
 import { PENDING_SESSION_KEY } from '@/lib/store';
 
 export default function ChatPanel() {
@@ -52,9 +53,6 @@ export default function ChatPanel() {
   /** 最近一次流式完成 chunk 携带的真实窗口（会话流式时的权威值；
       历史会话回退到 chatModels[selectedModel].context_length）。 */
   const liveWindowRef = useRef(0);
-  /** 当前在途流的归属会话（首个 chunk 到达时记录；onComplete/onError 按此
-      会话清除流式状态——UI 可能已切走，不能用 currentSessionId 闭包值）。 */
-  const streamSessionRef = useRef<string | null>(null);
 
   /** 当前会话自己的上下文占用：取本会话最后一条带 usage 的消息（消息级独立计算，
       切换会话随 messages 变化——每个会话显示各自的占用，不再串值）。 */
@@ -226,104 +224,28 @@ export default function ChatPanel() {
 
   // ─── Custom streaming via fetch + ReadableStream ─────────────────
 
+  // 流式事件归约在 lib/chat-stream（唯一解析器 + 协议→store 归约器）；
+  // 本组件只提供流生命周期回调（错误重载、完成复位、usage 窗口记录）。
   const { startStream, stopStream } = useChatStream({
     streamUrl: `${getApiBase()}/chat/stream`,
-    onChunk: (event) => {
-      // 流归属会话：消息按 session_id 写入各自缓存——切走会话流继续跑，
-      // 切回直接显示累积内容（含思考/工具/结果全过程）
-      const sid = event.session_id || null;
-      if (sid) {
-        streamSessionRef.current = sid;
-        useAppStore.getState().setCurrentSession(sid);
-      }
-      // Server-side error (validation / processing failure): surface to user
-      if (event.chunk_type === 'error') {
-        useAppStore.getState().removeEmptyAssistantMessage();
-        useAppStore.getState().setStreamStatus('idle');
-        useAppStore.getState().showToast(event.delta || '对话处理失败', 'error');
-        return;
-      }
-      // Clarification: 不追加 delta，改为展示追问气泡等待用户回答
-      if (event.chunk_type === 'clarification') {
-        useAppStore.getState().removeEmptyAssistantMessage(sid);
-        useAppStore.getState().setPendingClarification(event.delta);
-        return;
-      }
-      // 消息边界（统一结构）：流开始/结束携带完整 ChatMessage——本地消息
-      // id/内容直接来自服务端结构（与历史加载同构），回退定位键天然正确
-      if (event.message) {
-        useAppStore.getState().applyServerMessage(sid, event.message);
-      }
-      // Append content delta to the last assistant message（按流归属会话）
-      if (event.delta) {
-        useAppStore.getState().updateLastMessage(event.delta, sid);
-      }
-      // 思考增量（Thought chunk）单独累积到 thinking 字段（与正文分开渲染）。
-      // 轮次边界：新一轮思考到达且上一轮已产出内容（正文/工具调用）时，
-      // 新开一条 assistant 消息——与历史加载“一轮一条消息”的渲染一致。
-      // 轮次判断读流归属会话的消息（切走后仍正确）。
-      if (event.thinking) {
-        const st = useAppStore.getState();
-        const msgs = sid ? (st.sessionMessages[sid] ?? []) : st.messages;
-        const last = msgs[msgs.length - 1];
-        const hasPrevTurn =
-          last?.role === 'assistant' &&
-          (last.content !== '' || (last.tool_calls && last.tool_calls.length > 0));
-        if (hasPrevTurn) st.startNewAssistantTurn(sid);
-        useAppStore.getState().appendThinking(event.thinking, sid);
-      }
-      // Attach skill calls to the streaming session message
-      if (event.skill_calls && event.skill_calls.length > 0) {
-        useAppStore.getState().appendSkillCalls(event.skill_calls, sid);
-      }
-      // A2：结构化工具调用事件 → tool card 渲染（含展示意图）
-      if (event.tool_call) {
-        useAppStore.getState().appendToolCalls([event.tool_call], sid);
-      }
-      // 完成 chunk 携带 token 用量 → 附加到流归属会话的 assistant 消息
-      // （按会话独立取数，切换会话显示各自占用）；同时记录真实窗口
-      if (event.usage) {
-        liveWindowRef.current = event.usage.context_window;
-        const { prompt_tokens, completion_tokens, total_tokens, cache_read, cache_write } =
-          event.usage;
-        useAppStore.getState().attachLastMessageUsage(
-          {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens,
-            cache_read,
-            cache_write,
-          },
-          sid,
-        );
-      }
-      // 输出达到 token 上限（finish_reason === 'length'）：标记消息为截断，
-      // 在助手消息下方渲染提示；'stop'/'tool_calls' 等不处理
-      if (event.finish_reason === 'length') {
-        useAppStore.getState().markLastMessageTruncated(sid);
-      }
-      // 流式中断（finish_reason === 'interrupted'）：网络/服务中断保留部分输出
-      // ——提示用户，但不误报为 token 上限截断
-      if (event.finish_reason === 'interrupted') {
-        useAppStore.getState().showToast('流式中断，已保留部分输出', 'error');
-      }
+    onUsageWindow: (windowTokens) => {
+      liveWindowRef.current = windowTokens;
     },
-    onError: (error) => {
+    onError: (sessionId, error) => {
       // 流结束按归属会话置 idle（UI 可能已切走，不能用 currentSessionId 闭包值）
-      useAppStore.getState().setStreamStatus('idle', streamSessionRef.current);
+      useAppStore.getState().setStreamStatus('idle', sessionId);
       useAppStore.getState().showToast(`发送失败: ${error.message}`, 'error');
       // 同步服务端消息（本地消息 id 为 uuid，回退需服务端 msg_xxx 定位键；
       // 顺带清理失败残留的空 assistant 占位）
-      if (streamSessionRef.current) reloadSession(streamSessionRef.current);
+      if (sessionId) reloadSession(sessionId);
     },
-    onComplete: () => {
-      useAppStore.getState().setStreamStatus('idle', streamSessionRef.current);
-      // 用户消息 id 已随流事件同步（user_message_id）；无需 reload 覆盖本地
+    onComplete: (sessionId) => {
+      useAppStore.getState().setStreamStatus('idle', sessionId);
     },
   });
 
-  // 切走会话/界面后流继续在后台跑（fetch 循环持有闭包，回调按 session_id
-  // 写入各自会话缓存）——不在此中止流，切回时直接显示累积内容。
+  // 切走会话/界面后流继续在后台跑（fetch 循环持有归约器闭包，事件按
+  // session_id 写入各自会话缓存）——不在此中止流，切回时直接显示累积内容。
 
   // ─── Handlers ───────────────────────────────────────────────────
 
@@ -475,52 +397,10 @@ export default function ChatPanel() {
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error('Response body is not readable');
-
-        const decoder = new TextDecoder();
-        let buffer = '';
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || !trimmed.startsWith('data: ')) continue;
-            const data = trimmed.slice(6).trim();
-            if (data === '[DONE]') continue;
-            try {
-              const event = JSON.parse(data) as ChatStreamEvent;
-              // 追问流同样按 session_id 归属写入（与主对话流一致）
-              const sid = event.session_id || null;
-              // 消息边界（统一结构）：追问回答/回复的完整 ChatMessage 同步
-              if (event.message) {
-                useAppStore.getState().applyServerMessage(sid, event.message);
-              }
-              if (event.thinking) useAppStore.getState().appendThinking(event.thinking, sid);
-              if (event.delta) useAppStore.getState().updateLastMessage(event.delta, sid);
-              if (event.tool_call) useAppStore.getState().appendToolCalls([event.tool_call], sid);
-              // 工具结果事件：耗时/成败 + 结果内容（后端已随事件透传）挂到卡片
-              if (event.tool_result) {
-                useAppStore.getState().applyToolResult(event.tool_result, sid);
-              }
-              if (event.skill_calls && event.skill_calls.length > 0) {
-                useAppStore.getState().appendSkillCalls(event.skill_calls, sid);
-              }
-              if (event.finish_reason === 'length') {
-                useAppStore.getState().markLastMessageTruncated(sid);
-              }
-              if (event.chunk_type === 'error') {
-                useAppStore.getState().removeEmptyAssistantMessage(sid);
-                useAppStore.getState().showToast(event.delta || '追问回答失败', 'error');
-              }
-            } catch {
-              /* skip malformed SSE data */
-            }
-          }
-        }
+        // 追问流与主对话流共用同一解析器 + 事件归约器
+        // （协议事件 → store 动作的唯一定义点在 lib/chat-stream）
+        const reducer = createChatStreamReducer({ errorFallbackText: '追问回答失败' });
+        await consumeSseStream(response, (event) => reducer.handleEvent(event));
         // 流正常结束：追问气泡消失
         useAppStore.getState().setPendingClarification(null);
       } catch (err) {
@@ -594,7 +474,7 @@ export default function ChatPanel() {
 
             {/* Loading indicator: streaming started but no content yet.
                 思考已产出内容（message.thinking 非空）时由气泡内指示接管，
-                避免转圈与气泡内“思考中 · N 字”重复。 */}
+                避免转圈与气泡内"思考中 · N 字"重复。 */}
             {streamStatus === 'streaming' &&
               messages.length > 0 &&
               messages[messages.length - 1].role === 'assistant' &&

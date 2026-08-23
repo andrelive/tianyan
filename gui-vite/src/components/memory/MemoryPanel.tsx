@@ -1,7 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { fetchMemories } from '@/lib/api-client';
+import { useResource } from '@/hooks/use-resource';
 import type { MemoryEntry } from '@/lib/types';
-import { Loader2, AlertCircle, MemoryStick, Folder, Star, RefreshCw } from 'lucide-react';
+import { MemoryStick, Folder, Star, RefreshCw } from 'lucide-react';
+import { Spinner } from '@/components/ui/Spinner';
+import { ErrorBanner } from '@/components/ui/ErrorBanner';
 
 /** 按 detail → overview → abstract 三级回退取内容，返回内容与对应层级标签。 */
 function resolveContent(entry: MemoryEntry): { content: string; level: string } | null {
@@ -12,28 +15,16 @@ function resolveContent(entry: MemoryEntry): { content: string; level: string } 
 }
 
 export default function MemoryPanel() {
-  const [memories, setMemories] = useState<MemoryEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<MemoryEntry | null>(null);
+  const { data, loading, error, reload } = useResource(() => fetchMemories(), [], {
+    errorFallback: '加载失败',
+  });
+  const memories = data?.memories ?? [];
 
-  const loadMemories = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetchMemories();
-      setMemories(res.memories);
-      setSelected((prev) => (prev ? (res.memories.find((m) => m.uri === prev.uri) ?? null) : null));
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
+  // 刷新后重定位选中项（按 uri；已消失则清空选择）
   useEffect(() => {
-    loadMemories();
-  }, [loadMemories]);
+    setSelected((prev) => (prev ? (memories.find((m) => m.uri === prev.uri) ?? null) : null));
+  }, [memories]);
 
   const selectedContent = selected ? resolveContent(selected) : null;
 
@@ -43,7 +34,7 @@ export default function MemoryPanel() {
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border)]">
         <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">记忆</h2>
         <button
-          onClick={loadMemories}
+          onClick={() => void reload()}
           disabled={loading}
           className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
         >
@@ -54,21 +45,9 @@ export default function MemoryPanel() {
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-6">
-        {error && (
-          <div
-            role="alert"
-            className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
-          >
-            <AlertCircle size={16} />
-            <span>{error}</span>
-          </div>
-        )}
+        {error && <ErrorBanner message={error} />}
 
-        {!error && loading && (
-          <div className="flex items-center justify-center py-10">
-            <Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" />
-          </div>
-        )}
+        {!error && loading && <Spinner className="py-10" />}
 
         {!error && !loading && (
           <div className="space-y-1">

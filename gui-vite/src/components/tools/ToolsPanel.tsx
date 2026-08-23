@@ -1,7 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { apiGet } from '@/lib/api-client';
 import type { ListToolsResponse, ToolInfo } from '@/lib/types';
-import { Wrench, Loader2, AlertCircle, ChevronRight, Package } from 'lucide-react';
+import { useResource } from '@/hooks/use-resource';
+import { Wrench, ChevronRight, Package } from 'lucide-react';
+import { Spinner } from '@/components/ui/Spinner';
+import { ErrorBanner } from '@/components/ui/ErrorBanner';
+import { EmptyState } from '@/components/ui/EmptyState';
 
 /**
  * 工具面板：展示全部系统工具（与 LLM 收到的 tools 列表同源）。
@@ -10,38 +14,13 @@ import { Wrench, Loader2, AlertCircle, ChevronRight, Package } from 'lucide-reac
  * 技能面板展示 GEPA 学习方法论，工具面板展示可调用的原子操作。
  */
 export default function ToolsPanel() {
-  const [tools, setTools] = useState<ToolInfo[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<ToolInfo | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await apiGet<ListToolsResponse>('/tools');
-        if (!cancelled) {
-          setTools(res.tools);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : '加载工具失败');
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
-    }
-
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { data, loading, error } = useResource<ListToolsResponse>(
+    () => apiGet<ListToolsResponse>('/tools'),
+    [],
+    { errorFallback: '加载工具失败' },
+  );
+  const tools = data?.tools ?? [];
 
   return (
     <div className="flex h-full">
@@ -59,26 +38,11 @@ export default function ToolsPanel() {
 
         <div className="flex-1 overflow-y-auto p-3">
           {loading ? (
-            <div
-              className="flex items-center justify-center py-16"
-              aria-live="polite"
-              aria-label="正在加载工具"
-            >
-              <Loader2 size={24} className="animate-spin text-[var(--color-text-tertiary)]" />
-            </div>
+            <Spinner label="正在加载工具" />
           ) : error ? (
-            <div
-              role="alert"
-              className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
-            >
-              <AlertCircle size={16} />
-              <span>{error}</span>
-            </div>
+            <ErrorBanner message={error} />
           ) : tools.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 text-[var(--color-text-tertiary)]">
-              <Package size={40} className="mb-3 opacity-40" />
-              <p className="text-sm">暂无可用工具</p>
-            </div>
+            <EmptyState icon={Package} title="暂无可用工具" />
           ) : (
             <div className="space-y-1">
               {tools.map((tool) => (

@@ -1,7 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { fetchRetrievalTraces } from '@/lib/api-client';
+import { useResource } from '@/hooks/use-resource';
 import type { RetrievalTrace, RetrievalStepType } from '@/lib/types';
-import { Loader2, AlertCircle, Route, RefreshCw, Clock, Zap, FileText } from 'lucide-react';
+import { Route, RefreshCw, Clock, Zap, FileText } from 'lucide-react';
+import { Spinner } from '@/components/ui/Spinner';
+import { ErrorBanner } from '@/components/ui/ErrorBanner';
 
 const STEP_TYPE_LABELS: Record<RetrievalStepType, string> = {
   intent_analysis: '意图分析',
@@ -25,30 +28,18 @@ function formatTime(ts: string): string {
 }
 
 export default function RetrievalTracesPanel() {
-  const [traces, setTraces] = useState<RetrievalTrace[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<RetrievalTrace | null>(null);
+  const { data, loading, error, reload } = useResource(() => fetchRetrievalTraces(), [], {
+    errorFallback: '加载失败',
+  });
+  const traces = data?.traces ?? [];
 
-  const loadTraces = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetchRetrievalTraces();
-      setTraces(res.traces);
-      setSelected((prev) =>
-        prev ? (res.traces.find((t) => t.timestamp === prev.timestamp) ?? null) : null,
-      );
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
+  // 刷新后重定位选中项（按 timestamp；已消失则清空选择）
   useEffect(() => {
-    loadTraces();
-  }, [loadTraces]);
+    setSelected((prev) =>
+      prev ? (traces.find((t) => t.timestamp === prev.timestamp) ?? null) : null,
+    );
+  }, [traces]);
 
   return (
     <div className="flex flex-col h-full">
@@ -56,7 +47,7 @@ export default function RetrievalTracesPanel() {
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border)]">
         <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">检索轨迹</h2>
         <button
-          onClick={loadTraces}
+          onClick={() => void reload()}
           disabled={loading}
           className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
         >
@@ -70,21 +61,9 @@ export default function RetrievalTracesPanel() {
         {/* Left: trace list */}
         <div className="w-[40%] min-w-[260px] max-w-[360px] flex flex-col border-r border-[var(--color-border)]">
           <div className="flex-1 overflow-y-auto p-3">
-            {error && (
-              <div
-                role="alert"
-                className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
-              >
-                <AlertCircle size={16} />
-                <span>{error}</span>
-              </div>
-            )}
+            {error && <ErrorBanner message={error} />}
 
-            {!error && loading && (
-              <div className="flex items-center justify-center py-16">
-                <Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" />
-              </div>
-            )}
+            {!error && loading && <Spinner />}
 
             {!error && !loading && traces.length === 0 && (
               <div className="flex flex-col items-center justify-center py-16 text-[var(--color-text-tertiary)]">

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
+import { usePolling } from '@/hooks/use-polling';
 import { ClipboardList, X } from 'lucide-react';
 import { fetchClipboardPending, respondClipboard } from '@/lib/api-client';
 import { useAppStore } from '@/lib/store';
@@ -17,44 +18,33 @@ export default function ClipboardConfirmBar() {
   const [submitting, setSubmitting] = useState(false);
   const dismissedRef = useRef<string | null>(null);
 
-  // 轮询待确认捕获（仅在有 pending 时继续；确认/忽略后停止）
-  useEffect(() => {
+  // 有 pending 时快轮询（2s：确认/忽略后停止）；无 pending 时低频探测
+  // （4s：捕获到达后立即显示）。两组轮询互斥启用，消除原实现的重复请求。
+  const pollFast = useCallback(async () => {
     if (!pending) return;
-    const timer = setInterval(async () => {
-      try {
-        const next = await fetchClipboardPending();
-        if (!next || next.id === dismissedRef.current) {
-          if (!next) setPending(null);
-        } else if (next.id !== pending.id) {
-          setPending({ id: next.id, text: next.text });
-        }
-      } catch {
-        // 轮询失败静默（下次重试）
+    try {
+      const next = await fetchClipboardPending();
+      if (!next || next.id === dismissedRef.current) {
+        if (!next) setPending(null);
+      } else if (next.id !== pending.id) {
+        setPending({ id: next.id, text: next.text });
       }
-    }, 2000);
-    return () => clearInterval(timer);
+    } catch {
+      // 轮询失败静默（下次重试）
+    }
   }, [pending]);
-
-  // 初始加载 + 定期探测（无 pending 时低频轮询，捕获到达后立即显示）
-  useEffect(() => {
-    let stopped = false;
-    const poll = async () => {
-      try {
-        const next = await fetchClipboardPending();
-        if (!stopped && next && next.id !== dismissedRef.current) {
-          setPending({ id: next.id, text: next.text });
-        }
-      } catch {
-        // 静默
+  const pollSlow = useCallback(async () => {
+    try {
+      const next = await fetchClipboardPending();
+      if (next && next.id !== dismissedRef.current) {
+        setPending({ id: next.id, text: next.text });
       }
-    };
-    void poll();
-    const timer = setInterval(poll, 4000);
-    return () => {
-      stopped = true;
-      clearInterval(timer);
-    };
+    } catch {
+      // 静默
+    }
   }, []);
+  usePolling(pollFast, 2000, { enabled: !!pending });
+  usePolling(pollSlow, 4000, { enabled: !pending });
 
   const handleAction = async (action: 'remember' | 'knowledge' | 'ignore') => {
     if (submitting) return;

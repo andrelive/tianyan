@@ -1,18 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import {} from 'react';
 import { fetchSchedulerStatus, fetchUsageStats } from '@/lib/api-client';
-import type { SchedulerStatus, SchedulerTaskStatus, UsageStatsSummary } from '@/lib/types';
-import {
-  Loader2,
-  AlertCircle,
-  RefreshCw,
-  Gauge,
-  Wrench,
-  Zap,
-  FileText,
-  Search,
-  Clock,
-  Terminal,
-} from 'lucide-react';
+import { useResource } from '@/hooks/use-resource';
+import { Spinner } from '@/components/ui/Spinner';
+import { ErrorBanner } from '@/components/ui/ErrorBanner';
+import type { SchedulerTaskStatus } from '@/lib/types';
+import { RefreshCw, Gauge, Wrench, Zap, FileText, Search, Clock, Terminal } from 'lucide-react';
 
 /** 距上次执行秒数 → 中文显示（null = 从未执行）。 */
 function formatLastRun(secs: number | null): string {
@@ -96,32 +88,13 @@ function TaskRow({ task }: { task: SchedulerTaskStatus }) {
 }
 
 export default function InsightsPanel() {
-  const [scheduler, setScheduler] = useState<SchedulerStatus | null>(null);
-  const [stats, setStats] = useState<UsageStatsSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [schedulerRes, statsRes] = await Promise.all([
-        fetchSchedulerStatus(),
-        fetchUsageStats(),
-      ]);
-      setScheduler(schedulerRes);
-      setStats(statsRes);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '加载洞察数据失败');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // 挂载后加载一次（手动刷新，不轮询）
-  useEffect(() => {
-    void loadData();
-  }, [loadData]);
+  const { data, loading, error, reload } = useResource(
+    () => Promise.all([fetchSchedulerStatus(), fetchUsageStats()]),
+    [],
+    { errorFallback: '加载洞察数据失败' },
+  );
+  const scheduler = data?.[0] ?? null;
+  const stats = data?.[1] ?? null;
 
   const tasks = scheduler?.tasks ?? [];
   const running = scheduler?.running ?? false;
@@ -132,7 +105,7 @@ export default function InsightsPanel() {
       <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--color-border)]">
         <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">洞察</h2>
         <button
-          onClick={() => void loadData()}
+          onClick={() => void reload()}
           disabled={loading}
           className="flex items-center gap-1 px-2 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
         >
@@ -143,29 +116,9 @@ export default function InsightsPanel() {
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
-        {error && (
-          <div
-            role="alert"
-            className="flex items-center justify-between gap-3 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
-          >
-            <span className="flex items-center gap-2">
-              <AlertCircle size={16} className="shrink-0" />
-              <span>{error}</span>
-            </span>
-            <button
-              onClick={() => void loadData()}
-              className="shrink-0 px-2 py-1 text-xs rounded border border-red-300 dark:border-red-700 hover:bg-red-100 dark:hover:bg-red-900/40"
-            >
-              重试
-            </button>
-          </div>
-        )}
+        {error && <ErrorBanner message={error} onRetry={() => void reload()} />}
 
-        {!error && loading && (
-          <div className="flex items-center justify-center py-16">
-            <Loader2 size={20} className="animate-spin text-[var(--color-text-tertiary)]" />
-          </div>
-        )}
+        {!error && loading && <Spinner />}
 
         {!error && !loading && scheduler && stats && (
           <>
