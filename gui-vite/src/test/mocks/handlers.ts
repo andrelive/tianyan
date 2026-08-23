@@ -26,7 +26,7 @@ import type {
   WorkspaceDiffResponse,
   WorkspaceApplyPatchResponse,
 } from '@/lib/types';
-import type { KnowledgeEntryItem } from '@/lib/api-client';
+import type { ClipboardPendingCapture, KnowledgeEntryItem } from '@/lib/api-client';
 
 const API_BASE = '/api/v1';
 
@@ -503,6 +503,18 @@ export const mockProviderScanResult: ProviderScanResponse = {
     },
   ],
 };
+
+export const mockClipboardPending: ClipboardPendingCapture = {
+  id: 'clip-1',
+  text: '剪贴板捕获内容',
+  captured_at: '2026-07-23T10:00:00Z',
+};
+
+export const mockClipboardRespondCalls: { action: string; text?: string }[] = [];
+
+export function resetClipboardMocks() {
+  mockClipboardRespondCalls.length = 0;
+}
 
 export const mockSoulContent = { content: '你是天演，一个本地智能代理助手。' };
 
@@ -1436,5 +1448,15 @@ export const handlers = [
     const body = (await request.json()) as { model?: string; capability?: string };
     mockSwitchModelCalls.push({ model: body.model ?? '', capability: body.capability ?? 'chat' });
     return HttpResponse.json({ success: true, message: '已切换' });
+  }),
+
+  // Clipboard（后端为 GET /clipboard/pending、POST /clipboard/respond）
+  http.get(`${API_BASE}/clipboard/pending`, () => {
+    return HttpResponse.json({ pending: mockClipboardPending });
+  }),
+  http.post(`${API_BASE}/clipboard/respond`, async ({ request }) => {
+    const body = (await request.json()) as { action?: string; text?: string };
+    mockClipboardRespondCalls.push({ action: body.action ?? '', text: body.text });
+    return HttpResponse.json({ status: 'ok' });
   }),
 ];
