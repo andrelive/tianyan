@@ -436,74 +436,66 @@ Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE �
 
 ---
 
-## 4. GUI 模块 (tianyan-gui)
+## 4. GUI 模块 (gui-vite)
 
 ### 4.1 模块总览
 
-GUI 是天演的 React TypeScript 前端，采用 Zustand 模式管理全局状态。
+GUI 是天演的 React 18 + TypeScript + Vite 前端（2026-07 Yew WASM → React 迁移完成，gui/ 已删除），
+Zustand 全局状态（三切片）+ Tailwind 主题变量 + react-router 路由。
 
 | 子模块 | 职责 | 关键文件 |
 |--------|------|---------|
-| `api/chat` | 聊天 API 客户端（流式 SSE + 非流式 + regenerate/edit） | chat.rs |
-| `api/sessions` | 会话 API 客户端（CRUD + 标题更新） | sessions.rs |
-| `api/skills` | 技能 API 客户端（列表 + 执行 + 状态轮询） | skills.rs |
-| `components/chat` | 聊天面板组件（消息列表、输入框、编辑、重新生成、复制） | mod.rs |
-| `components/sidebar` | 侧边栏组件（会话列表、新建会话、视图切换） | mod.rs |
-| `components/skills` | 技能中心面板（技能列表、参数输入、执行、结果展示） | mod.rs |
-| `components/settings` | 设置面板组件（主题、字号、API 地址） | mod.rs |
-| `components/config_wizard` | 配置向导组件（六步向导） | mod.rs, api.rs, types.rs |
-| `state` | 全局状态管理（Zustand） | mod.rs |
+| lib/store/ | 全局状态切片（chatSlice/uiSlice/modelSlice） | chat-slice.ts, ui-slice.ts, model-slice.ts |
+| lib/chat-stream.ts | 会话流式深模块：唯一 SSE 解析器 + 协议事件归约 | chat-stream.ts |
+| lib/api-client.ts | API 客户端（fetch 封装 + 语义错误谓词 + 契约快照） | api-client.ts |
+| lib/config-transform.ts | 配置表单模型 ↔ 后端 TianyanConfig 双向映射 | config-transform.ts |
+| hooks/ | useChatStream / useResource / usePolling / useTheme / useKeyboardShortcuts | hooks/ |
+| components/chat | 聊天域（ChatPanel/SessionPage/MessageBubble/工具卡片/思考选择…） | components/chat/ |
+| components/settings | 设置面板（模型/存储/安全/日志/记忆/检索/外观/连接/MCP/人格等 tab） | components/settings/ |
+| components/workspace | 工作区（文件树/查看器/WorkspaceDiffPanel/目录选择） | components/workspace/ |
+| components/* | 技能/角色/工具/知识/记忆/任务/审批/洞察/检索轨迹/剪贴板/会话/向导/侧边栏/布局面板 | components/ |
+| components/ui/ | 视觉原语（Spinner/ErrorBanner/EmptyState） | components/ui/ |
 
 ### 4.2 前端 API 覆盖情况
 
 | 后端功能域 | 前端 API 模块 | 状态 |
 |-----------|-------------|------|
-| 聊天对话 | `api/chat` | ✅ 完整实现（流式 + regenerate + edit） |
-| 会话管理 | `api/sessions` | ✅ 完整实现（CRUD + title 更新） |
-| 技能执行 | `api/skills` | ✅ 完整实现（列表 + 执行 + 状态轮询） |
-| 知识管理 | - | ❌ 未实现 |
-| 运行时配置 | - | ❌ 未实现 |
-| 配置向导 | `config_wizard/api` | ✅ 完整实现 |
+| 聊天对话 | lib/api-client.ts（流式 + clarify + regenerate/edit/rollback/redo） | ✅ 完整实现 |
+| 会话管理 | lib/api-client.ts（CRUD + 标题 + 工作区绑定 + 压缩） | ✅ 完整实现 |
+| 技能/角色/工具 | lib/api-client.ts（列表 + 详情 + 统计 + reset） | ✅ 完整实现 |
+| 知识管理 | lib/api-client.ts（搜索/建议/导入/浏览/删除） | ✅ 完整实现 |
+| 运行时配置 | lib/api-client.ts（GET/PUT /config + 契约快照测试） | ✅ 完整实现 |
+| 配置向导 | components/wizard/ConfigWizard.tsx（五步） | ✅ 完整实现 |
+| 工作区 | lib/api-client.ts（tree/read/diff/apply-patch/dirs） | ✅ 完整实现 |
+| 任务/审批/洞察/检索轨迹/剪贴板 | lib/api-client.ts + 对应面板 | ✅ 完整实现 |
 
 ### 4.3 状态管理
 
-**AppState** 使用 Zustand store，包含多种 Action：
+Zustand 单 store 由三个切片组合（lib/store/），核心契约：
 
-| Action | 说明 | 使用状态 |
-|--------|------|:---:|
-| `SetView` | 切换视图（Chat/Skills/Settings） | ✅ |
-| `SetCurrentSession` | 设置当前会话 ID | ✅ |
-| `SetSessions` | 设置会话列表 | ✅ |
-| `AddSession` | 添加会话到列表 | ⚠️ |
-| `RemoveSession` | 从列表移除会话 | ✅ |
-| `SetMessages` | 设置消息列表 | ✅ |
-| `AddMessage` | 追加消息 | ✅ |
-| `UpdateLastMessage` | 追增最后一条消息内容 | ✅ |
-| `AppendStreamMessage` | 追加流式过程消息 | ✅ |
-| `AppendSkillCalls` | 附加技能调用信息 | ✅ |
-| `SetStreamStatus` | 设置流状态（Idle/Streaming/Error） | ✅ |
-| `ToggleSidebar` | 切换侧边栏 | ✅ |
-| `UpdateSettings` | 更新本地设置 | ✅ |
-| `ClearMessages` | 清空消息 | ✅ |
-| `SetSkills` | 设置技能列表 | ✅ |
-| `RegenerateFrom` | 从指定索引截断消息 | ✅ |
-| `EditMessage` | 编辑指定消息内容 | ✅ |
-| `DeleteMessagesFrom` | 删除指定索引之后的消息 | ✅ |
+- **chatSlice**：会话 + 消息缓存（按会话归属，切走流继续跑）+ 流式状态机
+  （PENDING 迁移、segments 时间线、轮次边界、回退按消息 ID 定位）+ 追问 + 流状态。
+- **uiSlice**：导航视图/侧边栏/主题字号/apiBaseUrl/Toast/配置状态。
+- **modelSlice**：模型选择/思考档位/模型目录/技能目录。
+
+持久化（persist partialize）仅 theme/fontSize/thinkingEffort 三项——会话/消息不入
+localStorage（ADR-018：会话权威在 SQLite）。
 
 ### 4.4 流式响应处理
 
-前端通过 `ReadableStream` API 处理 SSE 流式响应，支持：
+SSE 协议知识集中在 `lib/chat-stream.ts`（C1 深模块化）：
 
-- **6 种 chunk_type 差异化渲染**：
-  - `Thought` → 独立消息气泡，思考中标签
-  - `ToolCall` → 独立消息气泡，工具调用标签
-  - `Observation` → 独立消息气泡，观察结果标签
-  - `Answer` / `Clarification` → 追加到最后一条助手消息
-  - `Error` → 错误内容追加
-- **可中断**：通过 `AbortController` 实现停止生成
-- **技能调用**：skill_calls 附加为调用卡片
+- **唯一 SSE 解析器**（consumeSseStream）：data: 行 / [DONE] / 畸形行跳过；
+- **事件归约器**（createChatStreamReducer）：主对话流与追问流共用，处理
+  message/delta/thinking/tool_call/tool_result/skill_calls/usage/finish_reason
+  全事件 → store 动作（含轮次边界、截断/中断语义、usage 归位、工具结果挂卡）。
+- **可中断**：AbortController 停止生成；错误按流归属会话复位。
 
----
+### 4.4 测试
+
+- vitest + RTL + MSW（共享 server；SSE mock 含 error/length 分支）；
+- 契约快照测试（src/test/fixtures/contract/）防 DTO 漂移（C5）；
+- Playwright e2e（真实后端 + mock-llm + 身份守卫防污染开发数据）。
 
 ## 5. Tauri 模块 (tianyan-tauri)
 
@@ -545,4 +537,3 @@ Tauri lib.rs::run()
 **历史**: 2026-08-06（Wave 6 重构后同步：executor 拆分 security/command/output_parse、tool_registry 4 域文件、approval//image//lancedb/ 目录化、SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉（ADR-007）、observability 2 文件、SessionManager 仅存 PersistentSessionManager、GcTask 删除投机代码、会话截断常量单点）
 **历史**: 2026-08-04（重构：storage→vfs，移除 planner/chunker/ModelRouter/TokenBudget/ConversationSummarizer/VisionEncoder/AgentHarness/AgentSkills wrapper，修正 ContentLoadStrategy→enum、L1 tokens→~2K、MemoryExtractionTrait→MemoryExtractor，反映 4 项核心架构决策，model/router+openai→provider，tasks→scheduler/tasks，executor 标注废弃，knowledge 确认未集成，session 确认已集成）
 **历史**: 2026-08-04（审查改进 16 项：knowledge_ingest 工具确认已接入 Agent 流程；ToolRegistry 拆分 execute_single 为 14 个独立工具方法；审批默认关闭无人值守、拒绝降级 ask_user 追问；TianyanError 新增 not_found/is_not_found 结构化错误分类；AppState 复用 ModelServices；SummaryTask 缓存 FIFO 淘汰；SSE 事件 id 语义对齐）
-
