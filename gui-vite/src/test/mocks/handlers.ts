@@ -2,6 +2,9 @@ import { http, HttpResponse } from 'msw';
 import type {
   Session,
   Skill,
+  RoleDetail,
+  ListRolesResponse,
+  RolesStatsResponse,
   BackgroundTask,
   ListSessionsResponse,
   ChatResponse,
@@ -71,6 +74,87 @@ export const mockSkills: Skill[] = [
     enabled: true,
   },
 ];
+
+// ========== Roles mock ==========
+
+export const mockRolesList: ListRolesResponse = {
+  roles: [
+    {
+      name: 'researcher',
+      source: 'builtin',
+      status: 'active',
+      version: 1,
+      purpose: '网络调研与资料整理',
+      tool_count: 8,
+      usage: {
+        calls: 12,
+        success: 10,
+        failed: 2,
+        success_rate: 0.83,
+        last_used: 1754395200000,
+      },
+    },
+    {
+      name: 'editor',
+      source: 'learned',
+      status: 'experimental',
+      version: 2,
+      purpose: '代码审查与改写',
+      model: 'gpt-4o',
+    },
+  ],
+};
+
+export const mockRoleDetail: RoleDetail = {
+  name: 'researcher',
+  source: 'builtin',
+  status: 'active',
+  version: 1,
+  purpose: '网络调研与资料整理',
+  tool_count: 8,
+  system_prompt: '你是调研员，负责收集并整理资料。',
+  tools: ['web_search', 'web_fetch'],
+};
+
+export const mockRolesStats: RolesStatsResponse = {
+  total_calls: 12,
+  total_success: 10,
+  success_rate: 0.83,
+  by_role: [
+    {
+      name: 'researcher',
+      calls: 12,
+      success: 10,
+      failed: 2,
+      success_rate: 0.83,
+      last_used: 1754395200000,
+    },
+  ],
+  by_task_type: [['web_research', 12]],
+  recent: [
+    {
+      ts: 1754395200000,
+      role: 'researcher',
+      task: '调研 Rust 生态',
+      success: true,
+      mode: 'web',
+      duration_ms: 12000,
+      tokens: 3400,
+    },
+  ],
+};
+
+/** 记录的角色回退调用（{ name }），测试断言用。 */
+export const mockRoleResetCalls: string[] = [];
+
+/** 记录的角色删除调用（{ name }），测试断言用。 */
+export const mockRoleDeleteCalls: string[] = [];
+
+/** 恢复角色 mock 到初始状态。 */
+export function resetRoleMocks() {
+  mockRoleResetCalls.length = 0;
+  mockRoleDeleteCalls.length = 0;
+}
 
 // ========== Chat mock ==========
 
@@ -896,6 +980,31 @@ export const handlers = [
   http.get(`${API_BASE}/skills`, () => {
     const response: SkillListResponse = { skills: mockSkills };
     return HttpResponse.json(response);
+  }),
+
+  // Roles（stats 必须在 :name 之前匹配）
+  http.get(`${API_BASE}/roles/stats`, () => {
+    return HttpResponse.json(mockRolesStats);
+  }),
+
+  http.get(`${API_BASE}/roles`, () => {
+    return HttpResponse.json(mockRolesList);
+  }),
+
+  http.get(`${API_BASE}/roles/:name`, ({ params }) => {
+    const role = mockRolesList.roles.find((r) => r.name === params.name);
+    if (!role) return new HttpResponse(null, { status: 404 });
+    return HttpResponse.json({ ...mockRoleDetail, name: String(params.name) });
+  }),
+
+  http.post(`${API_BASE}/roles/:name/reset`, ({ params }) => {
+    mockRoleResetCalls.push(String(params.name));
+    return HttpResponse.json({ name: String(params.name), status: 'reset' });
+  }),
+
+  http.delete(`${API_BASE}/roles/:name`, ({ params }) => {
+    mockRoleDeleteCalls.push(String(params.name));
+    return HttpResponse.json({ name: String(params.name), status: 'deleted' });
   }),
 
   // Chat
