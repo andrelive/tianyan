@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   fetchKnowledgeEntries,
   fetchKnowledgeEntryContent,
@@ -11,7 +11,7 @@ import { toErrorMessage } from '@/lib/errors';
 import { ChevronRight, Folder, File, Trash2, Loader2, AlertCircle } from 'lucide-react';
 
 /** 知识库浏览（目录导航 + 层级查看 + 二次确认删除）。 */
-export default function KnowledgeBrowseTab() {
+export default function KnowledgeBrowseTab({ active = true }: { active?: boolean }) {
   const [selectedBrowseEntry, setSelectedBrowseEntry] = useState<KnowledgeEntryItem | null>(null);
   const [browseContent, setBrowseContent] = useState('');
   const [browseLevel, setBrowseLevel] = useState('detail');
@@ -48,6 +48,14 @@ export default function KnowledgeBrowseTab() {
     { errorFallback: '加载失败' },
   );
   const browseEntries = browseData?.entries ?? [];
+
+  // tab 保持挂载（状态保留），但列表必须新鲜：非激活时静默；
+  // 从非激活切换为激活时重新拉取（否则导入新条目后切回浏览仍显示旧列表）。
+  const prevActiveRef = useRef(active);
+  useEffect(() => {
+    if (active && !prevActiveRef.current) reloadBrowse();
+    prevActiveRef.current = active;
+  }, [active, reloadBrowse]);
 
   const handleBrowseView = async (entry: KnowledgeEntryItem) => {
     // VFS 中已 ingest 的文档以目录节点形态列出（is_directory=true 但携带 L0/L1/L2 内容）。

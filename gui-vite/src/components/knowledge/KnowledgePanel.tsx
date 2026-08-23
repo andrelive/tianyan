@@ -87,7 +87,7 @@ export default function KnowledgePanel() {
           id="tabpanel-browse"
           className={activeTab === 'browse' ? '' : 'hidden'}
         >
-          <KnowledgeBrowseTab />
+          <KnowledgeBrowseTab active={activeTab === 'browse'} />
         </div>
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type APIRequestContext } from '@playwright/test';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertE2eBackend } from './helpers';
@@ -25,18 +25,9 @@ test.describe('real backend session workspace grouping', () => {
     request,
   }) => {
     // 1. 首条消息携带 working_directory → 后端为新会话固化工作区归属
+    //    非流式 /chat 已移除（GUI 仅用 SSE），改用 /chat/stream 并解析首事件。
     const message = '会话工作区绑定测试';
-    const chatRes = await request.post('/api/v1/chat', {
-      data: {
-        message: { role: 'user', content: message },
-        stream: false,
-        temperature: 0.7,
-        max_tokens: 100,
-        working_directory: FIXTURE_WORKSPACE,
-      },
-    });
-    expect(chatRes.ok(), await chatRes.text()).toBeTruthy();
-    const chat = (await chatRes.json()) as { session_id: string };
+    const chat = await createSession(request, message, FIXTURE_WORKSPACE);
     expect(chat.session_id).toBeTruthy();
 
     // 2. GET /sessions 确认工作区归属已固化（侧边栏分组的数据源）
@@ -54,7 +45,9 @@ test.describe('real backend session workspace grouping', () => {
 
     // 3. UI：会话页左栏按目录分组 —— 分组头显示目录 basename（title 携带完整路径）
     await page.goto('/');
-    await expect(page.getByRole('button', { name: `分组 ${path.basename(FIXTURE_WORKSPACE)}` })).toBeVisible({
+    await expect(
+      page.getByRole('button', { name: `分组 ${path.basename(FIXTURE_WORKSPACE)}` }),
+    ).toBeVisible({
       timeout: 30000,
     });
     await expect(page.getByText(message, { exact: true })).toBeVisible({ timeout: 30000 });
@@ -81,17 +74,7 @@ test.describe('real backend session workspace grouping', () => {
     request,
   }) => {
     // 1. 创建绑定工作区的会话
-    const chatRes = await request.post('/api/v1/chat', {
-      data: {
-        message: { role: 'user', content: '清除绑定测试' },
-        stream: false,
-        temperature: 0.7,
-        max_tokens: 100,
-        working_directory: FIXTURE_WORKSPACE,
-      },
-    });
-    expect(chatRes.ok(), await chatRes.text()).toBeTruthy();
-    const chat = (await chatRes.json()) as { session_id: string };
+    const chat = await createSession(request, '清除绑定测试', FIXTURE_WORKSPACE);
 
     // 2. 清除绑定（空串）→ 会话回落全局配置
     const putRes = await request.put(`/api/v1/sessions/${chat.session_id}/workspace`, {
@@ -117,3 +100,46 @@ test.describe('real backend session workspace grouping', () => {
     await request.delete(`/api/v1/sessions/${chat.session_id}`);
   });
 });
+
+/**
+ * 通过流式端点创建会话并返回 { session_id }。
+ *
+ * 非流式 POST /chat 已随"GUI 仅用 SSE"决策移除（4a5b3c8d）；流式端点
+ * 返回 SSE 流，首事件（chunk_type=message）携带后端生成的 session_id。
+ */
+async function createSession(
+  request: APIRequestContext,
+  message: string,
+  workingDirectory: string,
+): Promise<{ session_id: string }> {
+  const res = await request.post('/api/v1/chat/stream', {
+    data: {
+      message: { role: 'user', content: message },
+      temperature: 0.7,
+      max_tokens: 100,
+      working_directory: workingDirectory,
+    },
+  });
+  expect(res.ok(), await res.text()).toBeTruthy();
+  const body = await res.text();
+  // SSE：data: {json} 行；[DONE] 后流结束。取首个携带 session_id 的事件。
+  const sessionId = extractFirstSessionId(body);
+  expect(sessionId, `SSE 响应应包含 session_id:\n${body.slice(0, 500)}`).toBeTruthy();
+  return { session_id: sessionId };
+}
+
+/** 从 SSE 文本中提取首个非空 session_id（跳过 [DONE] 与心跳行）。 */
+function extractFirstSessionId(sseBody: string): string {
+  for (const line of sseBody.split('\n')) {
+    if (!line.startsWith('data: ')) continue;
+    const payload = line.slice('data: '.length);
+    if (payload === '[DONE]') continue;
+    try {
+      const event = JSON.parse(payload) as { session_id?: string };
+      if (event.session_id) return event.session_id;
+    } catch {
+      // 心跳/非 JSON 行跳过
+    }
+  }
+  return '';
+}
