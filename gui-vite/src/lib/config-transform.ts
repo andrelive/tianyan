@@ -64,7 +64,11 @@ export function emptyConfigState(): ConfigState {
     max_turns: 20,
     learned_rules_top_k: 5,
     working_directory: '',
+    shortlist_tools: true,
+    background_self_review: false,
     data_dir: '',
+    storage_backend: 'sqlite',
+    sqlite_path: null,
     collection_name: 'tianyan_data',
     vector_dimension: 1536,
     max_storage_size: 0,
@@ -80,6 +84,8 @@ export function emptyConfigState(): ConfigState {
     confirm_commands: true,
     audit_logging: true,
     allow_all_operations: false,
+    safety_mode: 'strict',
+    trash_directory: '',
     max_file_size: 10485760,
     allowed_directories: '',
     blocked_directories: '',
@@ -108,9 +114,13 @@ export function emptyConfigState(): ConfigState {
 
 interface BackendAgentConfig {
   default_top_k: number;
-  loaded_rules_top_k: number;
+  /** 后端字段名（learned_rules_top_k；契约快照 2026-08 确认） */
+  learned_rules_top_k: number;
   working_directory?: string | null;
   max_turns: number;
+  /** 后端新增字段（透传保留，避免保存丢配置） */
+  shortlist_tools?: boolean;
+  background_self_review?: boolean;
 }
 
 interface BackendModelEntry {
@@ -152,6 +162,10 @@ interface BackendModelsConfig {
 
 interface BackendStorageConfig {
   data_dir: string;
+  /** 存储后端类型（sqlite 等；透传保留） */
+  backend?: string;
+  /** SQLite 路径（null = 默认位置；透传保留） */
+  sqlite_path?: string | null;
   max_storage_size: number;
   auto_cleanup: boolean;
   cleanup_days: number;
@@ -175,6 +189,10 @@ interface BackendSecurityConfig {
   confirm_commands: boolean;
   audit_logging: boolean;
   allow_all_operations?: boolean;
+  /** 安全模式（strict 等；透传保留） */
+  safety_mode?: string;
+  /** 回收站目录（透传保留） */
+  trash_directory?: string;
   max_file_size: number;
   allowed_directories: string[];
   blocked_directories: string[];
@@ -263,9 +281,11 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
     config: {
       agent: {
         default_top_k: cs.default_top_k,
-        loaded_rules_top_k: cs.learned_rules_top_k,
+        learned_rules_top_k: cs.learned_rules_top_k,
         max_turns: cs.max_turns,
         working_directory: cs.working_directory || null,
+        shortlist_tools: cs.shortlist_tools,
+        background_self_review: cs.background_self_review,
       },
       models: {
         providers: cs.providers.map((p) => ({
@@ -297,6 +317,8 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
       },
       storage: {
         data_dir: cs.data_dir,
+        backend: cs.storage_backend,
+        sqlite_path: cs.sqlite_path,
         max_storage_size: cs.max_storage_size,
         auto_cleanup: cs.auto_cleanup,
         cleanup_days: cs.cleanup_days,
@@ -318,6 +340,8 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
         confirm_commands: cs.confirm_commands,
         audit_logging: cs.audit_logging,
         allow_all_operations: cs.allow_all_operations,
+        safety_mode: cs.safety_mode,
+        trash_directory: cs.trash_directory,
         max_file_size: cs.max_file_size,
         allowed_directories: splitLines(cs.allowed_directories),
         blocked_directories: splitLines(cs.blocked_directories),
@@ -383,9 +407,8 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
       models: (p.models || []).map((m) => ({
         name: m.name ?? '',
         capabilities: (m.capabilities || []) as ModelCapability[],
-        reasoning_efforts: m.reasoning_efforts && m.reasoning_efforts.length > 0
-          ? m.reasoning_efforts
-          : undefined,
+        reasoning_efforts:
+          m.reasoning_efforts && m.reasoning_efforts.length > 0 ? m.reasoning_efforts : undefined,
         context_length: m.context_length ?? undefined,
         max_output_tokens: m.max_output_tokens ?? undefined,
         max_input_tokens: m.max_input_tokens ?? undefined,
@@ -406,17 +429,16 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     // Agent
     default_top_k: agent.default_top_k ?? defaults.default_top_k,
     max_turns: agent.max_turns ?? defaults.max_turns,
-    learned_rules_top_k: (() => {
-      const agentRecord = agent as unknown as Record<string, unknown>;
-      return typeof agentRecord.loaded_rules_top_k === 'number'
-        ? agentRecord.loaded_rules_top_k
-        : defaults.learned_rules_top_k;
-    })(),
+    learned_rules_top_k: agent.learned_rules_top_k ?? defaults.learned_rules_top_k,
+    shortlist_tools: agent.shortlist_tools ?? defaults.shortlist_tools,
+    background_self_review: agent.background_self_review ?? defaults.background_self_review,
     working_directory: agent.working_directory ?? defaults.working_directory,
 
     // Storage
     data_dir:
       (typeof storage.data_dir === 'string' ? storage.data_dir : undefined) ?? defaults.data_dir,
+    storage_backend: storage.backend ?? defaults.storage_backend,
+    sqlite_path: storage.sqlite_path ?? defaults.sqlite_path,
     collection_name: storage.vector?.collection_name ?? defaults.collection_name,
     vector_dimension: storage.vector?.vector_dimension ?? defaults.vector_dimension,
     max_storage_size: storage.max_storage_size ?? defaults.max_storage_size,
@@ -436,6 +458,8 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     confirm_commands: security.confirm_commands ?? defaults.confirm_commands,
     audit_logging: security.audit_logging ?? defaults.audit_logging,
     allow_all_operations: security.allow_all_operations ?? defaults.allow_all_operations,
+    safety_mode: security.safety_mode ?? defaults.safety_mode,
+    trash_directory: security.trash_directory ?? defaults.trash_directory,
     max_file_size: security.max_file_size ?? defaults.max_file_size,
     allowed_directories: (security.allowed_directories || []).join('\n'),
     blocked_directories: (security.blocked_directories || []).join('\n'),

@@ -11,6 +11,11 @@ import {
   apiPost,
   apiDelete,
   ApiError,
+  isConflict,
+  isInvalidInput,
+  isNotFound,
+  isPermission,
+  isTimeout,
   apiPostMultipart,
   clarifyChat,
   fetchTasks,
@@ -184,6 +189,39 @@ describe('ApiError', () => {
   it('preserves stack trace', () => {
     const err = new ApiError('test');
     expect(err.stack).toBeDefined();
+  });
+
+  // ── 语义分类（ADR-014：状态码 → kind 映射收敛在 api-client 唯一一处） ──
+
+  it('maps HTTP status codes to semantic kinds', () => {
+    expect(new ApiError('nf', 404).kind).toBe('not_found');
+    expect(new ApiError('cf', 409).kind).toBe('conflict');
+    expect(new ApiError('ii', 400).kind).toBe('invalid_input');
+    expect(new ApiError('ii2', 422).kind).toBe('invalid_input');
+    expect(new ApiError('pm', 403).kind).toBe('permission');
+    expect(new ApiError('to', 504).kind).toBe('timeout');
+    expect(new ApiError('un', 500).kind).toBe('unknown');
+    expect(new ApiError('no status').kind).toBe('unknown');
+  });
+
+  it('predicates classify errors without string matching', () => {
+    expect(isNotFound(new ApiError('x', 404))).toBe(true);
+    expect(isConflict(new ApiError('x', 409))).toBe(true);
+    expect(isInvalidInput(new ApiError('x', 400))).toBe(true);
+    expect(isPermission(new ApiError('x', 403))).toBe(true);
+    expect(isTimeout(new ApiError('x', 504))).toBe(true);
+
+    // 非 ApiError / 其他类别 → 全部 false
+    expect(isConflict(new Error('x'))).toBe(false);
+    expect(isConflict(new ApiError('x', 500))).toBe(false);
+    expect(isNotFound(new ApiError('x', 409))).toBe(false);
+    expect(isConflict(null)).toBe(false);
+  });
+
+  it('keeps code for backward compatibility', () => {
+    const err = new ApiError('x', 409);
+    expect(err.code).toBe('409');
+    expect(new ApiError('x', '403').kind).toBe('permission');
   });
 });
 

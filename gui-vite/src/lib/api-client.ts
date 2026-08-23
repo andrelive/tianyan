@@ -1,4 +1,4 @@
-import { getApiBase } from '@/hooks/use-api-base';
+import { getApiBase } from '@/lib/api-base';
 import type {
   ApprovalDecision,
   ApprovalStatusSnapshot,
@@ -33,15 +33,70 @@ import type {
   WorkspaceApplyPatchResponse,
 } from './types';
 
+import { fetchWithSignal } from './fetch-with-signal';
+
 const DEFAULT_TIMEOUT = 60000;
 
+/**
+ * 错误分类契约（对齐后端 ADR-014 语义谓词）。
+ *
+ * 后端错误分类经 HTTP 状态码外泄（server 层用语义谓词映射状态码，
+ * 见 core/src/common/error.rs + server/src/api/shared/error.rs）；前端在
+ * **唯一一处**把状态码映射为语义 kind，消费端一律用谓词
+ * （isNotFound / isConflict / ...）判断——禁止散落的状态码/字符串匹配。
+ */
+export type ApiErrorKind =
+  'not_found' | 'conflict' | 'invalid_input' | 'permission' | 'timeout' | 'unknown';
+
+/** 状态码 → 语义类别（唯一映射表；分类契约只此一处）。 */
+function kindFromStatus(status: number): ApiErrorKind {
+  switch (status) {
+    case 404:
+      return 'not_found';
+    case 409:
+      return 'conflict';
+    case 400:
+    case 422:
+      return 'invalid_input';
+    case 403:
+      return 'permission';
+    case 408:
+    case 504:
+      return 'timeout';
+    default:
+      return 'unknown';
+  }
+}
+
 export class ApiError extends Error {
+  /** HTTP 状态码（字符串；保留历史兼容）。 */
   code?: string;
-  constructor(message: string, code?: string) {
+  /** 语义错误类别（ADR-014；消费端用谓词判断，勿直接匹配）。 */
+  readonly kind: ApiErrorKind;
+  constructor(message: string, status?: number | string) {
     super(message);
     this.name = 'ApiError';
-    this.code = code;
+    const num = typeof status === 'number' ? status : Number(status);
+    this.code = num ? String(num) : undefined;
+    this.kind = num ? kindFromStatus(num) : 'unknown';
   }
+}
+
+/** 语义谓词：消费端错误分类的唯一入口（对应后端 is_not_found / is_conflict / …）。 */
+export function isNotFound(err: unknown): boolean {
+  return err instanceof ApiError && err.kind === 'not_found';
+}
+export function isConflict(err: unknown): boolean {
+  return err instanceof ApiError && err.kind === 'conflict';
+}
+export function isInvalidInput(err: unknown): boolean {
+  return err instanceof ApiError && err.kind === 'invalid_input';
+}
+export function isPermission(err: unknown): boolean {
+  return err instanceof ApiError && err.kind === 'permission';
+}
+export function isTimeout(err: unknown): boolean {
+  return err instanceof ApiError && err.kind === 'timeout';
 }
 
 async function request<T>(
@@ -61,27 +116,15 @@ async function request<T>(
   const finalSignal = signal || controller.signal;
 
   try {
-    let response: Response;
-    try {
-      response = await fetch(url, {
+    const response = await fetchWithSignal(
+      url,
+      {
         method,
         headers,
         body: body ? JSON.stringify(body) : undefined,
-        signal: finalSignal,
-      });
-    } catch (err) {
-      // vitest jsdom 环境下 Node fetch 会拒绝 jsdom realm 的 AbortSignal；
-      // 未显式传入 signal 时降级重试（生产浏览器同 realm，此分支永不触发）。
-      if (signal === undefined && err instanceof TypeError && /Expected signal/.test(err.message)) {
-        response = await fetch(url, {
-          method,
-          headers,
-          body: body ? JSON.stringify(body) : undefined,
-        });
-      } else {
-        throw err;
-      }
-    }
+      },
+      finalSignal,
+    );
 
     if (!response.ok) {
       const text = await response.text();
@@ -92,7 +135,7 @@ async function request<T>(
       } catch {
         /* use raw text */
       }
-      throw new ApiError(message, String(response.status));
+      throw new ApiError(message, response.status);
     }
 
     return await response.json();
@@ -125,7 +168,7 @@ export async function apiPostMultipart<T>(path: string, formData: FormData): Pro
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new ApiError(`HTTP ${response.status}: ${text}`, String(response.status));
+    throw new ApiError(`HTTP ${response.status}: ${text}`, response.status);
   }
   return response.json();
 }

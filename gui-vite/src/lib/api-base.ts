@@ -1,5 +1,6 @@
 import { useAppStore } from '@/lib/store';
 
+/** API base URL 解析（原 hooks/use-api-base：不是 hook，且被 lib 层引用——移入 lib）。 */
 export function getApiBase(): string {
   // Tauri 桌面端注入的实际监听端口（首选 3000 被占用时动态选择，
   // 此时默认值不可用，必须使用注入值）

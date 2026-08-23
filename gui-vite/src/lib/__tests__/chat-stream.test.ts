@@ -1,0 +1,114 @@
+/**
+ * ChatStreamReducer 契约测试（C8）：SSE 协议事件序列 → store 消息结构。
+ *
+ * C1 深模块（lib/chat-stream.ts）的直接测试面——协议归约逻辑不再只能
+ * 经 UI（ChatPanel.test）间接验证。
+ */
+
+import { describe, it, expect, beforeEach } from 'vitest';
+import { createChatStreamReducer } from '@/lib/chat-stream';
+import { useAppStore } from '@/lib/store';
+import type { ChatStreamEvent } from '@/lib/types';
+
+function ev(partial: Partial<ChatStreamEvent>): ChatStreamEvent {
+  return {
+    id: 'e1',
+    session_id: 's1',
+    delta: '',
+    chunk_type: 'answer',
+    ...partial,
+  } as ChatStreamEvent;
+}
+
+beforeEach(() => {
+  useAppStore.setState(useAppStore.getInitialState());
+});
+
+describe('createChatStreamReducer', () => {
+  it('establishes the streaming session on the first chunk', () => {
+    const r = createChatStreamReducer();
+    r.handleEvent(ev({ session_id: 's1', delta: '你好' }));
+    expect(r.streamSessionId).toBe('s1');
+    expect(useAppStore.getState().currentSessionId).toBe('s1');
+  });
+
+  it('accumulates thinking, deltas and tool calls into the assistant message', () => {
+    useAppStore.getState().addMessage({ role: 'user', content: 'hi', timestamp: '' });
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    const r = createChatStreamReducer();
+    r.handleEvent(ev({ thinking: '先想' }));
+    r.handleEvent(ev({ delta: '正文' }));
+    r.handleEvent(
+      ev({ tool_call: { id: 't1', name: 'read_file', arguments: '{}', presentation: 'read' } }),
+    );
+
+    const assistant = useAppStore.getState().messages.filter((m) => m.role === 'assistant');
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].thinking).toBe('先想');
+    expect(assistant[0].content).toBe('正文');
+    expect(assistant[0].tool_calls?.[0]).toMatchObject({ id: 't1', name: 'read_file' });
+  });
+
+  it('applies tool results to the matching tool call', () => {
+    useAppStore.getState().addMessage({ role: 'user', content: 'x', timestamp: '' });
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    const r = createChatStreamReducer();
+    r.handleEvent(
+      ev({ tool_call: { id: 't1', name: 'ls', arguments: '{}', presentation: 'terminal' } }),
+    );
+    r.handleEvent(
+      ev({
+        tool_result: { tool_call_id: 't1', duration_ms: 42, success: true, content: 'result-ok' },
+      }),
+    );
+    const tool = useAppStore.getState().messages[1].tool_calls?.[0];
+    expect(tool).toMatchObject({ duration_ms: 42, success: true, result: 'result-ok' });
+  });
+
+  it('handles error chunks: removes the empty bubble, resets status, shows toast', () => {
+    useAppStore.getState().addMessage({ role: 'user', content: 'x', timestamp: '' });
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    useAppStore.getState().setStreamStatus('streaming');
+    const r = createChatStreamReducer({ errorFallbackText: '处理失败' });
+    r.handleEvent(ev({ chunk_type: 'error', delta: '请求校验失败' }));
+    const state = useAppStore.getState();
+    expect(state.messages.filter((m) => m.role === 'assistant')).toHaveLength(0);
+    expect(Object.values(state.streamStatus).every((s) => s === 'idle')).toBe(true);
+    expect(state.toast?.message).toBe('请求校验失败');
+  });
+
+  it('marks truncation on finish_reason length and attaches usage', () => {
+    useAppStore.getState().addMessage({ role: 'user', content: 'x', timestamp: '' });
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    const r = createChatStreamReducer();
+    r.handleEvent(ev({ delta: '部分输出', finish_reason: 'length' }));
+    r.handleEvent(
+      ev({
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 50,
+          total_tokens: 150,
+          cache_read: 40,
+          cache_write: 10,
+          context_window: 16000,
+        },
+      }),
+    );
+    const assistant = useAppStore.getState().messages[1];
+    expect(assistant.truncated_by_length).toBe(true);
+    expect(assistant.usage?.total_tokens).toBe(150);
+    expect(r.liveWindow).toBe(16000);
+  });
+
+  it('starts a new assistant turn when thinking arrives after content', () => {
+    useAppStore.getState().addMessage({ role: 'user', content: 'x', timestamp: '' });
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    const r = createChatStreamReducer();
+    r.handleEvent(ev({ thinking: '第一轮思考' }));
+    r.handleEvent(ev({ delta: '第一轮输出' }));
+    r.handleEvent(ev({ thinking: '第二轮思考' }));
+    const assistants = useAppStore.getState().messages.filter((m) => m.role === 'assistant');
+    expect(assistants).toHaveLength(2);
+    expect(assistants[1].thinking).toBe('第二轮思考');
+  });
+});

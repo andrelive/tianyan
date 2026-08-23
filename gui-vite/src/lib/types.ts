@@ -678,9 +678,17 @@ export interface ConfigState {
   max_turns: number;
   learned_rules_top_k: number;
   working_directory: string;
+  /** 工具短名单（后端字段透传：设置页暂不编辑，保存时保留原值） */
+  shortlist_tools: boolean;
+  /** 后台自审（后端字段透传） */
+  background_self_review: boolean;
 
   // -- Storage config (storage.*) --
   data_dir: string;
+  /** 存储后端类型（后端字段透传：sqlite 等） */
+  storage_backend: string;
+  /** SQLite 路径（null = 默认位置；后端字段透传） */
+  sqlite_path: string | null;
   collection_name: string;
   vector_dimension: number;
   max_storage_size: number;
@@ -700,6 +708,10 @@ export interface ConfigState {
   confirm_commands: boolean;
   audit_logging: boolean;
   allow_all_operations: boolean;
+  /** 安全模式（strict 等；后端字段透传） */
+  safety_mode: string;
+  /** 回收站目录（后端字段透传；空串 = 后端默认） */
+  trash_directory: string;
   max_file_size: number;
   allowed_directories: string;
   blocked_directories: string;

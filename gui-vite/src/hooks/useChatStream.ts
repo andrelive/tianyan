@@ -1,110 +1,75 @@
-import { useRef, useCallback, useState } from 'react';
-import type { ChatStreamEvent, ChatRequest } from '@/lib/types';
+import { useCallback, useRef, useState } from 'react';
+import type { ChatRequest } from '@/lib/types';
+import { consumeSseStream, createChatStreamReducer } from '@/lib/chat-stream';
+import { fetchWithSignal } from '@/lib/fetch-with-signal';
 
 interface UseChatStreamOptions {
   /** SSE endpoint URL (e.g. `${getApiBase()}/chat/stream`) */
   streamUrl: string;
-  /** Called on each valid SSE data: event */
-  onChunk?: (event: ChatStreamEvent) => void;
-  /** Called when a non-abort error occurs */
-  onError?: (error: Error) => void;
-  /** Called when the stream completes naturally or is aborted */
-  onComplete?: () => void;
+  /** chunk_type=error 时 toast 的兜底文案（未携带 delta 时）。 */
+  errorFallbackText?: string;
+  /** 完成 chunk 携带真实上下文窗口时回调（组件用 ref 记录，避免重渲染）。 */
+  onUsageWindow?: (windowTokens: number) => void;
+  /** 非中止错误：按流归属会话报告（UI 切走后仍正确）。 */
+  onError?: (sessionId: string | null, error: Error) => void;
+  /** 流自然完成或中止：按流归属会话报告。 */
+  onComplete?: (sessionId: string | null) => void;
 }
 
 /**
- * Hook for SSE streaming chat responses via fetch + ReadableStream.
+ * 会话流式 hook（薄层）：fetch + AbortController + 单一 SSE 解析器。
  *
- * Parses SSE lines (data: ...), handles abort via AbortController,
- * and buffers incomplete lines. Returns start/stop controls and
- * a live isStreaming state.
+ * 协议事件 → store 的归约逻辑不在本 hook——由 `lib/chat-stream` 的
+ * `createChatStreamReducer` 承担（主对话流与追问流共用同一归约）。
+ * 返回 start/stop 控制与 isStreaming 状态。
  */
 export function useChatStream(options: UseChatStreamOptions) {
-  const { streamUrl, onChunk, onError, onComplete } = options;
+  const { streamUrl, errorFallbackText, onUsageWindow, onError, onComplete } = options;
   const abortRef = useRef<AbortController | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
 
   const startStream = useCallback(
     async (body: ChatRequest) => {
+      const reducer = createChatStreamReducer({ errorFallbackText });
       const controller = new AbortController();
       abortRef.current = controller;
       setIsStreaming(true);
 
       try {
-        let response: Response;
-        try {
-          response = await fetch(streamUrl, {
+        const response = await fetchWithSignal(
+          streamUrl,
+          {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
-            signal: controller.signal,
-          });
-        } catch (err) {
-          // vitest jsdom 环境下 Node fetch 会拒绝 jsdom realm 的 AbortSignal
-          // （与 api-client request() 同源问题）；降级重试不带 signal。
-          // 生产浏览器同 realm，此分支永不触发；降级路径下 stopStream 的
-          // abort 退化为无效操作——仅影响测试环境。
-          if (err instanceof TypeError && /Expected signal/.test(err.message)) {
-            response = await fetch(streamUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
-            });
-          } else {
-            throw err;
-          }
-        }
+          },
+          controller.signal,
+        );
 
         if (!response.ok) {
           const text = await response.text();
           throw new Error(`HTTP ${response.status}${text ? ': ' + text : ''}`);
         }
 
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error('Response body is not readable');
+        await consumeSseStream(response, (event) => {
+          reducer.handleEvent(event);
+          if (event.usage) onUsageWindow?.(reducer.liveWindow);
+        });
 
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          // Keep incomplete line in buffer
-          buffer = lines.pop() || '';
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || !trimmed.startsWith('data: ')) continue;
-
-            const data = trimmed.slice(6).trim();
-            if (data === '[DONE]') continue;
-
-            try {
-              const event: ChatStreamEvent = JSON.parse(data);
-              onChunk?.(event);
-            } catch {
-              // Skip malformed SSE data
-            }
-          }
-        }
-
-        onComplete?.();
+        onComplete?.(reducer.streamSessionId);
       } catch (err: unknown) {
         const error = err as Error;
         if (error.name === 'AbortError') {
-          onComplete?.();
+          onComplete?.(reducer.streamSessionId);
         } else {
-          onError?.(error);
+          onError?.(reducer.streamSessionId, error);
         }
       } finally {
         abortRef.current = null;
         setIsStreaming(false);
       }
     },
-    [streamUrl, onChunk, onError, onComplete],
+    [streamUrl, errorFallbackText, onUsageWindow, onError, onComplete],
   );
 
   const stopStream = useCallback(() => {
