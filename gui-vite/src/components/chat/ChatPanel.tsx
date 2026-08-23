@@ -10,14 +10,16 @@ import {
   redoSessionMessage,
   respondApproval,
 } from '@/lib/api-client';
-import { ShieldAlert, Check, X } from 'lucide-react';
 import type { ApprovalDecision, ApprovalStatusSnapshot } from '@/lib/types';
 import { useChatStream } from '@/hooks/useChatStream';
+import { usePolling } from '@/hooks/use-polling';
+import { useSessionHistory } from '@/hooks/use-session-history';
+import { lastMessageUsage, sumSessionUsage } from '@/lib/token-usage';
 import { MessageSquare, Loader2, Undo2 } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
-import type { StreamUsage } from '@/lib/types';
+import ApprovalBanner from './ApprovalBanner';
 import { PENDING_SESSION_KEY } from '@/lib/store';
 
 export default function ChatPanel() {
@@ -40,7 +42,8 @@ export default function ChatPanel() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [compressing, setCompressing] = useState(false);
-  const [wakePolling, setWakePolling] = useState(false);
+  /** 唤醒轮停止标记（轮询失败/会话删除时置位；下一轮任务通知重新开始） */
+  const [wakeStopped, setWakeStopped] = useState(false);
   /** 当前会话待审批操作（应用层授权卡片；wait_for_approval 模式挂起时出现） */
   const [pendingApproval, setPendingApproval] = useState<
     ApprovalStatusSnapshot['pending_approvals'][number] | null
@@ -52,44 +55,18 @@ export default function ChatPanel() {
       历史会话回退到 chatModels[selectedModel].context_length）。 */
   const liveWindowRef = useRef(0);
 
-  /** 当前会话自己的上下文占用：取本会话最后一条带 usage 的消息（消息级独立计算，
-      切换会话随 messages 变化——每个会话显示各自的占用，不再串值）。 */
-  const lastUsage = useMemo<StreamUsage | null>(() => {
-    const modelWindow =
-      chatModels.find((m) => m.name === selectedModel)?.context_length ?? liveWindowRef.current;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const u = messages[i].usage;
-      if (u && u.prompt_tokens > 0) {
-        return {
-          prompt_tokens: u.prompt_tokens,
-          completion_tokens: u.completion_tokens,
-          total_tokens: u.total_tokens,
-          cache_read: u.cache_read ?? 0,
-          cache_write: u.cache_write ?? 0,
-          context_window: modelWindow || 0,
-        };
-      }
-    }
-    return null;
-  }, [messages, chatModels, selectedModel]);
+  /** 当前会话自己的上下文占用（lib/token-usage 纯函数；切换会话随 messages 变化） */
+  const lastUsage = useMemo(
+    () =>
+      lastMessageUsage(
+        messages,
+        chatModels.find((m) => m.name === selectedModel)?.context_length ?? liveWindowRef.current,
+      ),
+    [messages, chatModels, selectedModel],
+  );
 
-  /** 当前会话 token 消耗汇总（跨全部消息 usage 累加；DSH 风格小字展示：
-   缓存未命中输入 / 缓存命中输入 / 输出 / 缓存命中率）。 */
-  const sessionUsage = useMemo(() => {
-    let uncachedInput = 0;
-    let cachedInput = 0;
-    let completion = 0;
-    for (const m of messages) {
-      const u = m.usage;
-      if (!u || u.prompt_tokens <= 0) continue;
-      const cached = u.cache_read ?? 0;
-      cachedInput += cached;
-      uncachedInput += Math.max(0, u.prompt_tokens - cached);
-      completion += u.completion_tokens;
-    }
-    if (uncachedInput + cachedInput + completion === 0) return null;
-    return { uncachedInput, cachedInput, completion };
-  }, [messages]);
+  /** 当前会话 token 消耗汇总（lib/token-usage 纯函数；DSH 风格小字展示） */
+  const sessionUsage = useMemo(() => sumSessionUsage(messages), [messages]);
 
   // Sync URL sessionId to store on mount / navigation
   useEffect(() => {
@@ -99,94 +76,60 @@ export default function ChatPanel() {
     }
   }, [urlSessionId, currentSessionId, setCurrentSession, setPendingClarification]);
 
-  // 刷新/直达 URL（如 /chat/{id}）时恢复历史消息：仅在挂载时执行一次。
-  // 列表点击路径由 SessionList.handleSelectSession 负责加载（导航后
-  // currentSessionId 已一致，此处不会重复请求）。
-  // StrictMode 双跑安全：ref 守卫只允许一次；cleanup 不取消请求（取消会
-  // 杀死唯一请求），改由「应用前校验当前 URL 仍指向该会话」防旧请求覆盖。
-  const loadedOnMountRef = useRef(false);
-  const activeUrlSessionRef = useRef<string | null>(null);
-  useEffect(() => {
-    activeUrlSessionRef.current = urlSessionId ?? null;
-  }, [urlSessionId]);
-  useEffect(() => {
-    if (loadedOnMountRef.current) return;
-    loadedOnMountRef.current = true;
-    if (!urlSessionId) return;
-    const sessionId = urlSessionId;
-    (async () => {
-      // 本地已有缓存（流式累积/之前看过）→ 直接显示，不重复拉历史
-      if (useAppStore.getState().hasSessionMessages(sessionId)) return;
-      try {
-        const data = await fetchSessionMessages(sessionId);
-        if (activeUrlSessionRef.current === sessionId) {
-          useAppStore.getState().setMessages(data.messages);
-        }
-      } catch {
-        // 加载失败保持空列表（与 reloadSession 行为一致）
-      }
-    })();
-  }, [urlSessionId]);
+  // 历史加载（挂载恢复 + reloadSession）收敛在 use-session-history
+  const { reloadSession } = useSessionHistory(urlSessionId);
 
   // ADR-013：唤醒轮自动刷新——会话末尾是后台任务 System 通知时轮询会话消息，
-  // 直到出现新的非空 assistant 消息（主 agent 自动汇总结果，无需用户操作）
+  // 直到出现新的非空 assistant 消息（主 agent 自动汇总结果，无需用户操作）。
+  // 轮询语义收敛在 usePolling；enabled 派生自会话/流状态与任务通知。
+  const lastMsg = messages[messages.length - 1];
+  const hasTaskNotice = lastMsg?.role === 'system' && lastMsg.content.includes('后台任务');
+  const wakeConditionsMet = !!currentSessionId && streamStatus !== 'streaming' && hasTaskNotice;
+  // 条件重新满足（新一轮任务通知）时重置停止标记，恢复轮询
   useEffect(() => {
-    if (!currentSessionId || streamStatus === 'streaming') return;
-    const last = messages[messages.length - 1];
-    const hasTaskNotice = last?.role === 'system' && last.content.includes('后台任务');
-    if (!hasTaskNotice) return;
-
-    setWakePolling(true);
-    const timer = setInterval(async () => {
-      try {
-        const data = await fetchSessionMessages(currentSessionId);
-        const serverMessages = data.messages;
-        const lastServer = serverMessages[serverMessages.length - 1];
-        // 唤醒轮结果（非空 assistant）出现 → 刷新并停止轮询
-        if (lastServer && lastServer.role === 'assistant' && lastServer.content !== '') {
-          useAppStore.getState().setMessages(serverMessages);
-          setWakePolling(false);
-        }
-      } catch {
-        // 轮询失败（会话删除等）：停止，避免无限重试
-        setWakePolling(false);
+    if (wakeConditionsMet) setWakeStopped(false);
+  }, [wakeConditionsMet]);
+  usePolling(
+    async () => {
+      if (!currentSessionId) return;
+      const data = await fetchSessionMessages(currentSessionId);
+      const lastServer = data.messages[data.messages.length - 1];
+      // 唤醒轮结果（非空 assistant）出现 → 刷新（hasTaskNotice 随 messages 消失，
+      // enabled 自动翻 false 停止轮询）
+      if (lastServer && lastServer.role === 'assistant' && lastServer.content !== '') {
+        useAppStore.getState().setMessages(data.messages);
       }
-    }, 3000);
-    return () => {
-      clearInterval(timer);
-      setWakePolling(false);
-    };
-  }, [currentSessionId, messages, streamStatus]);
+    },
+    3000,
+    {
+      enabled: wakeConditionsMet && !wakeStopped,
+      // 轮询失败（会话删除等）：停止，避免无限重试
+      onError: () => setWakeStopped(true),
+    },
+  );
+  /** 唤醒轮指示（条件满足且未被停止） */
+  const wakeActive = wakeConditionsMet && !wakeStopped;
 
   // 应用层授权：轮询审批状态，当前会话有挂起操作时显示审批卡片。
   // wait_for_approval 模式下危险操作由应用审批（与会话/LLM 无关），
-  // 批准/拒绝后挂起的工具自动继续。
+  // 批准/拒绝后挂起的工具自动继续。轮询语义收敛在 usePolling。
+  usePolling(
+    async () => {
+      if (!currentSessionId) return;
+      const status = await fetchApprovalStatus();
+      const mine =
+        status.pending_approvals.find((p) => p.session_id === currentSessionId) ?? null;
+      setPendingApproval((prev) => {
+        if (prev?.request_id !== mine?.request_id) return mine;
+        return prev;
+      });
+    },
+    4000,
+    { enabled: !!currentSessionId }, // 轮询失败静默（下次重试）
+  );
+  // 无会话时清空审批卡
   useEffect(() => {
-    if (!currentSessionId) {
-      setPendingApproval(null);
-      return;
-    }
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const status = await fetchApprovalStatus();
-        if (cancelled) return;
-        const mine =
-          status.pending_approvals.find((p) => p.session_id === currentSessionId) ?? null;
-        setPendingApproval((prev) => {
-          if (prev?.request_id !== mine?.request_id) return mine;
-          return prev;
-        });
-      } catch {
-        /* 轮询失败静默（下次重试） */
-      }
-    };
-    void poll();
-    const timer = setInterval(poll, 4000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    if (!currentSessionId) setPendingApproval(null);
   }, [currentSessionId]);
 
   const handleApproval = async (decision: ApprovalDecision) => {
@@ -370,16 +313,7 @@ export default function ChatPanel() {
     }
   }, [streamStatus, lastRollbackMessageId, setLastRollbackMessageId]);
 
-  // 从后端重新加载会话消息（失败回滚，恢复与持久化一致的状态）。
-  // 按目标会话更新缓存：流归属会话非当前会话时也只写对应字典，不污染当前投影。
-  const reloadSession = useCallback(async (sessionId: string) => {
-    try {
-      const data = await fetchSessionMessages(sessionId);
-      useAppStore.getState().setSessionMessages(sessionId, data.messages);
-    } catch {
-      useAppStore.getState().setSessionMessages(sessionId, []);
-    }
-  }, []);
+
 
   // 提交对 Agent 追问的回答（流式）：确认后思考/工具/输出逐块渲染，
   // 避免整轮等待超过 HTTP 超时（此前非流式路径表现为"按钮转圈后报错"）。
@@ -484,7 +418,7 @@ export default function ChatPanel() {
               )}
 
             {/* Wake polling indicator: 后台任务完成后主 agent 正在自动汇总 */}
-            {wakePolling && streamStatus === 'idle' && (
+            {wakeActive && streamStatus === 'idle' && (
               <div
                 className="flex items-center gap-2 text-[var(--color-text-tertiary)] py-2"
                 aria-live="polite"
@@ -523,46 +457,12 @@ export default function ChatPanel() {
         )}
       </div>
 
-      {/* 应用层授权卡片：危险操作等待人工批准（与 LLM 澄清无关） */}
-      {pendingApproval && (
-        <div
-          role="alert"
-          aria-label="操作等待授权"
-          className="mx-4 mb-2 p-3 rounded-lg border border-amber-500/40 bg-amber-50/60 dark:bg-amber-950/20 text-sm"
-        >
-          <div className="flex items-center gap-2 text-amber-700 dark:text-amber-400">
-            <ShieldAlert size={16} className="shrink-0" />
-            <span className="font-medium">操作等待授权</span>
-            <span className="text-xs opacity-70 ml-auto">风险：{pendingApproval.risk_level}</span>
-          </div>
-          <p className="mt-1.5 text-xs font-mono text-[var(--color-text-primary)] break-all">
-            {pendingApproval.action_description}
-          </p>
-          <div className="mt-2 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => handleApproval('approve')}
-              disabled={approvalBusy}
-              className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
-            >
-              <Check size={12} />
-              批准
-            </button>
-            <button
-              type="button"
-              onClick={() => handleApproval('deny')}
-              disabled={approvalBusy}
-              className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
-            >
-              <X size={12} />
-              拒绝
-            </button>
-            <span className="text-xs text-[var(--color-text-tertiary)]">
-              批准后挂起的操作将自动继续执行
-            </span>
-          </div>
-        </div>
-      )}
+      {/* 应用层授权卡片（提取自 ChatPanel 内联；与 ApprovalPanel 共用语义） */}
+      <ApprovalBanner
+        approval={pendingApproval}
+        busy={approvalBusy}
+        onRespond={(decision) => void handleApproval(decision)}
+      />
 
       {/* Input area（模型/思考强度/上下文圆环 + 发送：DSH 布局） */}
       <ChatInput
