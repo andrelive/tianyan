@@ -5,6 +5,7 @@ import type { RetrievalTrace, RetrievalStepType } from '@/lib/types';
 import { Route, RefreshCw, Clock, Zap, FileText } from 'lucide-react';
 import { Spinner } from '@/components/ui/Spinner';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';
+import { formatTime } from '@/lib/utils';
 
 const STEP_TYPE_LABELS: Record<RetrievalStepType, string> = {
   intent_analysis: '意图分析',
@@ -18,13 +19,6 @@ const STEP_TYPE_LABELS: Record<RetrievalStepType, string> = {
 function formatDuration(ms: number): string {
   if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
   return `${ms}ms`;
-}
-
-/** RFC3339 时间戳 → 本地时间（HH:mm:ss）。 */
-function formatTime(ts: string): string {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleTimeString('zh-CN', { hour12: false });
 }
 
 export default function RetrievalTracesPanel() {

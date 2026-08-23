@@ -3,10 +3,11 @@ export function formatDate(iso: string): string {
   return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
 }
 
+/** RFC3339 → 本地时钟时间（HH:mm:ss；非法返回原文）。 */
 export function formatTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleTimeString('zh-CN', { hour12: false });
 }
 
 /** epoch 毫秒 → 本地日期时间（yyyy/M/d HH:mm:ss；空/非法返回 ''）。 */

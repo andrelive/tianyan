@@ -1,6 +1,9 @@
-import React from 'react';
+import { FieldRow } from '@/components/ui/FieldRow';
 
-/* ───────── Helper components (shared across tabs) ───────── */
+/* ───────── Helper components (shared across tabs) ─────────
+   FieldRow 原语收敛至 components/ui/FieldRow（settings 与 wizard 共用，E4）。 */
+
+export { FieldRow };
 
 export function Toggle({
   checked,
@@ -58,24 +61,6 @@ export function SliderField({
       <span className="text-xs text-[var(--color-text-secondary)] w-8 text-right tabular-nums">
         {value.toFixed(2)}
       </span>
-    </div>
-  );
-}
-
-export function FieldRow({
-  label,
-  children,
-  description,
-}: {
-  label: string;
-  children: React.ReactNode;
-  description?: string;
-}) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-sm font-medium text-[var(--color-text-primary)]">{label}</label>
-      {children}
-      {description && <p className="text-xs text-[var(--color-text-tertiary)]">{description}</p>}
     </div>
   );
 }

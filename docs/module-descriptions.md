@@ -451,12 +451,13 @@ Zustand 全局状态（三切片）+ Tailwind 主题变量 + react-router 路由
 | lib/token-usage.ts | token 用量纯函数（最近一轮占用 / 会话汇总；渲染层只做 useMemo 包装） | token-usage.ts |
 | lib/api-client.ts | API 客户端（fetch 封装 + 语义错误谓词 + 契约快照） | api-client.ts |
 | lib/config-transform.ts | 配置表单模型 ↔ 后端 TianyanConfig 双向映射 | config-transform.ts |
-| hooks/ | useChatStream（主对话/追问流共用生命周期）/ useSessionHistory / useResource / usePolling / useTheme / useKeyboardShortcuts | hooks/ |
+| hooks/ | useChatStream（主对话/追问流共用生命周期）/ useSessionHistory / useResource（含 enabled 条件加载）/ usePolling / useProviderScan（模型扫描状态机）/ useTheme / useKeyboardShortcuts | hooks/ |
+| components/ui/FieldRow | 表单字段行原语（settings 与 wizard 共用；E4 收敛 ×4 拷贝） | components/ui/FieldRow.tsx |
 | components/chat | 聊天域（ChatPanel 编排层/SessionPage/MessageBubble/工具卡片/思考选择/ApprovalBanner…） | components/chat/ |
 | components/settings | 设置面板（模型/存储/安全/日志/记忆/检索/外观/连接/MCP/人格等 tab） | components/settings/ |
 | components/workspace | 工作区（文件树/查看器/WorkspaceDiffPanel/目录选择） | components/workspace/ |
 | components/* | 技能/角色/工具/知识/记忆/任务/审批/洞察/检索轨迹/剪贴板/会话/向导/侧边栏/布局面板 | components/ |
-| components/ui/ | 视觉原语（Spinner/ErrorBanner/EmptyState/Modal/ConfirmDialog——confirm 替代 window.confirm） | components/ui/ |
+| components/ui/ | 视觉原语（Spinner/ErrorBanner/EmptyState/Modal/ConfirmDialog/FieldRow——confirm 替代 window.confirm） | components/ui/ |
 
 ### 4.2 前端 API 覆盖情况
 

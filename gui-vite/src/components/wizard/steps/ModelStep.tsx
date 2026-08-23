@@ -1,21 +1,6 @@
+import { FieldRow } from '@/components/ui/FieldRow';
 import { MODEL_CAPABILITIES, MODEL_CAPABILITY_LABELS, type ModelCapability } from '@/lib/types';
 import type { StepProps } from './wizard.types';
-
-interface FieldRowProps {
-  label: string;
-  children: React.ReactNode;
-  description?: string;
-}
-
-function FieldRow({ label, children, description }: FieldRowProps) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-sm font-medium text-[var(--color-text-primary)]">{label}</label>
-      {children}
-      {description && <p className="text-xs text-[var(--color-text-tertiary)]">{description}</p>}
-    </div>
-  );
-}
 
 export default function ModelStep({
   data,
