@@ -11,7 +11,8 @@ export interface ChatMessage {
   content: string;
   /** 思考过程文本（模型 reasoning；正文在 content，前端折叠展示） */
   thinking?: string;
-  /** 流式时间线段（按事件到达顺序累积；历史消息无此字段） */
+  /** 消息时间线段（服务端权威，ADR-019）：历史加载与流式边界事件均携带，
+   * 按 StructuredMessage.parts 真实到达顺序渲染思考/正文/工具调用 */
   segments?: MessageSegment[];
   /** 图片 data URL 列表（仅用户消息），如 data:image/png;base64,... */
   images?: string[];
