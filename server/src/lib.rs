@@ -330,7 +330,7 @@ pub async fn start_server(
 ) -> tianyan::common::error::Result<()> {
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
-        .map_err(|e| tianyan::TianyanError::Custom(format!("配置错误：无效地址: {}", e)))?;
+        .map_err(|e| tianyan::TianyanError::config(format!("无效地址: {}", e)))?;
 
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
         error!("Failed to bind to address {}: {}", addr, e);

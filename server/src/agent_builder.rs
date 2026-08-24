@@ -223,8 +223,8 @@ impl AgentBuilderFactory {
             .collect();
 
         if enabled_providers.is_empty() {
-            return Err(TianyanError::Custom(
-                "配置错误：没有启用的模型提供商，请先完成配置".to_string(),
+            return Err(TianyanError::config(
+                "没有启用的模型提供商，请先完成配置",
             ));
         }
 
@@ -236,22 +236,22 @@ impl AgentBuilderFactory {
                     .map(|k| k.is_empty())
                     .unwrap_or(true)
             {
-                return Err(TianyanError::Custom(format!(
-                    "配置错误：模型提供商 '{}' 未配置 API Key，请先完成配置",
+                return Err(TianyanError::config(format!(
+                    "模型提供商 '{}' 未配置 API Key，请先完成配置",
                     provider.name
                 )));
             }
 
             if provider.endpoint.is_empty() {
-                return Err(TianyanError::Custom(format!(
-                    "配置错误：模型提供商 '{}' 未配置 API 端点，请先完成配置",
+                return Err(TianyanError::config(format!(
+                    "模型提供商 '{}' 未配置 API 端点，请先完成配置",
                     provider.name
                 )));
             }
 
             if provider.models.is_empty() {
-                return Err(TianyanError::Custom(format!(
-                    "配置错误：模型提供商 '{}' 未配置任何模型，请先完成配置",
+                return Err(TianyanError::config(format!(
+                    "模型提供商 '{}' 未配置任何模型，请先完成配置",
                     provider.name
                 )));
             }
@@ -259,8 +259,8 @@ impl AgentBuilderFactory {
 
         // 确保至少有一个可用聊天模型
         if config.models.resolve(ModelCapability::Chat).is_none() {
-            return Err(TianyanError::Custom(
-                "配置错误：未找到可用的聊天模型（需要 chat 能力标签），请先完成配置".to_string(),
+            return Err(TianyanError::config(
+                "未找到可用的聊天模型（需要 chat 能力标签），请先完成配置",
             ));
         }
 

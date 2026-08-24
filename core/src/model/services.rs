@@ -43,19 +43,18 @@ impl ModelServices {
     pub async fn from_config(config: &ModelsConfig) -> Result<Self> {
         // 解析每个能力需要的模型
         let chat_ref = config.resolve(ModelCapability::Chat).ok_or_else(|| {
-            TianyanError::Custom("配置错误：未找到可用的聊天模型（需要 chat 能力标签）".into())
+            TianyanError::config("未找到可用的聊天模型（需要 chat 能力标签）")
         })?;
         let embedding_ref = config
             .resolve(ModelCapability::TextEmbedding)
             .or_else(|| config.resolve(ModelCapability::MultimodalEmbedding))
             .ok_or_else(|| {
-                TianyanError::Custom(
-                    "配置错误：未找到可用的嵌入模型（需要 text-embedding 或 multimodal-embedding 能力标签）"
-                        .into(),
+                TianyanError::config(
+                    "未找到可用的嵌入模型（需要 text-embedding 或 multimodal-embedding 能力标签）",
                 )
             })?;
         let vision_ref = config.resolve(ModelCapability::Vision).ok_or_else(|| {
-            TianyanError::Custom("配置错误：未找到可用的视觉模型（需要 vision 能力标签）".into())
+            TianyanError::config("未找到可用的视觉模型（需要 vision 能力标签）")
         })?;
 
         // 按需创建客户端（同一 provider 复用）
@@ -68,7 +67,7 @@ impl ModelServices {
                 return Ok(c.clone());
             }
             let provider = find_provider(&config.providers, &r.provider).ok_or_else(|| {
-                TianyanError::Custom(format!("配置错误：提供商 '{}' 未找到或未启用", r.provider))
+                TianyanError::config(format!("提供商 '{}' 未找到或未启用", r.provider))
             })?;
             let client = AsyncOpenAIClient::from_provider(provider)?;
             clients.insert(r.provider.clone(), client.clone());

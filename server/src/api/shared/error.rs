@@ -96,19 +96,16 @@ impl From<TianyanError> for ApiError {
         if err.is_timeout() {
             return ApiError::GatewayTimeout(err.to_string());
         }
+        // 配置错误（core 统一 KIND_CONFIG 语义构造）→ 400
+        if err.is_config() {
+            return ApiError::Config(err.to_string());
+        }
         match err {
             TianyanError::Io(e) => ApiError::Internal(format!("IO 错误：{}", e)),
             TianyanError::Json(e) => ApiError::BadRequest(format!("JSON 解析错误：{}", e)),
             TianyanError::Toml(e) => ApiError::BadRequest(format!("TOML 解析错误：{}", e)),
-            TianyanError::Custom(msg) => {
-                // 配置错误（core 侧 From<config::ConfigError> 统一前缀）→ 400；
-                // 其余语义在谓词链已分类，此处仅剩默认 Internal（ADR-014）
-                if msg.starts_with("配置错误：") {
-                    ApiError::Config(msg)
-                } else {
-                    ApiError::Internal(msg)
-                }
-            }
+            // 其余语义在谓词链已分类，此处仅剩默认 Internal（ADR-014）
+            TianyanError::Custom(msg) => ApiError::Internal(msg),
         }
     }
 }
@@ -174,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_from_tianyan_error() {
-        let tianyan_err = TianyanError::Custom("配置错误：无效的配置".to_string());
+        let tianyan_err = TianyanError::config("无效的配置");
         let api_err: ApiError = tianyan_err.into();
         match api_err {
             ApiError::Config(msg) => assert!(msg.contains("无效的配置")),

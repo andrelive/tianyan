@@ -52,15 +52,14 @@ impl SearchBackend {
             "bing" => Ok(Self::Bing),
             "searxng" => {
                 let endpoint = config.searxng_endpoint.clone().ok_or_else(|| {
-                    TianyanError::Custom(
-                        "配置错误：search_backend = \"searxng\" 需要配置 searxng_endpoint"
-                            .to_string(),
+                    TianyanError::config(
+                        "search_backend = \"searxng\" 需要配置 searxng_endpoint",
                     )
                 })?;
                 Ok(Self::Searxng(endpoint.trim_end_matches('/').to_string()))
             }
-            other => Err(TianyanError::Custom(format!(
-                "配置错误：未知的 search_backend: {other}（支持 duckduckgo / bing / searxng）"
+            other => Err(TianyanError::config(format!(
+                "未知的 search_backend: {other}（支持 duckduckgo / bing / searxng）"
             ))),
         }
     }
@@ -99,7 +98,7 @@ impl WebSearchClient {
                 "; +local desktop agent)"
             ))
             .build()
-            .map_err(|e| TianyanError::Custom(format!("配置错误：构建 HTTP 客户端失败: {e}")))?;
+            .map_err(|e| TianyanError::config(format!("构建 HTTP 客户端失败: {e}")))?;
 
         Ok(Self {
             http,

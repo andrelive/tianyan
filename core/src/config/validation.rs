@@ -99,10 +99,7 @@ pub fn validate_storage_config(config: &StorageConfig) -> ValidationResult {
 pub fn validate_agent_config(config: &AgentConfig) -> ValidationResult {
     let mut errors = Vec::new();
     if let Err(e) = config.validate() {
-        errors.push(TianyanError::Custom(format!(
-            "配置错误：智能体配置错误：{}",
-            e
-        )));
+        errors.push(TianyanError::config(format!("智能体配置错误：{}", e)));
     }
     if errors.is_empty() {
         Ok(())
@@ -184,7 +181,7 @@ mod tests {
     #[test]
     fn test_validation_errors_to_strings() {
         let errors = vec![
-            TianyanError::Custom("配置错误：未找到配置文件".to_string()),
+            TianyanError::config("未找到配置文件"),
             TianyanError::Custom(format!("'{}' 的配置值无效：{}", "test", "缺少必要字段")),
         ];
         let strings = validation_errors_to_strings(errors);

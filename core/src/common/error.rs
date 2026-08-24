@@ -57,6 +57,9 @@ impl TianyanError {
     /// "操作已取消"类错误的统一消息前缀（用户停止/任务取消）。
     pub const KIND_CANCELLED: &str = "操作已取消";
 
+    /// "配置错误"类错误的统一消息前缀（配置缺失/校验失败/客户端配置非法）。
+    pub const KIND_CONFIG: &str = "配置错误";
+
     /// 构造"条目未找到"错误（与"不存在"语义统一的入口）。
     pub fn not_found<T: std::fmt::Display>(detail: T) -> Self {
         TianyanError::Custom(format!("{}：{}", Self::NOT_FOUND_PREFIX, detail))
@@ -85,6 +88,11 @@ impl TianyanError {
     /// 构造"操作已取消"错误（用户停止/任务取消；判断用 [`Self::is_cancelled`]）。
     pub fn cancelled<T: std::fmt::Display>(detail: T) -> Self {
         TianyanError::Custom(format!("{}：{}", Self::KIND_CANCELLED, detail))
+    }
+
+    /// 构造"配置错误"错误（配置缺失/校验失败；判断用 [`Self::is_config`]）。
+    pub fn config<T: std::fmt::Display>(detail: T) -> Self {
+        TianyanError::Custom(format!("{}：{}", Self::KIND_CONFIG, detail))
     }
 
     /// 判断是否为"目标不存在"类错误（条目未找到 / 目录未找到 / IO NotFound）。
@@ -127,6 +135,11 @@ impl TianyanError {
     pub fn is_cancelled(&self) -> bool {
         matches!(self, TianyanError::Custom(msg) if msg.starts_with(Self::KIND_CANCELLED))
     }
+
+    /// 判断是否为"配置错误"类错误（配置缺失/校验失败）。
+    pub fn is_config(&self) -> bool {
+        matches!(self, TianyanError::Custom(msg) if msg.starts_with(Self::KIND_CONFIG))
+    }
 }
 
 // ── From impls ──────────────────────────────────────────────
@@ -139,7 +152,7 @@ impl From<url::ParseError> for TianyanError {
 
 impl From<config::ConfigError> for TianyanError {
     fn from(err: config::ConfigError) -> Self {
-        TianyanError::Custom(format!("配置错误：{err}"))
+        TianyanError::config(err)
     }
 }
 
@@ -269,6 +282,16 @@ mod tests {
     }
 
     #[test]
+    fn test_config_constructor_and_predicate() {
+        let err = TianyanError::config("没有启用的模型提供商");
+        assert_eq!(err.to_string(), "配置错误：没有启用的模型提供商");
+        assert!(err.is_config());
+        // 其他错误不识别
+        assert!(!TianyanError::not_found("x").is_config());
+        assert!(!TianyanError::invalid_input("x").is_config());
+    }
+
+    #[test]
     fn test_kind_prefixes_do_not_collide() {
         // 各 KIND 前缀互不为对方前缀（谓词 starts_with 精确性）
         let kinds = [
@@ -278,6 +301,7 @@ mod tests {
             TianyanError::KIND_INVALID_INPUT,
             TianyanError::KIND_PERMISSION,
             TianyanError::KIND_TIMEOUT,
+            TianyanError::KIND_CONFIG,
         ];
         for a in kinds {
             for b in kinds {
