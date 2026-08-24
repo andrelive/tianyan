@@ -207,6 +207,46 @@ pub struct ChatStreamEvent {
     pub usage: Option<StreamUsage>,
 }
 
+impl ChatStreamEvent {
+    /// 错误事件（校验失败/处理失败）：chunk_type=Error，delta 为人类可读消息，
+    /// finish_reason=error。前端据此清理占位消息并提示；session_id 为空串时
+    /// 由前端按流归属会话处理。
+    pub fn error(stream_id: &str, session_id: &str, delta: impl Into<String>) -> Self {
+        Self {
+            id: stream_id.to_string(),
+            session_id: session_id.to_string(),
+            message: None,
+            delta: delta.into(),
+            finish_reason: Some("error".to_string()),
+            chunk_type: tianyan::agent::StreamChunkType::Error,
+            thinking: None,
+            skill_calls: None,
+            tool_call: None,
+            tool_result: None,
+            usage: None,
+        }
+    }
+
+    /// 消息边界事件（chunk_type=Message）：流开始携带用户消息、流结束携带
+    /// assistant 消息的完整结构——前端本地消息 id/内容直接来自服务端统一结构，
+    /// 不做两套形态的补丁同步。
+    pub fn message_boundary(stream_id: &str, session_id: &str, message: ChatMessage) -> Self {
+        Self {
+            id: stream_id.to_string(),
+            session_id: session_id.to_string(),
+            message: Some(message),
+            delta: String::new(),
+            finish_reason: None,
+            chunk_type: tianyan::agent::StreamChunkType::Message,
+            thinking: None,
+            skill_calls: None,
+            tool_call: None,
+            tool_result: None,
+            usage: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

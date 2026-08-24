@@ -142,19 +142,11 @@ impl ChatService {
         let stream_id = format!("chatcmpl-{}", short_uuid());
 
         if let Some(um) = user_message {
-            let event = ChatStreamEvent {
-                id: stream_id.clone(),
-                session_id: session_id.clone(),
-                message: Some(ChatMessage::from_structured_light(&um)),
-                delta: String::new(),
-                thinking: None,
-                finish_reason: None,
-                chunk_type: tianyan::agent::StreamChunkType::Message,
-                skill_calls: None,
-                tool_call: None,
-                tool_result: None,
-                usage: None,
-            };
+            let event = ChatStreamEvent::message_boundary(
+                &stream_id,
+                &session_id,
+                ChatMessage::from_structured_light(&um),
+            );
             if tx.send(event).await.is_err() {
                 debug!("客户端断开流式连接");
                 return Ok(());
@@ -173,19 +165,8 @@ impl ChatService {
                 }
                 Err(e) => {
                     error!("流式处理错误: {}", e);
-                    let event = ChatStreamEvent {
-                        id: stream_id.clone(),
-                        session_id: session_id.clone(),
-                        message: None,
-                        delta: format!("错误: {}", e),
-                        thinking: None,
-                        finish_reason: Some("error".to_string()),
-                        chunk_type: tianyan::agent::StreamChunkType::Error,
-                        skill_calls: None,
-                        tool_call: None,
-                        tool_result: None,
-                        usage: None,
-                    };
+                    let event =
+                        ChatStreamEvent::error(&stream_id, &session_id, format!("错误: {}", e));
                     if tx.send(event).await.is_err() {
                         debug!("客户端已断开，错误事件未送达");
                     }
@@ -208,19 +189,11 @@ impl ChatService {
                     .cloned()
             })
         {
-            let event = ChatStreamEvent {
-                id: stream_id.clone(),
-                session_id: session_id.clone(),
-                message: Some(ChatMessage::from_structured_light(&am)),
-                delta: String::new(),
-                thinking: None,
-                finish_reason: None,
-                chunk_type: tianyan::agent::StreamChunkType::Message,
-                skill_calls: None,
-                tool_call: None,
-                tool_result: None,
-                usage: None,
-            };
+            let event = ChatStreamEvent::message_boundary(
+                &stream_id,
+                &session_id,
+                ChatMessage::from_structured_light(&am),
+            );
             if tx.send(event).await.is_err() {
                 debug!("客户端断开流式连接");
             }
@@ -254,19 +227,11 @@ impl ChatService {
         let stream_id = format!("chatcmpl-{}", short_uuid());
 
         if let Some(um) = user_message {
-            let event = ChatStreamEvent {
-                id: stream_id.clone(),
-                session_id: session_id.to_string(),
-                message: Some(ChatMessage::from_structured_light(&um)),
-                delta: String::new(),
-                thinking: None,
-                finish_reason: None,
-                chunk_type: tianyan::agent::StreamChunkType::Message,
-                skill_calls: None,
-                tool_call: None,
-                tool_result: None,
-                usage: None,
-            };
+            let event = ChatStreamEvent::message_boundary(
+                &stream_id,
+                session_id,
+                ChatMessage::from_structured_light(&um),
+            );
             if tx.send(event).await.is_err() {
                 debug!("客户端断开流式连接");
                 return Ok(());
@@ -285,19 +250,9 @@ impl ChatService {
                 }
                 Err(e) => {
                     error!("流式处理错误: {}", e);
-                    let event = ChatStreamEvent {
-                        id: stream_id.clone(),
-                        session_id: session_id.to_string(),
-                        message: None,
-                        delta: format!("错误: {}", e),
-                        thinking: None,
-                        finish_reason: Some("error".to_string()),
-                        chunk_type: tianyan::agent::StreamChunkType::Error,
-                        skill_calls: None,
-                        tool_call: None,
-                        tool_result: None,
-                        usage: None,
-                    };
+                    let event = ChatStreamEvent::error(
+                        &stream_id, session_id, format!("错误: {}", e),
+                    );
                     if tx.send(event).await.is_err() {
                         debug!("客户端已断开，错误事件未送达");
                     }
@@ -319,19 +274,11 @@ impl ChatService {
                     .cloned()
             })
         {
-            let event = ChatStreamEvent {
-                id: stream_id.clone(),
-                session_id: session_id.to_string(),
-                message: Some(ChatMessage::from_structured_light(&am)),
-                delta: String::new(),
-                thinking: None,
-                finish_reason: None,
-                chunk_type: tianyan::agent::StreamChunkType::Message,
-                skill_calls: None,
-                tool_call: None,
-                tool_result: None,
-                usage: None,
-            };
+            let event = ChatStreamEvent::message_boundary(
+                &stream_id,
+                session_id,
+                ChatMessage::from_structured_light(&am),
+            );
             if tx.send(event).await.is_err() {
                 debug!("客户端断开流式连接");
             }

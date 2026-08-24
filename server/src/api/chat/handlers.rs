@@ -18,6 +18,20 @@ use crate::state::AppState;
 /// SSE 流式通道缓冲区大小。
 const SSE_CHANNEL_BUFFER: usize = 100;
 
+/// 校验失败 → 以标准 ChatStreamEvent（chunk_type=error）推送到 SSE 通道；
+/// 前端据此展示错误并清理占位消息。客户端断开时静默（debug 日志）。
+fn send_validation_error(tx: mpsc::Sender<Result<Event, Infallible>>, message: String) {
+    tokio::spawn(async move {
+        let id = uuid::Uuid::new_v4().to_string();
+        let event = ChatStreamEvent::error(&id, "", message);
+        if let Ok(json) = serde_json::to_string(&event) {
+            if tx.send(Ok(Event::default().data(json))).await.is_err() {
+                debug!("SSE 客户端已断开，错误事件未送达");
+            }
+        }
+    });
+}
+
 /// 追问回答处理器（非流式）
 pub async fn chat_clarify_handler(
     State(state): State<Arc<AppState>>,
@@ -52,31 +66,7 @@ pub async fn chat_clarify_stream_handler(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
 
     if let Err(e) = request.validate() {
-        let tx_clone = tx.clone();
-        tokio::spawn(async move {
-            let event = ChatStreamEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                session_id: String::new(),
-                message: None,
-                delta: e,
-                thinking: None,
-                finish_reason: None,
-                chunk_type: tianyan::agent::StreamChunkType::Error,
-                skill_calls: None,
-                tool_call: None,
-                tool_result: None,
-                usage: None,
-            };
-            if let Ok(json) = serde_json::to_string(&event) {
-                if tx_clone
-                    .send(Ok(Event::default().data(json)))
-                    .await
-                    .is_err()
-                {
-                    debug!("SSE 客户端已断开，错误事件未送达");
-                }
-            }
-        });
+        send_validation_error(tx.clone(), e);
         return Sse::new(ReceiverStream::new(rx));
     }
 
@@ -117,33 +107,7 @@ pub async fn chat_stream_handler(
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
 
     if let Err(e) = request.validate() {
-        let tx_clone = tx.clone();
-        tokio::spawn(async move {
-            // 以标准 ChatStreamEvent 发送 error（chunk_type=error），
-            // 前端据此展示错误并清理占位消息。
-            let event = ChatStreamEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                session_id: String::new(),
-                message: None,
-                delta: e,
-                thinking: None,
-                finish_reason: None,
-                chunk_type: tianyan::agent::StreamChunkType::Error,
-                skill_calls: None,
-                tool_call: None,
-                tool_result: None,
-                usage: None,
-            };
-            if let Ok(json) = serde_json::to_string(&event) {
-                if tx_clone
-                    .send(Ok(Event::default().data(json)))
-                    .await
-                    .is_err()
-                {
-                    debug!("SSE 客户端已断开，错误事件未送达");
-                }
-            }
-        });
+        send_validation_error(tx.clone(), e);
         return Sse::new(ReceiverStream::new(rx));
     }
 
