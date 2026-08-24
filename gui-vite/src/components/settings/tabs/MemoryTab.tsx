@@ -1,4 +1,4 @@
-import { Toggle, SliderField, FieldRow, SectionTitle } from './shared';
+import { Toggle, SliderField, FieldRow, SectionTitle, INPUT_CLASS } from './shared';
 import type { ConfigState } from '@/lib/types';
 
 interface MemoryTabProps {
@@ -17,7 +17,7 @@ export default function MemoryTab({ config, onUpdateField }: MemoryTabProps) {
             min={1}
             value={config.max_session_memory}
             onChange={(e) => onUpdateField('max_session_memory', parseInt(e.target.value) || 8000)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
           />
         </FieldRow>
         <FieldRow label="长期记忆上限">
@@ -28,7 +28,7 @@ export default function MemoryTab({ config, onUpdateField }: MemoryTabProps) {
             onChange={(e) =>
               onUpdateField('max_long_term_memory', parseInt(e.target.value) || 10000)
             }
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
           />
         </FieldRow>
         <FieldRow label="重要性阈值">
@@ -63,7 +63,7 @@ export default function MemoryTab({ config, onUpdateField }: MemoryTabProps) {
               onChange={(e) =>
                 onUpdateField('consolidation_interval', parseInt(e.target.value) || 3600)
               }
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              className={INPUT_CLASS}
             />
           </FieldRow>
         )}

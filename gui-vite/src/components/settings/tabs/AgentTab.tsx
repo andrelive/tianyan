@@ -1,4 +1,4 @@
-import { FieldRow, SectionTitle } from './shared';
+import { FieldRow, NumberInput, SectionTitle, TextInput } from './shared';
 import type { ConfigState } from '@/lib/types';
 
 interface AgentTabProps {
@@ -18,33 +18,30 @@ export default function AgentTab({ config, onUpdateField }: AgentTabProps) {
 
         <div className="grid grid-cols-2 gap-4 pt-2">
           <FieldRow label="默认 Top-K">
-            <input
-              type="number"
+            <NumberInput
+              value={config.default_top_k}
+              onChange={(v) => onUpdateField('default_top_k', v)}
               min={1}
               max={100}
-              value={config.default_top_k}
-              onChange={(e) => onUpdateField('default_top_k', parseInt(e.target.value) || 5)}
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              fallback={5}
             />
           </FieldRow>
           <FieldRow label="最大对话轮次">
-            <input
-              type="number"
+            <NumberInput
+              value={config.max_turns}
+              onChange={(v) => onUpdateField('max_turns', v)}
               min={1}
               max={200}
-              value={config.max_turns}
-              onChange={(e) => onUpdateField('max_turns', parseInt(e.target.value) || 200)}
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              fallback={200}
             />
           </FieldRow>
           <FieldRow label="学习规则 Top-K">
-            <input
-              type="number"
+            <NumberInput
+              value={config.learned_rules_top_k}
+              onChange={(v) => onUpdateField('learned_rules_top_k', v)}
               min={1}
               max={50}
-              value={config.learned_rules_top_k}
-              onChange={(e) => onUpdateField('learned_rules_top_k', parseInt(e.target.value) || 5)}
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              fallback={5}
             />
           </FieldRow>
         </div>
@@ -52,13 +49,11 @@ export default function AgentTab({ config, onUpdateField }: AgentTabProps) {
         {/* 工作目录：Agent 执行命令/读写文件的基础目录，会话回退快照的根目录 */}
         <div className="pt-2">
           <FieldRow label="工作目录">
-            <input
-              type="text"
-              aria-label="工作目录"
+            <TextInput
               value={config.working_directory}
-              onChange={(e) => onUpdateField('working_directory', e.target.value)}
+              onChange={(v) => onUpdateField('working_directory', v)}
               placeholder="留空 = 使用进程当前目录（如 E:\\code\\my-project）"
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              ariaLabel="工作目录"
             />
           </FieldRow>
           <p className="mt-1.5 text-xs text-[var(--color-text-tertiary)]">

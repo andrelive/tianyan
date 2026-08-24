@@ -10,7 +10,7 @@ import {
   ChevronDown,
   ChevronRight,
 } from 'lucide-react';
-import { Toggle, FieldRow } from './shared';
+import { Toggle, FieldRow, INPUT_CLASS } from './shared';
 import type {
   ProviderConfigState,
   ProviderModelEntry,
@@ -490,7 +490,7 @@ export default function ProviderCard({
             type="text"
             value={p.name}
             onChange={(e) => onUpdateProvider('name', e.target.value)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
             placeholder="openai"
           />
         </FieldRow>
@@ -499,7 +499,7 @@ export default function ProviderCard({
             type="text"
             value={p.endpoint}
             onChange={(e) => onUpdateProvider('endpoint', e.target.value)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
             placeholder="https://api.openai.com/v1"
           />
         </FieldRow>
@@ -525,7 +525,7 @@ export default function ProviderCard({
             type="password"
             value={p.api_key}
             onChange={(e) => onUpdateProvider('api_key', e.target.value)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
             placeholder="sk-... 或 ${ENV_VAR}"
           />
         </FieldRow>

@@ -1,4 +1,4 @@
-import { Toggle, FieldRow, SectionTitle } from './shared';
+import { Toggle, FieldRow, NumberInput, SectionTitle, TextInput, INPUT_CLASS } from './shared';
 import type { ConfigState } from '@/lib/types';
 
 interface StorageTabProps {
@@ -15,27 +15,23 @@ export default function StorageTab({ config, onUpdateField }: StorageTabProps) {
           label="数据目录"
           description="数据库（tianyan.db）、向量索引、快照等所有本地数据的存储路径"
         >
-          <input
-            type="text"
+          <TextInput
             value={config.data_dir}
-            onChange={(e) => onUpdateField('data_dir', e.target.value)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            onChange={(v) => onUpdateField('data_dir', v)}
             placeholder="~/.local/share/tianyan"
           />
         </FieldRow>
         <FieldRow label="集合名称" description="向量库中的集合/表名">
-          <input
-            type="text"
+          <TextInput
             value={config.collection_name}
-            onChange={(e) => onUpdateField('collection_name', e.target.value)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            onChange={(v) => onUpdateField('collection_name', v)}
           />
         </FieldRow>
         <FieldRow label="向量维度" description="向量嵌入的维度数，通常取决于使用的模型">
           <select
             value={config.vector_dimension}
             onChange={(e) => onUpdateField('vector_dimension', parseInt(e.target.value))}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
           >
             <option value="384">384</option>
             <option value="768">768</option>
@@ -45,12 +41,11 @@ export default function StorageTab({ config, onUpdateField }: StorageTabProps) {
           </select>
         </FieldRow>
         <FieldRow label="最大存储 (字节)">
-          <input
-            type="number"
-            min={0}
+          <NumberInput
             value={config.max_storage_size}
-            onChange={(e) => onUpdateField('max_storage_size', parseInt(e.target.value) || 0)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            onChange={(v) => onUpdateField('max_storage_size', v)}
+            min={0}
+            fallback={0}
           />
         </FieldRow>
         <div className="flex items-end pb-1">

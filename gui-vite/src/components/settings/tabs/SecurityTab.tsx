@@ -1,4 +1,4 @@
-import { Toggle, FieldRow, SectionTitle } from './shared';
+import { Toggle, FieldRow, SectionTitle, INPUT_CLASS } from './shared';
 import type { ConfigState } from '@/lib/types';
 
 interface SecurityTabProps {
@@ -51,7 +51,7 @@ export default function SecurityTab({ config, onUpdateField }: SecurityTabProps)
               min={0}
               value={config.max_file_size}
               onChange={(e) => onUpdateField('max_file_size', parseInt(e.target.value) || 0)}
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              className={INPUT_CLASS}
             />
           </FieldRow>
         </div>

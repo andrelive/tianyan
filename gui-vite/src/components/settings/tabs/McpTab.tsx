@@ -11,7 +11,7 @@ import {
   testMcpServer,
 } from '@/lib/api-client';
 import type { McpServerEntry } from '@/lib/types';
-import { Toggle, FieldRow, SectionTitle } from './shared';
+import { Toggle, FieldRow, SectionTitle, INPUT_CLASS } from './shared';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 
 interface ServerTestStatus {
@@ -315,7 +315,7 @@ export default function McpTab() {
               type="text"
               value={formName}
               onChange={(e) => setFormName(e.target.value)}
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              className={INPUT_CLASS}
               placeholder="例如: filesystem-server"
             />
           </FieldRow>
@@ -325,7 +325,7 @@ export default function McpTab() {
               type="text"
               value={formCommand}
               onChange={(e) => setFormCommand(e.target.value)}
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              className={INPUT_CLASS}
               placeholder="例如: npx"
             />
           </FieldRow>
@@ -335,7 +335,7 @@ export default function McpTab() {
               type="text"
               value={formArgs}
               onChange={(e) => setFormArgs(e.target.value)}
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              className={INPUT_CLASS}
               placeholder="例如: @anthropic/mcp-serve, start"
             />
           </FieldRow>
@@ -345,7 +345,7 @@ export default function McpTab() {
               type="text"
               value={formEnv}
               onChange={(e) => setFormEnv(e.target.value)}
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              className={INPUT_CLASS}
               placeholder="例如: GITHUB_TOKEN=ghp_xxx, API_KEY=sk-xxx"
             />
           </FieldRow>
@@ -355,7 +355,7 @@ export default function McpTab() {
               type="text"
               value={formDescription}
               onChange={(e) => setFormDescription(e.target.value)}
-              className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+              className={INPUT_CLASS}
               placeholder="文件系统操作、代码搜索等"
             />
           </FieldRow>

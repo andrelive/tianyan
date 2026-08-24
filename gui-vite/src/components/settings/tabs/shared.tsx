@@ -65,6 +65,67 @@ export function SliderField({
   );
 }
 
+export const INPUT_CLASS =
+  'w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent';
+
+/** 统一文本输入（settings tabs 共用样式单点；原 32 处重复 className 收敛）。 */
+export function TextInput({
+  value,
+  onChange,
+  placeholder,
+  ariaLabel,
+  type = 'text',
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  ariaLabel?: string;
+  type?: 'text' | 'password';
+}) {
+  return (
+    <input
+      type={type}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      aria-label={ariaLabel}
+      className={INPUT_CLASS}
+    />
+  );
+}
+
+/** 统一数字输入（min/max 钳制 + 解析失败回退 fallback）。 */
+export function NumberInput({
+  value,
+  onChange,
+  min,
+  max,
+  step,
+  fallback,
+  ariaLabel,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+  fallback: number;
+  ariaLabel?: string;
+}) {
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      step={step}
+      value={value}
+      onChange={(e) => onChange(parseInt(e.target.value) || fallback)}
+      aria-label={ariaLabel}
+      className={INPUT_CLASS}
+    />
+  );
+}
+
 export function SectionTitle({ title }: { title: string }) {
   return (
     <h3 className="text-base font-semibold text-[var(--color-text-primary)] border-b border-[var(--color-border)] pb-2 mb-4">

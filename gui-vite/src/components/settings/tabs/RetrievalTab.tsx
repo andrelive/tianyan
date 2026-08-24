@@ -1,4 +1,4 @@
-import { Toggle, SliderField, FieldRow, SectionTitle } from './shared';
+import { Toggle, SliderField, FieldRow, SectionTitle, INPUT_CLASS } from './shared';
 import type { ConfigState } from '@/lib/types';
 
 interface RetrievalTabProps {
@@ -18,7 +18,7 @@ export default function RetrievalTab({ config, onUpdateField }: RetrievalTabProp
             max={100}
             value={config.retrieval_top_k}
             onChange={(e) => onUpdateField('retrieval_top_k', parseInt(e.target.value) || 10)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
           />
         </FieldRow>
         <FieldRow label="最低分数">
@@ -43,7 +43,7 @@ export default function RetrievalTab({ config, onUpdateField }: RetrievalTabProp
             max={10}
             value={config.l0_multiplier}
             onChange={(e) => onUpdateField('l0_multiplier', parseInt(e.target.value) || 3)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
           />
         </FieldRow>
         <FieldRow label="最大上下文 Token">
@@ -54,7 +54,7 @@ export default function RetrievalTab({ config, onUpdateField }: RetrievalTabProp
             step={256}
             value={config.max_context_tokens}
             onChange={(e) => onUpdateField('max_context_tokens', parseInt(e.target.value) || 4000)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
           />
         </FieldRow>
         <div className="flex items-center gap-3">
@@ -70,7 +70,7 @@ export default function RetrievalTab({ config, onUpdateField }: RetrievalTabProp
             min={1}
             value={config.cache_ttl}
             onChange={(e) => onUpdateField('cache_ttl', parseInt(e.target.value) || 300)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
           />
         </FieldRow>
       </div>

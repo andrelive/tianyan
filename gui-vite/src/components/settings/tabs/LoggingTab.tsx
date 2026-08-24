@@ -1,4 +1,4 @@
-import { Toggle, FieldRow, SectionTitle } from './shared';
+import { Toggle, FieldRow, SectionTitle, INPUT_CLASS } from './shared';
 import type { ConfigState } from '@/lib/types';
 
 interface LoggingTabProps {
@@ -15,7 +15,7 @@ export default function LoggingTab({ config, onUpdateField }: LoggingTabProps) {
           <select
             value={config.log_level}
             onChange={(e) => onUpdateField('log_level', e.target.value)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
           >
             <option value="debug">Debug</option>
             <option value="info">Info</option>
@@ -27,7 +27,7 @@ export default function LoggingTab({ config, onUpdateField }: LoggingTabProps) {
           <select
             value={config.log_format}
             onChange={(e) => onUpdateField('log_format', e.target.value)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
           >
             <option value="text">Text</option>
             <option value="json">JSON</option>
@@ -39,7 +39,7 @@ export default function LoggingTab({ config, onUpdateField }: LoggingTabProps) {
             min={1}
             value={config.log_max_file_size}
             onChange={(e) => onUpdateField('log_max_file_size', parseInt(e.target.value) || 10)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
           />
         </FieldRow>
         <FieldRow label="最大文件数">
@@ -49,7 +49,7 @@ export default function LoggingTab({ config, onUpdateField }: LoggingTabProps) {
             max={100}
             value={config.log_max_files}
             onChange={(e) => onUpdateField('log_max_files', parseInt(e.target.value) || 5)}
-            className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
+            className={INPUT_CLASS}
           />
         </FieldRow>
         <div className="flex items-center gap-6">
