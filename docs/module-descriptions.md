@@ -162,7 +162,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `executor/verification.rs` — 验证门控 + 结构化诊断（`StructuredDiagnostic` / `parse_json_diagnostics`，解析 `cargo check --message-format=json-render-diagnostics`）
 - `executor/judge.rs` — LLM-as-Judge 语义验证
 - `executor/hashline.rs` — hashline 锚点（`line_hash` 空白不敏感 FNV-1a；`format_line` 生成 `N#ID|content`；`parse_anchor` / `hash_line_pair`）
-- `executor/truncate.rs` — 统一截断层（`truncate_head` / `truncate_tail` / `truncate_spill`，`MAX_LINES = 2000` / `MAX_BYTES = 50KB`，UTF-8 安全）
+- `executor/truncate.rs` — 统一截断层（`truncate_head` / `truncate_tail` / `truncate_spill`，`MAX_LINES = 2000` / `MAX_BYTES = 50KB`；单行截断 `truncate_line` / `MAX_LINE_CHARS = 2000` / `TRUNCATED_MARKER`，UTF-8 安全）；字节级前缀截断单点在 `common/truncate.rs`（`truncate_utf8_boundary`，session 存储与可观测性共用）
 - `executor/edit.rs` — 语义化编辑（`EditSpec` / `apply_edits_to_content` 纯函数 bottom-up 原子应用 / `apply_edit_action` / `detect_eol` CRLF 保留）
 - `executor/patch.rs` — unified diff（`parse_patch` 解析 `*** Update File:` 信封 / `apply_patch_to_content` similar fuzzy seek / `apply_patch_action` 多文件原子，`FUZZY_RATIO_THRESHOLD = 0.75`）
 - `executor/fs.rs` — 文件浏览（`execute_glob` rg --files + 回退 walk、mtime 排序；`execute_list_dir` 目录优先 + 分页；`MAX_GLOB_RESULTS = 200`）
@@ -208,7 +208,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 **职责**：工作区快照（会话回退/撤销回退），ADR-006 定义的 VFS 例外（独立文件存储于 `{data_dir}/snapshots/`，不经 VFS）。编程助手落地（ADR-008）新增三项能力：gzip 压缩、GC、similar diff。
 
 **模块组织**：
-- `snapshot/mod.rs` — `SnapshotManager`：内容寻址对象库（sha256-of-raw 键，全局去重）+ 树文件（`trees/{index}.json`）+ redo 增量（`redo/`）
+- `snapshot/mod.rs` — `SnapshotManager`：内容寻址对象库（sha256-of-raw 键，全局去重）+ 树文件（`trees/{index}.json`）+ redo 增量（`redo/`）；重做子系统独立子模块 `snapshot/redo.rs`（`save_redo`/`load_redo`/`has_redo`，按消息 ID 键组织，与 capture/restore/diff/gc 正交）
 - **gzip 压缩**（`flate2`）：对象以 gzip 流写入，读取时按魔数 `0x1f 0x8b`（`GZIP_MAGIC`）识别，legacy 未压缩对象向后兼容；对象键不变，去重语义不变
 - **`gc()` 标记-清除**：可达集 = 所有会话 `trees/*.json` + `redo/tree-*.json`，清理孤儿 redo cache 文件与不可达对象，返回 `GcStats`
 - **`diff(session_id, index)`**：经 `similar::TextDiff::from_lines` 生成 `DiffResult` / `FileDiff`（added / removed / modified / binary 分类 + unified 文本），服务 `/api/v1/workspace/diff`
@@ -313,7 +313,7 @@ soul → rules+memories → history(from compression_marker) → current input
 | 子模块 | 核心类型 | 说明 |
 |--------|---------|------|
 | `config` | `TianyanConfig`, `AgentConfig`, `ModelsConfig`, `ConfigStatus` | 全局配置管理，支持 TOML + env。查找顺序：`./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml` |
-| `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage`, `ContentPart`, `ImageUrl`, `LoggingConfig`, `TokenEstimator` | 通用错误（禁止引入新错误类型）、URI、向量、消息（含多模态 `content_parts`，ADR-010）、记忆类型、日志配置、token 估算（叶模块，无 core 内部依赖） |
+| `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage`, `ContentPart`, `ImageUrl`, `LoggingConfig`, `TokenEstimator` | 通用错误（禁止引入新错误类型）、URI、向量、消息（含多模态 `content_parts`，ADR-010）、记忆类型、日志配置、token 估算（叶模块，无 core 内部依赖）；横切单点：`truncate.rs`（UTF-8 边界截断唯一实现）、`http.rs`（reqwest 客户端工厂，超时/连接池/UA 策略一处定义） |
 | `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager`, `SessionStore`, `SessionRecall` | 会话管理，⚠️ ADR-018 VFS 例外：`SessionStore`（SQLite 权威存储，`session_messages` 完整消息 + `session_meta` 会话级状态，单事务原子取号 `MAX(seq)+1`，失败上抛）；`PersistentSessionManager::load_session_from_store()` 用 `compression_marker` 截断；截断常量单点定义于 `session/mod.rs`（`MAX_SESSION_MESSAGES=5000` / `KEEP_RECENT_MESSAGES=4800`）；`session_meta.header_json` 承载注入上下文快照（ADR-012）+ 会话元数据（created_at/title/ended_at，重启恢复；`list_sessions` 轻量元数据 + message_count，无幽灵会话） |
 | `memory` | `MemoryExtractor`, `ExtractionConfig` | 从会话文本中提取结构化记忆的纯功能，与调度/持久化解耦 |
 | `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（已通过 `knowledge_ingest` 工具集成到 Agent 流程）。ingestor/ 拆分为 mod + builder；`image/` 拆分为 types/processor/analyzer |
@@ -542,7 +542,7 @@ Tauri lib.rs::run()
 ---
 
 **文档版本**: 2026-08-07
-**最后更新**: 2026-08-07（编程助手落地同步：executor 新增 hashline/truncate/edit/patch/fs/search/symbols/project/test_discovery 子模块，新增 lsp 模块，snapshot 升级 gzip+GC+diff（ADR-007/ADR-008），工具 14→21，Agent 章节工具清单更新）
+**最后更新**: 2026-08（H/I/J 波架构收敛同步：截断/HTTP/工具元数据/工作目录解析/错误映射单点化；snapshot redo 独立子模块；AgentLoop 测试拆分；前端 ListDetailPanel/streaming-indicator/INPUT_CLASS 收敛）
 **历史**: 2026-08-06（Wave 6 重构后同步：executor 拆分 security/command/output_parse、tool_registry 4 域文件、approval//image//lancedb/ 目录化、SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉（ADR-007）、observability 2 文件、SessionManager 仅存 PersistentSessionManager、GcTask 删除投机代码、会话截断常量单点）
 **历史**: 2026-08-04（重构：storage→vfs，移除 planner/chunker/ModelRouter/TokenBudget/ConversationSummarizer/VisionEncoder/AgentHarness/AgentSkills wrapper，修正 ContentLoadStrategy→enum、L1 tokens→~2K、MemoryExtractionTrait→MemoryExtractor，反映 4 项核心架构决策，model/router+openai→provider，tasks→scheduler/tasks，executor 标注废弃，knowledge 确认未集成，session 确认已集成）
 **历史**: 2026-08-04（审查改进 16 项：knowledge_ingest 工具确认已接入 Agent 流程；ToolRegistry 拆分 execute_single 为 14 个独立工具方法；审批默认关闭无人值守、拒绝降级 ask_user 追问；TianyanError 新增 not_found/is_not_found 结构化错误分类；AppState 复用 ModelServices；SummaryTask 缓存 FIFO 淘汰；SSE 事件 id 语义对齐）

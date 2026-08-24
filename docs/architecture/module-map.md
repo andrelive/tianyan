@@ -22,11 +22,11 @@
 
 | 子模块 | 位置 | 职责 | 关键文件 |
 |--------|------|------|---------|
-| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 + 后台任务；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器/单调守卫/post-execute 监听器，DSH A1/A4 吸收）+ 内置可观测性监听器（`tool_registry/observability.rs`：统计/Trace/GEPA 历史/规则学习） | `coordinator.rs`, `loop.rs`, `tool_registry/`（含 `pipeline.rs`、`observability.rs`）, `session_state.rs`, `builder.rs`, `background.rs` |
-| `common` | `core/src/common/` | 通用类型、错误处理、日志配置、token 估算、`StructuredMessage`、多模态片段（`ContentPart`/`ImageUrl`） | `error.rs`, `logging.rs`, `token_estimator.rs`, `types/`（含 `retrieval_trace.rs`、`content_part.rs`） |
+| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 + 后台任务；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器/单调守卫/post-execute 监听器，DSH A1/A4 吸收）+ 内置可观测性监听器（`tool_registry/observability.rs`：统计/Trace/GEPA 历史/规则学习）；内置工具元数据单一事实源（`tool_registry/builtin_tools.rs`：schema/展示意图/短路清单） | `coordinator.rs`, `loop.rs`, `loop_tests.rs`, `tool_registry/`（含 `pipeline.rs`、`observability.rs`、`builtin_tools.rs`）, `session_state.rs`, `builder.rs`, `background.rs` |
+| `common` | `core/src/common/` | 通用类型、错误处理、日志配置、token 估算、`StructuredMessage`、多模态片段（`ContentPart`/`ImageUrl`）；横切单点：UTF-8 截断（`truncate.rs`）、HTTP 客户端工厂（`http.rs`） | `error.rs`, `logging.rs`, `token_estimator.rs`, `truncate.rs`, `http.rs`, `types/`（含 `retrieval_trace.rs`、`content_part.rs`） |
 | `config` | `core/src/config/` | TOML 配置管理 + 环境变量 + 向导 | `mod.rs`, `wizard.rs`, `validation.rs` |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 管线 + 组装） | `pipeline.rs`, `assembler.rs`, `retrieval/`, `compression/` |
-| `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 编程助手执行原语（hashline 编辑、patch、文件浏览、搜索、符号、测试发现）+ Web 工具（搜索/抓取） | `actions.rs`, `security.rs`, `command.rs`, `output_parse.rs`, `approval/`, `verification.rs`, `judge.rs`, `hashline.rs`, `truncate.rs`, `edit.rs`, `patch.rs`, `fs.rs`, `search.rs`, `symbols.rs`, `project.rs`, `test_discovery.rs`, `web.rs` |
+| `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 编程助手执行原语（hashline 编辑、patch、文件浏览、搜索、符号、测试发现）+ Web 工具（搜索/抓取）；统一截断层含单行截断（`truncate.rs`：`truncate_line`/`MAX_LINE_CHARS`） | `actions.rs`, `security.rs`, `command.rs`, `output_parse.rs`, `approval/`, `verification.rs`, `judge.rs`, `hashline.rs`, `truncate.rs`, `edit.rs`, `patch.rs`, `fs.rs`, `search.rs`, `symbols.rs`, `project.rs`, `test_discovery.rs`, `web.rs` |
 | `lsp` | `core/src/lsp/` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储） | `registry.rs`, `client.rs`, `diagnostics.rs` |
 | `knowledge` | `core/src/knowledge/` | 知识库导入（解析、图像、注入管道） | `ingestor/`, `parser.rs`, `image/` |
 | `memory` | `core/src/memory/` | 长期记忆提取 | `extractor.rs` |
@@ -35,7 +35,7 @@
 | `scheduler` | `core/src/scheduler/` | 定时任务调度器 + 任务实现 | `task_scheduler.rs`, `tasks/` |
 | `session` | `core/src/session/` | 会话管理（⚠️ ADR-018 VFS 例外：`SessionStore` SQLite 权威存储，原子取号 + 失败上抛；`PersistentSessionManager` 业务语义；`SessionRecall` FTS 回忆；`session_meta` 存 SessionHeader/injectable 快照）；截断常量单点（`MAX_SESSION_MESSAGES`/`KEEP_RECENT_MESSAGES`） | `store.rs`, `manager.rs`, `search.rs`, `types.rs` |
 | `skills` | `core/src/skills/` | 技能定义、执行、学习（GEPA 进化引擎） | `definition.rs`, `executor.rs`, `manager.rs`, `handlers/`, `learning/` |
-| `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退，⚠️ ADR-006 VFS 例外） | `mod.rs` |
+| `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退，⚠️ ADR-006 VFS 例外）；重做子系统独立（`redo.rs`，与 capture/restore/diff/gc 正交） | `mod.rs`, `redo.rs` |
 | `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `backend/sqlite_db.rs`, `vector/lancedb/`, `summary/engine.rs` |
 
 ---
@@ -61,13 +61,14 @@
 | 子模块 | 位置 | 职责 |
 |--------|------|------|
 | `lib/` | `gui-vite/src/lib/` | 类型定义、API 客户端、Zustand 状态管理、配置转换 |
-| `components/chat/` | `gui-vite/src/components/chat/` | 聊天面板（SSE 流式） |
+| `components/chat/` | `gui-vite/src/components/chat/` | 聊天面板（SSE 流式）；流式协议归约单点 `lib/chat-stream.ts`、思考指示器归属单点 `streaming-indicator.ts` |
 | `components/sidebar/` | `gui-vite/src/components/sidebar/` | 侧边栏（会话列表） |
 | `components/skills/` | `gui-vite/src/components/skills/` | 技能中心面板 |
 | `components/knowledge/` | `gui-vite/src/components/knowledge/` | 知识管理面板 |
 | `components/settings/` | `gui-vite/src/components/settings/` | 设置面板（14 Tab） |
 | `components/wizard/` | `gui-vite/src/components/wizard/` | 初次配置向导 |
 | `components/layout/` | `gui-vite/src/components/layout/` | 布局、错误边界、Toast |
+| `components/ui/` | `gui-vite/src/components/ui/` | 布局/输入原语（`ListDetailPanel` 列表-详情、`FieldRow`、`Spinner`、`ErrorBanner`、`EmptyState`、`ConfirmDialog`） |
 | `hooks/` | `gui-vite/src/hooks/` | 自定义 Hooks（SSE 流、键盘、主题） |
 
 ---
@@ -84,6 +85,7 @@
 | `server/src/api/vfs/` | 已删除 | VFS 管理 API 未完成，已移除 |
 | `AgentHarness` wrapper | 已删除 | 功能由 `Agent` 直接持有 |
 | `AgentSkills` wrapper | 已删除 | 功能由 `Agent` 直接持有 |
+| `hooks/use-debounced-value.ts` | 已删除 | 浅 hook 内联（唯一调用点 KnowledgeSearchTab 直接实现） |
 
 > **注**：存储后端已 trait 化（`StorageBackend` seam，ADR-005）。`LocalFileBackend` 为默认生产后端；`SqliteBackend` 已接入,通过配置 `[storage] backend = "sqlite"` 启用。
 
