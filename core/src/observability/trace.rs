@@ -169,7 +169,7 @@ impl TraceCollector {
             duration_ms,
             tokens: 0,
             success,
-            error: error.map(|e| truncate(&e, 300)),
+            error: error.map(|e| crate::common::truncate::truncate_utf8_boundary(&e, 300)),
             recorded_at: Utc::now().to_rfc3339(),
         });
     }
@@ -202,11 +202,11 @@ impl TraceCollector {
             turn_index: None,
             kind: SpanKind::Task.as_str().to_string(),
             name: description.to_string(),
-            detail: truncate(result_summary, 500),
+            detail: crate::common::truncate::truncate_utf8_boundary(result_summary, 500),
             duration_ms,
             tokens: 0,
             success,
-            error: error.map(|e| truncate(&e, 300)),
+            error: error.map(|e| crate::common::truncate::truncate_utf8_boundary(&e, 300)),
             recorded_at: Utc::now().to_rfc3339(),
         });
     }
@@ -346,19 +346,6 @@ fn row_to_span(row: &rusqlite::Row<'_>) -> rusqlite::Result<TraceSpan> {
     })
 }
 
-/// 截断长文本（观测数据控制体积）。
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
-        text.to_string()
-    } else {
-        let mut end = max_chars;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &text[..end])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,7 +435,7 @@ mod tests {
     #[test]
     fn test_truncate_unicode_boundary() {
         let long = "汉".repeat(200);
-        let t = truncate(&long, 100);
+        let t = crate::common::truncate::truncate_utf8_boundary(&long, 100);
         assert!(
             t.len() <= 100 + 3,
             "截断 + 省略号（3 字节）应在上限内: {}",

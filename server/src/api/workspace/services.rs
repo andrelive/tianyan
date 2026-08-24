@@ -427,7 +427,6 @@ fn strip_verbatim(path: &str) -> String {
     path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
 }
 
-
 /// 将 git 风格 unified diff（jsdiff `createTwoFilesPatch` 产物）归一化为
 /// core `parse_patch` 接受的 codex `*** Update File:` 信封；输入已是 codex
 /// 风格时原样透传。
@@ -489,5 +488,3 @@ fn strip_ab_prefix(path: &str) -> String {
         _ => p.to_string(),
     }
 }
-
-

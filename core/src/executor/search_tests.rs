@@ -199,7 +199,10 @@ async fn long_line_is_truncated_with_marker() {
     let results = out["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
     let text = results[0]["text"].as_str().unwrap();
-    assert!(text.contains(TRUNCATED_MARKER), "应含截断标记: {text}");
+    assert!(
+        text.contains(crate::executor::truncate::TRUNCATED_MARKER),
+        "应含截断标记: {text}"
+    );
     assert!(text.len() < 2500, "应被截断: len={}", text.len());
 }
 

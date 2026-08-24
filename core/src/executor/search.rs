@@ -18,9 +18,6 @@ use crate::common::error::TianyanError;
 
 /// 分页默认条数（search_engine 引用）。
 pub const DEFAULT_HEAD_LIMIT: usize = 200;
-/// 截断标记（search_tests 引用）。
-#[cfg(test)]
-pub(crate) const TRUNCATED_MARKER: &str = "…<truncated>";
 
 /// 输出模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

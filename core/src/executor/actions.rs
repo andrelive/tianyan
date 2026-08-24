@@ -14,9 +14,6 @@ use std::path::Path;
 use crate::executor::hashline;
 use crate::executor::truncate;
 
-/// 单行最大显示字符数（超出部分截断并追加 `…<truncated>` 标记）。
-const MAX_LINE_CHARS: usize = 2000;
-
 /// 执行文件读取操作（带行号锚点、offset/limit 窗口、截断标记、二进制嗅探与目录模式）。
 ///
 /// 签名从 `(path)` 扩展为 `(path, offset, limit)`：`offset` 1 起始（`Some(0)` 视为 1），
@@ -137,7 +134,7 @@ fn build_window(
         .enumerate()
         .skip(start)
         .take(end - start)
-        .map(|(i, line)| hashline::hash_line_pair(i + 1, &display_line(line)))
+        .map(|(i, line)| hashline::hash_line_pair(i + 1, &truncate::truncate_line(line).0))
         .collect();
     let message = window_truncated.then(|| {
         format!(
@@ -168,17 +165,6 @@ fn build_window(
         out["message"] = json!(m);
     }
     Ok(out)
-}
-
-/// 单行显示：超过 [`MAX_LINE_CHARS`] 个字符的行截断并追加 `…<truncated>` 标记。
-fn display_line(line: &str) -> String {
-    if line.chars().count() > MAX_LINE_CHARS {
-        let mut s: String = line.chars().take(MAX_LINE_CHARS).collect();
-        s.push_str("…<truncated>");
-        s
-    } else {
-        line.to_string()
-    }
 }
 
 /// 执行文件写入操作。

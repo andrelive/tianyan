@@ -250,9 +250,8 @@ impl ChatService {
                 }
                 Err(e) => {
                     error!("流式处理错误: {}", e);
-                    let event = ChatStreamEvent::error(
-                        &stream_id, session_id, format!("错误: {}", e),
-                    );
+                    let event =
+                        ChatStreamEvent::error(&stream_id, session_id, format!("错误: {}", e));
                     if tx.send(event).await.is_err() {
                         debug!("客户端已断开，错误事件未送达");
                     }

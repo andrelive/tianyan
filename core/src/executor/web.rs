@@ -52,9 +52,7 @@ impl SearchBackend {
             "bing" => Ok(Self::Bing),
             "searxng" => {
                 let endpoint = config.searxng_endpoint.clone().ok_or_else(|| {
-                    TianyanError::config(
-                        "search_backend = \"searxng\" 需要配置 searxng_endpoint",
-                    )
+                    TianyanError::config("search_backend = \"searxng\" 需要配置 searxng_endpoint")
                 })?;
                 Ok(Self::Searxng(endpoint.trim_end_matches('/').to_string()))
             }

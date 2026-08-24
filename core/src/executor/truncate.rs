@@ -142,6 +142,24 @@ fn truncate_head_with_marker(text: &str, marker: &str) -> Truncated {
     }
 }
 
+/// 单行显示最大字符数（超过截断并追加 TRUNCATED_MARKER）。
+pub const MAX_LINE_CHARS: usize = 2000;
+/// 单行截断标记。
+pub const TRUNCATED_MARKER: &str = "…<truncated>";
+
+/// 单行显示截断：超过 MAX_LINE_CHARS 个字符的行截断并追加标记。
+///
+/// 返回 (显示文本, 保留字节数)——保留字节数供偏移计算（search_engine 用）。
+pub fn truncate_line(line: &str) -> (String, usize) {
+    if line.chars().count() > MAX_LINE_CHARS {
+        let shown: String = line.chars().take(MAX_LINE_CHARS).collect();
+        let kept_bytes = shown.len();
+        (shown + TRUNCATED_MARKER, kept_bytes)
+    } else {
+        (line.to_string(), line.len())
+    }
+}
+
 #[cfg(test)]
 #[path = "truncate_tests.rs"]
 mod tests;

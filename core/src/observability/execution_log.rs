@@ -150,8 +150,12 @@ impl ExecutionLog {
     ) -> Result<(), TianyanError> {
         let tool_name = tool_name_from(&history.task_description);
         let category = categorize_by_keyword(&history.task_description).to_string();
-        let task_description = truncate_utf8(&history.task_description, MAX_TASK_DESCRIPTION);
-        let result = truncate_utf8(&history.result, MAX_RESULT_CHARS);
+        let task_description = crate::common::truncate::truncate_utf8_boundary(
+            &history.task_description,
+            MAX_TASK_DESCRIPTION,
+        );
+        let result =
+            crate::common::truncate::truncate_utf8_boundary(&history.result, MAX_RESULT_CHARS);
         let skills_used =
             serde_json::to_string(&history.skills_used).unwrap_or_else(|_| "[]".to_string());
         let steps_json = serde_json::to_string(&history.steps).unwrap_or_else(|_| "[]".to_string());
@@ -348,18 +352,6 @@ fn parse_delegated_role(task_description: &str) -> Option<String> {
         .and_then(|v| v.get("role").and_then(|r| r.as_str()).map(str::to_string))
 }
 
-/// UTF-8 边界安全的截断（超长追加省略号）。
-fn truncate_utf8(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
-}
-
 /// 构造 WHERE 子句与参数（since_ts / category 可选）。
 fn build_where(
     since_ts: Option<i64>,
@@ -474,10 +466,10 @@ mod tests {
     fn test_truncate_utf8_boundary() {
         // 中文多字节：截断点落在字符中间时回退到边界
         let s = "中文内容测试";
-        let t = truncate_utf8(s, 5);
+        let t = crate::common::truncate::truncate_utf8_boundary(s, 5);
         assert!(t.len() <= 5 + 1);
         assert!(t.ends_with('…'));
-        let t2 = truncate_utf8("short", 10);
+        let t2 = crate::common::truncate::truncate_utf8_boundary("short", 10);
         assert_eq!(t2, "short");
     }
 

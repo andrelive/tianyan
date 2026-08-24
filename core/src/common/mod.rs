@@ -7,6 +7,7 @@ pub mod error;
 pub mod llm_judge;
 pub mod logging;
 pub mod token_estimator;
+pub mod truncate;
 pub mod types;
 
 // 重新导出常用类型

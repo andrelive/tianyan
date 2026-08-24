@@ -425,21 +425,9 @@ fn extract_parts(msg: &StructuredMessage) -> (String, String) {
         }
     }
     (
-        truncate_utf8(&text, MAX_TEXT_CHARS),
-        truncate_utf8(&tool_text, MAX_TOOL_TEXT_CHARS),
+        crate::common::truncate::truncate_utf8_boundary(&text, MAX_TEXT_CHARS),
+        crate::common::truncate::truncate_utf8_boundary(&tool_text, MAX_TOOL_TEXT_CHARS),
     )
-}
-
-/// UTF-8 边界安全的截断。
-fn truncate_utf8(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }
 
 /// SQLite 错误包装（带 session 前缀）。

@@ -17,18 +17,16 @@ use serde_json::{json, Value};
 
 use crate::common::error::TianyanError;
 
+use crate::executor::truncate::truncate_line;
+
 use super::search::{OutputMode, SearchOptions};
 
-/// 单行最大显示字符数（与 search.rs 常量一致）。
-const MAX_LINE_CHARS: usize = 2000;
 /// 单条记录（含上下文行）最大字节数：超出则丢弃整条记录。
 const MAX_RECORD_BYTES: usize = 64 * 1024;
 /// 单条记录 submatch 上限。
 const MAX_SUBMATCHES: usize = 100;
 /// 收集的记录总数硬上限（内存与输出体积保护）。
 const MAX_TOTAL_MATCHES: usize = 5000;
-/// 截断标记。
-const TRUNCATED_MARKER: &str = "…<truncated>";
 
 /// 执行内嵌代码搜索，返回与 search.rs 相同的输出 JSON。
 pub fn execute_embedded_search(
@@ -328,17 +326,6 @@ fn scan_multiline(
             record["line_number"] = json!(1);
             records.push(record);
         }
-    }
-}
-
-/// 单行显示截断（与 search.rs truncate_line 一致）。
-fn truncate_line(line: &str) -> (String, usize) {
-    if line.chars().count() > MAX_LINE_CHARS {
-        let shown: String = line.chars().take(MAX_LINE_CHARS).collect();
-        let kept_bytes = shown.len();
-        (shown + TRUNCATED_MARKER, kept_bytes)
-    } else {
-        (line.to_string(), line.len())
     }
 }
 

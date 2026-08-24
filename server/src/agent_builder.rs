@@ -223,9 +223,7 @@ impl AgentBuilderFactory {
             .collect();
 
         if enabled_providers.is_empty() {
-            return Err(TianyanError::config(
-                "没有启用的模型提供商，请先完成配置",
-            ));
+            return Err(TianyanError::config("没有启用的模型提供商，请先完成配置"));
         }
 
         for provider in &enabled_providers {
