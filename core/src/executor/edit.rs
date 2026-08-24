@@ -43,6 +43,46 @@ pub fn detect_eol(content: &str) -> &'static str {
     }
 }
 
+/// 按行拆分内容（剥离行尾 `\r`；末尾 `\n` 产生的空串弹出，写回时恢复）。
+///
+/// 与 [`apply_patch`](crate::executor::patch) 共用同一 EOL 语义（I7）。
+pub(crate) fn split_lines(content: &str) -> (Vec<String>, bool) {
+    let mut lines: Vec<String> = content
+        .split('\n')
+        .map(|l| l.trim_end_matches('\r').to_string())
+        .collect();
+    let had_trailing_newline = content.ends_with('\n');
+    if had_trailing_newline {
+        lines.pop();
+    }
+    (lines, had_trailing_newline)
+}
+
+/// 以检测到的行尾风格 join 写回，保留原尾随换行。
+pub(crate) fn join_lines(lines: &[String], eol: &str, had_trailing_newline: bool) -> String {
+    let mut out = lines.join(eol);
+    if had_trailing_newline {
+        out.push_str(eol);
+    }
+    out
+}
+
+/// 区间重叠检测：按起始位置自底向上排序后，相邻区间相交即重叠。
+///
+/// 输入为半开区间 `(start, end)`；返回重叠区间的 1 起始索引对（错误消息用）。
+pub(crate) fn find_overlap(ranges: &[(usize, usize)]) -> Option<(usize, usize)> {
+    let mut order: Vec<usize> = (0..ranges.len()).collect();
+    order.sort_by(|&a, &b| ranges[b].0.cmp(&ranges[a].0));
+    for pair in order.windows(2) {
+        let upper = ranges[pair[0]];
+        let lower = ranges[pair[1]];
+        if lower.0 < upper.1 && upper.0 < lower.1 {
+            return Some((pair[1] + 1, pair[0] + 1));
+        }
+    }
+    None
+}
+
 /// 纯函数：对内容应用编辑（校验 + 自底向上应用），不涉及文件系统。
 ///
 /// 流程：
@@ -69,14 +109,7 @@ pub fn apply_edits_to_content(content: &str, edits: &[EditSpec]) -> Result<Strin
 
     let eol = detect_eol(content);
     // 剥离行尾 `\r` 并拆分为行；末尾 `\n` 产生的空串弹出，写回时恢复。
-    let mut lines: Vec<String> = content
-        .split('\n')
-        .map(|l| l.trim_end_matches('\r').to_string())
-        .collect();
-    let had_trailing_newline = content.ends_with('\n');
-    if had_trailing_newline {
-        lines.pop();
-    }
+    let (mut lines, had_trailing_newline) = split_lines(content);
     let total = lines.len();
 
     // ── 校验阶段（全部对照原始内容，任一失败即中止，不落盘）────────────
@@ -128,28 +161,22 @@ pub fn apply_edits_to_content(content: &str, edits: &[EditSpec]) -> Result<Strin
     }
 
     // ── 重叠检测：自底向上排序后，相邻区间起点落在前一区间内即重叠 ────
-    let mut order: Vec<usize> = (0..edits.len()).collect();
-    order.sort_by(|&a, &b| edits[b].start_line.cmp(&edits[a].start_line));
-    for pair in order.windows(2) {
-        let upper = &edits[pair[0]]; // 起始行较大者
-        let lower = &edits[pair[1]];
-        let upper_len = upper.old_lines.as_ref().map_or(1, |v| v.len());
-        let lower_len = lower.old_lines.as_ref().map_or(1, |v| v.len());
-        // 区间相交判定：[lower.start, lower.end) ∩ [upper.start, upper.end) ≠ ∅
-        let overlaps = lower.start_line < upper.start_line + upper_len
-            && upper.start_line < lower.start_line + lower_len;
-        if overlaps {
-            return Err(TianyanError::Custom(format!(
-                "executor: apply_edit: 编辑重叠：第{}处编辑（起始行 {}）与第{}处编辑（起始行 {}）重叠",
-                pair[1] + 1,
-                lower.start_line,
-                pair[0] + 1,
-                upper.start_line
-            )));
-        }
+    let ranges: Vec<(usize, usize)> = edits
+        .iter()
+        .map(|e| {
+            let len = e.old_lines.as_ref().map_or(1, |v| v.len());
+            (e.start_line - 1, e.start_line - 1 + len)
+        })
+        .collect();
+    if let Some((a, b)) = find_overlap(&ranges) {
+        return Err(TianyanError::Custom(format!(
+            "executor: apply_edit: 编辑重叠：第{a}处编辑与第{b}处编辑重叠"
+        )));
     }
 
     // ── 应用阶段：自底向上（起始行降序）替换 ────────────────────────────
+    let mut order: Vec<usize> = (0..edits.len()).collect();
+    order.sort_by(|&a, &b| edits[b].start_line.cmp(&edits[a].start_line));
     for &i in &order {
         let edit = &edits[i];
         let old_len = edit.old_lines.as_ref().map_or(1, |v| v.len());
@@ -160,11 +187,7 @@ pub fn apply_edits_to_content(content: &str, edits: &[EditSpec]) -> Result<Strin
         }
     }
 
-    let mut out = lines.join(eol);
-    if had_trailing_newline {
-        out.push_str(eol);
-    }
-    Ok(out)
+    Ok(join_lines(&lines, eol, had_trailing_newline))
 }
 
 /// 异步动作：读取文件 → 纯函数应用 → 写回。

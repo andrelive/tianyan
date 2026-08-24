@@ -364,18 +364,12 @@ fn apply_hunks(
     label: Option<&str>,
 ) -> Result<(String, usize, usize)> {
     let eol = edit::detect_eol(content);
-    let mut lines: Vec<String> = if content.is_empty() {
-        Vec::new()
+    // 空内容特例：split_lines 对空串返回空行列表（无尾随换行语义）
+    let (mut lines, had_trailing_newline) = if content.is_empty() {
+        (Vec::new(), false)
     } else {
-        content
-            .split('\n')
-            .map(|l| l.trim_end_matches('\r').to_string())
-            .collect()
+        edit::split_lines(content)
     };
-    let had_trailing_newline = !content.is_empty() && content.ends_with('\n');
-    if had_trailing_newline {
-        lines.pop();
-    }
 
     // 定位阶段：全部对照原始内容
     let mut located: Vec<(usize, usize, usize)> = Vec::with_capacity(hunks.len());
@@ -392,19 +386,14 @@ fn apply_hunks(
         located.push((s, e, leading_trimmed));
     }
 
-    // 重叠检测 + 自底向上应用顺序
+    // 重叠检测 + 自底向上应用顺序（区间判定与 apply_edit 同一实现）
     let mut order: Vec<usize> = (0..hunks.len()).collect();
     order.sort_by(|&a, &b| located[b].0.cmp(&located[a].0));
-    let mut applied: Vec<(usize, usize)> = Vec::with_capacity(hunks.len());
-    for &i in &order {
-        let (s, e, _) = located[i];
-        if applied.iter().any(|&(as_, ae)| s < ae && as_ < e) {
-            return Err(TianyanError::conflict(format!(
-                "executor: apply_patch: 补丁块重叠：块 {}",
-                i + 1
-            )));
-        }
-        applied.push((s, e));
+    let ranges: Vec<(usize, usize)> = located.iter().map(|&(s, e, _)| (s, e)).collect();
+    if let Some((a, b)) = edit::find_overlap(&ranges) {
+        return Err(TianyanError::conflict(format!(
+            "executor: apply_patch: 补丁块重叠：块 {a} 与块 {b}"
+        )));
     }
 
     for &i in &order {
@@ -445,10 +434,7 @@ fn apply_hunks(
         })
         .sum();
 
-    let mut out = lines.join(eol);
-    if had_trailing_newline {
-        out.push_str(eol);
-    }
+    let out = edit::join_lines(&lines, eol, had_trailing_newline);
     Ok((out, hunks.len(), lines_changed))
 }
 

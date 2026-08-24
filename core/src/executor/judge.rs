@@ -95,7 +95,10 @@ impl LlmJudge {
         let stderr_trunc = truncate_output(stderr, 2000);
 
         let prompt = build_judge_prompt(command, &stdout_trunc, &stderr_trunc, exit_code);
-        run_judge(&self.model_service, &self.model, prompt, exit_code, || fallback_judgment(exit_code)).await
+        run_judge(&self.model_service, &self.model, prompt, exit_code, || {
+            fallback_judgment(exit_code)
+        })
+        .await
     }
 }
 
@@ -167,7 +170,14 @@ impl TaskReviewer for LlmTaskReviewer {
 
         let result_trunc = truncate_output(result, 2000);
         let prompt = build_task_review_prompt(description, &result_trunc);
-        run_judge(&self.model_service, &self.model, prompt, 0, fallback_task_review_pass).await
+        run_judge(
+            &self.model_service,
+            &self.model,
+            prompt,
+            0,
+            fallback_task_review_pass,
+        )
+        .await
     }
 }
 
@@ -217,10 +227,8 @@ async fn run_judge(
     exit_code: i32,
     fallback: impl FnOnce() -> Judgment,
 ) -> Judgment {
-    let request = ChatCompletionRequest::new(
-        model,
-        vec![crate::common::types::Message::user(&prompt)],
-    );
+    let request =
+        ChatCompletionRequest::new(model, vec![crate::common::types::Message::user(&prompt)]);
     match model_service.chat_completion(request).await {
         Ok(response) => {
             let Some(content) = response.first_choice_content() else {
