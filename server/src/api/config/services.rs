@@ -81,16 +81,8 @@ impl ConfigService {
         &self,
         config: TianyanConfig,
     ) -> Result<UpdateConfigResponse, ApiError> {
-        config.validate().map_err(ApiError::Config)?;
-
-        self.persist_config(&config).await?;
-
-        self.state
-            .update_config(config)
-            .await
-            // ? 传播：From<TianyanError> 语义谓词映射（热重载失败非 500 专属，
-            // not_found/invalid_input 等保持原分类，ADR-014）
-            ?;
+        // 校验 + 持久化 + 热重载（统一序列 persist_and_reload）
+        self.persist_and_reload(config).await?;
 
         info!("配置已更新并重载");
         Ok(UpdateConfigResponse {
@@ -185,16 +177,8 @@ impl ConfigService {
 
         config.models.preferences.chat = Some(model_ref);
 
-        config.validate().map_err(ApiError::Config)?;
-
-        self.persist_config(&config).await?;
-
-        self.state
-            .update_config(config)
-            .await
-            // ? 传播：From<TianyanError> 语义谓词映射（热重载失败非 500 专属，
-            // not_found/invalid_input 等保持原分类，ADR-014）
-            ?;
+        // 校验 + 持久化 + 热重载（统一序列 persist_and_reload）
+        self.persist_and_reload(config).await?;
 
         info!(model = model, "默认聊天模型已切换");
         Ok(UpdateConfigResponse {
