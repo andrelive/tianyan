@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { toErrorMessage } from '@/lib/errors';
 import { fetchKnowledgeSuggestions, searchKnowledge } from '@/lib/api-client';
 import type { KnowledgeSearchResult } from '@/lib/types';
@@ -37,9 +36,13 @@ export default function KnowledgeSearchTab() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [expandedResultId, setExpandedResultId] = useState<string | null>(null);
 
-  // 防抖统一收敛（useDebouncedValue）：搜索 + 建议共享同一稳定值，
-  // 两段手写 debounceRef 样板消失；请求级竞态仍由各自 cancelled 守卫
-  const debouncedQuery = useDebouncedValue(searchQuery, 300);
+  // 防抖（唯一调用点，内联实现）：搜索 + 建议共享同一稳定值；
+  // 快速连续变化只有最后一次在 300ms 后生效。
+  const [debouncedQuery, setDebouncedQuery] = useState(searchQuery);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
   const query = debouncedQuery.trim();
 
   useEffect(() => {
