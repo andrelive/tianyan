@@ -708,6 +708,7 @@ impl Agent {
             }
             Ok(AgentLoopResult::NeedsClarification {
                 question,
+                tool_call_id,
                 total_tokens,
                 ..
             }) => {
@@ -716,6 +717,7 @@ impl Agent {
                     question_type: QuestionType::OpenEnded,
                     options: None,
                     required: true,
+                    tool_call_id,
                 };
                 state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
                 // 持久化到会话头部：澄清回答是独立请求（load_and_build_state
@@ -798,7 +800,15 @@ impl Agent {
         (response, loop_tokens)
     }
 
-    /// 处理用户对追问的回答（流式版）：确认审批 + 以 Stream 模式跑澄清轮。
+    /// 处理用户对追问的回答（流式版）。
+    ///
+    /// 两条路径：
+    /// - **ask_user 工具链**（待处理追问携带 `tool_call_id`）：用户回答
+    ///   作为该工具调用的**工具结果**注入上下文（与普通工具轮同构），
+    ///   AgentLoop 从工具结果继续本回合——追问是本轮对话的一部分，
+    ///   模型看到完整的 调用→结果 对，上下文不丢问题。
+    /// - **审批降级**（无 `tool_call_id`）：确认语义（指纹放行被拒操作），
+    ///   回答作为用户消息跑一轮（原语义）。
     ///
     /// 增量经 sender 推送（思考/工具/输出逐块到达），前端可实时展示
     /// 而非等待整轮完成。
@@ -808,7 +818,11 @@ impl Agent {
         clarification_answers: &str,
         sender: StreamEventSender,
     ) {
-        if state.read().await.pending_clarification.is_none() {
+        let pending = {
+            let s = state.read().await;
+            s.pending_clarification.clone()
+        };
+        let Some(questions) = pending else {
             sender
                 .send_complete(
                     "当前没有待处理的追问",
@@ -819,13 +833,14 @@ impl Agent {
                 )
                 .await;
             return;
-        }
+        };
         state.write().await.pending_clarification = None;
         // 清除后同步持久化（回答已受理，重启/请求边界后不应残留追问）
         let sid = state.read().await.session_id.clone();
         self.persist_pending_clarification(&sid, &None).await;
 
         let session_id = state.read().await.session_id.clone();
+        let tool_call_id = questions.iter().find_map(|q| q.tool_call_id.clone());
 
         // 审批降级链路：与非流式路径一致的确认语义（指纹放行被拒操作）
         let approved = crate::executor::approval::is_user_confirmation(clarification_answers);
@@ -842,6 +857,20 @@ impl Agent {
             );
         }
 
+        // ask_user 工具链：回答作为工具结果，AgentLoop 恢复本回合
+        if let Some(tool_call_id) = tool_call_id {
+            self.continue_after_clarification(
+                state,
+                &session_id,
+                &tool_call_id,
+                clarification_answers,
+                sender,
+            )
+            .await;
+            return;
+        }
+
+        // 审批降级路径：回答作为用户消息跑一轮（保持原语义）
         let clarification_msg = Message::user(clarification_answers);
         let start = Instant::now();
         let _ = self
@@ -859,6 +888,76 @@ impl Agent {
                     thinking_effort: None,
                 },
             )
+            .await;
+    }
+
+    /// 澄清续轮（ask_user 工具链）：用户回答作为工具结果注入上下文，
+    /// AgentLoop 从工具结果继续本回合——不注入用户消息、不持久化
+    /// 用户消息（回答是工具的输入，不是新一轮用户输入）。
+    async fn continue_after_clarification(
+        &self,
+        state: &Arc<RwLock<SessionState>>,
+        session_id: &str,
+        tool_call_id: &str,
+        answer: &str,
+        sender: StreamEventSender,
+    ) {
+        // 1. 工具结果消息入库（内存 + session_manager；parent 挂接在
+        //    ask_user 调用消息之下——与普通工具轮的 observation 同构）
+        let tool_msg = Message::tool(tool_call_id, answer);
+        let parent_id = {
+            let s = state.read().await;
+            s.structured_messages.last().map(|m| m.id.clone())
+        };
+        let sm = ContextAssembler::message_to_structured(
+            &tool_msg,
+            session_id,
+            parent_id.as_deref(),
+            None,
+        );
+        state.write().await.add_structured_message(sm.clone());
+        if let Err(e) = self
+            .session_manager
+            .add_structured_message(session_id, sm)
+            .await
+        {
+            tracing::warn!(error = %e, "持久化追问回答（工具结果）失败");
+        }
+
+        // 2. 组装上下文（复用前缀缓存；回答已作为工具结果在消息链上，
+        //    不再作为用户消息注入）
+        let injectable = self.ensure_injectable(state, answer).await;
+        let mut messages = {
+            let s = state.read().await;
+            ContextAssembler::assemble(&s.structured_messages, &injectable, "")
+        };
+        insert_session_hint(&mut messages, session_id);
+
+        // 3. AgentLoop 从工具结果继续本回合
+        let start = Instant::now();
+        let parent = {
+            let s = state.read().await;
+            s.structured_messages.last().map(|m| m.id.clone())
+        };
+        let loop_result = self
+            .agent_loop
+            .clone()
+            .run_stream(
+                &mut messages,
+                sender.clone(),
+                session_id,
+                parent.as_deref(),
+                &self.default_model,
+                None,
+                None,
+            )
+            .await;
+
+        // 4. 结果处理（完成事件/状态/指标；澄清轮不触发压缩——原语义）
+        let (_response, loop_tokens) = self
+            .apply_loop_result(state, loop_result, start, &TurnMode::Stream { sender })
+            .await;
+        self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
             .await;
     }
 

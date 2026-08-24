@@ -63,6 +63,9 @@ pub enum AgentLoopResult {
     NeedsClarification {
         /// 追问问题。
         question: String,
+        /// 触发追问的 ask_user 工具调用 ID（工具链语义：用户回答作为该
+        /// 调用的工具结果注入上下文继续本回合；审批降级追问为 None）。
+        tool_call_id: Option<String>,
         /// Token 用量。
         total_tokens: TokenUsage,
         /// 最后一轮 LLM 调用的单轮用量（语义同 Answer）。
@@ -725,15 +728,39 @@ impl AgentLoop {
         // 返回 [] 而非 null——否则会走进"执行 0 个工具 → 继续循环"的死路）
         let tool_calls = assistant_msg.tool_calls.as_ref().filter(|c| !c.is_empty());
 
-        // Check for ask_user before adding to history
+        // ask_user：工具链语义——追问是本轮对话的一部分，不是割裂的额外操作。
+        // LLM 的 ask_user 调用与普通工具调用同等待遇：assistant 消息（含
+        // 工具调用）先入历史并持久化，用户回答随后作为该调用的工具结果
+        // 注入（澄清轮）——模型看到完整的 调用→结果 对，上下文不丢问题。
         if let Some(tool_calls) = tool_calls {
             if let Some(ask_call) = tool_calls.iter().find(|tc| tc.function.name == "ask_user") {
                 let params: AskUserParams = serde_json::from_str(&ask_call.function.arguments)
                     .map_err(|e| {
                         TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
                     })?;
+                // 与普通工具轮一致：助手消息进入内存历史并持久化
+                ctx.messages.push(assistant_msg.clone());
+                self.persist_message(ctx, assistant_msg, turn_usage.clone(), finish_reason)
+                    .await;
+                // 工具调用展示事件（前端 tool card；与普通工具轮同构）
+                if let Some(sender) = ctx.stream_sender {
+                    let event = crate::agent::types::ToolCallEvent {
+                        id: ask_call.id.clone(),
+                        name: ask_call.function.name.clone(),
+                        arguments: ask_call.function.arguments.clone(),
+                        presentation: self
+                            .tool_registry
+                            .presentation(&ask_call.function.name)
+                            .as_str()
+                            .to_string(),
+                    };
+                    sender
+                        .send_tool_call(&format!("调用: {}", ask_call.function.name), Some(event))
+                        .await;
+                }
                 return Ok(Some(AgentLoopResult::NeedsClarification {
                     question: params.question,
+                    tool_call_id: Some(ask_call.id.clone()),
                     total_tokens: ctx.total_tokens.clone(),
                     last_turn_usage: turn_usage.clone(),
                     turns: ctx.turn + 1,
@@ -802,6 +829,9 @@ impl AgentLoop {
                         "系统安全策略要求确认后才能执行该操作。\n\n操作详情：{}\n\n请回复「允许」继续执行，或回复「拒绝」终止。",
                         err_msg
                     ),
+                    // 审批降级路径：非 ask_user 工具调用，无 tool_call_id——
+                    // 回答走确认语义（confirm_pending_approval），不进工具链
+                    tool_call_id: None,
                     total_tokens: ctx.total_tokens.clone(),
                     last_turn_usage: turn_usage.clone(),
                     turns: ctx.turn + 1,

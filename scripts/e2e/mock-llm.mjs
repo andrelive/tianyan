@@ -46,16 +46,19 @@ const PORT = Number(process.env.MOCK_LLM_PORT ?? 8765);
 
 const created = () => Math.floor(Date.now() / 1000);
 
-/** True when the last user message contains ASK_TRIGGER (clarify scenario). */
+/** True when the LAST message is a user message containing ASK_TRIGGER
+ * (clarify scenario). Only the most recent user turn counts: a clarify round
+ * carries the whole history (whose user messages may contain the trigger),
+ * but its last message is the tool result — it must fall back to REPLY. */
 function wantsAskUser(messages) {
-  if (!Array.isArray(messages)) return false;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const m = messages[i];
-    if (m && m.role === 'user') {
-      return typeof m.content === 'string' && m.content.includes(ASK_TRIGGER);
-    }
-  }
-  return false;
+  if (!Array.isArray(messages) || messages.length === 0) return false;
+  const last = messages[messages.length - 1];
+  return (
+    last &&
+    last.role === 'user' &&
+    typeof last.content === 'string' &&
+    last.content.includes(ASK_TRIGGER)
+  );
 }
 
 /** Split text into exactly `parts` contiguous pieces (roughly equal length). */

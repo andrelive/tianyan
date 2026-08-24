@@ -20,6 +20,10 @@ pub struct ClarificationQuestion {
     pub options: Option<Vec<String>>,
     /// 是否必填。
     pub required: bool,
+    /// 对应的 ask_user 工具调用 ID（工具链语义：用户回答作为该调用的
+    /// 工具结果注入上下文继续本回合；None = 审批降级追问等非工具路径）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// 追问问题类型。
@@ -598,6 +602,7 @@ mod tests {
             question_type: QuestionType::OpenEnded,
             options: None,
             required: true,
+            tool_call_id: None,
         }];
         let resp = AgentResponse::clarification(questions.clone(), "追问内容".to_string());
         assert_eq!(resp.content, "追问内容");
@@ -671,6 +676,7 @@ mod tests {
                 question_type: ty,
                 options: None,
                 required: false,
+                tool_call_id: None,
             };
             let json = serde_json::to_string(&q).unwrap();
             assert!(
@@ -691,6 +697,7 @@ mod tests {
             question_type: QuestionType::Choice,
             options: Some(vec!["A".to_string(), "B".to_string()]),
             required: true,
+            tool_call_id: None,
         };
         let json = serde_json::to_string(&q).unwrap();
         let deserialized: ClarificationQuestion = serde_json::from_str(&json).unwrap();

@@ -432,12 +432,14 @@ mod tests {
                 question_type: QuestionType::Choice,
                 options: Some(vec!["Rust 项目".to_string(), "TypeScript 项目".to_string()]),
                 required: true,
+                tool_call_id: None,
             },
             ClarificationQuestion {
                 question: "项目名称是什么？".to_string(),
                 question_type: QuestionType::OpenEnded,
                 options: None,
                 required: true,
+                tool_call_id: None,
             },
         ];
 
