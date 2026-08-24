@@ -24,6 +24,14 @@ export default defineConfig({
         'src/main.tsx',
         'src/vite-env.d.ts',
       ],
+      // G5：覆盖率门禁（基线 2026-08：84.41/84.14/77.9/84.41；
+      // 阈值留余量防小波动误伤，新增代码不得显著拉低覆盖率）
+      thresholds: {
+        statements: 80,
+        branches: 75,
+        functions: 70,
+        lines: 80,
+      },
     },
     include: ['src/**/__tests__/**/*.{test,spec}.{ts,tsx}'],
   },
