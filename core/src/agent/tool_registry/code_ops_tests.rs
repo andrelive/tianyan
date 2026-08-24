@@ -293,7 +293,8 @@ async fn test_verify_build_success_fallback() {
         .execute_verify_build(r#"{"command":"echo hello"}"#, "test-session", false)
         .await
         .unwrap();
-    // 统一输出形状：passed + structured_diagnostics（可能为空数组）+ judge_method null。
+    // 统一输出形状：passed + structured_diagnostics（可能为空数组）+ judge_method
+    // （与门控路径一致的字符串标记：echo 无诊断 → pattern 回退）。
     assert_eq!(result["passed"].as_bool(), Some(true));
     assert_eq!(result["exit_code"].as_i64(), Some(0));
     assert!(result["structured_diagnostics"].is_array());
@@ -301,7 +302,7 @@ async fn test_verify_build_success_fallback() {
         .as_array()
         .unwrap()
         .is_empty());
-    assert!(result["judge_method"].is_null());
+    assert_eq!(result["judge_method"].as_str(), Some("pattern"));
     assert!(result.get("success").is_none());
 }
 

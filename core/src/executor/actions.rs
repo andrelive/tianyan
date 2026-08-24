@@ -191,35 +191,19 @@ pub async fn execute_write_file(path: &str, content: &str) -> Result<Value, Tian
 
 /// 执行构建验证操作。
 ///
-/// 与验证门控（`VerificationGate::verify_build`）返回统一的 JSON 形状：
-/// `{ "passed", "exit_code", "structured_diagnostics", "stdout", "stderr", "judge_method" }`。
-/// 本路径（未配置 LLM 门控时的回退）始终携带 `structured_diagnostics`
-/// （可能为空数组），`judge_method` 固定为 `null`；门控路径则为字符串
-/// （"json_diagnostics" / "pattern" / "llm"）。
+/// 统一委托 [`VerificationGate::verify_build`]（无 LLM 门控时 `judge=None`）：
+/// 结构化诊断优先（json_diagnostics）→ pattern 回退，输出 JSON 形状与门控路径
+/// 完全一致（passed / exit_code / reason / suggestion / structured_diagnostics /
+/// stdout / stderr / judge_method）——判定规则不再有第二份实现。
 pub async fn execute_verify_build(
     command: &str,
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
 ) -> Result<Value, TianyanError> {
-    let output = execute_command_action(command, cwd, timeout_secs).await?;
-    let stdout = output["stdout"].as_str().unwrap_or("");
-    let stderr = output["stderr"].as_str().unwrap_or("");
-    let exit_code = output["exit_code"].as_i64().unwrap_or(-1);
-
-    let diagnostics = crate::executor::verification::parse_json_diagnostics(stdout);
-    let passed = exit_code == 0
-        && !diagnostics
-            .iter()
-            .any(|d| crate::executor::verification::is_error_level(&d.level));
-
-    Ok(json!({
-        "passed": passed,
-        "exit_code": exit_code,
-        "structured_diagnostics": diagnostics,
-        "stdout": stdout,
-        "stderr": stderr,
-        "judge_method": Value::Null,
-    }))
+    let result = crate::executor::verification::VerificationGate::new(None)
+        .verify_build(command, cwd, timeout_secs)
+        .await?;
+    Ok(Value::from(result))
 }
 
 #[cfg(test)]
