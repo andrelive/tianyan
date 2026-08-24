@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::common::error::Result;
-use crate::common::types::{DetailedTokenUsage, TokenUsage};
+use crate::common::types::{DetailedTokenUsage, StructuredMessage, TokenUsage};
 use crate::context::RetrievalTrace;
 
 /// 追问问题
@@ -199,6 +199,11 @@ pub struct AgentStreamChunk {
     /// 显示耗时/成败）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result: Option<ToolResultEvent>,
+    /// 消息边界载体（Message chunk：入库完成后的完整结构化消息；服务端
+    /// 据此构造边界事件，前端同步本地消息 id/内容——由入库侧发送保证
+    /// 时序正确，pump 侧不再猜测"最后一条消息"）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<StructuredMessage>,
 }
 
 /// 工具执行结果事件（Observation chunk 携带）。
@@ -275,6 +280,7 @@ impl StreamEventSender {
             finish_reason: None,
             tool_call: None,
             tool_result: None,
+            message: None,
         })
         .await;
     }
@@ -290,6 +296,7 @@ impl StreamEventSender {
             finish_reason: None,
             tool_call,
             tool_result: None,
+            message: None,
         })
         .await;
     }
@@ -305,6 +312,7 @@ impl StreamEventSender {
             finish_reason: None,
             tool_call: None,
             tool_result: None,
+            message: None,
         })
         .await;
     }
@@ -333,6 +341,7 @@ impl StreamEventSender {
                 error,
                 content: Some(content.to_string()),
             }),
+            message: None,
         })
         .await;
     }
@@ -348,6 +357,7 @@ impl StreamEventSender {
             finish_reason: None,
             tool_call: None,
             tool_result: None,
+            message: None,
         })
         .await;
     }
@@ -370,6 +380,28 @@ impl StreamEventSender {
             finish_reason,
             tool_call: None,
             tool_result: None,
+            message: None,
+        })
+        .await;
+    }
+
+    /// 发送消息边界事件（入库完成后的完整结构化消息）。
+    ///
+    /// 由持久化侧（run_agent_turn）在用户消息入库后立即发送，保证边界
+    /// 事件与入库时序一致——服务端 pump 不再读取"最后一条消息"猜测
+    /// 当前轮归属（第二轮竞态：用户消息未入库时误发上一轮 assistant
+    /// 边界，导致前端把上一轮输出合并进本轮占位）。
+    pub async fn send_message_boundary(&self, message: StructuredMessage) {
+        self.try_send(AgentStreamChunk {
+            delta: String::new(),
+            is_complete: false,
+            token_usage: None,
+            chunk_type: StreamChunkType::Message,
+            skill_calls: None,
+            finish_reason: None,
+            tool_call: None,
+            tool_result: None,
+            message: Some(message),
         })
         .await;
     }
@@ -385,6 +417,7 @@ impl StreamEventSender {
             finish_reason: None,
             tool_call: None,
             tool_result: None,
+            message: None,
         })
         .await;
     }
@@ -465,6 +498,7 @@ mod tests {
             finish_reason: None,
             tool_call: None,
             tool_result: None,
+            message: None,
         };
         assert_eq!(chunk.delta, "你好");
         assert!(!chunk.is_complete);
@@ -490,6 +524,7 @@ mod tests {
             finish_reason: None,
             tool_call: None,
             tool_result: None,
+            message: None,
         };
         assert_eq!(chunk.delta, "调用技能");
         assert!(chunk.is_complete);
@@ -509,6 +544,7 @@ mod tests {
             finish_reason: None,
             tool_call: None,
             tool_result: None,
+            message: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
@@ -529,6 +565,7 @@ mod tests {
             finish_reason: None,
             tool_call: None,
             tool_result: None,
+            message: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         // skill_calls 为 None 时不应出现在 JSON 中

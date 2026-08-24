@@ -556,7 +556,17 @@ impl Agent {
         }
 
         // 1. Persist current user message
-        self.persist_user_message(session_id, state, message).await;
+        // 流式路径：入库后立即发送消息边界事件（携带服务端结构化消息，
+        // 前端同步本地 id/内容）。由入库侧发送保证边界与入库时序一致——
+        // 服务端 pump 不再读取"最后一条消息"猜测当前轮归属（修复第二轮
+        // 竞态：用户消息未入库时误发上一轮 assistant 边界，导致前端把
+        // 上一轮输出合并进本轮占位而重复显示）。
+        let persisted_user = self.persist_user_message(session_id, state, message).await;
+        if let TurnMode::Stream { sender } = &options.mode {
+            if let Some(sm) = persisted_user {
+                sender.send_message_boundary(sm).await;
+            }
+        }
 
         // 2. Prepare context
         let messages = self.prepare_context(state, message).await;
@@ -899,12 +909,15 @@ impl Agent {
     }
 
     /// 持久化当前用户消息到 SessionManager。
+    ///
+    /// 返回入库成功后的结构化消息（供流式路径发送消息边界事件；
+    /// 入库失败返回 `None`——边界事件缺失时前端保留本地 uuid，不误同步）。
     pub(crate) async fn persist_user_message(
         &self,
         session_id: &str,
         state: &Arc<RwLock<SessionState>>,
         message: &Message,
-    ) {
+    ) -> Option<StructuredMessage> {
         let parent_id = {
             let s = state.read().await;
             s.structured_messages.last().map(|m| m.id.clone())
@@ -921,12 +934,16 @@ impl Agent {
             parent_id.as_deref(),
             None,
         );
-        if let Err(e) = self
+        match self
             .session_manager
-            .add_structured_message(session_id, user_sm)
+            .add_structured_message(session_id, user_sm.clone())
             .await
         {
-            tracing::warn!(error = %e, "持久化用户消息失败");
+            Ok(_) => Some(user_sm),
+            Err(e) => {
+                tracing::warn!(error = %e, "持久化用户消息失败");
+                None
+            }
         }
     }
 }

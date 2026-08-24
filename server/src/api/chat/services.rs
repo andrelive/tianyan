@@ -176,23 +176,11 @@ impl ChatService {
         session_id: &str,
         tx: &mpsc::Sender<ChatStreamEvent>,
     ) -> Result<(), ApiError> {
-        // 用户消息边界（统一结构）：会话最后一条消息即刚入库的用户消息
-        if let Some(um) = self
-            .session_manager
-            .get_session(session_id)
-            .await?
-            .and_then(|s| s.messages.last().cloned())
-        {
-            let event = ChatStreamEvent::message_boundary(
-                stream_id,
-                session_id,
-                ChatMessage::from_structured_light(&um),
-            );
-            if tx.send(event).await.is_err() {
-                debug!("客户端断开流式连接");
-                return Ok(());
-            }
-        }
+        // 用户消息边界由 core 入库侧发送（run_agent_turn persist 后立即
+        // 经流发送 Message chunk）——保证边界事件与入库时序一致。此处不再
+        // 读取"最后一条消息"猜测当前轮归属：第二轮竞态下用户消息尚未入库，
+        // 误取上一轮 assistant 输出会导致前端把上一轮内容合并进本轮占位
+        // （表现为"上一轮的输出又输出了一遍"）。
 
         while let Some(chunk_result) = stream.recv().await {
             match chunk_result {
@@ -277,7 +265,11 @@ fn map_chunk_to_event(
     ChatStreamEvent {
         id: stream_id.to_string(),
         session_id: session_id.to_string(),
-        message: None,
+        // Message chunk（core 入库侧发送）：携带完整结构化消息
+        message: chunk
+            .message
+            .as_ref()
+            .map(ChatMessage::from_structured_light),
         delta: if is_thought || is_observational {
             String::new()
         } else {
