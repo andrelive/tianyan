@@ -128,76 +128,12 @@ impl ChatService {
             )
             .await?;
 
-        // 消息边界（统一结构）：resolve_or_create_session 已把用户消息入库，
-        // 取会话最后一条消息（即刚追加的用户消息），流开始前以完整 ChatMessage
-        // 结构下发——前端本地用户消息 id/内容直接来自服务端，不做补丁同步。
-        let user_message = self
-            .session_manager
-            .get_session(&session_id)
-            .await?
-            .and_then(|s| s.messages.last().cloned());
-
         // 一次流式响应用一个响应 id（与非流式 ChatResponse.id 语义一致）。
         // SSE 事件 id 用于 Last-Event-ID 重连，同一响应流的所有 chunk 共享该 id。
         let stream_id = format!("chatcmpl-{}", short_uuid());
 
-        if let Some(um) = user_message {
-            let event = ChatStreamEvent::message_boundary(
-                &stream_id,
-                &session_id,
-                ChatMessage::from_structured_light(&um),
-            );
-            if tx.send(event).await.is_err() {
-                debug!("客户端断开流式连接");
-                return Ok(());
-            }
-        }
-
-        while let Some(chunk_result) = stream.recv().await {
-            match chunk_result {
-                Ok(chunk) => {
-                    let event =
-                        map_chunk_to_event(chunk, &stream_id, &session_id, self.context_window);
-                    if tx.send(event).await.is_err() {
-                        debug!("客户端断开流式连接");
-                        break;
-                    }
-                }
-                Err(e) => {
-                    error!("流式处理错误: {}", e);
-                    let event =
-                        ChatStreamEvent::error(&stream_id, &session_id, format!("错误: {}", e));
-                    if tx.send(event).await.is_err() {
-                        debug!("客户端已断开，错误事件未送达");
-                    }
-                    return Err(e.into());
-                }
-            }
-        }
-
-        // 消息边界（统一结构）：流结束后取最后一条 assistant 消息，以完整
-        // ChatMessage 结构下发——前端本地 assistant 消息 id 同步为服务端 id。
-        if let Some(am) = self
-            .session_manager
-            .get_session(&session_id)
-            .await?
-            .and_then(|s| {
-                s.messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == MessageRole::Assistant)
-                    .cloned()
-            })
-        {
-            let event = ChatStreamEvent::message_boundary(
-                &stream_id,
-                &session_id,
-                ChatMessage::from_structured_light(&am),
-            );
-            if tx.send(event).await.is_err() {
-                debug!("客户端断开流式连接");
-            }
-        }
+        self.pump_stream(&mut stream, &stream_id, &session_id, &tx)
+            .await?;
 
         info!("流式处理完成，会话：{}", session_id);
 
@@ -218,17 +154,37 @@ impl ChatService {
             .agent
             .handle_clarification_stream(session_id, answer)
             .await?;
-        // 追问回答同样入库为用户消息：流开始前以完整 ChatMessage 结构下发
-        let user_message = self
+        // 一次流式响应用一个响应 id（与非流式 ChatResponse.id 语义一致）。
+        let stream_id = format!("chatcmpl-{}", short_uuid());
+        self.pump_stream(&mut stream, &stream_id, session_id, &tx)
+            .await
+    }
+
+    /// 泵送流式 chunk 到 SSE 通道（主对话流与追问流共用骨架）：
+    /// 1. 流开始前下发用户消息边界事件（完整 ChatMessage，前端本地 id 同步）；
+    /// 2. 逐 chunk 映射为 ChatStreamEvent 发送（客户端断开即停）；
+    /// 3. 流结束（或 chunk 发送失败）后下发最后一条 assistant 消息边界事件。
+    ///
+    /// 客户端断开（send 失败）不视为错误：debug 日志后正常返回；
+    /// 流内错误（Err chunk）映射为 error 事件后上抛（调用方按 HTTP 语义处理）。
+    async fn pump_stream(
+        &self,
+        stream: &mut mpsc::Receiver<
+            Result<tianyan::agent::AgentStreamChunk, tianyan::TianyanError>,
+        >,
+        stream_id: &str,
+        session_id: &str,
+        tx: &mpsc::Sender<ChatStreamEvent>,
+    ) -> Result<(), ApiError> {
+        // 用户消息边界（统一结构）：会话最后一条消息即刚入库的用户消息
+        if let Some(um) = self
             .session_manager
             .get_session(session_id)
             .await?
-            .and_then(|s| s.messages.last().cloned());
-        let stream_id = format!("chatcmpl-{}", short_uuid());
-
-        if let Some(um) = user_message {
+            .and_then(|s| s.messages.last().cloned())
+        {
             let event = ChatStreamEvent::message_boundary(
-                &stream_id,
+                stream_id,
                 session_id,
                 ChatMessage::from_structured_light(&um),
             );
@@ -242,7 +198,7 @@ impl ChatService {
             match chunk_result {
                 Ok(chunk) => {
                     let event =
-                        map_chunk_to_event(chunk, &stream_id, session_id, self.context_window);
+                        map_chunk_to_event(chunk, stream_id, session_id, self.context_window);
                     if tx.send(event).await.is_err() {
                         debug!("客户端断开流式连接");
                         break;
@@ -251,7 +207,7 @@ impl ChatService {
                 Err(e) => {
                     error!("流式处理错误: {}", e);
                     let event =
-                        ChatStreamEvent::error(&stream_id, session_id, format!("错误: {}", e));
+                        ChatStreamEvent::error(stream_id, session_id, format!("错误: {}", e));
                     if tx.send(event).await.is_err() {
                         debug!("客户端已断开，错误事件未送达");
                     }
@@ -260,7 +216,8 @@ impl ChatService {
             }
         }
 
-        // 消息边界（统一结构）：流结束后下发最后一条 assistant 消息
+        // assistant 消息边界（统一结构）：流结束后取最后一条 assistant 消息，
+        // 以完整 ChatMessage 结构下发——前端本地 assistant 消息 id 同步为服务端 id。
         if let Some(am) = self
             .session_manager
             .get_session(session_id)
@@ -274,7 +231,7 @@ impl ChatService {
             })
         {
             let event = ChatStreamEvent::message_boundary(
-                &stream_id,
+                stream_id,
                 session_id,
                 ChatMessage::from_structured_light(&am),
             );
