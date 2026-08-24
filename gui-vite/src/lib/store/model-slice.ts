@@ -1,10 +1,12 @@
 /**
  * 模型/能力目录切片（modelSlice）—— 聊天模型选择、思考强度档位、
- * 聊天模型目录与技能目录（均为从后端加载的目录数据 + 用户选择）。
+ * 聊天模型目录（均为从后端加载的目录数据 + 用户选择）。
+ *
+ * 技能目录为页面级数据（仅 SkillsPanel 消费），留在组件局部 state，不进全局 store。
  */
 
 import type { StateCreator } from 'zustand';
-import type { ModelInfo, Skill } from '@/lib/types';
+import type { ModelInfo } from '@/lib/types';
 
 export interface ModelSlice {
   // Model
@@ -18,10 +20,6 @@ export interface ModelSlice {
   // 聊天模型目录（含每模型思考档位；ThinkingSelect 按当前模型档位渲染）
   chatModels: ModelInfo[];
   setChatModels: (models: ModelInfo[]) => void;
-
-  // Skills
-  skills: Skill[];
-  setSkills: (skills: Skill[]) => void;
 }
 
 export const createModelSlice: StateCreator<ModelSlice, [], [], ModelSlice> = (set) => ({
@@ -34,8 +32,4 @@ export const createModelSlice: StateCreator<ModelSlice, [], [], ModelSlice> = (s
   setThinkingEffort: (effort) => set({ thinkingEffort: effort }),
   chatModels: [],
   setChatModels: (models) => set({ chatModels: models }),
-
-  // Skills
-  skills: [],
-  setSkills: (skills) => set({ skills }),
 });

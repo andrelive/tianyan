@@ -1,9 +1,8 @@
 import { useState } from 'react';
 import { useResource } from '@/hooks/use-resource';
 import ReactMarkdown from 'react-markdown';
-import { useAppStore } from '@/lib/store';
-import { apiGet, getSkillDetail, getSkillsStats } from '@/lib/api-client';
-import type { Skill, SkillListResponse } from '@/lib/types';
+import { getSkillDetail, getSkills, getSkillsStats } from '@/lib/api-client';
+import type { Skill } from '@/lib/types';
 import { Wrench, Loader2, AlertCircle, ChevronRight, Clock } from 'lucide-react';
 import ListDetailPanel from '@/components/ui/ListDetailPanel';
 import { formatDateTime, formatTimestamp } from '@/lib/utils';
@@ -17,24 +16,20 @@ import { formatDateTime, formatTimestamp } from '@/lib/utils';
  * （学习技能无 handler，执行仅返回指南文本——查看更符合其性质）。
  */
 export default function SkillsPanel() {
-  const skills = useAppStore((s) => s.skills);
-
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
+
+  // Load skills on mount（页面级数据留在局部 state——不进全局 store；
+  // 与 workspace/knowledge 面板惯例一致）
+  const {
+    data: skillsData,
+    loading: loadingSkills,
+    error: skillsError,
+  } = useResource(() => getSkills(), [], { errorFallback: '加载技能失败' });
+  const skills = skillsData?.skills ?? [];
 
   // 只展示方法论技能（custom 类）
   const methodologySkills = skills.filter((s) => s.category === 'custom');
   const selectedSkill: Skill | undefined = methodologySkills.find((s) => s.id === selectedSkillId);
-
-  // Load skills on mount（数据写入 store 技能目录；加载/错误态由 useResource 管理）
-  const { loading: loadingSkills, error: skillsError } = useResource(
-    async () => {
-      const res = await apiGet<SkillListResponse>('/skills');
-      useAppStore.getState().setSkills(res.skills);
-      return res;
-    },
-    [],
-    { errorFallback: '加载技能失败' },
-  );
 
   // 技能使用统计（哪些技能被调用的多/成功率高）；失败不阻塞面板
   const { data: stats } = useResource(() => getSkillsStats(), [], {

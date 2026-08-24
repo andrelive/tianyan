@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
-import type { ChatMessage, Session, Skill, SkillCallInfo } from '@/lib/types';
+import type { ChatMessage, Session, SkillCallInfo } from '@/lib/types';
 
 describe('useAppStore', () => {
   // Reset store to initial values before each test
@@ -16,7 +16,6 @@ describe('useAppStore', () => {
       theme: 'system',
       fontSize: 'medium',
       apiBaseUrl: 'http://localhost:3000',
-      skills: [],
       toast: null,
       selectedModel: null,
       configured: null,
@@ -37,7 +36,6 @@ describe('useAppStore', () => {
     expect(state.theme).toBe('system');
     expect(state.fontSize).toBe('medium');
     expect(state.apiBaseUrl).toBe('http://localhost:3000');
-    expect(state.skills).toEqual([]);
     expect(state.toast).toBeNull();
     expect(state.selectedModel).toBeNull();
     expect(state.configured).toBeNull();
@@ -417,26 +415,6 @@ describe('useAppStore', () => {
   it('setApiBaseUrl updates apiBaseUrl', () => {
     useAppStore.getState().setApiBaseUrl('http://test:8080');
     expect(useAppStore.getState().apiBaseUrl).toBe('http://test:8080');
-  });
-
-  // ── Skills ──
-
-  it('setSkills replaces the skills array', () => {
-    const skills: Skill[] = [
-      {
-        id: 'x',
-        name: 'X',
-        description: '',
-        parameters: [],
-        category: '',
-        version: '1.0.0',
-        enabled: true,
-      },
-    ];
-
-    useAppStore.getState().setSkills(skills);
-    expect(useAppStore.getState().skills).toHaveLength(1);
-    expect(useAppStore.getState().skills[0].id).toBe('x');
   });
 
   // ── Current Session ──
