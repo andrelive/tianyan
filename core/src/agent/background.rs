@@ -16,8 +16,18 @@
 //!   独立实体，重启后可查询；中断的任务（Pending/Running）重启时标记为
 //!   Failed，保证唤醒计数（remaining）不因重启失真
 //!
-//! 与 [`crate::scheduler`]（cron 定时任务）无关：本模块是 LLM 驱动的
-//! agent 后台任务，不是定时调度。
+//! ## 与 [`crate::scheduler`]（cron 定时任务）的边界
+//!
+//! | 维度 | 本模块（agent 后台任务） | `crate::scheduler`（定时任务） |
+//! |------|--------------------------|------------------------------|
+//! | 驱动 | LLM 委托（delegate background / 后台命令），交互驱动 | cron 表达式，后台驱动 |
+//! | 生命周期 | 一次性：创建 → 运行 → 完成/失败/取消 | 周期重复（或单次触发） |
+//! | 持久化 | SQLite（`with_db` → `persist_upsert`；ADR-013） | VFS（`TaskStateStore`） |
+//! | 唤醒 | 完成/失败经 `TaskWaker` 唤醒主 agent（ADR-013） | 无唤醒语义，纯后台执行 |
+//! | 消费方 | 主 agent 对话（通知注入 + join 信号） | 系统维护任务（Summary/GC/进化等） |
+//!
+//! 两类任务概念不共享状态机与持久化载体——新读者请勿假设统一；
+//! 未来若出现跨类需求（如定时委托），在两边各自的边界内扩展。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
