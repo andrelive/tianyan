@@ -4,3 +4,6 @@ pub mod handlers;
 mod routes;
 
 pub use routes::routes;
+
+#[cfg(test)]
+mod tests;
