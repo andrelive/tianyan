@@ -186,16 +186,17 @@ impl ApprovalWorkflow {
                 }
             }
             Action::ExecuteCommand { command, .. } => {
-                let cmd = command.split_whitespace().next().unwrap_or(command);
-                let dangerous_cmds = ["rm", "del", "format", "fdisk", "mkfs", "dd"];
-                let moderate_cmds = ["git", "cargo", "npm", "pip", "docker"];
-
-                if dangerous_cmds.iter().any(|c| cmd.contains(c)) {
-                    RiskLevel::Critical
-                } else if moderate_cmds.iter().any(|c| cmd.contains(c)) {
-                    RiskLevel::Medium
-                } else {
-                    RiskLevel::Low
+                // 命令风险定级单一事实源（security.rs classify_command_risk）：
+                // Blocked/Dangerous → Critical（需用户确认），Moderate → Medium，Low → Low。
+                // 命令名经 extract_command_base 归一（小写、无路径/后缀），
+                // 与 check_command 同一匹配语义（此前为 contains 子串匹配，
+                // 会误伤 rmdir→rm 等边缘命令名）。
+                let cmd_name = crate::executor::command::extract_command_base(command);
+                match crate::executor::security::classify_command_risk(&cmd_name) {
+                    crate::executor::security::CommandRisk::Blocked
+                    | crate::executor::security::CommandRisk::Dangerous => RiskLevel::Critical,
+                    crate::executor::security::CommandRisk::Moderate => RiskLevel::Medium,
+                    crate::executor::security::CommandRisk::Low => RiskLevel::Low,
                 }
             }
             Action::CallSkill { skill_id, .. } => {

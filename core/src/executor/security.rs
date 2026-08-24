@@ -8,6 +8,50 @@ use crate::executor::command::{extract_command_base, DEFAULT_COMMAND_TIMEOUT_SEC
 pub const DEFAULT_BLOCKED_COMMANDS: &[&str] =
     &["rm", "del", "format", "rmdir", "rd", "shutdown", "taskkill"];
 
+/// 危险命令（审批层 Critical 定级）：执行前必须经用户确认。
+///
+/// 与 [`DEFAULT_BLOCKED_COMMANDS`] 有交集（rm/del/format 双重约束）：
+/// blocked 是硬拒绝（check_command 拦截），dangerous 是审批定级——
+/// 用户自定义黑名单移除某命令后，危险定级仍然生效。
+pub const DANGEROUS_COMMANDS: &[&str] = &["rm", "del", "format", "fdisk", "mkfs", "dd"];
+
+/// 中等风险命令（审批层 Medium 定级）：通常需用户确认。
+pub const MODERATE_COMMANDS: &[&str] = &["git", "cargo", "npm", "pip", "docker"];
+
+/// 命令风险定级（审批层与执行层的单一事实源）。
+///
+/// 输入为 [`crate::executor::command::extract_command_base`] 归一后的命令名
+/// （小写、无路径/后缀）；分类顺序：Blocked 优先于 Dangerous/Moderate。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandRisk {
+    /// 完全禁止（check_command 硬拒绝）。
+    Blocked,
+    /// 危险命令（审批 Critical）。
+    Dangerous,
+    /// 中等风险（审批 Medium）。
+    Moderate,
+    /// 低风险（审批 Low）。
+    Low,
+}
+
+/// 命令风险定级：内置清单 + 默认黑名单的静态单一事实源。
+///
+/// 用户自定义黑名单（`SecurityPolicy::blocked_commands`）的判定在
+/// [`SecurityPolicy::check_command`]（实例方法，含多词前缀匹配）；
+/// 本函数负责内置清单部分，审批层与执行层共用，禁止在别处复制清单。
+pub fn classify_command_risk(cmd_name: &str) -> CommandRisk {
+    if DEFAULT_BLOCKED_COMMANDS.contains(&cmd_name) {
+        return CommandRisk::Blocked;
+    }
+    if DANGEROUS_COMMANDS.contains(&cmd_name) {
+        return CommandRisk::Dangerous;
+    }
+    if MODERATE_COMMANDS.contains(&cmd_name) {
+        return CommandRisk::Moderate;
+    }
+    CommandRisk::Low
+}
+
 /// Executor 安全策略。
 #[derive(Debug, Clone)]
 pub struct SecurityPolicy {
@@ -81,11 +125,9 @@ impl SecurityPolicy {
             return None;
         }
 
-        let cmd_name = command
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
+        // 命令名统一经 extract_command_base 归一（小写、无路径/后缀），
+        // 与 check_command / classify_command_risk 同一匹配语义。
+        let cmd_name = extract_command_base(command);
 
         // Only transform explicitly dangerous commands
         let transformable = matches!(cmd_name.as_str(), "rm" | "rmdir" | "del" | "rd");
@@ -703,5 +745,45 @@ mod tests {
         let mut policy = policy_with(vec![], vec![blocked]);
         policy.safety_mode = SafetyMode::Permissive;
         assert!(policy.check_path(&path).is_ok());
+    }
+
+    #[test]
+    fn test_classify_command_risk_single_source() {
+        // Blocked 优先（rm/del/format 双重约束）
+        assert_eq!(classify_command_risk("rm"), CommandRisk::Blocked);
+        assert_eq!(classify_command_risk("del"), CommandRisk::Blocked);
+        assert_eq!(classify_command_risk("rmdir"), CommandRisk::Blocked);
+        assert_eq!(classify_command_risk("shutdown"), CommandRisk::Blocked);
+        // 危险但不在默认黑名单（用户自定义移除后可确认执行）
+        assert_eq!(classify_command_risk("fdisk"), CommandRisk::Dangerous);
+        assert_eq!(classify_command_risk("mkfs"), CommandRisk::Dangerous);
+        assert_eq!(classify_command_risk("dd"), CommandRisk::Dangerous);
+        // 中等风险
+        assert_eq!(classify_command_risk("git"), CommandRisk::Moderate);
+        assert_eq!(classify_command_risk("cargo"), CommandRisk::Moderate);
+        assert_eq!(classify_command_risk("docker"), CommandRisk::Moderate);
+        // 低风险/未知
+        assert_eq!(classify_command_risk("echo"), CommandRisk::Low);
+        assert_eq!(classify_command_risk("ls"), CommandRisk::Low);
+        // 归一后输入（extract_command_base 已保证小写无后缀）：路径形式不再误判
+        assert_eq!(classify_command_risk("rmdir"), CommandRisk::Blocked);
+    }
+
+    #[test]
+    fn test_transform_command_normalizes_path_and_suffix() {
+        let policy = policy_with(vec![], vec![]);
+        // transform 模式才转换
+        let mut p = policy.clone();
+        p.safety_mode = SafetyMode::Transform;
+        // 路径 + .exe 形式经 extract_command_base 归一后同样可转换（此前只认裸名）；
+        // 目标路径用 Windows 形式（Unix 路径以 / 开头会被当 flag 过滤，属既有语义）
+        assert!(p
+            .transform_command("C:\\Tools\\rm.exe -rf C:\\temp\\x")
+            .is_some());
+        assert!(p.transform_command("rm -rf C:\\temp\\x").is_some());
+        // Unix 路径目标被当 flag 过滤 → 拒绝转换（既有语义：宁可拒绝不误转换）
+        assert!(p.transform_command("rm -rf /tmp/x").is_none());
+        // 非危险命令不转换
+        assert!(p.transform_command("ls -la").is_none());
     }
 }
