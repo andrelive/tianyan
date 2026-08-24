@@ -24,19 +24,7 @@ impl ToolRegistry {
         // 安全校验基于解析后的实际搜索根（path 参数或会话工作目录）
         let base: PathBuf = match params.path {
             Some(p) => PathBuf::from(self.resolve_tool_path(session_id, &p).await),
-            None => match &self.session_manager {
-                Some(sm) => match sm.get_session(session_id).await {
-                    Ok(Some(session)) => {
-                        if let Some(wd) = session.working_directory(None) {
-                            wd
-                        } else {
-                            std::env::current_dir().map_err(|e| wrap_tool_error(e.into()))?
-                        }
-                    }
-                    _ => std::env::current_dir().map_err(|e| wrap_tool_error(e.into()))?,
-                },
-                None => std::env::current_dir().map_err(|e| wrap_tool_error(e.into()))?,
-            },
+            None => self.resolve_base_dir(session_id).await?,
         };
         safety_violation(self.security_policy.check_path(&base))?;
         let output = crate::executor::fs::execute_glob(&params.pattern, Some(&base))

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
@@ -327,6 +328,22 @@ impl ToolRegistry {
         path.to_string()
     }
 
+    /// 解析会话生效的基准目录：会话绑定的工作目录优先，缺省回退进程 cwd。
+    ///
+    /// 与 [`Self::resolve_tool_path`] 同一套归属规则；供 apply_patch 基准目录、
+    /// glob 搜索根等需要「目录本身」（而非拼接路径）的场景使用。
+    pub(crate) async fn resolve_base_dir(&self, session_id: &str) -> Result<PathBuf, TianyanError> {
+        if let Some(sm) = &self.session_manager {
+            if let Ok(Some(session)) = sm.get_session(session_id).await {
+                if let Some(wd) = session.working_directory(None) {
+                    return Ok(wd);
+                }
+            }
+        }
+        std::env::current_dir()
+            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：无法获取工作目录: {e}")))
+    }
+
     /// 设置委托子 Agent 使用的模型名称。
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
@@ -351,7 +368,7 @@ impl ToolRegistry {
     /// 设置后台命令日志目录（execute_command(background) 的日志文件落盘位置）。
     ///
     /// 缺省为 None（仅内存输出尾部缓冲，不落盘）。
-    pub fn with_command_logs_dir(mut self, dir: std::path::PathBuf) -> Self {
+    pub fn with_command_logs_dir(mut self, dir: PathBuf) -> Self {
         self.command_tasks = Arc::new(crate::executor::CommandManager::new(Some(dir)));
         self
     }

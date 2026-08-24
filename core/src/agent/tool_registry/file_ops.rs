@@ -123,26 +123,8 @@ impl ToolRegistry {
         let patch_paths = crate::executor::patch::collect_patch_paths(&params.patch);
         let first_path = patch_paths.first().cloned().unwrap_or_default();
         // 补丁基准目录：会话绑定的工作目录优先，缺省回退进程 cwd
-        // （与 read_file/write_file 同一套归属规则）
-        let base_dir = match &self.session_manager {
-            Some(sm) => match sm.get_session(session_id).await {
-                Ok(Some(session)) => {
-                    if let Some(wd) = session.working_directory(None) {
-                        wd
-                    } else {
-                        std::env::current_dir().map_err(|e| {
-                            TianyanError::Custom(format!("tool: 执行失败：无法获取工作目录: {e}"))
-                        })?
-                    }
-                }
-                _ => std::env::current_dir().map_err(|e| {
-                    TianyanError::Custom(format!("tool: 执行失败：无法获取工作目录: {e}"))
-                })?,
-            },
-            None => std::env::current_dir().map_err(|e| {
-                TianyanError::Custom(format!("tool: 执行失败：无法获取工作目录: {e}"))
-            })?,
-        };
+        // （与 read_file/write_file 同一套归属规则；统一 resolve_base_dir）
+        let base_dir = self.resolve_base_dir(session_id).await?;
         for path in &patch_paths {
             let resolved = if std::path::Path::new(path).is_absolute() {
                 std::path::PathBuf::from(path)
