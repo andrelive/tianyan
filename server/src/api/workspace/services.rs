@@ -14,7 +14,6 @@ use serde_json::{json, Value};
 use tianyan::executor::edit::EditSpec;
 use tianyan::executor::execute_read_file;
 use tianyan::snapshot::SnapshotManager;
-use tianyan::TianyanError;
 
 use crate::api::shared::error::ApiError;
 use crate::api::workspace::types::{
@@ -137,7 +136,7 @@ impl WorkspaceService {
         let (_base, target) = resolve_rel(&base, rel).await?;
         let value = execute_read_file(&strip_verbatim(&target.to_string_lossy()), offset, limit)
             .await
-            .map_err(executor_error_to_api)?;
+            .map_err(ApiError::from)?;
         Ok(value)
     }
 
@@ -164,7 +163,7 @@ impl WorkspaceService {
             .with_workdir(workdir)
             .diff(session_id, index)
             .await
-            .map_err(snapshot_error_to_api)?;
+            .map_err(ApiError::from)?;
         match path {
             Some(rel) => {
                 let found = result.files.iter().find(|f| f.path == rel);
@@ -267,7 +266,7 @@ impl WorkspaceService {
         let normalized = normalize_patch(patch_text)?;
         let value = tianyan::executor::patch::apply_patch_action(&normalized, &working_dir)
             .await
-            .map_err(executor_error_to_api)?;
+            .map_err(ApiError::from)?;
         serde_json::from_value(value).map_err(ApiError::from)
     }
 
@@ -286,7 +285,7 @@ impl WorkspaceService {
         let abs = strip_verbatim(&target.to_string_lossy());
         let value = tianyan::executor::edit::apply_edit_action(&abs, edits)
             .await
-            .map_err(executor_error_to_api)?;
+            .map_err(ApiError::from)?;
         let edits_applied = value
             .get("edits_applied")
             .and_then(Value::as_u64)
@@ -428,22 +427,6 @@ fn strip_verbatim(path: &str) -> String {
     path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
 }
 
-/// core executor 错误 → API 错误（语义谓词优先，与 core `TianyanError` 单一来源对齐）：
-/// - 目标不存在（条目/目录未找到）→ 404；
-/// - 冲突（锚点/旧内容/补丁定位不匹配）→ 409（前端据此提示"文件已被修改，请重新加载"）；
-/// - 无效输入（非法路径、绝对路径）→ 400；
-/// - 其余 → 500。
-fn executor_error_to_api(err: TianyanError) -> ApiError {
-    if err.is_not_found() {
-        ApiError::NotFound(err.to_string())
-    } else if err.is_conflict() {
-        ApiError::Conflict(err.to_string())
-    } else if err.is_invalid_input() {
-        ApiError::BadRequest(err.to_string())
-    } else {
-        ApiError::Internal(err.to_string())
-    }
-}
 
 /// 将 git 风格 unified diff（jsdiff `createTwoFilesPatch` 产物）归一化为
 /// core `parse_patch` 接受的 codex `*** Update File:` 信封；输入已是 codex
@@ -507,11 +490,4 @@ fn strip_ab_prefix(path: &str) -> String {
     }
 }
 
-/// 快照错误 → API 错误：快照缺失（`is_not_found` 语义）→ 404，其余 → 500。
-fn snapshot_error_to_api(err: TianyanError) -> ApiError {
-    if err.is_not_found() {
-        ApiError::NotFound(err.to_string())
-    } else {
-        ApiError::Internal(err.to_string())
-    }
-}
+
