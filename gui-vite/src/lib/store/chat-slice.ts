@@ -382,7 +382,16 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
     set((s) =>
       updateSessionMessages(s, sessionId, (msgs) => {
         const last = msgs[msgs.length - 1];
-        if (last && last.role === 'assistant' && last.content === '') {
+        // 只删「真空占位」：content 为空且无工具调用、无时间线。带 ask_user
+        // 工具卡片的助手消息（追问工具链）不是占位——clarification 事件
+        // 到达时若误删，追问内容会从信息流消失（只有刷新历史才回来）。
+        if (
+          last &&
+          last.role === 'assistant' &&
+          last.content === '' &&
+          (!last.tool_calls || last.tool_calls.length === 0) &&
+          (!last.segments || last.segments.length === 0)
+        ) {
           return msgs.slice(0, -1);
         }
         return msgs;

@@ -9,8 +9,9 @@ interface Props {
 }
 
 /**
- * 追问气泡：Agent 需要用户确认时展示问题与回答输入框，
- * 提交后通过 /chat/clarify/stream 继续处理（流式）。
+ * 追问接管组件（composer takeover，对齐 DSH）：Agent 需要确认时，
+ * 输入框区域被问题表单接管——问题文本 + 回答输入 + 提交；
+ * 提交后通过 /chat/clarify/stream 继续处理（流式），流结束后恢复普通输入框。
  */
 export default function ClarificationBubble({ question, submitting, onSubmit }: Props) {
   const [answer, setAnswer] = useState('');
@@ -34,18 +35,18 @@ export default function ClarificationBubble({ question, submitting, onSubmit }: 
   );
 
   return (
-    <div className="max-w-[80%] rounded-2xl rounded-br-sm px-4 py-3 border border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)]">
-      {/* 标签：AI 需要确认 */}
+    <div className="w-full px-4 py-3 border border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)]">
+      {/* 标签：AI 需要确认（输入框接管模式：普通输入区隐藏，此处回答） */}
       <div className="flex items-center gap-1.5 mb-1.5">
         <HelpCircle className="w-4 h-4 text-amber-600 dark:text-amber-500" aria-hidden="true" />
         <span className="text-xs font-medium text-amber-700 dark:text-amber-500">AI 需要确认</span>
       </div>
 
       {/* 追问问题 */}
-      <p className="text-sm leading-relaxed break-words whitespace-pre-wrap">{question}</p>
+      <p className="text-sm leading-relaxed break-words whitespace-pre-wrap mb-2">{question}</p>
 
       {/* 回答输入 */}
-      <div className="mt-2 flex items-end gap-2">
+      <div className="flex items-end gap-2">
         <textarea
           value={answer}
           onChange={(e) => setAnswer(e.target.value)}

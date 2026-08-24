@@ -165,13 +165,18 @@ export default function ChatPanel() {
   const clarifyStream = useChatStream({
     streamUrl: `${getApiBase()}/chat/clarify/stream`,
     errorFallbackText: '追问回答失败',
-    onComplete: () => {
-      // 流正常结束：追问气泡消失
+    onComplete: (sessionId) => {
+      // 流正常结束：接管已退出（提交时即清 pending），此处复位流状态；
+      // 双保险清 pending（异常路径也会走到这里时无害）
       useAppStore.getState().setPendingClarification(null);
+      useAppStore.getState().setStreamStatus('idle', sessionId);
     },
     onError: (sessionId, error) => {
-      // 失败：移除空占位 + 服务端消息同步（本地消息 id 为 uuid，回退需
-      // 服务端 msg_xxx 定位键）
+      // 失败：接管退出 + 流状态复位 + 移除空占位 + 服务端消息同步
+      // （本地消息 id 为 uuid，回退需服务端 msg_xxx 定位键）。
+      // 此前缺失 pending 清理：气泡残留 + submitting 永远为真。
+      useAppStore.getState().setPendingClarification(null);
+      useAppStore.getState().setStreamStatus('idle', sessionId);
       useAppStore.getState().removeEmptyAssistantMessage();
       useAppStore.getState().showToast(`追问回答失败: ${error.message}`, 'error');
       if (sessionId) void reloadSession(sessionId);
@@ -333,6 +338,10 @@ export default function ChatPanel() {
         content: '',
         timestamp: new Date().toISOString(),
       });
+      // 回答已受理：接管组件立即退出（对齐 DSH question/resolved 移除
+      // composer），普通输入框恢复；流式期间锁定输入（防并发轮）
+      state.setPendingClarification(null);
+      state.setStreamStatus('streaming');
       await clarifyStream.startStream({ session_id: sessionId, answer });
     },
     [streamStatus, addMessage, clarifyStream],
@@ -424,17 +433,6 @@ export default function ChatPanel() {
           </div>
         )}
 
-        {/* Clarification bubble: Agent 追问需要用户回答 */}
-        {pendingClarification && streamStatus !== 'streaming' && (
-          <div className="flex justify-end">
-            <ClarificationBubble
-              question={pendingClarification}
-              submitting={clarifyStream.isStreaming}
-              onSubmit={handleClarify}
-            />
-          </div>
-        )}
-
         {/* Redo banner: 回退后可撤销 */}
         {lastRollbackMessageId !== null && streamStatus !== 'streaming' && (
           <div className="flex justify-center pb-1">
@@ -457,15 +455,25 @@ export default function ChatPanel() {
         onRespond={(decision) => void handleApproval(decision)}
       />
 
-      {/* Input area（模型/思考强度/上下文圆环 + 发送：DSH 布局） */}
-      <ChatInput
-        onSend={handleSend}
-        onStop={handleStop}
-        isStreaming={streamStatus === 'streaming'}
-        usage={lastUsage}
-        sessionUsage={sessionUsage}
-        onCompress={() => void handleCompress()}
-      />
+      {/* Input area（模型/思考强度/上下文圆环 + 发送：DSH 布局）
+          追问待回答时由 ClarificationBubble 接管（composer takeover，对齐 DSH）：
+          输入框区域被问题表单替代，回答提交后恢复 */}
+      {pendingClarification && streamStatus !== 'streaming' ? (
+        <ClarificationBubble
+          question={pendingClarification}
+          submitting={clarifyStream.isStreaming}
+          onSubmit={handleClarify}
+        />
+      ) : (
+        <ChatInput
+          onSend={handleSend}
+          onStop={handleStop}
+          isStreaming={streamStatus === 'streaming'}
+          usage={lastUsage}
+          sessionUsage={sessionUsage}
+          onCompress={() => void handleCompress()}
+        />
+      )}
     </div>
   );
 }

@@ -27,10 +27,7 @@ test.describe('real backend clarify (ask_user)', () => {
     await deleteMarkerSessions(request);
   });
 
-  test('ask_user → clarification bubble → answer → streamed reply', async ({
-    page,
-    request,
-  }) => {
+  test('ask_user → clarification bubble → answer → streamed reply', async ({ page }) => {
     await page.goto('/');
     await page.getByRole('complementary', { name: '会话列表' }).getByLabel('新建会话').click();
     await expect(page).toHaveURL('/chat');
