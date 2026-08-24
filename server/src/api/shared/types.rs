@@ -171,15 +171,17 @@ pub struct ToolCallWithResult {
 }
 
 impl ChatMessage {
-    /// 从核心消息构造 API 消息（流式边界事件用，与历史加载同构的轻量版）：
-    /// id/role/content/thinking/images/usage/truncated/timestamp；
-    /// tool_calls 不填——流式期间前端已累积完整工具卡片（含结果），
-    /// 历史加载走 sessions 服务的完整转换（跨消息合并工具结果）。
-    pub(crate) fn from_structured_light(m: &tianyan::common::types::StructuredMessage) -> Self {
+    /// 提取核心消息 parts 的展示字段（Text→正文、Reasoning→思考、Image→图片）。
+    ///
+    /// 流式边界事件（from_structured_light）与历史加载（sessions 服务）共用
+    /// 同一合并语义：正文/思考各自以换行拼接，图片单独收集。
+    pub(crate) fn extract_parts(
+        parts: &[tianyan::common::types::Part],
+    ) -> (String, String, Vec<String>) {
         let mut thinking = String::new();
         let mut content = String::new();
         let mut images = Vec::new();
-        for p in &m.parts {
+        for p in parts {
             match p {
                 tianyan::common::types::Part::Text { text, .. } => {
                     if !content.is_empty() {
@@ -197,6 +199,15 @@ impl ChatMessage {
                 _ => {}
             }
         }
+        (content, thinking, images)
+    }
+
+    /// 从核心消息构造 API 消息（流式边界事件用，与历史加载同构的轻量版）：
+    /// id/role/content/thinking/images/usage/truncated/timestamp；
+    /// tool_calls 不填——流式期间前端已累积完整工具卡片（含结果），
+    /// 历史加载走 sessions 服务的完整转换（跨消息合并工具结果）。
+    pub(crate) fn from_structured_light(m: &tianyan::common::types::StructuredMessage) -> Self {
+        let (content, thinking, images) = Self::extract_parts(&m.parts);
         Self {
             id: Some(m.id.clone()),
             role: m.role,

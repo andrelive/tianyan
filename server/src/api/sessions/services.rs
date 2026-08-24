@@ -8,7 +8,7 @@ use tianyan::session::SessionManager;
 
 use crate::api::sessions::types::{
     DeleteMessageRequest, DeleteSessionResponse, ListSessionsResponse, RedoRequest, Session,
-    SessionDetail, SessionMessagesResponse, SessionMetadata, UpdateTitleRequest,
+    SessionDetail, SessionMessagesResponse, UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::api::shared::types::{ChatMessage, TokenUsage, ToolCallWithResult};
@@ -49,21 +49,7 @@ impl SessionService {
         let core_sessions = self.session_manager.list_sessions().await?;
 
         // 将核心 Session 转换为 API Session
-        let sessions: Vec<Session> = core_sessions
-            .iter()
-            .map(|s| Session {
-                id: s.session_id.clone(),
-                title: s.title.clone().unwrap_or_else(|| "新对话".to_string()),
-                created_at: s.created_at.to_rfc3339(),
-                updated_at: s.ended_at.unwrap_or(s.created_at).to_rfc3339(),
-                message_count: s.message_count.unwrap_or(s.messages.len()) as u32,
-                working_directory: s.header.working_directory.clone(),
-                metadata: Some(SessionMetadata {
-                    model: None,
-                    tags: None,
-                }),
-            })
-            .collect();
+        let sessions: Vec<Session> = core_sessions.iter().map(Session::from_core).collect();
 
         let total = sessions.len();
 
@@ -130,23 +116,11 @@ impl SessionService {
                 //   调用信息与对应执行结果按 tool_call_id 合并渲染）
                 // 工具结果/参数不拼进正文，也不做展示层截断——LLM 上下文
                 // 组装走原始 StructuredMessage（JSONL），与本展示转换无关。
-                let mut thinking = String::new();
-                let mut content = String::new();
+                // 正文/思考/图片合并（与流式边界事件同一语义：extract_parts）
+                let (content, thinking, images) = ChatMessage::extract_parts(&m.parts);
                 let mut tool_calls: Vec<ToolCallWithResult> = Vec::new();
                 for p in &m.parts {
                     match p {
-                        Part::Text { text, .. } => {
-                            if !content.is_empty() {
-                                content.push('\n');
-                            }
-                            content.push_str(text);
-                        }
-                        Part::Reasoning { text, .. } => {
-                            if !thinking.is_empty() {
-                                thinking.push('\n');
-                            }
-                            thinking.push_str(text);
-                        }
                         Part::ToolCall {
                             id,
                             name,
@@ -198,17 +172,10 @@ impl SessionService {
                         }
                         // 图片不进文本拼接（前端经 images 字段渲染）
                         Part::Image { .. } => {}
+                        // 正文/思考已由 extract_parts 合并，此处跳过
+                        Part::Text { .. } | Part::Reasoning { .. } => {}
                     }
                 }
-                // 提取历史消息中的图片 data URL（Part::Image → API images 字段）
-                let images = m
-                    .parts
-                    .iter()
-                    .filter_map(|p| match p {
-                        Part::Image { url, .. } => Some(url.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
                 // 工具结果被合并进调用卡片后，原 role=tool 消息无任何可展示
                 // 内容 → 跳过该消息（避免空气泡）；孤立结果消息保留。
                 if content.is_empty()
@@ -483,18 +450,7 @@ impl SessionService {
 
         self.session_manager.update_session(&session).await?;
 
-        Ok(Session {
-            id: session.session_id,
-            title: session.title.unwrap_or_else(|| "新对话".to_string()),
-            created_at: session.created_at.to_rfc3339(),
-            updated_at: session.ended_at.unwrap_or(session.created_at).to_rfc3339(),
-            message_count: session.messages.len() as u32,
-            working_directory: session.header.working_directory.clone(),
-            metadata: Some(SessionMetadata {
-                model: None,
-                tags: None,
-            }),
-        })
+        Ok(Session::from_core(&session))
     }
 
     /// 更新会话绑定的工作目录（工作区归属；空串清除绑定）。
@@ -525,18 +481,7 @@ impl SessionService {
 
         self.session_manager.update_session(&session).await?;
 
-        Ok(Session {
-            id: session.session_id,
-            title: session.title.unwrap_or_else(|| "新对话".to_string()),
-            created_at: session.created_at.to_rfc3339(),
-            updated_at: session.ended_at.unwrap_or(session.created_at).to_rfc3339(),
-            message_count: session.messages.len() as u32,
-            working_directory: session.header.working_directory.clone(),
-            metadata: Some(SessionMetadata {
-                model: None,
-                tags: None,
-            }),
-        })
+        Ok(Session::from_core(&session))
     }
 }
 
