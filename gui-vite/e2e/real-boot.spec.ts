@@ -12,6 +12,8 @@ const NAV_PAGES = [
   { label: '审批', url: '/approval', heading: '审批' },
   { label: '洞察', url: '/insights', heading: '洞察' },
   { label: '记忆', url: '/memory', heading: '记忆' },
+  { label: '子智能体', url: '/roles', heading: '子智能体' },
+  { label: '工具', url: '/tools', heading: '工具' },
 ] as const;
 
 test.describe('real backend boot', () => {
@@ -56,6 +58,18 @@ test.describe('real backend boot', () => {
     await expect(page.locator('button', { hasText: methodology.name }).first()).toBeVisible({
       timeout: 15000,
     });
+    await expect(page.locator('[role="alert"]')).toHaveCount(0);
+  });
+
+  test('navigates to settings and renders the tab list without errors', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: '设置', exact: true }).click();
+    await expect(page).toHaveURL('/settings');
+    // 设置面板无 h1/h2 标题——以 tablist 与首个 tab 断言
+    await expect(page.getByRole('tablist', { name: '设置选项卡' })).toBeVisible({
+      timeout: 30000,
+    });
+    await expect(page.getByRole('tab', { name: '模型服务' })).toBeVisible();
     await expect(page.locator('[role="alert"]')).toHaveCount(0);
   });
 
