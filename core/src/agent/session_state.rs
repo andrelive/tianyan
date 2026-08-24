@@ -13,8 +13,6 @@ pub struct SessionState {
     pub structured_messages: Vec<StructuredMessage>,
     /// 可注入的上下文（由 ContextPipeline 填充）。
     pub injectable_context: InjectableContext,
-    /// 当前目标。
-    pub current_goal: Option<String>,
     /// 待追问问题。
     pub pending_clarification: Option<Vec<ClarificationQuestion>>,
     /// 最后活动时间。
@@ -35,7 +33,6 @@ impl SessionState {
             session_id: session_id.to_string(),
             structured_messages: Vec::new(),
             injectable_context: InjectableContext::new(),
-            current_goal: None,
             pending_clarification: None,
             last_activity: now,
             pending_memories: Vec::new(),
@@ -125,7 +122,6 @@ mod tests {
         let state = SessionState::new("test-session");
         assert_eq!(state.session_id, "test-session");
         assert!(state.structured_messages.is_empty());
-        assert!(state.current_goal.is_none());
     }
 
     #[test]
