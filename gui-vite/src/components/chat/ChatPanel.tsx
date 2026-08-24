@@ -20,6 +20,7 @@ import { MessageSquare, Loader2, Undo2 } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
+import { streamingIndicatorOwner } from './streaming-indicator';
 import ApprovalBanner from './ApprovalBanner';
 import { PENDING_SESSION_KEY } from '@/lib/store';
 
@@ -394,13 +395,11 @@ export default function ChatPanel() {
             ))}
 
             {/* Loading indicator: streaming started but no content yet.
-                思考已产出内容（message.thinking 非空）时由气泡内指示接管，
-                避免转圈与气泡内"思考中 · N 字"重复。 */}
+                归属判定单点（streamingIndicatorOwner）：thinking 非空时由气泡内指示接管。 */}
             {streamStatus === 'streaming' &&
               messages.length > 0 &&
               messages[messages.length - 1].role === 'assistant' &&
-              messages[messages.length - 1].content === '' &&
-              !messages[messages.length - 1].thinking && (
+              streamingIndicatorOwner(messages[messages.length - 1]) === 'list' && (
                 <div
                   className="flex items-center gap-2 text-[var(--color-text-tertiary)] py-2"
                   aria-live="polite"

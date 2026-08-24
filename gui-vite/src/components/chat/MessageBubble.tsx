@@ -7,6 +7,7 @@ import { ChevronDown, ChevronRight, Copy, Check, Undo2 } from 'lucide-react';
 import type { ChatMessage, MessageSegment, ToolCallWithResult } from '@/lib/types';
 import { cn, formatTime } from '@/lib/utils';
 import SkillCallCard from './SkillCallCard';
+import { streamingIndicatorOwner } from './streaming-indicator';
 import ToolCallCard from './ToolCallCard';
 
 interface Props {
@@ -273,9 +274,8 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
 
         {/* Streaming feedback: 思考期间正文为空——显示可见的“思考中…”指示
             （含已产出思考量，避免首字符前的长静默被误认为卡住）。
-            仅 thinking 非空时显示（气泡内接管）；thinking 为空时由 ChatPanel
-            列表底部的流式指示器（“思考中...”）负责，两者互斥不重复。 */}
-        {isStreaming && message.content === '' && message.thinking && (
+            归属判定单点（streamingIndicatorOwner）：thinking 非空时气泡内接管。 */}
+        {isStreaming && streamingIndicatorOwner(message) === 'bubble' && (
           <span
             className="inline-flex items-center gap-1.5 text-base text-[var(--color-text-tertiary)] animate-pulse"
             aria-label="AI 正在思考中..."
