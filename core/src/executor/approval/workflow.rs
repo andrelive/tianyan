@@ -175,7 +175,6 @@ impl ApprovalWorkflow {
                     "C:\\Program Files",
                     ".env",
                     "config.yaml",
-                    "Cargo.toml",
                 ];
                 if critical_paths.iter().any(|p| path.contains(p)) {
                     RiskLevel::High

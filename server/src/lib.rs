@@ -93,7 +93,7 @@ async fn health_check() -> Json<HealthResponse> {
 ///
 /// This function tries to find the gui-vite/dist directory from various possible locations
 fn get_static_dir() -> std::path::PathBuf {
-    // Try to find the project root by looking for Cargo.toml
+    // 基准目录：当前工作目录（支持从项目根或 target/{debug,release} 启动）
     let current_dir = std::env::current_dir().unwrap_or_default();
 
     // Check if we're running from target/release or target/debug
