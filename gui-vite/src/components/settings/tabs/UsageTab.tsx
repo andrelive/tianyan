@@ -1,28 +1,9 @@
 import { useState } from 'react';
 import { BarChart3, Loader2, Search } from 'lucide-react';
-import { apiGet } from '@/lib/api-client';
+import { fetchUsageStatsRange } from '@/lib/api-client';
 import { useResource } from '@/hooks/use-resource';
 import { formatNumber } from '@/lib/utils';
 import { SectionTitle } from './shared';
-
-/** 单条用量统计（总计或按 provider/model 分组）。 */
-interface UsageStat {
-  group: string;
-  calls: number;
-  uncached_input: number;
-  cached_input: number;
-  completion_tokens: number;
-  total_tokens: number;
-  cache_hit_rate: number;
-}
-
-interface UsageStatsResponse {
-  days: number;
-  start_ts: number | null;
-  end_ts: number | null;
-  total: UsageStat | null;
-  grouped: UsageStat[];
-}
 
 function pct(n: number): string {
   return Math.round(n * 100) + '%';
@@ -61,7 +42,7 @@ export default function UsageTab() {
 
   // 查询加载（useResource：参数变化自动重取 + 竞态收敛）
   const { data, loading, error } = useResource(
-    () => apiGet<UsageStatsResponse>('/usage/stats?' + queryRange),
+    () => fetchUsageStatsRange(queryRange),
     [queryRange],
     { errorFallback: '加载失败' },
   );

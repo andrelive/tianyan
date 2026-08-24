@@ -2,10 +2,9 @@ import { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '@/lib/store';
 import { useResource } from '@/hooks/use-resource';
 import { ChevronDown, Loader2 } from 'lucide-react';
-import { apiGet, switchModel } from '@/lib/api-client';
+import { getModels, switchModel } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { toErrorMessage } from '@/lib/errors';
-import type { ModelsResponse } from '@/lib/types';
 
 /** ghost：一体式输入卡片内的无边框变体（外框由父组件统一提供）。 */
 export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
@@ -19,7 +18,7 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
   const setChatModelsStore = useAppStore((s) => s.setChatModels);
   const { loading } = useResource(
     async () => {
-      const data = await apiGet<ModelsResponse>('/config/models');
+      const data = await getModels();
       // Filter models with "chat" capability；保留完整信息（含每模型思考档位）
       const chat = data.models.filter((m) => m.capabilities.includes('chat'));
       setChatModelsStore(chat);

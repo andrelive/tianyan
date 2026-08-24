@@ -4,7 +4,7 @@ import { toErrorMessage } from '@/lib/errors';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { AlertCircle, Bot, ChevronRight, Loader2, RotateCcw, Trash2, Users } from 'lucide-react';
 import ListDetailPanel from '@/components/ui/ListDetailPanel';
-import { apiDelete, apiPost, getRoleDetail, getRoles, getRolesStats } from '@/lib/api-client';
+import { deleteRole, getRoleDetail, getRoles, getRolesStats, resetRole } from '@/lib/api-client';
 import { formatTimestamp } from '@/lib/utils';
 
 const TYPE_LABEL: Record<string, string> = {
@@ -93,7 +93,7 @@ export default function RolesPanel() {
     setActionPending(true);
     setActionMessage(null);
     try {
-      await apiPost(`/roles/${encodeURIComponent(selectedName)}/reset`, {});
+      await resetRole(selectedName);
       setActionMessage('已回退内置种子（下次会话边界生效）');
       void reloadRoles();
       void reloadStats();
@@ -120,7 +120,7 @@ export default function RolesPanel() {
     setActionPending(true);
     setActionMessage(null);
     try {
-      await apiDelete(`/roles/${encodeURIComponent(selectedName)}`);
+      await deleteRole(selectedName);
       setActionMessage('角色已退役删除');
       setSelectedName(null);
       void reloadRoles();

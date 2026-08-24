@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
-import { apiGet, apiPost, apiPut } from '@/lib/api-client';
+import { getConfig, saveConfig, testProviderConnection } from '@/lib/api-client';
 import {
   fromBackendConfig,
   toBackendConfig,
@@ -37,7 +37,6 @@ import type {
   ModelRef,
   DiscoveredModelInfo,
 } from '@/lib/types';
-import type { BackendConfigResponse } from '@/lib/config-transform';
 
 import ModelsTab from './tabs/ModelsTab';
 import StorageTab from './tabs/StorageTab';
@@ -262,14 +261,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
       const modelName = p.models[0]?.name || 'test-model';
       setTestStatus((prev) => ({ ...prev, [index]: 'testing' }));
       try {
-        const resp = await apiPost<{ success: boolean; message: string }>(
-          '/config/test-connection',
-          {
-            endpoint: p.endpoint,
-            api_key: p.api_key,
-            model: modelName,
-          },
-        );
+        const resp = await testProviderConnection(p.endpoint, p.api_key, modelName);
         if (resp.success) {
           setTestStatus((prev) => ({ ...prev, [index]: 'success' }));
           showToast(`${p.name} 连接成功`, 'success');
@@ -291,12 +283,12 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
     setSaving(true);
     try {
       const payload = toBackendConfig(config);
-      await apiPut<{ success: boolean; message: string }>('/config', payload);
+      await saveConfig(payload);
       showToast('设置已保存', 'success');
       // 保存成功后重新拉取配置：刷新后端解析结果（model_specs → resolvedSpecs，
       // 即"生效规格"行）。否则生效规格停留在面板挂载时的旧快照
       // （如手动设置 spec 后仍显示内置表匹配的旧值）。
-      const fresh = await apiGet<BackendConfigResponse>('/config');
+      const fresh = await getConfig();
       setConfig(fromBackendConfig(fresh));
     } catch (err: unknown) {
       const msg = toErrorMessage(err, '保存失败');
@@ -437,11 +429,9 @@ export default function SettingsPanel() {
     loading,
     error: loadError,
     reload,
-  } = useResource(
-    async () => fromBackendConfig(await apiGet<BackendConfigResponse>('/config')),
-    [],
-    { errorFallback: '无法加载配置' },
-  );
+  } = useResource(async () => fromBackendConfig(await getConfig()), [], {
+    errorFallback: '无法加载配置',
+  });
 
   if (loading) {
     return (

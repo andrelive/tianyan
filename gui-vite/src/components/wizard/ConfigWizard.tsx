@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 
 import { useAppStore } from '@/lib/store';
-import { apiPut } from '@/lib/api-client';
+import { saveConfig } from '@/lib/api-client';
 import { toBackendConfig, emptyConfigState } from '@/lib/config-transform';
 import { toErrorMessage } from '@/lib/errors';
 import type { ConfigState, ModelCapability } from '@/lib/types';
@@ -169,7 +169,7 @@ export default function ConfigWizard() {
     setSubmitting(true);
     try {
       const payload = toBackendConfig(config);
-      await apiPut<{ success: boolean; message: string }>('/config', payload);
+      await saveConfig(payload);
       showToast('配置完成！正在启动天演...', 'success');
       setConfigured(true);
     } catch (err: unknown) {

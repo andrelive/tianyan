@@ -6,13 +6,17 @@ import type {
   CancelTaskResponse,
   ChatMessage,
   CompressSessionResponse,
+  IngestResponse,
+  KnowledgeSearchResponse,
+  ListRolesResponse,
+  ListSessionsResponse,
   ListToolsResponse,
   McpServerEntry,
   McpTestResponse,
   MemoryListResponse,
+  ModelsResponse,
   ProviderProtocol,
   ProviderScanResponse,
-  ListRolesResponse,
   RetrievalTracesResponse,
   RoleActionResponse,
   RoleDetail,
@@ -21,17 +25,20 @@ import type {
   SearchSuggestionsResponse,
   Session,
   SkillDetail,
+  SkillListResponse,
   SkillsStatsResponse,
   SessionMessagesResponse,
+  UsageStatsResponse,
   UsageStatsSummary,
+  WorkspaceApplyPatchRequest,
+  WorkspaceApplyPatchResponse,
   WorkspaceDiffListResponse,
   WorkspaceDiffResponse,
   WorkspaceDirsResponse,
   WorkspaceReadResponse,
   WorkspaceTreeResponse,
-  WorkspaceApplyPatchRequest,
-  WorkspaceApplyPatchResponse,
 } from './types';
+import type { BackendConfigResponse, BackendUpdateRequest } from './config-transform';
 
 import { fetchWithSignal } from './fetch-with-signal';
 
@@ -107,9 +114,17 @@ async function request<T>(
 ): Promise<T> {
   const url = `${getApiBase()}${path}`;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
     Accept: 'application/json',
   };
+  // FormData（multipart）不设 Content-Type——浏览器自动带 boundary；
+  // 其余 JSON 请求统一 Content-Type。
+  let payload: BodyInit | undefined;
+  if (body instanceof FormData) {
+    payload = body;
+  } else if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    payload = JSON.stringify(body);
+  }
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
@@ -121,7 +136,7 @@ async function request<T>(
       {
         method,
         headers,
-        body: body ? JSON.stringify(body) : undefined,
+        body: payload,
       },
       finalSignal,
     );
@@ -161,16 +176,67 @@ export async function apiDelete<T>(path: string): Promise<T> {
 }
 
 export async function apiPostMultipart<T>(path: string, formData: FormData): Promise<T> {
-  const url = `${getApiBase()}${path}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    body: formData,
+  // 与 JSON 请求同一错误/超时路径（语义 kind + 60s 超时），不另起 fetch。
+  return request<T>('POST', path, formData);
+}
+
+// ========== 类型化端点包装（F3：组件禁止裸 apiGet/apiPost 拼路径） ==========
+
+/** 获取技能目录（全部技能；SkillsPanel 按 custom 类过滤展示）。 */
+export async function getSkills(): Promise<SkillListResponse> {
+  return apiGet<SkillListResponse>('/skills');
+}
+
+/** 语义搜索知识库（关键词查询，返回命中条目列表）。 */
+export async function searchKnowledge(query: string, limit = 10): Promise<KnowledgeSearchResponse> {
+  return apiGet<KnowledgeSearchResponse>(
+    `/knowledge/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+  );
+}
+
+/** 知识摄入（multipart 文件上传；错误语义与 JSON 请求一致）。 */
+export async function ingestKnowledge(formData: FormData): Promise<IngestResponse> {
+  return apiPostMultipart<IngestResponse>('/knowledge/ingest', formData);
+}
+
+/** 获取当前模型目录（含思考档位规格）。 */
+export async function getModels(): Promise<ModelsResponse> {
+  return apiGet<ModelsResponse>('/config/models');
+}
+
+/** 列出全部会话（侧边栏）。 */
+export async function listSessions(): Promise<ListSessionsResponse> {
+  return apiGet<ListSessionsResponse>('/sessions');
+}
+
+/** 获取后端配置（BackendConfigResponse 原始形状）。 */
+export async function getConfig(): Promise<BackendConfigResponse> {
+  return apiGet<BackendConfigResponse>('/config');
+}
+
+/** 保存配置（后端校验 + 持久化 + 热重载）。 */
+export async function saveConfig(
+  payload: BackendUpdateRequest,
+): Promise<{ success: boolean; message: string }> {
+  return apiPut<{ success: boolean; message: string }>('/config', payload);
+}
+
+/** 测试提供商连接（endpoint / api_key / model）。 */
+export async function testProviderConnection(
+  endpoint: string,
+  apiKey: string,
+  model: string,
+): Promise<{ success: boolean; message: string }> {
+  return apiPost<{ success: boolean; message: string }>('/config/test-connection', {
+    endpoint,
+    api_key: apiKey,
+    model,
   });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new ApiError(`HTTP ${response.status}: ${text}`, response.status);
-  }
-  return response.json();
+}
+
+/** 使用统计（按时间范围查询；range 形如 days=N 或 start_ts=..&end_ts=..）。 */
+export async function fetchUsageStatsRange(range: string): Promise<UsageStatsResponse> {
+  return apiGet<UsageStatsResponse>(`/usage/stats?${range}`);
 }
 
 // ========== Tools & Skills ==========

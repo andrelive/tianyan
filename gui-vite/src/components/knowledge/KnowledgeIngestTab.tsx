@@ -1,7 +1,6 @@
 import { useRef, useState } from 'react';
-import { apiPostMultipart } from '@/lib/api-client';
+import { ingestKnowledge } from '@/lib/api-client';
 import { toErrorMessage } from '@/lib/errors';
-import type { IngestResponse } from '@/lib/types';
 import { Inbox, File, X, Loader2, CheckCircle2, AlertCircle, Upload } from 'lucide-react';
 
 /** 知识库导入（拖拽/选择 + 标签 + 分文件结果呈现）。 */
@@ -76,7 +75,7 @@ export default function KnowledgeIngestTab() {
         // 而不是顶层 "tags" 字段（会被后端忽略并静默丢弃）。
         formData.append('metadata', JSON.stringify({ tags }));
       }
-      const resp = await apiPostMultipart<IngestResponse>('/knowledge/ingest', formData);
+      const resp = await ingestKnowledge(formData);
       // 后端 HTTP 200 但可能携带文件级失败（success=false 或个别文件 status=failed）：
       // 必须如实呈现，不能无条件显示"导入成功"。
       const failed = (resp.files ?? []).filter((f) => f.status === 'failed');

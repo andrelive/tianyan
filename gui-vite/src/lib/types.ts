@@ -985,3 +985,22 @@ export interface McpTestResponse {
   tools: number;
   error?: string;
 }
+
+/** 单条用量统计（总计或按 provider/model 分组；/usage/stats 响应）。 */
+export interface UsageStat {
+  group: string;
+  calls: number;
+  uncached_input: number;
+  cached_input: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_hit_rate: number;
+}
+
+export interface UsageStatsResponse {
+  days: number;
+  start_ts: number | null;
+  end_ts: number | null;
+  total: UsageStat | null;
+  grouped: UsageStat[];
+}

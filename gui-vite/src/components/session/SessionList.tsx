@@ -2,8 +2,13 @@ import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useResource } from '@/hooks/use-resource';
 import { useAppStore } from '@/lib/store';
-import { apiGet, deleteSession, fetchSessionMessages, updateSessionTitle } from '@/lib/api-client';
-import type { Session, ListSessionsResponse } from '@/lib/types';
+import {
+  deleteSession,
+  fetchSessionMessages,
+  listSessions,
+  updateSessionTitle,
+} from '@/lib/api-client';
+import type { Session } from '@/lib/types';
 import { formatRelativeTime } from '@/lib/utils';
 import {
   ChevronDown,
@@ -57,7 +62,7 @@ export default function SessionList() {
   // 会话列表加载：隐藏在本组件内（useResource 收敛加载/竞态）；
   // 数据写入 store（sessions 分组渲染的真相源）
   const { reload: reloadSessions } = useResource(async () => {
-    const data = await apiGet<ListSessionsResponse>('/sessions');
+    const data = await listSessions();
     useAppStore.getState().setSessions(data.sessions);
     return data;
   }, []);

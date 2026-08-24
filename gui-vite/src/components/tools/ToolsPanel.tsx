@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { apiGet } from '@/lib/api-client';
+import { getTools } from '@/lib/api-client';
 import type { ListToolsResponse, ToolInfo } from '@/lib/types';
 import { useResource } from '@/hooks/use-resource';
 import { Wrench, ChevronRight, Package } from 'lucide-react';
@@ -15,11 +15,9 @@ import { EmptyState } from '@/components/ui/EmptyState';
  */
 export default function ToolsPanel() {
   const [selected, setSelected] = useState<ToolInfo | null>(null);
-  const { data, loading, error } = useResource<ListToolsResponse>(
-    () => apiGet<ListToolsResponse>('/tools'),
-    [],
-    { errorFallback: '加载工具失败' },
-  );
+  const { data, loading, error } = useResource<ListToolsResponse>(() => getTools(), [], {
+    errorFallback: '加载工具失败',
+  });
   const tools = data?.tools ?? [];
 
   return (

@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { toErrorMessage } from '@/lib/errors';
-import { apiGet, fetchKnowledgeSuggestions } from '@/lib/api-client';
-import type { KnowledgeSearchResult, KnowledgeSearchResponse } from '@/lib/types';
+import { fetchKnowledgeSuggestions, searchKnowledge } from '@/lib/api-client';
+import type { KnowledgeSearchResult } from '@/lib/types';
 import { Search, Loader2, AlertCircle, ChevronDown, ChevronUp, BookOpen } from 'lucide-react';
 
 function HighlightedText({ text, query }: { text: string; query: string }) {
@@ -52,7 +52,7 @@ export default function KnowledgeSearchTab() {
     let cancelled = false;
     setIsSearching(true);
     setSearchError(null);
-    apiGet<KnowledgeSearchResponse>(`/knowledge/search?q=${encodeURIComponent(query)}&limit=10`)
+    searchKnowledge(query, 10)
       .then((res) => {
         if (!cancelled) {
           setSearchResults(res.results);
