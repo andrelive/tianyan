@@ -75,17 +75,6 @@ check_dependencies() {
     fi
     success "Cargo is installed"
 
-    # Check trunk
-    if ! command_exists trunk; then
-        warn "Trunk not found. Installing..."
-        cargo install trunk
-        if [ $? -ne 0 ]; then
-            error "Failed to install Trunk"
-            exit 1
-        fi
-    fi
-    success "Trunk is installed"
-
     # Check tauri-cli
     if ! cargo install --list | grep -q "tauri-cli"; then
         warn "tauri-cli not found. Installing..."
@@ -105,21 +94,21 @@ check_dependencies() {
     fi
 }
 
-# Build GUI (Yew/WASM)
+# Build GUI (React/Vite, gui-vite/dist)
 build_gui() {
     if [ "$SKIP_GUI" = true ]; then
         info "Skipping GUI build"
         return
     fi
 
-    info "Building GUI (Yew/WASM)..."
+    info "Building GUI (React/Vite)..."
 
-    cd "$PROJECT_ROOT/gui"
+    cd "$PROJECT_ROOT/gui-vite"
 
     if [ "$VERBOSE" = true ]; then
-        trunk build --release
+        npm run build
     else
-        trunk build --release 2>&1 | sed 's/^/  /'
+        npm run build 2>&1 | sed 's/^/  /'
     fi
 
     if [ $? -ne 0 ]; then
@@ -128,7 +117,7 @@ build_gui() {
     fi
 
     success "GUI build completed"
-    info "Output directory: gui/dist/"
+    info "Output directory: gui-vite/dist/"
 }
 
 # Start development mode

@@ -3,7 +3,7 @@
 //! This crate provides a Tauri-based desktop application that:
 //! - Starts an Axum HTTP server in a background thread
 //! - Waits for the server to be ready via health checks
-//! - Launches a Tauri window to display the Yew-based GUI
+//! - Launches a Tauri window to display the React GUI (gui-vite/dist 构建产物)
 
 // 测试代码中 unwrap/expect 是有意的（失败即 panic 即测试失败），
 // 豁免这些 lint 以保持测试可读性。生产代码不受影响。
