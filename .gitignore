@@ -6,6 +6,7 @@ node_modules/
 dist/
 test-results/
 playwright-report/
+coverage/
 *.tsbuildinfo
 
 # Tianyan runtime data (accidental writes to repo root)
