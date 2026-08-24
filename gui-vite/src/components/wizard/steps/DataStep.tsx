@@ -19,8 +19,8 @@ export default function DataStep({
         <FieldRow label="数据目录" description="文档和索引文件的本地存储路径">
           <input
             type="text"
-            value={data.dataDir}
-            onChange={(e) => onChange({ dataDir: e.target.value })}
+            value={data.data_dir}
+            onChange={(e) => onChange({ data_dir: e.target.value })}
             className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
             placeholder="~/.local/share/tianyan"
             aria-label="数据目录"
@@ -29,8 +29,8 @@ export default function DataStep({
 
         <FieldRow label="向量维度" description="向量嵌入的维度数，取决于使用的嵌入模型">
           <select
-            value={data.vectorDim}
-            onChange={(e) => onChange({ vectorDim: parseInt(e.target.value) })}
+            value={data.vector_dimension}
+            onChange={(e) => onChange({ vector_dimension: parseInt(e.target.value) })}
             className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
             aria-label="向量维度"
           >

@@ -1,6 +1,7 @@
 import { FieldRow } from '@/components/ui/FieldRow';
+import { emptyProvider } from '@/lib/config-transform';
 import { MODEL_CAPABILITIES, MODEL_CAPABILITY_LABELS, type ModelCapability } from '@/lib/types';
-import type { StepProps } from './wizard.types';
+import { firstModel, firstProvider, type StepProps } from './wizard.types';
 
 export default function ModelStep({
   data,
@@ -9,10 +10,26 @@ export default function ModelStep({
   onBack: _onBack,
   errors: _errors,
 }: StepProps) {
+  const provider = firstProvider(data);
+  const model = firstModel(data);
+
+  /** 更新第一个提供商（保持现有模型数组；向导只编辑 models[0]）。 */
+  const updateProvider = (updates: Partial<ReturnType<typeof emptyProvider>>) => {
+    const next = { ...provider, ...updates } as typeof provider;
+    onChange({ providers: [next, ...data.providers.slice(1)] });
+  };
+
+  /** 更新第一个模型（capabilities 变化同样写回；preferences 由收尾派生）。 */
+  const updateModel = (updates: Partial<{ name: string; capabilities: ModelCapability[] }>) => {
+    const model0 = provider.models[0] ?? { name: '', capabilities: ['chat' as ModelCapability] };
+    const nextModel = { ...model0, ...updates };
+    updateProvider({ models: [nextModel, ...provider.models.slice(1)] });
+  };
+
   const toggleCap = (cap: ModelCapability) => {
-    const prev = data.modelCaps;
+    const prev = model.capabilities;
     const next = prev.includes(cap) ? prev.filter((c) => c !== cap) : [...prev, cap];
-    onChange({ modelCaps: next });
+    updateModel({ capabilities: next });
   };
 
   return (
@@ -27,8 +44,8 @@ export default function ModelStep({
           <FieldRow label="提供商名称">
             <input
               type="text"
-              value={data.providerName}
-              onChange={(e) => onChange({ providerName: e.target.value })}
+              value={provider.name}
+              onChange={(e) => updateProvider({ name: e.target.value })}
               className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
               placeholder="openai"
               aria-label="提供商名称"
@@ -37,8 +54,8 @@ export default function ModelStep({
           <FieldRow label="模型名称" description="如 gpt-4、deepseek-chat">
             <input
               type="text"
-              value={data.modelName}
-              onChange={(e) => onChange({ modelName: e.target.value })}
+              value={model.name}
+              onChange={(e) => updateModel({ name: e.target.value })}
               className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
               placeholder="gpt-4"
               aria-label="模型名称"
@@ -49,8 +66,8 @@ export default function ModelStep({
         <FieldRow label="端点 URL">
           <input
             type="text"
-            value={data.providerEndpoint}
-            onChange={(e) => onChange({ providerEndpoint: e.target.value })}
+            value={provider.endpoint}
+            onChange={(e) => updateProvider({ endpoint: e.target.value })}
             className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
             placeholder="https://api.openai.com/v1"
             aria-label="端点 URL"
@@ -60,8 +77,8 @@ export default function ModelStep({
         <FieldRow label="API Key" description="支持 ${ENV_VAR} 格式引用环境变量">
           <input
             type="password"
-            value={data.providerApiKey}
-            onChange={(e) => onChange({ providerApiKey: e.target.value })}
+            value={provider.api_key}
+            onChange={(e) => updateProvider({ api_key: e.target.value })}
             className="w-full px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
             placeholder="sk-... 或 ${OPENAI_API_KEY}"
             aria-label="API Key"
@@ -74,14 +91,14 @@ export default function ModelStep({
               <label
                 key={cap}
                 className={`relative inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md cursor-pointer border transition-colors ${
-                  data.modelCaps.includes(cap)
+                  model.capabilities.includes(cap)
                     ? 'border-accent bg-accent-light text-accent'
                     : 'border-[var(--color-border)] text-[var(--color-text-tertiary)] hover:border-[var(--color-text-tertiary)]'
                 }`}
               >
                 <input
                   type="checkbox"
-                  checked={data.modelCaps.includes(cap)}
+                  checked={model.capabilities.includes(cap)}
                   // 铺满 label：几何位置与可见标签重合，聚焦不会滚动页面
                   className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                   onChange={() => toggleCap(cap)}

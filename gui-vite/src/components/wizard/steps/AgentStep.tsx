@@ -28,8 +28,8 @@ export default function AgentStep({
             type="number"
             min={1}
             max={200}
-            value={data.maxTurns}
-            onChange={(e) => onChange({ maxTurns: parseInt(e.target.value) || 200 })}
+            value={data.max_turns}
+            onChange={(e) => onChange({ max_turns: parseInt(e.target.value) || 200 })}
             className="w-full max-w-xs px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
             aria-label="最大对话轮次"
           />

@@ -14,9 +14,9 @@ import { useAppStore } from '@/lib/store';
 import { saveConfig } from '@/lib/api-client';
 import { toBackendConfig, emptyConfigState } from '@/lib/config-transform';
 import { toErrorMessage } from '@/lib/errors';
-import type { ConfigState, ModelCapability } from '@/lib/types';
+import type { ConfigState, ModelPreferencesState } from '@/lib/types';
 
-import type { WizardData } from './steps/wizard.types';
+import type { StepProps } from './steps/wizard.types';
 import WelcomeStep from './steps/WelcomeStep';
 import ModelStep from './steps/ModelStep';
 import DataStep from './steps/DataStep';
@@ -32,6 +32,24 @@ const STEPS = [
   { id: 'confirm', label: '确认', icon: Check },
 ];
 
+/** 能力标签 → preferences 绑定（向导收尾唯一派生点；与 ModelsTab 同规则）。 */
+function derivePreferences(config: ConfigState): ModelPreferencesState {
+  const p = config.providers[0];
+  const m = p?.models[0];
+  if (!p || !m) return { chat: null, embedding: null, vision: null };
+  const prefs: ModelPreferencesState = { chat: null, embedding: null, vision: null };
+  const ref = { provider: p.name, model: m.name };
+  if (m.capabilities.includes('chat')) prefs.chat = ref;
+  if (
+    m.capabilities.includes('text-embedding') ||
+    m.capabilities.includes('multimodal-embedding')
+  ) {
+    prefs.embedding = ref;
+  }
+  if (m.capabilities.includes('vision')) prefs.vision = ref;
+  return prefs;
+}
+
 /* ─────── ConfigWizard ─────── */
 
 export default function ConfigWizard() {
@@ -41,39 +59,35 @@ export default function ConfigWizard() {
   const [step, setStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
 
-  /* 单一 WizardData 状态（E6：8 个 useState + 扇出合并收敛为一个对象——
-     对象即真相源，handleChange 收敛为 spread 合并） */
-  const [wizardData, setWizardData] = useState<WizardData>({
-    providerName: '',
-    providerEndpoint: '',
-    providerApiKey: '',
-    modelName: '',
-    modelCaps: ['chat' as ModelCapability],
-    dataDir: '',
-    vectorDim: 1536,
-    maxTurns: 200,
-  });
+  /* F4：向导直接编辑 ConfigState（与设置面板同源），不再维护平行 WizardData */
+  const [config, setConfig] = useState<ConfigState>(() => ({
+    ...emptyConfigState(),
+    // 向导语义默认：与原 WizardData 默认一致（emptyConfigState 为产品默认 20）
+    max_turns: 200,
+  }));
 
   /* ── Handle partial updates from step components ── */
 
-  const handleChange = useCallback((updates: Partial<WizardData>) => {
-    setWizardData((prev) => ({ ...prev, ...updates }));
+  const handleChange = useCallback((updates: Partial<ConfigState>) => {
+    setConfig((prev) => ({ ...prev, ...updates }));
   }, []);
 
   /* ── Navigation ── */
   const canGoNext = useCallback((): boolean => {
+    const p = config.providers[0];
     switch (step) {
       case 0:
         return true;
       case 1:
         return (
-          wizardData.providerName.trim().length > 0 &&
-          wizardData.providerEndpoint.trim().length > 0 &&
-          wizardData.providerApiKey.trim().length > 0 &&
-          wizardData.modelName.trim().length > 0
+          !!p &&
+          p.name.trim().length > 0 &&
+          p.endpoint.trim().length > 0 &&
+          p.api_key.trim().length > 0 &&
+          (p.models[0]?.name ?? '').trim().length > 0
         );
       case 2:
-        return wizardData.dataDir.trim().length > 0;
+        return config.data_dir.trim().length > 0;
       case 3:
         return true;
       case 4:
@@ -81,7 +95,7 @@ export default function ConfigWizard() {
       default:
         return false;
     }
-  }, [step, wizardData]);
+  }, [step, config]);
 
   const handleNext = useCallback(() => {
     if (!canGoNext()) {
@@ -95,80 +109,15 @@ export default function ConfigWizard() {
     setStep((s) => Math.max(s - 1, 0));
   }, []);
 
-  /* ── Finish ── */
+  /* ── Finish：能力标签 → preferences 派生（唯一派生点）后保存 ── */
   const handleFinish = useCallback(async () => {
-    // Build ConfigState from wizard state
-    const {
-      providerName,
-      providerEndpoint,
-      providerApiKey,
-      modelName,
-      modelCaps,
-      dataDir,
-      vectorDim,
-      maxTurns,
-    } = wizardData;
-    const config: ConfigState = {
-      ...emptyConfigState(),
-      providers: [],
-      preferences: {
-        chat: null,
-        embedding: null,
-        vision: null,
-      },
-      data_dir: dataDir.trim(),
-      vector_dimension: vectorDim,
-      max_turns: maxTurns,
+    const finalConfig: ConfigState = {
+      ...config,
+      preferences: derivePreferences(config),
     };
-
-    // Add provider with one model if fields are filled
-    if (providerName.trim() && providerEndpoint.trim()) {
-      const modelCapsToUse: ModelCapability[] = modelCaps.length > 0 ? modelCaps : ['chat'];
-      config.providers = [
-        {
-          name: providerName.trim(),
-          endpoint: providerEndpoint.trim(),
-          api_key: providerApiKey.trim(),
-          models: [
-            {
-              name: modelName.trim(),
-              capabilities: modelCapsToUse,
-            },
-          ],
-          timeout: 60,
-          enabled: true,
-          is_local: false,
-          headers: {},
-        },
-      ];
-
-      // Set preferences: if model has chat cap, use it as default chat model
-      if (modelCapsToUse.includes('chat')) {
-        config.preferences.chat = {
-          provider: providerName.trim(),
-          model: modelName.trim(),
-        };
-      }
-      if (
-        modelCapsToUse.includes('text-embedding') ||
-        modelCapsToUse.includes('multimodal-embedding')
-      ) {
-        config.preferences.embedding = {
-          provider: providerName.trim(),
-          model: modelName.trim(),
-        };
-      }
-      if (modelCapsToUse.includes('vision')) {
-        config.preferences.vision = {
-          provider: providerName.trim(),
-          model: modelName.trim(),
-        };
-      }
-    }
-
     setSubmitting(true);
     try {
-      const payload = toBackendConfig(config);
+      const payload = toBackendConfig(finalConfig);
       await saveConfig(payload);
       showToast('配置完成！正在启动天演...', 'success');
       setConfigured(true);
@@ -177,16 +126,16 @@ export default function ConfigWizard() {
       showToast(`配置保存失败: ${msg}`, 'error');
       setSubmitting(false);
     }
-  }, [wizardData, showToast, setConfigured]);
+  }, [config, showToast, setConfigured]);
 
   /* ─────── Render ─────── */
 
-  const commonStepProps = {
-    data: wizardData,
+  const commonStepProps: StepProps = {
+    data: config,
     onChange: handleChange,
     onNext: handleNext,
     onBack: handlePrev,
-    errors: {} as Record<string, string>,
+    errors: {},
   };
 
   return (
@@ -237,7 +186,7 @@ export default function ConfigWizard() {
             </button>
           ) : (
             <button
-              onClick={handleFinish}
+              onClick={() => void handleFinish()}
               disabled={submitting}
               className="flex items-center gap-1.5 px-5 py-2 text-sm font-medium rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
             >

@@ -1,6 +1,6 @@
-import { Cpu, Database, Bot, Loader2 } from 'lucide-react';
+import { Bot, Cpu, Database, Loader2 } from 'lucide-react';
 import { MODEL_CAPABILITY_LABELS } from '@/lib/types';
-import type { StepProps } from './wizard.types';
+import { firstModel, firstProvider, type StepProps } from './wizard.types';
 
 interface SummaryRowProps {
   label: string;
@@ -30,6 +30,8 @@ export default function ConfirmStep({
   errors: _errors,
   submitting,
 }: ConfirmStepProps) {
+  const provider = firstProvider(data);
+  const model = firstModel(data);
   return (
     <div>
       <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-1">确认配置</h2>
@@ -45,18 +47,20 @@ export default function ConfirmStep({
             模型服务
           </div>
           <div className="px-3 py-2 space-y-1 text-sm">
-            {data.providerName.trim() ? (
+            {provider.name.trim() ? (
               <>
-                <SummaryRow label="提供商" value={data.providerName} />
-                <SummaryRow label="端点" value={data.providerEndpoint} />
+                <SummaryRow label="提供商" value={provider.name} />
+                <SummaryRow label="端点" value={provider.endpoint} />
                 <SummaryRow
                   label="API Key"
-                  value={data.providerApiKey ? `${data.providerApiKey.slice(0, 8)}...` : ''}
+                  value={provider.api_key ? `${provider.api_key.slice(0, 8)}...` : ''}
                 />
-                <SummaryRow label="模型" value={data.modelName || '(未设置)'} />
+                <SummaryRow label="模型" value={model.name || '(未设置)'} />
                 <SummaryRow
                   label="能力标签"
-                  value={data.modelCaps.map((c) => MODEL_CAPABILITY_LABELS[c]).join(', ') || '无'}
+                  value={
+                    model.capabilities.map((c) => MODEL_CAPABILITY_LABELS[c]).join(', ') || '无'
+                  }
                 />
               </>
             ) : (
@@ -74,8 +78,8 @@ export default function ConfirmStep({
             数据存储
           </div>
           <div className="px-3 py-2 space-y-1 text-sm">
-            <SummaryRow label="数据目录" value={data.dataDir} />
-            <SummaryRow label="向量维度" value={String(data.vectorDim)} />
+            <SummaryRow label="数据目录" value={data.data_dir} />
+            <SummaryRow label="向量维度" value={String(data.vector_dimension)} />
             <SummaryRow label="向量数据库" value="LanceDB (嵌入式)" />
           </div>
         </div>
@@ -89,7 +93,7 @@ export default function ConfirmStep({
           <div className="px-3 py-2 space-y-1 text-sm">
             <SummaryRow label="技能/记忆/流式" value="始终开启" />
             <SummaryRow label="思考模式" value="会话时选择" />
-            <SummaryRow label="最大轮次" value={String(data.maxTurns)} />
+            <SummaryRow label="最大轮次" value={String(data.max_turns)} />
           </div>
         </div>
       </div>
