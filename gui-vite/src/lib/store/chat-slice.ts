@@ -116,6 +116,18 @@ function lastAssistantIndex(msgs: ChatMessage[]): number {
   return -1;
 }
 
+/** 更新最后一条 assistant 消息（不可变；无则原样返回）。 */
+function updateLastAssistant(
+  msgs: ChatMessage[],
+  updater: (msg: ChatMessage) => ChatMessage,
+): ChatMessage[] {
+  const idx = lastAssistantIndex(msgs);
+  if (idx < 0) return msgs;
+  const updated = [...msgs];
+  updated[idx] = updater(updated[idx]);
+  return updated;
+}
+
 export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set, get) => ({
   // Session
   currentSessionId: null,
@@ -247,13 +259,9 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
     ),
   appendSkillCalls: (calls, sessionId) =>
     set((s) =>
-      updateSessionMessages(s, sessionId, (msgs) => {
-        const idx = lastAssistantIndex(msgs);
-        if (idx < 0) return msgs;
-        const updated = [...msgs];
-        updated[idx] = { ...updated[idx], skill_calls: calls };
-        return updated;
-      }),
+      updateSessionMessages(s, sessionId, (msgs) =>
+        updateLastAssistant(msgs, (m) => ({ ...m, skill_calls: calls })),
+      ),
     ),
   appendToolCalls: (calls, sessionId) =>
     set((s) =>
@@ -304,19 +312,14 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
     ),
   appendThinking: (delta, sessionId) =>
     set((s) =>
-      updateSessionMessages(s, sessionId, (msgs) => {
-        const idx = lastAssistantIndex(msgs);
-        if (idx < 0) return msgs;
-        const updated = [...msgs];
-        const prev = updated[idx].thinking ?? '';
-        updated[idx] = {
-          ...updated[idx],
-          thinking: prev + delta,
+      updateSessionMessages(s, sessionId, (msgs) =>
+        updateLastAssistant(msgs, (m) => ({
+          ...m,
+          thinking: (m.thinking ?? '') + delta,
           // 时间线：思考增量按到达顺序追加
-          segments: [...(updated[idx].segments ?? []), { type: 'thinking', text: delta }],
-        };
-        return updated;
-      }),
+          segments: [...(m.segments ?? []), { type: 'thinking', text: delta }],
+        })),
+      ),
     ),
   startNewAssistantTurn: (sessionId) =>
     set((s) =>
@@ -342,26 +345,15 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
     ),
   markLastMessageTruncated: (sessionId) =>
     set((s) =>
-      updateSessionMessages(s, sessionId, (msgs) => {
-        const idx = lastAssistantIndex(msgs);
-        if (idx < 0) return msgs;
-        const updated = [...msgs];
-        updated[idx] = { ...updated[idx], truncated_by_length: true };
-        return updated;
-      }),
+      updateSessionMessages(s, sessionId, (msgs) =>
+        updateLastAssistant(msgs, (m) => ({ ...m, truncated_by_length: true })),
+      ),
     ),
   attachLastMessageUsage: (usage, sessionId) =>
     set((s) =>
-      updateSessionMessages(s, sessionId, (msgs) => {
-        const idx = lastAssistantIndex(msgs);
-        if (idx < 0) return msgs;
-        const updated = [...msgs];
-        updated[idx] = {
-          ...updated[idx],
-          usage: { ...updated[idx].usage, ...usage },
-        };
-        return updated;
-      }),
+      updateSessionMessages(s, sessionId, (msgs) =>
+        updateLastAssistant(msgs, (m) => ({ ...m, usage: { ...m.usage, ...usage } })),
+      ),
     ),
   clearMessages: () =>
     set((s) => {
