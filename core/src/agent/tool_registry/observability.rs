@@ -69,6 +69,15 @@ impl ToolObservabilityListener {
             .execution_log = Some(log);
     }
 
+    /// 取使用统计引用（self_check 技能统计；None = 未配置）。
+    pub fn usage_stats_ref(&self) -> Option<Arc<UsageStats>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .usage_stats
+            .clone()
+    }
+
     /// 排空已收集的执行轨迹（供 GEPA 引擎消费）。
     pub fn drain_execution_history(&self) -> Vec<ExecutionHistory> {
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());

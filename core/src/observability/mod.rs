@@ -52,8 +52,6 @@ pub struct AgentMetrics {
     rule_hit_count: RwLock<usize>,
     rule_miss_count: RwLock<usize>,
     pipeline_failures: RwLock<usize>,
-    /// 技能激活统计（按技能 ID 计数；G2a 技能激活率可观测性）。
-    skill_call_counts: RwLock<std::collections::HashMap<String, usize>>,
 }
 
 impl AgentMetrics {
@@ -66,7 +64,6 @@ impl AgentMetrics {
             rule_hit_count: RwLock::new(0),
             rule_miss_count: RwLock::new(0),
             pipeline_failures: RwLock::new(0),
-            skill_call_counts: RwLock::new(std::collections::HashMap::new()),
         })
     }
 
@@ -96,40 +93,6 @@ impl AgentMetrics {
     /// 记录一次 Pipeline 失败。
     pub async fn record_pipeline_failure(&self) {
         *self.pipeline_failures.write().await += 1;
-    }
-
-    /// 记录一次技能调用（G2a：技能激活率可观测性）。
-    ///
-    /// 按技能 ID 计数；与 UsageStats 的持久化统计互补——本统计为
-    /// 内存态，供 `self_check` 自省即时可见（UsageStats 面向 /api/v1/stats）。
-    pub async fn record_skill_call(&self, skill_id: &str) {
-        let mut counts = self.skill_call_counts.write().await;
-        *counts.entry(skill_id.to_string()).or_insert(0) += 1;
-    }
-
-    /// 查询技能激活统计（按调用次数降序）。
-    pub async fn query_skill_activation(&self) -> serde_json::Value {
-        let counts = self.skill_call_counts.read().await;
-        let total: usize = counts.values().sum();
-        let mut sorted: Vec<(&String, &usize)> = counts.iter().collect();
-        sorted.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
-
-        let top: Vec<serde_json::Value> = sorted
-            .iter()
-            .take(20)
-            .map(|(id, count)| {
-                serde_json::json!({
-                    "skill_id": id,
-                    "calls": count,
-                })
-            })
-            .collect();
-
-        serde_json::json!({
-            "total_skill_calls": total,
-            "skills_invoked": counts.len(),
-            "top_skills": top,
-        })
     }
 
     /// 查询 token 消耗历史摘要。
@@ -202,9 +165,6 @@ impl AgentMetrics {
             0.0
         };
 
-        let skill_counts = self.skill_call_counts.read().await;
-        let skill_calls_total: usize = skill_counts.values().sum();
-
         serde_json::json!({
             "harness_version": 1,
             "executions": exec,
@@ -213,8 +173,6 @@ impl AgentMetrics {
             "rules_injected": rule_hits,
             "avg_tokens_per_execution": avg_tokens,
             "total_tokens_consumed": total_tokens,
-            "skills_invoked": skill_counts.len(),
-            "skill_calls_total": skill_calls_total,
         })
     }
 }
@@ -228,7 +186,6 @@ impl Default for AgentMetrics {
             rule_hit_count: RwLock::new(0),
             rule_miss_count: RwLock::new(0),
             pipeline_failures: RwLock::new(0),
-            skill_call_counts: RwLock::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -345,34 +302,5 @@ mod tests {
         assert_eq!(health["pipeline_failures"], 1);
         assert_eq!(health["total_tokens_consumed"], 5000);
         assert_eq!(health["avg_tokens_per_execution"], 5000);
-    }
-
-    #[tokio::test]
-    async fn test_record_skill_call_and_query_activation() {
-        let metrics = AgentMetrics::new();
-        metrics.record_skill_call("planning").await;
-        metrics.record_skill_call("planning").await;
-        metrics.record_skill_call("file_read").await;
-
-        let result = metrics.query_skill_activation().await;
-        assert_eq!(result["total_skill_calls"], 3);
-        assert_eq!(result["skills_invoked"], 2);
-        let top = result["top_skills"].as_array().unwrap();
-        assert_eq!(top[0]["skill_id"], "planning");
-        assert_eq!(top[0]["calls"], 2);
-        assert_eq!(top[1]["skill_id"], "file_read");
-        assert_eq!(top[1]["calls"], 1);
-    }
-
-    #[tokio::test]
-    async fn test_harness_health_includes_skill_stats() {
-        let metrics = AgentMetrics::new();
-        metrics.record_skill_call("planning").await;
-        metrics.record_skill_call("planning").await;
-        metrics.record_skill_call("file_read").await;
-
-        let health = metrics.query_harness_health().await;
-        assert_eq!(health["skills_invoked"], 2);
-        assert_eq!(health["skill_calls_total"], 3);
     }
 }

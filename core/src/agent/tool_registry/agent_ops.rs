@@ -150,11 +150,6 @@ impl ToolRegistry {
     ) -> Result<serde_json::Value, TianyanError> {
         let params: CallSkillParams = parse_params(arguments)?;
 
-        // G2a：技能激活可观测性——self_check 可见每个技能被调用的次数。
-        if let Some(ref metrics) = self.metrics {
-            metrics.record_skill_call(&params.skill_id).await;
-        }
-
         if let Some(ref skill_executor) = self.skill_executor {
             let request = SkillExecutionRequest::new(params.skill_id, params.parameters);
             match skill_executor.execute(request).await {
@@ -211,11 +206,30 @@ impl ToolRegistry {
     }
 
     /// 执行 self_check 工具：查询内部指标。
+    ///
+    /// 技能激活统计读 UsageStats（持久化权威，ToolObservabilityListener 逐次记录）；
+    /// AgentMetrics 不再维护第二份内存计数（E1：口径统一、重启不丢）。
     pub(crate) async fn execute_self_check(&self) -> Result<serde_json::Value, TianyanError> {
         let metrics = self.metrics.as_ref().ok_or_else(|| {
             TianyanError::Custom(format!("tool: 执行失败：{}", "AgentMetrics not configured"))
         })?;
-        Ok(metrics.query_harness_health().await)
+        let mut health = metrics.query_harness_health().await;
+        let top_skills = match self.observability.usage_stats_ref() {
+            Some(stats) => stats.query_top_skills(20).await,
+            None => Vec::new(),
+        };
+        if let Some(obj) = health.as_object_mut() {
+            obj.insert(
+                "skills_invoked".to_string(),
+                serde_json::json!(top_skills.len()),
+            );
+            obj.insert(
+                "skill_calls_total".to_string(),
+                serde_json::json!(top_skills.iter().map(|s| s.total_calls).sum::<u64>()),
+            );
+            obj.insert("top_skills".to_string(), serde_json::json!(top_skills));
+        }
+        Ok(health)
     }
 
     /// 执行 delegate_to_agent 工具：委托子任务到隔离子 Agent。
