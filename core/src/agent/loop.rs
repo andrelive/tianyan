@@ -66,6 +66,8 @@ pub enum AgentLoopResult {
         /// 触发追问的 ask_user 工具调用 ID（工具链语义：用户回答作为该
         /// 调用的工具结果注入上下文继续本回合；审批降级追问为 None）。
         tool_call_id: Option<String>,
+        /// 候选选项（label 列表；前端渲染选项 + 自定义输入，对齐 DSH）。
+        options: Option<Vec<String>>,
         /// Token 用量。
         total_tokens: TokenUsage,
         /// 最后一轮 LLM 调用的单轮用量（语义同 Answer）。
@@ -761,6 +763,10 @@ impl AgentLoop {
                 return Ok(Some(AgentLoopResult::NeedsClarification {
                     question: params.question,
                     tool_call_id: Some(ask_call.id.clone()),
+                    // 选项 label 列表（AskUserOption.description 仅展示用，不进回答值）
+                    options: params
+                        .options
+                        .map(|opts| opts.into_iter().map(|o| o.label).collect()),
                     total_tokens: ctx.total_tokens.clone(),
                     last_turn_usage: turn_usage.clone(),
                     turns: ctx.turn + 1,
@@ -832,6 +838,7 @@ impl AgentLoop {
                     // 审批降级路径：非 ask_user 工具调用，无 tool_call_id——
                     // 回答走确认语义（confirm_pending_approval），不进工具链
                     tool_call_id: None,
+                    options: None,
                     total_tokens: ctx.total_tokens.clone(),
                     last_turn_usage: turn_usage.clone(),
                     turns: ctx.turn + 1,

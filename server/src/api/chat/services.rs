@@ -283,6 +283,7 @@ fn map_chunk_to_event(
             cache_write: u.cache_write as u64,
             context_window,
         }),
+        clarification_options: chunk.clarification_options,
     }
 }
 

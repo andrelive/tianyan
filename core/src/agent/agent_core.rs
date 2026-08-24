@@ -709,13 +709,14 @@ impl Agent {
             Ok(AgentLoopResult::NeedsClarification {
                 question,
                 tool_call_id,
+                options,
                 total_tokens,
                 ..
             }) => {
                 let question_obj = ClarificationQuestion {
                     question,
                     question_type: QuestionType::OpenEnded,
-                    options: None,
+                    options: options.clone(),
                     required: true,
                     tool_call_id,
                 };
@@ -735,15 +736,8 @@ impl Agent {
                         resp
                     }
                     TurnMode::Stream { sender } => {
-                        sender
-                            .send_complete(
-                                &formatted,
-                                StreamChunkType::Clarification,
-                                None,
-                                None,
-                                None,
-                            )
-                            .await;
+                        // 结构化选项随追问事件下发（前端渲染选项 + 自定义输入）
+                        sender.send_clarification(&formatted, options).await;
                         let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
                         resp.token_usage = total_tokens.clone();
                         resp.processing_time_ms = start.elapsed().as_millis() as u64;

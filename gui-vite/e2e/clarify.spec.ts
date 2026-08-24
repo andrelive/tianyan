@@ -40,14 +40,16 @@ test.describe('real backend clarify (ask_user)', () => {
     // 用户消息立即渲染
     await expect(page.getByText(uniqueMessage)).toBeVisible();
 
-    // 追问气泡出现：标签 + 问题文本（AgentLoop 拦截 ask_user → NeedsClarification
-    // → 流式 clarification chunk → 前端 setPendingClarification）
+    // 追问接管出现：标签 + 问题文本 + 选项（AgentLoop 拦截 ask_user →
+    // NeedsClarification → 流式 clarification chunk（含 options）→ 前端
+    // composer takeover：N 个选项 + 1 个自定义输入）
     await expect(page.getByText('AI 需要确认')).toBeVisible({ timeout: 60000 });
     await expect(page.getByText(ASK_QUESTION)).toBeVisible();
+    await expect(page.getByRole('radio', { name: '蓝色' })).toBeVisible();
+    await expect(page.getByRole('radio', { name: '绿色' })).toBeVisible();
 
-    // 提交回答（流式追问 /chat/clarify/stream）
-    const answerBox = page.getByRole('textbox', { name: '输入对追问的回答' });
-    await answerBox.fill('蓝色');
+    // 点选选项回答（流式追问 /chat/clarify/stream）
+    await page.getByRole('radio', { name: '蓝色' }).click();
     await page.getByRole('button', { name: '提交回答' }).click();
 
     // 澄清轮 mock 回复流式到达

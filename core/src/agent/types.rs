@@ -208,6 +208,10 @@ pub struct AgentStreamChunk {
     /// 时序正确，pump 侧不再猜测"最后一条消息"）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<StructuredMessage>,
+    /// 追问选项（Clarification chunk 携带；前端渲染为选项列表 + 自定义输入，
+    /// 对齐 DSH ask_user_question 的 N 选项 + 1 自定义形态）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clarification_options: Option<Vec<String>>,
 }
 
 /// 工具执行结果事件（Observation chunk 携带）。
@@ -285,6 +289,7 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: None,
+            clarification_options: None,
         })
         .await;
     }
@@ -301,6 +306,7 @@ impl StreamEventSender {
             tool_call,
             tool_result: None,
             message: None,
+            clarification_options: None,
         })
         .await;
     }
@@ -317,6 +323,7 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: None,
+            clarification_options: None,
         })
         .await;
     }
@@ -346,6 +353,7 @@ impl StreamEventSender {
                 content: Some(content.to_string()),
             }),
             message: None,
+            clarification_options: None,
         })
         .await;
     }
@@ -362,6 +370,7 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: None,
+            clarification_options: None,
         })
         .await;
     }
@@ -385,6 +394,7 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: None,
+            clarification_options: None,
         })
         .await;
     }
@@ -406,6 +416,25 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: Some(message),
+            clarification_options: None,
+        })
+        .await;
+    }
+
+    /// 发送追问事件（Clarification chunk）：formatted 为人类可读问题文本
+    /// （含选项编号），options 为结构化选项列表（前端渲染选项 + 自定义输入）。
+    pub async fn send_clarification(&self, formatted: &str, options: Option<Vec<String>>) {
+        self.try_send(AgentStreamChunk {
+            delta: formatted.to_string(),
+            is_complete: true,
+            token_usage: None,
+            chunk_type: StreamChunkType::Clarification,
+            skill_calls: None,
+            finish_reason: None,
+            tool_call: None,
+            tool_result: None,
+            message: None,
+            clarification_options: options,
         })
         .await;
     }
@@ -422,6 +451,7 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: None,
+            clarification_options: None,
         })
         .await;
     }
@@ -503,6 +533,7 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
+            clarification_options: None,
         };
         assert_eq!(chunk.delta, "你好");
         assert!(!chunk.is_complete);
@@ -529,6 +560,7 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
+            clarification_options: None,
         };
         assert_eq!(chunk.delta, "调用技能");
         assert!(chunk.is_complete);
@@ -549,6 +581,7 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
+            clarification_options: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
@@ -570,6 +603,7 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
+            clarification_options: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         // skill_calls 为 None 时不应出现在 JSON 中

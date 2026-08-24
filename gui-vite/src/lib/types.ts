@@ -91,6 +91,8 @@ export interface ChatStreamEvent {
   tool_result?: ToolResultEvent | null;
   /** 本轮 token 用量（完成 chunk 携带；上下文占用 / 缓存命中展示用） */
   usage?: StreamUsage | null;
+  /** 追问选项（clarification chunk 携带；前端渲染选项列表 + 自定义输入） */
+  clarification_options?: string[] | null;
 }
 
 export interface SkillCallInfo {

@@ -285,7 +285,7 @@ describe('ChatPanel', () => {
   it('shows the clarification bubble when a clarification is pending', () => {
     useAppStore.setState({
       currentSessionId: 'session-1',
-      pendingClarification: '请确认是否删除该文件？',
+      pendingClarification: { question: '请确认是否删除该文件？', options: [] },
     });
 
     renderChatPanel();
@@ -301,7 +301,7 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     useAppStore.setState({
       currentSessionId: 'session-1',
-      pendingClarification: '请确认是否删除该文件？',
+      pendingClarification: { question: '请确认是否删除该文件？', options: [] },
     });
 
     renderChatPanel();
@@ -319,13 +319,15 @@ describe('ChatPanel', () => {
       expect(assistant[assistant.length - 1]?.content).toBe('好的，我来继续处理。');
     });
 
-    // 流结束：追问气泡消失
+    // 流结束：追问接管消失
     await waitFor(() => {
       expect(useAppStore.getState().pendingClarification).toBeNull();
     });
+    // 回答作为 ask_user 工具结果挂卡片（不进消息流）——消息流只有
+    // 澄清轮的 assistant 占位（流式回复累积其上）
     const messages = useAppStore.getState().messages;
-    expect(messages).toHaveLength(2);
-    expect(messages[0]).toMatchObject({ role: 'user', content: '确认删除' });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ role: 'assistant', content: '好的，我来继续处理。' });
     expect(screen.queryByText('请确认是否删除该文件？')).not.toBeInTheDocument();
   });
 

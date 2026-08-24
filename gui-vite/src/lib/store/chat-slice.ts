@@ -23,6 +23,13 @@ import type {
  * 迁移到正式键。跨会话并行流式互不干扰。 */
 export const PENDING_SESSION_KEY = '__pending__';
 
+/** 待回答的追问（composer takeover 数据）：问题文本 + 候选选项（label 列表；
+ * 空数组 = 纯文本输入，对齐 DSH ask_user_question 的 N 选项 + 1 自定义形态）。 */
+export interface PendingClarification {
+  question: string;
+  options: string[];
+}
+
 export interface ChatSlice {
   // Session
   currentSessionId: string | null;
@@ -71,8 +78,8 @@ export interface ChatSlice {
   hasSessionMessages: (sessionId: string) => boolean;
 
   // Clarification（追问）
-  pendingClarification: string | null;
-  setPendingClarification: (question: string | null) => void;
+  pendingClarification: PendingClarification | null;
+  setPendingClarification: (question: PendingClarification | null) => void;
   removeEmptyAssistantMessage: (sessionId?: string | null) => void;
 
   // Rollback / redo（按消息 ID 定位：前端索引与服务端消息列表错位，

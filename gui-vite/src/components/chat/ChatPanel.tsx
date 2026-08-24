@@ -10,7 +10,12 @@ import {
   redoSessionMessage,
   respondApproval,
 } from '@/lib/api-client';
-import type { ApprovalDecision, ApprovalStatusSnapshot } from '@/lib/types';
+import type {
+  ApprovalDecision,
+  ApprovalStatusSnapshot,
+  ChatMessage,
+  ToolCallEvent,
+} from '@/lib/types';
 import { useChatStream } from '@/hooks/useChatStream';
 import { usePolling } from '@/hooks/use-polling';
 import { useSessionHistory } from '@/hooks/use-session-history';
@@ -327,12 +332,18 @@ export default function ChatPanel() {
         state.showToast('请先发送一条消息以创建会话', 'error');
         return;
       }
-      addMessage({
-        role: 'user',
-        content: answer,
-        timestamp: new Date().toISOString(),
-      });
-      // 助手占位消息：流式增量累积其上
+      // 回答作为 ask_user 工具结果挂到工具卡片（工具链语义：回答是
+      // 工具的输入，不是新一轮用户输入——对齐 DSH，不进消息流）
+      const askCall = findAskUserCall(useAppStore.getState().messages);
+      if (askCall && askCall.id) {
+        useAppStore.getState().applyToolResult({
+          tool_call_id: askCall.id,
+          content: answer,
+          success: true,
+          duration_ms: 0,
+        });
+      }
+      // 助手占位消息：澄清轮流式增量累积其上
       addMessage({
         role: 'assistant',
         content: '',
@@ -460,7 +471,8 @@ export default function ChatPanel() {
           输入框区域被问题表单替代，回答提交后恢复 */}
       {pendingClarification && streamStatus !== 'streaming' ? (
         <ClarificationBubble
-          question={pendingClarification}
+          question={pendingClarification.question}
+          options={pendingClarification.options}
           submitting={clarifyStream.isStreaming}
           onSubmit={handleClarify}
         />
@@ -476,4 +488,16 @@ export default function ChatPanel() {
       )}
     </div>
   );
+}
+
+/** 在消息流中定位 ask_user 工具调用（回答提交时挂工具结果用）。 */
+function findAskUserCall(messages: ChatMessage[]): ToolCallEvent | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+      const call = m.tool_calls.find((c) => c.name === 'ask_user');
+      if (call) return call;
+    }
+  }
+  return null;
 }

@@ -178,11 +178,25 @@ pub struct VerifyBuildParams {
     pub timeout_secs: Option<u64>,
 }
 
+/// 追问选项（对齐 DSH ask_user_question：N 个选项 + 1 个自定义输入）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AskUserOption {
+    /// 选项标签（用户选择后作为回答值）。
+    pub label: String,
+    /// 选项说明（可选；展示用，不参与回答值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// 追问用户参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AskUserParams {
     /// 问题内容。
     pub question: String,
+    /// 候选选项（可选；提供时前端渲染为选项列表 + 自定义输入，
+    /// 缺省时退化为纯文本输入）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<AskUserOption>>,
 }
 
 /// 子代理提交结果参数（委托循环显式完成信号）。
@@ -317,6 +331,7 @@ mod tests {
     fn test_ask_user_params_serialization() {
         let params = AskUserParams {
             question: "What is your name?".to_string(),
+            options: None,
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(json.contains("What is your name?"));

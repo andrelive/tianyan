@@ -144,7 +144,10 @@ function handleChatCompletions(req, res, body) {
                     type: 'function',
                     function: {
                       name: 'ask_user',
-                      arguments: JSON.stringify({ question: ASK_QUESTION }),
+                      arguments: JSON.stringify({
+                        question: ASK_QUESTION,
+                        options: [{ label: '蓝色' }, { label: '绿色' }],
+                      }),
                     },
                   },
                 ],
@@ -185,7 +188,10 @@ function handleChatCompletions(req, res, body) {
             type: 'function',
             function: {
               name: 'ask_user',
-              arguments: JSON.stringify({ question: ASK_QUESTION }),
+              arguments: JSON.stringify({
+                question: ASK_QUESTION,
+                options: [{ label: '蓝色' }, { label: '绿色' }],
+              }),
             },
           },
         ],

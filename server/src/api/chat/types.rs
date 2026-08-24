@@ -168,6 +168,9 @@ pub struct ChatStreamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// 本轮 token 用量（完成 chunk 携带；上下文占用 / 缓存命中展示用）。
     pub usage: Option<StreamUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 追问选项（Clarification chunk 携带；前端渲染选项列表 + 自定义输入）。
+    pub clarification_options: Option<Vec<String>>,
 }
 
 impl ChatStreamEvent {
@@ -187,6 +190,7 @@ impl ChatStreamEvent {
             tool_call: None,
             tool_result: None,
             usage: None,
+            clarification_options: None,
         }
     }
 
@@ -206,6 +210,7 @@ impl ChatStreamEvent {
             tool_call: None,
             tool_result: None,
             usage: None,
+            clarification_options: None,
         }
     }
 }
@@ -274,6 +279,7 @@ mod tests {
             tool_call: None,
             tool_result: None,
             usage: None,
+            clarification_options: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Hello"));
