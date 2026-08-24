@@ -9,12 +9,10 @@ use tianyan::session::SessionManager;
 use tianyan::Message as CoreMessage;
 use tianyan::MessageRole as CoreMessageRole;
 
-use crate::api::chat::types::{
-    ChatRequest, ChatResponse, ChatStreamEvent, SkillCallInfo, StreamUsage,
-};
+use crate::api::chat::types::{ChatRequest, ChatStreamEvent, SkillCallInfo, StreamUsage};
 use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
-use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
+use crate::api::shared::types::{ChatMessage, MessageRole};
 use crate::state::{RoleSync, SkillSync};
 
 /// 把 API 层消息转换为 core 消息：携带图片时构造多模态消息。
@@ -230,18 +228,6 @@ impl ChatService {
 
         Ok(())
     }
-
-    /// 处理用户对追问的回答（非流式）。
-    ///
-    /// 会话必须存在待处理的追问（由 AgentLoop 在 ask_user 工具触发时设置）。
-    pub async fn handle_clarification(
-        &self,
-        session_id: &str,
-        answer: &str,
-    ) -> Result<ChatResponse, ApiError> {
-        let response = self.agent.handle_clarification(session_id, answer).await?;
-        Ok(to_chat_response(session_id, response))
-    }
 }
 
 /// 核心流式 chunk → API 事件映射（正文只收真正的回答/错误文本）：
@@ -304,41 +290,6 @@ fn map_chunk_to_event(
 /// 无 finish_reason 时回退 "stop"（保持缺省线上行为）。
 fn map_finish_reason(finish_reason: Option<String>) -> Option<String> {
     finish_reason.or_else(|| Some("stop".to_string()))
-}
-
-/// 将核心 AgentResponse 转换为 API 层 ChatResponse。
-fn to_chat_response(session_id: &str, response: tianyan::agent::AgentResponse) -> ChatResponse {
-    ChatResponse {
-        id: format!("chatcmpl-{}", short_uuid()),
-        session_id: session_id.to_string(),
-        message: ChatMessage {
-            // AgentResponse 无持久化消息 ID（非流式路径前端不依赖回退）
-            id: None,
-            role: MessageRole::Assistant,
-            content: response.content,
-            thinking: None,
-            tool_calls: None,
-            images: None,
-            truncated_by_length: false,
-            interrupted: false,
-            usage: Some(TokenUsage {
-                prompt_tokens: response.token_usage.prompt_tokens as u32,
-                completion_tokens: response.token_usage.completion_tokens as u32,
-                total_tokens: response.token_usage.total_tokens as u32,
-                cache_read: response.token_usage.cache_read as u32,
-                cache_write: response.token_usage.cache_write as u32,
-            }),
-            timestamp: Some(chrono::Utc::now().to_rfc3339()),
-            segments: None,
-        },
-        usage: TokenUsage {
-            prompt_tokens: response.token_usage.prompt_tokens as u32,
-            completion_tokens: response.token_usage.completion_tokens as u32,
-            total_tokens: response.token_usage.total_tokens as u32,
-            cache_read: response.token_usage.cache_read as u32,
-            cache_write: response.token_usage.cache_write as u32,
-        },
-    }
 }
 
 /// 将核心 SkillCallInfo 转换为 API 层 SkillCallInfo

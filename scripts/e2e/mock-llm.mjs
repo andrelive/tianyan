@@ -15,11 +15,19 @@
 //! Exports (so smoke scripts can import the same constants without duplicating):
 //!   REPLY  — the canned assistant reply, split across 3 stream chunks.
 //!   EMBED_DIM — default embedding vector length.
+//!   ASK_TRIGGER / ASK_QUESTION — clarify-scenario constants (see below).
+//!
+//! Scenario switching:
+//!   When the LAST user message contains ASK_TRIGGER, the mock returns a single
+//!   `ask_user` tool_call (finish_reason=tool_calls) instead of plain text. The
+//!   backend intercepts ask_user in the main loop → NeedsClarification → the
+//!   GUI shows the clarification bubble. A subsequent clarify round (whose user
+//!   message is the answer text, no trigger) falls back to the normal REPLY.
+//!   All other requests stay deterministic single-round text (never emit tool_calls).
 //!
 //! Notes:
 //!   - Binds 127.0.0.1 only.
 //!   - Accepts any Authorization header (the backend sends "Bearer e2e-key").
-//!   - NEVER emits tool_calls: the agent loop stays single-round in tests.
 //!   - SSE uses LF only (never CRLF) and flushes after every line.
 //!   - Request/connection errors are swallowed so the server never crashes.
 
@@ -28,6 +36,8 @@ import { pathToFileURL } from 'node:url';
 
 export const REPLY = '你好，我是天演 E2E 模拟助手，这条回复来自 mock-llm。';
 export const EMBED_DIM = 768;
+export const ASK_TRIGGER = '触发追问';
+export const ASK_QUESTION = 'E2E 追问测试：你更喜欢哪个颜色？';
 const STREAM_CHUNKS = 3;
 const MAX_BODY_BYTES = 1 * 1024 * 1024;
 
@@ -35,6 +45,18 @@ const HOST = '127.0.0.1';
 const PORT = Number(process.env.MOCK_LLM_PORT ?? 8765);
 
 const created = () => Math.floor(Date.now() / 1000);
+
+/** True when the last user message contains ASK_TRIGGER (clarify scenario). */
+function wantsAskUser(messages) {
+  if (!Array.isArray(messages)) return false;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m && m.role === 'user') {
+      return typeof m.content === 'string' && m.content.includes(ASK_TRIGGER);
+    }
+  }
+  return false;
+}
 
 /** Split text into exactly `parts` contiguous pieces (roughly equal length). */
 function splitText(text, parts) {
@@ -97,6 +119,8 @@ function handleChatCompletions(req, res, body) {
   }
   const model = typeof payload.model === 'string' ? payload.model : 'e2e-chat';
   const stream = payload.stream === true;
+  // Clarify scenario: last user message contains ASK_TRIGGER.
+  const ask = wantsAskUser(payload.messages);
 
   if (!stream) {
     const completion = {
@@ -107,8 +131,23 @@ function handleChatCompletions(req, res, body) {
       choices: [
         {
           index: 0,
-          message: { role: 'assistant', content: REPLY },
-          finish_reason: 'stop',
+          message: ask
+            ? {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'call_ask_1',
+                    type: 'function',
+                    function: {
+                      name: 'ask_user',
+                      arguments: JSON.stringify({ question: ASK_QUESTION }),
+                    },
+                  },
+                ],
+              }
+            : { role: 'assistant', content: REPLY },
+          finish_reason: ask ? 'tool_calls' : 'stop',
         },
       ],
       usage: { prompt_tokens: 5, completion_tokens: 9, total_tokens: 14 },
@@ -131,6 +170,37 @@ function handleChatCompletions(req, res, body) {
     'Cache-Control': 'no-cache',
     Connection: 'keep-alive',
   });
+
+  // Clarify scenario: single tool_call chunk + finish_reason=tool_calls.
+  if (ask) {
+    res.write(
+      `data: ${JSON.stringify(chunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: 'call_ask_1',
+            type: 'function',
+            function: {
+              name: 'ask_user',
+              arguments: JSON.stringify({ question: ASK_QUESTION }),
+            },
+          },
+        ],
+      }))}\n\n`,
+    );
+    res.write(
+      `data: ${JSON.stringify({
+        id: 'mock-1',
+        object: 'chat.completion.chunk',
+        created: created(),
+        model,
+        choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+      })}\n\n`,
+    );
+    res.write('data: [DONE]\n\n');
+    res.end();
+    return;
+  }
 
   // 3 content chunks (delta carries role + content part).
   for (const part of splitText(REPLY, STREAM_CHUNKS)) {

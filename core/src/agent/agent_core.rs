@@ -371,6 +371,9 @@ impl Agent {
             // 恢复注入上下文快照（重启后沿用会话固化的前缀内容，不重新检索——
             // 保证旧会话前缀稳定，prompt 缓存不失效；无快照时为空，首次加载填充）
             s.injectable_context = session.header.injectable_snapshot.unwrap_or_default();
+            // 恢复待处理追问（session_meta.header_json 持久化）：澄清回答是
+            // 独立请求，内存状态不跨请求存活，不恢复则追问回答恒失败
+            s.pending_clarification = session.header.pending_clarification.clone();
             for sm in &session.messages {
                 s.add_structured_message(sm.clone());
             }
@@ -431,6 +434,26 @@ impl Agent {
         session.header.injectable_snapshot = Some(ctx.clone());
         if let Err(e) = self.session_manager.update_session(&session).await {
             tracing::warn!(error = %e, "持久化注入上下文快照失败");
+        }
+    }
+
+    /// 持久化待处理追问到会话头部（session_meta.header_json）。
+    ///
+    /// 澄清回答是独立 HTTP 请求（load_and_build_state 重建内存状态），
+    /// 追问不落库则回答轮永远看不到待处理追问——气泡出现后回答恒返回
+    /// "当前没有待处理的追问"。设置（ask_user 触发）与清除（回答后）
+    /// 都须调用。失败仅告警（同进程内内存状态仍生效）。
+    pub(crate) async fn persist_pending_clarification(
+        &self,
+        session_id: &str,
+        pending: &Option<Vec<ClarificationQuestion>>,
+    ) {
+        let Ok(Some(mut session)) = self.session_manager.get_session(session_id).await else {
+            return;
+        };
+        session.header.pending_clarification = pending.clone();
+        if let Err(e) = self.session_manager.update_session(&session).await {
+            tracing::warn!(error = %e, session = %session_id, "持久化待处理追问失败");
         }
     }
 
@@ -527,8 +550,8 @@ impl Agent {
     /// 共享编排骨架：快照（可选）→ 持久化用户消息 → 准备上下文 → AgentLoop →
     /// 结果组装 → 指标更新 → 压缩检查（可选）。
     ///
-    /// `process_message`、`process_message_stream` 与 `handle_clarification_response`
-    /// 三条路径共用此骨架；差异段由 [`TurnOptions`] 参数化：
+    /// `process_message` 与 `process_message_stream` 两条路径共用此骨架；
+    /// 差异段由 [`TurnOptions`] 参数化：
     /// - `mode`：Plain（构造 `AgentResponse`）或 Stream（`run_stream` + 流式事件）
     /// - `do_snapshot` / `do_compress`：快照与压缩检查开关（流式轮此前缺失
     ///   压缩检查的漂移在此修复）。
@@ -695,6 +718,11 @@ impl Agent {
                     required: true,
                 };
                 state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
+                // 持久化到会话头部：澄清回答是独立请求（load_and_build_state
+                // 重建状态），不落库则回答轮找不到待处理追问
+                let sid = state.read().await.session_id.clone();
+                self.persist_pending_clarification(&sid, &Some(vec![question_obj.clone()]))
+                    .await;
                 let formatted = format_clarification_questions(std::slice::from_ref(&question_obj));
                 loop_tokens = Some(total_tokens.clone());
                 match mode {
@@ -770,61 +798,10 @@ impl Agent {
         (response, loop_tokens)
     }
 
-    /// 处理用户对追问的回答。
-    pub(crate) async fn handle_clarification_response(
-        &self,
-        state: &Arc<RwLock<SessionState>>,
-        clarification_answers: &str,
-    ) -> Result<AgentResponse> {
-        let start = Instant::now();
-
-        if state.read().await.pending_clarification.is_none() {
-            return Ok(AgentResponse::simple("当前没有待处理的追问".to_string()));
-        }
-        state.write().await.pending_clarification = None;
-
-        let session_id = state.read().await.session_id.clone();
-
-        // 审批降级链路：若存在待用户确认的审批操作，根据回答记录批准/拒绝。
-        // 决策语义由审批模块（executor::approval::is_user_confirmation）解析。
-        let approved = crate::executor::approval::is_user_confirmation(clarification_answers);
-        if self
-            .agent_loop
-            .tool_registry()
-            .confirm_pending_approval(approved)
-            .await
-        {
-            tracing::info!(
-                approved,
-                answer = %clarification_answers,
-                "已记录用户对审批追问的回应"
-            );
-        }
-
-        // 共享编排骨架（parent_id 统一在 prepare_context 之后计算，回复挂接在用户回答之下，与 process_message 路径语义一致）
-        let clarification_msg = Message::user(clarification_answers);
-        self.run_agent_turn(
-            state,
-            &session_id,
-            &clarification_msg,
-            &self.default_model,
-            start,
-            None,
-            TurnOptions {
-                // 澄清轮：不拍快照、不触发压缩（保持原路径语义）
-                mode: TurnMode::Plain,
-                do_snapshot: false,
-                do_compress: false,
-                thinking_effort: None,
-            },
-        )
-        .await
-    }
-
     /// 处理用户对追问的回答（流式版）：确认审批 + 以 Stream 模式跑澄清轮。
     ///
-    /// 与 [`Self::handle_clarification_response`] 的区别：增量经 sender 推送
-    /// （思考/工具/输出逐块到达），前端可实时展示而非等待整轮完成。
+    /// 增量经 sender 推送（思考/工具/输出逐块到达），前端可实时展示
+    /// 而非等待整轮完成。
     pub(crate) async fn handle_clarification_response_stream(
         &self,
         state: &Arc<RwLock<SessionState>>,
@@ -844,6 +821,9 @@ impl Agent {
             return;
         }
         state.write().await.pending_clarification = None;
+        // 清除后同步持久化（回答已受理，重启/请求边界后不应残留追问）
+        let sid = state.read().await.session_id.clone();
+        self.persist_pending_clarification(&sid, &None).await;
 
         let session_id = state.read().await.session_id.clone();
 
@@ -1209,37 +1189,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_clarification_response_returns_answer() {
-        // 回归保护：handle_clarification_response 编排路径（共享骨架 + 审批确认 extras）。
-        // 注意：trait 层 handle_clarification 每次重新 load_and_build_state，
-        // pending_clarification 不跨请求保留，故直接构造带待追问的状态调用
-        // pub(crate) handle_clarification_response 以覆盖其编排路径。
-        let mut mock = MockChatService::new();
-        mock.expect_chat_completion()
-            .times(1)
-            .returning(|_| Ok(response_with(Message::assistant("处理完成"))));
-        let agent = make_agent(mock);
-
-        let state = agent.load_and_build_state("session-1").await.unwrap();
-        state.write().await.pending_clarification = Some(vec![ClarificationQuestion {
-            question: "测试问题".to_string(),
-            question_type: QuestionType::OpenEnded,
-            options: None,
-            required: true,
-        }]);
-
-        let resp = agent
-            .handle_clarification_response(&state, "好的")
-            .await
-            .unwrap();
-
-        assert!(!resp.needs_clarification, "回答追问后应返回正常回答");
-        assert_eq!(resp.content, "处理完成");
-        // 待追问状态已被清理
-        assert!(state.read().await.pending_clarification.is_none());
-    }
-
-    #[tokio::test]
     async fn test_prepare_context_injects_session_hint() {
         // 回归保护：组装上下文必须包含会话定位信息（session_id + vfs 检索路径），
         // 使 LLM 在早期对话被压缩后仍能向上检索原始记录（resume 不丢意图的最后一环）。
@@ -1284,7 +1233,7 @@ mod tests {
 
     #[test]
     fn test_clarification_answer_injected_once() {
-        // 回归保护：handle_clarification_response 链路中，用户对追问的回答
+        // 回归保护：澄清回答链路中，用户对追问的回答
         // 通过 prepare_context 仅注入内存状态一次；持久化（persist_user_message）
         // 走 VFS，与上下文组装是两条独立存储，组装结果不得出现重复回答。
         let mut state = SessionState::new("session-1");

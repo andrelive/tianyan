@@ -11,8 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info};
 
 use crate::api::chat::services::ChatService;
-use crate::api::chat::types::{ChatRequest, ChatResponse, ChatStreamEvent, ClarifyRequest};
-use crate::api::shared::error::ApiError;
+use crate::api::chat::types::{ChatRequest, ChatStreamEvent, ClarifyRequest};
 use crate::state::AppState;
 
 /// SSE 流式通道缓冲区大小。
@@ -30,28 +29,6 @@ fn send_validation_error(tx: mpsc::Sender<Result<Event, Infallible>>, message: S
             }
         }
     });
-}
-
-/// 追问回答处理器（非流式）
-pub async fn chat_clarify_handler(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<ClarifyRequest>,
-) -> Result<Json<ChatResponse>, ApiError> {
-    if let Err(e) = request.validate() {
-        return Err(ApiError::BadRequest(e));
-    }
-
-    info!("收到追问回答请求，会话: {}", request.session_id);
-
-    let agent = state.agent().await;
-    let session_manager = state.session_manager();
-
-    let service = ChatService::new(agent, session_manager);
-    service
-        .handle_clarification(&request.session_id, &request.answer)
-        .await
-        .inspect_err(|e| error!("追问回答处理错误: {}", e))
-        .map(Json)
 }
 
 /// 追问回答处理器（流式/SSE via POST）。

@@ -4,7 +4,6 @@ import type {
   ApprovalStatusSnapshot,
   BackgroundTask,
   CancelTaskResponse,
-  ChatMessage,
   CompressSessionResponse,
   IngestResponse,
   KnowledgeSearchResponse,
@@ -338,32 +337,6 @@ export async function updateSessionWorkspace(
   return apiPut<Session>(`/sessions/${encodeURIComponent(sessionId)}/workspace`, {
     working_directory: workingDirectory,
   });
-}
-
-// ========== Chat clarification ==========
-
-export interface ClarifyRequest {
-  session_id: string;
-  answer: string;
-}
-
-export interface ClarifyResponse {
-  id: string;
-  session_id: string;
-  message: ChatMessage;
-  usage: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-}
-
-/** 提交对 Agent 追问的回答，返回继续处理的结果（非流式）。 */
-export async function clarifyChat(sessionId: string, answer: string): Promise<ClarifyResponse> {
-  return apiPost<ClarifyResponse>('/chat/clarify', {
-    session_id: sessionId,
-    answer,
-  } satisfies ClarifyRequest);
 }
 
 export { getApiBase };

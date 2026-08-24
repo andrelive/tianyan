@@ -244,13 +244,6 @@ mod tests {
         {
             Err(tianyan::TianyanError::Custom("测试桩".to_string()))
         }
-        async fn handle_clarification(
-            &self,
-            _session_id: &str,
-            _answers: &str,
-        ) -> tianyan::Result<AgentResponse> {
-            Err(tianyan::TianyanError::Custom("测试桩".to_string()))
-        }
         async fn approval_status(&self) -> tianyan::Result<ApprovalStatusSnapshot> {
             Err(tianyan::TianyanError::Custom("测试桩".to_string()))
         }

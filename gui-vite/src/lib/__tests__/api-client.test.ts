@@ -17,7 +17,6 @@ import {
   isPermission,
   isTimeout,
   apiPostMultipart,
-  clarifyChat,
   fetchTasks,
   cancelTask,
   compressSession,
@@ -222,40 +221,6 @@ describe('ApiError', () => {
     const err = new ApiError('x', 409);
     expect(err.code).toBe('409');
     expect(new ApiError('x', '403').kind).toBe('permission');
-  });
-});
-
-// ─── clarifyChat ───────────────────────────────────────────────────────────────
-
-describe('clarifyChat', () => {
-  it('submits an answer and returns the continued response', async () => {
-    const result = await clarifyChat('session-1', '我的回答');
-
-    expect(result.id).toBe('msg-2');
-    expect(result.session_id).toBe('session-1');
-    expect(result.message.role).toBe('assistant');
-    expect(result.message.content).toBe('好的，我来继续处理。');
-    expect(result.message.timestamp).toBe('2026-07-23T10:00:10Z');
-    expect(result.usage.total_tokens).toBe(80);
-  });
-
-  it('posts the answer in the request body', async () => {
-    let receivedBody: unknown;
-    server.use(
-      http.post(`${API_BASE}/chat/clarify`, async ({ request }) => {
-        receivedBody = await request.json();
-        return HttpResponse.json({
-          id: 'msg-2',
-          session_id: 'session-1',
-          message: { role: 'assistant', content: 'ok' },
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-        });
-      }),
-    );
-
-    await clarifyChat('session-1', '我的回答');
-
-    expect(receivedBody).toEqual({ session_id: 'session-1', answer: '我的回答' });
   });
 });
 

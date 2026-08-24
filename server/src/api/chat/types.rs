@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::api::shared::types::{ChatMessage, MessageRole, TokenUsage};
+use crate::api::shared::types::ChatMessage;
 
 /// 对话完成请求
 #[derive(Debug, Deserialize)]
@@ -74,43 +74,6 @@ impl ChatRequest {
             return Err("max_tokens 必须在 1 到 32768 之间".to_string());
         }
         Ok(())
-    }
-}
-
-/// 对话完成响应（非流式）
-#[derive(Debug, Serialize)]
-pub struct ChatResponse {
-    /// 响应标识
-    pub id: String,
-    /// 会话标识
-    pub session_id: String,
-    /// 回复消息
-    pub message: ChatMessage,
-    /// 令牌使用统计
-    pub usage: TokenUsage,
-}
-
-impl ChatResponse {
-    /// 创建错误响应
-    pub fn error(message: &str) -> Self {
-        Self {
-            id: format!("chatcmpl-{}", crate::api::shared::short_uuid()),
-            session_id: "error".to_string(),
-            message: ChatMessage {
-                id: None,
-                role: MessageRole::Assistant,
-                content: message.to_string(),
-                thinking: None,
-                tool_calls: None,
-                images: None,
-                truncated_by_length: false,
-                interrupted: false,
-                usage: None,
-                timestamp: Some(chrono::Utc::now().to_rfc3339()),
-                segments: None,
-            },
-            usage: TokenUsage::empty(),
-        }
     }
 }
 
@@ -250,7 +213,6 @@ impl ChatStreamEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::shared::types::MessageRole;
 
     #[test]
     fn test_chat_request_deserialization() {
@@ -265,37 +227,6 @@ mod tests {
         assert_eq!(req.session_id, Some("test-session".to_string()));
         assert_eq!(req.message.content, "Hello");
         assert!(!req.stream);
-    }
-
-    #[test]
-    fn test_chat_response_serialization() {
-        let response = ChatResponse {
-            id: "chatcmpl-123".to_string(),
-            session_id: "session-456".to_string(),
-            message: ChatMessage {
-                id: Some("test-msg".to_string()),
-                role: MessageRole::Assistant,
-                content: "Hello!".to_string(),
-                thinking: None,
-                tool_calls: None,
-                images: None,
-                truncated_by_length: false,
-                interrupted: false,
-                usage: None,
-                timestamp: Some("2026-02-20T10:00:00Z".to_string()),
-                segments: None,
-            },
-            usage: TokenUsage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                total_tokens: 15,
-                cache_read: 0,
-                cache_write: 0,
-            },
-        };
-        let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains("chatcmpl-123"));
-        assert!(json.contains("Hello!"));
     }
 
     #[test]

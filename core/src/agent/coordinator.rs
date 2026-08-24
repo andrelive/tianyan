@@ -34,28 +34,14 @@
 //! use tianyan::agent::{Agent, AgentCoordinator};
 //! use tianyan::common::types::Message;
 //!
-//! async fn chat_with_clarification(
+//! async fn chat_with_agent(
 //!     agent: &Agent,
 //!     user_input: &str,
 //! ) -> Result<String, Box<dyn std::error::Error>> {
 //!     let response = agent
 //!         .process_message("session-001", &Message::user(user_input), None, None)
 //!         .await?;
-//!
-//!     if response.needs_clarification {
-//!         println!("需要追问：");
-//!         for q in &response.clarification_questions {
-//!             println!("  - {}", q.question);
-//!         }
-//!
-//!         let user_answer = "我想优化 src/parser.rs，关注执行速度";
-//!         let final_response = agent
-//!             .handle_clarification("session-001", &Message::user(user_answer), None)
-//!             .await?;
-//!         Ok(final_response.content)
-//!     } else {
-//!         Ok(response.content)
-//!     }
+//!     Ok(response.content)
 //! }
 //! ```
 //!
@@ -131,9 +117,6 @@ pub trait AgentCoordinator: Send + Sync {
         cancel: Option<Arc<AtomicBool>>,
         thinking_effort: Option<String>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
-
-    /// 处理用户对追问的回答。
-    async fn handle_clarification(&self, session_id: &str, answers: &str) -> Result<AgentResponse>;
 
     /// 处理用户对追问的回答（流式响应）：增量逐块推送，避免整轮等待。
     ///
@@ -328,13 +311,6 @@ impl AgentCoordinator for Agent {
         });
 
         Ok(rx)
-    }
-
-    async fn handle_clarification(&self, session_id: &str, answers: &str) -> Result<AgentResponse> {
-        // ADR-013 串行化：澄清回答是用户轮的延续，同样占用会话轮次锁
-        let _turn_guard = self.turn_guard(session_id).await;
-        let state = self.load_and_build_state(session_id).await?;
-        self.handle_clarification_response(&state, answers).await
     }
 
     async fn handle_clarification_stream(

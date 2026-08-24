@@ -10,7 +10,7 @@ interface Props {
 
 /**
  * 追问气泡：Agent 需要用户确认时展示问题与回答输入框，
- * 提交后通过 /chat/clarify 继续处理（非流式）。
+ * 提交后通过 /chat/clarify/stream 继续处理（流式）。
  */
 export default function ClarificationBubble({ question, submitting, onSubmit }: Props) {
   const [answer, setAnswer] = useState('');
