@@ -40,13 +40,12 @@ impl AsyncOpenAIClient {
             oa_config = oa_config.with_api_key(&api_key);
         }
 
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout))
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .pool_max_idle_per_host(5)
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .build()
-            .map_err(|e| TianyanError::config(format!("构建 HTTP 客户端失败: {}", e)))?;
+        let http_client =
+            crate::common::http::build_http_client(&crate::common::http::HttpClientSpec {
+                timeout: std::time::Duration::from_secs(config.timeout),
+                connect_timeout: std::time::Duration::from_secs(30),
+                user_agent: None,
+            })?;
 
         let client = Client::with_config(oa_config).with_http_client(http_client.clone());
 

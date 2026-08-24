@@ -336,7 +336,7 @@ impl AppState {
             cfg.allowed_paths = sec.allowed_directories.clone();
             cfg
         };
-        register_builtin_skills(&mut skill_registry, &skill_config);
+        register_builtin_skills(&mut skill_registry, &skill_config)?;
         let skill_registry = Arc::new(RwLock::new(skill_registry));
         let skill_executor = Arc::new(SkillExecutor::new(skill_registry.clone(), skill_config));
 

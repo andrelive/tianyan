@@ -155,7 +155,10 @@ pub fn create_builtin_skills() -> Vec<Skill> {
 /// 单次遍历完成注册：每个技能携带完整元数据（参数 schema、分类、安全级别）
 /// 与对应处理器一起注册，避免先注册元数据、再用裸 `Skill::new` 覆盖
 /// 导致参数 schema 丢失的问题。
-pub fn register_builtin_skills(registry: &mut SkillRegistry, config: &ExecutorConfig) {
+pub fn register_builtin_skills(
+    registry: &mut SkillRegistry,
+    config: &ExecutorConfig,
+) -> crate::common::error::Result<()> {
     let handlers: Vec<(&str, Arc<dyn super::definition::SkillHandler>)> = vec![
         (
             "file_read",
@@ -195,7 +198,7 @@ pub fn register_builtin_skills(registry: &mut SkillRegistry, config: &ExecutorCo
             "http_request",
             Arc::new(HttpRequestHandler::with_timeout(
                 config.skill_http_timeout_secs,
-            )),
+            )?),
         ),
         (
             "planning",
@@ -209,4 +212,6 @@ pub fn register_builtin_skills(registry: &mut SkillRegistry, config: &ExecutorCo
             None => registry.register(skill),
         }
     }
+
+    Ok(())
 }

@@ -19,26 +19,20 @@ pub struct HttpRequestHandler {
 }
 
 impl HttpRequestHandler {
-    /// 创建新的 HTTP 请求处理器。
-    pub fn new() -> Self {
+    /// 创建新的 HTTP 请求处理器（默认 60s 超时；构建失败上抛）。
+    pub fn new() -> Result<Self> {
         Self::with_timeout(60)
     }
 
-    /// 使用自定义超时创建。
-    pub fn with_timeout(secs: u64) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(secs))
-            .connect_timeout(Duration::from_secs(secs.min(15)))
-            .pool_max_idle_per_host(5)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client }
-    }
-}
-
-impl Default for HttpRequestHandler {
-    fn default() -> Self {
-        Self::new()
+    /// 使用自定义超时创建（客户端构建失败上抛，不静默降级为默认客户端）。
+    pub fn with_timeout(secs: u64) -> Result<Self> {
+        let client =
+            crate::common::http::build_http_client(&crate::common::http::HttpClientSpec {
+                timeout: Duration::from_secs(secs),
+                connect_timeout: Duration::from_secs(secs.min(15)),
+                user_agent: None,
+            })?;
+        Ok(Self { client })
     }
 }
 
@@ -153,7 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_url_param() {
-        let handler = HttpRequestHandler::new();
+        let handler = HttpRequestHandler::new().unwrap();
         let err = handler
             .execute(HashMap::new(), ExecutionContext::default())
             .await
@@ -163,7 +157,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_url_rejected() {
-        let handler = HttpRequestHandler::new();
+        let handler = HttpRequestHandler::new().unwrap();
         let err = handler
             .execute(params("not a url"), ExecutionContext::default())
             .await
@@ -176,7 +170,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_http_scheme_rejected() {
-        let handler = HttpRequestHandler::new();
+        let handler = HttpRequestHandler::new().unwrap();
         for url in [
             "file:///etc/passwd",
             "ftp://example.com/x",
@@ -195,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_local_and_private_hosts_rejected() {
-        let handler = HttpRequestHandler::new();
+        let handler = HttpRequestHandler::new().unwrap();
         let blocked = [
             "http://localhost/x",
             "http://127.0.0.1/x",
@@ -222,7 +216,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unsupported_method_rejected() {
-        let handler = HttpRequestHandler::new();
+        let handler = HttpRequestHandler::new().unwrap();
         let mut p = params("https://example.com/x");
         p.insert("method".to_string(), Value::String("TRACE".to_string()));
         let err = handler
@@ -237,6 +231,9 @@ mod tests {
 
     #[test]
     fn test_skill_id() {
-        assert_eq!(HttpRequestHandler::new().skill_id(), "http_request");
+        assert_eq!(
+            HttpRequestHandler::new().unwrap().skill_id(),
+            "http_request"
+        );
     }
 }

@@ -4,6 +4,7 @@
 
 pub mod binary;
 pub mod error;
+pub mod http;
 pub mod llm_judge;
 pub mod logging;
 pub mod token_estimator;

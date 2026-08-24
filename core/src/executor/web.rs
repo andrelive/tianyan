@@ -87,16 +87,18 @@ pub struct WebSearchClient {
 impl WebSearchClient {
     /// 从配置创建客户端。
     pub fn new(config: &WebConfig) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.timeout_secs.max(1)))
-            .connect_timeout(Duration::from_secs(config.timeout_secs.clamp(1, 15)))
-            .user_agent(concat!(
-                "Mozilla/5.0 (compatible; tianyan-agent/",
-                env!("CARGO_PKG_VERSION"),
-                "; +local desktop agent)"
-            ))
-            .build()
-            .map_err(|e| TianyanError::config(format!("构建 HTTP 客户端失败: {e}")))?;
+        let http = crate::common::http::build_http_client(&crate::common::http::HttpClientSpec {
+            timeout: Duration::from_secs(config.timeout_secs.max(1)),
+            connect_timeout: Duration::from_secs(config.timeout_secs.clamp(1, 15)),
+            user_agent: Some(
+                concat!(
+                    "Mozilla/5.0 (compatible; tianyan-agent/",
+                    env!("CARGO_PKG_VERSION"),
+                    "; +local desktop agent)"
+                )
+                .to_string(),
+            ),
+        })?;
 
         Ok(Self {
             http,

@@ -386,7 +386,7 @@ mod tests {
     fn test_builtin_skills_keep_metadata_after_registration() {
         let mut registry = SkillRegistry::new();
         let config = ExecutorConfig::new();
-        register_builtin_skills(&mut registry, &config);
+        register_builtin_skills(&mut registry, &config).unwrap();
 
         assert_eq!(registry.count(), 7, "内置技能：6 执行型 + planning 软约束");
 
@@ -424,7 +424,7 @@ mod tests {
         let mut registry = SkillRegistry::new();
         let config = ExecutorConfig::new();
 
-        register_builtin_skills(&mut registry, &config);
+        register_builtin_skills(&mut registry, &config).unwrap();
 
         let registry = Arc::new(RwLock::new(registry));
         let executor = SkillExecutor::new(registry.clone(), config);
