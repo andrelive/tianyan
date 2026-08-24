@@ -144,7 +144,8 @@ impl TargetScope {
         let uri_prefix = if path.is_empty() {
             None
         } else {
-            Some(format!("tianyan://{}/{}", category, path.join("/")))
+            // 统一走 TianyanUri::new（前缀构造与 URI 解析同一实现，不手拼）
+            Some(TianyanUri::new(category, path.clone()).as_str().to_string())
         };
         Self {
             category,

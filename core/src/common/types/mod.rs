@@ -35,4 +35,4 @@ pub use structured_message::{
 };
 pub use token::TokenUsage;
 pub use tool::{FunctionCall, ToolCall, ToolCallType};
-pub use uri::{AgentPath, TianyanUri, TIANYAN_URI_SCHEME};
+pub use uri::{memory_paths, AgentPath, TianyanUri, TIANYAN_URI_SCHEME};

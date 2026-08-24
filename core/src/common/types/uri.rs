@@ -32,6 +32,25 @@ impl AgentPath {
     pub fn uri(&self) -> TianyanUri {
         TianyanUri::new(ContextNamespace::Agent, vec![self.as_segment().to_string()])
     }
+
+    /// 学习规则归档目录（tianyan://agent/learned/archive/；过时规则归档段）。
+    pub fn learned_archive() -> TianyanUri {
+        TianyanUri::new(
+            ContextNamespace::Agent,
+            vec![
+                Self::Learned.as_segment().to_string(),
+                "archive".to_string(),
+            ],
+        )
+    }
+}
+
+/// Memory 命名空间的固定子路径段（uri_mapper 等共用，禁止散落字面量）。
+pub mod memory_paths {
+    /// 会话快照段（tianyan://memory/sessions/）。
+    pub const SESSIONS: &str = "sessions";
+    /// 长期记忆段（tianyan://memory/long_term/）。
+    pub const LONG_TERM: &str = "long_term";
 }
 
 /// 用于标识上下文条目的 Tianyan URI。

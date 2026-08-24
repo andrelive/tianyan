@@ -76,7 +76,8 @@ impl UriMapper {
             crate::common::types::ContextNamespace::Memory => {
                 if !path.is_empty() {
                     match path[0].as_str() {
-                        "sessions" | "long_term" => "jsonl",
+                        crate::common::types::memory_paths::SESSIONS
+                        | crate::common::types::memory_paths::LONG_TERM => "jsonl",
                         _ => "md",
                     }
                 } else {

@@ -76,10 +76,7 @@ impl GcTask {
                     .cloned()
                     .unwrap_or_else(|| "unknown".to_string());
 
-                let archive_uri = AgentPath::Learned
-                    .uri()
-                    .append("archive")
-                    .append(&rule_name);
+                let archive_uri = AgentPath::learned_archive().append(&rule_name);
 
                 match ctx.vfs.move_entry(&entry.metadata.uri, &archive_uri).await {
                     Ok(_) => {
@@ -259,9 +256,7 @@ mod tests {
             moves[0],
             (
                 learned_uri("stale-rule").to_string(),
-                AgentPath::Learned
-                    .uri()
-                    .append("archive")
+                AgentPath::learned_archive()
                     .append("stale-rule")
                     .to_string()
             )
