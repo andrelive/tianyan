@@ -65,7 +65,8 @@ function MarkdownContent({ text, isUser }: { text: string; isUser: boolean }) {
       )}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        // singleTilde: false —— 中文语境 15~20 是数值范围，单波浪线不应渲染为删除线
+        remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
         components={{
           table: ({ children }) => (
             <div className="my-2 overflow-x-auto">
