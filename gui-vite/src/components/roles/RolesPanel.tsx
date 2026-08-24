@@ -3,6 +3,7 @@ import { useResource } from '@/hooks/use-resource';
 import { toErrorMessage } from '@/lib/errors';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { AlertCircle, Bot, ChevronRight, Loader2, RotateCcw, Trash2, Users } from 'lucide-react';
+import ListDetailPanel from '@/components/ui/ListDetailPanel';
 import { apiDelete, apiPost, getRoleDetail, getRoles, getRolesStats } from '@/lib/api-client';
 import { formatTimestamp } from '@/lib/utils';
 
@@ -132,60 +133,59 @@ export default function RolesPanel() {
   };
 
   return (
-    <div className="flex flex-col h-full">
-      {/* 统计概览区（ADR-016：委托统计面板） */}
-      <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center gap-4 flex-wrap shrink-0">
-        {stats && stats.total_calls > 0 ? (
-          <>
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-[var(--color-text-secondary)]">累计委托</span>
-              <span className="font-semibold text-[var(--color-text-primary)]">
-                {stats.total_calls} 次
+    <>
+      <ListDetailPanel
+        header={
+          <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center gap-4 flex-wrap shrink-0">
+            {stats && stats.total_calls > 0 ? (
+              <>
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="text-[var(--color-text-secondary)]">累计委托</span>
+                  <span className="font-semibold text-[var(--color-text-primary)]">
+                    {stats.total_calls} 次
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="text-[var(--color-text-secondary)]">成功率</span>
+                  <span
+                    className={`font-semibold ${stats.success_rate < 0.5 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}
+                  >
+                    {Math.round(stats.success_rate * 100)}%
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-xs text-[var(--color-text-tertiary)]">任务类型：</span>
+                  {stats.by_task_type.map(([type, count]) => (
+                    <span
+                      key={type}
+                      className="inline-block px-1.5 py-0.5 text-[10px] rounded bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-secondary)]"
+                      title={type}
+                    >
+                      {TYPE_LABEL[type] ?? type} {count}
+                    </span>
+                  ))}
+                </div>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-xs text-[var(--color-text-tertiary)]">按角色：</span>
+                  {stats.by_role.map((r) => (
+                    <span
+                      key={r.name}
+                      className="inline-block px-1.5 py-0.5 text-[10px] rounded bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-secondary)]"
+                      title={`${r.success}/${r.calls} 次成功`}
+                    >
+                      {r.name} {r.calls} 次
+                    </span>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <span className="text-xs text-[var(--color-text-tertiary)]">
+                暂无委托统计——主智能体委托子智能体后，这里会展示任务类型分布、各角色调用次数与成功率
               </span>
-            </div>
-            <div className="flex items-center gap-2 text-sm">
-              <span className="text-[var(--color-text-secondary)]">成功率</span>
-              <span
-                className={`font-semibold ${stats.success_rate < 0.5 ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400'}`}
-              >
-                {Math.round(stats.success_rate * 100)}%
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-xs text-[var(--color-text-tertiary)]">任务类型：</span>
-              {stats.by_task_type.map(([type, count]) => (
-                <span
-                  key={type}
-                  className="inline-block px-1.5 py-0.5 text-[10px] rounded bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-secondary)]"
-                  title={type}
-                >
-                  {TYPE_LABEL[type] ?? type} {count}
-                </span>
-              ))}
-            </div>
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-xs text-[var(--color-text-tertiary)]">按角色：</span>
-              {stats.by_role.map((r) => (
-                <span
-                  key={r.name}
-                  className="inline-block px-1.5 py-0.5 text-[10px] rounded bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-secondary)]"
-                  title={`${r.success}/${r.calls} 次成功`}
-                >
-                  {r.name} {r.calls} 次
-                </span>
-              ))}
-            </div>
-          </>
-        ) : (
-          <span className="text-xs text-[var(--color-text-tertiary)]">
-            暂无委托统计——主智能体委托子智能体后，这里会展示任务类型分布、各角色调用次数与成功率
-          </span>
-        )}
-      </div>
-
-      <div className="flex flex-1 min-h-0">
-        {/* 左列：角色列表 */}
-        <div className="w-[40%] min-w-[260px] max-w-[360px] flex flex-col border-r border-[var(--color-border)]">
+            )}
+          </div>
+        }
+        listHeader={
           <div className="px-4 py-4 border-b border-[var(--color-border)]">
             <h2 className="text-lg font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
               <Users size={20} />
@@ -195,95 +195,77 @@ export default function RolesPanel() {
               角色化分工（内置 / 配置 / 学习三源平级），自演化更新
             </p>
           </div>
+        }
 
-          <div className="flex-1 overflow-y-auto p-3">
-            {loading ? (
-              <div
-                className="flex items-center justify-center py-16"
-                aria-live="polite"
-                aria-label="正在加载角色"
+        listLoading={loading}
+        listError={error}
+        listAriaLabel="正在加载角色"
+        listEmpty={
+          roles.length === 0 ? (
+            <>
+              <Bot size={40} className="mb-3 opacity-40" />
+              <p className="text-sm">暂无角色</p>
+              <p className="text-xs mt-1 opacity-70">系统从重复成功的执行模式中自动分化子智能体</p>
+            </>
+          ) : null
+        }
+        list={
+          <div className="space-y-1">
+            {roles.map((role) => (
+              <button
+                key={role.name}
+                onClick={() => setSelectedName(role.name)}
+                className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                  selectedName === role.name
+                    ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                    : 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+                }`}
               >
-                <Loader2 size={24} className="animate-spin text-[var(--color-text-tertiary)]" />
-              </div>
-            ) : error ? (
-              <div
-                role="alert"
-                className="flex items-center gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-sm"
-              >
-                <AlertCircle size={16} />
-                <span>{error}</span>
-              </div>
-            ) : roles.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16 text-[var(--color-text-tertiary)]">
-                <Bot size={40} className="mb-3 opacity-40" />
-                <p className="text-sm">暂无角色</p>
-                <p className="text-xs mt-1 opacity-70">
-                  系统从重复成功的执行模式中自动分化子智能体
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {roles.map((role) => (
-                  <button
-                    key={role.name}
-                    onClick={() => setSelectedName(role.name)}
-                    className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                      selectedName === role.name
-                        ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
-                        : 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <p className="font-medium truncate">{role.name}</p>
-                          <span
-                            className={`shrink-0 inline-block px-1.5 py-0.5 text-[10px] rounded-full border ${SOURCE_STYLE[role.source] ?? ''}`}
-                          >
-                            {SOURCE_LABEL[role.source] ?? role.source}
-                          </span>
-                          {role.status === 'experimental' && (
-                            <span className="shrink-0 inline-block px-1.5 py-0.5 text-[10px] rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
-                              试验性
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-xs text-[var(--color-text-tertiary)] truncate mt-0.5">
-                          {role.purpose}
-                        </p>
-                        <p className="text-xs text-[var(--color-text-tertiary)]/80 mt-1 flex items-center gap-2 flex-wrap">
-                          <span>v{role.version}</span>
-                          <span>
-                            {role.tool_count == null ? '工具不限' : `${role.tool_count} 工具`}
-                          </span>
-                          {role.usage && role.usage.calls > 0 && (
-                            <span
-                              className={
-                                role.usage.success_rate < 0.5
-                                  ? 'text-red-600 dark:text-red-400'
-                                  : ''
-                              }
-                              title={`${role.usage.success}/${role.usage.calls} 次成功`}
-                            >
-                              成功率 {Math.round(role.usage.success_rate * 100)}%
-                            </span>
-                          )}
-                        </p>
-                      </div>
-                      {selectedName === role.name && (
-                        <ChevronRight size={14} className="shrink-0 ml-2 text-blue-500" />
+                <div className="flex items-center justify-between">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium truncate">{role.name}</p>
+                      <span
+                        className={`shrink-0 inline-block px-1.5 py-0.5 text-[10px] rounded-full border ${SOURCE_STYLE[role.source] ?? ''}`}
+                      >
+                        {SOURCE_LABEL[role.source] ?? role.source}
+                      </span>
+                      {role.status === 'experimental' && (
+                        <span className="shrink-0 inline-block px-1.5 py-0.5 text-[10px] rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                          试验性
+                        </span>
                       )}
                     </div>
-                  </button>
-                ))}
-              </div>
-            )}
+                    <p className="text-xs text-[var(--color-text-tertiary)] truncate mt-0.5">
+                      {role.purpose}
+                    </p>
+                    <p className="text-xs text-[var(--color-text-tertiary)]/80 mt-1 flex items-center gap-2 flex-wrap">
+                      <span>v{role.version}</span>
+                      <span>
+                        {role.tool_count == null ? '工具不限' : `${role.tool_count} 工具`}
+                      </span>
+                      {role.usage && role.usage.calls > 0 && (
+                        <span
+                          className={
+                            role.usage.success_rate < 0.5 ? 'text-red-600 dark:text-red-400' : ''
+                          }
+                          title={`${role.usage.success}/${role.usage.calls} 次成功`}
+                        >
+                          成功率 {Math.round(role.usage.success_rate * 100)}%
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                  {selectedName === role.name && (
+                    <ChevronRight size={14} className="shrink-0 ml-2 text-blue-500" />
+                  )}
+                </div>
+              </button>
+            ))}
           </div>
-        </div>
-
-        {/* 右列：角色详情 */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          {!selectedRole ? (
+        }
+        detail={
+          !selectedRole ? (
             <div className="flex-1 flex flex-col items-center justify-center text-[var(--color-text-tertiary)]">
               <Bot size={48} className="mb-4 opacity-30" />
               <p className="text-sm">选择一个子智能体查看详情</p>
@@ -461,10 +443,9 @@ export default function RolesPanel() {
                 )}
               </div>
             </>
-          )}
-        </div>
-      </div>
-
+          )
+        }
+      />
       {/* 破坏性操作确认（统一 ConfirmDialog 原语） */}
       <ConfirmDialog
         open={confirm !== null}
@@ -476,6 +457,6 @@ export default function RolesPanel() {
         onConfirm={() => void (confirm?.action === 'delete' ? executeDelete() : executeReset())}
         onCancel={() => setConfirm(null)}
       />
-    </div>
+    </>
   );
 }
