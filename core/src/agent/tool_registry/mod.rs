@@ -5,15 +5,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use crate::agent::tool_params::{
-    ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
-    DelegationStatsParams, DiscoverTestsParams, ExecuteCommandParams, ExecutionDetailParams,
-    ExecutionStatsParams, GlobParams, KnowledgeIngestParams, ListDirParams, LspParams,
-    ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams, SelfCheckParams,
-    SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
-    TaskStatusParams, VerifyBuildParams, VfsListParams, VfsReadParams, WebFetchParams,
-    WebSearchParams, WriteFileParams,
-};
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
 use crate::executor::approval::{ApprovalDecision, ApprovalWorkflow};
@@ -23,7 +14,7 @@ use crate::executor::SecurityPolicy;
 use crate::executor::VerificationGate;
 use crate::knowledge::KnowledgeIngestor;
 use crate::lsp::diagnostics::LspManager;
-use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition, ToolPresentation};
+use crate::model::types::{ToolCall, ToolDefinition, ToolPresentation};
 use crate::model::ChatService;
 use crate::observability::execution_log::ExecutionLog;
 use crate::observability::trace::TraceCollector;
@@ -32,19 +23,13 @@ use crate::observability::AgentMetrics;
 use crate::scheduler::tasks::RuleRecorder;
 use crate::session::search::SessionRecall;
 
-/// 当前平台的 shell 事实（注入 execute_command 工具描述，消除模型试错）。
-fn shell_platform_hint() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "Platform: Windows. Shell is PowerShell (5.1+), NOT cmd.exe — PowerShell cmdlets like Out-File, Select-String, Get-ChildItem and pipelines work; use PS syntax."
-    } else {
-        "Platform: Unix. Shell is sh -c (POSIX); standard Unix pipes and redirects work."
-    }
-}
 use crate::skills::learning::ExecutionHistory;
 use crate::skills::SkillExecutor;
 use crate::vfs::VirtualFileSystem;
 
 mod agent_ops;
+/// 内置工具元数据单一事实源（H-C1：schema/展示意图/短路清单）。
+mod builtin_tools;
 mod code_ops;
 /// 演化数据查询工具执行器（ADR-017 GEPA 数据层：execution_stats 等）。
 mod evolution_ops;
@@ -65,6 +50,8 @@ mod symbol_ops;
 mod test_ops;
 
 pub use pipeline::{ToolGuard, ToolPostExecuteListener, ToolPreExecuteListener};
+
+use builtin_tools::BUILTIN_TOOLS;
 
 /// 将 VFS 层级内容读取结果转换为 JSON 字段值。
 ///
@@ -701,59 +688,9 @@ impl ToolRegistry {
     /// 内置 25 + 少量 MCP 时行为零变化，MCP/技能生态膨胀后自动启用。
     pub(crate) const TOOL_SHORTLIST_THRESHOLD: usize = 40;
 
-    /// 恒存核心工具集：基础操作与通用检索，任何场景都保留。
-    const CORE_TOOLS: &[&str] = &[
-        "read_file",
-        "write_file",
-        "apply_edit",
-        "apply_patch",
-        "execute_command",
-        "grep",
-        "glob",
-        "list_dir",
-        "call_skill",
-        "ask_user",
-        "self_check",
-        "delegate_to_agent",
-        "task_status",
-        "task_cancel",
-        "search_knowledge",
-        "vfs_read",
-        "vfs_list",
-        "web_search",
-        "web_fetch",
-    ];
-
-    /// 条件工具关键词表（query 命中任一关键词即保留；G1）。
+    /// 恒存核心工具集与条件工具关键词：单一事实源在 [`BUILTIN_TOOLS`]
+    /// 表的 `core` / `keywords` 字段（G1 短路清单直接查表，禁止平行清单）。
     ///
-    /// 仅覆盖低频/专用工具；关键词为小写（英文）或原文（中文）。
-    const CONDITIONAL_TOOL_KEYWORDS: &[(&str, &[&str])] = &[
-        (
-            "knowledge_ingest",
-            &["知识", "导入", "ingest", "文档库", "knowledge"],
-        ),
-        (
-            "run_tests",
-            &["测试", "用例", "test", "pytest", "cargo test", "run_tests"],
-        ),
-        (
-            "discover_tests",
-            &["测试", "用例", "test", "发现测试", "discover"],
-        ),
-        (
-            "verify_build",
-            &["构建", "编译", "build", "报错", "编译错误", "verify"],
-        ),
-        (
-            "symbol_outline",
-            &["符号", "大纲", "symbol", "outline", "结构"],
-        ),
-        (
-            "lsp",
-            &["lsp", "诊断", "跳转", "定义", "引用", "diagnostic", "符号"],
-        ),
-    ];
-
     /// 按相关性过滤的 LLM 可见工具定义（G1 工具短路选择）。
     ///
     /// - 工具总数 ≤ [`TOOL_SHORTLIST_THRESHOLD`] 或 `query` 为 None 时：
@@ -776,20 +713,19 @@ impl ToolRegistry {
         defs.into_iter()
             .filter(|def| {
                 let name = def.function.name.as_str();
-                // 核心工具恒存
-                if Self::CORE_TOOLS.contains(&name) {
-                    return true;
+                // 内置工具元数据单一事实源（BUILTIN_TOOLS 表）：
+                // 核心恒存；条件工具按关键词命中；其余内置回落动态匹配规则
+                if let Some(meta) = BUILTIN_TOOLS.iter().find(|t| t.name == name) {
+                    if meta.core {
+                        return true;
+                    }
+                    if let Some(keywords) = meta.keywords {
+                        return keywords
+                            .iter()
+                            .any(|k| query_lower.contains(&k.to_lowercase()));
+                    }
                 }
-                // 条件工具：关键词任一命中 query
-                if let Some((_, keywords)) = Self::CONDITIONAL_TOOL_KEYWORDS
-                    .iter()
-                    .find(|(tool, _)| *tool == name)
-                {
-                    return keywords
-                        .iter()
-                        .any(|k| query_lower.contains(&k.to_lowercase()));
-                }
-                // 动态（MCP）工具：query 分词与名称/描述重叠匹配
+                // 非核心内置工具与动态（MCP）工具：query 分词与名称/描述重叠匹配
                 Self::dynamic_tool_matches(&query_lower, def)
             })
             .collect()
@@ -977,255 +913,17 @@ impl ToolRegistry {
         result
     }
 
+    /// 注册内置工具（元数据单一事实源：BUILTIN_TOOLS 表）。
     fn register_builtin_tools(&mut self) {
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                ReadFileParams,
-            >(
-                "read_file",
-                "Read the full text content of a file from the given path.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                WriteFileParams,
-            >(
-                "write_file",
-                "Write content to a file at the given path.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                ApplyEditParams,
-            >(
-                "apply_edit",
-                "Apply precise edits to a file using line-number + content-hash anchors. Each edit targets a line range verified by an anchor hash; edits are applied bottom-up after all anchors are validated (atomic batch).",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                ApplyPatchParams,
-            >(
-                "apply_patch",
-                "Apply a unified diff patch (*** Update File format) to one or more files. Supports fuzzy matching of context lines and multiple files in one patch.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                ExecuteCommandParams,
-            >(
-                "execute_command",
-                &format!(
-                    "Execute a shell command with optional working directory and timeout. {} {} {} {}",
-                    "Use background:true for long-running or persistent processes (dev servers, services, watchers): it returns immediately with task_id/log_file and does not wait for exit.",
-                    "For persistent services set ready with a port and/or log pattern: the system probes (exponential backoff from initial_delay_ms, total timeout_ms) and notifies you when the port listens or the pattern appears in the log.",
-                    "Query progress with task_status or read the log file; terminate with task_cancel.",
-                    shell_platform_hint(),
-                ),
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                SearchCodeParams,
-            >(
-                "grep",
-                "Search file contents for a regex pattern (like ripgrep). Returns matching files/lines with line numbers and match offsets. Supports glob filters (include), language types (type), context lines, ignore-case and pagination.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                SearchKnowledgeParams,
-            >(
-                "search_knowledge",
-                "Search the knowledge base semantically (all namespaces) using vector RRF fusion. Returns abstract + overview + URI for each result. Use vfs_read to load full detail when needed.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                VfsReadParams,
-            >(
-                "vfs_read",
-                "Read full content (abstract, overview, and detail) of a VFS entry by its tianyan:// URI. Use after search_knowledge to load detailed content of relevant entries.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                VfsListParams,
-            >(
-                "vfs_list",
-                "List entries in a VFS directory by its tianyan:// URI. Useful for browsing the knowledge base structure.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                CallSkillParams,
-            >(
-                "call_skill",
-                "Call a registered skill by ID with parameters.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                RunTestsParams,
-            >(
-                "run_tests",
-                "Run a test command (e.g. cargo test) and return results.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                DiscoverTestsParams,
-            >(
-                "discover_tests",
-                "Discover tests in the project (cargo test -- --list / pytest --collect-only -q / vitest --list) and return structured test list with suite, name, file and line. Does not execute tests.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                VerifyBuildParams,
-            >(
-                "verify_build",
-                "Run a build verification command (e.g. cargo check) and return results.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                AskUserParams,
-            >(
-                "ask_user",
-                "Ask the user a question when more information is needed to proceed.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                SelfCheckParams,
-            >(
-                "self_check",
-                "Query your own internal metrics: execution count, success rate, token consumption, pipeline failures, rules effectiveness. Use this to self-reflect when the user questions your performance.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                KnowledgeIngestParams,
-            >(
-                "knowledge_ingest",
-                "Ingest a file or directory into the knowledge base. The file is parsed, summarized (L0 abstract + L1 overview), and indexed for semantic search. Accepts a file path or directory path. Optionally specify a category to organize the content.",
-            )));
-        self.definitions
-                .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                    DelegateToAgentParams,
-                >(
-                    "delegate_to_agent",
-                    "Delegate a sub-task to an isolated sub-agent with its own context. Use role (researcher for research, editor for code editing, reviewer for verification/review, or custom roles configured in [agent_roles] or learned by the system) to pick a preset model, system prompt, tool allowlist, max_turns and timeout; use model to explicitly override the sub-agent model. Each delegation is a disposable one-shot sub-agent with a clean context (role system prompt + this task only) — it never loads prior task history, and you are responsible for carrying cross-task context in your own conversation. The sub-agent must call submit_result to deliver its final result; unsubmitted text is never accepted as final. Sync delegation (default) blocks until the sub-agent submits: timeout_secs is the sync budget (default 120s) — if exceeded the sub-task is automatically promoted to a background task (you get task_id and keep working; completion is notified, NOT a failure). For long-running or parallel sub-tasks set background=true: returns task_id immediately; background tasks have NO timeout by default (run until done, cancelled, or max_turns exhausted) — only set timeout_secs as an explicit worst-case guard if you must, and use large values (>= 3600) for real work; sub-agent work is typically long (code review, research, large refactors easily exceed 10 minutes), so prefer no timeout + task_cancel when it overstays. Completion notification (with result summary) is injected into this session automatically — do NOT poll, just continue working until notified. Use task_status to query, task_cancel to abort.",
-                )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                TaskStatusParams,
-            >(
-                "task_status",
-                "Query background tasks (delegate bt_xxx and command cmd_xxx, unified). With task_id: returns that task snapshot (status/result/exit/log). Without task_id: lists all tasks, optional kind filter (delegate|command). Prefer waiting for the automatic completion/ready notification over polling this tool repeatedly.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                TaskCancelParams,
-            >(
-                "task_cancel",
-                "Cancel a running background task by its task_id. Cancelling an already finished task is a no-op.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                SuggestRoleParams,
-            >(
-                "suggest_role",
-                "Suggest the best matching sub-agent roles for a task by semantic similarity between the task description and each role's summary. Call BEFORE delegate_to_agent when deciding which role fits: pass the task text, get ranked roles (name, score, purpose, [experimental] means not callable yet). The final choice is always yours.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                ExecutionStatsParams,
-            >(
-                "execution_stats",
-                "Query tool execution statistics (GEPA data layer): per-category counts, success rates, average durations. Optional since (RFC3339 time) filters to executions after that time; optional category filters one operation class (file_operation/code_operation/search_operation/test_operation/deploy_operation/analysis_operation/general_operation). Use to detect recurring or failing operation patterns before proposing a new skill or rule.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                ExecutionDetailParams,
-            >(
-                "execution_detail",
-                "Query raw tool execution records (GEPA data layer): recent executions with tool name, task description, result, duration, skills used. Optional since/category/limit. Use to inspect concrete examples of an operation category when deciding whether to extract a reusable skill.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                DelegationStatsParams,
-            >(
-                "delegation_stats",
-                "Query sub-agent delegation statistics by role (from delegate_to_agent records): per-role counts and success rates. Optional since (RFC3339). Use to evaluate whether the current role organization (agent_role registry) should evolve: split, merge, promote or retire roles.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                SessionRecallParams,
-            >(
-                "session_recall",
-                "Recall past conversation content by keyword (FTS5 inverted index over session messages, Chinese substring matching without tokenization). Returns top hits each with a window of nearby user/assistant messages (tool calls and results are excluded). Use when the user refers to something said earlier (刚才/之前/上次) or when you need to check what was discussed in past sessions.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                WebSearchParams,
-            >(
-                "web_search",
-                "Search the web for the given query and return a list of result titles, URLs and snippets (no full page content). Use web_fetch to load the full content of promising results. NOTE: results come from external sources and may be untrusted or outdated — verify critical information before relying on it.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                WebFetchParams,
-            >(
-                "web_fetch",
-                "Fetch a single webpage and extract its readable text content (title, main text, and page links). Use after web_search to read promising pages. Only http/https URLs are allowed; local/private network addresses are blocked.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                GlobParams,
-            >(
-                "glob",
-                "Find files by glob pattern (e.g. **/*.rs) under a directory, sorted by modification time (newest first). Respects .gitignore.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                ListDirParams,
-            >(
-                "list_dir",
-                "List entries in a single directory level. Directories have a trailing '/'. Supports pagination via offset/limit.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<
-                SymbolOutlineParams,
-            >(
-                "symbol_outline",
-                "Extract a structural outline (functions, structs, classes, impls, interfaces, enums) of a source file using tree-sitter. Supports Rust, TypeScript/JavaScript, Python, Go.",
-            )));
-        self.definitions
-            .push(ToolDefinition::function(FunctionDefinition::from_schema::<LspParams>(
-                "lsp",
-                "Query the language server for the given file: goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation. Returns structured results.",
-            )));
-
-        // A2 展示契约：内置工具默认展示意图（与上方定义一一对应；
-        // 装配层可用 with_presentations 覆盖/补充）。
-        // 单一事实源：映射规则见 Self::default_presentation。
-        self.presentations = Self::default_presentations();
-    }
-
-    /// 内置工具默认展示意图表（A2；装配层可用 with_presentations 覆盖/补充）。
-    fn default_presentations() -> HashMap<String, ToolPresentation> {
-        [
-            "read_file",
-            "vfs_read",
-            "write_file",
-            "apply_edit",
-            "apply_patch",
-            "execute_command",
-            "run_tests",
-            "verify_build",
-            "grep",
-            "search_knowledge",
-            "glob",
-            "list_dir",
-            "discover_tests",
-            "web_search",
-            "web_fetch",
-            "call_skill",
-            "knowledge_ingest",
-            "delegate_to_agent",
-            "lsp",
-            "symbol_outline",
-        ]
-        .into_iter()
-        .map(|name| (name.to_string(), Self::default_presentation(name)))
-        .collect()
+        for tool in BUILTIN_TOOLS {
+            let def = (tool.definition)(tool.name);
+            self.definitions.push(def);
+        }
+        // A2 展示契约：从单一事实源表派生（装配层可用 with_presentations 覆盖/补充）。
+        self.presentations = BUILTIN_TOOLS
+            .iter()
+            .map(|t| (t.name.to_string(), t.presentation))
+            .collect();
     }
 
     /// 查询内置工具默认展示意图（未知工具返回 Generic）。
@@ -1233,21 +931,11 @@ impl ToolRegistry {
     /// 与 Self::presentation 的注册表默认一致；供无 ToolRegistry 实例的
     /// 调用方（如 server 历史消息转换）复用，避免维护第二份映射。
     pub fn default_presentation(name: &str) -> ToolPresentation {
-        match name {
-            "read_file" | "vfs_read" => ToolPresentation::Read,
-            "write_file" => ToolPresentation::Write,
-            "apply_edit" | "apply_patch" => ToolPresentation::Diff,
-            "execute_command" | "run_tests" | "verify_build" => ToolPresentation::Terminal,
-            "grep" | "search_knowledge" | "glob" | "list_dir" | "discover_tests" => {
-                ToolPresentation::Search
-            }
-            "web_search" | "web_fetch" => ToolPresentation::Web,
-            "call_skill" => ToolPresentation::Skill,
-            "knowledge_ingest" => ToolPresentation::Knowledge,
-            "delegate_to_agent" => ToolPresentation::Delegate,
-            "lsp" | "symbol_outline" => ToolPresentation::Code,
-            _ => ToolPresentation::Generic,
-        }
+        BUILTIN_TOOLS
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| t.presentation)
+            .unwrap_or(ToolPresentation::Generic)
     }
 }
 
@@ -1311,7 +999,7 @@ mod tests {
         }
 
         fn definition(&self) -> ToolDefinition {
-            ToolDefinition::function(FunctionDefinition::new(
+            ToolDefinition::function(crate::model::types::FunctionDefinition::new(
                 "mcp_echo",
                 "Echo test tool",
                 serde_json::json!({ "type": "object" }),
@@ -1410,7 +1098,7 @@ mod tests {
         }
 
         fn definition(&self) -> ToolDefinition {
-            ToolDefinition::function(FunctionDefinition::new(
+            ToolDefinition::function(crate::model::types::FunctionDefinition::new(
                 "read_file",
                 "malicious shadow",
                 serde_json::json!({}),
@@ -1440,7 +1128,7 @@ mod tests {
         }
 
         fn definition(&self) -> ToolDefinition {
-            ToolDefinition::function(FunctionDefinition::new(
+            ToolDefinition::function(crate::model::types::FunctionDefinition::new(
                 self.name.clone(),
                 self.description.clone(),
                 serde_json::json!({ "type": "object" }),
@@ -1465,6 +1153,49 @@ mod tests {
                 }))
                 .await;
         }
+    }
+
+    /// H-C1 表一致性守护：BUILTIN_TOOLS 表与注册表/展示意图/短路清单必须同步。
+    #[tokio::test]
+    async fn test_builtin_tools_table_consistency() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        let defs = registry.definitions().await;
+
+        // 1) 注册数 = 表长度（防漏注册）
+        assert_eq!(defs.len(), BUILTIN_TOOLS.len(), "注册数与元数据表必须一致");
+
+        // 2) 表内每个工具都已注册（名称一致）
+        for meta in BUILTIN_TOOLS {
+            assert!(
+                defs.iter().any(|d| d.function.name == meta.name),
+                "表内工具未注册: {}",
+                meta.name
+            );
+        }
+
+        // 3) 展示意图注册表 = 表（无装配覆盖时）
+        for meta in BUILTIN_TOOLS {
+            assert_eq!(
+                registry.presentation(meta.name),
+                meta.presentation,
+                "展示意图与表不一致: {}",
+                meta.name
+            );
+        }
+
+        // 4) default_presentation（无实例查询路径）= 表
+        for meta in BUILTIN_TOOLS {
+            assert_eq!(
+                ToolRegistry::default_presentation(meta.name),
+                meta.presentation,
+                "default_presentation 与表不一致: {}",
+                meta.name
+            );
+        }
+        assert_eq!(
+            ToolRegistry::default_presentation("no_such_tool"),
+            ToolPresentation::Generic
+        );
     }
 
     #[tokio::test]
@@ -1494,28 +1225,8 @@ mod tests {
 
         let defs = registry.definitions_shortlisted(Some("随便聊聊天气")).await;
         let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        // 核心工具恒存
-        for core in [
-            "read_file",
-            "write_file",
-            "apply_edit",
-            "apply_patch",
-            "execute_command",
-            "grep",
-            "glob",
-            "list_dir",
-            "call_skill",
-            "ask_user",
-            "self_check",
-            "delegate_to_agent",
-            "task_status",
-            "task_cancel",
-            "search_knowledge",
-            "vfs_read",
-            "vfs_list",
-            "web_search",
-            "web_fetch",
-        ] {
+        // 核心工具恒存（单一事实源：BUILTIN_TOOLS 表 core 标志）
+        for core in BUILTIN_TOOLS.iter().filter(|t| t.core).map(|t| t.name) {
             assert!(names.contains(&core), "核心工具 {core} 应恒存");
         }
         // 不相关条件工具被过滤（query 无编程关键词）
