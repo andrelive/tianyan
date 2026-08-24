@@ -95,24 +95,7 @@ impl LlmJudge {
         let stderr_trunc = truncate_output(stderr, 2000);
 
         let prompt = build_judge_prompt(command, &stdout_trunc, &stderr_trunc, exit_code);
-
-        let request = ChatCompletionRequest::new(
-            &self.model,
-            vec![crate::common::types::Message::user(&prompt)],
-        );
-
-        match self.model_service.chat_completion(request).await {
-            Ok(response) => {
-                let Some(content) = response.first_choice_content() else {
-                    return fallback_judgment(exit_code);
-                };
-                parse_judgment(&content, exit_code)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "LlmJudge LLM 调用失败，回退到退出码判断");
-                fallback_judgment(exit_code)
-            }
-        }
+        run_judge(&self.model_service, &self.model, prompt, exit_code, || fallback_judgment(exit_code)).await
     }
 }
 
@@ -184,24 +167,7 @@ impl TaskReviewer for LlmTaskReviewer {
 
         let result_trunc = truncate_output(result, 2000);
         let prompt = build_task_review_prompt(description, &result_trunc);
-
-        let request = ChatCompletionRequest::new(
-            &self.model,
-            vec![crate::common::types::Message::user(&prompt)],
-        );
-
-        match self.model_service.chat_completion(request).await {
-            Ok(response) => {
-                let Some(content) = response.first_choice_content() else {
-                    return fallback_task_review_pass();
-                };
-                parse_judgment(&content, 0)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "任务自审 LLM 调用失败，默认通过");
-                fallback_task_review_pass()
-            }
-        }
+        run_judge(&self.model_service, &self.model, prompt, 0, fallback_task_review_pass).await
     }
 }
 
@@ -238,6 +204,35 @@ SUGGESTION: <如果 NEEDS_CHANGES，给出建议；否则留空>
 - FAIL: 结果明确失败或完全未完成任务
 - NEEDS_CHANGES: 结果部分完成、质量存疑或需主任务复核/重试"#
     )
+}
+
+/// 共享 LLM 判断骨架：构造请求 → 调用 → 解析 → 失败/无内容回退。
+///
+/// 两个判断流程（构建验证 / 任务自审）共用同一调用与回退语义，
+/// 仅 prompt 构造与兜底策略不同（调用方提供 fallback）。
+async fn run_judge(
+    model_service: &Arc<dyn ChatService>,
+    model: &str,
+    prompt: String,
+    exit_code: i32,
+    fallback: impl FnOnce() -> Judgment,
+) -> Judgment {
+    let request = ChatCompletionRequest::new(
+        model,
+        vec![crate::common::types::Message::user(&prompt)],
+    );
+    match model_service.chat_completion(request).await {
+        Ok(response) => {
+            let Some(content) = response.first_choice_content() else {
+                return fallback();
+            };
+            parse_judgment(&content, exit_code)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "LLM 判断调用失败，回退");
+            fallback()
+        }
+    }
 }
 
 /// 解析 LLM 回复中的判断。
