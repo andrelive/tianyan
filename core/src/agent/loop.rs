@@ -728,7 +728,7 @@ impl AgentLoop {
             if let Some(ask_call) = tool_calls.iter().find(|tc| tc.function.name == "ask_user") {
                 let params: AskUserParams = serde_json::from_str(&ask_call.function.arguments)
                     .map_err(|e| {
-                        TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
+                        TianyanError::Custom(format!("agent_loop: ask_user 参数解析失败：{}", e))
                     })?;
                 // 与普通工具轮一致：助手消息进入内存历史并持久化
                 ctx.messages.push(assistant_msg.clone());
