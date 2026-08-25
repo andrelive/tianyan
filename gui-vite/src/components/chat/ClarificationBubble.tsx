@@ -147,6 +147,9 @@ export default function ClarificationBubble({ questions, submitting, onSubmit }:
                     onClick={() => {
                       setSelected((prev) => prev.map((v, vi) => (vi === tab ? opt.label : v)));
                       setCustoms((prev) => prev.map((v, vi) => (vi === tab ? '' : v)));
+                      // 单选自动进入下一 tab（问题 → 问题 → … → 补充信息），
+                      // 无需手动切换；tab 可自由点回修改
+                      if (tab < EXTRA_TAB) setTab(tab + 1);
                     }}
                     disabled={submitting}
                     className={cn(

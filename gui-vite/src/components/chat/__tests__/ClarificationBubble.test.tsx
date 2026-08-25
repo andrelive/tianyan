@@ -52,6 +52,8 @@ describe('ClarificationBubble', () => {
     const user = userEvent.setup();
     render(<ClarificationBubble questions={QUESTIONS} submitting={false} onSubmit={onSubmit} />);
     await user.click(screen.getByRole('radio', { name: /删除/ }));
+    // 单选自动跳转到补充信息 tab：切回问题 tab 再输入自定义回答
+    await user.click(screen.getByRole('tab', { name: '问题 1' }));
     const input = screen.getByLabelText('输入对追问的回答');
     await user.type(input, '再想想');
     await user.click(screen.getByRole('button', { name: '提交回答' }));
@@ -80,6 +82,31 @@ describe('ClarificationBubble', () => {
     expect(payload.extra).toBe('顺便补充一点背景');
   });
 
+  it('auto-advances to the next tab after selecting an option (单选向导)', async () => {
+    const onSubmit = vi.fn();
+    const user = userEvent.setup();
+    const twoQuestions = [
+      { question: '问题 A？', options: [{ label: 'A1' }, { label: 'A2' }] },
+      { question: '问题 B？', options: [{ label: 'B1' }, { label: 'B2' }] },
+    ];
+    render(<ClarificationBubble questions={twoQuestions} submitting={false} onSubmit={onSubmit} />);
+
+    // 问题 1 选完 → 自动进入问题 2
+    await user.click(screen.getByRole('radio', { name: /A1/ }));
+    expect(screen.getByText('问题 B？')).toBeInTheDocument();
+
+    // 问题 2 选完 → 自动进入补充信息 tab
+    await user.click(screen.getByRole('radio', { name: /B1/ }));
+    expect(screen.getByLabelText('补充信息')).toBeInTheDocument();
+
+    // 直接提交（补充信息可选）
+    await user.click(screen.getByRole('button', { name: '提交回答' }));
+    const payload = JSON.parse(onSubmit.mock.calls[0][0] as string);
+    expect(payload.answers).toEqual([
+      { question: '问题 A？', answer: 'A1' },
+      { question: '问题 B？', answer: 'B1' },
+    ]);
+  });
   it('disables input and submit while submitting', () => {
     const onSubmit = vi.fn();
     render(<ClarificationBubble questions={QUESTIONS} submitting onSubmit={onSubmit} />);
