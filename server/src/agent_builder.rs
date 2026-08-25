@@ -74,6 +74,7 @@ impl AgentBuilderFactory {
         role_registry: Arc<tianyan::agent::RoleRegistry>,
         role_router: Arc<tianyan::agent::RoleRouter>,
         usage_log: Arc<UsageLog>,
+        user_questions: Arc<tianyan::agent::user_questions::UserQuestionService>,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
@@ -121,7 +122,8 @@ impl AgentBuilderFactory {
             .with_session_recall(session_recall)
             .with_session_store(session_store)
             .with_usage_log(usage_log)
-            .with_provider_by_model(provider_by_model);
+            .with_provider_by_model(provider_by_model)
+            .with_user_questions(user_questions);
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),
             None => agent,
@@ -182,6 +184,7 @@ impl AgentBuilderFactory {
         role_registry: Arc<tianyan::agent::RoleRegistry>,
         role_router: Arc<tianyan::agent::RoleRouter>,
         usage_log: Arc<UsageLog>,
+        user_questions: Arc<tianyan::agent::user_questions::UserQuestionService>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -202,6 +205,7 @@ impl AgentBuilderFactory {
             role_registry,
             role_router,
             usage_log,
+            user_questions,
         )
         .await
         {

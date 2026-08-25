@@ -11,7 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info};
 
 use crate::api::chat::services::ChatService;
-use crate::api::chat::types::{ChatRequest, ChatStreamEvent, ClarifyRequest};
+use crate::api::chat::types::{AnswerRequest, ChatRequest, ChatStreamEvent};
 use crate::state::AppState;
 
 /// SSE 流式通道缓冲区大小。
@@ -31,49 +31,26 @@ fn send_validation_error(tx: mpsc::Sender<Result<Event, Infallible>>, message: S
     });
 }
 
-/// 追问回答处理器（流式/SSE via POST）。
+/// 追问回答提交处理器（ask_user 同步工具：回答提交到等待通道，工具执行恢复）。
 ///
-/// 用户确认（如审批追问回答"允许"）后，澄清轮以流式执行：思考/工具/输出
-/// 逐块到达，避免整轮等待超过 HTTP 超时（此前非流式路径在前端表现为
-/// "按钮转圈后报错"）。
-pub async fn chat_clarify_stream_handler(
+/// 与流式对话共用同一 SSE 流：工具执行挂起期间流保持打开，回答提交后
+/// 工具结果经原流推送（模型看到 调用→结果 对，继续决策）。
+pub async fn chat_answer_handler(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<ClarifyRequest>,
-) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
-    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
-
-    if let Err(e) = request.validate() {
-        send_validation_error(tx.clone(), e);
-        return Sse::new(ReceiverStream::new(rx));
+    Json(request): Json<AnswerRequest>,
+) -> Json<serde_json::Value> {
+    let submitted = state
+        .user_questions()
+        .submit(&request.session_id, request.answers)
+        .await;
+    if submitted {
+        info!("追问回答已提交: 会话={}", request.session_id);
+        Json(serde_json::json!({ "status": "ok" }))
+    } else {
+        // 无等待中的追问：幂等空操作（前端在无追问时提交不报错）
+        debug!("追问回答提交时无等待通道: 会话={}", request.session_id);
+        Json(serde_json::json!({ "status": "ok", "no_pending": true }))
     }
-
-    info!("流式追问回答请求: 会话={}", request.session_id);
-
-    let (event_tx, event_rx) = mpsc::channel::<ChatStreamEvent>(SSE_CHANNEL_BUFFER);
-    let agent = state.agent().await;
-    let session_manager = state.session_manager();
-    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let shutdown_flag = state.shutdown_flag();
-
-    let session_id = request.session_id.clone();
-    let answer = request.answer.clone();
-    let config_arc = state.config();
-    let config_guard = config_arc.read().await;
-    let context_window = crate::state::resolve_chat_model_spec(&config_guard).context_length as u64;
-    drop(config_guard);
-    tokio::spawn(async move {
-        let service = ChatService::new(agent, session_manager).with_context_window(context_window);
-        if let Err(e) = service
-            .handle_clarification_stream(&session_id, &answer, event_tx)
-            .await
-        {
-            error!("流式追问处理错误: {}", e);
-        }
-    });
-
-    spawn_sse_forwarder(event_rx, tx, cancel, shutdown_flag);
-
-    Sse::new(ReceiverStream::new(rx))
 }
 
 /// 对话完成处理器（流式/SSE via POST）

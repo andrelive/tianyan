@@ -138,26 +138,6 @@ impl ChatService {
         Ok(())
     }
 
-    /// 处理用户对追问的回答（流式，SSE）。
-    ///
-    /// 与非流式 [`Self::handle_clarification`] 共用确认语义；增量经事件通道
-    /// 逐块推送（思考/工具/输出可见），避免整轮等待超过 HTTP 超时。
-    pub async fn handle_clarification_stream(
-        &self,
-        session_id: &str,
-        answer: &str,
-        tx: mpsc::Sender<ChatStreamEvent>,
-    ) -> Result<(), ApiError> {
-        let mut stream = self
-            .agent
-            .handle_clarification_stream(session_id, answer)
-            .await?;
-        // 一次流式响应用一个响应 id（与非流式 ChatResponse.id 语义一致）。
-        let stream_id = format!("chatcmpl-{}", short_uuid());
-        self.pump_stream(&mut stream, &stream_id, session_id, &tx)
-            .await
-    }
-
     /// 泵送流式 chunk 到 SSE 通道（主对话流与追问流共用骨架）：
     /// 1. 流开始前下发用户消息边界事件（完整 ChatMessage，前端本地 id 同步）；
     /// 2. 逐 chunk 映射为 ChatStreamEvent 发送（客户端断开即停）；
@@ -283,7 +263,6 @@ fn map_chunk_to_event(
             cache_write: u.cache_write as u64,
             context_window,
         }),
-        clarification_questions: chunk.clarification_questions,
     }
 }
 

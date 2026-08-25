@@ -287,6 +287,8 @@ pub struct AppState {
     clipboard_outbox: Arc<Mutex<Vec<String>>>,
     /// 剪贴板 pending（capture 存 → 前端确认（respond）消费）。
     clipboard_pending: Arc<RwLock<Option<PendingCapture>>>,
+    /// 用户问题服务（ask_user 同步等待用户回答；回答端点提交入口）。
+    user_questions: Arc<tianyan::agent::user_questions::UserQuestionService>,
 }
 
 impl AppState {
@@ -423,6 +425,8 @@ impl AppState {
         // 创建持久化会话管理器（唯一实例：Agent 与 API 层共享，避免双写；
         // ADR-018：基于 SessionStore（SQLite 权威存储），append 时事务内同步 FTS）
         let session_manager = Arc::new(PersistentSessionManager::new(session_store.clone()));
+        // 用户问题服务（ask_user 同步等待用户回答；回答端点与 Agent 共享同一实例）
+        let user_questions = Arc::new(tianyan::agent::user_questions::UserQuestionService::new());
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -445,6 +449,7 @@ impl AppState {
             role_registry.clone(),
             role_router,
             usage_log.clone(),
+            user_questions.clone(),
         )
         .await?;
 
@@ -473,6 +478,7 @@ impl AppState {
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             clipboard_outbox,
             clipboard_pending: Arc::new(RwLock::new(None)),
+            user_questions,
         })
     }
 
@@ -484,6 +490,11 @@ impl AppState {
     /// 获取剪贴板 pending 句柄。
     pub fn clipboard_pending(&self) -> Arc<RwLock<Option<PendingCapture>>> {
         self.clipboard_pending.clone()
+    }
+
+    /// 获取用户问题服务（ask_user 回答提交入口）。
+    pub fn user_questions(&self) -> Arc<tianyan::agent::user_questions::UserQuestionService> {
+        self.user_questions.clone()
     }
 
     /// 服务关停标志（Ctrl+C / SIGTERM / 桌面端退出时置位）。
@@ -597,6 +608,7 @@ impl AppState {
             self.role_registry.clone(),
             role_router,
             self.usage_log.clone(),
+            self.user_questions.clone(),
         )
         .await?;
 

@@ -77,26 +77,14 @@ impl ChatRequest {
     }
 }
 
-/// 追问回答请求
+/// 追问回答提交请求（ask_user 同步工具：回答提交到等待通道，工具执行恢复）。
 #[derive(Debug, Deserialize)]
-pub struct ClarifyRequest {
-    /// 会话标识（追问状态与会话绑定，必填）
+pub struct AnswerRequest {
+    /// 会话标识（等待通道按会话索引，必填）
     pub session_id: String,
-    /// 用户对追问的回答
-    pub answer: String,
-}
-
-impl ClarifyRequest {
-    /// 验证请求参数
-    pub fn validate(&self) -> Result<(), String> {
-        if self.session_id.trim().is_empty() {
-            return Err("session_id 不能为空".to_string());
-        }
-        if self.answer.trim().is_empty() {
-            return Err("answer 不能为空".to_string());
-        }
-        Ok(())
-    }
+    /// 用户回答（JSON 值：`{answers: [{question, answer}], extra}`——
+    /// 作为 ask_user 工具结果返回给模型）。
+    pub answers: serde_json::Value,
 }
 
 /// 技能调用信息
@@ -168,10 +156,6 @@ pub struct ChatStreamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// 本轮 token 用量（完成 chunk 携带；上下文占用 / 缓存命中展示用）。
     pub usage: Option<StreamUsage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// 追问问题列表（Clarification chunk 携带；每个含选项 label + description，
-    /// 前端按 tab 分步渲染选项行 + 自定义输入）。
-    pub clarification_questions: Option<Vec<tianyan::agent::ClarificationQuestionPayload>>,
 }
 
 impl ChatStreamEvent {
@@ -191,7 +175,6 @@ impl ChatStreamEvent {
             tool_call: None,
             tool_result: None,
             usage: None,
-            clarification_questions: None,
         }
     }
 
@@ -211,7 +194,6 @@ impl ChatStreamEvent {
             tool_call: None,
             tool_result: None,
             usage: None,
-            clarification_questions: None,
         }
     }
 }
@@ -236,34 +218,19 @@ mod tests {
     }
 
     #[test]
-    fn test_clarify_request_deserialization() {
-        // 正常请求：session_id 与 answer 均合法，校验通过
+    fn test_answer_request_deserialization() {
+        // 正常请求：session_id + answers（JSON 值）
         let json = r#"{
             "session_id": "session-123",
-            "answer": "我的回答"
+            "answers": {"answers": [{"question": "Q?", "answer": "A"}]}
         }"#;
-        let req: ClarifyRequest = serde_json::from_str(json).unwrap();
+        let req: AnswerRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.session_id, "session-123");
-        assert_eq!(req.answer, "我的回答");
-        assert!(req.validate().is_ok());
+        assert_eq!(req.answers["answers"][0]["answer"], "A");
 
-        // 空 session_id：校验失败
-        let bad = ClarifyRequest {
-            session_id: "  ".to_string(),
-            answer: "回答".to_string(),
-        };
-        assert!(bad.validate().is_err());
-
-        // 空 answer：校验失败
-        let bad = ClarifyRequest {
-            session_id: "session-123".to_string(),
-            answer: "".to_string(),
-        };
-        assert!(bad.validate().is_err());
-
-        // 缺少必填字段：反序列化失败
+        // 缺少 answers：反序列化失败
         let missing = r#"{"session_id": "session-123"}"#;
-        assert!(serde_json::from_str::<ClarifyRequest>(missing).is_err());
+        assert!(serde_json::from_str::<AnswerRequest>(missing).is_err());
     }
 
     #[test]
@@ -280,7 +247,6 @@ mod tests {
             tool_call: None,
             tool_result: None,
             usage: None,
-            clarification_questions: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Hello"));
