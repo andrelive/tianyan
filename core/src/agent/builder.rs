@@ -80,6 +80,8 @@ pub struct AgentBuilder {
     chat_model_spec: Option<ModelSpec>,
     /// 后台命令日志目录（execute_command(background) 日志落盘；None 时仅内存尾部）。
     command_logs_dir: Option<PathBuf>,
+    /// 用户问题服务（ask_user 同步等待用户回答；None 时工具不可用）。
+    user_questions: Option<Arc<crate::agent::user_questions::UserQuestionService>>,
 }
 
 impl AgentBuilder {
@@ -113,6 +115,7 @@ impl AgentBuilder {
             command_logs_dir: None,
             role_registry: None,
             role_router: None,
+            user_questions: None,
         }
     }
 
@@ -288,6 +291,15 @@ impl AgentBuilder {
         map: std::collections::HashMap<String, String>,
     ) -> Self {
         self.provider_by_model = map;
+        self
+    }
+
+    /// 设置用户问题服务（ask_user 同步等待用户回答；None 时工具不可用）。
+    pub fn with_user_questions(
+        mut self,
+        service: Arc<crate::agent::user_questions::UserQuestionService>,
+    ) -> Self {
+        self.user_questions = Some(service);
         self
     }
 
@@ -475,6 +487,10 @@ impl AgentBuilder {
         // 会话权威存储（ADR-018：vfs_read 会话 URI 兼容层）
         if let Some(ref store) = self.session_store {
             tool_registry = tool_registry.with_session_store(store.clone());
+        }
+        // 用户问题服务（ask_user 同步等待用户回答）
+        if let Some(ref service) = self.user_questions {
+            tool_registry = tool_registry.with_user_questions(service.clone());
         }
 
         let mut agent_loop = AgentLoop::new(

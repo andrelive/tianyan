@@ -16,10 +16,7 @@ use crate::agent::background::{BackgroundTaskManager, TaskWaker};
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
 use crate::agent::tool_registry::DynamicToolExecutor;
-use crate::agent::types::{
-    AgentResponse, AgentState, ClarificationQuestion, QuestionType, StreamChunkType,
-    StreamEventSender,
-};
+use crate::agent::types::{AgentResponse, AgentState, StreamChunkType, StreamEventSender};
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
     InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage,
@@ -234,11 +231,7 @@ impl Agent {
                     }
                     return;
                 }
-                Ok(AgentLoopResult::NeedsClarification { .. }) => {
-                    // 唤醒轮不应追问用户（无人值守）：放弃，通知已在 transcript
-                    tracing::warn!(session = %session_id, "唤醒轮返回追问，忽略（等待用户下次交互）");
-                    return;
-                }
+
                 Ok(AgentLoopResult::Cancelled { .. }) => {
                     tracing::debug!(session = %session_id, "唤醒轮被取消");
                     return;
@@ -373,9 +366,6 @@ impl Agent {
             // 恢复注入上下文快照（重启后沿用会话固化的前缀内容，不重新检索——
             // 保证旧会话前缀稳定，prompt 缓存不失效；无快照时为空，首次加载填充）
             s.injectable_context = session.header.injectable_snapshot.unwrap_or_default();
-            // 恢复待处理追问（session_meta.header_json 持久化）：澄清回答是
-            // 独立请求，内存状态不跨请求存活，不恢复则追问回答恒失败
-            s.pending_clarification = session.header.pending_clarification.clone();
             for sm in &session.messages {
                 s.add_structured_message(sm.clone());
             }
@@ -425,23 +415,6 @@ impl Agent {
     ) {
         self.update_session_header(session_id, "持久化注入上下文快照", |h| {
             h.injectable_snapshot = Some(ctx.clone());
-        })
-        .await;
-    }
-
-    /// 持久化待处理追问到会话头部（session_meta.header_json）。
-    ///
-    /// 澄清回答是独立 HTTP 请求（load_and_build_state 重建内存状态），
-    /// 追问不落库则回答轮永远看不到待处理追问——气泡出现后回答恒返回
-    /// "当前没有待处理的追问"。设置（ask_user 触发）与清除（回答后）
-    /// 都须调用。失败仅告警（同进程内内存状态仍生效）。
-    pub(crate) async fn persist_pending_clarification(
-        &self,
-        session_id: &str,
-        pending: &Option<Vec<ClarificationQuestion>>,
-    ) {
-        self.update_session_header(session_id, "持久化待处理追问", |h| {
-            h.pending_clarification = pending.clone();
         })
         .await;
     }
@@ -706,48 +679,7 @@ impl Agent {
                     }
                 }
             }
-            Ok(AgentLoopResult::NeedsClarification {
-                questions,
-                tool_call_id,
-                total_tokens,
-                ..
-            }) => {
-                // 持久化结构：label 列表（description 仅展示用，不进回答值）
-                let question_objs: Vec<ClarificationQuestion> = questions
-                    .iter()
-                    .map(|q| ClarificationQuestion {
-                        question: q.question.clone(),
-                        question_type: QuestionType::OpenEnded,
-                        options: Some(q.options.iter().map(|o| o.label.clone()).collect()),
-                        required: true,
-                        tool_call_id: tool_call_id.clone(),
-                    })
-                    .collect();
-                state.write().await.pending_clarification = Some(question_objs.clone());
-                // 持久化到会话头部：澄清回答是独立请求（load_and_build_state
-                // 重建状态），不落库则回答轮找不到待处理追问
-                let sid = state.read().await.session_id.clone();
-                self.persist_pending_clarification(&sid, &Some(question_objs.clone()))
-                    .await;
-                let formatted = format_clarification_questions(&question_objs);
-                loop_tokens = Some(total_tokens.clone());
-                match mode {
-                    TurnMode::Plain => finalize_response(
-                        AgentResponse::clarification(question_objs.clone(), formatted),
-                        &total_tokens,
-                        start,
-                    ),
-                    TurnMode::Stream { sender } => {
-                        // 结构化问题列表随追问事件下发（前端 tab 分步 + 选项行 + 自定义输入）
-                        sender.send_clarification(&formatted, Some(questions)).await;
-                        finalize_response(
-                            AgentResponse::clarification(question_objs, formatted),
-                            &total_tokens,
-                            start,
-                        )
-                    }
-                }
-            }
+
             Ok(AgentLoopResult::Cancelled {
                 total_tokens,
                 last_turn_usage: _,
@@ -795,162 +727,6 @@ impl Agent {
             }
         };
         (response, loop_tokens)
-    }
-
-    /// 处理用户对追问的回答（流式版）。
-    ///
-    /// 两条路径：
-    /// - **ask_user 工具链**（待处理追问携带 `tool_call_id`）：用户回答
-    ///   作为该工具调用的**工具结果**注入上下文（与普通工具轮同构），
-    ///   AgentLoop 从工具结果继续本回合——追问是本轮对话的一部分，
-    ///   模型看到完整的 调用→结果 对，上下文不丢问题。
-    /// - **审批降级**（无 `tool_call_id`）：确认语义（指纹放行被拒操作），
-    ///   回答作为用户消息跑一轮（原语义）。
-    ///
-    /// 增量经 sender 推送（思考/工具/输出逐块到达），前端可实时展示
-    /// 而非等待整轮完成。
-    pub(crate) async fn handle_clarification_response_stream(
-        &self,
-        state: &Arc<RwLock<SessionState>>,
-        clarification_answers: &str,
-        sender: StreamEventSender,
-    ) {
-        let pending = {
-            let s = state.read().await;
-            s.pending_clarification.clone()
-        };
-        let Some(questions) = pending else {
-            sender
-                .send_complete(
-                    "当前没有待处理的追问",
-                    StreamChunkType::Answer,
-                    None,
-                    Some("stop".to_string()),
-                    None,
-                )
-                .await;
-            return;
-        };
-        state.write().await.pending_clarification = None;
-        // 清除后同步持久化（回答已受理，重启/请求边界后不应残留追问）
-        let sid = state.read().await.session_id.clone();
-        self.persist_pending_clarification(&sid, &None).await;
-
-        let session_id = state.read().await.session_id.clone();
-        let tool_call_id = questions.iter().find_map(|q| q.tool_call_id.clone());
-
-        // 审批降级链路：与非流式路径一致的确认语义（指纹放行被拒操作）
-        let approved = crate::executor::approval::is_user_confirmation(clarification_answers);
-        if self
-            .agent_loop
-            .tool_registry()
-            .confirm_pending_approval(approved)
-            .await
-        {
-            tracing::info!(
-                approved,
-                answer = %clarification_answers,
-                "已记录用户对审批追问的回应（流式）"
-            );
-        }
-
-        // ask_user 工具链：回答作为工具结果，AgentLoop 恢复本回合
-        if let Some(tool_call_id) = tool_call_id {
-            self.continue_after_clarification(
-                state,
-                &session_id,
-                &tool_call_id,
-                clarification_answers,
-                sender,
-            )
-            .await;
-            return;
-        }
-
-        // 审批降级路径：回答作为用户消息跑一轮（保持原语义）
-        let clarification_msg = Message::user(clarification_answers);
-        let start = Instant::now();
-        let _ = self
-            .run_agent_turn(
-                state,
-                &session_id,
-                &clarification_msg,
-                &self.default_model,
-                start,
-                None,
-                TurnOptions {
-                    mode: TurnMode::Stream { sender },
-                    do_snapshot: false,
-                    do_compress: false,
-                    thinking_effort: None,
-                },
-            )
-            .await;
-    }
-
-    /// 澄清续轮（ask_user 工具链）：用户回答作为工具结果注入上下文，
-    /// AgentLoop 从工具结果继续本回合——不注入用户消息、不持久化
-    /// 用户消息（回答是工具的输入，不是新一轮用户输入）。
-    async fn continue_after_clarification(
-        &self,
-        state: &Arc<RwLock<SessionState>>,
-        session_id: &str,
-        tool_call_id: &str,
-        answer: &str,
-        sender: StreamEventSender,
-    ) {
-        // 1. 工具结果消息入库（内存 + session_manager；parent 挂接在
-        //    ask_user 调用消息之下——与普通工具轮的 observation 同构）
-        let tool_msg = Message::tool(tool_call_id, answer);
-        let parent_id = {
-            let s = state.read().await;
-            s.structured_messages.last().map(|m| m.id.clone())
-        };
-        let sm = ContextAssembler::message_to_structured(
-            &tool_msg,
-            session_id,
-            parent_id.as_deref(),
-            None,
-        );
-        state.write().await.add_structured_message(sm.clone());
-        if let Err(e) = self
-            .session_manager
-            .add_structured_message(session_id, sm)
-            .await
-        {
-            tracing::warn!(error = %e, "持久化追问回答（工具结果）失败");
-        }
-
-        // 2. 组装上下文（复用前缀缓存；回答已作为工具结果在消息链上，
-        //    不再作为用户消息注入）
-        let mut messages = self.assemble_context(state, answer).await;
-
-        // 3. AgentLoop 从工具结果继续本回合
-        let start = Instant::now();
-        let parent = {
-            let s = state.read().await;
-            s.structured_messages.last().map(|m| m.id.clone())
-        };
-        let loop_result = self
-            .agent_loop
-            .clone()
-            .run_stream(
-                &mut messages,
-                sender.clone(),
-                session_id,
-                parent.as_deref(),
-                &self.default_model,
-                None,
-                None,
-            )
-            .await;
-
-        // 4. 结果处理（完成事件/状态/指标；澄清轮不触发压缩——原语义）
-        let (_response, loop_tokens) = self
-            .apply_loop_result(state, loop_result, start, &TurnMode::Stream { sender })
-            .await;
-        self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
-            .await;
     }
 
     /// 更新全局 Agent 指标（对话计数、token 统计）。
@@ -1036,31 +812,6 @@ fn finalize_response(
     resp.token_usage = tokens.clone();
     resp.processing_time_ms = start.elapsed().as_millis() as u64;
     resp
-}
-
-/// 格式化追问问题为用户友好的文本。
-pub(crate) fn format_clarification_questions(questions: &[ClarificationQuestion]) -> String {
-    let mut content = String::from("为了更好帮助您，需要以下信息：\n\n");
-
-    for (i, q) in questions.iter().enumerate() {
-        content.push_str(&format!("{}. {}\n", i + 1, q.question));
-
-        if let Some(options) = &q.options {
-            content.push_str("   可选答案：\n");
-            for (j, opt) in options.iter().enumerate() {
-                content.push_str(&format!("   {}. {}\n", j + 1, opt));
-            }
-        }
-
-        if q.required {
-            content.push_str("   (必填)\n");
-        }
-
-        content.push('\n');
-    }
-
-    content.push_str("请提供以上信息，我会根据您的回答继续处理。");
-    content
 }
 
 /// 向消息列表注入会话定位信息（assemble_context / prepare_wake_context 共用）。
@@ -1280,12 +1031,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_message_returns_clarification() {
+    async fn test_process_message_ask_user_unconfigured_returns_error() {
         // 回归保护：process_message 编排路径（共享骨架 + 快照/压缩/技能学习 extras）。
+        // ask_user 是普通工具：未装配用户问题服务时返回工具失败结果（错误响应）。
         let mut mock = MockChatService::new();
-        mock.expect_chat_completion()
-            .times(1)
-            .returning(|_| Ok(response_with(ask_user_msg("测试问题"))));
+        mock.expect_chat_completion().times(2).returning(|req| {
+            // 第一轮：ask_user 调用（服务未装配 → 工具失败结果）；
+            // 第二轮：模型看到失败结果后给出最终回答
+            let has_tool_result = req.messages.iter().any(|m| m.role == MessageRole::Tool);
+            if has_tool_result {
+                Ok(response_with(Message::assistant(
+                    "无法追问，基于现有信息继续",
+                )))
+            } else {
+                Ok(response_with(ask_user_msg("测试问题")))
+            }
+        });
         let agent = make_agent(mock);
 
         let resp = agent
@@ -1293,9 +1054,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.needs_clarification, "ask_user 应触发追问响应");
-        assert_eq!(resp.clarification_questions.len(), 1);
-        assert_eq!(resp.clarification_questions[0].question, "测试问题");
+        assert_eq!(resp.content, "无法追问，基于现有信息继续");
     }
 
     #[tokio::test]

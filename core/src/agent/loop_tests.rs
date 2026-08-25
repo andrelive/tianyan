@@ -166,63 +166,103 @@ async fn test_run_completes_tool_loop() {
 }
 
 #[tokio::test]
-async fn test_run_ask_user_returns_clarification() {
+async fn test_run_ask_user_executes_as_sync_tool() {
+    // ask_user 是普通同步工具（对齐 DSH）：工具执行挂起等待用户回答，
+    // 回答作为普通工具结果返回，loop 继续——无拦截/无独立澄清轮。
+    use crate::agent::user_questions::UserQuestionService;
+
     let mut mock = MockChatService::new();
-    mock.expect_chat_completion().returning(|_| {
-        Ok(response_with(Message::assistant_with_tools(
-            "",
-            vec![ToolCall {
-                id: "call_ask".to_string(),
-                call_type: ToolCallType::Function,
-                function: FunctionCall {
-                    name: "ask_user".to_string(),
-                    arguments: r#"{"question": "你希望我怎么处理？"}"#.to_string(),
-                },
-            }],
-        )))
+    mock.expect_chat_completion().times(2).returning(|req| {
+        // 第一轮：ask_user 工具调用；第二轮：模型看到回答（工具结果）后给出最终答案
+        let has_tool_result = req.messages.iter().any(|m| m.role == MessageRole::Tool);
+        if has_tool_result {
+            Ok(response_with(Message::assistant("最终回答")))
+        } else {
+            Ok(response_with(Message::assistant_with_tools(
+                "",
+                vec![ToolCall {
+                    id: "call_ask".to_string(),
+                    call_type: ToolCallType::Function,
+                    function: FunctionCall {
+                        name: "ask_user".to_string(),
+                        arguments: r#"{"question": "你希望我怎么处理？"}"#.to_string(),
+                    },
+                }],
+            )))
+        }
     });
-    let agent_loop = make_loop(mock, 5);
+
+    let service = Arc::new(UserQuestionService::new());
+    let mut registry = ToolRegistry::new(SecurityPolicy::default());
+    registry = registry.with_user_questions(service.clone());
+    let agent_loop = AgentLoop::new(
+        Arc::new(mock),
+        registry,
+        Arc::new(MockSessionManager),
+        AgentLoopConfig {
+            max_turns: 5,
+            ..Default::default()
+        },
+    );
 
     let mut messages = vec![Message::user("帮我决定一下")];
-    let result = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
-        .await
-        .unwrap();
+    let run_handle = tokio::spawn(async move {
+        agent_loop
+            .run(&mut messages, "session-1", None, "test-model", None, None)
+            .await
+    });
+    // 等 ask_user 工具执行注册等待通道，然后提交用户回答
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let submitted = service
+        .submit(
+            "session-1",
+            serde_json::json!({
+                "answers": [{"question": "你希望我怎么处理？", "answer": "方案A"}],
+                "extra": "",
+            }),
+        )
+        .await;
+    assert!(submitted, "等待中的 ask_user 应收到回答");
+    let result = run_handle.await.unwrap().unwrap();
 
     match result {
-        AgentLoopResult::NeedsClarification {
-            questions, turns, ..
-        } => {
-            assert_eq!(questions.len(), 1);
-            assert_eq!(questions[0].question, "你希望我怎么处理？");
-            assert_eq!(turns, 1);
+        AgentLoopResult::Answer { content, .. } => {
+            assert_eq!(content, "最终回答", "模型看到回答后应给出最终答案");
         }
-        other => panic!("期望 NeedsClarification，得到 {:?}", other),
+        other => panic!("期望 Answer，得到 {:?}", other),
     }
 }
 
-/// 回归测试：审批门控拒绝必须通过 `has_pending_approval()` 类型化信号
-/// 降级为追问，而不是解析错误消息中的字符串标记。
+/// 回归测试：审批门控拒绝不再降级为追问——工具失败结果入史，
+/// 模型看到错误后自行决策（可调用 ask_user 确认——模型自律，对齐 DSH）。
 #[tokio::test]
-async fn test_run_approval_denied_returns_clarification() {
+async fn test_run_approval_denied_returns_tool_error() {
     use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
     use std::sync::Arc as StdArc;
 
     let mut mock = MockChatService::new();
-    mock.expect_chat_completion().returning(|_| {
-        // write_file 到非 test/temp/tmp 路径 → Medium 风险 → 审批拒绝
-        Ok(response_with(Message::assistant_with_tools(
-            "",
-            vec![ToolCall {
-                id: "call_write".to_string(),
-                call_type: ToolCallType::Function,
-                function: FunctionCall {
-                    name: "write_file".to_string(),
-                    arguments: r#"{"path": "project/src/main.rs", "content": "fn main() {}"}"#
-                        .to_string(),
-                },
-            }],
-        )))
+    mock.expect_chat_completion().times(2).returning(|req| {
+        // 第一轮：write_file 调用（Medium 风险 → 审批拒绝 → 工具失败结果）；
+        // 第二轮：模型看到失败结果后给出最终回答（不再调用工具）
+        let has_tool_result = req.messages.iter().any(|m| m.role == MessageRole::Tool);
+        if has_tool_result {
+            Ok(response_with(Message::assistant(
+                "已了解，该操作需要用户确认",
+            )))
+        } else {
+            Ok(response_with(Message::assistant_with_tools(
+                "",
+                vec![ToolCall {
+                    id: "call_write".to_string(),
+                    call_type: ToolCallType::Function,
+                    function: FunctionCall {
+                        name: "write_file".to_string(),
+                        arguments: r#"{"path": "project/src/main.rs", "content": "fn main() {}"}"#
+                            .to_string(),
+                    },
+                }],
+            )))
+        }
     });
 
     let mut registry = ToolRegistry::new(SecurityPolicy::default());
@@ -246,15 +286,15 @@ async fn test_run_approval_denied_returns_clarification() {
         .unwrap();
 
     match result {
-        AgentLoopResult::NeedsClarification { questions, .. } => {
-            assert_eq!(questions.len(), 1);
+        AgentLoopResult::Answer { content, .. } => {
+            assert_eq!(content, "已了解，该操作需要用户确认");
+            // 工具失败结果已入史（模型看到了审批拒绝错误）
             assert!(
-                questions[0].question.contains("安全策略要求确认"),
-                "追问应包含审批确认提示，实际: {}",
-                questions[0].question
+                messages.iter().any(|m| m.role == MessageRole::Tool),
+                "审批拒绝的工具失败结果应入史"
             );
         }
-        other => panic!("期望审批降级为 NeedsClarification，得到 {:?}", other),
+        other => panic!("期望 Answer，得到 {:?}", other),
     }
 }
 

@@ -4,9 +4,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::agent::tool_params::AskUserParams;
 use crate::agent::tool_registry::ToolRegistry;
-use crate::agent::types::{ClarificationQuestionPayload, StreamEventSender, ToolCallEvent};
+use crate::agent::types::{StreamEventSender, ToolCallEvent};
 use crate::common::error::TianyanError;
 use crate::common::types::{FunctionCall, Message, MessageRole, StructuredMessage, TokenUsage};
 use crate::common::types::{ToolCall, ToolCallType};
@@ -60,21 +59,7 @@ pub enum AgentLoopResult {
         /// AgentLoop 已持久化的 StructuredMessage，coordinator 直接复用此消息加入状态，避免重复创建。
         persisted_message: Box<StructuredMessage>,
     },
-    /// 需要追问。
-    NeedsClarification {
-        /// 追问问题列表（多问题分步：每个问题一个 tab + 补充信息 tab；
-        /// 每个含选项 label + description，对齐 DSH questions 数组）。
-        questions: Vec<ClarificationQuestionPayload>,
-        /// 触发追问的 ask_user 工具调用 ID（工具链语义：用户回答作为该
-        /// 调用的工具结果注入上下文继续本回合；审批降级追问为 None）。
-        tool_call_id: Option<String>,
-        /// Token 用量。
-        total_tokens: TokenUsage,
-        /// 最后一轮 LLM 调用的单轮用量（语义同 Answer）。
-        last_turn_usage: Option<TokenUsage>,
-        /// 循环轮数。
-        turns: usize,
-    },
+
     /// 循环被取消（客户端断开或服务关停）。
     Cancelled {
         /// Token 用量。
@@ -722,51 +707,6 @@ impl AgentLoop {
         // 返回 [] 而非 null——否则会走进"执行 0 个工具 → 继续循环"的死路）
         let tool_calls = assistant_msg.tool_calls.as_ref().filter(|c| !c.is_empty());
 
-        // ask_user：工具链语义——追问是本轮对话的一部分，不是割裂的额外操作。
-        // LLM 的 ask_user 调用与普通工具调用同等待遇：assistant 消息（含
-        // 工具调用）先入历史并持久化，用户回答随后作为该调用的工具结果
-        // 注入（澄清轮）——模型看到完整的 调用→结果 对，上下文不丢问题。
-        if let Some(tool_calls) = tool_calls {
-            if let Some(ask_call) = tool_calls.iter().find(|tc| tc.function.name == "ask_user") {
-                let params: AskUserParams = serde_json::from_str(&ask_call.function.arguments)
-                    .map_err(|e| {
-                        TianyanError::Custom(format!("agent_loop: ask_user 参数解析失败：{}", e))
-                    })?;
-                // 与普通工具轮一致：助手消息进入内存历史并持久化
-                ctx.messages.push(assistant_msg.clone());
-                self.persist_message(ctx, assistant_msg, turn_usage.clone(), finish_reason)
-                    .await;
-                // 工具调用展示事件（前端 tool card；与普通工具轮同构）
-                if let Some(sender) = ctx.stream_sender {
-                    let event = self.tool_call_event(ask_call);
-                    sender
-                        .send_tool_call(&format!("调用: {}", ask_call.function.name), Some(event))
-                        .await;
-                }
-                // 多问题（questions 优先）或单问题（question + options）
-                let questions: Vec<ClarificationQuestionPayload> = match params.questions {
-                    Some(qs) => qs
-                        .into_iter()
-                        .map(|q| ClarificationQuestionPayload {
-                            question: q.question,
-                            options: q.options.unwrap_or_default(),
-                        })
-                        .collect(),
-                    None => vec![ClarificationQuestionPayload {
-                        question: params.question,
-                        options: params.options.unwrap_or_default(),
-                    }],
-                };
-                return Ok(Some(AgentLoopResult::NeedsClarification {
-                    questions,
-                    tool_call_id: Some(ask_call.id.clone()),
-                    total_tokens: ctx.total_tokens.clone(),
-                    last_turn_usage: turn_usage.clone(),
-                    turns: ctx.turn + 1,
-                }));
-            }
-        }
-
         // Add assistant message to in-memory history
         ctx.messages.push(assistant_msg.clone());
 
@@ -799,37 +739,6 @@ impl AgentLoop {
                 .tool_registry
                 .execute_parallel(tool_calls, ctx.session_id, false)
                 .await;
-
-            // 审批降级：任一工具因审批门控被拒（已入队待确认指纹）时，
-            // 不再继续循环，直接转为追问用户（用户批准后重试工具调用）。
-            // 通过 has_pending_approval() 类型化信号判断，而非解析错误字符串。
-            let denied_action = if self.tool_registry.has_pending_approval().await {
-                results
-                    .iter()
-                    .find_map(|(_call_id, outcome)| match &outcome.result {
-                        Err(e) => Some(e.to_string()),
-                        _ => None,
-                    })
-            } else {
-                None
-            };
-            if let Some(err_msg) = denied_action {
-                return Ok(Some(AgentLoopResult::NeedsClarification {
-                    questions: vec![ClarificationQuestionPayload {
-                        question: format!(
-                            "系统安全策略要求确认后才能执行该操作。\n\n操作详情：{}\n\n请回复「允许」继续执行，或回复「拒绝」终止。",
-                            err_msg
-                        ),
-                        options: Vec::new(),
-                    }],
-                    // 审批降级路径：非 ask_user 工具调用，无 tool_call_id——
-                    // 回答走确认语义（confirm_pending_approval），不进工具链
-                    tool_call_id: None,
-                    total_tokens: ctx.total_tokens.clone(),
-                    last_turn_usage: turn_usage.clone(),
-                    turns: ctx.turn + 1,
-                }));
-            }
 
             for (call_id, outcome) in results {
                 let content = match &outcome.result {

@@ -216,7 +216,7 @@ impl SkillHandler for EchoSkillHandler {
 async fn test_ask_user_returns_clarification() {
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_ask_user(r#"{"question":"Which file do you mean?"}"#)
+        .execute_ask_user(r#"{"question":"Which file do you mean?"}"#, "s1", true)
         .await;
     // 子代理上下文：返回指导性结果（携带原问题），而非错误字符串
     let value = result.expect("子代理 ask_user 应返回指导性结果");
@@ -231,7 +231,7 @@ async fn test_ask_user_returns_clarification() {
 #[tokio::test]
 async fn test_ask_user_rejects_missing_arguments() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_ask_user(r#"{}"#).await;
+    let result = registry.execute_ask_user(r#"{}"#, "s1", true).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }

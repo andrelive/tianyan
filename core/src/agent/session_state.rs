@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-use crate::agent::types::ClarificationQuestion;
 use crate::common::types::{InjectableContext, StructuredMessage};
 use crate::session::{KEEP_RECENT_MESSAGES, MAX_SESSION_MESSAGES};
 
@@ -13,8 +12,6 @@ pub struct SessionState {
     pub structured_messages: Vec<StructuredMessage>,
     /// 可注入的上下文（由 ContextPipeline 填充）。
     pub injectable_context: InjectableContext,
-    /// 待追问问题。
-    pub pending_clarification: Option<Vec<ClarificationQuestion>>,
     /// 最后活动时间。
     pub last_activity: Instant,
     /// 待持久化记忆。
@@ -28,7 +25,6 @@ impl SessionState {
             session_id: session_id.to_string(),
             structured_messages: Vec::new(),
             injectable_context: InjectableContext::new(),
-            pending_clarification: None,
             last_activity: Instant::now(),
             pending_memories: Vec::new(),
         }

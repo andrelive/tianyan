@@ -26,6 +26,8 @@ pub mod roles;
 mod tool_params;
 mod tool_registry;
 mod types;
+/// 用户问题服务（ask_user 同步等待用户回答；对齐 DSH user-questions seam）。
+pub mod user_questions;
 
 pub use agent_core::Agent;
 pub use agent_core::AgentWakeForwarder;
@@ -46,7 +48,6 @@ pub use tool_params::{
 };
 pub use tool_registry::{DynamicToolExecutor, ToolRegistry};
 pub use types::{
-    AgentResponse, AgentState, AgentStreamChunk, ClarificationQuestion,
-    ClarificationQuestionPayload, QuestionType, SkillCallInfo, StreamChunkType, StreamEventSender,
+    AgentResponse, AgentState, AgentStreamChunk, SkillCallInfo, StreamChunkType, StreamEventSender,
     ToolCallEvent, ToolResultEvent,
 };

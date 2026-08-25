@@ -226,6 +226,8 @@ pub struct ToolRegistry {
     /// 主循环取消标志槽（按会话：coordinator 每请求注入/清理；
     /// 委托循环据此中断——同步委托期间用户点停止也能及时停）。
     delegation_cancel: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    /// 用户问题服务（ask_user 同步等待用户回答；None 时工具不可用）。
+    pub(crate) user_questions: Option<Arc<crate::agent::user_questions::UserQuestionService>>,
 }
 
 impl ToolRegistry {
@@ -261,6 +263,7 @@ impl ToolRegistry {
             role_registry: Arc::new(RoleRegistry::builtin()),
             session_manager: None,
             delegation_cancel: Arc::new(Mutex::new(HashMap::new())),
+            user_questions: None,
         };
         // A1：内置可观测性监听器注册为第一个 post-execute 监听器——
         // 原 execute_single 尾部的统计/Trace/GEPA/规则学习自此是管线消费者。
@@ -304,6 +307,15 @@ impl ToolRegistry {
     /// 设置会话权威存储（vfs_read 对 tianyan://session/{id} 的兼容读取）。
     pub fn with_session_store(mut self, store: Arc<crate::session::store::SessionStore>) -> Self {
         self.session_store = Some(store);
+        self
+    }
+
+    /// 设置用户问题服务（ask_user 同步等待用户回答；None 时工具不可用）。
+    pub fn with_user_questions(
+        mut self,
+        service: Arc<crate::agent::user_questions::UserQuestionService>,
+    ) -> Self {
+        self.user_questions = Some(service);
         self
     }
 
@@ -674,6 +686,18 @@ impl ToolRegistry {
             .unwrap_or(false)
     }
 
+    /// 同步版取消检查（ask_user 等待轮询用；try_lock 失败时保守返回 false）。
+    pub(crate) fn delegation_cancelled_sync(&self, session_id: &str) -> bool {
+        self.delegation_cancel
+            .try_lock()
+            .map(|map| {
+                map.get(session_id)
+                    .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
     /// 获取所有工具定义（内置 + 动态注册）。
     ///
     /// ADR-016 渐进披露：delegate_to_agent 的描述动态追加角色 L0 摘要段
@@ -893,7 +917,7 @@ impl ToolRegistry {
                 self.execute_verify_build(arguments, session_id, subagent)
                     .await
             }
-            "ask_user" => self.execute_ask_user(arguments).await,
+            "ask_user" => self.execute_ask_user(arguments, session_id, subagent).await,
             "self_check" => self.execute_self_check().await,
             "knowledge_ingest" => self.execute_knowledge_ingest(arguments).await,
             "web_search" => self.execute_web_search(arguments).await,

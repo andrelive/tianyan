@@ -60,7 +60,7 @@
 //!                      │
 //!                      ├─→ LLM 调用 → 工具调用 → 执行 → 循环
 //!                      │
-//!                      └─→ Answer / NeedsClarification
+//!                      └─→ Answer
 //! ```
 //!
 //! ## 会话状态管理
@@ -73,7 +73,7 @@
 //! Coordinator 统一处理各种错误情况：
 //!
 //! - **AgentLoop 错误**：转换为 AgentResponse 错误消息
-//! - **追问处理**：返回 `needs_clarification: true` 的响应
+//! - **追问处理**：ask_user 作为普通工具同步等待用户回答（回答作为工具结果）
 //! - **执行失败**：记录日志并返回友好的错误消息
 //! - **资源限制**：当达到最大迭代次数时生成错误响应
 
@@ -117,19 +117,6 @@ pub trait AgentCoordinator: Send + Sync {
         cancel: Option<Arc<AtomicBool>>,
         thinking_effort: Option<String>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
-
-    /// 处理用户对追问的回答（流式响应）：增量逐块推送，避免整轮等待。
-    ///
-    /// 默认实现返回错误（不支持流式澄清的适配器/测试替身直接继承）。
-    async fn handle_clarification_stream(
-        &self,
-        _session_id: &str,
-        _answers: &str,
-    ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
-        Err(crate::common::error::TianyanError::Custom(
-            "当前智能体不支持流式追问回答".to_string(),
-        ))
-    }
 
     /// 初始化智能体。
     ///
@@ -321,38 +308,6 @@ impl AgentCoordinator for Agent {
         Ok(rx)
     }
 
-    async fn handle_clarification_stream(
-        &self,
-        session_id: &str,
-        answers: &str,
-    ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
-        let answers = answers.to_string();
-        let (tx, rx) = mpsc::channel(100);
-        let self_clone = Arc::new(self.clone());
-        let sender = StreamEventSender::new(tx.clone());
-        let session_id = session_id.to_string();
-
-        tokio::spawn(async move {
-            // ADR-013 串行化：澄清回答是用户轮的延续，占用会话轮次锁；
-            // 锁先于状态加载（与 process_message_stream 同因：锁外加载会
-            // 拿到并发轮完成前的旧状态）。
-            let _turn_guard = self_clone.turn_guard(&session_id).await;
-
-            let state = match self_clone.load_and_build_state(&session_id).await {
-                Ok(s) => s,
-                Err(e) => {
-                    sender.send_error(&format!("处理失败：{}", e)).await;
-                    return;
-                }
-            };
-            self_clone
-                .handle_clarification_response_stream(&state, &answers, sender)
-                .await;
-        });
-
-        Ok(rx)
-    }
-
     async fn compress_session(&self, session_id: &str) -> Result<bool> {
         // 与进行中的轮互斥：压缩读取会话状态并写入摘要，若与轮并发会基于
         // 轮中未完成的消息生成摘要（且轮内状态与库分叉）。
@@ -436,41 +391,5 @@ impl AgentCoordinator for Agent {
     async fn shutdown(&self) -> Result<()> {
         tracing::info!("Shutting down agent");
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::agent::types::{ClarificationQuestion, QuestionType};
-
-    #[test]
-    fn test_format_clarification_questions() {
-        let questions = vec![
-            ClarificationQuestion {
-                question: "您想创建什么类型的项目？".to_string(),
-                question_type: QuestionType::Choice,
-                options: Some(vec!["Rust 项目".to_string(), "TypeScript 项目".to_string()]),
-                required: true,
-                tool_call_id: None,
-            },
-            ClarificationQuestion {
-                question: "项目名称是什么？".to_string(),
-                question_type: QuestionType::OpenEnded,
-                options: None,
-                required: true,
-                tool_call_id: None,
-            },
-        ];
-
-        let result = crate::agent::agent_core::format_clarification_questions(&questions);
-
-        assert!(result.contains("为了更好帮助您，需要以下信息"));
-        assert!(result.contains("1. 您想创建什么类型的项目？"));
-        assert!(result.contains("2. 项目名称是什么？"));
-        assert!(result.contains("可选答案："));
-        assert!(result.contains("Rust 项目"));
-        assert!(result.contains("TypeScript 项目"));
-        assert!(result.contains("(必填)"));
-        assert!(result.contains("请提供以上信息，我会根据您的回答继续处理。"));
     }
 }

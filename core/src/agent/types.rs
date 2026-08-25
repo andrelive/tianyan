@@ -8,49 +8,6 @@ use tokio::sync::mpsc;
 use crate::common::error::Result;
 use crate::common::types::{DetailedTokenUsage, StructuredMessage, TokenUsage};
 
-/// 追问问题
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClarificationQuestion {
-    /// 问题内容。
-    pub question: String,
-    /// 问题类型。
-    pub question_type: QuestionType,
-    /// 可选答案列表。
-    pub options: Option<Vec<String>>,
-    /// 是否必填。
-    pub required: bool,
-    /// 对应的 ask_user 工具调用 ID（工具链语义：用户回答作为该调用的
-    /// 工具结果注入上下文继续本回合；None = 审批降级追问等非工具路径）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-}
-
-/// 追问问题下发载荷（Clarification chunk 携带；与持久化结构
-/// [`ClarificationQuestion`] 分离——下发需要选项描述（label + description），
-/// 持久化结构保持 label 列表以兼容旧头部数据）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClarificationQuestionPayload {
-    /// 问题内容。
-    pub question: String,
-    /// 候选选项（label + description；空 = 纯文本输入）。
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub options: Vec<crate::agent::tool_params::AskUserOption>,
-}
-
-/// 追问问题类型。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum QuestionType {
-    /// 开放性问题。
-    #[serde(rename = "OpenEnded")]
-    OpenEnded,
-    /// 选择题。
-    #[serde(rename = "Choice")]
-    Choice,
-    /// 确认性问题。
-    #[serde(rename = "Confirmation")]
-    Confirmation,
-}
-
 /// 用于跟踪执行状态的智能体状态。
 #[derive(Debug, Clone, Default)]
 pub struct AgentState {
@@ -71,10 +28,6 @@ pub struct AgentResponse {
     pub token_usage: TokenUsage,
     /// 处理时间（毫秒）。
     pub processing_time_ms: u64,
-    /// 是否需要追问。
-    pub needs_clarification: bool,
-    /// 追问问题列表。
-    pub clarification_questions: Vec<ClarificationQuestion>,
 }
 
 impl AgentResponse {
@@ -87,23 +40,6 @@ impl AgentResponse {
             content,
             token_usage: TokenUsage::default(),
             processing_time_ms: 0,
-            needs_clarification: false,
-            clarification_questions: vec![],
-        }
-    }
-
-    /// 创建追问响应。
-    ///
-    /// - `questions` - 追问问题列表
-    /// - `content` - 格式化后的追问内容
-    /// - returns: AgentResponse 实例
-    pub fn clarification(questions: Vec<ClarificationQuestion>, content: String) -> Self {
-        Self {
-            content,
-            token_usage: TokenUsage::default(),
-            processing_time_ms: 0,
-            needs_clarification: true,
-            clarification_questions: questions,
         }
     }
 
@@ -116,8 +52,6 @@ impl AgentResponse {
             content: message,
             token_usage: TokenUsage::default(),
             processing_time_ms: 0,
-            needs_clarification: false,
-            clarification_questions: vec![],
         }
     }
 }
@@ -153,8 +87,6 @@ pub enum StreamChunkType {
     Answer,
     /// 错误信息。
     Error,
-    /// 追问需求。
-    Clarification,
     /// 消息边界（流开始/结束：携带完整 ChatMessage 元数据，与历史加载同构；
     /// 前端据此用服务端消息结构同步本地消息 id/内容）。
     Message,
@@ -190,10 +122,6 @@ pub struct AgentStreamChunk {
     /// 时序正确，pump 侧不再猜测"最后一条消息"）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<StructuredMessage>,
-    /// 追问问题列表（Clarification chunk 携带；每个问题含选项（label + description），
-    /// 前端按 tab 分步渲染——对齐 DSH ask_user_question 的多问题 + N 选项 + 1 自定义形态）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub clarification_questions: Option<Vec<ClarificationQuestionPayload>>,
 }
 
 /// 工具执行结果事件（Observation chunk 携带）。
@@ -361,24 +289,6 @@ impl StreamEventSender {
         .await;
     }
 
-    /// 发送追问事件（Clarification chunk）：formatted 为人类可读问题文本
-    /// （多问题编号列表），questions 为结构化问题列表（每个含选项 label +
-    /// description——前端按 tab 分步渲染选项行 + 自定义输入）。
-    pub async fn send_clarification(
-        &self,
-        formatted: &str,
-        questions: Option<Vec<ClarificationQuestionPayload>>,
-    ) {
-        self.try_send(AgentStreamChunk {
-            delta: formatted.to_string(),
-            is_complete: true,
-            chunk_type: StreamChunkType::Clarification,
-            clarification_questions: questions,
-            ..Default::default()
-        })
-        .await;
-    }
-
     /// 发送错误事件。
     pub async fn send_error(&self, error: &str) {
         self.try_send(AgentStreamChunk {
@@ -420,7 +330,6 @@ mod tests {
             StreamChunkType::Observation,
             StreamChunkType::Answer,
             StreamChunkType::Error,
-            StreamChunkType::Clarification,
             StreamChunkType::Message,
         ];
         for variant in variants {
@@ -445,10 +354,6 @@ mod tests {
             serde_json::to_value(StreamChunkType::Answer).unwrap(),
             serde_json::json!("answer")
         );
-        assert_eq!(
-            serde_json::to_value(StreamChunkType::Clarification).unwrap(),
-            serde_json::json!("clarification")
-        );
     }
 
     // ── AgentStreamChunk ────────────────────────────────────────
@@ -465,7 +370,6 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_questions: None,
         };
         assert_eq!(chunk.delta, "你好");
         assert!(!chunk.is_complete);
@@ -492,7 +396,6 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_questions: None,
         };
         assert_eq!(chunk.delta, "调用技能");
         assert!(chunk.is_complete);
@@ -513,7 +416,6 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_questions: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
@@ -535,7 +437,6 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_questions: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         // skill_calls 为 None 时不应出现在 JSON 中
@@ -553,33 +454,12 @@ mod tests {
         assert_eq!(resp.content, "回答内容");
         assert_eq!(resp.token_usage.total_tokens, 0);
         assert_eq!(resp.processing_time_ms, 0);
-        assert!(!resp.needs_clarification);
-        assert!(resp.clarification_questions.is_empty());
-    }
-
-    #[test]
-    fn agent_response_clarification_creation() {
-        let questions = vec![ClarificationQuestion {
-            question: "你是？".to_string(),
-            question_type: QuestionType::OpenEnded,
-            options: None,
-            required: true,
-            tool_call_id: None,
-        }];
-        let resp = AgentResponse::clarification(questions.clone(), "追问内容".to_string());
-        assert_eq!(resp.content, "追问内容");
-        assert!(resp.needs_clarification);
-        assert_eq!(resp.clarification_questions.len(), 1);
-        assert_eq!(resp.clarification_questions[0].question, "你是？");
-        assert!(resp.clarification_questions[0].required);
     }
 
     #[test]
     fn agent_response_error_creation() {
         let resp = AgentResponse::error("出错了".to_string());
         assert_eq!(resp.content, "出错了");
-        assert!(!resp.needs_clarification);
-        assert!(resp.clarification_questions.is_empty());
     }
 
     #[test]
@@ -618,50 +498,6 @@ mod tests {
         };
         assert!(!info.success);
         assert_eq!(info.error.unwrap(), "权限不足");
-    }
-
-    // ── ClarificationQuestion ───────────────────────────────────
-
-    #[test]
-    fn clarification_question_serde_all_types() {
-        let types = [
-            (QuestionType::OpenEnded, "OpenEnded"),
-            (QuestionType::Choice, "Choice"),
-            (QuestionType::Confirmation, "Confirmation"),
-        ];
-        for (ty, expected) in types {
-            let q = ClarificationQuestion {
-                question: "test".to_string(),
-                question_type: ty,
-                options: None,
-                required: false,
-                tool_call_id: None,
-            };
-            let json = serde_json::to_string(&q).unwrap();
-            assert!(
-                json.contains(expected),
-                "JSON {json} 应包含序列化名称 {expected}"
-            );
-            // 反序列化后检查 JSON value 中的字段（QuestionType 没有 PartialEq）
-            let deserialized: ClarificationQuestion = serde_json::from_str(&json).unwrap();
-            let serialized_again = serde_json::to_string(&deserialized).unwrap();
-            assert_eq!(json, serialized_again, "反序列化再序列化应得到相同 JSON");
-        }
-    }
-
-    #[test]
-    fn clarification_question_with_options() {
-        let q = ClarificationQuestion {
-            question: "选择？".to_string(),
-            question_type: QuestionType::Choice,
-            options: Some(vec!["A".to_string(), "B".to_string()]),
-            required: true,
-            tool_call_id: None,
-        };
-        let json = serde_json::to_string(&q).unwrap();
-        let deserialized: ClarificationQuestion = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.options.unwrap().len(), 2);
-        assert!(deserialized.required);
     }
 
     // ── StreamEventSender ────────────────────────────────────────

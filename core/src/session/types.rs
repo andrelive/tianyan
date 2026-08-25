@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::ClarificationQuestion;
 use crate::common::types::{InjectableContext, StructuredMessage, TianyanUri};
 
 /// 会话 JSONL 首行的会话级状态头部。
@@ -45,11 +44,6 @@ pub struct SessionHeader {
     /// 全局 [agent] working_directory 配置兜底）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
-    /// 待处理追问（ask_user 触发后未回答前持久化于此）：澄清回答是独立
-    /// HTTP 请求（load_and_build_state 重建内存状态），不落库则回答轮
-    /// 永远看不到待处理追问——气泡出现后回答恒返回"当前没有待处理的追问"。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_clarification: Option<Vec<ClarificationQuestion>>,
 }
 
 impl Default for SessionHeader {
@@ -61,7 +55,6 @@ impl Default for SessionHeader {
             title: None,
             ended_at: None,
             working_directory: None,
-            pending_clarification: None,
         }
     }
 }

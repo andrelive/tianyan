@@ -28,6 +28,9 @@ pub(crate) const MAX_DELEGATION_DEPTH: usize = 3;
 /// 超预算自动升级为后台任务继续运行（不杀死子代理，完成后通知）。
 const DEFAULT_SYNC_DELEGATION_BUDGET_SECS: u64 = 120;
 
+/// ask_user 等待用户回答的超时（防挂死；超时返回错误，模型看到失败结果）。
+const ASK_USER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// 委托深度 RAII guard：Drop 时自动递减，保证异常路径不泄漏深度计数。
 pub(crate) struct DelegationDepthGuard(pub(crate) Arc<AtomicUsize>);
 
@@ -188,22 +191,45 @@ impl ToolRegistry {
         }
     }
 
-    /// 执行 ask_user 工具：向用户追问。
+    /// 执行 ask_user 工具：**同步等待用户回答**（对齐 DSH：工具执行挂起，
+    /// 回答作为普通工具结果返回，loop 继续——无拦截/无独立澄清轮）。
     ///
-    /// 语义归一：主循环（`loop.rs::handle_llm_response`）在工具执行前按名称
-    /// 拦截 ask_user 并转 `NeedsClarification`——本函数因此只在**子代理循环**
-    /// （delegation）可达。子代理不可交互追问：返回指导性结果（携带原问题），
-    /// 让子 LLM 基于已有上下文继续，而非收到误导性的错误字符串。
+    /// 工具调用事件（ToolCall chunk）已把问题（arguments JSON）推给前端，
+    /// 前端拉起组件；用户回答经 server 回答端点提交到 [`UserQuestionService`]，
+    /// 本方法 await 到回答后返回 `{answers: [...]}` 作为普通工具结果。
+    ///
+    /// 子代理不能向用户提问（ADR-011：任务下发即授权边界）——返回合成结果，
+    /// 子代理把问题/决策带进最终结果，由主 agent 在主对话中确认。
+    ///
+    /// 审批降级：回答命中确认语义（允许/是等）时放行待确认指纹——
+    /// 模型看到回答后重试被拒工具时审批通过（原 NeedsClarification 确认链路）。
     pub(crate) async fn execute_ask_user(
         &self,
         arguments: &str,
+        session_id: &str,
+        subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: AskUserParams = parse_params(arguments)?;
-        Ok(serde_json::json!({
-            "status": "delegated_agent_cannot_ask",
-            "question": params.question,
-            "hint": "子代理无法向用户追问。请基于已有上下文与工具结果尽量回答该问题；若确需用户输入，请给出当前可交付的最佳结果。",
-        }))
+        if subagent {
+            return Ok(serde_json::json!({
+                "status": "delegated_agent_cannot_ask",
+                "question": params.question,
+                "hint": "子代理无法向用户追问。请基于已有上下文与工具结果尽量回答该问题；若确需用户输入，请给出当前可交付的最佳结果。",
+            }));
+        }
+        let service = self.user_questions.as_ref().ok_or_else(|| {
+            TianyanError::Custom("tool: 执行失败：用户问题服务未装配".to_string())
+        })?;
+        // 挂起等待用户回答（超时防挂死；主循环停止时取消等待）
+        let answers = service
+            .ask(session_id, ASK_USER_WAIT_TIMEOUT, || {
+                self.delegation_cancelled_sync(session_id)
+            })
+            .await?;
+        // 审批降级：确认语义放行待确认指纹（模型重试工具时通过）
+        let approved = crate::executor::approval::is_user_confirmation(&answers.to_string());
+        self.confirm_pending_approval(approved).await;
+        Ok(answers)
     }
 
     /// 执行 self_check 工具：查询内部指标。
