@@ -33,7 +33,6 @@ impl ToolRegistry {
     pub(crate) async fn execute_write_file(
         &self,
         arguments: &str,
-
         session_id: &str,
         subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
@@ -69,7 +68,6 @@ impl ToolRegistry {
     pub(crate) async fn execute_apply_edit(
         &self,
         arguments: &str,
-
         session_id: &str,
         subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
@@ -110,7 +108,6 @@ impl ToolRegistry {
     pub(crate) async fn execute_apply_patch(
         &self,
         arguments: &str,
-
         session_id: &str,
         subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {

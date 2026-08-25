@@ -37,7 +37,6 @@ impl ToolRegistry {
     pub(crate) async fn execute_run_tests(
         &self,
         arguments: &str,
-
         session_id: &str,
         subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
@@ -88,7 +87,6 @@ impl ToolRegistry {
     pub(crate) async fn execute_verify_build(
         &self,
         arguments: &str,
-
         session_id: &str,
         subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
