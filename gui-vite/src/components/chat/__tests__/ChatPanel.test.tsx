@@ -297,7 +297,7 @@ describe('ChatPanel', () => {
     expect(screen.getByRole('button', { name: '提交回答' })).toBeInTheDocument();
   });
 
-  it('submits a clarification answer via /chat/clarify/stream, streams the reply and clears the bubble', async () => {
+  it('submits a clarification answer via /chat/answer and clears the bubble', async () => {
     const user = userEvent.setup();
     useAppStore.setState({
       currentSessionId: 'session-1',
@@ -311,23 +311,11 @@ describe('ChatPanel', () => {
 
     await user.click(screen.getByRole('button', { name: '提交回答' }));
 
-    // 流式：思考增量进 thinking、正文增量进 content
-    await waitFor(() => {
-      const messages = useAppStore.getState().messages;
-      const assistant = messages.filter((m) => m.role === 'assistant');
-      expect(assistant[assistant.length - 1]?.thinking).toBe('确认用户意图');
-      expect(assistant[assistant.length - 1]?.content).toBe('好的，我来继续处理。');
-    });
-
-    // 流结束：追问接管消失
+    // 同步工具语义：回答提交到 /chat/answer 等待通道（mock 返回 ok），
+    // 提交成功后接管组件退出（工具结果经主对话流返回，此处不模拟）
     await waitFor(() => {
       expect(useAppStore.getState().pendingClarification).toBeNull();
     });
-    // 回答作为 ask_user 工具结果挂卡片（不进消息流）——消息流只有
-    // 澄清轮的 assistant 占位（流式回复累积其上）
-    const messages = useAppStore.getState().messages;
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toMatchObject({ role: 'assistant', content: '好的，我来继续处理。' });
     expect(screen.queryByText('请确认是否删除该文件？')).not.toBeInTheDocument();
   });
 

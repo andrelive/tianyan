@@ -3,7 +3,7 @@
 export type MessageRole = 'system' | 'user' | 'assistant';
 
 export type StreamChunkType =
-  'answer' | 'thought' | 'tool_call' | 'observation' | 'clarification' | 'error' | 'message';
+  'answer' | 'thought' | 'tool_call' | 'observation' | 'error' | 'message';
 
 export interface ChatMessage {
   id?: string;
@@ -91,15 +91,6 @@ export interface ChatStreamEvent {
   tool_result?: ToolResultEvent | null;
   /** 本轮 token 用量（完成 chunk 携带；上下文占用 / 缓存命中展示用） */
   usage?: StreamUsage | null;
-  /** 追问问题列表（clarification chunk 携带；每个含选项 label + description，
-   * 前端按 tab 分步渲染选项行 + 自定义输入） */
-  clarification_questions?: ClarificationQuestionPayload[] | null;
-}
-
-/** 追问问题载荷（与后端 ClarificationQuestionPayload 对齐） */
-export interface ClarificationQuestionPayload {
-  question: string;
-  options: { label: string; description?: string | null }[];
 }
 
 export interface SkillCallInfo {

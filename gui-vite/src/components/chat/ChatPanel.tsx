@@ -2,6 +2,7 @@ import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
 import {
+  answerChat,
   compressSession,
   deleteSessionMessage,
   fetchApprovalStatus,
@@ -49,6 +50,7 @@ export default function ChatPanel() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [compressing, setCompressing] = useState(false);
+  const [clarifySubmitting, setClarifySubmitting] = useState(false);
   /** 唤醒轮停止标记（轮询失败/会话删除时置位；下一轮任务通知重新开始） */
   const [wakeStopped, setWakeStopped] = useState(false);
   /** 当前会话待审批操作（应用层授权卡片；wait_for_approval 模式挂起时出现） */
@@ -164,29 +166,6 @@ export default function ChatPanel() {
       }
     }
   }, [messages, pendingClarification]);
-
-  // 追问流与主对话流共用同一 hook 生命周期（fetch + 唯一 SSE 解析器 +
-  // 事件归约器）；协议事件 → store 动作的唯一定义点在 lib/chat-stream
-  const clarifyStream = useChatStream({
-    streamUrl: `${getApiBase()}/chat/clarify/stream`,
-    errorFallbackText: '追问回答失败',
-    onComplete: (sessionId) => {
-      // 流正常结束：接管已退出（提交时即清 pending），此处复位流状态；
-      // 双保险清 pending（异常路径也会走到这里时无害）
-      useAppStore.getState().setPendingClarification(null);
-      useAppStore.getState().setStreamStatus('idle', sessionId);
-    },
-    onError: (sessionId, error) => {
-      // 失败：接管退出 + 流状态复位 + 移除空占位 + 服务端消息同步
-      // （本地消息 id 为 uuid，回退需服务端 msg_xxx 定位键）。
-      // 此前缺失 pending 清理：气泡残留 + submitting 永远为真。
-      useAppStore.getState().setPendingClarification(null);
-      useAppStore.getState().setStreamStatus('idle', sessionId);
-      useAppStore.getState().removeEmptyAssistantMessage();
-      useAppStore.getState().showToast(`追问回答失败: ${error.message}`, 'error');
-      if (sessionId) void reloadSession(sessionId);
-    },
-  });
 
   // ─── Custom streaming via fetch + ReadableStream ─────────────────
 
@@ -320,42 +299,46 @@ export default function ChatPanel() {
     }
   }, [streamStatus, lastRollbackMessageId, setLastRollbackMessageId, reloadSession]);
 
-  // 提交对 Agent 追问的回答（流式）：确认后思考/工具/输出逐块渲染，
-  // 避免整轮等待超过 HTTP 超时（此前非流式路径表现为"按钮转圈后报错"）。
-  // 生命周期交给 clarifyStream hook（fetch/consume/错误语义与主对话流一致）
+  // 提交对 Agent 追问的回答（同步工具语义，对齐 DSH）：回答提交到
+  // /chat/answer 等待通道，ask_user 工具执行恢复，结果经**主对话流**返回
+  // （无独立澄清流）——模型看到 调用→结果 对后继续决策，最终完成 chunk
+  // 复位流状态。提交失败保留接管组件（用户可重试）。
   const handleClarify = useCallback(
     async (answer: string) => {
-      if (streamStatus === 'streaming' || clarifyStream.isStreaming) return;
+      // 注意：同步工具语义下 ask_user 工具执行挂起时主对话流仍处于 streaming
+      // （工具结果经原流返回）——提交回答不能因 streaming 被拦截，只防重复提交
+      if (clarifySubmitting) return;
       const state = useAppStore.getState();
       const sessionId = state.currentSessionId;
       if (!sessionId) {
         state.showToast('请先发送一条消息以创建会话', 'error');
         return;
       }
-      // 回答作为 ask_user 工具结果挂到工具卡片（工具链语义：回答是
-      // 工具的输入，不是新一轮用户输入——对齐 DSH，不进消息流）
-      const askCall = findAskUserCall(useAppStore.getState().messages);
-      if (askCall && askCall.id) {
-        useAppStore.getState().applyToolResult({
-          tool_call_id: askCall.id,
-          content: answer,
-          success: true,
-          duration_ms: 0,
-        });
+      setClarifySubmitting(true);
+      try {
+        // 回答 JSON（{answers, extra}）提交到等待通道
+        const payload = JSON.parse(answer) as unknown;
+        await answerChat(sessionId, payload);
+        // 回答已受理：乐观挂到 ask_user 工具卡片（服务端 tool_result 到达后
+        // 幂等覆盖）；接管组件退出，普通输入框恢复；主流保持 streaming
+        // （工具执行挂起中，完成 chunk 到达后复位）
+        const askCall = findAskUserCall(useAppStore.getState().messages);
+        if (askCall && askCall.id) {
+          useAppStore.getState().applyToolResult({
+            tool_call_id: askCall.id,
+            content: answer,
+            success: true,
+            duration_ms: 0,
+          });
+        }
+        state.setPendingClarification(null);
+      } catch (err: unknown) {
+        state.showToast(`追问回答提交失败: ${toErrorMessage(err, '未知错误')}`, 'error');
+      } finally {
+        setClarifySubmitting(false);
       }
-      // 助手占位消息：澄清轮流式增量累积其上
-      addMessage({
-        role: 'assistant',
-        content: '',
-        timestamp: new Date().toISOString(),
-      });
-      // 回答已受理：接管组件立即退出（对齐 DSH question/resolved 移除
-      // composer），普通输入框恢复；流式期间锁定输入（防并发轮）
-      state.setPendingClarification(null);
-      state.setStreamStatus('streaming');
-      await clarifyStream.startStream({ session_id: sessionId, answer });
     },
-    [streamStatus, addMessage, clarifyStream],
+    [clarifySubmitting],
   );
 
   const handleStop = useCallback(() => {
@@ -468,11 +451,13 @@ export default function ChatPanel() {
 
       {/* Input area（模型/思考强度/上下文圆环 + 发送：DSH 布局）
           追问待回答时由 ClarificationBubble 接管（composer takeover，对齐 DSH）：
-          输入框区域被问题表单替代，回答提交后恢复 */}
-      {pendingClarification && streamStatus !== 'streaming' ? (
+          输入框区域被问题表单替代，回答提交后恢复。
+          注意：同步工具语义下 ask_user 工具执行挂起时主对话流仍处于 streaming
+          （工具结果经原流返回）——气泡渲染只看 pending，不再要求 idle。 */}
+      {pendingClarification ? (
         <ClarificationBubble
           questions={pendingClarification.questions}
-          submitting={clarifyStream.isStreaming}
+          submitting={clarifySubmitting}
           onSubmit={handleClarify}
         />
       ) : (

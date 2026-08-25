@@ -1157,37 +1157,10 @@ export const handlers = [
     });
   }),
 
-  // Chat clarify（追问回答）
-  http.post(`${API_BASE}/chat/clarify`, () => {
-    return HttpResponse.json({
-      id: 'msg-2',
-      session_id: 'session-1',
-      message: {
-        role: 'assistant',
-        content: '好的，我来继续处理。',
-        timestamp: '2026-07-23T10:00:10Z',
-      },
-      usage: { prompt_tokens: 60, completion_tokens: 20, total_tokens: 80 },
-    });
-  }),
-
-  // Chat clarify stream（追问回答，流式）：思考 + 正文增量
-  http.post(`${API_BASE}/chat/clarify/stream`, () => {
-    const encoder = new TextEncoder();
-    const chunks = [
-      'data: {"id":"msg-2","session_id":"session-1","delta":"","thinking":"确认用户意图","chunk_type":"thought"}\n\n',
-      'data: {"id":"msg-2","session_id":"session-1","delta":"好的，我来继续处理。","chunk_type":"answer"}\n\n',
-      'data: {"id":"msg-2","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',
-    ];
-    const stream = new ReadableStream({
-      start(controller) {
-        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
-        controller.close();
-      },
-    });
-    return new HttpResponse(stream, {
-      headers: { 'Content-Type': 'text/event-stream' },
-    });
+  // Chat answer（ask_user 追问回答提交：同步工具语义——回答提交到等待通道，
+  // 工具执行恢复，结果经主对话流返回）
+  http.post(`${API_BASE}/chat/answer`, () => {
+    return HttpResponse.json({ status: 'ok' });
   }),
 
   // Knowledge search（后端为 GET /knowledge/search?q=）

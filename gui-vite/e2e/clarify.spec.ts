@@ -2,10 +2,11 @@ import { test, expect, type APIRequestContext } from '@playwright/test';
 import { assertE2eBackend } from './helpers';
 
 /**
- * 真实追问链路：UI 发送消息 → mock-llm 返回 ask_user 工具调用 → AgentLoop
- * 主循环拦截转 NeedsClarification → 前端展示追问气泡 → 用户回答 →
- * /chat/clarify/stream（流式追问）→ mock-llm 回复 → 前端渲染。
- * 非流式 /chat/clarify 端点已移除，本 spec 是追问链路的唯一 E2E 覆盖。
+ * 真实追问链路（同步工具语义，对齐 DSH）：UI 发送消息 → mock-llm 返回
+ * ask_user 工具调用 → 工具执行挂起等待（无拦截/无独立澄清轮）→ 前端从
+ * ToolCall chunk 解析问题并展示追问气泡（composer takeover）→ 用户回答
+ * 提交到 /chat/answer 等待通道 → 工具执行恢复，回答作为普通工具结果入史
+ * → mock-llm 第二轮（最后消息为 tool 结果）回复 → 经主对话流渲染。
  */
 
 /** mock-llm.mjs 的场景常量（与 scripts/e2e/mock-llm.mjs 保持一致；
@@ -53,7 +54,7 @@ test.describe('real backend clarify (ask_user)', () => {
     await expect(page.getByRole('tab', { name: '问题 1' })).toBeVisible();
     await expect(page.getByRole('tab', { name: '补充信息' })).toBeVisible();
 
-    // 点选选项回答（流式追问 /chat/clarify/stream）
+    // 点选选项回答（同步工具：提交到 /chat/answer 等待通道）
     await page.getByRole('radio', { name: '蓝色' }).click();
     await page.getByRole('button', { name: '提交回答' }).click();
 

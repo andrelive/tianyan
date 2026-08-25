@@ -13,6 +13,43 @@
 import { useAppStore } from '@/lib/store';
 import type { ChatStreamEvent } from '@/lib/types';
 
+/* ─────── ask_user 问题解析（同步工具语义） ─────── */
+
+/**
+ * 从 ask_user 工具调用参数（arguments JSON）解析问题列表。
+ *
+ * 参数形态（对齐后端 AskUserParams）：`questions` 数组优先（多问题分步），
+ * 缺省回落单问题 `question` + `options`。解析失败返回空数组（不接管输入框，
+ * 工具卡片仍正常渲染——模型可自行处理失败）。
+ */
+export function parseAskUserQuestions(argumentsRaw: string): {
+  question: string;
+  options: { label: string; description?: string | null }[];
+}[] {
+  try {
+    const parsed = JSON.parse(argumentsRaw) as {
+      questions?: {
+        question: string;
+        options?: { label: string; description?: string | null }[];
+      }[];
+      question?: string;
+      options?: { label: string; description?: string | null }[];
+    };
+    if (Array.isArray(parsed.questions) && parsed.questions.length > 0) {
+      return parsed.questions.map((q) => ({
+        question: q.question ?? '',
+        options: q.options ?? [],
+      }));
+    }
+    if (parsed.question) {
+      return [{ question: parsed.question, options: parsed.options ?? [] }];
+    }
+  } catch {
+    // 参数解析失败：不接管（工具卡片正常渲染）
+  }
+  return [];
+}
+
 /* ─────── SSE 行解析（唯一实现） ─────── */
 
 /**
@@ -112,19 +149,6 @@ export function createChatStreamReducer(options: ChatStreamReducerOptions = {}):
         return;
       }
 
-      // Clarification：不追加 delta，置为待回答追问（composer takeover：
-      // 输入框被问题表单接管，多问题 tab + 选项行 + 自定义输入）
-      if (event.chunk_type === 'clarification') {
-        st.removeEmptyAssistantMessage(sid);
-        st.setPendingClarification({
-          questions: (event.clarification_questions ?? []).map((q) => ({
-            question: q.question,
-            options: q.options,
-          })),
-        });
-        return;
-      }
-
       // 消息边界（统一结构）：流开始/结束携带完整 ChatMessage——本地消息
       // id/内容直接来自服务端结构（与历史加载同构），回退定位键天然正确
       if (event.message) {
@@ -158,6 +182,15 @@ export function createChatStreamReducer(options: ChatStreamReducerOptions = {}):
       // 结构化工具调用事件 → tool card 渲染（含展示意图）
       if (event.tool_call) {
         st.appendToolCalls([event.tool_call], sid);
+        // ask_user：同步工具语义（对齐 DSH）——工具执行挂起等待用户回答，
+        // 问题从调用参数解析（arguments JSON），输入框被问题表单接管；
+        // 回答提交到 /chat/answer 后工具结果经本流返回，loop 继续。
+        if (event.tool_call.name === 'ask_user') {
+          const questions = parseAskUserQuestions(event.tool_call.arguments);
+          if (questions.length > 0) {
+            st.setPendingClarification({ questions });
+          }
+        }
       }
 
       // 工具执行结果事件：按 tool_call_id 关联调用卡片，实时填充

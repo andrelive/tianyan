@@ -319,6 +319,20 @@ export async function redoSessionMessage(
   );
 }
 
+export interface AnswerRequest {
+  session_id: string;
+  answers: unknown;
+}
+
+/** 提交 ask_user 追问回答（同步工具语义）：回答提交到等待通道，
+ * 工具执行恢复，结果经主对话流返回。无等待中的追问时幂等空操作。 */
+export async function answerChat(sessionId: string, answers: unknown): Promise<void> {
+  await apiPost<void>('/chat/answer', {
+    session_id: sessionId,
+    answers,
+  } satisfies AnswerRequest);
+}
+
 /** 更新会话标题。 */
 export async function updateSessionTitle(
   sessionId: string,
