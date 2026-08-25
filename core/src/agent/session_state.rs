@@ -19,25 +19,18 @@ pub struct SessionState {
     pub last_activity: Instant,
     /// 待持久化记忆。
     pub pending_memories: Vec<crate::common::types::MemoryEntry>,
-    /// 总 token 数。
-    pub total_tokens: usize,
-    /// 开始时间。
-    pub start_time: Instant,
 }
 
 impl SessionState {
     /// 创建新的会话状态。
     pub fn new(session_id: &str) -> Self {
-        let now = Instant::now();
         Self {
             session_id: session_id.to_string(),
             structured_messages: Vec::new(),
             injectable_context: InjectableContext::new(),
             pending_clarification: None,
-            last_activity: now,
+            last_activity: Instant::now(),
             pending_memories: Vec::new(),
-            total_tokens: 0,
-            start_time: now,
         }
     }
 

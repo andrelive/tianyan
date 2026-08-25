@@ -206,7 +206,9 @@ async fn test_run_ask_user_returns_clarification() {
         .unwrap();
 
     match result {
-        AgentLoopResult::NeedsClarification { questions, turns, .. } => {
+        AgentLoopResult::NeedsClarification {
+            questions, turns, ..
+        } => {
             assert_eq!(questions.len(), 1);
             assert_eq!(questions[0].question, "你希望我怎么处理？");
             assert_eq!(turns, 1);

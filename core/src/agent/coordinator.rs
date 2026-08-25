@@ -248,23 +248,31 @@ impl AgentCoordinator for Agent {
         cancel: Option<Arc<AtomicBool>>,
         thinking_effort: Option<String>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
-        let state = self.load_and_build_state(session_id).await?;
         let model = model.unwrap_or(&self.default_model).to_string();
 
         let (tx, rx) = mpsc::channel(100);
         let self_clone = Arc::new(self.clone());
         let message = message.clone();
         let stream_sender = StreamEventSender::new(tx.clone());
-        let state_clone = state.clone();
+        let session_id = session_id.to_string();
 
         tokio::spawn(async move {
-            // ADR-013 串行化：单会话同一时刻只有一个活动轮（用户轮 / 唤醒轮互斥）；
-            // 锁覆盖 prepare_context + AgentLoop 全程（其他轮排队等待）
-            let (session_id_str, _) = {
-                let s = state_clone.read().await;
-                (s.session_id.clone(), ())
+            // ADR-013 串行化：单会话同一时刻只有一个活动轮（用户轮 / 唤醒轮互斥）。
+            // 锁必须先于状态加载：并发轮（如唤醒轮进行中又来用户消息）若在锁外
+            // 加载状态，会拿到前一轮完成前的旧快照——上下文缺失前一轮消息，
+            // 且状态与库分叉。非流式路径（process_message）已是锁内加载，
+            // 此处对齐。
+            let _turn_guard = self_clone.turn_guard(&session_id).await;
+
+            // 状态加载失败：经流式通道下发错误事件（pump 侧映射为 error 事件
+            // + HTTP 错误，与锁外加载返回 Err 的语义一致）。
+            let state = match self_clone.load_and_build_state(&session_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    stream_sender.send_error(&format!("处理失败：{}", e)).await;
+                    return;
+                }
             };
-            let _turn_guard = self_clone.turn_guard(&session_id_str).await;
 
             let start = Instant::now();
             // 注入取消标志：工具执行（含同步委托）期间也能响应停止
@@ -272,14 +280,14 @@ impl AgentCoordinator for Agent {
             self_clone
                 .agent_loop
                 .tool_registry()
-                .set_delegation_cancel(&session_id_str, cancel.clone())
+                .set_delegation_cancel(&session_id, cancel.clone())
                 .await;
             // 共享编排骨架：快照 → 持久化 → 上下文 → run_stream → 流式事件 → 指标 → 压缩
             // （do_compress = true：修复流式路径缺失压缩检查的漂移，与 process_message 对齐）
             let _ = self_clone
                 .run_agent_turn(
-                    &state_clone,
-                    &session_id_str,
+                    &state,
+                    &session_id,
                     &message,
                     &model,
                     start,
@@ -305,7 +313,7 @@ impl AgentCoordinator for Agent {
                 self_clone
                     .agent_loop
                     .tool_registry()
-                    .set_delegation_cancel(&session_id_str, None)
+                    .set_delegation_cancel(&session_id, None)
                     .await;
             }
         });
@@ -318,19 +326,27 @@ impl AgentCoordinator for Agent {
         session_id: &str,
         answers: &str,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
-        let state = self.load_and_build_state(session_id).await?;
         let answers = answers.to_string();
         let (tx, rx) = mpsc::channel(100);
         let self_clone = Arc::new(self.clone());
         let sender = StreamEventSender::new(tx.clone());
-        let state_clone = state.clone();
         let session_id = session_id.to_string();
 
         tokio::spawn(async move {
-            // ADR-013 串行化：澄清回答是用户轮的延续，占用会话轮次锁
+            // ADR-013 串行化：澄清回答是用户轮的延续，占用会话轮次锁；
+            // 锁先于状态加载（与 process_message_stream 同因：锁外加载会
+            // 拿到并发轮完成前的旧状态）。
             let _turn_guard = self_clone.turn_guard(&session_id).await;
+
+            let state = match self_clone.load_and_build_state(&session_id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    sender.send_error(&format!("处理失败：{}", e)).await;
+                    return;
+                }
+            };
             self_clone
-                .handle_clarification_response_stream(&state_clone, &answers, sender)
+                .handle_clarification_response_stream(&state, &answers, sender)
                 .await;
         });
 
@@ -338,6 +354,9 @@ impl AgentCoordinator for Agent {
     }
 
     async fn compress_session(&self, session_id: &str) -> Result<bool> {
+        // 与进行中的轮互斥：压缩读取会话状态并写入摘要，若与轮并发会基于
+        // 轮中未完成的消息生成摘要（且轮内状态与库分叉）。
+        let _turn_guard = self.turn_guard(session_id).await;
         let state = self.load_and_build_state(session_id).await?;
         Ok(self.maybe_compress_and_persist(&state, session_id).await)
     }

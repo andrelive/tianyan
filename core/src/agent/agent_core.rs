@@ -170,7 +170,6 @@ impl Agent {
     /// 一条消息自然触发）。
     pub(crate) async fn process_wake(&self, session_id: &str) {
         let _turn = self.turn_guard(session_id).await;
-        let start = Instant::now();
 
         let mut last_err: Option<TianyanError> = None;
         for attempt in 0..WAKE_RETRY_LIMIT {
@@ -248,20 +247,15 @@ impl Agent {
             "唤醒轮重试 {} 次后放弃（消息已在会话中，用户下一条消息自然触发）",
             WAKE_RETRY_LIMIT - 1
         );
-        let _ = start; // 保留 start 供未来指标扩展
     }
 
     /// 组装唤醒轮上下文（ADR-013）。
     ///
-    /// 与 [`Self::prepare_context`] 的区别：**不添加用户消息**（无用户输入），
+    /// 与 [`Self::assemble_context`] 的区别：**不添加用户消息**（无用户输入），
     /// 直接组装会话历史（System 完成通知已在其中）+ 会话定位 + 唤醒指令。
     async fn prepare_wake_context(&self, state: &Arc<RwLock<SessionState>>) -> Vec<Message> {
-        let injectable = self.ensure_injectable(state, "").await;
-        let s = state.read().await;
-        let mut messages = ContextAssembler::assemble(&s.structured_messages, &injectable, "");
-
-        // 会话定位信息（与 prepare_context 一致）
-        insert_session_hint(&mut messages, &s.session_id);
+        // 会话历史 + 前缀 + 会话定位（与用户轮共用组装；无用户消息注入）
+        let mut messages = self.assemble_context(state, "").await;
 
         // 唤醒指令：告知模型这是后台任务完成触发的自动处理轮
         messages.push(Message::system(
@@ -275,7 +269,7 @@ impl Agent {
 
     /// 加载（或复用）可注入上下文（soul/rules/memories 前缀）。
     ///
-    /// 会话级缓存 + 首次加载固化快照（提取自 prepare_context，唤醒轮共用）；
+    /// 会话级缓存 + 首次加载固化快照（提取自 assemble_context，唤醒轮共用）；
     /// `query` 用于首次加载时的语义检索（唤醒轮无用户查询，传空串）。
     async fn ensure_injectable(
         &self,
@@ -381,32 +375,25 @@ impl Agent {
         Ok(state)
     }
 
-    /// 准备当前轮次的上下文消息。
+    /// 组装当前轮次的上下文消息（soul/rules/memories 前缀 + 会话历史 + 会话定位）。
     ///
-    /// 执行：写入用户消息 → 检查会话缓存 → 按需加载 injectable → 压缩 → 组装。
+    /// 用户消息已由调用方写入 state（`persist_user_message` / 澄清续轮 / 唤醒轮），
+    /// 本函数只做组装、不修改状态——用户消息的**单一创建点**在
+    /// [`Self::persist_user_message`]（入库 + 内存状态同一份 StructuredMessage，
+    /// 避免状态与库中消息链 id 分叉）。
+    ///
     /// soul/rules/memories 仅会话首次加载，后续轮次复用缓存，
     /// 确保 system prompt 前缀稳定以命中 DeepSeek 前缀缓存。
     ///
     /// 图片（`message.content_parts`）随用户消息写入会话状态，经
     /// `ContextAssembler` 组装为多模态传输消息，对 LLM 可见。
-    pub(crate) async fn prepare_context(
+    pub(crate) async fn assemble_context(
         &self,
         state: &Arc<RwLock<SessionState>>,
-        message: &Message,
+        query: &str,
     ) -> Vec<Message> {
-        let query = message.content.clone();
-        let images = message.image_urls();
-        if images.is_empty() {
-            state.write().await.add_user_message(&query);
-        } else {
-            state
-                .write()
-                .await
-                .add_user_message_with_images(&query, images);
-        }
-
         // 加载（或复用）可注入上下文：soul/rules/memories 前缀
-        let injectable = self.ensure_injectable(state, &query).await;
+        let injectable = self.ensure_injectable(state, query).await;
 
         let s = state.read().await;
         let mut messages = ContextAssembler::assemble(&s.structured_messages, &injectable, "");
@@ -428,13 +415,10 @@ impl Agent {
         session_id: &str,
         ctx: &InjectableContext,
     ) {
-        let Ok(Some(mut session)) = self.session_manager.get_session(session_id).await else {
-            return;
-        };
-        session.header.injectable_snapshot = Some(ctx.clone());
-        if let Err(e) = self.session_manager.update_session(&session).await {
-            tracing::warn!(error = %e, "持久化注入上下文快照失败");
-        }
+        self.update_session_header(session_id, "持久化注入上下文快照", |h| {
+            h.injectable_snapshot = Some(ctx.clone());
+        })
+        .await;
     }
 
     /// 持久化待处理追问到会话头部（session_meta.header_json）。
@@ -448,35 +432,50 @@ impl Agent {
         session_id: &str,
         pending: &Option<Vec<ClarificationQuestion>>,
     ) {
-        let Ok(Some(mut session)) = self.session_manager.get_session(session_id).await else {
-            return;
-        };
-        session.header.pending_clarification = pending.clone();
-        if let Err(e) = self.session_manager.update_session(&session).await {
-            tracing::warn!(error = %e, session = %session_id, "持久化待处理追问失败");
-        }
+        self.update_session_header(session_id, "持久化待处理追问", |h| {
+            h.pending_clarification = pending.clone();
+        })
+        .await;
     }
 
     /// 清空注入上下文快照（压缩点调用）：内存缓存 + 持久化快照一并失效，
-    /// 下一轮 prepare_context 重新加载并固化新快照。
+    /// 下一轮 assemble_context 重新加载并固化新快照。
     async fn invalidate_injectable_snapshot(
         &self,
         state: &Arc<RwLock<SessionState>>,
         session_id: &str,
     ) {
         state.write().await.injectable_context = InjectableContext::default();
-        if let Ok(Some(mut session)) = self.session_manager.get_session(session_id).await {
-            session.header.injectable_snapshot = None;
-            if let Err(e) = self.session_manager.update_session(&session).await {
-                tracing::warn!(error = %e, "清空注入上下文快照失败");
-            }
+        self.update_session_header(session_id, "清空注入上下文快照", |h| {
+            h.injectable_snapshot = None;
+        })
+        .await;
+    }
+
+    /// 更新会话头部字段的公共骨架（get_session → 修改 header → update_session）。
+    ///
+    /// 会话不存在或更新失败仅告警（内存状态仍生效）；`what` 用于告警日志
+    /// 区分调用方。三个会话头部持久化点（注入快照 / 待处理追问 / 快照失效）
+    /// 共用，消除逐份复制的 get/update 样板。
+    async fn update_session_header(
+        &self,
+        session_id: &str,
+        what: &str,
+        f: impl FnOnce(&mut crate::session::SessionHeader),
+    ) {
+        let Ok(Some(mut session)) = self.session_manager.get_session(session_id).await else {
+            return;
+        };
+        f(&mut session.header);
+        if let Err(e) = self.session_manager.update_session(&session).await {
+            tracing::warn!(error = %e, session = %session_id, "更新会话头部失败（{what}）");
         }
     }
 
     /// 判断是否需要压缩，如果需要则生成摘要 StructuredMessage 并持久化。
     ///
     /// 压缩成功后执行会话转换点刷新（自动/手动压缩共用）：
-    /// 1. 清空 injectable_context 缓存 —— 下一轮 `prepare_context` 重新加载，
+    /// 1. 清空 injectable_context 缓存 —— 下一轮 `assemble_context` 重新加载，
     ///    learned rules / memories 最新化（GEPA 经验对会话后续阶段可见）；
     /// 2. 触发 [`SkillRefresher`] —— VFS 新进化技能增量注册，call_skill 可用。
     ///
@@ -557,7 +556,7 @@ impl Agent {
     ///   压缩检查的漂移在此修复）。
     /// - `model` — 本次使用的模型（调用方已解析）。
     /// - `start` — 由调用方传入，保证 `processing_time_ms` 测量窗口与调用前一致。
-    /// - `parent_id` — 在 `prepare_context` 之后统一计算（挂接在当前用户消息之下），
+    /// - `parent_id` — 在 `assemble_context` 之后统一计算（挂接在当前用户消息之下），
     ///   与 process_message 原行为一致（澄清路径的回复链随之修正为 回答→回复）。
     /// - `cancel` — 取消标志（客户端断开/服务关停时置位）；`None` 表示不可取消。
     // 共享骨架：7 个参数均为单轮演进所需状态/依赖，收敛为结构体反而降低可读性
@@ -591,8 +590,8 @@ impl Agent {
             }
         }
 
-        // 2. Prepare context
-        let messages = self.prepare_context(state, message).await;
+        // 2. Prepare context（用户消息已由 persist_user_message 写入 state）
+        let messages = self.assemble_context(state, &message.content).await;
 
         // 3. Run agent loop (internal persistence in AgentLoop)
         let parent_id = {
@@ -678,10 +677,7 @@ impl Agent {
                 loop_tokens = Some(total_tokens.clone());
                 match mode {
                     TurnMode::Plain => {
-                        let mut resp = AgentResponse::simple(content);
-                        resp.token_usage = total_tokens.clone();
-                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                        resp
+                        finalize_response(AgentResponse::simple(content), &total_tokens, start)
                     }
                     TurnMode::Stream { sender } => {
                         // 上下文占用语义用最后一轮单轮用量（跨轮累计值只用于
@@ -699,10 +695,7 @@ impl Agent {
                                 Some(usage),
                             )
                             .await;
-                        let mut resp = AgentResponse::simple(content);
-                        resp.token_usage = total_tokens.clone();
-                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                        resp
+                        finalize_response(AgentResponse::simple(content), &total_tokens, start)
                     }
                 }
             }
@@ -732,20 +725,19 @@ impl Agent {
                 let formatted = format_clarification_questions(&question_objs);
                 loop_tokens = Some(total_tokens.clone());
                 match mode {
-                    TurnMode::Plain => {
-                        let mut resp =
-                            AgentResponse::clarification(question_objs.clone(), formatted);
-                        resp.token_usage = total_tokens.clone();
-                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                        resp
-                    }
+                    TurnMode::Plain => finalize_response(
+                        AgentResponse::clarification(question_objs.clone(), formatted),
+                        &total_tokens,
+                        start,
+                    ),
                     TurnMode::Stream { sender } => {
                         // 结构化问题列表随追问事件下发（前端 tab 分步 + 选项行 + 自定义输入）
                         sender.send_clarification(&formatted, Some(questions)).await;
-                        let mut resp = AgentResponse::clarification(question_objs, formatted);
-                        resp.token_usage = total_tokens.clone();
-                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                        resp
+                        finalize_response(
+                            AgentResponse::clarification(question_objs, formatted),
+                            &total_tokens,
+                            start,
+                        )
                     }
                 }
             }
@@ -758,22 +750,20 @@ impl Agent {
                 self.metrics.record_execution(false).await;
                 loop_tokens = Some(total_tokens.clone());
                 match mode {
-                    TurnMode::Plain => {
-                        let mut resp = AgentResponse::simple("任务已取消".to_string());
-                        resp.cancelled = true;
-                        resp.token_usage = total_tokens.clone();
-                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                        resp
-                    }
+                    TurnMode::Plain => finalize_response(
+                        AgentResponse::simple("任务已取消".to_string()),
+                        &total_tokens,
+                        start,
+                    ),
                     TurnMode::Stream { sender } => {
                         sender
                             .send_complete("任务已取消", StreamChunkType::Answer, None, None, None)
                             .await;
-                        let mut resp = AgentResponse::simple("任务已取消".to_string());
-                        resp.cancelled = true;
-                        resp.token_usage = total_tokens.clone();
-                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                        resp
+                        finalize_response(
+                            AgentResponse::simple("任务已取消".to_string()),
+                            &total_tokens,
+                            start,
+                        )
                     }
                 }
             }
@@ -781,16 +771,18 @@ impl Agent {
                 tracing::warn!(error = %e, "AgentLoop 执行失败");
                 self.metrics.record_execution(false).await;
                 match mode {
-                    TurnMode::Plain => {
-                        let mut resp = AgentResponse::error(format!("处理失败：{}", e));
-                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                        resp
-                    }
+                    TurnMode::Plain => finalize_response(
+                        AgentResponse::error(format!("处理失败：{}", e)),
+                        &TokenUsage::default(),
+                        start,
+                    ),
                     TurnMode::Stream { sender } => {
                         sender.send_error(&format!("处理失败：{}", e)).await;
-                        let mut resp = AgentResponse::error(format!("处理失败：{}", e));
-                        resp.processing_time_ms = start.elapsed().as_millis() as u64;
-                        resp
+                        finalize_response(
+                            AgentResponse::error(format!("处理失败：{}", e)),
+                            &TokenUsage::default(),
+                            start,
+                        )
                     }
                 }
             }
@@ -924,12 +916,7 @@ impl Agent {
 
         // 2. 组装上下文（复用前缀缓存；回答已作为工具结果在消息链上，
         //    不再作为用户消息注入）
-        let injectable = self.ensure_injectable(state, answer).await;
-        let mut messages = {
-            let s = state.read().await;
-            ContextAssembler::assemble(&s.structured_messages, &injectable, "")
-        };
-        insert_session_hint(&mut messages, session_id);
+        let mut messages = self.assemble_context(state, answer).await;
 
         // 3. AgentLoop 从工具结果继续本回合
         let start = Instant::now();
@@ -985,10 +972,12 @@ impl Agent {
         }
     }
 
-    /// 持久化当前用户消息到 SessionManager。
+    /// 持久化当前用户消息（**单一创建点**：入库 + 内存状态同一份
+    /// StructuredMessage，消息链 id 一致）。
     ///
     /// 返回入库成功后的结构化消息（供流式路径发送消息边界事件；
-    /// 入库失败返回 `None`——边界事件缺失时前端保留本地 uuid，不误同步）。
+    /// 入库失败返回 `None`——边界事件缺失时前端保留本地 uuid，不误同步；
+    /// 内存状态仍写入，会话可继续）。
     pub(crate) async fn persist_user_message(
         &self,
         session_id: &str,
@@ -1011,6 +1000,9 @@ impl Agent {
             parent_id.as_deref(),
             None,
         );
+        // 内存状态与入库同步写入（此前 prepare_context 会再建一份不同 id 的
+        // 消息，导致状态与库中消息链 id 分叉、assistant 的 parent 悬空）
+        state.write().await.add_structured_message(user_sm.clone());
         match self
             .session_manager
             .add_structured_message(session_id, user_sm.clone())
@@ -1023,6 +1015,20 @@ impl Agent {
             }
         }
     }
+}
+
+/// 组装响应公共字段（token 用量 + 处理耗时）。
+///
+/// Plain/Stream 两路分支共用：消除逐分支重复的
+/// `resp.token_usage = ...; resp.processing_time_ms = ...` 样板。
+fn finalize_response(
+    mut resp: AgentResponse,
+    tokens: &TokenUsage,
+    start: Instant,
+) -> AgentResponse {
+    resp.token_usage = tokens.clone();
+    resp.processing_time_ms = start.elapsed().as_millis() as u64;
+    resp
 }
 
 /// 格式化追问问题为用户友好的文本。
@@ -1050,7 +1056,7 @@ pub(crate) fn format_clarification_questions(questions: &[ClarificationQuestion]
     content
 }
 
-/// 向消息列表注入会话定位信息（prepare_context / prepare_wake_context 共用）。
+/// 向消息列表注入会话定位信息（assemble_context / prepare_wake_context 共用）。
 ///
 /// 告知 LLM 当前会话 URI，使其可用 `vfs_read` 检索被压缩的原始记录。
 /// 位置固定在 system 前缀（soul/rules）之后、历史消息之前；
@@ -1286,7 +1292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prepare_context_injects_session_hint() {
+    async fn test_assemble_context_injects_session_hint() {
         // 回归保护：组装上下文必须包含会话定位信息（session_id + vfs 检索路径），
         // 使 LLM 在早期对话被压缩后仍能向上检索原始记录（resume 不丢意图的最后一环）。
         let mock = MockChatService::new();
@@ -1294,7 +1300,11 @@ mod tests {
 
         let state = agent.load_and_build_state("session-abc").await.unwrap();
         let query_msg = Message::user("你好");
-        let messages = agent.prepare_context(&state, &query_msg).await;
+        // 用户消息经 persist_user_message 单一创建点写入 state（组装不再注入）
+        agent
+            .persist_user_message("session-abc", &state, &query_msg)
+            .await;
+        let messages = agent.assemble_context(&state, "你好").await;
 
         let hint = messages
             .iter()
@@ -1328,11 +1338,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_persist_user_message_single_creation_point() {
+        // 回归保护：用户消息单一创建点——persist_user_message 返回的消息
+        // 必须与写入 state 的是同一份（id 一致），assemble_context 不再
+        // 重建第二份（此前状态与库中消息链 id 分叉，assistant 的 parent
+        // 指向库中不存在的消息）。
+        let mock = MockChatService::new();
+        let agent = make_agent(mock);
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        let query_msg = Message::user("你好");
+        let persisted = agent
+            .persist_user_message("session-1", &state, &query_msg)
+            .await
+            .expect("入库应成功");
+
+        let state_last = state.read().await.structured_messages.last().cloned();
+        assert_eq!(
+            state_last.as_ref().map(|m| m.id.as_str()),
+            Some(persisted.id.as_str()),
+            "state 中的用户消息应与入库消息同一份（id 一致）"
+        );
+        // 组装上下文只含一份用户消息（不重复注入）
+        let messages = agent.assemble_context(&state, "你好").await;
+        let user_count = messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User && m.content == "你好")
+            .count();
+        assert_eq!(user_count, 1, "组装上下文应恰好包含一份用户消息");
+    }
     #[test]
     fn test_clarification_answer_injected_once() {
         // 回归保护：澄清回答链路中，用户对追问的回答
-        // 通过 prepare_context 仅注入内存状态一次；持久化（persist_user_message）
-        // 走 VFS，与上下文组装是两条独立存储，组装结果不得出现重复回答。
+        // 只注入内存状态一次（单一创建点语义），组装结果不得出现重复回答。
         let mut state = SessionState::new("session-1");
         state.add_user_message("原始问题");
         state.add_structured_message(ContextAssembler::message_to_structured(
@@ -1341,7 +1380,7 @@ mod tests {
             None,
             None,
         ));
-        // prepare_context 对追问回答的注入（每次调用仅一次）
+        // 追问回答的注入（每次调用仅一次）
         state.add_user_message("允许");
 
         let messages = ContextAssembler::assemble(

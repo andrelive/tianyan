@@ -7,7 +7,6 @@ use tokio::sync::mpsc;
 
 use crate::common::error::Result;
 use crate::common::types::{DetailedTokenUsage, StructuredMessage, TokenUsage};
-use crate::context::RetrievalTrace;
 
 /// 追问问题
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,10 +60,6 @@ pub struct AgentState {
     pub conversations_processed: usize,
     /// Token 使用详情（含 input/output/reasoning/cache 明细）。
     pub total_tokens: DetailedTokenUsage,
-    /// 检索执行次数。
-    pub retrievals_performed: usize,
-    /// 技能执行次数。
-    pub skills_executed: usize,
 }
 
 /// 智能体的响应。
@@ -72,24 +67,14 @@ pub struct AgentState {
 pub struct AgentResponse {
     /// 响应内容。
     pub content: String,
-    /// 是否完成。
-    pub is_complete: bool,
-    /// 检索追踪信息。
-    pub retrieval_trace: Option<RetrievalTrace>,
-    /// 上下文 URI 列表。
-    pub context_uris: Vec<String>,
     /// Token 使用情况。
     pub token_usage: TokenUsage,
-    /// 技能调用列表。
-    pub skill_calls: Vec<SkillCallInfo>,
     /// 处理时间（毫秒）。
     pub processing_time_ms: u64,
     /// 是否需要追问。
     pub needs_clarification: bool,
     /// 追问问题列表。
     pub clarification_questions: Vec<ClarificationQuestion>,
-    /// 是否被取消（客户端断开或服务关停导致循环中断）。
-    pub cancelled: bool,
 }
 
 impl AgentResponse {
@@ -100,15 +85,10 @@ impl AgentResponse {
     pub fn simple(content: String) -> Self {
         Self {
             content,
-            is_complete: true,
-            retrieval_trace: None,
-            context_uris: vec![],
             token_usage: TokenUsage::default(),
-            skill_calls: vec![],
             processing_time_ms: 0,
             needs_clarification: false,
             clarification_questions: vec![],
-            cancelled: false,
         }
     }
 
@@ -120,15 +100,10 @@ impl AgentResponse {
     pub fn clarification(questions: Vec<ClarificationQuestion>, content: String) -> Self {
         Self {
             content,
-            is_complete: true,
-            retrieval_trace: None,
-            context_uris: vec![],
             token_usage: TokenUsage::default(),
-            skill_calls: vec![],
             processing_time_ms: 0,
             needs_clarification: true,
             clarification_questions: questions,
-            cancelled: false,
         }
     }
 
@@ -139,15 +114,10 @@ impl AgentResponse {
     pub fn error(message: String) -> Self {
         Self {
             content: message,
-            is_complete: true,
-            retrieval_trace: None,
-            context_uris: vec![],
             token_usage: TokenUsage::default(),
-            skill_calls: vec![],
             processing_time_ms: 0,
             needs_clarification: false,
             clarification_questions: vec![],
-            cancelled: false,
         }
     }
 }
@@ -191,7 +161,7 @@ pub enum StreamChunkType {
 }
 
 /// 流式响应块。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentStreamChunk {
     /// 增量内容。
     pub delta: String,
@@ -293,15 +263,8 @@ impl StreamEventSender {
     pub async fn send_thought(&self, content: &str) {
         self.try_send(AgentStreamChunk {
             delta: content.to_string(),
-            is_complete: false,
-            token_usage: None,
             chunk_type: StreamChunkType::Thought,
-            skill_calls: None,
-            finish_reason: None,
-            tool_call: None,
-            tool_result: None,
-            message: None,
-            clarification_questions: None,
+            ..Default::default()
         })
         .await;
     }
@@ -310,15 +273,9 @@ impl StreamEventSender {
     pub async fn send_tool_call(&self, description: &str, tool_call: Option<ToolCallEvent>) {
         self.try_send(AgentStreamChunk {
             delta: description.to_string(),
-            is_complete: false,
-            token_usage: None,
             chunk_type: StreamChunkType::ToolCall,
-            skill_calls: None,
-            finish_reason: None,
             tool_call,
-            tool_result: None,
-            message: None,
-            clarification_questions: None,
+            ..Default::default()
         })
         .await;
     }
@@ -327,15 +284,8 @@ impl StreamEventSender {
     pub async fn send_observation(&self, content: &str) {
         self.try_send(AgentStreamChunk {
             delta: content.to_string(),
-            is_complete: false,
-            token_usage: None,
             chunk_type: StreamChunkType::Observation,
-            skill_calls: None,
-            finish_reason: None,
-            tool_call: None,
-            tool_result: None,
-            message: None,
-            clarification_questions: None,
+            ..Default::default()
         })
         .await;
     }
@@ -351,12 +301,7 @@ impl StreamEventSender {
     ) {
         self.try_send(AgentStreamChunk {
             delta: content.to_string(),
-            is_complete: false,
-            token_usage: None,
             chunk_type: StreamChunkType::Observation,
-            skill_calls: None,
-            finish_reason: None,
-            tool_call: None,
             tool_result: Some(ToolResultEvent {
                 tool_call_id: tool_call_id.to_string(),
                 duration_ms,
@@ -364,8 +309,7 @@ impl StreamEventSender {
                 error,
                 content: Some(content.to_string()),
             }),
-            message: None,
-            clarification_questions: None,
+            ..Default::default()
         })
         .await;
     }
@@ -374,15 +318,8 @@ impl StreamEventSender {
     pub async fn send_answer_delta(&self, delta: &str) {
         self.try_send(AgentStreamChunk {
             delta: delta.to_string(),
-            is_complete: false,
-            token_usage: None,
             chunk_type: StreamChunkType::Answer,
-            skill_calls: None,
-            finish_reason: None,
-            tool_call: None,
-            tool_result: None,
-            message: None,
-            clarification_questions: None,
+            ..Default::default()
         })
         .await;
     }
@@ -403,10 +340,7 @@ impl StreamEventSender {
             chunk_type,
             skill_calls,
             finish_reason,
-            tool_call: None,
-            tool_result: None,
-            message: None,
-            clarification_questions: None,
+            ..Default::default()
         })
         .await;
     }
@@ -420,15 +354,9 @@ impl StreamEventSender {
     pub async fn send_message_boundary(&self, message: StructuredMessage) {
         self.try_send(AgentStreamChunk {
             delta: String::new(),
-            is_complete: false,
-            token_usage: None,
             chunk_type: StreamChunkType::Message,
-            skill_calls: None,
-            finish_reason: None,
-            tool_call: None,
-            tool_result: None,
             message: Some(message),
-            clarification_questions: None,
+            ..Default::default()
         })
         .await;
     }
@@ -444,14 +372,9 @@ impl StreamEventSender {
         self.try_send(AgentStreamChunk {
             delta: formatted.to_string(),
             is_complete: true,
-            token_usage: None,
             chunk_type: StreamChunkType::Clarification,
-            skill_calls: None,
-            finish_reason: None,
-            tool_call: None,
-            tool_result: None,
-            message: None,
             clarification_questions: questions,
+            ..Default::default()
         })
         .await;
     }
@@ -461,14 +384,8 @@ impl StreamEventSender {
         self.try_send(AgentStreamChunk {
             delta: error.to_string(),
             is_complete: true,
-            token_usage: None,
             chunk_type: StreamChunkType::Error,
-            skill_calls: None,
-            finish_reason: None,
-            tool_call: None,
-            tool_result: None,
-            message: None,
-            clarification_questions: None,
+            ..Default::default()
         })
         .await;
     }
@@ -486,8 +403,6 @@ mod tests {
         assert!(!state.initialized, "initialized 默认应为 false");
         assert_eq!(state.conversations_processed, 0);
         assert_eq!(state.total_tokens.total, 0);
-        assert_eq!(state.retrievals_performed, 0);
-        assert_eq!(state.skills_executed, 0);
     }
 
     // ── StreamChunkType ─────────────────────────────────────────
@@ -636,11 +551,7 @@ mod tests {
     fn agent_response_simple_creation() {
         let resp = AgentResponse::simple("回答内容".to_string());
         assert_eq!(resp.content, "回答内容");
-        assert!(resp.is_complete);
-        assert!(resp.retrieval_trace.is_none());
-        assert!(resp.context_uris.is_empty());
         assert_eq!(resp.token_usage.total_tokens, 0);
-        assert!(resp.skill_calls.is_empty());
         assert_eq!(resp.processing_time_ms, 0);
         assert!(!resp.needs_clarification);
         assert!(resp.clarification_questions.is_empty());
@@ -657,7 +568,6 @@ mod tests {
         }];
         let resp = AgentResponse::clarification(questions.clone(), "追问内容".to_string());
         assert_eq!(resp.content, "追问内容");
-        assert!(resp.is_complete);
         assert!(resp.needs_clarification);
         assert_eq!(resp.clarification_questions.len(), 1);
         assert_eq!(resp.clarification_questions[0].question, "你是？");
@@ -668,7 +578,6 @@ mod tests {
     fn agent_response_error_creation() {
         let resp = AgentResponse::error("出错了".to_string());
         assert_eq!(resp.content, "出错了");
-        assert!(resp.is_complete);
         assert!(!resp.needs_clarification);
         assert!(resp.clarification_questions.is_empty());
     }
@@ -679,7 +588,6 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: AgentResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.content, "测试");
-        assert!(deserialized.is_complete);
     }
 
     // ── SkillCallInfo ───────────────────────────────────────────

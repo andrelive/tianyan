@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::agent::tool_params::AskUserParams;
 use crate::agent::tool_registry::ToolRegistry;
-use crate::agent::types::{ClarificationQuestionPayload, StreamEventSender};
+use crate::agent::types::{ClarificationQuestionPayload, StreamEventSender, ToolCallEvent};
 use crate::common::error::TianyanError;
 use crate::common::types::{FunctionCall, Message, MessageRole, StructuredMessage, TokenUsage};
 use crate::common::types::{ToolCall, ToolCallType};
@@ -227,6 +227,55 @@ impl AgentLoop {
         }
     }
 
+    /// 构造本轮 LLM 请求（`run` / `run_stream` 共用，消除两条路径的重复）。
+    ///
+    /// 统一处理：工具短路选择 → T6 动态 max_tokens → 思考强度 → 流式开关。
+    /// 动态 max_tokens：优先上次请求实测输入（usage.prompt_tokens），
+    /// 无实测时退化为 TokenEstimator 估算；预算不足 1024 时提前报错
+    /// （不发送请求），交由压缩链路在后续轮次恢复。
+    async fn prepare_request(
+        &self,
+        model: &str,
+        msgs: &[Message],
+        stream: bool,
+        thinking_effort: Option<String>,
+    ) -> Result<ChatCompletionRequest, TianyanError> {
+        let tools = self.tools_for_turn(msgs).await;
+
+        let max_tokens = self.chat_spec.and_then(|spec| {
+            let measured = (self.last_input_usage.load(Ordering::Relaxed) > 0)
+                .then(|| self.last_input_usage.load(Ordering::Relaxed));
+            let input_est = measured.unwrap_or_else(|| {
+                crate::common::token_estimator::TokenEstimator::new().estimate_messages(msgs)
+            });
+            let max = crate::model::spec::dynamic_max_tokens(&spec, measured, msgs);
+            tracing::debug!(
+                model = %model,
+                max_tokens = ?max,
+                input_est,
+                "agent_loop: 动态 max_tokens"
+            );
+            max
+        });
+
+        let mut request = ChatCompletionRequest::new(model, msgs.to_vec()).with_tools(tools);
+        if stream {
+            request = request.with_stream(true);
+        }
+        if let Some(t) = thinking_effort {
+            request = request.with_thinking_effort(t);
+        }
+        if let Some(n) = max_tokens {
+            request = request.with_max_tokens(n);
+        } else if self.chat_spec.is_some() {
+            return Err(TianyanError::Custom(
+                "agent_loop: 上下文预算不足（不足 1024 tokens），将由压缩链路在后续轮次恢复"
+                    .to_string(),
+            ));
+        }
+        Ok(request)
+    }
+
     /// 运行迭代循环直到回答或追问（非流式）。
     ///
     /// `cancel` 为 `Some` 时，每轮开始前检查取消标志；被取消返回
@@ -253,44 +302,9 @@ impl AgentLoop {
                 // FnMut 闭包按值捕获 thinking_effort，每次调用 clone 供本轮使用
                 let thinking_effort = thinking_effort.clone();
                 Box::pin(async move {
-                    let tools = this.tools_for_turn(&msgs).await;
-
-                    // T6 动态 max_tokens：优先上次请求实测输入（usage.prompt_tokens），
-                    // 无实测时退化为 TokenEstimator 估算；预算不足 1024 时提前报错
-                    // （不发送请求），交由压缩链路在后续轮次恢复。
-                    let max_tokens = this.chat_spec.and_then(|spec| {
-                        let measured = (this.last_input_usage.load(Ordering::Relaxed) > 0)
-                            .then(|| this.last_input_usage.load(Ordering::Relaxed));
-                        let input_est = measured.unwrap_or_else(|| {
-                            crate::common::token_estimator::TokenEstimator::new()
-                                .estimate_messages(&msgs)
-                        });
-                        let max = crate::model::spec::dynamic_max_tokens(&spec, measured, &msgs);
-                        tracing::debug!(
-                            model = %model,
-                            max_tokens = ?max,
-                            input_est,
-                            "agent_loop: 动态 max_tokens"
-                        );
-                        max
-                    });
-
-                    let request = ChatCompletionRequest::new(model, msgs).with_tools(tools);
-                    let request = if let Some(t) = thinking_effort {
-                        request.with_thinking_effort(t)
-                    } else {
-                        request
-                    };
-                    let request = if let Some(n) = max_tokens {
-                        request.with_max_tokens(n)
-                    } else if this.chat_spec.is_some() {
-                        return Err(TianyanError::Custom(
-                            "agent_loop: 上下文预算不足（不足 1024 tokens），将由压缩链路在后续轮次恢复"
-                                .to_string(),
-                        ));
-                    } else {
-                        request
-                    };
+                    let request = this
+                        .prepare_request(model, &msgs, false, thinking_effort)
+                        .await?;
 
                     let response =
                         this.model_service
@@ -356,44 +370,9 @@ impl AgentLoop {
                         TianyanError::Custom("agent_loop: 流式路径缺少 stream_sender".to_string())
                     })?;
 
-                    let tools = this.tools_for_turn(&msgs).await;
-
-                    // T6 动态 max_tokens：与 run() 同语义（见非流式注释）。
-                    let max_tokens = this.chat_spec.and_then(|spec| {
-                        let measured = (this.last_input_usage.load(Ordering::Relaxed) > 0)
-                            .then(|| this.last_input_usage.load(Ordering::Relaxed));
-                        let input_est = measured.unwrap_or_else(|| {
-                            crate::common::token_estimator::TokenEstimator::new()
-                                .estimate_messages(&msgs)
-                        });
-                        let max = crate::model::spec::dynamic_max_tokens(&spec, measured, &msgs);
-                        tracing::debug!(
-                            model = %model,
-                            max_tokens = ?max,
-                            input_est,
-                            "agent_loop: 动态 max_tokens"
-                        );
-                        max
-                    });
-
-                    let request = ChatCompletionRequest::new(model, msgs)
-                        .with_stream(true)
-                        .with_tools(tools);
-                    let request = if let Some(t) = thinking_effort {
-                        request.with_thinking_effort(t)
-                    } else {
-                        request
-                    };
-                    let request = if let Some(n) = max_tokens {
-                        request.with_max_tokens(n)
-                    } else if this.chat_spec.is_some() {
-                        return Err(TianyanError::Custom(
-                            "agent_loop: 上下文预算不足（不足 1024 tokens），将由压缩链路在后续轮次恢复"
-                                .to_string(),
-                        ));
-                    } else {
-                        request
-                    };
+                    let request = this
+                        .prepare_request(model, &msgs, true, thinking_effort)
+                        .await?;
 
                     let mut rx = this
                         .model_service
@@ -425,10 +404,8 @@ impl AgentLoop {
                                 if let Some(ref usage) = chunk.usage {
                                     turn_usage = Some(usage.clone());
                                     // T6：记录本次实测输入，供下一轮动态 max_tokens 校准。
-                                    this.last_input_usage.store(
-                                        usage.prompt_tokens,
-                                        Ordering::Relaxed,
-                                    );
+                                    this.last_input_usage
+                                        .store(usage.prompt_tokens, Ordering::Relaxed);
                                 }
                                 for choice in &chunk.choices {
                                     // finish_reason：最终 chunk 携带；None 保持之前值（if let Some 覆盖累计）
@@ -706,6 +683,20 @@ impl AgentLoop {
         )))
     }
 
+    /// 构造工具调用展示事件（A2 展示契约；ask_user 与普通工具轮共用）。
+    fn tool_call_event(&self, tc: &ToolCall) -> ToolCallEvent {
+        ToolCallEvent {
+            id: tc.id.clone(),
+            name: tc.function.name.clone(),
+            arguments: tc.function.arguments.clone(),
+            presentation: self
+                .tool_registry
+                .presentation(&tc.function.name)
+                .as_str()
+                .to_string(),
+        }
+    }
+
     /// Process a single turn after the LLM response has been obtained.
     ///
     /// Handles: token accumulation, ask_user check, message persistence (in-memory + VFS),
@@ -745,16 +736,7 @@ impl AgentLoop {
                     .await;
                 // 工具调用展示事件（前端 tool card；与普通工具轮同构）
                 if let Some(sender) = ctx.stream_sender {
-                    let event = crate::agent::types::ToolCallEvent {
-                        id: ask_call.id.clone(),
-                        name: ask_call.function.name.clone(),
-                        arguments: ask_call.function.arguments.clone(),
-                        presentation: self
-                            .tool_registry
-                            .presentation(&ask_call.function.name)
-                            .as_str()
-                            .to_string(),
-                    };
+                    let event = self.tool_call_event(ask_call);
                     sender
                         .send_tool_call(&format!("调用: {}", ask_call.function.name), Some(event))
                         .await;
@@ -799,16 +781,7 @@ impl AgentLoop {
                 for tc in tool_calls {
                     // A2 展示契约：携带结构化工具信息（ID/名称/参数/展示意图），
                     // 前端据此渲染 tool card 并按 ID 关联执行结果；delta 保持人类可读文本。
-                    let event = crate::agent::types::ToolCallEvent {
-                        id: tc.id.clone(),
-                        name: tc.function.name.clone(),
-                        arguments: tc.function.arguments.clone(),
-                        presentation: self
-                            .tool_registry
-                            .presentation(&tc.function.name)
-                            .as_str()
-                            .to_string(),
-                    };
+                    let event = self.tool_call_event(tc);
                     sender
                         .send_tool_call(
                             &format!("\u{8c03}\u{7528}: {}", tc.function.name),
