@@ -707,38 +707,42 @@ impl Agent {
                 }
             }
             Ok(AgentLoopResult::NeedsClarification {
-                question,
+                questions,
                 tool_call_id,
-                options,
                 total_tokens,
                 ..
             }) => {
-                let question_obj = ClarificationQuestion {
-                    question,
-                    question_type: QuestionType::OpenEnded,
-                    options: options.clone(),
-                    required: true,
-                    tool_call_id,
-                };
-                state.write().await.pending_clarification = Some(vec![question_obj.clone()]);
+                // 持久化结构：label 列表（description 仅展示用，不进回答值）
+                let question_objs: Vec<ClarificationQuestion> = questions
+                    .iter()
+                    .map(|q| ClarificationQuestion {
+                        question: q.question.clone(),
+                        question_type: QuestionType::OpenEnded,
+                        options: Some(q.options.iter().map(|o| o.label.clone()).collect()),
+                        required: true,
+                        tool_call_id: tool_call_id.clone(),
+                    })
+                    .collect();
+                state.write().await.pending_clarification = Some(question_objs.clone());
                 // 持久化到会话头部：澄清回答是独立请求（load_and_build_state
                 // 重建状态），不落库则回答轮找不到待处理追问
                 let sid = state.read().await.session_id.clone();
-                self.persist_pending_clarification(&sid, &Some(vec![question_obj.clone()]))
+                self.persist_pending_clarification(&sid, &Some(question_objs.clone()))
                     .await;
-                let formatted = format_clarification_questions(std::slice::from_ref(&question_obj));
+                let formatted = format_clarification_questions(&question_objs);
                 loop_tokens = Some(total_tokens.clone());
                 match mode {
                     TurnMode::Plain => {
-                        let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
+                        let mut resp =
+                            AgentResponse::clarification(question_objs.clone(), formatted);
                         resp.token_usage = total_tokens.clone();
                         resp.processing_time_ms = start.elapsed().as_millis() as u64;
                         resp
                     }
                     TurnMode::Stream { sender } => {
-                        // 结构化选项随追问事件下发（前端渲染选项 + 自定义输入）
-                        sender.send_clarification(&formatted, options).await;
-                        let mut resp = AgentResponse::clarification(vec![question_obj], formatted);
+                        // 结构化问题列表随追问事件下发（前端 tab 分步 + 选项行 + 自定义输入）
+                        sender.send_clarification(&formatted, Some(questions)).await;
+                        let mut resp = AgentResponse::clarification(question_objs, formatted);
                         resp.token_usage = total_tokens.clone();
                         resp.processing_time_ms = start.elapsed().as_millis() as u64;
                         resp

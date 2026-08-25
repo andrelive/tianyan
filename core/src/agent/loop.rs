@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::agent::tool_params::AskUserParams;
 use crate::agent::tool_registry::ToolRegistry;
-use crate::agent::types::StreamEventSender;
+use crate::agent::types::{ClarificationQuestionPayload, StreamEventSender};
 use crate::common::error::TianyanError;
 use crate::common::types::{FunctionCall, Message, MessageRole, StructuredMessage, TokenUsage};
 use crate::common::types::{ToolCall, ToolCallType};
@@ -61,13 +61,12 @@ pub enum AgentLoopResult {
     },
     /// 需要追问。
     NeedsClarification {
-        /// 追问问题。
-        question: String,
+        /// 追问问题列表（多问题分步：每个问题一个 tab + 补充信息 tab；
+        /// 每个含选项 label + description，对齐 DSH questions 数组）。
+        questions: Vec<ClarificationQuestionPayload>,
         /// 触发追问的 ask_user 工具调用 ID（工具链语义：用户回答作为该
         /// 调用的工具结果注入上下文继续本回合；审批降级追问为 None）。
         tool_call_id: Option<String>,
-        /// 候选选项（label 列表；前端渲染选项 + 自定义输入，对齐 DSH）。
-        options: Option<Vec<String>>,
         /// Token 用量。
         total_tokens: TokenUsage,
         /// 最后一轮 LLM 调用的单轮用量（语义同 Answer）。
@@ -760,13 +759,23 @@ impl AgentLoop {
                         .send_tool_call(&format!("调用: {}", ask_call.function.name), Some(event))
                         .await;
                 }
+                // 多问题（questions 优先）或单问题（question + options）
+                let questions: Vec<ClarificationQuestionPayload> = match params.questions {
+                    Some(qs) => qs
+                        .into_iter()
+                        .map(|q| ClarificationQuestionPayload {
+                            question: q.question,
+                            options: q.options.unwrap_or_default(),
+                        })
+                        .collect(),
+                    None => vec![ClarificationQuestionPayload {
+                        question: params.question,
+                        options: params.options.unwrap_or_default(),
+                    }],
+                };
                 return Ok(Some(AgentLoopResult::NeedsClarification {
-                    question: params.question,
+                    questions,
                     tool_call_id: Some(ask_call.id.clone()),
-                    // 选项 label 列表（AskUserOption.description 仅展示用，不进回答值）
-                    options: params
-                        .options
-                        .map(|opts| opts.into_iter().map(|o| o.label).collect()),
                     total_tokens: ctx.total_tokens.clone(),
                     last_turn_usage: turn_usage.clone(),
                     turns: ctx.turn + 1,
@@ -831,14 +840,16 @@ impl AgentLoop {
             };
             if let Some(err_msg) = denied_action {
                 return Ok(Some(AgentLoopResult::NeedsClarification {
-                    question: format!(
-                        "系统安全策略要求确认后才能执行该操作。\n\n操作详情：{}\n\n请回复「允许」继续执行，或回复「拒绝」终止。",
-                        err_msg
-                    ),
+                    questions: vec![ClarificationQuestionPayload {
+                        question: format!(
+                            "系统安全策略要求确认后才能执行该操作。\n\n操作详情：{}\n\n请回复「允许」继续执行，或回复「拒绝」终止。",
+                            err_msg
+                        ),
+                        options: Vec::new(),
+                    }],
                     // 审批降级路径：非 ask_user 工具调用，无 tool_call_id——
                     // 回答走确认语义（confirm_pending_approval），不进工具链
                     tool_call_id: None,
-                    options: None,
                     total_tokens: ctx.total_tokens.clone(),
                     last_turn_usage: turn_usage.clone(),
                     turns: ctx.turn + 1,

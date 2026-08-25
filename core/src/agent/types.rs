@@ -26,6 +26,18 @@ pub struct ClarificationQuestion {
     pub tool_call_id: Option<String>,
 }
 
+/// 追问问题下发载荷（Clarification chunk 携带；与持久化结构
+/// [`ClarificationQuestion`] 分离——下发需要选项描述（label + description），
+/// 持久化结构保持 label 列表以兼容旧头部数据）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClarificationQuestionPayload {
+    /// 问题内容。
+    pub question: String,
+    /// 候选选项（label + description；空 = 纯文本输入）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<crate::agent::tool_params::AskUserOption>,
+}
+
 /// 追问问题类型。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QuestionType {
@@ -208,10 +220,10 @@ pub struct AgentStreamChunk {
     /// 时序正确，pump 侧不再猜测"最后一条消息"）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<StructuredMessage>,
-    /// 追问选项（Clarification chunk 携带；前端渲染为选项列表 + 自定义输入，
-    /// 对齐 DSH ask_user_question 的 N 选项 + 1 自定义形态）。
+    /// 追问问题列表（Clarification chunk 携带；每个问题含选项（label + description），
+    /// 前端按 tab 分步渲染——对齐 DSH ask_user_question 的多问题 + N 选项 + 1 自定义形态）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub clarification_options: Option<Vec<String>>,
+    pub clarification_questions: Option<Vec<ClarificationQuestionPayload>>,
 }
 
 /// 工具执行结果事件（Observation chunk 携带）。
@@ -289,7 +301,7 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_options: None,
+            clarification_questions: None,
         })
         .await;
     }
@@ -306,7 +318,7 @@ impl StreamEventSender {
             tool_call,
             tool_result: None,
             message: None,
-            clarification_options: None,
+            clarification_questions: None,
         })
         .await;
     }
@@ -323,7 +335,7 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_options: None,
+            clarification_questions: None,
         })
         .await;
     }
@@ -353,7 +365,7 @@ impl StreamEventSender {
                 content: Some(content.to_string()),
             }),
             message: None,
-            clarification_options: None,
+            clarification_questions: None,
         })
         .await;
     }
@@ -370,7 +382,7 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_options: None,
+            clarification_questions: None,
         })
         .await;
     }
@@ -394,7 +406,7 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_options: None,
+            clarification_questions: None,
         })
         .await;
     }
@@ -416,14 +428,19 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: Some(message),
-            clarification_options: None,
+            clarification_questions: None,
         })
         .await;
     }
 
     /// 发送追问事件（Clarification chunk）：formatted 为人类可读问题文本
-    /// （含选项编号），options 为结构化选项列表（前端渲染选项 + 自定义输入）。
-    pub async fn send_clarification(&self, formatted: &str, options: Option<Vec<String>>) {
+    /// （多问题编号列表），questions 为结构化问题列表（每个含选项 label +
+    /// description——前端按 tab 分步渲染选项行 + 自定义输入）。
+    pub async fn send_clarification(
+        &self,
+        formatted: &str,
+        questions: Option<Vec<ClarificationQuestionPayload>>,
+    ) {
         self.try_send(AgentStreamChunk {
             delta: formatted.to_string(),
             is_complete: true,
@@ -434,7 +451,7 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_options: options,
+            clarification_questions: questions,
         })
         .await;
     }
@@ -451,7 +468,7 @@ impl StreamEventSender {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_options: None,
+            clarification_questions: None,
         })
         .await;
     }
@@ -533,7 +550,7 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_options: None,
+            clarification_questions: None,
         };
         assert_eq!(chunk.delta, "你好");
         assert!(!chunk.is_complete);
@@ -560,7 +577,7 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_options: None,
+            clarification_questions: None,
         };
         assert_eq!(chunk.delta, "调用技能");
         assert!(chunk.is_complete);
@@ -581,7 +598,7 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_options: None,
+            clarification_questions: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
@@ -603,7 +620,7 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
-            clarification_options: None,
+            clarification_questions: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         // skill_calls 为 None 时不应出现在 JSON 中

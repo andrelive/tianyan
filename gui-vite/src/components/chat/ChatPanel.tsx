@@ -471,8 +471,7 @@ export default function ChatPanel() {
           输入框区域被问题表单替代，回答提交后恢复 */}
       {pendingClarification && streamStatus !== 'streaming' ? (
         <ClarificationBubble
-          question={pendingClarification.question}
-          options={pendingClarification.options}
+          questions={pendingClarification.questions}
           submitting={clarifyStream.isStreaming}
           onSubmit={handleClarify}
         />

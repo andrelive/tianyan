@@ -188,15 +188,28 @@ pub struct AskUserOption {
     pub description: Option<String>,
 }
 
+/// 单个追问问题（多问题分步：每个问题一个 tab，对齐 DSH questions 数组）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AskUserQuestion {
+    /// 问题内容。
+    pub question: String,
+    /// 候选选项（可选；提供时前端渲染为选项列表 + 自定义输入）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<AskUserOption>>,
+}
+
 /// 追问用户参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AskUserParams {
-    /// 问题内容。
+    /// 问题内容（单问题快捷形式；`questions` 提供时忽略）。
     pub question: String,
-    /// 候选选项（可选；提供时前端渲染为选项列表 + 自定义输入，
-    /// 缺省时退化为纯文本输入）。
+    /// 候选选项（单问题快捷形式；`questions` 提供时忽略）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<AskUserOption>>,
+    /// 多问题列表（可选；提供时按每个问题一个 tab 分步追问，
+    /// 并附带一个"补充信息" tab 供用户补充其他内容）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub questions: Option<Vec<AskUserQuestion>>,
 }
 
 /// 子代理提交结果参数（委托循环显式完成信号）。
@@ -332,6 +345,7 @@ mod tests {
         let params = AskUserParams {
             question: "What is your name?".to_string(),
             options: None,
+            questions: None,
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(json.contains("What is your name?"));

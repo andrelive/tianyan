@@ -206,10 +206,9 @@ async fn test_run_ask_user_returns_clarification() {
         .unwrap();
 
     match result {
-        AgentLoopResult::NeedsClarification {
-            question, turns, ..
-        } => {
-            assert_eq!(question, "你希望我怎么处理？");
+        AgentLoopResult::NeedsClarification { questions, turns, .. } => {
+            assert_eq!(questions.len(), 1);
+            assert_eq!(questions[0].question, "你希望我怎么处理？");
             assert_eq!(turns, 1);
         }
         other => panic!("期望 NeedsClarification，得到 {:?}", other),
@@ -269,10 +268,12 @@ async fn test_run_approval_denied_returns_clarification() {
         .unwrap();
 
     match result {
-        AgentLoopResult::NeedsClarification { question, .. } => {
+        AgentLoopResult::NeedsClarification { questions, .. } => {
+            assert_eq!(questions.len(), 1);
             assert!(
-                question.contains("安全策略要求确认"),
-                "追问应包含审批确认提示，实际: {question}"
+                questions[0].question.contains("安全策略要求确认"),
+                "追问应包含审批确认提示，实际: {}",
+                questions[0].question
             );
         }
         other => panic!("期望审批降级为 NeedsClarification，得到 {:?}", other),

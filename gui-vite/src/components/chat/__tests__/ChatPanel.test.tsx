@@ -285,7 +285,7 @@ describe('ChatPanel', () => {
   it('shows the clarification bubble when a clarification is pending', () => {
     useAppStore.setState({
       currentSessionId: 'session-1',
-      pendingClarification: { question: '请确认是否删除该文件？', options: [] },
+      pendingClarification: { questions: [{ question: '请确认是否删除该文件？', options: [] }] },
     });
 
     renderChatPanel();
@@ -301,7 +301,7 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     useAppStore.setState({
       currentSessionId: 'session-1',
-      pendingClarification: { question: '请确认是否删除该文件？', options: [] },
+      pendingClarification: { questions: [{ question: '请确认是否删除该文件？', options: [] }] },
     });
 
     renderChatPanel();

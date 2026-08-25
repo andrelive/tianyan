@@ -113,12 +113,14 @@ export function createChatStreamReducer(options: ChatStreamReducerOptions = {}):
       }
 
       // Clarification：不追加 delta，置为待回答追问（composer takeover：
-      // 输入框被问题表单接管，选项 + 自定义输入）
+      // 输入框被问题表单接管，多问题 tab + 选项行 + 自定义输入）
       if (event.chunk_type === 'clarification') {
         st.removeEmptyAssistantMessage(sid);
         st.setPendingClarification({
-          question: event.delta,
-          options: event.clarification_options ?? [],
+          questions: (event.clarification_questions ?? []).map((q) => ({
+            question: q.question,
+            options: q.options,
+          })),
         });
         return;
       }
