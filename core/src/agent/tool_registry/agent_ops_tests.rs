@@ -1022,6 +1022,38 @@ async fn test_task_cancel_via_tool() {
 }
 
 #[tokio::test]
+async fn test_task_status_list_mode_without_task_id() {
+    // 回归保护：task_status 支持列表模式（task_id 缺省）——schema 与行为一致
+    // （TaskStatusParams.task_id 为 Option，缺省列出全部任务 + kind 过滤）。
+    use crate::agent::background::TaskKind;
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    let id = registry
+        .background_tasks
+        .register(TaskKind::Delegate, "task-a".to_string(), "s1".to_string())
+        .await;
+    registry.background_tasks.mark_running(&id).await;
+
+    // 无 task_id：列表模式（含全部任务）
+    let result = registry.execute_task_status("{}").await.unwrap();
+    assert_eq!(
+        result["total"].as_u64(),
+        Some(1),
+        "列表应包含已注册任务: {result}"
+    );
+    // kind 过滤：delegate 命中，command 为空
+    let result = registry
+        .execute_task_status(r#"{"kind":"delegate"}"#)
+        .await
+        .unwrap();
+    assert_eq!(result["total"].as_u64(), Some(1));
+    let result = registry
+        .execute_task_status(r#"{"kind":"command"}"#)
+        .await
+        .unwrap();
+    assert_eq!(result["total"].as_u64(), Some(0));
+}
+#[tokio::test]
 async fn test_task_status_missing_task() {
     let registry = ToolRegistry::new(default_strict_policy());
     let err = registry

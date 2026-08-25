@@ -281,8 +281,12 @@ pub struct DelegateToAgentParams {
 /// 后台任务状态查询参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskStatusParams {
-    /// 后台任务 ID（delegate_to_agent(background) 返回的 task_id）。
-    pub task_id: String,
+    /// 后台任务 ID（delegate_to_agent(background) 返回的 task_id）；缺省列出全部任务。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// 列表过滤（delegate | command；缺省全部）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// 后台任务取消参数。

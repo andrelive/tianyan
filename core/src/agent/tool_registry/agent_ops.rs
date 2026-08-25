@@ -9,7 +9,8 @@ use futures::future::BoxFuture;
 
 use crate::agent::role_store::RoleStore;
 use crate::agent::tool_params::{
-    AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, SubmitResultParams,
+    AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams,
+    SubmitResultParams, SuggestRoleParams, TaskCancelParams, TaskStatusParams,
 };
 use crate::common::error::TianyanError;
 use crate::common::types::Message;
@@ -763,15 +764,9 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        #[derive(serde::Deserialize)]
-        struct Params {
-            #[serde(default)]
-            task_id: Option<String>,
-            #[serde(default)]
-            kind: Option<String>,
-        }
-        let params: Params = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        // 与 schema 共用同一参数类型（task_id 可选 = 列表模式 + kind 过滤），
+        // 避免本地重复定义导致 schema 与行为漂移
+        let params: TaskStatusParams = parse_params(arguments)?;
 
         // 单任务查询：按 ID 先查委托表再查命令表（前缀不互斥，双表探测）。
         if let Some(task_id) = params.task_id.as_deref() {
@@ -811,12 +806,7 @@ impl ToolRegistry {
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        #[derive(serde::Deserialize)]
-        struct Params {
-            task_id: String,
-        }
-        let params: Params = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let params: TaskCancelParams = parse_params(arguments)?;
 
         self.background_tasks.cancel(&params.task_id).await?;
 
@@ -835,13 +825,7 @@ impl ToolRegistry {
         let router = self.role_router.as_ref().ok_or_else(|| {
             TianyanError::Custom(format!("tool: 执行失败：{}", "RoleRouter not configured"))
         })?;
-        #[derive(serde::Deserialize)]
-        struct Params {
-            task: String,
-            top_k: Option<usize>,
-        }
-        let params: Params = serde_json::from_str(arguments)
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
+        let params: SuggestRoleParams = parse_params(arguments)?;
 
         let matches = router
             .suggest(&params.task, params.top_k.unwrap_or(3))
