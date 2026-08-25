@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::{oneshot, RwLock};
 
@@ -103,7 +103,6 @@ pub struct ApprovalWorkflow {
 struct PendingApproval {
     request: ApprovalRequest,
     response_tx: oneshot::Sender<ApprovalResponse>,
-    _created_at: Instant,
 }
 
 impl ApprovalWorkflow {
@@ -401,7 +400,6 @@ impl ApprovalWorkflow {
                 PendingApproval {
                     request: request.clone(),
                     response_tx: tx,
-                    _created_at: Instant::now(),
                 },
             );
         }
