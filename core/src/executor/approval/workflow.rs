@@ -105,6 +105,66 @@ struct PendingApproval {
     response_tx: oneshot::Sender<ApprovalResponse>,
 }
 
+/// 路径段集合（按 `/` 与 `\\` 切分；小写归一——Windows 文件系统大小写不敏感）。
+fn path_segments(path: &str) -> Vec<String> {
+    path.to_lowercase()
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// 写文件是否命中关键路径（High 风险）：目录段精确匹配系统目录；
+/// 文件名段命中环境/配置文件形态（`.env*`、`config.y*ml*`）。
+///
+/// 与此前的 `contains` 子串匹配的区别：按路径段匹配避免误判——
+/// `myconfig.yaml.bak` 这类目录名/文件名前缀仍命中（保守方向），
+/// 但 `/etc2/`、`C:\\WindowsBackup` 等子串巧合不再命中；
+/// 大小写统一归一（`c:\\windows\\...` 同样命中）。
+fn is_critical_write_path(path: &str) -> bool {
+    let segments = path_segments(path);
+    // 系统目录段：/etc/、/usr/、/bin/、/sbin/、C:\\Windows\\、C:\\Program Files\\
+    if segments.iter().any(|s| {
+        matches!(
+            s.as_str(),
+            "etc" | "usr" | "bin" | "sbin" | "windows" | "program files"
+        )
+    }) {
+        return true;
+    }
+    // 文件名段：.env（含 .env.local 等变体）、config.y*ml*（yaml/yml 及 example 变体）
+    if let Some(file) = segments.last() {
+        if file.starts_with(".env") || file.starts_with("config.y") {
+            return true;
+        }
+    }
+    false
+}
+
+/// 写文件是否命中测试/临时目录语义（Low Risk）：路径段按非字母数字
+/// 分词后含 test/tests/temp/tmp 词（如 `test.txt`、`tests/foo.rs`、
+/// `tmp/x`、`unit_test.rs`）。
+///
+/// 与此前的 `contains("test")` 子串匹配的区别：`attestation.txt`、
+/// `latest_report.md`（"latest" 含 "test"）、`attempt.log`（含 "tmp"）等
+/// 非测试文件不再被误降级为 Low（绕过审批门控的安全漏洞方向）。
+fn is_test_or_temp_path(path: &str) -> bool {
+    path_segments(path).iter().any(|seg| {
+        seg.split(|c: char| !c.is_alphanumeric())
+            .any(|w| matches!(w, "test" | "tests" | "temp" | "tmp"))
+    })
+}
+
+/// 技能名是否命中危险关键词（shell/exec/delete/remove）：按非字母数字
+/// 分词后精确匹配——`executive_summary` 不再误命中 "exec"，
+/// `delete_all_files` 仍命中 "delete"。
+fn is_dangerous_skill(skill_id: &str) -> bool {
+    let lower = skill_id.to_lowercase();
+    ["shell", "exec", "delete", "remove"]
+        .iter()
+        .any(|k| lower.split(|c: char| !c.is_alphanumeric()).any(|w| w == *k))
+}
+
 impl ApprovalWorkflow {
     /// 创建新的审批工作流。
     pub fn new(config: ApprovalWorkflowConfig) -> Self {
@@ -165,19 +225,9 @@ impl ApprovalWorkflow {
             Action::ReadFile { .. } => RiskLevel::Safe,
             Action::SearchCode { .. } => RiskLevel::Safe,
             Action::WriteFile { path, .. } => {
-                let critical_paths = [
-                    "/etc/",
-                    "/usr/",
-                    "/bin/",
-                    "/sbin/",
-                    "C:\\Windows",
-                    "C:\\Program Files",
-                    ".env",
-                    "config.yaml",
-                ];
-                if critical_paths.iter().any(|p| path.contains(p)) {
+                if is_critical_write_path(path) {
                     RiskLevel::High
-                } else if path.contains("test") || path.contains("temp") || path.contains("tmp") {
+                } else if is_test_or_temp_path(path) {
                     RiskLevel::Low
                 } else {
                     RiskLevel::Medium
@@ -198,11 +248,7 @@ impl ApprovalWorkflow {
                 }
             }
             Action::CallSkill { skill_id, .. } => {
-                let dangerous_skills = ["shell", "exec", "delete", "remove"];
-                if dangerous_skills
-                    .iter()
-                    .any(|s| skill_id.to_lowercase().contains(s))
-                {
+                if is_dangerous_skill(skill_id) {
                     RiskLevel::High
                 } else {
                     RiskLevel::Low

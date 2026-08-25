@@ -49,6 +49,97 @@ fn test_risk_level_assessment() {
 }
 
 #[test]
+fn test_risk_assessment_segment_matching() {
+    // 回归保护：风险定级按路径段/词边界匹配——
+    // 1) 子串巧合不得误降级（attestation.txt 含 test、latest 含 test、
+    //    attempt.log 含 tmp——都是非测试文件，必须保持 Medium）；
+    // 2) 关键路径大小写归一（Windows 路径 c:\\windows 同样 High）；
+    // 3) 技能名词边界（executive_summary 不含危险词）。
+    let workflow = ApprovalWorkflow::new(ApprovalWorkflowConfig::default());
+
+    // 误降级方向（安全）：子串巧合不得把普通文件当测试文件
+    for p in [
+        "attestation.txt",
+        "latest_report.md",
+        "attempt.log",
+        "contemplate.md",
+        "src/latest.rs",
+    ] {
+        assert_eq!(
+            workflow.assess_risk(&Action::WriteFile {
+                path: p.to_string(),
+                content: String::new(),
+            }),
+            RiskLevel::Medium,
+            "非测试文件不得因子串巧合被降级: {p}",
+        );
+    }
+
+    // 真正的测试/临时文件仍为 Low
+    for p in [
+        "test.txt",
+        "tests/foo.rs",
+        "tmp/x.log",
+        "src/temp.rs",
+        "unit_test.rs",
+    ] {
+        assert_eq!(
+            workflow.assess_risk(&Action::WriteFile {
+                path: p.to_string(),
+                content: String::new(),
+            }),
+            RiskLevel::Low,
+            "测试/临时文件应为 Low: {p}",
+        );
+    }
+
+    // 关键路径：大小写归一 + 变体命中
+    for p in [
+        "c:\\windows\\system32\\x.dll",
+        "C:\\PROGRAM FILES\\app\\x.dll",
+        "project/.env.local",
+        "project/config.yaml.example",
+    ] {
+        assert_eq!(
+            workflow.assess_risk(&Action::WriteFile {
+                path: p.to_string(),
+                content: String::new(),
+            }),
+            RiskLevel::High,
+            "关键路径应为 High: {p}",
+        );
+    }
+
+    // etc2 不是关键目录段（子串巧合不再命中）——中等风险
+    assert_eq!(
+        workflow.assess_risk(&Action::WriteFile {
+            path: "/etc2/not-system".to_string(),
+            content: String::new(),
+        }),
+        RiskLevel::Medium,
+    );
+
+    // 技能名词边界
+    let exec_summary = Action::CallSkill {
+        skill_id: "executive_summary".to_string(),
+        parameters: serde_json::Map::new(),
+    };
+    assert_eq!(
+        workflow.assess_risk(&exec_summary),
+        RiskLevel::Low,
+        "executive_summary 不应命中危险关键词 exec",
+    );
+    let del = Action::CallSkill {
+        skill_id: "delete_all_files".to_string(),
+        parameters: serde_json::Map::new(),
+    };
+    assert_eq!(
+        workflow.assess_risk(&del),
+        RiskLevel::High,
+        "delete_all_files 应命中危险关键词",
+    );
+}
+#[test]
 fn test_auto_approval_rules() {
     let config = ApprovalWorkflowConfig::default();
     let workflow = ApprovalWorkflow::new(config);
