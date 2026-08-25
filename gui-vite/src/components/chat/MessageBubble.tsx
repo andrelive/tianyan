@@ -177,6 +177,17 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
 
   const isUser = message.role === 'user';
 
+  // 唤醒轮空输出（allow_empty_answer：模型认为无需回复）会持久化一条
+  // 空 content 的 assistant 消息——渲染层跳过（不动数组索引，回退定位
+  // 按消息 ID 的语义不受影响），避免历史中出现只有时间戳的空白气泡。
+  if (!isUser && !isStreaming) {
+    const hasContent = message.content.length > 0;
+    const hasThinking = !!message.thinking && message.thinking.length > 0;
+    const hasTools = !!message.tool_calls && message.tool_calls.length > 0;
+    const hasSegments = !!message.segments && message.segments.length > 0;
+    if (!hasContent && !hasThinking && !hasTools && !hasSegments) return null;
+  }
+
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(message.content);

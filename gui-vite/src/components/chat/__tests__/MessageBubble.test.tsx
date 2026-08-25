@@ -82,4 +82,27 @@ describe('MessageBubble history rendering', () => {
     expect(screen.getByText('工具前的正文')).toBeInTheDocument();
     expect(screen.getByText('工具后的正文')).toBeInTheDocument();
   });
+
+  it('skips empty assistant messages from wake-turn empty output', () => {
+    // 唤醒轮空输出（allow_empty_answer）持久化的空 assistant 消息：
+    // 渲染层跳过，避免历史中出现只有时间戳的空白气泡。
+    const emptyMsg: ChatMessage = {
+      role: 'assistant',
+      content: '',
+      timestamp: new Date().toISOString(),
+    };
+    const { container } = render(
+      <MessageBubble message={emptyMsg} index={0} isStreaming={false} onRollback={() => {}} />,
+    );
+    expect(container.firstChild).toBeNull();
+  });
+
+  it('still renders empty assistant message while streaming (placeholder)', () => {
+    // 流式占位（content 为空但正在输出）必须保留，否则首字到达前无气泡
+    const streamingMsg: ChatMessage = { role: 'assistant', content: '' };
+    const { container } = render(
+      <MessageBubble message={streamingMsg} index={0} isStreaming={true} onRollback={() => {}} />,
+    );
+    expect(container.firstChild).not.toBeNull();
+  });
 });

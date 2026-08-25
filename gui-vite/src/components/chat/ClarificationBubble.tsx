@@ -32,7 +32,12 @@ export default function ClarificationBubble({ questions, submitting, onSubmit }:
   const isExtra = tab === EXTRA_TAB;
   const question = questions[tab];
 
-  const answerOf = (i: number) => selected[i] ?? customs[i].trim();
+  // 稳定化：answerOf 被 handleSubmit 的 useCallback 依赖，若每次渲染重建则
+  // handleSubmit/handleKeyDown 链随之每次重建（react-hooks/exhaustive-deps）
+  const answerOf = useCallback(
+    (i: number) => selected[i] ?? customs[i].trim(),
+    [selected, customs],
+  );
   const allAnswered = questions.every((_, i) => answerOf(i).length > 0);
   const canSubmit = allAnswered && !submitting;
 
