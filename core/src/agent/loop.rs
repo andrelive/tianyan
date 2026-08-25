@@ -23,10 +23,11 @@ use crate::session::SessionManager;
 pub struct AgentLoopConfig {
     /// 最大轮数。
     pub max_turns: usize,
-    /// 允许模型输出空文本作为合法结束（ADR-013 唤醒轮语义）。
+    /// 跳过空响应重试（ADR-013 唤醒轮语义）。
     ///
-    /// 唤醒轮（后台任务全部完成/失败触发）中模型可能认为无需回复——
-    /// 空输出是合法结束而非错误；普通用户轮保持 false（空输出视为错误）。
+    /// 空输出（无正文无工具调用）本身是正常结束（对齐 DSH：无工具调用即
+    /// completed）；普通轮在结束前重试一次（思考模型"想完没说话"的恢复
+    /// 机会），唤醒轮（后台任务完成触发，模型可能有意无需回复）不重试。
     pub allow_empty_answer: bool,
     /// 工具短路选择（G1）：LLM 可见工具数超过阈值时按相关性过滤 schema。
     pub shortlist_tools: bool,
@@ -590,9 +591,10 @@ impl AgentLoop {
                 };
 
             // 空响应重试（用户轮）：LLM 偶发返回既无正文也无工具调用的空响应
-            // （思考模型"想完没说话"），直接报错会让任务在工具循环中途静默终止。
+            // （思考模型"想完没说话"），直接结束会让任务在工具循环中途静默终止。
             // 消息历史此时未变（空响应尚未入史），重试一次通常能恢复；
-            // 重试仍空则按原有空响应错误路径处理。唤醒轮（allow_empty_answer）不重试。
+            // 重试仍空则按正常结束处理（空输出 = completed，对齐 DSH）。
+            // 唤醒轮（allow_empty_answer）不重试——模型可能有意无需回复。
             if !self.config.allow_empty_answer {
                 let empty = matches!(
                     &step_result,
@@ -865,24 +867,18 @@ impl AgentLoop {
 
             Ok(None)
         } else if assistant_msg.content.is_empty() {
-            if self.config.allow_empty_answer {
-                // ADR-013 唤醒轮：模型空输出 = 合法结束（无需回复）。
-                // 空消息已在上方 persist_message 持久化（无害，下一轮组装跳过空文本）。
-                Ok(Some(AgentLoopResult::Answer {
-                    content: String::new(),
-                    total_tokens: ctx.total_tokens.clone(),
-                    last_turn_usage: turn_usage.clone(),
-                    turns: ctx.turn + 1,
-                    persisted_message: Box::new(persisted),
-                }))
-            } else {
-                // LLM returned neither content nor tool calls — treat as error
-                // rather than silently continuing the loop (which would consume
-                // up to max_turns with no progress).
-                Err(TianyanError::Custom(
-                    "agent_loop: LLM 返回空响应".to_string(),
-                ))
-            }
+            // 空输出 = 正常结束（对齐 DSH：无工具调用即 completed，内容空不空
+            // 不改变结束判定）。空响应重试（run_turns）已给模型一次恢复机会；
+            // 重试仍空说明模型确实无需回复——结束而非报错。
+            // 空消息已在上方 persist_message 持久化（组装层跳过空文本，
+            // 不进 LLM 上下文；前端渲染层跳过，不产生可见气泡）。
+            Ok(Some(AgentLoopResult::Answer {
+                content: String::new(),
+                total_tokens: ctx.total_tokens.clone(),
+                last_turn_usage: turn_usage.clone(),
+                turns: ctx.turn + 1,
+                persisted_message: Box::new(persisted),
+            }))
         } else {
             // Already persisted above — just return.
             Ok(Some(AgentLoopResult::Answer {
