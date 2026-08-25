@@ -18,12 +18,11 @@ impl ContextAssembler {
     /// 输出顺序（缓存最优）：
     /// - messages[0]: injectable.soul（system）
     /// - messages[1]: rules + memories（system）
-    /// - messages[2..N-1]: 历史对话
-    /// - messages[N-1]: 当前用户输入（如果 current_input 非空）
+    /// - messages[2..N]: 历史对话（含当前用户输入——调用方已把用户消息
+    ///   写入 structured_messages，组装器不再单独接收 current_input）
     pub fn assemble(
         structured_messages: &[StructuredMessage],
         injectable: &InjectableContext,
-        current_input: &str,
     ) -> Vec<Message> {
         let mut messages = Vec::new();
 
@@ -50,14 +49,9 @@ impl ContextAssembler {
             messages.push(Message::system(context_parts.concat()));
         }
 
-        // 历史对话
+        // 历史对话（含当前用户输入）
         for sm in structured_messages {
             messages.extend(Self::structured_to_messages(sm));
-        }
-
-        // 当前用户输入
-        if !current_input.is_empty() {
-            messages.push(Message::user(current_input));
         }
 
         messages
@@ -225,13 +219,14 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_empty_session() {
+    fn test_assemble_soul_and_user_message() {
         let injectable = InjectableContext {
             soul: "You are a helpful assistant.".to_string(),
             ..Default::default()
         };
-        let messages = ContextAssembler::assemble(&[], &injectable, "Hello");
-        assert_eq!(messages.len(), 2); // soul + current input
+        let sm = make_text_msg("msg_1", MessageRole::User, "Hello", "ses_1");
+        let messages = ContextAssembler::assemble(&[sm], &injectable);
+        assert_eq!(messages.len(), 2); // soul + user message
         assert_eq!(messages[0].role, MessageRole::System);
         assert_eq!(messages[0].content, "You are a helpful assistant.");
         assert_eq!(messages[1].role, MessageRole::User);
@@ -241,9 +236,10 @@ mod tests {
     #[test]
     fn test_assemble_with_history() {
         let injectable = InjectableContext::default();
-        let sm = make_text_msg("msg_1", MessageRole::User, "Hi", "ses_1");
-        let messages = ContextAssembler::assemble(&[sm], &injectable, "Hello again");
-        // 1 user history + 1 current input (no injectable, so no system messages)
+        let sm1 = make_text_msg("msg_1", MessageRole::User, "Hi", "ses_1");
+        let sm2 = make_text_msg("msg_2", MessageRole::User, "Hello again", "ses_1");
+        let messages = ContextAssembler::assemble(&[sm1, sm2], &injectable);
+        // 2 user messages in history (no injectable, so no system messages)
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, MessageRole::User);
         assert_eq!(messages[0].content, "Hi");
@@ -347,14 +343,17 @@ mod tests {
             memories: vec!["User prefers Result style.".to_string()],
             ..Default::default()
         };
-        let messages = ContextAssembler::assemble(&[], &injectable, "Test");
-        // soul + (rules+memories merged) + current input
+        let sm = make_text_msg("msg_1", MessageRole::User, "Test", "ses_1");
+        let messages = ContextAssembler::assemble(&[sm], &injectable);
+        // soul + (rules+memories merged) + user message
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, MessageRole::System);
         assert!(messages[0].content.contains("helpful"));
         assert_eq!(messages[1].role, MessageRole::System);
         assert!(messages[1].content.contains("Always read"));
         assert!(messages[1].content.contains("Result style"));
+        assert_eq!(messages[2].role, MessageRole::User);
+        assert_eq!(messages[2].content, "Test");
     }
 
     #[test]
@@ -387,22 +386,23 @@ mod tests {
     #[test]
     fn test_empty_injectable_skips_system_messages() {
         let injectable = InjectableContext::default();
-        let sm = make_text_msg("msg_1", MessageRole::User, "Hi", "ses_1");
-        let messages = ContextAssembler::assemble(&[sm], &injectable, "Hello");
-        // Only user history + current input, no system messages
+        let sm1 = make_text_msg("msg_1", MessageRole::User, "Hi", "ses_1");
+        let sm2 = make_text_msg("msg_2", MessageRole::User, "Hello", "ses_1");
+        let messages = ContextAssembler::assemble(&[sm1, sm2], &injectable);
+        // Only user messages, no system messages
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, MessageRole::User);
         assert_eq!(messages[1].role, MessageRole::User);
     }
 
     #[test]
-    fn test_empty_current_input_no_extra_message() {
+    fn test_assemble_soul_only() {
         let injectable = InjectableContext {
             soul: "You are helpful.".to_string(),
             ..Default::default()
         };
-        let messages = ContextAssembler::assemble(&[], &injectable, "");
-        // Only soul, no current input appended
+        let messages = ContextAssembler::assemble(&[], &injectable);
+        // Only soul, no messages to append
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, MessageRole::System);
     }

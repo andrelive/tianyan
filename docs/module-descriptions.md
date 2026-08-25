@@ -248,7 +248,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 `ContextAssembler::assemble()` 拼装顺序严格固定，不可变更：
 
 ```
-soul → rules+memories → history(from compression_marker) → current input
+soul → rules+memories → history(from compression_marker，含当前用户输入)
 ```
 
 - **固定前缀（soul + rules + memories）**：会话期间不变化，利用 LLM Provider 前缀匹配缓存，只计算一次

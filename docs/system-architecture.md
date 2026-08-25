@@ -179,7 +179,7 @@ pub struct StructuredMessage {
 `ContextAssembler::assemble()` 严格遵循**固定前缀 + 可变后缀**顺序：
 
 ```
-soul → rules+memories → history(from compression_marker) → current input
+soul → rules+memories → history(from compression_marker，含当前用户输入)
 ```
 
 - **固定前缀（soul + rules + memories）**：会话期间不变，LLM Provider 可利用前缀缓存只计算一次。
@@ -201,7 +201,7 @@ Agent :: process_message(session_id, msg)
   │     └─ SessionStore::load()：SQLite 按 seq 查询 → compression_marker 截断
   │
   ├─ ContextPipeline::prepare_context()
-  │     ├─ ContextAssembler::assemble()：soul → rules+memories → history → input
+  │     ├─ ContextAssembler::assemble()：soul → rules+memories → history（含当前用户输入）
   │     ├─ DualLayerRetriever::retrieve()：L0+L1 RRF 融合检索
   │     └─ compress_if_needed()：compression_marker 后 > 6 条 → LLM 摘要压缩
   │
@@ -255,7 +255,7 @@ Axum Server → AppState.agent().process_message()
          ↓
 SessionState: structured_messages（单一真相源）
          ↓
-ContextAssembler::assemble()：soul → rules+memories → history → input
+ContextAssembler::assemble()：soul → rules+memories → history（含当前用户输入）
          ↓
 AgentLoop 迭代循环
   ├─ LLM 决策：tool_calls 或 content

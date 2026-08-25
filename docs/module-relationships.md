@@ -452,7 +452,7 @@ SSE 事件（`server/src/api/chat/types.rs`，逐行 `data:` JSON），完整字
 `context/assembler.rs` 的 `assemble()` 严格遵循固定前缀 → 可变后缀：
 
 ```
-soul → rules+memories → history(from compression_marker) → current input
+soul → rules+memories → history(from compression_marker，含当前用户输入)
 ```
 
 **模块影响**：soul 首次加载后缓存（`context/pipeline.rs` 中的 `cached_soul`）；compression_marker 由 `context/compression/` 模块管理；顺序不可变更以保证 LLM 前缀缓存命中率。

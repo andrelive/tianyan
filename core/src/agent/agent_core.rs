@@ -37,6 +37,8 @@ const MIN_MESSAGES_BEFORE_COMPRESSION: usize = 6;
 
 /// 唤醒轮重试次数（ADR-013：重试 2 次后降级为静默）。
 const WAKE_RETRY_LIMIT: usize = 3;
+/// 会话轮次锁表清理阈值（超过后清理无持有者条目，防长驻服务内存泄漏）。
+const TURN_LOCKS_PRUNE_THRESHOLD: usize = 256;
 /// 唤醒轮重试间隔。
 const WAKE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -140,9 +142,16 @@ impl Agent {
     ///
     /// 持锁期间该会话的任何其他轮次（用户消息 / 唤醒轮）排队等待；
     /// 返回 OwnedMutexGuard（持有 Arc，不依赖 self 借用）。
+    ///
+    /// 锁表按会话增长且从不回收：条目数超过阈值时清理无持有者/无等待者
+    /// 的条目（`strong_count == 1` 表示仅 map 持有——无进行中轮次也无排队
+    /// 等待者，删除后新请求重建锁，串行化语义不变），防止长驻服务内存泄漏。
     pub(crate) async fn turn_guard(&self, session_id: &str) -> OwnedMutexGuard<()> {
         let lock = {
             let mut map = self.turn_locks.lock().await;
+            if map.len() > TURN_LOCKS_PRUNE_THRESHOLD {
+                map.retain(|_, lock| Arc::strong_count(lock) > 1);
+            }
             map.entry(session_id.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
@@ -196,7 +205,6 @@ impl Agent {
                 .with_allow_empty_answer()
                 .run(
                     &mut messages.clone(),
-                    None,
                     session_id,
                     parent_id.as_deref(),
                     &self.default_model,
@@ -293,7 +301,7 @@ impl Agent {
                     // 固化注入上下文快照到会话（重启后沿用同一份前缀内容）
                     let sid = state.read().await.session_id.clone();
                     self.persist_injectable_snapshot(&sid, &ctx).await;
-                    state.read().await.injectable_context.clone()
+                    ctx
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "加载可注入上下文失败");
@@ -396,7 +404,7 @@ impl Agent {
         let injectable = self.ensure_injectable(state, query).await;
 
         let s = state.read().await;
-        let mut messages = ContextAssembler::assemble(&s.structured_messages, &injectable, "");
+        let mut messages = ContextAssembler::assemble(&s.structured_messages, &injectable);
 
         // 注入会话定位信息：早期对话被压缩后，摘要字段可能不足以恢复细节，
         // 告知 LLM 当前会话 URI，使其可用 vfs_read 检索被压缩的原始记录。
@@ -604,7 +612,6 @@ impl Agent {
                     .clone()
                     .run(
                         &mut messages.clone(),
-                        None,
                         session_id,
                         parent_id.as_deref(),
                         model,
@@ -1383,11 +1390,8 @@ mod tests {
         // 追问回答的注入（每次调用仅一次）
         state.add_user_message("允许");
 
-        let messages = ContextAssembler::assemble(
-            &state.structured_messages,
-            &InjectableContext::default(),
-            "",
-        );
+        let messages =
+            ContextAssembler::assemble(&state.structured_messages, &InjectableContext::default());
 
         let answer_count = messages
             .iter()

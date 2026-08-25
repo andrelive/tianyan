@@ -31,7 +31,7 @@ pub struct StructuredMessage {
 
 1. **持久化**：JSONL 格式写入 VFS。`AgentLoop` 每产生一条消息，实时调 `SessionManager::add_structured_message()` 落盘。工具调用消息不丢弃，全部持久化。
 
-2. **会话组装**：存储与传输分离 — `StructuredMessage`（存储层）↔ `Message`（传输层）。`ContextAssembler::assemble()` 负责转换。顺序：soul → rules+memories → history → current input。
+2. **会话组装**：存储与传输分离 — `StructuredMessage`（存储层）↔ `Message`（传输层）。`ContextAssembler::assemble()` 负责转换。顺序：soul → rules+memories → history（含当前用户输入）。
 
 3. **会话跟踪**：`compression_marker` 标记压缩产生的摘要消息。加载会话时反向扫描到最近 marker，只加载 marker 及之后的消息（旧消息保留在磁盘）。压缩触发条件：marker 后 > 6 条消息。
 

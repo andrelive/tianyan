@@ -150,15 +150,7 @@ async fn test_run_completes_tool_loop() {
 
     let mut messages = vec![Message::user("帮我做点事")];
     let result = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap();
 
@@ -193,15 +185,7 @@ async fn test_run_ask_user_returns_clarification() {
 
     let mut messages = vec![Message::user("帮我决定一下")];
     let result = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap();
 
@@ -257,15 +241,7 @@ async fn test_run_approval_denied_returns_clarification() {
 
     let mut messages = vec![Message::user("请帮我写入文件")];
     let result = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap();
 
@@ -291,15 +267,7 @@ async fn test_run_empty_response_errors() {
 
     let mut messages = vec![Message::user("你好")];
     let err = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("空响应"));
@@ -315,15 +283,7 @@ async fn test_run_max_turns_exceeded() {
 
     let mut messages = vec![Message::user("循环测试")];
     let err = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("最大轮数"));
@@ -338,15 +298,7 @@ async fn test_run_llm_error_propagates() {
 
     let mut messages = vec![Message::user("测试")];
     let err = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("LLM 调用失败"));
@@ -365,7 +317,6 @@ async fn test_run_returns_cancelled_when_flag_pre_set() {
     let result = agent_loop
         .run(
             &mut messages,
-            None,
             "session-1",
             None,
             "test-model",
@@ -966,15 +917,7 @@ async fn test_run_persists_finish_reason() {
 
     let mut messages = vec![Message::user("测试")];
     let result = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap();
 
@@ -1087,15 +1030,7 @@ async fn test_run_sets_dynamic_max_tokens_with_spec() {
 
     let mut messages = vec![Message::user("帮我做点事")];
     let result = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap();
     assert!(matches!(result, AgentLoopResult::Answer { .. }));
@@ -1136,27 +1071,11 @@ async fn test_run_calibrates_max_tokens_from_prior_usage() {
 
     let mut messages = vec![Message::user("帮我做点事")];
     let r1 = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap();
     let r2 = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap();
     assert!(matches!(r1, AgentLoopResult::Answer { .. }));
@@ -1215,15 +1134,7 @@ async fn test_run_errors_when_budget_below_min() {
 
     let mut messages = vec![Message::user("测试")];
     let err = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap_err();
     assert!(
@@ -1244,15 +1155,7 @@ async fn test_run_without_spec_skips_max_tokens() {
 
     let mut messages = vec![Message::user("测试")];
     let result = agent_loop
-        .run(
-            &mut messages,
-            None,
-            "session-1",
-            None,
-            "test-model",
-            None,
-            None,
-        )
+        .run(&mut messages, "session-1", None, "test-model", None, None)
         .await
         .unwrap();
     assert!(matches!(result, AgentLoopResult::Answer { .. }));

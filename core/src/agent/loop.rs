@@ -280,11 +280,11 @@ impl AgentLoop {
     ///
     /// `cancel` 为 `Some` 时，每轮开始前检查取消标志；被取消返回
     /// [`AgentLoopResult::Cancelled`]（而非错误），调用方可区分"用户取消"与"失败"。
+    /// 流式事件（思考/工具卡片）由 [`Self::run_stream`] 承担，本路径不携带 sender。
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
         messages: &mut Vec<Message>,
-        stream_sender: Option<StreamEventSender>,
         session_id: &str,
         initial_parent_id: Option<&str>,
         model: &str,
@@ -293,7 +293,7 @@ impl AgentLoop {
     ) -> Result<AgentLoopResult, TianyanError> {
         self.run_turns(
             messages,
-            stream_sender.as_ref(),
+            None,
             session_id,
             initial_parent_id,
             model,

@@ -8,14 +8,14 @@
 
 ## 背景
 
-每次 LLM 请求需要拼装 soul + rules + memories + history + current input。若这些内容的顺序不当，LLM Provider 的前缀匹配缓存将无法生效，导致每次请求都重新计算全部 Token，显著增加延迟和成本。
+每次 LLM 请求需要拼装 soul + rules + memories + history（含当前用户输入）。若这些内容的顺序不当，LLM Provider 的前缀匹配缓存将无法生效，导致每次请求都重新计算全部 Token，显著增加延迟和成本。
 
 ## 决策
 
 `ContextAssembler::assemble()` 严格遵循 **固定前缀 + 可变后缀** 顺序：
 
 ```
-soul → rules+memories → history(from compression_marker) → current input
+soul → rules+memories → history(from compression_marker，含当前用户输入)
 ```
 
 ### 设计理由
