@@ -74,7 +74,7 @@ describe('createChatStreamReducer', () => {
     const state = useAppStore.getState();
     expect(state.messages.filter((m) => m.role === 'assistant')).toHaveLength(0);
     expect(Object.values(state.streamStatus).every((s) => s === 'idle')).toBe(true);
-    expect(state.toast?.message).toBe('请求校验失败');
+    expect(state.toasts[0]?.message).toBe('请求校验失败');
   });
 
   it('marks truncation on finish_reason length and attaches usage', () => {

@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { fetchRetrievalTraces } from '@/lib/api-client';
 import { useResource } from '@/hooks/use-resource';
+import { usePolling } from '@/hooks/use-polling';
 import type { RetrievalTrace, RetrievalStepType } from '@/lib/types';
 import { Route, RefreshCw, Clock, Zap, FileText } from 'lucide-react';
 import { Spinner } from '@/components/ui/Spinner';
@@ -23,9 +24,13 @@ function formatDuration(ms: number): string {
 
 export default function RetrievalTracesPanel() {
   const [selected, setSelected] = useState<RetrievalTrace | null>(null);
-  const { data, loading, error, reload } = useResource(() => fetchRetrievalTraces(), [], {
-    errorFallback: '加载失败',
-  });
+  const { data, loading, error, reload, silentReload } = useResource(
+    () => fetchRetrievalTraces(),
+    [],
+    { errorFallback: '加载失败' },
+  );
+  // 自动轮询（8s）：检索轨迹在 agent 运行时持续变化，静默刷新不闪 Spinner
+  usePolling(() => void silentReload(), 8000, { immediate: false });
   // 派生数组 useMemo 化：useEffect deps 需要稳定引用（?? [] 每次渲染新建数组）
   const traces = useMemo(() => data?.traces ?? [], [data]);
 

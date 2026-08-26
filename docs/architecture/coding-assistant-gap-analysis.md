@@ -239,13 +239,13 @@
 
 ## 5. 待讨论决策点（带研究推荐）
 
-- [x] D1：**已定稿** —— 语义化编辑双原语：`apply_edit` 采用 **hashline 机制**（行号+内容哈希锚点 `N#ID`，空白不敏感哈希、防陈旧校验、edits[] 批量 bottom-up 应用、错误回喂最新锚点）+ `apply_patch`（unified diff 信封，大改/多文件）。参考 oh-my-opencode（code-yeongyu，移植自 oh-my-pi）
+- [x] D1：**已定稿（2026-08 修订）** —— 语义化编辑双原语：`apply_edit` 采用**内容匹配**（`ContentEdit{old_string,new_string,replace_all}` 唯一匹配，对齐 DSH/Claude Code，免疫行号漂移，替代早期 hashline 行锚点）+ `apply_patch`（unified diff 信封，大改/多文件）
 - [x] D2：**已定稿** —— diff 库 `similar`（3.1.2，零依赖）+ 自研 apply 薄层（parse_patch + 模糊定位，参考 codex ~300 行）；unified diff 给模型展示，结构化行序列给前端
 - [x] D3：**已定稿** —— 快照纯自研升级：保留现有 sha256 对象库 + trees 树 + mtime/size 缓存（ADR-006），新增 ① flate2/zstd 压缩 ② GC（树文件为可达集的标记-清除）③ 与 similar 集成产出 diff。**不引入 git 二进制 / git2 / gix**（否决影子仓库：需 git 二进制假设，与"全能型通用代理"定位冲突；否决 gix：restore 编排未完成；否决 git2：C 编译 + 生态逆风）。非 git 仓库天然支持
 - [x] D4：**已定稿** —— 代码智能层三阶段全自研：① `verify_build` 多格式结构化诊断（格式注册表，按项目探测：Cargo.toml→cargo json、tsconfig→tsc parseable、pyproject→pytest json；`cargo_metadata::Message::parse_stream`）② 自研**多语言 LSP 注册表**（opencode 式：`{language_id, extensions, root探测(lockfile), spawn, 自动安装命令}` + 按项目启用 + 安装失败 broken 降级；工具暴露 `lsp` + 9 operation；起步内置 rust-analyzer/TS/pyright/gopls，机制预留扩展；lsp-types 纯 Rust 依赖）③ tree-sitter 多语言符号大纲喂 VFS 结构层（天然 500+ grammar）。能力优先级：诊断 > 定义跳转/hover > 符号 > findReferences > rename（最后）。LSP 诊断 = 内环快信号，verify_build = 最终权威门控
 - [x] D5：**已定稿** —— 前端工作台：**CodeMirror 6**（只读一等公民）+ @codemirror/merge（diff，同栈）+ react-arborist（文件树），从零建 `/workspace` 页面；聊天侧 react-markdown + react-syntax-highlighter 不动；渐进式：Phase 1 只读工作台 → Phase 2 编辑（配合 apply_edit 展示）→ Phase 3 可选 Monaco 懒加载。否决 Monaco：2-5MB、Tauri worker 事故、竞品全部规避
 - [x] D6：**已定稿** —— 新增 `discover_tests`（业界空白差异化点）：探测链 Cargo.toml→`cargo test -- --list`、pyproject→`pytest --collect-only -q`、package.json→`vitest --list`，返回结构化 `[{suite, name, file, line}]`（上限 500）；`run_tests` 改造 `{filter?, suite?, framework?}`；结果解析：失败用例 ≤20（断言消息 + 回溯头 30/尾 20 行）+ 统计，按文件分组；工具不做自主重试（决策权在 LLM）；与 D4 ①共享格式注册表模式
-- [x] D7：**已定稿** —— 分期：**P0**（一次 PR 组，共用 similar + 工具链路）：similar 引入 → read_file 增强（行号+哈希锚点，apply_edit 前置）→ apply_edit(hashline) + apply_patch → 快照升级（压缩+GC+diff）→ 文件浏览（glob/list_dir）；**P1**：search_code 增强 + 统一截断层 → verify_build 多格式结构化诊断 → discover_tests + run_tests 改造 → tree-sitter 符号大纲；**P2**：后端 workspace API → 前端工作台 Phase 1（CM6 只读+merge diff+文件树）→ LSP 多语言注册表 → 前端 Phase 2 编辑
+- [x] D7：**已定稿** —— 分期：**P0**（一次 PR 组，共用 similar + 工具链路）：similar 引入 → read_file 增强（内容匹配，纯内容输出）→ apply_edit(内容匹配) + apply_patch → 快照升级（压缩+GC+diff）→ 文件浏览（glob/list_dir）；**P1**：search_code 增强 + 统一截断层 → verify_build 多格式结构化诊断 → discover_tests + run_tests 改造 → tree-sitter 符号大纲；**P2**：后端 workspace API → 前端工作台 Phase 1（CM6 只读+merge diff+文件树）→ LSP 多语言注册表 → 前端 Phase 2 编辑
 
 ## 6. 实施记录
 
@@ -253,7 +253,7 @@
 
 | 决策 | 实现文件 | 工具 / API |
 |------|---------|-----------|
-| D1 语义化编辑双原语 | `core/src/executor/hashline.rs`（锚点）+ `edit.rs`（apply_edit）+ `patch.rs`（apply_patch） | 工具 `apply_edit` / `apply_patch`；`Action::ApplyEdit` / `Action::ApplyPatch`（`executor/types.rs`，审批 Medium） |
+| D1 语义化编辑双原语 | `core/src/executor/edit.rs`（apply_edit 内容匹配）+ `patch.rs`（apply_patch） | 工具 `apply_edit` / `apply_patch`；`Action::ApplyEdit` / `Action::ApplyPatch`（`executor/types.rs`，审批 Medium） |
 | D2 diff 库 similar | `executor/patch.rs`（`FUZZY_RATIO_THRESHOLD = 0.75` fuzzy seek）；`snapshot/mod.rs::diff()` | 前端 diff 面板（`/workspace` 页：Phase 1 以带 +/- 着色的 `<pre>` 渲染 unified 文本；`@codemirror/merge` 依赖已引入，待 Phase 2 后端返回 old/new 双侧内容时启用） |
 | D3 快照升级 | `core/src/snapshot/mod.rs`：gzip（`GZIP_MAGIC` `0x1f 0x8b`，legacy 向后兼容）、`gc()` 标记-清除（`GcStats`）、`diff()`（similar → `DiffResult`/`FileDiff`） | `/api/v1/workspace/diff?base=snapshot&session_id=&index=` |
 | D4 代码智能层 | `core/src/lsp/`：`registry.rs`（`ServerSpec` + `BUILTIN_SERVERS`：rust-analyzer / typescript-language-server / pyright-langserver / gopls）、`client.rs`（自研 JSON-RPC 2.0 客户端）、`diagnostics.rs`（`LspManager`）；`executor/verification.rs`（`StructuredDiagnostic` / `parse_json_diagnostics`）；`executor/symbols.rs`（tree-sitter 多语言 `symbol_outline`） | 工具 `lsp`（goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation）；`verify_build`（结构化诊断）；`symbol_outline` |
@@ -261,7 +261,7 @@
 | D6 测试发现 | `core/src/executor/test_discovery.rs`（`discover_tests` / `parse_test_output` / `resolve_test_command` / `run_tests_action`） | 工具 `discover_tests`；`run_tests` 改造（framework / filter / suite） |
 | D7 分期 P0–P2 | P0/P1 全部落地；P2：workspace API + 前端工作台 Phase 1（只读）+ LSP 注册表落地；前端 Phase 2 编辑按 D5 渐进式设计留待后续（2026-08-07） | 工具注册点：`core/src/agent/tool_registry/mod.rs::register_builtin_tools()` |
 
-差距项补充落地：G3 文件浏览 → `executor/fs.rs`（`execute_glob` / `execute_list_dir`，`MAX_GLOB_RESULTS = 200`）+ 工具 `glob` / `list_dir` + read_file 目录模式；G4 read_file 增强（offset/limit、hashline 前缀 `N#ID|content`、截断消息、二进制嗅探）；G5 search_code 增强 → `executor/search.rs`（`SearchOptions` / `OutputMode` / `execute_search_code`）；统一截断层 → `executor/truncate.rs`（`MAX_LINES = 2000` / `MAX_BYTES = 50KB`）。
+差距项补充落地：G3 文件浏览 → `executor/fs.rs`（`execute_glob` / `execute_list_dir`，`MAX_GLOB_RESULTS = 200`）+ 工具 `glob` / `list_dir` + read_file 目录模式；G4 read_file 增强（offset/limit、纯内容输出、截断消息、二进制嗅探）；G5 search_code 增强 → `executor/search.rs`（`SearchOptions` / `OutputMode` / `execute_search_code`）；统一截断层 → `executor/truncate.rs`（`MAX_LINES = 2000` / `MAX_BYTES = 50KB`）。
 
 ## 附录 A：参考项目
 

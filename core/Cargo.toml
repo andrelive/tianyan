@@ -58,6 +58,9 @@ async-openai = { workspace = true }
 # Time handling
 chrono = { workspace = true }
 
+# Cron 调度表达式解析（定时任务真实 cron 语义）
+cron = { workspace = true }
+
 # UUID generation
 uuid = { workspace = true }
 

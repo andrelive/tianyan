@@ -144,7 +144,7 @@ describe('ConfigWizard', () => {
     await waitFor(() => {
       expect(useAppStore.getState().configured).toBe(true);
     });
-    expect(useAppStore.getState().toast).toEqual({
+    expect(useAppStore.getState().toasts[0]).toMatchObject({
       message: '配置完成！正在启动天演...',
       type: 'success',
     });
@@ -161,9 +161,9 @@ describe('ConfigWizard', () => {
     await user.click(screen.getByRole('button', { name: '完成配置' }));
 
     await waitFor(() => {
-      expect(useAppStore.getState().toast?.type).toBe('error');
+      expect(useAppStore.getState().toasts[0]?.type).toBe('error');
     });
-    expect(useAppStore.getState().toast?.message).toContain('配置保存失败');
+    expect(useAppStore.getState().toasts[0]?.message).toContain('配置保存失败');
     // 向导未关闭：仍在确认页，完成按钮可重试，未标记已配置
     expect(screen.getByText('5 / 5')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '完成配置' })).toBeEnabled();

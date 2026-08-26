@@ -26,12 +26,17 @@ interface UseChatStreamOptions {
 export function useChatStream(options: UseChatStreamOptions) {
   const { streamUrl, errorFallbackText, onUsageWindow, onError, onComplete } = options;
   const abortRef = useRef<AbortController | null>(null);
+  /** 代际计数：每次 startStream 自增。stop 后立即重发时，旧流的迟到
+   * onComplete/onError/状态复位会被判定为过期而丢弃，不覆盖新流的
+   * streaming 状态（消除"停止后立即重发，Stop 按钮消失/可并发重复发送"竞态）。 */
+  const generationRef = useRef(0);
   const [isStreaming, setIsStreaming] = useState(false);
 
   const startStream = useCallback(
     // body 为端点私有形状（主对话 ChatRequest / 追问 {session_id, answer}）——
     // hook 只负责 JSON 序列化与流消费，不关心载荷结构
     async (body: object) => {
+      const myGen = ++generationRef.current;
       const reducer = createChatStreamReducer({ errorFallbackText });
       const controller = new AbortController();
       abortRef.current = controller;
@@ -58,8 +63,10 @@ export function useChatStream(options: UseChatStreamOptions) {
           if (event.usage) onUsageWindow?.(reducer.liveWindow);
         });
 
-        onComplete?.(reducer.streamSessionId);
+        if (generationRef.current === myGen) onComplete?.(reducer.streamSessionId);
       } catch (err: unknown) {
+        // 过期流（stop 后已发起新流）：丢弃，不触发回调/不复位状态
+        if (generationRef.current !== myGen) return;
         const error = err as Error;
         if (error.name === 'AbortError') {
           onComplete?.(reducer.streamSessionId);
@@ -67,8 +74,10 @@ export function useChatStream(options: UseChatStreamOptions) {
           onError?.(reducer.streamSessionId, error);
         }
       } finally {
-        abortRef.current = null;
-        setIsStreaming(false);
+        if (generationRef.current === myGen) {
+          abortRef.current = null;
+          setIsStreaming(false);
+        }
       }
     },
     [streamUrl, errorFallbackText, onUsageWindow, onError, onComplete],

@@ -11,7 +11,6 @@ pub use crate::executor::security::SecurityPolicy;
 
 use std::path::Path;
 
-use crate::executor::hashline;
 use crate::executor::truncate;
 
 /// 执行文件读取操作（带行号锚点、offset/limit 窗口、截断标记、二进制嗅探与目录模式）。
@@ -127,14 +126,14 @@ fn build_window(
     let limit = limit.unwrap_or(2000).max(1); // `limit: 0` 视为 1
     let end = (start + limit).min(total_lines);
     let window_truncated = end < total_lines;
-    // 超长行先截断再哈希：锚点对应展示内容，apply_edit 可按锚点精确定位。
-    // （权衡：锚点与截断后的展示行一致，而不是与原始完整行一致。）
-    let window_lines: Vec<String> = lines
+    // 内容匹配编辑（apply_edit 已改为 old_string 匹配）：read_file 输出纯内容，
+    // 不再带行号/哈希前缀（省 token）；行范围提示仍保留供模型定位讨论。
+    let window_lines: Vec<&str> = lines
         .iter()
         .enumerate()
         .skip(start)
         .take(end - start)
-        .map(|(i, line)| hashline::hash_line_pair(i + 1, &truncate::truncate_line(line).0))
+        .map(|(_, line)| *line)
         .collect();
     let message = window_truncated.then(|| {
         format!(

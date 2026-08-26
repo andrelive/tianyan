@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useResource } from '@/hooks/use-resource';
 import { toErrorMessage } from '@/lib/errors';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
-import { AlertCircle, Bot, ChevronRight, Loader2, RotateCcw, Trash2, Users } from 'lucide-react';
+import { AlertCircle, Bot, ChevronRight, Loader2, RotateCcw, Search, Trash2, Users } from 'lucide-react';
 import ListDetailPanel from '@/components/ui/ListDetailPanel';
 import { deleteRole, getRoleDetail, getRoles, getRolesStats, resetRole } from '@/lib/api-client';
 import { formatTimestamp } from '@/lib/utils';
@@ -54,6 +54,13 @@ export default function RolesPanel() {
     reload: reloadRoles,
   } = useResource(() => getRoles(), [], { errorFallback: '加载角色失败' });
   const roles = rolesData?.roles ?? [];
+  const [query, setQuery] = useState('');
+  const q = query.trim().toLowerCase();
+  const visibleRoles = q
+    ? roles.filter(
+        (r) => r.name.toLowerCase().includes(q) || (r.purpose ?? '').toLowerCase().includes(q),
+      )
+    : roles;
   const { data: stats, reload: reloadStats } = useResource(() => getRolesStats(), [], {
     errorFallback: '加载角色统计失败',
   });
@@ -194,6 +201,20 @@ export default function RolesPanel() {
             <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
               角色化分工（内置 / 配置 / 学习三源平级），自演化更新
             </p>
+            <div className="relative mt-3">
+              <Search
+                size={14}
+                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]"
+              />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="搜索子智能体..."
+                aria-label="搜索子智能体"
+                className="w-full pl-8 pr-3 py-1.5 text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
+              />
+            </div>
           </div>
         }
 
@@ -211,7 +232,13 @@ export default function RolesPanel() {
         }
         list={
           <div className="space-y-1">
-            {roles.map((role) => (
+            {q && visibleRoles.length === 0 ? (
+              <div className="flex flex-col items-center gap-1 py-8 text-[var(--color-text-tertiary)]">
+                <Search size={24} className="opacity-40" />
+                <p className="text-xs">未找到匹配子智能体</p>
+              </div>
+            ) : (
+              visibleRoles.map((role) => (
               <button
                 key={role.name}
                 onClick={() => setSelectedName(role.name)}
@@ -261,7 +288,8 @@ export default function RolesPanel() {
                   )}
                 </div>
               </button>
-            ))}
+            ))
+          )}
           </div>
         }
         detail={

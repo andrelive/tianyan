@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect } from 'react';
-import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
 import { apiGet } from '@/lib/api-client';
 import type { ConfigStatus } from '@/lib/types';
@@ -24,6 +24,13 @@ const TasksPanel = lazy(() => import('@/components/tasks/TasksPanel'));
 const InsightsPanel = lazy(() => import('@/components/insights/InsightsPanel'));
 const SettingsPanel = lazy(() => import('@/components/settings/SettingsPanel'));
 const ConfigWizard = lazy(() => import('@/components/wizard/ConfigWizard'));
+
+/** 路由级错误边界：每个面板独立捕获，单面板崩溃不拖垮整应用（含侧边栏）；
+ * 导航时按 pathname 重置，切走再回来自动恢复。 */
+function RouteErrorBoundary({ children }: { children: React.ReactNode }) {
+  const { pathname } = useLocation();
+  return <ErrorBoundary key={pathname}>{children}</ErrorBoundary>;
+}
 
 function App() {
   const theme = useAppStore((s) => s.theme);
@@ -99,17 +106,17 @@ function App() {
             <Route path="/" element={<Navigate to="/chat" replace />} />
             <Route path="/chat" element={<SessionPage />} />
             <Route path="/chat/:sessionId" element={<SessionPage />} />
-            <Route path="/skills" element={<SkillsPanel />} />
-            <Route path="/roles" element={<RolesPanel />} />
-            <Route path="/tools" element={<ToolsPanel />} />
-            <Route path="/knowledge" element={<KnowledgePanel />} />
-            <Route path="/workspace" element={<WorkspacePanel />} />
-            <Route path="/memory" element={<MemoryPanel />} />
-            <Route path="/traces" element={<RetrievalTracesPanel />} />
-            <Route path="/approval" element={<ApprovalPanel />} />
-            <Route path="/tasks" element={<TasksPanel />} />
-            <Route path="/insights" element={<InsightsPanel />} />
-            <Route path="/settings" element={<SettingsPanel />} />
+            <Route path="/skills" element={<RouteErrorBoundary><SkillsPanel /></RouteErrorBoundary>} />
+            <Route path="/roles" element={<RouteErrorBoundary><RolesPanel /></RouteErrorBoundary>} />
+            <Route path="/tools" element={<RouteErrorBoundary><ToolsPanel /></RouteErrorBoundary>} />
+            <Route path="/knowledge" element={<RouteErrorBoundary><KnowledgePanel /></RouteErrorBoundary>} />
+            <Route path="/workspace" element={<RouteErrorBoundary><WorkspacePanel /></RouteErrorBoundary>} />
+            <Route path="/memory" element={<RouteErrorBoundary><MemoryPanel /></RouteErrorBoundary>} />
+            <Route path="/traces" element={<RouteErrorBoundary><RetrievalTracesPanel /></RouteErrorBoundary>} />
+            <Route path="/approval" element={<RouteErrorBoundary><ApprovalPanel /></RouteErrorBoundary>} />
+            <Route path="/tasks" element={<RouteErrorBoundary><TasksPanel /></RouteErrorBoundary>} />
+            <Route path="/insights" element={<RouteErrorBoundary><InsightsPanel /></RouteErrorBoundary>} />
+            <Route path="/settings" element={<RouteErrorBoundary><SettingsPanel /></RouteErrorBoundary>} />
           </Route>
         </Routes>
       </Suspense>

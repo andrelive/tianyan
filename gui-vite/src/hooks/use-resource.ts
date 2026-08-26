@@ -29,6 +29,8 @@ export interface UseResourceResult<T> {
   error: string | null;
   /** 重新执行 fetcher（置 loading；刷新按钮/重试用）。 */
   reload: () => void;
+  /** 静默重取（不置 loading）：供自动轮询使用，避免数据面板每次刷新闪 Spinner。 */
+  silentReload: () => void;
 }
 
 export function useResource<T>(
@@ -54,7 +56,9 @@ export function useResource<T>(
       return;
     }
     let cancelled = false;
-    setLoading(true);
+    const silent = silentRef.current;
+    silentRef.current = false;
+    if (!silent) setLoading(true);
     setError(null);
     fetcherRef
       .current()
@@ -79,5 +83,11 @@ export function useResource<T>(
   }, [...deps, nonce, enabled]);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
-  return { data, loading, error, reload };
+  // 静默重取：置 silentRef 再 bump nonce——effect 在本次运行时跳过 setLoading(true)
+  const silentRef = useRef(false);
+  const silentReload = useCallback(() => {
+    silentRef.current = true;
+    setNonce((n) => n + 1);
+  }, []);
+  return { data, loading, error, reload, silentReload };
 }

@@ -1,6 +1,10 @@
+import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
+import { usePolling } from '@/hooks/use-polling';
+import { fetchApprovalStatus, fetchTasks } from '@/lib/api-client';
 import {
+  FileText,
   MessageSquare,
   Wrench,
   Users,
@@ -17,9 +21,11 @@ import {
 /**
  * 全局一级导航侧边栏（图标 rail）：恒为 64px 图标栏，hover 显示名字（title）。
  * 不做展开/收起——一级菜单只保留图标更简洁；会话列表在会话页左栏（SessionList）。
+ * 审批/任务图标带动态角标（待审批数 / 运行中任务数），低频轮询（5s）。
  */
 const NAV_ITEMS = [
   { id: 'chat' as const, label: '会话', icon: MessageSquare, path: '/chat' },
+  { id: 'workspace' as const, label: '文件', icon: FileText, path: '/workspace' },
   { id: 'skills' as const, label: '技能', icon: Wrench, path: '/skills' },
   { id: 'roles' as const, label: '子智能体', icon: Users, path: '/roles' },
   { id: 'tools' as const, label: '工具', icon: Hammer, path: '/tools' },
@@ -36,6 +42,30 @@ export default function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
   const setView = useAppStore((s) => s.setView);
+  const [pendingApprovals, setPendingApprovals] = useState(0);
+  const [runningTasks, setRunningTasks] = useState(0);
+
+  // 角标轮询（低频；失败静默保留旧值）
+  usePolling(
+    async () => {
+      try {
+        const status = await fetchApprovalStatus();
+        setPendingApprovals(status.pending_approvals?.length ?? 0);
+      } catch {
+        /* 静默 */
+      }
+      try {
+        const tasks = await fetchTasks();
+        setRunningTasks(
+          tasks.filter((t) => t.status === 'pending' || t.status === 'running').length,
+        );
+      } catch {
+        /* 静默 */
+      }
+    },
+    5000,
+    { onError: () => {} },
+  );
 
   const handleNavClick = (item: (typeof NAV_ITEMS)[number]) => {
     setView(item.id);
@@ -60,21 +90,34 @@ export default function Sidebar() {
         >
           天
         </div>
-        {NAV_ITEMS.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => handleNavClick(item)}
-            className={`p-2 rounded-md transition-colors ${
-              activeNav === item.id
-                ? 'text-blue-600 bg-blue-50 dark:bg-blue-900/30'
-                : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
-            }`}
-            title={item.label}
-            aria-label={item.label}
-          >
-            <item.icon size={20} />
-          </button>
-        ))}
+        {NAV_ITEMS.map((item) => {
+          const badge =
+            item.id === 'approval'
+              ? pendingApprovals
+              : item.id === 'tasks'
+                ? runningTasks
+                : 0;
+          return (
+            <button
+              key={item.id}
+              onClick={() => handleNavClick(item)}
+              className={`relative p-2 rounded-md transition-colors ${
+                activeNav === item.id
+                  ? 'text-blue-600 bg-blue-50 dark:bg-blue-900/30'
+                  : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'
+              }`}
+              title={item.label}
+              aria-label={item.label}
+            >
+              <item.icon size={20} />
+              {badge > 0 && (
+                <span className="absolute top-0.5 right-0.5 min-w-[14px] h-[14px] px-0.5 flex items-center justify-center rounded-full bg-red-500 text-white text-[9px] font-bold leading-none">
+                  {badge > 99 ? '99+' : badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
     </aside>
   );

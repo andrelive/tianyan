@@ -241,7 +241,7 @@ describe('SettingsPanel tabs', () => {
       model: 'gpt-4o',
     });
     await waitFor(() => {
-      expect(useAppStore.getState().toast).toEqual({ message: 'openai 连接成功', type: 'success' });
+      expect(useAppStore.getState().toasts[0]).toMatchObject({ message: 'openai 连接成功', type: 'success' });
     });
   });
 
@@ -450,7 +450,7 @@ describe('SettingsPanel tabs', () => {
       expect(putBody).toEqual({ content: '你是天演，请用简洁的语言回答。' });
     });
     await waitFor(() => {
-      expect(useAppStore.getState().toast).toEqual({
+      expect(useAppStore.getState().toasts[0]).toMatchObject({
         message: '智能体人格已保存，下次对话生效',
         type: 'success',
       });

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Path, State},
     response::sse::{Event, Sse},
 };
 use tokio::sync::mpsc;
@@ -81,9 +81,17 @@ pub async fn chat_stream_handler(
 
     let agent = state.agent().await;
     let session_manager = state.session_manager();
-    // 取消标志：客户端断开或服务关停时置位，停止后台 AgentLoop（不再烧 token）
+    // 取消标志：服务关停时置位；客户端断开不置位（跑完再取——本地助手后台
+    // 任务不应因 SSE 断线而中断），主动「停止」经 stream_cancels 端点显式触发。
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let shutdown_flag = state.shutdown_flag();
+    // 注册到流取消注册表（供显式「停止」端点触发）；agent 跑完后移除
+    let cancels_registry = state.stream_cancels();
+    cancels_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(session_id.clone(), cancel.clone());
+    let session_id_for_cleanup = session_id.clone();
 
     // 生成任务处理流式响应
     let cancel_for_service = cancel.clone();
@@ -99,12 +107,28 @@ pub async fn chat_stream_handler(
             .with_role_sync(role_sync)
             .with_context_window(context_window);
 
+        // 捕获会话 id（request 随后被 move 进 process_message_stream）
+        let request_session_id = request.session_id.clone().unwrap_or_default();
         if let Err(e) = service
-            .process_message_stream(request, event_tx, cancel_for_service)
+            .process_message_stream(request, event_tx.clone(), cancel_for_service)
             .await
         {
             error!("流式处理错误: {}", e);
+            // 运行时错误（模型未配置 / provider 挂 / 会话失效等）发 error 事件：
+            // 否则 SSE 干净结束、前端留空 assistant 气泡且无任何提示。
+            let _ = event_tx
+                .send(ChatStreamEvent::error(
+                    "chatcmpl-runtime-error",
+                    &request_session_id,
+                    format!("对话处理失败: {e}"),
+                ))
+                .await;
         }
+        // 流结束：从取消注册表移除（无论正常完成 / 显式取消 / 错误）
+        cancels_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&session_id_for_cleanup);
     });
 
     spawn_sse_forwarder(event_rx, tx, cancel, shutdown_flag);
@@ -129,20 +153,31 @@ fn spawn_sse_forwarder(
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
         let mut shutdown_poll = tokio::time::interval(Duration::from_secs(1));
+        // 客户端断开后进入排空：不再发送，但仍消费 event_rx 直到 finish_reason，
+        // 让 agent 跑完并持久化结果（跑完再取——本地助手后台任务不因断线中断）。
+        // 主动「停止」经 stream_cancels 端点置位 cancel（不是断线）。
+        let mut draining = false;
         loop {
             tokio::select! {
                 event = event_rx.recv() => {
                     match event {
                         Some(event) => {
-                            if let Ok(json) = serde_json::to_string(&event) {
-                                if tx_clone.send(Ok(Event::default().data(json))).await.is_err() {
-                                    cancel_for_sse.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    break;
+                            if !draining {
+                                // SSE 事件带 id（流 stream_id）：Last-Event-ID 恢复的基础
+                                let event_id = event.id.clone();
+                                if let Ok(json) = serde_json::to_string(&event) {
+                                    let sse_event = Event::default().id(event_id).data(json);
+                                    if tx_clone.send(Ok(sse_event)).await.is_err() {
+                                        // 客户端断开：进入排空（不取消 agent，跑完再取）
+                                        draining = true;
+                                    }
                                 }
                             }
                             if event.finish_reason.is_some() {
-                                if let Err(e) = tx_clone.send(Ok(Event::default().data("[DONE]"))).await {
-                                    tracing::warn!(error = %e, "SSE [DONE] 发送失败");
+                                if !draining {
+                                    let _ = tx_clone
+                                        .send(Ok(Event::default().data("[DONE]")))
+                                        .await;
                                 }
                                 break;
                             }
@@ -157,12 +192,33 @@ fn spawn_sse_forwarder(
                     }
                 }
                 _ = interval.tick() => {
-                    if ping_tx.send(Ok(Event::default().data(":ping"))).await.is_err() {
-                        cancel_for_sse.store(true, std::sync::atomic::Ordering::Relaxed);
-                        break;
+                    if !draining && ping_tx.send(Ok(Event::default().data(":ping"))).await.is_err() {
+                        // 客户端断开：进入排空（不取消 agent，跑完再取）
+                        draining = true;
                     }
                 }
             }
         }
     });
+}
+
+/// 显式取消进行中的对话流（「停止」按钮）：置位该会话的 cancel 标志。
+/// 跑完再取语义下，客户端断开不取消；用户主动停止经此端点显式取消。
+pub async fn chat_stream_cancel_handler(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let flag = state
+        .stream_cancels()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&session_id)
+        .cloned();
+    match flag {
+        Some(f) => {
+            f.store(true, std::sync::atomic::Ordering::Relaxed);
+            Json(serde_json::json!({ "status": "cancelling", "session_id": session_id }))
+        }
+        None => Json(serde_json::json!({ "status": "no_active_stream", "session_id": session_id })),
+    }
 }

@@ -84,7 +84,7 @@ DSH 基于 vendored 的 **Cordis**（Koishi 生态的 TypeScript 插件框架，
 
 ### 3.2 天演当前的扩展机制（代码事实）
 
-- **内置工具：编译期静态注册**。新增一个工具需改动 5 处：`tool_params.rs` 参数结构体 → `register_builtin_tools()` → `*_ops.rs` 执行器 → `execute_single` match 分支 →（可选）短路选择表。`grep "plugin|插件"` 全库 0 命中。
+- **内置工具：编译期静态注册**。新增一个工具需改动 5 处：`tool_params.rs` 参数结构体 → `register_builtin_tools()` → `*_ops.rs` 执行器 → `execute_single` match 分支。`grep "plugin|插件"` 全库 0 命中。
 - **唯一运行时注入点**：`DynamicToolExecutor` trait + `register_dynamic_tool()`，目前**只有 MCP 桥接**在使用（`mcp_bridge.rs`）。
 - **技能系统**："过程知识"通道。GEPA 学习技能写 VFS `skill/` 命名空间（L0 发现 → L2 按需），call_skill 桥接；无 handler 时只返回操作指引。
 - **配置**：单层 TOML（tianyan.toml 三级查找）+ 热更新 API（持久化写回）。

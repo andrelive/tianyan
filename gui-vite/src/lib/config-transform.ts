@@ -64,7 +64,6 @@ export function emptyConfigState(): ConfigState {
     max_turns: 20,
     learned_rules_top_k: 5,
     working_directory: '',
-    shortlist_tools: true,
     background_self_review: false,
     data_dir: '',
     storage_backend: 'sqlite',
@@ -119,7 +118,6 @@ interface BackendAgentConfig {
   working_directory?: string | null;
   max_turns: number;
   /** 后端新增字段（透传保留，避免保存丢配置） */
-  shortlist_tools?: boolean;
   background_self_review?: boolean;
 }
 
@@ -284,7 +282,6 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
         learned_rules_top_k: cs.learned_rules_top_k,
         max_turns: cs.max_turns,
         working_directory: cs.working_directory || null,
-        shortlist_tools: cs.shortlist_tools,
         background_self_review: cs.background_self_review,
       },
       models: {
@@ -430,7 +427,6 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     default_top_k: agent.default_top_k ?? defaults.default_top_k,
     max_turns: agent.max_turns ?? defaults.max_turns,
     learned_rules_top_k: agent.learned_rules_top_k ?? defaults.learned_rules_top_k,
-    shortlist_tools: agent.shortlist_tools ?? defaults.shortlist_tools,
     background_self_review: agent.background_self_review ?? defaults.background_self_review,
     working_directory: agent.working_directory ?? defaults.working_directory,
 

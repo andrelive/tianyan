@@ -184,7 +184,7 @@ describe('ChatPanel', () => {
       expect(emptyAssistant).toHaveLength(0);
       // streamStatus 按会话归属（Record）：断言所有会话均为 idle
       expect(Object.values(state.streamStatus).every((s) => s === 'idle')).toBe(true);
-      expect(state.toast?.message).toContain('请求校验失败');
+      expect(state.toasts[0]?.message).toContain('请求校验失败');
     });
   });
 
@@ -355,9 +355,9 @@ describe('ChatPanel', () => {
 
     // 成功 toast（compressed=true → 已压缩）
     await waitFor(() => {
-      expect(useAppStore.getState().toast?.message).toBe('已压缩');
+      expect(useAppStore.getState().toasts[0]?.message).toBe('已压缩');
     });
-    expect(useAppStore.getState().toast?.type).toBe('success');
+    expect(useAppStore.getState().toasts[0]?.type).toBe('success');
   });
 
   it('shows 无需压缩 when the backend reports nothing to compress', async () => {
@@ -385,7 +385,7 @@ describe('ChatPanel', () => {
     await user.click(screen.getByRole('button', { name: /压缩会话/ }));
 
     await waitFor(() => {
-      expect(useAppStore.getState().toast?.message).toBe('无需压缩');
+      expect(useAppStore.getState().toasts[0]?.message).toBe('无需压缩');
     });
   });
 
@@ -414,9 +414,9 @@ describe('ChatPanel', () => {
     await user.click(screen.getByRole('button', { name: /压缩会话/ }));
 
     await waitFor(() => {
-      expect(useAppStore.getState().toast?.message).toContain('压缩失败');
+      expect(useAppStore.getState().toasts[0]?.message).toContain('压缩失败');
     });
-    expect(useAppStore.getState().toast?.type).toBe('error');
+    expect(useAppStore.getState().toasts[0]?.type).toBe('error');
   });
 
   it('shows truncation hint when stream ends with finish_reason "length"', async () => {

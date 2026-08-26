@@ -35,7 +35,7 @@ describe('Sidebar', () => {
       currentSessionId: null,
       currentView: 'chat',
       messages: [],
-      toast: null,
+      toasts: [],
     });
   });
 

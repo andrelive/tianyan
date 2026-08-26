@@ -10,11 +10,6 @@ export interface UiSlice {
   currentView: View;
   setView: (view: View) => void;
 
-  // Sidebar
-  isSidebarOpen: boolean;
-  toggleSidebar: () => void;
-  setSidebarOpen: (open: boolean) => void;
-
   // Settings（本地偏好，persist 持久化 theme/fontSize）
   theme: Theme;
   fontSize: FontSize;
@@ -23,10 +18,10 @@ export interface UiSlice {
   setFontSize: (size: FontSize) => void;
   setApiBaseUrl: (url: string) => void;
 
-  // Toast
-  toast: ToastMessage | null;
+  // Toast（多实例堆叠：每次 showToast 追加一条，各自 3s 自动消失）
+  toasts: (ToastMessage & { id: string })[];
   showToast: (message: string, type: ToastMessage['type']) => void;
-  hideToast: () => void;
+  hideToast: (id: string) => void;
 
   // App mode
   configured: boolean | null;
@@ -38,11 +33,6 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set) => ({
   currentView: 'chat',
   setView: (view) => set({ currentView: view }),
 
-  // Sidebar
-  isSidebarOpen: true,
-  toggleSidebar: () => set((s) => ({ isSidebarOpen: !s.isSidebarOpen })),
-  setSidebarOpen: (open) => set({ isSidebarOpen: open }),
-
   // Settings
   theme: 'system',
   fontSize: 'medium',
@@ -52,9 +42,12 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set) => ({
   setApiBaseUrl: (url) => set({ apiBaseUrl: url }),
 
   // Toast
-  toast: null,
-  showToast: (message, type) => set({ toast: { message, type } }),
-  hideToast: () => set({ toast: null }),
+  toasts: [],
+  showToast: (message, type) =>
+    set((s) => ({
+      toasts: [...s.toasts, { id: crypto.randomUUID(), message, type }],
+    })),
+  hideToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 
   // App mode
   configured: null,

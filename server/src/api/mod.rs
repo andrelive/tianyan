@@ -73,6 +73,7 @@ pub fn create_routes() -> Router<Arc<AppState>> {
         .merge(traces::routes())
         .merge(clipboard::routes())
         .merge(events::routes())
+        .merge(crate::scheduled_tasks::routes::routes())
 }
 
 #[cfg(test)]

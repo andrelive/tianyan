@@ -21,7 +21,7 @@ pub enum Action {
     ApplyEdit {
         /// 文件路径。
         path: String,
-        /// 编辑规格列表（JSON 序列化的 [`crate::executor::edit::EditSpec`]）。
+        /// 编辑规格列表（JSON 序列化的 [`crate::executor::edit::ContentEdit`]）。
         edits: Vec<Value>,
     },
     /// 应用统一 diff 补丁（codex 风格 `*** Update File` 信封格式，可含多文件）。

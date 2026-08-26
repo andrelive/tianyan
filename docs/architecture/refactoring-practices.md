@@ -57,7 +57,6 @@
 | bench 参数 bug | `scripts/test.ps1:37` | `-- --verbose` 被 bench harness 拒绝；直接跑 `cargo bench -p tianyan-server` |
 | `rusqlite::Error` 泄漏 | `core/src/vfs/backend/sqlite_db.rs:22,45,69` | 公共 API 泄漏外部错误类型（ADR-014 记录为债务，3 个调用点，未修） |
 | 文档漂移 | `docs/module-descriptions.md` 等 | 声称 LocalFileBackend 已删除，实际为生产默认（ADR-005 部分落地） |
-| 工具短路 G1 阈值 | `agent/tool_registry/` | `shortlist_tools` 阈值 40——调整需同步测试 |
 
 **已修复（2026-08-13 第二轮架构深化，勿重复排查）**：
 

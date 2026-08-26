@@ -78,8 +78,8 @@ describe('ModelSelector', () => {
 
     // 非阻塞错误通过 toast 呈现
     await waitFor(() => {
-      const toast = useAppStore.getState().toast;
-      expect(toast).not.toBeNull();
+      const toast = useAppStore.getState().toasts[0];
+      expect(toast).toBeDefined();
       expect(toast?.type).toBe('error');
       expect(toast?.message).toContain('切换模型失败');
     });

@@ -156,6 +156,14 @@ pub trait AgentCoordinator: Send + Sync {
         Vec::new()
     }
 
+    /// 运行时注册动态工具（server 层在 agent 构建后追加工具，如 schedule_task）。
+    /// 默认空实现（无工具装配的适配器/测试替身直接继承）。
+    async fn register_dynamic_tools(
+        &self,
+        _tools: Vec<Arc<dyn crate::agent::DynamicToolExecutor>>,
+    ) {
+    }
+
     /// 获取后台任务列表快照（delegate_to_agent(background) 的任务）。
     async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask>;
 
@@ -374,6 +382,10 @@ impl AgentCoordinator for Agent {
 
     async fn tool_definitions(&self) -> Vec<crate::model::types::ToolDefinition> {
         self.agent_loop.tool_registry().definitions().await
+    }
+
+    async fn register_dynamic_tools(&self, tools: Vec<Arc<dyn crate::agent::DynamicToolExecutor>>) {
+        self.register_dynamic_tools(tools).await
     }
 
     async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask> {

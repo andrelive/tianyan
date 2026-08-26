@@ -57,9 +57,8 @@ describe('SessionList', () => {
       sessions: [],
       currentSessionId: null,
       currentView: 'chat',
-      isSidebarOpen: true,
-      messages: [],
-      toast: null,
+            messages: [],
+      toasts: [],
     });
   });
 
@@ -286,6 +285,8 @@ describe('SessionList', () => {
       expect(screen.getByTitle('删除会话')).toBeInTheDocument();
     });
     await user.click(screen.getByTitle('删除会话'));
+    // 二次确认对话框（P0：破坏性操作统一走 ConfirmDialog）
+    await user.click(screen.getByRole('button', { name: '删除' }));
 
     await waitFor(() => {
       const sessions = useAppStore.getState().sessions;
@@ -314,10 +315,12 @@ describe('SessionList', () => {
       expect(screen.getByTitle('删除会话')).toBeInTheDocument();
     });
     await user.click(screen.getByTitle('删除会话'));
+    // 二次确认对话框（P0：破坏性操作统一走 ConfirmDialog）
+    await user.click(screen.getByRole('button', { name: '删除' }));
 
     await waitFor(() => {
-      const toast = useAppStore.getState().toast;
-      expect(toast).not.toBeNull();
+      const toast = useAppStore.getState().toasts[0];
+      expect(toast).toBeDefined();
       expect(toast!.message).toBe('删除会话失败');
       expect(toast!.type).toBe('error');
     });

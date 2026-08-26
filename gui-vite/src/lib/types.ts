@@ -687,8 +687,6 @@ export interface ConfigState {
   max_turns: number;
   learned_rules_top_k: number;
   working_directory: string;
-  /** 工具短名单（后端字段透传：设置页暂不编辑，保存时保留原值） */
-  shortlist_tools: boolean;
   /** 后台自审（后端字段透传） */
   background_self_review: boolean;
 

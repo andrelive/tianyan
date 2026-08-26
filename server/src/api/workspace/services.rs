@@ -11,7 +11,7 @@ use std::time::UNIX_EPOCH;
 use tianyan::session::SessionManager;
 
 use serde_json::{json, Value};
-use tianyan::executor::edit::EditSpec;
+use tianyan::executor::edit::ContentEdit;
 use tianyan::executor::execute_read_file;
 use tianyan::snapshot::SnapshotManager;
 
@@ -270,14 +270,14 @@ impl WorkspaceService {
         serde_json::from_value(value).map_err(ApiError::from)
     }
 
-    /// 应用 hashline 语义编辑（委托 core executor 锚点校验 + 原子落盘）。
+    /// 应用内容匹配编辑（委托 core executor 校验 old_string 唯一 + 原子落盘）。
     ///
     /// 先经 [`Self::resolve`] 沙箱解析绝对路径（文件不存在 → 404），再交给
     /// core；响应路径回显请求的相对路径（前端契约）。
     pub async fn apply_edit(
         &self,
         rel: &str,
-        edits: Vec<EditSpec>,
+        edits: Vec<ContentEdit>,
         session_id: Option<&str>,
     ) -> Result<ApplyEditResponse, ApiError> {
         let base = self.resolve_workdir(session_id).await?;

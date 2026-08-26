@@ -15,12 +15,10 @@ pub mod types;
 /// 验证门控模块。
 pub mod verification;
 
-/// 行锚点语义编辑（apply_edit：哈希锚定 + 自底向上批量应用）。
+/// 内容匹配编辑（apply_edit：old_string/new_string 唯一匹配，原子批量）。
 pub mod edit;
 /// 文件系统浏览工具核心逻辑（glob 查找 / list_dir 目录列出）。
 pub mod fs;
-/// 行锚点工具（apply_edit 的 `N#ID|content` 锚点生成与解析）。
-pub mod hashline;
 /// 统一 diff 补丁解析与应用（apply_patch：codex 风格 `*** Update File` 信封）。
 pub mod patch;
 /// 项目格式探测注册表（verify_build / discover_tests 共享）。

@@ -21,6 +21,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import WorkspacePicker from '@/components/workspace/WorkspacePicker';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 
 /** 目录绝对路径 → 展示名（basename；默认组回退）。 */
 function groupLabel(workdir: string): string {
@@ -186,13 +187,24 @@ export default function SessionList() {
     }
   };
 
-  const handleDeleteSession = async (e: React.MouseEvent, id: string) => {
+  // 删除会话走统一 ConfirmDialog 原语（对齐 RolesPanel/KnowledgeBrowseTab），
+  // 避免一次性不可逆操作无确认。
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
+  const handleDeleteClick = (e: React.MouseEvent, session: Session) => {
     e.stopPropagation();
+    setDeleteTarget({ id: session.id, title: session.title || '新对话' });
+  };
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
     try {
-      await deleteSession(id);
-      useAppStore.getState().removeSession(id);
+      await deleteSession(deleteTarget.id);
+      useAppStore.getState().removeSession(deleteTarget.id);
+      // 删除的是当前会话：跳回会话首页，避免停留在失效的 /chat/:deletedId
+      if (currentSessionId === deleteTarget.id) navigate('/chat');
     } catch {
       showToast('删除会话失败', 'error');
+    } finally {
+      setDeleteTarget(null);
     }
   };
 
@@ -206,20 +218,29 @@ export default function SessionList() {
   };
 
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent, index: number) => {
+    (e: React.KeyboardEvent) => {
       const items = sessionListRef.current?.querySelectorAll('[role="button"]');
-      if (!items) return;
+      if (!items || items.length === 0) return;
+      // 以当前焦点元素在 DOM 列表中的位置为锚（分组行/占位/会话行混排，
+      // 不能用与 flatSessions 错位的 index——否则 Enter 会选错会话）
+      const focused = document.activeElement;
+      const idx = Math.max(Array.from(items).indexOf(focused as HTMLElement), 0);
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        const next = Math.min(index + 1, items.length - 1);
+        const next = Math.min(idx + 1, items.length - 1);
         (items[next] as HTMLElement).focus();
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
-        const prev = Math.max(index - 1, 0);
+        const prev = Math.max(idx - 1, 0);
         (items[prev] as HTMLElement).focus();
       } else if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
-        handleSelectSession(flatSessions[index]);
+        // 仅会话行带 data-session-id；分组/占位行无 → 自然 no-op
+        const sid = (items[idx] as HTMLElement).dataset.sessionId;
+        if (sid) {
+          const session = flatSessions.find((s) => s.id === sid);
+          if (session) handleSelectSession(session);
+        }
       }
     },
     [flatSessions, handleSelectSession],
@@ -340,14 +361,14 @@ export default function SessionList() {
                   {/* 会话子项（二级） */}
                   {!collapsed &&
                     groupSessions.map((session) => {
-                      const flatIndex = flatSessions.findIndex((s) => s.id === session.id);
                       return (
                         <div
                           key={session.id}
                           role="button"
                           tabIndex={0}
+                          data-session-id={session.id}
                           onClick={() => handleSelectSession(session)}
-                          onKeyDown={(e) => handleKeyDown(e, flatIndex)}
+                          onKeyDown={handleKeyDown}
                           onMouseEnter={() => setHoveredSession(session.id)}
                           onMouseLeave={() => setHoveredSession(null)}
                           aria-label={session.title || '新对话'}
@@ -395,7 +416,7 @@ export default function SessionList() {
                           </div>
                           {hoveredSession === session.id && (
                             <button
-                              onClick={(e) => handleDeleteSession(e, session.id)}
+                              onClick={(e) => handleDeleteClick(e, session)}
                               className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-[var(--color-text-tertiary)] hover:text-red-500 shrink-0"
                               title="删除会话"
                               aria-label={`删除会话 ${session.title || '新对话'}`}
@@ -433,6 +454,15 @@ export default function SessionList() {
         currentWorkingDir={newSessionWorkspace ?? ''}
         onClose={() => setPickerOpen(false)}
         onSelect={handleAddDirectory}
+      />
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="删除会话"
+        message={'确定删除会话「' + (deleteTarget?.title ?? '新对话') + '」吗？此操作不可恢复。'}
+        confirmLabel="删除"
+        danger
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setDeleteTarget(null)}
       />
     </aside>
   );

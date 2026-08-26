@@ -105,6 +105,16 @@ export default function DiffPanel({ filePath, onClose }: DiffPanelProps) {
     await loadFileDiff(filePath, session);
   };
 
+  // 自动加载：选中文件 + 存在当前会话 → 立即拉取该文件 diff（P0：去掉手工
+  // "填写会话 ID + 点加载" 的摩擦；文件或当前会话变化自动重取）。
+  // 用 store 的 currentSessionId（而非可编辑输入框）：避免输入框逐字符触发请求；
+  // 手动改会话 ID 走「加载 diff」按钮（高级用：对比其他会话）。
+  useEffect(() => {
+    if (!filePath || !currentSessionId) return;
+    loadFileDiff(filePath, currentSessionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filePath, currentSessionId]);
+
   /** 切到整体差异：无 path 调用后端，返回工作区全部变更文件。 */
   const handleWorkspaceMode = async () => {
     const session = requireSession();
@@ -179,7 +189,9 @@ export default function DiffPanel({ filePath, onClose }: DiffPanelProps) {
           </button>
         </div>
         <label className="block">
-          <span className="block text-xs text-[var(--color-text-tertiary)] mb-1">会话 ID</span>
+          <span className="block text-xs text-[var(--color-text-tertiary)] mb-1">
+            会话（当前会话）
+          </span>
           <input
             type="text"
             value={sessionId}
@@ -187,6 +199,7 @@ export default function DiffPanel({ filePath, onClose }: DiffPanelProps) {
               setSessionId(e.target.value);
               if (sessionIdError) setSessionIdError(null);
             }}
+            aria-label="会话 ID"
             placeholder="会话 ID"
             aria-invalid={sessionIdError !== null}
             className="w-full px-2.5 py-1.5 text-xs rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"

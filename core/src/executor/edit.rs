@@ -1,40 +1,34 @@
-//! 行锚点语义编辑（apply_edit 核心逻辑）。
+//! 内容匹配编辑（apply_edit 核心逻辑）。
 //!
-//! 哈希锚定：每条编辑以 `start_line`（1 起始）+ 可选 `anchor`（行内容的
-//! 空白不敏感 2 位十六进制哈希）定位目标行。所有编辑先对照**原始内容**
-//! 全量校验（任一失败即整批中止、不落盘，保证原子性），再按 `start_line`
-//! **自底向上**应用，保证较早行号不受后续替换影响。
-//!
-//! 行尾风格：写回时保持原文件的 EOL（检测 `\r\n` / `\n`）；内部按行处理时
-//! 剥离行尾 `\r`，因此 CRLF 文件经 apply_edit 后仍为 CRLF，不会被整体改写。
-//! 空 `new_lines` 表示删除目标行。
+//! 采用 old_string / new_string 内容匹配（对齐 DSH / Claude Code / opencode edit）：
+//! 在文件内容中查找 old_string（须唯一，除非 replace_all），替换为 new_string。
+//! 内容匹配天然免疫行号漂移，无需 read_file 的行号 / 哈希前缀。
+//! 批量编辑（1..=20 条）先全部定位校验，再自底向上应用（原子性）。
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use similar::TextDiff;
+
 use crate::common::error::{Result, TianyanError};
-use crate::executor::hashline;
 
 /// 单次编辑允许的最大条数（1..=20）。
 pub const MAX_EDITS: usize = 20;
 
-/// 单条编辑规格。
+/// 单条内容编辑规格。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct EditSpec {
-    /// 目标起始行号（1 起始）。
-    pub start_line: usize,
-    /// 期望的行内容哈希（2 位十六进制，空白不敏感）。
+pub struct ContentEdit {
+    /// 要查找并替换的原文（须在文件中唯一；多处出现需 replace_all 或提供更多上下文）。
+    pub old_string: String,
+    /// 替换后的新内容。
+    pub new_string: String,
+    /// 替换所有出现（默认 false：仅允许唯一匹配）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<String>,
-    /// 期望的旧内容（逐行哈希比对；缺省时视为单行替换）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub old_lines: Option<Vec<String>>,
-    /// 替换行（空数组 = 删除目标行）。
-    pub new_lines: Vec<String>,
+    pub replace_all: Option<bool>,
 }
 
-/// 检测内容的行尾风格（含 `\r\n` 则整体按 CRLF 处理，否则 LF）。
+/// 检测内容的行尾风格（含 CRLF 则整体按 CRLF 处理，否则 LF）。
 pub fn detect_eol(content: &str) -> &'static str {
     if content.contains("\r\n") {
         "\r\n"
@@ -43,9 +37,9 @@ pub fn detect_eol(content: &str) -> &'static str {
     }
 }
 
-/// 按行拆分内容（剥离行尾 `\r`；末尾 `\n` 产生的空串弹出，写回时恢复）。
+/// 按行拆分内容（剥离行尾 CR；末尾 LF 产生的空串弹出，写回时恢复）。
 ///
-/// 与 [`apply_patch`](crate::executor::patch) 共用同一 EOL 语义（I7）。
+/// 与 apply_patch 共用同一 EOL 语义（I7）。
 pub(crate) fn split_lines(content: &str) -> (Vec<String>, bool) {
     let mut lines: Vec<String> = content
         .split('\n')
@@ -69,7 +63,7 @@ pub(crate) fn join_lines(lines: &[String], eol: &str, had_trailing_newline: bool
 
 /// 区间重叠检测：按起始位置自底向上排序后，相邻区间相交即重叠。
 ///
-/// 输入为半开区间 `(start, end)`；返回重叠区间的 1 起始索引对（错误消息用）。
+/// 输入为半开区间 (start, end)；返回重叠区间的 1 起始索引对（错误消息用）。
 pub(crate) fn find_overlap(ranges: &[(usize, usize)]) -> Option<(usize, usize)> {
     let mut order: Vec<usize> = (0..ranges.len()).collect();
     order.sort_by(|&a, &b| ranges[b].0.cmp(&ranges[a].0));
@@ -83,18 +77,69 @@ pub(crate) fn find_overlap(ranges: &[(usize, usize)]) -> Option<(usize, usize)> 
     None
 }
 
-/// 纯函数：对内容应用编辑（校验 + 自底向上应用），不涉及文件系统。
+/// 查找 needle 在 haystack 中的非重叠出现位置（字节偏移）。
+fn find_all_non_overlapping(haystack: &str, needle: &str) -> Vec<usize> {
+    let mut positions = Vec::new();
+    if needle.is_empty() {
+        return positions;
+    }
+    let needle_len = needle.len();
+    let mut from = 0;
+    while from <= haystack.len() {
+        match haystack[from..].find(needle) {
+            Some(rel) => {
+                let pos = from + rel;
+                positions.push(pos);
+                from = pos + needle_len;
+            }
+            None => break,
+        }
+    }
+    positions
+}
+
+/// 找 content 中与 needle（空白不敏感）最相似的行，返回 (行号, 行内容)。
+/// 用于 old_string 未找到时给模型就近提示，减少整文件重读。
+fn closest_line(content: &str, needle: &str) -> Option<(usize, String)> {
+    let needle_norm: String = needle.chars().filter(|c| !c.is_whitespace()).collect();
+    if needle_norm.is_empty() {
+        return None;
+    }
+    let mut best: Option<(usize, f32, String)> = None;
+    for (i, line) in content.lines().enumerate() {
+        let line_norm: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        let score = TextDiff::from_chars(&line_norm, &needle_norm).ratio();
+        if best.as_ref().is_none_or(|(_, bs, _)| score > *bs) {
+            best = Some((i + 1, score, line.to_string()));
+        }
+    }
+    best.map(|(n, _, l)| (n, l))
+}
+
+/// 纯函数：对内容应用编辑（内容匹配定位 + 原子批量应用），不涉及文件系统。
+///
+/// 行尾归一化（对齐 DSH editText）：匹配前把 CRLF 归成 LF（模型用 \n 写 old_string，
+/// CRLF 文件是 \r\n，不归一化则永远匹配不上）；写回时按原文件主导行尾恢复。
+/// 内容匹配是精确子串匹配（仅容忍行尾差异）。
 ///
 /// 流程：
-/// 1. 校验编辑条数（1..=20）与每条编辑的边界（`start_line` 1 起始、不越界）。
-/// 2. 逐条对照**原始内容**校验锚点/旧内容哈希（任一失败即整批中止）。
-/// 3. 检测重叠范围（按起始行自底向上排序后相邻区间相交即重叠）。
-/// 4. 按 `start_line` 自底向上替换（较早行号不受后续替换影响）。
-/// 5. 以检测到的行尾风格（CRLF/LF）join 写回，保留原尾随换行。
-///
-/// 行尾归一化：行内容统一剥离行尾 `\r` 后参与哈希/比较/输出，
-/// 换行符由 `detect_eol` 检测并统一重新加入，因此 CRLF 文件保持 CRLF。
-pub fn apply_edits_to_content(content: &str, edits: &[EditSpec]) -> Result<String> {
+/// 1. 校验编辑条数（1..=20）与 old_string 非空。
+/// 2. 逐条在 LF 归一化内容中查找 old_string（同样归一化）：未找到 → 409；多处且非 replace_all → 报错。
+/// 3. 检测替换区间重叠。
+/// 4. 自底向上（起始位置降序）替换，保证较早位置不受后续替换影响。
+pub fn apply_edits_to_content(content: &str, edits: &[ContentEdit]) -> Result<String> {
+    let crlf = content.contains("\r\n");
+    let normalized = content.replace("\r\n", "\n");
+    let result = apply_normalized(&normalized, edits)?;
+    if crlf {
+        Ok(result.replace('\n', "\r\n"))
+    } else {
+        Ok(result)
+    }
+}
+
+/// 在 LF 归一化内容上应用编辑（匹配与替换），不做行尾处理。
+fn apply_normalized(content: &str, edits: &[ContentEdit]) -> Result<String> {
     if edits.is_empty() {
         return Err(TianyanError::Custom(
             "executor: apply_edit: 编辑列表为空，至少需要 1 处编辑".to_string(),
@@ -107,93 +152,67 @@ pub fn apply_edits_to_content(content: &str, edits: &[EditSpec]) -> Result<Strin
         )));
     }
 
-    let eol = detect_eol(content);
-    // 剥离行尾 `\r` 并拆分为行；末尾 `\n` 产生的空串弹出，写回时恢复。
-    let (mut lines, had_trailing_newline) = split_lines(content);
-    let total = lines.len();
-
-    // ── 校验阶段（全部对照原始内容，任一失败即中止，不落盘）────────────
-    for (idx, edit) in edits.iter().enumerate() {
-        let i = idx + 1; // 1 起始编辑序号
-        if edit.start_line == 0 {
+    // 收集所有替换区间（start, end, new_string）。
+    let mut spans: Vec<(usize, usize, &str)> = Vec::new();
+    for (i, edit) in edits.iter().enumerate() {
+        if edit.old_string.is_empty() {
             return Err(TianyanError::Custom(format!(
-                "executor: apply_edit: 第{i}处编辑：起始行 0 无效（1 起始）"
+                "executor: apply_edit: 第{}处编辑：old_string 不能为空",
+                i + 1
             )));
         }
-        if edit.start_line > total {
-            return Err(TianyanError::Custom(format!(
-                "executor: apply_edit: 第{i}处编辑：起始行 {} 超出文件总行数 {total}",
-                edit.start_line
+        // old_string 同样做行尾归一化（模型用 \n 写，CRLF 文件需先归成 \n 再匹配）
+        let needle = edit.old_string.replace("\r\n", "\n");
+        let positions = find_all_non_overlapping(content, &needle);
+        if positions.is_empty() {
+            // 文件当前内容与模型预期不符 → 409 Conflict（同旧锚点不匹配语义）
+            let hint = closest_line(content, &needle)
+                .map(|(n, l)| format!("；最接近的是第 {n} 行：{l}"))
+                .unwrap_or_default();
+            return Err(TianyanError::conflict(format!(
+                "executor: apply_edit: 第{}处编辑：未找到要替换的原文（old_string 不在当前文件中）{hint}，请据此修正或重新 read_file 确认当前内容",
+                i + 1
             )));
         }
-        let old_len = edit.old_lines.as_ref().map_or(1, |v| v.len());
-        let range_end = edit.start_line + old_len - 1;
-        if range_end > total {
-            return Err(TianyanError::Custom(format!(
-                "executor: apply_edit: 第{i}处编辑：起始行 {} 起 {old_len} 行超出文件总行数 {total}",
-                edit.start_line
+        let replace_all = edit.replace_all.unwrap_or(false);
+        if positions.len() > 1 && !replace_all {
+            return Err(TianyanError::conflict(format!(
+                "executor: apply_edit: 第{}处编辑：原文出现 {} 次（不唯一），请提供更多上下文或设 replace_all",
+                i + 1,
+                positions.len()
             )));
         }
-
-        let actual_line = &lines[edit.start_line - 1];
-        let actual_hash = hashline::line_hash(actual_line);
-        if let Some(expected) = &edit.anchor {
-            if *expected != actual_hash {
-                return Err(TianyanError::conflict(format!(
-                    "executor: apply_edit: 第{i}处编辑：锚点不匹配 第{}行 期望 {expected} 实际 {actual_hash}，最新锚点为 {}",
-                    edit.start_line,
-                    hashline::format_line(edit.start_line, &actual_hash, actual_line)
-                )));
-            }
-        }
-        if let Some(old_lines) = &edit.old_lines {
-            for (offset, expected_line) in old_lines.iter().enumerate() {
-                let line_no = edit.start_line + offset;
-                let actual = &lines[line_no - 1];
-                if hashline::line_hash(actual) != hashline::line_hash(expected_line) {
-                    return Err(TianyanError::conflict(format!(
-                        "executor: apply_edit: 第{i}处编辑：旧内容不匹配 第{line_no}行 期望 {} 实际 {actual}",
-                        expected_line.trim_end_matches('\r')
-                    )));
-                }
-            }
+        let old_len = needle.len();
+        for pos in positions {
+            spans.push((pos, pos + old_len, edit.new_string.as_str()));
         }
     }
 
-    // ── 重叠检测：自底向上排序后，相邻区间起点落在前一区间内即重叠 ────
-    let ranges: Vec<(usize, usize)> = edits
-        .iter()
-        .map(|e| {
-            let len = e.old_lines.as_ref().map_or(1, |v| v.len());
-            (e.start_line - 1, e.start_line - 1 + len)
-        })
-        .collect();
-    if let Some((a, b)) = find_overlap(&ranges) {
-        return Err(TianyanError::Custom(format!(
-            "executor: apply_edit: 编辑重叠：第{a}处编辑与第{b}处编辑重叠"
-        )));
-    }
-
-    // ── 应用阶段：自底向上（起始行降序）替换 ────────────────────────────
-    let mut order: Vec<usize> = (0..edits.len()).collect();
-    order.sort_by(|&a, &b| edits[b].start_line.cmp(&edits[a].start_line));
-    for &i in &order {
-        let edit = &edits[i];
-        let old_len = edit.old_lines.as_ref().map_or(1, |v| v.len());
-        let start_idx = edit.start_line - 1;
-        lines.drain(start_idx..start_idx + old_len);
-        for (offset, new_line) in edit.new_lines.iter().enumerate() {
-            lines.insert(start_idx + offset, new_line.clone());
+    // 重叠检测：按起始位置升序，相邻区间起点落在前一区间内即重叠。
+    let mut sorted = spans.clone();
+    sorted.sort_by_key(|s| s.0);
+    for w in sorted.windows(2) {
+        if w[1].0 < w[0].1 {
+            return Err(TianyanError::Custom(
+                "executor: apply_edit: 编辑重叠：两条编辑的替换区间重叠".to_string(),
+            ));
         }
     }
 
-    Ok(join_lines(&lines, eol, had_trailing_newline))
+    // 自底向上应用（起始位置降序），保证较早位置不受影响。
+    let mut by_start = spans;
+    by_start.sort_by_key(|s| std::cmp::Reverse(s.0));
+    let mut result = content.to_string();
+    for (start, end, new_string) in by_start {
+        result = format!("{}{}{}", &result[..start], new_string, &result[end..]);
+    }
+    Ok(result)
 }
 
 /// 异步动作：读取文件 → 纯函数应用 → 写回。
 ///
-/// 返回结构化 JSON：`path` 与 `edits_applied`。
-pub async fn apply_edit_action(path: &str, edits: Vec<EditSpec>) -> Result<Value> {
+/// 返回结构化 JSON：path 与 edits_applied。
+pub async fn apply_edit_action(path: &str, edits: Vec<ContentEdit>) -> Result<Value> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| TianyanError::Custom(format!("executor: apply_edit: 读取失败：{e}")))?;
@@ -207,7 +226,6 @@ pub async fn apply_edit_action(path: &str, edits: Vec<EditSpec>) -> Result<Value
     }))
 }
 
-/// 测试模块（拆分至独立文件，保持主文件聚焦生产逻辑）。
 #[cfg(test)]
 #[path = "edit_tests.rs"]
 mod tests;

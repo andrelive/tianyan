@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   XCircle,
   Clock,
+  Loader2,
 } from 'lucide-react';
 import type { ToolCallEvent } from '@/lib/types';
 import { TOOL_PRESENTATION_LABELS } from '@/lib/types';
@@ -87,6 +88,13 @@ function ToolCallCard({ event, result }: Props) {
           </code>
         ) : (
           <span className="text-base text-[var(--color-text-primary)]">工具结果</span>
+        )}
+        {/* 运行中状态：结果未达、未失败、未成功 —— 显示 spinner（执行挂起可辨） */}
+        {result == null && !failed && !event.success && (
+          <span className="shrink-0 flex items-center gap-1.5 text-base text-[var(--color-text-tertiary)]">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            <span>运行中</span>
+          </span>
         )}
         {/* 状态区：失败红色 / 成功绿色标记 + 耗时（observation 到达后显示） */}
         {hasStatus && (

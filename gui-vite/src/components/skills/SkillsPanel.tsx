@@ -3,7 +3,7 @@ import { useResource } from '@/hooks/use-resource';
 import ReactMarkdown from 'react-markdown';
 import { getSkillDetail, getSkills, getSkillsStats } from '@/lib/api-client';
 import type { Skill } from '@/lib/types';
-import { Wrench, Loader2, AlertCircle, ChevronRight, Clock } from 'lucide-react';
+import { Wrench, Loader2, AlertCircle, ChevronRight, Clock, Search } from 'lucide-react';
 import ListDetailPanel from '@/components/ui/ListDetailPanel';
 import { formatDateTime, formatTimestamp } from '@/lib/utils';
 
@@ -29,6 +29,13 @@ export default function SkillsPanel() {
 
   // 只展示方法论技能（custom 类）
   const methodologySkills = skills.filter((s) => s.category === 'custom');
+  const [query, setQuery] = useState('');
+  const q = query.trim().toLowerCase();
+  const visibleSkills = q
+    ? methodologySkills.filter(
+        (s) => s.name.toLowerCase().includes(q) || (s.description ?? '').toLowerCase().includes(q),
+      )
+    : methodologySkills;
   const selectedSkill: Skill | undefined = methodologySkills.find((s) => s.id === selectedSkillId);
 
   // 技能使用统计（哪些技能被调用的多/成功率高）；失败不阻塞面板
@@ -92,6 +99,20 @@ export default function SkillsPanel() {
             <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
               自动学习方法论（GEPA 总结），只读查看
             </p>
+            <div className="relative mt-3">
+              <Search
+                size={14}
+                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]"
+              />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="搜索技能..."
+                aria-label="搜索技能"
+                className="w-full pl-8 pr-3 py-1.5 text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
+              />
+            </div>
           </div>
         }
 
@@ -109,7 +130,13 @@ export default function SkillsPanel() {
         }
         list={
           <div className="space-y-1">
-            {methodologySkills.map((skill) => (
+            {q && visibleSkills.length === 0 ? (
+              <div className="flex flex-col items-center gap-1 py-8 text-[var(--color-text-tertiary)]">
+                <Search size={24} className="opacity-40" />
+                <p className="text-xs">未找到匹配技能</p>
+              </div>
+            ) : (
+              visibleSkills.map((skill) => (
               <button
                 key={skill.id}
                 onClick={() => setSelectedSkillId(skill.id)}
@@ -182,7 +209,8 @@ export default function SkillsPanel() {
                   )}
                 </div>
               </button>
-            ))}
+            ))
+          )}
           </div>
         }
         detail={

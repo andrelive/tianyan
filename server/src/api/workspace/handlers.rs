@@ -107,7 +107,7 @@ pub async fn apply_patch_handler(
     ))
 }
 
-/// 处理 hashline 语义编辑请求（供 LLM/外部工作流）。
+/// 处理内容匹配编辑请求（供 LLM/外部工作流）。
 pub async fn apply_edit_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ApplyEditRequest>,

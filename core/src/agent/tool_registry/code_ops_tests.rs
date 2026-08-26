@@ -279,8 +279,8 @@ async fn test_discover_tests_registered_in_definitions() {
         .iter()
         .find(|d| d.function.name == "discover_tests")
         .expect("discover_tests 应已注册");
-    assert!(def.function.description.contains("Discover tests"));
-    assert!(def.function.description.contains("Does not execute tests"));
+    assert!(def.function.description.contains("发现项目中的测试"));
+    assert!(def.function.description.contains("不执行测试"));
 }
 
 // ── verify_build ─────────────────────────────────────────────────────────

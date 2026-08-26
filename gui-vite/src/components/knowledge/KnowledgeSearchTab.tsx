@@ -44,6 +44,7 @@ export default function KnowledgeSearchTab() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
   const query = debouncedQuery.trim();
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     if (!query) {
@@ -55,7 +56,7 @@ export default function KnowledgeSearchTab() {
     let cancelled = false;
     setIsSearching(true);
     setSearchError(null);
-    searchKnowledge(query, 10)
+    searchKnowledge(query, 10, 0)
       .then((res) => {
         if (!cancelled) {
           setSearchResults(res.results);
@@ -101,6 +102,20 @@ export default function KnowledgeSearchTab() {
 
   const toggleResultExpand = (id: string) => {
     setExpandedResultId((prev) => (prev === id ? null : id));
+  };
+
+  // 加载更多：按当前已加载条数作为 offset 追加下一页（P1：total 与展示不再不符）
+  const loadMore = async () => {
+    if (!query || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const res = await searchKnowledge(query, 10, searchResults.length);
+      setSearchResults((prev) => [...prev, ...res.results]);
+    } catch (err: unknown) {
+      setSearchError(toErrorMessage(err, '加载更多失败'));
+    } finally {
+      setLoadingMore(false);
+    }
   };
 
   return (
@@ -202,6 +217,25 @@ export default function KnowledgeSearchTab() {
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* 加载更多分页（P1：total 与展示不再不符） */}
+      {!searchError && searchResults.length > 0 && searchResults.length < totalResults && (
+        <div className="text-center pt-2">
+          <button
+            type="button"
+            onClick={() => void loadMore()}
+            disabled={loadingMore}
+            className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loadingMore ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <ChevronDown size={12} />
+            )}
+            {loadingMore ? '加载中...' : '加载更多'}
+          </button>
         </div>
       )}
 

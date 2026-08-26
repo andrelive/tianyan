@@ -92,10 +92,8 @@ async fn test_read_file_success() {
     assert_eq!(result["truncated"].as_bool(), Some(false));
     assert_eq!(result["total_lines"].as_u64(), Some(1));
     let content = result["content"].as_str().unwrap();
-    let (line_no, id) = crate::executor::hashline::parse_anchor(content).unwrap();
-    assert_eq!(line_no, 1);
-    assert_eq!(id, crate::executor::hashline::line_hash("hello content"));
-    assert_eq!(content, format!("1#{id}|hello content"));
+    // 内容匹配编辑：read_file 输出纯内容（不再带行号/哈希前缀）
+    assert_eq!(content, "hello content");
 }
 
 #[tokio::test]
@@ -188,11 +186,11 @@ async fn test_read_file_offset_limit_slicing() {
     assert_eq!(result["showing"]["offset"].as_u64(), Some(2));
     assert_eq!(result["showing"]["limit"].as_u64(), Some(2));
     let content = result["content"].as_str().unwrap();
-    // 窗口内行号是文件真实行号（1 起始）
-    let (n2, _) = crate::executor::hashline::parse_anchor(content.lines().next().unwrap()).unwrap();
-    assert_eq!(n2, 2);
-    let (n3, _) = crate::executor::hashline::parse_anchor(content.lines().nth(1).unwrap()).unwrap();
-    assert_eq!(n3, 3);
+    // 窗口内容 = 文件第 2-3 行（内容匹配编辑：read_file 输出纯内容，无行号/哈希前缀）
+    assert!(
+        content.starts_with("l2\nl3"),
+        "窗口应从第 2 行开始: {content}"
+    );
     // 截断提示行是内容的最后一行，且同步暴露在 message 字段
     assert!(
         content
@@ -209,7 +207,7 @@ async fn test_read_file_offset_limit_slicing() {
 }
 
 #[tokio::test]
-async fn test_read_file_hashline_anchor_roundtrip() {
+async fn test_read_file_window_returns_plain_content() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("code.txt");
     std::fs::write(&path, "let x = 1;\nlet y = 2;\nlet z = 3;").unwrap();
@@ -223,13 +221,11 @@ async fn test_read_file_hashline_anchor_roundtrip() {
         .await
         .unwrap();
     let content = result["content"].as_str().unwrap();
+    // 内容匹配编辑：read_file 输出纯内容（无行号/哈希前缀）
     assert!(
-        content.starts_with("2#"),
-        "内容应以真实行号 2 的锚点开头: {content}"
+        content.starts_with("let y = 2;"),
+        "窗口应从第 2 行内容开始: {content}"
     );
-    let (line_no, id) = crate::executor::hashline::parse_anchor(content).unwrap();
-    assert_eq!(line_no, 2);
-    assert_eq!(id, crate::executor::hashline::line_hash("let y = 2;"));
 }
 
 #[tokio::test]
@@ -326,7 +322,8 @@ async fn test_read_file_directory_lists_sorted() {
 }
 
 #[tokio::test]
-async fn test_read_file_long_line_truncated_with_marker() {
+async fn test_read_file_long_line_returned_fully() {
+    // 行内不截断：模型需要完整行信息推理，长行应整体返回（体量由 offset/limit + 字节预算兜底）
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("wide.txt");
     let long = "x".repeat(2500);
@@ -339,15 +336,8 @@ async fn test_read_file_long_line_truncated_with_marker() {
         .unwrap();
     let content = result["content"].as_str().unwrap();
     let first_line = content.lines().next().unwrap();
-    assert!(
-        first_line.ends_with("…<truncated>"),
-        "超长行应带截断标记: {first_line}"
-    );
-    // 锚点哈希基于截断后的展示行（截断优先，哈希在后）
-    let (line_no, id) = crate::executor::hashline::parse_anchor(first_line).unwrap();
-    assert_eq!(line_no, 1);
-    let expected_line = format!("{}…<truncated>", "x".repeat(2000));
-    assert_eq!(id, crate::executor::hashline::line_hash(&expected_line));
+    // 长行完整返回（行内不截断，内容匹配编辑无前缀）
+    assert_eq!(first_line, &long, "长行应完整返回，而非截断");
     // 总行数仍是原始行数
     assert_eq!(result["total_lines"].as_u64(), Some(2));
 }
@@ -374,9 +364,10 @@ async fn test_read_file_default_limit_2000() {
         content.contains("(Showing lines 1-2000 of 2500. Use offset=2001 to continue.)"),
         "应提示续读偏移: {content}"
     );
-    let (line_no, _) =
-        crate::executor::hashline::parse_anchor(content.lines().next().unwrap()).unwrap();
-    assert_eq!(line_no, 1);
+    assert!(
+        content.starts_with("line 1\n"),
+        "窗口应从第 1 行开始: {content}"
+    );
 }
 
 #[tokio::test]
@@ -564,11 +555,7 @@ async fn test_apply_edit_success() {
 
     let registry = ToolRegistry::new(default_strict_policy());
     let edits = json!([
-        {
-            "start_line": 2,
-            "anchor": crate::executor::hashline::line_hash("let b = 2;"),
-            "new_lines": ["let b = 20;"]
-        }
+        { "old_string": "let b = 2;", "new_string": "let b = 20;" }
     ]);
     let result = registry
         .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
@@ -601,7 +588,7 @@ async fn test_apply_edit_rejects_path_traversal() {
     // `../` 逃逸路径：规范化后位于 allowed 目录之外，必须被安全策略拒绝。
     let escape = allowed.join("..").join("secret.txt");
     let registry = ToolRegistry::new(file_policy(vec![allowed.to_path_buf()], vec![]));
-    let edits = json!([{ "start_line": 1, "new_lines": ["x"] }]);
+    let edits = json!([{ "old_string": "a", "new_string": "x" }]);
     let result = registry
         .execute_apply_edit(&apply_edit_args(&escape, edits), "test-session", false)
         .await;
@@ -614,7 +601,7 @@ async fn test_apply_edit_rejects_when_file_write_disabled() {
     let mut policy = default_strict_policy();
     policy.allow_file_write = false;
     let registry = ToolRegistry::new(policy);
-    let edits = json!([{ "start_line": 1, "new_lines": ["x"] }]);
+    let edits = json!([{ "old_string": "a", "new_string": "x" }]);
     let result = registry
         .execute_apply_edit(
             &apply_edit_args(std::path::Path::new("any.txt"), edits),
@@ -635,7 +622,7 @@ async fn test_apply_edit_approval_denied() {
     // 默认（attended、无审批通道）：Medium 风险立即拒绝并降级为询问用户。
     let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
     let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
-    let edits = json!([{ "start_line": 1, "new_lines": ["x"] }]);
+    let edits = json!([{ "old_string": "a", "new_string": "x" }]);
     let result = registry
         .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
         .await;
@@ -660,7 +647,7 @@ async fn test_apply_edit_approval_approved() {
     };
     let workflow = Arc::new(ApprovalWorkflow::new(config));
     let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
-    let edits = json!([{ "start_line": 1, "new_lines": ["x"] }]);
+    let edits = json!([{ "old_string": "a", "new_string": "x" }]);
     let result = registry
         .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
         .await;
@@ -670,8 +657,8 @@ async fn test_apply_edit_approval_approved() {
 }
 
 #[tokio::test]
-async fn test_apply_edit_bad_anchor_is_conflict() {
-    // ADR-014：锚点不匹配是 conflict 类错误（edit.rs 已用冲突构造器），
+async fn test_apply_edit_not_found_is_conflict() {
+    // ADR-014：old_string 未找到是 conflict 类错误（文件当前内容与模型预期不符），
     // 工具包装器必须保留分类（否则 server 层收到 Custom 映射为 500 而非 409）。
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("code.rs");
@@ -679,17 +666,16 @@ async fn test_apply_edit_bad_anchor_is_conflict() {
 
     let registry = ToolRegistry::new(default_strict_policy());
     let edits = json!([
-        {
-            "start_line": 1,
-            "anchor": crate::executor::hashline::line_hash("完全不匹配的内容"),
-            "new_lines": ["let a = 10;"]
-        }
+        { "old_string": "完全不匹配的内容", "new_string": "let a = 10;" }
     ]);
     let err = registry
         .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
         .await
         .unwrap_err();
-    assert!(err.is_conflict(), "锚点不匹配应分类为 conflict：{err}");
+    assert!(
+        err.is_conflict(),
+        "old_string 未找到应分类为 conflict：{err}"
+    );
 }
 
 // ── apply_patch ───────────────────────────────────────────────────────────
@@ -893,7 +879,7 @@ async fn test_apply_edit_without_lsp_manager_unchanged() {
     let path = dir.path().join("code.txt");
     std::fs::write(&path, "a\nb\n").unwrap();
     let registry = ToolRegistry::new(default_strict_policy());
-    let edits = json!([{ "start_line": 1, "new_lines": ["x"] }]);
+    let edits = json!([{ "old_string": "a", "new_string": "x" }]);
     let result = registry
         .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
         .await
@@ -911,7 +897,7 @@ async fn test_apply_edit_with_lsp_manager_appends_diagnostics() {
     std::fs::write(&path, "fn main() {}\n").unwrap();
     let registry =
         ToolRegistry::new(default_strict_policy()).with_lsp_manager(seeded_manager(&path));
-    let edits = json!([{ "start_line": 1, "new_lines": ["fn main() {}"] }]);
+    let edits = json!([{ "old_string": "fn main() {}", "new_string": "fn main() {}" }]);
     let result = registry
         .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
         .await

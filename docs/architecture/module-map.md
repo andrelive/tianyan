@@ -22,11 +22,11 @@
 
 | 子模块 | 位置 | 职责 | 关键文件 |
 |--------|------|------|---------|
-| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 + 后台任务；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器/单调守卫/post-execute 监听器，DSH A1/A4 吸收）+ 内置可观测性监听器（`tool_registry/observability.rs`：统计/Trace/GEPA 历史/规则学习）；内置工具元数据单一事实源（`tool_registry/builtin_tools.rs`：schema/展示意图/短路清单） | `coordinator.rs`, `loop.rs`, `loop_tests.rs`, `tool_registry/`（含 `pipeline.rs`、`observability.rs`、`builtin_tools.rs`）, `session_state.rs`, `builder.rs`, `background.rs` |
+| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 + 后台任务；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器/单调守卫/post-execute 监听器，DSH A1/A4 吸收）+ 内置可观测性监听器（`tool_registry/observability.rs`：统计/Trace/GEPA 历史/规则学习）；内置工具元数据单一事实源（`tool_registry/builtin_tools.rs`：schema/展示意图） | `coordinator.rs`, `loop.rs`, `loop_tests.rs`, `tool_registry/`（含 `pipeline.rs`、`observability.rs`、`builtin_tools.rs`）, `session_state.rs`, `builder.rs`, `background.rs` |
 | `common` | `core/src/common/` | 通用类型、错误处理、日志配置、token 估算、`StructuredMessage`、多模态片段（`ContentPart`/`ImageUrl`）；横切单点：UTF-8 截断（`truncate.rs`）、HTTP 客户端工厂（`http.rs`） | `error.rs`, `logging.rs`, `token_estimator.rs`, `truncate.rs`, `http.rs`, `types/`（含 `retrieval_trace.rs`、`content_part.rs`） |
 | `config` | `core/src/config/` | TOML 配置管理 + 环境变量 + 向导 | `mod.rs`, `wizard.rs`, `validation.rs` |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 管线 + 组装） | `pipeline.rs`, `assembler.rs`, `retrieval/`, `compression/` |
-| `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 编程助手执行原语（hashline 编辑、patch、文件浏览、搜索、符号、测试发现）+ Web 工具（搜索/抓取）；统一截断层含单行截断（`truncate.rs`：`truncate_line`/`MAX_LINE_CHARS`） | `actions.rs`, `security.rs`, `command.rs`, `output_parse.rs`, `approval/`, `verification.rs`, `judge.rs`, `hashline.rs`, `truncate.rs`, `edit.rs`, `patch.rs`, `fs.rs`, `search.rs`, `symbols.rs`, `project.rs`, `test_discovery.rs`, `web.rs` |
+| `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、测试发现）+ Web 工具（搜索/抓取）；统一截断层含单行截断（`truncate.rs`：`truncate_line`/`MAX_LINE_CHARS`） | `actions.rs`, `security.rs`, `command.rs`, `output_parse.rs`, `approval/`, `verification.rs`, `judge.rs`, `truncate.rs`, `edit.rs`, `patch.rs`, `fs.rs`, `search.rs`, `symbols.rs`, `project.rs`, `test_discovery.rs`, `web.rs` |
 | `lsp` | `core/src/lsp/` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储） | `registry.rs`, `client.rs`, `diagnostics.rs` |
 | `knowledge` | `core/src/knowledge/` | 知识库导入（解析、图像、注入管道） | `ingestor/`, `parser.rs`, `image/` |
 | `memory` | `core/src/memory/` | 长期记忆提取 | `extractor.rs` |
@@ -102,7 +102,7 @@
 - [ADR-005: SQLite 作为主存储后端](decisions/005-sqlite-backend.md)
 - [ADR-006: 工作区快照独立存储](decisions/006-snapshot-storage-exception.md) — snapshot 的 VFS 例外
 - [ADR-007: Core 依赖环消除与共享基础设施归属](decisions/007-core-dependency-cycle-removal.md) — SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉决策
-- [ADR-009: 语义化编辑双原语](decisions/009-hashline-editing.md) — hashline 锚点 + unified diff 信封（apply_edit / apply_patch）
+- [ADR-009: 语义化编辑双原语](decisions/009-hashline-editing.md) — 内容匹配 + unified diff 信封（apply_edit / apply_patch）
 - [ADR-008: 快照升级](decisions/008-snapshot-upgrade.md) — gzip 压缩 + GC + similar diff（扩展 ADR-006）
 - [ADR-010: 对话多模态链路](decisions/010-multimodal-message-chain.md) — 图片输入（Message.content_parts + Part::Image）+ MCP 截图落盘
 - [ADR-011: 子任务授权边界](decisions/011-subagent-approval-boundary.md) — 子 agent 无交互审批

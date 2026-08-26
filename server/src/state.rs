@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 // 内部 crate
+use crate::scheduled_tasks::ScheduledAgentTaskManager;
 use tianyan::agent::AgentCoordinator;
 use tianyan::config::{ModelEntry, TianyanConfig};
 use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
@@ -273,6 +274,8 @@ pub struct AppState {
     mcp_tools: Arc<McpToolManager>,
     /// 定时任务调度器（无启用的模型 Provider 时为 None，在 `start_server` 中装配）
     scheduler: Arc<RwLock<Option<Arc<TaskScheduler>>>>,
+    /// 定时智能体任务管理器（start_server 创建后装配；无 Provider 时为 None）。
+    scheduled_agent_tasks: Arc<RwLock<Option<Arc<ScheduledAgentTaskManager>>>>,
     /// 全系统共享 SQLite（ADR-005；后台任务持久化/唤醒，ADR-013）
     sqlite_db: SqliteDb,
     /// 事件总线（T1 事件驱动：文件监听/webhook → 处理器/唤醒）
@@ -289,6 +292,10 @@ pub struct AppState {
     clipboard_pending: Arc<RwLock<Option<PendingCapture>>>,
     /// 用户问题服务（ask_user 同步等待用户回答；回答端点提交入口）。
     user_questions: Arc<tianyan::agent::user_questions::UserQuestionService>,
+    /// 活跃 SSE 对话流的取消句柄：session_id → cancel 标志（供显式取消端点触发）。
+    /// 跑完再取：客户端断开不再取消 agent，主动「停止」经此端点显式取消。
+    stream_cancels:
+        Arc<Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
 }
 
 impl AppState {
@@ -473,12 +480,14 @@ impl AppState {
             model_services: Arc::new(RwLock::new(model_services)),
             mcp_tools,
             scheduler: Arc::new(RwLock::new(None)),
+            scheduled_agent_tasks: Arc::new(RwLock::new(None)),
             sqlite_db,
             event_bus: Arc::new(tianyan::events::EventBus::new()),
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             clipboard_outbox,
             clipboard_pending: Arc::new(RwLock::new(None)),
             user_questions,
+            stream_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
 
@@ -495,6 +504,13 @@ impl AppState {
     /// 获取用户问题服务（ask_user 回答提交入口）。
     pub fn user_questions(&self) -> Arc<tianyan::agent::user_questions::UserQuestionService> {
         self.user_questions.clone()
+    }
+
+    /// 获取活跃对话流取消注册表（session_id → cancel 标志）。
+    pub fn stream_cancels(
+        &self,
+    ) -> Arc<Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> {
+        self.stream_cancels.clone()
     }
 
     /// 服务关停标志（Ctrl+C / SIGTERM / 桌面端退出时置位）。
@@ -707,6 +723,16 @@ impl AppState {
     /// 获取定时任务调度器（未装配或无 Provider 时为 None）。
     pub async fn scheduler(&self) -> Option<Arc<TaskScheduler>> {
         self.scheduler.read().await.clone()
+    }
+
+    /// 装配定时智能体任务管理器（start_server 创建后调用）。
+    pub async fn attach_scheduled_agent_tasks(&self, m: Option<Arc<ScheduledAgentTaskManager>>) {
+        *self.scheduled_agent_tasks.write().await = m;
+    }
+
+    /// 获取定时智能体任务管理器（未装配时为 None）。
+    pub async fn scheduled_agent_tasks(&self) -> Option<Arc<ScheduledAgentTaskManager>> {
+        self.scheduled_agent_tasks.read().await.clone()
     }
 
     /// 获取共享模型服务（配置热更新后自动指向新实例）。

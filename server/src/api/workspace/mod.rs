@@ -5,7 +5,7 @@
 //! - `read`：文件读取（委托 core executor 的锚点行读取）
 //! - `diff`：差异对比（快照对比 / 文件间对比）
 //! - `apply-patch`：补丁应用（编程工作台保存主通道）
-//! - `apply-edit`：hashline 语义编辑（LLM/外部工作流）
+//! - `apply-edit`：内容匹配编辑（LLM/外部工作流）
 
 /// 工作区请求处理函数
 pub mod handlers;

@@ -9,6 +9,12 @@ interface ShortcutHandlers {
 export function useKeyboardShortcuts(handlers: ShortcutHandlers) {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      // 焦点在可编辑元素（输入框/文本域/内容可编辑）时忽略全局快捷键，
+      // 避免在重命名/输入中误触（如 Ctrl+N 新建、Ctrl+Shift+Delete 清空）。
+      const t = e.target as HTMLElement | null;
+      const editable =
+        t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+      if (editable) return;
       const ctrl = e.ctrlKey || e.metaKey;
       if (ctrl && !e.shiftKey && e.key === 'n') {
         e.preventDefault();

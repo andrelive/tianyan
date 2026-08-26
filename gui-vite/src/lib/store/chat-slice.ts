@@ -70,6 +70,8 @@ export interface ChatSlice {
   startNewAssistantTurn: (sessionId?: string | null) => void;
   /** 标记最后一条 assistant 消息为截断（finish_reason === 'length'） */
   markLastMessageTruncated: (sessionId?: string | null) => void;
+  /** 标记最后一条 assistant 消息为流式中断（手动停止：残留部分输出打标） */
+  markLastMessageInterrupted: (sessionId?: string | null) => void;
   /** 附加 token 用量到 assistant 消息（完成 chunk 携带；按会话独立取数） */
   attachLastMessageUsage: (usage: TokenUsage, sessionId?: string | null) => void;
   clearMessages: () => void;
@@ -254,21 +256,37 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       updateSessionMessages(s, sessionId, (msgs) => {
         if (msgs.length === 0) return msgs;
         const last = msgs[msgs.length - 1];
+        const segments = last.segments ?? [];
+        // 时间线：文本增量若末段已是 text 直接合并，避免逐 delta 建对象
+        // （长回答 O(n^2) 段膨胀 → O(n)）
+        const lastSeg = segments[segments.length - 1];
+        const nextSegments =
+          lastSeg && lastSeg.type === 'text'
+            ? [...segments.slice(0, -1), { type: 'text' as const, text: lastSeg.text + delta }]
+            : [...segments, { type: 'text' as const, text: delta }];
         const updated = [...msgs];
         updated[updated.length - 1] = {
           ...last,
           content: last.content + delta,
-          // 时间线：文本增量按到达顺序追加
-          segments: [...(last.segments ?? []), { type: 'text', text: delta }],
+          segments: nextSegments,
         };
         return updated;
       }),
     ),
   appendSkillCalls: (calls, sessionId) =>
     set((s) =>
-      updateSessionMessages(s, sessionId, (msgs) =>
-        updateLastAssistant(msgs, (m) => ({ ...m, skill_calls: calls })),
-      ),
+      updateSessionMessages(s, sessionId, (msgs) => {
+        const idx = lastAssistantIndex(msgs);
+        if (idx < 0) return msgs;
+        const prev = msgs[idx].skill_calls ?? [];
+        // 按 skill_id 去重追加（服务端逐 chunk 发增量；整体覆盖会丢多技能事件）
+        const existing = new Set(prev.map((c) => c.skill_id));
+        const fresh = calls.filter((c) => !existing.has(c.skill_id));
+        if (fresh.length === 0) return msgs;
+        const updated = [...msgs];
+        updated[idx] = { ...updated[idx], skill_calls: [...prev, ...fresh] };
+        return updated;
+      }),
     ),
   appendToolCalls: (calls, sessionId) =>
     set((s) =>
@@ -354,6 +372,12 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
     set((s) =>
       updateSessionMessages(s, sessionId, (msgs) =>
         updateLastAssistant(msgs, (m) => ({ ...m, truncated_by_length: true })),
+      ),
+    ),
+  markLastMessageInterrupted: (sessionId) =>
+    set((s) =>
+      updateSessionMessages(s, sessionId, (msgs) =>
+        updateLastAssistant(msgs, (m) => ({ ...m, interrupted: true })),
       ),
     ),
   attachLastMessageUsage: (usage, sessionId) =>

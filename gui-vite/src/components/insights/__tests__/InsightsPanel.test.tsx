@@ -84,9 +84,13 @@ describe('InsightsPanel', () => {
     expect(screen.getByText('60 分前')).toBeInTheDocument();
   });
 
-  it('shows error state with retry button when scheduler status request fails', async () => {
+  it('shows error state with retry button when both scheduler and usage fail', async () => {
+    // 一处失败不再拖垮整面板（allSettled 分区容错）：仅双失败整体报错
     server.use(
       http.get('/api/v1/scheduler/status', () => {
+        return new HttpResponse(null, { status: 500 });
+      }),
+      http.get('/api/v1/stats', () => {
         return new HttpResponse(null, { status: 500 });
       }),
     );

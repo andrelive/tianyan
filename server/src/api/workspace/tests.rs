@@ -323,9 +323,9 @@ async fn tree_session_bound_workdir_missing_returns_bad_request() {
 // read
 // ---------------------------------------------------------------------------
 
-/// 文本文件读取：逐行 `N#ID|content` 锚点前缀 + 总行数。
+/// 文本文件读取：纯内容 + 总行数（内容匹配编辑：无行号/哈希前缀）。
 #[tokio::test]
-async fn read_returns_hashline_content_for_text_file() {
+async fn read_returns_plain_content_for_text_file() {
     let dir = tempdir().unwrap();
     let workdir = dir.path().join("work");
     std::fs::create_dir_all(&workdir).unwrap();
@@ -345,14 +345,8 @@ async fn read_returns_hashline_content_for_text_file() {
         )
     );
     let content = value["content"].as_str().unwrap();
-    assert!(
-        content.starts_with("1#"),
-        "content 应带行锚点前缀: {content}"
-    );
-    assert!(
-        content.contains("|alpha"),
-        "content 应包含行内容: {content}"
-    );
+    // 内容匹配编辑：read_file 输出纯内容（无行号/哈希前缀）
+    assert_eq!(content, "alpha\nbeta");
     assert_eq!(value["total_lines"], 2);
     assert_eq!(value["truncated"], false);
 }
@@ -602,9 +596,9 @@ async fn tree_endpoint_rejects_dotdot_with_400() {
     assert!(body["error"].is_string());
 }
 
-/// read 端点 → 200 + 锚点行内容（端到端验证 core 委托链路）。
+/// read 端点 → 200 + 纯内容（端到端验证 core 委托链路）。
 #[tokio::test]
-async fn read_endpoint_returns_hashline_content() {
+async fn read_endpoint_returns_plain_content() {
     let dir = tempdir().unwrap();
     let workdir = dir.path().join("work");
     std::fs::create_dir_all(&workdir).unwrap();
@@ -627,7 +621,7 @@ async fn read_endpoint_returns_hashline_content() {
         .await
         .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(body["content"].as_str().unwrap().starts_with("1#"));
+    assert_eq!(body["content"].as_str().unwrap(), "alpha\nbeta");
     assert_eq!(body["total_lines"], 2);
 }
 
@@ -734,9 +728,9 @@ async fn apply_patch_endpoint_rejects_dotdot_path() {
     assert!(body["error"].as_str().unwrap().contains("非法路径"));
 }
 
-/// apply-edit 成功路径：hashline 锚点定位 + 落盘 + 响应 edits_applied=1。
+/// apply-edit 成功路径：内容匹配定位 + 落盘 + 响应 edits_applied=1。
 #[tokio::test]
-async fn apply_edit_endpoint_applies_hashline_edit() {
+async fn apply_edit_endpoint_applies_content_edit() {
     let dir = tempdir().unwrap();
     let workdir = dir.path().join("work");
     std::fs::create_dir_all(&workdir).unwrap();
@@ -744,13 +738,12 @@ async fn apply_edit_endpoint_applies_hashline_edit() {
     let config = test_config(dir.path(), Some(&workdir));
     let (app, _state) = crate::create_app(config).await.unwrap();
 
-    let anchor = tianyan::executor::hashline::line_hash("beta");
     let response = app
         .oneshot(post_json(
             "/api/v1/workspace/apply-edit",
             json!({
                 "path": "a.txt",
-                "edits": [{ "start_line": 2, "anchor": anchor, "new_lines": ["BETA"] }],
+                "edits": [{ "old_string": "beta", "new_string": "BETA" }],
             }),
         ))
         .await
@@ -767,9 +760,9 @@ async fn apply_edit_endpoint_applies_hashline_edit() {
     assert_eq!(disk, "alpha\nBETA\n");
 }
 
-/// apply-edit 锚点不匹配（内容漂移）→ 409（前端提示"文件已被修改"）。
+/// apply-edit old_string 未找到（内容漂移）→ 409（前端提示"文件已被修改"）。
 #[tokio::test]
-async fn apply_edit_endpoint_anchor_mismatch_returns_409() {
+async fn apply_edit_endpoint_not_found_returns_409() {
     let dir = tempdir().unwrap();
     let workdir = dir.path().join("work");
     std::fs::create_dir_all(&workdir).unwrap();
@@ -782,7 +775,7 @@ async fn apply_edit_endpoint_anchor_mismatch_returns_409() {
             "/api/v1/workspace/apply-edit",
             json!({
                 "path": "a.txt",
-                "edits": [{ "start_line": 1, "anchor": "ff", "new_lines": ["x"] }],
+                "edits": [{ "old_string": "完全不存在的原文", "new_string": "x" }],
             }),
         ))
         .await
@@ -794,7 +787,7 @@ async fn apply_edit_endpoint_anchor_mismatch_returns_409() {
         .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["success"], false);
-    assert!(body["error"].as_str().unwrap().contains("锚点"));
+    assert!(body["error"].as_str().unwrap().contains("未找到"));
 }
 
 /// apply-patch 接受 git 风格补丁（jsdiff `createTwoFilesPatch` 产物）：
@@ -873,7 +866,7 @@ async fn apply_edit_endpoint_missing_file_returns_404() {
             "/api/v1/workspace/apply-edit",
             json!({
                 "path": "ghost.rs",
-                "edits": [{ "start_line": 1, "new_lines": ["x"] }],
+                "edits": [{ "old_string": "a", "new_string": "x" }],
             }),
         ))
         .await

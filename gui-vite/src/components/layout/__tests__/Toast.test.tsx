@@ -25,7 +25,7 @@ describe('Toast', () => {
 
   it('shows message when toast is set', () => {
     useAppStore.setState({
-      toast: { message: '操作成功', type: 'success' },
+      toasts: [{ id: 't', message: '操作成功', type: 'success' }],
     });
     renderToast();
     expect(screen.getByText('操作成功')).toBeInTheDocument();
@@ -33,7 +33,7 @@ describe('Toast', () => {
 
   it('renders error variant with correct styling', () => {
     useAppStore.setState({
-      toast: { message: '发生错误', type: 'error' },
+      toasts: [{ id: 't', message: '发生错误', type: 'error' }],
     });
     renderToast();
 
@@ -45,7 +45,7 @@ describe('Toast', () => {
 
   it('renders success variant with correct styling', () => {
     useAppStore.setState({
-      toast: { message: '保存成功', type: 'success' },
+      toasts: [{ id: 't', message: '保存成功', type: 'success' }],
     });
     renderToast();
 
@@ -57,7 +57,7 @@ describe('Toast', () => {
 
   it('renders info variant with correct styling', () => {
     useAppStore.setState({
-      toast: { message: '请稍候', type: 'info' },
+      toasts: [{ id: 't', message: '请稍候', type: 'info' }],
     });
     renderToast();
 
@@ -69,13 +69,13 @@ describe('Toast', () => {
 
   it('auto-hides after 3 seconds', () => {
     useAppStore.setState({
-      toast: { message: '自动消失', type: 'info' },
+      toasts: [{ id: 't', message: '自动消失', type: 'info' }],
     });
     renderToast();
 
     // Toast should be visible initially
     expect(screen.getByText('自动消失')).toBeInTheDocument();
-    expect(useAppStore.getState().toast).not.toBeNull();
+    expect(useAppStore.getState().toasts).toHaveLength(1);
 
     // Fast-forward 3 seconds
     act(() => {
@@ -83,12 +83,12 @@ describe('Toast', () => {
     });
 
     // Toast should be null (hidden)
-    expect(useAppStore.getState().toast).toBeNull();
+    expect(useAppStore.getState().toasts).toHaveLength(0);
   });
 
   it('can be dismissed by clicking on the toast', () => {
     useAppStore.setState({
-      toast: { message: '可关闭', type: 'info' },
+      toasts: [{ id: 't', message: '可关闭', type: 'info' }],
     });
     renderToast();
 
@@ -99,12 +99,12 @@ describe('Toast', () => {
     fireEvent.click(toastWrapper);
 
     // Toast should be dismissed
-    expect(useAppStore.getState().toast).toBeNull();
+    expect(useAppStore.getState().toasts).toHaveLength(0);
   });
 
   it('renders dismiss button', () => {
     useAppStore.setState({
-      toast: { message: '带关闭按钮', type: 'info' },
+      toasts: [{ id: 't', message: '带关闭按钮', type: 'info' }],
     });
     renderToast();
 
@@ -115,7 +115,7 @@ describe('Toast', () => {
   it('clears the timer on unmount', () => {
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
     useAppStore.setState({
-      toast: { message: '卸载测试', type: 'info' },
+      toasts: [{ id: 't', message: '卸载测试', type: 'info' }],
     });
     const { unmount } = renderToast();
 

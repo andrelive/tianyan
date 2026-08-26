@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **工具短路选择（G1）回滚**：`[agent] shortlist_tools` 配置与 `definitions_shortlisted`/`dynamic_tool_matches`/`TOOL_SHORTLIST_THRESHOLD` 实现全量移除，`BUILTIN_TOOLS` 表去除 `core`/`keywords` 字段。原因：工具清单位于 OpenAI 请求前缀区（prompt 缓存 key），逐轮按 query 过滤使工具集合会话内漂移，破坏 ADR-012 前缀匹配缓存。全部工具改为恒常可见（确定性装配），前缀逐会话稳定。
+
+### Fixed（前端交互审查落地，2026-08-25）
+- **手动停止标记**：ChatPanel handleStop 给当前流式消息打 `interrupted:true`，残留部分输出显示「流式中断，已保留部分输出」，与服务端中断语义一致
+- **发送竞态**：handleSend 改读 store 同步流状态防同帧双击并发两条流；useChatStream 增加代际计数，丢弃 stop 后旧流的迟到 onComplete/onError，不再覆盖新流 streaming 状态
+- **后端运行时错误**：chat/stream 的 agent 运行失败分支发 `ChatStreamEvent::error`（原仅 log、SSE 干净结束 → 前端留空气泡无提示）
+- **流式渲染**：chat-slice 文本 delta 若末段为 text 直接合并（O(n²) 段膨胀 → O(n)）；appendSkillCalls 按 skill_id 去重追加（不再整体覆盖丢多技能事件）
+- **键盘快捷键**：焦点在可编辑元素时忽略全局快捷键（避免输入中误触 Ctrl+N / Ctrl+Shift+Delete 清空流式会话）
+- **工具运行态**：ToolCallCard 结果未达时显示「运行中」spinner（区分执行中 vs 无结果）
+- **知识库浏览**：切换 L0/L1/L2 层级时重取当前选中条目内容（原显示不变"点了没反应"）；知识搜索加「加载更多」分页（offset）
+- **会话列表**：键盘导航改以 DOM 焦点为锚（修复分组/占位行导致的索引错位）；删除会话统一走 ConfirmDialog 二次确认；删除当前会话后跳回 /chat
+- **文件树**：高度改为 ResizeObserver 自适应容器（原固定 600px 被裁剪）；子目录加载失败行内红色重试提示（原静默变空）
+- **Diff 面板**：选中文件且存在当前会话时自动加载 diff（去掉手工填会话 ID + 点加载）；会话 ID 仍可手改以对比其他会话
+- **侧边栏**：新增「文件」一级入口；审批/任务图标带待办角标（低频轮询）
+- **洞察面板**：scheduler/stats 改 allSettled 分区容错（一处失败不再拖垮整面板，双失败保留原始错误）
+- **任务面板**：结果/错误可展开全文；会话 ID 可点击跳转对应会话
+- **错误边界**：路由级 ErrorBoundary 独立隔离各面板（单面板崩溃不拖垮整应用，导航按 pathname 重置）
+- **列表搜索**：工具/技能/子智能体面板加名称/描述过滤（空结果有提示态）
+- **审批倒计时**：待审批卡显示剩余自动处理时间（按 requested_at + timeout_secs 每秒刷新）
+- **自动轮询**：检索轨迹/记忆面板 8s 静默刷新（useResource 新增 `silentReload` 不闪 Spinner；原仅手动刷新）
+- **SSE 跑完再取（B）**：客户端断开不再取消 agent——本地助手后台任务不因 SSE 断线中断。后端每个 SSE 事件设 `id`；断线时 forwarder 进入排空模式（继续消费让 agent 跑完并持久化）；新增 `POST /chat/streams/{session_id}/cancel` 显式「停止」端点；前端停止走取消端点、断线显示「任务继续在后台运行」+「刷新结果」（不再 reload 覆盖 / 不再重跑该轮）
+- **Toast 堆叠**：store 从单槽 `toast` 改为数组 `toasts`，多条提示各自 3s 自动消失、右上角纵向堆叠（连续错误不再互相覆盖）
+- **死状态清理**：移除未使用的 `isSidebarOpen`/`toggleSidebar`/`setSidebarOpen` 及对应测试
+- **记忆面板双栏**：列表 + 详情左右分栏（对齐工具/技能/角色面板布局），不再上下堆叠
+- **apply_patch 提为主力编辑工具**：对齐 Aider/Codex/opencode 的业界共识（unified diff + 上下文锚定，抗行号漂移、无需逐字节复现整块原文）。工具描述/roles/ADR-009/default_soul 均改为「修改优先 apply_patch」；apply_edit 降为仅用于能精确复现原文的极小改动。**不做空白容差匹配**（容差会让模型漏掉的空行/格式问题被应用进文件，长期破坏格式）。
+- **apply_edit 改为内容匹配（ADR-009 修订）**：`apply_edit` 从行号+hashline 锚点彻底改为 `old_string`/`new_string` 内容匹配（对齐 DSH/Claude Code），免疫行号漂移；`read_file` 输出纯内容（去掉行号/哈希前缀，省输入 token）；`ContentEdit{old_string,new_string,replace_all}` 唯一匹配，old_string 未找到/不唯一返回 409。移除 hashline 模块；同步更新工具描述、server workspace API、测试与全部文档（ADR-009/module-map/module-descriptions/gap-analysis/AGENTS.md）。
+- **工具描述中文化 + 编辑链路说明**：全部内置工具描述改为中文（中文 token 更省）；read_file 说明行号+哈希供 apply_edit 用、apply_edit 说明哈希取自 read_file/报错返回值（可省略锚点用行号+内容）、apply_patch 说明超大单行文件应改用 diff 片段编辑
+- **read_file 完整行返回**：read_file 不再截断行内内容（此前超长行被截断，模型读到不完整行 → 无法正确推理/整行替换）；改为返回完整行 + 整行哈希锚点，与 apply_edit 校验一致（长行锚点 bug 一并修复）。输出体量由 offset/limit 行数与统一字节预算兜底
+- **输出 `\r` 归一化**：模型输出可能带裸回车符（CRLF/孤立 \r），渲染前统一转 \n（MessageBubble 正文 + 思考块），避免正文出现 `\r` 字符
+- **回撤横幅残留修复**：发起新消息时清空 `lastRollbackMessageId`，「已回退—撤销回退」横幅不再残留在输出底部
+- **历史会话定位**：进入会话（非流式）时自动滚动到最新输出位置，不再停在顶部；流式中仍仅近底部才跟随
+- **定时智能体任务（新能力）**：可指令智能体（schedule_task 工具）或经 REST API 创建定时任务——按完整 cron 调用 agent 在指定工作区完成给定指令。任务定义持久化到 {data_dir}/scheduled_agent_tasks.json（重启恢复）。**调度基础设施收敛为一套**：核心 TaskScheduler 升级为完整 cron 语义（引入 cron crate 解析，替代原 */N 间隔）+ 支持运行期动态注册/注销；定时 agent 任务注册进同一 TaskScheduler（复用其调度循环/运行统计/状态查询），不再用独立循环。前端「任务」面板新增「定时任务」区（列表 + 新建 + 删除）。接口：GET/POST /api/v1/scheduled-tasks、DELETE /api/v1/scheduled-tasks/{id}。
+
 ### Added
 - **Tauri + React + TypeScript + Axum** 桌面应用架构（替代原 CLI-only 模式）
 - **Agent Loop 架构**：LLM 自主工具调用 + 流式 SSE 响应（6 种 chunk_type）

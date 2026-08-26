@@ -186,10 +186,14 @@ export async function getSkills(): Promise<SkillListResponse> {
   return apiGet<SkillListResponse>('/skills');
 }
 
-/** 语义搜索知识库（关键词查询，返回命中条目列表）。 */
-export async function searchKnowledge(query: string, limit = 10): Promise<KnowledgeSearchResponse> {
+/** 语义搜索知识库（关键词查询，返回命中条目列表；offset 用于分页加载更多）。 */
+export async function searchKnowledge(
+  query: string,
+  limit = 10,
+  offset = 0,
+): Promise<KnowledgeSearchResponse> {
   return apiGet<KnowledgeSearchResponse>(
-    `/knowledge/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+    `/knowledge/search?q=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}`,
   );
 }
 
@@ -533,6 +537,50 @@ export async function fetchTasks(): Promise<BackgroundTask[]> {
 /** 取消一个后台任务（仅 pending/running 有效；404 任务不存在）。 */
 export async function cancelTask(taskId: string): Promise<CancelTaskResponse> {
   return apiPost<CancelTaskResponse>(`/tasks/${encodeURIComponent(taskId)}/cancel`, {});
+}
+
+/** 显式取消进行中的对话流（「停止」按钮；跑完再取语义下断线不取消，仅主动停止）。 */
+export async function cancelChatStream(sessionId: string): Promise<{ status: string }> {
+  return apiPost<{ status: string }>(
+    `/chat/streams/${encodeURIComponent(sessionId)}/cancel`,
+    {},
+  );
+}
+
+// ========== Scheduled Agent Tasks API ==========
+
+/** 定时智能体任务（到点调用 agent 在指定工作区工作）。 */
+export interface ScheduledAgentTask {
+  id: string;
+  name: string;
+  cron: string;
+  workspace: string;
+  prompt: string;
+  enabled: boolean;
+  created_at: number;
+  last_run_at: number | null;
+  next_run_at: number | null;
+  last_result: string | null;
+}
+
+/** 列出全部定时智能体任务。 */
+export async function fetchScheduledTasks(): Promise<ScheduledAgentTask[]> {
+  return apiGet<ScheduledAgentTask[]>('/scheduled-tasks');
+}
+
+/** 创建定时智能体任务。 */
+export async function createScheduledTask(req: {
+  name: string;
+  cron: string;
+  workspace: string;
+  prompt: string;
+}): Promise<ScheduledAgentTask> {
+  return apiPost<ScheduledAgentTask>('/scheduled-tasks', req);
+}
+
+/** 删除定时智能体任务。 */
+export async function deleteScheduledTask(id: string): Promise<{ deleted: boolean }> {
+  return apiDelete<{ deleted: boolean }>(`/scheduled-tasks/${encodeURIComponent(id)}`);
 }
 
 // ========== Session compression API ==========

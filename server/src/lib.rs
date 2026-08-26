@@ -22,6 +22,8 @@ use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 use crate::agent_builder::create_model_services;
 use crate::api::events::processor as event_processor;
 use crate::evolution_executor::AgentEvolutionExecutor;
+use crate::scheduled_tasks::manager::ScheduledAgentTaskManager;
+use crate::scheduled_tasks::tool::ScheduleTaskTool;
 
 // Import API module
 pub mod agent_builder;
@@ -29,6 +31,7 @@ pub mod api;
 pub mod evolution_executor;
 pub mod mcp_bridge;
 pub mod notification;
+pub mod scheduled_tasks;
 pub mod state;
 
 use api::create_api_router;
@@ -530,6 +533,33 @@ async fn start_server_inner(
         // 启动任务调度器
         TaskScheduler::start_with_scheduler(scheduler.clone(), task_ctx.clone()).await?;
         info!("任务调度器已启动");
+
+        // 定时智能体任务管理器（schedule_task 工具 + REST API + 后台循环）
+        {
+            let data_dir = state.config().read().await.storage.data_dir.clone();
+            let manager = Arc::new(ScheduledAgentTaskManager::new(
+                state.agent_lock(),
+                state.session_manager(),
+                &data_dir,
+            ));
+            state
+                .attach_scheduled_agent_tasks(Some(manager.clone()))
+                .await;
+            // 注入 schedule_task 动态工具（agent 构建后追加，LLM 可见可调用）
+            state
+                .agent_lock()
+                .read()
+                .await
+                .register_dynamic_tools(vec![Arc::new(ScheduleTaskTool::new(manager.clone()))])
+                .await;
+            // 收敛到一套调度器：绑定 TaskScheduler + 恢复持久化任务（完整 cron 由
+            // 核心调度器承担，不再用独立循环）
+            manager
+                .bind_scheduler(Some(scheduler.clone()), Some(task_ctx.clone()))
+                .await;
+            manager.load_and_register().await;
+        }
+
         Some(scheduler)
     } else {
         warn!("没有启用的模型服务，跳过所有定时任务注册");

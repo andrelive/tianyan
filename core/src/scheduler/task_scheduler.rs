@@ -3,9 +3,12 @@
 //! 本模块提供基于 cron 表达式的任务调度功能，管理所有后台任务。
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{TimeZone, Utc};
+use cron::Schedule;
 use serde::Serialize;
 use tokio::sync::RwLock;
 
@@ -181,14 +184,70 @@ pub struct TaskStatus {
 /// 统一任务调度器。
 ///
 /// 自研轻量实现（非 tokio-cron-scheduler 依赖）：每个任务一个 tokio
-/// 间隔循环；cron 表达式仅支持 `*/N` 间隔语义（详见 [`parse_cron_interval`]）。
+/// 循环，按完整 cron 表达式（`cron` crate 解析）计算下次触发时刻。
+/// 支持启动时注册与运行期动态注册（`register_dynamic_task`）。
 pub struct TaskScheduler {
     /// 已注册的任务。
     tasks: RwLock<HashMap<String, RegisteredTask>>,
     /// 运行状态。
     running: std::sync::atomic::AtomicBool,
-    /// 任务执行句柄（用于取消）。
-    handles: RwLock<Vec<tokio::task::JoinHandle<()>>>,
+    /// 任务执行句柄（task_id → 循环句柄；用于动态注销时单独取消）。
+    handles: RwLock<HashMap<String, tokio::task::JoinHandle<()>>>,
+}
+
+/// 计算 cron 在 after_epoch 之后的下次触发时刻（epoch 秒；供显示/API 使用）。
+pub fn next_run_at(cron: &str, after_epoch: i64) -> Option<i64> {
+    let schedule = Schedule::from_str(cron).ok()?;
+    let after = Utc.timestamp_opt(after_epoch, 0).single()?;
+    let next = schedule.after(&after).next()?;
+    Some(next.timestamp())
+}
+
+/// 计算从当前时刻到 cron 下次触发的时间间隔（秒）。
+fn next_delay_secs(cron: &str) -> Option<u64> {
+    let schedule = Schedule::from_str(cron).ok()?;
+    let now = Utc::now();
+    let next = schedule.after(&now).next()?;
+    let secs = (next - now).num_seconds();
+    Some(secs.max(1) as u64)
+}
+
+/// 单个任务的 cron 循环：计算下次触发时刻 → sleep 到点 → 执行 → 重复。
+async fn run_task_loop(sched: Arc<TaskScheduler>, ctx: Arc<TaskContext>, task_id: String) {
+    loop {
+        let delay = {
+            let tasks = sched.tasks.read().await;
+            let cron = match tasks.get(&task_id) {
+                Some(t) => &t.definition.cron_expression,
+                None => return, // 任务已注销
+            };
+            match next_delay_secs(cron) {
+                Some(d) => d,
+                None => {
+                    tracing::warn!(task = %task_id, cron = %cron, "cron parse failed, stopping task");
+                    return;
+                }
+            }
+        };
+        tokio::time::sleep(tokio::time::Duration::from_secs(delay)).await;
+        if !sched.is_running() {
+            break;
+        }
+        if sched.execute_task(&task_id, &ctx).await.is_none() {
+            break; // 任务已注销
+        }
+    }
+}
+
+/// 为单个任务启动 cron 循环（startup 与运行期动态注册共用）。
+async fn spawn_task_loop(scheduler: Arc<TaskScheduler>, ctx: Arc<TaskContext>, task_id: String) {
+    let handle = tokio::spawn(run_task_loop(scheduler.clone(), ctx, task_id.clone()));
+    scheduler
+        .handles
+        .write()
+        .await
+        .insert(task_id.clone(), handle);
+    tracing::info!("启动任务调度：{}", task_id);
 }
 
 impl TaskScheduler {
@@ -200,7 +259,7 @@ impl TaskScheduler {
         Self {
             tasks: RwLock::new(HashMap::new()),
             running: std::sync::atomic::AtomicBool::new(false),
-            handles: RwLock::new(Vec::new()),
+            handles: RwLock::new(HashMap::new()),
         }
     }
 
@@ -230,52 +289,7 @@ impl TaskScheduler {
         let task_ids = scheduler.get_task_ids().await;
 
         for task_id in task_ids {
-            let sched = scheduler.clone();
-            let ctx = ctx.clone();
-            let task_info = match scheduler.get_task_info(&task_id).await {
-                Some(info) => info,
-                None => {
-                    tracing::warn!("任务 {} 信息不存在，可能已被注销，跳过", task_id);
-                    continue;
-                }
-            };
-
-            // 解析 cron 表达式获取间隔（简化实现，使用固定间隔）
-            // 格式：秒 分钟 小时 日期 月份 星期
-
-            // "0 */5 * * * *" = 每 5 分钟
-            // "0 */10 * * * *" = 每 10 分钟
-            let interval_secs = parse_cron_interval(&task_info.1);
-
-            tracing::info!(
-                "启动任务调度：{} ({}), 间隔：{} 秒",
-                task_info.0,
-                task_id,
-                interval_secs
-            );
-
-            let handle = tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
-                // 消费首个立即 tick：任务不在启动时触发（cron 语义对齐——
-                // 首次执行在第一个完整间隔后；防止 evolution 等长任务启动即跑）
-                interval.tick().await;
-
-                loop {
-                    interval.tick().await;
-
-                    if !sched.is_running() {
-                        break;
-                    }
-
-                    match sched.execute_task(&task_id, &ctx).await {
-                        None => tracing::warn!(task = %task_id, "定时任务未找到"),
-                        Some(_result) => {}
-                    }
-                }
-            });
-
-            scheduler.handles.write().await.push(handle);
+            spawn_task_loop(scheduler.clone(), ctx.clone(), task_id).await;
         }
 
         tracing::info!("任务调度器已启动");
@@ -288,9 +302,10 @@ impl TaskScheduler {
 
         // 取消所有任务句柄
         let mut handles = self.handles.write().await;
-        for handle in handles.drain(..) {
+        for handle in handles.values() {
             handle.abort();
         }
+        handles.clear();
 
         tracing::info!("任务调度器已关闭");
         Ok(())
@@ -334,6 +349,31 @@ impl TaskScheduler {
         );
 
         Ok(())
+    }
+
+    /// 运行期动态注册任务：注册即起 cron 循环（用于用户动态创建的任务）。
+    pub async fn register_dynamic_task(
+        self: &Arc<Self>,
+        definition: TaskDefinition,
+        ctx: Arc<TaskContext>,
+    ) -> crate::common::error::Result<()> {
+        let id = definition.id.clone();
+        self.register_task(definition).await?;
+        if self.is_running() {
+            spawn_task_loop(self.clone(), ctx, id).await;
+        }
+        Ok(())
+    }
+
+    /// 注销任务：移除定义并取消其循环。
+    pub async fn unregister_task(&self, task_id: &str) -> bool {
+        let removed = self.tasks.write().await.remove(task_id).is_some();
+        if removed {
+            if let Some(handle) = self.handles.write().await.remove(task_id) {
+                handle.abort();
+            }
+        }
+        removed
     }
 
     /// 停止调度器。
@@ -453,78 +493,35 @@ impl Default for TaskScheduler {
     }
 }
 
-/// 解析 cron 表达式获取间隔秒数（自研简化实现，非完整 cron 语义）。
-///
-/// 支持 6 字段格式（秒 分钟 小时 日 月 星期），但仅 `*/N` 字段参与
-/// 间隔计算：
-///
-/// - `"0 */5 * * * *"` = 每 5 分钟 = 300 秒
-/// - `"0 */10 * * * *"` = 每 10 分钟 = 600 秒
-///
-/// 语义边界（有意收缩，勿按完整 cron 预期）：
-/// - 固定值字段（如秒位 `0`/`30`）只表达相位，被忽略（首个 tick 不
-///   对齐相位）；
-/// - 日/月/星期字段不支持，恒被忽略；
-/// - 无任何 `*/N` 字段或解析失败 → 回退默认 300 秒并告警。
-fn parse_cron_interval(cron: &str) -> u64 {
-    let parts: Vec<&str> = cron.split_whitespace().collect();
-    if parts.len() != 6 {
-        tracing::warn!(
-            cron = %cron,
-            expected_parts = 6,
-            actual_parts = parts.len(),
-            "Cron 表达式格式不支持，回退到默认 300 秒间隔"
-        );
-        return 300;
-    }
-
-    // 6 字段格式: 秒 分钟 小时 日 月 星期
-    let fields: [(u64, &str); 6] = [
-        (1, parts[0]),     // 秒 → 秒
-        (60, parts[1]),    // 分钟 → 秒
-        (3600, parts[2]),  // 小时 → 秒
-        (86400, parts[3]), // 日 → 秒
-        (0, parts[4]),     // 月 (暂不支持)
-        (0, parts[5]),     // 星期 (暂不支持)
-    ];
-
-    let mut interval: Option<u64> = None;
-
-    for (multiplier, field) in &fields {
-        if *multiplier == 0 {
-            continue; // 跳过月/星期字段
-        }
-        if let Some(val_str) = field.strip_prefix("*/") {
-            if let Ok(val) = val_str.parse::<u64>() {
-                let secs = val * multiplier;
-                interval = Some(match interval {
-                    Some(existing) => existing.min(secs),
-                    None => secs,
-                });
-            }
-        } else if *field != "*" {
-            // 固定值: 不作为间隔处理
-            if let Ok(_val) = field.parse::<u64>() {
-                continue;
-            }
-        }
-    }
-
-    match interval {
-        Some(secs) if secs > 0 => secs,
-        _ => {
-            tracing::warn!(
-                cron = %cron,
-                "Cron 表达式解析失败，回退到默认 300 秒间隔"
-            );
-            300
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn test_next_run_at_interval_minutes() {
+        // 真 cron 对齐：00:00 之后下一个 */30 分点是 00:30
+        assert_eq!(next_run_at("0 */30 * * * *", 0), Some(1800));
+        // 00:01:01 之后下一个每 5 分钟对齐点（0,5,10...）是 00:05:00
+        assert_eq!(next_run_at("0 */5 * * * *", 61), Some(300));
+    }
+
+    #[test]
+    fn test_next_run_at_daily() {
+        let ts = |y, mo, d, h, mi| {
+            Utc.with_ymd_and_hms(y, mo, d, h, mi, 0)
+                .unwrap()
+                .timestamp()
+        };
+        assert_eq!(
+            next_run_at("0 30 9 * * *", ts(2026, 8, 25, 9, 29)),
+            Some(ts(2026, 8, 25, 9, 30))
+        );
+        assert_eq!(
+            next_run_at("0 30 9 * * *", ts(2026, 8, 25, 9, 31)),
+            Some(ts(2026, 8, 26, 9, 30))
+        );
+    }
 
     struct TestTask;
 

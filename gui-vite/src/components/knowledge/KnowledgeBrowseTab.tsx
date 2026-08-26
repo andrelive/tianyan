@@ -79,6 +79,33 @@ export default function KnowledgeBrowseTab({ active = true }: { active?: boolean
     }
   };
 
+  // 查看层级切换时重取当前选中条目的内容（P0：否则显示不变，"点了没反应"）。
+  // prevLevelRef 保证只在层级真正变化时触发（选中条目不触发重复请求）。
+  const prevLevelRef = useRef(browseLevel);
+  useEffect(() => {
+    const entry = selectedBrowseEntry;
+    if (prevLevelRef.current === browseLevel || !entry) return;
+    prevLevelRef.current = browseLevel;
+    if (entry.is_directory && !(entry.has_abstract || entry.has_overview || entry.has_detail)) {
+      return; // 纯容器目录无内容层级，无需重取
+    }
+    let cancelled = false;
+    setBrowseContentLoading(true);
+    fetchKnowledgeEntryContent(entry.uri, browseLevel)
+      .then((res) => {
+        if (!cancelled) setBrowseContent(res.content);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setBrowseContent(`加载失败: ${toErrorMessage(err, '未知错误')}`);
+      })
+      .finally(() => {
+        if (!cancelled) setBrowseContentLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [browseLevel, selectedBrowseEntry]);
+
   const handleDeleteClick = (entry: KnowledgeEntryItem) => {
     setDeleteError(null);
     setConfirmTarget({ uri: entry.uri, name: entry.name, isDirectory: entry.is_directory });

@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
 import {
   answerChat,
+  cancelChatStream,
   compressSession,
   deleteSessionMessage,
   fetchApprovalStatus,
@@ -22,7 +23,7 @@ import { usePolling } from '@/hooks/use-polling';
 import { useSessionHistory } from '@/hooks/use-session-history';
 import { toErrorMessage } from '@/lib/errors';
 import { lastMessageUsage, sumSessionUsage } from '@/lib/token-usage';
-import { MessageSquare, Loader2, Undo2 } from 'lucide-react';
+import { MessageSquare, Loader2, RotateCcw, Undo2 } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
@@ -63,6 +64,8 @@ export default function ChatPanel() {
   /** 最近一次流式完成 chunk 携带的真实窗口（会话流式时的权威值；
       历史会话回退到 chatModels[selectedModel].context_length）。 */
   const liveWindowRef = useRef(0);
+  /** 流式中途断线（网络错误）标志：显示「任务继续在后台运行」提示。 */
+  const [streamError, setStreamError] = useState(false);
 
   /** 当前会话自己的上下文占用（lib/token-usage 纯函数；切换会话随 messages 变化） */
   const lastUsage = useMemo(
@@ -153,19 +156,19 @@ export default function ChatPanel() {
     }
   };
 
-  // Auto-scroll to bottom when messages change
+  // Auto-scroll：非流式（进入历史会话/轮完成）时直接定位到最新输出（不再停在顶部）；
+  // 流式中仅当用户近底部才跟随（避免向上回读时被强拉到底）。
   useEffect(() => {
-    if (scrollRef.current) {
-      const el = scrollRef.current;
-      // Only auto-scroll if user is near the bottom
-      const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
-      if (isNearBottom) {
-        requestAnimationFrame(() => {
-          el.scrollTop = el.scrollHeight;
-        });
-      }
+    if (!scrollRef.current) return;
+    const el = scrollRef.current;
+    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
+    const shouldScroll = streamStatus !== 'streaming' || isNearBottom;
+    if (shouldScroll) {
+      requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+      });
     }
-  }, [messages, pendingClarification]);
+  }, [messages, pendingClarification, streamStatus]);
 
   // ─── Custom streaming via fetch + ReadableStream ─────────────────
 
@@ -176,13 +179,14 @@ export default function ChatPanel() {
     onUsageWindow: (windowTokens) => {
       liveWindowRef.current = windowTokens;
     },
-    onError: (sessionId, error) => {
+    onError: (sessionId) => {
       // 流结束按归属会话置 idle（UI 可能已切走，不能用 currentSessionId 闭包值）
       useAppStore.getState().setStreamStatus('idle', sessionId);
-      useAppStore.getState().showToast(`发送失败: ${error.message}`, 'error');
-      // 同步服务端消息（本地消息 id 为 uuid，回退需服务端 msg_xxx 定位键；
-      // 顺带清理失败残留的空 assistant 占位）
-      if (sessionId) reloadSession(sessionId);
+      // 跑完再取：断线不取消 agent，任务继续在后台运行并持久化结果。
+      // 保留本地已流式的部分输出（不标记 interrupted——任务仍在跑）；
+      // 用户点「刷新结果」获取服务端最终结果。
+      setStreamError(true);
+      useAppStore.getState().showToast('连接断开，任务继续在后台运行', 'info');
     },
     onComplete: (sessionId) => {
       useAppStore.getState().setStreamStatus('idle', sessionId);
@@ -196,9 +200,15 @@ export default function ChatPanel() {
 
   const handleSend = useCallback(
     async (content: string, images: string[] = []) => {
-      if (streamStatus === 'streaming') return;
+      // 同步守卫：读 store 最新值而非渲染闭包，防同一帧双击/连按并发两条流
+      const st = useAppStore.getState();
+      const activeKey = st.currentSessionId ?? PENDING_SESSION_KEY;
+      if ((st.streamStatus[activeKey] ?? 'idle') === 'streaming') return;
       const trimmed = content.trim();
       if (!trimmed && images.length === 0) return;
+
+      // 发起新轮：回撤已被新工作取代，清空撤销回退横幅（否则残留到输出底部）
+      setLastRollbackMessageId(null);
 
       // Add user message
       addMessage({
@@ -221,11 +231,10 @@ export default function ChatPanel() {
       // placeholder being the last element.
       const state = useAppStore.getState();
       const isNewSession = !state.currentSessionId;
-      state.setStreamStatus('streaming');
-      await startStream({
+      const payload = {
         session_id: state.currentSessionId,
         message: {
-          role: 'user',
+          role: 'user' as const,
           content: trimmed,
           images: images.length > 0 ? images : undefined,
           timestamp: new Date().toISOString(),
@@ -238,13 +247,17 @@ export default function ChatPanel() {
         thinking: state.thinkingEffort === 'off' ? undefined : state.thinkingEffort,
         // 新会话绑定工作区（工作区 = 会话的父级分组；服务端固化到会话头部）
         working_directory: isNewSession ? (state.newSessionWorkspace ?? undefined) : undefined,
-      });
+      };
+      // 清除上一次的断线标志
+      setStreamError(false);
+      state.setStreamStatus('streaming');
+      await startStream(payload);
       // 新会话已创建并固化工作区绑定：清除待绑定状态（每个新对话重新选择）
       if (isNewSession) {
         useAppStore.getState().setNewSessionWorkspace(null);
       }
     },
-    [streamStatus, addMessage, startStream],
+    [addMessage, startStream],
   );
 
   const handleRollback = useCallback(
@@ -342,8 +355,13 @@ export default function ChatPanel() {
   );
 
   const handleStop = useCallback(() => {
+    // 主动停止：显式调用取消端点（跑完再取语义下断线不取消，只有主动停止才取消）
+    const sid = useAppStore.getState().currentSessionId;
+    if (sid) void cancelChatStream(sid).catch(() => {});
     stopStream();
     setStreamStatus('idle');
+    // 给当前流式消息打 interrupted 标记（与服务端 finish=interrupted 语义一致）
+    useAppStore.getState().markLastMessageInterrupted(sid ?? undefined);
   }, [stopStream, setStreamStatus]);
 
   // 手动压缩当前会话上下文
@@ -422,6 +440,23 @@ export default function ChatPanel() {
               >
                 <Loader2 className="w-4 h-4 animate-spin" />
                 <span className="text-sm">后台任务完成，AI 正在汇总结果...</span>
+              </div>
+            )}
+
+            {/* 断线提示：跑完再取——任务继续在后台运行，刷新获取最终结果 */}
+            {streamError && streamStatus === 'idle' && (
+              <div className="flex items-center gap-2 py-2" role="alert" aria-live="polite">
+                <span className="text-xs text-amber-600 dark:text-amber-400">
+                  连接断开，任务继续在后台运行，完成后可刷新查看
+                </span>
+                <button
+                  type="button"
+                  onClick={() => currentSessionId && reloadSession(currentSessionId)}
+                  className="flex items-center gap-1 px-2.5 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+                >
+                  <RotateCcw size={12} />
+                  刷新结果
+                </button>
               </div>
             )}
           </div>

@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::executor::edit::EditSpec;
+use crate::executor::edit::ContentEdit;
 
 /// 读取文件参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -26,13 +26,13 @@ pub struct WriteFileParams {
     pub content: String,
 }
 
-/// 应用编辑参数（哈希锚定行编辑，1..=20 条）。
+/// 应用编辑参数（内容匹配编辑，1..=20 条）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ApplyEditParams {
     /// 文件路径。
     pub path: String,
-    /// 编辑规格列表。
-    pub edits: Vec<EditSpec>,
+    /// 编辑列表（每条 old_string 须唯一，除非 replace_all）。
+    pub edits: Vec<ContentEdit>,
 }
 
 /// 执行命令参数。

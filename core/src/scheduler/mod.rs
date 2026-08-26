@@ -24,6 +24,6 @@ mod task_state;
 pub mod tasks;
 
 pub use task_scheduler::{
-    TaskContext, TaskDefinition, TaskHandler, TaskPriority, TaskResult, TaskScheduler,
+    next_run_at, TaskContext, TaskDefinition, TaskHandler, TaskPriority, TaskResult, TaskScheduler,
 };
 pub use task_state::TaskStateStore;

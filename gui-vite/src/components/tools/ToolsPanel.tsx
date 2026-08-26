@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { getTools } from '@/lib/api-client';
 import type { ListToolsResponse, ToolInfo } from '@/lib/types';
 import { useResource } from '@/hooks/use-resource';
-import { Wrench, ChevronRight, Package } from 'lucide-react';
+import { Wrench, ChevronRight, Package, Search } from 'lucide-react';
 import { Spinner } from '@/components/ui/Spinner';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -15,10 +15,13 @@ import { EmptyState } from '@/components/ui/EmptyState';
  */
 export default function ToolsPanel() {
   const [selected, setSelected] = useState<ToolInfo | null>(null);
+  const [query, setQuery] = useState('');
   const { data, loading, error } = useResource<ListToolsResponse>(() => getTools(), [], {
     errorFallback: '加载工具失败',
   });
   const tools = data?.tools ?? [];
+  const q = query.trim().toLowerCase();
+  const filtered = q ? tools.filter((t) => t.name.toLowerCase().includes(q) || (t.description ?? '').toLowerCase().includes(q)) : tools;
 
   return (
     <div className="flex h-full">
@@ -32,6 +35,20 @@ export default function ToolsPanel() {
           <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
             系统内置原子操作（{tools.length} 个），LLM 通过 tool call 调用
           </p>
+          <div className="relative mt-3">
+            <Search
+              size={14}
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]"
+            />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="搜索工具..."
+              aria-label="搜索工具"
+              className="w-full pl-8 pr-3 py-1.5 text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500"
+            />
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-3">
@@ -41,9 +58,11 @@ export default function ToolsPanel() {
             <ErrorBanner message={error} />
           ) : tools.length === 0 ? (
             <EmptyState icon={Package} title="暂无可用工具" />
+          ) : filtered.length === 0 ? (
+            <EmptyState icon={Search} title="未找到匹配工具" />
           ) : (
             <div className="space-y-1">
-              {tools.map((tool) => (
+              {filtered.map((tool) => (
                 <button
                   key={tool.name}
                   onClick={() => setSelected(tool)}

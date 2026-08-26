@@ -4,7 +4,6 @@
       "default_top_k": 5,
       "learned_rules_top_k": 5,
       "max_turns": 200,
-      "shortlist_tools": true,
       "background_self_review": false,
       "working_directory": "F:\\\\work\\\\example"
     },

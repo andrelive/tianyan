@@ -4,7 +4,7 @@
 //! 编辑（apply-patch / apply-edit，编程工作台 Phase 2）。
 
 use serde::{Deserialize, Serialize};
-use tianyan::executor::edit::EditSpec;
+use tianyan::executor::edit::ContentEdit;
 
 /// 目录树响应。
 #[derive(Debug, Clone, Serialize)]
@@ -135,13 +135,13 @@ pub struct ApplyPatchResponse {
     pub total_files: usize,
 }
 
-/// apply-edit 请求体（hashline 语义编辑，供 LLM/外部工作流）。
+/// apply-edit 请求体（内容匹配编辑，供 LLM/外部工作流）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApplyEditRequest {
     /// 相对工作目录的路径。
     pub path: String,
-    /// 语义编辑列表（复用 core [`EditSpec`] 的 serde 契约）。
-    pub edits: Vec<EditSpec>,
+    /// 语义编辑列表（复用 core [`ContentEdit`] 的 serde 契约）。
+    pub edits: Vec<ContentEdit>,
     /// 会话 ID（解析会话绑定的工作目录；缺省 = 全局配置）。
     pub session_id: Option<String>,
 }

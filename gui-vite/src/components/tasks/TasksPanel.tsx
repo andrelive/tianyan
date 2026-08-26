@@ -1,4 +1,6 @@
 import { useState, useCallback } from 'react';
+import { Link } from 'react-router-dom';
+import ScheduledTasksSection from './ScheduledTasksSection';
 import { usePolling } from '@/hooks/use-polling';
 import { Spinner } from '@/components/ui/Spinner';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -60,6 +62,26 @@ function truncate(text: string, maxLen = RESULT_MAX_LEN): string {
   return `${text.slice(0, maxLen)}…`;
 }
 
+/** 可展开文本（超长结果/错误：默认截断，可展开全文——P1：长产出不再不可见）。 */
+function ExpandableText({ text, maxLen = RESULT_MAX_LEN }: { text: string; maxLen?: number }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > maxLen;
+  return (
+    <span>
+      {long && !open ? truncate(text, maxLen) : text}
+      {long && (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="ml-1.5 text-blue-600 dark:text-blue-400 underline hover:opacity-80"
+        >
+          {open ? '收起' : '展开'}
+        </button>
+      )}
+    </span>
+  );
+}
+
 export default function TasksPanel() {
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   // 正在取消的 task_id，用于禁用按钮防重复点击
@@ -109,6 +131,10 @@ export default function TasksPanel() {
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-6">
+        <ScheduledTasksSection />
+
+        <div className="mt-6 mb-2 border-t border-[var(--color-border)]" />
+
         {loading && <Spinner />}
 
         {!loading && tasks.length === 0 && <EmptyState icon={ListTodo} title="暂无任务" />}
@@ -135,7 +161,20 @@ export default function TasksPanel() {
                       </div>
                       <div className="flex items-center gap-2 mt-1.5 text-xs text-[var(--color-text-tertiary)]">
                         <StatusBadge status={task.status} />
-                        <span>会话 {task.parent_session_id ?? '—'}</span>
+                        {task.parent_session_id ? (
+                          <Link
+                            to={'/chat/' + task.parent_session_id}
+                            className="hover:text-blue-600 underline underline-offset-2"
+                            title="跳转到该会话"
+                          >
+                            会话{' '}
+                            {task.parent_session_id.length > 16
+                              ? task.parent_session_id.slice(0, 12) + '…'
+                              : task.parent_session_id}
+                          </Link>
+                        ) : (
+                          <span>会话 —</span>
+                        )}
                         <span>{formatTimestamp(task.created_at)}</span>
                         {task.completed_at !== null && (
                           <span>完成于 {formatTimestamp(task.completed_at)}</span>
@@ -164,7 +203,7 @@ export default function TasksPanel() {
                     <div className="flex items-start gap-2 mt-2 pt-2 border-t border-[var(--color-border)]">
                       <CircleCheck size={14} className="mt-0.5 shrink-0 text-green-500" />
                       <p className="text-xs text-[var(--color-text-secondary)] break-all">
-                        {truncate(task.result)}
+                        <ExpandableText text={task.result} />
                       </p>
                     </div>
                   )}
@@ -172,7 +211,7 @@ export default function TasksPanel() {
                     <div className="flex items-start gap-2 mt-2 pt-2 border-t border-[var(--color-border)]">
                       <CircleX size={14} className="mt-0.5 shrink-0 text-red-500" />
                       <p className="text-xs text-red-600 dark:text-red-400 break-all">
-                        {truncate(task.error)}
+                        <ExpandableText text={task.error} />
                       </p>
                     </div>
                   )}

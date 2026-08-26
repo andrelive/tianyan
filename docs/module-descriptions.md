@@ -28,7 +28,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `common` | 通用类型（按领域拆分）、错误处理、日志配置、token 估算 | error.rs, logging.rs, token_estimator.rs, types/ | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
 | `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
-| `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控）+ 编程助手执行原语（hashline 编辑、patch、文件浏览、搜索、符号、测试发现） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs, hashline.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
+| `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、测试发现） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
 | `lsp` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储） | registry.rs, client.rs, diagnostics.rs | ✅ 已集成 |
 | `snapshot` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | mod.rs | ✅ 正常使用 |
 | `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image/, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
@@ -161,9 +161,8 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `executor/approval/` — 审批工作流（`types.rs` 领域类型 + `workflow.rs` 状态机）
 - `executor/verification.rs` — 验证门控 + 结构化诊断（`StructuredDiagnostic` / `parse_json_diagnostics`，解析 `cargo check --message-format=json-render-diagnostics`）
 - `executor/judge.rs` — LLM-as-Judge 语义验证
-- `executor/hashline.rs` — hashline 锚点（`line_hash` 空白不敏感 FNV-1a；`format_line` 生成 `N#ID|content`；`parse_anchor` / `hash_line_pair`）
 - `executor/truncate.rs` — 统一截断层（`truncate_head` / `truncate_tail` / `truncate_spill`，`MAX_LINES = 2000` / `MAX_BYTES = 50KB`；单行截断 `truncate_line` / `MAX_LINE_CHARS = 2000` / `TRUNCATED_MARKER`，UTF-8 安全）；字节级前缀截断单点在 `common/truncate.rs`（`truncate_utf8_boundary`，session 存储与可观测性共用）
-- `executor/edit.rs` — 语义化编辑（`EditSpec` / `apply_edits_to_content` 纯函数 bottom-up 原子应用 / `apply_edit_action` / `detect_eol` CRLF 保留）
+- `executor/edit.rs` — 语义化编辑（`ContentEdit` / `apply_edits_to_content` 内容匹配唯一定位 + bottom-up 原子应用 / `apply_edit_action` / `detect_eol` CRLF 保留）
 - `executor/patch.rs` — unified diff（`parse_patch` 解析 `*** Update File:` 信封 / `apply_patch_to_content` similar fuzzy seek / `apply_patch_action` 多文件原子，`FUZZY_RATIO_THRESHOLD = 0.75`）
 - `executor/fs.rs` — 文件浏览（`execute_glob` rg --files + 回退 walk、mtime 排序；`execute_list_dir` 目录优先 + 分页；`MAX_GLOB_RESULTS = 200`）
 - `executor/search.rs` — ripgrep 封装（`SearchOptions` / `OutputMode`（files_with_matches 默认）/ `execute_search_code`；64KB 记录拒绝、100 submatch 上限、2000 字符行截断、`.git` 排除、offset/head_limit 分页、无效正则报"正则无效"）
@@ -183,7 +182,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `VerificationGate` | 验证门控（执行后自动运行 cargo check/测试验证产出） |
 | `LlmJudge` | LLM-as-Judge（语义判断，解析 `-- JUDGMENT: PASS/FAIL/NEEDS_CHANGES`） |
 | `StructuredDiagnostic` | 结构化编译诊断（file/line/column/level/code/message/suggestion） |
-| `EditSpec` | 语义化编辑规格（start_line / anchor / old_lines / new_lines，hashline 防陈旧校验） |
+| `ContentEdit` | 内容匹配编辑规格（old_string / new_string / replace_all） |
 | `Truncated` | 截断结果（text / truncated / total_lines / total_bytes / spill_path） |
 
 ### 1.6 lsp 子模块
@@ -456,7 +455,7 @@ Zustand 全局状态（三切片）+ Tailwind 主题变量 + react-router 路由
 | components/ui/FieldRow | 表单字段行原语（settings 与 wizard 共用；E4 收敛 ×4 拷贝） | components/ui/FieldRow.tsx |
 | components/chat | 聊天域（ChatPanel 编排层/SessionPage/MessageBubble/工具卡片/思考选择/ApprovalBanner…） | components/chat/ |
 | components/settings | 设置面板（模型/存储/安全/日志/记忆/检索/外观/连接/MCP/人格等 tab） | components/settings/ |
-| components/workspace | 工作区（文件树/查看器/WorkspaceDiffPanel/目录选择；fileViewerUtils 纯函数：分页 offset + hashline 剥离，F5 提取） | components/workspace/ |
+| components/workspace | 工作区（文件树/查看器/WorkspaceDiffPanel/目录选择；fileViewerUtils 纯函数：分页 offset，F5 提取） | components/workspace/ |
 | components/* | 技能/角色/工具/知识/记忆/任务/审批/洞察/检索轨迹/剪贴板/会话/向导/侧边栏/布局面板 | components/ |
 | components/ui/ | 视觉原语（Spinner/ErrorBanner/EmptyState/Modal/ConfirmDialog/FieldRow——confirm 替代 window.confirm） | components/ui/ |
 

@@ -12,11 +12,10 @@ describe('useAppStore', () => {
       messages: [],
       sessionMessages: {},
       streamStatus: {},
-      isSidebarOpen: true,
       theme: 'system',
       fontSize: 'medium',
       apiBaseUrl: 'http://localhost:3000',
-      toast: null,
+      toasts: [],
       selectedModel: null,
       configured: null,
     });
@@ -32,11 +31,10 @@ describe('useAppStore', () => {
     expect(state.messages).toEqual([]);
     expect(state.sessionMessages).toEqual({});
     expect(state.streamStatus).toEqual({});
-    expect(state.isSidebarOpen).toBe(true);
     expect(state.theme).toBe('system');
     expect(state.fontSize).toBe('medium');
     expect(state.apiBaseUrl).toBe('http://localhost:3000');
-    expect(state.toast).toBeNull();
+    expect(state.toasts).toEqual([]);
     expect(state.selectedModel).toBeNull();
     expect(state.configured).toBeNull();
   });
@@ -57,26 +55,6 @@ describe('useAppStore', () => {
 
     setView('chat');
     expect(useAppStore.getState().currentView).toBe('chat');
-  });
-
-  // ── Sidebar ──
-
-  it('toggleSidebar flips isSidebarOpen', () => {
-    expect(useAppStore.getState().isSidebarOpen).toBe(true);
-
-    useAppStore.getState().toggleSidebar();
-    expect(useAppStore.getState().isSidebarOpen).toBe(false);
-
-    useAppStore.getState().toggleSidebar();
-    expect(useAppStore.getState().isSidebarOpen).toBe(true);
-  });
-
-  it('setSidebarOpen sets isSidebarOpen explicitly', () => {
-    useAppStore.getState().setSidebarOpen(false);
-    expect(useAppStore.getState().isSidebarOpen).toBe(false);
-
-    useAppStore.getState().setSidebarOpen(true);
-    expect(useAppStore.getState().isSidebarOpen).toBe(true);
   });
 
   // ── Sessions ──
@@ -358,30 +336,29 @@ describe('useAppStore', () => {
 
   // ── Toast ──
 
-  it('showToast sets the toast', () => {
+  it('showToast appends toasts (stacking)', () => {
     useAppStore.getState().showToast('Something failed', 'error');
-    expect(useAppStore.getState().toast).toEqual({
-      message: 'Something failed',
-      type: 'error',
-    });
-
     useAppStore.getState().showToast('Done!', 'success');
-    expect(useAppStore.getState().toast).toEqual({
-      message: 'Done!',
-      type: 'success',
-    });
-
     useAppStore.getState().showToast('FYI', 'info');
-    expect(useAppStore.getState().toast).toEqual({
-      message: 'FYI',
-      type: 'info',
-    });
+    const toasts = useAppStore.getState().toasts;
+    expect(toasts).toHaveLength(3);
+    expect(toasts[0].message).toBe('Something failed');
+    expect(toasts[0].type).toBe('error');
+    expect(toasts[1].message).toBe('Done!');
+    expect(toasts[1].type).toBe('success');
+    expect(toasts[2].message).toBe('FYI');
+    expect(toasts[2].type).toBe('info');
+    expect(toasts.every((t) => typeof t.id === 'string' && t.id.length > 0)).toBe(true);
   });
 
-  it('hideToast clears the toast', () => {
-    useAppStore.setState({ toast: { message: 'hello', type: 'info' } });
-    useAppStore.getState().hideToast();
-    expect(useAppStore.getState().toast).toBeNull();
+  it('hideToast removes the toast by id', () => {
+    useAppStore.getState().showToast('hello', 'info');
+    useAppStore.getState().showToast('world', 'error');
+    const id = useAppStore.getState().toasts[0].id;
+    useAppStore.getState().hideToast(id);
+    const remaining = useAppStore.getState().toasts;
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].message).toBe('world');
   });
 
   // ── Settings ──

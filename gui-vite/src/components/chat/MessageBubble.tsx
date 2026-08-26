@@ -37,7 +37,7 @@ function ThinkingBlock({ text }: { text: string }) {
       </button>
       {open && (
         <div className="px-3 pb-2 text-base leading-relaxed whitespace-pre-wrap text-[var(--color-text-secondary)] italic opacity-80 max-h-64 overflow-y-auto">
-          {text}
+          {text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')}
         </div>
       )}
     </div>
@@ -117,7 +117,8 @@ function MarkdownContent({ text, isUser }: { text: string; isUser: boolean }) {
           },
         }}
       >
-        {text}
+        {/* 归一化行尾：模型输出可能带裸 \r（CRLF/孤立回车），统一转 \n 避免显示异常 */}
+        {text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')}
       </ReactMarkdown>
     </div>
   );

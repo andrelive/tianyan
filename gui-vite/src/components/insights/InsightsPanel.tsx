@@ -84,12 +84,23 @@ function TaskRow({ task }: { task: SchedulerTaskStatus }) {
 
 export default function InsightsPanel() {
   const { data, loading, error, reload } = useResource(
-    () => Promise.all([fetchSchedulerStatus(), fetchUsageStats()]),
+    // allSettled：调度器与使用统计相互独立，一处失败不再拖垮整面板（P1）。
+    async () => {
+      const [s, u] = await Promise.allSettled([fetchSchedulerStatus(), fetchUsageStats()]);
+      if (s.status === 'rejected' && u.status === 'rejected') {
+        // 双失败才整体报错：保留原始错误详情（含 HTTP 状态）
+        throw s.reason instanceof Error ? s.reason : new Error('调度器与使用统计均加载失败');
+      }
+      return {
+        scheduler: s.status === 'fulfilled' ? s.value : null,
+        stats: u.status === 'fulfilled' ? u.value : null,
+      };
+    },
     [],
     { errorFallback: '加载洞察数据失败' },
   );
-  const scheduler = data?.[0] ?? null;
-  const stats = data?.[1] ?? null;
+  const scheduler = data?.scheduler ?? null;
+  const stats = data?.stats ?? null;
 
   const tasks = scheduler?.tasks ?? [];
   const running = scheduler?.running ?? false;

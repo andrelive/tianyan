@@ -28,8 +28,6 @@ pub struct AgentLoopConfig {
     /// completed）；普通轮在结束前重试一次（思考模型"想完没说话"的恢复
     /// 机会），唤醒轮（后台任务完成触发，模型可能有意无需回复）不重试。
     pub allow_empty_answer: bool,
-    /// 工具短路选择（G1）：LLM 可见工具数超过阈值时按相关性过滤 schema。
-    pub shortlist_tools: bool,
 }
 
 impl Default for AgentLoopConfig {
@@ -37,7 +35,6 @@ impl Default for AgentLoopConfig {
         Self {
             max_turns: 200,
             allow_empty_answer: false,
-            shortlist_tools: true,
         }
     }
 }
@@ -188,34 +185,9 @@ impl AgentLoop {
         cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
     }
 
-    /// 提取工具短路选择的查询信号（G1）：最后一条用户消息的文本。
-    ///
-    /// 过滤以"当前任务意图"为相关性锚点；取不到用户消息时返回 None
-    /// （短路层保守回退为全量工具）。
-    fn shortlist_query(msgs: &[Message]) -> Option<String> {
-        msgs.iter()
-            .rev()
-            .find(|m| m.role == MessageRole::User)
-            .map(|m| m.content.clone())
-    }
-
-    /// 获取本轮的 LLM 可见工具定义（G1 工具短路选择）。
-    ///
-    /// 配置开启且工具总数超阈值时按 query 相关性过滤 schema；
-    /// 否则全量（行为零变化）。执行层不受影响（被过滤工具仍可执行）。
-    async fn tools_for_turn(&self, msgs: &[Message]) -> Vec<crate::model::types::ToolDefinition> {
-        if self.config.shortlist_tools {
-            self.tool_registry
-                .definitions_shortlisted(Self::shortlist_query(msgs).as_deref())
-                .await
-        } else {
-            self.tool_registry.definitions().await
-        }
-    }
-
     /// 构造本轮 LLM 请求（`run` / `run_stream` 共用，消除两条路径的重复）。
     ///
-    /// 统一处理：工具短路选择 → T6 动态 max_tokens → 思考强度 → 流式开关。
+    /// 统一处理：T6 动态 max_tokens → 思考强度 → 流式开关。
     /// 动态 max_tokens：优先上次请求实测输入（usage.prompt_tokens），
     /// 无实测时退化为 TokenEstimator 估算；预算不足 1024 时提前报错
     /// （不发送请求），交由压缩链路在后续轮次恢复。
@@ -226,7 +198,7 @@ impl AgentLoop {
         stream: bool,
         thinking_effort: Option<String>,
     ) -> Result<ChatCompletionRequest, TianyanError> {
-        let tools = self.tools_for_turn(msgs).await;
+        let tools = self.tool_registry.definitions().await;
 
         let max_tokens = self.chat_spec.and_then(|spec| {
             let measured = (self.last_input_usage.load(Ordering::Relaxed) > 0)

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { usePolling } from '@/hooks/use-polling';
 import { toErrorMessage } from '@/lib/errors';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';
@@ -26,6 +26,28 @@ const RISK_BADGE_CLASSES: Record<string, string> = {
   Critical:
     'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800',
 };
+
+/** 审批倒计时（P1：wait_for_approval 阻塞期间用户需知道还剩多久自动处理）。 */
+function CountdownText({ requestedAt, timeoutSecs }: { requestedAt: string; timeoutSecs: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const deadline = new Date(requestedAt).getTime() + timeoutSecs * 1000;
+  const remainMs = Math.max(deadline - now, 0);
+  const remainSec = Math.ceil(remainMs / 1000);
+  const mm = Math.floor(remainSec / 60);
+  const ss = remainSec % 60;
+  return (
+    <span
+      title={`请求于 ${formatDateTime(requestedAt)}，超时 ${timeoutSecs}s 自动处理`}
+      className="text-amber-600 dark:text-amber-400"
+    >
+      {remainSec > 0 ? `剩余 ${mm}:${String(ss).padStart(2, '0')} 自动处理` : '超时处理中'}
+    </span>
+  );
+}
 
 /** 决策 → 中文标签（后端返回大小写不固定，统一小写匹配）。 */
 const DECISION_LABELS: Record<string, string> = {
@@ -184,6 +206,7 @@ export default function ApprovalPanel() {
                             <div className="flex items-center gap-2 mt-1.5 text-xs text-[var(--color-text-tertiary)]">
                               <RiskBadge riskLevel={req.risk_level} />
                               <span>{formatDateTime(req.requested_at)}</span>
+                              <CountdownText requestedAt={req.requested_at} timeoutSecs={req.timeout_secs} />
                             </div>
                             {/* execute_command 类请求：展示命令文本 + 编辑后批准 */}
                             {command !== null && (

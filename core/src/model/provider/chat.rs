@@ -521,12 +521,26 @@ fn convert_messages(messages: &[Message]) -> Vec<ChatCompletionRequestMessage> {
                     calls
                         .iter()
                         .map(|c| {
+                            // 健壮性：历史中的工具调用参数若为非法 JSON（如流式截断/
+                            // 模型中途停止导致的截断参数），降级为 {} 再发送——否则上游
+                            // 因单个坏工具调用 400 拒绝整轮请求，污染后续所有对话。
+                            let arguments =
+                                if serde_json::from_str::<Value>(&c.function.arguments).is_ok() {
+                                    c.function.arguments.clone()
+                                } else {
+                                    tracing::warn!(
+                                        tool = %c.function.name,
+                                        id = %c.id,
+                                        "工具调用参数非合法 JSON，降级为 {{}} 发送"
+                                    );
+                                    "{}".to_string()
+                                };
                             ChatCompletionMessageToolCalls::Function(
                                 ChatCompletionMessageToolCall {
                                     id: c.id.clone(),
                                     function: OaFunctionCall {
                                         name: c.function.name.clone(),
-                                        arguments: c.function.arguments.clone(),
+                                        arguments,
                                     },
                                 },
                             )
@@ -647,6 +661,32 @@ mod convert_tests {
         );
         let converted = convert_messages(&[msg]);
         assert_eq!(converted.len(), 1);
+    }
+
+    #[test]
+    fn test_convert_assistant_sanitizes_invalid_tool_arguments() {
+        // 流式截断导致的非法 JSON 参数：发送前降级为 {}，避免上游 400
+        let msg = Message::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "call_bad".to_string(),
+                call_type: ToolCallType::Function,
+                function: FunctionCall {
+                    name: "apply_patch".to_string(),
+                    // 未闭合的 JSON（模拟截断）
+                    arguments: r#"{"patch": "*** Begin Patch"#.to_string(),
+                },
+            }],
+        );
+        let converted = convert_messages(&[msg]);
+        let ChatCompletionRequestMessage::Assistant(assistant) = &converted[0] else {
+            panic!("应生成 Assistant 消息");
+        };
+        let calls = assistant.tool_calls.as_ref().expect("应有 tool_calls");
+        let ChatCompletionMessageToolCalls::Function(f) = &calls[0] else {
+            panic!("应为 Function 调用");
+        };
+        assert_eq!(f.function.arguments, "{}");
     }
 
     #[test]

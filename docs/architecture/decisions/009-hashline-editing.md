@@ -1,4 +1,6 @@
-# ADR-009: 语义化编辑双原语 —— hashline 锚点 + unified diff 信封
+# ADR-009: 语义化编辑双原语 —— 内容匹配 + unified diff 信封
+
+> **2026-08 修订**：`apply_edit` 由早期 hashline 行锚点方案改为**内容匹配**（old_string/new_string，对齐 DSH / Claude Code），解决行号漂移导致的反复失败与 read_file 哈希前缀的输入 token 开销。文件名保留旧名以稳定链接。
 
 **日期**: 2026-08
 **状态**: ✅ 已采纳
@@ -23,13 +25,13 @@
 
 ## 决策
 
-**语义化编辑采用双原语**：`apply_edit`（hashline 锚点，小改）+ `apply_patch`（unified diff 信封，大改/多文件），作为 `write_file` 整文件覆盖的补充。hashline 机制参考 oh-my-opencode（code-yeongyu，移植自 oh-my-pi）。
+**语义化编辑采用双原语**：`apply_patch`（unified diff 信封 + 上下文锚定）为**主力编辑工具**（对齐 Aider/Codex/opencode）；`apply_edit`（内容匹配 old_string/new_string）仅保留给能精确复现原文的极小改动。二者作为 `write_file` 整文件覆盖的补充。`apply_edit` 采用内容匹配，取代早期 hashline 行锚点方案。
 
-1. **hashline 锚点**（`executor/hashline.rs`）：行内容哈希 `line_hash`（空白不敏感的 FNV-1a，2 hex），行前缀 `N#ID|content` 由 `format_line` 生成。read_file 输出带锚点行号；`apply_edit` 以 `EditSpec { start_line, anchor, old_lines, new_lines }` 定位，锚点与磁盘当前行哈希不匹配即拒绝（防陈旧校验），错误回喂最新锚点。
-2. **匹配级联不做纯 fuzzy**：锚点 + 行内容双校验；`apply_patch` 仅以 similar 相似度（`FUZZY_RATIO_THRESHOLD = 0.75`）做 hunk 头模糊定位（fuzzy seek），命中后逐行内容仍需匹配。不做无锚点的全局模糊替换。
+1. **内容匹配**（`executor/edit.rs`）：`apply_edit` 以 `ContentEdit { old_string, new_string, replace_all }` 在文件内容中查找 `old_string`（须唯一，多处出现需 `replace_all`）替换为 `new_string`。内容匹配天然免疫行号漂移；`read_file` 输出纯内容（无行号/哈希前缀），省输入 token。`old_string` 未找到/不唯一即拒绝（409 conflict），提示重新 read_file。
+2. **不做无锚点的纯 fuzzy**：`apply_edit` 用唯一 `old_string` 精确匹配（不做 fuzzy，避免误改位置）；`apply_patch` 仅以 similar 相似度（`FUZZY_RATIO_THRESHOLD = 0.75`）做 hunk 头模糊定位（fuzzy seek），命中后逐行内容仍需匹配。不做全局模糊替换。
 3. **批量原子**：`apply_edits_to_content` 纯函数自底向上应用（bottom-up，行号从大到小，避免前序编辑破坏后续行号），全部校验通过才写盘；`apply_patch_action` 多文件批量，任一文件失败整体回滚。
 4. **审批门控**：`Action` 新增 `ApplyEdit` / `ApplyPatch` 变体（`executor/types.rs`），风险分级 Medium，走既有 `ApprovalWorkflow`。
-5. **配套能力**：`executor/truncate.rs` 统一截断层（`MAX_LINES = 2000` / `MAX_BYTES = 50KB`，保头/保尾/落盘 spill）；`executor/fs.rs` 文件浏览（`execute_glob` / `execute_list_dir`，`MAX_GLOB_RESULTS = 200`）；read_file 增强（offset/limit、hashline 前缀、截断消息、二进制嗅探、目录模式）。
+5. **配套能力**：`executor/truncate.rs` 统一截断层（`MAX_LINES = 2000` / `MAX_BYTES = 50KB`，保头/保尾/落盘 spill）；`executor/fs.rs` 文件浏览（`execute_glob` / `execute_list_dir`，`MAX_GLOB_RESULTS = 200`）；read_file 增强（offset/limit、截断消息、二进制嗅探、目录模式）。
 
 diff 库选型（D2）：引入 `similar`（3.1.2，零依赖）用于 unified diff 生成与 patch 模糊定位；patch 解析/应用为自研薄层（`parse_patch`，参考 codex apply-patch 模式）。
 
@@ -38,7 +40,7 @@ diff 库选型（D2）：引入 `similar`（3.1.2，零依赖）用于 unified d
 ### 正面
 - 大文件局部修改不再整文件重写，Token 成本与出错面大幅下降
 - 双原语覆盖小改（apply_edit）与大改/多文件（apply_patch）场景，与业界工具能力对齐
-- hashline 防陈旧校验让编辑错误显式化，模型可据错误信息自我修正，不再静默覆盖
+- 内容匹配免疫行号漂移，模型编辑不再因行号漂移反复失败；read_file 无哈希前缀，输入 token 更省
 
 ### 负面 / 代价
 - 双原语增加模型工具选择负担，需在工具描述中明确适用边界
@@ -52,9 +54,8 @@ diff 库选型（D2）：引入 `similar`（3.1.2，零依赖）用于 unified d
 
 ## 关键文件
 
-- `core/src/executor/hashline.rs` — `line_hash` / `format_line` / `parse_anchor` / `hash_line_pair`
 - `core/src/executor/truncate.rs` — `truncate_head` / `truncate_tail` / `truncate_spill`、`Truncated`
-- `core/src/executor/edit.rs` — `EditSpec` / `apply_edits_to_content` / `apply_edit_action` / `detect_eol`（CRLF 保留）
+- `core/src/executor/edit.rs` — `ContentEdit` / `apply_edits_to_content` / `apply_edit_action` / `detect_eol`（CRLF 保留）
 - `core/src/executor/patch.rs` — `parse_patch` / `apply_patch_to_content` / `apply_patch_action`、`FUZZY_RATIO_THRESHOLD`
 - `core/src/executor/fs.rs` — `execute_glob` / `execute_list_dir`
 - `core/src/executor/types.rs` — `Action::ApplyEdit` / `Action::ApplyPatch`

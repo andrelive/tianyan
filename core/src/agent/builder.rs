@@ -499,7 +499,6 @@ impl AgentBuilder {
             session_manager.clone(),
             AgentLoopConfig {
                 max_turns: self.config.max_turns,
-                shortlist_tools: self.config.shortlist_tools,
                 ..Default::default()
             },
         );

@@ -30,7 +30,6 @@ describe('backend config contract snapshot', () => {
     // 字段名契约：后端发 learned_rules_top_k（曾漂移为 loaded_rules_top_k）
     expect(response.config.agent.learned_rules_top_k).toBe(state.learned_rules_top_k);
     // 后端新增字段透传（不丢）
-    expect(state.shortlist_tools).toBe(response.config.agent.shortlist_tools ?? true);
     expect(state.background_self_review).toBe(
       response.config.agent.background_self_review ?? false,
     );
@@ -44,7 +43,6 @@ describe('backend config contract snapshot', () => {
 
     // 保存时后端字段名必须正确（曾错写 loaded_rules_top_k 被 serde 静默丢弃）
     expect(emitted.agent.learned_rules_top_k).toBe(state.learned_rules_top_k);
-    expect(emitted.agent.shortlist_tools).toBe(state.shortlist_tools);
     expect(emitted.agent.background_self_review).toBe(state.background_self_review);
     expect(emitted.storage.backend).toBe(state.storage_backend);
     expect(emitted.security.safety_mode).toBe(state.safety_mode);
