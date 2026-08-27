@@ -25,6 +25,9 @@ jobs:
       - name: Build frontend
         run: cd gui-vite && npm run build
 
+      - name: Install protoc (lance-encoding build dependency)
+        uses: arduino/setup-protoc@v3
+
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked
 
