@@ -84,17 +84,28 @@ pub fn parse_patch(text: &str) -> Result<Vec<PatchFile>> {
         let line = raw.trim_end_matches('\r');
 
         if let Some(rest) = line.strip_prefix("*** Update File: ") {
-            // 闭合当前块与当前文件（块头在下一个头部之前必须已完整）
+            // 闭合当前块与当前文件
             close_hunk(&mut cur_hunk, &mut cur_file, line_num)?;
-            if let Some(pf) = cur_file.take() {
-                if pf.hunks.is_empty() {
-                    return Err(parse_err(line_num, "文件缺少 @@ 块头"));
-                }
-                files.push(pf);
-            }
             let path = rest.trim().to_string();
             if path.is_empty() {
                 return Err(parse_err(line_num, "文件路径为空"));
+            }
+            if let Some(pf) = cur_file.take() {
+                if pf.hunks.is_empty() {
+                    // 空文件段一律报错（静默丢弃 = 静默失败，模型会以为改过但实际没改）：
+                    // 同路径 = 重复头；异路径 = 该文件缺少补丁内容
+                    if pf.path == path {
+                        return Err(parse_err(
+                            line_num,
+                            format!("重复的 *** Update File 头: {path}"),
+                        ));
+                    }
+                    return Err(parse_err(
+                        line_num,
+                        format!("文件缺少补丁内容: {}", pf.path),
+                    ));
+                }
+                files.push(pf);
             }
             cur_file = Some(PatchFile {
                 path,
@@ -148,13 +159,17 @@ pub fn parse_patch(text: &str) -> Result<Vec<PatchFile>> {
     close_hunk(&mut cur_hunk, &mut cur_file, text.split('\n').count())?;
     if let Some(pf) = cur_file.take() {
         if pf.hunks.is_empty() {
-            return Err(parse_err(text.split('\n').count(), "文件缺少 @@ 块头"));
+            // 结尾空文件段同样报错（模型写了头但没写内容）
+            return Err(parse_err(
+                text.split('\n').count(),
+                format!("文件缺少补丁内容: {}", pf.path),
+            ));
         }
         files.push(pf);
     }
     if files.is_empty() {
         return Err(TianyanError::Custom(
-            "executor: apply_patch: 解析失败: 补丁为空或缺少 *** Update File 头部".to_string(),
+            "executor: apply_patch: 解析失败: 补丁为空或缺少补丁内容".to_string(),
         ));
     }
     Ok(files)

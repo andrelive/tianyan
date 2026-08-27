@@ -78,6 +78,23 @@ fn apply_patch_without_hunk_header_works() {
 }
 
 #[test]
+fn apply_patch_duplicate_file_header_errors() {
+    // 模型重复写 *** Update File 头：明确报"重复头"错误（便于模型纠正）
+    let text = "*** Update File: f.txt\n*** Update File: f.txt\n-b\n+B\n";
+    let err = parse_patch(text).unwrap_err();
+    assert!(err.to_string().contains("重复的 *** Update File 头"), "{err}");
+}
+
+#[test]
+fn apply_patch_empty_file_section_errors() {
+    // 模型写了头但没写内容（异路径空段）：明确报"文件缺少补丁内容"，
+    // 避免静默丢弃导致模型以为改过但实际没改
+    let text = "*** Update File: a.txt\n*** Update File: b.txt\n-b\n+B\n";
+    let err = parse_patch(text).unwrap_err();
+    assert!(err.to_string().contains("文件缺少补丁内容"), "{err}");
+}
+
+#[test]
 fn parse_patch_hunk_without_leading_header_errors() {
     let err = parse_patch("@@ -1,1 +1,1 @@\n x\n").unwrap_err();
     assert!(err.to_string().contains("解析失败"), "{err}");
