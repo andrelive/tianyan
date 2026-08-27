@@ -20,6 +20,7 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-clipboard-manager = "2"
+tauri-plugin-updater = "2"
 rfd = "0.17"
 
 # HTTP server

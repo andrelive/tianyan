@@ -102,7 +102,7 @@
 - [ADR-005: SQLite 作为主存储后端](decisions/005-sqlite-backend.md)
 - [ADR-006: 工作区快照独立存储](decisions/006-snapshot-storage-exception.md) — snapshot 的 VFS 例外
 - [ADR-007: Core 依赖环消除与共享基础设施归属](decisions/007-core-dependency-cycle-removal.md) — SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉决策
-- [ADR-009: 语义化编辑双原语](decisions/009-hashline-editing.md) — 内容匹配 + unified diff 信封（apply_edit / apply_patch）
+- [ADR-009: 语义化编辑双原语](decisions/009-semantic-editing.md) — 内容匹配 + unified diff 信封（apply_edit / apply_patch）
 - [ADR-008: 快照升级](decisions/008-snapshot-upgrade.md) — gzip 压缩 + GC + similar diff（扩展 ADR-006）
 - [ADR-010: 对话多模态链路](decisions/010-multimodal-message-chain.md) — 图片输入（Message.content_parts + Part::Image）+ MCP 截图落盘
 - [ADR-011: 子任务授权边界](decisions/011-subagent-approval-boundary.md) — 子 agent 无交互审批

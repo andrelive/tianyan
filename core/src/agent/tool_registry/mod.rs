@@ -286,7 +286,7 @@ impl ToolRegistry {
         self
     }
 
-    /// 设置 VFS 引用（search_knowledge 工具依赖）。
+    /// 设置 VFS 引用（search_vfs 工具依赖）。
     pub fn with_vfs(mut self, vfs: Arc<dyn VirtualFileSystem>) -> Self {
         self.vfs = Some(vfs);
         self
@@ -820,7 +820,7 @@ impl ToolRegistry {
                     .await
             }
             "grep" => self.execute_search_code(arguments).await,
-            "search_knowledge" => self.execute_search_knowledge(arguments).await,
+            "search_vfs" => self.execute_search_vfs(arguments).await,
             "vfs_read" => self.execute_vfs_read(arguments).await,
             "vfs_list" => self.execute_vfs_list(arguments).await,
             "call_skill" => self.execute_call_skill(arguments).await,
@@ -914,7 +914,7 @@ mod tests {
         let defs = registry.definitions().await;
         assert!(defs.iter().any(|d| d.function.name == "ask_user"));
         assert!(defs.iter().any(|d| d.function.name == "delegate_to_agent"));
-        assert!(defs.iter().any(|d| d.function.name == "search_knowledge"));
+        assert!(defs.iter().any(|d| d.function.name == "search_vfs"));
         assert!(defs.iter().any(|d| d.function.name == "vfs_read"));
         assert!(defs.iter().any(|d| d.function.name == "vfs_list"));
         assert!(defs.iter().any(|d| d.function.name == "self_check"));

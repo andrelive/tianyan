@@ -150,7 +150,7 @@ impl RoleRegistry {
                 tools: Some(vec![
                     "web_search".to_string(),
                     "web_fetch".to_string(),
-                    "search_knowledge".to_string(),
+                    "search_vfs".to_string(),
                     "vfs_read".to_string(),
                     "vfs_list".to_string(),
                     "grep".to_string(),
@@ -265,7 +265,7 @@ impl RoleRegistry {
                     "session_recall".to_string(),
                     "vfs_read".to_string(),
                     "vfs_list".to_string(),
-                    "search_knowledge".to_string(),
+                    "search_vfs".to_string(),
                     "read_file".to_string(),
                     "glob".to_string(),
                     "list_dir".to_string(),

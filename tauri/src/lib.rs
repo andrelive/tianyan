@@ -547,6 +547,51 @@ pub async fn wait_for_server_ready(port: u16) -> anyhow::Result<()> {
     ))
 }
 
+/// 启动时静默检查更新（tauri-plugin-updater）。
+///
+/// 有新版本则下载并安装（重启后生效）；无更新或失败仅记录日志，不打扰用户。
+/// 更新源在 tauri.conf.json 的 plugins.updater.endpoints（GitHub Releases）。
+async fn check_for_updates(app: tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+    // app.updater() 是同步方法，返回 Result<Updater, Error>
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            warn!("updater 初始化失败：{e}");
+            return;
+        }
+    };
+    match updater.check().await {
+        Ok(Some(update)) => {
+            info!("发现新版本 {}，询问用户是否安装", update.version);
+            // 原生对话框确认（spawn_blocking 避免阻塞异步运行时）
+            let install = tauri::async_runtime::spawn_blocking({
+                let version = update.version.clone();
+                move || {
+                    rfd::MessageDialog::new()
+                        .set_title("天演更新")
+                        .set_description(format!("发现新版本 {version}，是否现在安装？"))
+                        .set_buttons(rfd::MessageButtons::YesNo)
+                        .show()
+                }
+            })
+            .await
+            .unwrap_or(rfd::MessageDialogResult::No)
+                == rfd::MessageDialogResult::Yes;
+            if install {
+                match update.download_and_install(|_, _| {}, || {}).await {
+                    Ok(_) => info!("更新已安装，重启后生效"),
+                    Err(e) => warn!("更新安装失败：{e}"),
+                }
+            } else {
+                info!("用户取消更新");
+            }
+        }
+        Ok(None) => info!("已是最新版本"),
+        Err(e) => warn!("更新检查失败：{e}"),
+    }
+}
+
 /// 运行 Tauri 应用程序
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -670,6 +715,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // 单实例保护：双开时第二实例的启动参数转发到第一实例并聚焦主窗口，
         // 避免两个进程共享同一 SQLite/LanceDB 数据文件
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -722,6 +768,13 @@ pub fn run() {
             // 将 AppHandle 交给监督循环（服务器重启后注入新端口用）
             let _ = app_handle_tx.send(app.handle().clone());
             build_tray(app)?;
+            // 启动时静默检查更新（tauri-plugin-updater；有新版本则下载安装，重启生效）
+            {
+                let updater_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    check_for_updates(updater_app).await;
+                });
+            }
             Ok(())
         })
         .build(tauri::generate_context!())

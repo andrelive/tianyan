@@ -713,7 +713,7 @@ table.tb .lvl{display:inline-block;font-size:10px;border-radius:4px;padding:1px 
     <g class="flowbox" id="lp-exe"><rect x="960" y="240" width="280" height="96" rx="10"/>
       <text x="1100" y="266" text-anchor="middle" class="t1">execute_parallel（JoinSet 并发）</text>
       <text x="1100" y="286" text-anchor="middle" class="t2 mono">read_file · write_file · execute_command ·</text>
-      <text x="1100" y="304" text-anchor="middle" class="t2 mono">search_code · search_knowledge · call_skill ·</text>
+      <text x="1100" y="304" text-anchor="middle" class="t2 mono">search_code · search_vfs · call_skill ·</text>
       <text x="1100" y="322" text-anchor="middle" class="t2 mono">run_tests · verify_build · ask_user · delegate</text></g>
     <g class="edge" id="lp-back"><path d="M1100,336 C1100,420 660,420 660,236" marker-end="url(#ar)"/></g>
     <text x="800" y="410" class="el">回环 → LLM（每轮 persist assistant + tool）</text>
@@ -1058,7 +1058,7 @@ table.tb .lvl{display:inline-block;font-size:10px;border-radius:4px;padding:1px 
       <tr><td class="m">write_file</td><td>SecurityPolicy + ApprovalWorkflow</td><td>按路径风险分级（关键路径 High / test·temp Low / 其他 Medium）</td></tr>
       <tr><td class="m">execute_command</td><td>SecurityPolicy + ApprovalWorkflow</td><td>rm / del / format 为 Critical（默认拒绝）</td></tr>
       <tr><td class="m">search_code</td><td>Safe</td><td>代码检索</td></tr>
-      <tr><td class="m">search_knowledge</td><td>—</td><td>知识库检索（VFS）</td></tr>
+      <tr><td class="m">search_vfs</td><td>—</td><td>VFS 语义检索</td></tr>
       <tr><td class="m">call_skill</td><td>→ skills::SkillExecutor 桥接</td><td>按技能风险分级（shell / delete 为 High）</td></tr>
       <tr><td class="m">run_tests</td><td>Low</td><td>运行测试</td></tr>
       <tr><td class="m">verify_build</td><td>VerificationGate（LlmJudge）</td><td>LLM-as-Judge 验证门控</td></tr>

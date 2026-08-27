@@ -24,7 +24,7 @@
 | `write_file` | 写入文件 |
 | `execute_command` | 执行系统命令 |
 | `search_code` | 代码搜索 |
-| `search_knowledge` | 知识库检索 |
+| `search_vfs` | VFS 语义检索（文档/记忆/规则/技能） |
 | `vfs_read` | VFS 读取 |
 | `vfs_list` | VFS 列表 |
 | `call_skill` | 技能调用（桥接到 `SkillExecutor`） |

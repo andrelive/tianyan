@@ -22,7 +22,7 @@ pub enum ToolPresentation {
     Terminal,
     /// 差异编辑（apply_edit / apply_patch）：展示 diff 意图。
     Diff,
-    /// 搜索（grep / search_knowledge / glob / list_dir / discover_tests）：
+    /// 搜索（grep / search_vfs / glob / list_dir / discover_tests）：
     /// 结果列表。
     Search,
     /// Web（web_search / web_fetch）：链接卡片。

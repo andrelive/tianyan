@@ -1,4 +1,4 @@
-//! 知识库类工具执行器测试：search_knowledge / knowledge_ingest。
+//! 知识库类工具执行器测试：search_vfs / knowledge_ingest。
 
 use std::sync::Arc;
 
@@ -32,14 +32,12 @@ fn default_strict_policy() -> SecurityPolicy {
     }
 }
 
-// ── search_knowledge ─────────────────────────────────────────────────────
+// ── search_vfs ─────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_search_knowledge_not_configured() {
+async fn test_search_vfs_not_configured() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry
-        .execute_search_knowledge(r#"{"query":"hello"}"#)
-        .await;
+    let result = registry.execute_search_vfs(r#"{"query":"hello"}"#).await;
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -48,7 +46,7 @@ async fn test_search_knowledge_not_configured() {
 }
 
 #[tokio::test]
-async fn test_search_knowledge_success_surfaces_vfs_results() {
+async fn test_search_vfs_success_surfaces_vfs_results() {
     let uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["doc1".to_string()]);
     let vfs = MockVfs::builder()
         .with_content(&uri, ContentLevel::Abstract, "abstract text")
@@ -61,7 +59,7 @@ async fn test_search_knowledge_success_surfaces_vfs_results() {
     let registry = ToolRegistry::new(default_strict_policy()).with_vfs(Arc::new(vfs));
 
     let result = registry
-        .execute_search_knowledge(r#"{"query":"hello","top_k":5}"#)
+        .execute_search_vfs(r#"{"query":"hello","top_k":5}"#)
         .await
         .unwrap();
     assert_eq!(result["count"].as_u64(), Some(1));
@@ -81,14 +79,12 @@ async fn test_search_knowledge_success_surfaces_vfs_results() {
 }
 
 #[tokio::test]
-async fn test_search_knowledge_surfaces_search_error() {
+async fn test_search_vfs_surfaces_search_error() {
     let vfs = MockVfs::builder()
         .with_search_error("simulated failure")
         .build();
     let registry = ToolRegistry::new(default_strict_policy()).with_vfs(Arc::new(vfs));
-    let result = registry
-        .execute_search_knowledge(r#"{"query":"hello"}"#)
-        .await;
+    let result = registry.execute_search_vfs(r#"{"query":"hello"}"#).await;
     assert!(result.is_err());
 }
 

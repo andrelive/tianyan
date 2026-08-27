@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0] - 2026-08
+
+### Added
+- 桌面应用（Tauri）：托盘常驻、系统通知、剪贴板、自动更新（用户确认后安装）
+- GitHub Actions 发布流水线（签名构建 + latest.json + GitHub Release）
+- 发布文档：known-issues.md / RELEASE_NOTES.md
+
+### Changed
+- 编辑链路重构：apply_patch 提为主力（unified diff + 上下文锚定，对齐 omo/Codex，@@ 可选）；apply_edit 改为内容匹配（old_string/new_string）
+- read_file 输出纯内容（去掉行号/哈希前缀）
+- 工具描述全部中文化；soul 清理（不列工具/技能，技能经 search_vfs 语义发现）
+- search_knowledge 更名为 search_vfs（语义搜索整个 VFS：文档/记忆/规则/技能）
+- 前端修复：\r 渲染归一化、回撤横幅残留、历史会话滚动定位
+
+### Fixed
+- 模型生成截断工具调用导致整轮 400（降级护栏）
+- apply_patch 裸 @@ 块头报错（宽容解析 + 内容定位）
+- apply_edit 长行锚点不一致（整行哈希 + 完整行返回）
+
 ## [Unreleased]
 
 ### Removed

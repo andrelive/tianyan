@@ -1,6 +1,6 @@
-//! 知识库类工具执行器：search_knowledge / knowledge_ingest（含文件与目录摄入）。
+//! 知识库类工具执行器：search_vfs / knowledge_ingest（含文件与目录摄入）。
 
-use crate::agent::tool_params::{KnowledgeIngestParams, SearchKnowledgeParams};
+use crate::agent::tool_params::{KnowledgeIngestParams, SearchVfsParams};
 use crate::common::error::TianyanError;
 use crate::common::types::{ContentLevel, ContentSource, SearchResult};
 use crate::knowledge::{IngestionRequest, KnowledgeCategory, KnowledgeIngestor};
@@ -8,12 +8,12 @@ use crate::knowledge::{IngestionRequest, KnowledgeCategory, KnowledgeIngestor};
 use super::{parse_params, vfs_content_field, wrap_tool_error, ToolRegistry};
 
 impl ToolRegistry {
-    /// 执行 search_knowledge 工具：语义搜索知识库。
-    pub(crate) async fn execute_search_knowledge(
+    /// 执行 search_vfs 工具：语义搜索整个 VFS（文档/记忆/规则/技能）。
+    pub(crate) async fn execute_search_vfs(
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        let params: SearchKnowledgeParams = parse_params(arguments)?;
+        let params: SearchVfsParams = parse_params(arguments)?;
         let vfs = self.vfs.as_ref().ok_or_else(|| {
             TianyanError::Custom(format!(
                 "tool: 执行失败：{}",

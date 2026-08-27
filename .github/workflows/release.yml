@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: gui-vite/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend deps
+        run: cd gui-vite && npm ci
+
+      - name: Build frontend
+        run: cd gui-vite && npm run build
+
+      - name: Build Tauri (signed)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cd tauri && cargo tauri build
+
+      - name: Generate latest.json
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          $msi = Get-ChildItem "tauri/target/release/bundle/msi/*.msi" | Select-Object -First 1
+          $sig = Get-ChildItem "tauri/target/release/bundle/msi/*.sig" | Select-Object -First 1
+          $signature = Get-Content $sig.FullName -Raw
+          $url = "https://github.com/andrelive/tianyan/releases/download/$tag/$($msi.Name)"
+          $json = @{
+            version = $version
+            notes = "Tianyan $version"
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            platforms = @{
+              "windows-x86_64" = @{
+                signature = $signature
+                url = $url
+              }
+            }
+          }
+          $json | ConvertTo-Json -Depth 5 | Set-Content -Path latest.json -Encoding UTF8
+          Write-Output "latest.json generated for $version"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            tauri/target/release/bundle/msi/*.msi
+            tauri/target/release/bundle/msi/*.sig
+            latest.json

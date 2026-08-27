@@ -1,9 +1,10 @@
 //! 统一 diff 补丁解析与应用（apply_patch 核心逻辑）。
 //!
-//! 解析 codex 风格 `*** Update File:` 信封补丁：每个文件一个头部 + 若干
-//! `@@ -old,count +new,count @@` 块。块定位采用"提示位置精确匹配 → 全文件
-//! 精确匹配 → 模糊匹配（similar 行级 ratio ≥ 阈值）"三级策略；全部块定位
-//! 成功后才落盘（批量原子性）。写回时保持目标文件原有 CRLF/LF 行尾。
+//! 解析 codex 风格 `*** Update File:` 信封补丁（对齐 omo）：每个文件一个头部
+//! + 若干 `-`/`+`/上下文行。`@@` 块头**可选**（模型可省略，降低出错面）；
+//! 块定位采用"提示位置精确匹配 → 全文件精确匹配 → 模糊匹配（similar 行级
+//! ratio ≥ 阈值）"三级策略；全部块定位成功后才落盘（批量原子性）。写回时
+//! 保持目标文件原有 CRLF/LF 行尾。
 
 use std::path::{Path, PathBuf};
 
@@ -125,10 +126,22 @@ pub fn parse_patch(text: &str) -> Result<Vec<PatchFile>> {
         } else if line.starts_with('\\') {
             // `\ No newline at end of file` 标记：忽略（保持简单）。
         } else {
-            let Some(hunk) = cur_hunk.as_mut() else {
-                return Err(parse_err(line_num, "缺少 @@ 块头"));
-            };
-            hunk.lines.push(parse_body_line(line, line_num)?);
+            // 对齐 omo：@@ 可选——文件头后可直接跟 -/+ /上下文行，自动开块
+            //（位置未知，靠内容定位；模型无需写 @@ 行号，降低出错面）
+            if cur_hunk.is_none() {
+                if cur_file.is_none() {
+                    return Err(parse_err(line_num, "补丁行出现在 *** Update File 头部之前"));
+                }
+                cur_hunk = Some(PatchHunk {
+                    old_start: usize::MAX,
+                    old_count: usize::MAX,
+                    new_count: usize::MAX,
+                    lines: Vec::new(),
+                });
+            }
+            if let Some(hunk) = cur_hunk.as_mut() {
+                hunk.lines.push(parse_body_line(line, line_num)?);
+            }
         }
     }
 
@@ -168,12 +181,18 @@ fn close_hunk(
     Ok(())
 }
 
-/// 解析 `@@ -old,count +new,count @@` 块头，返回 `(old_start 0 起始, old_count, new_count)`。
-fn parse_hunk_header(line: &str, line_num: usize) -> Result<(usize, usize, usize)> {
-    let inner = line
+/// 解析 @@ -old,count +new,count @@ 块头，返回 (old_start 0 起始, old_count, new_count)。
+///
+/// 宽容解析：模型常漏写结束 @@ 或行号范围。缺范围时返回哨兵
+/// usize::MAX 表示"位置未知"，由内容匹配（locate_hunk）定位，而非报错。
+fn parse_hunk_header(line: &str, _line_num: usize) -> Result<(usize, usize, usize)> {
+    let Some(inner) = line
         .strip_prefix("@@")
         .and_then(|s| s.find("@@").map(|p| &s[..p]))
-        .ok_or_else(|| parse_err(line_num, "无效的 @@ 块头（缺少结束 @@）"))?;
+    else {
+        // 裸 @@（无结束 @@）：位置未知
+        return Ok((usize::MAX, usize::MAX, usize::MAX));
+    };
     let mut old: Option<(usize, usize)> = None;
     let mut new: Option<(usize, usize)> = None;
     for token in inner.split_whitespace() {
@@ -183,30 +202,30 @@ fn parse_hunk_header(line: &str, line_num: usize) -> Result<(usize, usize, usize
         };
         let rest = chars.as_str();
         if rest.is_empty() {
-            return Err(parse_err(line_num, format!("无效的块范围: {token}")));
+            continue;
         }
         let (start_s, count_s) = match rest.split_once(',') {
             Some((s, c)) => (s, c),
             None => (rest, "1"),
         };
-        let start: usize = start_s
-            .parse()
-            .map_err(|_| parse_err(line_num, format!("无效的起始行号: {token}")))?;
-        let count: usize = count_s
-            .parse()
-            .map_err(|_| parse_err(line_num, format!("无效的行数: {token}")))?;
+        let Ok(start) = start_s.parse::<usize>() else {
+            continue;
+        };
+        let Ok(count) = count_s.parse::<usize>() else {
+            continue;
+        };
         match sign {
             '-' => old = Some((start, count)),
             '+' => new = Some((start, count)),
-            _ => return Err(parse_err(line_num, format!("无效的块范围符号: {token}"))),
+            _ => {}
         }
     }
-    let (old_start, old_count) = old.ok_or_else(|| parse_err(line_num, "缺少旧文件范围 (-)"))?;
-    let (new_start, new_count) = new.ok_or_else(|| parse_err(line_num, "缺少新文件范围 (+)"))?;
+    let (Some((old_start, old_count)), Some((_new_start, new_count))) = (old, new) else {
+        // 缺 -/+ 范围：位置未知，靠内容定位
+        return Ok((usize::MAX, usize::MAX, usize::MAX));
+    };
     // 文本 1 起始 → 内部 0 起始（old_start=0 表示创建场景，无需减 1）
     let old_start0 = if old_start == 0 { 0 } else { old_start - 1 };
-    // 新文件起始行仅作展示，不参与定位
-    let _ = new_start;
     Ok((old_start0, old_count, new_count))
 }
 
@@ -272,7 +291,9 @@ fn match_window(hunk: &PatchHunk) -> (Vec<String>, usize) {
 /// 策略：纯插入按 old_start 定位；否则提示位置（±1）精确匹配 →
 /// 全文件精确匹配 → 全文件模糊匹配（similar 行级 ratio）。
 fn locate_hunk(lines: &[String], hunk: &PatchHunk) -> Option<(usize, usize, usize)> {
-    if hunk.old_count == 0 {
+    // 裸 @@（无行号范围）→ 位置未知，跳过行号定位，直接按内容匹配
+    let no_hint = hunk.old_start == usize::MAX;
+    if !no_hint && hunk.old_count == 0 {
         // 纯插入（创建/追加）：位置钳制到文件末尾
         let pos = hunk.old_start.min(lines.len());
         return Some((pos, pos, 0));
@@ -280,19 +301,25 @@ fn locate_hunk(lines: &[String], hunk: &PatchHunk) -> Option<(usize, usize, usiz
     let (expected, leading_trimmed) = match_window(hunk);
     let win_len = expected.len();
     if win_len == 0 {
-        // 全空白 Context 块：无操作
-        let pos = hunk.old_start.min(lines.len());
+        // 全空白 Context 块：无操作；无提示时追加到末尾
+        let pos = if no_hint {
+            lines.len()
+        } else {
+            hunk.old_start.min(lines.len())
+        };
         return Some((pos, pos, leading_trimmed));
     }
 
-    // 1. 提示位置精确匹配（±1 容差，消歧重复内容）
-    for cand in [
-        hunk.old_start,
-        hunk.old_start.saturating_sub(1),
-        hunk.old_start.saturating_add(1),
-    ] {
-        if exact_match(lines, cand, &expected) {
-            return Some((cand, cand + win_len, leading_trimmed));
+    // 1. 提示位置精确匹配（±1 容差，消歧重复内容）——仅当有位置提示
+    if !no_hint {
+        for cand in [
+            hunk.old_start,
+            hunk.old_start.saturating_sub(1),
+            hunk.old_start.saturating_add(1),
+        ] {
+            if exact_match(lines, cand, &expected) {
+                return Some((cand, cand + win_len, leading_trimmed));
+            }
         }
     }
     // 2. 全文件精确匹配
@@ -310,7 +337,11 @@ fn locate_hunk(lines: &[String], hunk: &PatchHunk) -> Option<(usize, usize, usiz
         if ratio < FUZZY_RATIO_THRESHOLD {
             continue;
         }
-        let dist = start.abs_diff(hunk.old_start);
+        let dist = if no_hint {
+            0
+        } else {
+            start.abs_diff(hunk.old_start)
+        };
         let better = match best {
             Some((b_ratio, b_dist, _)) => ratio > b_ratio || (ratio == b_ratio && dist < b_dist),
             None => true,

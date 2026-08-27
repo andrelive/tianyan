@@ -168,7 +168,7 @@ async fn test_search_memory() {
 }
 
 #[tokio::test]
-async fn test_search_knowledge() {
+async fn test_search_vfs() {
     let vfs = create_test_vfs().await;
     vfs.initialize().await.unwrap();
 

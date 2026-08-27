@@ -224,7 +224,7 @@ pub struct SubmitResultParams {
 
 /// 搜索知识库参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SearchKnowledgeParams {
+pub struct SearchVfsParams {
     /// 检索查询（自然语言）。
     pub query: String,
     /// 返回结果数量上限。

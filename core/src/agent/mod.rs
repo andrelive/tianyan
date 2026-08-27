@@ -43,7 +43,7 @@ pub use roles::{AgentRole, RoleRegistry, RoleSource, RoleStatus};
 pub use session_state::SessionState;
 pub use tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, ReadFileParams,
-    RunTestsParams, SearchCodeParams, SearchKnowledgeParams, SelfCheckParams, VerifyBuildParams,
+    RunTestsParams, SearchCodeParams, SearchVfsParams, SelfCheckParams, VerifyBuildParams,
     VfsListParams, VfsReadParams, WriteFileParams,
 };
 pub use tool_registry::{DynamicToolExecutor, ToolRegistry};

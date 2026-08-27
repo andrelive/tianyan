@@ -50,9 +50,31 @@ fn parse_patch_empty_text_errors() {
 }
 
 #[test]
-fn parse_patch_malformed_hunk_header_errors() {
-    let err = parse_patch(&patch_for("@@ -abc,3 +1,1 @@\n x\n")).unwrap_err();
-    assert!(err.to_string().contains("解析失败"), "{err}");
+fn parse_patch_bare_hunk_header_accepted() {
+    // 模型常漏写行号范围（裸 @@）：宽容解析为"位置未知"，不报错
+    let files = parse_patch(&patch_for("@@\n x\n")).unwrap();
+    let h = &files[0].hunks[0];
+    assert_eq!(h.old_start, usize::MAX, "裸 @@ 应标记为位置未知");
+}
+
+#[test]
+fn apply_patch_bare_hunk_header_locates_by_content() {
+    // 裸 @@（无行号）：按内容定位，仍能正确应用（上下文 + 插入，对齐真实场景）
+    let content = "a\nb\nc\n";
+    let text = patch_for("@@\n b\n+B\n");
+    let files = parse_patch(&text).unwrap();
+    let result = apply_patch_to_content(content, &files[0].hunks).unwrap();
+    assert_eq!(result, "a\nb\nB\nc\n");
+}
+
+#[test]
+fn apply_patch_without_hunk_header_works() {
+    // 对齐 omo：模型可不写 @@，直接 *** Update File + -/+ 行
+    let content = "a\nb\nc\n";
+    let text = "*** Update File: f.txt\n-b\n+B\n";
+    let files = parse_patch(text).unwrap();
+    let result = apply_patch_to_content(content, &files[0].hunks).unwrap();
+    assert_eq!(result, "a\nB\nc\n");
 }
 
 #[test]

@@ -11,7 +11,7 @@ use crate::agent::tool_params::{
     ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
     DelegationStatsParams, DiscoverTestsParams, ExecuteCommandParams, ExecutionDetailParams,
     ExecutionStatsParams, GlobParams, KnowledgeIngestParams, ListDirParams, LspParams,
-    ReadFileParams, RunTestsParams, SearchCodeParams, SearchKnowledgeParams, SelfCheckParams,
+    ReadFileParams, RunTestsParams, SearchCodeParams, SearchVfsParams, SelfCheckParams,
     SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
     TaskStatusParams, VerifyBuildParams, VfsListParams, VfsReadParams, WebFetchParams,
     WebSearchParams, WriteFileParams,
@@ -72,7 +72,7 @@ fn def_apply_edit(name: &'static str) -> ToolDefinition {
 fn def_apply_patch(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<ApplyPatchParams>(
         name,
-        "对一个或多个文件做修改的**主力编辑工具**（优先于 apply_edit）。用 unified diff 信封（`*** Begin Patch / *** Update File / @@ / - / +`）写「要改的行 + 少量上下文行」，按上下文内容定位——抗行号漂移、无需逐字节复现整块原文（不要求精确复现空行/缩进，只要上下文对上即可）；小改、大改、单文件、多文件均适用。编辑前建议先 read_file 目标区确认当前内容。",
+        "对一个或多个文件做修改的**主力编辑工具**。格式：`*** Update File: <路径>` 后直接跟 `-`（删除）/ `+`（新增）/ 空格（上下文）行，只写要改的行 + 少量上下文，不要复现整个文件。`@@` 块头**可省略**（工具按内容定位，无需行号）。`-`/上下文行须与当前文件内容一致。小改、大改、单文件、多文件均适用；编辑前建议先 read_file 目标区确认当前内容。",
     ))
 }
 
@@ -96,17 +96,17 @@ fn def_grep(name: &'static str) -> ToolDefinition {
     ))
 }
 
-fn def_search_knowledge(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<SearchKnowledgeParams>(
+fn def_search_vfs(name: &'static str) -> ToolDefinition {
+    ToolDefinition::function(FunctionDefinition::from_schema::<SearchVfsParams>(
         name,
-        "语义化搜索知识库（所有命名空间），向量 RRF 融合。返回每条结果的 abstract + overview + URI。需要完整详情时用 vfs_read 加载。",
+        "语义化搜索整个 VFS（所有命名空间：文档/记忆/规则/技能），向量 RRF 融合。返回每条结果的 abstract + overview + URI。需要完整详情时用 vfs_read 加载。发现可用技能、检索相关规则/记忆也用本工具。",
     ))
 }
 
 fn def_vfs_read(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<VfsReadParams>(
         name,
-        "按 tianyan:// URI 读取 VFS 条目的完整内容（abstract/overview/detail）。在 search_knowledge 之后用于加载相关条目的详细内容。",
+        "按 tianyan:// URI 读取 VFS 条目的完整内容（abstract/overview/detail）。在 search_vfs 之后用于加载相关条目的详细内容。",
     ))
 }
 
@@ -276,11 +276,7 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
         ToolPresentation::Terminal,
     ),
     tool("grep", def_grep, ToolPresentation::Search),
-    tool(
-        "search_knowledge",
-        def_search_knowledge,
-        ToolPresentation::Search,
-    ),
+    tool("search_vfs", def_search_vfs, ToolPresentation::Search),
     tool("vfs_read", def_vfs_read, ToolPresentation::Read),
     tool("vfs_list", def_vfs_list, ToolPresentation::Generic),
     tool("call_skill", def_call_skill, ToolPresentation::Skill),

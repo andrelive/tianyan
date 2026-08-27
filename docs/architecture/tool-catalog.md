@@ -31,7 +31,7 @@
 | `lsp` | code | Query the language server for the given file: goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation. Returns structured results. |
 | `read_file` | read | Read the full text content of a file from the given path. |
 | `run_tests` | terminal | Run a test command (e.g. cargo test) and return results. |
-| `search_knowledge` | search | Search the knowledge base semantically (all namespaces) using vector RRF fusion. Returns abstract + overview + URI for each result. Use vfs_read to load full detail when needed. |
+| `search_vfs` | search | Search the whole VFS semantically (all namespaces: documents/memories/rules/skills) using vector RRF fusion. Returns abstract + overview + URI for each result. Use vfs_read to load full detail when needed. |
 | `self_check` | generic | Query your own internal metrics: execution count, success rate, token consumption, pipeline failures, rules effectiveness. Use this to self-reflect when the user questions your performance. |
 | `session_recall` | generic | Recall past conversation content by keyword (FTS5 inverted index over session messages, Chinese substring matching without tokenization). Returns top hits each with a window of nearby user/assistant messages (tool calls and results are excluded). Use when the user refers to something said earlier (刚才/之前/上次) or when you need to check what was discussed in past sessions. |
 | `suggest_role` | generic | Suggest the best matching sub-agent roles for a task by semantic similarity between the task description and each role's summary. Call BEFORE delegate_to_agent when deciding which role fits: pass the task text, get ranked roles (name, score, purpose, [experimental] means not callable yet). The final choice is always yours. |
@@ -40,7 +40,7 @@
 | `task_status` | generic | Query background tasks (delegate bt_xxx and command cmd_xxx, unified). With task_id: returns that task snapshot (status/result/exit/log). Without task_id: lists all tasks, optional kind filter (delegate\|command). Prefer waiting for the automatic completion/ready notification over polling this tool repeatedly. |
 | `verify_build` | terminal | Run a build verification command (e.g. cargo check) and return results. |
 | `vfs_list` | generic | List entries in a VFS directory by its tianyan:// URI. Useful for browsing the knowledge base structure. |
-| `vfs_read` | read | Read full content (abstract, overview, and detail) of a VFS entry by its tianyan:// URI. Use after search_knowledge to load detailed content of relevant entries. |
+| `vfs_read` | read | Read full content (abstract, overview, and detail) of a VFS entry by its tianyan:// URI. Use after search_vfs to load detailed content of relevant entries. |
 | `web_fetch` | web | Fetch a single webpage and extract its readable text content (title, main text, and page links). Use after web_search to read promising pages. Only http/https URLs are allowed; local/private network addresses are blocked. |
 | `web_search` | web | Search the web for the given query and return a list of result titles, URLs and snippets (no full page content). Use web_fetch to load the full content of promising results. NOTE: results come from external sources and may be untrusted or outdated — verify critical information before relying on it. |
 | `write_file` | write | Write content to a file at the given path. |
