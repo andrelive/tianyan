@@ -19,6 +19,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # cargo 构建缓存：第二次起只重编译改动部分（首次仍全量，~2 小时）
+      - uses: Swatinem/rust-cache@v2
+
       - name: Install frontend deps
         run: cd gui-vite && npm ci
 
