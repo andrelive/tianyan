@@ -42,8 +42,8 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $version = $tag.TrimStart('v')
-          $msi = Get-ChildItem "tauri/target/release/bundle/msi/*.msi" | Select-Object -First 1
-          $sig = Get-ChildItem "tauri/target/release/bundle/msi/*.sig" | Select-Object -First 1
+          $msi = Get-ChildItem "target/release/bundle/msi/*.msi" | Select-Object -First 1
+          $sig = Get-ChildItem "target/release/bundle/msi/*.sig" | Select-Object -First 1
           $signature = Get-Content $sig.FullName -Raw
           $url = "https://github.com/andrelive/tianyan/releases/download/$tag/$($msi.Name)"
           $json = @{
@@ -64,6 +64,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            tauri/target/release/bundle/msi/*.msi
-            tauri/target/release/bundle/msi/*.sig
+            target/release/bundle/msi/*.msi
+            target/release/bundle/msi/*.sig
             latest.json
