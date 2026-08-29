@@ -70,7 +70,7 @@ impl VirtualFileSystemBuilder {
             .vector_storage
             .ok_or_else(|| TianyanError::Custom("内部错误：需要向量存储".to_string()))?;
 
-        let mut vfs = VirtualFileSystemImpl::new(storage, vector_storage, config);
+        let vfs = VirtualFileSystemImpl::new(storage, vector_storage, config);
 
         if let (Some(provider), Some(model)) = (self.embedding_provider, self.embedding_model) {
             vfs.set_embedding_provider(provider, model);

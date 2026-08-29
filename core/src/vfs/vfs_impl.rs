@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
@@ -21,8 +21,9 @@ pub struct VirtualFileSystemImpl {
     storage: Arc<dyn StorageBackend>,
     vector_storage: Arc<dyn VectorStorage>,
     config: StorageConfig,
-    embedding_provider: Option<Arc<dyn EmbeddingService>>,
-    embedding_model: Option<String>,
+    // RwLock：支持运行时热更新（配置热重载时 set_embedding_provider 无需 &mut）
+    embedding_provider: RwLock<Option<Arc<dyn EmbeddingService>>>,
+    embedding_model: RwLock<Option<String>>,
 }
 
 impl VirtualFileSystemImpl {
@@ -36,30 +37,30 @@ impl VirtualFileSystemImpl {
             storage,
             vector_storage,
             config,
-            embedding_provider: None,
-            embedding_model: None,
+            embedding_provider: RwLock::new(None),
+            embedding_model: RwLock::new(None),
         }
     }
 
     /// 设置嵌入服务（`model::EmbeddingService` 直接注入，无桥接层）。
     pub fn with_embedding_provider(
-        mut self,
+        self,
         provider: Arc<dyn EmbeddingService>,
         model: impl Into<String>,
     ) -> Self {
-        self.embedding_provider = Some(provider);
-        self.embedding_model = Some(model.into());
+        *self.embedding_provider.write().unwrap_or_else(|p| p.into_inner()) = Some(provider);
+        *self.embedding_model.write().unwrap_or_else(|p| p.into_inner()) = Some(model.into());
         self
     }
 
-    /// 设置嵌入服务（可变引用版本）。
+    /// 设置嵌入服务（运行时热更新；RwLock 内部可变，无需 &mut）。
     pub fn set_embedding_provider(
-        &mut self,
+        &self,
         provider: Arc<dyn EmbeddingService>,
         model: impl Into<String>,
     ) {
-        self.embedding_provider = Some(provider);
-        self.embedding_model = Some(model.into());
+        *self.embedding_provider.write().unwrap_or_else(|p| p.into_inner()) = Some(provider);
+        *self.embedding_model.write().unwrap_or_else(|p| p.into_inner()) = Some(model.into());
     }
 
     /// 获取存储配置。
@@ -388,16 +389,22 @@ impl VfsSearch for VirtualFileSystemImpl {
         limit: usize,
         namespace: Option<ContextNamespace>,
     ) -> Result<Vec<SearchResult>> {
-        let embedding_provider = self.embedding_provider.as_ref().ok_or_else(|| {
-            TianyanError::Custom("检索错误：VFS 未配置嵌入服务，无法进行向量搜索".to_string())
-        })?;
-
+        let embedding_provider = self
+            .embedding_provider
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .ok_or_else(|| {
+                TianyanError::Custom("检索错误：VFS 未配置嵌入服务，无法进行向量搜索".to_string())
+            })?;
         let model = self
             .embedding_model
-            .as_deref()
-            .unwrap_or("text-embedding-3-small");
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_else(|| "text-embedding-3-small".to_string());
 
-        let embedding = embedding_provider.embed_single(model, query).await?;
+        let embedding = embedding_provider.embed_single(&model, query).await?;
         let query_vector = embedding.vector;
 
         let category_filter = namespace.map(|ns| ns.to_string());
@@ -436,8 +443,10 @@ impl VfsSearch for VirtualFileSystemImpl {
 
         let embedding_model = self
             .embedding_model
-            .as_deref()
-            .unwrap_or("text-embedding-3-small");
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_else(|| "text-embedding-3-small".to_string());
         let payload = EntryMetadata::new(uri.clone(), uri.namespace().to_string());
         self.index_entry(
             uri,
@@ -445,7 +454,7 @@ impl VfsSearch for VirtualFileSystemImpl {
             overview_content,
             existing_visual,
             payload,
-            embedding_model,
+            &embedding_model,
         )
         .await
     }
@@ -461,7 +470,9 @@ impl VfsSearch for VirtualFileSystemImpl {
     ) -> Result<()> {
         let embedding_provider = self
             .embedding_provider
-            .as_ref()
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
             .ok_or_else(|| TianyanError::Custom("检索错误：VFS 未配置嵌入服务".to_string()))?;
 
         let abstract_embedding = embedding_provider

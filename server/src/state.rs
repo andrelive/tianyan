@@ -595,6 +595,11 @@ impl AppState {
         let model_services = create_model_services(&config)
             .await
             .map_err(model_services_error)?;
+        // 同步更新 VFS 嵌入服务（热重载后语义检索立即生效，无需重启）
+        self.vfs.set_embedding_provider(
+            model_services.embedding.clone(),
+            resolve_embedding_model(&config),
+        );
         // ADR-016：配置热重载时应用持久化状态（配置签名变更 → 用户种子生效）
         self.role_registry
             .apply_persisted(&self.role_store, &config.agent_roles)
