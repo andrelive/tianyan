@@ -174,8 +174,10 @@ async fn collect_rg_files(
     base: &Path,
     pattern: &str,
 ) -> Result<Option<Vec<PathBuf>>, TianyanError> {
-    let output = match tokio::process::Command::new("rg")
-        .arg("--files")
+    let output = match crate::executor::command::hide_console_window(
+        tokio::process::Command::new("rg"),
+    )
+    .arg("--files")
         .arg("--glob")
         .arg(pattern)
         .arg("--glob")

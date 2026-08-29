@@ -507,6 +507,16 @@ impl CommandManager {
 
 /// 跨平台 shell 包装命令构造（Unix: `sh -c`，Windows: `powershell`）。
 ///
+/// Windows：隐藏子进程控制台窗口（CREATE_NO_WINDOW），避免执行命令时
+/// 弹出黑窗口一闪而过；Unix 无操作。
+pub(crate) fn hide_console_window(mut cmd: tokio::process::Command) -> tokio::process::Command {
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(0x08000000);
+    }
+    cmd
+}
+
 /// Windows 用 PowerShell（Win10/11 默认自带）：与工具描述、系统提示词的
 /// PowerShell 语义一致（管道/Out-File/Select-String 等 cmdlet 可用），
 /// 避免模型按 PowerShell 语法写命令却在 cmd.exe 下失败。
@@ -519,7 +529,7 @@ fn build_shell_command(command: &str) -> tokio::process::Command {
             .arg("-NonInteractive")
             .arg("-Command")
             .arg(command);
-        c
+        hide_console_window(c)
     } else {
         let mut c = tokio::process::Command::new("sh");
         c.arg("-c").arg(command);
@@ -534,7 +544,7 @@ fn build_shell_command(command: &str) -> tokio::process::Command {
 /// opencode #30868 教训：只杀 shell 会留孤儿服务进程）。
 async fn kill_process_tree(pid: u32) {
     let result = if cfg!(target_os = "windows") {
-        tokio::process::Command::new("taskkill")
+        hide_console_window(tokio::process::Command::new("taskkill"))
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

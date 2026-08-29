@@ -133,8 +133,10 @@ impl LspClient {
     ) -> Result<Self> {
         use std::process::Stdio;
 
-        let mut child = tokio::process::Command::new(spec.spawn_command)
-            .args(spec.args)
+        let mut child = crate::executor::command::hide_console_window(
+            tokio::process::Command::new(spec.spawn_command),
+        )
+        .args(spec.args)
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
