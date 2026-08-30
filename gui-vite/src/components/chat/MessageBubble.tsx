@@ -15,8 +15,6 @@ interface Props {
   index: number;
   isStreaming: boolean;
   onRollback: (index: number) => void;
-  /** 流式中断提示上的「继续生成」回调（缺省 = 不显示按钮，如历史回放） */
-  onContinue?: () => void;
 }
 
 /** 可折叠思考块。 */
@@ -175,7 +173,7 @@ function SegmentBlocks({
   return <>{blocks}</>;
 }
 
-function MessageBubble({ message, index, isStreaming, onRollback, onContinue }: Props) {
+function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
   const [copied, setCopied] = useState(false);
 
   const isUser = message.role === 'user';
@@ -280,23 +278,11 @@ function MessageBubble({ message, index, isStreaming, onRollback, onContinue }: 
           </p>
         )}
 
-        {/* 流式中断提示（finish=interrupted：网络/服务中断保留部分输出）+ 一键继续 */}
+        {/* 流式中断提示（finish=interrupted：网络/服务中断保留部分输出） */}
         {message.interrupted && (
-          <div className="mt-2 flex items-center gap-2 text-base text-red-500/80">
-            <p className="flex items-center gap-1">
-              <span aria-hidden="true">⚠️</span> 流式中断，已保留部分输出
-            </p>
-            {onContinue && (
-              <button
-                type="button"
-                onClick={onContinue}
-                aria-label="继续生成"
-                className="px-2 py-0.5 text-xs rounded border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30"
-              >
-                继续生成
-              </button>
-            )}
-          </div>
+          <p className="mt-2 text-base text-red-500/80 flex items-center gap-1">
+            <span aria-hidden="true">⚠️</span> 流式中断，已保留部分输出
+          </p>
         )}
 
         {/* Streaming feedback: 思考期间正文为空——显示可见的“思考中…”指示
