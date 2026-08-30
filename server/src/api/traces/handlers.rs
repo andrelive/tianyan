@@ -38,7 +38,7 @@ pub async fn query_traces(
     // 回放视图：按 (session_id, task_id) 分组，组内时间正序
     let mut groups: Vec<serde_json::Value> = Vec::new();
     let mut current_key: Option<(String, Option<String>)> = None;
-    let mut current_spans: Vec<&tianyan::observability::trace::TraceSpan> = Vec::new();
+    let mut current_spans: Vec<&tianyan::db::trace::TraceSpan> = Vec::new();
 
     for span in &spans {
         let key = (span.session_id.clone(), span.task_id.clone());
