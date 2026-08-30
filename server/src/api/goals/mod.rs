@@ -2,6 +2,7 @@
 
 pub mod handlers;
 pub mod routes;
+pub mod tool;
 pub mod types;
 
 pub use routes::routes;

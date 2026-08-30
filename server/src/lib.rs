@@ -23,6 +23,8 @@ use crate::agent_builder::create_model_services;
 use crate::api::events::processor as event_processor;
 use crate::evolution_executor::AgentEvolutionExecutor;
 use crate::scheduled_tasks::manager::{ScheduledAgentTaskManager, SchedulerRegistrar};
+use crate::api::goals::tool::GoalTool;
+use crate::api::todos::tool::TodoTool;
 use crate::scheduled_tasks::tool::{CreateTaskRequest, ScheduleTaskTool};
 
 // Import API module
@@ -579,6 +581,17 @@ async fn start_server_inner(
                 .read()
                 .await
                 .register_dynamic_tools(vec![Arc::new(ScheduleTaskTool::new(create_task_tx))])
+                .await;
+            // 注入 todo/goal 动态工具（agent 可自主创建/跟踪/修复待办与目标——
+            // 计划面板数据同源，非纯 UI 功能）
+            state
+                .agent_lock()
+                .read()
+                .await
+                .register_dynamic_tools(vec![
+                    Arc::new(TodoTool::new(state.todo_store())),
+                    Arc::new(GoalTool::new(state.goal_store())),
+                ])
                 .await;
             // 恢复持久化任务（注册经 registrar 接口进调度器）
             manager.load_and_register().await;
