@@ -221,15 +221,7 @@ impl UsageStats {
     }
 
     /// 记录 SQL 查询错误（统计查询失败时降级返回空数据，但错误必须可见）。
-    fn log_query_err<T>(result: Result<T, rusqlite::Error>, query: &str) -> Option<T> {
-        match result {
-            Ok(value) => Some(value),
-            Err(e) => {
-                tracing::warn!(error = %e, query, "统计查询失败，返回空数据");
-                None
-            }
-        }
-    }
+    
 
     /// 查询调用次数最多的技能列表。
     ///

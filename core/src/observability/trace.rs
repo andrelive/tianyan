@@ -45,8 +45,6 @@ impl SpanKind {
 
 /// 内存缓冲上限（超过后丢弃最旧，等待 flush 落库）。
 const MAX_BUFFER: usize = 5000;
-/// SQLite 全局保留窗口（超过后旧记录被清理）。
-const KEEP_RECORDS: i64 = 10_000;
 
 /// 结构化 Trace 收集器：热路径内存缓冲 + 批量落库 + 回放查询。
 pub struct TraceCollector {
@@ -55,7 +53,6 @@ pub struct TraceCollector {
     /// 工具 span 归属当前轮；跨会话并发按键隔离）。
     current_turns: Mutex<HashMap<String, i64>>,
     /// Trace 域仓储（SQL 收敛：落盘/查询经此，组件保留内存缓冲）。
-    db: Arc<Database>,
     repo: TraceRepo,
     pending_writes: AtomicU64,
 }
@@ -67,7 +64,6 @@ impl TraceCollector {
             buffer: Mutex::new(Vec::new()),
             repo: TraceRepo::new(db.clone()),
             current_turns: Mutex::new(HashMap::new()),
-            db,
             pending_writes: AtomicU64::new(0),
         }))
     }
@@ -231,22 +227,7 @@ impl TraceCollector {
 }
 
 /// SQLite 行 → TraceSpan。
-fn row_to_span(row: &rusqlite::Row<'_>) -> rusqlite::Result<TraceSpan> {
-    Ok(TraceSpan {
-        id: row.get(0)?,
-        session_id: row.get(1)?,
-        task_id: row.get(2)?,
-        turn_index: row.get(3)?,
-        kind: row.get(4)?,
-        name: row.get(5)?,
-        detail: row.get(6)?,
-        duration_ms: row.get(7)?,
-        tokens: row.get(8)?,
-        success: row.get::<_, i32>(9)? != 0,
-        error: row.get(10)?,
-        recorded_at: row.get(11)?,
-    })
-}
+
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,53 @@
+pub struct ExecutionStat {
+    /// 类别（file_operation / code_operation / ...）。
+    pub category: String,
+    /// 执行总次数。
+    pub total: u64,
+    /// 成功次数。
+    pub successes: u64,
+    /// 成功率（0.0 ~ 1.0）。
+    pub success_rate: f64,
+    /// 平均耗时（毫秒）。
+    pub avg_time_ms: f64,
+    /// 最近一次执行时间（epoch 秒）。
+    pub last_ts: i64,
+}
+
+/// 单条执行明细。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExecutionDetail {
+    /// 记录 ID。
+    pub id: i64,
+    /// 来源会话。
+    pub session_id: String,
+    /// 工具名。
+    pub tool_name: String,
+    /// 类别。
+    pub category: String,
+    /// 任务描述（工具名 + 参数摘要）。
+    pub task_description: String,
+    /// 是否成功。
+    pub success: bool,
+    /// 耗时（毫秒）。
+    pub execution_time_ms: u64,
+    /// 使用的技能列表。
+    pub skills_used: Vec<String>,
+    /// 执行结果（截断）。
+    pub result: String,
+    /// 执行时间（epoch 秒）。
+    pub ts: i64,
+}
+
+/// 角色委托统计。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DelegationStat {
+    /// 角色名。
+    pub role: String,
+    /// 委托总次数。
+    pub total: u64,
+    /// 成功次数。
+    pub successes: u64,
+    /// 成功率（0.0 ~ 1.0）。
+    pub success_rate: f64,
+}
+

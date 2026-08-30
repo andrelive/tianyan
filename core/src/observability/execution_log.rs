@@ -8,12 +8,12 @@
 //! 本模块是派生统计数据：内容权威在 VFS，数据可重建；共享 SqliteDb 连接
 //! （ADR-005 / AGENTS.md 派生索引模式）。
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::error::TianyanError;
 use crate::observability::execution_history::ExecutionHistory;
 use crate::db::Database;
+use crate::db::execution::{DelegationStat, ExecutionDetail, ExecutionRepo, ExecutionStat};
 
 /// 任务描述截断上限（防参数膨胀入库）。
 const MAX_TASK_DESCRIPTION: usize = 500;
@@ -70,64 +70,11 @@ pub fn categorize_by_keyword(description: &str) -> &'static str {
 }
 
 /// 按类别统计的执行数据。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ExecutionStat {
-    /// 类别（file_operation / code_operation / ...）。
-    pub category: String,
-    /// 执行总次数。
-    pub total: u64,
-    /// 成功次数。
-    pub successes: u64,
-    /// 成功率（0.0 ~ 1.0）。
-    pub success_rate: f64,
-    /// 平均耗时（毫秒）。
-    pub avg_time_ms: f64,
-    /// 最近一次执行时间（epoch 秒）。
-    pub last_ts: i64,
-}
-
-/// 单条执行明细。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ExecutionDetail {
-    /// 记录 ID。
-    pub id: i64,
-    /// 来源会话。
-    pub session_id: String,
-    /// 工具名。
-    pub tool_name: String,
-    /// 类别。
-    pub category: String,
-    /// 任务描述（工具名 + 参数摘要）。
-    pub task_description: String,
-    /// 是否成功。
-    pub success: bool,
-    /// 耗时（毫秒）。
-    pub execution_time_ms: u64,
-    /// 使用的技能列表。
-    pub skills_used: Vec<String>,
-    /// 执行结果（截断）。
-    pub result: String,
-    /// 执行时间（epoch 秒）。
-    pub ts: i64,
-}
-
-/// 角色委托统计。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DelegationStat {
-    /// 角色名。
-    pub role: String,
-    /// 委托总次数。
-    pub total: u64,
-    /// 成功次数。
-    pub successes: u64,
-    /// 成功率（0.0 ~ 1.0）。
-    pub success_rate: f64,
-}
-
 /// 执行记录日志（GEPA 数据层）。
 #[derive(Clone)]
 pub struct ExecutionLog {
-    db: Arc<Database>,
+    /// 执行记录域仓储（SQL 收敛：写入/统计/明细经此）。
+    repo: ExecutionRepo,
 }
 
 impl ExecutionLog {
@@ -136,7 +83,7 @@ impl ExecutionLog {
     /// # Errors
     /// * 返回 TianyanError（本方法当前不失败，签名保持与全库统一错误类型）。
     pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
-        Ok(Arc::new(Self { db }))
+        Ok(Arc::new(Self { repo: ExecutionRepo::new(db) }))
     }
 
     /// 记录一次工具执行（热路径：try_lock，锁不可用时跳过）。
@@ -160,27 +107,21 @@ impl ExecutionLog {
             serde_json::to_string(&history.skills_used).unwrap_or_else(|_| "[]".to_string());
         let steps_json = serde_json::to_string(&history.steps).unwrap_or_else(|_| "[]".to_string());
         let ts = chrono::Utc::now().timestamp();
-
-        let conn = self.db.try_lock().map_err(|e| {
-            TianyanError::Custom(format!("observability: execution_log: 数据库锁不可用：{e}"))
-        })?;
-        conn.execute(
-            "INSERT INTO executions (session_id, tool_name, category, task_description, success, execution_time_ms, skills_used, steps_json, result, ts) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            rusqlite::params![
+        // 落盘经 ExecutionRepo（SQL 收敛于 db 层）
+        self.repo
+            .record(
                 session_id,
                 tool_name,
-                category,
-                task_description,
-                if history.success { 1 } else { 0 },
+                &category,
+                &task_description,
+                history.success,
                 history.execution_time_ms as i64,
-                skills_used,
-                steps_json,
-                result,
+                &skills_used,
+                &steps_json,
+                &result,
                 ts,
-            ],
-        )
-        .map_err(|e| TianyanError::Custom(format!("observability: execution_log: 写入失败：{e}")))?;
-        Ok(())
+            )
+            .await
     }
 
     /// 按类别统计执行情况。
@@ -194,36 +135,7 @@ impl ExecutionLog {
         since_ts: Option<i64>,
         category: Option<&str>,
     ) -> Result<Vec<ExecutionStat>, TianyanError> {
-        let conn = self.db.lock().await;
-        let (where_sql, params) = build_where(since_ts, category);
-        let sql = format!(
-            "SELECT category, COUNT(*) AS total,              SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successes,              AVG(execution_time_ms) AS avg_time_ms, MAX(ts) AS last_ts              FROM executions{where_sql} GROUP BY category ORDER BY total DESC"
-        );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| sqlite_query_error(&sql, e))?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
-                |row| {
-                    let total = row.get::<_, i64>(1)? as u64;
-                    let successes = row.get::<_, i64>(2)? as u64;
-                    Ok(ExecutionStat {
-                        category: row.get(0)?,
-                        total,
-                        successes,
-                        success_rate: if total > 0 {
-                            successes as f64 / total as f64
-                        } else {
-                            0.0
-                        },
-                        avg_time_ms: row.get(3)?,
-                        last_ts: row.get(4)?,
-                    })
-                },
-            )
-            .map_err(|e| sqlite_query_error(&sql, e))?;
-        collect_rows(rows, &sql)
+        self.repo.stats(since_ts, category).await
     }
 
     /// 查询原始执行记录（按时间倒序）。
@@ -236,36 +148,7 @@ impl ExecutionLog {
         category: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ExecutionDetail>, TianyanError> {
-        let conn = self.db.lock().await;
-        let (where_sql, mut params) = build_where(since_ts, category);
-        let sql = format!(
-            "SELECT id, session_id, tool_name, category, task_description, success,              execution_time_ms, skills_used, result, ts FROM executions{where_sql}              ORDER BY ts DESC, id DESC LIMIT ?"
-        );
-        params.push(Box::new(limit as i64));
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| sqlite_query_error(&sql, e))?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
-                |row| {
-                    let skills_used: String = row.get(7)?;
-                    Ok(ExecutionDetail {
-                        id: row.get(0)?,
-                        session_id: row.get(1)?,
-                        tool_name: row.get(2)?,
-                        category: row.get(3)?,
-                        task_description: row.get(4)?,
-                        success: row.get::<_, i64>(5)? != 0,
-                        execution_time_ms: row.get::<_, i64>(6)? as u64,
-                        skills_used: serde_json::from_str(&skills_used).unwrap_or_default(),
-                        result: row.get(8)?,
-                        ts: row.get(9)?,
-                    })
-                },
-            )
-            .map_err(|e| sqlite_query_error(&sql, e))?;
-        collect_rows(rows, &sql)
+        self.repo.detail(since_ts, category, limit).await
     }
 
     /// 按角色统计委托使用情况（解析 delegate_to_agent 记录）。
@@ -276,63 +159,7 @@ impl ExecutionLog {
         &self,
         since_ts: Option<i64>,
     ) -> Result<Vec<DelegationStat>, TianyanError> {
-        let conn = self.db.lock().await;
-        let mut where_clauses = vec!["tool_name = 'delegate_to_agent'".to_string()];
-        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        if let Some(ts) = since_ts {
-            where_clauses.push("ts >= ?".to_string());
-            params.push(Box::new(ts));
-        }
-        let where_sql = format!(" WHERE {}", where_clauses.join(" AND "));
-        let sql = format!("SELECT task_description, success FROM executions{where_sql}");
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| sqlite_query_error(&sql, e))?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)),
-            )
-            .map_err(|e| sqlite_query_error(&sql, e))?;
-
-        let mut agg: HashMap<String, (u64, u64)> = HashMap::new();
-        let mut failed_rows: Option<TianyanError> = None;
-        for row in rows {
-            match row {
-                Ok((task_description, success)) => {
-                    if let Some(role) = parse_delegated_role(&task_description) {
-                        let entry = agg.entry(role).or_insert((0, 0));
-                        entry.0 += 1;
-                        if success {
-                            entry.1 += 1;
-                        }
-                    }
-                }
-                Err(e) => {
-                    failed_rows = Some(sqlite_query_error(&sql, e));
-                    break;
-                }
-            }
-        }
-        if let Some(e) = failed_rows {
-            return Err(e);
-        }
-
-        let mut stats: Vec<DelegationStat> = agg
-            .into_iter()
-            .map(|(role, (total, successes))| DelegationStat {
-                role,
-                total,
-                successes,
-                success_rate: if total > 0 {
-                    successes as f64 / total as f64
-                } else {
-                    0.0
-                },
-            })
-            .collect();
-        stats.sort_by_key(|s| std::cmp::Reverse(s.total));
-        Ok(stats)
+        self.repo.delegation_stats(since_ts).await
     }
 }
 
@@ -345,59 +172,21 @@ fn tool_name_from(task_description: &str) -> &str {
 }
 
 /// 解析 delegate_to_agent 记录中的 role 参数。
-fn parse_delegated_role(task_description: &str) -> Option<String> {
-    let (_, json_part) = task_description.split_once(": ")?;
-    serde_json::from_str::<serde_json::Value>(json_part)
-        .ok()
-        .and_then(|v| v.get("role").and_then(|r| r.as_str()).map(str::to_string))
-}
+
 
 /// 构造 WHERE 子句与参数（since_ts / category 可选）。
-fn build_where(
-    since_ts: Option<i64>,
-    category: Option<&str>,
-) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
-    let mut clauses: Vec<String> = Vec::new();
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    if let Some(ts) = since_ts {
-        clauses.push("ts >= ?".to_string());
-        params.push(Box::new(ts));
-    }
-    if let Some(cat) = category {
-        clauses.push("category = ?".to_string());
-        params.push(Box::new(cat.to_string()));
-    }
-    let where_sql = if clauses.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", clauses.join(" AND "))
-    };
-    (where_sql, params)
-}
+
 
 /// 收集查询行（统一错误包装）。
-fn collect_rows<T>(
-    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
-    sql: &str,
-) -> Result<Vec<T>, TianyanError> {
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|e| sqlite_query_error(sql, e))?);
-    }
-    Ok(out)
-}
+
 
 /// SQLite 查询错误包装（带 SQL 摘要，便于排查）。
-fn sqlite_query_error(sql: &str, e: rusqlite::Error) -> TianyanError {
-    let sql_head = sql.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
-    TianyanError::Custom(format!(
-        "observability: execution_log: 查询失败（{sql_head}...）：{e}"
-    ))
-}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::execution::parse_delegated_role;
     use crate::observability::execution_history::{ExecutionHistory, ExecutionStep};
 
     async fn make_log() -> Arc<ExecutionLog> {
