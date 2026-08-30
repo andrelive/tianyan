@@ -38,7 +38,7 @@ pub async fn get_skills_stats(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // 技能级统计：query_top_skills 已在 SQL 层按 `skill:` 前缀过滤并剥离
     // 前缀（工具调用不混入，返回的 skill_id 与技能注册名对齐）。
-    let skills: Vec<tianyan::observability::usage_stats::SkillStats> =
+    let skills: Vec<tianyan::db::stats::SkillStats> =
         state.usage_stats().query_top_skills(100).await;
     let total_calls: u64 = skills.iter().map(|s| s.total_calls).sum();
     let total_success: u64 = skills.iter().map(|s| s.success_calls).sum();
