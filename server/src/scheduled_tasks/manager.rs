@@ -23,7 +23,9 @@ pub struct ScheduledAgentTaskHandler {
     task_id: String,
     workspace: String,
     prompt: String,
-    manager: Arc<ScheduledAgentTaskManager>,
+    /// 结果回写目标（Weak：打破 manager → scheduler → handler → manager
+    /// 循环引用——handler 执行完回写结果，但不应强持有 manager 阻止其释放）。
+    manager: std::sync::Weak<ScheduledAgentTaskManager>,
 }
 
 impl ScheduledAgentTaskHandler {
@@ -41,7 +43,7 @@ impl ScheduledAgentTaskHandler {
             task_id,
             workspace,
             prompt,
-            manager,
+            manager: Arc::downgrade(&manager),
         }
     }
 
@@ -99,7 +101,10 @@ impl TaskHandler for ScheduledAgentTaskHandler {
     async fn execute(&self, _ctx: &TaskContext) -> TaskResult {
         let result = self.run_agent().await;
         let text = result.clone().unwrap_or_else(|| "(无结果)".to_string());
-        self.manager.record_result(&self.task_id, &text).await;
+        // Weak upgrade：manager 已销毁（应用关停中）时跳过回写，结果丢失可接受
+        if let Some(manager) = self.manager.upgrade() {
+            manager.record_result(&self.task_id, &text).await;
+        }
         if result.is_some() {
             TaskResult::success(1)
         } else {
