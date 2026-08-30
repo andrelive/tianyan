@@ -22,7 +22,6 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = "0.1"
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 async-trait = "0.1"
 

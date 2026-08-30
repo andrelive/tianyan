@@ -25,8 +25,6 @@ rfd = "0.17"
 
 # HTTP server
 axum = { version = "0.8", features = ["multipart"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-tower = { version = "0.5", features = ["util"] }
 
 # Core dependencies
 tokio = { workspace = true }
@@ -38,7 +36,6 @@ anyhow = { workspace = true }
 
 # Utilities
 reqwest = { workspace = true }
-uuid = { workspace = true }
 chrono = { workspace = true }
 url = { workspace = true }
 dirs = "5.0"

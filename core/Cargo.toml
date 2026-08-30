@@ -21,12 +21,10 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 config = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 # Cryptography
 ring = { workspace = true }
@@ -93,7 +91,6 @@ arrow-schema = "58.4.0"
 # 文本相似度比较
 similar = { workspace = true }
 # unified diff 解析与应用（apply_patch 标准组件）
-diffy = { workspace = true }
 scraper = "0.20"
 
 # 压缩 / 解压
