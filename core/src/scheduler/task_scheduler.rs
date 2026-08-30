@@ -300,12 +300,26 @@ impl TaskScheduler {
     pub async fn shutdown(&self) -> crate::common::error::Result<()> {
         self.stop().await?;
 
-        // 取消所有任务句柄
-        let mut handles = self.handles.write().await;
-        for handle in handles.values() {
+        // 清空任务定义：释放 handler（ScheduledAgentTaskHandler 持有
+        // manager，manager 持有 scheduler——不清理则形成循环引用，
+        // 调度器/manager/Agent 永不 drop，SQLite 文件锁无法释放，
+        // 数据目录搬迁失败）。
+        self.tasks.write().await.clear();
+
+        // 取消所有任务句柄并等待其完全结束：abort 后 future 在下一个
+        // 调度点才被 drop，若不等候，任务循环持有的 Arc（TaskContext →
+        // VFS → SqliteDb 等）会阻止组件释放——数据目录搬迁依赖关停后
+        // 文件锁释放（Windows 上移动打开的文件会失败）。
+        let handles_vec: Vec<tokio::task::JoinHandle<()>> = {
+            let mut handles = self.handles.write().await;
+            handles.drain().map(|(_, h)| h).collect()
+        };
+        for handle in &handles_vec {
             handle.abort();
         }
-        handles.clear();
+        for handle in handles_vec {
+            let _ = handle.await;
+        }
 
         tracing::info!("任务调度器已关闭");
         Ok(())

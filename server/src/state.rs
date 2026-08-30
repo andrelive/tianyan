@@ -13,6 +13,8 @@ use tokio::sync::RwLock;
 use crate::scheduled_tasks::ScheduledAgentTaskManager;
 use tianyan::agent::AgentCoordinator;
 use tianyan::config::{ModelEntry, TianyanConfig};
+use tianyan::goals::GoalStore;
+use tianyan::todos::TodoStore;
 use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
 use tianyan::model::spec::ModelSpec;
@@ -276,6 +278,10 @@ pub struct AppState {
     scheduler: Arc<RwLock<Option<Arc<TaskScheduler>>>>,
     /// 定时智能体任务管理器（start_server 创建后装配；无 Provider 时为 None）。
     scheduled_agent_tasks: Arc<RwLock<Option<Arc<ScheduledAgentTaskManager>>>>,
+    /// 待办清单存储（todos.json；用户跟踪多步任务）。
+    todo_store: Arc<TodoStore>,
+    /// 目标存储（goals.json；长期目标 + 进度跟踪）。
+    goal_store: Arc<GoalStore>,
     /// 全系统共享 SQLite（ADR-005；后台任务持久化/唤醒，ADR-013）
     sqlite_db: SqliteDb,
     /// 事件总线（T1 事件驱动：文件监听/webhook → 处理器/唤醒）
@@ -296,6 +302,9 @@ pub struct AppState {
     /// 跑完再取：客户端断开不再取消 agent，主动「停止」经此端点显式取消。
     stream_cancels:
         Arc<Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    /// 服务器优雅关停信号发送端（数据目录搬迁等 API 触发重启用；
+    /// start_server 装配，未装配时为 None）。
+    shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
 }
 
 impl AppState {
@@ -460,6 +469,7 @@ impl AppState {
         )
         .await?;
 
+        let data_dir = config.storage.data_dir.clone();
         Ok(Self {
             agent: Arc::new(RwLock::new(agent)),
             config: Arc::new(RwLock::new(config)),
@@ -481,6 +491,8 @@ impl AppState {
             mcp_tools,
             scheduler: Arc::new(RwLock::new(None)),
             scheduled_agent_tasks: Arc::new(RwLock::new(None)),
+            todo_store: Arc::new(TodoStore::new(&data_dir)),
+            goal_store: Arc::new(GoalStore::new(&data_dir)),
             sqlite_db,
             event_bus: Arc::new(tianyan::events::EventBus::new()),
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -488,6 +500,7 @@ impl AppState {
             clipboard_pending: Arc::new(RwLock::new(None)),
             user_questions,
             stream_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            shutdown_tx: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -504,6 +517,18 @@ impl AppState {
     /// 获取用户问题服务（ask_user 回答提交入口）。
     pub fn user_questions(&self) -> Arc<tianyan::agent::user_questions::UserQuestionService> {
         self.user_questions.clone()
+    }
+
+    /// 装配服务器优雅关停信号发送端（start_server 创建 watch 通道后调用）。
+    pub fn attach_shutdown_tx(&self, tx: tokio::sync::watch::Sender<bool>) {
+        *self.shutdown_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
+    }
+
+    /// 请求服务器优雅关停（数据目录搬迁等场景；未装配时静默）。
+    pub fn request_shutdown(&self) {
+        if let Some(tx) = self.shutdown_tx.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+            let _ = tx.send(true);
+        }
     }
 
     /// 获取活跃对话流取消注册表（session_id → cancel 标志）。
@@ -740,6 +765,16 @@ impl AppState {
         self.scheduled_agent_tasks.read().await.clone()
     }
 
+    /// 获取待办清单存储。
+    pub fn todo_store(&self) -> Arc<TodoStore> {
+        self.todo_store.clone()
+    }
+
+    /// 获取目标存储。
+    pub fn goal_store(&self) -> Arc<GoalStore> {
+        self.goal_store.clone()
+    }
+
     /// 获取共享模型服务（配置热更新后自动指向新实例）。
     pub(crate) async fn shared_model_services(
         &self,
@@ -825,6 +860,18 @@ impl AppState {
         if let Err(e) = self.usage_stats.shutdown().await {
             tracing::warn!(error = %e, "使用统计刷盘失败");
         }
+        // 释放 agent 引用：替换为向导 agent（零大小，不持有组件），
+        // 打破 agent → ToolRegistry → ScheduleTaskTool → manager → scheduler
+        // → UsageStatsFlushTask → UsageStats → SqliteDb 的引用链。否则
+        // AppState drop 时这些组件永不释放，SQLite 文件锁无法解除——
+        // 数据目录搬迁依赖关停后文件可移动。
+        {
+            let wizard: Arc<dyn AgentCoordinator> = Arc::new(crate::agent_builder::WizardModeAgent);
+            *self.agent.write().await = wizard;
+        }
+        // 显式清理定时任务管理器与调度器引用（打破 manager ↔ scheduler 循环）
+        *self.scheduled_agent_tasks.write().await = None;
+        *self.scheduler.write().await = None;
         tracing::info!("应用已关闭");
         Ok(())
     }

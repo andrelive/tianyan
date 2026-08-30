@@ -1,9 +1,141 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Toggle, FieldRow, NumberInput, SectionTitle, TextInput, INPUT_CLASS } from './shared';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import { getApiRoot } from '@/lib/api-base';
+import { migrateDataDir } from '@/lib/api-client';
+import { useAppStore } from '@/lib/store';
+import { FolderOpen, Loader2, MoveRight } from 'lucide-react';
 import type { ConfigState } from '@/lib/types';
 
 interface StorageTabProps {
   config: ConfigState;
   onUpdateField: <K extends keyof ConfigState>(key: K, value: ConfigState[K]) => void;
+}
+
+/** 健康检查轮询间隔（搬迁后等待服务器重启）。 */
+const HEALTH_POLL_INTERVAL_MS = 2000;
+/** 等待服务器重启的最长时间。 */
+const HEALTH_POLL_TIMEOUT_MS = 120000;
+
+/** 数据目录搬迁区：选新目录 → 确认 → 后端关停 → 监督循环搬迁 → 自动重启。 */
+function MigrationSection({ currentDir }: { currentDir: string }) {
+  const showToast = useAppStore((s) => s.showToast);
+  const [newDir, setNewDir] = useState('');
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [migrating, setMigrating] = useState(false);
+  const [phase, setPhase] = useState<'idle' | 'requested' | 'waiting' | 'done'>('idle');
+  const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // 卸载时清理轮询
+  useEffect(() => {
+    return () => {
+      if (pollTimer.current) clearInterval(pollTimer.current);
+    };
+  }, []);
+
+  /** 搬迁请求发出后：轮询 /health 直到服务器重启完成。 */
+  const startHealthPoll = useCallback(() => {
+    setPhase('waiting');
+    const root = getApiRoot();
+    const startedAt = Date.now();
+    pollTimer.current = setInterval(async () => {
+      try {
+        const resp = await fetch(`${root}/health`, { signal: AbortSignal.timeout(3000) });
+        if (resp.ok) {
+          if (pollTimer.current) clearInterval(pollTimer.current);
+          setPhase('done');
+          setMigrating(false);
+          showToast('数据目录搬迁完成', 'success');
+          // 服务器已用新配置重启：刷新页面让配置/数据展示同步
+          setTimeout(() => window.location.reload(), 1500);
+        }
+      } catch {
+        /* 服务器未就绪，继续轮询 */
+      }
+      if (Date.now() - startedAt > HEALTH_POLL_TIMEOUT_MS) {
+        if (pollTimer.current) clearInterval(pollTimer.current);
+        setPhase('idle');
+        setMigrating(false);
+        showToast('等待服务器重启超时，请手动重启应用', 'error');
+      }
+    }, HEALTH_POLL_INTERVAL_MS);
+  }, [showToast]);
+
+  const handleConfirm = useCallback(async () => {
+    setConfirmOpen(false);
+    setMigrating(true);
+    setPhase('requested');
+    try {
+      await migrateDataDir(newDir.trim());
+      // 请求已发出：服务器即将关停，连接会断开——进入健康检查轮询
+      startHealthPoll();
+    } catch (err: unknown) {
+      setMigrating(false);
+      setPhase('idle');
+      const msg = err instanceof Error ? err.message : '未知错误';
+      showToast(`搬迁启动失败: ${msg}`, 'error');
+    }
+  }, [newDir, showToast, startHealthPoll]);
+
+  const canStart = newDir.trim().length > 0 && !migrating;
+
+  return (
+    <div className="mt-8 pt-6 border-t border-[var(--color-border)]">
+      <h4 className="text-sm font-semibold text-[var(--color-text-primary)] flex items-center gap-1.5">
+        <FolderOpen size={14} />
+        数据目录搬迁
+      </h4>
+      <p className="text-xs text-[var(--color-text-tertiary)] mt-1.5">
+        将全部数据（数据库 / 向量索引 / 快照 / 定时任务等）移动到新目录。
+        程序会自动完成：关闭数据库 → 移动数据 → 更新配置 → 重启应用。
+        当前目录：<span className="font-mono">{currentDir || '(默认)'}</span>
+      </p>
+
+      <div className="flex items-center gap-2 mt-3">
+        <TextInput
+          value={newDir}
+          onChange={setNewDir}
+          placeholder="新数据目录（绝对路径，如 D:\tianyan-data）"
+          ariaLabel="新数据目录"
+        />
+        <button
+          onClick={() => setConfirmOpen(true)}
+          disabled={!canStart}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+        >
+          {migrating ? <Loader2 size={12} className="animate-spin" /> : <MoveRight size={12} />}
+          {migrating ? '搬迁中...' : '开始搬迁'}
+        </button>
+      </div>
+
+      {phase === 'requested' && (
+        <p className="text-xs text-[var(--color-text-secondary)] mt-2">
+          搬迁请求已提交，正在关闭服务器...
+        </p>
+      )}
+      {phase === 'waiting' && (
+        <p className="text-xs text-[var(--color-text-secondary)] mt-2 flex items-center gap-1.5">
+          <Loader2 size={12} className="animate-spin" />
+          正在移动数据并重启应用，请稍候...
+        </p>
+      )}
+      {phase === 'done' && (
+        <p className="text-xs text-green-600 dark:text-green-400 mt-2">
+          搬迁完成，应用已使用新数据目录运行
+        </p>
+      )}
+
+      <ConfirmDialog
+        open={confirmOpen}
+        title="确认搬迁数据目录？"
+        message={`将把全部数据从\n${currentDir || '(默认)'}\n移动到\n${newDir.trim()}\n\n搬迁期间应用会短暂关闭并自动重启。请确认目标目录为空或不存在。`}
+        confirmLabel="确认搬迁"
+        danger
+        onConfirm={() => void handleConfirm()}
+        onCancel={() => setConfirmOpen(false)}
+      />
+    </div>
+  );
 }
 
 export default function StorageTab({ config, onUpdateField }: StorageTabProps) {
@@ -70,6 +202,8 @@ export default function StorageTab({ config, onUpdateField }: StorageTabProps) {
           </div>
         </div>
       </div>
+
+      <MigrationSection currentDir={config.data_dir} />
     </div>
   );
 }

@@ -14,6 +14,7 @@ mod events;
 mod evolution;
 pub mod mcp;
 mod memory;
+pub mod migration;
 mod model;
 mod reminder;
 mod retrieval;

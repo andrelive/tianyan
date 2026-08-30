@@ -263,3 +263,25 @@ const SCHEMA_SQL: &str = "
         tokenize = 'trigram'
     );
 ";
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_connection_close_releases_file_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("t.db");
+        {
+            let db = SqliteDb::open(db_path.clone()).unwrap();
+            {
+                let conn = db.lock().await;
+                conn.execute_batch("CREATE TABLE t(x);").unwrap();
+            }
+        }
+        // SqliteDb dropped → Connection should be closed → rename should work
+        let probe = dir.path().join("t2.db");
+        std::fs::rename(&db_path, &probe).unwrap();
+        std::fs::rename(&probe, &db_path).unwrap();
+    }
+}

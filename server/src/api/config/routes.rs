@@ -9,8 +9,8 @@ use crate::api::config::discovery_handlers::{
     add_provider_model, scan_provider_models, test_provider_connection,
 };
 use crate::api::config::handlers::{
-    get_config, get_config_section, get_config_status, get_models, switch_model, test_connection,
-    update_config,
+    get_config, get_config_section, get_config_status, get_models, migrate_data_dir, switch_model,
+    test_connection, update_config,
 };
 use crate::api::config::mcp_handlers::{
     add_mcp_server, list_mcp_servers, remove_mcp_server, test_mcp_server, toggle_mcp_server,
@@ -29,6 +29,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/config/models", get(get_models))
         .route("/config/models/switch", post(switch_model))
         .route("/config/test-connection", post(test_connection))
+        .route("/config/migrate-data-dir", post(migrate_data_dir))
         // Soul（智能体人格）
         .route(
             "/config/soul",

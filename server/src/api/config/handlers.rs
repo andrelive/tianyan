@@ -157,6 +157,45 @@ async fn test_model_connection(
     }
 }
 
+/// 数据目录搬迁请求体。
+#[derive(Debug, serde::Deserialize)]
+pub struct MigrateDataDirRequest {
+    /// 目标数据目录（绝对路径）。
+    pub new_dir: String,
+}
+
+/// 数据目录搬迁：校验 → 写迁移请求文件 → 触发服务器优雅关停。
+///
+/// 服务器停止后由监督循环（Tauri）/主循环（独立 server）执行搬迁并重启；
+/// 本端点只负责发起，响应可能在关停前到达或随连接断开丢失。
+pub async fn migrate_data_dir(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<MigrateDataDirRequest>,
+) -> Result<Json<Value>, ApiError> {
+    use std::path::PathBuf;
+
+    let config = state.config().read().await.clone();
+    let current = config.storage.data_dir.clone();
+    let new_dir = PathBuf::from(&request.new_dir);
+
+    tianyan::config::migration::validate_migration_target(&current, &new_dir)
+        .map_err(ApiError::BadRequest)?;
+    tianyan::config::migration::write_migration_request(&current, &new_dir)?;
+
+    info!(
+        from = %current.display(),
+        to = %new_dir.display(),
+        "数据目录搬迁请求已写入，触发服务器关停"
+    );
+    // 触发优雅关停（关停完成后由监督循环执行搬迁并重启）
+    state.request_shutdown();
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "数据目录搬迁已启动，应用即将重启",
+    })))
+}
+
 /// 切换默认聊天模型
 pub async fn switch_model(
     State(state): State<Arc<AppState>>,

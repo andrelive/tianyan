@@ -16,6 +16,11 @@ function renderTasksPanel() {
   );
 }
 
+/** 切换到「后台任务」tab（默认展示内置任务）。 */
+async function openBackgroundTab(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('tab', { name: '后台任务' }));
+}
+
 beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState());
   resetTaskMocks();
@@ -28,7 +33,9 @@ describe('TasksPanel', () => {
   });
 
   it('renders tasks with status badges, session and timestamps from mock data', async () => {
+    const user = userEvent.setup();
     renderTasksPanel();
+    await openBackgroundTab(user);
 
     // 任务描述
     await waitFor(() => {
@@ -52,7 +59,9 @@ describe('TasksPanel', () => {
   });
 
   it('shows cancel button only for running/pending tasks', async () => {
+    const user = userEvent.setup();
     renderTasksPanel();
+    await openBackgroundTab(user);
 
     await waitFor(() => {
       expect(screen.getByText('写入文件 /home/user/report.md')).toBeInTheDocument();
@@ -74,6 +83,7 @@ describe('TasksPanel', () => {
   it('cancels a running task, calls the API and refreshes the list', async () => {
     const user = userEvent.setup();
     renderTasksPanel();
+    await openBackgroundTab(user);
 
     await waitFor(() => {
       expect(screen.getByText('写入文件 /home/user/report.md')).toBeInTheDocument();
@@ -98,6 +108,7 @@ describe('TasksPanel', () => {
   });
 
   it('shows empty state when there are no tasks', async () => {
+    const user = userEvent.setup();
     server.use(
       http.get('/api/v1/tasks', () => {
         return HttpResponse.json([]);
@@ -105,9 +116,10 @@ describe('TasksPanel', () => {
     );
 
     renderTasksPanel();
+    await openBackgroundTab(user);
 
     await waitFor(() => {
-      expect(screen.getByText('暂无任务')).toBeInTheDocument();
+      expect(screen.getByText('暂无后台任务')).toBeInTheDocument();
     });
   });
 
@@ -125,5 +137,15 @@ describe('TasksPanel', () => {
       expect(screen.getByText('任务')).toBeInTheDocument();
     });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows builtin scheduler tasks in the default tab', async () => {
+    renderTasksPanel();
+
+    // 内置任务（调度器 cron 任务）默认展示
+    await waitFor(() => {
+      expect(screen.getByText('摘要生成')).toBeInTheDocument();
+    });
+    expect(screen.getByText('记忆提取')).toBeInTheDocument();
   });
 });

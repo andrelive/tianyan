@@ -1,5 +1,13 @@
 import { useAppStore } from '@/lib/store';
 
+/** API 根 URL（不含 /api/v1；健康检查等非 API 端点用）。 */
+export function getApiRoot(): string {
+  const injected = (window as { __TIANYAN_API_BASE__?: string }).__TIANYAN_API_BASE__;
+  if (injected) return injected;
+  if (import.meta.env.DEV) return '';
+  return useAppStore.getState().apiBaseUrl;
+}
+
 /** API base URL 解析（原 hooks/use-api-base：不是 hook，且被 lib 层引用——移入 lib）。 */
 export function getApiBase(): string {
   // Tauri 桌面端注入的实际监听端口（首选 3000 被占用时动态选择，

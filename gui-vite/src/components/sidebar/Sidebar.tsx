@@ -14,6 +14,7 @@ import {
   Route,
   ShieldCheck,
   ListTodo,
+  Target,
   Gauge,
   Settings,
 } from 'lucide-react';
@@ -34,6 +35,7 @@ const NAV_ITEMS = [
   { id: 'traces' as const, label: '检索轨迹', icon: Route, path: '/traces' },
   { id: 'approval' as const, label: '审批', icon: ShieldCheck, path: '/approval' },
   { id: 'tasks' as const, label: '任务', icon: ListTodo, path: '/tasks' },
+  { id: 'planner' as const, label: '计划', icon: Target, path: '/planner' },
   { id: 'insights' as const, label: '洞察', icon: Gauge, path: '/insights' },
   { id: 'settings' as const, label: '设置', icon: Settings, path: '/settings' },
 ];

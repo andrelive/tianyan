@@ -30,6 +30,7 @@ pub mod agent_builder;
 pub mod api;
 pub mod evolution_executor;
 pub mod mcp_bridge;
+pub mod migration;
 pub mod notification;
 pub mod scheduled_tasks;
 pub mod state;
@@ -580,12 +581,18 @@ async fn start_server_inner(
 
     // 创建 shutdown channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // 装配到 AppState：数据目录搬迁等 API 可触发优雅关停（关停后由
+    // 监督循环/主循环执行搬迁并重启）
+    state.attach_shutdown_tx(shutdown_tx.clone());
 
     // 克隆 shutdown receiver 用于服务器优雅关闭
     let mut shutdown_rx_server = shutdown_rx.clone();
+    // 内部关停监听（request_shutdown 触发；与外部信号并列，独立 server
+    // 无外部信号源时同样生效）
+    let mut shutdown_rx_internal = shutdown_rx.clone();
 
     // 启动服务器，设置优雅关闭
-    let server_handle = tokio::spawn(async move {
+    let mut server_handle = tokio::spawn(async move {
         let server = axum::serve(listener, app);
         let shutdown_signal = async move {
             // 等待 shutdown 信号
@@ -614,6 +621,19 @@ async fn start_server_inner(
                 }
             }
         },
+        internal_result = wait_internal_shutdown(&mut shutdown_rx_internal) => {
+            match internal_result {
+                "internal" => {
+                    info!("收到内部关闭信号（数据目录搬迁等）");
+                    state.shutdown_flag().store(true, std::sync::atomic::Ordering::Relaxed);
+                    "internal"
+                }
+                _ => {
+                    error!("内部关闭信号通道断开");
+                    "error"
+                }
+            }
+        },
         ctrl_c_result = tokio::signal::ctrl_c() => {
             match ctrl_c_result {
                 Ok(()) => {
@@ -637,7 +657,7 @@ async fn start_server_inner(
                 None => "sigterm_error",
             }
         },
-        server_result = server_handle => {
+        server_result = &mut server_handle => {
             match server_result {
                 Ok(Ok(())) => {
                     info!("服务器正常退出");
@@ -697,7 +717,25 @@ async fn start_server_inner(
         }
     }
 
+    // 等待服务器任务完全结束：axum 优雅关停完成 → router/AppState drop →
+    // SQLite/LanceDB 文件锁释放。数据目录搬迁依赖此顺序（Windows 上移动
+    // 打开的文件会失败）；select 分支获胜时 JoinHandle 未被消费，此处可 await。
+    if let Err(e) = server_handle.await {
+        error!("服务器任务异常结束：{}", e);
+    }
+
     Ok(())
+}
+
+/// 等待内部关闭信号（AppState::request_shutdown 触发：数据目录搬迁等）。
+///
+/// 与外部信号并列监听；内部通道断开视为错误（正常路径不会发生）。
+async fn wait_internal_shutdown(rx: &mut watch::Receiver<bool>) -> &'static str {
+    if rx.changed().await.is_ok() {
+        "internal"
+    } else {
+        "internal_error"
+    }
 }
 
 /// 等待外部关闭信号。

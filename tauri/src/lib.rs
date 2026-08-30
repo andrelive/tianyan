@@ -230,7 +230,7 @@ async fn run_server_supervisor(
     exiting: Arc<AtomicBool>,
     shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
     app_handle_rx: tokio::sync::oneshot::Receiver<tauri::AppHandle>,
-    config: tianyan::config::TianyanConfig,
+    mut config: tianyan::config::TianyanConfig,
 ) {
     // 等待 setup 完成（AppHandle 就绪后才能注入端口）
     let app_handle = match app_handle_rx.await {
@@ -263,6 +263,18 @@ async fn run_server_supervisor(
         if exiting.load(Ordering::SeqCst) {
             info!("应用退出流程中，监督循环退出");
             return;
+        }
+
+        // 重启前重读配置：数据目录搬迁 / 设置页修改 data_dir 后生效
+        // （监督循环持有的 config 是启动时快照，可能已过期）
+        if let Ok(fresh) = tianyan::config::TianyanConfig::load() {
+            config = fresh;
+        }
+
+        // 数据目录搬迁：服务器已关停（AppState drop，SQLite/LanceDB 释放
+        // 文件锁），执行待处理迁移并重读配置（搬迁后以新 data_dir 重启）
+        if let Some(new_config) = tianyan_server::migration::handle_pending_migration(&config).await {
+            config = new_config;
         }
 
         // 退避后重启（崩溃风暴保护：1s → 2s → 4s → ... → 30s 封顶）

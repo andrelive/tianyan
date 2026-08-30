@@ -21,6 +21,7 @@ const MemoryPanel = lazy(() => import('@/components/memory/MemoryPanel'));
 const RetrievalTracesPanel = lazy(() => import('@/components/retrieval/RetrievalTracesPanel'));
 const ApprovalPanel = lazy(() => import('@/components/approval/ApprovalPanel'));
 const TasksPanel = lazy(() => import('@/components/tasks/TasksPanel'));
+const PlannerPanel = lazy(() => import('@/components/planner/PlannerPanel'));
 const InsightsPanel = lazy(() => import('@/components/insights/InsightsPanel'));
 const SettingsPanel = lazy(() => import('@/components/settings/SettingsPanel'));
 const ConfigWizard = lazy(() => import('@/components/wizard/ConfigWizard'));
@@ -115,6 +116,7 @@ function App() {
             <Route path="/traces" element={<RouteErrorBoundary><RetrievalTracesPanel /></RouteErrorBoundary>} />
             <Route path="/approval" element={<RouteErrorBoundary><ApprovalPanel /></RouteErrorBoundary>} />
             <Route path="/tasks" element={<RouteErrorBoundary><TasksPanel /></RouteErrorBoundary>} />
+            <Route path="/planner" element={<RouteErrorBoundary><PlannerPanel /></RouteErrorBoundary>} />
             <Route path="/insights" element={<RouteErrorBoundary><InsightsPanel /></RouteErrorBoundary>} />
             <Route path="/settings" element={<RouteErrorBoundary><SettingsPanel /></RouteErrorBoundary>} />
           </Route>

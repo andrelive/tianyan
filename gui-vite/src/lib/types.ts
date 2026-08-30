@@ -749,6 +749,19 @@ export interface ConfigState {
 
   // -- MCP config --
   mcpServers: McpServerConfigState[];
+
+  // -- Web config (web.*；web_search / web_fetch 工具) --
+  web_enabled: boolean;
+  /** 搜索后端：duckduckgo（默认，零配置）/ bing（国内可达）/ searxng（自定义端点）。 */
+  search_backend: string;
+  /** SearXNG 端点（search_backend = searxng 时必填）。 */
+  searxng_endpoint: string;
+  /** HTTP 请求超时（秒）。 */
+  web_timeout_secs: number;
+  /** 搜索/抓取结果缓存 TTL（秒）。 */
+  web_cache_ttl_secs: number;
+  /** 单次抓取响应大小上限（字节）。 */
+  web_max_fetch_bytes: number;
 }
 
 // ========== API Response Types (matches backend api_types) ==========
@@ -899,6 +912,63 @@ export interface WorkspaceApplyPatchResponse {
   total_files: number;
 }
 
+// ========== Todo & Goal Types (matches backend todos/goals DTO) ==========
+
+/** 待办状态（API 语义：snake_case）。 */
+export type TodoStatus = 'pending' | 'in_progress' | 'completed';
+
+/** 待办优先级。 */
+export type TodoPriority = 'low' | 'medium' | 'high';
+
+/** 待办条目（GET /todos 返回 { todos, total }）。 */
+export interface TodoItem {
+  id: string;
+  title: string;
+  description: string | null;
+  status: TodoStatus;
+  priority: TodoPriority;
+  /** 关联目标 id（可选；目标进度按关联待办自动计算）。 */
+  goal_id: string | null;
+  created_at: number;
+  updated_at: number;
+  completed_at: number | null;
+  due_at: number | null;
+}
+
+export interface ListTodosResponse {
+  todos: TodoItem[];
+  total: number;
+}
+
+/** 目标状态（API 语义：snake_case）。 */
+export type GoalStatus = 'active' | 'completed' | 'archived';
+
+/** 目标条目。 */
+export interface Goal {
+  id: string;
+  title: string;
+  description: string | null;
+  status: GoalStatus;
+  created_at: number;
+  updated_at: number;
+  completed_at: number | null;
+  target_date: number | null;
+}
+
+/** 目标 + 进度（GET /goals 返回 { goals: GoalWithProgress[], total }）。 */
+export interface GoalWithProgress {
+  goal: Goal;
+  /** 进度百分比 0-100（关联待办完成比例；无关联待办时为 0）。 */
+  progress: number;
+  todo_total: number;
+  todo_done: number;
+}
+
+export interface ListGoalsResponse {
+  goals: GoalWithProgress[];
+  total: number;
+}
+
 // ========== App State Types ==========
 
 export type View =
@@ -913,6 +983,7 @@ export type View =
   | 'traces'
   | 'approval'
   | 'tasks'
+  | 'planner'
   | 'insights';
 
 export type StreamStatus = 'idle' | 'streaming' | 'error';

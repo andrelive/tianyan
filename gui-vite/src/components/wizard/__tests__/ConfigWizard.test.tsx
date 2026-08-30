@@ -24,13 +24,14 @@ async function fillModelStep(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByLabelText('API Key'), 'sk-test-key');
 }
 
-/** 从欢迎页走完各步骤到达确认页（step 4），沿途填写必填项。 */
+/** 从欢迎页走完各步骤到达确认页（step 5），沿途填写必填项。 */
 async function walkToConfirm(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('button', { name: '下一步' })); // 欢迎 → 模型
   await fillModelStep(user);
   await user.click(screen.getByRole('button', { name: '下一步' })); // 模型 → 数据
   await user.type(screen.getByLabelText('数据目录'), '~/.local/share/tianyan-test');
-  await user.click(screen.getByRole('button', { name: '下一步' })); // 数据 → Agent
+  await user.click(screen.getByRole('button', { name: '下一步' })); // 数据 → Web
+  await user.click(screen.getByRole('button', { name: '下一步' })); // Web → Agent
   await user.click(screen.getByRole('button', { name: '下一步' })); // Agent → 确认
 }
 
@@ -43,7 +44,7 @@ describe('ConfigWizard', () => {
     renderWizard();
 
     expect(screen.getByText('欢迎使用天演')).toBeInTheDocument();
-    expect(screen.getByText('1 / 5')).toBeInTheDocument();
+    expect(screen.getByText('1 / 6')).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: '配置步骤' })).toBeInTheDocument();
     // 欢迎步骤无必填项，下一步可用；没有上一步
     expect(screen.getByRole('button', { name: '下一步' })).toBeEnabled();
@@ -56,11 +57,11 @@ describe('ConfigWizard', () => {
 
     await user.click(screen.getByRole('button', { name: '下一步' }));
     expect(screen.getByText('模型服务配置')).toBeInTheDocument();
-    expect(screen.getByText('2 / 5')).toBeInTheDocument();
+    expect(screen.getByText('2 / 6')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '上一步' }));
     expect(screen.getByText('欢迎使用天演')).toBeInTheDocument();
-    expect(screen.getByText('1 / 5')).toBeInTheDocument();
+    expect(screen.getByText('1 / 6')).toBeInTheDocument();
   });
 
   it('blocks advancing while required model fields are missing', async () => {
@@ -107,7 +108,7 @@ describe('ConfigWizard', () => {
 
     // 确认页展示汇总
     expect(screen.getByText('确认配置')).toBeInTheDocument();
-    expect(screen.getByText('5 / 5')).toBeInTheDocument();
+    expect(screen.getByText('6 / 6')).toBeInTheDocument();
     expect(screen.getByText('test-provider')).toBeInTheDocument();
     expect(screen.getByText('http://localhost:9999/v1')).toBeInTheDocument();
     expect(screen.getByText('sk-test-...')).toBeInTheDocument();
@@ -165,7 +166,7 @@ describe('ConfigWizard', () => {
     });
     expect(useAppStore.getState().toasts[0]?.message).toContain('配置保存失败');
     // 向导未关闭：仍在确认页，完成按钮可重试，未标记已配置
-    expect(screen.getByText('5 / 5')).toBeInTheDocument();
+    expect(screen.getByText('6 / 6')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '完成配置' })).toBeEnabled();
     expect(useAppStore.getState().configured).not.toBe(true);
   });

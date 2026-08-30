@@ -8,7 +8,9 @@ import type {
   IngestResponse,
   KnowledgeSearchResponse,
   ListRolesResponse,
+  ListGoalsResponse,
   ListSessionsResponse,
+  ListTodosResponse,
   ListToolsResponse,
   McpServerEntry,
   McpTestResponse,
@@ -37,6 +39,7 @@ import type {
   WorkspaceReadResponse,
   WorkspaceTreeResponse,
 } from './types';
+import type { Goal, GoalStatus, TodoItem, TodoPriority, TodoStatus } from './types';
 import type { BackendConfigResponse, BackendUpdateRequest } from './config-transform';
 
 import { fetchWithSignal } from './fetch-with-signal';
@@ -170,6 +173,10 @@ export async function apiPut<T>(path: string, body: unknown): Promise<T> {
   return request<T>('PUT', path, body);
 }
 
+export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+  return request<T>('PATCH', path, body);
+}
+
 export async function apiDelete<T>(path: string): Promise<T> {
   return request<T>('DELETE', path);
 }
@@ -240,6 +247,17 @@ export async function testProviderConnection(
 /** 使用统计（按时间范围查询；range 形如 days=N 或 start_ts=..&end_ts=..）。 */
 export async function fetchUsageStatsRange(range: string): Promise<UsageStatsResponse> {
   return apiGet<UsageStatsResponse>(`/usage/stats?${range}`);
+}
+
+// ========== Data Migration API ==========
+
+/** 数据目录搬迁（校验 + 写迁移请求 + 触发服务器关停；应用将自动重启）。 */
+export async function migrateDataDir(
+  newDir: string,
+): Promise<{ success: boolean; message: string }> {
+  return apiPost<{ success: boolean; message: string }>('/config/migrate-data-dir', {
+    new_dir: newDir,
+  });
 }
 
 // ========== Tools & Skills ==========
@@ -581,6 +599,76 @@ export async function createScheduledTask(req: {
 /** 删除定时智能体任务。 */
 export async function deleteScheduledTask(id: string): Promise<{ deleted: boolean }> {
   return apiDelete<{ deleted: boolean }>(`/scheduled-tasks/${encodeURIComponent(id)}`);
+}
+
+// ========== Todo & Goal API ==========
+
+/** 列出全部待办。 */
+export async function fetchTodos(): Promise<ListTodosResponse> {
+  return apiGet<ListTodosResponse>('/todos');
+}
+
+/** 创建待办。 */
+export async function createTodo(req: {
+  title: string;
+  description?: string;
+  priority?: TodoPriority;
+  goal_id?: string;
+  due_at?: number;
+}): Promise<{ todo: TodoItem }> {
+  return apiPost<{ todo: TodoItem }>('/todos', req);
+}
+
+/** 更新待办（部分字段；status 支持 pending/in_progress/completed）。 */
+export async function updateTodo(
+  id: string,
+  req: {
+    title?: string;
+    description?: string;
+    status?: TodoStatus;
+    priority?: TodoPriority;
+    goal_id?: string;
+    due_at?: number;
+  },
+): Promise<{ todo: TodoItem }> {
+  return apiPatch<{ todo: TodoItem }>(`/todos/${encodeURIComponent(id)}`, req);
+}
+
+/** 删除待办。 */
+export async function deleteTodo(id: string): Promise<{ deleted: boolean }> {
+  return apiDelete<{ deleted: boolean }>(`/todos/${encodeURIComponent(id)}`);
+}
+
+/** 列出全部目标（含进度）。 */
+export async function fetchGoals(): Promise<ListGoalsResponse> {
+  return apiGet<ListGoalsResponse>('/goals');
+}
+
+/** 创建目标。 */
+export async function createGoal(req: {
+  title: string;
+  description?: string;
+  target_date?: number;
+}): Promise<{ goal: Goal }> {
+  return apiPost<{ goal: Goal }>('/goals', req);
+}
+
+/** 更新目标（部分字段；status 支持 active/completed/archived）。 */
+export async function updateGoal(
+  id: string,
+  req: {
+    title?: string;
+    description?: string;
+    status?: GoalStatus;
+    target_date?: number;
+  },
+): Promise<{ goal: Goal }> {
+  return apiPatch<{ goal: Goal }>(`/goals/${encodeURIComponent(id)}`, req);
+}
+
+/** 删除目标。 */
+export async function deleteGoal(id: string): Promise<{ deleted: boolean }> {
+  return apiDelete<{ deleted: boolean }>(`/goals/${encodeURIComponent(id)}`);
 }
 
 // ========== Session compression API ==========

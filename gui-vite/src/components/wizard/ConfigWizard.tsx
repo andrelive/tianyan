@@ -6,6 +6,7 @@ import {
   Bot,
   Database,
   Cpu,
+  Globe,
   Rocket,
   Loader2,
 } from 'lucide-react';
@@ -21,6 +22,7 @@ import WelcomeStep from './steps/WelcomeStep';
 import ModelStep from './steps/ModelStep';
 import DataStep from './steps/DataStep';
 import AgentStep from './steps/AgentStep';
+import WebStep from './steps/WebStep';
 import ConfirmStep from './steps/ConfirmStep';
 import StepIndicator from './StepIndicator';
 
@@ -28,6 +30,7 @@ const STEPS = [
   { id: 'welcome', label: '欢迎', icon: Rocket },
   { id: 'model', label: '模型配置', icon: Cpu },
   { id: 'data', label: '数据存储', icon: Database },
+  { id: 'web', label: 'Web 搜索', icon: Globe },
   { id: 'agent', label: 'Agent 行为', icon: Bot },
   { id: 'confirm', label: '确认', icon: Check },
 ];
@@ -92,6 +95,8 @@ export default function ConfigWizard() {
         return true;
       case 4:
         return true;
+      case 5:
+        return true;
       default:
         return false;
     }
@@ -102,7 +107,7 @@ export default function ConfigWizard() {
       showToast('请填写必填字段', 'info');
       return;
     }
-    setStep((s) => Math.min(s + 1, 4));
+    setStep((s) => Math.min(s + 1, 5));
   }, [canGoNext, showToast]);
 
   const handlePrev = useCallback(() => {
@@ -151,8 +156,9 @@ export default function ConfigWizard() {
           {step === 0 && <WelcomeStep {...commonStepProps} />}
           {step === 1 && <ModelStep {...commonStepProps} />}
           {step === 2 && <DataStep {...commonStepProps} />}
-          {step === 3 && <AgentStep {...commonStepProps} />}
-          {step === 4 && <ConfirmStep {...commonStepProps} submitting={submitting} />}
+          {step === 3 && <WebStep {...commonStepProps} />}
+          {step === 4 && <AgentStep {...commonStepProps} />}
+          {step === 5 && <ConfirmStep {...commonStepProps} submitting={submitting} />}
         </div>
       </div>
 
@@ -175,7 +181,7 @@ export default function ConfigWizard() {
         </div>
 
         <div>
-          {step < 4 ? (
+          {step < 5 ? (
             <button
               onClick={handleNext}
               disabled={!canGoNext()}

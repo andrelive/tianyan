@@ -46,6 +46,8 @@ pub mod context;
 pub mod events;
 /// 执行器（独立执行函数 + Action）。
 pub mod executor;
+/// 目标管理（长期目标 + 进度跟踪；与待办联动）。
+pub mod goals;
 pub mod knowledge;
 /// LSP 集成：语言服务器注册表 + 自实现 JSON-RPC 客户端 + 推送诊断。
 pub mod lsp;
@@ -58,6 +60,8 @@ pub mod session;
 pub mod skills;
 /// 工作区文件快照（会话回退时恢复文件修改）。
 pub mod snapshot;
+/// 待办清单（todolist；用户跟踪多步任务）。
+pub mod todos;
 pub mod vfs;
 
 /// 测试工具（仅在 cfg(test) 时编译）。
