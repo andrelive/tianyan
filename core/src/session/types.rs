@@ -314,3 +314,55 @@ mod tests {
         assert_eq!(parsed.len(), 2);
     }
 }
+
+/// 回忆窗口默认半径（命中前后各 N 条）。
+pub const DEFAULT_WINDOW_RADIUS: i64 = 5;
+
+/// 回忆命中（全文检索结果）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecallHit {
+    /// 来源会话。
+    pub session_id: String,
+    /// 消息序号（会话内 0 起始）。
+    pub seq: i64,
+    /// 消息 ID。
+    pub message_id: String,
+    /// 消息角色。
+    pub role: String,
+    /// 文本内容（user/assistant）。
+    pub text: String,
+    /// 相关度（BM25 分数取负，越大越相关）。
+    pub score: f64,
+}
+
+/// 回忆窗口消息。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecallMessage {
+    /// 来源会话。
+    pub session_id: String,
+    /// 消息序号。
+    pub seq: i64,
+    /// 消息 ID。
+    pub message_id: String,
+    /// 消息角色。
+    pub role: String,
+    /// 文本内容（user/assistant）。
+    pub text: String,
+    /// 工具文本（截断要点）。
+    pub tool_text: String,
+    /// 消息时间（epoch 毫秒）。
+    pub ts: i64,
+}
+
+/// 会话元数据（轻量列出，不加载消息）。
+#[derive(Debug, Clone)]
+pub struct SessionMeta {
+    /// 会话 ID。
+    pub session_id: String,
+    /// 会话级头部（title/ended_at/injectable 快照）。
+    pub header: SessionHeader,
+    /// 会话创建时间（epoch 毫秒；缺省 0 = 未知，由调用方兜底）。
+    pub created_at: i64,
+    /// 消息数（走 (session_id, seq) 索引计数，O(1)）。
+    pub message_count: usize,
+}

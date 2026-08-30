@@ -110,7 +110,7 @@ impl ToolRegistry {
         let limit = params.limit.unwrap_or(5).min(20);
         let radius = params
             .radius
-            .unwrap_or(crate::session::search::DEFAULT_WINDOW_RADIUS)
+            .unwrap_or(crate::session::types::DEFAULT_WINDOW_RADIUS)
             .max(0);
         let hits = recall
             .search(&params.query, limit)

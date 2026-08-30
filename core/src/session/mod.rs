@@ -30,7 +30,8 @@ mod manager;
 pub mod search;
 /// 会话权威存储（ADR-018：SQLite 表为唯一真相，VFS 会话例外）。
 pub mod store;
-mod types;
+/// 会话类型（纯类型层：Session/SessionHeader/RecallHit/SessionMeta 等）。
+pub mod types;
 
 /// 会话消息数量上限（持久态安全上限）。
 ///

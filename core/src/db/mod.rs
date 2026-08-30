@@ -10,6 +10,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub mod session;
+
 use crate::common::error::{Result, TianyanError};
 use crate::vfs::backend::sqlite_db::SqliteDb;
 

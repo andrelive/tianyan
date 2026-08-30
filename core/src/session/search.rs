@@ -1,200 +1,53 @@
-//! 会话回忆检索（ADR-017 决策 6：FTS5 会话回忆，方案 A）。
+//! 会话回忆服务（ADR-017 决策 6：FTS5 消息索引）。
 //!
-//! 会话权威存储已迁入 SQLite（ADR-018，`crate::session::store::SessionStore`）；
-//! 本模块是回忆检索服务，读同一张 `session_messages` 表：
-//! - FTS5 倒排索引（trigram tokenizer：中文子串匹配，BM25 排序；rowid 对应消息行）；
-//! - 回忆流程：关键词 → BM25 命中 → 附近窗口（user/assistant 文本，忽略工具）；
-//! - 消息写入（含 FTS 维护）由 SessionStore 负责，本模块只读。
-//!
-//! 架构落位：session 模块能力（共享 SqliteDb，权威数据），不新增平行检索抽象。
+//! **SQL 已收敛到 [`crate::db::session::SessionRepo`]**：本组件封装全文回忆
+//! 查询（保持公共 API），数据访问委托仓储。
 
 use std::sync::Arc;
 
 use crate::common::error::TianyanError;
 use crate::db::Database;
+use crate::db::session::SessionRepo;
+use crate::session::types::RecallHit;
 
-/// 回忆窗口默认半径（命中前后各 N 条）。
-pub const DEFAULT_WINDOW_RADIUS: i64 = 5;
-
-/// 回忆命中。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RecallHit {
-    /// 来源会话。
-    pub session_id: String,
-    /// 消息序号（会话内 0 起始）。
-    pub seq: i64,
-    /// 消息 ID。
-    pub message_id: String,
-    /// 消息角色。
-    pub role: String,
-    /// 文本内容（user/assistant）。
-    pub text: String,
-    /// 相关度（BM25 分数取负，越大越相关）。
-    pub score: f64,
-}
-
-/// 回忆窗口消息。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RecallMessage {
-    /// 来源会话。
-    pub session_id: String,
-    /// 消息序号。
-    pub seq: i64,
-    /// 消息 ID。
-    pub message_id: String,
-    /// 消息角色。
-    pub role: String,
-    /// 文本内容（user/assistant）。
-    pub text: String,
-    /// 工具调用/结果（截断；回忆窗口展示用）。
-    pub tool_text: String,
-    /// 消息创建时间（epoch 毫秒）。
-    pub ts: i64,
-}
-
-/// 会话回忆检索服务。
-#[derive(Clone)]
+/// 会话回忆服务（封装 [`SessionRepo`] 的全文查询）。
 pub struct SessionRecall {
-    db: Arc<Database>,
+    repo: Arc<SessionRepo>,
 }
 
 impl SessionRecall {
-    /// 创建会话回忆服务（共享 SqliteDb 连接）。
-    ///
-    /// # Errors
-    /// * 返回 TianyanError（本方法当前不失败，签名保持与全库统一错误类型）。
+    /// 创建会话回忆服务（共享 Database 单连接）。
     pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
-        Ok(Arc::new(Self { db }))
+        Ok(Arc::new(Self {
+            repo: Arc::new(SessionRepo::new(db)),
+        }))
     }
 
-    /// 关键词回忆：FTS5 BM25 命中（trigram 子串匹配，中文无需分词）。
-    ///
-    /// # Errors
-    /// * SQLite 查询失败时返回 TianyanError::Custom（带 session 前缀）。
+    /// 全文检索消息（bm25 排序；空查询返回空）。
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<RecallHit>, TianyanError> {
-        let q = sanitize_fts_query(query);
-        if q.is_empty() {
-            return Ok(Vec::new());
-        }
-        let conn = self.db.lock().await;
-        let sql = "SELECT m.session_id, m.seq, m.message_id, m.role, m.text,                    bm25(session_messages_fts) AS score                    FROM session_messages_fts                    JOIN session_messages m ON m.id = session_messages_fts.rowid                    WHERE session_messages_fts MATCH ?1                    ORDER BY score LIMIT ?2";
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| sqlite_error("回忆查询准备失败", e))?;
-        let rows = stmt
-            .query_map(rusqlite::params![q, limit as i64], |row| {
-                Ok(RecallHit {
-                    session_id: row.get(0)?,
-                    seq: row.get(1)?,
-                    message_id: row.get(2)?,
-                    role: row.get(3)?,
-                    text: row.get(4)?,
-                    score: -row.get::<_, f64>(5)?,
-                })
-            })
-            .map_err(|e| sqlite_error("回忆查询执行失败", e))?;
-        let mut hits = Vec::new();
-        for row in rows {
-            hits.push(row.map_err(|e| sqlite_error("回忆查询行读取失败", e))?);
-        }
-        Ok(hits)
+        self.repo.search(query, limit).await
     }
 
-    /// 命中附近窗口（user/assistant 文本 + tool_text 截断；忽略工具过滤由
-    /// text 列天然保证——工具调用/结果只进 tool_text；空正文消息不参与）。
-    ///
-    /// # Errors
-    /// * SQLite 查询失败时返回 TianyanError::Custom（带 session 前缀）。
+    /// 命中附近窗口（center_seq 前后 radius 条）。
     pub async fn window(
         &self,
         session_id: &str,
         center_seq: i64,
         radius: i64,
-    ) -> Result<Vec<RecallMessage>, TianyanError> {
-        let conn = self.db.lock().await;
-        let sql = "SELECT session_id, seq, message_id, role, text, tool_text, ts                    FROM session_messages                    WHERE session_id = ?1 AND seq BETWEEN ?2 AND ?3                      AND (text != '' OR tool_text != '')                    ORDER BY seq";
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| sqlite_error("窗口查询准备失败", e))?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![session_id, center_seq - radius, center_seq + radius],
-                map_recall_message,
-            )
-            .map_err(|e| sqlite_error("窗口查询执行失败", e))?;
-        collect(rows, "窗口查询行读取失败")
+    ) -> Result<Vec<crate::session::types::RecallMessage>, TianyanError> {
+        self.repo.window(session_id, center_seq, radius).await
     }
 
-    /// 会话内自 since_seq 之后的消息（水位线增量；供记忆提取/演化任务）。
-    ///
-    /// # Errors
-    /// * SQLite 查询失败时返回 TianyanError::Custom（带 session 前缀）。
+    /// 水位线后的消息（增量；供记忆提取/演化任务）。
     pub async fn messages_since(
         &self,
         session_id: &str,
         since_seq: i64,
         limit: usize,
-    ) -> Result<Vec<RecallMessage>, TianyanError> {
-        let conn = self.db.lock().await;
-        let sql = "SELECT session_id, seq, message_id, role, text, tool_text, ts                    FROM session_messages                    WHERE session_id = ?1 AND seq > ?2                      AND (text != '' OR tool_text != '')                    ORDER BY seq LIMIT ?3";
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| sqlite_error("增量查询准备失败", e))?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![session_id, since_seq, limit as i64],
-                map_recall_message,
-            )
-            .map_err(|e| sqlite_error("增量查询执行失败", e))?;
-        collect(rows, "增量查询行读取失败")
+    ) -> Result<Vec<crate::session::types::RecallMessage>, TianyanError> {
+        self.repo.messages_since(session_id, since_seq, limit).await
     }
 }
-
-/// 行映射：RecallMessage。
-fn map_recall_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecallMessage> {
-    Ok(RecallMessage {
-        session_id: row.get(0)?,
-        seq: row.get(1)?,
-        message_id: row.get(2)?,
-        role: row.get(3)?,
-        text: row.get(4)?,
-        tool_text: row.get(5)?,
-        ts: row.get(6)?,
-    })
-}
-
-/// 收集查询行（统一错误包装）。
-fn collect(
-    rows: rusqlite::MappedRows<
-        '_,
-        impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<RecallMessage>,
-    >,
-    err_msg: &str,
-) -> Result<Vec<RecallMessage>, TianyanError> {
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row.map_err(|e| sqlite_error(err_msg, e))?);
-    }
-    Ok(out)
-}
-
-/// FTS5 查询净化：trigram 短语匹配（去引号防注入；过短查询返回空）。
-fn sanitize_fts_query(query: &str) -> String {
-    let cleaned: String = query
-        .chars()
-        .filter(|c| !matches!(c, '"' | '*' | '^' | ':' | '(' | ')' | '-' | ' '))
-        .collect();
-    if cleaned.chars().count() < 3 {
-        return String::new();
-    }
-    format!("\"{cleaned}\"")
-}
-
-/// SQLite 错误包装（带 session 前缀）。
-fn sqlite_error(context: &str, e: rusqlite::Error) -> TianyanError {
-    TianyanError::Custom(format!("session: session_recall: {context}：{e}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +55,7 @@ mod tests {
         DetailedTokenUsage, MessageRole, MessageTime, Part, PartTime, StructuredMessage,
     };
     use crate::session::store::SessionStore;
+    use crate::db::session::sanitize_fts_query;
 
     fn msg(
         id: &str,
