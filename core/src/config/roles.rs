@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::AgentRole;
+use crate::roles::AgentRole;
 
 /// 子 Agent 角色配置节。
 ///

@@ -1,105 +1,15 @@
-//! 角色化子 Agent 委托（ADR-016：统一角色实体模型）。
+//! 角色注册表（ADR-016：统一角色实体模型）。
 //!
-//! `delegate_to_agent` 工具的 `role` 参数按名字从 [`RoleRegistry`] 解析角色；
-//! 角色提供模型、系统提示、工具白名单、最大轮数与整体超时，替代逐次手写参数。
-//! 角色来源三类且平级：内置种子（Builtin）/ 用户配置（User）/ 学习演化（Learned），
-//! 来源只是元数据；注册表 VFS 持久化后以演化实体为准。
-//! 试验性角色（status = Experimental）只展示不可调用。
+//! 基础类型（[`crate::roles`]：AgentRole/RoleSource/RoleStatus）已移至基础层；
+//! 本模块保留 agent 特定逻辑：注册表（按名字索引 + 内置种子）+ 配置签名。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-
-use crate::agent::role_store::RoleStore;
 use crate::common::error::Result;
 use crate::config::AgentRolesConfig;
-
-/// 角色来源（ADR-016：三类来源平级，来源只是元数据）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RoleSource {
-    /// 内置种子（researcher / editor / reviewer；首次启动写入 VFS）。
-    Builtin,
-    /// 用户配置（`[agent_roles]` 节；降级为种子来源）。
-    #[default]
-    User,
-    /// 学习演化（GEPA 角色管线产物）。
-    Learned,
-}
-
-/// 角色激活状态（ADR-016：试验性只展示不可调用）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RoleStatus {
-    /// 正式：可被 delegate_to_agent 调用。
-    #[default]
-    Active,
-    /// 试验性：出现在 delegate 描述中供评估，调用被拒绝。
-    Experimental,
-}
-
-impl RoleSource {
-    /// 是否用户来源（配置序列化时省略该字段）。
-    pub(crate) fn is_user(&self) -> bool {
-        *self == Self::User
-    }
-}
-
-impl RoleStatus {
-    /// 是否正式（配置序列化时省略该字段）。
-    pub(crate) fn is_active(&self) -> bool {
-        *self == Self::Active
-    }
-}
-
-/// 子 Agent 角色定义。
-///
-/// 所有字段均为可选：缺省时回落到主 Agent 配置（模型/轮数/超时）或不生效
-/// （系统提示 / 工具白名单）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AgentRole {
-    /// 角色名（配置节 `[agent_roles.<name>]` 的键，序列化时省略——名字即键）。
-    #[serde(skip)]
-    pub name: String,
-    /// 角色使用的模型名称（与主 Agent 模型同空间；缺省回落主 Agent 模型）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// 角色系统提示（缺省无系统提示，仅携带任务描述）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
-    /// 工具白名单（缺省不限制——与主 Agent 相同；Some 时白名单外工具被拒绝）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<String>>,
-    /// 子 Agent 最大循环轮数（缺省 200，范围 1-500）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_turns: Option<usize>,
-    /// 委托整体超时（秒；缺省不限制）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout_secs: Option<u64>,
-    /// 来源（内置种子 / 用户配置 / 学习演化；缺省 User）。
-    #[serde(default, skip_serializing_if = "RoleSource::is_user")]
-    pub source: RoleSource,
-    /// 进化版本（1 起始；学习更新时递增；缺省视为 1——roundtrip 保真）。
-    #[serde(default = "one", skip_serializing_if = "is_one")]
-    pub version: u32,
-    /// 激活状态（缺省 Active）。
-    #[serde(default, skip_serializing_if = "RoleStatus::is_active")]
-    pub status: RoleStatus,
-    /// 进化来源角色名（回退链；内置/用户配置为 None）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage: Option<String>,
-}
-
-/// 版本 1 判定（序列化省略）。
-fn is_one(v: &u32) -> bool {
-    *v == 1
-}
-
-/// 版本缺省值（1）。
-fn one() -> u32 {
-    1
-}
+use crate::role_store::RoleStore;
+pub use crate::roles::{AgentRole, RoleSource, RoleStatus};
 
 /// 用户配置签名：排序后的角色序列化文本（配置变更检测）。
 fn config_sig(config: &AgentRolesConfig) -> String {

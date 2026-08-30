@@ -26,7 +26,7 @@ use crate::model::ChatService;
 use crate::observability::execution_log::ExecutionLog;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
-use crate::scheduler::tasks::RuleRecorder;
+use crate::observability::RuleRecorder;
 use crate::session::SessionManager;
 use crate::skills::{SkillExecutor, SkillRefresher};
 use crate::snapshot::SnapshotManager;

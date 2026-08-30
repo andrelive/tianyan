@@ -21,7 +21,7 @@ use crate::observability::execution_log::ExecutionLog;
 use crate::observability::trace::TraceCollector;
 use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
-use crate::scheduler::tasks::RuleRecorder;
+use crate::observability::RuleRecorder;
 use crate::session::search::SessionRecall;
 
 use crate::skills::learning::ExecutionHistory;

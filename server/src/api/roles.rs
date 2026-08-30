@@ -105,7 +105,7 @@ pub struct RolesStatsResponse {
     /// 按任务类型统计（分类计数；类别见 [`tianyan::agent::categorize_task_by_keyword`]）。
     pub by_task_type: Vec<(String, usize)>,
     /// 最近委托记录（时间倒序，最多 10 条）。
-    pub recent: Vec<tianyan::agent::role_store::DelegationRecord>,
+    pub recent: Vec<tianyan::roles::DelegationRecord>,
 }
 
 /// 角色列表（含会话摘要）。
@@ -215,7 +215,7 @@ pub async fn get_roles_stats(
         *by_type.entry(t).or_default() += 1;
     }
     let by_task_type: Vec<(String, usize)> = by_type.into_iter().collect();
-    let recent: Vec<tianyan::agent::role_store::DelegationRecord> =
+    let recent: Vec<tianyan::roles::DelegationRecord> =
         records.iter().rev().take(10).cloned().collect();
     let success_rate = if total_calls == 0 {
         0.0

@@ -14,7 +14,6 @@
 mod evolution_task;
 mod gc_task;
 mod reminder_task;
-pub mod rule_recorder;
 mod snapshot_gc_task;
 mod summary_task;
 mod usage_stats_flush_task;
@@ -22,7 +21,6 @@ mod usage_stats_flush_task;
 pub use evolution_task::{EvolutionReviewExecutor, EvolutionTask};
 pub use gc_task::GcTask;
 pub use reminder_task::ReminderTask;
-pub use rule_recorder::RuleRecorder;
 pub use snapshot_gc_task::SnapshotGcTask;
 pub use summary_task::SummaryTask;
 pub use usage_stats_flush_task::UsageStatsFlushTask;

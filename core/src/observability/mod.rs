@@ -4,10 +4,16 @@
 //! 让智能体可以反思自己的执行历史，实现 Harness Engineering 原则 2
 //! 的"环境可读性"。
 
+pub mod execution_history;
 pub mod execution_log;
+/// 规则记录器（从 scheduler 移入：agent 与 scheduler 共用，不依赖调度机制）。
+pub mod rule_recorder;
 pub mod trace;
 pub mod usage_log;
 pub mod usage_stats;
+
+pub use execution_history::{ExecutionHistory, ExecutionStep};
+pub use rule_recorder::RuleRecorder;
 
 use std::sync::Arc;
 

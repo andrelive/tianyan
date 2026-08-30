@@ -1,35 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-
-/// 执行历史记录。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionHistory {
-    /// 任务描述。
-    pub task_description: String,
-    /// 执行步骤。
-    pub steps: Vec<ExecutionStep>,
-    /// 执行结果。
-    pub result: String,
-    /// 是否成功。
-    pub success: bool,
-    /// 执行耗时（毫秒）。
-    pub execution_time_ms: u64,
-    /// 使用的技能列表。
-    pub skills_used: Vec<String>,
-}
-
-/// 执行步骤。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionStep {
-    /// 步骤描述。
-    pub description: String,
-    /// 动作类型。
-    pub action: String,
-    /// 参数。
-    pub parameters: HashMap<String, String>,
-    /// 执行结果。
-    pub result: String,
-}
+// 执行历史类型已移至 observability（observability 记录、skills 消费；
+// 独立类型层避免 observability → skills 依赖）。
+pub use crate::observability::{ExecutionHistory, ExecutionStep};
 
 /// 生成的技能。
 #[derive(Debug, Clone, Serialize, Deserialize)]

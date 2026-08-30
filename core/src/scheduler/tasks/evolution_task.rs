@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::agent::role_store::RoleStore;
-use crate::agent::roles::{AgentRole, RoleSource, RoleStatus};
+use crate::role_store::RoleStore;
+use crate::roles::{AgentRole, RoleSource, RoleStatus};
 use crate::common::error::{Result, TianyanError};
 use crate::common::llm_judge::parse_llm_json;
 use crate::common::types::{

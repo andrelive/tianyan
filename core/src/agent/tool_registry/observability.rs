@@ -16,7 +16,7 @@ use crate::model::types::ToolCall;
 use crate::observability::execution_log::ExecutionLog;
 use crate::observability::trace::TraceCollector;
 use crate::observability::usage_stats::UsageStats;
-use crate::scheduler::tasks::RuleRecorder;
+use crate::observability::RuleRecorder;
 use crate::skills::learning::ExecutionHistory;
 
 /// 可观测性状态（std Mutex 短临界区：仅克隆 Arc / 同步 push，跨 await 不持锁）。
@@ -188,7 +188,7 @@ impl ToolPostExecuteListener for ToolObservabilityListener {
                         &abstract_text,
                         &detail_text,
                         "tool-execution",
-                        crate::scheduler::tasks::rule_recorder::FailureKind::Logic,
+                        crate::observability::rule_recorder::FailureKind::Logic,
                     )
                     .await
                 {

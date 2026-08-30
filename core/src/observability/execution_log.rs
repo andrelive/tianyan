@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::common::error::TianyanError;
-use crate::skills::learning::ExecutionHistory;
+use crate::observability::execution_history::ExecutionHistory;
 use crate::vfs::backend::sqlite_db::SqliteDb;
 
 /// 任务描述截断上限（防参数膨胀入库）。
@@ -398,7 +398,7 @@ fn sqlite_query_error(sql: &str, e: rusqlite::Error) -> TianyanError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::learning::{ExecutionHistory, ExecutionStep};
+    use crate::observability::execution_history::{ExecutionHistory, ExecutionStep};
 
     async fn make_log() -> Arc<ExecutionLog> {
         let db = SqliteDb::open_in_memory().unwrap();

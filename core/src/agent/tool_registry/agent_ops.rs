@@ -666,7 +666,7 @@ impl ToolRegistry {
                     ),
                     Err(_) => (false, 0),
                 };
-                let record = crate::agent::role_store::DelegationRecord {
+                let record = crate::roles::DelegationRecord {
                     ts: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as i64)
