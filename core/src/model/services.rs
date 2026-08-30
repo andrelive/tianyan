@@ -79,7 +79,10 @@ impl ModelServices {
                     r.model.clone(),
                 )
             }
-            None => (Arc::new(UnconfiguredChatService) as Arc<dyn ChatService>, String::new()),
+            None => (
+                Arc::new(UnconfiguredChatService) as Arc<dyn ChatService>,
+                String::new(),
+            ),
         };
         let (embedding, embedding_model) = match &embedding_ref {
             Some(r) => {
@@ -102,7 +105,10 @@ impl ModelServices {
                     Some(r.model.clone()),
                 )
             }
-            None => (Arc::new(UnconfiguredVlmService) as Arc<dyn VlmService>, None),
+            None => (
+                Arc::new(UnconfiguredVlmService) as Arc<dyn VlmService>,
+                None,
+            ),
         };
 
         if chat_ref.is_none() || embedding_ref.is_none() || vision_ref.is_none() {

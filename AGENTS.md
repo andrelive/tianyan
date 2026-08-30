@@ -93,6 +93,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-012: 注入上下文快照持久化](docs/architecture/decisions/012-injectable-snapshot-persistence.md) — 前缀零漂移（JSONL SessionHeader）+ 会话边界/压缩点技能刷新
 - [ADR-013: 统一消息通知与唤醒原语](docs/architecture/decisions/013-unified-message-notification-wake.md) — 消息入库 + 唤醒语义（shouldReply = allComplete || failure；任务持久化前置）
 - [ADR-018: 会话权威存储迁至 SQLite](docs/architecture/decisions/018-session-authoritative-sqlite.md) — 会话迁出 VFS（流式 vs 文档）；`SessionStore` 原子取号 + 失败上抛；VFS 恢复纯文档基座
+- [ADR-022: 会话绑定的任务面板与任务语义分层](docs/architecture/decisions/022-session-bound-task-ux.md) — todo/goal 会话绑定临时展示（无全局计划页）；内置任务→洞察、定时任务独立栏目、后台任务→会话停靠条；数据目录只读+搬迁对话框
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 

@@ -54,9 +54,16 @@ describe('Sidebar', () => {
     expect(screen.getByTitle('记忆')).toBeInTheDocument();
     expect(screen.getByTitle('检索轨迹')).toBeInTheDocument();
     expect(screen.getByTitle('审批')).toBeInTheDocument();
-    expect(screen.getByTitle('任务')).toBeInTheDocument();
+    expect(screen.getByTitle('定时任务')).toBeInTheDocument();
     expect(screen.getByTitle('洞察')).toBeInTheDocument();
     expect(screen.getByTitle('设置')).toBeInTheDocument();
+  });
+
+  it('does not show the removed 任务/计划 mixed nav items', () => {
+    renderSidebar();
+    // 0.2 修复：内置任务并入洞察、定时任务独立、后台任务/待办随会话展示
+    expect(screen.queryByTitle('任务')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('计划')).not.toBeInTheDocument();
   });
 
   it('does not show the old 工作区 nav item or session list', () => {

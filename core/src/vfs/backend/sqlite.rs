@@ -7,13 +7,11 @@ use async_trait::async_trait;
 
 use std::sync::Arc;
 
-use crate::db::Database;
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, EntryMetadata, TianyanUri};
+use crate::db::Database;
 use crate::vfs::backend::StorageBackend;
 use crate::vfs::types::{ContextEntry, CURRENT_SCHEMA_VERSION};
-
-
 
 /// 基于 SQLite 的 VFS 存储后端。
 #[derive(Clone)]

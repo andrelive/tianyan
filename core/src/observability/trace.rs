@@ -42,7 +42,6 @@ impl SpanKind {
     }
 }
 
-
 /// 内存缓冲上限（超过后丢弃最旧，等待 flush 落库）。
 const MAX_BUFFER: usize = 5000;
 
@@ -227,7 +226,6 @@ impl TraceCollector {
 }
 
 /// SQLite 行 → TraceSpan。
-
 
 #[cfg(test)]
 mod tests {

@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use crate::common::error::TianyanError;
 use crate::common::types::TokenUsage;
-use crate::db::Database;
 use crate::db::usage::{UsageRepo, UsageStat};
+use crate::db::Database;
 
 /// LLM 用量日志（共享 SqliteDb 连接，与 VFS 同库）。
 #[derive(Clone)]
@@ -23,11 +23,12 @@ pub struct UsageLog {
     repo: UsageRepo,
 }
 
-
 impl UsageLog {
     /// 创建用量日志（共享 SqliteDb）。
     pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
-        Ok(Arc::new(Self { repo: UsageRepo::new(db) }))
+        Ok(Arc::new(Self {
+            repo: UsageRepo::new(db),
+        }))
     }
 
     /// 记录一次 LLM 调用用量（非热路径：每轮一次，直接写 SQLite）。
@@ -62,7 +63,9 @@ impl UsageLog {
         model: Option<&str>,
         group_by: &str,
     ) -> Vec<UsageStat> {
-        self.repo.stats(since_ts, until_ts, provider, model, group_by).await
+        self.repo
+            .stats(since_ts, until_ts, provider, model, group_by)
+            .await
     }
 }
 

@@ -11,9 +11,9 @@
 use std::sync::Arc;
 
 use crate::common::error::TianyanError;
-use crate::observability::execution_history::ExecutionHistory;
-use crate::db::Database;
 use crate::db::execution::{DelegationStat, ExecutionDetail, ExecutionRepo, ExecutionStat};
+use crate::db::Database;
+use crate::observability::execution_history::ExecutionHistory;
 
 /// 任务描述截断上限（防参数膨胀入库）。
 const MAX_TASK_DESCRIPTION: usize = 500;
@@ -83,7 +83,9 @@ impl ExecutionLog {
     /// # Errors
     /// * 返回 TianyanError（本方法当前不失败，签名保持与全库统一错误类型）。
     pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
-        Ok(Arc::new(Self { repo: ExecutionRepo::new(db) }))
+        Ok(Arc::new(Self {
+            repo: ExecutionRepo::new(db),
+        }))
     }
 
     /// 记录一次工具执行（热路径：try_lock，锁不可用时跳过）。
@@ -173,15 +175,11 @@ fn tool_name_from(task_description: &str) -> &str {
 
 /// 解析 delegate_to_agent 记录中的 role 参数。
 
-
 /// 构造 WHERE 子句与参数（since_ts / category 可选）。
-
 
 /// 收集查询行（统一错误包装）。
 
-
 /// SQLite 查询错误包装（带 SQL 摘要，便于排查）。
-
 
 #[cfg(test)]
 mod tests {

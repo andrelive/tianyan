@@ -29,6 +29,8 @@ import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
 import { streamingIndicatorOwner } from './streaming-indicator';
 import ApprovalBanner from './ApprovalBanner';
+import SessionTasksPanel from './SessionTasksPanel';
+import SessionTodoPanel from './SessionTodoPanel';
 import { PENDING_SESSION_KEY } from '@/lib/store';
 
 export default function ChatPanel() {
@@ -476,6 +478,11 @@ export default function ChatPanel() {
           </div>
         )}
       </div>
+
+      {/* 会话内临时面板（DSH 式 dock，完事即隐）：当前会话的后台任务
+          （委托/终端，可取消）与活跃待办/目标（todo/goal 工具产物）。 */}
+      <SessionTasksPanel sessionId={currentSessionId} />
+      <SessionTodoPanel sessionId={currentSessionId} />
 
       {/* 应用层授权卡片（提取自 ChatPanel 内联；与 ApprovalPanel 共用语义） */}
       <ApprovalBanner

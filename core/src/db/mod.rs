@@ -10,9 +10,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub mod execution;
 pub mod sqlite_db;
 pub mod stats;
-pub mod execution;
 pub mod trace;
 pub mod usage;
 
@@ -55,7 +55,12 @@ impl Database {
     }
 
     /// 非阻塞获取连接引用（热路径组件用，锁不可用时跳过）。
-    pub fn try_lock(&self) -> std::result::Result<tokio::sync::MutexGuard<'_, rusqlite::Connection>, tokio::sync::TryLockError> {
+    pub fn try_lock(
+        &self,
+    ) -> std::result::Result<
+        tokio::sync::MutexGuard<'_, rusqlite::Connection>,
+        tokio::sync::TryLockError,
+    > {
         self.sqlite.try_lock()
     }
 

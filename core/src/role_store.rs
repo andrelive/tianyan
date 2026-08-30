@@ -11,9 +11,9 @@
 
 use std::sync::Arc;
 
-use crate::roles::{AgentRole, DelegationRecord, RoleStatus, RoleUsage};
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
+use crate::roles::{AgentRole, DelegationRecord, RoleStatus, RoleUsage};
 use crate::vfs::VirtualFileSystem;
 
 /// 委托历史保留上限（超出重写截断）。

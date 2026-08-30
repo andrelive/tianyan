@@ -59,7 +59,7 @@ impl DynamicToolExecutor for ClipboardWriteTool {
         ))
     }
 
-    async fn execute(&self, arguments: &str) -> Result<serde_json::Value> {
+    async fn execute(&self, _session_id: &str, arguments: &str) -> Result<serde_json::Value> {
         let args: ClipboardWriteArgs = serde_json::from_str(arguments)
             .map_err(|e| TianyanError::Custom(format!("tool: clipboard_write 参数无效：{e}")))?;
         let content_length = args.content.len();

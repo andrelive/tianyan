@@ -280,7 +280,7 @@ async fn clipboard_write_tool_pushes_outbox() {
 
     let tool = ClipboardWriteTool::new(state.clipboard_outbox());
     let result = tool
-        .execute(r#"{"content":"粘贴这段文本"}"#)
+        .execute("test-session", r#"{"content":"粘贴这段文本"}"#)
         .await
         .expect("工具执行应成功");
     assert_eq!(result["status"], "queued");
@@ -297,7 +297,7 @@ async fn clipboard_write_tool_pushes_outbox() {
 #[tokio::test]
 async fn clipboard_write_tool_rejects_invalid_args() {
     let tool = ClipboardWriteTool::new(Arc::new(Mutex::new(Vec::new())));
-    let result = tool.execute(r#"not-json"#).await;
+    let result = tool.execute("test-session", r#"not-json"#).await;
     assert!(result.is_err(), "非法参数应报错");
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -306,7 +306,7 @@ async fn clipboard_write_tool_rejects_invalid_args() {
 #[tokio::test]
 async fn clipboard_write_tool_requires_content() {
     let tool = ClipboardWriteTool::new(Arc::new(Mutex::new(Vec::new())));
-    let result = tool.execute(r#"{}"#).await;
+    let result = tool.execute("test-session", r#"{}"#).await;
     assert!(result.is_err());
 }
 

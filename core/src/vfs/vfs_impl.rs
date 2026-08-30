@@ -48,8 +48,14 @@ impl VirtualFileSystemImpl {
         provider: Arc<dyn EmbeddingService>,
         model: impl Into<String>,
     ) -> Self {
-        *self.embedding_provider.write().unwrap_or_else(|p| p.into_inner()) = Some(provider);
-        *self.embedding_model.write().unwrap_or_else(|p| p.into_inner()) = Some(model.into());
+        *self
+            .embedding_provider
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(provider);
+        *self
+            .embedding_model
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(model.into());
         self
     }
 
@@ -59,8 +65,14 @@ impl VirtualFileSystemImpl {
         provider: Arc<dyn EmbeddingService>,
         model: impl Into<String>,
     ) {
-        *self.embedding_provider.write().unwrap_or_else(|p| p.into_inner()) = Some(provider);
-        *self.embedding_model.write().unwrap_or_else(|p| p.into_inner()) = Some(model.into());
+        *self
+            .embedding_provider
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(provider);
+        *self
+            .embedding_model
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = Some(model.into());
     }
 
     /// 获取存储配置。

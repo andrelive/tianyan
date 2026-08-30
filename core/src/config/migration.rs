@@ -28,7 +28,10 @@ pub struct MigrationRequest {
 }
 
 /// 校验迁移目标目录（绝对路径 / 非当前目录 / 非父子关系 / 可写）。
-pub fn validate_migration_target(current: &Path, new_dir: &Path) -> std::result::Result<(), String> {
+pub fn validate_migration_target(
+    current: &Path,
+    new_dir: &Path,
+) -> std::result::Result<(), String> {
     if new_dir.as_os_str().is_empty() {
         return Err("新数据目录不能为空".to_string());
     }
@@ -47,8 +50,7 @@ pub fn validate_migration_target(current: &Path, new_dir: &Path) -> std::result:
         return Err("新数据目录不能是当前数据目录的父目录".to_string());
     }
     // 可写性检查：创建目录 + 写探针文件
-    std::fs::create_dir_all(new_dir)
-        .map_err(|e| format!("无法创建新数据目录：{e}"))?;
+    std::fs::create_dir_all(new_dir).map_err(|e| format!("无法创建新数据目录：{e}"))?;
     let probe = new_dir.join(".tianyan-write-probe");
     std::fs::write(&probe, b"ok").map_err(|e| format!("新数据目录不可写：{e}"))?;
     let _ = std::fs::remove_file(&probe);
@@ -85,17 +87,14 @@ pub fn read_migration_request(data_dir: &Path) -> Option<MigrationRequest> {
 /// 返回移动的条目数。
 pub fn perform_migration(old_dir: &Path, new_dir: &Path) -> Result<usize> {
     validate_migration_target(old_dir, new_dir).map_err(TianyanError::config)?;
-    std::fs::create_dir_all(new_dir).map_err(|e| {
-        TianyanError::Custom(format!("migration: 创建目标目录失败：{e}"))
-    })?;
-    let entries = std::fs::read_dir(old_dir).map_err(|e| {
-        TianyanError::Custom(format!("migration: 读取数据目录失败：{e}"))
-    })?;
+    std::fs::create_dir_all(new_dir)
+        .map_err(|e| TianyanError::Custom(format!("migration: 创建目标目录失败：{e}")))?;
+    let entries = std::fs::read_dir(old_dir)
+        .map_err(|e| TianyanError::Custom(format!("migration: 读取数据目录失败：{e}")))?;
     let mut copied: Vec<PathBuf> = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|e| {
-            TianyanError::Custom(format!("migration: 读取目录条目失败：{e}"))
-        })?;
+        let entry =
+            entry.map_err(|e| TianyanError::Custom(format!("migration: 读取目录条目失败：{e}")))?;
         let name = entry.file_name();
         if name == MIGRATION_REQUEST_FILE {
             continue;

@@ -14,6 +14,10 @@ pub struct CreateGoalRequest {
     /// 目标日期（epoch 秒；可选）。
     #[serde(default)]
     pub target_date: Option<i64>,
+    /// 归属会话 id（可选；正常路径由 goal 工具自动归属当前会话，
+    /// REST 直传便于 QA/测试造会话绑定数据）。
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// 更新目标请求（全部字段可选；缺省 = 不修改）。

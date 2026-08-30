@@ -18,7 +18,10 @@ pub async fn handle_pending_migration(old_config: &TianyanConfig) -> Option<Tian
             // 重读配置（新 data_dir 生效；失败时回退旧配置并告警）
             match TianyanConfig::load() {
                 Ok(c) => {
-                    tracing::info!("搬迁完成，以新配置重启（data_dir={}）", c.storage.data_dir.display());
+                    tracing::info!(
+                        "搬迁完成，以新配置重启（data_dir={}）",
+                        c.storage.data_dir.display()
+                    );
                     Some(c)
                 }
                 Err(e) => {

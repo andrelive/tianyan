@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::api::shared::error::ApiError;
@@ -11,11 +12,22 @@ use crate::state::AppState;
 
 use super::types::{CreateTodoRequest, UpdateTodoRequest};
 
-/// 列出全部待办。
+/// 列表查询参数。
+#[derive(Debug, Default, Deserialize)]
+pub struct ListQuery {
+    /// 按归属会话过滤（会话页数据源；缺省返回全部）。
+    pub session_id: Option<String>,
+}
+
+/// 列出待办（`?session_id=` 过滤归属会话）。
 pub async fn list_todos(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let todos = state.todo_store().list().await;
+    let todos = match query.session_id.as_deref() {
+        Some(sid) if !sid.trim().is_empty() => state.todo_store().list_by_session(sid).await,
+        _ => state.todo_store().list().await,
+    };
     Ok(Json(json!({ "todos": todos, "total": todos.len() })))
 }
 
@@ -33,6 +45,7 @@ pub async fn create_todo(
             priority,
             request.goal_id,
             request.due_at,
+            request.session_id,
         )
         .await?;
     Ok(Json(json!({ "todo": todo })))

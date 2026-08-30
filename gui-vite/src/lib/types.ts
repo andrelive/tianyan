@@ -929,6 +929,8 @@ export interface TodoItem {
   priority: TodoPriority;
   /** 关联目标 id（可选；目标进度按关联待办自动计算）。 */
   goal_id: string | null;
+  /** 归属会话 id（会话绑定；null = 历史遗留/无会话归属）。 */
+  session_id: string | null;
   created_at: number;
   updated_at: number;
   completed_at: number | null;
@@ -949,6 +951,8 @@ export interface Goal {
   title: string;
   description: string | null;
   status: GoalStatus;
+  /** 归属会话 id（会话绑定；null = 历史遗留/无会话归属）。 */
+  session_id: string | null;
   created_at: number;
   updated_at: number;
   completed_at: number | null;
@@ -982,8 +986,7 @@ export type View =
   | 'memory'
   | 'traces'
   | 'approval'
-  | 'tasks'
-  | 'planner'
+  | 'scheduled'
   | 'insights';
 
 export type StreamStatus = 'idle' | 'streaming' | 'error';

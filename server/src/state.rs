@@ -13,8 +13,8 @@ use tokio::sync::RwLock;
 use crate::scheduled_tasks::ScheduledAgentTaskManager;
 use tianyan::agent::AgentCoordinator;
 use tianyan::config::{ModelEntry, TianyanConfig};
+use tianyan::db::Database;
 use tianyan::goals::GoalStore;
-use tianyan::todos::TodoStore;
 use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
 use tianyan::memory::{ExtractionConfig, MemoryExtractor};
 use tianyan::model::spec::ModelSpec;
@@ -29,7 +29,7 @@ use tianyan::skills::{
     SkillRegistry,
 };
 use tianyan::snapshot::SnapshotManager;
-use tianyan::db::Database;
+use tianyan::todos::TodoStore;
 use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
@@ -526,7 +526,12 @@ impl AppState {
 
     /// 请求服务器优雅关停（数据目录搬迁等场景；未装配时静默）。
     pub fn request_shutdown(&self) {
-        if let Some(tx) = self.shutdown_tx.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+        if let Some(tx) = self
+            .shutdown_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
             let _ = tx.send(true);
         }
     }

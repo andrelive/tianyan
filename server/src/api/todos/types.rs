@@ -20,6 +20,10 @@ pub struct CreateTodoRequest {
     /// 截止时间（epoch 秒；可选）。
     #[serde(default)]
     pub due_at: Option<i64>,
+    /// 归属会话 id（可选；正常路径由 todo 工具自动归属当前会话，
+    /// REST 直传便于 QA/测试造会话绑定数据）。
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl CreateTodoRequest {
@@ -61,9 +65,9 @@ impl UpdateTodoRequest {
     pub fn parse_status(&self) -> Result<Option<TodoStatus>, String> {
         match &self.status {
             None => Ok(None),
-            Some(s) => TodoStatus::parse(s)
-                .map(Some)
-                .ok_or_else(|| format!("无效的状态：{s}（可选：pending / in_progress / completed）")),
+            Some(s) => TodoStatus::parse(s).map(Some).ok_or_else(|| {
+                format!("无效的状态：{s}（可选：pending / in_progress / completed）")
+            }),
         }
     }
 

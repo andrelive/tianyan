@@ -13,8 +13,7 @@ import {
   MemoryStick,
   Route,
   ShieldCheck,
-  ListTodo,
-  Target,
+  CalendarClock,
   Gauge,
   Settings,
 } from 'lucide-react';
@@ -22,7 +21,12 @@ import {
 /**
  * 全局一级导航侧边栏（图标 rail）：恒为 64px 图标栏，hover 显示名字（title）。
  * 不做展开/收起——一级菜单只保留图标更简洁；会话列表在会话页左栏（SessionList）。
- * 审批/任务图标带动态角标（待审批数 / 运行中任务数），低频轮询（5s）。
+ * 审批/会话图标带动态角标（待审批数 / 全局运行中后台任务数），低频轮询（5s）。
+ *
+ * 任务语义分层（0.2 修复）：内置调度任务在「洞察」展示；定时智能体任务
+ * 独立一级栏目；后台任务（委托/终端）会话绑定，在会话页内展示——不再设
+ * 混合的「任务」栏目。待办/目标是智能体的会话内推理辅助工具，同样随会话
+ * 展示，无全局「计划」栏目。
  */
 const NAV_ITEMS = [
   { id: 'chat' as const, label: '会话', icon: MessageSquare, path: '/chat' },
@@ -34,8 +38,7 @@ const NAV_ITEMS = [
   { id: 'memory' as const, label: '记忆', icon: MemoryStick, path: '/memory' },
   { id: 'traces' as const, label: '检索轨迹', icon: Route, path: '/traces' },
   { id: 'approval' as const, label: '审批', icon: ShieldCheck, path: '/approval' },
-  { id: 'tasks' as const, label: '任务', icon: ListTodo, path: '/tasks' },
-  { id: 'planner' as const, label: '计划', icon: Target, path: '/planner' },
+  { id: 'scheduled' as const, label: '定时任务', icon: CalendarClock, path: '/scheduled' },
   { id: 'insights' as const, label: '洞察', icon: Gauge, path: '/insights' },
   { id: 'settings' as const, label: '设置', icon: Settings, path: '/settings' },
 ];
@@ -96,7 +99,7 @@ export default function Sidebar() {
           const badge =
             item.id === 'approval'
               ? pendingApprovals
-              : item.id === 'tasks'
+              : item.id === 'chat'
                 ? runningTasks
                 : 0;
           return (

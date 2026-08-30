@@ -1,6 +1,8 @@
 //! 待办清单（todolist）存储。
 //!
-//! 用户跟踪多步任务的结构化数据：创建/完成/删除/优先级/关联目标。
+//! 会话绑定的智能体推理辅助工具（对齐 DSH todo_write 语义）：由 `todo`
+//! 动态工具在会话内创建/推进/完成，条目归属创建它的会话（`session_id`），
+//! 会话页仅展示当前会话的活跃待办，全部完成后面板消失——不是全局计划页。
 //! 持久化为 `{data_dir}/todos.json`（与定时智能体任务
 //! `scheduled_agent_tasks.json` 同类的运行期结构化产物，不经 VFS——
 //! VFS 面向文档型上下文内容，频繁小更新的结构化 CRUD 数据不匹配其
@@ -76,6 +78,9 @@ pub struct TodoItem {
     pub priority: TodoPriority,
     /// 关联目标 id（可选；目标进度按关联待办自动计算）。
     pub goal_id: Option<String>,
+    /// 归属会话 id（会话绑定；None = 历史遗留/无会话归属，不进会话面板）。
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// 创建时间（epoch 秒）。
     pub created_at: i64,
     /// 更新时间（epoch 秒）。
@@ -94,6 +99,7 @@ impl TodoItem {
         priority: TodoPriority,
         goal_id: Option<String>,
         due_at: Option<i64>,
+        session_id: Option<String>,
         now: i64,
     ) -> Self {
         Self {
@@ -103,6 +109,7 @@ impl TodoItem {
             status: TodoStatus::Pending,
             priority,
             goal_id,
+            session_id,
             created_at: now,
             updated_at: now,
             completed_at: None,
@@ -139,7 +146,9 @@ impl TodoStore {
             Ok(items) => {
                 *self.items.write().await = items;
             }
-            Err(e) => tracing::warn!(error = %e, path = %self.file_path.display(), "待办加载失败（使用空列表）"),
+            Err(e) => {
+                tracing::warn!(error = %e, path = %self.file_path.display(), "待办加载失败（使用空列表）")
+            }
         }
     }
 
@@ -175,13 +184,22 @@ impl TodoStore {
         priority: TodoPriority,
         goal_id: Option<String>,
         due_at: Option<i64>,
+        session_id: Option<String>,
     ) -> Result<TodoItem> {
         let title = title.trim().to_string();
         if title.is_empty() {
             return Err(TianyanError::invalid_input("todos: 待办标题不能为空"));
         }
         let now = chrono::Utc::now().timestamp();
-        let item = TodoItem::new(title, description, priority, goal_id, due_at, now);
+        let item = TodoItem::new(
+            title,
+            description,
+            priority,
+            goal_id,
+            due_at,
+            session_id,
+            now,
+        );
         self.items.write().await.push(item.clone());
         self.save().await;
         Ok(item)
@@ -250,6 +268,31 @@ impl TodoStore {
         Ok(removed)
     }
 
+    /// 列出归属指定会话的待办（按创建时间升序；会话页数据源）。
+    pub async fn list_by_session(&self, session_id: &str) -> Vec<TodoItem> {
+        self.list()
+            .await
+            .into_iter()
+            .filter(|i| i.session_id.as_deref() == Some(session_id))
+            .collect()
+    }
+
+    /// 删除归属指定会话的全部待办（会话删除级联清理）。返回删除数。
+    pub async fn delete_by_session(&self, session_id: &str) -> usize {
+        if !self.loaded.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.load().await;
+        }
+        let mut items = self.items.write().await;
+        let before = items.len();
+        items.retain(|i| i.session_id.as_deref() != Some(session_id));
+        let removed = before - items.len();
+        drop(items);
+        if removed > 0 {
+            self.save().await;
+        }
+        removed
+    }
+
     /// 按目标 id 统计（目标进度计算用）：(总数, 已完成数)。
     pub async fn count_by_goal(&self, goal_id: &str) -> (usize, usize) {
         let items = self.items.read().await;
@@ -279,7 +322,14 @@ mod tests {
     async fn test_create_list_update_delete() {
         let (store, _dir) = temp_store();
         let item = store
-            .create("写周报".into(), Some("总结本周进展".into()), TodoPriority::High, None, None)
+            .create(
+                "写周报".into(),
+                Some("总结本周进展".into()),
+                TodoPriority::High,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(item.status, TodoStatus::Pending);
@@ -290,7 +340,15 @@ mod tests {
 
         // 更新状态 → completed_at 填充
         let updated = store
-            .update(&item.id, None, None, Some(TodoStatus::Completed), None, None, None)
+            .update(
+                &item.id,
+                None,
+                None,
+                Some(TodoStatus::Completed),
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -309,7 +367,14 @@ mod tests {
         {
             let store = TodoStore::new(dir.path());
             store
-                .create("持久化测试".into(), None, TodoPriority::Medium, None, None)
+                .create(
+                    "持久化测试".into(),
+                    None,
+                    TodoPriority::Medium,
+                    None,
+                    None,
+                    None,
+                )
                 .await
                 .unwrap();
         }
@@ -325,7 +390,7 @@ mod tests {
     async fn test_empty_title_rejected() {
         let (store, _dir) = temp_store();
         let err = store
-            .create("  ".into(), None, TodoPriority::Medium, None, None)
+            .create("  ".into(), None, TodoPriority::Medium, None, None, None)
             .await
             .unwrap_err();
         assert!(err.is_invalid_input());
@@ -346,18 +411,89 @@ mod tests {
         let (store, _dir) = temp_store();
         let gid = "goal-1".to_string();
         store
-            .create("a".into(), None, TodoPriority::Low, Some(gid.clone()), None)
+            .create(
+                "a".into(),
+                None,
+                TodoPriority::Low,
+                Some(gid.clone()),
+                None,
+                None,
+            )
             .await
             .unwrap();
         let b = store
-            .create("b".into(), None, TodoPriority::Low, Some(gid.clone()), None)
+            .create(
+                "b".into(),
+                None,
+                TodoPriority::Low,
+                Some(gid.clone()),
+                None,
+                None,
+            )
             .await
             .unwrap();
         store
-            .update(&b.id, None, None, Some(TodoStatus::Completed), None, None, None)
+            .update(
+                &b.id,
+                None,
+                None,
+                Some(TodoStatus::Completed),
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         let (total, done) = store.count_by_goal(&gid).await;
         assert_eq!((total, done), (2, 1));
+    }
+
+    #[tokio::test]
+    async fn test_session_binding() {
+        let (store, _dir) = temp_store();
+        let a = store
+            .create(
+                "会话内待办".into(),
+                None,
+                TodoPriority::Medium,
+                None,
+                None,
+                Some("s-1".into()),
+            )
+            .await
+            .unwrap();
+        let _b = store
+            .create(
+                "其他会话待办".into(),
+                None,
+                TodoPriority::Medium,
+                None,
+                None,
+                Some("s-2".into()),
+            )
+            .await
+            .unwrap();
+        let _c = store
+            .create(
+                "无归属待办".into(),
+                None,
+                TodoPriority::Medium,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // list_by_session 只返回归属会话的条目
+        let mine = store.list_by_session("s-1").await;
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].id, a.id);
+        assert!(store.list_by_session("s-9").await.is_empty());
+
+        // delete_by_session 只清理归属会话的条目（旧数据 None 保留）
+        assert_eq!(store.delete_by_session("s-2").await, 1);
+        assert_eq!(store.delete_by_session("s-2").await, 0);
+        assert_eq!(store.list().await.len(), 2);
     }
 }

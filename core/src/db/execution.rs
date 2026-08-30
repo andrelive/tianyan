@@ -63,8 +63,6 @@ pub struct DelegationStat {
     pub success_rate: f64,
 }
 
-
-
 /// 执行记录域仓储。
 #[derive(Clone)]
 pub struct ExecutionRepo {
@@ -265,7 +263,6 @@ impl ExecutionRepo {
         Ok(stats)
     }
 }
-
 
 /// 解析 delegate_to_agent 记录中的 role 参数。
 pub(crate) fn parse_delegated_role(task_description: &str) -> Option<String> {

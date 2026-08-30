@@ -273,7 +273,8 @@ async fn run_server_supervisor(
 
         // 数据目录搬迁：服务器已关停（AppState drop，SQLite/LanceDB 释放
         // 文件锁），执行待处理迁移并重读配置（搬迁后以新 data_dir 重启）
-        if let Some(new_config) = tianyan_server::migration::handle_pending_migration(&config).await {
+        if let Some(new_config) = tianyan_server::migration::handle_pending_migration(&config).await
+        {
             config = new_config;
         }
 
@@ -725,6 +726,8 @@ pub fn run() {
     // 前端通过 HTTP 调用 Axum 后端 API
     let mut app_builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // 原生目录选择对话框（设置页「数据搬迁」选新数据目录用）
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

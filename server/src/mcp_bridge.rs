@@ -75,7 +75,7 @@ impl DynamicToolExecutor for McpToolBridge {
         ))
     }
 
-    async fn execute(&self, arguments: &str) -> Result<serde_json::Value> {
+    async fn execute(&self, _session_id: &str, arguments: &str) -> Result<serde_json::Value> {
         // 参数非 JSON 对象时按 Null 处理（MCP 协议要求对象参数）。
         let args = serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
         match self.client.call_tool_detailed(&self.tool.name, args).await {

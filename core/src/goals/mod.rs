@@ -1,7 +1,9 @@
 //! 目标（goal）存储。
 //!
 //! 长期目标管理 + 进度跟踪：目标可关联待办（todos.goal_id），
-//! 进度按关联待办的完成比例自动计算。持久化为 `{data_dir}/goals.json`
+//! 进度按关联待办的完成比例自动计算。目标与会话绑定（`session_id`，
+//! 由 `goal` 动态工具在会话内创建；会话页仅展示当前会话的活跃目标）。
+//! 持久化为 `{data_dir}/goals.json`
 //! （与 todos.json 同类的运行期结构化产物，不经 VFS）。
 
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,9 @@ pub struct Goal {
     pub description: Option<String>,
     /// 状态。
     pub status: GoalStatus,
+    /// 归属会话 id（会话绑定；None = 历史遗留/无会话归属，不进会话面板）。
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// 创建时间（epoch 秒）。
     pub created_at: i64,
     /// 更新时间（epoch 秒）。
@@ -62,6 +67,7 @@ impl Goal {
         title: String,
         description: Option<String>,
         target_date: Option<i64>,
+        session_id: Option<String>,
         now: i64,
     ) -> Self {
         Self {
@@ -69,6 +75,7 @@ impl Goal {
             title,
             description,
             status: GoalStatus::Active,
+            session_id,
             created_at: now,
             updated_at: now,
             completed_at: None,
@@ -105,7 +112,9 @@ impl GoalStore {
             Ok(goals) => {
                 *self.goals.write().await = goals;
             }
-            Err(e) => tracing::warn!(error = %e, path = %self.file_path.display(), "目标加载失败（使用空列表）"),
+            Err(e) => {
+                tracing::warn!(error = %e, path = %self.file_path.display(), "目标加载失败（使用空列表）")
+            }
         }
     }
 
@@ -139,13 +148,14 @@ impl GoalStore {
         title: String,
         description: Option<String>,
         target_date: Option<i64>,
+        session_id: Option<String>,
     ) -> Result<Goal> {
         let title = title.trim().to_string();
         if title.is_empty() {
             return Err(TianyanError::invalid_input("goals: 目标标题不能为空"));
         }
         let now = chrono::Utc::now().timestamp();
-        let goal = Goal::new(title, description, target_date, now);
+        let goal = Goal::new(title, description, target_date, session_id, now);
         self.goals.write().await.push(goal.clone());
         self.save().await;
         Ok(goal)
@@ -193,6 +203,31 @@ impl GoalStore {
         Ok(Some(updated))
     }
 
+    /// 列出归属指定会话的目标（按创建时间升序；会话页数据源）。
+    pub async fn list_by_session(&self, session_id: &str) -> Vec<Goal> {
+        self.list()
+            .await
+            .into_iter()
+            .filter(|g| g.session_id.as_deref() == Some(session_id))
+            .collect()
+    }
+
+    /// 删除归属指定会话的全部目标（会话删除级联清理）。返回删除数。
+    pub async fn delete_by_session(&self, session_id: &str) -> usize {
+        if !self.loaded.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.load().await;
+        }
+        let mut goals = self.goals.write().await;
+        let before = goals.len();
+        goals.retain(|g| g.session_id.as_deref() != Some(session_id));
+        let removed = before - goals.len();
+        drop(goals);
+        if removed > 0 {
+            self.save().await;
+        }
+        removed
+    }
+
     /// 删除目标（返回是否删除）。
     pub async fn delete(&self, id: &str) -> Result<bool> {
         let mut goals = self.goals.write().await;
@@ -220,7 +255,7 @@ mod tests {
     async fn test_create_list_update_delete() {
         let (store, _dir) = temp_store();
         let goal = store
-            .create("学会 Rust".into(), Some("完成 0.2 开发".into()), None)
+            .create("学会 Rust".into(), Some("完成 0.2 开发".into()), None, None)
             .await
             .unwrap();
         assert_eq!(goal.status, GoalStatus::Active);
@@ -246,7 +281,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let store = GoalStore::new(dir.path());
-            store.create("持久化目标".into(), None, None).await.unwrap();
+            store
+                .create("持久化目标".into(), None, None, None)
+                .await
+                .unwrap();
         }
         {
             let store = GoalStore::new(dir.path());
@@ -259,14 +297,45 @@ mod tests {
     #[tokio::test]
     async fn test_empty_title_rejected() {
         let (store, _dir) = temp_store();
-        let err = store.create("  ".into(), None, None).await.unwrap_err();
+        let err = store
+            .create("  ".into(), None, None, None)
+            .await
+            .unwrap_err();
         assert!(err.is_invalid_input());
     }
 
     #[tokio::test]
     async fn test_update_missing_returns_not_found() {
         let (store, _dir) = temp_store();
-        let err = store.update("nope", None, None, None, None).await.unwrap_err();
+        let err = store
+            .update("nope", None, None, None, None)
+            .await
+            .unwrap_err();
         assert!(err.is_not_found());
+    }
+
+    #[tokio::test]
+    async fn test_session_binding() {
+        let (store, _dir) = temp_store();
+        let a = store
+            .create("会话内目标".into(), None, None, Some("s-1".into()))
+            .await
+            .unwrap();
+        let _b = store
+            .create("其他会话目标".into(), None, None, Some("s-2".into()))
+            .await
+            .unwrap();
+        let _c = store
+            .create("无归属目标".into(), None, None, None)
+            .await
+            .unwrap();
+
+        let mine = store.list_by_session("s-1").await;
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].id, a.id);
+
+        assert_eq!(store.delete_by_session("s-2").await, 1);
+        assert_eq!(store.delete_by_session("s-2").await, 0);
+        assert_eq!(store.list().await.len(), 2);
     }
 }

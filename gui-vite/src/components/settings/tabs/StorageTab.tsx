@@ -1,27 +1,37 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Toggle, FieldRow, NumberInput, SectionTitle, TextInput, INPUT_CLASS } from './shared';
-import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import Modal from '@/components/ui/Modal';
 import { getApiRoot } from '@/lib/api-base';
 import { migrateDataDir } from '@/lib/api-client';
+import { isTauri, pickDirectory } from '@/lib/tauri';
 import { useAppStore } from '@/lib/store';
-import { FolderOpen, Loader2, MoveRight } from 'lucide-react';
+import { FolderInput, Loader2, MoveRight } from 'lucide-react';
 import type { ConfigState } from '@/lib/types';
-
-interface StorageTabProps {
-  config: ConfigState;
-  onUpdateField: <K extends keyof ConfigState>(key: K, value: ConfigState[K]) => void;
-}
 
 /** 健康检查轮询间隔（搬迁后等待服务器重启）。 */
 const HEALTH_POLL_INTERVAL_MS = 2000;
 /** 等待服务器重启的最长时间。 */
 const HEALTH_POLL_TIMEOUT_MS = 120000;
 
-/** 数据目录搬迁区：选新目录 → 确认 → 后端关停 → 监督循环搬迁 → 自动重启。 */
-function MigrationSection({ currentDir }: { currentDir: string }) {
+/**
+ * 数据目录搬迁对话框（认可交互：数据目录仅展示 + 搬迁按钮 → 对话框内
+ * 选择新目录 → 确认；系统校验目标目录为空后才真正开始搬迁）。
+ *
+ * 空目录校验在后端 `validate_migration_target`（非空 → 400，错误信息
+ * 就地展示，不触发关停）；校验通过后写迁移请求 → 服务器优雅关停 →
+ * 监督循环搬迁 → 自动重启（本组件轮询 /health 等待重启完成）。
+ */
+function MigrationDialog({
+  currentDir,
+  onClose,
+}: {
+  currentDir: string;
+  onClose: () => void;
+}) {
   const showToast = useAppStore((s) => s.showToast);
   const [newDir, setNewDir] = useState('');
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [migrating, setMigrating] = useState(false);
   const [phase, setPhase] = useState<'idle' | 'requested' | 'waiting' | 'done'>('idle');
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -61,8 +71,22 @@ function MigrationSection({ currentDir }: { currentDir: string }) {
     }, HEALTH_POLL_INTERVAL_MS);
   }, [showToast]);
 
+  /** 原生目录选择（Tauri 桌面壳；浏览器环境回退为手动输入框）。 */
+  const handlePick = useCallback(async () => {
+    setError(null);
+    setPicking(true);
+    try {
+      const dir = await pickDirectory('选择新数据目录（须为空目录）');
+      if (dir) setNewDir(dir);
+    } catch {
+      setError('打开目录选择器失败，请手动输入路径');
+    } finally {
+      setPicking(false);
+    }
+  }, []);
+
   const handleConfirm = useCallback(async () => {
-    setConfirmOpen(false);
+    setError(null);
     setMigrating(true);
     setPhase('requested');
     try {
@@ -70,88 +94,153 @@ function MigrationSection({ currentDir }: { currentDir: string }) {
       // 请求已发出：服务器即将关停，连接会断开——进入健康检查轮询
       startHealthPoll();
     } catch (err: unknown) {
+      // 校验失败（400：目录非空/不可写等）不会触发关停，就地展示可重试
       setMigrating(false);
       setPhase('idle');
-      const msg = err instanceof Error ? err.message : '未知错误';
-      showToast(`搬迁启动失败: ${msg}`, 'error');
+      setError(err instanceof Error ? err.message : '搬迁启动失败：未知错误');
     }
-  }, [newDir, showToast, startHealthPoll]);
+  }, [newDir, startHealthPoll]);
 
-  const canStart = newDir.trim().length > 0 && !migrating;
+  const canConfirm = newDir.trim().length > 0 && !migrating;
 
   return (
-    <div className="mt-8 pt-6 border-t border-[var(--color-border)]">
-      <h4 className="text-sm font-semibold text-[var(--color-text-primary)] flex items-center gap-1.5">
-        <FolderOpen size={14} />
-        数据目录搬迁
-      </h4>
-      <p className="text-xs text-[var(--color-text-tertiary)] mt-1.5">
-        将全部数据（数据库 / 向量索引 / 快照 / 定时任务等）移动到新目录。
-        程序会自动完成：关闭数据库 → 移动数据 → 更新配置 → 重启应用。
-        当前目录：<span className="font-mono">{currentDir || '(默认)'}</span>
-      </p>
+    <Modal
+      onClose={onClose}
+      closeDisabled={migrating}
+      ariaLabel="数据目录搬迁"
+      panelClassName="w-full max-w-lg"
+    >
+      <div className="p-5 space-y-4">
+        <div className="flex items-center gap-2">
+          <FolderInput size={16} className="text-blue-600 dark:text-blue-400" />
+          <h3 className="text-base font-semibold text-[var(--color-text-primary)]">数据目录搬迁</h3>
+        </div>
 
-      <div className="flex items-center gap-2 mt-3">
-        <TextInput
-          value={newDir}
-          onChange={setNewDir}
-          placeholder="新数据目录（绝对路径，如 D:\tianyan-data）"
-          ariaLabel="新数据目录"
-        />
-        <button
-          onClick={() => setConfirmOpen(true)}
-          disabled={!canStart}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-        >
-          {migrating ? <Loader2 size={12} className="animate-spin" /> : <MoveRight size={12} />}
-          {migrating ? '搬迁中...' : '开始搬迁'}
-        </button>
+        {phase === 'idle' && (
+          <>
+            <div className="space-y-1 text-sm">
+              <p className="text-[var(--color-text-secondary)]">当前数据目录：</p>
+              <p className="font-mono text-xs break-all rounded bg-[var(--color-bg-secondary)] border border-[var(--color-border)] px-2 py-1.5">
+                {currentDir || '(默认)'}
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <p className="text-sm text-[var(--color-text-secondary)]">新数据目录（必须为空或不存在）：</p>
+              {isTauri() ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handlePick()}
+                    disabled={picking}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-[var(--color-border)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
+                  >
+                    {picking ? <Loader2 size={12} className="animate-spin" /> : <FolderInput size={12} />}
+                    {picking ? '打开选择器...' : '选择目录...'}
+                  </button>
+                  {newDir && (
+                    <span className="min-w-0 flex-1 font-mono text-xs truncate" title={newDir}>
+                      {newDir}
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <TextInput
+                  value={newDir}
+                  onChange={setNewDir}
+                  placeholder="新数据目录（绝对路径，如 D:\tianyan-data）"
+                  ariaLabel="新数据目录"
+                />
+              )}
+              <p className="text-xs text-[var(--color-text-tertiary)]">
+                确认后系统会先校验目标目录为空（避免其他文件影响），随后自动完成：
+                关闭数据库 → 移动数据 → 更新配置 → 重启应用。搬迁期间应用会短暂关闭。
+              </p>
+            </div>
+
+            {error && (
+              <p className="text-xs text-red-600 dark:text-red-400 break-all" role="alert">
+                {error}
+              </p>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={migrating}
+                className="px-3 py-1.5 text-xs rounded-md border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirm()}
+                disabled={!canConfirm}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {migrating ? <Loader2 size={12} className="animate-spin" /> : <MoveRight size={12} />}
+                确认搬迁
+              </button>
+            </div>
+          </>
+        )}
+
+        {phase === 'requested' && (
+          <p className="text-xs text-[var(--color-text-secondary)] flex items-center gap-1.5">
+            <Loader2 size={12} className="animate-spin" />
+            搬迁请求已提交，正在关闭服务器...
+          </p>
+        )}
+        {phase === 'waiting' && (
+          <p className="text-xs text-[var(--color-text-secondary)] flex items-center gap-1.5">
+            <Loader2 size={12} className="animate-spin" />
+            正在校验并移动数据，完成后应用将自动重启，请稍候...
+          </p>
+        )}
+        {phase === 'done' && (
+          <p className="text-sm text-green-600 dark:text-green-400">
+            搬迁完成，应用已使用新数据目录运行
+          </p>
+        )}
       </div>
-
-      {phase === 'requested' && (
-        <p className="text-xs text-[var(--color-text-secondary)] mt-2">
-          搬迁请求已提交，正在关闭服务器...
-        </p>
-      )}
-      {phase === 'waiting' && (
-        <p className="text-xs text-[var(--color-text-secondary)] mt-2 flex items-center gap-1.5">
-          <Loader2 size={12} className="animate-spin" />
-          正在移动数据并重启应用，请稍候...
-        </p>
-      )}
-      {phase === 'done' && (
-        <p className="text-xs text-green-600 dark:text-green-400 mt-2">
-          搬迁完成，应用已使用新数据目录运行
-        </p>
-      )}
-
-      <ConfirmDialog
-        open={confirmOpen}
-        title="确认搬迁数据目录？"
-        message={`将把全部数据从\n${currentDir || '(默认)'}\n移动到\n${newDir.trim()}\n\n搬迁期间应用会短暂关闭并自动重启。请确认目标目录为空或不存在。`}
-        confirmLabel="确认搬迁"
-        danger
-        onConfirm={() => void handleConfirm()}
-        onCancel={() => setConfirmOpen(false)}
-      />
-    </div>
+    </Modal>
   );
 }
 
+interface StorageTabProps {
+  config: ConfigState;
+  onUpdateField: <K extends keyof ConfigState>(key: K, value: ConfigState[K]) => void;
+}
+
 export default function StorageTab({ config, onUpdateField }: StorageTabProps) {
+  const [migrateOpen, setMigrateOpen] = useState(false);
+
   return (
     <div>
       <SectionTitle title="数据存储" />
       <div className="grid grid-cols-2 gap-4">
         <FieldRow
           label="数据目录"
-          description="数据库（tianyan.db）、向量索引、快照等所有本地数据的存储路径"
+          description="数据库（tianyan.db）、向量索引、快照等所有本地数据的存储路径（通过「数据搬迁」更改）"
         >
-          <TextInput
-            value={config.data_dir}
-            onChange={(v) => onUpdateField('data_dir', v)}
-            placeholder="~/.local/share/tianyan"
-          />
+          <div className="flex items-center gap-2">
+            <code
+              className="min-w-0 flex-1 px-2.5 py-1.5 text-sm rounded-md bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-[var(--color-text-primary)] font-mono truncate"
+              title={config.data_dir}
+            >
+              {config.data_dir || '(默认)'}
+            </code>
+            <button
+              type="button"
+              onClick={() => setMigrateOpen(true)}
+              aria-label="数据搬迁"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-accent text-white hover:bg-accent-hover shrink-0"
+            >
+              <FolderInput size={12} />
+              数据搬迁
+            </button>
+          </div>
         </FieldRow>
         <FieldRow label="集合名称" description="向量库中的集合/表名">
           <TextInput
@@ -194,7 +283,9 @@ export default function StorageTab({ config, onUpdateField }: StorageTabProps) {
                   type="number"
                   min={1}
                   value={config.cleanup_days}
-                  onChange={(e) => onUpdateField('cleanup_days', parseInt(e.target.value) || 365)}
+                  onChange={(e) =>
+                    onUpdateField('cleanup_days', parseInt(e.target.value) || 365)
+                  }
                   className="w-20 px-2 py-1 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
                 />
               </div>
@@ -203,7 +294,9 @@ export default function StorageTab({ config, onUpdateField }: StorageTabProps) {
         </div>
       </div>
 
-      <MigrationSection currentDir={config.data_dir} />
+      {migrateOpen && (
+        <MigrationDialog currentDir={config.data_dir} onClose={() => setMigrateOpen(false)} />
+      )}
     </div>
   );
 }

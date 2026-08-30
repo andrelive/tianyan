@@ -603,9 +603,10 @@ export async function deleteScheduledTask(id: string): Promise<{ deleted: boolea
 
 // ========== Todo & Goal API ==========
 
-/** 列出全部待办。 */
-export async function fetchTodos(): Promise<ListTodosResponse> {
-  return apiGet<ListTodosResponse>('/todos');
+/** 列出待办（sessionId 传入时按归属会话过滤——会话面板数据源）。 */
+export async function fetchTodos(sessionId?: string): Promise<ListTodosResponse> {
+  const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+  return apiGet<ListTodosResponse>(`/todos${qs}`);
 }
 
 /** 创建待办。 */
@@ -639,9 +640,10 @@ export async function deleteTodo(id: string): Promise<{ deleted: boolean }> {
   return apiDelete<{ deleted: boolean }>(`/todos/${encodeURIComponent(id)}`);
 }
 
-/** 列出全部目标（含进度）。 */
-export async function fetchGoals(): Promise<ListGoalsResponse> {
-  return apiGet<ListGoalsResponse>('/goals');
+/** 列出目标（含进度；sessionId 传入时按归属会话过滤——会话面板数据源）。 */
+export async function fetchGoals(sessionId?: string): Promise<ListGoalsResponse> {
+  const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+  return apiGet<ListGoalsResponse>(`/goals${qs}`);
 }
 
 /** 创建目标。 */

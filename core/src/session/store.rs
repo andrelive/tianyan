@@ -63,7 +63,6 @@ fn sqlite_error(context: &str, e: rusqlite::Error) -> TianyanError {
     TianyanError::Custom(format!("session: session_store: {context}：{e}"))
 }
 
-
 impl SessionStore {
     /// 创建会话存储（共享 Database 单连接）。
     pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
@@ -410,8 +409,6 @@ impl SessionStore {
         }
         Ok(Some(content))
     }
-
-
 }
 
 #[cfg(test)]

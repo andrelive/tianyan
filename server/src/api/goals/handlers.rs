@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::api::shared::error::ApiError;
@@ -11,11 +12,22 @@ use crate::state::AppState;
 
 use super::types::{CreateGoalRequest, UpdateGoalRequest};
 
-/// 列出全部目标（含进度：关联待办完成比例）。
+/// 列表查询参数。
+#[derive(Debug, Default, Deserialize)]
+pub struct ListQuery {
+    /// 按归属会话过滤（会话页数据源；缺省返回全部）。
+    pub session_id: Option<String>,
+}
+
+/// 列出目标（`?session_id=` 过滤归属会话；含进度：关联待办完成比例）。
 pub async fn list_goals(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let goals = state.goal_store().list().await;
+    let goals = match query.session_id.as_deref() {
+        Some(sid) if !sid.trim().is_empty() => state.goal_store().list_by_session(sid).await,
+        _ => state.goal_store().list().await,
+    };
     let mut items = Vec::with_capacity(goals.len());
     for goal in goals {
         let (todo_total, todo_done) = state.todo_store().count_by_goal(&goal.id).await;
@@ -41,7 +53,12 @@ pub async fn create_goal(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let goal = state
         .goal_store()
-        .create(request.title, request.description, request.target_date)
+        .create(
+            request.title,
+            request.description,
+            request.target_date,
+            request.session_id,
+        )
         .await?;
     Ok(Json(json!({ "goal": goal })))
 }
@@ -55,7 +72,13 @@ pub async fn update_goal(
     let status = request.parse_status().map_err(ApiError::BadRequest)?;
     let goal = state
         .goal_store()
-        .update(&id, request.title, request.description, status, request.target_date)
+        .update(
+            &id,
+            request.title,
+            request.description,
+            status,
+            request.target_date,
+        )
         .await?;
     match goal {
         Some(g) => Ok(Json(json!({ "goal": g }))),

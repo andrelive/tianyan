@@ -165,7 +165,14 @@ pub trait DynamicToolExecutor: Send + Sync {
     fn definition(&self) -> ToolDefinition;
 
     /// 执行工具调用。
-    async fn execute(&self, arguments: &str) -> crate::common::error::Result<serde_json::Value>;
+    ///
+    /// `session_id` 随调用链显式传入（归属会话；会话绑定的动态工具如
+    /// todo/goal 以此归属数据，与内置工具的 session_id 传递约定一致）。
+    async fn execute(
+        &self,
+        session_id: &str,
+        arguments: &str,
+    ) -> crate::common::error::Result<serde_json::Value>;
 }
 
 /// 工具注册表，维护工具定义并并行执行 tool_calls。
@@ -851,7 +858,7 @@ impl ToolRegistry {
             "symbol_outline" => self.execute_symbol_outline(arguments).await,
             "lsp" => self.execute_lsp(arguments).await,
             name => match self.dynamic_tools.lock().await.get(name).cloned() {
-                Some(executor) => executor.execute(&call.function.arguments).await,
+                Some(executor) => executor.execute(session_id, &call.function.arguments).await,
                 None => Err(TianyanError::Custom(format!("tool: 未知工具：{name}"))),
             },
         };
@@ -965,6 +972,7 @@ mod tests {
 
         async fn execute(
             &self,
+            _session_id: &str,
             arguments: &str,
         ) -> crate::common::error::Result<serde_json::Value> {
             Ok(serde_json::json!({ "echo": arguments }))
@@ -1064,6 +1072,7 @@ mod tests {
 
         async fn execute(
             &self,
+            _session_id: &str,
             _arguments: &str,
         ) -> crate::common::error::Result<serde_json::Value> {
             Ok(serde_json::json!({}))

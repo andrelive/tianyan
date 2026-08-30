@@ -8,7 +8,7 @@ import { assertE2eBackend } from './helpers';
 
 /** 侧边栏展开态导航项（与 Sidebar.tsx 的 NAV_ITEMS 对齐）。 */
 const NAV_PAGES = [
-  { label: '任务', url: '/tasks', heading: '任务' },
+  { label: '定时任务', url: '/scheduled', heading: '定时任务' },
   { label: '审批', url: '/approval', heading: '审批' },
   { label: '洞察', url: '/insights', heading: '洞察' },
   { label: '记忆', url: '/memory', heading: '记忆' },

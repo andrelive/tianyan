@@ -12,8 +12,8 @@ use dashmap::DashMap;
 
 use crate::common::error::TianyanError;
 use crate::common::types::retrieval_trace::RetrievalTrace;
-use crate::db::Database;
 use crate::db::stats::{DocStats, SkillStats, StatsRepo};
+use crate::db::Database;
 
 #[derive(Default)]
 struct SkillCounter {
@@ -221,34 +221,33 @@ impl UsageStats {
     }
 
     /// 记录 SQL 查询错误（统计查询失败时降级返回空数据，但错误必须可见）。
-    
 
     /// 查询调用次数最多的技能列表。
     ///
     /// 口径：只统计真技能（`skill:` 前缀键），普通工具调用不混入；
     /// 返回的 skill_id 剥离前缀（与技能注册名对齐，如 `planning`）。
-        pub async fn query_top_skills(&self, limit: usize) -> Vec<SkillStats> {
+    pub async fn query_top_skills(&self, limit: usize) -> Vec<SkillStats> {
         self.flush_pending().await;
         self.repo.query_top_skills(limit).await
     }
 
-        /// 查询访问最少的冷门文档列表。
-        pub async fn query_cold_documents(&self, limit: usize) -> Vec<DocStats> {
+    /// 查询访问最少的冷门文档列表。
+    pub async fn query_cold_documents(&self, limit: usize) -> Vec<DocStats> {
         self.flush_pending().await;
         self.repo.query_cold_documents(limit).await
     }
 
-        /// 查询近 7 天的搜索命名空间热度分布。
-        pub async fn query_search_heatmap(&self) -> serde_json::Value {
+    /// 查询近 7 天的搜索命名空间热度分布。
+    pub async fn query_search_heatmap(&self) -> serde_json::Value {
         self.repo.query_search_heatmap().await
     }
 
-        /// 查询全局统计概览（技能数、调用数、工具数、文档数、搜索数）。
+    /// 查询全局统计概览（技能数、调用数、工具数、文档数、搜索数）。
     ///
     /// 口径：`skill_calls` 表同时记录真技能（`skill:<id>` 键）与普通工具
     /// （工具名键）。技能指标只统计 `skill:` 前缀，工具指标统计其余——
     /// 工具是工具，技能是技能。
-        pub async fn query_summary(&self) -> serde_json::Value {
+    pub async fn query_summary(&self) -> serde_json::Value {
         self.flush_pending().await;
         self.repo.query_summary().await
     }
@@ -263,7 +262,6 @@ impl UsageStats {
 const MAX_RETRIEVAL_TRACES: i64 = 500;
 
 /// 将 rusqlite 错误映射为 `TianyanError::Custom`（统一 observability 模块前缀）。
-
 
 #[cfg(test)]
 mod tests {

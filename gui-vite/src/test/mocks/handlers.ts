@@ -6,6 +6,8 @@ import type {
   ListRolesResponse,
   RolesStatsResponse,
   BackgroundTask,
+  GoalWithProgress,
+  TodoItem,
   ListSessionsResponse,
   ChatResponse,
   SkillListResponse,
@@ -1123,6 +1125,20 @@ export const handlers = [
     return HttpResponse.json({ task_id: taskId, status: 'cancelled' });
   }),
 
+  // Todos（后端为 GET /todos?session_id=；会话绑定：按归属会话过滤）
+  http.get(`${API_BASE}/todos`, ({ request }) => {
+    const sid = new URL(request.url).searchParams.get('session_id');
+    const todos = sid ? mockTodos.filter((t) => t.session_id === sid) : mockTodos;
+    return HttpResponse.json({ todos, total: todos.length });
+  }),
+
+  // Goals（后端为 GET /goals?session_id=；含进度：关联待办完成比例）
+  http.get(`${API_BASE}/goals`, ({ request }) => {
+    const sid = new URL(request.url).searchParams.get('session_id');
+    const goals = sid ? mockGoals.filter((g) => g.goal.session_id === sid) : mockGoals;
+    return HttpResponse.json({ goals, total: goals.length });
+  }),
+
   // Chat stream (SSE)
   http.post(`${API_BASE}/chat/stream`, async ({ request }) => {
     const encoder = new TextEncoder();
@@ -1433,3 +1449,129 @@ export const handlers = [
     return HttpResponse.json({ status: 'ok' });
   }),
 ];
+
+// ========== Todo & Goal mock 数据（SessionTodoPanel 测试用；会话绑定） ==========
+
+export const mockTodos: TodoItem[] = [
+  {
+    id: 'todo-1',
+    title: '进行中的待办',
+    description: null,
+    status: 'in_progress',
+    priority: 'high',
+    goal_id: 'goal-1',
+    session_id: 'session-1',
+    created_at: 1753200000,
+    updated_at: 1753200000,
+    completed_at: null,
+    due_at: null,
+  },
+  {
+    id: 'todo-2',
+    title: '待开始的待办',
+    description: null,
+    status: 'pending',
+    priority: 'medium',
+    goal_id: null,
+    session_id: 'session-1',
+    created_at: 1753200001,
+    updated_at: 1753200001,
+    completed_at: null,
+    due_at: null,
+  },
+  {
+    id: 'todo-3',
+    title: '其他会话的待办',
+    description: null,
+    status: 'pending',
+    priority: 'low',
+    goal_id: null,
+    session_id: 'session-2',
+    created_at: 1753200002,
+    updated_at: 1753200002,
+    completed_at: null,
+    due_at: null,
+  },
+];
+
+export const mockGoals: GoalWithProgress[] = [
+  {
+    goal: {
+      id: 'goal-1',
+      title: '会话内目标',
+      description: null,
+      status: 'active',
+      session_id: 'session-1',
+      created_at: 1753200000,
+      updated_at: 1753200000,
+      completed_at: null,
+      target_date: null,
+    },
+    progress: 50,
+    todo_total: 2,
+    todo_done: 1,
+  },
+];
+
+/** 恢复 todo/goal mock 到初始状态（测试 afterEach 用）。 */
+export function resetTodoMocks(): void {
+  mockTodos.length = 0;
+  mockTodos.push(
+    {
+      id: 'todo-1',
+      title: '进行中的待办',
+      description: null,
+      status: 'in_progress',
+      priority: 'high',
+      goal_id: 'goal-1',
+      session_id: 'session-1',
+      created_at: 1753200000,
+      updated_at: 1753200000,
+      completed_at: null,
+      due_at: null,
+    },
+    {
+      id: 'todo-2',
+      title: '待开始的待办',
+      description: null,
+      status: 'pending',
+      priority: 'medium',
+      goal_id: null,
+      session_id: 'session-1',
+      created_at: 1753200001,
+      updated_at: 1753200001,
+      completed_at: null,
+      due_at: null,
+    },
+    {
+      id: 'todo-3',
+      title: '其他会话的待办',
+      description: null,
+      status: 'pending',
+      priority: 'low',
+      goal_id: null,
+      session_id: 'session-2',
+      created_at: 1753200002,
+      updated_at: 1753200002,
+      completed_at: null,
+      due_at: null,
+    },
+  );
+  mockGoals.length = 0;
+  mockGoals.push({
+    goal: {
+      id: 'goal-1',
+      title: '会话内目标',
+      description: null,
+      status: 'active',
+      session_id: 'session-1',
+      created_at: 1753200000,
+      updated_at: 1753200000,
+      completed_at: null,
+      target_date: null,
+    },
+    progress: 50,
+    todo_total: 2,
+    todo_done: 1,
+  });
+}

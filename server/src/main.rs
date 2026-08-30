@@ -23,7 +23,10 @@ async fn main() -> tianyan::common::error::Result<()> {
         match start_server(tianyan_server::ServerConfig::default(), config.clone()).await {
             Ok(()) => {
                 // 服务器正常关停：检查是否有待处理的数据目录搬迁
-                if tianyan_server::migration::handle_pending_migration(&config).await.is_some() {
+                if tianyan_server::migration::handle_pending_migration(&config)
+                    .await
+                    .is_some()
+                {
                     eprintln!("数据目录搬迁完成，以新配置重启");
                     continue;
                 }

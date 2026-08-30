@@ -40,10 +40,10 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use crate::common::error::{Result, TianyanError};
 use crate::common::llm_judge::truncate_output;
 use crate::common::types::StructuredMessage;
+use crate::db::Database;
 use crate::executor::{CommandTask, CommandTaskStatus};
 use crate::notification::SharedNotificationSink;
 use crate::session::SessionManager;
-use crate::db::Database;
 
 /// 默认最大并发后台任务数。
 pub const DEFAULT_MAX_BACKGROUND_TASKS: usize = 4;

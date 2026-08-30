@@ -137,19 +137,19 @@ impl LspClient {
             tokio::process::Command::new(spec.spawn_command),
         )
         .args(spec.args)
-            .current_dir(root)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                unavailable(
-                    spec.spawn_command,
-                    &format!("进程启动失败：{e}"),
-                    spec.auto_install_hint,
-                )
-            })?;
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| {
+            unavailable(
+                spec.spawn_command,
+                &format!("进程启动失败：{e}"),
+                spec.auto_install_hint,
+            )
+        })?;
         let stdin = child.stdin.take().ok_or_else(|| {
             unavailable(
                 spec.spawn_command,

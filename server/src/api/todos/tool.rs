@@ -1,7 +1,9 @@
-//! todo 动态工具：让智能体创建/更新/跟踪待办清单（计划面板数据同源）。
+//! todo 动态工具：让智能体在会话内创建/更新/跟踪待办清单。
 //!
 //! 待办是智能体可调用的工具（非纯 UI 功能）：agent 自主拆分任务、跟踪进度、
-//! 标记完成——与 `schedule_task`（定时任务）同属"智能体自我管理"工具族。
+//! 标记完成。数据与会话绑定（`session_id`）：创建时归属当前会话，
+//! list/update/delete 只作用于本会话条目；会话页输入框上方展示活跃待办，
+//! 全部完成后面板消失（对齐 DSH todo_write 的临时面板语义）。
 
 use std::sync::Arc;
 
@@ -54,7 +56,7 @@ impl DynamicToolExecutor for TodoTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::new(
             "todo",
-            "管理待办清单（计划面板数据同源）：创建/更新/列出/删除待办。用于把任务拆解为可跟踪的待办、标记进度（pending/in_progress/completed）、关联目标。operation: create（title 必填）/ update（id + 可选字段）/ list（可选 status/goal_id 过滤）/ delete（id）。",
+            "管理当前会话的待办清单（会话绑定，仅本会话可见）：创建/更新/列出/删除待办。用于把任务拆解为可跟踪的待办、标记进度（pending/in_progress/completed）、关联目标。operation: create（title 必填）/ update（id + 可选字段）/ list（可选 status/goal_id 过滤）/ delete（id）。",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -71,7 +73,7 @@ impl DynamicToolExecutor for TodoTool {
         ))
     }
 
-    async fn execute(&self, arguments: &str) -> Result<serde_json::Value> {
+    async fn execute(&self, session_id: &str, arguments: &str) -> Result<serde_json::Value> {
         let args: TodoArgs = serde_json::from_str(arguments)
             .map_err(|e| TianyanError::Custom(format!("tool: todo 参数无效：{e}")))?;
         match args.operation.as_str() {
@@ -81,13 +83,21 @@ impl DynamicToolExecutor for TodoTool {
                     return Err(TianyanError::invalid_input("tool: todo create 需要 title"));
                 }
                 let priority = match args.priority.as_deref() {
-                    Some(p) => TodoPriority::parse(p)
-                        .ok_or_else(|| TianyanError::invalid_input(format!("tool: todo 优先级无效：{p}")))?,
+                    Some(p) => TodoPriority::parse(p).ok_or_else(|| {
+                        TianyanError::invalid_input(format!("tool: todo 优先级无效：{p}"))
+                    })?,
                     None => TodoPriority::Medium,
                 };
                 let item = self
                     .store
-                    .create(title, args.description, priority, args.goal_id, None)
+                    .create(
+                        title,
+                        args.description,
+                        priority,
+                        args.goal_id,
+                        None,
+                        Some(session_id.to_string()),
+                    )
                     .await?;
                 Ok(serde_json::json!({
                     "status": "created",
@@ -98,7 +108,11 @@ impl DynamicToolExecutor for TodoTool {
                 }))
             }
             "update" => {
-                let id = args.id.ok_or_else(|| TianyanError::invalid_input("tool: todo update 需要 id"))?;
+                let id = args
+                    .id
+                    .ok_or_else(|| TianyanError::invalid_input("tool: todo update 需要 id"))?;
+                // 归属校验：只允许操作本会话的待办（跨会话 id 一律 not_found）
+                self.owned_todo(session_id, &id).await?;
                 let status = match args.status.as_deref() {
                     Some(s) => Some(TodoStatus::parse(s).ok_or_else(|| {
                         TianyanError::invalid_input(format!("tool: todo 状态无效：{s}"))
@@ -113,7 +127,15 @@ impl DynamicToolExecutor for TodoTool {
                 };
                 let updated = self
                     .store
-                    .update(&id, args.title, args.description, status, priority, args.goal_id, None)
+                    .update(
+                        &id,
+                        args.title,
+                        args.description,
+                        status,
+                        priority,
+                        args.goal_id,
+                        None,
+                    )
                     .await?;
                 match updated {
                     Some(item) => Ok(serde_json::json!({
@@ -126,7 +148,8 @@ impl DynamicToolExecutor for TodoTool {
                 }
             }
             "list" => {
-                let items = self.store.list().await;
+                // 只列出本会话的待办（会话绑定数据源）
+                let items = self.store.list_by_session(session_id).await;
                 let filtered: Vec<_> = items
                     .into_iter()
                     .filter(|i| {
@@ -153,7 +176,10 @@ impl DynamicToolExecutor for TodoTool {
                 Ok(serde_json::json!({ "todos": filtered, "count": filtered.len() }))
             }
             "delete" => {
-                let id = args.id.ok_or_else(|| TianyanError::invalid_input("tool: todo delete 需要 id"))?;
+                let id = args
+                    .id
+                    .ok_or_else(|| TianyanError::invalid_input("tool: todo delete 需要 id"))?;
+                self.owned_todo(session_id, &id).await?;
                 let removed = self.store.delete(&id).await?;
                 if removed {
                     Ok(serde_json::json!({ "status": "deleted", "id": id }))
@@ -161,7 +187,28 @@ impl DynamicToolExecutor for TodoTool {
                     Err(TianyanError::not_found(format!("tool: todo 不存在：{id}")))
                 }
             }
-            other => Err(TianyanError::invalid_input(format!("tool: todo 未知操作：{other}"))),
+            other => Err(TianyanError::invalid_input(format!(
+                "tool: todo 未知操作：{other}"
+            ))),
+        }
+    }
+}
+
+impl TodoTool {
+    /// 校验待办归属当前会话（不存在或属于其他会话 → not_found）。
+    async fn owned_todo(&self, session_id: &str, id: &str) -> Result<()> {
+        let owned = self
+            .store
+            .list_by_session(session_id)
+            .await
+            .iter()
+            .any(|i| i.id == id);
+        if owned {
+            Ok(())
+        } else {
+            Err(TianyanError::not_found(format!(
+                "tool: todo 不存在或不属于当前会话：{id}"
+            )))
         }
     }
 }

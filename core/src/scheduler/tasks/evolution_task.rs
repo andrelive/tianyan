@@ -13,14 +13,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::role_store::RoleStore;
-use crate::roles::{AgentRole, RoleSource, RoleStatus};
 use crate::common::error::{Result, TianyanError};
 use crate::common::llm_judge::parse_llm_json;
 use crate::common::types::{
     AgentPath, ContentLevel, ContextNamespace, MemoryCategory, MemoryEntry, TianyanUri,
 };
 use crate::memory::format_memory_as_markdown;
+use crate::role_store::RoleStore;
+use crate::roles::{AgentRole, RoleSource, RoleStatus};
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
 
 /// 演化综述执行器（server 提供实现：委托 evolution_reviewer 角色 / 唤醒主 agent）。

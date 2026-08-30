@@ -80,7 +80,7 @@ impl DynamicToolExecutor for ScheduleTaskTool {
         ))
     }
 
-    async fn execute(&self, arguments: &str) -> Result<serde_json::Value> {
+    async fn execute(&self, _session_id: &str, arguments: &str) -> Result<serde_json::Value> {
         let args: ScheduleTaskArgs = serde_json::from_str(arguments)
             .map_err(|e| TianyanError::Custom(format!("tool: schedule_task 参数无效：{e}")))?;
         if args.name.trim().is_empty() || args.prompt.trim().is_empty() {

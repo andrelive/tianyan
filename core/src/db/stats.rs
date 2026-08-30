@@ -52,7 +52,9 @@ impl StatsRepo {
         doc_batch: &[(String, u64, f64)],
     ) -> Result<(), TianyanError> {
         let conn = self.db.lock().await;
-        let tx = conn.unchecked_transaction().map_err(|e| Self::sqlite_error("统计落盘", e))?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| Self::sqlite_error("统计落盘", e))?;
         let now = chrono::Utc::now().to_rfc3339();
         for (skill_id, calls, successes, time) in skill_batch {
             let avg_time_us = if *calls > 0 { time / calls } else { 0 };
@@ -103,7 +105,7 @@ impl StatsRepo {
     }
 
     pub async fn query_top_skills(&self, limit: usize) -> Vec<SkillStats> {
-                let conn = self.db.lock().await;
+        let conn = self.db.lock().await;
         let mut stmt = match conn.prepare(
             "SELECT substr(skill_id, 7), COUNT(*), SUM(success),
                 CAST(SUM(success) AS REAL) / MAX(COUNT(*),1),
@@ -136,7 +138,7 @@ impl StatsRepo {
 
     /// 查询访问最少的冷门文档列表。
     pub async fn query_cold_documents(&self, limit: usize) -> Vec<DocStats> {
-                let conn = self.db.lock().await;
+        let conn = self.db.lock().await;
         let mut stmt = match conn.prepare(
             "SELECT uri, SUM(CASE WHEN event_type='search_hit' THEN 1 ELSE 0 END),
                 SUM(CASE WHEN event_type='detail_load' THEN 1 ELSE 0 END),
@@ -196,7 +198,7 @@ impl StatsRepo {
     /// （工具名键）。技能指标只统计 `skill:` 前缀，工具指标统计其余——
     /// 工具是工具，技能是技能。
     pub async fn query_summary(&self) -> serde_json::Value {
-                let conn = self.db.lock().await;
+        let conn = self.db.lock().await;
         let skills: i64 = Self::log_query_err(
             conn.query_row(
                 "SELECT COUNT(DISTINCT skill_id) FROM skill_calls WHERE skill_id LIKE 'skill:%'",
@@ -278,4 +280,3 @@ impl StatsRepo {
             .collect()
     }
 }
-

@@ -64,7 +64,10 @@ impl TraceRepo {
             )
             .map_err(|e| TianyanError::Custom(format!("trace: 查询失败：{e}")))?;
         let rows = stmt
-            .query_map(rusqlite::params![session_id, task_id, limit as i64], row_to_span)
+            .query_map(
+                rusqlite::params![session_id, task_id, limit as i64],
+                row_to_span,
+            )
             .map_err(|e| TianyanError::Custom(format!("trace: 查询执行失败：{e}")))?;
         let mut out = Vec::new();
         for row in rows {

@@ -21,10 +21,10 @@ use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 
 use crate::agent_builder::create_model_services;
 use crate::api::events::processor as event_processor;
-use crate::evolution_executor::AgentEvolutionExecutor;
-use crate::scheduled_tasks::manager::{ScheduledAgentTaskManager, SchedulerRegistrar};
 use crate::api::goals::tool::GoalTool;
 use crate::api::todos::tool::TodoTool;
+use crate::evolution_executor::AgentEvolutionExecutor;
+use crate::scheduled_tasks::manager::{ScheduledAgentTaskManager, SchedulerRegistrar};
 use crate::scheduled_tasks::tool::{CreateTaskRequest, ScheduleTaskTool};
 
 // Import API module
@@ -263,10 +263,7 @@ pub async fn create_app(
     // 统一写入门面：Database 门面（单连接 + schema 集中初始化）——全系统
     // 结构化存储的唯一入口（ADR-005），业务组件不再各自持 SqliteDb。
     let database = tianyan::db::Database::open(db_path).map_err(|e| {
-        tianyan::TianyanError::Custom(format!(
-            "虚拟文件系统错误：打开 SQLite 数据库失败：{}",
-            e
-        ))
+        tianyan::TianyanError::Custom(format!("虚拟文件系统错误：打开 SQLite 数据库失败：{}", e))
     })?;
     if let Err(e) = database.init_schemas().await {
         return Err(tianyan::TianyanError::Custom(format!(

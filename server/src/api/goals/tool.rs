@@ -1,7 +1,9 @@
-//! goal 动态工具：让智能体创建/更新/跟踪长期目标（计划面板数据同源）。
+//! goal 动态工具：让智能体在会话内创建/更新/跟踪长期目标。
 //!
 //! 目标进度按关联待办完成比例自动计算（与 todolist 联动）——agent 用
 //! `todo` 工具拆解任务、`goal` 工具跟踪目标，形成"目标 → 待办"闭环。
+//! 数据与会话绑定：创建时归属当前会话，list/update/delete 只作用于
+//! 本会话条目；会话页展示活跃目标，完成/删除后面板消失。
 
 use std::sync::Arc;
 
@@ -50,7 +52,7 @@ impl DynamicToolExecutor for GoalTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::new(
             "goal",
-            "管理长期目标（计划面板数据同源）：创建/更新/列出/删除目标。目标进度按关联待办完成比例自动计算。operation: create（title 必填）/ update（id + 可选字段）/ list（可选 status 过滤）/ delete（id）。",
+            "管理当前会话的长期目标（会话绑定，仅本会话可见）：创建/更新/列出/删除目标。目标进度按关联待办完成比例自动计算。operation: create（title 必填）/ update（id + 可选字段）/ list（可选 status 过滤）/ delete（id）。",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -65,7 +67,7 @@ impl DynamicToolExecutor for GoalTool {
         ))
     }
 
-    async fn execute(&self, arguments: &str) -> Result<serde_json::Value> {
+    async fn execute(&self, session_id: &str, arguments: &str) -> Result<serde_json::Value> {
         let args: GoalArgs = serde_json::from_str(arguments)
             .map_err(|e| TianyanError::Custom(format!("tool: goal 参数无效：{e}")))?;
         match args.operation.as_str() {
@@ -74,7 +76,10 @@ impl DynamicToolExecutor for GoalTool {
                 if title.trim().is_empty() {
                     return Err(TianyanError::invalid_input("tool: goal create 需要 title"));
                 }
-                let goal = self.store.create(title, args.description, None).await?;
+                let goal = self
+                    .store
+                    .create(title, args.description, None, Some(session_id.to_string()))
+                    .await?;
                 Ok(serde_json::json!({
                     "status": "created",
                     "id": goal.id,
@@ -82,14 +87,21 @@ impl DynamicToolExecutor for GoalTool {
                 }))
             }
             "update" => {
-                let id = args.id.ok_or_else(|| TianyanError::invalid_input("tool: goal update 需要 id"))?;
+                let id = args
+                    .id
+                    .ok_or_else(|| TianyanError::invalid_input("tool: goal update 需要 id"))?;
+                // 归属校验：只允许操作本会话的目标
+                self.owned_goal(session_id, &id).await?;
                 let status = match args.status.as_deref() {
                     Some(s) => Some(GoalStatus::parse(s).ok_or_else(|| {
                         TianyanError::invalid_input(format!("tool: goal 状态无效：{s}"))
                     })?),
                     None => None,
                 };
-                let updated = self.store.update(&id, args.title, args.description, status, None).await?;
+                let updated = self
+                    .store
+                    .update(&id, args.title, args.description, status, None)
+                    .await?;
                 match updated {
                     Some(goal) => Ok(serde_json::json!({
                         "status": "updated",
@@ -101,14 +113,13 @@ impl DynamicToolExecutor for GoalTool {
                 }
             }
             "list" => {
-                let goals = self.store.list().await;
+                // 只列出本会话的目标（会话绑定数据源）
+                let goals = self.store.list_by_session(session_id).await;
                 let filtered: Vec<_> = goals
                     .into_iter()
-                    .filter(|g| {
-                        match args.status.as_deref() {
-                            Some(s) => format!("{:?}", g.status).to_lowercase() == s,
-                            None => true,
-                        }
+                    .filter(|g| match args.status.as_deref() {
+                        Some(s) => format!("{:?}", g.status).to_lowercase() == s,
+                        None => true,
                     })
                     .map(|g| {
                         serde_json::json!({
@@ -121,7 +132,10 @@ impl DynamicToolExecutor for GoalTool {
                 Ok(serde_json::json!({ "goals": filtered, "count": filtered.len() }))
             }
             "delete" => {
-                let id = args.id.ok_or_else(|| TianyanError::invalid_input("tool: goal delete 需要 id"))?;
+                let id = args
+                    .id
+                    .ok_or_else(|| TianyanError::invalid_input("tool: goal delete 需要 id"))?;
+                self.owned_goal(session_id, &id).await?;
                 let removed = self.store.delete(&id).await?;
                 if removed {
                     Ok(serde_json::json!({ "status": "deleted", "id": id }))
@@ -129,7 +143,28 @@ impl DynamicToolExecutor for GoalTool {
                     Err(TianyanError::not_found(format!("tool: goal 不存在：{id}")))
                 }
             }
-            other => Err(TianyanError::invalid_input(format!("tool: goal 未知操作：{other}"))),
+            other => Err(TianyanError::invalid_input(format!(
+                "tool: goal 未知操作：{other}"
+            ))),
+        }
+    }
+}
+
+impl GoalTool {
+    /// 校验目标归属当前会话（不存在或属于其他会话 → not_found）。
+    async fn owned_goal(&self, session_id: &str, id: &str) -> Result<()> {
+        let owned = self
+            .store
+            .list_by_session(session_id)
+            .await
+            .iter()
+            .any(|g| g.id == id);
+        if owned {
+            Ok(())
+        } else {
+            Err(TianyanError::not_found(format!(
+                "tool: goal 不存在或不属于当前会话：{id}"
+            )))
         }
     }
 }

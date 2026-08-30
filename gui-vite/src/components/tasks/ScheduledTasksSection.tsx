@@ -66,7 +66,7 @@ export default function ScheduledTasksSection() {
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider flex items-center gap-1.5">
           <CalendarClock size={14} />
-          定时任务
+          任务列表
         </h3>
         <button
           type="button"

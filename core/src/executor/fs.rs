@@ -174,26 +174,25 @@ async fn collect_rg_files(
     base: &Path,
     pattern: &str,
 ) -> Result<Option<Vec<PathBuf>>, TianyanError> {
-    let output = match crate::executor::command::hide_console_window(
-        tokio::process::Command::new("rg"),
-    )
-    .arg("--files")
-        .arg("--glob")
-        .arg(pattern)
-        .arg("--glob")
-        .arg("!.git")
-        .arg(base)
-        // stdin 置 null：tokio 默认创建 stdin 管道，Windows 并发场景下 rg 的
-        // stdin 启发式会误判为"搜索 stdin"（同 search.rs rg_command 的缺陷），
-        // 静默返回空结果而非目标目录的 --files 输出。
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-    {
-        Ok(o) => o,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(TianyanError::Custom(format!("executor: rg 启动失败：{e}"))),
-    };
+    let output =
+        match crate::executor::command::hide_console_window(tokio::process::Command::new("rg"))
+            .arg("--files")
+            .arg("--glob")
+            .arg(pattern)
+            .arg("--glob")
+            .arg("!.git")
+            .arg(base)
+            // stdin 置 null：tokio 默认创建 stdin 管道，Windows 并发场景下 rg 的
+            // stdin 启发式会误判为"搜索 stdin"（同 search.rs rg_command 的缺陷），
+            // 静默返回空结果而非目标目录的 --files 输出。
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+        {
+            Ok(o) => o,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(TianyanError::Custom(format!("executor: rg 启动失败：{e}"))),
+        };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();

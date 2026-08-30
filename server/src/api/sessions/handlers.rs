@@ -99,11 +99,20 @@ pub async fn delete_session(
         state.agent_working_directory().await,
     );
 
-    service
+    let response = service
         .delete_session(&session_id)
         .await
-        .inspect_err(|e| error!("删除会话失败: {}", e))
-        .map(Json)
+        .inspect_err(|e| error!("删除会话失败: {}", e))?;
+
+    // 会话绑定的待办/目标级联清理（todo/goal 是会话内的临时推理辅助，
+    // 会话删除后数据即失效；清理失败仅告警，不阻塞会话删除）
+    let todos = state.todo_store().delete_by_session(&session_id).await;
+    let goals = state.goal_store().delete_by_session(&session_id).await;
+    if todos > 0 || goals > 0 {
+        info!(session = %session_id, todos, goals, "已级联清理会话绑定的待办/目标");
+    }
+
+    Ok(Json(response))
 }
 
 /// 删除消息（该消息及其后的所有消息）

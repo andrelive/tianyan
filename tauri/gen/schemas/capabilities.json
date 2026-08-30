@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"主窗口默认能力：核心命令 + 原生目录选择对话框（设置页「数据搬迁」）","local":true,"windows":["main"],"permissions":["core:default","dialog:default"]}}

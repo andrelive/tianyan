@@ -144,8 +144,6 @@ fn sqlite_error(context: &str, e: rusqlite::Error) -> TianyanError {
     TianyanError::Custom(format!("session: session_recall: {context}：{e}"))
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

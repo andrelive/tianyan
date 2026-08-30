@@ -57,10 +57,10 @@ pub mod memory;
 pub mod model;
 pub mod notification;
 pub mod observability;
-/// 角色基础类型（纯类型层：config/agent/scheduler 共用）。
-pub mod roles;
 /// 角色 VFS 存储（独立存储层，依赖 vfs + roles）。
 pub mod role_store;
+/// 角色基础类型（纯类型层：config/agent/scheduler 共用）。
+pub mod roles;
 pub mod scheduler;
 pub mod session;
 pub mod skills;

@@ -82,7 +82,10 @@ fn apply_patch_duplicate_file_header_errors() {
     // 模型重复写 *** Update File 头：明确报"重复头"错误（便于模型纠正）
     let text = "*** Update File: f.txt\n*** Update File: f.txt\n-b\n+B\n";
     let err = parse_patch(text).unwrap_err();
-    assert!(err.to_string().contains("重复的 *** Update File 头"), "{err}");
+    assert!(
+        err.to_string().contains("重复的 *** Update File 头"),
+        "{err}"
+    );
 }
 
 #[test]
