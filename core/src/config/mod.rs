@@ -100,18 +100,15 @@ impl TianyanConfig {
     /// 配置文件名。
     const CONFIG_FILE_NAME: &'static str = "tianyan.toml";
 
-    /// 从默认位置加载配置。
+    /// 从固定位置加载配置：`~/.tianyan/tianyan.toml`。
     ///
-    /// 搜索顺序：
-    /// 1. 当前目录 `./tianyan.toml`
-    /// 2. 配置目录 `~/.config/tianyan/tianyan.toml`
-    /// 3. 主目录 `~/.tianyan/tianyan.toml`
-    ///
+    /// 配置目录与数据目录是两个概念（ADR-023）：配置文件位置写死、
+    /// 不随 `storage.data_dir` 搬迁；数据目录从配置内容读取。
     /// 如果找不到配置文件，返回错误。
     pub fn load() -> Result<Self, TianyanError> {
         let config_path = Self::find_config_file().ok_or_else(|| {
             TianyanError::Custom(
-                "配置加载失败：未找到配置文件，请将 tianyan.toml 放置在当前目录、配置目录 (~/.config/tianyan) 或主目录 (~/.tianyan)".to_string(),
+                "配置加载失败：未找到配置文件 ~/.tianyan/tianyan.toml（可用环境变量 TIANYAN_CONFIG 指定其他路径）".to_string(),
             )
         })?;
 
@@ -159,47 +156,25 @@ impl TianyanConfig {
         Ok(config)
     }
 
-    /// 在默认位置查找配置文件。
+    /// 在固定位置查找配置文件。
     ///
-    /// 搜索顺序：
-    /// 0. 环境变量 `TIANYAN_CONFIG` 显式指定（最高优先级，README/.env.example 已声明）
-    /// 1. 当前目录 `./tianyan.toml`
-    /// 2. %APPDATA%/tianyan/tianyan.toml (Windows) 或 ~/.config/tianyan/tianyan.toml
-    /// 3. ~/.tianyan/tianyan.toml
+    /// 位置：`~/.tianyan/tianyan.toml`（写死，不随数据目录搬迁）；
+    /// 环境变量 `TIANYAN_CONFIG` 显式指定时最高优先级（e2e/CI 用）。
     pub fn find_config_file() -> Option<std::path::PathBuf> {
-        // 0. 环境变量显式覆盖（空值视为未设置）
+        // 0. 环境变量显式覆盖（空值视为未设置；路径不存在时原样返回，由 load 报错）
         if let Ok(path) = std::env::var("TIANYAN_CONFIG") {
             if !path.trim().is_empty() {
                 return Some(std::path::PathBuf::from(path));
             }
         }
 
-        // 1. 检查当前目录
-        let current_dir = std::env::current_dir().ok()?;
-        let config_in_current = current_dir.join(Self::CONFIG_FILE_NAME);
-        if config_in_current.exists() {
-            return Some(config_in_current);
-        }
+        // 1. 固定位置：~/.tianyan/tianyan.toml
+        Self::canonical_config_path().filter(|p| p.exists())
+    }
 
-        // 2. 检查配置目录 (%APPDATA% 或 ~/.config)
-        if let Some(config_dir) = dirs::config_dir() {
-            // Windows: %APPDATA%/tianyan/tianyan.toml
-            // Linux/macOS: ~/.config/tianyan/tianyan.toml
-            let config_in_config = config_dir.join("tianyan").join(Self::CONFIG_FILE_NAME);
-            if config_in_config.exists() {
-                return Some(config_in_config);
-            }
-        }
-
-        // 3. 检查主目录 (向后兼容)
-        if let Some(home_dir) = dirs::home_dir() {
-            let config_in_home = home_dir.join(".tianyan").join(Self::CONFIG_FILE_NAME);
-            if config_in_home.exists() {
-                return Some(config_in_home);
-            }
-        }
-
-        None
+    /// 固定配置路径（不检查存在性）：`~/.tianyan/tianyan.toml`。
+    fn canonical_config_path() -> Option<std::path::PathBuf> {
+        dirs::home_dir().map(|home| home.join(".tianyan").join(Self::CONFIG_FILE_NAME))
     }
 
     /// 检查配置文件是否存在。
@@ -207,11 +182,10 @@ impl TianyanConfig {
         Self::find_config_file().is_some()
     }
 
-    /// 获取默认配置文件保存路径。
-    ///
-    /// 优先使用配置目录 (%APPDATA%/tianyan 或 ~/.config/tianyan)
+    /// 获取默认配置文件保存路径（配置不存在时首次写入用）：
+    /// `~/.tianyan/tianyan.toml`（与查找位置一致）。
     pub fn default_config_path() -> Option<std::path::PathBuf> {
-        dirs::config_dir().map(|dir| dir.join("tianyan").join(Self::CONFIG_FILE_NAME))
+        Self::canonical_config_path()
     }
 
     /// 验证配置。

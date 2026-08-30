@@ -52,7 +52,31 @@ function MigrationDialog({
       try {
         const resp = await fetch(`${root}/health`, { signal: AbortSignal.timeout(3000) });
         if (resp.ok) {
+          // 搬迁是否真正生效：回滚时服务器以旧配置重启，data_dir 不会变成新目录。
+          // 读取重启后的配置比对，避免把"回滚"误报成"搬迁完成"。
+          let rolledBack = false;
+          let gotDir = '';
+          try {
+            const cfgResp = await fetch(`${root}/api/v1/config`, { signal: AbortSignal.timeout(5000) });
+            if (cfgResp.ok) {
+              const body = (await cfgResp.json()) as { config?: { storage?: { data_dir?: string } } };
+              const norm = (s: string) => s.trim().replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+              gotDir = body?.config?.storage?.data_dir ?? '';
+              rolledBack = gotDir.trim().length > 0 && norm(gotDir) !== norm(newDir.trim());
+            }
+          } catch {
+            /* 配置读取失败：不阻塞，按成功流程处理 */
+          }
           if (pollTimer.current) clearInterval(pollTimer.current);
+          if (rolledBack) {
+            setMigrating(false);
+            setPhase('idle');
+            setError(
+              `搬迁未生效（已自动回滚）：当前数据目录仍为 ${gotDir || '(空)'}。请确认已完全退出应用（含托盘）后重试，详见应用日志。`,
+            );
+            showToast('数据目录搬迁未生效（已回滚）', 'error');
+            return;
+          }
           setPhase('done');
           setMigrating(false);
           showToast('数据目录搬迁完成', 'success');
@@ -69,7 +93,7 @@ function MigrationDialog({
         showToast('等待服务器重启超时，请手动重启应用', 'error');
       }
     }, HEALTH_POLL_INTERVAL_MS);
-  }, [showToast]);
+  }, [newDir, showToast]);
 
   /** 原生目录选择（Tauri 桌面壳；浏览器环境回退为手动输入框）。 */
   const handlePick = useCallback(async () => {

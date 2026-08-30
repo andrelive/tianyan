@@ -14,7 +14,14 @@ use tianyan::config::TianyanConfig;
 pub async fn handle_pending_migration(old_config: &TianyanConfig) -> Option<TianyanConfig> {
     let old_dir = old_config.storage.data_dir.clone();
     match tianyan::config::migration::run_pending_migration(&old_dir) {
-        Ok(true) => {
+        Ok(outcome) if outcome.migrated => {
+            // 被占用而未能删除的源文件：留作无害残留（数据已完整在新目录）
+            for leftover in &outcome.leftovers {
+                tracing::warn!(
+                    path = %leftover.display(),
+                    "搬迁残留：文件被占用未能从旧目录删除（可稍后手动删除）"
+                );
+            }
             // 重读配置（新 data_dir 生效；失败时回退旧配置并告警）
             match TianyanConfig::load() {
                 Ok(c) => {
@@ -30,7 +37,7 @@ pub async fn handle_pending_migration(old_config: &TianyanConfig) -> Option<Tian
                 }
             }
         }
-        Ok(false) => None,
+        Ok(_) => None,
         Err(e) => {
             // 失败已回滚（数据在旧目录、配置未动、请求已清除）：
             // 返回旧配置让调用方重启，应用恢复正常运行

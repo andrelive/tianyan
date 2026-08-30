@@ -94,6 +94,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-013: 统一消息通知与唤醒原语](docs/architecture/decisions/013-unified-message-notification-wake.md) — 消息入库 + 唤醒语义（shouldReply = allComplete || failure；任务持久化前置）
 - [ADR-018: 会话权威存储迁至 SQLite](docs/architecture/decisions/018-session-authoritative-sqlite.md) — 会话迁出 VFS（流式 vs 文档）；`SessionStore` 原子取号 + 失败上抛；VFS 恢复纯文档基座
 - [ADR-022: 会话绑定的任务面板与任务语义分层](docs/architecture/decisions/022-session-bound-task-ux.md) — todo/goal 会话绑定临时展示（无全局计划页）；内置任务→洞察、定时任务独立栏目、后台任务→会话停靠条；数据目录只读+搬迁对话框
+- [ADR-023: 配置目录与数据目录分离](docs/architecture/decisions/023-config-data-dir-separation.md) — 配置固定 `~/.tianyan/tianyan.toml` 永不搬迁；数据目录从配置读取；搬迁=复制+校验+先改配置后强制删源，失败可见
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 
@@ -133,7 +134,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 
 - `tianyan` 和 `tianyan-core` 是同一个包（lib name: `tianyan`），导入用 `tianyan::...`
 - `ServiceDiscovery::is_available()` 是 `async` —— 别忘了 `await`
-- 配置文件查找顺序：`./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml`
+- 配置文件固定为 `~/.tianyan/tianyan.toml`（`TIANYAN_CONFIG` 环境变量可覆盖，e2e 用）；数据目录由配置 `storage.data_dir` 决定（默认 `%LOCALAPPDATA%/tianyan`），两者分离、搬迁只动数据（ADR-023）
 - 测试不依赖外部服务，用 `MockVectorStorage` 和 temp dir 隔离
 - `DEFAULT_SOUL` 在 `core/src/agent/mod.rs`，通过 `include_str!` 构建
 - VFS 初始化分离：基础设施 → `vfs_impl.rs::initialize()`；应用内容 → `server/src/lib.rs::bootstrap_app_vfs()`
