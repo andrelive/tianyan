@@ -475,9 +475,12 @@ fn init_logging(config: &tianyan::common::logging::LoggingConfig) {
         }
     };
 
-    // 级别：RUST_LOG 优先，回退配置文件 [logging].level
-    let env_filter =
+    // 级别：控制台层 RUST_LOG 优先，回退配置文件 [logging].level；
+    // 文件层恒用配置级别——RUST_LOG 是开发调试入口，不能让 GUI 实例的
+    // 文件日志静默归零（曾出现文件日志 0 字节、流式中断无取证的情况）。
+    let console_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
+    let file_filter = EnvFilter::new(&config.level);
 
     // 控制台 layer：格式（text/json）来自配置文件 [logging].format
     let fmt_layer = if config.format == "json" {
@@ -508,13 +511,13 @@ fn init_logging(config: &tianyan::common::logging::LoggingConfig) {
             .boxed();
 
         tracing_subscriber::registry()
-            .with(env_filter)
+            .with(console_filter)
             .with(fmt_layer)
             .with(fmt_layer_file)
             .init();
     } else {
         tracing_subscriber::registry()
-            .with(env_filter)
+            .with(console_filter)
             .with(fmt_layer)
             .init();
     }

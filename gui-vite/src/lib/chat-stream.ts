@@ -217,8 +217,10 @@ export function createChatStreamReducer(options: ChatStreamReducerOptions = {}):
       }
 
       // 流式中断（finish_reason === 'interrupted'）：保留部分输出并提示，
-      // 不误报为 token 上限截断
+      // 不误报为 token 上限截断。toast 只停留 3 秒，必须同时给消息打
+      // 内联标记（气泡下方持久红字提示 +「继续生成」入口）。
       if (event.finish_reason === 'interrupted') {
+        st.markLastMessageInterrupted(sid);
         st.showToast('流式中断，已保留部分输出', 'error');
       }
     },

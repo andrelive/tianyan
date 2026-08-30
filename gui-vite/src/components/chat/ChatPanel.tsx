@@ -414,6 +414,7 @@ export default function ChatPanel() {
                 index={i}
                 isStreaming={i === streamingIndex && msg.role === 'assistant'}
                 onRollback={handleRollback}
+                onContinue={() => void handleSend('继续')}
               />
             ))}
 

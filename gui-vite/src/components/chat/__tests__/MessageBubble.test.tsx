@@ -1,7 +1,42 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import MessageBubble from '@/components/chat/MessageBubble';
 import type { ChatMessage } from '@/lib/types';
+
+describe('MessageBubble interrupted hint', () => {
+  it('shows the interrupted hint with a continue button and fires onContinue', async () => {
+    const user = userEvent.setup();
+    const onContinue = vi.fn();
+    render(
+      <MessageBubble
+        message={{ role: 'assistant', content: '对了一半。本地快速通路：不是', interrupted: true }}
+        index={0}
+        isStreaming={false}
+        onRollback={() => {}}
+        onContinue={onContinue}
+      />,
+    );
+
+    expect(screen.getByText('流式中断，已保留部分输出')).toBeInTheDocument();
+    const btn = screen.getByRole('button', { name: '继续生成' });
+    await user.click(btn);
+    expect(onContinue).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides the continue button when onContinue is absent (history replay)', () => {
+    render(
+      <MessageBubble
+        message={{ role: 'assistant', content: '部分输出', interrupted: true }}
+        index={0}
+        isStreaming={false}
+        onRollback={() => {}}
+      />,
+    );
+    expect(screen.getByText('流式中断，已保留部分输出')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '继续生成' })).not.toBeInTheDocument();
+  });
+});
 
 describe('MessageBubble history rendering', () => {
   it('renders tool calls with results from history messages (no segments)', () => {

@@ -77,6 +77,16 @@ describe('createChatStreamReducer', () => {
     expect(state.toasts[0]?.message).toBe('请求校验失败');
   });
 
+  it('marks interrupted on finish_reason interrupted and toasts once', () => {
+    useAppStore.getState().addMessage({ role: 'user', content: 'x', timestamp: '' });
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    const r = createChatStreamReducer();
+    r.handleEvent(ev({ delta: '部分输出', finish_reason: 'interrupted' }));
+    const assistant = useAppStore.getState().messages[1];
+    expect(assistant.interrupted).toBe(true);
+    expect(useAppStore.getState().toasts[0]?.message).toBe('流式中断，已保留部分输出');
+  });
+
   it('marks truncation on finish_reason length and attaches usage', () => {
     useAppStore.getState().addMessage({ role: 'user', content: 'x', timestamp: '' });
     useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
