@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::common::error::TianyanError;
 
-use crate::context::RetrievalTrace;
+use crate::common::types::retrieval_trace::RetrievalTrace;
 use crate::db::Database;
 
 /// 技能调用统计数据。
