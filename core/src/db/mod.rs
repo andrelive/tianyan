@@ -14,6 +14,7 @@ pub mod session;
 pub mod stats;
 pub mod execution;
 pub mod trace;
+pub mod usage;
 
 use crate::common::error::{Result, TianyanError};
 use crate::vfs::backend::sqlite_db::SqliteDb;

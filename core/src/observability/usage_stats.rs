@@ -263,9 +263,7 @@ impl UsageStats {
 const MAX_RETRIEVAL_TRACES: i64 = 500;
 
 /// 将 rusqlite 错误映射为 `TianyanError::Custom`（统一 observability 模块前缀）。
-fn sqlite_error(e: rusqlite::Error) -> TianyanError {
-    TianyanError::Custom(format!("observability: {e}"))
-}
+
 
 #[cfg(test)]
 mod tests {
