@@ -238,11 +238,27 @@ impl AsyncOpenAIClient {
 
         let mut byte_stream = response.bytes_stream();
         let (tx, rx) = mpsc::channel(100);
+        let read_idle = self.read_idle;
 
         tokio::spawn(async move {
             let mut buf: Vec<u8> = Vec::new();
             loop {
-                match byte_stream.next().await {
+                // 空闲超时：相邻两块之间静默超过 provider timeout 即报错——
+                // 活跃流（持续吐块）总时长不受限；纯传输层 read_timeout
+                // 对停滞 body 不可靠，必须在此显式保证
+                let next = match tokio::time::timeout(read_idle, byte_stream.next()).await {
+                    Ok(item) => item,
+                    Err(_) => {
+                        let _ = tx
+                            .send(Err(TianyanError::Custom(format!(
+                                "模型服务错误：流式读取空闲超时（{}s 无数据）",
+                                read_idle.as_secs()
+                            ))))
+                            .await;
+                        return;
+                    }
+                };
+                match next {
                     Some(Ok(bytes)) => {
                         buf.extend_from_slice(&bytes);
                         drain_sse_lines(&mut buf, &tx).await;
@@ -423,6 +439,23 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
                 if choices_empty && has_usage {
                     tracing::debug!(line = %data, "流式 usage-only 块（正常流尾）");
                     continue;
+                }
+                // 非标准 finish_reason（如网关的 network_error）：typed 反序列化
+                // 会失败，但这是合法的流结束信号——显式上抛保留可诊断性，
+                // 绝不静默丢弃（曾导致断流看起来像"正常结束"）。
+                let raw_finish = value
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("finish_reason"))
+                    .and_then(|f| f.as_str());
+                if let Some(reason) = raw_finish {
+                    let _ = tx
+                        .send(Err(TianyanError::Custom(format!(
+                            "模型服务错误：Provider finish_reason: {}",
+                            reason
+                        ))))
+                        .await;
+                    return;
                 }
                 tracing::debug!(line = %data, "跳过无法解析的流式数据行");
                 continue;
@@ -694,5 +727,120 @@ mod convert_tests {
         let msg = Message::tool("call_abc", r#"{"result":"ok"}"#);
         let converted = convert_messages(&[msg]);
         assert_eq!(converted.len(), 1);
+    }
+}
+
+/// 流式健壮性回归（0.2.3 会话静默中断排查）：
+/// 1) 非标准 finish_reason（网关 network_error）显式上抛而非静默丢弃；
+/// 2) 流空闲超时：相邻块静默超过 provider timeout → Err，活跃流不受限。
+#[cfg(test)]
+mod stream_robustness_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    /// 本地 mock SSE 服务器：返回给定 body（Content-Length 框架），
+    /// 可选在 body 后保持静默（不关闭连接）。返回实际监听地址。
+    fn spawn_mock_sse(
+        listener: std::net::TcpListener,
+        body: String,
+        stall_after_body: bool,
+    ) -> std::net::SocketAddr {
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(body.as_bytes()).unwrap();
+            stream.flush().unwrap();
+            if stall_after_body {
+                // 模拟网关停滞：body 之后持续沉默，不关闭连接
+                std::thread::sleep(Duration::from_millis(2500));
+            }
+        });
+        addr
+    }
+
+    /// 变体：调用方自带完整响应头（可用超量 Content-Length 模拟网关停滞）。
+    #[allow(dead_code)]
+    fn spawn_mock_sse_with_body(
+        listener: std::net::TcpListener,
+        header: String,
+        body: String,
+        stall_after_body: bool,
+    ) -> std::net::SocketAddr {
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(body.as_bytes()).unwrap();
+            stream.flush().unwrap();
+            if stall_after_body {
+                std::thread::sleep(Duration::from_millis(2500));
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn test_unknown_finish_reason_surfaces_as_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = spawn_mock_sse(
+            listener,
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"network_error\"}]}\n\n".to_string(),
+            false,
+        );
+        let client = AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1).unwrap();
+
+        let mut rx = client
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .await
+            .unwrap();
+
+        // 非标准 finish_reason 必须显式上抛（携带原始原因），而非静默丢弃
+        let item = rx.recv().await.expect("应有错误项");
+        let err = item.expect_err("network_error finish_reason 应转为错误");
+        assert!(
+            err.to_string().contains("network_error"),
+            "应携带原始原因: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_idle_timeout_fires_on_stall() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        // 声明超量 Content-Length（200）但只发一个合法块，随后网关持续停滞：
+        // 1s 空闲超时必须触发 Err，而不是无限等待剩余字节
+        let chunk: String = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n".to_string();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+            chunk.len() + 200
+        );
+        let addr = spawn_mock_sse_with_body(listener, header, chunk, true);
+        let client = AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1).unwrap();
+
+        let started = std::time::Instant::now();
+        let mut rx = client
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .await
+            .unwrap();
+
+        let first = rx.recv().await.expect("第一块应正常送达");
+        assert!(first.is_ok(), "第一块应解析成功: {first:?}");
+
+        let second = rx.recv().await.expect("停滞超时后应有错误项");
+        let elapsed = started.elapsed();
+        assert!(second.is_err(), "停滞流应转为错误: {second:?}");
+        assert!(
+            elapsed < Duration::from_millis(1900),
+            "应在 1s 空闲超时附近失败（实际 {elapsed:?}），而不是等到服务端关闭"
+        );
     }
 }

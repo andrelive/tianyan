@@ -24,6 +24,10 @@ pub struct AsyncOpenAIClient {
     pub(crate) headers: std::collections::HashMap<String, String>,
     /// 请求重试策略（指数退避 + 最大重试次数；内置全局默认，对全部 provider 生效）。
     pub(crate) retry_policy: RetryPolicy,
+    /// 流式读取空闲超时：相邻两个 SSE 块之间的最长静默间隔。
+    /// 语义为"空闲"而非"总时长"——长思维链生成可持续数分钟，总时长
+    /// 限制会把活跃长流在中途掐断（0.2.3 会话静默中断根因之一）。
+    pub(crate) read_idle: std::time::Duration,
 }
 
 impl AsyncOpenAIClient {
@@ -42,6 +46,9 @@ impl AsyncOpenAIClient {
 
         let http_client =
             crate::common::http::build_http_client(&crate::common::http::HttpClientSpec {
+                // 读空闲超时（字节间无数据的最长间隔）——非总请求时长：
+                // 流式思维链+长正文可持续数分钟，总时长限制会把长生成
+                // 在中途掐断（0.2.3 会话静默中断的根因，见 ADR-023 后续排查）
                 timeout: std::time::Duration::from_secs(config.timeout),
                 connect_timeout: std::time::Duration::from_secs(30),
                 user_agent: None,
@@ -57,6 +64,7 @@ impl AsyncOpenAIClient {
             api_key,
             headers: config.headers.clone(),
             retry_policy: RetryPolicy::default(),
+            read_idle: std::time::Duration::from_secs(config.timeout),
         })
     }
 
