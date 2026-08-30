@@ -24,7 +24,7 @@ use tianyan::observability::usage_log::UsageLog;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::session::SessionManager;
 use tianyan::skills::{SkillExecutor, SkillRefresher};
-use tianyan::vfs::backend::sqlite_db::SqliteDb;
+use tianyan::db::Database;
 use tianyan::vfs::VirtualFileSystemImpl;
 use tianyan::{Result as TianyanResult, TianyanError};
 
@@ -64,7 +64,7 @@ impl AgentBuilderFactory {
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
         skill_refresher: Arc<dyn SkillRefresher>,
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
-        sqlite_db: Option<SqliteDb>,
+        sqlite_db: Option<Arc<Database>>,
         notification_sink: tianyan::notification::SharedNotificationSink,
         session_manager: Arc<dyn SessionManager>,
         trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,
@@ -174,7 +174,7 @@ impl AgentBuilderFactory {
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
         skill_refresher: Arc<dyn SkillRefresher>,
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
-        sqlite_db: Option<SqliteDb>,
+        sqlite_db: Option<Arc<Database>>,
         notification_sink: tianyan::notification::SharedNotificationSink,
         session_manager: Arc<dyn SessionManager>,
         trace_collector: Option<Arc<tianyan::observability::trace::TraceCollector>>,

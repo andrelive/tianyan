@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::common::error::TianyanError;
 use crate::common::types::{Part, StructuredMessage};
 use crate::session::SessionHeader;
-use crate::vfs::backend::sqlite_db::SqliteDb;
+use crate::db::Database;
 
 /// 文本列截断上限（FTS 索引体积控制；与回忆模块一致）。
 const MAX_TEXT_CHARS: usize = 4000;
@@ -36,7 +36,7 @@ pub struct SessionMeta {
 /// 会话权威存储服务。
 #[derive(Clone)]
 pub struct SessionStore {
-    db: SqliteDb,
+    db: Arc<Database>,
 }
 
 impl SessionStore {
@@ -44,7 +44,7 @@ impl SessionStore {
     ///
     /// # Errors
     /// * 当前不失败；签名保持与全库统一错误类型。
-    pub fn new(db: SqliteDb) -> Result<Arc<Self>, TianyanError> {
+    pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
         Ok(Arc::new(Self { db }))
     }
 
@@ -470,8 +470,8 @@ mod tests {
     }
 
     async fn make_store() -> Arc<SessionStore> {
-        let db = SqliteDb::open_in_memory().unwrap();
-        db.init_all_schemas().await.unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
         SessionStore::new(db).unwrap()
     }
 

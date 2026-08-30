@@ -130,7 +130,7 @@ fn get_static_dir() -> std::path::PathBuf {
 /// `sqlite_db` 为全系统共享连接（ADR-005：禁止第二个 SQLite 连接）。
 async fn initialize_vfs_for_app(
     config: &tianyan::config::TianyanConfig,
-    sqlite_db: tianyan::vfs::backend::sqlite_db::SqliteDb,
+    database: Arc<tianyan::db::Database>,
 ) -> tianyan::common::error::Result<Arc<tianyan::vfs::VirtualFileSystemImpl>> {
     use tianyan::config::StorageBackendType;
     use tianyan::vfs::{
@@ -145,9 +145,9 @@ async fn initialize_vfs_for_app(
         StorageBackendType::Sqlite => {
             info!(
                 "VFS 使用 SQLite 存储后端（共享连接）：{}",
-                sqlite_db.path().display()
+                database.path().display()
             );
-            Arc::new(SqliteBackend::new(sqlite_db))
+            Arc::new(SqliteBackend::new(database))
         }
     };
 
@@ -258,10 +258,15 @@ pub async fn create_app(
         .sqlite_path
         .clone()
         .unwrap_or_else(|| config.storage.data_dir.join("tianyan.db"));
-    let sqlite_db = tianyan::vfs::backend::sqlite_db::SqliteDb::open(db_path).map_err(|e| {
-        tianyan::TianyanError::Custom(format!("虚拟文件系统错误：打开 SQLite 数据库失败：{}", e))
+    // 统一写入门面：Database 门面（单连接 + schema 集中初始化）——全系统
+    // 结构化存储的唯一入口（ADR-005），业务组件不再各自持 SqliteDb。
+    let database = tianyan::db::Database::open(db_path).map_err(|e| {
+        tianyan::TianyanError::Custom(format!(
+            "虚拟文件系统错误：打开 SQLite 数据库失败：{}",
+            e
+        ))
     })?;
-    if let Err(e) = sqlite_db.init_all_schemas().await {
+    if let Err(e) = database.init_schemas().await {
         return Err(tianyan::TianyanError::Custom(format!(
             "虚拟文件系统错误：初始化 SQLite Schema 失败：{}",
             e
@@ -269,10 +274,10 @@ pub async fn create_app(
     }
 
     // 在应用层初始化 VFS（单一实例，共享 SqliteDb）
-    let vfs = initialize_vfs_for_app(&config, sqlite_db.clone()).await?;
+    let vfs = initialize_vfs_for_app(&config, database.clone()).await?;
 
     // Create shared application state（传入 VFS + 共享 SqliteDb）
-    let state = AppState::new(config, vfs, sqlite_db).await?;
+    let state = AppState::new(config, vfs, database).await?;
 
     info!("Application state initialized successfully");
     let state = Arc::new(state);

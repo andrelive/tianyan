@@ -43,7 +43,7 @@ use crate::common::types::StructuredMessage;
 use crate::executor::{CommandTask, CommandTaskStatus};
 use crate::notification::SharedNotificationSink;
 use crate::session::SessionManager;
-use crate::vfs::backend::sqlite_db::SqliteDb;
+use crate::db::Database;
 
 /// 默认最大并发后台任务数。
 pub const DEFAULT_MAX_BACKGROUND_TASKS: usize = 4;
@@ -188,7 +188,7 @@ pub struct BackgroundTaskManager {
     task_reviewer: Option<Arc<dyn crate::executor::judge::TaskReviewer>>,
     /// 结构化 Trace 收集器（G6；None 时不记录任务 span）。
     trace_collector: Option<Arc<crate::observability::trace::TraceCollector>>,
-    db: Option<SqliteDb>,
+    db: Option<Arc<Database>>,
     next_seq: Arc<AtomicU64>,
     /// 持久化加载只执行一次（惰性：首次 register/snapshot 前）。
     reloaded: Arc<AtomicBool>,
@@ -229,7 +229,7 @@ impl BackgroundTaskManager {
     }
 
     /// 设置 SQLite 持久化后端（任务状态脱离调用栈；重启可查询可恢复）。
-    pub fn with_db(mut self, db: SqliteDb) -> Self {
+    pub fn with_db(mut self, db: Arc<Database>) -> Self {
         self.db = Some(db);
         self
     }
@@ -1173,8 +1173,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_task_persistence_reload() {
-        let db = SqliteDb::open_in_memory().unwrap();
-        db.init_all_schemas().await.unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
         let manager = BackgroundTaskManager::new().with_db(db.clone());
         let id = manager
             .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string())
@@ -1199,8 +1199,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_persistence_reload_interrupted_becomes_failed() {
-        let db = SqliteDb::open_in_memory().unwrap();
-        db.init_all_schemas().await.unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
         let manager = BackgroundTaskManager::new().with_db(db.clone());
         let id = manager
             .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string())

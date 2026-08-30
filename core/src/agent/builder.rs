@@ -57,7 +57,7 @@ pub struct AgentBuilder {
     /// 技能注册表刷新钩子（压缩会话转换点时增量注册 VFS 学习技能）。
     skill_refresher: Option<Arc<dyn SkillRefresher>>,
     /// 后台任务 SQLite 持久化后端（ADR-013；None 时任务状态纯内存）。
-    background_task_db: Option<crate::vfs::backend::sqlite_db::SqliteDb>,
+    background_task_db: Option<Arc<crate::db::Database>>,
     /// 系统通知通道（后台任务完成 / 审批挂起的桌面通知；None 时静默）。
     notification_sink: Option<crate::notification::SharedNotificationSink>,
     /// 子 Agent 角色配置（delegate_to_agent role 参数；None 时使用内置角色）。
@@ -212,7 +212,7 @@ impl AgentBuilder {
     }
 
     /// 设置后台任务 SQLite 持久化后端（ADR-013：任务实体化，重启可恢复）。
-    pub fn with_background_task_db(mut self, db: crate::vfs::backend::sqlite_db::SqliteDb) -> Self {
+    pub fn with_background_task_db(mut self, db: Arc<crate::db::Database>) -> Self {
         self.background_task_db = Some(db);
         self
     }

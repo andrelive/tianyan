@@ -58,7 +58,7 @@ mod tests {
     use crate::memory::{ExtractionConfig, MemoryExtractor};
     use crate::model::ChatService;
     use crate::test_utils::{MockChatService, MockVfs};
-    use crate::vfs::backend::sqlite_db::SqliteDb;
+    use crate::db::Database;
     use crate::vfs::SummaryEngine;
 
     /// 构造任务执行上下文（MockVfs + mock 服务；任务本身不读取上下文）。
@@ -83,8 +83,8 @@ mod tests {
 
     /// 构造隔离的 UsageStats（内存 SQLite，模式同 `usage_stats::tests::setup`）。
     async fn make_stats() -> Arc<UsageStats> {
-        let db = SqliteDb::open_in_memory().unwrap();
-        db.init_all_schemas().await.unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
         UsageStats::new(db).unwrap()
     }
 

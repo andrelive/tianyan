@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use crate::common::error::TianyanError;
-use crate::vfs::backend::sqlite_db::SqliteDb;
+use crate::db::Database;
 
 /// 回忆窗口默认半径（命中前后各 N 条）。
 pub const DEFAULT_WINDOW_RADIUS: i64 = 5;
@@ -55,7 +55,7 @@ pub struct RecallMessage {
 /// 会话回忆检索服务。
 #[derive(Clone)]
 pub struct SessionRecall {
-    db: SqliteDb,
+    db: Arc<Database>,
 }
 
 impl SessionRecall {
@@ -63,7 +63,7 @@ impl SessionRecall {
     ///
     /// # Errors
     /// * 返回 TianyanError（本方法当前不失败，签名保持与全库统一错误类型）。
-    pub fn new(db: SqliteDb) -> Result<Arc<Self>, TianyanError> {
+    pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
         Ok(Arc::new(Self { db }))
     }
 
@@ -253,8 +253,8 @@ mod tests {
 
     /// 建内存库：store（写数据）+ recall（查数据）共享同一 SqliteDb。
     async fn make_pair() -> (Arc<SessionStore>, Arc<SessionRecall>) {
-        let db = SqliteDb::open_in_memory().unwrap();
-        db.init_all_schemas().await.unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
         (
             SessionStore::new(db.clone()).unwrap(),
             SessionRecall::new(db).unwrap(),

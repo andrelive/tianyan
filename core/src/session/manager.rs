@@ -248,13 +248,13 @@ mod tests {
     use crate::common::types::{
         DetailedTokenUsage, InjectableContext, MessageRole, MessageTime, Part, PartTime,
     };
-    use crate::vfs::backend::sqlite_db::SqliteDb;
+    use crate::db::Database;
     use chrono::Utc;
 
     /// Helper：内存库 + 会话管理器。
     async fn make_manager() -> Arc<PersistentSessionManager> {
-        let db = SqliteDb::open_in_memory().unwrap();
-        db.init_all_schemas().await.unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
         let store = SessionStore::new(db).unwrap();
         Arc::new(PersistentSessionManager::new(store))
     }

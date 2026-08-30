@@ -13,7 +13,7 @@ use dashmap::DashMap;
 
 use crate::common::error::TianyanError;
 use crate::common::types::retrieval_trace::RetrievalTrace;
-use crate::vfs::backend::sqlite_db::SqliteDb;
+use crate::db::Database;
 
 #[derive(Default)]
 struct SkillCounter {
@@ -65,7 +65,7 @@ pub struct DocStats {
 pub struct UsageStats {
     skill_counters: DashMap<String, Arc<SkillCounter>>,
     doc_counters: DashMap<String, Arc<DocCounter>>,
-    db: SqliteDb,
+    db: Arc<Database>,
     pending_writes: AtomicU64,
 }
 
@@ -74,7 +74,7 @@ impl UsageStats {
     ///
     /// # Errors
     /// * 返回 `TianyanError`（本方法当前不失败，签名保持与全库统一错误类型）。
-    pub fn new(db: SqliteDb) -> Result<Arc<Self>, TianyanError> {
+    pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
         Ok(Arc::new(Self {
             skill_counters: DashMap::new(),
             doc_counters: DashMap::new(),
@@ -492,8 +492,8 @@ mod tests {
     use super::*;
 
     async fn setup() -> Arc<UsageStats> {
-        let db = SqliteDb::open_in_memory().unwrap();
-        db.init_all_schemas().await.unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
         UsageStats::new(db).unwrap()
     }
 
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn test_new_error_type_is_tianyan_error() {
         // 契约：UsageStats::new 的错误类型必须是 TianyanError（不再泄漏 rusqlite::Error）
-        let db = SqliteDb::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         let result: Result<Arc<UsageStats>, TianyanError> = UsageStats::new(db);
         assert!(result.is_ok());
     }
@@ -609,7 +609,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("tianyan_bad_db_{}", std::process::id()));
         std::fs::write(&tmp, b"x").unwrap();
         let bad_path = tmp.join("nested").join("tianyan.db");
-        let result = SqliteDb::open(bad_path);
+        let result = Database::open(bad_path);
         let _ = std::fs::remove_file(&tmp);
         assert!(result.is_err(), "坏数据库路径应打开失败");
     }
@@ -617,7 +617,7 @@ mod tests {
     #[tokio::test]
     async fn test_flush_error_maps_to_tianyan_error() {
         // 未初始化 schema 的数据库 → 刷盘失败，错误必须映射为 TianyanError::Custom
-        let db = SqliteDb::open_in_memory().unwrap(); // 故意不调用 init_all_schemas
+        let db = Database::open_in_memory().unwrap(); // 故意不调用 init_all_schemas
         let stats = UsageStats::new(db).unwrap();
         stats.record_skill_call("read_file", true, 100);
         let err = stats.flush().await.unwrap_err();

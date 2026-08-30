@@ -42,6 +42,8 @@ pub mod agent;
 pub mod common;
 pub mod config;
 pub mod context;
+/// 统一写入门面（Database Repository 层；单连接 + schema 集中）。
+pub mod db;
 /// 事件驱动触发（文件监听 + webhook → 事件总线 → 规则动作，T1 路线）。
 pub mod events;
 /// 执行器（独立执行函数 + Action）。

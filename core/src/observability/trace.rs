@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 
 use crate::common::error::TianyanError;
-use crate::vfs::backend::sqlite_db::SqliteDb;
+use crate::db::Database;
 
 /// span 类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,13 +81,13 @@ pub struct TraceCollector {
     /// session → 当前轮次索引（主循环轮边界由 AgentLoop 设置；
     /// 工具 span 归属当前轮；跨会话并发按键隔离）。
     current_turns: Mutex<HashMap<String, i64>>,
-    db: SqliteDb,
+    db: Arc<Database>,
     pending_writes: AtomicU64,
 }
 
 impl TraceCollector {
     /// 创建收集器（共享 SqliteDb；表结构由 `init_all_schemas` 统一创建）。
-    pub fn new(db: SqliteDb) -> Result<Arc<Self>, TianyanError> {
+    pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
         Ok(Arc::new(Self {
             buffer: Mutex::new(Vec::new()),
             current_turns: Mutex::new(HashMap::new()),
@@ -351,10 +351,10 @@ mod tests {
     use super::*;
 
     fn collector() -> Arc<TraceCollector> {
-        let db = SqliteDb::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            db.init_all_schemas().await.unwrap();
+            db.init_schemas().await.unwrap();
         });
         TraceCollector::new(db).unwrap()
     }

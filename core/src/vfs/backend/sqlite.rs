@@ -5,23 +5,26 @@
 
 use async_trait::async_trait;
 
+use std::sync::Arc;
+
+use crate::db::Database;
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{ContentLevel, EntryMetadata, TianyanUri};
 use crate::vfs::backend::StorageBackend;
 use crate::vfs::types::{ContextEntry, CURRENT_SCHEMA_VERSION};
 
-use super::sqlite_db::SqliteDb;
+
 
 /// 基于 SQLite 的 VFS 存储后端。
 #[derive(Clone)]
 pub struct SqliteBackend {
-    db: SqliteDb,
+    db: Arc<Database>,
 }
 
 impl SqliteBackend {
     /// 使用共享的 SqliteDb 创建后端。
     /// Schema 应已由 `SqliteDb::init_all_schemas()` 创建。
-    pub fn new(db: SqliteDb) -> Self {
+    pub fn new(db: Arc<Database>) -> Self {
         Self { db }
     }
 
@@ -303,11 +306,11 @@ impl StorageBackend for SqliteBackend {
 mod tests {
     use super::*;
     use crate::common::types::ContextNamespace;
-    use crate::vfs::backend::sqlite_db::SqliteDb;
+    use crate::db::Database;
 
     async fn setup() -> SqliteBackend {
-        let db = SqliteDb::open_in_memory().unwrap();
-        db.init_all_schemas().await.unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
         let backend = SqliteBackend::new(db);
         backend.ensure_schema().await.unwrap();
         backend

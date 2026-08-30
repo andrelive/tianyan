@@ -29,7 +29,7 @@ use tianyan::skills::{
     SkillRegistry,
 };
 use tianyan::snapshot::SnapshotManager;
-use tianyan::vfs::backend::sqlite_db::SqliteDb;
+use tianyan::db::Database;
 use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
 use tianyan::{Result as TianyanResult, TianyanError};
 
@@ -283,7 +283,7 @@ pub struct AppState {
     /// 目标存储（goals.json；长期目标 + 进度跟踪）。
     goal_store: Arc<GoalStore>,
     /// 全系统共享 SQLite（ADR-005；后台任务持久化/唤醒，ADR-013）
-    sqlite_db: SqliteDb,
+    sqlite_db: Arc<Database>,
     /// 事件总线（T1 事件驱动：文件监听/webhook → 处理器/唤醒）
     event_bus: Arc<tianyan::events::EventBus>,
     /// 服务关停标志（Ctrl+C / SIGTERM / 桌面端退出时置位）。
@@ -326,7 +326,7 @@ impl AppState {
     pub async fn new(
         config: TianyanConfig,
         vfs: Arc<VirtualFileSystemImpl>,
-        sqlite_db: SqliteDb,
+        database: Arc<Database>,
     ) -> TianyanResult<Self> {
         // 初始化技能注册表和执行器
         let mut skill_registry = SkillRegistry::new();
@@ -374,22 +374,22 @@ impl AppState {
         }
 
         // 初始化使用统计（复用全系统共享的 SqliteDb，ADR-005：单连接）
-        let usage_stats = UsageStats::new(sqlite_db.clone())?;
+        let usage_stats = UsageStats::new(database.clone())?;
 
         // 初始化结构化 Trace（G6：span 持久化与回放；失败仅告警）
-        let trace_collector = tianyan::observability::trace::TraceCollector::new(sqlite_db.clone())
+        let trace_collector = tianyan::observability::trace::TraceCollector::new(database.clone())
             .map_err(|e| TianyanError::Custom(format!("TraceCollector 初始化失败：{e}")))?;
 
         // 初始化执行记录日志（ADR-017 GEPA 数据层；共享 SqliteDb 连接）
-        let execution_log = ExecutionLog::new(sqlite_db.clone())?;
+        let execution_log = ExecutionLog::new(database.clone())?;
 
         // 初始化会话回忆服务（ADR-017 决策 6：FTS5 消息索引；共享 SqliteDb 连接）
-        let session_recall = SessionRecall::new(sqlite_db.clone())?;
+        let session_recall = SessionRecall::new(database.clone())?;
         // 初始化会话权威存储（ADR-018：SQLite 表为唯一真相，VFS 会话例外）
-        let session_store = tianyan::session::store::SessionStore::new(sqlite_db.clone())?;
+        let session_store = tianyan::session::store::SessionStore::new(database.clone())?;
 
         // 初始化 LLM 用量日志（token 统计；共享 SqliteDb 连接）
-        let usage_log = UsageLog::new(sqlite_db.clone())?;
+        let usage_log = UsageLog::new(database.clone())?;
 
         // 初始化工作区快照管理器（配置了 working_directory 时启用）
         let snapshot_manager = config.agent.working_directory.clone().map(|workdir| {
@@ -455,7 +455,7 @@ impl AppState {
                 registry: skill_registry.clone(),
             }),
             dynamic_tools,
-            Some(sqlite_db.clone()),
+            Some(database.clone()),
             crate::notification::global_notification_sink(),
             session_manager.clone(),
             Some(trace_collector.clone()),
@@ -493,7 +493,7 @@ impl AppState {
             scheduled_agent_tasks: Arc::new(RwLock::new(None)),
             todo_store: Arc::new(TodoStore::new(&data_dir)),
             goal_store: Arc::new(GoalStore::new(&data_dir)),
-            sqlite_db,
+            sqlite_db: database,
             event_bus: Arc::new(tianyan::events::EventBus::new()),
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             clipboard_outbox,

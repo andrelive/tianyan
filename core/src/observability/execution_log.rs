@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::common::error::TianyanError;
 use crate::observability::execution_history::ExecutionHistory;
-use crate::vfs::backend::sqlite_db::SqliteDb;
+use crate::db::Database;
 
 /// 任务描述截断上限（防参数膨胀入库）。
 const MAX_TASK_DESCRIPTION: usize = 500;
@@ -127,7 +127,7 @@ pub struct DelegationStat {
 /// 执行记录日志（GEPA 数据层）。
 #[derive(Clone)]
 pub struct ExecutionLog {
-    db: SqliteDb,
+    db: Arc<Database>,
 }
 
 impl ExecutionLog {
@@ -135,7 +135,7 @@ impl ExecutionLog {
     ///
     /// # Errors
     /// * 返回 TianyanError（本方法当前不失败，签名保持与全库统一错误类型）。
-    pub fn new(db: SqliteDb) -> Result<Arc<Self>, TianyanError> {
+    pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
         Ok(Arc::new(Self { db }))
     }
 
@@ -401,8 +401,8 @@ mod tests {
     use crate::observability::execution_history::{ExecutionHistory, ExecutionStep};
 
     async fn make_log() -> Arc<ExecutionLog> {
-        let db = SqliteDb::open_in_memory().unwrap();
-        db.init_all_schemas().await.unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
         ExecutionLog::new(db).unwrap()
     }
 

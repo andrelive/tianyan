@@ -592,7 +592,7 @@ impl ToolRegistry {
     }
 
     /// 设置后台任务 SQLite 持久化后端（ADR-013：任务实体化，重启可恢复）。
-    pub fn with_background_task_db(mut self, db: crate::vfs::backend::sqlite_db::SqliteDb) -> Self {
+    pub fn with_background_task_db(mut self, db: Arc<crate::db::Database>) -> Self {
         self.background_tasks = Arc::new((*self.background_tasks).clone().with_db(db));
         self
     }

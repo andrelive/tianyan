@@ -13,12 +13,12 @@ use std::sync::Arc;
 
 use crate::common::error::TianyanError;
 use crate::common::types::TokenUsage;
-use crate::vfs::backend::sqlite_db::SqliteDb;
+use crate::db::Database;
 
 /// LLM 用量日志（共享 SqliteDb 连接，与 VFS 同库）。
 #[derive(Clone)]
 pub struct UsageLog {
-    db: SqliteDb,
+    db: Arc<Database>,
 }
 
 /// 聚合统计结果（总计或按 provider/model 分组）。
@@ -42,7 +42,7 @@ pub struct UsageStat {
 
 impl UsageLog {
     /// 创建用量日志（共享 SqliteDb）。
-    pub fn new(db: SqliteDb) -> Result<Arc<Self>, TianyanError> {
+    pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
         Ok(Arc::new(Self { db }))
     }
 
@@ -258,8 +258,8 @@ mod tests {
     use super::*;
 
     async fn setup() -> Arc<UsageLog> {
-        let db = SqliteDb::open_in_memory().unwrap();
-        db.init_all_schemas().await.unwrap();
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
         UsageLog::new(db).unwrap()
     }
 
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn test_new_error_type_is_tianyan_error() {
-        let db = SqliteDb::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         let result: Result<Arc<UsageLog>, TianyanError> = UsageLog::new(db);
         assert!(result.is_ok());
     }
