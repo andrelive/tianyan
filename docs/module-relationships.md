@@ -57,15 +57,18 @@ core/src/
 ├── common/      (error, logging, token_estimator, types/ 子模块，含 content_part.rs)
 ├── config/      (TOML 配置；LoggingConfig 自 common::logging re-export)
 ├── context/     (pipeline, assembler, compression/, retrieval/)
+├── db/          (统一写入门面：Database 门面 + SqliteDb + stats/trace/execution/usage Repository；只依赖 common)
 ├── executor/    (工具执行：Action、审批、LLM-as-Judge、验证门控)
 ├── knowledge/   (parser, image/, ingestor/, types)
 ├── memory/      (extractor.rs)
 ├── model/       (traits, services.rs, provider/)
-├── observability/ (AgentMetrics, usage_stats.rs；SqliteDb 位于 vfs/backend/)
+├── observability/ (AgentMetrics, usage_stats/trace/execution_log/usage_log/rule_recorder；SQL 经 db 收敛)
+├── roles/       (角色基础类型：AgentRole/RoleSource/RoleStatus 等，纯类型层)
+├── role_store.rs (角色 VFS 存储，独立存储层)
 ├── scheduler/   (task_scheduler, tasks/)
-├── session/     (manager, types, mod.rs 截断常量)
+├── session/     (store/search 直接实现 SQL（ADR-018 专属），manager, types)
 ├── skills/      (definition, executor, manager, handlers/, learning/, registry, types)
-├── vfs/         (traits, vfs_impl, backend/ 含 sqlite_db.rs, vector/, summary/)
+├── vfs/         (traits, vfs_impl, backend/ 含 sqlite.rs；SqliteDb 已移入 db/)
 └── lib.rs
 ```
 
@@ -121,11 +124,15 @@ core/src/
 - `agent` → 协调者，聚合 context、model、session、vfs
 - `skills / scheduler` → 被 agent 调用，scheduler 独立运行后台任务
 
-**依赖环现状（Wave 6 重构后，详见 [ADR-007](architecture/decisions/007-core-dependency-cycle-removal.md)）**：
+**依赖环现状（阶段 1-3 分层重构后，详见 [ADR-007](architecture/decisions/007-core-dependency-cycle-removal.md) + [ADR-020](architecture/decisions/020-database-facade.md) + [ADR-021](architecture/decisions/021-layered-refactor.md)）**：
 
-- ✅ 已消除 3 个依赖环：`vfs→observability`（SqliteDb 下沉 `vfs::backend`）、`context↔observability`（RetrievalTrace 下沉 `common::types`）、`common↔config`（LoggingConfig 下沉 `common::logging`，config 单向 re-export）
-- ⬇️ 残留单向依赖（均非环，已接受）：`observability→vfs`（`usage_stats.rs` 引入 `vfs::backend::sqlite_db::SqliteDb`）、`observability→common`（`common::types::retrieval_trace::RetrievalTrace`）、`vfs→model`（`SummaryEngine` 摘要生成依赖 `ChatService`）
-- `common` 内部无 `use crate::config` / `use crate::context` / `use crate::observability`，为叶模块
+- ✅ **生产代码零模块环**（文件级 SCC 检测 = 0）：
+  - 基础类型层：`roles`（角色纯类型）、`common`（含 `RetrievalTrace`）——config/agent/scheduler 共用，不依赖领域
+  - 存储层：`db`（Database 门面 + SqliteDb + 业务域 Repository）——**只依赖 `common`**（纯底层）
+  - 领域层：`session`（SQL 收敛本模块，经 db 单连接）、`vfs`（SqliteBackend 经 db）、`observability`（SQL 经 db Repository）——单向依赖 db
+  - 顶层：`agent` / `scheduler`（工具化装配，依赖领域层 + 基础类型）
+- ⬇️ 残留单向依赖（均非环，已接受）：`vfs→model`（`SummaryEngine` 摘要生成依赖 `ChatService`）
+- ⚠️ cfg(test) 测试工具环（`context↔test_utils`、`test_utils↔vfs`）：`test_utils` 是 `#[cfg(test)]` 专用模块，环只存在于测试编译，发布编译无环（测试 mock 的天然模式）
 
 ---
 
@@ -262,7 +269,7 @@ React Frontend：增量按 chunk_type 渲染；历史/流式共用服务端 segm
     └─────────────────────┘  └──────────────┘  └───────────────────┘
 ```
 
-> **注**：`backend/sqlite_db.rs` 是 VFS 与 `observability/usage_stats.rs` 共享的 SQLite 连接（ADR-005 单连接语义，ADR-007 下沉决策）。`SummaryEngine` 经 `model::ChatService` 生成 L0/L1 摘要，是 vfs→model 的残留单向依赖（非环）。
+> **注**：`SqliteDb` 已移入 `db` 模块（`core/src/db/sqlite_db.rs`，`backend/sqlite_db.rs` 仅 re-export 兼容）——全系统唯一 SQLite 连接（ADR-005 单连接语义），经 `db::Database` 门面统一访问（ADR-020）。`SummaryEngine` 经 `model::ChatService` 生成 L0/L1 摘要，是 vfs→model 的残留单向依赖（非环）。
 
 ### 3.5 记忆持久化流程（定时任务）
 
@@ -461,7 +468,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 
 共享基础设施归属**被依赖方/叶模块**，消费方保留 re-export 保留下游兼容：
 
-- `SqliteDb` → `vfs/backend/sqlite_db.rs`（被 vfs 与 observability 共享的 SQLite 连接，归属存储层）
+- `SqliteDb` → `db/sqlite_db.rs`（ADR-020 统一写入门面：全系统唯一 SQLite 连接归属 `db` 层，vfs/observability 经 `db::Database` 门面访问；`vfs/backend/sqlite_db.rs` 保留 re-export 兼容）
 - `RetrievalTrace` 家族 → `common/types/retrieval_trace.rs`（纯数据契约；`context/retrieval/types.rs` re-export）
 - `LoggingConfig` → `common/logging.rs`（`config::LoggingConfig` re-export 仍可用）
 - `TokenEstimator`/`estimate_tokens` → `common/token_estimator.rs`（全系统唯一估算入口；`context::compression` re-export）
@@ -476,5 +483,5 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 
 ---
 
-**文档版本**: 2026-08-13
-**最后更新**: 2026-08-13（架构深化同步：死代码清理（skills/vfs/retriever/session 等 ~700 行）、去重提取（`common::llm_judge::parse_llm_json`、`common::binary::sniff_binary`、session_hint 助手、LSP 操作列表单一来源）、错误语义化（`TianyanError` 冲突/无效输入/权限/超时构造器与谓词，见 ADR-014）、组合根收敛（AppState 单一 SessionManager/TraceCollector 注入 Agent、core_bridge 内联删除、`SummaryService` trait 接口化））
+**文档版本**: 2026-08-30
+**最后更新**: 2026-08-30（分层重构同步：阶段 1 拆基础类型打破循环（roles/role_store/observability 类型层）、阶段 2 统一写入门面（db::Database + 业务域 Repository）、阶段 2b SQL 收敛（session/stats/trace/execution/usage）、阶段 3 打破 db 层依赖环（SqliteDb 移入 db、SessionRepo 归位 session、RetrievalTrace 引用 common）——生产代码零模块环；依赖清理（cargo-machete 移除 7 个未用依赖））

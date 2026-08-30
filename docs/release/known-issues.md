@@ -52,6 +52,6 @@
 ## 8. 数据目录搬迁后旧目录可能残留被锁文件
 
 - **现象**：迁移使用 copy 而非 rename（Windows 上 SQLite 文件可能被锁，无 FILE_SHARE_DELETE）。
-- **现状**：优雅关停时释放 agent 引用（打破循环引用链），SQLite 文件锁得以解除，旧目录通常完全清空。
+- **现状**：**循环引用已彻底修复**（分层重构，ADR-021）：handler 经 TaskResultSink 接口回写（Weak）、ScheduleTaskTool 经 channel 解耦、manager 经 TaskRegistrar 接口注册——依赖单向向下，**不再依赖优雅关停特殊处理**；迁移验证旧目录完全清空（Agent/SqliteDb 全部释放）。
 - **限制**：极端情况下（如外部进程占用）旧目录可能残留文件，需手动清理。
 - **影响**：低（迁移后新目录数据完整可用）。

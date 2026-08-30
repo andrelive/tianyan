@@ -25,18 +25,21 @@
 | `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 + 后台任务；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器/单调守卫/post-execute 监听器，DSH A1/A4 吸收）+ 内置可观测性监听器（`tool_registry/observability.rs`：统计/Trace/GEPA 历史/规则学习）；内置工具元数据单一事实源（`tool_registry/builtin_tools.rs`：schema/展示意图） | `coordinator.rs`, `loop.rs`, `loop_tests.rs`, `tool_registry/`（含 `pipeline.rs`、`observability.rs`、`builtin_tools.rs`）, `session_state.rs`, `builder.rs`, `background.rs` |
 | `common` | `core/src/common/` | 通用类型、错误处理、日志配置、token 估算、`StructuredMessage`、多模态片段（`ContentPart`/`ImageUrl`）；横切单点：UTF-8 截断（`truncate.rs`）、HTTP 客户端工厂（`http.rs`） | `error.rs`, `logging.rs`, `token_estimator.rs`, `truncate.rs`, `http.rs`, `types/`（含 `retrieval_trace.rs`、`content_part.rs`） |
 | `config` | `core/src/config/` | TOML 配置管理 + 环境变量 + 向导 | `mod.rs`, `wizard.rs`, `validation.rs` |
+| `db` | `core/src/db/` | **统一写入门面**（ADR-020）：`Database` 门面（单连接 + schema 集中）+ `SqliteDb`（ADR-005 连接）+ 业务域 Repository（stats/trace/execution/usage）；**只依赖 `common`**（纯底层，无领域依赖） | `mod.rs`, `sqlite_db.rs`, `stats.rs`, `trace.rs`, `execution.rs`, `usage.rs` |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 管线 + 组装） | `pipeline.rs`, `assembler.rs`, `retrieval/`, `compression/` |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、测试发现）+ Web 工具（搜索/抓取）；统一截断层含单行截断（`truncate.rs`：`truncate_line`/`MAX_LINE_CHARS`） | `actions.rs`, `security.rs`, `command.rs`, `output_parse.rs`, `approval/`, `verification.rs`, `judge.rs`, `truncate.rs`, `edit.rs`, `patch.rs`, `fs.rs`, `search.rs`, `symbols.rs`, `project.rs`, `test_discovery.rs`, `web.rs` |
 | `lsp` | `core/src/lsp/` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储） | `registry.rs`, `client.rs`, `diagnostics.rs` |
 | `knowledge` | `core/src/knowledge/` | 知识库导入（解析、图像、注入管道） | `ingestor/`, `parser.rs`, `image/` |
 | `memory` | `core/src/memory/` | 长期记忆提取 | `extractor.rs` |
 | `model` | `core/src/model/` | 模型服务容器（`ModelServices`）+ provider 实现 | `traits.rs`, `services.rs`, `provider/` |
-| `observability` | `core/src/observability/` | 可观测性 + 使用统计（`AgentMetrics`、`UsageStats`；SQLite 连接经 `vfs::backend::sqlite_db` 复用） | `mod.rs`, `usage_stats.rs` |
+| `observability` | `core/src/observability/` | 可观测性 + 使用统计（`AgentMetrics`、`UsageStats`、`TraceCollector`、`ExecutionLog`、`UsageLog`、`RuleRecorder`；SQL 经 `db` 门面/Repository 收敛，组件保留内存热路径） | `mod.rs`, `usage_stats.rs`, `trace.rs`, `execution_log.rs`, `usage_log.rs`, `rule_recorder.rs`, `execution_history.rs` |
+| `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层：`AgentRole`/`RoleSource`/`RoleStatus`/`RoleUsage`/`DelegationRecord`）——config/agent/scheduler 共用，不依赖领域模块 | `mod.rs` |
+| `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles；scheduler 演化任务与 agent 共用） | `role_store.rs` |
 | `scheduler` | `core/src/scheduler/` | 定时任务调度器 + 任务实现 | `task_scheduler.rs`, `tasks/` |
-| `session` | `core/src/session/` | 会话管理（⚠️ ADR-018 VFS 例外：`SessionStore` SQLite 权威存储，原子取号 + 失败上抛；`PersistentSessionManager` 业务语义；`SessionRecall` FTS 回忆；`session_meta` 存 SessionHeader/injectable 快照）；截断常量单点（`MAX_SESSION_MESSAGES`/`KEEP_RECENT_MESSAGES`） | `store.rs`, `manager.rs`, `search.rs`, `types.rs` |
+| `session` | `core/src/session/` | 会话管理（⚠️ ADR-018 VFS 例外：`SessionStore` SQLite 权威存储，原子取号 + 失败上抛；**SQL 收敛于本模块**（会话专属存储，经 `db::Database` 单连接直接实现）；`PersistentSessionManager` 业务语义；`SessionRecall` FTS 回忆；`session_meta` 存 SessionHeader/injectable 快照）；截断常量单点（`MAX_SESSION_MESSAGES`/`KEEP_RECENT_MESSAGES`） | `store.rs`, `manager.rs`, `search.rs`, `types.rs` |
 | `skills` | `core/src/skills/` | 技能定义、执行、学习（GEPA 进化引擎） | `definition.rs`, `executor.rs`, `manager.rs`, `handlers/`, `learning/` |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退，⚠️ ADR-006 VFS 例外）；重做子系统独立（`redo.rs`，与 capture/restore/diff/gc 正交） | `mod.rs`, `redo.rs` |
-| `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `backend/sqlite_db.rs`, `vector/lancedb/`, `summary/engine.rs` |
+| `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**）；`SqliteBackend` 经 `db::Database` 访问（SqliteDb 已移入 `db` 模块，`backend/sqlite_db.rs` 仅 re-export 兼容） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `vector/lancedb/`, `summary/engine.rs` |
 
 ---
 
@@ -111,3 +114,5 @@
 - [ADR-013: 统一消息通知与唤醒原语](decisions/013-unified-message-notification-wake.md) — 消息入库 + 唤醒语义
 - [ADR-014: 错误分类语义谓词](decisions/014-error-classification.md) — not_found/conflict/invalid_input 语义谓词
 - [ADR-015: 会话工作区绑定](decisions/015-session-workspace-binding.md) — 工作区是会话的父级分组
+- [ADR-020: 统一写入门面 Database](decisions/020-database-facade.md) — 单连接 + schema 集中 + 业务域 Repository；db 只依赖 common
+- [ADR-021: 分层重构与循环消除](decisions/021-layered-refactor.md) — 基础类型层/存储层/领域层单向依赖；生产代码零模块环

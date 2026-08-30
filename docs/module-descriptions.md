@@ -289,7 +289,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 
 ### 1.10 observability 子模块
 
-**职责**：Agent 的可观测性存储，记录执行指标并支持 Agent 自省查询。模块包含 2 个文件（mod.rs、usage_stats.rs）；SQLite 连接复用 `vfs/backend/sqlite_db.rs` 的 `SqliteDb`（ADR-005 单连接，ADR-007 下沉），`usage_stats.rs` 依赖 `common::types::retrieval_trace::RetrievalTrace` 持久化检索轨迹。
+**职责**：Agent 的可观测性存储，记录执行指标并支持 Agent 自省查询。模块包含 `AgentMetrics`（内存可观测性）、`UsageStats`（使用统计）、`TraceCollector`（执行 span）、`ExecutionLog`（GEPA 数据层）、`UsageLog`（LLM 用量）、`RuleRecorder`（规则学习）；**SQL 经 `db` 门面/Repository 收敛**（ADR-020：`db::stats`/`db::trace`/`db::execution`/`db::usage`），组件保留内存热路径计数（DashMap/缓冲），落盘与查询委托仓储。
 
 **核心类型**：
 
@@ -313,7 +313,10 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 |--------|---------|------|
 | `config` | `TianyanConfig`, `AgentConfig`, `ModelsConfig`, `ConfigStatus` | 全局配置管理，支持 TOML + env。查找顺序：`./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml` |
 | `common` | `TianyanError`, `Message`, `TianyanUri`, `Embedding`, `TokenUsage`, `StructuredMessage`, `ContentPart`, `ImageUrl`, `LoggingConfig`, `TokenEstimator` | 通用错误（禁止引入新错误类型）、URI、向量、消息（含多模态 `content_parts`，ADR-010）、记忆类型、日志配置、token 估算（叶模块，无 core 内部依赖）；横切单点：`truncate.rs`（UTF-8 边界截断唯一实现）、`http.rs`（reqwest 客户端工厂，超时/连接池/UA 策略一处定义） |
-| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager`, `SessionStore`, `SessionRecall` | 会话管理，⚠️ ADR-018 VFS 例外：`SessionStore`（SQLite 权威存储，`session_messages` 完整消息 + `session_meta` 会话级状态，单事务原子取号 `MAX(seq)+1`，失败上抛）；`PersistentSessionManager::load_session_from_store()` 用 `compression_marker` 截断；截断常量单点定义于 `session/mod.rs`（`MAX_SESSION_MESSAGES=5000` / `KEEP_RECENT_MESSAGES=4800`）；`session_meta.header_json` 承载注入上下文快照（ADR-012）+ 会话元数据（created_at/title/ended_at，重启恢复；`list_sessions` 轻量元数据 + message_count，无幽灵会话） |
+| `db` | `Database`, `SqliteDb`, `StatsRepo`, `TraceRepo`, `ExecutionRepo`, `UsageRepo` | **统一写入门面**（ADR-020）：`Database` 门面（单连接 + schema 集中 + lock/try_lock 统一访问）；`SqliteDb`（ADR-005 连接，自 `vfs/backend` 移入）；业务域 Repository 收敛 SQL；**只依赖 `common`**（纯底层） |
+| `roles` | `AgentRole`, `RoleSource`, `RoleStatus`, `RoleUsage`, `DelegationRecord` | 角色基础类型（ADR-016 纯类型层）：config/agent/scheduler 共用，不依赖领域模块——打破 `config↔agent`、`scheduler↔agent` 环 |
+| `role_store` | `RoleStore` | 角色 VFS 存储（独立存储层，依赖 vfs + roles）：保存/加载/删除角色，维护配置签名；scheduler 演化任务与 agent 共用（ADR-021 分层） |
+| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager`, `SessionStore`, `SessionRecall` | 会话管理，⚠️ ADR-018 VFS 例外：`SessionStore`（SQLite 权威存储，`session_messages` 完整消息 + `session_meta` 会话级状态，单事务原子取号 `MAX(seq)+1`，失败上抛；**SQL 收敛于本模块**——会话专属存储经 `db::Database` 单连接直接实现，不依赖 db 层通用仓储）；`PersistentSessionManager::load_session_from_store()` 用 `compression_marker` 截断；截断常量单点定义于 `session/mod.rs`（`MAX_SESSION_MESSAGES=5000` / `KEEP_RECENT_MESSAGES=4800`）；`session_meta.header_json` 承载注入上下文快照（ADR-012）+ 会话元数据（created_at/title/ended_at，重启恢复；`list_sessions` 轻量元数据 + message_count，无幽灵会话） |
 | `memory` | `MemoryExtractor`, `ExtractionConfig` | 从会话文本中提取结构化记忆的纯功能，与调度/持久化解耦 |
 | `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（已通过 `knowledge_ingest` 工具集成到 Agent 流程）。ingestor/ 拆分为 mod + builder；`image/` 拆分为 types/processor/analyzer |
 | `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `EvolutionTask`, `GcTask`, `SummaryTask`, `ReminderTask`, `SnapshotGcTask`, `UsageStatsFlushTask` | 定时任务调度框架 + 任务实现，位于 `scheduler/tasks/`（memory_task/rule_task/rule_suggester 已删除——ADR-017 后演化统一由 EvolutionTask 承担）；`TaskResult.error: Option<TianyanError>`（结构化错误）；GcTask 职责为规则归档 + 记忆 TTL 清理；UsageStatsFlushTask 定期把使用统计内存计数器刷入 SQLite（构造器注入，同 SnapshotGcTask 模式） |

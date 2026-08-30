@@ -107,16 +107,19 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 
 | 模块 | 位置 | 一句话 | ⛔ VFS 约束 |
 |------|------|--------|-------------|
-| `vfs` | `core/src/vfs/` | **基础机制**：统一存储检索层（L0/L1/L2 + RRF 融合） | — |
+| `db` | `core/src/db/` | **统一写入门面**（ADR-020）：Database 门面（单连接 + schema 集中）+ SqliteDb + 业务域 Repository（stats/trace/execution/usage）；只依赖 common | — |
+| `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层）：config/agent/scheduler 共用 | — |
+| `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles） | — |
+| `vfs` | `core/src/vfs/` | **基础机制**：统一存储检索层（L0/L1/L2 + RRF 融合）；SqliteBackend 经 db::Database 访问 | — |
 | `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry；工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，DSH 吸收）+ 内置可观测性监听器（统计/Trace/GEPA/规则学习） | 所有工具操作通过 VFS |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 组装） | 检索仅通过 `DualLayerRetriever` |
 | `knowledge` | `core/src/knowledge/` | 知识库导入管道 | ❌ **不建独立检索管道**，导入→VFS→SummaryEngine |
 | `memory` | `core/src/memory/` | `MemoryExtractor` 长期记忆提取 | ❌ **不建独立存储**，提取→VFS write |
 | `skills` | `core/src/skills/` | 技能定义 + 执行 + GEPA 进化引擎 | ❌ **不全量加载**，L0 发现→L2 按需 |
-| `session` | `core/src/session/` | `SessionStore`（SQLite 权威存储，ADR-018）+ `PersistentSessionManager` + `SessionRecall`（FTS 回忆） | ⚠️ 例外：会话内容不经 VFS（ADR-018）；`tianyan://session/{id}` 仅作逻辑标识 |
+| `session` | `core/src/session/` | `SessionStore`（SQLite 权威存储，ADR-018；SQL 收敛本模块，经 db 单连接）+ `PersistentSessionManager` + `SessionRecall`（FTS 回忆） | ⚠️ 例外：会话内容不经 VFS（ADR-018）；`tianyan://session/{id}` 仅作逻辑标识 |
 | `model` | `core/src/model/` | `ModelServices` 容器（不路由、不重试） | — |
 | `scheduler` | `core/src/scheduler/` | 定时任务（SummaryTask、EvolutionTask、GcTask、SnapshotGcTask、ReminderTask、UsageStatsFlushTask） | 定时任务产物写入 VFS |
-| `observability` | `core/src/observability/` | `AgentMetrics` 可观测性存储 | — |
+| `observability` | `core/src/observability/` | `AgentMetrics`/`UsageStats`/`TraceCollector`/`ExecutionLog`/`UsageLog`/`RuleRecorder`；SQL 经 db Repository 收敛 | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 语义化编辑（内容匹配 edit / patch）、文件浏览（fs/search）、代码智能（symbols/project/test_discovery） | — |
 | `lsp` | `core/src/lsp/` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储；lsp 工具：诊断/跳转/符号） | — |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | ⚠️ **ADR-006 例外**：独立文件存储于 `{data_dir}/snapshots/`，不经 VFS |
