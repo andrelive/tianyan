@@ -1,6 +1,10 @@
 import { test, expect } from '@playwright/test';
 import { assertE2eBackend } from './helpers';
 
+// planner 测试共享同一后端数据（todo/goal 列表），并行执行会互相干扰
+// （如两个测试同时点「标记完成」选中对方的条目）——串行执行保证稳定。
+test.describe.configure({ mode: 'serial' });
+
 /**
  * 0.2 新功能真实后端 E2E：
  * - 计划面板（待办清单 + 目标，含关联进度）

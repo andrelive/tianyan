@@ -22,7 +22,7 @@ use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 use crate::agent_builder::create_model_services;
 use crate::api::events::processor as event_processor;
 use crate::evolution_executor::AgentEvolutionExecutor;
-use crate::scheduled_tasks::manager::ScheduledAgentTaskManager;
+use crate::scheduled_tasks::manager::{ScheduledAgentTaskManager, SchedulerRegistrar};
 use crate::scheduled_tasks::tool::ScheduleTaskTool;
 
 // Import API module
@@ -538,11 +538,18 @@ async fn start_server_inner(
         // 定时智能体任务管理器（schedule_task 工具 + REST API + 后台循环）
         {
             let data_dir = state.config().read().await.storage.data_dir.clone();
+            // 分层（避免循环引用）：manager 经 TaskRegistrar 接口与调度器交互，
+            // 不直接持有 scheduler/task_ctx；注册器先创建、后 bind（装配顺序解耦）。
+            let registrar = Arc::new(SchedulerRegistrar::new());
             let manager = Arc::new(ScheduledAgentTaskManager::new(
                 state.agent_lock(),
                 state.session_manager(),
                 &data_dir,
+                registrar.clone(),
             ));
+            registrar
+                .bind(Some(scheduler.clone()), Some(task_ctx.clone()))
+                .await;
             state
                 .attach_scheduled_agent_tasks(Some(manager.clone()))
                 .await;
@@ -553,11 +560,7 @@ async fn start_server_inner(
                 .await
                 .register_dynamic_tools(vec![Arc::new(ScheduleTaskTool::new(manager.clone()))])
                 .await;
-            // 收敛到一套调度器：绑定 TaskScheduler + 恢复持久化任务（完整 cron 由
-            // 核心调度器承担，不再用独立循环）
-            manager
-                .bind_scheduler(Some(scheduler.clone()), Some(task_ctx.clone()))
-                .await;
+            // 恢复持久化任务（注册经 registrar 接口进调度器）
             manager.load_and_register().await;
         }
 

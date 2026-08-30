@@ -27,14 +27,21 @@ pub struct ScheduleTaskArgs {
 }
 
 /// 定时任务动态工具（ADR-003 组件工具化：server 层适配 core 动态工具 trait）。
+///
+/// 持 manager 的 [std::sync::Weak]：agent（→ ToolRegistry → ScheduleTaskTool）→ manager
+/// → registrar → scheduler → handler → agent_lock → agent 构成功能环，强引用会阻止
+/// AppState drop 时组件释放（SQLite 文件锁无法解除）；工具调用发生在 agent 运行期间
+/// （manager 必然存活，upgrade 成功），Weak 不损失功能。
 pub struct ScheduleTaskTool {
-    manager: Arc<ScheduledAgentTaskManager>,
+    manager: std::sync::Weak<ScheduledAgentTaskManager>,
 }
 
 impl ScheduleTaskTool {
-    /// 绑定到定时任务管理器。
+    /// 绑定到定时任务管理器（Weak——agent ↔ manager ↔ scheduler ↔ handler 功能环）。
     pub fn new(manager: Arc<ScheduledAgentTaskManager>) -> Self {
-        Self { manager }
+        Self {
+            manager: Arc::downgrade(&manager),
+        }
     }
 }
 
@@ -80,7 +87,13 @@ impl DynamicToolExecutor for ScheduleTaskTool {
             workspace: args.workspace,
             prompt: args.prompt,
         };
-        let task = self.manager.create(&req).await;
+        // Weak upgrade：manager 已销毁（应用关停中）时工具调用失败可接受
+        let Some(manager) = self.manager.upgrade() else {
+            return Err(TianyanError::Custom(
+                "tool: schedule_task 定时任务管理器不可用".to_string(),
+            ));
+        };
+        let task = manager.create(&req).await;
         Ok(serde_json::json!({
             "status": "created",
             "id": task.id,

@@ -10,5 +10,5 @@ pub mod routes;
 pub mod tool;
 pub mod types;
 
-pub use manager::ScheduledAgentTaskManager;
+pub use manager::{ResultSinkBridge, ScheduledAgentTaskManager, SchedulerRegistrar, TaskRegistrar, TaskResultSink};
 pub use types::ScheduledAgentTask;

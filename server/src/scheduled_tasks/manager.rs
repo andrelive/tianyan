@@ -1,7 +1,16 @@
 //! 定时智能体任务管理器。
 //!
 //! 任务定义持久化到 JSON；实际调度由核心 TaskScheduler 承担（完整 cron）——
-//! 本管理器只负责：任务注册/注销进调度器、持久化、结果回写与列表展示。
+//! 本管理器只负责：任务注册/注销、持久化、结果回写与列表展示。
+//!
+//! # 分层（避免循环引用）
+//!
+//! 依赖方向**单向向下**（manager 顶层 → registrar 中层 → handler 底层）：
+//! - `ScheduledAgentTaskManager`（顶层：任务定义 + 持久化 + API）**不持有**
+//!   scheduler/task_ctx——经 [`TaskRegistrar`] 接口注册（装配层注入实现）；
+//! - `ScheduledAgentTaskHandler`（底层：执行器）**不依赖** manager 具体类型——
+//!   经 [`TaskResultSink`] 接口回写结果（[`ResultSinkBridge`] 实持 [Weak] 打破
+//!   循环：manager → registrar → scheduler → handler → (Weak) manager）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +25,130 @@ use tokio::sync::RwLock;
 
 use crate::scheduled_tasks::types::{CreateScheduledTaskRequest, ScheduledAgentTask};
 
+/* ───────── 分层接口：结果回写（handler → manager，经接口 + Weak） ───────── */
+
+/// 结果回写接口：handler 执行完任务后回写结果，**只依赖此接口**，
+/// 不依赖 manager 具体类型——底层不反向依赖顶层（分层）。
+#[async_trait::async_trait]
+pub trait TaskResultSink: Send + Sync {
+    /// 记录一次执行结果（更新 last_run_at / last_result / next_run_at）。
+    async fn record_result(&self, task_id: &str, result: &str);
+}
+
+/// 结果回写桥：handler → 接口 → [Weak]<manager>。
+///
+/// [Weak] 不增加强引用计数：manager drop 后 `upgrade()` 返回 None（应用关停中
+/// 结果丢失可接受），因此 manager → registrar → scheduler → handler → manager
+/// 不构成循环引用。
+pub struct ResultSinkBridge {
+    manager: std::sync::Weak<ScheduledAgentTaskManager>,
+}
+
+impl ResultSinkBridge {
+    /// 创建桥（持有 manager 的 Weak 引用）。
+    pub fn new(manager: &Arc<ScheduledAgentTaskManager>) -> Self {
+        Self {
+            manager: Arc::downgrade(manager),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TaskResultSink for ResultSinkBridge {
+    async fn record_result(&self, task_id: &str, result: &str) {
+        if let Some(manager) = self.manager.upgrade() {
+            manager.record_result(task_id, result).await;
+        }
+    }
+}
+
+/* ───────── 分层接口：任务注册（manager → scheduler，经接口） ───────── */
+
+/// 任务注册接口：manager 经此把任务注册进调度器，**不持有** scheduler/task_ctx。
+///
+/// 装配层实现 [`SchedulerRegistrar`] 并注入，依赖方向：manager → 接口 →调度器。
+#[async_trait::async_trait]
+pub trait TaskRegistrar: Send + Sync {
+    /// 注册任务到调度器（handler 已构建；注册即起 cron 循环）。
+    async fn register(
+        &self,
+        task: &ScheduledAgentTask,
+        handler: Arc<dyn TaskHandler>,
+    ) -> Result<(), String>;
+    /// 从调度器注销任务（任务不存在时幂等）。
+    async fn unregister(&self, task_id: &str);
+}
+
+/// 调度器注册器：装配层实现的 [`TaskRegistrar`]。
+///
+/// 持有 scheduler/task_ctx 的共享句柄（与 AppState 装配顺序解耦：
+/// 注册器先创建、后 bind，manager 无需感知调度器存在与否）。
+pub struct SchedulerRegistrar {
+    scheduler: Arc<RwLock<Option<Arc<TaskScheduler>>>>,
+    task_ctx: Arc<RwLock<Option<Arc<TaskContext>>>>,
+}
+
+impl Default for SchedulerRegistrar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SchedulerRegistrar {
+    /// 创建注册器（scheduler/task_ctx 初始 None，装配后 bind）。
+    pub fn new() -> Self {
+        Self {
+            scheduler: Arc::new(RwLock::new(None)),
+            task_ctx: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// 绑定调度器与任务上下文（start_server 创建 scheduler 后调用；
+    /// 无 Provider 时为 None，注册静默跳过）。
+    pub async fn bind(
+        &self,
+        scheduler: Option<Arc<TaskScheduler>>,
+        task_ctx: Option<Arc<TaskContext>>,
+    ) {
+        *self.scheduler.write().await = scheduler;
+        *self.task_ctx.write().await = task_ctx;
+    }
+}
+
+#[async_trait::async_trait]
+impl TaskRegistrar for SchedulerRegistrar {
+    async fn register(
+        &self,
+        task: &ScheduledAgentTask,
+        handler: Arc<dyn TaskHandler>,
+    ) -> Result<(), String> {
+        let Some(sched) = self.scheduler.read().await.clone() else {
+            return Ok(()); // 调度器未装配（无 Provider）：静默跳过
+        };
+        let Some(ctx) = self.task_ctx.read().await.clone() else {
+            return Ok(());
+        };
+        let definition = TaskDefinition::new(
+            task.id.clone(),
+            task.name.clone(),
+            task.cron.clone(),
+            handler,
+        );
+        sched
+            .register_dynamic_task(definition, ctx)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn unregister(&self, task_id: &str) {
+        if let Some(sched) = self.scheduler.read().await.clone() {
+            sched.unregister_task(task_id).await;
+        }
+    }
+}
+
+/* ───────── 底层：执行器（handler，只依赖接口，不依赖 manager） ───────── */
+
 /// 定时智能体任务处理器：到点由 TaskScheduler 调用，在绑定工作区执行 prompt。
 pub struct ScheduledAgentTaskHandler {
     agent_lock: Arc<RwLock<Arc<dyn AgentCoordinator>>>,
@@ -23,9 +156,8 @@ pub struct ScheduledAgentTaskHandler {
     task_id: String,
     workspace: String,
     prompt: String,
-    /// 结果回写目标（Weak：打破 manager → scheduler → handler → manager
-    /// 循环引用——handler 执行完回写结果，但不应强持有 manager 阻止其释放）。
-    manager: std::sync::Weak<ScheduledAgentTaskManager>,
+    /// 结果回写接口（不依赖 manager 具体类型——分层；桥实持 Weak 打破循环）。
+    result_sink: Arc<dyn TaskResultSink>,
 }
 
 impl ScheduledAgentTaskHandler {
@@ -35,7 +167,7 @@ impl ScheduledAgentTaskHandler {
         task_id: String,
         workspace: String,
         prompt: String,
-        manager: Arc<ScheduledAgentTaskManager>,
+        result_sink: Arc<dyn TaskResultSink>,
     ) -> Self {
         Self {
             agent_lock,
@@ -43,7 +175,7 @@ impl ScheduledAgentTaskHandler {
             task_id,
             workspace,
             prompt,
-            manager: Arc::downgrade(&manager),
+            result_sink,
         }
     }
 
@@ -101,10 +233,8 @@ impl TaskHandler for ScheduledAgentTaskHandler {
     async fn execute(&self, _ctx: &TaskContext) -> TaskResult {
         let result = self.run_agent().await;
         let text = result.clone().unwrap_or_else(|| "(无结果)".to_string());
-        // Weak upgrade：manager 已销毁（应用关停中）时跳过回写，结果丢失可接受
-        if let Some(manager) = self.manager.upgrade() {
-            manager.record_result(&self.task_id, &text).await;
-        }
+        // 结果经接口回写（manager 已销毁时 upgrade 失败跳过——应用关停中）
+        self.result_sink.record_result(&self.task_id, &text).await;
         if result.is_some() {
             TaskResult::success(1)
         } else {
@@ -117,14 +247,16 @@ impl TaskHandler for ScheduledAgentTaskHandler {
     }
 }
 
+/* ───────── 顶层：任务管理器（经接口注册，不持有 scheduler/handler 依赖） ───────── */
+
 /// 定时智能体任务管理器：持久化 + 注册进 TaskScheduler + 列表/结果。
 pub struct ScheduledAgentTaskManager {
     agent_lock: Arc<RwLock<Arc<dyn AgentCoordinator>>>,
     session_manager: Arc<dyn SessionManager>,
     file_path: PathBuf,
     tasks: Arc<RwLock<HashMap<String, ScheduledAgentTask>>>,
-    scheduler: Arc<RwLock<Option<Arc<TaskScheduler>>>>,
-    task_ctx: Arc<RwLock<Option<Arc<TaskContext>>>>,
+    /// 任务注册接口（装配层注入；不持有 scheduler——分层）。
+    registrar: Arc<dyn TaskRegistrar>,
 }
 
 impl ScheduledAgentTaskManager {
@@ -133,25 +265,15 @@ impl ScheduledAgentTaskManager {
         agent_lock: Arc<RwLock<Arc<dyn AgentCoordinator>>>,
         session_manager: Arc<dyn SessionManager>,
         data_dir: &Path,
+        registrar: Arc<dyn TaskRegistrar>,
     ) -> Self {
         Self {
             agent_lock,
             session_manager,
             file_path: data_dir.join("scheduled_agent_tasks.json"),
             tasks: Arc::new(RwLock::new(HashMap::new())),
-            scheduler: Arc::new(RwLock::new(None)),
-            task_ctx: Arc::new(RwLock::new(None)),
+            registrar,
         }
-    }
-
-    /// 绑定调度器与任务上下文（start_server 创建后调用；无 Provider 时为 None）。
-    pub async fn bind_scheduler(
-        &self,
-        scheduler: Option<Arc<TaskScheduler>>,
-        task_ctx: Option<Arc<TaskContext>>,
-    ) {
-        *self.scheduler.write().await = scheduler;
-        *self.task_ctx.write().await = task_ctx;
     }
 
     /// 从磁盘加载任务定义。
@@ -217,7 +339,7 @@ impl ScheduledAgentTaskManager {
             name = %task.name,
             cron = %task.cron,
             workspace = %task.workspace,
-            "已创建定时智能体任务"
+            "已创建定时智能体任务",
         );
         task
     }
@@ -240,7 +362,7 @@ impl ScheduledAgentTaskManager {
         v
     }
 
-    /// 记录一次执行结果（handler 调用；更新 last_run_at / last_result / next_run_at）。
+    /// 记录一次执行结果（handler 经接口回写；更新 last_run_at / last_result / next_run_at）。
     pub async fn record_result(&self, id: &str, result: &str) {
         let now = chrono::Utc::now().timestamp();
         {
@@ -254,37 +376,28 @@ impl ScheduledAgentTaskManager {
         self.save().await;
     }
 
-    /// 将单个任务注册进调度器（构建 handler，注册即起 cron 循环）。
+    /// 结果回写接口（handler 用；桥实持 Weak 打破循环）。
+    fn result_sink(self: &Arc<Self>) -> Arc<dyn TaskResultSink> {
+        Arc::new(ResultSinkBridge::new(self))
+    }
+
+    /// 将单个任务注册进调度器（构建 handler，经 registrar 接口注册）。
     async fn register(self: &Arc<Self>, task: &ScheduledAgentTask) {
-        let Some(sched) = self.scheduler.read().await.clone() else {
-            return;
-        };
-        let Some(ctx) = self.task_ctx.read().await.clone() else {
-            return;
-        };
         let handler = Arc::new(ScheduledAgentTaskHandler::new(
             self.agent_lock.clone(),
             self.session_manager.clone(),
             task.id.clone(),
             task.workspace.clone(),
             task.prompt.clone(),
-            self.clone(),
+            self.result_sink(),
         ));
-        let definition = TaskDefinition::new(
-            task.id.clone(),
-            task.name.clone(),
-            task.cron.clone(),
-            handler,
-        );
-        if let Err(e) = sched.register_dynamic_task(definition, ctx).await {
+        if let Err(e) = self.registrar.register(task, handler).await {
             tracing::warn!(error = %e, task = %task.id, "定时智能体任务注册失败");
         }
     }
 
-    /// 从调度器注销任务。
+    /// 从调度器注销任务（经 registrar 接口）。
     async fn unregister(&self, id: &str) {
-        if let Some(sched) = self.scheduler.read().await.clone() {
-            sched.unregister_task(id).await;
-        }
+        self.registrar.unregister(id).await;
     }
 }

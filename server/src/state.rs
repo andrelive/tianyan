@@ -860,15 +860,6 @@ impl AppState {
         if let Err(e) = self.usage_stats.shutdown().await {
             tracing::warn!(error = %e, "使用统计刷盘失败");
         }
-        // 释放 agent 引用：替换为向导 agent（零大小，不持有组件），
-        // 打破 agent → ToolRegistry → ScheduleTaskTool → manager → scheduler
-        // → UsageStatsFlushTask → UsageStats → SqliteDb 的引用链。否则
-        // AppState drop 时这些组件永不释放，SQLite 文件锁无法解除——
-        // 数据目录搬迁依赖关停后文件可移动。
-        {
-            let wizard: Arc<dyn AgentCoordinator> = Arc::new(crate::agent_builder::WizardModeAgent);
-            *self.agent.write().await = wizard;
-        }
         // 显式清理定时任务管理器与调度器引用（打破 manager ↔ scheduler 循环）
         *self.scheduled_agent_tasks.write().await = None;
         *self.scheduler.write().await = None;
