@@ -23,7 +23,7 @@ use crate::agent_builder::create_model_services;
 use crate::api::events::processor as event_processor;
 use crate::evolution_executor::AgentEvolutionExecutor;
 use crate::scheduled_tasks::manager::{ScheduledAgentTaskManager, SchedulerRegistrar};
-use crate::scheduled_tasks::tool::ScheduleTaskTool;
+use crate::scheduled_tasks::tool::{CreateTaskRequest, ScheduleTaskTool};
 
 // Import API module
 pub mod agent_builder;
@@ -553,12 +553,27 @@ async fn start_server_inner(
             state
                 .attach_scheduled_agent_tasks(Some(manager.clone()))
                 .await;
-            // 注入 schedule_task 动态工具（agent 构建后追加，LLM 可见可调用）
+            // 注入 schedule_task 动态工具（agent 构建后追加，LLM 可见可调用）。
+            // 解耦：工具只持创建请求通道（不依赖 manager 类型）；装配层在此创建
+            // 消费者（持 manager 的 Weak）监听通道处理请求。通道生命周期随工具
+            // 自动结束（agent drop → 工具 drop → sender drop → 通道关闭 → 消费者退出）。
+            let (create_task_tx, mut create_task_rx) =
+                tokio::sync::mpsc::channel::<CreateTaskRequest>(32);
+            let manager_weak = Arc::downgrade(&manager);
+            tokio::spawn(async move {
+                while let Some(request) = create_task_rx.recv().await {
+                    let result = match manager_weak.upgrade() {
+                        Some(m) => Ok(m.create(&request.req).await),
+                        None => Err("定时任务管理器不可用".to_string()),
+                    };
+                    let _ = request.resp_tx.send(result);
+                }
+            });
             state
                 .agent_lock()
                 .read()
                 .await
-                .register_dynamic_tools(vec![Arc::new(ScheduleTaskTool::new(manager.clone()))])
+                .register_dynamic_tools(vec![Arc::new(ScheduleTaskTool::new(create_task_tx))])
                 .await;
             // 恢复持久化任务（注册经 registrar 接口进调度器）
             manager.load_and_register().await;
