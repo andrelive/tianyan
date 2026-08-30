@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 
 use crate::common::error::TianyanError;
+use crate::db::trace::{TraceRepo, TraceSpan};
 use crate::db::Database;
 
 /// span 类型。
@@ -41,34 +42,6 @@ impl SpanKind {
     }
 }
 
-/// 一条执行 span（可持久化）。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TraceSpan {
-    /// 自增 ID（回放排序键）。
-    pub id: i64,
-    /// 归属会话。
-    pub session_id: String,
-    /// 后台任务 ID（task 类型必填；turn/tool 为 None）。
-    pub task_id: Option<String>,
-    /// 主循环轮次（turn/tool 使用；后台任务为 None）。
-    pub turn_index: Option<i64>,
-    /// span 类型（turn | tool | task）。
-    pub kind: String,
-    /// 名称（turn=模型名 / tool=工具名 / task=任务描述）。
-    pub name: String,
-    /// 详情（tool=参数摘要 / task=结果摘要；turn 为空）。
-    pub detail: String,
-    /// 耗时（毫秒）。
-    pub duration_ms: i64,
-    /// token 消耗（turn 使用；tool/task 为 0）。
-    pub tokens: i64,
-    /// 是否成功。
-    pub success: bool,
-    /// 错误信息（失败时）。
-    pub error: Option<String>,
-    /// 记录时间（RFC3339）。
-    pub recorded_at: String,
-}
 
 /// 内存缓冲上限（超过后丢弃最旧，等待 flush 落库）。
 const MAX_BUFFER: usize = 5000;
@@ -81,7 +54,9 @@ pub struct TraceCollector {
     /// session → 当前轮次索引（主循环轮边界由 AgentLoop 设置；
     /// 工具 span 归属当前轮；跨会话并发按键隔离）。
     current_turns: Mutex<HashMap<String, i64>>,
+    /// Trace 域仓储（SQL 收敛：落盘/查询经此，组件保留内存缓冲）。
     db: Arc<Database>,
+    repo: TraceRepo,
     pending_writes: AtomicU64,
 }
 
@@ -90,6 +65,7 @@ impl TraceCollector {
     pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
         Ok(Arc::new(Self {
             buffer: Mutex::new(Vec::new()),
+            repo: TraceRepo::new(db.clone()),
             current_turns: Mutex::new(HashMap::new()),
             db,
             pending_writes: AtomicU64::new(0),
@@ -233,55 +209,12 @@ impl TraceCollector {
         if spans.is_empty() {
             return Ok(());
         }
-
-        let conn = self.db.lock().await;
-        let result = conn.execute("BEGIN", []);
-        let _ = result;
-        for span in &spans {
-            let res = conn.execute(
-                "INSERT INTO trace_spans
-                    (session_id, task_id, turn_index, kind, name, detail,
-                     duration_ms, tokens, success, error, recorded_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                rusqlite::params![
-                    span.session_id,
-                    span.task_id,
-                    span.turn_index,
-                    span.kind,
-                    span.name,
-                    span.detail,
-                    span.duration_ms,
-                    span.tokens,
-                    span.success as i32,
-                    span.error,
-                    span.recorded_at,
-                ],
-            );
-            if let Err(e) = res {
-                tracing::warn!(error = %e, "trace_spans 写入失败");
-                let _ = conn.execute("ROLLBACK", []);
-                return Err(TianyanError::Custom(format!("trace: 写入失败：{e}")));
-            }
-        }
-        // 清理窗口：保留全局最近 KEEP_RECORDS 条
-        if let Err(e) = conn.execute(
-            "DELETE FROM trace_spans WHERE id NOT IN (
-                SELECT id FROM trace_spans ORDER BY id DESC LIMIT ?1
-            )",
-            [KEEP_RECORDS],
-        ) {
-            tracing::warn!(error = %e, "trace_spans 清理失败");
-        }
-        if let Err(e) = conn.execute("COMMIT", []) {
-            tracing::warn!(error = %e, "trace_spans 提交失败");
-        }
+        // 落盘经 TraceRepo（SQL 收敛于 db 层）
+        self.repo.flush_spans(&spans).await?;
         self.pending_writes.store(0, Ordering::Relaxed);
         Ok(())
     }
 
-    /// 回放查询（按 session / task 过滤，时间正序）。
-    ///
-    /// 查询前自动 flush，保证缓冲中的最近记录可见。
     pub async fn query(
         &self,
         session_id: Option<&str>,
@@ -289,40 +222,9 @@ impl TraceCollector {
         limit: usize,
     ) -> Result<Vec<TraceSpan>, TianyanError> {
         self.flush().await?;
-
-        let conn = self.db.lock().await;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, session_id, task_id, turn_index, kind, name, detail,
-                        duration_ms, tokens, success, error, recorded_at
-                 FROM trace_spans
-                 WHERE (?1 IS NULL OR session_id = ?1)
-                 ORDER BY id DESC LIMIT ?2",
-            )
-            .map_err(|e| TianyanError::Custom(format!("trace: 查询失败：{e}")))?;
-
-        let mut rows = stmt
-            .query_map(rusqlite::params![session_id, limit as i64], row_to_span)
-            .map_err(|e| TianyanError::Custom(format!("trace: 查询失败：{e}")))?;
-
-        let mut spans: Vec<TraceSpan> = Vec::new();
-        for row in rows.by_ref() {
-            match row {
-                Ok(span) => spans.push(span),
-                Err(e) => tracing::warn!(error = %e, "trace_spans 行解析失败"),
-            }
-        }
-        // 时间正序（回放顺序）
-        spans.reverse();
-
-        // 按 task_id 二次过滤（session + task 组合查询）
-        if let Some(tid) = task_id {
-            spans.retain(|s| s.task_id.as_deref() == Some(tid));
-        }
-        Ok(spans)
+        self.repo.query(session_id, task_id, limit).await
     }
 
-    /// 待写入缓冲条数（观测用）。
     pub fn pending_count(&self) -> u64 {
         self.pending_writes.load(Ordering::Relaxed)
     }

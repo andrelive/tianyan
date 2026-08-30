@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 pub mod session;
 pub mod stats;
+pub mod trace;
 
 use crate::common::error::{Result, TianyanError};
 use crate::vfs::backend::sqlite_db::SqliteDb;
