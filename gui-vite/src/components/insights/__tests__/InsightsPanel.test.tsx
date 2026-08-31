@@ -33,17 +33,15 @@ describe('InsightsPanel', () => {
     await waitFor(() => {
       expect(screen.getByText('摘要生成')).toBeInTheDocument();
     });
-    expect(screen.getByText('记忆提取')).toBeInTheDocument();
     expect(screen.getByText('垃圾回收')).toBeInTheDocument();
 
-    // 任务 ID + 优先级 badge + cron 表达式 + 累计执行次数
+    // 任务 ID + 优先级 badge + 间隔展示 + 累计执行次数（ADR-024 间隔制）
     expect(screen.getByText('summary_generation')).toBeInTheDocument();
     expect(screen.getAllByText('Medium').length).toBeGreaterThan(0);
     expect(screen.getByText('Low')).toBeInTheDocument();
-    expect(screen.getByText('0 */5 * * * *')).toBeInTheDocument();
-    expect(screen.getByText('0 */10 * * * *')).toBeInTheDocument();
+    expect(screen.getAllByText('每 6 小时').length).toBe(2);
     expect(screen.getByText('12 次')).toBeInTheDocument();
-    expect(screen.getByText('6 次')).toBeInTheDocument();
+    expect(screen.getByText('2 次')).toBeInTheDocument();
 
     // 运行中徽标
     expect(screen.getByText('运行中')).toBeInTheDocument();
@@ -70,6 +68,45 @@ describe('InsightsPanel', () => {
   });
 
   it('shows 从未执行 for tasks that never ran, and formatted elapsed time otherwise', async () => {
+    // 覆盖：包含一个从未执行（last_run_ago_secs = null）的任务
+    const { http, HttpResponse } = await import('msw');
+    const { server } = await import('@/test/mocks/server');
+    server.use(
+      http.get('/api/v1/scheduler/status', () => {
+        return HttpResponse.json({
+          running: true,
+          tasks: [
+            {
+              id: 'evolution',
+              name: '自演化综述',
+              priority: 'High',
+              interval_secs: 86400,
+              run_count: 0,
+              last_run_ago_secs: null,
+              next_due_in_secs: 0,
+            },
+            {
+              id: 'summary_generation',
+              name: '摘要生成',
+              priority: 'Medium',
+              interval_secs: 21600,
+              run_count: 12,
+              last_run_ago_secs: 183,
+              next_due_in_secs: 21417,
+            },
+            {
+              id: 'garbage_collection',
+              name: '垃圾回收',
+              priority: 'Low',
+              interval_secs: 21600,
+              run_count: 2,
+              last_run_ago_secs: 3600,
+              next_due_in_secs: 18000,
+            },
+          ],
+        });
+      }),
+    );
     renderInsightsPanel();
 
     // last_run_ago_secs = null → 从未执行

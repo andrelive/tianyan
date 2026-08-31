@@ -385,14 +385,18 @@ async fn start_server_inner(
     let has_providers = tianyan_config.models.providers.iter().any(|p| p.enabled);
     let (app, state) = create_app(tianyan_config).await?;
     let task_scheduler: Option<Arc<TaskScheduler>> = if has_providers {
-        let scheduler = Arc::new(TaskScheduler::new());
+        // last_run 持久化（ADR-024）：宕机错过的事件任务重启后自动补跑
+        let app_config = Arc::new(state.config().read().await.clone());
+        let scheduler = Arc::new(
+            TaskScheduler::new()
+                .with_state_path(app_config.storage.data_dir.join("scheduler_state.json")),
+        );
 
         // 创建任务上下文
         let vfs = state.vfs();
         let summary_engine = state.create_summary_engine().await?;
         let memory_extractor = state.create_memory_extractor().await?;
         let skill_reviewer = state.create_skill_reviewer().await?;
-        let app_config = Arc::new(state.config().read().await.clone());
 
         let task_ctx = Arc::new(TaskContext::new(
             vfs.clone(),
@@ -408,7 +412,7 @@ async fn start_server_inner(
             .register_task(TaskDefinition::new(
                 "summary_generation",
                 "摘要生成",
-                "0 0 */6 * * *",
+                6 * 3600,
                 Arc::new(SummaryTask::new()),
             ))
             .await?;
@@ -424,11 +428,25 @@ async fn start_server_inner(
                     state::resolve_chat_model(&cfg),
                     cfg.evolution.review_role.clone(),
                 ));
+                // 旧 cron 配置自动换算为间隔（ADR-024 迁移）；换算不了回退每日一次
+                let evolution_interval = match tianyan::scheduler::interval_from_cron(
+                    &cfg.evolution.cron,
+                ) {
+                    Some(secs) => secs,
+                    None => {
+                        tracing::warn!(
+                            old = %cfg.evolution.cron,
+                            fallback_secs = 24 * 3600,
+                            "evolution.cron 无法换算为间隔（ADR-024 已弃用 cron），回退每日一次；可从配置中删除该字段"
+                        );
+                        24 * 3600
+                    }
+                };
                 scheduler
                     .register_task(TaskDefinition::new(
                         "evolution",
                         "自演化综述",
-                        cfg.evolution.cron.clone(),
+                        evolution_interval,
                         Arc::new(EvolutionTask::new(
                             executor,
                             cfg.evolution.max_items_per_run,
@@ -439,12 +457,11 @@ async fn start_server_inner(
         }
 
         // 注册垃圾回收任务（每 6 小时；auto_cleanup 来自存储配置）
-        // 注册垃圾回收任务（每 6 小时；auto_cleanup 来自存储配置）
         scheduler
             .register_task(TaskDefinition::new(
                 "garbage_collection",
                 "垃圾回收",
-                "0 0 */6 * * *",
+                6 * 3600,
                 Arc::new(GcTask::new(&app_config.storage)),
             ))
             .await?;
@@ -455,7 +472,7 @@ async fn start_server_inner(
             .register_task(TaskDefinition::new(
                 "usage_stats_flush",
                 "使用统计刷盘",
-                "0 */1 * * * *",
+                60,
                 Arc::new(UsageStatsFlushTask::new(state.usage_stats())),
             ))
             .await?;
@@ -466,7 +483,7 @@ async fn start_server_inner(
                 .register_task(TaskDefinition::new(
                     "snapshot_gc",
                     "快照垃圾回收",
-                    "0 0 */12 * * *",
+                    12 * 3600,
                     Arc::new(SnapshotGcTask::new(sm)),
                 ))
                 .await?;
@@ -484,7 +501,7 @@ async fn start_server_inner(
                     .register_task(TaskDefinition::new(
                         "reminder",
                         "主动提醒",
-                        format!("0 */{interval_min} * * * *"),
+                        interval_min * 60,
                         Arc::new(tianyan::scheduler::tasks::ReminderTask::new(
                             model_services.chat,
                             model_name,

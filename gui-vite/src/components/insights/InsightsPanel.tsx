@@ -1,5 +1,5 @@
 import { fetchSchedulerStatus, fetchUsageStats } from '@/lib/api-client';
-import { formatNumber } from '@/lib/utils';
+import { formatNumber, formatInterval } from '@/lib/utils';
 import { useResource } from '@/hooks/use-resource';
 import { Spinner } from '@/components/ui/Spinner';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';
@@ -66,7 +66,7 @@ function TaskRow({ task }: { task: SchedulerTaskStatus }) {
       </div>
       <div className="col-span-2 min-w-0">
         <code className="text-xs text-[var(--color-text-secondary)] truncate">
-          {task.cron_expression}
+          {formatInterval(task.interval_secs)}
         </code>
       </div>
       <div className="col-span-1 text-xs text-[var(--color-text-secondary)]">

@@ -538,6 +538,8 @@ export interface BackgroundTask {
   id: string;
   description: string;
   status: TaskStatus;
+  /** 任务类型（delegate=子代理委托 / command=后台终端命令）。 */
+  kind?: 'delegate' | 'command';
   /** 归属会话 id（未归属时为 null）。 */
   parent_session_id: string | null;
   result: string | null;
@@ -563,15 +565,18 @@ export interface CompressSessionResponse {
 
 // ========== Insights Types (matches backend scheduler/stats DTO) ==========
 
-/** 定时任务状态（GET /scheduler/status）。 */
+/** 定时任务状态（GET /scheduler/status；ADR-024 间隔制）。 */
 export interface SchedulerTaskStatus {
   id: string;
   name: string;
   priority: string;
-  cron_expression: string;
+  /** 执行间隔（秒）。 */
+  interval_secs: number;
   run_count: number;
   /** 距上次执行秒数（从未执行时为 null）。 */
   last_run_ago_secs: number | null;
+  /** 距下次到期秒数（已到期 = 0）。 */
+  next_due_in_secs: number;
 }
 
 export interface SchedulerStatus {
@@ -929,6 +934,8 @@ export interface TodoItem {
   priority: TodoPriority;
   /** 关联目标 id（可选；目标进度按关联待办自动计算）。 */
   goal_id: string | null;
+  /** 父待办 id（可选；子待办挂靠，面板缩进展示）。 */
+  parent_id: string | null;
   /** 归属会话 id（会话绑定；null = 历史遗留/无会话归属）。 */
   session_id: string | null;
   created_at: number;

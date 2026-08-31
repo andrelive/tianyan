@@ -95,6 +95,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-018: 会话权威存储迁至 SQLite](docs/architecture/decisions/018-session-authoritative-sqlite.md) — 会话迁出 VFS（流式 vs 文档）；`SessionStore` 原子取号 + 失败上抛；VFS 恢复纯文档基座
 - [ADR-022: 会话绑定的任务面板与任务语义分层](docs/architecture/decisions/022-session-bound-task-ux.md) — todo/goal 会话绑定临时展示（无全局计划页）；内置任务→洞察、定时任务独立栏目、后台任务→会话停靠条；数据目录只读+搬迁对话框
 - [ADR-023: 配置目录与数据目录分离](docs/architecture/decisions/023-config-data-dir-separation.md) — 配置固定 `~/.tianyan/tianyan.toml` 永不搬迁；数据目录从配置读取；搬迁=复制+校验+先改配置后强制删源，失败可见
+- [ADR-024: 调度模型从 cron 改为间隔 + 补跑](docs/architecture/decisions/024-interval-scheduler.md) — 任务声明执行间隔；单一扫描循环每 60s 顺序检查、串行执行；last_run 持久化宕机补跑；cron 配置自动换算弃用
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 

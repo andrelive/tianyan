@@ -131,7 +131,7 @@ impl TaskRegistrar for SchedulerRegistrar {
         let definition = TaskDefinition::new(
             task.id.clone(),
             task.name.clone(),
-            task.cron.clone(),
+            task.interval_secs,
             handler,
         );
         sched
@@ -276,7 +276,7 @@ impl ScheduledAgentTaskManager {
         }
     }
 
-    /// 从磁盘加载任务定义。
+    /// 从磁盘加载任务定义（含 ADR-024 迁移：旧 cron → interval_secs，回写迁移结果）。
     async fn load(&self) {
         let content = match std::fs::read_to_string(&self.file_path) {
             Ok(c) => c,
@@ -287,8 +287,33 @@ impl ScheduledAgentTaskManager {
             Err(_) => return,
         };
         let mut tasks = HashMap::new();
-        for t in list {
+        let mut migrated = false;
+        for mut t in list {
+            if t.interval_secs == 0 {
+                // 旧 cron 模式 → 间隔换算；无法识别回退每日一次
+                let translated = t
+                    .cron
+                    .as_deref()
+                    .and_then(tianyan::scheduler::interval_from_cron);
+                t.interval_secs = translated.unwrap_or(86400);
+                if translated.is_none() {
+                    tracing::warn!(
+                        task = %t.name,
+                        cron = ?t.cron,
+                        fallback_secs = t.interval_secs,
+                        "旧 cron 无法换算为间隔（ADR-024），回退每日一次"
+                    );
+                }
+                migrated = true;
+            }
             tasks.insert(t.id.clone(), t);
+        }
+        if migrated {
+            tracing::info!("定时任务已从 cron 迁移为间隔制（ADR-024）");
+            // 先放入内存再触发一次落盘（由 save 完成）
+            *self.tasks.write().await = tasks;
+            self.save().await;
+            return;
         }
         *self.tasks.write().await = tasks;
     }
@@ -321,12 +346,11 @@ impl ScheduledAgentTaskManager {
     pub async fn create(self: &Arc<Self>, req: &CreateScheduledTaskRequest) -> ScheduledAgentTask {
         let mut task = ScheduledAgentTask::new(
             req.name.clone(),
-            req.cron.clone(),
+            req.interval_secs,
             req.workspace.clone(),
             req.prompt.clone(),
         );
-        task.next_run_at =
-            tianyan::scheduler::next_run_at(&task.cron, chrono::Utc::now().timestamp());
+        task.next_run_at = Some(chrono::Utc::now().timestamp() + task.interval_secs as i64);
         self.tasks
             .write()
             .await
@@ -337,7 +361,7 @@ impl ScheduledAgentTaskManager {
         }
         tracing::info!(
             name = %task.name,
-            cron = %task.cron,
+            interval_secs = task.interval_secs,
             workspace = %task.workspace,
             "已创建定时智能体任务",
         );
@@ -370,7 +394,7 @@ impl ScheduledAgentTaskManager {
             if let Some(t) = tasks.get_mut(id) {
                 t.last_run_at = Some(now);
                 t.last_result = Some(result.to_string());
-                t.next_run_at = tianyan::scheduler::next_run_at(&t.cron, now);
+                t.next_run_at = Some(now + t.interval_secs as i64);
             }
         }
         self.save().await;

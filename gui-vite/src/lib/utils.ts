@@ -31,17 +31,29 @@ export function formatNumber(n: number): string {
   return n.toLocaleString('en-US');
 }
 
+/** 秒数 → 人类可读间隔（ADR-024 间隔制展示；如 21600 → "每 6 小时"）。 */
+export function formatInterval(secs: number): string {
+  if (secs >= 604800 && secs % 604800 === 0) return '每 ' + secs / 604800 + ' 周';
+  if (secs >= 86400 && secs % 86400 === 0) {
+    return secs === 86400 ? '每天' : '每 ' + secs / 86400 + ' 天';
+  }
+  if (secs >= 3600 && secs % 3600 === 0) return '每 ' + secs / 3600 + ' 小时';
+  if (secs >= 60 && secs % 60 === 0) return '每 ' + secs / 60 + ' 分钟';
+  return '每 ' + secs + ' 秒';
+}
+
+/** RFC3339 → 相对时间（刚刚/N分钟前/N小时前/N天前；超出 7 天回退日期）。 */
 export function formatRelativeTime(iso: string): string {
   const d = new Date(iso);
   const now = new Date();
   const diffMs = now.getTime() - d.getTime();
   const diffMin = Math.floor(diffMs / 60000);
   if (diffMin < 1) return '刚刚';
-  if (diffMin < 60) return `${diffMin}分钟前`;
+  if (diffMin < 60) return diffMin + '分钟前';
   const diffHour = Math.floor(diffMin / 60);
-  if (diffHour < 24) return `${diffHour}小时前`;
+  if (diffHour < 24) return diffHour + '小时前';
   const diffDay = Math.floor(diffHour / 24);
-  if (diffDay < 7) return `${diffDay}天前`;
+  if (diffDay < 7) return diffDay + '天前';
   return formatDate(iso);
 }
 

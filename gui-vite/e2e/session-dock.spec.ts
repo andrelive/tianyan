@@ -72,7 +72,7 @@ test.describe('0.2 session dock (todos/goals session-bound)', () => {
     await request.delete(`/api/v1/sessions/${sessionId}`);
   });
 
-  test('dock shows session todos/goals and hides them when completed', async ({
+  test('dock shows session todos/goals, completed todo stays visible as done', async ({
     page,
     request,
   }) => {
@@ -111,12 +111,12 @@ test.describe('0.2 session dock (todos/goals session-bound)', () => {
     await expect(dock).toBeVisible({ timeout: 15000 });
     await expect(page.getByText('E2E 停靠目标')).toBeVisible();
 
-    // 完成待办 → 从面板消失（临时语义）
+    // 完成待办 → 保留展示（划线样式），不消失
     const doneRes = await request.patch(`/api/v1/todos/${todoBody.todo.id}`, {
       data: { status: 'completed' },
     });
     expect(doneRes.ok()).toBeTruthy();
-    await expect(page.getByText('E2E 停靠待办')).not.toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('E2E 停靠待办')).toBeVisible({ timeout: 15000 });
 
     // 完成目标 → 目标条也消失
     const goalDone = await request.patch(`/api/v1/goals/${goalBody.goal.id}`, {

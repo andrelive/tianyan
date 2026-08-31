@@ -9,10 +9,14 @@ pub struct ScheduledAgentTask {
     pub id: String,
     /// 任务显示名称。
     pub name: String,
-    /// Cron 表达式。语义：秒字段为 */N = 每 N 秒（如 */30 * * * * *）；
-    /// 分字段为 */N = 每 N 分钟（如 0 */30 * * * *）；分/时字段为具体数字且其余
-    /// 为 * = 每天该时刻（如 0 30 9 * * * = 每天 09:30）。
-    pub cron: String,
+    /// 执行间隔（秒）：距上次执行 ≥ 此值即在下个扫描周期执行（ADR-024 间隔制；
+    /// 宕机补跑——服务未运行期间超期的任务在重启后自动执行一次）。
+    /// 旧 JSON 无此字段 → default 0 → load 时从 cron 换算。
+    #[serde(default)]
+    pub interval_secs: u64,
+    /// 旧 cron 表达式（ADR-024 迁移遗留；load 时换算为 interval_secs 后不再使用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
     /// 工作目录（agent 执行命令/读写文件的根）。
     pub workspace: String,
     /// 给智能体的指令（到点后让它在这个工作区做的事）。
@@ -23,19 +27,20 @@ pub struct ScheduledAgentTask {
     pub created_at: i64,
     /// 上次执行时间（epoch 秒；未执行过为 None）。
     pub last_run_at: Option<i64>,
-    /// 下次触发时间（epoch 秒；首次创建时计算）。
+    /// 下次预计执行时间（epoch 秒；展示用近似值 = last_run_at + interval）。
     pub next_run_at: Option<i64>,
     /// 最近一次执行结果摘要。
     pub last_result: Option<String>,
 }
 
 impl ScheduledAgentTask {
-    /// 创建新任务（首次 next_run 由 manager 计算）。
-    pub fn new(name: String, cron: String, workspace: String, prompt: String) -> Self {
+    /// 创建新任务。
+    pub fn new(name: String, interval_secs: u64, workspace: String, prompt: String) -> Self {
         Self {
             id: format!("sched-task-{}", uuid::Uuid::new_v4()),
             name,
-            cron,
+            interval_secs,
+            cron: None,
             workspace,
             prompt,
             enabled: true,
@@ -52,9 +57,9 @@ impl ScheduledAgentTask {
 pub struct CreateScheduledTaskRequest {
     /// 任务显示名称。
     pub name: String,
-    /// Cron 表达式（*/N 秒、*/N 分钟、每天 H:M）。
-    pub cron: String,
-    /// 工作目录（agent 执行工作的根）。
+    /// 执行间隔（秒），如 1800 = 每 30 分钟、86400 = 每天（距上次执行 ≥24h 即触发）。
+    pub interval_secs: u64,
+    /// 工作目录（agent 执行命令/读写文件的根）。
     pub workspace: String,
     /// 给智能体的指令。
     pub prompt: String,

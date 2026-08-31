@@ -567,11 +567,12 @@ export async function cancelChatStream(sessionId: string): Promise<{ status: str
 
 // ========== Scheduled Agent Tasks API ==========
 
-/** 定时智能体任务（到点调用 agent 在指定工作区工作）。 */
+/** 定时智能体任务（按执行间隔调用 agent 在指定工作区工作，ADR-024 间隔制）。 */
 export interface ScheduledAgentTask {
   id: string;
   name: string;
-  cron: string;
+  /** 执行间隔（秒）；距上次执行 ≥ 此值即触发，宕机超期任务重启后补跑一次。 */
+  interval_secs: number;
   workspace: string;
   prompt: string;
   enabled: boolean;
@@ -589,7 +590,7 @@ export async function fetchScheduledTasks(): Promise<ScheduledAgentTask[]> {
 /** 创建定时智能体任务。 */
 export async function createScheduledTask(req: {
   name: string;
-  cron: string;
+  interval_secs: number;
   workspace: string;
   prompt: string;
 }): Promise<ScheduledAgentTask> {
