@@ -5,11 +5,6 @@ use serde::{Deserialize, Serialize};
 use crate::common::types::{ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
 
-// 检索追踪类型（RetrievalStep / RetrievalStepType / RetrievalTrace）已下沉到
-// `common::types::retrieval_trace`（跨模块共享的持久化契约），此处仅重新导出
-// 以保持既有引用路径 `crate::context::retrieval::types::*` 不变。
-pub use crate::common::types::retrieval_trace::{RetrievalStep, RetrievalStepType, RetrievalTrace};
-
 /// 带有内容的检索结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalResult {
@@ -60,7 +55,6 @@ impl RetrievalResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
 
     #[test]
     fn test_retrieval_result() {
@@ -78,19 +72,5 @@ mod tests {
             RetrievalResult::new(uri, 0.9).with_content("Test".to_string(), ContentLevel::Overview);
         assert!(result.has_content());
         assert!(result.token_count > 0);
-    }
-
-    #[test]
-    fn test_retrieval_trace() {
-        let mut trace = RetrievalTrace::new("test query");
-        let step = RetrievalStep {
-            step_type: RetrievalStepType::L0Search,
-            target_uri: TianyanUri::parse("tianyan://user/profile").unwrap(),
-            score: Some(0.9),
-            tokens_used: 100,
-            timestamp: Utc::now(),
-        };
-        trace.add_step(step);
-        assert_eq!(trace.total_tokens, 100);
     }
 }

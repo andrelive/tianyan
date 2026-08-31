@@ -4,6 +4,7 @@
 //! - 使用 RRF (Reciprocal Rank Fusion) 算法融合 abstract 和 overview 向量搜索结果
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use tracing::{debug, info, instrument};
 
@@ -17,7 +18,6 @@ use crate::vfs::VirtualFileSystem;
 
 use super::intent::{Intent, IntentAnalyzer};
 use super::loader::ContentLoadStrategy;
-use super::trace::RetrievalTraceBuilder;
 
 /// 组合评分（新鲜度恒为 1.0——`source_updated_at` 无数据源，字段已移除，
 /// 常数项内联，与旧行为逐位一致）。
@@ -68,11 +68,10 @@ impl DualLayerRetriever {
     /// 检索查询的内容。
     #[instrument(skip(self), fields(query = %query))]
     pub async fn retrieve(&self, query: &str, top_k: usize) -> Result<Vec<RetrievalResult>> {
-        let mut trace_builder = RetrievalTraceBuilder::new(query);
+        let started = Instant::now();
 
         // 步骤 1：意图分析。
         let intent = self.analyze_intent(query).await?;
-        trace_builder.add_intent_analysis(intent.token_count);
 
         // 步骤 2：融合搜索（VFS 内部处理嵌入）。
         let results = self
@@ -89,19 +88,8 @@ impl DualLayerRetriever {
             stats.record_search_query(query, results.len(), ns.as_deref());
         }
 
-        for result in &results {
-            trace_builder.add_l1_search(result.uri.clone(), result.score, 0);
-        }
-
         // 步骤 3：加载内容。
         let results = self.load_content_for_results(results).await?;
-        for result in &results {
-            if result.has_content() {
-                trace_builder.add_content_load(result.uri.clone(), result.token_count);
-            }
-            // 记录最终命中的结果 URI（轨迹黑匣子的结果清单）。
-            trace_builder.add_result(result.uri.clone());
-        }
 
         // Record doc loads in usage stats
         if let Some(ref stats) = self.usage_stats {
@@ -112,18 +100,9 @@ impl DualLayerRetriever {
             }
         }
 
-        // 构建最终追踪记录。
-        let trace = trace_builder.build();
-
-        // 持久化轨迹（完整过程快照，供调试界面回溯"为什么检索成这样"）。
-        if let Some(ref stats) = self.usage_stats {
-            stats.record_retrieval_trace(&trace);
-        }
-
         info!(
             query = %query,
-            total_time_ms = trace.total_time_ms,
-            total_tokens = trace.total_tokens,
+            elapsed_ms = started.elapsed().as_millis() as u64,
             result_count = results.len(),
             "Retrieval completed"
         );

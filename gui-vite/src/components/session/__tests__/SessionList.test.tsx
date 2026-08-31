@@ -62,12 +62,14 @@ describe('SessionList', () => {
     });
   });
 
-  it('shows empty state when sessions=[]', async () => {
+  it('shows default workspace group when sessions=[]', async () => {
     mockSessions([]);
     renderSessionList();
+    // 默认工作区始终显示（即便无会话），可 hover「＋」新建会话
     await waitFor(() => {
-      expect(screen.getByText('暂无会话')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '分组 默认' })).toBeInTheDocument();
     });
+    expect(screen.queryByText('暂无会话')).not.toBeInTheDocument();
   });
 
   it('shows sessions grouped by working directory (default group for unbound)', async () => {
@@ -125,8 +127,8 @@ describe('SessionList', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '新会话' })).toBeInTheDocument();
     });
-    // 占位在 a 分组下、不在默认组下（默认组无会话且未选中）
-    expect(screen.queryByRole('button', { name: '分组 默认' })).not.toBeInTheDocument();
+    // 占位在 a 分组下；默认组始终显示（即便无会话）
+    expect(screen.getByRole('button', { name: '分组 默认' })).toBeInTheDocument();
   });
 
   it('clicking top 新建会话 clears pending workspace, navigates to /chat and shows placeholder', async () => {

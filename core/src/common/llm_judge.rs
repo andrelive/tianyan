@@ -7,8 +7,10 @@
 
 /// 剥离 LLM 输出的代码围栏并解析为 JSON 值。
 ///
-/// 兼容三种形态：```json 围栏、无语言 ``` 围栏、无围栏裸 JSON。
-/// 解析失败返回 `None`（调用方自行决定降级策略，如告警、空结果或默认值）。
+/// 兼容三种形态：```json 围栏、无语言 ``` 围栏、无围栏裸 JSON；
+/// 直接解析失败时回退为**平衡花括号提取**——从混排文本（前言/后记/围栏夹杂）
+/// 中定位首个平衡的 JSON 对象再解析（字符串内转义与花括号均正确跳过）。
+/// 全部失败返回 `None`（调用方自行决定降级策略，如告警、空结果或默认值）。
 pub fn parse_llm_json(response: &str) -> Option<serde_json::Value> {
     let cleaned = response
         .trim()
@@ -16,7 +18,46 @@ pub fn parse_llm_json(response: &str) -> Option<serde_json::Value> {
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    serde_json::from_str(cleaned).ok()
+    if let Ok(v) = serde_json::from_str(cleaned) {
+        return Some(v);
+    }
+    extract_balanced_json(response)
+}
+
+/// 从混排文本中提取首个平衡的 JSON 对象并解析。
+///
+/// 扫描规则：从首个 `{` 起，正确跳过字符串字面量内的花括号与转义序列，
+/// 深度归零处截取；截取片段再走一次严格解析（片段非法仍返回 None）。
+fn extract_balanced_json(text: &str) -> Option<serde_json::Value> {
+    let start = text.find('{')?;
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, ch) in text[start..].char_indices() {
+        let abs = start + i;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return serde_json::from_str(&text[start..=abs]).ok();
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// 截断长文本以控制 LLM 调用成本（保留头尾）。
@@ -77,9 +118,40 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_llm_json_preamble_returns_none() {
-        // 前置说明文字（非围栏包裹）不属于受支持形态——返回 None 而非静默解析
-        assert!(parse_llm_json("结果如下：{\"a\": 1}").is_none());
+    fn test_parse_llm_json_preamble_extracted() {
+        // 前置说明文字 + JSON：平衡提取回退应成功取出 JSON 对象
+        // （旧行为返回 None——这正是自演化综述"输出中未找到 JSON"失败的形态之一）
+        let v = parse_llm_json("结果如下：{\"a\": 1}，请查收。").unwrap();
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn test_parse_llm_json_braces_inside_strings_ignored() {
+        // 字符串字面量内的花括号不参与平衡计算
+        let v = parse_llm_json("说明：{\"text\": \"包含}花括号{\"}").unwrap();
+        assert_eq!(v["text"], "包含}花括号{");
+    }
+
+    #[test]
+    fn test_parse_llm_json_escaped_quotes_in_strings() {
+        // 字符串内的转义引号正确跳过
+        let v = parse_llm_json("前言\n{\"q\": \"a\\\"b\"}").unwrap();
+        assert_eq!(v["q"], "a\"b");
+    }
+
+    #[test]
+    fn test_parse_llm_json_first_object_wins() {
+        // 多个对象时取首个平衡对象
+        let v = parse_llm_json("{\"a\": 1}{\"b\": 2}").unwrap();
+        assert_eq!(v["a"], 1);
+        assert!(v.get("b").is_none());
+    }
+
+    #[test]
+    fn test_parse_llm_json_unbalanced_returns_none() {
+        // 不平衡的花括号：无法截取完整对象
+        assert!(parse_llm_json("残缺输出 {\"a\": 1").is_none());
+        assert!(parse_llm_json("}").is_none());
     }
 
     #[test]

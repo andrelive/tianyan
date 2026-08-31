@@ -1,20 +1,18 @@
 //! 天演智能体系统的检索模块。
 //!
-//! 本模块实现了目录递归检索系统，包括。
+//! 本模块实现基于意图分析与双层向量检索的检索系统：
 //! - 意图分析
-//! - 双层向量检索（L0/L1。
-//! - 带有 Token 预算管理的内容加。
-//! - 检索追踪记。
+//! - 双层向量检索（L0/L1）
+//! - 带 Token 预算管理的内容加载
 
 mod intent;
 mod loader;
 mod retriever;
-mod trace;
 mod types;
 
 pub use intent::{Intent, IntentAnalyzer};
 pub use retriever::DualLayerRetriever;
-pub use types::{RetrievalResult, RetrievalStep, RetrievalStepType, RetrievalTrace};
+pub use types::RetrievalResult;
 
 #[cfg(test)]
 mod tests {

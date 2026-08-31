@@ -52,7 +52,6 @@ describe('Sidebar', () => {
     expect(screen.getByTitle('技能')).toBeInTheDocument();
     expect(screen.getByTitle('知识')).toBeInTheDocument();
     expect(screen.getByTitle('记忆')).toBeInTheDocument();
-    expect(screen.getByTitle('检索轨迹')).toBeInTheDocument();
     expect(screen.getByTitle('审批')).toBeInTheDocument();
     expect(screen.getByTitle('定时任务')).toBeInTheDocument();
     expect(screen.getByTitle('洞察')).toBeInTheDocument();

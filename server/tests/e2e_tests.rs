@@ -96,24 +96,6 @@ async fn test_e2e_stats_endpoint() {
 }
 
 #[tokio::test]
-async fn test_e2e_retrieval_traces_endpoint() {
-    let (server, _dir) = start_real_server().await;
-
-    // 检索轨迹（真实 handler：空库返回空数组 + limit 参数生效）
-    let resp = server.get("/api/v1/retrieval/traces").await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["total"], 0, "新数据目录应无轨迹: {body}");
-    assert_eq!(body["traces"].as_array().unwrap().len(), 0);
-
-    // limit 上限收敛
-    let resp = server.get("/api/v1/retrieval/traces?limit=5000").await;
-    assert_eq!(resp.status(), 200);
-
-    server.shutdown();
-}
-
-#[tokio::test]
 async fn test_e2e_scheduler_status_endpoint() {
     let (server, _dir) = start_real_server().await;
 
@@ -126,6 +108,11 @@ async fn test_e2e_scheduler_status_endpoint() {
         "无 Provider 环境调度器应未运行: {body}"
     );
     assert_eq!(body["tasks"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        body["executing_task_id"],
+        serde_json::Value::Null,
+        "空闲时应无执行中任务: {body}"
+    );
 
     server.shutdown();
 }

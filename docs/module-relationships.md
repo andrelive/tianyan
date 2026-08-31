@@ -127,7 +127,7 @@ core/src/
 **依赖环现状（阶段 1-3 分层重构后，详见 [ADR-007](architecture/decisions/007-core-dependency-cycle-removal.md) + [ADR-020](architecture/decisions/020-database-facade.md) + [ADR-021](architecture/decisions/021-layered-refactor.md)）**：
 
 - ✅ **生产代码零模块环**（文件级 SCC 检测 = 0）：
-  - 基础类型层：`roles`（角色纯类型）、`common`（含 `RetrievalTrace`）——config/agent/scheduler 共用，不依赖领域
+  - 基础类型层：`roles`（角色纯类型）、`common`（错误/估算器等纯类型）——config/agent/scheduler 共用，不依赖领域
   - 存储层：`db`（Database 门面 + SqliteDb + 业务域 Repository）——**只依赖 `common`**（纯底层）
   - 领域层：`session`（SQL 收敛本模块，经 db 单连接）、`vfs`（SqliteBackend 经 db）、`observability`（SQL 经 db Repository）——单向依赖 db
   - 顶层：`agent` / `scheduler`（工具化装配，依赖领域层 + 基础类型）
@@ -469,7 +469,6 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 共享基础设施归属**被依赖方/叶模块**，消费方保留 re-export 保留下游兼容：
 
 - `SqliteDb` → `db/sqlite_db.rs`（ADR-020 统一写入门面：全系统唯一 SQLite 连接归属 `db` 层，vfs/observability 经 `db::Database` 门面访问；`vfs/backend/sqlite_db.rs` 保留 re-export 兼容）
-- `RetrievalTrace` 家族 → `common/types/retrieval_trace.rs`（纯数据契约；`context/retrieval/types.rs` re-export）
 - `LoggingConfig` → `common/logging.rs`（`config::LoggingConfig` re-export 仍可用）
 - `TokenEstimator`/`estimate_tokens` → `common/token_estimator.rs`（全系统唯一估算入口；`context::compression` re-export）
 

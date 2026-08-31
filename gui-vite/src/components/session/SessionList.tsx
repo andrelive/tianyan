@@ -88,7 +88,8 @@ export default function SessionList() {
     }
   }, [editingSessionId]);
 
-  // 按工作目录分组（工作区 = 会话的父级分组；未绑定归入默认组）
+  // 按工作目录分组（工作区 = 会话的父级分组；未绑定归入默认组）。
+  // 默认组（''）始终保留：即便没有未绑定会话，默认工作区也可见（可新建会话）。
   const sessionGroups = useMemo(() => {
     const map = new Map<string, Session[]>();
     for (const s of sessions) {
@@ -96,6 +97,9 @@ export default function SessionList() {
       const list = map.get(key) ?? [];
       list.push(s);
       map.set(key, list);
+    }
+    if (!map.has('')) {
+      map.set('', []);
     }
     return [...map.entries()].sort((a, b) => {
       if (a[0] === '') return 1;
@@ -277,16 +281,10 @@ export default function SessionList() {
       </div>
 
       {/* 会话列表（工作区分组 + 会话子项） */}
+      {/* 默认组始终存在（sessionGroups 恒含 ''），故不再有「暂无会话」空态：
+          无任何会话时仍显示默认工作区分组，可 hover「＋」新建会话 */}
       <div ref={sessionListRef} className="flex-1 overflow-y-auto px-2 py-2">
-        {sessions.length === 0 && pendingGroupKey === null ? (
-          <p
-            className="text-xs text-[var(--color-text-tertiary)] text-center mt-8"
-            aria-live="polite"
-          >
-            暂无会话
-          </p>
-        ) : (
-          <div className="flex flex-col gap-1.5" role="list" aria-label="会话列表">
+        <div className="flex flex-col gap-1.5" role="list" aria-label="会话列表">
             {groupsToRender.map(([workdir, groupSessions]) => {
               const collapsed = collapsedGroups.has(workdir);
               const label = groupLabel(workdir);
@@ -430,8 +428,7 @@ export default function SessionList() {
                 </div>
               );
             })}
-          </div>
-        )}
+        </div>
       </div>
 
       {/* 底部：文件视图入口（当前会话工作区审计页） */}

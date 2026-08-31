@@ -225,7 +225,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 **职责**：上下文工程系统，包括双层检索、对话压缩、统一上下文管线和消息组装。
 
 **子模块组织**：
-- `context/retrieval/` — 意图分析、双层向量检索（DualLayerRetriever）、内容加载（ContentLoadStrategy）、检索追踪（`RetrievalTraceBuilder` 构建器；`RetrievalTrace` 类型定义于 `common/types/retrieval_trace.rs`，此处 re-export）
+- `context/retrieval/` — 意图分析、双层向量检索（DualLayerRetriever）、内容加载（ContentLoadStrategy）（检索轨迹已于 ADR-025 移除）
 - `context/compression/` — 对话压缩（ContextCompressor）；`TokenEstimator` / `estimate_tokens` 定义于 `common/token_estimator.rs`，此处 re-export（全系统唯一估算入口）
 - `context/pipeline.rs` — `ContextPipeline`，统一上下文管线（规则注入 → 检索 → 压缩）
 - `context/assembler.rs` — `ContextAssembler`，纯函数：存储层 `StructuredMessage` → 传输层 `Message`
@@ -459,7 +459,7 @@ Zustand 全局状态（三切片）+ Tailwind 主题变量 + react-router 路由
 | components/chat | 聊天域（ChatPanel 编排层/SessionPage/MessageBubble/工具卡片/思考选择/ApprovalBanner…） | components/chat/ |
 | components/settings | 设置面板（模型/存储/安全/日志/记忆/检索/外观/连接/MCP/人格等 tab） | components/settings/ |
 | components/workspace | 工作区（文件树/查看器/WorkspaceDiffPanel/目录选择；fileViewerUtils 纯函数：分页 offset，F5 提取） | components/workspace/ |
-| components/* | 技能/角色/工具/知识/记忆/任务/审批/洞察/检索轨迹/剪贴板/会话/向导/侧边栏/布局面板 | components/ |
+| components/* | 技能/角色/工具/知识/记忆/任务/审批/洞察/剪贴板/会话/向导/侧边栏/布局面板 | components/ |
 | components/ui/ | 视觉原语（Spinner/ErrorBanner/EmptyState/Modal/ConfirmDialog/FieldRow——confirm 替代 window.confirm） | components/ui/ |
 
 ### 4.2 前端 API 覆盖情况
@@ -473,7 +473,7 @@ Zustand 全局状态（三切片）+ Tailwind 主题变量 + react-router 路由
 | 运行时配置 | lib/api-client.ts（GET/PUT /config + 契约快照测试） | ✅ 完整实现 |
 | 配置向导 | components/wizard/ConfigWizard.tsx（五步） | ✅ 完整实现 |
 | 工作区 | lib/api-client.ts（tree/read/diff/apply-patch/dirs） | ✅ 完整实现 |
-| 任务/审批/洞察/检索轨迹/剪贴板 | lib/api-client.ts + 对应面板 | ✅ 完整实现 |
+| 任务/审批/洞察/剪贴板 | lib/api-client.ts + 对应面板 | ✅ 完整实现 |
 
 ### 4.3 状态管理
 

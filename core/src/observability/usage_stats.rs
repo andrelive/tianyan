@@ -11,7 +11,6 @@ use std::sync::Arc;
 use dashmap::DashMap;
 
 use crate::common::error::TianyanError;
-use crate::common::types::retrieval_trace::RetrievalTrace;
 use crate::db::stats::{DocStats, SkillStats, StatsRepo};
 use crate::db::Database;
 
@@ -119,39 +118,6 @@ impl UsageStats {
         }
     }
 
-    /// 记录一次检索轨迹（完整过程快照，非热路径）。
-    ///
-    /// 轨迹保留最近 [`MAX_RETRIEVAL_TRACES`] 条，超出删除最旧（FIFO）。
-    pub fn record_retrieval_trace(&self, trace: &RetrievalTrace) {
-        let trace_json = match serde_json::to_string(trace) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!(error = %e, "统计存储错误：轨迹序列化失败");
-                return;
-            }
-        };
-        let conn = match self.db.try_lock() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "统计存储错误：检索轨迹跳过（数据库锁不可用）");
-                return;
-            }
-        };
-        if let Err(e) = conn.execute(
-            "INSERT INTO retrieval_traces (query, trace_json, total_tokens, total_time_ms) VALUES (?1,?2,?3,?4)",
-            rusqlite::params![trace.query, trace_json, trace.total_tokens as i64, trace.total_time_ms as i64],
-        ) {
-            tracing::warn!(error = %e, "统计存储错误：检索轨迹写入失败");
-            return;
-        }
-        if let Err(e) = conn.execute(
-            "DELETE FROM retrieval_traces WHERE id NOT IN (SELECT id FROM retrieval_traces ORDER BY id DESC LIMIT ?1)",
-            rusqlite::params![MAX_RETRIEVAL_TRACES],
-        ) {
-            tracing::warn!(error = %e, "统计存储错误：检索轨迹清理失败");
-        }
-    }
-
     // ── 持久化 ─────────────────────────────────────────────────────
 
     /// 将内存计数器批量刷入 SQLite。
@@ -251,15 +217,7 @@ impl UsageStats {
         self.flush_pending().await;
         self.repo.query_summary().await
     }
-
-    /// 查询最近的检索轨迹（完整过程快照，供调试界面使用）。
-    pub async fn query_recent_traces(&self, limit: usize) -> Vec<RetrievalTrace> {
-        self.repo.query_recent_traces(limit).await
-    }
 }
-
-/// 检索轨迹保留上限（FIFO 淘汰）。
-const MAX_RETRIEVAL_TRACES: i64 = 500;
 
 /// 将 rusqlite 错误映射为 `TianyanError::Custom`（统一 observability 模块前缀）。
 
@@ -323,52 +281,6 @@ mod tests {
         stats.record_search_query("async rust", 5, Some("knowledge"));
         let hm = stats.query_search_heatmap().await;
         assert!(!hm["namespaces"].as_array().unwrap().is_empty());
-    }
-
-    fn sample_trace(query: &str) -> RetrievalTrace {
-        use crate::common::types::retrieval_trace::{RetrievalStep, RetrievalStepType};
-        use crate::common::types::TianyanUri;
-        RetrievalTrace {
-            query: query.to_string(),
-            steps: vec![RetrievalStep {
-                step_type: RetrievalStepType::IntentAnalysis,
-                target_uri: TianyanUri::parse("tianyan://knowledge/x").unwrap(),
-                score: None,
-                tokens_used: 10,
-                timestamp: chrono::Utc::now(),
-            }],
-            results: vec![],
-            total_tokens: 10,
-            total_time_ms: 5,
-            timestamp: chrono::Utc::now(),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_retrieval_trace_roundtrip() {
-        let stats = setup().await;
-        stats.record_retrieval_trace(&sample_trace("为什么没找到"));
-        let traces = stats.query_recent_traces(10).await;
-        assert_eq!(traces.len(), 1);
-        assert_eq!(traces[0].query, "为什么没找到");
-        assert_eq!(traces[0].steps.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_retrieval_trace_fifo_cap() {
-        let stats = setup().await;
-        for i in 0..(MAX_RETRIEVAL_TRACES + 10) {
-            stats.record_retrieval_trace(&sample_trace(&format!("query-{i}")));
-        }
-        let traces = stats.query_recent_traces(1000).await;
-        assert_eq!(
-            traces.len() as i64,
-            MAX_RETRIEVAL_TRACES,
-            "超出上限应 FIFO 淘汰"
-        );
-        // 最旧的 10 条（query-0..query-9）应被淘汰，query-10 起保留
-        assert!(traces.iter().any(|t| t.query == "query-10"));
-        assert!(!traces.iter().any(|t| t.query == "query-9"));
     }
 
     #[test]

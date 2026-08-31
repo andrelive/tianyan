@@ -117,31 +117,6 @@ async fn get_stats_returns_summary_shape() {
     assert!(body.is_object(), "stats 应为对象: {body}");
 }
 
-/// GET /api/v1/retrieval/traces → 200 + 空轨迹列表。
-#[tokio::test]
-async fn list_retrieval_traces_returns_empty_on_fresh_instance() {
-    let dir = tempdir().unwrap();
-    let config = test_config(dir.path());
-    let (app, _state) = create_app(config).await.unwrap();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/retrieval/traces")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let body: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["total"].as_u64().unwrap(), 0);
-}
-
 /// GET /api/v1/scheduler/status → 200 + 未装配调度器返回空状态（running=false）。
 #[tokio::test]
 async fn scheduler_status_returns_not_running_without_scheduler() {

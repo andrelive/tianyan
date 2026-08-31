@@ -152,8 +152,27 @@ impl EvolutionTask {
             .review(&input)
             .await
             .map_err(|e| TianyanError::Custom(format!("evolution: 综述失败：{e}")))?;
-        let plan = parse_plan(&plan_text)
-            .map_err(|e| TianyanError::Custom(format!("evolution: 综述输出解析失败：{e}")))?;
+        // 解析失败降级为空计划：综述输出不可解析时不再让整个任务失败
+        // （历史教训：模型偶尔以散文回复或把 JSON 写进剪贴板工具，导致
+        // 自演化综述从未产出过任何报告/规则/记忆）。降级保证演化报告与
+        // 水位线照常落盘，综述原文截断进摘要——失败可回溯、下周期可续跑。
+        let plan = match parse_plan(&plan_text) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "evolution: 综述输出解析失败，按空计划降级（报告照常落盘）"
+                );
+                EvolutionPlan {
+                    memories: Vec::new(),
+                    skills: Vec::new(),
+                    rules: Vec::new(),
+                    roles: Vec::new(),
+                    deletions: Vec::new(),
+                    summary: first_line_truncated(&plan_text),
+                }
+            }
+        };
 
         // 阶段 2：记账提交
         let applied = self.apply_plan(ctx, &plan).await?;
@@ -251,7 +270,8 @@ impl EvolutionTask {
 3. 对照上面清单，自行决定查看哪些历史记忆、经验、组织形态；
 4. 自行决定输出哪些内容作为新的记忆 / 技能 / 规则 / 组织形态，以及哪些应更新或删除。
 
-【输出格式】只输出以下 JSON（不要输出其他内容）：
+【输出格式】只输出以下 JSON（不要输出其他内容）。
+不要使用任何工具（如 clipboard_write）输出综述结果——最终回复文本必须直接就是 JSON：
 {{
   "memories": [{{"action": "add", "category": "preference|decision|fact|entity|pattern|successful_case|failed_case", "content": "...", "importance": 0.8, "id": "可选"}}],
   "skills": [{{"action": "add|update", "id": "kebab-case", "name": "...", "description": "...", "content": "使用说明（Markdown）", "applicable_scenarios": ["..."]}}],
@@ -568,6 +588,20 @@ fn parse_plan(text: &str) -> Result<EvolutionPlan> {
         .map_err(|e| TianyanError::Custom(format!("evolution: 综述 JSON 结构不合法：{e}")))
 }
 
+/// 降级路径的综述摘要：取输出首个非空行并截断（保证报告/水位线里可回溯）。
+fn first_line_truncated(text: &str) -> String {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let mut out: String = first.chars().take(120).collect();
+    if first.chars().count() > 120 {
+        out.push('…');
+    }
+    out
+}
+
 /// 解析记忆类别。
 fn parse_category(category: &str) -> Result<MemoryCategory> {
     match category.to_lowercase().as_str() {
@@ -796,5 +830,42 @@ mod tests {
         // 水位线已写
         let state = ctx.task_state.read("evolution").await.unwrap().unwrap();
         assert!(state.contains("应用变更: 1"));
+    }
+
+    #[tokio::test]
+    async fn test_unparseable_review_degrades_to_empty_plan_not_failure() {
+        // 回归（真实事故 2026-08-31）：综述智能体以散文回复（无可解析 JSON），
+        // 旧实现整个任务失败 → 演化报告/水位线全不落盘。
+        // 降级契约：空计划 + 报告照常写 + 任务成功（applied=0）+ 摘要可回溯原文。
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let executor = FakeExecutor {
+            response: "本周期经审查无需新增记忆或规则，现有注册表已覆盖。".to_string(),
+        };
+        let task = EvolutionTask::new(Arc::new(executor), 10);
+        let applied = task.run_evolution(&ctx).await.unwrap();
+        assert_eq!(applied, 0, "降级空计划应 0 变更且任务不失败");
+        // 演化报告仍落盘
+        let report_root = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["events".to_string(), "evolution_reports".to_string()],
+        );
+        assert!(ctx.vfs.exists(&report_root).await.unwrap());
+        // 水位线写入且摘要回溯了综述原文
+        let state = ctx.task_state.read("evolution").await.unwrap().unwrap();
+        assert!(state.contains("应用变更: 0"));
+        assert!(state.contains("无需新增记忆或规则"));
+    }
+
+    #[test]
+    fn test_first_line_truncated() {
+        assert_eq!(
+            first_line_truncated("\n  \n本周期无变更。\n尾行"),
+            "本周期无变更。"
+        );
+        let long = "字".repeat(200);
+        assert_eq!(first_line_truncated(&long).chars().count(), 121);
+        assert!(first_line_truncated(&long).ends_with('…'));
+        assert_eq!(first_line_truncated(""), "");
     }
 }

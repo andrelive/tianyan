@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use crate::common::error::TianyanError;
 
-use crate::common::types::retrieval_trace::RetrievalTrace;
 use crate::db::Database;
 
 /// 技能调用统计数据。
@@ -250,33 +249,5 @@ impl StatsRepo {
         )
         .unwrap_or(0);
         serde_json::json!({"total_skills_tracked":skills,"total_skill_calls":calls,"total_tools_tracked":tools,"total_tool_calls":tool_calls,"total_docs_tracked":docs,"total_searches":searches})
-    }
-
-    /// 查询最近的检索轨迹（完整过程快照，供调试界面使用）。
-    ///
-    /// 返回按时间倒序的最新 `limit` 条；轨迹 JSON 解析失败的行被跳过。
-    pub async fn query_recent_traces(&self, limit: usize) -> Vec<RetrievalTrace> {
-        let conn = self.db.lock().await;
-        let mut stmt = match conn
-            .prepare("SELECT trace_json FROM retrieval_traces ORDER BY id DESC LIMIT ?1")
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "统计查询失败：检索轨迹 prepare 失败");
-                return Vec::new();
-            }
-        };
-        let rows: Vec<String> = match stmt.query_map(rusqlite::params![limit as i64], |row| {
-            row.get::<_, String>(0)
-        }) {
-            Ok(iter) => iter.filter_map(Result::ok).collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "统计查询失败：检索轨迹查询失败");
-                return Vec::new();
-            }
-        };
-        rows.iter()
-            .filter_map(|j| serde_json::from_str::<RetrievalTrace>(j).ok())
-            .collect()
     }
 }

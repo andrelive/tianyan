@@ -163,6 +163,8 @@ struct RegisteredTask {
     last_run: Option<i64>,
     /// 执行次数。
     run_count: u64,
+    /// 最近一次执行的失败信息（None = 成功或从未执行）。
+    last_error: Option<String>,
 }
 
 /// 任务运行状态快照（供状态查询接口使用）。
@@ -182,6 +184,9 @@ pub struct TaskStatus {
     pub last_run_ago_secs: Option<u64>,
     /// 距下次到期秒数（已到期 = 0；从未执行 = 0，首个扫描周期即执行）。
     pub next_due_in_secs: u64,
+    /// 最近一次执行的失败信息（None = 成功或从未执行）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// 持久化状态文件的单任务条目。
@@ -189,6 +194,9 @@ pub struct TaskStatus {
 struct PersistedTaskState {
     last_run: i64,
     run_count: u64,
+    /// 最近一次失败信息（旧状态文件无此字段，缺省 None）。
+    #[serde(default)]
+    last_error: Option<String>,
 }
 
 /// 扫描间隔默认值（秒）。
@@ -206,6 +214,8 @@ pub struct TaskScheduler {
     state_path: Option<PathBuf>,
     /// 扫描间隔（秒）。
     tick_secs: u64,
+    /// 当前正在执行的任务 ID（顺序执行，至多一个；None = 空闲）。
+    executing: RwLock<Option<String>>,
 }
 
 /// 计算下次到期时刻（epoch 秒）：last_run + interval；从未执行 = 立即到期。
@@ -263,6 +273,7 @@ impl TaskScheduler {
             handle: RwLock::new(None),
             state_path: None,
             tick_secs: DEFAULT_TICK_SECS,
+            executing: RwLock::new(None),
         }
     }
 
@@ -278,7 +289,7 @@ impl TaskScheduler {
         self
     }
 
-    /// 从磁盘加载持久化的 last_run / run_count（按任务 id 合并）。
+    /// 从磁盘加载持久化的 last_run / run_count / last_error（按任务 id 合并）。
     async fn load_state(&self) {
         let Some(path) = &self.state_path else {
             return;
@@ -295,6 +306,7 @@ impl TaskScheduler {
             if let Some(s) = map.get(&t.definition.id) {
                 t.last_run = Some(s.last_run);
                 t.run_count = s.run_count;
+                t.last_error = s.last_error.clone();
             }
         }
         tracing::info!(count = map.len(), "已加载调度器持久化状态");
@@ -316,6 +328,7 @@ impl TaskScheduler {
                             PersistedTaskState {
                                 last_run: lr,
                                 run_count: t.run_count,
+                                last_error: t.last_error.clone(),
                             },
                         )
                     })
@@ -437,6 +450,7 @@ impl TaskScheduler {
             definition,
             last_run: None,
             run_count: 0,
+            last_error: None,
         });
         Ok(())
     }
@@ -526,6 +540,7 @@ impl TaskScheduler {
                     run_count: t.run_count,
                     last_run_ago_secs,
                     next_due_in_secs,
+                    last_error: t.last_error.clone(),
                 }
             })
             .collect();
@@ -555,14 +570,22 @@ impl TaskScheduler {
 
         tracing::debug!("执行任务：{} ({})", name, task_id);
 
+        // 标记执行中（顺序执行语义下至多一个；供状态查询展示"执行中"）
+        *self.executing.write().await = Some(task_id.to_string());
         let result = handler.execute(ctx).await;
+        *self.executing.write().await = None;
 
-        // 执行完成后补记运行统计 + last_run（重新获取写锁，短临界区）
+        // 执行完成后补记运行统计 + last_run + last_error（重新获取写锁，短临界区）。
+        // last_error：失败可追溯（洞察页此前只显示次数，失败完全不可见）。
         {
             let mut tasks = self.tasks.write().await;
             if let Some(task) = tasks.iter_mut().find(|t| t.definition.id == task_id) {
                 task.last_run = Some(Utc::now().timestamp());
                 task.run_count += 1;
+                task.last_error = result
+                    .error
+                    .as_ref()
+                    .map(|e| truncate_error(&e.to_string()));
             }
         }
 
@@ -578,6 +601,22 @@ impl TaskScheduler {
 
         Some(result)
     }
+
+    /// 当前正在执行的任务 ID（顺序执行语义下至多一个；None = 空闲）。
+    pub async fn executing_task_id(&self) -> Option<String> {
+        self.executing.read().await.clone()
+    }
+}
+
+/// 状态展示/持久化用的错误串截断上限（错误全文进 tracing 日志）。
+const LAST_ERROR_MAX_CHARS: usize = 300;
+
+fn truncate_error(msg: &str) -> String {
+    let mut out: String = msg.chars().take(LAST_ERROR_MAX_CHARS).collect();
+    if msg.chars().count() > LAST_ERROR_MAX_CHARS {
+        out.push('…');
+    }
+    out
 }
 
 impl Default for TaskScheduler {

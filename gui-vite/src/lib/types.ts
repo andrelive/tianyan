@@ -427,33 +427,6 @@ export interface MemoryListResponse {
   total: number;
 }
 
-// ========== Retrieval Trace Types (matches backend retrieval trace DTO) ==========
-
-export type RetrievalStepType =
-  'intent_analysis' | 'l0_search' | 'l1_search' | 'content_load' | 'aggregation';
-
-export interface RetrievalStep {
-  step_type: RetrievalStepType;
-  target_uri: MemoryUri;
-  score: number | null;
-  tokens_used: number;
-  timestamp: string;
-}
-
-export interface RetrievalTrace {
-  query: string;
-  steps: RetrievalStep[];
-  results: MemoryUri[];
-  total_tokens: number;
-  total_time_ms: number;
-  timestamp: string;
-}
-
-export interface RetrievalTracesResponse {
-  traces: RetrievalTrace[];
-  total: number;
-}
-
 // ========== Approval Types (matches backend approval DTO) ==========
 
 /** 审批决策（API 语义：snake_case 字符串）。 */
@@ -577,10 +550,14 @@ export interface SchedulerTaskStatus {
   last_run_ago_secs: number | null;
   /** 距下次到期秒数（已到期 = 0）。 */
   next_due_in_secs: number;
+  /** 最近一次执行的失败信息（null = 成功或从未执行）。 */
+  last_error?: string | null;
 }
 
 export interface SchedulerStatus {
   running: boolean;
+  /** 当前正在执行的任务 ID（null = 空闲）。 */
+  executing_task_id?: string | null;
   tasks: SchedulerTaskStatus[];
 }
 
@@ -991,7 +968,6 @@ export type View =
   | 'workspace'
   | 'settings'
   | 'memory'
-  | 'traces'
   | 'approval'
   | 'scheduled'
   | 'insights';

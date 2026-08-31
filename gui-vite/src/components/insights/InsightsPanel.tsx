@@ -4,7 +4,7 @@ import { useResource } from '@/hooks/use-resource';
 import { Spinner } from '@/components/ui/Spinner';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';
 import type { SchedulerTaskStatus } from '@/lib/types';
-import { RefreshCw, Gauge, Wrench, Zap, FileText, Search, Clock, Terminal } from 'lucide-react';
+import { RefreshCw, Gauge, Wrench, Zap, FileText, Search, Clock, Terminal, Loader2, CircleX } from 'lucide-react';
 
 /** 距上次执行秒数 → 中文显示（null = 从未执行）。 */
 function formatLastRun(secs: number | null): string {
@@ -52,11 +52,39 @@ function RunningBadge({ running }: { running: boolean }) {
 }
 
 /** 单个定时任务行。 */
-function TaskRow({ task }: { task: SchedulerTaskStatus }) {
+function TaskRow({ task, executing }: { task: SchedulerTaskStatus; executing: boolean }) {
   return (
     <div className="grid grid-cols-12 gap-2 px-4 py-2.5 items-center text-sm">
       <div className="col-span-3 min-w-0">
-        <p className="text-[var(--color-text-primary)] truncate">{task.name}</p>
+        <div className="flex items-center gap-1.5 min-w-0">
+          <p className="text-[var(--color-text-primary)] truncate">{task.name}</p>
+          {executing && (
+            <span
+              className="inline-flex items-center gap-1 shrink-0 text-[10px] text-blue-600 dark:text-blue-300"
+              title="该任务正在执行中（调度器顺序执行，其余任务排队等待）"
+            >
+              <Loader2 size={11} className="animate-spin" />
+              执行中
+            </span>
+          )}
+          {task.last_error && !executing && (
+            <span
+              className="inline-flex items-center shrink-0 text-red-500"
+              title={`上次执行失败：${task.last_error}`}
+              aria-label={`上次执行失败：${task.last_error}`}
+            >
+              <CircleX size={13} />
+            </span>
+          )}
+        </div>
+        {task.last_error && (
+          <p
+            className="text-[10px] text-red-500/90 dark:text-red-400/90 truncate mt-0.5"
+            title={task.last_error}
+          >
+            {task.last_error}
+          </p>
+        )}
       </div>
       <div className="col-span-2 min-w-0">
         <p className="text-xs text-[var(--color-text-tertiary)] truncate">{task.id}</p>
@@ -104,6 +132,7 @@ export default function InsightsPanel() {
 
   const tasks = scheduler?.tasks ?? [];
   const running = scheduler?.running ?? false;
+  const executingTaskId = scheduler?.executing_task_id ?? null;
 
   return (
     <div className="flex flex-col h-full">
@@ -149,13 +178,17 @@ export default function InsightsPanel() {
                     <div className="col-span-3">任务名</div>
                     <div className="col-span-2">ID</div>
                     <div className="col-span-2">优先级</div>
-                    <div className="col-span-2">Cron 表达式</div>
+                    <div className="col-span-2">执行间隔</div>
                     <div className="col-span-1">累计执行</div>
                     <div className="col-span-2">上次执行</div>
                   </div>
                   <div className="divide-y divide-[var(--color-border)]">
                     {tasks.map((task) => (
-                      <TaskRow key={task.id} task={task} />
+                      <TaskRow
+                        key={task.id}
+                        task={task}
+                        executing={executingTaskId === task.id}
+                      />
                     ))}
                   </div>
                 </div>

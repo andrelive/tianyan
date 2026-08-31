@@ -28,7 +28,7 @@ Trait 实现直接在 `impl Trait for Struct` 中完成，不定义中间 inhere
 当现有组件已形成功能闭环（如 EvolutionTask → 综述智能体 → VFS 记账提交的演化链路），不需要额外封装 Manager/Coordinator 层。
 
 ### 共享基础设施归属被依赖方
-跨模块共享的基础设施（类型、连接、估算器）放在**被依赖方/叶模块**，而非依赖方——消费方经单向 re-export 保留下游兼容路径。先例：`SqliteDb` → `vfs::backend`、`RetrievalTrace`/`LoggingConfig`/`TokenEstimator` → `common`。目标是无依赖环（见 [ADR-007](decisions/007-core-dependency-cycle-removal.md)）。
+跨模块共享的基础设施（类型、连接、估算器）放在**被依赖方/叶模块**，而非依赖方——消费方经单向 re-export 保留下游兼容路径。先例：`SqliteDb` → `vfs::backend`、`LoggingConfig`/`TokenEstimator` → `common`。目标是无依赖环（见 [ADR-007](decisions/007-core-dependency-cycle-removal.md)）。
 
 ---
 

@@ -18,7 +18,6 @@ const ToolsPanel = lazy(() => import('@/components/tools/ToolsPanel'));
 const KnowledgePanel = lazy(() => import('@/components/knowledge/KnowledgePanel'));
 const WorkspacePanel = lazy(() => import('@/components/workspace/WorkspacePanel'));
 const MemoryPanel = lazy(() => import('@/components/memory/MemoryPanel'));
-const RetrievalTracesPanel = lazy(() => import('@/components/retrieval/RetrievalTracesPanel'));
 const ApprovalPanel = lazy(() => import('@/components/approval/ApprovalPanel'));
 const ScheduledTasksPanel = lazy(() => import('@/components/tasks/ScheduledTasksPanel'));
 const InsightsPanel = lazy(() => import('@/components/insights/InsightsPanel'));
@@ -112,7 +111,6 @@ function App() {
             <Route path="/knowledge" element={<RouteErrorBoundary><KnowledgePanel /></RouteErrorBoundary>} />
             <Route path="/workspace" element={<RouteErrorBoundary><WorkspacePanel /></RouteErrorBoundary>} />
             <Route path="/memory" element={<RouteErrorBoundary><MemoryPanel /></RouteErrorBoundary>} />
-            <Route path="/traces" element={<RouteErrorBoundary><RetrievalTracesPanel /></RouteErrorBoundary>} />
             <Route path="/approval" element={<RouteErrorBoundary><ApprovalPanel /></RouteErrorBoundary>} />
             <Route path="/scheduled" element={<RouteErrorBoundary><ScheduledTasksPanel /></RouteErrorBoundary>} />
             <Route path="/insights" element={<RouteErrorBoundary><InsightsPanel /></RouteErrorBoundary>} />
