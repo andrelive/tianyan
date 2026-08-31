@@ -78,6 +78,9 @@ pub struct TodoItem {
     pub priority: TodoPriority,
     /// 关联目标 id（可选；目标进度按关联待办自动计算）。
     pub goal_id: Option<String>,
+    /// 父待办 id（可选；子待办挂靠，面板缩进展示）。
+    #[serde(default)]
+    pub parent_id: Option<String>,
     /// 归属会话 id（会话绑定；None = 历史遗留/无会话归属，不进会话面板）。
     #[serde(default)]
     pub session_id: Option<String>,
@@ -109,6 +112,7 @@ impl TodoItem {
             status: TodoStatus::Pending,
             priority,
             goal_id,
+            parent_id: None,
             session_id,
             created_at: now,
             updated_at: now,
@@ -116,6 +120,44 @@ impl TodoItem {
             due_at,
         }
     }
+}
+
+/// 批量创建输入（工具层一次调用写整份清单）。
+#[derive(Debug, Clone)]
+pub struct TodoDraft {
+    /// 标题（必填，非空）。
+    pub title: String,
+    /// 详细描述。
+    pub description: Option<String>,
+    /// 初始状态（缺省 Pending）。
+    pub status: Option<TodoStatus>,
+    /// 优先级（缺省 Medium）。
+    pub priority: Option<TodoPriority>,
+    /// 关联目标 id。
+    pub goal_id: Option<String>,
+    /// 父待办 id（必须已存在）。
+    pub parent_id: Option<String>,
+}
+
+/// 批量更新输入（id + 可选字段；None = 不改动）。
+#[derive(Debug, Clone, Default)]
+pub struct TodoPatch {
+    /// 目标待办 id（必须已存在）。
+    pub id: String,
+    /// 新标题。
+    pub title: Option<String>,
+    /// 新描述。
+    pub description: Option<String>,
+    /// 新状态。
+    pub status: Option<TodoStatus>,
+    /// 新优先级。
+    pub priority: Option<TodoPriority>,
+    /// 新关联目标 id（空串清除）。
+    pub goal_id: Option<String>,
+    /// 新父待办 id（空串清除；必须已存在）。
+    pub parent_id: Option<String>,
+    /// 新截止时间（epoch 秒；<=0 清除）。
+    pub due_at: Option<i64>,
 }
 
 /// 待办存储：内存态 + JSON 文件持久化（写时全量落盘）。
@@ -136,20 +178,26 @@ impl TodoStore {
         }
     }
 
-    /// 从磁盘加载（文件缺失/损坏时静默空列表，不阻塞启动）。
-    async fn load(&self) {
-        let content = match std::fs::read_to_string(&self.file_path) {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        match serde_json::from_str::<Vec<TodoItem>>(&content) {
-            Ok(items) => {
-                *self.items.write().await = items;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, path = %self.file_path.display(), "待办加载失败（使用空列表）")
+    /// 确保已从磁盘加载并返回写锁守卫。
+    ///
+    /// 读盘在写锁内进行（双重检查）：并发首调用者阻塞到加载完成，
+    /// 拿到的是已加载数据——修复「首个 create 在加载完成前 push 到空列表、
+    /// save 时把磁盘上其他会话待办全部覆盖」的竞态（曾导致
+    /// 「todo 不存在或不属于当前会话」的误报）。
+    async fn ensure_loaded(&self) -> tokio::sync::RwLockWriteGuard<'_, Vec<TodoItem>> {
+        let mut guard = self.items.write().await;
+        if !self.loaded.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            match std::fs::read_to_string(&self.file_path) {
+                Ok(content) => match serde_json::from_str::<Vec<TodoItem>>(&content) {
+                    Ok(items) => *guard = items,
+                    Err(e) => {
+                        tracing::warn!(error = %e, path = %self.file_path.display(), "待办加载失败（使用空列表）")
+                    }
+                },
+                Err(_) => { /* 文件缺失 = 首次使用，空列表起步 */ }
             }
         }
+        guard
     }
 
     /// 持久化到磁盘（写失败仅告警——内存态仍可用，下次写重试）。
@@ -167,11 +215,8 @@ impl TodoStore {
 
     /// 列出全部待办（按创建时间升序；首次调用时加载磁盘）。
     pub async fn list(&self) -> Vec<TodoItem> {
-        if !self.loaded.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            self.load().await;
-        }
-        let items = self.items.read().await;
-        let mut v = items.clone();
+        let guard = self.ensure_loaded().await;
+        let mut v = guard.clone();
         v.sort_by_key(|a| a.created_at);
         v
     }
@@ -200,12 +245,15 @@ impl TodoStore {
             session_id,
             now,
         );
-        self.items.write().await.push(item.clone());
+        let mut items = self.ensure_loaded().await;
+        items.push(item.clone());
+        drop(items);
         self.save().await;
         Ok(item)
     }
 
     /// 更新待办（部分字段；返回更新后的条目，不存在返回 None）。
+    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
         id: &str,
@@ -216,53 +264,168 @@ impl TodoStore {
         goal_id: Option<String>,
         due_at: Option<i64>,
     ) -> Result<Option<TodoItem>> {
-        let mut items = self.items.write().await;
-        let item = items
-            .iter_mut()
-            .find(|i| i.id == id)
-            .ok_or_else(|| TianyanError::not_found(format!("todos: 待办不存在：{id}")))?;
-        if let Some(t) = title {
-            let t = t.trim().to_string();
-            if t.is_empty() {
-                return Err(TianyanError::invalid_input("todos: 待办标题不能为空"));
-            }
-            item.title = t;
-        }
-        if let Some(d) = description {
-            item.description = Some(d);
-        }
-        if let Some(s) = status {
-            item.status = s;
-            item.completed_at = if s == TodoStatus::Completed {
-                Some(chrono::Utc::now().timestamp())
-            } else {
-                None
-            };
-        }
-        if let Some(pr) = priority {
-            item.priority = pr;
-        }
-        if let Some(g) = goal_id {
-            item.goal_id = if g.is_empty() { None } else { Some(g) };
-        }
-        if let Some(d) = due_at {
-            item.due_at = if d <= 0 { None } else { Some(d) };
-        }
-        item.updated_at = chrono::Utc::now().timestamp();
-        let updated = item.clone();
-        drop(items);
-        self.save().await;
-        Ok(Some(updated))
+        let patched = self
+            .update_many(vec![TodoPatch {
+                id: id.to_string(),
+                title,
+                description,
+                status,
+                priority,
+                goal_id,
+                parent_id: None,
+                due_at,
+            }])
+            .await?;
+        Ok(patched.into_iter().next())
     }
 
     /// 删除待办（返回是否删除）。
     pub async fn delete(&self, id: &str) -> Result<bool> {
-        let mut items = self.items.write().await;
-        let before = items.len();
-        items.retain(|i| i.id != id);
-        let removed = items.len() != before;
+        Ok(self.delete_many(&[id.to_string()]).await? > 0)
+    }
+
+    /// 批量创建待办（单次落盘；工具层一次调用写整份清单）。
+    ///
+    /// parent_id 指向的父待办必须已存在（同批新建的条目互相不可挂靠——
+    /// id 由存储生成，调用方事先不知道）。
+    pub async fn create_many(
+        &self,
+        session_id: Option<String>,
+        drafts: Vec<TodoDraft>,
+    ) -> Result<Vec<TodoItem>> {
+        if drafts.is_empty() {
+            return Err(TianyanError::invalid_input(
+                "todos: 批量创建至少需要一条待办",
+            ));
+        }
+        for d in &drafts {
+            if d.title.trim().is_empty() {
+                return Err(TianyanError::invalid_input("todos: 待办标题不能为空"));
+            }
+        }
+        let mut items = self.ensure_loaded().await;
+        for d in &drafts {
+            if let Some(p) = &d.parent_id {
+                if !items.iter().any(|i| i.id == *p) {
+                    return Err(TianyanError::invalid_input(format!(
+                        "todos: 父待办不存在：{p}"
+                    )));
+                }
+            }
+        }
+        let now = chrono::Utc::now().timestamp();
+        let mut created = Vec::with_capacity(drafts.len());
+        for d in drafts {
+            let mut item = TodoItem::new(
+                d.title.trim().to_string(),
+                d.description,
+                d.priority.unwrap_or(TodoPriority::Medium),
+                d.goal_id,
+                None,
+                session_id.clone(),
+                now,
+            );
+            if let Some(s) = d.status {
+                item.status = s;
+                if s == TodoStatus::Completed {
+                    item.completed_at = Some(now);
+                }
+            }
+            item.parent_id = d.parent_id;
+            created.push(item);
+        }
+        items.extend(created.iter().cloned());
         drop(items);
-        if removed {
+        self.save().await;
+        Ok(created)
+    }
+
+    /// 批量更新待办（单次落盘；原子——任一 id 不存在则整体不上盘）。
+    pub async fn update_many(&self, patches: Vec<TodoPatch>) -> Result<Vec<TodoItem>> {
+        if patches.is_empty() {
+            return Err(TianyanError::invalid_input("todos: 批量更新至少需要一条"));
+        }
+        let mut items = self.ensure_loaded().await;
+        // 预校验（原子性）：全部 id 存在、标题非空、parent_id 存在
+        let missing: Vec<String> = patches
+            .iter()
+            .filter(|p| !items.iter().any(|i| i.id == p.id))
+            .map(|p| p.id.clone())
+            .collect();
+        if !missing.is_empty() {
+            return Err(TianyanError::not_found(format!(
+                "todos: 待办不存在：{}",
+                missing.join(", ")
+            )));
+        }
+        for p in &patches {
+            if p.title.as_deref().unwrap_or("x").trim().is_empty() {
+                return Err(TianyanError::invalid_input("todos: 待办标题不能为空"));
+            }
+            if let Some(pid) = &p.parent_id {
+                if !pid.is_empty() && !items.iter().any(|i| i.id == *pid) {
+                    return Err(TianyanError::invalid_input(format!(
+                        "todos: 父待办不存在：{pid}"
+                    )));
+                }
+            }
+        }
+        let now = chrono::Utc::now().timestamp();
+        let mut updated = Vec::with_capacity(patches.len());
+        for p in &patches {
+            if let Some(item) = items.iter_mut().find(|i| i.id == p.id) {
+                if let Some(t) = &p.title {
+                    item.title = t.trim().to_string();
+                }
+                if p.description.is_some() {
+                    item.description = p.description.clone();
+                }
+                if let Some(s) = p.status {
+                    item.status = s;
+                    item.completed_at = if s == TodoStatus::Completed {
+                        Some(now)
+                    } else {
+                        None
+                    };
+                }
+                if let Some(pr) = p.priority {
+                    item.priority = pr;
+                }
+                if let Some(g) = &p.goal_id {
+                    item.goal_id = if g.is_empty() { None } else { Some(g.clone()) };
+                }
+                if let Some(pid) = &p.parent_id {
+                    item.parent_id = if pid.is_empty() {
+                        None
+                    } else {
+                        Some(pid.clone())
+                    };
+                }
+                if let Some(d) = p.due_at {
+                    item.due_at = if d <= 0 { None } else { Some(d) };
+                }
+                item.updated_at = now;
+                updated.push(item.clone());
+            }
+        }
+        drop(items);
+        self.save().await;
+        Ok(updated)
+    }
+
+    /// 批量删除待办（单次落盘）。返回实际删除数。
+    pub async fn delete_many(&self, ids: &[String]) -> Result<usize> {
+        if ids.is_empty() {
+            return Err(TianyanError::invalid_input(
+                "todos: 批量删除至少需要一个 id",
+            ));
+        }
+        let mut items = self.ensure_loaded().await;
+        let before = items.len();
+        items.retain(|i| !ids.iter().any(|id| id == &i.id));
+        let removed = before - items.len();
+        drop(items);
+        if removed > 0 {
             self.save().await;
         }
         Ok(removed)
@@ -279,10 +442,7 @@ impl TodoStore {
 
     /// 删除归属指定会话的全部待办（会话删除级联清理）。返回删除数。
     pub async fn delete_by_session(&self, session_id: &str) -> usize {
-        if !self.loaded.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            self.load().await;
-        }
-        let mut items = self.items.write().await;
+        let mut items = self.ensure_loaded().await;
         let before = items.len();
         items.retain(|i| i.session_id.as_deref() != Some(session_id));
         let removed = before - items.len();
@@ -295,7 +455,7 @@ impl TodoStore {
 
     /// 按目标 id 统计（目标进度计算用）：(总数, 已完成数)。
     pub async fn count_by_goal(&self, goal_id: &str) -> (usize, usize) {
-        let items = self.items.read().await;
+        let items = self.ensure_loaded().await;
         let linked: Vec<&TodoItem> = items
             .iter()
             .filter(|i| i.goal_id.as_deref() == Some(goal_id))
@@ -404,6 +564,226 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_not_found());
+    }
+
+    #[tokio::test]
+    async fn test_create_before_load_does_not_clobber_file() {
+        // 回归：新实例首次操作若是 create（未经 list 加载），不得把磁盘上
+        // 既有条目覆盖掉（曾导致「todo 不存在或不属于当前会话」误报）。
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = TodoStore::new(dir.path());
+            store
+                .create(
+                    "既有待办".into(),
+                    None,
+                    TodoPriority::Medium,
+                    None,
+                    None,
+                    Some("s-1".into()),
+                )
+                .await
+                .unwrap();
+        }
+        {
+            let store = TodoStore::new(dir.path());
+            // 首个操作即批量 create（无任何 list 前置）
+            store
+                .create_many(
+                    Some("s-2".into()),
+                    vec![TodoDraft {
+                        title: "新待办".into(),
+                        description: None,
+                        status: None,
+                        priority: None,
+                        goal_id: None,
+                        parent_id: None,
+                    }],
+                )
+                .await
+                .unwrap();
+            let all = store.list().await;
+            assert_eq!(all.len(), 2, "既有待办不得被覆盖丢失");
+        }
+        // 落盘后重启同样双条可见
+        let store = TodoStore::new(dir.path());
+        assert_eq!(store.list().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_batch_create_update_delete() {
+        let (store, _dir) = temp_store();
+        // 批量创建：3 条，1 条直接 in_progress，1 条挂靠首条为子待办
+        let created = store
+            .create_many(
+                Some("s-1".into()),
+                vec![
+                    TodoDraft {
+                        title: "父任务".into(),
+                        description: None,
+                        status: Some(TodoStatus::InProgress),
+                        priority: Some(TodoPriority::High),
+                        goal_id: None,
+                        parent_id: None,
+                    },
+                    TodoDraft {
+                        title: "子任务".into(),
+                        description: None,
+                        status: None,
+                        priority: None,
+                        goal_id: None,
+                        parent_id: None, // 占位，下方用真实 id 重建
+                    },
+                    TodoDraft {
+                        title: "独立任务".into(),
+                        description: None,
+                        status: None,
+                        priority: None,
+                        goal_id: None,
+                        parent_id: None,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.len(), 3);
+        assert_eq!(created[0].status, TodoStatus::InProgress);
+
+        // 子待办挂靠：parent_id 指向同批首条
+        let child = store
+            .create_many(
+                Some("s-1".into()),
+                vec![TodoDraft {
+                    title: "真正的子任务".into(),
+                    description: None,
+                    status: None,
+                    priority: None,
+                    goal_id: None,
+                    parent_id: Some(created[0].id.clone()),
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(child[0].parent_id.as_deref(), Some(created[0].id.as_str()));
+
+        // 批量更新：两条状态一次推进
+        let updated = store
+            .update_many(vec![
+                TodoPatch {
+                    id: created[1].id.clone(),
+                    status: Some(TodoStatus::Completed),
+                    ..Default::default()
+                },
+                TodoPatch {
+                    id: created[2].id.clone(),
+                    status: Some(TodoStatus::InProgress),
+                    ..Default::default()
+                },
+            ])
+            .await
+            .unwrap();
+        assert_eq!(updated.len(), 2);
+        assert_eq!(updated[0].status, TodoStatus::Completed);
+        assert!(updated[0].completed_at.is_some());
+
+        // 原子性：批量中混入不存在 id → 整体报错不落盘
+        let err = store
+            .update_many(vec![
+                TodoPatch {
+                    id: created[0].id.clone(),
+                    status: Some(TodoStatus::Completed),
+                    ..Default::default()
+                },
+                TodoPatch {
+                    id: "nope".into(),
+                    status: Some(TodoStatus::Completed),
+                    ..Default::default()
+                },
+            ])
+            .await
+            .unwrap_err();
+        assert!(err.is_not_found());
+
+        // 批量删除
+        let removed = store
+            .delete_many(&[created[1].id.clone(), created[2].id.clone()])
+            .await
+            .unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.list().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_parent_id_validation() {
+        let (store, _dir) = temp_store();
+        // 创建时父待办不存在 → invalid_input
+        let err = store
+            .create_many(
+                Some("s-1".into()),
+                vec![TodoDraft {
+                    title: "孤儿".into(),
+                    description: None,
+                    status: None,
+                    priority: None,
+                    goal_id: None,
+                    parent_id: Some("ghost".into()),
+                }],
+            )
+            .await
+            .unwrap_err();
+        assert!(err.is_invalid_input());
+
+        // 更新时挂靠不存在的父 → invalid_input
+        let item = store
+            .create(
+                "普通待办".into(),
+                None,
+                TodoPriority::Medium,
+                None,
+                None,
+                Some("s-1".into()),
+            )
+            .await
+            .unwrap();
+        let err = store
+            .update_many(vec![TodoPatch {
+                id: item.id.clone(),
+                parent_id: Some("ghost".into()),
+                ..Default::default()
+            }])
+            .await
+            .unwrap_err();
+        assert!(err.is_invalid_input());
+
+        // 空串清除父挂靠
+        let parent = store
+            .create(
+                "父".into(),
+                None,
+                TodoPriority::Medium,
+                None,
+                None,
+                Some("s-1".into()),
+            )
+            .await
+            .unwrap();
+        store
+            .update_many(vec![TodoPatch {
+                id: item.id.clone(),
+                parent_id: Some(parent.id.clone()),
+                ..Default::default()
+            }])
+            .await
+            .unwrap();
+        let cleared = store
+            .update_many(vec![TodoPatch {
+                id: item.id.clone(),
+                parent_id: Some(String::new()),
+                ..Default::default()
+            }])
+            .await
+            .unwrap();
+        assert_eq!(cleared[0].parent_id, None);
     }
 
     #[tokio::test]

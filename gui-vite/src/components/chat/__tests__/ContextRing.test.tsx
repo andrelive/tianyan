@@ -18,10 +18,12 @@ describe('ContextRing', () => {
 
     expect(screen.getByText('75%')).toBeInTheDocument();
     fireEvent.click(screen.getByText('75%'));
-    // 详情展开：占用 / 缓存命中 / 输出
+    // 详情展开：占用 / 缓存命中 / 输出 / 口径说明
     expect(screen.getByText(/6,000 \/ 8,000 \(75%\)/)).toBeInTheDocument();
     expect(screen.getByText(/3,000 token/)).toBeInTheDocument();
     expect(screen.getByText('500 token')).toBeInTheDocument();
+    // 口径说明：圆环 = 最近一轮请求，底部小字 = 会话累计
+    expect(screen.getByText(/最近一轮请求/)).toBeInTheDocument();
   });
 
   it('renders an empty ring without usage (en-dash placeholder)', () => {

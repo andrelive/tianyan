@@ -125,6 +125,10 @@ export default function ContextRing({
               {formatNumber(usage.completion_tokens)} token
             </span>
           </div>
+          {/* 口径说明：圆环 = 最近一轮请求（上下文占用语义）；底部小字 = 会话累计 */}
+          <div className="pt-1 mb-2 border-t border-[var(--color-border)] text-[10px] text-[var(--color-text-tertiary)]">
+            以上为最近一轮请求 · 输入框下方小字为会话累计
+          </div>
           <button
             type="button"
             onClick={() => {
