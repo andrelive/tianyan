@@ -234,12 +234,15 @@ describe('fetchTasks', () => {
   it('fetches the background task list (Vec<BackgroundTask>)', async () => {
     const result = await fetchTasks();
 
-    expect(result).toHaveLength(3);
+    expect(result).toHaveLength(4);
     expect(result[0]).toMatchObject({ id: 'task-1', status: 'running' });
     expect(result[0].created_at).toBeTypeOf('number');
     expect(result[0].completed_at).toBeNull();
-    expect(result[1].result).toBe('找到 12 处 TODO 标记');
-    expect(result[2]).toMatchObject({ status: 'failed', error: '读取文件超时: 网络错误' });
+    // 后台终端命令（kind=command）与委托任务同一视图
+    const byId = Object.fromEntries(result.map((t) => [t.id, t]));
+    expect(byId['task-2'].result).toBe('找到 12 处 TODO 标记');
+    expect(byId['task-3']).toMatchObject({ status: 'failed', error: '读取文件超时: 网络错误' });
+    expect(byId['task-cmd-1']).toMatchObject({ status: 'running', kind: 'command' });
   });
 
   it('returns empty array when no tasks exist', async () => {
