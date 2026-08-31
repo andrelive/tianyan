@@ -389,15 +389,27 @@ impl AgentCoordinator for Agent {
     }
 
     async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask> {
-        self.background_tasks.snapshot().await
+        let mut all = self.background_tasks.snapshot().await;
+        // 合并后台终端命令（execute_command background）：与委托任务共用
+        // 同一面板视图与取消入口（此前命令任务仅 agent 内 task_status 可见）
+        for t in self.command_tasks.list().await {
+            all.push(crate::agent::background::BackgroundTask::from_command_task(
+                t,
+            ));
+        }
+        all
     }
 
     async fn cancel_background_task(&self, task_id: &str) -> Result<bool> {
-        if self.background_tasks.get(task_id).await.is_none() {
-            return Ok(false);
+        if self.background_tasks.get(task_id).await.is_some() {
+            self.background_tasks.cancel(task_id).await?;
+            return Ok(true);
         }
-        self.background_tasks.cancel(task_id).await?;
-        Ok(true)
+        // 后台终端命令（cmd_ 前缀）：kill 终态幂等；未知 id Err → 不存在
+        match self.command_tasks.kill(task_id).await {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {

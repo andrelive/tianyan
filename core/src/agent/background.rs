@@ -151,6 +151,41 @@ pub struct BackgroundTask {
     pub seq: u64,
 }
 
+impl BackgroundTask {
+    /// CommandTask → BackgroundTask 同构映射（统一后台任务视图）。
+    ///
+    /// 后台终端命令（execute_command background）此前仅 agent 内
+    /// task_status 可见，会话面板不可见——合并进同一列表后，面板与
+    /// REST 取消入口对两类任务行为一致（状态映射 snake_case 同语义）。
+    pub(crate) fn from_command_task(t: CommandTask) -> Self {
+        let status = match t.status {
+            CommandTaskStatus::Running => TaskStatus::Running,
+            CommandTaskStatus::Completed => TaskStatus::Completed,
+            CommandTaskStatus::Failed => TaskStatus::Failed,
+            CommandTaskStatus::Cancelled => TaskStatus::Cancelled,
+        };
+        // 命令串截断（面板单行展示；委托侧描述同语义）
+        let description: String = t.command.chars().take(160).collect();
+        // 失败时携带退出码（面板终态展示用；Cancelled 无退出码）
+        let error = match t.status {
+            CommandTaskStatus::Failed => Some(format!("退出码 {}", t.exit_code.unwrap_or(-1))),
+            _ => None,
+        };
+        Self {
+            id: t.id,
+            kind: TaskKind::Command,
+            description,
+            status,
+            parent_session_id: t.parent_session_id,
+            result: None,
+            error,
+            created_at: t.created_at,
+            completed_at: t.completed_at,
+            seq: t.seq,
+        }
+    }
+}
+
 /// 任务完成通知器。
 ///
 /// 由 Agent 装配层注入（默认实现 [`SessionTaskNotifier`] 把通知持久化
@@ -780,6 +815,100 @@ mod tests {
         assert!(TaskStatus::Completed.is_terminal());
         assert!(TaskStatus::Failed.is_terminal());
         assert!(TaskStatus::Cancelled.is_terminal());
+    }
+
+    #[test]
+    fn test_from_command_task_mapping() {
+        let t = CommandTask {
+            id: "cmd_7".to_string(),
+            command: "python -m src.main --config long.yaml".to_string(),
+            cwd: Some("F:\\work".to_string()),
+            parent_session_id: "session-1".to_string(),
+            status: CommandTaskStatus::Running,
+            exit_code: None,
+            pid: Some(1234),
+            log_file: Some("cmd_7.log".to_string()),
+            output_tail: String::new(),
+            created_at: 1000,
+            completed_at: None,
+            seq: 7,
+            ready: false,
+            ready_note: None,
+        };
+        let b = BackgroundTask::from_command_task(t);
+        assert_eq!(b.id, "cmd_7");
+        assert_eq!(b.kind, TaskKind::Command);
+        assert_eq!(b.status, TaskStatus::Running);
+        assert_eq!(b.parent_session_id, "session-1");
+        assert_eq!(b.seq, 7);
+        assert_eq!(b.completed_at, None);
+
+        // 状态映射：四态一一对应
+        let mk = |s: CommandTaskStatus| {
+            let t = CommandTask {
+                status: s,
+                exit_code: Some(1),
+                completed_at: Some(2000),
+                ..CommandTask {
+                    id: String::new(),
+                    command: String::new(),
+                    cwd: None,
+                    parent_session_id: String::new(),
+                    status: CommandTaskStatus::Running,
+                    exit_code: None,
+                    pid: None,
+                    log_file: None,
+                    output_tail: String::new(),
+                    created_at: 0,
+                    completed_at: None,
+                    seq: 0,
+                    ready: false,
+                    ready_note: None,
+                }
+            };
+            BackgroundTask::from_command_task(t)
+        };
+        assert_eq!(
+            mk(CommandTaskStatus::Completed).status,
+            TaskStatus::Completed
+        );
+        assert_eq!(mk(CommandTaskStatus::Failed).status, TaskStatus::Failed);
+        assert_eq!(
+            mk(CommandTaskStatus::Cancelled).status,
+            TaskStatus::Cancelled
+        );
+
+        // 失败携带退出码（面板终态展示），其余终态无 error
+        let failed = mk(CommandTaskStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("退出码 1"));
+        assert_eq!(mk(CommandTaskStatus::Completed).error, None);
+        assert_eq!(mk(CommandTaskStatus::Cancelled).error, None);
+
+        // 长命令描述截断到 160 字符
+        let long = CommandTask {
+            command: "x".repeat(500),
+            parent_session_id: "s".to_string(),
+            status: CommandTaskStatus::Running,
+            seq: 1,
+            ..CommandTask {
+                id: String::new(),
+                command: String::new(),
+                cwd: None,
+                parent_session_id: String::new(),
+                status: CommandTaskStatus::Running,
+                exit_code: None,
+                pid: None,
+                log_file: None,
+                output_tail: String::new(),
+                created_at: 0,
+                completed_at: None,
+                seq: 0,
+                ready: false,
+                ready_note: None,
+            }
+        };
+        let b = BackgroundTask::from_command_task(long);
+        assert_eq!(b.description.chars().count(), 160);
     }
 
     #[test]

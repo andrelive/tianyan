@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import SessionTasksPanel from '../SessionTasksPanel';
 import { mockTaskCancelCalls, resetTaskMocks } from '@/test/mocks/handlers';
 
-/** 会话后台任务停靠条（会话绑定 + 只展示 pending/running + 可取消）。 */
+/** 会话后台任务停靠条（会话绑定 + 终态保留展示 + 运行中可取消）。 */
 
 beforeEach(() => {
   resetTaskMocks();
@@ -16,19 +16,23 @@ describe('SessionTasksPanel', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('shows running tasks bound to the current session with cancel buttons', async () => {
+  it('shows session tasks with kind badges and cancel buttons', async () => {
     render(<SessionTasksPanel sessionId="session-1" />);
 
-    // mockTasks: task-1 running @ session-1；task-2 completed @ session-2（不显示）
+    // mockTasks: task-1(delegate running) + task-cmd-1(command running) @ session-1；
+    // task-2 completed @ session-2、task-3 failed 无会话归属（不显示）
     await waitFor(() => {
-      expect(screen.getByText(/后台任务 1 个运行中/)).toBeInTheDocument();
+      expect(screen.getByText(/运行中 2/)).toBeInTheDocument();
     });
     expect(screen.getByText(/写入文件/)).toBeInTheDocument();
     expect(screen.queryByText(/搜索代码库/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /取消后台任务/ })).toBeInTheDocument();
+    // 类型徽标：委托 / 终端（后台终端命令对用户可见——此前只有 agent 能看到）
+    expect(screen.getByText('委托')).toBeInTheDocument();
+    expect(screen.getByText('终端')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /取消后台任务/ })).toHaveLength(2);
   });
 
-  it('renders nothing when the session has no running tasks', async () => {
+  it('renders nothing when the session has no tasks', async () => {
     const { container } = render(<SessionTasksPanel sessionId="session-9" />);
     // 轮询发出但过滤后为空 → 整条不渲染
     await waitFor(() => {
@@ -36,14 +40,57 @@ describe('SessionTasksPanel', () => {
     });
   });
 
+  it('keeps terminal tasks visible with status labels', async () => {
+    // 覆盖：session-1 只有终态任务 → 面板仍展示（已完成/已取消样式）
+    const { mockTasks } = await import('@/test/mocks/handlers');
+    const { http, HttpResponse } = await import('msw');
+    const { server } = await import('@/test/mocks/server');
+    const finished = [
+      { ...mockTasks[0], status: 'completed' as const, completed_at: 1754399900000 },
+      { ...mockTasks[1], status: 'cancelled' as const, completed_at: 1754399900001 },
+    ];
+    server.use(
+      http.get('*/api/v1/tasks', () => HttpResponse.json(finished)),
+    );
+    render(<SessionTasksPanel sessionId="session-1" />);
+    await waitFor(() => {
+      expect(screen.getByText(/已结束 2/)).toBeInTheDocument();
+    });
+    expect(screen.getByText('已完成')).toBeInTheDocument();
+    expect(screen.getByText('已取消')).toBeInTheDocument();
+    // 终态无取消按钮
+    expect(screen.queryByRole('button', { name: /取消后台任务/ })).not.toBeInTheDocument();
+  });
+
+  it('shows failure reason for failed command tasks', async () => {
+    const { mockTasks } = await import('@/test/mocks/handlers');
+    const { http, HttpResponse } = await import('msw');
+    const { server } = await import('@/test/mocks/server');
+    const failed = [
+      {
+        ...mockTasks[1],
+        status: 'failed' as const,
+        error: '退出码 1',
+        completed_at: 1754399900002,
+      },
+    ];
+    server.use(
+      http.get('*/api/v1/tasks', () => HttpResponse.json(failed)),
+    );
+    render(<SessionTasksPanel sessionId="session-1" />);
+    await waitFor(() => {
+      expect(screen.getByText('失败（退出码 1）')).toBeInTheDocument();
+    });
+  });
+
   it('cancels a running task via POST /tasks/{id}/cancel', async () => {
     const user = userEvent.setup();
     render(<SessionTasksPanel sessionId="session-1" />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /取消后台任务/ })).toBeInTheDocument();
+      expect(screen.getAllByRole('button', { name: /取消后台任务/ })[0]).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole('button', { name: /取消后台任务/ }));
+    await user.click(screen.getAllByRole('button', { name: /取消后台任务/ })[0]);
     await waitFor(() => {
       expect(mockTaskCancelCalls).toEqual([{ taskId: 'task-1' }]);
     });
