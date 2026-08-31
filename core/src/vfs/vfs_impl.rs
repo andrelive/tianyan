@@ -416,8 +416,18 @@ impl VfsSearch for VirtualFileSystemImpl {
             .clone()
             .unwrap_or_else(|| "text-embedding-3-small".to_string());
 
-        let embedding = embedding_provider.embed_single(&model, query).await?;
-        let query_vector = embedding.vector;
+        // 查询向量维度与向量库建表维度对齐（同 index_entry）
+        let query_embedding = {
+            let dim = self.vector_storage.embedding_dim();
+            if dim > 0 {
+                embedding_provider
+                    .embed_single_with_dimensions(&model, query, dim)
+                    .await?
+            } else {
+                embedding_provider.embed_single(&model, query).await?
+            }
+        };
+        let query_vector = query_embedding.vector;
 
         let category_filter = namespace.map(|ns| ns.to_string());
         // 内部请求 limit * 2 保证融合质量（每列独立搜索后融合），返回前截断到 limit。
@@ -487,12 +497,27 @@ impl VfsSearch for VirtualFileSystemImpl {
             .clone()
             .ok_or_else(|| TianyanError::Custom("检索错误：VFS 未配置嵌入服务".to_string()))?;
 
-        let abstract_embedding = embedding_provider
-            .embed_single(embedding_model, abstract_content)
-            .await?;
-        let overview_embedding = embedding_provider
-            .embed_single(embedding_model, overview_content)
-            .await?;
+        // 按向量库建表维度请求嵌入（维度与 API 默认输出不一致时，arrow 写入路径
+        // 会 panic——release panic=abort 下整进程闪退，故必须显式对齐）
+        let dim = self.vector_storage.embedding_dim();
+        let abstract_embedding = if dim > 0 {
+            embedding_provider
+                .embed_single_with_dimensions(embedding_model, abstract_content, dim)
+                .await?
+        } else {
+            embedding_provider
+                .embed_single(embedding_model, abstract_content)
+                .await?
+        };
+        let overview_embedding = if dim > 0 {
+            embedding_provider
+                .embed_single_with_dimensions(embedding_model, overview_content, dim)
+                .await?
+        } else {
+            embedding_provider
+                .embed_single(embedding_model, overview_content)
+                .await?
+        };
 
         let point_id = uri.to_point_id();
         let point = VectorPoint {

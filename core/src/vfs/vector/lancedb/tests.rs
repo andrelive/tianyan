@@ -228,3 +228,46 @@ async fn test_search_abstract_and_overview() {
         results[0].score
     );
 }
+
+// ─── 维度不匹配防御（闪退根因回归） ───
+//
+// 历史故障：配置 vector_dimension(3072) ≠ 嵌入 API 实际输出(1024) 时，
+// arrow FixedSizeListBuilder 产出非法数组 → lance 内部 panic →
+// release panic=abort 整进程闪退（BEX64，日志无输出）。
+// 回归锁定：维度不匹配必须在存储层转为干净错误，绝不 panic。
+
+#[tokio::test]
+async fn test_upsert_dimension_mismatch_returns_clean_error() {
+    let (store, _dir) = create_store().await;
+    // 4 维向量 vs 建表 8 维
+    let point = make_point(
+        "tianyan://knowledge/dim_mismatch",
+        Some(vec![1.0, 0.0, 0.0, 0.0]),
+        Some(vec![1.0, 0.0, 0.0, 0.0]),
+    );
+    let err = store.upsert_point(&point).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("维度不匹配"), "错误信息应可行动：{msg}");
+}
+
+#[tokio::test]
+async fn test_search_dimension_mismatch_returns_clean_error() {
+    let (store, _dir) = create_store().await;
+    let query = VectorSearchQuery {
+        vector: vec![1.0, 0.0, 0.0, 0.0], // 4 维 vs 建表 8 维
+        vector_type: VectorType::Abstract,
+        limit: 10,
+        category_filter: None,
+        min_score: None,
+    };
+    let err = store.search(query).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("维度不匹配"), "错误信息应可行动：{msg}");
+}
+
+#[tokio::test]
+async fn test_embedding_dim_exposes_table_dimension() {
+    let (store, _dir) = create_store().await;
+    use crate::vfs::vector::VectorStorage as _;
+    assert_eq!(store.embedding_dim(), 8);
+}

@@ -31,6 +31,10 @@ impl Default for InMemoryVectorStorage {
 
 #[async_trait]
 impl VectorStorage for InMemoryVectorStorage {
+    fn embedding_dim(&self) -> usize {
+        8
+    }
+
     async fn initialize(&self) -> Result<()> {
         Ok(())
     }

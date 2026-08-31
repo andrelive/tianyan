@@ -10,6 +10,13 @@ use crate::vfs::types::{VectorPoint, VectorSearchQuery, VectorSearchResult, Vect
 /// 此 trait 定义了存储和搜索向量嵌入的向量存储后端接口。
 #[async_trait]
 pub trait VectorStorage: Send + Sync {
+    /// 向量存储的嵌入维度（建表 schema 的 FixedSizeList 宽度）。
+    ///
+    /// 嵌入路径据此向 API 请求同维度向量，保证写入/查询与表 schema 一致。
+    /// 维度不一致曾触发 arrow 内部 panic + release `panic = "abort"` 整进程闪退
+    /// （0xC0000409 fail-fast，日志无任何输出）。
+    fn embedding_dim(&self) -> usize;
+
     /// 初始化向量存储。
     async fn initialize(&self) -> Result<()>;
 

@@ -31,6 +31,10 @@ impl Default for MockVectorStorage {
 
 #[async_trait::async_trait]
 impl VectorStorage for MockVectorStorage {
+    fn embedding_dim(&self) -> usize {
+        8
+    }
+
     async fn initialize(&self) -> crate::common::error::Result<()> {
         Ok(())
     }

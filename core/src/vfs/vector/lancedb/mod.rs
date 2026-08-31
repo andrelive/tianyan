@@ -122,6 +122,32 @@ impl LanceDbVectorStore {
 
     /// 将上下文条目转换为 RecordBatch（单行）。
     fn point_to_batch(&self, point: &VectorPoint) -> Result<RecordBatch> {
+        // 维度前置校验（防御性）：向量长度 ≠ 建表维度时，arrow FixedSizeListBuilder
+        // 会在 finish/访问时 panic——release panic=abort 下整进程闪退且日志无输出。
+        // 此处提前转为带行动指引的干净错误。
+        let check = |name: &str, v: &Option<Vec<f32>>, dim: usize| -> Result<()> {
+            if let Some(v) = v {
+                if v.len() != dim {
+                    return Err(TianyanError::Custom(format!(
+                        "向量数据库错误：{} 维度不匹配：实际 {}，向量库 {}——请使 storage.vector.vector_dimension 与嵌入模型输出维度一致（嵌入请求已按向量库维度发起；检查嵌入模型配置）",
+                        name, v.len(), dim
+                    )));
+                }
+            }
+            Ok(())
+        };
+        check(
+            "abstract_vector",
+            &point.abstract_vector,
+            self.embedding_dim,
+        )?;
+        check(
+            "overview_vector",
+            &point.overview_vector,
+            self.embedding_dim,
+        )?;
+        check("visual_vector", &point.visual_vector, self.visual_dim)?;
+
         let id = point.uri().to_point_id();
         let mut id_b = StringBuilder::new();
         let mut abs_b = FixedSizeListBuilder::new(Float32Builder::new(), self.embedding_dim as i32);
@@ -164,6 +190,10 @@ impl LanceDbVectorStore {
 
 #[async_trait]
 impl VectorStorage for LanceDbVectorStore {
+    fn embedding_dim(&self) -> usize {
+        self.embedding_dim
+    }
+
     async fn initialize(&self) -> Result<()> {
         Ok(())
     }
@@ -191,6 +221,14 @@ impl VectorStorage for LanceDbVectorStore {
     }
 
     async fn search(&self, query: VectorSearchQuery) -> Result<Vec<VectorSearchResult>> {
+        // 查询向量维度校验（同 upsert：不一致时 arrow/lance 内部 panic 不可控）
+        if query.vector.len() != self.embedding_dim {
+            return Err(TianyanError::Custom(format!(
+                "向量数据库错误：查询向量维度不匹配：实际 {}，向量库 {}——请使 storage.vector.vector_dimension 与嵌入模型输出维度一致",
+                query.vector.len(),
+                self.embedding_dim
+            )));
+        }
         let stream = self
             .table
             .query()
