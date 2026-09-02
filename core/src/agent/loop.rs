@@ -580,7 +580,32 @@ impl AgentLoop {
                 }
             }
 
-            let (assistant_msg, turn_usage, finish_reason) = step_result;
+            let (mut assistant_msg, turn_usage, finish_reason) = step_result;
+
+            // 兜底剥离（流式/非流式统一）：部分网关（如 opencode 代理
+            // deepseek-v4-flash）不稳定——有时把思考内容直接放进 content
+            // 而非 reasoning_content，导致思考内容作为正文显示/存储。
+            // 工具调用轮（content 与 tool_calls 并存）的 content 几乎必然
+            // 是思考过程（模型在工具轮不输出正文），并入 reasoning 通道
+            // （前端折叠展示、存储为 Part::Reasoning）。
+            if !assistant_msg.content.is_empty()
+                && assistant_msg
+                    .tool_calls
+                    .as_ref()
+                    .map(|c| !c.is_empty())
+                    .unwrap_or(false)
+            {
+                let content = std::mem::take(&mut assistant_msg.content);
+                let merged = match assistant_msg.reasoning_content.take() {
+                    Some(mut r) => {
+                        r.push('\n');
+                        r.push_str(&content);
+                        r
+                    }
+                    None => content,
+                };
+                assistant_msg.reasoning_content = Some(merged);
+            }
 
             // LLM 用量日志：每轮一次（聊天/子代理/演化任务统一记录）。
             // provider 优先查配置映射（模型名可能不含前缀），
