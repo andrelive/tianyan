@@ -96,25 +96,34 @@ impl SqliteDb {
                 "DROP TABLE IF EXISTS session_messages_fts; DROP TABLE IF EXISTS session_messages;",
             )?;
         }
-        conn.execute_batch(SCHEMA_SQL)?;
-        // ADR-026 幂等迁移：旧 session_meta 表补 parent_session_id 列（已存在则跳过）
-        let has_parent_col: bool = {
-            let mut stmt = conn.prepare("PRAGMA table_info(session_meta)")?;
-            let cols = stmt
-                .query_map([], |r| r.get::<_, String>(1))?
-                .collect::<Result<Vec<_>, _>>()?;
-            cols.iter().any(|c| c == "parent_session_id")
-        };
-        if !has_parent_col {
-            conn.execute(
-                "ALTER TABLE session_meta ADD COLUMN parent_session_id TEXT",
+        // ADR-026 幂等迁移：旧 session_meta 表补 parent_session_id 列。
+        // 必须在 SCHEMA_SQL 之前执行——SCHEMA_SQL 含
+        // CREATE INDEX idx_session_meta_parent，旧表无该列时建索引直接报错
+        // （0.2.6 首版 bug：迁移放在 execute_batch 之后，旧库启动即失败）。
+        // 新库（表不存在）跳过 ALTER，由 SCHEMA_SQL 创建带列的表。
+        let has_meta_table: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_meta')",
                 [],
-            )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_session_meta_parent ON session_meta(parent_session_id)",
-                [],
-            )?;
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if has_meta_table {
+            let has_parent_col: bool = {
+                let mut stmt = conn.prepare("PRAGMA table_info(session_meta)")?;
+                let cols = stmt
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                cols.iter().any(|c| c == "parent_session_id")
+            };
+            if !has_parent_col {
+                conn.execute(
+                    "ALTER TABLE session_meta ADD COLUMN parent_session_id TEXT",
+                    [],
+                )?;
+            }
         }
+        conn.execute_batch(SCHEMA_SQL)?;
         Ok(())
     }
 }
@@ -293,5 +302,69 @@ mod lock_tests {
         let probe = dir.path().join("t2.db");
         std::fs::rename(&db_path, &probe).unwrap();
         std::fs::rename(&probe, &db_path).unwrap();
+    }
+
+    /// 回归（0.2.6 首版 bug）：旧库 session_meta 表无 parent_session_id 列时，
+    /// init_all_schemas 必须先 ALTER 加列再执行 SCHEMA_SQL（SCHEMA_SQL 含
+    /// 该列的索引创建，顺序颠倒会 no such column 启动失败）。
+    #[tokio::test]
+    async fn test_migration_adds_parent_session_id_before_schema_sql() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy.db");
+        {
+            // 模拟 0.2.5 旧库：session_meta 无 parent_session_id 列
+            let db = SqliteDb::open(db_path.clone()).unwrap();
+            {
+                let conn = db.lock().await;
+                conn.execute_batch(
+                    "CREATE TABLE session_meta (
+                        session_id  TEXT PRIMARY KEY,
+                        header_json TEXT NOT NULL DEFAULT '{}',
+                        created_at  INTEGER,
+                        updated_at  TEXT DEFAULT (datetime('now'))
+                    );
+                    INSERT INTO session_meta (session_id) VALUES ('legacy-session');",
+                )
+                .unwrap();
+            }
+            db.init_all_schemas().await.expect("旧库迁移应成功");
+            // 列已添加 + 索引已建
+            let conn = db.lock().await;
+            let has_col: bool = {
+                let mut stmt = conn.prepare("PRAGMA table_info(session_meta)").unwrap();
+                let cols = stmt
+                    .query_map([], |r| r.get::<_, String>(1))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                cols.iter().any(|c| c == "parent_session_id")
+            };
+            assert!(has_col, "旧表应补 parent_session_id 列");
+            // 旧数据保留
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM session_meta", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1, "迁移不应丢数据");
+        }
+    }
+
+    /// 新库（无 session_meta 表）：init_all_schemas 直接创建带列的表 + 索引。
+    #[tokio::test]
+    async fn test_fresh_db_creates_parent_session_id_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("fresh.db");
+        let db = SqliteDb::open(db_path).unwrap();
+        db.init_all_schemas().await.expect("新库初始化应成功");
+        let conn = db.lock().await;
+        let has_col: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(session_meta)").unwrap();
+            let cols = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            cols.iter().any(|c| c == "parent_session_id")
+        };
+        assert!(has_col, "新表应含 parent_session_id 列");
     }
 }
