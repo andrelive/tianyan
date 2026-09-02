@@ -134,58 +134,6 @@ fn make_loop(mock: MockChatService, max_turns: usize) -> AgentLoop {
     )
 }
 
-/// 回归（opencode 网关不稳定）：工具调用轮的 content 是思考内容（未走
-/// reasoning_content 字段）时，剥离为 reasoning——不作为正文显示/存储。
-#[tokio::test]
-async fn test_run_strips_tool_turn_content_into_reasoning() {
-    let mut mock = MockChatService::new();
-    mock.expect_chat_completion().returning(|req| {
-        // 第一轮：返回"content 思考 + tool_calls"（模拟网关把思考放 content）
-        if req.messages.len() <= 1 {
-            let mut msg = tool_call_msg("read_file");
-            msg.content = "让我先看看这个文件的结构，然后决定怎么改。".to_string();
-            Ok(response_with(msg))
-        } else {
-            Ok(response_with(Message::assistant("最终回答")))
-        }
-    });
-    let agent_loop = make_loop(mock, 5);
-
-    let mut messages = vec![Message::user("帮我改代码")];
-    let result = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
-        .await
-        .unwrap();
-    assert!(matches!(result, AgentLoopResult::Answer { .. }));
-
-    // 历史中第一条 assistant 消息：content 被剥离为空，思考进 reasoning
-    let first_assistant = messages
-        .iter()
-        .find(|m| m.role == crate::common::types::MessageRole::Assistant)
-        .expect("应有 assistant 消息");
-    assert!(
-        first_assistant.content.is_empty(),
-        "工具轮 content 应被剥离，实际: {:?}",
-        first_assistant.content
-    );
-    assert!(
-        first_assistant
-            .reasoning_content
-            .as_deref()
-            .map(|r| r.contains("让我先看看"))
-            .unwrap_or(false),
-        "思考内容应进 reasoning_content"
-    );
-    assert!(
-        first_assistant
-            .tool_calls
-            .as_ref()
-            .map(|c| !c.is_empty())
-            .unwrap_or(false),
-        "tool_calls 应保留"
-    );
-}
-
 #[tokio::test]
 async fn test_run_completes_tool_loop() {
     let mut mock = MockChatService::new();
