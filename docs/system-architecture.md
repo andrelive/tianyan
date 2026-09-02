@@ -172,7 +172,7 @@ pub struct StructuredMessage {
 
 知识库查询、技能调用等能力封装为 OpenAI function calling 兼容的工具，由 LLM 通过 `tool_call` 自主调用。
 
-当前 `ToolRegistry` 注册了 25 个工具：`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_code`、`search_vfs`、`vfs_read`、`vfs_list`、`call_skill`、`run_tests`、`discover_tests`、`verify_build`、`ask_user`、`self_check`、`knowledge_ingest`、`web_search`、`web_fetch`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`task_status`、`task_cancel`、`lsp`。其中 `call_skill` 桥接到 `SkillExecutor`（参数验证 + 安全检查 + 超时控制）；`delegate_to_agent` 支持并行/嵌套委托（深度上限 3）+ `max_turns`/`timeout_secs`；`web_search`/`web_fetch` 提供网页感知（DuckDuckGo/SearXNG 后端 + SSRF 防护 + 缓存）。
+当前 `ToolRegistry` 注册了 25 个工具：`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_code`、`search_vfs`、`vfs_read`、`vfs_list`、`call_skill`、`run_tests`、`discover_tests`、`verify_build`、`ask_user`、`self_check`、`knowledge_ingest`、`web_search`、`web_fetch`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`task_status`、`task_cancel`、`lsp`。其中 `call_skill` 桥接到 `SkillExecutor`（参数验证 + 安全检查 + 超时控制）；`delegate_to_agent` 支持并行/嵌套委托（深度上限 3）+ `max_turns`/`timeout_secs`，委托只支持异步（ADR-026：一律注册后台任务 + 立即返回 task_id，完成通知注入）；`web_search`/`web_fetch` 提供网页感知（DuckDuckGo/SearXNG 后端 + SSRF 防护 + 缓存）。
 
 ### 3.4 决策 4: 上下文组装前缀匹配原则
 

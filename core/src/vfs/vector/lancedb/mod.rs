@@ -95,8 +95,38 @@ impl LanceDbVectorStore {
 
         let table = match db.open_table(table_name).execute().await {
             Ok(t) => {
-                tracing::info!("LanceDB 表已打开: {}", table_name);
-                t
+                // 维度自愈（ADR-025 后续）：已建表的 FixedSizeList 宽度 ≠ 当前配置时，
+                // 嵌入/写入/检索将全部失败（历史教训：配置改过但表维度不迁移，
+                // 三层维度错位导致检索全空 + 摘要任务全失败）。向量是可从 VFS
+                // 摘要文本再生的派生数据，自动重建安全；空表由启动期回填补齐。
+                let stale = match t.schema().await {
+                    Ok(actual) => fixed_size_dims_differ(&actual, emb_dim, vis_dim),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "LanceDB 表 schema 读取失败，跳过维度自愈检测");
+                        false
+                    }
+                };
+                if stale {
+                    tracing::warn!(
+                        configured_dim = emb_dim,
+                        "LanceDB 表维度与配置不一致，自动重建（存量向量将由启动期回填重嵌入）"
+                    );
+                    db.drop_table(table_name, &[])
+                        .await
+                        .map_err(|e| {
+                            TianyanError::Custom(format!("向量数据库错误：重建表删除失败: {e}"))
+                        })?;
+                    let empty = RecordBatch::new_empty(schema.clone());
+                    db.create_table(table_name, empty)
+                        .execute()
+                        .await
+                        .map_err(|e| {
+                            TianyanError::Custom(format!("向量数据库错误：重建表失败: {e}"))
+                        })?
+                } else {
+                    tracing::info!("LanceDB 表已打开: {}", table_name);
+                    t
+                }
             }
             Err(_) => {
                 let empty = RecordBatch::new_empty(schema.clone());
@@ -196,6 +226,14 @@ impl VectorStorage for LanceDbVectorStore {
 
     async fn initialize(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn count_rows(&self) -> Result<u64> {
+        self.table
+            .count_rows(None)
+            .await
+            .map(|n| n as u64)
+            .map_err(|e| TianyanError::Custom(format!("向量数据库错误：行数读取失败: {e}")))
     }
 
     async fn upsert_point(&self, point: &VectorPoint) -> Result<()> {
@@ -382,6 +420,29 @@ impl VectorStorage for LanceDbVectorStore {
         fused.truncate(top_k);
         Ok(fused)
     }
+}
+
+/// 表内 FixedSizeList 列宽与配置维度是否不一致（小写辅助：任一缺失或不等 = 重建）。
+fn fixed_size_dims_differ(schema: &Schema, expected_emb: usize, expected_vis: usize) -> bool {
+    let dim_of = |field: &str| -> Option<usize> {
+        schema
+            .field_with_name(field)
+            .ok()
+            .and_then(|f| match f.data_type() {
+                DataType::FixedSizeList(_, w) => Some(*w as usize),
+                _ => None,
+            })
+    };
+    let (abs, ov, vis) = (
+        dim_of("abstract_vec"),
+        dim_of("overview_vec"),
+        dim_of("visual_vec"),
+    );
+    !matches!(
+        (abs, ov, vis),
+        (Some(a), Some(o), Some(v))
+            if a == expected_emb && o == expected_emb && v == expected_vis
+    )
 }
 
 /// 测试模块（拆分至独立文件，保持主文件聚焦生产逻辑）。

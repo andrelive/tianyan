@@ -28,6 +28,28 @@ use tianyan::skills::{SkillExecutor, SkillRefresher};
 use tianyan::vfs::VirtualFileSystemImpl;
 use tianyan::{Result as TianyanResult, TianyanError};
 
+/// 子智能体消息流事件广播（ADR-026：core 事件通道 → SSE 订阅者分发）。
+///
+/// 事件为 ChatStreamEvent 同构 JSON，附加 task_id 归集到面板对应任务；
+/// 无订阅者时静默丢弃（broadcast 语义）。
+pub struct TaskEventBroadcaster {
+    /// 广播通道（GET /tasks/stream 订阅）。
+    pub tx: tokio::sync::broadcast::Sender<String>,
+}
+
+#[async_trait]
+impl tianyan::agent::background::TaskEventSink for TaskEventBroadcaster {
+    async fn emit(&self, task_id: &str, event: serde_json::Value) {
+        let mut payload = event;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("task_id".to_string(), serde_json::json!(task_id));
+        }
+        if let Ok(json) = serde_json::to_string(&payload) {
+            let _ = self.tx.send(json);
+        }
+    }
+}
+
 use crate::state::{build_knowledge_ingestor, resolve_chat_model, resolve_chat_model_spec};
 
 /// 根据配置创建模型服务。
@@ -75,6 +97,7 @@ impl AgentBuilderFactory {
         role_router: Arc<tianyan::agent::RoleRouter>,
         usage_log: Arc<UsageLog>,
         user_questions: Arc<tianyan::agent::user_questions::UserQuestionService>,
+        task_event_sink: Arc<dyn tianyan::agent::background::TaskEventSink>,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
@@ -138,6 +161,8 @@ impl AgentBuilderFactory {
         }
         // 系统通知通道（动态包装：Tauri 后注册亦生效）
         builder = builder.with_notification_sink(notification_sink);
+        // 子智能体消息流事件通道（ADR-026：面板实时流式显示）
+        builder = builder.with_task_event_sink(task_event_sink);
         let agent = builder
             .build()
             .map_err(|e| TianyanError::Custom(format!("内部错误：Agent 构建失败：{}", e)))?;
@@ -185,6 +210,7 @@ impl AgentBuilderFactory {
         role_router: Arc<tianyan::agent::RoleRouter>,
         usage_log: Arc<UsageLog>,
         user_questions: Arc<tianyan::agent::user_questions::UserQuestionService>,
+        task_event_sink: Arc<dyn tianyan::agent::background::TaskEventSink>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -206,6 +232,7 @@ impl AgentBuilderFactory {
             role_router,
             usage_log,
             user_questions,
+            task_event_sink,
         )
         .await
         {

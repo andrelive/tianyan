@@ -13,7 +13,7 @@ use crate::agent::tool_params::{
     SubmitResultParams, SuggestRoleParams, TaskCancelParams, TaskStatusParams,
 };
 use crate::common::error::TianyanError;
-use crate::common::types::Message;
+use crate::common::types::{Message, StructuredMessage};
 use crate::executor::Action;
 use crate::model::types::ChatCompletionRequest;
 use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition};
@@ -24,10 +24,6 @@ use super::{parse_params, safety_violation, wrap_tool_error, ToolExecutionOutcom
 /// 委托链最大深度（主循环为 0；1 = 一层子 Agent，以此类推）。
 pub(crate) const MAX_DELEGATION_DEPTH: usize = 3;
 
-/// 同步委托默认时间预算（秒）：预算内完成直接返回结果；
-/// 超预算自动升级为后台任务继续运行（不杀死子代理，完成后通知）。
-const DEFAULT_SYNC_DELEGATION_BUDGET_SECS: u64 = 120;
-
 /// ask_user 等待用户回答的超时（防挂死；超时返回错误，模型看到失败结果）。
 const ASK_USER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
@@ -37,6 +33,88 @@ pub(crate) struct DelegationDepthGuard(pub(crate) Arc<AtomicUsize>);
 impl Drop for DelegationDepthGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// 落库子智能体会话新增消息（ADR-026：持久化过程记录，不进 FTS——
+/// 子会话无"人"提供的信息，不参与回忆检索）。失败仅告警（记录尽力而为）。
+/// 同时经事件通道推送（面板实时流式显示）。
+async fn persist_sub_messages(
+    store: &Option<Arc<crate::session::store::SessionStore>>,
+    sink: &Option<Arc<dyn crate::agent::background::TaskEventSink>>,
+    presentations: &HashMap<String, crate::model::types::ToolPresentation>,
+    task_id: &str,
+    sub_messages: &[Message],
+    from: usize,
+) {
+    for msg in &sub_messages[from..] {
+        if let Some(store) = store {
+            let sm = StructuredMessage::from_message(msg, task_id, None, None);
+            if let Err(e) = store.append_message_no_fts(task_id, &sm).await {
+                tracing::warn!(task_id, error = %e, "子智能体会话消息落库失败");
+            }
+        }
+        if let Some(sink) = sink {
+            if let Some(event) = message_to_stream_event(msg, presentations) {
+                sink.emit(task_id, event).await;
+            }
+        }
+    }
+}
+
+/// Message → ChatStreamEvent 同构 JSON（ADR-026：子智能体消息流事件）。
+///
+/// 与主对话流同一事件协议（chunk_type: thought/tool_call/observation/answer），
+/// 前端面板复用主对话流的归约/渲染逻辑。
+fn message_to_stream_event(
+    msg: &Message,
+    presentations: &HashMap<String, crate::model::types::ToolPresentation>,
+) -> Option<serde_json::Value> {
+    match msg.role {
+        crate::common::types::MessageRole::Assistant => {
+            if let Some(thinking) = msg.reasoning_content.as_deref().filter(|t| !t.is_empty()) {
+                Some(serde_json::json!({
+                    "chunk_type": "thought",
+                    "delta": "",
+                    "thinking": thinking,
+                }))
+            } else if !msg.content.is_empty() {
+                Some(serde_json::json!({
+                    "chunk_type": "answer",
+                    "delta": msg.content,
+                }))
+            } else if let Some(tool_calls) = &msg.tool_calls {
+                let tc = tool_calls.first()?;
+                let presentation = presentations
+                    .get(&tc.function.name)
+                    .copied()
+                    .unwrap_or_default();
+                Some(serde_json::json!({
+                    "chunk_type": "tool_call",
+                    "delta": "",
+                    "tool_call": {
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                        "presentation": serde_json::to_value(presentation).ok(),
+                    },
+                }))
+            } else {
+                None
+            }
+        }
+        crate::common::types::MessageRole::Tool => Some(serde_json::json!({
+            "chunk_type": "observation",
+            "delta": "",
+            "tool_result": {
+                "tool_call_id": msg.tool_call_id.clone().unwrap_or_default(),
+                "content": msg.content,
+                "success": msg.tool_error.is_none(),
+                "duration_ms": msg.tool_duration_ms.unwrap_or(0),
+                "error": msg.tool_error,
+            },
+        })),
+        _ => None,
     }
 }
 
@@ -292,13 +370,9 @@ impl ToolRegistry {
             let params: DelegateToAgentParams = serde_json::from_str(arguments)
                 .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
 
-            // 后台委托：注册 + spawn + 立即返回（并发上限由任务管理器控制；
-            // 后台任务内再委托由内层深度检查与并发上限共同防失控）。
-            if params.background == Some(true) {
-                return self.spawn_background_delegate(&params, session_id).await;
-            }
-
-            // 嵌套委托深度保护：进入委托时 +1，超出上限拒绝。
+            // ADR-026：委托只支持异步——所有委托一律注册 + spawn + 立即返回 task_id。
+            // 嵌套委托深度保护：进入委托时 +1，guard 移入任务闭包持有到任务结束
+            // （含排队等待期间），Drop 时自动回滚计数。
             let depth = self.delegation_depth.fetch_add(1, Ordering::SeqCst) + 1;
             if depth > MAX_DELEGATION_DEPTH {
                 self.delegation_depth.fetch_sub(1, Ordering::SeqCst);
@@ -307,10 +381,10 @@ impl ToolRegistry {
                     MAX_DELEGATION_DEPTH
                 )));
             }
-            // 深度 guard 必须活到委托结束（含 Err 路径），Drop 时自动回滚计数。
-            let _depth_guard = DelegationDepthGuard(self.delegation_depth.clone());
+            let depth_guard = DelegationDepthGuard(self.delegation_depth.clone());
 
-            self.run_delegation_loop(&params, session_id).await
+            self.spawn_background_delegate(&params, session_id, depth_guard)
+                .await
         })
     }
 
@@ -324,6 +398,7 @@ impl ToolRegistry {
         &self,
         params: &DelegateToAgentParams,
         session_id: &str,
+        task_id: &str,
     ) -> Result<serde_json::Value, TianyanError> {
         const DEFAULT_MAX_TURNS: usize = 200;
         const MAX_TURNS_CAP: usize = 500;
@@ -427,8 +502,11 @@ impl ToolRegistry {
         let this_for_loop = self.clone();
         let session_owned = session_id.to_string();
         let role_name_for_loop = role_name.clone();
+        let task_id_owned = task_id.to_string();
         let run_loop = async move {
             let mut total_tokens: usize = 0;
+            // ADR-026：子智能体会话消息落库游标（已持久化条数；每轮落库新增）
+            let mut persisted: usize = 0;
 
             for _turn in 0..max_turns {
                 // 主循环取消（用户点停止）：子代理循环也及时响应。
@@ -478,6 +556,16 @@ impl ToolRegistry {
                             String::new(),
                             tool_calls.clone(),
                         ));
+                        persist_sub_messages(
+                            &this_for_loop.session_store,
+                            &this_for_loop.task_event_sink,
+                            &this_for_loop.presentations,
+                            &task_id_owned,
+                            &sub_messages,
+                            persisted,
+                        )
+                        .await;
+                        persisted = sub_messages.len();
                         return Ok((
                             serde_json::json!({
                                 "result": params.result,
@@ -524,6 +612,16 @@ impl ToolRegistry {
                                 ));
                             }
                         }
+                        persist_sub_messages(
+                            &this_for_loop.session_store,
+                            &this_for_loop.task_event_sink,
+                            &this_for_loop.presentations,
+                            &task_id_owned,
+                            &sub_messages,
+                            persisted,
+                        )
+                        .await;
+                        persisted = sub_messages.len();
                         continue;
                     }
                 } else {
@@ -534,12 +632,31 @@ impl ToolRegistry {
                     sub_messages.push(Message::system(
                         "你上一条回复没有被接受为最终结果。如果你认为任务已完成，请调用 submit_result 工具提交最终结果；否则请继续使用工具收集信息。",
                     ));
+                    persist_sub_messages(
+                        &this_for_loop.session_store,
+                        &this_for_loop.task_event_sink,
+                        &this_for_loop.presentations,
+                        &task_id_owned,
+                        &sub_messages,
+                        persisted,
+                    )
+                    .await;
+                    persisted = sub_messages.len();
                     continue;
                 }
             }
 
             // 兜底：达到 max_turns 仍未显式提交——返回最后一条非空 assistant
             // 输出（若存在），并标记 submitted=false 让主 agent 知情。
+            persist_sub_messages(
+                &this_for_loop.session_store,
+                &this_for_loop.task_event_sink,
+                &this_for_loop.presentations,
+                &task_id_owned,
+                &sub_messages,
+                persisted,
+            )
+            .await;
             let last_content = sub_messages
                 .iter()
                 .rev()
@@ -559,98 +676,21 @@ impl ToolRegistry {
             ))
         };
 
-        // 同步委托（缺省）：时间预算 + 超时自动升级为后台任务（不杀死子代理）。
-        // 后台委托：保持原语义——timeout_secs 超时即失败。
-        // 用 spawn + channel 而非 tokio::time::timeout：timeout 会 drop 内部
-        // future（子代理循环被杀），自动转后台必须让循环脱离调用栈继续跑。
-        let is_background = params.background == Some(true);
-        let outcome = if is_background {
-            match timeout_secs {
-                Some(secs) => {
-                    let result =
-                        tokio::time::timeout(std::time::Duration::from_secs(secs), run_loop).await;
-                    match result {
-                        Ok(inner) => inner,
-                        Err(_) => Err(TianyanError::Custom(format!(
-                            "tool: 委托执行超时（{}s）",
-                            secs
-                        ))),
-                    }
-                }
-                None => run_loop.await,
-            }
-        } else {
-            // 同步预算：模型可显式设置 timeout_secs；缺省 120s。
-            let budget_secs = timeout_secs.unwrap_or(DEFAULT_SYNC_DELEGATION_BUDGET_SECS);
-            let (done_tx, done_rx) = tokio::sync::mpsc::channel::<
-                Result<(serde_json::Value, Vec<Message>), TianyanError>,
-            >(1);
-            tokio::spawn(async move {
-                let result = run_loop.await;
-                let _ = done_tx.send(result).await;
-            });
-            let mut done_rx = Some(done_rx);
-            tokio::select! {
-                res = async {
-                    if let Some(rx) = done_rx.as_mut() {
-                        rx.recv().await.unwrap_or_else(|| {
-                            Err(TianyanError::Custom("tool: 委托通道关闭".to_string()))
-                        })
-                    } else {
-                        Err(TianyanError::Custom("tool: 委托通道关闭".to_string()))
-                    }
-                } => res,
-                _ = tokio::time::sleep(std::time::Duration::from_secs(budget_secs)) => {
-                    // 预算耗尽：升级为后台任务。子代理循环仍在跑（handle 未 abort），
-                    // 移交后台管理器：完成/失败经既有通知链路注入父会话 + 唤醒。
-                    let task_id = self
-                        .background_tasks
-                        .register(
-                            crate::agent::background::TaskKind::Delegate,
-                            params.task.clone(),
-                            session_id.to_string(),
-                        )
-                        .await;
-                    self.background_tasks.mark_running(&task_id).await;
-                    let mgr = self.background_tasks.clone();
-                    let task_id_watch = task_id.clone();
-                    let Some(mut rx) = done_rx.take() else {
-                        return Err(TianyanError::Custom(
-                            "tool: 委托通道关闭".to_string(),
-                        ));
-                    };
-                    tokio::spawn(async move {
-                        match rx.recv().await {
-                            Some(Ok((value, _))) => {
-                                mgr.complete(&task_id_watch, value.to_string()).await;
-                            }
-                            Some(Err(e)) => {
-                                if e.is_cancelled() {
-                                    // 用户停止 → 任务取消（不触发唤醒/汇总轮）
-                                    mgr.cancel(&task_id_watch).await.ok();
-                                } else {
-                                    mgr.fail(&task_id_watch, e.to_string()).await;
-                                }
-                            }
-                            _ => {
-                                mgr.fail(
-                                    &task_id_watch,
-                                    "同步执行失败（通道关闭）".to_string(),
-                                )
-                                .await;
-                            }
-                        }
-                    });
-                    return Ok(serde_json::json!({
-                        "status": "promoted_to_background",
-                        "task_id": task_id,
-                        "message": format!(
-                            "子任务超过同步预算（{}s）已转入后台继续运行（{}），完成后自动通知本会话。",
-                            budget_secs, task_id
-                        ),
-                    }));
+        // ADR-026：委托只支持异步——timeout_secs 超时即失败（不自动转后台；
+        // 后台任务默认无超时，显式设置 timeout_secs 作为兜底守卫）。
+        let outcome = match timeout_secs {
+            Some(secs) => {
+                let result =
+                    tokio::time::timeout(std::time::Duration::from_secs(secs), run_loop).await;
+                match result {
+                    Ok(inner) => inner,
+                    Err(_) => Err(TianyanError::Custom(format!(
+                        "tool: 委托执行超时（{}s）",
+                        secs
+                    ))),
                 }
             }
+            None => run_loop.await,
         };
 
         // 委托历史明细（统计面板；成功/失败均记录）
@@ -732,21 +772,26 @@ impl ToolRegistry {
         results
     }
 
-    /// 后台委托：注册任务 → 获取并发许可 → spawn 独立执行 → 立即返回。
+    /// 后台委托（ADR-026 唯一路径）：排队槽位 → 注册（Pending）→ 运行许可 →
+    /// spawn 独立执行 → 立即返回 task_id。
     ///
-    /// `session_id` 由调用链显式传入（父会话归属），不再依赖共享可变状态。
+    /// session_id 由调用链显式传入（父会话归属），不再依赖共享可变状态。
+    /// depth_guard 移入任务闭包持有到任务结束（含排队等待期间），
+    /// 保证嵌套委托深度计数在任务生命周期内有效。
     async fn spawn_background_delegate(
         &self,
         params: &DelegateToAgentParams,
         session_id: &str,
+        depth_guard: DelegationDepthGuard,
     ) -> Result<serde_json::Value, TianyanError> {
         let manager = &self.background_tasks;
 
         // 父会话归属：调用链显式传递（AgentLoop 经 execute_parallel 传入当前会话）
         let session_id = session_id.to_string();
 
-        // 并发许可：达到上限立即拒绝（不阻塞）
-        let _permit = manager.try_acquire().await?;
+        // ADR-026 排队模型：先拿排队槽位（满则拒绝）→ 注册（Pending，面板可见）
+        // → 等待运行许可（阻塞排队）→ 标记运行。许可随任务闭包持有，任务结束释放。
+        let queue_permit = manager.acquire_queue_slot().await?;
 
         let desc = params.task.clone();
         let task_id = manager
@@ -756,7 +801,25 @@ impl ToolRegistry {
                 session_id.clone(),
             )
             .await;
+        let run_permit = manager.acquire_run().await?;
         manager.mark_running(&task_id).await;
+
+        // ADR-026：创建子智能体会话（会话 id = task_id，关联主会话；
+        // 消息流走会话存储，面板可复用主对话流渲染）。上限保护（B）惰性触发。
+        if let Some(store) = &self.session_store {
+            let header = crate::session::types::SessionHeader {
+                parent_session_id: Some(session_id.clone()),
+                kind: Some("delegate".to_string()),
+                role: params.role.clone(),
+                ..crate::session::types::SessionHeader::default()
+            };
+            if let Err(e) = store.create(&task_id, &header).await {
+                tracing::warn!(task_id, error = %e, "子智能体会话创建失败");
+            }
+            if let Err(e) = store.enforce_child_session_limit(300).await {
+                tracing::warn!(error = %e, "子智能体会话上限清理失败");
+            }
+        }
 
         let this = self.clone();
         let mgr = manager.clone();
@@ -765,12 +828,16 @@ impl ToolRegistry {
         let run_session_id = session_id.clone();
 
         tokio::spawn(async move {
-            let outcome = this.run_delegation_loop(&run_params, &run_session_id).await;
+            // 许可 + 深度 guard 在任务运行期间持有（作用域结束释放）
+            let _permits = (queue_permit, run_permit);
+            let _depth_guard = depth_guard;
+            let outcome = this
+                .run_delegation_loop(&run_params, &run_session_id, &run_task_id)
+                .await;
             match outcome {
                 Ok(v) => mgr.complete(&run_task_id, format!("{v}")).await,
                 Err(e) => mgr.fail(&run_task_id, e.to_string()).await,
             }
-            // _permit 在此作用域结束时释放
         });
 
         Ok(serde_json::json!({

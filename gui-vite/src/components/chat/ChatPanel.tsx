@@ -29,7 +29,7 @@ import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
 import { streamingIndicatorOwner } from './streaming-indicator';
 import ApprovalBanner from './ApprovalBanner';
-import SessionTasksPanel from './SessionTasksPanel';
+import AgentTasksPanel from './AgentTasksPanel';
 import SessionTodoPanel from './SessionTodoPanel';
 import { PENDING_SESSION_KEY } from '@/lib/store';
 
@@ -388,7 +388,9 @@ export default function ChatPanel() {
   // ─── Render ────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-full bg-[var(--color-bg-primary)]">
+    <div className="flex h-full bg-[var(--color-bg-primary)]">
+      {/* 左列：对话主区 */}
+      <div className="flex flex-col flex-1 min-w-0">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] shrink-0">
         <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">会话</h1>
@@ -479,9 +481,7 @@ export default function ChatPanel() {
         )}
       </div>
 
-      {/* 会话内临时面板（DSH 式 dock，完事即隐）：当前会话的后台任务
-          （委托/终端，可取消）与活跃待办/目标（todo/goal 工具产物）。 */}
-      <SessionTasksPanel sessionId={currentSessionId} />
+      {/* 会话内临时面板（完事即隐）：活跃待办/目标（todo/goal 工具产物）。 */}
       <SessionTodoPanel sessionId={currentSessionId} />
 
       {/* 应用层授权卡片（提取自 ChatPanel 内联；与 ApprovalPanel 共用语义） */}
@@ -512,6 +512,10 @@ export default function ChatPanel() {
           onCompress={() => void handleCompress()}
         />
       )}
+      </div>
+
+      {/* 右列：会话后台任务面板（ADR-026：活跃在上、完成沉底、可展开/取消/折叠） */}
+      <AgentTasksPanel sessionId={currentSessionId} />
     </div>
   );
 }

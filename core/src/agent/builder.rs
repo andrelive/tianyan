@@ -82,6 +82,8 @@ pub struct AgentBuilder {
     command_logs_dir: Option<PathBuf>,
     /// 用户问题服务（ask_user 同步等待用户回答；None 时工具不可用）。
     user_questions: Option<Arc<crate::agent::user_questions::UserQuestionService>>,
+    /// 子智能体消息流事件通道（ADR-026：面板实时流式；None 时静默）。
+    task_event_sink: Option<Arc<dyn crate::agent::background::TaskEventSink>>,
 }
 
 impl AgentBuilder {
@@ -116,6 +118,7 @@ impl AgentBuilder {
             role_registry: None,
             role_router: None,
             user_questions: None,
+            task_event_sink: None,
         }
     }
 
@@ -214,6 +217,15 @@ impl AgentBuilder {
     /// 设置后台任务 SQLite 持久化后端（ADR-013：任务实体化，重启可恢复）。
     pub fn with_background_task_db(mut self, db: Arc<crate::db::Database>) -> Self {
         self.background_task_db = Some(db);
+        self
+    }
+
+    /// 设置子智能体消息流事件通道（ADR-026：面板实时流式显示）。
+    pub fn with_task_event_sink(
+        mut self,
+        sink: Arc<dyn crate::agent::background::TaskEventSink>,
+    ) -> Self {
+        self.task_event_sink = Some(sink);
         self
     }
 
@@ -415,6 +427,12 @@ impl AgentBuilder {
         if let Some(dir) = self.command_logs_dir {
             tool_registry = tool_registry.with_command_logs_dir(dir);
         }
+        // 并发配置（ADR-026）：委托双信号量（运行/排队）+ 终端命令上限
+        tool_registry = tool_registry.with_concurrency(
+            self.config.max_background_concurrency,
+            self.config.max_background_queue,
+            self.config.max_command_concurrency,
+        );
         // 角色向量路由器（suggest_role 工具）
         if let Some(router) = self.role_router {
             tool_registry = tool_registry.with_role_router(router);
@@ -453,6 +471,10 @@ impl AgentBuilder {
         tool_registry = tool_registry.with_task_notifier(Arc::new(
             crate::agent::background::SessionTaskNotifier::new(session_manager.clone()),
         ));
+        // 子智能体消息流事件通道（ADR-026：面板实时流式显示）
+        if let Some(sink) = self.task_event_sink {
+            tool_registry = tool_registry.with_task_event_sink(sink);
+        }
         // 后台命令完成通知器（execute_command(background) 终态注入父会话）
         tool_registry = tool_registry.with_command_notifier(Arc::new(
             crate::agent::background::SessionCommandNotifier::new(session_manager.clone()),

@@ -22,7 +22,7 @@
 
 | 子模块 | 位置 | 职责 | 关键文件 |
 |--------|------|------|---------|
-| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 + 后台任务；动态工具（server 层注入）：`schedule_task`（定时任务）、`todo`/`goal`（待办/目标——会话绑定的推理辅助工具，agent 自主跟踪修复）；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器/单调守卫/post-execute 监听器，DSH A1/A4 吸收）+ 内置可观测性监听器（`tool_registry/observability.rs`：统计/Trace/GEPA 历史/规则学习）；内置工具元数据单一事实源（`tool_registry/builtin_tools.rs`：schema/展示意图） | `coordinator.rs`, `loop.rs`, `loop_tests.rs`, `tool_registry/`（含 `pipeline.rs`、`observability.rs`、`builtin_tools.rs`）, `session_state.rs`, `builder.rs`, `background.rs` |
+| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 会话状态 + 后台任务（ADR-026：委托只支持异步、双信号量排队 20+40、SQL 权威注册表 + 3 天 TTL、子智能体会话消息落库 + 事件通道）；动态工具（server 层注入）：`schedule_task`（定时任务）、`todo`/`goal`（待办/目标——会话绑定的推理辅助工具，agent 自主跟踪修复）；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器/单调守卫/post-execute 监听器，DSH A1/A4 吸收）+ 内置可观测性监听器（`tool_registry/observability.rs`：统计/Trace/GEPA 历史/规则学习）；内置工具元数据单一事实源（`tool_registry/builtin_tools.rs`：schema/展示意图） | `coordinator.rs`, `loop.rs`, `loop_tests.rs`, `tool_registry/`（含 `pipeline.rs`、`observability.rs`、`builtin_tools.rs`）, `session_state.rs`, `builder.rs`, `background.rs` |
 | `common` | `core/src/common/` | 通用类型、错误处理、日志配置、token 估算、`StructuredMessage`、多模态片段（`ContentPart`/`ImageUrl`）；横切单点：UTF-8 截断（`truncate.rs`）、HTTP 客户端工厂（`http.rs`） | `error.rs`, `logging.rs`, `token_estimator.rs`, `truncate.rs`, `http.rs`, `types/`（含 `content_part.rs`） |
 | `config` | `core/src/config/` | TOML 配置管理 + 环境变量 + 向导 | `mod.rs`, `wizard.rs`, `validation.rs` |
 | `db` | `core/src/db/` | **统一写入门面**（ADR-020）：`Database` 门面（单连接 + schema 集中）+ `SqliteDb`（ADR-005 连接）+ 业务域 Repository（stats/trace/execution/usage）；**只依赖 `common`**（纯底层，无领域依赖） | `mod.rs`, `sqlite_db.rs`, `stats.rs`, `trace.rs`, `execution.rs`, `usage.rs` |
@@ -51,7 +51,7 @@
 | `api/sessions` | `server/src/api/sessions/` | 会话管理 API |
 | `api/knowledge` | `server/src/api/knowledge/` | 知识管理 API（摄入 + 检索） |
 | `api/skills` | `server/src/api/skills/` | 技能执行 API |
-| `api/tasks` | `server/src/api/tasks/` | 后台任务列表 API（delegate background 任务视图） |
+| `api/tasks` | `server/src/api/tasks/` | 后台任务 API：`GET /tasks`（统一列表：委托/终端）、`POST /tasks/{id}/cancel`、`GET /tasks/stream`（子智能体消息流 SSE，ADR-026） |
 | `api/config` | `server/src/api/config/` | 配置管理 API + 向导 |
 | `state` | `server/src/state.rs` | AppState 生命周期管理 |
 | `agent_builder` | `server/src/agent_builder.rs` | Agent 构建工厂 |

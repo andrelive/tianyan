@@ -151,6 +151,16 @@ pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch {
     async fn read_abstract(&self, uri: &TianyanUri) -> Result<String> {
         self.read_content(uri, ContentLevel::Abstract).await
     }
+
+    /// 向量库为空时把存量条目的摘要重新嵌入（启动期自愈回填）。
+    ///
+    /// 触发场景：LanceDB 表维度变更自动重建（ADR-025 后续）/ 首次建库 /
+    /// 手动删除向量目录。表非空时为 no-op（返回 0）。
+    /// 默认 no-op（mock 后端不回填；生产实现见 `VirtualFileSystemImpl`）。
+    async fn backfill_summary_vectors_if_empty(&self) -> Result<usize> {
+        let _ = self;
+        Ok(0)
+    }
 }
 
 #[cfg(test)]

@@ -45,11 +45,25 @@ use crate::executor::{CommandTask, CommandTaskStatus};
 use crate::notification::SharedNotificationSink;
 use crate::session::SessionManager;
 
-/// 默认最大并发后台任务数。
-pub const DEFAULT_MAX_BACKGROUND_TASKS: usize = 4;
+/// 默认最大并发后台任务数（ADR-026：同时运行上限）。
+pub const DEFAULT_MAX_BACKGROUND_TASKS: usize = 20;
+
+/// 默认后台任务排队上限（ADR-026：超出拒绝；排队中的任务 = Pending）。
+pub const DEFAULT_MAX_BACKGROUND_QUEUE: usize = 40;
 
 /// 通知中结果摘要的最大字符数。
 const RESULT_SUMMARY_MAX_CHARS: usize = 2000;
+
+/// 子智能体消息流事件通道（ADR-026：面板实时流式显示）。
+///
+/// core 层只定义通道契约；server 层实现广播（SSE 订阅者分发）。
+/// 事件为 ChatStreamEvent 同构 JSON（chunk_type: thought/tool_call/
+/// observation/answer），带 task_id 归集到面板对应任务。
+#[async_trait]
+pub trait TaskEventSink: Send + Sync {
+    /// 发布子智能体消息事件。
+    async fn emit(&self, task_id: &str, event: serde_json::Value);
+}
 
 /// 后台任务类型（统一注册表：委托 / 命令）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -140,6 +154,8 @@ pub struct BackgroundTask {
     pub result: Option<String>,
     /// 错误信息（Failed 时）。
     pub error: Option<String>,
+    /// 终端命令输出尾部（ADR-026：面板展开显示最近输出；委托任务为 None）。
+    pub output_tail: Option<String>,
     /// 创建时间（epoch 毫秒）。
     pub created_at: i64,
     /// 完成时间（epoch 毫秒）。
@@ -179,6 +195,7 @@ impl BackgroundTask {
             parent_session_id: t.parent_session_id,
             result: None,
             error,
+            output_tail: Some(t.output_tail),
             created_at: t.created_at,
             completed_at: t.completed_at,
             seq: t.seq,
@@ -213,7 +230,10 @@ pub trait TaskWaker: Send + Sync {
 #[derive(Clone)]
 pub struct BackgroundTaskManager {
     tasks: Arc<Mutex<HashMap<String, BackgroundTask>>>,
-    semaphore: Arc<Semaphore>,
+    /// 运行许可（同时运行上限；ADR-026 双信号量排队模型）。
+    run_sem: Arc<Semaphore>,
+    /// 排队槽位（排队上限；超出拒绝）。
+    queue_sem: Arc<Semaphore>,
     notifier: Option<Arc<dyn TaskNotifier>>,
     /// 唤醒器槽（Arc<Mutex> 支持构建后注入：Agent 完成后注册自引用转发器）。
     waker: Arc<Mutex<Option<Arc<dyn TaskWaker>>>>,
@@ -230,16 +250,22 @@ pub struct BackgroundTaskManager {
 }
 
 impl BackgroundTaskManager {
-    /// 创建管理器（默认并发上限）。
+    /// 创建管理器（默认并发上限 + 排队上限）。
     pub fn new() -> Self {
-        Self::with_max_concurrent(DEFAULT_MAX_BACKGROUND_TASKS)
+        Self::with_concurrency(DEFAULT_MAX_BACKGROUND_TASKS, DEFAULT_MAX_BACKGROUND_QUEUE)
     }
 
-    /// 创建管理器并指定并发上限。
+    /// 创建管理器并指定并发上限（排队上限取并发上限，兼容旧调用）。
     pub fn with_max_concurrent(max_concurrent: usize) -> Self {
+        Self::with_concurrency(max_concurrent, max_concurrent.max(1) * 2)
+    }
+
+    /// 创建管理器并指定运行上限与排队上限（ADR-026 双信号量排队模型）。
+    pub fn with_concurrency(max_concurrent: usize, max_queue: usize) -> Self {
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
-            semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
+            run_sem: Arc::new(Semaphore::new(max_concurrent.max(1))),
+            queue_sem: Arc::new(Semaphore::new(max_queue.max(max_concurrent.max(1)))),
             notifier: None,
             waker: Arc::new(Mutex::new(None)),
             notification: Arc::new(Mutex::new(None)),
@@ -306,12 +332,23 @@ impl BackgroundTaskManager {
         *self.notification.lock().await = Some(sink);
     }
 
-    /// 尝试获取并发许可；达到上限时立即报错（不阻塞）。
-    pub async fn try_acquire(&self) -> std::result::Result<OwnedSemaphorePermit, TianyanError> {
-        self.semaphore.clone().try_acquire_owned().map_err(|_| {
+    /// 获取排队槽位（ADR-026）：排队已满时立即报错（不阻塞）。
+    ///
+    /// 调用方拿到槽位后应注册任务（Pending），再等待运行许可（acquire_run）。
+    pub async fn acquire_queue_slot(
+        &self,
+    ) -> std::result::Result<OwnedSemaphorePermit, TianyanError> {
+        self.queue_sem.clone().try_acquire_owned().map_err(|_| {
             TianyanError::Custom(
-                "tool: 后台任务并发已达上限，请等待现有任务完成，或取消后重试".to_string(),
+                "tool: 后台任务排队已满，请等待现有任务完成，或取消后重试".to_string(),
             )
+        })
+    }
+
+    /// 等待运行许可（ADR-026）：阻塞排队，许可释放后继续。
+    pub async fn acquire_run(&self) -> std::result::Result<OwnedSemaphorePermit, TianyanError> {
+        self.run_sem.clone().acquire_owned().await.map_err(|_| {
+            TianyanError::Custom("tool: 后台任务调度器已关闭".to_string())
         })
     }
 
@@ -335,6 +372,7 @@ impl BackgroundTaskManager {
             parent_session_id,
             result: None,
             error: None,
+            output_tail: None,
             created_at: now_ms(),
             completed_at: None,
             seq,
@@ -344,10 +382,20 @@ impl BackgroundTaskManager {
         id
     }
 
-    /// 标记任务为运行中。
+    /// 标记任务为运行中（内存 + SQLite）。
     pub async fn mark_running(&self, id: &str) {
-        if let Some(t) = self.tasks.lock().await.get_mut(id) {
-            t.status = TaskStatus::Running;
+        let updated = {
+            let mut tasks = self.tasks.lock().await;
+            match tasks.get_mut(id) {
+                Some(t) => {
+                    t.status = TaskStatus::Running;
+                    Some(t.clone())
+                }
+                None => None,
+            }
+        };
+        if let Some(t) = updated {
+            self.persist_upsert(&t).await;
         }
     }
 
@@ -408,30 +456,45 @@ impl BackgroundTaskManager {
     /// 取消任务并触发通知。
     pub async fn cancel(&self, id: &str) -> Result<()> {
         self.ensure_reloaded().await;
-        let exists = {
+        // 内存未终态任务可取消；终态（内存已移除/落库）为幂等空操作
+        let terminal = {
             let tasks = self.tasks.lock().await;
             tasks
                 .get(id)
                 .map(|t| t.status.is_terminal())
                 .unwrap_or(false)
         };
-        if exists {
+        if terminal {
             return Ok(());
         }
-        self.finish(id, TaskStatus::Cancelled, None, None).await;
+        if self.tasks.lock().await.contains_key(id) {
+            self.finish(id, TaskStatus::Cancelled, None, None).await;
+        }
         Ok(())
     }
 
-    /// 获取任务快照。
+    /// 获取任务快照（内存未命中时查 SQLite——终态任务已落库）。
     pub async fn get(&self, id: &str) -> Option<BackgroundTask> {
         self.ensure_reloaded().await;
-        self.tasks.lock().await.get(id).cloned()
+        if let Some(t) = self.tasks.lock().await.get(id).cloned() {
+            return Some(t);
+        }
+        self.query_sqlite(id).await
     }
 
-    /// 获取全部任务快照（按创建时间排序）。
+    /// 获取全部任务快照（内存未终态 + SQLite 全量合并，按 seq 排序）。
     pub async fn snapshot(&self) -> Vec<BackgroundTask> {
         self.ensure_reloaded().await;
+        self.evict_expired().await;
         let mut tasks: Vec<BackgroundTask> = self.tasks.lock().await.values().cloned().collect();
+        // 合并 SQLite 全量（去重：内存优先——未终态任务的最新状态在内存）
+        let mut seen: std::collections::HashSet<String> =
+            tasks.iter().map(|t| t.id.clone()).collect();
+        for t in self.query_sqlite_all().await {
+            if seen.insert(t.id.clone()) {
+                tasks.push(t);
+            }
+        }
         // 按注册序号排序（seq 单调递增，先注册在前；created_at 毫秒精度
         // 同毫秒无法区分，且 HashMap 迭代顺序随机）
         tasks.sort_by_key(|t| t.seq);
@@ -469,6 +532,12 @@ impl BackgroundTaskManager {
         };
 
         self.persist_upsert(&task).await;
+        // ADR-026 SQL 权威：有 db 时终态任务从内存移除（SQLite 保留；查询走 SQL），
+        // 内存只保留未终态任务（Running ≤ 并发 + Pending 排队），有界。
+        // 无 db（测试桩/未装配持久化）时终态保留内存——没有 SQLite 可落，移除即丢失。
+        if self.db.is_some() {
+            self.tasks.lock().await.remove(id);
+        }
 
         // G6 结构化 Trace：任务终态 span（独立子树根，task_id 关联）
         if let Some(trace) = &self.trace_collector {
@@ -564,6 +633,7 @@ impl BackgroundTaskManager {
                     parent_session_id: row.get(4)?,
                     result: row.get(5)?,
                     error: row.get(6)?,
+                    output_tail: None,
                     created_at: row.get(7)?,
                     completed_at: row.get(8)?,
                     seq: row.get(9)?,
@@ -577,17 +647,19 @@ impl BackgroundTaskManager {
         let mut interrupted: Vec<BackgroundTask> = Vec::new();
         let mut tasks = self.tasks.lock().await;
         for mut t in rows {
+            // seq 续接：避免与历史任务重复（先取 seq，t 可能随后被移动）
+            if t.seq >= self.next_seq.load(AtomicOrdering::SeqCst) {
+                self.next_seq.store(t.seq + 1, AtomicOrdering::SeqCst);
+            }
             if !t.status.is_terminal() {
+                // 进程重启中断：标记 Failed 并落库（remaining 计数不误判）
                 t.status = TaskStatus::Failed;
                 t.error = Some("进程重启中断（任务随进程消亡）".to_string());
                 t.completed_at = Some(now);
                 interrupted.push(t.clone());
+                tasks.insert(t.id.clone(), t);
             }
-            // seq 续接：避免与历史任务重复
-            if t.seq >= self.next_seq.load(AtomicOrdering::SeqCst) {
-                self.next_seq.store(t.seq + 1, AtomicOrdering::SeqCst);
-            }
-            tasks.insert(t.id.clone(), t);
+            // 终态任务不载入内存（ADR-026 SQL 权威：查询走 SQL）
         }
         drop(tasks);
         for t in interrupted {
@@ -632,6 +704,85 @@ impl BackgroundTaskManager {
             tracing::warn!(error = %e, task = %task.id, "后台任务持久化失败");
         }
     }
+
+    /// 按 ID 查询 SQLite（终态任务已从内存移除；未命中返回 None）。
+    async fn query_sqlite(&self, id: &str) -> Option<BackgroundTask> {
+        let db = self.db.as_ref()?;
+        let conn = db.try_lock().ok()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, kind, description, status, parent_session_id, result, error, created_at, completed_at, seq
+                 FROM background_tasks WHERE id = ?1",
+            )
+            .ok()?;
+        stmt.query_row(rusqlite::params![id], map_task_row)
+            .ok()
+    }
+
+    /// 查询 SQLite 全部任务（终态任务权威存储；与内存未终态合并见 snapshot）。
+    async fn query_sqlite_all(&self) -> Vec<BackgroundTask> {
+        let Some(db) = &self.db else {
+            return Vec::new();
+        };
+        let conn = match db.try_lock() {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT id, kind, description, status, parent_session_id, result, error, created_at, completed_at, seq
+             FROM background_tasks",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([], map_task_row)
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    }
+
+    /// TTL 逐出（ADR-026）：删除 3 天前的终态任务（惰性：snapshot 时触发）。
+    async fn evict_expired(&self) {
+        let Some(db) = &self.db else {
+            return;
+        };
+        let conn = match db.try_lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let cutoff = now_ms() - 3 * 24 * 3600 * 1000;
+        if let Err(e) = conn.execute(
+            "DELETE FROM background_tasks WHERE completed_at IS NOT NULL AND completed_at < ?1",
+            rusqlite::params![cutoff as i64],
+        ) {
+            tracing::warn!(error = %e, "后台任务 TTL 逐出失败");
+        }
+    }
+}
+
+/// SQLite 行 → BackgroundTask（与 ensure_reloaded 共用映射）。
+fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackgroundTask> {
+    let id: String = row.get(0)?;
+    let kind_str: String = row.get(1)?;
+    let kind = if kind_str == "command" {
+        TaskKind::Command
+    } else {
+        TaskKind::Delegate
+    };
+    let status_str: String = row.get(3)?;
+    let status = TaskStatus::parse(&status_str).unwrap_or(TaskStatus::Failed); // 未知状态按失败处理
+    Ok(BackgroundTask {
+        id,
+        kind,
+        description: row.get(2)?,
+        status,
+        parent_session_id: row.get(4)?,
+        result: row.get(5)?,
+        error: row.get(6)?,
+        output_tail: None,
+        created_at: row.get(7)?,
+        completed_at: row.get(8)?,
+        seq: row.get(9)?,
+    })
 }
 
 impl Default for BackgroundTaskManager {
@@ -933,6 +1084,7 @@ mod tests {
             parent_session_id: "s1".to_string(),
             result: Some("找到 3 篇".to_string()),
             error: None,
+            output_tail: None,
             created_at: 0,
             completed_at: Some(1),
             seq: 0,
@@ -954,6 +1106,7 @@ mod tests {
             parent_session_id: "s1".to_string(),
             result: Some("无异常".to_string()),
             error: None,
+            output_tail: None,
             created_at: 0,
             completed_at: Some(1),
             seq: 0,
@@ -1012,16 +1165,39 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrency_limit() {
-        let manager = BackgroundTaskManager::with_max_concurrent(2);
-        let p1 = manager.try_acquire().await.unwrap();
-        let p2 = manager.try_acquire().await.unwrap();
-        let p3 = manager.try_acquire().await;
-        assert!(p3.is_err(), "第 3 个许可应被拒绝");
-        drop(p1);
-        let p3 = manager.try_acquire().await;
-        assert!(p3.is_ok(), "释放后应可获取");
-        drop(p2);
-        drop(p3.unwrap());
+        // ADR-026 双信号量：排队槽位（满则拒绝）+ 运行许可（阻塞排队）
+        let manager = BackgroundTaskManager::with_concurrency(2, 4);
+
+        // 排队槽位：4 个可拿，第 5 个拒绝
+        let q1 = manager.acquire_queue_slot().await.unwrap();
+        let q2 = manager.acquire_queue_slot().await.unwrap();
+        let q3 = manager.acquire_queue_slot().await.unwrap();
+        let q4 = manager.acquire_queue_slot().await.unwrap();
+        let q5 = manager.acquire_queue_slot().await;
+        assert!(q5.is_err(), "第 5 个排队槽位应被拒绝");
+        drop(q1);
+        let q5 = manager.acquire_queue_slot().await;
+        assert!(q5.is_ok(), "释放后应可获取");
+        drop(q2);
+        drop(q3);
+        drop(q4);
+        drop(q5.unwrap());
+
+        // 运行许可：2 个可拿，第 3 个阻塞（timeout 验证）
+        let r1 = manager.acquire_run().await.unwrap();
+        let r2 = manager.acquire_run().await.unwrap();
+        let r3 = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            manager.acquire_run(),
+        );
+        assert!(r3.await.is_err(), "第 3 个运行许可应阻塞排队");
+        drop(r1);
+        let r3 = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            manager.acquire_run(),
+        );
+        assert!(r3.await.is_ok(), "释放后应可获取");
+        drop(r2);
     }
 
     #[tokio::test]
@@ -1140,6 +1316,7 @@ mod tests {
             parent_session_id: "s1".to_string(),
             result: Some("结果".to_string()),
             error: None,
+            output_tail: None,
             created_at: 0,
             completed_at: Some(1),
             seq: 0,

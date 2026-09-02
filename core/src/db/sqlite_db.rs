@@ -97,6 +97,24 @@ impl SqliteDb {
             )?;
         }
         conn.execute_batch(SCHEMA_SQL)?;
+        // ADR-026 幂等迁移：旧 session_meta 表补 parent_session_id 列（已存在则跳过）
+        let has_parent_col: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(session_meta)")?;
+            let cols = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            cols.iter().any(|c| c == "parent_session_id")
+        };
+        if !has_parent_col {
+            conn.execute(
+                "ALTER TABLE session_meta ADD COLUMN parent_session_id TEXT",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_meta_parent ON session_meta(parent_session_id)",
+                [],
+            )?;
+        }
         Ok(())
     }
 }
@@ -226,8 +244,11 @@ const SCHEMA_SQL: &str = "
         session_id  TEXT PRIMARY KEY,
         header_json TEXT NOT NULL DEFAULT '{}',
         created_at  INTEGER,
-        updated_at  TEXT DEFAULT (datetime('now'))
+        updated_at  TEXT DEFAULT (datetime('now')),
+        -- ADR-026：子智能体会话关联主会话（NULL = 主会话；查询/级联/过滤直接走 SQL）
+        parent_session_id TEXT
     );
+    CREATE INDEX IF NOT EXISTS idx_session_meta_parent ON session_meta(parent_session_id);
 
     -- LLM 用量日志（token 统计：每次 LLM 调用一行，覆盖聊天/子代理/演化任务；
     -- 由 AgentLoop 每轮拿到 turn_usage 后写入，供统计面板按 provider/model/时段聚合）

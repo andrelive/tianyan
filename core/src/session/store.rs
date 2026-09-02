@@ -10,6 +10,7 @@ use crate::common::error::TianyanError;
 use crate::common::types::{Part, StructuredMessage};
 use crate::db::Database;
 use crate::session::types::{SessionHeader, SessionMeta};
+use rusqlite::OptionalExtension;
 
 /// 会话权威存储（经 Database 单连接直接实现 SQL；ADR-018）。
 #[derive(Clone)]
@@ -80,8 +81,8 @@ impl SessionStore {
         })?;
         let created_at = header.created_at.map(|t| t.timestamp_millis()).unwrap_or(0);
         conn.execute(
-            "INSERT INTO session_meta (session_id, header_json, created_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![session_id, header_json, created_at],
+            "INSERT INTO session_meta (session_id, header_json, created_at, parent_session_id) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, header_json, created_at, header.parent_session_id],
         )
         .map_err(|e| match e {
             rusqlite::Error::SqliteFailure(err, _)
@@ -94,7 +95,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// 追加一条消息：单事务内原子取号（`MAX(seq)+1`）并写入完整消息，
+    /// 追加一条消息：单事务内原子取号（MAX(seq)+1）并写入完整消息，
     /// text 非空时同步写 FTS（空正文/纯图片消息占 seq 但不进 FTS）。
     ///
     /// # Errors
@@ -103,6 +104,26 @@ impl SessionStore {
         &self,
         session_id: &str,
         msg: &StructuredMessage,
+    ) -> Result<(), TianyanError> {
+        self.append_message_inner(session_id, msg, true).await
+    }
+
+    /// 追加消息但不写 FTS（ADR-026：子智能体会话——无"人"提供的信息，
+    /// 不进回忆检索；FTS 索引不膨胀，session_recall 天然搜不到）。
+    pub async fn append_message_no_fts(
+        &self,
+        session_id: &str,
+        msg: &StructuredMessage,
+    ) -> Result<(), TianyanError> {
+        self.append_message_inner(session_id, msg, false).await
+    }
+
+    /// 追加消息核心实现（index_fts 控制是否写 FTS 索引）。
+    async fn append_message_inner(
+        &self,
+        session_id: &str,
+        msg: &StructuredMessage,
+        index_fts: bool,
     ) -> Result<(), TianyanError> {
         let (text, tool_text) = extract_parts(msg);
         let content_parts = serde_json::to_string(msg).map_err(|e| {
@@ -142,7 +163,7 @@ impl SessionStore {
             ],
         )
         .map_err(|e| sqlite_error("消息写入失败", e))?;
-        if !text.is_empty() {
+        if index_fts && !text.is_empty() {
             let rowid = tx.last_insert_rowid();
             tx.execute(
                 "INSERT INTO session_messages_fts (rowid, text) VALUES (?1, ?2)",
@@ -150,6 +171,12 @@ impl SessionStore {
             )
             .map_err(|e| sqlite_error("FTS 索引写入失败", e))?;
         }
+        // ADR-026：刷新会话活跃时间（清理策略 B 的"最不活跃"判定依据）
+        tx.execute(
+            "UPDATE session_meta SET updated_at = datetime('now') WHERE session_id = ?1",
+            rusqlite::params![session_id],
+        )
+        .map_err(|e| sqlite_error("会话活跃时间刷新失败", e))?;
         tx.commit()
             .map_err(|e| sqlite_error("追加事务提交失败", e))?;
         Ok(())
@@ -310,7 +337,9 @@ impl SessionStore {
         Ok(())
     }
 
-    /// 轻量列出所有会话（仅元数据，不加载消息；按创建时间倒序）。
+    /// 轻量列出所有主会话（仅元数据，不加载消息；按创建时间倒序）。
+    ///
+    /// ADR-026：子智能体会话（parent_session_id 非空）不进会话列表。
     ///
     /// # Errors
     /// * SQLite 查询失败时返回 TianyanError。
@@ -318,7 +347,7 @@ impl SessionStore {
         let conn = self.db.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT sm.session_id, sm.header_json, sm.created_at,                    (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = sm.session_id)                    FROM session_meta sm ORDER BY sm.created_at DESC",
+                "SELECT sm.session_id, sm.header_json, sm.created_at,                    (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = sm.session_id)                    FROM session_meta sm WHERE sm.parent_session_id IS NULL ORDER BY sm.created_at DESC",
             )
             .map_err(|e| sqlite_error("会话列表查询准备失败", e))?;
         let rows = stmt
@@ -361,6 +390,9 @@ impl SessionStore {
 
     /// 删除会话（单事务：清 FTS + 消息 + 元数据）。
     ///
+    /// ADR-026 A：级联删除——主会话删除时连带删除其所有子智能体会话
+    /// （子会话是主会话的附属，主会话没了子会话记录无独立价值）。
+    ///
     /// # Errors
     /// * SQLite 写入失败时返回 TianyanError。
     pub async fn delete(&self, session_id: &str) -> Result<(), TianyanError> {
@@ -368,6 +400,23 @@ impl SessionStore {
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| sqlite_error("删除事务开启失败", e))?;
+        // 级联：子会话（parent_session_id = 本会话）三表清理
+        tx.execute(
+            "DELETE FROM session_messages_fts WHERE rowid IN              (SELECT id FROM session_messages WHERE session_id IN                (SELECT session_id FROM session_meta WHERE parent_session_id = ?1))",
+            rusqlite::params![session_id],
+        )
+        .map_err(|e| sqlite_error("级联删除子会话 FTS 清理失败", e))?;
+        tx.execute(
+            "DELETE FROM session_messages WHERE session_id IN              (SELECT session_id FROM session_meta WHERE parent_session_id = ?1)",
+            rusqlite::params![session_id],
+        )
+        .map_err(|e| sqlite_error("级联删除子会话消息失败", e))?;
+        tx.execute(
+            "DELETE FROM session_meta WHERE parent_session_id = ?1",
+            rusqlite::params![session_id],
+        )
+        .map_err(|e| sqlite_error("级联删除子会话元数据失败", e))?;
+        // 本会话三表清理
         tx.execute(
             "DELETE FROM session_messages_fts WHERE rowid IN              (SELECT id FROM session_messages WHERE session_id = ?1)",
             rusqlite::params![session_id],
@@ -385,6 +434,66 @@ impl SessionStore {
         .map_err(|e| sqlite_error("删除元数据失败", e))?;
         tx.commit()
             .map_err(|e| sqlite_error("删除事务提交失败", e))?;
+        Ok(())
+    }
+
+    /// ADR-026 B：子智能体会话上限保护——总数超 max_children 时，
+    /// 删"最不活跃主会话"（updated_at 最旧）的所有子会话，循环至 ≤ 上限。
+    /// 惰性触发（创建子会话时调用）。
+    ///
+    /// # Errors
+    /// * SQLite 写入失败时返回 TianyanError。
+    pub async fn enforce_child_session_limit(
+        &self,
+        max_children: usize,
+    ) -> Result<(), TianyanError> {
+        let conn = self.db.lock().await;
+        loop {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM session_meta WHERE parent_session_id IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| sqlite_error("子会话计数查询失败", e))?;
+            if count <= max_children as i64 {
+                break;
+            }
+            // 最不活跃主会话（有子会话的，按子会话最新活跃时间升序取最旧）
+            let parent: Option<String> = conn
+                .query_row(
+                    "SELECT parent_session_id FROM session_meta
+                     WHERE parent_session_id IS NOT NULL
+                     GROUP BY parent_session_id
+                     ORDER BY MAX(updated_at) ASC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| sqlite_error("最不活跃主会话查询失败", e))?;
+            let Some(parent) = parent else {
+                break;
+            };
+            // 删该主会话的所有子会话（三表）
+            conn.execute(
+                "DELETE FROM session_messages_fts WHERE rowid IN
+                    (SELECT id FROM session_messages WHERE session_id IN
+                        (SELECT session_id FROM session_meta WHERE parent_session_id = ?1))",
+                rusqlite::params![parent],
+            )
+            .map_err(|e| sqlite_error("上限清理子会话 FTS 失败", e))?;
+            conn.execute(
+                "DELETE FROM session_messages WHERE session_id IN
+                    (SELECT session_id FROM session_meta WHERE parent_session_id = ?1)",
+                rusqlite::params![parent],
+            )
+            .map_err(|e| sqlite_error("上限清理子会话消息失败", e))?;
+            conn.execute(
+                "DELETE FROM session_meta WHERE parent_session_id = ?1",
+                rusqlite::params![parent],
+            )
+            .map_err(|e| sqlite_error("上限清理子会话元数据失败", e))?;
+        }
         Ok(())
     }
 

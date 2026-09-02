@@ -1,23 +1,23 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import SessionTasksPanel from '../SessionTasksPanel';
+import AgentTasksPanel from '../AgentTasksPanel';
 import { mockTaskCancelCalls, resetTaskMocks } from '@/test/mocks/handlers';
 
-/** 会话后台任务停靠条（会话绑定 + 终态保留展示 + 运行中可取消）。 */
+/** 会话后台任务面板（ADR-026：活跃在上、完成沉底、可展开、可取消）。 */
 
 beforeEach(() => {
   resetTaskMocks();
 });
 
-describe('SessionTasksPanel', () => {
+describe('AgentTasksPanel', () => {
   it('renders nothing without a session (new chat)', () => {
-    const { container } = render(<SessionTasksPanel sessionId={null} />);
+    const { container } = render(<AgentTasksPanel sessionId={null} />);
     expect(container).toBeEmptyDOMElement();
   });
 
   it('shows session tasks with kind badges and cancel buttons', async () => {
-    render(<SessionTasksPanel sessionId="session-1" />);
+    render(<AgentTasksPanel sessionId="session-1" />);
 
     // mockTasks: task-1(delegate running) + task-cmd-1(command running) @ session-1；
     // task-2 completed @ session-2、task-3 failed 无会话归属（不显示）
@@ -33,14 +33,14 @@ describe('SessionTasksPanel', () => {
   });
 
   it('renders nothing when the session has no tasks', async () => {
-    const { container } = render(<SessionTasksPanel sessionId="session-9" />);
+    const { container } = render(<AgentTasksPanel sessionId="session-9" />);
     // 轮询发出但过滤后为空 → 整条不渲染
     await waitFor(() => {
       expect(container).toBeEmptyDOMElement();
     });
   });
 
-  it('keeps terminal tasks visible with status labels', async () => {
+  it('keeps terminal tasks visible with status labels (done sink)', async () => {
     // 覆盖：session-1 只有终态任务 → 面板仍展示（已完成/已取消样式）
     const { mockTasks } = await import('@/test/mocks/handlers');
     const { http, HttpResponse } = await import('msw');
@@ -52,7 +52,7 @@ describe('SessionTasksPanel', () => {
     server.use(
       http.get('*/api/v1/tasks', () => HttpResponse.json(finished)),
     );
-    render(<SessionTasksPanel sessionId="session-1" />);
+    render(<AgentTasksPanel sessionId="session-1" />);
     await waitFor(() => {
       expect(screen.getByText(/已结束 2/)).toBeInTheDocument();
     });
@@ -77,7 +77,7 @@ describe('SessionTasksPanel', () => {
     server.use(
       http.get('*/api/v1/tasks', () => HttpResponse.json(failed)),
     );
-    render(<SessionTasksPanel sessionId="session-1" />);
+    render(<AgentTasksPanel sessionId="session-1" />);
     await waitFor(() => {
       expect(screen.getByText('失败（退出码 1）')).toBeInTheDocument();
     });
@@ -85,7 +85,7 @@ describe('SessionTasksPanel', () => {
 
   it('cancels a running task via POST /tasks/{id}/cancel', async () => {
     const user = userEvent.setup();
-    render(<SessionTasksPanel sessionId="session-1" />);
+    render(<AgentTasksPanel sessionId="session-1" />);
     await waitFor(() => {
       expect(screen.getAllByRole('button', { name: /取消后台任务/ })[0]).toBeInTheDocument();
     });

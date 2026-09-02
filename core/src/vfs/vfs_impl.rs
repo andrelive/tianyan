@@ -535,7 +535,76 @@ impl VfsSearch for VirtualFileSystemImpl {
     }
 }
 
-impl VirtualFileSystem for VirtualFileSystemImpl {}
+#[async_trait]
+impl VirtualFileSystem for VirtualFileSystemImpl {
+    async fn backfill_summary_vectors_if_empty(&self) -> Result<usize> {
+        // 表非空 = 无需回填（正常启动路径，一次 count 查询即返回）
+        if self.vector_storage.count_rows().await? > 0 {
+            return Ok(0);
+        }
+
+        // 收集全部可索引条目（排除 Session——ADR-018 会话不入向量库）
+        let mut pending: Vec<TianyanUri> = Vec::new();
+        for &category in ContextNamespace::ALL {
+            if category == ContextNamespace::Session {
+                continue;
+            }
+            let root = TianyanUri::new(category, vec![]);
+            collect_indexable_uris(self, &root, &mut pending).await;
+        }
+        let total = pending.len();
+        if total == 0 {
+            return Ok(0);
+        }
+        tracing::warn!(total, "向量库为空，开始回填存量摘要（维度重建/首次建库后自愈）");
+
+        let mut done = 0usize;
+        for uri in pending {
+            // 摘要文本缺失的条目跳过——摘要任务生成文本后自然获得向量
+            let (Ok(abs), Ok(ov)) = (
+                self.read_abstract(&uri).await,
+                self.read_content(&uri, ContentLevel::Overview).await,
+            ) else {
+                continue;
+            };
+            if abs.trim().is_empty() || ov.trim().is_empty() {
+                continue;
+            }
+            match self.update_summary_vectors(&uri, &abs, &ov).await {
+                Ok(()) => {
+                    done += 1;
+                    if done % 50 == 0 {
+                        tracing::info!("向量回填进度：{done}/{total}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(uri = %uri, error = %e, "向量回填单条失败，跳过");
+                }
+            }
+        }
+        tracing::info!(done, total, "向量库回填完成");
+        Ok(done)
+    }
+}
+
+/// 递归收集命名空间下全部文件条目 URI（目录读取失败静默跳过——回填尽力而为）。
+async fn collect_indexable_uris(
+    vfs: &dyn VirtualFileSystem,
+    uri: &TianyanUri,
+    out: &mut Vec<TianyanUri>,
+) {
+    let entries = match vfs.list(uri).await {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries {
+        if entry.is_directory() {
+            Box::pin(collect_indexable_uris(vfs, entry.uri(), out)).await;
+        } else {
+            out.push(entry.uri().clone());
+        }
+    }
+}
 
 #[path = "vfs_builder.rs"]
 pub mod builder;

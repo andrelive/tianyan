@@ -23,6 +23,15 @@ pub struct AgentConfig {
     /// 文件快照的根目录。缺省使用进程当前目录。
     #[serde(default)]
     pub working_directory: Option<String>,
+    /// 委托任务（delegate_to_agent）同时运行上限（ADR-026）。
+    #[serde(default = "default_max_background_concurrency")]
+    pub max_background_concurrency: usize,
+    /// 委托任务排队上限（超出拒绝；ADR-026 双信号量排队模型）。
+    #[serde(default = "default_max_background_queue")]
+    pub max_background_queue: usize,
+    /// 终端命令（execute_command background）同时运行上限（ADR-026）。
+    #[serde(default = "default_max_command_concurrency")]
+    pub max_command_concurrency: usize,
 }
 
 impl Default for AgentConfig {
@@ -33,6 +42,9 @@ impl Default for AgentConfig {
             max_turns: default_max_turns(),
             background_self_review: false,
             working_directory: None,
+            max_background_concurrency: default_max_background_concurrency(),
+            max_background_queue: default_max_background_queue(),
+            max_command_concurrency: default_max_command_concurrency(),
         }
     }
 }
@@ -54,6 +66,18 @@ impl AgentConfig {
                 self.default_top_k
             ));
         }
+        if self.max_background_concurrency == 0 {
+            return Err("max_background_concurrency 必须大于 0".to_string());
+        }
+        if self.max_background_queue < self.max_background_concurrency {
+            return Err(format!(
+                "max_background_queue（{}）不能小于 max_background_concurrency（{}）",
+                self.max_background_queue, self.max_background_concurrency
+            ));
+        }
+        if self.max_command_concurrency == 0 {
+            return Err("max_command_concurrency 必须大于 0".to_string());
+        }
         Ok(())
     }
 }
@@ -72,6 +96,18 @@ fn default_max_turns() -> usize {
 
 fn default_false() -> bool {
     false
+}
+
+fn default_max_background_concurrency() -> usize {
+    20
+}
+
+fn default_max_background_queue() -> usize {
+    40
+}
+
+fn default_max_command_concurrency() -> usize {
+    16
 }
 
 #[cfg(test)]

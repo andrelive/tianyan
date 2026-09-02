@@ -204,6 +204,12 @@ pub struct ToolRegistry {
     pub(crate) background_tasks: Arc<crate::agent::background::BackgroundTaskManager>,
     /// 后台命令管理器（execute_command(background)；查询/终止经统一 task_status / task_cancel）。
     pub(crate) command_tasks: Arc<crate::executor::CommandManager>,
+    /// 后台命令日志目录（with_command_logs_dir 存值；重建 CommandManager 时保留）。
+    command_logs_dir: Option<std::path::PathBuf>,
+    /// 后台命令并发上限（ADR-026：可配置；重建 CommandManager 时保留）。
+    command_concurrency: usize,
+    /// 子智能体消息流事件通道（ADR-026：面板实时流式；None 时静默）。
+    pub(crate) task_event_sink: Option<Arc<dyn crate::agent::background::TaskEventSink>>,
     /// 角色向量路由器（ADR-016 P3：suggest_role 工具依赖；None 时工具不可用）。
     pub(crate) role_router: Option<Arc<crate::agent::role_router::RoleRouter>>,
     /// 执行记录日志（ADR-017 GEPA 数据层：execution_stats 等工具依赖；None 时工具不可用）。
@@ -256,6 +262,9 @@ impl ToolRegistry {
             web_client: None,
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
             command_tasks: Arc::new(crate::executor::CommandManager::new(None)),
+            command_logs_dir: None,
+            command_concurrency: crate::executor::command::DEFAULT_MAX_CONCURRENT_COMMANDS,
+            task_event_sink: None,
             role_router: None,
             execution_log: None,
             session_recall: None,
@@ -388,7 +397,44 @@ impl ToolRegistry {
     ///
     /// 缺省为 None（仅内存输出尾部缓冲，不落盘）。
     pub fn with_command_logs_dir(mut self, dir: PathBuf) -> Self {
-        self.command_tasks = Arc::new(crate::executor::CommandManager::new(Some(dir)));
+        self.command_logs_dir = Some(dir.clone());
+        self.command_tasks = Arc::new(
+            crate::executor::CommandManager::new(Some(dir))
+                .with_max_concurrent(self.command_concurrency),
+        );
+        self
+    }
+
+    /// 设置并发配置（ADR-026）：委托运行上限/排队上限 + 终端命令上限。
+    ///
+    /// 委托为双信号量排队模型（运行 ≤ max_background，排队 ≤ max_queue，超出拒绝）；
+    /// 终端命令保持排队模型，上限可配置。
+    pub fn with_concurrency(
+        mut self,
+        max_background: usize,
+        max_queue: usize,
+        max_command: usize,
+    ) -> Self {
+        self.background_tasks = Arc::new(
+            crate::agent::background::BackgroundTaskManager::with_concurrency(
+                max_background,
+                max_queue,
+            ),
+        );
+        self.command_concurrency = max_command.max(1);
+        self.command_tasks = Arc::new(
+            crate::executor::CommandManager::new(self.command_logs_dir.clone())
+                .with_max_concurrent(self.command_concurrency),
+        );
+        self
+    }
+
+    /// 设置子智能体消息流事件通道（ADR-026：面板实时流式显示）。
+    pub fn with_task_event_sink(
+        mut self,
+        sink: Arc<dyn crate::agent::background::TaskEventSink>,
+    ) -> Self {
+        self.task_event_sink = Some(sink);
         self
     }
 

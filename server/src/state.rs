@@ -298,6 +298,8 @@ pub struct AppState {
     clipboard_pending: Arc<RwLock<Option<PendingCapture>>>,
     /// 用户问题服务（ask_user 同步等待用户回答；回答端点提交入口）。
     user_questions: Arc<tianyan::agent::user_questions::UserQuestionService>,
+    /// 子智能体消息流事件广播（ADR-026：GET /tasks/stream SSE 订阅源）。
+    pub(crate) task_event_tx: tokio::sync::broadcast::Sender<String>,
     /// 活跃 SSE 对话流的取消句柄：session_id → cancel 标志（供显式取消端点触发）。
     /// 跑完再取：客户端断开不再取消 agent，主动「停止」经此端点显式取消。
     stream_cancels:
@@ -443,6 +445,12 @@ impl AppState {
         let session_manager = Arc::new(PersistentSessionManager::new(session_store.clone()));
         // 用户问题服务（ask_user 同步等待用户回答；回答端点与 Agent 共享同一实例）
         let user_questions = Arc::new(tianyan::agent::user_questions::UserQuestionService::new());
+        // 子智能体消息流事件广播（ADR-026：面板实时流式；SSE 订阅源）
+        let (task_event_tx, _) = tokio::sync::broadcast::channel::<String>(256);
+        let task_event_sink: Arc<dyn tianyan::agent::background::TaskEventSink> =
+            Arc::new(crate::agent_builder::TaskEventBroadcaster {
+                tx: task_event_tx.clone(),
+            });
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -466,6 +474,7 @@ impl AppState {
             role_router,
             usage_log.clone(),
             user_questions.clone(),
+            task_event_sink,
         )
         .await?;
 
@@ -496,6 +505,7 @@ impl AppState {
             sqlite_db: database,
             event_bus: Arc::new(tianyan::events::EventBus::new()),
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            task_event_tx,
             clipboard_outbox,
             clipboard_pending: Arc::new(RwLock::new(None)),
             user_questions,
@@ -660,6 +670,9 @@ impl AppState {
             role_router,
             self.usage_log.clone(),
             self.user_questions.clone(),
+            Arc::new(crate::agent_builder::TaskEventBroadcaster {
+                tx: self.task_event_tx.clone(),
+            }),
         )
         .await?;
 

@@ -17,6 +17,14 @@ pub trait VectorStorage: Send + Sync {
     /// （0xC0000409 fail-fast，日志无任何输出）。
     fn embedding_dim(&self) -> usize;
 
+    /// 向量表当前行数（0 = 空表）。
+    ///
+    /// 供启动期自愈判断：维度重建 / 首次建库后表为空，触发存量摘要回填。
+    /// 默认实现仅供测试桩（返回 0）；真实后端必须实现。
+    async fn count_rows(&self) -> Result<u64> {
+        Ok(0)
+    }
+
     /// 初始化向量存储。
     async fn initialize(&self) -> Result<()>;
 

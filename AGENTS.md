@@ -97,6 +97,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-023: 配置目录与数据目录分离](docs/architecture/decisions/023-config-data-dir-separation.md) — 配置固定 `~/.tianyan/tianyan.toml` 永不搬迁；数据目录从配置读取；搬迁=复制+校验+先改配置后强制删源，失败可见
 - [ADR-024: 调度模型从 cron 改为间隔 + 补跑](docs/architecture/decisions/024-interval-scheduler.md) — 任务声明执行间隔；单一扫描循环每 60s 顺序检查、串行执行；last_run 持久化宕机补跑；cron 配置自动换算弃用
 - [ADR-025: 移除检索轨迹功能](docs/architecture/decisions/025-remove-retrieval-traces.md) — 只覆盖组装路径不覆盖 search_vfs、同 query 双记录误导、零有效使用；检索观测回归 UsageStats + tracing（否决记录 REJECTED #20）
+- [ADR-026: 后台任务与子智能体统一面板](docs/architecture/decisions/026-background-tasks-unified-panel.md) — 委托只支持异步；子智能体 = 带父会话引用的会话（存储/协议/渲染三层复用）；右侧任务面板（活跃在上、完成沉底、可展开过程/输出）；并发可配置（委托 20+排队 40、终端 16）+ SQL 权威注册表 + 3 天 TTL + 子会话级联/上限/不索引 FTS
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 
@@ -115,7 +116,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层）：config/agent/scheduler 共用 | — |
 | `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles） | — |
 | `vfs` | `core/src/vfs/` | **基础机制**：统一存储检索层（L0/L1/L2 + RRF 融合）；SqliteBackend 经 db::Database 访问 | — |
-| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry；工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，DSH 吸收）+ 内置可观测性监听器（统计/Trace/GEPA/规则学习） | 所有工具操作通过 VFS |
+| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 后台任务（ADR-026：委托只支持异步、双信号量排队 20+40、SQL 权威 + 3 天 TTL、子智能体会话消息落库 + 事件通道）；工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，DSH 吸收）+ 内置可观测性监听器（统计/Trace/GEPA/规则学习） | 所有工具操作通过 VFS |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 组装） | 检索仅通过 `DualLayerRetriever` |
 | `knowledge` | `core/src/knowledge/` | 知识库导入管道 | ❌ **不建独立检索管道**，导入→VFS→SummaryEngine |
 | `memory` | `core/src/memory/` | `MemoryExtractor` 长期记忆提取 | ❌ **不建独立存储**，提取→VFS write |

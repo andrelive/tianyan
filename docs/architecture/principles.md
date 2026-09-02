@@ -44,11 +44,11 @@ SQLite 的 WAL 模式和 `ON CONFLICT` 语义已处理并发和不存在的情�
 
 ## 运行时原则
 
-### Providers fail fast
-不做重试/退避。`RetryService` 已移除，禁止重新引入。
+### Providers fail fast（跨层语义）
+请求层内置指数退避重试（全局默认 5 次、1s 起点 ×2 + 抖动；HTTP 429/5xx 与网络/超时类错误可重试）；"fail fast" 仅指不跨 Agent 层/不跨任务重试。`RetryService` 已移除，禁止重新引入独立的请求封装重试层。
 
 ### 工具不做自主多轮决策
-工具（如 `delegate_to_agent`）采用多轮调用——LLM 每次响应要么给出最终答案，要么请求 tool_calls。决策权永远在 LLM 手中，工具只是执行者 + 信使。`delegate_to_agent` 采用有界循环（默认 5 轮）防止失控。
+工具（如 `delegate_to_agent`）采用多轮调用——LLM 每次响应要么给出最终答案，要么请求 tool_calls。决策权永远在 LLM 手中，工具只是执行者 + 信使。`delegate_to_agent` 采用有界循环（默认 200 轮，`max_turns` 可收紧，上限 500）；委托只支持异步（ADR-026），子智能体循环在后台任务中运行。
 
 ---
 

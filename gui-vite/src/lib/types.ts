@@ -517,6 +517,8 @@ export interface BackgroundTask {
   parent_session_id: string | null;
   result: string | null;
   error: string | null;
+  /** 终端命令输出尾部（ADR-026：面板展开显示最近输出；委托任务为 null）。 */
+  output_tail?: string | null;
   /** 创建时间（epoch 毫秒）。 */
   created_at: number;
   /** 完成时间（epoch 毫秒，未完成时为 null）。 */

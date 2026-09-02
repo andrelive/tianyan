@@ -139,7 +139,7 @@ pub struct CommandManager {
 }
 
 impl CommandManager {
-    /// 创建管理器。`logs_dir` 为后台命令日志目录（None 时仅内存尾部缓冲，不落盘）。
+    /// 创建管理器。logs_dir 为后台命令日志目录（None 时仅内存尾部缓冲，不落盘）。
     pub fn new(logs_dir: Option<PathBuf>) -> Self {
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
@@ -150,6 +150,12 @@ impl CommandManager {
             waker: Arc::new(Mutex::new(None)),
             session_counts: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// 指定并发上限（ADR-026：可配置；默认 DEFAULT_MAX_CONCURRENT_COMMANDS）。
+    pub fn with_max_concurrent(mut self, max_concurrent: usize) -> Self {
+        self.semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
+        self
     }
 
     /// 后台启动命令：立即返回任务快照，进程在独立任务中运行。

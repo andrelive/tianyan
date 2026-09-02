@@ -53,7 +53,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry；`Agent::new` 7 参数） |
 | `AgentLoop` | Agent 迭代循环（LLM 工具调用循环） |
 | `AgentLoopConfig` | AgentLoop 配置（loop_limit 默认 50） |
-| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls（JoinSet，同轮多调用并发）；注册 25 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](./architecture/tool-catalog.md)，freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁，A3）；工具执行走**可插拔管线**（`tool_registry/pipeline.rs`：pre-execute 监听器 → 单调守卫 → 执行 → post-execute 监听器，A1/A4）；内置可观测性监听器（`tool_registry/observability.rs`）承担 usage stats / Trace / GEPA 执行历史 / 失败规则学习；工具展示意图映射（`ToolPresentation`，A2）供前端渲染 tool card；`delegate_to_agent` 支持嵌套委托（深度上限 3，RAII guard 计数）、`max_turns`/`timeout_secs` 参数与**后台执行**（`background: true` → 任务注册表 + 完成通知注入父会话） |
+| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls（JoinSet，同轮多调用并发）；注册 25 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](./architecture/tool-catalog.md)，freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁，A3）；工具执行走**可插拔管线**（`tool_registry/pipeline.rs`：pre-execute 监听器 → 单调守卫 → 执行 → post-execute 监听器，A1/A4）；内置可观测性监听器（`tool_registry/observability.rs`）承担 usage stats / Trace / GEPA 执行历史 / 失败规则学习；工具展示意图映射（`ToolPresentation`，A2）供前端渲染 tool card；`delegate_to_agent` 支持嵌套委托（深度上限 3，RAII guard 计数随任务闭包持有）、`max_turns`/`timeout_secs` 参数，**委托只支持异步**（ADR-026：一律注册后台任务 + 立即返回 task_id）；后台任务排队模型（运行上限 `agent.max_background_concurrency`=20、排队上限 `agent.max_background_queue`=40，双信号量）与终端命令并发（`agent.max_command_concurrency`=16）可配置 |
 | `SessionState` | 会话状态容器（对话历史为唯一真相源，上下文窗口、待持久化记忆） |
 | `SessionStateManager` | 多会话状态管理器（线程安全，Arc<RwLock<HashMap>>） |
 | `AgentResponse` | Agent 响应（内容、追问、Token 使用量、技能调用信息、处理时间） |

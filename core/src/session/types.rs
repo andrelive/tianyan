@@ -44,6 +44,15 @@ pub struct SessionHeader {
     /// 全局 [agent] working_directory 配置兜底）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
+    /// 父会话 ID（ADR-026：子智能体会话关联主会话；None = 主会话）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    /// 会话类型（ADR-026：子智能体会话为 "delegate"；None = 主会话）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// 子智能体角色名（ADR-026：delegate 会话的角色；None = 主会话）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 impl Default for SessionHeader {
@@ -55,6 +64,9 @@ impl Default for SessionHeader {
             title: None,
             ended_at: None,
             working_directory: None,
+            parent_session_id: None,
+            kind: None,
+            role: None,
         }
     }
 }

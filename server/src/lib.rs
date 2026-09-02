@@ -17,6 +17,7 @@ use tracing::{error, info, warn};
 use tianyan::scheduler::tasks::{
     EvolutionTask, GcTask, SnapshotGcTask, SummaryTask, UsageStatsFlushTask,
 };
+use tianyan::vfs::VirtualFileSystem;
 use tianyan::scheduler::{TaskContext, TaskDefinition, TaskScheduler};
 
 use crate::agent_builder::create_model_services;
@@ -405,6 +406,17 @@ async fn start_server_inner(
             skill_reviewer,
             app_config.clone(),
         ));
+
+        // 向量库自愈回填（后台）：表为空（维度重建/首次建库）时把存量摘要重嵌入，
+        // 恢复语义检索；表非空时 no-op。不阻塞启动。
+        let backfill_vfs = vfs.clone();
+        tokio::spawn(async move {
+            match backfill_vfs.backfill_summary_vectors_if_empty().await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("向量库回填完成：重嵌入 {n} 条存量摘要"),
+                Err(e) => tracing::warn!(error = %e, "向量库回填失败（内容更新时会渐进补齐）"),
+            }
+        });
 
         // 注册摘要任务（ADR-017：降频每 6 小时；知识导入同步摘要，本任务仅兜底；
         // 范围排除 Session 命名空间——会话回忆改 FTS5）
