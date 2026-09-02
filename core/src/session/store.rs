@@ -347,7 +347,7 @@ impl SessionStore {
         let conn = self.db.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT sm.session_id, sm.header_json, sm.created_at,                    (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = sm.session_id)                    FROM session_meta sm WHERE sm.parent_session_id IS NULL ORDER BY sm.created_at DESC",
+                "SELECT sm.session_id, sm.header_json, sm.created_at,                    (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = sm.session_id)                    FROM session_meta sm WHERE sm.parent_session_id IS NULL                    AND sm.session_id NOT LIKE 'evolution-%'                    ORDER BY sm.created_at DESC",
             )
             .map_err(|e| sqlite_error("会话列表查询准备失败", e))?;
         let rows = stmt
@@ -355,7 +355,9 @@ impl SessionStore {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
+                    // created_at 可空（append 隐式创建的会话缺省 NULL）：
+                    // 读取为 Option，NULL 归 0（排序靠后），避免整列表 500
+                    r.get::<_, Option<i64>>(2)?.unwrap_or(0),
                     r.get::<_, i64>(3)?,
                 ))
             })

@@ -61,12 +61,13 @@ impl EvolutionReviewExecutor for AgentEvolutionExecutor {
         let agent = self.agent.read().await.clone();
         let resp = agent
             .process_message(&session_id, &msg, Some(&self.model), None)
-            .await?;
+            .await;
 
-        // 清理专用会话（避免进入会话列表与记忆提取）
+        // 清理专用会话（避免进入会话列表与记忆提取）——成功/失败都清理：
+        // 失败路径此前 `?` 提前返回跳过清理，专用会话残留进前端会话列表。
         if let Err(e) = self.session_manager.delete_session(&session_id).await {
             tracing::debug!(session_id = %session_id, error = %e, "演化会话清理失败");
         }
-        Ok(resp.content)
+        resp.map(|r| r.content)
     }
 }

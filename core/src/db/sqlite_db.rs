@@ -123,6 +123,31 @@ impl SqliteDb {
                 )?;
             }
         }
+        // 幂等迁移：旧 background_tasks 表补 kind 列（8817eb7 加列时未迁移，
+        // 旧库 SELECT/INSERT 含 kind 报 no such column——后台任务持久化失效）。
+        // 同样必须在 SCHEMA_SQL 之前（SCHEMA_SQL 的 CREATE TABLE 对已存在表不生效）。
+        let has_bt_table: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='background_tasks')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if has_bt_table {
+            let has_kind_col: bool = {
+                let mut stmt = conn.prepare("PRAGMA table_info(background_tasks)")?;
+                let cols = stmt
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                cols.iter().any(|c| c == "kind")
+            };
+            if !has_kind_col {
+                conn.execute(
+                    "ALTER TABLE background_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'delegate'",
+                    [],
+                )?;
+            }
+        }
         conn.execute_batch(SCHEMA_SQL)?;
         Ok(())
     }
@@ -366,5 +391,56 @@ mod lock_tests {
             cols.iter().any(|c| c == "parent_session_id")
         };
         assert!(has_col, "新表应含 parent_session_id 列");
+    }
+
+    /// 回归：旧库 background_tasks 表无 kind 列（8817eb7 加列时未迁移）时，
+    /// init_all_schemas 补列成功，SELECT/INSERT 不再报 no such column。
+    #[tokio::test]
+    async fn test_migration_adds_kind_to_background_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy-bt.db");
+        {
+            // 模拟旧库：background_tasks 无 kind 列
+            let db = SqliteDb::open(db_path.clone()).unwrap();
+            {
+                let conn = db.lock().await;
+                conn.execute_batch(
+                    "CREATE TABLE background_tasks (
+                        id                 TEXT PRIMARY KEY,
+                        description        TEXT    NOT NULL,
+                        status             TEXT    NOT NULL,
+                        parent_session_id  TEXT    NOT NULL,
+                        result             TEXT,
+                        error              TEXT,
+                        created_at         INTEGER NOT NULL,
+                        completed_at       INTEGER,
+                        seq                INTEGER NOT NULL
+                    );
+                    INSERT INTO background_tasks (id, description, status, parent_session_id, created_at, seq)
+                    VALUES ('bt_legacy', '旧任务', 'completed', 's1', 0, 1);",
+                )
+                .unwrap();
+            }
+            db.init_all_schemas().await.expect("旧库迁移应成功");
+            let conn = db.lock().await;
+            // kind 列已补（默认 delegate）
+            let kind: String = conn
+                .query_row(
+                    "SELECT kind FROM background_tasks WHERE id = 'bt_legacy'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(kind, "delegate", "旧行 kind 应回填默认值");
+            // 含 kind 的 SELECT 可执行（后台任务持久化加载不再失败）
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM background_tasks WHERE kind IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+        }
     }
 }
