@@ -35,10 +35,17 @@ export default function DataStep({
             aria-label="向量维度"
           >
             <option value="384">384</option>
+            <option value="512">512</option>
             <option value="768">768</option>
             <option value="1024">1024</option>
             <option value="1536">1536 (OpenAI ada-002 / text-embedding-3-small)</option>
+            <option value="2048">2048 (阿里云 text-embedding-v4)</option>
             <option value="3072">3072 (text-embedding-3-large)</option>
+            {![384, 512, 768, 1024, 1536, 2048, 3072].includes(data.vector_dimension) && (
+              <option value={data.vector_dimension}>
+                {data.vector_dimension}（当前值）
+              </option>
+            )}
           </select>
         </FieldRow>
       </div>
