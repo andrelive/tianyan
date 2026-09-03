@@ -225,7 +225,9 @@ impl Agent {
                     self.update_agent_metrics(session_id, Some(&total_tokens), true)
                         .await;
                     if content.is_empty() {
-                        tracing::debug!(session = %session_id, "唤醒轮空输出（模型无需回复）");
+                        // 空输出是重要事件（主 agent 静默无反馈的取证点）：
+                        // info 级别可见，便于排查"任务完成但无反应"类问题。
+                        tracing::info!(session = %session_id, "唤醒轮空输出（模型无需回复）");
                     } else {
                         tracing::info!(session = %session_id, "唤醒轮完成：后台任务结果已汇总");
                     }
@@ -254,16 +256,46 @@ impl Agent {
     ///
     /// 与 [`Self::assemble_context`] 的区别：**不添加用户消息**（无用户输入），
     /// 直接组装会话历史（System 完成通知已在其中）+ 会话定位 + 唤醒指令。
+    ///
+    /// 唤醒指令区分失败/完成场景：**失败必须汇报**（ADR-013 shouldReply =
+    /// allComplete || isTaskFailure——失败唤醒的目的就是让主 agent 知情并
+    /// 继续处理），只有"全部成功且无需输出"才允许空输出。此前指令把两者
+    /// 混在一起，模型在失败场景下选择空输出结束，主 agent 静默无反馈。
     async fn prepare_wake_context(&self, state: &Arc<RwLock<SessionState>>) -> Vec<Message> {
         // 会话历史 + 前缀 + 会话定位（与用户轮共用组装；无用户消息注入）
         let mut messages = self.assemble_context(state, "").await;
 
-        // 唤醒指令：告知模型这是后台任务完成触发的自动处理轮
-        messages.push(Message::system(
-            "## 自动唤醒轮\n这是一轮由后台任务完成（或失败）自动触发的处理轮，不是用户新消息。\n\
-             若全部后台任务已完成：汇总各任务结果，并继续原有工作。\n\
-             若无需向用户输出任何内容：直接输出空文本结束本轮。",
-        ));
+        // 感知任务状态：任一后台任务/命令失败 → 失败场景（必须汇报）
+        let has_failure = {
+            let bg_failed = self
+                .background_tasks
+                .snapshot()
+                .await
+                .iter()
+                .any(|t| t.status == crate::agent::background::TaskStatus::Failed);
+            let cmd_failed = self
+                .command_tasks
+                .list()
+                .await
+                .iter()
+                .any(|t| t.status == crate::executor::CommandTaskStatus::Failed);
+            bg_failed || cmd_failed
+        };
+
+        if has_failure {
+            messages.push(Message::system(
+                "## 自动唤醒轮\n这是一轮由后台任务完成（或失败）自动触发的处理轮，不是用户新消息。\n\
+                 会话中有后台任务/命令执行失败：**必须向用户汇报失败情况**（哪些任务失败、\n\
+                 失败原因、后续处理建议），并继续原有工作。\n\
+                 禁止输出空文本结束本轮。",
+            ));
+        } else {
+            messages.push(Message::system(
+                "## 自动唤醒轮\n这是一轮由后台任务完成（或失败）自动触发的处理轮，不是用户新消息。\n\
+                 若全部后台任务已完成：汇总各任务结果，并继续原有工作。\n\
+                 若无需向用户输出任何内容：直接输出空文本结束本轮。",
+            ));
+        }
 
         messages
     }
@@ -1296,6 +1328,58 @@ mod tests {
         assert_eq!(
             state.conversations_processed, 1,
             "空输出应正常结束（计入成功，不重试）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_wake_context_requires_report_on_failure() {
+        // 回归保护：后台任务失败时唤醒指令必须要求模型汇报（ADR-013
+        // shouldReply = allComplete || isTaskFailure——失败唤醒的目的就是
+        // 让主 agent 知情并继续处理）。此前指令允许空输出，模型在失败
+        // 场景下选择沉默，主 agent 无反馈（"任务失败但没通知"类问题）。
+        let agent = make_agent(MockChatService::new());
+        // 注入一个失败的后台任务
+        let id = agent
+            .background_tasks
+            .register(
+                crate::agent::background::TaskKind::Delegate,
+                "测试任务".to_string(),
+                "session-1".to_string(),
+            )
+            .await;
+        agent
+            .background_tasks
+            .fail(&id, "mock 失败".to_string())
+            .await;
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        let messages = agent.prepare_wake_context(&state).await;
+        let last = messages.last().expect("唤醒指令应存在");
+        assert_eq!(last.role, MessageRole::System);
+        assert!(
+            last.content.contains("必须向用户汇报失败情况"),
+            "失败场景唤醒指令必须要求汇报，实际：{}",
+            last.content
+        );
+        assert!(
+            !last.content.contains("直接输出空文本结束本轮"),
+            "失败场景不得允许空输出，实际：{}",
+            last.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_wake_context_allows_empty_on_success() {
+        // 全部成功且无需输出时，唤醒指令仍允许空输出（ADR-013 空输出合法）
+        let agent = make_agent(MockChatService::new());
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        let messages = agent.prepare_wake_context(&state).await;
+        let last = messages.last().expect("唤醒指令应存在");
+        assert!(
+            last.content.contains("直接输出空文本结束本轮"),
+            "无失败时允许空输出，实际：{}",
+            last.content
         );
     }
 

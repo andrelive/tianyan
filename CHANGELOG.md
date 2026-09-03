@@ -26,6 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed（唤醒轮失败场景静默，2026-09-03）
+- **后台任务失败时主 agent 无反馈**：通知/注入/唤醒链路正常（System 通知入库 + 唤醒轮触发），但唤醒指令允许"空输出结束"，模型在失败场景下选择沉默——主 agent 静默无反馈（"任务失败但没通知"）。唤醒指令区分失败/完成场景：**失败必须向用户汇报**（ADR-013 shouldReply = allComplete || isTaskFailure 的语义落地），只有全部成功且无需输出才允许空输出；空输出日志从 debug 升级为 info（取证可见）。回归测试锁定失败场景指令含"必须汇报"、成功场景仍允许空输出
+
+### Fixed（会话消耗汇总漏计工具轮输入，2026-09-03）
+- **流式 usage 事件逐轮下发**：AgentLoop 每轮 LLM 调用都有真实 usage（完整上下文重发，O(n²) 量级），但流式事件只有最终轮经 `send_complete` 下发——中间工具轮的 usage 从未下发，前端本地消息只有每轮对话的最后一条 assistant 消息带 usage，`sumSessionUsage` 漏计所有中间轮输入（刷新历史后正确，流式过程中错误）。新增 `StreamEventSender::send_turn_usage`（delta 空、is_complete=false，前端归约器只消费 usage 字段，无正文/边界副作用），工具轮 persist 后逐轮下发（回归测试锁定）
+
+### Fixed（托盘退出卡死，2026-09-03）
+- **常驻 SSE 流阻塞优雅关停**：`GET /tasks/stream`（后台任务聚合 SSE，ADR-026）forwarder 死等 broadcast 消息，前端 EventSource 常驻订阅——axum `with_graceful_shutdown` 等待所有活跃连接结束永不完成，托盘「退出」卡死只能杀进程。forwarder 加 shutdown 感知（`tokio::select!` 轮询 `shutdown_flag` 1s 间隔，与 `/chat/stream` 同模式）；ADR-026 补充「常驻 SSE 端点必须 shutdown 感知」约束
+
 ### Fixed（流式 usage 丢失根因修复，2026-09-03）
 - **流式请求显式要求 usage**：`stream_options: {include_usage: true}`（OpenAI 规范：流式响应默认不返回 usage，除非请求显式要求）——ollama 等规范网关此前永远不返回 usage（实测"流式不返回"实为未请求）；对齐 DSH 同名参数（回归测试锁定请求体）
 - **usage-only 尾块保留下发**：SSE 解析不再丢弃 `{"choices":[],"usage":{...}}` 尾块（include_usage=true 的正常流尾），构造带 usage 的空 chunk 下发供校准；纯 cost 块与空块仍跳过（回归测试锁定）
