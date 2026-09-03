@@ -273,6 +273,24 @@ impl StreamEventSender {
         .await;
     }
 
+    /// 发送单轮 LLM 调用用量事件（工具轮专用）。
+    ///
+    /// 最终轮由 [`send_complete`] 携带 usage（`last_turn_usage`），工具轮
+    /// （调用工具后继续循环）此前不下发——前端本地消息只有最终轮带 usage，
+    /// 会话消耗汇总（`sumSessionUsage`）漏计所有中间轮输入（每轮都是完整
+    /// 上下文重发，O(n²) 量级）。本事件 delta 为空、`is_complete=false`，
+    /// 前端归约器只消费 usage 字段（附加到最后一条 assistant 消息），
+    /// 不产生正文/边界副作用。
+    pub async fn send_turn_usage(&self, usage: &TokenUsage) {
+        self.try_send(AgentStreamChunk {
+            delta: String::new(),
+            chunk_type: StreamChunkType::Answer,
+            token_usage: Some(usage.clone()),
+            ..Default::default()
+        })
+        .await;
+    }
+
     /// 发送消息边界事件（入库完成后的完整结构化消息）。
     ///
     /// 由持久化侧（run_agent_turn）在用户消息入库后立即发送，保证边界

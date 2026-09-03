@@ -831,6 +831,93 @@ async fn test_run_stream_accumulates_tool_call_deltas() {
     assert_eq!(tool_calls[0].function.arguments, r#"{"city":"北京"}"#);
 }
 
+/// 流式路径：工具轮 usage 事件逐轮下发——前端本地消息每轮都带 usage，
+/// 会话消耗汇总（sumSessionUsage）不漏计中间轮输入（每轮都是完整上下文
+/// 重发，O(n²) 量级）。工具轮事件 delta 为空、is_complete=false，
+/// 最终轮仍由 send_complete 携带 usage。
+#[tokio::test]
+async fn test_run_stream_emits_usage_per_tool_turn() {
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion_stream().returning(|req| {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        if req.messages.len() <= 1 {
+            // 第一轮：工具调用 + usage（完整上下文输入 1000，缓存命中 800）
+            tx.try_send(Ok(stream_chunk(
+                None,
+                Some(vec![ToolCallDelta {
+                    index: 0,
+                    id: Some("call_abc".to_string()),
+                    call_type: Some("function".to_string()),
+                    function: Some(ToolCallFunctionDelta {
+                        name: Some("get_weather".to_string()),
+                        arguments: Some("{}".to_string()),
+                    }),
+                }]),
+                None,
+            )))
+            .unwrap();
+            tx.try_send(Ok(stream_chunk(
+                None,
+                None,
+                Some(TokenUsage::new(1000, 20)),
+            )))
+            .unwrap();
+        } else {
+            // 第二轮：最终回答 + usage（上下文增长到 1200）
+            tx.try_send(Ok(stream_chunk(Some("天气：晴"), None, None)))
+                .unwrap();
+            tx.try_send(Ok(stream_chunk(
+                None,
+                None,
+                Some(TokenUsage::new(1200, 30)),
+            )))
+            .unwrap();
+        }
+        Ok(rx)
+    });
+    let agent_loop = make_loop(mock, 5);
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+    let sender = StreamEventSender::new(event_tx);
+
+    let mut messages = vec![Message::user("北京天气如何？")];
+    let result = agent_loop
+        .run_stream(
+            &mut messages,
+            sender,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    match result {
+        AgentLoopResult::Answer { content, turns, .. } => {
+            assert_eq!(content, "天气：晴");
+            assert_eq!(turns, 2);
+        }
+        other => panic!("期望 Answer，得到 {:?}", other),
+    }
+
+    // 收集全部 usage 事件：工具轮（delta 空、非 complete）在 loop 内部下发；
+    // 最终轮 complete 事件由上层 run_agent_turn::apply_loop_result 发送
+    // （不在 run_stream 范围内），此处只断言工具轮事件。
+    let mut usage_events: Vec<(bool, usize)> = Vec::new();
+    while let Some(Ok(chunk)) = event_rx.recv().await {
+        if let Some(u) = chunk.token_usage {
+            usage_events.push((chunk.is_complete, u.prompt_tokens));
+        }
+    }
+    assert_eq!(
+        usage_events,
+        vec![(false, 1000)],
+        "工具轮应下发 usage 事件（非 complete）；最终轮由上层 send_complete 下发"
+    );
+}
+
 /// 流式路径：已有部分内容后流中断 —— 保留已收内容为截断输出
 /// （finish=length），不再整体报错（对齐 DSH 中断不丢内容）。
 #[tokio::test]

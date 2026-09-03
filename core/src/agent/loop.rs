@@ -734,6 +734,13 @@ impl AgentLoop {
             .await;
 
         if let Some(tool_calls) = tool_calls {
+            // 工具轮用量事件：每轮 LLM 调用都是完整上下文重发（O(n²) 量级），
+            // 必须逐轮下发——否则前端本地消息只有最终轮带 usage，会话消耗
+            // 汇总（sumSessionUsage）漏计所有中间轮输入。
+            if let (Some(sender), Some(usage)) = (ctx.stream_sender, &turn_usage) {
+                sender.send_turn_usage(usage).await;
+            }
+
             // Notify about tool calls if sender is available
             if let Some(sender) = ctx.stream_sender {
                 for tc in tool_calls {
