@@ -15,6 +15,12 @@ use serde::{Deserialize, Serialize};
 pub struct InjectableContext {
     /// 智能体核心人格（soul.md）。
     pub soul: String,
+    /// 项目指令（会话绑定工作目录下的 AGENTS.md；无则空）。
+    ///
+    /// 会话首次加载上下文时读取一次（会话绑定工作目录后不变），
+    /// 随快照持久化（旧快照缺省空，向后兼容）。
+    #[serde(default)]
+    pub project_instructions: String,
     /// 经验与方法论。
     pub rules_and_experiences: Vec<String>,
     /// 用户画像与环境事实。

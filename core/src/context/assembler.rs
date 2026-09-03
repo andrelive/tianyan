@@ -31,6 +31,11 @@ impl ContextAssembler {
             messages.push(Message::system(&injectable.soul));
         }
 
+        // 注入项目指令（AGENTS.md）——soul 之后、rules/memories 之前
+        if !injectable.project_instructions.is_empty() {
+            messages.push(Message::system(&injectable.project_instructions));
+        }
+
         // 注入 rules + memories
         let mut context_parts: Vec<String> = Vec::new();
         if !injectable.rules_and_experiences.is_empty() {
@@ -354,6 +359,24 @@ mod tests {
         assert!(messages[1].content.contains("Result style"));
         assert_eq!(messages[2].role, MessageRole::User);
         assert_eq!(messages[2].content, "Test");
+    }
+
+    #[test]
+    fn test_assemble_injects_project_instructions_after_soul() {
+        let injectable = InjectableContext {
+            soul: "You are helpful.".to_string(),
+            project_instructions: "项目规范：禁止使用 unsafe。".to_string(),
+            rules_and_experiences: vec!["Always read before writing.".to_string()],
+            ..Default::default()
+        };
+        let sm = make_text_msg("msg_1", MessageRole::User, "Test", "ses_1");
+        let messages = ContextAssembler::assemble(&[sm], &injectable);
+        // soul + project_instructions + (rules merged) + user message
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].content, "You are helpful.");
+        assert_eq!(messages[1].content, "项目规范：禁止使用 unsafe。");
+        assert!(messages[2].content.contains("Always read"));
+        assert_eq!(messages[3].role, MessageRole::User);
     }
 
     #[test]

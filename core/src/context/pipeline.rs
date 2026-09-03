@@ -61,11 +61,16 @@ impl ContextPipeline {
         &self.compressor
     }
 
-    /// 加载可注入上下文（soul + rules + memories）。
+    /// 加载可注入上下文（soul + project_instructions + rules + memories）。
     ///
-    /// soul 通过 VFS 读取（有内部缓存），rules 和 memories 通过向量检索。
+    /// soul 通过 VFS 读取（有内部缓存），project_instructions 读取会话绑定
+    /// 工作目录下的 AGENTS.md（无则空），rules 和 memories 通过向量检索。
     /// 此方法有 I/O 开销，调用方应在会话级缓存结果。
-    pub async fn load_injectable(&self, query: &str) -> Result<InjectableContext> {
+    pub async fn load_injectable(
+        &self,
+        query: &str,
+        working_directory: Option<&std::path::Path>,
+    ) -> Result<InjectableContext> {
         let mut injectable = InjectableContext::new();
 
         // Load soul — 仅首次加载，后续复用缓存
@@ -86,6 +91,12 @@ impl ContextPipeline {
                     tracing::warn!(error = %e, uri = %soul_uri, "加载核心提示词失败");
                 }
             }
+        }
+
+        // Load project instructions（AGENTS.md）——会话绑定工作目录下探测；
+        // 会话首次加载时读取一次（会话绑定工作目录后不变，无需刷新机制）。
+        if let Some(dir) = working_directory {
+            injectable.project_instructions = load_agents_md(dir);
         }
 
         // Load learned rules and experiences
@@ -114,7 +125,7 @@ impl ContextPipeline {
         conversation: &mut Vec<Message>,
         recent_input_tokens: usize,
     ) -> Result<(InjectableContext, Option<String>)> {
-        let injectable = self.load_injectable(query).await?;
+        let injectable = self.load_injectable(query, None).await?;
         let summary = self
             .compress_if_needed(conversation, recent_input_tokens)
             .await?;
@@ -267,6 +278,30 @@ impl ContextPipeline {
     }
 }
 
+/// 读取会话绑定工作目录下的 AGENTS.md（项目指令前缀）。
+///
+/// 探测 AGENTS.md / agents.md（大小写兼容）；读取失败或不存在返回空串。
+/// 每次调用都重新读文件（不缓存）——压缩点刷新（invalidate → 重新加载）
+/// 时能读到最新内容，与 soul/rules/memories 的刷新语义一致。
+fn load_agents_md(dir: &std::path::Path) -> String {
+    for name in ["AGENTS.md", "agents.md"] {
+        let path = dir.join(name);
+        if path.is_file() {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    tracing::info!(path = %path.display(), "已加载项目指令（AGENTS.md）");
+                    return content;
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "读取 AGENTS.md 失败");
+                    return String::new();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +379,44 @@ mod tests {
             10,
             5,
         )
+    }
+
+    // ── Project instructions（AGENTS.md） ───────────────────────────
+
+    #[tokio::test]
+    async fn test_load_injectable_reads_agents_md() {
+        let vfs = Arc::new(MockVfs::new());
+        let (pipeline, _) = make_pipeline(vfs);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "项目规范：禁止使用 unsafe。").unwrap();
+
+        let ctx = pipeline
+            .load_injectable("test", Some(dir.path()))
+            .await
+            .unwrap();
+        assert_eq!(ctx.project_instructions, "项目规范：禁止使用 unsafe。");
+    }
+
+    #[tokio::test]
+    async fn test_load_injectable_agents_md_missing_is_empty() {
+        let vfs = Arc::new(MockVfs::new());
+        let (pipeline, _) = make_pipeline(vfs);
+        let dir = tempfile::tempdir().unwrap(); // 无 AGENTS.md
+
+        let ctx = pipeline
+            .load_injectable("test", Some(dir.path()))
+            .await
+            .unwrap();
+        assert!(ctx.project_instructions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_injectable_no_workdir_is_empty() {
+        let vfs = Arc::new(MockVfs::new());
+        let (pipeline, _) = make_pipeline(vfs);
+
+        let ctx = pipeline.load_injectable("test", None).await.unwrap();
+        assert!(ctx.project_instructions.is_empty());
     }
 
     // ── Soul loading ────────────────────────────────────────────────

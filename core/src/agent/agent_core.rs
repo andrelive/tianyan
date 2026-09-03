@@ -284,7 +284,13 @@ impl Agent {
         };
 
         if !soul_loaded {
-            match self.context_pipeline.load_injectable(query).await {
+            // 会话生效工作目录（AGENTS.md 项目指令前缀的探测根）
+            let workdir = self.resolve_working_directory(&state.read().await.session_id).await;
+            match self
+                .context_pipeline
+                .load_injectable(query, workdir.as_deref())
+                .await
+            {
                 Ok(ctx) => {
                     let injected_rules = ctx.rules_and_experiences.len();
                     if injected_rules > 0 {
