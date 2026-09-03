@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed（ollama 网关兼容，2026-09-03）
+- **思考过程不显示**：ollama 兼容层流式响应用 `delta.reasoning` 字段名（DeepSeek 用 `reasoning_content`）——`DeltaContent.reasoning_content` 加 serde alias `reasoning` 统一解析（回归测试锁定）
+- **上下文圆环无数据**：ollama 流式 chunk 不携带 usage（非流式才返回）——流式 step 末尾加 usage 兜底（对齐 DSH token-meter 启发式：prompt 优先用上次实测值，completion 按正文+思考用 TokenEstimator 估算）；真实 usage 存在时不受影响
+
 ### Removed
 - **工具短路选择（G1）回滚**：`[agent] shortlist_tools` 配置与 `definitions_shortlisted`/`dynamic_tool_matches`/`TOOL_SHORTLIST_THRESHOLD` 实现全量移除，`BUILTIN_TOOLS` 表去除 `core`/`keywords` 字段。原因：工具清单位于 OpenAI 请求前缀区（prompt 缓存 key），逐轮按 query 过滤使工具集合会话内漂移，破坏 ADR-012 前缀匹配缓存。全部工具改为恒常可见（确定性装配），前缀逐会话稳定。
 

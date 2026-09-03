@@ -70,10 +70,38 @@ pub struct DeltaContent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     /// 思考过程增量（DeepSeek 等思考模型的 `reasoning_content` 字段；
+    /// ollama 网关用 `reasoning` 字段名，serde alias 统一解析；
     /// async-openai 0.34 不解析该字段，由手写流式解析填充）。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "reasoning", skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     /// 流式 tool calls 增量。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ollama 网关用 `reasoning` 字段名，DeepSeek 用 `reasoning_content`——
+    /// serde alias 必须统一解析两种形态（思考过程增量）。
+    #[test]
+    fn delta_content_parses_both_reasoning_field_names() {
+        let ollama: DeltaContent = serde_json::from_value(serde_json::json!({
+            "content": "好",
+            "reasoning": "我们只需要回答一个字",
+        }))
+        .unwrap();
+        assert_eq!(
+            ollama.reasoning_content.as_deref(),
+            Some("我们只需要回答一个字")
+        );
+
+        let deepseek: DeltaContent = serde_json::from_value(serde_json::json!({
+            "content": "好",
+            "reasoning_content": "思考中",
+        }))
+        .unwrap();
+        assert_eq!(deepseek.reasoning_content.as_deref(), Some("思考中"));
+    }
 }

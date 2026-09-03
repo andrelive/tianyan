@@ -476,6 +476,30 @@ impl AgentLoop {
                         },
                     };
 
+                    // usage 兜底（对齐 DSH token-meter 启发式）：部分网关
+                    // （如 ollama 兼容层）流式响应不携带 usage 字段——真实值
+                    // 缺失时用 TokenEstimator 估算，保证上下文占用/缓存命中
+                    // 展示与压缩判定不因网关差异而失效。
+                    let turn_usage = turn_usage.or_else(|| {
+                        let estimator = crate::common::token_estimator::TokenEstimator::new();
+                        let prompt = (this.last_input_usage.load(Ordering::Relaxed) > 0)
+                            .then(|| this.last_input_usage.load(Ordering::Relaxed))
+                            .unwrap_or_else(|| estimator.estimate_messages(&msgs));
+                        let completion = estimator.estimate_text(&assistant_msg.content)
+                            + assistant_msg
+                                .reasoning_content
+                                .as_deref()
+                                .map(|r| estimator.estimate_text(r))
+                                .unwrap_or(0);
+                        Some(TokenUsage {
+                            prompt_tokens: prompt,
+                            completion_tokens: completion,
+                            total_tokens: prompt + completion,
+                            cache_read: 0,
+                            cache_write: 0,
+                        })
+                    });
+
                     Ok((assistant_msg, turn_usage, finish_reason))
                 })
             },
