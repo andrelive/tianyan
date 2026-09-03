@@ -6,11 +6,13 @@
 //! 后台任务管理器驱动。
 
 use std::convert::Infallible;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
-use axum::Json;
 use axum::response::sse::{Event, Sse};
+use axum::Json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -37,16 +39,30 @@ pub async fn stream_tasks(
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
     let mut event_rx = state.task_event_tx.subscribe();
+    let shutdown_flag = state.shutdown_flag();
     tokio::spawn(async move {
+        // 服务关停时退出（与 chat 流 forwarder 同模式）：本流是前端常驻订阅
+        // （EventSource 不关闭），若死等 broadcast 则 axum 优雅关停
+        // （with_graceful_shutdown 等待所有连接结束）永不完成，托盘退出卡死。
+        let mut shutdown_poll = tokio::time::interval(Duration::from_secs(1));
         loop {
-            match event_rx.recv().await {
-                Ok(json) => {
-                    if tx.send(Ok(Event::default().data(json))).await.is_err() {
-                        break; // 客户端断开
+            tokio::select! {
+                event = event_rx.recv() => {
+                    match event {
+                        Ok(json) => {
+                            if tx.send(Ok(Event::default().data(json))).await.is_err() {
+                                break; // 客户端断开
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(_) => break,
+                _ = shutdown_poll.tick() => {
+                    if shutdown_flag.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
             }
         }
     });

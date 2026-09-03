@@ -89,6 +89,9 @@
 - 面板打开时：先 `GET /sessions/{bt_xxx}/messages` 拉历史，再订阅增量——
   与主对话流"历史加载 + 流式增量"同构。
 - 服务压力：SSE 事件驱动推送（有事件才发），一个聚合连接覆盖所有任务，桌面量级无压力。
+- **shutdown 感知**（实现时补充）：本流是前端 EventSource 常驻订阅（会话存在期间不关闭），
+  forwarder 必须轮询 `shutdown_flag`（1s 间隔，与 `/chat/stream` 的 `spawn_sse_forwarder` 同模式）——
+  否则 axum 优雅关停等待所有活跃连接结束将永不完成，桌面端托盘「退出」卡死（只能杀进程）。
 
 ### 3.4 渲染复用
 

@@ -32,6 +32,11 @@
 
 - 新增聚合 SSE 端点 `GET /tasks/stream`：事件复用 `ChatStreamEvent` 结构，加 `task_id` 字段归集。
 - 前端把 `MessageBubble` 的段渲染抽成共享组件，主对话流与子智能体流共用——视觉完全一致，工具结果完整不截断。
+- **常驻 SSE 端点必须 shutdown 感知**（实现时补充）：`/tasks/stream` 是前端 EventSource 常驻订阅
+  （会话存在期间不关闭），forwarder 若死等 broadcast 消息，axum `with_graceful_shutdown` 等待所有
+  活跃连接结束将永不完成——桌面端托盘「退出」卡死（只能杀进程）。与 `/chat/stream` 的
+  `spawn_sse_forwarder` 同模式：`tokio::select!` 轮询 `shutdown_flag`（1s 间隔），置位即结束流，
+  优雅关停链得以完成。**约束：任何新增常驻 SSE 端点必须带 shutdown 感知，否则阻塞应用退出。**
 
 ### 4. 右侧任务面板（会话级）
 
