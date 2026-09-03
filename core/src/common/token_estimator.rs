@@ -36,9 +36,23 @@ impl TokenEstimator {
     }
 
     /// 估算单条消息的 token 数量。
+    ///
+    /// 覆盖消息发送给模型的实际内容：正文 + 推理内容（reasoning_content）+
+    /// 工具调用参数（tool_calls arguments）。天演作为 agent 总是携带 tools，
+    /// DeepSeek 思考模型要求携带 tools 的请求必须完整回传 reasoning_content
+    /// （即使该轮未实际进行工具调用）——思考内容随请求回传，必须计入估算。
     pub fn estimate_message(&self, message: &Message) -> usize {
-        let content_tokens = self.estimate_text(&message.content);
-        content_tokens + self.message_overhead
+        let mut tokens = self.estimate_text(&message.content);
+        if let Some(reasoning) = &message.reasoning_content {
+            tokens += self.estimate_text(reasoning);
+        }
+        if let Some(calls) = &message.tool_calls {
+            for call in calls {
+                tokens += self.estimate_text(&call.function.name);
+                tokens += self.estimate_text(&call.function.arguments);
+            }
+        }
+        tokens + self.message_overhead
     }
 
     /// 估算消息列表的 token 数量。
@@ -93,7 +107,22 @@ impl TokenEstimator {
         let mut message_breakdown = Vec::new();
 
         for (i, message) in messages.iter().enumerate() {
-            let content_tokens = self.estimate_text(&message.content);
+            let content_tokens = self.estimate_text(&message.content)
+                + message
+                    .reasoning_content
+                    .as_deref()
+                    .map(|r| self.estimate_text(r))
+                    .unwrap_or(0)
+                + message
+                    .tool_calls
+                    .as_ref()
+                    .map(|calls| {
+                        calls.iter().fold(0, |acc, call| {
+                            acc + self.estimate_text(&call.function.name)
+                                + self.estimate_text(&call.function.arguments)
+                        })
+                    })
+                    .unwrap_or(0);
             let message_total = content_tokens + self.message_overhead;
 
             total_content_tokens += content_tokens;
@@ -165,6 +194,7 @@ pub struct MessageTokenEstimate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::types::{FunctionCall, ToolCall, ToolCallType};
 
     #[test]
     fn test_estimate_text_chinese() {
@@ -188,6 +218,39 @@ mod tests {
         let msg = Message::user("Hello world");
         let tokens = estimator.estimate_message(&msg);
         assert!(tokens >= 6); // content + overhead
+    }
+
+    #[test]
+    fn test_estimate_message_includes_tool_calls() {
+        let estimator = TokenEstimator::new();
+        let mut msg = Message::assistant("");
+        msg.tool_calls = Some(vec![ToolCall {
+            id: "call_1".to_string(),
+            call_type: ToolCallType::Function,
+            function: FunctionCall {
+                name: "read_file".to_string(),
+                arguments: r#"{"path":"/tmp/very/long/path/to/a/file"}"#.to_string(),
+            },
+        }]);
+        let with_calls = estimator.estimate_message(&msg);
+        msg.tool_calls = None;
+        let without_calls = estimator.estimate_message(&msg);
+        // 工具调用参数必须被算入（请求会发送）
+        assert!(with_calls > without_calls);
+        assert!(with_calls - without_calls >= 10);
+    }
+
+    #[test]
+    fn test_estimate_message_includes_reasoning() {
+        let estimator = TokenEstimator::new();
+        let mut msg = Message::assistant("Hello");
+        msg.reasoning_content = Some("思考过程内容".to_string());
+        let with_reasoning = estimator.estimate_message(&msg);
+        msg.reasoning_content = None;
+        let without_reasoning = estimator.estimate_message(&msg);
+        // 思考内容随请求回传（携带 tools 时必须完整回传），必须计入估算
+        assert!(with_reasoning > without_reasoning);
+        assert!(with_reasoning - without_reasoning >= 2);
     }
 
     #[test]

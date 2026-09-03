@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed（流式 usage 丢失根因修复，2026-09-03）
+- **流式请求显式要求 usage**：`stream_options: {include_usage: true}`（OpenAI 规范：流式响应默认不返回 usage，除非请求显式要求）——ollama 等规范网关此前永远不返回 usage（实测"流式不返回"实为未请求）；对齐 DSH 同名参数（回归测试锁定请求体）
+- **usage-only 尾块保留下发**：SSE 解析不再丢弃 `{"choices":[],"usage":{...}}` 尾块（include_usage=true 的正常流尾），构造带 usage 的空 chunk 下发供校准；纯 cost 块与空块仍跳过（回归测试锁定）
+- **思考内容正确回传**（DeepSeek 官方要求）：携带 tools 的请求必须完整回传 `reasoning_content`（即使该轮未实际工具调用）——`convert_messages` 序列化后按索引回填 `inject_reasoning_content`（async-openai 0.34 类型无此字段，此前被静默丢弃）；`assembler` 无条件保留 reasoning；`TokenEstimator` 估算计入 reasoning 与 tool_calls 参数
+- **换模型旧实测值失效**：`last_input_usage` 升级为 `(model, tokens)` 配对，切换 provider/model 后旧实测值退回全量估算（对齐 DSH token-meter header 不匹配语义）
+
 ### Fixed（ollama 网关兼容，2026-09-03）
 - **思考过程不显示**：ollama 兼容层流式响应用 `delta.reasoning` 字段名（DeepSeek 用 `reasoning_content`）——`DeltaContent.reasoning_content` 加 serde alias `reasoning` 统一解析（回归测试锁定）
 - **上下文圆环无数据**：ollama 流式 chunk 不携带 usage（非流式才返回）——流式 step 末尾加 usage 兜底（对齐 DSH token-meter 启发式：prompt 优先用上次实测值，completion 按正文+思考用 TokenEstimator 估算）；真实 usage 存在时不受影响

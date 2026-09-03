@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 use crate::agent::tool_registry::ToolRegistry;
 use crate::agent::types::{StreamEventSender, ToolCallEvent};
@@ -114,7 +114,10 @@ pub struct AgentLoop {
     /// 上次请求实测输入 token 数（T6 动态 max_tokens 校准）。
     ///
     /// `Arc` 保证 AgentLoop 克隆后校准值共享；0 表示尚无实测（退化为估算）。
-    pub(crate) last_input_usage: Arc<AtomicUsize>,
+    /// 同时记录实测时的 model：同一会话切换 provider/model 后旧实测值
+    /// 不再适用（不同模型分词/计费口径不同），退回全量估算（对齐 DSH
+    /// token-meter：header 不匹配时全量重估，不复用旧 usage）。
+    pub(crate) last_input_usage: Arc<RwLock<Option<(String, usize)>>>,
     /// LLM 用量日志（token 统计：每轮调用落库；None 时不记录）。
     usage_log: Option<Arc<UsageLog>>,
     /// model → provider 映射（配置注入；用量日志的 provider 维度）。
@@ -136,7 +139,7 @@ impl AgentLoop {
             config,
             trace: None,
             chat_spec: None,
-            last_input_usage: Arc::new(AtomicUsize::new(0)),
+            last_input_usage: Arc::new(RwLock::new(None)),
             usage_log: None,
             provider_by_model: HashMap::new(),
         }
@@ -185,6 +188,26 @@ impl AgentLoop {
         cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
     }
 
+    /// 读取上次实测输入 token 数（仅当 model 与实测时一致）。
+    ///
+    /// 同一会话切换 provider/model 后旧实测值不再适用（不同模型分词/
+    /// 计费口径不同），返回 None 由调用方退回全量估算（对齐 DSH
+    /// token-meter：header 不匹配时全量重估，不复用旧 usage）。
+    fn measured_input(&self, model: &str) -> Option<usize> {
+        let guard = self.last_input_usage.read().ok()?;
+        guard
+            .as_ref()
+            .filter(|(m, _)| m == model)
+            .map(|(_, tokens)| *tokens)
+    }
+
+    /// 记录本次实测输入（T6：供下一轮动态 max_tokens 校准，跨轮共享）。
+    fn record_measured_input(&self, model: &str, prompt_tokens: usize) {
+        if let Ok(mut guard) = self.last_input_usage.write() {
+            *guard = Some((model.to_string(), prompt_tokens));
+        }
+    }
+
     /// 构造本轮 LLM 请求（`run` / `run_stream` 共用，消除两条路径的重复）。
     ///
     /// 统一处理：T6 动态 max_tokens → 思考强度 → 流式开关。
@@ -201,8 +224,7 @@ impl AgentLoop {
         let tools = self.tool_registry.definitions().await;
 
         let max_tokens = self.chat_spec.and_then(|spec| {
-            let measured = (self.last_input_usage.load(Ordering::Relaxed) > 0)
-                .then(|| self.last_input_usage.load(Ordering::Relaxed));
+            let measured = self.measured_input(model);
             let input_est = measured.unwrap_or_else(|| {
                 crate::common::token_estimator::TokenEstimator::new().estimate_messages(msgs)
             });
@@ -273,8 +295,7 @@ impl AgentLoop {
                             })?;
 
                     // T6：记录本次实测输入，供下一轮动态 max_tokens 校准（跨轮共享）。
-                    this.last_input_usage
-                        .store(response.usage.prompt_tokens, Ordering::Relaxed);
+                    this.record_measured_input(model, response.usage.prompt_tokens);
                     let turn_usage = response.usage;
                     let finish_reason = response
                         .choices
@@ -362,8 +383,7 @@ impl AgentLoop {
                                 if let Some(ref usage) = chunk.usage {
                                     turn_usage = Some(usage.clone());
                                     // T6：记录本次实测输入，供下一轮动态 max_tokens 校准。
-                                    this.last_input_usage
-                                        .store(usage.prompt_tokens, Ordering::Relaxed);
+                                    this.record_measured_input(model, usage.prompt_tokens);
                                 }
                                 for choice in &chunk.choices {
                                     // finish_reason：最终 chunk 携带；None 保持之前值（if let Some 覆盖累计）
@@ -482,8 +502,8 @@ impl AgentLoop {
                     // 展示与压缩判定不因网关差异而失效。
                     let turn_usage = turn_usage.or_else(|| {
                         let estimator = crate::common::token_estimator::TokenEstimator::new();
-                        let prompt = (this.last_input_usage.load(Ordering::Relaxed) > 0)
-                            .then(|| this.last_input_usage.load(Ordering::Relaxed))
+                        let prompt = this
+                            .measured_input(model)
                             .unwrap_or_else(|| estimator.estimate_messages(&msgs));
                         let completion = estimator.estimate_text(&assistant_msg.content)
                             + assistant_msg

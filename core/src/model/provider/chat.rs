@@ -6,10 +6,12 @@ use async_openai::types::chat::{
     ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionTools,
-    CreateChatCompletionRequestArgs, FunctionCall as OaFunctionCall, FunctionName, FunctionObject,
-    ImageDetail as OaImageDetail, ImageUrl as OaImageUrl, Role as OaRole, ToolChoiceOptions,
+    ChatCompletionStreamOptions, ChatCompletionTool, ChatCompletionToolChoiceOption,
+    ChatCompletionTools, CreateChatCompletionRequestArgs, CreateChatCompletionResponse,
+    FunctionCall as OaFunctionCall, FunctionName, FunctionObject, ImageDetail as OaImageDetail,
+    ImageUrl as OaImageUrl, Role as OaRole, ToolChoiceOptions,
 };
+use async_openai::error::OpenAIError;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::Value;
@@ -52,21 +54,22 @@ impl ChatService for AsyncOpenAIClient {
                     retryable: false,
                     message: format!("构建请求失败：{}", e),
                 })?;
-                let attempted = if let Some(effort) = request.thinking_effort.as_deref() {
-                    if effort == "off" {
-                        self.client.chat().create(oa_request).await
-                    } else {
-                        let mut body =
-                            serde_json::to_value(&oa_request).map_err(|e| RetryableFailure {
-                                retryable: false,
-                                message: format!("序列化请求失败：{}", e),
-                            })?;
+                // 统一走 JSON 层发送：async-openai 0.34 类型无 reasoning_content
+                // 字段，序列化后注入历史思考内容（DeepSeek 思考模型要求：携带
+                // tools 的请求必须完整回传 reasoning_content，即使该轮未实际
+                // 进行工具调用），再附加思考强度参数。
+                let mut body = serde_json::to_value(&oa_request).map_err(|e| RetryableFailure {
+                    retryable: false,
+                    message: format!("序列化请求失败：{}", e),
+                })?;
+                inject_reasoning_content(&mut body, &request.messages);
+                if let Some(effort) = request.thinking_effort.as_deref() {
+                    if effort != "off" {
                         apply_thinking_params(&mut body, effort, &request.model);
-                        self.client.chat().create_byot(body).await
                     }
-                } else {
-                    self.client.chat().create(oa_request).await
-                };
+                }
+                let attempted: std::result::Result<CreateChatCompletionResponse, OpenAIError> =
+                    self.client.chat().create_byot(body).await;
                 attempted.map_err(|e| RetryableFailure {
                     retryable: match &e {
                         async_openai::error::OpenAIError::Reqwest(r) => {
@@ -153,6 +156,14 @@ impl ChatService for AsyncOpenAIClient {
         builder.model(&request.model);
         builder.messages(messages);
         builder.stream(true);
+        // 显式请求流式 usage（对齐 DSH/OpenAI 规范）：流式响应默认不返回
+        // usage，除非请求携带 stream_options: {include_usage: true}——
+        // 否则 ollama 等严格遵守规范的网关永远不返回 usage，上下文占用
+        // 只能走估算。
+        builder.stream_options(ChatCompletionStreamOptions {
+            include_usage: Some(true),
+            include_obfuscation: None,
+        });
         Self::apply_shared_params(&mut builder, &request);
 
         let oa_request = builder
@@ -166,6 +177,9 @@ impl ChatService for AsyncOpenAIClient {
         // 非思考模型不携带，行为与原有 async-openai 路径一致。
         let mut body = serde_json::to_value(&oa_request)
             .map_err(|e| TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e)))?;
+        // 回传历史思考内容（DeepSeek 思考模型要求：携带 tools 的请求必须
+        // 完整回传 reasoning_content，即使该轮未实际进行工具调用）。
+        inject_reasoning_content(&mut body, &request.messages);
         if let Some(effort) = request.thinking_effort.as_deref() {
             if effort != "off" {
                 apply_thinking_params(&mut body, effort, &request.model);
@@ -409,6 +423,13 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
         };
         match serde_json::from_value::<ChatCompletionChunk>(value.clone()) {
             Ok(mut chunk) => {
+                // 空块过滤：choices 为空且无 usage（如兼容层纯 cost 块
+                // `{"choices":[],"cost":"..."}`）反序列化成功但无内容可下发，
+                // 静默跳过（不产生空块、不产生错误）。
+                if chunk.choices.is_empty() && chunk.usage.is_none() {
+                    tracing::debug!(line = %data, "流式空块（无 choices 无 usage，跳过）");
+                    continue;
+                }
                 if let (Some(usage_value), Some(usage)) = (value.get("usage"), chunk.usage.as_mut())
                 {
                     extract_cache_tokens(usage_value, usage);
@@ -429,7 +450,10 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
                         .await;
                     return;
                 }
-                // usage-only / cost 块：choices 为空（或缺失）且无 delta 内容
+                // usage-only / cost 块：choices 为空（或缺失）且无 delta 内容。
+                // 这是 include_usage=true 的正常流尾（OpenAI 规范：附加一个
+                // 空 choices 的 usage chunk 在 [DONE] 之前）——usage 必须保留
+                // 下发（上下文占用/校准依赖它），不能静默丢弃。
                 let choices_empty = value
                     .get("choices")
                     .and_then(|c| c.as_array())
@@ -437,7 +461,44 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
                     .unwrap_or(true);
                 let has_usage = value.get("usage").is_some() || value.get("cost").is_some();
                 if choices_empty && has_usage {
-                    tracing::debug!(line = %data, "流式 usage-only 块（正常流尾）");
+                    // 从原始 JSON 提取 usage 并构造带 usage 的空 chunk 下发
+                    if let Ok(usage) = serde_json::from_value::<TokenUsage>(
+                        value.get("usage").cloned().unwrap_or(serde_json::json!({})),
+                    ) {
+                        if usage.prompt_tokens > 0 || usage.total_tokens > 0 {
+                            let mut tail = ChatCompletionChunk {
+                                id: value
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                object: "chat.completion.chunk".to_string(),
+                                created: value
+                                    .get("created")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0),
+                                model: value
+                                    .get("model")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                choices: vec![],
+                                usage: Some(usage),
+                            };
+                            if let Some(usage_value) = value.get("usage") {
+                                extract_cache_tokens(usage_value, tail.usage.as_mut().unwrap());
+                            }
+                            tracing::debug!(
+                                usage = ?tail.usage,
+                                "流式 usage-only 尾块（include_usage）"
+                            );
+                            if tx.send(Ok(tail)).await.is_err() {
+                                return;
+                            }
+                            continue;
+                        }
+                    }
+                    tracing::debug!(line = %data, "流式 cost 块（无 usage，跳过）");
                     continue;
                 }
                 // 非标准 finish_reason（如网关的 network_error）：typed 反序列化
@@ -531,6 +592,31 @@ fn user_content(m: &Message) -> ChatCompletionRequestUserMessageContent {
         .collect();
 
     ChatCompletionRequestUserMessageContent::Array(oa_parts)
+}
+
+/// 把历史 assistant 消息的 reasoning_content 注入序列化后的请求体。
+///
+/// async-openai 0.34 的 `ChatCompletionRequestAssistantMessage` 没有
+/// `reasoning_content` 字段，类型化构造会静默丢弃。DeepSeek 思考模型要求：
+/// 携带 tools 的请求必须完整回传 reasoning_content（即使该轮未实际进行
+/// 工具调用），否则多轮工具调用会报错/丢失上下文。序列化后按索引回填。
+/// `convert_messages` 对每条 [`Message`] 恰好生成一条请求消息，索引一一对应。
+fn inject_reasoning_content(body: &mut Value, messages: &[Message]) {
+    let Some(arr) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for (msg, entry) in messages.iter().zip(arr.iter_mut()) {
+        if msg.role != MessageRole::Assistant {
+            continue;
+        }
+        let Some(reasoning) = msg.reasoning_content.as_deref() else {
+            continue;
+        };
+        if reasoning.is_empty() {
+            continue;
+        }
+        entry["reasoning_content"] = Value::String(reasoning.to_string());
+    }
 }
 
 fn convert_messages(messages: &[Message]) -> Vec<ChatCompletionRequestMessage> {
@@ -728,6 +814,84 @@ mod convert_tests {
         let converted = convert_messages(&[msg]);
         assert_eq!(converted.len(), 1);
     }
+
+    #[test]
+    fn test_inject_reasoning_content_roundtrip() {
+        // 携带 tools 的请求必须完整回传 reasoning_content（DeepSeek 思考模型要求）
+        let mut assistant = Message::assistant("42");
+        assistant.reasoning_content = Some("思考过程".to_string());
+        let messages = vec![
+            Message::system("You are helpful"),
+            Message::user("What is 6*7?"),
+            assistant,
+        ];
+        let converted = convert_messages(&messages);
+        let mut body = serde_json::to_value(converted).unwrap();
+        // 模拟完整请求体（messages 数组）
+        let mut request_body = serde_json::json!({ "messages": body });
+        inject_reasoning_content(&mut request_body, &messages);
+        let arr = request_body["messages"].as_array().unwrap();
+        assert!(arr[0].get("reasoning_content").is_none(), "system 不注入");
+        assert!(arr[1].get("reasoning_content").is_none(), "user 不注入");
+        assert_eq!(
+            arr[2]["reasoning_content"].as_str(),
+            Some("思考过程"),
+            "assistant 的 reasoning_content 必须回传"
+        );
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_skips_empty() {
+        let mut assistant = Message::assistant("42");
+        assistant.reasoning_content = Some(String::new());
+        let messages = vec![assistant];
+        let converted = convert_messages(&messages);
+        let mut request_body = serde_json::json!({ "messages": converted });
+        inject_reasoning_content(&mut request_body, &messages);
+        let arr = request_body["messages"].as_array().unwrap();
+        assert!(arr[0].get("reasoning_content").is_none(), "空 reasoning 不注入");
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_multi_assistant_index_alignment() {
+        // 多条 assistant 消息：索引必须一一对应（convert_messages 每条 Message 生成一条请求消息）
+        let mut a1 = Message::assistant("first");
+        a1.reasoning_content = Some("思考一".to_string());
+        let mut a2 = Message::assistant("second");
+        a2.reasoning_content = Some("思考二".to_string());
+        let messages = vec![a1, a2];
+        let converted = convert_messages(&messages);
+        let mut request_body = serde_json::json!({ "messages": converted });
+        inject_reasoning_content(&mut request_body, &messages);
+        let arr = request_body["messages"].as_array().unwrap();
+        assert_eq!(arr[0]["reasoning_content"].as_str(), Some("思考一"));
+        assert_eq!(arr[1]["reasoning_content"].as_str(), Some("思考二"));
+    }
+
+    #[test]
+    fn test_stream_options_include_usage_in_request() {
+        // 流式请求必须携带 stream_options.include_usage=true（OpenAI 规范：
+        // 流式默认不返回 usage，除非显式请求）——否则 ollama 等规范网关
+        // 永远不返回 usage，上下文占用只能走估算。
+        let request = ChatCompletionRequest::new("test-model", vec![Message::user("hi")])
+            .with_stream(true);
+        // 序列化后的请求体应包含 stream_options
+        let mut builder = CreateChatCompletionRequestArgs::default();
+        builder.model(&request.model);
+        builder.messages(convert_messages(&request.messages));
+        builder.stream(true);
+        builder.stream_options(ChatCompletionStreamOptions {
+            include_usage: Some(true),
+            include_obfuscation: None,
+        });
+        let oa_request = builder.build().unwrap();
+        let body = serde_json::to_value(&oa_request).unwrap();
+        assert_eq!(
+            body["stream_options"]["include_usage"],
+            serde_json::json!(true),
+            "流式请求必须显式请求 usage"
+        );
+    }
 }
 
 /// 流式健壮性回归（0.2.3 会话静默中断排查）：
@@ -841,6 +1005,61 @@ mod stream_robustness_tests {
         assert!(
             elapsed < Duration::from_millis(1900),
             "应在 1s 空闲超时附近失败（实际 {elapsed:?}），而不是等到服务端关闭"
+        );
+    }
+
+    /// include_usage=true 的流尾：`{"choices":[],"usage":{...}}` 块（OpenAI 规范
+    /// 附加在 [DONE] 之前）——usage 必须保留下发（上下文占用/校准依赖它），
+    /// 不能被当作"正常流尾"静默丢弃（曾导致 ollama 等规范网关流式 usage 永远丢失）。
+    #[tokio::test]
+    async fn test_usage_only_tail_block_is_forwarded() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let body = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":123,\"completion_tokens\":45,\"total_tokens\":168}}\n\ndata: [DONE]\n\n".to_string();
+        let addr = spawn_mock_sse(listener, body, false);
+        let client = AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1).unwrap();
+
+        let mut rx = client
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .await
+            .unwrap();
+
+        // 第一块：正文 delta
+        let first = rx.recv().await.expect("第一块应送达");
+        let chunk = first.expect("第一块应解析成功");
+        assert_eq!(chunk.choices.len(), 1);
+
+        // 第二块：usage-only 尾块——usage 必须保留（不再静默丢弃）
+        let second = rx.recv().await.expect("usage-only 尾块应送达");
+        let tail = second.expect("usage-only 尾块应解析为 Ok");
+        assert!(
+            tail.choices.is_empty(),
+            "usage-only 尾块 choices 应为空，实际: {:?}",
+            tail.choices.len()
+        );
+        let usage = tail.usage.expect("usage-only 尾块必须携带 usage");
+        assert_eq!(usage.prompt_tokens, 123);
+        assert_eq!(usage.completion_tokens, 45);
+        assert_eq!(usage.total_tokens, 168);
+    }
+
+    /// 纯 cost 块（兼容层 `{"choices":[],"cost":"..."}`，无 usage）：
+    /// 正常静默跳过，不产生错误、不产生空 usage 块。
+    #[tokio::test]
+    async fn test_cost_only_block_skipped() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let body = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[],\"cost\":\"0.001\"}\n\ndata: [DONE]\n\n".to_string();
+        let addr = spawn_mock_sse(listener, body, false);
+        let client = AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1).unwrap();
+
+        let mut rx = client
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .await
+            .unwrap();
+
+        // 无合法块：流应直接结束（cost 块被跳过），rx.recv() 返回 None
+        assert!(
+            rx.recv().await.is_none(),
+            "仅 cost 块时流应正常结束（无输出、无错误）"
         );
     }
 }

@@ -91,8 +91,6 @@ impl ContextAssembler {
                 }
             }
             MessageRole::Assistant => {
-                let has_tool_calls = sm.parts.iter().any(|p| matches!(p, Part::ToolCall { .. }));
-
                 let mut content = String::new();
                 let mut tool_calls: Vec<CoreToolCall> = Vec::new();
                 let mut reasoning_content: Option<String> = None;
@@ -106,9 +104,10 @@ impl ContextAssembler {
                             content.push_str(text);
                         }
                         Part::Reasoning { text, .. } => {
-                            if has_tool_calls {
-                                reasoning_content = Some(text.clone());
-                            }
+                            // 无条件保留：天演作为 agent 总是携带 tools 参数，
+                            // DeepSeek 思考模型要求携带 tools 的请求必须完整回传
+                            // reasoning_content（即使该轮未实际进行工具调用）。
+                            reasoning_content = Some(text.clone());
                         }
                         Part::ToolCall {
                             id,
@@ -290,7 +289,10 @@ mod tests {
     }
 
     #[test]
-    fn test_structured_to_messages_reasoning_without_tool_call_is_discarded() {
+    fn test_structured_to_messages_reasoning_without_tool_call_is_kept() {
+        // 天演作为 agent 总是携带 tools 参数，DeepSeek 思考模型要求携带 tools
+        // 的请求必须完整回传 reasoning_content（即使该轮未实际进行工具调用）——
+        // 无 tool_call 的轮次也必须保留思考内容。
         let sm = StructuredMessage {
             id: "msg_1".to_string(),
             parent_id: None,
@@ -318,7 +320,10 @@ mod tests {
         let msg = &messages[0];
         assert_eq!(msg.role, MessageRole::Assistant);
         assert_eq!(msg.content, "42");
-        assert!(msg.reasoning_content.is_none());
+        assert_eq!(
+            msg.reasoning_content.as_deref(),
+            Some("The answer is 42")
+        );
         assert!(msg.tool_calls.is_none());
     }
 

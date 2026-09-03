@@ -3,6 +3,7 @@ use crate::common::error::Result;
 use crate::common::types::StructuredMessage;
 use crate::session::Session;
 use async_trait::async_trait;
+use std::sync::atomic::AtomicUsize;
 
 struct MockSessionManager;
 #[async_trait]
@@ -1156,6 +1157,54 @@ async fn test_run_calibrates_max_tokens_from_prior_usage() {
     assert_eq!(calls.load(Ordering::Relaxed), 2, "应恰好发起两次请求");
 }
 
+/// 换 model 后旧实测值失效（对齐 DSH token-meter：header 不匹配时全量重估）：
+/// model A 记录实测 120_000 → 切到 model B 后 max_tokens 应回到估算值（16_000），
+/// 而不是复用 A 的实测值（不同模型分词/计费口径不同）。
+#[tokio::test]
+async fn test_run_prior_usage_invalidated_on_model_switch() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_in_mock = calls.clone();
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion()
+        .times(2)
+        .returning(
+            move |req| match calls_in_mock.fetch_add(1, Ordering::Relaxed) {
+                0 => {
+                    assert_eq!(
+                        req.max_tokens,
+                        Some(16_000),
+                        "model A 首轮无实测 → 估算 → 达到输出上限"
+                    );
+                    let mut resp = response_with(Message::assistant("A 轮"));
+                    resp.usage = CommonTokenUsage::new(120_000, 0);
+                    Ok(resp)
+                }
+                _ => {
+                    assert_eq!(
+                        req.max_tokens,
+                        Some(16_000),
+                        "切到 model B 后旧实测值失效 → 回到估算上限，而非 4096"
+                    );
+                    Ok(response_with(Message::assistant("B 轮")))
+                }
+            },
+        );
+    let agent_loop = make_loop(mock, 5).with_chat_spec(Some(spec_128k_16k()));
+
+    let mut messages = vec![Message::user("帮我做点事")];
+    let r1 = agent_loop
+        .run(&mut messages, "session-1", None, "model-a", None, None)
+        .await
+        .unwrap();
+    let r2 = agent_loop
+        .run(&mut messages, "session-1", None, "model-b", None, None)
+        .await
+        .unwrap();
+    assert!(matches!(r1, AgentLoopResult::Answer { .. }));
+    assert!(matches!(r2, AgentLoopResult::Answer { .. }));
+    assert_eq!(calls.load(Ordering::Relaxed), 2, "应恰好发起两次请求");
+}
+
 /// 流式：with_stream(true) 请求同样携带 max_tokens = Some(16_000)。
 #[tokio::test]
 async fn test_run_stream_sets_dynamic_max_tokens_with_spec() {
@@ -1203,7 +1252,9 @@ async fn test_run_errors_when_budget_below_min() {
     // 剩余 1137 × 0.9 = 1023 → pow2_floor = 512 < 1024 → dynamic_max_tokens 返回 None
     agent_loop
         .last_input_usage
-        .store(128_000 - 1137, Ordering::Relaxed);
+        .write()
+        .unwrap()
+        .replace(("test-model".to_string(), 128_000 - 1137));
 
     let mut messages = vec![Message::user("测试")];
     let err = agent_loop

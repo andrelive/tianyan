@@ -1,8 +1,17 @@
 # 天演 Tianyan 0.2 发布说明
 
-> 0.2.0 发布日期：2026-08-30 · 0.2.2/0.2.3 修复日期：2026-08-30 · 0.2.4 修复日期：2026-08-30 · 0.2.5 修复日期：2026-08-31 · 0.2.6 修复日期：2026-09-01 · 0.2.7 修复日期：2026-09-03
+> 0.2.0 发布日期：2026-08-30 · 0.2.2/0.2.3 修复日期：2026-08-30 · 0.2.4 修复日期：2026-08-30 · 0.2.5 修复日期：2026-08-31 · 0.2.6 修复日期：2026-09-01 · 0.2.7 修复日期：2026-09-03 · 0.2.8 修复日期：2026-09-03
 
 天演（Tianyan）是一个本地优先的通用智能助手：桌面应用（Tauri）+ 本地服务（Axum）+ 自进化智能体（VFS 统一知识/记忆/技能/规则）。
+
+## 0.2.8 修复（流式 usage 丢失根因：请求未显式要求 + 尾块被丢弃）
+
+- **根因**：0.2.7 的 usage 兜底只是"症状缓解"——真正的根因是两条叠加的链路缺陷：① 流式请求从未发送 `stream_options: {include_usage: true}`（OpenAI 规范：流式响应默认不返回 usage，除非请求显式要求）——ollama 等严格遵守规范的网关因此永远不返回 usage，0.2.7 之前实测"ollama 流式不返回 usage"其实是没向网关要；② SSE 解析把 `{"choices":[],"usage":{...}}` 尾块（include_usage=true 的正常流尾）当作"正常流尾"静默丢弃——即使网关返回了 usage 也会丢掉
+- **流式请求显式要求 usage**：`chat_completion_stream` 构造请求时设置 `stream_options: {include_usage: true}`（对齐 DSH 同名参数，回归测试锁定请求体含该字段）
+- **usage-only 尾块保留下发**：SSE 解析识别 `{"choices":[],"usage":{...}}` 块后构造带 usage 的空 chunk 下发（loop 收到后更新 `last_input_usage` 校准值），不再静默丢弃；纯 cost 块（兼容层 `{"choices":[],"cost":"..."}`）、无 choices 无 usage 的空块仍正常跳过（回归测试锁定两种形态）
+- **思考内容正确回传**（DeepSeek 官方要求）：携带 tools 的请求必须完整回传 `reasoning_content`（即使该轮未实际进行工具调用，官方 thinking_mode 文档）——`convert_messages` 此前用 `..Default::default()` 构造 assistant 消息（async-openai 0.34 无此字段），序列化后被静默丢弃；改为序列化后按索引回填（`inject_reasoning_content`，非流式与流式统一走 JSON 层）；`assembler` 去掉 `has_tool_calls` 条件无条件保留 reasoning（回归测试锁定无工具调用轮也保留）
+- **估算计入思考与工具参数**：`TokenEstimator.estimate_message` 此前只算 `message.content`，漏掉 reasoning_content 与 tool_calls 参数——思考十几万字的会话被低估（5% 显示的根因之一）；估算纳入思考内容与工具调用参数（回归测试锁定），无 usage 兜底时占用显示包含思考
+- **换模型旧实测值失效**：`last_input_usage` 从裸数字升级为 `(model, tokens)` 配对——同一会话切换 provider/model 后旧实测值不再适用（不同模型分词/计费口径不同），退回全量估算（对齐 DSH token-meter：header 不匹配时全量重估）（回归测试锁定）
 
 ## 0.2.7 修复（ollama 网关兼容：思考过程不显示 + 上下文圆环无数据）
 
