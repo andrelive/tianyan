@@ -127,7 +127,7 @@ impl ContextPipeline {
     ) -> Result<(InjectableContext, Option<String>)> {
         let injectable = self.load_injectable(query, None).await?;
         let summary = self
-            .compress_if_needed(conversation, recent_input_tokens)
+            .compress_if_needed(conversation, recent_input_tokens, false)
             .await?;
         Ok((injectable, summary))
     }
@@ -137,9 +137,12 @@ impl ContextPipeline {
         &self,
         conversation: &mut Vec<Message>,
         recent_input_tokens: usize,
+        force: bool,
     ) -> Result<Option<String>> {
         let mut compressor = self.compressor.lock().await;
-        if !compressor.should_compress(recent_input_tokens) {
+        // 手动压缩（force=true）跳过阈值判定——用户主动点击即明确意图；
+        // 自动压缩保留窗口阈值（防止频繁压缩）。
+        if !force && !compressor.should_compress(recent_input_tokens) {
             return Ok(None);
         }
 
@@ -168,11 +171,12 @@ impl ContextPipeline {
         messages: &[Message],
         session_id: &str,
         recent_input_tokens: usize,
+        force: bool,
     ) -> Option<StructuredMessage> {
         let mut conversation = messages.to_vec();
 
         let summary = match self
-            .compress_if_needed(&mut conversation, recent_input_tokens)
+            .compress_if_needed(&mut conversation, recent_input_tokens, force)
             .await
         {
             Ok(Some(summary)) => summary,
@@ -618,5 +622,53 @@ mod tests {
             "compression should trigger with 6 messages and 60 input tokens > 50 threshold"
         );
         assert!(conversation.len() < 6);
+    }
+
+    /// 手动压缩（force=true）跳过窗口阈值——大窗口下（如 100 万 context）
+    /// 自动压缩永不触发，但用户主动点击应立即压缩（只受消息数下限保护）。
+    #[tokio::test]
+    async fn test_manual_compress_forces_below_threshold() {
+        let soul_uri = AgentPath::Soul.uri();
+        let vfs = Arc::new(
+            MockVfs::builder()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .build(),
+        );
+
+        // 模拟大窗口：100 万 × 0.5 = 触发线 50 万，小 token 数远低于阈值
+        let config = CompressionConfig {
+            context_window: 1_000_000,
+            min_messages_to_compress: 3,
+            preserve_recent_messages: 2,
+            ..Default::default()
+        };
+        let compressor = ContextCompressor::new(mock_chat("Summarized."), config);
+        let pipeline = make_pipeline_with_compressor(vfs, compressor);
+
+        let conv = vec![
+            Message::user("A"),
+            Message::assistant("B"),
+            Message::user("C"),
+            Message::assistant("D"),
+            Message::user("E"),
+            Message::assistant("F"),
+        ];
+
+        // 非强制：100 token << 50 万阈值 → 不压缩
+        let mut conv_auto = conv.clone();
+        let summary_auto = pipeline
+            .compress_for_session(&conv_auto, "s1", 100, false)
+            .await;
+        assert!(summary_auto.is_none(), "自动压缩低于阈值不应触发");
+
+        // 强制（手动）：跳过阈值 → 压缩
+        let mut conv_manual = conv.clone();
+        let summary_manual = pipeline
+            .compress_for_session(&conv_manual, "s1", 100, true)
+            .await;
+        assert!(
+            summary_manual.is_some(),
+            "手动压缩（force）应跳过窗口阈值"
+        );
     }
 }

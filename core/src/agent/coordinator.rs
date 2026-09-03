@@ -321,7 +321,8 @@ impl AgentCoordinator for Agent {
         // 轮中未完成的消息生成摘要（且轮内状态与库分叉）。
         let _turn_guard = self.turn_guard(session_id).await;
         let state = self.load_and_build_state(session_id).await?;
-        Ok(self.maybe_compress_and_persist(&state, session_id).await)
+        // force=true：手动压缩跳过窗口阈值——用户主动点击即明确意图
+        Ok(self.maybe_compress_and_persist(&state, session_id, true).await)
     }
 
     async fn wake_session(&self, session_id: &str) {

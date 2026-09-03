@@ -474,6 +474,7 @@ impl Agent {
         &self,
         state: &Arc<RwLock<SessionState>>,
         session_id: &str,
+        force: bool,
     ) -> bool {
         let messages_since_marker: Vec<StructuredMessage> = {
             let s = state.read().await;
@@ -506,7 +507,7 @@ impl Agent {
 
         let Some(summary_sm) = self
             .context_pipeline
-            .compress_for_session(&conversation, session_id, recent_input_tokens)
+            .compress_for_session(&conversation, session_id, recent_input_tokens, force)
             .await
         else {
             return false;
@@ -626,7 +627,7 @@ impl Agent {
 
         // 6. Compression check and persist (optional per path semantics)
         if options.do_compress {
-            self.maybe_compress_and_persist(state, session_id).await;
+            self.maybe_compress_and_persist(state, session_id, false).await;
         }
 
         Ok(response)
@@ -1208,7 +1209,9 @@ mod tests {
             state.write().await.add_structured_message(sm);
         }
 
-        let compressed = agent.maybe_compress_and_persist(&state, "session-1").await;
+        let compressed = agent
+            .maybe_compress_and_persist(&state, "session-1", false)
+            .await;
         assert!(compressed, "token 超阈值且消息数足够时应发生压缩");
         assert!(
             state.read().await.injectable_context.soul.is_empty(),
@@ -1246,7 +1249,9 @@ mod tests {
             state.write().await.add_structured_message(sm);
         }
 
-        let compressed = agent.maybe_compress_and_persist(&state, "session-1").await;
+        let compressed = agent
+            .maybe_compress_and_persist(&state, "session-1", false)
+            .await;
         assert!(!compressed, "消息不足不应压缩");
         assert!(
             !state.read().await.injectable_context.soul.is_empty(),
