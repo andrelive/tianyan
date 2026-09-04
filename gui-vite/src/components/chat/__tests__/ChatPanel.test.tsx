@@ -360,6 +360,36 @@ describe('ChatPanel', () => {
     expect(useAppStore.getState().toasts[0]?.type).toBe('success');
   });
 
+  it('reloads session messages after a successful compression', async () => {
+    const user = userEvent.setup();
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      messages: [
+        {
+          role: 'assistant',
+          content: 'ok',
+          timestamp: new Date().toISOString(),
+          usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
+        },
+      ],
+    });
+
+    renderChatPanel();
+
+    await user.click(screen.getByRole('button', { name: '上下文占用' }));
+    await user.click(screen.getByRole('button', { name: /压缩会话/ }));
+
+    // 压缩成功（compressed=true）→ 重新拉取消息列表（摘要消息出现在会话流中）
+    await waitFor(() => {
+      expect(useAppStore.getState().toasts[0]?.message).toBe('已压缩');
+    });
+    await waitFor(() => {
+      // mock 的 messages 端点返回「你好 / 你好！我是天演...」两条消息
+      const msgs = useAppStore.getState().messages;
+      expect(msgs.some((m) => m.content.includes('你好！我是天演'))).toBe(true);
+    });
+  });
+
   it('shows 无需压缩 when the backend reports nothing to compress', async () => {
     const user = userEvent.setup();
     useAppStore.setState({

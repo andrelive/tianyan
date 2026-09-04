@@ -30,4 +30,14 @@ describe('ContextRing', () => {
     render(<ContextRing usage={null} onCompress={vi.fn()} />);
     expect(screen.getByText('–')).toBeInTheDocument();
   });
+
+  it('shows loading state and disables the button while compressing', () => {
+    render(<ContextRing usage={usage} onCompress={vi.fn()} compressing />);
+
+    fireEvent.click(screen.getByText('75%'));
+    // 压缩中：按钮显示 spinner 文案且禁用（防重复点击）
+    const btn = screen.getByRole('button', { name: /压缩中/ });
+    expect(btn).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /压缩会话/ })).not.toBeInTheDocument();
+  });
 });

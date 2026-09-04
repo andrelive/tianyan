@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Minimize2 } from 'lucide-react';
+import { Loader2, Minimize2 } from 'lucide-react';
 import type { StreamUsage } from '@/lib/types';
 import { formatNumber } from '@/lib/utils';
 
@@ -23,10 +23,13 @@ function ringColor(pct: number): string {
 export default function ContextRing({
   usage,
   onCompress,
+  compressing = false,
 }: {
   usage: StreamUsage | null;
   /** 压缩当前会话（由父组件提供，卧交给元组件） */
   onCompress: () => void;
+  /** 压缩进行中（禁用按钮 + 显示 loading，防重复点击） */
+  compressing?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -132,13 +135,25 @@ export default function ContextRing({
           <button
             type="button"
             onClick={() => {
-              setOpen(false);
+              // 压缩期间保持面板打开：按钮就地变为「压缩中...」（spinner +
+              // disabled），用户能看到明确的进行中反馈；完成后由父组件
+              // toast 提示，面板仍可点击外部/Esc 关闭。
               onCompress();
             }}
-            className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors"
+            disabled={compressing}
+            className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-secondary)]"
           >
-            <Minimize2 className="w-3.5 h-3.5" />
-            压缩会话（当前占用 {Math.round(pct)}%）
+            {compressing ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                压缩中...
+              </>
+            ) : (
+              <>
+                <Minimize2 className="w-3.5 h-3.5" />
+                压缩会话（当前占用 {Math.round(pct)}%）
+              </>
+            )}
           </button>
         </div>
       )}

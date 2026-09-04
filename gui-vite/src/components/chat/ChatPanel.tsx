@@ -375,12 +375,17 @@ export default function ChatPanel() {
     try {
       const resp = await compressSession(sessionId);
       state.showToast(resp.compressed ? '已压缩' : '无需压缩', 'success');
+      // 压缩成功后刷新消息列表：摘要消息（system 角色）已持久化到服务端，
+      // 前端 store 不会自动更新——重新拉取让摘要出现在会话流中。
+      if (resp.compressed) {
+        await reloadSession(sessionId);
+      }
     } catch (err: unknown) {
       state.showToast(`压缩失败: ${toErrorMessage(err, '未知错误')}`, 'error');
     } finally {
       setCompressing(false);
     }
-  }, [streamStatus, compressing]);
+  }, [streamStatus, compressing, reloadSession]);
 
   // Determine which message is currently streaming
   const streamingIndex = streamStatus === 'streaming' ? messages.length - 1 : -1;
@@ -510,6 +515,7 @@ export default function ChatPanel() {
           usage={lastUsage}
           sessionUsage={sessionUsage}
           onCompress={() => void handleCompress()}
+          compressing={compressing}
         />
       )}
       </div>

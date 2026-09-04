@@ -16,6 +16,8 @@ interface Props {
   sessionUsage: { uncachedInput: number; cachedInput: number; completion: number } | null;
   /** 压缩当前会话（圆环详情面板内的快捷操作） */
   onCompress: () => void;
+  /** 压缩进行中（ContextRing 按钮禁用 + loading） */
+  compressing?: boolean;
 }
 
 /** 单张图片大小上限（4MB，data URL base64 膨胀约 1.33 倍后约 5.3MB 文本） */
@@ -44,6 +46,7 @@ export default function ChatInput({
   usage,
   sessionUsage,
   onCompress,
+  compressing = false,
 }: Props) {
   const [input, setInput] = useState('');
   const [images, setImages] = useState<string[]>([]);
@@ -263,7 +266,7 @@ export default function ChatInput({
           <div className="flex items-center gap-1.5">
             <ModelSelector ghost />
             <ThinkingSelect ghost />
-            <ContextRing usage={usage} onCompress={onCompress} />
+            <ContextRing usage={usage} onCompress={onCompress} compressing={compressing} />
             {isStreaming ? (
               <button
                 onClick={onStop}
