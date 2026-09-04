@@ -360,12 +360,13 @@ describe('ChatPanel', () => {
     expect(useAppStore.getState().toasts[0]?.type).toBe('success');
   });
 
-  it('reloads session messages after a successful compression', async () => {
+  it('appends the summary message to the message list after a successful compression', async () => {
     const user = userEvent.setup();
     useAppStore.setState({
       currentSessionId: 'session-1',
       messages: [
         {
+          id: 'msg-1',
           role: 'assistant',
           content: 'ok',
           timestamp: new Date().toISOString(),
@@ -373,20 +374,35 @@ describe('ChatPanel', () => {
         },
       ],
     });
+    server.use(
+      http.post('/api/v1/sessions/:id/compress', () => {
+        return HttpResponse.json({
+          compressed: true,
+          message: {
+            id: 'cmp_123',
+            role: 'system',
+            content: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\n测试\n[摘要结束]',
+            timestamp: new Date().toISOString(),
+          },
+        });
+      }),
+    );
 
     renderChatPanel();
 
     await user.click(screen.getByRole('button', { name: '上下文占用' }));
     await user.click(screen.getByRole('button', { name: /压缩会话/ }));
 
-    // 压缩成功（compressed=true）→ 重新拉取消息列表（摘要消息出现在会话流中）
+    // 压缩成功 → 摘要消息追加到消息流末尾（保留完整历史，不做清空/替换）
     await waitFor(() => {
       expect(useAppStore.getState().toasts[0]?.message).toBe('已压缩');
     });
     await waitFor(() => {
-      // mock 的 messages 端点返回「你好 / 你好！我是天演...」两条消息
       const msgs = useAppStore.getState().messages;
-      expect(msgs.some((m) => m.content.includes('你好！我是天演'))).toBe(true);
+      expect(msgs.length).toBe(2);
+      expect(msgs[0].id).toBe('msg-1');
+      expect(msgs[1].id).toBe('cmp_123');
+      expect(msgs[1].content).toContain('对话摘要');
     });
   });
 

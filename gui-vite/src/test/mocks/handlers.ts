@@ -951,7 +951,15 @@ export const handlers = [
   // Session compress（后端为 POST /sessions/{id}/compress，body: {}）
   http.post(`${API_BASE}/sessions/:id/compress`, ({ params }) => {
     mockSessionCompressCalls.push({ sessionId: String(params.id) });
-    return HttpResponse.json({ compressed: true });
+    return HttpResponse.json({
+      compressed: true,
+      message: {
+        id: 'cmp_mock',
+        role: 'system',
+        content: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\nmock\n[摘要结束]',
+        timestamp: new Date().toISOString(),
+      },
+    });
   }),
 
   // Background tasks（后端为 GET /tasks，返回 Vec<BackgroundTask>）

@@ -368,8 +368,11 @@ impl AgentCoordinator for WizardModeAgent {
         Ok(false)
     }
 
-    async fn compress_session(&self, _session_id: &str) -> TianyanResult<bool> {
+    async fn compress_session(
+        &self,
+        _session_id: &str,
+    ) -> TianyanResult<Option<tianyan::common::types::StructuredMessage>> {
         // 向导模式未装配 Agent，压缩不可用
-        Ok(false)
+        Ok(None)
     }
 }

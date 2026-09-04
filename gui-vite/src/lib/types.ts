@@ -536,6 +536,8 @@ export interface CancelTaskResponse {
 export interface CompressSessionResponse {
   /** true=已执行压缩；false=无需压缩。 */
   compressed: boolean;
+  /** 压缩生成的摘要消息（system 角色；压缩未发生时不返回）——前端追加到消息流末尾。 */
+  message?: ChatMessage;
 }
 
 // ========== Insights Types (matches backend scheduler/stats DTO) ==========

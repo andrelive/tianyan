@@ -176,8 +176,12 @@ pub trait AgentCoordinator: Send + Sync {
     ///
     /// 与自动压缩共用 `maybe_compress_and_persist` 逻辑（含压缩点刷新：
     /// learned rules 缓存清空 + 技能注册表增量注册），仅触发点不同。
-    /// 返回是否实际发生了压缩（消息不足 / token 未超阈值时为 false）。
-    async fn compress_session(&self, session_id: &str) -> Result<bool>;
+    /// 返回 `Some(summary_sm)` = 实际发生压缩（摘要消息已持久化）；
+    /// `None` = 无需压缩（消息不足 / token 未超阈值）。
+    async fn compress_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::common::types::StructuredMessage>>;
 
     /// 唤醒指定会话的主 agent（T1 事件驱动：外部事件触发一轮系统消息处理）。
     ///
@@ -316,13 +320,19 @@ impl AgentCoordinator for Agent {
         Ok(rx)
     }
 
-    async fn compress_session(&self, session_id: &str) -> Result<bool> {
+    async fn compress_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::common::types::StructuredMessage>> {
         // 与进行中的轮互斥：压缩读取会话状态并写入摘要，若与轮并发会基于
         // 轮中未完成的消息生成摘要（且轮内状态与库分叉）。
         let _turn_guard = self.turn_guard(session_id).await;
         let state = self.load_and_build_state(session_id).await?;
         // force=true：手动压缩跳过窗口阈值——用户主动点击即明确意图
-        Ok(self.maybe_compress_and_persist(&state, session_id, true).await)
+        let summary = self
+            .maybe_compress_and_persist(&state, session_id, true)
+            .await;
+        Ok(summary)
     }
 
     async fn wake_session(&self, session_id: &str) {

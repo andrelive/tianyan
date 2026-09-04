@@ -501,13 +501,14 @@ impl Agent {
     /// 压缩已重建 system 前缀（摘要消息插入），此刻刷新零额外缓存成本，
     /// 是会话内唯一的免费刷新点。
     ///
-    /// 返回是否发生了压缩（供手动压缩入口判断结果）。
+    /// 返回压缩生成的摘要消息（`Some` = 发生了压缩；`None` = 无需压缩）。
+    /// 自动压缩调用方忽略返回值（压缩检查只是副作用）；手动压缩透传给前端。
     pub(crate) async fn maybe_compress_and_persist(
         &self,
         state: &Arc<RwLock<SessionState>>,
         session_id: &str,
         force: bool,
-    ) -> bool {
+    ) -> Option<StructuredMessage> {
         let messages_since_marker: Vec<StructuredMessage> = {
             let s = state.read().await;
             let marker_pos = s
@@ -519,7 +520,7 @@ impl Agent {
         };
 
         if messages_since_marker.len() < MIN_MESSAGES_BEFORE_COMPRESSION {
-            return false;
+            return None;
         }
 
         let conversation: Vec<Message> = messages_since_marker
@@ -542,8 +543,9 @@ impl Agent {
             .compress_for_session(&conversation, session_id, recent_input_tokens, force)
             .await
         else {
-            return false;
+            return None;
         };
+        let summary_sm = summary_sm.clone();
 
         if let Err(e) = self
             .session_manager
@@ -552,7 +554,10 @@ impl Agent {
         {
             tracing::warn!(error = %e, "持久化压缩摘要失败");
         } else {
-            state.write().await.add_structured_message(summary_sm);
+            state
+                .write()
+                .await
+                .add_structured_message(summary_sm.clone());
         }
 
         // 会话转换点刷新（learned rules 缓存 + 技能注册表）
@@ -563,7 +568,7 @@ impl Agent {
             }
         }
 
-        true
+        Some(summary_sm)
     }
 
     /// 共享编排骨架：快照（可选）→ 持久化用户消息 → 准备上下文 → AgentLoop →
@@ -1241,10 +1246,10 @@ mod tests {
             state.write().await.add_structured_message(sm);
         }
 
-        let compressed = agent
+        let summary = agent
             .maybe_compress_and_persist(&state, "session-1", false)
             .await;
-        assert!(compressed, "token 超阈值且消息数足够时应发生压缩");
+        assert!(summary.is_some(), "token 超阈值且消息数足够时应发生压缩");
         assert!(
             state.read().await.injectable_context.soul.is_empty(),
             "压缩后注入上下文缓存应清空（下一轮重新加载 learned rules）"
@@ -1281,10 +1286,10 @@ mod tests {
             state.write().await.add_structured_message(sm);
         }
 
-        let compressed = agent
+        let summary = agent
             .maybe_compress_and_persist(&state, "session-1", false)
             .await;
-        assert!(!compressed, "消息不足不应压缩");
+        assert!(summary.is_none(), "消息不足不应压缩");
         assert!(
             !state.read().await.injectable_context.soul.is_empty(),
             "未压缩不应清空注入上下文缓存"

@@ -181,8 +181,14 @@ pub async fn compress_session(
 
     let agent = state.agent().await;
     // ? 传播：会话不存在时由 core 返回 not_found 语义（404），不吞成 Internal
-    let compressed = agent.compress_session(&session_id).await?;
-    Ok(Json(CompressSessionResponse { compressed }))
+    let summary = agent.compress_session(&session_id).await?;
+    let message = summary
+        .as_ref()
+        .map(crate::api::shared::types::ChatMessage::from_structured_light);
+    Ok(Json(CompressSessionResponse {
+        compressed: message.is_some(),
+        message,
+    }))
 }
 
 /// 更新会话标题

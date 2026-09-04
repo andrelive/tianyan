@@ -375,17 +375,17 @@ export default function ChatPanel() {
     try {
       const resp = await compressSession(sessionId);
       state.showToast(resp.compressed ? '已压缩' : '无需压缩', 'success');
-      // 压缩成功后刷新消息列表：摘要消息（system 角色）已持久化到服务端，
-      // 前端 store 不会自动更新——重新拉取让摘要出现在会话流中。
-      if (resp.compressed) {
-        await reloadSession(sessionId);
+      // 摘要消息追加到消息流末尾（展示始终只追加，保留完整历史；
+      // 服务端上下文组装从压缩点开始与此无关）。
+      if (resp.message) {
+        useAppStore.getState().addMessage(resp.message, sessionId);
       }
     } catch (err: unknown) {
       state.showToast(`压缩失败: ${toErrorMessage(err, '未知错误')}`, 'error');
     } finally {
       setCompressing(false);
     }
-  }, [streamStatus, compressing, reloadSession]);
+  }, [streamStatus, compressing]);
 
   // Determine which message is currently streaming
   const streamingIndex = streamStatus === 'streaming' ? messages.length - 1 : -1;

@@ -296,7 +296,10 @@ describe('compressSession', () => {
     const result = await compressSession('session-1');
 
     expect(mockSessionCompressCalls).toEqual([{ sessionId: 'session-1' }]);
-    expect(result).toEqual({ compressed: true });
+    expect(result.compressed).toBe(true);
+    // 压缩成功时响应携带摘要消息（前端追加到消息流末尾）
+    expect(result.message?.role).toBe('system');
+    expect(result.message?.content).toContain('对话摘要');
   });
 
   it('returns compressed=false when there is nothing to compress', async () => {

@@ -265,8 +265,11 @@ mod tests {
         async fn cancel_background_task(&self, _task_id: &str) -> tianyan::Result<bool> {
             Ok(false)
         }
-        async fn compress_session(&self, _session_id: &str) -> tianyan::Result<bool> {
-            Ok(false)
+        async fn compress_session(
+            &self,
+            _session_id: &str,
+        ) -> tianyan::Result<Option<tianyan::common::types::StructuredMessage>> {
+            Ok(None)
         }
         async fn wake_session(&self, session_id: &str) {
             self.woken

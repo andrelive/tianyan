@@ -7,6 +7,9 @@ use crate::api::shared::types::ChatMessage;
 pub struct CompressSessionResponse {
     /// 是否实际发生了压缩（消息不足 / token 未超阈值时为 false）。
     pub compressed: bool,
+    /// 压缩生成的摘要消息（前端追加到消息流末尾；压缩未发生时省略）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<ChatMessage>,
 }
 
 /// 会话信息

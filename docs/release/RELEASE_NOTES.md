@@ -6,8 +6,8 @@
 
 ## 0.2.12 修复（手动压缩会话：无进行中反馈 + 可重复点击 + 摘要不显示）
 
-- **根因**：① 压缩按钮点击后立即关闭详情面板，`compressing` 状态无处展示——整个压缩过程（LLM 摘要生成，通常 10-30 秒）界面无任何反馈；② `compressing` 状态未传给按钮做 disabled，期间可反复点击（服务端虽有 `turn_guard` 串行化 + 消息数守卫兜底，第二次返回"无需压缩"，但体验差）；③ 压缩成功后只弹 toast，**未刷新消息列表**——摘要消息（system 角色）已持久化到服务端，但前端 store 不会自动更新，摘要永远不出现在会话流中
-- **修复**：`ContextRing` 新增 `compressing` prop——压缩期间面板保持打开，按钮就地变为「压缩中...」（spinner + disabled，防重复点击）；`ChatPanel.handleCompress` 压缩成功后调用 `reloadSession` 重新拉取消息列表，摘要消息（`[对话摘要]` system 消息）出现在会话流中（回归测试锁定：压缩中按钮禁用 + 压缩成功后消息刷新）
+- **根因**：① 压缩按钮点击后立即关闭详情面板，`compressing` 状态无处展示——整个压缩过程（LLM 摘要生成，通常 10-30 秒）界面无任何反馈；② `compressing` 状态未传给按钮做 disabled，期间可反复点击（服务端虽有 `turn_guard` 串行化 + 消息数守卫兜底，第二次返回"无需压缩"，但体验差）；③ 压缩成功后只弹 toast，**摘要消息不追加到会话流**——摘要已持久化到服务端，但前端 store 不更新，用户看不到压缩点
+- **修复**：`ContextRing` 新增 `compressing` prop——压缩期间面板保持打开，按钮就地变为「压缩中...」（spinner + disabled，防重复点击）；`compress_session` 返回摘要消息（`StructuredMessage` → API `ChatMessage`），前端 `addMessage` **追加**到消息流末尾（展示始终只追加、保留完整库历史，不做清空/刷新/截断——服务端上下文组装从压缩点开始与此无关）
 
 - **根因**：通知/注入/唤醒链路正常（System 通知入库 + 唤醒轮触发），但 `prepare_wake_context` 的唤醒指令允许"空输出结束"，模型在后台任务失败场景下选择沉默——主 agent 无任何反馈（构建失败后 5 分钟无反应）
 - **修复**：唤醒指令区分失败/完成场景——感知任务状态（`background_tasks.snapshot()` + `command_tasks.list()` 任一 Failed），失败时指令明确"必须向用户汇报失败情况，禁止输出空文本"（ADR-013 shouldReply = allComplete || isTaskFailure 的语义落地）；全部成功且无需输出才允许空输出；空输出日志从 debug 升级为 info（取证可见）
