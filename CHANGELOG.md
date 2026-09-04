@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed（唤醒轮失败场景静默，2026-09-03）
+### Fixed（0.2.11 构建：唤醒轮失败场景静默，2026-09-03）
 - **后台任务失败时主 agent 无反馈**：通知/注入/唤醒链路正常（System 通知入库 + 唤醒轮触发），但唤醒指令允许"空输出结束"，模型在失败场景下选择沉默——主 agent 静默无反馈（"任务失败但没通知"）。唤醒指令区分失败/完成场景：**失败必须向用户汇报**（ADR-013 shouldReply = allComplete || isTaskFailure 的语义落地），只有全部成功且无需输出才允许空输出；空输出日志从 debug 升级为 info（取证可见）。回归测试锁定失败场景指令含"必须汇报"、成功场景仍允许空输出
 
 ### Fixed（会话消耗汇总漏计工具轮输入，2026-09-03）
