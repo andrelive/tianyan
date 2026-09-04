@@ -165,6 +165,11 @@ pub struct BackgroundTask {
     /// `created_at` 为毫秒精度，同毫秒注册的任务无法区分先后；
     /// `seq` 保证快照/列表顺序确定（先注册在前）。
     pub seq: u64,
+    /// 时序锚点：任务启动时链上消息数（= 下一条消息的 seq）。
+    ///
+    /// 回退到用户输入 U 时，锚点 > U.seq 的任务属于"回退点之后"，
+    /// 应一并取消（方案 B：任务与链上时序点关联，精确取消）。
+    pub anchor_seq: i64,
 }
 
 impl BackgroundTask {
@@ -199,6 +204,7 @@ impl BackgroundTask {
             created_at: t.created_at,
             completed_at: t.completed_at,
             seq: t.seq,
+            anchor_seq: t.anchor_seq,
         }
     }
 }
@@ -358,6 +364,7 @@ impl BackgroundTaskManager {
         kind: TaskKind,
         description: String,
         parent_session_id: String,
+        anchor_seq: i64,
     ) -> String {
         self.ensure_reloaded().await;
         let id = format!("bt_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
@@ -376,6 +383,7 @@ impl BackgroundTaskManager {
             created_at: now_ms(),
             completed_at: None,
             seq,
+            anchor_seq,
         };
         self.tasks.lock().await.insert(id.clone(), task.clone());
         self.persist_upsert(&task).await;
@@ -637,6 +645,7 @@ impl BackgroundTaskManager {
                     created_at: row.get(7)?,
                     completed_at: row.get(8)?,
                     seq: row.get(9)?,
+                    anchor_seq: 0,
                 })
             })
             .map(|iter| iter.filter_map(|r| r.ok()).collect())
@@ -782,6 +791,7 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackgroundTask> {
         created_at: row.get(7)?,
         completed_at: row.get(8)?,
         seq: row.get(9)?,
+        anchor_seq: 0,
     })
 }
 
@@ -983,6 +993,7 @@ mod tests {
             created_at: 1000,
             completed_at: None,
             seq: 7,
+            anchor_seq: 0,
             ready: false,
             ready_note: None,
         };
@@ -1013,6 +1024,7 @@ mod tests {
                     created_at: 0,
                     completed_at: None,
                     seq: 0,
+                    anchor_seq: 0,
                     ready: false,
                     ready_note: None,
                 }
@@ -1054,6 +1066,7 @@ mod tests {
                 created_at: 0,
                 completed_at: None,
                 seq: 0,
+                anchor_seq: 0,
                 ready: false,
                 ready_note: None,
             }
@@ -1088,6 +1101,7 @@ mod tests {
             created_at: 0,
             completed_at: Some(1),
             seq: 0,
+            anchor_seq: 0,
         };
         let text = build_notification_text(&task, 2);
         assert!(text.contains("[后台任务完成]"));
@@ -1110,6 +1124,7 @@ mod tests {
             created_at: 0,
             completed_at: Some(1),
             seq: 0,
+            anchor_seq: 0,
         };
         let text = build_notification_text(&task, 0);
         assert!(text.contains("所有后台任务均已完成"));
@@ -1120,7 +1135,7 @@ mod tests {
     async fn test_register_and_complete() {
         let manager = BackgroundTaskManager::new();
         let id = manager
-            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string(), 0)
             .await;
         assert!(id.starts_with("bt_"));
         assert_eq!(manager.get(&id).await.unwrap().status, TaskStatus::Pending);
@@ -1146,7 +1161,7 @@ mod tests {
     async fn test_fail_and_cancel() {
         let manager = BackgroundTaskManager::new();
         let id = manager
-            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string(), 0)
             .await;
         manager.fail(&id, "boom".to_string()).await;
         let task = manager.get(&id).await.unwrap();
@@ -1154,7 +1169,7 @@ mod tests {
         assert_eq!(task.error.as_deref(), Some("boom"));
 
         let id2 = manager
-            .register(TaskKind::Delegate, "t2".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t2".to_string(), "s1".to_string(), 0)
             .await;
         manager.cancel(&id2).await.unwrap();
         assert_eq!(
@@ -1220,10 +1235,10 @@ mod tests {
             BackgroundTaskManager::new().with_notifier(Arc::new(CountingNotifier(calls.clone())));
 
         let id1 = manager
-            .register(TaskKind::Delegate, "a".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "a".to_string(), "s1".to_string(), 0)
             .await;
         let id2 = manager
-            .register(TaskKind::Delegate, "b".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "b".to_string(), "s1".to_string(), 0)
             .await;
         manager.complete(&id1, "r1".to_string()).await;
         manager.complete(&id2, "r2".to_string()).await;
@@ -1241,10 +1256,10 @@ mod tests {
     async fn test_snapshot_sorted() {
         let manager = BackgroundTaskManager::new();
         let id1 = manager
-            .register(TaskKind::Delegate, "a".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "a".to_string(), "s1".to_string(), 0)
             .await;
         let id2 = manager
-            .register(TaskKind::Delegate, "b".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "b".to_string(), "s1".to_string(), 0)
             .await;
         let snap = manager.snapshot().await;
         assert_eq!(snap.len(), 2);
@@ -1320,6 +1335,7 @@ mod tests {
             created_at: 0,
             completed_at: Some(1),
             seq: 0,
+            anchor_seq: 0,
         };
         notifier.on_task_terminal("s1", &task, 0).await;
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "应持久化一条通知");
@@ -1345,10 +1361,10 @@ mod tests {
             calls: calls.clone(),
         }));
         let id1 = manager
-            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string(), 0)
             .await;
         let id2 = manager
-            .register(TaskKind::Delegate, "t2".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t2".to_string(), "s1".to_string(), 0)
             .await;
         manager.complete(&id1, "r1".to_string()).await;
         assert_eq!(
@@ -1371,7 +1387,7 @@ mod tests {
             calls: calls.clone(),
         }));
         let id = manager
-            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string(), 0)
             .await;
         manager.fail(&id, "boom".to_string()).await;
         assert_eq!(
@@ -1401,10 +1417,10 @@ mod tests {
                 calls: calls.clone(),
             }));
         let id1 = manager
-            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string(), 0)
             .await;
         let id2 = manager
-            .register(TaskKind::Delegate, "t2".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t2".to_string(), "s1".to_string(), 0)
             .await;
         manager.complete(&id1, "r1".to_string()).await;
         assert_eq!(
@@ -1428,7 +1444,7 @@ mod tests {
                 calls: calls.clone(),
             }));
         let id = manager
-            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string(), 0)
             .await;
         manager.fail(&id, "boom".to_string()).await;
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "失败触发系统通知");
@@ -1445,7 +1461,7 @@ mod tests {
             }))
             .await;
         let id = manager
-            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string(), 0)
             .await;
         manager.complete(&id, "r".to_string()).await;
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "构建后注入同样生效");
@@ -1458,10 +1474,10 @@ mod tests {
             calls: calls.clone(),
         }));
         let a = manager
-            .register(TaskKind::Delegate, "ta".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "ta".to_string(), "s1".to_string(), 0)
             .await;
         let b = manager
-            .register(TaskKind::Delegate, "tb".to_string(), "s2".to_string())
+            .register(TaskKind::Delegate, "tb".to_string(), "s2".to_string(), 0)
             .await;
         manager.complete(&a, "ra".to_string()).await;
         assert_eq!(
@@ -1483,7 +1499,7 @@ mod tests {
         db.init_schemas().await.unwrap();
         let manager = BackgroundTaskManager::new().with_db(db.clone());
         let id = manager
-            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string(), 0)
             .await;
         manager.mark_running(&id).await;
         manager.complete(&id, "done".to_string()).await;
@@ -1496,7 +1512,7 @@ mod tests {
         assert_eq!(tasks[0].result.as_deref(), Some("done"));
         // seq 续接：新注册任务序号不与历史冲突
         let new_id = manager2
-            .register(TaskKind::Delegate, "t2".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t2".to_string(), "s1".to_string(), 0)
             .await;
         let tasks = manager2.snapshot().await;
         assert_eq!(tasks.len(), 2);
@@ -1509,7 +1525,7 @@ mod tests {
         db.init_schemas().await.unwrap();
         let manager = BackgroundTaskManager::new().with_db(db.clone());
         let id = manager
-            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "t1".to_string(), "s1".to_string(), 0)
             .await;
         manager.mark_running(&id).await; // 重启前仍在运行
 
@@ -1561,7 +1577,7 @@ mod tests {
             reviewed: reviewed.clone(),
         }));
         let id = manager
-            .register(TaskKind::Delegate, "整理日志".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "整理日志".to_string(), "s1".to_string(), 0)
             .await;
         manager
             .complete(&id, "已处理 6/12 个文件".to_string())
@@ -1584,7 +1600,7 @@ mod tests {
             reviewed: Arc::new(AtomicUsize::new(0)),
         }));
         let id = manager
-            .register(TaskKind::Delegate, "任务".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "任务".to_string(), "s1".to_string(), 0)
             .await;
         manager.complete(&id, "完成".to_string()).await;
 
@@ -1597,7 +1613,7 @@ mod tests {
         // 未注入自审器 → 行为零变化
         let manager = BackgroundTaskManager::new();
         let id = manager
-            .register(TaskKind::Delegate, "任务".to_string(), "s1".to_string())
+            .register(TaskKind::Delegate, "任务".to_string(), "s1".to_string(), 0)
             .await;
         manager.complete(&id, "结果".to_string()).await;
 

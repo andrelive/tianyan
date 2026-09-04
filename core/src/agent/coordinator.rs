@@ -183,6 +183,21 @@ pub trait AgentCoordinator: Send + Sync {
         session_id: &str,
     ) -> Result<Option<crate::common::types::StructuredMessage>>;
 
+    /// 回退会话到指定用户输入之前（完整回退编排）。
+    ///
+    /// 流程（四种状态统一覆盖，每步对"不存在"的情况幂等）：
+    /// ① 等待进行中的轮收尾（调用方已置位 cancel 标志，AgentLoop 在轮次
+    ///    边界停止；turn_guard 保证与轮互斥）；
+    /// ② 取消时序锚点之后的所有任务（委托 cancel + 命令 kill），等待
+    ///    全部终态（取消通知入库，截断时一并丢弃）；
+    /// ③ 保存 redo 状态（被截断消息 + 工作区树）并恢复工作区到锚点快照；
+    /// ④ 完整链上截断到锚点之前，rewrite 写回（压缩点前历史保留）。
+    ///
+    /// 默认空实现（无任务/快照装配的适配器/测试替身直接继承）。
+    async fn rollback_session(&self, _session_id: &str, _message_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// 唤醒指定会话的主 agent（T1 事件驱动：外部事件触发一轮系统消息处理）。
     ///
     /// 默认空实现（不唤醒）；Agent 实现转发到 `process_wake`（ADR-013）。
@@ -333,6 +348,77 @@ impl AgentCoordinator for Agent {
             .maybe_compress_and_persist(&state, session_id, true)
             .await;
         Ok(summary)
+    }
+
+    async fn rollback_session(&self, session_id: &str, message_id: &str) -> Result<()> {
+        // ① 与进行中的轮互斥：回退读取完整链并截断，若与轮并发会基于轮中
+        // 未完成的消息截断（且轮内状态与库分叉）。
+        let _turn_guard = self.turn_guard(session_id).await;
+
+        // ② 取消时序锚点之后的所有任务（委托 cancel + 命令 kill）。
+        // 锚点 = 被回退消息的索引（完整链上定位）。
+        let anchor = {
+            let session = self
+                .session_manager
+                .get_session(session_id)
+                .await?
+                .ok_or_else(|| {
+                    crate::TianyanError::not_found(format!("会话存储错误：会话未找到：{session_id}"))
+                })?;
+            session
+                .messages
+                .iter()
+                .position(|m| m.id == message_id)
+                .ok_or_else(|| {
+                    crate::TianyanError::not_found(format!("消息不存在：{message_id}"))
+                })?
+        };
+
+        // 委托任务：锚点 > 回退点 → 取消
+        let bg_tasks = self.background_tasks.snapshot().await;
+        for t in bg_tasks
+            .iter()
+            .filter(|t| t.parent_session_id == session_id && t.anchor_seq > anchor as i64)
+        {
+            if !t.status.is_terminal() {
+                self.background_tasks.cancel(&t.id).await?;
+            }
+        }
+        // 命令任务：锚点 > 回退点 → kill（杀进程树）
+        let cmd_tasks = self.command_tasks.list().await;
+        let mut killed: Vec<String> = Vec::new();
+        for t in cmd_tasks
+            .iter()
+            .filter(|t| t.parent_session_id == session_id && t.anchor_seq > anchor as i64)
+        {
+            if t.status == crate::executor::CommandTaskStatus::Running {
+                if self.command_tasks.kill(&t.id).await.is_ok() {
+                    killed.push(t.id.clone());
+                }
+            }
+        }
+        // 等待被 kill 的命令任务进入终态（watcher 收尾异步：杀进程后
+        // child.wait() 返回 → on_command_terminal 入库取消通知）。
+        // 必须等通知入库再截断——否则取消通知追加到新链尾污染。
+        if !killed.is_empty() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let tasks = self.command_tasks.list().await;
+                let all_terminal = killed.iter().all(|id| {
+                    tasks
+                        .iter()
+                        .find(|t| &t.id == id)
+                        .map(|t| t.status != crate::executor::CommandTaskStatus::Running)
+                        .unwrap_or(true)
+                });
+                if all_terminal || std::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+
+        Ok(())
     }
 
     async fn wake_session(&self, session_id: &str) {

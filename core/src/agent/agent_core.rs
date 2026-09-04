@@ -1350,6 +1350,7 @@ mod tests {
                 crate::agent::background::TaskKind::Delegate,
                 "测试任务".to_string(),
                 "session-1".to_string(),
+                0,
             )
             .await;
         agent

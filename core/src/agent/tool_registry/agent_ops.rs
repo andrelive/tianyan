@@ -199,7 +199,22 @@ impl ToolRegistry {
                 });
             let task = self
                 .command_tasks
-                .spawn_background(session_id, &params.command, cwd.as_deref(), ready_spec)
+                .spawn_background(
+                    session_id,
+                    &params.command,
+                    cwd.as_deref(),
+                    ready_spec,
+                    // 时序锚点：任务启动时链上消息数（= 下一条消息的 seq）。
+                    // 回退到用户输入 U 时，锚点 > U.seq 的任务属于"回退点之后"，
+                    // 应一并取消（方案 B：任务与链上时序点关联，精确取消）。
+                    match &self.session_manager {
+                        Some(sm) => match sm.get_session(session_id).await {
+                            Ok(Some(s)) => s.messages.len() as i64,
+                            _ => 0,
+                        },
+                        None => 0,
+                    },
+                )
                 .await
                 .map_err(wrap_tool_error)?;
             let ready_msg = if params.ready.is_some() {
@@ -794,11 +809,21 @@ impl ToolRegistry {
         let queue_permit = manager.acquire_queue_slot().await?;
 
         let desc = params.task.clone();
+        // 时序锚点：任务启动时链上消息数（= 下一条消息的 seq）。
+        // 回退到用户输入 U 时，锚点 > U.seq 的任务属于"回退点之后"，应一并取消。
+        let anchor_seq = match &self.session_manager {
+            Some(sm) => match sm.get_session(&session_id).await {
+                Ok(Some(s)) => s.messages.len() as i64,
+                _ => 0,
+            },
+            None => 0,
+        };
         let task_id = manager
             .register(
                 crate::agent::background::TaskKind::Delegate,
                 desc.clone(),
                 session_id.clone(),
+                anchor_seq,
             )
             .await;
         let run_permit = manager.acquire_run().await?;

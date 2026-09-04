@@ -8,11 +8,11 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{Message, MessageRole, StructuredMessage};
+use crate::common::types::{Message, StructuredMessage};
 
 use super::store::SessionStore;
 use super::types::SessionHeader;
-use super::{types::Session, MAX_SESSION_MESSAGES};
+use super::types::Session;
 
 /// 会话管理操作 trait。
 #[async_trait]
@@ -84,52 +84,6 @@ impl PersistentSessionManager {
         session.message_count = Some(messages.len());
         for msg in messages {
             session.add_structured_message(msg);
-        }
-
-        // 从后向前扫描 compression_marker，只保留 marker 及之后的消息
-        if let Some(marker_pos) = session.messages.iter().rposition(|m| m.compression_marker) {
-            if marker_pos > 0 {
-                let skipped = marker_pos;
-                session.messages = session.messages.split_off(skipped);
-                tracing::info!(
-                    skipped_messages = skipped,
-                    session_id = %id,
-                    "按 compression_marker 截断会话至工作集"
-                );
-            }
-        }
-
-        // 限制加载的消息数量，保留最近的 MAX_SESSION_MESSAGES 条（安全上限）。
-        // 截断优先丢弃 assistant/tool/system——**用户消息是上下文锚点，
-        // 必须保留**（否则切回会话找不到自己的输入）；仅当用户消息本身
-        // 超限时才从最旧处丢弃 user 消息。
-        if session.messages.len() > MAX_SESSION_MESSAGES {
-            let mut skipped = 0usize;
-            while session.messages.len() > MAX_SESSION_MESSAGES {
-                let over = session.messages.len() - MAX_SESSION_MESSAGES;
-                // 第一遍：从最旧开始丢弃非 user 消息
-                let dropped = session
-                    .messages
-                    .iter()
-                    .take(over)
-                    .take_while(|m| m.role != MessageRole::User)
-                    .count();
-                if dropped == 0 {
-                    // 无可丢弃的非 user 消息（user 消息本身超限）：
-                    // 退化为从最旧丢弃 user 消息
-                    session.messages.remove(0);
-                    skipped += 1;
-                    continue;
-                }
-                session.messages.drain(..dropped);
-                skipped += dropped;
-            }
-            tracing::info!(
-                skipped_messages = skipped,
-                session_id = %id,
-                "会话消息超过上限，截断至最近 {} 条（保留用户消息）",
-                session.messages.len(),
-            );
         }
 
         Ok(Some(session))
@@ -405,14 +359,18 @@ mod tests {
 
         let session = mgr.get_session(id).await.unwrap().unwrap();
 
-        // Should only have marker + messages after it = 3 messages
-        assert_eq!(session.messages.len(), 3, "should skip pre-marker messages");
+        // 存储层返回完整链（压缩点截断已移到组装层 assemble_context）：
+        // 压缩点前的历史必须保留，回退/重做基于完整链操作。
+        assert_eq!(session.messages.len(), 6, "存储层应返回完整链（含压缩点前历史）");
         assert!(
-            session.messages[0].compression_marker,
-            "first should be the marker"
+            session.messages[3].compression_marker,
+            "压缩摘要消息应保留在链上"
         );
-        assert_eq!(session.messages[1].id, "m3");
-        assert_eq!(session.messages[2].id, "m4");
+        assert_eq!(session.messages[4].id, "m3");
+        assert_eq!(session.messages[5].id, "m4");
+        assert_eq!(session.messages[0].role, MessageRole::User);
+        assert_eq!(session.messages[1].id, "m1");
+        assert_eq!(session.messages[2].id, "m2");
     }
 
     #[tokio::test]

@@ -975,7 +975,7 @@ async fn test_task_cancel_via_tool() {
     let registry = ToolRegistry::new(default_strict_policy());
     let id = registry
         .background_tasks
-        .register(TaskKind::Delegate, "task".to_string(), "s1".to_string())
+        .register(TaskKind::Delegate, "task".to_string(), "s1".to_string(), 0)
         .await;
     registry.background_tasks.mark_running(&id).await;
 
@@ -998,7 +998,7 @@ async fn test_task_status_list_mode_without_task_id() {
     let registry = ToolRegistry::new(default_strict_policy());
     let id = registry
         .background_tasks
-        .register(TaskKind::Delegate, "task-a".to_string(), "s1".to_string())
+        .register(TaskKind::Delegate, "task-a".to_string(), "s1".to_string(), 0)
         .await;
     registry.background_tasks.mark_running(&id).await;
 

@@ -54,8 +54,14 @@ impl ContextAssembler {
             messages.push(Message::system(context_parts.concat()));
         }
 
-        // 历史对话（含当前用户输入）
-        for sm in structured_messages {
+        // 历史对话（含当前用户输入）：从最后一个压缩点（compression_marker）
+        // 开始组装——压缩点之前的原始消息已被摘要替代，不再发给 LLM；
+        // 无压缩点时从头组装。压缩点本身（摘要消息）包含在组装范围内。
+        let start_idx = structured_messages
+            .iter()
+            .rposition(|m| m.compression_marker)
+            .unwrap_or(0);
+        for sm in &structured_messages[start_idx..] {
             messages.extend(Self::structured_to_messages(sm));
         }
 
@@ -248,6 +254,41 @@ mod tests {
         assert_eq!(messages[0].role, MessageRole::User);
         assert_eq!(messages[0].content, "Hi");
         assert_eq!(messages[1].content, "Hello again");
+    }
+
+    #[test]
+    fn test_assemble_starts_from_last_compression_marker() {
+        // 存储层返回完整链（含压缩点前历史）；组装层从最后一个压缩点开始：
+        // 压缩点之前的原始消息不再发给 LLM，压缩点（摘要）本身包含在组装内。
+        let injectable = InjectableContext::default();
+        let pre1 = make_text_msg("pre_1", MessageRole::User, "早期消息 1", "ses_1");
+        let pre2 = make_text_msg("pre_2", MessageRole::Assistant, "早期回复", "ses_1");
+        let mut marker = make_text_msg("cmp_1", MessageRole::System, "[对话摘要] 早期摘要", "ses_1");
+        marker.compression_marker = true;
+        let post1 = make_text_msg("post_1", MessageRole::User, "近期消息", "ses_1");
+        let post2 = make_text_msg("post_2", MessageRole::Assistant, "近期回复", "ses_1");
+
+        let messages = ContextAssembler::assemble(
+            &[pre1, pre2, marker, post1, post2],
+            &injectable,
+        );
+        // 组装从压缩点开始：摘要 + 近期消息（早期消息不发给 LLM）
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].content, "[对话摘要] 早期摘要");
+        assert_eq!(messages[1].content, "近期消息");
+        assert_eq!(messages[2].content, "近期回复");
+    }
+
+    #[test]
+    fn test_assemble_without_marker_includes_all() {
+        // 无压缩点时从头组装（完整链全部发给 LLM）
+        let injectable = InjectableContext::default();
+        let sm1 = make_text_msg("msg_1", MessageRole::User, "Hi", "ses_1");
+        let sm2 = make_text_msg("msg_2", MessageRole::Assistant, "Hello", "ses_1");
+        let messages = ContextAssembler::assemble(&[sm1, sm2], &injectable);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "Hi");
+        assert_eq!(messages[1].content, "Hello");
     }
 
     #[test]

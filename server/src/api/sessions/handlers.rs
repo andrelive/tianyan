@@ -136,6 +136,26 @@ pub async fn delete_message(
         state.agent_working_directory().await,
     );
 
+    // 回退前置编排：① 停止 LLM 输出（置位 cancel 标志，AgentLoop 在轮次
+    // 边界停止）→ ② 取消时序锚点之后的任务（委托 cancel + 命令 kill）。
+    // ③ 回退文件到快照 + ④ 链截断丢弃由 delete_message 完成（基于完整链，
+    // 压缩点前历史保留）。四种状态（有无输出/有无任务）统一覆盖，每步幂等。
+    // ① 停止 LLM 输出：置位该会话的流取消标志（与「停止」按钮同语义）
+    if let Some(flag) = state
+        .stream_cancels()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&session_id)
+        .cloned()
+    {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let agent = state.agent().await;
+    if let Err(e) = agent.rollback_session(&session_id, &request.message_id).await {
+        // 回退编排失败（如消息不存在）：透传错误，不执行截断
+        return Err(e.into());
+    }
+
     let resp = service.delete_message(&session_id, request).await?;
     Ok(Json(resp))
 }
