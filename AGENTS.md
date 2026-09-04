@@ -98,6 +98,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-024: 调度模型从 cron 改为间隔 + 补跑](docs/architecture/decisions/024-interval-scheduler.md) — 任务声明执行间隔；单一扫描循环每 60s 顺序检查、串行执行；last_run 持久化宕机补跑；cron 配置自动换算弃用
 - [ADR-025: 移除检索轨迹功能](docs/architecture/decisions/025-remove-retrieval-traces.md) — 只覆盖组装路径不覆盖 search_vfs、同 query 双记录误导、零有效使用；检索观测回归 UsageStats + tracing（否决记录 REJECTED #20）
 - [ADR-026: 后台任务与子智能体统一面板](docs/architecture/decisions/026-background-tasks-unified-panel.md) — 委托只支持异步；子智能体 = 带父会话引用的会话（存储/协议/渲染三层复用）；右侧任务面板（活跃在上、完成沉底、可展开过程/输出）；并发可配置（委托 20+排队 40、终端 16）+ SQL 权威注册表 + 3 天 TTL + 子会话级联/上限/不索引 FTS
+- [ADR-027: 会话时序链模型](docs/architecture/decisions/027-session-timeline-chain.md) — 会话 = 无分支时序链（user/assistant/tool/system 四种节点平等）；存储层永远返回完整链（无压缩点截断、无消息数上限），压缩点截断只发生在组装层视图；回退 = 锚点（用户输入）之后全部截断（含取消时序锚点之后的任务）；任务带 anchor_seq 时序锚点
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 

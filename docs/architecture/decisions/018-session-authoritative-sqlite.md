@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS session_meta (
 - 不再持有 `Arc<dyn VirtualFileSystem>` 与 recall，改持 `Arc<SessionStore>`；`SessionManager` trait
   签名不变——**server/mcp/agent 层零改动**（组合根 `server/src/state.rs` 改为传入 SessionStore）。
 - `load_session` 的 compression_marker 截断、MAX_SESSION_MESSAGES 上限逻辑保留。
+  （注：ADR-027 已移除这两道截断——存储层返回完整链，压缩点截断移到组装层。）
 - title/ended_at/created_at 同步（原 write_session_header）改为 `update_header`。
 
 ### 4. 兼容层与死代码清理

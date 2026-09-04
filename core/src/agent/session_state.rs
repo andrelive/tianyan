@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use crate::common::types::{InjectableContext, StructuredMessage};
-use crate::session::{KEEP_RECENT_MESSAGES, MAX_SESSION_MESSAGES};
 
 /// 会话状态容器（conversation 为唯一真相源）。
 #[derive(Debug, Clone)]
@@ -50,14 +49,15 @@ impl SessionState {
         // 维持消息链：父消息指向会话当前最后一条消息
         msg.parent_id = self.structured_messages.last().map(|m| m.id.clone());
         self.structured_messages.push(msg);
-        self.trim_conversation();
         self.last_activity = Instant::now();
     }
 
-    /// 添加结构化消息并裁剪历史。
+    /// 添加结构化消息（内存态与存储层一致：完整链，不裁剪）。
+    ///
+    /// 上下文预算由压缩机制（token 阈值 + 摘要替换）控制；组装层从
+    /// 最后一个压缩点开始组装，内存态保留完整链供回退/重做/快照索引。
     pub fn add_structured_message(&mut self, msg: StructuredMessage) {
         self.structured_messages.push(msg);
-        self.trim_conversation();
         self.last_activity = Instant::now();
     }
 
@@ -66,39 +66,8 @@ impl SessionState {
         self.structured_messages.len()
     }
 
-    /// 清理过期消息。
-    pub fn cleanup(&mut self) {
-        self.trim_conversation();
-    }
-
-    fn trim_conversation(&mut self) {
-        if self.structured_messages.len() <= MAX_SESSION_MESSAGES {
-            return;
-        }
-        // 优先找到最近的 compression_marker 位置，避免截断标记
-        let last_marker_pos = self
-            .structured_messages
-            .iter()
-            .rposition(|m| m.compression_marker);
-        let keep_from = self
-            .structured_messages
-            .len()
-            .saturating_sub(KEEP_RECENT_MESSAGES);
-        if keep_from == 0 {
-            return;
-        }
-        // 如果有 compression_marker，只截断到 marker 之前，保留 marker（摘要消息）及之后所有消息
-        if let Some(marker_pos) = last_marker_pos {
-            if marker_pos < keep_from {
-                // 修复：原实现 drain(0..=marker_pos) 会把摘要消息本身一并删除，
-                // 导致早期摘要从上下文消失；应为 drain(0..marker_pos)。
-                self.structured_messages.drain(0..marker_pos);
-                return;
-            }
-        }
-        // 无 marker 或 marker 在保留范围内：正常截断
-        self.structured_messages.drain(0..keep_from);
-    }
+    /// 清理过期消息（无操作：内存态不裁剪，完整链保留）。
+    pub fn cleanup(&mut self) {}
 }
 
 #[cfg(test)]
@@ -122,84 +91,13 @@ mod tests {
     }
 
     #[test]
-    fn test_session_state_cleanup() {
+    fn test_session_state_keeps_full_chain() {
+        // 内存态不裁剪：完整链保留（回退/重做/快照索引依赖完整链）
         let mut state = SessionState::new("test-session");
-        for i in 0..MAX_SESSION_MESSAGES + 1 {
+        for i in 0..6000 {
             state.add_user_message(format!("Message {}", i));
         }
         state.cleanup();
-        assert!(state.structured_messages.len() <= KEEP_RECENT_MESSAGES);
-        assert!(!state.structured_messages.is_empty());
-    }
-
-    /// 回归测试：早期存在 compression_marker 时，裁剪必须保留摘要消息本身
-    /// （修复 drain(0..=marker_pos) 误删 marker 的 bug）。
-    #[test]
-    fn test_trim_conversation_keeps_marker_message() {
-        let mut state = SessionState::new("test-session");
-        // 早期消息 + 摘要 marker
-        for i in 0..30 {
-            state.add_user_message(format!("early {}", i));
-        }
-        let marker = StructuredMessage {
-            id: "msg_marker".to_string(),
-            parent_id: None,
-            role: MessageRole::System,
-            parts: vec![Part::Text {
-                text: "[对话摘要] 早期对话已压缩".to_string(),
-                time: PartTime::default(),
-            }],
-            tokens: Default::default(),
-            cost: 0.0,
-            model_id: None,
-            time: MessageTime::default(),
-            session_id: "test-session".to_string(),
-            finish: None,
-            compression_marker: true,
-        };
-        state.add_structured_message(marker);
-        // 后续消息撑过 MAX_SESSION_MESSAGES，使 marker 落在保留窗口之前
-        for i in 0..MAX_SESSION_MESSAGES + 1 {
-            state.add_user_message(format!("later {}", i));
-        }
-        state.cleanup();
-
-        assert!(
-            state
-                .structured_messages
-                .iter()
-                .any(|m| m.compression_marker),
-            "摘要消息（compression_marker）不应被裁剪掉"
-        );
-        // marker 之前的 early 消息必须全部删除；marker 之后的 later 消息全部保留
-        assert!(
-            state
-                .structured_messages
-                .iter()
-                .all(|m| m.compression_marker || !m.parts.is_empty()),
-            "裁剪后消息不应为空"
-        );
-        let texts: Vec<String> = state
-            .structured_messages
-            .iter()
-            .flat_map(|m| {
-                m.parts
-                    .iter()
-                    .filter_map(|p| match p {
-                        Part::Text { text, .. } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        assert!(
-            texts.iter().all(|t| !t.starts_with("early ")),
-            "marker 之前的消息应被删除，但残留: {:?}",
-            texts
-        );
-        assert!(
-            texts.iter().any(|t| t.starts_with("later ")),
-            "marker 之后的消息应保留"
-        );
+        assert_eq!(state.structured_messages.len(), 6000, "内存态应保留完整链");
     }
 }
