@@ -8,6 +8,7 @@ import {
   deleteSessionMessage,
   fetchApprovalStatus,
   fetchSessionMessages,
+  fetchTasks,
   getApiBase,
   redoSessionMessage,
   respondApproval,
@@ -97,7 +98,12 @@ export default function ChatPanel() {
   // 直到出现新的非空 assistant 消息（主 agent 自动汇总结果，无需用户操作）。
   // 轮询语义收敛在 usePolling；enabled 派生自会话/流状态与任务通知。
   const lastMsg = messages[messages.length - 1];
-  const hasTaskNotice = lastMsg?.role === 'system' && lastMsg.content.includes('后台任务');
+  // 通知文本两种形态：委托任务「[后台任务完成/失败]」、后台命令「[后台命令完成/失败]」
+  // （build_notification_text / build_command_notification_text）——统一按「[后台」前缀匹配，
+  // 避免「后台命令」不包含「后台任务」子串导致轮询永不启动。
+  const hasTaskNotice =
+    lastMsg?.role === 'system' &&
+    (lastMsg.content.includes('[后台任务') || lastMsg.content.includes('[后台命令'));
   const wakeConditionsMet = !!currentSessionId && streamStatus !== 'streaming' && hasTaskNotice;
   // 条件重新满足（新一轮任务通知）时重置停止标记，恢复轮询
   useEffect(() => {
@@ -123,6 +129,31 @@ export default function ChatPanel() {
   );
   /** 唤醒轮指示（条件满足且未被停止） */
   const wakeActive = wakeConditionsMet && !wakeStopped;
+
+  // 任务终态感知轮询：后台任务/命令完成通知只持久化到服务端（前端 store
+  // 无推送事件），本地消息流永远看不到 system 通知 → hasTaskNotice 不满足
+  // → 唤醒轮询永不启动。本轮询检测本会话任务进入终态（completed/failed/
+  // cancelled），一旦发现 → 拉取服务端消息按 id 去重合并到本地 store
+  // （追加语义，保留本地累积），通知/唤醒轮结果出现在会话流中。
+  const terminalTaskIdsRef = useRef<Set<string>>(new Set());
+  usePolling(
+    async () => {
+      if (!currentSessionId) return;
+      const tasks = await fetchTasks();
+      const mine = tasks.filter((t) => t.parent_session_id === currentSessionId);
+      const terminal = mine.filter(
+        (t) => t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled',
+      );
+      const fresh = terminal.filter((t) => !terminalTaskIdsRef.current.has(t.id));
+      if (fresh.length === 0) return;
+      // 记录已感知的终态任务（避免重复拉取）
+      fresh.forEach((t) => terminalTaskIdsRef.current.add(t.id));
+      const data = await fetchSessionMessages(currentSessionId);
+      useAppStore.getState().mergeServerMessages(currentSessionId, data.messages);
+    },
+    3000,
+    { enabled: !!currentSessionId && streamStatus !== 'streaming' },
+  );
 
   // 应用层授权：轮询审批状态，当前会话有挂起操作时显示审批卡片。
   // wait_for_approval 模式下危险操作由应用审批（与会话/LLM 无关），
