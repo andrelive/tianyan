@@ -8,7 +8,6 @@ import {
   deleteSessionMessage,
   fetchApprovalStatus,
   fetchSessionMessages,
-  fetchTasks,
   getApiBase,
   redoSessionMessage,
   respondApproval,
@@ -129,31 +128,6 @@ export default function ChatPanel() {
   );
   /** 唤醒轮指示（条件满足且未被停止） */
   const wakeActive = wakeConditionsMet && !wakeStopped;
-
-  // 任务终态感知轮询：后台任务/命令完成通知只持久化到服务端（前端 store
-  // 无推送事件），本地消息流永远看不到 system 通知 → hasTaskNotice 不满足
-  // → 唤醒轮询永不启动。本轮询检测本会话任务进入终态（completed/failed/
-  // cancelled），一旦发现 → 拉取服务端消息按 id 去重合并到本地 store
-  // （追加语义，保留本地累积），通知/唤醒轮结果出现在会话流中。
-  const terminalTaskIdsRef = useRef<Set<string>>(new Set());
-  usePolling(
-    async () => {
-      if (!currentSessionId) return;
-      const tasks = await fetchTasks();
-      const mine = tasks.filter((t) => t.parent_session_id === currentSessionId);
-      const terminal = mine.filter(
-        (t) => t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled',
-      );
-      const fresh = terminal.filter((t) => !terminalTaskIdsRef.current.has(t.id));
-      if (fresh.length === 0) return;
-      // 记录已感知的终态任务（避免重复拉取）
-      fresh.forEach((t) => terminalTaskIdsRef.current.add(t.id));
-      const data = await fetchSessionMessages(currentSessionId);
-      useAppStore.getState().mergeServerMessages(currentSessionId, data.messages);
-    },
-    3000,
-    { enabled: !!currentSessionId && streamStatus !== 'streaming' },
-  );
 
   // 应用层授权：轮询审批状态，当前会话有挂起操作时显示审批卡片。
   // wait_for_approval 模式下危险操作由应用审批（与会话/LLM 无关），

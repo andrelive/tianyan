@@ -52,10 +52,6 @@ export interface ChatSlice {
    * 用于流结束/失败后从服务端同步真实消息 ID（回退定位键），或后台流
    * 归属非当前会话时的缓存更新。 */
   setSessionMessages: (sessionId: string, messages: ChatMessage[]) => void;
-  /** 按 id 去重合并服务端消息到指定会话（追加语义：本地已有保留，服务端
-   * 新增的 system 通知/唤醒轮结果追加到末尾；不做清空/替换）。用于后台
-   * 任务/命令完成通知只持久化到服务端、前端 store 无推送事件的场景。 */
-  mergeServerMessages: (sessionId: string, serverMsgs: ChatMessage[]) => void;
   /** 应用服务端消息边界（chunk_type=message）：按 role 合并到本地最后一条
    * 同角色消息——id/内容以服务端统一结构为准，本地累积的 tool_calls/
    * segments 保留（流式期间已含完整工具结果）。 */
@@ -212,23 +208,6 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       return {
         sessionMessages: { ...s.sessionMessages, [sessionId]: messages },
         ...(isCurrent ? { messages } : {}),
-      };
-    }),
-  mergeServerMessages: (sessionId, serverMsgs) =>
-    set((s) => {
-      const key = sessionId;
-      const base = s.sessionMessages[key] ?? (key === resolveSessionKey(s) ? s.messages : []);
-      const localIds = new Set(base.map((m) => m.id).filter(Boolean));
-      // 按 id 去重：本地已有保留（流式累积更完整），服务端新增追加（保持服务端顺序）
-      const merged = [...base];
-      for (const sm of serverMsgs) {
-        if (sm.id && localIds.has(sm.id)) continue;
-        merged.push(sm);
-      }
-      const isCurrent = key === resolveSessionKey(s);
-      return {
-        sessionMessages: { ...s.sessionMessages, [key]: merged },
-        ...(isCurrent ? { messages: merged } : {}),
       };
     }),
   applyServerMessage: (sessionId, msg) =>
