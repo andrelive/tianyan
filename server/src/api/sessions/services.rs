@@ -178,10 +178,15 @@ impl SessionService {
                 }
                 // 工具结果被合并进调用卡片后，原 role=tool 消息无任何可展示
                 // 内容 → 跳过该消息（避免空气泡）；孤立结果消息保留。
+                // 注意：assistant 空消息（唤醒轮空输出等）**必须保留**——
+                // 前端唤醒轮询以"出现新的 assistant 消息"为停止信号，
+                // 过滤掉会导致轮询永不停止（指示器卡死）。渲染层
+                // MessageBubble 已跳过空消息，保留不影响展示。
                 if content.is_empty()
                     && thinking.is_empty()
                     && tool_calls.is_empty()
                     && images.is_empty()
+                    && m.role == MessageRole::Tool
                 {
                     return None;
                 }
@@ -751,5 +756,45 @@ mod tests {
             Some(r#"{"count":2}"#),
             "结果应跨消息合并进调用卡片"
         );
+    }
+
+    /// 回归：assistant 空消息（唤醒轮空输出）必须保留——前端唤醒轮询以
+    /// "出现新的 assistant 消息"为停止信号，过滤掉会导致轮询永不停止
+    /// （指示器卡死）。渲染层 MessageBubble 已跳过空消息，保留不影响展示。
+    #[tokio::test]
+    async fn test_get_session_detail_keeps_empty_assistant() {
+        let empty_assistant = StructuredMessage {
+            id: "msg_empty".to_string(),
+            parent_id: None,
+            role: MessageRole::Assistant,
+            parts: vec![],
+            tokens: Default::default(),
+            cost: 0.0,
+            model_id: None,
+            time: Default::default(),
+            session_id: "session-test".to_string(),
+            finish: None,
+            compression_marker: false,
+        };
+        let mut session = Session::new("session-test");
+        session.messages.push(empty_assistant);
+
+        let service = SessionService::new(
+            Arc::new(MockSessionManager::with_sessions(vec![session])),
+            None,
+            None,
+        );
+        let detail = service
+            .get_session_detail("session-test")
+            .await
+            .expect("get_session_detail 不应失败");
+
+        assert_eq!(
+            detail.messages.len(),
+            1,
+            "assistant 空消息应保留（前端轮询停止信号）"
+        );
+        assert_eq!(detail.messages[0].role, MessageRole::Assistant);
+        assert_eq!(detail.messages[0].content, "");
     }
 }

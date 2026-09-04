@@ -113,9 +113,11 @@ export default function ChatPanel() {
       if (!currentSessionId) return;
       const data = await fetchSessionMessages(currentSessionId);
       const lastServer = data.messages[data.messages.length - 1];
-      // 唤醒轮结果（非空 assistant）出现 → 刷新（hasTaskNotice 随 messages 消失，
-      // enabled 自动翻 false 停止轮询）
-      if (lastServer && lastServer.role === 'assistant' && lastServer.content !== '') {
+      // 唤醒轮结果出现 → 刷新（hasTaskNotice 随 messages 消失，
+      // enabled 自动翻 false 停止轮询）。
+      // 停止信号 = "最后一条是 assistant 消息"（含空输出——唤醒轮空输出
+      // 也是已结束的信号；服务端保留空 assistant 消息，渲染层跳过）。
+      if (lastServer && lastServer.role === 'assistant') {
         useAppStore.getState().setMessages(data.messages);
       }
     },
