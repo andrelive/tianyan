@@ -6,7 +6,9 @@ export type StreamChunkType =
   'answer' | 'thought' | 'tool_call' | 'observation' | 'error' | 'message';
 
 export interface ChatMessage {
-  id?: string;
+  /** 消息 ID（服务端 msg_xxx；null = 本地占位——流式期间无 id，
+   * 服务端广播/边界事件到达后替换为真实 id）。 */
+  id?: string | null;
   role: MessageRole;
   content: string;
   /** 思考过程文本（模型 reasoning；正文在 content，前端折叠展示） */

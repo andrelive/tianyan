@@ -33,8 +33,7 @@ describe('createChatStreamReducer', () => {
   });
 
   it('accumulates thinking, deltas and tool calls into the assistant message', () => {
-    useAppStore.getState().addMessage({ role: 'user', content: 'hi', timestamp: '' });
-    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', id: null, timestamp: '' });
     const r = createChatStreamReducer();
     r.handleEvent(ev({ thinking: '先想' }));
     r.handleEvent(ev({ delta: '正文' }));
@@ -50,8 +49,7 @@ describe('createChatStreamReducer', () => {
   });
 
   it('applies tool results to the matching tool call', () => {
-    useAppStore.getState().addMessage({ role: 'user', content: 'x', timestamp: '' });
-    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', id: null, timestamp: '' });
     const r = createChatStreamReducer();
     r.handleEvent(
       ev({ tool_call: { id: 't1', name: 'ls', arguments: '{}', presentation: 'terminal' } }),
@@ -61,13 +59,12 @@ describe('createChatStreamReducer', () => {
         tool_result: { tool_call_id: 't1', duration_ms: 42, success: true, content: 'result-ok' },
       }),
     );
-    const tool = useAppStore.getState().messages[1].tool_calls?.[0];
+    const tool = useAppStore.getState().messages[0].tool_calls?.[0];
     expect(tool).toMatchObject({ duration_ms: 42, success: true, result: 'result-ok' });
   });
 
   it('handles error chunks: removes the empty bubble, resets status, shows toast', () => {
-    useAppStore.getState().addMessage({ role: 'user', content: 'x', timestamp: '' });
-    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', id: null, timestamp: '' });
     useAppStore.getState().setStreamStatus('streaming');
     const r = createChatStreamReducer({ errorFallbackText: '处理失败' });
     r.handleEvent(ev({ chunk_type: 'error', delta: '请求校验失败' }));
@@ -78,18 +75,16 @@ describe('createChatStreamReducer', () => {
   });
 
   it('marks interrupted on finish_reason interrupted and toasts once', () => {
-    useAppStore.getState().addMessage({ role: 'user', content: 'x', timestamp: '' });
-    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', id: null, timestamp: '' });
     const r = createChatStreamReducer();
     r.handleEvent(ev({ delta: '部分输出', finish_reason: 'interrupted' }));
-    const assistant = useAppStore.getState().messages[1];
+    const assistant = useAppStore.getState().messages[0];
     expect(assistant.interrupted).toBe(true);
     expect(useAppStore.getState().toasts[0]?.message).toBe('流式中断，已保留部分输出');
   });
 
   it('marks truncation on finish_reason length and attaches usage', () => {
-    useAppStore.getState().addMessage({ role: 'user', content: 'x', timestamp: '' });
-    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', id: null, timestamp: '' });
     const r = createChatStreamReducer();
     r.handleEvent(ev({ delta: '部分输出', finish_reason: 'length' }));
     r.handleEvent(
@@ -104,15 +99,16 @@ describe('createChatStreamReducer', () => {
         },
       }),
     );
-    const assistant = useAppStore.getState().messages[1];
+    const assistant = useAppStore.getState().messages[0];
     expect(assistant.truncated_by_length).toBe(true);
     expect(assistant.usage?.total_tokens).toBe(150);
     expect(r.liveWindow).toBe(16000);
   });
 
   it('starts a new assistant turn when thinking arrives after content', () => {
-    useAppStore.getState().addMessage({ role: 'user', content: 'x', timestamp: '' });
-    useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+    // 真实模式（ADR-028）：handleSend 只加 assistant 占位（id: null），
+    // user 消息由服务端边界事件提供
+    useAppStore.getState().addMessage({ role: 'assistant', content: '', id: null, timestamp: '' });
     const r = createChatStreamReducer();
     r.handleEvent(ev({ thinking: '第一轮思考' }));
     r.handleEvent(ev({ delta: '第一轮输出' }));

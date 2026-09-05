@@ -116,11 +116,10 @@ describe('useChatStream', () => {
       }),
     );
 
-    // 与 ChatPanel.handleSend 一致：先放 user 消息 + assistant 占位，
-    // 流式增量累积在占位上（归约器不自行创建消息）
+    // 与 ChatPanel.handleSend 一致（ADR-028）：只加 assistant 占位（id: null），
+    // user 消息由服务端边界事件提供；流式增量累积在占位上（归约器不自行创建消息）
     act(() => {
-      useAppStore.getState().addMessage({ role: 'user', content: '你好', timestamp: '' });
-      useAppStore.getState().addMessage({ role: 'assistant', content: '', timestamp: '' });
+      useAppStore.getState().addMessage({ role: 'assistant', content: '', id: null, timestamp: '' });
     });
 
     await act(async () => {

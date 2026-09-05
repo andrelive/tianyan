@@ -998,16 +998,24 @@ export const handlers = [
     const body = (await request.json()) as { message?: { content?: string } };
     const lastContent = body.message?.content ?? '';
 
+    // 用户消息边界事件（与真实服务端一致：core 入库侧经流发送 Message chunk）
+    const userBoundary =
+      'data: {"id":"chatcmpl-mock","session_id":"session-1","message":{"id":"msg-user","role":"user","content":' +
+      JSON.stringify(lastContent) +
+      '},"delta":"","chunk_type":"message"}\n\n';
+
     const chunks = lastContent.includes('[error-test]')
       ? [
           'data: {"id":"msg-err","session_id":"session-1","delta":"请求校验失败: [error-test] 是非法输入","finish_reason":null,"chunk_type":"error","skill_calls":null}\n\n',
         ]
       : lastContent.includes('[length-test]')
         ? [
+            userBoundary,
             'data: {"id":"msg-1","session_id":"session-1","delta":"第一段","chunk_type":"answer"}\n\n',
             'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"length","chunk_type":"answer"}\n\n',
           ]
         : [
+            userBoundary,
             'data: {"id":"msg-1","session_id":"session-1","delta":"你好","chunk_type":"answer"}\n\n',
             'data: {"id":"msg-1","session_id":"session-1","delta":"！","chunk_type":"answer"}\n\n',
             'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',

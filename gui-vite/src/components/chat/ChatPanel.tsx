@@ -195,18 +195,17 @@ export default function ChatPanel() {
       // 发起新轮：回撤已被新工作取代，清空撤销回退横幅（否则残留到输出底部）
       setLastRollbackMessageId(null);
 
-      // Add user message
-      addMessage({
-        role: 'user',
-        content: trimmed,
-        images: images.length > 0 ? images : undefined,
-        timestamp: new Date().toISOString(),
-      });
+      // ADR-028：不再乐观渲染用户消息——服务端落库即广播（msg_xxx id），
+      // 前端本地渲染（randomUUID id）与广播 id 不一致导致 mergeServerMessages
+      // 按 id 去重失效（用户消息重复出现）。用户消息由广播到达后插入到
+      // assistant 占位之前（保持 用户→assistant 顺序）。
 
-      // Add empty assistant placeholder for streaming
+      // Add empty assistant placeholder for streaming（id: null = 占位，
+      // 等待服务端广播/边界事件替换为真实 id）
       addMessage({
         role: 'assistant',
         content: '',
+        id: null,
         timestamp: new Date().toISOString(),
       });
 

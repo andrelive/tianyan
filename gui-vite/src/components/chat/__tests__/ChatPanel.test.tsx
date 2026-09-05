@@ -125,18 +125,21 @@ describe('ChatPanel', () => {
     const sendButton = screen.getByRole('button', { name: /发送/i });
     await user.click(sendButton);
 
-    // After clicking send, messages are added synchronously (before fetch)
+    // ADR-028：不再乐观渲染 user 消息（等广播/边界事件）——发送后本地只有
+    // assistant 占位；user 消息由服务端边界事件（message chunk）插入到占位前。
     const messages = useAppStore.getState().messages;
-    expect(messages.length).toBeGreaterThanOrEqual(2);
+    expect(messages.length).toBeGreaterThanOrEqual(1);
 
-    // First message is the user message
-    expect(messages[0].role).toBe('user');
-    expect(messages[0].content).toBe('测试发送');
-
-    // Subsequent messages are assistant responses (the MSW mock streams
-    // "你好" + "！" deltas through the SSE handler)
-    const assistantMessages = messages.filter((m) => m.role === 'assistant');
-    expect(assistantMessages.length).toBeGreaterThanOrEqual(1);
+    // 流式完成后 user 消息经边界事件插入到 assistant 之前（顺序正确）
+    await vi.waitFor(() => {
+      const msgs = useAppStore.getState().messages;
+      const userMsg = msgs.find((m) => m.role === 'user');
+      expect(userMsg?.content).toBe('测试发送');
+      const userIdx = msgs.findIndex((m) => m.role === 'user');
+      const asstIdx = msgs.findIndex((m) => m.role === 'assistant');
+      expect(userIdx).toBeGreaterThanOrEqual(0);
+      expect(asstIdx).toBeGreaterThan(userIdx);
+    });
 
     // After the stream completes, status returns to 'idle'
     await vi.waitFor(() => {

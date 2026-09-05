@@ -149,10 +149,20 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       if (id === s.currentSessionId) return {};
       let sessionMessages = s.sessionMessages;
       // 新会话创建（null → id）：PENDING 占位消息迁移到正式键，避免首轮
-      // 流式消息断链（切走再切回仍完整）。
+      // 流式消息断链（切走再切回仍完整）。ADR-028：广播可能已把 user 消息
+      // 写入正式键（落库即推送）——迁移时合并而非覆盖：正式键已有消息
+      // （广播的 user/assistant）优先，PENDING 占位（无 id 的 assistant）
+      // 仅在正式键尚无 assistant 时追加（避免重复气泡）。
       if (s.currentSessionId === null && id && sessionMessages[PENDING_SESSION_KEY]?.length) {
         sessionMessages = { ...sessionMessages };
-        sessionMessages[id] = sessionMessages[PENDING_SESSION_KEY];
+        const pending = sessionMessages[PENDING_SESSION_KEY];
+        const existing = sessionMessages[id] ?? [];
+        const hasAssistant = existing.some((m) => m.role === 'assistant');
+        // 只迁移无 id 的 assistant 占位（user 消息由广播/边界事件提供权威版本；
+        // 有 id 的本地消息不迁移——避免与广播的 msg_xxx 重复）
+        sessionMessages[id] = hasAssistant
+          ? existing
+          : [...existing, ...pending.filter((m) => m.role === 'assistant' && !m.id)];
         delete sessionMessages[PENDING_SESSION_KEY];
       }
       // 迁移流式状态键（PENDING → 正式会话）并删除残留键
@@ -219,10 +229,27 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       const key = sessionId;
       const base = s.sessionMessages[key] ?? (key === resolveSessionKey(s) ? s.messages : []);
       const localIds = new Set(base.map((m) => m.id).filter(Boolean));
-      // 按 id 去重：本地已有保留（流式累积更完整），服务端新增追加（保持服务端顺序）
       const merged = [...base];
       for (const sm of serverMsgs) {
         if (sm.id && localIds.has(sm.id)) continue;
+        // user 消息：插入到第一条 assistant 占位之前（保持 用户→assistant 顺序；
+        // 前端不再乐观渲染用户消息，广播到达时本地只有 assistant 占位）
+        if (sm.role === 'user') {
+          const firstAssistant = merged.findIndex((m) => m.role === 'assistant');
+          if (firstAssistant >= 0) {
+            merged.splice(firstAssistant, 0, sm);
+            continue;
+          }
+        }
+        // assistant 消息：替换无 id 的占位（保留流式累积的 content/segments，
+        // id 同步为服务端 id——回退定位键正确）
+        if (sm.role === 'assistant') {
+          const placeholder = merged.findIndex((m) => m.role === 'assistant' && !m.id);
+          if (placeholder >= 0) {
+            merged[placeholder] = { ...merged[placeholder], ...sm, id: sm.id };
+            continue;
+          }
+        }
         merged.push(sm);
       }
       const isCurrent = key === resolveSessionKey(s);
@@ -235,6 +262,33 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
     set((s) => {
       const key = sessionId ?? resolveSessionKey(s);
       const base = s.sessionMessages[key] ?? (key === resolveSessionKey(s) ? s.messages : []);
+      const next = [...base];
+      // user 消息：插入到第一条 assistant 占位之前（保持 用户→assistant 顺序；
+      // 前端不再乐观渲染 user 消息，边界事件到达时本地只有 assistant 占位）
+      if (msg.role === 'user') {
+        const firstAssistant = next.findIndex((m) => m.role === 'assistant');
+        if (firstAssistant >= 0) {
+          next.splice(firstAssistant, 0, msg);
+          const isCurrent = key === resolveSessionKey(s);
+          return {
+            sessionMessages: { ...s.sessionMessages, [key]: next },
+            ...(isCurrent ? { messages: next } : {}),
+          };
+        }
+      }
+      // assistant 消息：替换无 id 的占位（保留流式累积的 content/segments，
+      // id 同步为服务端 id——回退定位键正确）
+      if (msg.role === 'assistant') {
+        const placeholder = next.findIndex((m) => m.role === 'assistant' && !m.id);
+        if (placeholder >= 0) {
+          next[placeholder] = { ...next[placeholder], ...msg, id: msg.id };
+          const isCurrent = key === resolveSessionKey(s);
+          return {
+            sessionMessages: { ...s.sessionMessages, [key]: next },
+            ...(isCurrent ? { messages: next } : {}),
+          };
+        }
+      }
       // 按 role 定位最后一条同角色消息；找不到则追加
       let target = -1;
       for (let i = base.length - 1; i >= 0; i--) {
@@ -243,7 +297,6 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
           break;
         }
       }
-      const next = [...base];
       if (target >= 0) {
         // 合并：id/内容以服务端统一结构为准；本地累积的 tool_calls（含
         // 工具结果）与 segments（时间线）保留——流式期间已完整
@@ -269,7 +322,9 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
     set((s) =>
       updateSessionMessages(s, sessionId, (msgs) => [
         ...msgs,
-        { ...message, id: message.id || crypto.randomUUID() },
+        // id: null = 占位（流式期间无 id，等待服务端广播/边界事件替换）；
+        // undefined = 普通消息（赋本地 uuid，如压缩摘要）
+        { ...message, id: message.id === undefined ? crypto.randomUUID() : message.id },
       ]),
     ),
   updateLastMessage: (delta, sessionId) =>
