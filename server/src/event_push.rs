@@ -14,9 +14,18 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use tianyan::common::error::Result;
-use tianyan::common::types::{Message, StructuredMessage};
+use tianyan::common::types::{Message, MessageRole, StructuredMessage};
 use tianyan::session::store::SessionStore;
 use tianyan::session::{Session, SessionManager};
+
+use crate::api::shared::types::ChatMessage;
+
+// 跳过 role=Tool 的独立消息：工具结果在历史加载中合并进前一条 assistant
+// 调用卡片（跨消息合并），单独广播会产生空气泡。空 assistant 消息保留
+// （前端唤醒轮以"最后一条是 assistant"为停止信号，与历史加载语义一致）。
+fn broadcastable(msg: &StructuredMessage) -> bool {
+    msg.role != MessageRole::Tool
+}
 
 /// 会话管理器推送 wrapper：落库成功后广播消息事件。
 ///
@@ -50,7 +59,10 @@ impl BroadcastingSessionManager {
             "type": "message",
             "session_id": session_id,
             "seq": seq,
-            "message": msg,
+            // 广播 ChatMessage（API 展示格式，与历史加载/流式边界同构）：
+            // StructuredMessage 是存储格式（parts 数组），前端渲染访问
+            // content/segments/tool_calls 会 undefined 崩溃。
+            "message": ChatMessage::from_structured_light(msg),
         });
         if let Ok(json) = serde_json::to_string(&payload) {
             let _ = self.tx.send(json);
@@ -74,7 +86,9 @@ impl SessionManager for BroadcastingSessionManager {
 
     async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()> {
         self.inner.add_structured_message(session_id, msg.clone()).await?;
-        self.broadcast_message(session_id, &msg).await;
+        if broadcastable(&msg) {
+            self.broadcast_message(session_id, &msg).await;
+        }
         Ok(())
     }
 

@@ -384,25 +384,58 @@ async fn test_e2e_unified_event_push_message() {
         .await
         .expect("落库失败");
 
-    // 读取 SSE 流，等待 message 事件（超时 5s）
-    let mut found = false;
+    // 读取 SSE 流，等待 message 事件（超时 5s）；累积文本逐行解析
+    // `data: {...}` 行，捕获完整事件体做结构断言。
+    let mut sse_text = String::new();
+    let mut parsed: Option<serde_json::Value> = None;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        let chunk = resp
-            .chunk()
-            .await
-            .expect("读 SSE 失败");
+    while std::time::Instant::now() < deadline && parsed.is_none() {
+        let chunk = resp.chunk().await.expect("读 SSE 失败");
         if let Some(bytes) = chunk {
-            let text = String::from_utf8_lossy(&bytes);
-            if text.contains("\"type\":\"message\"") || text.contains("\"type\": \"message\"") {
-                found = true;
-                break;
-            }
+            sse_text.push_str(&String::from_utf8_lossy(&bytes));
         } else {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+        for line in sse_text.lines() {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                    if v["type"] == "message" {
+                        parsed = Some(v);
+                        break;
+                    }
+                }
+            }
+        }
     }
-    assert!(found, "SSE 应收到 message 事件（落库即广播）");
+    let ev = parsed.expect("SSE 应收到 message 事件（落库即广播）");
+
+    // 事件契约：{type, session_id, seq, message}
+    assert_eq!(ev["session_id"].as_str(), Some(session_id));
+    assert!(ev["seq"].is_i64() || ev["seq"].is_u64(), "seq 应为数字");
+
+    // 关键：message 必须是 ChatMessage（API 展示格式）——StructuredMessage
+    // （存储格式，parts 数组）会让前端渲染崩溃（content/segments 缺失）。
+    let msg = &ev["message"];
+    assert!(
+        msg["content"].is_string(),
+        "message 应为 ChatMessage 格式（含 content）：{msg}"
+    );
+    assert!(
+        msg["content"].as_str().unwrap_or("").contains("[后台命令完成]"),
+        "content 应为通知文本：{msg}"
+    );
+    assert!(
+        msg["role"].is_string() && msg["id"].is_string(),
+        "message 应含 role/id：{msg}"
+    );
+    assert!(
+        msg.get("parts").is_none(),
+        "不应是 StructuredMessage 格式（含 parts 字段）：{msg}"
+    );
+    assert!(
+        msg.get("segments").is_none_or(|s| s.is_array() || s.is_null()),
+        "segments 字段应为数组或 null：{msg}"
+    );
 
     // 落库后 last_seq 正确（wrapper 广播的 seq 锚点）
     let last_seq = state
