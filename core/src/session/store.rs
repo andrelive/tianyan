@@ -390,6 +390,53 @@ impl SessionStore {
         .map_err(|e| sqlite_error("会话存在性查询失败", e))
     }
 
+    /// 会话最新消息序号（无消息时返回 -1）。
+    ///
+    /// ADR-028：事件推送的 seq 锚点（落库后取号广播；断点对齐的游标）。
+    ///
+    /// # Errors
+    /// * SQLite 查询失败时返回 TianyanError。
+    pub async fn last_seq(&self, session_id: &str) -> Result<i64, TianyanError> {
+        let conn = self.db.lock().await;
+        conn.query_row(
+            "SELECT COALESCE(MAX(seq), -1) FROM session_messages WHERE session_id = ?1",
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| sqlite_error("会话最新序号查询失败", e))
+    }
+
+    /// 加载自 since_seq 之后的消息（含 seq，ADR-028 断点对齐增量）。
+    ///
+    /// # Errors
+    /// * SQLite 查询失败或 content_parts 反序列化失败时返回 TianyanError。
+    pub async fn load_after(
+        &self,
+        session_id: &str,
+        since_seq: i64,
+    ) -> Result<Vec<(i64, StructuredMessage)>, TianyanError> {
+        let conn = self.db.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT seq, content_parts FROM session_messages WHERE session_id = ?1 AND seq > ?2 ORDER BY seq",
+            )
+            .map_err(|e| sqlite_error("增量查询准备失败", e))?;
+        let rows = stmt
+            .query_map(rusqlite::params![session_id, since_seq], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(|e| sqlite_error("增量查询执行失败", e))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, json) = row.map_err(|e| sqlite_error("增量查询行读取失败", e))?;
+            let msg: StructuredMessage = serde_json::from_str(&json).map_err(|e| {
+                TianyanError::Custom(format!("session: session_store: 消息反序列化失败：{e}"))
+            })?;
+            out.push((seq, msg));
+        }
+        Ok(out)
+    }
+
     /// 删除会话（单事务：清 FTS + 消息 + 元数据）。
     ///
     /// ADR-026 A：级联删除——主会话删除时连带删除其所有子智能体会话

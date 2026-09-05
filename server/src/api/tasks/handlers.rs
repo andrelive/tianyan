@@ -85,3 +85,63 @@ pub async fn cancel_task(
         "status": "cancelled",
     })))
 }
+
+/// 后台命令日志分页读取（ADR-028：精确回看——滚动查看器按需加载）。
+///
+/// 参数：offset（字节偏移，默认 0）、limit（最大字节数，默认 64KB）。
+/// 返回：content（该段文本）、offset（本次起始）、next_offset（下次起始，
+/// 文件尾时为 None）、total（文件总字节数）。
+pub async fn get_task_log(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let agent = state.agent().await;
+    let task = agent
+        .background_tasks()
+        .await
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .ok_or_else(|| ApiError::NotFound(format!("任务不存在：{}", task_id)))?;
+    let Some(path) = task.log_file else {
+        return Err(ApiError::NotFound(format!("任务无日志文件：{}", task_id)));
+    };
+    let offset: u64 = params
+        .get("offset")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let limit: usize = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64 * 1024)
+        .min(1024 * 1024);
+
+    let mut file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| ApiError::Internal(format!("打开日志失败：{e}")))?;
+    let total = file
+        .metadata()
+        .await
+        .map_err(|e| ApiError::Internal(format!("读取日志元数据失败：{e}")))?
+        .len();
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .map_err(|e| ApiError::Internal(format!("定位日志失败：{e}")))?;
+    let mut buf = vec![0u8; limit];
+    let n = file
+        .read(&mut buf)
+        .await
+        .map_err(|e| ApiError::Internal(format!("读取日志失败：{e}")))?;
+    buf.truncate(n);
+    let content = String::from_utf8_lossy(&buf).into_owned();
+    let next = offset + n as u64;
+    Ok(Json(serde_json::json!({
+        "task_id": task_id,
+        "content": content,
+        "offset": offset,
+        "next_offset": if next >= total { serde_json::Value::Null } else { serde_json::json!(next) },
+        "total": total,
+    })))
+}

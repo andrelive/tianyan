@@ -40,6 +40,18 @@ pub enum CommandTaskStatus {
     Cancelled,
 }
 
+impl CommandTaskStatus {
+    /// 字符串表示（与 serde 的 snake_case 一致）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// 后台命令终态通知器（Agent 装配层注入；默认实现把通知持久化到父会话）。
 ///
 /// `remaining` 为父会话中仍运行中的命令任务数（join 信号）。
@@ -59,6 +71,16 @@ pub trait CommandNotifier: Send + Sync {
 pub trait CommandWaker: Send + Sync {
     /// 唤醒指定会话的主 agent。
     async fn wake(&self, session_id: &str);
+}
+
+/// 后台命令事件通道（ADR-028：状态转移/输出增量 emit；None 时静默）。
+///
+/// 定义在 executor 层（不依赖 agent 层，避免循环依赖）；server 装配层
+/// 用适配器接到统一事件通道。
+#[async_trait]
+pub trait CommandEventSink: Send + Sync {
+    /// 发布命令任务事件（JSON：type=task_status / command_output）。
+    async fn emit(&self, task_id: &str, event: Value);
 }
 
 /// 后台命令任务快照（状态查询 / 列表返回）。
@@ -141,6 +163,8 @@ pub struct CommandManager {
     waker: Arc<Mutex<Option<Arc<dyn CommandWaker>>>>,
     /// 会话内运行中命令任务计数（remaining 信号）。
     session_counts: Arc<Mutex<HashMap<String, usize>>>,
+    /// 命令事件通道（ADR-028：状态转移/输出增量；None 时静默）。
+    event_sink: Option<Arc<dyn CommandEventSink>>,
 }
 
 impl CommandManager {
@@ -154,12 +178,19 @@ impl CommandManager {
             notifier: None,
             waker: Arc::new(Mutex::new(None)),
             session_counts: Arc::new(Mutex::new(HashMap::new())),
+            event_sink: None,
         }
     }
 
     /// 指定并发上限（ADR-026：可配置；默认 DEFAULT_MAX_CONCURRENT_COMMANDS）。
     pub fn with_max_concurrent(mut self, max_concurrent: usize) -> Self {
         self.semaphore = Arc::new(Semaphore::new(max_concurrent.max(1)));
+        self
+    }
+
+    /// 设置命令事件通道（ADR-028：状态转移/输出增量 emit；None 时静默）。
+    pub fn with_event_sink(mut self, sink: Arc<dyn CommandEventSink>) -> Self {
+        self.event_sink = Some(sink);
         self
     }
 
@@ -245,11 +276,23 @@ impl CommandManager {
         let out_reader = child
             .stdout
             .take()
-            .map(|r| tokio::spawn(drain_output(r, tail.clone(), file.clone())));
+            .map(|r| tokio::spawn(drain_output(
+                r,
+                tail.clone(),
+                file.clone(),
+                id.clone(),
+                self.event_sink.clone(),
+            )));
         let err_reader = child
             .stderr
             .take()
-            .map(|r| tokio::spawn(drain_output(r, tail.clone(), file.clone())));
+            .map(|r| tokio::spawn(drain_output(
+                r,
+                tail.clone(),
+                file.clone(),
+                id.clone(),
+                self.event_sink.clone(),
+            )));
 
         let task = CommandTask {
             id: id.clone(),
@@ -282,6 +325,23 @@ impl CommandManager {
             .entry(session_id.to_string())
             .or_insert(0) += 1;
         self.evict_if_needed().await;
+
+        // ADR-028：状态转移事件（running）——面板实时显示
+        if let Some(sink) = &self.event_sink {
+            sink.emit(
+                &id,
+                json!({
+                    "type": "task_status",
+                    "task_id": id,
+                    "kind": "command",
+                    "status": "running",
+                    "command": command,
+                    "pid": pid,
+                    "created_at": now,
+                }),
+            )
+            .await;
+        }
 
         // watcher：等进程退出 → 收 reader → 写退出标记 → 更新终态
         let manager = self.clone();
@@ -349,6 +409,21 @@ impl CommandManager {
                     notifier
                         .on_command_terminal(&session_id, &task, remaining)
                         .await;
+                }
+                // ADR-028：状态转移事件（终态）——面板实时更新
+                if let Some(sink) = &manager.event_sink {
+                    sink.emit(
+                        &task.id,
+                        json!({
+                            "type": "task_status",
+                            "task_id": task.id,
+                            "kind": "command",
+                            "status": task.status.as_str(),
+                            "exit_code": task.exit_code,
+                            "completed_at": task.completed_at,
+                        }),
+                    )
+                    .await;
                 }
                 // should_wake = allComplete || failure（部分完成保持静默）
                 if remaining == 0 || task.status == CommandTaskStatus::Failed {
@@ -579,10 +654,14 @@ async fn kill_process_tree(pid: u32) {
 /// 读取子进程输出流：追加到内存尾部缓冲（截断）+ 日志文件。
 ///
 /// 锁顺序固定为 tail → file（与 watcher 的标记写入一致，避免死锁）。
+/// ADR-028：每读一块经 event_sink emit 输出增量（尽力而为，通道满丢弃，
+/// 完整性由日志文件保证）。
 async fn drain_output<R>(
     mut reader: R,
     tail: Arc<Mutex<String>>,
     file: Arc<Mutex<Option<tokio::fs::File>>>,
+    task_id: String,
+    event_sink: Option<Arc<dyn CommandEventSink>>,
 ) where
     R: AsyncRead + Unpin,
 {
@@ -606,6 +685,19 @@ async fn drain_output<R>(
                         tracing::warn!("写入后台命令日志失败");
                         break;
                     }
+                }
+                drop(f);
+                // ADR-028：输出增量事件（实时终端视图；尽力而为）
+                if let Some(sink) = &event_sink {
+                    sink.emit(
+                        &task_id,
+                        json!({
+                            "type": "command_output",
+                            "task_id": task_id,
+                            "delta": String::from_utf8_lossy(chunk),
+                        }),
+                    )
+                    .await;
                 }
             }
             Err(e) => {

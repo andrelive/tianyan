@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePolling } from '@/hooks/use-polling';
+import { useUnifiedEvents, type UnifiedEvent } from '@/hooks/use-unified-events';
 import { cancelTask, fetchSessionMessages, fetchTasks } from '@/lib/api-client';
 import { getApiBase } from '@/lib/api-base';
 import type {
@@ -92,6 +93,24 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
     }
   }, []);
   usePolling(poll, POLL_INTERVAL_MS, { enabled: !!sessionId });
+
+  // ADR-028：统一事件订阅——task_status 实时刷新任务状态（终态/运行中），
+  // command_output 累积终端输出增量（实时视图）。消息类事件由 hook 自动
+  // 合并进 store，本面板只消费任务类事件。
+  const [terminalOutputs, setTerminalOutputs] = useState<Record<string, string>>({});
+  const terminalRef = useRef<Record<string, string>>({});
+  useUnifiedEvents((ev: UnifiedEvent) => {
+    if (ev.type === 'task_status' && ev.task_id) {
+      // 状态变化 → 拉取权威列表（终态/运行中实时更新）
+      void poll();
+    } else if (ev.type === 'command_output' && ev.task_id && ev.delta) {
+      const prev = terminalRef.current[ev.task_id] ?? '';
+      // 输出尾部上限（与后端 OUTPUT_TAIL_MAX_BYTES 对齐，防无限增长）
+      const next = (prev + ev.delta).slice(-64 * 1024);
+      terminalRef.current[ev.task_id] = next;
+      setTerminalOutputs({ ...terminalRef.current });
+    }
+  });
 
   // SSE 订阅：子智能体消息流（ADR-026；事件按 task_id 归集）
   useEffect(() => {
@@ -279,9 +298,12 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
               </>
             ) : (
               <>
-                {t.output_tail && (
+                {/* 终端输出：实时增量（command_output 事件累积）优先，
+                    尾部快照（output_tail）兜底——实时流尽力而为，
+                    完整输出经日志文件分页查看（ADR-028） */}
+                {(terminalOutputs[t.id] || t.output_tail) && (
                   <pre className="max-h-48 overflow-auto px-2.5 py-2 rounded text-[11px] leading-relaxed whitespace-pre-wrap break-words font-mono bg-[#0d1117] text-[#c9d1d9]">
-                    {t.output_tail}
+                    {terminalOutputs[t.id] || t.output_tail}
                   </pre>
                 )}
                 {t.result && (

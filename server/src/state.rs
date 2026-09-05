@@ -451,6 +451,15 @@ impl AppState {
             Arc::new(crate::agent_builder::TaskEventBroadcaster {
                 tx: task_event_tx.clone(),
             });
+        // ADR-028：统一事件推送——会话管理器包装为落库即广播（消息事件
+        // 与任务状态/命令输出事件共用同一通道；core 不感知，SessionStore 纯库）
+        let session_manager: Arc<dyn SessionManager> = Arc::new(
+            crate::event_push::BroadcastingSessionManager::new(
+                session_manager,
+                session_store.clone(),
+                task_event_tx.clone(),
+            ),
+        );
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
@@ -689,6 +698,11 @@ impl AppState {
     /// * `Arc<dyn SessionManager>` - 会话管理器实例
     pub fn session_manager(&self) -> Arc<dyn SessionManager> {
         self.session_manager.clone()
+    }
+
+    /// 获取会话权威存储（ADR-028：断点对齐增量查询）。
+    pub fn session_store(&self) -> Arc<tianyan::session::store::SessionStore> {
+        self.session_store.clone()
     }
 
     /// 获取虚拟文件系统

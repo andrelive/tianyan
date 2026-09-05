@@ -852,16 +852,30 @@ impl ToolRegistry {
         let run_task_id = task_id.clone();
         let run_session_id = session_id.clone();
 
-        tokio::spawn(async move {
+        // ADR-028：watcher 模式——任务主体只返回 Result，watcher 等 JoinHandle
+        // 捕获 panic（JoinHandle.await 在任务任何方式结束时 resolve：正常/panic/abort），
+        // panic 也转 fail + 通知，任务不悬死。watcher 协程挂起不占线程，
+        // 主调用链 spawn 后立即返回。
+        let task_id_for_loop = run_task_id.clone();
+        let handle = tokio::spawn(async move {
             // 许可 + 深度 guard 在任务运行期间持有（作用域结束释放）
             let _permits = (queue_permit, run_permit);
             let _depth_guard = depth_guard;
-            let outcome = this
-                .run_delegation_loop(&run_params, &run_session_id, &run_task_id)
-                .await;
-            match outcome {
-                Ok(v) => mgr.complete(&run_task_id, format!("{v}")).await,
-                Err(e) => mgr.fail(&run_task_id, e.to_string()).await,
+            this.run_delegation_loop(&run_params, &run_session_id, &task_id_for_loop)
+                .await
+        });
+        tokio::spawn(async move {
+            match handle.await {
+                Ok(Ok(v)) => mgr.complete(&run_task_id, format!("{v}")).await,
+                Ok(Err(e)) => mgr.fail(&run_task_id, e.to_string()).await,
+                Err(join_err) => {
+                    tracing::error!(
+                        task_id = %run_task_id,
+                        error = %join_err,
+                        "后台委托任务异常终止（panic）"
+                    );
+                    mgr.fail(&run_task_id, format!("任务进程异常终止: {join_err}")).await;
+                }
             }
         });
 

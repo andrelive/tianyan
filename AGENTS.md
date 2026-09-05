@@ -99,6 +99,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-025: 移除检索轨迹功能](docs/architecture/decisions/025-remove-retrieval-traces.md) — 只覆盖组装路径不覆盖 search_vfs、同 query 双记录误导、零有效使用；检索观测回归 UsageStats + tracing（否决记录 REJECTED #20）
 - [ADR-026: 后台任务与子智能体统一面板](docs/architecture/decisions/026-background-tasks-unified-panel.md) — 委托只支持异步；子智能体 = 带父会话引用的会话（存储/协议/渲染三层复用）；右侧任务面板（活跃在上、完成沉底、可展开过程/输出）；并发可配置（委托 20+排队 40、终端 16）+ SQL 权威注册表 + 3 天 TTL + 子会话级联/上限/不索引 FTS
 - [ADR-027: 会话时序链模型](docs/architecture/decisions/027-session-timeline-chain.md) — 会话 = 无分支时序链（user/assistant/tool/system 四种节点平等）；存储层永远返回完整链（无压缩点截断、无消息数上限），压缩点截断只发生在组装层视图；回退 = 锚点（用户输入）之后全部截断（含取消时序锚点之后的任务）；任务带 anchor_seq 时序锚点
+- [ADR-028: 会话消息统一事件推送与任务实时同步](docs/architecture/decisions/028-unified-event-push.md) — SSE 是水管（常驻）/循环是抽水机（请求驱动）；落库即推送（mpsc 单消费者）；GET /events 全局单连接按 session_id 路由；重连即快照（DSH 模式）+ 断点对齐 replace 兜底；任务状态/命令输出事件尽力而为（日志文件为权威）；JoinHandle watcher 收尾（panic 转 fail，非 watchdog）；POST /chat/stream 收敛为开关
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 

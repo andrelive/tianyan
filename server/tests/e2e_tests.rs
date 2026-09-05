@@ -341,3 +341,76 @@ async fn test_e2e_knowledge_delete_entry_endpoint() {
 
     server.shutdown();
 }
+
+/// ADR-028：统一事件推送——落库即广播，SSE 订阅者收到 message 事件。
+///
+/// 链路：SessionManager wrapper 落库 → broadcast → /events SSE → 客户端。
+/// 验证：订阅 /events → 经 state.session_manager 落库一条消息 →
+/// SSE 流收到 {type: message, session_id, seq, message}。
+#[tokio::test]
+async fn test_e2e_unified_event_push_message() {
+    let dir = tempdir().expect("创建临时目录失败");
+    let config = test_tianyan_config_with_data_dir(dir.path().to_path_buf());
+    let (router, state) = tianyan_server::create_app(config)
+        .await
+        .expect("create_app 失败");
+    let server = TestServer::start(router).await.expect("启动测试服务器失败");
+
+    // 订阅统一事件流（SSE）
+    let client = reqwest::Client::new();
+    let mut resp = client
+        .get(format!("{}/api/v1/events", server.base_url()))
+        .send()
+        .await
+        .expect("订阅 /events 失败");
+    assert_eq!(resp.status(), 200, "/events 应 200");
+
+    // 经会话管理器落库一条消息（触发 wrapper 广播）
+    let session_id = "session-evt-1";
+    state
+        .session_manager()
+        .create_session(session_id, tianyan::common::types::Message::user("你好"))
+        .await
+        .expect("创建会话失败");
+    state
+        .session_manager()
+        .add_structured_message(
+            session_id,
+            tianyan::common::types::StructuredMessage::system(
+                session_id.to_string(),
+                "[后台命令完成] ping（cmd_0）".to_string(),
+            ),
+        )
+        .await
+        .expect("落库失败");
+
+    // 读取 SSE 流，等待 message 事件（超时 5s）
+    let mut found = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let chunk = resp
+            .chunk()
+            .await
+            .expect("读 SSE 失败");
+        if let Some(bytes) = chunk {
+            let text = String::from_utf8_lossy(&bytes);
+            if text.contains("\"type\":\"message\"") || text.contains("\"type\": \"message\"") {
+                found = true;
+                break;
+            }
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    assert!(found, "SSE 应收到 message 事件（落库即广播）");
+
+    // 落库后 last_seq 正确（wrapper 广播的 seq 锚点）
+    let last_seq = state
+        .session_store()
+        .last_seq(session_id)
+        .await
+        .expect("last_seq 查询失败");
+    assert!(last_seq >= 1, "落库后 last_seq 应 >= 1: {last_seq}");
+
+    server.shutdown();
+}

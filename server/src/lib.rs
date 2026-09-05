@@ -31,6 +31,7 @@ use crate::scheduled_tasks::tool::{CreateTaskRequest, ScheduleTaskTool};
 // Import API module
 pub mod agent_builder;
 pub mod api;
+pub mod event_push;
 pub mod evolution_executor;
 pub mod mcp_bridge;
 pub mod migration;

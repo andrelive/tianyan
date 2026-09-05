@@ -7,7 +7,6 @@ import {
   compressSession,
   deleteSessionMessage,
   fetchApprovalStatus,
-  fetchSessionMessages,
   getApiBase,
   redoSessionMessage,
   respondApproval,
@@ -21,6 +20,7 @@ import type {
 import { useChatStream } from '@/hooks/useChatStream';
 import { usePolling } from '@/hooks/use-polling';
 import { useSessionHistory } from '@/hooks/use-session-history';
+import { useUnifiedEvents } from '@/hooks/use-unified-events';
 import { toErrorMessage } from '@/lib/errors';
 import { lastMessageUsage, sumSessionUsage } from '@/lib/token-usage';
 import { MessageSquare, Loader2, RotateCcw, Undo2 } from 'lucide-react';
@@ -54,8 +54,6 @@ export default function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [compressing, setCompressing] = useState(false);
   const [clarifySubmitting, setClarifySubmitting] = useState(false);
-  /** 唤醒轮停止标记（轮询失败/会话删除时置位；下一轮任务通知重新开始） */
-  const [wakeStopped, setWakeStopped] = useState(false);
   /** 当前会话待审批操作（应用层授权卡片；wait_for_approval 模式挂起时出现） */
   const [pendingApproval, setPendingApproval] = useState<
     ApprovalStatusSnapshot['pending_approvals'][number] | null
@@ -93,9 +91,11 @@ export default function ChatPanel() {
   // 历史加载（挂载恢复 + reloadSession）收敛在 use-session-history
   const { reloadSession } = useSessionHistory(urlSessionId);
 
-  // ADR-013：唤醒轮自动刷新——会话末尾是后台任务 System 通知时轮询会话消息，
-  // 直到出现新的非空 assistant 消息（主 agent 自动汇总结果，无需用户操作）。
-  // 轮询语义收敛在 usePolling；enabled 派生自会话/流状态与任务通知。
+  // ADR-028：统一事件订阅——后台通知/唤醒轮结果/任务状态经常驻 SSE 推送，
+  // 消息类事件自动 mergeServerMessages 进 store（追加语义），无需轮询。
+  // 唤醒轮指示：会话末尾是后台任务 System 通知时显示"AI 正在汇总"，
+  // 唤醒轮结果（assistant 消息）到达后 hasTaskNotice 消失，指示器自动隐藏。
+  useUnifiedEvents();
   const lastMsg = messages[messages.length - 1];
   // 通知文本两种形态：委托任务「[后台任务完成/失败]」、后台命令「[后台命令完成/失败]」
   // （build_notification_text / build_command_notification_text）——统一按「[后台」前缀匹配，
@@ -104,32 +104,8 @@ export default function ChatPanel() {
     lastMsg?.role === 'system' &&
     (lastMsg.content.includes('[后台任务') || lastMsg.content.includes('[后台命令'));
   const wakeConditionsMet = !!currentSessionId && streamStatus !== 'streaming' && hasTaskNotice;
-  // 条件重新满足（新一轮任务通知）时重置停止标记，恢复轮询
-  useEffect(() => {
-    if (wakeConditionsMet) setWakeStopped(false);
-  }, [wakeConditionsMet]);
-  usePolling(
-    async () => {
-      if (!currentSessionId) return;
-      const data = await fetchSessionMessages(currentSessionId);
-      const lastServer = data.messages[data.messages.length - 1];
-      // 唤醒轮结果出现 → 刷新（hasTaskNotice 随 messages 消失，
-      // enabled 自动翻 false 停止轮询）。
-      // 停止信号 = "最后一条是 assistant 消息"（含空输出——唤醒轮空输出
-      // 也是已结束的信号；服务端保留空 assistant 消息，渲染层跳过）。
-      if (lastServer && lastServer.role === 'assistant') {
-        useAppStore.getState().setMessages(data.messages);
-      }
-    },
-    3000,
-    {
-      enabled: wakeConditionsMet && !wakeStopped,
-      // 轮询失败（会话删除等）：停止，避免无限重试
-      onError: () => setWakeStopped(true),
-    },
-  );
-  /** 唤醒轮指示（条件满足且未被停止） */
-  const wakeActive = wakeConditionsMet && !wakeStopped;
+  /** 唤醒轮指示（通知已到达、汇总结果未出现） */
+  const wakeActive = wakeConditionsMet;
 
   // 应用层授权：轮询审批状态，当前会话有挂起操作时显示审批卡片。
   // wait_for_approval 模式下危险操作由应用审批（与会话/LLM 无关），

@@ -430,11 +430,20 @@ impl ToolRegistry {
     }
 
     /// 设置子智能体消息流事件通道（ADR-026：面板实时流式显示）。
+    ///
+    /// 同时接入后台任务管理器（ADR-028：状态转移事件 emit）与后台命令
+    /// 管理器（经适配器：状态转移/输出增量 emit）。
     pub fn with_task_event_sink(
         mut self,
         sink: Arc<dyn crate::agent::background::TaskEventSink>,
     ) -> Self {
-        self.task_event_sink = Some(sink);
+        self.task_event_sink = Some(sink.clone());
+        self.background_tasks = Arc::new((*self.background_tasks).clone().with_event_sink(sink.clone()));
+        self.command_tasks = Arc::new(
+            (*self.command_tasks)
+                .clone()
+                .with_event_sink(Arc::new(CommandEventSinkAdapter(sink))),
+        );
         self
     }
 
@@ -946,6 +955,19 @@ impl ToolRegistry {
             .find(|t| t.name == name)
             .map(|t| t.presentation)
             .unwrap_or(ToolPresentation::Generic)
+    }
+}
+
+/// CommandEventSink → TaskEventSink 适配器（ADR-028）。
+///
+/// executor 层定义独立的 [`crate::executor::CommandEventSink`]（避免循环依赖），
+/// 装配层把统一事件通道（TaskEventSink）适配到命令管理器。
+struct CommandEventSinkAdapter(Arc<dyn crate::agent::background::TaskEventSink>);
+
+#[async_trait]
+impl crate::executor::CommandEventSink for CommandEventSinkAdapter {
+    async fn emit(&self, task_id: &str, event: serde_json::Value) {
+        self.0.emit(task_id, event).await;
     }
 }
 

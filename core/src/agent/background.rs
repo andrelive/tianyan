@@ -156,6 +156,8 @@ pub struct BackgroundTask {
     pub error: Option<String>,
     /// 终端命令输出尾部（ADR-026：面板展开显示最近输出；委托任务为 None）。
     pub output_tail: Option<String>,
+    /// 终端命令日志文件路径（ADR-028：日志分页查看；委托任务为 None）。
+    pub log_file: Option<String>,
     /// 创建时间（epoch 毫秒）。
     pub created_at: i64,
     /// 完成时间（epoch 毫秒）。
@@ -201,6 +203,7 @@ impl BackgroundTask {
             result: None,
             error,
             output_tail: Some(t.output_tail),
+            log_file: t.log_file,
             created_at: t.created_at,
             completed_at: t.completed_at,
             seq: t.seq,
@@ -249,6 +252,8 @@ pub struct BackgroundTaskManager {
     task_reviewer: Option<Arc<dyn crate::executor::judge::TaskReviewer>>,
     /// 结构化 Trace 收集器（G6；None 时不记录任务 span）。
     trace_collector: Option<Arc<crate::observability::trace::TraceCollector>>,
+    /// 任务状态事件通道（ADR-028：状态转移 emit；None 时静默）。
+    event_sink: Option<Arc<dyn TaskEventSink>>,
     db: Option<Arc<Database>>,
     next_seq: Arc<AtomicU64>,
     /// 持久化加载只执行一次（惰性：首次 register/snapshot 前）。
@@ -277,6 +282,7 @@ impl BackgroundTaskManager {
             notification: Arc::new(Mutex::new(None)),
             task_reviewer: None,
             trace_collector: None,
+            event_sink: None,
             db: None,
             next_seq: Arc::new(AtomicU64::new(0)),
             reloaded: Arc::new(AtomicBool::new(false)),
@@ -310,6 +316,12 @@ impl BackgroundTaskManager {
         reviewer: Arc<dyn crate::executor::judge::TaskReviewer>,
     ) -> Self {
         self.task_reviewer = Some(reviewer);
+        self
+    }
+
+    /// 设置任务状态事件通道（ADR-028：状态转移 emit；None 时静默）。
+    pub fn with_event_sink(mut self, sink: Arc<dyn TaskEventSink>) -> Self {
+        self.event_sink = Some(sink);
         self
     }
 
@@ -380,6 +392,7 @@ impl BackgroundTaskManager {
             result: None,
             error: None,
             output_tail: None,
+            log_file: None,
             created_at: now_ms(),
             completed_at: None,
             seq,
@@ -387,6 +400,21 @@ impl BackgroundTaskManager {
         };
         self.tasks.lock().await.insert(id.clone(), task.clone());
         self.persist_upsert(&task).await;
+        // ADR-028：状态转移事件（pending）——面板实时显示排队/运行中
+        if let Some(sink) = &self.event_sink {
+            sink.emit(
+                &id,
+                serde_json::json!({
+                    "type": "task_status",
+                    "task_id": id,
+                    "kind": kind.as_str(),
+                    "status": "pending",
+                    "description": task.description,
+                    "created_at": task.created_at,
+                }),
+            )
+            .await;
+        }
         id
     }
 
@@ -404,6 +432,19 @@ impl BackgroundTaskManager {
         };
         if let Some(t) = updated {
             self.persist_upsert(&t).await;
+            // ADR-028：状态转移事件（running）
+            if let Some(sink) = &self.event_sink {
+                sink.emit(
+                    &t.id,
+                    serde_json::json!({
+                        "type": "task_status",
+                        "task_id": t.id,
+                        "kind": t.kind.as_str(),
+                        "status": "running",
+                    }),
+                )
+                .await;
+            }
         }
     }
 
@@ -540,6 +581,22 @@ impl BackgroundTaskManager {
         };
 
         self.persist_upsert(&task).await;
+        // ADR-028：状态转移事件（终态）——面板实时更新，前端据此触发消息对齐
+        if let Some(sink) = &self.event_sink {
+            sink.emit(
+                &task.id,
+                serde_json::json!({
+                    "type": "task_status",
+                    "task_id": task.id,
+                    "kind": task.kind.as_str(),
+                    "status": task.status.as_str(),
+                    "result": task.result,
+                    "error": task.error,
+                    "completed_at": task.completed_at,
+                }),
+            )
+            .await;
+        }
         // ADR-026 SQL 权威：有 db 时终态任务从内存移除（SQLite 保留；查询走 SQL），
         // 内存只保留未终态任务（Running ≤ 并发 + Pending 排队），有界。
         // 无 db（测试桩/未装配持久化）时终态保留内存——没有 SQLite 可落，移除即丢失。
@@ -642,6 +699,7 @@ impl BackgroundTaskManager {
                     result: row.get(5)?,
                     error: row.get(6)?,
                     output_tail: None,
+            log_file: None,
                     created_at: row.get(7)?,
                     completed_at: row.get(8)?,
                     seq: row.get(9)?,
@@ -788,6 +846,7 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackgroundTask> {
         result: row.get(5)?,
         error: row.get(6)?,
         output_tail: None,
+        log_file: None,
         created_at: row.get(7)?,
         completed_at: row.get(8)?,
         seq: row.get(9)?,
@@ -1098,6 +1157,7 @@ mod tests {
             result: Some("找到 3 篇".to_string()),
             error: None,
             output_tail: None,
+            log_file: None,
             created_at: 0,
             completed_at: Some(1),
             seq: 0,
@@ -1121,6 +1181,7 @@ mod tests {
             result: Some("无异常".to_string()),
             error: None,
             output_tail: None,
+            log_file: None,
             created_at: 0,
             completed_at: Some(1),
             seq: 0,
@@ -1332,6 +1393,7 @@ mod tests {
             result: Some("结果".to_string()),
             error: None,
             output_tail: None,
+            log_file: None,
             created_at: 0,
             completed_at: Some(1),
             seq: 0,
