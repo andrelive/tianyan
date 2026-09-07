@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import remarkGfm from 'remark-gfm';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { ChevronDown, ChevronRight } from 'lucide-react';
-import type { MessageSegment, ToolCallWithResult } from '@/lib/types';
+import type { MessageSegment, ToolCallEvent, ToolCallWithResult } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import ToolCallCard from './ToolCallCard';
 
@@ -43,8 +43,16 @@ export function ThinkingBlock({ text }: { text: string }) {
   );
 }
 
-/** Markdown 正文渲染（共用样式与代码高亮）。 */
-export function MarkdownContent({ text, isUser }: { text: string; isUser: boolean }) {
+/** Markdown 正文渲染（共用样式与代码高亮）。memo：流式事件逐条到达时
+ * 只有文本变化的调用方重解析 markdown——气泡因其他原因重渲染时跳过
+ * 昂贵的解析/高亮（大会话流式卡死防护，与 ChatPanel onRollback 稳定化配套）。 */
+export const MarkdownContent = memo(function MarkdownContent({
+  text,
+  isUser,
+}: {
+  text: string;
+  isUser: boolean;
+}) {
   return (
     <div
       className={cn(
@@ -121,7 +129,7 @@ export function MarkdownContent({ text, isUser }: { text: string; isUser: boolea
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 /** 时间线段渲染：按到达顺序轮番展示（相邻同类段合并，保持 markdown 连续）。
  * toolCalls：当前消息的工具调用列表（含 observation 挂载的结果）——
@@ -170,4 +178,29 @@ export function SegmentBlocks({
     }
   }
   return <>{blocks}</>;
+}
+
+/**
+ * 流式事件 → 段（共享映射规则：主对话流与子智能体流的事件协议同构）。
+ *
+ * 主对话流（增量写 store）与子智能体流（整条消息事件批量转换）的事件
+ * 语义不同，无法共用同一归约器；但「事件 → 段」的映射规则是同一套，
+ * 收敛在此处——新段类型只改这一处。
+ */
+export function streamEventToSegment(ev: {
+  chunk_type?: string;
+  thinking?: string | null;
+  delta?: string;
+  tool_call?: ToolCallEvent | null;
+}): MessageSegment | null {
+  if (ev.chunk_type === 'thought' && ev.thinking) {
+    return { type: 'thinking', text: ev.thinking };
+  }
+  if (ev.chunk_type === 'answer' && ev.delta) {
+    return { type: 'text', text: ev.delta };
+  }
+  if (ev.chunk_type === 'tool_call' && ev.tool_call) {
+    return { type: 'tool', tool_call: ev.tool_call };
+  }
+  return null;
 }

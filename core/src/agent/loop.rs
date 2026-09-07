@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::agent::tool_registry::ToolRegistry;
 use crate::agent::types::{StreamEventSender, ToolCallEvent};
@@ -39,6 +39,49 @@ impl Default for AgentLoopConfig {
     }
 }
 
+/// 工具执行器（ADR-030：主 agent 与子代理同构的配置点）。
+#[derive(Debug, Clone)]
+pub enum ToolExecutorKind {
+    /// 全局注册表（主 agent：审批可交互）。
+    Global,
+    /// 角色过滤（子代理：审批不交互，ADR-011——未授权操作拒绝并上报主 agent）。
+    /// `role_tools` 为 Some 时白名单外工具不执行（合成错误回喂模型重试）。
+    RoleFiltered {
+        role_tools: Option<Vec<String>>,
+        role_name: Option<String>,
+    },
+}
+
+/// 单轮演进策略（ADR-030：主 agent 与子代理同构的配置点）。
+///
+/// 主 agent 用默认策略（全局注册表工具执行 + 索引 FTS + max_turns 报错）；
+/// 子代理用委托策略（角色过滤工具执行 + 不索引 FTS（ADR-026）+ max_turns
+/// 尽力返回最后输出）。
+#[derive(Debug, Clone)]
+pub struct TurnPolicy {
+    /// 工具执行器。
+    pub tool_executor: ToolExecutorKind,
+    /// 持久化是否索引 FTS（子代理不索引，ADR-026：子会话不参与回忆检索）。
+    pub persist_no_fts: bool,
+    /// 达到 max_turns 时的行为：false = 报错（主 agent）；true = 返回最后
+    /// 输出（子代理尽力而为，不因轮数上限丢失已完成的工作）。
+    pub max_turns_graceful: bool,
+    /// 请求构造的工具集（None = 全局注册表；Some = 过滤后的工具集——
+    /// 子代理：角色白名单 + submit_result）。
+    pub tools: Option<Vec<crate::model::types::ToolDefinition>>,
+}
+
+impl Default for TurnPolicy {
+    fn default() -> Self {
+        Self {
+            tool_executor: ToolExecutorKind::Global,
+            persist_no_fts: false,
+            max_turns_graceful: false,
+            tools: None,
+        }
+    }
+}
+
 /// Agent 循环结果。
 #[derive(Debug, Clone)]
 pub enum AgentLoopResult {
@@ -66,6 +109,19 @@ pub enum AgentLoopResult {
         /// 已执行的循环轮数。
         turns: usize,
     },
+
+    /// 达到 max_turns 且策略为尽力而为（ADR-030：子代理——不因轮数上限
+    /// 丢失已完成的工作，返回最后输出；主 agent 策略为报错，不产生此变体）。
+    MaxTurnsReached {
+        /// 最后一条非空 assistant 输出（已持久化，调用方从会话读取完整消息）。
+        content: String,
+        /// Token 用量。
+        total_tokens: TokenUsage,
+        /// 最后一轮 LLM 调用的单轮用量。
+        last_turn_usage: Option<TokenUsage>,
+        /// 已执行的循环轮数。
+        turns: usize,
+    },
 }
 
 // AgentLoopError replaced with TianyanError::Custom("agent_loop: ...")
@@ -88,14 +144,26 @@ struct TurnContext<'a> {
     stream_sender: Option<&'a StreamEventSender>,
     /// 当前轮数（0 起）。
     turn: usize,
+    /// 当前模型（持久化到消息 model_id，供实测输入按模型恢复）。
+    model: &'a str,
 }
 
 /// 单轮响应获取步骤返回的 future（`run` / `run_stream` 传入 [`AgentLoop::run_turns`]）。
-/// 第三元素为模型响应的 finish_reason（非流式来自 choice，流式来自最终 chunk）。
+/// 第三元素为模型响应的 finish_reason（非流式来自 choice，流式来自最终 chunk）；
+/// 第四元素为更新后的实测输入（`(model, prompt_tokens)`，供下一轮动态 max_tokens 校准）。
 type TurnStep<'a> = Pin<
     Box<
-        dyn Future<Output = Result<(Message, Option<TokenUsage>, Option<String>), TianyanError>>
-            + Send
+        dyn Future<
+                Output = Result<
+                    (
+                        Message,
+                        Option<TokenUsage>,
+                        Option<String>,
+                        Option<(String, usize)>,
+                    ),
+                    TianyanError,
+                >,
+            > + Send
             + 'a,
     >,
 >;
@@ -111,17 +179,12 @@ pub struct AgentLoop {
     trace: Option<Arc<TraceCollector>>,
     /// 当前聊天模型的上下文规格（T5；由 AgentBuilder 注入，供请求构造/压缩联动使用）。
     pub(crate) chat_spec: Option<ModelSpec>,
-    /// 上次请求实测输入 token 数（T6 动态 max_tokens 校准）。
-    ///
-    /// `Arc` 保证 AgentLoop 克隆后校准值共享；0 表示尚无实测（退化为估算）。
-    /// 同时记录实测时的 model：同一会话切换 provider/model 后旧实测值
-    /// 不再适用（不同模型分词/计费口径不同），退回全量估算（对齐 DSH
-    /// token-meter：header 不匹配时全量重估，不复用旧 usage）。
-    pub(crate) last_input_usage: Arc<RwLock<Option<(String, usize)>>>,
     /// LLM 用量日志（token 统计：每轮调用落库；None 时不记录）。
     usage_log: Option<Arc<UsageLog>>,
     /// model → provider 映射（配置注入；用量日志的 provider 维度）。
     provider_by_model: HashMap<String, String>,
+    /// 单轮演进策略（ADR-030：主 agent 默认；子代理委托策略）。
+    turn_policy: TurnPolicy,
 }
 
 impl AgentLoop {
@@ -139,10 +202,16 @@ impl AgentLoop {
             config,
             trace: None,
             chat_spec: None,
-            last_input_usage: Arc::new(RwLock::new(None)),
             usage_log: None,
             provider_by_model: HashMap::new(),
+            turn_policy: TurnPolicy::default(),
         }
+    }
+
+    /// 设置单轮演进策略（ADR-030：主 agent 默认；子代理委托策略）。
+    pub fn with_turn_policy(mut self, policy: TurnPolicy) -> Self {
+        self.turn_policy = policy;
+        self
     }
 
     /// 设置聊天模型上下文规格（T5：由 AgentBuilder 从模型配置注入；None 时走默认窗口）。
@@ -188,30 +257,11 @@ impl AgentLoop {
         cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
     }
 
-    /// 读取上次实测输入 token 数（仅当 model 与实测时一致）。
-    ///
-    /// 同一会话切换 provider/model 后旧实测值不再适用（不同模型分词/
-    /// 计费口径不同），返回 None 由调用方退回全量估算（对齐 DSH
-    /// token-meter：header 不匹配时全量重估，不复用旧 usage）。
-    fn measured_input(&self, model: &str) -> Option<usize> {
-        let guard = self.last_input_usage.read().ok()?;
-        guard
-            .as_ref()
-            .filter(|(m, _)| m == model)
-            .map(|(_, tokens)| *tokens)
-    }
-
-    /// 记录本次实测输入（T6：供下一轮动态 max_tokens 校准，跨轮共享）。
-    fn record_measured_input(&self, model: &str, prompt_tokens: usize) {
-        if let Ok(mut guard) = self.last_input_usage.write() {
-            *guard = Some((model.to_string(), prompt_tokens));
-        }
-    }
-
     /// 构造本轮 LLM 请求（`run` / `run_stream` 共用，消除两条路径的重复）。
     ///
     /// 统一处理：T6 动态 max_tokens → 思考强度 → 流式开关。
-    /// 动态 max_tokens：优先上次请求实测输入（usage.prompt_tokens），
+    /// 动态 max_tokens：优先上次请求实测输入（usage.prompt_tokens，由
+    /// `run_turns` 从会话消息恢复并逐轮更新——重启后不退回估算），
     /// 无实测时退化为 TokenEstimator 估算；预算不足 1024 时提前报错
     /// （不发送请求），交由压缩链路在后续轮次恢复。
     async fn prepare_request(
@@ -220,11 +270,21 @@ impl AgentLoop {
         msgs: &[Message],
         stream: bool,
         thinking_effort: Option<String>,
+        last_input_usage: Option<(String, usize)>,
     ) -> Result<ChatCompletionRequest, TianyanError> {
-        let tools = self.tool_registry.definitions().await;
+        // ADR-030：工具集按策略——主 agent 全局注册表；子代理过滤集
+        // （角色白名单 + submit_result）
+        let tools = match &self.turn_policy.tools {
+            Some(t) => t.clone(),
+            None => self.tool_registry.definitions().await,
+        };
 
         let max_tokens = self.chat_spec.and_then(|spec| {
-            let measured = self.measured_input(model);
+            // 实测输入：run_turns 从会话消息恢复 + 逐轮更新（model 一致才复用）
+            let measured = last_input_usage
+                .as_ref()
+                .filter(|(m, _)| m == model)
+                .map(|(_, tokens)| *tokens);
             let input_est = measured.unwrap_or_else(|| {
                 crate::common::token_estimator::TokenEstimator::new().estimate_messages(msgs)
             });
@@ -278,12 +338,12 @@ impl AgentLoop {
             initial_parent_id,
             model,
             cancel,
-            |this, model, _sender, msgs, _cancel| {
+            |this, model, _sender, msgs, _cancel, last_input_usage| {
                 // FnMut 闭包按值捕获 thinking_effort，每次调用 clone 供本轮使用
                 let thinking_effort = thinking_effort.clone();
                 Box::pin(async move {
                     let request = this
-                        .prepare_request(model, &msgs, false, thinking_effort)
+                        .prepare_request(model, &msgs, false, thinking_effort, last_input_usage)
                         .await?;
 
                     let response =
@@ -294,8 +354,8 @@ impl AgentLoop {
                                 TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
                             })?;
 
-                    // T6：记录本次实测输入，供下一轮动态 max_tokens 校准（跨轮共享）。
-                    this.record_measured_input(model, response.usage.prompt_tokens);
+                    // T6：记录本次实测输入，供下一轮动态 max_tokens 校准（随返回值更新）。
+                    let updated_input = Some((model.to_string(), response.usage.prompt_tokens));
                     let turn_usage = response.usage;
                     let finish_reason = response
                         .choices
@@ -310,7 +370,12 @@ impl AgentLoop {
                                 "agent_loop: LLM 返回空响应".to_string(),
                             ))?;
 
-                    Ok((choice.message, Some(turn_usage), finish_reason))
+                    Ok((
+                        choice.message,
+                        Some(turn_usage),
+                        finish_reason,
+                        updated_input,
+                    ))
                 })
             },
         )
@@ -341,7 +406,7 @@ impl AgentLoop {
             initial_parent_id,
             model,
             cancel,
-            |this, model, sender, msgs, cancel| {
+            |this, model, sender, msgs, cancel, last_input_usage| {
                 // FnMut 闭包按值捕获 thinking_effort，每次调用 clone 供本轮使用
                 let thinking_effort = thinking_effort.clone();
                 Box::pin(async move {
@@ -350,7 +415,13 @@ impl AgentLoop {
                     })?;
 
                     let request = this
-                        .prepare_request(model, &msgs, true, thinking_effort)
+                        .prepare_request(
+                            model,
+                            &msgs,
+                            true,
+                            thinking_effort,
+                            last_input_usage.clone(),
+                        )
                         .await?;
 
                     let mut rx = this
@@ -371,6 +442,8 @@ impl AgentLoop {
                     let mut turn_usage: Option<TokenUsage> = None;
                     let mut stream_error: Option<String> = None;
                     let mut finish_reason: Option<String> = None;
+                    // 本轮实测输入（流式 usage 到达时更新；供下一轮校准）
+                    let mut updated_input: Option<(String, usize)> = None;
 
                     while let Some(chunk_result) = rx.recv().await {
                         // 客户端断开/服务关停：chunk 循环内及时中断（长响应时不必等流结束）
@@ -383,7 +456,7 @@ impl AgentLoop {
                                 if let Some(ref usage) = chunk.usage {
                                     turn_usage = Some(usage.clone());
                                     // T6：记录本次实测输入，供下一轮动态 max_tokens 校准。
-                                    this.record_measured_input(model, usage.prompt_tokens);
+                                    updated_input = Some((model.to_string(), usage.prompt_tokens));
                                 }
                                 for choice in &chunk.choices {
                                     // finish_reason：最终 chunk 携带；None 保持之前值（if let Some 覆盖累计）
@@ -502,8 +575,10 @@ impl AgentLoop {
                     // 展示与压缩判定不因网关差异而失效。
                     let turn_usage = turn_usage.or_else(|| {
                         let estimator = crate::common::token_estimator::TokenEstimator::new();
-                        let prompt = this
-                            .measured_input(model)
+                        let prompt = last_input_usage
+                            .as_ref()
+                            .filter(|(m, _)| m == model)
+                            .map(|(_, tokens)| *tokens)
                             .unwrap_or_else(|| estimator.estimate_messages(&msgs));
                         let completion = estimator.estimate_text(&assistant_msg.content)
                             + assistant_msg
@@ -520,7 +595,7 @@ impl AgentLoop {
                         })
                     });
 
-                    Ok((assistant_msg, turn_usage, finish_reason))
+                    Ok((assistant_msg, turn_usage, finish_reason, updated_input))
                 })
             },
         )
@@ -529,11 +604,15 @@ impl AgentLoop {
 
     /// 运行多轮迭代循环的共享脚手架（`run` / `run_stream` 共用）。
     ///
-    /// 统一处理：轮次状态初始化（`current_parent_id` / `total_tokens`）、
-    /// [`TurnContext`] 构建、[`AgentLoop::handle_llm_response`] 调用与早返回、
-    /// 最大轮数错误、取消检查（轮顶 + step 错误时）。
+    /// 统一处理：轮次状态初始化（`current_parent_id` / `total_tokens` /
+    /// 实测输入恢复）、[`TurnContext`] 构建、[`AgentLoop::handle_llm_response`]
+    /// 调用与早返回、最大轮数错误、取消检查（轮顶 + step 错误时）。
     /// `step` 负责每轮获取模型响应，并统一转换为
-    /// `(assistant_msg, turn_usage)` 形式。
+    /// `(assistant_msg, turn_usage, finish_reason, 更新后的实测输入)` 形式。
+    ///
+    /// 实测输入（T6 动态 max_tokens 校准）：从会话消息恢复最后一条带 usage
+    /// 的消息（重启后不退回估算——usage 已持久化在消息里），循环内逐轮用
+    /// 最新实测更新局部变量（无跨轮共享字段，克隆安全）。
     // 私有脚手架：8 个参数均为单轮演进所需状态/依赖，收敛为结构体反而降低可读性
     #[allow(clippy::too_many_arguments)]
     async fn run_turns<F>(
@@ -553,10 +632,27 @@ impl AgentLoop {
             Option<&'a StreamEventSender>,
             Vec<Message>,
             Option<&'a AtomicBool>,
+            Option<(String, usize)>,
         ) -> TurnStep<'a>,
     {
         let mut current_parent_id = initial_parent_id.map(|s| s.to_string());
         let mut total_tokens = TokenUsage::default();
+        // 实测输入恢复：从会话消息取最后一条带 usage 且 model 一致的消息
+        // （重启后不退回估算——usage 已持久化在消息里；model 不一致 = 切换
+        // 模型，旧实测值不适用，退回估算。与压缩判定的取数口径一致）。
+        let mut last_input_usage: Option<(String, usize)> =
+            match self.session_manager.get_session(session_id).await {
+                Ok(Some(session)) => session
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| {
+                        (m.tokens.input > 0 || m.tokens.cache.read > 0)
+                            && m.model_id.as_deref() == Some(model)
+                    })
+                    .map(|m| (model.to_string(), m.tokens.input + m.tokens.cache.read)),
+                _ => None,
+            };
 
         for turn in 0..self.config.max_turns {
             // 轮顶取消检查：工具执行结束后、进入下一轮 LLM 调用前响应取消
@@ -574,22 +670,30 @@ impl AgentLoop {
                 trace.set_current_turn(session_id, turn as i64);
             }
 
-            let mut step_result =
-                match step(self, model, stream_sender, messages.clone(), cancel).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        // step 内部（如流式 chunk 循环）检测到取消会上抛"任务已取消"，
-                        // 此处统一转换为 Cancelled 结果，避免被当作失败
-                        if Self::is_cancelled(cancel) {
-                            return Ok(AgentLoopResult::Cancelled {
-                                total_tokens,
-                                last_turn_usage: None,
-                                turns: turn + 1,
-                            });
-                        }
-                        return Err(e);
+            let mut step_result = match step(
+                self,
+                model,
+                stream_sender,
+                messages.clone(),
+                cancel,
+                last_input_usage.clone(),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    // step 内部（如流式 chunk 循环）检测到取消会上抛"任务已取消"，
+                    // 此处统一转换为 Cancelled 结果，避免被当作失败
+                    if Self::is_cancelled(cancel) {
+                        return Ok(AgentLoopResult::Cancelled {
+                            total_tokens,
+                            last_turn_usage: None,
+                            turns: turn + 1,
+                        });
                     }
-                };
+                    return Err(e);
+                }
+            };
 
             // 空响应重试（用户轮）：LLM 偶发返回既无正文也无工具调用的空响应
             // （思考模型"想完没说话"），直接结束会让任务在工具循环中途静默终止。
@@ -599,7 +703,7 @@ impl AgentLoop {
             if !self.config.allow_empty_answer {
                 let empty = matches!(
                     &step_result,
-                    (m, _, _) if m.content.is_empty() && m.tool_calls.is_none()
+                    (m, _, _, _) if m.content.is_empty() && m.tool_calls.is_none()
                 );
                 if empty {
                     tracing::warn!(
@@ -607,24 +711,36 @@ impl AgentLoop {
                         turn,
                         "LLM 返回空响应，重试一次"
                     );
-                    step_result =
-                        match step(self, model, stream_sender, messages.clone(), cancel).await {
-                            Ok(v) => v,
-                            Err(e) => {
-                                if Self::is_cancelled(cancel) {
-                                    return Ok(AgentLoopResult::Cancelled {
-                                        total_tokens,
-                                        last_turn_usage: None,
-                                        turns: turn + 1,
-                                    });
-                                }
-                                return Err(e);
+                    step_result = match step(
+                        self,
+                        model,
+                        stream_sender,
+                        messages.clone(),
+                        cancel,
+                        last_input_usage.clone(),
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            if Self::is_cancelled(cancel) {
+                                return Ok(AgentLoopResult::Cancelled {
+                                    total_tokens,
+                                    last_turn_usage: None,
+                                    turns: turn + 1,
+                                });
                             }
-                        };
+                            return Err(e);
+                        }
+                    };
                 }
             }
 
-            let (assistant_msg, turn_usage, finish_reason) = step_result;
+            let (assistant_msg, turn_usage, finish_reason, updated_input) = step_result;
+            // 更新实测输入（供下一轮动态 max_tokens 校准；None = 本轮无实测，保持旧值）
+            if let Some(ui) = updated_input {
+                last_input_usage = Some(ui);
+            }
 
             // LLM 用量日志：每轮一次（聊天/子代理/演化任务统一记录）。
             // provider 优先查配置映射（模型名可能不含前缀），
@@ -649,6 +765,7 @@ impl AgentLoop {
                 messages: &mut *messages,
                 stream_sender,
                 turn,
+                model,
             };
 
             if let Some(result) = self
@@ -678,6 +795,23 @@ impl AgentLoop {
                     true,
                 );
             }
+        }
+
+        // ADR-030：max_turns 行为按策略——主 agent 报错；子代理尽力而为
+        // （返回最后输出，不因轮数上限丢失已完成的工作）
+        if self.turn_policy.max_turns_graceful {
+            let content = messages
+                .iter()
+                .rev()
+                .find(|m| m.role == MessageRole::Assistant && !m.content.is_empty())
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            return Ok(AgentLoopResult::MaxTurnsReached {
+                content,
+                total_tokens,
+                last_turn_usage: None,
+                turns: self.config.max_turns,
+            });
         }
 
         Err(TianyanError::Custom(format!(
@@ -756,12 +890,28 @@ impl AgentLoop {
                 }
             }
 
-            // 执行工具（session_id 随调用链传递：后台委托归属父会话，完成
-            // 通知注入该会话；subagent=false 主循环——审批可交互）
-            let results = self
-                .tool_registry
-                .execute_parallel(tool_calls, ctx.session_id, false)
-                .await;
+            // 执行工具（ADR-030：按策略选择执行器——主 agent 全局注册表
+            // （审批可交互）；子代理角色过滤（审批不交互，ADR-011））
+            let results = match &self.turn_policy.tool_executor {
+                ToolExecutorKind::Global => {
+                    self.tool_registry
+                        .execute_parallel(tool_calls, ctx.session_id, false)
+                        .await
+                }
+                ToolExecutorKind::RoleFiltered {
+                    role_tools,
+                    role_name,
+                } => {
+                    self.tool_registry
+                        .execute_tool_calls_with_role(
+                            tool_calls,
+                            ctx.session_id,
+                            role_tools.as_deref(),
+                            role_name.as_deref(),
+                        )
+                        .await
+                }
+            };
 
             for (call_id, outcome) in results {
                 let content = match &outcome.result {
@@ -842,13 +992,23 @@ impl AgentLoop {
         );
         // T4：持久化消息携带模型 finish_reason（此前恒为 None）
         structured.finish = finish_reason;
+        // 持久化模型标识：实测输入按模型恢复（不同模型分词/计费口径不同，
+        // 切换后旧实测值不得复用）
+        structured.model_id = Some(ctx.model.to_string());
         *ctx.current_parent_id = Some(structured.id.clone());
         let persisted = structured.clone();
-        if let Err(e) = self
-            .session_manager
-            .add_structured_message(ctx.session_id, structured)
-            .await
-        {
+        // ADR-030：按策略选择持久化路径——主 agent 索引 FTS；子代理不索引
+        // （ADR-026：子会话不参与回忆检索）
+        let result = if self.turn_policy.persist_no_fts {
+            self.session_manager
+                .add_structured_message_no_fts(ctx.session_id, structured)
+                .await
+        } else {
+            self.session_manager
+                .add_structured_message(ctx.session_id, structured)
+                .await
+        };
+        if let Err(e) = result {
             tracing::warn!(error = %e, "持久化消息失败");
         }
         persisted

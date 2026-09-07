@@ -5,6 +5,10 @@
 //! 块定位采用"提示位置精确匹配 → 全文件精确匹配 → 模糊匹配（similar 行级
 //! ratio ≥ 阈值）"三级策略；全部块定位成功后才落盘（批量原子性）。写回时
 //! 保持目标文件原有 CRLF/LF 行尾。
+//!
+//! 围栏容错：Claude Code 风格补丁带 `*** Begin Patch` / `*** End Patch` 围栏
+//! 头尾（LLM 输出惯性夹带），本工具无围栏（直接 `*** Update File:` 起止）——
+//! 已知围栏行一律跳过（与空行同策略），未知 `***` 头仍报错。
 
 use std::path::{Path, PathBuf};
 
@@ -117,6 +121,16 @@ pub fn parse_patch(text: &str) -> Result<Vec<PatchFile>> {
                 return Err(TianyanError::Custom(
                     "executor: apply_patch: 不支持的补丁操作：rename".to_string(),
                 ));
+            }
+            // 已知围栏行（Claude Code 风格 Begin/End 信封）：模型输出惯性
+            // 夹带，但围栏不携带语义——跳过（与空行忽略同策略；出现在文件
+            // 头前、文件间、文件尾均安全）。未知 `***` 头仍报错。
+            let rest_lower = rest.trim().to_lowercase();
+            if matches!(
+                rest_lower.as_str(),
+                "begin" | "end" | "begin patch" | "end patch"
+            ) {
+                continue;
             }
             return Err(parse_err(line_num, format!("未知的信封头部: {rest}")));
         } else if line.starts_with("@@") {

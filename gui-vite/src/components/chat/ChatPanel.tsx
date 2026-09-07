@@ -18,9 +18,14 @@ import type {
   ToolCallEvent,
 } from '@/lib/types';
 import { useChatStream } from '@/hooks/useChatStream';
+import {
+  createChatStreamReducer,
+  registerStreamReducer,
+  unregisterStreamReducer,
+} from '@/lib/chat-stream';
 import { usePolling } from '@/hooks/use-polling';
 import { useSessionHistory } from '@/hooks/use-session-history';
-import { useUnifiedEvents } from '@/hooks/use-unified-events';
+import { useUnifiedEvents, subscribeSession } from '@/hooks/use-unified-events';
 import { toErrorMessage } from '@/lib/errors';
 import { lastMessageUsage, sumSessionUsage } from '@/lib/token-usage';
 import { MessageSquare, Loader2, RotateCcw, Undo2 } from 'lucide-react';
@@ -45,7 +50,6 @@ export default function ChatPanel() {
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
   const addMessage = useAppStore((s) => s.addMessage);
   const setStreamStatus = useAppStore((s) => s.setStreamStatus);
-  const deleteMessagesFrom = useAppStore((s) => s.deleteMessagesFrom);
   const lastRollbackMessageId = useAppStore((s) => s.lastRollbackMessageId);
   const setLastRollbackMessageId = useAppStore((s) => s.setLastRollbackMessageId);
   const pendingClarification = useAppStore((s) => s.pendingClarification);
@@ -92,20 +96,10 @@ export default function ChatPanel() {
   const { reloadSession } = useSessionHistory(urlSessionId);
 
   // ADR-028：统一事件订阅——后台通知/唤醒轮结果/任务状态经常驻 SSE 推送，
-  // 消息类事件自动 mergeServerMessages 进 store（追加语义），无需轮询。
-  // 唤醒轮指示：会话末尾是后台任务 System 通知时显示"AI 正在汇总"，
-  // 唤醒轮结果（assistant 消息）到达后 hasTaskNotice 消失，指示器自动隐藏。
+  // ADR-031：消息不再广播——流式增量 + 完成事件到前端；后台任务完成
+  // 通知只落库（LLM 上下文），唤醒轮流式化后输出经 chat_stream 推送
+  // （前端打字机看到汇总，无需"通知气泡 + 唤醒指示"轮询逻辑）。
   useUnifiedEvents();
-  const lastMsg = messages[messages.length - 1];
-  // 通知文本两种形态：委托任务「[后台任务完成/失败]」、后台命令「[后台命令完成/失败]」
-  // （build_notification_text / build_command_notification_text）——统一按「[后台」前缀匹配，
-  // 避免「后台命令」不包含「后台任务」子串导致轮询永不启动。
-  const hasTaskNotice =
-    lastMsg?.role === 'system' &&
-    (lastMsg.content.includes('[后台任务') || lastMsg.content.includes('[后台命令'));
-  const wakeConditionsMet = !!currentSessionId && streamStatus !== 'streaming' && hasTaskNotice;
-  /** 唤醒轮指示（通知已到达、汇总结果未出现） */
-  const wakeActive = wakeConditionsMet;
 
   // 应用层授权：轮询审批状态，当前会话有挂起操作时显示审批卡片。
   // wait_for_approval 模式下危险操作由应用审批（与会话/LLM 无关），
@@ -157,24 +151,17 @@ export default function ChatPanel() {
 
   // ─── Custom streaming via fetch + ReadableStream ─────────────────
 
-  // 流式事件归约在 lib/chat-stream（唯一解析器 + 协议→store 归约器）；
-  // 本组件只提供流生命周期回调（错误重载、完成复位、usage 窗口记录）。
+  // ADR-028 第 3 步：POST /chat/stream 收敛为开关——启动请求立即返回
+  // session_id；流式输出（增量/边界/工具/usage）全部经 GET /events 统一
+  // 事件通道下发，由 useUnifiedEvents 路由到活跃归约器（lib/chat-stream）。
+  // 本组件只负责启动请求 + 注册/注销归约器。
   const { startStream, stopStream } = useChatStream({
     streamUrl: `${getApiBase()}/chat/stream`,
-    onUsageWindow: (windowTokens) => {
-      liveWindowRef.current = windowTokens;
-    },
-    onError: (sessionId) => {
-      // 流结束按归属会话置 idle（UI 可能已切走，不能用 currentSessionId 闭包值）
-      useAppStore.getState().setStreamStatus('idle', sessionId);
-      // 跑完再取：断线不取消 agent，任务继续在后台运行并持久化结果。
-      // 保留本地已流式的部分输出（不标记 interrupted——任务仍在跑）；
-      // 用户点「刷新结果」获取服务端最终结果。
+    onError: () => {
+      // 启动失败（HTTP 错误）：复位流状态 + 清理占位
+      useAppStore.getState().setStreamStatus('idle');
+      useAppStore.getState().removeEmptyAssistantMessage();
       setStreamError(true);
-      useAppStore.getState().showToast('连接断开，任务继续在后台运行', 'info');
-    },
-    onComplete: (sessionId) => {
-      useAppStore.getState().setStreamStatus('idle', sessionId);
     },
   });
 
@@ -195,16 +182,27 @@ export default function ChatPanel() {
       // 发起新轮：回撤已被新工作取代，清空撤销回退横幅（否则残留到输出底部）
       setLastRollbackMessageId(null);
 
-      // ADR-028：不再乐观渲染用户消息——服务端落库即广播（msg_xxx id），
-      // 前端本地渲染（randomUUID id）与广播 id 不一致导致 mergeServerMessages
-      // 按 id 去重失效（用户消息重复出现）。用户消息由广播到达后插入到
-      // assistant 占位之前（保持 用户→assistant 顺序）。
+      // ADR-031：乐观渲染——本地立即插入用户消息（带 user_message_id 定位
+      // 键），服务端落库后经 UserMessageId 确认事件回显真实 id，前端比对
+      // user_message_id 精确替换（不再依赖"广播插入 + id 去重"的模糊匹配，
+      // 也消除了 b749eb0 时代"本地 randomUUID 与广播 id 不一致导致重复"的
+      // 根因——确认事件是同一消息的精确收尾）。
+      const userMessageId = crypto.randomUUID();
+      addMessage({
+        role: 'user',
+        segments: [{ type: 'text', text: trimmed }],
+        user_message_id: userMessageId,
+        // id: null = 占位（等待 UserMessageId 确认事件替换为服务端真实 id）
+        id: null,
+        images: images.length > 0 ? images : undefined,
+        timestamp: new Date().toISOString(),
+      });
 
       // Add empty assistant placeholder for streaming（id: null = 占位，
       // 等待服务端广播/边界事件替换为真实 id）
       addMessage({
         role: 'assistant',
-        content: '',
+        segments: [],
         id: null,
         timestamp: new Date().toISOString(),
       });
@@ -220,6 +218,7 @@ export default function ChatPanel() {
         message: {
           role: 'user' as const,
           content: trimmed,
+          user_message_id: userMessageId,
           images: images.length > 0 ? images : undefined,
           timestamp: new Date().toISOString(),
         },
@@ -235,7 +234,33 @@ export default function ChatPanel() {
       // 清除上一次的断线标志
       setStreamError(false);
       state.setStreamStatus('streaming');
-      await startStream(payload);
+      // ADR-028 第 3 步：启动请求立即返回 session_id；流式事件经统一事件
+      // 通道（GET /events）到达——注册该会话的活跃归约器，事件按
+      // session_id 路由。新会话（adoptOnFirstEvent）首个事件到达时
+      // setCurrentSession 迁移 PENDING；已有会话不拉回当前视图。
+      const reducer = createChatStreamReducer({
+        errorFallbackText: '对话处理失败',
+        adoptOnFirstEvent: isNewSession,
+        onDone: (sid) => {
+          if (sid) unregisterStreamReducer(sid);
+        },
+      });
+      const confirmedSessionId = await startStream(payload);
+      if (confirmedSessionId) {
+        registerStreamReducer(confirmedSessionId, reducer);
+        // ADR-029：确保会话已订阅（消息事件按订阅推送；resident 幂等——
+        // 已订阅跳过，未订阅首次打开 → 快照恢复）
+        void subscribeSession(confirmedSessionId);
+        // 新会话：服务端已确认 session_id，立即迁移（不等首个事件——
+        // 事件可能因通道 Lag 丢失，PENDING 滞留会断链）
+        if (isNewSession) {
+          useAppStore.getState().setCurrentSession(confirmedSessionId);
+        }
+      } else {
+        // 启动失败：归约器无事件可路由，直接丢弃
+        useAppStore.getState().setStreamStatus('idle');
+        useAppStore.getState().removeEmptyAssistantMessage();
+      }
       // 新会话已创建并固化工作区绑定：清除待绑定状态（每个新对话重新选择）
       if (isNewSession) {
         useAppStore.getState().setNewSessionWorkspace(null);
@@ -246,35 +271,38 @@ export default function ChatPanel() {
 
   const handleRollback = useCallback(
     async (index: number) => {
-      if (streamStatus === 'streaming') return;
-
-      const state = useAppStore.getState();
-      const sessionId = state.currentSessionId;
+      // 读 store 最新值而非渲染闭包：回调身份稳定（不依赖 messages/streamStatus），
+      // memo(MessageBubble) 的 onRollback 浅比较不失效——流式事件逐条到达时
+      // 只有变更气泡重渲染，避免大会话全量重渲染卡死（O(n²) markdown/高亮）。
+      const st = useAppStore.getState();
+      const activeKey = st.currentSessionId ?? PENDING_SESSION_KEY;
+      if ((st.streamStatus[activeKey] ?? 'idle') === 'streaming') return;
+      const sessionId = st.currentSessionId;
       if (!sessionId) {
-        state.showToast('请先发送一条消息以创建会话', 'error');
+        st.showToast('请先发送一条消息以创建会话', 'error');
         return;
       }
 
       // 被回退消息的 ID：重做数据的定位键（前端索引与服务端列表错位，
       // 数字索引不可靠——按 ID 定位删除）
-      const target = messages[index];
+      const target = st.messages[index];
       if (!target?.id) {
-        state.showToast('该消息缺少 ID，无法回退', 'error');
+        st.showToast('该消息缺少 ID，无法回退', 'error');
         return;
       }
 
       // 乐观更新：回退到该消息之前（删除该消息及其后）
-      deleteMessagesFrom(index);
+      st.deleteMessagesFrom(index);
       try {
         const resp = await deleteSessionMessage(sessionId, target.id);
-        state.setMessages(resp.messages);
-        setLastRollbackMessageId(target.id);
+        st.setMessages(resp.messages);
+        st.setLastRollbackMessageId(target.id);
       } catch (err: unknown) {
-        state.showToast(`回退失败: ${toErrorMessage(err, '未知错误')}`, 'error');
+        st.showToast(`回退失败: ${toErrorMessage(err, '未知错误')}`, 'error');
         await reloadSession(sessionId);
       }
     },
-    [streamStatus, deleteMessagesFrom, setLastRollbackMessageId, messages, reloadSession],
+    [reloadSession],
   );
 
   // 撤销回滚：恢复被删除的消息与工作区文件
@@ -341,7 +369,12 @@ export default function ChatPanel() {
   const handleStop = useCallback(() => {
     // 主动停止：显式调用取消端点（跑完再取语义下断线不取消，只有主动停止才取消）
     const sid = useAppStore.getState().currentSessionId;
-    if (sid) void cancelChatStream(sid).catch(() => {});
+    if (sid) {
+      void cancelChatStream(sid).catch(() => {});
+      // 注销该会话的活跃归约器：停止后服务端后续事件不再路由（否则
+      // 旧流事件可能写进新流/已复位状态）
+      unregisterStreamReducer(sid);
+    }
     stopStream();
     setStreamStatus('idle');
     // 给当前流式消息打 interrupted 标记（与服务端 finish=interrupted 语义一致）
@@ -421,18 +454,6 @@ export default function ChatPanel() {
                   <span className="text-sm">思考中...</span>
                 </div>
               )}
-
-            {/* Wake polling indicator: 后台任务完成后主 agent 正在自动汇总 */}
-            {wakeActive && streamStatus === 'idle' && (
-              <div
-                className="flex items-center gap-2 text-[var(--color-text-tertiary)] py-2"
-                aria-live="polite"
-                aria-label="等待后台任务汇总"
-              >
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span className="text-sm">后台任务完成，AI 正在汇总结果...</span>
-              </div>
-            )}
 
             {/* 断线提示：跑完再取——任务继续在后台运行，刷新获取最终结果 */}
             {streamError && streamStatus === 'idle' && (
@@ -519,3 +540,5 @@ function findAskUserCall(messages: ChatMessage[]): ToolCallEvent | null {
   }
   return null;
 }
+
+

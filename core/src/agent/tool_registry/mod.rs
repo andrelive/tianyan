@@ -738,16 +738,6 @@ impl ToolRegistry {
         }
     }
 
-    /// 指定会话的主循环是否已请求取消（委托循环每轮检查）。
-    pub(crate) async fn delegation_cancelled(&self, session_id: &str) -> bool {
-        self.delegation_cancel
-            .lock()
-            .await
-            .get(session_id)
-            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(false)
-    }
-
     /// 同步版取消检查（ask_user 等待轮询用；try_lock 失败时保守返回 false）。
     pub(crate) fn delegation_cancelled_sync(&self, session_id: &str) -> bool {
         self.delegation_cancel
@@ -901,6 +891,7 @@ impl ToolRegistry {
             "web_search" => self.execute_web_search(arguments).await,
             "web_fetch" => self.execute_web_fetch(arguments).await,
             "delegate_to_agent" => self.execute_delegate_to_agent(arguments, session_id).await,
+            "submit_result" => self.execute_submit_result(arguments, session_id).await,
             "task_status" => self.execute_task_status(arguments).await,
             "task_cancel" => self.execute_task_cancel(arguments).await,
             "suggest_role" => self.execute_suggest_role(arguments).await,

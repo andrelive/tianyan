@@ -1,11 +1,11 @@
 import { useState, memo } from 'react';
 import { Copy, Check, Undo2 } from 'lucide-react';
+import { messageText } from '@/lib/types';
 import type { ChatMessage } from '@/lib/types';
 import { cn, formatTime } from '@/lib/utils';
 import SkillCallCard from './SkillCallCard';
 import { streamingIndicatorOwner } from './streaming-indicator';
-import { MarkdownContent, SegmentBlocks, ThinkingBlock } from './MessageSegments';
-import ToolCallCard from './ToolCallCard';
+import { SegmentBlocks } from './MessageSegments';
 
 interface Props {
   message: ChatMessage;
@@ -21,19 +21,18 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
   const isUser = message.role === 'user';
 
   // 唤醒轮空输出（allow_empty_answer：模型认为无需回复）会持久化一条
-  // 空 content 的 assistant 消息——渲染层跳过（不动数组索引，回退定位
+  // 空 segments 的 assistant 消息——渲染层跳过（不动数组索引，回退定位
   // 按消息 ID 的语义不受影响），避免历史中出现只有时间戳的空白气泡。
   if (!isUser && !isStreaming) {
-    const hasContent = message.content.length > 0;
     const hasThinking = !!message.thinking && message.thinking.length > 0;
     const hasTools = !!message.tool_calls && message.tool_calls.length > 0;
     const hasSegments = !!message.segments && message.segments.length > 0;
-    if (!hasContent && !hasThinking && !hasTools && !hasSegments) return null;
+    if (!hasThinking && !hasTools && !hasSegments) return null;
   }
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(message.content);
+      await navigator.clipboard.writeText(messageText(message));
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -73,36 +72,14 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
           </div>
         )}
 
-        {/* 时间线渲染：服务端权威 segments（历史/流式同构，ADR-019）按真实
-            到达顺序轮番展示思考/文本/工具调用；固定顺序仅旧数据兜底 */}
-        {message.segments && message.segments.length > 0 ? (
-          <SegmentBlocks
-            segments={message.segments}
-            toolCalls={message.tool_calls}
-            isUser={isUser}
-          />
-        ) : (
-          <>
-            {/* 思考过程（可折叠，与正文分开渲染，按序轮番出现） */}
-            {!isUser && message.thinking && <ThinkingBlock text={message.thinking} />}
-
-            <MarkdownContent text={message.content} isUser={isUser} />
-
-            {/* Tool calls（A2 展示契约：按展示意图渲染卡片；调用与结果合并，
-                结果完整内容折叠展示，不截断） */}
-            {message.tool_calls && message.tool_calls.length > 0 && (
-              <div className="mt-2 space-y-1">
-                {message.tool_calls.map((call, i) => (
-                  <ToolCallCard
-                    key={`${call.name}-${call.arguments}-${i}`}
-                    event={call}
-                    result={call.result}
-                  />
-                ))}
-              </div>
-            )}
-          </>
-        )}
+        {/* 渲染路径（统一时间线）：服务端权威 segments（历史/流式同构，
+            ADR-019）按真实到达顺序轮番展示思考/文本/工具调用——所有角色
+            的正文都进时间线（Text 段），纯文本字段已移除（单一事实源）。 */}
+        <SegmentBlocks
+          segments={message.segments ?? []}
+          toolCalls={message.tool_calls}
+          isUser={isUser}
+        />
 
         {/* Skill calls */}
         {message.skill_calls && message.skill_calls.length > 0 && (
@@ -144,9 +121,9 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
         )}
 
         {/* Live region for streaming content updates */}
-        {isStreaming && message.content !== '' && (
+        {isStreaming && messageText(message) !== '' && (
           <div aria-live="polite" aria-atomic="true" className="sr-only">
-            {message.content.slice(-200)}
+            {messageText(message).slice(-200)}
           </div>
         )}
 

@@ -5,14 +5,24 @@ use crate::session::Session;
 use async_trait::async_trait;
 use std::sync::atomic::AtomicUsize;
 
-struct MockSessionManager;
+struct MockSessionManager {
+    /// 最近一次 add_structured_message 的实测输入（模拟 SQLite 持久化：
+    /// run_turns 从会话恢复实测输入的数据源；None = 无 usage，走估算）。
+    last_usage: Arc<std::sync::Mutex<Option<usize>>>,
+}
 #[async_trait]
 impl SessionManager for MockSessionManager {
     async fn add_structured_message(
         &self,
         _session_id: &str,
-        _msg: StructuredMessage,
+        msg: StructuredMessage,
     ) -> Result<()> {
+        // 模拟持久化：记录消息携带的实测输入（重启后 run_turns 可恢复）
+        if msg.tokens.input > 0 || msg.tokens.cache.read > 0 {
+            if let Ok(mut guard) = self.last_usage.lock() {
+                *guard = Some(msg.tokens.input + msg.tokens.cache.read);
+            }
+        }
         Ok(())
     }
     async fn rewrite_messages(
@@ -26,6 +36,22 @@ impl SessionManager for MockSessionManager {
         Ok(Session::new(_id))
     }
     async fn get_session(&self, _id: &str) -> Result<Option<Session>> {
+        // 有 usage 时返回带最后一条 assistant 消息的会话（run_turns 恢复实测输入）
+        if let Ok(guard) = self.last_usage.lock() {
+            if let Some(tokens) = *guard {
+                let mut session = Session::new(_id);
+                let mut sm = StructuredMessage::from_message(
+                    &Message::assistant("last"),
+                    _id,
+                    None,
+                    Some(crate::common::types::TokenUsage::new(tokens, 0)),
+                );
+                // 模拟持久化 model_id（run_turns 按模型过滤实测输入）
+                sm.model_id = Some("test-model".to_string());
+                session.messages.push(sm);
+                return Ok(Some(session));
+            }
+        }
         Ok(None)
     }
     async fn update_session(&self, _session: &Session) -> Result<()> {
@@ -44,7 +70,9 @@ fn test_agent_loop_config_default() {
     let config = AgentLoopConfig::default();
     assert_eq!(config.max_turns, 200);
     // Touch the mock to keep it "constructed" (dead-code lint).
-    let _mgr = MockSessionManager;
+    let _mgr = MockSessionManager {
+        last_usage: Arc::new(std::sync::Mutex::new(None)),
+    };
 }
 
 #[test]
@@ -127,7 +155,9 @@ fn make_loop(mock: MockChatService, max_turns: usize) -> AgentLoop {
     AgentLoop::new(
         Arc::new(mock),
         registry,
-        Arc::new(MockSessionManager),
+        Arc::new(MockSessionManager {
+            last_usage: Arc::new(std::sync::Mutex::new(None)),
+        }),
         AgentLoopConfig {
             max_turns,
             ..Default::default()
@@ -199,7 +229,9 @@ async fn test_run_ask_user_executes_as_sync_tool() {
     let agent_loop = AgentLoop::new(
         Arc::new(mock),
         registry,
-        Arc::new(MockSessionManager),
+        Arc::new(MockSessionManager {
+            last_usage: Arc::new(std::sync::Mutex::new(None)),
+        }),
         AgentLoopConfig {
             max_turns: 5,
             ..Default::default()
@@ -273,7 +305,9 @@ async fn test_run_approval_denied_returns_tool_error() {
     let agent_loop = AgentLoop::new(
         Arc::new(mock),
         registry,
-        Arc::new(MockSessionManager),
+        Arc::new(MockSessionManager {
+            last_usage: Arc::new(std::sync::Mutex::new(None)),
+        }),
         AgentLoopConfig {
             max_turns: 5,
             ..Default::default()
@@ -1329,19 +1363,27 @@ async fn test_run_stream_sets_dynamic_max_tokens_with_spec() {
     assert!(matches!(result, AgentLoopResult::Answer { .. }));
 }
 
-/// 1024 门槛：预置实测输入使剩余预算 < 1024 → 返回 Err 且不发送请求。
+/// 1024 门槛：会话恢复的实测输入使剩余预算 < 1024 → 返回 Err 且不发送请求。
 #[tokio::test]
 async fn test_run_errors_when_budget_below_min() {
     let mut mock = MockChatService::new();
     mock.expect_chat_completion()
         .returning(|_| panic!("预算不足时不应发送请求"));
-    let agent_loop = make_loop(mock, 5).with_chat_spec(Some(spec_128k_16k()));
+    // 会话最后一条消息带 usage（实测输入恢复源）：
     // 剩余 1137 × 0.9 = 1023 → pow2_floor = 512 < 1024 → dynamic_max_tokens 返回 None
-    agent_loop
-        .last_input_usage
-        .write()
-        .unwrap()
-        .replace(("test-model".to_string(), 128_000 - 1137));
+    let registry = ToolRegistry::new(SecurityPolicy::default());
+    let agent_loop = AgentLoop::new(
+        Arc::new(mock),
+        registry,
+        Arc::new(MockSessionManager {
+            last_usage: Arc::new(std::sync::Mutex::new(Some(128_000 - 1137))),
+        }),
+        AgentLoopConfig {
+            max_turns: 5,
+            ..Default::default()
+        },
+    )
+    .with_chat_spec(Some(spec_128k_16k()));
 
     let mut messages = vec![Message::user("测试")];
     let err = agent_loop

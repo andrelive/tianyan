@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
@@ -7,7 +7,10 @@ import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
 import { resetTaskMocks, mockSessionCompressCalls } from '@/test/mocks/handlers';
 import ChatPanel from '@/components/chat/ChatPanel';
-import type { ChatMessage } from '@/lib/types';
+import { routeChatStreamEvent } from '@/lib/chat-stream';
+import { applySnapshot } from '@/hooks/use-unified-events';
+import type { ChatMessage, ChatStreamEvent } from '@/lib/types';
+import { messageText } from '@/lib/types';
 
 function renderChatPanel(route = '/chat') {
   return render(
@@ -18,6 +21,18 @@ function renderChatPanel(route = '/chat') {
       </Routes>
     </MemoryRouter>,
   );
+}
+
+/** 构造统一事件通道的 chat_stream 事件（ADR-028 第 3 步：流式事件经
+ * GET /events 到达，测试直接驱动 routeChatStreamEvent 模拟）。 */
+function streamEvent(partial: Partial<ChatStreamEvent>): ChatStreamEvent {
+  return {
+    id: 'e1',
+    session_id: 'session-1',
+    delta: '',
+    chunk_type: 'answer',
+    ...partial,
+  } as ChatStreamEvent;
 }
 
 beforeEach(() => {
@@ -48,15 +63,17 @@ describe('ChatPanel', () => {
   });
 
   it('does not show empty state when there are messages', () => {
+    // 消息带 segments（服务端权威时间线，ADR-019：历史/流式同构——
+    // 渲染唯一路径 SegmentBlocks 依赖 segments）
     const messages: ChatMessage[] = [
       {
         role: 'user',
-        content: '你好',
+        segments: [{ type: 'text', text: '你好' }],
         timestamp: new Date().toISOString(),
       },
       {
         role: 'assistant',
-        content: '你好！我是天演',
+        segments: [{ type: 'text', text: '你好！我是天演' }],
         timestamp: new Date().toISOString(),
       },
     ];
@@ -75,12 +92,12 @@ describe('ChatPanel', () => {
       messages: [
         {
           role: 'user',
-          content: '测试消息',
+          segments: [{ type: 'text', text: '测试消息' }],
           timestamp: new Date().toISOString(),
         },
         {
           role: 'assistant',
-          content: '',
+          segments: [],
           timestamp: new Date().toISOString(),
         },
       ],
@@ -98,12 +115,12 @@ describe('ChatPanel', () => {
       messages: [
         {
           role: 'user',
-          content: '测试消息',
+          segments: [{ type: 'text', text: '测试消息' }],
           timestamp: new Date().toISOString(),
         },
         {
           role: 'assistant',
-          content: '已有内容',
+          segments: [{ type: 'text', text: '已有内容' }],
           timestamp: new Date().toISOString(),
         },
       ],
@@ -130,11 +147,21 @@ describe('ChatPanel', () => {
     const messages = useAppStore.getState().messages;
     expect(messages.length).toBeGreaterThanOrEqual(1);
 
+    // 模拟统一事件通道（GET /events）到达：用户消息边界 + 增量 + 完成
+    routeChatStreamEvent(
+      streamEvent({
+        message: { id: 'msg-user', role: 'user', segments: [{ type: 'text', text: '测试发送' }], timestamp: '' },
+        chunk_type: 'message',
+      }),
+    );
+    routeChatStreamEvent(streamEvent({ delta: '你好' }));
+    routeChatStreamEvent(streamEvent({ delta: '！', finish_reason: 'stop' }));
+
     // 流式完成后 user 消息经边界事件插入到 assistant 之前（顺序正确）
     await vi.waitFor(() => {
       const msgs = useAppStore.getState().messages;
       const userMsg = msgs.find((m) => m.role === 'user');
-      expect(userMsg?.content).toBe('测试发送');
+      expect(userMsg ? messageText(userMsg) : undefined).toBe('测试发送');
       const userIdx = msgs.findIndex((m) => m.role === 'user');
       const asstIdx = msgs.findIndex((m) => m.role === 'assistant');
       expect(userIdx).toBeGreaterThanOrEqual(0);
@@ -151,17 +178,40 @@ describe('ChatPanel', () => {
   });
 
   it('loads history messages when directly visiting a session URL (refresh/deep-link)', async () => {
-    // 刷新/直达 /chat/{id}：ChatPanel 挂载时从后端加载历史并渲染
+    // 刷新/直达 /chat/{id}：ChatPanel 挂载时订阅会话（ADR-029），
+    // 快照帧（完整历史 + cursor）经统一事件通道到达 → replace 窗口。
+    // 测试环境无 EventSource，快照帧由 applySnapshot 直接驱动模拟。
     renderChatPanel('/chat/session-1');
+
+    // 模拟订阅快照帧到达（服务端 /events/subscribe 已 mock 返回 ok）
+    act(() => {
+      applySnapshot(
+        'session-1',
+        [
+          {
+            id: 'msg-1',
+            role: 'user',
+            segments: [{ type: 'text', text: '你好' }],
+            timestamp: '2026-07-23T10:00:00Z',
+          },
+          {
+            id: 'msg-2',
+            role: 'assistant',
+            segments: [{ type: 'text', text: '你好！我是天演，有什么可以帮助你的？' }],
+            timestamp: '2026-07-23T10:00:05Z',
+          },
+        ],
+      );
+    });
 
     await waitFor(() => {
       const messages = useAppStore.getState().messages;
       expect(messages.length).toBeGreaterThanOrEqual(2);
       expect(messages[0].role).toBe('user');
-      expect(messages[0].content).toBe('你好');
+      expect(messageText(messages[0])).toBe('你好');
     });
 
-    // 历史消息渲染到页面（assistant 回复来自 mock /sessions/:id/messages）
+    // 历史消息渲染到页面（快照 replace 后渲染）
     await waitFor(() => {
       expect(screen.getByText('你好！我是天演，有什么可以帮助你的？')).toBeInTheDocument();
     });
@@ -178,11 +228,16 @@ describe('ChatPanel', () => {
     fireEvent.change(textarea, { target: { value: '这是一个 [error-test] 请求' } });
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
+    // 模拟统一事件通道到达 error 事件（服务端校验/处理失败）
+    routeChatStreamEvent(
+      streamEvent({ chunk_type: 'error', delta: '请求校验失败: [error-test] 是非法输入' }),
+    );
+
     // 服务端返回 chunk_type=error 后：空气泡被清理、状态回到 idle、错误 toast 显示
     await vi.waitFor(() => {
       const state = useAppStore.getState();
       const emptyAssistant = state.messages.filter(
-        (m) => m.role === 'assistant' && m.content === '',
+        (m) => m.role === 'assistant' && messageText(m) === '',
       );
       expect(emptyAssistant).toHaveLength(0);
       // streamStatus 按会话归属（Record）：断言所有会话均为 idle
@@ -198,12 +253,12 @@ describe('ChatPanel', () => {
       messages: [
         {
           role: 'user',
-          content: '第一条',
+          segments: [{ type: 'text', text: '第一条' }],
           timestamp: new Date().toISOString(),
         },
         {
           role: 'assistant',
-          content: '',
+          segments: [],
           timestamp: new Date().toISOString(),
         },
       ],
@@ -230,13 +285,13 @@ describe('ChatPanel', () => {
         {
           id: 'msg_0',
           role: 'user',
-          content: '你好',
+          segments: [{ type: 'text', text: '你好' }],
           timestamp: new Date().toISOString(),
         },
         {
           id: 'msg_1',
           role: 'assistant',
-          content: '你好！我是天演',
+          segments: [{ type: 'text', text: '你好！我是天演' }],
           timestamp: new Date().toISOString(),
         },
       ],
@@ -267,7 +322,7 @@ describe('ChatPanel', () => {
       messages: [
         {
           role: 'user',
-          content: '你好',
+          segments: [{ type: 'text', text: '你好' }],
           timestamp: new Date().toISOString(),
         },
       ],
@@ -280,7 +335,7 @@ describe('ChatPanel', () => {
     await waitFor(() => {
       const messages = useAppStore.getState().messages;
       expect(messages).toHaveLength(2);
-      expect(messages[1].content).toBe('你好！我是天演，有什么可以帮助你的？');
+      expect(messageText(messages[1])).toBe('你好！我是天演，有什么可以帮助你的？');
     });
     expect(useAppStore.getState().lastRollbackMessageId).toBeNull();
   });
@@ -338,7 +393,7 @@ describe('ChatPanel', () => {
       messages: [
         {
           role: 'assistant',
-          content: 'ok',
+          segments: [{ type: 'text', text: 'ok' }],
           timestamp: new Date().toISOString(),
           usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
         },
@@ -371,7 +426,7 @@ describe('ChatPanel', () => {
         {
           id: 'msg-1',
           role: 'assistant',
-          content: 'ok',
+          segments: [{ type: 'text', text: 'ok' }],
           timestamp: new Date().toISOString(),
           usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
         },
@@ -384,7 +439,7 @@ describe('ChatPanel', () => {
           message: {
             id: 'cmp_123',
             role: 'system',
-            content: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\n测试\n[摘要结束]',
+            segments: [{ type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\n测试\n[摘要结束]' }],
             timestamp: new Date().toISOString(),
           },
         });
@@ -405,7 +460,7 @@ describe('ChatPanel', () => {
       expect(msgs.length).toBe(2);
       expect(msgs[0].id).toBe('msg-1');
       expect(msgs[1].id).toBe('cmp_123');
-      expect(msgs[1].content).toContain('对话摘要');
+      expect(messageText(msgs[1])).toContain('对话摘要');
     });
   });
 
@@ -416,7 +471,7 @@ describe('ChatPanel', () => {
       messages: [
         {
           role: 'assistant',
-          content: 'ok',
+          segments: [{ type: 'text', text: 'ok' }],
           timestamp: new Date().toISOString(),
           usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
         },
@@ -445,7 +500,7 @@ describe('ChatPanel', () => {
       messages: [
         {
           role: 'assistant',
-          content: 'ok',
+          segments: [{ type: 'text', text: 'ok' }],
           timestamp: new Date().toISOString(),
           usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
         },
@@ -477,6 +532,10 @@ describe('ChatPanel', () => {
     fireEvent.change(textarea, { target: { value: '这是一个 [length-test] 请求' } });
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
+    // 模拟统一事件通道到达：增量 + length 完成
+    routeChatStreamEvent(streamEvent({ delta: '第一段' }));
+    routeChatStreamEvent(streamEvent({ delta: '', finish_reason: 'length' }));
+
     // SSE 流结束事件 finish_reason='length' → 助手消息下方显示截断提示
     await waitFor(() => {
       expect(screen.getByText(/输出已达上限/)).toBeInTheDocument();
@@ -500,6 +559,10 @@ describe('ChatPanel', () => {
     await user.type(textarea, '普通请求');
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
+    // 模拟统一事件通道到达：增量 + stop 完成
+    routeChatStreamEvent(streamEvent({ delta: '回答' }));
+    routeChatStreamEvent(streamEvent({ delta: '', finish_reason: 'stop' }));
+
     // 流正常结束后（finish_reason='stop'）不显示截断提示
     await waitFor(() => {
       // streamStatus 按会话归属（Record）：断言所有会话均为 idle
@@ -512,39 +575,24 @@ describe('ChatPanel', () => {
 
   it('accumulates thinking deltas separately and renders the collapsible block', async () => {
     const user = userEvent.setup();
-    // 覆盖 SSE：thought chunk 携带 thinking 增量，answer chunk 携带正文
-    server.use(
-      http.post('/api/v1/chat/stream', () => {
-        const encoder = new TextEncoder();
-        const chunks = [
-          'data: {"id":"msg-1","session_id":"session-1","delta":"","thinking":"先分析","chunk_type":"thought"}\n\n',
-          'data: {"id":"msg-1","session_id":"session-1","delta":"","thinking":"再想想","chunk_type":"thought"}\n\n',
-          'data: {"id":"msg-1","session_id":"session-1","delta":"最终输出","chunk_type":"answer"}\n\n',
-          'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',
-        ];
-        const stream = new ReadableStream({
-          start(controller) {
-            for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
-            controller.close();
-          },
-        });
-        return new HttpResponse(stream, {
-          headers: { 'Content-Type': 'text/event-stream' },
-        });
-      }),
-    );
     renderChatPanel();
 
     const textarea = screen.getByPlaceholderText(/输入消息/);
     fireEvent.change(textarea, { target: { value: '带思考的问题' } });
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
+    // 模拟统一事件通道到达：思考增量 + 正文 + 完成
+    routeChatStreamEvent(streamEvent({ delta: '', thinking: '先分析', chunk_type: 'thought' }));
+    routeChatStreamEvent(streamEvent({ delta: '', thinking: '再想想', chunk_type: 'thought' }));
+    routeChatStreamEvent(streamEvent({ delta: '最终输出' }));
+    routeChatStreamEvent(streamEvent({ delta: '', finish_reason: 'stop' }));
+
     // 思考增量与正文分开累积（思考不入 content）
     await waitFor(() => {
       const assistant = useAppStore.getState().messages.filter((m) => m.role === 'assistant');
       const last = assistant[assistant.length - 1];
       expect(last?.thinking).toBe('先分析再想想');
-      expect(last?.content).toBe('最终输出');
+      expect(last ? messageText(last) : undefined).toBe('最终输出');
     });
 
     // 思考块（可折叠）渲染在消息气泡中
@@ -552,3 +600,7 @@ describe('ChatPanel', () => {
     expect(screen.getByText('先分析再想想')).toBeInTheDocument();
   });
 });
+
+
+
+

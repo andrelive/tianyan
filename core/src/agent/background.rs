@@ -235,10 +235,21 @@ pub trait TaskWaker: Send + Sync {
     async fn wake(&self, session_id: &str);
 }
 
+/// 子代理暂存的结果（ADR-030：submit_result 工具写入；complete 时优先使用）。
+#[derive(Debug, Clone)]
+pub struct StagedResult {
+    /// 完整结果（子代理提交的最终报告/结论）。
+    pub result: String,
+    /// 可选一句话摘要（通知/唤醒轮用）。
+    pub summary: Option<String>,
+}
+
 /// 后台任务管理器：注册表 + 并发限制 + 完成通知分发 + 唤醒 + 可选持久化。
 #[derive(Clone)]
 pub struct BackgroundTaskManager {
     tasks: Arc<Mutex<HashMap<String, BackgroundTask>>>,
+    /// 子代理暂存结果（ADR-030：submit_result 写入；complete 时消费）。
+    staged_results: Arc<Mutex<HashMap<String, StagedResult>>>,
     /// 运行许可（同时运行上限；ADR-026 双信号量排队模型）。
     run_sem: Arc<Semaphore>,
     /// 排队槽位（排队上限；超出拒绝）。
@@ -275,6 +286,7 @@ impl BackgroundTaskManager {
     pub fn with_concurrency(max_concurrent: usize, max_queue: usize) -> Self {
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            staged_results: Arc::new(Mutex::new(HashMap::new())),
             run_sem: Arc::new(Semaphore::new(max_concurrent.max(1))),
             queue_sem: Arc::new(Semaphore::new(max_queue.max(max_concurrent.max(1)))),
             notifier: None,
@@ -448,8 +460,45 @@ impl BackgroundTaskManager {
         }
     }
 
+    /// 暂存子代理提交的结果（ADR-030：submit_result 工具写入；complete 时
+    /// 优先使用）。任务必须存在且未终态。
+    pub async fn stage_result(
+        &self,
+        id: &str,
+        result: String,
+        summary: Option<String>,
+    ) -> Result<()> {
+        self.ensure_reloaded().await;
+        let exists = {
+            let tasks = self.tasks.lock().await;
+            tasks.get(id).is_some()
+        };
+        if !exists {
+            return Err(TianyanError::not_found(format!("后台任务不存在：{id}")));
+        }
+        self.staged_results
+            .lock()
+            .await
+            .insert(id.to_string(), StagedResult { result, summary });
+        Ok(())
+    }
+
+    /// 读取子代理暂存结果（ADR-030：submit_result 写入；不消费）。
+    ///
+    /// 前台 `run_subagent_loop` 在收尾时读取暂存结果作为最终结果
+    /// （模型最后输出兜底）；后台 `complete` 消费同一暂存结果。
+    pub async fn staged_result(&self, id: &str) -> Option<StagedResult> {
+        self.staged_results.lock().await.get(id).cloned()
+    }
+
     /// 标记完成并触发通知（G4：注入前先过自审门，未通过则结果带标记）。
     pub async fn complete(&self, id: &str, result: String) {
+        // ADR-030：暂存结果（submit_result 写入）优先；否则用传入结果
+        let staged = self.staged_results.lock().await.remove(id);
+        let result = match staged {
+            Some(s) => s.result,
+            None => result,
+        };
         let result = self.maybe_self_review(id, &result).await;
         self.finish(
             id,

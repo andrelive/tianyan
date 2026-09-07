@@ -50,4 +50,4 @@
 - `core/src/executor/approval/workflow.rs` — request_approval_no_wait / ApprovalPendingNotifier / SessionApprovalNotifier
 - `core/src/agent/tool_registry/mod.rs` — execute_parallel / execute_single subagent 参数
 - `core/src/agent/tool_registry/{agent_ops,file_ops,code_ops}.rs` — 审批工具分流
-- `core/src/agent/loop.rs` — 主循环 subagent=false
+- `core/src/agent/loop.rs` — TurnPolicy（ADR-030）按策略选择工具执行器：主 agent Global（审批可交互）/ 子代理 RoleFiltered（审批不交互）

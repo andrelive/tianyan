@@ -67,3 +67,11 @@
 - 数据有界：内存（未终态任务）、SQLite（3 天 TTL）、FTS（子会话不索引）、子会话（级联 + 300 上限）。
 - 主 agent 对简单短任务也变成"委托→等通知→汇总"两轮，需实测验证不空转。
 - SQL 写失败语义从"仅告警"改为上抛，状态机操作可见性提升。
+
+## 后续演进
+
+本 ADR 中"子智能体消息流 `/tasks/stream`（事件按 task_id 归集）+ 展开历史 fetch"的模型已被
+[ADR-030](030-unified-agent-loop.md) 取代：子智能体 = 主会话同构（统一循环框架）——消息
+**落库即广播**（message 事件带 session_id=task_id）+ 流式事件经统一通道（`GET /events`），
+`/tasks/stream` 与前端本地事件累积（liveEvents/eventsToBlocks）删除，任务面板读 store
+渲染（保留本 ADR 的任务状态机/并发/排队/TTL/面板布局决策）。

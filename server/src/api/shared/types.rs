@@ -28,9 +28,16 @@ pub struct ChatMessage {
     pub id: Option<String>,
     /// 消息角色
     pub role: MessageRole,
-    /// 消息内容
-    pub content: String,
-    /// 思考过程文本（模型 reasoning；正文在 content，前端分开渲染）。
+    /// 前端生成的用户消息临时 id（ADR-031 乐观渲染定位键）——**仅请求方向**
+    /// 携带；落库后经 UserMessageId 确认事件回显真实 id，此后弃用（不持久化）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<String>,
+    /// 纯文本正文——**仅请求方向**（ChatRequest.message：用户输入）承载；
+    /// 响应方向（历史/快照/广播/边界事件）为 None 序列化跳过——正文在
+    /// segments 的 Text 段（单一事实源，渲染/复制/判断前端一律从 segments 取）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// 思考过程文本（模型 reasoning；正文在 segments，前端分开渲染）。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub thinking: Option<String>,
     /// 工具调用卡片（A2 展示契约：名称 + 参数 + 展示意图 + 对应执行结果，
@@ -100,18 +107,15 @@ impl ChatMessage {
     /// 从结构化消息的 parts 生成时间线段（历史加载与流式边界事件共用；
     /// 顺序 = 持久化 parts 顺序 = 真实到达顺序）。
     ///
-    /// - Part::Reasoning → Thinking 段
-    /// - Part::Text → Text 段
+    /// - Part::Reasoning → Thinking 段（仅 assistant 产生）
+    /// - Part::Text → Text 段（所有角色：用户/助手/系统通知的正文都进时间线，
+    ///   前端渲染统一走 SegmentBlocks——用户消息不再依赖"无 segments 兜底"）
     /// - Part::ToolCall → Tool 段（结果挂到 tool_calls 卡片，不产生段）
     /// - Part::ToolResult / Part::Image → 不产生段（结果合并/图片独立渲染）
     pub(crate) fn segments_from_parts(
-        role: &MessageRole,
+        _role: &MessageRole,
         parts: &[tianyan::common::types::Part],
     ) -> Option<Vec<MessageSegment>> {
-        // 时间线语义只属于 assistant 消息（思考/工具调用仅 assistant 产生）
-        if !matches!(role, MessageRole::Assistant) {
-            return None;
-        }
         let mut segments = Vec::new();
         for p in parts {
             match p {
@@ -207,11 +211,12 @@ impl ChatMessage {
     /// tool_calls 不填——流式期间前端已累积完整工具卡片（含结果），
     /// 历史加载走 sessions 服务的完整转换（跨消息合并工具结果）。
     pub(crate) fn from_structured_light(m: &tianyan::common::types::StructuredMessage) -> Self {
-        let (content, thinking, images) = Self::extract_parts(&m.parts);
+        let (_, thinking, images) = Self::extract_parts(&m.parts);
         Self {
             id: Some(m.id.clone()),
             role: m.role,
-            content,
+            user_message_id: None,
+            content: None,
             thinking: if thinking.is_empty() {
                 None
             } else {
@@ -250,7 +255,12 @@ impl ChatMessage {
         Self {
             id: None,
             role: MessageRole::System,
-            content: content.to_string(),
+            user_message_id: None,
+            // 构造器同时填 content（请求方向：用户输入契约）与 segments
+            // （响应方向：正文进时间线 Text 段——渲染/复制前端一律从
+            // segments 取，content 仅输入侧消费）
+            content: Some(content.to_string()),
+            segments: Some(vec![MessageSegment::Text { text: content.to_string() }]),
             thinking: None,
             tool_calls: None,
             images: None,
@@ -258,7 +268,6 @@ impl ChatMessage {
             interrupted: false,
             usage: None,
             timestamp: None,
-            segments: None,
         }
     }
 
@@ -273,7 +282,9 @@ impl ChatMessage {
         Self {
             id: None,
             role: MessageRole::User,
-            content: content.to_string(),
+            user_message_id: None,
+            content: Some(content.to_string()),
+            segments: Some(vec![MessageSegment::Text { text: content.to_string() }]),
             thinking: None,
             tool_calls: None,
             images: None,
@@ -281,7 +292,6 @@ impl ChatMessage {
             interrupted: false,
             usage: None,
             timestamp: None,
-            segments: None,
         }
     }
 
@@ -296,7 +306,9 @@ impl ChatMessage {
         Self {
             id: None,
             role: MessageRole::Assistant,
-            content: content.to_string(),
+            user_message_id: None,
+            content: Some(content.to_string()),
+            segments: Some(vec![MessageSegment::Text { text: content.to_string() }]),
             thinking: None,
             tool_calls: None,
             images: None,
@@ -304,7 +316,6 @@ impl ChatMessage {
             interrupted: false,
             usage: None,
             timestamp: None,
-            segments: None,
         }
     }
 }
@@ -454,9 +465,18 @@ mod tests {
     }
 
     #[test]
-    fn test_segments_none_for_plain_messages() {
+    fn test_segments_for_plain_messages() {
+        // 所有角色的正文都进时间线（Text 段）——用户/系统消息不再依赖
+        // "无 segments 兜底"，前端渲染统一走 SegmentBlocks
         let sm = tianyan::common::types::StructuredMessage::system("sess-1", "系统消息");
-        assert!(ChatMessage::segments_from_parts(&sm.role, &sm.parts).is_none());
+        let segs = ChatMessage::segments_from_parts(&sm.role, &sm.parts).expect("segments");
+        assert_eq!(segs.len(), 1);
+        match &segs[0] {
+            MessageSegment::Text { text } => {
+                assert_eq!(text, "系统消息");
+            }
+            other => panic!("应为 Text 段，实际: {other:?}"),
+        }
     }
 
     #[test]
@@ -475,3 +495,9 @@ mod tests {
         assert_eq!(usage.total_tokens, 150);
     }
 }
+
+
+
+
+
+

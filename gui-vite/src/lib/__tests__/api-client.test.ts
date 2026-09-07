@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { server } from '@/test/mocks/server';
+import { messageText } from '@/lib/types';
 import {
   mockTaskCancelCalls,
   mockSessionCompressCalls,
@@ -97,7 +98,7 @@ describe('apiPost', () => {
     expect(result.id).toBe('msg-1');
     expect(result.session_id).toBe('session-1');
     expect(result.message.role).toBe('assistant');
-    expect(result.message.content).toContain('天演');
+    expect(messageText(result.message)).toContain('天演');
     expect(result.usage.total_tokens).toBe(80);
   });
 
@@ -299,7 +300,7 @@ describe('compressSession', () => {
     expect(result.compressed).toBe(true);
     // 压缩成功时响应携带摘要消息（前端追加到消息流末尾）
     expect(result.message?.role).toBe('system');
-    expect(result.message?.content).toContain('对话摘要');
+    expect(result.message ? messageText(result.message) : '').toContain('对话摘要');
   });
 
   it('returns compressed=false when there is nothing to compress', async () => {
@@ -335,7 +336,7 @@ describe('apiPostMultipart', () => {
     const result = await apiPostMultipart<ChatResponse>('/chat', formData);
 
     expect(result.id).toBe('msg-1');
-    expect(result.message.content).toContain('天演');
+    expect(messageText(result.message)).toContain('天演');
   });
 
   it('throws ApiError on server error', async () => {
@@ -352,3 +353,6 @@ describe('apiPostMultipart', () => {
     await expect(apiPostMultipart('/upload-error', formData)).rejects.toThrow(ApiError);
   });
 });
+
+
+

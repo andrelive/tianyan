@@ -208,7 +208,11 @@ impl SessionService {
                         MessageRole::Tool => MessageRole::Assistant,
                         role => role,
                     },
-                    content,
+                    // 纯文本视图已移除（Option 仅请求方向承载）：正文在
+                    // segments 的 Text 段（单一事实源）；上方 content 变量仅
+                    // 用于空消息（tool 消息）跳过判断。
+                    user_message_id: None,
+                    content: None,
                     thinking: if thinking.is_empty() {
                         None
                     } else {
@@ -624,7 +628,7 @@ mod tests {
             .await
             .expect("get_session_detail 不应失败");
         let msg = &detail.messages[0];
-        assert_eq!(msg.content, "", "正文只含文本 parts，不含工具调用/结果文本");
+        assert!(msg.content.is_none(), "响应方向无纯文本字段（正文在 segments）");
         assert!(msg.thinking.is_none(), "无思考 parts 时 thinking 为空");
 
         let calls = msg.tool_calls.as_ref().expect("应输出 tool_calls");
@@ -745,7 +749,20 @@ mod tests {
         // 只有 1 条消息（role=tool 消息被合并消费后跳过）
         assert_eq!(detail.messages.len(), 1, "tool 结果消息应被合并后跳过");
         let msg = &detail.messages[0];
-        assert_eq!(msg.content, "先看看目录");
+        // 正文在 segments 的 Text 段（响应方向无纯文本字段）
+        let text: Vec<&str> = msg
+            .segments
+            .as_ref()
+            .map(|s| {
+                s.iter()
+                    .filter_map(|x| match x {
+                        crate::api::shared::types::MessageSegment::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(text, vec!["先看看目录"]);
         let calls = msg.tool_calls.as_ref().expect("应输出 tool_calls");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_1");
@@ -795,6 +812,8 @@ mod tests {
             "assistant 空消息应保留（前端轮询停止信号）"
         );
         assert_eq!(detail.messages[0].role, MessageRole::Assistant);
-        assert_eq!(detail.messages[0].content, "");
+        assert!(detail.messages[0].content.is_none(), "空 assistant 消息：无纯文本字段");
     }
 }
+
+

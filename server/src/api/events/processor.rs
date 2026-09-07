@@ -240,6 +240,7 @@ mod tests {
             _model: Option<&str>,
             _cancel: Option<Arc<AtomicBool>>,
             _thinking_effort: Option<String>,
+            _user_message_id: Option<&str>,
         ) -> tianyan::Result<tokio::sync::mpsc::Receiver<tianyan::Result<AgentStreamChunk>>>
         {
             Err(tianyan::TianyanError::Custom("测试桩".to_string()))

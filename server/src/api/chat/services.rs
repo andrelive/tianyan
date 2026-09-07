@@ -19,9 +19,9 @@ use crate::state::{RoleSync, SkillSync};
 fn to_core_message(msg: &ChatMessage) -> CoreMessage {
     match &msg.images {
         Some(images) if !images.is_empty() => {
-            CoreMessage::user_with_images(msg.content.clone(), images.clone())
+            CoreMessage::user_with_images(msg.content.clone().unwrap_or_default(), images.clone())
         }
-        _ => CoreMessage::user(msg.content.clone()),
+        _ => CoreMessage::user(msg.content.clone().unwrap_or_default()),
     }
 }
 
@@ -100,7 +100,7 @@ impl ChatService {
         tx: mpsc::Sender<ChatStreamEvent>,
         cancel: Arc<AtomicBool>,
     ) -> Result<(), ApiError> {
-        let last_text = request.message.content.clone();
+        let last_text = request.message.content.clone().unwrap_or_default();
         let last_message = to_core_message(&request.message);
 
         let (session_id, is_new) = resolve_or_create_session(
@@ -123,6 +123,8 @@ impl ChatService {
                 request.model.as_deref(),
                 Some(cancel),
                 request.thinking,
+                // ADR-031：乐观渲染定位键（落库后经 UserMessageId 确认事件回显）
+                request.message.user_message_id.as_deref(),
             )
             .await?;
 
@@ -215,7 +217,7 @@ impl ChatService {
 /// - ToolCall → tool_call 字段（A2 工具卡片），delta 丢弃（"调用: xxx" 不进正文）
 /// - Observation → 丢弃（工具结果 JSON 不再淹没正文）
 /// - Answer / Error → delta（正文增量）
-fn map_chunk_to_event(
+pub(crate) fn map_chunk_to_event(
     chunk: tianyan::agent::AgentStreamChunk,
     stream_id: &str,
     session_id: &str,
@@ -255,6 +257,9 @@ fn map_chunk_to_event(
         skill_calls,
         tool_call: chunk.tool_call,
         tool_result: chunk.tool_result,
+        // ADR-031：用户消息落库确认（乐观渲染的 id 回显）
+        user_message_id: chunk.user_message_id,
+        message_id: chunk.message_id,
         usage: chunk.token_usage.map(|u| StreamUsage {
             prompt_tokens: u.prompt_tokens as u64,
             completion_tokens: u.completion_tokens as u64,
@@ -385,3 +390,4 @@ mod tests {
         assert_eq!(fr.as_deref(), Some("stop"));
     }
 }
+

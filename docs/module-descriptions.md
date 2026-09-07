@@ -24,7 +24,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 | 子模块 | 职责 | 关键文件 | 集成状态 |
 |--------|------|---------|---------|
-| `agent` | Agent 协调器 + AgentLoop 迭代循环 + 会话状态；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器）+ 内置可观测性监听器（`tool_registry/observability.rs`） | coordinator.rs, builder.rs, session_state.rs, loop.rs, tool_registry/（含 pipeline.rs、observability.rs）, tools.rs, types.rs | ✅ 已集成 |
+| `agent` | Agent 协调器 + AgentLoop 迭代循环 + 会话状态；**统一循环框架（ADR-030）**：主 agent 与子代理同构（`TurnPolicy` 配置），子代理用流式路径 + 消息落库不索引 FTS（ADR-031：消息不再广播，chat_stream 带 session_id=task_id 路由）；ToolRegistry 工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器）+ 内置可观测性监听器（`tool_registry/observability.rs`） | coordinator.rs, builder.rs, session_state.rs, loop.rs, tool_registry/（含 pipeline.rs、observability.rs）, tools.rs, types.rs | ✅ 已集成 |
 | `common` | 通用类型（按领域拆分）、错误处理、日志配置、token 估算 | error.rs, logging.rs, token_estimator.rs, types/ | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
 | `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
@@ -53,7 +53,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `AgentBuilder` | 构建器模式创建 Agent（构造 AgentLoop + ToolRegistry；`Agent::new` 7 参数） |
 | `AgentLoop` | Agent 迭代循环（LLM 工具调用循环） |
 | `AgentLoopConfig` | AgentLoop 配置（loop_limit 默认 50） |
-| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls（JoinSet，同轮多调用并发）；注册 25 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](./architecture/tool-catalog.md)，freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁，A3）；工具执行走**可插拔管线**（`tool_registry/pipeline.rs`：pre-execute 监听器 → 单调守卫 → 执行 → post-execute 监听器，A1/A4）；内置可观测性监听器（`tool_registry/observability.rs`）承担 usage stats / Trace / GEPA 执行历史 / 失败规则学习；工具展示意图映射（`ToolPresentation`，A2）供前端渲染 tool card；`delegate_to_agent` 支持嵌套委托（深度上限 3，RAII guard 计数随任务闭包持有）、`max_turns`/`timeout_secs` 参数，**委托只支持异步**（ADR-026：一律注册后台任务 + 立即返回 task_id）；后台任务排队模型（运行上限 `agent.max_background_concurrency`=20、排队上限 `agent.max_background_queue`=40，双信号量）与终端命令并发（`agent.max_command_concurrency`=16）可配置 |
+| `ToolRegistry` | 工具注册表，维护 ToolDefinition[] 并并行执行 tool_calls（JoinSet，同轮多调用并发）；注册 25 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](./architecture/tool-catalog.md)，freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁，A3）；工具执行走**可插拔管线**（`tool_registry/pipeline.rs`：pre-execute 监听器 → 单调守卫 → 执行 → post-execute 监听器，A1/A4）；内置可观测性监听器（`tool_registry/observability.rs`）承担 usage stats / Trace / GEPA 执行历史 / 失败规则学习；工具展示意图映射（`ToolPresentation`，A2）供前端渲染 tool card；`delegate_to_agent` 走**统一循环框架**（ADR-030：`run_subagent_loop` = AgentLoop 实例 + `TurnPolicy` 委托策略——角色过滤工具执行、不索引 FTS、max_turns 尽力而为、流式路径），支持嵌套委托（深度上限 3，RAII guard 计数随任务闭包持有）、`max_turns`/`timeout_secs` 参数，**委托只支持异步**（ADR-026：一律注册后台任务 + 立即返回 task_id）；submit_result 降级为可选结果落盘工具（`stage_result` 写入暂存，返回 task_id 供 `task_status` 查询）；后台任务排队模型（运行上限 `agent.max_background_concurrency`=20、排队上限 `agent.max_background_queue`=40，双信号量）与终端命令并发（`agent.max_command_concurrency`=16）可配置 |
 | `SessionState` | 会话状态容器（对话历史为唯一真相源，上下文窗口、待持久化记忆） |
 | `SessionStateManager` | 多会话状态管理器（线程安全，Arc<RwLock<HashMap>>） |
 | `AgentResponse` | Agent 响应（内容、追问、Token 使用量、技能调用信息、处理时间） |
@@ -71,7 +71,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 **核心架构决策集成**：
 
-1. **StructuredMessage 持久化**：AgentLoop 每产生一条消息，实时调 `SessionManager::add_structured_message()` 落盘，工具调用消息全部持久化。
+1. **StructuredMessage 持久化**：AgentLoop 每产生一条消息，实时调 `SessionManager::add_structured_message()` 落盘，工具调用消息全部持久化；子代理按 `TurnPolicy.persist_no_fts` 走 `add_structured_message_no_fts()`（不索引 FTS，ADR-026——无"人"提供的信息不参与回忆检索）；消息不再广播（ADR-031：流式增量 + 完成事件到前端，快照兜底）。
 2. **压缩锚点**：`StructuredMessage.compression_marker` 标记压缩产生的摘要消息，加载会话时反向扫描到最近 marker。
 3. **组件工具化**：`ToolRegistry` 注册 25 个 OpenAI function calling 兼容工具（完整清单见自动生成的 [`tool-catalog.md`](architecture/tool-catalog.md)），`call_skill` 桥接到 `SkillExecutor`；工具执行走可插拔管线（pre-execute 监听器 / 单调守卫 / post-execute 监听器）。
 
@@ -544,7 +544,7 @@ Tauri lib.rs::run()
 ---
 
 **文档版本**: 2026-08-07
-**最后更新**: 2026-08（H/I/J 波架构收敛同步：截断/HTTP/工具元数据/工作目录解析/错误映射单点化；snapshot redo 独立子模块；AgentLoop 测试拆分；前端 ListDetailPanel/streaming-indicator/INPUT_CLASS 收敛）
+**最后更新**: 2026-09-06（ADR-028/029/030 同步：统一事件推送、事件订阅与快照恢复、统一 Agent 循环框架）。此前：2026-08（H/I/J 波架构收敛同步：截断/HTTP/工具元数据/工作目录解析/错误映射单点化；snapshot redo 独立子模块；AgentLoop 测试拆分；前端 ListDetailPanel/streaming-indicator/INPUT_CLASS 收敛）
 **历史**: 2026-08-06（Wave 6 重构后同步：executor 拆分 security/command/output_parse、tool_registry 4 域文件、approval//image//lancedb/ 目录化、SqliteDb/RetrievalTrace/LoggingConfig/TokenEstimator 下沉（ADR-007）、observability 2 文件、SessionManager 仅存 PersistentSessionManager、GcTask 删除投机代码、会话截断常量单点）
 **历史**: 2026-08-04（重构：storage→vfs，移除 planner/chunker/ModelRouter/TokenBudget/ConversationSummarizer/VisionEncoder/AgentHarness/AgentSkills wrapper，修正 ContentLoadStrategy→enum、L1 tokens→~2K、MemoryExtractionTrait→MemoryExtractor，反映 4 项核心架构决策，model/router+openai→provider，tasks→scheduler/tasks，executor 标注废弃，knowledge 确认未集成，session 确认已集成）
 **历史**: 2026-08-04（审查改进 16 项：knowledge_ingest 工具确认已接入 Agent 流程；ToolRegistry 拆分 execute_single 为 14 个独立工具方法；审批默认关闭无人值守、拒绝降级 ask_user 追问；TianyanError 新增 not_found/is_not_found 结构化错误分类；AppState 复用 ModelServices；SummaryTask 缓存 FIFO 淘汰；SSE 事件 id 语义对齐）

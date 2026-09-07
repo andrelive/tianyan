@@ -100,3 +100,11 @@ tokio::spawn(async move {                          // watcher：专职等句柄
 3. server：`POST /chat/stream` 改造为启动循环即返回；删除 draining forwarder
 4. 前端：恢复 mergeServerMessages → 常驻 EventSource（全局单连接，按 session_id 路由 + 断点对齐 replace 兜底）→ 删除唤醒轮询/任务终态轮询 → 终端组件 + 日志查看器
 5. 验证：通知实时可见（10s 后台命令场景）、断线重连（服务重启期间消息补齐）、任务 panic 兜底（注入 panic 测试）
+
+## 后续演进
+
+本 ADR 的"全局广播 + 前端 fetch 快照"模型已被 [ADR-029](029-event-subscription-snapshot.md)
+演进：推送范围从"所有会话"变为"订阅的会话"（按连接订阅分发），快照恢复从"前端 fetch
+全量"变为"订阅时后端推快照"（快照与实时同一条流，消除合并竞态）。单连接、落库即推送、
+断点对齐兜底、任务事件尽力而为等决策保持不变。
+

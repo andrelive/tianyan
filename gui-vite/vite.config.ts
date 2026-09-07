@@ -15,6 +15,16 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:3000',
         changeOrigin: true,
+        configure: (proxy) => {
+          // SSE 长连接（GET /events）：http-proxy 的 writeHeaders 在 proxyRes
+          // 事件后同步执行——flushHeaders 必须延迟到 writeHeaders 之后
+          // （否则先发空头 → headersSent=true → content-type 丢失）
+          proxy.on('proxyRes', (proxyRes, _req, res) => {
+            if (proxyRes.headers['content-type']?.includes('text/event-stream')) {
+              setImmediate(() => res.flushHeaders());
+            }
+          });
+        },
       },
     },
   },
@@ -43,3 +53,4 @@ export default defineConfig({
     },
   },
 });
+

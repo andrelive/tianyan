@@ -10,14 +10,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::mpsc;
 use tokio::sync::{OwnedMutexGuard, RwLock};
 
 use crate::agent::background::{BackgroundTaskManager, TaskWaker};
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
 use crate::agent::tool_registry::DynamicToolExecutor;
-use crate::agent::types::{AgentResponse, AgentState, StreamChunkType, StreamEventSender};
-use crate::common::error::{Result, TianyanError};
+use crate::agent::types::{
+    AgentResponse, AgentState, AgentStreamChunk, StreamChunkType, StreamEventSender,
+};
+use crate::common::error::Result;
 use crate::common::types::{
     InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage,
 };
@@ -174,10 +177,21 @@ impl Agent {
     /// System 完成通知）+ 唤醒指令；模型可输出空文本合法结束；失败重试
     /// [`WAKE_RETRY_LIMIT`] 次后降级为静默（消息已在 transcript，用户下
     /// 一条消息自然触发）。
-    pub(crate) async fn process_wake(&self, session_id: &str) {
+    /// 唤醒轮（ADR-013：后台任务完成 → 主 agent 汇总下一轮）。
+    ///
+    /// ADR-031：**流式化**——输出经 StreamEventSender 逐 chunk 推送（调用方
+    /// 转发到统一事件通道，前端打字机看到汇总），不再依赖"落库广播"作为
+    /// 无活跃流时的输出通道。返回事件接收器（调用方消费/转发；不消费时
+    /// 发送静默失败，不影响唤醒轮本身）。
+    pub(crate) async fn process_wake(
+        &self,
+        session_id: &str,
+    ) -> mpsc::Receiver<Result<AgentStreamChunk>> {
+        let (tx, rx) = mpsc::channel(100);
+        let sender = StreamEventSender::new(tx.clone());
         let _turn = self.turn_guard(session_id).await;
 
-        let mut last_err: Option<TianyanError> = None;
+        let mut last_err: Option<String> = None;
         for attempt in 0..WAKE_RETRY_LIMIT {
             if attempt > 0 {
                 tokio::time::sleep(WAKE_RETRY_DELAY).await;
@@ -186,7 +200,7 @@ impl Agent {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(session = %session_id, error = %e, "唤醒轮加载会话失败");
-                    last_err = Some(e);
+                    last_err = Some(e.to_string());
                     continue;
                 }
             };
@@ -195,13 +209,15 @@ impl Agent {
                 let s = state.read().await;
                 s.structured_messages.last().map(|m| m.id.clone())
             };
+            let start = Instant::now();
 
             let loop_result = self
                 .agent_loop
                 .clone()
                 .with_allow_empty_answer()
-                .run(
+                .run_stream(
                     &mut messages.clone(),
+                    sender.clone(),
                     session_id,
                     parent_id.as_deref(),
                     &self.default_model,
@@ -211,19 +227,8 @@ impl Agent {
                 )
                 .await;
 
-            match loop_result {
-                Ok(AgentLoopResult::Answer {
-                    content,
-                    total_tokens,
-                    persisted_message,
-                    ..
-                }) => {
-                    state
-                        .write()
-                        .await
-                        .add_structured_message(*persisted_message);
-                    self.update_agent_metrics(session_id, Some(&total_tokens), true)
-                        .await;
+            match &loop_result {
+                Ok(AgentLoopResult::Answer { content, .. }) => {
                     if content.is_empty() {
                         // 空输出是重要事件（主 agent 静默无反馈的取证点）：
                         // info 级别可见，便于排查"任务完成但无反应"类问题。
@@ -231,18 +236,33 @@ impl Agent {
                     } else {
                         tracing::info!(session = %session_id, "唤醒轮完成：后台任务结果已汇总");
                     }
-                    return;
                 }
-
                 Ok(AgentLoopResult::Cancelled { .. }) => {
                     tracing::debug!(session = %session_id, "唤醒轮被取消");
-                    return;
+                }
+                Ok(AgentLoopResult::MaxTurnsReached { content, .. }) => {
+                    // ADR-030：唤醒轮用默认策略（max_turns 报错），此变体
+                    // 仅防御性覆盖——尽力而为策略下达到轮数上限视为完成
+                    tracing::info!(session = %session_id, content_len = content.len(), "唤醒轮达到轮数上限");
                 }
                 Err(e) => {
                     tracing::warn!(session = %session_id, error = %e, attempt, "唤醒轮执行失败");
-                    last_err = Some(e);
+                    last_err = Some(e.to_string());
+                    continue;
                 }
             }
+            // 统一结果处理（Stream 模式：send_complete + 落库 + 指标）
+            let (_, loop_tokens) = self
+                .apply_loop_result(
+                    &state,
+                    loop_result,
+                    start,
+                    &TurnMode::Stream { sender: sender.clone() },
+                )
+                .await;
+            self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
+                .await;
+            return rx;
         }
         tracing::warn!(
             error = ?last_err,
@@ -250,6 +270,14 @@ impl Agent {
             "唤醒轮重试 {} 次后放弃（消息已在会话中，用户下一条消息自然触发）",
             WAKE_RETRY_LIMIT - 1
         );
+        // 重试耗尽：错误事件（前端可见——不再静默）
+        sender
+            .send_error(&format!(
+                "唤醒轮失败：{}",
+                last_err.unwrap_or_default()
+            ))
+            .await;
+        rx
     }
 
     /// 组装唤醒轮上下文（ADR-013）。
@@ -594,6 +622,7 @@ impl Agent {
         model: &str,
         start: Instant,
         cancel: Option<&AtomicBool>,
+        user_message_id: Option<&str>,
         options: TurnOptions,
     ) -> Result<AgentResponse> {
         // 0. Capture workspace snapshot (before message processing, for session rollback)
@@ -603,14 +632,21 @@ impl Agent {
         }
 
         // 1. Persist current user message
-        // 流式路径：入库后立即发送消息边界事件（携带服务端结构化消息，
-        // 前端同步本地 id/内容）。由入库侧发送保证边界与入库时序一致——
-        // 服务端 pump 不再读取"最后一条消息"猜测当前轮归属（修复第二轮
-        // 竞态：用户消息未入库时误发上一轮 assistant 边界，导致前端把
-        // 上一轮输出合并进本轮占位而重复显示）。
+        // 流式路径：入库后立即发送确认事件（ADR-031：乐观渲染的 id 回显——
+        // 携带前端 user_message_id 与落库后的真实 message_id，前端比对后
+        // 把本地乐观消息替换为真实 id）。由入库侧发送保证确认与入库时序
+        // 一致——服务端 pump 不再读取"最后一条消息"猜测当前轮归属（修复
+        // 第二轮竞态：用户消息未入库时误发上一轮 assistant 边界，导致前端
+        // 把上一轮输出合并进本轮占位而重复显示）。
         let persisted_user = self.persist_user_message(session_id, state, message).await;
         if let TurnMode::Stream { sender } = &options.mode {
             if let Some(sm) = persisted_user {
+                // ADR-031：乐观渲染的 id 回显（前端比对 user_message_id 后
+                // 把本地乐观消息替换为真实 id）——与消息边界并存（波次过渡：
+                // 前端乐观渲染落地后边界事件按 id 去重自动失效，波次 4 移除）。
+                if let Some(umid) = user_message_id {
+                    sender.send_user_message_id(umid, &sm.id).await;
+                }
                 sender.send_message_boundary(sm).await;
             }
         }
@@ -720,6 +756,37 @@ impl Agent {
                             )
                             .await;
                         finalize_response(AgentResponse::simple(content), &total_tokens, start)
+                    }
+                }
+            }
+
+            Ok(AgentLoopResult::MaxTurnsReached {
+                content,
+                total_tokens,
+                last_turn_usage,
+                turns,
+            }) => {
+                // ADR-030：尽力而为策略（子代理）达到轮数上限——返回最后
+                // 输出（消息已逐轮持久化，不重复落库）
+                tracing::info!(turns, "AgentLoop 达到轮数上限（尽力而为）");
+                self.metrics.record_execution(true).await;
+                loop_tokens = Some(total_tokens.clone());
+                match mode {
+                    TurnMode::Plain => finalize_response(
+                        AgentResponse::simple(content),
+                        &total_tokens,
+                        start,
+                    ),
+                    TurnMode::Stream { sender } => {
+                        let usage = last_turn_usage.unwrap_or_else(|| total_tokens.clone());
+                        sender
+                            .send_complete("", StreamChunkType::Answer, None, None, Some(usage))
+                            .await;
+                        finalize_response(
+                            AgentResponse::simple(content),
+                            &total_tokens,
+                            start,
+                        )
                     }
                 }
             }
@@ -880,15 +947,23 @@ fn insert_session_hint(messages: &mut Vec<Message>, session_id: &str) {
 /// 用 `Weak<Agent>` 打破循环引用（Agent → AgentLoop → ToolRegistry →
 /// BackgroundTaskManager → TaskWaker → Agent）；Agent 已销毁时唤醒静默丢弃。
 /// `wake` 内部 spawn 独立任务执行唤醒轮，不阻塞任务完成收尾。
+///
+/// ADR-031：唤醒轮流式化——`forward` 由宿主（server）注入，把唤醒轮的
+/// 流式事件转发到统一事件通道（前端打字机看到汇总输出）。
 pub struct AgentWakeForwarder {
     agent: std::sync::Weak<Agent>,
+    forward: Arc<dyn Fn(&str, mpsc::Receiver<Result<AgentStreamChunk>>) + Send + Sync>,
 }
 
 impl AgentWakeForwarder {
     /// 创建转发器（引用持有方必须与 `agent` 同一 Arc）。
-    pub fn new(agent: &Arc<Agent>) -> Self {
+    pub fn new(
+        agent: &Arc<Agent>,
+        forward: Arc<dyn Fn(&str, mpsc::Receiver<Result<AgentStreamChunk>>) + Send + Sync>,
+    ) -> Self {
         Self {
             agent: Arc::downgrade(agent),
+            forward,
         }
     }
 }
@@ -901,8 +976,10 @@ impl TaskWaker for AgentWakeForwarder {
             return;
         };
         let session_id = session_id.to_string();
+        let forward = self.forward.clone();
         tokio::spawn(async move {
-            agent.process_wake(&session_id).await;
+            let rx = agent.process_wake(&session_id).await;
+            forward(&session_id, rx);
         });
     }
 }
@@ -920,6 +997,7 @@ impl crate::executor::CommandWaker for CommandWakeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::error::TianyanError;
     use crate::agent::session_state::SessionState;
     use crate::common::types::{InjectableContext, MessageRole};
     use crate::context::assembler::ContextAssembler;
@@ -988,6 +1066,44 @@ mod tests {
             }],
             usage: TokenUsage::default(),
         }
+    }
+
+    /// 流式完成 chunk（ADR-031：唤醒轮流式化后 mock 走 chat_completion_stream）。
+    fn stream_chunk_finish(content: &str) -> crate::model::types::ChatCompletionChunk {
+        use crate::model::types::{ChunkChoice, DeltaContent};
+        crate::model::types::ChatCompletionChunk {
+            id: "chunk-f".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: DeltaContent {
+                    role: None,
+                    content: Some(content.to_string()),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: Some(TokenUsage::default()),
+        }
+    }
+
+    /// 流式 mock：固定 chunk 序列（每次调用重放）。
+    fn stream_mock(chunks: Vec<crate::model::types::ChatCompletionChunk>) -> MockChatService {
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion_stream().returning(move |_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = chunks.clone();
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+        mock
     }
 
     fn ask_user_msg(question: &str) -> Message {
@@ -1301,15 +1417,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_wake_produces_summary() {
-        let mut mock = MockChatService::new();
-        mock.expect_chat_completion().times(1).returning(|_| {
-            Ok(response_with(Message::assistant(
-                "三个调研任务汇总：已完成",
-            )))
-        });
+        // ADR-031：唤醒轮流式化——mock 走 chat_completion_stream
+        let mock = stream_mock(vec![stream_chunk_finish("三个调研任务汇总：已完成")]);
         let agent = make_agent(mock);
 
-        agent.process_wake("session-1").await;
+        let rx = agent.process_wake("session-1").await;
+        // 消费事件（转发器语义：不消费时发送静默失败，不影响唤醒轮）
+        drop(rx);
 
         let state = agent.state.read().await;
         assert_eq!(
@@ -1321,13 +1435,11 @@ mod tests {
     #[tokio::test]
     async fn test_process_wake_empty_answer_legal() {
         // ADR-013：唤醒轮空输出是合法结束（模型无需回复），非错误
-        let mut mock = MockChatService::new();
-        mock.expect_chat_completion()
-            .times(1)
-            .returning(|_| Ok(response_with(Message::assistant(""))));
+        let mock = stream_mock(vec![stream_chunk_finish("")]);
         let agent = make_agent(mock);
 
-        agent.process_wake("session-1").await;
+        let rx = agent.process_wake("session-1").await;
+        drop(rx);
 
         let state = agent.state.read().await;
         assert_eq!(
@@ -1393,14 +1505,17 @@ mod tests {
     async fn test_process_wake_retries_then_gives_up() {
         // 失败重试 3 次后静默放弃（ADR-013：重试 2 次后降级），不 panic、不记成功
         let mut mock = MockChatService::new();
-        mock.expect_chat_completion()
+        mock.expect_chat_completion_stream()
             .times(3)
             .returning(|_| Err(TianyanError::Custom("mock: LLM 不可用".to_string())));
         let agent = make_agent(mock);
 
-        agent.process_wake("session-1").await;
+        let rx = agent.process_wake("session-1").await;
+        drop(rx);
 
         let state = agent.state.read().await;
         assert_eq!(state.conversations_processed, 0, "失败重试后不记成功");
     }
 }
+
+

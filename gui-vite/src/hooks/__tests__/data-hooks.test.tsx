@@ -105,25 +105,18 @@ describe('usePolling', () => {
 });
 
 describe('useChatStream', () => {
-  it('streams SSE events into the store and completes with the stream session', async () => {
-    const onComplete = vi.fn();
+  it('starts the loop and returns the confirmed session id', async () => {
     const onError = vi.fn();
     const { result } = renderHook(() =>
       useChatStream({
         streamUrl: '/api/v1/chat/stream',
-        onComplete,
         onError,
       }),
     );
 
-    // 与 ChatPanel.handleSend 一致（ADR-028）：只加 assistant 占位（id: null），
-    // user 消息由服务端边界事件提供；流式增量累积在占位上（归约器不自行创建消息）
-    act(() => {
-      useAppStore.getState().addMessage({ role: 'assistant', content: '', id: null, timestamp: '' });
-    });
-
+    let sid: string | null = null;
     await act(async () => {
-      await result.current.startStream({
+      sid = await result.current.startStream({
         session_id: 'session-1',
         message: { role: 'user', content: '你好' },
         stream: true,
@@ -133,15 +126,11 @@ describe('useChatStream', () => {
     });
 
     expect(onError).not.toHaveBeenCalled();
-    expect(onComplete).toHaveBeenCalledWith('session-1');
-    // MSW 流式 fixture：answer delta「你好」「！」累积到 assistant 消息
-    const messages = useAppStore.getState().messages;
-    const assistant = messages.find((m) => m.role === 'assistant');
-    expect(assistant?.content).toContain('你好');
-    expect(assistant?.content).toContain('！');
+    // ADR-028 第 3 步：启动请求立即返回服务端确认的 session_id
+    expect(sid).toBe('session-1');
   });
 
-  it('reports non-OK responses through onError without a session', async () => {
+  it('reports non-OK responses through onError', async () => {
     server.use(http.post('/api/v1/chat/stream', () => new HttpResponse(null, { status: 500 })));
     const onError = vi.fn();
     const { result } = renderHook(() =>
@@ -151,8 +140,9 @@ describe('useChatStream', () => {
       }),
     );
 
+    let sid: string | null = 'x';
     await act(async () => {
-      await result.current.startStream({
+      sid = await result.current.startStream({
         session_id: 'session-1',
         message: { role: 'user', content: '你好' },
         stream: true,
@@ -162,21 +152,26 @@ describe('useChatStream', () => {
     });
 
     expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0][0]).toBeNull(); // 无事件 → streamSessionId 为 null
+    expect(sid).toBeNull(); // 启动失败 → 无 session_id
   });
 
-  it('stopStream aborts an in-flight stream and completes without error', async () => {
-    const onComplete = vi.fn();
+  it('stopStream aborts an in-flight start request without error', async () => {
+    // 延迟响应：让 abort 在 fetch 挂起时生效（MSW 默认立即返回，abort 来不及）
+    server.use(
+      http.post('/api/v1/chat/stream', async () => {
+        await new Promise((r) => setTimeout(r, 50));
+        return HttpResponse.json({ status: 'started', session_id: 'session-1' });
+      }),
+    );
     const onError = vi.fn();
     const { result } = renderHook(() =>
       useChatStream({
         streamUrl: '/api/v1/chat/stream',
-        onComplete,
         onError,
       }),
     );
 
-    let started!: Promise<void>;
+    let started!: Promise<string | null>;
     act(() => {
       started = result.current.startStream({
         session_id: 'session-1',
@@ -191,8 +186,10 @@ describe('useChatStream', () => {
       await started;
     });
 
+    // 核心语义：stop 不触发 onError（abort 是否真正中断请求受测试环境限制——
+    // jsdom AbortController 跨 realm 被 Node fetch 拒绝后降级为无 signal
+    // 请求，abort 退化为无效操作，见 fetch-with-signal.ts）
     expect(onError).not.toHaveBeenCalled();
-    expect(onComplete).toHaveBeenCalledTimes(1);
   });
 });
 

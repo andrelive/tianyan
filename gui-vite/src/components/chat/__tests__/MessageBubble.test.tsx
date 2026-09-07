@@ -7,7 +7,7 @@ describe('MessageBubble interrupted hint', () => {
   it('shows the persistent interrupted hint (no interactive button)', () => {
     render(
       <MessageBubble
-        message={{ role: 'assistant', content: '对了一半。本地快速通路：不是', interrupted: true }}
+        message={{ role: 'assistant', segments: [{ type: 'text', text: '对了一半。本地快速通路：不是' }], interrupted: true }}
         index={0}
         isStreaming={false}
         onRollback={() => {}}
@@ -21,10 +21,25 @@ describe('MessageBubble interrupted hint', () => {
 });
 
 describe('MessageBubble history rendering', () => {
-  it('renders tool calls with results from history messages (no segments)', () => {
+  it('renders user message content without segments (regression: 空气泡)', () => {
+    // 服务端 segments 只属于 assistant（segments_from_parts 对非 assistant
+    // 恒返回 None）——用户消息直接渲染 content，不依赖 segments
+    const userMsg: ChatMessage = {
+      role: 'user',
+      segments: [{ type: 'text', text: '请写一篇 800 字的文章' }],
+      timestamp: '2026-09-06T00:00:00Z',
+    };
+    render(
+      <MessageBubble message={userMsg} index={0} isStreaming={false} onRollback={() => {}} />,
+    );
+    expect(screen.getByText('请写一篇 800 字的文章')).toBeInTheDocument();
+  });
+
+  it('renders tool calls with results from history messages', () => {
+    // 历史消息携带服务端权威 segments（ADR-019：由 StructuredMessage.parts
+    // 生成，tool 段 + 结果挂 tool_calls）——渲染唯一路径 SegmentBlocks
     const historyMsg: ChatMessage = {
       role: 'assistant',
-      content: '已读取文件。',
       thinking: '思考过程',
       tool_calls: [
         {
@@ -34,6 +49,19 @@ describe('MessageBubble history rendering', () => {
           presentation: 'read',
           result: '{"content":"文件内容abc"}',
         },
+      ],
+      segments: [
+        { type: 'thinking', text: '思考过程' },
+        {
+          type: 'tool',
+          tool_call: {
+            id: 'call_1',
+            name: 'read_file',
+            arguments: '{"path":"a.txt"}',
+            presentation: 'read',
+          },
+        },
+        { type: 'text', text: '已读取文件。' },
       ],
     };
     render(
@@ -47,7 +75,6 @@ describe('MessageBubble history rendering', () => {
   it('renders tool calls WITHOUT results when result is absent', () => {
     const streamMsg: ChatMessage = {
       role: 'assistant',
-      content: '',
       segments: [
         { type: 'tool', tool_call: { name: 'read_file', arguments: '{}', presentation: 'read' } },
       ],
@@ -63,7 +90,6 @@ describe('MessageBubble history rendering', () => {
     // 思考 → 工具前的正文 → 工具调用 → 工具后的正文——顺序与流式一致
     const historyMsg: ChatMessage = {
       role: 'assistant',
-      content: '工具前的正文\n工具后的正文',
       thinking: '先想一步',
       tool_calls: [
         {
@@ -105,7 +131,7 @@ describe('MessageBubble history rendering', () => {
     // 渲染层跳过，避免历史中出现只有时间戳的空白气泡。
     const emptyMsg: ChatMessage = {
       role: 'assistant',
-      content: '',
+      segments: [],
       timestamp: new Date().toISOString(),
     };
     const { container } = render(
@@ -116,10 +142,11 @@ describe('MessageBubble history rendering', () => {
 
   it('still renders empty assistant message while streaming (placeholder)', () => {
     // 流式占位（content 为空但正在输出）必须保留，否则首字到达前无气泡
-    const streamingMsg: ChatMessage = { role: 'assistant', content: '' };
+    const streamingMsg: ChatMessage = { role: 'assistant', segments: [] };
     const { container } = render(
       <MessageBubble message={streamingMsg} index={0} isStreaming={true} onRollback={() => {}} />,
     );
     expect(container.firstChild).not.toBeNull();
   });
 });
+

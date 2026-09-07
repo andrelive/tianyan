@@ -163,7 +163,7 @@ export const mockChatResponse: ChatResponse = {
   session_id: 'session-1',
   message: {
     role: 'assistant',
-    content: '你好！我是天演，有什么可以帮助你的？',
+    segments: [{ type: 'text', text: '你好！我是天演，有什么可以帮助你的？' }],
     timestamp: '2026-07-23T10:00:00Z',
   },
   usage: {
@@ -888,16 +888,22 @@ export const handlers = [
       messages: [
         {
           role: 'user',
-          content: '你好',
+          segments: [{ type: 'text', text: '你好' }],
           timestamp: '2026-07-23T10:00:00Z',
         },
         {
           role: 'assistant',
-          content: '你好！我是天演，有什么可以帮助你的？',
+          segments: [{ type: 'text', text: '你好！我是天演，有什么可以帮助你的？' }],
           timestamp: '2026-07-23T10:00:05Z',
         },
       ],
     });
+  }),
+
+  // 事件订阅（ADR-029）：快照恢复的触发点——测试环境无 EventSource，
+  // 快照帧由测试直接调用 applySnapshot 模拟（见 ChatPanel.test.tsx）
+  http.post(`${API_BASE}/events/subscribe`, async () => {
+    return HttpResponse.json({ status: 'ok' });
   }),
 
   // Session message delete: 删除该消息及其后，返回剩余消息
@@ -905,11 +911,11 @@ export const handlers = [
     // 模拟真实后端语义：按 message_id 定位索引后 truncate
     const body = (await request.json()) as { message_id?: string } | null;
     const all = [
-      { id: 'msg_0', role: 'user' as const, content: '你好', timestamp: '2026-07-23T10:00:00Z' },
+      { id: 'msg_0', role: 'user' as const, segments: [{ type: 'text', text: '你好' }], timestamp: '2026-07-23T10:00:00Z' },
       {
         id: 'msg_1',
         role: 'assistant' as const,
-        content: '你好！我是天演',
+        segments: [{ type: 'text', text: '你好！我是天演' }],
         timestamp: '2026-07-23T10:00:05Z',
       },
     ];
@@ -927,12 +933,12 @@ export const handlers = [
       messages: [
         {
           role: 'user',
-          content: '你好',
+          segments: [{ type: 'text', text: '你好' }],
           timestamp: '2026-07-23T10:00:00Z',
         },
         {
           role: 'assistant',
-          content: '你好！我是天演，有什么可以帮助你的？',
+          segments: [{ type: 'text', text: '你好！我是天演，有什么可以帮助你的？' }],
           timestamp: '2026-07-23T10:00:05Z',
         },
       ],
@@ -956,7 +962,9 @@ export const handlers = [
       message: {
         id: 'cmp_mock',
         role: 'system',
-        content: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\nmock\n[摘要结束]',
+        segments: [
+          { type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\nmock\n[摘要结束]' },
+        ],
         timestamp: new Date().toISOString(),
       },
     });
@@ -992,45 +1000,14 @@ export const handlers = [
     return HttpResponse.json({ goals, total: goals.length });
   }),
 
-  // Chat stream (SSE)
+  // Chat stream（ADR-028 第 3 步：收敛为开关——启动请求立即返回 JSON，
+  // 流式输出经 GET /events 统一事件通道下发；测试环境无 EventSource，
+  // 由 ChatPanel 测试直接驱动归约器验证）
   http.post(`${API_BASE}/chat/stream`, async ({ request }) => {
-    const encoder = new TextEncoder();
-    const body = (await request.json()) as { message?: { content?: string } };
-    const lastContent = body.message?.content ?? '';
-
-    // 用户消息边界事件（与真实服务端一致：core 入库侧经流发送 Message chunk）
-    const userBoundary =
-      'data: {"id":"chatcmpl-mock","session_id":"session-1","message":{"id":"msg-user","role":"user","content":' +
-      JSON.stringify(lastContent) +
-      '},"delta":"","chunk_type":"message"}\n\n';
-
-    const chunks = lastContent.includes('[error-test]')
-      ? [
-          'data: {"id":"msg-err","session_id":"session-1","delta":"请求校验失败: [error-test] 是非法输入","finish_reason":null,"chunk_type":"error","skill_calls":null}\n\n',
-        ]
-      : lastContent.includes('[length-test]')
-        ? [
-            userBoundary,
-            'data: {"id":"msg-1","session_id":"session-1","delta":"第一段","chunk_type":"answer"}\n\n',
-            'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"length","chunk_type":"answer"}\n\n',
-          ]
-        : [
-            userBoundary,
-            'data: {"id":"msg-1","session_id":"session-1","delta":"你好","chunk_type":"answer"}\n\n',
-            'data: {"id":"msg-1","session_id":"session-1","delta":"！","chunk_type":"answer"}\n\n',
-            'data: {"id":"msg-1","session_id":"session-1","delta":"","finish_reason":"stop","chunk_type":"answer"}\n\n',
-          ];
-
-    const stream = new ReadableStream({
-      start(controller) {
-        for (const chunk of chunks) {
-          controller.enqueue(encoder.encode(chunk));
-        }
-        controller.close();
-      },
-    });
-    return new HttpResponse(stream, {
-      headers: { 'Content-Type': 'text/event-stream' },
+    const body = (await request.json()) as { session_id?: string };
+    return HttpResponse.json({
+      status: 'started',
+      session_id: body.session_id ?? 'session-1',
     });
   }),
 
@@ -1447,3 +1424,4 @@ export function resetTodoMocks(): void {
     todo_done: 1,
   });
 }
+

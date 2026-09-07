@@ -36,6 +36,20 @@ pub trait SessionManager: Send + Sync {
     /// 直接持久化 StructuredMessage（不经过 Message 转换）。
     async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()>;
 
+    /// 直接持久化 StructuredMessage（**不索引 FTS**——子智能体会话，ADR-026：
+    /// 无"人"提供的信息不参与回忆检索）。
+    ///
+    /// 默认实现委托 [`Self::add_structured_message`]（索引 FTS）；需要不索引
+    /// 语义的实现（`PersistentSessionManager` / `BroadcastingSessionManager`）
+    /// 覆盖为 `store.append_message_no_fts`。
+    async fn add_structured_message_no_fts(
+        &self,
+        session_id: &str,
+        msg: StructuredMessage,
+    ) -> Result<()> {
+        self.add_structured_message(session_id, msg).await
+    }
+
     /// 全量重写会话消息（用于编辑/截断后持久化）。
     ///
     /// 会话必须已存在。传入空切片将清空会话历史。
@@ -145,6 +159,16 @@ impl SessionManager for PersistentSessionManager {
 
     async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()> {
         self.store.append_message(session_id, &msg).await?;
+        Ok(())
+    }
+
+    async fn add_structured_message_no_fts(
+        &self,
+        session_id: &str,
+        msg: StructuredMessage,
+    ) -> Result<()> {
+        // ADR-026：子智能体会话不索引 FTS（无"人"提供的信息不参与回忆检索）
+        self.store.append_message_no_fts(session_id, &msg).await?;
         Ok(())
     }
 

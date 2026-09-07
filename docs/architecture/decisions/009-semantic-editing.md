@@ -10,7 +10,7 @@
 
 ## 背景
 
-编程助手差距评估（`docs/architecture/coding-assistant-gap-analysis.md`）识别出 G1（语义化编辑）与 G2（diff 生成/解析/应用）两项基础差距：`write_file` 仅支持整文件覆盖写入（大文件重写 Token 爆炸且易出错），全 workspace 无 diff 相关代码。选型研究（D1/D2）对比两条原语路线后确定双原语并存：
+编程助手差距评估（`docs/archive/coding-assistant-gap-analysis.md`，已归档）识别出 G1（语义化编辑）与 G2（diff 生成/解析/应用）两项基础差距：`write_file` 仅支持整文件覆盖写入（大文件重写 Token 爆炸且易出错），全 workspace 无 diff 相关代码。选型研究（D1/D2）对比两条原语路线后确定双原语并存：
 
 - **old_string/new_string 精确替换**（Claude Code、opencode `edit`、Continue `multiEdit`）—— 单文件小改
 - **unified diff freeform**（Aider `udiff`、Codex / opencode `apply_patch`）—— 多文件大改 + move/delete
@@ -60,3 +60,4 @@ diff 库选型（D2）：引入 `similar`（3.1.2，零依赖）用于 unified d
 - `core/src/executor/fs.rs` — `execute_glob` / `execute_list_dir`
 - `core/src/executor/types.rs` — `Action::ApplyEdit` / `Action::ApplyPatch`
 - `core/src/agent/tool_registry/mod.rs` — `register_builtin_tools()`（apply_edit / apply_patch / glob / list_dir 注册）
+

@@ -1,16 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { usePolling } from '@/hooks/use-polling';
-import { useUnifiedEvents, type UnifiedEvent } from '@/hooks/use-unified-events';
-import { cancelTask, fetchSessionMessages, fetchTasks } from '@/lib/api-client';
-import { getApiBase } from '@/lib/api-base';
-import type {
-  BackgroundTask,
-  ChatMessage,
-  MessageSegment,
-  ToolCallEvent,
-  ToolCallWithResult,
-  ToolResultEvent,
-} from '@/lib/types';
+import { useUnifiedEvents, subscribeSession, type UnifiedEvent } from '@/hooks/use-unified-events';
+import { cancelTask, fetchTasks } from '@/lib/api-client';
+import { useAppStore } from '@/lib/store';
+import {
+  createChatStreamReducer,
+  registerStreamReducer,
+  unregisterStreamReducer,
+} from '@/lib/chat-stream';
+import type { BackgroundTask } from '@/lib/types';
 import { SegmentBlocks } from './MessageSegments';
 import {
   ChevronDown,
@@ -27,48 +25,12 @@ import {
 /** 轮询间隔（后台任务状态变化）。 */
 const POLL_INTERVAL_MS = 3000;
 
-/** 子智能体消息流事件（ChatStreamEvent 同构 + task_id；ADR-026）。 */
-interface TaskStreamEvent {
-  task_id?: string;
-  chunk_type: 'answer' | 'thought' | 'tool_call' | 'observation' | 'error' | 'message';
-  delta?: string;
-  thinking?: string | null;
-  tool_call?: ToolCallEvent | null;
-  tool_result?: ToolResultEvent | null;
-}
-
-/** 事件流 → 段渲染结构（与主对话流同构：thinking/text/tool + 结果挂卡）。 */
-function eventsToBlocks(
-  events: TaskStreamEvent[],
-): { segments: MessageSegment[]; toolCalls: ToolCallWithResult[] } {
-  const segments: MessageSegment[] = [];
-  const toolCalls: ToolCallWithResult[] = [];
-  for (const ev of events) {
-    if (ev.chunk_type === 'thought' && ev.thinking) {
-      segments.push({ type: 'thinking', text: ev.thinking });
-    } else if (ev.chunk_type === 'answer' && ev.delta) {
-      segments.push({ type: 'text', text: ev.delta });
-    } else if (ev.chunk_type === 'tool_call' && ev.tool_call) {
-      segments.push({ type: 'tool', tool_call: ev.tool_call });
-      toolCalls.push({ ...ev.tool_call, result: null });
-    } else if (ev.chunk_type === 'observation' && ev.tool_result) {
-      const tc = toolCalls.find((c) => c.id === ev.tool_result!.tool_call_id);
-      if (tc) {
-        tc.result = ev.tool_result.content ?? null;
-        tc.success = ev.tool_result.success;
-        tc.duration_ms = ev.tool_result.duration_ms;
-        tc.error = ev.tool_result.error;
-      }
-    }
-  }
-  return { segments, toolCalls };
-}
-
 /**
  * 会话后台任务面板（ADR-026，DSH 式右侧 dock）：展示当前会话发起的
  * 后台任务（delegate 委托 / command 终端命令），活跃在上、完成沉底。
  *
- * - 委托任务展开：子智能体消息流（历史 + SSE 实时增量，复用主对话流渲染）；
+ * - 委托任务展开：子智能体 = 主会话同构（ADR-030）——订阅（快照恢复）+
+ *   流式归约器（逐 token 增量），消息读 store（sessionMessages[task_id]）；
  * - 终端任务展开：输出尾部（output_tail）+ 状态/错误；
  * - 运行中可取消；终态保留展示（回看做了什么、结果如何）。
  * 无任何任务时整条不渲染。
@@ -78,11 +40,6 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
-  /** 委托任务历史消息（task_id → 会话消息；展开时加载）。 */
-  const [histories, setHistories] = useState<Record<string, ChatMessage[]>>({});
-  /** 委托任务实时事件（task_id → SSE 增量；按到达顺序累积）。 */
-  const [liveEvents, setLiveEvents] = useState<Record<string, TaskStreamEvent[]>>({});
-  const liveRef = useRef<Record<string, TaskStreamEvent[]>>({});
 
   const poll = useCallback(async () => {
     try {
@@ -112,41 +69,28 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
     }
   });
 
-  // SSE 订阅：子智能体消息流（ADR-026；事件按 task_id 归集）
-  useEffect(() => {
-    if (!sessionId) return;
-    if (typeof EventSource === 'undefined') return; // 测试环境（jsdom）无 EventSource
-    const es = new EventSource(getApiBase() + '/tasks/stream');
-    es.onmessage = (e) => {
-      try {
-        const ev = JSON.parse(e.data) as TaskStreamEvent;
-        if (!ev.task_id) return;
-        const list = liveRef.current[ev.task_id] ?? [];
-        list.push(ev);
-        liveRef.current[ev.task_id] = list;
-        setLiveEvents({ ...liveRef.current });
-      } catch {
-        /* 畸形事件跳过 */
-      }
-    };
-    return () => es.close();
-  }, [sessionId]);
-
-  // 展开委托任务时加载历史消息
+  // 展开委托任务：订阅（快照恢复）+ 注册流式归约器（逐 token 增量，
+  // 与主会话同构——事件按 session_id=task_id 路由写 store）
   const handleOpen = useCallback(
     async (task: BackgroundTask) => {
       const next = openId === task.id ? null : task.id;
       setOpenId(next);
-      if (next && task.kind === 'delegate' && !histories[task.id]) {
-        try {
-          const resp = await fetchSessionMessages(task.id);
-          setHistories((h) => ({ ...h, [task.id]: resp.messages }));
-        } catch {
-          /* 历史加载失败：仅显示实时增量 */
-        }
+      if (next && task.kind === 'delegate') {
+        void subscribeSession(task.id);
+        const reducer = createChatStreamReducer({
+          errorFallbackText: '子智能体处理失败',
+          adoptOnFirstEvent: false,
+          onDone: (sid) => {
+            if (sid) unregisterStreamReducer(sid);
+          },
+        });
+        registerStreamReducer(task.id, reducer);
+      } else if (!next) {
+        // 收起：注销归约器（订阅保持 resident，切回零延迟）
+        unregisterStreamReducer(task.id);
       }
     },
-    [openId, histories],
+    [openId],
   );
 
   const handleCancel = useCallback(
@@ -185,9 +129,6 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
     const terminal = t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled';
     const open = openId === t.id;
     const label = statusLabel(t);
-    const live = liveEvents[t.id] ?? [];
-    const liveBlocks = eventsToBlocks(live);
-    const history = histories[t.id] ?? [];
     return (
       <div
         key={t.id}
@@ -275,27 +216,7 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
         {open && (
           <div className="border-t border-[var(--color-border)] px-2.5 py-2 space-y-2">
             {t.kind === 'delegate' ? (
-              <>
-                {/* 历史消息（会话存储加载） */}
-                {history.map((m, i) => (
-                  <div key={m.id ?? i} className="space-y-1">
-                    {m.segments && m.segments.length > 0 && (
-                      <SegmentBlocks segments={m.segments} toolCalls={m.tool_calls} isUser={false} />
-                    )}
-                  </div>
-                ))}
-                {/* 实时增量（SSE） */}
-                {liveBlocks.segments.length > 0 && (
-                  <SegmentBlocks segments={liveBlocks.segments} toolCalls={liveBlocks.toolCalls} isUser={false} />
-                )}
-                {liveBlocks.segments.length === 0 && history.length === 0 && (
-                  <p className="text-xs text-[var(--color-text-tertiary)]">
-                    {t.status === 'running' || t.status === 'pending'
-                      ? '子智能体工作中…'
-                      : '无过程记录'}
-                  </p>
-                )}
-              </>
+              <DelegateMessages taskId={t.id} status={t.status} />
             ) : (
               <>
                 {/* 终端输出：实时增量（command_output 事件累积）优先，
@@ -372,3 +293,34 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
     </div>
   );
 }
+
+/**
+ * 委托任务消息（ADR-030：子智能体 = 主会话同构——消息读 store
+ * sessionMessages[task_id]，历史（订阅快照）+ 实时（流式归约器/落库广播）
+ * 天然合并，渲染复用 SegmentBlocks）。
+ */
+function DelegateMessages({ taskId, status }: { taskId: string; status: string }) {
+  const messages = useAppStore((s) => s.sessionMessages[taskId] ?? []);
+  if (messages.length === 0) {
+    return (
+      <p className="text-xs text-[var(--color-text-tertiary)]">
+        {status === 'running' || status === 'pending' ? '子智能体工作中…' : '无过程记录'}
+      </p>
+    );
+  }
+  return (
+    <>
+      {messages.map((m, i) => (
+        <div key={m.id ?? i} className="space-y-1">
+          {m.segments && m.segments.length > 0 && (
+            <SegmentBlocks segments={m.segments} toolCalls={m.tool_calls} isUser={false} />
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
+
+
+

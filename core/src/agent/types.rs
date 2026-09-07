@@ -90,6 +90,10 @@ pub enum StreamChunkType {
     /// 消息边界（流开始/结束：携带完整 ChatMessage 元数据，与历史加载同构；
     /// 前端据此用服务端消息结构同步本地消息 id/内容）。
     Message,
+    /// 用户消息落库确认（ADR-031：乐观渲染的 id 回显——携带前端生成的
+    /// `user_message_id` 与落库后的真实 `message_id`，前端比对后把本地
+    /// 乐观消息替换为真实 id；确认后 user_message_id 生命周期结束）。
+    UserMessageId,
 }
 
 /// 流式响应块。
@@ -122,6 +126,13 @@ pub struct AgentStreamChunk {
     /// 时序正确，pump 侧不再猜测"最后一条消息"）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<StructuredMessage>,
+    /// 用户消息落库确认（UserMessageId chunk，ADR-031）：前端生成的临时
+    /// id（乐观渲染定位键）——确认后生命周期结束，不持久化。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<String>,
+    /// 用户消息落库后的真实 id（UserMessageId chunk 携带）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 /// 工具执行结果事件（Observation chunk 携带）。
@@ -307,6 +318,23 @@ impl StreamEventSender {
         .await;
     }
 
+    /// 发送用户消息落库确认事件（ADR-031：乐观渲染的 id 回显）。
+    ///
+    /// 由持久化侧（run_agent_turn）在用户消息入库后立即发送——携带前端
+    /// 生成的 `user_message_id`（请求侧临时 id）与落库后的真实 `message_id`，
+    /// 前端比对后把本地乐观消息替换为真实 id。确认后 user_message_id
+    /// 生命周期结束（不持久化、不参与回退/对齐）。
+    pub async fn send_user_message_id(&self, user_message_id: &str, message_id: &str) {
+        self.try_send(AgentStreamChunk {
+            delta: String::new(),
+            chunk_type: StreamChunkType::UserMessageId,
+            user_message_id: Some(user_message_id.to_string()),
+            message_id: Some(message_id.to_string()),
+            ..Default::default()
+        })
+        .await;
+    }
+
     /// 发送错误事件。
     pub async fn send_error(&self, error: &str) {
         self.try_send(AgentStreamChunk {
@@ -388,6 +416,8 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
+            user_message_id: None,
+            message_id: None,
         };
         assert_eq!(chunk.delta, "你好");
         assert!(!chunk.is_complete);
@@ -414,6 +444,8 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
+            user_message_id: None,
+            message_id: None,
         };
         assert_eq!(chunk.delta, "调用技能");
         assert!(chunk.is_complete);
@@ -434,6 +466,8 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
+            user_message_id: None,
+            message_id: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
@@ -441,6 +475,33 @@ mod tests {
         assert!(!deserialized.is_complete);
         assert_eq!(deserialized.chunk_type, StreamChunkType::Thought);
         assert!(deserialized.skill_calls.is_none());
+    }
+
+    #[test]
+    fn user_message_id_chunk_serde_roundtrip() {
+        // ADR-031：确认事件携带前端临时 id + 落库真实 id，序列化为
+        // chunk_type=user_message_id（前端 reducer 按此分支处理）
+        let chunk = AgentStreamChunk {
+            delta: String::new(),
+            is_complete: false,
+            token_usage: None,
+            chunk_type: StreamChunkType::UserMessageId,
+            skill_calls: None,
+            finish_reason: None,
+            tool_call: None,
+            tool_result: None,
+            message: None,
+            user_message_id: Some("umid-abc".to_string()),
+            message_id: Some("msg_123".to_string()),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(json.contains("\"chunk_type\":\"user_message_id\""), "json: {json}");
+        assert!(json.contains("\"user_message_id\":\"umid-abc\""), "json: {json}");
+        assert!(json.contains("\"message_id\":\"msg_123\""), "json: {json}");
+        let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.chunk_type, StreamChunkType::UserMessageId);
+        assert_eq!(deserialized.user_message_id.as_deref(), Some("umid-abc"));
+        assert_eq!(deserialized.message_id.as_deref(), Some("msg_123"));
     }
 
     #[test]
@@ -455,6 +516,8 @@ mod tests {
             tool_call: None,
             tool_result: None,
             message: None,
+            user_message_id: None,
+            message_id: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         // skill_calls 为 None 时不应出现在 JSON 中
@@ -664,3 +727,4 @@ mod tests {
         // 测试通过即可
     }
 }
+

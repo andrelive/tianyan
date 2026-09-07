@@ -3,18 +3,18 @@ import { lastMessageUsage, sumSessionUsage } from '@/lib/token-usage';
 import type { ChatMessage } from '@/lib/types';
 
 function msg(overrides: Partial<ChatMessage>): ChatMessage {
-  return { role: 'assistant', content: '', ...overrides };
+  return { role: 'assistant', segments: [], ...overrides };
 }
 
 describe('lastMessageUsage', () => {
   it('returns null when no message carries usage', () => {
-    expect(lastMessageUsage([msg({ content: 'a' }), msg({ content: 'b' })], 32000)).toBeNull();
+    expect(lastMessageUsage([msg({ segments: [{ type: 'text', text: 'a' }] }), msg({ segments: [{ type: 'text', text: 'b' }] })], 32000)).toBeNull();
   });
 
   it('picks the last message with prompt_tokens > 0 (skip trailing zero-usage)', () => {
     const messages = [
       msg({ usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 } }),
-      msg({ content: 'no usage' }),
+      msg({ segments: [{ type: 'text', text: 'no usage' }] }),
       msg({ usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } }),
     ];
     const r = lastMessageUsage(messages, 32000);
@@ -47,7 +47,7 @@ describe('lastMessageUsage', () => {
 
 describe('sumSessionUsage', () => {
   it('returns null when nothing consumed', () => {
-    expect(sumSessionUsage([msg({ content: 'a' })])).toBeNull();
+    expect(sumSessionUsage([msg({ segments: [{ type: 'text', text: 'a' }] })])).toBeNull();
     expect(
       sumSessionUsage([
         msg({ usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } }),
@@ -63,7 +63,7 @@ describe('sumSessionUsage', () => {
       msg({
         usage: { prompt_tokens: 200, completion_tokens: 70, total_tokens: 270, cache_read: 60 },
       }),
-      msg({ content: 'no usage' }),
+      msg({ segments: [{ type: 'text', text: 'no usage' }] }),
     ];
     expect(sumSessionUsage(messages)).toEqual({
       uncachedInput: 200, // (100-40) + (200-60)
@@ -72,3 +72,4 @@ describe('sumSessionUsage', () => {
     });
   });
 });
+

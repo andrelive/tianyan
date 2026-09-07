@@ -483,4 +483,5 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 ---
 
 **文档版本**: 2026-08-30
-**最后更新**: 2026-08-30（分层重构同步：阶段 1 拆基础类型打破循环（roles/role_store/observability 类型层）、阶段 2 统一写入门面（db::Database + 业务域 Repository）、阶段 2b SQL 收敛（session/stats/trace/execution/usage）、阶段 3 打破 db 层依赖环（SqliteDb 移入 db、SessionRepo 归位 session、RetrievalTrace 引用 common）——生产代码零模块环；依赖清理（cargo-machete 移除 7 个未用依赖））
+**最后更新**: 2026-09-06（ADR-029/030 同步：事件订阅、统一循环框架）。此前 2026-08-30（分层重构同步：阶段 1 拆基础类型打破循环（roles/role_store/observability 类型层）、阶段 2 统一写入门面（db::Database + 业务域 Repository）、阶段 2b SQL 收敛（session/stats/trace/execution/usage）、阶段 3 打破 db 层依赖环（SqliteDb 移入 db、SessionRepo 归位 session、RetrievalTrace 引用 common）——生产代码零模块环；依赖清理（cargo-machete 移除 7 个未用依赖））
+

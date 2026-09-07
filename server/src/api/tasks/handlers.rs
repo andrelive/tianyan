@@ -13,14 +13,68 @@ use std::time::Duration;
 use axum::extract::{Path, State};
 use axum::response::sse::{Event, Sse};
 use axum::Json;
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::api::shared::error::ApiError;
+use crate::api::shared::types::ChatMessage;
 use crate::state::AppState;
 
 /// SSE 流式通道缓冲区大小（与 chat 流一致）。
 const SSE_CHANNEL_BUFFER: usize = 100;
+
+/// 事件订阅请求（ADR-029：快照恢复的触发点）。
+#[derive(Debug, Deserialize)]
+pub struct SubscribeRequest {
+    /// 要订阅的会话 ID。
+    pub session_id: String,
+}
+
+/// 事件订阅（ADR-029）：把会话快照（完整历史 + cursor）推入统一事件通道。
+///
+/// 快照与后续实时事件同一条流（`GET /events`），顺序由服务端保证——
+/// 前端收到快照后 replace 窗口，合并竞态（fetch 历史 + 广播事件两条路径）
+/// 消失。
+///
+/// resident 语义：打开过的会话保持订阅（不取消），切回零延迟；流式会话
+/// 切走保持订阅（未落库增量不能丢）。会话从列表删除时前端 unsubscribe。
+///
+/// ADR-031 后消息不再广播（落库即广播移除），订阅集合随之移除——本端点
+/// 仅承担快照推送（前端打开/重连时的权威兜底）。
+pub async fn subscribe_events(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SubscribeRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let session_manager = state.session_manager();
+    let session = session_manager
+        .get_session(&request.session_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("会话不存在：{}", request.session_id)))?;
+
+    // 快照：完整历史（ChatMessage 展示格式）+ cursor（最新持久化 seq）
+    let cursor = state
+        .session_store()
+        .last_seq(&request.session_id)
+        .await
+        .unwrap_or(0);
+    let messages: Vec<ChatMessage> = session
+        .messages
+        .iter()
+        .map(ChatMessage::from_structured_light)
+        .collect();
+    let payload = serde_json::json!({
+        "type": "snapshot",
+        "session_id": request.session_id,
+        "cursor": cursor,
+        "messages": messages,
+    });
+    if let Ok(json) = serde_json::to_string(&payload) {
+        let _ = state.task_event_tx.send(json);
+    }
+
+    Ok(Json(serde_json::json!({ "status": "ok" })))
+}
 
 /// 后台任务列表。
 pub async fn list_tasks(

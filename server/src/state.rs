@@ -451,14 +451,10 @@ impl AppState {
             Arc::new(crate::agent_builder::TaskEventBroadcaster {
                 tx: task_event_tx.clone(),
             });
-        // ADR-028：统一事件推送——会话管理器包装为落库即广播（消息事件
-        // 与任务状态/命令输出事件共用同一通道；core 不感知，SessionStore 纯库）
+        // ADR-028/031：会话管理器包装（消息不再广播——流式增量 + 完成事件
+        // 到前端；任务状态/命令输出事件仍经统一通道）
         let session_manager: Arc<dyn SessionManager> = Arc::new(
-            crate::event_push::BroadcastingSessionManager::new(
-                session_manager,
-                session_store.clone(),
-                task_event_tx.clone(),
-            ),
+            crate::event_push::BroadcastingSessionManager::new(session_manager),
         );
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
@@ -484,6 +480,7 @@ impl AppState {
             usage_log.clone(),
             user_questions.clone(),
             task_event_sink,
+            task_event_tx.clone(),
         )
         .await?;
 
@@ -682,6 +679,7 @@ impl AppState {
             Arc::new(crate::agent_builder::TaskEventBroadcaster {
                 tx: self.task_event_tx.clone(),
             }),
+            self.task_event_tx.clone(),
         )
         .await?;
 

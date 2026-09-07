@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
 import type { ChatMessage, Session, SkillCallInfo } from '@/lib/types';
+import { messageText } from '@/lib/types';
 
 describe('useAppStore', () => {
   // Reset store to initial values before each test
@@ -103,7 +104,7 @@ describe('useAppStore', () => {
     useAppStore.setState({
       sessions: [s],
       currentSessionId: 'cur',
-      messages: [{ role: 'user', content: 'hello' }],
+      messages: [{ role: 'user', segments: [{ type: 'text', text: 'hello' }] }],
     });
 
     useAppStore.getState().removeSession('cur');
@@ -119,7 +120,7 @@ describe('useAppStore', () => {
     useAppStore.setState({
       sessions: [s1, s2],
       currentSessionId: '2',
-      messages: [{ role: 'assistant', content: 'keep' }],
+      messages: [{ role: 'assistant', segments: [{ type: 'text', text: 'keep' }] }],
     });
 
     useAppStore.getState().removeSession('1');
@@ -131,16 +132,16 @@ describe('useAppStore', () => {
   // ── Messages ──
 
   it('setMessages replaces the messages array', () => {
-    const msgs: ChatMessage[] = [{ role: 'user', content: 'first' }];
+    const msgs: ChatMessage[] = [{ role: 'user', segments: [{ type: 'text', text: 'first' }] }];
 
     useAppStore.getState().setMessages(msgs);
     expect(useAppStore.getState().messages).toHaveLength(1);
-    expect(useAppStore.getState().messages[0].content).toBe('first');
+    expect(messageText(useAppStore.getState().messages[0])).toBe('first');
   });
 
   it('addMessage appends a message', () => {
-    useAppStore.getState().addMessage({ role: 'user', content: 'q' });
-    useAppStore.getState().addMessage({ role: 'assistant', content: 'a' });
+    useAppStore.getState().addMessage({ role: 'user', segments: [{ type: 'text', text: 'q' }] });
+    useAppStore.getState().addMessage({ role: 'assistant', segments: [{ type: 'text', text: 'a' }] });
 
     const msgs = useAppStore.getState().messages;
     expect(msgs).toHaveLength(2);
@@ -151,13 +152,13 @@ describe('useAppStore', () => {
   it('updateLastMessage appends delta to the last message content', () => {
     useAppStore.setState({
       messages: [
-        { role: 'user', content: 'hi' },
-        { role: 'assistant', content: 'Hel' },
+        { role: 'user', segments: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', segments: [{ type: 'text', text: 'Hel' }] },
       ],
     });
 
     useAppStore.getState().updateLastMessage('lo');
-    expect(useAppStore.getState().messages[1].content).toBe('Hello');
+    expect(messageText(useAppStore.getState().messages[1])).toBe('Hello');
   });
 
   it('updateLastMessage does nothing when messages is empty', () => {
@@ -171,23 +172,23 @@ describe('useAppStore', () => {
     // 上一轮已有正文 → 新开消息（轮次边界）
     useAppStore.setState({
       messages: [
-        { role: 'user', content: 'hi' },
-        { role: 'assistant', content: '完成回答', tool_calls: [] },
+        { role: 'user', segments: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', segments: [{ type: 'text', text: '完成回答' }], tool_calls: [] },
       ],
     });
     useAppStore.getState().startNewAssistantTurn();
     const msgs = useAppStore.getState().messages;
     expect(msgs).toHaveLength(3);
     expect(msgs[2].role).toBe('assistant');
-    expect(msgs[2].content).toBe('');
+    expect(messageText(msgs[2])).toBe('');
   });
 
   it('startNewAssistantTurn reuses an empty placeholder', () => {
     // 空占位（流式初始）→ 复用，不新开
     useAppStore.setState({
       messages: [
-        { role: 'user', content: 'hi' },
-        { role: 'assistant', content: '', tool_calls: [] },
+        { role: 'user', segments: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', segments: [], tool_calls: [] },
       ],
     });
     useAppStore.getState().startNewAssistantTurn();
@@ -195,7 +196,7 @@ describe('useAppStore', () => {
   });
 
   it('clearMessages empties the messages array', () => {
-    useAppStore.setState({ messages: [{ role: 'user', content: 'x' }] });
+    useAppStore.setState({ messages: [{ role: 'user', segments: [{ type: 'text', text: 'x' }] }] });
 
     useAppStore.getState().clearMessages();
     expect(useAppStore.getState().messages).toEqual([]);
@@ -204,16 +205,16 @@ describe('useAppStore', () => {
   it('deleteMessagesFrom removes messages from index and resets stream status', () => {
     useAppStore.setState({
       messages: [
-        { role: 'user', content: 'a' },
-        { role: 'assistant', content: 'b' },
-        { role: 'user', content: 'c' },
+        { role: 'user', segments: [{ type: 'text', text: 'a' }] },
+        { role: 'assistant', segments: [{ type: 'text', text: 'b' }] },
+        { role: 'user', segments: [{ type: 'text', text: 'c' }] },
       ],
       streamStatus: { [PENDING_SESSION_KEY]: 'streaming' },
     });
 
     useAppStore.getState().deleteMessagesFrom(1);
     expect(useAppStore.getState().messages).toHaveLength(1);
-    expect(useAppStore.getState().messages[0].content).toBe('a');
+    expect(messageText(useAppStore.getState().messages[0])).toBe('a');
     expect(useAppStore.getState().streamStatus).toEqual({ [PENDING_SESSION_KEY]: 'idle' });
   });
 
@@ -222,8 +223,8 @@ describe('useAppStore', () => {
   it('appendSkillCalls sets skill_calls on the last assistant message', () => {
     useAppStore.setState({
       messages: [
-        { role: 'user', content: 'go' },
-        { role: 'assistant', content: 'searching', skill_calls: [] },
+        { role: 'user', segments: [{ type: 'text', text: 'go' }] },
+        { role: 'assistant', segments: [{ type: 'text', text: 'searching' }], skill_calls: [] },
       ],
     });
 
@@ -237,7 +238,7 @@ describe('useAppStore', () => {
 
   it('appendSkillCalls does nothing when no assistant message exists', () => {
     useAppStore.setState({
-      messages: [{ role: 'user', content: 'hi' }],
+      messages: [{ role: 'user', segments: [{ type: 'text', text: 'hi' }] }],
     });
 
     // Should not throw and messages remain unchanged
@@ -253,8 +254,8 @@ describe('useAppStore', () => {
   it('appendToolCalls accumulates tool call cards on the last assistant message', () => {
     useAppStore.setState({
       messages: [
-        { role: 'user', content: 'go' },
-        { role: 'assistant', content: 'working' },
+        { role: 'user', segments: [{ type: 'text', text: 'go' }] },
+        { role: 'assistant', segments: [{ type: 'text', text: 'working' }] },
       ],
     });
 
@@ -275,7 +276,7 @@ describe('useAppStore', () => {
 
   it('appendToolCalls does nothing when no assistant message exists', () => {
     useAppStore.setState({
-      messages: [{ role: 'user', content: 'hi' }],
+      messages: [{ role: 'user', segments: [{ type: 'text', text: 'hi' }] }],
     });
     useAppStore
       .getState()
@@ -287,8 +288,8 @@ describe('useAppStore', () => {
   it('applyToolResult matches tool call by id (流式结果挂卡)', () => {
     useAppStore.setState({
       messages: [
-        { role: 'user', content: 'hi' },
-        { role: 'assistant', content: '' },
+        { role: 'user', segments: [{ type: 'text', text: 'hi' }] },
+        { role: 'assistant', segments: [] },
       ],
     });
     // 流式 tool_call 事件带调用 ID
@@ -424,68 +425,70 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().configured).toBe(false);
   });
 
-  // ── mergeServerMessages（ADR-028：统一事件推送的追加合并原语） ──
+  // ── appendThinking（思考增量合并） ──
 
-  it('mergeServerMessages appends server-only messages and keeps local ones', () => {
+  it('appendThinking merges consecutive thinking deltas into one segment', () => {
     useAppStore.setState({
       currentSessionId: 'session-1',
+      sessionMessages: {
+        'session-1': [
+          { id: 'msg-1', role: 'user', segments: [{ type: 'text', text: '问题' }], timestamp: '' },
+          { id: 'msg-2', role: 'assistant', segments: [], timestamp: '' },
+        ],
+      },
       messages: [
+        { id: 'msg-1', role: 'user', segments: [{ type: 'text', text: '问题' }], timestamp: '' },
+        { id: 'msg-2', role: 'assistant', segments: [], timestamp: '' },
+      ],
+    });
+
+    const { appendThinking } = useAppStore.getState();
+    appendThinking('先分析', 'session-1');
+    appendThinking('再想想', 'session-1');
+    appendThinking('得出结论', 'session-1');
+
+    const assistant = useAppStore.getState().messages[1];
+    expect(assistant.thinking).toBe('先分析再想想得出结论');
+    // 连续 thinking 增量合并为单个段（O(1) 追加，不逐 delta 膨胀）
+    expect(assistant.segments).toEqual([{ type: 'thinking', text: '先分析再想想得出结论' }]);
+  });
+
+  it('appendThinking starts a new segment after a non-thinking segment', () => {
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      sessionMessages: {
+        'session-1': [
+          { id: 'msg-1', role: 'user', segments: [{ type: 'text', text: '问题' }], timestamp: '' },
+          {
+            id: 'msg-2',
+            role: 'assistant',
+            segments: [{ type: 'text', text: '正文' }],
+            timestamp: '',
+          },
+        ],
+      },
+      messages: [
+        { id: 'msg-1', role: 'user', segments: [{ type: 'text', text: '问题' }], timestamp: '' },
         {
-          id: 'msg-1',
+          id: 'msg-2',
           role: 'assistant',
-          content: '本地累积的消息',
-          timestamp: '2026-09-04T00:00:00Z',
+          segments: [{ type: 'text', text: '正文' }],
+          timestamp: '',
         },
       ],
     });
 
-    useAppStore.getState().mergeServerMessages('session-1', [
-      {
-        id: 'msg-1',
-        role: 'assistant',
-        content: '服务端同 id 消息（应被跳过，保留本地）',
-        timestamp: '2026-09-04T00:00:00Z',
-      },
-      {
-        id: 'msg_983',
-        role: 'system',
-        content: '[后台命令完成] ping -n 11 127.0.0.1（cmd_0）',
-        timestamp: '2026-09-04T00:01:00Z',
-      },
-      {
-        id: 'msg_984',
-        role: 'assistant',
-        content: '唤醒轮汇总结果',
-        timestamp: '2026-09-04T00:01:10Z',
-      },
+    useAppStore.getState().appendThinking('补充思考', 'session-1');
+
+    const assistant = useAppStore.getState().messages[1];
+    expect(assistant.segments).toEqual([
+      { type: 'text', text: '正文' },
+      { type: 'thinking', text: '补充思考' },
     ]);
-
-    const msgs = useAppStore.getState().messages;
-    expect(msgs.length).toBe(3);
-    expect(msgs[0].id).toBe('msg-1');
-    expect(msgs[0].content).toBe('本地累积的消息');
-    expect(msgs[1].id).toBe('msg_983');
-    expect(msgs[1].role).toBe('system');
-    expect(msgs[2].id).toBe('msg_984');
-  });
-
-  it('mergeServerMessages updates the session cache for non-current sessions', () => {
-    useAppStore.setState({
-      currentSessionId: 'session-1',
-      messages: [],
-    });
-
-    useAppStore.getState().mergeServerMessages('session-2', [
-      {
-        id: 'msg-2',
-        role: 'system',
-        content: '[后台任务完成] 其他会话的通知',
-        timestamp: '2026-09-04T00:00:00Z',
-      },
-    ]);
-
-    // 非当前会话：只更新字典，不污染当前投影
-    expect(useAppStore.getState().messages).toEqual([]);
-    expect(useAppStore.getState().sessionMessages['session-2']?.length).toBe(1);
   });
 });
+
+
+
+
+

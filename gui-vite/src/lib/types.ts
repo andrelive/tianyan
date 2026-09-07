@@ -3,18 +3,29 @@
 export type MessageRole = 'system' | 'user' | 'assistant';
 
 export type StreamChunkType =
-  'answer' | 'thought' | 'tool_call' | 'observation' | 'error' | 'message';
+  | 'answer'
+  | 'thought'
+  | 'tool_call'
+  | 'observation'
+  | 'error'
+  | 'message'
+  | 'user_message_id';
 
 export interface ChatMessage {
   /** 消息 ID（服务端 msg_xxx；null = 本地占位——流式期间无 id，
    * 服务端广播/边界事件到达后替换为真实 id）。 */
   id?: string | null;
   role: MessageRole;
-  content: string;
-  /** 思考过程文本（模型 reasoning；正文在 content，前端折叠展示） */
+  /** 乐观渲染定位键（ADR-031）：用户消息发送时前端生成的临时 id——服务端
+   * 落库后经 UserMessageId 确认事件回显真实 id，比对后替换并删除本字段
+   * （生命周期：请求 → 确认 → 弃，不持久化）。 */
+  user_message_id?: string;
+  /** 思考过程文本（模型 reasoning；正文在 segments，前端折叠展示） */
   thinking?: string;
   /** 消息时间线段（服务端权威，ADR-019）：历史加载与流式边界事件均携带，
-   * 按 StructuredMessage.parts 真实到达顺序渲染思考/正文/工具调用 */
+   * 按 StructuredMessage.parts 真实到达顺序渲染思考/正文/工具调用——
+   * **纯文本字段已移除**（正文即 segments 的 Text 段，渲染/复制/判断
+   * 一律从 segments 取，单一事实源） */
   segments?: MessageSegment[];
   /** 图片 data URL 列表（仅用户消息），如 data:image/png;base64,... */
   images?: string[];
@@ -32,18 +43,13 @@ export interface ChatMessage {
   usage?: TokenUsage | null;
 }
 
-export interface ChatRequest {
-  session_id?: string | null;
-  /** 本轮输入消息（单条）——历史由服务端会话持久化提供，请求不携带全量历史 */
-  message: ChatMessage;
-  stream: boolean;
-  temperature: number;
-  max_tokens: number;
-  model?: string | null;
-  /** 本会话思考强度档位（会话时选择；值为当前模型声明的档位，如 "high"/"max"，"off" 关闭） */
-  thinking?: string;
-  /** 新会话绑定的工作目录（仅新建会话时生效） */
-  working_directory?: string | null;
+/** 消息纯文本视图：拼合 segments 的全部 Text 段（复制/通知检查/可访问性
+ * 播报等需要纯文本的场景；渲染仍走 segments 时间线）。 */
+export function messageText(m: { segments?: { type: string; text?: string }[] }): string {
+  return (m.segments ?? [])
+    .filter((s) => s.type === 'text' && s.text)
+    .map((s) => s.text ?? '')
+    .join('');
 }
 
 export interface ChatResponse {
@@ -91,6 +97,11 @@ export interface ChatStreamEvent {
   tool_call?: ToolCallEvent | null;
   /** 工具执行结果事件（observation chunk 携带；耗时/成败结构化下发） */
   tool_result?: ToolResultEvent | null;
+  /** 用户消息落库确认（chunk_type=user_message_id，ADR-031）：前端生成的
+   * 临时 id（乐观渲染定位键）——确认后生命周期结束 */
+  user_message_id?: string | null;
+  /** 用户消息落库后的真实 id（user_message_id 确认事件携带） */
+  message_id?: string | null;
   /** 本轮 token 用量（完成 chunk 携带；上下文占用 / 缓存命中展示用） */
   usage?: StreamUsage | null;
 }

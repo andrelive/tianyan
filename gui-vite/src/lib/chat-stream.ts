@@ -1,13 +1,14 @@
 /**
- * 会话流式客户端 —— SSE 协议事件 → store 动作的唯一定义点。
+ * 会话流式客户端 —— 统一事件通道（GET /events）事件 → store 动作的唯一定义点。
  *
  * 职责边界（深模块：小接口承载整个流式协议知识）：
- * - `consumeSseStream`：全前端唯一的 SSE 行解析器（data: 行 / [DONE] / 畸形行跳过）。
  * - `createChatStreamReducer`：协议事件归约器，把每个 chunk 翻译为 store 动作
  *   （含会话归属、轮次边界、截断/中断语义、usage 归位、工具结果挂卡）。
+ * - 活跃流归约器注册表：POST /chat/stream 启动后按 session_id 注册，
+ *   `routeChatStreamEvent` 把统一事件通道的 chat_stream 事件路由到对应归约器。
  *
- * 主对话流（/chat/stream）与追问流（/chat/clarify/stream）共用同一归约器，
- * 组件只负责「发起流」与「渲染」，不再内联协议知识。
+ * 主对话流（/chat/stream）与追问流共用同一归约器，组件只负责「启动请求」
+ * 与「渲染」，不再内联协议知识。
  */
 
 import { useAppStore } from '@/lib/store';
@@ -50,52 +51,16 @@ export function parseAskUserQuestions(argumentsRaw: string): {
   return [];
 }
 
-/* ─────── SSE 行解析（唯一实现） ─────── */
-
-/**
- * 消费 SSE 响应体：逐行解析 `data: ` 事件并回调；`[DONE]` 与畸形行跳过；
- * 未完整的行保留在缓冲区跨块拼接。流自然结束时 resolve。
- */
-export async function consumeSseStream(
-  response: Response,
-  onEvent: (event: ChatStreamEvent) => void,
-): Promise<void> {
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('Response body is not readable');
-
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    // 最后一行可能不完整，留在缓冲区等下一块
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || !trimmed.startsWith('data: ')) continue;
-
-      const data = trimmed.slice(6).trim();
-      if (data === '[DONE]') continue;
-
-      try {
-        onEvent(JSON.parse(data) as ChatStreamEvent);
-      } catch {
-        // Skip malformed SSE data
-      }
-    }
-  }
-}
-
 /* ─────── 事件归约器（协议 → store） ─────── */
 
 export interface ChatStreamReducerOptions {
   /** chunk_type=error 时 toast 的兜底文案（服务端未携带 delta 时）。 */
   errorFallbackText?: string;
+  /** 流结束（finish_reason 非空 / error）回调：复位流状态 + 注销归约器。 */
+  onDone?: (sessionId: string | null) => void;
+  /** 首个事件到达时是否 setCurrentSession（新会话 true；已有会话 false——
+   * 避免切走后事件把当前会话拉回流式会话）。 */
+  adoptOnFirstEvent?: boolean;
 }
 
 export interface ChatStreamReducer {
@@ -119,8 +84,16 @@ export interface ChatStreamReducer {
  * 切回直接显示累积内容。
  */
 export function createChatStreamReducer(options: ChatStreamReducerOptions = {}): ChatStreamReducer {
+  const onDone = options.onDone;
   const errorFallbackText = options.errorFallbackText ?? '对话处理失败';
+  const adoptOnFirstEvent = options.adoptOnFirstEvent ?? true;
   let streamSessionId: string | null = null;
+
+  /** 流结束统一收尾：复位流状态 + 通知调用方（注销归约器）。 */
+  const finish = (sid: string | null) => {
+    if (sid) useAppStore.getState().setStreamStatus('idle', sid);
+    onDone?.(sid);
+  };
   let liveWindow = 0;
 
   return {
@@ -135,17 +108,27 @@ export function createChatStreamReducer(options: ChatStreamReducerOptions = {}):
       const st = useAppStore.getState();
       const sid = event.session_id || null;
 
-      // 流归属会话：首个带 session_id 的 chunk 建立会话（PENDING 迁移交给 store）
+      // 流归属会话：首个带 session_id 的 chunk 建立会话（PENDING 迁移交给 store）。
+      // 仅新会话（adoptOnFirstEvent）才 setCurrentSession——已有会话时事件
+      // 直接写字典（updateSessionMessages 按 sid 路由），避免切走后被拉回。
       if (sid && sid !== streamSessionId) {
         streamSessionId = sid;
-        st.setCurrentSession(sid);
+        if (adoptOnFirstEvent) st.setCurrentSession(sid);
       }
 
       // Server-side error（校验/处理失败）：清理空气泡、复位状态、Toast 提示
       if (event.chunk_type === 'error') {
         st.removeEmptyAssistantMessage();
-        st.setStreamStatus('idle');
+        finish(sid);
         st.showToast(event.delta || errorFallbackText, 'error');
+        return;
+      }
+
+      // 用户消息落库确认（ADR-031）：比对 user_message_id 把本地乐观消息
+      // 替换为服务端真实 id（回退/重做定位键）；user_message_id 生命周期
+      // 到此结束（字段删除，不持久化）。
+      if (event.chunk_type === 'user_message_id' && event.user_message_id && event.message_id) {
+        st.confirmUserMessageId(sid, event.user_message_id, event.message_id);
         return;
       }
 
@@ -167,9 +150,10 @@ export function createChatStreamReducer(options: ChatStreamReducerOptions = {}):
       if (event.thinking) {
         const msgs = sid ? (st.sessionMessages[sid] ?? []) : st.messages;
         const last = msgs[msgs.length - 1];
+        const hasText = last?.segments?.some((s) => s.type === 'text') ?? false;
         const hasPrevTurn =
           last?.role === 'assistant' &&
-          (last.content !== '' || (last.tool_calls && last.tool_calls.length > 0));
+          (hasText || (last.tool_calls && last.tool_calls.length > 0));
         if (hasPrevTurn) st.startNewAssistantTurn(sid);
         st.appendThinking(event.thinking, sid);
       }
@@ -214,6 +198,7 @@ export function createChatStreamReducer(options: ChatStreamReducerOptions = {}):
       // 输出达到 token 上限（finish_reason === 'length'）：标记截断提示
       if (event.finish_reason === 'length') {
         st.markLastMessageTruncated(sid);
+        finish(sid);
       }
 
       // 流式中断（finish_reason === 'interrupted'）：保留部分输出并提示，
@@ -222,7 +207,42 @@ export function createChatStreamReducer(options: ChatStreamReducerOptions = {}):
       if (event.finish_reason === 'interrupted') {
         st.markLastMessageInterrupted(sid);
         st.showToast('流式中断，已保留部分输出', 'error');
+        finish(sid);
+      }
+
+      // 正常完成（finish_reason === 'stop' 等）：复位流状态 + 注销归约器
+      if (event.finish_reason && event.finish_reason !== 'length' && event.finish_reason !== 'interrupted') {
+        finish(sid);
       }
     },
   };
+}
+
+/* ─────── 活跃流归约器注册表（ADR-028 第 3 步） ─────── */
+
+/**
+ * 活跃流归约器注册表：POST /chat/stream 启动后按 session_id 注册，
+ * 统一事件通道（GET /events）的 chat_stream 事件按 session_id 路由到
+ * 对应归约器。流结束（finish_reason/error）时注销。
+ *
+ * 并行流式（切走会话后另一会话发新流）互不干扰：每个会话一个归约器。
+ */
+const activeStreamReducers = new Map<string, ChatStreamReducer>();
+
+/** 注册会话的活跃流归约器（startStream 拿到 session_id 后调用）。 */
+export function registerStreamReducer(sessionId: string, reducer: ChatStreamReducer): void {
+  activeStreamReducers.set(sessionId, reducer);
+}
+
+/** 注销会话的活跃流归约器（流结束/错误时调用）。 */
+export function unregisterStreamReducer(sessionId: string): void {
+  activeStreamReducers.delete(sessionId);
+}
+
+/** 路由 chat_stream 事件到对应会话的归约器（useUnifiedEvents 调用）。 */
+export function routeChatStreamEvent(event: ChatStreamEvent): void {
+  const sid = event.session_id;
+  if (!sid) return;
+  const reducer = activeStreamReducers.get(sid);
+  if (reducer) reducer.handleEvent(event);
 }

@@ -7,10 +7,12 @@
  *
  * 互斥由本函数保证：任一调用方改判定条件，另一侧自动跟随，不会双显/都不显。
  */
+import { messageText } from '@/lib/types';
+
 export function streamingIndicatorOwner(message: {
-  content: string;
+  segments?: { type: string; text?: string }[];
   thinking?: string | null;
 }): 'bubble' | 'list' | null {
-  if (message.content !== '') return null;
+  if (messageText(message) !== '') return null;
   return message.thinking ? 'bubble' : 'list';
 }

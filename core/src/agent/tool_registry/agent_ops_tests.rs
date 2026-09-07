@@ -9,12 +9,15 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::agent::{AgentRole, RoleRegistry};
-use crate::common::types::{FunctionCall, TokenUsage, ToolCall, ToolCallType};
+use crate::common::types::{FunctionCall, StructuredMessage, TokenUsage, ToolCall, ToolCallType};
 use crate::config::AgentRolesConfig;
 use crate::config::SafetyMode;
 use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
 use crate::executor::SecurityPolicy;
-use crate::model::types::{ChatChoice, ChatCompletionResponse};
+use crate::model::types::{
+    ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChunkChoice,
+    DeltaContent, ToolCallDelta, ToolCallFunctionDelta,
+};
 use crate::model::MockChatService;
 use crate::observability::AgentMetrics;
 use crate::skills::{
@@ -23,6 +26,234 @@ use crate::skills::{
 use crate::vfs::VirtualFileSystem;
 
 use super::*;
+
+// ── 流式 mock 辅助（ADR-030：run_subagent_loop 用 run_stream） ──
+
+/// 构造携带工具调用 delta 的流式 chunk。
+fn stream_chunk_with_tools(tools: Vec<ToolCallDelta>) -> ChatCompletionChunk {
+    ChatCompletionChunk {
+        id: "chunk-t".to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created: 0,
+        model: "test".to_string(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: DeltaContent {
+                role: None,
+                content: None,
+                reasoning_content: None,
+                tool_calls: Some(tools),
+            },
+            finish_reason: None,
+        }],
+        usage: Some(TokenUsage::default()),
+    }
+}
+
+/// 构造携带正文 + finish_reason 的流式 chunk（带 usage，避免 TokenEstimator 兜底）。
+fn stream_chunk_finish(content: &str, finish_reason: &str) -> ChatCompletionChunk {
+    ChatCompletionChunk {
+        id: "chunk-f".to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created: 0,
+        model: "test".to_string(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: DeltaContent {
+                role: None,
+                content: Some(content.to_string()),
+                reasoning_content: None,
+                tool_calls: None,
+            },
+            finish_reason: Some(finish_reason.to_string()),
+        }],
+        usage: Some(TokenUsage::default()),
+    }
+}
+
+/// mock 固定 chunk 序列的流式响应（每次调用重放同一序列）。
+fn stream_mock(chunks: Vec<ChatCompletionChunk>) -> MockChatService {
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion_stream().returning(move |_| {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let chunks = chunks.clone();
+        tokio::spawn(async move {
+            for chunk in chunks {
+                tx.send(Ok(chunk)).await.ok();
+            }
+        });
+        Ok(rx)
+    });
+    mock
+}
+
+/// 两轮流式 mock（submit_result 降级）：第 1 轮 submit_result 工具调用
+/// （执行器写入暂存结果），第 2 轮纯文本完成（无工具调用 = 收尾）。
+fn stream_mock_submit(result: &str) -> MockChatService {
+    use mockall::Sequence;
+    let mut mock = MockChatService::new();
+    let mut seq = Sequence::new();
+    let result = result.to_string();
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(move |_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![submit_delta(&result)])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_finish("结果 ID：bt_test", "stop")];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    mock
+}
+
+/// 两轮流式 mock（带请求谓词 withf）：第 1 轮 submit_result（withf 校验请求），
+/// 第 2 轮纯文本完成。
+fn stream_mock_submit_withf<F>(pred: F, result: &str) -> MockChatService
+where
+    F: Fn(&ChatCompletionRequest) -> bool + Send + Sync + 'static,
+{
+    use mockall::Sequence;
+    let mut mock = MockChatService::new();
+    let mut seq = Sequence::new();
+    let result = result.to_string();
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
+        .withf(pred)
+        .returning(move |_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![submit_delta(&result)])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_finish("结果 ID：bt_test", "stop")];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    mock
+}
+
+/// 构造 submit_result 工具调用 delta。
+fn submit_delta(result: &str) -> ToolCallDelta {
+    ToolCallDelta {
+        index: 0,
+        id: Some("s1".to_string()),
+        call_type: None,
+        function: Some(ToolCallFunctionDelta {
+            name: Some("submit_result".to_string()),
+            arguments: Some(format!(r#"{{"result":"{result}"}}"#)),
+        }),
+    }
+}
+
+/// 构造任意工具调用 delta（read_file / write_file / delegate_to_agent 等）。
+fn tool_delta(id: &str, name: &str, args: &str) -> ToolCallDelta {
+    ToolCallDelta {
+        index: 0,
+        id: Some(id.to_string()),
+        call_type: None,
+        function: Some(ToolCallFunctionDelta {
+            name: Some(name.to_string()),
+            arguments: Some(args.to_string()),
+        }),
+    }
+}
+
+/// 会话管理器 mock（run_subagent_loop 落库用；ADR-030 统一循环框架）。
+struct MockSessionManager;
+#[async_trait]
+impl crate::session::SessionManager for MockSessionManager {
+    async fn add_structured_message(
+        &self,
+        _session_id: &str,
+        _msg: StructuredMessage,
+    ) -> crate::common::error::Result<()> {
+        Ok(())
+    }
+    async fn rewrite_messages(
+        &self,
+        _session_id: &str,
+        _messages: &[StructuredMessage],
+    ) -> crate::common::error::Result<()> {
+        Ok(())
+    }
+    async fn create_session(
+        &self,
+        _id: &str,
+        _message: Message,
+    ) -> crate::common::error::Result<crate::session::Session> {
+        Ok(crate::session::Session::new(_id))
+    }
+    async fn get_session(
+        &self,
+        _id: &str,
+    ) -> crate::common::error::Result<Option<crate::session::Session>> {
+        Ok(None)
+    }
+    async fn update_session(
+        &self,
+        _session: &crate::session::Session,
+    ) -> crate::common::error::Result<()> {
+        Ok(())
+    }
+    async fn list_sessions(&self) -> crate::common::error::Result<Vec<crate::session::Session>> {
+        Ok(vec![])
+    }
+    async fn delete_session(&self, _id: &str) -> crate::common::error::Result<()> {
+        Ok(())
+    }
+}
+
+/// 构造带会话管理器的委托测试注册表。
+fn delegate_registry(mock: MockChatService) -> ToolRegistry {
+    ToolRegistry::new(default_strict_policy())
+        .with_model_service(Arc::new(mock))
+        .with_session_manager(Arc::new(MockSessionManager))
+        .with_model("test-model")
+}
+
+/// 注册委托任务并返回 task_id（submit_result 执行器 stage_result 需要任务存在）。
+async fn register_delegate_task(registry: &ToolRegistry, desc: &str) -> String {
+    registry
+        .background_tasks
+        .register(
+            crate::agent::background::TaskKind::Delegate,
+            desc.to_string(),
+            "session-1".to_string(),
+            0,
+        )
+        .await
+}
 
 /// 默认严格策略：允许任意路径，但阻止常见破坏性命令。
 fn default_strict_policy() -> SecurityPolicy {
@@ -264,7 +495,11 @@ async fn test_self_check_success_with_metrics() {
 async fn test_delegate_to_agent_not_configured() {
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"do something"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"do something"}"#).unwrap(),
+            "session-1",
+            "bt_test",
+        )
         .await;
     assert!(result.is_err());
     assert!(result
@@ -285,15 +520,19 @@ async fn test_delegate_to_agent_rejects_missing_arguments() {
 
 #[tokio::test]
 async fn test_delegate_to_agent_success() {
-    let mut mock = MockChatService::new();
-    mock.expect_chat_completion()
-        .returning(|_| Ok(submit_response("final answer")));
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
-        .with_model("test-model");
+    // ADR-030：submit_result 降级为普通工具——模型调用 submit_result
+    // （执行器写入暂存结果），继续输出（告知主 agent 结果 ID），
+    // 无工具调用 = 完成（暂存结果优先）
+    let mock = stream_mock_submit("final answer");
+    let registry = delegate_registry(mock);
+    let task_id = register_delegate_task(&registry, "summarize the notes").await;
 
     let result = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"summarize the notes"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"summarize the notes"}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "final answer");
@@ -362,35 +601,95 @@ async fn test_delegate_nested_delegation_executes_and_depth_released() {
     // 完成后委托深度应恢复为 0（guard 释放）。
     use mockall::Sequence;
 
+    // 流式 mock：外层 3 轮 + 内层 2 轮（submit_result 降级后各需两轮：
+    // 工具调用 + 纯文本完成）。内层 spawn 在外层第 1 轮 delegate 工具
+    // 执行的 await 期间自运行到完成（原测试时序假设一致）。
     let mut mock = MockChatService::new();
     let mut seq = Sequence::new();
-    // 第 1 轮：外层子循环收到嵌套委托请求
-    mock.expect_chat_completion()
+    // 第 1 轮：外层子循环收到嵌套委托请求（delegate_to_agent 工具调用）
+    mock.expect_chat_completion_stream()
         .times(1)
         .in_sequence(&mut seq)
         .returning(|_| {
-            Ok(chat_response_with_tools(vec![delegate_call(
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![tool_delta(
                 "c1",
-                "inner task",
-            )]))
+                "delegate_to_agent",
+                r#"{"task":"inner task"}"#,
+            )])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
         });
-    // 第 2 轮：内层子循环显式提交结果
-    mock.expect_chat_completion()
+    // 内层第 1 轮：submit_result（inner done）
+    mock.expect_chat_completion_stream()
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|_| Ok(submit_response("inner done")));
-    // 第 3 轮：外层子循环收到工具结果后显式提交最终结果
-    mock.expect_chat_completion()
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![submit_delta("inner done")])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    // 内层第 2 轮：纯文本完成（inner done）
+    mock.expect_chat_completion_stream()
         .times(1)
         .in_sequence(&mut seq)
-        .returning(|_| Ok(submit_response("outer done")));
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_finish("inner done", "stop")];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    // 外层第 2 轮：submit_result（outer done）
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![submit_delta("outer done")])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    // 外层第 3 轮：纯文本完成（outer done）
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_finish("outer done", "stop")];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
 
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
-        .with_model("test-model");
+    let registry = delegate_registry(mock);
+    let task_id = register_delegate_task(&registry, "outer task").await;
 
     let result = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"outer task"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"outer task"}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "outer done");
@@ -437,50 +736,45 @@ async fn test_delegate_depth_limit_rejected() {
 
 #[tokio::test]
 async fn test_delegate_max_turns_param_bounds_loop() {
-    // max_turns=2：mock 始终返回工具调用（无最终答案），2 轮后返回超限消息。
-    let mut mock = MockChatService::new();
-    mock.expect_chat_completion().times(2).returning(|_| {
-        Ok(chat_response_with_tools(vec![ToolCall {
-            id: "c1".to_string(),
-            call_type: ToolCallType::Function,
-            function: FunctionCall {
-                name: "read_file".to_string(),
-                arguments: r#"{"path":"x"}"#.to_string(),
-            },
-        }]))
-    });
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
-        .with_model("test-model");
+    // max_turns=2：mock 每轮返回 read_file 工具调用（永不完成），
+    // 2 轮后返回 MaxTurnsReached（ADR-030：尽力而为，submitted=false）。
+    let mock = stream_mock(vec![stream_chunk_with_tools(vec![tool_delta(
+        "c1",
+        "read_file",
+        r#"{"path":"x"}"#,
+    )])]);
+    let registry = delegate_registry(mock);
+    let task_id = register_delegate_task(&registry, "loop forever").await;
 
     let result = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"loop forever","max_turns":2}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"loop forever","max_turns":2}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
-    assert!(
-        result["result"]
-            .as_str()
-            .unwrap()
-            .contains("reached max turns (2)"),
-        "应报告到达 max_turns"
+    assert_eq!(
+        result["submitted"].as_bool(),
+        Some(false),
+        "max_turns 上限应标记 submitted=false（尽力而为）"
     );
 }
-
 #[tokio::test]
 async fn test_delegate_timeout_param_accepted() {
     // timeout_secs 参数被接受：正常完成不受影响，深度恢复为 0。
     // （mock 无法真实挂起——mockall async 方法闭包同步返回，超时中断路径
     // 由 tokio::time::timeout 保证，此处覆盖参数解析与正常路径。）
-    let mut mock = MockChatService::new();
-    mock.expect_chat_completion()
-        .times(1)
-        .returning(|_| Ok(submit_response("quick answer")));
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
-        .with_model("test-model");
+    let mock = stream_mock_submit("quick answer");
+    let registry = delegate_registry(mock);
+    let task_id = register_delegate_task(&registry, "quick").await;
 
     let result = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"quick","timeout_secs":30}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"quick","timeout_secs":30}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "quick answer");
@@ -492,36 +786,50 @@ async fn test_delegate_timeout_param_accepted() {
 }
 
 #[tokio::test]
-async fn test_delegate_plain_text_not_accepted_as_final() {
-    // 未调用 submit_result 的纯文本输出不被接受为最终结果：
-    // 第一轮输出文本 → 循环继续（注入提示）；第二轮调用 submit_result 才结束。
-    use mockall::Sequence;
+async fn test_delegate_timeout_aborts_hung_subagent() {
+    // 超时兜底守卫（ADR-026）：mock 流挂起（不产出 chunk 也不关闭通道），
+    // timeout_secs=1 应中断并返回超时错误（watcher 标 fail + 通知主 agent）。
     let mut mock = MockChatService::new();
-    let mut seq = Sequence::new();
-    mock.expect_chat_completion()
-        .times(1)
-        .in_sequence(&mut seq)
-        .returning(|_| Ok(chat_response("我先说说我的看法")));
-    mock.expect_chat_completion()
-        .times(1)
-        .in_sequence(&mut seq)
-        .withf(|req: &ChatCompletionRequest| {
-            // 第二轮请求应携带"未接受"提示（引导调用 submit_result）
-            req.messages
-                .iter()
-                .any(|m| m.content.contains("没有被接受为最终结果"))
-        })
-        .returning(|_| Ok(submit_response("最终报告")));
-
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
-        .with_model("test-model");
+    mock.expect_chat_completion_stream().returning(|_| {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        // 挂起：forget tx 使通道保持打开但永不发送——rx.recv() 永久挂起
+        std::mem::forget(tx);
+        Ok(rx)
+    });
+    let registry = delegate_registry(mock);
+    let task_id = register_delegate_task(&registry, "hung").await;
 
     let result = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"审查"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"hung","timeout_secs":1}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
+        .await;
+    assert!(result.is_err(), "挂起子代理应超时失败");
+    assert!(
+        result.unwrap_err().to_string().contains("委托执行超时"),
+        "错误应提示超时"
+    );
+}
+
+#[tokio::test]
+async fn test_delegate_plain_text_is_final() {
+    // ADR-030：收尾统一"无工具调用"——纯文本输出即完成（submitted=true），
+    // 结果 = 模型输出（无 submit_result 暂存时）。
+    let mock = stream_mock(vec![stream_chunk_finish("我先说说我的看法", "stop")]);
+    let registry = delegate_registry(mock);
+    let task_id = register_delegate_task(&registry, "审查").await;
+
+    let result = registry
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"审查"}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
-    assert_eq!(result["result"].as_str().unwrap(), "最终报告");
+    assert_eq!(result["result"].as_str().unwrap(), "我先说说我的看法");
     assert_eq!(result["submitted"].as_bool(), Some(true));
 }
 
@@ -560,17 +868,21 @@ fn tool_call(id: &str, name: &str, args: &str) -> ToolCall {
 #[tokio::test]
 async fn test_delegate_role_model_used() {
     // role="researcher"（配置覆盖 model）：子 Agent 请求使用角色模型
-    let mut mock = MockChatService::new();
-    mock.expect_chat_completion()
-        .withf(|req: &ChatCompletionRequest| req.model == "role-model")
-        .returning(|_| Ok(submit_response("researched")));
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
+    let mock = stream_mock_submit_withf(
+        |req: &ChatCompletionRequest| req.model == "role-model",
+        "researched",
+    );
+    let registry = delegate_registry(mock)
         .with_model("main-model")
         .with_role_registry(role_registry_with(Some("role-model"), None));
+    let task_id = register_delegate_task(&registry, "research x").await;
 
     let result = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"research x","role":"researcher"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"research x","role":"researcher"}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "researched");
@@ -584,16 +896,19 @@ async fn test_delegate_role_model_used() {
 #[tokio::test]
 async fn test_delegate_no_role_uses_self_model() {
     // 无 role：请求模型回落主 Agent 模型（self.model）
-    let mut mock = MockChatService::new();
-    mock.expect_chat_completion()
-        .withf(|req: &ChatCompletionRequest| req.model == "main-model")
-        .returning(|_| Ok(submit_response("answer")));
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
-        .with_model("main-model");
+    let mock = stream_mock_submit_withf(
+        |req: &ChatCompletionRequest| req.model == "main-model",
+        "answer",
+    );
+    let registry = delegate_registry(mock).with_model("main-model");
+    let task_id = register_delegate_task(&registry, "t").await;
 
     let result = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"t"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"t"}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "answer");
@@ -602,21 +917,22 @@ async fn test_delegate_no_role_uses_self_model() {
 #[tokio::test]
 async fn test_delegate_explicit_model_beats_role_model() {
     // 显式 model 参数优先级最高（> role.model > self.model）
-    let mut mock = MockChatService::new();
-    mock.expect_chat_completion()
-        .withf(|req: &ChatCompletionRequest| req.model == "explicit-model")
-        .returning(|_| Ok(submit_response("answer")));
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
+    let mock = stream_mock_submit_withf(
+        |req: &ChatCompletionRequest| req.model == "explicit-model",
+        "answer",
+    );
+    let registry = delegate_registry(mock)
         .with_model("main-model")
         .with_role_registry(role_registry_with(Some("role-model"), None));
+    let task_id = register_delegate_task(&registry, "t").await;
 
     let result = registry
-        .run_delegation_loop(
-    &serde_json::from_str(r#"{"task":"t","role":"researcher","model":"explicit-model"}"#).unwrap(),
-    "session-1",
-    "bt_test",
-)
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"t","role":"researcher","model":"explicit-model"}"#)
+                .unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "answer");
@@ -638,23 +954,27 @@ async fn test_delegate_role_system_prompt_injected() {
             ..Default::default()
         },
     );
-    let mut mock = MockChatService::new();
-    mock.expect_chat_completion()
-        .withf(|req: &ChatCompletionRequest| {
+    let mock = stream_mock_submit_withf(
+        |req: &ChatCompletionRequest| {
             req.messages
                 .iter()
                 .any(|m| m.content.contains("检索调研助手"))
-        })
-        .returning(|_| Ok(submit_response("answer")));
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
+        },
+        "answer",
+    );
+    let registry = delegate_registry(mock)
         .with_model("main-model")
         .with_role_registry(Arc::new(RoleRegistry::from_config(&AgentRolesConfig {
             roles,
         })));
+    let task_id = register_delegate_task(&registry, "t").await;
 
     let result = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"t","role":"researcher"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"t","role":"researcher"}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "answer");
@@ -676,26 +996,27 @@ async fn test_delegate_explicit_system_prompt_beats_role() {
             ..Default::default()
         },
     );
-    let mut mock = MockChatService::new();
-    mock.expect_chat_completion()
-        .withf(|req: &ChatCompletionRequest| {
+    let mock = stream_mock_submit_withf(
+        |req: &ChatCompletionRequest| {
             req.messages.iter().any(|m| m.content.contains("显式提示"))
                 && !req.messages.iter().any(|m| m.content.contains("角色提示"))
-        })
-        .returning(|_| Ok(submit_response("answer")));
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
+        },
+        "answer",
+    );
+    let registry = delegate_registry(mock)
         .with_model("main-model")
         .with_role_registry(Arc::new(RoleRegistry::from_config(&AgentRolesConfig {
             roles,
         })));
+    let task_id = register_delegate_task(&registry, "t").await;
 
     let result = registry
-        .run_delegation_loop(
-    &serde_json::from_str(r#"{"task":"t","role":"researcher","system_prompt":"显式提示"}"#).unwrap(),
-    "session-1",
-    "bt_test",
-)
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"t","role":"researcher","system_prompt":"显式提示"}"#)
+                .unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "answer");
@@ -714,14 +1035,40 @@ async fn test_delegate_one_shot_clean_context_every_time() {
             ..Default::default()
         },
     );
+    // 第一次委托：任何请求 → submit + 完成
     let mut mock = MockChatService::new();
-    mock.expect_chat_completion()
+    let mut seq = mockall::Sequence::new();
+    mock.expect_chat_completion_stream()
         .times(1)
-        .returning(|_| Ok(submit_response("answer1")));
-    mock.expect_chat_completion()
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![submit_delta("answer1")])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    mock.expect_chat_completion_stream()
         .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_finish("answer1", "stop")];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    // 第二次委托：干净上下文（无 t1 残留）
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
         .withf(|req: &ChatCompletionRequest| {
-            // 干净上下文：不含首次任务 t1，仅含当前任务 t2 与角色系统提示
             !req.messages.iter().any(|m| m.content.contains("t1"))
                 && req.messages.iter().any(|m| m.content.contains("t2"))
                 && req
@@ -729,11 +1076,32 @@ async fn test_delegate_one_shot_clean_context_every_time() {
                     .iter()
                     .any(|m| m.content.contains("你是检索助手"))
         })
-        .returning(|_| Ok(submit_response("answer2")));
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![submit_delta("answer2")])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_finish("answer2", "stop")];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
 
     let (vfs, _dir) = real_vfs().await;
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
+    let registry = delegate_registry(mock)
         .with_model("main-model")
         .with_vfs(vfs)
         .with_role_registry(Arc::new(RoleRegistry::from_config(&AgentRolesConfig {
@@ -741,8 +1109,13 @@ async fn test_delegate_one_shot_clean_context_every_time() {
         })));
 
     // 第一次委托
+    let task1 = register_delegate_task(&registry, "t1").await;
     let r1 = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"t1","role":"researcher"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"t1","role":"researcher"}"#).unwrap(),
+            "session-1",
+            &task1,
+        )
         .await
         .unwrap();
     assert_eq!(r1["result"].as_str().unwrap(), "answer1");
@@ -752,8 +1125,13 @@ async fn test_delegate_one_shot_clean_context_every_time() {
     );
 
     // 第二次委托：干净上下文（无 t1 残留）
+    let task2 = register_delegate_task(&registry, "t2").await;
     let r2 = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"t2","role":"researcher"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"t2","role":"researcher"}"#).unwrap(),
+            "session-1",
+            &task2,
+        )
         .await
         .unwrap();
     assert_eq!(r2["result"].as_str().unwrap(), "answer2");
@@ -764,32 +1142,73 @@ async fn test_delegate_one_shot_clean_context_every_time() {
 async fn test_delegate_role_filters_disallowed_tools() {
     // 角色白名单外的工具：不执行，合成错误结果回喂模型（循环继续，不硬失败）
     let mut mock = MockChatService::new();
-    mock.expect_chat_completion().times(1).returning(|_| {
-        Ok(chat_response_with_tools(vec![tool_call(
-            "c1",
-            "write_file",
-            r#"{"path":"x","content":"y"}"#,
-        )]))
-    });
-    mock.expect_chat_completion()
+    let mut seq = mockall::Sequence::new();
+    // 第 1 轮：write_file 工具调用（白名单外 → 合成错误）
+    mock.expect_chat_completion_stream()
         .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![tool_delta(
+                "c1",
+                "write_file",
+                r#"{"path":"x","content":"y"}"#,
+            )])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    // 第 2 轮：模型看到错误后 submit_result
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
         .withf(|req: &ChatCompletionRequest| {
             req.messages
                 .iter()
                 .any(|m| m.content.contains("不允许使用工具 write_file"))
         })
-        .returning(|_| Ok(submit_response("fixed answer")));
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![submit_delta("fixed answer")])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    // 第 3 轮：纯文本完成
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_finish("fixed answer", "stop")];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
 
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
+    let registry = delegate_registry(mock)
         .with_model("main-model")
         .with_role_registry(role_registry_with(
             None,
             Some(vec!["read_file", "delegate_to_agent"]),
         ));
+    let task_id = register_delegate_task(&registry, "t").await;
 
     let result = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"t","role":"researcher"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"t","role":"researcher"}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "fixed answer");
@@ -799,29 +1218,70 @@ async fn test_delegate_role_filters_disallowed_tools() {
 async fn test_delegate_role_allows_allowlisted_tool() {
     // 白名单内的工具正常执行：read_file 直接执行并回喂结果
     let mut mock = MockChatService::new();
-    mock.expect_chat_completion().times(1).returning(|_| {
-        Ok(chat_response_with_tools(vec![tool_call(
-            "c1",
-            "read_file",
-            r#"{"path":"x"}"#,
-        )]))
-    });
-    mock.expect_chat_completion()
+    let mut seq = mockall::Sequence::new();
+    // 第 1 轮：read_file 工具调用（白名单内 → 执行）
+    mock.expect_chat_completion_stream()
         .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![tool_delta(
+                "c1",
+                "read_file",
+                r#"{"path":"x"}"#,
+            )])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    // 第 2 轮：模型看到工具结果后 submit_result
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
         .withf(|req: &ChatCompletionRequest| {
             req.messages.iter().any(|m| {
                 m.tool_call_id.as_deref() == Some("c1") && !m.content.contains("不允许使用工具")
             })
         })
-        .returning(|_| Ok(submit_response("done")));
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![submit_delta("done")])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    // 第 3 轮：纯文本完成
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_finish("done", "stop")];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
 
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
+    let registry = delegate_registry(mock)
         .with_model("main-model")
         .with_role_registry(role_registry_with(None, Some(vec!["read_file"])));
+    let task_id = register_delegate_task(&registry, "t").await;
 
     let result = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"t","role":"researcher"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"t","role":"researcher"}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "done");
@@ -831,12 +1291,14 @@ async fn test_delegate_role_allows_allowlisted_tool() {
 async fn test_delegate_unknown_role_errors_with_available_roles() {
     // 未知角色：循环启动前报错，错误消息列出可用角色（模型可重试）
     let mock = MockChatService::new();
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
-        .with_model("main-model");
+    let registry = delegate_registry(mock).with_model("main-model");
 
     let err = registry
-        .run_delegation_loop(&serde_json::from_str(r#"{"task":"t","role":"ghost"}"#).unwrap(), "session-1", "bt_test")
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"t","role":"ghost"}"#).unwrap(),
+            "session-1",
+            "bt_test",
+        )
         .await
         .unwrap_err()
         .to_string();
@@ -853,28 +1315,61 @@ async fn test_delegate_background_role_applies() {
     // 后台委托同样应用角色：角色模型 + 白名单过滤（与前台共用循环）
     use crate::agent::background::TaskStatus;
 
+    // 流式 mock：第 1 轮 write_file（白名单外 → 合成错误），
+    // 第 2 轮 submit_result（bg done），第 3 轮纯文本完成
     let mut mock = MockChatService::new();
-    mock.expect_chat_completion()
+    let mut seq = mockall::Sequence::new();
+    mock.expect_chat_completion_stream()
         .times(1)
+        .in_sequence(&mut seq)
         .withf(|req: &ChatCompletionRequest| req.model == "role-model")
         .returning(|_| {
-            Ok(chat_response_with_tools(vec![tool_call(
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![tool_delta(
                 "c1",
                 "write_file",
                 r#"{"path":"x","content":"y"}"#,
-            )]))
+            )])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
         });
-    mock.expect_chat_completion()
+    mock.expect_chat_completion_stream()
         .times(1)
+        .in_sequence(&mut seq)
         .withf(|req: &ChatCompletionRequest| {
             req.messages
                 .iter()
                 .any(|m| m.content.contains("不允许使用工具"))
         })
-        .returning(|_| Ok(submit_response("bg done")));
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_with_tools(vec![submit_delta("bg done")])];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
+    mock.expect_chat_completion_stream()
+        .times(1)
+        .in_sequence(&mut seq)
+        .returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunks = vec![stream_chunk_finish("bg done", "stop")];
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    tx.send(Ok(chunk)).await.ok();
+                }
+            });
+            Ok(rx)
+        });
 
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
+    let registry = delegate_registry(mock)
         .with_model("main-model")
         .with_role_registry(role_registry_with(
             Some("role-model"),
@@ -916,12 +1411,8 @@ async fn test_delegate_background_role_applies() {
 async fn test_delegate_background_starts_and_completes() {
     use crate::agent::background::TaskStatus;
 
-    let mut mock = MockChatService::new();
-    mock.expect_chat_completion()
-        .returning(|_| Ok(submit_response("bg done")));
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
-        .with_model("test-model");
+    let mock = stream_mock_submit("bg done");
+    let registry = delegate_registry(mock);
 
     let result = registry
         .execute_delegate_to_agent(
@@ -998,7 +1489,12 @@ async fn test_task_status_list_mode_without_task_id() {
     let registry = ToolRegistry::new(default_strict_policy());
     let id = registry
         .background_tasks
-        .register(TaskKind::Delegate, "task-a".to_string(), "s1".to_string(), 0)
+        .register(
+            TaskKind::Delegate,
+            "task-a".to_string(),
+            "s1".to_string(),
+            0,
+        )
         .await;
     registry.background_tasks.mark_running(&id).await;
 
@@ -1038,12 +1534,8 @@ async fn test_task_status_missing_task() {
 async fn test_background_assigns_correct_parent_session() {
     // 回归保护：后台任务归属由调用链显式传递的 session_id 决定（非共享可变
     // 状态）——多会话并发 turn 下，各任务挂到正确的父会话。
-    let mut mock = MockChatService::new();
-    mock.expect_chat_completion()
-        .returning(|_| Ok(chat_response("x")));
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
-        .with_model("test-model");
+    let mock = stream_mock(vec![stream_chunk_finish("x", "stop")]);
+    let registry = delegate_registry(mock);
 
     // 不同会话各自发起后台委托（模拟并发 turn 的交错调用）
     let r1 = registry
@@ -1055,6 +1547,7 @@ async fn test_background_assigns_correct_parent_session() {
         .await
         .unwrap();
 
+    // 等待两个后台任务完成（parent_session_id 在注册时已固化——无需等终态）
     let task_a = registry
         .background_tasks
         .get(r1["task_id"].as_str().unwrap())

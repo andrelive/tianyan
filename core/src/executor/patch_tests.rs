@@ -110,6 +110,56 @@ fn parse_patch_rename_operation_unsupported() {
 }
 
 #[test]
+fn parse_patch_ignores_claude_style_envelope_lines() {
+    // Claude Code 风格围栏（模型输出惯性夹带 Begin/End）：本工具无围栏，
+    // 已知围栏行跳过（与空行同策略），不报"未知的信封头部"。
+    let text = "\
+*** Begin Patch
+*** Update File: a.txt
+@@ -1,1 +1,1 @@
+-a
++A
+*** End Patch
+";
+    let files = parse_patch(text).unwrap();
+    assert_eq!(files.len(), 1, "围栏行应被跳过，仅剩文件块");
+    assert_eq!(files[0].path, "a.txt");
+    assert_eq!(files[0].hunks.len(), 1);
+    let out = apply_patch_to_content("a\n", &files[0].hunks).unwrap();
+    assert_eq!(out, "A\n");
+}
+
+#[test]
+fn parse_patch_ignores_envelope_variants_and_unknown_still_errors() {
+    // Begin / End / Begin Patch / End Patch 四种变体（大小写不敏感）均可跳过
+    let text = "\
+*** begin patch
+*** Update File: a.txt
+@@ -1,1 +1,1 @@
+-a
++A
+*** end
+*** Update File: b.txt
+@@ -1,1 +1,1 @@
+-b
++B
+*** END PATCH
+";
+    let files = parse_patch(text).unwrap();
+    assert_eq!(files.len(), 2, "文件间围栏也应跳过");
+    // 未知 *** 头仍报错（围栏容错不放行任意头部）
+    let err = parse_patch("*** Something Else\n").unwrap_err();
+    assert!(err.to_string().contains("未知的信封头部"), "{err}");
+}
+
+#[test]
+fn parse_patch_envelope_only_text_errors() {
+    // 只有围栏没有实际文件块：仍按"补丁为空"报错（围栏不构成补丁内容）
+    let err = parse_patch("*** Begin Patch\n*** End Patch\n").unwrap_err();
+    assert!(err.to_string().contains("解析失败"), "{err}");
+}
+
+#[test]
 fn parse_patch_hunk_body_without_prefix_errors() {
     let err = parse_patch(&patch_for("@@ -1,1 +1,1 @@\n裸行\n")).unwrap_err();
     assert!(err.to_string().contains("解析失败"), "{err}");

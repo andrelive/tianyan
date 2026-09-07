@@ -6,6 +6,12 @@
 //! 完成条目保留展示（划线样式），无任何条目后面板消失（对齐 DSH todo_write
 //! 的临时面板语义）。
 //!
+//! 当前批语义（同一会话同一时期只保留一批同源待办）：
+//! - create 时若本会话已有待办且全部完成 → 自动移除旧批、建立新批；
+//!   仍有未完成项则作为新工作追加进当前批。
+//! - `close` 主动清空当前批全部待办（目标变更、现有待办不再相关时使用，
+//!   即使有未完成项）；完成项划线保留，是否清理由智能体自行决定（delete）。
+//!
 //! 批量语义（对齐 DSH todo_write 的一次性整单写入）：create 接受 `todos`
 //! 数组一次创建整份清单；update 接受 `updates` 数组一次合并多条状态变更；
 //! delete 接受 `ids` 数组。子任务用 `parent_id` 挂靠父待办。
@@ -150,11 +156,11 @@ impl DynamicToolExecutor for TodoTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::new(
             "todo",
-            "管理当前会话的待办清单（会话绑定，仅本会话可见）。支持批量，避免逐条调用：operation=create 时传 todos 数组一次性写入整份清单（推荐）；operation=update 时传 updates 数组（id + 可选 status/title 等）一次合并多条状态变更——开始/完成多条时务必合并到一次调用；发现新工作随时 create 追加，子任务用 parent_id 挂到父待办下；operation=list 查看当前清单（含 id 与状态）；operation=delete 传 ids 数组。",
+            "管理当前会话的待办清单（会话绑定，仅本会话可见；同一时期只保留一批同源待办）。支持批量，避免逐条调用：operation=create 时传 todos 数组一次性写入整份清单（推荐）——若当前批已全部完成，旧批自动移除并建立新批；仍有未完成项则作为新工作追加进当前批。operation=update 时传 updates 数组（id + 可选 status/title 等）一次合并多条状态变更——开始/完成多条时务必合并到一次调用。发现新工作随时 create 追加，子任务用 parent_id 挂到父待办下。operation=list 查看当前清单（含 id 与状态）。operation=delete 传 ids 数组删除指定项——完成项默认划线保留展示，是否清理由你自行决定。operation=close 清空当前批全部待办——当用户目标变更、现有待办不再反映当前意图时使用（即使有未完成项）。",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "operation": { "type": "string", "enum": ["create", "update", "list", "delete"], "description": "操作类型" },
+                    "operation": { "type": "string", "enum": ["create", "update", "list", "delete", "close"], "description": "操作类型" },
                     "todos": {
                         "type": "array",
                         "description": "批量创建（推荐）：一次传入整份清单",
@@ -214,6 +220,7 @@ impl DynamicToolExecutor for TodoTool {
             "update" => self.update(session_id, args).await,
             "list" => self.list(session_id, &args).await,
             "delete" => self.delete(session_id, args).await,
+            "close" => self.close(session_id).await,
             other => Err(TianyanError::invalid_input(format!(
                 "tool: todo 未知操作：{other}"
             ))),
@@ -224,6 +231,12 @@ impl DynamicToolExecutor for TodoTool {
 impl TodoTool {
     // —— create：批量数组优先，回落单条形态 ——
     async fn create(&self, session_id: &str, args: TodoArgs) -> Result<serde_json::Value> {
+        // 当前批语义：本会话已有待办且全部完成 → 先移除旧批，再建新批
+        let existing = self.store.list_by_session(session_id).await;
+        if !existing.is_empty() && existing.iter().all(|i| i.status == TodoStatus::Completed) {
+            let olds: Vec<String> = existing.iter().map(|i| i.id.clone()).collect();
+            self.store.delete_many(&olds).await?;
+        }
         let drafts: Vec<TodoDraftArgs> = match args.todos {
             Some(list) if !list.is_empty() => list,
             // 单条形态：title 视为必填
@@ -264,6 +277,12 @@ impl TodoTool {
             "count": created.len(),
             "todos": created.iter().map(Self::todo_json).collect::<Vec<_>>(),
         }))
+    }
+
+    // —— close：清空当前会话全部待办（目标变更时主动关闭当前批）——
+    async fn close(&self, session_id: &str) -> Result<serde_json::Value> {
+        let removed = self.store.delete_by_session(session_id).await;
+        Ok(serde_json::json!({ "status": "closed", "removed": removed }))
     }
 
     // —— update：批量数组优先，回落单条形态；原子归属校验 ——
@@ -523,5 +542,111 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deleted["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_create_auto_rotates_batch_when_all_completed() {
+        let (tool, _dir) = tool();
+        // 第一批：两条
+        let created = tool
+            .execute(
+                "s-1",
+                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"旧1\" }, { \"title\": \"旧2\" } ] }",
+            )
+            .await
+            .unwrap();
+        let ids: Vec<String> = created["todos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect();
+        // 全部完成
+        let updates = ids
+            .iter()
+            .map(|id| format!("{{ \"id\": \"{id}\", \"status\": \"completed\" }}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        tool.execute(
+            "s-1",
+            &format!("{{ \"operation\": \"update\", \"updates\": [{updates}] }}"),
+        )
+        .await
+        .unwrap();
+        // 再 create → 旧批自动移除，新批只有新条目
+        let new_batch = tool
+            .execute(
+                "s-1",
+                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"新1\" } ] }",
+            )
+            .await
+            .unwrap();
+        assert_eq!(new_batch["count"], 1);
+        let list = tool
+            .execute("s-1", "{ \"operation\": \"list\" }")
+            .await
+            .unwrap();
+        assert_eq!(list["count"], 1, "旧批应被移除，仅剩新批");
+        assert_eq!(list["todos"][0]["title"], "新1");
+    }
+
+    #[tokio::test]
+    async fn test_create_appends_when_incomplete_remains() {
+        let (tool, _dir) = tool();
+        tool.execute(
+            "s-1",
+            "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"进行中\" } ] }",
+        )
+        .await
+        .unwrap();
+        // 有未完成项时 create → 追加进当前批
+        let appended = tool
+            .execute(
+                "s-1",
+                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"新发现\" } ] }",
+            )
+            .await
+            .unwrap();
+        assert_eq!(appended["count"], 1);
+        let list = tool
+            .execute("s-1", "{ \"operation\": \"list\" }")
+            .await
+            .unwrap();
+        assert_eq!(list["count"], 2, "未完成时新工作应追加，不移除旧批");
+    }
+
+    #[tokio::test]
+    async fn test_close_clears_current_batch() {
+        let (tool, _dir) = tool();
+        tool.execute(
+            "s-1",
+            "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"a\" }, { \"title\": \"b\" } ] }",
+        )
+        .await
+        .unwrap();
+        // close 清空当前批（含未完成项）
+        let closed = tool
+            .execute("s-1", "{ \"operation\": \"close\" }")
+            .await
+            .unwrap();
+        assert_eq!(closed["removed"], 2);
+        let list = tool
+            .execute("s-1", "{ \"operation\": \"list\" }")
+            .await
+            .unwrap();
+        assert_eq!(list["count"], 0);
+        // 只清本会话：他会话不受影响
+        tool.execute(
+            "s-2",
+            "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"别的\" } ] }",
+        )
+        .await
+        .unwrap();
+        let _ = tool.execute("s-1", "{ \"operation\": \"close\" }").await;
+        let other = tool
+            .execute("s-2", "{ \"operation\": \"list\" }")
+            .await
+            .unwrap();
+        assert_eq!(other["count"], 1, "close 不应影响其他会话");
     }
 }

@@ -48,7 +48,7 @@ impl ChatRequest {
             }
         }
         // 内容允许为空——当且仅当该消息携带图片（多模态消息以图片为主体）。
-        if self.message.content.trim().is_empty()
+        if self.message.content.as_deref().unwrap_or_default().trim().is_empty()
             && self
                 .message
                 .images
@@ -156,6 +156,13 @@ pub struct ChatStreamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// 本轮 token 用量（完成 chunk 携带；上下文占用 / 缓存命中展示用）。
     pub usage: Option<StreamUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 用户消息落库确认（chunk_type=user_message_id，ADR-031）：前端生成的
+    /// 临时 id（乐观渲染定位键）——确认后生命周期结束，不持久化。
+    pub user_message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 用户消息落库后的真实 id（user_message_id 确认事件携带）。
+    pub message_id: Option<String>,
 }
 
 impl ChatStreamEvent {
@@ -175,6 +182,8 @@ impl ChatStreamEvent {
             tool_call: None,
             tool_result: None,
             usage: None,
+            user_message_id: None,
+            message_id: None,
         }
     }
 
@@ -194,6 +203,8 @@ impl ChatStreamEvent {
             tool_call: None,
             tool_result: None,
             usage: None,
+            user_message_id: None,
+            message_id: None,
         }
     }
 }
@@ -213,8 +224,28 @@ mod tests {
         }"#;
         let req: ChatRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.session_id, Some("test-session".to_string()));
-        assert_eq!(req.message.content, "Hello");
+        assert_eq!(req.message.content.as_deref(), Some("Hello"));
         assert!(!req.stream);
+    }
+
+    #[test]
+    fn test_chat_request_parses_user_message_id() {
+        // ADR-031：乐观渲染定位键随请求透传（落库后经确认事件回显真实 id）
+        let json = r#"{
+            "session_id": "test-session",
+            "message": {"role": "user", "content": "Hello", "user_message_id": "umid-xyz"},
+            "stream": true,
+            "temperature": 0.7,
+            "max_tokens": 100
+        }"#;
+        let req: ChatRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.message.user_message_id.as_deref(), Some("umid-xyz"));
+        // 无 user_message_id 的请求（旧客户端/非乐观路径）解析为 None
+        let plain: ChatRequest = serde_json::from_str(
+            r#"{"message": {"role": "user", "content": "Hi"}, "stream": true, "temperature": 0.7, "max_tokens": 100}"#,
+        )
+        .unwrap();
+        assert!(plain.message.user_message_id.is_none());
     }
 
     #[test]
@@ -247,6 +278,8 @@ mod tests {
             tool_call: None,
             tool_result: None,
             usage: None,
+            user_message_id: None,
+            message_id: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Hello"));
@@ -308,3 +341,5 @@ mod tests {
         assert!(out.contains("images"));
     }
 }
+
+

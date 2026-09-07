@@ -52,14 +52,13 @@ export interface ChatSlice {
    * 用于流结束/失败后从服务端同步真实消息 ID（回退定位键），或后台流
    * 归属非当前会话时的缓存更新。 */
   setSessionMessages: (sessionId: string, messages: ChatMessage[]) => void;
-  /** 按 id 去重合并服务端消息到指定会话（追加语义：本地已有保留，服务端
-   * 新增的 system 通知/唤醒轮结果追加到末尾；不做清空/替换）。用于后台
-   * 任务/命令完成通知只持久化到服务端、前端 store 无推送事件的场景。 */
-  mergeServerMessages: (sessionId: string, serverMsgs: ChatMessage[]) => void;
   /** 应用服务端消息边界（chunk_type=message）：按 role 合并到本地最后一条
    * 同角色消息——id/内容以服务端统一结构为准，本地累积的 tool_calls/
    * segments 保留（流式期间已含完整工具结果）。 */
   applyServerMessage: (sessionId: string | null, msg: ChatMessage) => void;
+  /** 用户消息落库确认（ADR-031）：比对 user_message_id 把本地乐观消息
+   * 替换为服务端真实 id（user_message_id 字段删除——生命周期结束）。 */
+  confirmUserMessageId: (sessionId: string | null, userMessageId: string, messageId: string) => void;
   addMessage: (message: ChatMessage, sessionId?: string | null) => void;
   updateLastMessage: (delta: string, sessionId?: string | null) => void;
   appendSkillCalls: (calls: SkillCallInfo[], sessionId?: string | null) => void;
@@ -158,11 +157,20 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
         const pending = sessionMessages[PENDING_SESSION_KEY];
         const existing = sessionMessages[id] ?? [];
         const hasAssistant = existing.some((m) => m.role === 'assistant');
-        // 只迁移无 id 的 assistant 占位（user 消息由广播/边界事件提供权威版本；
-        // 有 id 的本地消息不迁移——避免与广播的 msg_xxx 重复）
+        const hasUser = existing.some((m) => m.role === 'user');
+        // 迁移乐观 user 消息（带 user_message_id——ADR-031 确认事件将替换为
+        // 真实 id；正式键已有 user（广播版权威）时不迁移）与无 id 的
+        // assistant 占位；有 id 的本地消息不迁移（避免与广播的 msg_xxx 重复）
         sessionMessages[id] = hasAssistant
           ? existing
-          : [...existing, ...pending.filter((m) => m.role === 'assistant' && !m.id)];
+          : [
+              ...existing,
+              ...pending.filter(
+                (m) =>
+                  (m.role === 'assistant' && !m.id) ||
+                  (m.role === 'user' && !!m.user_message_id && !hasUser),
+              ),
+            ];
         delete sessionMessages[PENDING_SESSION_KEY];
       }
       // 迁移流式状态键（PENDING → 正式会话）并删除残留键
@@ -224,57 +232,29 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
         ...(isCurrent ? { messages } : {}),
       };
     }),
-  mergeServerMessages: (sessionId, serverMsgs) =>
-    set((s) => {
-      const key = sessionId;
-      const base = s.sessionMessages[key] ?? (key === resolveSessionKey(s) ? s.messages : []);
-      const localIds = new Set(base.map((m) => m.id).filter(Boolean));
-      const merged = [...base];
-      for (const sm of serverMsgs) {
-        if (sm.id && localIds.has(sm.id)) continue;
-        // user 消息：插入到第一条 assistant 占位之前（保持 用户→assistant 顺序；
-        // 前端不再乐观渲染用户消息，广播到达时本地只有 assistant 占位）
-        if (sm.role === 'user') {
-          const firstAssistant = merged.findIndex((m) => m.role === 'assistant');
-          if (firstAssistant >= 0) {
-            merged.splice(firstAssistant, 0, sm);
-            continue;
-          }
-        }
-        // assistant 消息：替换无 id 的占位（保留流式累积的 content/segments，
-        // id 同步为服务端 id——回退定位键正确）
-        if (sm.role === 'assistant') {
-          const placeholder = merged.findIndex((m) => m.role === 'assistant' && !m.id);
-          if (placeholder >= 0) {
-            merged[placeholder] = { ...merged[placeholder], ...sm, id: sm.id };
-            continue;
-          }
-        }
-        merged.push(sm);
-      }
-      const isCurrent = key === resolveSessionKey(s);
-      return {
-        sessionMessages: { ...s.sessionMessages, [key]: merged },
-        ...(isCurrent ? { messages: merged } : {}),
-      };
-    }),
   applyServerMessage: (sessionId, msg) =>
     set((s) => {
       const key = sessionId ?? resolveSessionKey(s);
       const base = s.sessionMessages[key] ?? (key === resolveSessionKey(s) ? s.messages : []);
       const next = [...base];
-      // user 消息：插入到第一条 assistant 占位之前（保持 用户→assistant 顺序；
-      // 前端不再乐观渲染 user 消息，边界事件到达时本地只有 assistant 占位）
+      // user 消息：ADR-031 乐观渲染后本地已有（user_message_id 定位，确认
+      // 事件负责 id 同步）——边界事件（用户消息完整版）到达时跳过，避免
+      // 重复插入；非乐观场景（无 user_message_id 的请求）仍插入（保持
+      // 用户→assistant 顺序：插到最后一条 assistant 占位之前）。
       if (msg.role === 'user') {
-        const firstAssistant = next.findIndex((m) => m.role === 'assistant');
-        if (firstAssistant >= 0) {
-          next.splice(firstAssistant, 0, msg);
-          const isCurrent = key === resolveSessionKey(s);
-          return {
-            sessionMessages: { ...s.sessionMessages, [key]: next },
-            ...(isCurrent ? { messages: next } : {}),
-          };
+        if (base.some((m) => m.role === 'user' && m.user_message_id)) return {};
+        if (msg.id && base.some((m) => m.id === msg.id)) return {};
+        const lastAssistant = lastAssistantIndex(next);
+        if (lastAssistant >= 0) {
+          next.splice(lastAssistant, 0, msg);
+        } else {
+          next.push(msg);
         }
+        const isCurrent = key === resolveSessionKey(s);
+        return {
+          sessionMessages: { ...s.sessionMessages, [key]: next },
+          ...(isCurrent ? { messages: next } : {}),
+        };
       }
       // assistant 消息：替换无 id 的占位（保留流式累积的 content/segments，
       // id 同步为服务端 id——回退定位键正确）
@@ -318,6 +298,17 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
         ...(isCurrent ? { messages: next } : {}),
       };
     }),
+  confirmUserMessageId: (sessionId, userMessageId, messageId) =>
+    set((s) =>
+      updateSessionMessages(s, sessionId, (msgs) => {
+        const idx = msgs.findIndex((m) => m.user_message_id === userMessageId);
+        if (idx < 0) return msgs;
+        const updated = [...msgs];
+        const { user_message_id: _umid, ...rest } = updated[idx];
+        updated[idx] = { ...rest, id: messageId };
+        return updated;
+      }),
+    ),
   addMessage: (message, sessionId) =>
     set((s) =>
       updateSessionMessages(s, sessionId, (msgs) => [
@@ -343,7 +334,6 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
         const updated = [...msgs];
         updated[updated.length - 1] = {
           ...last,
-          content: last.content + delta,
           segments: nextSegments,
         };
         return updated;
@@ -414,12 +404,22 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
   appendThinking: (delta, sessionId) =>
     set((s) =>
       updateSessionMessages(s, sessionId, (msgs) =>
-        updateLastAssistant(msgs, (m) => ({
-          ...m,
-          thinking: (m.thinking ?? '') + delta,
-          // 时间线：思考增量按到达顺序追加
-          segments: [...(m.segments ?? []), { type: 'thinking', text: delta }],
-        })),
+        updateLastAssistant(msgs, (m) => {
+          const segments = m.segments ?? [];
+          const lastSeg = segments[segments.length - 1];
+          // 时间线：思考增量若末段已是 thinking 直接合并，避免逐 delta
+          // 建对象（超长思考流 O(n²) 段膨胀 → O(n)，与正文增量同策略；
+          // SegmentBlocks 渲染本就合并相邻 thinking 段，展示不变）
+          const nextSegments =
+            lastSeg && lastSeg.type === 'thinking'
+              ? [...segments.slice(0, -1), { type: 'thinking' as const, text: lastSeg.text + delta }]
+              : [...segments, { type: 'thinking' as const, text: delta }];
+          return {
+            ...m,
+            thinking: (m.thinking ?? '') + delta,
+            segments: nextSegments,
+          };
+        }),
       ),
     ),
   startNewAssistantTurn: (sessionId) =>
@@ -430,7 +430,7 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
         const last = msgs[msgs.length - 1];
         const isEmptyPlaceholder =
           last?.role === 'assistant' &&
-          last.content === '' &&
+          (!last.segments || last.segments.length === 0) &&
           !last.thinking &&
           (!last.tool_calls || last.tool_calls.length === 0);
         if (isEmptyPlaceholder) return msgs;
@@ -438,7 +438,7 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
           ...msgs,
           {
             role: 'assistant',
-            content: '',
+            segments: [],
             timestamp: new Date().toISOString(),
           },
         ];
@@ -489,13 +489,12 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
     set((s) =>
       updateSessionMessages(s, sessionId, (msgs) => {
         const last = msgs[msgs.length - 1];
-        // 只删「真空占位」：content 为空且无工具调用、无时间线。带 ask_user
+        // 只删「真空占位」：无时间线（空白正文/思考/工具）。带 ask_user
         // 工具卡片的助手消息（追问工具链）不是占位——clarification 事件
         // 到达时若误删，追问内容会从信息流消失（只有刷新历史才回来）。
         if (
           last &&
           last.role === 'assistant' &&
-          last.content === '' &&
           (!last.tool_calls || last.tool_calls.length === 0) &&
           (!last.segments || last.segments.length === 0)
         ) {

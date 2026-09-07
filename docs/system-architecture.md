@@ -1,10 +1,16 @@
 # 天演 (Tianyan) 系统架构文档
 
-本文档描述天演本地智能代理系统的整体架构、核心决策和组件间交互。
+本文档描述天演本地智能代理系统的整体架构、核心决策和组件间交互——**README 级总览**。
+实现细节与最新事实以代码为准，权威文档：
 
 > **相关文档导航**：
+> - [模块索引](./architecture/module-map.md) — 模块清单与位置
 > - [模块关系图](./module-relationships.md) — 模块间依赖关系、调用流程和数据交互机制
 > - [模块功能说明](./module-descriptions.md) — 各模块功能职责、公开 API 和集成状态
+> - [架构决策记录](./architecture/decisions/) — ADR-001~030（含修订关系）
+> - [工具目录](./architecture/tool-catalog.md) — 自动生成，与代码一致
+
+> **最后更新**: 2026-09-06（同步 ADR-028/029/030：统一事件推送、事件订阅与快照恢复、统一 Agent 循环框架）
 
 ## 目录
 
@@ -100,24 +106,26 @@ tianyan/
 
 ### 2.3 API 端点
 
-服务器提供以下 REST API 端点（前端调用状态：✅ 已接入 / ⚠️ 可优化 / ❌ 未接入）：
+服务器提供以下 REST API 端点（已接入前端的主要端点；完整路由以 `server/src/api/*/routes.rs` 为准）：
 
-| 领域 | 端点 | 方法 | 前端 |
-|------|------|------|:---:|
-| 对话 | `/api/v1/chat/stream` | POST (SSE) | ✅ |
-| 对话 | `/api/v1/chat` | POST | ⚠️ |
-| 对话 | `/api/v1/chat/regenerate` | POST | ✅ |
-| 对话 | `/api/v1/chat/edit` | POST | ✅ |
-| 会话 | `/api/v1/sessions` | GET/POST | ✅/⚠️ |
-| 会话 | `/api/v1/sessions/{id}` | GET/DELETE | ✅ |
-| 会话 | `/api/v1/sessions/{id}/title` | POST | ⚠️ |
-| 技能 | `/api/v1/skills` | GET | ✅ |
-| 技能 | `/api/v1/skills/{id}/execute` | POST | ✅ |
-| 知识 | `/api/v1/ingest` | POST | ❌ |
-| 知识 | `/api/v1/search` | GET | ❌ |
-| 配置 | `/api/config/status` | GET | ✅ |
-| 配置 | `/api/config/wizard` | POST | ✅ |
-| 健康 | `/health` | GET | 内部 |
+| 领域 | 端点 | 方法 | 说明 |
+|------|------|------|------|
+| 对话 | `/api/v1/chat/stream` | POST | 对话启动（收敛为开关：校验 + 启动 AgentLoop 立即返回，ADR-028；流式输出经 `GET /events`） |
+| 对话 | `/api/v1/chat/answer` | POST | ask_user 追问回答提交 |
+| 事件 | `/api/v1/events` | GET (SSE) | 统一事件流（message / task_status / command_output / chat_stream / snapshot，ADR-028/029） |
+| 事件 | `/api/v1/events/subscribe` | POST | 事件订阅（快照恢复触发点，ADR-029） |
+| 会话 | `/api/v1/sessions` | GET/POST | 会话列表 / 创建 |
+| 会话 | `/api/v1/sessions/{id}/messages` | GET | 会话消息（历史/对齐快照） |
+| 任务 | `/api/v1/tasks` | GET | 后台任务列表（委托/终端统一） |
+| 任务 | `/api/v1/tasks/{id}/cancel` | POST | 取消任务 |
+| 任务 | `/api/v1/tasks/{id}/log` | GET | 命令输出日志分页（ADR-028） |
+| 知识 | `/api/v1/knowledge/ingest` | POST | 知识摄入（VFS L2 + 摘要） |
+| 技能 | `/api/v1/skills` | GET | 技能列表（L0 渐进披露） |
+| 配置 | `/api/v1/config` | GET/PUT | 配置读写（ADR-023：`~/.tianyan/tianyan.toml` 固定） |
+| 配置 | `/api/v1/config/status` | GET | 配置状态（向导门控） |
+| 工作区 | `/api/v1/workspace/{tree,read,diff,apply-patch,apply-edit}` | GET/POST | 工作区浏览/编辑 |
+| 审批 | `/api/v1/approval/{status,respond}` | GET/POST | 应用层审批（wait_for_approval） |
+| 健康 | `/health` | GET | 健康检查 |
 
 ---
 
@@ -168,11 +176,11 @@ pub struct StructuredMessage {
 3. **会话跟踪**：`compression_marker` 标记压缩产生的摘要消息。加载会话时反向扫描到最近 marker，只加载 marker 及之后的的消息（旧消息仍完整保留在 SQLite 中）。
 4. **Token 统计**：LLM 响应 `TokenUsage` → `AgentLoop` 捕获 → `DetailedTokenUsage` → 持久化 → 聚合到 `AgentState.total_tokens`。
 
-### 3.3 决策 3: 组件工具化（待实现）
+### 3.3 决策 3: 组件工具化（已实施，ADR-003）
 
 知识库查询、技能调用等能力封装为 OpenAI function calling 兼容的工具，由 LLM 通过 `tool_call` 自主调用。
 
-当前 `ToolRegistry` 注册了 25 个工具：`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_code`、`search_vfs`、`vfs_read`、`vfs_list`、`call_skill`、`run_tests`、`discover_tests`、`verify_build`、`ask_user`、`self_check`、`knowledge_ingest`、`web_search`、`web_fetch`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`task_status`、`task_cancel`、`lsp`。其中 `call_skill` 桥接到 `SkillExecutor`（参数验证 + 安全检查 + 超时控制）；`delegate_to_agent` 支持并行/嵌套委托（深度上限 3）+ `max_turns`/`timeout_secs`，委托只支持异步（ADR-026：一律注册后台任务 + 立即返回 task_id，完成通知注入）；`web_search`/`web_fetch` 提供网页感知（DuckDuckGo/SearXNG 后端 + SSRF 防护 + 缓存）。
+当前 `ToolRegistry` 注册 25 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](architecture/tool-catalog.md)）：`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_vfs`、`call_skill`、`run_tests`、`discover_tests`、`ask_user`、`self_check`、`knowledge_ingest`、`web_search`、`web_fetch`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`task_status`、`task_cancel`、`lsp` 等。其中 `call_skill` 桥接到 `SkillExecutor`；`delegate_to_agent` 走统一循环框架（ADR-030：子代理 = AgentLoop 实例 + `TurnPolicy` 委托策略，流式路径 + 消息落库即广播）；`web_search`/`web_fetch` 提供网页感知（后端 + SSRF 防护 + 缓存）。
 
 ### 3.4 决策 4: 上下文组装前缀匹配原则
 
@@ -195,7 +203,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 ### 4.1 Agent 组件结构
 
 ```
-Agent :: process_message(session_id, msg)
+Agent :: process_message(session_id, msg) / process_message_stream（多模态 + 流式）
   │
   ├─ SessionManager::get_session(session_id) → SessionState
   │     └─ SessionStore::load()：SQLite 按 seq 查询 → compression_marker 截断
@@ -203,14 +211,14 @@ Agent :: process_message(session_id, msg)
   ├─ ContextPipeline::prepare_context()
   │     ├─ ContextAssembler::assemble()：soul → rules+memories → history（含当前用户输入）
   │     ├─ DualLayerRetriever::retrieve()：L0+L1 RRF 融合检索
-  │     └─ compress_if_needed()：compression_marker 后 > 6 条 → LLM 摘要压缩
+  │     └─ compress_if_needed()：compression_marker 后超阈值 → LLM 摘要压缩
   │
-  ├─ AgentLoop::run(messages, session_id, parent_id)
-  │     ├─ ChatCompletionRequest::new(model, messages).with_tools(ToolRegistry.defs())
-  │     ├─ LLM 返回 tool_calls → ToolRegistry::execute_parallel()
-  │     │     └─ 每条消息实时 persist（含工具调用结果，不丢弃）
-  │     ├─ 调用 ask_user → NeedsClarification，中断循环
-  │     └─ 返回 content → Answer，循环结束
+  ├─ AgentLoop::run / run_stream（统一循环框架，ADR-030）
+  │     ├─ TurnPolicy 配置：工具执行器 / 持久化 FTS 开关 / max_turns 策略 / 请求工具集
+  │     ├─ 主 agent = 默认策略（全局工具 + 索引 FTS）；子代理 = 委托策略（角色过滤 + 不索引 + 流式）
+  │     ├─ LLM 返回 tool_calls → ToolRegistry::execute_parallel()（可插拔管线）
+  │     ├─ 收尾统一：无工具调用 = 完成（子代理 submit_result 降级为可选结果落盘工具）
+  │     └─ 每条消息实时落库（子代理走 add_structured_message_no_fts + 广播）
   │
   └─ 后台异步（不阻塞响应）：
         ├─ EvolutionTask（ADR-017）：每日演化综述（记忆/技能/规则/组织形态统一演化）
@@ -306,7 +314,7 @@ TianyanConfig
 └── features    # 功能开关
 ```
 
-配置查找顺序：`./tianyan.toml` → `~/.config/tianyan/tianyan.toml` → `~/.tianyan/tianyan.toml`。
+配置查找顺序（ADR-023）：`~/.tianyan/tianyan.toml` 固定（`TIANYAN_CONFIG` 环境变量可覆盖）；数据目录由配置 `storage.data_dir` 决定（默认 `%LOCALAPPDATA%/tianyan`），配置目录与数据目录分离。
 
 ---
 

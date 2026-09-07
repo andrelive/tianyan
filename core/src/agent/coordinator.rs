@@ -109,6 +109,8 @@ pub trait AgentCoordinator: Send + Sync {
     /// - `model` — 可选指定模型，None 时使用默认配置。
     /// - `cancel` — 取消标志（客户端断开/服务关停时置位）；`None` 表示不可取消。
     /// - `thinking_effort` — 本会话思考强度（会话时选择；None 时使用模型默认）。
+    /// - `user_message_id` — 前端生成的用户消息临时 id（ADR-031 乐观渲染
+    ///   定位键；落库后经 UserMessageId 确认事件回显真实 id，此后弃用）。
     async fn process_message_stream(
         &self,
         session_id: &str,
@@ -116,6 +118,7 @@ pub trait AgentCoordinator: Send + Sync {
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
         thinking_effort: Option<String>,
+        user_message_id: Option<&str>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
 
     /// 初始化智能体。
@@ -242,6 +245,7 @@ impl AgentCoordinator for Agent {
                 model,
                 start,
                 None,
+                None, // 非流式路径无乐观渲染确认（响应直接携带消息 id）
                 crate::agent::agent_core::TurnOptions {
                     mode: crate::agent::agent_core::TurnMode::Plain,
                     do_snapshot: true,
@@ -261,6 +265,7 @@ impl AgentCoordinator for Agent {
         model: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
         thinking_effort: Option<String>,
+        user_message_id: Option<&str>,
     ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
         let model = model.unwrap_or(&self.default_model).to_string();
 
@@ -269,6 +274,7 @@ impl AgentCoordinator for Agent {
         let message = message.clone();
         let stream_sender = StreamEventSender::new(tx.clone());
         let session_id = session_id.to_string();
+        let user_message_id = user_message_id.map(str::to_string);
 
         tokio::spawn(async move {
             // ADR-013 串行化：单会话同一时刻只有一个活动轮（用户轮 / 唤醒轮互斥）。
@@ -306,6 +312,7 @@ impl AgentCoordinator for Agent {
                     &model,
                     start,
                     cancel.as_deref(),
+                    user_message_id.as_deref(),
                     crate::agent::agent_core::TurnOptions {
                         mode: crate::agent::agent_core::TurnMode::Stream {
                             sender: stream_sender,

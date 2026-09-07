@@ -1,6 +1,7 @@
 # 天演模块索引
 
 > 快速导航：每个模块的职责、位置、关键文件。详细功能见 [module-descriptions.md](../module-descriptions.md)，模块间关系和调用流程见 [module-relationships.md](../module-relationships.md)。
+> **最后更新**: 2026-09-06（ADR-029/030 同步：事件订阅与快照恢复、统一 Agent 循环框架）
 
 ---
 
@@ -51,7 +52,7 @@
 | `api/sessions` | `server/src/api/sessions/` | 会话管理 API |
 | `api/knowledge` | `server/src/api/knowledge/` | 知识管理 API（摄入 + 检索） |
 | `api/skills` | `server/src/api/skills/` | 技能执行 API |
-| `api/tasks` | `server/src/api/tasks/` | 后台任务 API：`GET /tasks`（统一列表：委托/终端）、`POST /tasks/{id}/cancel`、`GET /tasks/stream`（子智能体消息流 SSE，ADR-026） |
+| `api/tasks` | `server/src/api/tasks/` | 后台任务 API：`GET /tasks`（统一列表：委托/终端）、`POST /tasks/{id}/cancel`、`GET /tasks/{id}/log`（日志分页）；`GET /events`（统一事件流，ADR-028：task_status / command_output / chat_stream / snapshot）+ `POST /events/subscribe`（快照恢复，ADR-029/031：消息不再广播，端点仅推快照） |
 | `api/config` | `server/src/api/config/` | 配置管理 API + 向导 |
 | `state` | `server/src/state.rs` | AppState 生命周期管理 |
 | `agent_builder` | `server/src/agent_builder.rs` | Agent 构建工厂 |
