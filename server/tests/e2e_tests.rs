@@ -421,7 +421,10 @@ async fn test_e2e_unified_event_push_message() {
         "message 应为 ChatMessage 格式（含 content）：{msg}"
     );
     assert!(
-        msg["content"].as_str().unwrap_or("").contains("[后台命令完成]"),
+        msg["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("[后台命令完成]"),
         "content 应为通知文本：{msg}"
     );
     assert!(
@@ -433,7 +436,8 @@ async fn test_e2e_unified_event_push_message() {
         "不应是 StructuredMessage 格式（含 parts 字段）：{msg}"
     );
     assert!(
-        msg.get("segments").is_none_or(|s| s.is_array() || s.is_null()),
+        msg.get("segments")
+            .is_none_or(|s| s.is_array() || s.is_null()),
         "segments 字段应为数组或 null：{msg}"
     );
 

@@ -263,15 +263,13 @@ mod tests {
         let injectable = InjectableContext::default();
         let pre1 = make_text_msg("pre_1", MessageRole::User, "早期消息 1", "ses_1");
         let pre2 = make_text_msg("pre_2", MessageRole::Assistant, "早期回复", "ses_1");
-        let mut marker = make_text_msg("cmp_1", MessageRole::System, "[对话摘要] 早期摘要", "ses_1");
+        let mut marker =
+            make_text_msg("cmp_1", MessageRole::System, "[对话摘要] 早期摘要", "ses_1");
         marker.compression_marker = true;
         let post1 = make_text_msg("post_1", MessageRole::User, "近期消息", "ses_1");
         let post2 = make_text_msg("post_2", MessageRole::Assistant, "近期回复", "ses_1");
 
-        let messages = ContextAssembler::assemble(
-            &[pre1, pre2, marker, post1, post2],
-            &injectable,
-        );
+        let messages = ContextAssembler::assemble(&[pre1, pre2, marker, post1, post2], &injectable);
         // 组装从压缩点开始：摘要 + 近期消息（早期消息不发给 LLM）
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].content, "[对话摘要] 早期摘要");
@@ -361,10 +359,7 @@ mod tests {
         let msg = &messages[0];
         assert_eq!(msg.role, MessageRole::Assistant);
         assert_eq!(msg.content, "42");
-        assert_eq!(
-            msg.reasoning_content.as_deref(),
-            Some("The answer is 42")
-        );
+        assert_eq!(msg.reasoning_content.as_deref(), Some("The answer is 42"));
         assert!(msg.tool_calls.is_none());
     }
 

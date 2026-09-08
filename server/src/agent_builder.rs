@@ -182,8 +182,8 @@ impl AgentBuilderFactory {
             Arc::new(
                 move |session_id: &str,
                       mut rx: mpsc::Receiver<
-                        Result<tianyan::agent::AgentStreamChunk, tianyan::TianyanError>,
-                      >| {
+                    Result<tianyan::agent::AgentStreamChunk, tianyan::TianyanError>,
+                >| {
                     let event_tx = event_tx.clone();
                     let session_id = session_id.to_string();
                     tokio::spawn(async move {
@@ -208,8 +208,7 @@ impl AgentBuilderFactory {
         };
         agent_arc
             .register_task_waker(Arc::new(tianyan::agent::AgentWakeForwarder::new(
-                &agent_arc,
-                forward,
+                &agent_arc, forward,
             )))
             .await;
 

@@ -495,8 +495,14 @@ mod tests {
             message_id: Some("msg_123".to_string()),
         };
         let json = serde_json::to_string(&chunk).unwrap();
-        assert!(json.contains("\"chunk_type\":\"user_message_id\""), "json: {json}");
-        assert!(json.contains("\"user_message_id\":\"umid-abc\""), "json: {json}");
+        assert!(
+            json.contains("\"chunk_type\":\"user_message_id\""),
+            "json: {json}"
+        );
+        assert!(
+            json.contains("\"user_message_id\":\"umid-abc\""),
+            "json: {json}"
+        );
         assert!(json.contains("\"message_id\":\"msg_123\""), "json: {json}");
         let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.chunk_type, StreamChunkType::UserMessageId);
@@ -727,4 +733,3 @@ mod tests {
         // 测试通过即可
     }
 }
-

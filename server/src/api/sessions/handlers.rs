@@ -151,7 +151,10 @@ pub async fn delete_message(
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     let agent = state.agent().await;
-    if let Err(e) = agent.rollback_session(&session_id, &request.message_id).await {
+    if let Err(e) = agent
+        .rollback_session(&session_id, &request.message_id)
+        .await
+    {
         // 回退编排失败（如消息不存在）：透传错误，不执行截断
         return Err(e.into());
     }

@@ -159,4 +159,3 @@ pub async fn chat_stream_cancel_handler(
         None => Json(serde_json::json!({ "status": "no_active_stream", "session_id": session_id })),
     }
 }
-

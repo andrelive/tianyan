@@ -438,7 +438,11 @@ impl ToolRegistry {
         sink: Arc<dyn crate::agent::background::TaskEventSink>,
     ) -> Self {
         self.task_event_sink = Some(sink.clone());
-        self.background_tasks = Arc::new((*self.background_tasks).clone().with_event_sink(sink.clone()));
+        self.background_tasks = Arc::new(
+            (*self.background_tasks)
+                .clone()
+                .with_event_sink(sink.clone()),
+        );
         self.command_tasks = Arc::new(
             (*self.command_tasks)
                 .clone()

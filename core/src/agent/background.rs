@@ -377,9 +377,11 @@ impl BackgroundTaskManager {
 
     /// 等待运行许可（ADR-026）：阻塞排队，许可释放后继续。
     pub async fn acquire_run(&self) -> std::result::Result<OwnedSemaphorePermit, TianyanError> {
-        self.run_sem.clone().acquire_owned().await.map_err(|_| {
-            TianyanError::Custom("tool: 后台任务调度器已关闭".to_string())
-        })
+        self.run_sem
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| TianyanError::Custom("tool: 后台任务调度器已关闭".to_string()))
     }
 
     /// 注册新任务（Pending）并返回任务 ID。
@@ -748,7 +750,7 @@ impl BackgroundTaskManager {
                     result: row.get(5)?,
                     error: row.get(6)?,
                     output_tail: None,
-            log_file: None,
+                    log_file: None,
                     created_at: row.get(7)?,
                     completed_at: row.get(8)?,
                     seq: row.get(9)?,
@@ -831,8 +833,7 @@ impl BackgroundTaskManager {
                  FROM background_tasks WHERE id = ?1",
             )
             .ok()?;
-        stmt.query_row(rusqlite::params![id], map_task_row)
-            .ok()
+        stmt.query_row(rusqlite::params![id], map_task_row).ok()
     }
 
     /// 查询 SQLite 全部任务（终态任务权威存储；与内存未终态合并见 snapshot）。
@@ -1311,16 +1312,10 @@ mod tests {
         // 运行许可：2 个可拿，第 3 个阻塞（timeout 验证）
         let r1 = manager.acquire_run().await.unwrap();
         let r2 = manager.acquire_run().await.unwrap();
-        let r3 = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            manager.acquire_run(),
-        );
+        let r3 = tokio::time::timeout(std::time::Duration::from_millis(100), manager.acquire_run());
         assert!(r3.await.is_err(), "第 3 个运行许可应阻塞排队");
         drop(r1);
-        let r3 = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            manager.acquire_run(),
-        );
+        let r3 = tokio::time::timeout(std::time::Duration::from_millis(100), manager.acquire_run());
         assert!(r3.await.is_ok(), "释放后应可获取");
         drop(r2);
     }
@@ -1688,7 +1683,12 @@ mod tests {
             reviewed: reviewed.clone(),
         }));
         let id = manager
-            .register(TaskKind::Delegate, "整理日志".to_string(), "s1".to_string(), 0)
+            .register(
+                TaskKind::Delegate,
+                "整理日志".to_string(),
+                "s1".to_string(),
+                0,
+            )
             .await;
         manager
             .complete(&id, "已处理 6/12 个文件".to_string())

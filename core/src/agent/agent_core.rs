@@ -9,8 +9,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::{OwnedMutexGuard, RwLock};
 
 use crate::agent::background::{BackgroundTaskManager, TaskWaker};
@@ -257,7 +257,9 @@ impl Agent {
                     &state,
                     loop_result,
                     start,
-                    &TurnMode::Stream { sender: sender.clone() },
+                    &TurnMode::Stream {
+                        sender: sender.clone(),
+                    },
                 )
                 .await;
             self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
@@ -272,10 +274,7 @@ impl Agent {
         );
         // 重试耗尽：错误事件（前端可见——不再静默）
         sender
-            .send_error(&format!(
-                "唤醒轮失败：{}",
-                last_err.unwrap_or_default()
-            ))
+            .send_error(&format!("唤醒轮失败：{}", last_err.unwrap_or_default()))
             .await;
         rx
     }
@@ -345,7 +344,9 @@ impl Agent {
 
         if !soul_loaded {
             // 会话生效工作目录（AGENTS.md 项目指令前缀的探测根）
-            let workdir = self.resolve_working_directory(&state.read().await.session_id).await;
+            let workdir = self
+                .resolve_working_directory(&state.read().await.session_id)
+                .await;
             match self
                 .context_pipeline
                 .load_injectable(query, workdir.as_deref())
@@ -700,7 +701,8 @@ impl Agent {
 
         // 6. Compression check and persist (optional per path semantics)
         if options.do_compress {
-            self.maybe_compress_and_persist(state, session_id, false).await;
+            self.maybe_compress_and_persist(state, session_id, false)
+                .await;
         }
 
         Ok(response)
@@ -772,21 +774,15 @@ impl Agent {
                 self.metrics.record_execution(true).await;
                 loop_tokens = Some(total_tokens.clone());
                 match mode {
-                    TurnMode::Plain => finalize_response(
-                        AgentResponse::simple(content),
-                        &total_tokens,
-                        start,
-                    ),
+                    TurnMode::Plain => {
+                        finalize_response(AgentResponse::simple(content), &total_tokens, start)
+                    }
                     TurnMode::Stream { sender } => {
                         let usage = last_turn_usage.unwrap_or_else(|| total_tokens.clone());
                         sender
                             .send_complete("", StreamChunkType::Answer, None, None, Some(usage))
                             .await;
-                        finalize_response(
-                            AgentResponse::simple(content),
-                            &total_tokens,
-                            start,
-                        )
+                        finalize_response(AgentResponse::simple(content), &total_tokens, start)
                     }
                 }
             }
@@ -997,8 +993,8 @@ impl crate::executor::CommandWaker for CommandWakeAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::error::TianyanError;
     use crate::agent::session_state::SessionState;
+    use crate::common::error::TianyanError;
     use crate::common::types::{InjectableContext, MessageRole};
     use crate::context::assembler::ContextAssembler;
 
@@ -1517,5 +1513,3 @@ mod tests {
         assert_eq!(state.conversations_processed, 0, "失败重试后不记成功");
     }
 }
-
-

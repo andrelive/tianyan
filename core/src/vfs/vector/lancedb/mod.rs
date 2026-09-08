@@ -111,11 +111,9 @@ impl LanceDbVectorStore {
                         configured_dim = emb_dim,
                         "LanceDB 表维度与配置不一致，自动重建（存量向量将由启动期回填重嵌入）"
                     );
-                    db.drop_table(table_name, &[])
-                        .await
-                        .map_err(|e| {
-                            TianyanError::Custom(format!("向量数据库错误：重建表删除失败: {e}"))
-                        })?;
+                    db.drop_table(table_name, &[]).await.map_err(|e| {
+                        TianyanError::Custom(format!("向量数据库错误：重建表删除失败: {e}"))
+                    })?;
                     let empty = RecordBatch::new_empty(schema.clone());
                     db.create_table(table_name, empty)
                         .execute()

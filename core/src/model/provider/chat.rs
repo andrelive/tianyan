@@ -1,3 +1,4 @@
+use async_openai::error::OpenAIError;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
@@ -11,7 +12,6 @@ use async_openai::types::chat::{
     FunctionCall as OaFunctionCall, FunctionName, FunctionObject, ImageDetail as OaImageDetail,
     ImageUrl as OaImageUrl, Role as OaRole, ToolChoiceOptions,
 };
-use async_openai::error::OpenAIError;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::Value;
@@ -473,10 +473,7 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
                                     .unwrap_or("")
                                     .to_string(),
                                 object: "chat.completion.chunk".to_string(),
-                                created: value
-                                    .get("created")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(0),
+                                created: value.get("created").and_then(|v| v.as_i64()).unwrap_or(0),
                                 model: value
                                     .get("model")
                                     .and_then(|v| v.as_str())
@@ -849,7 +846,10 @@ mod convert_tests {
         let mut request_body = serde_json::json!({ "messages": converted });
         inject_reasoning_content(&mut request_body, &messages);
         let arr = request_body["messages"].as_array().unwrap();
-        assert!(arr[0].get("reasoning_content").is_none(), "空 reasoning 不注入");
+        assert!(
+            arr[0].get("reasoning_content").is_none(),
+            "空 reasoning 不注入"
+        );
     }
 
     #[test]
@@ -873,8 +873,8 @@ mod convert_tests {
         // 流式请求必须携带 stream_options.include_usage=true（OpenAI 规范：
         // 流式默认不返回 usage，除非显式请求）——否则 ollama 等规范网关
         // 永远不返回 usage，上下文占用只能走估算。
-        let request = ChatCompletionRequest::new("test-model", vec![Message::user("hi")])
-            .with_stream(true);
+        let request =
+            ChatCompletionRequest::new("test-model", vec![Message::user("hi")]).with_stream(true);
         // 序列化后的请求体应包含 stream_options
         let mut builder = CreateChatCompletionRequestArgs::default();
         builder.model(&request.model);

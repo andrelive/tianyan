@@ -370,7 +370,9 @@ impl AgentCoordinator for Agent {
                 .get_session(session_id)
                 .await?
                 .ok_or_else(|| {
-                    crate::TianyanError::not_found(format!("会话存储错误：会话未找到：{session_id}"))
+                    crate::TianyanError::not_found(format!(
+                        "会话存储错误：会话未找到：{session_id}"
+                    ))
                 })?;
             session
                 .messages

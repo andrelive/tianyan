@@ -7,9 +7,7 @@ use axum::Router;
 
 use crate::state::AppState;
 
-use super::handlers::{
-    cancel_task, get_task_log, list_tasks, stream_tasks, subscribe_events,
-};
+use super::handlers::{cancel_task, get_task_log, list_tasks, stream_tasks, subscribe_events};
 
 /// 后台任务相关路由。
 ///

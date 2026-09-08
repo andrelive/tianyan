@@ -48,7 +48,13 @@ impl ChatRequest {
             }
         }
         // 内容允许为空——当且仅当该消息携带图片（多模态消息以图片为主体）。
-        if self.message.content.as_deref().unwrap_or_default().trim().is_empty()
+        if self
+            .message
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
             && self
                 .message
                 .images
@@ -341,5 +347,3 @@ mod tests {
         assert!(out.contains("images"));
     }
 }
-
-

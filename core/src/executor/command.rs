@@ -273,26 +273,24 @@ impl CommandManager {
             }
         }
 
-        let out_reader = child
-            .stdout
-            .take()
-            .map(|r| tokio::spawn(drain_output(
+        let out_reader = child.stdout.take().map(|r| {
+            tokio::spawn(drain_output(
                 r,
                 tail.clone(),
                 file.clone(),
                 id.clone(),
                 self.event_sink.clone(),
-            )));
-        let err_reader = child
-            .stderr
-            .take()
-            .map(|r| tokio::spawn(drain_output(
+            ))
+        });
+        let err_reader = child.stderr.take().map(|r| {
+            tokio::spawn(drain_output(
                 r,
                 tail.clone(),
                 file.clone(),
                 id.clone(),
                 self.event_sink.clone(),
-            )));
+            ))
+        });
 
         let task = CommandTask {
             id: id.clone(),

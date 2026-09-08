@@ -556,7 +556,10 @@ impl VirtualFileSystem for VirtualFileSystemImpl {
         if total == 0 {
             return Ok(0);
         }
-        tracing::warn!(total, "向量库为空，开始回填存量摘要（维度重建/首次建库后自愈）");
+        tracing::warn!(
+            total,
+            "向量库为空，开始回填存量摘要（维度重建/首次建库后自愈）"
+        );
 
         let mut done = 0usize;
         for uri in pending {

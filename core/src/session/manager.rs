@@ -11,8 +11,8 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::types::{Message, StructuredMessage};
 
 use super::store::SessionStore;
-use super::types::SessionHeader;
 use super::types::Session;
+use super::types::SessionHeader;
 
 /// 会话管理操作 trait。
 #[async_trait]
@@ -385,7 +385,11 @@ mod tests {
 
         // 存储层返回完整链（压缩点截断已移到组装层 assemble_context）：
         // 压缩点前的历史必须保留，回退/重做基于完整链操作。
-        assert_eq!(session.messages.len(), 6, "存储层应返回完整链（含压缩点前历史）");
+        assert_eq!(
+            session.messages.len(),
+            6,
+            "存储层应返回完整链（含压缩点前历史）"
+        );
         assert!(
             session.messages[3].compression_marker,
             "压缩摘要消息应保留在链上"
