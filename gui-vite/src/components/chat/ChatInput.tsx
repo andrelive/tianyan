@@ -70,7 +70,10 @@ export default function ChatInput({
     textareaRef.current?.focus();
   }, []);
 
-  const canSend = !isStreaming && (input.trim().length > 0 || images.length > 0);
+  // 压缩期间禁发：压缩请求与发送并发会基于分叉状态组装上下文
+  // （textarea/send 一并禁用，与 streaming 语义一致）
+  const canSend =
+    !isStreaming && !compressing && (input.trim().length > 0 || images.length > 0);
 
   const addImages = useCallback(async (files: FileList | File[]) => {
     const list = Array.from(files).filter((f) => f.type.startsWith('image/'));
@@ -102,7 +105,7 @@ export default function ChatInput({
   }, []);
 
   const handleSend = useCallback(() => {
-    if (isStreaming || (input.trim().length === 0 && images.length === 0)) return;
+    if (isStreaming || compressing || (input.trim().length === 0 && images.length === 0)) return;
     onSend(input, images);
     setInput('');
     setImages([]);
@@ -110,7 +113,7 @@ export default function ChatInput({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [input, images, isStreaming, onSend]);
+  }, [input, images, isStreaming, compressing, onSend]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -222,7 +225,7 @@ export default function ChatInput({
             dragOver ? '松开鼠标添加图片' : '输入消息... (Shift+Enter 换行，可粘贴/拖拽图片)'
           }
           rows={2}
-          disabled={isStreaming}
+          disabled={isStreaming || compressing}
           aria-label="输入消息"
           className={cn(
             'w-full resize-none bg-transparent px-3.5 pt-3 pb-1',

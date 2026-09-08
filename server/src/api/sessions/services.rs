@@ -233,6 +233,8 @@ impl SessionService {
                     truncated_by_length: m.finish.as_deref() == Some("length"),
                     interrupted: m.finish.as_deref() == Some("interrupted"),
                     usage,
+                    // 压缩摘要标记：历史加载与压缩响应一致（前端识别摘要消息）
+                    compression_marker: m.compression_marker,
                     timestamp: None,
                     // 时间线（方案 B）：parts 顺序 = 真实到达顺序——历史与
                     // 流式共用同一渲染管线（前端 SegmentBlocks）
@@ -628,7 +630,10 @@ mod tests {
             .await
             .expect("get_session_detail 不应失败");
         let msg = &detail.messages[0];
-        assert!(msg.content.is_none(), "响应方向无纯文本字段（正文在 segments）");
+        assert!(
+            msg.content.is_none(),
+            "响应方向无纯文本字段（正文在 segments）"
+        );
         assert!(msg.thinking.is_none(), "无思考 parts 时 thinking 为空");
 
         let calls = msg.tool_calls.as_ref().expect("应输出 tool_calls");
@@ -756,7 +761,9 @@ mod tests {
             .map(|s| {
                 s.iter()
                     .filter_map(|x| match x {
-                        crate::api::shared::types::MessageSegment::Text { text } => Some(text.as_str()),
+                        crate::api::shared::types::MessageSegment::Text { text } => {
+                            Some(text.as_str())
+                        }
                         _ => None,
                     })
                     .collect()
@@ -812,8 +819,9 @@ mod tests {
             "assistant 空消息应保留（前端轮询停止信号）"
         );
         assert_eq!(detail.messages[0].role, MessageRole::Assistant);
-        assert!(detail.messages[0].content.is_none(), "空 assistant 消息：无纯文本字段");
+        assert!(
+            detail.messages[0].content.is_none(),
+            "空 assistant 消息：无纯文本字段"
+        );
     }
 }
-
-

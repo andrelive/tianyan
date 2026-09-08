@@ -48,3 +48,17 @@ pub struct StructuredMessage {
 - `core/src/common/types/structured_message.rs` — 类型定义
 - `core/src/session/manager.rs` — `add_structured_message()`
 - `core/src/context/assembler.rs` — `assemble()` 存储→传输转换
+
+---
+
+## 修订记录（0.3.4）
+
+**压缩摘要消息携带真实 token 用量**：摘要请求不走 AgentLoop（无 assistant 消息承载该请求的
+input/output/cache），此前 `tokens` 保持全零——压缩消耗从会话统计中完全丢失，且前端
+`lastMessageUsage` 跳过摘要消息导致压缩后圆环占用不变。`summarize`/`incremental_summarize`
+改用 `chat_completion()`（丢弃 usage 的 `chat()` 便捷方法弃用），`CompressionResult.summary_usage`
+→ `CompressionOutcome` 透传，`compress_for_session` 将压缩请求真实 token 用量写入摘要消息的
+`tokens` 并持久化。前端 `sumSessionUsage` 自动计入（压缩请求 = 一次完整 LLM 请求）；圆环
+`lastMessageUsage` 对 `compression_marker` 消息用「第一条 assistant 输入（≈系统前缀）+ 摘要
+输出」估算压缩后上下文（摘要 input 是压缩前上下文，不能直接作占用）。API 层 `ChatMessage`
+新增 `compression_marker` 字段（历史加载 + 流式边界事件映射）。

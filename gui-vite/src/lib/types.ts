@@ -41,6 +41,8 @@ export interface ChatMessage {
   interrupted?: boolean;
   /** 本条消息的 token 用量（历史加载/完成 chunk 携带；前端按会话独立计算上下文占用） */
   usage?: TokenUsage | null;
+  /** 压缩摘要消息标记（system 角色；后端从 StructuredMessage.compression_marker 映射） */
+  compression_marker?: boolean;
 }
 
 /** 消息纯文本视图：拼合 segments 的全部 Text 段（复制/通知检查/可访问性

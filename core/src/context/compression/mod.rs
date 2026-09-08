@@ -24,7 +24,8 @@ use std::sync::Arc;
 
 use crate::common::error::Result;
 use crate::common::types::Message;
-use crate::model::ChatService;
+use crate::common::types::TokenUsage;
+use crate::model::{ChatCompletionRequest, ChatService};
 
 pub use crate::common::token_estimator::{
     estimate_tokens, EstimationDetails, MessageTokenEstimate, TokenEstimator,
@@ -95,6 +96,10 @@ pub struct CompressionResult {
     pub compressed_count: usize,
     /// 生成的摘要文本。
     pub summary: String,
+    /// 生成摘要的 LLM 请求真实 token 用量（输入/输出/缓存命中）。
+    /// 压缩请求不走 AgentLoop，其消耗须随摘要消息持久化，否则会话统计丢失。
+    /// `Select` 策略不调用 LLM——恒为默认值。
+    pub summary_usage: TokenUsage,
     /// 压缩前的 token 估算。
     pub original_tokens: usize,
     /// 压缩后的 token 估算。
@@ -208,6 +213,7 @@ impl ContextCompressor {
                 messages: vec![],
                 compressed_count: 0,
                 summary: String::new(),
+                summary_usage: TokenUsage::default(),
                 original_tokens: zero,
                 compressed_tokens: zero,
             });
@@ -215,16 +221,24 @@ impl ContextCompressor {
 
         let original_tokens = self.estimator.estimate_messages(messages);
 
-        let (compressed_messages, summary) = match self.config.strategy {
-            CompressionStrategy::Summarize => self.compress_by_summarization(messages).await?,
-            CompressionStrategy::Select => self.compress_by_selection(messages).await?,
-            CompressionStrategy::Hybrid => self.compress_hybrid(messages).await?,
+        let (compressed_messages, summary, summary_usage) = match self.config.strategy {
+            CompressionStrategy::Summarize => {
+                let (msgs, s, u) = self.compress_by_summarization(messages).await?;
+                (msgs, s, u)
+            }
+            CompressionStrategy::Select => {
+                let (msgs, s) = self.compress_by_selection(messages).await?;
+                (msgs, s, TokenUsage::default())
+            }
+            CompressionStrategy::Hybrid => {
+                let (msgs, s, u) = self.compress_hybrid(messages).await?;
+                (msgs, s, u)
+            }
         };
-
         let compressed_tokens = self.estimator.estimate_messages(&compressed_messages);
-
         Ok(CompressionResult {
             messages: compressed_messages,
+            summary_usage,
             compressed_count: messages.len(),
             summary,
             original_tokens,
@@ -236,9 +250,9 @@ impl ContextCompressor {
     async fn compress_by_summarization(
         &mut self,
         messages: &[Message],
-    ) -> Result<(Vec<Message>, String)> {
+    ) -> Result<(Vec<Message>, String, TokenUsage)> {
         // 如果有缓存摘要，使用增量摘要；否则全量摘要
-        let summary = if let Some(ref cached) = self.cached_summary {
+        let (summary, usage) = if let Some(ref cached) = self.cached_summary {
             self.incremental_summarize(cached, messages).await?
         } else {
             self.summarize(messages).await?
@@ -251,13 +265,12 @@ impl ContextCompressor {
             summary
         ));
 
-        Ok((vec![summary_message], summary))
+        Ok((vec![summary_message], summary, usage))
     }
 
-    /// LLM 全量摘要。
-    async fn summarize(&self, messages: &[Message]) -> Result<String> {
+    async fn summarize(&self, messages: &[Message]) -> Result<(String, TokenUsage)> {
         if messages.is_empty() {
-            return Ok(String::new());
+            return Ok((String::new(), TokenUsage::default()));
         }
 
         let conversation = messages
@@ -270,10 +283,19 @@ impl ContextCompressor {
 
         let response = self
             .model_service
-            .chat(&self.config.summary_model, vec![Message::user(prompt)])
+            .chat_completion(ChatCompletionRequest::new(
+                &self.config.summary_model,
+                vec![Message::user(prompt)],
+            ))
             .await?;
-
-        Ok(response.trim().to_string())
+        // 取第一个候选的文本（`chat()` 便捷方法丢弃 usage——此处需要真实
+        // token 统计供压缩消耗入账，故走完整响应）。
+        let text = response
+            .choices
+            .first()
+            .map(|c| c.message.content.clone())
+            .unwrap_or_default();
+        Ok((text.trim().to_string(), response.usage))
     }
 
     /// LLM 增量摘要。
@@ -281,9 +303,9 @@ impl ContextCompressor {
         &self,
         existing_summary: &str,
         new_messages: &[Message],
-    ) -> Result<String> {
+    ) -> Result<(String, TokenUsage)> {
         if new_messages.is_empty() {
-            return Ok(existing_summary.to_string());
+            return Ok((existing_summary.to_string(), TokenUsage::default()));
         }
 
         let new_conversation = new_messages
@@ -299,10 +321,17 @@ impl ContextCompressor {
 
         let response = self
             .model_service
-            .chat(&self.config.summary_model, vec![Message::user(prompt)])
+            .chat_completion(ChatCompletionRequest::new(
+                &self.config.summary_model,
+                vec![Message::user(prompt)],
+            ))
             .await?;
-
-        Ok(response.trim().to_string())
+        let text = response
+            .choices
+            .first()
+            .map(|c| c.message.content.clone())
+            .unwrap_or_default();
+        Ok((text.trim().to_string(), response.usage))
     }
 
     /// 通过选择压缩（保留重要消息）。
@@ -338,12 +367,15 @@ impl ContextCompressor {
     }
 
     /// 混合压缩：先摘要，再保留关键消息。
-    async fn compress_hybrid(&mut self, messages: &[Message]) -> Result<(Vec<Message>, String)> {
+    async fn compress_hybrid(
+        &mut self,
+        messages: &[Message],
+    ) -> Result<(Vec<Message>, String, TokenUsage)> {
         // 全量摘要：所有消息进一条摘要，不保留原样。
         // 前缀缓存考量：保留原样会让请求前缀随轮次增长且压缩后缓存失效；
         // 全量摘要 + 稳定前缀（soul/rules/摘要）跨请求不变，命中率最高。
         // 用户意图与进度由摘要提示词专门承载（见 DEFAULT_SUMMARY_PROMPT）。
-        let summary = if let Some(ref cached) = self.cached_summary {
+        let (summary, usage) = if let Some(ref cached) = self.cached_summary {
             self.incremental_summarize(cached, messages).await?
         } else {
             self.summarize(messages).await?
@@ -357,7 +389,7 @@ impl ContextCompressor {
             summary
         ));
 
-        Ok((vec![summary_message], summary))
+        Ok((vec![summary_message], summary, usage))
     }
 
     /// 获取压缩状态信息。
@@ -456,6 +488,7 @@ mod tests {
             messages: vec![],
             compressed_count: 5,
             summary: "test".to_string(),
+            summary_usage: TokenUsage::default(),
             original_tokens: 1000,
             compressed_tokens: 500,
         };

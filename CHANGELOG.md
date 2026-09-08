@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed（0.3.4 构建：压缩会话反馈与占用统计，2026-09-05）
+- **压缩中无进行中反馈 + 可输入发送**：压缩（LLM 摘要生成，通常 10-30 秒）期间消息流底部无提示、输入框与发送按钮仍可用——用户可能在压缩完成前输入，与服务端压缩基于的分叉状态并发。压缩期间消息流底部显示「压缩中...」（spinner + aria-live），textarea 与发送按钮禁用（`compressing` 纳入 `canSend`/`disabled`/Enter 守卫），压缩完成/失败后恢复。
+- **压缩后圆环占用不更新（下轮才变）**：圆环占用 = `lastMessageUsage`（从末尾向前找第一条带 usage 的消息）——压缩摘要消息 `tokens` 此前全零 → 前端映射 `usage:null` → 查找跳过摘要、命中压缩前最后一条 assistant 的 usage（压缩前完整占用）→ 圆环不变；下一轮新请求完成后才更新。同时摘要请求走 `chat()` 便捷方法，真实 usage 被丢弃（压缩消耗从未入账）。修复：
+  - **摘要消息携带压缩请求真实用量**：`summarize`/`incremental_summarize` 改 `chat_completion()`（`CompressionResult.summary_usage` → `CompressionOutcome`）——摘要 StructuredMessage 的 tokens = 压缩请求真实 input/output/cache，随消息持久化（刷新后一致）
+  - **圆环对摘要消息特殊处理**：`lastMessageUsage` 命中 `compression_marker` 消息时改用「第一条 assistant 的 prompt_tokens（≈系统前缀）+ 摘要 completion」估算压缩后上下文（摘要 input 是压缩前上下文，不能直接作占用）；新请求完成后新 assistant 消息优先命中
+  - **会话消耗自动计入压缩**：`sumSessionUsage` 累加所有带 usage 消息——摘要消息自带压缩请求消耗（输入/输出/缓存），无需特殊分支即自动入账（最准：压缩请求 = 一次完整 LLM 请求）
+  - **API 契约**：`ChatMessage` 新增 `compression_marker`（历史加载 + 流式边界事件从 `StructuredMessage.compression_marker` 映射），前端识别摘要消息
+
 ### Fixed（0.2.11 构建：唤醒轮失败场景静默，2026-09-03）
 - **后台任务失败时主 agent 无反馈**：通知/注入/唤醒链路正常（System 通知入库 + 唤醒轮触发），但唤醒指令允许"空输出结束"，模型在失败场景下选择沉默——主 agent 静默无反馈（"任务失败但没通知"）。唤醒指令区分失败/完成场景：**失败必须向用户汇报**（ADR-013 shouldReply = allComplete || isTaskFailure 的语义落地），只有全部成功且无需输出才允许空输出；空输出日志从 debug 升级为 info（取证可见）。回归测试锁定失败场景指令含"必须汇报"、成功场景仍允许空输出
 

@@ -11,8 +11,8 @@ use tokio::sync::Mutex as TokioMutex;
 use crate::common::error::Result;
 use crate::common::types::InjectableContext;
 use crate::common::types::{
-    AgentPath, ContentLevel, ContextNamespace, DetailedTokenUsage, Message, MessageRole,
-    MessageTime, Part, PartTime, StructuredMessage,
+    AgentPath, CacheUsage, ContentLevel, ContextNamespace, DetailedTokenUsage, Message,
+    MessageRole, MessageTime, Part, PartTime, StructuredMessage, TokenUsage,
 };
 use crate::context::compression::ContextCompressor;
 use crate::context::retrieval::DualLayerRetriever;
@@ -28,6 +28,18 @@ pub struct ContextPipeline {
     learned_rules_top_k: usize,
     /// 已缓存的 soul（首次加载后复用，避免每轮从 VFS 重复读取）
     cached_soul: Arc<TokioMutex<Option<String>>>,
+}
+
+/// 压缩结果：摘要文本 + 生成摘要的 LLM 请求真实用量。
+///
+/// 压缩请求不走 AgentLoop（无 assistant 消息），其 token 消耗须随摘要
+/// 消息持久化入账，否则会话统计丢失（sumSessionUsage / UsageStats）。
+#[derive(Debug, Clone)]
+pub struct CompressionOutcome {
+    /// 生成的摘要文本。
+    pub summary: String,
+    /// 生成摘要的 LLM 请求真实 token 用量（输入/输出/缓存命中）。
+    pub summary_usage: TokenUsage,
 }
 
 impl ContextPipeline {
@@ -126,19 +138,19 @@ impl ContextPipeline {
         recent_input_tokens: usize,
     ) -> Result<(InjectableContext, Option<String>)> {
         let injectable = self.load_injectable(query, None).await?;
-        let summary = self
+        let outcome = self
             .compress_if_needed(conversation, recent_input_tokens, false)
             .await?;
-        Ok((injectable, summary))
+        Ok((injectable, outcome.map(|o| o.summary)))
     }
 
-    /// 如需压缩则执行压缩，返回摘要文本。
+    /// 如需压缩则执行压缩，返回摘要文本与压缩请求真实用量。
     pub async fn compress_if_needed(
         &self,
         conversation: &mut Vec<Message>,
         recent_input_tokens: usize,
         force: bool,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<CompressionOutcome>> {
         let mut compressor = self.compressor.lock().await;
         // 手动压缩（force=true）跳过阈值判定——用户主动点击即明确意图；
         // 自动压缩保留窗口阈值（防止频繁压缩）。
@@ -147,10 +159,13 @@ impl ContextPipeline {
         }
 
         let result = compressor.compress(conversation).await?;
-        let summary = if result.summary.is_empty() {
+        let outcome = if result.summary.is_empty() {
             None
         } else {
-            Some(result.summary)
+            Some(CompressionOutcome {
+                summary: result.summary,
+                summary_usage: result.summary_usage,
+            })
         };
 
         *conversation = result.messages;
@@ -161,7 +176,7 @@ impl ContextPipeline {
             "上下文压缩完成"
         );
 
-        Ok(summary)
+        Ok(outcome)
     }
 
     /// 压缩对话并生成带 compression_marker 的摘要 StructuredMessage。
@@ -175,11 +190,11 @@ impl ContextPipeline {
     ) -> Option<StructuredMessage> {
         let mut conversation = messages.to_vec();
 
-        let summary = match self
+        let outcome = match self
             .compress_if_needed(&mut conversation, recent_input_tokens, force)
             .await
         {
-            Ok(Some(summary)) => summary,
+            Ok(Some(outcome)) => outcome,
             Ok(None) => return None,
             Err(e) => {
                 tracing::warn!(
@@ -189,6 +204,11 @@ impl ContextPipeline {
                 return None;
             }
         };
+        // 压缩请求的真实 token 用量随摘要消息持久化：压缩不走 AgentLoop
+        // （无 assistant 消息承载该请求的 input/output/cache），若摘要消息
+        // tokens 保持全零，压缩消耗将从会话统计中丢失。前端 sumSessionUsage
+        // 累加所有带 usage 的消息即自动计入。
+        let tu = outcome.summary_usage;
 
         Some(StructuredMessage {
             id: format!("cmp_{}", chrono::Utc::now().timestamp_millis()),
@@ -197,11 +217,20 @@ impl ContextPipeline {
             parts: vec![Part::Text {
                 text: format!(
                     "[对话摘要] 以下是对历史对话的摘要：\n{}\n[摘要结束]",
-                    summary
+                    outcome.summary
                 ),
                 time: PartTime::default(),
             }],
-            tokens: DetailedTokenUsage::default(),
+            tokens: DetailedTokenUsage {
+                input: tu.prompt_tokens,
+                output: tu.completion_tokens,
+                total: tu.total_tokens,
+                cache: CacheUsage {
+                    read: tu.cache_read,
+                    write: tu.cache_write,
+                },
+                ..Default::default()
+            },
             cost: 0.0,
             model_id: None,
             time: MessageTime {
@@ -335,6 +364,30 @@ mod tests {
                     finish_reason: Some("stop".to_string()),
                 }],
                 usage: Default::default(),
+            })
+        });
+        Arc::new(mock)
+    }
+
+    /// 创建返回指定响应文本与 token 用量的 mock ChatService（压缩消耗入账测试用）。
+    fn mock_chat_with_usage(
+        response: &str,
+        usage: crate::common::types::TokenUsage,
+    ) -> Arc<dyn ChatService> {
+        let response = response.to_string();
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(move |_| {
+            Ok(ChatCompletionResponse {
+                id: "mock".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant(response.clone()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: usage.clone(),
             })
         });
         Arc::new(mock)
@@ -666,9 +719,59 @@ mod tests {
         let summary_manual = pipeline
             .compress_for_session(&conv_manual, "s1", 100, true)
             .await;
-        assert!(
-            summary_manual.is_some(),
-            "手动压缩（force）应跳过窗口阈值"
+        assert!(summary_manual.is_some(), "手动压缩（force）应跳过窗口阈值");
+    }
+
+    /// 压缩请求的真实 token 用量必须随摘要消息持久化：压缩不走 AgentLoop
+    /// （无 assistant 消息），tokens 若保持全零则压缩消耗从会话统计丢失。
+    #[tokio::test]
+    async fn test_summary_message_carries_real_compression_usage() {
+        let soul_uri = AgentPath::Soul.uri();
+        let vfs = Arc::new(
+            MockVfs::builder()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .build(),
         );
+
+        // 模拟压缩请求的真实消耗：输入 5000（压缩前历史 + 提示词）、输出 800（摘要）、
+        // 缓存命中 3000（压缩前历史前缀缓存）。
+        let summary_usage = crate::common::types::TokenUsage {
+            prompt_tokens: 5000,
+            completion_tokens: 800,
+            total_tokens: 5800,
+            cache_read: 3000,
+            cache_write: 2000,
+        };
+        let config = CompressionConfig {
+            context_window: 100,
+            min_messages_to_compress: 3,
+            preserve_recent_messages: 2,
+            ..Default::default()
+        };
+        let compressor =
+            ContextCompressor::new(mock_chat_with_usage("Summarized.", summary_usage), config);
+        let pipeline = make_pipeline_with_compressor(vfs, compressor);
+
+        let conv = vec![
+            Message::user("A"),
+            Message::assistant("B"),
+            Message::user("C"),
+            Message::assistant("D"),
+            Message::user("E"),
+            Message::assistant("F"),
+        ];
+        let sm = pipeline
+            .compress_for_session(&conv, "s1", 100, true)
+            .await
+            .expect("手动压缩应触发");
+
+        assert_eq!(sm.role, MessageRole::System, "摘要消息为 system 角色");
+        assert!(sm.compression_marker, "摘要消息应带压缩标记");
+        // 输入 / 输出 / 缓存全部来自压缩请求真实 usage
+        assert_eq!(sm.tokens.input, 5000, "输入 = 压缩请求 prompt_tokens");
+        assert_eq!(sm.tokens.output, 800, "输出 = 压缩请求 completion_tokens");
+        assert_eq!(sm.tokens.total, 5800);
+        assert_eq!(sm.tokens.cache.read, 3000, "缓存命中 = 压缩请求 cache_read");
+        assert_eq!(sm.tokens.cache.write, 2000);
     }
 }

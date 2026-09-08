@@ -237,10 +237,14 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `ContextPipeline` | 统一上下文管线，封装检索→规则注入→压缩的完整流程 |
 | `ContextCompressor` | 对话压缩器，保留最近消息 + 分层压缩策略 |
 | `CompressionConfig` | 压缩配置（preserve_recent_messages 默认 6） |
+| `CompressionResult` | 压缩结果（含 `summary_usage`——生成摘要的 LLM 请求真实 token 用量） |
+| `CompressionOutcome` | 管线输出的摘要文本 + 压缩请求真实用量（`compress_for_session` 消费） |
 | `ContextAssembler` | 存储层/传输层消息格式转换（纯函数） |
 | `DualLayerRetriever` | 双层向量检索器（Intent 分析 + 向量搜索 + 内容加载） |
 | `ContentLoadStrategy` (enum) | 基于分数的内容加载策略：Full(大于0.85→L2) / Overview(0.6~0.85→L1) / Abstract(小于等于0.6→L0) |
 | `IntentAnalyzer` | 意图分析器：LLM 分析查询意图 + 目标命名空间 |
+
+**压缩消耗入账**：摘要请求不走 AgentLoop（无 assistant 消息），`summarize`/`incremental_summarize` 使用 `chat_completion()` 而非 `chat()` 便捷方法（后者丢弃 usage）；`CompressionResult.summary_usage` 经 `CompressionOutcome` 透传，`compress_for_session` 将压缩请求真实 token 用量（输入/输出/缓存命中）写入摘要 StructuredMessage 的 `tokens` 并持久化——前端 `sumSessionUsage` 自动计入会话消耗（压缩请求 = 一次完整 LLM 请求），圆环 `lastMessageUsage` 对 `compression_marker` 消息用「第一条 assistant 输入（≈系统前缀）+ 摘要输出」估算压缩后上下文。
 
 **核心架构决策——前缀匹配原则**：
 
@@ -316,7 +320,7 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 | `db` | `Database`, `SqliteDb`, `StatsRepo`, `TraceRepo`, `ExecutionRepo`, `UsageRepo` | **统一写入门面**（ADR-020）：`Database` 门面（单连接 + schema 集中 + lock/try_lock 统一访问）；`SqliteDb`（ADR-005 连接，自 `vfs/backend` 移入）；业务域 Repository 收敛 SQL；**只依赖 `common`**（纯底层） |
 | `roles` | `AgentRole`, `RoleSource`, `RoleStatus`, `RoleUsage`, `DelegationRecord` | 角色基础类型（ADR-016 纯类型层）：config/agent/scheduler 共用，不依赖领域模块——打破 `config↔agent`、`scheduler↔agent` 环 |
 | `role_store` | `RoleStore` | 角色 VFS 存储（独立存储层，依赖 vfs + roles）：保存/加载/删除角色，维护配置签名；scheduler 演化任务与 agent 共用（ADR-021 分层） |
-| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager`, `SessionStore`, `SessionRecall` | 会话管理，⚠️ ADR-018 VFS 例外：`SessionStore`（SQLite 权威存储，`session_messages` 完整消息 + `session_meta` 会话级状态，单事务原子取号 `MAX(seq)+1`，失败上抛；**SQL 收敛于本模块**——会话专属存储经 `db::Database` 单连接直接实现，不依赖 db 层通用仓储）；`PersistentSessionManager::load_session_from_store()` 用 `compression_marker` 截断；截断常量单点定义于 `session/mod.rs`（`MAX_SESSION_MESSAGES=5000` / `KEEP_RECENT_MESSAGES=4800`）；`session_meta.header_json` 承载注入上下文快照（ADR-012）+ 会话元数据（created_at/title/ended_at，重启恢复；`list_sessions` 轻量元数据 + message_count，无幽灵会话） |
+| `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager`, `SessionStore`, `SessionRecall` | 会话管理，⚠️ ADR-018 VFS 例外：`SessionStore`（SQLite 权威存储，`session_messages` 完整消息 + `session_meta` 会话级状态，单事务原子取号 `MAX(seq)+1`，失败上抛；**SQL 收敛于本模块**——会话专属存储经 `db::Database` 单连接直接实现，不依赖 db 层通用仓储）；`PersistentSessionManager::load_session_from_store()` 返回**完整时序链**（ADR-027：存储层不截断，压缩点截断只发生在组装层视图）；`session_meta.header_json` 承载注入上下文快照（ADR-012）+ 会话元数据（created_at/title/ended_at，重启恢复；`list_sessions` 轻量元数据 + message_count，无幽灵会话） |
 | `memory` | `MemoryExtractor`, `ExtractionConfig` | 从会话文本中提取结构化记忆的纯功能，与调度/持久化解耦 |
 | `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（已通过 `knowledge_ingest` 工具集成到 Agent 流程）。ingestor/ 拆分为 mod + builder；`image/` 拆分为 types/processor/analyzer |
 | `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `EvolutionTask`, `GcTask`, `SummaryTask`, `ReminderTask`, `SnapshotGcTask`, `UsageStatsFlushTask` | 定时任务调度框架 + 任务实现，位于 `scheduler/tasks/`（memory_task/rule_task/rule_suggester 已删除——ADR-017 后演化统一由 EvolutionTask 承担）；`TaskResult.error: Option<TianyanError>`（结构化错误）；GcTask 职责为规则归档 + 记忆 TTL 清理；UsageStatsFlushTask 定期把使用统计内存计数器刷入 SQLite（构造器注入，同 SnapshotGcTask 模式） |

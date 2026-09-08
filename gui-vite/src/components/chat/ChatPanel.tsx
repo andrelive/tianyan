@@ -455,6 +455,19 @@ export default function ChatPanel() {
                 </div>
               )}
 
+            {/* 压缩中：底部进行中提示（与压缩按钮/输入框禁用同一状态源，
+                压缩完成/失败后消失）。 */}
+            {compressing && (
+              <div
+                className="flex items-center justify-center gap-2 text-[var(--color-text-tertiary)] py-2"
+                aria-live="polite"
+                aria-label="正在压缩会话"
+              >
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span className="text-sm">压缩中...</span>
+              </div>
+            )}
+
             {/* 断线提示：跑完再取——任务继续在后台运行，刷新获取最终结果 */}
             {streamError && streamStatus === 'idle' && (
               <div className="flex items-center gap-2 py-2" role="alert" aria-live="polite">

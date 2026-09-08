@@ -92,6 +92,53 @@ describe('ChatInput', () => {
     expect(props.onStop).toHaveBeenCalled();
   });
 
+  it('disables send and textarea while compressing', async () => {
+    const user = userEvent.setup();
+    const { props, rerender } = renderChatInput();
+
+    // 先输入内容（compressing=false 时可输可发）
+    await user.type(screen.getByLabelText('输入消息'), '压缩期间的消息');
+    expect(screen.getByRole('button', { name: '发送消息' })).toBeEnabled();
+
+    // 压缩开始：rerender 同一输入内容下，发送按钮与 textarea 禁用
+    rerender(
+      <MemoryRouter>
+        <ChatInput
+          onSend={props.onSend}
+          onStop={props.onStop}
+          isStreaming={false}
+          usage={null}
+          sessionUsage={null}
+          onCompress={props.onCompress}
+          compressing={true}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('button', { name: '发送消息' })).toBeDisabled();
+    expect(screen.getByLabelText('输入消息')).toBeDisabled();
+
+    // Enter 也不触发发送
+    fireEvent.keyDown(screen.getByLabelText('输入消息'), { key: 'Enter' });
+    expect(props.onSend).not.toHaveBeenCalled();
+
+    // 压缩结束：恢复可发
+    rerender(
+      <MemoryRouter>
+        <ChatInput
+          onSend={props.onSend}
+          onStop={props.onStop}
+          isStreaming={false}
+          usage={null}
+          sessionUsage={null}
+          onCompress={props.onCompress}
+          compressing={false}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole('button', { name: '发送消息' })).toBeEnabled();
+    expect(screen.getByLabelText('输入消息')).toBeEnabled();
+  });
+
   it('adds image via file input and sends it with content', async () => {
     const user = userEvent.setup();
     const { props } = renderChatInput();

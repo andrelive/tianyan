@@ -59,6 +59,11 @@ pub struct ChatMessage {
     /// 计算上下文占用 / 缓存命中）。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub usage: Option<TokenUsage>,
+    /// 压缩摘要标记（system 角色；压缩点消息）。前端据此识别摘要消息：
+    /// 圆环占用对其特殊处理（压缩请求真实 input 是压缩前上下文，不能直接
+    /// 作"压缩后占用"），会话消耗统计据此区分摘要消耗入账。
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub compression_marker: bool,
     /// 可选的时间戳（RFC3339 格式）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
@@ -237,6 +242,7 @@ impl ChatMessage {
                 cache_read: m.tokens.cache.read as u32,
                 cache_write: m.tokens.cache.write as u32,
             }),
+            compression_marker: m.compression_marker,
             timestamp: None,
             // 时间线：与历史加载同构（方案 B）——流式边界事件携带服务端
             // 权威 segments，前端 applyServerMessage 以服务端为准
@@ -260,13 +266,16 @@ impl ChatMessage {
             // （响应方向：正文进时间线 Text 段——渲染/复制前端一律从
             // segments 取，content 仅输入侧消费）
             content: Some(content.to_string()),
-            segments: Some(vec![MessageSegment::Text { text: content.to_string() }]),
+            segments: Some(vec![MessageSegment::Text {
+                text: content.to_string(),
+            }]),
             thinking: None,
             tool_calls: None,
             images: None,
             truncated_by_length: false,
             interrupted: false,
             usage: None,
+            compression_marker: false,
             timestamp: None,
         }
     }
@@ -284,13 +293,16 @@ impl ChatMessage {
             role: MessageRole::User,
             user_message_id: None,
             content: Some(content.to_string()),
-            segments: Some(vec![MessageSegment::Text { text: content.to_string() }]),
+            segments: Some(vec![MessageSegment::Text {
+                text: content.to_string(),
+            }]),
             thinking: None,
             tool_calls: None,
             images: None,
             truncated_by_length: false,
             interrupted: false,
             usage: None,
+            compression_marker: false,
             timestamp: None,
         }
     }
@@ -308,13 +320,16 @@ impl ChatMessage {
             role: MessageRole::Assistant,
             user_message_id: None,
             content: Some(content.to_string()),
-            segments: Some(vec![MessageSegment::Text { text: content.to_string() }]),
+            segments: Some(vec![MessageSegment::Text {
+                text: content.to_string(),
+            }]),
             thinking: None,
             tool_calls: None,
             images: None,
             truncated_by_length: false,
             interrupted: false,
             usage: None,
+            compression_marker: false,
             timestamp: None,
         }
     }
@@ -495,9 +510,3 @@ mod tests {
         assert_eq!(usage.total_tokens, 150);
     }
 }
-
-
-
-
-
-
