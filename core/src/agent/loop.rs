@@ -22,20 +22,11 @@ use crate::session::SessionManager;
 pub struct AgentLoopConfig {
     /// 最大轮数。
     pub max_turns: usize,
-    /// 跳过空响应重试（ADR-013 唤醒轮语义）。
-    ///
-    /// 空输出（无正文无工具调用）本身是正常结束（对齐 DSH：无工具调用即
-    /// completed）；普通轮在结束前重试一次（思考模型"想完没说话"的恢复
-    /// 机会），唤醒轮（后台任务完成触发，模型可能有意无需回复）不重试。
-    pub allow_empty_answer: bool,
 }
 
 impl Default for AgentLoopConfig {
     fn default() -> Self {
-        Self {
-            max_turns: 200,
-            allow_empty_answer: false,
-        }
+        Self { max_turns: 200 }
     }
 }
 
@@ -242,14 +233,6 @@ impl AgentLoop {
     /// 获取工具注册表引用。
     pub fn tool_registry(&self) -> &ToolRegistry {
         &self.tool_registry
-    }
-
-    /// 允许模型空输出合法结束（ADR-013 唤醒轮语义）。
-    ///
-    /// 返回克隆实例（AgentLoop 为值类型，字段仅 config 变化）。
-    pub fn with_allow_empty_answer(mut self) -> Self {
-        self.config.allow_empty_answer = true;
-        self
     }
 
     /// 取消标志检查（None 视为未取消）。
@@ -699,41 +682,42 @@ impl AgentLoop {
             // （思考模型"想完没说话"），直接结束会让任务在工具循环中途静默终止。
             // 消息历史此时未变（空响应尚未入史），重试一次通常能恢复；
             // 重试仍空则按正常结束处理（空输出 = completed，对齐 DSH）。
-            // 唤醒轮（allow_empty_answer）不重试——模型可能有意无需回复。
-            if !self.config.allow_empty_answer {
-                let empty = matches!(
-                    &step_result,
-                    (m, _, _, _) if m.content.is_empty() && m.tool_calls.is_none()
+            // 唤醒轮与用户轮同构（统一循环框架）：空响应同样重试一次——
+            // 后台命令完成通知是明确的输入，模型"想完没说话"或思考碎片
+            // （如只剩 "@if"）时给第二次机会（失败场景指令要求必须汇报，
+            // 重试通常能恢复完整输出），重试仍空才按正常结束处理。
+            let empty = matches!(
+                &step_result,
+                (m, _, _, _) if m.content.is_empty() && m.tool_calls.is_none()
+            );
+            if empty {
+                tracing::warn!(
+                    session = %session_id,
+                    turn,
+                    "LLM 返回空响应，重试一次"
                 );
-                if empty {
-                    tracing::warn!(
-                        session = %session_id,
-                        turn,
-                        "LLM 返回空响应，重试一次"
-                    );
-                    step_result = match step(
-                        self,
-                        model,
-                        stream_sender,
-                        messages.clone(),
-                        cancel,
-                        last_input_usage.clone(),
-                    )
-                    .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            if Self::is_cancelled(cancel) {
-                                return Ok(AgentLoopResult::Cancelled {
-                                    total_tokens,
-                                    last_turn_usage: None,
-                                    turns: turn + 1,
-                                });
-                            }
-                            return Err(e);
+                step_result = match step(
+                    self,
+                    model,
+                    stream_sender,
+                    messages.clone(),
+                    cancel,
+                    last_input_usage.clone(),
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if Self::is_cancelled(cancel) {
+                            return Ok(AgentLoopResult::Cancelled {
+                                total_tokens,
+                                last_turn_usage: None,
+                                turns: turn + 1,
+                            });
                         }
-                    };
-                }
+                        return Err(e);
+                    }
+                };
             }
 
             let (assistant_msg, turn_usage, finish_reason, updated_input) = step_result;

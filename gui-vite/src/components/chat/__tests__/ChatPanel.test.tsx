@@ -7,7 +7,7 @@ import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
 import { resetTaskMocks, mockSessionCompressCalls } from '@/test/mocks/handlers';
 import ChatPanel from '@/components/chat/ChatPanel';
-import { routeChatStreamEvent } from '@/lib/chat-stream';
+import { handleChatStreamEvent } from '@/lib/chat-stream';
 import { applySnapshot } from '@/hooks/use-unified-events';
 import type { ChatMessage, ChatStreamEvent } from '@/lib/types';
 import { messageText } from '@/lib/types';
@@ -24,7 +24,7 @@ function renderChatPanel(route = '/chat') {
 }
 
 /** 构造统一事件通道的 chat_stream 事件（ADR-028 第 3 步：流式事件经
- * GET /events 到达，测试直接驱动 routeChatStreamEvent 模拟）。 */
+ * GET /events 到达，测试直接驱动 handleChatStreamEvent 模拟）。 */
 function streamEvent(partial: Partial<ChatStreamEvent>): ChatStreamEvent {
   return {
     id: 'e1',
@@ -148,14 +148,14 @@ describe('ChatPanel', () => {
     expect(messages.length).toBeGreaterThanOrEqual(1);
 
     // 模拟统一事件通道（GET /events）到达：用户消息边界 + 增量 + 完成
-    routeChatStreamEvent(
+    handleChatStreamEvent(
       streamEvent({
         message: { id: 'msg-user', role: 'user', segments: [{ type: 'text', text: '测试发送' }], timestamp: '' },
         chunk_type: 'message',
       }),
     );
-    routeChatStreamEvent(streamEvent({ delta: '你好' }));
-    routeChatStreamEvent(streamEvent({ delta: '！', finish_reason: 'stop' }));
+    handleChatStreamEvent(streamEvent({ delta: '你好' }));
+    handleChatStreamEvent(streamEvent({ delta: '！', finish_reason: 'stop' }));
 
     // 流式完成后 user 消息经边界事件插入到 assistant 之前（顺序正确）
     await vi.waitFor(() => {
@@ -229,7 +229,7 @@ describe('ChatPanel', () => {
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
     // 模拟统一事件通道到达 error 事件（服务端校验/处理失败）
-    routeChatStreamEvent(
+    handleChatStreamEvent(
       streamEvent({ chunk_type: 'error', delta: '请求校验失败: [error-test] 是非法输入' }),
     );
 
@@ -533,8 +533,8 @@ describe('ChatPanel', () => {
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
     // 模拟统一事件通道到达：增量 + length 完成
-    routeChatStreamEvent(streamEvent({ delta: '第一段' }));
-    routeChatStreamEvent(streamEvent({ delta: '', finish_reason: 'length' }));
+    handleChatStreamEvent(streamEvent({ delta: '第一段' }));
+    handleChatStreamEvent(streamEvent({ delta: '', finish_reason: 'length' }));
 
     // SSE 流结束事件 finish_reason='length' → 助手消息下方显示截断提示
     await waitFor(() => {
@@ -560,8 +560,8 @@ describe('ChatPanel', () => {
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
     // 模拟统一事件通道到达：增量 + stop 完成
-    routeChatStreamEvent(streamEvent({ delta: '回答' }));
-    routeChatStreamEvent(streamEvent({ delta: '', finish_reason: 'stop' }));
+    handleChatStreamEvent(streamEvent({ delta: '回答' }));
+    handleChatStreamEvent(streamEvent({ delta: '', finish_reason: 'stop' }));
 
     // 流正常结束后（finish_reason='stop'）不显示截断提示
     await waitFor(() => {
@@ -582,10 +582,10 @@ describe('ChatPanel', () => {
     await user.click(screen.getByRole('button', { name: /发送/i }));
 
     // 模拟统一事件通道到达：思考增量 + 正文 + 完成
-    routeChatStreamEvent(streamEvent({ delta: '', thinking: '先分析', chunk_type: 'thought' }));
-    routeChatStreamEvent(streamEvent({ delta: '', thinking: '再想想', chunk_type: 'thought' }));
-    routeChatStreamEvent(streamEvent({ delta: '最终输出' }));
-    routeChatStreamEvent(streamEvent({ delta: '', finish_reason: 'stop' }));
+    handleChatStreamEvent(streamEvent({ delta: '', thinking: '先分析', chunk_type: 'thought' }));
+    handleChatStreamEvent(streamEvent({ delta: '', thinking: '再想想', chunk_type: 'thought' }));
+    handleChatStreamEvent(streamEvent({ delta: '最终输出' }));
+    handleChatStreamEvent(streamEvent({ delta: '', finish_reason: 'stop' }));
 
     // 思考增量与正文分开累积（思考不入 content）
     await waitFor(() => {

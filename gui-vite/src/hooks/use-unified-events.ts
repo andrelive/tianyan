@@ -1,12 +1,19 @@
 /**
  * useUnifiedEvents —— 统一事件订阅（ADR-028/031）。
  *
- * 前端启动即建立常驻 EventSource（GET /events），事件带 type 区分：
- * - `chat_stream`：对话流式事件（ADR-028 第 3 步）→ 按 session_id 路由到
- *   活跃归约器（主会话 / 子代理 task_id 同构）；
+ * 前端启动即建立**应用级常驻** EventSource（GET /events），事件带 type 区分：
+ * - `chat_stream`：对话流式事件（ADR-028 第 3 步）→ 纯函数
+ *   `handleChatStreamEvent` 直接映射 store（主会话 / 子代理 task_id 同构，
+ *   无归约器注册表——唤醒轮事件常驻可达）；
  * - `snapshot`：订阅快照（ADR-029）→ replace 窗口（打开/重连的权威兜底）；
  * - `task_status`：任务状态转移（pending/running/终态）→ 任务面板实时更新；
  * - `command_output`：命令输出增量（尽力而为，终端视图实时 append）。
+ *
+ * **应用级常驻**：连接生命周期与组件卸载解耦——切到设置/其他面板不关闭
+ * EventSource（此前挂在 ChatPanel/AgentTasksPanel 的 useUnifiedEvents 上，
+ * 最后一个消费者卸载即 stopUnifiedEvents 关闭连接，订阅集合被丢弃，
+ * 切回才由 onopen 重放——实时流在切换期间全部丢失）。模块加载即启动，
+ * 进程存活期间不关闭（断线由 EventSource 自动重连 + onopen 重放订阅）。
  *
  * ADR-031 后消息不再广播（落库即广播移除）：主会话消息经流式增量 + 完成
  * 事件（user_message_id 确认 / pump 边界）到前端；后台任务完成通知只落库
@@ -24,7 +31,8 @@
 import { useEffect, useRef } from 'react';
 import { getApiBase } from '@/lib/api-base';
 import { useAppStore } from '@/lib/store';
-import { routeChatStreamEvent } from '@/lib/chat-stream';
+import { handleChatStreamEvent } from '@/lib/chat-stream';
+import type { ChatStreamEvent } from '@/lib/types';
 import type { ChatMessage } from '@/lib/types';
 
 /** 统一事件（ADR-028 事件契约；ADR-029 新增 snapshot 订阅快照）。 */
@@ -49,11 +57,12 @@ export interface UnifiedEvent {
 export type EventHandler = (ev: UnifiedEvent) => void;
 
 /**
- * 全局统一事件订阅（单例 EventSource，按 type 分发）。
+ * 应用级统一事件订阅（单例 EventSource，按 type 分发）。
  *
- * 组件通过 useUnifiedEvents(handler) 注册回调；hook 内部维护单例连接，
- * 首个订阅者建立、最后一个退订时关闭。chat_stream 事件由本 hook 路由到
- * 活跃归约器（lib/chat-stream），组件无需重复处理。
+ * 组件通过 useUnifiedEvents(handler) 注册回调；连接由模块级启动管理
+ * （应用启动即建、进程存活期间常驻），组件卸载只移除回调、不关闭连接。
+ * chat_stream 事件经纯函数 `handleChatStreamEvent` 直接映射 store，
+ * 组件无需重复处理。
  */
 export function useUnifiedEvents(handler?: EventHandler): void {
   const handlerRef = useRef<EventHandler | null>(null);
@@ -62,24 +71,20 @@ export function useUnifiedEvents(handler?: EventHandler): void {
   useEffect(() => {
     const listeners = unifiedEventsListeners;
     listeners.add(handlerRef);
-    if (!unifiedEventsStarted) {
-      unifiedEventsStarted = true;
-      startUnifiedEvents();
-    }
+    // 应用级常驻：即使当前无组件订阅 chat_stream，连接也已建立——
+    // 归约器为纯函数（无实例），唤醒轮/后台事件不依赖组件存活。
+    startUnifiedEventsOnce();
     return () => {
       listeners.delete(handlerRef);
-      if (listeners.size === 0 && unifiedEventsStarted) {
-        unifiedEventsStarted = false;
-        stopUnifiedEvents();
-      }
+      // 不关闭连接（应用级常驻）；仅移除回调
     };
   }, []);
 }
 
-// ── 单例连接管理 ─────────────────────────────────────────────
+// ── 应用级单例连接管理 ─────────────────────────────────────────
 
 const unifiedEventsListeners = new Set<React.MutableRefObject<EventHandler | null>>();
-let unifiedEventsStarted = false;
+let started = false;
 let es: EventSource | null = null;
 /** 已订阅会话集合（ADR-029：resident——打开过保持订阅，切回零延迟）。 */
 const subscribedSessions = new Set<string>();
@@ -87,6 +92,13 @@ const subscribedSessions = new Set<string>();
  * 推入广播通道时无订阅者被丢弃，历史加载静默失败）。 */
 let esReady = false;
 const esReadyWaiters: (() => void)[] = [];
+
+/** 首次调用时启动常驻连接（后续调用幂等）。 */
+function startUnifiedEventsOnce(): void {
+  if (started) return;
+  started = true;
+  startUnifiedEvents();
+}
 
 /** 等待 EventSource 连接就绪（订阅 POST 前调用，消除快照帧丢失竞态）。
  * 测试环境（jsdom 无 EventSource）直接放行——无真实连接，订阅 POST 由
@@ -145,6 +157,8 @@ export function applySnapshot(sessionId: string, messages: ChatMessage[]): void 
   }
 }
 
+/** 建立应用级常驻连接（模块加载后首次订阅即启动；进程存活期间不关闭，
+ * 断线自动重连 + onopen 重放订阅）。 */
 function startUnifiedEvents(): void {
   if (typeof EventSource === 'undefined') return; // 测试环境（jsdom）无 EventSource
   es = new EventSource(getApiBase() + '/events');
@@ -157,9 +171,9 @@ function startUnifiedEvents(): void {
       }
       // ADR-031：message 广播已移除——消息经流式增量 + 完成事件
       // （user_message_id 确认 / pump 边界）到前端；快照（打开/重连）兜底。
+      // chat_stream 为常驻纯函数处理（无注册表，唤醒轮/后台事件不丢失）。
       if (ev.type === 'chat_stream') {
-        // 对话流式事件（ADR-028 第 3 步）：路由到该会话的活跃归约器
-        routeChatStreamEvent(ev as unknown as import('@/lib/types').ChatStreamEvent);
+        handleChatStreamEvent(ev as unknown as ChatStreamEvent);
       }
       for (const ref of unifiedEventsListeners) {
         ref.current?.(ev);
@@ -183,11 +197,3 @@ function startUnifiedEvents(): void {
     // EventSource 自动重连；重连成功由 onopen 重放订阅。
   };
 }
-
-function stopUnifiedEvents(): void {
-  es?.close();
-  es = null;
-  // 连接关闭：就绪标志重置（下次 startUnifiedEvents 重新建立连接后置位）
-  esReady = false;
-}
-

@@ -13,12 +13,13 @@ interface UseChatStreamOptions {
  *
  * 不再消费 SSE 响应流——服务端校验 + 启动 AgentLoop 后立即返回 JSON
  * （{status: started, session_id}）。流式输出（增量/边界/工具/usage）全部
- * 经 `GET /events` 统一事件通道下发，由 useUnifiedEvents 按 session_id
- * 路由到归约器（lib/chat-stream 的 createChatStreamReducer）。
+ * 经 `GET /events` 统一事件通道下发，由纯函数 handleChatStreamEvent
+ * （lib/chat-stream）直接映射 store（无归约器注册表——事件自带
+ * session_id，常驻可达唤醒轮/子代理事件）。
  *
- * 流状态复位（streaming → idle）由归约器在收到 finish_reason 非空事件时
- * 驱动（error 分支已有；stop/length/interrupted 分支补上），本 hook 不再
- * 承担完成回调。
+ * 流状态复位（streaming → idle）由 handleChatStreamEvent 在收到
+ * finish_reason 非空事件时驱动（error 分支已有；stop/length/interrupted
+ * 分支补上），本 hook 不再承担完成回调。
  */
 export function useChatStream(options: UseChatStreamOptions) {
   const { streamUrl, onError } = options;

@@ -359,13 +359,14 @@ async fn test_run_empty_response_retries_then_completes() {
 }
 
 #[tokio::test]
-async fn test_run_empty_response_wake_turn_no_retry() {
-    // 唤醒轮（allow_empty_answer）：空输出直接结束，不重试（模型有意无需回复）
+async fn test_run_empty_response_wake_turn_retries_once() {
+    // 唤醒轮与用户轮同构（统一循环框架）：空响应重试一次，
+    // 重试仍空才按正常结束处理（不再有 allow_empty_answer 豁免）
     let mut mock = MockChatService::new();
     mock.expect_chat_completion()
-        .times(1)
+        .times(2)
         .returning(|_| Ok(response_with(Message::assistant(""))));
-    let agent_loop = make_loop(mock, 5).with_allow_empty_answer();
+    let agent_loop = make_loop(mock, 5);
 
     let mut messages = vec![Message::user("你好")];
     let result = agent_loop
@@ -375,7 +376,8 @@ async fn test_run_empty_response_wake_turn_no_retry() {
     match result {
         AgentLoopResult::Answer { content, turns, .. } => {
             assert_eq!(content, "");
-            assert_eq!(turns, 1, "唤醒轮空输出不重试");
+            // 重试在同一轮内（turn 计数不增加）；mock times(2) 已验证 2 次 LLM 调用
+            assert_eq!(turns, 1, "空响应重试一次后仍空才结束（同轮内重试）");
         }
         other => panic!("期望 Answer(空)，得到 {:?}", other),
     }

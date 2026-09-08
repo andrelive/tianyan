@@ -214,7 +214,6 @@ impl Agent {
             let loop_result = self
                 .agent_loop
                 .clone()
-                .with_allow_empty_answer()
                 .run_stream(
                     &mut messages.clone(),
                     sender.clone(),
@@ -1429,8 +1428,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_wake_empty_answer_legal() {
-        // ADR-013：唤醒轮空输出是合法结束（模型无需回复），非错误
+    async fn test_process_wake_empty_answer_retries_once() {
+        // 唤醒轮与用户轮同构：空输出重试一次（统一循环框架），
+        // 重试仍空才按正常结束处理（非错误）
         let mock = stream_mock(vec![stream_chunk_finish("")]);
         let agent = make_agent(mock);
 
@@ -1440,7 +1440,7 @@ mod tests {
         let state = agent.state.read().await;
         assert_eq!(
             state.conversations_processed, 1,
-            "空输出应正常结束（计入成功，不重试）"
+            "空输出重试后仍空应正常结束（计入成功）"
         );
     }
 

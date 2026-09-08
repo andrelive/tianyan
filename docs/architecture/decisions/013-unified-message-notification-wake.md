@@ -68,3 +68,22 @@ wake 正确性依赖 `remaining` 计数，而 `BackgroundTaskManager` 状态目�
 - `core/src/agent/loop.rs` — 空输出合法结束语义
 - `server/src/api/chat/services.rs` — 通知器装配
 - `core/src/session/` — 任务状态持久化存储（SQLite 或 VFS）
+
+---
+
+## 修订记录（0.3.5）
+
+**唤醒轮与用户轮同构：移除空输出豁免**。原实现给唤醒轮加 `allow_empty_answer`
+（`with_allow_empty_answer()`）——空响应在唤醒轮直接放过不重试，理由是"模型可能
+有意无需回复"。实测发现该豁免是缺陷的根源：失败场景（cmd 退出码 1 + "必须汇报"
+指令）下模型返回仅含碎片思考（如 "@if"）的空输出，框架直接放行并把这条垃圾消息
+持久化到会话（用户重启后看到"思考过程 @if"）。
+
+按统一循环框架原则（ADR-030：主 agent 与子代理同构），唤醒轮与用户轮同样同构：
+
+- `AgentLoopConfig.allow_empty_answer` 字段与 `with_allow_empty_answer()` 方法移除
+- 空响应（无正文无工具调用）统一重试一次（同轮内，turn 不增加）——`process_wake`
+  不再调用 `with_allow_empty_answer()`，`run` / `run_stream` 共享同一空响应判定
+- 重试仍空才作为合法结束（空输出 = completed，对齐 DSH 无工具调用收尾语义）
+- 唤醒指令保持失败/完成区分：失败场景"必须向用户汇报，禁止输出空文本"；
+  全部成功且无需输出仍允许空输出（重试给模型第二次机会后仍空）

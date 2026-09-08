@@ -18,11 +18,6 @@ import type {
   ToolCallEvent,
 } from '@/lib/types';
 import { useChatStream } from '@/hooks/useChatStream';
-import {
-  createChatStreamReducer,
-  registerStreamReducer,
-  unregisterStreamReducer,
-} from '@/lib/chat-stream';
 import { usePolling } from '@/hooks/use-polling';
 import { useSessionHistory } from '@/hooks/use-session-history';
 import { useUnifiedEvents, subscribeSession } from '@/hooks/use-unified-events';
@@ -235,21 +230,13 @@ export default function ChatPanel() {
       setStreamError(false);
       state.setStreamStatus('streaming');
       // ADR-028 第 3 步：启动请求立即返回 session_id；流式事件经统一事件
-      // 通道（GET /events）到达——注册该会话的活跃归约器，事件按
-      // session_id 路由。新会话（adoptOnFirstEvent）首个事件到达时
-      // setCurrentSession 迁移 PENDING；已有会话不拉回当前视图。
-      const reducer = createChatStreamReducer({
-        errorFallbackText: '对话处理失败',
-        adoptOnFirstEvent: isNewSession,
-        onDone: (sid) => {
-          if (sid) unregisterStreamReducer(sid);
-        },
-      });
+      // 通道（GET /events）到达——纯函数 handleChatStreamEvent 常驻处理
+      // （无归约器注册表：事件自带 session_id 直接路由到 store，唤醒轮/
+      // 后台事件同样可达）。
       const confirmedSessionId = await startStream(payload);
       if (confirmedSessionId) {
-        registerStreamReducer(confirmedSessionId, reducer);
-        // ADR-029：确保会话已订阅（消息事件按订阅推送；resident 幂等——
-        // 已订阅跳过，未订阅首次打开 → 快照恢复）
+        // ADR-029：确保会话已订阅（快照恢复；resident 幂等——
+        // 已订阅跳过，未订阅首次打开 → 快照补充）
         void subscribeSession(confirmedSessionId);
         // 新会话：服务端已确认 session_id，立即迁移（不等首个事件——
         // 事件可能因通道 Lag 丢失，PENDING 滞留会断链）
@@ -257,7 +244,7 @@ export default function ChatPanel() {
           useAppStore.getState().setCurrentSession(confirmedSessionId);
         }
       } else {
-        // 启动失败：归约器无事件可路由，直接丢弃
+        // 启动失败：复位流状态 + 清理占位（事件不会到达）
         useAppStore.getState().setStreamStatus('idle');
         useAppStore.getState().removeEmptyAssistantMessage();
       }
@@ -371,9 +358,6 @@ export default function ChatPanel() {
     const sid = useAppStore.getState().currentSessionId;
     if (sid) {
       void cancelChatStream(sid).catch(() => {});
-      // 注销该会话的活跃归约器：停止后服务端后续事件不再路由（否则
-      // 旧流事件可能写进新流/已复位状态）
-      unregisterStreamReducer(sid);
     }
     stopStream();
     setStreamStatus('idle');
@@ -411,129 +395,129 @@ export default function ChatPanel() {
     <div className="flex h-full bg-[var(--color-bg-primary)]">
       {/* 左列：对话主区 */}
       <div className="flex flex-col flex-1 min-w-0">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] shrink-0">
-        <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">会话</h1>
-        <div className="flex items-center gap-2" />
-      </div>
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] shrink-0">
+          <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">会话</h1>
+          <div className="flex items-center gap-2" />
+        </div>
 
-      {/* Messages area */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
-        {messages.length === 0 && streamStatus === 'idle' && (
-          <div className="flex flex-col items-center justify-center h-full text-[var(--color-text-tertiary)] gap-3">
-            <MessageSquare className="w-12 h-12 opacity-30" />
-            <p className="text-sm">开始一段新的对话</p>
-            <p className="text-xs opacity-60">输入消息开始与 AI 助手交流</p>
-          </div>
-        )}
+        {/* Messages area */}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
+          {messages.length === 0 && streamStatus === 'idle' && (
+            <div className="flex flex-col items-center justify-center h-full text-[var(--color-text-tertiary)] gap-3">
+              <MessageSquare className="w-12 h-12 opacity-30" />
+              <p className="text-sm">开始一段新的对话</p>
+              <p className="text-xs opacity-60">输入消息开始与 AI 助手交流</p>
+            </div>
+          )}
 
-        {messages.length > 0 && (
-          <div className="space-y-4 max-w-4xl mx-auto">
-            {messages.map((msg, i) => (
-              <MessageBubble
-                key={msg.id || `msg-${i}`}
-                message={msg}
-                index={i}
-                isStreaming={i === streamingIndex && msg.role === 'assistant'}
-                onRollback={handleRollback}
-              />
-            ))}
+          {messages.length > 0 && (
+            <div className="space-y-4 max-w-4xl mx-auto">
+              {messages.map((msg, i) => (
+                <MessageBubble
+                  key={msg.id || `msg-${i}`}
+                  message={msg}
+                  index={i}
+                  isStreaming={i === streamingIndex && msg.role === 'assistant'}
+                  onRollback={handleRollback}
+                />
+              ))}
 
-            {/* Loading indicator: streaming started but no content yet.
+              {/* Loading indicator: streaming started but no content yet.
                 归属判定单点（streamingIndicatorOwner）：thinking 非空时由气泡内指示接管。 */}
-            {streamStatus === 'streaming' &&
-              messages.length > 0 &&
-              messages[messages.length - 1].role === 'assistant' &&
-              streamingIndicatorOwner(messages[messages.length - 1]) === 'list' && (
+              {streamStatus === 'streaming' &&
+                messages.length > 0 &&
+                messages[messages.length - 1].role === 'assistant' &&
+                streamingIndicatorOwner(messages[messages.length - 1]) === 'list' && (
+                  <div
+                    className="flex items-center gap-2 text-[var(--color-text-tertiary)] py-2"
+                    aria-live="polite"
+                    aria-label="AI 正在思考中"
+                  >
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span className="text-sm">思考中...</span>
+                  </div>
+                )}
+
+              {/* 压缩中：底部进行中提示（与压缩按钮/输入框禁用同一状态源，
+                压缩完成/失败后消失）。 */}
+              {compressing && (
                 <div
-                  className="flex items-center gap-2 text-[var(--color-text-tertiary)] py-2"
+                  className="flex items-center justify-center gap-2 text-[var(--color-text-tertiary)] py-2"
                   aria-live="polite"
-                  aria-label="AI 正在思考中"
+                  aria-label="正在压缩会话"
                 >
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-sm">思考中...</span>
+                  <span className="text-sm">压缩中...</span>
                 </div>
               )}
 
-            {/* 压缩中：底部进行中提示（与压缩按钮/输入框禁用同一状态源，
-                压缩完成/失败后消失）。 */}
-            {compressing && (
-              <div
-                className="flex items-center justify-center gap-2 text-[var(--color-text-tertiary)] py-2"
-                aria-live="polite"
-                aria-label="正在压缩会话"
+              {/* 断线提示：跑完再取——任务继续在后台运行，刷新获取最终结果 */}
+              {streamError && streamStatus === 'idle' && (
+                <div className="flex items-center gap-2 py-2" role="alert" aria-live="polite">
+                  <span className="text-xs text-amber-600 dark:text-amber-400">
+                    连接断开，任务继续在后台运行，完成后可刷新查看
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => currentSessionId && reloadSession(currentSessionId)}
+                    className="flex items-center gap-1 px-2.5 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+                  >
+                    <RotateCcw size={12} />
+                    刷新结果
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Redo banner: 回退后可撤销 */}
+          {lastRollbackMessageId !== null && streamStatus !== 'streaming' && (
+            <div className="flex justify-center pb-1">
+              <button
+                onClick={handleRedo}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                aria-label="撤销回退"
               >
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span className="text-sm">压缩中...</span>
-              </div>
-            )}
+                <Undo2 className="w-3.5 h-3.5" />
+                已回退 — 撤销回退
+              </button>
+            </div>
+          )}
+        </div>
 
-            {/* 断线提示：跑完再取——任务继续在后台运行，刷新获取最终结果 */}
-            {streamError && streamStatus === 'idle' && (
-              <div className="flex items-center gap-2 py-2" role="alert" aria-live="polite">
-                <span className="text-xs text-amber-600 dark:text-amber-400">
-                  连接断开，任务继续在后台运行，完成后可刷新查看
-                </span>
-                <button
-                  type="button"
-                  onClick={() => currentSessionId && reloadSession(currentSessionId)}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
-                >
-                  <RotateCcw size={12} />
-                  刷新结果
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+        {/* 会话内临时面板（完事即隐）：活跃待办/目标（todo/goal 工具产物）。 */}
+        <SessionTodoPanel sessionId={currentSessionId} />
 
-        {/* Redo banner: 回退后可撤销 */}
-        {lastRollbackMessageId !== null && streamStatus !== 'streaming' && (
-          <div className="flex justify-center pb-1">
-            <button
-              onClick={handleRedo}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
-              aria-label="撤销回退"
-            >
-              <Undo2 className="w-3.5 h-3.5" />
-              已回退 — 撤销回退
-            </button>
-          </div>
-        )}
-      </div>
+        {/* 应用层授权卡片（提取自 ChatPanel 内联；与 ApprovalPanel 共用语义） */}
+        <ApprovalBanner
+          approval={pendingApproval}
+          busy={approvalBusy}
+          onRespond={(decision) => void handleApproval(decision)}
+        />
 
-      {/* 会话内临时面板（完事即隐）：活跃待办/目标（todo/goal 工具产物）。 */}
-      <SessionTodoPanel sessionId={currentSessionId} />
-
-      {/* 应用层授权卡片（提取自 ChatPanel 内联；与 ApprovalPanel 共用语义） */}
-      <ApprovalBanner
-        approval={pendingApproval}
-        busy={approvalBusy}
-        onRespond={(decision) => void handleApproval(decision)}
-      />
-
-      {/* Input area（模型/思考强度/上下文圆环 + 发送：DSH 布局）
+        {/* Input area（模型/思考强度/上下文圆环 + 发送：DSH 布局）
           追问待回答时由 ClarificationBubble 接管（composer takeover，对齐 DSH）：
           输入框区域被问题表单替代，回答提交后恢复。
           注意：同步工具语义下 ask_user 工具执行挂起时主对话流仍处于 streaming
           （工具结果经原流返回）——气泡渲染只看 pending，不再要求 idle。 */}
-      {pendingClarification ? (
-        <ClarificationBubble
-          questions={pendingClarification.questions}
-          submitting={clarifySubmitting}
-          onSubmit={handleClarify}
-        />
-      ) : (
-        <ChatInput
-          onSend={handleSend}
-          onStop={handleStop}
-          isStreaming={streamStatus === 'streaming'}
-          usage={lastUsage}
-          sessionUsage={sessionUsage}
-          onCompress={() => void handleCompress()}
-          compressing={compressing}
-        />
-      )}
+        {pendingClarification ? (
+          <ClarificationBubble
+            questions={pendingClarification.questions}
+            submitting={clarifySubmitting}
+            onSubmit={handleClarify}
+          />
+        ) : (
+          <ChatInput
+            onSend={handleSend}
+            onStop={handleStop}
+            isStreaming={streamStatus === 'streaming'}
+            usage={lastUsage}
+            sessionUsage={sessionUsage}
+            onCompress={() => void handleCompress()}
+            compressing={compressing}
+          />
+        )}
       </div>
 
       {/* 右列：会话后台任务面板（ADR-026：活跃在上、完成沉底、可展开/取消/折叠） */}
@@ -553,5 +537,3 @@ function findAskUserCall(messages: ChatMessage[]): ToolCallEvent | null {
   }
   return null;
 }
-
-

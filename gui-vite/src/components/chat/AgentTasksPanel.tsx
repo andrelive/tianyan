@@ -3,11 +3,6 @@ import { usePolling } from '@/hooks/use-polling';
 import { useUnifiedEvents, subscribeSession, type UnifiedEvent } from '@/hooks/use-unified-events';
 import { cancelTask, fetchTasks } from '@/lib/api-client';
 import { useAppStore } from '@/lib/store';
-import {
-  createChatStreamReducer,
-  registerStreamReducer,
-  unregisterStreamReducer,
-} from '@/lib/chat-stream';
 import type { BackgroundTask } from '@/lib/types';
 import { SegmentBlocks } from './MessageSegments';
 import {
@@ -69,25 +64,15 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
     }
   });
 
-  // 展开委托任务：订阅（快照恢复）+ 注册流式归约器（逐 token 增量，
-  // 与主会话同构——事件按 session_id=task_id 路由写 store）
+  // 展开委托任务：订阅（快照恢复）；流式增量由常驻纯函数
+  // handleChatStreamEvent 按 session_id=task_id 路由写 store（与主会话同构，
+  // 无归约器注册——展开/收起不改变事件处理）
   const handleOpen = useCallback(
     async (task: BackgroundTask) => {
       const next = openId === task.id ? null : task.id;
       setOpenId(next);
       if (next && task.kind === 'delegate') {
         void subscribeSession(task.id);
-        const reducer = createChatStreamReducer({
-          errorFallbackText: '子智能体处理失败',
-          adoptOnFirstEvent: false,
-          onDone: (sid) => {
-            if (sid) unregisterStreamReducer(sid);
-          },
-        });
-        registerStreamReducer(task.id, reducer);
-      } else if (!next) {
-        // 收起：注销归约器（订阅保持 resident，切回零延迟）
-        unregisterStreamReducer(task.id);
       }
     },
     [openId],
@@ -134,9 +119,7 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
         key={t.id}
         className={
           'border rounded-lg overflow-hidden bg-[var(--color-bg-primary)]' +
-          (t.status === 'failed'
-            ? ' border-[var(--color-error)]'
-            : ' border-[var(--color-border)]')
+          (t.status === 'failed' ? ' border-[var(--color-error)]' : ' border-[var(--color-border)]')
         }
       >
         <button
@@ -320,7 +303,3 @@ function DelegateMessages({ taskId, status }: { taskId: string; status: string }
     </>
   );
 }
-
-
-
-

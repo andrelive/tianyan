@@ -514,10 +514,7 @@ impl ToolRegistry {
             model_service,
             self.clone(),
             session_manager,
-            AgentLoopConfig {
-                max_turns,
-                allow_empty_answer: false,
-            },
+            AgentLoopConfig { max_turns },
         )
         .with_turn_policy(TurnPolicy {
             tool_executor: ToolExecutorKind::RoleFiltered {

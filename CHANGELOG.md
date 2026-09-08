@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed（0.3.5 构建：唤醒轮可见性与事件通道重构，2026-09-08）
+- **唤醒轮输出前端不可见**（切走再切回才看到）：后台命令完成 → 通知落库 → 唤醒轮跑 loop → 输出经 `chat_stream` 事件推送——但前端 `routeChatStreamEvent` 依赖**活跃流归约器注册表**（发消息时注册、流结束即注销），主循环空闲时事件到达无归约器可路由 → **静默丢弃**；且 `useUnifiedEvents` 挂在 `ChatPanel`/`AgentTasksPanel` 上，最后一个消费者卸载即 `stopUnifiedEvents()` **关闭 EventSource**——切到设置等面板期间订阅连接断开，切回才由 onopen 重放订阅（看到的其实是重连快照而非实时事件）
+- **修复 1：EventSource 应用级常驻**——连接生命周期与组件卸载解耦（`startUnifiedEventsOnce` 模块级启动、进程存活期间不关闭），切到任何面板订阅连接保持，断线自动重连 + onopen 重放订阅不变
+- **修复 2：chat_stream 归约器纯函数化**——删除 `createChatStreamReducer`/`activeStreamReducers` 注册表/`registerStreamReducer`/`unregisterStreamReducer`/`routeChatStreamEvent`（历史包袱：每个 SSE 响应一条独立连接时代的 per-stream 实例；ADR-028/031 收敛为统一事件通道后事件自带 session_id，实例前提消失）；改为无状态纯函数 `handleChatStreamEvent`（订阅级常驻，事件 → store 直接映射，唤醒轮/主对话流/子代理事件同一入口）；`liveWindow` 闭包状态一并移除（实际无消费点，圆环回退窗口恒为模型声明值）
+- **副作用收敛**：纯函数不 `setCurrentSession`（唤醒轮事件不再拉回当前会话视图）；停止不再注销归约器（无注册表可注销）
+- **回归测试**：chat-stream.test 改造为直接测 `handleChatStreamEvent`（10 用例，含唤醒轮消息边界事件写入 dict）；ChatPanel/AgentTasksPanel 同步更新
+
+### Fixed（0.3.5 构建：唤醒轮空输出豁免移除，2026-09-08）
+- **唤醒轮产生碎片垃圾消息**（"思考过程 @if"）：cmd 退出后唤醒轮执行时，模型返回仅含碎片思考（如 "@if"）、无正文无工具调用的空输出——`process_wake` 此前给唤醒轮加 `allow_empty_answer` 豁免（空响应直接放过不重试），垃圾消息被持久化到会话，用户重启后看到莫名其妙的"思考过程 @if"。
+- **修复：唤醒轮与用户轮同构（统一循环框架）**——`AgentLoopConfig.allow_empty_answer` 字段与 `with_allow_empty_answer()` 方法移除；空响应（无正文无工具调用）在 `run` / `run_stream` 统一重试一次（同轮内，turn 不增加），重试仍空才作为合法结束（空输出 = completed，对齐 DSH 无工具调用收尾语义）；`process_wake` 不再调用 `with_allow_empty_answer()`。失败场景指令"必须汇报" + 空响应重试 = 模型获得第二次机会正确输出。
+- **回归测试**：`test_run_empty_response_wake_turn_retries_once`（唤醒轮空响应重试一次，mock times(2)）+ `test_run_empty_response_retries_then_completes`（既有用户轮语义不变）
+
 ### Fixed（0.3.4 构建：压缩会话反馈与占用统计，2026-09-05）
 - **压缩中无进行中反馈 + 可输入发送**：压缩（LLM 摘要生成，通常 10-30 秒）期间消息流底部无提示、输入框与发送按钮仍可用——用户可能在压缩完成前输入，与服务端压缩基于的分叉状态并发。压缩期间消息流底部显示「压缩中...」（spinner + aria-live），textarea 与发送按钮禁用（`compressing` 纳入 `canSend`/`disabled`/Enter 守卫），压缩完成/失败后恢复。
 - **压缩后圆环占用不更新（下轮才变）**：圆环占用 = `lastMessageUsage`（从末尾向前找第一条带 usage 的消息）——压缩摘要消息 `tokens` 此前全零 → 前端映射 `usage:null` → 查找跳过摘要、命中压缩前最后一条 assistant 的 usage（压缩前完整占用）→ 圆环不变；下一轮新请求完成后才更新。同时摘要请求走 `chat()` 便捷方法，真实 usage 被丢弃（压缩消耗从未入账）。修复：
