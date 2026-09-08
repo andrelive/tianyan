@@ -24,10 +24,7 @@ use tianyan::observability::usage_stats::UsageStats;
 use tianyan::scheduler::TaskScheduler;
 use tianyan::session::search::SessionRecall;
 use tianyan::session::{PersistentSessionManager, SessionManager};
-use tianyan::skills::{
-    register_builtin_skills, ExecutorConfig, SkillExecutor, SkillManager, SkillRefresher,
-    SkillRegistry,
-};
+use tianyan::skills::SkillManager;
 use tianyan::snapshot::SnapshotManager;
 use tianyan::todos::TodoStore;
 use tianyan::vfs::{SummaryEngine, VirtualFileSystemImpl};
@@ -187,36 +184,9 @@ pub(crate) fn build_knowledge_ingestor(
 type SharedConfig = Arc<RwLock<TianyanConfig>>;
 type SharedAgent = Arc<RwLock<Arc<dyn AgentCoordinator>>>;
 
-/// 技能注册表同步句柄。
-///
-/// 会话边界刷新的承载者：新会话创建时把 VFS 中已学习技能（GEPA 产物）
-/// 增量注册进 SkillRegistry。刷新是幂等的（仅注册新技能），失败不影响对话。
-#[derive(Clone)]
-pub struct SkillSync {
-    manager: Arc<SkillManager>,
-    registry: Arc<RwLock<SkillRegistry>>,
-}
-
-impl SkillSync {
-    /// 将 VFS 已学习技能增量注册进注册表，返回新注册数。
-    pub async fn refresh(&self) -> TianyanResult<usize> {
-        let mut registry = self.registry.write().await;
-        self.manager.refresh_registry(&mut registry).await
-    }
-}
-
-/// SkillSync 作为核心层 [`SkillRefresher`] 的实现：
-/// 压缩（会话转换点）时被 Agent 调用，增量注册 VFS 学习技能。
-#[async_trait::async_trait]
-impl SkillRefresher for SkillSync {
-    async fn refresh_skills(&self) -> TianyanResult<usize> {
-        self.refresh().await
-    }
-}
-
 /// 角色注册表会话边界刷新（ADR-016：学习产物新会话立即可见）。
 ///
-/// 与 [`SkillSync`] 同构：新会话创建时把 VFS 中角色（学习产物）增量合并进
+/// 与角色注册表同构：新会话创建时把 VFS 中角色（学习产物）增量合并进
 /// 注册表；会话内不刷新（前缀稳定，prompt 缓存不失效）。
 #[derive(Clone)]
 pub struct RoleSync {
@@ -247,11 +217,7 @@ pub struct AppState {
     session_manager: Arc<dyn SessionManager>,
     /// 虚拟文件系统（所有组件共享）
     vfs: Arc<VirtualFileSystemImpl>,
-    /// 技能注册表
-    skill_registry: Arc<RwLock<SkillRegistry>>,
-    /// 技能执行器
-    skill_executor: Arc<SkillExecutor>,
-    /// 技能管理器（VFS 命名空间访问；会话边界刷新已学习技能用）
+    /// 技能管理器（VFS 命名空间访问；技能列表/详情/执行 API 数据源）
     skill_manager: Arc<SkillManager>,
     /// 角色 VFS 存储（ADR-016：角色列表/详情/会话 API 的权威数据源）。
     role_store: tianyan::agent::RoleStore,
@@ -330,50 +296,8 @@ impl AppState {
         vfs: Arc<VirtualFileSystemImpl>,
         database: Arc<Database>,
     ) -> TianyanResult<Self> {
-        // 初始化技能注册表和执行器
-        let mut skill_registry = SkillRegistry::new();
-        let skill_config = {
-            let sec = &config.security;
-            let mut cfg = ExecutorConfig::new();
-            cfg.skill_file_read_max_size = sec.skill_file_read_max_size;
-            cfg.skill_file_read_timeout_secs = sec.skill_file_read_timeout_secs;
-            cfg.skill_file_write_max_size = sec.skill_file_write_max_size;
-            cfg.skill_file_write_timeout_secs = sec.skill_file_write_timeout_secs;
-            cfg.skill_file_list_max_entries = sec.skill_file_list_max_entries;
-            cfg.skill_http_timeout_secs = sec.skill_http_timeout_secs;
-            cfg.skill_command_timeout_secs = sec.skill_command_timeout_secs;
-            // 双安全域统一接线：blocklist / 危险技能许可 / 路径白名单
-            // 与工具路径共用同一配置源（security 节）。
-            cfg.blocked_commands = if sec.blocked_commands.is_empty() {
-                tianyan::executor::DEFAULT_BLOCKED_COMMANDS
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect()
-            } else {
-                sec.blocked_commands.clone()
-            };
-            cfg.allow_dangerous_operations = sec.allow_dangerous_skills;
-            cfg.allowed_paths = sec.allowed_directories.clone();
-            cfg
-        };
-        register_builtin_skills(&mut skill_registry, &skill_config)?;
-        let skill_registry = Arc::new(RwLock::new(skill_registry));
-        let skill_executor = Arc::new(SkillExecutor::new(skill_registry.clone(), skill_config));
-
-        // VFS 技能自动发现：把之前学到的技能注册进 SkillRegistry，
-        // 使它们可被列出、检索（GEPA 学习回路闭环）。
-        // 启动时全量加载一次；运行中新进化的技能由会话边界刷新
-        // （SkillSync::refresh，见 ChatService 接线）增量注册。
+        // VFS 技能管理器（技能 = VFS 方法论文档；列表/详情/执行 API 数据源）
         let skill_manager = Arc::new(SkillManager::new(vfs.clone()));
-        {
-            let mut registry = skill_registry.write().await;
-            match skill_manager.refresh_registry(&mut registry).await {
-                Ok(registered) => {
-                    tracing::info!(count = registered, "已注册 VFS 学习技能");
-                }
-                Err(e) => tracing::warn!(error = %e, "加载已学习技能失败"),
-            }
-        }
 
         // 初始化使用统计（复用全系统共享的 SqliteDb，ADR-005：单连接）
         let usage_stats = UsageStats::new(database.clone())?;
@@ -460,13 +384,8 @@ impl AppState {
             &config,
             model_services.clone(),
             vfs.clone(),
-            skill_executor.clone(),
             usage_stats.clone(),
             snapshot_manager.clone(),
-            Arc::new(SkillSync {
-                manager: skill_manager.clone(),
-                registry: skill_registry.clone(),
-            }),
             dynamic_tools,
             Some(database.clone()),
             crate::notification::global_notification_sink(),
@@ -490,8 +409,6 @@ impl AppState {
             config: Arc::new(RwLock::new(config)),
             session_manager,
             vfs,
-            skill_registry,
-            skill_executor,
             skill_manager,
             role_store,
             role_registry,
@@ -577,18 +494,6 @@ impl AppState {
         self.agent.clone()
     }
 
-    /// 获取技能注册表同步句柄。
-    ///
-    /// ChatService 在新会话创建时调用 [`SkillSync::refresh`]，把 GEPA 在
-    /// 运行期间进化出的新技能增量注册进 SkillRegistry —— 新会话立即可用，
-    /// 会话内保持冻结（system 前缀稳定，prompt 缓存不失效）。
-    pub fn skill_sync(&self) -> SkillSync {
-        SkillSync {
-            manager: self.skill_manager.clone(),
-            registry: self.skill_registry.clone(),
-        }
-    }
-
     /// 获取角色注册表同步句柄（ADR-016：新会话创建时刷新学习角色）。
     pub fn role_sync(&self) -> RoleSync {
         RoleSync {
@@ -660,10 +565,8 @@ impl AppState {
             &config,
             model_services.clone(),
             self.vfs.clone(),
-            self.skill_executor.clone(),
             self.usage_stats.clone(),
             self.snapshot_manager.clone(),
-            Arc::new(self.skill_sync()),
             dynamic_tools,
             Some(self.sqlite_db.clone()),
             crate::notification::global_notification_sink(),
@@ -711,6 +614,11 @@ impl AppState {
         self.vfs.clone()
     }
 
+    /// 获取技能管理器（VFS 技能命名空间访问；技能 API 数据源）。
+    pub fn skill_manager(&self) -> Arc<SkillManager> {
+        self.skill_manager.clone()
+    }
+
     /// 获取工作区快照管理器（未配置 working_directory 时为 None）。
     pub fn snapshot_manager(&self) -> Option<Arc<SnapshotManager>> {
         self.snapshot_manager.clone()
@@ -734,22 +642,6 @@ impl AppState {
     /// * `Arc<RwLock<TianyanConfig>>` - 配置实例
     pub fn config(&self) -> Arc<RwLock<TianyanConfig>> {
         self.config.clone()
-    }
-
-    /// 获取技能注册表
-    ///
-    /// # Returns
-    /// * `Arc<RwLock<SkillRegistry>>` - 技能注册表实例
-    pub fn skill_registry(&self) -> Arc<RwLock<SkillRegistry>> {
-        self.skill_registry.clone()
-    }
-
-    /// 获取技能执行器
-    ///
-    /// # Returns
-    /// * `Arc<SkillExecutor>` - 技能执行器实例
-    pub fn skill_executor(&self) -> Arc<SkillExecutor> {
-        self.skill_executor.clone()
     }
 
     /// 获取使用统计追踪器

@@ -16,10 +16,9 @@ use crate::agent::tool_params::{
 };
 use crate::agent::types::{AgentStreamChunk, StreamChunkType, StreamEventSender};
 use crate::common::error::TianyanError;
-use crate::common::types::Message;
+use crate::common::types::{ContentLevel, ContextNamespace, Message, TianyanUri};
 use crate::executor::Action;
 use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition};
-use crate::skills::SkillExecutionRequest;
 
 use super::{parse_params, safety_violation, wrap_tool_error, ToolExecutionOutcome, ToolRegistry};
 
@@ -195,48 +194,53 @@ impl ToolRegistry {
         .map_err(wrap_tool_error)
     }
 
-    /// 执行 call_skill 工具：调用已注册技能。
+    /// 执行 call_skill 工具：读取 VFS 技能文档（L0 摘要 + L2 详情）返回。
+    ///
+    /// 技能 = 方法论文档（VFS `skill/{id}/`），无执行语义——模型读到内容后
+    /// 参考方法论自行用基础工具执行。planning 为预置技能（bootstrap 写入），
+    /// GEPA 学习技能由进化引擎写入，两者同构。
     pub(crate) async fn execute_call_skill(
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: CallSkillParams = parse_params(arguments)?;
+        let vfs = self.vfs.as_ref().ok_or_else(|| {
+            TianyanError::Custom(format!("tool: 执行失败：{}", "VFS not configured"))
+        })?;
 
-        if let Some(ref skill_executor) = self.skill_executor {
-            let request = SkillExecutionRequest::new(params.skill_id, params.parameters);
-            match skill_executor.execute(request).await {
-                Ok(result) => {
-                    let mut data = HashMap::new();
-                    if let Some(output) = result.output {
-                        data.insert("output".to_string(), serde_json::Value::String(output));
-                    }
-                    if let Some(error) = result.error {
-                        data.insert("error".to_string(), serde_json::Value::String(error));
-                    }
-                    if let Some(exit_code) = result.exit_code {
-                        data.insert(
-                            "exit_code".to_string(),
-                            serde_json::Value::Number(exit_code.into()),
-                        );
-                    }
-                    data.insert(
-                        "execution_time_ms".to_string(),
-                        serde_json::Value::Number(result.execution_time_ms.into()),
-                    );
-                    data.insert(
-                        "success".to_string(),
-                        serde_json::Value::Bool(result.success),
-                    );
-                    Ok(serde_json::Value::Object(data.into_iter().collect()))
-                }
-                Err(e) => Err(wrap_tool_error(e)),
-            }
-        } else {
-            Err(TianyanError::Custom(format!(
-                "tool: 执行失败：{}",
-                "SkillExecutor not configured",
-            )))
+        let uri = TianyanUri::new(ContextNamespace::Skill, vec![params.skill_id.clone()]);
+        if !vfs.exists(&uri).await.map_err(wrap_tool_error)? {
+            return Err(TianyanError::Custom(format!(
+                "tool: 执行失败：技能 '{}' 不存在（VFS skill/ 命名空间下无此技能）",
+                params.skill_id
+            )));
         }
+
+        let (abstract_text, detail) = tokio::join!(
+            vfs.read_content(&uri, ContentLevel::Abstract),
+            vfs.read_content(&uri, ContentLevel::Detail),
+        );
+        let abstract_text = abstract_text.map_err(wrap_tool_error)?;
+        let detail = detail.map_err(wrap_tool_error)?;
+
+        if detail.trim().is_empty() {
+            return Err(TianyanError::Custom(format!(
+                "tool: 执行失败：技能 '{}' 内容为空",
+                params.skill_id
+            )));
+        }
+
+        let mut data = HashMap::new();
+        data.insert(
+            "skill_id".to_string(),
+            serde_json::Value::String(params.skill_id.clone()),
+        );
+        data.insert(
+            "abstract".to_string(),
+            serde_json::Value::String(abstract_text),
+        );
+        data.insert("detail".to_string(), serde_json::Value::String(detail));
+        Ok(serde_json::Value::Object(data.into_iter().collect()))
     }
 
     /// 执行 ask_user 工具：**同步等待用户回答**（对齐 DSH：工具执行挂起，

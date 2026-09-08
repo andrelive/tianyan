@@ -64,7 +64,6 @@ pub async fn chat_stream_handler(
 
     let agent = state.agent().await;
     let session_manager = state.session_manager();
-    let skill_sync = state.skill_sync();
     let role_sync = state.role_sync();
     let config_arc = state.config();
     let config_guard = config_arc.read().await;
@@ -86,7 +85,6 @@ pub async fn chat_stream_handler(
 
     tokio::spawn(async move {
         let service = ChatService::new(agent, session_manager)
-            .with_skill_sync(skill_sync)
             .with_role_sync(role_sync)
             .with_context_window(context_window);
 

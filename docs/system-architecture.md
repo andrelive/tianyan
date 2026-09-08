@@ -34,9 +34,9 @@
 | **Agent Loop 架构** | LLM 在循环中自主调用工具或直接回答，支持并行工具调用和追问中断 |
 | **VFS 双层摘要索引** | 三层内容（L0 Abstract / L1 Overview / L2 Detail）+ 双向量 RRF 融合检索 |
 | **StructuredMessage** | 单一真相源：持久化、会话组装、压缩跟踪、Token 统计 |
-| **组件工具化** | 25 个 OpenAI function calling 兼容工具，`call_skill` 桥接到技能系统 |
+| **组件工具化** | 30 个 OpenAI function calling 兼容工具，`call_skill` 读 VFS 技能文档 |
 | **前缀匹配缓存** | soul+rules+memories 固定前缀 → history 可变后缀，利用 LLM Provider 缓存 |
-| **技能系统** | 6 个内置技能 + GEPA 进化引擎自动学习 |
+| **技能系统** | 技能 = VFS 方法论文档（planning 预置 + GEPA 进化引擎自动学习） |
 | **流式响应** | SSE 流式输出，7 种 chunk_type（含 message 边界事件）；历史/流式共用服务端权威时间线（segments，ADR-019） |
 
 ---
@@ -180,7 +180,7 @@ pub struct StructuredMessage {
 
 知识库查询、技能调用等能力封装为 OpenAI function calling 兼容的工具，由 LLM 通过 `tool_call` 自主调用。
 
-当前 `ToolRegistry` 注册 25 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](architecture/tool-catalog.md)）：`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_vfs`、`call_skill`、`run_tests`、`discover_tests`、`ask_user`、`self_check`、`knowledge_ingest`、`web_search`、`web_fetch`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`task_status`、`task_cancel`、`lsp` 等。其中 `call_skill` 桥接到 `SkillExecutor`；`delegate_to_agent` 走统一循环框架（ADR-030：子代理 = AgentLoop 实例 + `TurnPolicy` 委托策略，流式路径 + 消息落库即广播）；`web_search`/`web_fetch` 提供网页感知（后端 + SSRF 防护 + 缓存）。
+当前 `ToolRegistry` 注册 30 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](architecture/tool-catalog.md)）：`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_vfs`、`call_skill`、`run_tests`、`discover_tests`、`ask_user`、`self_check`、`knowledge_ingest`、`web_search`、`web_fetch`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`task_status`、`task_cancel`、`lsp` 等。其中 `call_skill` 读 VFS 技能文档（方法论文档，无执行语义）；`delegate_to_agent` 走统一循环框架（ADR-030：子代理 = AgentLoop 实例 + `TurnPolicy` 委托策略，流式路径 + 消息落库即广播）；`web_search`/`web_fetch` 提供网页感知（后端 + SSRF 防护 + 缓存）。
 
 ### 3.4 决策 4: 上下文组装前缀匹配原则
 

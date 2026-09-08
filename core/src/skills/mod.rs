@@ -1,73 +1,25 @@
 //! 技能模块。
 //!
-//! 本模块提供技能管理和执行能力。
+//! 技能 = **方法论文档**（VFS `skill/` 命名空间），不是可执行单元：
 //!
-//! # 架构
+//! - **写**：GEPA 进化引擎（[`SkillLearningEngine`]）从执行历史自动生成技能，
+//!   写入 VFS `skill/{id}/`（content.md + abstract.md）；`planning` 为预置技能
+//!   （bootstrap 时写入），与学习技能同构。
+//! - **读**：[`SkillManager`] 从 VFS 发现技能（L0 摘要）与读取内容（L2 详情）；
+//!   `call_skill` 工具直接读 VFS 返回内容，由 LLM 参考后自行用工具执行。
+//! - **复审**：[`SkillReviewer`] 基于会话证据对技能使用效果打分，落 VFS
+//!   `skill/_reviews/<id>.jsonl`。
 //!
-//! 技能系统由以下组件组成：
-//!
-//! - **定义**：技能结构、参数模式和注册表
-//! - **执行**：具有验证、安全和监控功能的技能执行
-//! - **类型**：技能的通用类型
-//!
-//! # 示例
-//!
-//! ```no_run
-//! use std::sync::Arc;
-//! use tokio::sync::RwLock;
-//! use tianyan::skills::{Skill, SkillRegistry, SkillExecutor, ExecutorConfig, register_builtin_skills};
-//!
-//! async fn setup_skills() {
-//!     let mut registry = SkillRegistry::new();
-//!     let config = ExecutorConfig::new();
-//!     
-//!     register_builtin_skills(&mut registry, &config);
-//!     
-//!     let registry = Arc::new(RwLock::new(registry));
-//!     let executor = SkillExecutor::new(registry.clone(), config);
-//! }
-//! ```
+//! 技能没有 handler、没有执行语义——文件/命令/网络等能力由 Agent 内置工具
+//! 直接覆盖，技能只承载"怎么做"的方法论。
 
-mod definition;
-mod executor;
-/// 内置技能处理器。
-pub mod handlers;
-/// 技能学习引擎（GEPA）。
 pub(crate) mod learning;
 mod manager;
-mod registry;
-/// 技能使用复审（基于会话证据：执行结果 + 用户反馈；记忆任务顺路）。
-pub mod reviewer;
-mod types;
+mod reviewer;
 
-pub use definition::{
-    ParameterDefinition, ParameterSchema, ParameterType, Skill, SkillHandler, SkillRegistry,
-};
-pub use executor::{ExecutorConfig, SkillExecutor};
-pub use handlers::{
-    FileDeleteHandler, FileListHandler, FileReadHandler, FileWriteHandler, HttpRequestHandler,
-    SystemCommandHandler,
-};
 pub use learning::{
     ExecutionHistory, ExecutionStep, GeneratedSkill, SkillAction, SkillEvaluation,
-    SkillLearningConfig, SkillLearningEngine, SkillParameter,
+    SkillLearningConfig, SkillLearningEngine, SkillParameter, SkillVerification,
 };
-pub use manager::{SkillManager, SkillRefresher, SkillSummary};
-pub use registry::{create_builtin_skills, register_builtin_skills};
+pub use manager::{SkillManager, SkillSummary};
 pub use reviewer::{SkillReview, SkillReviewer, REVIEWS_PREFIX};
-pub use types::{
-    ExecutionContext, SecurityLevel, SkillCategory, SkillExample, SkillExecutionRequest,
-    SkillExecutionResult,
-};
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_module_exports() {
-        let _registry = SkillRegistry::new();
-        let _config = ExecutorConfig::new();
-        let _skill = Skill::new("test", "Test", "A test skill");
-    }
-}

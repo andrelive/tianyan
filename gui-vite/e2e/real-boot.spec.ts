@@ -51,8 +51,7 @@ test.describe('real backend boot', () => {
     };
     expect(body.skills.length).toBeGreaterThan(0);
 
-    // 面板只展示方法论技能（custom 类：GEPA 学习技能 + planning）；
-    // 内置桥接技能（file/system/network）不渲染
+    // 面板只展示方法论技能（custom 类：GEPA 学习技能 + planning）
     const methodology =
       body.skills.find((s) => s.category === 'custom') ?? body.skills[0];
     await expect(page.locator('button', { hasText: methodology.name }).first()).toBeVisible({

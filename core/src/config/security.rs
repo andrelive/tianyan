@@ -52,27 +52,6 @@ pub struct SecurityConfig {
     /// 启用审计日志。
     #[serde(default = "default_true")]
     pub audit_logging: bool,
-    /// 文件读取技能最大大小（字节），默认 50MB。
-    #[serde(default = "default_skill_read_max_size")]
-    pub skill_file_read_max_size: u64,
-    /// 文件读取技能超时（秒），默认 30。
-    #[serde(default = "default_skill_read_timeout")]
-    pub skill_file_read_timeout_secs: u64,
-    /// 文件写入技能最大大小（字节），默认 10MB。
-    #[serde(default = "default_skill_write_max_size")]
-    pub skill_file_write_max_size: u64,
-    /// 文件写入技能超时（秒），默认 30。
-    #[serde(default = "default_skill_write_timeout")]
-    pub skill_file_write_timeout_secs: u64,
-    /// 文件列表技能最大条目数，默认 10000。
-    #[serde(default = "default_skill_list_max")]
-    pub skill_file_list_max_entries: usize,
-    /// HTTP 请求技能超时（秒），默认 60。
-    #[serde(default = "default_skill_http_timeout")]
-    pub skill_http_timeout_secs: u64,
-    /// 系统命令技能超时（秒），默认 300。
-    #[serde(default = "default_skill_command_timeout")]
-    pub skill_command_timeout_secs: u64,
     /// 审批等待模式：危险操作通过 GUI 审批面板等待人工响应
     /// （默认关闭：走"询问用户 → 指纹确认"降级链路）。
     #[serde(default)]
@@ -82,11 +61,6 @@ pub struct SecurityConfig {
     /// 默认空（不强制）。注入审批工作流 `prompt_commands`。
     #[serde(default)]
     pub prompt_commands: Vec<String>,
-    /// 允许技能执行危险操作（system_command / file_delete）。
-    /// 默认关闭：技能路径无审批流，危险技能须显式启用。
-    /// 工具路径不受影响（走审批/询问降级链路）。
-    #[serde(default)]
-    pub allow_dangerous_skills: bool,
     /// 完全放开模式：所有操作自动批准（黑名单 Deny 规则仍优先）。
     /// 开启后不再弹授权/追问——只保留 blocked_commands 黑名单兜底。
     #[serde(default)]
@@ -108,34 +82,6 @@ fn default_trash_dir() -> PathBuf {
         .join("trash")
 }
 
-fn default_skill_read_max_size() -> u64 {
-    50 * 1024 * 1024 // 50 MB
-}
-
-fn default_skill_read_timeout() -> u64 {
-    30
-}
-
-fn default_skill_write_max_size() -> u64 {
-    10 * 1024 * 1024 // 10 MB
-}
-
-fn default_skill_write_timeout() -> u64 {
-    30
-}
-
-fn default_skill_list_max() -> usize {
-    10000
-}
-
-fn default_skill_http_timeout() -> u64 {
-    60
-}
-
-fn default_skill_command_timeout() -> u64 {
-    300
-}
-
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
@@ -149,16 +95,8 @@ impl Default for SecurityConfig {
             confirm_commands: true,
             max_file_size: default_max_file_size(),
             audit_logging: true,
-            skill_file_read_max_size: default_skill_read_max_size(),
-            skill_file_read_timeout_secs: default_skill_read_timeout(),
-            skill_file_write_max_size: default_skill_write_max_size(),
-            skill_file_write_timeout_secs: default_skill_write_timeout(),
-            skill_file_list_max_entries: default_skill_list_max(),
-            skill_http_timeout_secs: default_skill_http_timeout(),
-            skill_command_timeout_secs: default_skill_command_timeout(),
             wait_for_approval: false,
             prompt_commands: Vec::new(),
-            allow_dangerous_skills: false,
             allow_all_operations: false,
         }
     }

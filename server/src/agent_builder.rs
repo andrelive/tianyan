@@ -24,7 +24,6 @@ use tianyan::observability::execution_log::ExecutionLog;
 use tianyan::observability::usage_log::UsageLog;
 use tianyan::observability::usage_stats::UsageStats;
 use tianyan::session::SessionManager;
-use tianyan::skills::{SkillExecutor, SkillRefresher};
 use tianyan::vfs::VirtualFileSystemImpl;
 use tianyan::{Result as TianyanResult, TianyanError};
 
@@ -81,10 +80,8 @@ impl AgentBuilderFactory {
         config: &TianyanConfig,
         model_services: ModelServices,
         vfs: Arc<VirtualFileSystemImpl>,
-        skill_executor: Arc<SkillExecutor>,
         usage_stats: Arc<UsageStats>,
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
-        skill_refresher: Arc<dyn SkillRefresher>,
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
         sqlite_db: Option<Arc<Database>>,
         notification_sink: tianyan::notification::SharedNotificationSink,
@@ -132,7 +129,6 @@ impl AgentBuilderFactory {
             .with_role_router(role_router)
             .with_vfs(vfs.clone())
             .with_retriever(Arc::new(retriever))
-            .with_skill_executor(skill_executor)
             .with_knowledge_ingestor(Arc::new(knowledge_ingestor))
             .with_security_config(config.security.clone())
             .with_web_config(config.web.clone())
@@ -152,7 +148,7 @@ impl AgentBuilderFactory {
             Some(sm) => agent.with_snapshot_manager(sm),
             None => agent,
         };
-        let mut builder = agent.with_skill_refresher(skill_refresher);
+        let mut builder = agent;
         if let Some(trace) = trace_collector {
             // G6：结构化 Trace（与 AppState 共享同一收集器，单一写入路径）
             builder = builder.with_trace_collector(trace);
@@ -227,10 +223,8 @@ impl AgentBuilderFactory {
         config: &TianyanConfig,
         model_services: ModelServices,
         vfs: Arc<VirtualFileSystemImpl>,
-        skill_executor: Arc<SkillExecutor>,
         usage_stats: Arc<UsageStats>,
         snapshot_manager: Option<Arc<tianyan::snapshot::SnapshotManager>>,
-        skill_refresher: Arc<dyn SkillRefresher>,
         dynamic_tools: Vec<Arc<dyn DynamicToolExecutor>>,
         sqlite_db: Option<Arc<Database>>,
         notification_sink: tianyan::notification::SharedNotificationSink,
@@ -250,10 +244,8 @@ impl AgentBuilderFactory {
             config,
             model_services,
             vfs,
-            skill_executor,
             usage_stats,
             snapshot_manager,
-            skill_refresher,
             dynamic_tools,
             sqlite_db,
             notification_sink,

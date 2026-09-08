@@ -8,12 +8,10 @@ import ListDetailPanel from '@/components/ui/ListDetailPanel';
 import { formatDateTime, formatTimestamp } from '@/lib/utils';
 
 /**
- * 技能面板：只展示方法论技能（custom 类：GEPA 学习技能 + planning）。
+ * 技能面板：展示 VFS 方法论文档技能（planning 预置 + GEPA 学习技能）。
  *
- * 内置桥接技能（file/system/network 类）本质是工具的技能化封装，能力已由
- * 工具面板（/tools）与对话中的工具卡片覆盖，不再在此混排。
- * 学习方法论技能为只读展示：完整内容 + 创建/更新时间，无"执行"语义
- * （学习技能无 handler，执行仅返回指南文本——查看更符合其性质）。
+ * 技能 = 方法论文档（无执行语义），只读查看：完整内容 + 创建/更新时间。
+ * 文件/命令/网络等能力由工具面板（/tools）与对话中的工具卡片覆盖。
  */
 export default function SkillsPanel() {
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);

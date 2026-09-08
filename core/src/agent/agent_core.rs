@@ -29,7 +29,6 @@ use crate::executor::approval::ApprovalWorkflow;
 use crate::observability::AgentMetrics;
 use crate::observability::TokenRecord;
 use crate::session::{Session, SessionManager};
-use crate::skills::SkillRefresher;
 use crate::snapshot::SnapshotManager;
 
 /// compression_marker 之后至少积累多少条消息才触发压缩。
@@ -77,8 +76,6 @@ pub struct Agent {
     /// 全局默认工作目录（[agent] working_directory 配置；会话级绑定缺省时
     /// 快照捕获以此为根）。
     pub(crate) default_working_directory: Option<PathBuf>,
-    /// 技能注册表刷新钩子：压缩（会话转换点）时增量注册 VFS 学习技能。
-    pub(crate) skill_refresher: Option<Arc<dyn SkillRefresher>>,
     /// 会话级轮次锁（ADR-013 串行化）：单会话同一时刻只有一个活动轮；
     /// 唤醒轮与用户轮互斥——wake 排队等待当前轮结束，绝不抢占。
     turn_locks: Arc<TokioMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
@@ -111,7 +108,6 @@ impl Agent {
         session_manager: Arc<dyn SessionManager>,
         snapshot_manager: Option<Arc<SnapshotManager>>,
         default_working_directory: Option<PathBuf>,
-        skill_refresher: Option<Arc<dyn SkillRefresher>>,
     ) -> Self {
         // 从 AgentLoop 的 ToolRegistry 提取共享句柄（同一 Arc，非复制状态）：
         // 协调器对后台任务/审批的直接入口，避免逐调用三层穿透。
@@ -129,7 +125,6 @@ impl Agent {
             session_manager,
             snapshot_manager,
             default_working_directory,
-            skill_refresher,
             turn_locks: Arc::new(TokioMutex::new(HashMap::new())),
             background_tasks,
             command_tasks,
@@ -522,9 +517,8 @@ impl Agent {
     /// 判断是否需要压缩，如果需要则生成摘要 StructuredMessage 并持久化。
     ///
     /// 压缩成功后执行会话转换点刷新（自动/手动压缩共用）：
-    /// 1. 清空 injectable_context 缓存 —— 下一轮 `assemble_context` 重新加载，
-    ///    learned rules / memories 最新化（GEPA 经验对会话后续阶段可见）；
-    /// 2. 触发 [`SkillRefresher`] —— VFS 新进化技能增量注册，call_skill 可用。
+    /// 清空 injectable_context 缓存 —— 下一轮 `assemble_context` 重新加载，
+    /// learned rules / memories 最新化（GEPA 经验对会话后续阶段可见）。
     ///
     /// 压缩已重建 system 前缀（摘要消息插入），此刻刷新零额外缓存成本，
     /// 是会话内唯一的免费刷新点。
@@ -588,13 +582,8 @@ impl Agent {
                 .add_structured_message(summary_sm.clone());
         }
 
-        // 会话转换点刷新（learned rules 缓存 + 技能注册表）
+        // 会话转换点刷新（learned rules 缓存）
         self.invalidate_injectable_snapshot(state, session_id).await;
-        if let Some(refresher) = &self.skill_refresher {
-            if let Err(e) = refresher.refresh_skills().await {
-                tracing::warn!(error = %e, "压缩后技能刷新失败（不影响会话）");
-            }
-        }
 
         Some(summary_sm)
     }
@@ -1116,21 +1105,15 @@ mod tests {
     }
 
     fn make_agent(mock: MockChatService) -> Agent {
-        make_agent_full(
-            mock,
-            MockChatService::new(),
-            CompressionConfig::default(),
-            None,
-        )
+        make_agent_full(mock, MockChatService::new(), CompressionConfig::default())
     }
 
-    /// 构造带可配置压缩窗口与技能刷新钩子的 Agent（压缩测试专用）。
+    /// 构造带可配置压缩窗口的 Agent（压缩测试专用）。
     #[allow(clippy::too_many_arguments)]
     fn make_agent_full(
         mock: MockChatService,
         compression_mock: MockChatService,
         compression_config: CompressionConfig,
-        refresher: Option<Arc<dyn SkillRefresher>>,
     ) -> Agent {
         let vfs = Arc::new(MockVfs::new());
         let retriever = Arc::new(DualLayerRetriever::new(
@@ -1164,25 +1147,7 @@ mod tests {
             Arc::new(MockSessionManager),
             None,
             None,
-            refresher,
         )
-    }
-
-    /// 记录调用次数的技能刷新钩子 mock。
-    struct MockRefresher {
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl SkillRefresher for MockRefresher {
-        async fn refresh_skills(&self) -> Result<usize> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(0)
-        }
-    }
-
-    fn refresher_calls(refresher: &MockRefresher) -> usize {
-        refresher.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[tokio::test]
@@ -1315,17 +1280,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compression_refreshes_injectable_and_skills() {
+    async fn test_compression_refreshes_injectable() {
         // 回归保护：压缩（会话转换点）成功后必须清空 injectable_context
-        // （下一轮 prepare_context 重新加载，learned rules 最新化）并触发
-        // SkillRefresher（VFS 新进化技能增量注册）。
+        // （下一轮 prepare_context 重新加载，learned rules 最新化）。
         let mut compress_mock = MockChatService::new();
         compress_mock
             .expect_chat_completion()
             .returning(|_| Ok(response_with(Message::assistant("这是压缩摘要"))));
-        let refresher = Arc::new(MockRefresher {
-            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        });
         let agent = make_agent_full(
             MockChatService::new(),
             compress_mock,
@@ -1334,7 +1295,6 @@ mod tests {
                 compression_threshold: 1.0,
                 ..CompressionConfig::default()
             },
-            Some(refresher.clone()),
         );
 
         let state = agent.load_and_build_state("session-1").await.unwrap();
@@ -1365,21 +1325,16 @@ mod tests {
             state.read().await.injectable_context.soul.is_empty(),
             "压缩后注入上下文缓存应清空（下一轮重新加载 learned rules）"
         );
-        assert_eq!(refresher_calls(&refresher), 1, "压缩后应触发技能注册表刷新");
     }
 
     #[tokio::test]
     async fn test_compress_skipped_without_enough_messages() {
         // 回归保护：消息不足（< MIN_MESSAGES_BEFORE_COMPRESSION）时不压缩，
-        // 不得清空注入上下文缓存、不得触发技能刷新。
-        let refresher = Arc::new(MockRefresher {
-            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        });
+        // 不得清空注入上下文缓存。
         let agent = make_agent_full(
             MockChatService::new(),
             MockChatService::new(),
             CompressionConfig::default(),
-            Some(refresher.clone()),
         );
 
         let state = agent.load_and_build_state("session-1").await.unwrap();
@@ -1405,7 +1360,6 @@ mod tests {
             !state.read().await.injectable_context.soul.is_empty(),
             "未压缩不应清空注入上下文缓存"
         );
-        assert_eq!(refresher_calls(&refresher), 0, "未压缩不应触发技能刷新");
     }
 
     // ── ADR-013：唤醒轮（process_wake） ─────────────────────────

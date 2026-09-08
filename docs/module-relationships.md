@@ -358,7 +358,7 @@ TaskScheduler 触发
 | `SqliteBackend` | `core/src/vfs/backend/sqlite.rs` | SQLite 存储后端（具体类型） | `vfs/vfs_impl.rs` |
 | `VectorStorage` | `core/src/vfs/vector/traits.rs` | `LanceDbVectorStore`（`vfs/vector/lancedb/`） | `vfs/vfs_impl.rs`, `context/retrieval/` |
 | `SessionManager` | `core/src/session/manager.rs` | `PersistentSessionManager`（基于 `SessionStore`，ADR-018） | `server/state.rs`, `agent/coordinator.rs` |
-| `SkillExecutor` | `core/src/skills/executor.rs` | `SkillExecutor` | `agent/tool_registry/`（通过 call_skill 工具桥接） |
+| `SkillManager` | `core/src/skills/manager.rs` | `SkillManager` | `server/state.rs`, `server/api/skills/`（VFS 技能发现/读取） |
 
 > **注意**：`ModelServices` 不是 trait，是 `core/src/model/services.rs` 中的 struct，聚合 `Arc<dyn ChatService>` + `Arc<dyn EmbeddingService>` + `Arc<dyn VlmService>`。
 
@@ -450,9 +450,9 @@ SSE 事件（`server/src/api/chat/types.rs`，逐行 `data:` JSON），完整字
 
 ### 决策 3：组件工具化
 
-`agent/tool_registry/`（目录模块）注册内置工具（当前 25 个，完整清单见自动生成的 [`tool-catalog.md`](./tool-catalog.md)，freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁），其中 `call_skill` 桥接到 `skills/executor.rs`。工具执行器按域拆分为 8 个文件（`file_ops.rs` / `code_ops.rs` / `knowledge_ops.rs` / `agent_ops.rs` / `fs_ops.rs` / `lsp_ops.rs` / `symbol_ops.rs` / `test_ops.rs`），公开 API 与 dispatch 不变。工具执行管线为可插拔瀑布（`pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，A1/A4 吸收），内置可观测性监听器（`observability.rs`）承担统计/Trace/GEPA 历史/规则学习。
+`agent/tool_registry/`（目录模块）注册内置工具（当前 30 个，完整清单见自动生成的 [`tool-catalog.md`](./tool-catalog.md)，freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁），其中 `call_skill` 读 VFS 技能文档（`skills/manager.rs`，方法论文档无执行语义）。工具执行器按域拆分为 8 个文件（`file_ops.rs` / `code_ops.rs` / `knowledge_ops.rs` / `agent_ops.rs` / `fs_ops.rs` / `lsp_ops.rs` / `symbol_ops.rs` / `test_ops.rs`），公开 API 与 dispatch 不变。工具执行管线为可插拔瀑布（`pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，A1/A4 吸收），内置可观测性监听器（`observability.rs`）承担统计/Trace/GEPA 历史/规则学习。
 
-**模块影响**：`agent/tool_registry/` 依赖 `skills::SkillExecutor` 实现 call_skill 工具，形成 agent → skills 单向依赖。
+**模块影响**：`agent/tool_registry/` 依赖 `skills::SkillManager` 实现 call_skill 工具（VFS 读取），形成 agent → skills 单向依赖。
 
 ### 决策 4：前缀匹配缓存顺序
 

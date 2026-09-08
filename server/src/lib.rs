@@ -231,9 +231,39 @@ async fn bootstrap_app_vfs(
         tracing::info!("已创建默认用户档案： tianyan://user");
     }
 
+    // 预置 planning 技能（VFS 方法论文档，与 GEPA 学习技能同构）：
+    // 用户说"计划一下/做个方案/先别动手"时，模型调 call_skill("planning")，
+    // 读到行为指南后按"只读研究 → 结构化计划 → 询问是否执行"行动。
+    let planning_uri = TianyanUri::new(ContextNamespace::Skill, vec!["planning".to_string()]);
+    if !vfs
+        .has_content(&planning_uri, ContentLevel::Detail)
+        .await
+        .unwrap_or(false)
+    {
+        vfs.create_directory(&planning_uri).await?;
+        vfs.write(&planning_uri, ContentLevel::Detail, PLANNING_SKILL_CONTENT)
+            .await?;
+        vfs.write(
+            &planning_uri,
+            ContentLevel::Abstract,
+            "计划阶段软约束：只读研究 + 结构化计划 + 结束询问",
+        )
+        .await?;
+        tracing::info!("已预置 planning 技能： tianyan://skill/planning");
+    }
+
     tracing::info!("VFS 目录结构初始化完成");
     Ok(())
 }
+
+/// planning 技能内容（预置 VFS 方法论文档；原 PlanningHandler 静态指南）。
+const PLANNING_SKILL_CONTENT: &str = "\
+# 计划阶段
+
+你已进入计划阶段（用户要求先规划再执行）。遵守以下约束：
+
+1. **只读研究**：只使用只读工具收集信息（read_file / grep / search_vfs /\n   vfs_read / vfs_list / glob / list_dir / symbol_outline / lsp / web_search / web_fetch /\n   discover_tests）。不得调用 write_file / apply_edit / apply_patch / execute_command /\n   run_tests / verify_build / knowledge_ingest / delegate_to_agent（后台任务）。
+2. **输出结构化计划**：按以下格式输出——\n   - 目标：一句话明确要完成什么\n   - 步骤：编号列表，每步注明涉及的文件/命令/风险\n   - 风险与验证：潜在副作用 + 每步完成后的验证方式（测试/检查命令，仅描述不执行）\n3. **结束询问**：计划输出完毕后，询问用户是否开始执行——用户确认前不执行任何写操作。\n4. 用户确认执行后，恢复正常（执行）行为。";
 
 /// 允许的 CORS 来源（编译期常量，避免运行时 parse panic）。
 const ALLOWED_ORIGINS: [HeaderValue; 6] = [

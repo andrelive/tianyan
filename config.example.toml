@@ -142,10 +142,6 @@ prompt_commands = []
 confirm_commands = true
 max_file_size = 104857600
 audit_logging = true
-# 允许技能执行危险操作（system_command / file_delete）。默认 false：
-# 技能路径无审批流，危险技能须显式启用；工具路径不受影响（走审批/询问）。
-# blocked_commands 同时约束技能 system_command（空 = 默认列表）。
-allow_dangerous_skills = false
 
 # ==================== 记忆配置 ====================
 [memory]

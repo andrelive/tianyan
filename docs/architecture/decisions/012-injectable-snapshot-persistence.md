@@ -59,3 +59,9 @@ system 前缀（soul + learned rules + memories，即 `InjectableContext`）是 
 - `core/src/agent/agent_core.rs` — 快照恢复/固化/压缩点清空
 - `server/src/state.rs` — SkillSync；`server/src/api/chat/services.rs` — 会话边界触发
 - `server/src/api/sessions/` — 手动压缩端点
+
+## 后续演进
+
+- **技能注册表刷新机制移除**：技能回归 VFS 方法论文档后，`SkillRefresher`/`SkillSync`/
+  `refresh_registry` 全部删除——`call_skill` 与技能 API 实时读 VFS，无需注册表与刷新钩子；
+  压缩点刷新只保留 injectable_context 清空（learned rules/memories 重新检索）。

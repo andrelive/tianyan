@@ -20,9 +20,6 @@ use crate::model::types::{
 };
 use crate::model::MockChatService;
 use crate::observability::AgentMetrics;
-use crate::skills::{
-    ExecutionContext, Skill, SkillExecutionResult, SkillExecutor, SkillHandler, SkillRegistry,
-};
 use crate::vfs::VirtualFileSystem;
 
 use super::*;
@@ -385,17 +382,6 @@ async fn test_subagent_command_approved_via_shared_fingerprint() {
 // ── call_skill ───────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_call_skill_not_configured() {
-    let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_call_skill(r#"{"skill_id":"echo"}"#).await;
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("SkillExecutor not configured"));
-}
-
-#[tokio::test]
 async fn test_call_skill_rejects_missing_arguments() {
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry.execute_call_skill(r#"{}"#).await;
@@ -404,41 +390,54 @@ async fn test_call_skill_rejects_missing_arguments() {
 }
 
 #[tokio::test]
-async fn test_call_skill_success_with_mock_handler() {
-    let mut skill_registry = SkillRegistry::new();
-    skill_registry.register_with_handler(
-        Skill::new("echo", "Echo", "Echo a message"),
-        Arc::new(EchoSkillHandler),
-    );
-    let skill_executor = Arc::new(SkillExecutor::with_defaults(Arc::new(
-        tokio::sync::RwLock::new(skill_registry),
-    )));
-    let registry = ToolRegistry::new(default_strict_policy()).with_skill_executor(skill_executor);
-
-    let result = registry
-        .execute_call_skill(r#"{"skill_id":"echo","parameters":{}}"#)
-        .await
-        .unwrap();
-    assert_eq!(result["success"].as_bool(), Some(true));
-    assert_eq!(result["output"].as_str().unwrap(), "echo output");
+async fn test_call_skill_not_configured() {
+    let registry = ToolRegistry::new(default_strict_policy());
+    let result = registry.execute_call_skill(r#"{"skill_id":"echo"}"#).await;
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("VFS not configured"));
 }
 
-/// 技能执行器的 Mock 处理器：返回固定输出。
-struct EchoSkillHandler;
+#[tokio::test]
+async fn test_call_skill_reads_vfs_content() {
+    // call_skill = 读 VFS 技能文档（L0 摘要 + L2 详情），无执行语义。
+    let vfs = Arc::new(crate::test_utils::MockVfs::new());
+    let skill_uri = crate::common::types::TianyanUri::new(
+        crate::common::types::ContextNamespace::Skill,
+        vec!["planning".to_string()],
+    );
+    vfs.set_content(
+        &skill_uri,
+        crate::common::types::ContentLevel::Abstract,
+        "计划阶段软约束",
+    );
+    vfs.set_content(
+        &skill_uri,
+        crate::common::types::ContentLevel::Detail,
+        "# 计划阶段\n\n只读研究，输出结构化计划",
+    );
+    let registry = ToolRegistry::new(default_strict_policy()).with_vfs(vfs);
 
-#[async_trait]
-impl SkillHandler for EchoSkillHandler {
-    async fn execute(
-        &self,
-        _params: HashMap<String, Value>,
-        _context: ExecutionContext,
-    ) -> crate::common::error::Result<SkillExecutionResult> {
-        Ok(SkillExecutionResult::success("echo output"))
-    }
+    let result = registry
+        .execute_call_skill(r#"{"skill_id":"planning"}"#)
+        .await
+        .unwrap();
+    assert_eq!(result["skill_id"].as_str().unwrap(), "planning");
+    assert!(result["abstract"].as_str().unwrap().contains("计划阶段"));
+    assert!(result["detail"].as_str().unwrap().contains("只读研究"));
+}
 
-    fn skill_id(&self) -> &str {
-        "echo"
-    }
+#[tokio::test]
+async fn test_call_skill_missing_skill_errors() {
+    let vfs = Arc::new(crate::test_utils::MockVfs::new());
+    let registry = ToolRegistry::new(default_strict_policy()).with_vfs(vfs);
+    let result = registry
+        .execute_call_skill(r#"{"skill_id":"not_exist"}"#)
+        .await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("不存在"));
 }
 
 // ── ask_user ─────────────────────────────────────────────────────────────

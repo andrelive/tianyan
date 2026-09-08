@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed（技能系统回归 VFS 方法论文档，2026-09-09）
+- **技能 = VFS 方法论文档，删除全部执行型基础设施**：6 个桥接技能（file_read/file_write/file_delete/file_list/system_command/http_request）与 `SkillExecutor`/`SkillHandler`/`SkillRegistry`/`ExecutorConfig`/`SkillExecutionRequest`/`SkillExecutionResult` 全部删除——文件/命令/网络能力由内置工具直接覆盖，技能只承载"怎么做"的方法论
+- **`call_skill` 改为读 VFS**：按 ID 读 `tianyan://skill/{id}`（L0 摘要 + L2 详情）返回，由 LLM 参考后自行用工具执行；不再有 handler/执行语义
+- **planning 预置进 VFS**：bootstrap 时写入 `skill/planning/`（原 PlanningHandler 静态指南），与 GEPA 学习技能同构，可被进化引擎完善/复审
+- **注册表与刷新机制移除**：`SkillRefresher`/`SkillSync`/`refresh_registry`/会话边界技能刷新全部删除（VFS 实时读，无需注册表）；压缩点刷新只保留 injectable_context 清空
+- **配置清理**：`security.skill_*` 6 个字段 + `allow_dangerous_skills` 删除（技能只剩 Safe 级文档，开关失去意义）
+- **技能 API 改读 VFS**：`/api/v1/skills` 列表/详情/执行统一走 `SkillManager`（VFS 发现 + 读取）；"执行" = 返回技能文档
+
 ### Fixed（0.3.5 构建：唤醒轮可见性与事件通道重构，2026-09-08）
 - **唤醒轮输出前端不可见**（切走再切回才看到）：后台命令完成 → 通知落库 → 唤醒轮跑 loop → 输出经 `chat_stream` 事件推送——但前端 `routeChatStreamEvent` 依赖**活跃流归约器注册表**（发消息时注册、流结束即注销），主循环空闲时事件到达无归约器可路由 → **静默丢弃**；且 `useUnifiedEvents` 挂在 `ChatPanel`/`AgentTasksPanel` 上，最后一个消费者卸载即 `stopUnifiedEvents()` **关闭 EventSource**——切到设置等面板期间订阅连接断开，切回才由 onopen 重放订阅（看到的其实是重连快照而非实时事件）
 - **修复 1：EventSource 应用级常驻**——连接生命周期与组件卸载解耦（`startUnifiedEventsOnce` 模块级启动、进程存活期间不关闭），切到任何面板订阅连接保持，断线自动重连 + onopen 重放订阅不变

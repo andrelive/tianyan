@@ -50,3 +50,11 @@
 
 - `core/src/agent/tool_registry.rs` — 工具注册 + 并行执行
 - `core/src/skills/executor.rs` — `SkillExecutor`（call_skill 桥接目标）
+
+## 后续演进
+
+- **技能执行语义移除**：技能回归纯方法论文档（VFS `skill/` 命名空间）。
+  6 个桥接技能（file_read/file_write/file_delete/file_list/system_command/http_request）
+  与 `SkillExecutor`/`SkillHandler`/`SkillRegistry` 全部删除——能力由内置工具直接覆盖；
+  `call_skill` 改为读 VFS 技能文档（L0 摘要 + L2 详情）返回，由 LLM 参考后自行执行；
+  planning 预置进 VFS（bootstrap 写入），与 GEPA 学习技能同构。

@@ -15,7 +15,7 @@ Tianyan（天演）是一个本地智能代理系统，旨在通过自然语言�
 - **OpenAI API 标准**：统一支持所有兼容 OpenAI API 的模型服务
 - **本地优先**：数据本地存储，确保隐私和离线能力
 - **GUI 桌面应用**：基于 Tauri + React + TypeScript + Axum 的跨平台桌面应用
-- **可扩展技能**：内置文件操作、系统命令等技能
+- **可扩展技能**：技能 = VFS 方法论文档（planning 预置 + GEPA 自动进化）
 - **记忆自迭代**：自动从交互中学习和改进
 - **对话图片输入**：聊天中粘贴/拖拽/选择图片（多模态消息链路，需 vision 模型支持）
 - **浏览器感知**：通过 MCP 接入 Playwright 等浏览器服务器，Agent 可导航/点击/截图（截图自动落盘）
@@ -48,7 +48,7 @@ tianyan/
 │       ├── roles/          # 子智能体角色基础类型（ADR-016）
 │       ├── scheduler/      # 定时任务调度（摘要/进化/GC/提醒/统计落盘）
 │       ├── session/        # 会话管理（SQLite 权威存储，ADR-018）
-│       ├── skills/         # 技能定义 + 执行 + GEPA 进化引擎
+│       ├── skills/         # 技能 = VFS 方法论文档（发现/读取 + GEPA 进化）
 │       ├── snapshot/       # 工作区快照（回退/重做；gzip + GC）
 │       ├── todos/          # 会话待办清单
 │       ├── vfs/            # 虚拟文件系统（L0/L1/L2 + LanceDB 向量，RRF 融合检索）
@@ -71,7 +71,7 @@ tianyan/
 │           ├── chat/       # 对话接口（SSE 流式、停止、追问回答）
 │           ├── sessions/   # 会话管理（消息回退/重做、标题编辑、压缩）
 │           ├── knowledge/  # 知识导入、检索、条目浏览
-│           ├── skills/     # 技能列表与执行
+│           ├── skills/     # 技能列表与详情（VFS 方法论文档）
 │           ├── config/     # 配置管理（soul/MCP/Provider 发现/数据迁移）
 │           ├── clipboard/  # 剪贴板桥接（capture/respond/pending/outbox）
 │           ├── events/     # 事件 webhook 接收
@@ -96,7 +96,7 @@ tianyan/
 │           ├── sidebar/      # 侧边栏 + 会话管理
 │           ├── settings/     # 设置面板（14 个 Tab）
 │           ├── knowledge/    # 知识管理
-│           ├── skills/       # 技能浏览 + 执行
+│           ├── skills/       # 技能浏览 + 详情
 │           └── wizard/       # 初次配置向导
 ├── tauri/                  # Tauri 桌面包装
 │   ├── Cargo.toml          # 库名: tianyan-tauri
@@ -293,7 +293,7 @@ API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
 | `/api/v1/sessions/{id}/messages/redo` | POST | 重做指定消息 |
 | `/api/v1/sessions/{id}/title` | POST | 更新会话标题 |
 | `/api/v1/sessions/{id}/workspace` | PUT | 更新会话工作目录 |
-| `/api/v1/sessions/{id}/compress` | POST | 手动压缩会话（压缩点同步刷新 learned rules 与技能注册表） |
+| `/api/v1/sessions/{id}/compress` | POST | 手动压缩会话（压缩点同步刷新 learned rules） |
 | `/api/v1/knowledge/ingest` | POST | 文档导入（multipart） |
 | `/api/v1/knowledge/search` | GET | 知识搜索 |
 | `/api/v1/knowledge/search/suggestions` | GET | 搜索建议 |
@@ -317,7 +317,7 @@ API 端点（全部业务接口挂载于 `/api/v1` 前缀下）：
 | `/api/v1/skills` | GET | 技能列表 |
 | `/api/v1/skills/stats` | GET | 技能使用统计 |
 | `/api/v1/skills/{id}` | GET | 技能详情 |
-| `/api/v1/skills/{id}/execute` | POST | 执行技能（同步执行，响应即最终结果） |
+| `/api/v1/skills/{id}/execute` | POST | 读取技能文档（方法论文档，无执行语义） |
 | `/api/v1/tasks` | GET | 后台任务列表（delegate_to_agent background 任务） |
 | `/api/v1/tasks/stream` | GET | 后台任务流（兼容入口；推荐用 `GET /events`） |
 | `/api/v1/tasks/{id}/cancel` | POST | 取消后台任务（终态幂等；不存在 404） |
@@ -431,7 +431,7 @@ Tianyan 正在积极开发中。详见 [系统架构文档](./docs/system-archit
 - 后台任务管理（`task_status`/`task_cancel` 工具 + `GET /api/v1/tasks`，统一面板，ADR-026）
 - 剪贴板桥接（agent `clipboard_write` 工具 → 系统剪贴板；`/api/v1/clipboard/*` 四端点）
 - LLM-as-Judge 验证门控（命令输出语义质量评估，构建验证自动判定）
-- 7 个内置技能（6 执行型 + planning 软约束）+ GEPA 进化引擎自动学习（VFS 存储 → 注册 → 可发现/执行指引；会话边界刷新 + 压缩点刷新 + 前缀快照持久化）
+- 技能 = 方法论（planning 软约束 + GEPA 自动学习技能）；文件/命令/网络等能力由内置工具直接覆盖，不重复封装为技能
 - 上下文压缩（自动阈值触发 + 手动 API；压缩点 = 会话内唯一免费刷新点）
 - 定时任务调度（摘要生成、规则提炼/GEPA 进化、记忆提取、存储 GC、快照 GC、用量统计落盘）
 - 定时智能体任务（`schedule_task` 工具 + REST 管理，间隔制 + 宕机补跑，ADR-024）

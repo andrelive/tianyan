@@ -28,7 +28,6 @@ use crate::observability::usage_stats::UsageStats;
 use crate::observability::AgentMetrics;
 use crate::observability::RuleRecorder;
 use crate::session::SessionManager;
-use crate::skills::{SkillExecutor, SkillRefresher};
 use crate::snapshot::SnapshotManager;
 use crate::vfs::VirtualFileSystem;
 
@@ -42,7 +41,6 @@ pub struct AgentBuilder {
     model_service: Option<Arc<dyn ChatService>>,
     retriever: Option<Arc<DualLayerRetriever>>,
     vfs: Option<Arc<dyn VirtualFileSystem>>,
-    skill_executor: Option<Arc<SkillExecutor>>,
     session_manager: Option<Arc<dyn SessionManager>>,
     knowledge_ingestor: Option<Arc<KnowledgeIngestor>>,
     security_config: Option<SecurityConfig>,
@@ -54,8 +52,6 @@ pub struct AgentBuilder {
     /// 全局默认工作目录（[agent] working_directory 配置；会话级绑定缺省时
     /// 快照/工具操作以此为根）。
     default_working_directory: Option<PathBuf>,
-    /// 技能注册表刷新钩子（压缩会话转换点时增量注册 VFS 学习技能）。
-    skill_refresher: Option<Arc<dyn SkillRefresher>>,
     /// 后台任务 SQLite 持久化后端（ADR-013；None 时任务状态纯内存）。
     background_task_db: Option<Arc<crate::db::Database>>,
     /// 系统通知通道（后台任务完成 / 审批挂起的桌面通知；None 时静默）。
@@ -95,7 +91,6 @@ impl AgentBuilder {
             model_service: None,
             retriever: None,
             vfs: None,
-            skill_executor: None,
             session_manager: None,
             knowledge_ingestor: None,
             security_config: None,
@@ -103,7 +98,6 @@ impl AgentBuilder {
             web_config: None,
             snapshot_manager: None,
             default_working_directory: None,
-            skill_refresher: None,
             background_task_db: None,
             notification_sink: None,
             agent_roles: None,
@@ -149,12 +143,6 @@ impl AgentBuilder {
     /// 设置虚拟文件系统。
     pub fn with_vfs(mut self, vfs: Arc<dyn VirtualFileSystem>) -> Self {
         self.vfs = Some(vfs);
-        self
-    }
-
-    /// 设置技能执行器。
-    pub fn with_skill_executor(mut self, executor: Arc<SkillExecutor>) -> Self {
-        self.skill_executor = Some(executor);
         self
     }
 
@@ -205,12 +193,6 @@ impl AgentBuilder {
     /// 会话未绑定工作目录（或绑定目录不存在）时，快照捕获以此为根。
     pub fn with_default_working_directory(mut self, dir: Option<PathBuf>) -> Self {
         self.default_working_directory = dir;
-        self
-    }
-
-    /// 设置技能注册表刷新钩子（压缩会话转换点时增量注册 VFS 学习技能）。
-    pub fn with_skill_refresher(mut self, refresher: Arc<dyn SkillRefresher>) -> Self {
-        self.skill_refresher = Some(refresher);
         self
     }
 
@@ -448,9 +430,6 @@ impl AgentBuilder {
         if let Some(ref stats) = self.usage_stats {
             tool_registry = tool_registry.with_usage_stats(stats.clone());
         }
-        if let Some(ref executor) = self.skill_executor {
-            tool_registry = tool_registry.with_skill_executor(executor.clone());
-        }
         if let Some(ref ingestor) = self.knowledge_ingestor {
             tool_registry = tool_registry.with_knowledge_ingestor(ingestor.clone());
         }
@@ -572,7 +551,6 @@ impl AgentBuilder {
             session_manager,
             self.snapshot_manager,
             self.default_working_directory,
-            self.skill_refresher,
         ))
     }
 }

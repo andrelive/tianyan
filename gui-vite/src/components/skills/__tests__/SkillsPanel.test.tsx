@@ -37,7 +37,7 @@ const METHODOLOGY_SKILLS: Skill[] = [
   },
 ];
 
-/** 内置桥接技能（不应出现在面板）。 */
+/** 非方法论技能（不应出现在面板；后端现统一返回 custom，此数据模拟历史/异常分类）。 */
 const BRIDGE_SKILLS: Skill[] = [
   {
     id: 'file-read',

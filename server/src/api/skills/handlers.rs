@@ -19,7 +19,7 @@ pub async fn list_skills(
 ) -> Result<Json<ListSkillsResponse>, ApiError> {
     info!("列出所有技能");
 
-    let service = SkillService::new(state.skill_registry(), state.skill_executor(), state.vfs());
+    let service = SkillService::new(state.skill_manager(), state.vfs());
 
     service
         .list_skills()
@@ -82,7 +82,7 @@ pub async fn get_skill_detail(
 
     info!("获取技能详情: {}", skill_id);
 
-    let service = SkillService::new(state.skill_registry(), state.skill_executor(), state.vfs());
+    let service = SkillService::new(state.skill_manager(), state.vfs());
 
     service
         .get_skill_detail(&skill_id)
@@ -106,7 +106,7 @@ pub async fn execute_skill(
 
     info!("执行技能: {}", skill_id);
 
-    let service = SkillService::new(state.skill_registry(), state.skill_executor(), state.vfs());
+    let service = SkillService::new(state.skill_manager(), state.vfs());
 
     service
         .execute_skill(&skill_id, request)

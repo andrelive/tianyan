@@ -73,7 +73,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 1. **StructuredMessage 持久化**：AgentLoop 每产生一条消息，实时调 `SessionManager::add_structured_message()` 落盘，工具调用消息全部持久化；子代理按 `TurnPolicy.persist_no_fts` 走 `add_structured_message_no_fts()`（不索引 FTS，ADR-026——无"人"提供的信息不参与回忆检索）；消息不再广播（ADR-031：流式增量 + 完成事件到前端，快照兜底）。
 2. **压缩锚点**：`StructuredMessage.compression_marker` 标记压缩产生的摘要消息，加载会话时反向扫描到最近 marker。
-3. **组件工具化**：`ToolRegistry` 注册 25 个 OpenAI function calling 兼容工具（完整清单见自动生成的 [`tool-catalog.md`](architecture/tool-catalog.md)），`call_skill` 桥接到 `SkillExecutor`；工具执行走可插拔管线（pre-execute 监听器 / 单调守卫 / post-execute 监听器）。
+3. **组件工具化**：`ToolRegistry` 注册 30 个 OpenAI function calling 兼容工具（完整清单见自动生成的 [`tool-catalog.md`](architecture/tool-catalog.md)），`call_skill` 读 VFS 技能文档（方法论文档，无执行语义）；工具执行走可插拔管线（pre-execute 监听器 / 单调守卫 / post-execute 监听器）。
 
 ### 1.3 model 子模块
 
@@ -262,28 +262,25 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 
 ### 1.9 skills 子模块
 
-**职责**：管理 Agent 可调用的技能，包括技能定义、执行、注册、发现和学习（GEPA 进化引擎）。
+**职责**：技能 = VFS `skill/` 命名空间下的方法论文档（无执行语义）。
+提供发现（L0 摘要）、读取（L2 详情）与自动进化（GEPA 引擎）。
 
 **模块组织**：
-- `skills/definition.rs` + `skills/types.rs` — 技能定义、参数模式和注册表
-- `skills/executor.rs` — 技能执行器（参数验证 + 安全检查 + 执行监控）
-- `skills/manager.rs` — 技能管理器
-- `skills/handlers/` — 6 个内置技能处理文件（file_read, file_write, file_delete, file_list, system_command, http_request）
-- `skills/registry.rs` — 技能注册表工厂（`create_builtin_skills`, `register_builtin_skills`）
+- `skills/manager.rs` — 技能管理器（VFS 发现 `list_available_skills` + 读取 `read_skill`）
 - `skills/learning/` — GEPA 进化引擎（mod.rs 核心引擎、types.rs 类型定义、generator.rs 技能生成逻辑）
+- `skills/reviewer.rs` — 技能使用复审（基于会话证据打分，落 VFS `skill/_reviews/`）
 
 **核心类型**：
 
 | 类型 | 说明 |
 |------|------|
-| `Skill` | 技能定义（id、name、description、parameters、handler） |
-| `SkillRegistry` | 技能注册表，支持运行时动态注册/发现/执行 |
-| `SkillExecutor` | 技能执行器（参数验证 + 安全检查 + 执行监控） |
-| `SkillManager` | 技能管理器，`list_available_skills()` 读取所有技能的 abstract |
-| `SkillHandler` | 技能处理器 trait |
+| `SkillManager` | 技能管理器，`list_available_skills()` 读取所有技能的 abstract，`read_skill()` 读取 L2 详情 |
 | `SkillLearningEngine` | GEPA 进化引擎，从执行历史中自动提取可复用技能 |
 | `ExecutionHistory` | 执行历史记录，用于 GEPA 引擎 |
 | `GeneratedSkill` | GEPA 引擎生成的技能 |
+| `SkillReviewer` | 技能使用复审（会话证据 → 质量分） |
+
+**执行语义已移除**：技能没有 handler、没有执行器——文件/命令/网络等能力由 Agent 内置工具直接覆盖，`call_skill` 工具读 VFS 技能文档返回，由 LLM 参考后自行用工具执行。planning 为预置技能（bootstrap 写入 VFS），与 GEPA 学习技能同构。
 
 **GEPA 进化引擎**：
 - **G**enerate：分析执行历史中的成功模式
@@ -429,7 +426,7 @@ Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE �
 ### 3.3 关键组件
 
 **AppState** (`state.rs`)：
-- 持有 `Agent`、`Config`、`VFS`、`SessionManager`、`SkillRegistry`、`SkillExecutor`、`SummaryService`
+- 持有 `Agent`、`Config`、`VFS`、`SessionManager`、`SkillManager`、`SummaryService`
 - VFS 初始化分离：基础设施 → `VFS::initialize()`；应用内容（soul.md、learned 目录）→ `server/src/lib.rs::bootstrap_app_vfs()`
 
 **AgentBuilderFactory** (`agent_builder.rs`)：

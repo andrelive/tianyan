@@ -13,7 +13,7 @@ use crate::api::chat::types::{ChatRequest, ChatStreamEvent, SkillCallInfo, Strea
 use crate::api::shared::error::ApiError;
 use crate::api::shared::short_uuid;
 use crate::api::shared::types::{ChatMessage, MessageRole};
-use crate::state::{RoleSync, SkillSync};
+use crate::state::RoleSync;
 
 /// 把 API 层消息转换为 core 消息：携带图片时构造多模态消息。
 fn to_core_message(msg: &ChatMessage) -> CoreMessage {
@@ -29,8 +29,6 @@ fn to_core_message(msg: &ChatMessage) -> CoreMessage {
 pub struct ChatService {
     agent: Arc<dyn AgentCoordinator>,
     session_manager: Arc<dyn SessionManager>,
-    /// 技能注册表同步句柄：新会话创建时刷新已学习技能（会话边界刷新）。
-    skill_sync: Option<SkillSync>,
     /// 角色注册表同步句柄（ADR-016）：新会话创建时刷新学习角色。
     role_sync: Option<RoleSync>,
     /// 当前聊天模型上下文窗口（token），随流式 usage 事件下发供前端计算占用百分比。
@@ -43,7 +41,6 @@ impl ChatService {
         Self {
             agent,
             session_manager,
-            skill_sync: None,
             role_sync: None,
             context_window: tianyan::model::spec::ModelSpec::default().context_length as u64,
         }
@@ -55,27 +52,10 @@ impl ChatService {
         self
     }
 
-    /// 挂载技能注册表同步句柄（新会话创建时刷新已学习技能）。
-    pub fn with_skill_sync(mut self, sync: SkillSync) -> Self {
-        self.skill_sync = Some(sync);
-        self
-    }
-
     /// 挂载角色注册表同步句柄（ADR-016：新会话创建时刷新学习角色）。
     pub fn with_role_sync(mut self, sync: RoleSync) -> Self {
         self.role_sync = Some(sync);
         self
-    }
-
-    /// 会话边界刷新：新会话创建后把 VFS 中已学习技能增量注册进注册表。
-    ///
-    /// 幂等（仅注册新技能）；失败仅告警，不影响对话。
-    async fn refresh_learned_skills(&self) {
-        if let Some(sync) = &self.skill_sync {
-            if let Err(e) = sync.refresh().await {
-                tracing::warn!(error = %e, "新会话技能刷新失败（不影响对话）");
-            }
-        }
     }
 
     /// 会话边界刷新（ADR-016）：新会话创建后把 VFS 学习角色增量合并进注册表。
@@ -111,7 +91,6 @@ impl ChatService {
         )
         .await?;
         if is_new {
-            self.refresh_learned_skills().await;
             self.refresh_learned_roles().await;
         }
 

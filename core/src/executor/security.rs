@@ -2,9 +2,7 @@ use crate::common::error::TianyanError;
 use crate::config::{SafetyMode, SecurityConfig};
 use crate::executor::command::{extract_command_base, DEFAULT_COMMAND_TIMEOUT_SECS};
 
-/// 默认禁止命令——工具路径（[`SecurityPolicy`]）与技能路径（`ExecutorConfig`）
-/// 共享的单一默认源（空配置时的兜底）。与工具侧既有默认一致，技能侧
-/// 此前硬编码的更宽列表（python/curl 等）已收敛到本单一来源。
+/// 默认禁止命令——工具路径（[`SecurityPolicy`]）的单一默认源（空配置时的兜底）。
 pub const DEFAULT_BLOCKED_COMMANDS: &[&str] =
     &["rm", "del", "format", "rmdir", "rd", "shutdown", "taskkill"];
 

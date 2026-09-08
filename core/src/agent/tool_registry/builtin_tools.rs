@@ -120,7 +120,7 @@ fn def_vfs_list(name: &'static str) -> ToolDefinition {
 fn def_call_skill(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<CallSkillParams>(
         name,
-        "按 ID 调用已注册的技能并传参。",
+        "按 ID 读取 VFS 技能文档（方法论文档：L0 摘要 + L2 详情）。技能无执行语义——读到内容后参考方法论自行用基础工具执行。planning 为预置技能，GEPA 学习技能由进化引擎写入。",
     ))
 }
 

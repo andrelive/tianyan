@@ -25,7 +25,6 @@ use crate::observability::RuleRecorder;
 use crate::session::search::SessionRecall;
 
 use crate::skills::learning::ExecutionHistory;
-use crate::skills::SkillExecutor;
 use crate::vfs::VirtualFileSystem;
 
 mod agent_ops;
@@ -179,7 +178,6 @@ pub trait DynamicToolExecutor: Send + Sync {
 #[derive(Clone)]
 pub struct ToolRegistry {
     pub(crate) security_policy: SecurityPolicy,
-    pub(crate) skill_executor: Option<Arc<SkillExecutor>>,
     pub(crate) knowledge_ingestor: Option<Arc<KnowledgeIngestor>>,
     pub(crate) vfs: Option<Arc<dyn VirtualFileSystem>>,
     pub(crate) model_service: Option<Arc<dyn ChatService>>,
@@ -248,7 +246,6 @@ impl ToolRegistry {
     pub fn new(security_policy: SecurityPolicy) -> Self {
         let mut registry = Self {
             security_policy,
-            skill_executor: None,
             knowledge_ingestor: None,
             vfs: None,
             model_service: None,
@@ -288,12 +285,6 @@ impl ToolRegistry {
             .push(Arc::new(registry.observability.clone()));
         registry.register_builtin_tools();
         registry
-    }
-
-    /// 设置技能执行器。
-    pub fn with_skill_executor(mut self, executor: Arc<SkillExecutor>) -> Self {
-        self.skill_executor = Some(executor);
-        self
     }
 
     /// 设置知识导入器（knowledge_ingest 工具依赖）。
