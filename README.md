@@ -2,7 +2,7 @@
 
 一个基于大语言模型的本地智能代理系统。
 
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 概述
 
@@ -449,10 +449,7 @@ Tianyan 正在积极开发中。详见 [系统架构文档](./docs/system-archit
 
 ## 许可证
 
-本项目采用 **AGPL-3.0** 许可证 - 详见 [LICENSE](LICENSE) 文件。
-
-> 选择 AGPL-3.0 的原因：防止商业换皮闭源分发（含面向公众的在线服务）；
-> 个人 fork 自用或内部改造不触发任何开源义务，欢迎自由改造。
+本项目采用 **MIT** 许可证 - 详见 [LICENSE](LICENSE) 文件。
 
 ## 致谢
 
