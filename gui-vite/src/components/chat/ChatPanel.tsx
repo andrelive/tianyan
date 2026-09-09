@@ -53,6 +53,9 @@ export default function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [compressing, setCompressing] = useState(false);
   const [clarifySubmitting, setClarifySubmitting] = useState(false);
+  /** 是否跟随底部（聊天经典模式）：用户在底部时自动跟随新输出；
+      向上滚动超过阈值立即脱离跟随（不再被拉回），滚回底部恢复。 */
+  const [stickToBottom, setStickToBottom] = useState(true);
   /** 当前会话待审批操作（应用层授权卡片；wait_for_approval 模式挂起时出现） */
   const [pendingApproval, setPendingApproval] = useState<
     ApprovalStatusSnapshot['pending_approvals'][number] | null
@@ -130,19 +133,49 @@ export default function ChatPanel() {
     }
   };
 
-  // Auto-scroll：非流式（进入历史会话/轮完成）时直接定位到最新输出（不再停在顶部）；
-  // 流式中仅当用户近底部才跟随（避免向上回读时被强拉到底）。
-  useEffect(() => {
-    if (!scrollRef.current) return;
+  // 滚动监听：用户主动向上滚动（scrollTop 减小）立即脱离跟随——
+  // 即使只滚 1px 也不再被流式增量拉回（解决"来回跳动"）；
+  // 滚回底部（距底 < 150px）恢复跟随。
+  const prevScrollTopRef = useRef(0);
+  const handleScroll = useCallback(() => {
     const el = scrollRef.current;
-    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
-    const shouldScroll = streamStatus !== 'streaming' || isNearBottom;
-    if (shouldScroll) {
-      requestAnimationFrame(() => {
-        el.scrollTop = el.scrollHeight;
-      });
+    if (!el) return;
+    const prev = prevScrollTopRef.current;
+    prevScrollTopRef.current = el.scrollTop;
+    if (el.scrollTop < prev) {
+      // 用户向上滚动：立即脱离跟随（流式增量不再强拉）
+      setStickToBottom(false);
+      return;
     }
-  }, [messages, pendingClarification, streamStatus]);
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
+    setStickToBottom(nearBottom);
+  }, []);
+
+  // 滚动到底（多帧兜底）：rAF 在下一帧布局后执行；setTimeout 覆盖
+  // 异步内容加载（图片等）导致 scrollHeight 增长后停在中间的场景。
+  const scrollToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const doScroll = () => {
+      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    };
+    requestAnimationFrame(doScroll);
+    // 兜底：长会话/重内容（markdown、代码高亮、图片）渲染跨帧，
+    // 单次 rAF 时 scrollHeight 可能未达最终值——延迟再滚一次。
+    setTimeout(doScroll, 150);
+  }, []);
+
+  // 会话切换时重置跟随（切回预期看到最新内容）
+  useEffect(() => {
+    setStickToBottom(true);
+  }, [currentSessionId]);
+
+  // Auto-scroll：仅跟随状态时滚动（非流式打开/切换/完成 + 流式增量）。
+  // 用户向上回读（stickToBottom=false）时任何消息变化都不强拉。
+  useEffect(() => {
+    if (!stickToBottom) return;
+    scrollToBottom();
+  }, [messages, pendingClarification, streamStatus, stickToBottom, scrollToBottom]);
 
   // ─── Custom streaming via fetch + ReadableStream ─────────────────
 
@@ -176,6 +209,8 @@ export default function ChatPanel() {
 
       // 发起新轮：回撤已被新工作取代，清空撤销回退横幅（否则残留到输出底部）
       setLastRollbackMessageId(null);
+      // 用户发送新消息：恢复底部跟随（此前可能向上回读）
+      setStickToBottom(true);
 
       // ADR-031：乐观渲染——本地立即插入用户消息（带 user_message_id 定位
       // 键），服务端落库后经 UserMessageId 确认事件回显真实 id，前端比对
@@ -402,7 +437,11 @@ export default function ChatPanel() {
         </div>
 
         {/* Messages area */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="flex-1 overflow-y-auto px-4 py-4"
+        >
           {messages.length === 0 && streamStatus === 'idle' && (
             <div className="flex flex-col items-center justify-center h-full text-[var(--color-text-tertiary)] gap-3">
               <MessageSquare className="w-12 h-12 opacity-30" />
