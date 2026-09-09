@@ -269,29 +269,29 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
           };
         }
       }
-      // 按 role 定位最后一条同角色消息；找不到则追加
-      let target = -1;
-      for (let i = base.length - 1; i >= 0; i--) {
-        if (base[i].role === msg.role) {
-          target = i;
-          break;
+      // 独立完整消息（system 通知 / 唤醒轮输出 / 无占位的 assistant）：
+      // 按 id 查重——已存在则更新（幂等），否则**追加**。
+      // 不再按 role 合并：system 通知与唤醒轮输出是独立新消息，
+      // 按 role 定位合并会把多条通知/多条输出折叠成一条（历史可见、
+      // 实时流只剩一条的根因）。
+      if (msg.id) {
+        const existing = next.findIndex((m) => m.id === msg.id);
+        if (existing >= 0) {
+          next[existing] = {
+            ...next[existing],
+            ...msg,
+            id: msg.id,
+            tool_calls: next[existing].tool_calls ?? msg.tool_calls,
+            segments: msg.segments ?? next[existing].segments,
+          };
+          const isCurrent = key === resolveSessionKey(s);
+          return {
+            sessionMessages: { ...s.sessionMessages, [key]: next },
+            ...(isCurrent ? { messages: next } : {}),
+          };
         }
       }
-      if (target >= 0) {
-        // 合并：id/内容以服务端统一结构为准；本地累积的 tool_calls（含
-        // 工具结果）与 segments（时间线）保留——流式期间已完整
-        next[target] = {
-          ...base[target],
-          ...msg,
-          id: msg.id ?? base[target].id,
-          tool_calls: base[target].tool_calls ?? msg.tool_calls,
-          // 时间线以服务端权威为准（方案 B：历史/流式同构）——本地累积与
-          // 服务端 parts 顺序一致；老数据（无 segments）回退保留本地累积
-          segments: msg.segments ?? base[target].segments,
-        };
-      } else {
-        next.push(msg);
-      }
+      next.push(msg);
       const isCurrent = key === resolveSessionKey(s);
       return {
         sessionMessages: { ...s.sessionMessages, [key]: next },
