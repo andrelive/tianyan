@@ -223,6 +223,19 @@ impl Agent {
 
             match &loop_result {
                 Ok(AgentLoopResult::Answer { content, .. }) => {
+                    if content.is_empty() && attempt + 1 < WAKE_RETRY_LIMIT {
+                        // 无正文输出（空响应或仅思考碎片——reasoning-only 时
+                        // content 同样为空）：唤醒轮必须向用户输出汇总，
+                        // 重试整个唤醒轮（loop 内部已对空响应重试一次，
+                        // 此处是第二层：整个唤醒轮重试）。重试耗尽后
+                        // 最后一次仍落库正常结束（前端可见思考，不静默）。
+                        tracing::info!(
+                            session = %session_id,
+                            attempt,
+                            "唤醒轮无正文输出（空/仅思考），重试整个唤醒轮"
+                        );
+                        continue;
+                    }
                     if content.is_empty() {
                         // 空输出是重要事件（主 agent 静默无反馈的取证点）：
                         // info 级别可见，便于排查"任务完成但无反应"类问题。
@@ -1075,6 +1088,29 @@ mod tests {
         }
     }
 
+    /// 仅思考的流式完成 chunk（reasoning-only：有思考无正文——思考模型
+    /// "想完没说话"的真实形态，如唤醒轮输出 " 10 秒后见。"）。
+    fn stream_chunk_reasoning_only(reasoning: &str) -> crate::model::types::ChatCompletionChunk {
+        use crate::model::types::{ChunkChoice, DeltaContent};
+        crate::model::types::ChatCompletionChunk {
+            id: "chunk-r".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            choices: vec![ChunkChoice {
+                index: 0,
+                delta: DeltaContent {
+                    role: None,
+                    content: None,
+                    reasoning_content: Some(reasoning.to_string()),
+                    tool_calls: None,
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: Some(TokenUsage::default()),
+        }
+    }
+
     /// 流式 mock：固定 chunk 序列（每次调用重放）。
     fn stream_mock(chunks: Vec<crate::model::types::ChatCompletionChunk>) -> MockChatService {
         let mut mock = MockChatService::new();
@@ -1396,6 +1432,43 @@ mod tests {
         assert_eq!(
             state.conversations_processed, 1,
             "空输出重试后仍空应正常结束（计入成功）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_wake_reasoning_only_retries_whole_wake() {
+        // 回归保护：reasoning-only 输出（有思考无正文——思考模型"想完没
+        // 说话"，如 " 10 秒后见。"）在 loop 内部不算空响应（content 空但
+        // reasoning 非空），不会触发 loop 的空响应重试——此前直接按正常
+        // 结束落库，前端只看到思考没有正文（用户报告的"命令完成后只有
+        // 思考过程而没有正文输出"根因）。process_wake 层必须重试整个
+        // 唤醒轮；重试耗尽后最后一次仍落库正常结束（前端可见思考）。
+        // mock：前两次调用返回 reasoning-only（触发整轮重试），第三次
+        // 返回正常输出（重试恢复）。
+        let mut mock = MockChatService::new();
+        let call = std::sync::atomic::AtomicUsize::new(0);
+        mock.expect_chat_completion_stream().returning(move |_| {
+            let n = call.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            let chunk = if n < 2 {
+                stream_chunk_reasoning_only(" 10 秒后见。")
+            } else {
+                stream_chunk_finish("后台任务已完成，汇总如下")
+            };
+            tokio::spawn(async move {
+                tx.send(Ok(chunk)).await.ok();
+            });
+            Ok(rx)
+        });
+        let agent = make_agent(mock);
+
+        let rx = agent.process_wake("session-1").await;
+        drop(rx);
+
+        let state = agent.state.read().await;
+        assert_eq!(
+            state.conversations_processed, 1,
+            "reasoning-only 重试后恢复应计入成功"
         );
     }
 

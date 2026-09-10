@@ -257,9 +257,19 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
         };
       }
       // assistant 消息：替换无 id 的占位（保留流式累积的 content/segments，
-      // id 同步为服务端 id——回退定位键正确）
+      // id 同步为服务端 id——回退定位键正确）。
+      // 从末尾反向找：边界事件携带流结束时的**最后一条** assistant
+      // （多轮工具循环中中间轮占位无 id，但边界只发最后一条）——正向
+      // findIndex 会错误替换中间轮占位（中间轮正文被覆盖丢失 + 最后
+      // 一条内容重复）。ES2020 无 findLastIndex，手写反向循环。
       if (msg.role === 'assistant') {
-        const placeholder = next.findIndex((m) => m.role === 'assistant' && !m.id);
+        let placeholder = -1;
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].role === 'assistant' && !next[i].id) {
+            placeholder = i;
+            break;
+          }
+        }
         if (placeholder >= 0) {
           next[placeholder] = { ...next[placeholder], ...msg, id: msg.id };
           const isCurrent = key === resolveSessionKey(s);

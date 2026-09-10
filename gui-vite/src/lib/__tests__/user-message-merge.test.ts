@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useAppStore } from '@/lib/store';
+import { messageText } from '@/lib/types';
 import type { ChatMessage } from '@/lib/types';
 
 function userMsg(id: string, content: string): ChatMessage {
@@ -68,5 +69,73 @@ describe('用户消息边界事件（applyServerMessage，ADR-031）', () => {
 
     const msgs = useAppStore.getState().messages;
     expect(msgs.map((m) => m.id)).toEqual(['msg_1', 'msg_2', 'msg_3', null]);
+  });
+
+  it('多轮工具循环：assistant 边界事件应替换最后一条占位（findLastIndex），不覆盖中间轮', () => {
+    // 模拟多轮工具循环：第一轮占位（无 id，流式累积了正文+工具卡片）、
+    // 第二轮占位（无 id，流式累积了正文）。流结束只发最后一条 assistant
+    // 边界事件——必须替换**最后一条**占位，否则中间轮正文被覆盖丢失、
+    // 最后一条内容重复（用户报告的"输出两次 + tool 调用不见"根因）。
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      sessionMessages: {
+        'session-1': [
+          userMsg('msg_1', '启动任务'),
+          {
+            id: null,
+            role: 'assistant',
+            segments: [
+              { type: 'text', text: '第一轮正文' },
+              { type: 'tool', tool_call: { id: 'call_1', name: 'execute_command', arguments: '{}', presentation: 'terminal' } },
+            ],
+            tool_calls: [{ id: 'call_1', name: 'execute_command', arguments: '{}', presentation: 'terminal', result: 'ok' }],
+            timestamp: '',
+          },
+          {
+            id: null,
+            role: 'assistant',
+            segments: [{ type: 'text', text: '第二轮正文' }],
+            timestamp: '',
+          },
+        ],
+      },
+      messages: [
+        userMsg('msg_1', '启动任务'),
+        {
+          id: null,
+          role: 'assistant',
+          segments: [
+            { type: 'text', text: '第一轮正文' },
+            { type: 'tool', tool_call: { id: 'call_1', name: 'execute_command', arguments: '{}', presentation: 'terminal' } },
+          ],
+          tool_calls: [{ id: 'call_1', name: 'execute_command', arguments: '{}', presentation: 'terminal', result: 'ok' }],
+          timestamp: '',
+        },
+        {
+          id: null,
+          role: 'assistant',
+          segments: [{ type: 'text', text: '第二轮正文' }],
+          timestamp: '',
+        },
+      ],
+    });
+
+    // 流结束边界事件：最后一条 assistant 的完整结构（带服务端 id）
+    useAppStore.getState().applyServerMessage('session-1', {
+      id: 'msg_final',
+      role: 'assistant',
+      segments: [{ type: 'text', text: '第二轮正文' }],
+      timestamp: '',
+    });
+
+    const msgs = useAppStore.getState().messages;
+    expect(msgs).toHaveLength(3);
+    // 第一轮占位：保留流式累积内容（正文 + 工具卡片），id 仍为 null
+    expect(msgs[1].id).toBeNull();
+    expect(messageText(msgs[1])).toBe('第一轮正文');
+    expect(msgs[1].tool_calls).toHaveLength(1);
+    // 第二轮占位：被边界事件替换（id 同步为服务端 id）
+    expect(msgs[2].id).toBe('msg_final');
+    expect(messageText(msgs[2])).toBe('第二轮正文');
   });
 });
