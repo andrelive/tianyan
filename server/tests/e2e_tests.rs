@@ -342,11 +342,13 @@ async fn test_e2e_knowledge_delete_entry_endpoint() {
     server.shutdown();
 }
 
-/// ADR-028：统一事件推送——落库即广播，SSE 订阅者收到 message 事件。
+/// System 通知实时推送——落库后补发 chat_stream 边界事件。
 ///
-/// 链路：SessionManager wrapper 落库 → broadcast → /events SSE → 客户端。
-/// 验证：订阅 /events → 经 state.session_manager 落库一条消息 →
-/// SSE 流收到 {type: message, session_id, seq, message}。
+/// ADR-031 移除"落库即广播"（消息不再广播）；System 通知（后台任务/命令
+/// 完成、定时提醒）作为输入类消息的例外：落库后补发 chat_stream 事件
+/// （chunk_type=message），前端 applyServerMessage 按 id 查重追加。
+/// 验证：订阅 /events → 经 state.session_manager 落库一条 System 消息 →
+/// SSE 流收到 {type: chat_stream, chunk_type: message, session_id, message}。
 #[tokio::test]
 async fn test_e2e_unified_event_push_message() {
     let dir = tempdir().expect("创建临时目录失败");
@@ -384,7 +386,7 @@ async fn test_e2e_unified_event_push_message() {
         .await
         .expect("落库失败");
 
-    // 读取 SSE 流，等待 message 事件（超时 5s）；累积文本逐行解析
+    // 读取 SSE 流，等待 chat_stream 事件（超时 5s）；累积文本逐行解析
     // `data: {...}` 行，捕获完整事件体做结构断言。
     let mut sse_text = String::new();
     let mut parsed: Option<serde_json::Value> = None;
@@ -399,7 +401,7 @@ async fn test_e2e_unified_event_push_message() {
         for line in sse_text.lines() {
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                    if v["type"] == "message" {
+                    if v["type"] == "chat_stream" && v["chunk_type"] == "message" {
                         parsed = Some(v);
                         break;
                     }
@@ -407,41 +409,33 @@ async fn test_e2e_unified_event_push_message() {
             }
         }
     }
-    let ev = parsed.expect("SSE 应收到 message 事件（落库即广播）");
-
-    // 事件契约：{type, session_id, seq, message}
+    let ev = parsed.expect("SSE 应收到 chat_stream 事件（System 通知落库即推送）");
+    // 事件契约：{type: chat_stream, chunk_type: message, session_id, message}
+    assert_eq!(ev["type"], "chat_stream");
+    assert_eq!(ev["chunk_type"], "message");
     assert_eq!(ev["session_id"].as_str(), Some(session_id));
-    assert!(ev["seq"].is_i64() || ev["seq"].is_u64(), "seq 应为数字");
 
     // 关键：message 必须是 ChatMessage（API 展示格式）——StructuredMessage
     // （存储格式，parts 数组）会让前端渲染崩溃（content/segments 缺失）。
+    // 响应方向 content 为 None（正文在 segments 的 Text 段，单一事实源）。
     let msg = &ev["message"];
-    assert!(
-        msg["content"].is_string(),
-        "message 应为 ChatMessage 格式（含 content）：{msg}"
-    );
-    assert!(
-        msg["content"]
-            .as_str()
-            .unwrap_or("")
-            .contains("[后台命令完成]"),
-        "content 应为通知文本：{msg}"
-    );
-    assert!(
-        msg["role"].is_string() && msg["id"].is_string(),
-        "message 应含 role/id：{msg}"
-    );
+    assert_eq!(msg["role"], "system", "通知应为 system 角色：{msg}");
+    assert!(msg["id"].is_string(), "message 应含 id：{msg}");
     assert!(
         msg.get("parts").is_none(),
         "不应是 StructuredMessage 格式（含 parts 字段）：{msg}"
     );
+    let segments = msg["segments"].as_array().expect("segments 应为数组");
+    assert_eq!(segments[0]["type"], "text", "首段应为 Text：{msg}");
     assert!(
-        msg.get("segments")
-            .is_none_or(|s| s.is_array() || s.is_null()),
-        "segments 字段应为数组或 null：{msg}"
+        segments[0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("[后台命令完成]"),
+        "Text 段应为通知文本：{msg}"
     );
 
-    // 落库后 last_seq 正确（wrapper 广播的 seq 锚点）
+    // 落库后 last_seq 正确（通知已持久化）
     let last_seq = state
         .session_store()
         .last_seq(session_id)

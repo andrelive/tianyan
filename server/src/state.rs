@@ -377,9 +377,11 @@ impl AppState {
             });
         // ADR-028/031：会话管理器包装（消息不再广播——流式增量 + 完成事件
         // 到前端；任务状态/命令输出事件仍经统一通道）
-        let session_manager: Arc<dyn SessionManager> = Arc::new(
-            crate::event_push::BroadcastingSessionManager::new(session_manager),
-        );
+        let session_manager: Arc<dyn SessionManager> =
+            Arc::new(crate::event_push::BroadcastingSessionManager::new(
+                session_manager,
+                task_event_tx.clone(),
+            ));
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
