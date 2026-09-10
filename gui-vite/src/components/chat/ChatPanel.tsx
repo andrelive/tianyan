@@ -54,8 +54,17 @@ export default function ChatPanel() {
   const [compressing, setCompressing] = useState(false);
   const [clarifySubmitting, setClarifySubmitting] = useState(false);
   /** 是否跟随底部（聊天经典模式）：用户在底部时自动跟随新输出；
-      向上滚动超过阈值立即脱离跟随（不再被拉回），滚回底部恢复。 */
-  const [stickToBottom, setStickToBottom] = useState(true);
+      向上滚动超过阈值立即脱离跟随（不再被拉回），滚回底部恢复。
+      scroll 热路径用 ref 避免高频 setState（DSH atBottomRef 双轨模式）。 */
+  const stickToBottomRef = useRef(true);
+  /** 程序化滚动账本：每次写 scrollTop 同步记录，scroll 事件据此判定
+      "用户滚动"（|scrollTop - observedTop| > 0.5）——程序化滚动/浏览器
+      clamp 不改变跟随所有权（DSH observed-top ledger 模式）。 */
+  const observedTopRef = useRef(0);
+  /** 内容跟随签名：仅当内容真正变化（消息数/流状态/会话切换）时触发
+      follow——滚动阈值翻转（setState → effect → scrollToBottom → scroll）
+      的循环不再发生（DSH followSig 模式）。 */
+  const followSigRef = useRef('');
   /** 当前会话待审批操作（应用层授权卡片；wait_for_approval 模式挂起时出现） */
   const [pendingApproval, setPendingApproval] = useState<
     ApprovalStatusSnapshot['pending_approvals'][number] | null
@@ -133,49 +142,62 @@ export default function ChatPanel() {
     }
   };
 
-  // 滚动监听：用户主动向上滚动（scrollTop 减小）立即脱离跟随——
-  // 即使只滚 1px 也不再被流式增量拉回（解决"来回跳动"）；
-  // 滚回底部（距底 < 150px）恢复跟随。
-  const prevScrollTopRef = useRef(0);
-  const handleScroll = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const prev = prevScrollTopRef.current;
-    prevScrollTopRef.current = el.scrollTop;
-    if (el.scrollTop < prev) {
-      // 用户向上滚动：立即脱离跟随（流式增量不再强拉）
-      setStickToBottom(false);
-      return;
-    }
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
-    setStickToBottom(nearBottom);
-  }, []);
+  // ── 滚动跟随（DSH observed-top ledger + followSig 模式） ─────────
+  const FOLLOW_THRESHOLD = 24;
 
-  // 滚动到底（多帧兜底）：rAF 在下一帧布局后执行；setTimeout 覆盖
-  // 异步内容加载（图片等）导致 scrollHeight 增长后停在中间的场景。
+  /** 滚动到底：写 scrollTop 后同步记录账本（程序化滚动不改变跟随所有权）。 */
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const doScroll = () => {
-      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    };
-    requestAnimationFrame(doScroll);
-    // 兜底：长会话/重内容（markdown、代码高亮、图片）渲染跨帧，
-    // 单次 rAF 时 scrollHeight 可能未达最终值——延迟再滚一次。
-    setTimeout(doScroll, 150);
+    el.scrollTop = el.scrollHeight;
+    observedTopRef.current = el.scrollTop;
+  }, []);
+
+  /** 滚动监听：仅用户输入（wheel/touch/scrollbar/键盘）改变原始滚动几何
+      时更新跟随所有权；程序化滚动落在账本上，保持当前所有权。 */
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const floor = Math.max(0, el.scrollHeight - el.clientHeight);
+    const movedByReader = Math.abs(el.scrollTop - Math.min(observedTopRef.current, floor)) > 0.5;
+    const isAtBottom = movedByReader
+      ? floor - el.scrollTop <= FOLLOW_THRESHOLD + 1
+      : stickToBottomRef.current;
+    if (!movedByReader && isAtBottom) {
+      // 程序化滚动落在账本上且已在底部：保持跟随（不重复滚动）
+      observedTopRef.current = el.scrollTop;
+      return;
+    }
+    stickToBottomRef.current = isAtBottom;
+    observedTopRef.current = el.scrollTop;
   }, []);
 
   // 会话切换时重置跟随（切回预期看到最新内容）
   useEffect(() => {
-    setStickToBottom(true);
+    stickToBottomRef.current = true;
   }, [currentSessionId]);
 
-  // Auto-scroll：仅跟随状态时滚动（非流式打开/切换/完成 + 流式增量）。
-  // 用户向上回读（stickToBottom=false）时任何消息变化都不强拉。
+  // 内容跟随签名：消息数/流状态/会话切换变化时，若仍跟随则滚动到底。
+  // 滚动阈值翻转（setState → effect → scrollToBottom → scroll）不再触发
+  // follow——签名只在内容真正变化时更新（DSH followSig 模式）。
+  const followSig = `${currentSessionId}:${messages.length}:${streamStatus}:${pendingClarification ? 1 : 0}`;
   useEffect(() => {
-    if (!stickToBottom) return;
-    scrollToBottom();
-  }, [messages, pendingClarification, streamStatus, stickToBottom, scrollToBottom]);
+    if (followSigRef.current === followSig) return;
+    followSigRef.current = followSig;
+    if (stickToBottomRef.current) scrollToBottom();
+  }, [followSig, scrollToBottom]);
+
+  // ResizeObserver：异步内容（图片/markdown/代码高亮）加载导致列高度
+  // 变化时，若仍跟随则滚动到底（替代 setTimeout 兜底，DSH 同款）。
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (stickToBottomRef.current) scrollToBottom();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [scrollToBottom]);
 
   // ─── Custom streaming via fetch + ReadableStream ─────────────────
 
@@ -210,7 +232,7 @@ export default function ChatPanel() {
       // 发起新轮：回撤已被新工作取代，清空撤销回退横幅（否则残留到输出底部）
       setLastRollbackMessageId(null);
       // 用户发送新消息：恢复底部跟随（此前可能向上回读）
-      setStickToBottom(true);
+      stickToBottomRef.current = true;
 
       // ADR-031：乐观渲染——本地立即插入用户消息（带 user_message_id 定位
       // 键），服务端落库后经 UserMessageId 确认事件回显真实 id，前端比对
