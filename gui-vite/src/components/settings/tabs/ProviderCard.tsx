@@ -148,7 +148,6 @@ function ResolvedSpecRow({
 
 interface ModelRowProps {
   model: ProviderModelEntry;
-  modelIndex: number;
   resolvedSpec: ResolvedModelSpec | undefined;
   catalog: ModelCatalogInfo | undefined;
   onRemove: () => void;
@@ -158,7 +157,6 @@ interface ModelRowProps {
 
 function ModelRow({
   model,
-  modelIndex,
   resolvedSpec,
   catalog,
   onRemove,
@@ -167,7 +165,6 @@ function ModelRow({
 }: ModelRowProps) {
   return (
     <div
-      key={model.name || modelIndex}
       className="flex items-start gap-2 mb-2 p-2 rounded bg-[var(--color-bg-secondary)]"
     >
       <div className="flex-1 min-w-0">
@@ -582,9 +579,8 @@ export default function ProviderCard({
           )}
           {p.models.map((m, mi) => (
             <ModelRow
-              key={m.name || mi}
+              key={mi}
               model={m}
-              modelIndex={mi}
               resolvedSpec={resolvedSpecs[`${p.name}/${m.name}`]}
               catalog={modelCatalog[`${p.name}/${m.name}`]}
               onRemove={() => onRemoveModel(mi)}

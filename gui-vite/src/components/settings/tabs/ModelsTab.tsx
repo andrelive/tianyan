@@ -158,7 +158,7 @@ export default function ModelsTab({
       {/* ── Provider cards ── */}
       {config.providers.map((p, pi) => (
         <ProviderCard
-          key={p.name || pi}
+          key={pi}
           provider={p}
           collapsed={collapsed[pi] ?? true}
           onToggleCollapsed={() => setCollapsed((prev) => ({ ...prev, [pi]: !(prev[pi] ?? true) }))}
