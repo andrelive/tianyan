@@ -248,7 +248,8 @@ impl SessionService {
             title: core_session.title.unwrap_or_else(|| "新对话".to_string()),
             created_at: core_session.created_at.to_rfc3339(),
             updated_at: core_session
-                .ended_at
+                .last_message_at
+                .or(core_session.ended_at)
                 .unwrap_or(core_session.created_at)
                 .to_rfc3339(),
             messages,

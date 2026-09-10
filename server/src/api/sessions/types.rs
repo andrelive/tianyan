@@ -40,7 +40,14 @@ impl Session {
             id: s.session_id.clone(),
             title: s.title.clone().unwrap_or_else(|| "新对话".to_string()),
             created_at: s.created_at.to_rfc3339(),
-            updated_at: s.ended_at.unwrap_or(s.created_at).to_rfc3339(),
+            // 最后对话时间优先（会话不"结束"——ADR-027 时序链模型，
+            // ended_at 恒为 None，此前回退 created_at 导致列表显示创建时间）；
+            // 无消息时回退创建时间。
+            updated_at: s
+                .last_message_at
+                .or(s.ended_at)
+                .unwrap_or(s.created_at)
+                .to_rfc3339(),
             message_count: s.message_count.unwrap_or(s.messages.len()) as u32,
             working_directory: s.header.working_directory.clone(),
             metadata: Some(SessionMetadata {

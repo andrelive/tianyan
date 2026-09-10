@@ -114,6 +114,9 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     /// 会话结束时间戳（如果已结束）。
     pub ended_at: Option<DateTime<Utc>>,
+    /// 最后一条消息时间戳（轻量列表时预填；None = 无消息或未加载）。
+    #[serde(default)]
+    pub last_message_at: Option<DateTime<Utc>>,
     /// 会话中的消息。
     pub messages: Vec<StructuredMessage>,
     /// 会话摘要（会话结束后生成）。
@@ -135,6 +138,7 @@ impl Session {
             session_id: session_id.into(),
             created_at: Utc::now(),
             ended_at: None,
+            last_message_at: None,
             messages: Vec::new(),
             summary: None,
             title: None,
@@ -375,6 +379,8 @@ pub struct SessionMeta {
     pub header: SessionHeader,
     /// 会话创建时间（epoch 毫秒；缺省 0 = 未知，由调用方兜底）。
     pub created_at: i64,
+    /// 最后一条消息时间（epoch 毫秒；None = 无消息）。
+    pub last_message_at: Option<i64>,
     /// 消息数（走 (session_id, seq) 索引计数，O(1)）。
     pub message_count: usize,
 }

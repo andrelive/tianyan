@@ -337,7 +337,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// 轻量列出所有主会话（仅元数据，不加载消息；按创建时间倒序）。
+    /// 轻量列出所有主会话（仅元数据，不加载消息；按最后消息时间倒序）。
     ///
     /// ADR-026：子智能体会话（parent_session_id 非空）不进会话列表。
     ///
@@ -347,7 +347,7 @@ impl SessionStore {
         let conn = self.db.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT sm.session_id, sm.header_json, sm.created_at,                    (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = sm.session_id)                    FROM session_meta sm WHERE sm.parent_session_id IS NULL                    AND sm.session_id NOT LIKE 'evolution-%'                    ORDER BY sm.created_at DESC",
+                "SELECT sm.session_id, sm.header_json, sm.created_at,                    (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = sm.session_id),                    (SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id)                    FROM session_meta sm WHERE sm.parent_session_id IS NULL                    AND sm.session_id NOT LIKE 'evolution-%'                    ORDER BY COALESCE((SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id), sm.created_at) DESC",
             )
             .map_err(|e| sqlite_error("会话列表查询准备失败", e))?;
         let rows = stmt
@@ -359,17 +359,19 @@ impl SessionStore {
                     // 读取为 Option，NULL 归 0（排序靠后），避免整列表 500
                     r.get::<_, Option<i64>>(2)?.unwrap_or(0),
                     r.get::<_, i64>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
                 ))
             })
             .map_err(|e| sqlite_error("会话列表查询执行失败", e))?;
         let mut out = Vec::new();
         for row in rows {
-            let (session_id, header_json, created_at, message_count) =
+            let (session_id, header_json, created_at, message_count, last_message_at) =
                 row.map_err(|e| sqlite_error("会话列表行读取失败", e))?;
             out.push(SessionMeta {
                 session_id,
                 header: serde_json::from_str(&header_json).unwrap_or_default(),
                 created_at,
+                last_message_at,
                 message_count: message_count as usize,
             });
         }

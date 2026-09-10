@@ -202,6 +202,9 @@ impl SessionManager for PersistentSessionManager {
             session.ended_at = meta.header.ended_at;
             session.header = meta.header;
             session.message_count = Some(meta.message_count);
+            session.last_message_at = meta.last_message_at.map(|ts| {
+                chrono::DateTime::from_timestamp_millis(ts).unwrap_or_else(|| session.created_at)
+            });
             sessions.push(session);
         }
         Ok(sessions)
