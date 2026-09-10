@@ -223,23 +223,15 @@ impl Agent {
 
             match &loop_result {
                 Ok(AgentLoopResult::Answer { content, .. }) => {
-                    if content.is_empty() && attempt + 1 < WAKE_RETRY_LIMIT {
-                        // 无正文输出（空响应或仅思考碎片——reasoning-only 时
-                        // content 同样为空）：唤醒轮必须向用户输出汇总，
-                        // 重试整个唤醒轮（loop 内部已对空响应重试一次，
-                        // 此处是第二层：整个唤醒轮重试）。重试耗尽后
-                        // 最后一次仍落库正常结束（前端可见思考，不静默）。
-                        tracing::info!(
-                            session = %session_id,
-                            attempt,
-                            "唤醒轮无正文输出（空/仅思考），重试整个唤醒轮"
-                        );
-                        continue;
-                    }
                     if content.is_empty() {
-                        // 空输出是重要事件（主 agent 静默无反馈的取证点）：
-                        // info 级别可见，便于排查"任务完成但无反应"类问题。
-                        tracing::info!(session = %session_id, "唤醒轮空输出（模型无需回复）");
+                        // 空输出（含 reasoning-only——思考模型"想完没说话"）
+                        // 直接按正常结束落库（前端可见思考，不静默）。
+                        // 此前对 reasoning-only 重试整个唤醒轮，但实测确认
+                        // 这是模型对 system 完成通知的系统性行为（相同上下文
+                        // 重试结果相同）——整轮重试只浪费 LLM 调用，已移除；
+                        // loop 内部对空响应的单次重试（针对偶发完全空响应）
+                        // 仍保留。
+                        tracing::info!(session = %session_id, "唤醒轮空输出（模型无需回复/仅思考）");
                     } else {
                         tracing::info!(session = %session_id, "唤醒轮完成：后台任务结果已汇总");
                     }
@@ -1436,25 +1428,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_wake_reasoning_only_retries_whole_wake() {
+    async fn test_process_wake_reasoning_only_ends_normally() {
         // 回归保护：reasoning-only 输出（有思考无正文——思考模型"想完没
-        // 说话"，如 " 10 秒后见。"）在 loop 内部不算空响应（content 空但
-        // reasoning 非空），不会触发 loop 的空响应重试——此前直接按正常
-        // 结束落库，前端只看到思考没有正文（用户报告的"命令完成后只有
-        // 思考过程而没有正文输出"根因）。process_wake 层必须重试整个
-        // 唤醒轮；重试耗尽后最后一次仍落库正常结束（前端可见思考）。
-        // mock：前两次调用返回 reasoning-only（触发整轮重试），第三次
-        // 返回正常输出（重试恢复）。
+        // 说话"，如 " 10 秒后见。"）在 loop 内部触发一次空响应重试
+        // （content 空 + 无工具调用），重试仍空则直接按正常结束落库
+        // （前端可见思考，不静默）。此前 process_wake 层还会重试整个
+        // 唤醒轮——实测确认这是模型对 system 完成通知的系统性行为
+        // （相同上下文重试结果相同），整轮重试只浪费 LLM 调用，已移除。
+        // mock 应只被调用 2 次（loop 内部空响应重试一次），不再整轮重试。
         let mut mock = MockChatService::new();
-        let call = std::sync::atomic::AtomicUsize::new(0);
+        let call = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_clone = call.clone();
         mock.expect_chat_completion_stream().returning(move |_| {
-            let n = call.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            call_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (tx, rx) = tokio::sync::mpsc::channel(16);
-            let chunk = if n < 2 {
-                stream_chunk_reasoning_only(" 10 秒后见。")
-            } else {
-                stream_chunk_finish("后台任务已完成，汇总如下")
-            };
+            let chunk = stream_chunk_reasoning_only(" 10 秒后见。");
             tokio::spawn(async move {
                 tx.send(Ok(chunk)).await.ok();
             });
@@ -1468,7 +1456,12 @@ mod tests {
         let state = agent.state.read().await;
         assert_eq!(
             state.conversations_processed, 1,
-            "reasoning-only 重试后恢复应计入成功"
+            "reasoning-only 应直接正常结束（计入成功）"
+        );
+        assert_eq!(
+            call.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "loop 内部空响应重试一次，process_wake 不再整轮重试"
         );
     }
 
