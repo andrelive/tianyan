@@ -313,8 +313,9 @@ impl Agent {
         } else {
             messages.push(Message::system(
                 "## 自动唤醒轮\n这是一轮由后台任务完成（或失败）自动触发的处理轮，不是用户新消息。\n\
-                 若全部后台任务已完成：汇总各任务结果，并继续原有工作。\n\
-                 若无需向用户输出任何内容：直接输出空文本结束本轮。",
+                 若全部后台任务已完成：**必须向用户输出汇总**（哪些任务完成、\n\
+                 结果摘要、后续计划），并继续原有工作。\n\
+                 禁止输出空文本结束本轮。",
             ));
         }
 
@@ -1437,16 +1438,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prepare_wake_context_allows_empty_on_success() {
-        // 全部成功且无需输出时，唤醒指令仍允许空输出（ADR-013 空输出合法）
+    async fn test_prepare_wake_context_requires_output_on_success() {
+        // 全部成功时唤醒指令也必须要求模型输出汇总（用户期望：通知后
+        // LLM 输出结果摘要——此前允许空输出，模型在完成场景下选择沉默，
+        // 前端只看到通知看不到汇总，交互断裂）
         let agent = make_agent(MockChatService::new());
 
         let state = agent.load_and_build_state("session-1").await.unwrap();
         let messages = agent.prepare_wake_context(&state).await;
         let last = messages.last().expect("唤醒指令应存在");
         assert!(
-            last.content.contains("直接输出空文本结束本轮"),
-            "无失败时允许空输出，实际：{}",
+            last.content.contains("必须向用户输出汇总"),
+            "无失败时也必须输出汇总，实际：{}",
+            last.content
+        );
+        assert!(
+            !last.content.contains("直接输出空文本结束本轮"),
+            "完成场景不得允许空输出，实际：{}",
             last.content
         );
     }

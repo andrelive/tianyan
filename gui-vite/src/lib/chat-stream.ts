@@ -95,14 +95,18 @@ export function handleChatStreamEvent(event: ChatStreamEvent): void {
   // 思考增量单独累积（thinking 字段，折叠展示）。轮次边界：新一轮思考
   // 到达且上一轮已产出内容（正文/工具调用）时新开一条 assistant 消息——
   // 与历史加载「一轮一条消息」的渲染一致；轮次判断读流归属会话的消息
-  // （切换会话后仍正确）。
+  // （切换会话后仍正确）。最后一条不是 assistant（system 通知 / user
+  // 消息）时也必须新开——否则 appendThinking 落到上一条 assistant
+  // （通知之前的消息），思考显示在通知上方（用户报告的"思考插到通知
+  // 前面"根因）。
   if (event.thinking) {
     const msgs = sid ? (st.sessionMessages[sid] ?? []) : st.messages;
     const last = msgs[msgs.length - 1];
     const hasText = last?.segments?.some((s) => s.type === 'text') ?? false;
     const hasPrevTurn =
       last?.role === 'assistant' && (hasText || (last.tool_calls && last.tool_calls.length > 0));
-    if (hasPrevTurn) st.startNewAssistantTurn(sid);
+    const lastIsAssistant = last?.role === 'assistant';
+    if (hasPrevTurn || !lastIsAssistant) st.startNewAssistantTurn(sid);
     st.appendThinking(event.thinking, sid);
   }
 

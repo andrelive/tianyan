@@ -107,6 +107,35 @@ describe('handleChatStreamEvent', () => {
     expect(assistants[1].thinking).toBe('第二轮思考');
   });
 
+  it('starts a new assistant turn when thinking arrives after a system notification', () => {
+    // 后台任务完成通知（system 消息）落库推送后，唤醒轮思考到达——最后
+    // 一条是 system 时必须新开 assistant 消息，否则 thinking 落到通知
+    // 之前的 assistant 上（"思考插到通知前面"根因回归保护）
+    useAppStore.getState().addMessage({ role: 'assistant', segments: [], id: null, timestamp: '' });
+    handleChatStreamEvent(ev({ delta: '等任务完成后我会收到注入通知' }));
+    // system 通知边界事件（applyServerMessage 按 id 追加）
+    handleChatStreamEvent(
+      ev({
+        message: {
+          id: 'msg-sys-1',
+          role: 'system',
+          segments: [{ type: 'text', text: '[后台命令完成] test（cmd_0）' }],
+        },
+      }),
+    );
+    // 唤醒轮思考到达
+    handleChatStreamEvent(ev({ thinking: '后台命令已完成，汇总结果' }));
+
+    const msgs = useAppStore.getState().messages;
+    const assistants = msgs.filter((m) => m.role === 'assistant');
+    // 第一条 assistant（启动任务时的回复）+ 新开的唤醒轮 assistant
+    expect(assistants).toHaveLength(2);
+    // 新开的 assistant 在 system 通知之后（思考不插到通知前面）
+    const sysIdx = msgs.findIndex((m) => m.id === 'msg-sys-1');
+    const wakeIdx = msgs.findIndex((m) => m.role === 'assistant' && m.thinking === '后台命令已完成，汇总结果');
+    expect(wakeIdx).toBeGreaterThan(sysIdx);
+  });
+
   it('confirms the optimistic user message id via user_message_id event (ADR-031)', () => {
     // 乐观渲染：本地插入用户消息（带 user_message_id）→ 确认事件比对后
     // 替换为服务端真实 id（user_message_id 字段删除——生命周期结束）
