@@ -49,8 +49,8 @@ export default function SessionTodoPanel({ sessionId }: { sessionId: string | nu
   const doneCount = todos.filter((t) => t.status === 'completed').length;
 
   return (
-    <div className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-4 py-2">
-      <div className="max-w-4xl mx-auto">
+    <div className="shrink-0 px-4 py-2">
+      <div className="max-w-4xl mx-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-4 py-2">
         {/* 头部：标题 + 计数 + 折叠开关 */}
         <button
           type="button"
