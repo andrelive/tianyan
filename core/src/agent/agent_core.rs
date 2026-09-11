@@ -9,17 +9,15 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::{OwnedMutexGuard, RwLock};
 
 use crate::agent::background::{BackgroundTaskManager, TaskWaker};
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
+use crate::agent::stream_forward::{spawn_stream_forwarder, StreamEventDeliver, StreamEventMapper};
 use crate::agent::tool_registry::DynamicToolExecutor;
-use crate::agent::types::{
-    AgentResponse, AgentState, AgentStreamChunk, StreamChunkType, StreamEventSender,
-};
+use crate::agent::types::{AgentResponse, AgentState, StreamChunkType, StreamEventSender};
 use crate::common::error::Result;
 use crate::common::types::{
     InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage,
@@ -933,22 +931,29 @@ fn insert_session_hint(messages: &mut Vec<Message>, session_id: &str) {
 /// BackgroundTaskManager → TaskWaker → Agent）；Agent 已销毁时唤醒静默丢弃。
 /// `wake` 内部 spawn 独立任务执行唤醒轮，不阻塞任务完成收尾。
 ///
-/// ADR-031：唤醒轮流式化——`forward` 由宿主（server）注入，把唤醒轮的
-/// 流式事件转发到统一事件通道（前端打字机看到汇总输出）。
+/// ADR-031/032：唤醒轮流式化——映射器与送达目标由宿主（server）注入
+/// （`mapper` 复用主会话的 `map_chunk_to_event`；`deliver` 为统一事件通道），
+/// 转发骨架与用户轮 / 子代理共用 [`spawn_stream_forwarder`]（建通道即消费，
+/// 死锁形态从结构上不可能再现）。
 pub struct AgentWakeForwarder {
     agent: std::sync::Weak<Agent>,
-    forward: Arc<dyn Fn(&str, mpsc::Receiver<Result<AgentStreamChunk>>) + Send + Sync>,
+    /// 流式事件映射（chunk → 事件 JSON；与主会话共用实现）。
+    mapper: StreamEventMapper,
+    /// 事件送达目标（统一事件通道）。
+    deliver: Arc<dyn StreamEventDeliver>,
 }
 
 impl AgentWakeForwarder {
     /// 创建转发器（引用持有方必须与 `agent` 同一 Arc）。
     pub fn new(
         agent: &Arc<Agent>,
-        forward: Arc<dyn Fn(&str, mpsc::Receiver<Result<AgentStreamChunk>>) + Send + Sync>,
+        mapper: StreamEventMapper,
+        deliver: Arc<dyn StreamEventDeliver>,
     ) -> Self {
         Self {
             agent: Arc::downgrade(agent),
-            forward,
+            mapper,
+            deliver,
         }
     }
 }
@@ -960,17 +965,19 @@ impl TaskWaker for AgentWakeForwarder {
             tracing::debug!("唤醒被丢弃：Agent 已销毁");
             return;
         };
+        let mapper = self.mapper.clone();
+        let deliver = self.deliver.clone();
         let session_id = session_id.to_string();
-        let forward = self.forward.clone();
         tokio::spawn(async move {
-            // 事件通道在唤醒轮**开始前**交给转发器（转发器立即启动消费
-            // 任务）——唤醒轮期间事件实时流出。此前先 await 整个唤醒轮
-            // 再取 rx：输出积压到轮结束才转发，超过通道缓冲（100）还会
-            // 死锁（发送端等消费、转发器等轮结束）。
-            let (tx, rx) = mpsc::channel(100);
-            let sender = StreamEventSender::new(tx);
-            forward(&session_id, rx);
+            // 统一转发器：通道在唤醒轮**开始前**创建并立即开始消费——
+            // 唤醒轮期间事件实时流出（此前先 await 整个唤醒轮再取 rx：
+            // 输出积压到轮结束才转发，超过通道缓冲还会死锁——1151680）。
+            let (sender, forward_handle) =
+                spawn_stream_forwarder(session_id.clone(), mapper, deliver);
+            // 轮结束（sender 全部释放）→ 消费任务收尾：等待句柄确保
+            // 尾部事件已送达（唤醒轮输出不丢最后一块）。
             agent.process_wake(&session_id, sender).await;
+            let _ = forward_handle.await;
         });
     }
 }
@@ -1588,5 +1595,60 @@ mod tests {
         assert!(!handle.is_finished(), "此时唤醒轮应仍在进行中（未结束）");
 
         handle.await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_wake_forwarder_delivers_events_while_turn_running() {
+        // 端到端回归：`AgentWakeForwarder::wake`（任务完成信号的真实入口）
+        // 经统一转发器（spawn_stream_forwarder）把事件送达，且**在轮进行中**
+        // 即到达。此前 `wake` 先 await 整个 process_wake 再取 rx——输出积压
+        // 到轮结束才转发，超过通道缓冲还会死锁（1151680，用户报告"后台命令
+        // 完成后好久没有输出，退出重进才看到"）。本测试锁死该路径：
+        // 转发器注入 → 轮进行中消费端必须收到事件。
+        use crate::agent::stream_forward::{spawn_stream_forwarder, StreamEventDeliver};
+        use std::sync::Mutex as StdMutex;
+
+        struct Collect(StdMutex<usize>);
+        #[async_trait::async_trait]
+        impl StreamEventDeliver for Collect {
+            async fn deliver(&self, _sid: &str, _event: serde_json::Value) {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion_stream().returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                // 首 chunk 立即可见；随后挂起（模拟长轮——轮不结束）
+                tx.send(Ok(stream_chunk_finish("汇总中"))).await.ok();
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            });
+            Ok(rx)
+        });
+        let agent = make_agent(mock);
+        let collect = Arc::new(Collect(StdMutex::new(0)));
+
+        // 模拟 wake 入口：转发器先建（通道即消费），sender 交给轮。
+        let mapper: crate::agent::StreamEventMapper =
+            Arc::new(|_sid, chunk| Some(serde_json::json!({ "delta": chunk.delta })));
+        let (sender, forward_handle) = spawn_stream_forwarder("session-1", mapper, collect.clone());
+        let turn = tokio::spawn(async move {
+            agent.process_wake("session-1", sender).await;
+        });
+
+        // 轮仍在进行：送达计数应在 1s 内增长（证明事件实时流出，未积压）
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        while *collect.0.lock().unwrap() == 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            *collect.0.lock().unwrap() > 0,
+            "唤醒轮事件应在轮进行中送达（1s 内）——转发器必须建通道即消费"
+        );
+        assert!(!turn.is_finished(), "此时唤醒轮应仍在进行中（未结束）");
+
+        turn.await.ok();
+        let _ = forward_handle.await;
     }
 }

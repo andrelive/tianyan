@@ -4,16 +4,12 @@ use axum::{
     extract::{Json, Path, State},
     Json as JsonResponse,
 };
-use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 use crate::api::chat::services::ChatService;
 use crate::api::chat::types::{AnswerRequest, ChatRequest, ChatStreamEvent};
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
-
-/// 流式事件转发通道缓冲区大小（chunk → 统一事件通道）。
-const SSE_CHANNEL_BUFFER: usize = 100;
 
 /// 追问回答提交处理器（ask_user 同步工具：回答提交到等待通道，工具执行恢复）。
 ///
@@ -82,31 +78,19 @@ pub async fn chat_stream_handler(
 
     // 统一事件通道（GET /events 广播源）
     let event_tx = state.task_event_tx.clone();
+    let task_event_tx = state.task_event_tx.clone();
 
     tokio::spawn(async move {
         let service = ChatService::new(agent, session_manager)
             .with_role_sync(role_sync)
             .with_context_window(context_window);
 
-        // 流式事件转发：ChatStreamEvent → JSON（带 type=chat_stream）→ 统一事件通道。
-        // 转发协程随 process_message_stream 结束（tx drop → rx 关闭）退出。
-        let (event_tx_local, mut event_rx) = mpsc::channel::<ChatStreamEvent>(SSE_CHANNEL_BUFFER);
-        let broadcast_tx = event_tx.clone();
-        tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                if let Ok(mut payload) = serde_json::to_value(&event) {
-                    payload["type"] = serde_json::json!("chat_stream");
-                    if let Ok(json) = serde_json::to_string(&payload) {
-                        let _ = broadcast_tx.send(json);
-                    }
-                }
-            }
-        });
-
         // 捕获会话 id（request 随后被 move 进 process_message_stream）
         let request_session_id = request.session_id.clone().unwrap_or_default();
+        // ADR-032：流式接线收敛 core 统一转发器（服务层内部建通道即消费）；
+        // 本处只传入统一事件通道（广播源），不再手写转发协程。
         if let Err(e) = service
-            .process_message_stream(request, event_tx_local, cancel)
+            .process_message_stream(request, event_tx, cancel)
             .await
         {
             error!("对话处理错误: {}", e);
@@ -118,9 +102,12 @@ pub async fn chat_stream_handler(
                 format!("对话处理失败: {e}"),
             );
             if let Ok(mut payload) = serde_json::to_value(&event) {
-                payload["type"] = serde_json::json!("chat_stream");
+                tianyan::agent::stream_forward::inject_stream_event_fields(
+                    &mut payload,
+                    &request_session_id,
+                );
                 if let Ok(json) = serde_json::to_string(&payload) {
-                    let _ = event_tx.send(json);
+                    let _ = task_event_tx.send(json);
                 }
             }
         }

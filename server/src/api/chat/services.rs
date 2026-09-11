@@ -1,9 +1,12 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::info;
 
+use tianyan::agent::stream_forward::{
+    inject_stream_event_fields, spawn_stream_forwarder, BroadcastJsonDeliver, StreamEventDeliver,
+    StreamEventMapper,
+};
 use tianyan::agent::AgentCoordinator;
 use tianyan::session::SessionManager;
 use tianyan::Message as CoreMessage;
@@ -74,10 +77,15 @@ impl ChatService {
     /// 如果 `session_id` 未提供，会自动创建新会话。
     /// `cancel` 为服务层/传输层共享的取消标志：客户端断开或服务关停时置位，
     /// 使后台 AgentLoop 在轮次边界/流式 chunk 边界及时停止。
+    ///
+    /// ADR-032：流式接线收敛到 core 统一转发器——本方法创建转发器
+    /// （建通道即消费）、把 sender 交给 core 轮、等待流排空后补发 assistant
+    /// 消息边界事件。`event_tx` 为统一事件通道（SSE 广播源），与唤醒轮 /
+    /// 子代理路径同一送达抽象。
     pub async fn process_message_stream(
         &self,
         request: ChatRequest,
-        tx: mpsc::Sender<ChatStreamEvent>,
+        event_tx: tokio::sync::broadcast::Sender<String>,
         cancel: Arc<AtomicBool>,
     ) -> Result<(), ApiError> {
         let last_text = request.message.content.clone().unwrap_or_default();
@@ -94,7 +102,17 @@ impl ChatService {
             self.refresh_learned_roles().await;
         }
 
-        let mut stream = self
+        // 一次流式响应用一个响应 id（与非流式 ChatResponse.id 语义一致）。
+        // SSE 事件 id 用于 Last-Event-ID 重连，同一响应流的所有 chunk 共享该 id。
+        let stream_id = format!("chatcmpl-{}", short_uuid());
+
+        // ADR-032 统一转发器：通道先建并立即消费，sender 交给 core 轮。
+        let mapper = self.chunk_mapper(&stream_id);
+        let deliver: Arc<dyn StreamEventDeliver> = Arc::new(BroadcastJsonDeliver::new(event_tx));
+        let (sender, forward_handle) =
+            spawn_stream_forwarder(session_id.clone(), mapper, deliver.clone());
+
+        let result = self
             .agent
             .process_message_stream(
                 &session_id,
@@ -104,14 +122,18 @@ impl ChatService {
                 request.thinking,
                 // ADR-031：乐观渲染定位键（落库后经 UserMessageId 确认事件回显）
                 request.message.user_message_id.as_deref(),
+                sender,
             )
-            .await?;
+            .await;
 
-        // 一次流式响应用一个响应 id（与非流式 ChatResponse.id 语义一致）。
-        // SSE 事件 id 用于 Last-Event-ID 重连，同一响应流的所有 chunk 共享该 id。
-        let stream_id = format!("chatcmpl-{}", short_uuid());
+        // 轮结束（sender 已释放）→ 等待流排空：尾部事件（完成/usage）不丢。
+        let _ = forward_handle.await;
+        result?;
 
-        self.pump_stream(&mut stream, &stream_id, &session_id, &tx)
+        // assistant 消息边界（统一结构）：流结束后取最后一条 assistant 消息，
+        // 以完整 ChatMessage 结构下发——前端本地 assistant 消息 id 同步为
+        // 服务端 id（与用户消息边界同构；经同一送达目标，排在流事件之后）。
+        self.send_assistant_boundary(&session_id, &stream_id, &deliver)
             .await?;
 
         info!("流式处理完成，会话：{}", session_id);
@@ -119,53 +141,32 @@ impl ChatService {
         Ok(())
     }
 
-    /// 泵送流式 chunk 到 SSE 通道（主对话流与追问流共用骨架）：
-    /// 1. 流开始前下发用户消息边界事件（完整 ChatMessage，前端本地 id 同步）；
-    /// 2. 逐 chunk 映射为 ChatStreamEvent 发送（客户端断开即停）；
-    /// 3. 流结束（或 chunk 发送失败）后下发最后一条 assistant 消息边界事件。
+    /// 构造 chunk → 事件 JSON 映射（统一转发器用；`stream_id` 固定本响应 id）。
+    fn chunk_mapper(&self, stream_id: &str) -> StreamEventMapper {
+        let stream_id = stream_id.to_string();
+        let context_window = self.context_window;
+        Arc::new(move |session_id, chunk| {
+            serde_json::to_value(map_chunk_to_event(
+                chunk,
+                &stream_id,
+                session_id,
+                context_window,
+            ))
+            .ok()
+        })
+    }
+
+    /// 下发 assistant 消息边界事件（流结束后，经同一送达目标）。
     ///
-    /// 客户端断开（send 失败）不视为错误：debug 日志后正常返回；
-    /// 流内错误（Err chunk）映射为 error 事件后上抛（调用方按 HTTP 语义处理）。
-    async fn pump_stream(
+    /// 取会话最后一条 assistant 消息构造统一结构——前端本地消息 id 同步为
+    /// 服务端 id（回退/重做定位键）。无 assistant 消息（异常路径）时跳过。
+    async fn send_assistant_boundary(
         &self,
-        stream: &mut mpsc::Receiver<
-            Result<tianyan::agent::AgentStreamChunk, tianyan::TianyanError>,
-        >,
-        stream_id: &str,
         session_id: &str,
-        tx: &mpsc::Sender<ChatStreamEvent>,
+        stream_id: &str,
+        deliver: &Arc<dyn StreamEventDeliver>,
     ) -> Result<(), ApiError> {
-        // 用户消息边界由 core 入库侧发送（run_agent_turn persist 后立即
-        // 经流发送 Message chunk）——保证边界事件与入库时序一致。此处不再
-        // 读取"最后一条消息"猜测当前轮归属：第二轮竞态下用户消息尚未入库，
-        // 误取上一轮 assistant 输出会导致前端把上一轮内容合并进本轮占位
-        // （表现为"上一轮的输出又输出了一遍"）。
-
-        while let Some(chunk_result) = stream.recv().await {
-            match chunk_result {
-                Ok(chunk) => {
-                    let event =
-                        map_chunk_to_event(chunk, stream_id, session_id, self.context_window);
-                    if tx.send(event).await.is_err() {
-                        debug!("客户端断开流式连接");
-                        break;
-                    }
-                }
-                Err(e) => {
-                    error!("流式处理错误: {}", e);
-                    let event =
-                        ChatStreamEvent::error(stream_id, session_id, format!("错误: {}", e));
-                    if tx.send(event).await.is_err() {
-                        debug!("客户端已断开，错误事件未送达");
-                    }
-                    return Err(e.into());
-                }
-            }
-        }
-
-        // assistant 消息边界（统一结构）：流结束后取最后一条 assistant 消息，
-        // 以完整 ChatMessage 结构下发——前端本地 assistant 消息 id 同步为服务端 id。
-        if let Some(am) = self
+        let Some(am) = self
             .session_manager
             .get_session(session_id)
             .await?
@@ -176,17 +177,18 @@ impl ChatService {
                     .find(|m| m.role == MessageRole::Assistant)
                     .cloned()
             })
-        {
-            let event = ChatStreamEvent::message_boundary(
-                stream_id,
-                session_id,
-                ChatMessage::from_structured_light(&am),
-            );
-            if tx.send(event).await.is_err() {
-                debug!("客户端断开流式连接");
-            }
-        }
-
+        else {
+            return Ok(());
+        };
+        let event = ChatStreamEvent::message_boundary(
+            stream_id,
+            session_id,
+            ChatMessage::from_structured_light(&am),
+        );
+        let mut payload = serde_json::to_value(&event)
+            .map_err(|e| ApiError::Internal(format!("序列化边界事件失败：{e}")))?;
+        inject_stream_event_fields(&mut payload, session_id);
+        deliver.deliver(session_id, payload).await;
         Ok(())
     }
 }

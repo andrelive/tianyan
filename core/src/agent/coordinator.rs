@@ -82,10 +82,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 
 use crate::agent::agent_core::Agent;
-use crate::agent::types::{AgentResponse, AgentState, AgentStreamChunk, StreamEventSender};
+use crate::agent::stream_forward::spawn_null_forwarder;
+use crate::agent::types::{AgentResponse, AgentState, StreamEventSender};
 use crate::common::error::Result;
 use crate::common::types::Message;
 
@@ -111,6 +111,13 @@ pub trait AgentCoordinator: Send + Sync {
     /// - `thinking_effort` — 本会话思考强度（会话时选择；None 时使用模型默认）。
     /// - `user_message_id` — 前端生成的用户消息临时 id（ADR-031 乐观渲染
     ///   定位键；落库后经 UserMessageId 确认事件回显真实 id，此后弃用）。
+    /// - `sender` — 流式事件出口（ADR-032：由调用方经
+    ///   [`crate::agent::spawn_stream_forwarder`] 创建并**先于本调用**开始
+    ///   消费——通道所有权归调用方，与唤醒轮 / 子代理路径完全同构）。
+    ///
+    /// 本方法**等待整轮结束**（不内部 spawn）；需要非阻塞语义的调用方
+    /// 自行 spawn（server 侧在请求协程内 spawn 后立即返回 HTTP 响应）。
+    #[allow(clippy::too_many_arguments)]
     async fn process_message_stream(
         &self,
         session_id: &str,
@@ -119,7 +126,8 @@ pub trait AgentCoordinator: Send + Sync {
         cancel: Option<Arc<AtomicBool>>,
         thinking_effort: Option<String>,
         user_message_id: Option<&str>,
-    ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>>;
+        sender: StreamEventSender,
+    ) -> Result<()>;
 
     /// 初始化智能体。
     ///
@@ -266,80 +274,66 @@ impl AgentCoordinator for Agent {
         cancel: Option<Arc<AtomicBool>>,
         thinking_effort: Option<String>,
         user_message_id: Option<&str>,
-    ) -> Result<mpsc::Receiver<Result<AgentStreamChunk>>> {
+        sender: StreamEventSender,
+    ) -> Result<()> {
         let model = model.unwrap_or(&self.default_model).to_string();
+        // ADR-013 串行化：单会话同一时刻只有一个活动轮（用户轮 / 唤醒轮互斥）。
+        // 锁必须先于状态加载：并发轮（如唤醒轮进行中又来用户消息）若在锁外
+        // 加载状态，会拿到前一轮完成前的旧快照——上下文缺失前一轮消息，
+        // 且状态与库分叉。非流式路径（process_message）已是锁内加载，此处对齐。
+        let _turn_guard = self.turn_guard(session_id).await;
 
-        let (tx, rx) = mpsc::channel(100);
-        let self_clone = Arc::new(self.clone());
-        let message = message.clone();
-        let stream_sender = StreamEventSender::new(tx.clone());
-        let session_id = session_id.to_string();
-        let user_message_id = user_message_id.map(str::to_string);
-
-        tokio::spawn(async move {
-            // ADR-013 串行化：单会话同一时刻只有一个活动轮（用户轮 / 唤醒轮互斥）。
-            // 锁必须先于状态加载：并发轮（如唤醒轮进行中又来用户消息）若在锁外
-            // 加载状态，会拿到前一轮完成前的旧快照——上下文缺失前一轮消息，
-            // 且状态与库分叉。非流式路径（process_message）已是锁内加载，
-            // 此处对齐。
-            let _turn_guard = self_clone.turn_guard(&session_id).await;
-
-            // 状态加载失败：经流式通道下发错误事件（pump 侧映射为 error 事件
-            // + HTTP 错误，与锁外加载返回 Err 的语义一致）。
-            let state = match self_clone.load_and_build_state(&session_id).await {
-                Ok(s) => s,
-                Err(e) => {
-                    stream_sender.send_error(&format!("处理失败：{}", e)).await;
-                    return;
-                }
-            };
-
-            let start = Instant::now();
-            // 注入取消标志：工具执行（含同步委托）期间也能响应停止
-            // （此前 cancel 只在 chunk 循环/轮顶检查，长工具调用点停止无效）。
-            self_clone
-                .agent_loop
-                .tool_registry()
-                .set_delegation_cancel(&session_id, cancel.clone())
-                .await;
-            // 共享编排骨架：快照 → 持久化 → 上下文 → run_stream → 流式事件 → 指标 → 压缩
-            // （do_compress = true：修复流式路径缺失压缩检查的漂移，与 process_message 对齐）
-            let _ = self_clone
-                .run_agent_turn(
-                    &state,
-                    &session_id,
-                    &message,
-                    &model,
-                    start,
-                    cancel.as_deref(),
-                    user_message_id.as_deref(),
-                    crate::agent::agent_core::TurnOptions {
-                        mode: crate::agent::agent_core::TurnMode::Stream {
-                            sender: stream_sender,
-                        },
-                        do_snapshot: true,
-                        do_compress: true,
-                        thinking_effort,
-                    },
-                )
-                .await;
-            // 清理会话取消槽：仅正常结束时清理。用户停止（cancel 置位）时保留——
-            // 已转入后台的委托子代理仍要看到取消标志并退出（否则"停止"对
-            // 后台任务无效）；下次请求会注入新的取消槽覆盖本槽。
-            let cancelled = cancel
-                .as_ref()
-                .map(|c| c.load(std::sync::atomic::Ordering::SeqCst))
-                .unwrap_or(false);
-            if !cancelled {
-                self_clone
-                    .agent_loop
-                    .tool_registry()
-                    .set_delegation_cancel(&session_id, None)
-                    .await;
+        // 状态加载失败：经流式通道下发错误事件（调用方映射为 error 事件 +
+        // HTTP 错误，与锁外加载返回 Err 的语义一致）。
+        let state = match self.load_and_build_state(session_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                sender.send_error(&format!("处理失败：{}", e)).await;
+                return Ok(());
             }
-        });
+        };
 
-        Ok(rx)
+        let start = Instant::now();
+        // 注入取消标志：工具执行（含同步委托）期间也能响应停止
+        // （此前 cancel 只在 chunk 循环/轮顶检查，长工具调用点停止无效）。
+        self.agent_loop
+            .tool_registry()
+            .set_delegation_cancel(session_id, cancel.clone())
+            .await;
+        // 共享编排骨架：快照 → 持久化 → 上下文 → run_stream → 流式事件 → 指标 → 压缩
+        // （do_compress = true：修复流式路径缺失压缩检查的漂移，与 process_message 对齐）
+        let _ = self
+            .run_agent_turn(
+                &state,
+                session_id,
+                message,
+                &model,
+                start,
+                cancel.as_deref(),
+                user_message_id,
+                crate::agent::agent_core::TurnOptions {
+                    mode: crate::agent::agent_core::TurnMode::Stream { sender },
+                    do_snapshot: true,
+                    do_compress: true,
+                    thinking_effort,
+                },
+            )
+            .await;
+        // 清理会话取消槽：仅正常结束时清理。用户停止（cancel 置位）时保留——
+        // 已转入后台的委托子代理仍要看到取消标志并退出（否则"停止"对
+        // 后台任务无效）；下次请求会注入新的取消槽覆盖本槽。
+        let cancelled = cancel
+            .as_ref()
+            .map(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false);
+        if !cancelled {
+            self.agent_loop
+                .tool_registry()
+                .set_delegation_cancel(session_id, None)
+                .await;
+        }
+
+        Ok(())
     }
 
     async fn compress_session(
@@ -431,13 +425,10 @@ impl AgentCoordinator for Agent {
     }
 
     async fn wake_session(&self, session_id: &str) {
-        // 无事件转发通道（webhook 唤醒路径）：丢弃接收端——事件发送静默
-        // 失败（debug 日志），唤醒轮本身正常执行。必须 drop（保持接收端
-        // 存活会填满缓冲后阻塞发送端）。
-        let (tx, rx) = mpsc::channel(100);
-        drop(rx);
-        self.process_wake(session_id, StreamEventSender::new(tx))
-            .await;
+        // 无事件转发通道（webhook 唤醒路径）：统一 null 转发器——消费端
+        // 存活（持续排空，不阻塞发送端），事件静默丢弃，唤醒轮本身正常执行。
+        let (sender, _handle) = spawn_null_forwarder(session_id);
+        self.process_wake(session_id, sender).await;
     }
 
     async fn initialize(&self) -> Result<()> {

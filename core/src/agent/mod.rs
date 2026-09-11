@@ -23,6 +23,8 @@ pub mod role_router;
 pub mod role_store;
 /// 角色化子 Agent 委托（delegate_to_agent role 参数）。
 pub mod roles;
+/// 流式事件统一转发（ADR-032：三处接线收敛——建通道即消费 + 字段注入单点）。
+pub mod stream_forward;
 mod tool_params;
 mod tool_registry;
 mod types;
@@ -41,6 +43,10 @@ pub use role_router::{RoleMatch, RoleRouter};
 pub use role_store::RoleStore;
 pub use roles::{AgentRole, RoleRegistry, RoleSource, RoleStatus};
 pub use session_state::SessionState;
+pub use stream_forward::{
+    inject_stream_event_fields, spawn_null_forwarder, spawn_stream_forwarder, BroadcastJsonDeliver,
+    NullDeliver, StreamEventDeliver, StreamEventMapper, TaskSinkDeliver, STREAM_FORWARD_BUFFER,
+};
 pub use tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, ReadFileParams,
     RunTestsParams, SearchCodeParams, SearchVfsParams, SelfCheckParams, VerifyBuildParams,

@@ -103,6 +103,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-029: 事件订阅与快照恢复](docs/architecture/decisions/029-event-subscription-snapshot.md) — 单流按需订阅 + resident：POST /events/subscribe 触发快照（历史 + cursor）推入统一通道；打开过保持订阅（切回零延迟）；快照与实时同一条流（合并竞态消失）；ADR-031 后订阅集合移除（消息不再广播），端点仅承担快照推送
 - [ADR-030: 统一 Agent 循环框架](docs/architecture/decisions/030-unified-agent-loop.md) — 主 agent 与子代理同构：AgentLoop 抽配置点（上下文组装/工具集/持久化策略/完成回调/策略）；收尾条件统一"无工具调用"（submit_result 降级为可选结果落盘工具，主 agent 用 task_status 查结果 ID）；子代理用流式路径（task_id 即 session_id，前端完全复用）
 - [ADR-031: 乐观渲染 + user_message_id 确认 + 统一流式](docs/architecture/decisions/031-optimistic-render-user-message-id.md) — 用户消息发送即显示（乐观渲染），落库后经 user_message_id 确认事件回显真实 id（生命周期：请求→确认→弃）；assistant 纯流式（增量即终版，message 广播移除）；任务完成通知走 LOOP（process_wake 流式化，输出经 chat_stream 打字机展示）；子代理流式事件补 type/session_id 路由
+- [ADR-032: 流式事件转发统一](docs/architecture/decisions/032-unified-stream-forward.md) — 三处手写接线（用户轮/唤醒轮/子代理）收敛为 core 单一转发器 `spawn_stream_forwarder`（建通道即消费，防死锁不变量）；映射器与送达目标为有意可插拔 seam；`process_message_stream` 改收 sender（与 process_wake 同构，通道所有权归调用方）；字段注入单点
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 
@@ -121,7 +122,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层）：config/agent/scheduler 共用 | — |
 | `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles） | — |
 | `vfs` | `core/src/vfs/` | **基础机制**：统一存储检索层（L0/L1/L2 + RRF 融合）；SqliteBackend 经 db::Database 访问 | — |
-| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 后台任务（ADR-026：委托只支持异步、双信号量排队 20+40、SQL 权威 + 3 天 TTL）；**统一循环框架（ADR-030）**：主 agent 与子代理同构（`TurnPolicy` 配置——工具执行器 Global/RoleFiltered、持久化 FTS 开关、max_turns 策略、请求工具集），收尾统一"无工具调用"（submit_result 降级为可选结果落盘工具，主 agent 用 task_status 查询）；子智能体会话消息落库不索引 FTS（`add_structured_message_no_fts`）+ 流式事件同一通道（ADR-031：消息不再广播，chat_stream 带 session_id=task_id 路由）；工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，DSH 吸收）+ 内置可观测性监听器（统计/Trace/GEPA/规则学习） | 所有工具操作通过 VFS |
+| `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 后台任务（ADR-026：委托只支持异步、双信号量排队 20+40、SQL 权威 + 3 天 TTL）；**统一循环框架（ADR-030）**：主 agent 与子代理同构（`TurnPolicy` 配置——工具执行器 Global/RoleFiltered、持久化 FTS 开关、max_turns 策略、请求工具集），收尾统一"无工具调用"（submit_result 降级为可选结果落盘工具，主 agent 用 task_status 查询）；子智能体会话消息落库不索引 FTS（`add_structured_message_no_fts`）+ 流式事件同一通道（ADR-031：消息不再广播，chat_stream 带 session_id=task_id 路由）；**流式转发统一（ADR-032）**：`stream_forward.rs` 单点（建通道即消费防死锁 + 字段注入），用户轮/唤醒轮/子代理共用，映射器与送达目标可插拔；工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，DSH 吸收）+ 内置可观测性监听器（统计/Trace/GEPA/规则学习） | 所有工具操作通过 VFS |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 组装） | 检索仅通过 `DualLayerRetriever` |
 | `knowledge` | `core/src/knowledge/` | 知识库导入管道 | ❌ **不建独立检索管道**，导入→VFS→SummaryEngine |
 | `memory` | `core/src/memory/` | `MemoryExtractor` 长期记忆提取 | ❌ **不建独立存储**，提取→VFS write |

@@ -9,13 +9,10 @@ use std::sync::Arc;
 
 // 外部 crate
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 
 // 内部 crate
 use tianyan::agent::DynamicToolExecutor;
-use tianyan::agent::{
-    Agent, AgentBuilder, AgentCoordinator, AgentResponse, AgentState, AgentStreamChunk,
-};
+use tianyan::agent::{Agent, AgentBuilder, AgentCoordinator, AgentResponse, AgentState};
 use tianyan::config::{ModelCapability, TianyanConfig};
 use tianyan::context::DualLayerRetriever;
 use tianyan::db::Database;
@@ -169,42 +166,25 @@ impl AgentBuilderFactory {
 
         // ADR-013：注册任务唤醒器（Weak 自引用转发器 → Agent::process_wake）。
         // 后台任务全部完成/失败时自动触发主 agent 新一轮生成。
-        // ADR-031：唤醒轮流式化——转发器把唤醒轮的流式事件（AgentStreamChunk）
-        // 转成 ChatStreamEvent JSON（type=chat_stream）推入统一事件通道，
-        // 前端打字机看到汇总输出（不再依赖落库广播）。
+        // ADR-031/032：唤醒轮流式化——映射器复用主会话的 `map_chunk_to_event`
+        // （与用户轮同一协议），送达目标为统一事件通道；转发骨架由 core
+        // 统一转发器提供（建通道即消费），前端打字机看到汇总输出。
         let agent_arc = Arc::new(agent);
-        let forward = {
-            let event_tx = event_tx.clone();
-            Arc::new(
-                move |session_id: &str,
-                      mut rx: mpsc::Receiver<
-                    Result<tianyan::agent::AgentStreamChunk, tianyan::TianyanError>,
-                >| {
-                    let event_tx = event_tx.clone();
-                    let session_id = session_id.to_string();
-                    tokio::spawn(async move {
-                        while let Some(chunk_result) = rx.recv().await {
-                            let Ok(chunk) = chunk_result else { continue };
-                            let event = crate::api::chat::services::map_chunk_to_event(
-                                chunk,
-                                "wake",
-                                &session_id,
-                                0,
-                            );
-                            if let Ok(mut payload) = serde_json::to_value(&event) {
-                                payload["type"] = serde_json::json!("chat_stream");
-                                if let Ok(json) = serde_json::to_string(&payload) {
-                                    let _ = event_tx.send(json);
-                                }
-                            }
-                        }
-                    });
-                },
-            )
-        };
+        let wake_mapper: tianyan::agent::StreamEventMapper = Arc::new(
+            |session_id: &str, chunk: tianyan::agent::AgentStreamChunk| {
+                serde_json::to_value(crate::api::chat::services::map_chunk_to_event(
+                    chunk, "wake", session_id, 0,
+                ))
+                .ok()
+            },
+        );
+        let wake_deliver: Arc<dyn tianyan::agent::StreamEventDeliver> =
+            Arc::new(tianyan::agent::BroadcastJsonDeliver::new(event_tx.clone()));
         agent_arc
             .register_task_waker(Arc::new(tianyan::agent::AgentWakeForwarder::new(
-                &agent_arc, forward,
+                &agent_arc,
+                wake_mapper,
+                wake_deliver,
             )))
             .await;
 
@@ -352,7 +332,8 @@ impl AgentCoordinator for WizardModeAgent {
         _cancel: Option<Arc<AtomicBool>>,
         _thinking_effort: Option<String>,
         _user_message_id: Option<&str>,
-    ) -> TianyanResult<mpsc::Receiver<TianyanResult<AgentStreamChunk>>> {
+        _sender: tianyan::agent::StreamEventSender,
+    ) -> TianyanResult<()> {
         Err(TianyanError::Custom(
             "模型服务错误：应用未配置。请先完成配置向导。".to_string(),
         ))

@@ -10,11 +10,14 @@ use futures::future::BoxFuture;
 use crate::agent::r#loop::{
     AgentLoop, AgentLoopConfig, AgentLoopResult, ToolExecutorKind, TurnPolicy,
 };
+use crate::agent::stream_forward::{
+    spawn_stream_forwarder, NullDeliver, StreamEventDeliver, TaskSinkDeliver,
+};
 use crate::agent::tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams,
     SubmitResultParams, SuggestRoleParams, TaskCancelParams, TaskStatusParams,
 };
-use crate::agent::types::{AgentStreamChunk, StreamChunkType, StreamEventSender};
+use crate::agent::types::{AgentStreamChunk, StreamChunkType};
 use crate::common::error::TianyanError;
 use crate::common::types::{ContentLevel, ContextNamespace, Message, TianyanUri};
 use crate::executor::Action;
@@ -41,7 +44,9 @@ impl Drop for DelegationDepthGuard {
 /// 同构 JSON，与主会话协议一致——前端完全复用 reducer 渲染）。
 ///
 /// Message chunk（落库即广播已推 message 事件）与 Error 不转发。
-fn chunk_to_stream_json(chunk: AgentStreamChunk) -> Option<serde_json::Value> {
+/// `_session_id` 由统一转发器传入（本映射的载荷不含 session_id——由转发器
+/// 单点注入，保持与主会话同一注入路径）。
+fn chunk_to_stream_json(_session_id: &str, chunk: AgentStreamChunk) -> Option<serde_json::Value> {
     if matches!(
         chunk.chunk_type,
         StreamChunkType::Message | StreamChunkType::Error
@@ -490,27 +495,18 @@ impl ToolRegistry {
             .cloned()
             .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
 
-        // 流式事件转发：AgentStreamChunk → ChatStreamEvent 同构 JSON →
-        // TaskEventSink（task_id 即 session_id，前端完全复用主会话 reducer）。
-        // ADR-031：事件带 type=chat_stream + session_id=task_id——前端
-        // routeChatStreamEvent 按 session_id 路由到任务面板的活跃归约器
-        // （此前无 type/session_id，事件被前端丢弃——子代理流式未生效）。
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<AgentStreamChunk, TianyanError>>(64);
-        let sink = self.task_event_sink.clone();
-        let task_id_owned = task_id.to_string();
-        tokio::spawn(async move {
-            while let Some(chunk) = rx.recv().await {
-                let Ok(chunk) = chunk else { continue };
-                if let Some(mut json) = chunk_to_stream_json(chunk) {
-                    json["type"] = serde_json::json!("chat_stream");
-                    json["session_id"] = serde_json::json!(task_id_owned);
-                    if let Some(sink) = &sink {
-                        sink.emit(&task_id_owned, json).await;
-                    }
-                }
-            }
-        });
-        let sender = StreamEventSender::new(tx);
+        // 流式事件转发（ADR-032 统一转发器）：AgentStreamChunk → 事件 JSON
+        // → TaskEventSink（task_id 即 session_id，前端完全复用主会话 reducer）。
+        // 骨架与用户轮 / 唤醒轮共用（建通道即消费）；`type=chat_stream` +
+        // `session_id=task_id` 由转发器单点注入（前端按 session_id 路由到
+        // 任务面板——此前无这两个字段，事件被前端丢弃）。
+        // 未装配事件通道时走 null 送达（消费端存活，不阻塞子代理轮）。
+        let deliver: Arc<dyn StreamEventDeliver> = match self.task_event_sink.clone() {
+            Some(sink) => Arc::new(TaskSinkDeliver(sink)),
+            None => Arc::new(NullDeliver),
+        };
+        let (sender, forward_handle) =
+            spawn_stream_forwarder(task_id.to_string(), Arc::new(chunk_to_stream_json), deliver);
 
         // AgentLoop 实例（统一循环框架：委托策略——角色过滤工具执行、
         // 不索引 FTS（ADR-026）、max_turns 尽力而为）
@@ -567,6 +563,10 @@ impl ToolRegistry {
                     .await
             }
         }?;
+
+        // 轮结束（sender 已随 run_stream 释放）→ 消费任务收尾：等待句柄确保
+        // 子代理尾部事件（最后一块正文/工具结果）已送达面板。
+        let _ = forward_handle.await;
 
         // 结果转换：AgentLoopResult → 任务结果（watcher 写入任务状态机）
         match result {
