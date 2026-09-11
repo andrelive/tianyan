@@ -145,6 +145,7 @@ fn test_config(data_dir: &Path, workdir: Option<&Path>) -> TianyanConfig {
             timeout: 30,
             enabled: true,
             headers: std::collections::HashMap::new(),
+            thinking_field: None,
         }],
         preferences: ModelPreferences {
             chat: Some(ModelRef {

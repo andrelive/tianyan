@@ -136,6 +136,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: std::collections::HashMap::new(),
+            thinking_field: None,
         };
         assert!(validate_provider(&provider).is_ok());
     }
@@ -150,6 +151,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: std::collections::HashMap::new(),
+            thinking_field: None,
         };
         assert!(validate_provider(&provider).is_err());
     }
@@ -164,6 +166,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: std::collections::HashMap::new(),
+            thinking_field: None,
         };
         assert!(validate_provider(&provider).is_err());
     }

@@ -53,4 +53,20 @@ describe('backend config contract snapshot', () => {
     const second = toBackendConfig(fromBackendConfig({ config: first })).config;
     expect(second).toEqual(first);
   });
+
+  it('does not silently drop provider-level fields (whitelist drift guard)', () => {
+    // 通用防线：config-transform 对 provider 是白名单映射，后端新增 provider 级
+    // 字段（如 thinking_field 传输层思考方言）若未同步，会在「保存设置」时被
+    // 静默丢弃——PUT 是全量替换，用户手写的配置随之丢失。此处逐字段断言
+    // 后端 provider 的每个键都能从 from→to 往返回来。
+    const backendProviders = response.config.models.providers;
+    const state = fromBackendConfig(response);
+    const emitted = toBackendConfig(state).config.models.providers;
+    expect(emitted).toHaveLength(backendProviders.length);
+    backendProviders.forEach((bp, i) => {
+      for (const key of Object.keys(bp)) {
+        expect(emitted[i], `provider[${i}] 丢失字段 ${key}`).toHaveProperty(key);
+      }
+    });
+  });
 });

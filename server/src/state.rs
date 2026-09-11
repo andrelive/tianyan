@@ -809,6 +809,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: std::collections::HashMap::new(),
+            thinking_field: None,
         }
     }
 

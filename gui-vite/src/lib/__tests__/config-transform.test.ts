@@ -138,6 +138,37 @@ describe('fromBackendConfig edge cases', () => {
     expect(state.mcpServers[1].enabled).toBe(false);
   });
 
+  it('keeps thinking_field (transport thinking dialect) through from→to', () => {
+    // 回归锁定：thinking_field 是嗅探不到网关的逃生门，白名单映射漏掉它会
+    // 在「保存设置」时被静默丢弃（PUT 全量替换配置）。
+    const state = fromBackendConfig(
+      makeResponse({
+        models: {
+          providers: [
+            { name: 'gw', endpoint: 'https://gw.corp.example/v1', thinking_field: 'reasoning' },
+            {
+              name: 'ds',
+              endpoint: 'https://api.deepseek.com/v1',
+              thinking_field: 'reasoning_content',
+            },
+            { name: 'auto', endpoint: 'https://ollama.com/v1' },
+          ],
+          preferences: {},
+        },
+      }),
+    );
+    expect(state.providers[0].thinking_field).toBe('reasoning');
+    expect(state.providers[1].thinking_field).toBe('reasoning_content');
+    expect(state.providers[2].thinking_field).toBeUndefined();
+
+    const req = toBackendConfig(state) as BackendUpdateRequest;
+    const emitted = req.config.models.providers;
+    expect(emitted[0].thinking_field).toBe('reasoning');
+    expect(emitted[1].thinking_field).toBe('reasoning_content');
+    // 缺省不序列化（不污染用户配置文件）
+    expect('thinking_field' in emitted[2]).toBe(false);
+  });
+
   it('keeps model_specs and model_catalog passthrough', () => {
     const state = fromBackendConfig({
       config: { models: { providers: [], preferences: {} } },

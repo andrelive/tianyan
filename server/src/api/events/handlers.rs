@@ -122,6 +122,7 @@ mod tests {
                 timeout: 30,
                 enabled: true,
                 headers: std::collections::HashMap::new(),
+                thinking_field: None,
             }],
             preferences: ModelPreferences {
                 chat: Some(ModelRef {

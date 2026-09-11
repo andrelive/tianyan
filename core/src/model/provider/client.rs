@@ -2,7 +2,7 @@ use async_openai::types::chat::FinishReason;
 use async_openai::{config::OpenAIConfig, Client};
 
 use crate::common::error::{Result, TianyanError};
-use crate::config::ProviderConfig;
+use crate::config::{ProviderConfig, ThinkingField};
 use crate::model::retry::RetryPolicy;
 
 /// 基于 async-openai 的模型服务客户端。
@@ -28,6 +28,12 @@ pub struct AsyncOpenAIClient {
     /// 语义为"空闲"而非"总时长"——长思维链生成可持续数分钟，总时长
     /// 限制会把活跃长流在中途掐断（0.2.3 会话静默中断根因之一）。
     pub(crate) read_idle: std::time::Duration,
+    /// 传输层思考方言：历史 assistant 消息的思考内容用哪个 wire 字段名。
+    ///
+    /// 构造时按「显式配置 > endpoint/名称嗅探 > 默认」解析一次并缓存；
+    /// 请求路径上不再重复判断。字段名不匹配时服务端静默丢弃思考内容，
+    /// 请求仍成功——发错不会报错，只会静默损失上下文。
+    pub(crate) thinking_field: ThinkingField,
 }
 
 impl AsyncOpenAIClient {
@@ -65,6 +71,7 @@ impl AsyncOpenAIClient {
             headers: config.headers.clone(),
             retry_policy: RetryPolicy::default(),
             read_idle: std::time::Duration::from_secs(config.timeout),
+            thinking_field: config.resolve_thinking_field(),
         })
     }
 
@@ -83,6 +90,7 @@ impl AsyncOpenAIClient {
             timeout: timeout_secs,
             enabled: true,
             headers: std::collections::HashMap::new(),
+            thinking_field: None,
         };
         Self::from_provider(&provider)
     }
@@ -117,6 +125,7 @@ mod tests {
             timeout: 30,
             enabled: true,
             headers: std::collections::HashMap::new(),
+            thinking_field: None,
         }
     }
 
@@ -133,6 +142,59 @@ mod tests {
         let config = provider("local", "http://localhost:11434/v1", None);
         let client = AsyncOpenAIClient::from_provider(&config).expect("无密钥构造客户端");
         assert_eq!(client.service_name(), "local");
+    }
+
+    /// 客户端在构造时就把方言解析完毕（请求路径不再判断）：
+    /// ollama 端点/名称 → reasoning；其余 → reasoning_content。
+    #[test]
+    fn test_from_provider_resolves_thinking_field() {
+        let ollama_cloud = provider("ollama", "https://ollama.com/v1", Some("k"));
+        assert_eq!(
+            AsyncOpenAIClient::from_provider(&ollama_cloud)
+                .unwrap()
+                .thinking_field,
+            ThinkingField::Ollama
+        );
+
+        let local = provider("local", "http://127.0.0.1:11434/v1", None);
+        assert_eq!(
+            AsyncOpenAIClient::from_provider(&local)
+                .unwrap()
+                .thinking_field,
+            ThinkingField::Ollama
+        );
+
+        let deepseek = provider("deepseek", "https://api.deepseek.com/v1", Some("k"));
+        assert_eq!(
+            AsyncOpenAIClient::from_provider(&deepseek)
+                .unwrap()
+                .thinking_field,
+            ThinkingField::ReasoningContent
+        );
+    }
+
+    /// 显式配置覆盖嗅探（自建代理/嗅探不到的网关逃生门）。
+    #[test]
+    fn test_explicit_thinking_field_overrides_sniff() {
+        // 自建网关（嗅探不到）显式声明为 ollama 方言
+        let mut custom = provider("my-gateway", "https://gw.corp.example/v1", Some("k"));
+        custom.thinking_field = Some(ThinkingField::Ollama);
+        assert_eq!(
+            AsyncOpenAIClient::from_provider(&custom)
+                .unwrap()
+                .thinking_field,
+            ThinkingField::Ollama
+        );
+
+        // ollama 端点被显式改回 DeepSeek 方言
+        let mut ollama = provider("ollama", "https://ollama.com/v1", Some("k"));
+        ollama.thinking_field = Some(ThinkingField::ReasoningContent);
+        assert_eq!(
+            AsyncOpenAIClient::from_provider(&ollama)
+                .unwrap()
+                .thinking_field,
+            ThinkingField::ReasoningContent
+        );
     }
 
     #[test]

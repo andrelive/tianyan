@@ -35,6 +35,7 @@ export function emptyProvider(): ProviderConfigState {
     enabled: true,
     is_local: false,
     headers: {},
+    thinking_field: undefined,
   };
 }
 
@@ -146,6 +147,11 @@ interface BackendProviderConfig {
   enabled: boolean;
   is_local: boolean;
   headers: Record<string, string>;
+  /**
+   * 传输层思考字段名（可选）。缺省时后端按 endpoint/名称嗅探，
+   * 回落 `reasoning_content`。**必须透传**：漏掉会在「保存设置」时被静默丢弃。
+   */
+  thinking_field?: 'reasoning_content' | 'reasoning';
 }
 
 interface BackendModelRef {
@@ -321,6 +327,8 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
           enabled: p.enabled,
           is_local: p.is_local || false,
           headers: p.headers || {},
+          // 显式配置才写入（缺省不序列化，避免污染用户配置文件）
+          ...(p.thinking_field ? { thinking_field: p.thinking_field } : {}),
         })),
         preferences: {
           chat: toModelRef(cs.preferences.chat),
@@ -438,6 +446,7 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
       enabled: p.enabled ?? true,
       is_local: p.is_local ?? false,
       headers: p.headers ?? {},
+      thinking_field: p.thinking_field ?? undefined,
     })),
     resolvedSpecs: response.model_specs ?? {},
     modelCatalog: response.model_catalog ?? {},

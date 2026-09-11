@@ -34,7 +34,7 @@ pub use mcp::{McpConfig, McpServerEntry};
 pub use memory::MemoryConfig;
 pub use model::{
     find_provider, ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig,
-    ProviderConfig,
+    ProviderConfig, ThinkingField,
 };
 pub use reminder::ReminderConfig;
 pub use retrieval::RetrievalConfig;

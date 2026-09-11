@@ -336,6 +336,7 @@ impl ConfigService {
                         timeout: 60,
                         enabled: true,
                         headers: Default::default(),
+                        thinking_field: None,
                     });
                 config
                     .models
@@ -395,6 +396,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: Default::default(),
+            thinking_field: None,
         }
     }
 

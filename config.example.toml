@@ -98,6 +98,14 @@ capabilities = ["text-embedding", "multimodal-embedding"]
 # endpoint = "http://localhost:11434/v1"
 # api_key = ""
 #
+# 传输层思考字段名（可选，thinking_field）：
+#   历史 assistant 消息的思考内容用哪个 wire 字段名回传。
+#   "reasoning_content"（DeepSeek / OpenAI 生态）| "reasoning"（ollama 兼容层）。
+#   不配置时按 endpoint/名称嗅探：含 ollama 或 :11434 → reasoning，其余 → reasoning_content。
+#   发错字段名不会报错（服务端忽略未知字段），但思考内容会被静默丢弃、根本没进 prompt。
+#   自建代理/嗅探不到的网关用此项显式指定，例如：
+#   thinking_field = "reasoning"
+#
 # 本地 chat 模型示例（128K 上下文，输出上限 32K）：
 # [[models.providers.models]]
 # name = "qwen2.5-72b-instruct"

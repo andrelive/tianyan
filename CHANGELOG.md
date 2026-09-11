@@ -60,6 +60,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed（会话消耗汇总漏计工具轮输入，2026-09-03）
 - **流式 usage 事件逐轮下发**：AgentLoop 每轮 LLM 调用都有真实 usage（完整上下文重发，O(n²) 量级），但流式事件只有最终轮经 `send_complete` 下发——中间工具轮的 usage 从未下发，前端本地消息只有每轮对话的最后一条 assistant 消息带 usage，`sumSessionUsage` 漏计所有中间轮输入（刷新历史后正确，流式过程中错误）。新增 `StreamEventSender::send_turn_usage`（delta 空、is_complete=false，前端归约器只消费 usage 字段，无正文/边界副作用），工具轮 persist 后逐轮下发（回归测试锁定）
 
+### Fixed（ollama 思考字段回传，2026-09-11）
+- **根因**：0.2.7 只修了"读"（`DeltaContent` 加 serde alias `reasoning`）没修"写"——`inject_reasoning_content` 把历史思考无条件写到 `reasoning_content`，而 ollama 的 OpenAI 兼容层（`openai/openai.go` 的 `Message.Reasoning`）**只解析 `reasoning`**。Go 的 `encoding/json` 静默忽略未知字段，所以请求照样成功，但思考内容根本没进 prompt——多轮上下文与思考一致性悄悄受损（实测：ollama cloud 上 `reasoning_content` 的 `prompt_tokens` 零增长，`reasoning` 则 +2300；类型探针也证实只有 `reasoning` 报 400）
+- **修复**：新增 `ThinkingField` 传输层方言（`ReasoningContent` / `Ollama`），在 `AsyncOpenAIClient::from_provider` 按「**显式配置 > endpoint/名称嗅探 > 默认**」解析一次并缓存；`inject_reasoning_content` 按方言写字段名（互斥、不双写）。嗅探只认已知 ollama 域名与默认端口（`ollama` / `:11434`）及名称含 `ollama`，其余回落 `reasoning_content`——**刻意不猜自建域名**，猜不到时用 `thinking_field` 配置项显式覆盖
+- **新增配置**：`[[models.providers]] thinking_field = "reasoning" | "reasoning_content"`（可选；缺省不序列化，不污染用户配置文件）
+- 回归测试：方言写入互斥、嗅探命中/未命中、显式配置覆盖嗅探、TOML 解析与缺省省略
+
+### Fixed（前端配置往返丢弃 provider 新字段，2026-09-11）
+- **根因**：前端 `config-transform.ts` 对 provider 是**白名单映射**（from/to 双向都只列已知字段），而后端 `PUT /api/v1/config` 是**全量替换**——后端新增的 provider 级字段（本次的 `thinking_field`）不在白名单里，用户按文档手写进 `tianyan.toml` 后，只要打开设置页点一次"保存"，该字段就被静默抹掉。同类缺陷曾在 `learned_rules_top_k` / `shortlist_tools` / `safety_mode` 上发生过（契约快照测试的由来）
+- **修复**：`ProviderConfigState` 增加 `thinking_field`，`fromBackendConfig` / `toBackendConfig` 双向透传（缺省不序列化）；设置页 provider 卡片新增「思考字段名」下拉（自动 / `reasoning_content` / `reasoning`）——逃生门字段必须能在 UI 里设置，否则只能手改 TOML
+- **回归测试**：`config-transform.test.ts` 新增 from→to 往返保留用例（含缺省省略）；`contract.test.ts` 新增**通用防线**——逐字段断言后端 provider 的每个键都能往返回来，防止下一个新增 provider 字段重蹈覆辙
+
+### Fixed（唤醒轮事件转发死锁，2026-09-11）
+- **现象**：后台命令/任务完成后，唤醒轮的输出不实时显示，退出重进才看到
+- **根因**：唤醒轮转发器先 `await` 整个 `process_wake` 完成，之后才去 `rx.recv()` 取事件——期间事件持续写入容量 100 的通道，唤醒轮输出超过缓冲即 `send().await` 阻塞，形成死锁（轮等转发器收、转发器等轮完）
+- **修复**：`process_wake` 改收 `sender` 参数（与 `process_message_stream` 同构），转发器在轮开始前就建通道并立即消费；新增防死锁回归测试
+
+### Changed（流式事件转发三处接线收敛为单一实现，ADR-032，2026-09-11）
+- **根因**："chunk → 事件 JSON → 统一通道"的接线在用户轮 / 唤醒轮 / 子代理三处手写，已出现漂移（容量 100/100/64 不统一、字段注入各写一遍）——上述死锁 bug 正是该结构的产物（顺序写错从代码上看不出来）
+- **重构**：core 新增 `agent/stream_forward.rs`——`spawn_stream_forwarder` 原子地建通道并启动消费任务（反向顺序从结构上写不出来），返回 `(sender, JoinHandle)`；`StreamEventMapper` / `StreamEventDeliver` 为有意保留的可插拔 seam（映射器与送达目标），内置 `BroadcastJsonDeliver`（用户轮）/ `TaskSinkDeliver`（子代理）/ `NullDeliver`；`inject_stream_event_fields` 单点注入路由字段。三处调用点改为复用该函数，`process_message_stream` 签名与 `process_wake` 同构
+- **回归测试**：`stream_forward` 6 项单测 + 端到端 `test_wake_forwarder_delivers_events_while_turn_running`（锁定"轮运行中事件已送达"）
+
 ### Fixed（托盘退出卡死，2026-09-03）
 - **常驻 SSE 流阻塞优雅关停**：`GET /tasks/stream`（后台任务聚合 SSE，ADR-026）forwarder 死等 broadcast 消息，前端 EventSource 常驻订阅——axum `with_graceful_shutdown` 等待所有活跃连接结束永不完成，托盘「退出」卡死只能杀进程。forwarder 加 shutdown 感知（`tokio::select!` 轮询 `shutdown_flag` 1s 间隔，与 `/chat/stream` 同模式）；ADR-026 补充「常驻 SSE 端点必须 shutdown 感知」约束
 

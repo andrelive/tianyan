@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{Message, MessageRole, TokenUsage};
+use crate::config::ThinkingField;
 use crate::model::traits::ChatService;
 use crate::model::types::{
     ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ToolCall,
@@ -62,7 +63,7 @@ impl ChatService for AsyncOpenAIClient {
                     retryable: false,
                     message: format!("序列化请求失败：{}", e),
                 })?;
-                inject_reasoning_content(&mut body, &request.messages);
+                inject_reasoning_content(&mut body, &request.messages, self.thinking_field);
                 if let Some(effort) = request.thinking_effort.as_deref() {
                     if effort != "off" {
                         apply_thinking_params(&mut body, effort, &request.model);
@@ -179,7 +180,7 @@ impl ChatService for AsyncOpenAIClient {
             .map_err(|e| TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e)))?;
         // 回传历史思考内容（DeepSeek 思考模型要求：携带 tools 的请求必须
         // 完整回传 reasoning_content，即使该轮未实际进行工具调用）。
-        inject_reasoning_content(&mut body, &request.messages);
+        inject_reasoning_content(&mut body, &request.messages, self.thinking_field);
         if let Some(effort) = request.thinking_effort.as_deref() {
             if effort != "off" {
                 apply_thinking_params(&mut body, effort, &request.model);
@@ -598,10 +599,15 @@ fn user_content(m: &Message) -> ChatCompletionRequestUserMessageContent {
 /// 携带 tools 的请求必须完整回传 reasoning_content（即使该轮未实际进行
 /// 工具调用），否则多轮工具调用会报错/丢失上下文。序列化后按索引回填。
 /// `convert_messages` 对每条 [`Message`] 恰好生成一条请求消息，索引一一对应。
-fn inject_reasoning_content(body: &mut Value, messages: &[Message]) {
+///
+/// **字段名按 provider 方言决定**（[`ThinkingField`]）：DeepSeek / OpenAI 生态
+/// 用 `reasoning_content`，ollama 的 OpenAI 兼容层用 `reasoning`。发错字段名
+/// 不会报错（服务端忽略未知字段），但思考内容会被静默丢弃、根本没进 prompt。
+fn inject_reasoning_content(body: &mut Value, messages: &[Message], dialect: ThinkingField) {
     let Some(arr) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
+    let field = dialect.wire_name();
     for (msg, entry) in messages.iter().zip(arr.iter_mut()) {
         if msg.role != MessageRole::Assistant {
             continue;
@@ -612,7 +618,7 @@ fn inject_reasoning_content(body: &mut Value, messages: &[Message]) {
         if reasoning.is_empty() {
             continue;
         }
-        entry["reasoning_content"] = Value::String(reasoning.to_string());
+        entry[field] = Value::String(reasoning.to_string());
     }
 }
 
@@ -826,7 +832,11 @@ mod convert_tests {
         let mut body = serde_json::to_value(converted).unwrap();
         // 模拟完整请求体（messages 数组）
         let mut request_body = serde_json::json!({ "messages": body });
-        inject_reasoning_content(&mut request_body, &messages);
+        inject_reasoning_content(
+            &mut request_body,
+            &messages,
+            ThinkingField::ReasoningContent,
+        );
         let arr = request_body["messages"].as_array().unwrap();
         assert!(arr[0].get("reasoning_content").is_none(), "system 不注入");
         assert!(arr[1].get("reasoning_content").is_none(), "user 不注入");
@@ -844,7 +854,11 @@ mod convert_tests {
         let messages = vec![assistant];
         let converted = convert_messages(&messages);
         let mut request_body = serde_json::json!({ "messages": converted });
-        inject_reasoning_content(&mut request_body, &messages);
+        inject_reasoning_content(
+            &mut request_body,
+            &messages,
+            ThinkingField::ReasoningContent,
+        );
         let arr = request_body["messages"].as_array().unwrap();
         assert!(
             arr[0].get("reasoning_content").is_none(),
@@ -862,10 +876,61 @@ mod convert_tests {
         let messages = vec![a1, a2];
         let converted = convert_messages(&messages);
         let mut request_body = serde_json::json!({ "messages": converted });
-        inject_reasoning_content(&mut request_body, &messages);
+        inject_reasoning_content(
+            &mut request_body,
+            &messages,
+            ThinkingField::ReasoningContent,
+        );
         let arr = request_body["messages"].as_array().unwrap();
         assert_eq!(arr[0]["reasoning_content"].as_str(), Some("思考一"));
         assert_eq!(arr[1]["reasoning_content"].as_str(), Some("思考二"));
+    }
+
+    /// ollama 方言：历史思考必须写在 `reasoning` 上（而非 `reasoning_content`）。
+    ///
+    /// 回归锁定：ollama 的 OpenAI 兼容层只解析 `reasoning`，`reasoning_content`
+    /// 会被静默丢弃（实测：prompt_tokens 零增长；类型探针 400 仅对 reasoning 报错）。
+    #[test]
+    fn test_inject_reasoning_content_ollama_dialect() {
+        let mut assistant = Message::assistant("42");
+        assistant.reasoning_content = Some("思考过程".to_string());
+        let messages = vec![
+            Message::system("You are helpful"),
+            Message::user("What is 6*7?"),
+            assistant,
+        ];
+        let converted = convert_messages(&messages);
+        let mut request_body = serde_json::json!({ "messages": converted });
+        inject_reasoning_content(&mut request_body, &messages, ThinkingField::Ollama);
+        let arr = request_body["messages"].as_array().unwrap();
+        assert_eq!(
+            arr[2]["reasoning"].as_str(),
+            Some("思考过程"),
+            "ollama 方言必须写 reasoning 字段"
+        );
+        assert!(
+            arr[2].get("reasoning_content").is_none(),
+            "ollama 方言不得再写 reasoning_content（避免双写）"
+        );
+    }
+
+    /// 两个方言互斥：同一条消息在两个方言下写不同字段名，不双写。
+    #[test]
+    fn test_inject_reasoning_content_dialects_are_exclusive() {
+        let mut assistant = Message::assistant("42");
+        assistant.reasoning_content = Some("x".to_string());
+        let messages = vec![assistant];
+        let converted = convert_messages(&messages);
+
+        let mut ds = serde_json::json!({ "messages": converted.clone() });
+        inject_reasoning_content(&mut ds, &messages, ThinkingField::ReasoningContent);
+        assert!(ds["messages"][0].get("reasoning_content").is_some());
+        assert!(ds["messages"][0].get("reasoning").is_none());
+
+        let mut ol = serde_json::json!({ "messages": converted });
+        inject_reasoning_content(&mut ol, &messages, ThinkingField::Ollama);
+        assert!(ol["messages"][0].get("reasoning").is_some());
+        assert!(ol["messages"][0].get("reasoning_content").is_none());
     }
 
     #[test]

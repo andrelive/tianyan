@@ -57,6 +57,53 @@ impl std::fmt::Display for ModelCapability {
     }
 }
 
+// ─── 传输层思考方言 ───
+
+/// 传输层"思考"方言。
+///
+/// 决定历史 assistant 消息的思考内容在 HTTP wire 上用哪个字段名表达。
+/// 各 OpenAI 兼容实现的字段名并不统一：DeepSeek 官方与 OpenAI 生态用
+/// `reasoning_content`，ollama 的 OpenAI 兼容层用 `reasoning`。发错字段名
+/// 时服务端会**静默丢弃**（Go 的 `encoding/json` 忽略未知字段），请求仍然
+/// 成功，但思考内容根本没进 prompt——上下文与多轮一致性悄悄受损。
+///
+/// 本类型只描述"字段名"这一件事，与思考强度档位（模型维度）正交。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ThinkingField {
+    /// DeepSeek / OpenAI 生态：assistant 消息上的 `reasoning_content`。
+    #[default]
+    #[serde(rename = "reasoning_content")]
+    ReasoningContent,
+    /// ollama OpenAI 兼容层：assistant 消息上的 `reasoning`。
+    #[serde(rename = "reasoning")]
+    Ollama,
+}
+
+impl ThinkingField {
+    /// 该方言在 wire 上使用的字段名。
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::ReasoningContent => "reasoning_content",
+            Self::Ollama => "reasoning",
+        }
+    }
+
+    /// 按 endpoint 与提供商名称嗅探方言（仅在未显式配置时使用）。
+    ///
+    /// 只认已知的 ollama 域名与默认端口，以及名称里含 `ollama` 的提供商；
+    /// 其余一律回落到 `reasoning_content`。**刻意不猜测自建域名/代理**——
+    /// 猜错时用户可用 `thinking_field` 显式覆盖，而不是让嗅探去赌。
+    pub fn sniff(endpoint: &str, provider_name: &str) -> Self {
+        let ep = endpoint.to_ascii_lowercase();
+        let name = provider_name.to_ascii_lowercase();
+        if ep.contains("ollama") || ep.contains(":11434") || name.contains("ollama") {
+            Self::Ollama
+        } else {
+            Self::ReasoningContent
+        }
+    }
+}
+
 // ─── 模型提供商 ───
 
 /// 模型提供商配置。
@@ -84,9 +131,22 @@ pub struct ProviderConfig {
     /// 自定义请求头。
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// 传输层思考字段名（可选）。
+    ///
+    /// 缺省时按 endpoint / 名称嗅探（见 [`ThinkingField::sniff`]），再回落
+    /// 到 `reasoning_content`。自建代理或嗅探不到的网关用此字段显式指定。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub thinking_field: Option<ThinkingField>,
 }
 
 impl ProviderConfig {
+    /// 解析传输层思考方言：显式配置 > 嗅探 > 默认。
+    ///
+    /// 在客户端构造时调用一次并缓存，请求路径上不再重复判断。
+    pub fn resolve_thinking_field(&self) -> ThinkingField {
+        self.thinking_field
+            .unwrap_or_else(|| ThinkingField::sniff(&self.endpoint, &self.name))
+    }
     /// 解析 API 密钥（支持 `${ENV_VAR}` 格式）。
     pub fn resolve_api_key(&self) -> String {
         let raw = self.api_key.as_deref().unwrap_or("");
@@ -331,6 +391,127 @@ fn default_true() -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_thinking_field_wire_names() {
+        assert_eq!(
+            ThinkingField::ReasoningContent.wire_name(),
+            "reasoning_content"
+        );
+        assert_eq!(ThinkingField::Ollama.wire_name(), "reasoning");
+    }
+
+    #[test]
+    fn test_thinking_field_default_is_reasoning_content() {
+        assert_eq!(ThinkingField::default(), ThinkingField::ReasoningContent);
+    }
+
+    #[test]
+    fn test_thinking_field_sniff_ollama() {
+        // 官方云端点、本地默认端口、名称含 ollama——三种已知形态均命中
+        for (ep, name) in [
+            ("https://ollama.com/v1", "my-cloud"),
+            ("http://localhost:11434/v1", "local"),
+            ("http://127.0.0.1:11434/v1", "local"),
+            ("https://proxy.example.com/v1", "ollama"),
+            ("https://OLLAMA.com/v1", "x"),
+        ] {
+            assert_eq!(
+                ThinkingField::sniff(ep, name),
+                ThinkingField::Ollama,
+                "应嗅探为 Ollama: {ep} / {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_thinking_field_sniff_defaults_to_reasoning_content() {
+        // 刻意不猜自建域名：未识别的端点回落 reasoning_content，由用户显式覆盖
+        for (ep, name) in [
+            ("https://api.deepseek.com/v1", "deepseek"),
+            ("https://api.openai.com/v1", "openai"),
+            ("https://gateway.corp.example/v1", "my-gateway"),
+            ("https://opencode.ai/zen/go/v1", "opencode"),
+        ] {
+            assert_eq!(
+                ThinkingField::sniff(ep, name),
+                ThinkingField::ReasoningContent,
+                "应回落 reasoning_content: {ep} / {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_thinking_field_precedence() {
+        let base = make_provider(make_model("m", vec![ModelCapability::Chat]));
+
+        // 1) 显式配置 > 嗅探：ollama 端点被显式改为 reasoning_content
+        let explicit = ProviderConfig {
+            endpoint: "https://ollama.com/v1".to_string(),
+            thinking_field: Some(ThinkingField::ReasoningContent),
+            ..base.clone()
+        };
+        assert_eq!(
+            explicit.resolve_thinking_field(),
+            ThinkingField::ReasoningContent,
+            "显式配置必须覆盖嗅探"
+        );
+
+        // 2) 未配置时按端点嗅探
+        let sniffed = ProviderConfig {
+            endpoint: "https://ollama.com/v1".to_string(),
+            thinking_field: None,
+            ..base.clone()
+        };
+        assert_eq!(sniffed.resolve_thinking_field(), ThinkingField::Ollama);
+
+        // 3) 未配置且不可识别 → 默认
+        let fallback = ProviderConfig {
+            endpoint: "https://api.deepseek.com/v1".to_string(),
+            thinking_field: None,
+            ..base
+        };
+        assert_eq!(
+            fallback.resolve_thinking_field(),
+            ThinkingField::ReasoningContent
+        );
+    }
+
+    #[test]
+    fn test_thinking_field_serde_roundtrip() {
+        // 配置里的写法（snake_case 字符串）必须能解析
+        let p: ProviderConfig = toml::from_str(
+            r#"
+            name = "ollama"
+            endpoint = "https://ollama.com/v1"
+            thinking_field = "reasoning"
+
+            [[models]]
+            name = "m"
+            capabilities = ["chat"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(p.thinking_field, Some(ThinkingField::Ollama));
+        assert_eq!(p.resolve_thinking_field(), ThinkingField::Ollama);
+
+        // 缺省时不序列化（不污染用户配置文件）
+        let json = serde_json::to_string(&base_provider()).unwrap();
+        assert!(!json.contains("thinking_field"));
+    }
+
+    fn base_provider() -> ProviderConfig {
+        ProviderConfig {
+            name: "x".to_string(),
+            endpoint: "https://x.com".to_string(),
+            api_key: None,
+            models: vec![],
+            timeout: 60,
+            enabled: true,
+            headers: HashMap::new(),
+            thinking_field: None,
+        }
+    }
+
     fn make_model(name: &str, caps: Vec<ModelCapability>) -> ModelEntry {
         ModelEntry {
             name: name.to_string(),
@@ -348,6 +529,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: HashMap::new(),
+            thinking_field: None,
         }
     }
 
@@ -361,6 +543,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: HashMap::new(),
+            thinking_field: None,
         };
         assert!(p.validate().is_ok());
     }
@@ -375,6 +558,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: HashMap::new(),
+            thinking_field: None,
         };
         assert!(p.validate().is_err());
     }
@@ -389,6 +573,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: HashMap::new(),
+            thinking_field: None,
         };
         assert!(p.validate().is_err());
     }
@@ -403,6 +588,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: HashMap::new(),
+            thinking_field: None,
         };
         assert!(p.validate().is_err());
     }
@@ -418,6 +604,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: HashMap::new(),
+            thinking_field: None,
         };
         assert_eq!(p.resolve_api_key(), "env-key-value");
         std::env::remove_var("TIANYAN_TEST_KEY2");
@@ -433,6 +620,7 @@ mod tests {
             timeout: 60,
             enabled: true,
             headers: HashMap::new(),
+            thinking_field: None,
         };
         assert_eq!(p.resolve_api_key(), "sk-plain");
     }
@@ -448,6 +636,7 @@ mod tests {
                     timeout: 60,
                     enabled: true,
                     headers: HashMap::new(),
+                    thinking_field: None,
                     models: vec![
                         make_model("gpt-4", vec![ModelCapability::Chat]),
                         make_model(
@@ -463,6 +652,7 @@ mod tests {
                     timeout: 60,
                     enabled: true,
                     headers: HashMap::new(),
+                    thinking_field: None,
                     models: vec![make_model("deepseek-chat", vec![ModelCapability::Chat])],
                 },
             ],
@@ -498,6 +688,7 @@ mod tests {
                 timeout: 60,
                 enabled: true,
                 headers: HashMap::new(),
+                thinking_field: None,
                 models: vec![
                     make_model(
                         "gpt-4",
@@ -533,6 +724,7 @@ mod tests {
                 timeout: 60,
                 enabled: true,
                 headers: HashMap::new(),
+                thinking_field: None,
                 models: vec![make_model(
                     "te3",
                     vec![

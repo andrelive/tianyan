@@ -19,6 +19,7 @@ import type {
   DiscoveredModelInfo,
   ProviderProtocol,
   ResolvedModelSpec,
+  ThinkingField,
 } from '@/lib/types';
 import { MODEL_CAPABILITIES, MODEL_CAPABILITY_LABELS } from '@/lib/types';
 import type { ProviderScanState } from '@/hooks/use-provider-scan';
@@ -164,9 +165,7 @@ function ModelRow({
   onToggleCapability,
 }: ModelRowProps) {
   return (
-    <div
-      className="flex items-start gap-2 mb-2 p-2 rounded bg-[var(--color-bg-secondary)]"
-    >
+    <div className="flex items-start gap-2 mb-2 p-2 rounded bg-[var(--color-bg-secondary)]">
       <div className="flex-1 min-w-0">
         <input
           type="text"
@@ -543,6 +542,30 @@ export default function ProviderCard({
             )}
             测试连接
           </button>
+        </div>
+        {/* 思考字段名（传输层方言逃生门）：嗅探不到的网关在此显式指定。
+        占满整行，描述较长。 */}
+        <div className="col-span-2">
+          <FieldRow
+            label="思考字段名"
+            description="历史思考回传用哪个字段名；自动 = 按端点/名称嗅探（ollama → reasoning，其余 → reasoning_content）"
+          >
+            <select
+              aria-label="思考字段名"
+              value={p.thinking_field ?? ''}
+              onChange={(e) =>
+                onUpdateProvider(
+                  'thinking_field',
+                  e.target.value === '' ? undefined : (e.target.value as ThinkingField),
+                )
+              }
+              className={INPUT_CLASS}
+            >
+              <option value="">自动（按端点/名称嗅探）</option>
+              <option value="reasoning_content">reasoning_content（DeepSeek / OpenAI）</option>
+              <option value="reasoning">reasoning（ollama 兼容层）</option>
+            </select>
+          </FieldRow>
         </div>
       </div>
 

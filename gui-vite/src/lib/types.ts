@@ -3,13 +3,7 @@
 export type MessageRole = 'system' | 'user' | 'assistant';
 
 export type StreamChunkType =
-  | 'answer'
-  | 'thought'
-  | 'tool_call'
-  | 'observation'
-  | 'error'
-  | 'message'
-  | 'user_message_id';
+  'answer' | 'thought' | 'tool_call' | 'observation' | 'error' | 'message' | 'user_message_id';
 
 export interface ChatMessage {
   /** 消息 ID（服务端 msg_xxx；null = 本地占位——流式期间无 id，
@@ -645,7 +639,16 @@ export interface ProviderConfigState {
   enabled: boolean;
   is_local: boolean;
   headers: Record<string, string>;
+  /**
+   * 传输层思考字段名（后端 `thinking_field`）：历史思考内容回传用哪个 wire 字段名。
+   * `undefined` = 未显式配置（后端按 endpoint/名称嗅探，回落 reasoning_content）。
+   * 自建代理/嗅探不到的网关用此项显式指定。
+   */
+  thinking_field?: ThinkingField;
 }
+
+/** 传输层思考方言（与后端 `ThinkingField` 对应，serde snake_case 字符串）。 */
+export type ThinkingField = 'reasoning_content' | 'reasoning';
 
 // ── Model Reference & Preferences (matches backend ModelRef / ModelPreferences) ──
 
