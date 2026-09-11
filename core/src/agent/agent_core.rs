@@ -172,18 +172,14 @@ impl Agent {
     /// System 完成通知）+ 唤醒指令；模型可输出空文本合法结束；失败重试
     /// [`WAKE_RETRY_LIMIT`] 次后降级为静默（消息已在 transcript，用户下
     /// 一条消息自然触发）。
-    /// 唤醒轮（ADR-013：后台任务完成 → 主 agent 汇总下一轮）。
     ///
-    /// ADR-031：**流式化**——输出经 StreamEventSender 逐 chunk 推送（调用方
-    /// 转发到统一事件通道，前端打字机看到汇总），不再依赖"落库广播"作为
-    /// 无活跃流时的输出通道。返回事件接收器（调用方消费/转发；不消费时
-    /// 发送静默失败，不影响唤醒轮本身）。
-    pub(crate) async fn process_wake(
-        &self,
-        session_id: &str,
-    ) -> mpsc::Receiver<Result<AgentStreamChunk>> {
-        let (tx, rx) = mpsc::channel(100);
-        let sender = StreamEventSender::new(tx.clone());
+    /// ADR-031：**流式化**——输出经调用方传入的 [`StreamEventSender`] 逐
+    /// chunk 推送（调用方转发到统一事件通道，前端打字机看到汇总）。调用方
+    /// 必须在调用**前**创建事件通道并**立即开始消费**（转发器先启动消费
+    /// 任务再调用本方法）——唤醒轮期间事件实时流出；若先 await 本方法再
+    /// 消费，输出会积压到轮结束（超过通道缓冲还会死锁：发送端等消费、
+    /// 消费方等轮结束）。
+    pub(crate) async fn process_wake(&self, session_id: &str, sender: StreamEventSender) {
         let _turn = self.turn_guard(session_id).await;
 
         let mut last_err: Option<String> = None;
@@ -263,7 +259,7 @@ impl Agent {
                 .await;
             self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
                 .await;
-            return rx;
+            return;
         }
         tracing::warn!(
             error = ?last_err,
@@ -275,7 +271,6 @@ impl Agent {
         sender
             .send_error(&format!("唤醒轮失败：{}", last_err.unwrap_or_default()))
             .await;
-        rx
     }
 
     /// 组装唤醒轮上下文（ADR-013）。
@@ -968,8 +963,14 @@ impl TaskWaker for AgentWakeForwarder {
         let session_id = session_id.to_string();
         let forward = self.forward.clone();
         tokio::spawn(async move {
-            let rx = agent.process_wake(&session_id).await;
+            // 事件通道在唤醒轮**开始前**交给转发器（转发器立即启动消费
+            // 任务）——唤醒轮期间事件实时流出。此前先 await 整个唤醒轮
+            // 再取 rx：输出积压到轮结束才转发，超过通道缓冲（100）还会
+            // 死锁（发送端等消费、转发器等轮结束）。
+            let (tx, rx) = mpsc::channel(100);
+            let sender = StreamEventSender::new(tx);
             forward(&session_id, rx);
+            agent.process_wake(&session_id, sender).await;
         });
     }
 }
@@ -1398,10 +1399,12 @@ mod tests {
         // ADR-031：唤醒轮流式化——mock 走 chat_completion_stream
         let mock = stream_mock(vec![stream_chunk_finish("三个调研任务汇总：已完成")]);
         let agent = make_agent(mock);
-
-        let rx = agent.process_wake("session-1").await;
-        // 消费事件（转发器语义：不消费时发送静默失败，不影响唤醒轮）
+        // 事件通道：接收端丢弃（发送静默失败，不影响唤醒轮本身）
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
         drop(rx);
+        agent
+            .process_wake("session-1", StreamEventSender::new(tx))
+            .await;
 
         let state = agent.state.read().await;
         assert_eq!(
@@ -1416,9 +1419,11 @@ mod tests {
         // 重试仍空才按正常结束处理（非错误）
         let mock = stream_mock(vec![stream_chunk_finish("")]);
         let agent = make_agent(mock);
-
-        let rx = agent.process_wake("session-1").await;
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
         drop(rx);
+        agent
+            .process_wake("session-1", StreamEventSender::new(tx))
+            .await;
 
         let state = agent.state.read().await;
         assert_eq!(
@@ -1450,8 +1455,11 @@ mod tests {
         });
         let agent = make_agent(mock);
 
-        let rx = agent.process_wake("session-1").await;
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
         drop(rx);
+        agent
+            .process_wake("session-1", StreamEventSender::new(tx))
+            .await;
 
         let state = agent.state.read().await;
         assert_eq!(
@@ -1533,11 +1541,52 @@ mod tests {
             .times(3)
             .returning(|_| Err(TianyanError::Custom("mock: LLM 不可用".to_string())));
         let agent = make_agent(mock);
-
-        let rx = agent.process_wake("session-1").await;
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
         drop(rx);
+        agent
+            .process_wake("session-1", StreamEventSender::new(tx))
+            .await;
 
         let state = agent.state.read().await;
         assert_eq!(state.conversations_processed, 0, "失败重试后不记成功");
+    }
+
+    #[tokio::test]
+    async fn test_process_wake_streams_events_while_running() {
+        // 回归保护：唤醒轮事件必须在**轮进行中**流出（而非积压到轮结束）。
+        // 此前转发器先 await 整个 process_wake 再取 rx：输出积压到轮结束
+        // 才转发，超过通道缓冲（100）还会死锁（发送端等消费、转发器等轮
+        // 结束）——用户报告"后台命令完成后好久没有输出，退出重进才看到"。
+        // 本测试：mock 发送第一个 chunk 后阻塞（等信号），消费端必须在轮
+        // 结束前收到该 chunk（证明流式实时性）。
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion_stream().returning(|_| {
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                // 第一个 chunk：立即可见；第二个 chunk 前挂起（模拟长轮）
+                tx.send(Ok(stream_chunk_finish(""))).await.ok();
+                // 挂起等待（不发送更多）——轮不结束，消费端仍应收到首 chunk
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            });
+            Ok(rx)
+        });
+        let agent = make_agent(mock);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let handle = tokio::spawn(async move {
+            agent
+                .process_wake("session-1", StreamEventSender::new(tx))
+                .await;
+        });
+
+        // 轮仍在进行（handle 未完成）：消费端必须能在 1s 内收到事件
+        // （证明事件在轮进行中实时流出，而非积压到轮结束）。
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("唤醒轮事件应在轮进行中到达（1s 内）");
+        assert!(chunk.is_some(), "应收到流式事件");
+        assert!(!handle.is_finished(), "此时唤醒轮应仍在进行中（未结束）");
+
+        handle.await.ok();
     }
 }

@@ -431,7 +431,13 @@ impl AgentCoordinator for Agent {
     }
 
     async fn wake_session(&self, session_id: &str) {
-        self.process_wake(session_id).await;
+        // 无事件转发通道（webhook 唤醒路径）：丢弃接收端——事件发送静默
+        // 失败（debug 日志），唤醒轮本身正常执行。必须 drop（保持接收端
+        // 存活会填满缓冲后阻塞发送端）。
+        let (tx, rx) = mpsc::channel(100);
+        drop(rx);
+        self.process_wake(session_id, StreamEventSender::new(tx))
+            .await;
     }
 
     async fn initialize(&self) -> Result<()> {
