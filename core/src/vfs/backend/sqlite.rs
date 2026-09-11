@@ -19,6 +19,20 @@ pub struct SqliteBackend {
     db: Arc<Database>,
 }
 
+/// 解析存储层时间戳字符串（兼容 SQLite `datetime('now')` 格式与 RFC3339）。
+///
+/// SQLite `datetime('now')` 产出 `YYYY-MM-DD HH:MM:SS`（UTC，秒级），
+/// 并非 RFC3339——此前仅按 RFC3339 解析，失败后条目时间退回
+/// `EntryMetadata::new` 的构造时刻（`Utc::now()`），导致时间信息失真。
+fn parse_stored_timestamp(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(ts) {
+        return Some(t.with_timezone(&chrono::Utc));
+    }
+    chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
 impl SqliteBackend {
     /// 使用共享的 SqliteDb 创建后端。
     /// Schema 应已由 `SqliteDb::init_all_schemas()` 创建。
@@ -88,13 +102,13 @@ impl StorageBackend for SqliteBackend {
                 let mut metadata = EntryMetadata::new(uri.clone(), "unknown");
                 metadata.is_directory = is_dir;
                 if let Some(ref ts) = created_at {
-                    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(ts) {
-                        metadata.created_at = t.with_timezone(&chrono::Utc);
+                    if let Some(t) = parse_stored_timestamp(ts) {
+                        metadata.created_at = t;
                     }
                 }
                 if let Some(ref ts) = updated_at {
-                    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(ts) {
-                        metadata.updated_at = t.with_timezone(&chrono::Utc);
+                    if let Some(t) = parse_stored_timestamp(ts) {
+                        metadata.updated_at = t;
                     }
                 }
                 Ok(ContextEntry {
@@ -203,13 +217,13 @@ impl StorageBackend for SqliteBackend {
                 let created_at: Option<String> = row.get(5)?;
                 let updated_at: Option<String> = row.get(6)?;
                 if let Some(ref ts) = created_at {
-                    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(ts) {
-                        metadata.created_at = t.with_timezone(&chrono::Utc);
+                    if let Some(t) = parse_stored_timestamp(ts) {
+                        metadata.created_at = t;
                     }
                 }
                 if let Some(ref ts) = updated_at {
-                    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(ts) {
-                        metadata.updated_at = t.with_timezone(&chrono::Utc);
+                    if let Some(t) = parse_stored_timestamp(ts) {
+                        metadata.updated_at = t;
                     }
                 }
                 Ok(Some(ContextEntry {

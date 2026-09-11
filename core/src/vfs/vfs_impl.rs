@@ -335,22 +335,43 @@ impl VfsCore for VirtualFileSystemImpl {
     }
 }
 
-/// 确保条目存在（幂等）：不存在时自动创建父目录 + 文件条目。
+/// 确保条目存在（幂等）：不存在时自动创建父目录链 + 文件条目。
 ///
 /// write/append 的建目录语义收敛于此（与 [`VfsCore::create_file`] 的区别：
 /// 已存在时静默跳过而非报错——内容写入可重复执行，VFS 自带容错）。
+/// 父链按 `mkdir -p` 语义逐级补齐：此前仅创建直接父级，深层路径写入时
+/// 中间目录缺失会导致基于 list 的递归遍历断链（条目"隐身"）。
 impl VirtualFileSystemImpl {
     async fn ensure_entry_exists(&self, uri: &TianyanUri) -> Result<()> {
         if !self.storage.exists(uri).await? {
             if let Some(parent) = uri.parent() {
-                if !self.storage.exists(&parent).await? {
-                    self.storage
-                        .write_entry(&ContextEntry::new_directory(parent.clone()))
-                        .await?;
-                }
+                self.ensure_directory_chain(&parent).await?;
             }
             self.storage
                 .write_entry(&ContextEntry::new_file(uri.clone()))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// 递归补齐目录链：从命名空间根到目标目录逐级创建缺失节点。
+    async fn ensure_directory_chain(&self, dir: &TianyanUri) -> Result<()> {
+        let mut missing = Vec::new();
+        let mut current = dir.clone();
+        loop {
+            if current.is_namespace_root() || self.storage.exists(&current).await? {
+                break;
+            }
+            missing.push(current.clone());
+            match current.parent() {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+        // 从最浅（根侧）到最深创建，保证父先于子
+        for d in missing.into_iter().rev() {
+            self.storage
+                .write_entry(&ContextEntry::new_directory(d))
                 .await?;
         }
         Ok(())

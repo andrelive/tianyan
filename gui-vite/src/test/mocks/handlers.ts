@@ -529,6 +529,7 @@ export const mockMemories: MemoryEntry[] = [
     uri: 'tianyan://memory/rules',
     is_directory: true,
     name: 'rules',
+    relative_path: 'rules',
     metadata: {
       uri: { uri: 'tianyan://memory/rules', namespace: 'memory', path: ['rules'] },
       is_directory: true,
@@ -551,6 +552,7 @@ export const mockMemories: MemoryEntry[] = [
     uri: 'tianyan://memory/preferences/response_style',
     is_directory: false,
     name: 'response_style',
+    relative_path: 'preferences/response_style',
     metadata: {
       uri: {
         uri: 'tianyan://memory/preferences/response_style',
@@ -579,6 +581,7 @@ export const mockMemories: MemoryEntry[] = [
     uri: 'tianyan://memory/facts/user_name',
     is_directory: false,
     name: 'user_name',
+    relative_path: 'facts/user_name',
     metadata: {
       uri: {
         uri: 'tianyan://memory/facts/user_name',

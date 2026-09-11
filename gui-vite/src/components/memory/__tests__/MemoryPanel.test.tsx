@@ -34,8 +34,8 @@ describe('MemoryPanel', () => {
     });
 
     // 条目名称全部出现（目录 + 记忆条目）
-    expect(screen.getByText('response_style')).toBeInTheDocument();
-    expect(screen.getByText('user_name')).toBeInTheDocument();
+    expect(screen.getByText('preferences/response_style')).toBeInTheDocument();
+    expect(screen.getByText('facts/user_name')).toBeInTheDocument();
 
     // 重要度展示
     expect(screen.getByText('90%')).toBeInTheDocument();
@@ -51,16 +51,16 @@ describe('MemoryPanel', () => {
     renderMemoryPanel();
 
     await waitFor(() => {
-      expect(screen.getByText('response_style')).toBeInTheDocument();
+      expect(screen.getByText('preferences/response_style')).toBeInTheDocument();
     });
 
-    // 点击有 detail 内容的条目 → 显示 L2 详情
+    await user.click(screen.getByText('preferences/response_style'));
     await user.click(screen.getByText('response_style'));
     expect(screen.getByText('L2 详情')).toBeInTheDocument();
     expect(screen.getByText(/用户偏好简洁直接的回复风格/)).toBeInTheDocument();
 
     // 点击只有 abstract 的条目 → 回退到 L0 摘要
-    await user.click(screen.getByText('user_name'));
+    await user.click(screen.getByText('facts/user_name'));
     expect(screen.getByText('L0 摘要')).toBeInTheDocument();
     expect(screen.getByText(/用户昵称为「小天」/)).toBeInTheDocument();
   });

@@ -20,16 +20,41 @@ use crate::state::AppState;
 ///
 /// 记忆由 MemoryTask（每 10 分钟 cron）经 MemoryExtractor 写入
 /// `tianyan://memory/*`；此前无任何读路径，本端点补齐浏览能力。
+///
+/// 浏览语义：递归展开子目录，仅返回叶子条目——目录仅作导航中间节点，
+/// 内容为空且 importance 为默认 0.5，直接展示只会误导。按 updated_at
+/// 倒序（最近记忆在前）。`relative_path` 供前端区分跨目录同名条目。
 pub async fn list_memories_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let vfs = state.vfs();
     let memory_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+    // VFS list 为单层语义：逐级下钻收集叶子条目。
+    // 深度上限防御异常嵌套；单目录失败不阻塞整体浏览。
+    const MAX_DEPTH: usize = 8;
+    let mut leaves = Vec::new();
+    let mut stack = vec![(memory_root, 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > MAX_DEPTH {
+            continue;
+        }
+        let entries = match vfs.list(&dir).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            if entry.is_directory() {
+                stack.push((entry.metadata.uri.clone(), depth + 1));
+            } else {
+                leaves.push(entry);
+            }
+        }
+    }
+    // 浏览主序：最近更新的记忆在前
+    leaves.sort_by(|a, b| b.metadata.updated_at.cmp(&a.metadata.updated_at));
 
-    let entries = vfs.list(&memory_root).await?;
-
-    let mut memories = Vec::with_capacity(entries.len());
-    for entry in entries {
+    let mut memories = Vec::with_capacity(leaves.len());
+    for entry in leaves {
         let uri = &entry.metadata.uri;
         // 内容读取失败不阻塞整体浏览：缺失层级返回 null
         let abstract_content = vfs.read(uri, ContentLevel::Abstract).await.ok();
@@ -37,8 +62,9 @@ pub async fn list_memories_handler(
         let detail_content = vfs.read(uri, ContentLevel::Detail).await.ok();
         memories.push(json!({
             "uri": uri.to_string(),
-            "is_directory": entry.is_directory(),
+            "is_directory": false,
             "name": uri.path().last().map(|s| s.to_string()),
+            "relative_path": uri.path().join("/"),
             "metadata": entry.metadata,
             "abstract": abstract_content,
             "overview": overview_content,

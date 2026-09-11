@@ -82,8 +82,11 @@ export default function MemoryPanel() {
                       ) : (
                         <MemoryStick size={16} className="shrink-0 text-[var(--color-text-tertiary)]" />
                       )}
-                      <span className="text-sm text-[var(--color-text-primary)] truncate">
-                        {entry.name ?? entry.metadata.uri.uri}
+                      <span
+                        className="text-sm text-[var(--color-text-primary)] truncate"
+                        title={entry.uri}
+                      >
+                        {entry.relative_path ?? entry.name ?? entry.metadata.uri.uri}
                       </span>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">

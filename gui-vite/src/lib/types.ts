@@ -425,6 +425,8 @@ export interface MemoryEntry {
   uri: string;
   is_directory: boolean;
   name: string | null;
+  /** 相对路径（不含命名空间前缀）：区分跨目录同名条目。 */
+  relative_path: string | null;
   metadata: MemoryEntryMetadata;
   abstract: string | null;
   overview: string | null;
