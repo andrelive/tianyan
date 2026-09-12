@@ -196,11 +196,19 @@ impl ToolRegistry {
                 Ok(None) => String::new(),
                 Err(e) => return Err(wrap_tool_error(e)),
             };
+            // 体量治理：会话 JSONL 可达数 MB，整读会压垮上下文——头部截断
+            //（50KB / 2000 行）+ 提示（本路径无 offset 续读参数，指引改用检索）。
+            let truncated = crate::executor::truncate::truncate_head_noted(
+                &detail,
+                "；如需特定内容，可用 session_recall 按关键词检索",
+            );
             return Ok(serde_json::json!({
                 "uri": params.uri,
                 "abstract": "",
                 "overview": "",
-                "detail": detail,
+                "detail": truncated.text,
+                "truncated": truncated.truncated,
+                "total_bytes": truncated.total_bytes,
             }));
         }
         // 加载三层内容，让 LLM 按需使用

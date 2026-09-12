@@ -51,7 +51,7 @@ const fn tool(
 fn def_read_file(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<ReadFileParams>(
         name,
-        "读取指定路径文件的完整文本内容（纯内容，无行号/哈希前缀）。每行内容完整返回，不截断；行数/字节体量由 offset/limit 分页与统一字节预算兜底。内容匹配编辑（apply_edit）直接按内容定位，无需行号。",
+        "读取文本文件内容（纯内容，无行号/哈希前缀）。默认返回前 2000 行（单次输出上限约 50KB，超出部分截断并附「使用 offset 继续」提示）。大文件请**按需读取**：用 offset/limit 指定行范围（1 起始行号），建议先用 grep/symbol_outline 定位目标区域再按范围精读；结果含 total_lines/total_bytes 与实际窗口（showing）。内容匹配编辑（apply_edit）直接按内容定位，无需行号。",
     ))
 }
 

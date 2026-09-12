@@ -13,13 +13,13 @@ use std::path::Path;
 
 use crate::executor::truncate;
 
-/// 执行文件读取操作（带行号锚点、offset/limit 窗口、截断标记、二进制嗅探与目录模式）。
+/// 执行文件读取操作（offset/limit 窗口、截断标记、二进制嗅探与目录模式）。
 ///
 /// 签名从 `(path)` 扩展为 `(path, offset, limit)`：`offset` 1 起始（`Some(0)` 视为 1），
 /// `limit` 默认 2000（`Some(0)` 视为 1）。`executor/mod.rs` 的 `pub use` 按名称重导出，
 /// 无需同步修改；全仓库无其它旧签名调用方（已 grep 验证），故不保留 1 参数兼容包装。
 ///
-/// 返回结构化 JSON：`content`（`N#ID|content` 锚点行）、`truncated`、`total_lines`、
+/// 返回结构化 JSON：`content`（纯文本）、`truncated`、`total_lines`、`total_bytes`、
 /// `showing`（实际窗口）、`message`（仅截断时）；二进制文件返回 `binary`/`size`/`preview`，
 /// 目录返回 `directory`/`entries`。
 pub async fn execute_read_file(
@@ -106,6 +106,7 @@ fn build_window(
 ) -> Result<Value, TianyanError> {
     let lines: Vec<&str> = text.lines().collect();
     let total_lines = lines.len();
+    let total_bytes = text.len();
     // 空文件没有可读行：返回空内容，而非 "offset 1 超出文件总行数 0" 的误导性错误。
     if total_lines == 0 {
         return Ok(json!({
@@ -113,6 +114,7 @@ fn build_window(
             "content": "",
             "truncated": false,
             "total_lines": 0,
+            "total_bytes": total_bytes,
             "showing": { "offset": 1, "limit": limit.unwrap_or(2000) },
         }));
     }
@@ -123,7 +125,9 @@ fn build_window(
             start + 1
         )));
     }
-    let limit = limit.unwrap_or(2000).max(1); // `limit: 0` 视为 1
+    // `limit: 0` 视为 1；上限钳制到 2000 行（对齐截断层单窗口行数上限，
+    // 防"一次读全"的误用——超大请求被钳制后按窗口截断并提示 offset 续读）。
+    let limit = limit.unwrap_or(2000).clamp(1, 2000);
     let end = (start + limit).min(total_lines);
     let window_truncated = end < total_lines;
     // 内容匹配编辑（apply_edit 已改为 old_string 匹配）：read_file 输出纯内容，
@@ -158,7 +162,8 @@ fn build_window(
         "content": content,
         "truncated": window_truncated || trunc.truncated,
         "total_lines": total_lines,
-        "showing": { "offset": start + 1, "limit": limit },
+        "total_bytes": total_bytes,
+        "showing": { "offset": start + 1, "limit": end - start },
     });
     if let Some(m) = message {
         out["message"] = json!(m);

@@ -36,6 +36,15 @@ pub fn truncate_head(text: &str) -> Truncated {
     truncate_head_with_marker(text, &marker)
 }
 
+/// 头部截断 + 自定义提示后缀（提示与总行数/字节数一起进入统一截断标记）。
+/// 用于**没有 offset 续读参数**的场景——如 vfs_read 会话导出（提示改用检索工具）。
+pub fn truncate_head_noted(text: &str, note: &str) -> Truncated {
+    let total_lines = text.lines().count();
+    let total_bytes = text.len();
+    let marker = format!("\n... (输出已截断，共 {total_lines} 行 {total_bytes} 字节{note})");
+    truncate_head_with_marker(text, &marker)
+}
+
 /// 保留末尾（命令输出模式，错误/摘要通常在尾部）：
 /// 从最后一行向前累积，行数或字节数超限即停止；
 /// 截断时在开头前置 `... (输出已截断，共 N 行 M 字节)` 标记行。

@@ -913,12 +913,13 @@ fn finalize_response(
 
 /// 向消息列表注入会话定位信息（assemble_context / prepare_wake_context 共用）。
 ///
-/// 告知 LLM 当前会话 URI，使其可用 `vfs_read` 检索被压缩的原始记录。
+/// 告知 LLM 当前会话 URI，使其可用 `vfs_read` 检索被压缩的原始记录
+///（超长输出会被截断；精确查找建议改用 `session_recall`）。
 /// 位置固定在 system 前缀（soul/rules）之后、历史消息之前；
 /// 同会话内内容恒定，不影响 DeepSeek 前缀缓存。
 fn insert_session_hint(messages: &mut Vec<Message>, session_id: &str) {
     let hint = format!(
-        "## 会话定位\n当前会话 ID：{}\n若早期对话已被压缩且摘要信息不足，可用 vfs_read 工具读取 tianyan://session/{} 查看原始对话记录（JSONL 格式，含压缩前的完整消息）。",
+        "## 会话定位\n当前会话 ID：{}\n若早期对话已被压缩且摘要信息不足，可用 vfs_read 工具读取 tianyan://session/{} 查看原始对话记录（JSONL 格式，含压缩前的完整消息；超长输出会被截断，精确查找建议用 session_recall 按关键词检索）。",
         session_id, session_id
     );
     let insert_at = messages

@@ -9,10 +9,10 @@ use crate::executor::edit::ContentEdit;
 pub struct ReadFileParams {
     /// 文件路径。
     pub path: String,
-    /// 起始行号（1 起始，默认 1）。
+    /// 起始行号（1 起始，默认 1）；大文件按需读取时用它定位目标范围。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<usize>,
-    /// 最大读取行数（默认 2000）。
+    /// 返回行数上限（默认 2000，单窗口钳制至 2000）；按需读取目标范围时收窄。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
 }

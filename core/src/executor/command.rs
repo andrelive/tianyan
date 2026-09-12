@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::common::error::{Result, TianyanError};
+use crate::executor::truncate;
 
 pub(super) const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 
@@ -741,6 +742,9 @@ pub(super) fn extract_command_base(cmd: &str) -> String {
 /// 跨平台：Unix (Linux/macOS) 用 `sh -c`，Windows 用 `powershell -NoProfile -NonInteractive -Command`。
 /// 超时后**杀进程树**（不只 shell）：Windows taskkill /T /F，Unix 进程组 kill，
 /// 避免派生服务进程残留为孤儿（opencode #30868 同款问题）。
+///
+/// 输出经统一截断层**尾部截断**（50KB / 2000 行；`stdout_truncated`/
+/// `stderr_truncated` 标志），防大输出（实测单条 45 万字符）压垮上下文。
 pub async fn execute_command_action(
     command: &str,
     cwd: Option<&str>,
@@ -799,9 +803,17 @@ pub async fn execute_command_action(
                 Vec::new()
             };
 
+            // 输出体量治理：命令输出原样可达数十万字符——尾部截断（错误/摘要
+            // 通常在尾部；50KB / 2000 行双上限），防单条结果压垮上下文。
+            let stdout_text = String::from_utf8_lossy(&stdout_bytes).to_string();
+            let stderr_text = String::from_utf8_lossy(&stderr_bytes).to_string();
+            let out_trunc = truncate::truncate_tail(&stdout_text);
+            let err_trunc = truncate::truncate_tail(&stderr_text);
             Ok(json!({
-                "stdout": String::from_utf8_lossy(&stdout_bytes).to_string(),
-                "stderr": String::from_utf8_lossy(&stderr_bytes).to_string(),
+                "stdout": out_trunc.text,
+                "stderr": err_trunc.text,
+                "stdout_truncated": out_trunc.truncated,
+                "stderr_truncated": err_trunc.truncated,
                 "exit_code": status.code().unwrap_or(-1),
             }))
         }
@@ -849,6 +861,33 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output["stdout"].as_str().unwrap_or("").contains("Hello"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_output_truncated() {
+        // 输出体量治理：超限输出按尾部截断（统一截断标记 + 显式标志）。
+        // Windows 走 powershell、Unix 走 sh——各自构造产生 >50KB 输出的命令。
+        let cmd = if cfg!(target_os = "windows") {
+            "1..3000 | ForEach-Object { 'A' * 30 }"
+        } else {
+            "yes AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | head -n 3000"
+        };
+        let output = execute_command_action(cmd, None, Some(30)).await.unwrap();
+        let stdout = output["stdout"].as_str().unwrap_or("");
+        assert_eq!(
+            output["stdout_truncated"].as_bool(),
+            Some(true),
+            "超限输出应标记截断"
+        );
+        assert!(
+            stdout.contains("输出已截断"),
+            "应包含统一截断标记：{stdout:?}"
+        );
+        assert!(
+            stdout.len() < 60 * 1024,
+            "截断后体量应受限于预算：{}",
+            stdout.len()
+        );
     }
 
     #[tokio::test]
