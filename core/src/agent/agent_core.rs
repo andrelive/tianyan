@@ -549,17 +549,18 @@ impl Agent {
             .flat_map(ContextAssembler::structured_to_messages)
             .collect();
 
-        // 真实上下文占用：最近一次请求的 prompt 侧 token。
-        // `tokens.input` 是**完整输入**（含缓存命中部分，`cache.read` 为其
-        // 子集）——两者相加会重复计算缓存命中（判定值≈真实值×2，真实占用
-        // 远低于阈值也会提前压缩），故取 input；max 兜底异常口径
-        // （input=0 但 cache.read>0 的旧数据）。从消息持久化的 usage 聚合
-        // ——最后一条带 usage 的消息即最近一次请求的输入统计。
+        // 真实上下文占用：最近一次请求的 prompt 侧 token（取数口径单点见
+        // `StructuredMessage::prompt_side_tokens`——`tokens.input` 是**完整
+        // 输入**（含缓存命中部分，`cache.read` 为其子集），两者相加会重复
+        // 计算（判定值≈真实值×2，真实占用远低于阈值也会提前压缩）。
+        // 压缩点自身不参与——其 tokens 是摘要请求（压缩前上下文重发）的
+        // 用量，不代表会话当前占用。从消息持久化的 usage 聚合——最后一条
+        // 带 usage 的消息即最近一次请求的输入统计。
         let recent_input_tokens = messages_since_marker
             .iter()
             .rev()
-            .find(|m| m.tokens.input > 0 || m.tokens.cache.read > 0)
-            .map(|m| m.tokens.input.max(m.tokens.cache.read))
+            .find(|m| !m.compression_marker && (m.tokens.input > 0 || m.tokens.cache.read > 0))
+            .map(|m| m.prompt_side_tokens())
             .unwrap_or(0);
 
         let Some(summary_sm) = self

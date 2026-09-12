@@ -230,6 +230,16 @@ impl StructuredMessage {
         Self::text_message(MessageRole::Assistant, session_id, text)
     }
 
+    /// prompt 侧真实占用（取数口径**单点**：压缩判定与实测输入恢复共用）。
+    ///
+    /// `tokens.input` 是**完整输入**（含缓存命中部分，`tokens.cache.read`
+    /// 为其子集）——两者相加会把缓存命中重复计一遍（判定值≈真实值×2，
+    /// 真实占用远低于阈值也会提前压缩 / 预算误报不足），故取 `input`；
+    /// `max(cache.read)` 兜底旧数据中 `input=0` 但 `cache.read>0` 的异常口径。
+    pub fn prompt_side_tokens(&self) -> usize {
+        self.tokens.input.max(self.tokens.cache.read)
+    }
+
     /// 将传输层 `Message` 全保真转换为 `StructuredMessage`（用于持久化）。
     ///
     /// 角色从 `msg.role` 直接派生。对于 Tool 消息，生成 `Part::ToolResult`；

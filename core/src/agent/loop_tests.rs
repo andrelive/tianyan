@@ -17,10 +17,11 @@ impl SessionManager for MockSessionManager {
         _session_id: &str,
         msg: StructuredMessage,
     ) -> Result<()> {
-        // 模拟持久化：记录消息携带的实测输入（重启后 run_turns 可恢复）
+        // 模拟持久化：记录消息携带的实测输入（重启后 run_turns 可恢复）。
+        // 取数口径与生产一致（prompt 侧 input，max 兜底；input 已含 cache.read）。
         if msg.tokens.input > 0 || msg.tokens.cache.read > 0 {
             if let Ok(mut guard) = self.last_usage.lock() {
-                *guard = Some(msg.tokens.input + msg.tokens.cache.read);
+                *guard = Some(msg.tokens.input.max(msg.tokens.cache.read));
             }
         }
         Ok(())
@@ -1211,6 +1212,15 @@ fn spec_128k_16k() -> ModelSpec {
     }
 }
 
+/// 事故配置（ollama/deepseek-v4.1-flash）：1M 窗口 / 384K 输出上限。
+fn spec_1m_384k() -> ModelSpec {
+    ModelSpec {
+        context_length: 1_000_000,
+        max_output_tokens: 384_000,
+        max_input_tokens: 968_000,
+    }
+}
+
 /// 非流式：小消息 + 128k 规格 → 请求带 max_tokens = Some(16_000)（预算远超 cap）。
 #[tokio::test]
 async fn test_run_sets_dynamic_max_tokens_with_spec() {
@@ -1409,6 +1419,149 @@ async fn test_run_without_spec_skips_max_tokens() {
     let agent_loop = make_loop(mock, 5); // 默认 chat_spec = None
 
     let mut messages = vec![Message::user("测试")];
+    let result = agent_loop
+        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .await
+        .unwrap();
+    assert!(matches!(result, AgentLoopResult::Answer { .. }));
+}
+
+/// 会话返回固定消息列表的 SessionManager（实测输入恢复回归的注入点；
+/// 与 `MockSessionManager` 不同——可直接构造带压缩点的消息序列）。
+struct FixedSessionManager {
+    messages: Vec<StructuredMessage>,
+}
+
+#[async_trait]
+impl SessionManager for FixedSessionManager {
+    async fn add_structured_message(
+        &self,
+        _session_id: &str,
+        _msg: StructuredMessage,
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn rewrite_messages(
+        &self,
+        _session_id: &str,
+        _messages: &[StructuredMessage],
+    ) -> Result<()> {
+        Ok(())
+    }
+    async fn create_session(&self, id: &str, _message: Message) -> Result<Session> {
+        Ok(Session::new(id))
+    }
+    async fn get_session(&self, id: &str) -> Result<Option<Session>> {
+        let mut session = Session::new(id);
+        session.messages = self.messages.clone();
+        Ok(Some(session))
+    }
+    async fn update_session(&self, _session: &Session) -> Result<()> {
+        Ok(())
+    }
+    async fn list_sessions(&self) -> Result<Vec<Session>> {
+        Ok(vec![])
+    }
+    async fn delete_session(&self, _id: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// 回归（"预算不足 1024"事故，double count）：实测输入恢复取 prompt 侧
+/// input（已含缓存命中，`cache.read` 为其子集）——旧口径 `input + cache.read`
+/// 把缓存命中重复计一遍（≈真实×2）。事故数据：input=593_399、cache.read=
+/// 592_128 → 旧口径 1_185_527 越过 1M 窗口 → dynamic_max_tokens 返回 None →
+/// "上下文预算不足（不足 1024 tokens）"。修复后剩余 406_601 × 0.9 = 365_940
+/// → pow2_floor = 262_144，请求正常携带 max_tokens 发出。
+#[tokio::test]
+async fn test_run_recovery_does_not_double_count_cached_input() {
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion().returning(|req| {
+        assert_eq!(
+            req.max_tokens,
+            Some(262_144),
+            "input=593_399（含 592_128 缓存）→ 预算 262_144；旧口径会误报预算不足"
+        );
+        Ok(response_with(Message::assistant("回答")))
+    });
+
+    let mut sm = StructuredMessage::from_message(
+        &Message::assistant("历史回复"),
+        "session-1",
+        None,
+        Some(CommonTokenUsage::new(593_399, 0)),
+    );
+    sm.tokens.cache.read = 592_128;
+    sm.model_id = Some("test-model".to_string());
+
+    let agent_loop = AgentLoop::new(
+        Arc::new(mock),
+        ToolRegistry::new(SecurityPolicy::default()),
+        Arc::new(FixedSessionManager { messages: vec![sm] }),
+        AgentLoopConfig {
+            max_turns: 5,
+            ..Default::default()
+        },
+    )
+    .with_chat_spec(Some(spec_1m_384k()));
+
+    let mut messages = vec![Message::user("继续")];
+    let result = agent_loop
+        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .await
+        .unwrap();
+    assert!(matches!(result, AgentLoopResult::Answer { .. }));
+}
+
+/// 回归（压缩后预算）：实测输入恢复按最后一个压缩点截断——压缩点之前的
+/// 实测对应旧上下文（组装视图已从压缩点重新开始），不得参与压缩后请求的
+/// 预算计算；压缩点后无实测 → 退回估算（而非旧实测）。
+/// 事故形态：压缩前 input=593_399、压缩点后无新实测——旧实现取到压缩前
+/// 消息（double count 后 1_185_527 → 预算不足误报；仅取 max 也会把输出
+/// 上限错误压到 262_144）；正确行为：估算小上下文 → 达到输出上限 384_000。
+#[tokio::test]
+async fn test_run_recovery_scoped_after_last_compression_point() {
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion().returning(|req| {
+        assert_eq!(
+            req.max_tokens,
+            Some(384_000),
+            "压缩点后无实测 → 估算 → 输出上限 384_000（不得复用压缩前实测）"
+        );
+        Ok(response_with(Message::assistant("回答")))
+    });
+
+    let mut before = StructuredMessage::from_message(
+        &Message::assistant("压缩前回复"),
+        "session-1",
+        None,
+        Some(CommonTokenUsage::new(593_399, 0)),
+    );
+    before.tokens.cache.read = 592_128;
+    before.model_id = Some("test-model".to_string());
+
+    let mut marker = StructuredMessage::from_message(
+        &Message::user("[对话摘要] 历史摘要"),
+        "session-1",
+        None,
+        Some(CommonTokenUsage::new(223_112, 2_095)),
+    );
+    marker.compression_marker = true;
+
+    let agent_loop = AgentLoop::new(
+        Arc::new(mock),
+        ToolRegistry::new(SecurityPolicy::default()),
+        Arc::new(FixedSessionManager {
+            messages: vec![before, marker],
+        }),
+        AgentLoopConfig {
+            max_turns: 5,
+            ..Default::default()
+        },
+    )
+    .with_chat_spec(Some(spec_1m_384k()));
+
+    let mut messages = vec![Message::user("继续")];
     let result = agent_loop
         .run(&mut messages, "session-1", None, "test-model", None, None)
         .await

@@ -593,9 +593,9 @@ impl AgentLoop {
     /// `step` 负责每轮获取模型响应，并统一转换为
     /// `(assistant_msg, turn_usage, finish_reason, 更新后的实测输入)` 形式。
     ///
-    /// 实测输入（T6 动态 max_tokens 校准）：从会话消息恢复最后一条带 usage
-    /// 的消息（重启后不退回估算——usage 已持久化在消息里），循环内逐轮用
-    /// 最新实测更新局部变量（无跨轮共享字段，克隆安全）。
+    /// 实测输入（T6 动态 max_tokens 校准）：从会话消息恢复**最后一个压缩点
+    /// 之后**最后一条带 usage 的消息（重启后不退回估算——usage 已持久化在
+    /// 消息里），循环内逐轮用最新实测更新局部变量（无跨轮共享字段，克隆安全）。
     // 私有脚手架：8 个参数均为单轮演进所需状态/依赖，收敛为结构体反而降低可读性
     #[allow(clippy::too_many_arguments)]
     async fn run_turns<F>(
@@ -622,18 +622,33 @@ impl AgentLoop {
         let mut total_tokens = TokenUsage::default();
         // 实测输入恢复：从会话消息取最后一条带 usage 且 model 一致的消息
         // （重启后不退回估算——usage 已持久化在消息里；model 不一致 = 切换
-        // 模型，旧实测值不适用，退回估算。与压缩判定的取数口径一致）。
+        // 模型，旧实测值不适用，退回估算）。
+        //
+        // 取数口径与压缩判定共用 `prompt_side_tokens` 单点——此前此处为
+        // `input + cache.read`，把缓存命中重复计一遍（≈真实×2；1M 窗口下
+        // 高缓存命中会话直接越过窗口 → "上下文预算不足"误报，会话被卡死）。
+        //
+        // 作用域与组装/压缩判定一致：只看**最后一个压缩点之后**的消息。
+        // 压缩点之前（含压缩前刚发生）的实测对应旧上下文——组装视图已从
+        // 压缩点重新开始，旧实测不适用于压缩后的请求（压缩后首轮退回估算）。
         let mut last_input_usage: Option<(String, usize)> =
             match self.session_manager.get_session(session_id).await {
-                Ok(Some(session)) => session
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| {
-                        (m.tokens.input > 0 || m.tokens.cache.read > 0)
-                            && m.model_id.as_deref() == Some(model)
-                    })
-                    .map(|m| (model.to_string(), m.tokens.input + m.tokens.cache.read)),
+                Ok(Some(session)) => {
+                    let start_idx = session
+                        .messages
+                        .iter()
+                        .rposition(|m| m.compression_marker)
+                        .unwrap_or(0);
+                    session.messages[start_idx..]
+                        .iter()
+                        .rev()
+                        .find(|m| {
+                            !m.compression_marker
+                                && (m.tokens.input > 0 || m.tokens.cache.read > 0)
+                                && m.model_id.as_deref() == Some(model)
+                        })
+                        .map(|m| (model.to_string(), m.prompt_side_tokens()))
+                }
                 _ => None,
             };
 
