@@ -11,6 +11,7 @@ use tokio::sync::{oneshot, RwLock};
 
 use super::types::*;
 use crate::common::types::StructuredMessage;
+use crate::config::ApprovalMode;
 use crate::executor::Action;
 use crate::notification::SharedNotificationSink;
 use crate::session::SessionManager;
@@ -321,6 +322,38 @@ impl ApprovalWorkflow {
             }
         }
 
+        // 模式短路（ADR-033）：全自主——黑名单外全放行并记录审计
+        // （总是询问命令除外；黑名单 Deny 已在上方规则评估中优先处理）。
+        if !forced_prompt && self.config.mode == ApprovalMode::Autonomous {
+            let request = ApprovalRequest {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.to_string(),
+                action_description: format!("{:?}", action),
+                action: action.clone(),
+                risk_level,
+                requested_at: chrono::Utc::now(),
+                timeout_secs: self.config.default_timeout_secs,
+            };
+            let response = ApprovalResponse {
+                request_id: request.request_id.clone(),
+                decision: ApprovalDecision::Approve,
+                reason: Some("全自主模式：自动批准".to_string()),
+                responded_at: chrono::Utc::now(),
+                approved_by: "auto".to_string(),
+                edited_command: None,
+            };
+            tracing::info!(
+                session_id = %session_id,
+                action = ?action,
+                risk_level = %risk_level,
+                decision = ?response.decision,
+                "全自主模式自动审批（审计）"
+            );
+            self.record_approval_audit(request, Some(response.clone()))
+                .await;
+            return Ok(response);
+        }
+
         // 如果风险等级为 Safe，直接通过（总是询问命令除外）
         if !forced_prompt && risk_level == RiskLevel::Safe {
             return Ok(ApprovalResponse {
@@ -345,39 +378,7 @@ impl ApprovalWorkflow {
             });
         }
 
-        // 无人值守模式：Medium/High 风险操作自动批准并记录审计
-        // （总是询问命令除外——prompt 命令强制走审批，不自动批准）。
-        if !forced_prompt && self.config.unattended_mode {
-            let request = ApprovalRequest {
-                request_id: uuid::Uuid::new_v4().to_string(),
-                session_id: session_id.to_string(),
-                action_description: format!("{:?}", action),
-                action: action.clone(),
-                risk_level,
-                requested_at: chrono::Utc::now(),
-                timeout_secs: self.config.default_timeout_secs,
-            };
-            let response = ApprovalResponse {
-                request_id: request.request_id.clone(),
-                decision: ApprovalDecision::Approve,
-                reason: Some(format!("无人值守模式：{} 风险自动批准", risk_level)),
-                responded_at: chrono::Utc::now(),
-                approved_by: "auto".to_string(),
-                edited_command: None,
-            };
-            tracing::info!(
-                session_id = %session_id,
-                action = ?action,
-                risk_level = %risk_level,
-                decision = ?response.decision,
-                "无人值守模式自动审批（审计）"
-            );
-            self.record_approval_audit(request, Some(response.clone()))
-                .await;
-            return Ok(response);
-        }
-
-        // attended 模式（默认）：检查用户是否已通过"询问用户"链路确认过该操作
+        // 确认/交互模式（ADR-033）：检查用户是否已通过"询问用户"链路确认过该操作
         if self.is_action_confirmed(action).await {
             return Ok(ApprovalResponse {
                 request_id: uuid::Uuid::new_v4().to_string(),
@@ -389,9 +390,9 @@ impl ApprovalWorkflow {
             });
         }
 
-        // 审批通道已接入且允许等待时：等待人工审批响应（带超时）。
+        // 交互模式（ADR-033）且允许等待时：挂起等待人工审批响应（带超时）。
         // 总是询问命令在这里强制挂起等待人工响应。
-        if self.config.wait_for_approval && allow_human_wait {
+        if self.config.mode == ApprovalMode::Interactive && allow_human_wait {
             return self
                 .wait_for_human_approval(session_id, action, risk_level)
                 .await;

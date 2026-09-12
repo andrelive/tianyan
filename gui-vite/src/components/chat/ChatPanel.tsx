@@ -65,7 +65,7 @@ export default function ChatPanel() {
       follow——滚动阈值翻转（setState → effect → scrollToBottom → scroll）
       的循环不再发生（DSH followSig 模式）。 */
   const followSigRef = useRef('');
-  /** 当前会话待审批操作（应用层授权卡片；wait_for_approval 模式挂起时出现） */
+  /** 当前会话待审批操作（应用层授权卡片；交互模式挂起时出现） */
   const [pendingApproval, setPendingApproval] = useState<
     ApprovalStatusSnapshot['pending_approvals'][number] | null
   >(null);
@@ -109,7 +109,7 @@ export default function ChatPanel() {
   useUnifiedEvents();
 
   // 应用层授权：轮询审批状态，当前会话有挂起操作时显示审批卡片。
-  // wait_for_approval 模式下危险操作由应用审批（与会话/LLM 无关），
+  // 交互模式下危险操作由应用审批（与会话/LLM 无关），
   // 批准/拒绝后挂起的工具自动继续。轮询语义收敛在 usePolling。
   usePolling(
     async () => {

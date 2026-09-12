@@ -87,10 +87,9 @@ export function emptyConfigState(): ConfigState {
     log_include_timestamp: true,
     log_include_location: false,
     security_enabled: true,
-    confirm_commands: true,
     audit_logging: true,
-    allow_all_operations: false,
-    safety_mode: 'strict',
+    approval_mode: 'autonomous',
+    safety_mode: 'relaxed',
     trash_directory: '',
     max_file_size: 10485760,
     allowed_directories: '',
@@ -196,10 +195,10 @@ interface BackendLoggingConfig {
 
 interface BackendSecurityConfig {
   enabled: boolean;
-  confirm_commands: boolean;
   audit_logging: boolean;
-  allow_all_operations?: boolean;
-  /** 安全模式（strict 等；透传保留） */
+  /** 审批行为模式（ADR-033：autonomous / confirm / interactive；透传保留） */
+  approval_mode?: string;
+  /** 安全模式（strict / relaxed / transform / permissive；透传保留） */
   safety_mode?: string;
   /** 回收站目录（透传保留） */
   trash_directory?: string;
@@ -358,9 +357,8 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
       },
       security: {
         enabled: cs.security_enabled,
-        confirm_commands: cs.confirm_commands,
         audit_logging: cs.audit_logging,
-        allow_all_operations: cs.allow_all_operations,
+        approval_mode: cs.approval_mode,
         safety_mode: cs.safety_mode,
         trash_directory: cs.trash_directory,
         max_file_size: cs.max_file_size,
@@ -484,9 +482,8 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
 
     // Security
     security_enabled: security.enabled ?? defaults.security_enabled,
-    confirm_commands: security.confirm_commands ?? defaults.confirm_commands,
     audit_logging: security.audit_logging ?? defaults.audit_logging,
-    allow_all_operations: security.allow_all_operations ?? defaults.allow_all_operations,
+    approval_mode: security.approval_mode ?? defaults.approval_mode,
     safety_mode: security.safety_mode ?? defaults.safety_mode,
     trash_directory: security.trash_directory ?? defaults.trash_directory,
     max_file_size: security.max_file_size ?? defaults.max_file_size,

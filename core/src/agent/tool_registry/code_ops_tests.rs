@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::config::SafetyMode;
+use crate::config::{ApprovalMode, SafetyMode};
 use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
 use crate::executor::SecurityPolicy;
 
@@ -29,7 +29,6 @@ fn default_strict_policy() -> SecurityPolicy {
         max_command_timeout_secs: 30,
         max_file_size: 1024 * 1024,
         block_interpreters: true,
-        allow_all_operations: false,
     }
 }
 
@@ -56,7 +55,6 @@ fn file_policy(allowed: Vec<std::path::PathBuf>) -> SecurityPolicy {
         max_command_timeout_secs: 30,
         max_file_size: 1024 * 1024,
         block_interpreters: true,
-        allow_all_operations: false,
     }
 }
 
@@ -167,10 +165,10 @@ async fn test_run_tests_framework_suite_filter_backward_compat_command_wins() {
     assert_eq!(result["success"].as_bool(), Some(true));
 }
 
-/// 无人值守审批工作流：Medium/High 风险自动批准（与 file_ops_tests 同款）。
-fn unattended_workflow() -> Arc<ApprovalWorkflow> {
+/// 全自主审批工作流：黑名单外全放行（与 file_ops_tests 同款；ADR-033）。
+fn autonomous_workflow() -> Arc<ApprovalWorkflow> {
     let config = ApprovalWorkflowConfig {
-        unattended_mode: true,
+        mode: ApprovalMode::Autonomous,
         ..Default::default()
     };
     Arc::new(ApprovalWorkflow::new(config))
@@ -178,9 +176,12 @@ fn unattended_workflow() -> Arc<ApprovalWorkflow> {
 
 #[tokio::test]
 async fn test_run_tests_approval_denied_without_confirmation() {
-    // 默认（attended、无审批通道）：run_tests 命令属 Medium 风险，立即拒绝
+    // 确认模式（ADR-033）：run_tests 命令属 Medium 风险，立即拒绝
     // 并降级为询问用户——与 execute_command 的门控一致。
-    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
+        mode: ApprovalMode::Confirm,
+        ..Default::default()
+    }));
     let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
     let result = registry
         .execute_run_tests(r#"{"command":"echo hello"}"#, "test-session", false)
@@ -193,11 +194,11 @@ async fn test_run_tests_approval_denied_without_confirmation() {
 #[tokio::test]
 async fn test_run_tests_approval_approved_unattended() {
     let registry =
-        ToolRegistry::new(default_strict_policy()).with_approval_workflow(unattended_workflow());
+        ToolRegistry::new(default_strict_policy()).with_approval_workflow(autonomous_workflow());
     let result = registry
         .execute_run_tests(r#"{"command":"echo hello"}"#, "test-session", false)
         .await;
-    let result = result.expect("无人值守应批准测试命令");
+    let result = result.expect("全自主应批准测试命令");
     assert_eq!(result["exit_code"].as_i64(), Some(0));
 }
 
@@ -318,8 +319,11 @@ async fn test_verify_build_rejects_missing_arguments() {
 
 #[tokio::test]
 async fn test_verify_build_approval_denied_without_confirmation() {
-    // 默认（attended、无审批通道）：verify_build 命令属 Medium 风险，立即拒绝。
-    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+    // 确认模式（ADR-033）：verify_build 命令属 Medium 风险，立即拒绝。
+    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
+        mode: ApprovalMode::Confirm,
+        ..Default::default()
+    }));
     let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
     let result = registry
         .execute_verify_build(r#"{"command":"echo hello"}"#, "test-session", false)
@@ -332,11 +336,11 @@ async fn test_verify_build_approval_denied_without_confirmation() {
 #[tokio::test]
 async fn test_verify_build_approval_approved_unattended() {
     let registry =
-        ToolRegistry::new(default_strict_policy()).with_approval_workflow(unattended_workflow());
+        ToolRegistry::new(default_strict_policy()).with_approval_workflow(autonomous_workflow());
     let result = registry
         .execute_verify_build(r#"{"command":"echo hello"}"#, "test-session", false)
         .await;
-    let result = result.expect("无人值守应批准构建命令");
+    let result = result.expect("全自主应批准构建命令");
     assert_eq!(result["passed"].as_bool(), Some(true));
 }
 

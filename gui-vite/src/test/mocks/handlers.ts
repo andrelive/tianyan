@@ -438,7 +438,7 @@ export const mockTianyanConfig = {
   },
   security: {
     enabled: true,
-    confirm_commands: true,
+    approval_mode: 'autonomous',
     audit_logging: true,
     max_file_size: 10485760,
     allowed_directories: [],
@@ -732,8 +732,7 @@ export const mockApprovalStatus: ApprovalStatusSnapshot = {
     enable_auto_approval: true,
     persist_records: true,
     max_pending_approvals: 100,
-    unattended_mode: false,
-    wait_for_approval: true,
+    mode: 'interactive',
   },
   pending_approvals: [
     {

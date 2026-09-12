@@ -13,7 +13,7 @@ interface Props {
 }
 
 /**
- * 应用层授权卡片：会话流中危险操作等待人工批准（wait_for_approval 模式，
+ * 应用层授权卡片：会话流中危险操作等待人工批准（交互模式，
  * 与会话/LLM 澄清无关）。批准/拒绝后挂起的工具自动继续。
  */
 export default function ApprovalBanner({ approval, busy, onRespond }: Props) {

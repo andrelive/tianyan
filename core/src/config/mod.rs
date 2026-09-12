@@ -39,7 +39,7 @@ pub use model::{
 pub use reminder::ReminderConfig;
 pub use retrieval::RetrievalConfig;
 pub use roles::AgentRolesConfig;
-pub use security::{SafetyMode, SecurityConfig};
+pub use security::{ApprovalMode, SafetyMode, SecurityConfig};
 pub use storage::{StorageBackendType, StorageConfig, VectorStorageConfig};
 pub use validation::{
     validate_agent_config, validate_models_config, validate_provider, validate_storage_config,
@@ -148,6 +148,9 @@ impl TianyanConfig {
             .iter()
             .map(|p| expand_user_dir(p))
             .collect();
+        // 归一安全配置旧字段（ADR-033）：wait_for_approval / allow_all_operations
+        // → approval_mode（仅读取兼容；下次写回时旧字段自然消失）。
+        config.security.normalize();
 
         config
             .validate()

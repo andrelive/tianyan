@@ -341,7 +341,8 @@ impl AgentBuilder {
         //   allowed_commands → Approve 规则（自动放行）；
         //   prompt_commands  → 总是询问（强制走人工审批，不被自动放行）。
         let mut approval_config = ApprovalWorkflowConfig {
-            wait_for_approval: security_config.wait_for_approval,
+            // ADR-033：审批行为模式（默认全自主；黑名单 Deny 仍最优先）。
+            mode: security_config.approval_mode,
             ..Default::default()
         };
         approval_config.prompt_commands = security_config.prompt_commands.clone();
@@ -358,18 +359,6 @@ impl AgentBuilder {
             approval_config.auto_approval_rules.push(AutoApprovalRule {
                 name: format!("security_allowed_{cmd}"),
                 action_pattern: ActionPattern::CommandPattern(cmd.clone()),
-                condition: ApprovalCondition::Always,
-                decision: ApprovalDecision::Approve,
-                enabled: true,
-            });
-        }
-        // 完全放开模式：除 Deny 规则（黑名单）外全部自动批准。
-        // 评估顺序保证 Deny 优先（check_auto_approval 第一遍先跑拒绝规则），
-        // 因此 blocked_commands 黑名单在任何模式下都强制生效。
-        if security_config.allow_all_operations {
-            approval_config.auto_approval_rules.push(AutoApprovalRule {
-                name: "allow_all_operations".to_string(),
-                action_pattern: ActionPattern::Any,
                 condition: ApprovalCondition::Always,
                 decision: ApprovalDecision::Approve,
                 enabled: true,

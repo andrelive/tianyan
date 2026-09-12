@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ApprovalMode;
 use crate::executor::Action;
 
 /// 判断用户对审批追问的回答是否为"允许执行"语义。
@@ -180,18 +181,14 @@ pub struct ApprovalWorkflowConfig {
     pub enable_auto_approval: bool,
     /// 自动审批规则。
     pub auto_approval_rules: Vec<AutoApprovalRule>,
+    /// 审批行为模式（ADR-033：审批层单一事实源；默认全自主）。
+    pub mode: ApprovalMode,
     /// 是否持久化审批记录。
     pub persist_records: bool,
     /// 最大待处理审批数。
     pub max_pending_approvals: usize,
-    /// 无人值守模式：Medium/High 风险操作自动批准并记录审计，不等待人工审批。
-    /// 默认关闭（安全默认）：高风险操作需用户确认，未确认时拒绝并降级为询问用户。
-    pub unattended_mode: bool,
-    /// attended 模式下是否等待人工审批响应（需 GUI 审批通道已接入）。
-    /// 当前无审批通道，默认 false：未确认的操作立即拒绝并降级为询问用户。
-    pub wait_for_approval: bool,
     /// "总是询问"命令列表：命中的命令强制走人工审批/询问，
-    /// 不被自动审批规则、Safe 自动放行与无人值守模式放行。
+    /// 不被自动审批规则与任何模式的自动放行覆盖。
     /// 默认空（不强制）。
     pub prompt_commands: Vec<String>,
 }
@@ -211,12 +208,10 @@ impl Default for ApprovalWorkflowConfig {
                     enabled: true,
                 },
             ],
+            // ADR-033：默认全自主（黑名单外全放行）。
+            mode: ApprovalMode::default(),
             persist_records: true,
             max_pending_approvals: 100,
-            // 默认关闭无人值守：Medium/High 风险操作必须获得用户确认（拒绝时降级为询问用户）
-            unattended_mode: false,
-            // 审批通道未接入前不等待：未确认即拒绝，由上层降级为 ask_user 追问
-            wait_for_approval: false,
             // 默认不强制任何命令走人工审批
             prompt_commands: Vec::new(),
         }

@@ -43,10 +43,9 @@ describe('ApprovalPanel', () => {
     expect(screen.getByText('写入文件 /home/user/old.txt')).toBeInTheDocument();
     expect(screen.getByText('user')).toBeInTheDocument();
 
-    // 审批配置摘要
-    expect(screen.getByText('等待人工响应（降级链路）')).toBeInTheDocument();
+    // 审批配置摘要（ADR-033：模式字段取代 wait_for_approval / unattended_mode）
+    expect(screen.getByText('审批模式')).toBeInTheDocument();
     expect(screen.getByText('自动批准')).toBeInTheDocument();
-    expect(screen.getByText('无人值守模式')).toBeInTheDocument();
     expect(screen.getByText('已确认操作数')).toBeInTheDocument();
     expect(screen.getByText('300 秒')).toBeInTheDocument();
   });
@@ -223,12 +222,12 @@ describe('ApprovalPanel', () => {
     expect(respondSpy).not.toHaveBeenCalled();
   });
 
-  it('shows hint when wait_for_approval is disabled and no pending approvals', async () => {
+  it('shows hint when not in interactive mode and no pending approvals', async () => {
     server.use(
       http.get('/api/v1/approval/status', () => {
         return HttpResponse.json({
           ...mockApprovalStatus,
-          config: { ...mockApprovalStatus.config, wait_for_approval: false },
+          config: { ...mockApprovalStatus.config, mode: 'autonomous' },
           pending_approvals: [],
         });
       }),
@@ -241,7 +240,7 @@ describe('ApprovalPanel', () => {
     });
     expect(
       screen.getByText(
-        '审批等待模式未开启（配置 security.wait_for_approval=false 时危险操作走对话确认链路）',
+        '当前为「autonomous」模式；交互模式下危险操作会在此面板等待人工响应',
       ),
     ).toBeInTheDocument();
   });

@@ -271,6 +271,7 @@ async fn test_run_ask_user_executes_as_sync_tool() {
 /// 模型看到错误后自行决策（可调用 ask_user 确认——模型自律，对齐 DSH）。
 #[tokio::test]
 async fn test_run_approval_denied_returns_tool_error() {
+    use crate::config::ApprovalMode;
     use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
     use std::sync::Arc as StdArc;
 
@@ -301,7 +302,11 @@ async fn test_run_approval_denied_returns_tool_error() {
 
     let mut registry = ToolRegistry::new(SecurityPolicy::default());
     registry = registry.with_approval_workflow(StdArc::new(ApprovalWorkflow::new(
-        ApprovalWorkflowConfig::default(),
+        ApprovalWorkflowConfig {
+            // 确认模式（ADR-033）：Medium 风险无确认时拒绝（工具错误入史）。
+            mode: ApprovalMode::Confirm,
+            ..Default::default()
+        },
     )));
     let agent_loop = AgentLoop::new(
         Arc::new(mock),

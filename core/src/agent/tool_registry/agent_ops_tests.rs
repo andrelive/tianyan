@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use crate::agent::{AgentRole, RoleRegistry};
 use crate::common::types::{FunctionCall, StructuredMessage, TokenUsage, ToolCall, ToolCallType};
 use crate::config::AgentRolesConfig;
-use crate::config::SafetyMode;
+use crate::config::{ApprovalMode, SafetyMode};
 use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
 use crate::executor::SecurityPolicy;
 use crate::model::types::{
@@ -271,7 +271,6 @@ fn default_strict_policy() -> SecurityPolicy {
         max_command_timeout_secs: 30,
         max_file_size: 1024 * 1024,
         block_interpreters: true,
-        allow_all_operations: false,
     }
 }
 
@@ -320,12 +319,11 @@ async fn test_execute_command_rejects_missing_arguments() {
 
 #[tokio::test]
 async fn test_subagent_command_denied_without_hang() {
-    // 回归保护：子任务（subagent=true）审批不交互——即使全局
-    // wait_for_approval=true（主循环会挂起等面板），子任务也必须立即
+    // 回归保护：子任务（subagent=true）审批不交互——即使交互模式
+    // （主循环会挂起等面板），子任务也必须立即
     // 拒绝（timeout 包裹验证不挂起），由主 agent 在主对话确认后重试。
     let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
-        unattended_mode: false,
-        wait_for_approval: true,
+        mode: ApprovalMode::Interactive,
         ..Default::default()
     }));
     let registry =
@@ -354,8 +352,7 @@ async fn test_subagent_command_approved_via_shared_fingerprint() {
     // 回归保护：主 agent 已确认过的操作（指纹共享），子任务直接执行——
     // 子 agent 是主 agent 意图的执行器，已授权范围内的操作零交互。
     let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
-        unattended_mode: false,
-        wait_for_approval: true,
+        mode: ApprovalMode::Interactive,
         ..Default::default()
     }));
     // 主循环先确认过该操作（指纹记录）

@@ -130,8 +130,11 @@ async fn test_e2e_approval_status_endpoint() {
         body["config"]["enable_auto_approval"].is_boolean(),
         "审批配置应包含 enable_auto_approval: {body}"
     );
-    assert!(body["config"]["unattended_mode"].is_boolean());
-    assert!(body["config"]["wait_for_approval"].is_boolean());
+    // ADR-033：审批行为模式（autonomous / confirm / interactive）
+    assert!(
+        body["config"]["mode"].is_string(),
+        "审批配置应包含 mode: {body}"
+    );
     // 空队列：pending_approvals / pending_confirmations / recent_records
     assert_eq!(body["pending_approvals"].as_array().unwrap().len(), 0);
     assert_eq!(body["pending_confirmations"].as_array().unwrap().len(), 0);

@@ -73,9 +73,6 @@ pub struct SecurityPolicy {
     pub max_file_size: u64,
     /// 是否允许通过解释器执行命令。
     pub block_interpreters: bool,
-    /// 完全放开模式：跳过元字符/解释器检查，仅保留黑名单（与审批层
-    /// allow_all_operations 配套；默认关闭）。
-    pub allow_all_operations: bool,
 }
 
 impl SecurityPolicy {
@@ -104,8 +101,11 @@ impl SecurityPolicy {
             allow_file_write: true,
             max_command_timeout_secs: DEFAULT_COMMAND_TIMEOUT_SECS,
             max_file_size: config.max_file_size,
-            block_interpreters: config.safety_mode != SafetyMode::Permissive,
-            allow_all_operations: config.allow_all_operations,
+            // ADR-033：Relaxed/Permissive 跳过解释器检查（Strict/Transform 检查）。
+            block_interpreters: matches!(
+                config.safety_mode,
+                SafetyMode::Strict | SafetyMode::Transform
+            ),
         }
     }
 
@@ -343,8 +343,8 @@ impl SecurityPolicy {
         }
 
         // 检测命令链和命令替换元字符，防止注入
-        // （完全放开模式跳过：仅保留黑名单兜底）
-        if !self.allow_all_operations && Self::has_shell_metacharacters(command) {
+        // （放宽模式跳过：仅保留黑名单兜底）
+        if self.safety_mode != SafetyMode::Relaxed && Self::has_shell_metacharacters(command) {
             return Err(TianyanError::Custom(
                 "executor: 安全策略违规：命令包含不被允许的 shell 元字符（&&、||、;、`、$() 等）"
                     .to_string(),
@@ -354,7 +354,7 @@ impl SecurityPolicy {
         let cmd_name = command.split_whitespace().next().unwrap_or(command);
         let pure_name = extract_command_base(cmd_name);
 
-        if self.block_interpreters && !self.allow_all_operations {
+        if self.block_interpreters {
             let interpreters = ["cmd", "powershell", "pwsh", "bash", "sh", "wsl", "wsl.exe"];
             if interpreters.contains(&pure_name.as_str()) {
                 return Err(TianyanError::Custom(format!(
@@ -448,7 +448,6 @@ mod tests {
             max_command_timeout_secs: 30,
             max_file_size: 1024 * 1024,
             block_interpreters: true,
-            allow_all_operations: false,
         }
     }
 
@@ -719,10 +718,10 @@ mod tests {
     }
 
     #[test]
-    fn test_allow_all_operations_skips_metachar_but_keeps_blocklist() {
-        // 完全放开：跳过元字符/解释器检查，但黑名单仍生效
+    fn test_relaxed_mode_skips_metachar_but_keeps_blocklist() {
+        // 放宽模式：跳过元字符/解释器检查，但黑名单仍生效
         let policy = SecurityPolicy::from_config(&SecurityConfig {
-            allow_all_operations: true,
+            safety_mode: SafetyMode::Relaxed,
             blocked_commands: vec!["rm -rf /".to_string()],
             ..Default::default()
         });

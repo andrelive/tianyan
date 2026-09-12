@@ -20,11 +20,16 @@ export default function SecurityTab({ config, onUpdateField }: SecurityTabProps)
             />
           </div>
           <div className="flex items-center gap-3">
-            <label className="text-sm text-[var(--color-text-primary)] w-36">确认命令执行</label>
-            <Toggle
-              checked={config.confirm_commands}
-              onChange={(v) => onUpdateField('confirm_commands', v)}
-            />
+            <label className="text-sm text-[var(--color-text-primary)] w-36">审批模式</label>
+            <select
+              value={config.approval_mode}
+              onChange={(e) => onUpdateField('approval_mode', e.target.value)}
+              className={INPUT_CLASS}
+            >
+              <option value="autonomous">全自主（默认，不询问）</option>
+              <option value="confirm">确认式（危险操作需确认）</option>
+              <option value="interactive">交互式（挂起等审批面板）</option>
+            </select>
           </div>
           <div className="flex items-center gap-3">
             <label className="text-sm text-[var(--color-text-primary)] w-36">审计日志</label>
@@ -34,13 +39,17 @@ export default function SecurityTab({ config, onUpdateField }: SecurityTabProps)
             />
           </div>
           <div className="flex items-center gap-3">
-            <label className="text-sm text-[var(--color-text-primary)] w-36">
-              完全放开（不询问）
-            </label>
-            <Toggle
-              checked={config.allow_all_operations}
-              onChange={(v) => onUpdateField('allow_all_operations', v)}
-            />
+            <label className="text-sm text-[var(--color-text-primary)] w-36">命令检查</label>
+            <select
+              value={config.safety_mode}
+              onChange={(e) => onUpdateField('safety_mode', e.target.value)}
+              className={INPUT_CLASS}
+            >
+              <option value="relaxed">放宽（默认；黑名单兜底）</option>
+              <option value="strict">严格（元字符/解释器检查）</option>
+              <option value="transform">转换（危险命令改写为回收站）</option>
+              <option value="permissive">完全放开（跳过一切检查）</option>
+            </select>
           </div>
         </div>
 

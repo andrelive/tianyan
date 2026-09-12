@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::config::ApprovalMode;
 use crate::executor::Action;
 
 use super::*;
@@ -152,10 +153,10 @@ fn test_auto_approval_rules() {
 }
 
 #[tokio::test]
-async fn test_unattended_mode_auto_approves_medium_risk() {
-    // 显式开启无人值守模式
+async fn test_autonomous_mode_auto_approves_medium_risk() {
+    // ADR-033：全自主模式自动批准
     let config = ApprovalWorkflowConfig {
-        unattended_mode: true,
+        mode: ApprovalMode::Autonomous,
         ..Default::default()
     };
     let workflow = Arc::new(ApprovalWorkflow::new(config));
@@ -175,7 +176,7 @@ async fn test_unattended_mode_auto_approves_medium_risk() {
         .unwrap();
     assert_eq!(resp.decision, ApprovalDecision::Approve);
     assert_eq!(resp.approved_by, "auto");
-    assert!(resp.reason.unwrap().contains("无人值守"));
+    assert!(resp.reason.unwrap().contains("全自主"));
 
     // 审计记录已写入
     let records = workflow.get_approval_records().await;
@@ -188,8 +189,12 @@ async fn test_unattended_mode_auto_approves_medium_risk() {
 }
 
 #[tokio::test]
-async fn test_unattended_mode_keeps_critical_denied() {
-    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+async fn test_confirm_mode_keeps_critical_denied() {
+    // ADR-033：确认模式保留 Critical 默认拒绝（全自主模式除黑名单外放行）
+    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
+        mode: ApprovalMode::Confirm,
+        ..Default::default()
+    }));
 
     let action = Action::ExecuteCommand {
         command: "rm -rf /".to_string(),
@@ -207,10 +212,10 @@ async fn test_unattended_mode_keeps_critical_denied() {
 }
 
 #[tokio::test]
-async fn test_allow_all_operations_approves_everything_except_blocked() {
-    // 完全放开模式：注入 Any+Always+Approve 规则——除 Deny 规则（黑名单）
-    // 外全部自动批准，不等待、不追问。
+async fn test_autonomous_mode_approves_everything_except_blocked() {
+    // ADR-033 全自主模式：除 Deny 规则（黑名单）外全部自动批准，不等待、不追问。
     let config = ApprovalWorkflowConfig {
+        mode: ApprovalMode::Autonomous,
         auto_approval_rules: vec![
             // 黑名单 Deny（模拟 security_blocked_ 注入）
             AutoApprovalRule {
@@ -218,14 +223,6 @@ async fn test_allow_all_operations_approves_everything_except_blocked() {
                 action_pattern: ActionPattern::CommandPattern("rm -rf /".to_string()),
                 condition: ApprovalCondition::Always,
                 decision: ApprovalDecision::Deny,
-                enabled: true,
-            },
-            // 完全放开 Approve（模拟 allow_all_operations 注入）
-            AutoApprovalRule {
-                name: "allow_all_operations".to_string(),
-                action_pattern: ActionPattern::Any,
-                condition: ApprovalCondition::Always,
-                decision: ApprovalDecision::Approve,
                 enabled: true,
             },
         ],
@@ -272,9 +269,12 @@ async fn test_allow_all_operations_approves_everything_except_blocked() {
 }
 
 #[tokio::test]
-async fn test_attended_mode_denies_without_confirmation() {
-    // 默认（attended、无审批通道）：Medium 风险应立即拒绝，由上层降级为追问
-    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+async fn test_confirm_mode_denies_without_confirmation() {
+    // 确认模式（ADR-033）：Medium 风险无确认时立即拒绝，由上层降级为追问
+    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
+        mode: ApprovalMode::Confirm,
+        ..Default::default()
+    }));
 
     let action = Action::ExecuteCommand {
         command: "git status".to_string(),
@@ -293,7 +293,11 @@ async fn test_attended_mode_denies_without_confirmation() {
 
 #[tokio::test]
 async fn test_attended_mode_approves_after_user_confirmation() {
-    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+    // 确认模式（ADR-033）：未确认拒绝；用户确认（指纹）后批准。
+    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
+        mode: ApprovalMode::Confirm,
+        ..Default::default()
+    }));
 
     let action = Action::ExecuteCommand {
         command: "git status".to_string(),
@@ -320,11 +324,10 @@ async fn test_attended_mode_approves_after_user_confirmation() {
 
 #[tokio::test]
 async fn test_attended_mode_still_requests_human_approval() {
-    // 显式开启 wait_for_approval（GUI 审批通道接入后）：
+    // 交互模式（ADR-033；原 wait_for_approval）：
     // Medium 风险应进入待处理队列等待人工审批
     let config = ApprovalWorkflowConfig {
-        unattended_mode: false,
-        wait_for_approval: true,
+        mode: ApprovalMode::Interactive,
         ..Default::default()
     };
     let workflow = Arc::new(ApprovalWorkflow::new(config));
@@ -377,11 +380,10 @@ impl ApprovalPendingNotifier for RecordingNotifier {
 
 #[tokio::test]
 async fn test_approval_pending_notifier_called() {
-    // 回归保护：wait_for_approval 挂起时必须通知（后台任务等无人值守场景
+    // 回归保护：交互模式挂起时必须通知（后台任务等无人值守场景
     // 的审批请求不再静默——用户经通知到审批面板响应后任务恢复）。
     let config = ApprovalWorkflowConfig {
-        unattended_mode: false,
-        wait_for_approval: true,
+        mode: ApprovalMode::Interactive,
         ..Default::default()
     };
     let notifier = Arc::new(RecordingNotifier {
@@ -453,12 +455,11 @@ fn test_approval_pending_text_contains_guidance() {
 
 #[tokio::test]
 async fn test_request_approval_no_wait_never_waits() {
-    // 回归保护：子任务审批（no_wait）永不等待人工响应——即使全局
-    // wait_for_approval=true（主循环会挂起），子任务也必须立即拒绝
+    // 回归保护：子任务审批（no_wait）永不等待人工响应——即使交互模式
+    // （主循环会挂起），子任务也必须立即拒绝
     // 并携带"主任务授权"标记；不产生挂起请求。
     let config = ApprovalWorkflowConfig {
-        unattended_mode: false,
-        wait_for_approval: true,
+        mode: ApprovalMode::Interactive,
         ..Default::default()
     };
     let workflow = Arc::new(ApprovalWorkflow::new(config));
@@ -575,11 +576,11 @@ fn test_deny_rule_priority_regardless_of_rule_order() {
 }
 
 #[tokio::test]
-async fn test_blocked_command_denied_even_with_wait_for_approval() {
-    // 命中 Deny 规则的命令：即使 wait_for_approval 开启（否则 Medium 风险
+async fn test_blocked_command_denied_even_in_interactive_mode() {
+    // 命中 Deny 规则的命令：即使交互模式（否则 Medium 风险
     // 会挂起等待人工），也立即强制拒绝，不进入待处理队列。
     let config = ApprovalWorkflowConfig {
-        wait_for_approval: true,
+        mode: ApprovalMode::Interactive,
         auto_approval_rules: vec![AutoApprovalRule {
             name: "security_blocked_git".to_string(),
             action_pattern: ActionPattern::CommandPattern("git".to_string()),
@@ -604,11 +605,11 @@ async fn test_blocked_command_denied_even_with_wait_for_approval() {
 }
 
 #[tokio::test]
-async fn test_prompt_commands_force_ask_even_in_unattended_mode() {
-    // 总是询问命令：即使无人值守模式（否则 Medium 风险自动批准）
+async fn test_prompt_commands_force_ask_even_in_autonomous_mode() {
+    // 总是询问命令：即使全自主模式（否则 Medium 风险自动批准）
     // 也强制走审批——未确认即拒绝。
     let config = ApprovalWorkflowConfig {
-        unattended_mode: true,
+        mode: ApprovalMode::Autonomous,
         prompt_commands: vec!["git".to_string()],
         ..Default::default()
     };
@@ -653,9 +654,9 @@ async fn test_prompt_commands_force_ask_for_safe_risk() {
 
 #[tokio::test]
 async fn test_prompt_command_routes_to_human_approval() {
-    // 总是询问命令 + wait_for_approval：强制进入待处理队列等待人工响应
+    // 总是询问命令 + 交互模式：强制进入待处理队列等待人工响应
     let config = ApprovalWorkflowConfig {
-        wait_for_approval: true,
+        mode: ApprovalMode::Interactive,
         prompt_commands: vec!["echo".to_string()],
         ..Default::default()
     };
@@ -693,7 +694,7 @@ async fn test_prompt_command_routes_to_human_approval() {
 #[tokio::test]
 async fn test_respond_with_edited_command_records_audit() {
     let config = ApprovalWorkflowConfig {
-        wait_for_approval: true,
+        mode: ApprovalMode::Interactive,
         ..Default::default()
     };
     let workflow = Arc::new(ApprovalWorkflow::new(config));
@@ -759,7 +760,7 @@ async fn test_respond_with_edited_command_records_audit() {
 async fn test_respond_deny_ignores_edited_command() {
     // 编辑命令仅对批准语义生效：deny 响应忽略编辑值，审计不记录
     let config = ApprovalWorkflowConfig {
-        wait_for_approval: true,
+        mode: ApprovalMode::Interactive,
         ..Default::default()
     };
     let workflow = Arc::new(ApprovalWorkflow::new(config));

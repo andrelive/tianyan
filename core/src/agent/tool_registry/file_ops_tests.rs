@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::config::SafetyMode;
+use crate::config::{ApprovalMode, SafetyMode};
 use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
 use crate::executor::SecurityPolicy;
 use crate::test_utils::MockVfs;
@@ -34,7 +34,6 @@ fn default_strict_policy() -> SecurityPolicy {
         max_command_timeout_secs: 30,
         max_file_size: 1024 * 1024,
         block_interpreters: true,
-        allow_all_operations: false,
     }
 }
 
@@ -618,9 +617,11 @@ async fn test_apply_edit_approval_denied() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("code.txt");
     std::fs::write(&path, "a\nb\n").unwrap();
-
-    // 默认（attended、无审批通道）：Medium 风险立即拒绝并降级为询问用户。
-    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+    // 确认模式（ADR-033）：Medium 风险无确认时立即拒绝并降级为询问用户。
+    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
+        mode: ApprovalMode::Confirm,
+        ..Default::default()
+    }));
     let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
     let edits = json!([{ "old_string": "a", "new_string": "x" }]);
     let result = registry
@@ -640,9 +641,9 @@ async fn test_apply_edit_approval_approved() {
     let path = dir.path().join("code.txt");
     std::fs::write(&path, "a\nb\n").unwrap();
 
-    // 无人值守模式：Medium 风险自动批准。
+    // 全自主模式（ADR-033）：Medium 风险自动批准。
     let config = ApprovalWorkflowConfig {
-        unattended_mode: true,
+        mode: ApprovalMode::Autonomous,
         ..Default::default()
     };
     let workflow = Arc::new(ApprovalWorkflow::new(config));
@@ -651,7 +652,7 @@ async fn test_apply_edit_approval_approved() {
     let result = registry
         .execute_apply_edit(&apply_edit_args(&path, edits), "test-session", false)
         .await;
-    assert!(result.is_ok(), "无人值守应批准编辑: {result:?}");
+    assert!(result.is_ok(), "全自主应批准编辑: {result:?}");
     let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
     assert_eq!(on_disk, "x\nb\n");
 }
@@ -778,9 +779,11 @@ async fn test_apply_patch_approval_denied() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("code.txt");
     std::fs::write(&path, "a\nb\n").unwrap();
-
-    // 默认（attended、无审批通道）：Medium 风险立即拒绝并降级为询问用户。
-    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig::default()));
+    // 确认模式（ADR-033）：Medium 风险无确认时立即拒绝并降级为询问用户。
+    let workflow = Arc::new(ApprovalWorkflow::new(ApprovalWorkflowConfig {
+        mode: ApprovalMode::Confirm,
+        ..Default::default()
+    }));
     let registry = ToolRegistry::new(default_strict_policy()).with_approval_workflow(workflow);
     let patch = format!(
         "*** Update File: {}\n@@ -1,1 +1,1 @@\n-a\n+b\n",
@@ -803,9 +806,9 @@ async fn test_apply_patch_approval_approved() {
     let path = dir.join("code.txt");
     std::fs::write(&path, "a\nb\n").unwrap();
 
-    // 无人值守模式：Medium 风险自动批准。
+    // 全自主模式（ADR-033）：Medium 风险自动批准。
     let config = ApprovalWorkflowConfig {
-        unattended_mode: true,
+        mode: ApprovalMode::Autonomous,
         ..Default::default()
     };
     let workflow = Arc::new(ApprovalWorkflow::new(config));
@@ -820,7 +823,7 @@ async fn test_apply_patch_approval_approved() {
     let result = registry
         .execute_apply_patch(&apply_patch_args(patch), "test-session", false)
         .await;
-    assert!(result.is_ok(), "无人值守应批准补丁: {result:?}");
+    assert!(result.is_ok(), "全自主应批准补丁: {result:?}");
     let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
     assert_eq!(on_disk, "c\n");
     let _ = std::fs::remove_dir_all(&dir);

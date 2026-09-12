@@ -104,6 +104,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-030: 统一 Agent 循环框架](docs/architecture/decisions/030-unified-agent-loop.md) — 主 agent 与子代理同构：AgentLoop 抽配置点（上下文组装/工具集/持久化策略/完成回调/策略）；收尾条件统一"无工具调用"（submit_result 降级为可选结果落盘工具，主 agent 用 task_status 查结果 ID）；子代理用流式路径（task_id 即 session_id，前端完全复用）
 - [ADR-031: 乐观渲染 + user_message_id 确认 + 统一流式](docs/architecture/decisions/031-optimistic-render-user-message-id.md) — 用户消息发送即显示（乐观渲染），落库后经 user_message_id 确认事件回显真实 id（生命周期：请求→确认→弃）；assistant 纯流式（增量即终版，message 广播移除）；任务完成通知走 LOOP（process_wake 流式化，输出经 chat_stream 打字机展示）；子代理流式事件补 type/session_id 路由
 - [ADR-032: 流式事件转发统一](docs/architecture/decisions/032-unified-stream-forward.md) — 三处手写接线（用户轮/唤醒轮/子代理）收敛为 core 单一转发器 `spawn_stream_forwarder`（建通道即消费，防死锁不变量）；映射器与送达目标为有意可插拔 seam；`process_message_stream` 改收 sender（与 process_wake 同构，通道所有权归调用方）；字段注入单点
+- [ADR-033: 安全策略收敛——默认自主](docs/architecture/decisions/033-security-policy-convergence.md) — 审批行为收敛为 `ApprovalMode` 三态（autonomous 默认 / confirm / interactive）；`SafetyMode` 四态（relaxed 新默认，吸收 allow_all_operations 命令层语义）；`allow_all_operations`/`wait_for_approval`/`confirm_commands`/`unattended_mode` 四个旧开关下线（读取兼容 + 自动归一）；评估链模式短路单点
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 

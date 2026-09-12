@@ -27,7 +27,7 @@ const RISK_BADGE_CLASSES: Record<string, string> = {
     'bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800',
 };
 
-/** 审批倒计时（P1：wait_for_approval 阻塞期间用户需知道还剩多久自动处理）。 */
+/** 审批倒计时（P1：交互模式阻塞期间用户需知道还剩多久自动处理）。 */
 function CountdownText({ requestedAt, timeoutSecs }: { requestedAt: string; timeoutSecs: number }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -142,7 +142,7 @@ export default function ApprovalPanel() {
   const pending = snapshot?.pending_approvals ?? [];
   const confirmations = snapshot?.pending_confirmations ?? [];
   const records = snapshot?.recent_records.slice(0, 10) ?? [];
-  const waitForApproval = snapshot?.config.wait_for_approval ?? true;
+  const interactiveMode = snapshot?.config.mode === 'interactive';
 
   return (
     <div className="flex flex-col h-full">
@@ -180,10 +180,9 @@ export default function ApprovalPanel() {
                 <div className="flex flex-col items-center justify-center py-10 text-[var(--color-text-tertiary)]">
                   <ShieldCheck size={36} className="mb-2 opacity-40" />
                   <p className="text-sm">暂无待处理审批</p>
-                  {!waitForApproval && (
+                  {!interactiveMode && (
                     <p className="text-xs mt-2 max-w-md text-center">
-                      审批等待模式未开启（配置 security.wait_for_approval=false
-                      时危险操作走对话确认链路）
+                      当前为「{snapshot?.config.mode}」模式；交互模式下危险操作会在此面板等待人工响应
                     </p>
                   )}
                 </div>
@@ -330,23 +329,15 @@ export default function ApprovalPanel() {
               </h3>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                 <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
-                  <p className="text-xs text-[var(--color-text-tertiary)]">
-                    等待人工响应（降级链路）
-                  </p>
+                  <p className="text-xs text-[var(--color-text-tertiary)]">审批模式</p>
                   <p className="text-sm font-medium text-[var(--color-text-primary)] mt-1">
-                    {booleanLabel(snapshot.config.wait_for_approval)}
+                    {snapshot.config.mode}
                   </p>
                 </div>
                 <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
                   <p className="text-xs text-[var(--color-text-tertiary)]">自动批准</p>
                   <p className="text-sm font-medium text-[var(--color-text-primary)] mt-1">
                     {booleanLabel(snapshot.config.enable_auto_approval)}
-                  </p>
-                </div>
-                <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
-                  <p className="text-xs text-[var(--color-text-tertiary)]">无人值守模式</p>
-                  <p className="text-sm font-medium text-[var(--color-text-primary)] mt-1">
-                    {booleanLabel(snapshot.config.unattended_mode)}
                   </p>
                 </div>
                 <div className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">

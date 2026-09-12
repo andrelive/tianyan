@@ -140,14 +140,18 @@ include_location = false
 # ==================== 安全配置 ====================
 [security]
 enabled = true
+# 审批行为模式（ADR-033）：autonomous（默认，黑名单外全放行）/ confirm（危险操作询问）/
+# interactive（挂起等待审批面板）。
+approval_mode = "autonomous"
+# 命令检查层模式（ADR-033）：relaxed（默认，跳过元字符/解释器检查、黑名单兜底）/
+# strict（元字符/解释器检查）/ transform（危险命令改写为回收站）/ permissive（跳过一切检查）。
+safety_mode = "relaxed"
 allowed_directories = []
 blocked_directories = ["/", "/etc", "/bin", "/sbin", "/usr/bin", "/usr/sbin"]
 allowed_commands = []
 blocked_commands = ["rm -rf /", "format", "del /s", "rd /s"]
-# "总是询问"命令列表：命中的命令强制走人工审批/询问（不被自动放行、
-# Safe 自动通过与无人值守模式放行）。默认空。
+# "总是询问"命令列表：命中的命令强制走人工审批/询问（不被自动放行）。默认空。
 prompt_commands = []
-confirm_commands = true
 max_file_size = 104857600
 audit_logging = true
 

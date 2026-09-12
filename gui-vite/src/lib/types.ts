@@ -481,8 +481,8 @@ export interface ApprovalWorkflowConfig {
   enable_auto_approval: boolean;
   persist_records: boolean;
   max_pending_approvals: number;
-  unattended_mode: boolean;
-  wait_for_approval: boolean;
+  /** 审批行为模式（ADR-033：autonomous / confirm / interactive）。 */
+  mode: string;
   /** "总是询问"命令列表：命中命令强制走人工审批（不被自动放行）。 */
   prompt_commands?: string[];
 }
@@ -719,10 +719,10 @@ export interface ConfigState {
 
   // -- Security config (security.*) --
   security_enabled: boolean;
-  confirm_commands: boolean;
   audit_logging: boolean;
-  allow_all_operations: boolean;
-  /** 安全模式（strict 等；后端字段透传） */
+  /** 审批行为模式（autonomous / confirm / interactive；ADR-033） */
+  approval_mode: string;
+  /** 安全模式（strict / relaxed / transform / permissive；后端字段透传） */
   safety_mode: string;
   /** 回收站目录（后端字段透传；空串 = 后端默认） */
   trash_directory: string;

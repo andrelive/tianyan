@@ -28,7 +28,7 @@ describe('fromBackendConfig edge cases', () => {
     expect(state.preferences).toEqual(defaults.preferences);
     expect(state.working_directory).toBe(defaults.working_directory);
     expect(state.log_level).toBe('info');
-    expect(state.safety_mode).toBe('strict');
+    expect(state.safety_mode).toBe('relaxed');
     expect(state.mcpServers).toEqual([]);
     expect(state.resolvedSpecs).toEqual({});
   });
