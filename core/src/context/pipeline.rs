@@ -656,6 +656,9 @@ mod tests {
 
         let config = CompressionConfig {
             context_window: 100,
+            // 用例固定 0.5 阈值（触发线 50：真实 usage 60 > 50 必触发），
+            // 不随默认阈值调整而漂移（默认值语义由 compression 模块测试覆盖）。
+            compression_threshold: 0.5,
             min_messages_to_compress: 3,
             preserve_recent_messages: 2,
             ..Default::default()

@@ -1,7 +1,7 @@
 //! 上下文压缩模块。
 //!
 //! 提供智能的上下文压缩能力，对标 Hermes Agent 的上下文压缩机制：
-//! - 当对话历史超过上下文窗口的 50% 时自动触发压缩
+//! - 当对话历史超过上下文窗口的 60% 时自动触发压缩
 //! - 使用 LLM 生成对话摘要，保留关键信息
 //! - 支持分层压缩（最近对话保留详情，早期对话压缩为摘要）
 //! - 保留重要的执行结果和决策记录
@@ -45,8 +45,9 @@ pub enum CompressionStrategy {
 
 /// 默认上下文窗口大小。
 const DEFAULT_CONTEXT_WINDOW: usize = 128000;
-/// 默认压缩阈值（窗口的百分比）。
-const DEFAULT_COMPRESSION_THRESHOLD: f32 = 0.5;
+/// 默认压缩阈值（窗口的百分比）——60% 触发（2026-09 从 50% 上调：
+/// 在上下文仍有余量时尽量保留原文，减少压缩频次与摘要信息损耗）。
+const DEFAULT_COMPRESSION_THRESHOLD: f32 = 0.6;
 /// 默认保留最近消息数。
 const DEFAULT_PRESERVE_RECENT: usize = 10;
 /// 默认最小压缩消息数。
@@ -478,7 +479,7 @@ mod tests {
     fn test_compression_config_default() {
         let config = CompressionConfig::default();
         assert_eq!(config.context_window, 128000);
-        assert_eq!(config.compression_threshold, 0.5);
+        assert_eq!(config.compression_threshold, 0.6);
         assert_eq!(config.preserve_recent_messages, 10);
     }
 
