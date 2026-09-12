@@ -2,7 +2,7 @@
 //! delegate_to_agent。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -17,7 +17,7 @@ use crate::agent::tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams,
     SubmitResultParams, SuggestRoleParams, TaskCancelParams, TaskStatusParams,
 };
-use crate::agent::types::{AgentStreamChunk, StreamChunkType};
+use crate::agent::types::{AgentStreamChunk, StreamChunkType, StreamEventSender};
 use crate::common::error::TianyanError;
 use crate::common::types::{ContentLevel, ContextNamespace, Message, TianyanUri};
 use crate::executor::Action;
@@ -75,6 +75,24 @@ fn chunk_to_stream_json(_session_id: &str, chunk: AgentStreamChunk) -> Option<se
         "tool_call": chunk.tool_call,
         "tool_result": chunk.tool_result,
     }))
+}
+
+/// 委托循环已解析参数（[`ToolRegistry::resolve_delegate_params`] 的产物）。
+///
+/// 优先级统一为：显式参数 > 角色值 > 主 Agent 配置/默认值。
+struct DelegateLoopParams {
+    /// 模型名（显式 model > role.model > 主 Agent 模型）。
+    model: String,
+    /// 系统提示（None = 无系统提示）。
+    system_prompt: Option<String>,
+    /// 最大轮数（已钳制到 [1, MAX_TURNS_CAP]）。
+    max_turns: usize,
+    /// 超时秒数（None = 无限时；后台任务默认无限时）。
+    timeout_secs: Option<u64>,
+    /// 角色工具白名单（None = 不限制）。
+    role_tools: Option<Vec<String>>,
+    /// 角色名（白名单拒绝消息用；None = 无角色）。
+    role_name: Option<String>,
 }
 
 impl ToolRegistry {
@@ -381,9 +399,6 @@ impl ToolRegistry {
         session_id: &str,
         task_id: &str,
     ) -> Result<serde_json::Value, TianyanError> {
-        const DEFAULT_MAX_TURNS: usize = 200;
-        const MAX_TURNS_CAP: usize = 500;
-
         let model_service = self.model_service.clone().ok_or_else(|| {
             TianyanError::Custom(format!(
                 "tool: 执行失败：{}",
@@ -397,8 +412,98 @@ impl ToolRegistry {
             ))
         })?;
 
-        // 角色解析（`params.role`）：未知角色在循环启动前报错（模型可换用
-        // 有效角色重试）。字段优先级：显式参数 > 角色值 > 主 Agent 配置/默认值。
+        // 角色解析与参数解析（优先级：显式参数 > 角色值 > 主 Agent 配置/默认值；
+        // 未知/试验性角色在循环启动前报错，模型可换用有效角色重试）。
+        let DelegateLoopParams {
+            model,
+            system_prompt,
+            max_turns,
+            timeout_secs,
+            role_tools,
+            role_name,
+        } = self.resolve_delegate_params(params)?;
+
+        // 一次性子代理（2026-08 决策：移除 durable 角色会话 continue 模式）：
+        // 每次委托都是干净上下文——不加载角色历史（旧任务上下文会污染当前
+        // 任务，子代理顺着旧对话跑偏），也不持久化。上下文 = 角色系统提示 +
+        // 当前任务指令（组装见 [`Self::build_delegate_messages`]）。
+        let mut messages = Self::build_delegate_messages(system_prompt.as_deref(), &params.task);
+
+        // 委托工具列表：角色白名单过滤（无白名单则全量）+ submit_result 恒在。
+        // （组装见 [`Self::build_delegate_tools`]）。
+        let delegate_tools = self.build_delegate_tools(role_tools.as_deref()).await;
+
+        // 取消标志：主循环停止时置位（coordinator 注入 delegation_cancel）
+        let cancel = self
+            .delegation_cancel
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+
+        // 流式事件转发（ADR-032 统一转发器）：AgentStreamChunk → 事件 JSON
+        // → TaskEventSink（task_id 即 session_id，前端完全复用主会话 reducer）。
+        // 骨架与用户轮 / 唤醒轮共用（建通道即消费）；`type=chat_stream` +
+        // `session_id=task_id` 由转发器单点注入（前端按 session_id 路由到
+        // 任务面板——此前无这两个字段，事件被前端丢弃）。
+        // 未装配事件通道时走 null 送达（消费端存活，不阻塞子代理轮）。
+        let deliver: Arc<dyn StreamEventDeliver> = match self.task_event_sink.clone() {
+            Some(sink) => Arc::new(TaskSinkDeliver(sink)),
+            None => Arc::new(NullDeliver),
+        };
+        let (sender, forward_handle) =
+            spawn_stream_forwarder(task_id.to_string(), Arc::new(chunk_to_stream_json), deliver);
+
+        // AgentLoop 实例（统一循环框架：委托策略——角色过滤工具执行、
+        // 不索引 FTS（ADR-026）、max_turns 尽力而为）
+        let agent_loop = AgentLoop::new(
+            model_service,
+            self.clone(),
+            session_manager,
+            AgentLoopConfig { max_turns },
+        )
+        .with_turn_policy(TurnPolicy {
+            tool_executor: ToolExecutorKind::RoleFiltered {
+                role_tools,
+                role_name,
+            },
+            persist_no_fts: true,
+            max_turns_graceful: true,
+            tools: Some(delegate_tools),
+        });
+
+        // 循环执行（含 timeout 兜底守卫）：超时置位取消标志并返回超时错误
+        // （执行细节见 [`Self::run_delegate_loop`]）。
+        let result = Self::run_delegate_loop(
+            agent_loop,
+            &mut messages,
+            sender,
+            task_id,
+            &model,
+            &cancel,
+            timeout_secs,
+        )
+        .await?;
+
+        // 轮结束（sender 已随 run_stream 释放）→ 消费任务收尾：等待句柄确保
+        // 子代理尾部事件（最后一块正文/工具结果）已送达面板。
+        let _ = forward_handle.await;
+
+        // 结果转换：AgentLoopResult → 任务结果（watcher 写入任务状态机）
+        self.assemble_subagent_result(result, task_id).await
+    }
+
+    /// 解析委托角色与循环参数：未知/试验性角色在循环启动前报错（模型可换用
+    /// 有效角色重试）；模型/系统提示/轮数/超时/工具白名单按「显式参数 > 角色值
+    /// > 主 Agent 配置/默认值」归并。
+    fn resolve_delegate_params(
+        &self,
+        params: &DelegateToAgentParams,
+    ) -> Result<DelegateLoopParams, TianyanError> {
+        const DEFAULT_MAX_TURNS: usize = 200;
+        const MAX_TURNS_CAP: usize = 500;
+
         let role = match params.role.as_deref() {
             Some(name) => {
                 let active = self.role_registry.get_active(name);
@@ -454,23 +559,39 @@ impl ToolRegistry {
         let role_tools: Option<Vec<String>> = role.as_ref().and_then(|r| r.tools.clone());
         let role_name: Option<String> = role.as_ref().map(|r| r.name.clone());
 
-        // 一次性子代理（2026-08 决策：移除 durable 角色会话 continue 模式）：
-        // 每次委托都是干净上下文——不加载角色历史（旧任务上下文会污染当前
-        // 任务，子代理顺着旧对话跑偏），也不持久化。上下文 = 角色系统提示
-        // + 当前任务指令。任务间记忆由主 agent 承担（主对话是唯一记忆载体）。
+        Ok(DelegateLoopParams {
+            model,
+            system_prompt,
+            max_turns,
+            timeout_secs,
+            role_tools,
+            role_name,
+        })
+    }
+
+    /// 组装一次性子代理的初始消息：角色/显式系统提示（非空时）+ 任务指令。
+    ///
+    /// 每次委托都是干净上下文——不加载角色历史（旧任务上下文会污染当前
+    /// 任务，子代理顺着旧对话跑偏），也不持久化。上下文 = 角色系统提示 +
+    /// 当前任务指令。任务间记忆由主 agent 承担（主对话是唯一记忆载体）。
+    fn build_delegate_messages(system_prompt: Option<&str>, task: &str) -> Vec<Message> {
         let mut messages: Vec<Message> = Vec::new();
-        if let Some(prompt) = system_prompt.as_deref() {
+        if let Some(prompt) = system_prompt {
             if !prompt.is_empty() {
                 messages.push(Message::system(prompt));
             }
         }
-        messages.push(Message::user(&params.task));
+        messages.push(Message::user(task));
+        messages
+    }
 
-        // 委托工具列表：角色白名单过滤（无白名单则全量）+ submit_result 恒在。
-        // 此前请求未携带工具定义（ChatCompletionRequest::new 默认 tools=None）——
-        // 子代理 LLM 看不到任何工具，只能凭空输出，这是"子代理报告与代码不符"
-        // 的根本原因。
-        let mut delegate_tools: Vec<ToolDefinition> = match role_tools.as_deref() {
+    /// 组装子代理工具列表：角色白名单过滤（无白名单则全量）+ submit_result 恒在。
+    ///
+    /// 此前请求未携带工具定义（ChatCompletionRequest::new 默认 tools=None）——
+    /// 子代理 LLM 看不到任何工具，只能凭空输出，这是"子代理报告与代码不符"
+    /// 的根本原因。
+    async fn build_delegate_tools(&self, role_tools: Option<&[String]>) -> Vec<ToolDefinition> {
+        let mut delegate_tools: Vec<ToolDefinition> = match role_tools {
             Some(allowed) => {
                 let all = self.definitions().await;
                 all.into_iter()
@@ -485,55 +606,28 @@ impl ToolRegistry {
                 "当你的任务完成时，调用本工具把最终结果写入任务存储（result 为完整报告/结论，summary 为可选一句话摘要）。工具返回结果 ID（task_id）。调用后请在最终回复中告知主智能体结果 ID，主智能体可用 task_status 工具查询。",
             ),
         ));
+        delegate_tools
+    }
 
-        // 取消标志：主循环停止时置位（coordinator 注入 delegation_cancel）
-        let cancel = self
-            .delegation_cancel
-            .lock()
-            .await
-            .get(session_id)
-            .cloned()
-            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
-
-        // 流式事件转发（ADR-032 统一转发器）：AgentStreamChunk → 事件 JSON
-        // → TaskEventSink（task_id 即 session_id，前端完全复用主会话 reducer）。
-        // 骨架与用户轮 / 唤醒轮共用（建通道即消费）；`type=chat_stream` +
-        // `session_id=task_id` 由转发器单点注入（前端按 session_id 路由到
-        // 任务面板——此前无这两个字段，事件被前端丢弃）。
-        // 未装配事件通道时走 null 送达（消费端存活，不阻塞子代理轮）。
-        let deliver: Arc<dyn StreamEventDeliver> = match self.task_event_sink.clone() {
-            Some(sink) => Arc::new(TaskSinkDeliver(sink)),
-            None => Arc::new(NullDeliver),
-        };
-        let (sender, forward_handle) =
-            spawn_stream_forwarder(task_id.to_string(), Arc::new(chunk_to_stream_json), deliver);
-
-        // AgentLoop 实例（统一循环框架：委托策略——角色过滤工具执行、
-        // 不索引 FTS（ADR-026）、max_turns 尽力而为）
-        let agent_loop = AgentLoop::new(
-            model_service,
-            self.clone(),
-            session_manager,
-            AgentLoopConfig { max_turns },
-        )
-        .with_turn_policy(TurnPolicy {
-            tool_executor: ToolExecutorKind::RoleFiltered {
-                role_tools,
-                role_name,
-            },
-            persist_no_fts: true,
-            max_turns_graceful: true,
-            tools: Some(delegate_tools),
-        });
-
+    /// 执行子代理循环并返回循环结果（timeout 兜底：超时置位取消标志并返回
+    /// 超时错误；`cancel` 为主循环停止时置位的共享标志）。
+    async fn run_delegate_loop(
+        agent_loop: AgentLoop,
+        messages: &mut Vec<Message>,
+        sender: StreamEventSender,
+        task_id: &str,
+        model: &str,
+        cancel: &Arc<AtomicBool>,
+        timeout_secs: Option<u64>,
+    ) -> Result<AgentLoopResult, TianyanError> {
         let result = match timeout_secs {
             Some(secs) => {
                 let run = agent_loop.run_stream(
-                    &mut messages,
+                    messages,
                     sender,
                     task_id,
                     None,
-                    &model,
+                    model,
                     Some(cancel.as_ref()),
                     None,
                 );
@@ -552,23 +646,29 @@ impl ToolRegistry {
             None => {
                 agent_loop
                     .run_stream(
-                        &mut messages,
+                        messages,
                         sender,
                         task_id,
                         None,
-                        &model,
+                        model,
                         Some(cancel.as_ref()),
                         None,
                     )
                     .await
             }
         }?;
+        Ok(result)
+    }
 
-        // 轮结束（sender 已随 run_stream 释放）→ 消费任务收尾：等待句柄确保
-        // 子代理尾部事件（最后一块正文/工具结果）已送达面板。
-        let _ = forward_handle.await;
-
-        // 结果转换：AgentLoopResult → 任务结果（watcher 写入任务状态机）
+    /// 结果转换：AgentLoopResult → 任务结果 JSON（watcher 写入任务状态机）。
+    ///
+    /// ADR-030：Answer 用 submit_result 暂存结果优先（模型最后输出兜底）；
+    /// MaxTurnsReached 标记 submitted=false（尽力而为）；Cancelled 返回取消错误。
+    async fn assemble_subagent_result(
+        &self,
+        result: AgentLoopResult,
+        task_id: &str,
+    ) -> Result<serde_json::Value, TianyanError> {
         match result {
             AgentLoopResult::Answer {
                 content,

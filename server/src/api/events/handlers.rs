@@ -149,7 +149,7 @@ mod tests {
     ) -> (
         tempfile::TempDir,
         Arc<AppState>,
-        tokio::sync::mpsc::UnboundedReceiver<Event>,
+        tokio::sync::mpsc::Receiver<Event>,
     ) {
         let dir = tempdir().unwrap();
         let mut config = test_config(dir.path());

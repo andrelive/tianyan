@@ -141,6 +141,16 @@ struct TaskEntry {
     cancelled: bool,
 }
 
+/// 单次就绪探测的结果（内部控制流；不对外暴露）。
+enum ProbeOutcome {
+    /// 进程已终态：停止探测（watcher 已发终态通知）。
+    ProcessFinished,
+    /// 未就绪：按退避继续探测。
+    NotReady,
+    /// 已就绪：附判定说明（写入 `ready_note` 并通知）。字段为判定说明。
+    Ready(String),
+}
+
 /// 后台命令管理器（fire-and-forget 进程原语，对标 DSH 后台任务语义）。
 ///
 /// - **立即返回**：`spawn_background` 只负责拉起进程并返回任务快照，调用方不被阻塞；
@@ -201,6 +211,9 @@ impl CommandManager {
     /// 并触发完成通知（注入父会话）+ 唤醒（ADR-013 语义）。
     ///
     /// `session_id` 为发起命令的父会话（完成通知归属）。
+    ///
+    /// 本函数只做编排——日志准备 / 进程启动 / 输出泵 / 任务注册 / watcher /
+    /// 就绪探测各自独立成段（见下方私有 helper）。
     pub async fn spawn_background(
         &self,
         session_id: &str,
@@ -223,75 +236,14 @@ impl CommandManager {
             self.seq.fetch_add(1, AtomicOrdering::SeqCst)
         );
         let now = now_ms();
-        let log_file = self
-            .logs_dir
-            .as_ref()
-            .map(|dir| dir.join(format!("{id}.log")));
+        let log_file = self.prepare_command_log(&id, command, cwd).await;
 
-        // 预写命令回显头
-        if let Some(path) = &log_file {
-            if let Some(parent) = path.parent() {
-                let _ = tokio::fs::create_dir_all(parent).await;
-            }
-            let header = format!(
-                "> $ {}{}\n",
-                cwd.map(|d| format!("({d}) ")).unwrap_or_default(),
-                command
-            );
-            let _ = tokio::fs::write(path, header).await;
-        }
-
-        let mut cmd = build_shell_command(command);
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
-        cmd.stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| TianyanError::Custom(format!("executor: 后台命令启动失败：{e}")))?;
+        let mut child = Self::spawn_shell_child(command, cwd)?;
         let pid = child.id();
 
         let tail: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-        let file: Arc<Mutex<Option<tokio::fs::File>>> = Arc::new(Mutex::new(None));
-        if let Some(path) = &log_file {
-            match tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .await
-            {
-                Ok(f) => {
-                    *file.lock().await = Some(f);
-                }
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "打开后台命令日志文件失败");
-                }
-            }
-        }
-
-        let out_reader = child.stdout.take().map(|r| {
-            tokio::spawn(drain_output(
-                r,
-                tail.clone(),
-                file.clone(),
-                id.clone(),
-                self.event_sink.clone(),
-            ))
-        });
-        let err_reader = child.stderr.take().map(|r| {
-            tokio::spawn(drain_output(
-                r,
-                tail.clone(),
-                file.clone(),
-                id.clone(),
-                self.event_sink.clone(),
-            ))
-        });
+        let file = Self::open_log_writer(log_file.as_ref()).await;
+        let (out_reader, err_reader) = self.spawn_output_drains(&mut child, &tail, &file, &id);
 
         let task = CommandTask {
             id: id.clone(),
@@ -310,8 +262,129 @@ impl CommandManager {
             ready: false,
             ready_note: None,
         };
-        self.tasks.lock().await.insert(
+        self.register_spawned_task(&task, session_id, command, pid, now)
+            .await;
+
+        self.spawn_watcher(
+            child,
+            out_reader,
+            err_reader,
+            tail.clone(),
+            file,
             id.clone(),
+        );
+        if let Some(spec) = ready {
+            self.spawn_ready_probe(spec, tail, id);
+        }
+
+        Ok(task)
+    }
+
+    /// 生成日志文件路径并预写命令回显头（未配置日志目录时返回 `None`）。
+    async fn prepare_command_log(
+        &self,
+        id: &str,
+        command: &str,
+        cwd: Option<&str>,
+    ) -> Option<PathBuf> {
+        let path = self
+            .logs_dir
+            .as_ref()
+            .map(|dir| dir.join(format!("{id}.log")))?;
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let header = format!(
+            "> $ {}{}\n",
+            cwd.map(|d| format!("({d}) ")).unwrap_or_default(),
+            command
+        );
+        let _ = tokio::fs::write(&path, header).await;
+        Some(path)
+    }
+
+    /// 构造并启动 shell 子进程（stdout/stderr 管道 + `kill_on_drop`；
+    /// Unix 下独立进程组，便于按进程树终止）。
+    fn spawn_shell_child(command: &str, cwd: Option<&str>) -> Result<tokio::process::Child> {
+        let mut cmd = build_shell_command(command);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        cmd.spawn()
+            .map_err(|e| TianyanError::Custom(format!("executor: 后台命令启动失败：{e}")))
+    }
+
+    /// 打开日志文件追加句柄（失败仅告警——命令照常运行，仅少一份持久日志）。
+    async fn open_log_writer(path: Option<&PathBuf>) -> Arc<Mutex<Option<tokio::fs::File>>> {
+        let file: Arc<Mutex<Option<tokio::fs::File>>> = Arc::new(Mutex::new(None));
+        let Some(path) = path else {
+            return file;
+        };
+        match tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await
+        {
+            Ok(f) => {
+                *file.lock().await = Some(f);
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "打开后台命令日志文件失败");
+            }
+        }
+        file
+    }
+
+    /// 启动 stdout/stderr 输出泵（内存尾部 + 日志文件 + 输出增量事件）。
+    fn spawn_output_drains(
+        &self,
+        child: &mut tokio::process::Child,
+        tail: &Arc<Mutex<String>>,
+        file: &Arc<Mutex<Option<tokio::fs::File>>>,
+        id: &str,
+    ) -> (
+        Option<tokio::task::JoinHandle<()>>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) {
+        let out = child.stdout.take().map(|r| {
+            tokio::spawn(drain_output(
+                r,
+                tail.clone(),
+                file.clone(),
+                id.to_string(),
+                self.event_sink.clone(),
+            ))
+        });
+        let err = child.stderr.take().map(|r| {
+            tokio::spawn(drain_output(
+                r,
+                tail.clone(),
+                file.clone(),
+                id.to_string(),
+                self.event_sink.clone(),
+            ))
+        });
+        (out, err)
+    }
+
+    /// 注册刚启动的任务：快照入库 + 会话计数 + 容量淘汰 + running 状态事件。
+    async fn register_spawned_task(
+        &self,
+        task: &CommandTask,
+        session_id: &str,
+        command: &str,
+        pid: Option<u32>,
+        now: i64,
+    ) {
+        self.tasks.lock().await.insert(
+            task.id.clone(),
             TaskEntry {
                 task: task.clone(),
                 cancelled: false,
@@ -328,10 +401,10 @@ impl CommandManager {
         // ADR-028：状态转移事件（running）——面板实时显示
         if let Some(sink) = &self.event_sink {
             sink.emit(
-                &id,
+                &task.id,
                 json!({
                     "type": "task_status",
-                    "task_id": id,
+                    "task_id": task.id,
                     "kind": "command",
                     "status": "running",
                     "command": command,
@@ -341,12 +414,21 @@ impl CommandManager {
             )
             .await;
         }
+    }
 
-        // watcher：等进程退出 → 收 reader → 写退出标记 → 更新终态
+    /// 启动 watcher 任务：等进程退出 → 收输出泵 → 落终态 → 通知/唤醒。
+    ///
+    /// 并发许可（`_permit`）持有于 `spawn_background` 作用域，随本任务结束释放。
+    fn spawn_watcher(
+        &self,
+        mut child: tokio::process::Child,
+        out_reader: Option<tokio::task::JoinHandle<()>>,
+        err_reader: Option<tokio::task::JoinHandle<()>>,
+        tail: Arc<Mutex<String>>,
+        file: Arc<Mutex<Option<tokio::fs::File>>>,
+        id: String,
+    ) {
         let manager = self.clone();
-        let tail_w = tail.clone();
-        let file_w = file.clone();
-        let id_w = id.clone();
         tokio::spawn(async move {
             let wait_result = child.wait().await;
             if let Some(h) = out_reader {
@@ -357,151 +439,183 @@ impl CommandManager {
             }
             let exit_code = wait_result.ok().and_then(|s| s.code());
 
-            let mut tasks = manager.tasks.lock().await;
-            let is_cancelled = tasks.get(&id_w).map(|e| e.cancelled).unwrap_or(false);
-            let marker = if is_cancelled {
-                "--- terminated (killed) ---\n".to_string()
-            } else {
-                format!("--- exit code: {} ---\n", exit_code.unwrap_or(-1))
-            };
-            {
-                let mut t = tail_w.lock().await;
-                t.push_str(&marker);
-                if t.len() > OUTPUT_TAIL_MAX_BYTES {
-                    let excess = t.len() - OUTPUT_TAIL_MAX_BYTES;
-                    t.drain(..excess);
-                }
-                let mut f = file_w.lock().await;
-                if let Some(f) = f.as_mut() {
-                    let _ = f.write_all(marker.as_bytes()).await;
-                }
-            }
-            let task_snapshot = {
-                if let Some(entry) = tasks.get_mut(&id_w) {
-                    if !is_cancelled {
-                        entry.task.status = if exit_code == Some(0) {
-                            CommandTaskStatus::Completed
-                        } else {
-                            CommandTaskStatus::Failed
-                        };
-                        entry.task.exit_code = exit_code;
-                    }
-                    entry.task.completed_at = Some(now_ms());
-                    entry.task.output_tail = tail_w.lock().await.clone();
-                }
-                tasks.get(&id_w).map(|e| e.task.clone())
-            };
+            let snapshot = manager
+                .finalize_finished_task(&id, exit_code, &tail, &file)
+                .await;
             // 锁外收尾：remaining 计数 → 完成通知 → 唤醒（ADR-013）
-            if let Some(task) = task_snapshot {
-                let session_id = task.parent_session_id.clone();
-                let remaining = {
-                    let mut counts = manager.session_counts.lock().await;
-                    let n = counts
-                        .get(&session_id)
-                        .copied()
-                        .unwrap_or(0)
-                        .saturating_sub(1);
-                    counts.insert(session_id.clone(), n);
-                    n
-                };
-                if let Some(notifier) = &manager.notifier {
-                    notifier
-                        .on_command_terminal(&session_id, &task, remaining)
-                        .await;
-                }
-                // ADR-028：状态转移事件（终态）——面板实时更新
-                if let Some(sink) = &manager.event_sink {
-                    sink.emit(
-                        &task.id,
-                        json!({
-                            "type": "task_status",
-                            "task_id": task.id,
-                            "kind": "command",
-                            "status": task.status.as_str(),
-                            "exit_code": task.exit_code,
-                            "completed_at": task.completed_at,
-                        }),
-                    )
-                    .await;
-                }
-                // should_wake = allComplete || failure（部分完成保持静默）
-                if remaining == 0 || task.status == CommandTaskStatus::Failed {
-                    if let Some(waker) = manager.waker.lock().await.clone() {
-                        waker.wake(&session_id).await;
-                    }
-                }
+            if let Some(task) = snapshot {
+                manager.notify_task_terminal(task).await;
             }
         });
+    }
 
-        // 就绪探测：端口监听 / 日志关键词匹配后通知主 agent 服务已就绪。
-        // 指数退避（起点 initial_delay_ms，×2，抖动 ±20%）；总超时后通知未就绪
-        // （不杀进程——服务可能仍在启动，退出由 watcher 另行通知）。
-        if let Some(spec) = ready {
-            let manager = self.clone();
-            let tail_r = tail.clone();
-            let task_id = id.clone();
-            tokio::spawn(async move {
-                let mut delay_ms = spec.initial_delay_ms.max(50);
-                let start = now_ms();
-                let timeout_ms = spec.timeout_ms.max(delay_ms);
-                loop {
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    // 进程已退出：停止探测（watcher 已发终态通知）
-                    let terminal = manager
-                        .tasks
-                        .lock()
-                        .await
-                        .get(&task_id)
-                        .map(|e| e.task.status != CommandTaskStatus::Running)
-                        .unwrap_or(true);
-                    if terminal {
-                        break;
-                    }
-                    // 判定 1：端口 TCP 连接成功
-                    let port_ok = match spec.port {
-                        Some(port) => tokio::net::TcpStream::connect(("127.0.0.1", port))
-                            .await
-                            .is_ok(),
-                        None => false,
-                    };
-                    // 判定 2：日志尾部关键词
-                    let pattern_ok = if let Some(p) = spec.pattern.as_deref() {
-                        if p.is_empty() {
-                            false
-                        } else {
-                            tail_r.lock().await.contains(p)
-                        }
-                    } else {
-                        false
-                    };
-                    if port_ok || pattern_ok {
-                        let note = if port_ok {
-                            format!("端口 {} 已监听", spec.port.unwrap_or(0))
-                        } else {
-                            format!(
-                                "日志出现关键词 \"{}\"",
-                                spec.pattern.as_deref().unwrap_or("")
-                            )
-                        };
-                        Self::mark_ready(&manager, &task_id, Some(note.clone())).await;
-                        Self::notify_ready(&manager, &task_id, &note).await;
-                        break;
-                    }
-                    // 超时：通知未就绪（不杀进程）
-                    if now_ms() - start >= timeout_ms as i64 {
-                        let note = format!("就绪探测超时（{} ms）", timeout_ms);
-                        Self::mark_ready(&manager, &task_id, Some(note.clone())).await;
-                        Self::notify_ready(&manager, &task_id, &note).await;
-                        break;
-                    }
-                    // 指数退避：×2 + ±20% 抖动
-                    delay_ms = (delay_ms * 2).min(30_000);
-                    // 纯指数退避（无抖动依赖）
-                }
-            });
+    /// 落终态：写退出标记（内存尾部 + 日志文件）→ 更新状态 → 返回任务快照。
+    ///
+    /// 锁顺序固定为 tasks → tail → file（与输出泵一致，避免死锁）。
+    async fn finalize_finished_task(
+        &self,
+        id: &str,
+        exit_code: Option<i32>,
+        tail: &Arc<Mutex<String>>,
+        file: &Arc<Mutex<Option<tokio::fs::File>>>,
+    ) -> Option<CommandTask> {
+        let mut tasks = self.tasks.lock().await;
+        let is_cancelled = tasks.get(id).map(|e| e.cancelled).unwrap_or(false);
+        let marker = if is_cancelled {
+            "--- terminated (killed) ---\n".to_string()
+        } else {
+            format!("--- exit code: {} ---\n", exit_code.unwrap_or(-1))
+        };
+        {
+            let mut t = tail.lock().await;
+            t.push_str(&marker);
+            if t.len() > OUTPUT_TAIL_MAX_BYTES {
+                let excess = t.len() - OUTPUT_TAIL_MAX_BYTES;
+                t.drain(..excess);
+            }
+            let mut f = file.lock().await;
+            if let Some(f) = f.as_mut() {
+                let _ = f.write_all(marker.as_bytes()).await;
+            }
         }
+        if let Some(entry) = tasks.get_mut(id) {
+            if !is_cancelled {
+                entry.task.status = if exit_code == Some(0) {
+                    CommandTaskStatus::Completed
+                } else {
+                    CommandTaskStatus::Failed
+                };
+                entry.task.exit_code = exit_code;
+            }
+            entry.task.completed_at = Some(now_ms());
+            entry.task.output_tail = tail.lock().await.clone();
+        }
+        tasks.get(id).map(|e| e.task.clone())
+    }
 
-        Ok(task)
+    /// 终态收尾（锁外）：remaining 计数 → 完成通知 → 终态事件 → 唤醒。
+    ///
+    /// `should_wake = allComplete || failure`（部分完成保持静默，ADR-013）。
+    async fn notify_task_terminal(&self, task: CommandTask) {
+        let session_id = task.parent_session_id.clone();
+        let remaining = {
+            let mut counts = self.session_counts.lock().await;
+            let n = counts
+                .get(&session_id)
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(1);
+            counts.insert(session_id.clone(), n);
+            n
+        };
+        if let Some(notifier) = &self.notifier {
+            notifier
+                .on_command_terminal(&session_id, &task, remaining)
+                .await;
+        }
+        // ADR-028：状态转移事件（终态）——面板实时更新
+        if let Some(sink) = &self.event_sink {
+            sink.emit(
+                &task.id,
+                json!({
+                    "type": "task_status",
+                    "task_id": task.id,
+                    "kind": "command",
+                    "status": task.status.as_str(),
+                    "exit_code": task.exit_code,
+                    "completed_at": task.completed_at,
+                }),
+            )
+            .await;
+        }
+        if remaining == 0 || task.status == CommandTaskStatus::Failed {
+            if let Some(waker) = self.waker.lock().await.clone() {
+                waker.wake(&session_id).await;
+            }
+        }
+    }
+
+    /// 启动就绪探测任务：端口监听 / 日志关键词命中即通知就绪。
+    ///
+    /// 指数退避（起点 `initial_delay_ms`，×2）至总超时后通知未就绪——
+    /// 不杀进程（服务可能仍在启动，退出由 watcher 另行通知）。
+    fn spawn_ready_probe(&self, spec: ReadySpec, tail: Arc<Mutex<String>>, task_id: String) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let mut delay_ms = spec.initial_delay_ms.max(50);
+            let start = now_ms();
+            let timeout_ms = spec.timeout_ms.max(delay_ms);
+            loop {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                match Self::probe_readiness(&manager, &task_id, &spec, &tail).await {
+                    // 进程已退出：停止探测（watcher 已发终态通知）
+                    ProbeOutcome::ProcessFinished => break,
+                    ProbeOutcome::NotReady => {}
+                    ProbeOutcome::Ready(note) => {
+                        Self::mark_ready(&manager, &task_id, Some(note.clone())).await;
+                        Self::notify_ready(&manager, &task_id, &note).await;
+                        break;
+                    }
+                }
+                // 超时：通知未就绪（不杀进程）
+                if now_ms() - start >= timeout_ms as i64 {
+                    let note = format!("就绪探测超时（{} ms）", timeout_ms);
+                    Self::mark_ready(&manager, &task_id, Some(note.clone())).await;
+                    Self::notify_ready(&manager, &task_id, &note).await;
+                    break;
+                }
+                // 指数退避：×2（上限 30s）
+                delay_ms = (delay_ms * 2).min(30_000);
+            }
+        });
+    }
+
+    /// 单次就绪探测：进程终态 → 停止；端口连通 / 关键词命中 → 就绪。
+    async fn probe_readiness(
+        manager: &CommandManager,
+        task_id: &str,
+        spec: &ReadySpec,
+        tail: &Arc<Mutex<String>>,
+    ) -> ProbeOutcome {
+        let terminal = manager
+            .tasks
+            .lock()
+            .await
+            .get(task_id)
+            .map(|e| e.task.status != CommandTaskStatus::Running)
+            .unwrap_or(true);
+        if terminal {
+            return ProbeOutcome::ProcessFinished;
+        }
+        // 判定 1：端口 TCP 连接成功
+        let port_ok = match spec.port {
+            Some(port) => tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok(),
+            None => false,
+        };
+        // 判定 2：日志尾部关键词
+        let pattern_ok = if let Some(p) = spec.pattern.as_deref() {
+            if p.is_empty() {
+                false
+            } else {
+                tail.lock().await.contains(p)
+            }
+        } else {
+            false
+        };
+        if port_ok || pattern_ok {
+            let note = if port_ok {
+                format!("端口 {} 已监听", spec.port.unwrap_or(0))
+            } else {
+                format!(
+                    "日志出现关键词 \"{}\"",
+                    spec.pattern.as_deref().unwrap_or("")
+                )
+            };
+            return ProbeOutcome::Ready(note);
+        }
+        ProbeOutcome::NotReady
     }
 
     /// 标记任务就绪状态（就绪 / 超时说明）。
@@ -650,11 +764,16 @@ async fn kill_process_tree(pid: u32) {
     }
 }
 
+/// 输出增量事件的最小合并间隔（ADR-028：时间窗节流——高频命令（构建/日志
+/// 滚动）每读一块就 emit 会造成事件风暴，无谓占用有界事件通道）。
+const OUTPUT_EVENT_FLUSH_MS: i64 = 100;
+
 /// 读取子进程输出流：追加到内存尾部缓冲（截断）+ 日志文件。
 ///
 /// 锁顺序固定为 tail → file（与 watcher 的标记写入一致，避免死锁）。
-/// ADR-028：每读一块经 event_sink emit 输出增量（尽力而为，通道满丢弃，
-/// 完整性由日志文件保证）。
+/// ADR-028：输出增量按时间窗（[`OUTPUT_EVENT_FLUSH_MS`]）合并后经 event_sink
+/// emit——尽力而为（通道满丢弃），完整性由日志文件保证；**流结束必须 flush
+/// 残留增量**，否则面板会丢尾块。
 async fn drain_output<R>(
     mut reader: R,
     tail: Arc<Mutex<String>>,
@@ -665,6 +784,8 @@ async fn drain_output<R>(
     R: AsyncRead + Unpin,
 {
     let mut buf = [0u8; 8192];
+    let mut pending = String::new();
+    let mut last_emit = now_ms();
     loop {
         match reader.read(&mut buf).await {
             Ok(0) => break,
@@ -686,17 +807,12 @@ async fn drain_output<R>(
                     }
                 }
                 drop(f);
-                // ADR-028：输出增量事件（实时终端视图；尽力而为）
-                if let Some(sink) = &event_sink {
-                    sink.emit(
-                        &task_id,
-                        json!({
-                            "type": "command_output",
-                            "task_id": task_id,
-                            "delta": String::from_utf8_lossy(chunk),
-                        }),
-                    )
-                    .await;
+                // ADR-028：输出增量事件（时间窗合并；实时终端视图，尽力而为）
+                pending.push_str(&String::from_utf8_lossy(chunk));
+                let now = now_ms();
+                if now - last_emit >= OUTPUT_EVENT_FLUSH_MS {
+                    flush_output_event(&event_sink, &task_id, &mut pending).await;
+                    last_emit = now;
                 }
             }
             Err(e) => {
@@ -705,6 +821,31 @@ async fn drain_output<R>(
             }
         }
     }
+    // 收尾：残留增量必须发出（含写日志失败 / 读错误提前 break 的路径）
+    flush_output_event(&event_sink, &task_id, &mut pending).await;
+}
+
+/// 发送累积的输出增量并清空缓冲（空内容不发；无 sink 时只清空）。
+async fn flush_output_event(
+    event_sink: &Option<Arc<dyn CommandEventSink>>,
+    task_id: &str,
+    pending: &mut String,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    if let Some(sink) = event_sink {
+        sink.emit(
+            task_id,
+            json!({
+                "type": "command_output",
+                "task_id": task_id,
+                "delta": pending.as_str(),
+            }),
+        )
+        .await;
+    }
+    pending.clear();
 }
 
 /// 当前 epoch 毫秒。
@@ -1113,5 +1254,78 @@ mod tests {
             1,
             "全部完成后应唤醒恰好一次"
         );
+    }
+
+    /// 回归测试：输出增量事件按**时间窗合并**（ADR-028），且收尾必须 flush
+    /// 残留增量——旧实现每读一块 emit 一次（高频命令即事件风暴）。
+    #[tokio::test]
+    async fn test_drain_output_merges_by_time_window_and_flushes_tail() {
+        /// 分块立即就绪的测试 reader（模拟同一时间窗内的多次 read）。
+        struct ChunkedReader {
+            chunks: Vec<Vec<u8>>,
+            idx: usize,
+        }
+        impl AsyncRead for ChunkedReader {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                if self.idx >= self.chunks.len() {
+                    return std::task::Poll::Ready(Ok(()));
+                }
+                buf.put_slice(&self.chunks[self.idx]);
+                self.idx += 1;
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        struct RecordingSink {
+            deltas: Mutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl CommandEventSink for RecordingSink {
+            async fn emit(&self, _task_id: &str, event: Value) {
+                if let Some(d) = event.get("delta").and_then(|v| v.as_str()) {
+                    self.deltas.lock().await.push(d.to_string());
+                }
+            }
+        }
+
+        let reader = ChunkedReader {
+            chunks: vec![
+                b"line-1\n".to_vec(),
+                b"line-2\n".to_vec(),
+                b"line-3\n".to_vec(),
+            ],
+            idx: 0,
+        };
+        let sink = Arc::new(RecordingSink {
+            deltas: Mutex::new(Vec::new()),
+        });
+        let tail: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let file: Arc<Mutex<Option<tokio::fs::File>>> = Arc::new(Mutex::new(None));
+
+        drain_output(
+            reader,
+            tail.clone(),
+            file,
+            "cmd_test".to_string(),
+            Some(sink.clone()),
+        )
+        .await;
+
+        let deltas = sink.deltas.lock().await.clone();
+        assert_eq!(
+            deltas.len(),
+            1,
+            "同一时间窗内的多块输出应合并为 1 个事件（实际 {} 个）",
+            deltas.len()
+        );
+        assert_eq!(
+            deltas[0], "line-1\nline-2\nline-3\n",
+            "合并内容须完整无丢块"
+        );
+        assert_eq!(tail.lock().await.as_str(), "line-1\nline-2\nline-3\n");
     }
 }

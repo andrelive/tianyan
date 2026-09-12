@@ -159,6 +159,9 @@ impl StorageBackend for SqliteBackend {
     /// 使用 `substr` 做精确前缀匹配（而非 LIKE）：LIKE 会把 URI 中的
     /// `%`/`_` 当作通配符，且 `uri%` 会误删同前缀的兄弟条目
     /// （如删除 `.../ab` 时连带删除 `.../abc`）。
+    ///
+    /// 长度用 SQL 侧 `length()`（按字符计）而非 Rust 的 `str::len()`（按字节）：
+    /// 两者单位不同，URI 含非 ASCII 字符时字节数会大于字符数 → 前缀匹配失效。
     async fn delete_entry(&self, uri: &TianyanUri) -> Result<()> {
         let conn = self.db.lock().await;
         let uri_str = uri.to_string();
@@ -167,8 +170,8 @@ impl StorageBackend for SqliteBackend {
 
         let deleted = conn
             .execute(
-                "DELETE FROM vfs_entries WHERE uri = ?1 OR substr(uri, 1, ?2) = ?3",
-                rusqlite::params![&uri_str, dir_prefix.len(), &dir_prefix],
+                "DELETE FROM vfs_entries WHERE uri = ?1 OR substr(uri, 1, length(?2)) = ?2",
+                rusqlite::params![&uri_str, &dir_prefix],
             )
             .map_err(|e| TianyanError::Custom(format!("存储后端错误：删除条目失败: {e}")))?;
 
@@ -178,25 +181,28 @@ impl StorageBackend for SqliteBackend {
         Ok(())
     }
 
-    /// 列出指定 URI 下的一级子条目（基于 SQL LIKE 过滤）。
+    /// 列出指定 URI 下的一级子条目（基于 SQL 前缀匹配过滤）。
+    ///
+    /// 前缀匹配用 `substr + length`（按字符计）而非 `LIKE`：LIKE 会把 URI
+    /// 里的 `%`/`_` 当通配符，可能返回不属于该前缀的条目（与
+    /// [`Self::delete_entry`] 同一口径——长度一律由 SQL 侧计算）。
     async fn list_directory(&self, uri: &TianyanUri) -> Result<Vec<ContextEntry>> {
         let conn = self.db.lock().await;
         let prefix = format!("{}/", uri);
         // 只列出一级子条目：匹配 prefix，且 prefix 之后不含 '/'
-        let pattern = format!("{}%", prefix);
 
         let mut stmt = conn
             .prepare(
                 "SELECT uri, is_directory, abstract_content, overview_content, detail_content,
                         created_at, updated_at
-                 FROM vfs_entries WHERE uri LIKE ?1",
+                 FROM vfs_entries WHERE substr(uri, 1, length(?1)) = ?1",
             )
             .map_err(|e| TianyanError::Custom(format!("存储后端错误：查询目录失败: {e}")))?;
 
         let prefix_len = prefix.len();
 
         let rows = stmt
-            .query_map(rusqlite::params![&pattern], |row| {
+            .query_map(rusqlite::params![&prefix], |row| {
                 let full_uri: String = row.get(0)?;
                 // 过滤掉二级及以下的子条目
                 let rest = &full_uri[prefix_len..];
@@ -415,6 +421,61 @@ mod tests {
             .unwrap();
         let entries = be.list_directory(&parent).await.unwrap();
         assert_eq!(entries.len(), 3);
+    }
+    /// 回归测试：目录列举按**精确前缀**匹配——URI 中的 `_` 不得被当作
+    /// LIKE 通配符。
+    ///
+    /// 旧实现 `uri LIKE 'prefix/%'` 会把 `_` 解释为「任意单字符」，
+    /// 于是 `a_b/` 的列举结果会混入 `axb/` 下的条目。
+    #[tokio::test]
+    async fn test_list_directory_exact_prefix_underscore() {
+        let be = setup().await;
+        let target = TianyanUri::new(
+            ContextNamespace::Knowledge,
+            vec!["a_b".to_string(), "one.md".to_string()],
+        );
+        let decoy = TianyanUri::new(
+            ContextNamespace::Knowledge,
+            vec!["axb".to_string(), "two.md".to_string()],
+        );
+        for uri in [&target, &decoy] {
+            be.write_entry(&ContextEntry::new_file(uri.clone()))
+                .await
+                .unwrap();
+        }
+
+        let parent = knowledge_uri("a_b");
+        let entries = be.list_directory(&parent).await.unwrap();
+        assert_eq!(entries.len(), 1, "只应列出 a_b 下的一级子条目");
+        assert!(
+            entries[0].metadata.uri.to_string().contains("a_b/one.md"),
+            "列举结果误含通配符匹配到的兄弟目录条目：{}",
+            entries[0].metadata.uri
+        );
+    }
+
+    /// 回归测试：含非 ASCII 的 URI 前缀删除不得受「字节长度 vs 字符长度」
+    /// 差异影响（SQL `substr`/`length` 按字符计，Rust `str::len()` 按字节）。
+    #[tokio::test]
+    async fn test_delete_entry_non_ascii_prefix() {
+        let be = setup().await;
+        let parent = knowledge_uri("中文目录");
+        let child = TianyanUri::new(
+            ContextNamespace::Knowledge,
+            vec!["中文目录".to_string(), "c.md".to_string()],
+        );
+        for uri in [&parent, &child] {
+            be.write_entry(&ContextEntry::new_file(uri.clone()))
+                .await
+                .unwrap();
+        }
+
+        be.delete_entry(&parent).await.unwrap();
+        assert!(!be.exists(&parent).await.unwrap(), "父条目应被删除");
+        assert!(
+            !be.exists(&child).await.unwrap(),
+            "非 ASCII 前缀下的子条目应被级联删除（长度单位须一致）"
+        );
     }
 
     #[tokio::test]

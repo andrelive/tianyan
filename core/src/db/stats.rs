@@ -57,6 +57,9 @@ impl StatsRepo {
     }
 
     /// 落盘计数批量（技能/文档；单事务逐行展开保证统计真实）。
+    ///
+    /// 行数由调用次数决定（每次调用一行），故逐行插入是语义要求；但语句
+    /// **只 prepare 一次**（复用 statement），避免每次 execute 重复解析 SQL。
     pub async fn flush_counts(
         &self,
         skill_batch: &[(String, u64, u64, u64)],
@@ -67,29 +70,40 @@ impl StatsRepo {
             .unchecked_transaction()
             .map_err(|e| Self::sqlite_error("统计落盘", e))?;
         let now = chrono::Utc::now().to_rfc3339();
-        for (skill_id, calls, successes, time) in skill_batch {
-            let avg_time_us = if *calls > 0 { time / calls } else { 0 };
-            for _ in 0..*successes {
-                tx.execute(
+        {
+            let mut stmt_success = tx
+                .prepare(
                     "INSERT INTO skill_calls (skill_id, success, time_us, recorded_at) VALUES (?1,1,?2,?3)",
-                    rusqlite::params![skill_id, avg_time_us, now],
                 )
                 .map_err(|e| Self::sqlite_error("统计落盘", e))?;
-            }
-            for _ in *successes..*calls {
-                tx.execute(
+            let mut stmt_failure = tx
+                .prepare(
                     "INSERT INTO skill_calls (skill_id, success, time_us, recorded_at) VALUES (?1,0,?2,?3)",
-                    rusqlite::params![skill_id, avg_time_us, now],
                 )
                 .map_err(|e| Self::sqlite_error("统计落盘", e))?;
+            for (skill_id, calls, successes, time) in skill_batch {
+                let avg_time_us = if *calls > 0 { time / calls } else { 0 };
+                for _ in 0..*successes {
+                    stmt_success
+                        .execute(rusqlite::params![skill_id, avg_time_us, &now])
+                        .map_err(|e| Self::sqlite_error("统计落盘", e))?;
+                }
+                for _ in *successes..*calls {
+                    stmt_failure
+                        .execute(rusqlite::params![skill_id, avg_time_us, &now])
+                        .map_err(|e| Self::sqlite_error("统计落盘", e))?;
+                }
             }
-        }
-        for (uri, _hits, avg_score) in doc_batch {
-            tx.execute(
-                "INSERT INTO doc_access (uri, event_type, score, recorded_at) VALUES (?1,'search_hit',?2,?3)",
-                rusqlite::params![uri, avg_score, now],
-            )
-            .map_err(|e| Self::sqlite_error("统计落盘", e))?;
+            let mut stmt_doc = tx
+                .prepare(
+                    "INSERT INTO doc_access (uri, event_type, score, recorded_at) VALUES (?1,'search_hit',?2,?3)",
+                )
+                .map_err(|e| Self::sqlite_error("统计落盘", e))?;
+            for (uri, _hits, avg_score) in doc_batch {
+                stmt_doc
+                    .execute(rusqlite::params![uri, avg_score, &now])
+                    .map_err(|e| Self::sqlite_error("统计落盘", e))?;
+            }
         }
         tx.commit().map_err(|e| Self::sqlite_error("统计落盘", e))?;
         Ok(())

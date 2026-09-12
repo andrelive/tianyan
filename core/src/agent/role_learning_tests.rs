@@ -2,12 +2,12 @@
 use std::sync::Arc;
 
 use crate::agent::role_learning::{RoleLearningConfig, RoleLearningEngine};
-use crate::agent::role_store::RoleStore;
 use crate::agent::roles::{RoleSource, RoleStatus};
 use crate::common::types::{ContextNamespace, Message as ModelMessage, TianyanUri, TokenUsage};
 use crate::config::StorageConfig;
 use crate::model::types::{ChatChoice, ChatCompletionResponse};
 use crate::model::MockChatService;
+use crate::role_store::RoleStore;
 use crate::skills::learning::ExecutionHistory;
 use crate::vfs::backend::LocalFileBackend;
 use crate::vfs::{

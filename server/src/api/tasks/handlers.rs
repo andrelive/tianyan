@@ -108,7 +108,16 @@ pub async fn stream_tasks(
                                 break; // 客户端断开
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            // 有界 broadcast 的背压：客户端消费慢时旧事件被挤出。
+                            // 不静默——任务状态/命令输出事件是「尽力而为」，
+                            // 权威数据在 SQLite 与命令日志文件中（重连快照可补）。
+                            tracing::warn!(
+                                skipped,
+                                "任务事件流消费落后：事件被丢弃（重连快照可补齐权威状态）"
+                            );
+                            continue;
+                        }
                         Err(_) => break,
                     }
                 }

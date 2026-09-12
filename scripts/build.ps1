@@ -58,6 +58,14 @@ function Check-Dependencies {
         }
     }
     Write-Success "tauri-cli is installed"
+
+    # Check protoc（lance-encoding 的构建依赖；CI 用 arduino/setup-protoc 安装，
+    # 本地脚本此前没有该检查 → 冷编译 lancedb 时可能莫名失败）
+    if (Test-Command "protoc") {
+        Write-Success "protoc is installed"
+    } else {
+        Write-Warn "protoc not found（lancedb/lance-encoding 冷编译需要）。已有构建缓存时可继续；从零编译请先安装 protoc"
+    }
 }
 
 # Build GUI (React/TypeScript)
@@ -131,7 +139,9 @@ function Build-Tauri {
         Write-Success "Tauri build completed"
 
         # Show output paths
-        $bundleDir = "$PSScriptRoot\..\tauri\target\release\bundle"
+        # 产物在 workspace 共享 target 下（<仓库根>\target\release\bundle），
+        # 而非 <tauri>\target —— 此前路径写错，脚本总是列不出产物。
+        $bundleDir = "$PSScriptRoot\..\target\release\bundle"
         if (Test-Path $bundleDir) {
             Write-Info "Installer output directory:"
             Get-ChildItem -Path $bundleDir -Recurse -Include "*.msi","*.exe","*.msi.zip" | ForEach-Object {
@@ -165,6 +175,7 @@ function Main {
         # Build mode
         Build-Gui
         Write-Host ""
+        Write-Info "Note: tauri build 的 beforeBuildCommand 会再执行一次前端构建（重复构建；只想构建一次可用 -SkipGui）"
         Build-Tauri
         Write-Host ""
         Write-Success "Build completed!"

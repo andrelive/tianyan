@@ -81,10 +81,10 @@ impl UsageRepo {
         model: Option<&str>,
         group_by: &str,
     ) -> Vec<UsageStat> {
-        let mut sql = String::from(
-            "SELECT provider, model, COUNT(*), SUM(uncached_input), SUM(cached_input), SUM(completion_tokens), SUM(total_tokens) FROM usage_logs",
-        );
-        let mut conds = Vec::new();
+        // WHERE 子句**单点构造**：分组查询与总计查询共用同一份。
+        // （此前 `total_stat` 丢弃调用方传入的 SQL，改按 conds 个数/顺序硬编码
+        // 重建 WHERE——过滤条件一改就静默失配，是数据口径分裂的隐患。）
+        let mut conds: Vec<&str> = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::types::ToSql + Send + Sync>> = Vec::new();
         if let Some(ts) = since_ts {
             conds.push("ts >= ?");
@@ -102,19 +102,24 @@ impl UsageRepo {
             conds.push("model = ?");
             params.push(Box::new(m.to_string()));
         }
-        if !conds.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&conds.join(" AND "));
-        }
-        sql.push_str(" GROUP BY ");
+        let where_clause = if conds.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conds.join(" AND "))
+        };
+
+        let mut sql = format!(
+            "SELECT provider, model, COUNT(*), SUM(uncached_input), SUM(cached_input), SUM(completion_tokens), SUM(total_tokens) FROM usage_logs{where_clause}"
+        );
         match group_by {
-            "provider" => sql.push_str("provider ORDER BY SUM(total_tokens) DESC"),
+            "provider" => {
+                sql.push_str(" GROUP BY provider ORDER BY SUM(total_tokens) DESC");
+            }
             "model" => {
-                sql.push_str("provider, model ORDER BY SUM(total_tokens) DESC");
+                sql.push_str(" GROUP BY provider, model ORDER BY SUM(total_tokens) DESC");
             }
             _ => {
-                sql.truncate(sql.len() - " GROUP BY ".len());
-                return self.total_stat(&sql, &params).await;
+                return self.total_stat(&where_clause, &params).await;
             }
         }
 
@@ -157,26 +162,17 @@ impl UsageRepo {
     }
 
     /// 总计统计（group_by = none）。
+    ///
+    /// `where_clause` 由调用方单点构造（含前导 `" WHERE "`，无过滤时为
+    /// 空串）——本函数不再按参数顺序重建 WHERE。
     async fn total_stat(
         &self,
-        _sql: &str,
+        where_clause: &str,
         conds: &[Box<dyn rusqlite::types::ToSql + Send + Sync>],
     ) -> Vec<UsageStat> {
-        let mut agg = String::from(
-            "SELECT COUNT(*), COALESCE(SUM(uncached_input),0), COALESCE(SUM(cached_input),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(total_tokens),0) FROM usage_logs",
+        let agg = format!(
+            "SELECT COUNT(*), COALESCE(SUM(uncached_input),0), COALESCE(SUM(cached_input),0), COALESCE(SUM(completion_tokens),0), COALESCE(SUM(total_tokens),0) FROM usage_logs{where_clause}"
         );
-        if !conds.is_empty() {
-            agg.push_str(" WHERE ts >= ?");
-            if conds.len() >= 2 {
-                agg.push_str(" AND ts <= ?");
-            }
-            if conds.len() >= 3 {
-                agg.push_str(" AND provider = ?");
-            }
-            if conds.len() >= 4 {
-                agg.push_str(" AND model = ?");
-            }
-        }
         let conn = self.db.lock().await;
         let mut stmt = match conn.prepare(&agg) {
             Ok(s) => s,
@@ -228,5 +224,71 @@ impl UsageRepo {
             total_tokens: total,
             cache_hit_rate: hit,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn setup() -> UsageRepo {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        UsageRepo::new(db)
+    }
+
+    /// 回归测试：WHERE 子句**单点构造**——总计与分组查询共用同一过滤条件。
+    ///
+    /// 旧实现的 `total_stat` 丢弃调用方传入的 SQL，改按 `conds.len()` 个数/
+    /// 顺序硬编码重建 WHERE（只认 `ts>= / ts<= / provider / model` 四种位置），
+    /// 过滤组合一改就静默失配——本测试同时断言总计与分组口径一致。
+    #[tokio::test]
+    async fn test_stats_filters_shared_by_total_and_grouping() {
+        let repo = setup().await;
+        repo.record("s1", "deepseek", "v3", 100, 0, 10, 110).await;
+        repo.record("s1", "deepseek", "v3", 50, 50, 10, 110).await;
+        repo.record("s2", "ollama", "qwen", 200, 0, 20, 220).await;
+
+        // 无过滤总计
+        let total = repo.stats(None, None, None, None, "none").await;
+        assert_eq!(total.len(), 1);
+        assert_eq!(total[0].calls, 3);
+        assert_eq!(total[0].uncached_input, 350);
+        assert_eq!(total[0].cached_input, 50);
+        assert_eq!(total[0].completion_tokens, 40);
+        assert_eq!(total[0].total_tokens, 440);
+
+        // 单条件：provider
+        let ds = repo.stats(None, None, Some("deepseek"), None, "none").await;
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].calls, 2);
+        assert_eq!(ds[0].total_tokens, 220);
+
+        // 双条件：provider + model（旧实现最易在此失配）
+        let grouped = repo
+            .stats(None, None, Some("deepseek"), Some("v3"), "model")
+            .await;
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].group, "deepseek/v3");
+        assert_eq!(grouped[0].calls, 2);
+        assert_eq!(grouped[0].total_tokens, 220);
+
+        let single = repo
+            .stats(None, None, Some("deepseek"), Some("v3"), "none")
+            .await;
+        assert_eq!(single.len(), 1);
+        assert_eq!(
+            single[0].calls, grouped[0].calls,
+            "总计与分组的过滤口径必须一致"
+        );
+        assert_eq!(single[0].total_tokens, grouped[0].total_tokens);
+
+        // 时间下界在未来：无匹配（总计返回一条零值行）
+        let future = repo
+            .stats(Some(i64::MAX - 1), None, None, None, "none")
+            .await;
+        assert_eq!(future.len(), 1);
+        assert_eq!(future[0].calls, 0);
+        assert_eq!(future[0].total_tokens, 0);
     }
 }

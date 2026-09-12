@@ -190,7 +190,7 @@ type SharedAgent = Arc<RwLock<Arc<dyn AgentCoordinator>>>;
 /// 注册表；会话内不刷新（前缀稳定，prompt 缓存不失效）。
 #[derive(Clone)]
 pub struct RoleSync {
-    store: tianyan::agent::RoleStore,
+    store: tianyan::role_store::RoleStore,
     registry: Arc<tianyan::agent::RoleRegistry>,
 }
 
@@ -220,7 +220,7 @@ pub struct AppState {
     /// 技能管理器（VFS 命名空间访问；技能列表/详情/执行 API 数据源）
     skill_manager: Arc<SkillManager>,
     /// 角色 VFS 存储（ADR-016：角色列表/详情/会话 API 的权威数据源）。
-    role_store: tianyan::agent::RoleStore,
+    role_store: tianyan::role_store::RoleStore,
     /// 角色注册表（ADR-016：与 Agent 共享同一 Arc；会话边界刷新目标）。
     role_registry: Arc<tianyan::agent::RoleRegistry>,
     /// 使用统计追踪器
@@ -353,7 +353,7 @@ impl AppState {
             .await
             .map_err(model_services_error)?;
         // ADR-016：角色注册表从 VFS 加载（内置种子 + 配置签名 upsert + 演化实体）
-        let role_store = tianyan::agent::RoleStore::new(vfs.clone());
+        let role_store = tianyan::role_store::RoleStore::new(vfs.clone());
         let role_registry = Arc::new(
             tianyan::agent::RoleRegistry::load_persisted(&role_store, &config.agent_roles).await?,
         );
@@ -505,7 +505,7 @@ impl AppState {
     }
 
     /// 角色 VFS 存储（角色 API 的权威数据源）。
-    pub fn role_store(&self) -> tianyan::agent::RoleStore {
+    pub fn role_store(&self) -> tianyan::role_store::RoleStore {
         self.role_store.clone()
     }
 

@@ -125,7 +125,11 @@ impl ToolPostExecuteListener for ToolObservabilityListener {
             trace.record_tool(
                 session_id,
                 &call.function.name,
-                &super::truncate_trace_params(arguments),
+                // 截断单点：common::truncate（禁止模块内复制实现）
+                &crate::common::truncate::truncate_utf8_boundary(
+                    arguments,
+                    super::TRACE_PARAMS_MAX_BYTES,
+                ),
                 elapsed.as_millis() as i64,
                 success,
                 result.as_ref().err().map(|e| e.to_string()),

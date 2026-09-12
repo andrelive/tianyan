@@ -19,8 +19,6 @@ mod r#loop;
 pub mod role_learning;
 /// 角色向量路由（ADR-016 P3：任务描述 → 角色摘要语义匹配建议）。
 pub mod role_router;
-/// 角色 VFS 存储（ADR-016：注册表持久化）。
-pub mod role_store;
 /// 角色化子 Agent 委托（delegate_to_agent role 参数）。
 pub mod roles;
 /// 流式事件统一转发（ADR-032：三处接线收敛——建通道即消费 + 字段注入单点）。
@@ -40,7 +38,6 @@ pub use role_learning::{
     categorize_task_by_keyword, LearnedRole, RoleLearningConfig, RoleLearningEngine,
 };
 pub use role_router::{RoleMatch, RoleRouter};
-pub use role_store::RoleStore;
 pub use roles::{AgentRole, RoleRegistry, RoleSource, RoleStatus};
 pub use session_state::SessionState;
 pub use stream_forward::{

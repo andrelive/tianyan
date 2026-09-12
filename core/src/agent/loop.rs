@@ -159,6 +159,40 @@ type TurnStep<'a> = Pin<
     >,
 >;
 
+/// 单轮模型响应结果 `(assistant_msg, usage, finish_reason, 实测输入)`。
+///
+/// `run` / `run_stream` 的 step 产出与 [`AgentLoop::run_turns`] 归约共用同一形式；
+/// 提炼为别名以消除复杂元组的内联重复。
+/// 第三元素为模型响应的 finish_reason；第四元素为更新后的实测输入
+/// （`(model, prompt_tokens)`，供下一轮动态 max_tokens 校准）。
+type TurnResult = (
+    Message,
+    Option<TokenUsage>,
+    Option<String>,
+    Option<(String, usize)>,
+);
+
+/// 流式单轮 chunk 累积结果（`run_stream` 路径内部用）。
+///
+/// 收敛「接收 chunk → 累积正文/推理/工具调用」过程的全部可变状态，
+/// 使累积循环与结果组装（[`AgentLoop::finalize_streamed_turn`]）解耦。
+struct StreamAccum {
+    /// 已累积的正文增量。
+    content: String,
+    /// 已累积的推理（思考）增量。
+    reasoning: String,
+    /// 按 index 累积的工具调用增量 `(id, name, arguments)`。
+    tool_calls: std::collections::BTreeMap<usize, (String, String, String)>,
+    /// 流式 usage（网关未返回时为 None，交由组装阶段估算）。
+    usage: Option<TokenUsage>,
+    /// 流式接收错误（中断）。
+    stream_error: Option<String>,
+    /// finish_reason（最终 chunk 携带；None 表示未到达）。
+    finish_reason: Option<String>,
+    /// 本轮实测输入（usage 到达时更新）。
+    updated_input: Option<(String, usize)>,
+}
+
 /// Agent 迭代循环。
 #[derive(Clone)]
 pub struct AgentLoop {
@@ -396,193 +430,241 @@ impl AgentLoop {
                     let sender = sender.ok_or_else(|| {
                         TianyanError::Custom("agent_loop: 流式路径缺少 stream_sender".to_string())
                     })?;
-
-                    let request = this
-                        .prepare_request(
+                    // 收流并累积 chunk，再组装为与 `run` 路径一致的响应元组
+                    let accum = this
+                        .collect_streamed_turn(
                             model,
+                            sender,
                             &msgs,
-                            true,
+                            cancel,
                             thinking_effort,
-                            last_input_usage.clone(),
+                            &last_input_usage,
                         )
                         .await?;
-
-                    let mut rx = this
-                        .model_service
-                        .chat_completion_stream(request)
-                        .await
-                        .map_err(|e| {
-                            TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
-                        })?;
-
-                    // Accumulators for streaming chunks
-                    let mut accumulated_content = String::new();
-                    let mut accumulated_reasoning = String::new();
-                    let mut accumulated_tool_calls: std::collections::BTreeMap<
-                        usize,
-                        (String, String, String),
-                    > = std::collections::BTreeMap::new();
-                    let mut turn_usage: Option<TokenUsage> = None;
-                    let mut stream_error: Option<String> = None;
-                    let mut finish_reason: Option<String> = None;
-                    // 本轮实测输入（流式 usage 到达时更新；供下一轮校准）
-                    let mut updated_input: Option<(String, usize)> = None;
-
-                    while let Some(chunk_result) = rx.recv().await {
-                        // 客户端断开/服务关停：chunk 循环内及时中断（长响应时不必等流结束）
-                        if AgentLoop::is_cancelled(cancel) {
-                            return Err(TianyanError::Custom("agent_loop: 任务已取消".to_string()));
-                        }
-                        match chunk_result {
-                            Ok(chunk) => {
-                                // OpenAI sends usage in the final chunk
-                                if let Some(ref usage) = chunk.usage {
-                                    turn_usage = Some(usage.clone());
-                                    // T6：记录本次实测输入，供下一轮动态 max_tokens 校准。
-                                    updated_input = Some((model.to_string(), usage.prompt_tokens));
-                                }
-                                for choice in &chunk.choices {
-                                    // finish_reason：最终 chunk 携带；None 保持之前值（if let Some 覆盖累计）
-                                    if let Some(ref fr) = choice.finish_reason {
-                                        finish_reason = Some(fr.clone());
-                                    }
-                                    // 顺序：reasoning 先于 content——同一 chunk 同时携带
-                                    // reasoning_content 与 content（推理→正文切换边界）时，
-                                    // 思考增量必须先发，正文后发，否则前端出现
-                                    // "思考未结束正文已插入"的乱序。
-                                    if let Some(ref reasoning) = choice.delta.reasoning_content {
-                                        if !reasoning.is_empty() {
-                                            accumulated_reasoning.push_str(reasoning);
-                                            sender.send_thought(reasoning).await;
-                                        }
-                                    }
-                                    if let Some(ref content) = choice.delta.content {
-                                        accumulated_content.push_str(content);
-                                        sender.send_answer_delta(content).await;
-                                    }
-                                    if let Some(ref tc_deltas) = choice.delta.tool_calls {
-                                        for tc in tc_deltas {
-                                            let entry = accumulated_tool_calls
-                                                .entry(tc.index)
-                                                .or_insert_with(|| {
-                                                    (String::new(), String::new(), String::new())
-                                                });
-                                            if let Some(ref id) = tc.id {
-                                                entry.0.clone_from(id);
-                                            }
-                                            if let Some(ref func) = tc.function {
-                                                if let Some(ref name) = func.name {
-                                                    entry.1.clone_from(name);
-                                                }
-                                                if let Some(ref args) = func.arguments {
-                                                    entry.2.push_str(args);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let err_msg = format!("流式接收中断: {}", e);
-                                tracing::warn!(error = %e, "{}", err_msg);
-                                stream_error = Some(err_msg);
-                                break;
-                            }
-                        }
-                    }
-
-                    // 流式中断容错（对齐 DSH：中断不丢弃已收内容）：
-                    // - 已有内容累积（正文/推理/工具调用）→ 保留为截断输出
-                    //   （finish=length 语义，前端可提示截断），不再整体报错；
-                    // - 完全无内容（流一开始就断）→ 按失败上报。
-                    let stream_interrupted = stream_error.is_some();
-                    if let Some(err_msg) = &stream_error {
-                        let has_partial = !accumulated_content.is_empty()
-                            || !accumulated_reasoning.is_empty()
-                            || !accumulated_tool_calls.is_empty();
-                        if !has_partial {
-                            return Err(TianyanError::Custom(format!(
-                                "agent_loop: LLM 调用失败：{}",
-                                err_msg
-                            )));
-                        }
-                        tracing::warn!(
-                            error = %err_msg,
-                            content_len = accumulated_content.len(),
-                            "流式中断，保留已收部分输出（截断）"
-                        );
-                    }
-
-                    // 流式中断：已收内容保留为截断输出——finish 标记独立值
-                    // "interrupted"（区别于 token 上限的 length：用户配置的
-                    // max_tokens 远未触顶时显示"已达上限"是误导，前端据此
-                    // 显示"流式中断"提示）。
-                    if stream_interrupted && finish_reason.is_none() {
-                        finish_reason = Some("interrupted".to_string());
-                    }
-
-                    // Build assistant message from accumulated content + tool calls
-                    let tool_calls: Option<Vec<ToolCall>> = if accumulated_tool_calls.is_empty() {
-                        None
-                    } else {
-                        Some(
-                            accumulated_tool_calls
-                                .into_values()
-                                .map(|(id, name, arguments)| ToolCall {
-                                    id,
-                                    call_type: ToolCallType::Function,
-                                    function: FunctionCall { name, arguments },
-                                })
-                                .collect(),
-                        )
-                    };
-
-                    let assistant_msg = Message {
-                        role: MessageRole::Assistant,
-                        content: accumulated_content,
-                        content_parts: None,
-                        tool_calls,
-                        tool_call_id: None,
-                        tool_duration_ms: None,
-                        tool_error: None,
-                        reasoning_content: if accumulated_reasoning.is_empty() {
-                            None
-                        } else {
-                            Some(accumulated_reasoning)
-                        },
-                    };
-
-                    // usage 兜底（对齐 DSH token-meter 启发式）：部分网关
-                    // （如 ollama 兼容层）流式响应不携带 usage 字段——真实值
-                    // 缺失时用 TokenEstimator 估算，保证上下文占用/缓存命中
-                    // 展示与压缩判定不因网关差异而失效。
-                    let turn_usage = turn_usage.or_else(|| {
-                        let estimator = crate::common::token_estimator::TokenEstimator::new();
-                        let prompt = last_input_usage
-                            .as_ref()
-                            .filter(|(m, _)| m == model)
-                            .map(|(_, tokens)| *tokens)
-                            .unwrap_or_else(|| estimator.estimate_messages(&msgs));
-                        let completion = estimator.estimate_text(&assistant_msg.content)
-                            + assistant_msg
-                                .reasoning_content
-                                .as_deref()
-                                .map(|r| estimator.estimate_text(r))
-                                .unwrap_or(0);
-                        Some(TokenUsage {
-                            prompt_tokens: prompt,
-                            completion_tokens: completion,
-                            total_tokens: prompt + completion,
-                            cache_read: 0,
-                            cache_write: 0,
-                        })
-                    });
-
-                    Ok((assistant_msg, turn_usage, finish_reason, updated_input))
+                    AgentLoop::finalize_streamed_turn(
+                        accum,
+                        &msgs,
+                        model,
+                        last_input_usage.as_ref(),
+                    )
                 })
             },
         )
         .await
+    }
+
+    /// 获取本轮流式响应并累积 chunk（`run_stream` 单轮）。
+    ///
+    /// 职责：构造流式请求、打开流、逐 chunk 累积正文/推理/工具调用增量，
+    /// 并透传 usage / finish_reason / 实测输入。取消在 chunk 循环内即时响应
+    /// （返回“任务已取消”错误，由 [`Self::run_turns`] 统一转换为 Cancelled）。
+    ///
+    /// 不变量：累积顺序与发送顺序一致（reasoning 先于 content）；
+    /// 网关缺失 usage 时此处不兜底（由 [`Self::finalize_streamed_turn`] 估算）。
+    async fn collect_streamed_turn(
+        &self,
+        model: &str,
+        sender: &StreamEventSender,
+        msgs: &[Message],
+        cancel: Option<&AtomicBool>,
+        thinking_effort: Option<String>,
+        last_input_usage: &Option<(String, usize)>,
+    ) -> Result<StreamAccum, TianyanError> {
+        let request = self
+            .prepare_request(model, msgs, true, thinking_effort, last_input_usage.clone())
+            .await?;
+
+        let mut rx = self
+            .model_service
+            .chat_completion_stream(request)
+            .await
+            .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e)))?;
+
+        // Accumulators for streaming chunks
+        let mut accum = StreamAccum {
+            content: String::new(),
+            reasoning: String::new(),
+            tool_calls: std::collections::BTreeMap::new(),
+            usage: None,
+            stream_error: None,
+            finish_reason: None,
+            updated_input: None,
+        };
+
+        while let Some(chunk_result) = rx.recv().await {
+            // 客户端断开/服务关停：chunk 循环内及时中断（长响应时不必等流结束）
+            if AgentLoop::is_cancelled(cancel) {
+                return Err(TianyanError::Custom("agent_loop: 任务已取消".to_string()));
+            }
+            match chunk_result {
+                Ok(chunk) => {
+                    // OpenAI sends usage in the final chunk
+                    if let Some(ref usage) = chunk.usage {
+                        accum.usage = Some(usage.clone());
+                        // T6：记录本次实测输入，供下一轮动态 max_tokens 校准。
+                        accum.updated_input = Some((model.to_string(), usage.prompt_tokens));
+                    }
+                    for choice in &chunk.choices {
+                        // finish_reason：最终 chunk 携带；None 保持之前值（if let Some 覆盖累计）
+                        if let Some(ref fr) = choice.finish_reason {
+                            accum.finish_reason = Some(fr.clone());
+                        }
+                        // 顺序：reasoning 先于 content——同一 chunk 同时携带
+                        // reasoning_content 与 content（推理→正文切换边界）时，
+                        // 思考增量必须先发，正文后发，否则前端出现
+                        // "思考未结束正文已插入"的乱序。
+                        if let Some(ref reasoning) = choice.delta.reasoning_content {
+                            if !reasoning.is_empty() {
+                                accum.reasoning.push_str(reasoning);
+                                sender.send_thought(reasoning).await;
+                            }
+                        }
+                        if let Some(ref content) = choice.delta.content {
+                            accum.content.push_str(content);
+                            sender.send_answer_delta(content).await;
+                        }
+                        if let Some(ref tc_deltas) = choice.delta.tool_calls {
+                            for tc in tc_deltas {
+                                let entry = accum.tool_calls.entry(tc.index).or_insert_with(|| {
+                                    (String::new(), String::new(), String::new())
+                                });
+                                if let Some(ref id) = tc.id {
+                                    entry.0.clone_from(id);
+                                }
+                                if let Some(ref func) = tc.function {
+                                    if let Some(ref name) = func.name {
+                                        entry.1.clone_from(name);
+                                    }
+                                    if let Some(ref args) = func.arguments {
+                                        entry.2.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let err_msg = format!("流式接收中断: {}", e);
+                    tracing::warn!(error = %e, "{}", err_msg);
+                    accum.stream_error = Some(err_msg);
+                    break;
+                }
+            }
+        }
+
+        Ok(accum)
+    }
+
+    /// 将流式累积结果组装为模型响应元组（`run_stream` 单轮收尾）。
+    ///
+    /// 职责：流式中断容错（有部分输出则保留为截断、否则报错）、finish 标记
+    /// （中断且未携带时补 `interrupted`）、构建 assistant 消息、usage 兜底估算。
+    /// 返回形式与 `run` 路径一致：`(assistant_msg, turn_usage, finish_reason, 实测输入)`。
+    ///
+    /// 不变量：错误消息与 finish 标记逐字与拆分前一致；估算仅在网关未返回
+    /// usage 时触发。
+    fn finalize_streamed_turn(
+        accum: StreamAccum,
+        msgs: &[Message],
+        model: &str,
+        last_input_usage: Option<&(String, usize)>,
+    ) -> Result<TurnResult, TianyanError> {
+        let StreamAccum {
+            content,
+            reasoning,
+            tool_calls: accumulated_tool_calls,
+            usage,
+            stream_error,
+            mut finish_reason,
+            updated_input,
+        } = accum;
+
+        // 流式中断容错（对齐 DSH：中断不丢弃已收内容）：
+        // - 已有内容累积（正文/推理/工具调用）→ 保留为截断输出
+        //   （finish=length 语义，前端可提示截断），不再整体报错；
+        // - 完全无内容（流一开始就断）→ 按失败上报。
+        let stream_interrupted = stream_error.is_some();
+        if let Some(err_msg) = &stream_error {
+            let has_partial =
+                !content.is_empty() || !reasoning.is_empty() || !accumulated_tool_calls.is_empty();
+            if !has_partial {
+                return Err(TianyanError::Custom(format!(
+                    "agent_loop: LLM 调用失败：{}",
+                    err_msg
+                )));
+            }
+            tracing::warn!(
+                error = %err_msg,
+                content_len = content.len(),
+                "流式中断，保留已收部分输出（截断）"
+            );
+        }
+
+        // 流式中断：已收内容保留为截断输出——finish 标记独立值
+        // "interrupted"（区别于 token 上限的 length：用户配置的
+        // max_tokens 远未触顶时显示"已达上限"是误导，前端据此
+        // 显示"流式中断"提示）。
+        if stream_interrupted && finish_reason.is_none() {
+            finish_reason = Some("interrupted".to_string());
+        }
+
+        // Build assistant message from accumulated content + tool calls
+        let tool_calls: Option<Vec<ToolCall>> = if accumulated_tool_calls.is_empty() {
+            None
+        } else {
+            Some(
+                accumulated_tool_calls
+                    .into_values()
+                    .map(|(id, name, arguments)| ToolCall {
+                        id,
+                        call_type: ToolCallType::Function,
+                        function: FunctionCall { name, arguments },
+                    })
+                    .collect(),
+            )
+        };
+
+        let assistant_msg = Message {
+            role: MessageRole::Assistant,
+            content,
+            content_parts: None,
+            tool_calls,
+            tool_call_id: None,
+            tool_duration_ms: None,
+            tool_error: None,
+            reasoning_content: if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            },
+        };
+
+        // usage 兜底（对齐 DSH token-meter 启发式）：部分网关
+        // （如 ollama 兼容层）流式响应不携带 usage 字段——真实值
+        // 缺失时用 TokenEstimator 估算，保证上下文占用/缓存命中
+        // 展示与压缩判定不因网关差异而失效。
+        let turn_usage = usage.or_else(|| {
+            let estimator = crate::common::token_estimator::TokenEstimator::new();
+            let prompt = last_input_usage
+                .filter(|(m, _)| m == model)
+                .map(|(_, tokens)| *tokens)
+                .unwrap_or_else(|| estimator.estimate_messages(msgs));
+            let completion = estimator.estimate_text(&assistant_msg.content)
+                + assistant_msg
+                    .reasoning_content
+                    .as_deref()
+                    .map(|r| estimator.estimate_text(r))
+                    .unwrap_or(0);
+            Some(TokenUsage {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                total_tokens: prompt + completion,
+                cache_read: 0,
+                cache_write: 0,
+            })
+        });
+
+        Ok((assistant_msg, turn_usage, finish_reason, updated_input))
     }
 
     /// 运行多轮迭代循环的共享脚手架（`run` / `run_stream` 共用）。
@@ -620,37 +702,8 @@ impl AgentLoop {
     {
         let mut current_parent_id = initial_parent_id.map(|s| s.to_string());
         let mut total_tokens = TokenUsage::default();
-        // 实测输入恢复：从会话消息取最后一条带 usage 且 model 一致的消息
-        // （重启后不退回估算——usage 已持久化在消息里；model 不一致 = 切换
-        // 模型，旧实测值不适用，退回估算）。
-        //
-        // 取数口径与压缩判定共用 `prompt_side_tokens` 单点——此前此处为
-        // `input + cache.read`，把缓存命中重复计一遍（≈真实×2；1M 窗口下
-        // 高缓存命中会话直接越过窗口 → "上下文预算不足"误报，会话被卡死）。
-        //
-        // 作用域与组装/压缩判定一致：只看**最后一个压缩点之后**的消息。
-        // 压缩点之前（含压缩前刚发生）的实测对应旧上下文——组装视图已从
-        // 压缩点重新开始，旧实测不适用于压缩后的请求（压缩后首轮退回估算）。
-        let mut last_input_usage: Option<(String, usize)> =
-            match self.session_manager.get_session(session_id).await {
-                Ok(Some(session)) => {
-                    let start_idx = session
-                        .messages
-                        .iter()
-                        .rposition(|m| m.compression_marker)
-                        .unwrap_or(0);
-                    session.messages[start_idx..]
-                        .iter()
-                        .rev()
-                        .find(|m| {
-                            !m.compression_marker
-                                && (m.tokens.input > 0 || m.tokens.cache.read > 0)
-                                && m.model_id.as_deref() == Some(model)
-                        })
-                        .map(|m| (model.to_string(), m.prompt_side_tokens()))
-                }
-                _ => None,
-            };
+        // 实测输入恢复（T6 动态 max_tokens 校准）：口径见 recover_last_input_usage。
+        let mut last_input_usage = self.recover_last_input_usage(session_id, model).await;
 
         for turn in 0..self.config.max_turns {
             // 轮顶取消检查：工具执行结束后、进入下一轮 LLM 调用前响应取消
@@ -668,15 +721,18 @@ impl AgentLoop {
                 trace.set_current_turn(session_id, turn as i64);
             }
 
-            let mut step_result = match step(
-                self,
-                model,
-                stream_sender,
-                messages.clone(),
-                cancel,
-                last_input_usage.clone(),
-            )
-            .await
+            let step_result = match self
+                .run_step_with_retry(
+                    &mut step,
+                    model,
+                    stream_sender,
+                    messages,
+                    cancel,
+                    last_input_usage.as_ref(),
+                    session_id,
+                    turn,
+                )
+                .await
             {
                 Ok(v) => v,
                 Err(e) => {
@@ -693,48 +749,6 @@ impl AgentLoop {
                 }
             };
 
-            // 空响应重试（用户轮）：LLM 偶发返回既无正文也无工具调用的空响应
-            // （思考模型"想完没说话"），直接结束会让任务在工具循环中途静默终止。
-            // 消息历史此时未变（空响应尚未入史），重试一次通常能恢复；
-            // 重试仍空则按正常结束处理（空输出 = completed，对齐 DSH）。
-            // 唤醒轮与用户轮同构（统一循环框架）：空响应同样重试一次——
-            // 后台命令完成通知是明确的输入，模型"想完没说话"或思考碎片
-            // （如只剩 "@if"）时给第二次机会（失败场景指令要求必须汇报，
-            // 重试通常能恢复完整输出），重试仍空才按正常结束处理。
-            let empty = matches!(
-                &step_result,
-                (m, _, _, _) if m.content.is_empty() && m.tool_calls.is_none()
-            );
-            if empty {
-                tracing::warn!(
-                    session = %session_id,
-                    turn,
-                    "LLM 返回空响应，重试一次"
-                );
-                step_result = match step(
-                    self,
-                    model,
-                    stream_sender,
-                    messages.clone(),
-                    cancel,
-                    last_input_usage.clone(),
-                )
-                .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        if Self::is_cancelled(cancel) {
-                            return Ok(AgentLoopResult::Cancelled {
-                                total_tokens,
-                                last_turn_usage: None,
-                                turns: turn + 1,
-                            });
-                        }
-                        return Err(e);
-                    }
-                };
-            }
-
             let (assistant_msg, turn_usage, finish_reason, updated_input) = step_result;
             // 更新实测输入（供下一轮动态 max_tokens 校准；None = 本轮无实测，保持旧值）
             if let Some(ui) = updated_input {
@@ -742,20 +756,7 @@ impl AgentLoop {
             }
 
             // LLM 用量日志：每轮一次（聊天/子代理/演化任务统一记录）。
-            // provider 优先查配置映射（模型名可能不含前缀），
-            // 未命中时按 model 名前缀推导（provider/model 命名）。
-            if let Some(ref usage_log) = self.usage_log {
-                if let Some(usage) = &turn_usage {
-                    let provider =
-                        self.provider_by_model
-                            .get(model)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                model.split("/").next().unwrap_or("unknown").to_string()
-                            });
-                    usage_log.record(session_id, &provider, model, usage).await;
-                }
-            }
+            self.record_usage_log(session_id, model, &turn_usage).await;
 
             let mut ctx = TurnContext {
                 session_id,
@@ -772,32 +773,180 @@ impl AgentLoop {
                 .await?
             {
                 // G6：终轮 span（含 token 消耗）
-                if let Some(ref trace) = self.trace {
-                    trace.record_turn(
-                        session_id,
-                        model,
-                        turn_start.elapsed().as_millis() as i64,
-                        (total_tokens.prompt_tokens + total_tokens.completion_tokens) as i64,
-                        true,
-                    );
-                }
+                self.record_turn_span(session_id, model, turn_start, &total_tokens);
                 return Ok(result);
             }
 
             // G6：非终轮 span（工具执行后继续下一轮）
-            if let Some(ref trace) = self.trace {
-                trace.record_turn(
-                    session_id,
-                    model,
-                    turn_start.elapsed().as_millis() as i64,
-                    (total_tokens.prompt_tokens + total_tokens.completion_tokens) as i64,
-                    true,
-                );
-            }
+            self.record_turn_span(session_id, model, turn_start, &total_tokens);
         }
 
         // ADR-030：max_turns 行为按策略——主 agent 报错；子代理尽力而为
         // （返回最后输出，不因轮数上限丢失已完成的工作）
+        self.max_turns_result(messages, total_tokens)
+    }
+
+    /// 恢复上一轮实测输入（T6 动态 max_tokens 校准）。
+    ///
+    /// 从会话消息取**最后一个压缩点之后**最后一条带 usage 且 model 一致的消息
+    /// （重启后不退回估算——usage 已持久化在消息里；model 不一致 = 切换模型，
+    /// 旧实测值不适用，退回估算）。
+    ///
+    /// 取数口径与压缩判定共用 `prompt_side_tokens` 单点——此前此处为
+    /// `input + cache.read`，把缓存命中重复计一遍（≈真实×2；1M 窗口下
+    /// 高缓存命中会话直接越过窗口 → "上下文预算不足"误报，会话被卡死）。
+    /// 作用域与组装/压缩判定一致：只看**最后一个压缩点之后**的消息；
+    /// 压缩点之前的实测对应旧上下文，不适用于压缩后的请求（压缩后首轮退回估算）。
+    async fn recover_last_input_usage(
+        &self,
+        session_id: &str,
+        model: &str,
+    ) -> Option<(String, usize)> {
+        match self.session_manager.get_session(session_id).await {
+            Ok(Some(session)) => {
+                let start_idx = session
+                    .messages
+                    .iter()
+                    .rposition(|m| m.compression_marker)
+                    .unwrap_or(0);
+                session.messages[start_idx..]
+                    .iter()
+                    .rev()
+                    .find(|m| {
+                        !m.compression_marker
+                            && (m.tokens.input > 0 || m.tokens.cache.read > 0)
+                            && m.model_id.as_deref() == Some(model)
+                    })
+                    .map(|m| (model.to_string(), m.prompt_side_tokens()))
+            }
+            _ => None,
+        }
+    }
+
+    /// 执行单轮 step 获取模型响应（含空响应重试一次）。
+    ///
+    /// 空响应（既无正文也无工具调用）会让工具循环中途静默终止；消息历史此时
+    /// 未变（空响应尚未入史），重试一次通常能恢复；重试仍空则按正常结束处理
+    /// （空输出 = completed，对齐 DSH）。唤醒轮与用户轮同构（统一循环框架）。
+    ///
+    /// 不变量：每次调用 `step` 传入 `messages` 的克隆与最新实测输入；
+    /// 取消（step 内上抛"任务已取消"）以 `Err` 上抛，由调用方统一转换为
+    /// Cancelled（不在此处改变可观测行为）。
+    // 私有脚手架：参数均为单轮 step 所需状态/依赖，收敛为结构体反而降低可读性
+    #[allow(clippy::too_many_arguments)]
+    async fn run_step_with_retry<F>(
+        &self,
+        step: &mut F,
+        model: &str,
+        stream_sender: Option<&StreamEventSender>,
+        messages: &[Message],
+        cancel: Option<&AtomicBool>,
+        last_input_usage: Option<&(String, usize)>,
+        session_id: &str,
+        turn: usize,
+    ) -> Result<TurnResult, TianyanError>
+    where
+        F: for<'a> FnMut(
+            &'a AgentLoop,
+            &'a str,
+            Option<&'a StreamEventSender>,
+            Vec<Message>,
+            Option<&'a AtomicBool>,
+            Option<(String, usize)>,
+        ) -> TurnStep<'a>,
+    {
+        let mut step_result = step(
+            self,
+            model,
+            stream_sender,
+            messages.to_vec(),
+            cancel,
+            last_input_usage.cloned(),
+        )
+        .await?;
+
+        // 空响应重试（用户轮）：LLM 偶发返回既无正文也无工具调用的空响应
+        // （思考模型"想完没说话"），直接结束会让任务在工具循环中途静默终止。
+        // 消息历史此时未变（空响应尚未入史），重试一次通常能恢复；
+        // 重试仍空则按正常结束处理（空输出 = completed，对齐 DSH）。
+        // 唤醒轮与用户轮同构（统一循环框架）：空响应同样重试一次——
+        // 后台命令完成通知是明确的输入，模型"想完没说话"或思考碎片
+        // （如只剩 "@if"）时给第二次机会（失败场景指令要求必须汇报，
+        // 重试通常能恢复完整输出），重试仍空才按正常结束处理。
+        let empty = matches!(
+            &step_result,
+            (m, _, _, _) if m.content.is_empty() && m.tool_calls.is_none()
+        );
+        if empty {
+            tracing::warn!(
+                session = %session_id,
+                turn,
+                "LLM 返回空响应，重试一次"
+            );
+            step_result = step(
+                self,
+                model,
+                stream_sender,
+                messages.to_vec(),
+                cancel,
+                last_input_usage.cloned(),
+            )
+            .await?;
+        }
+
+        Ok(step_result)
+    }
+
+    /// 记录单轮 LLM 用量日志（聊天/子代理/演化任务统一记录）。
+    ///
+    /// provider 优先查配置映射（模型名可能不含前缀），未命中时按 model 名前缀
+    /// 推导（provider/model 命名）。无 usage_log 或无用量时静默跳过。
+    async fn record_usage_log(
+        &self,
+        session_id: &str,
+        model: &str,
+        turn_usage: &Option<TokenUsage>,
+    ) {
+        if let Some(ref usage_log) = self.usage_log {
+            if let Some(usage) = turn_usage {
+                let provider = self
+                    .provider_by_model
+                    .get(model)
+                    .cloned()
+                    .unwrap_or_else(|| model.split("/").next().unwrap_or("unknown").to_string());
+                usage_log.record(session_id, &provider, model, usage).await;
+            }
+        }
+    }
+
+    /// 记录本轮的 G6 结构化 Trace span（含 token 消耗）。
+    ///
+    /// 终轮与非终轮共用同一记录口径（success = true）；未配置 trace 时静默跳过。
+    fn record_turn_span(
+        &self,
+        session_id: &str,
+        model: &str,
+        turn_start: std::time::Instant,
+        total_tokens: &TokenUsage,
+    ) {
+        if let Some(ref trace) = self.trace {
+            trace.record_turn(
+                session_id,
+                model,
+                turn_start.elapsed().as_millis() as i64,
+                (total_tokens.prompt_tokens + total_tokens.completion_tokens) as i64,
+                true,
+            );
+        }
+    }
+
+    /// 达到 max_turns 上限时的结果（ADR-030）：策略为尽力而为则返回最后输出
+    /// （不因轮数上限丢失已完成的工作），否则报错。
+    fn max_turns_result(
+        &self,
+        messages: &[Message],
+        total_tokens: TokenUsage,
+    ) -> Result<AgentLoopResult, TianyanError> {
         if self.turn_policy.max_turns_graceful {
             let content = messages
                 .iter()

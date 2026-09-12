@@ -104,18 +104,11 @@ fn safety_violation<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, 
     result.map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))
 }
 
-/// 截断工具参数摘要（G6 trace 观测数据控制体积；UTF-8 边界安全）。
-fn truncate_trace_params(arguments: &str) -> String {
-    const MAX: usize = 200;
-    if arguments.len() <= MAX {
-        return arguments.to_string();
-    }
-    let mut end = MAX;
-    while !arguments.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &arguments[..end])
-}
+/// 工具参数摘要的截断上限（G6 trace 观测数据体积控制）。
+///
+/// 截断实现取 `common::truncate::truncate_utf8_boundary`（全库截断单点），
+/// 本模块不再自带复制实现。
+pub(crate) const TRACE_PARAMS_MAX_BYTES: usize = 200;
 
 /// 单个工具调用的执行结果（含耗时元数据）。
 ///

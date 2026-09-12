@@ -12,12 +12,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::agent::role_store::RoleStore;
 use crate::agent::roles::{AgentRole, RoleSource, RoleStatus};
 use crate::common::error::{Result, TianyanError};
 use crate::common::llm_judge::parse_llm_json;
 use crate::common::types::{ContextNamespace, Message, TianyanUri};
 use crate::model::ChatService;
+use crate::role_store::RoleStore;
 use crate::skills::learning::ExecutionHistory;
 use crate::vfs::VirtualFileSystem;
 

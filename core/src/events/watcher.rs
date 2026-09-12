@@ -147,9 +147,7 @@ mod tests {
     use std::time::Duration;
 
     /// 带超时的接收（notify 异步派发，单次最长等待 5s）。
-    async fn recv_with_timeout(
-        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
-    ) -> Option<Event> {
+    async fn recv_with_timeout(rx: &mut tokio::sync::mpsc::Receiver<Event>) -> Option<Event> {
         tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .ok()

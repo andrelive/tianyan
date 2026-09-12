@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rusqlite::Connection;
+
+use crate::common::error::TianyanError;
 use tokio::sync::{Mutex, MutexGuard, TryLockError};
 
 /// 共享的 SQLite 数据库句柄。
@@ -19,7 +21,10 @@ pub struct SqliteDb {
 
 impl SqliteDb {
     /// 打开（或创建）指定路径的 SQLite 数据库。
-    pub fn open(path: PathBuf) -> Result<Self, rusqlite::Error> {
+    ///
+    /// 错误在模块边界收敛为 [`TianyanError`]：rusqlite 的错误类型不外泄到
+    /// `db` 模块之外（抽象泄漏收敛，ADR-020）。
+    pub fn open(path: PathBuf) -> Result<Self, TianyanError> {
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 tracing::warn!(
@@ -29,11 +34,12 @@ impl SqliteDb {
                 );
             }
         }
-        let conn = Connection::open(&path)?;
+        let conn = Connection::open(&path).map_err(|e| Self::open_error(&path, e))?;
         // foreign_keys=ON：启用 schema 中声明的 FK 约束（ON DELETE CASCADE 等）
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
-        )?;
+        )
+        .map_err(|e| Self::open_error(&path, e))?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -42,8 +48,9 @@ impl SqliteDb {
     }
 
     /// 创建内存数据库（测试用）。
-    pub fn open_in_memory() -> Result<Self, rusqlite::Error> {
-        let conn = Connection::open_in_memory()?;
+    pub fn open_in_memory() -> Result<Self, TianyanError> {
+        let conn = Connection::open_in_memory()
+            .map_err(|e| TianyanError::Custom(format!("db: 打开内存数据库失败：{e}")))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             path: PathBuf::from(":memory:"),
@@ -65,8 +72,23 @@ impl SqliteDb {
         self.conn.try_lock()
     }
 
+    /// 打开失败的错误映射（路径 + 原因）。
+    fn open_error(path: &std::path::Path, e: rusqlite::Error) -> TianyanError {
+        TianyanError::Custom(format!("db: 打开数据库失败（{}）：{e}", path.display()))
+    }
+
     /// 初始化所有表的 Schema。
-    pub async fn init_all_schemas(&self) -> Result<(), rusqlite::Error> {
+    ///
+    /// 错误在模块边界收敛为 [`TianyanError`]（实现内部仍用 rusqlite 错误，
+    /// 但不再出现在公开签名上）。
+    pub async fn init_all_schemas(&self) -> Result<(), TianyanError> {
+        self.init_all_schemas_inner()
+            .await
+            .map_err(|e| TianyanError::Custom(format!("db: 初始化 schema 失败：{e}")))
+    }
+
+    /// schema 初始化的实现（内部使用 rusqlite 错误；私有，不外泄）。
+    async fn init_all_schemas_inner(&self) -> Result<(), rusqlite::Error> {
         let conn = self.lock().await;
         // ADR-018：会话权威存储迁出 VFS（pre-release 本地数据，直接重建）。
         // 1) 清理 VFS 中残留的会话条目（旧 JSONL 伪文件）；

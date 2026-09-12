@@ -11,7 +11,8 @@ use axum::{
 };
 use serde::Serialize;
 
-use tianyan::agent::{RoleRegistry, RoleSource, RoleStatus, RoleStore};
+use tianyan::agent::{RoleRegistry, RoleSource, RoleStatus};
+use tianyan::role_store::RoleStore;
 
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;

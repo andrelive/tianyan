@@ -16,7 +16,7 @@ pub mod stats;
 pub mod trace;
 pub mod usage;
 
-use crate::common::error::{Result, TianyanError};
+use crate::common::error::Result;
 use crate::db::sqlite_db::SqliteDb;
 
 /// 统一数据库门面。
@@ -29,24 +29,20 @@ pub struct Database {
 impl Database {
     /// 打开（或创建）数据库（schema 由调用方 [`Database::init_schemas`] 初始化）。
     pub fn open(path: PathBuf) -> Result<Arc<Self>> {
-        let sqlite = SqliteDb::open(path)
-            .map_err(|e| TianyanError::Custom(format!("db: 打开数据库失败：{e}")))?;
+        // 错误前缀由 SqliteDb 单点携带（此处不再重复包装）
+        let sqlite = SqliteDb::open(path)?;
         Ok(Arc::new(Self { sqlite }))
     }
 
     /// 打开内存数据库（测试用）。
     pub fn open_in_memory() -> Result<Arc<Self>> {
-        let sqlite = SqliteDb::open_in_memory()
-            .map_err(|e| TianyanError::Custom(format!("db: 打开内存数据库失败：{e}")))?;
+        let sqlite = SqliteDb::open_in_memory()?;
         Ok(Arc::new(Self { sqlite }))
     }
 
     /// 初始化全部 schema（启动时调用一次；集中管理入口）。
     pub async fn init_schemas(&self) -> Result<()> {
-        self.sqlite
-            .init_all_schemas()
-            .await
-            .map_err(|e| TianyanError::Custom(format!("db: 初始化 schema 失败：{e}")))
+        self.sqlite.init_all_schemas().await
     }
 
     /// 底层连接（统一访问点；与 SqliteDb.lock 语义一致，组件迁移后方法不变）。

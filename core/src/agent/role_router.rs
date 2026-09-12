@@ -10,11 +10,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::agent::role_store::RoleStore;
 use crate::agent::roles::RoleStatus;
 use crate::common::error::Result;
 use crate::common::types::Embedding;
 use crate::model::EmbeddingService;
+use crate::role_store::RoleStore;
 
 /// 角色匹配建议。
 #[derive(Debug, Clone)]
