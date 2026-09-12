@@ -4,7 +4,18 @@ import { useResource } from '@/hooks/use-resource';
 import { Spinner } from '@/components/ui/Spinner';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';
 import type { SchedulerTaskStatus } from '@/lib/types';
-import { RefreshCw, Gauge, Wrench, Zap, FileText, Search, Clock, Terminal, Loader2, CircleX } from 'lucide-react';
+import {
+  RefreshCw,
+  Gauge,
+  Wrench,
+  Zap,
+  FileText,
+  Search,
+  Clock,
+  Terminal,
+  Loader2,
+  CircleX,
+} from 'lucide-react';
 
 /** 距上次执行秒数 → 中文显示（null = 从未执行）。 */
 function formatLastRun(secs: number | null): string {
@@ -184,11 +195,7 @@ export default function InsightsPanel() {
                   </div>
                   <div className="divide-y divide-[var(--color-border)]">
                     {tasks.map((task) => (
-                      <TaskRow
-                        key={task.id}
-                        task={task}
-                        executing={executingTaskId === task.id}
-                      />
+                      <TaskRow key={task.id} task={task} executing={executingTaskId === task.id} />
                     ))}
                   </div>
                 </div>

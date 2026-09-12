@@ -285,149 +285,146 @@ export default function SessionList() {
           无任何会话时仍显示默认工作区分组，可 hover「＋」新建会话 */}
       <div ref={sessionListRef} className="flex-1 overflow-y-auto px-2 py-2">
         <div className="flex flex-col gap-1.5" role="list" aria-label="会话列表">
-            {groupsToRender.map(([workdir, groupSessions]) => {
-              const collapsed = collapsedGroups.has(workdir);
-              const label = groupLabel(workdir);
-              return (
-                <div key={workdir || '__default_ws__'} className="flex flex-col gap-0.5">
-                  {/* 分组行：折叠/展开 + hover「＋」新建该目录会话 */}
+          {groupsToRender.map(([workdir, groupSessions]) => {
+            const collapsed = collapsedGroups.has(workdir);
+            const label = groupLabel(workdir);
+            return (
+              <div key={workdir || '__default_ws__'} className="flex flex-col gap-0.5">
+                {/* 分组行：折叠/展开 + hover「＋」新建该目录会话 */}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => toggleGroup(workdir)}
+                  onMouseEnter={() => setHoveredGroup(workdir)}
+                  onMouseLeave={() => setHoveredGroup(null)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      toggleGroup(workdir);
+                    }
+                  }}
+                  aria-label={`分组 ${label}`}
+                  className="group flex items-center gap-1 px-1.5 py-1 rounded-md cursor-pointer hover:bg-[var(--color-bg-hover)]"
+                >
+                  {collapsed ? (
+                    <ChevronRight
+                      size={12}
+                      className="shrink-0 text-[var(--color-text-tertiary)]"
+                    />
+                  ) : (
+                    <ChevronDown size={12} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                  )}
+                  <FolderOpen size={13} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                  <span
+                    className="text-xs font-medium text-[var(--color-text-secondary)] truncate"
+                    title={workdir || undefined}
+                  >
+                    {label}
+                  </span>
+                  <span className="text-[10px] text-[var(--color-text-tertiary)] shrink-0">
+                    {groupSessions.length}
+                  </span>
+                  {hoveredGroup === workdir && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        startNewSession(workdir);
+                      }}
+                      title={`在 ${label} 新建会话`}
+                      aria-label={`在 ${label} 新建会话`}
+                      className="ml-auto p-0.5 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] shrink-0"
+                    >
+                      <Plus size={12} />
+                    </button>
+                  )}
+                </div>
+
+                {/* 进行中的新会话占位条目（归属当前分组） */}
+                {!collapsed && pendingGroupKey === workdir && (
                   <div
                     role="button"
-                    tabIndex={0}
-                    onClick={() => toggleGroup(workdir)}
-                    onMouseEnter={() => setHoveredGroup(workdir)}
-                    onMouseLeave={() => setHoveredGroup(null)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        toggleGroup(workdir);
-                      }
-                    }}
-                    aria-label={`分组 ${label}`}
-                    className="group flex items-center gap-1 px-1.5 py-1 rounded-md cursor-pointer hover:bg-[var(--color-bg-hover)]"
+                    aria-label="新会话"
+                    title="新会话（发送首条消息后创建）"
+                    className="flex items-center gap-2 pl-7 pr-2 py-1.5 rounded-md text-sm border border-dashed border-blue-400/50 bg-blue-50/40 dark:bg-blue-900/10 text-blue-700 dark:text-blue-300"
                   >
-                    {collapsed ? (
-                      <ChevronRight
-                        size={12}
-                        className="shrink-0 text-[var(--color-text-tertiary)]"
-                      />
-                    ) : (
-                      <ChevronDown
-                        size={12}
-                        className="shrink-0 text-[var(--color-text-tertiary)]"
-                      />
-                    )}
-                    <FolderOpen size={13} className="shrink-0 text-[var(--color-text-tertiary)]" />
-                    <span
-                      className="text-xs font-medium text-[var(--color-text-secondary)] truncate"
-                      title={workdir || undefined}
-                    >
-                      {label}
-                    </span>
-                    <span className="text-[10px] text-[var(--color-text-tertiary)] shrink-0">
-                      {groupSessions.length}
-                    </span>
-                    {hoveredGroup === workdir && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          startNewSession(workdir);
-                        }}
-                        title={`在 ${label} 新建会话`}
-                        aria-label={`在 ${label} 新建会话`}
-                        className="ml-auto p-0.5 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] shrink-0"
-                      >
-                        <Plus size={12} />
-                      </button>
-                    )}
+                    <MessageSquare size={13} className="shrink-0" />
+                    <span className="truncate">新会话</span>
                   </div>
+                )}
 
-                  {/* 进行中的新会话占位条目（归属当前分组） */}
-                  {!collapsed && pendingGroupKey === workdir && (
-                    <div
-                      role="button"
-                      aria-label="新会话"
-                      title="新会话（发送首条消息后创建）"
-                      className="flex items-center gap-2 pl-7 pr-2 py-1.5 rounded-md text-sm border border-dashed border-blue-400/50 bg-blue-50/40 dark:bg-blue-900/10 text-blue-700 dark:text-blue-300"
-                    >
-                      <MessageSquare size={13} className="shrink-0" />
-                      <span className="truncate">新会话</span>
-                    </div>
-                  )}
-
-                  {/* 会话子项（二级） */}
-                  {!collapsed &&
-                    groupSessions.map((session) => {
-                      return (
-                        <div
-                          key={session.id}
-                          role="button"
-                          tabIndex={0}
-                          data-session-id={session.id}
-                          onClick={() => handleSelectSession(session)}
-                          onKeyDown={handleKeyDown}
-                          onMouseEnter={() => setHoveredSession(session.id)}
-                          onMouseLeave={() => setHoveredSession(null)}
-                          aria-label={session.title || '新对话'}
-                          aria-current={currentSessionId === session.id ? 'true' : undefined}
-                          className={`group flex items-center justify-between pl-7 pr-2 py-1.5 rounded-md cursor-pointer text-sm transition-colors ${
-                            currentSessionId === session.id
-                              ? 'bg-blue-50 dark:bg-blue-900/20'
-                              : 'hover:bg-[var(--color-bg-hover)]'
-                          }`}
-                        >
-                          <div className="flex-1 min-w-0">
-                            {editingSessionId === session.id ? (
-                              <input
-                                ref={editInputRef}
-                                value={editingTitle}
-                                onChange={(e) => setEditingTitle(e.target.value)}
-                                onBlur={handleRenameSubmit}
-                                onKeyDown={(e) => {
-                                  e.stopPropagation();
-                                  if (e.key === 'Enter') {
-                                    handleRenameSubmit();
-                                  } else if (e.key === 'Escape') {
-                                    setEditingSessionId(null);
-                                  }
-                                }}
-                                className="w-full px-1 py-0.5 text-sm rounded border border-blue-500 bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] outline-none"
-                                aria-label="编辑会话标题"
-                              />
-                            ) : (
-                              <p
-                                onDoubleClick={(e) => handleStartRename(e, session)}
-                                title="双击重命名"
-                                className={`truncate ${
-                                  currentSessionId === session.id
-                                    ? 'text-blue-700 dark:text-blue-300 font-medium'
-                                    : 'text-[var(--color-text-primary)]'
-                                }`}
-                              >
-                                {session.title || '新对话'}
-                              </p>
-                            )}
-                            <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
-                              {formatRelativeTime(session.updated_at)}
-                            </p>
-                          </div>
-                          {hoveredSession === session.id && (
-                            <button
-                              onClick={(e) => handleDeleteClick(e, session)}
-                              className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-[var(--color-text-tertiary)] hover:text-red-500 shrink-0"
-                              title="删除会话"
-                              aria-label={`删除会话 ${session.title || '新对话'}`}
+                {/* 会话子项（二级） */}
+                {!collapsed &&
+                  groupSessions.map((session) => {
+                    return (
+                      <div
+                        key={session.id}
+                        role="button"
+                        tabIndex={0}
+                        data-session-id={session.id}
+                        onClick={() => handleSelectSession(session)}
+                        onKeyDown={handleKeyDown}
+                        onMouseEnter={() => setHoveredSession(session.id)}
+                        onMouseLeave={() => setHoveredSession(null)}
+                        aria-label={session.title || '新对话'}
+                        aria-current={currentSessionId === session.id ? 'true' : undefined}
+                        className={`group flex items-center justify-between pl-7 pr-2 py-1.5 rounded-md cursor-pointer text-sm transition-colors ${
+                          currentSessionId === session.id
+                            ? 'bg-blue-50 dark:bg-blue-900/20'
+                            : 'hover:bg-[var(--color-bg-hover)]'
+                        }`}
+                      >
+                        <div className="flex-1 min-w-0">
+                          {editingSessionId === session.id ? (
+                            <input
+                              ref={editInputRef}
+                              value={editingTitle}
+                              onChange={(e) => setEditingTitle(e.target.value)}
+                              onBlur={handleRenameSubmit}
+                              onKeyDown={(e) => {
+                                e.stopPropagation();
+                                if (e.key === 'Enter') {
+                                  handleRenameSubmit();
+                                } else if (e.key === 'Escape') {
+                                  setEditingSessionId(null);
+                                }
+                              }}
+                              className="w-full px-1 py-0.5 text-sm rounded border border-blue-500 bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] outline-none"
+                              aria-label="编辑会话标题"
+                            />
+                          ) : (
+                            <p
+                              onDoubleClick={(e) => handleStartRename(e, session)}
+                              title="双击重命名"
+                              className={`truncate ${
+                                currentSessionId === session.id
+                                  ? 'text-blue-700 dark:text-blue-300 font-medium'
+                                  : 'text-[var(--color-text-primary)]'
+                              }`}
                             >
-                              <Trash2 size={14} />
-                            </button>
+                              {session.title || '新对话'}
+                            </p>
                           )}
+                          <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+                            {formatRelativeTime(session.updated_at)}
+                          </p>
                         </div>
-                      );
-                    })}
-                </div>
-              );
-            })}
+                        {hoveredSession === session.id && (
+                          <button
+                            onClick={(e) => handleDeleteClick(e, session)}
+                            className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/30 text-[var(--color-text-tertiary)] hover:text-red-500 shrink-0"
+                            title="删除会话"
+                            aria-label={`删除会话 ${session.title || '新对话'}`}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+            );
+          })}
         </div>
       </div>
 

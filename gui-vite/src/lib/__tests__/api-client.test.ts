@@ -354,6 +354,3 @@ describe('apiPostMultipart', () => {
     await expect(apiPostMultipart('/upload-error', formData)).rejects.toThrow(ApiError);
   });
 });
-
-
-

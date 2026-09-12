@@ -112,7 +112,9 @@ describe('useSessionHistory', () => {
     );
     useAppStore
       .getState()
-      .setSessionMessages('session-1', [{ role: 'user', segments: [{ type: 'text', text: 'old' }], timestamp: '' }]);
+      .setSessionMessages('session-1', [
+        { role: 'user', segments: [{ type: 'text', text: 'old' }], timestamp: '' },
+      ]);
 
     const { result } = renderHook(() => useSessionHistory('session-1'));
     await act(async () => {
@@ -140,5 +142,3 @@ describe('useSessionHistory', () => {
     expect(subscribeCalls).toHaveBeenCalledTimes(1);
   });
 });
-
-

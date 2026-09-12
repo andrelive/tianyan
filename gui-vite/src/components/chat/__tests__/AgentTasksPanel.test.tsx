@@ -49,9 +49,7 @@ describe('AgentTasksPanel', () => {
       { ...mockTasks[0], status: 'completed' as const, completed_at: 1754399900000 },
       { ...mockTasks[1], status: 'cancelled' as const, completed_at: 1754399900001 },
     ];
-    server.use(
-      http.get('*/api/v1/tasks', () => HttpResponse.json(finished)),
-    );
+    server.use(http.get('*/api/v1/tasks', () => HttpResponse.json(finished)));
     render(<AgentTasksPanel sessionId="session-1" />);
     await waitFor(() => {
       expect(screen.getByText(/已结束 2/)).toBeInTheDocument();
@@ -74,9 +72,7 @@ describe('AgentTasksPanel', () => {
         completed_at: 1754399900002,
       },
     ];
-    server.use(
-      http.get('*/api/v1/tasks', () => HttpResponse.json(failed)),
-    );
+    server.use(http.get('*/api/v1/tasks', () => HttpResponse.json(failed)));
     render(<AgentTasksPanel sessionId="session-1" />);
     await waitFor(() => {
       expect(screen.getByText('失败（退出码 1）')).toBeInTheDocument();

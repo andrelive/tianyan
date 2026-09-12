@@ -7,7 +7,9 @@ param(
     [switch]$Verbose = $false
 )
 
-$ErrorActionPreference = "Stop"
+# native 命令的 stderr 不是错误（PowerShell 5.1 会把 cargo 的 warning 当
+# NativeCommandError 抛出 → 打包脚本误判失败）；成败以 `$LASTEXITCODE` 为准。
+$ErrorActionPreference = "Continue"
 
 # Color output functions
 function Write-Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Cyan }

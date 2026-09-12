@@ -135,80 +135,80 @@ export default function SkillsPanel() {
               </div>
             ) : (
               visibleSkills.map((skill) => (
-              <button
-                key={skill.id}
-                onClick={() => setSelectedSkillId(skill.id)}
-                className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                  selectedSkillId === skill.id
-                    ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
-                    : 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="min-w-0 flex-1">
-                    <p className="font-medium truncate">{skill.name}</p>
-                    <p className="text-xs text-[var(--color-text-tertiary)] truncate mt-0.5">
-                      {skill.description}
-                    </p>
-                    {(() => {
-                      const st = skillStats(skill.id);
-                      if (!st || st.total_calls === 0) return null;
-                      return (
-                        <p className="text-xs mt-1 flex items-center gap-2">
-                          <span className="text-[var(--color-text-tertiary)]">
-                            调用 {st.total_calls} 次
-                          </span>
-                          <span className="text-[var(--color-text-tertiary)]/70">
-                            均值 {Math.round(st.avg_time_ms)}ms
-                          </span>
-                          {st.total_calls - st.success_calls > 0 && (
-                            <span
-                              className="text-red-600 dark:text-red-400"
-                              title="handler 执行异常（存储/模型故障），非方法论本身成败"
-                            >
-                              执行异常 {st.total_calls - st.success_calls} 次
-                            </span>
-                          )}
-                        </p>
-                      );
-                    })()}
-                    {(() => {
-                      const rv = stats?.reviews.find((r) => r.skill_id === skill.id);
-                      if (!rv) return null;
-                      return (
-                        <p className="text-xs mt-1 flex items-center gap-2">
-                          <span className="text-[var(--color-text-tertiary)]">使用复审</span>
-                          <span
-                            className={
-                              rv.score >= 7
-                                ? 'text-emerald-600 dark:text-emerald-400'
-                                : rv.score >= 4
-                                  ? 'text-amber-600 dark:text-amber-400'
-                                  : 'text-red-600 dark:text-red-400'
-                            }
-                          >
-                            {rv.score}/10
-                          </span>
-                          {rv.verdict === 'negative' && (
-                            <span className="text-red-600 dark:text-red-400">效果不佳</span>
-                          )}
-                        </p>
-                      );
-                    })()}
-                    {skill.updated_at && (
-                      <p className="text-xs text-[var(--color-text-tertiary)]/80 flex items-center gap-1 mt-1">
-                        <Clock size={11} />
-                        更新于 {formatDateTime(skill.updated_at)}
+                <button
+                  key={skill.id}
+                  onClick={() => setSelectedSkillId(skill.id)}
+                  className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                    selectedSkillId === skill.id
+                      ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                      : 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium truncate">{skill.name}</p>
+                      <p className="text-xs text-[var(--color-text-tertiary)] truncate mt-0.5">
+                        {skill.description}
                       </p>
+                      {(() => {
+                        const st = skillStats(skill.id);
+                        if (!st || st.total_calls === 0) return null;
+                        return (
+                          <p className="text-xs mt-1 flex items-center gap-2">
+                            <span className="text-[var(--color-text-tertiary)]">
+                              调用 {st.total_calls} 次
+                            </span>
+                            <span className="text-[var(--color-text-tertiary)]/70">
+                              均值 {Math.round(st.avg_time_ms)}ms
+                            </span>
+                            {st.total_calls - st.success_calls > 0 && (
+                              <span
+                                className="text-red-600 dark:text-red-400"
+                                title="handler 执行异常（存储/模型故障），非方法论本身成败"
+                              >
+                                执行异常 {st.total_calls - st.success_calls} 次
+                              </span>
+                            )}
+                          </p>
+                        );
+                      })()}
+                      {(() => {
+                        const rv = stats?.reviews.find((r) => r.skill_id === skill.id);
+                        if (!rv) return null;
+                        return (
+                          <p className="text-xs mt-1 flex items-center gap-2">
+                            <span className="text-[var(--color-text-tertiary)]">使用复审</span>
+                            <span
+                              className={
+                                rv.score >= 7
+                                  ? 'text-emerald-600 dark:text-emerald-400'
+                                  : rv.score >= 4
+                                    ? 'text-amber-600 dark:text-amber-400'
+                                    : 'text-red-600 dark:text-red-400'
+                              }
+                            >
+                              {rv.score}/10
+                            </span>
+                            {rv.verdict === 'negative' && (
+                              <span className="text-red-600 dark:text-red-400">效果不佳</span>
+                            )}
+                          </p>
+                        );
+                      })()}
+                      {skill.updated_at && (
+                        <p className="text-xs text-[var(--color-text-tertiary)]/80 flex items-center gap-1 mt-1">
+                          <Clock size={11} />
+                          更新于 {formatDateTime(skill.updated_at)}
+                        </p>
+                      )}
+                    </div>
+                    {selectedSkillId === skill.id && (
+                      <ChevronRight size={14} className="shrink-0 ml-2 text-blue-500" />
                     )}
                   </div>
-                  {selectedSkillId === skill.id && (
-                    <ChevronRight size={14} className="shrink-0 ml-2 text-blue-500" />
-                  )}
-                </div>
-              </button>
-            ))
-          )}
+                </button>
+              ))
+            )}
           </div>
         }
         detail={

@@ -72,8 +72,7 @@ export default function ChatInput({
 
   // 压缩期间禁发：压缩请求与发送并发会基于分叉状态组装上下文
   // （textarea/send 一并禁用，与 streaming 语义一致）
-  const canSend =
-    !isStreaming && !compressing && (input.trim().length > 0 || images.length > 0);
+  const canSend = !isStreaming && !compressing && (input.trim().length > 0 || images.length > 0);
 
   const addImages = useCallback(async (files: FileList | File[]) => {
     const list = Array.from(files).filter((f) => f.type.startsWith('image/'));

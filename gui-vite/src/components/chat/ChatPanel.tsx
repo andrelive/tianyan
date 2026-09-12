@@ -310,7 +310,7 @@ export default function ChatPanel() {
         useAppStore.getState().setNewSessionWorkspace(null);
       }
     },
-    [addMessage, startStream],
+    [addMessage, startStream, setLastRollbackMessageId],
   );
 
   const handleRollback = useCallback(

@@ -29,7 +29,7 @@
 | `knowledge_ingest` | knowledge | 将文件或目录导入知识库：解析、摘要（L0 摘要 + L1 概览）、建立语义索引。接受文件或目录路径，可选指定分类。 |
 | `list_dir` | search | 列出单层目录下的条目。目录带尾部 '/'。支持 offset/limit 分页。 |
 | `lsp` | code | 查询指定文件的语言服务器：goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation。返回结构化结果。 |
-| `read_file` | read | 读取指定路径文件的完整文本内容（纯内容，无行号/哈希前缀）。每行内容完整返回，不截断；行数/字节体量由 offset/limit 分页与统一字节预算兜底。内容匹配编辑（apply_edit）直接按内容定位，无需行号。 |
+| `read_file` | read | 读取文本文件内容（纯内容，无行号/哈希前缀）。默认返回前 2000 行（单次输出上限约 50KB，超出部分截断并附「使用 offset 继续」提示）。大文件请**按需读取**：用 offset/limit 指定行范围（1 起始行号），建议先用 grep/symbol_outline 定位目标区域再按范围精读；结果含 total_lines/total_bytes 与实际窗口（showing）。内容匹配编辑（apply_edit）直接按内容定位，无需行号。 |
 | `run_tests` | terminal | 运行测试命令（如 cargo test）并返回结果。 |
 | `search_vfs` | search | 语义化搜索整个 VFS（所有命名空间：文档/记忆/规则/技能），向量 RRF 融合。返回每条结果的 abstract + overview + URI。需要完整详情时用 vfs_read 加载。发现可用技能、检索相关规则/记忆也用本工具。 |
 | `self_check` | generic | 查询自身运行指标：执行次数、成功率、token 消耗、管线失败、规则有效性。当用户质疑你的表现时用于自我反思。 |

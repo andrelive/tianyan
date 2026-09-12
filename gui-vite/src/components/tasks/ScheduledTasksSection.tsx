@@ -78,7 +78,8 @@ export default function ScheduledTasksSection() {
     }
   };
 
-  const field = 'w-full px-2.5 py-1.5 text-xs rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500';
+  const field =
+    'w-full px-2.5 py-1.5 text-xs rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500';
 
   return (
     <section className="space-y-2">
@@ -99,7 +100,13 @@ export default function ScheduledTasksSection() {
 
       {showForm && (
         <div className="space-y-2 p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
-          <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="任务名称" className={field} aria-label="任务名称" />
+          <input
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            placeholder="任务名称"
+            className={field}
+            aria-label="任务名称"
+          />
           <select
             value={form.preset}
             onChange={(e) => setForm({ ...form, preset: Number(e.target.value) })}
@@ -123,8 +130,21 @@ export default function ScheduledTasksSection() {
               aria-label="自定义间隔秒数"
             />
           )}
-          <input value={form.workspace} onChange={(e) => setForm({ ...form, workspace: e.target.value })} placeholder="工作目录（绝对路径）" className={field} aria-label="工作目录" />
-          <textarea value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })} placeholder="给智能体的指令（每次触发让它做的事）" rows={2} className={field + ' resize-y'} aria-label="指令" />
+          <input
+            value={form.workspace}
+            onChange={(e) => setForm({ ...form, workspace: e.target.value })}
+            placeholder="工作目录（绝对路径）"
+            className={field}
+            aria-label="工作目录"
+          />
+          <textarea
+            value={form.prompt}
+            onChange={(e) => setForm({ ...form, prompt: e.target.value })}
+            placeholder="给智能体的指令（每次触发让它做的事）"
+            rows={2}
+            className={field + ' resize-y'}
+            aria-label="指令"
+          />
           <button
             type="button"
             onClick={() => void handleCreate()}
@@ -146,23 +166,37 @@ export default function ScheduledTasksSection() {
       ) : (
         <div className="space-y-2">
           {tasks.map((t) => (
-            <div key={t.id} className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+            <div
+              key={t.id}
+              className="p-3 rounded-lg bg-[var(--color-bg-secondary)] border border-[var(--color-border)]"
+            >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-[var(--color-text-primary)] truncate">{t.name}</span>
-                    <span className="px-1.5 py-0.5 text-[10px] rounded bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">{formatInterval(t.interval_secs)}</span>
+                    <span className="text-sm font-medium text-[var(--color-text-primary)] truncate">
+                      {t.name}
+                    </span>
+                    <span className="px-1.5 py-0.5 text-[10px] rounded bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                      {formatInterval(t.interval_secs)}
+                    </span>
                   </div>
-                  <p className="text-xs text-[var(--color-text-tertiary)] truncate mt-0.5" title={t.workspace}>
+                  <p
+                    className="text-xs text-[var(--color-text-tertiary)] truncate mt-0.5"
+                    title={t.workspace}
+                  >
                     工作区: {t.workspace || '(默认)'}
                   </p>
-                  <p className="text-xs text-[var(--color-text-secondary)] mt-0.5 line-clamp-2">{t.prompt}</p>
+                  <p className="text-xs text-[var(--color-text-secondary)] mt-0.5 line-clamp-2">
+                    {t.prompt}
+                  </p>
                   <div className="flex items-center gap-2 mt-1 text-[10px] text-[var(--color-text-tertiary)]">
                     <span>下次(约): {t.next_run_at ? formatTimestamp(t.next_run_at) : '待定'}</span>
                     {t.last_run_at !== null && <span>上次: {formatTimestamp(t.last_run_at)}</span>}
                   </div>
                   {t.last_result && (
-                    <p className="text-xs text-[var(--color-text-tertiary)] mt-1 break-words line-clamp-2">结果: {t.last_result}</p>
+                    <p className="text-xs text-[var(--color-text-tertiary)] mt-1 break-words line-clamp-2">
+                      结果: {t.last_result}
+                    </p>
                   )}
                 </div>
                 <button

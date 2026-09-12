@@ -8,7 +8,15 @@ function msg(overrides: Partial<ChatMessage>): ChatMessage {
 
 describe('lastMessageUsage', () => {
   it('returns null when no message carries usage', () => {
-    expect(lastMessageUsage([msg({ segments: [{ type: 'text', text: 'a' }] }), msg({ segments: [{ type: 'text', text: 'b' }] })], 32000)).toBeNull();
+    expect(
+      lastMessageUsage(
+        [
+          msg({ segments: [{ type: 'text', text: 'a' }] }),
+          msg({ segments: [{ type: 'text', text: 'b' }] }),
+        ],
+        32000,
+      ),
+    ).toBeNull();
   });
 
   it('picks the last message with prompt_tokens > 0 (skip trailing zero-usage)', () => {
@@ -73,7 +81,11 @@ describe('lastMessageUsage', () => {
   it('prefers a newer assistant message over an old compression marker', () => {
     const messages = [
       msg({ usage: { prompt_tokens: 1000, completion_tokens: 200, total_tokens: 1200 } }),
-      msg({ role: 'user', compression_marker: true, usage: { prompt_tokens: 50000, completion_tokens: 800, total_tokens: 50800 } }),
+      msg({
+        role: 'user',
+        compression_marker: true,
+        usage: { prompt_tokens: 50000, completion_tokens: 800, total_tokens: 50800 },
+      }),
       // 压缩后新请求完成：新 assistant 带压缩后真实占用
       msg({ usage: { prompt_tokens: 2500, completion_tokens: 500, total_tokens: 3000 } }),
     ];
@@ -117,7 +129,12 @@ describe('sumSessionUsage', () => {
       msg({
         role: 'user',
         compression_marker: true,
-        usage: { prompt_tokens: 2000, completion_tokens: 500, total_tokens: 2500, cache_read: 1500 },
+        usage: {
+          prompt_tokens: 2000,
+          completion_tokens: 500,
+          total_tokens: 2500,
+          cache_read: 1500,
+        },
       }),
     ];
     // 压缩请求消耗（2000 输入 / 500 输出 / 1500 缓存）计入会话累计：
@@ -129,4 +146,3 @@ describe('sumSessionUsage', () => {
     });
   });
 });
-

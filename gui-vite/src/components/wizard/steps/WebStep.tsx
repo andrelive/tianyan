@@ -20,8 +20,8 @@ export default function WebStep({
     <div>
       <h2 className="text-lg font-semibold text-[var(--color-text-primary)] mb-1">Web 搜索配置</h2>
       <p className="text-xs text-[var(--color-text-tertiary)] mb-5">
-        web_search / web_fetch 工具的网络配置。默认 DuckDuckGo 零配置可用；
-        国内网络不可达时可切换 Bing（cn.bing.com 可达）或自托管 SearXNG。
+        web_search / web_fetch 工具的网络配置。默认 DuckDuckGo 零配置可用； 国内网络不可达时可切换
+        Bing（cn.bing.com 可达）或自托管 SearXNG。
       </p>
 
       <div className="space-y-4">

@@ -62,8 +62,7 @@ export default function SessionTodoPanel({ sessionId }: { sessionId: string | nu
           <ListTodo size={12} />
           <span>待办</span>
           <span className="text-[var(--color-text-tertiary)]">
-            {todos.length} 项
-            {inProgress > 0 && `（进行中 ${inProgress}）`}
+            {todos.length} 项{inProgress > 0 && `（进行中 ${inProgress}）`}
             {doneCount > 0 && ` · 完成 ${doneCount}`}
           </span>
           <span className="flex-1" />
@@ -107,7 +106,10 @@ export default function SessionTodoPanel({ sessionId }: { sessionId: string | nu
                 ) : t.status === 'in_progress' ? (
                   <Loader2 size={12} className="shrink-0 animate-spin text-blue-500" />
                 ) : t.status === 'pending' ? (
-                  <CircleDotDashed size={12} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                  <CircleDotDashed
+                    size={12}
+                    className="shrink-0 text-[var(--color-text-tertiary)]"
+                  />
                 ) : (
                   <Circle size={12} className="shrink-0 text-[var(--color-text-tertiary)]" />
                 )}

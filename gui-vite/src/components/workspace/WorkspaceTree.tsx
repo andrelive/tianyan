@@ -132,7 +132,9 @@ function WorkspaceNode({
       ) : (
         <File size={14} className="shrink-0 text-[var(--color-text-tertiary)]" />
       )}
-      <span className={`truncate min-w-0 ${loadFailed ? 'text-red-600 dark:text-red-400' : 'text-[var(--color-text-primary)]'}`}>
+      <span
+        className={`truncate min-w-0 ${loadFailed ? 'text-red-600 dark:text-red-400' : 'text-[var(--color-text-primary)]'}`}
+      >
         {node.data.name}
       </span>
       {loadFailed && <AlertCircle size={12} className="shrink-0 text-red-500" />}

@@ -132,7 +132,9 @@ describe('handleChatStreamEvent', () => {
     expect(assistants).toHaveLength(2);
     // 新开的 assistant 在 system 通知之后（思考不插到通知前面）
     const sysIdx = msgs.findIndex((m) => m.id === 'msg-sys-1');
-    const wakeIdx = msgs.findIndex((m) => m.role === 'assistant' && m.thinking === '后台命令已完成，汇总结果');
+    const wakeIdx = msgs.findIndex(
+      (m) => m.role === 'assistant' && m.thinking === '后台命令已完成，汇总结果',
+    );
     expect(wakeIdx).toBeGreaterThan(sysIdx);
   });
 

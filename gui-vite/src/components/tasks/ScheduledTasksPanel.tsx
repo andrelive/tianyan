@@ -16,8 +16,8 @@ export default function ScheduledTasksPanel() {
       <div className="flex-1 overflow-y-auto p-6">
         <div className="max-w-3xl mx-auto">
           <p className="text-xs text-[var(--color-text-tertiary)] mb-4">
-            到点自动调用智能体在指定工作区完成指令（cron 周期）。可让智能体用
-            schedule_task 工具创建，或在此手动管理。
+            到点自动调用智能体在指定工作区完成指令（cron 周期）。可让智能体用 schedule_task
+            工具创建，或在此手动管理。
           </p>
           <ScheduledTasksSection />
         </div>

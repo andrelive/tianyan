@@ -150,7 +150,12 @@ describe('ChatPanel', () => {
     // 模拟统一事件通道（GET /events）到达：用户消息边界 + 增量 + 完成
     handleChatStreamEvent(
       streamEvent({
-        message: { id: 'msg-user', role: 'user', segments: [{ type: 'text', text: '测试发送' }], timestamp: '' },
+        message: {
+          id: 'msg-user',
+          role: 'user',
+          segments: [{ type: 'text', text: '测试发送' }],
+          timestamp: '',
+        },
         chunk_type: 'message',
       }),
     );
@@ -185,23 +190,20 @@ describe('ChatPanel', () => {
 
     // 模拟订阅快照帧到达（服务端 /events/subscribe 已 mock 返回 ok）
     act(() => {
-      applySnapshot(
-        'session-1',
-        [
-          {
-            id: 'msg-1',
-            role: 'user',
-            segments: [{ type: 'text', text: '你好' }],
-            timestamp: '2026-07-23T10:00:00Z',
-          },
-          {
-            id: 'msg-2',
-            role: 'assistant',
-            segments: [{ type: 'text', text: '你好！我是天演，有什么可以帮助你的？' }],
-            timestamp: '2026-07-23T10:00:05Z',
-          },
-        ],
-      );
+      applySnapshot('session-1', [
+        {
+          id: 'msg-1',
+          role: 'user',
+          segments: [{ type: 'text', text: '你好' }],
+          timestamp: '2026-07-23T10:00:00Z',
+        },
+        {
+          id: 'msg-2',
+          role: 'assistant',
+          segments: [{ type: 'text', text: '你好！我是天演，有什么可以帮助你的？' }],
+          timestamp: '2026-07-23T10:00:05Z',
+        },
+      ]);
     });
 
     await waitFor(() => {
@@ -440,7 +442,12 @@ describe('ChatPanel', () => {
             id: 'cmp_123',
             role: 'user',
             compression_marker: true,
-            segments: [{ type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\n测试\n[摘要结束]' }],
+            segments: [
+              {
+                type: 'text',
+                text: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\n测试\n[摘要结束]',
+              },
+            ],
             timestamp: new Date().toISOString(),
           },
         });
@@ -495,7 +502,12 @@ describe('ChatPanel', () => {
             id: 'cmp_123',
             role: 'user',
             compression_marker: true,
-            segments: [{ type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\n测试\n[摘要结束]' }],
+            segments: [
+              {
+                type: 'text',
+                text: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\n测试\n[摘要结束]',
+              },
+            ],
             timestamp: new Date().toISOString(),
           },
         });
@@ -515,7 +527,6 @@ describe('ChatPanel', () => {
       expect(msgs.filter((m) => m.id === 'cmp_123')).toHaveLength(1);
     });
   });
-
 
   it('shows 无需压缩 when the backend reports nothing to compress', async () => {
     const user = userEvent.setup();
@@ -654,7 +665,3 @@ describe('ChatPanel', () => {
     expect(screen.getByText('先分析再想想')).toBeInTheDocument();
   });
 });
-
-
-
-

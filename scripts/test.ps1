@@ -10,7 +10,11 @@ param(
     [string]$Level = "all"
 )
 
-$ErrorActionPreference = "Stop"
+# native 命令的 stderr 不是错误：PowerShell 5.1 在 Stop 模式下会把 cargo 的
+# warning/进度输出（写 stderr）当成 NativeCommandError 抛出，脚本被**误判失败**
+# （实测：cargo check 被标记 failed，实际已 Finished）。关键步骤一律用显式
+# `$LASTEXITCODE` 检查（见下文每步 throw），故这里用 Continue。
+$ErrorActionPreference = "Continue"
 
 Write-Host "========== 天演自动化测试 ==========" -ForegroundColor Cyan
 Write-Host "测试层级: $Level" -ForegroundColor Yellow

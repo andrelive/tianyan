@@ -241,7 +241,10 @@ describe('SettingsPanel tabs', () => {
       model: 'gpt-4o',
     });
     await waitFor(() => {
-      expect(useAppStore.getState().toasts[0]).toMatchObject({ message: 'openai 连接成功', type: 'success' });
+      expect(useAppStore.getState().toasts[0]).toMatchObject({
+        message: 'openai 连接成功',
+        type: 'success',
+      });
     });
   });
 

@@ -3,11 +3,7 @@ import { fetchMemories } from '@/lib/api-client';
 import { useResource } from '@/hooks/use-resource';
 import { usePolling } from '@/hooks/use-polling';
 import type { MemoryEntry } from '@/lib/types';
-import {
-  buildMemoryTree,
-  countLeaves,
-  type MemoryTreeNode,
-} from '@/lib/memory-tree';
+import { buildMemoryTree, countLeaves, type MemoryTreeNode } from '@/lib/memory-tree';
 import { MemoryStick, Folder, Star, RefreshCw, ChevronRight, ChevronDown } from 'lucide-react';
 import { Spinner } from '@/components/ui/Spinner';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';

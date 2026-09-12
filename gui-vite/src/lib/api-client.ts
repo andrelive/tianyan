@@ -549,10 +549,7 @@ export async function cancelTask(taskId: string): Promise<CancelTaskResponse> {
 
 /** 显式取消进行中的对话流（「停止」按钮；跑完再取语义下断线不取消，仅主动停止）。 */
 export async function cancelChatStream(sessionId: string): Promise<{ status: string }> {
-  return apiPost<{ status: string }>(
-    `/chat/streams/${encodeURIComponent(sessionId)}/cancel`,
-    {},
-  );
+  return apiPost<{ status: string }>(`/chat/streams/${encodeURIComponent(sessionId)}/cancel`, {});
 }
 
 // ========== Scheduled Agent Tasks API ==========

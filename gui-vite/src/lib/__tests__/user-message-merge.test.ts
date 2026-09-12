@@ -53,12 +53,22 @@ describe('用户消息边界事件（applyServerMessage，ADR-031）', () => {
       sessionMessages: {
         'session-1': [
           userMsg('msg_1', '第一轮问题'),
-          { id: 'msg_2', role: 'assistant', segments: [{ type: 'text', text: '第一轮回答' }], timestamp: '' },
+          {
+            id: 'msg_2',
+            role: 'assistant',
+            segments: [{ type: 'text', text: '第一轮回答' }],
+            timestamp: '',
+          },
         ],
       },
       messages: [
         userMsg('msg_1', '第一轮问题'),
-        { id: 'msg_2', role: 'assistant', segments: [{ type: 'text', text: '第一轮回答' }], timestamp: '' },
+        {
+          id: 'msg_2',
+          role: 'assistant',
+          segments: [{ type: 'text', text: '第一轮回答' }],
+          timestamp: '',
+        },
       ],
     });
 
@@ -86,9 +96,25 @@ describe('用户消息边界事件（applyServerMessage，ADR-031）', () => {
             role: 'assistant',
             segments: [
               { type: 'text', text: '第一轮正文' },
-              { type: 'tool', tool_call: { id: 'call_1', name: 'execute_command', arguments: '{}', presentation: 'terminal' } },
+              {
+                type: 'tool',
+                tool_call: {
+                  id: 'call_1',
+                  name: 'execute_command',
+                  arguments: '{}',
+                  presentation: 'terminal',
+                },
+              },
             ],
-            tool_calls: [{ id: 'call_1', name: 'execute_command', arguments: '{}', presentation: 'terminal', result: 'ok' }],
+            tool_calls: [
+              {
+                id: 'call_1',
+                name: 'execute_command',
+                arguments: '{}',
+                presentation: 'terminal',
+                result: 'ok',
+              },
+            ],
             timestamp: '',
           },
           {
@@ -106,9 +132,25 @@ describe('用户消息边界事件（applyServerMessage，ADR-031）', () => {
           role: 'assistant',
           segments: [
             { type: 'text', text: '第一轮正文' },
-            { type: 'tool', tool_call: { id: 'call_1', name: 'execute_command', arguments: '{}', presentation: 'terminal' } },
+            {
+              type: 'tool',
+              tool_call: {
+                id: 'call_1',
+                name: 'execute_command',
+                arguments: '{}',
+                presentation: 'terminal',
+              },
+            },
           ],
-          tool_calls: [{ id: 'call_1', name: 'execute_command', arguments: '{}', presentation: 'terminal', result: 'ok' }],
+          tool_calls: [
+            {
+              id: 'call_1',
+              name: 'execute_command',
+              arguments: '{}',
+              presentation: 'terminal',
+              result: 'ok',
+            },
+          ],
           timestamp: '',
         },
         {

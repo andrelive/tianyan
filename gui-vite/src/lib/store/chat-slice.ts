@@ -58,7 +58,11 @@ export interface ChatSlice {
   applyServerMessage: (sessionId: string | null, msg: ChatMessage) => void;
   /** 用户消息落库确认（ADR-031）：比对 user_message_id 把本地乐观消息
    * 替换为服务端真实 id（user_message_id 字段删除——生命周期结束）。 */
-  confirmUserMessageId: (sessionId: string | null, userMessageId: string, messageId: string) => void;
+  confirmUserMessageId: (
+    sessionId: string | null,
+    userMessageId: string,
+    messageId: string,
+  ) => void;
   addMessage: (message: ChatMessage, sessionId?: string | null) => void;
   updateLastMessage: (delta: string, sessionId?: string | null) => void;
   appendSkillCalls: (calls: SkillCallInfo[], sessionId?: string | null) => void;
@@ -425,7 +429,10 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
           // SegmentBlocks 渲染本就合并相邻 thinking 段，展示不变）
           const nextSegments =
             lastSeg && lastSeg.type === 'thinking'
-              ? [...segments.slice(0, -1), { type: 'thinking' as const, text: lastSeg.text + delta }]
+              ? [
+                  ...segments.slice(0, -1),
+                  { type: 'thinking' as const, text: lastSeg.text + delta },
+                ]
               : [...segments, { type: 'thinking' as const, text: delta }];
           return {
             ...m,

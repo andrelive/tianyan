@@ -95,11 +95,7 @@ export default function Sidebar() {
         </div>
         {NAV_ITEMS.map((item) => {
           const badge =
-            item.id === 'approval'
-              ? pendingApprovals
-              : item.id === 'chat'
-                ? runningTasks
-                : 0;
+            item.id === 'approval' ? pendingApprovals : item.id === 'chat' ? runningTasks : 0;
           return (
             <button
               key={item.id}

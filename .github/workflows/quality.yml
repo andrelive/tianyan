@@ -1,0 +1,55 @@
+name: Quality
+
+# 质量门禁（0.3.15 恢复）：CI 之前只有 release.yml（tag 发布构建），
+# 无任何测试检查——本地 `scripts/test.ps1` 的 lint 段又因 clippy 存量告警
+# 与脚本自身缺陷（PowerShell 把 cargo stderr 当错误）长期不可达。
+# 本工作流覆盖当前已达标的三类门禁：
+#   1. Rust fmt
+#   2. Rust 单元测试（core/server/mcp；tauri 需桌面依赖，排除）
+#   3. 工具目录 freshness（运行时注册 = schema 唯一真相源）
+#   4. 前端 lint（eslint + prettier）/ typecheck / vitest
+# 待办：clippy 存量告警清零后，追加 `cargo clippy -- -D warnings` 步骤。
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: gui-vite/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rust fmt check
+        run: cargo fmt --all -- --check
+
+      - name: Rust unit tests (core/server/mcp)
+        run: cargo test --workspace --exclude tianyan-tauri --lib
+
+      - name: Tool catalog freshness
+        run: cargo run -q -p tianyan-core --example tool_catalog -- --check
+
+      - name: Frontend deps
+        run: cd gui-vite && npm ci
+
+      - name: Frontend lint (eslint + prettier)
+        run: cd gui-vite && npm run lint
+
+      - name: Frontend typecheck
+        run: cd gui-vite && npm run typecheck
+
+      - name: Frontend unit tests
+        run: cd gui-vite && npm test

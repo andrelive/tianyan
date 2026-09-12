@@ -183,7 +183,10 @@ describe('SettingsPanel', () => {
 
     // 保存成功提示
     await waitFor(() => {
-      expect(useAppStore.getState().toasts[0]).toMatchObject({ message: '设置已保存', type: 'success' });
+      expect(useAppStore.getState().toasts[0]).toMatchObject({
+        message: '设置已保存',
+        type: 'success',
+      });
     });
   });
 });

@@ -141,7 +141,9 @@ describe('useAppStore', () => {
 
   it('addMessage appends a message', () => {
     useAppStore.getState().addMessage({ role: 'user', segments: [{ type: 'text', text: 'q' }] });
-    useAppStore.getState().addMessage({ role: 'assistant', segments: [{ type: 'text', text: 'a' }] });
+    useAppStore
+      .getState()
+      .addMessage({ role: 'assistant', segments: [{ type: 'text', text: 'a' }] });
 
     const msgs = useAppStore.getState().messages;
     expect(msgs).toHaveLength(2);
@@ -487,8 +489,3 @@ describe('useAppStore', () => {
     ]);
   });
 });
-
-
-
-
-

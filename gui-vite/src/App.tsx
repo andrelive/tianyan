@@ -105,16 +105,86 @@ function App() {
             <Route path="/" element={<Navigate to="/chat" replace />} />
             <Route path="/chat" element={<SessionPage />} />
             <Route path="/chat/:sessionId" element={<SessionPage />} />
-            <Route path="/skills" element={<RouteErrorBoundary><SkillsPanel /></RouteErrorBoundary>} />
-            <Route path="/roles" element={<RouteErrorBoundary><RolesPanel /></RouteErrorBoundary>} />
-            <Route path="/tools" element={<RouteErrorBoundary><ToolsPanel /></RouteErrorBoundary>} />
-            <Route path="/knowledge" element={<RouteErrorBoundary><KnowledgePanel /></RouteErrorBoundary>} />
-            <Route path="/workspace" element={<RouteErrorBoundary><WorkspacePanel /></RouteErrorBoundary>} />
-            <Route path="/memory" element={<RouteErrorBoundary><MemoryPanel /></RouteErrorBoundary>} />
-            <Route path="/approval" element={<RouteErrorBoundary><ApprovalPanel /></RouteErrorBoundary>} />
-            <Route path="/scheduled" element={<RouteErrorBoundary><ScheduledTasksPanel /></RouteErrorBoundary>} />
-            <Route path="/insights" element={<RouteErrorBoundary><InsightsPanel /></RouteErrorBoundary>} />
-            <Route path="/settings" element={<RouteErrorBoundary><SettingsPanel /></RouteErrorBoundary>} />
+            <Route
+              path="/skills"
+              element={
+                <RouteErrorBoundary>
+                  <SkillsPanel />
+                </RouteErrorBoundary>
+              }
+            />
+            <Route
+              path="/roles"
+              element={
+                <RouteErrorBoundary>
+                  <RolesPanel />
+                </RouteErrorBoundary>
+              }
+            />
+            <Route
+              path="/tools"
+              element={
+                <RouteErrorBoundary>
+                  <ToolsPanel />
+                </RouteErrorBoundary>
+              }
+            />
+            <Route
+              path="/knowledge"
+              element={
+                <RouteErrorBoundary>
+                  <KnowledgePanel />
+                </RouteErrorBoundary>
+              }
+            />
+            <Route
+              path="/workspace"
+              element={
+                <RouteErrorBoundary>
+                  <WorkspacePanel />
+                </RouteErrorBoundary>
+              }
+            />
+            <Route
+              path="/memory"
+              element={
+                <RouteErrorBoundary>
+                  <MemoryPanel />
+                </RouteErrorBoundary>
+              }
+            />
+            <Route
+              path="/approval"
+              element={
+                <RouteErrorBoundary>
+                  <ApprovalPanel />
+                </RouteErrorBoundary>
+              }
+            />
+            <Route
+              path="/scheduled"
+              element={
+                <RouteErrorBoundary>
+                  <ScheduledTasksPanel />
+                </RouteErrorBoundary>
+              }
+            />
+            <Route
+              path="/insights"
+              element={
+                <RouteErrorBoundary>
+                  <InsightsPanel />
+                </RouteErrorBoundary>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <RouteErrorBoundary>
+                  <SettingsPanel />
+                </RouteErrorBoundary>
+              }
+            />
           </Route>
         </Routes>
       </Suspense>

@@ -8,7 +8,11 @@ describe('MessageBubble interrupted hint', () => {
   it('shows the persistent interrupted hint (no interactive button)', () => {
     render(
       <MessageBubble
-        message={{ role: 'assistant', segments: [{ type: 'text', text: '对了一半。本地快速通路：不是' }], interrupted: true }}
+        message={{
+          role: 'assistant',
+          segments: [{ type: 'text', text: '对了一半。本地快速通路：不是' }],
+          interrupted: true,
+        }}
         index={0}
         isStreaming={false}
         onRollback={() => {}}
@@ -30,9 +34,7 @@ describe('MessageBubble history rendering', () => {
       segments: [{ type: 'text', text: '请写一篇 800 字的文章' }],
       timestamp: '2026-09-06T00:00:00Z',
     };
-    render(
-      <MessageBubble message={userMsg} index={0} isStreaming={false} onRollback={() => {}} />,
-    );
+    render(<MessageBubble message={userMsg} index={0} isStreaming={false} onRollback={() => {}} />);
     expect(screen.getByText('请写一篇 800 字的文章')).toBeInTheDocument();
   });
 
@@ -219,4 +221,3 @@ describe('MessageBubble thinking block', () => {
     expect(screen.getByText(/第一步：分析需求/)).toBeInTheDocument();
   });
 });
-

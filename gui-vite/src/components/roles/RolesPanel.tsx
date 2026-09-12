@@ -2,7 +2,16 @@ import { useState } from 'react';
 import { useResource } from '@/hooks/use-resource';
 import { toErrorMessage } from '@/lib/errors';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
-import { AlertCircle, Bot, ChevronRight, Loader2, RotateCcw, Search, Trash2, Users } from 'lucide-react';
+import {
+  AlertCircle,
+  Bot,
+  ChevronRight,
+  Loader2,
+  RotateCcw,
+  Search,
+  Trash2,
+  Users,
+} from 'lucide-react';
 import ListDetailPanel from '@/components/ui/ListDetailPanel';
 import { deleteRole, getRoleDetail, getRoles, getRolesStats, resetRole } from '@/lib/api-client';
 import { formatTimestamp } from '@/lib/utils';
@@ -239,57 +248,57 @@ export default function RolesPanel() {
               </div>
             ) : (
               visibleRoles.map((role) => (
-              <button
-                key={role.name}
-                onClick={() => setSelectedName(role.name)}
-                className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                  selectedName === role.name
-                    ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
-                    : 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <p className="font-medium truncate">{role.name}</p>
-                      <span
-                        className={`shrink-0 inline-block px-1.5 py-0.5 text-[10px] rounded-full border ${SOURCE_STYLE[role.source] ?? ''}`}
-                      >
-                        {SOURCE_LABEL[role.source] ?? role.source}
-                      </span>
-                      {role.status === 'experimental' && (
-                        <span className="shrink-0 inline-block px-1.5 py-0.5 text-[10px] rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
-                          试验性
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-[var(--color-text-tertiary)] truncate mt-0.5">
-                      {role.purpose}
-                    </p>
-                    <p className="text-xs text-[var(--color-text-tertiary)]/80 mt-1 flex items-center gap-2 flex-wrap">
-                      <span>v{role.version}</span>
-                      <span>
-                        {role.tool_count == null ? '工具不限' : `${role.tool_count} 工具`}
-                      </span>
-                      {role.usage && role.usage.calls > 0 && (
+                <button
+                  key={role.name}
+                  onClick={() => setSelectedName(role.name)}
+                  className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                    selectedName === role.name
+                      ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                      : 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="font-medium truncate">{role.name}</p>
                         <span
-                          className={
-                            role.usage.success_rate < 0.5 ? 'text-red-600 dark:text-red-400' : ''
-                          }
-                          title={`${role.usage.success}/${role.usage.calls} 次成功`}
+                          className={`shrink-0 inline-block px-1.5 py-0.5 text-[10px] rounded-full border ${SOURCE_STYLE[role.source] ?? ''}`}
                         >
-                          成功率 {Math.round(role.usage.success_rate * 100)}%
+                          {SOURCE_LABEL[role.source] ?? role.source}
                         </span>
-                      )}
-                    </p>
+                        {role.status === 'experimental' && (
+                          <span className="shrink-0 inline-block px-1.5 py-0.5 text-[10px] rounded-full bg-amber-50 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                            试验性
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-[var(--color-text-tertiary)] truncate mt-0.5">
+                        {role.purpose}
+                      </p>
+                      <p className="text-xs text-[var(--color-text-tertiary)]/80 mt-1 flex items-center gap-2 flex-wrap">
+                        <span>v{role.version}</span>
+                        <span>
+                          {role.tool_count == null ? '工具不限' : `${role.tool_count} 工具`}
+                        </span>
+                        {role.usage && role.usage.calls > 0 && (
+                          <span
+                            className={
+                              role.usage.success_rate < 0.5 ? 'text-red-600 dark:text-red-400' : ''
+                            }
+                            title={`${role.usage.success}/${role.usage.calls} 次成功`}
+                          >
+                            成功率 {Math.round(role.usage.success_rate * 100)}%
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                    {selectedName === role.name && (
+                      <ChevronRight size={14} className="shrink-0 ml-2 text-blue-500" />
+                    )}
                   </div>
-                  {selectedName === role.name && (
-                    <ChevronRight size={14} className="shrink-0 ml-2 text-blue-500" />
-                  )}
-                </div>
-              </button>
-            ))
-          )}
+                </button>
+              ))
+            )}
           </div>
         }
         detail={

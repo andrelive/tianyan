@@ -57,7 +57,7 @@ describe('SessionList', () => {
       sessions: [],
       currentSessionId: null,
       currentView: 'chat',
-            messages: [],
+      messages: [],
       toasts: [],
     });
   });

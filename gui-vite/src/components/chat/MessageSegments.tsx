@@ -4,7 +4,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import remarkGfm from 'remark-gfm';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { ChevronDown, ChevronRight } from 'lucide-react';
-import type { MessageSegment, ToolCallEvent, ToolCallWithResult } from '@/lib/types';
+import type { MessageSegment, ToolCallWithResult } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import ToolCallCard from './ToolCallCard';
 
@@ -47,10 +47,7 @@ export function ThinkingBlock({ text }: { text: string }) {
         <span className="shrink-0">思考过程</span>
         {/* 收起态横幅：在 header 上单行展示思考输出（最新一行，流式期间实时更新） */}
         {!open && banner !== '' && (
-          <span
-            className="flex-1 min-w-0 truncate pl-2 text-left italic opacity-70"
-            title={banner}
-          >
+          <span className="flex-1 min-w-0 truncate pl-2 text-left italic opacity-70" title={banner}>
             {banner}
           </span>
         )}
@@ -199,29 +196,4 @@ export function SegmentBlocks({
     }
   }
   return <>{blocks}</>;
-}
-
-/**
- * 流式事件 → 段（共享映射规则：主对话流与子智能体流的事件协议同构）。
- *
- * 主对话流（增量写 store）与子智能体流（整条消息事件批量转换）的事件
- * 语义不同，无法共用同一归约器；但「事件 → 段」的映射规则是同一套，
- * 收敛在此处——新段类型只改这一处。
- */
-export function streamEventToSegment(ev: {
-  chunk_type?: string;
-  thinking?: string | null;
-  delta?: string;
-  tool_call?: ToolCallEvent | null;
-}): MessageSegment | null {
-  if (ev.chunk_type === 'thought' && ev.thinking) {
-    return { type: 'thinking', text: ev.thinking };
-  }
-  if (ev.chunk_type === 'answer' && ev.delta) {
-    return { type: 'text', text: ev.delta };
-  }
-  if (ev.chunk_type === 'tool_call' && ev.tool_call) {
-    return { type: 'tool', tool_call: ev.tool_call };
-  }
-  return null;
 }

@@ -24,7 +24,11 @@ describe('tool call rendering regression', () => {
   it('renders tool cards for history messages with tool_calls', () => {
     // 历史消息携带服务端权威 segments（ADR-019：tool 段 + 结果挂 tool_calls）
     const messages: ChatMessage[] = [
-      { role: 'user', segments: [{ type: 'text', text: '查一下' }], timestamp: new Date().toISOString() },
+      {
+        role: 'user',
+        segments: [{ type: 'text', text: '查一下' }],
+        timestamp: new Date().toISOString(),
+      },
       {
         role: 'assistant',
         timestamp: new Date().toISOString(),
@@ -60,4 +64,3 @@ describe('tool call rendering regression', () => {
     // expect(screen.getByText('{"count":1,"results":[]}')).toBeInTheDocument();
   });
 });
-

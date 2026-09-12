@@ -21,7 +21,11 @@ export default function ToolsPanel() {
   });
   const tools = data?.tools ?? [];
   const q = query.trim().toLowerCase();
-  const filtered = q ? tools.filter((t) => t.name.toLowerCase().includes(q) || (t.description ?? '').toLowerCase().includes(q)) : tools;
+  const filtered = q
+    ? tools.filter(
+        (t) => t.name.toLowerCase().includes(q) || (t.description ?? '').toLowerCase().includes(q),
+      )
+    : tools;
 
   return (
     <div className="flex h-full">
