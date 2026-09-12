@@ -563,13 +563,10 @@ impl Agent {
             .map(|m| m.prompt_side_tokens())
             .unwrap_or(0);
 
-        let Some(summary_sm) = self
+        let summary_sm = self
             .context_pipeline
             .compress_for_session(&conversation, session_id, recent_input_tokens, force)
-            .await
-        else {
-            return None;
-        };
+            .await?;
         let summary_sm = summary_sm.clone();
 
         if let Err(e) = self
@@ -1176,10 +1173,7 @@ mod tests {
             Arc::new(mock),
             ToolRegistry::new(SecurityPolicy::default()),
             Arc::new(MockSessionManager),
-            AgentLoopConfig {
-                max_turns: 5,
-                ..Default::default()
-            },
+            AgentLoopConfig { max_turns: 5 },
         );
         Agent::new(
             "test-model".to_string(),
@@ -1591,7 +1585,7 @@ mod tests {
         // （相同上下文重试结果相同），整轮重试只浪费 LLM 调用，已移除。
         // mock 应只被调用 2 次（loop 内部空响应重试一次），不再整轮重试。
         let mut mock = MockChatService::new();
-        let call = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let call_clone = call.clone();
         mock.expect_chat_completion_stream().returning(move |_| {
             call_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1715,7 +1709,7 @@ mod tests {
                 // 第一个 chunk：立即可见；第二个 chunk 前挂起（模拟长轮）
                 tx.send(Ok(stream_chunk_finish(""))).await.ok();
                 // 挂起等待（不发送更多）——轮不结束，消费端仍应收到首 chunk
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
             });
             Ok(rx)
         });
@@ -1730,7 +1724,7 @@ mod tests {
 
         // 轮仍在进行（handle 未完成）：消费端必须能在 1s 内收到事件
         // （证明事件在轮进行中实时流出，而非积压到轮结束）。
-        let chunk = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+        let chunk = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("唤醒轮事件应在轮进行中到达（1s 内）");
         assert!(chunk.is_some(), "应收到流式事件");
@@ -1764,7 +1758,7 @@ mod tests {
             tokio::spawn(async move {
                 // 首 chunk 立即可见；随后挂起（模拟长轮——轮不结束）
                 tx.send(Ok(stream_chunk_finish("汇总中"))).await.ok();
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
             });
             Ok(rx)
         });
@@ -1772,7 +1766,7 @@ mod tests {
         let collect = Arc::new(Collect(StdMutex::new(0)));
 
         // 模拟 wake 入口：转发器先建（通道即消费），sender 交给轮。
-        let mapper: crate::agent::StreamEventMapper =
+        let mapper: StreamEventMapper =
             Arc::new(|_sid, chunk| Some(serde_json::json!({ "delta": chunk.delta })));
         let (sender, forward_handle) = spawn_stream_forwarder("session-1", mapper, collect.clone());
         let turn = tokio::spawn(async move {
@@ -1780,9 +1774,9 @@ mod tests {
         });
 
         // 轮仍在进行：送达计数应在 1s 内增长（证明事件实时流出，未积压）
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         while *collect.0.lock().unwrap() == 0 && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
             *collect.0.lock().unwrap() > 0,

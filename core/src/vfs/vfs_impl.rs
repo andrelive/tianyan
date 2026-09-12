@@ -597,7 +597,7 @@ impl VirtualFileSystem for VirtualFileSystemImpl {
             match self.update_summary_vectors(&uri, &abs, &ov).await {
                 Ok(()) => {
                     done += 1;
-                    if done % 50 == 0 {
+                    if done.is_multiple_of(50) {
                         tracing::info!("向量回填进度：{done}/{total}");
                     }
                 }

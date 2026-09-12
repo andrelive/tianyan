@@ -489,7 +489,6 @@ impl AgentBuilder {
             session_manager.clone(),
             AgentLoopConfig {
                 max_turns: self.config.max_turns,
-                ..Default::default()
             },
         );
         // 结构化 Trace（G6）：轮次 span

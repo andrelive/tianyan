@@ -203,7 +203,7 @@ pub struct ToolRegistry {
     /// 后台命令管理器（execute_command(background)；查询/终止经统一 task_status / task_cancel）。
     pub(crate) command_tasks: Arc<crate::executor::CommandManager>,
     /// 后台命令日志目录（with_command_logs_dir 存值；重建 CommandManager 时保留）。
-    command_logs_dir: Option<std::path::PathBuf>,
+    command_logs_dir: Option<PathBuf>,
     /// 后台命令并发上限（ADR-026：可配置；重建 CommandManager 时保留）。
     command_concurrency: usize,
     /// 子智能体消息流事件通道（ADR-026：面板实时流式；None 时静默）。

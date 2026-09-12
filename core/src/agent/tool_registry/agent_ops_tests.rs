@@ -6,17 +6,17 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::agent::{AgentRole, RoleRegistry};
-use crate::common::types::{FunctionCall, StructuredMessage, TokenUsage, ToolCall, ToolCallType};
+use crate::common::types::{StructuredMessage, TokenUsage};
 use crate::config::AgentRolesConfig;
 use crate::config::{ApprovalMode, SafetyMode};
 use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
 use crate::executor::SecurityPolicy;
 use crate::model::types::{
-    ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChunkChoice,
-    DeltaContent, ToolCallDelta, ToolCallFunctionDelta,
+    ChatCompletionChunk, ChatCompletionRequest, ChunkChoice, DeltaContent, ToolCallDelta,
+    ToolCallFunctionDelta,
 };
 use crate::model::MockChatService;
 use crate::observability::AgentMetrics;
@@ -401,18 +401,11 @@ async fn test_call_skill_not_configured() {
 async fn test_call_skill_reads_vfs_content() {
     // call_skill = 读 VFS 技能文档（L0 摘要 + L2 详情），无执行语义。
     let vfs = Arc::new(crate::test_utils::MockVfs::new());
-    let skill_uri = crate::common::types::TianyanUri::new(
-        crate::common::types::ContextNamespace::Skill,
-        vec!["planning".to_string()],
-    );
+    let skill_uri = TianyanUri::new(ContextNamespace::Skill, vec!["planning".to_string()]);
+    vfs.set_content(&skill_uri, ContentLevel::Abstract, "计划阶段软约束");
     vfs.set_content(
         &skill_uri,
-        crate::common::types::ContentLevel::Abstract,
-        "计划阶段软约束",
-    );
-    vfs.set_content(
-        &skill_uri,
-        crate::common::types::ContentLevel::Detail,
+        ContentLevel::Detail,
         "# 计划阶段\n\n只读研究，输出结构化计划",
     );
     let registry = ToolRegistry::new(default_strict_policy()).with_vfs(vfs);
@@ -534,61 +527,6 @@ async fn test_delegate_to_agent_success() {
     assert_eq!(result["result"].as_str().unwrap(), "final answer");
     assert_eq!(result["submitted"].as_bool(), Some(true));
     assert_eq!(result["total_tokens"].as_u64(), Some(0));
-}
-
-/// 构造返回固定文本的 ChatCompletionResponse。
-fn chat_response(content: &str) -> ChatCompletionResponse {
-    ChatCompletionResponse {
-        id: "test".to_string(),
-        object: "chat.completion".to_string(),
-        created: 0,
-        model: "test-model".to_string(),
-        choices: vec![ChatChoice {
-            index: 0,
-            message: Message::assistant(content),
-            finish_reason: Some("stop".to_string()),
-        }],
-        usage: TokenUsage::default(),
-    }
-}
-
-/// 构造子代理显式提交结果的响应（submit_result 工具调用）。
-fn submit_response(result: &str) -> ChatCompletionResponse {
-    chat_response_with_tools(vec![ToolCall {
-        id: "s1".to_string(),
-        call_type: ToolCallType::Function,
-        function: FunctionCall {
-            name: "submit_result".to_string(),
-            arguments: format!(r#"{{"result":"{result}"}}"#),
-        },
-    }])
-}
-
-/// 构造返回工具调用的 ChatCompletionResponse（content 为空）。
-fn chat_response_with_tools(calls: Vec<ToolCall>) -> ChatCompletionResponse {
-    ChatCompletionResponse {
-        id: "test".to_string(),
-        object: "chat.completion".to_string(),
-        created: 0,
-        model: "test-model".to_string(),
-        choices: vec![ChatChoice {
-            index: 0,
-            message: Message::assistant_with_tools("", calls),
-            finish_reason: Some("tool_calls".to_string()),
-        }],
-        usage: TokenUsage::default(),
-    }
-}
-
-fn delegate_call(id: &str, task: &str) -> ToolCall {
-    ToolCall {
-        id: id.to_string(),
-        call_type: ToolCallType::Function,
-        function: FunctionCall {
-            name: "delegate_to_agent".to_string(),
-            arguments: format!(r#"{{"task":"{task}"}}"#),
-        },
-    }
 }
 
 #[tokio::test]
@@ -847,18 +785,6 @@ fn role_registry_with(model: Option<&str>, tools: Option<Vec<&str>>) -> Arc<Role
         },
     );
     Arc::new(RoleRegistry::from_config(&AgentRolesConfig { roles }))
-}
-
-/// 构造任意工具调用。
-fn tool_call(id: &str, name: &str, args: &str) -> ToolCall {
-    ToolCall {
-        id: id.to_string(),
-        call_type: ToolCallType::Function,
-        function: FunctionCall {
-            name: name.to_string(),
-            arguments: args.to_string(),
-        },
-    }
 }
 
 #[tokio::test]

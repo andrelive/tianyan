@@ -414,6 +414,7 @@ mod tests {
         // 独占打开（不共享）→ 删除必然失败
         let mut locked = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .share_mode(0)
             .open(old_dir.join("locked.db"))

@@ -12,21 +12,32 @@ use crate::db::Database;
 /// 技能调用统计数据。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SkillStats {
+    /// 技能 ID（已剥离 `skill:` 前缀，与注册名对齐）。
     pub skill_id: String,
+    /// 累计调用次数。
     pub total_calls: u64,
+    /// 成功调用次数。
     pub success_calls: u64,
+    /// 成功率（success_calls / total_calls）。
     pub success_rate: f64,
+    /// 平均耗时（毫秒）。
     pub avg_time_ms: f64,
+    /// 最后一次调用时间（RFC3339）。
     pub last_called_at: String,
 }
 
 /// 文档访问统计数据。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DocStats {
+    /// 文档 URI。
     pub uri: String,
+    /// 检索命中次数。
     pub search_hits: u64,
+    /// 详情加载次数。
     pub detail_loads: u64,
+    /// 平均相关性得分。
     pub avg_score: f64,
+    /// 最后一次命中时间（RFC3339）。
     pub last_hit_at: String,
 }
 
@@ -36,6 +47,7 @@ pub struct StatsRepo {
 }
 
 impl StatsRepo {
+    /// 创建统计仓储（共享 `Database` 单连接）。
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
     }
@@ -103,6 +115,7 @@ impl StatsRepo {
         }
     }
 
+    /// 查询调用次数最多的技能（按调用次数倒序；只统计 `skill:` 前缀键）。
     pub async fn query_top_skills(&self, limit: usize) -> Vec<SkillStats> {
         let conn = self.db.lock().await;
         let mut stmt = match conn.prepare(

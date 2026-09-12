@@ -48,6 +48,94 @@ impl BroadcastingSessionManager {
     }
 }
 
+#[async_trait]
+impl SessionManager for BroadcastingSessionManager {
+    async fn create_session(&self, id: &str, message: Message) -> Result<Session> {
+        self.inner.create_session(id, message).await
+    }
+
+    async fn get_session(&self, id: &str) -> Result<Option<Session>> {
+        self.inner.get_session(id).await
+    }
+
+    async fn update_session(&self, session: &Session) -> Result<()> {
+        self.inner.update_session(session).await
+    }
+
+    async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()> {
+        // ADR-031：消息不再广播（落库即广播移除）——主会话消息经流式增量 +
+        // 完成事件（user_message_id 确认 / pump 边界）到前端；后台任务完成
+        // 通知只落库（LLM 上下文），唤醒轮流式化后输出经 chat_stream 推送。
+        // 快照恢复（订阅端点）与断点对齐（fetch）仍是权威兜底。
+        self.inner
+            .add_structured_message(session_id, msg.clone())
+            .await?;
+        // 边界消息（System 通知 / 压缩点）：落库后补发 chat_stream 边界事件
+        //（与用户消息边界事件同构）——前端 applyServerMessage 按 id 查重追加，
+        // 实时可见。压缩点是会话时序链上的普通节点（统一结构，不做区分）；
+        // 推送与快照/历史按 id 幂等收敛，不产生重复。压缩摘要为 user 锚定
+        //（模型侧角色），此处按 marker 判定——不能只按角色（会漏掉摘要）。
+        let is_boundary_message =
+            msg.role == tianyan::common::types::MessageRole::System || msg.compression_marker;
+        if is_boundary_message {
+            self.push_boundary_event(session_id, &msg);
+        }
+        Ok(())
+    }
+
+    async fn add_structured_message_no_fts(
+        &self,
+        session_id: &str,
+        msg: StructuredMessage,
+    ) -> Result<()> {
+        // ADR-030/031：子智能体消息落库（不索引 FTS，ADR-026）——不再广播；
+        // 任务面板展开 = 订阅快照 + 活跃流 reducer（chat_stream 事件带
+        // session_id=task_id 路由）。
+        self.inner
+            .add_structured_message_no_fts(session_id, msg)
+            .await
+    }
+
+    async fn rewrite_messages(
+        &self,
+        session_id: &str,
+        messages: &[StructuredMessage],
+    ) -> Result<()> {
+        self.inner.rewrite_messages(session_id, messages).await
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<Session>> {
+        self.inner.list_sessions().await
+    }
+
+    async fn delete_session(&self, id: &str) -> Result<()> {
+        self.inner.delete_session(id).await
+    }
+}
+
+impl BroadcastingSessionManager {
+    /// 把边界消息（System 通知 / 压缩点）转成 chat_stream 事件推入统一通道。
+    ///
+    /// 复用 `map_chunk_to_event`（Message chunk → ChatStreamEvent 同构转换），
+    /// 与主会话流式路径同一映射；无订阅者时静默丢弃（broadcast 语义）。
+    fn push_boundary_event(&self, session_id: &str, msg: &StructuredMessage) {
+        let chunk = tianyan::agent::AgentStreamChunk {
+            delta: String::new(),
+            chunk_type: tianyan::agent::StreamChunkType::Message,
+            message: Some(msg.clone()),
+            ..Default::default()
+        };
+        let event =
+            crate::api::chat::services::map_chunk_to_event(chunk, "system-notify", session_id, 0);
+        if let Ok(mut payload) = serde_json::to_value(&event) {
+            payload["type"] = serde_json::json!("chat_stream");
+            if let Ok(json) = serde_json::to_string(&payload) {
+                let _ = self.event_tx.send(json);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -228,93 +316,5 @@ mod tests {
         assert_eq!(inner.calls.lock().unwrap().len(), 1);
         let timeout = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
         assert!(timeout.is_err(), "assistant 消息不应推送事件");
-    }
-}
-
-#[async_trait]
-impl SessionManager for BroadcastingSessionManager {
-    async fn create_session(&self, id: &str, message: Message) -> Result<Session> {
-        self.inner.create_session(id, message).await
-    }
-
-    async fn get_session(&self, id: &str) -> Result<Option<Session>> {
-        self.inner.get_session(id).await
-    }
-
-    async fn update_session(&self, session: &Session) -> Result<()> {
-        self.inner.update_session(session).await
-    }
-
-    async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()> {
-        // ADR-031：消息不再广播（落库即广播移除）——主会话消息经流式增量 +
-        // 完成事件（user_message_id 确认 / pump 边界）到前端；后台任务完成
-        // 通知只落库（LLM 上下文），唤醒轮流式化后输出经 chat_stream 推送。
-        // 快照恢复（订阅端点）与断点对齐（fetch）仍是权威兜底。
-        self.inner
-            .add_structured_message(session_id, msg.clone())
-            .await?;
-        // 边界消息（System 通知 / 压缩点）：落库后补发 chat_stream 边界事件
-        //（与用户消息边界事件同构）——前端 applyServerMessage 按 id 查重追加，
-        // 实时可见。压缩点是会话时序链上的普通节点（统一结构，不做区分）；
-        // 推送与快照/历史按 id 幂等收敛，不产生重复。压缩摘要为 user 锚定
-        //（模型侧角色），此处按 marker 判定——不能只按角色（会漏掉摘要）。
-        let is_boundary_message =
-            msg.role == tianyan::common::types::MessageRole::System || msg.compression_marker;
-        if is_boundary_message {
-            self.push_boundary_event(session_id, &msg);
-        }
-        Ok(())
-    }
-
-    async fn add_structured_message_no_fts(
-        &self,
-        session_id: &str,
-        msg: StructuredMessage,
-    ) -> Result<()> {
-        // ADR-030/031：子智能体消息落库（不索引 FTS，ADR-026）——不再广播；
-        // 任务面板展开 = 订阅快照 + 活跃流 reducer（chat_stream 事件带
-        // session_id=task_id 路由）。
-        self.inner
-            .add_structured_message_no_fts(session_id, msg)
-            .await
-    }
-
-    async fn rewrite_messages(
-        &self,
-        session_id: &str,
-        messages: &[StructuredMessage],
-    ) -> Result<()> {
-        self.inner.rewrite_messages(session_id, messages).await
-    }
-
-    async fn list_sessions(&self) -> Result<Vec<Session>> {
-        self.inner.list_sessions().await
-    }
-
-    async fn delete_session(&self, id: &str) -> Result<()> {
-        self.inner.delete_session(id).await
-    }
-}
-
-impl BroadcastingSessionManager {
-    /// 把边界消息（System 通知 / 压缩点）转成 chat_stream 事件推入统一通道。
-    ///
-    /// 复用 `map_chunk_to_event`（Message chunk → ChatStreamEvent 同构转换），
-    /// 与主会话流式路径同一映射；无订阅者时静默丢弃（broadcast 语义）。
-    fn push_boundary_event(&self, session_id: &str, msg: &StructuredMessage) {
-        let chunk = tianyan::agent::AgentStreamChunk {
-            delta: String::new(),
-            chunk_type: tianyan::agent::StreamChunkType::Message,
-            message: Some(msg.clone()),
-            ..Default::default()
-        };
-        let event =
-            crate::api::chat::services::map_chunk_to_event(chunk, "system-notify", session_id, 0);
-        if let Ok(mut payload) = serde_json::to_value(&event) {
-            payload["type"] = serde_json::json!("chat_stream");
-            if let Ok(json) = serde_json::to_string(&payload) {
-                let _ = self.event_tx.send(json);
-            }
-        }
     }
 }

@@ -11,17 +11,29 @@ use crate::db::Database;
 /// 一条执行 span（可持久化）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TraceSpan {
+    /// 自增主键。
     pub id: i64,
+    /// 会话 ID。
     pub session_id: String,
+    /// 任务 ID（子代理/后台任务链路；无则 None）。
     pub task_id: Option<String>,
+    /// 会话内轮次序号（无则 None）。
     pub turn_index: Option<i64>,
+    /// span 类型（turn / tool / task 等）。
     pub kind: String,
+    /// span 名称（工具名 / 阶段名）。
     pub name: String,
+    /// 详情（参数摘要 / 结果摘要）。
     pub detail: String,
+    /// 耗时（毫秒）。
     pub duration_ms: i64,
+    /// Token 用量（无则 0）。
     pub tokens: i64,
+    /// 是否成功。
     pub success: bool,
+    /// 错误信息（失败时）。
     pub error: Option<String>,
+    /// 记录时间（RFC3339）。
     pub recorded_at: String,
 }
 
@@ -31,6 +43,7 @@ pub struct TraceRepo {
 }
 
 impl TraceRepo {
+    /// 创建 Trace 仓储（共享 `Database` 单连接）。
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
     }

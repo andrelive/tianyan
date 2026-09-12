@@ -51,7 +51,7 @@ pub async fn list_memories_handler(
         }
     }
     // 浏览主序：最近更新的记忆在前
-    leaves.sort_by(|a, b| b.metadata.updated_at.cmp(&a.metadata.updated_at));
+    leaves.sort_by_key(|e| std::cmp::Reverse(e.metadata.updated_at));
 
     let mut memories = Vec::with_capacity(leaves.len());
     for entry in leaves {

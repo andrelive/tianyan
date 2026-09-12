@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::common::error::TianyanError;
 use crate::db::Database;
 
+/// 执行统计（按类别 / 工具 / 会话维度聚合）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ExecutionStat {
     /// 类别（file_operation / code_operation / ...）。
@@ -76,6 +77,9 @@ impl ExecutionRepo {
     }
 
     /// 插入一条执行记录（组件已组装派生字段；SQL 收敛于本层）。
+    ///
+    /// 注：字段较多（11 参数）；后续可收敛为 `ExecutionRecord` 参数对象（记入债务）。
+    #[allow(clippy::too_many_arguments)]
     pub async fn record(
         &self,
         session_id: &str,

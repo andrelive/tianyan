@@ -173,14 +173,6 @@ fn tool_name_from(task_description: &str) -> &str {
         .unwrap_or(task_description)
 }
 
-/// 解析 delegate_to_agent 记录中的 role 参数。
-
-/// 构造 WHERE 子句与参数（since_ts / category 可选）。
-
-/// 收集查询行（统一错误包装）。
-
-/// SQLite 查询错误包装（带 SQL 摘要，便于排查）。
-
 #[cfg(test)]
 mod tests {
     use super::*;

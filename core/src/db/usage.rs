@@ -33,12 +33,16 @@ pub struct UsageRepo {
 }
 
 impl UsageRepo {
+    /// 创建用量仓储（共享 `Database` 单连接）。
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
     }
 
     /// 记录一次 LLM 调用用量（非热路径：直接写 SQLite；失败仅告警）。
     /// 组件已从 TokenUsage 提取原始计数。
+    ///
+    /// 注：字段较多（8 参数）；后续可收敛为 `UsageRecord` 参数对象（记入债务）。
+    #[allow(clippy::too_many_arguments)]
     pub async fn record(
         &self,
         session_id: &str,

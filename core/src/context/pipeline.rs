@@ -375,10 +375,7 @@ mod tests {
     }
 
     /// 创建返回指定响应文本与 token 用量的 mock ChatService（压缩消耗入账测试用）。
-    fn mock_chat_with_usage(
-        response: &str,
-        usage: crate::common::types::TokenUsage,
-    ) -> Arc<dyn ChatService> {
+    fn mock_chat_with_usage(response: &str, usage: TokenUsage) -> Arc<dyn ChatService> {
         let response = response.to_string();
         let mut mock = MockChatService::new();
         mock.expect_chat_completion().returning(move |_| {
@@ -716,14 +713,14 @@ mod tests {
         ];
 
         // 非强制：100 token << 50 万阈值 → 不压缩
-        let mut conv_auto = conv.clone();
+        let conv_auto = conv.clone();
         let summary_auto = pipeline
             .compress_for_session(&conv_auto, "s1", 100, false)
             .await;
         assert!(summary_auto.is_none(), "自动压缩低于阈值不应触发");
 
         // 强制（手动）：跳过阈值 → 压缩
-        let mut conv_manual = conv.clone();
+        let conv_manual = conv.clone();
         let summary_manual = pipeline
             .compress_for_session(&conv_manual, "s1", 100, true)
             .await;
@@ -743,7 +740,7 @@ mod tests {
 
         // 模拟压缩请求的真实消耗：输入 5000（压缩前历史 + 提示词）、输出 800（摘要）、
         // 缓存命中 3000（压缩前历史前缀缓存）。
-        let summary_usage = crate::common::types::TokenUsage {
+        let summary_usage = TokenUsage {
             prompt_tokens: 5000,
             completion_tokens: 800,
             total_tokens: 5800,

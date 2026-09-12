@@ -13,12 +13,12 @@ use super::handlers::{cancel_task, get_task_log, list_tasks, stream_tasks, subsc
 ///
 /// `/events` 为统一事件流（ADR-028）：全局单连接，事件带 type 区分
 /// （message / task_status / command_output / 子代理消息），前端按
-/// session_id / task_id 路由。`/tasks/stream` 保留兼容。
+/// session_id / task_id 路由；旧路径 `/tasks/stream` 已删除
+/// （ADR-028/030：并入统一流）。
 /// `/events/subscribe` 为事件订阅（ADR-029）：快照恢复的触发点。
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/tasks", get(list_tasks))
-        .route("/tasks/stream", get(stream_tasks))
         .route("/events", get(stream_tasks))
         .route("/events/subscribe", post(subscribe_events))
         .route("/tasks/{id}/cancel", post(cancel_task))

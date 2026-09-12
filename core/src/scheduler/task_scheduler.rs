@@ -644,12 +644,12 @@ mod tests {
             chat.clone(),
             ExtractionConfig::default(),
         ));
-        let skill_reviewer = Arc::new(crate::skills::SkillReviewer::new(
+        let skill_reviewer = Arc::new(SkillReviewer::new(
             chat,
             vfs.clone(),
             "test-model".to_string(),
         ));
-        let config = Arc::new(crate::config::TianyanConfig::default());
+        let config = Arc::new(TianyanConfig::default());
         TaskContext::new(
             vfs,
             summary_engine,

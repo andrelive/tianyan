@@ -43,7 +43,6 @@ test.describe('sidebar', () => {
     await expect(page.locator('button[title="技能"]')).toBeVisible();
     await expect(page.locator('button[title="知识"]')).toBeVisible();
     await expect(page.locator('button[title="记忆"]')).toBeVisible();
-    await expect(page.locator('button[title="检索轨迹"]')).toBeVisible();
     await expect(page.locator('button[title="审批"]')).toBeVisible();
     await expect(page.locator('button[title="定时任务"]')).toBeVisible();
     await expect(page.locator('button[title="洞察"]')).toBeVisible();

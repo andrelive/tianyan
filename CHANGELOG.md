@@ -24,6 +24,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - apply_patch 裸 @@ 块头报错（宽容解析 + 内容定位）
 - apply_edit 长行锚点不一致（整行哈希 + 完整行返回）
 
+## [0.3.15] - 2026-09-12
+
+### Changed
+- **安全策略收敛（ADR-033）**：审批行为收敛为 `ApprovalMode`（`autonomous` 默认 / `confirm` / `interactive`），命令检查收敛为 `SafetyMode` 四态（`relaxed` 默认：跳过元字符/解释器检查、黑名单仍强制）；`allow_all_operations`/`wait_for_approval`/`confirm_commands`/`unattended_mode` 四个旧开关下线（读取兼容 + 启动自动归一）
+- 默认 soul 增加「思考语言」约束（内部思考必须中文；同义内容省 ~13% token）
+
+### Fixed
+- 文件日志层恒用配置级别（`file_filter` 接线：此前未挂载，`RUST_LOG` 会连带过滤文件层）
+- 后台任务惰性加载失败回滚标志（锁不可用曾导致永不重试 → 历史任务不加载、中断任务不标 Failed、唤醒不触发）
+- 写/读路径 `try_lock` → `lock().await`（7 处静默丢弃 → 任务状态/用量/GEPA 数据丢失）
+- 模型错误语义分类单点（KIND 前缀）+ 配置面板连接测试改语义谓词（ADR-014）
+- 流式 usage 解析去除生产路径唯一 `unwrap`；续读偏移按实际返回行数（字节截断场景曾跳行）
+
+### Added
+- CI 质量工作流（`.github/workflows/quality.yml`）：fmt / Rust 单测 / tool-catalog freshness / 前端 lint+typecheck+vitest
+
+### Docs
+- ADR-033；三处回归测试缺口补齐（f2/f1/e + 压缩点自身）；前端 prettier/eslint 清零；AGENTS/module-map/known-issues 口径同步
+
+## [0.3.10] ~ [0.3.14] - 2026-09-11 ~ 2026-09-12
+
+### Changed / Fixed / Added
+- 详见 [`docs/release/RELEASE_NOTES.md`](docs/release/RELEASE_NOTES.md)：记忆面板分类树、记忆浏览修复、唤醒轮实时性 + ollama 思考字段回传、压缩点体验与 user 锚定、预算误报修复 + 压缩阈值 60% + 读通道治理 + 思考块收起
+
 ## [Unreleased]
 
 ### Changed（技能系统回归 VFS 方法论文档，2026-09-09）

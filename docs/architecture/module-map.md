@@ -37,9 +37,13 @@
 | `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层：`AgentRole`/`RoleSource`/`RoleStatus`/`RoleUsage`/`DelegationRecord`）——config/agent/scheduler 共用，不依赖领域模块 | `mod.rs` |
 | `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles；scheduler 演化任务与 agent 共用） | `role_store.rs` |
 | `scheduler` | `core/src/scheduler/` | 定时任务调度器 + 任务实现 | `task_scheduler.rs`, `tasks/` |
-| `session` | `core/src/session/` | 会话管理（⚠️ ADR-018 VFS 例外：`SessionStore` SQLite 权威存储，原子取号 + 失败上抛；**SQL 收敛于本模块**（会话专属存储，经 `db::Database` 单连接直接实现）；`PersistentSessionManager` 业务语义；`SessionRecall` FTS 回忆；`session_meta` 存 SessionHeader/injectable 快照）；截断常量单点（`MAX_SESSION_MESSAGES`/`KEEP_RECENT_MESSAGES`） | `store.rs`, `manager.rs`, `search.rs`, `types.rs` |
-| `skills` | `core/src/skills/` | 技能定义、执行、学习（GEPA 进化引擎） | `definition.rs`, `executor.rs`, `manager.rs`, `handlers/`, `learning/` |
+| `session` | `core/src/session/` | 会话管理（⚠️ ADR-018 VFS 例外：`SessionStore` SQLite 权威存储，原子取号 + 失败上抛；**SQL 收敛于本模块**（会话专属存储，经 `db::Database` 单连接直接实现）；`PersistentSessionManager` 业务语义；`SessionRecall` FTS 回忆；`session_meta` 存 SessionHeader/injectable 快照）；存储层返回完整链（ADR-027），压缩点截断发生在组装层 | `store.rs`, `manager.rs`, `search.rs`, `types.rs` |
+| `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现/读取 + GEPA 进化 + 使用复审；**无执行语义**） | `manager.rs`, `reviewer.rs`, `learning/` |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退，⚠️ ADR-006 VFS 例外）；重做子系统独立（`redo.rs`，与 capture/restore/diff/gc 正交） | `mod.rs`, `redo.rs` |
+| `events` | `core/src/events/` | 事件驱动触发（文件监听 + webhook → 事件总线 → 规则动作） | `mod.rs`, `bus.rs`, `watcher.rs`, `rules.rs` |
+| `goals` | `core/src/goals/` | 长期目标 + 进度跟踪（会话绑定；运行期 `goals.json`） | `mod.rs` |
+| `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`；桌面实现由 tauri 注入） | `notification.rs` |
+| `todos` | `core/src/todos/` | 待办清单（会话绑定；运行期 `todos.json`） | `mod.rs` |
 | `vfs` | `core/src/vfs/` | 统一存储与检索层（**项目基础机制**）；`SqliteBackend` 经 `db::Database` 访问（SqliteDb 已移入 `db` 模块，`backend/sqlite_db.rs` 仅 re-export 兼容） | `traits.rs`, `vfs_impl.rs`, `backend/local.rs`, `backend/sqlite.rs`, `vector/lancedb/`, `summary/engine.rs` |
 
 ---
@@ -91,7 +95,7 @@
 | `AgentSkills` wrapper | 已删除 | 功能由 `Agent` 直接持有 |
 | `hooks/use-debounced-value.ts` | 已删除 | 浅 hook 内联（唯一调用点 KnowledgeSearchTab 直接实现） |
 
-> **注**：存储后端已 trait 化（`StorageBackend` seam，ADR-005）。`LocalFileBackend` 为默认生产后端；`SqliteBackend` 已接入,通过配置 `[storage] backend = "sqlite"` 启用。
+> **注**：存储后端已 trait 化（`StorageBackend` seam，ADR-005）。**默认后端为 `SqliteBackend`**（`config/storage.rs` 的 `#[default] Sqlite`）；`LocalFileBackend` 保留为可选后端。
 
 ---
 
@@ -117,3 +121,15 @@
 - [ADR-015: 会话工作区绑定](decisions/015-session-workspace-binding.md) — 工作区是会话的父级分组
 - [ADR-020: 统一写入门面 Database](decisions/020-database-facade.md) — 单连接 + schema 集中 + 业务域 Repository；db 只依赖 common
 - [ADR-021: 分层重构与循环消除](decisions/021-layered-refactor.md) — 基础类型层/存储层/领域层单向依赖；生产代码零模块环
+- [ADR-022: 会话绑定任务面板](decisions/022-session-bound-task-ux.md) — todo/goal 会话绑定；数据目录只读 + 搬迁对话框
+- [ADR-023: 配置目录与数据目录分离](decisions/023-config-data-dir-separation.md) — 配置固定永不搬迁；搬迁=复制+校验+先改配置后删源
+- [ADR-024: 调度模型 cron → 间隔 + 补跑](decisions/024-interval-scheduler.md) — 单一扫描循环、last_run 持久化宕机补跑
+- [ADR-025: 移除检索轨迹](decisions/025-remove-retrieval-traces.md) — 观测回归 UsageStats + tracing
+- [ADR-026: 后台任务与子智能体统一面板](decisions/026-background-tasks-unified-panel.md) — 委托只支持异步；双信号量排队；SQL 权威 + 3 天 TTL
+- [ADR-027: 会话时序链模型](decisions/027-session-timeline-chain.md) — 无分支时序链；存储层返回完整链，截断仅在组装层
+- [ADR-028: 会话消息统一事件推送](decisions/028-unified-event-push.md) — SSE 水管 + 循环抽水机；落库即推送
+- [ADR-029: 事件订阅与快照恢复](decisions/029-event-subscription-snapshot.md) — 单流按需订阅 + resident；快照与实时同一流
+- [ADR-030: 统一 Agent 循环框架](decisions/030-unified-agent-loop.md) — 主 agent 与子代理同构（TurnPolicy）；收尾统一「无工具调用」
+- [ADR-031: 乐观渲染 + user_message_id 确认 + 统一流式](decisions/031-optimistic-render-user-message-id.md) — 消息落库确认回显；assistant 纯流式
+- [ADR-032: 流式事件转发统一](decisions/032-unified-stream-forward.md) — `spawn_stream_forwarder` 单点（建通道即消费，防死锁）
+- [ADR-033: 安全策略收敛——默认自主](decisions/033-security-policy-convergence.md) — `ApprovalMode` 三态 + `SafetyMode` 四态；旧开关自动归一

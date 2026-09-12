@@ -70,6 +70,7 @@ impl SessionStore {
         Ok(Arc::new(Self { db }))
     }
 
+    /// 创建会话（写 `session_meta`；重复创建返回 conflict，ADR-014）。
     pub async fn create(
         &self,
         session_id: &str,

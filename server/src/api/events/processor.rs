@@ -269,7 +269,7 @@ mod tests {
         async fn compress_session(
             &self,
             _session_id: &str,
-        ) -> tianyan::Result<Option<tianyan::common::types::StructuredMessage>> {
+        ) -> tianyan::Result<Option<StructuredMessage>> {
             Ok(None)
         }
         async fn wake_session(&self, session_id: &str) {

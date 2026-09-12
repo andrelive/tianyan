@@ -394,17 +394,17 @@ impl AgentCoordinator for Agent {
             .iter()
             .filter(|t| t.parent_session_id == session_id && t.anchor_seq > anchor as i64)
         {
-            if t.status == crate::executor::CommandTaskStatus::Running {
-                if self.command_tasks.kill(&t.id).await.is_ok() {
-                    killed.push(t.id.clone());
-                }
+            if t.status == crate::executor::CommandTaskStatus::Running
+                && self.command_tasks.kill(&t.id).await.is_ok()
+            {
+                killed.push(t.id.clone());
             }
         }
         // 等待被 kill 的命令任务进入终态（watcher 收尾异步：杀进程后
         // child.wait() 返回 → on_command_terminal 入库取消通知）。
         // 必须等通知入库再截断——否则取消通知追加到新链尾污染。
         if !killed.is_empty() {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
             loop {
                 let tasks = self.command_tasks.list().await;
                 let all_terminal = killed.iter().all(|id| {
@@ -414,7 +414,7 @@ impl AgentCoordinator for Agent {
                         .map(|t| t.status != crate::executor::CommandTaskStatus::Running)
                         .unwrap_or(true)
                 });
-                if all_terminal || std::time::Instant::now() >= deadline {
+                if all_terminal || Instant::now() >= deadline {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;

@@ -181,8 +181,6 @@ impl UsageStats {
         }
     }
 
-    /// 记录 SQL 查询错误（统计查询失败时降级返回空数据，但错误必须可见）。
-
     /// 查询调用次数最多的技能列表。
     ///
     /// 口径：只统计真技能（`skill:` 前缀键），普通工具调用不混入；
@@ -213,8 +211,6 @@ impl UsageStats {
         self.repo.query_summary().await
     }
 }
-
-/// 将 rusqlite 错误映射为 `TianyanError::Custom`（统一 observability 模块前缀）。
 
 #[cfg(test)]
 mod tests {

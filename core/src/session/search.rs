@@ -20,6 +20,7 @@ impl SessionRecall {
         Ok(Arc::new(Self { db }))
     }
 
+    /// FTS 回忆检索（关键词匹配历史消息；返回命中及其附近窗口）。
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<RecallHit>, TianyanError> {
         let q = sanitize_fts_query(query);
         if q.is_empty() {

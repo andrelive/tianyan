@@ -73,7 +73,7 @@ impl SessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::{MessageRole, MessageTime, Part, PartTime};
+    use crate::common::types::MessageRole;
 
     #[test]
     fn test_session_state_new() {

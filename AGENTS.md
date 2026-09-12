@@ -53,7 +53,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 
 ## 工作区结构
 
-5 crate，单 `Cargo.toml` workspace (resolver = "2")：
+4 个 Rust crate（+ 1 个前端工程 `gui-vite/`，非 crate），单 `Cargo.toml` workspace (resolver = "2")：
 
 | Crate | Package | 类型 |
 |-------|---------|------|
@@ -119,6 +119,8 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 
 | 模块 | 位置 | 一句话 | ⛔ VFS 约束 |
 |------|------|--------|-------------|
+| `common` | `core/src/common/` | 通用类型/错误（`TianyanError` 4 变体 + 语义谓词）/日志/token 估算/UTF-8 截断/HTTP 工厂 | — |
+| `config` | `core/src/config/` | TOML 配置 + 环境变量 + 向导 + 安全策略（ADR-033：`approval_mode`/`safety_mode`） | — |
 | `db` | `core/src/db/` | **统一写入门面**（ADR-020）：Database 门面（单连接 + schema 集中）+ SqliteDb + 业务域 Repository（stats/trace/execution/usage）；只依赖 common | — |
 | `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层）：config/agent/scheduler 共用 | — |
 | `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles） | — |
@@ -135,8 +137,16 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 语义化编辑（内容匹配 edit / patch）、文件浏览（fs/search）、代码智能（symbols/project/test_discovery） | — |
 | `lsp` | `core/src/lsp/` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储；lsp 工具：诊断/跳转/符号） | — |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | ⚠️ **ADR-006 例外**：独立文件存储于 `{data_dir}/snapshots/`，不经 VFS |
+| `events` | `core/src/events/` | 事件驱动触发（T1 路线：文件监听 + webhook → 事件总线 → 规则动作） | — |
+| `goals` | `core/src/goals/` | 长期目标 + 进度跟踪（与待办联动；运行期 `goals.json` 持久化） | ⚠️ 例外：运行期结构化产物 |
+| `todos` | `core/src/todos/` | 待办清单（会话绑定；运行期 `todos.json` 持久化） | ⚠️ 例外：运行期结构化产物 |
+| `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`；桌面实现由 tauri 注入） | — |
 
 > **注**：MCP 桥接（`server/src/mcp_bridge.rs`）返回的图片（浏览器截图等）落盘于 `{data_dir}/mcp_images/`，与 snapshot 同级运行时产物例外，不经 VFS（ADR-010）。
+>
+> **注（运行期结构化产物，ADR-022/024）**：`goals.json`/`todos.json`（会话任务与目标）、
+> `scheduled_agent_tasks.json`/`scheduler_state.json`（调度器状态）为**运行期状态文件**
+> （非知识/记忆/技能内容），不经 VFS——与快照、MCP 图片同类的结构性例外。
 
 已删除组件：`planner/`、`ModelRouter`、`TokenBudget`、`Chunker`、`AgentHarness` wrapper、`AgentSkills` wrapper、`eval/`（回答质量离线评测，判断归入演化智能体）。
 

@@ -45,7 +45,7 @@ impl SessionManager for MockSessionManager {
                     &Message::assistant("last"),
                     _id,
                     None,
-                    Some(crate::common::types::TokenUsage::new(tokens, 0)),
+                    Some(TokenUsage::new(tokens, 0)),
                 );
                 // 模拟持久化 model_id（run_turns 按模型过滤实测输入）
                 sm.model_id = Some("test-model".to_string());
@@ -159,10 +159,7 @@ fn make_loop(mock: MockChatService, max_turns: usize) -> AgentLoop {
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(None)),
         }),
-        AgentLoopConfig {
-            max_turns,
-            ..Default::default()
-        },
+        AgentLoopConfig { max_turns },
     )
 }
 
@@ -233,10 +230,7 @@ async fn test_run_ask_user_executes_as_sync_tool() {
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(None)),
         }),
-        AgentLoopConfig {
-            max_turns: 5,
-            ..Default::default()
-        },
+        AgentLoopConfig { max_turns: 5 },
     );
 
     let mut messages = vec![Message::user("帮我决定一下")];
@@ -314,10 +308,7 @@ async fn test_run_approval_denied_returns_tool_error() {
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(None)),
         }),
-        AgentLoopConfig {
-            max_turns: 5,
-            ..Default::default()
-        },
+        AgentLoopConfig { max_turns: 5 },
     );
 
     let mut messages = vec![Message::user("请帮我写入文件")];
@@ -1395,10 +1386,7 @@ async fn test_run_errors_when_budget_below_min() {
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(Some(128_000 - 1137))),
         }),
-        AgentLoopConfig {
-            max_turns: 5,
-            ..Default::default()
-        },
+        AgentLoopConfig { max_turns: 5 },
     )
     .with_chat_spec(Some(spec_128k_16k()));
 
@@ -1503,10 +1491,7 @@ async fn test_run_recovery_does_not_double_count_cached_input() {
         Arc::new(mock),
         ToolRegistry::new(SecurityPolicy::default()),
         Arc::new(FixedSessionManager { messages: vec![sm] }),
-        AgentLoopConfig {
-            max_turns: 5,
-            ..Default::default()
-        },
+        AgentLoopConfig { max_turns: 5 },
     )
     .with_chat_spec(Some(spec_1m_384k()));
 
@@ -1559,10 +1544,7 @@ async fn test_run_recovery_scoped_after_last_compression_point() {
         Arc::new(FixedSessionManager {
             messages: vec![before, marker],
         }),
-        AgentLoopConfig {
-            max_turns: 5,
-            ..Default::default()
-        },
+        AgentLoopConfig { max_turns: 5 },
     )
     .with_chat_spec(Some(spec_1m_384k()));
 

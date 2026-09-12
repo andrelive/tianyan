@@ -866,7 +866,7 @@ impl BackgroundTaskManager {
         let cutoff = now_ms() - 3 * 24 * 3600 * 1000;
         if let Err(e) = conn.execute(
             "DELETE FROM background_tasks WHERE completed_at IS NOT NULL AND completed_at < ?1",
-            rusqlite::params![cutoff as i64],
+            rusqlite::params![{ cutoff }],
         ) {
             tracing::warn!(error = %e, "后台任务 TTL 逐出失败");
         }
@@ -1734,7 +1734,7 @@ mod tests {
         // 回归保护：加载失败（锁不可用）必须**回滚标志**——此前先置位再加载，
         // 失败后标志永为 true → 历史任务永不加载、重启中断的 Running 永不标
         // Failed、remaining 长期 >0 使"全部完成唤醒"永不触发。
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         {
             let conn = db.lock().await;
@@ -1770,7 +1770,7 @@ mod tests {
     async fn test_persist_upsert_waits_for_lock_instead_of_dropping() {
         // 回归保护：写路径等待锁（try_lock 静默丢弃 → 任务状态不落库、
         // 重启后"凭空消失"）。
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         let manager = BackgroundTaskManager::new().with_db(db.clone());
         let id = manager

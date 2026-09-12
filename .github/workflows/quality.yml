@@ -5,10 +5,10 @@ name: Quality
 # 与脚本自身缺陷（PowerShell 把 cargo stderr 当错误）长期不可达。
 # 本工作流覆盖当前已达标的三类门禁：
 #   1. Rust fmt
-#   2. Rust 单元测试（core/server/mcp；tauri 需桌面依赖，排除）
-#   3. 工具目录 freshness（运行时注册 = schema 唯一真相源）
-#   4. 前端 lint（eslint + prettier）/ typecheck / vitest
-# 待办：clippy 存量告警清零后，追加 `cargo clippy -- -D warnings` 步骤。
+#   2. Rust clippy（`-D warnings`；存量告警已于 0.3.15 清零）
+#   3. Rust 单元测试（core/server/mcp；tauri 需桌面依赖，排除）
+#   4. 工具目录 freshness（运行时注册 = schema 唯一真相源）
+#   5. 前端 lint（eslint + prettier）/ typecheck / vitest
 
 on:
   push:
@@ -35,6 +35,9 @@ jobs:
 
       - name: Rust fmt check
         run: cargo fmt --all -- --check
+      - name: Rust clippy (deny warnings)
+        run: cargo clippy --workspace --exclude tianyan-tauri --all-targets -- -D warnings
+
 
       - name: Rust unit tests (core/server/mcp)
         run: cargo test --workspace --exclude tianyan-tauri --lib

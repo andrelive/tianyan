@@ -210,6 +210,7 @@ impl TraceCollector {
         Ok(())
     }
 
+    /// 查询 trace span（按 `session_id` / `task_id` 过滤 + 条数上限）。
     pub async fn query(
         &self,
         session_id: Option<&str>,
@@ -220,12 +221,11 @@ impl TraceCollector {
         self.repo.query(session_id, task_id, limit).await
     }
 
+    /// 待落盘 span 数（flush 前积压量；指标观测用）。
     pub fn pending_count(&self) -> u64 {
         self.pending_writes.load(Ordering::Relaxed)
     }
 }
-
-/// SQLite 行 → TraceSpan。
 
 #[cfg(test)]
 mod tests {

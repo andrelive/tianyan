@@ -417,11 +417,7 @@ async fn test_read_file_byte_truncation_continuation_no_skipped_lines() {
     assert_eq!(first["showing"]["offset"].as_u64(), Some(1));
     let content = first["content"].as_str().unwrap();
     // 第一段：末数据行 = 第 `returned` 行；且不含第 `returned+1` 行（截断干净）。
-    let last_data = content
-        .lines()
-        .filter(|l| l.starts_with("line-"))
-        .last()
-        .unwrap();
+    let last_data = content.lines().rfind(|l| l.starts_with("line-")).unwrap();
     assert!(
         last_data.starts_with(&format!("line-{returned:04}-")),
         "第一段末行应为第 {returned} 行: {last_data}"
@@ -449,7 +445,7 @@ async fn test_read_file_byte_truncation_continuation_no_skipped_lines() {
     assert!(
         second_content.starts_with(&format!("line-{expect_next:04}-")),
         "续读应从第 {expect_next} 行开始（无跳行）: {}",
-        &second_content.chars().take(60).collect::<String>()
+        second_content.chars().take(60).collect::<String>()
     );
 }
 
@@ -522,12 +518,12 @@ async fn test_vfs_read_session_export_truncated_for_large_history() {
     assert!(
         detail.contains("输出已截断"),
         "应包含截断标记: {}",
-        &detail.chars().take(100).collect::<String>()
+        detail.chars().take(100).collect::<String>()
     );
     assert!(
         detail.contains("session_recall"),
         "应包含检索提示（session_recall）: {}",
-        &detail.chars().take(100).collect::<String>()
+        detail.chars().take(100).collect::<String>()
     );
 }
 

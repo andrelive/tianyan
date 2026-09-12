@@ -73,9 +73,7 @@ impl ChatService for AsyncOpenAIClient {
                     self.client.chat().create_byot(body).await;
                 attempted.map_err(|e| RetryableFailure {
                     retryable: match &e {
-                        async_openai::error::OpenAIError::Reqwest(r) => {
-                            crate::model::retry::should_retry_transport(r)
-                        }
+                        OpenAIError::Reqwest(r) => crate::model::retry::should_retry_transport(r),
                         _ => false,
                     },
                     // ADR-014：语义分类单点（KIND 前缀可被消费端谓词判定）
@@ -885,7 +883,7 @@ mod convert_tests {
             assistant,
         ];
         let converted = convert_messages(&messages);
-        let mut body = serde_json::to_value(converted).unwrap();
+        let body = serde_json::to_value(converted).unwrap();
         // 模拟完整请求体（messages 数组）
         let mut request_body = serde_json::json!({ "messages": body });
         inject_reasoning_content(
