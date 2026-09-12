@@ -140,14 +140,15 @@ describe('handleChatStreamEvent', () => {
     // 压缩摘要是会话时序链上的普通节点（统一结构，不做区分）：与 System
     // 通知同一条推送路径（chat_stream 边界事件 → applyServerMessage 按 id
     // 查重追加）——压缩点在页面上实时可见，无需重载会话；usage 随消息
-    // 携带（圆环 lastMessageUsage 据此估算压缩后占用）。
+    // 携带（圆环 lastMessageUsage 据此估算压缩后占用）。压缩点为 user 锚定
+    //（模型侧角色），但按 marker 走独立消息路径（非用户输入，不做乐观合并）。
     useAppStore.getState().addMessage({ role: 'assistant', segments: [], id: null, timestamp: '' });
     handleChatStreamEvent(ev({ delta: '回复完成，压缩检查在后台进行' }));
     handleChatStreamEvent(
       ev({
         message: {
           id: 'cmp_1',
-          role: 'system',
+          role: 'user',
           compression_marker: true,
           segments: [{ type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：……' }],
           usage: {
@@ -168,6 +169,35 @@ describe('handleChatStreamEvent', () => {
     expect(msgs[msgs.length - 1].id).toBe('cmp_1');
     // usage 透传（lastMessageUsage 的压缩点分支依赖）
     expect(marker?.usage?.prompt_tokens).toBe(167284);
+  });
+
+  it('appends the compression marker even when an optimistic user message is pending', () => {
+    // 回归保护：压缩点是 user 锚定的独立节点（非用户输入）——乐观合并的
+    // "存在未确认 user_message_id 则跳过"逻辑不适用于它；该场景下压缩点
+    // 必须仍按 id 幂等追加（修复前会被静默跳过、压缩点丢失）。
+    useAppStore.getState().addMessage({
+      role: 'user',
+      segments: [{ type: 'text', text: '进行中的输入' }],
+      user_message_id: 'umid-pending',
+      id: null,
+      timestamp: '',
+    });
+    handleChatStreamEvent(
+      ev({
+        message: {
+          id: 'cmp_pending_1',
+          role: 'user',
+          compression_marker: true,
+          segments: [{ type: 'text', text: '[对话摘要] ……' }],
+        },
+      }),
+    );
+
+    const msgs = useAppStore.getState().messages;
+    // 压缩点按 id 追加成功（未被乐观消息误判跳过）
+    expect(msgs.some((m) => m.id === 'cmp_pending_1')).toBe(true);
+    // 乐观消息仍保留（未被误动）
+    expect(msgs.some((m) => m.user_message_id === 'umid-pending')).toBe(true);
   });
 
   it('confirms the optimistic user message id via user_message_id event (ADR-031)', () => {

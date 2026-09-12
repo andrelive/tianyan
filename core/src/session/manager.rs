@@ -368,12 +368,9 @@ mod tests {
         )
         .await
         .unwrap();
-        mgr.add_structured_message(
-            id,
-            make_msg("cmp", id, MessageRole::System, "summary", true),
-        )
-        .await
-        .unwrap();
+        mgr.add_structured_message(id, make_msg("cmp", id, MessageRole::User, "summary", true))
+            .await
+            .unwrap();
         mgr.add_structured_message(id, make_msg("m3", id, MessageRole::User, "recent 1", false))
             .await
             .unwrap();

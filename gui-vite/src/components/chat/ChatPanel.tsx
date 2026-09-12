@@ -431,10 +431,12 @@ export default function ChatPanel() {
     try {
       const resp = await compressSession(sessionId);
       state.showToast(resp.compressed ? '已压缩' : '无需压缩', 'success');
-      // 摘要消息追加到消息流末尾（展示始终只追加，保留完整历史；
-      // 服务端上下文组装从压缩点开始与此无关）。
+      // 摘要消息收敛到消息流（展示始终只追加，保留完整历史；服务端上下文
+      // 组装从压缩点开始与此无关）。走 applyServerMessage 按 id 幂等 upsert：
+      // 与实时推送（chat_stream 边界事件）双路径收敛——先到者写入，后到者
+      // 更新同一消息，不产生重复。
       if (resp.message) {
-        useAppStore.getState().addMessage(resp.message, sessionId);
+        useAppStore.getState().applyServerMessage(sessionId, resp.message);
       }
     } catch (err: unknown) {
       state.showToast(`压缩失败: ${toErrorMessage(err, '未知错误')}`, 'error');

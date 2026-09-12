@@ -50,7 +50,7 @@ describe('lastMessageUsage', () => {
       msg({ usage: { prompt_tokens: 1000, completion_tokens: 200, total_tokens: 1200 } }),
       // 压缩摘要：prompt = 压缩请求输入（压缩前上下文），completion = 摘要输出
       msg({
-        role: 'system',
+        role: 'user',
         compression_marker: true,
         usage: { prompt_tokens: 50000, completion_tokens: 800, total_tokens: 50800 },
       }),
@@ -64,7 +64,7 @@ describe('lastMessageUsage', () => {
   it('falls back to last real usage when compression marker has zero usage', () => {
     const messages = [
       msg({ usage: { prompt_tokens: 300, completion_tokens: 100, total_tokens: 400 } }),
-      msg({ role: 'system', compression_marker: true }),
+      msg({ role: 'user', compression_marker: true }),
     ];
     const r = lastMessageUsage(messages, 64000);
     expect(r?.prompt_tokens).toBe(300);
@@ -73,7 +73,7 @@ describe('lastMessageUsage', () => {
   it('prefers a newer assistant message over an old compression marker', () => {
     const messages = [
       msg({ usage: { prompt_tokens: 1000, completion_tokens: 200, total_tokens: 1200 } }),
-      msg({ role: 'system', compression_marker: true, usage: { prompt_tokens: 50000, completion_tokens: 800, total_tokens: 50800 } }),
+      msg({ role: 'user', compression_marker: true, usage: { prompt_tokens: 50000, completion_tokens: 800, total_tokens: 50800 } }),
       // 压缩后新请求完成：新 assistant 带压缩后真实占用
       msg({ usage: { prompt_tokens: 2500, completion_tokens: 500, total_tokens: 3000 } }),
     ];
@@ -115,7 +115,7 @@ describe('sumSessionUsage', () => {
         usage: { prompt_tokens: 100, completion_tokens: 30, total_tokens: 130, cache_read: 40 },
       }),
       msg({
-        role: 'system',
+        role: 'user',
         compression_marker: true,
         usage: { prompt_tokens: 2000, completion_tokens: 500, total_tokens: 2500, cache_read: 1500 },
       }),

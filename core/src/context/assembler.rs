@@ -69,10 +69,23 @@ impl ContextAssembler {
     }
 
     /// 将单个 StructuredMessage 转换为 1~N 条传输层 Message。
+    ///
+    /// 压缩点（`compression_marker`）以 **user 角色**锚定（DSH 式）：摘要作为
+    /// 后续请求中的 user 消息，保证"压缩后的组装视图恒有 ≥1 条 user"——全
+    /// system 请求会被云 API 判为无用户输入而返回空输出。旧数据中摘要持久化为
+    /// system 角色，此处按 marker 统一归一为 user（新数据落库即 user，转换层
+    /// 同时兼容两代数据）。
     pub(crate) fn structured_to_messages(sm: &StructuredMessage) -> Vec<Message> {
         let mut messages = Vec::new();
 
-        match sm.role {
+        // 压缩点归一：旧数据 system → user（见函数文档）。
+        let role = if sm.compression_marker {
+            MessageRole::User
+        } else {
+            sm.role
+        };
+
+        match role {
             MessageRole::User => {
                 let mut text = String::new();
                 let mut images: Vec<String> = Vec::new();
@@ -273,8 +286,38 @@ mod tests {
         // 组装从压缩点开始：摘要 + 近期消息（早期消息不发给 LLM）
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].content, "[对话摘要] 早期摘要");
+        // 压缩点 user 锚定（DSH 式）：旧数据（system 角色）经转换层归一为 user
+        assert_eq!(messages[0].role, MessageRole::User);
         assert_eq!(messages[1].content, "近期消息");
         assert_eq!(messages[2].content, "近期回复");
+    }
+
+    #[test]
+    fn test_compression_marker_role_normalized_to_user() {
+        // 两代数据（旧 system / 新 user）转换后一律为 user 锚定；
+        // 非压缩点的普通 system 消息不受影响。
+        let mut old_marker =
+            make_text_msg("cmp_old", MessageRole::System, "[对话摘要] 旧", "ses_1");
+        old_marker.compression_marker = true;
+        let mut new_marker = make_text_msg("cmp_new", MessageRole::User, "[对话摘要] 新", "ses_1");
+        new_marker.compression_marker = true;
+        let notify = make_text_msg("sys_1", MessageRole::System, "通知", "ses_1");
+
+        assert_eq!(
+            ContextAssembler::structured_to_messages(&old_marker)[0].role,
+            MessageRole::User,
+            "旧数据（system 角色摘要）应归一为 user"
+        );
+        assert_eq!(
+            ContextAssembler::structured_to_messages(&new_marker)[0].role,
+            MessageRole::User,
+            "新数据（user 角色摘要）保持 user"
+        );
+        assert_eq!(
+            ContextAssembler::structured_to_messages(&notify)[0].role,
+            MessageRole::System,
+            "普通 system 消息不受归一影响"
+        );
     }
 
     #[test]

@@ -153,9 +153,10 @@ describe('MessageBubble history rendering', () => {
 describe('MessageBubble compression marker', () => {
   it('renders the 压缩点 badge for compression summary messages', () => {
     // 压缩点标识（compression_marker）：实时推送后在页面上可辨识——徽章
-    // 渲染于消息顶部，正文仍走统一时间线（SegmentBlocks）。
+    // 渲染于消息顶部，正文仍走统一时间线（SegmentBlocks）。压缩点为 user
+    // 锚定（模型侧角色），展示侧保持无框节点：不渲染用户气泡/回退按钮。
     const summaryMsg: ChatMessage = {
-      role: 'system',
+      role: 'user',
       compression_marker: true,
       segments: [{ type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：……' }],
     };
@@ -164,7 +165,22 @@ describe('MessageBubble compression marker', () => {
     );
 
     expect(screen.getByText('压缩点')).toBeInTheDocument();
+    // 非用户输入：不提供回退按钮（回退锚点只属于真实用户输入）
+    expect(screen.queryByLabelText('回退到此')).not.toBeInTheDocument();
     expect(screen.getByText(/对话摘要/)).toBeInTheDocument();
+  });
+
+  it('renders the badge for legacy (system-role) compression summaries too', () => {
+    // 旧数据兼容：历史库里摘要持久化为 system 角色——渲染按 marker 判定，不依赖角色。
+    const legacyMsg: ChatMessage = {
+      role: 'system',
+      compression_marker: true,
+      segments: [{ type: 'text', text: '[对话摘要] 旧数据摘要' }],
+    };
+    render(
+      <MessageBubble message={legacyMsg} index={1} isStreaming={false} onRollback={() => {}} />,
+    );
+    expect(screen.getByText('压缩点')).toBeInTheDocument();
   });
 
   it('does not render the badge for regular system notifications', () => {

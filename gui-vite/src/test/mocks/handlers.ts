@@ -968,7 +968,8 @@ export const handlers = [
       compressed: true,
       message: {
         id: 'cmp_mock',
-        role: 'system',
+        role: 'user',
+        compression_marker: true,
         segments: [
           { type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\nmock\n[摘要结束]' },
         ],

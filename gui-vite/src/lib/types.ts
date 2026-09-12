@@ -35,7 +35,8 @@ export interface ChatMessage {
   interrupted?: boolean;
   /** 本条消息的 token 用量（历史加载/完成 chunk 携带；前端按会话独立计算上下文占用） */
   usage?: TokenUsage | null;
-  /** 压缩摘要消息标记（system 角色；后端从 StructuredMessage.compression_marker 映射） */
+  /** 压缩摘要消息标记（user 锚定消息；后端从 StructuredMessage.compression_marker
+   * 映射；旧数据可能为 system 角色——渲染按本标记判定，与角色无关） */
   compression_marker?: boolean;
 }
 

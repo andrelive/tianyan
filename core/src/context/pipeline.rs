@@ -210,10 +210,15 @@ impl ContextPipeline {
         // 累加所有带 usage 的消息即自动计入。
         let tu = outcome.summary_usage;
 
+        // 压缩点以 **user 角色**锚定（DSH 式）：摘要作为后续请求的 user 消息，
+        // 保证"压缩后的组装视图恒有 ≥1 条 user"——全 system 请求会被云 API
+        // 判为无用户输入而返回空输出（历史事故：.scratch/wake-no-user-finding.md）。
+        // 展示不受影响：前端按 compression_marker 渲染压缩点节点；旧数据
+        // （system 角色）由组装层兼容归一（ContextAssembler::structured_to_messages）。
         Some(StructuredMessage {
             id: format!("cmp_{}", chrono::Utc::now().timestamp_millis()),
             parent_id: None,
-            role: MessageRole::System,
+            role: MessageRole::User,
             parts: vec![Part::Text {
                 text: format!(
                     "[对话摘要] 以下是对历史对话的摘要：\n{}\n[摘要结束]",
@@ -765,7 +770,11 @@ mod tests {
             .await
             .expect("手动压缩应触发");
 
-        assert_eq!(sm.role, MessageRole::System, "摘要消息为 system 角色");
+        assert_eq!(
+            sm.role,
+            MessageRole::User,
+            "摘要消息为 user 角色（压缩点 user 锚定：压缩后请求恒有 ≥1 条 user，防全 system 空输出）"
+        );
         assert!(sm.compression_marker, "摘要消息应带压缩标记");
         // 输入 / 输出 / 缓存全部来自压缩请求真实 usage
         assert_eq!(sm.tokens.input, 5000, "输入 = 压缩请求 prompt_tokens");

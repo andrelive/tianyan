@@ -146,7 +146,8 @@ pub struct StructuredMessage {
     /// 完成原因。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub finish: Option<String>,
-    /// 会话压缩标记。
+    /// 压缩点标记（摘要消息以 **user 角色**锚定；旧数据可能为 system 角色——
+    /// 组装层按本标记统一归一，见 `ContextAssembler::structured_to_messages`）。
     #[serde(default)]
     pub compression_marker: bool,
 }

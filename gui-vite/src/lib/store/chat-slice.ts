@@ -241,7 +241,10 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       // 事件负责 id 同步）——边界事件（用户消息完整版）到达时跳过，避免
       // 重复插入；非乐观场景（无 user_message_id 的请求）仍插入（保持
       // 用户→assistant 顺序：插到最后一条 assistant 占位之前）。
-      if (msg.role === 'user') {
+      // 例外：压缩点（compression_marker）是 user 锚定的独立节点（非用户
+      // 输入）——跳过乐观合并分支，走下方"按 id 幂等追加/更新"路径
+      // （否则未确认的乐观消息在场时会被误判跳过，压缩点丢失）。
+      if (msg.role === 'user' && !msg.compression_marker) {
         if (base.some((m) => m.role === 'user' && m.user_message_id)) return {};
         if (msg.id && base.some((m) => m.id === msg.id)) return {};
         const lastAssistant = lastAssistantIndex(next);

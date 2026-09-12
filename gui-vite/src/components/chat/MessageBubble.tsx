@@ -18,7 +18,10 @@ interface Props {
 function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
   const [copied, setCopied] = useState(false);
 
-  const isUser = message.role === 'user';
+  // 压缩点（compression_marker）是 user 锚定消息（模型侧角色），展示侧保持
+  // "无框节点 + 徽章"——不渲染成用户气泡，也不提供回退（回退锚点只属于
+  // 真实用户输入）。
+  const isUser = message.role === 'user' && !message.compression_marker;
 
   // 唤醒轮空输出（allow_empty_answer：模型认为无需回复）会持久化一条
   // 空 segments 的 assistant 消息——渲染层跳过（不动数组索引，回退定位

@@ -438,7 +438,8 @@ describe('ChatPanel', () => {
           compressed: true,
           message: {
             id: 'cmp_123',
-            role: 'system',
+            role: 'user',
+            compression_marker: true,
             segments: [{ type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\n测试\n[摘要结束]' }],
             timestamp: new Date().toISOString(),
           },
@@ -463,6 +464,58 @@ describe('ChatPanel', () => {
       expect(messageText(msgs[1])).toContain('对话摘要');
     });
   });
+  it('converges the compression response with an already-pushed marker (idempotent)', async () => {
+    // 推送先到（同一 id 已在消息流）→ HTTP 响应后到：按 id 幂等 upsert，
+    // 不产生重复气泡（压缩点单一节点）。
+    const user = userEvent.setup();
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      messages: [
+        {
+          id: 'msg-1',
+          role: 'assistant',
+          segments: [{ type: 'text', text: 'ok' }],
+          timestamp: new Date().toISOString(),
+          usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
+        },
+        {
+          id: 'cmp_123',
+          role: 'user',
+          compression_marker: true,
+          segments: [{ type: 'text', text: '[对话摘要] 已经推送到达' }],
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    });
+    server.use(
+      http.post('/api/v1/sessions/:id/compress', () => {
+        return HttpResponse.json({
+          compressed: true,
+          message: {
+            id: 'cmp_123',
+            role: 'user',
+            compression_marker: true,
+            segments: [{ type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\n测试\n[摘要结束]' }],
+            timestamp: new Date().toISOString(),
+          },
+        });
+      }),
+    );
+
+    renderChatPanel();
+
+    await user.click(screen.getByRole('button', { name: '上下文占用' }));
+    await user.click(screen.getByRole('button', { name: /压缩会话/ }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().toasts[0]?.message).toBe('已压缩');
+    });
+    await waitFor(() => {
+      const msgs = useAppStore.getState().messages;
+      expect(msgs.filter((m) => m.id === 'cmp_123')).toHaveLength(1);
+    });
+  });
+
 
   it('shows 无需压缩 when the backend reports nothing to compress', async () => {
     const user = userEvent.setup();

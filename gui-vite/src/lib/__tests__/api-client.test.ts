@@ -298,8 +298,9 @@ describe('compressSession', () => {
 
     expect(mockSessionCompressCalls).toEqual([{ sessionId: 'session-1' }]);
     expect(result.compressed).toBe(true);
-    // 压缩成功时响应携带摘要消息（前端追加到消息流末尾）
-    expect(result.message?.role).toBe('system');
+    // 压缩成功时响应携带摘要消息（user 锚定；前端按 id 幂等收敛到消息流）
+    expect(result.message?.role).toBe('user');
+    expect(result.message?.compression_marker).toBe(true);
     expect(result.message ? messageText(result.message) : '').toContain('对话摘要');
   });
 
