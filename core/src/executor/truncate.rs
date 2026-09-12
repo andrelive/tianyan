@@ -22,6 +22,8 @@ pub struct Truncated {
     pub total_lines: usize,
     /// 原文总字节数。
     pub total_bytes: usize,
+    /// 实际保留行数（截断后仍完整保留的行；未截断 = total_lines）。
+    pub kept_lines: usize,
     /// 全文溢出文件路径（仅 [`truncate_spill`] 设置）。
     pub spill_path: Option<String>,
 }
@@ -70,6 +72,7 @@ pub fn truncate_tail(text: &str) -> Truncated {
             truncated: false,
             total_lines,
             total_bytes,
+            kept_lines: total_lines,
             spill_path: None,
         };
     }
@@ -81,6 +84,7 @@ pub fn truncate_tail(text: &str) -> Truncated {
         truncated: true,
         total_lines,
         total_bytes,
+        kept_lines: kept.len(),
         spill_path: None,
     }
 }
@@ -137,6 +141,7 @@ fn truncate_head_with_marker(text: &str, marker: &str) -> Truncated {
             truncated: false,
             total_lines,
             total_bytes,
+            kept_lines: total_lines,
             spill_path: None,
         };
     }
@@ -147,6 +152,7 @@ fn truncate_head_with_marker(text: &str, marker: &str) -> Truncated {
         truncated: true,
         total_lines,
         total_bytes,
+        kept_lines: kept.len(),
         spill_path: None,
     }
 }

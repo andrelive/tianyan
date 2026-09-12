@@ -129,7 +129,6 @@ fn build_window(
     // 防"一次读全"的误用——超大请求被钳制后按窗口截断并提示 offset 续读）。
     let limit = limit.unwrap_or(2000).clamp(1, 2000);
     let end = (start + limit).min(total_lines);
-    let window_truncated = end < total_lines;
     // 内容匹配编辑（apply_edit 已改为 old_string 匹配）：read_file 输出纯内容，
     // 不再带行号/哈希前缀（省 token）；行范围提示仍保留供模型定位讨论。
     let window_lines: Vec<&str> = lines
@@ -139,19 +138,25 @@ fn build_window(
         .take(end - start)
         .map(|(_, line)| *line)
         .collect();
-    let message = window_truncated.then(|| {
-        format!(
-            "(Showing lines {}-{} of {}. Use offset={} to continue.)",
-            start + 1,
-            end,
-            total_lines,
-            end + 1
-        )
-    });
     // 超大窗口（大 limit）仍受统一截断层（50KB / 2000 行）约束。
     // 注意：先对窗口内容截断、后追加提示行 —— 若先拼上提示行，窗口恰好 2000 行时
     // 会被截断层计为 2001 行而把提示行吃掉，丢失精确的续读偏移。
     let trunc = truncate::truncate_head(&window_lines.join("\n"));
+    // 实际返回的完整行数（字节截断时可能少于标称窗口）——续读偏移与
+    // showing.limit 都按它计算，避免跳过被截掉的行（前端"加载更多"同一契约：
+    // showing.limit = 该窗口实际返回的真实行数，不含截断标记）。
+    let returned_lines = trunc.kept_lines;
+    let shown_end = start + returned_lines;
+    let has_more = shown_end < total_lines;
+    let message = has_more.then(|| {
+        format!(
+            "(Showing lines {}-{} of {}. Use offset={} to continue.)",
+            start + 1,
+            shown_end,
+            total_lines,
+            shown_end + 1
+        )
+    });
     let mut content = trunc.text;
     if let Some(m) = &message {
         content.push('\n');
@@ -160,10 +165,10 @@ fn build_window(
     let mut out = json!({
         "path": path,
         "content": content,
-        "truncated": window_truncated || trunc.truncated,
+        "truncated": has_more,
         "total_lines": total_lines,
         "total_bytes": total_bytes,
-        "showing": { "offset": start + 1, "limit": end - start },
+        "showing": { "offset": start + 1, "limit": returned_lines },
     });
     if let Some(m) = message {
         out["message"] = json!(m);
