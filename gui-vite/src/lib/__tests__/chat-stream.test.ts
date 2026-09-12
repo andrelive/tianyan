@@ -136,6 +136,40 @@ describe('handleChatStreamEvent', () => {
     expect(wakeIdx).toBeGreaterThan(sysIdx);
   });
 
+  it('appends the compression summary message via server boundary event (pushed like normal messages)', () => {
+    // 压缩摘要是会话时序链上的普通节点（统一结构，不做区分）：与 System
+    // 通知同一条推送路径（chat_stream 边界事件 → applyServerMessage 按 id
+    // 查重追加）——压缩点在页面上实时可见，无需重载会话；usage 随消息
+    // 携带（圆环 lastMessageUsage 据此估算压缩后占用）。
+    useAppStore.getState().addMessage({ role: 'assistant', segments: [], id: null, timestamp: '' });
+    handleChatStreamEvent(ev({ delta: '回复完成，压缩检查在后台进行' }));
+    handleChatStreamEvent(
+      ev({
+        message: {
+          id: 'cmp_1',
+          role: 'system',
+          compression_marker: true,
+          segments: [{ type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：……' }],
+          usage: {
+            prompt_tokens: 167284,
+            completion_tokens: 3542,
+            total_tokens: 170826,
+            cache_read: 0,
+            cache_write: 0,
+          },
+        },
+      }),
+    );
+
+    const msgs = useAppStore.getState().messages;
+    // 摘要消息按 id 追加（时序顺序：排在回复之后）
+    const marker = msgs.find((m) => m.id === 'cmp_1');
+    expect(marker?.compression_marker).toBe(true);
+    expect(msgs[msgs.length - 1].id).toBe('cmp_1');
+    // usage 透传（lastMessageUsage 的压缩点分支依赖）
+    expect(marker?.usage?.prompt_tokens).toBe(167284);
+  });
+
   it('confirms the optimistic user message id via user_message_id event (ADR-031)', () => {
     // 乐观渲染：本地插入用户消息（带 user_message_id）→ 确认事件比对后
     // 替换为服务端真实 id（user_message_id 字段删除——生命周期结束）

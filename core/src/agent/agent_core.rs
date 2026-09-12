@@ -549,14 +549,17 @@ impl Agent {
             .flat_map(ContextAssembler::structured_to_messages)
             .collect();
 
-        // 真实上下文占用：最近一次请求的 prompt 侧 token（input + cache.read）。
-        // 从消息持久化的 usage 聚合——最后一条带 usage 的 assistant 消息即
-        // 最近一次请求的完整输入统计。
+        // 真实上下文占用：最近一次请求的 prompt 侧 token。
+        // `tokens.input` 是**完整输入**（含缓存命中部分，`cache.read` 为其
+        // 子集）——两者相加会重复计算缓存命中（判定值≈真实值×2，真实占用
+        // 远低于阈值也会提前压缩），故取 input；max 兜底异常口径
+        // （input=0 但 cache.read>0 的旧数据）。从消息持久化的 usage 聚合
+        // ——最后一条带 usage 的消息即最近一次请求的输入统计。
         let recent_input_tokens = messages_since_marker
             .iter()
             .rev()
             .find(|m| m.tokens.input > 0 || m.tokens.cache.read > 0)
-            .map(|m| m.tokens.input + m.tokens.cache.read)
+            .map(|m| m.tokens.input.max(m.tokens.cache.read))
             .unwrap_or(0);
 
         let Some(summary_sm) = self
@@ -1397,6 +1400,91 @@ mod tests {
             !state.read().await.injectable_context.soul.is_empty(),
             "未压缩不应清空注入上下文缓存"
         );
+    }
+
+    #[tokio::test]
+    async fn test_compress_not_triggered_by_double_counted_cache() {
+        // 回归保护（double count）：压缩判定基于"最近请求的真实占用"。
+        // `tokens.input` 已含缓存命中部分（cache.read 是其子集）——此前
+        // `input + cache.read` 重复计算，判定值≈真实×2，真实占用远低于
+        // 阈值也会提前压缩。
+        //
+        // 窗口 10000 × 阈值 0.5 → 触发线 5000；最近请求 input=4800（其中
+        // cache.read=4700 命中）→ 真实 4800 < 5000：不得压缩
+        // （旧逻辑 4800+4700=9500 > 5000 会误触发）。
+        let agent = make_agent_full(
+            MockChatService::new(),
+            MockChatService::new(),
+            CompressionConfig {
+                context_window: 10_000,
+                compression_threshold: 0.5,
+                ..CompressionConfig::default()
+            },
+        );
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        for i in 0..7 {
+            let mut sm = ContextAssembler::message_to_structured(
+                &Message::user(format!("消息 {i}")),
+                "session-1",
+                None,
+                None,
+            );
+            if i == 6 {
+                sm.tokens.input = 4_800;
+                sm.tokens.cache.read = 4_700;
+            }
+            state.write().await.add_structured_message(sm);
+        }
+
+        let summary = agent
+            .maybe_compress_and_persist(&state, "session-1", false)
+            .await;
+        assert!(
+            summary.is_none(),
+            "真实占用 4800 < 触发线 5000：不应压缩（旧逻辑 4800+4700 会误压）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compress_triggered_when_real_input_above_threshold() {
+        // 正向保护：修复 double count 后，真实占用超过触发线仍正常压缩。
+        // 窗口 10000 × 阈值 0.5 → 触发线 5000；最近请求 input=5100（含
+        // cache.read=5000）→ 真实 5100 > 5000：应压缩。
+        let mut compress_mock = MockChatService::new();
+        compress_mock
+            .expect_chat_completion()
+            .returning(|_| Ok(response_with(Message::assistant("这是压缩摘要"))));
+        let agent = make_agent_full(
+            MockChatService::new(),
+            compress_mock,
+            CompressionConfig {
+                context_window: 10_000,
+                compression_threshold: 0.5,
+                ..CompressionConfig::default()
+            },
+        );
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        for i in 0..7 {
+            let mut sm = ContextAssembler::message_to_structured(
+                &Message::user(format!("消息 {i}")),
+                "session-1",
+                None,
+                None,
+            );
+            if i == 6 {
+                sm.tokens.input = 5_100;
+                sm.tokens.cache.read = 5_000;
+            }
+            state.write().await.add_structured_message(sm);
+        }
+
+        let summary = agent
+            .maybe_compress_and_persist(&state, "session-1", false)
+            .await;
+        let summary = summary.expect("真实占用 5100 > 触发线 5000：应发生压缩");
+        assert!(summary.compression_marker, "压缩摘要消息应带压缩标记");
     }
 
     // ── ADR-013：唤醒轮（process_wake） ─────────────────────────

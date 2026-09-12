@@ -150,3 +150,34 @@ describe('MessageBubble history rendering', () => {
   });
 });
 
+describe('MessageBubble compression marker', () => {
+  it('renders the 压缩点 badge for compression summary messages', () => {
+    // 压缩点标识（compression_marker）：实时推送后在页面上可辨识——徽章
+    // 渲染于消息顶部，正文仍走统一时间线（SegmentBlocks）。
+    const summaryMsg: ChatMessage = {
+      role: 'system',
+      compression_marker: true,
+      segments: [{ type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：……' }],
+    };
+    render(
+      <MessageBubble message={summaryMsg} index={1} isStreaming={false} onRollback={() => {}} />,
+    );
+
+    expect(screen.getByText('压缩点')).toBeInTheDocument();
+    expect(screen.getByText(/对话摘要/)).toBeInTheDocument();
+  });
+
+  it('does not render the badge for regular system notifications', () => {
+    const notifyMsg: ChatMessage = {
+      role: 'system',
+      segments: [{ type: 'text', text: '[后台命令完成] cargo tauri build（cmd_0）' }],
+    };
+    render(
+      <MessageBubble message={notifyMsg} index={0} isStreaming={false} onRollback={() => {}} />,
+    );
+
+    expect(screen.queryByText('压缩点')).not.toBeInTheDocument();
+    expect(screen.getByText(/后台命令完成/)).toBeInTheDocument();
+  });
+});
+

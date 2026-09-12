@@ -5,10 +5,12 @@
 //!   完成事件（user_message_id 确认 / pump 边界）到前端；后台任务完成
 //!   通知只落库（LLM 上下文），唤醒轮流式化后输出经 chat_stream 推送；
 //!   子智能体消息经 chat_stream 事件（session_id=task_id）路由到面板。
-//!   **System 通知例外**：后台任务/命令完成通知、定时提醒等 System 消息
-//!   落库后补发 chat_stream 边界事件（chunk_type=message）——与用户消息
-//!   边界事件同构，前端 applyServerMessage 按 id 查重追加，实时可见
-//!   （历史加载与实时流同一份数据、同一条渲染路径）。
+//!   **System 消息统一推送**：后台任务/命令完成通知、定时提醒、**压缩摘要**
+//!   等 System 消息落库后补发 chat_stream 边界事件（chunk_type=message）——
+//!   与用户消息边界事件同构，前端 applyServerMessage 按 id 查重追加，实时
+//!   可见（历史加载与实时流同一份数据、同一条渲染路径）。压缩点是会话
+//!   时序链上的普通节点（统一结构，不做区分）：推送与快照/历史按 id 幂等
+//!   收敛，不产生重复。
 //!   快照恢复（订阅端点）与断点对齐（fetch）是权威兜底。
 //! - 通道：`task_event_tx`（broadcast）仍承载任务状态/命令输出事件
 //!   （core 已 emit）与流式事件（chat_stream），前端按 `type` 区分。
@@ -25,9 +27,10 @@ use tianyan::session::{Session, SessionManager};
 ///
 /// 只包装 `add_structured_message`（所有消息的唯一入口：用户消息/工具结果/
 /// 后台通知/唤醒轮输出/压缩摘要均经此落库）；其余方法原样委托。
-/// System 通知（后台任务/命令完成、定时提醒）落库后补发 chat_stream 边界
-/// 事件——输入类消息"落库 → 推送"统一契约（用户消息有 send_message_boundary，
-/// 后台通知补上等价推送；压缩摘要不推送——历史加载已含，避免重复）。
+/// System 消息（后台任务/命令完成、定时提醒、压缩摘要）落库后补发
+/// chat_stream 边界事件——输入类消息"落库 → 推送"统一契约（用户消息有
+/// send_message_boundary，System 消息补上等价推送；压缩点与普通消息同构，
+/// 不做区分）。
 #[derive(Clone)]
 pub struct BroadcastingSessionManager {
     inner: Arc<dyn SessionManager>,
@@ -178,21 +181,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compression_marker_system_does_not_push() {
-        let (tx, mut rx) = tokio::sync::broadcast::channel::<String>(16);
+    async fn compression_marker_system_pushes_chat_stream_event() {
+        // 压缩摘要与普通 System 消息同构推送（统一结构，不做区分）：落库
+        // 后补发 chat_stream 边界事件——前端实时可见（压缩点不再需要重载
+        // 会话才能发现）；`compression_marker` 字段随消息下发，前端据此
+        // 渲染"压缩点"标识。
+        let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
         let inner = Arc::new(RecordingSessionManager::new());
         let wrapper = BroadcastingSessionManager::new(inner.clone(), tx);
 
-        let mut sm = StructuredMessage::system("session-1", "压缩摘要");
+        let mut sm = StructuredMessage::system("session-1", "[对话摘要] 早期对话摘要");
         sm.compression_marker = true;
         wrapper
-            .add_structured_message("session-1", sm)
+            .add_structured_message("session-1", sm.clone())
             .await
             .unwrap();
 
+        // 落库调用发生
         assert_eq!(inner.calls.lock().unwrap().len(), 1);
-        let timeout = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
-        assert!(timeout.is_err(), "压缩摘要不应推送事件");
+        // 事件推送：chat_stream + chunk_type=message + compression_marker 透传
+        let ev = recv_event(rx)
+            .await
+            .expect("压缩摘要应推送 chat_stream 事件");
+        assert_eq!(ev["type"], "chat_stream");
+        assert_eq!(ev["chunk_type"], "message");
+        assert_eq!(ev["session_id"], "session-1");
+        assert_eq!(ev["message"]["id"], sm.id);
+        assert_eq!(ev["message"]["role"], "system");
+        assert_eq!(ev["message"]["compression_marker"], true);
+        let segments = ev["message"]["segments"].as_array().expect("segments");
+        assert!(segments[0]["text"].as_str().unwrap().contains("对话摘要"));
     }
 
     #[tokio::test]
@@ -235,11 +253,11 @@ impl SessionManager for BroadcastingSessionManager {
         self.inner
             .add_structured_message(session_id, msg.clone())
             .await?;
-        // System 通知例外：落库后补发 chat_stream 边界事件（与用户消息
-        // 边界事件同构）——前端 applyServerMessage 按 id 查重追加，实时可见。
-        // 压缩摘要（compression_marker）不推送：历史加载已含，实时推送会
-        // 与快照/历史重复。
-        if msg.role == tianyan::common::types::MessageRole::System && !msg.compression_marker {
+        // System 消息（含压缩摘要）：落库后补发 chat_stream 边界事件（与
+        // 用户消息边界事件同构）——前端 applyServerMessage 按 id 查重追加，
+        // 实时可见。压缩点是会话时序链上的普通节点（统一结构，不做区分）；
+        // 推送与快照/历史按 id 幂等收敛，不产生重复。
+        if msg.role == tianyan::common::types::MessageRole::System {
             self.push_system_notification(session_id, &msg);
         }
         Ok(())

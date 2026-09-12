@@ -1,5 +1,5 @@
 import { useState, memo } from 'react';
-import { Copy, Check, Undo2 } from 'lucide-react';
+import { Copy, Check, Minimize2, Undo2 } from 'lucide-react';
 import { messageText } from '@/lib/types';
 import type { ChatMessage } from '@/lib/types';
 import { cn, formatTime } from '@/lib/utils';
@@ -69,6 +69,19 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
                 className="max-w-[240px] max-h-[240px] rounded-lg object-contain border border-white/10"
               />
             ))}
+          </div>
+        )}
+
+        {/* 压缩点标识（compression_marker 摘要消息）：压缩点是会话时序链
+            上的普通节点（统一结构）——实时推送后，经徽章标识在页面上可
+            辨识；正文仍走统一时间线（SegmentBlocks），不另做渲染分支。 */}
+        {message.compression_marker && (
+          <div className="mb-2 flex items-center gap-2 select-none">
+            <span className="inline-flex items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-hover)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)]">
+              <Minimize2 className="w-3 h-3" aria-hidden="true" />
+              压缩点
+            </span>
+            <span className="h-px flex-1 bg-[var(--color-border)]" aria-hidden="true" />
           </div>
         )}
 
