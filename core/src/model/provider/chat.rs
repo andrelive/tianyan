@@ -78,12 +78,13 @@ impl ChatService for AsyncOpenAIClient {
                         }
                         _ => false,
                     },
-                    message: format!("聊天补全失败：{}", e),
+                    // ADR-014：语义分类单点（KIND 前缀可被消费端谓词判定）
+                    message: classify_upstream_error(&e),
                 })
             },
         )
         .await
-        .map_err(|e| TianyanError::Custom(format!("模型服务错误：{}", e.message)))?;
+        .map_err(|e| TianyanError::Custom(e.message))?;
 
         let choices = response
             .choices
@@ -227,6 +228,55 @@ struct RetryableFailure {
     message: String,
 }
 
+/// 上游 OpenAI 兼容错误的语义分类（ADR-014：分类契约单点）。
+///
+/// 上游网关（官方 / ollama / 自建）错误形态差异大：用错误文本中的
+/// **语义关键词**判定（不再依赖裸状态码数字，避免误判）；命中返回
+/// **带语义 KIND 前缀**的显示文本（消费端用 `is_permission` /
+/// `is_not_found` / `is_timeout` 谓词判定），未命中返回原文（Custom 语义）。
+/// 前缀保持既有显示契约（"模型服务错误：聊天补全失败：…"）。
+fn classify_upstream_error(e: &OpenAIError) -> String {
+    let raw = format!("模型服务错误：聊天补全失败：{e}");
+    let probe = format!("{e}").to_lowercase();
+    if probe.contains("invalid_api_key")
+        || probe.contains("invalid api key")
+        || probe.contains("unauthorized")
+        || probe.contains("authentication")
+    {
+        return TianyanError::permission(raw).to_string();
+    }
+    if probe.contains("model_not_found")
+        || probe.contains("model not found")
+        || probe.contains("does not exist")
+    {
+        return TianyanError::not_found(raw).to_string();
+    }
+    if let OpenAIError::Reqwest(r) = e {
+        if r.is_timeout() {
+            return TianyanError::timeout(raw).to_string();
+        }
+    }
+    raw
+}
+
+/// HTTP 状态码 → 语义分类（ADR-014：分类契约单点；流式请求的显式状态码）。
+///
+/// 401/403 → permission、404 → not_found、408/504 → timeout；其余返回原文。
+fn classify_http_status(status: reqwest::StatusCode, raw: &str) -> String {
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return TianyanError::permission(raw).to_string();
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return TianyanError::not_found(raw).to_string();
+    }
+    if status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::GATEWAY_TIMEOUT
+    {
+        return TianyanError::timeout(raw).to_string();
+    }
+    raw.to_string()
+}
+
 impl AsyncOpenAIClient {
     /// 手写 SSE 流式补全：POST {base_url}/chat/completions（body 已含 stream: true），
     /// 逐行解析 data: 事件为内部 ChatCompletionChunk 并经 channel 返回。
@@ -249,7 +299,7 @@ impl AsyncOpenAIClient {
             || self.send_chat_request(&url, &body),
         )
         .await
-        .map_err(|e| TianyanError::Custom(format!("模型服务错误：{}", e.message)))?;
+        .map_err(|e| TianyanError::Custom(e.message))?;
 
         let mut byte_stream = response.bytes_stream();
         let (tx, rx) = mpsc::channel(100);
@@ -314,19 +364,23 @@ impl AsyncOpenAIClient {
         }
         let response = req.send().await.map_err(|e| {
             let retryable = crate::model::retry::should_retry_transport(&e);
-            RetryableFailure {
-                retryable,
-                message: format!("流式请求失败：{}", e),
-            }
+            let raw = format!("模型服务错误：流式请求失败：{e}");
+            let message = if e.is_timeout() {
+                TianyanError::timeout(raw).to_string()
+            } else {
+                raw
+            };
+            RetryableFailure { retryable, message }
         })?;
         let status = response.status();
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
             let detail: String = detail.chars().take(300).collect();
             let retryable = crate::model::retry::should_retry_http(status);
+            let raw = format!("模型服务错误：流式请求被拒绝（HTTP {status}）：{detail}");
             return Err(RetryableFailure {
                 retryable,
-                message: format!("流式请求被拒绝（HTTP {}）：{}", status, detail),
+                message: classify_http_status(status, &raw),
             });
         }
         Ok(response)
@@ -483,8 +537,10 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
                                 choices: vec![],
                                 usage: Some(usage),
                             };
-                            if let Some(usage_value) = value.get("usage") {
-                                extract_cache_tokens(usage_value, tail.usage.as_mut().unwrap());
+                            if let (Some(usage_value), Some(usage_slot)) =
+                                (value.get("usage"), tail.usage.as_mut())
+                            {
+                                extract_cache_tokens(usage_value, usage_slot);
                             }
                             tracing::debug!(
                                 usage = ?tail.usage,
@@ -1126,5 +1182,31 @@ mod stream_robustness_tests {
             rx.recv().await.is_none(),
             "仅 cost 块时流应正常结束（无输出、无错误）"
         );
+    }
+
+    /// 错误语义分类测试（ADR-014：KIND 前缀可被消费端谓词判定）。
+    ///
+    /// `classify_upstream_error` 的输入需构造上游错误对象（依赖 async-openai
+    /// 内部结构，测试稳定性差），其关键词逻辑由集成路径覆盖；此处锁定
+    /// HTTP 状态 → KIND 的映射契约（消费端谓词判定的根基）。
+    #[test]
+    fn test_classify_http_status_maps_semantic_kinds() {
+        let raw = "模型服务错误：流式请求被拒绝（HTTP 401）：invalid api key";
+        let s = classify_http_status(reqwest::StatusCode::UNAUTHORIZED, raw);
+        assert!(s.starts_with("操作不被允许："), "KIND 前缀应在最前: {s}");
+        assert!(TianyanError::Custom(s.clone()).is_permission(), "{s}");
+
+        let s = classify_http_status(reqwest::StatusCode::FORBIDDEN, raw);
+        assert!(TianyanError::Custom(s.clone()).is_permission(), "{s}");
+
+        let s = classify_http_status(reqwest::StatusCode::NOT_FOUND, raw);
+        assert!(TianyanError::Custom(s.clone()).is_not_found(), "{s}");
+
+        let s = classify_http_status(reqwest::StatusCode::GATEWAY_TIMEOUT, raw);
+        assert!(TianyanError::Custom(s.clone()).is_timeout(), "{s}");
+
+        // 其它状态：原文返回（Custom 语义，不改写分类）
+        let s = classify_http_status(reqwest::StatusCode::BAD_REQUEST, raw);
+        assert_eq!(s, raw);
     }
 }

@@ -121,8 +121,8 @@ pub async fn test_connection(
 
 /// 测试模型连接：创建临时客户端并发送一个简单的聊天请求验证连接。
 ///
-/// 错误文本按 HTTP 状态码文本分类（401/404/timeout），
-/// 面向配置面板的友好提示；不属 TianyanError 语义谓词范畴。
+/// 错误分类用**语义谓词**（ADR-014：分类契约在 core 单点——上游错误已在
+/// `model::provider::chat` 映射为 KIND 前缀），消费端不再做消息文本匹配。
 async fn test_model_connection(
     endpoint: &str,
     api_key: &str,
@@ -142,18 +142,44 @@ async fn test_model_connection(
     use tianyan::model::ChatService;
     match client.chat_completion(request).await {
         Ok(_) => Ok(vec![model.to_string()]),
-        Err(e) => {
-            let error_msg = e.to_string();
-            if error_msg.contains("401") || error_msg.contains("unauthorized") {
-                Err("API 密钥无效或已过期".to_string())
-            } else if error_msg.contains("404") {
-                Err("模型不存在，请检查模型名称".to_string())
-            } else if error_msg.contains("timeout") {
-                Err("连接超时，请检查网络或 API 端点".to_string())
-            } else {
-                Err(format!("连接失败: {}", error_msg))
-            }
-        }
+        Err(e) => Err(classify_connection_error(&e)),
+    }
+}
+
+/// 连接测试错误的用户友好提示（ADR-014 语义谓词；纯函数便于测试）。
+fn classify_connection_error(e: &tianyan::TianyanError) -> String {
+    if e.is_permission() {
+        "API 密钥无效或已过期".to_string()
+    } else if e.is_not_found() {
+        "模型不存在，请检查模型名称".to_string()
+    } else if e.is_timeout() {
+        "连接超时，请检查网络或 API 端点".to_string()
+    } else {
+        format!("连接失败: {e}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_classify_connection_error_uses_semantic_predicates() {
+        // ADR-014：消费端按语义谓词分类（不做消息文本匹配）
+        assert_eq!(
+            classify_connection_error(&tianyan::TianyanError::permission("model: 401")),
+            "API 密钥无效或已过期"
+        );
+        assert_eq!(
+            classify_connection_error(&tianyan::TianyanError::not_found("model: 404")),
+            "模型不存在，请检查模型名称"
+        );
+        assert_eq!(
+            classify_connection_error(&tianyan::TianyanError::timeout("model: timeout")),
+            "连接超时，请检查网络或 API 端点"
+        );
+        let other = tianyan::TianyanError::Custom("boom".to_string());
+        assert_eq!(classify_connection_error(&other), "连接失败: boom");
     }
 }
 

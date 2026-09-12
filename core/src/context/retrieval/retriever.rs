@@ -85,7 +85,9 @@ impl DualLayerRetriever {
                 stats.record_doc_hit(result.uri.as_str(), result.score);
             }
             let ns = results.first().map(|r| r.uri.namespace().to_string());
-            stats.record_search_query(query, results.len(), ns.as_deref());
+            stats
+                .record_search_query(query, results.len(), ns.as_deref())
+                .await;
         }
 
         // 步骤 3：加载内容。

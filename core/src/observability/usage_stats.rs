@@ -97,19 +97,14 @@ impl UsageStats {
     }
 
     /// 记录一次搜索查询（直接写入 SQLite，非热路径）。
-    pub fn record_search_query(
+    pub async fn record_search_query(
         &self,
         query_text: &str,
         result_count: usize,
         top_namespace: Option<&str>,
     ) {
-        let conn = match self.db.try_lock() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "统计存储错误：搜索查询跳过（数据库锁不可用）");
-                return;
-            }
-        };
+        // 写路径异步等待锁（try_lock 静默丢弃会让搜索统计失真）。
+        let conn = self.db.lock().await;
         if let Err(e) = conn.execute(
             "INSERT INTO daily_search_queries (query_text, result_count, top_namespace) VALUES (?1,?2,?3)",
             rusqlite::params![query_text, result_count as i64, top_namespace],
@@ -278,7 +273,9 @@ mod tests {
     #[tokio::test]
     async fn test_heatmap() {
         let stats = setup().await;
-        stats.record_search_query("async rust", 5, Some("knowledge"));
+        stats
+            .record_search_query("async rust", 5, Some("knowledge"))
+            .await;
         let hm = stats.query_search_heatmap().await;
         assert!(!hm["namespaces"].as_array().unwrap().is_empty());
     }

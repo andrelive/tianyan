@@ -89,9 +89,8 @@ impl ExecutionRepo {
         result: &str,
         ts: i64,
     ) -> Result<(), TianyanError> {
-        let conn = self.db.try_lock().map_err(|e| {
-            TianyanError::Custom(format!("observability: execution_log: 数据库锁不可用：{e}"))
-        })?;
+        // 写路径异步等待锁（此前 try_lock 失败直接上抛 → 记录丢失）。
+        let conn = self.db.lock().await;
         conn.execute(
             "INSERT INTO executions (session_id, tool_name, category, task_description, success, execution_time_ms, skills_used, steps_json, result, ts) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             rusqlite::params![

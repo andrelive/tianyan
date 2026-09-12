@@ -705,10 +705,12 @@ impl BackgroundTaskManager {
     /// （"进程重启中断"）——保证 remaining 计数不误判"仍有任务进行中"
     /// （否则全部完成唤醒永不触发）。
     async fn ensure_reloaded(&self) {
-        if self.reloaded.load(AtomicOrdering::SeqCst) {
+        // `swap` 抢锁：并发调用只有一个执行加载（其余直接返回，避免重复插入）。
+        // 加载失败必须**回滚标志**——否则历史任务永不加载、重启中断的
+        // Running 永不标 Failed、remaining 长期 >0 使"全部完成唤醒"永不触发。
+        if self.reloaded.swap(true, AtomicOrdering::SeqCst) {
             return;
         }
-        self.reloaded.store(true, AtomicOrdering::SeqCst);
 
         let Some(db) = &self.db else {
             return;
@@ -718,7 +720,9 @@ impl BackgroundTaskManager {
             let conn = match db.try_lock() {
                 Ok(c) => c,
                 Err(_) => {
-                    tracing::warn!("后台任务持久化加载跳过（数据库锁不可用）");
+                    // 锁不可用：回滚标志，允许下次调用重试（此前先置位 → 永不重试）
+                    self.reloaded.store(false, AtomicOrdering::SeqCst);
+                    tracing::warn!("后台任务持久化加载跳过（数据库锁不可用，下次重试）");
                     return;
                 }
             };
@@ -727,7 +731,9 @@ impl BackgroundTaskManager {
             ) {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!(error = %e, "后台任务持久化加载失败");
+                    // 回滚标志：允许下次重试
+                    self.reloaded.store(false, AtomicOrdering::SeqCst);
+                    tracing::warn!(error = %e, "后台任务持久化加载失败（下次重试）");
                     return;
                 }
             };
@@ -790,13 +796,8 @@ impl BackgroundTaskManager {
         let Some(db) = &self.db else {
             return;
         };
-        let conn = match db.try_lock() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "后台任务持久化跳过（数据库锁不可用）");
-                return;
-            }
-        };
+        // 写路径异步等待锁：try_lock 静默丢弃会让任务状态不落库（重启后"凭空消失"）。
+        let conn = db.lock().await;
         let result = conn.execute(
             "INSERT INTO background_tasks (id, kind, description, status, parent_session_id, result, error, created_at, completed_at, seq)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
@@ -826,7 +827,8 @@ impl BackgroundTaskManager {
     /// 按 ID 查询 SQLite（终态任务已从内存移除；未命中返回 None）。
     async fn query_sqlite(&self, id: &str) -> Option<BackgroundTask> {
         let db = self.db.as_ref()?;
-        let conn = db.try_lock().ok()?;
+        // 读路径同样等待锁：锁竞争时返回 None 会被误判为"任务不存在"。
+        let conn = db.lock().await;
         let mut stmt = conn
             .prepare(
                 "SELECT id, kind, description, status, parent_session_id, result, error, created_at, completed_at, seq
@@ -841,10 +843,8 @@ impl BackgroundTaskManager {
         let Some(db) = &self.db else {
             return Vec::new();
         };
-        let conn = match db.try_lock() {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
+        // 等待锁（try_lock 失败返回空列表会被误判为"无任务"）。
+        let conn = db.lock().await;
         let mut stmt = match conn.prepare(
             "SELECT id, kind, description, status, parent_session_id, result, error, created_at, completed_at, seq
              FROM background_tasks",
@@ -862,10 +862,7 @@ impl BackgroundTaskManager {
         let Some(db) = &self.db else {
             return;
         };
-        let conn = match db.try_lock() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
+        let conn = db.lock().await;
         let cutoff = now_ms() - 3 * 24 * 3600 * 1000;
         if let Err(e) = conn.execute(
             "DELETE FROM background_tasks WHERE completed_at IS NOT NULL AND completed_at < ?1",
@@ -1730,5 +1727,89 @@ mod tests {
 
         let task = manager.get(&id).await.unwrap();
         assert_eq!(task.result.as_deref(), Some("结果"));
+    }
+
+    #[tokio::test]
+    async fn test_ensure_reloaded_retries_when_lock_was_unavailable() {
+        // 回归保护：加载失败（锁不可用）必须**回滚标志**——此前先置位再加载，
+        // 失败后标志永为 true → 历史任务永不加载、重启中断的 Running 永不标
+        // Failed、remaining 长期 >0 使"全部完成唤醒"永不触发。
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        {
+            let conn = db.lock().await;
+            conn.execute(
+                "INSERT INTO background_tasks (id, kind, description, status, parent_session_id, result, error, created_at, completed_at, seq)
+                 VALUES ('hist-1','delegate','中断任务','running','s1',NULL,NULL,1000,NULL,1)",
+                [],
+            )
+            .unwrap();
+        }
+        let manager = BackgroundTaskManager::new().with_db(db.clone());
+
+        // 持锁：首次 ensure_reloaded 的 try_lock 必然失败（触发回滚路径）
+        let guard = db.lock().await;
+        manager.ensure_reloaded().await;
+        drop(guard);
+
+        // 释放锁后重试：应完成加载并把中断任务标 Failed
+        manager.ensure_reloaded().await;
+        let tasks = manager.snapshot().await;
+        let hist = tasks
+            .iter()
+            .find(|t| t.id == "hist-1")
+            .expect("历史任务应已加载");
+        assert_eq!(
+            hist.status,
+            TaskStatus::Failed,
+            "进程重启中断的 Running 任务应标记 Failed（失败后未回滚标志会导致永不加载）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persist_upsert_waits_for_lock_instead_of_dropping() {
+        // 回归保护：写路径等待锁（try_lock 静默丢弃 → 任务状态不落库、
+        // 重启后"凭空消失"）。
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let manager = BackgroundTaskManager::new().with_db(db.clone());
+        let id = manager
+            .register(TaskKind::Delegate, "任务".to_string(), "s1".to_string(), 0)
+            .await;
+
+        // register 落库为 pending——持锁期间的更新若被丢弃，SQL 仍为 pending。
+        assert_eq!(
+            manager.get(&id).await.map(|t| t.status),
+            Some(TaskStatus::Pending)
+        );
+
+        // 持锁期间发起写入：应等待而非丢弃
+        let guard = db.lock().await;
+        let m = manager.clone();
+        let task_id = id.clone();
+        let handle = tokio::spawn(async move {
+            if let Some(mut t) = m.get(&task_id).await {
+                t.status = TaskStatus::Completed;
+                t.result = Some("锁内写入".to_string());
+                m.persist_upsert(&t).await;
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(guard);
+        handle.await.unwrap();
+
+        let conn = db.lock().await;
+        let (status, result): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, result FROM background_tasks WHERE id = ?1",
+                rusqlite::params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "completed",
+            "持锁期间的写入必须等待完成（此前 try_lock 静默丢弃 → 状态不落库）"
+        );
+        assert_eq!(result.as_deref(), Some("锁内写入"));
     }
 }

@@ -49,13 +49,8 @@ impl UsageRepo {
         completion: u64,
         total: u64,
     ) {
-        let conn = match self.db.try_lock() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "usage_log: 跳过（数据库锁不可用）");
-                return;
-            }
-        };
+        // 写路径异步等待锁：try_lock 静默丢弃会让用量统计与演化输入失真。
+        let conn = self.db.lock().await;
         if let Err(e) = conn.execute(
             "INSERT INTO usage_logs (session_id, provider, model, uncached_input, cached_input, completion_tokens, total_tokens, ts) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             rusqlite::params![
