@@ -10,24 +10,26 @@
 
 | 文件 | 当前值 | 是否决定 MSI 版本 | 说明 |
 | --- | --- | --- | --- |
-| `tauri/tauri.conf.json` → `version` | **`0.3.15`** | ✅ **是**（唯一权威） | **MSI 文件名与产品版本由它决定** |
-| `Cargo.toml` → `[workspace.package] version` | `0.1.0` | ❌ 否 | 仅 crate 版本（编译产物显示 `tianyan-tauri v0.1.0`），**不影响 MSI 名** |
+| `tauri/tauri.conf.json` → `version` | **`0.3.16`** | ✅ **是**（唯一权威） | **MSI 文件名与 ProductVersion 由它决定**（安装后在「应用和功能」可见） |
+| `Cargo.toml` → `[workspace.package] version` | `0.3.16` | ❌ 否（但决定 **exe 文件属性**） | 各 crate 版本 + 编译产物的 `FileVersion`/`ProductVersion`。**0.3.16 起与产品版本统一**：此前为 `0.1.0`，导致 exe 属性里显示旧版本（MSI 名不受影响） |
 | `gui-vite/package.json` → `version` | `0.1.0` | ❌ 否 | 前端包版本（name `tianyan-gui`），不参与 MSI |
-| `docs/release/RELEASE_NOTES.md` | `0.3.15` | ❌ 否 | 发布说明（人工维护） |
-| `CHANGELOG.md` | `0.3.15` | ❌ 否 | 变更日志（人工维护） |
+| `docs/release/RELEASE_NOTES.md` | `0.3.16` | ❌ 否 | 发布说明（人工维护） |
+| `CHANGELOG.md` | `0.3.16` | ❌ 否 | 变更日志（人工维护） |
 
 **结论（务必记住）**
 
 - **MSI 文件名 = `Tianyan_<tauri.conf.json.version>_x64_<lang>.msi`**，
   即 `<productName>_<version>_x64_<language>.msi`。
 - 语言取 `tauri.conf.json.bundle.windows.wix.language = ["zh-CN","en-US"]` → **一次构建产出两个 MSI**：
-  - `target/release/bundle/msi/Tianyan_0.3.15_x64_zh-CN.msi`
-  - `target/release/bundle/msi/Tianyan_0.3.15_x64_en-US.msi`
+  - `target/release/bundle/msi/Tianyan_0.3.16_x64_zh-CN.msi`
+  - `target/release/bundle/msi/Tianyan_0.3.16_x64_en-US.msi`
 - **只改 `Cargo.toml` / `package.json` 的版本不会改变 MSI 名**——必须改 `tauri/tauri.conf.json`
   的 `version`。发布时三处（或至少 `tauri.conf.json` + CHANGELOG/RELEASE_NOTES）应保持一致。
 
-> ⚠️ **已发现的文档不一致**：`docs/release/RELEASE_NOTES.md` 的「安装与使用」写下载包为
-> `tianyan_0.2.0_x64.msi`（全小写、无语言段），与实际产物 `Tianyan_<ver>_x64_<lang>.msi` 不符。
+> ✅ **已修正（0.3.16）**：`RELEASE_NOTES.md` 的「安装与使用」此前写下载包为
+> `tianyan_0.2.0_x64.msi`（全小写、无语言段），现改为 `Tianyan_<版本>_x64_<lang>.msi`，
+> 并纠正「自签名」表述（实际未做 Windows 代码签名；`.sig` 是 Tauri 更新签名）。
+> 同时 `Cargo.toml` workspace 版本由 `0.1.0` 统一为 `0.3.16`（exe 文件属性随之一致）。
 
 ---
 
