@@ -108,6 +108,8 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 
+专题文档（机制级）→ [`context-pipeline`](docs/architecture/context-pipeline.md)（上下文组装+压缩）· [`event-protocol`](docs/architecture/event-protocol.md)（事件/SSE 协议）· [`model-provider-notes`](docs/architecture/model-provider-notes.md)（reasoning 回传+缓存）· [`operations/`](docs/operations/)（troubleshooting / data-health-check / release-msi）
+
 模块索引 → [`docs/architecture/module-map.md`](docs/architecture/module-map.md)
 设计原则 → [`docs/architecture/principles.md`](docs/architecture/principles.md)
 模块详细说明 → [`docs/module-descriptions.md`](docs/module-descriptions.md)
@@ -166,3 +168,5 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 - 已有链路不叠加抽象（不额外封装 Manager/Coordinator）
 - `server/main.rs` 不解析 `--host/--port` 命令行参数——独立启动总是监听默认 `127.0.0.1:3000`，QA 时直接测 3000
 - 配置热更新 API（`PUT /api/v1/config`）会持久化写入 `tianyan.toml`——QA/测试改动配置后必须恢复，别留污染
+- **PowerShell + cargo 陷阱（会伪造"编译失败"）**：PowerShell 5.1 下 `cargo ... 2>&1 | Select-String` / `Out-String` 会把 cargo 写到 **stderr** 的内容（warning 列表、`Blocking waiting for file lock`）当作错误抛出（`NativeCommandError`，exit 1）——即使编译实际成功。判据是输出里是否出现 `Finished` / `test result:`。脚本内用 `$ErrorActionPreference="Continue"`，交互排查可用 `cmd /c "cargo ..."`
+- 事件总线为**有界通道**（4096）：订阅者（事件处理器/SSE）积压时丢弃事件并计数（`EventBus::dropped_events()`）——实时通知尽力而为，权威数据在 SQLite/日志文件；不要把"事件必达"当作完整性契约

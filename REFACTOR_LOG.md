@@ -728,3 +728,56 @@ Oracle 批判性终审（Loop 2）发现 Wave 7 的 clippy 修复引入 3 处 fm
 - 14 个示例编译成本 ~60s（冷）/ 每次改动 ~11s（热），运行仅 ~8s——编译:运行 > 7:1，性价比极低
 - 示例均为模块级文档代码块（coordinator.rs / config / context），无 API 契约测试价值
 - 保留 `--doc` 显式能力，未来引入重要 API 示例时可选择性恢复
+
+## D 轮波次（0.3.16）：文档固化 + 结构重构（2026-09-12）
+
+### 背景
+三路深度审查（架构一致性 / 代码债务 / 文档体系）+ 机械扫描清单落在
+`.scratch/audit-report-2026-09-12.md`（D1 文档固化 6 份、D2 结构技术债 12 项）。
+批次 A（P1 正确性，`4505668`）、B（门禁恢复，`8ecb226`）、C（仓库卫生 + clippy 清零，`afba701`）
+已完成，本轮清 D1 + D2。
+
+### D1 文档固化（新增 8 份，全部经代码核实）
+| 文档 | 覆盖 | 规模 |
+|---|---|---|
+| `docs/architecture/context-pipeline.md` | 组装顺序（含 `project_instructions`）+ 压缩（阈值 0.6/临界 0.8/保留 10/最小 6、**轮末单次检查**、`prompt_side_tokens` 单点、user 锚定）+ 量化 SQL + 故障模式 | 399 行 |
+| `docs/architecture/event-protocol.md` | 通道模型 + 4 类事件字段表 + `StreamChunkType` 7 成员 + 订阅/快照恢复 + 可靠性分层 + 与 ADR 的 10 处不一致核实 | 347 行 |
+| `docs/architecture/model-provider-notes.md` | Provider 矩阵 + reasoning 回传契约 + 思考强度×语言实测 + 前缀缓存 + 上游异常 | — |
+| `docs/architecture/task-runtime.md` | 三类任务 + 并发排队 + 3 天 TTL + 唤醒 + 取消/回退 + FTS 边界 + 面板数据流 | 190 行 |
+| `docs/operations/troubleshooting.md` | 日志位置 + 三类高频故障 + DB 取证 + QA 纪律 + PowerShell 陷阱 | 378 行 |
+| `docs/operations/data-health-check.md` | 10 表 + 18 条巡检 SQL（EXPLAIN 全通过）+ 解读处置 | 283 行 |
+| `docs/operations/release-msi.md` | 版本落点 + 打包流程 + CI 链 + 已知坑 + 验收清单 | 172 行 |
+| 索引 | `module-map.md`（专题导航 + ADR 016/017/019 补齐）、`AGENTS.md`（导航 + PowerShell/cargo 陷阱 + 有界事件总线）、`development.md`（知识固化判据 + 测试口径） | — |
+
+### D2 结构重构（逐项）
+| # | 项 | 处置 | 验证 |
+|---|---|---|---|
+| B1 | 超长函数 4 个 | `spawn_background` 308→65、`run_stream` 226→46、`run_turns` 222→105、委托入口 235→95（各提取私有 helper） | 1182 测试全绿；字符串字面量集合比对（旧版全部保留） |
+| B3 | 截断重复 | 删 `truncate_trace_params`，统一 `common::truncate` 单点 | 编译 + 测试 |
+| B5 | 事件通道无界 + Lagged 静默 | `EventBus` 有界 4096 + `try_send` 丢弃计数 + 首次/每 100 次告警；`Lagged` 显式告警（含 skipped） | 新回归测试 + 反向验证 |
+| B6 | 统计刷盘逐行 INSERT | 语句 prepare 一次复用（逐行是语义要求：每次调用一行） | 编译 + 测试 |
+| B7 | VFS 前缀查询不一致 | `list_directory` `LIKE` → `substr + length`；`delete_entry` 长度改 SQL 侧 `length()` | 2 新回归测试 + 反向验证 |
+| B8 | `total_stat` 丢弃传入 SQL | WHERE 子句单点构造（分组/总计共用） | 新回归测试 + 反向验证 |
+| B4a | rusqlite 类型外泄 | `SqliteDb::open/open_in_memory/init_all_schemas` → `TianyanError`；门面去重复前缀 | 编译 + 测试 |
+| B11 | 残留 | `agent/role_store.rs` 兼容层删除；`/tasks/stream` 保留为兼容入口（见下） | 编译 + 测试 |
+| ADR 对齐 | `command_output` 无节流（ADR-028 声明 100ms 合并） | `drain_output` 时间窗合并 + 收尾 flush（含提前 break 路径） | 新回归测试 + 反向验证 |
+| B10/B12 | clippy 残留 / 仓库卫生 | 批次 C 已清零，本轮复核 `-D warnings` 通过 | clippy |
+
+### 决策记录（明确不修 + 理由）
+| 项 | 决定 | 理由 |
+|---|---|---|
+| B4b `Database::lock()` 裸连接（54 处） | 不修 | 站点集中在 `db/*` 仓储、`vfs/backend/sqlite.rs`、`session/store.rs`、`agent/background.rs`——都是"该直接执行 SQL 的存储实现层"；再包一层违背「已有链路不叠加抽象」。真正可修的抽象泄漏（类型出现在公开签名）已修（B4a） |
+| B9 启动期重复 clone 配置 | 不修 | 启动期一次性、非热路径（毫秒级），改动需引入局部变量/借用重构，收益≈0 风险非零 |
+| B6 `skill_calls` 无 TTL | 不修 | 该表是演化/统计的长期输入，删历史行会改变指标口径；如要限制应立独立 ADR（数据保留策略） |
+| `/tasks/stream` 端点 | 保留 | 它已是 `GET /events` 的兼容入口（README 已注明"兼容入口；推荐用 /events"）；删除收益小、外部脚本风险大 |
+| `agent_ops_tests.rs` helper"未使用" | 无需动作 | clippy `-D warnings` 全绿说明该项已过时 |
+
+### 验证（门禁全绿）
+- `cargo fmt --all -- --check` 干净；`cargo clippy --workspace --all-targets -- -D warnings` 0 报错
+- core **1182** / server 146 / mcp 16 / tauri 9；前端 vitest **392** / eslint 0 problems / prettier 全符合
+- `scripts/gen-tool-catalog.ps1 -Check` → 工具目录与代码一致
+- 反向验证（5 个新测试均有判别力）：VFS 前缀 ×2、usage WHERE 口径 ×1、事件总线背压 ×1、命令输出节流 ×1
+- 文档质量：`data-health-check.md` 的 18 条 SQL 全部 EXPLAIN 通过（修正 1 条 DELETE 别名语法）
+
+### 交付
+`Tianyan_0.3.16_x64_zh-CN.msi` / `Tianyan_0.3.16_x64_en-US.msi`

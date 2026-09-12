@@ -1,7 +1,21 @@
 # 天演模块索引
 
 > 快速导航：每个模块的职责、位置、关键文件。详细功能见 [module-descriptions.md](../module-descriptions.md)，模块间关系和调用流程见 [module-relationships.md](../module-relationships.md)。
-> **最后更新**: 2026-09-06（ADR-029/030 同步：事件订阅与快照恢复、统一 Agent 循环框架）
+> **最后更新**: 2026-09-12（D 轮补全：专题文档导航、ADR 编号补齐、role_store 去向、事件总线有界化）
+
+**专题文档**（机制级说明，先读这些再看模块）：
+
+| 文档 | 覆盖 |
+|------|------|
+| [context-pipeline.md](context-pipeline.md) | 上下文组装顺序（含 project_instructions）+ 压缩机制（触发口径/阈值/摘要字段/user 锚定）+ 构成量化方法 + 故障模式 |
+| [event-protocol.md](event-protocol.md) | 事件通道模型 + 4 类事件字段表 + 订阅与快照恢复 + 可靠性分层 + 防死锁不变量 |
+| [model-provider-notes.md](model-provider-notes.md) | Provider/协议矩阵 + reasoning 回传契约 + 思考强度×语言实测 + 前缀缓存 + 上游异常 |
+| [task-runtime.md](task-runtime.md) | 三类任务 + 并发排队 + TTL + 唤醒语义 + 取消/回退 + 子会话 FTS 边界 + 面板数据流 |
+| [principles.md](principles.md) | 设计原则 |
+| [refactoring-practices.md](refactoring-practices.md) | 重构实践指南（审查/波次/QA 纪律） |
+| [../operations/troubleshooting.md](../operations/troubleshooting.md) | 日志与三类高频故障排查 + DB 取证 + QA 纪律 |
+| [../operations/data-health-check.md](../operations/data-health-check.md) | 表清单 + 巡检 SQL 集 + 解读处置 |
+| [../operations/release-msi.md](../operations/release-msi.md) | 版本号落点 + 本地打包流程 + CI 发布链 + 已知坑 + 验收清单 |
 
 ---
 
@@ -35,12 +49,12 @@
 | `model` | `core/src/model/` | 模型服务容器（`ModelServices`）+ provider 实现 | `traits.rs`, `services.rs`, `provider/` |
 | `observability` | `core/src/observability/` | 可观测性 + 使用统计（`AgentMetrics`、`UsageStats`、`TraceCollector`、`ExecutionLog`、`UsageLog`、`RuleRecorder`；SQL 经 `db` 门面/Repository 收敛，组件保留内存热路径） | `mod.rs`, `usage_stats.rs`, `trace.rs`, `execution_log.rs`, `usage_log.rs`, `rule_recorder.rs`, `execution_history.rs` |
 | `roles` | `core/src/roles/` | 角色基础类型（ADR-016 纯类型层：`AgentRole`/`RoleSource`/`RoleStatus`/`RoleUsage`/`DelegationRecord`）——config/agent/scheduler 共用，不依赖领域模块 | `mod.rs` |
-| `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles；scheduler 演化任务与 agent 共用） | `role_store.rs` |
+| `role_store` | `core/src/role_store.rs` | 角色 VFS 存储（独立存储层，依赖 vfs + roles；scheduler 演化任务与 agent 共用）。**唯一路径**：`crate::role_store`——`agent/role_store.rs` 的历史 re-export 兼容层已删除（2026-09） | `role_store.rs` |
 | `scheduler` | `core/src/scheduler/` | 定时任务调度器 + 任务实现 | `task_scheduler.rs`, `tasks/` |
 | `session` | `core/src/session/` | 会话管理（⚠️ ADR-018 VFS 例外：`SessionStore` SQLite 权威存储，原子取号 + 失败上抛；**SQL 收敛于本模块**（会话专属存储，经 `db::Database` 单连接直接实现）；`PersistentSessionManager` 业务语义；`SessionRecall` FTS 回忆；`session_meta` 存 SessionHeader/injectable 快照）；存储层返回完整链（ADR-027），压缩点截断发生在组装层 | `store.rs`, `manager.rs`, `search.rs`, `types.rs` |
 | `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现/读取 + GEPA 进化 + 使用复审；**无执行语义**） | `manager.rs`, `reviewer.rs`, `learning/` |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退，⚠️ ADR-006 VFS 例外）；重做子系统独立（`redo.rs`，与 capture/restore/diff/gc 正交） | `mod.rs`, `redo.rs` |
-| `events` | `core/src/events/` | 事件驱动触发（文件监听 + webhook → 事件总线 → 规则动作） | `mod.rs`, `bus.rs`, `watcher.rs`, `rules.rs` |
+| `events` | `core/src/events/` | 事件驱动触发（文件监听 + webhook → 事件总线 → 规则动作）。事件总线为**有界通道**（`EVENT_BUS_CAPACITY = 4096` + `try_send`）：订阅者积压时丢弃该事件并计入 `dropped_events()`（绝不阻塞发布方、不无限积压内存） | `mod.rs`, `bus.rs`, `watcher.rs`, `rules.rs` |
 | `goals` | `core/src/goals/` | 长期目标 + 进度跟踪（会话绑定；运行期 `goals.json`） | `mod.rs` |
 | `notification` | `core/src/notification.rs` | 通知通道抽象（`NotificationSink`；桌面实现由 tauri 注入） | `notification.rs` |
 | `todos` | `core/src/todos/` | 待办清单（会话绑定；运行期 `todos.json`） | `mod.rs` |
@@ -119,6 +133,9 @@
 - [ADR-013: 统一消息通知与唤醒原语](decisions/013-unified-message-notification-wake.md) — 消息入库 + 唤醒语义
 - [ADR-014: 错误分类语义谓词](decisions/014-error-classification.md) — not_found/conflict/invalid_input 语义谓词
 - [ADR-015: 会话工作区绑定](decisions/015-session-workspace-binding.md) — 工作区是会话的父级分组
+- [ADR-016: 角色专业化与演化](decisions/016-role-specialization-evolution.md) — 角色注册表 + 角色化委托 + 使用统计驱动的演化
+- [ADR-017: 统一自演化](decisions/017-unified-self-evolution.md) — 记忆/规则/技能三路自演化的统一模型
+- [ADR-019: 服务端权威消息时序](decisions/019-server-authoritative-message-timeline.md) — 服务端为消息时序权威（ADR-027 前身）
 - [ADR-020: 统一写入门面 Database](decisions/020-database-facade.md) — 单连接 + schema 集中 + 业务域 Repository；db 只依赖 common
 - [ADR-021: 分层重构与循环消除](decisions/021-layered-refactor.md) — 基础类型层/存储层/领域层单向依赖；生产代码零模块环
 - [ADR-022: 会话绑定任务面板](decisions/022-session-bound-task-ux.md) — todo/goal 会话绑定；数据目录只读 + 搬迁对话框

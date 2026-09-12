@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.16] - 2026-09-12
+
+### Added
+- 机制文档 4 份：`docs/architecture/context-pipeline.md`（组装+压缩+量化+故障模式）、`event-protocol.md`（事件协议+快照恢复+可靠性分层）、`model-provider-notes.md`（reasoning 契约+实测）、`task-runtime.md`（任务运行时模型）
+- 运维手册 3 份：`docs/operations/{troubleshooting,data-health-check,release-msi}.md`（巡检 SQL 全部经 EXPLAIN 实测）
+- 回归测试 5 个（VFS 前缀匹配 ×2、usage 统计口径 ×1、事件总线背压 ×1、命令输出节流 ×1），全部经反向验证（注入旧缺陷必红）
+
+### Changed
+- 结构重构（行为零变化）：`CommandManager::spawn_background` 308 → 65 行；`AgentLoop::run_stream` 226 → 46；`run_turns` 222 → 105；子代理委托入口 235 → 95
+- 事件总线由无界 → **有界**（`EVENT_BUS_CAPACITY = 4096` + `try_send` 丢弃计数）；`task_event_tx` 的 `Lagged` 由静默 `continue` 改为显式告警
+- 命令输出事件按 **100ms 时间窗合并**（对齐 ADR-028 声明）+ 流结束 flush 残留增量
+- `db::SqliteDb::open` / `open_in_memory` / `init_all_schemas` 返回 `TianyanError`（rusqlite 类型不再外泄）；`Database` 门面去掉重复错误前缀
+- 统计落盘 `flush_counts` 语句 prepare 一次复用（逐行插入仍是语义要求）
+
+### Fixed
+- VFS `list_directory` 的 `LIKE` 前缀匹配会把 URI 里的 `_` 当通配符（可能列出兄弟目录条目）→ 改 `substr(uri, 1, length(?1)) = ?1`；`delete_entry` 长度改由 SQL 侧 `length()` 计算（消除 Rust 字节长度与 SQL 字符长度混用）
+- `db::UsageRepo::total_stat` 丢弃传入 SQL、按 `conds.len()` 硬编码重建 WHERE（过滤组合一改即静默失配）→ WHERE 子句单点构造
+- 截断实现重复：`tool_registry::truncate_trace_params` 删除，统一走 `common::truncate::truncate_utf8_boundary`
+- `scripts/build.ps1` 产物路径错误（查 `tauri/target`，实际在 workspace `<root>/target`）；补 `protoc` 依赖检查
+- `docs/operations/data-health-check.md` 首版 `DELETE ... AS b` 语法（SQLite 不支持 DELETE 表别名）已修正
+
+### Removed
+- `core/src/agent/role_store.rs` 兼容 re-export（统一 `crate::role_store`）
+
 ## [0.1.0] - 2026-08
 
 ### Added
