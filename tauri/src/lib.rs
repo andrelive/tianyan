@@ -482,13 +482,17 @@ fn init_logging(config: &tianyan::common::logging::LoggingConfig) {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
     let file_filter = EnvFilter::new(&config.level);
 
-    // 控制台 layer：格式（text/json）来自配置文件 [logging].format
+    // 控制台 layer：格式（text/json）来自配置文件 [logging].format。
+    // filter 按层挂载（`with_filter`）——此前 console_filter 是全局过滤器，
+    // file_filter 建了却未接线（unused）：RUST_LOG 一旦设置，文件层也被它
+    // 过滤（与"文件层恒用配置级别"的设计相悖）。
     let fmt_layer = if config.format == "json" {
         tracing_subscriber::fmt::layer()
             .json()
             .with_target(true)
             .with_line_number(true)
             .with_file(true)
+            .with_filter(console_filter)
             .boxed()
     } else {
         tracing_subscriber::fmt::layer()
@@ -496,11 +500,12 @@ fn init_logging(config: &tianyan::common::logging::LoggingConfig) {
             .with_thread_ids(true)
             .with_line_number(true)
             .with_file(true)
+            .with_filter(console_filter)
             .boxed()
     };
 
     if let Some(file) = file_appender {
-        // 文件 layer：固定 text 格式（ANSI off，可读性好）
+        // 文件 layer：固定 text 格式（ANSI off，可读性好）；级别恒为配置级别
         let fmt_layer_file = tracing_subscriber::fmt::layer()
             .with_writer(Arc::new(file))
             .with_ansi(false)
@@ -508,18 +513,15 @@ fn init_logging(config: &tianyan::common::logging::LoggingConfig) {
             .with_thread_ids(true)
             .with_line_number(true)
             .with_file(true)
+            .with_filter(file_filter)
             .boxed();
 
         tracing_subscriber::registry()
-            .with(console_filter)
             .with(fmt_layer)
             .with(fmt_layer_file)
             .init();
     } else {
-        tracing_subscriber::registry()
-            .with(console_filter)
-            .with(fmt_layer)
-            .init();
+        tracing_subscriber::registry().with(fmt_layer).init();
     }
 
     info!("=== Tianyan Application Started ===");
