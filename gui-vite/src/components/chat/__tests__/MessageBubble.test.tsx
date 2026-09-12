@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import MessageBubble from '@/components/chat/MessageBubble';
 import type { ChatMessage } from '@/lib/types';
 
@@ -194,6 +195,28 @@ describe('MessageBubble compression marker', () => {
 
     expect(screen.queryByText('压缩点')).not.toBeInTheDocument();
     expect(screen.getByText(/后台命令完成/)).toBeInTheDocument();
+  });
+});
+
+describe('MessageBubble thinking block', () => {
+  it('collapses thinking by default and shows the latest line as a header banner', async () => {
+    // 默认收起：思考输出以"类横幅"形式展示在 header（最后一行；流式期间即当前思考）；
+    // 点击展开后显示全文、横幅收进正文。
+    const user = userEvent.setup();
+    const msg: ChatMessage = {
+      role: 'assistant',
+      segments: [{ type: 'thinking', text: '第一步：分析需求\n第二步：给出结论' }],
+    };
+    render(<MessageBubble message={msg} index={0} isStreaming={false} onRollback={() => {}} />);
+
+    const toggle = screen.getByRole('button', { name: /思考过程/ });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    // 收起态仅横幅（最后一行）可见
+    expect(screen.getByText('第二步：给出结论')).toBeInTheDocument();
+
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText(/第一步：分析需求/)).toBeInTheDocument();
   });
 });
 

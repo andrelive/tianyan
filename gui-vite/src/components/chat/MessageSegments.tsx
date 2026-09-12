@@ -16,9 +16,21 @@ import ToolCallCard from './ToolCallCard';
  * 渲染，视觉与主对话流完全一致。
  */
 
-/** 可折叠思考块。 */
+/** 取文本的最后一行非空行（思考横幅用；流式期间即"当前思考"）。 */
+function lastNonEmptyLine(text: string): string {
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (line !== '') return line;
+  }
+  return '';
+}
+
+/** 可折叠思考块（默认收起；收起时在 header 上以横幅形式显示思考输出的最后一行）。 */
 export function ThinkingBlock({ text }: { text: string }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const banner = lastNonEmptyLine(normalized);
   return (
     <div className="mb-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-tertiary)]/60 overflow-hidden">
       <button
@@ -32,11 +44,20 @@ export function ThinkingBlock({ text }: { text: string }) {
         ) : (
           <ChevronRight size={12} className="shrink-0" />
         )}
-        <span>思考过程</span>
+        <span className="shrink-0">思考过程</span>
+        {/* 收起态横幅：在 header 上单行展示思考输出（最新一行，流式期间实时更新） */}
+        {!open && banner !== '' && (
+          <span
+            className="flex-1 min-w-0 truncate pl-2 text-left italic opacity-70"
+            title={banner}
+          >
+            {banner}
+          </span>
+        )}
       </button>
       {open && (
         <div className="px-3 pb-2 text-base leading-relaxed whitespace-pre-wrap text-[var(--color-text-secondary)] italic opacity-80 max-h-64 overflow-y-auto">
-          {text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')}
+          {normalized}
         </div>
       )}
     </div>

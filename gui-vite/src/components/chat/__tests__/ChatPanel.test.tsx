@@ -648,8 +648,9 @@ describe('ChatPanel', () => {
       expect(last ? messageText(last) : undefined).toBe('最终输出');
     });
 
-    // 思考块（可折叠）渲染在消息气泡中
-    expect(await screen.findByRole('button', { name: /思考过程/ })).toBeInTheDocument();
+    // 思考块（默认收起）：header 横幅展示最新思考
+    const thinkToggle = await screen.findByRole('button', { name: /思考过程/ });
+    expect(thinkToggle).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByText('先分析再想想')).toBeInTheDocument();
   });
 });
