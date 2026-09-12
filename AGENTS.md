@@ -155,5 +155,4 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 - 工具不做自主多轮决策，决策权在 LLM
 - 已有链路不叠加抽象（不额外封装 Manager/Coordinator）
 - `server/main.rs` 不解析 `--host/--port` 命令行参数——独立启动总是监听默认 `127.0.0.1:3000`，QA 时直接测 3000
-- `scripts/test.ps1` 的 bench 步骤传 `-- --verbose` 会被 bench harness 拒绝（脚本 bug）——bench 请直接跑 `cargo bench -p tianyan-server`
 - 配置热更新 API（`PUT /api/v1/config`）会持久化写入 `tianyan.toml`——QA/测试改动配置后必须恢复，别留污染

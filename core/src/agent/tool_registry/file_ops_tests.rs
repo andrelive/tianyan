@@ -385,6 +385,152 @@ async fn test_read_file_empty_file_returns_empty_content() {
     assert_eq!(result["total_lines"].as_u64(), Some(0));
 }
 
+#[tokio::test]
+async fn test_read_file_byte_truncation_continuation_no_skipped_lines() {
+    // 回归保护（71511a6）：字节截断时续读偏移必须按「实际返回行数」计算——
+    // 修复前按标称窗口（end-start）计算，续读会跳过被截掉的行（前端"加载更多"跳行）。
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wide.txt");
+    // 每行 100 字符 + 换行 = 101 字节；1500 行 ≈ 151KB > 50KB 截断上限 → 窗口内必然字节截断。
+    let mut file_content = String::new();
+    for i in 1..=1500 {
+        file_content.push_str(&format!("line-{i:04}-{}\n", "x".repeat(90)));
+    }
+    std::fs::write(&path, file_content).unwrap();
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    let first = registry
+        .execute_read_file(&read_file_args(&path), "test-session")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        first["truncated"].as_bool(),
+        Some(true),
+        "应发生字节截断: {first}"
+    );
+    let returned = first["showing"]["limit"].as_u64().unwrap();
+    assert!(
+        returned > 0 && returned < 1500,
+        "实际返回行数应为部分窗口（字节截断），实际: {returned}"
+    );
+    assert_eq!(first["showing"]["offset"].as_u64(), Some(1));
+    let content = first["content"].as_str().unwrap();
+    // 第一段：末数据行 = 第 `returned` 行；且不含第 `returned+1` 行（截断干净）。
+    let last_data = content
+        .lines()
+        .filter(|l| l.starts_with("line-"))
+        .last()
+        .unwrap();
+    assert!(
+        last_data.starts_with(&format!("line-{returned:04}-")),
+        "第一段末行应为第 {returned} 行: {last_data}"
+    );
+    let expect_next = returned + 1;
+    assert!(
+        !content.contains(&format!("line-{expect_next:04}-")),
+        "第一段不应包含第 {expect_next} 行"
+    );
+    // 续读偏移 = 起始 offset + 实际返回行数（修复前取标称窗口 1500 → 1501）。
+    assert!(
+        content.contains(&format!("Use offset={expect_next} to continue")),
+        "续读偏移应为 {expect_next}（按实际行数）: {content}"
+    );
+
+    // 续读必须以第 `expect_next` 行开头——修复前 offset=1501 会跳过中间所有行。
+    let second = registry
+        .execute_read_file(
+            &read_file_window_args(&path, Some(expect_next as usize), None),
+            "test-session",
+        )
+        .await
+        .unwrap();
+    let second_content = second["content"].as_str().unwrap();
+    assert!(
+        second_content.starts_with(&format!("line-{expect_next:04}-")),
+        "续读应从第 {expect_next} 行开始（无跳行）: {}",
+        &second_content.chars().take(60).collect::<String>()
+    );
+}
+
+#[tokio::test]
+async fn test_read_file_oversized_limit_clamped_with_total_bytes() {
+    // 回归保护（2658414）：超大 limit 被钳制到 2000；total_bytes 为文件真实字节数。
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.txt");
+    let mut file_content = String::new();
+    let mut expected_bytes = 0usize;
+    for i in 1..=2500 {
+        let line = format!("line {i}\n");
+        expected_bytes += line.len();
+        file_content.push_str(&line);
+    }
+    std::fs::write(&path, &file_content).unwrap();
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    let result = registry
+        .execute_read_file(
+            &read_file_window_args(&path, None, Some(100_000)),
+            "test-session",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result["showing"]["limit"].as_u64(),
+        Some(2000),
+        "超大 limit 应被钳制到 2000: {result}"
+    );
+    assert_eq!(result["total_bytes"].as_u64(), Some(expected_bytes as u64));
+    assert_eq!(result["total_lines"].as_u64(), Some(2500));
+    assert_eq!(result["truncated"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn test_vfs_read_session_export_truncated_for_large_history() {
+    // 回归保护（2658414）：会话 JSONL 导出经头部截断（50KB/2000 行）+ 检索提示，
+    // 防止整读数 MB 会话压垮上下文。
+    let db = crate::db::Database::open_in_memory().unwrap();
+    db.init_schemas().await.unwrap();
+    let store = crate::session::store::SessionStore::new(db).unwrap();
+    store
+        .create("s-big", &crate::session::types::SessionHeader::default())
+        .await
+        .unwrap();
+    // 每条约 1KB × 120 条 ≈ 120KB，超过 50KB 截断上限。
+    for i in 0..120 {
+        let mut msg = crate::common::types::StructuredMessage::user("s-big", "y".repeat(1000));
+        msg.id = format!("m{i}");
+        store.append_message("s-big", &msg).await.unwrap();
+    }
+
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_vfs(Arc::new(MockVfs::new()))
+        .with_session_store(store);
+    let result = registry
+        .execute_vfs_read(r#"{"uri":"tianyan://session/s-big"}"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        result["truncated"].as_bool(),
+        Some(true),
+        "大体量会话导出应被截断: {}",
+        result.to_string().chars().take(200).collect::<String>()
+    );
+    let total = result["total_bytes"].as_u64().unwrap();
+    assert!(total > 50 * 1024, "total_bytes 应为原文体量: {total}");
+    let detail = result["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("输出已截断"),
+        "应包含截断标记: {}",
+        &detail.chars().take(100).collect::<String>()
+    );
+    assert!(
+        detail.contains("session_recall"),
+        "应包含检索提示（session_recall）: {}",
+        &detail.chars().take(100).collect::<String>()
+    );
+}
+
 // ── write_file ───────────────────────────────────────────────────────────
 
 // ── write_file ───────────────────────────────────────────────────────────

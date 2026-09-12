@@ -239,9 +239,7 @@ describe('ApprovalPanel', () => {
       expect(screen.getByText('暂无待处理审批')).toBeInTheDocument();
     });
     expect(
-      screen.getByText(
-        '当前为「autonomous」模式；交互模式下危险操作会在此面板等待人工响应',
-      ),
+      screen.getByText('当前为「autonomous」模式；交互模式下危险操作会在此面板等待人工响应'),
     ).toBeInTheDocument();
   });
 

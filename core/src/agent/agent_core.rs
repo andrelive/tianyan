@@ -1449,6 +1449,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_compress_point_own_usage_excluded_from_decision() {
+        // 回归保护（6b0112b 第三处改动）：压缩点**自身**的 usage（摘要请求的
+        // 上下文重发用量）不计入会话占用——若计入，压缩完成后会立即再次触发压缩。
+        // 窗口 10000 × 阈值 0.5 → 触发线 5000；压缩点自身 input=8000，其后
+        // 无任何带 usage 的消息 → 修复后应视为"无实测占用"（不压缩）；
+        // 旧实现会把压缩点的 8000 当最近占用 → 误触发（本测试在旧实现下必红）。
+        let mut compress_mock = MockChatService::new();
+        compress_mock
+            .expect_chat_completion()
+            .returning(|_| Ok(response_with(Message::assistant("这是压缩摘要"))));
+        let agent = make_agent_full(
+            MockChatService::new(),
+            compress_mock,
+            CompressionConfig {
+                context_window: 10_000,
+                compression_threshold: 0.5,
+                ..CompressionConfig::default()
+            },
+        );
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        // 压缩点（摘要消息）：compression_marker=true + 大 usage（摘要请求用量）
+        let mut marker = ContextAssembler::message_to_structured(
+            &Message::user("对话摘要……"),
+            "session-1",
+            None,
+            None,
+        );
+        marker.compression_marker = true;
+        marker.tokens.input = 8_000;
+        state.write().await.add_structured_message(marker);
+        // 压缩点之后累积 ≥ MIN_MESSAGES_BEFORE_COMPRESSION 条普通消息（均无 usage）
+        for i in 0..6 {
+            let sm = ContextAssembler::message_to_structured(
+                &Message::user(format!("压缩后消息 {i}")),
+                "session-1",
+                None,
+                None,
+            );
+            state.write().await.add_structured_message(sm);
+        }
+
+        let summary = agent
+            .maybe_compress_and_persist(&state, "session-1", false)
+            .await;
+        assert!(
+            summary.is_none(),
+            "压缩点自身 usage（8000）不应计入占用；其后无带 usage 消息 → 不压缩"
+        );
+    }
+
+    #[tokio::test]
     async fn test_compress_triggered_when_real_input_above_threshold() {
         // 正向保护：修复 double count 后，真实占用超过触发线仍正常压缩。
         // 窗口 10000 × 阈值 0.5 → 触发线 5000；最近请求 input=5100（含

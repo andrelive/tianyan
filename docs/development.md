@@ -18,7 +18,7 @@ cargo test -p tianyan-server --lib          # server 单元测试
 
 ```powershell
 npm run dev            # Vite dev server（端口 5100，/api 代理到 3000）
-npm run test           # vitest 单元测试（374 个）
+npm run test           # vitest 单元测试（392 个）
 npm run typecheck      # tsc --noEmit
 npm run test:e2e       # Playwright e2e
 ```
@@ -27,7 +27,7 @@ npm run test:e2e       # Playwright e2e
 
 | 文档 | 定位 |
 |------|------|
-| [`docs/architecture/decisions/`](architecture/decisions/) | 架构决策记录（ADR-001~030）——**历史记录，不修改正文**；演进在末尾加"后续演进" |
+| [`docs/architecture/decisions/`](architecture/decisions/) | 架构决策记录（ADR-001~033）——**历史记录，不修改正文**；演进在末尾加"后续演进" |
 | [`docs/architecture/module-map.md`](architecture/module-map.md) | 模块索引（职责/位置/关键文件）——保持最新 |
 | [`docs/module-descriptions.md`](module-descriptions.md) | 模块详细说明——保持最新 |
 | [`docs/module-relationships.md`](module-relationships.md) | 模块间关系——保持最新 |

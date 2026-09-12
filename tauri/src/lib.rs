@@ -439,6 +439,22 @@ async fn clipboard_io_loop(app_handle: tauri::AppHandle, api_base: String) {
     let _ = tokio::join!(monitor, outbox_poller);
 }
 
+/// 分层日志过滤器（控制台 / 文件）——纯函数（可测）。
+///
+/// - 控制台层：非空 `RUST_LOG` 优先，无效值时回退配置级别；
+/// - 文件层：**恒用配置级别**——RUST_LOG 是开发调试入口，不能让 GUI 实例
+///   的文件日志静默归零（5c4f62d 回归保护）。
+fn layer_filters(config_level: &str, rust_log: Option<&str>) -> (EnvFilter, EnvFilter) {
+    let console = match rust_log {
+        Some(v) if !v.trim().is_empty() => {
+            EnvFilter::try_new(v).unwrap_or_else(|_| EnvFilter::new(config_level))
+        }
+        _ => EnvFilter::new(config_level),
+    };
+    let file = EnvFilter::new(config_level);
+    (console, file)
+}
+
 /// 初始化日志系统 - 同时输出到文件和控制台。
 ///
 /// 级别/格式来自配置文件 `[logging]` 节（`RUST_LOG` 环境变量可覆盖级别）；
@@ -478,9 +494,10 @@ fn init_logging(config: &tianyan::common::logging::LoggingConfig) {
     // 级别：控制台层 RUST_LOG 优先，回退配置文件 [logging].level；
     // 文件层恒用配置级别——RUST_LOG 是开发调试入口，不能让 GUI 实例的
     // 文件日志静默归零（曾出现文件日志 0 字节、流式中断无取证的情况）。
-    let console_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
-    let file_filter = EnvFilter::new(&config.level);
+    // 分层过滤器（纯函数构造，回归保护见 `test_layer_filters_*`）：
+    // 控制台层 RUST_LOG 优先、文件层恒用配置级别。
+    let rust_log = std::env::var("RUST_LOG").ok();
+    let (console_filter, file_filter) = layer_filters(&config.level, rust_log.as_deref());
 
     // 控制台 layer：格式（text/json）来自配置文件 [logging].format。
     // filter 按层挂载（`with_filter`）——此前 console_filter 是全局过滤器，
@@ -931,5 +948,42 @@ mod tests {
             next_backoff(Duration::from_secs(30), Duration::from_secs(30)),
             Duration::from_secs(30)
         );
+    }
+
+    // ── 分层日志过滤器（5c4f62d 回归保护）────────────────────────────
+
+    #[test]
+    fn test_layer_filters_file_uses_config_level_even_with_rust_log() {
+        // 回归保护（5c4f62d）：RUST_LOG 设置时，文件层必须仍使用配置级别——
+        // 此前 file_filter 建了未接线，RUST_LOG 会连带过滤文件层（GUI 实例的
+        // 文件日志可能静默归零）。
+        let (console, file) = layer_filters("debug", Some("error"));
+        assert!(
+            console.to_string().contains("error"),
+            "控制台层应使用 RUST_LOG: {console}"
+        );
+        assert!(
+            file.to_string().contains("debug"),
+            "文件层必须恒用配置级别（debug）: {file}"
+        );
+        assert!(
+            !file.to_string().contains("error"),
+            "文件层不得被 RUST_LOG 过滤: {file}"
+        );
+    }
+
+    #[test]
+    fn test_layer_filters_falls_back_to_config_when_rust_log_absent_or_blank() {
+        for rust_log in [None, Some(""), Some("   ")] {
+            let (console, file) = layer_filters("info", rust_log);
+            assert!(
+                console.to_string().contains("info"),
+                "RUST_LOG 缺省/空白时应回退配置级别: {console}"
+            );
+            assert!(
+                file.to_string().contains("info"),
+                "文件层恒配置级别: {file}"
+            );
+        }
     }
 }

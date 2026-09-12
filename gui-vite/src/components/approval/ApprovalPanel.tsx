@@ -182,7 +182,8 @@ export default function ApprovalPanel() {
                   <p className="text-sm">暂无待处理审批</p>
                   {!interactiveMode && (
                     <p className="text-xs mt-2 max-w-md text-center">
-                      当前为「{snapshot?.config.mode}」模式；交互模式下危险操作会在此面板等待人工响应
+                      当前为「{snapshot?.config.mode}
+                      」模式；交互模式下危险操作会在此面板等待人工响应
                     </p>
                   )}
                 </div>
@@ -205,7 +206,10 @@ export default function ApprovalPanel() {
                             <div className="flex items-center gap-2 mt-1.5 text-xs text-[var(--color-text-tertiary)]">
                               <RiskBadge riskLevel={req.risk_level} />
                               <span>{formatDateTime(req.requested_at)}</span>
-                              <CountdownText requestedAt={req.requested_at} timeoutSecs={req.timeout_secs} />
+                              <CountdownText
+                                requestedAt={req.requested_at}
+                                timeoutSecs={req.timeout_secs}
+                              />
                             </div>
                             {/* execute_command 类请求：展示命令文本 + 编辑后批准 */}
                             {command !== null && (

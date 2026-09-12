@@ -917,7 +917,12 @@ export const handlers = [
     // 模拟真实后端语义：按 message_id 定位索引后 truncate
     const body = (await request.json()) as { message_id?: string } | null;
     const all = [
-      { id: 'msg_0', role: 'user' as const, segments: [{ type: 'text', text: '你好' }], timestamp: '2026-07-23T10:00:00Z' },
+      {
+        id: 'msg_0',
+        role: 'user' as const,
+        segments: [{ type: 'text', text: '你好' }],
+        timestamp: '2026-07-23T10:00:00Z',
+      },
       {
         id: 'msg_1',
         role: 'assistant' as const,
@@ -970,7 +975,10 @@ export const handlers = [
         role: 'user',
         compression_marker: true,
         segments: [
-          { type: 'text', text: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\nmock\n[摘要结束]' },
+          {
+            type: 'text',
+            text: '[对话摘要] 以下是对历史对话的摘要：\n## 用户意图\nmock\n[摘要结束]',
+          },
         ],
         timestamp: new Date().toISOString(),
       },
@@ -1431,4 +1439,3 @@ export function resetTodoMocks(): void {
     todo_done: 1,
   });
 }
-

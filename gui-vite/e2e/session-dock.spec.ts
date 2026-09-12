@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { assertE2eBackend } from './helpers';
 
 // 会话停靠面板测试依赖 UI 创建的会话 + REST 造的会话绑定数据，
