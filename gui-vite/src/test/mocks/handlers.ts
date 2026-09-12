@@ -526,29 +526,6 @@ export const mockTestConnectionResult = { success: true, message: '连接成功'
 
 export const mockMemories: MemoryEntry[] = [
   {
-    uri: 'tianyan://memory/rules',
-    is_directory: true,
-    name: 'rules',
-    relative_path: 'rules',
-    metadata: {
-      uri: { uri: 'tianyan://memory/rules', namespace: 'memory', path: ['rules'] },
-      is_directory: true,
-      content_type: 'directory',
-      category: null,
-      source: 'memory',
-      original_name: null,
-      file_size: null,
-      importance: 0,
-      tags: [],
-      created_at: '2026-07-20T10:00:00Z',
-      updated_at: '2026-07-23T09:00:00Z',
-      custom: {},
-    },
-    abstract: null,
-    overview: null,
-    detail: null,
-  },
-  {
     uri: 'tianyan://memory/preferences/response_style',
     is_directory: false,
     name: 'response_style',
@@ -603,6 +580,33 @@ export const mockMemories: MemoryEntry[] = [
     abstract: '用户昵称为「小天」。',
     overview: null,
     detail: null,
+  },
+  {
+    uri: 'tianyan://memory/cases/failed_tasks/old_case',
+    is_directory: false,
+    name: 'old_case',
+    relative_path: 'cases/failed_tasks/old_case',
+    metadata: {
+      uri: {
+        uri: 'tianyan://memory/cases/failed_tasks/old_case',
+        namespace: 'memory',
+        path: ['cases', 'failed_tasks', 'old_case'],
+      },
+      is_directory: false,
+      content_type: 'text/plain',
+      category: 'case',
+      source: 'MemoryTask',
+      original_name: 'old_case.md',
+      file_size: 256,
+      importance: 0.7,
+      tags: ['案例'],
+      created_at: '2026-07-20T09:00:00Z',
+      updated_at: '2026-07-20T09:00:00Z',
+      custom: {},
+    },
+    abstract: '一次失败任务的复盘：路径参数处理遗漏。',
+    overview: null,
+    detail: '失败案例：命令路径中的反斜杠未转义，导致文件未找到。\n修复：使用引号包裹路径。',
   },
 ];
 
