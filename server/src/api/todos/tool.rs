@@ -6,15 +6,14 @@
 //! 完成条目保留展示（划线样式），无任何条目后面板消失（对齐 DSH todo_write
 //! 的临时面板语义）。
 //!
-//! 当前批语义（同一会话同一时期只保留一批同源待办）：
-//! - create 时若本会话已有待办且全部完成 → 自动移除旧批、建立新批；
-//!   仍有未完成项则作为新工作追加进当前批。
-//! - `close` 主动清空当前批全部待办（目标变更、现有待办不再相关时使用，
-//!   即使有未完成项）；完成项划线保留，是否清理由智能体自行决定（delete）。
-//!
-//! 批量语义（对齐 DSH todo_write 的一次性整单写入）：create 接受 `todos`
-//! 数组一次创建整份清单；update 接受 `updates` 数组一次合并多条状态变更；
-//! delete 接受 `ids` 数组。子任务用 `parent_id` 挂靠父待办。
+//! 当前批语义（同一会话同一时期只有一批同源待办；create = 整表替换，
+//! 对齐 DSH todo_write 的 last-write-wins）：
+//! - create 传 `todos` 数组 = "当前完整计划"，旧批（含已完成项）整体替换——
+//!   未包含的旧条目即被移除（被中止/放弃的任务随重规划自然消失）；
+//!   想保留的条目（包括已完成的）必须包含在新列表中。
+//! - 推进/完成用 `update`（id 批量合并，比全量重发省）；`close` 主动清空
+//!   当前批（目标变更、整批作废时使用）；`delete` 按 id 删除；完成项批内
+//!   划线保留；子任务建后用 update 的 parent_id 挂靠。
 
 use std::sync::Arc;
 
@@ -44,7 +43,7 @@ pub struct TodoDraftArgs {
     /// 关联目标 id。
     #[serde(default)]
     pub goal_id: Option<String>,
-    /// 父待办 id（子任务挂靠；父待办须已存在）。
+    /// 父待办 id（整表替换下不可用——非空会被拒绝；请先创建、再用 update 挂靠）。
     #[serde(default)]
     pub parent_id: Option<String>,
 }
@@ -79,7 +78,7 @@ pub struct TodoUpdateArgs {
 pub struct TodoArgs {
     /// 操作：create | update | list | delete。
     pub operation: String,
-    /// 批量创建（推荐）：一次传入整份清单。
+    /// 整表替换（create 必填）：当前完整计划——未包含的旧条目即被移除。
     #[serde(default)]
     pub todos: Option<Vec<TodoDraftArgs>>,
     /// 批量更新（推荐）：一次合并多条状态变更。
@@ -88,11 +87,11 @@ pub struct TodoArgs {
     /// 批量删除的待办 id 列表。
     #[serde(default)]
     pub ids: Option<Vec<String>>,
-    // —— 单条快捷形态（向后兼容；等价于长度 1 的批量）——
+    // —— 单条快捷形态（update/delete 用；create 为整表替换，不提供单条）——
     /// 待办 ID（update/delete 单条形态必填）。
     #[serde(default)]
     pub id: Option<String>,
-    /// 标题（create 单条形态必填）。
+    /// 新标题（update 单条形态）。
     #[serde(default)]
     pub title: Option<String>,
     /// 详细描述。
@@ -156,14 +155,14 @@ impl DynamicToolExecutor for TodoTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::new(
             "todo",
-            "管理当前会话的待办清单（会话绑定，仅本会话可见；同一时期只保留一批同源待办）。支持批量，避免逐条调用：operation=create 时传 todos 数组一次性写入整份清单（推荐）——若当前批已全部完成，旧批自动移除并建立新批；仍有未完成项则作为新工作追加进当前批。operation=update 时传 updates 数组（id + 可选 status/title 等）一次合并多条状态变更——开始/完成多条时务必合并到一次调用。发现新工作随时 create 追加，子任务用 parent_id 挂到父待办下。operation=list 查看当前清单（含 id 与状态）。operation=delete 传 ids 数组删除指定项——完成项默认划线保留展示，是否清理由你自行决定。operation=close 清空当前批全部待办——当用户目标变更、现有待办不再反映当前意图时使用（即使有未完成项）。",
+            "管理当前会话的待办清单（会话绑定，仅本会话可见；同一时期只保留一批同源待办）。支持批量，避免逐条调用。create 为整表替换：传 todos 数组 = 当前完整计划，整体替换旧清单——未包含的旧条目（含未完成项）即被移除；想保留的条目（包括已完成的）必须包含在新列表中。开始多步工作先写入整份清单；推进/完成用 update（updates 数组按 id 批量合并状态，比全量重发省）；计划增删改时重发完整列表。子任务挂靠：先创建任务，再用 update 的 parent_id 挂靠（整表替换中 parent_id 不可用）。operation=list 查看当前清单（含 id 与状态）。operation=delete 传 ids 数组删除指定项——完成项默认划线保留展示，是否清理由你自行决定。operation=close 清空当前批全部待办——当用户目标变更、现有待办不再反映当前意图时使用（即使有未完成项）。",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "operation": { "type": "string", "enum": ["create", "update", "list", "delete", "close"], "description": "操作类型" },
                     "todos": {
                         "type": "array",
-                        "description": "批量创建（推荐）：一次传入整份清单",
+                        "description": "整表替换：当前完整计划（未包含的旧条目即被移除）",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -172,7 +171,7 @@ impl DynamicToolExecutor for TodoTool {
                                 "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "初始状态（缺省 pending）" },
                                 "priority": { "type": "string", "enum": ["low", "medium", "high"], "description": "优先级（缺省 medium）" },
                                 "goal_id": { "type": "string", "description": "关联目标 id" },
-                                "parent_id": { "type": "string", "description": "父待办 id（子任务挂靠）" }
+                                "parent_id": { "type": "string", "description": "父待办 id（整表替换下不可用；建后经 update 挂靠）" }
                             },
                             "required": ["title"]
                         }
@@ -199,13 +198,13 @@ impl DynamicToolExecutor for TodoTool {
                         "items": { "type": "string" },
                         "description": "批量删除的待办 id 列表"
                     },
-                    "id": { "type": "string", "description": "待办 ID（单条形态）" },
-                    "title": { "type": "string", "description": "标题（单条创建）" },
-                    "description": { "type": "string", "description": "详细描述（单条形态）" },
-                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "状态（单条形态）" },
-                    "priority": { "type": "string", "enum": ["low", "medium", "high"], "description": "优先级（单条形态）" },
-                    "goal_id": { "type": "string", "description": "关联目标 id（单条形态）" },
-                    "parent_id": { "type": "string", "description": "父待办 id（单条形态）" }
+                    "id": { "type": "string", "description": "待办 ID（update/delete 单条形态）" },
+                    "title": { "type": "string", "description": "新标题（update 单条形态）" },
+                    "description": { "type": "string", "description": "新描述（update 单条形态）" },
+                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "新状态（update 单条形态）" },
+                    "priority": { "type": "string", "enum": ["low", "medium", "high"], "description": "新优先级（update 单条形态）" },
+                    "goal_id": { "type": "string", "description": "新关联目标 id（update 单条形态）" },
+                    "parent_id": { "type": "string", "description": "新父待办 id（update 单条形态；空串清除）" }
                 },
                 "required": ["operation"]
             }),
@@ -229,25 +228,15 @@ impl DynamicToolExecutor for TodoTool {
 }
 
 impl TodoTool {
-    // —— create：批量数组优先，回落单条形态 ——
+    // —— create：整表替换（todos 数组 = 当前完整计划；未包含的旧条目即被移除） ——
     async fn create(&self, session_id: &str, args: TodoArgs) -> Result<serde_json::Value> {
-        // 当前批语义：本会话已有待办且全部完成 → 先移除旧批，再建新批
-        let existing = self.store.list_by_session(session_id).await;
-        if !existing.is_empty() && existing.iter().all(|i| i.status == TodoStatus::Completed) {
-            let olds: Vec<String> = existing.iter().map(|i| i.id.clone()).collect();
-            self.store.delete_many(&olds).await?;
-        }
         let drafts: Vec<TodoDraftArgs> = match args.todos {
             Some(list) if !list.is_empty() => list,
-            // 单条形态：title 视为必填
-            _ => vec![TodoDraftArgs {
-                title: args.title.unwrap_or_default(),
-                description: args.description,
-                status: args.status,
-                priority: args.priority,
-                goal_id: args.goal_id,
-                parent_id: args.parent_id,
-            }],
+            _ => {
+                return Err(TianyanError::invalid_input(
+                    "tool: todo create 需要非空 todos 数组（整表替换：传入当前完整清单）",
+                ))
+            }
         };
         let mut drafts_parsed = Vec::with_capacity(drafts.len());
         for d in drafts {
@@ -268,13 +257,11 @@ impl TodoTool {
                 parent_id: d.parent_id,
             });
         }
-        let created = self
-            .store
-            .create_many(Some(session_id.to_string()), drafts_parsed)
-            .await?;
+        let (created, replaced) = self.store.replace_many(session_id, drafts_parsed).await?;
         Ok(serde_json::json!({
             "status": "created",
             "count": created.len(),
+            "replaced": replaced,
             "todos": created.iter().map(Self::todo_json).collect::<Vec<_>>(),
         }))
     }
@@ -435,20 +422,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["count"], 3);
+        assert_eq!(result["replaced"], 0);
         assert_eq!(result["todos"][1]["status"], "in_progress");
-
-        // 单条快捷形态仍可用
-        let single = tool
-            .execute("s-1", "{ \"operation\": \"create\", \"title\": \"单条\" }")
-            .await
-            .unwrap();
-        assert_eq!(single["count"], 1);
 
         let list = tool
             .execute("s-1", "{ \"operation\": \"list\" }")
             .await
             .unwrap();
-        assert_eq!(list["count"], 4);
+        assert_eq!(list["count"], 3);
+
+        // create 为整表替换：再次 create 单条新批 → 旧批 3 条被整体替换
+        let replaced = tool
+            .execute(
+                "s-1",
+                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"新批\" } ] }",
+            )
+            .await
+            .unwrap();
+        assert_eq!(replaced["count"], 1);
+        assert_eq!(replaced["replaced"], 3);
+        let list = tool
+            .execute("s-1", "{ \"operation\": \"list\" }")
+            .await
+            .unwrap();
+        assert_eq!(list["count"], 1);
+
+        // create 不再接受单条快捷形态（缺 todos → 明确报错）
+        let err = tool
+            .execute("s-1", "{ \"operation\": \"create\", \"title\": \"单条\" }")
+            .await
+            .unwrap_err();
+        assert!(err.is_invalid_input());
     }
 
     #[tokio::test]
@@ -502,36 +506,51 @@ mod tests {
     #[tokio::test]
     async fn test_parent_id_subtask() {
         let (tool, _dir) = tool();
+        // 先创建整批（整表替换语义），再用 update 挂靠
         let created = tool
             .execute(
                 "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"父任务\" } ] }",
+                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"父任务\" }, { \"title\": \"待挂子任务\" } ] }",
             )
             .await
             .unwrap();
         let parent_id = created["todos"][0]["id"].as_str().unwrap().to_string();
-
-        // 子任务挂靠
+        let child_id = created["todos"][1]["id"].as_str().unwrap().to_string();
+        // update 挂靠
         let child = tool
             .execute(
                 "s-1",
                 &format!(
-                    "{{ \"operation\": \"create\", \"todos\": [ {{ \"title\": \"子任务\", \"parent_id\": \"{parent_id}\" }} ] }}"
+                    "{{ \"operation\": \"update\", \"updates\": [ {{ \"id\": \"{child_id}\", \"parent_id\": \"{parent_id}\" }} ] }}"
                 ),
             )
             .await
             .unwrap();
         assert_eq!(child["todos"][0]["parent_id"], parent_id.as_str());
 
-        // 挂靠不存在的父 → 报错
+        // create 带 parent_id → 明确拒绝（整表替换：旧条目将被替换、新 id 未生成）
         let err = tool
             .execute(
                 "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"孤儿\", \"parent_id\": \"ghost\" } ] }",
+                &format!(
+                    "{{ \"operation\": \"create\", \"todos\": [ {{ \"title\": \"孤儿\", \"parent_id\": \"{parent_id}\" }} ] }}"
+                ),
             )
             .await
             .unwrap_err();
         assert!(err.is_invalid_input());
+
+        // update 挂靠不存在的父 → 报错
+        let err = tool
+            .execute(
+                "s-1",
+                &format!(
+                    "{{ \"operation\": \"update\", \"updates\": [ {{ \"id\": \"{child_id}\", \"parent_id\": \"ghost\" }} ] }}"
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.is_not_found());
 
         // 批量删除
         let deleted = tool
@@ -545,35 +564,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_auto_rotates_batch_when_all_completed() {
+    async fn test_create_replaces_whole_batch() {
         let (tool, _dir) = tool();
-        // 第一批：两条
+        // 旧批 2 条：1 完成 + 1 未完成——旧语义下"未完成项"导致只追加不替换（回归点）
         let created = tool
             .execute(
                 "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"旧1\" }, { \"title\": \"旧2\" } ] }",
+                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"旧完成\", \"status\": \"completed\" }, { \"title\": \"旧未完成\" } ] }",
             )
             .await
             .unwrap();
-        let ids: Vec<String> = created["todos"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["id"].as_str().unwrap().to_string())
-            .collect();
-        // 全部完成
-        let updates = ids
-            .iter()
-            .map(|id| format!("{{ \"id\": \"{id}\", \"status\": \"completed\" }}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        tool.execute(
-            "s-1",
-            &format!("{{ \"operation\": \"update\", \"updates\": [{updates}] }}"),
-        )
-        .await
-        .unwrap();
-        // 再 create → 旧批自动移除，新批只有新条目
+        assert_eq!(created["count"], 2);
+        assert_eq!(created["replaced"], 0);
+        // 整表替换：新批完全取代旧批（未包含的旧条目即被移除）
         let new_batch = tool
             .execute(
                 "s-1",
@@ -582,37 +585,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(new_batch["count"], 1);
+        assert_eq!(new_batch["replaced"], 2);
         let list = tool
             .execute("s-1", "{ \"operation\": \"list\" }")
             .await
             .unwrap();
-        assert_eq!(list["count"], 1, "旧批应被移除，仅剩新批");
+        assert_eq!(list["count"], 1, "旧批（含未完成项）应被整表替换移除");
         assert_eq!(list["todos"][0]["title"], "新1");
-    }
-
-    #[tokio::test]
-    async fn test_create_appends_when_incomplete_remains() {
-        let (tool, _dir) = tool();
+        // 全完成批同样被替换（原"全完成才轮换"逻辑被整表替换覆盖）
         tool.execute(
             "s-1",
-            "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"进行中\" } ] }",
+            "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"全完成\", \"status\": \"completed\" } ] }",
         )
         .await
         .unwrap();
-        // 有未完成项时 create → 追加进当前批
-        let appended = tool
+        let third = tool
             .execute(
                 "s-1",
-                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"新发现\" } ] }",
+                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"新2\" } ] }",
             )
             .await
             .unwrap();
-        assert_eq!(appended["count"], 1);
-        let list = tool
-            .execute("s-1", "{ \"operation\": \"list\" }")
-            .await
-            .unwrap();
-        assert_eq!(list["count"], 2, "未完成时新工作应追加，不移除旧批");
+        assert_eq!(third["replaced"], 1);
     }
 
     #[tokio::test]

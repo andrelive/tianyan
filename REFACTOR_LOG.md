@@ -843,5 +843,41 @@ Oracle 批判性终审（Loop 2）发现 Wave 7 的 clippy 修复引入 3 处 fm
 - 版本落点：`tauri/tauri.conf.json` = `Cargo.toml`（workspace）= `Cargo.lock` = 0.3.17；exe `FileVersion` / `ProductVersion` = 0.3.17
 - 门禁终态：core **1191** / server 152 / mcp 16 / tauri 9 / 前端 **395**；fmt · clippy `-D warnings` 0 · eslint · tsc · prettier 全绿
 
-### 门禁
+### 门禁（工具表稳定性波次）
 fmt 干净 · clippy `-D warnings` 0 · core **1191** / server 152 / mcp 16 / tauri 9
+
+## 待办 create 整表替换波次（2026-09-13）：废弃项随重规划自然移除
+
+### 起因
+用户观察："待办允许新增之后，被中止（放弃）的任务不会被移除、替换"——旧语义（`b9f435f` 起、
+`b3404fa` 修订）create 仅当"旧批全部完成"才替换，否则追加 → "部分完成 + 中途放弃"（常态）
+永不满足替换条件，弃项永久残留（4 会话实证 15 项）。要求参考 DSH（deepseek-harness）逻辑优化。
+
+### DSH 对照
+- DSH `todo_write`：**整表替换**（每次发完整列表、last-write-wins；不重发即移除）；
+  计划条生命周期 = `turn/end` 保留 → `next turn/start` 清空；并**明确否决**过
+  "仅全完成才清空"——理由"会让放弃或部分完成的计划跨轮次残留"（与本项目病灶一致）。
+- 不照搬"下轮清空"（tianyan 待办 = 会话级跨轮跟踪；完成项划线保留语义保留）；
+  吸收核心：**last-write-wins 整表替换**。
+
+### 用户拍板（三项）
+1. create 采用**无条件全量替换**（弃追加、弃单条快捷形态）；
+2. 取消轮 `in_progress→pending` **不做**（等下次替换自然清理）；
+3. 存量废项**先清理**：4 会话共 15 项陈旧未完成项经 REST `DELETE /todos/{id}` 清除
+   （completed 划线项保留；清理后 unfinished=0，total=64）。
+
+### 改动清单
+| # | 项 | 内容 | 验证 |
+|---|---|---|---|
+| 1 | `TodoStore::replace_many` | 整表替换原语（旧批含已完成整体移除后写新批；单次落盘；**失败路径不触碰旧批**——校验先于内存改动）；`create_many`/`replace_many` 共用 `build_draft_items` | 2 新测试（全批替换 / parent 拒绝原子性）+ **反向验证**（跳过旧批移除 → 必红：left 4 vs right 2） |
+| 2 | todo 工具 create | 无条件整表替换：`todos` 数组即完整计划（未包含的旧条目即被移除）；删"全完成才替换"与单条回落；响应新增 `replaced`；描述/schema 重写（"想保留的条目必须包含在新列表中"）；父子挂靠改走 update（替换下 create 不接受 parent_id） | tool 测试重写 2 + 新增 1 + 全量回归 |
+
+### 决策记录
+- "重发全表换语义单一"：模型重新规划即天然清理废项，无需任何特殊清理逻辑。
+- 单条快捷形态删除（全量语义下"单条 = 替换为一条"反直觉、易误用）。
+- **tool-catalog 补齐**：`delegate_to_agent` 描述同步——`9e285cb`（角色清单解耦）改了描述
+  但漏生成产物，本次一并重新生成（漂移 7 删 1 增，仅 delegate 段）。
+
+### 门禁
+- Rust：fmt 干净 · clippy `-D warnings` 0 · core **1193** / server **151 passed（+1 ignored）** / 集成（3+8+5+13+1）全绿
+- tool-catalog freshness ✓（重新生成后）；前端未改动

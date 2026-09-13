@@ -1,6 +1,7 @@
 //! 待办清单（todolist）存储。
 //!
-//! 会话绑定的智能体推理辅助工具（对齐 DSH todo_write 语义）：由 `todo`
+//! 会话绑定的智能体推理辅助工具（对齐 DSH todo_write 语义：create 为整表替换、
+//! last-write-wins——重规划时未包含的旧条目即被移除）：由 `todo`
 //! 动态工具在会话内创建/推进/完成，条目归属创建它的会话（`session_id`），
 //! 会话页仅展示当前会话的活跃待办，全部完成后面板消失——不是全局计划页。
 //! 持久化为 `{data_dir}/todos.json`（与定时智能体任务
@@ -122,7 +123,7 @@ impl TodoItem {
     }
 }
 
-/// 批量创建输入（工具层一次调用写整份清单）。
+/// 批量创建 / 整表替换输入（工具层一次调用写整份清单）。
 #[derive(Debug, Clone)]
 pub struct TodoDraft {
     /// 标题（必填，非空）。
@@ -284,7 +285,7 @@ impl TodoStore {
         Ok(self.delete_many(&[id.to_string()]).await? > 0)
     }
 
-    /// 批量创建待办（单次落盘；工具层一次调用写整份清单）。
+    /// 批量创建待办（单次落盘；追加语义的底层原语——工具层整表替换走 `replace_many`）。
     ///
     /// parent_id 指向的父待办必须已存在（同批新建的条目互相不可挂靠——
     /// id 由存储生成，调用方事先不知道）。
@@ -314,30 +315,83 @@ impl TodoStore {
             }
         }
         let now = chrono::Utc::now().timestamp();
-        let mut created = Vec::with_capacity(drafts.len());
-        for d in drafts {
-            let mut item = TodoItem::new(
-                d.title.trim().to_string(),
-                d.description,
-                d.priority.unwrap_or(TodoPriority::Medium),
-                d.goal_id,
-                None,
-                session_id.clone(),
-                now,
-            );
-            if let Some(s) = d.status {
-                item.status = s;
-                if s == TodoStatus::Completed {
-                    item.completed_at = Some(now);
-                }
-            }
-            item.parent_id = d.parent_id;
-            created.push(item);
-        }
+        let created = Self::build_draft_items(&drafts, session_id.as_deref(), now);
         items.extend(created.iter().cloned());
         drop(items);
         self.save().await;
         Ok(created)
+    }
+
+    /// 由 drafts 构造条目（时间与归属由调用方注入；parent_id 原样保留、
+    /// 校验由调用方负责）——create_many / replace_many 共用。
+    fn build_draft_items(
+        drafts: &[TodoDraft],
+        session_id: Option<&str>,
+        now: i64,
+    ) -> Vec<TodoItem> {
+        drafts
+            .iter()
+            .map(|d| {
+                let mut item = TodoItem::new(
+                    d.title.trim().to_string(),
+                    d.description.clone(),
+                    d.priority.unwrap_or(TodoPriority::Medium),
+                    d.goal_id.clone(),
+                    None,
+                    session_id.map(str::to_string),
+                    now,
+                );
+                if let Some(s) = d.status {
+                    item.status = s;
+                    if s == TodoStatus::Completed {
+                        item.completed_at = Some(now);
+                    }
+                }
+                item.parent_id = d.parent_id.clone();
+                item
+            })
+            .collect()
+    }
+
+    /// 整表替换待办（对齐 DSH last-write-wins：传入"当前完整计划"）。
+    ///
+    /// 旧批（该会话全部条目，含已完成项）整体移除后写入新批；单次落盘。
+    /// 替换语义下 `parent_id` 不可用——旧条目将被移除、新条目 id 尚未生成，
+    /// 非空即拒绝（调用方应"先创建、再用 update 的 parent_id 挂靠"）。
+    /// 返回 `(新批条目, 被替换的旧批数量)`。
+    pub async fn replace_many(
+        &self,
+        session_id: &str,
+        drafts: Vec<TodoDraft>,
+    ) -> Result<(Vec<TodoItem>, usize)> {
+        if drafts.is_empty() {
+            return Err(TianyanError::invalid_input(
+                "todos: 整表替换至少需要一条待办",
+            ));
+        }
+        for d in &drafts {
+            if d.title.trim().is_empty() {
+                return Err(TianyanError::invalid_input("todos: 待办标题不能为空"));
+            }
+            if d.parent_id.as_deref().is_some_and(|p| !p.is_empty()) {
+                return Err(TianyanError::invalid_input(
+                    "todos: 整表替换不支持 parent_id（先创建、再用 update 挂靠）",
+                ));
+            }
+        }
+        let mut items = self.ensure_loaded().await;
+        // 校验已全部通过，此处才改动内存态（失败路径不触碰旧批）
+        let old_count = items
+            .iter()
+            .filter(|i| i.session_id.as_deref() == Some(session_id))
+            .count();
+        items.retain(|i| i.session_id.as_deref() != Some(session_id));
+        let now = chrono::Utc::now().timestamp();
+        let created = Self::build_draft_items(&drafts, Some(session_id), now);
+        items.extend(created.iter().cloned());
+        drop(items);
+        self.save().await;
+        Ok((created, old_count))
     }
 
     /// 批量更新待办（单次落盘；原子——任一 id 不存在则整体不上盘）。
@@ -476,6 +530,18 @@ mod tests {
     fn temp_store() -> (TodoStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         (TodoStore::new(dir.path()), dir)
+    }
+
+    /// 构造一条 draft（测试便捷）。
+    fn draft(title: &str, status: Option<TodoStatus>) -> TodoDraft {
+        TodoDraft {
+            title: title.into(),
+            description: None,
+            status,
+            priority: None,
+            goal_id: None,
+            parent_id: None,
+        }
     }
 
     #[tokio::test]
@@ -875,5 +941,73 @@ mod tests {
         assert_eq!(store.delete_by_session("s-2").await, 1);
         assert_eq!(store.delete_by_session("s-2").await, 0);
         assert_eq!(store.list().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_replace_many_replaces_whole_batch() {
+        let (store, _dir) = temp_store();
+        // 旧批：1 完成 + 1 未完成（模拟"部分完成 + 中途放弃"——旧语义下永远不被替换）
+        let old = store
+            .create_many(
+                Some("s-1".into()),
+                vec![
+                    draft("旧完成", Some(TodoStatus::Completed)),
+                    draft("旧未完成", None),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(old.len(), 2);
+        // 整表替换：新批完全取代旧批（完成与未完成项一并移除）
+        let (created, replaced) = store
+            .replace_many(
+                "s-1",
+                vec![
+                    draft("新批1", None),
+                    draft("新批2", Some(TodoStatus::InProgress)),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.len(), 2);
+        assert_eq!(replaced, 2);
+        let list = store.list_by_session("s-1").await;
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|i| i.title.starts_with("新批")));
+        // 其他会话不受影响
+        store
+            .create_many(Some("s-2".into()), vec![draft("他会话", None)])
+            .await
+            .unwrap();
+        let (_, replaced2) = store
+            .replace_many("s-1", vec![draft("再一轮", None)])
+            .await
+            .unwrap();
+        assert_eq!(replaced2, 2);
+        assert_eq!(store.list_by_session("s-2").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_replace_many_validation_atomic() {
+        let (store, _dir) = temp_store();
+        store
+            .create_many(Some("s-1".into()), vec![draft("旧", None)])
+            .await
+            .unwrap();
+        // parent_id 非空 → 拒绝（替换语义下旧条目将被移除、新 id 未生成）
+        let mut with_parent = draft("x", None);
+        with_parent.parent_id = Some("ghost".into());
+        let err = store
+            .replace_many("s-1", vec![with_parent])
+            .await
+            .unwrap_err();
+        assert!(err.is_invalid_input());
+        // 空标题同样拒绝；失败路径不触碰旧批（原子性）
+        let err = store
+            .replace_many("s-1", vec![draft("  ", None)])
+            .await
+            .unwrap_err();
+        assert!(err.is_invalid_input());
+        assert_eq!(store.list_by_session("s-1").await.len(), 1);
     }
 }
