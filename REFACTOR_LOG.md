@@ -952,3 +952,10 @@ fmt 干净 · clippy `-D warnings` 0 · core **1191** / server 152 / mcp 16 / ta
 ### 后续候选（未实施）
 - decay_rate / 访问追踪（access_count 从未维护，暂缓）；记忆面板覆盖 user/agent 命名空间；同 id 多条目歧义；rule_recorder 产出质量复审
 - rule_recorder（失败实时记录）与 ADR-017「统一综述驱动」的架构一致性收口——数据核查：**活跃区 0 条其产出**（低频 + 去重保护），暂无污染压力，处置按需触发
+
+## 0.4.0 交付（2026-09-13）
+
+- 产物：`Tianyan_0.4.0_x64_zh-CN.msi` / `Tianyan_0.4.0_x64_en-US.msi`（各 46.4 MB，`target/release/bundle/msi/`；构建 `cmd_0` exit 0，release 编译 12m 28s）
+- 版本落点：`tauri/tauri.conf.json` = `Cargo.toml`（workspace）= `Cargo.lock`（4 crate）= 0.4.0；exe `FileVersion` / `ProductVersion` = 0.4.0
+- 内容：记忆生命周期治理（ADR-034）主体——删除通道修复（find_entry）+ 概览压缩契约（L1≤L2）+ 巩固通道（merge/auto_consolidation）+ 运维子域消费面分离 + GC 递归 TTL 白名单 + 存量清洗（记忆 80→22 / 规则 391→31）；发布提交 `b985003`
+- 门禁终态：core **1209** / server 152（+1 ignored）/ mcp 16 / tauri 9；fmt · clippy `-D warnings` 0
