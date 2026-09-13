@@ -352,6 +352,13 @@ impl AppState {
         let model_services = create_model_services(&config)
             .await
             .map_err(model_services_error)?;
+        // 嵌入用量入账（Agent 侧实例：摘要任务/角色路由等也调嵌入）。
+        // provider 名由全量 config 解析（与 VFS 侧同策略、同表）。
+        crate::embedding_usage::attach_embedding_usage_sink(
+            &model_services,
+            usage_log.clone(),
+            &config,
+        );
         // ADR-016：角色注册表从 VFS 加载（内置种子 + 配置签名 upsert + 演化实体）
         let role_store = tianyan::role_store::RoleStore::new(vfs.clone());
         let role_registry = Arc::new(
@@ -548,6 +555,13 @@ impl AppState {
         let model_services = create_model_services(&config)
             .await
             .map_err(model_services_error)?;
+        // 嵌入用量入账（Agent 侧实例：摘要任务/角色路由等也调嵌入）。
+        // provider 名由全量 config 解析（与 VFS 侧同策略、同表）。
+        crate::embedding_usage::attach_embedding_usage_sink(
+            &model_services,
+            self.usage_log(),
+            &config,
+        );
         // 同步更新 VFS 嵌入服务（热重载后语义检索立即生效，无需重启）
         self.vfs.set_embedding_provider(
             model_services.embedding.clone(),

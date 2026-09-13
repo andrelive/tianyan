@@ -51,6 +51,9 @@ pub mod types;
 
 pub use traits::{ChatService, EmbeddingService, ServiceDiscovery, VlmService};
 
+/// 嵌入用量上报契约与装配层注入槽位（嵌入不走 AgentLoop，其 token 用量需单独入账）。
+pub use provider::middleware::{EmbeddingUsageHandle, EmbeddingUsageSink};
+
 pub use types::{
     embedding_dimension, ApiError, ApiErrorResponse, ChatChoice, ChatCompletionChunk,
     ChatCompletionRequest, ChatCompletionResponse, ChunkChoice, ContentPart, DeltaContent,

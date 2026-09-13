@@ -422,6 +422,11 @@ impl VfsSearch for VirtualFileSystemImpl {
         limit: usize,
         namespace: Option<ContextNamespace>,
     ) -> Result<Vec<SearchResult>> {
+        // 空/空白查询短路：不发嵌入请求（日志实测出现过 `text_len=0` 的调用）
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
         let embedding_provider = self
             .embedding_provider
             .read()
@@ -511,6 +516,12 @@ impl VfsSearch for VirtualFileSystemImpl {
         payload: EntryMetadata,
         embedding_model: &str,
     ) -> Result<()> {
+        // 双摘要均为空：跳过向量索引（无内容可检索，避免白消耗嵌入调用）
+        if abstract_content.trim().is_empty() && overview_content.trim().is_empty() {
+            tracing::warn!(uri = %uri, "摘要为空，跳过向量索引（避免无意义嵌入调用）");
+            return Ok(());
+        }
+
         let embedding_provider = self
             .embedding_provider
             .read()

@@ -14,6 +14,7 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
+use tianyan::observability::usage_log::UsageLog;
 use tianyan::scheduler::tasks::{
     EvolutionTask, GcTask, SnapshotGcTask, SummaryTask, UsageStatsFlushTask,
 };
@@ -24,6 +25,7 @@ use crate::agent_builder::create_model_services;
 use crate::api::events::processor as event_processor;
 use crate::api::goals::tool::GoalTool;
 use crate::api::todos::tool::TodoTool;
+use crate::embedding_usage::attach_embedding_usage_sink;
 use crate::evolution_executor::AgentEvolutionExecutor;
 use crate::scheduled_tasks::manager::{ScheduledAgentTaskManager, SchedulerRegistrar};
 use crate::scheduled_tasks::tool::{CreateTaskRequest, ScheduleTaskTool};
@@ -31,6 +33,8 @@ use crate::scheduled_tasks::tool::{CreateTaskRequest, ScheduleTaskTool};
 // Import API module
 pub mod agent_builder;
 pub mod api;
+/// 嵌入用量入账（usage_logs）。
+pub mod embedding_usage;
 pub mod event_push;
 pub mod evolution_executor;
 pub mod mcp_bridge;
@@ -151,7 +155,8 @@ async fn initialize_vfs_for_app(
                 "VFS 使用 SQLite 存储后端（共享连接）：{}",
                 database.path().display()
             );
-            Arc::new(SqliteBackend::new(database))
+            // clone：database 还需用于嵌入用量入账（UsageLog 共享同一连接）
+            Arc::new(SqliteBackend::new(database.clone()))
         }
     };
 
@@ -173,6 +178,14 @@ async fn initialize_vfs_for_app(
                     .resolve(tianyan::config::ModelCapability::TextEmbedding)
                     .map(|r| r.model)
                     .unwrap_or_else(|| "text-embedding-3-small".to_string());
+                // 嵌入用量入账（此前嵌入 token 完全不入 usage_logs：账单/统计盲区）。
+                // 失败只告警：嵌入照常工作，仅不入账（不阻断启动链）。
+                match UsageLog::new(database.clone()) {
+                    Ok(usage_log) => {
+                        attach_embedding_usage_sink(&ms, usage_log, config);
+                    }
+                    Err(e) => warn!("嵌入用量入账不可用（{}），嵌入调用将不入账", e),
+                }
                 // 直接注入 EmbeddingService（无桥接层）
                 vfs_builder = vfs_builder.with_embedding_provider(ms.embedding, emb_model);
             }

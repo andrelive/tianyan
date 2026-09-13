@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -12,7 +12,10 @@ use crate::model::types::{
     EmbeddingResponse, VisionRequest, VisionResponse,
 };
 
-use super::provider::middleware::{LoggedEmbeddingService, LoggedService, LoggedVlmService};
+use super::provider::middleware::{
+    EmbeddingUsageHandle, EmbeddingUsageSink, LoggedEmbeddingService, LoggedService,
+    LoggedVlmService,
+};
 use super::provider::AsyncOpenAIClient;
 
 /// 一组已构建的模型服务。
@@ -33,6 +36,8 @@ pub struct ModelServices {
     pub embedding_model: Option<String>,
     /// 视觉模型名。
     pub vision_model: Option<String>,
+    /// 嵌入用量上报槽位（装配层后置注入；见 [`ModelServices::set_embedding_usage_sink`]）。
+    embedding_usage_sink: EmbeddingUsageHandle,
 }
 
 /// 缓存的 provider 客户端映射。
@@ -54,6 +59,9 @@ impl ModelServices {
             .resolve(ModelCapability::TextEmbedding)
             .or_else(|| config.resolve(ModelCapability::MultimodalEmbedding));
         let vision_ref = config.resolve(ModelCapability::Vision);
+
+        // 嵌入用量上报槽位（与 LoggedEmbeddingService 共享；装配层后置注入）
+        let embedding_usage_sink: EmbeddingUsageHandle = Arc::new(Mutex::new(None));
 
         // 按需创建客户端（同一 provider 复用）
         let mut clients = ClientPool::new();
@@ -88,7 +96,10 @@ impl ModelServices {
             Some(r) => {
                 let client = get_or_create_client(&mut clients, r)?;
                 (
-                    Arc::new(LoggedEmbeddingService(client)) as Arc<dyn EmbeddingService>,
+                    Arc::new(LoggedEmbeddingService::new(
+                        client,
+                        embedding_usage_sink.clone(),
+                    )) as Arc<dyn EmbeddingService>,
                     Some(r.model.clone()),
                 )
             }
@@ -127,7 +138,19 @@ impl ModelServices {
             chat_model,
             embedding_model,
             vision_model,
+            embedding_usage_sink,
         })
+    }
+
+    /// 注入嵌入用量上报（装配层拿到 `UsageLog` 后调用；未注入则不上报）。
+    ///
+    /// 后置注入而非构造参数：`from_config` 只依赖 `ModelsConfig`，而用量落库
+    /// 需要 `UsageLog`（数据库连接）——保持 model 层不依赖 observability/db。
+    pub fn set_embedding_usage_sink(&self, sink: Arc<dyn EmbeddingUsageSink>) {
+        *self
+            .embedding_usage_sink
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(sink);
     }
 }
 
