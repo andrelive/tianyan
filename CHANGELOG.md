@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.17] - 2026-09-13
+
+### Added
+- 嵌入调用用量入账：`EmbeddingUsageSink` 契约（model 层定义 + 装配层注入）+ `UsageLogEmbeddingSink`（异步落库）——嵌入 token 此前完全不写 `usage_logs`（不入账 = 统计/账单盲区）；VFS 实例与 Agent 实例（构造 + 热重载）均注入
+- 查询嵌入缓存（键 `model|dimensions|text`，容量 256，FIFO）+ 空文本/空查询短路——同一 query 一次检索被嵌 2 次、`text_len=0` 空调用均被消除
+
+### Changed
+- 动态工具注册表 `HashMap` → 注册序 `Vec`（追加末尾、按名去重）；`definitions()` 声明稳定性契约（连续取定义逐字节一致）——消除工具定义顺序漂移对前缀缓存命中的干扰
+- 角色清单与工具描述解耦：`delegate_to_agent` 描述移除运行时角色 L0 摘要注入（保留内置角色名 + 指向 `suggest_role`）；删除 `RoleRegistry::delegate_role_segment()`
+- 会话级工具表变化检测：真用户轮在请求前比对 `toolset_fingerprint`（有序名 + 描述 + params schema），与基线不同则强制压缩一次（首轮只记基线；唤醒轮不检查）
+
+### Fixed
+- 终止/取消轮把**上一轮** assistant 结论当作本轮边界事件下发（前端合并进本轮占位气泡）→ 轮前记水位 `prev_assistant_id`，只下发本轮新产生消息（`select_turn_assistant` 水位纯函数）
+- 子代理 `submit_result` 被执行侧角色白名单误拒 → 协议工具豁免单点（`PROTOCOL_TOOLS` / `is_protocol_tool`，请求注入与执行豁免同源；白名单外普通工具仍被拒）
+- 停止按钮竞态：新会话首个请求未返回（会话 id 未就绪）时点停止 → 取消请求发不出；新增 `cancelWhenSessionIdReady`（轮询等待 id 就绪后补发）
+
 ## [0.3.16] - 2026-09-12
 
 ### Added
