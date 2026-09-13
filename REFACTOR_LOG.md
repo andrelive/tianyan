@@ -837,5 +837,11 @@ Oracle 批判性终审（Loop 2）发现 Wave 7 的 clippy 修复引入 3 处 fm
 - 压缩门槛（`MIN_MESSAGES_BEFORE_COMPRESSION = 6`）保持不动；阈值/体量再评估暂缓（用户决定）。
 - 过期兜底确认：委托未知角色报错附全量可调用清单（`active_names()`），模型可一次失败内自愈。
 
+## 0.3.17 交付（2026-09-13）
+
+- 产物：`Tianyan_0.3.17_x64_zh-CN.msi` / `Tianyan_0.3.17_x64_en-US.msi`（各 46.4 MB，`target/release/bundle/msi/`）
+- 版本落点：`tauri/tauri.conf.json` = `Cargo.toml`（workspace）= `Cargo.lock` = 0.3.17；exe `FileVersion` / `ProductVersion` = 0.3.17
+- 门禁终态：core **1191** / server 152 / mcp 16 / tauri 9 / 前端 **395**；fmt · clippy `-D warnings` 0 · eslint · tsc · prettier 全绿
+
 ### 门禁
 fmt 干净 · clippy `-D warnings` 0 · core **1191** / server 152 / mcp 16 / tauri 9
