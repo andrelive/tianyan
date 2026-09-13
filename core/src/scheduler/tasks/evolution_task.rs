@@ -848,7 +848,7 @@ async fn find_entry(
 mod tests {
     use super::*;
     use crate::test_utils::MockVfs;
-    use crate::vfs::{ContentStore, SummaryEngine, VfsCore};
+    use crate::vfs::{ContentStore, SummaryEngine, VfsCore, VirtualFileSystem};
 
     struct FakeExecutor {
         response: String,
@@ -866,7 +866,7 @@ mod tests {
     }
 
     fn make_context_with_config(
-        vfs: Arc<MockVfs>,
+        vfs: Arc<dyn VirtualFileSystem>,
         config: crate::config::TianyanConfig,
     ) -> TaskContext {
         let chat: Arc<dyn crate::model::ChatService> =
@@ -889,6 +889,129 @@ mod tests {
             skill_reviewer,
             config,
         )
+    }
+    // ── 真实后端（SqliteBackend）集成验证 ────────────────────────────
+    // find_entry 缺陷的教训：旧测试以"目录形态"Mock 条目掩盖了与生产
+    // 数据形态（文件条目）的差异。以下测试在真实存储后端上锁定删除/合并链。
+
+    /// 构造真实后端 VFS（SqliteBackend + 内存 DB + Mock 向量）。
+    async fn real_vfs() -> Arc<dyn VirtualFileSystem> {
+        use crate::db::Database;
+        use crate::vfs::{
+            MockVectorStorage, SqliteBackend, StorageBackend, VirtualFileSystemBuilder,
+        };
+        let database = Database::open_in_memory().unwrap();
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteBackend::new(database));
+        let vector: Arc<dyn crate::vfs::VectorStorage> = Arc::new(MockVectorStorage::new());
+        let vfs = VirtualFileSystemBuilder::new()
+            .with_storage(storage)
+            .with_vector_storage(vector)
+            .build()
+            .unwrap();
+        vfs.initialize().await.unwrap();
+        Arc::new(vfs)
+    }
+
+    #[tokio::test]
+    async fn test_apply_deletion_real_backend_hits_nested_file() {
+        // 真实后端形态：深层文件（cases/failed_tasks/{id}）必须命中并归档
+        let vfs = real_vfs().await;
+        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let entry = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec![
+                "cases".to_string(),
+                "failed_tasks".to_string(),
+                "old-case".to_string(),
+            ],
+        );
+        vfs.write_content(&entry, "旧案例内容").await.unwrap();
+        vfs.write_abstract(&entry, "旧摘要").await.unwrap();
+
+        let d = DeletionPlan {
+            kind: "memory".to_string(),
+            id: "old-case".to_string(),
+            reason: "已过时".to_string(),
+        };
+        task.apply_deletion(&ctx, &d).await.unwrap();
+
+        assert!(
+            !vfs.exists(&entry).await.unwrap(),
+            "原条目应删除（真实后端）"
+        );
+        let archive = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["archive".to_string(), "old-case".to_string()],
+        );
+        let archived = vfs
+            .read_content(&archive, ContentLevel::Detail)
+            .await
+            .unwrap();
+        assert_eq!(archived, "旧案例内容", "归档副本应保留内容（真实后端）");
+    }
+
+    #[tokio::test]
+    async fn test_apply_memory_merge_real_backend() {
+        // 真实后端：目标原地重写 + 源归档删除（全链路）
+        let vfs = real_vfs().await;
+        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let a = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec![
+                "cases".to_string(),
+                "failed_tasks".to_string(),
+                "theme-a".to_string(),
+            ],
+        );
+        let b = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec![
+                "cases".to_string(),
+                "failed_tasks".to_string(),
+                "theme-b".to_string(),
+            ],
+        );
+        vfs.write_content(&a, "旧内容 A").await.unwrap();
+        vfs.write_abstract(&a, "旧摘要 A").await.unwrap();
+        vfs.write_content(&b, "旧内容 B").await.unwrap();
+
+        let m = MemoryPlan {
+            action: "merge".to_string(),
+            category: "failed_case".to_string(),
+            content: "归纳后的主题内容".to_string(),
+            importance: 0.9,
+            id: Some("theme-a".to_string()),
+            merge_from: vec!["theme-b".to_string()],
+        };
+        task.apply_memory_merge(&ctx, &m).await.unwrap();
+
+        let updated = vfs.read_content(&a, ContentLevel::Detail).await.unwrap();
+        assert!(
+            updated.contains("归纳后的主题内容"),
+            "目标应原地重写（真实后端）"
+        );
+        assert!(!vfs.exists(&b).await.unwrap(), "源条目应删除（真实后端）");
+        let arch = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["archive".to_string(), "theme-b".to_string()],
+        );
+        assert_eq!(
+            vfs.read_content(&arch, ContentLevel::Detail).await.unwrap(),
+            "旧内容 B",
+            "源归档副本应保留（真实后端）"
+        );
     }
 
     #[test]

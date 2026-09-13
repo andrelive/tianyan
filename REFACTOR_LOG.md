@@ -942,6 +942,7 @@ fmt 干净 · clippy `-D warnings` 0 · core **1191** / server 152 / mcp 16 / ta
 
 ### 验证
 - **反向验证 8 项**（注入旧行为必红）：短路径失效 / 守卫失效 / GC 不下钻 ×2 / 扫描跳过失效 / 面板过滤失效 / find_entry 旧逻辑 / merge 开关失效 / merge_from 归档失效
+- **真实后端集成验证**：SqliteBackend（内存 DB）上重跑删除/合并链（2 测试 + 1 项反向验证必红）——消除「Mock 形态差异」残留风险（find_entry 缺陷曾被目录形态 Mock 掩盖的教训）
 - 全量门禁：core **1207** / server 152 (+1 ignored) / mcp 16 / tauri 9 / 集成全绿；fmt 干净；clippy `-D warnings` 0（含 example）
 - 数据复核：活跃条目 L1>L2 **归零**；清洗后 memory 22 / user 3 / patterns 4 / 规则 31；归档首次产生内容（memory 19 / user 10 / learned 360）
 
@@ -950,3 +951,4 @@ fmt 干净 · clippy `-D warnings` 0 · core **1191** / server 152 / mcp 16 / ta
 
 ### 后续候选（未实施）
 - decay_rate / 访问追踪（access_count 从未维护，暂缓）；记忆面板覆盖 user/agent 命名空间；同 id 多条目歧义；rule_recorder 产出质量复审
+- rule_recorder（失败实时记录）与 ADR-017「统一综述驱动」的架构一致性收口——数据核查：**活跃区 0 条其产出**（低频 + 去重保护），暂无污染压力，处置按需触发
