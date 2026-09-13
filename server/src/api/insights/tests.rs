@@ -154,6 +154,79 @@ async fn list_memories_expands_subdirectories_to_leaves() {
     );
 }
 
+/// GET /api/v1/memory → 运维数据子域（状态/日志/归档）不作为记忆展示。
+#[tokio::test]
+async fn list_memories_excludes_operational_subdirs() {
+    use tianyan::common::types::{ContentLevel, ContextNamespace, TianyanUri};
+    use tianyan::vfs::ContentStore;
+
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path());
+    let (app, state) = create_app(config).await.unwrap();
+
+    let vfs = state.vfs();
+    // 真记忆 + 四类运维数据各一（运维数据即便在磁盘上存在也不得展示）
+    let uris = [
+        TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["facts".to_string(), "real-fact".to_string()],
+        ),
+        TianyanUri::new(
+            ContextNamespace::Memory,
+            vec![
+                "events".to_string(),
+                "evolution_reports".to_string(),
+                "r.md".to_string(),
+            ],
+        ),
+        TianyanUri::new(
+            ContextNamespace::Memory,
+            vec![
+                "events".to_string(),
+                "task_states".to_string(),
+                "evolution.md".to_string(),
+            ],
+        ),
+        TianyanUri::new(
+            ContextNamespace::Memory,
+            vec![
+                "events".to_string(),
+                "extraction_state".to_string(),
+                "s1".to_string(),
+            ],
+        ),
+        TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["archive".to_string(), "old-entry".to_string()],
+        ),
+    ];
+    for uri in &uris {
+        vfs.write(uri, ContentLevel::Detail, "内容").await.unwrap();
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/memory")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+    let memories = body["memories"].as_array().unwrap();
+    assert_eq!(memories.len(), 1, "仅真记忆条目返回: {memories:?}");
+    assert_eq!(
+        memories[0]["relative_path"].as_str().unwrap(),
+        "facts/real-fact"
+    );
+}
+
 /// GET /api/v1/stats → 200 + 统计摘要结构（技能调用/文档访问/搜索热度）。
 #[tokio::test]
 async fn get_stats_returns_summary_shape() {

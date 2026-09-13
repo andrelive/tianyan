@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::info;
 
-use tianyan::common::types::{ContentLevel, ContextNamespace, TianyanUri};
+use tianyan::common::types::{memory_paths, ContentLevel, ContextNamespace, TianyanUri};
 use tianyan::vfs::{ContentStore, VfsCore};
 
 use crate::api::shared::error::ApiError;
@@ -24,6 +24,8 @@ use crate::state::AppState;
 /// 浏览语义：递归展开子目录，仅返回叶子条目——目录仅作导航中间节点，
 /// 内容为空且 importance 为默认 0.5，直接展示只会误导。按 updated_at
 /// 倒序（最近记忆在前）。`relative_path` 供前端区分跨目录同名条目。
+/// 运维数据子域（`extraction_state`/`evolution_reports`/`task_states`/`archive`）
+/// 不属记忆内容，统一排除（判定单一真相源：`memory_paths::is_operational_path`）。
 pub async fn list_memories_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -43,6 +45,10 @@ pub async fn list_memories_handler(
             Err(_) => continue,
         };
         for entry in entries {
+            // 运维数据子域（状态/日志/归档）不作为「记忆」展示
+            if memory_paths::is_operational_path(&entry.metadata.uri) {
+                continue;
+            }
             if entry.is_directory() {
                 stack.push((entry.metadata.uri.clone(), depth + 1));
             } else {
