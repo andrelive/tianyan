@@ -18,6 +18,7 @@ import type {
   ToolCallEvent,
 } from '@/lib/types';
 import { useChatStream } from '@/hooks/useChatStream';
+import { cancelWhenSessionIdReady } from '@/lib/cancel-pending';
 import { usePolling } from '@/hooks/use-polling';
 import { useSessionHistory } from '@/hooks/use-session-history';
 import { useUnifiedEvents, subscribeSession } from '@/hooks/use-unified-events';
@@ -413,8 +414,16 @@ export default function ChatPanel() {
   const handleStop = useCallback(() => {
     // 主动停止：显式调用取消端点（跑完再取语义下断线不取消，只有主动停止才取消）
     const sid = useAppStore.getState().currentSessionId;
+    const sendCancel = (id: string) => {
+      void cancelChatStream(id).catch(() => {});
+    };
     if (sid) {
-      void cancelChatStream(sid).catch(() => {});
+      sendCancel(sid);
+    } else {
+      // 竞态修复：新会话的首个请求尚未返回、sessionId 还没确定时点「停止」，
+      // 取消端点无 id 可用 → 后端会按「跑完再取」继续跑完，前端却已显示
+      // "已中止"（下次加载突然冒出完整回答）。此处等待 id 就绪后补发取消。
+      cancelWhenSessionIdReady(() => useAppStore.getState().currentSessionId, sendCancel);
     }
     stopStream();
     setStreamStatus('idle');
