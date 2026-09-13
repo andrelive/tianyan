@@ -5,6 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::common::error::Result;
+use crate::common::token_estimator::estimate_tokens;
 use crate::model::ChatService;
 
 /// 不同内容级别的 token 限制。
@@ -173,15 +174,24 @@ impl SummaryService for SummaryEngine {
 
     /// 生成概览（L1）。
     ///
-    /// 概览是约 2K 个 token 的详细摘要，
-    /// 用于内容导航和重新排序。
+    /// 概览是约 2K 个 token 的详细摘要，用于内容导航和重新排序。
+    ///
+    /// **压缩契约**（防“概览比原文详实”历史问题）：
+    /// - 内容本身不超过概览容量（[`OVERVIEW_TOKEN_LIMIT`]）时直接复用原文
+    ///   ——概览无语义压缩空间，LLM 生成只会引入扩写/脑补风险；
+    /// - 超容量时 LLM 生成，且生成结果不得超过原文长度（守卫回退）。
     async fn generate_overview(&self, content: &str) -> Result<String> {
+        // 短内容直用：概览无语义压缩空间
+        if estimate_tokens(content) <= OVERVIEW_TOKEN_LIMIT {
+            return Ok(content.to_string());
+        }
+
         let prompt = format!(
             r#"请为以下内容生成一个详细的概览，限制在 2000 个 token 以内。
-概览应该：
-1. 包含主要结构和关键点
-2. 保留重要细节
-3. 便于内容导航
+概览要求：
+1. 忠实于原文——只包含原文中出现的信息，不得引入原文之外的内容
+2. 保留主要结构和关键点、重要细节
+3. 便于内容导航；原文已简洁处不得扩写
 
 内容：
 {}
@@ -197,6 +207,17 @@ impl SummaryService for SummaryEngine {
                 vec![crate::common::types::Message::user(&prompt)],
             )
             .await?;
+
+        // 长度守卫：概览不得超过原文（防扩写回归——历史教训：
+        // 短输入被“详细概览”指令扩写为多节文章并引入原文外信息）
+        if response.chars().count() > content.chars().count() {
+            tracing::warn!(
+                original_chars = content.chars().count(),
+                overview_chars = response.chars().count(),
+                "概览生成超过原文长度，回退为原文"
+            );
+            return Ok(content.to_string());
+        }
 
         Ok(response)
     }
@@ -309,9 +330,9 @@ mod tests {
             .returning(|_| Ok(mock_chat_response("Test abstract summary")));
         let engine = SummaryEngine::new(Arc::new(chat), "test-model");
         let (abs, ov) = engine.generate_or_fallback("Some content").await;
-        // 两次 chat 调用返回同一 mock 响应（abstract 与 overview 相同）
+        // L0 走 LLM；L1 短内容直用（不调 LLM）
         assert_eq!(abs, "Test abstract summary");
-        assert_eq!(ov, "Test abstract summary");
+        assert_eq!(ov, "Some content");
     }
 
     #[tokio::test]
@@ -320,7 +341,8 @@ mod tests {
         chat.expect_chat_completion()
             .returning(|_| Err(TianyanError::Custom("模拟摘要服务不可用".to_string())));
         let engine = SummaryEngine::new(Arc::new(chat), "test-model");
-        let long = "x".repeat(1000);
+        // 超过概览容量（≈3000 token）以覆盖概览的 LLM 失败回退路径
+        let long = "x".repeat(9000);
         let (abs, ov) = engine.generate_or_fallback(&long).await;
         assert_eq!(abs.chars().count(), 500, "回退摘要截断为 500 字符");
         assert_eq!(ov, long, "回退概览为全文");
@@ -353,33 +375,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_generate_overview_with_mock() {
+    async fn test_generate_overview_short_content_reused() {
+        // 短内容（≤ 2000 token）无压缩空间：直接复用原文，不调 LLM
         let mut chat = MockChatService::new();
-        chat.expect_chat_completion()
-            .returning(|_| Ok(mock_chat_response("Test overview content")));
+        chat.expect_chat_completion().times(0);
         let engine = SummaryEngine::new(Arc::new(chat), "test-model");
         let result = engine.generate_overview("Some content").await.unwrap();
-        assert_eq!(result, "Test overview content");
+        assert_eq!(result, "Some content");
+    }
+
+    #[tokio::test]
+    async fn test_generate_overview_long_content_calls_llm() {
+        // 超容量内容（> 2000 token）：经 LLM 生成概览
+        let mut chat = MockChatService::new();
+        chat.expect_chat_completion()
+            .returning(|_| Ok(mock_chat_response("生成的长文档概览")));
+        let engine = SummaryEngine::new(Arc::new(chat), "test-model");
+        let long = "内容".repeat(1600); // 3200 CJK 字 ≈ 2133 token > 2000
+        let result = engine.generate_overview(&long).await.unwrap();
+        assert_eq!(result, "生成的长文档概览");
+    }
+
+    #[tokio::test]
+    async fn test_generate_overview_expansion_guard_falls_back() {
+        // 守卫：LLM 输出超过原文（扩写/脑补回归）→ 回退原文
+        let mut chat = MockChatService::new();
+        let expanded = "内容".repeat(1600) + &"扩".repeat(200);
+        chat.expect_chat_completion()
+            .returning(move |_| Ok(mock_chat_response(&expanded)));
+        let engine = SummaryEngine::new(Arc::new(chat), "test-model");
+        let long = "内容".repeat(1600);
+        let result = engine.generate_overview(&long).await.unwrap();
+        assert_eq!(result, long, "超过原文长度的概览必须回退原文");
     }
 
     #[tokio::test]
     async fn test_generate_summaries_with_mock() {
+        // L0 走 LLM；L1 短内容直用（不调 LLM）
         let mut chat = MockChatService::new();
-        let call_count = std::sync::Mutex::new(0usize);
-        chat.expect_chat_completion().returning(move |_| {
-            let mut count = call_count.lock().unwrap();
-            *count += 1;
-            if *count == 1 {
-                Ok(mock_chat_response("Test abstract summary"))
-            } else {
-                Ok(mock_chat_response("Test overview content"))
-            }
-        });
+        chat.expect_chat_completion()
+            .returning(|_| Ok(mock_chat_response("Test abstract summary")));
         let engine = SummaryEngine::new(Arc::new(chat), "test-model");
         let (abstract_result, overview_result) =
             engine.generate_summaries("Some content").await.unwrap();
         assert_eq!(abstract_result, "Test abstract summary");
-        assert_eq!(overview_result, "Test overview content");
+        assert_eq!(overview_result, "Some content");
     }
 
     #[tokio::test]

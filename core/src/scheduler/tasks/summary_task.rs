@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::common::token_estimator::estimate_tokens;
+use crate::common::types::memory_paths;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
 use crate::vfs::{ContextEntry, ABSTRACT_TOKEN_LIMIT};
@@ -84,6 +85,11 @@ impl SummaryTask {
         let entries = ctx.vfs.list(uri).await?;
 
         for entry in entries {
+            // 运维数据子域（extraction_state/evolution_reports/task_states/archive）
+            // 不参与摘要：非记忆内容，不生成 L0/L1 与向量
+            if memory_paths::is_operational_path(entry.uri()) {
+                continue;
+            }
             if entry.is_directory() {
                 Box::pin(self.scan_directory_recursive(ctx, entry.uri(), missing)).await?;
             } else if self.needs_summary(ctx, &entry).await? {
@@ -164,16 +170,21 @@ impl SummaryTask {
                 ))
             })?;
 
-        let (abstract_content, overview_content) =
-            if estimate_tokens(&detail_content) < ABSTRACT_TOKEN_LIMIT {
-                tracing::debug!("短内容直接用作摘要：{}", uri);
-                (detail_content.clone(), detail_content)
-            } else {
-                tracing::debug!("长内容生成摘要：{}", uri);
-                ctx.summary_engine
-                    .generate_summaries(&detail_content)
-                    .await?
-            };
+        // L0：极短内容全文直用；否则走 LLM 摘要
+        let abstract_content = if estimate_tokens(&detail_content) < ABSTRACT_TOKEN_LIMIT {
+            tracing::debug!("短内容直接用作摘要：{}", uri);
+            detail_content.clone()
+        } else {
+            tracing::debug!("长内容生成摘要：{}", uri);
+            ctx.summary_engine
+                .generate_abstract(&detail_content)
+                .await?
+        };
+        // L1：概览压缩契约由引擎单点（短内容直用 / 超容量生成 + 长度守卫）
+        let overview_content = ctx
+            .summary_engine
+            .generate_overview(&detail_content)
+            .await?;
 
         // 写入摘要
         ctx.vfs.write_abstract(uri, &abstract_content).await?;
@@ -421,7 +432,7 @@ mod tests {
 
         let mut chat = MockChatService::new();
         chat.expect_chat_completion()
-            .times(2)
+            .times(1)
             .returning(|_| Ok(mock_chat_response("模拟摘要内容")));
         let vfs = Arc::new(MockVfs::new());
         let uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["long-cn".into()]);
@@ -441,7 +452,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(abstract_content, "模拟摘要内容", "长中文应调用 LLM 生成 L0");
-        assert_eq!(overview_content, "模拟摘要内容", "长中文应调用 LLM 生成 L1");
+        assert_eq!(
+            overview_content, content,
+            "输入未超过概览容量时 L1 直用原文（不调 LLM）"
+        );
         assert_ne!(abstract_content, content, "长中文摘要不应等于全文");
     }
 
@@ -453,7 +467,7 @@ mod tests {
 
         let mut chat = MockChatService::new();
         chat.expect_chat_completion()
-            .times(2)
+            .times(1)
             .returning(|_| Ok(mock_chat_response("生成摘要结果")));
         let vfs = Arc::new(MockVfs::new());
         let uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["long-cn-no-full".into()]);
@@ -490,10 +504,9 @@ mod tests {
             estimate_tokens(&content)
         );
 
-        // 摘要引擎返回固定内容：若被（错误地）调用，写出的 Abstract 将是 mock 输出而非原文
+        // 短路径（token 低于阈值）：L0/L1 均直用原文，不得调用 LLM
         let mut chat = MockChatService::new();
-        chat.expect_chat_completion()
-            .returning(|_| Ok(mock_chat_response("模拟摘要")));
+        chat.expect_chat_completion().times(0);
         let vfs = Arc::new(MockVfs::new());
         let uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["boundary-cn".into()]);
         vfs.set_content(&uri, ContentLevel::Detail, &content);
@@ -509,6 +522,46 @@ mod tests {
         assert_eq!(
             abstract_content, content,
             "token 低于阈值的中文内容不应被 LLM 摘要（字节/token 误判 bug）"
+        );
+    }
+
+    // ── 运维子域排除（状态/日志类不参与摘要） ───────────────────────
+
+    #[tokio::test]
+    async fn test_operational_paths_excluded_from_summary_scan() {
+        // evolution_reports（运维日志）不参与摘要扫描：即便缺少 L1，
+        // 也不进入 missing 队列；普通 cases 条目正常进入（判别基准）
+        let vfs = Arc::new(MockVfs::new());
+        let mem_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+        let events = mem_root.append("events");
+        let reports = events.append("evolution_reports");
+        let cases = mem_root.append("cases");
+        vfs.add_directory(&mem_root, &events);
+        vfs.add_directory(&events, &reports);
+        vfs.add_directory(&mem_root, &cases);
+
+        let report = reports.append("r1.md");
+        let case = cases.append("c1");
+        vfs.add_entry(&reports, &report);
+        vfs.add_entry(&cases, &case);
+        vfs.add_content_metadata(&report, ContentLevel::Detail);
+        vfs.add_content_metadata(&case, ContentLevel::Detail);
+
+        let ctx = make_context(vfs.clone(), MockChatService::new());
+        let missing = SummaryTask::new()
+            .scan_missing_summaries(&ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            missing.iter().any(|u| u.as_str().contains("/cases/")),
+            "普通记忆条目应进入 missing（判别基准）：{missing:?}"
+        );
+        assert!(
+            missing
+                .iter()
+                .all(|u| !u.as_str().contains("evolution_reports")),
+            "运维子域不得进入 missing：{missing:?}"
         );
     }
 }

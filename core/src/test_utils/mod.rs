@@ -36,6 +36,8 @@ pub struct MockVfs {
     entries: RwLock<HashMap<String, Vec<ContextEntry>>>,
     /// uri_string → exists() bool
     exists: RwLock<HashMap<String, bool>>,
+    /// (uri_string, ContentLevel) → ContentMetadata（get_all_content_metadata 返回）
+    metadata: RwLock<HashMap<(String, ContentLevel), ContentMetadata>>,
     /// 可配置的搜索结果
     search_results: RwLock<Vec<SearchResult>>,
     /// 搜索错误（Some = 模拟搜索失败）
@@ -51,6 +53,7 @@ impl MockVfs {
             content: RwLock::new(HashMap::new()),
             entries: RwLock::new(HashMap::new()),
             exists: RwLock::new(HashMap::new()),
+            metadata: RwLock::new(HashMap::new()),
             search_results: RwLock::new(vec![]),
             search_error: RwLock::new(None),
             moved: RwLock::new(vec![]),
@@ -68,6 +71,21 @@ impl MockVfs {
             .write()
             .unwrap()
             .insert((uri.to_string(), level), text.to_string());
+    }
+    /// 设置指定 URI 的内容层元数据（`get_all_content_metadata` 返回）。
+    ///
+    /// 默认不设置时返回空（保持既有测试行为）；供摘要扫描等依赖
+    /// 「内容层存在性」判定的路径使用。
+    pub fn add_content_metadata(&self, uri: &TianyanUri, level: ContentLevel) {
+        let now = chrono::Utc::now();
+        self.metadata.write().unwrap().insert(
+            (uri.to_string(), level),
+            ContentMetadata {
+                size: 0,
+                created_at: now,
+                updated_at: now,
+            },
+        );
     }
 
     /// 在指定目录下添加条目。
@@ -212,9 +230,15 @@ impl VfsCore for MockVfs {
 
     async fn get_all_content_metadata(
         &self,
-        _uri: &TianyanUri,
+        uri: &TianyanUri,
     ) -> Result<HashMap<ContentLevel, ContentMetadata>> {
-        Ok(HashMap::new())
+        let s = uri.to_string();
+        let map = self.metadata.read().unwrap();
+        Ok(map
+            .iter()
+            .filter(|((u, _), _)| *u == s)
+            .map(|((_, level), meta)| (*level, meta.clone()))
+            .collect())
     }
 }
 

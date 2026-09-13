@@ -51,6 +51,33 @@ pub mod memory_paths {
     pub const SESSIONS: &str = "sessions";
     /// 长期记忆段（tianyan://memory/long_term/）。
     pub const LONG_TERM: &str = "long_term";
+
+    /// 运维数据子域（非记忆内容）：面板展示、摘要生成与检索消费一律排除。
+    ///
+    /// - `events/extraction_state/`：会话提取状态（旧提取管道遗物）；
+    /// - `events/evolution_reports/`：演化报告（运维日志）；
+    /// - `events/task_states/`：定时任务持久状态（水位线）；
+    /// - `archive/`：演化软删除归档。
+    pub const OPERATIONAL_SUBDIRS: &[&[&str]] = &[
+        &["events", "extraction_state"],
+        &["events", "evolution_reports"],
+        &["events", "task_states"],
+        &["archive"],
+    ];
+
+    /// 判断 URI 是否位于记忆命名空间的运维数据子域（非记忆内容）。
+    ///
+    /// 消费面（记忆面板、摘要任务、语义检索）统一经本判定过滤——
+    /// 运维数据只作为系统状态/日志存在，不作为「记忆」被展示或检索。
+    pub fn is_operational_path(uri: &super::TianyanUri) -> bool {
+        if uri.namespace() != super::ContextNamespace::Memory {
+            return false;
+        }
+        let path: Vec<&str> = uri.path().iter().map(|s| s.as_str()).collect();
+        OPERATIONAL_SUBDIRS
+            .iter()
+            .any(|sub| path.len() >= sub.len() && path.iter().zip(sub.iter()).all(|(a, b)| a == b))
+    }
 }
 
 /// 用于标识上下文条目的 Tianyan URI。
@@ -327,5 +354,41 @@ mod tests {
         let uri = TianyanUri::parse("tianyan://user/profile").unwrap();
         let s: &str = uri.as_ref();
         assert_eq!(s, "tianyan://user/profile");
+    }
+
+    // ── memory_paths::is_operational_path ────────────────────────────
+
+    #[test]
+    fn test_is_operational_path_matches_subdirs() {
+        let cases = [
+            // 四个运维子域（含其深层子路径）均命中
+            ("tianyan://memory/events/extraction_state/session-1", true),
+            (
+                "tianyan://memory/events/evolution_reports/20260913-061422.md",
+                true,
+            ),
+            ("tianyan://memory/events/task_states/evolution.md", true),
+            ("tianyan://memory/archive/old-entry", true),
+            ("tianyan://memory/events/extraction_state", true),
+            // 真记忆内容：不得命中
+            ("tianyan://memory/cases/failed_tasks/1786957130", false),
+            ("tianyan://memory/facts/evo-1789280062", false),
+            ("tianyan://memory/events/decisions/evo-1789280062", false),
+            ("tianyan://memory/clipboard/123", false),
+            // 相似前缀但不同域：不得命中（防前缀误伤）
+            ("tianyan://memory/events/extraction_state_notes", false),
+            ("tianyan://memory/archive_notes/x", false),
+            // 非记忆命名空间：不适用（返回 false）
+            ("tianyan://agent/learned/rule-1", false),
+            ("tianyan://skill/learned/tianyan-release-build", false),
+        ];
+        for (uri_str, expected) in cases {
+            let uri = TianyanUri::parse(uri_str).unwrap();
+            assert_eq!(
+                memory_paths::is_operational_path(&uri),
+                expected,
+                "uri={uri_str}"
+            );
+        }
     }
 }
