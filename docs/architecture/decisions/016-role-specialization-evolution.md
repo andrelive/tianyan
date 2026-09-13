@@ -157,3 +157,27 @@
 - `core/src/context/assembler.rs` + `core/src/session/types.rs` — 前缀分块与快照扩展
 - `core/src/executor/command.rs` — 后台命令原语（已落地）
 - `server/src/api/config/services.rs` — 角色 API（列表/试验性标记/回退）
+
+## 后续演进（2026-09-13）：角色清单移出工具描述，改按需查询
+
+**背景**：`ToolRegistry::definitions()` 曾把角色 L0 摘要（名字 + 职责首行 +
+工具数 + 状态）动态追加到 `delegate_to_agent` 的**工具描述**上。角色是**自动
+演化**的（本 ADR 的学习机制 + 演化任务），每次演化都会改动描述字节 → **工具段
+提示词前缀缓存失效**（隐性成本：每次角色更新后，所有活跃会话的下一轮请求从
+工具段起整段 cache miss）。
+
+**演进**：
+
+- 工具描述恢复为**稳定文案**：静态部分保留 3 个内置角色名（`researcher` /
+  `editor` / `reviewer`——代码写死、不随演化变化）；其他自定义/学习角色指路
+  `suggest_role`（"按任务描述查询，experimental 不可调用"）；
+- 角色清单改**按需查询**（`suggest_role` 语义匹配，返回 `name/score/purpose/status`）
+  ——本 ADR 的"渐进披露"精神不变（完整提示仅委托时加载），但不再占用工具描述字节；
+- **过期兜底**（角色改名/删除后模型记忆失效）：委托未知角色在循环启动前报错，
+  **错误消息附当前全部可调用角色**（`active_names()`，过滤试验性）→ 模型一次
+  失败即拿到最新清单并重试，无需额外查询；试验性角色单独报"试验性不可调用"；
+- 删除 `RoleRegistry::delegate_role_segment()`（无引用）。
+
+**影响**：主 agent 不再"一眼看到全部角色"，需要时用 `suggest_role` 查，或在
+委托失败时从报错获得最新清单。代价：过期场景最多少量一次失败轮；收益：角色
+演化不再打掉工具段缓存（自动化高频事件 → 零缓存代价）。

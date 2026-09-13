@@ -317,31 +317,6 @@ impl RoleRegistry {
         names
     }
 
-    /// delegate 工具描述的角色 L0 摘要段（ADR-016 渐进披露）。
-    ///
-    /// 每行：`- 名字：职责一句话（N 工具）[试验性]`；完整提示仅委托时加载。
-    pub fn delegate_role_segment(&self) -> String {
-        let roles = self.roles.read().unwrap_or_else(|e| e.into_inner());
-        let mut roles: Vec<&AgentRole> = roles.values().collect();
-        roles.sort_by(|a, b| a.name.cmp(&b.name));
-        let mut lines = Vec::new();
-        for role in roles {
-            let purpose = role
-                .system_prompt
-                .as_deref()
-                .map(|p| p.lines().next().unwrap_or("").trim())
-                .unwrap_or("无系统提示")
-                .to_string();
-            let tool_count = role.tools.as_ref().map(|t| t.len()).unwrap_or(0);
-            let mut line = format!("- {}：{}（{} 工具）", role.name, purpose, tool_count);
-            if role.status == RoleStatus::Experimental {
-                line.push_str(" [试验性]");
-            }
-            lines.push(line);
-        }
-        lines.join("\n")
-    }
-
     /// 所有角色名（字典序，便于生成稳定的可用角色列表）。
     pub fn names(&self) -> Vec<String> {
         let roles = self.roles.read().unwrap_or_else(|e| e.into_inner());

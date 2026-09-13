@@ -15,6 +15,12 @@ pub struct SessionState {
     pub last_activity: Instant,
     /// 待持久化记忆。
     pub pending_memories: Vec<crate::common::types::MemoryEntry>,
+    /// 会话工具表指纹（**内存态**；真用户轮检测工具集变化用）。
+    ///
+    /// 语义：`None` = 尚未对齐（新会话/重启后首轮只记录基线）；`Some(prev)`
+    /// 与当前指纹不同 → 工具集发生变化（MCP 增删/热重载）→ 会话侧主动压缩
+    /// 重建前缀（变化立即可见 + 缓存失效与压缩合并到同一轮）。
+    pub toolset_fingerprint: Option<u64>,
 }
 
 impl SessionState {
@@ -26,6 +32,7 @@ impl SessionState {
             injectable_context: InjectableContext::new(),
             last_activity: Instant::now(),
             pending_memories: Vec::new(),
+            toolset_fingerprint: None,
         }
     }
 

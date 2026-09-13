@@ -169,7 +169,7 @@ fn def_knowledge_ingest(name: &'static str) -> ToolDefinition {
 fn def_delegate_to_agent(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<DelegateToAgentParams>(
         name,
-        "将子任务委托给隔离的子智能体（独立上下文）。可用 role（researcher 研究 / editor 编辑 / reviewer 验证评审，或 [agent_roles] 配置 / 系统学习的自定义角色）选择预设模型、系统提示、工具白名单、max_turns 与超时；用 model 显式覆盖子智能体模型。每次委托是一次性、干净上下文的子智能体（角色系统提示 + 仅此任务），不加载之前任务历史，跨任务上下文需自行在对话中携带。子智能体与主会话同构（ADR-030）：收尾统一\"无工具调用\"，任务完成时输出最终结果；可用 submit_result 把最终结果写入任务存储（可选结果落盘工具，返回 task_id）——调用后告知主智能体结果 ID，用 task_status 查询。委托一律异步（ADR-026）：立即返回 task_id，任务独立运行；后台任务默认无超时（跑完/取消/轮数耗尽为止）——仅需显式设置 timeout_secs 作为兜底守卫，真实工作用大值（>=3600）；子智能体工作通常较长（代码评审/研究/大重构常超 10 分钟），优先不设超时 + 超时用 task_cancel。完成通知（含结果摘要）自动注入本会话——不要轮询，继续工作直到被通知。用 task_status 查询、task_cancel 中止。",
+        "将子任务委托给隔离的子智能体（独立上下文）。可用 role（内置：researcher 研究 / editor 编辑 / reviewer 验证评审；其他自定义/学习角色用 suggest_role 按任务描述查询——experimental 角色不可调用）选择预设模型、系统提示、工具白名单、max_turns 与超时；用 model 显式覆盖子智能体模型。每次委托是一次性、干净上下文的子智能体（角色系统提示 + 仅此任务），不加载之前任务历史，跨任务上下文需自行在对话中携带。子智能体与主会话同构（ADR-030）：收尾统一\"无工具调用\"，任务完成时输出最终结果；可用 submit_result 把最终结果写入任务存储（可选结果落盘工具，返回 task_id）——调用后告知主智能体结果 ID，用 task_status 查询。委托一律异步（ADR-026）：立即返回 task_id，任务独立运行；后台任务默认无超时（跑完/取消/轮数耗尽为止）——仅需显式设置 timeout_secs 作为兜底守卫，真实工作用大值（>=3600）；子智能体工作通常较长（代码评审/研究/大重构常超 10 分钟），优先不设超时 + 超时用 task_cancel。完成通知（含结果摘要）自动注入本会话——不要轮询，继续工作直到被通知。用 task_status 查询、task_cancel 中止。",
     ))
 }
 

@@ -167,6 +167,13 @@ pub trait DynamicToolExecutor: Send + Sync {
     ) -> crate::common::error::Result<serde_json::Value>;
 }
 
+/// 动态工具表：**有序**（注册顺序，新注册追加末尾）。
+///
+/// 顺序是提示词前缀的一部分，必须确定且稳定——`HashMap` 遍历顺序不确定
+/// （随机种子），会让同一工具集每次请求产生不同字节序列、白白打掉前缀缓存，
+/// 也会让"新增工具"改变已有工具的排布。按名去重（重名注册被跳过）。
+type DynamicToolTable = Vec<(String, Arc<dyn DynamicToolExecutor>)>;
+
 /// 工具注册表，维护工具定义并并行执行 tool_calls。
 #[derive(Clone)]
 pub struct ToolRegistry {
@@ -218,8 +225,10 @@ pub struct ToolRegistry {
     /// 工具 UI 展示意图映射（A2；工具名 → card 类型，不进入 LLM schema）。
     presentations: HashMap<String, ToolPresentation>,
     definitions: Vec<ToolDefinition>,
-    /// 外部注册的动态工具（如 MCP 工具桥接），按工具名索引。
-    dynamic_tools: Arc<Mutex<HashMap<String, Arc<dyn DynamicToolExecutor>>>>,
+    /// 外部注册的动态工具（如 MCP 工具桥接）。
+    ///
+    /// **有序容器**（[`DynamicToolTable`]）：注册顺序，新注册追加末尾。
+    dynamic_tools: Arc<Mutex<DynamicToolTable>>,
     /// 当前委托链深度（delegate_to_agent 嵌套保护；主循环为 0）。
     pub(crate) delegation_depth: Arc<AtomicUsize>,
     /// 子 Agent 角色注册表（delegate_to_agent role 参数解析；默认内置角色）。
@@ -264,7 +273,7 @@ impl ToolRegistry {
             post_execute_listeners: Vec::new(),
             presentations: HashMap::new(),
             definitions: Vec::new(),
-            dynamic_tools: Arc::new(Mutex::new(HashMap::new())),
+            dynamic_tools: Arc::new(Mutex::new(Vec::new())),
             delegation_depth: Arc::new(AtomicUsize::new(0)),
             role_registry: Arc::new(RoleRegistry::builtin()),
             session_manager: None,
@@ -699,12 +708,13 @@ impl ToolRegistry {
             tracing::warn!(tool = %name, "动态工具注册被跳过：与内置工具重名");
             return;
         }
-        let mut map = self.dynamic_tools.lock().await;
-        if map.contains_key(&name) {
+        let mut tools = self.dynamic_tools.lock().await;
+        if tools.iter().any(|(n, _)| n == &name) {
             tracing::warn!(tool = %name, "动态工具注册被跳过：已存在同名动态工具");
             return;
         }
-        map.insert(name.clone(), executor);
+        // 追加末尾：新工具不移位已有工具（前缀只从末尾变起，缓存失效范围最小）
+        tools.push((name.clone(), executor));
         tracing::info!(tool = %name, "已注册动态工具");
     }
 
@@ -740,26 +750,38 @@ impl ToolRegistry {
 
     /// 获取所有工具定义（内置 + 动态注册）。
     ///
-    /// ADR-016 渐进披露：delegate_to_agent 的描述动态追加角色 L0 摘要段
-    /// （名字 + 一句话职责 + 工具数 + 状态；完整提示仅委托时加载）。
+    /// **稳定性契约**：返回内容与顺序必须确定——内置按注册顺序、动态工具按
+    /// 注册顺序追加末尾。工具定义是提示词前缀的一部分，任何随机漂移（如无序
+    /// 容器遍历）都会白白打掉前缀缓存。
+    ///
+    /// 角色清单**不在此处注入**（ADR-016 后续演进）：此前把角色 L0 摘要
+    /// （名字/职责/工具数/状态）动态追加到 `delegate_to_agent` 描述——角色
+    /// 是自动演化的，每次演化都会改动描述字节 → 工具段前缀失效。现改为按需
+    /// 查询（`suggest_role` 工具），描述保持稳定。
     pub async fn definitions(&self) -> Vec<ToolDefinition> {
         let mut defs = self.definitions.clone();
-        if let Some(def) = defs
-            .iter_mut()
-            .find(|d| d.function.name == "delegate_to_agent")
-        {
-            let segment = self.role_registry.delegate_role_segment();
-            if !segment.is_empty() {
-                def.function.description = format!(
-                    "{}\n\n可用角色（来源含内置/配置/学习，[试验性] 不可调用）：\n{}",
-                    def.function.description, segment
-                );
-            }
-        }
-        for executor in self.dynamic_tools.lock().await.values() {
+        // 注册顺序遍历（Vec）：顺序确定——前缀稳定性的前提
+        for (_, executor) in self.dynamic_tools.lock().await.iter() {
             defs.push(executor.definition());
         }
         defs
+    }
+
+    /// 工具表指纹（**确定性**）：有序工具名 + 描述 + 参数 schema 的内容哈希。
+    ///
+    /// 用途：真用户轮检测"会话工具表是否变化"（MCP 增删 / 配置热重载）。
+    /// 确定性依赖 [`Self::definitions`] 的顺序契约（内置注册序 + 动态追加末尾）
+    /// ——同一集合两次取值必须得到相同指纹。
+    pub async fn toolset_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let defs = self.definitions().await;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for d in &defs {
+            d.function.name.hash(&mut hasher);
+            d.function.description.hash(&mut hasher);
+            d.function.parameters.to_string().hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// 排空已收集的执行轨迹（供 GEPA 引擎消费；委托给内置可观测性监听器）。
@@ -891,7 +913,14 @@ impl ToolRegistry {
             "list_dir" => self.execute_list_dir(arguments, session_id).await,
             "symbol_outline" => self.execute_symbol_outline(arguments).await,
             "lsp" => self.execute_lsp(arguments).await,
-            name => match self.dynamic_tools.lock().await.get(name).cloned() {
+            name => match self
+                .dynamic_tools
+                .lock()
+                .await
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, e)| e.clone())
+            {
                 Some(executor) => executor.execute(session_id, &call.function.arguments).await,
                 None => Err(TianyanError::Custom(format!("tool: 未知工具：{name}"))),
             },
@@ -1167,5 +1196,106 @@ mod tests {
             ToolRegistry::default_presentation("no_such_tool"),
             ToolPresentation::Generic
         );
+    }
+    /// 具名测试动态工具（顺序/去重测试用）。
+    struct NamedDynamicTool(&'static str);
+
+    #[async_trait]
+    impl DynamicToolExecutor for NamedDynamicTool {
+        fn tool_name(&self) -> String {
+            self.0.to_string()
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::function(crate::model::types::FunctionDefinition::new(
+                self.0,
+                format!("test tool {}", self.0),
+                serde_json::json!({}),
+            ))
+        }
+
+        async fn execute(
+            &self,
+            _session_id: &str,
+            _arguments: &str,
+        ) -> crate::common::error::Result<serde_json::Value> {
+            Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    /// 回归测试：动态工具顺序 = **注册顺序（追加末尾）**，且连续两次取定义
+    /// **逐字节一致**。
+    ///
+    /// 背景：`HashMap` 遍历顺序不确定（随机种子）→ 同一工具集每次请求产生
+    /// 不同字节序列，白白打掉提示词前缀缓存；且"新增工具"会改变已有工具排布。
+    #[tokio::test]
+    async fn test_dynamic_tool_order_is_registration_order_and_stable() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        for name in ["mcp_a", "mcp_b", "mcp_c"] {
+            registry
+                .register_dynamic_tool(Arc::new(NamedDynamicTool(name)))
+                .await;
+        }
+
+        let first = registry.definitions().await;
+        let second = registry.definitions().await;
+
+        let names: Vec<String> = first.iter().map(|d| d.function.name.clone()).collect();
+        let pos = |n: &str| {
+            names
+                .iter()
+                .position(|x| x == n)
+                .expect("动态工具应在定义中")
+        };
+        assert!(
+            pos("mcp_a") < pos("mcp_b") && pos("mcp_b") < pos("mcp_c"),
+            "动态工具必须按注册顺序排列（追加末尾）: {names:?}"
+        );
+
+        let bytes_first = serde_json::to_string(&first).expect("序列化");
+        let bytes_second = serde_json::to_string(&second).expect("序列化");
+        assert_eq!(
+            bytes_first, bytes_second,
+            "同一注册表连续两次取定义必须逐字节一致（前缀缓存稳定性契约）"
+        );
+    }
+
+    /// 回归测试：重名动态工具注册被跳过（按名去重），且不影响既有顺序。
+    #[tokio::test]
+    async fn test_dynamic_tool_duplicate_name_skipped() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        registry
+            .register_dynamic_tool(Arc::new(NamedDynamicTool("mcp_dup")))
+            .await;
+        registry
+            .register_dynamic_tool(Arc::new(NamedDynamicTool("mcp_dup")))
+            .await;
+
+        let defs = registry.definitions().await;
+        assert_eq!(
+            defs.iter().filter(|d| d.function.name == "mcp_dup").count(),
+            1,
+            "同名动态工具只应注册一次"
+        );
+    }
+
+    /// 回归测试：工具表指纹**确定性**（同集合连续两次取值相同）。
+    ///
+    /// 前缀稳定性契约的下游保障：若指纹本身不确定，"会话工具表变化检测"
+    /// 会误报变化 → 无谓压缩。
+    #[tokio::test]
+    async fn test_toolset_fingerprint_is_deterministic() {
+        let registry = ToolRegistry::new(SecurityPolicy::default());
+        let a = registry.toolset_fingerprint().await;
+        let b = registry.toolset_fingerprint().await;
+        assert_eq!(a, b, "同一注册表两次指纹必须相同");
+
+        registry
+            .register_dynamic_tool(Arc::new(NamedDynamicTool("mcp_fp")))
+            .await;
+        let c = registry.toolset_fingerprint().await;
+        let d = registry.toolset_fingerprint().await;
+        assert_eq!(c, d, "注册动态工具后指纹仍须确定");
+        assert_ne!(a, c, "新增动态工具必须改变指纹（变化检测的依据）");
     }
 }

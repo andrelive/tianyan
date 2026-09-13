@@ -258,6 +258,7 @@ impl AgentCoordinator for Agent {
                     mode: crate::agent::agent_core::TurnMode::Plain,
                     do_snapshot: true,
                     do_compress: true,
+                    do_toolset_check: true,
                     thinking_effort,
                 },
             )
@@ -315,6 +316,7 @@ impl AgentCoordinator for Agent {
                     mode: crate::agent::agent_core::TurnMode::Stream { sender },
                     do_snapshot: true,
                     do_compress: true,
+                    do_toolset_check: true,
                     thinking_effort,
                 },
             )

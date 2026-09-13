@@ -55,6 +55,9 @@ pub(crate) struct TurnOptions {
     pub do_snapshot: bool,
     /// 轮后是否执行压缩检查（用户轮与流式轮 true；澄清回答轮 false）。
     pub do_compress: bool,
+    /// 轮前是否检测"会话工具表变化"（真用户轮 true；唤醒轮不经本函数，
+    /// 天然不检查——只在用户输入轮付一次指纹成本）。
+    pub do_toolset_check: bool,
     /// 本会话思考强度档位（会话时选择；None 时使用模型默认）。
     pub thinking_effort: Option<String>,
 }
@@ -637,6 +640,37 @@ impl Agent {
                     sender.send_user_message_id(umid, &sm.id).await;
                 }
                 sender.send_message_boundary(sm).await;
+            }
+        }
+
+        // 1.5 工具表变化检测（仅真用户轮）：MCP 增删 / 配置热重载 → 主动压缩。
+        //
+        // 设计取舍（2026-09 讨论）：请求侧工具定义**每轮现取**全局注册表——
+        // 工具变化天然在下一轮可见；本检测的价值是把"因工具变化导致的提示词
+        // 前缀缓存失效"与一次压缩**合并到同一轮**（变化立即可见 + 掉缓存值得），
+        // 且只对主会话的用户轮付一次指纹成本。
+        if options.do_toolset_check {
+            let current = self.agent_loop.tool_registry().toolset_fingerprint().await;
+            let changed = {
+                let mut s = state.write().await;
+                match s.toolset_fingerprint {
+                    Some(prev) if prev == current => false,
+                    Some(_) => {
+                        s.toolset_fingerprint = Some(current);
+                        true
+                    }
+                    None => {
+                        // 首次（新会话/重启后首轮）：只记录基线，不触发压缩
+                        s.toolset_fingerprint = Some(current);
+                        false
+                    }
+                }
+            };
+            if changed {
+                tracing::info!(session_id, "工具表已变化：主动压缩以重建前缀");
+                // force=true：主动重建（消息不足时由压缩门槛自然拒绝）
+                self.maybe_compress_and_persist(state, session_id, true)
+                    .await;
             }
         }
 

@@ -817,3 +817,25 @@ Oracle 批判性终审（Loop 2）发现 Wave 7 的 clippy 修复引入 3 处 fm
 - Rust：fmt 干净 · clippy `-D warnings` 0 · core **1188** / server 152 / mcp 16 / tauri 9
 - 前端：vitest **395**（53 文件）· eslint 0 · tsc 0 · prettier ✓
 - 反向验证：本轮 5 项改动的新测试均验证过判别力（注入旧行为必红）
+
+## 工具表稳定性波次（2026-09-13）：有序化 + 描述解耦 + 会话级变化检测
+
+### 起因
+用户讨论三点：① 工具注册表为何"动态"、动态是否打掉前缀缓存；② HashMap/HashSet
+无序（用户纠正）；③ 角色清单注入方式 + "每会话一套工具表 + 真用户输入前检查、
+变化时压缩"的方案设计。
+
+### 改动
+| # | 项 | 内容 | 验证 |
+|---|---|---|---|
+| 1 | **动态工具有序化** | `HashMap` → `Vec<(String, Arc<dyn DynamicToolExecutor>)>`（注册顺序、**追加末尾**、按名去重）；`definitions()` 声明"稳定性契约" | 2 测试（顺序/去重）+ 反向验证（遍历反转 / 内容漂移必红） |
+| 2 | **角色清单解耦** | `definitions()` 移除角色 L0 摘要注入；`delegate_to_agent` 描述稳定化（内置角色名保留 + `suggest_role` 指路）；删 `RoleRegistry::delegate_role_segment()` | 编译 + 全量测试 |
+| 3 | **会话级变化检测** | `SessionState.toolset_fingerprint` + `ToolRegistry::toolset_fingerprint()`（确定性哈希）；真用户轮（`TurnOptions.do_toolset_check`）变化 → 主动压缩重建前缀；首轮只记基线 | 指纹确定性测试 + 反向验证 |
+
+### 决策
+- **不冻结**请求侧工具表（每轮现取 + 确定化 + 变化检测已等价达成"稳定 + 可见 + 失效可控"）——见 ADR-030 后续演进"取舍记录"。
+- 压缩门槛（`MIN_MESSAGES_BEFORE_COMPRESSION = 6`）保持不动；阈值/体量再评估暂缓（用户决定）。
+- 过期兜底确认：委托未知角色报错附全量可调用清单（`active_names()`），模型可一次失败内自愈。
+
+### 门禁
+fmt 干净 · clippy `-D warnings` 0 · core **1191** / server 152 / mcp 16 / tauri 9
