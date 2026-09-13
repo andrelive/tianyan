@@ -221,7 +221,61 @@ pub fn prompt_side_tokens(&self) -> usize {
 
 ---
 
-## 5. 上游异常
+## 5. 嵌入调用（用量入账与查询缓存）
+
+> 本节记录 0.3.16 的一次实测排查：**嵌入一直在被调用，但此前完全不入账**，
+> 导致"账单里看不到嵌入费用 → 以为没在用"的误判。
+
+### 5.1 嵌入在哪被调用（实证）
+
+| 调用点 | 触发 | 位置 |
+|---|---|---|
+| 语义检索（query 侧） | 每次 `search_vfs` → `VfsSearch::search` | `core/src/vfs/vfs_impl.rs`（embed query 后查 LanceDB 两列 RRF） |
+| 内容写入（摘要侧） | 摘要生成/更新 → `index_entry` | 同上（`abstract` / `overview` 各嵌一次） |
+| 图像分析 / 角色路由 | 图像理解、`suggest_role` | `knowledge/image/analyzer.rs`、`agent/role_router.rs` |
+
+日志证据（`%APPDATA%\com.tianyan.app\logs\`，时间戳为 **UTC**）：
+
+```
+INFO ... retrieve{top_k=10 query=...}: tianyan::model::provider::middleware:
+  embed_single_with_dimensions called model=text-embedding-v4 dimensions=2048 text_len=132
+INFO ... embed_single_with_dimensions succeeded model=text-embedding-v4
+```
+
+### 5.2 为什么"看不到费用"（三个原因，按可能性排序）
+
+1. **账单口径**：若 `endpoint` 是百炼 **MaaS 专属实例**域名
+   （`llm-xxxx.<region>.maas.aliyuncs.com`），费用通常按**实例/算力时长**计，
+   不出现在"模型调用（token）"账单条目里；公共 `dashscope.aliyuncs.com` 才按 token 计。
+2. **用量极小**：单次只是短 query（几十~百余字符）或摘要文本；数百条内容 +
+   千余次检索，按公共价量级也在"元"以下。
+3. **应用内不入账（0.3.16 已修）**：嵌入不走 AgentLoop，其 token 此前**不写
+   `usage_logs`**——`usage_logs` 里只有 chat provider，统计面板自然看不到。
+
+### 5.3 0.3.16 的两项改动
+
+| 改动 | 内容 | 位置 |
+|---|---|---|
+| **用量入账** | `EmbeddingUsageSink` 契约（model 层定义，装配层注入实现）→ `UsageLogEmbeddingSink` 把 `provider/model/prompt_tokens` 异步写入 `usage_logs`（`session_id=""`） | `core/src/model/provider/middleware.rs`、`server/src/embedding_usage.rs` |
+| **查询缓存 + 空串短路** | 键 `model\|dimensions\|text`，容量 256（FIFO）；命中不发请求、不重复上报。空/空白文本直接报错（日志曾出现 `text_len=0` 的调用）。VFS 侧空 query 直接返回空结果、双摘要皆空则跳过索引 | 同上、`core/src/vfs/vfs_impl.rs` |
+
+- 装配点：VFS 实例（`server/src/lib.rs` 的 `initialize_vfs_for_app`）与 Agent 实例
+  （`server/src/state.rs` 构造 + 配置热重载两处）**都注入**——两个实例各自持有缓存。
+- 验证方式（升级后）：任意检索一次 → `usage_logs` 应出现
+  `provider=<你的嵌入 provider>` / `model=text-embedding-v4` 的记录；
+  同 query 立刻再检索一次 → **不再新增记录**（缓存命中）。
+
+### 5.4 与账单核对的对应关系
+
+| 你要看的东西 | 看哪里 |
+|---|---|
+| 应用内嵌入消耗 | `usage_logs`（按 provider/model 聚合；`db::UsageRepo::stats`） |
+| 云侧账单 | 控制台「模型调用」条目（公共端点）；专属实例看部署/算力费用 |
+| 是否真的在调用 | 文件日志的 `embed_* called/succeeded` 行（含 model 与 text_len） |
+
+---
+
+## 6. 上游异常
 
 ### 5.1 `finish_reason: "load"` + 空 assistant（0 token）
 
@@ -275,7 +329,7 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 
 ---
 
-## 6. 复现脚本与数据来源清单
+## 7. 复现脚本与数据来源清单
 
 > 全部位于 `.scratch/`（**本地、未提交**）。复现时**只读既有结果文件**；如需重跑探针，注意它们会**发起真实 LLM 请求**。
 
@@ -301,7 +355,7 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 
 ---
 
-## 7. 相关文档
+## 8. 相关文档
 
 - `docs/architecture/context-pipeline.md` — 上下文组装顺序 + 压缩机制 + 构成量化方法 + 故障模式
 - `docs/architecture/decisions/014-error-classification.md` — 错误分类语义谓词（KIND 前缀 + 构造器/谓词）
