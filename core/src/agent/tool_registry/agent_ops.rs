@@ -228,6 +228,7 @@ impl ToolRegistry {
             &params.command,
             cwd.as_deref(),
             params.timeout_secs,
+            self.command_logs_dir.as_deref(),
         )
         .await
         .map_err(wrap_tool_error)

@@ -53,6 +53,21 @@ pub fn truncate_head_noted(text: &str, note: &str) -> Truncated {
 pub fn truncate_tail(text: &str) -> Truncated {
     let total_lines = text.lines().count();
     let total_bytes = text.len();
+    let marker = format!("... (输出已截断，共 {total_lines} 行 {total_bytes} 字节)\n");
+    truncate_tail_with_marker(text, &marker)
+}
+
+/// 尾部截断 + 自定义提示后缀（提示与总行数/字节数一起进入统一截断标记）。
+/// 用于命令输出已落盘场景——截断后指引完整输出的读取路径（read_file 分页）。
+pub fn truncate_tail_noted(text: &str, note: &str) -> Truncated {
+    let total_lines = text.lines().count();
+    let total_bytes = text.len();
+    let marker = format!("... (输出已截断，共 {total_lines} 行 {total_bytes} 字节{note})\n");
+    truncate_tail_with_marker(text, &marker)
+}
+
+/// [`truncate_tail`] 与 [`truncate_tail_noted`] 的公共实现：以给定标记行前置截断。
+fn truncate_tail_with_marker(text: &str, marker: &str) -> Truncated {
     let lines: Vec<&str> = text.lines().collect();
     let mut kept: Vec<&str> = Vec::new();
     let mut bytes = 0usize;
@@ -70,20 +85,20 @@ pub fn truncate_tail(text: &str) -> Truncated {
         return Truncated {
             text: text.to_string(),
             truncated: false,
-            total_lines,
-            total_bytes,
-            kept_lines: total_lines,
+            total_lines: lines.len(),
+            total_bytes: text.len(),
+            kept_lines: lines.len(),
             spill_path: None,
         };
     }
     kept.reverse();
-    let mut out = format!("... (输出已截断，共 {total_lines} 行 {total_bytes} 字节)\n");
+    let mut out = marker.to_string();
     out.push_str(&kept.join("\n"));
     Truncated {
         text: out,
         truncated: true,
-        total_lines,
-        total_bytes,
+        total_lines: lines.len(),
+        total_bytes: text.len(),
         kept_lines: kept.len(),
         spill_path: None,
     }

@@ -80,10 +80,11 @@ fn def_execute_command(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<ExecuteCommandParams>(
         name,
         &format!(
-            "执行 shell 命令（可指定工作目录与超时）。{} {} {} {}",
+            "执行 shell 命令（可指定工作目录与超时）。{} {} {} {} {}",
             "后台命令用 background:true（长驻进程/开发服务器/服务/监视器）：立即返回 task_id 与 log_file，不等待退出。",
             "常驻服务可设 ready（端口和/或日志模式）：系统探测（从 initial_delay_ms 指数退避，总超时 timeout_ms），端口监听或日志出现该模式时通知你。",
             "用 task_status 查询进度或读取日志文件；用 task_cancel 终止。",
+            "同步命令输出超限（50KB / 2000 行）自动截断并仅保留尾部；完整输出自动落盘，结果中给出 log_file 与 stdout_total_bytes，可用 read_file 的 offset/limit 分页读取全文。",
             shell_platform_hint(),
         ),
     ))

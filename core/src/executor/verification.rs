@@ -154,7 +154,7 @@ impl VerificationGate {
         timeout_secs: Option<u64>,
     ) -> Result<VerificationResult, TianyanError> {
         // Execute the command
-        let output = execute_command_action(command, cwd, timeout_secs).await?;
+        let output = execute_command_action(command, cwd, timeout_secs, None).await?;
         let stdout = output["stdout"].as_str().unwrap_or("");
         let stderr = output["stderr"].as_str().unwrap_or("");
         let exit_code = output["exit_code"].as_i64().unwrap_or(-1) as i32;

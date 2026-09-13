@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -878,6 +878,46 @@ pub(super) fn extract_command_base(cmd: &str) -> String {
     pure.to_lowercase()
 }
 
+/// 完整命令输出落盘（best effort）：`{log_dir}/exec-{uuid8}.log`。
+///
+/// 格式：`> $ (cwd) command` header + stdout 全文（stderr 非空时追加 `[stderr]` 分节）。
+/// 目录未配置或写失败时返回 None（仅告警，不影响命令结果与截断路径）。
+async fn write_full_output_log(
+    log_dir: Option<&Path>,
+    command: &str,
+    cwd: Option<&str>,
+    stdout: &str,
+    stderr: &str,
+) -> Option<String> {
+    let dir = log_dir?;
+    if let Err(e) = tokio::fs::create_dir_all(dir).await {
+        tracing::warn!(error = %e, dir = %dir.display(), "命令输出落盘：目录创建失败");
+        return None;
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let path = dir.join(format!("exec-{}.log", &id[..8]));
+    let mut content = format!(
+        "> $ {}{}\n",
+        cwd.map(|d| format!("({d}) ")).unwrap_or_default(),
+        command
+    );
+    content.push_str(stdout);
+    if !stderr.is_empty() {
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str("[stderr]\n");
+        content.push_str(stderr);
+    }
+    match tokio::fs::write(&path, content).await {
+        Ok(()) => Some(path.to_string_lossy().into_owned()),
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "命令输出落盘失败（结果不受影响）");
+            None
+        }
+    }
+}
+
 /// 执行 ExecuteCommand 动作（无安全策略依赖，纯函数）。
 ///
 /// 跨平台：Unix (Linux/macOS) 用 `sh -c`，Windows 用 `powershell -NoProfile -NonInteractive -Command`。
@@ -886,10 +926,15 @@ pub(super) fn extract_command_base(cmd: &str) -> String {
 ///
 /// 输出经统一截断层**尾部截断**（50KB / 2000 行；`stdout_truncated`/
 /// `stderr_truncated` 标志），防大输出（实测单条 45 万字符）压垮上下文。
+///
+/// `log_dir` 配置时：**截断前**将完整输出（header + stdout + stderr 分节）
+/// 落盘（best effort），结果附 `log_file` / `*_total_bytes`；截断标记指引
+/// 路径——模型可经 `read_file` 的 offset/limit 回读完整内容（消除"截断即丢失"）。
 pub async fn execute_command_action(
     command: &str,
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
+    log_dir: Option<&Path>,
 ) -> Result<Value> {
     let timeout = timeout_secs.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS);
 
@@ -948,13 +993,26 @@ pub async fn execute_command_action(
             // 通常在尾部；50KB / 2000 行双上限），防单条结果压垮上下文。
             let stdout_text = String::from_utf8_lossy(&stdout_bytes).to_string();
             let stderr_text = String::from_utf8_lossy(&stderr_bytes).to_string();
-            let out_trunc = truncate::truncate_tail(&stdout_text);
-            let err_trunc = truncate::truncate_tail(&stderr_text);
+            // 截断前先把完整输出落盘（best effort）——截断标记附路径指引，
+            // 模型可按需回读完整内容（read_file 分页），截掉的部分不再"永久丢失"。
+            let log_file =
+                write_full_output_log(log_dir, command, cwd, &stdout_text, &stderr_text).await;
+            let note = match &log_file {
+                Some(path) => {
+                    format!("，完整输出已保存至 {path}（可用 read_file 的 offset/limit 分页读取）")
+                }
+                None => String::new(),
+            };
+            let out_trunc = truncate::truncate_tail_noted(&stdout_text, &note);
+            let err_trunc = truncate::truncate_tail_noted(&stderr_text, &note);
             Ok(json!({
                 "stdout": out_trunc.text,
                 "stderr": err_trunc.text,
                 "stdout_truncated": out_trunc.truncated,
                 "stderr_truncated": err_trunc.truncated,
+                "stdout_total_bytes": out_trunc.total_bytes,
+                "stderr_total_bytes": err_trunc.total_bytes,
+                "log_file": log_file,
                 "exit_code": status.code().unwrap_or(-1),
             }))
         }
@@ -998,7 +1056,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command() {
-        let result = execute_command_action("echo Hello", None, Some(5)).await;
+        let result = execute_command_action("echo Hello", None, Some(5), None).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output["stdout"].as_str().unwrap_or("").contains("Hello"));
@@ -1013,12 +1071,22 @@ mod tests {
         } else {
             "yes AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA | head -n 3000"
         };
-        let output = execute_command_action(cmd, None, Some(30)).await.unwrap();
+        let output = execute_command_action(cmd, None, Some(30), None)
+            .await
+            .unwrap();
         let stdout = output["stdout"].as_str().unwrap_or("");
         assert_eq!(
             output["stdout_truncated"].as_bool(),
             Some(true),
             "超限输出应标记截断"
+        );
+        assert!(
+            output["log_file"].is_null(),
+            "未配置日志目录时不应返回 log_file"
+        );
+        assert!(
+            output["stdout_total_bytes"].as_u64().unwrap_or(0) > 50 * 1024,
+            "应返回原始总量，供判断截掉多少"
         );
         assert!(
             stdout.contains("输出已截断"),
@@ -1030,6 +1098,45 @@ mod tests {
             stdout.len()
         );
     }
+    #[tokio::test]
+    async fn test_execute_command_spills_full_output_when_dir_configured() {
+        // 截断 + 落盘闭环：大输出尾部截断后，完整输出（含被截掉的头部）在
+        // 落盘文件中可回读（read_file 分页）；截断标记指引路径。
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = if cfg!(target_os = "windows") {
+            "1..3000 | ForEach-Object { $p = if ($_ -le 1500) { 'HEADER' } else { 'TAIL' }; \"$p-\" + ('x' * 40) + \"-$_\" }; [Console]::Error.WriteLine('ERR-MARKER-42')"
+        } else {
+            "for i in $(seq 1 3000); do if [ $i -le 1500 ]; then p=HEADER; else p=TAIL; fi; echo \"$p-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-$i\"; done; echo 'ERR-MARKER-42' 1>&2"
+        };
+        let output = execute_command_action(cmd, None, Some(30), Some(dir.path()))
+            .await
+            .unwrap();
+        assert_eq!(
+            output["stdout_truncated"].as_bool(),
+            Some(true),
+            "超限应截断"
+        );
+        let total = output["stdout_total_bytes"].as_u64().unwrap();
+        assert!(total > 50 * 1024, "应返回原始总量：{total}");
+        let log_file = output["log_file"]
+            .as_str()
+            .expect("配置目录后应返回 log_file");
+        let content = tokio::fs::read_to_string(log_file).await.unwrap();
+        // 判别核心：被截掉的头部（HEADER）只在落盘文件里、不在返回文本里
+        assert!(content.contains("HEADER-"), "落盘文件应含被截掉的头部行");
+        assert!(
+            content.len() > total as usize,
+            "文件应含完整 stdout（及 header）：{} > {total}",
+            content.len()
+        );
+        assert!(
+            content.contains("[stderr]") && content.contains("ERR-MARKER-42"),
+            "落盘文件应含 stderr 分节"
+        );
+        let stdout = output["stdout"].as_str().unwrap();
+        assert!(stdout.contains("完整输出已保存至"), "截断标记应指引路径");
+        assert!(!stdout.contains("HEADER-"), "返回文本不应含被截掉的头部");
+    }
 
     #[tokio::test]
     async fn test_command_timeout_is_timeout_error() {
@@ -1039,7 +1146,7 @@ mod tests {
         } else {
             "sleep 5"
         };
-        let err = execute_command_action(cmd, None, Some(1))
+        let err = execute_command_action(cmd, None, Some(1), None)
             .await
             .unwrap_err();
         assert!(

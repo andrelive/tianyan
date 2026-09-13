@@ -881,3 +881,34 @@ fmt 干净 · clippy `-D warnings` 0 · core **1191** / server 152 / mcp 16 / ta
 ### 门禁
 - Rust：fmt 干净 · clippy `-D warnings` 0 · core **1193** / server **151 passed（+1 ignored）** / 集成（3+8+5+13+1）全绿
 - tool-catalog freshness ✓（重新生成后）；前端未改动
+
+## 命令输出落盘波次（2026-09-13）：截断不再"即丢失"
+
+### 起因
+上下文治理盘点（工具输出约束全量审计）发现：`execute_command` 等命令类工具的输出
+经尾部截断（50KB / 2000 行）后**完整输出被丢弃、无法找回**——前台（同步）路径没有
+任何回读通道（后台命令已有 log 文件设施，前台未接线）。用户确认方向：落盘 + 路径
+回传 + read_file 回读闭环。
+
+### 改动
+| # | 项 | 内容 |
+|---|---|---|
+| 1 | `execute_command_action` 增 `log_dir` | **截断前**完整输出落盘（`{log_dir}/exec-{uuid8}.log`：`> $ (cwd) cmd` header + stdout + `[stderr]` 分节；best effort——失败仅告警不影响结果）；返回新增 `stdout_total_bytes` / `stderr_total_bytes` / `log_file` |
+| 2 | 截断标记升级 | `truncate` 层新增 `truncate_tail_noted`（对称既有 `truncate_head_noted`）——标记追加"完整输出已保存至 <path>（可用 read_file 的 offset/limit 分页读取）" |
+| 3 | 接线 | 工具路径（`agent_ops::execute_execute_command`）传 `command_logs_dir`（server 已装配 `{data_dir}/command_logs`）；其余调用方（run_tests / verify_build / discover_tests）暂传 None |
+| 4 | 工具描述 | `execute_command` 描述补"大输出自动落盘 + log_file + read_file 回读"；tool-catalog 重新生成 |
+
+### 验证
+- 新测试 `test_execute_command_spills_full_output_when_dir_configured`：截断 + 总量 +
+  **落盘文件含被截掉的头部**（同一 HEADER 字符串"只在文件、不在返回"——判别核心）+
+  stderr 分节 + 标记指引路径
+- **反向验证**：注入"跳过落盘"→ 必红（`配置目录后应返回 log_file` panic）
+- 既有测试补断言：无目录时 `log_file=null` + `stdout_total_bytes` 可用
+
+### 门禁
+- Rust：fmt 干净 · clippy `-D warnings` 0 · core **1194** / server 151(+1 ignored) 全绿 · tool-catalog 重新生成 ✓
+
+### 后续候选（未实施，按需触发）
+- run_tests / verify_build / discover_tests 接线落盘（需各自返回体扩展）
+- 日志清理机制（TTL + 目录大小上限；现状 16 文件/0.1MB 无压力，参照 GcTask/SnapshotGcTask 模式）
+- 截断阈值再评估（可找回落地后，50KB 可评估下调）

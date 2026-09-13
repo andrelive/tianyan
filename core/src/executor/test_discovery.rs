@@ -577,6 +577,7 @@ pub async fn discover_tests(path: &str) -> Result<Value, TianyanError> {
                 "cargo test -- --list",
                 Some(&root),
                 Some(DISCOVER_TIMEOUT_SECS),
+                None,
             )
             .await?;
             let stdout = output["stdout"].as_str().unwrap_or("");
@@ -592,15 +593,20 @@ pub async fn discover_tests(path: &str) -> Result<Value, TianyanError> {
                 "pytest --collect-only -q",
                 Some(&root),
                 Some(DISCOVER_TIMEOUT_SECS),
+                None,
             )
             .await?;
             let stdout = output["stdout"].as_str().unwrap_or("");
             ("pytest", parse_pytest_list(stdout))
         }
         ProjectFormat::TypeScript => {
-            let output =
-                execute_command_action("vitest --list", Some(&root), Some(DISCOVER_TIMEOUT_SECS))
-                    .await?;
+            let output = execute_command_action(
+                "vitest --list",
+                Some(&root),
+                Some(DISCOVER_TIMEOUT_SECS),
+                None,
+            )
+            .await?;
             let stdout = output["stdout"].as_str().unwrap_or("");
             ("vitest", parse_vitest_list(stdout))
         }
@@ -664,7 +670,7 @@ pub async fn run_tests_action(
 ) -> Result<Value, TianyanError> {
     let resolved = resolve_run_tests_command(command, cwd, framework, filter, suite)?;
 
-    let output = execute_command_action(&resolved, cwd, timeout_secs).await?;
+    let output = execute_command_action(&resolved, cwd, timeout_secs, None).await?;
     let stdout = output["stdout"].as_str().unwrap_or("").to_string();
     let stderr = output["stderr"].as_str().unwrap_or("").to_string();
     let exit_code = output["exit_code"].as_i64().unwrap_or(-1);
