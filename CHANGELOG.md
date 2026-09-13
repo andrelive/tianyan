@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-13
+
+### Added
+- 记忆巩固通道（ADR-034）：演化综述 `merge` 动作（目标原地重写 + `merge_from` 归档旧条）；`auto_consolidation` 配置兑现（prompt 巩固职责 + apply 层开关）
+- 运维子域单一判定 `memory_paths::is_operational_path`（记忆面板 / 摘要生成 / 检索统一过滤）；GC TTL 白名单分层（cases/clipboard 90 天、evolution_reports 30 天、语义记忆与状态类豁免）
+- 概览压缩契约：`generate_overview` 短内容直用（≤2000 token）+ 长度守卫（超原文回退）+ prompt 忠实原则
+- 存量清洗工具 `core/examples/memory_cleanup.rs`（幂等 + dry-run）
+- 真实后端集成测试（SqliteBackend + 内存 DB）：删除/合并链形态锁定
+
+### Fixed
+- `find_entry` 仅匹配目录条目 → 演化删除通道自上线从未生效（三个归档目录恒为空）→ 修复为匹配任意条目（文件/目录）
+- GC `scan_memory` 仅扫一层 → 递归全树（90 天 TTL 从未生效）
+- 综述清单：memory 递归条目明细（此前仅目录名）；skill root 修正（此前指向空目录）
+- 记忆面板 / 摘要扫描含运维数据（状态/日志/归档）→ 消费面分离
+
+### Changed
+- 写入收口：过程记录（版本发布 / 功能完成 / 里程碑）不写记忆；过时、被证伪、重复条目主动列入删除
+- 概览生成：短内容不再调用 LLM（直用原文）——消除扩写/脑补
+
 ## [0.3.18] - 2026-09-13
 
 ### Added

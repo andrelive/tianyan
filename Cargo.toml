@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 # 产品版本：与 tauri/tauri.conf.json 保持一致（后者决定 MSI 名与 ProductVersion；
 # 此处决定各 crate 版本与 exe 文件属性 FileVersion/ProductVersion）。
-version = "0.3.18"
+version = "0.4.0"
 edition = "2021"
 authors = ["Tianyan Team"]
 license = "MIT"
