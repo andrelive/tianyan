@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use crate::common::error::{Result, TianyanError};
 use crate::common::llm_judge::parse_llm_json;
 use crate::common::types::{
-    AgentPath, ContentLevel, ContextNamespace, MemoryCategory, MemoryEntry, TianyanUri,
+    memory_paths, AgentPath, ContentLevel, ContextNamespace, MemoryCategory, MemoryEntry,
+    TianyanUri,
 };
 use crate::memory::format_memory_as_markdown;
 use crate::role_store::RoleStore;
@@ -43,6 +44,9 @@ struct MemoryPlan {
     importance: f32,
     #[serde(default)]
     id: Option<String>,
+    /// `merge` 动作：被合并（归档）的其它同主题条目 id 列表。
+    #[serde(default)]
+    merge_from: Vec<String>,
 }
 
 /// 技能 diff 计划项。
@@ -144,7 +148,8 @@ impl EvolutionTask {
         // 阶段 0：采集（水位线 + 注册表清单）
         let (last_run_at, last_run_summary) = self.read_watermark(ctx).await;
         let inventory = self.collect_inventory(ctx).await?;
-        let input = self.build_review_input(&last_run_at, &inventory);
+        let consolidate = ctx.config.memory.auto_consolidation;
+        let input = self.build_review_input(&last_run_at, &inventory, consolidate);
 
         // 阶段 1：综述（智能体产出 diff 计划）
         let plan_text = self
@@ -216,16 +221,27 @@ impl EvolutionTask {
     }
 
     /// 采集当前注册表清单（记忆/技能/规则/角色 + 各自 L0 摘要首行）。
+    ///
+    /// memory 为嵌套结构（cases/events/facts 子目录）——递归收集叶子条目；
+    /// 其余命名空间为单层文件列表——浅列即可。运维数据子域统一跳过
+    /// （非记忆内容，不进综述清单）。
     async fn collect_inventory(&self, ctx: &TaskContext) -> Result<String> {
         let mut out = String::new();
         let mut count = 0usize;
+        // memory：递归叶子清单
+        let memory_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+        collect_memory_inventory(
+            ctx,
+            &memory_root,
+            &mut out,
+            &mut count,
+            self.max_items_per_run,
+            0,
+        )
+        .await;
 
         let roots = [
-            ("memory", TianyanUri::new(ContextNamespace::Memory, vec![])),
-            (
-                "skill/learned",
-                TianyanUri::new(ContextNamespace::Skill, vec!["learned".to_string()]),
-            ),
+            ("skill", TianyanUri::new(ContextNamespace::Skill, vec![])),
             (
                 "agent/learned",
                 TianyanUri::new(ContextNamespace::Agent, vec!["learned".to_string()]),
@@ -253,8 +269,26 @@ impl EvolutionTask {
 
 impl EvolutionTask {
     /// 组装综述输入包（上次运行时间 + 注册表清单 + 综述指令）。
-    fn build_review_input(&self, last_run_at: &Option<String>, inventory: &str) -> String {
+    ///
+    /// `consolidate` 对应 `[memory] auto_consolidation`：启用时综述包含
+    /// 记忆巩固职责（查重 / 合并归纳），关闭时保持最简写入原则。
+    fn build_review_input(
+        &self,
+        last_run_at: &Option<String>,
+        inventory: &str,
+        consolidate: bool,
+    ) -> String {
         let last = last_run_at.as_deref().unwrap_or("从未运行（首次演化综述）");
+        let consolidation_principle = if consolidate {
+            "- 记忆治理（巩固）：写记忆前先查同类——同主题已有条目时用 merge 归纳更新，\n  不要重复新增；发现同主题碎片（≥2 条旧条目）时归纳为一条主题条目，\n  被归纳的旧条目列入 merge_from 一并归档；\n"
+        } else {
+            ""
+        };
+        let merge_example = if consolidate {
+            ",\n    {\"action\": \"merge\", \"id\": \"既有条目 id（先用 vfs_read 确认）\", \"category\": \"...\", \"content\": \"归纳后的完整内容\", \"importance\": 0.8, \"merge_from\": [\"被合并的其它条目 id\"]}"
+        } else {
+            ""
+        };
         format!(
             r#"你是演化综述员。请完成一次天演自演化综述。
 
@@ -265,11 +299,13 @@ impl EvolutionTask {
 {inventory}
 
 【本次任务】
-1. 用 execution_stats / execution_detail / delegation_stats 查看自上次运行以来的工具执行与委托统计（since 可用上次运行时间）；
+4. 自行决定输出哪些内容作为新的记忆 / 技能 / 规则 / 组织形态，以及哪些应更新、合并或删除。
 2. 用 session_recall 回忆近期会话内容，识别用户偏好、事实与重复工作模式；
 3. 对照上面清单，自行决定查看哪些历史记忆、经验、组织形态；
 4. 自行决定输出哪些内容作为新的记忆 / 技能 / 规则 / 组织形态，以及哪些应更新或删除。
-
+  "memories": [
+    {{"action": "add", "category": "preference|decision|fact|entity|pattern|successful_case|failed_case", "content": "...", "importance": 0.8, "id": "可选"}}{merge_example}
+  ],
 【输出格式】只输出以下 JSON（不要输出其他内容）。
 不要使用任何工具（如 clipboard_write）输出综述结果——最终回复文本必须直接就是 JSON：
 {{
@@ -278,30 +314,42 @@ impl EvolutionTask {
   "rules": [{{"action": "add", "abstract": "规则摘要", "content": "规则详情"}}],
   "roles": [{{"action": "create|retire", "id": "role-name", "system_prompt": "...", "tools": ["..."]}}],
   "deletions": [{{"kind": "memory|skill|rule", "id": "...", "reason": "删除证据"}}],
-  "summary": "本周期综述一句话总结"
-}}
+{consolidation_principle}- 只把稳定、跨会话可复用的偏好 / 事实 / 教训 / 决策写入记忆；临时性、一次性内容
+  与过程记录（版本发布、功能完成、例行里程碑）不写记忆——它们在演化报告与项目文档中留痕；
+- 删除必须有证据（被取代 / 已过时 / 低分评审）——过时、被证伪、重复的条目（含记忆）
+  应主动列入 deletions；
 
 【写前原则】
 - 写新技能前先查现有技能（语义重复则完善而非新建）；
 - 只把稳定、跨会话可复用的偏好写入画像（临时性、一次性的不写）；
+            consolidation_principle = consolidation_principle,
 - 删除必须有证据（被取代 / 已过时 / 低分评审）；
 - 不确定的内容宁可少写，不要污染注册表。
 "#,
             last = last,
             inventory = inventory,
+            merge_example = merge_example,
         )
     }
 
     /// 应用 diff 计划（记忆/技能/规则/角色/删除）。
     async fn apply_plan(&self, ctx: &TaskContext, plan: &EvolutionPlan) -> Result<usize> {
         let mut applied = 0usize;
+        let consolidate = ctx.config.memory.auto_consolidation;
         for m in &plan.memories {
-            if m.action != "add" {
-                continue;
-            }
-            match self.apply_memory(ctx, m).await {
-                Ok(()) => applied += 1,
-                Err(e) => tracing::warn!(content = %m.content, error = %e, "记忆应用失败"),
+            match m.action.as_str() {
+                "add" => match self.apply_memory(ctx, m).await {
+                    Ok(()) => applied += 1,
+                    Err(e) => tracing::warn!(content = %m.content, error = %e, "记忆应用失败"),
+                },
+                "merge" if consolidate => match self.apply_memory_merge(ctx, m).await {
+                    Ok(()) => applied += 1,
+                    Err(e) => tracing::warn!(content = %m.content, error = %e, "记忆合并应用失败"),
+                },
+                "merge" => {
+                    tracing::debug!(id = ?m.id, "自动巩固已禁用（auto_consolidation=false），跳过 merge");
+                }
+                other => tracing::warn!(action = %other, "未知记忆动作，跳过"),
             }
         }
         for s in &plan.skills {
@@ -361,6 +409,74 @@ impl EvolutionTask {
         );
         ctx.vfs.write_abstract(&uri, &abstract_content).await?;
         tracing::info!(uri = %uri, "演化记忆已写入");
+        Ok(())
+    }
+
+    /// 应用记忆合并（巩固）：重写目标条目 + 归档被合并条目。
+    ///
+    /// - `id` 为目标条目：全树查找既有文件条目，命中则原地重写内容与摘要；
+    ///   未命中则按 `category.default_uri` 新建（降级为 add——综述认知与现状
+    ///   不一致时内容不丢）。
+    /// - `merge_from` 列出的其它条目：走软删除通道归档到 `memory/archive/`
+    ///   （摘要标注"已被合并到 {目标}"），从活跃记忆移除。
+    async fn apply_memory_merge(&self, ctx: &TaskContext, m: &MemoryPlan) -> Result<()> {
+        let Some(target_id) = m.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+            return Err(TianyanError::invalid_input(
+                "evolution: merge 记忆缺少目标 id",
+            ));
+        };
+        let category = parse_category(&m.category)?;
+        let memory_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+
+        // 目标条目：全树查找；未命中降级为新建（保持与 apply_memory 相同的写路径）
+        let target_uri = match find_entry(ctx, &memory_root, target_id, 0).await? {
+            Some(uri) => uri,
+            None => {
+                let uri = category.default_uri(target_id);
+                if let Some(parent) = uri.parent() {
+                    if !ctx.vfs.exists(&parent).await? {
+                        ctx.vfs.create_directory(&parent).await?;
+                    }
+                }
+                uri
+            }
+        };
+
+        let mut entry = MemoryEntry::new(target_id, &m.content, category);
+        entry.importance = m.importance.clamp(0.0, 1.0);
+        entry.source_session = Some("evolution".to_string());
+        let content = format_memory_as_markdown(&entry);
+        ctx.vfs.write_content(&target_uri, &content).await?;
+        let abstract_content = format!(
+            "{} | 重要性: {:.2} | 类别: {} | 来源: evolution",
+            entry.content, entry.importance, entry.category
+        );
+        ctx.vfs
+            .write_abstract(&target_uri, &abstract_content)
+            .await?;
+        tracing::info!(
+            uri = %target_uri,
+            merge_from = m.merge_from.len(),
+            "记忆合并已应用"
+        );
+
+        // 归档被合并条目（复用软删除通道；防自吞与空 id）
+        for from_id in &m.merge_from {
+            let from_id = from_id.trim();
+            if from_id.is_empty() || from_id == target_id {
+                continue;
+            }
+            let d = DeletionPlan {
+                kind: "memory".to_string(),
+                id: from_id.to_string(),
+                reason: format!("已被合并到 {target_id}"),
+            };
+            match self.apply_deletion(ctx, &d).await {
+                Ok(()) => tracing::info!(id = %from_id, to = %target_id, "被合并条目已归档"),
+                Err(e) => tracing::warn!(id = %from_id, error = %e, "合并归档失败"),
+            }
+        }
+
         Ok(())
     }
 
@@ -635,6 +751,10 @@ async fn collect_inventory_ns(
         if *count >= max {
             break;
         }
+        if entry.is_directory() {
+            // 清单只列条目（规则/技能文件）；跳过归档等子目录
+            continue;
+        }
         let name = entry.uri().path().last().cloned().unwrap_or_default();
         let abstract_text = ctx.vfs.read_abstract(entry.uri()).await.unwrap_or_default();
         let first_line = abstract_text.lines().next().unwrap_or("").to_string();
@@ -644,7 +764,59 @@ async fn collect_inventory_ns(
     }
 }
 
-/// 在命名空间下按目录名递归查找条目（深度上限防失控）。
+/// 递归采集记忆清单（叶子条目 + L0 摘要首行；运维子域跳过；受条目上限约束）。
+///
+/// 记忆为嵌套结构（cases/events/facts 子目录）——旧实现对 memory 仅浅列
+/// 目录名，综述看不到条目明细，无法执行"同主题合并"等巩固操作。
+async fn collect_memory_inventory(
+    ctx: &TaskContext,
+    dir: &TianyanUri,
+    out: &mut String,
+    count: &mut usize,
+    max: usize,
+    depth: usize,
+) {
+    if depth > 3 || *count >= max {
+        return;
+    }
+    let entries = match ctx.vfs.list(dir).await {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries {
+        if *count >= max {
+            break;
+        }
+        if memory_paths::is_operational_path(entry.uri()) {
+            continue;
+        }
+        if entry.is_directory() {
+            Box::pin(collect_memory_inventory(
+                ctx,
+                entry.uri(),
+                out,
+                count,
+                max,
+                depth + 1,
+            ))
+            .await;
+            continue;
+        }
+        let relative = entry.uri().path().join("/");
+        let abstract_text = ctx.vfs.read_abstract(entry.uri()).await.unwrap_or_default();
+        let first_line = abstract_text.lines().next().unwrap_or("").to_string();
+        out.push_str(&format!("memory/{relative}: {first_line}"));
+        out.push('\n');
+        *count += 1;
+    }
+}
+
+/// 在命名空间下按名字递归查找条目（文件或目录均可；深度上限防失控）。
+///
+/// 历史缺陷：此前仅匹配**目录**条目（`if !entry.is_directory() { continue; }`），
+/// 而规则/技能/记忆条目在 VFS 中均为文件——演化删除通道自上线起从未命中过
+/// 任何目标（"删除目标不存在，跳过"被静默吞掉），三个软删归档目录恒为空。
+/// 旧测试以目录形态的 mock 条目掩盖了该缺陷（与生产数据形态不一致）。
 async fn find_entry(
     ctx: &TaskContext,
     uri: &TianyanUri,
@@ -659,15 +831,14 @@ async fn find_entry(
         Err(_) => return Ok(None),
     };
     for entry in entries {
-        if !entry.is_directory() {
-            continue;
-        }
         let entry_name = entry.uri().path().last().cloned().unwrap_or_default();
         if entry_name == name {
             return Ok(Some(entry.uri().clone()));
         }
-        if let Some(found) = Box::pin(find_entry(ctx, entry.uri(), name, depth + 1)).await? {
-            return Ok(Some(found));
+        if entry.is_directory() {
+            if let Some(found) = Box::pin(find_entry(ctx, entry.uri(), name, depth + 1)).await? {
+                return Ok(Some(found));
+            }
         }
     }
     Ok(None)
@@ -691,6 +862,13 @@ mod tests {
     }
 
     fn make_context(vfs: Arc<MockVfs>) -> TaskContext {
+        make_context_with_config(vfs, crate::config::TianyanConfig::default())
+    }
+
+    fn make_context_with_config(
+        vfs: Arc<MockVfs>,
+        config: crate::config::TianyanConfig,
+    ) -> TaskContext {
         let chat: Arc<dyn crate::model::ChatService> =
             Arc::new(crate::test_utils::MockChatService::new());
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
@@ -703,7 +881,7 @@ mod tests {
             vfs.clone(),
             "test-model".to_string(),
         ));
-        let config = Arc::new(crate::config::TianyanConfig::default());
+        let config = Arc::new(config);
         TaskContext::new(
             vfs,
             summary_engine,
@@ -732,6 +910,17 @@ mod tests {
     fn test_parse_plan_invalid() {
         assert!(parse_plan("不是 JSON").is_err());
         assert!(parse_plan("").is_err());
+    }
+    #[test]
+    fn test_parse_plan_merge_memory() {
+        let text = r#"{"memories":[{"action":"merge","id":"theme-1","category":"failed_case","content":"归纳内容","importance":0.8,"merge_from":["a","b"]}],"summary":"巩固"}"#;
+        let plan = parse_plan(text).unwrap();
+        assert_eq!(plan.memories[0].action, "merge");
+        assert_eq!(plan.memories[0].id.as_deref(), Some("theme-1"));
+        assert_eq!(
+            plan.memories[0].merge_from,
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[test]
@@ -763,6 +952,7 @@ mod tests {
             content: "用户使用 Windows 与 PowerShell".to_string(),
             importance: 0.8,
             id: Some("evo-test-fact".to_string()),
+            merge_from: Vec::new(),
         };
         task.apply_memory(&ctx, &m).await.unwrap();
         let uri = MemoryCategory::Fact.default_uri("evo-test-fact");
@@ -786,11 +976,12 @@ mod tests {
             }),
             10,
         );
-        // 建技能 skill/rust-lint（MockVfs：目录键 + 子条目 + 内容）
+        // 建技能 skill/rust-lint——**文件形态**（与生产一致：技能/规则/记忆
+        // 条目在 VFS 中均为文件；旧测试用目录形态掩盖了 find_entry 缺陷）
         let skill_root = TianyanUri::new(ContextNamespace::Skill, vec![]);
         let uri = TianyanUri::new(ContextNamespace::Skill, vec!["rust-lint".to_string()]);
         vfs.create_directory(&skill_root).await.unwrap();
-        vfs.add_directory(&skill_root, &uri);
+        vfs.add_entry(&skill_root, &uri);
         vfs.write_content(&uri, "content").await.unwrap();
         vfs.write_abstract(&uri, "abstract").await.unwrap();
         // 删除
@@ -808,6 +999,234 @@ mod tests {
             vec!["_archive".to_string(), "rust-lint".to_string()],
         );
         assert!(ctx.vfs.exists(&archive).await.unwrap());
+    }
+    #[tokio::test]
+    async fn test_apply_deletion_memory_nested_file() {
+        // 记忆条目为深层文件（cases/failed_tasks/{id}）——删除通道必须命中
+        // 文件条目并归档到 memory/archive（回归：find_entry 仅匹配目录时必红）
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let mem_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+        let cases = mem_root.append("cases");
+        let failed = cases.append("failed_tasks");
+        vfs.create_directory(&mem_root).await.unwrap();
+        vfs.add_directory(&mem_root, &cases);
+        vfs.add_directory(&cases, &failed);
+        let entry = failed.append("old-case");
+        vfs.add_entry(&failed, &entry);
+        vfs.write_content(&entry, "旧案例内容").await.unwrap();
+        vfs.write_abstract(&entry, "旧摘要").await.unwrap();
+
+        let d = DeletionPlan {
+            kind: "memory".to_string(),
+            id: "old-case".to_string(),
+            reason: "已过时".to_string(),
+        };
+        task.apply_deletion(&ctx, &d).await.unwrap();
+
+        assert!(!ctx.vfs.exists(&entry).await.unwrap(), "原条目应删除");
+        let archive = mem_root.append("archive").append("old-case");
+        let archived = ctx
+            .vfs
+            .read_content(&archive, ContentLevel::Detail)
+            .await
+            .unwrap();
+        assert_eq!(archived, "旧案例内容", "归档副本应保留内容");
+    }
+    #[tokio::test]
+    async fn test_apply_memory_merge_updates_target_and_archives_sources() {
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        // 两条同主题旧记忆（cases/failed_tasks 下）
+        let mem_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+        let cases = mem_root.append("cases");
+        let failed = cases.append("failed_tasks");
+        vfs.create_directory(&mem_root).await.unwrap();
+        vfs.add_directory(&mem_root, &cases);
+        vfs.add_directory(&cases, &failed);
+        let a = failed.append("theme-a");
+        let b = failed.append("theme-b");
+        vfs.add_entry(&failed, &a);
+        vfs.add_entry(&failed, &b);
+        vfs.write_content(&a, "旧内容 A").await.unwrap();
+        vfs.write_abstract(&a, "旧摘要 A").await.unwrap();
+        vfs.write_content(&b, "旧内容 B").await.unwrap();
+        vfs.write_abstract(&b, "旧摘要 B").await.unwrap();
+
+        let m = MemoryPlan {
+            action: "merge".to_string(),
+            category: "failed_case".to_string(),
+            content: "归纳后的主题内容".to_string(),
+            importance: 0.9,
+            id: Some("theme-a".to_string()),
+            merge_from: vec!["theme-b".to_string()],
+        };
+        task.apply_memory_merge(&ctx, &m).await.unwrap();
+
+        // 目标条目原地重写（不新建）
+        let updated = ctx
+            .vfs
+            .read_content(&a, ContentLevel::Detail)
+            .await
+            .unwrap();
+        assert!(
+            updated.contains("归纳后的主题内容"),
+            "目标条目应更新: {updated}"
+        );
+        // 被合并条目已归档 + 原条目删除
+        assert!(!ctx.vfs.exists(&b).await.unwrap(), "被合并条目应移除");
+        let archive = mem_root.append("archive").append("theme-b");
+        let archived = ctx
+            .vfs
+            .read_content(&archive, ContentLevel::Detail)
+            .await
+            .unwrap();
+        assert_eq!(archived, "旧内容 B", "归档副本应保留原内容");
+    }
+
+    #[tokio::test]
+    async fn test_apply_memory_merge_missing_target_falls_back_to_add() {
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let m = MemoryPlan {
+            action: "merge".to_string(),
+            category: "fact".to_string(),
+            content: "新建的归纳内容".to_string(),
+            importance: 0.7,
+            id: Some("brand-new".to_string()),
+            merge_from: Vec::new(),
+        };
+        task.apply_memory_merge(&ctx, &m).await.unwrap();
+
+        // 目标不存在 → 按类别默认路径新建（内容不丢）
+        let uri = MemoryCategory::Fact.default_uri("brand-new");
+        let content = ctx
+            .vfs
+            .read_content(&uri, ContentLevel::Detail)
+            .await
+            .unwrap();
+        assert!(content.contains("新建的归纳内容"));
+    }
+
+    #[tokio::test]
+    async fn test_merge_skipped_when_consolidation_disabled() {
+        let vfs = Arc::new(MockVfs::new());
+        let mut config = crate::config::TianyanConfig::default();
+        config.memory.auto_consolidation = false;
+        let ctx = make_context_with_config(vfs.clone(), config);
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        // 目标条目存在
+        let mem_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+        let cases = mem_root.append("cases");
+        let failed = cases.append("failed_tasks");
+        vfs.create_directory(&mem_root).await.unwrap();
+        vfs.add_directory(&mem_root, &cases);
+        vfs.add_directory(&cases, &failed);
+        let a = failed.append("theme-a");
+        vfs.add_entry(&failed, &a);
+        vfs.write_content(&a, "旧内容 A").await.unwrap();
+        vfs.write_abstract(&a, "旧摘要 A").await.unwrap();
+
+        let plan = EvolutionPlan {
+            memories: vec![MemoryPlan {
+                action: "merge".to_string(),
+                category: "failed_case".to_string(),
+                content: "不应被写入".to_string(),
+                importance: 0.9,
+                id: Some("theme-a".to_string()),
+                merge_from: Vec::new(),
+            }],
+            skills: Vec::new(),
+            rules: Vec::new(),
+            roles: Vec::new(),
+            deletions: Vec::new(),
+            summary: "test".to_string(),
+        };
+        let applied = task.apply_plan(&ctx, &plan).await.unwrap();
+        assert_eq!(applied, 0, "auto_consolidation=false 时 merge 不应被应用");
+        let content = ctx
+            .vfs
+            .read_content(&a, ContentLevel::Detail)
+            .await
+            .unwrap();
+        assert!(
+            content.contains("旧内容 A"),
+            "目标条目不应被改动: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_inventory_recursive_and_excludes_operational() {
+        let vfs = Arc::new(MockVfs::new());
+        let ctx = make_context(vfs.clone());
+        let mem_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+        let cases = mem_root.append("cases");
+        let failed = cases.append("failed_tasks");
+        let events = mem_root.append("events");
+        let reports = events.append("evolution_reports");
+        vfs.create_directory(&mem_root).await.unwrap();
+        vfs.add_directory(&mem_root, &cases);
+        vfs.add_directory(&cases, &failed);
+        vfs.add_directory(&mem_root, &events);
+        vfs.add_directory(&events, &reports);
+        let leaf = failed.append("deep-case");
+        vfs.add_entry(&failed, &leaf);
+        vfs.write_abstract(&leaf, "深层案例摘要首行").await.unwrap();
+        let report = reports.append("r.md");
+        vfs.add_entry(&reports, &report);
+        vfs.write_abstract(&report, "报告摘要").await.unwrap();
+
+        let mut out = String::new();
+        let mut count = 0usize;
+        collect_memory_inventory(&ctx, &mem_root, &mut out, &mut count, 200, 0).await;
+
+        assert!(
+            out.contains("memory/cases/failed_tasks/deep-case"),
+            "递归应含深层叶子: {out}"
+        );
+        assert!(out.contains("深层案例摘要首行"));
+        assert!(!out.contains("evolution_reports"), "运维子域应跳过: {out}");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_build_review_input_consolidation_toggle() {
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let on = task.build_review_input(&None, "memory/x: y", true);
+        assert!(on.contains("merge_from"), "启用巩固时输出格式含 merge 示例");
+        assert!(on.contains("记忆治理（巩固）"));
+        assert!(on.contains("过程记录"), "写前原则含过程记录约束");
+        let off = task.build_review_input(&None, "memory/x: y", false);
+        assert!(!off.contains("merge_from"), "关闭巩固时不含 merge 指导");
+        assert!(!off.contains("记忆治理（巩固）"));
     }
 
     #[tokio::test]
