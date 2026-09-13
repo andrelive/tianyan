@@ -25,6 +25,22 @@ use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition};
 
 use super::{parse_params, safety_violation, wrap_tool_error, ToolExecutionOutcome, ToolRegistry};
 
+/// `submit_result` 工具名（请求侧注入与执行侧豁免的**单点**）。
+pub(crate) const SUBMIT_RESULT_TOOL: &str = "submit_result";
+
+/// **协议工具**：循环协议的一部分，不是角色能力——请求侧恒注入、执行侧恒允许。
+///
+/// 历史 bug：`submit_result` 由 [`ToolRegistry::build_delegate_tools`] 恒注入请求
+/// 工具列表，但执行侧按角色白名单过滤时**没有豁免**它 → 模型看到工具、调用却被拒
+/// （"角色 X 不允许使用工具 submit_result"），子代理最终结果只能靠最后一条输出兜底，
+/// 且模型会浪费轮次重试。白名单表达的是"角色能力边界"，协议工具不应受其约束。
+pub(crate) const PROTOCOL_TOOLS: &[&str] = &[SUBMIT_RESULT_TOOL];
+
+/// 是否为协议工具（角色白名单豁免判定的单点）。
+pub(crate) fn is_protocol_tool(name: &str) -> bool {
+    PROTOCOL_TOOLS.contains(&name)
+}
+
 /// 委托链最大深度（主循环为 0；1 = 一层子 Agent，以此类推）。
 pub(crate) const MAX_DELEGATION_DEPTH: usize = 3;
 
@@ -600,9 +616,10 @@ impl ToolRegistry {
             }
             None => self.definitions().await,
         };
+        // 恒注入协议工具（工具名取自单点常量：与执行侧豁免同一集合）
         delegate_tools.push(ToolDefinition::function(
             FunctionDefinition::from_schema::<SubmitResultParams>(
-                "submit_result",
+                SUBMIT_RESULT_TOOL,
                 "当你的任务完成时，调用本工具把最终结果写入任务存储（result 为完整报告/结论，summary 为可选一句话摘要）。工具返回结果 ID（task_id）。调用后请在最终回复中告知主智能体结果 ID，主智能体可用 task_status 工具查询。",
             ),
         ));
@@ -721,9 +738,13 @@ impl ToolRegistry {
             return self.execute_parallel(tool_calls, session_id, true).await;
         };
 
-        let (allowed_refs, blocked_refs): (Vec<&ToolCall>, Vec<&ToolCall>) = tool_calls
-            .iter()
-            .partition(|call| allowed.iter().any(|t| t == &call.function.name));
+        // 协议工具（submit_result）**恒允许**：白名单是角色能力边界，
+        // 不约束循环协议——否则模型会看到工具却调不动（历史 bug）。
+        let (allowed_refs, blocked_refs): (Vec<&ToolCall>, Vec<&ToolCall>) =
+            tool_calls.iter().partition(|call| {
+                is_protocol_tool(&call.function.name)
+                    || allowed.iter().any(|t| t == &call.function.name)
+            });
         let allowed_calls: Vec<ToolCall> = allowed_refs.into_iter().cloned().collect();
 
         let mut results = self

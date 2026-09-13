@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::agent::{AgentRole, RoleRegistry};
-use crate::common::types::{StructuredMessage, TokenUsage};
+use crate::common::types::{FunctionCall, StructuredMessage, TokenUsage, ToolCallType};
 use crate::config::AgentRolesConfig;
 use crate::config::{ApprovalMode, SafetyMode};
 use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
@@ -1506,4 +1506,94 @@ async fn real_vfs() -> (Arc<dyn VirtualFileSystem>, tempfile::TempDir) {
     let vfs = VirtualFileSystemImpl::new(storage, vector_storage, config);
     vfs.initialize().await.unwrap();
     (Arc::new(vfs), dir)
+}
+
+// ── 协议工具豁免（角色白名单 vs 循环协议） ──────────────────────────────
+
+/// 构造 ToolCall（执行侧过滤测试用）。
+fn tool_call(id: &str, name: &str, args: &str) -> ToolCall {
+    ToolCall {
+        id: id.to_string(),
+        call_type: ToolCallType::Function,
+        function: FunctionCall {
+            name: name.to_string(),
+            arguments: args.to_string(),
+        },
+    }
+}
+
+/// 回归测试：**协议工具 `submit_result` 不受角色白名单限制**（执行侧恒允许）。
+///
+/// 历史 bug：请求侧恒注入 submit_result，执行侧按白名单过滤却没豁免 →
+/// 子代理调用被拒（"角色 X 不允许使用工具 submit_result"），结果只能靠
+/// 最后一条输出兜底。同时验证对照组：白名单外的**普通**工具仍被拒。
+#[tokio::test]
+async fn test_protocol_tool_exempt_from_role_whitelist() {
+    let registry = delegate_registry(MockChatService::default());
+    let task_id = register_delegate_task(&registry, "协议工具豁免").await;
+
+    let protocol_call = tool_call("s1", PROTOCOL_TOOLS[0], r#"{"result":"done"}"#);
+    let normal_call = tool_call("w1", "write_file", r#"{"path":"a.txt","content":"x"}"#);
+    let whitelist = vec!["read_file".to_string()]; // 白名单不含 submit_result / write_file
+
+    // 子代理 = 会话：task_id 即 session_id（stage_result 按此定位任务）
+    let results = registry
+        .execute_tool_calls_with_role(
+            &[protocol_call, normal_call],
+            &task_id,
+            Some(&whitelist),
+            Some("tester"),
+        )
+        .await;
+
+    assert_eq!(results.len(), 2, "两个调用都应返回结果（含被拒的合成错误）");
+
+    let protocol_outcome = results
+        .iter()
+        .find(|(id, _)| id == "s1")
+        .map(|(_, o)| o)
+        .expect("submit_result 应有结果");
+    assert!(
+        protocol_outcome.result.is_ok(),
+        "协议工具必须被执行（豁免白名单），实际错误：{:?}",
+        protocol_outcome
+            .result
+            .as_ref()
+            .err()
+            .map(|e| e.to_string())
+    );
+
+    let normal_outcome = results
+        .iter()
+        .find(|(id, _)| id == "w1")
+        .map(|(_, o)| o)
+        .expect("write_file 应有结果");
+    let err = normal_outcome
+        .result
+        .as_ref()
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        err.contains("不允许使用工具"),
+        "白名单外的普通工具仍应被拒，实际：{err:?}"
+    );
+}
+
+/// 判定单点：`is_protocol_tool` 只认协议工具。
+#[test]
+fn test_is_protocol_tool_membership() {
+    assert!(is_protocol_tool(SUBMIT_RESULT_TOOL));
+    assert!(
+        is_protocol_tool("submit_result"),
+        "常量与字面量必须一致（单点防漂移）"
+    );
+    for tool in [
+        "read_file",
+        "write_file",
+        "execute_command",
+        "delegate_to_agent",
+    ] {
+        assert!(!is_protocol_tool(tool), "{tool} 不应被视为协议工具");
+    }
 }
