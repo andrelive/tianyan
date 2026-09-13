@@ -919,3 +919,34 @@ fmt 干净 · clippy `-D warnings` 0 · core **1191** / server 152 / mcp 16 / ta
 - 版本落点：`tauri/tauri.conf.json` = `Cargo.toml`（workspace）= `Cargo.lock`（4 crate）= 0.3.18；exe `FileVersion` / `ProductVersion` = 0.3.18
 - 内容：待办 `create` 整表替换（`1b1555f`）+ 命令输出截断落盘回读（`ae0d864`）+ tool-catalog 生成产物补齐（`a4446bc`）；发布提交 `88eda15`
 - 门禁终态：core **1194** / server **151**（+1 ignored）· 集成全绿；fmt · clippy `-D warnings` 0 · tool-catalog freshness ✓（前端未改动，随包沿用）
+
+## 记忆生命周期治理波次（2026-09-13）：从「只增不减」到「有进有出」
+
+### 起因
+用户质疑"记忆散乱零碎（发版记忆一大堆），这样的记忆有什么意义"——侦查实证：
+80 条记忆 **39% 是运维状态**（extraction_state 遗物 17 / 演化报告 12 / task_states 2）；
+**43/80 条 L1>L2 倒挂**（L1 被"详细概览"prompt 扩写并引入原文外信息）；
+**删除通道自上线从未生效**（find_entry 仅匹配目录条目 → 三个软删归档目录恒为空，
+报告声称的"清理 83/93 条规则"从未发生，391 条规则含 119 条已被实测证伪）；
+`auto_consolidation`/`decay_rate` 死配置；GC `scan_memory` 仅扫一层（90 天 TTL 从未生效）；
+综述清单 memory 只有目录名（无法巩固）、skill root 指向空目录。
+
+### 改动（5 组）
+| # | 项 | 内容 |
+|---|----|----|
+| 1 | 概览压缩契约 | `SummaryEngine::generate_overview`：≤2000 token 直用原文；生成后长度守卫（超原文回退）；prompt 忠实原则；`summary_task` 拆分 L0/L1 逻辑 |
+| 2 | GC 修复 | `scan_memory` 递归 + TTL 白名单分层（cases/clipboard 90 天、evolution_reports 30 天、语义记忆豁免） |
+| 3 | 运维分离 | `memory_paths::is_operational_path` 单一判定；SummaryTask 跳过（不生成摘要/向量）+ insights 面板过滤；MockVfs 增 metadata 支持 |
+| 4 | 巩固通道 | `find_entry` 修复（文件条目匹配——删除通道恢复）；`MemoryPlan` merge/merge_from；`auto_consolidation` 兑现（prompt + apply 双开关）；清单 memory 递归 + skill root 修正 |
+| 5 | 存量清洗 | `core/examples/memory_cleanup.rs`（幂等 + dry-run + 备份后执行） |
+
+### 验证
+- **反向验证 8 项**（注入旧行为必红）：短路径失效 / 守卫失效 / GC 不下钻 ×2 / 扫描跳过失效 / 面板过滤失效 / find_entry 旧逻辑 / merge 开关失效 / merge_from 归档失效
+- 全量门禁：core **1207** / server 152 (+1 ignored) / mcp 16 / tauri 9 / 集成全绿；fmt 干净；clippy `-D warnings` 0（含 example）
+- 数据复核：活跃条目 L1>L2 **归零**；清洗后 memory 22 / user 3 / patterns 4 / 规则 31；归档首次产生内容（memory 19 / user 10 / learned 360）
+
+### 备份
+`<数据目录>\.backup-20260913`（清洗前完整备份：tianyan.db + lancedb）
+
+### 后续候选（未实施）
+- decay_rate / 访问追踪（access_count 从未维护，暂缓）；记忆面板覆盖 user/agent 命名空间；同 id 多条目歧义；rule_recorder 产出质量复审
