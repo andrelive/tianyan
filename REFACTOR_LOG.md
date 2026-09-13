@@ -912,3 +912,10 @@ fmt 干净 · clippy `-D warnings` 0 · core **1191** / server 152 / mcp 16 / ta
 - run_tests / verify_build / discover_tests 接线落盘（需各自返回体扩展）
 - 日志清理机制（TTL + 目录大小上限；现状 16 文件/0.1MB 无压力，参照 GcTask/SnapshotGcTask 模式）
 - 截断阈值再评估（可找回落地后，50KB 可评估下调）
+
+## 0.3.18 交付（2026-09-13）
+
+- 产物：`Tianyan_0.3.18_x64_zh-CN.msi` / `Tianyan_0.3.18_x64_en-US.msi`（各 46.4 MB，`target/release/bundle/msi/`；构建 `cmd_0` exit 0，release 编译 8m 16s）
+- 版本落点：`tauri/tauri.conf.json` = `Cargo.toml`（workspace）= `Cargo.lock`（4 crate）= 0.3.18；exe `FileVersion` / `ProductVersion` = 0.3.18
+- 内容：待办 `create` 整表替换（`1b1555f`）+ 命令输出截断落盘回读（`ae0d864`）+ tool-catalog 生成产物补齐（`a4446bc`）；发布提交 `88eda15`
+- 门禁终态：core **1194** / server **151**（+1 ignored）· 集成全绿；fmt · clippy `-D warnings` 0 · tool-catalog freshness ✓（前端未改动，随包沿用）
