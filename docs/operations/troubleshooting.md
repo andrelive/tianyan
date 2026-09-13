@@ -74,7 +74,7 @@ let log_file = log_dir.join(format!(
 
 ---
 
-## 2. 三类高频故障排查路径
+## 2. 高频故障排查路径（四类）
 
 每条按「现象 → 查什么 → 判定 → 处置」给出。
 
@@ -242,6 +242,34 @@ ORDER BY seq DESC LIMIT 10;
 - 已卡死的旧会话：升级后新请求按修复后口径重算；若仍异常，检查模型 `context_length`
   （与 `storage.vector` 无关——向量维度是另一回事，见数据体检文档）。
 - 回归证据：`core/src/agent/loop_tests.rs` 的“预算不足 1024”事故复现测试（`input=593_399`）。
+
+### 2.d 终止后前端显示「上一轮的回答」
+
+**现象**：在输入框打字（内容有误）后点击「终止/停止」，前端把**上一轮的 assistant
+结论**渲染到本轮位置——内容明显不属于本轮。
+
+**根因（0.3.16 修复）**：服务层在流式轮结束后**无条件**补发 assistant 消息边界事件，
+而该事件取的是「会话中**最后一条** assistant 消息」。取消/失败轮根本不落库 assistant
+消息，于是取到的是**上一轮**的消息；前端把它合并进本轮的占位气泡（覆盖
+segments/thinking/usage），于是陈旧内容显示在当前轮。
+
+**修复位置**：`server/src/api/chat/services.rs`
+
+- 轮前记录水位：`last_assistant_message(session.messages).id` → `prev_assistant_id`；
+- 边界事件只下发 `select_turn_assistant(messages, prev_assistant_id)`——即**本轮新产生**
+  的 assistant 消息；本轮没有新消息则**不下发**（取消/失败轮静默）；
+- 回归测试：`api::chat::services::tests::test_select_turn_assistant_*`
+  （取消场景断言返回 `None`；反向验证：恢复旧行为必红）。
+
+**排查入口**（旧版本再遇到时）：
+
+1. 查该轮是否落库 assistant 消息——`session_messages` 按 seq 倒序看最近两条
+   （取消轮只会看到用户消息）；
+2. 比对前端展示的消息 id 与上一轮 assistant id 是否相同（相同即命中此 bug）。
+
+**前端加固建议（未实施）**：`applyServerMessage` 合并边界事件时校验消息归属本轮
+（用本轮流已收到的 `message_id`），从渲染侧再兜一层，避免任何来源的陈旧边界被
+合并进当前气泡。
 
 ---
 

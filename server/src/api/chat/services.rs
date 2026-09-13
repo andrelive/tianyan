@@ -8,6 +8,7 @@ use tianyan::agent::stream_forward::{
     StreamEventMapper,
 };
 use tianyan::agent::AgentCoordinator;
+use tianyan::common::types::StructuredMessage;
 use tianyan::session::SessionManager;
 use tianyan::Message as CoreMessage;
 use tianyan::MessageRole as CoreMessageRole;
@@ -112,6 +113,19 @@ impl ChatService {
         let (sender, forward_handle) =
             spawn_stream_forwarder(session_id.clone(), mapper, deliver.clone());
 
+        // 「终止后显示上一轮结论」修复：记录轮前最后一条 assistant 消息 id。
+        //
+        // 取消 / 失败轮**不落库** assistant 消息；若边界事件无条件取"最后一条
+        // assistant"，就会把上一轮的结论当作本轮结果下发，前端把它合并进本轮
+        // 占位气泡 → 陈旧内容显示在当前轮位置。水位用于只认"本轮新产生的"消息。
+        let prev_assistant_id = self
+            .session_manager
+            .get_session(&session_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| last_assistant_message(&s.messages).map(|m| m.id.clone()));
+
         let result = self
             .agent
             .process_message_stream(
@@ -133,8 +147,13 @@ impl ChatService {
         // assistant 消息边界（统一结构）：流结束后取最后一条 assistant 消息，
         // 以完整 ChatMessage 结构下发——前端本地 assistant 消息 id 同步为
         // 服务端 id（与用户消息边界同构；经同一送达目标，排在流事件之后）。
-        self.send_assistant_boundary(&session_id, &stream_id, &deliver)
-            .await?;
+        self.send_assistant_boundary(
+            &session_id,
+            &stream_id,
+            &deliver,
+            prev_assistant_id.as_deref(),
+        )
+        .await?;
 
         info!("流式处理完成，会话：{}", session_id);
 
@@ -158,25 +177,23 @@ impl ChatService {
 
     /// 下发 assistant 消息边界事件（流结束后，经同一送达目标）。
     ///
-    /// 取会话最后一条 assistant 消息构造统一结构——前端本地消息 id 同步为
-    /// 服务端 id（回退/重做定位键）。无 assistant 消息（异常路径）时跳过。
+    /// 只下发**本轮新产生的** assistant 消息（判据见 [`select_turn_assistant`]）：
+    /// 取消 / 失败轮没有新消息时**不下发**——否则会把上一轮的结论当作本轮结果
+    /// 推给前端（用户实测：终止后前端渲染出上一轮的回答）。
+    ///
+    /// `prev_assistant_id` 为轮前最后一条 assistant 消息 id（水位）。
     async fn send_assistant_boundary(
         &self,
         session_id: &str,
         stream_id: &str,
         deliver: &Arc<dyn StreamEventDeliver>,
+        prev_assistant_id: Option<&str>,
     ) -> Result<(), ApiError> {
         let Some(am) = self
             .session_manager
             .get_session(session_id)
             .await?
-            .and_then(|s| {
-                s.messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == MessageRole::Assistant)
-                    .cloned()
-            })
+            .and_then(|s| select_turn_assistant(&s.messages, prev_assistant_id).cloned())
         else {
             return Ok(());
         };
@@ -191,6 +208,26 @@ impl ChatService {
         deliver.deliver(session_id, payload).await;
         Ok(())
     }
+}
+
+/// 取会话中最后一条 assistant 消息（用作"轮前水位"）。
+fn last_assistant_message(messages: &[StructuredMessage]) -> Option<&StructuredMessage> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == MessageRole::Assistant)
+}
+
+/// 取**本轮新产生的** assistant 消息（无 → `None`）。
+///
+/// 判据：从尾部找最后一条 assistant，且其 id 必须与轮前水位不同。
+/// 为什么必须这样判：取消 / 失败轮**不落库** assistant 消息，无条件取"最后一条
+/// assistant"会把上一轮结论当作本轮结果（前端合并进本轮占位气泡 → 渲染陈旧内容）。
+fn select_turn_assistant<'a>(
+    messages: &'a [StructuredMessage],
+    prev_assistant_id: Option<&str>,
+) -> Option<&'a StructuredMessage> {
+    last_assistant_message(messages).filter(|m| Some(m.id.as_str()) != prev_assistant_id)
 }
 
 /// 核心流式 chunk → API 事件映射（正文只收真正的回答/错误文本）：
@@ -369,5 +406,54 @@ mod tests {
         // 无 finish_reason 时回退 "stop"（保持缺省线上行为）
         let fr = map_finish_reason(None);
         assert_eq!(fr.as_deref(), Some("stop"));
+    }
+    /// 回归测试：**取消 / 失败轮不得把上一轮 assistant 结论当作本轮结果**。
+    ///
+    /// 场景复现：会话里已有上一轮 assistant 消息，本轮被终止且没有落库新消息——
+    /// 此时必须返回 None（旧实现会取到上一轮消息 → 前端渲染到本轮位置）。
+    #[test]
+    fn test_select_turn_assistant_returns_none_when_no_new_message() {
+        let old = StructuredMessage::assistant("s1", "上一轮结论");
+        let messages = vec![old.clone()];
+
+        assert!(
+            select_turn_assistant(&messages, Some(old.id.as_str())).is_none(),
+            "无新 assistant 消息时不得回退到上一轮消息"
+        );
+        assert_eq!(
+            last_assistant_message(&messages).map(|m| m.id.clone()),
+            Some(old.id.clone()),
+            "水位函数应返回最后一条 assistant（无论新旧）"
+        );
+    }
+
+    /// 本轮落库了新 assistant 消息 → 选中它（而不是上一轮）。
+    #[test]
+    fn test_select_turn_assistant_picks_new_message() {
+        let old = StructuredMessage::assistant("s1", "上一轮结论");
+        let new = StructuredMessage::assistant("s1", "本轮结论");
+        let messages = vec![old.clone(), new.clone()];
+
+        let picked =
+            select_turn_assistant(&messages, Some(old.id.as_str())).expect("应选中本轮新消息");
+        assert_eq!(picked.id, new.id, "必须下发本轮消息而非上一轮");
+    }
+
+    /// 首轮（会话尚无 assistant 消息，水位 None）→ 选中新消息。
+    #[test]
+    fn test_select_turn_assistant_first_turn() {
+        let new = StructuredMessage::assistant("s1", "首个回答");
+        let messages = vec![new.clone()];
+
+        assert!(last_assistant_message(&messages).is_some());
+        let picked = select_turn_assistant(&messages, None).expect("首轮应选中新消息");
+        assert_eq!(picked.id, new.id);
+    }
+
+    /// 无 assistant 消息 → None（不 panic）。
+    #[test]
+    fn test_select_turn_assistant_empty() {
+        assert!(select_turn_assistant(&[], Some("x")).is_none());
+        assert!(last_assistant_message(&[]).is_none());
     }
 }
