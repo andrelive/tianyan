@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.18] - 2026-09-13
+
+### Added
+- 命令输出截断落盘：`execute_command` 截断前完整输出写入 `{data_dir}/command_logs/exec-{uuid8}.log`（header + stdout + `[stderr]` 分节，best effort）；返回新增 `stdout_total_bytes` / `stderr_total_bytes` / `log_file`（配合 `read_file` offset/limit 分页回读）——消除“截断即丢失”
+
+### Changed
+- 待办 `create` 语义改为整表替换（对齐 DSH last-write-wins）：无条件替换整批（`TodoStore::replace_many` 原子写、失败不触碰旧批）——模型重规划后废弃项随替换自然移除；删除单条快捷形态；响应新增 `replaced`；父子挂靠改经 `update`
+- 截断实现对称化：新增 `truncate_tail_noted`（对称既有 `truncate_head_noted`），截断标记携带完整输出路径与回读指引
+
 ## [0.3.17] - 2026-09-13
 
 ### Added
