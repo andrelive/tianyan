@@ -1,7 +1,7 @@
 # 模型 / Provider 侧事实手册（model-provider-notes）
 
 > **定位**：模型与 Provider 侧的**事实手册**——把排查中积累的高价值知识固化：reasoning 回传契约、思考强度/语言实测、前缀缓存口径、上游异常。
-> **最后更新**：2026-09-12（对应 HEAD `afba701`，版本 0.3.15）
+> **最后更新**：2026-09-13（对应 HEAD `9e285cb`，版本 0.3.17）
 > **取证纪律**（本文所有陈述遵守）：
 > 1. 每条陈述给出**代码位置（`文件:行`）或数据来源（`.scratch/` 文件名）**；
 > 2. 实测数字标注**来源文件 + 条件**，并注明"会话实测/非实验室基准"；
@@ -223,7 +223,7 @@ pub fn prompt_side_tokens(&self) -> usize {
 
 ## 5. 嵌入调用（用量入账与查询缓存）
 
-> 本节记录 0.3.16 的一次实测排查：**嵌入一直在被调用，但此前完全不入账**，
+> 本节记录 0.3.16 装机后的一次实测排查（修复随 0.3.17 发布）：**嵌入一直在被调用，但此前完全不入账**，
 > 导致"账单里看不到嵌入费用 → 以为没在用"的误判。
 
 ### 5.1 嵌入在哪被调用（实证）
@@ -249,10 +249,10 @@ INFO ... embed_single_with_dimensions succeeded model=text-embedding-v4
    不出现在"模型调用（token）"账单条目里；公共 `dashscope.aliyuncs.com` 才按 token 计。
 2. **用量极小**：单次只是短 query（几十~百余字符）或摘要文本；数百条内容 +
    千余次检索，按公共价量级也在"元"以下。
-3. **应用内不入账（0.3.16 已修）**：嵌入不走 AgentLoop，其 token 此前**不写
+3. **应用内不入账（0.3.17 已修）**：嵌入不走 AgentLoop，其 token 此前**不写
    `usage_logs`**——`usage_logs` 里只有 chat provider，统计面板自然看不到。
 
-### 5.3 0.3.16 的两项改动
+### 5.3 0.3.17 的两项改动
 
 | 改动 | 内容 | 位置 |
 |---|---|---|
@@ -277,7 +277,7 @@ INFO ... embed_single_with_dimensions succeeded model=text-embedding-v4
 
 ## 6. 上游异常
 
-### 5.1 `finish_reason: "load"` + 空 assistant（0 token）
+### 6.1 `finish_reason: "load"` + 空 assistant（0 token）
 
 **现象**：会话里落一条**空 assistant 消息**（`parts=[]`、`tokens=0`、`finish="load"`）；前端看不到，需退出重进才可能察觉。来源：`docs/operations/troubleshooting.md` §2.a、`.scratch/wake-no-user-finding.md`（0.3.10 现场定位）。
 
@@ -305,7 +305,7 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 - **加固**：`finish=load` / 完全空响应**不再静默** → 异常化（走唤醒重试，耗尽后前端可见错误）；
 - 临时规避：给该会话手动发一条 user 消息再触发唤醒轮。
 
-### 5.2 ollama cloud 缓存命中实测（2026-09-11 会话）
+### 6.2 ollama cloud 缓存命中实测（2026-09-11 会话）
 
 来源：`.scratch/v41-run1.txt` / `v41-run2.txt`（模型 `deepseek-v4.1-flash`）、`.scratch/v4f-run1.txt` / `v4f-run2.txt`（模型 `deepseek-v4-flash:0731`）；请求体 `.scratch/verify-long-v41.json` / `verify-long-v4f.json`（固定长前缀 system + 一次短 user，`stream_options.include_usage`）。
 
@@ -318,7 +318,7 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 - **判定**：这是**上游/网关侧**的缓存行为（前缀命中由服务端决定），**非 agent 缺陷**。
 - **旁证**：DeepSeek 官方响应用顶层 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`（`.scratch/verify-resp-deepseek.txt:33`）；ollama 用 `prompt_tokens_details.cached_tokens`（`.scratch/v41-run2.txt`）——**两种形态已由 `extract_cache_tokens` 统一**（`core/src/model/provider/chat.rs:581-599`）。
 
-### 5.3 其他上游异常形态
+### 6.3 其他上游异常形态
 
 | 形态 | 说明 | 位置 |
 |---|---|---|
@@ -341,10 +341,10 @@ SELECT * FROM usage_logs WHERE session_id = '<会话 id>' ORDER BY id DESC LIMIT
 | `probe-reason-text.py` | 抓思考原文（V2 强约束 vs 基线），判断语言是否真切换 | §3.4 / §3.5 旁证 | 会话实测 |
 | `probe-strip-safety.py`（K1~K5）、`probe-strip-safety2.py`（C1/C2/C4） | 思考回传"裁剪安全性"——省略历史 reasoning 是否被 400 拒 | §2.3 | 探针脚本（结果片段已入代码注释） |
 | `verify-body-deepseek.json` / `verify-body-ollama.json` | 最小请求体（`stream_options.include_usage`） | §1.3 usage 形态 | 请求体快照 |
-| `verify-resp-deepseek.txt` / `verify-resp-ollama.txt` | 单轮响应原文（字段名差异） | §1.3 / §5.2 | 响应快照 |
-| `verify-long-v41.json` / `verify-long-v4f.json` + `v41-run1/2.txt`、`v4f-run1/2.txt` | 前缀缓存命中实测（固定长前缀 + 冷/热两次） | §5.2 | 会话实测（2026-09-11） |
+| `verify-resp-deepseek.txt` / `verify-resp-ollama.txt` | 单轮响应原文（字段名差异） | §1.3 / §6.2 | 响应快照 |
+| `verify-long-v41.json` / `verify-long-v4f.json` + `v41-run1/2.txt`、`v4f-run1/2.txt` | 前缀缓存命中实测（固定长前缀 + 冷/热两次） | §6.2 | 会话实测（2026-09-11） |
 | `probe-ollama-reasoning-field*.py` | ollama `reasoning` vs `reasoning_content` 字段名探针（阳性对照：塞进 content 必涨 `prompt_tokens`） | §1.2 / §2.2 | 探针脚本 |
-| `wake-no-user-finding.md` | 唤醒轮"无 user → `finish_reason:load` → 静默"四步故障链 | §5.1 | 现场定位记录 |
+| `wake-no-user-finding.md` | 唤醒轮"无 user → `finish_reason:load` → 静默"四步故障链 | §6.1 | 现场定位记录 |
 
 ### 未能核实 / 待复测
 
