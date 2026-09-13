@@ -792,3 +792,28 @@ Oracle 批判性终审（Loop 2）发现 Wave 7 的 clippy 修复引入 3 处 fm
 | U1 | 子代理 `submit_result` 调用受限 | **请求侧"恒注入"与执行侧"角色白名单"不对称**：协议工具（`submit_result`）进入请求工具列表，但未进角色白名单 → 执行侧拒绝。附带：4 个角色白名单含**已删除的工具名**（`search_knowledge` / `command_*`） | ToolSet 单点方案（请求列表与执行白名单同源）；最小版本 = 执行侧恒允许 protocol 工具 + 白名单归一闸门（剔除已删工具名并告警） | 用户决定实施时；或再出现子代理报告"工具不可用" |
 | U2 | 上下文压缩的**轮内**检查 | 压缩只在整轮收尾检查一次（`run_agent_turn` 末尾），轮内多次工具调用不检查 → 长工具轮会冲到 80%+ 才压（"体感 80% 才压"的机制原因）。机制已固化进 `docs/architecture/context-pipeline.md` §4.2 | 两级：60%~80% 留轮末；>80%（critical）在"工具结果落盘后、下一次请求前"这一自然断点立即压（此处工具配对完整） | 用户认为"压得太晚"成为实际困扰时（当前 0.6 触发线 + 40% 余量，正常工具轮不触发风险） |
 | U3 | `Database::lock()` 裸连接（54 处）/ 启动期配置 clone / `skill_calls` 无 TTL | 本轮判定**不修**（理由见上表）；三者都属"要动就得先立 ADR"的类型 | 裸连接：保持（存储实现层的合理直连）；clone：保持；`skill_calls` TTL：若表体量成为问题，立"数据保留策略"ADR（含各表保留期与清理入口） | ① 出现绕过仓储写裸 SQL 导致的口径分裂；② 启动耗时被测量为瓶颈；③ `skill_calls` 行数达到百万级 |
+
+## 0.3.17 波次：嵌入用量入账 + 两处用户可感 bug 修复（2026-09-13）
+
+### 起因
+用户三个问题驱动的排查：① 嵌入调用是否真的在用（为何账单无费用）② 终止后前端
+显示**上一轮结论** ③ 停止按钮竞态。前两问的实证与修复如下。
+
+### 改动清单
+| # | 项 | 根因 / 内容 | 验证 |
+|---|---|---|---|
+| 1 | **嵌入用量入账** | 嵌入不走 AgentLoop → token 完全不写 `usage_logs`（账单/统计盲区）。新增 `EmbeddingUsageSink` 契约（model 层定义、装配层注入）+ `UsageLogEmbeddingSink`（`tokio::spawn` 异步落库）；VFS 实例与 Agent 实例（构造 + 热重载）均注入 | server 端到端测试：`record` → `usage_logs` 可按 provider/model 查到 `calls/uncached_input` |
+| 2 | **查询嵌入缓存 + 空串短路** | 日志实测同一 query 一次检索被嵌 2 次、空 query（`text_len=0`）也发请求。缓存键 `model\|dimensions\|text`（256，FIFO）；空文本报错短路；VFS 空 query 返回空结果、双摘要皆空跳过索引 | 4 个 middleware 测试 + 反向验证（注入"不写缓存/不短路"必红） |
+| 3 | **终止轮不再下发上一轮 assistant** | 服务层**无条件**补发 assistant 边界事件，取"会话最后一条 assistant"——取消轮不落库新消息 → 下发上一轮结论，前端合并进本轮占位气泡。修复：轮前记水位 `prev_assistant_id`，边界只下发 `select_turn_assistant(messages, prev)`（本轮新消息） | 4 个回归测试 + 反向验证；排查路径固化进 `troubleshooting.md §2.d` |
+| 4 | **协议工具 `submit_result` 豁免**（U1 结项） | 请求侧恒注入、执行侧按角色白名单过滤时**未豁免** → 子代理调用被拒、结果只能靠最后输出兜底。新增单点 `PROTOCOL_TOOLS` / `is_protocol_tool()`，请求注入与执行豁免同源 | 2 个测试（豁免 + 对照组普通工具仍被拒）+ 反向验证 |
+| 5 | **停止按钮竞态** | 新会话首个请求未返回（`currentSessionId` 为 null）时点停止 → 取消请求发不出，后端继续跑完而前端显示已中止。新增 `cancelWhenSessionIdReady`（250ms × 40 轮询等待 id 就绪后补发） | 3 个前端测试（fake timers）+ 反向验证 |
+
+### 决策更新
+- **U1 关闭**：按"最小正确"路径修复（执行侧恒允许 protocol 工具 + 单点常量），
+  未采用完整 ToolSet 单点重构（请求集与执行集仍分属两处，但工具名单点已收敛）。
+- U2（轮内压缩检查）、U3（三项不修）保持挂账，触发条件不变。
+
+### 门禁（0.3.17）
+- Rust：fmt 干净 · clippy `-D warnings` 0 · core **1188** / server 152 / mcp 16 / tauri 9
+- 前端：vitest **395**（53 文件）· eslint 0 · tsc 0 · prettier ✓
+- 反向验证：本轮 5 项改动的新测试均验证过判别力（注入旧行为必红）
