@@ -469,10 +469,7 @@ impl CommandManager {
         {
             let mut t = tail.lock().await;
             t.push_str(&marker);
-            if t.len() > OUTPUT_TAIL_MAX_BYTES {
-                let excess = t.len() - OUTPUT_TAIL_MAX_BYTES;
-                t.drain(..excess);
-            }
+            crate::common::truncate::truncate_keep_tail_bytes(&mut t, OUTPUT_TAIL_MAX_BYTES);
             let mut f = file.lock().await;
             if let Some(f) = f.as_mut() {
                 let _ = f.write_all(marker.as_bytes()).await;
@@ -784,6 +781,9 @@ async fn drain_output<R>(
     R: AsyncRead + Unpin,
 {
     let mut buf = [0u8; 8192];
+    // 跨块的多字节字符残片（≤3 字节）：本块尾部被切断的字符留到下一块拼接，
+    // 避免 8KB 读边界把中文替换为 U+FFFD（每块末尾必现"半字符"的根因）。
+    let mut carry: Vec<u8> = Vec::new();
     let mut pending = String::new();
     let mut last_emit = now_ms();
     loop {
@@ -791,14 +791,7 @@ async fn drain_output<R>(
             Ok(0) => break,
             Ok(n) => {
                 let chunk = &buf[..n];
-                {
-                    let mut t = tail.lock().await;
-                    t.push_str(&String::from_utf8_lossy(chunk));
-                    if t.len() > OUTPUT_TAIL_MAX_BYTES {
-                        let excess = t.len() - OUTPUT_TAIL_MAX_BYTES;
-                        t.drain(..excess);
-                    }
-                }
+                // 原始字节写日志文件（字节流保真，不受解码影响）
                 let mut f = file.lock().await;
                 if let Some(f) = f.as_mut() {
                     if f.write_all(chunk).await.is_err() {
@@ -807,8 +800,22 @@ async fn drain_output<R>(
                     }
                 }
                 drop(f);
-                // ADR-028：输出增量事件（时间窗合并；实时终端视图，尽力而为）
-                pending.push_str(&String::from_utf8_lossy(chunk));
+                // 文本视图：carry + 本块 → 可完整解码前缀（不完整序列残片留 carry）
+                carry.extend_from_slice(chunk);
+                let (text, rest) = decode_utf8_keep_tail(&carry);
+                carry = rest;
+                if !text.is_empty() {
+                    {
+                        let mut t = tail.lock().await;
+                        t.push_str(&text);
+                        crate::common::truncate::truncate_keep_tail_bytes(
+                            &mut t,
+                            OUTPUT_TAIL_MAX_BYTES,
+                        );
+                    }
+                    // ADR-028：输出增量事件（时间窗合并；实时终端视图，尽力而为）
+                    pending.push_str(&text);
+                }
                 let now = now_ms();
                 if now - last_emit >= OUTPUT_EVENT_FLUSH_MS {
                     flush_output_event(&event_sink, &task_id, &mut pending).await;
@@ -821,8 +828,51 @@ async fn drain_output<R>(
             }
         }
     }
-    // 收尾：残留增量必须发出（含写日志失败 / 读错误提前 break 的路径）
+    // 收尾 1：流以不完整序列结束（真截断/非法字节）→ lossy 兜底一次
+    if !carry.is_empty() {
+        let text = String::from_utf8_lossy(&carry).into_owned();
+        if !text.is_empty() {
+            let mut t = tail.lock().await;
+            t.push_str(&text);
+            crate::common::truncate::truncate_keep_tail_bytes(&mut t, OUTPUT_TAIL_MAX_BYTES);
+            drop(t);
+            pending.push_str(&text);
+        }
+    }
+    // 收尾 2：残留增量必须发出（含写日志失败 / 读错误提前 break 的路径）
     flush_output_event(&event_sink, &task_id, &mut pending).await;
+}
+
+/// 解码字节流的可完整解码前缀：返回（已解码文本，残余字节）。
+///
+/// - 合法文本全部解码；
+/// - 尾部不完整的多字节序列（跨块被切断，≤3 字节）→ 留作残余，待下个块拼接；
+/// - 非法序列（非"被切断"）→ 立即 lossy 替换（�）并继续推进，不积累残余。
+fn decode_utf8_keep_tail(bytes: &[u8]) -> (String, Vec<u8>) {
+    let mut text = String::new();
+    let mut rest: &[u8] = bytes;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                text.push_str(s);
+                return (text, Vec::new());
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                // 安全：valid_up_to 保证前缀是合法 UTF-8
+                text.push_str(std::str::from_utf8(&rest[..valid]).unwrap_or_default());
+                match e.error_len() {
+                    // 尾部不完整序列：保留残余（可能跨块被切分的多字节字符）
+                    None => return (text, rest[valid..].to_vec()),
+                    // 非法序列：lossy 替换并跳过，不积累
+                    Some(bad) => {
+                        text.push('\u{FFFD}');
+                        rest = &rest[valid + bad..];
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// 发送累积的输出增量并清空缓冲（空内容不发；无 sink 时只清空）。
@@ -1434,5 +1484,78 @@ mod tests {
             "合并内容须完整无丢块"
         );
         assert_eq!(tail.lock().await.as_str(), "line-1\nline-2\nline-3\n");
+    }
+
+    /// 回归：输出 tail 截断必须 UTF-8 边界安全——旧实现 `String::drain(..excess)`
+    /// 在丢弃起点落在多字节字符中间时 panic（release `panic = "abort"` →
+    /// 整个进程无痕退出——2026-09-14 后台任务闪退的根因路径）。
+    /// 判别力：输入 33000 字节纯中文（32KB 上限后首切 excess=232，恰落在
+    /// 字符内部）——旧实现必 panic 红。
+    #[tokio::test]
+    async fn test_drain_output_tail_truncation_utf8_safe() {
+        let content = "中".repeat(11000); // 33000 字节
+        let reader: &[u8] = content.as_bytes();
+        let tail: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let file: Arc<Mutex<Option<tokio::fs::File>>> = Arc::new(Mutex::new(None));
+
+        drain_output(reader, tail.clone(), file, "cmd_utf8".to_string(), None).await;
+
+        let t = tail.lock().await;
+        assert!(
+            t.len() <= OUTPUT_TAIL_MAX_BYTES,
+            "tail 不得超过 32KB 上限（实际 {} 字节）",
+            t.len()
+        );
+        assert!(
+            t.chars().all(|c| c == '中'),
+            "截断后必须仍是完整字符（不得切出半字符）"
+        );
+        assert_eq!(t.len(), 32766, "对齐到字符边界后的精确保留量");
+    }
+
+    /// 回归（同源单点）：finalize_finished_task 追加退出标记后的 tail 截断
+    /// 同样必须 UTF-8 安全（同一 `truncate_keep_tail_bytes` 单点）。
+    #[tokio::test]
+    async fn test_finalize_task_tail_truncation_utf8_safe() {
+        let manager = CommandManager::new(None);
+        let tail: Arc<Mutex<String>> = Arc::new(Mutex::new("中".repeat(11000))); // 33000 字节
+        let file: Arc<Mutex<Option<tokio::fs::File>>> = Arc::new(Mutex::new(None));
+
+        // 标记 21 字节：33021 → excess 253（恰落在字符内部）——旧实现必 panic 红
+        let result = manager
+            .finalize_finished_task("cmd_none", Some(0), &tail, &file)
+            .await;
+        assert!(result.is_none(), "未注册的任务应返回 None");
+        let t = tail.lock().await;
+        assert!(t.len() <= OUTPUT_TAIL_MAX_BYTES);
+        assert!(
+            t.ends_with("--- exit code: 0 ---\n"),
+            "保留尾部应含退出标记"
+        );
+    }
+
+    #[test]
+    fn test_decode_utf8_keep_tail_holds_incomplete_sequence() {
+        // "中" = E4 B8 AD：前 2 字节被切断 → 残余保留，不出 �
+        let bytes = [b'a', 0xE4, 0xB8];
+        let (text, rest) = decode_utf8_keep_tail(&bytes);
+        assert_eq!(text, "a");
+        assert_eq!(rest, vec![0xE4, 0xB8]);
+
+        // 拼上第 3 字节 → 完整解码
+        let mut joined = rest;
+        joined.push(0xAD);
+        let (text2, rest2) = decode_utf8_keep_tail(&joined);
+        assert_eq!(text2, "中");
+        assert!(rest2.is_empty());
+    }
+
+    #[test]
+    fn test_decode_utf8_keep_tail_replaces_invalid_bytes() {
+        // 非法字节（0xFF）→ �，不积累残余、不卡住
+        let (text, rest) = decode_utf8_keep_tail(&[0xFF, b'x']);
+        assert!(text.starts_with('\u{FFFD}'));
+        assert!(text.ends_with('x'));
+        assert!(rest.is_empty());
     }
 }

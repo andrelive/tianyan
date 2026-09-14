@@ -18,6 +18,22 @@ pub fn truncate_utf8_boundary(s: &str, max: usize) -> String {
     }
     format!("{}…", &s[..end])
 }
+/// 就地保留尾部 `max_bytes` 字节（UTF-8 边界安全）。
+///
+/// 超出部分从头部丢弃，丢弃起点对齐到最近的字符边界（至多少丢 ≤3 字节）；
+/// `max_bytes = 0` 时清空。供"内存快照保留尾部"型截断使用——此前命令输出
+/// tail 直接 `String::drain(..excess)`：excess 落在多字节字符中间时 panic
+/// （release 构建 `panic = "abort"` → 整个进程无痕退出）。
+pub fn truncate_keep_tail_bytes(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut start = s.len() - max_bytes;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s.drain(..start);
+}
 
 #[cfg(test)]
 mod tests {
@@ -45,5 +61,35 @@ mod tests {
             t.len() <= 10 + '…'.len_utf8(),
             "截断后字节应不超过 max+省略号"
         );
+    }
+
+    #[test]
+    fn test_truncate_keep_tail_bytes_short_unchanged() {
+        let mut s = "short".to_string();
+        truncate_keep_tail_bytes(&mut s, 10);
+        assert_eq!(s, "short");
+    }
+
+    #[test]
+    fn test_truncate_keep_tail_bytes_aligns_multibyte() {
+        // 32 个"中"（96 字节）+ "xx"（共 98 字节）：保留 4 字节 → 丢弃起点
+        // 94 落在"中"#31（93..96）的字符内部，必须向后对齐（旧实现
+        // `String::drain(..94)` 在此 panic）。
+        let mut s = "中".repeat(32) + "xx";
+        truncate_keep_tail_bytes(&mut s, 4);
+        assert_eq!(s, "xx");
+        assert!(std::str::from_utf8(s.as_bytes()).is_ok());
+
+        // 纯多字节内容：对齐后保留完整字符（3 字节 ≤ 4）
+        let mut t = "中".repeat(32);
+        truncate_keep_tail_bytes(&mut t, 4);
+        assert_eq!(t, "中");
+    }
+
+    #[test]
+    fn test_truncate_keep_tail_bytes_zero_clears() {
+        let mut s = "内容".to_string();
+        truncate_keep_tail_bytes(&mut s, 0);
+        assert!(s.is_empty());
     }
 }
