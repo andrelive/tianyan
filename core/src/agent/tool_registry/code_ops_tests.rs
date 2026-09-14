@@ -37,7 +37,7 @@ fn default_strict_policy() -> SecurityPolicy {
 #[tokio::test]
 async fn test_search_code_rejects_missing_arguments() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_search_code(r#"{}"#).await;
+    let result = registry.execute_search_code(r#"{}"#, "test-session").await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -65,7 +65,10 @@ async fn test_search_code_basic_success() {
     let registry = ToolRegistry::new(default_strict_policy());
     let path = serde_json::to_string(&dir.path().to_string_lossy().into_owned()).unwrap();
     let result = registry
-        .execute_search_code(&format!(r#"{{"pattern":"foo","path":{path}}}"#))
+        .execute_search_code(
+            &format!(r#"{{"pattern":"foo","path":{path}}}"#),
+            "test-session",
+        )
         .await
         .unwrap();
     assert_eq!(result["count"].as_u64(), Some(1));
@@ -86,7 +89,10 @@ async fn test_search_code_rejects_path_outside_allowlist() {
     let registry = ToolRegistry::new(file_policy(vec![allowed]));
     let path = serde_json::to_string(&outside.to_string_lossy().into_owned()).unwrap();
     let result = registry
-        .execute_search_code(&format!(r#"{{"pattern":"foo","path":{path}}}"#))
+        .execute_search_code(
+            &format!(r#"{{"pattern":"foo","path":{path}}}"#),
+            "test-session",
+        )
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("安全违规"));
@@ -100,7 +106,10 @@ async fn test_search_code_serde_alias_old_payload() {
     // 旧字段名 query/scope 仍可解析（serde alias 兼容）。
     let scope = serde_json::to_string(&dir.path().to_string_lossy().into_owned()).unwrap();
     let result = registry
-        .execute_search_code(&format!(r#"{{"query":"foo","scope":{scope}}}"#))
+        .execute_search_code(
+            &format!(r#"{{"query":"foo","scope":{scope}}}"#),
+            "test-session",
+        )
         .await
         .unwrap();
     assert_eq!(result["count"].as_u64(), Some(1));
@@ -215,6 +224,71 @@ async fn test_run_tests_command_metacharacters_blocked() {
         .await;
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("安全违规"), "应报安全违规: {msg}");
+}
+
+/// 构造绑定指定工作目录的持久化会话管理器（grep 搜索根解析测试用）。
+async fn session_manager_with_cwd(
+    session_id: &str,
+    cwd: &std::path::Path,
+) -> Arc<dyn crate::session::SessionManager> {
+    let db = crate::db::Database::open_in_memory().unwrap();
+    db.init_schemas().await.unwrap();
+    let store = crate::session::store::SessionStore::new(db).unwrap();
+    let header = crate::session::types::SessionHeader {
+        working_directory: Some(cwd.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    store.create(session_id, &header).await.unwrap();
+    let sm: Arc<dyn crate::session::SessionManager> =
+        Arc::new(crate::session::PersistentSessionManager::new(store));
+    sm
+}
+
+#[tokio::test]
+async fn test_search_code_relative_path_resolves_against_session_working_directory() {
+    // 回归保护（grep 失效根因）：相对 path 必须按会话工作目录解析——修复前
+    // 直接落进程 cwd（Tauri 安装目录），遍历不到目标时静默 0 条假阴性。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/a.rs"), "fn needle_rel() {}\n").unwrap();
+
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_session_manager(session_manager_with_cwd("s-rel", dir.path()).await);
+    let result = registry
+        .execute_search_code(r#"{"pattern":"needle_rel","path":"sub"}"#, "s-rel")
+        .await
+        .unwrap();
+    assert_eq!(
+        result["count"].as_u64(),
+        Some(1),
+        "相对路径应命中会话工作目录的子目录: {result}"
+    );
+    assert!(result["results"][0]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("a.rs"));
+}
+
+#[tokio::test]
+async fn test_search_code_default_path_uses_session_working_directory() {
+    // 回归保护：缺省 path 必须落在会话工作目录（修复前落进程 cwd 静默 0 条），
+    // 且输出回显解析后的搜索根（透明化，不再无声落错目录）。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn needle_default() {}\n").unwrap();
+
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_session_manager(session_manager_with_cwd("s-def", dir.path()).await);
+    let result = registry
+        .execute_search_code(r#"{"pattern":"needle_default"}"#, "s-def")
+        .await
+        .unwrap();
+    assert_eq!(
+        result["count"].as_u64(),
+        Some(1),
+        "缺省 path 应命中会话工作目录: {result}"
+    );
+    let expected_root = dir.path().to_string_lossy().into_owned();
+    assert_eq!(result["path"].as_str(), Some(expected_root.as_str()));
 }
 
 #[tokio::test]

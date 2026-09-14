@@ -91,7 +91,8 @@ pub struct SearchCodeParams {
     /// 搜索模式（正则；兼容旧字段名 `query`）。
     #[serde(alias = "query")]
     pub pattern: String,
-    /// 搜索根目录（默认当前工作目录；兼容旧字段名 `scope`）。
+    /// 搜索根目录（相对路径按会话工作目录解析；缺省为会话工作目录，
+    /// 无会话时回退进程当前目录；兼容旧字段名 `scope`）。
     #[serde(default, alias = "scope", skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// glob 过滤器（如 `*.rs`）。

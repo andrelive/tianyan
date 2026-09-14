@@ -881,7 +881,7 @@ impl ToolRegistry {
                 self.execute_execute_command(arguments, session_id, subagent)
                     .await
             }
-            "grep" => self.execute_search_code(arguments).await,
+            "grep" => self.execute_search_code(arguments, session_id).await,
             "search_vfs" => self.execute_search_vfs(arguments).await,
             "vfs_read" => self.execute_vfs_read(arguments).await,
             "vfs_list" => self.execute_vfs_list(arguments).await,
