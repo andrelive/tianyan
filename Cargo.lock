@@ -9327,7 +9327,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -9380,7 +9380,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-mcp"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "futures",
  "rust-mcp-sdk",
@@ -9395,7 +9395,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-server"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9421,7 +9421,7 @@ dependencies = [
 
 [[package]]
 name = "tianyan-tauri"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "axum",

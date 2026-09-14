@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-09-14
+
+### Fixed
+- grep 工具搜索根工作区归属：相对 `path` 与缺省 `path` 此前以进程 cwd（桌面端为 exe 安装目录）为搜索基准，遍历不到目标时**静默返回 0 条假阴性**（脚手架排查被误导为「文档断链」的根因）；现与 glob/read_file 同一套规则解析到**会话工作目录**（无会话时保持旧回退语义），搜索输出同时回显解析后的搜索根
+- 回归保护：新增两条回归测试（相对路径 / 缺省 path 命中会话工作目录，修复前必失败）
+
 ## [0.4.0] - 2026-09-13
 
 ### Added
