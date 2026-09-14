@@ -9,20 +9,22 @@ struct MockSessionManager {
     /// 最近一次 add_structured_message 的实测输入（模拟 SQLite 持久化：
     /// run_turns 从会话恢复实测输入的数据源；None = 无 usage，走估算）。
     last_usage: Arc<std::sync::Mutex<Option<usize>>>,
+    /// 全部落库消息捕获 `(session_id, msg)`（取消收尾等落库行为断言用）。
+    messages: Arc<std::sync::Mutex<Vec<(String, StructuredMessage)>>>,
 }
 #[async_trait]
 impl SessionManager for MockSessionManager {
-    async fn add_structured_message(
-        &self,
-        _session_id: &str,
-        msg: StructuredMessage,
-    ) -> Result<()> {
+    async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()> {
         // 模拟持久化：记录消息携带的实测输入（重启后 run_turns 可恢复）。
         // 取数口径与生产一致（prompt 侧 input，max 兜底；input 已含 cache.read）。
         if msg.tokens.input > 0 || msg.tokens.cache.read > 0 {
             if let Ok(mut guard) = self.last_usage.lock() {
                 *guard = Some(msg.tokens.input.max(msg.tokens.cache.read));
             }
+        }
+        // 捕获落库消息（取消收尾等落库行为断言用）
+        if let Ok(mut guard) = self.messages.lock() {
+            guard.push((session_id.to_string(), msg));
         }
         Ok(())
     }
@@ -73,6 +75,7 @@ fn test_agent_loop_config_default() {
     // Touch the mock to keep it "constructed" (dead-code lint).
     let _mgr = MockSessionManager {
         last_usage: Arc::new(std::sync::Mutex::new(None)),
+        messages: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
 }
 
@@ -111,7 +114,7 @@ fn test_agent_loop_error_display() {
 // ── 完整循环测试（MockChatService + 真实 ToolRegistry） ────
 
 use crate::common::types::TokenUsage as CommonTokenUsage;
-use crate::common::types::{FunctionCall, ToolCall, ToolCallType};
+use crate::common::types::{FunctionCall, Part, ToolCall, ToolCallType};
 use crate::executor::SecurityPolicy;
 use crate::model::types::{
     ChatChoice, ChatCompletionChunk, ChatCompletionResponse, ChunkChoice, DeltaContent,
@@ -158,9 +161,31 @@ fn make_loop(mock: MockChatService, max_turns: usize) -> AgentLoop {
         registry,
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(None)),
+            messages: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
         AgentLoopConfig { max_turns },
     )
+}
+/// 构造带落库消息捕获的 AgentLoop（取消收尾等落库行为断言用）。
+fn make_loop_with_capture(
+    mock: MockChatService,
+    max_turns: usize,
+) -> (
+    AgentLoop,
+    Arc<std::sync::Mutex<Vec<(String, StructuredMessage)>>>,
+) {
+    let registry = ToolRegistry::new(SecurityPolicy::default());
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let agent_loop = AgentLoop::new(
+        Arc::new(mock),
+        registry,
+        Arc::new(MockSessionManager {
+            last_usage: Arc::new(std::sync::Mutex::new(None)),
+            messages: captured.clone(),
+        }),
+        AgentLoopConfig { max_turns },
+    );
+    (agent_loop, captured)
 }
 
 #[tokio::test]
@@ -229,6 +254,7 @@ async fn test_run_ask_user_executes_as_sync_tool() {
         registry,
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(None)),
+            messages: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
         AgentLoopConfig { max_turns: 5 },
     );
@@ -307,6 +333,7 @@ async fn test_run_approval_denied_returns_tool_error() {
         registry,
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(None)),
+            messages: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
         AgentLoopConfig { max_turns: 5 },
     );
@@ -471,7 +498,7 @@ async fn test_run_stream_returns_cancelled_mid_chunk() {
         });
         Ok(chunk_rx)
     });
-    let agent_loop = make_loop(mock, 5);
+    let (agent_loop, captured) = make_loop_with_capture(mock, 5);
 
     let cancel = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<AgentStreamChunk>>(8);
@@ -509,6 +536,138 @@ async fn test_run_stream_returns_cancelled_mid_chunk() {
         matches!(result, AgentLoopResult::Cancelled { .. }),
         "流式中途取消应返回 Cancelled，实际: {:?}",
         result
+    );
+    // 取消收尾（DSH“中断先于分发”对齐）：已收“第一段”以 interrupted 落库、
+    // tool_calls 全丢（本测试无工具调用；工具调用丢弃见 finalize 单元测试）。
+    let msgs = captured.lock().unwrap();
+    let persisted = msgs
+        .iter()
+        .find(|(sid, m)| sid.as_str() == "session-1" && m.finish.as_deref() == Some("interrupted"))
+        .map(|(_, m)| m)
+        .expect("取消应落库 finish=interrupted 的 assistant 消息");
+    assert_eq!(persisted.role, MessageRole::Assistant);
+    assert!(
+        persisted
+            .parts
+            .iter()
+            .any(|p| matches!(p, Part::Text { text, .. } if text == "第一段")),
+        "落库内容应包含取消前已交付的正文前缀"
+    );
+    assert!(
+        !persisted
+            .parts
+            .iter()
+            .any(|p| matches!(p, Part::ToolCall { .. })),
+        "取消落库消息不得携带 tool_calls"
+    );
+}
+
+// ── 取消收尾（finalize_streamed_turn 单元测试，DSH 对齐） ─────────
+
+/// 取消收尾：已收正文/推理保留（已交付前缀），tool_calls 全部丢弃
+/// （含未闭合参数的流式半截调用）。
+#[test]
+fn test_finalize_cancelled_drops_tool_calls_keeps_delivered_prefix() {
+    let accum = StreamAccum {
+        content: "正在调用".to_string(),
+        reasoning: "先读文件".to_string(),
+        // 未闭合参数（流式中断在参数中途）——取消收尾仍须整体丢弃
+        tool_calls: std::collections::BTreeMap::from([(
+            0usize,
+            (
+                "call_1".to_string(),
+                "read_file".to_string(),
+                "{\"path\": \"src/ma".to_string(),
+            ),
+        )]),
+        usage: None,
+        stream_error: None,
+        finish_reason: None,
+        updated_input: None,
+        cancelled: true,
+    };
+    let (msg, _usage, finish, _input, cancelled_turn) =
+        AgentLoop::finalize_streamed_turn(accum, &[Message::user("测试")], "test-model", None)
+            .unwrap();
+    assert!(cancelled_turn, "取消收尾标记应为 true");
+    assert_eq!(msg.content, "正在调用");
+    assert_eq!(msg.reasoning_content.as_deref(), Some("先读文件"));
+    assert!(
+        msg.tool_calls.is_none(),
+        "取消收尾必须丢弃全部 tool_calls（保留就须捏造结果）"
+    );
+    assert_eq!(finish.as_deref(), Some("interrupted"));
+}
+
+/// 取消收尾：完全无内容（含仅有半截 tool_calls）→ 按取消上抛（不落库）。
+#[test]
+fn test_finalize_cancelled_without_content_is_cancel_error() {
+    let accum = StreamAccum {
+        content: String::new(),
+        reasoning: String::new(),
+        tool_calls: std::collections::BTreeMap::from([(
+            0usize,
+            (
+                "call_1".to_string(),
+                "read_file".to_string(),
+                "{\"pa".to_string(),
+            ),
+        )]),
+        usage: None,
+        stream_error: None,
+        finish_reason: None,
+        updated_input: None,
+        cancelled: true,
+    };
+    let err =
+        AgentLoop::finalize_streamed_turn(accum, &[Message::user("测试")], "test-model", None)
+            .unwrap_err();
+    assert!(
+        err.to_string().contains("任务已取消"),
+        "无内容取消应上抛取消错误，实际: {err}"
+    );
+}
+
+/// 取消收尾：纯空白文本/推理按无内容处理（对齐 DSH interruptedBlocks 过滤）。
+#[test]
+fn test_finalize_cancelled_blank_only_dropped() {
+    let accum = StreamAccum {
+        content: "  \n".to_string(),
+        reasoning: " ".to_string(),
+        tool_calls: std::collections::BTreeMap::new(),
+        usage: None,
+        stream_error: None,
+        finish_reason: None,
+        updated_input: None,
+        cancelled: true,
+    };
+    let err =
+        AgentLoop::finalize_streamed_turn(accum, &[Message::user("测试")], "test-model", None)
+            .unwrap_err();
+    assert!(err.to_string().contains("任务已取消"));
+}
+
+/// 取消收尾：正文非空白 + 推理纯空白 → 推理丢弃、正文保留。
+#[test]
+fn test_finalize_cancelled_blank_reasoning_dropped() {
+    let accum = StreamAccum {
+        content: "你好".to_string(),
+        reasoning: "\n ".to_string(),
+        tool_calls: std::collections::BTreeMap::new(),
+        usage: None,
+        stream_error: None,
+        finish_reason: None,
+        updated_input: None,
+        cancelled: true,
+    };
+    let (msg, _usage, _finish, _input, cancelled_turn) =
+        AgentLoop::finalize_streamed_turn(accum, &[Message::user("测试")], "test-model", None)
+            .unwrap();
+    assert!(cancelled_turn);
+    assert_eq!(msg.content, "你好");
+    assert!(
+        msg.reasoning_content.is_none(),
+        "纯空白推理应被过滤（视为无内容）"
     );
 }
 
@@ -1385,6 +1544,7 @@ async fn test_run_errors_when_budget_below_min() {
         registry,
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(Some(128_000 - 1137))),
+            messages: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
         AgentLoopConfig { max_turns: 5 },
     )
