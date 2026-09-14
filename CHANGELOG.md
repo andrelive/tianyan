@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-09-14
+
+### Fixed
+- **应用闪退根因修复（后台任务/命令输出链 UTF-8 边界安全）**：后台任务输出缓冲的 32KB 尾部截断以**字节**定位丢弃起点（`String::drain(..excess)`），起点落在中文等多字节字符中间时必 panic；release 构建 `panic = "abort"` 使该 panic 升级为**全进程无痕退出**（无日志、GUI 直接消失——「闪退」根因；实测崩点 33270 = 32768 + 502，两次复现一致，纯 ASCII 不触发）。修复 = 新增 `common::truncate::truncate_keep_tail_bytes`（UTF-8 边界安全，对齐既有截断单点），两处截断点替换；顺带修复跨 8KB 读边界中文被 lossy 为 `�`（carry 拼接）
+- **VFS sqlite 后端 NULL 层读取**：`read_content` 对 NULL 列直接取值报 `Invalid column type Null`——L0/L1 缺失为合法状态（`ContextEntry` 三层均 `Option<String>`，local 后端语义即 `not_found`），读取报错根因。修复为 NULL → `not_found`（后端语义契约对齐）
+- 回归保护：截断边界新增 7 条测试 + 2 条反向验证（注入旧截断必红）；VFS NULL 新增回归测试 + 反向验证（注入旧行为必红，报错文本与用户检索所见一致）；core 1223 全绿，fmt / clippy 0
+
+### Added
+- 技能导入工具（`core/examples/skill_import.rs`）：外部标准化方法论（`abstract.md` + `content.md` 目录式）→ VFS 技能库导入器（`--dry-run` / `--verify` / `--data-dir` 三模式；幂等，重跑即更新；显式 `update_summary_vectors`）；随工具附 11 篇内置方法论源（`core/examples/import-skills/`：调试/并行 agent/评审/TDD/研究/交接等）
+
 ## [0.4.1] - 2026-09-14
 
 ### Fixed
