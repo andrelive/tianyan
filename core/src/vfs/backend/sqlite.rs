@@ -246,6 +246,10 @@ impl StorageBackend for SqliteBackend {
     }
 
     /// 读取指定 URI 的某一层级内容（L0/L1/L2）。
+    ///
+    /// 缺失语义与 local 后端对齐：行不存在或该层列为 NULL（从未写入）均返回
+    /// `not_found`——`ContextEntry` 各层本就是 `Option<String>`，缺层是合法状态；
+    /// 调用方可据此区分"无内容"（如 search_vfs 展示为空）与"存储故障"。
     async fn read_content(&self, uri: &TianyanUri, level: ContentLevel) -> Result<String> {
         let conn = self.db.lock().await;
         let column = match level {
@@ -255,13 +259,15 @@ impl StorageBackend for SqliteBackend {
         };
         let sql = format!("SELECT {} FROM vfs_entries WHERE uri = ?1", column);
 
-        conn.query_row(&sql, rusqlite::params![uri.to_string()], |row| row.get(0))
+        let value: Option<String> = conn
+            .query_row(&sql, rusqlite::params![uri.to_string()], |row| row.get(0))
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => {
                     TianyanError::not_found(format!("{uri} 无 {level:?} 层级内容"))
                 }
                 other => TianyanError::Custom(format!("存储后端错误：读取内容失败: {other}")),
-            })
+            })?;
+        value.ok_or_else(|| TianyanError::not_found(format!("{uri} 无 {level:?} 层级内容")))
     }
 
     /// 写入指定 URI 的某一层级内容（UPSERT 语义）。
@@ -364,6 +370,47 @@ mod tests {
         assert_eq!(read.abstract_content, Some("摘要".into()));
         assert_eq!(read.overview_content, Some("概览".into()));
         assert_eq!(read.detail_content, Some("详情".into()));
+    }
+    /// 回归：读取"条目存在但该层从未写入（列为 NULL）"→ not_found（与 local
+    /// 后端"缺层"语义对齐），而不是把 NULL 当存储故障。
+    /// 判别力：修复前 NULL 列 `row.get::<String>` 报 `Invalid column type Null`
+    /// （Custom 错误）→ `is_not_found()` 断言必红。
+    #[tokio::test]
+    async fn test_read_content_null_level_is_not_found() {
+        let be = setup().await;
+        let uri = knowledge_uri("partial.md");
+        let mut entry = ContextEntry::new_file(uri.clone());
+        entry.detail_content = Some("仅详情".into());
+        be.write_entry(&entry).await.unwrap();
+
+        // 未写入的层（NULL）→ not_found，而非存储故障
+        let err_overview = be
+            .read_content(&uri, ContentLevel::Overview)
+            .await
+            .unwrap_err();
+        assert!(
+            err_overview.is_not_found(),
+            "NULL 层应报 not_found（缺层为合法状态），实际: {err_overview}"
+        );
+        let err_abstract = be
+            .read_content(&uri, ContentLevel::Abstract)
+            .await
+            .unwrap_err();
+        assert!(err_abstract.is_not_found());
+
+        // 已写入的层正常读取
+        assert_eq!(
+            be.read_content(&uri, ContentLevel::Detail).await.unwrap(),
+            "仅详情"
+        );
+
+        // 行不存在 → 同为 not_found（语义一致）
+        let missing = knowledge_uri("missing.md");
+        let err_missing = be
+            .read_content(&missing, ContentLevel::Detail)
+            .await
+            .unwrap_err();
+        assert!(err_missing.is_not_found());
     }
 
     #[tokio::test]
