@@ -1,7 +1,35 @@
+import { useEffect, useState } from 'react';
 import { Bot } from 'lucide-react';
 import { SectionTitle } from './shared';
+import { getApiRoot } from '@/lib/api-base';
+import { fetchWithSignal } from '@/lib/fetch-with-signal';
 
 export default function AboutTab() {
+  // 版本号运行时获取（GET /health）：此前硬编码 "0.1.0"，发布的多处版本落点
+  // 均覆盖不到 → 长期漂移。后端 version 取自 CARGO_PKG_VERSION（发布纪律要求
+  // 与 tauri.conf.json 一致）；取不到（后端不可达/超时）时显示占位符。
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const resp = await fetchWithSignal(`${getApiRoot()}/health`, {}, AbortSignal.timeout(3000));
+        if (!resp.ok) return;
+        const data = (await resp.json()) as { version?: unknown };
+        if (!cancelled && typeof data.version === 'string' && data.version) {
+          setVersion(data.version);
+        }
+      } catch {
+        // 后端不可达/超时：保持占位符显示
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div>
       <SectionTitle title="关于天演" />
@@ -10,7 +38,9 @@ export default function AboutTab() {
           <Bot size={40} className="text-accent" />
           <div>
             <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">天演 Tianyan</h2>
-            <p className="text-xs text-[var(--color-text-tertiary)]">版本 0.1.0</p>
+            <p className="text-xs text-[var(--color-text-tertiary)]">
+              {version ? `版本 ${version}` : '版本 —'}
+            </p>
           </div>
         </div>
 

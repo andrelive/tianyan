@@ -820,6 +820,9 @@ export const mockUsageStats: UsageStatsSummary = {
 // ========== Handler mapping ==========
 
 export const handlers = [
+  // Health（关于页版本展示 / 连接测试 / 重启轮询）
+  http.get('/health', () => HttpResponse.json({ status: 'ok', version: '0.0.0-test' })),
+
   // Sessions
   http.get(`${API_BASE}/sessions`, () => {
     const response: ListSessionsResponse = {

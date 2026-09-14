@@ -52,6 +52,11 @@ export default function ChatPanel() {
   const setPendingClarification = useAppStore((s) => s.setPendingClarification);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** 内容列（消息流 wrapper，data-chat-flow）：ResizeObserver 的观察对象——
+      流式增量/工具披露/图片加载等内容增高发生在这一层；滚动容器（flex-1，
+      高度固定）不随内容变化，只观察它会漏掉"内容增高但无 scroll 事件"的
+      跟随（DSH 同款：观察 column 而非 scrollport）。 */
+  const columnRef = useRef<HTMLDivElement>(null);
   const [compressing, setCompressing] = useState(false);
   const [clarifySubmitting, setClarifySubmitting] = useState(false);
   /** 是否跟随底部（聊天经典模式）：用户在底部时自动跟随新输出；
@@ -188,17 +193,24 @@ export default function ChatPanel() {
     if (stickToBottomRef.current) scrollToBottom();
   }, [followSig, scrollToBottom]);
 
-  // ResizeObserver：异步内容（图片/markdown/代码高亮）加载导致列高度
-  // 变化时，若仍跟随则滚动到底（替代 setTimeout 兜底，DSH 同款）。
+  const hasMessages = messages.length > 0;
+
+  // ResizeObserver：内容列（流式增量/工具披露/图片/markdown/代码高亮等
+  // 高度变化）+ 滚动容器自身尺寸变化时，若仍跟随则滚动到底（替代
+  // setTimeout 兜底，DSH 同款）。必须观察内容列：滚动容器高度不随内容
+  // 变化——只观察容器会漏掉"工具卡片出现/输出增长但无 scroll 事件"的
+  // 跟随（曾致工具调用出现时视图不跟底）。
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
+    const column = columnRef.current;
     const observer = new ResizeObserver(() => {
       if (stickToBottomRef.current) scrollToBottom();
     });
     observer.observe(el);
+    if (column) observer.observe(column);
     return () => observer.disconnect();
-  }, [scrollToBottom]);
+  }, [scrollToBottom, hasMessages]);
 
   // ─── Custom streaming via fetch + ReadableStream ─────────────────
 
@@ -480,7 +492,7 @@ export default function ChatPanel() {
           )}
 
           {messages.length > 0 && (
-            <div className="space-y-4 max-w-4xl mx-auto">
+            <div ref={columnRef} data-chat-flow="" className="space-y-4 max-w-4xl mx-auto">
               {messages.map((msg, i) => (
                 <MessageBubble
                   key={msg.id || `msg-${i}`}

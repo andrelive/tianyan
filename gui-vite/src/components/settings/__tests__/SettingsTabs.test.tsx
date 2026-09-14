@@ -685,4 +685,21 @@ describe('SettingsPanel tabs', () => {
       expect(screen.getByText(/生效规格：1M 上下文 \/ 384K 输出/)).toBeInTheDocument();
     });
   });
+
+  it('shows the runtime version from /health on the About tab (was hardcoded 0.1.0)', async () => {
+    const user = userEvent.setup();
+    server.use(http.get('/health', () => HttpResponse.json({ status: 'ok', version: '9.9.9' })));
+
+    renderSettingsPanel();
+    await waitFor(() => {
+      expect(screen.getByText('默认模型偏好')).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('tab', { name: '关于' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('版本 9.9.9')).toBeInTheDocument();
+    });
+    // 硬编码版本不再出现（回归：曾长期显示 "版本 0.1.0"）
+    expect(screen.queryByText('版本 0.1.0')).not.toBeInTheDocument();
+  });
 });

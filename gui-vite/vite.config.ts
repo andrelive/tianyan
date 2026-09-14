@@ -25,6 +25,11 @@ export default defineConfig({
             }
           });
         },
+        // /health（非 API 前缀）：关于页版本展示 / 连接测试 / 重启轮询同样代理到后端
+        '/health': {
+          target: 'http://localhost:3000',
+          changeOrigin: true,
+        },
       },
     },
   },
@@ -53,4 +58,3 @@ export default defineConfig({
     },
   },
 });
-

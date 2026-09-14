@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -663,5 +663,44 @@ describe('ChatPanel', () => {
     const thinkToggle = await screen.findByRole('button', { name: /思考过程/ });
     expect(thinkToggle).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByText('先分析再想想')).toBeInTheDocument();
+  });
+
+  it('binds ResizeObserver to the content column (regression: tool-card growth must trigger follow)', () => {
+    // 回归保护：ResizeObserver 曾观察滚动容器——容器 flex-1 高度固定，工具卡片
+    // 出现/流式增量等内容增高不触发回调 → 视图不跟随（工具调用出现时"不滚底"
+    // 的根因）。修复后必须把内容列（data-chat-flow）纳入观察（DSH 同款）。
+    const observed: Element[] = [];
+    class MockResizeObserver {
+      constructor(_cb: ResizeObserverCallback, _opts?: ResizeObserverOptions) {}
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', MockResizeObserver);
+
+    try {
+      const messages: ChatMessage[] = [
+        {
+          role: 'user',
+          segments: [{ type: 'text', text: '你好' }],
+          timestamp: new Date().toISOString(),
+        },
+        {
+          role: 'assistant',
+          segments: [{ type: 'text', text: '回复' }],
+          timestamp: new Date().toISOString(),
+        },
+      ];
+      useAppStore.setState({ messages, streamStatus: {} });
+      renderChatPanel();
+
+      const column = document.querySelector('[data-chat-flow]');
+      expect(column).not.toBeNull();
+      expect(observed).toContain(column as Element);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
