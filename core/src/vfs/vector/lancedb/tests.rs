@@ -233,7 +233,7 @@ async fn test_search_abstract_and_overview() {
 //
 // 历史故障：配置 vector_dimension(3072) ≠ 嵌入 API 实际输出(1024) 时，
 // arrow FixedSizeListBuilder 产出非法数组 → lance 内部 panic →
-// release panic=abort 整进程闪退（BEX64，日志无输出）。
+// 当时 release 为 panic=abort：整进程闪退（BEX64，日志无输出）。
 // 回归锁定：维度不匹配必须在存储层转为干净错误，绝不 panic。
 
 #[tokio::test]

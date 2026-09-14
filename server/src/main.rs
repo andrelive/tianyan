@@ -11,6 +11,9 @@ async fn main() -> tianyan::common::error::Result<()> {
         tianyan::config::TianyanConfig::default()
     });
     tianyan::common::logging::init_logging(&config.logging)?;
+    // panic hook（最后防线）：panic 现场写入 <日志目录>/panic.log
+    // （与桌面端同一目录：core::common::panic_hook::default_log_dir）。
+    tianyan::common::panic_hook::install(tianyan::common::panic_hook::default_log_dir());
 
     // 主循环：数据目录搬迁后以新配置重启（搬迁由 start_server 关停后的
     // handle_pending_migration 执行；无搬迁时单次运行即退出）

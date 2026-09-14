@@ -1487,8 +1487,8 @@ mod tests {
     }
 
     /// 回归：输出 tail 截断必须 UTF-8 边界安全——旧实现 `String::drain(..excess)`
-    /// 在丢弃起点落在多字节字符中间时 panic（release `panic = "abort"` →
-    /// 整个进程无痕退出——2026-09-14 后台任务闪退的根因路径）。
+    /// 在丢弃起点落在多字节字符中间时 panic（当时 release `panic = "abort"` →
+    /// 整个进程无痕退出——2026-09-14 后台任务闪退的根因路径；现已改 `unwind`）。
     /// 判别力：输入 33000 字节纯中文（32KB 上限后首切 excess=232，恰落在
     /// 字符内部）——旧实现必 panic 红。
     #[tokio::test]

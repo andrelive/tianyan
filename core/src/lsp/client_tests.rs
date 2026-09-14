@@ -234,3 +234,87 @@ async fn test_jsonrpc_error_response_is_reported() {
     assert!(err.to_string().contains("JSON-RPC 错误"), "{}", err);
     server_task.await.expect("假服务器正常退出");
 }
+
+/// 假服务器：连续推送两条诊断，随后响应 hover 请求。
+async fn fake_server_two_diagnostics(
+    server_read: impl AsyncRead + Unpin,
+    server_write: impl AsyncWrite + Unpin,
+) {
+    let mut reader = BufReader::new(server_read);
+    let mut writer = server_write;
+    let init = read_framed(&mut reader).await;
+    write_framed(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","id":init["id"],"result":{"capabilities":{}}}),
+    )
+    .await;
+    let _notif = read_framed(&mut reader).await;
+    for i in 0..2 {
+        let diagnostic = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": "file:///fake/main.rs",
+                "diagnostics": [{
+                    "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } },
+                    "severity": 1,
+                    "message": format!("诊断 {i}")
+                }]
+            }
+        });
+        write_framed(&mut writer, &diagnostic).await;
+    }
+    // 保持连接：等待 hover 请求并响应（读循环存活才会到达这里）。
+    let hover = read_framed(&mut reader).await;
+    write_framed(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","id":hover["id"],"result":{"contents":"ok"}}),
+    )
+    .await;
+}
+#[tokio::test]
+async fn test_callback_panic_does_not_kill_read_loop() {
+    // 回调 panic 不得杀死读循环（读循环是唯一响应分发者）：catch_unwind
+    // 兜底——panic 回调被隔离并记 error，后续消息照常分发。
+    // 判别力：若移除 catch_unwind，回调 panic 杀死读循环 → 随后的 hover
+    // 请求得不到响应 → 本测试超时红。
+    let (client_read, server_write) = duplex(8192);
+    let (server_read, client_write) = duplex(8192);
+    let server_task =
+        tokio::spawn(async move { fake_server_two_diagnostics(server_read, server_write).await });
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let callback_calls = calls.clone();
+    let on_publish: Option<PublishDiagnosticsCallback> =
+        Some(Arc::new(move |_p: lsp_types::PublishDiagnosticsParams| {
+            let n = callback_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // 首次回调 panic——读循环必须隔离它并继续分发后续消息。
+                panic!("publishDiagnostics 回调测试性 panic");
+            }
+        }));
+    let client = LspClient::from_streams(
+        Box::new(client_read),
+        Box::new(client_write),
+        "fake-panic-server",
+        "安装提示",
+        on_publish,
+    );
+    let uri = lsp_types::Uri::from_str("file:///fake/main.rs").expect("URI");
+    client
+        .initialize(uri.clone())
+        .await
+        .expect("initialize 成功");
+    client.initialized().await.expect("initialized 通知成功");
+    // hover 响应在两条诊断之后——能收到即证明读循环穿越回调 panic 存活。
+    let hover = tokio::time::timeout(std::time::Duration::from_secs(10), client.hover(&uri, 0, 0))
+        .await
+        .expect("读循环应在回调 panic 后继续分发（未超时）")
+        .expect("hover 成功");
+    assert_eq!(hover["contents"], "ok");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "两条诊断回调都应被调用（第一条 panic 被隔离、第二条正常执行）"
+    );
+    server_task.await.expect("假服务器正常退出");
+}

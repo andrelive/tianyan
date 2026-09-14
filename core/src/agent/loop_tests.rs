@@ -166,14 +166,14 @@ fn make_loop(mock: MockChatService, max_turns: usize) -> AgentLoop {
         AgentLoopConfig { max_turns },
     )
 }
+/// 落库消息捕获容器：(seq, message) 列表（取消收尾等落库行为断言用）。
+type CapturedMessages = Arc<std::sync::Mutex<Vec<(String, StructuredMessage)>>>;
+
 /// 构造带落库消息捕获的 AgentLoop（取消收尾等落库行为断言用）。
 fn make_loop_with_capture(
     mock: MockChatService,
     max_turns: usize,
-) -> (
-    AgentLoop,
-    Arc<std::sync::Mutex<Vec<(String, StructuredMessage)>>>,
-) {
+) -> (AgentLoop, CapturedMessages) {
     let registry = ToolRegistry::new(SecurityPolicy::default());
     let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
     let agent_loop = AgentLoop::new(

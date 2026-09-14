@@ -23,7 +23,7 @@ pub fn truncate_utf8_boundary(s: &str, max: usize) -> String {
 /// 超出部分从头部丢弃，丢弃起点对齐到最近的字符边界（至多少丢 ≤3 字节）；
 /// `max_bytes = 0` 时清空。供"内存快照保留尾部"型截断使用——此前命令输出
 /// tail 直接 `String::drain(..excess)`：excess 落在多字节字符中间时 panic
-/// （release 构建 `panic = "abort"` → 整个进程无痕退出）。
+/// （当时 release 为 `panic = "abort"` → 整个进程无痕退出；现已改 `unwind`）。
 pub fn truncate_keep_tail_bytes(s: &mut String, max_bytes: usize) {
     if s.len() <= max_bytes {
         return;

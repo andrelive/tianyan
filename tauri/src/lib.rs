@@ -543,6 +543,11 @@ fn init_logging(config: &tianyan::common::logging::LoggingConfig) {
 
     info!("=== Tianyan Application Started ===");
     info!("Log file: {:?}", log_file);
+
+    // panic hook（最后防线）：panic 时把现场（线程/位置/消息/回溯）写入
+    // <log_dir>/panic.log——GUI 无 stderr，这是唯一的留痕通道；
+    // 与 release `panic = "unwind"`（第一防线：任务级隔离）配套。
+    tianyan::common::panic_hook::install(log_dir.clone());
 }
 
 /// 等待服务就绪（健康检查）

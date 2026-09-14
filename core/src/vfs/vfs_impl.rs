@@ -530,7 +530,7 @@ impl VfsSearch for VirtualFileSystemImpl {
             .ok_or_else(|| TianyanError::Custom("检索错误：VFS 未配置嵌入服务".to_string()))?;
 
         // 按向量库建表维度请求嵌入（维度与 API 默认输出不一致时，arrow 写入路径
-        // 会 panic——release panic=abort 下整进程闪退，故必须显式对齐）
+        // 会 panic——当时 release 为 panic=abort：整进程闪退，故必须显式对齐）
         let dim = self.vector_storage.embedding_dim();
         let abstract_embedding = if dim > 0 {
             embedding_provider

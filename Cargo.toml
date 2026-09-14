@@ -126,7 +126,12 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
-panic = "abort"
+# 任务级 panic 隔离（2026-09-14 自 "abort" 改回；闪退事故的放大器下线）：
+# abort 策略下任何线程的 panic 即刻终止整个进程（无 unwind、无日志、GUI 无痕
+# 消失）；"unwind" 下 panic 被任务边界隔离（tokio JoinError / catch_unwind 可
+# 捕获），并配合 core::common::panic_hook 把现场落盘（最后防线）。
+# 背景：2026-09-14 中文截断 panic × abort 放大为全进程无痕退出（提交 150191a）。
+panic = "unwind"
 
 [profile.release.package."*"]
 opt-level = 3

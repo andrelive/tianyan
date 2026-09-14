@@ -151,7 +151,7 @@ impl LanceDbVectorStore {
     /// 将上下文条目转换为 RecordBatch（单行）。
     fn point_to_batch(&self, point: &VectorPoint) -> Result<RecordBatch> {
         // 维度前置校验（防御性）：向量长度 ≠ 建表维度时，arrow FixedSizeListBuilder
-        // 会在 finish/访问时 panic——release panic=abort 下整进程闪退且日志无输出。
+        // 会在 finish/访问时 panic——当时 release 为 panic=abort：整进程闪退且日志无输出。
         // 此处提前转为带行动指引的干净错误。
         let check = |name: &str, v: &Option<Vec<f32>>, dim: usize| -> Result<()> {
             if let Some(v) = v {
