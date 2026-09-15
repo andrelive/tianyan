@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-09-15
+
+### Added
+- **panic 隔离防线（release 构建行为变更）**：release `panic = "abort"` 改为 **`unwind`**——此前任何单点 panic 都会升级为**全进程无痕退出**（0.4.2 闪退事故的放大器；`catch_unwind` / `JoinError::is_panic` 类防线在 abort 下全部静默失效），且无现场可查；新增 panic hook（`common::panic_hook`）现场落盘 `%APPDATA%/com.tianyan.app/logs/panic.log`（消息 / 位置 / 回溯，防递归设计），tauri / server 两入口安装
+- 异步任务纪律（U1）：soul「异步任务纪律」节 + `task_status` 工具描述强化 + 非终态查询返回「无需轮询」提醒（委派后频繁轮询的行为治理）
+- 委托结果通知轻量化（U2）：子代理完整结果落盘 `{data_dir}/task_results/{id}.md`，任务通知只携带「结果路径 + ≤300 字摘要」（超长截断 / 界面污染根除）
+
+### Fixed
+- **外部链接守卫（U3）**：点击消息中的 http 链接此前由应用 webview 自身导航（无法回退、只能重启）；现插件级 `on_navigation` 守卫——外部 URL 一律取消导航并转交默认浏览器（放行 `tauri.localhost` / dev localhost）；无用途 shell 插件清理 → 官方 `tauri-plugin-opener`
+- **消息正文软换行保留（U4）**：文本结构化内容（画线框图 ASCII art）与用户输入多行文本的换行 / 连续空格被折叠（Markdown 软换行 + 浏览器默认 `white-space` 折叠）；现正文渲染对段落 / 列表项应用 `whitespace-pre-wrap`——保留换行与空格对齐，且仍允许长行自动换行
+- 顺带修复两处「按 unwind 语义编写、被 abort 编译静默失效」的既有防御（委托 watcher panic 转 fail、LSP 回调隔离）
+- 回归保护：U1 task_status 3/3 + core 1229 全绿；U2 判别力已证（注入旧行为必红）；U3 tauri 12/12；U4 前端 3 条先红后绿 + 全量 400 全绿 + 构建产物 CSS 规则确认；panic hook 单测 3/3 + release 探针（JOIN_ERROR_IS_PANIC / HOOK_REPORT_OK / SURVIVED）
+
 ## [0.4.2] - 2026-09-14
 
 ### Fixed

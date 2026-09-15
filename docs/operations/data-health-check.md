@@ -1,6 +1,6 @@
 # 天演数据体检（data health check）
 
-> 适用版本：0.4.2（撰写基线 HEAD `19dbbd8`）
+> 适用版本：0.4.3（撰写基线 HEAD `19dbbd8`）
 > 目的：只读检查 SQLite（`tianyan.db`）与向量库（`lancedb/`）的体量、一致性、脏数据；
 > 提供**可直接复制执行**的巡检 SQL 集与解读/处置。全部 SQL 均按 `core/src/db/sqlite_db.rs`
 > 的 `SCHEMA_SQL`（约 159–301 行）实写，未核实项标注 **待核实**。
