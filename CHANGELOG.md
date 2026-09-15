@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-09-15
+
+### Fixed
+- **无语言围栏代码块换行渲染（U6，用户报告）**：`pre` 组件透明化（避开与高亮器双容器嵌套）导致**无语言标记**的 ``` 围栏块只剩 inline `<code>`（无 `white-space: pre`），多行内容折叠成一行（目录树 ├── 各行挤在一起；数据层正常，纯渲染）；现 `code` 组件按 ReactMarkdown 约定（块级 children 以 \n 结尾）区分块级/内联，块级渲染自带 pre 语义容器
+- **SSRF 重定向校验（T0-3，安全）**：web_fetch 只校验初始 URL，HTTP 客户端默认静默跟随重定向——公网 URL 302 到私网即绕过防护（判别力实证：旧代码成功抓回 127.0.0.1 内网内容）；现每一跳发出前 `validate_public_url`，拒绝则不发出请求
+- **摘要刷新检测（T0-4）**：① `processed` 缓存短路在时间戳检测之前——条目一旦处理过，内容更新后摘要/向量永不刷新（直到 FIFO 淘汰/重启）；② `process_uri` 先写摘要后更新向量——向量失败时摘要已“完成”，向量永久缺失（检索漏条目）。现时间戳检测优先 + 反序（先向量、后摘要作提交点，失败下轮自愈）
+- **Trace 落盘事务 RAII（T0-5）**：手写 `BEGIN`/`COMMIT` 且 `let _ =` 吞错——COMMIT 失败静默丢数据、INSERT 失败无 ROLLBACK（事务悬挂，`is_autocommit()` 实证）；现用 rusqlite `Transaction`（Drop 自动回滚 + 开启/提交错误上抛）
+- **命令分段引号感知（T0-2 补充）**：分段判定不感知引号——命令中字符串字面量里的 `|`（如 `'lint|format|build'`）被切段后段首词恰为黑名单词 → 误拦合法命令（实测天演自身命令被拒）；现引号内不分段（未闭合引号保守退化，不漏检）
+- 回归保护：core **1256** 全绿 + 前端 **403** 全绿；主回归先红后绿（判别力已证）；clippy 0 / fmt 干净 / eslint + tsc + build 全绿
+
 ## [0.4.4] - 2026-09-15
 
 ### Added
