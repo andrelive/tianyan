@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-09-15
+
+### Added
+- 唤醒轮轮末压缩检查（C1）：`process_wake` 为独立实现（不走 `run_agent_turn`），此前无轮末压缩检查——高负载区间若主要由唤醒轮推进（等子代理报告 / 后台通知轮），上下文持续增长而压缩被无限推迟（实测 60.8%→81.7% 区间零压缩）；现唤醒轮末与用户轮共用同一压缩判定链
+
+### Fixed
+- **压缩空摘要静默失败治理（C2）**：生产现象“上下文 82% 未触发压缩”的根因不是未触发——压缩检查已通过、摘要请求已发出，但模型偶发返回空 content（思考模型“想完没说话”）：空摘要被静默丢弃（不落库压缩点、与成功路径共用“上下文压缩完成” info 日志——运维不可见）、空串污染增量摘要缓存、压缩被推迟到下一轮。现空摘要**重试一次**（对齐 AgentLoop 空响应重试，两笔真实消耗合并入账）、空摘要不进入缓存、丢弃时 **warn 告警**且不改写对话
+- **路径沙箱 `..` 词法归一化（T0-1）**：`canonicalize` 失败（目标不存在，如写新文件）时回退不折叠 `..`——组件级前缀匹配被 `sub/../..` 欺骗：**白名单逃逸**（旧代码实测把 `allowed/ghost/../../escape.txt` 判为 Allowed）、**黑名单漏报**（`src/../.git/config` 漏过 `.git` 禁令）。现新增 `lexical_normalize`（has_root 语义不越根/盘符）+ `resolve_canonical`（词法折叠 × 最近已存在祖先物理解析，符号链接亦无法欺骗）+ `resolve_tool_path` 判定/执行统一口径
+- **命令分段判定（T0-2）**：命令统一经 shell 执行，但安全判定只覆盖“整条首词 + 整条前缀”——**relaxed（默认）模式**下 `git status && rm -rf /` 第二段完全不做黑名单/白名单/解释器检查；**strict 模式**漏检换行分段（`echo hi\nrm -rf /`）；**审批层**危险命令被低估为 Medium（确认门被绕过）。现 `split_command_segments` 切段（`&&`/`||`/`;`/`|`/换行）+ `check_command` 逐段判定 + 换行入元字符检查 + `assess_risk` 逐段取最严
+- task_status 工作目录视野（U5）：默认按本会话工作目录过滤（同目录跨会话可见 = 同目录竞争协调面），`scope="global"` 显式查全局（用完即回），跨目录信息不进入汇报；归属未知（旧数据）仍可见
+- 回归保护：core **1248 全绿**（0.4.3 基线 1234 → +14 条）；C2/T0-1/T0-2 主回归**先红后绿**（判别力已证）；clippy 0；fmt 干净
+
 ## [0.4.3] - 2026-09-15
 
 ### Added
