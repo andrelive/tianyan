@@ -931,6 +931,29 @@ mod tests {
             .expect("创建测试 runtime")
     }
 
+    /// U8 回归：CSP 必须显式放行 `data:` 图片——消息与输入框预览的图片都是
+    /// data URL（`data:image/png;base64,...`）。缺失 `img-src` 时回退到
+    /// `default-src 'self'`，图片被 CSP 拦成裂图（预览与会话内同时裂）。
+    #[test]
+    fn test_csp_allows_data_url_images() {
+        let conf = include_str!("../tauri.conf.json");
+        let csp_line = conf
+            .lines()
+            .find(|l| l.contains("\"csp\""))
+            .expect("tauri.conf.json 应声明 csp");
+
+        assert!(
+            csp_line.contains("img-src"),
+            "CSP 需显式声明 img-src（否则 data: 图片被 default-src 拦截）: {csp_line}"
+        );
+        let img_seg = csp_line.split("img-src").nth(1).unwrap_or("");
+        let img_seg = img_seg.split(';').next().unwrap_or("");
+        assert!(
+            img_seg.contains("data:"),
+            "img-src 需放行 data:（消息图片为 data URL）: img-src{img_seg}"
+        );
+    }
+
     #[test]
     fn test_instance_running_on_detects_live_server() {
         // 起一个真实健康检查服务，探测应返回 true
