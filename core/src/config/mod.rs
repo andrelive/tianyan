@@ -211,18 +211,59 @@ impl TianyanConfig {
     }
 
     /// 将配置保存到文件。
+    ///
+    /// **段保全（T0-6）**：保存前读取现有文件，把程序**未建模**的键（用户
+    /// 自定义段、未来版本字段、版本回滚场景）合并回输出——此前全量序列化
+    /// 覆盖会把它们静默清掉（跨版本回滚时配置退化）。程序建模的键以内存值
+    /// 为准。
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), TianyanError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| TianyanError::Custom(format!("配置保存失败：创建目录失败：{}", e)))?;
         }
 
-        let content = toml::to_string_pretty(self)?;
+        let mut new_value = toml::Value::try_from(self)
+            .map_err(|e| TianyanError::Custom(format!("配置保存失败：序列化失败：{}", e)))?;
+        // 现有文件可解析时合并未建模键（不存在/解析失败则跳过——不阻断保存）
+        if let Ok(existing_raw) = std::fs::read_to_string(path) {
+            if let Ok(existing_value) = existing_raw.parse::<toml::Value>() {
+                new_value = merge_unknown_keys(existing_value, new_value);
+            }
+        }
+
+        let content = toml::to_string_pretty(&new_value)
+            .map_err(|e| TianyanError::Custom(format!("配置保存失败：序列化失败：{}", e)))?;
 
         std::fs::write(path, content)
             .map_err(|e| TianyanError::Custom(format!("配置保存失败：写入文件失败：{}", e)))?;
 
         Ok(())
+    }
+}
+
+/// 合并“程序未建模的键”（段保全，T0-6）：以 `new`（当前配置序列化结果）为
+/// 基准，保留 `existing`（磁盘现有文件）中 `new` 缺失的键；双方都有的表递归
+/// 合并，标量/数组以 `new` 为准（程序建模值优先）。
+fn merge_unknown_keys(existing: toml::Value, new: toml::Value) -> toml::Value {
+    use toml::Value;
+
+    match (existing, new) {
+        (Value::Table(old), Value::Table(mut new_table)) => {
+            for (key, old_val) in old {
+                match new_table.remove(&key) {
+                    Some(new_val) => {
+                        new_table.insert(key, merge_unknown_keys(old_val, new_val));
+                    }
+                    // 未建模键：原样保留（自定义段 / 未来版本字段）
+                    None => {
+                        new_table.insert(key, old_val);
+                    }
+                }
+            }
+            Value::Table(new_table)
+        }
+        // 非表（标量 / 数组 / 类型不一致）：以程序当前值为准
+        (_, new_val) => new_val,
     }
 }
 
@@ -405,6 +446,46 @@ mod tests {
         let parsed: TianyanConfig = toml::from_str(&toml_str).unwrap();
         // 默认配置 providers 和 preferences 都为空
         assert!(parsed.models.providers.is_empty());
+    }
+
+    /// T0-6 主回归：保存时保留程序未建模的段/字段——
+    /// 此前 `save_to_file` 全量序列化覆盖，用户自定义段（或未来版本字段 /
+    /// 版本回滚场景）会被静默清掉。
+    #[test]
+    fn test_save_to_file_preserves_unmodeled_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tianyan.toml");
+        std::fs::write(
+            &path,
+            "[storage]\ndata_dir = 'D:/tianyan'\n\n[my_custom_section]\nkeep_me = 'yes'\n",
+        )
+        .unwrap();
+
+        TianyanConfig::default().save_to_file(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("my_custom_section") && content.contains("keep_me"),
+            "未建模段必须保全（此前全量覆盖会静默清掉）: {content}"
+        );
+    }
+
+    /// 回归：程序建模的字段以内存值为准（段保全不得反向覆盖当前配置）。
+    #[test]
+    fn test_save_to_file_modeled_values_take_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tianyan.toml");
+        std::fs::write(&path, "[agent]\nmax_turns = 7\n").unwrap();
+
+        let mut config = TianyanConfig::default();
+        config.agent.max_turns = 99;
+        config.save_to_file(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("max_turns = 99"),
+            "建模字段以内存值为准: {content}"
+        );
     }
 
     #[test]
