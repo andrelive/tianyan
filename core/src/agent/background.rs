@@ -30,6 +30,7 @@
 //! 未来若出现跨类需求（如定时委托），在两边各自的边界内扩展。
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
@@ -53,6 +54,8 @@ pub const DEFAULT_MAX_BACKGROUND_QUEUE: usize = 40;
 
 /// 通知中结果摘要的最大字符数。
 const RESULT_SUMMARY_MAX_CHARS: usize = 2000;
+/// 通知短摘要的最大字符数（U2：完整结果落盘为文件，通知只给路径 + 本摘要）。
+const RESULT_NOTIFICATION_BRIEF_CHARS: usize = 300;
 
 /// 子智能体消息流事件通道（ADR-026：面板实时流式显示）。
 ///
@@ -158,6 +161,11 @@ pub struct BackgroundTask {
     pub output_tail: Option<String>,
     /// 终端命令日志文件路径（ADR-028：日志分页查看；委托任务为 None）。
     pub log_file: Option<String>,
+    /// 完整结果落盘路径（U2：`{data_dir}/task_results/{id}.md`；通知只携带
+    /// 路径 + 短摘要，完整结果由主 agent 用 read_file 按需读取）。
+    ///
+    /// 非持久化运行时字段（与 output_tail/log_file 同类）：重启加载后为 None。
+    pub result_path: Option<String>,
     /// 创建时间（epoch 毫秒）。
     pub created_at: i64,
     /// 完成时间（epoch 毫秒）。
@@ -204,6 +212,7 @@ impl BackgroundTask {
             error,
             output_tail: Some(t.output_tail),
             log_file: t.log_file,
+            result_path: None,
             created_at: t.created_at,
             completed_at: t.completed_at,
             seq: t.seq,
@@ -267,6 +276,8 @@ pub struct BackgroundTaskManager {
     event_sink: Option<Arc<dyn TaskEventSink>>,
     db: Option<Arc<Database>>,
     next_seq: Arc<AtomicU64>,
+    /// 委托结果落盘目录（U2；None 时不落盘——通知回退为短摘要）。
+    results_dir: Option<PathBuf>,
     /// 持久化加载只执行一次（惰性：首次 register/snapshot 前）。
     reloaded: Arc<AtomicBool>,
 }
@@ -296,6 +307,7 @@ impl BackgroundTaskManager {
             trace_collector: None,
             event_sink: None,
             db: None,
+            results_dir: None,
             next_seq: Arc::new(AtomicU64::new(0)),
             reloaded: Arc::new(AtomicBool::new(false)),
         }
@@ -316,6 +328,12 @@ impl BackgroundTaskManager {
     /// 设置 SQLite 持久化后端（任务状态脱离调用栈；重启可查询可恢复）。
     pub fn with_db(mut self, db: Arc<Database>) -> Self {
         self.db = Some(db);
+        self
+    }
+
+    /// 设置委托结果落盘目录（U2：完整结果写 `{dir}/{id}.md`，通知携带路径）。
+    pub fn with_results_dir(mut self, dir: PathBuf) -> Self {
+        self.results_dir = Some(dir);
         self
     }
 
@@ -407,6 +425,7 @@ impl BackgroundTaskManager {
             error: None,
             output_tail: None,
             log_file: None,
+            result_path: None,
             created_at: now_ms(),
             completed_at: None,
             seq,
@@ -502,13 +521,44 @@ impl BackgroundTaskManager {
             None => result,
         };
         let result = self.maybe_self_review(id, &result).await;
+        // U2：完整结果落盘——通知只带"路径 + 短摘要"（此前 2000 字符截断版
+        // 直接塞进通知：既不完整又污染会话界面）。
+        let result_path = self.persist_result_file(id, &result).await;
         self.finish(
             id,
             TaskStatus::Completed,
             Some(truncate_output(&result, RESULT_SUMMARY_MAX_CHARS)),
             None,
+            result_path,
         )
         .await;
+    }
+
+    /// 把完整结果落盘为 `{results_dir}/{id}.md`（U2）。
+    ///
+    /// 目录未配置或写入失败时返回 None（通知回退为不带路径的短摘要）。
+    async fn persist_result_file(&self, id: &str, result: &str) -> Option<String> {
+        let dir = self.results_dir.as_ref()?;
+        if let Err(e) = tokio::fs::create_dir_all(dir).await {
+            tracing::warn!(task_id = %id, error = %e, "任务结果目录创建失败（通知不含路径）");
+            return None;
+        }
+        let path = dir.join(format!("{id}.md"));
+        match tokio::fs::write(&path, result.as_bytes()).await {
+            Ok(()) => {
+                tracing::info!(
+                    task_id = %id,
+                    path = %path.display(),
+                    chars = result.chars().count(),
+                    "后台任务完整结果已落盘"
+                );
+                Some(path.to_string_lossy().into_owned())
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %id, error = %e, "后台任务结果落盘失败（通知不含路径）");
+                None
+            }
+        }
     }
 
     /// G4 循环内自审门：任务结果注入父会话前轻量 LLM 自审。
@@ -549,6 +599,7 @@ impl BackgroundTaskManager {
             TaskStatus::Failed,
             None,
             Some(truncate_output(&error, 500)),
+            None,
         )
         .await;
     }
@@ -568,7 +619,8 @@ impl BackgroundTaskManager {
             return Ok(());
         }
         if self.tasks.lock().await.contains_key(id) {
-            self.finish(id, TaskStatus::Cancelled, None, None).await;
+            self.finish(id, TaskStatus::Cancelled, None, None, None)
+                .await;
         }
         Ok(())
     }
@@ -608,6 +660,7 @@ impl BackgroundTaskManager {
         status: TaskStatus,
         result: Option<String>,
         error: Option<String>,
+        result_path: Option<String>,
     ) {
         let (session_id, remaining, task) = {
             let mut tasks = self.tasks.lock().await;
@@ -620,6 +673,7 @@ impl BackgroundTaskManager {
             t.status = status;
             t.result = result;
             t.error = error;
+            t.result_path = result_path;
             t.completed_at = Some(now_ms());
             let session = t.parent_session_id.clone();
             let task = t.clone();
@@ -757,6 +811,7 @@ impl BackgroundTaskManager {
                     error: row.get(6)?,
                     output_tail: None,
                     log_file: None,
+                    result_path: None,
                     created_at: row.get(7)?,
                     completed_at: row.get(8)?,
                     seq: row.get(9)?,
@@ -894,6 +949,7 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackgroundTask> {
         error: row.get(6)?,
         output_tail: None,
         log_file: None,
+        result_path: None,
         created_at: row.get(7)?,
         completed_at: row.get(8)?,
         seq: row.get(9)?,
@@ -946,7 +1002,15 @@ pub fn build_notification_text(task: &BackgroundTask, remaining: usize) -> Strin
         _ => "结束",
     };
     let detail = match (&task.result, &task.error) {
-        (Some(r), _) => format!("结果：{r}"),
+        (Some(r), _) => {
+            // U2：通知不再携带（截断的）完整结果——给落盘路径 + 短摘要，
+            // 完整结果由主 agent 按路径用 read_file 读取。
+            let brief = truncate_output(r, RESULT_NOTIFICATION_BRIEF_CHARS);
+            match &task.result_path {
+                Some(path) => format!("结果：已保存至 {path}\n摘要：{brief}"),
+                None => format!("结果：{brief}"),
+            }
+        }
         (_, Some(e)) => format!("错误：{e}"),
         _ => String::new(),
     };
@@ -1205,6 +1269,7 @@ mod tests {
             error: None,
             output_tail: None,
             log_file: None,
+            result_path: None,
             created_at: 0,
             completed_at: Some(1),
             seq: 0,
@@ -1229,6 +1294,7 @@ mod tests {
             error: None,
             output_tail: None,
             log_file: None,
+            result_path: None,
             created_at: 0,
             completed_at: Some(1),
             seq: 0,
@@ -1237,6 +1303,52 @@ mod tests {
         let text = build_notification_text(&task, 0);
         assert!(text.contains("所有后台任务均已完成"));
         assert!(text.contains("汇总各任务结果并继续"));
+    }
+
+    #[tokio::test]
+    async fn test_complete_persists_full_result_file_and_brief_notification() {
+        // U2 回归：完整结果落盘为文件；完成通知只给"路径 + 短摘要"
+        // （此前 2000 字符截断版直接塞进通知——既不完整又污染会话界面）。
+        let dir = std::env::temp_dir().join(format!(
+            "tianyan_task_results_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = BackgroundTaskManager::new().with_results_dir(dir.clone());
+        let id = manager
+            .register(
+                TaskKind::Delegate,
+                "审查任务".to_string(),
+                "s1".to_string(),
+                0,
+            )
+            .await;
+        let long_result = "结".repeat(2500);
+        manager.complete(&id, long_result.clone()).await;
+
+        // ① 完整结果落盘（超过 2000 截断上限仍完整）
+        let path = dir.join(format!("{id}.md"));
+        let content = std::fs::read_to_string(&path).expect("结果文件应存在");
+        assert_eq!(content, long_result, "落盘必须是完整结果（未截断）");
+
+        // ② 任务携带落盘路径
+        let task = manager.get(&id).await.expect("任务应存在");
+        assert_eq!(
+            task.result_path.as_deref(),
+            Some(path.to_string_lossy().as_ref()),
+            "任务应携带落盘路径"
+        );
+
+        // ③ 通知短化：含路径指引、不含长结果片段（判别力：旧行为把 2000 字符
+        // 截断版塞进通知——1000 字连续片段检测足以区分，新行为最多 300 字摘要）
+        let text = build_notification_text(&task, 0);
+        assert!(text.contains("已保存至"), "通知应含路径指引: {text}");
+        assert!(
+            !text.contains(&"结".repeat(1000)),
+            "通知不得携带长结果片段（仅允许短摘要）: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -1435,6 +1547,7 @@ mod tests {
             error: None,
             output_tail: None,
             log_file: None,
+            result_path: None,
             created_at: 0,
             completed_at: Some(1),
             seq: 0,

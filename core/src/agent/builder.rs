@@ -76,6 +76,8 @@ pub struct AgentBuilder {
     chat_model_spec: Option<ModelSpec>,
     /// 后台命令日志目录（execute_command(background) 日志落盘；None 时仅内存尾部）。
     command_logs_dir: Option<PathBuf>,
+    /// 委托结果落盘目录（U2：完整结果写 `{dir}/{id}.md`；None 时不落盘）。
+    task_results_dir: Option<PathBuf>,
     /// 用户问题服务（ask_user 同步等待用户回答；None 时工具不可用）。
     user_questions: Option<Arc<crate::agent::user_questions::UserQuestionService>>,
     /// 子智能体消息流事件通道（ADR-026：面板实时流式；None 时静默）。
@@ -109,6 +111,7 @@ impl AgentBuilder {
             provider_by_model: std::collections::HashMap::new(),
             chat_model_spec: None,
             command_logs_dir: None,
+            task_results_dir: None,
             role_registry: None,
             role_router: None,
             user_questions: None,
@@ -155,6 +158,12 @@ impl AgentBuilder {
     /// 设置后台命令日志目录（execute_command(background) 工具日志落盘位置）。
     pub fn with_command_logs_dir(mut self, dir: PathBuf) -> Self {
         self.command_logs_dir = Some(dir);
+        self
+    }
+
+    /// 设置委托结果落盘目录（U2：完整结果写 `{dir}/{id}.md`，完成通知携带路径）。
+    pub fn with_task_results_dir(mut self, dir: PathBuf) -> Self {
+        self.task_results_dir = Some(dir);
         self
     }
 
@@ -397,6 +406,10 @@ impl AgentBuilder {
         // 后台命令日志目录（execute_command(background) 日志落盘）
         if let Some(dir) = self.command_logs_dir {
             tool_registry = tool_registry.with_command_logs_dir(dir);
+        }
+        // 委托结果落盘目录（U2：完整结果写文件，完成通知携带路径）
+        if let Some(dir) = self.task_results_dir {
+            tool_registry = tool_registry.with_task_results_dir(dir);
         }
         // 并发配置（ADR-026）：委托双信号量（运行/排队）+ 终端命令上限
         tool_registry = tool_registry.with_concurrency(

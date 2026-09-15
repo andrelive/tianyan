@@ -204,6 +204,8 @@ pub struct ToolRegistry {
     pub(crate) command_tasks: Arc<crate::executor::CommandManager>,
     /// 后台命令日志目录（with_command_logs_dir 存值；重建 CommandManager 时保留）。
     command_logs_dir: Option<PathBuf>,
+    /// 委托结果落盘目录（U2：with_task_results_dir 存值；重建 BackgroundTaskManager 时保留）。
+    task_results_dir: Option<PathBuf>,
     /// 后台命令并发上限（ADR-026：可配置；重建 CommandManager 时保留）。
     command_concurrency: usize,
     /// 子智能体消息流事件通道（ADR-026：面板实时流式；None 时静默）。
@@ -262,6 +264,7 @@ impl ToolRegistry {
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
             command_tasks: Arc::new(crate::executor::CommandManager::new(None)),
             command_logs_dir: None,
+            task_results_dir: None,
             command_concurrency: crate::executor::command::DEFAULT_MAX_CONCURRENT_COMMANDS,
             task_event_sink: None,
             role_router: None,
@@ -398,6 +401,15 @@ impl ToolRegistry {
         self
     }
 
+    /// 设置委托结果落盘目录（U2：完整结果写 `{dir}/{id}.md`，完成通知携带路径）。
+    ///
+    /// 缺省 None（不落盘，通知回退为短摘要）。
+    pub fn with_task_results_dir(mut self, dir: PathBuf) -> Self {
+        self.task_results_dir = Some(dir.clone());
+        self.background_tasks = Arc::new((*self.background_tasks).clone().with_results_dir(dir));
+        self
+    }
+
     /// 设置并发配置（ADR-026）：委托运行上限/排队上限 + 终端命令上限。
     ///
     /// 委托为双信号量排队模型（运行 ≤ max_background，排队 ≤ max_queue，超出拒绝）；
@@ -408,12 +420,16 @@ impl ToolRegistry {
         max_queue: usize,
         max_command: usize,
     ) -> Self {
-        self.background_tasks = Arc::new(
-            crate::agent::background::BackgroundTaskManager::with_concurrency(
-                max_background,
-                max_queue,
-            ),
+        // 保留已设置的结果落盘目录（U2；与 command_logs_dir 同模式——
+        // with_concurrency 为全新构造，需显式传递）
+        let mut background = crate::agent::background::BackgroundTaskManager::with_concurrency(
+            max_background,
+            max_queue,
         );
+        if let Some(dir) = &self.task_results_dir {
+            background = background.with_results_dir(dir.clone());
+        }
+        self.background_tasks = Arc::new(background);
         self.command_concurrency = max_command.max(1);
         self.command_tasks = Arc::new(
             crate::executor::CommandManager::new(self.command_logs_dir.clone())
