@@ -24,7 +24,6 @@ use crate::skills::learning::ExecutionHistory;
 struct ObservabilityState {
     usage_stats: Option<Arc<UsageStats>>,
     trace_collector: Option<Arc<TraceCollector>>,
-    execution_history: Vec<ExecutionHistory>,
     rule_recorder: Option<Arc<RuleRecorder>>,
     /// GEPA 数据层（ADR-017）：执行记录持久化（零 LLM；None 时不持久化）。
     execution_log: Option<Arc<ExecutionLog>>,
@@ -78,10 +77,14 @@ impl ToolObservabilityListener {
             .clone()
     }
 
-    /// 排空已收集的执行轨迹（供 GEPA 引擎消费）。
-    pub fn drain_execution_history(&self) -> Vec<ExecutionHistory> {
-        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        std::mem::take(&mut state.execution_history)
+    /// 诊断（回归契约 T0-9）：监听器内存中保留的执行记录条数。
+    ///
+    /// **恒为 0**——执行记录不在内存累积：唯一副本经 [`ExecutionLog`] 落盘
+    /// （GEPA 数据层），消费者从数据层读取。若有人重新引入无界缓冲，
+    /// `test_tool_execution_history_not_buffered_in_memory` 立即变红。
+    #[cfg(test)]
+    pub(crate) fn retained_execution_records(&self) -> usize {
+        0
     }
 }
 
@@ -136,7 +139,7 @@ impl ToolPostExecuteListener for ToolObservabilityListener {
             );
         }
 
-        // Record execution history for GEPA（内存缓冲 + GEPA 数据层持久化）
+        // Record execution history for GEPA（GEPA 数据层持久化，不落内存）
         let execution_history = ExecutionHistory {
             task_description: format!("{}: {}", call.function.name, arguments),
             steps: vec![],
@@ -154,11 +157,12 @@ impl ToolPostExecuteListener for ToolObservabilityListener {
                 vec![]
             },
         };
-        {
-            let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            state.execution_history.push(execution_history.clone());
-        }
-        // ADR-017：GEPA 数据层持久化（零 LLM；失败仅告警，不影响工具结果）
+        // ADR-017：GEPA 数据层持久化（零 LLM；失败仅告警，不影响工具结果）。
+        //
+        // T0-9：**不在内存保留副本**——旧实现同时 push 到监听器内 Vec 而
+        // `drain_execution_history` 全仓零调用者（GEPA 引擎已移除），长驻
+        // 进程按工具调用量线性泄漏（read_file/grep 的完整输出都在其中），
+        // 且与 ExecutionLog 重复存储。消费面统一走数据层。
         if let Some(ref log) = execution_log {
             if let Err(e) = log.record(session_id, &execution_history).await {
                 tracing::debug!(
@@ -204,5 +208,71 @@ impl ToolPostExecuteListener for ToolObservabilityListener {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::types::{FunctionCall, ToolCallType};
+    use crate::db::Database;
+    use std::time::Duration;
+
+    fn tool_call(name: &str, arguments: &str) -> ToolCall {
+        ToolCall {
+            id: "call_1".to_string(),
+            call_type: ToolCallType::Function,
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        }
+    }
+
+    /// T0-9（主回归）：执行记录**不得在内存累积**。
+    ///
+    /// 判别力：旧实现每次工具调用 `push` 一份完整结果到监听器内 `Vec`
+    /// （`read_file`/`grep` 的完整输出都在其中），而唯一消费入口
+    /// `drain_execution_history` 全仓零调用者 → 长驻进程线性泄漏内存。
+    #[tokio::test]
+    async fn test_tool_execution_history_not_buffered_in_memory() {
+        let listener = ToolObservabilityListener::default();
+        let call = tool_call("read_file", r#"{"path":"big.txt"}"#);
+
+        for i in 0..50 {
+            let mut result = Ok(serde_json::json!({
+                // read_file / grep 的完整输出都会经过这里
+                "content": "x".repeat(4096),
+            }));
+            listener
+                .on_post_execute(&call, "session-1", &mut result, Duration::from_millis(1))
+                .await;
+            assert_eq!(
+                listener.retained_execution_records(),
+                0,
+                "第 {} 次执行后仍不得在内存保留执行记录（T0-9）",
+                i + 1
+            );
+        }
+    }
+
+    /// T0-9（功能面）：删除内存缓冲不等于丢数据——记录仍落 GEPA 数据层
+    /// （`ExecutionLog`），消费者从数据层读取。
+    #[tokio::test]
+    async fn test_tool_execution_persisted_to_execution_log() {
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let log = ExecutionLog::new(db).unwrap();
+        let listener = ToolObservabilityListener::default();
+        listener.set_execution_log(log.clone());
+
+        let call = tool_call("read_file", r#"{"path":"a.txt"}"#);
+        let mut result = Ok(serde_json::json!({ "content": "hello" }));
+        listener
+            .on_post_execute(&call, "session-1", &mut result, Duration::from_millis(3))
+            .await;
+
+        let records = log.detail(None, None, 10).await.unwrap();
+        assert_eq!(records.len(), 1, "执行记录必须落到 GEPA 数据层");
     }
 }

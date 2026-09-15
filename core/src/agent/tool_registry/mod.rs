@@ -23,7 +23,6 @@ use crate::observability::AgentMetrics;
 use crate::observability::RuleRecorder;
 use crate::session::search::SessionRecall;
 
-use crate::skills::learning::ExecutionHistory;
 use crate::vfs::VirtualFileSystem;
 
 mod agent_ops;
@@ -821,11 +820,6 @@ impl ToolRegistry {
             d.function.parameters.to_string().hash(&mut hasher);
         }
         hasher.finish()
-    }
-
-    /// 排空已收集的执行轨迹（供 GEPA 引擎消费；委托给内置可观测性监听器）。
-    pub async fn drain_execution_history(&self) -> Vec<ExecutionHistory> {
-        self.observability.drain_execution_history()
     }
 
     /// 并行执行多个 tool_call。
