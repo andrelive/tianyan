@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::Manager;
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_opener::OpenerExt;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use tracing_subscriber::{
@@ -455,6 +456,52 @@ fn layer_filters(config_level: &str, rust_log: Option<&str>) -> (EnvFilter, EnvF
     (console, file)
 }
 
+/// 外部链接守卫插件：webview 永不导航到外部 URL——取消导航并交给系统
+/// 默认浏览器打开。
+///
+/// 背景：点击聊天消息中的 http(s) 链接，Tauri webview 此前会**自行导航**
+/// 渲染网页且无回退入口（只能重启应用）。本插件在导航层拦截（覆盖链接
+/// 点击 / JS 跳转 / 子 frame 等全部导航路径），外部 URL 转交默认浏览器。
+fn build_external_link_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::<tauri::Wry>::new("external-link-guard")
+        .on_navigation(|webview, url| {
+            if is_app_internal_url(url) {
+                return true;
+            }
+            info!(url = %url, "外部链接：取消 webview 导航，交由系统默认浏览器打开");
+            if let Err(e) = webview
+                .app_handle()
+                .opener()
+                .open_url(url.to_string(), None::<&str>)
+            {
+                warn!(error = %e, "打开外部浏览器失败");
+            }
+            false
+        })
+        .build()
+}
+
+/// 判定导航目标是否为应用自身文档（其余一律视为外部链接）。
+///
+/// 放行集合：
+/// - 生产：Tauri 自定义协议——`tauri://localhost` 或 wry 兼容形态
+///   `http(s)://tauri.localhost`（Windows 实际形态）；
+/// - 非网络 scheme（`about:`/`blob:`/`data:`）——不涉外部导航；
+/// - 开发（debug）：vite dev server（`http://localhost:*`）。
+fn is_app_internal_url(url: &tauri::Url) -> bool {
+    if url.scheme() == "tauri" || url.host_str() == Some("tauri.localhost") {
+        return true;
+    }
+    if matches!(url.scheme(), "about" | "blob" | "data") {
+        return true;
+    }
+    #[cfg(debug_assertions)]
+    if url.scheme() == "http" && url.host_str() == Some("localhost") {
+        return true;
+    }
+    false
+}
+
 /// 初始化日志系统 - 同时输出到文件和控制台。
 ///
 /// 级别/格式来自配置文件 `[logging]` 节（`RUST_LOG` 环境变量可覆盖级别）；
@@ -752,7 +799,10 @@ pub fn run() {
     // Tauri 会自动加载 frontendDist 中配置的静态文件 (gui-vite/dist)
     // 前端通过 HTTP 调用 Axum 后端 API
     let mut app_builder = tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
+        // 外部链接守卫：webview 永不导航外部 URL——一律交给系统默认浏览器
+        // （修复：点击聊天中的 http 链接导致 webview 被网页替换、无法回退）
+        .plugin(build_external_link_guard())
         // 原生目录选择对话框（设置页「数据搬迁」选新数据目录用）
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -990,5 +1040,39 @@ mod tests {
                 "文件层恒配置级别: {file}"
             );
         }
+    }
+
+    // ── 外部链接守卫（U3：外链交给默认浏览器）────────────────────
+
+    #[test]
+    fn test_is_app_internal_url_allows_tauri_scheme_and_host() {
+        for raw in [
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/",
+            "https://tauri.localhost/x",
+        ] {
+            let url = tauri::Url::parse(raw).expect("URL");
+            assert!(is_app_internal_url(&url), "应用自身文档应放行: {raw}");
+        }
+    }
+
+    #[test]
+    fn test_is_app_internal_url_rejects_external() {
+        for raw in [
+            "https://example.com/a",
+            "http://example.com",
+            "https://github.com/andrelive/tianyan",
+            "file:///C:/Windows/win.ini",
+        ] {
+            let url = tauri::Url::parse(raw).expect("URL");
+            assert!(!is_app_internal_url(&url), "外部 URL 必须拦截: {raw}");
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn test_is_app_internal_url_allows_localhost_in_dev() {
+        let url = tauri::Url::parse("http://localhost:5173/").expect("URL");
+        assert!(is_app_internal_url(&url), "dev 下 localhost 应放行");
     }
 }

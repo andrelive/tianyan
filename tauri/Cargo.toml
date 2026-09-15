@@ -16,7 +16,8 @@ tianyan-server = { path = "../server" }
 # Tauri framework
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }
 tauri-plugin-dialog = "2"
-tauri-plugin-shell = "2.2"
+# 打开系统默认程序（外部链接转交默认浏览器；shell 插件的 open 已废弃，按官方建议改用 opener）
+tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
