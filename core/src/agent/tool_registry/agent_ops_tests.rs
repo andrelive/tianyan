@@ -248,6 +248,7 @@ async fn register_delegate_task(registry: &ToolRegistry, desc: &str) -> String {
             desc.to_string(),
             "session-1".to_string(),
             0,
+            None,
         )
         .await
 }
@@ -1371,7 +1372,7 @@ async fn test_delegate_background_starts_and_completes() {
 
     // task_status 工具查询
     let status = registry
-        .execute_task_status(&format!(r#"{{"task_id":"{task_id}"}}"#))
+        .execute_task_status(&format!(r#"{{"task_id":"{task_id}"}}"#), "s1")
         .await
         .unwrap();
     assert_eq!(status["status"].as_str(), Some("completed"));
@@ -1388,7 +1389,13 @@ async fn test_task_cancel_via_tool() {
     let registry = ToolRegistry::new(default_strict_policy());
     let id = registry
         .background_tasks
-        .register(TaskKind::Delegate, "task".to_string(), "s1".to_string(), 0)
+        .register(
+            TaskKind::Delegate,
+            "task".to_string(),
+            "s1".to_string(),
+            0,
+            None,
+        )
         .await;
     registry.background_tasks.mark_running(&id).await;
 
@@ -1416,12 +1423,13 @@ async fn test_task_status_list_mode_without_task_id() {
             "task-a".to_string(),
             "s1".to_string(),
             0,
+            None,
         )
         .await;
     registry.background_tasks.mark_running(&id).await;
 
     // 无 task_id：列表模式（含全部任务）
-    let result = registry.execute_task_status("{}").await.unwrap();
+    let result = registry.execute_task_status("{}", "s1").await.unwrap();
     assert_eq!(
         result["total"].as_u64(),
         Some(1),
@@ -1429,12 +1437,12 @@ async fn test_task_status_list_mode_without_task_id() {
     );
     // kind 过滤：delegate 命中，command 为空
     let result = registry
-        .execute_task_status(r#"{"kind":"delegate"}"#)
+        .execute_task_status(r#"{"kind":"delegate"}"#, "s1")
         .await
         .unwrap();
     assert_eq!(result["total"].as_u64(), Some(1));
     let result = registry
-        .execute_task_status(r#"{"kind":"command"}"#)
+        .execute_task_status(r#"{"kind":"command"}"#, "s1")
         .await
         .unwrap();
     assert_eq!(result["total"].as_u64(), Some(0));
@@ -1443,7 +1451,7 @@ async fn test_task_status_list_mode_without_task_id() {
 async fn test_task_status_missing_task() {
     let registry = ToolRegistry::new(default_strict_policy());
     let err = registry
-        .execute_task_status(r#"{"task_id":"bt_nope"}"#)
+        .execute_task_status(r#"{"task_id":"bt_nope"}"#, "s1")
         .await
         .unwrap_err();
     assert!(
@@ -1461,13 +1469,19 @@ async fn test_task_status_running_includes_no_poll_note() {
     let registry = ToolRegistry::new(default_strict_policy());
     let id = registry
         .background_tasks
-        .register(TaskKind::Delegate, "task".to_string(), "s1".to_string(), 0)
+        .register(
+            TaskKind::Delegate,
+            "task".to_string(),
+            "s1".to_string(),
+            0,
+            None,
+        )
         .await;
     registry.background_tasks.mark_running(&id).await;
 
     // 运行中：附提醒
     let v = registry
-        .execute_task_status(&format!(r#"{{"task_id":"{id}"}}"#))
+        .execute_task_status(&format!(r#"{{"task_id":"{id}"}}"#), "s1")
         .await
         .unwrap();
     assert!(
@@ -1481,10 +1495,148 @@ async fn test_task_status_running_includes_no_poll_note() {
         .complete(&id, "ok".to_string())
         .await;
     let v = registry
-        .execute_task_status(&format!(r#"{{"task_id":"{id}"}}"#))
+        .execute_task_status(&format!(r#"{{"task_id":"{id}"}}"#), "s1")
         .await
         .unwrap();
     assert!(v.get("note").is_none(), "终态查询不应附提醒: {v}");
+}
+
+#[tokio::test]
+async fn test_task_status_workspace_scope_filters_other_directories() {
+    // U5 回归：task_status 默认 scope=workspace——只显示**本工作目录**下
+    // （含跨会话）的任务；其他目录的任务默认不查、不用、不提（防跨目录
+    // 注意力偏移）；scope=global 显式查全局可见。归属未知（None——旧数据、
+    // 解析失败）不构成"其他目录"证据，仍可见。
+    use crate::agent::background::TaskKind;
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    let here = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let elsewhere = "X:\\unrelated-other-dir";
+
+    // A：本会话（s1）+ 本目录；B：他会话（s2）+ 其他目录；
+    // C：他会话（s2）+ 本目录（同目录跨会话协调面）；D：归属未知（旧数据）。
+    let id_a = registry
+        .background_tasks
+        .register(
+            TaskKind::Delegate,
+            "A".to_string(),
+            "s1".to_string(),
+            0,
+            Some(here.clone()),
+        )
+        .await;
+    let id_b = registry
+        .background_tasks
+        .register(
+            TaskKind::Delegate,
+            "B".to_string(),
+            "s2".to_string(),
+            0,
+            Some(elsewhere.to_string()),
+        )
+        .await;
+    let id_c = registry
+        .background_tasks
+        .register(
+            TaskKind::Delegate,
+            "C".to_string(),
+            "s2".to_string(),
+            0,
+            Some(here.clone()),
+        )
+        .await;
+    let id_d = registry
+        .background_tasks
+        .register(
+            TaskKind::Delegate,
+            "D".to_string(),
+            "s3".to_string(),
+            0,
+            None,
+        )
+        .await;
+
+    // 默认 workspace：A + C + D（B 不可见）
+    let v = registry.execute_task_status("{}", "s1").await.unwrap();
+    assert_eq!(v["scope"].as_str(), Some("workspace"));
+    let ids: Vec<&str> = v["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["id"].as_str())
+        .collect();
+    assert!(ids.contains(&id_a.as_str()), "本目录任务应可见: {v}");
+    assert!(ids.contains(&id_c.as_str()), "同目录跨会话任务应可见: {v}");
+    assert!(
+        ids.contains(&id_d.as_str()),
+        "归属未知（旧数据）应可见: {v}"
+    );
+    assert!(!ids.contains(&id_b.as_str()), "其他目录任务默认不可见: {v}");
+    assert_eq!(v["total"].as_u64(), Some(3));
+
+    // global：全部可见
+    let v = registry
+        .execute_task_status(r#"{"scope":"global"}"#, "s1")
+        .await
+        .unwrap();
+    assert_eq!(v["scope"].as_str(), Some("global"));
+    assert_eq!(v["total"].as_u64(), Some(4));
+}
+
+#[tokio::test]
+async fn test_task_status_single_other_directory_denied_without_leak() {
+    // U5 回归：单任务查询同样受视野约束——其他目录任务默认拒绝（附
+    // scope="global" 指引；错误信息不泄漏任务实际所在目录）；global 可查。
+    use crate::agent::background::TaskKind;
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    let id = registry
+        .background_tasks
+        .register(
+            TaskKind::Delegate,
+            "B".to_string(),
+            "s2".to_string(),
+            0,
+            Some("X:\\unrelated-other-dir".to_string()),
+        )
+        .await;
+
+    let err = registry
+        .execute_task_status(&format!(r#"{{"task_id":"{id}"}}"#), "s1")
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("可见范围"), "应拒绝并说明可见范围: {msg}");
+    assert!(msg.contains("global"), "应附 global 指引: {msg}");
+    assert!(
+        !msg.contains("unrelated-other-dir"),
+        "错误信息不应泄漏其他目录: {msg}"
+    );
+
+    // global 显式查询可读
+    let v = registry
+        .execute_task_status(&format!(r#"{{"task_id":"{id}","scope":"global"}}"#), "s1")
+        .await
+        .unwrap();
+    assert_eq!(v["id"].as_str(), Some(id.as_str()));
+}
+
+#[tokio::test]
+async fn test_task_status_invalid_scope_rejected() {
+    // U5 回归：scope 仅接受 workspace|global——其他值报错（防静默按默认
+    // 处理导致的视野误解）。
+    let registry = ToolRegistry::new(default_strict_policy());
+    let err = registry
+        .execute_task_status(r#"{"scope":"local"}"#, "s1")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("scope"),
+        "非法 scope 应报错: {err}"
+    );
 }
 
 #[tokio::test]

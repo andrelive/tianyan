@@ -288,6 +288,10 @@ pub struct TaskStatusParams {
     /// 列表过滤（delegate | command；缺省全部）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// 查询范围（U5 视野）：workspace（缺省）= 当前会话工作目录下所有会话的
+    /// 任务（同目录跨会话的协调面）；global = 全局（跨目录协调专用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// 后台任务取消参数。

@@ -918,7 +918,7 @@ impl ToolRegistry {
             "web_fetch" => self.execute_web_fetch(arguments).await,
             "delegate_to_agent" => self.execute_delegate_to_agent(arguments, session_id).await,
             "submit_result" => self.execute_submit_result(arguments, session_id).await,
-            "task_status" => self.execute_task_status(arguments).await,
+            "task_status" => self.execute_task_status(arguments, session_id).await,
             "task_cancel" => self.execute_task_cancel(arguments).await,
             "suggest_role" => self.execute_suggest_role(arguments).await,
             "execution_stats" => self.execute_execution_stats(arguments).await,

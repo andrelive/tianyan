@@ -41,6 +41,23 @@ pub(crate) fn is_protocol_tool(name: &str) -> bool {
     PROTOCOL_TOOLS.contains(&name)
 }
 
+/// 目录归属键（U5：task_status 视野比较用）——统一分隔符、去尾斜杠；
+/// Windows 大小写不敏感（与文件系统语义一致）。
+///
+/// 任务创建时快照的归属目录与查询时本会话目录都经此键比较，
+/// 保证「同一目录不同写法」（分隔符 / 大小写 / 尾斜杠）能正确匹配。
+pub(crate) fn dir_scope_key(path: &std::path::Path) -> String {
+    let mut key = path.to_string_lossy().replace('/', "\\");
+    while key.len() > 3 && key.ends_with('\\') {
+        key.pop();
+    }
+    if cfg!(windows) {
+        key.to_lowercase()
+    } else {
+        key
+    }
+}
+
 /// 委托链最大深度（主循环为 0；1 = 一层子 Agent，以此类推）。
 pub(crate) const MAX_DELEGATION_DEPTH: usize = 3;
 
@@ -190,6 +207,13 @@ impl ToolRegistry {
                     initial_delay_ms: r.initial_delay_ms.unwrap_or(500),
                     timeout_ms: r.timeout_ms.unwrap_or(300_000),
                 });
+            // U5：任务归属工作目录快照（task_status 默认视野按它过滤）——
+            // 与 cwd 解耦（cwd 是命令运行目录，可能被模型显式指定）。
+            let task_working_directory = self
+                .resolve_base_dir(session_id)
+                .await
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned());
             let task = self
                 .command_tasks
                 .spawn_background(
@@ -207,6 +231,7 @@ impl ToolRegistry {
                         },
                         None => 0,
                     },
+                    task_working_directory,
                 )
                 .await
                 .map_err(wrap_tool_error)?;
@@ -799,12 +824,19 @@ impl ToolRegistry {
             },
             None => 0,
         };
+        // U5：任务归属工作目录快照（task_status 默认视野按它过滤）。
+        let task_working_directory = self
+            .resolve_base_dir(&session_id)
+            .await
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
         let task_id = manager
             .register(
                 crate::agent::background::TaskKind::Delegate,
                 desc.clone(),
                 session_id.clone(),
                 anchor_seq,
+                task_working_directory,
             )
             .await;
         let run_permit = manager.acquire_run().await?;
@@ -894,21 +926,61 @@ impl ToolRegistry {
         }))
     }
 
+    /// 解析会话生效工作目录的归属键（U5：task_status workspace 范围过滤用）。
+    ///
+    /// 与任务创建时的目录快照共用同一解析链（`resolve_base_dir`）——
+    /// 两侧一致才能匹配。
+    async fn resolve_scope_key(&self, session_id: &str) -> Option<String> {
+        self.resolve_base_dir(session_id)
+            .await
+            .ok()
+            .map(|p| dir_scope_key(&p))
+    }
+
     /// 执行 task_status 工具：查询后台任务状态与结果（统一：委托 + 命令）。
     ///
     /// 参数：task_id 可选——给定则查询单任务（委托/命令自动识别）；
-    /// 缺省则列出全部任务（kind 可选过滤：delegate | command）。
+    /// 缺省则列出任务（kind 可选过滤：delegate | command）。U5 视野：
+    /// 默认 scope=workspace（当前会话工作目录，同目录跨会话的协调面）；
+    /// scope=global 显式查全局（跨目录协调专用，用完即回）。
     pub(crate) async fn execute_task_status(
         &self,
         arguments: &str,
+        session_id: &str,
     ) -> Result<serde_json::Value, TianyanError> {
         // 与 schema 共用同一参数类型（task_id 可选 = 列表模式 + kind 过滤），
         // 避免本地重复定义导致 schema 与行为漂移
         let params: TaskStatusParams = parse_params(arguments)?;
 
+        // U5 视野解析：workspace（缺省）= 当前会话工作目录；global = 不过滤。
+        let scope = params.scope.as_deref().unwrap_or("workspace");
+        let (scope_global, scope_key) = match scope {
+            "workspace" => (false, self.resolve_scope_key(session_id).await),
+            "global" => (true, None),
+            other => {
+                return Err(TianyanError::invalid_input(format!(
+                    "tool: scope 仅支持 \"workspace\"（缺省，当前工作目录）或 \"global\"（全局），收到：{other}"
+                )));
+            }
+        };
+        // 目标目录解析失败（极端）：降级不过滤（附 note），避免任务"消失"。
+        let scope_degraded = !scope_global && scope_key.is_none();
+        // 可见性谓词：global / 降级 / 归属未知 → 可见；否则按归属键匹配。
+        let visible = |task_dir: Option<&str>| -> bool {
+            match (&scope_key, task_dir) {
+                (Some(key), Some(dir)) => dir_scope_key(std::path::Path::new(dir)) == *key,
+                _ => true,
+            }
+        };
+
         // 单任务查询：按 ID 先查委托表再查命令表（前缀不互斥，双表探测）。
         if let Some(task_id) = params.task_id.as_deref() {
             if let Some(task) = self.background_tasks.get(task_id).await {
+                if !visible(task.working_directory.as_deref()) {
+                    return Err(TianyanError::permission(format!(
+                        "tool: 任务不在当前工作目录的可见范围内（跨目录协调请使用 scope=\"global\"）：{task_id}"
+                    )));
+                }
                 let mut v = serde_json::to_value(&task)
                     .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))?;
                 // U1：非终态查询附提醒——任务完成会自动通知，轮询是资源浪费
@@ -925,6 +997,11 @@ impl ToolRegistry {
                 return Ok(v);
             }
             if let Some(task) = self.command_tasks.get(task_id).await {
+                if !visible(task.working_directory.as_deref()) {
+                    return Err(TianyanError::permission(format!(
+                        "tool: 任务不在当前工作目录的可见范围内（跨目录协调请使用 scope=\"global\"）：{task_id}"
+                    )));
+                }
                 let mut v = serde_json::to_value(&task)
                     .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))?;
                 if matches!(task.status, crate::executor::CommandTaskStatus::Running) {
@@ -942,24 +1019,42 @@ impl ToolRegistry {
             return Err(TianyanError::Custom(format!("tool: 任务不存在：{task_id}")));
         }
 
-        // 列表：委托任务 + 命令任务（kind 过滤）。
+        // 列表：委托任务 + 命令任务（kind 过滤 + U5 视野过滤）。
         let mut entries: Vec<serde_json::Value> = Vec::new();
         let kind_filter = params.kind.as_deref().unwrap_or("");
         if kind_filter.is_empty() || kind_filter == "delegate" {
             for t in self.background_tasks.snapshot().await {
-                if let Ok(v) = serde_json::to_value(t) {
-                    entries.push(v);
+                if visible(t.working_directory.as_deref()) {
+                    if let Ok(v) = serde_json::to_value(t) {
+                        entries.push(v);
+                    }
                 }
             }
         }
         if kind_filter.is_empty() || kind_filter == "command" {
             for t in self.command_tasks.list().await {
-                if let Ok(v) = serde_json::to_value(t) {
-                    entries.push(v);
+                if visible(t.working_directory.as_deref()) {
+                    if let Ok(v) = serde_json::to_value(t) {
+                        entries.push(v);
+                    }
                 }
             }
         }
-        Ok(serde_json::json!({ "tasks": entries, "total": entries.len() }))
+        // scope 回显：让模型明确当前视野（global 用于跨目录协调后"用完即回"）。
+        let mut out = serde_json::json!({
+            "tasks": entries,
+            "total": entries.len(),
+            "scope": if scope_global { "global" } else { "workspace" },
+        });
+        if scope_degraded {
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert(
+                    "note".to_string(),
+                    serde_json::json!("无法解析当前会话工作目录，已列出全部任务"),
+                );
+            }
+        }
+        Ok(out)
     }
 
     /// 执行 task_cancel 工具：取消后台任务（终态任务为幂等空操作）。

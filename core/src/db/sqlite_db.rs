@@ -156,16 +156,24 @@ impl SqliteDb {
             )
             .unwrap_or(false);
         if has_bt_table {
-            let has_kind_col: bool = {
+            let cols: Vec<String> = {
                 let mut stmt = conn.prepare("PRAGMA table_info(background_tasks)")?;
-                let cols = stmt
+                let collected = stmt
                     .query_map([], |r| r.get::<_, String>(1))?
                     .collect::<Result<Vec<_>, _>>()?;
-                cols.iter().any(|c| c == "kind")
+                collected
             };
-            if !has_kind_col {
+            if !cols.iter().any(|c| c == "kind") {
                 conn.execute(
                     "ALTER TABLE background_tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'delegate'",
+                    [],
+                )?;
+            }
+            // 幂等迁移（U5）：补 working_directory 列——task_status 默认视野
+            // 按归属工作目录过滤；旧库缺列时 SELECT 报 no such column。
+            if !cols.iter().any(|c| c == "working_directory") {
+                conn.execute(
+                    "ALTER TABLE background_tasks ADD COLUMN working_directory TEXT",
                     [],
                 )?;
             }
@@ -230,7 +238,8 @@ const SCHEMA_SQL: &str = "
         error              TEXT,
         created_at         INTEGER NOT NULL,
         completed_at       INTEGER,
-        seq                INTEGER NOT NULL
+        seq                INTEGER NOT NULL,
+        working_directory  TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_background_tasks_session ON background_tasks(parent_session_id, seq);
 
@@ -458,6 +467,59 @@ mod lock_tests {
             let count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM background_tasks WHERE kind IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+    }
+
+    /// 回归（U5）：旧库 background_tasks 表无 working_directory 列时，
+    /// init_all_schemas 幂等补列（task_status 归属过滤依赖该列；缺列时
+    /// 持久化 SELECT 报 no such column）。
+    #[tokio::test]
+    async fn test_migration_adds_working_directory_to_background_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("legacy-bt-wd.db");
+        {
+            // 模拟旧库：background_tasks 有 kind、无 working_directory 列
+            let db = SqliteDb::open(db_path.clone()).unwrap();
+            {
+                let conn = db.lock().await;
+                conn.execute_batch(
+                    "CREATE TABLE background_tasks (
+                        id                 TEXT PRIMARY KEY,
+                        kind               TEXT    NOT NULL DEFAULT 'delegate',
+                        description        TEXT    NOT NULL,
+                        status             TEXT    NOT NULL,
+                        parent_session_id  TEXT    NOT NULL,
+                        result             TEXT,
+                        error              TEXT,
+                        created_at         INTEGER NOT NULL,
+                        completed_at       INTEGER,
+                        seq                INTEGER NOT NULL
+                    );
+                    INSERT INTO background_tasks (id, kind, description, status, parent_session_id, created_at, seq)
+                    VALUES ('bt_legacy', 'delegate', '旧任务', 'completed', 's1', 0, 1);",
+                )
+                .unwrap();
+            }
+            db.init_all_schemas().await.expect("旧库迁移应成功");
+            let conn = db.lock().await;
+            // working_directory 列已补（旧行回填 NULL）
+            let wd: Option<String> = conn
+                .query_row(
+                    "SELECT working_directory FROM background_tasks WHERE id = 'bt_legacy'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(wd.is_none(), "旧行 working_directory 应为 NULL");
+            // 含 working_directory 的 SELECT 可执行（持久化加载不再失败）
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM background_tasks WHERE working_directory IS NULL",
                     [],
                     |r| r.get(0),
                 )

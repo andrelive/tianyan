@@ -116,6 +116,10 @@ pub struct CommandTask {
     /// 回退到用户输入 U 时，锚点 > U.seq 的任务属于"回退点之后"，
     /// 应一并取消（方案 B：任务与链上时序点关联，精确取消）。
     pub anchor_seq: i64,
+    /// 任务归属工作目录（创建会话的生效工作目录快照；U5：task_status 默认
+    /// 视野按它过滤。命令的实际运行目录见 `cwd`——模型可显式指定，与归属
+    /// 可能不同）。
+    pub working_directory: Option<String>,
     /// 就绪探测是否已通过（服务可用的信号）。
     pub ready: bool,
     /// 就绪/超时说明（如 "端口 3000 已监听" / "就绪探测超时"）。
@@ -221,6 +225,7 @@ impl CommandManager {
         cwd: Option<&str>,
         ready: Option<ReadySpec>,
         anchor_seq: i64,
+        working_directory: Option<String>,
     ) -> Result<CommandTask> {
         // 并发许可：排队等待（防失控扇出；许可随 watcher 任务结束自动释放）
         let _permit = self
@@ -259,6 +264,7 @@ impl CommandManager {
             completed_at: None,
             seq: self.seq.load(AtomicOrdering::SeqCst) - 1,
             anchor_seq,
+            working_directory,
             ready: false,
             ready_note: None,
         };
@@ -1227,7 +1233,7 @@ mod tests {
             timeout_ms: 10_000,
         };
         let task = manager
-            .spawn_background("sess-r", cmd, None, Some(spec), 0)
+            .spawn_background("sess-r", cmd, None, Some(spec), 0, None)
             .await
             .unwrap();
 
@@ -1269,7 +1275,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = CommandManager::new(Some(dir.path().to_path_buf()));
         let task = manager
-            .spawn_background("sess-1", "echo Hello", None, None, 0)
+            .spawn_background("sess-1", "echo Hello", None, None, 0, None)
             .await
             .unwrap();
         assert!(
@@ -1300,7 +1306,7 @@ mod tests {
             "sleep 30"
         };
         let task = manager
-            .spawn_background("sess-1", cmd, None, None, 0)
+            .spawn_background("sess-1", cmd, None, None, 0, None)
             .await
             .unwrap();
         manager.kill(&task.id).await.unwrap();
@@ -1315,7 +1321,7 @@ mod tests {
     async fn test_background_list_and_unknown() {
         let manager = CommandManager::new(None);
         let task = manager
-            .spawn_background("sess-1", "echo A", None, None, 0)
+            .spawn_background("sess-1", "echo A", None, None, 0, None)
             .await
             .unwrap();
         let list = manager.list().await;
@@ -1353,11 +1359,11 @@ mod tests {
         }));
 
         let t1 = manager
-            .spawn_background("sess-1", "echo A", None, None, 0)
+            .spawn_background("sess-1", "echo A", None, None, 0, None)
             .await
             .unwrap();
         let t2 = manager
-            .spawn_background("sess-1", "echo B", None, None, 0)
+            .spawn_background("sess-1", "echo B", None, None, 0, None)
             .await
             .unwrap();
         wait_terminal(&manager, &t1.id).await;
@@ -1395,11 +1401,11 @@ mod tests {
             .await;
 
         let t1 = manager
-            .spawn_background("sess-w", "echo A", None, None, 0)
+            .spawn_background("sess-w", "echo A", None, None, 0, None)
             .await
             .unwrap();
         let t2 = manager
-            .spawn_background("sess-w", "echo B", None, None, 0)
+            .spawn_background("sess-w", "echo B", None, None, 0, None)
             .await
             .unwrap();
         wait_terminal(&manager, &t1.id).await;
