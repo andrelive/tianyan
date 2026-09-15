@@ -101,21 +101,17 @@ impl SummaryTask {
     }
 
     /// 检查条目是否需要摘要。
+    ///
+    /// 判定顺序（T0-4）：**内容更新时间戳检测优先于 processed 缓存**——
+    /// Detail 比任一摘要新说明内容被编辑过，必须重建摘要与向量；此前
+    /// 缓存短路在时间戳检测之前（条目一旦处理过即跳过），内容更新后
+    /// 摘要/向量永不刷新，直到缓存 FIFO 淘汰或进程重启。缓存只用于
+    /// “内容未变时不重复处理”（防重复 LLM 调用）。
     async fn needs_summary(
         &self,
         ctx: &TaskContext,
         entry: &ContextEntry,
     ) -> crate::common::error::Result<bool> {
-        // 检查是否已处理
-        let uri_str = entry.metadata.uri.to_string();
-        let is_processed = {
-            let processed = self.processed.read().await;
-            processed.contains(&uri_str)
-        };
-        if is_processed {
-            return Ok(false);
-        }
-
         // 检查元数据
         let metadata = ctx
             .vfs
@@ -130,26 +126,32 @@ impl SummaryTask {
         let has_abstract = metadata.contains_key(&ContentLevel::Abstract);
         let has_overview = metadata.contains_key(&ContentLevel::Overview);
 
-        if !has_abstract || !has_overview {
-            return Ok(true);
+        if has_abstract && has_overview {
+            // 内容被编辑（Detail 比摘要新）→ 必须重建（无视 processed 缓存）
+            let detail_newer_than = |level: &ContentLevel| {
+                metadata
+                    .get(level)
+                    .map(|m| detail_meta.updated_at > m.updated_at)
+                    .unwrap_or(true)
+            };
+            if detail_newer_than(&ContentLevel::Abstract)
+                || detail_newer_than(&ContentLevel::Overview)
+            {
+                return Ok(true);
+            }
         }
 
-        let abstract_meta = match metadata.get(&ContentLevel::Abstract) {
-            Some(m) => m,
-            None => return Ok(true),
+        // 内容未变（或摘要缺失）：processed 缓存防重复处理
+        let uri_str = entry.metadata.uri.to_string();
+        let is_processed = {
+            let processed = self.processed.read().await;
+            processed.contains(&uri_str)
         };
-        let overview_meta = match metadata.get(&ContentLevel::Overview) {
-            Some(m) => m,
-            None => return Ok(true),
-        };
-
-        if detail_meta.updated_at > abstract_meta.updated_at
-            || detail_meta.updated_at > overview_meta.updated_at
-        {
-            return Ok(true);
+        if is_processed {
+            return Ok(false);
         }
 
-        Ok(false)
+        Ok(!has_abstract || !has_overview)
     }
 
     /// 处理单个 URI。
@@ -186,14 +188,18 @@ impl SummaryTask {
             .generate_overview(&detail_content)
             .await?;
 
-        // 写入摘要
-        ctx.vfs.write_abstract(uri, &abstract_content).await?;
-        ctx.vfs.write_overview(uri, &overview_content).await?;
-
-        // 更新向量
+        // 先更新向量、后写摘要（T0-4 第二面）：摘要是“完成标记”（真实 VFS
+        // 写入即刷新 updated_at，扫描据此判“已覆盖当前内容”）——若先写摘要
+        // 而向量更新失败，下次扫描会判“已完成”，向量永久缺失（语义检索漏
+        // 掉该条目）。反序后任一环节失败都不留“看似完成”的摘要，下一轮自
+        // 动重建（向量 upsert 幂等，重复更新无害）。
         ctx.vfs
             .update_summary_vectors(uri, &abstract_content, &overview_content)
             .await?;
+
+        // 写入摘要（提交点）
+        ctx.vfs.write_abstract(uri, &abstract_content).await?;
+        ctx.vfs.write_overview(uri, &overview_content).await?;
 
         // 标记为已处理（带容量限制，FIFO 淘汰最旧记录）
         self.record_processed(uri.as_str()).await;
@@ -562,6 +568,103 @@ mod tests {
                 .iter()
                 .all(|u| !u.as_str().contains("evolution_reports")),
             "运维子域不得进入 missing：{missing:?}"
+        );
+    }
+
+    /// T0-4 主回归：内容更新（Detail 比摘要新）必须触发摘要/向量重建——
+    /// 修复前 `processed` 缓存短路在时间戳检测之前：条目一旦处理过，即使
+    /// 内容被编辑也不会重新摘要（摘要与向量长期陈旧，直到缓存 FIFO 淘汰
+    /// 或进程重启）。
+    #[tokio::test]
+    async fn test_content_update_rebuilds_despite_processed_cache() {
+        let vfs = Arc::new(MockVfs::new());
+        let root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+        let cases = root.append("cases");
+        vfs.add_directory(&root, &cases);
+        let uri = cases.append("c1");
+        vfs.add_entry(&cases, &uri);
+
+        // 摘要生成于 2 小时前；内容 1 分钟前被编辑（Detail 更新）
+        let summary_time = chrono::Utc::now() - chrono::Duration::hours(2);
+        let edited_time = chrono::Utc::now() - chrono::Duration::minutes(1);
+        vfs.add_content_metadata_with_updated_at(&uri, ContentLevel::Abstract, summary_time);
+        vfs.add_content_metadata_with_updated_at(&uri, ContentLevel::Overview, summary_time);
+        vfs.add_content_metadata_with_updated_at(&uri, ContentLevel::Detail, edited_time);
+
+        let ctx = make_context(vfs.clone(), MockChatService::new());
+        let task = SummaryTask::new();
+        // 模拟该条目此前已处理（缓存命中）
+        task.record_processed(uri.as_str()).await;
+
+        let missing = task.scan_missing_summaries(&ctx).await.unwrap();
+
+        assert!(
+            missing.iter().any(|u| u.as_str() == uri.as_str()),
+            "内容更新后必须重新摘要（不得被 processed 缓存短路）：{missing:?}"
+        );
+    }
+
+    /// 回归：内容未变（摘要比 Detail 新）→ 不重复摘要（摘要齐全且未更新
+    /// 不调用 LLM）。
+    #[tokio::test]
+    async fn test_unchanged_content_not_reprocessed() {
+        let vfs = Arc::new(MockVfs::new());
+        let root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+        let cases = root.append("cases");
+        vfs.add_directory(&root, &cases);
+        let uri = cases.append("c1");
+        vfs.add_entry(&cases, &uri);
+
+        // Detail 1 小时前；摘要 10 分钟前（比 Detail 新 → 已覆盖当前内容）
+        let detail_time = chrono::Utc::now() - chrono::Duration::hours(1);
+        let summary_time = chrono::Utc::now() - chrono::Duration::minutes(10);
+        vfs.add_content_metadata_with_updated_at(&uri, ContentLevel::Detail, detail_time);
+        vfs.add_content_metadata_with_updated_at(&uri, ContentLevel::Abstract, summary_time);
+        vfs.add_content_metadata_with_updated_at(&uri, ContentLevel::Overview, summary_time);
+
+        let ctx = make_context(vfs.clone(), MockChatService::new());
+        let task = SummaryTask::new();
+
+        let missing = task.scan_missing_summaries(&ctx).await.unwrap();
+        assert!(
+            !missing.iter().any(|u| u.as_str() == uri.as_str()),
+            "内容未变不应重复摘要：{missing:?}"
+        );
+    }
+
+    /// T0-4（第二面）：向量更新失败不得让摘要内容落盘——
+    /// 修复前顺序 `write_abstract → write_overview → update_summary_vectors`：
+    /// 向量失败时摘要已写入（真实 VFS 下同时刷新 updated_at），下次扫描判
+    /// “已完成”→ 向量永久缺失（语义检索漏掉该条目）。修复后顺序为
+    /// 「先向量、后摘要（提交点）」，任一环节失败都不留“看似完成”的摘要。
+    #[tokio::test]
+    async fn test_vector_failure_does_not_persist_summary() {
+        let content = short_chinese();
+        let vfs = Arc::new(MockVfs::new());
+        let uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["vec-fail".into()]);
+        vfs.set_content(&uri, ContentLevel::Detail, &content);
+        vfs.set_summary_vector_error(Some("vector store down".to_string()));
+
+        let ctx = make_context(vfs.clone(), MockChatService::new());
+
+        assert!(
+            SummaryTask::new().process_uri(&ctx, &uri).await.is_err(),
+            "向量更新失败应上抛"
+        );
+
+        let has_abstract = ctx
+            .vfs
+            .read_content(&uri, ContentLevel::Abstract)
+            .await
+            .is_ok();
+        let has_overview = ctx
+            .vfs
+            .read_content(&uri, ContentLevel::Overview)
+            .await
+            .is_ok();
+        assert!(
+            !has_abstract && !has_overview,
+            "向量失败时摘要不得落盘（否则下次扫描判已完成，向量永不重建）"
         );
     }
 }

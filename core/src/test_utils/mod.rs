@@ -44,6 +44,8 @@ pub struct MockVfs {
     search_error: RwLock<Option<String>>,
     /// move_entry 调用记录（(src, dst)），供断言归档/移动行为
     moved: RwLock<Vec<(String, String)>>,
+    /// 向量更新错误（Some = 模拟 update_summary_vectors 失败）。
+    summary_vector_error: RwLock<Option<String>>,
 }
 
 impl MockVfs {
@@ -57,6 +59,7 @@ impl MockVfs {
             search_results: RwLock::new(vec![]),
             search_error: RwLock::new(None),
             moved: RwLock::new(vec![]),
+            summary_vector_error: RwLock::new(None),
         }
     }
 
@@ -88,6 +91,24 @@ impl MockVfs {
         );
     }
 
+    /// 设置指定 URI 的内容层元数据（可指定更新时间）——供「Detail 比摘要新
+    /// → 需重建摘要」类判定测试构造时间戳差。
+    pub fn add_content_metadata_with_updated_at(
+        &self,
+        uri: &TianyanUri,
+        level: ContentLevel,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        self.metadata.write().unwrap().insert(
+            (uri.to_string(), level),
+            ContentMetadata {
+                size: 0,
+                created_at: updated_at,
+                updated_at,
+            },
+        );
+    }
+
     /// 在指定目录下添加条目。
     pub fn add_entry(&self, dir_uri: &TianyanUri, entry_uri: &TianyanUri) {
         self.entries
@@ -111,6 +132,11 @@ impl MockVfs {
     /// 设置指定 URI 的 exists() 返回值。
     pub fn set_exists(&self, uri: &TianyanUri, val: bool) {
         self.exists.write().unwrap().insert(uri.to_string(), val);
+    }
+
+    /// 设置 `update_summary_vectors` 的失败注入（供「向量更新失败」路径测试）。
+    pub fn set_summary_vector_error(&self, msg: Option<String>) {
+        *self.summary_vector_error.write().unwrap() = msg;
     }
 
     /// 在指定目录下添加条目（可指定更新时间，用于模拟过期内容）。
@@ -294,7 +320,11 @@ impl VfsSearch for MockVfs {
     }
 
     async fn update_summary_vectors(&self, _u: &TianyanUri, _a: &str, _o: &str) -> Result<()> {
-        Ok(())
+        if let Some(ref e) = *self.summary_vector_error.read().unwrap() {
+            Err(TianyanError::Custom(format!("内部错误：{}", e)))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -339,6 +369,12 @@ impl MockVfsBuilder {
     /// 设置搜索错误。
     pub fn with_search_error(self, msg: &str) -> Self {
         self.vfs.set_search_error(Some(msg.to_string()));
+        self
+    }
+
+    /// 设置向量更新错误（供「向量失败」路径测试）。
+    pub fn with_summary_vector_error(self, msg: &str) -> Self {
+        self.vfs.set_summary_vector_error(Some(msg.to_string()));
         self
     }
 
