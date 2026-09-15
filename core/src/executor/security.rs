@@ -408,14 +408,43 @@ fn is_meaningless_blocked_dir(_dir: &std::path::Path) -> bool {
 /// 且非分段语义的误伤大于收益——既有决策）；`|` 是合法管道（strict 模式
 /// 不拦），但右侧是新命令段，逐段判定必须覆盖。
 ///
+/// 引号感知（T0-2 补充）：引号内的分隔符无分段语义（与 shell 一致）——
+/// 否则 `Select-String -Pattern 'a|format|b'` 会被切开、段首词恰为黑名单
+/// 词时误拦合法命令（实测：天演自身命令被自己的安全策略拒绝）。仅当单/
+/// 双引号各自配对（计数为偶数）时启用感知；未闭合引号（含攻击构造
+/// `echo "a | rm -rf /`）退化为“全部按分隔符切”，宁可误伤不漏检。
+///
 /// 返回各段原始切片（含前后空白，调用方自行 trim）；空段被剔除。
 pub(crate) fn split_command_segments(command: &str) -> Vec<&str> {
-    let mut segments = Vec::new();
     let bytes = command.as_bytes();
+    let quote_aware = command.matches('\'').count().is_multiple_of(2)
+        && command.matches('"').count().is_multiple_of(2);
+
+    let mut segments = Vec::new();
     let mut start = 0;
     let mut i = 0;
+    let mut in_quote: Option<u8> = None;
     while i < bytes.len() {
         let b = bytes[i];
+        if quote_aware {
+            match in_quote {
+                Some(q) if b == q => {
+                    in_quote = None;
+                    i += 1;
+                    continue;
+                }
+                Some(_) => {
+                    i += 1;
+                    continue;
+                }
+                None if b == b'\'' || b == b'"' => {
+                    in_quote = Some(b);
+                    i += 1;
+                    continue;
+                }
+                None => {}
+            }
+        }
         let is_sep = match b {
             b';' | b'|' | b'\n' | b'\r' => true,
             b'&' => i + 1 < bytes.len() && bytes[i + 1] == b'&',
@@ -931,6 +960,25 @@ mod tests {
             "第二段不在白名单必须拦截"
         );
         assert!(allowlisted.check_command("git status && git log").is_ok());
+    }
+
+    /// T0-2 补充（误伤修复）：引号内的分隔符无分段语义——
+    /// `Select-String -Pattern 'lint|format|build'` 这类命令此前被 `|` 切段后，
+    /// 段首词恰为黑名单词（如 format）→ 误拦合法命令（实测：天演自身命令
+    /// 被自己的安全策略拒绝）。引号内不切段（与 shell 语义一致）；
+    /// 未闭合引号退化为全切（宁可误伤，不漏检——见实现注释）。
+    #[test]
+    fn test_quoted_separators_not_split() {
+        let policy = SecurityPolicy::from_config(&SecurityConfig::default());
+        // 引号配对 → 引号内 `|` 不切段 → 段首词 Select-String 非黑名单 → 放行
+        assert!(
+            policy
+                .check_command("Get-Content x | Select-String -Pattern 'lint|format|build'")
+                .is_ok(),
+            "引号内的 | 不得触发分段误拦"
+        );
+        // 引号外分隔符仍切段并命中黑名单（回归：修复不得弱化真实防护）
+        assert!(policy.check_command("echo x | format c:").is_err());
     }
 
     #[test]
