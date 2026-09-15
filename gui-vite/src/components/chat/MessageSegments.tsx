@@ -113,7 +113,8 @@ export const MarkdownContent = memo(function MarkdownContent({
           ),
           code: ({ className, children, ...props }: React.ComponentPropsWithoutRef<'code'>) => {
             const match = /language-(\w+)/.exec(className || '');
-            const codeString = String(children).replace(/\n$/, '');
+            const raw = String(children);
+            const codeString = raw.replace(/\n$/, '');
             if (match) {
               return (
                 <SyntaxHighlighter
@@ -128,6 +129,18 @@ export const MarkdownContent = memo(function MarkdownContent({
                 >
                   {codeString}
                 </SyntaxHighlighter>
+              );
+            }
+            // U6：无语言标记的**围栏块**必须保留 pre 语义——ReactMarkdown 约定
+            // 块级 code 的 children 以 \n 结尾（内联代码无尾换行）。pre 组件已
+            // 透明化（避免与高亮器容器重复嵌套），故此处自行渲染块级容器：
+            // 否则多行内容只剩 inline <code>（white-space: normal）→ 折叠成一行
+            // （用户报告：目录树挤成一行）。
+            if (raw.endsWith('\n')) {
+              return (
+                <pre className="my-2 overflow-x-auto rounded-lg bg-[var(--color-bg-tertiary)] p-3 text-[0.8rem] font-mono whitespace-pre">
+                  <code>{codeString}</code>
+                </pre>
               );
             }
             return (

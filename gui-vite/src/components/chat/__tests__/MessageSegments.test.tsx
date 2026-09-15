@@ -49,3 +49,41 @@ describe('MarkdownContent 换行渲染（U4）', () => {
     expect(container.querySelectorAll('li')).toHaveLength(2);
   });
 });
+
+/**
+ * 回归保护（U6）：**无语言标记**的围栏代码块换行渲染。
+ *
+ * 背景：`pre` 组件被透明化（`<>{children}</>`）——有语言的代码块走
+ * SyntaxHighlighter（自带容器），但无语言的围栏块仅剩 inline `<code>`
+ * （无 white-space: pre），多行内容被折叠成一行（用户报告：目录树挤成一行）。
+ *
+ * 修复：`code` 组件按 ReactMarkdown 约定（无语言块级 children 以 \n 结尾）
+ * 区分块级/内联——块级渲染自带 pre 语义的容器。
+ *
+ * 判别力：修复前无 `<pre>` 元素（被透明化），第一条断言必红。
+ */
+describe('MarkdownContent 围栏代码块换行（U6）', () => {
+  it('无语言围栏块保留块级容器（pre 语义 + whitespace-pre）', () => {
+    const text = '```\n<新仓>/\n├── EmergencyBackend/\n└── opencode.json\n```';
+    const { container } = render(<MarkdownContent text={text} isUser={false} />);
+
+    const pre = container.querySelector('pre');
+    expect(pre).not.toBeNull(); // 修复前为 null（pre 被透明化）
+    expect(pre!.className).toContain('whitespace-pre'); // CSS 保留换行
+    expect(pre!.textContent).toContain('EmergencyBackend');
+    expect(pre!.textContent?.split('\n').length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('行内代码不受影响（不产生块级容器）', () => {
+    const { container } = render(<MarkdownContent text={'这是 `inline` 代码'} isUser={false} />);
+    expect(container.querySelector('pre')).toBeNull();
+    expect(container.querySelector('code')?.textContent).toBe('inline');
+  });
+
+  it('有语言标记的代码块仍走高亮器容器（不回归）', () => {
+    const { container } = render(<MarkdownContent text={'```bash\nls -la\n```'} isUser={false} />);
+    expect(container.textContent).toContain('ls -la');
+    // 高亮器用 div 容器（PreTag="div"）——不重复包 <pre>
+    expect(container.querySelector('pre')).toBeNull();
+  });
+});
