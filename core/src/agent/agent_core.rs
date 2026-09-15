@@ -260,6 +260,12 @@ impl Agent {
                 .await;
             self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
                 .await;
+            // C1：唤醒轮同样执行轮末压缩检查——高负载区间若主要由唤醒轮
+            // 推进（等子代理报告/后台通知），无检查会使上下文持续增长而
+            // 压缩被无限推迟（实测：60.8%→81.7% 区间零压缩）。判定成本
+            // 廉价（消息数/实测 token 读取），仅超阈值才真正压缩。
+            self.maybe_compress_and_persist(&state, session_id, false)
+                .await;
             return;
         }
         tracing::warn!(
@@ -1394,6 +1400,164 @@ mod tests {
         assert!(
             state.read().await.injectable_context.soul.is_empty(),
             "压缩后注入上下文缓存应清空（下一轮重新加载 learned rules）"
+        );
+    }
+
+    /// 内存态会话管理器（C1 唤醒轮压缩测试专用）：get_session 返回真实
+    /// 消息链、add_structured_message 追加、update_session 写回——支撑
+    /// "唤醒轮结束 → 压缩点落库"的端到端断言。
+    struct InMemorySessionManager {
+        session: TokioMutex<Session>,
+    }
+    #[async_trait]
+    impl SessionManager for InMemorySessionManager {
+        async fn add_structured_message(
+            &self,
+            session_id: &str,
+            msg: StructuredMessage,
+        ) -> Result<()> {
+            let mut s = self.session.lock().await;
+            if s.session_id == session_id {
+                s.messages.push(msg);
+            }
+            Ok(())
+        }
+        async fn rewrite_messages(
+            &self,
+            _session_id: &str,
+            _messages: &[StructuredMessage],
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn create_session(&self, id: &str, _message: Message) -> Result<Session> {
+            Ok(Session::new(id))
+        }
+        async fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
+            let s = self.session.lock().await;
+            if s.session_id == session_id {
+                Ok(Some(s.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+        async fn update_session(&self, session: &Session) -> Result<()> {
+            *self.session.lock().await = session.clone();
+            Ok(())
+        }
+        async fn list_sessions(&self) -> Result<Vec<Session>> {
+            Ok(vec![])
+        }
+        async fn delete_session(&self, _id: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 构造带自定义会话管理器的 Agent（C1 唤醒轮压缩测试专用）。
+    fn make_agent_with_sessions(
+        session_manager: Arc<dyn SessionManager>,
+        mock: MockChatService,
+        compression_mock: MockChatService,
+        compression_config: CompressionConfig,
+    ) -> Agent {
+        let vfs = Arc::new(MockVfs::new());
+        let retriever = Arc::new(DualLayerRetriever::new(
+            vfs.clone() as Arc<dyn VirtualFileSystem>
+        ));
+        let compressor = Arc::new(TokioMutex::new(ContextCompressor::new(
+            Arc::new(compression_mock),
+            compression_config,
+        )));
+        let context_pipeline = ContextPipeline::new(
+            vfs.clone() as Arc<dyn VirtualFileSystem>,
+            retriever,
+            compressor,
+            10,
+            5,
+        );
+        let agent_loop = AgentLoop::new(
+            Arc::new(mock),
+            ToolRegistry::new(SecurityPolicy::default()),
+            session_manager.clone(),
+            AgentLoopConfig { max_turns: 5 },
+        );
+        Agent::new(
+            "test-model".to_string(),
+            context_pipeline,
+            AgentMetrics::new(),
+            agent_loop,
+            session_manager,
+            None,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_process_wake_triggers_compression_check() {
+        // C1 回归：唤醒轮同样执行轮末压缩检查——高负载区间若主要由唤醒轮
+        // 推进（等子代理报告/后台通知），此前无检查使上下文持续增长而压缩
+        // 被无限推迟（实测：60.8%→81.7% 区间零压缩）。修复后唤醒轮结束即
+        // 检查：超阈值场景应落库压缩点。
+        let mut session = Session::new("session-1");
+        // 7 条超阈值消息（窗口 2000 × 阈值 1.0 → 触发线 2000；实测值 3000）
+        for _ in 0..7 {
+            let mut sm = ContextAssembler::message_to_structured(
+                &Message::user("历史消息"),
+                "session-1",
+                None,
+                None,
+            );
+            sm.tokens.input = 3_000;
+            session.add_structured_message(sm);
+        }
+        let session_manager = Arc::new(InMemorySessionManager {
+            session: TokioMutex::new(session),
+        });
+
+        let mut compress_mock = MockChatService::new();
+        compress_mock
+            .expect_chat_completion()
+            .returning(|_| Ok(response_with(Message::assistant("唤醒轮压缩摘要"))));
+        let agent = make_agent_with_sessions(
+            session_manager.clone(),
+            stream_mock(vec![stream_chunk_finish("已汇总")]),
+            compress_mock,
+            CompressionConfig {
+                context_window: 2000,
+                compression_threshold: 1.0,
+                ..CompressionConfig::default()
+            },
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        agent
+            .process_wake("session-1", StreamEventSender::new(tx))
+            .await;
+        let _ = drain.await;
+
+        let saved = session_manager.session.lock().await;
+        let markers = saved
+            .messages
+            .iter()
+            .filter(|m| m.compression_marker)
+            .count();
+        assert_eq!(markers, 1, "唤醒轮结束应执行压缩检查并落库压缩点");
+        let marker = saved
+            .messages
+            .iter()
+            .find(|m| m.compression_marker)
+            .unwrap();
+        let text = marker
+            .parts
+            .iter()
+            .find_map(|p| match p {
+                crate::common::types::Part::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(
+            text.contains("唤醒轮压缩摘要"),
+            "压缩点内容应来自压缩调用: {text}"
         );
     }
 
