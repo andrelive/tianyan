@@ -40,6 +40,24 @@ fn model_services_error(e: impl std::fmt::Display) -> TianyanError {
     TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{e}"))
 }
 
+/// 按配置派生工作区快照管理器（配置了 `working_directory` 时启用）。
+///
+/// 组合根单点：`AppState::new` 与 `AppState::reload_agent` 共用——热重载
+/// 必须用**新配置**重建（T0-12：旧实现沿用启动期实例，改工作目录后工具在
+/// 新目录、快照/回退仍在旧目录；初始为 None 时热更新后快照永久不可用）。
+fn build_snapshot_manager(config: &TianyanConfig) -> Option<Arc<SnapshotManager>> {
+    config.agent.working_directory.clone().map(|workdir| {
+        let root = config.storage.data_dir.join("snapshots");
+        let workdir = std::path::PathBuf::from(workdir);
+        tracing::info!(
+            "工作区快照已启用: 目录={}, 存储={}",
+            workdir.display(),
+            root.display()
+        );
+        Arc::new(SnapshotManager::new(root, workdir))
+    })
+}
+
 // ── 模型解析单一入口（组合根去重） ────────────────────────────────────────
 //
 // 全 server 各装配点（state.rs 工厂、agent_builder.rs、scheduler 任务注册）
@@ -235,7 +253,12 @@ pub struct AppState {
     session_store: Arc<tianyan::session::store::SessionStore>,
     usage_log: Arc<UsageLog>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
-    snapshot_manager: Option<Arc<SnapshotManager>>,
+    /// 工作区快照管理器（配置了 working_directory 时启用）。
+    ///
+    /// `std::sync::RwLock`（同步、只瞬时持锁）：读多写少——每次请求读一次，
+    /// 仅配置热重载写一次；保持 getter 同步以免波及全部调用点（T0-12：
+    /// 热重载必须换成**新工作目录**的实例，不能沿用启动期实例）。
+    snapshot_manager: Arc<std::sync::RwLock<Option<Arc<SnapshotManager>>>>,
     /// 模型服务（chat/embedding/vision，全组件共享；配置热更新时重建）
     model_services: Arc<RwLock<tianyan::model::ModelServices>>,
     /// MCP 客户端生命周期管理器（跨 agent reload 保持连接一致）
@@ -317,17 +340,9 @@ impl AppState {
         // 初始化 LLM 用量日志（token 统计；共享 SqliteDb 连接）
         let usage_log = UsageLog::new(database.clone())?;
 
-        // 初始化工作区快照管理器（配置了 working_directory 时启用）
-        let snapshot_manager = config.agent.working_directory.clone().map(|workdir| {
-            let root = config.storage.data_dir.join("snapshots");
-            let workdir = std::path::PathBuf::from(workdir);
-            tracing::info!(
-                "工作区快照已启用: 目录={}, 存储={}",
-                workdir.display(),
-                root.display()
-            );
-            Arc::new(SnapshotManager::new(root, workdir))
-        });
+        // 初始化工作区快照管理器（配置了 working_directory 时启用；
+        // 与 reload_agent 共用同一构造助手）
+        let snapshot_manager = build_snapshot_manager(&config);
 
         // MCP 工具桥接：连接配置中的 MCP 服务器，生成动态工具
         // （图片类返回，如浏览器截图，落盘到 {data_dir}/mcp_images/）
@@ -427,7 +442,7 @@ impl AppState {
             session_recall,
             session_store,
             usage_log,
-            snapshot_manager,
+            snapshot_manager: Arc::new(std::sync::RwLock::new(snapshot_manager)),
             model_services: Arc::new(RwLock::new(model_services)),
             mcp_tools,
             scheduler: Arc::new(RwLock::new(None)),
@@ -577,12 +592,13 @@ impl AppState {
             model_services.embedding.clone(),
             resolve_embedding_model(&config),
         ));
+        let new_snapshot_manager = build_snapshot_manager(&config);
         let new_agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
             self.vfs.clone(),
             self.usage_stats.clone(),
-            self.snapshot_manager.clone(),
+            new_snapshot_manager.clone(),
             dynamic_tools,
             Some(self.sqlite_db.clone()),
             crate::notification::global_notification_sink(),
@@ -604,6 +620,12 @@ impl AppState {
 
         *self.agent.write().await = new_agent;
         *self.model_services.write().await = model_services;
+        // T0-12：快照管理器随新配置替换（builder 成功后才提交，避免半更新
+        // 状态——旧实现根本不重建，快照/回退停留在旧工作目录）
+        *self
+            .snapshot_manager
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = new_snapshot_manager;
 
         tracing::info!("Agent 重新加载成功");
         Ok(())
@@ -637,7 +659,10 @@ impl AppState {
 
     /// 获取工作区快照管理器（未配置 working_directory 时为 None）。
     pub fn snapshot_manager(&self) -> Option<Arc<SnapshotManager>> {
-        self.snapshot_manager.clone()
+        self.snapshot_manager
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// 获取全局默认工作目录（[agent] working_directory 配置；动态读取，
