@@ -320,10 +320,10 @@ export default function ChatPanel() {
         useAppStore.getState().setStreamStatus('idle');
         useAppStore.getState().removeEmptyAssistantMessage();
       }
-      // 新会话已创建并固化工作区绑定：清除待绑定状态（每个新对话重新选择）
-      if (isNewSession) {
-        useAppStore.getState().setNewSessionWorkspace(null);
-      }
+      // 新会话已创建并固化工作区绑定：待绑定状态由会话列表在刷新就绪后清理
+      // （U9：此处不再立即清——列表刷新是异步的，立即清会让新建工作目录
+      // 的分组在刷新返回前失去依据闪断；失败路径也不应清，否则重试丢目录）。
+      // 见 SessionList 的 currentSessionId 变更 effect。
     },
     [addMessage, startStream, setLastRollbackMessageId],
   );

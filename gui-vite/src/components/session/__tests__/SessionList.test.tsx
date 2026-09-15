@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
@@ -222,6 +222,52 @@ describe('SessionList', () => {
     expect(screen.getByRole('button', { name: '新会话' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '分组 a' })).toBeInTheDocument();
     expect(useAppStore.getState().newSessionWorkspace).toBe('C:\\sub1');
+  });
+
+  it('新建目录会话后：分组在列表刷新完成前不得消失（U9）', async () => {
+    const user = userEvent.setup();
+    mockSessions([]);
+    renderSessionList();
+
+    // 添加新工作区 C:\sub1 → 占位分组出现
+    await user.click(screen.getByRole('button', { name: '新目录' }));
+    const dialog = screen.getByRole('dialog', { name: '选择目录' });
+    await waitFor(() => {
+      expect(within(dialog).getByRole('button', { name: '目录 C:\\' })).toBeInTheDocument();
+    });
+    await user.dblClick(within(dialog).getByRole('button', { name: '目录 C:\\' }));
+    const subDir = await within(dialog).findByRole('button', { name: '目录 sub1' });
+    await user.click(subDir);
+    await user.click(within(dialog).getByRole('button', { name: '确认选择' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '分组 sub1' })).toBeInTheDocument();
+    });
+
+    // 让后续的会话列表刷新“挂住”（模拟真实场景：会话已创建、列表尚未返回）
+    let release!: () => void;
+    server.use(
+      http.get('/api/v1/sessions', async () => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return HttpResponse.json({ sessions: [], total: 0 });
+      }),
+    );
+
+    // 会话创建完成（currentSessionId: null → 新 id；真实场景由发送首条消息触发）
+    // act 包裹：让 effect（撤销占位 + 刷新）同步生效后再断言
+    await act(async () => {
+      useAppStore.setState({ currentSessionId: 'new-session' });
+    });
+
+    // U9 关键断言：刷新未返回期间，分组必须仍可见——
+    // 修复前：立即撤销占位（newChatStarted=false）+ 刷新异步 → 分组消失一段时间
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '分组 sub1' })).toBeInTheDocument();
+    });
+
+    // 放行刷新（收尾，不阻断）
+    release();
   });
 
   it('文件视图 button navigates to /workspace', async () => {

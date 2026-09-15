@@ -68,17 +68,30 @@ export default function SessionList() {
     return data;
   }, []);
 
-  // 新会话创建完成（currentSessionId 从 null → 非 null）后刷新列表：
-  // 让刚创建的真实会话条目出现在对应分组下（占位条目随之消失）
+  // 新会话创建完成（currentSessionId 从 null → 非 null）后触发列表刷新：
+  // 让刚创建的真实会话条目出现在对应分组下。
   const prevSessionId = useRef<string | null>(null);
   useEffect(() => {
     if (currentSessionId && currentSessionId !== prevSessionId.current) {
-      // 会话已创建/选中：新会话占位消失 + 刷新列表（真实条目出现）
-      setNewChatStarted(false);
-      void reloadSessions();
+      // 刷新会话列表（reload 不返回 Promise，不能 await；占位清理由
+      // 下方“数据就绪” effect 驱动，不依赖刷新时序）
+      reloadSessions();
     }
     prevSessionId.current = currentSessionId;
   }, [currentSessionId, reloadSessions]);
+
+  // 占位与待绑定目录的清理由**数据就绪**驱动（U9）：新会话真实条目出现在
+  // `sessions` 后才撤占位/清目录——此前在 currentSessionId 变化时立即撤，
+  // 而列表刷新是异步的（reload 不返回 Promise，无法 await），中间窗口里
+  // 新建工作目录的分组会先消失再重现（用户可见闪烁）。ChatPanel 也不再在
+  // 会话创建瞬间清待绑定目录（清理统一收敛到这里；失败路径也不清，重试
+  // 不丢目录）。
+  useEffect(() => {
+    if (newChatStarted && currentSessionId && sessions.some((s) => s.id === currentSessionId)) {
+      setNewChatStarted(false);
+      setNewSessionWorkspace(null);
+    }
+  }, [newChatStarted, currentSessionId, sessions, setNewSessionWorkspace]);
 
   // 进入编辑模式时聚焦输入框
   useEffect(() => {
