@@ -27,6 +27,9 @@ export const PENDING_SESSION_KEY = '__pending__';
  * 补充信息 tab），每个问题含选项（label + description；空 = 纯文本输入），
  * 对齐 DSH ask_user_question 的 questions 数组形态。 */
 export interface PendingClarification {
+  /** 问题所属会话（U7 跨会话隔离）：气泡只在对应会话显示；
+   * 回答也提交回该会话（否则在别的会话回答会错投，原会话永久卡死）。 */
+  sessionId: string;
   questions: { question: string; options: { label: string; description?: string | null }[] }[];
 }
 

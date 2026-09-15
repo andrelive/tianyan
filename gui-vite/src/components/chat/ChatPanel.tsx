@@ -186,7 +186,9 @@ export default function ChatPanel() {
   // 内容跟随签名：消息数/流状态/会话切换变化时，若仍跟随则滚动到底。
   // 滚动阈值翻转（setState → effect → scrollToBottom → scroll）不再触发
   // follow——签名只在内容真正变化时更新（DSH followSig 模式）。
-  const followSig = `${currentSessionId}:${messages.length}:${streamStatus}:${pendingClarification ? 1 : 0}`;
+  const followSig = `${currentSessionId}:${messages.length}:${streamStatus}:${
+    pendingClarification && pendingClarification.sessionId === currentSessionId ? 1 : 0
+  }`;
   useEffect(() => {
     if (followSigRef.current === followSig) return;
     followSigRef.current = followSig;
@@ -391,7 +393,10 @@ export default function ChatPanel() {
       // （工具结果经原流返回）——提交回答不能因 streaming 被拦截，只防重复提交
       if (clarifySubmitting) return;
       const state = useAppStore.getState();
-      const sessionId = state.currentSessionId;
+      // U7：回答提交到**问题所属会话**（而非当前会话）——跨会话隔离下气泡
+      // 只在对应会话显示，但保险起见仍以问题绑定的会话为准（错投会让原
+      // 会话的 ask_user 永久挂起）。
+      const sessionId = state.pendingClarification?.sessionId ?? state.currentSessionId;
       if (!sessionId) {
         state.showToast('请先发送一条消息以创建会话', 'error');
         return;
@@ -581,7 +586,7 @@ export default function ChatPanel() {
           输入框区域被问题表单替代，回答提交后恢复。
           注意：同步工具语义下 ask_user 工具执行挂起时主对话流仍处于 streaming
           （工具结果经原流返回）——气泡渲染只看 pending，不再要求 idle。 */}
-        {pendingClarification ? (
+        {pendingClarification && pendingClarification.sessionId === currentSessionId ? (
           <ClarificationBubble
             questions={pendingClarification.questions}
             submitting={clarifySubmitting}

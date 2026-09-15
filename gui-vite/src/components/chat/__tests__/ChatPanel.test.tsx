@@ -342,10 +342,31 @@ describe('ChatPanel', () => {
     expect(useAppStore.getState().lastRollbackMessageId).toBeNull();
   });
 
+  it('show no clarification bubble for a different session (cross-session isolation)', () => {
+    useAppStore.setState({
+      currentSessionId: 'session-B',
+      pendingClarification: {
+        sessionId: 'session-A',
+        questions: [{ question: '请确认是否删除该文件？', options: [] }],
+      },
+    });
+
+    renderChatPanel();
+
+    // 跨会话：不得显示追问气泡（否则在 B 会话回答会提交到 B，A 永久卡死）
+    expect(screen.queryByText('AI 需要确认')).not.toBeInTheDocument();
+    expect(screen.queryByText('请确认是否删除该文件？')).not.toBeInTheDocument();
+    // 普通输入框可用（textbox 可见）
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+  });
+
   it('shows the clarification bubble when a clarification is pending', () => {
     useAppStore.setState({
       currentSessionId: 'session-1',
-      pendingClarification: { questions: [{ question: '请确认是否删除该文件？', options: [] }] },
+      pendingClarification: {
+        sessionId: 'session-1',
+        questions: [{ question: '请确认是否删除该文件？', options: [] }],
+      },
     });
 
     renderChatPanel();
@@ -361,7 +382,10 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     useAppStore.setState({
       currentSessionId: 'session-1',
-      pendingClarification: { questions: [{ question: '请确认是否删除该文件？', options: [] }] },
+      pendingClarification: {
+        sessionId: 'session-1',
+        questions: [{ question: '请确认是否删除该文件？', options: [] }],
+      },
     });
 
     renderChatPanel();

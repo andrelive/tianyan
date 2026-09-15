@@ -123,8 +123,10 @@ export function handleChatStreamEvent(event: ChatStreamEvent): void {
     // 回答提交到 /chat/answer 后工具结果经本流返回，loop 继续。
     if (event.tool_call.name === 'ask_user') {
       const questions = parseAskUserQuestions(event.tool_call.arguments);
-      if (questions.length > 0) {
-        st.setPendingClarification({ questions });
+      // U7：追问绑定来源会话（跨会话隔离）——气泡只在对应会话显示，
+      // 回答也提交回该会话；无会话归属的事件不弹（保守）。
+      if (questions.length > 0 && sid) {
+        st.setPendingClarification({ sessionId: sid, questions });
       }
     }
   }

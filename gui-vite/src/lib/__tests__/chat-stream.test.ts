@@ -57,6 +57,25 @@ describe('handleChatStreamEvent', () => {
     expect(tool).toMatchObject({ duration_ms: 42, success: true, result: 'result-ok' });
   });
 
+  it('ask_user 事件把追问绑定到来源会话（跨会话不串）', () => {
+    handleChatStreamEvent(
+      ev({
+        session_id: 'session-A',
+        tool_call: {
+          id: 't-ask',
+          name: 'ask_user',
+          arguments: JSON.stringify({ questions: [{ question: '确认吗？', options: [] }] }),
+          presentation: 'generic',
+        },
+      }),
+    );
+
+    const pending = useAppStore.getState().pendingClarification;
+    expect(pending?.questions[0]?.question).toBe('确认吗？');
+    // 修复前无 sessionId：追问是全局状态 → 在其他会话也会弹（并在该会话提交 → 原会话卡死）
+    expect(pending?.sessionId).toBe('session-A');
+  });
+
   it('handles error chunks: removes the empty bubble, resets status, shows toast', () => {
     useAppStore.getState().addMessage({ role: 'assistant', segments: [], id: null, timestamp: '' });
     useAppStore.getState().setStreamStatus('streaming');
