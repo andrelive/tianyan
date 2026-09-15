@@ -50,6 +50,30 @@ fn test_risk_level_assessment() {
 }
 
 #[test]
+fn test_risk_assessment_takes_max_across_command_segments() {
+    // T0-2：多段命令取最严段——修复前只按整条首词定级，
+    // `git status && rm -rf /` 被低估为 Medium（危险命令确认门被绕过）。
+    let workflow = ApprovalWorkflow::new(ApprovalWorkflowConfig::default());
+    let chained = Action::ExecuteCommand {
+        command: "git status && rm -rf /".to_string(),
+        cwd: None,
+        timeout_secs: None,
+    };
+    assert_eq!(
+        workflow.assess_risk(&chained),
+        RiskLevel::Critical,
+        "第二段危险命令必须提升整条定级"
+    );
+    // 单段行为不变（首词即全命令语义）
+    let single = Action::ExecuteCommand {
+        command: "git status".to_string(),
+        cwd: None,
+        timeout_secs: None,
+    };
+    assert_eq!(workflow.assess_risk(&single), RiskLevel::Medium);
+}
+
+#[test]
 fn test_risk_assessment_segment_matching() {
     // 回归保护：风险定级按路径段/词边界匹配——
     // 1) 子串巧合不得误降级（attestation.txt 含 test、latest 含 test、

@@ -237,15 +237,29 @@ impl ApprovalWorkflow {
             Action::ExecuteCommand { command, .. } => {
                 // 命令风险定级单一事实源（security.rs classify_command_risk）：
                 // Blocked/Dangerous → Critical（需用户确认），Moderate → Medium，Low → Low。
-                // 命令名经 extract_command_base 归一（小写、无路径/后缀），
-                // 与 check_command 同一匹配语义（此前为 contains 子串匹配，
-                // 会误伤 rmdir→rm 等边缘命令名）。
-                let cmd_name = crate::executor::command::extract_command_base(command);
-                match crate::executor::security::classify_command_risk(&cmd_name) {
-                    crate::executor::security::CommandRisk::Blocked
-                    | crate::executor::security::CommandRisk::Dangerous => RiskLevel::Critical,
-                    crate::executor::security::CommandRisk::Moderate => RiskLevel::Medium,
-                    crate::executor::security::CommandRisk::Low => RiskLevel::Low,
+                // 逐段取最严（T0-2）：`;`/`&&`/`||`/`|`/换行 切分的每一段独立
+                // 定级后取最高风险——修复前只按整条首词定级（`git status &&
+                // rm -rf /` 被低估为 Medium，危险命令确认门被绕过）；命令名经
+                // extract_command_base 归一（小写、无路径/后缀），与 check_command
+                // 同一匹配语义（此前为 contains 子串匹配，会误伤 rmdir→rm 等边缘命令名）。
+                use crate::executor::security::CommandRisk;
+                let risk = crate::executor::security::split_command_segments(command)
+                    .iter()
+                    .map(|seg| {
+                        let name = crate::executor::command::extract_command_base(seg);
+                        crate::executor::security::classify_command_risk(&name)
+                    })
+                    .max_by_key(|r| match r {
+                        CommandRisk::Low => 0,
+                        CommandRisk::Moderate => 1,
+                        CommandRisk::Dangerous => 2,
+                        CommandRisk::Blocked => 3,
+                    })
+                    .unwrap_or(CommandRisk::Low);
+                match risk {
+                    CommandRisk::Blocked | CommandRisk::Dangerous => RiskLevel::Critical,
+                    CommandRisk::Moderate => RiskLevel::Medium,
+                    CommandRisk::Low => RiskLevel::Low,
                 }
             }
             Action::CallSkill { skill_id, .. } => {

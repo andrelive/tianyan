@@ -400,6 +400,42 @@ fn is_meaningless_blocked_dir(_dir: &std::path::Path) -> bool {
     false
 }
 
+/// 将命令按 shell 分段符切分为子命令段（逐段安全判定的基础）。
+///
+/// 分段符：`&&`、`||`、`;`、`|`、换行（`\n`/`\r`）——命令统一经
+/// `sh -c` / `powershell -Command` 执行（见 executor::command::build_shell_command），
+/// 这些符号两侧都是独立命令段。单个 `&` 不作为分段符（URL/参数常见字符，
+/// 且非分段语义的误伤大于收益——既有决策）；`|` 是合法管道（strict 模式
+/// 不拦），但右侧是新命令段，逐段判定必须覆盖。
+///
+/// 返回各段原始切片（含前后空白，调用方自行 trim）；空段被剔除。
+pub(crate) fn split_command_segments(command: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let bytes = command.as_bytes();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let is_sep = match b {
+            b';' | b'|' | b'\n' | b'\r' => true,
+            b'&' => i + 1 < bytes.len() && bytes[i + 1] == b'&',
+            _ => false,
+        };
+        if is_sep {
+            segments.push(&command[start..i]);
+            // 双字符分隔符（`&&` / `||`）：跳过后一个字符
+            if matches!(b, b'&' | b'|') && i + 1 < bytes.len() && bytes[i + 1] == b {
+                i += 1;
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    segments.push(&command[start..]);
+    segments.retain(|s| !s.trim().is_empty());
+    segments
+}
+
 impl SecurityPolicy {
     /// 检查命令是否被允许执行。
     pub fn check_command(&self, command: &str) -> Result<(), TianyanError> {
@@ -417,46 +453,54 @@ impl SecurityPolicy {
             ));
         }
 
-        let cmd_name = command.split_whitespace().next().unwrap_or(command);
-        let pure_name = extract_command_base(cmd_name);
-
-        if self.block_interpreters {
-            let interpreters = ["cmd", "powershell", "pwsh", "bash", "sh", "wsl", "wsl.exe"];
-            if interpreters.contains(&pure_name.as_str()) {
-                return Err(TianyanError::Custom(format!(
-                    "executor: 安全策略违规：禁止通过解释器执行命令：{}",
-                    cmd_name
-                )));
+        // 逐段安全判定（T0-2）：`;`/`&&`/`||`/`|`/换行 切分的每一段都独立
+        // 检查（解释器 / 黑名单 / 白名单）——修复前只检查整条首词与整条
+        // 前缀，`git status && rm -rf /` 的第二段在 relaxed 模式（默认）
+        // 下完全跳过；管道右侧（`echo | powershell`）同理。
+        for segment in split_command_segments(command) {
+            let seg = segment.trim();
+            if seg.is_empty() {
+                continue;
             }
-        }
+            let seg_word = seg.split_whitespace().next().unwrap_or(seg);
+            let seg_name = extract_command_base(seg);
 
-        for blocked in &self.blocked_commands {
-            let blocked_lower = blocked.to_lowercase();
-            // 匹配语义：单词条目按命令名精确匹配（兼容既有行为）；
-            // 多词条目（如 `rm -rf /`、`del /s`）按整条命令前缀匹配——
-            // 使"全目录删除"类黑名单真正生效（此前仅首词比较导致永不命中）。
-            let hit = if blocked_lower.contains(' ') {
-                command
-                    .to_lowercase()
-                    .trim_start()
-                    .starts_with(&blocked_lower)
-            } else {
-                pure_name == blocked_lower
-            };
-            if hit {
-                return Err(TianyanError::Custom(format!(
-                    "executor: 安全策略违规：命令被安全策略禁止：{}",
-                    cmd_name
-                )));
+            if self.block_interpreters {
+                let interpreters = ["cmd", "powershell", "pwsh", "bash", "sh", "wsl", "wsl.exe"];
+                if interpreters.contains(&seg_name.as_str()) {
+                    return Err(TianyanError::Custom(format!(
+                        "executor: 安全策略违规：禁止通过解释器执行命令：{}",
+                        seg_word
+                    )));
+                }
             }
-        }
-        if let Some(allowed) = &self.allowed_commands {
-            let is_allowed = allowed.iter().any(|a| a.to_lowercase() == pure_name);
-            if !is_allowed {
-                return Err(TianyanError::Custom(format!(
-                    "executor: 安全策略违规：命令不在白名单中：{}",
-                    cmd_name
-                )));
+
+            for blocked in &self.blocked_commands {
+                let blocked_lower = blocked.to_lowercase();
+                // 匹配语义：单词条目按命令名精确匹配（兼容既有行为）；
+                // 多词条目（如 `rm -rf /`、`del /s`）按段前缀匹配——
+                // 单段命令与既有整条前缀语义等价；多段命令由此覆盖后续段
+                // （T0-2：`git status && rm -rf /` 的第二段必须命中）。
+                let hit = if blocked_lower.contains(' ') {
+                    seg.to_lowercase().starts_with(&blocked_lower)
+                } else {
+                    seg_name == blocked_lower
+                };
+                if hit {
+                    return Err(TianyanError::Custom(format!(
+                        "executor: 安全策略违规：命令被安全策略禁止：{}",
+                        seg_word
+                    )));
+                }
+            }
+            if let Some(allowed) = &self.allowed_commands {
+                let is_allowed = allowed.iter().any(|a| a.to_lowercase() == seg_name);
+                if !is_allowed {
+                    return Err(TianyanError::Custom(format!(
+                        "executor: 安全策略违规：命令不在白名单中：{}",
+                        seg_word
+                    )));
+                }
             }
         }
         Ok(())
@@ -465,9 +509,10 @@ impl SecurityPolicy {
     /// 检测命令中是否包含命令链或命令替换元字符。
     ///
     /// 阻止的模式：`&&`（命令链）、`||`（条件链）、`` ` ``（反引号替换）、
-    /// `$(`（命令替换）。`;` 在 POSIX sh 与 Windows PowerShell 中都是语句
-    /// 分隔符，一律阻止（Windows 切换 PowerShell 后不再豁免——cmd 时代
-    /// `;` 无分隔语义，PS 时代有，防注入一致化）。
+    /// `$(`（命令替换）。`;` 与换行（`\n`/`\r`）在 POSIX sh 与 Windows
+    /// PowerShell 中都是语句分隔符，一律阻止（Windows 切换 PowerShell 后
+    /// 不再豁免——cmd 时代 `;` 无分隔语义，PS 时代有，防注入一致化；
+    /// 换行此前漏检可注入第二段命令——T0-2 修复）。
     /// 单个 `&` 不阻止：它同时是 URL/参数的常见字符，误伤大于收益
     /// （真正的链式注入由 `&&` 覆盖；PS 的调用运算符 `&` 由解释器
     /// 白名单兜底）。
@@ -479,6 +524,8 @@ impl SecurityPolicy {
             || command.contains('`')
             || command.contains("$(")
             || command.contains(';')
+            || command.contains('\n')
+            || command.contains('\r')
     }
 
     /// 检查文件写入是否被允许。
@@ -810,6 +857,80 @@ mod tests {
         let base = dir.path().to_path_buf();
         let up = base.join("x").join("..").join("..").join("y");
         assert_eq!(lexical_normalize(&up), base.parent().unwrap().join("y"));
+    }
+
+    // ── T0-2：命令分段判定（逐段黑名单/白名单/解释器 + 换行分段）──────
+
+    /// T0-2 主回归（relaxed 分段黑名单）：`&&`/`;`/`||`/`|`/换行 连接的第二
+    /// 段是独立命令，黑名单必须命中——修复前只匹配整条前缀，后续段完全
+    /// 跳过（漏报）；relaxed 是默认模式，这是主防线。
+    #[test]
+    fn test_relaxed_mode_blocklist_covers_each_segment() {
+        let policy = SecurityPolicy::from_config(&SecurityConfig {
+            safety_mode: SafetyMode::Relaxed,
+            blocked_commands: vec!["rm -rf /".to_string()],
+            ..Default::default()
+        });
+        for cmd in [
+            "git status && rm -rf /",
+            "git status; rm -rf /",
+            "git status || rm -rf /",
+            "echo x | rm -rf /",
+            "git status\nrm -rf /",
+        ] {
+            assert!(
+                policy.check_command(cmd).is_err(),
+                "第二段黑名单必须命中: {cmd}"
+            );
+        }
+        // 无黑名单词的多段命令放行（不得误伤正常链式/管道）
+        assert!(policy.check_command("git status && git log").is_ok());
+        assert!(policy.check_command("git log | Select-String fix").is_ok());
+    }
+
+    /// T0-2 主回归（strict 换行分段）：换行与 `;` 同为 sh/PowerShell 语句
+    /// 分隔符，strict 模式元字符检查必须拦截——修复前换行不检测（可注入）。
+    #[test]
+    fn test_strict_mode_blocks_newline_segmentation() {
+        let policy = policy_with(vec![], vec![]);
+        assert!(
+            policy.check_command("echo hi\nrm -rf /").is_err(),
+            "换行分段必须拦截"
+        );
+        assert!(
+            policy.check_command("echo hi\r\nrm -rf /").is_err(),
+            "CRLF 分段必须拦截"
+        );
+        // 单行命令不受影响
+        assert!(policy.check_command("echo hi").is_ok());
+    }
+
+    /// T0-2：解释器与白名单检查覆盖每一段——第二段启动解释器 / 不在
+    /// 白名单的命令都必须拦（修复前仅查整条首词，管道/链式分段即可绕过）。
+    #[test]
+    fn test_segment_checks_cover_interpreter_and_allowlist() {
+        // strict + 管道分段：`|` 是合法管道（strict 不拦元字符），
+        // 但管道右侧启动解释器必须拦。
+        let strict = policy_with(vec![], vec![]);
+        assert!(
+            strict
+                .check_command("git status | powershell -c calc")
+                .is_err(),
+            "第二段解释器必须拦截"
+        );
+
+        // 白名单逐段：第二段不在白名单 → 拦（修复前只查首词 git 放行）
+        let allowlisted = SecurityPolicy::from_config(&SecurityConfig {
+            safety_mode: SafetyMode::Relaxed,
+            allowed_commands: vec!["git".to_string()],
+            blocked_commands: vec!["never-match-me".to_string()],
+            ..Default::default()
+        });
+        assert!(
+            allowlisted.check_command("git status && ls").is_err(),
+            "第二段不在白名单必须拦截"
+        );
+        assert!(allowlisted.check_command("git status && git log").is_ok());
     }
 
     #[test]
