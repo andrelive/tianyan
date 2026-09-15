@@ -209,7 +209,12 @@ impl ScheduledAgentTaskHandler {
     }
 
     /// 调用 agent 执行任务 prompt（绑定工作区），返回结果摘要。
-    async fn run_agent(&self) -> Option<String> {
+    ///
+    /// 返回 `Ok(摘要)`（成功；空响应归一为"(空响应)"）或 `Err(原因)`——
+    /// **失败必须走 Err**：旧实现把失败也塞进 `Some("执行失败: …")`，使
+    /// `execute()` 的失败分支不可达，调度器统计（run_count/last_error）
+    /// 永远显示成功（T0-11：模型调用全挂时用户看不到失败信号）。
+    async fn run_agent(&self) -> Result<String, String> {
         self.ensure_session().await;
         let sid = format!("sched-task-{}", self.task_id);
         let msg = Message::user(&self.prompt);
@@ -217,29 +222,42 @@ impl ScheduledAgentTaskHandler {
         match agent.process_message(&sid, &msg, None, None).await {
             Ok(resp) => {
                 let content = resp.content.trim();
-                if content.is_empty() {
-                    Some("(空响应)".to_string())
+                Ok(if content.is_empty() {
+                    "(空响应)".to_string()
                 } else {
-                    Some(content.chars().take(500).collect())
-                }
+                    content.chars().take(500).collect()
+                })
             }
-            Err(e) => Some(format!("执行失败: {e}")),
+            Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+/// 执行结果 → （回写文本, 任务结果）映射单点。
+///
+/// 失败必须映射为 [`TaskResult::failed`]（T0-11）：调度器据此统计
+/// `run_count` / `last_error`，失败走 success 会让失败完全静默。
+fn map_run_outcome(run: Result<String, String>) -> (String, TaskResult) {
+    match run {
+        Ok(text) => (text, TaskResult::success(1)),
+        Err(e) => (
+            format!("执行失败: {e}"),
+            TaskResult::failed(TianyanError::Custom(format!(
+                "server: scheduled_tasks: 定时智能体任务执行失败：{e}"
+            ))),
+        ),
     }
 }
 
 #[async_trait::async_trait]
 impl TaskHandler for ScheduledAgentTaskHandler {
     async fn execute(&self, _ctx: &TaskContext) -> TaskResult {
-        let result = self.run_agent().await;
-        let text = result.clone().unwrap_or_else(|| "(无结果)".to_string());
+        // 失败可见化（T0-11）：摘要照写（用户能读到原因），但任务状态必须
+        // 是 failed（否则调度器统计把失败当成功）。
+        let (text, result) = map_run_outcome(self.run_agent().await);
         // 结果经接口回写（manager 已销毁时 upgrade 失败跳过——应用关停中）
         self.result_sink.record_result(&self.task_id, &text).await;
-        if result.is_some() {
-            TaskResult::success(1)
-        } else {
-            TaskResult::failed(TianyanError::Custom("定时智能体任务执行失败".to_string()))
-        }
+        result
     }
 
     fn name(&self) -> &str {
@@ -423,5 +441,40 @@ impl ScheduledAgentTaskManager {
     /// 从调度器注销任务（经 registrar 接口）。
     async fn unregister(&self, id: &str) {
         self.registrar.unregister(id).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T0-11（主回归）：执行失败必须映射为 `TaskResult::failed`。
+    ///
+    /// 判别力：旧实现 `run_agent` 把失败也塞进 `Some(...)`，`execute()` 的
+    /// `result.is_some()` 恒真 → 失败分支不可达，调度器统计永远成功。
+    #[test]
+    fn test_failed_run_maps_to_failed_task_result() {
+        let (text, result) = map_run_outcome(Err("模型调用失败：connect timeout".to_string()));
+        assert!(!result.success, "失败执行必须映射为 failed（T0-11）");
+        assert_eq!(result.processed_count, 0);
+        let err = result.error.expect("failed 必须携带错误").to_string();
+        assert!(
+            err.contains("模型调用失败"),
+            "错误原因必须透传，实际: {err}"
+        );
+        assert!(
+            text.contains("执行失败"),
+            "回写文本应可见失败，实际: {text}"
+        );
+    }
+
+    /// 成功路径不受影响（摘要 + 计数 1）。
+    #[test]
+    fn test_success_run_maps_to_success_task_result() {
+        let (text, result) = map_run_outcome(Ok("任务完成摘要".to_string()));
+        assert!(result.success);
+        assert_eq!(result.processed_count, 1);
+        assert_eq!(text, "任务完成摘要");
+        assert!(result.error.is_none());
     }
 }
