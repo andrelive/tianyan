@@ -75,6 +75,11 @@ export const MarkdownContent = memo(function MarkdownContent({
     <div
       className={cn(
         'text-lg leading-relaxed break-words',
+        // U4：Markdown 软换行（段落内 \n）在浏览器默认 white-space 下折叠为空格——
+        // 文本结构化内容（画线框图）与用户输入的多行文本换行丢失；pre-wrap 保留
+        // 换行与连续空格（ASCII art 对齐），且仍允许长行自动换行（区别于 pre）。
+        '[&_p]:whitespace-pre-wrap',
+        '[&_li]:whitespace-pre-wrap',
         '[&_p]:mb-2 [&_p:last-child]:mb-0',
         '[&_ul]:mb-2 [&_ol]:mb-2',
         '[&_ul]:pl-5 [&_ol]:pl-5',
