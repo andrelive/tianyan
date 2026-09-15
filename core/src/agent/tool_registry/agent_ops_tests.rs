@@ -2,6 +2,7 @@
 //! self_check / delegate_to_agent。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -753,6 +754,85 @@ async fn test_delegate_timeout_aborts_hung_subagent() {
     assert!(
         result.unwrap_err().to_string().contains("委托执行超时"),
         "错误应提示超时"
+    );
+}
+
+/// T0-10（主回归）：子代理**超时**不得污染会话级取消标志。
+///
+/// 判别力：旧实现把会话槽里的 Arc 直接交给子代理并在超时时置位它——该 Arc
+/// 同时是**父轮**的取消标志（coordinator 注入同一槽）→ 父轮下一步与后续
+/// 委托被误取消。
+#[tokio::test]
+async fn test_delegate_timeout_does_not_pollute_shared_cancel() {
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion_stream().returning(|_| {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        std::mem::forget(tx); // 挂起流：逼出超时路径
+        Ok(rx)
+    });
+    let registry = delegate_registry(mock);
+    // 会话共享标志 = 父轮"停止"标志的同一条 Arc
+    let shared = Arc::new(AtomicBool::new(false));
+    registry
+        .set_delegation_cancel("session-1", Some(shared.clone()))
+        .await;
+    let task_id = register_delegate_task(&registry, "hung with timeout").await;
+
+    let result = registry
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"hung with timeout","timeout_secs":1}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
+        .await;
+    assert!(result.is_err(), "挂起子代理应超时失败");
+    assert!(
+        !shared.load(Ordering::Relaxed),
+        "子代理超时不得置位会话共享取消标志（T0-10：会把父轮一并误取消）"
+    );
+
+    // 父轮后续委托不受影响（超时只停子代理自己）
+    let next = registry
+        .execute_delegate_to_agent(r#"{"task":"next sibling"}"#, "session-1")
+        .await;
+    assert!(next.is_ok(), "超时后父轮后续委托仍应受理：{:?}", next.err());
+}
+
+/// T0-10（镜像面）：用户"停止"（会话共享标志）仍必须传播到子代理。
+///
+/// 镜像任务（10ms 轮询）把共享标志同步到子代理本地标志——本测试防止
+/// "修污染"时把用户停止语义一起丢掉。
+#[tokio::test]
+async fn test_delegate_user_stop_still_propagates_to_subagent() {
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion_stream().returning(|_| {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            // 稍后才产出 chunk：给镜像任务时间把共享标志同步到本地
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let _ = tx.send(Ok(stream_chunk_finish("late", "stop"))).await;
+        });
+        Ok(rx)
+    });
+    let registry = delegate_registry(mock);
+    // 用户已点"停止"（父轮取消标志置位）
+    let shared = Arc::new(AtomicBool::new(true));
+    registry
+        .set_delegation_cancel("session-1", Some(shared))
+        .await;
+    let task_id = register_delegate_task(&registry, "stopped").await;
+
+    let result = registry
+        .run_subagent_loop(
+            &serde_json::from_str(r#"{"task":"stopped"}"#).unwrap(),
+            "session-1",
+            &task_id,
+        )
+        .await;
+    let err = result.expect_err("用户停止后子代理应被取消");
+    assert!(
+        err.to_string().contains("取消"),
+        "错误应提示取消，实际: {err}"
     );
 }
 

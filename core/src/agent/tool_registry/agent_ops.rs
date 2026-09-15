@@ -464,14 +464,35 @@ impl ToolRegistry {
         // （组装见 [`Self::build_delegate_tools`]）。
         let delegate_tools = self.build_delegate_tools(role_tools.as_deref()).await;
 
-        // 取消标志：主循环停止时置位（coordinator 注入 delegation_cancel）
-        let cancel = self
-            .delegation_cancel
-            .lock()
-            .await
-            .get(session_id)
-            .cloned()
-            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        // 取消标志（T0-10）：**子代理本地标志 + 会话共享标志镜像**。
+        //
+        // 旧实现把会话槽里的 Arc 直接 clone 给子代理，超时时置位它——而该 Arc
+        // 同时是**父轮**的取消标志（coordinator 注入同一槽）→ 子代理超时把父轮
+        // 下一步与后续委托一并误取消。现在超时只置位本地标志；用户"停止"
+        // （共享标志）经镜像任务（10ms 轮询，子代理结束即 abort）传播到本地，
+        // 停止语义不变。
+        let shared_cancel = self.delegation_cancel.lock().await.get(session_id).cloned();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_mirror = {
+            let shared = shared_cancel.clone();
+            let local = cancel.clone();
+            tokio::spawn(async move {
+                loop {
+                    if local.load(Ordering::Relaxed) {
+                        break; // 本地已置位（超时）→ 镜像使命结束
+                    }
+                    if shared
+                        .as_ref()
+                        .map(|c| c.load(Ordering::Relaxed))
+                        .unwrap_or(false)
+                    {
+                        local.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+        };
 
         // 流式事件转发（ADR-032 统一转发器）：AgentStreamChunk → 事件 JSON
         // → TaskEventSink（task_id 即 session_id，前端完全复用主会话 reducer）。
@@ -504,8 +525,8 @@ impl ToolRegistry {
             tools: Some(delegate_tools),
         });
 
-        // 循环执行（含 timeout 兜底守卫）：超时置位取消标志并返回超时错误
-        // （执行细节见 [`Self::run_delegate_loop`]）。
+        // 循环执行（含 timeout 兜底守卫）：超时置位**子代理本地**标志并返回
+        // 超时错误（执行细节见 [`Self::run_delegate_loop`]）。
         let result = Self::run_delegate_loop(
             agent_loop,
             &mut messages,
@@ -515,7 +536,10 @@ impl ToolRegistry {
             &cancel,
             timeout_secs,
         )
-        .await?;
+        .await;
+        // 镜像任务收尾（超时/正常结束都释放；否则会随父轮存活）
+        cancel_mirror.abort();
+        let result = result?;
 
         // 轮结束（sender 已随 run_stream 释放）→ 消费任务收尾：等待句柄确保
         // 子代理尾部事件（最后一块正文/工具结果）已送达面板。
@@ -641,8 +665,12 @@ impl ToolRegistry {
         delegate_tools
     }
 
-    /// 执行子代理循环并返回循环结果（timeout 兜底：超时置位取消标志并返回
-    /// 超时错误；`cancel` 为主循环停止时置位的共享标志）。
+    /// 执行子代理循环并返回循环结果（timeout 兜底：超时置位**子代理本地**
+    /// 取消标志并返回超时错误）。
+    ///
+    /// `cancel` 是**子代理本地**标志（用户停止经镜像任务传播，见
+    /// [`Self::run_subagent_loop`]）——超时置位它不会污染父轮/后续委托
+    /// （T0-10：旧实现置位会话共享标志，把父轮一并误取消）。
     async fn run_delegate_loop(
         agent_loop: AgentLoop,
         messages: &mut Vec<Message>,
