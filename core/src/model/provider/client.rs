@@ -51,13 +51,15 @@ impl AsyncOpenAIClient {
         }
 
         let http_client =
-            crate::common::http::build_http_client(&crate::common::http::HttpClientSpec {
+            crate::common::http::build_http_client(crate::common::http::HttpClientSpec {
                 // 读空闲超时（字节间无数据的最长间隔）——非总请求时长：
                 // 流式思维链+长正文可持续数分钟，总时长限制会把长生成
                 // 在中途掐断（0.2.3 会话静默中断的根因，见 ADR-023 后续排查）
                 timeout: std::time::Duration::from_secs(config.timeout),
                 connect_timeout: std::time::Duration::from_secs(30),
                 user_agent: None,
+                // 模型 API 端点来自用户配置（可信），保持默认重定向跟随
+                redirect_policy: None,
             })?;
 
         let client = Client::with_config(oa_config).with_http_client(http_client.clone());

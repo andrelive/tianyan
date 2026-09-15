@@ -20,10 +20,14 @@ pub struct HttpClientSpec {
     pub connect_timeout: Duration,
     /// User-Agent（None 用 reqwest 默认）。
     pub user_agent: Option<String>,
+    /// 重定向策略（None = reqwest 默认：最多跟随 10 跳）。
+    /// 需要逐跳安全校验的调用方（如 web_fetch 的 SSRF 防护）传入自定义
+    /// 策略——默认跟随会让“初始 URL 已校验、302 到内网”绕过校验。
+    pub redirect_policy: Option<reqwest::redirect::Policy>,
 }
 
 /// 构建 HTTP 客户端（统一连接池策略：每主机空闲连接 5、空闲超时 90s）。
-pub fn build_http_client(spec: &HttpClientSpec) -> Result<reqwest::Client> {
+pub fn build_http_client(spec: HttpClientSpec) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .read_timeout(spec.timeout)
         .connect_timeout(spec.connect_timeout)
@@ -31,6 +35,9 @@ pub fn build_http_client(spec: &HttpClientSpec) -> Result<reqwest::Client> {
         .pool_idle_timeout(Duration::from_secs(90));
     if let Some(ua) = &spec.user_agent {
         builder = builder.user_agent(ua);
+    }
+    if let Some(policy) = spec.redirect_policy {
+        builder = builder.redirect(policy);
     }
     builder
         .build()
@@ -72,10 +79,11 @@ mod tests {
             }
         });
 
-        let client = build_http_client(&HttpClientSpec {
+        let client = build_http_client(HttpClientSpec {
             timeout: Duration::from_millis(300),
             connect_timeout: Duration::from_secs(1),
             user_agent: None,
+            redirect_policy: None,
         })
         .unwrap();
 

@@ -87,7 +87,7 @@ pub struct WebSearchClient {
 impl WebSearchClient {
     /// 从配置创建客户端。
     pub fn new(config: &WebConfig) -> Result<Self> {
-        let http = crate::common::http::build_http_client(&crate::common::http::HttpClientSpec {
+        let http = crate::common::http::build_http_client(crate::common::http::HttpClientSpec {
             timeout: Duration::from_secs(config.timeout_secs.max(1)),
             connect_timeout: Duration::from_secs(config.timeout_secs.clamp(1, 15)),
             user_agent: Some(
@@ -98,6 +98,16 @@ impl WebSearchClient {
                 )
                 .to_string(),
             ),
+            // 逐跳 SSRF 校验（T0-3）：初始 URL 由调用方 validate_public_url
+            // 校验，重定向目标在每一跳发出前再校验——否则公网 URL 可以 302
+            // 到内网绕过防护（reqwest 默认静默跟随，最多 10 跳）。
+            redirect_policy: Some(reqwest::redirect::Policy::custom(|attempt| {
+                if validate_public_url(attempt.url().as_str()).is_err() {
+                    attempt.error("禁止访问本地或内网地址")
+                } else {
+                    attempt.follow()
+                }
+            })),
         })?;
 
         Ok(Self {
@@ -913,5 +923,94 @@ mod tests {
         config.search_backend = "google".to_string();
         let err = WebSearchClient::new(&config).unwrap_err();
         assert!(err.to_string().contains("未知的 search_backend"));
+    }
+
+    // ── T0-3：重定向目标的 SSRF 校验 ────────────────────────────────
+
+    /// 起一个本地 mock HTTP server，对首个请求返回 302（Location 由参数给定）。
+    async fn spawn_mock_redirect(location: String) -> String {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 2048];
+            let _ = socket.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// T0-3 主回归：初始 URL 校验通过后，公网 URL 可 302 到私网绕过
+    /// SSRF 防护——重定向目标必须在每一跳发出前校验（修复前 reqwest
+    /// 默认静默跟随，第二跳会被实际请求）。
+    #[tokio::test]
+    async fn test_fetch_rejects_redirect_to_private_address() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // 第二跳 mock：记录是否被访问——修复后（策略拦截）不得被访问。
+        let hit = Arc::new(AtomicBool::new(false));
+        let hit_in = hit.clone();
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = target.accept().await {
+                hit_in.store(true, Ordering::SeqCst);
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecret",
+                    )
+                    .await;
+            }
+        });
+
+        let endpoint =
+            spawn_mock_redirect(format!("http://127.0.0.1:{}/secret", target_addr.port())).await;
+        let client = WebSearchClient::new(&test_config()).unwrap();
+
+        let err = client
+            .fetch(&format!("{endpoint}/redirect"), None)
+            .await
+            .expect_err("重定向到内网必须失败");
+
+        // 关键断言：内网第二跳不得被实际请求（策略在发出前拦截）
+        assert!(
+            !hit.load(Ordering::SeqCst),
+            "重定向到内网不得实际发出请求（SSRF 绕过）: {err}"
+        );
+        assert!(
+            err.to_string().contains("following redirect"),
+            "应被重定向策略拦下（而非尝试连接内网）: {err}"
+        );
+    }
+
+    /// 回归：重定向到公网字面地址不被策略误伤（策略只拦私网/本地）。
+    ///
+    /// 目标用 `.invalid` 保留域名（RFC 2606 保证永不解析）——策略按 URL
+    /// 字面放行，请求实际发出后 DNS 失败；断言“错误消息不是策略拦截”
+    /// 即可区分（且不触达真实外网，不依赖网络环境）。
+    #[tokio::test]
+    async fn test_fetch_redirect_to_public_not_blocked_by_policy() {
+        let endpoint = spawn_mock_redirect("http://redirect-target.invalid/next".to_string()).await;
+        let client = WebSearchClient::new(&test_config()).unwrap();
+
+        let err = client
+            .fetch(&format!("{endpoint}/redirect"), None)
+            .await
+            .expect_err("目标域名不可解析，请求必失败");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("禁止访问本地或内网地址"),
+            "公网重定向不应被策略拦截（应为网络层失败）: {msg}"
+        );
     }
 }
