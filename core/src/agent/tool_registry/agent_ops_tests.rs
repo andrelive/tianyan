@@ -1453,6 +1453,41 @@ async fn test_task_status_missing_task() {
 }
 
 #[tokio::test]
+async fn test_task_status_running_includes_no_poll_note() {
+    // U1 回归：非终态任务的单查询附"无需轮询"提醒（完成会自动通知）；
+    // 终态后不再附（提醒只针对等待场景）。
+    use crate::agent::background::TaskKind;
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    let id = registry
+        .background_tasks
+        .register(TaskKind::Delegate, "task".to_string(), "s1".to_string(), 0)
+        .await;
+    registry.background_tasks.mark_running(&id).await;
+
+    // 运行中：附提醒
+    let v = registry
+        .execute_task_status(&format!(r#"{{"task_id":"{id}"}}"#))
+        .await
+        .unwrap();
+    assert!(
+        v["note"].as_str().is_some_and(|n| n.contains("无需轮询")),
+        "非终态查询应附无需轮询提醒: {v}"
+    );
+
+    // 终态：不再附
+    registry
+        .background_tasks
+        .complete(&id, "ok".to_string())
+        .await;
+    let v = registry
+        .execute_task_status(&format!(r#"{{"task_id":"{id}"}}"#))
+        .await
+        .unwrap();
+    assert!(v.get("note").is_none(), "终态查询不应附提醒: {v}");
+}
+
+#[tokio::test]
 async fn test_background_assigns_correct_parent_session() {
     // 回归保护：后台任务归属由调用链显式传递的 session_id 决定（非共享可变
     // 状态）——多会话并发 turn 下，各任务挂到正确的父会话。

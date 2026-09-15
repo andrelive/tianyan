@@ -909,12 +909,35 @@ impl ToolRegistry {
         // 单任务查询：按 ID 先查委托表再查命令表（前缀不互斥，双表探测）。
         if let Some(task_id) = params.task_id.as_deref() {
             if let Some(task) = self.background_tasks.get(task_id).await {
-                return serde_json::to_value(task)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")));
+                let mut v = serde_json::to_value(&task)
+                    .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))?;
+                // U1：非终态查询附提醒——任务完成会自动通知，轮询是资源浪费
+                if !task.status.is_terminal() {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert(
+                            "note".to_string(),
+                            serde_json::json!(
+                                "任务仍在运行；完成/失败会自动通知本会话，无需轮询等待。"
+                            ),
+                        );
+                    }
+                }
+                return Ok(v);
             }
             if let Some(task) = self.command_tasks.get(task_id).await {
-                return serde_json::to_value(task)
-                    .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")));
+                let mut v = serde_json::to_value(&task)
+                    .map_err(|e| TianyanError::Custom(format!("tool: 序列化失败：{e}")))?;
+                if matches!(task.status, crate::executor::CommandTaskStatus::Running) {
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert(
+                            "note".to_string(),
+                            serde_json::json!(
+                                "任务仍在运行；完成/失败会自动通知本会话，无需轮询等待。"
+                            ),
+                        );
+                    }
+                }
+                return Ok(v);
             }
             return Err(TianyanError::Custom(format!("tool: 任务不存在：{task_id}")));
         }
