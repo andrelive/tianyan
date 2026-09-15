@@ -332,24 +332,32 @@ impl ToolRegistry {
     }
 
     /// 解析工具文件路径：相对路径（非绝对）基于**会话绑定的工作目录**解析
-    /// （缺省回退进程 cwd 语义，原样返回）；绝对路径原样返回。
+    /// （缺省回退进程 cwd 语义，原样返回）；绝对路径原样解析。
+    ///
+    /// 输出统一做**词法归一化**（折叠 `.`/`..`）——判定（沙箱前缀匹配）
+    /// 与执行（OS 解析）使用同一形态的路径，`sub/../..` 与符号链接都无法
+    /// 制造两者口径差（T0-1）；对模型也更直观（`a/../b` 直接落 `b`）。
     ///
     /// 与 execute_command 默认 cwd 同一套归属规则：模型在会话工作区内工作时，
     /// `read_file ".git/HEAD"`、`glob path="."` 等相对路径落在工作区而非
     /// 进程 cwd（如天演仓库根）。
     pub(crate) async fn resolve_tool_path(&self, session_id: &str, path: &str) -> String {
+        use crate::executor::security::lexical_normalize;
+
         let p = std::path::Path::new(path);
         if p.is_absolute() {
-            return path.to_string();
+            return lexical_normalize(p).to_string_lossy().into_owned();
         }
         if let Some(sm) = &self.session_manager {
             if let Ok(Some(session)) = sm.get_session(session_id).await {
                 if let Some(wd) = session.working_directory(None) {
-                    return wd.join(path).to_string_lossy().into_owned();
+                    let joined = wd.join(path);
+                    return lexical_normalize(&joined).to_string_lossy().into_owned();
                 }
             }
         }
-        path.to_string()
+        // 无会话绑定：保留相对语义（进程 cwd），同样折叠 `.`/`..`
+        lexical_normalize(p).to_string_lossy().into_owned()
     }
 
     /// 解析会话生效的基准目录：会话绑定的工作目录优先，缺省回退进程 cwd。

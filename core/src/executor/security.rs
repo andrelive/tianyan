@@ -262,6 +262,40 @@ pub(crate) fn normalize_path_for_check(p: &std::path::Path) -> std::path::PathBu
     std::path::PathBuf::from(s)
 }
 
+/// 词法归一化路径：折叠 `.` 与 `..` 组件（纯字符串语义，不访问文件系统）。
+///
+/// 供 `canonicalize` 失败的 fallback 使用——目标不存在时 `..` 也必须折叠，
+/// 否则前缀匹配会被 `sub/../..` 之类的路径欺骗（T0-1：白名单逃逸 /
+/// 黑名单漏报）。有根路径的 `..` 不越过根/盘符（`C:\..` = `C:\`、
+/// `/..` = `/`），无根相对路径越界 `..` 保留（`../` 语义）。
+pub(crate) fn lexical_normalize(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+
+    let mut out = std::path::PathBuf::new();
+    // 用 has_root（而非 is_absolute）：Windows 上 `/xx` 有根但无盘符
+    // （is_absolute=false），`..` 越过根仍需折叠为根。
+    let has_root = path.has_root();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::ParentDir) => out.push(comp.as_os_str()),
+                // 根/盘符之上（或空栈）：有根路径忽略，无根路径保留
+                _ => {
+                    if !has_root {
+                        out.push(comp.as_os_str());
+                    }
+                }
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// 统一路径沙箱判定（黑名单绝对优先），供技能 `validate_path` 与 `SecurityPolicy::check_path`
 /// 共用，消除两套语义不一致的路径校验实现：
 ///
@@ -299,20 +333,52 @@ pub(crate) fn check_path_rules(
     PathCheckOutcome::Allowed
 }
 
-/// 解析路径为规范化形式：`canonicalize` 失败回退 `current_dir().join(path)`（再回退原值），
-/// 并剥离 Windows verbatim 前缀。
+/// 解析路径为规范化形式（沙箱判定的路径侧口径）：
+///
+/// 1. 全路径 `canonicalize` 成功 → 物理解析结果（跟随符号链接）；
+/// 2. 失败（目标不存在，如写新文件）→ 先词法折叠 `.`/`..`，再对**最近的
+///    已存在祖先**做物理解析后拼接剩余组件——`..` 与符号链接都无法欺骗
+///    前缀匹配（T0-1：修复前只做 `cwd.join(path)` 不折叠 `..`，
+///    `sub/../..` 可逃出白名单 / 混入黑名单）。
 fn resolve_canonical(path: &std::path::Path) -> std::path::PathBuf {
-    let resolved = path.canonicalize().unwrap_or_else(|_| {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    });
-    normalize_path_for_check(&resolved)
+    if let Ok(c) = path.canonicalize() {
+        return normalize_path_for_check(&c);
+    }
+
+    let absolute = std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf());
+    let lexical = lexical_normalize(&absolute);
+
+    // 从完整路径向上找第一个可物理解析的祖先，拼接剩余组件。
+    let mut probe: &std::path::Path = &lexical;
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(base) = probe.canonicalize() {
+            let mut out = normalize_path_for_check(&base);
+            for name in rest.iter().rev() {
+                out.push(name);
+            }
+            return out;
+        }
+        match (probe.parent(), probe.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                probe = parent;
+            }
+            // 无父级（盘根/根）或无名组件：退回词法结果（异常形态兜底）
+            _ => return lexical,
+        }
+    }
 }
 
-/// 规范化目录用于前缀比较：`canonicalize` 失败回退原值，并剥离 Windows verbatim 前缀。
+/// 规范化目录用于前缀比较：`canonicalize` 失败回退**词法归一化**原值
+/// （配置目录含 `.`/`..` 时保持可比较），并剥离 Windows verbatim 前缀。
 fn normalize_dir_for_check(dir: &std::path::Path) -> std::path::PathBuf {
-    normalize_path_for_check(&dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()))
+    normalize_path_for_check(
+        &dir.canonicalize()
+            .unwrap_or_else(|_| lexical_normalize(dir)),
+    )
 }
 
 /// 黑名单目录条目在本平台是否无意义（应跳过）。
@@ -668,6 +734,82 @@ mod tests {
             .check_path(&path)
             .unwrap_err();
         assert!(err.to_string().contains("黑名单"));
+    }
+
+    // ── T0-1：`..` 归一化（目标不存在时的沙箱绕过回归）──────────────────
+
+    /// T0-1 主回归（白名单逃逸）：目标不存在时 `..` 必须参与归一化——
+    /// 修复前 canonicalize 失败回退不折叠 `..`，`ghost/../..` 可欺骗
+    /// 字符串前缀匹配逃出白名单（判定放行、实际落在白名单之外）。
+    #[test]
+    fn test_check_path_rules_rejects_parent_dir_escape_when_target_missing() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir_all(&allowed).unwrap();
+        // ghost 与 escape.txt 均不存在：canonicalize 失败走 fallback
+        let escape = allowed
+            .join("ghost")
+            .join("..")
+            .join("..")
+            .join("escape.txt");
+        assert_eq!(
+            check_path_rules(&escape, std::slice::from_ref(&allowed), &[]),
+            PathCheckOutcome::NotAllowed
+        );
+    }
+
+    /// T0-1 主回归（黑名单漏报）：路径经已存在目录 + `..` 混入黑名单目录，
+    /// 目标不存在时必须折叠 `..` 后命中黑名单——修复前前缀匹配漏报放行，
+    /// 而实际 OS 解析会落进黑名单目录。
+    #[test]
+    fn test_check_path_rules_blocks_parent_dir_path_into_blocked_dir() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("src");
+        let blocked = dir.path().join(".git");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&blocked).unwrap();
+        // config 不存在 → fallback 路径；src 存在使 OS 解析必然落入 .git
+        let sneaky = src.join("..").join(".git").join("config");
+        assert!(matches!(
+            check_path_rules(&sneaky, &[], std::slice::from_ref(&blocked)),
+            PathCheckOutcome::Blocked(_)
+        ));
+    }
+
+    /// 正向回归：`..` 折叠后仍落在白名单内 → 放行（归一化不得误伤合法穿越）。
+    #[test]
+    fn test_check_path_rules_allows_parent_dir_within_allowed() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir_all(allowed.join("sub")).unwrap();
+        let path = allowed.join("sub").join("..").join("new.txt");
+        assert_eq!(
+            check_path_rules(&path, std::slice::from_ref(&allowed), &[]),
+            PathCheckOutcome::Allowed
+        );
+    }
+
+    /// 词法归一化基础语义：`.`/`..` 折叠、绝对路径不越根、相对越界保留。
+    #[test]
+    fn test_lexical_normalize_collapses_dot_and_dotdot() {
+        use std::path::Path;
+        assert_eq!(lexical_normalize(Path::new("a/../b")), PathBuf::from("b"));
+        assert_eq!(lexical_normalize(Path::new("a/./b")), PathBuf::from("a/b"));
+        assert_eq!(
+            lexical_normalize(Path::new("a/../../b")),
+            PathBuf::from("../b"),
+            "相对路径越界 `..` 保留"
+        );
+        // 绝对路径：`..` 不越过根（`/..` = `/`）
+        assert_eq!(
+            lexical_normalize(Path::new("/../noop")),
+            PathBuf::from("/noop")
+        );
+        // 绝对路径多级折叠：`<base>/x/../..` = `<base>/..`
+        let dir = tempdir().unwrap();
+        let base = dir.path().to_path_buf();
+        let up = base.join("x").join("..").join("..").join("y");
+        assert_eq!(lexical_normalize(&up), base.parent().unwrap().join("y"));
     }
 
     #[test]

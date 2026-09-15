@@ -244,6 +244,49 @@ async fn session_manager_with_cwd(
     sm
 }
 
+// ── T0-1：resolve_tool_path 词法归一化（判定与执行同一口径）─────────────
+
+#[tokio::test]
+async fn test_resolve_tool_path_normalizes_parent_dir_components() {
+    // T0-1：相对路径 join 会话工作目录后必须折叠 `.`/`..`——修复前原样
+    // 输出 `sub/../target.txt`，下游沙箱前缀匹配与执行语义可能被 `..` 欺骗。
+    let dir = tempfile::tempdir().unwrap();
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_session_manager(session_manager_with_cwd("s-norm", dir.path()).await);
+
+    let resolved = registry
+        .resolve_tool_path("s-norm", "sub/../target.txt")
+        .await;
+
+    assert_eq!(
+        std::path::Path::new(&resolved),
+        dir.path().join("target.txt").as_path(),
+        "`..` 必须折叠为词法等价路径"
+    );
+    assert!(
+        !resolved.contains(".."),
+        "输出路径不得含 `..` 组件: {resolved}"
+    );
+}
+
+#[tokio::test]
+async fn test_resolve_tool_path_normalizes_absolute_parent_dir() {
+    // 绝对路径同样归一化（判定与执行同一口径，含 `..` 的绝对输入不留存）。
+    let dir = tempfile::tempdir().unwrap();
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_session_manager(session_manager_with_cwd("s-abs", dir.path()).await);
+
+    let abs = dir.path().join("a").join("..").join("b.txt");
+    let resolved = registry
+        .resolve_tool_path("s-abs", &abs.to_string_lossy())
+        .await;
+
+    assert_eq!(
+        std::path::Path::new(&resolved),
+        dir.path().join("b.txt").as_path()
+    );
+}
+
 #[tokio::test]
 async fn test_search_code_relative_path_resolves_against_session_working_directory() {
     // 回归保护（grep 失效根因）：相对 path 必须按会话工作目录解析——修复前
