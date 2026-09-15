@@ -2,7 +2,6 @@
 //! self_check / delegate_to_agent。
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -532,8 +531,8 @@ async fn test_delegate_to_agent_success() {
 
 #[tokio::test]
 async fn test_delegate_nested_delegation_executes_and_depth_released() {
-    // 嵌套委托链路：外层 → 子 Agent → 内层委托（深度 2，允许），
-    // 完成后委托深度应恢复为 0（guard 释放）。
+    // 嵌套委托链路：外层 → 子 Agent → 内层委托（层级 2，允许）；
+    // 层级是注册表固有属性，父层不因子代理运行而改变（T0-8）。
     use mockall::Sequence;
 
     // 流式 mock：外层 3 轮 + 内层 2 轮（submit_result 降级后各需两轮：
@@ -628,33 +627,22 @@ async fn test_delegate_nested_delegation_executes_and_depth_released() {
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "outer done");
-    // 内层委托为异步任务（ADR-026）：等待其完成、深度 guard 释放
-    for _ in 0..200 {
-        if registry.delegation_depth.load(Ordering::SeqCst) == 0 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    // 层级是注册表固有属性（T0-8：不是在途计数）——父层不因子代理运行而改变
     assert_eq!(
-        registry.delegation_depth.load(Ordering::SeqCst),
-        0,
-        "委托结束后深度应恢复为 0（guard 释放）"
+        registry.delegation_level, 0,
+        "父注册表层级恒定（旧实现在此断言在途计数归零）"
     );
 }
 
 #[tokio::test]
-async fn test_delegate_depth_limit_rejected() {
-    // 深度到达上限时，新委托被拒绝，且深度回滚（不泄漏计数）。
+async fn test_delegate_depth_limit_rejected_by_level() {
+    // 层级到达上限时，新委托被拒绝（T0-8：按注册表层级判定，非在途计数）。
     let mock = MockChatService::new();
-    let registry = ToolRegistry::new(default_strict_policy())
-        .with_model_service(Arc::new(mock))
-        .with_model("test-model");
-    // 手动将深度推至上限（模拟已有 MAX 层委托在途）
-    registry
-        .delegation_depth
-        .store(MAX_DELEGATION_DEPTH, Ordering::SeqCst);
+    let registry = delegate_registry(mock);
+    // 模拟"已在 MAX 层"的子代理注册表
+    let deepest = registry.child_registry(MAX_DELEGATION_DEPTH);
 
-    let result = registry
+    let result = deepest
         .execute_delegate_to_agent(r#"{"task":"too deep"}"#, "session-1")
         .await;
     let err = result.unwrap_err().to_string();
@@ -662,11 +650,34 @@ async fn test_delegate_depth_limit_rejected() {
         err.contains("委托深度超过上限"),
         "超限应被拒绝，实际: {err}"
     );
-    assert_eq!(
-        registry.delegation_depth.load(Ordering::SeqCst),
-        MAX_DELEGATION_DEPTH,
-        "拒绝后深度应回滚到上限值"
-    );
+    // 拒绝不改变任何层级（层级不可变）：父层仍为 0、最深层仍为 MAX
+    assert_eq!(registry.delegation_level, 0);
+    assert_eq!(deepest.delegation_level, MAX_DELEGATION_DEPTH);
+}
+
+#[tokio::test]
+async fn test_delegate_concurrent_siblings_not_rejected() {
+    // T0-8（主回归）：**并发兄弟委托不共享深度**——同一父层连续发起的
+    // MAX+1 个委托必须全部受理。
+    //
+    // 判别力：旧实现把"在途委托数"当深度（进入委托 `fetch_add`），第 4 个
+    // 并发委托在途时计数 = 4 > MAX_DELEGATION_DEPTH → 被误拒（本会话亲历）。
+    // mock 流永久挂起（forget tx）：任务保持"在途"，复现并发场景。
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion_stream().returning(|_| {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        std::mem::forget(tx);
+        Ok(rx)
+    });
+    let registry = delegate_registry(mock);
+
+    for i in 0..=MAX_DELEGATION_DEPTH {
+        let out = registry
+            .execute_delegate_to_agent(&format!(r#"{{"task":"sibling {i}"}}"#), "session-1")
+            .await
+            .unwrap_or_else(|e| panic!("第 {} 个并发兄弟委托不应被拒：{e}", i + 1));
+        assert_eq!(out["status"], "running");
+    }
 }
 
 #[tokio::test]
@@ -713,11 +724,8 @@ async fn test_delegate_timeout_param_accepted() {
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "quick answer");
-    assert_eq!(
-        registry.delegation_depth.load(Ordering::SeqCst),
-        0,
-        "正常完成后深度应恢复为 0"
-    );
+    // 旧实现在此断言"在途计数归零"；层级是注册表固有属性（T0-8）
+    assert_eq!(registry.delegation_level, 0, "主层注册表层级恒为 0");
 }
 
 #[tokio::test]
@@ -809,11 +817,8 @@ async fn test_delegate_role_model_used() {
         .await
         .unwrap();
     assert_eq!(result["result"].as_str().unwrap(), "researched");
-    assert_eq!(
-        registry.delegation_depth.load(Ordering::SeqCst),
-        0,
-        "委托结束后深度应恢复为 0"
-    );
+    // 层级是注册表固有属性（T0-8）：委托结束后主层仍为 0
+    assert_eq!(registry.delegation_level, 0, "主层注册表层级恒为 0");
 }
 
 #[tokio::test]

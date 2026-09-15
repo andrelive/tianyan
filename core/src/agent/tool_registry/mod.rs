@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -231,8 +230,12 @@ pub struct ToolRegistry {
     ///
     /// **有序容器**（[`DynamicToolTable`]）：注册顺序，新注册追加末尾。
     dynamic_tools: Arc<Mutex<DynamicToolTable>>,
-    /// 当前委托链深度（delegate_to_agent 嵌套保护；主循环为 0）。
-    pub(crate) delegation_depth: Arc<AtomicUsize>,
+    /// 本注册表所在的委托层级（delegate_to_agent 嵌套保护）：主循环为 0，
+    /// 子代理注册表 = 父 + 1（见 [`Self::child_registry`]）。
+    ///
+    /// **不是"在途委托计数"**（T0-8）：计数语义把并发兄弟委托误判成嵌套
+    /// 深度——同一父层第 4 个并发委托被误拒（本会话亲历）。
+    pub(crate) delegation_level: usize,
     /// 子 Agent 角色注册表（delegate_to_agent role 参数解析；默认内置角色）。
     pub(crate) role_registry: Arc<RoleRegistry>,
     /// 会话管理器（execute_command 默认 cwd 解析：模型未指定时使用会话
@@ -277,7 +280,7 @@ impl ToolRegistry {
             presentations: HashMap::new(),
             definitions: Vec::new(),
             dynamic_tools: Arc::new(Mutex::new(Vec::new())),
-            delegation_depth: Arc::new(AtomicUsize::new(0)),
+            delegation_level: 0,
             role_registry: Arc::new(RoleRegistry::builtin()),
             session_manager: None,
             delegation_cancel: Arc::new(Mutex::new(HashMap::new())),
@@ -329,6 +332,18 @@ impl ToolRegistry {
     ) -> Self {
         self.user_questions = Some(service);
         self
+    }
+
+    /// 派生**下一层**注册表（子代理用）：仅替换委托层级，其余字段
+    /// （工具集/服务/信号量/事件通道）与父共享。
+    ///
+    /// 层级是注册表的**固有属性**，不是在途计数——每个子代理拿到自己的
+    /// 层级（父 + 1），并发兄弟委托互不影响；嵌套判定用
+    /// `agent_ops::MAX_DELEGATION_DEPTH`（T0-8）。
+    pub(crate) fn child_registry(&self, level: usize) -> Self {
+        let mut child = self.clone();
+        child.delegation_level = level;
+        child
     }
 
     /// 解析工具文件路径：相对路径（非绝对）基于**会话绑定的工作目录**解析

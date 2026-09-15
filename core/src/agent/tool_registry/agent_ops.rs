@@ -2,7 +2,7 @@
 //! delegate_to_agent。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -63,15 +63,6 @@ pub(crate) const MAX_DELEGATION_DEPTH: usize = 3;
 
 /// ask_user 等待用户回答的超时（防挂死；超时返回错误，模型看到失败结果）。
 const ASK_USER_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// 委托深度 RAII guard：Drop 时自动递减，保证异常路径不泄漏深度计数。
-pub(crate) struct DelegationDepthGuard(pub(crate) Arc<AtomicUsize>);
-
-impl Drop for DelegationDepthGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
 
 /// 子代理流式事件转发映射（ADR-030：AgentStreamChunk → ChatStreamEvent
 /// 同构 JSON，与主会话协议一致——前端完全复用 reducer 渲染）。
@@ -410,20 +401,18 @@ impl ToolRegistry {
                 .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
 
             // ADR-026：委托只支持异步——所有委托一律注册 + spawn + 立即返回 task_id。
-            // 嵌套委托深度保护：进入委托时 +1，guard 移入任务闭包持有到任务结束
-            // （含排队等待期间），Drop 时自动回滚计数。
-            let depth = self.delegation_depth.fetch_add(1, Ordering::SeqCst) + 1;
-            if depth > MAX_DELEGATION_DEPTH {
-                self.delegation_depth.fetch_sub(1, Ordering::SeqCst);
+            // 嵌套委托深度保护：**按注册表层级**判定（本注册表层级 + 1），
+            // 不是在途计数——并发兄弟委托共享同一父层，不互相累加（T0-8：
+            // 旧实现把第 4 个并发委托当成 4 层嵌套误拒）。子代理拿到自己的
+            // 层级（[`ToolRegistry::child_registry`]），层级随委托链单调递增。
+            if self.delegation_level + 1 > MAX_DELEGATION_DEPTH {
                 return Err(TianyanError::Custom(format!(
                     "tool: 委托深度超过上限（{} 层），已拒绝嵌套委托",
                     MAX_DELEGATION_DEPTH
                 )));
             }
-            let depth_guard = DelegationDepthGuard(self.delegation_depth.clone());
 
-            self.spawn_background_delegate(&params, session_id, depth_guard)
-                .await
+            self.spawn_background_delegate(&params, session_id).await
         })
     }
 
@@ -797,13 +786,12 @@ impl ToolRegistry {
     /// spawn 独立执行 → 立即返回 task_id。
     ///
     /// session_id 由调用链显式传入（父会话归属），不再依赖共享可变状态。
-    /// depth_guard 移入任务闭包持有到任务结束（含排队等待期间），
-    /// 保证嵌套委托深度计数在任务生命周期内有效。
+    /// 子代理使用**下一层注册表**（`ToolRegistry::child_registry`）运行，
+    /// 委托层级随调用链单调递增（T0-8：不是在途计数）。
     async fn spawn_background_delegate(
         &self,
         params: &DelegateToAgentParams,
         session_id: &str,
-        depth_guard: DelegationDepthGuard,
     ) -> Result<serde_json::Value, TianyanError> {
         let manager = &self.background_tasks;
 
@@ -859,7 +847,9 @@ impl ToolRegistry {
             }
         }
 
-        let this = self.clone();
+        // 子代理注册表：层级 = 父 + 1（并发兄弟委托各自持有同层注册表，
+        // 互不累加——T0-8）
+        let child = self.child_registry(self.delegation_level + 1);
         let mgr = manager.clone();
         let run_params = params.clone();
         let run_task_id = task_id.clone();
@@ -871,10 +861,10 @@ impl ToolRegistry {
         // 主调用链 spawn 后立即返回。
         let task_id_for_loop = run_task_id.clone();
         let handle = tokio::spawn(async move {
-            // 许可 + 深度 guard 在任务运行期间持有（作用域结束释放）
+            // 许可在任务运行期间持有（作用域结束释放）
             let _permits = (queue_permit, run_permit);
-            let _depth_guard = depth_guard;
-            this.run_subagent_loop(&run_params, &run_session_id, &task_id_for_loop)
+            child
+                .run_subagent_loop(&run_params, &run_session_id, &task_id_for_loop)
                 .await
         });
         tokio::spawn(async move {
