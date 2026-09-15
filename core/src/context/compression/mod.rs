@@ -174,7 +174,9 @@ pub struct ContextCompressor {
     model_service: Arc<dyn ChatService>,
     estimator: TokenEstimator,
     config: CompressionConfig,
-    /// 缓存的上次摘要，用于增量压缩。
+    /// 缓存的上次摘要，用于增量压缩。仅有效（非空）摘要会更新缓存——
+    /// 空摘要（模型空响应，重试后仍空）置空，下次压缩走全量摘要
+    /// （消息头部含上次摘要 marker，信息不丢失）。
     cached_summary: Option<String>,
 }
 
@@ -259,7 +261,7 @@ impl ContextCompressor {
             self.summarize(messages).await?
         };
 
-        self.cached_summary = Some(summary.clone());
+        self.cached_summary = Self::cacheable_summary(&summary);
 
         let summary_message = Message::system(format!(
             "[对话摘要] 以下是对早期对话的摘要：\n{}\n[摘要结束]",
@@ -280,23 +282,11 @@ impl ContextCompressor {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let prompt = DEFAULT_SUMMARY_PROMPT.replace("{conversation}", &conversation);
+        let prompt = DEFAULT_SUMMARY_PROMPT
+            .replace("{conversation}", &conversation)
+            .replace("{max_tokens}", &self.config.max_summary_tokens.to_string());
 
-        let response = self
-            .model_service
-            .chat_completion(ChatCompletionRequest::new(
-                &self.config.summary_model,
-                vec![Message::user(prompt)],
-            ))
-            .await?;
-        // 取第一个候选的文本（`chat()` 便捷方法丢弃 usage——此处需要真实
-        // token 统计供压缩消耗入账，故走完整响应）。
-        let text = response
-            .choices
-            .first()
-            .map(|c| c.message.content.clone())
-            .unwrap_or_default();
-        Ok((text.trim().to_string(), response.usage))
+        self.complete_summary(prompt).await
     }
 
     /// LLM 增量摘要。
@@ -319,7 +309,30 @@ impl ContextCompressor {
             .replace("{existing_summary}", existing_summary)
             .replace("{new_conversation}", &new_conversation)
             .replace("{max_tokens}", &self.config.max_summary_tokens.to_string());
+        self.complete_summary(prompt).await
+    }
 
+    /// 摘要补全：空响应时重试一次（与 AgentLoop 空响应重试同构——
+    /// 思考模型偶发"想完没说话"；空摘要会让压缩静默失败：压缩点不
+    /// 落库、上下文继续增长，直到下一次轮末重试）。重试仍空则返回
+    /// 空摘要，由上层丢弃并告警。两次请求的真实用量合并返回——
+    /// 压缩消耗不因重试而丢失入账。
+    async fn complete_summary(&self, prompt: String) -> Result<(String, TokenUsage)> {
+        let (text, first_usage) = self.complete_summary_once(prompt.clone()).await?;
+        if !text.is_empty() {
+            return Ok((text, first_usage));
+        }
+
+        tracing::warn!("压缩摘要返回空响应，重试一次");
+        let (retry_text, retry_usage) = self.complete_summary_once(prompt).await?;
+        let mut usage = first_usage;
+        usage.accumulate(&retry_usage);
+        Ok((retry_text, usage))
+    }
+
+    /// 单次摘要补全请求（取第一个候选的文本；`chat()` 便捷方法丢弃
+    /// usage——压缩消耗需随摘要消息入账，故走完整响应）。
+    async fn complete_summary_once(&self, prompt: String) -> Result<(String, TokenUsage)> {
         let response = self
             .model_service
             .chat_completion(ChatCompletionRequest::new(
@@ -333,6 +346,18 @@ impl ContextCompressor {
             .map(|c| c.message.content.clone())
             .unwrap_or_default();
         Ok((text.trim().to_string(), response.usage))
+    }
+
+    /// 摘要缓存更新策略：仅非空摘要进入缓存（"缓存 = 最近一次有效摘要"）。
+    /// 空摘要（模型空响应，重试后仍空）不保留——否则下次压缩会把空串当
+    /// "已有摘要"走增量路径，且与链上未落库压缩点的事实不一致；置空后
+    /// 下次走全量摘要（消息头部含上次摘要 marker，信息不丢失）。
+    fn cacheable_summary(summary: &str) -> Option<String> {
+        if summary.is_empty() {
+            None
+        } else {
+            Some(summary.to_string())
+        }
     }
 
     /// 通过选择压缩（保留重要消息）。
@@ -382,7 +407,7 @@ impl ContextCompressor {
             self.summarize(messages).await?
         };
 
-        self.cached_summary = Some(summary.clone());
+        self.cached_summary = Self::cacheable_summary(&summary);
         let summary_message = Message::system(format!(
             "[对话摘要] 以下是对早期对话的摘要：
 {}
@@ -663,5 +688,146 @@ mod tests {
         assert!(status.should_compress);
         let status = compressor.get_status(90);
         assert!(status.is_critical);
+    }
+
+    // ── 空摘要治理（模型空响应重试 / 缓存一致性 / 提示词占位符）──────
+
+    /// 空响应重试：第一次空、第二次有效——重试恢复 + 两笔消耗合并入账。
+    /// 判别力：修复前无重试（只调用 1 次、直接返回空摘要），先红后绿。
+    #[tokio::test]
+    async fn test_summarize_retries_once_on_empty_response() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_in = calls.clone();
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(move |_| {
+            let n = calls_in.fetch_add(1, Ordering::SeqCst);
+            // 第 1 次空响应（思考模型"想完没说话"）；第 2 次正常输出
+            let (text, prompt_tokens, completion_tokens) = if n == 0 {
+                ("", 900usize, 0usize)
+            } else {
+                ("## 用户意图\n修复 C2", 900, 60)
+            };
+            Ok(ChatCompletionResponse {
+                id: "mock".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant(text.to_string()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: TokenUsage::new(prompt_tokens, completion_tokens),
+            })
+        });
+        let config = CompressionConfig {
+            summary_model: "mock".to_string(),
+            ..CompressionConfig::default()
+        };
+        let compressor = ContextCompressor::new(Arc::new(mock), config);
+        let msgs = vec![msg_user("问题"), msg_assistant("回答")];
+
+        let (summary, usage) = compressor.summarize(&msgs).await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "空摘要应触发一次重试");
+        assert_eq!(summary, "## 用户意图\n修复 C2", "重试输出作为摘要");
+        assert_eq!(usage.prompt_tokens, 1800, "两笔输入消耗合并（900+900）");
+        assert_eq!(usage.completion_tokens, 60, "两笔输出消耗合并（0+60）");
+    }
+
+    /// 空摘要不进入增量摘要缓存：缓存语义保持"最近一次有效摘要"。
+    /// 判别力：修复前 cached_summary 被写入 Some("")（下次会以空串为
+    /// "已有摘要"走增量路径），先红后绿。
+    #[tokio::test]
+    async fn test_empty_summary_not_cached_for_incremental() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_in = calls.clone();
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(move |_| {
+            calls_in.fetch_add(1, Ordering::SeqCst);
+            Ok(ChatCompletionResponse {
+                id: "mock".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant(String::new()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Default::default(),
+            })
+        });
+        let config = CompressionConfig {
+            strategy: CompressionStrategy::Hybrid,
+            summary_model: "mock".to_string(),
+            ..CompressionConfig::default()
+        };
+        let mut compressor = ContextCompressor::new(Arc::new(mock), config);
+        let msgs = vec![
+            msg_user("问题一"),
+            msg_assistant("回答一"),
+            msg_user("问题二"),
+            msg_assistant("回答二"),
+            msg_user("问题三"),
+        ];
+
+        let result = compressor.compress(&msgs).await.unwrap();
+
+        assert!(result.summary.is_empty(), "模型恒空 → 摘要为空");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "空摘要重试一次后仍空");
+        assert!(
+            compressor.cached_summary.is_none(),
+            "空摘要不得进入增量缓存（否则下次以空串为已有摘要）"
+        );
+    }
+
+    /// {max_tokens} 占位符必须替换：修复前全量摘要路径漏替换（增量路径
+    /// 已替换），模型收到字面量 "{max_tokens}"。判别力：先红后绿。
+    #[tokio::test]
+    async fn test_summarize_prompt_replaces_max_tokens_placeholder() {
+        use std::sync::Mutex;
+
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen_in = seen.clone();
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(move |req| {
+            if let Some(msg) = req.messages.first() {
+                *seen_in.lock().unwrap() = msg.content.clone();
+            }
+            Ok(ChatCompletionResponse {
+                id: "mock".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant("摘要".to_string()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Default::default(),
+            })
+        });
+        let config = CompressionConfig {
+            summary_model: "mock".to_string(),
+            max_summary_tokens: 4000,
+            ..CompressionConfig::default()
+        };
+        let compressor = ContextCompressor::new(Arc::new(mock), config);
+        let msgs = vec![msg_user("问题"), msg_assistant("回答")];
+
+        let _ = compressor.summarize(&msgs).await.unwrap();
+
+        let prompt = seen.lock().unwrap().clone();
+        assert!(
+            !prompt.contains("{max_tokens}"),
+            "占位符必须替换，不得把字面量发给模型"
+        );
+        assert!(prompt.contains("4000"), "替换为配置的 max_summary_tokens");
+        assert!(prompt.contains("问题"), "对话内容已嵌入提示词");
     }
 }

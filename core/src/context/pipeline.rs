@@ -159,14 +159,18 @@ impl ContextPipeline {
         }
 
         let result = compressor.compress(conversation).await?;
-        let outcome = if result.summary.is_empty() {
-            None
-        } else {
-            Some(CompressionOutcome {
-                summary: result.summary,
-                summary_usage: result.summary_usage,
-            })
-        };
+        if result.summary.is_empty() {
+            // 空摘要（模型空响应，含单次重试后仍空）：本次压缩丢弃——
+            // 不改写对话、不落库压缩点，链上保持原压缩点，下一轮阈值
+            // 检查自然重试。此前与成功路径共用"上下文压缩完成"info 日志，
+            // 生产上表现为"上下文超阈值但压缩不生效"的静默失败（C2）。
+            tracing::warn!(
+                compressed = result.compressed_count,
+                original_tokens = result.original_tokens,
+                "压缩摘要为空（模型空响应），本次压缩丢弃，下轮重试"
+            );
+            return Ok(None);
+        }
 
         *conversation = result.messages;
         tracing::info!(
@@ -176,7 +180,10 @@ impl ContextPipeline {
             "上下文压缩完成"
         );
 
-        Ok(outcome)
+        Ok(Some(CompressionOutcome {
+            summary: result.summary,
+            summary_usage: result.summary_usage,
+        }))
     }
 
     /// 压缩对话并生成带 compression_marker 的摘要 StructuredMessage。
@@ -782,5 +789,53 @@ mod tests {
         assert_eq!(sm.tokens.total, 5800);
         assert_eq!(sm.tokens.cache.read, 3000, "缓存命中 = 压缩请求 cache_read");
         assert_eq!(sm.tokens.cache.write, 2000);
+    }
+
+    /// 空摘要端到端契约：压缩请求（含单次重试）仍空 → 丢弃本次压缩——
+    /// 返回 None 且不改写对话（链上保持原压缩点，下轮阈值检查重试）。
+    /// 判别力：修复前对话被替换为 [空摘要] 单条消息，先红后绿。
+    #[tokio::test]
+    async fn test_compress_if_needed_discards_empty_summary() {
+        let soul_uri = AgentPath::Soul.uri();
+        let vfs = Arc::new(
+            MockVfs::builder()
+                .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                .build(),
+        );
+        let config = CompressionConfig {
+            context_window: 100,
+            min_messages_to_compress: 3,
+            preserve_recent_messages: 2,
+            ..Default::default()
+        };
+        // 模型恒返回空内容（偶发空响应在单次重试后仍空的最坏情况）
+        let compressor = ContextCompressor::new(mock_chat(""), config);
+        let pipeline = make_pipeline_with_compressor(vfs, compressor);
+
+        let mut conversation = vec![
+            Message::user("A"),
+            Message::assistant("B"),
+            Message::user("C"),
+            Message::assistant("D"),
+            Message::user("E"),
+            Message::assistant("F"),
+        ];
+        let before = conversation.clone();
+
+        let outcome = pipeline
+            .compress_if_needed(&mut conversation, 100, true)
+            .await
+            .unwrap();
+
+        assert!(outcome.is_none(), "空摘要不得产出压缩结果");
+        assert_eq!(
+            conversation.len(),
+            before.len(),
+            "空摘要不得改写对话（修复前会替换为 [空摘要] 单条消息）"
+        );
+        assert_eq!(
+            conversation[0].content, before[0].content,
+            "对话内容保持原状"
+        );
     }
 }
