@@ -211,10 +211,13 @@ impl ChatMessage {
         (content, thinking, images)
     }
 
-    /// 从核心消息构造 API 消息（流式边界事件用，与历史加载同构的轻量版）：
+    /// 从核心消息构造 API 消息（**仅流式边界事件**用，轻量版）：
     /// id/role/content/thinking/images/usage/truncated/timestamp；
-    /// tool_calls 不填——流式期间前端已累积完整工具卡片（含结果），
-    /// 历史加载走 sessions 服务的完整转换（跨消息合并工具结果）。
+    /// tool_calls 不填——流式期间前端已累积完整工具卡片（含结果）。
+    ///
+    /// ⚠️ 权威历史视图（含事件订阅快照的 replace 兜底）必须用
+    /// [`ChatMessage::messages_from_structured`]（跨消息合并工具结果）；
+    /// 用它构造快照会让历史工具卡片丢结果、永久显示"运行中"（T0-7）。
     pub(crate) fn from_structured_light(m: &tianyan::common::types::StructuredMessage) -> Self {
         let (_, thinking, images) = Self::extract_parts(&m.parts);
         Self {
@@ -248,6 +251,184 @@ impl ChatMessage {
             // 权威 segments，前端 applyServerMessage 以服务端为准
             segments: Self::segments_from_parts(&m.role, &m.parts),
         }
+    }
+
+    /// 从核心会话消息列表构造 API 展示消息（**完整转换**——历史加载
+    /// `SessionService::get_session_detail` 与事件订阅快照
+    /// （`subscribe_events`）共用同一语义）。
+    ///
+    /// 与 [`ChatMessage::from_structured_light`]（轻量版：流式期间前端已累积
+    /// 完整工具卡片）不同，本函数产出**权威历史视图**：
+    ///
+    /// - **跨消息合并工具结果**：JSONL 中结果位于独立 `role=tool` 消息
+    ///   （`Part::ToolResult`），按 `tool_call_id` 挂到对应调用卡片
+    ///   （`result` + `duration_ms` + `error`）；无对应调用的孤立结果输出
+    ///   结果-only 卡片；
+    /// - `role=Tool` 映射为 `Assistant`（结果已并入卡片，前端不消费 tool 角色）；
+    /// - 无任何展示内容（正文/思考/工具卡片/图片皆空）的 `role=tool` 消息跳过
+    ///   （避免空气泡）；assistant 空消息**保留**——前端唤醒轮询以"出现新的
+    ///   assistant 消息"为停止信号，过滤会导致指示器永不停止；
+    /// - 正文/思考/图片合并语义与 [`Self::extract_parts`] 一致。
+    ///
+    /// 为什么必须同源：订阅快照是前端打开/重连会话时的 **replace 权威兜底**；
+    /// 若快照走轻量转换（`tool_calls: None`），历史工具卡片丢结果，
+    /// 前端按"无结果"渲染成永久"运行中"转圈（误导为仍在执行）。
+    pub(crate) fn messages_from_structured(
+        messages: Vec<tianyan::common::types::StructuredMessage>,
+    ) -> Vec<ChatMessage> {
+        /// 工具执行结果元数据（跨消息合并用）。
+        struct ToolResultMeta {
+            content: String,
+            duration_ms: Option<i64>,
+            error: Option<String>,
+        }
+
+        // 先扫一遍收集结果：结果消息与调用消息的先后顺序不作假设。
+        let mut result_map: std::collections::HashMap<String, ToolResultMeta> =
+            std::collections::HashMap::new();
+        for m in &messages {
+            for p in &m.parts {
+                if let tianyan::common::types::Part::ToolResult {
+                    tool_call_id,
+                    content,
+                    error,
+                    time,
+                } = p
+                {
+                    let duration_ms = if time.end > 0 && time.start > 0 {
+                        Some((time.end - time.start).max(0))
+                    } else {
+                        None
+                    };
+                    result_map.insert(
+                        tool_call_id.clone(),
+                        ToolResultMeta {
+                            content: content.clone(),
+                            duration_ms,
+                            error: error.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        messages
+            .into_iter()
+            .filter_map(|m| {
+                let (content, thinking, images) = Self::extract_parts(&m.parts);
+                let mut tool_calls: Vec<ToolCallWithResult> = Vec::new();
+                for p in &m.parts {
+                    match p {
+                        tianyan::common::types::Part::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                            ..
+                        } => {
+                            // 结果已跨消息收集：此处取出挂到卡片上
+                            // （含耗时/失败元数据，前端卡片显示 ✓/✗ + 耗时）
+                            let meta = result_map.remove(id);
+                            tool_calls.push(ToolCallWithResult {
+                                id: id.clone(),
+                                name: name.clone(),
+                                arguments: arguments.clone(),
+                                presentation: tianyan::agent::ToolRegistry::default_presentation(
+                                    name,
+                                )
+                                .as_str()
+                                .to_string(),
+                                result: meta.as_ref().map(|r| r.content.clone()),
+                                duration_ms: meta.as_ref().and_then(|r| r.duration_ms),
+                                error: meta.as_ref().and_then(|r| r.error.clone()),
+                            });
+                        }
+                        // guard：remove 返回 None → 结果已被前置调用卡片消费
+                        // （已合并进调用卡片）→ 落到 `_` 跳过；Some → 结果仍在
+                        // map 中（无对应调用，孤立结果）→ 输出结果-only 卡片。
+                        tianyan::common::types::Part::ToolResult {
+                            tool_call_id,
+                            content: result_content,
+                            error,
+                            time,
+                        } if result_map.remove(tool_call_id).is_some() => {
+                            let duration_ms = if time.end > 0 && time.start > 0 {
+                                Some((time.end - time.start).max(0))
+                            } else {
+                                None
+                            };
+                            tool_calls.push(ToolCallWithResult {
+                                id: tool_call_id.clone(),
+                                name: String::new(),
+                                arguments: String::new(),
+                                presentation: "generic".to_string(),
+                                result: Some(result_content.clone()),
+                                duration_ms,
+                                error: error.clone(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                // 工具结果被合并进调用卡片后，原 role=tool 消息无任何可展示
+                // 内容 → 跳过该消息（避免空气泡）；孤立结果消息保留。
+                // 注意：assistant 空消息（唤醒轮空输出等）**必须保留**。
+                if content.is_empty()
+                    && thinking.is_empty()
+                    && tool_calls.is_empty()
+                    && images.is_empty()
+                    && m.role == MessageRole::Tool
+                {
+                    return None;
+                }
+                // 历史消息携带持久化 usage（DetailedTokenUsage → API TokenUsage）：
+                // 前端按会话独立计算上下文占用 / 缓存命中，避免跨会话串值。
+                let usage = (m.tokens.total > 0 || m.tokens.input > 0).then_some(TokenUsage {
+                    prompt_tokens: m.tokens.input as u32,
+                    completion_tokens: m.tokens.output as u32,
+                    total_tokens: m.tokens.total as u32,
+                    cache_read: m.tokens.cache.read as u32,
+                    cache_write: m.tokens.cache.write as u32,
+                });
+                Some(ChatMessage {
+                    // 消息 ID：回退/重做的定位键（前端按 ID 调删除/恢复）
+                    id: Some(m.id),
+                    // Tool 角色在 API 层映射为 Assistant（与旧 core_bridge 转换
+                    // 一致），工具结果已合并进 tool_calls.result，前端不消费 tool 角色。
+                    role: match m.role {
+                        MessageRole::Tool => MessageRole::Assistant,
+                        role => role,
+                    },
+                    user_message_id: None,
+                    content: None,
+                    thinking: if thinking.is_empty() {
+                        None
+                    } else {
+                        Some(thinking)
+                    },
+                    tool_calls: if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls)
+                    },
+                    images: if images.is_empty() {
+                        None
+                    } else {
+                        Some(images)
+                    },
+                    // finish=length（token 上限或流式中断）：历史加载与流式
+                    // 渲染一致地显示截断提示。
+                    truncated_by_length: m.finish.as_deref() == Some("length"),
+                    interrupted: m.finish.as_deref() == Some("interrupted"),
+                    usage,
+                    // 压缩摘要标记：历史加载与压缩响应一致（前端识别摘要消息）
+                    compression_marker: m.compression_marker,
+                    timestamp: None,
+                    // 时间线（方案 B）：parts 顺序 = 真实到达顺序——历史与
+                    // 流式共用同一渲染管线（前端 SegmentBlocks）
+                    segments: Self::segments_from_parts(&m.role, &m.parts),
+                })
+            })
+            .collect()
     }
 
     /// 创建新的系统消息

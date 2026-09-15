@@ -24,6 +24,27 @@ use crate::state::AppState;
 /// SSE 流式通道缓冲区大小（与 chat 流一致）。
 const SSE_CHANNEL_BUFFER: usize = 100;
 
+/// 构造订阅快照 payload（ADR-029）：完整历史（ChatMessage 展示格式）+ cursor。
+///
+/// 历史消息走**完整转换**（[`ChatMessage::messages_from_structured`]，与
+/// `SessionService::get_session_detail` 同源）——跨消息合并工具执行结果。
+/// 快照是前端打开/重连会话时的 **replace 权威兜底**：若此处走轻量转换
+/// （`from_structured_light`，`tool_calls: None`），历史工具卡片会丢结果
+/// 并被渲染成永久"运行中"转圈（T0-7）。
+pub(crate) fn build_snapshot_payload(
+    session_id: &str,
+    messages: Vec<tianyan::common::types::StructuredMessage>,
+    cursor: i64,
+) -> serde_json::Value {
+    let messages = ChatMessage::messages_from_structured(messages);
+    serde_json::json!({
+        "type": "snapshot",
+        "session_id": session_id,
+        "cursor": cursor,
+        "messages": messages,
+    })
+}
+
 /// 事件订阅请求（ADR-029：快照恢复的触发点）。
 #[derive(Debug, Deserialize)]
 pub struct SubscribeRequest {
@@ -58,17 +79,7 @@ pub async fn subscribe_events(
         .last_seq(&request.session_id)
         .await
         .unwrap_or(0);
-    let messages: Vec<ChatMessage> = session
-        .messages
-        .iter()
-        .map(ChatMessage::from_structured_light)
-        .collect();
-    let payload = serde_json::json!({
-        "type": "snapshot",
-        "session_id": request.session_id,
-        "cursor": cursor,
-        "messages": messages,
-    });
+    let payload = build_snapshot_payload(&request.session_id, session.messages, cursor);
     if let Ok(json) = serde_json::to_string(&payload) {
         let _ = state.task_event_tx.send(json);
     }
