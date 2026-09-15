@@ -60,6 +60,10 @@ fn extract_parts(msg: &StructuredMessage) -> (String, String) {
 }
 
 /// SQLite 错误包装（带 session 前缀）。
+/// 递归后代集合 CTE（T0-13）：从 `?1`（被删/被清会话）出发沿
+/// `parent_session_id` 链收集**全部**后代（子/孙/…）。`UNION` 去重兼防环。
+const DESCENDANT_CTE: &str = "WITH RECURSIVE descendants(session_id) AS (SELECT session_id FROM session_meta WHERE parent_session_id = ?1 UNION SELECT m.session_id FROM session_meta m JOIN descendants d ON m.parent_session_id = d.session_id) ";
+
 fn sqlite_error(context: &str, e: rusqlite::Error) -> TianyanError {
     TianyanError::Custom(format!("session: session_store: {context}：{e}"))
 }
@@ -452,25 +456,28 @@ impl SessionStore {
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| sqlite_error("删除事务开启失败", e))?;
-        // 级联：子会话（parent_session_id = 本会话）三表清理
+        // 级联：**递归**删除全部后代会话（子/孙/…）三表清理——嵌套委托会
+        // 产生多层子会话，旧实现只删一层（parent = 本会话），孙会话成为孤儿：
+        // 不进列表、消息与 FTS 永久留存、SessionRecall 仍命中不可访问会话（T0-13）。
+        let cte = DESCENDANT_CTE;
         tx.execute(
-            "DELETE FROM session_messages_fts WHERE rowid IN              (SELECT id FROM session_messages WHERE session_id IN                (SELECT session_id FROM session_meta WHERE parent_session_id = ?1))",
+            &format!("{cte} DELETE FROM session_messages_fts WHERE rowid IN (SELECT id FROM session_messages WHERE session_id IN (SELECT session_id FROM descendants))"),
             rusqlite::params![session_id],
         )
         .map_err(|e| sqlite_error("级联删除子会话 FTS 清理失败", e))?;
         tx.execute(
-            "DELETE FROM session_messages WHERE session_id IN              (SELECT session_id FROM session_meta WHERE parent_session_id = ?1)",
+            &format!("{cte} DELETE FROM session_messages WHERE session_id IN (SELECT session_id FROM descendants)"),
             rusqlite::params![session_id],
         )
         .map_err(|e| sqlite_error("级联删除子会话消息失败", e))?;
         tx.execute(
-            "DELETE FROM session_meta WHERE parent_session_id = ?1",
+            &format!("{cte} DELETE FROM session_meta WHERE session_id IN (SELECT session_id FROM descendants)"),
             rusqlite::params![session_id],
         )
         .map_err(|e| sqlite_error("级联删除子会话元数据失败", e))?;
         // 本会话三表清理
         tx.execute(
-            "DELETE FROM session_messages_fts WHERE rowid IN              (SELECT id FROM session_messages WHERE session_id = ?1)",
+            "DELETE FROM session_messages_fts WHERE rowid IN (SELECT id FROM session_messages WHERE session_id = ?1)",
             rusqlite::params![session_id],
         )
         .map_err(|e| sqlite_error("删除 FTS 清理失败", e))?;
@@ -490,8 +497,8 @@ impl SessionStore {
     }
 
     /// ADR-026 B：子智能体会话上限保护——总数超 max_children 时，
-    /// 删"最不活跃主会话"（updated_at 最旧）的所有子会话，循环至 ≤ 上限。
-    /// 惰性触发（创建子会话时调用）。
+    /// 删"最不活跃主会话"（其子会话 updated_at 最旧）的**全部后代**，
+    /// 循环至 ≤ 上限。惰性触发（创建子会话时调用）。
     ///
     /// # Errors
     /// * SQLite 写入失败时返回 TianyanError。
@@ -511,13 +518,17 @@ impl SessionStore {
             if count <= max_children as i64 {
                 break;
             }
-            // 最不活跃主会话（有子会话的，按子会话最新活跃时间升序取最旧）
+            // 候选限定为**根会话**（自身无父、且有后代）：只有从根递归删除才能
+            // 一次清掉整棵树——旧实现按 parent_session_id 分组，会把嵌套中间
+            // 节点也当候选（删掉中间节点后其祖先仍在 → 孙会话成孤儿，T0-13）。
+            // 排序：其子会话最新活跃时间升序（最旧者先删）。
             let parent: Option<String> = conn
                 .query_row(
-                    "SELECT parent_session_id FROM session_meta
-                     WHERE parent_session_id IS NOT NULL
-                     GROUP BY parent_session_id
-                     ORDER BY MAX(updated_at) ASC LIMIT 1",
+                    "SELECT m.session_id FROM session_meta m
+                     WHERE m.parent_session_id IS NULL
+                       AND EXISTS (SELECT 1 FROM session_meta c WHERE c.parent_session_id = m.session_id)
+                     ORDER BY (SELECT MAX(updated_at) FROM session_meta c WHERE c.parent_session_id = m.session_id) ASC
+                     LIMIT 1",
                     [],
                     |r| r.get(0),
                 )
@@ -526,25 +537,29 @@ impl SessionStore {
             let Some(parent) = parent else {
                 break;
             };
-            // 删该主会话的所有子会话（三表）
-            conn.execute(
-                "DELETE FROM session_messages_fts WHERE rowid IN
-                    (SELECT id FROM session_messages WHERE session_id IN
-                        (SELECT session_id FROM session_meta WHERE parent_session_id = ?1))",
+            // 单事务删除该根会话的全部后代（旧实现三条 execute 非事务：中途
+            // 失败会留下"消息已删、元数据还在"的半删状态，T0-13）。
+            let cte = DESCENDANT_CTE;
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| sqlite_error("上限清理事务开启失败", e))?;
+            tx.execute(
+                &format!("{cte} DELETE FROM session_messages_fts WHERE rowid IN (SELECT id FROM session_messages WHERE session_id IN (SELECT session_id FROM descendants))"),
                 rusqlite::params![parent],
             )
             .map_err(|e| sqlite_error("上限清理子会话 FTS 失败", e))?;
-            conn.execute(
-                "DELETE FROM session_messages WHERE session_id IN
-                    (SELECT session_id FROM session_meta WHERE parent_session_id = ?1)",
+            tx.execute(
+                &format!("{cte} DELETE FROM session_messages WHERE session_id IN (SELECT session_id FROM descendants)"),
                 rusqlite::params![parent],
             )
             .map_err(|e| sqlite_error("上限清理子会话消息失败", e))?;
-            conn.execute(
-                "DELETE FROM session_meta WHERE parent_session_id = ?1",
+            tx.execute(
+                &format!("{cte} DELETE FROM session_meta WHERE session_id IN (SELECT session_id FROM descendants)"),
                 rusqlite::params![parent],
             )
             .map_err(|e| sqlite_error("上限清理子会话元数据失败", e))?;
+            tx.commit()
+                .map_err(|e| sqlite_error("上限清理事务提交失败", e))?;
         }
         Ok(())
     }
@@ -751,5 +766,99 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_conflict());
+    }
+
+    /// 构造子会话 header（parent = 指定会话）。
+    fn child_header(parent: &str) -> SessionHeader {
+        SessionHeader {
+            parent_session_id: Some(parent.to_string()),
+            kind: Some("delegate".to_string()),
+            ..SessionHeader::default()
+        }
+    }
+
+    /// T0-13（主回归）：删除主会话必须级联到**全部后代**（子/孙）——
+    /// 嵌套委托会产生多层子会话，旧实现只删一层，孙会话成为孤儿。
+    #[tokio::test]
+    async fn test_delete_cascades_recursively_to_grandchildren() {
+        let store = make_store().await;
+        store
+            .create("main", &SessionHeader::default())
+            .await
+            .unwrap();
+        store.create("child", &child_header("main")).await.unwrap();
+        store.create("grand", &child_header("child")).await.unwrap();
+        store
+            .append_message("child", &msg("c1", MessageRole::Assistant, "儿童消息"))
+            .await
+            .unwrap();
+        store
+            .append_message("grand", &msg("g1", MessageRole::Assistant, "孙消息"))
+            .await
+            .unwrap();
+
+        store.delete("main").await.unwrap();
+
+        assert!(store.load("main").await.unwrap().is_none());
+        assert!(
+            store.load("child").await.unwrap().is_none(),
+            "子会话必须删除"
+        );
+        assert!(
+            store.load("grand").await.unwrap().is_none(),
+            "孙会话必须删除（T0-13：旧实现只删一层）"
+        );
+        // 三表无残留（孙会话的消息与 FTS 索引也不得留下）
+        let conn = store.db.lock().await;
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "消息表不得残留被删会话的消息");
+        let fts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_messages_fts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(fts, 0, "FTS 索引不得残留被删会话的消息");
+    }
+
+    /// T0-13：上限清理从**根会话**递归删整棵树（不留孤儿）。
+    #[tokio::test]
+    async fn test_enforce_child_session_limit_removes_whole_tree() {
+        let store = make_store().await;
+        store
+            .create("main", &SessionHeader::default())
+            .await
+            .unwrap();
+        for i in 0..3 {
+            let child = format!("child-{i}");
+            store.create(&child, &child_header("main")).await.unwrap();
+            store
+                .create(&format!("grand-{i}"), &child_header(&child))
+                .await
+                .unwrap();
+        }
+        // 6 个子会话（含孙）> 上限 2 → 清理至 ≤ 2
+        store.enforce_child_session_limit(2).await.unwrap();
+
+        let conn = store.db.lock().await;
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_meta WHERE parent_session_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(left <= 2, "清理后子会话数应 ≤ 上限，实际 {left}");
+        // 无孤儿：剩余子会话的父必须存在（旧实现删中间节点，孙会话成孤儿）
+        let orphans: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_meta m WHERE m.parent_session_id IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM session_meta p WHERE p.session_id = m.parent_session_id)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0, "清理不得留下孤儿会话（T0-13）");
     }
 }
