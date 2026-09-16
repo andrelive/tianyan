@@ -83,6 +83,8 @@ pub struct SessionWorkingSet {
     session_id: String,
     header: RwLock<SessionHeader>,        // 前缀快照 + 会话元数据（库的镜像）
     entries: RwLock<Segment>,             // 压缩点起段：Vec<WorkingEntry { seq, msg }>
+    running: AtomicBool,                  // 本会话是否有 loop 在跑（唤醒幂等的依据，§4）
+    last_consumed_seq: AtomicI64,         // 最后一次被 loop 消费到的上界（§4）
     last_activity: Mutex<Instant>,        // 空闲失效判定（§7）
 }
 
@@ -90,7 +92,6 @@ pub struct SessionWorkingSet {
 pub struct WorkingSetRegistry {
     sets: Mutex<HashMap<String, Arc<SessionWorkingSet>>>,
     locks: Mutex<HashMap<String, Arc<TokioMutex<()>>>>,  // 现有 turn_locks 迁入
-    wake_pending: Mutex<HashSet<String>>,                // 待执行唤醒（按会话合并，§4）
 }
 ```
 
@@ -128,7 +129,7 @@ pub struct WorkingSetRegistry {
   不记账**；异步写入使工作集段尾前进，轮边界判出增量后**续跑一轮**即可（§4）。
   连带删除：`notice_delivered` HashMap、`NOTICE_WATERMARK_INIT`、
   `has_pending_notices`、`store_last_seq` / `mark_notices_delivered` 配对、
-  `AgentWakeForwarder` 的入口水位判定（改为唤醒请求合并，§4）。
+  `AgentWakeForwarder` 的入口水位判定（改为 `ensure_loop_running` 幂等，§4）。
   **T1-24 因此机制性消失**：没有「投递」动作，就没有「重启后把历史通知再追加
   一遍」这条路径——历史通知只在段里出现一次。
 - **收口方式**：`SessionManager` 的写方法**降级为工作集的内部依赖**——agent 层与
@@ -149,11 +150,16 @@ seq 由工作集承载，经 API 边界（`ChatMessage.seq`、事件 payload、�
 loop {
     resp = llm(ctx, tools)
     if 无工具调用 {
-        if ws.last_seq() > ctx.last_seq() {              // 段尾跑到 ctx 前面 → 有新消息
-            ctx.append(ws.delta_since(ctx.last_seq()))    // 增量注入（只取新条目）
-            continue                                      // 再跑一轮
+        持会话锁 {                                            // 与 ensure_loop_running 同一临界区
+            if ws.last_seq() > ctx.last_seq() {              // 段尾跑到 ctx 前面 → 有新消息
+                ctx.append(ws.delta_since(ctx.last_seq()))    // 增量注入（只取新条目）
+                ws.last_consumed_seq = ctx.last_seq();
+                continue                                      // 再跑一轮
+            }
+            ws.last_consumed_seq = ctx.last_seq();            // 回写消费上界
+            ws.running = false;                               // 同一临界区标记退出
         }
-        break                                             // 收尾
+        break                                                 // 收尾
     }
     ... 工具执行 ...
 }
@@ -168,17 +174,50 @@ loop {
 - **读语义**：`snapshot()`（轮开始：前缀 + 段 + `last_seq`）与
   `delta_since(seq)`（轮边界增量）——后者不再以「水位」为界，而以**调用方 ctx 的
   `last_seq`** 为界。
-- **唤醒请求合并（替代入口水位判定）**：唤醒的触发源是通知落库，按**会话**去重
-  而非按通知条数：
-  - 通知落库时若该会话**有活动轮** → 不请求唤醒（轮边界续跑判定会消化）；
-  - 否则请求唤醒，且**该会话已有待执行唤醒则不重复入队**
-    （`WorkingSetRegistry.wake_pending`）。
-  - 合并后「N 条通知 → 1 个唤醒轮」；唤醒轮不再补唤醒（其收尾的续跑判定自然
-    覆盖「期间又有新通知」）。
-  - 现状缺陷（实测根因）：`request_wake`（`background.rs:661`）**无去重**，每次
-    调用直接 spawn 一个任务；`AgentWakeForwarder` 的入口水位判定只在 **spawn 前**
-    跑一次，排队中的任务执行时不再重判——7 条通知 = 7 个任务全部入队，依次重读
-    整段历史。本决策连同 §3 的水位删除一起消除该形态。
+- **唤醒 = `ensure_loop_running(session_id)`（幂等，不是入队）**：唤醒的语义是
+  「确保该会话有一个 loop 在跑」，而非「为本条通知排一个轮」。
+
+  ```
+  ensure_loop_running(session_id):
+      持会话锁 {                                  // 与 loop 退出判定同一临界区
+          if ws.running { return }               // 已有 loop → no-op（它会消化新通知）
+          if ws.last_seq() <= ws.last_consumed_seq { return }  // 无未消费新消息 → no-op
+          ws.running = true; 启动 loop
+      }
+  ```
+
+  - **N 条通知 → 1 个 loop**：第一条拿到启动权，后续的看到 `running` → no-op——
+    不需要队列、不需要去重集合（「是否已有 loop」本身就是那个状态）。
+  - **后来者不丢**：它们的通知在段里，running loop 的轮边界续跑判定（§上文）会
+    读到并消化。
+  - **唤醒轮不补唤醒**：其收尾的续跑判定自然覆盖「期间又有新通知」。
+- **串行化点：`running` 检查 / `last_consumed_seq` 更新 / loop 退出判定必须同一
+  临界区**（per-session 锁）。否则存在**丢通知窗口**：
+
+  ```
+  ✗ 错误：loop 已判定「无新消息」→ 准备退出 → 此刻通知落库
+          → 通知方 ensure 看到 running=true → no-op → 双双不管，通知丢失
+  ✓ 正确：两者持同一把锁——
+          通知先到：ensure 持锁看到 running → no-op；
+                    但 loop 在锁内的退出判定会看到这条通知 → 续跑 ✓
+          loop 先退：loop 持锁判定无新消息并清 running → 释放；
+                    ensure 持锁看到 !running 且有未消费 → 启动新 loop ✓
+  ```
+
+  `last_consumed_seq` = loop 每次把上下文消费到的上界回写（锁内）——它就是
+  `ctx.last_seq` 在工作集里的投影（同一语义，一个字段，非独立水位机制）。
+  **初值 = 段尾**（重启/重建后第一次组装必然读到段尾，视为已消费）——避免重启后
+  把历史通知当「未消费」多起一轮（T1-24 的“不重现”在这一层兑现）。
+- **与用户消息的区别（两类语义，不可混）**：
+  - **用户消息**：排队（`turn_guard` 阻塞等待）——用户输入必须被处理，不能因
+    「已有 loop」而丢弃；
+  - **通知唤醒**：幂等（`ensure_loop_running`）——后到的通知由在跑的 loop 消化，
+    不需要各自一轮。
+- 现状缺陷（实测根因）：`request_wake`（`background.rs:661`）把唤醒当作**入队**
+  （每次调用直接 spawn 一个任务，`turn_guard` 是 `lock()` 排队而非 `try_lock()`
+  幂等），且 `AgentWakeForwarder` 的入口判定只在 **spawn 前**跑一次、排队中的任务
+  执行时不再重判——7 条通知 = 7 个任务全部入队，依次重读整段历史。本决策连同
+  §3 的水位删除一起消除该形态。
 
 ### 5. 前缀策略（存库 + 压缩点刷新 + 内容哈希）
 
@@ -207,8 +246,9 @@ loop {
   无锁调用方（如 API 只读查库）走库、不经工作集。这条避免"锁内取锁"死锁。
 - **并发写者实测场景**：用户轮 + 通知异步 append + 唤醒轮——三者都经 ①，
   由单写者 + 原子取号保证无丢号无重复。
-- **唤醒请求合并与单写者同源**：唤醒去重（§4）依据“该会话是否已有活动轮/待执行
-  唤醒”，两项查询都在注册表的会话锁下完成——不与写路径竞争，也不需额外锁。
+- **唤醒幂等与单写者同源**：`ensure_loop_running`（§4）的 `running` /
+  `last_consumed_seq` 检查与 loop 退出判定共用同一把会话锁——不与写路径竞争，
+  也不需额外锁。
 
 ### 7. 失效：空闲卸载 + 重建点 = 最近压缩点
 
@@ -282,8 +322,8 @@ loop {
   `SessionStore`——放进 VFS 反而是给缓存造第二份持久化。
 - **「为什么连水位都不需要？」** 回应：水位的唯一作用是回答「哪些通知还没进过
   模型视野」。而 seq 进上下文后，这个问题由 **`ctx.last_seq` vs `ws.last_seq` 的
-  比较**直接回答（§4），无需旁路状态；无活动轮时则由「按会话合并的唤醒请求」
-  回答。两者都不需要“读到哪了”的持久化字段——**T1-24（重启重放）随之机制性
+  比较**直接回答（§4），无需旁路状态；无活动轮时则由「确保一个 loop 在跑」
+  （`ensure_loop_running` 幂等，§4）回答。两者都不需要“读到哪了”的持久化字段——**T1-24（重启重放）随之机制性
   消失**（无投递动作，就无“重投历史通知”的路径）。保留水位只会多一份需持久化、
   需初始化、需三处同步的内存态（现状 `has_pending_notices` / `store_last_seq` /
   `mark_notices_delivered` 正是这份重复记账的成本）。
@@ -306,7 +346,7 @@ loop {
 | 018（会话权威存储迁 SQLite） | **遵守**。工作集是缓存；写入仍经 `SessionStore`；VFS 例外不变。**无新增会话级字段**（水位删除，不再需要 `notice_cursor`）。 |
 | 027（存储完整链 / 组装压缩点） | **遵守**。段 = 压缩点起；段外（压缩点前）经库按需读；不在存储层截断。 |
 | 012 / 030（前缀快照持久化 + 压缩点刷新） | **继承并收口**。三个前缀私有方法归入工作集；新增内容哈希避免无意义重写。 |
-| 013（串行化 + 唤醒） | **修订机制**。单写者保留（锁迁到注册表）；唤醒判定的“投递水位”整体删除，改由 `ctx.last_seq` vs `ws.last_seq` 的续跑判定 + 按会话合并的唤醒请求承担。 |
+| 013（串行化 + 唤醒） | **修订机制**。单写者保留（锁迁到注册表）；唤醒判定的“投递水位”整体删除，改由 `ctx.last_seq` vs `ws.last_seq` 的续跑判定 + `ensure_loop_running` 幂等承担；唤醒从“入队”改为“确保 loop 在跑”。 |
 | 029 / 031（订阅快照 / 乐观渲染） | **延续**。订阅快照改为最近 N 条 + cursor；乐观渲染保留，落位改按 seq。 |
 | 026（子智能体会话） | **扩展**。子会话同样有工作集（独立键）；级联删除（④）时一并移除。 |
 
@@ -327,7 +367,7 @@ loop {
 - `core/src/agent/agent_core.rs` — `load_and_build_state` / `assemble_context` /
   `ensure_injectable` / `persist_injectable_snapshot` / `invalidate_injectable_snapshot`
   → 经工作集；`update_session_header` 合并入 ③；`AgentWakeForwarder` 删除入口水位
-  判定（改由 `request_wake` 按会话合并承担）
+  判定（改由 `ensure_loop_running` 幂等承担）
 - `core/src/agent/coordinator.rs` — 五个入口改 `registry.ensure`
 - `core/src/agent/loop.rs` — **删除** `notice_delivered` / `NOTICE_WATERMARK_INIT` /
   `store_last_seq` / `mark_notices_delivered` / `has_pending_notices`；
@@ -360,7 +400,8 @@ loop {
 2. 五个入口改 `registry.ensure`；`assemble_context` 改读段。
 3. seq 一等公民（`WorkingEntry`）；`delta_since` 接入轮边界续跑判定；**删除通知
    投递水位三件套**（`notice_delivered` / `has_pending_notices` / `mark_notices_delivered`）。
-4. `request_wake` 按会话合并（有活动轮则抑制、待执行唤醒则去重）+ 空闲卸载落地。
+4. 唤醒改为 `ensure_loop_running` 幂等（`running` / `last_consumed_seq`，与退出判定
+   同一临界区）+ 空闲卸载落地。
    **验收**：连续轮/唤醒轮不再全量重建；N 条并发通知只产生 1 轮唤醒；重启后历史
    通知不重现；core 全绿。
 
@@ -386,8 +427,10 @@ loop {
 3. **压缩前移**：段起点前移到新压缩点；前缀刷新；**内容哈希不变时不重写快照**
    （判别力：篡改为"无条件重写"必红）。
 4. **并发写**：用户轮 + 通知异步 append + 唤醒轮 → 单写者，seq 无丢号、无重复。
-4b. **唤醒合并**：同一会话 N 条通知（N≥3）→ **只产生 1 轮唤醒**（判别力：
-   移除 `wake_pending` 去重必红——回到现状 9 轮形态）；有活动轮期间的通知不请求唤醒。
+4b. **唤醒幂等**：同一会话 N 条通知（N≥3）→ **只产生 1 个 loop**（判别力：
+   改回“每条通知入队”（现状 `request_wake`）必红——回到 9 轮形态）。
+4c. **丢通知窗口**（串行化判别力）：在 loop 收尾判定“无新消息”到退出之间注入一条
+   通知 → **不得丢失**（判别力：把清 `running` 移到锁外/单独临界区必红）。
 5. **重启重建**：重启后 `ensure` 段 = 压缩点后全部；**历史通知不重现**（判别力：
    重新引入“投递”路径必红——这正是 T1-24 的形态）；前缀逐字节一致。
 6. **子会话**：独立工作集；级联删除时工作集一并移除（含孙会话）。
@@ -408,6 +451,9 @@ loop {
 |------|-----------------|----------------|
 | **T1-24** 重启重放历史通知 | 水位初值取「进程启动前最后一条 seq」 | **机制删除**：无投递动作、无水位，历史通知只在段里出现一次（§3/§4） |
 | **U10** 停不掉唤醒轮 / 发了没响应 / 顺序乱 | 唤醒轮接取消标志；`turn_state` 事件；消息按服务端 seq 落位 | §9 推送收口（轮状态 + seq 落位）；§6 单写者排队提示 |
+
+> 注：用户消息仍走 `turn_guard` **排队**（输入必须被处理，不能因“已有 loop”而丢弃）；
+> 只有通知唤醒是**幂等**（§4）——两类语义不可混。
 
 > T1-24 的快修与根治是**同一处代码的两次改动**：快修把水位初值改成“boot 前最后
 > 一条 seq”（低风险、立即止血），阶段一直接把整套水位删掉。快修不是新增层，阶段
