@@ -624,6 +624,14 @@ impl Agent {
         what: &str,
         f: impl FnOnce(&mut crate::session::SessionHeader),
     ) {
+        // ADR-035 §3 收口 ③：经工作集镜像读改落库（快照变化时同步内存前缀）——
+        // 三个调用点（注入快照固化 / 待处理追问 / 快照失效）统一走单一写入口。
+        if let Some(ws) = self.working_sets.get(session_id).await {
+            if let Err(e) = ws.update_header(f).await {
+                tracing::warn!(error = %e, session = %session_id, "更新会话头部失败（{what}）");
+            }
+            return;
+        }
         let Ok(Some(mut session)) = self.session_manager.get_session(session_id).await else {
             return;
         };
