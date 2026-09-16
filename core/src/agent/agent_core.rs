@@ -39,6 +39,34 @@ const TURN_LOCKS_PRUNE_THRESHOLD: usize = 256;
 /// 唤醒轮重试间隔。
 const WAKE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
+/// 唤醒轮"失败必须汇报"的判定窗口（T1-2）。
+///
+/// 只把**本会话**中最近该窗口内到达终态的失败任务视为"本次失败"：
+/// 任务注册表保留 3 天 TTL，旧实现扫全量跨会话任务且不看时间——任一会话、
+/// 任一 3 天内的历史失败都会让每个唤醒轮进入"必须汇报失败"分支（指令与
+/// 事实不符，模型被推着重复/编造失败汇报）。窗口取 1 小时：远大于"任务
+/// 失败 → 唤醒触发"的正常延迟（秒级），又足以把陈年失败排除在外。
+const WAKE_FAILURE_FRESH_WINDOW_MS: i64 = 60 * 60 * 1000;
+
+/// 唤醒轮"本次需汇报失败"判定（T1-2 单点）。
+///
+/// 条件：任务属于**当前会话** && 失败状态 && 最近
+/// [`WAKE_FAILURE_FRESH_WINDOW_MS`] 内到达终态（`completed_at` 缺失的
+/// 异常数据保守不命中）。
+fn is_fresh_failure(
+    session_id: &str,
+    task_session: &str,
+    failed: bool,
+    completed_at: Option<i64>,
+    now_ms: i64,
+) -> bool {
+    failed
+        && task_session == session_id
+        && completed_at
+            .map(|ts| now_ms - ts <= WAKE_FAILURE_FRESH_WINDOW_MS)
+            .unwrap_or(false)
+}
+
 /// 轮执行模式：Plain 构造 [`AgentResponse`]；Stream 向 sender 推送流式事件。
 #[derive(Clone)]
 pub(crate) enum TurnMode {
@@ -196,7 +224,7 @@ impl Agent {
                     continue;
                 }
             };
-            let messages = self.prepare_wake_context(&state).await;
+            let messages = self.prepare_wake_context(&state, session_id).await;
             let parent_id = {
                 let s = state.read().await;
                 s.structured_messages.last().map(|m| m.id.clone())
@@ -289,24 +317,39 @@ impl Agent {
     /// allComplete || isTaskFailure——失败唤醒的目的就是让主 agent 知情并
     /// 继续处理），只有"全部成功且无需输出"才允许空输出。此前指令把两者
     /// 混在一起，模型在失败场景下选择空输出结束，主 agent 静默无反馈。
-    async fn prepare_wake_context(&self, state: &Arc<RwLock<SessionState>>) -> Vec<Message> {
+    ///
+    /// 失败判定限定**本会话 + 时间窗**（T1-2，见 [`is_fresh_failure`]）。
+    async fn prepare_wake_context(
+        &self,
+        state: &Arc<RwLock<SessionState>>,
+        session_id: &str,
+    ) -> Vec<Message> {
         // 会话历史 + 前缀 + 会话定位（与用户轮共用组装；无用户消息注入）
         let mut messages = self.assemble_context(state, "").await;
 
-        // 感知任务状态：任一后台任务/命令失败 → 失败场景（必须汇报）
+        // 感知任务状态：任一**本会话、近期**后台任务/命令失败 → 失败场景
+        let now_ms = chrono::Utc::now().timestamp_millis();
         let has_failure = {
-            let bg_failed = self
-                .background_tasks
-                .snapshot()
-                .await
-                .iter()
-                .any(|t| t.status == crate::agent::background::TaskStatus::Failed);
-            let cmd_failed = self
-                .command_tasks
-                .list()
-                .await
-                .iter()
-                .any(|t| t.status == crate::executor::CommandTaskStatus::Failed);
+            let bg = self.background_tasks.snapshot().await;
+            let bg_failed = bg.iter().any(|t| {
+                is_fresh_failure(
+                    session_id,
+                    &t.parent_session_id,
+                    t.status == crate::agent::background::TaskStatus::Failed,
+                    t.completed_at,
+                    now_ms,
+                )
+            });
+            let cmd = self.command_tasks.list().await;
+            let cmd_failed = cmd.iter().any(|t| {
+                is_fresh_failure(
+                    session_id,
+                    &t.parent_session_id,
+                    t.status == crate::executor::CommandTaskStatus::Failed,
+                    t.completed_at,
+                    now_ms,
+                )
+            });
             bg_failed || cmd_failed
         };
 
@@ -1838,7 +1881,7 @@ mod tests {
             .await;
 
         let state = agent.load_and_build_state("session-1").await.unwrap();
-        let messages = agent.prepare_wake_context(&state).await;
+        let messages = agent.prepare_wake_context(&state, "session-1").await;
         let last = messages.last().expect("唤醒指令应存在");
         assert_eq!(last.role, MessageRole::System);
         assert!(
@@ -1861,7 +1904,7 @@ mod tests {
         let agent = make_agent(MockChatService::new());
 
         let state = agent.load_and_build_state("session-1").await.unwrap();
-        let messages = agent.prepare_wake_context(&state).await;
+        let messages = agent.prepare_wake_context(&state, "session-1").await;
         let last = messages.last().expect("唤醒指令应存在");
         assert!(
             last.content.contains("必须向用户输出汇总"),
@@ -1871,6 +1914,66 @@ mod tests {
         assert!(
             !last.content.contains("直接输出空文本结束本轮"),
             "完成场景不得允许空输出，实际：{}",
+            last.content
+        );
+    }
+
+    /// T1-2（主回归）：失败判定必须**限定本会话 + 时间窗**。
+    ///
+    /// 判别力：旧实现扫全量跨会话注册表且不看时间——任一会话、任一 3 天内
+    /// （TTL 未清）的历史失败都会命中。
+    #[test]
+    fn test_fresh_failure_predicate_scopes_session_and_time() {
+        let now = 1_700_000_000_000_i64;
+        let hour = 60 * 60 * 1000;
+
+        assert!(
+            is_fresh_failure("s1", "s1", true, Some(now), now),
+            "本会话新失败应命中"
+        );
+        assert!(
+            !is_fresh_failure("s1", "s2", true, Some(now), now),
+            "其他会话的失败不得影响本会话（T1-2：旧实现跨会话）"
+        );
+        assert!(
+            !is_fresh_failure("s1", "s1", true, Some(now - 3 * 24 * hour), now),
+            "3 天历史失败不得命中（T1-2：旧实现吃 TTL 内全部终态）"
+        );
+        assert!(
+            !is_fresh_failure("s1", "s1", false, Some(now), now),
+            "非失败任务不命中"
+        );
+        assert!(
+            !is_fresh_failure("s1", "s1", true, None, now),
+            "无完成时间（异常数据）保守不命中"
+        );
+    }
+
+    /// T1-2：其他会话的失败不得把本会话唤醒指令推进失败分支。
+    #[tokio::test]
+    async fn test_prepare_wake_context_ignores_other_session_failures() {
+        let agent = make_agent(MockChatService::new());
+        let id = agent
+            .background_tasks
+            .register(
+                crate::agent::background::TaskKind::Delegate,
+                "别的会话任务".to_string(),
+                "session-other".to_string(),
+                0,
+                None,
+            )
+            .await;
+        agent
+            .background_tasks
+            .fail(&id, "mock 失败".to_string())
+            .await;
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        let messages = agent.prepare_wake_context(&state, "session-1").await;
+        let last = messages.last().expect("唤醒指令应存在");
+        assert!(
+            last.content.contains("必须向用户输出汇总"),
+            "其他会话的失败不得进入失败分支（T1-2），实际：{}",
             last.content
         );
     }
