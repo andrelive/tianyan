@@ -19,6 +19,9 @@ use tianyan::session::SessionManager;
 pub struct AgentEvolutionExecutor {
     agent: Arc<RwLock<Arc<dyn AgentCoordinator>>>,
     session_manager: Arc<dyn SessionManager>,
+    /// 会话工作集注册表（ADR-035 §3：演化会话被 agent 处理过 → 缓存已建，
+    /// 清理必须经工作集，旁路直删会残留缓存）。
+    working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
     model: String,
     review_role: String,
 }
@@ -31,12 +34,14 @@ impl AgentEvolutionExecutor {
     pub fn new(
         agent: Arc<RwLock<Arc<dyn AgentCoordinator>>>,
         session_manager: Arc<dyn SessionManager>,
+        working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
         model: String,
         review_role: String,
     ) -> Self {
         Self {
             agent,
             session_manager,
+            working_sets,
             model,
             review_role,
         }
@@ -65,8 +70,21 @@ impl EvolutionReviewExecutor for AgentEvolutionExecutor {
 
         // 清理专用会话（避免进入会话列表与记忆提取）——成功/失败都清理：
         // 失败路径此前 `?` 提前返回跳过清理，专用会话残留进前端会话列表。
-        if let Err(e) = self.session_manager.delete_session(&session_id).await {
-            tracing::debug!(session_id = %session_id, error = %e, "演化会话清理失败");
+        //
+        // ADR-035 §3 收口 ④：该会话刚经 `agent.process_message` 处理（工作集已
+        // 缓存），清理必须经工作集——旁路直删会留下已删会话的缓存条目。
+        let mut cleaned_via_ws = false;
+        if let Some(ws) = self.working_sets.get(&session_id).await {
+            if let Err(e) = ws.delete().await {
+                tracing::debug!(session_id = %session_id, error = %e, "演化会话清理失败（工作集路径）");
+            }
+            self.working_sets.remove(&session_id).await;
+            cleaned_via_ws = true;
+        }
+        if !cleaned_via_ws {
+            if let Err(e) = self.session_manager.delete_session(&session_id).await {
+                tracing::debug!(session_id = %session_id, error = %e, "演化会话清理失败");
+            }
         }
         resp.map(|r| r.content)
     }

@@ -481,6 +481,7 @@ async fn start_server_inner(
                 let executor = Arc::new(AgentEvolutionExecutor::new(
                     state.agent_lock(),
                     state.session_manager(),
+                    state.working_sets(),
                     state::resolve_chat_model(&cfg),
                     cfg.evolution.review_role.clone(),
                 ));
@@ -623,6 +624,7 @@ async fn start_server_inner(
                 state.session_manager(),
                 &data_dir,
                 registrar.clone(),
+                state.working_sets(),
             ));
             registrar
                 .bind(Some(scheduler.clone()), Some(task_ctx.clone()))

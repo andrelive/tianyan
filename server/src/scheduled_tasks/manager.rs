@@ -153,6 +153,8 @@ impl TaskRegistrar for SchedulerRegistrar {
 pub struct ScheduledAgentTaskHandler {
     agent_lock: Arc<RwLock<Arc<dyn AgentCoordinator>>>,
     session_manager: Arc<dyn SessionManager>,
+    /// 会话工作集注册表（ADR-035 §3：任务会话重建后失效缓存）。
+    working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
     task_id: String,
     workspace: String,
     prompt: String,
@@ -164,6 +166,7 @@ impl ScheduledAgentTaskHandler {
     fn new(
         agent_lock: Arc<RwLock<Arc<dyn AgentCoordinator>>>,
         session_manager: Arc<dyn SessionManager>,
+        working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
         task_id: String,
         workspace: String,
         prompt: String,
@@ -172,6 +175,7 @@ impl ScheduledAgentTaskHandler {
         Self {
             agent_lock,
             session_manager,
+            working_sets,
             task_id,
             workspace,
             prompt,
@@ -205,6 +209,9 @@ impl ScheduledAgentTaskHandler {
             // 会话历史统一由 agent.process_message 追加，避免同一条用户消息重复
             session.messages.clear();
             let _ = self.session_manager.rewrite_messages(&sid, &[]).await;
+            // ADR-035 §3：库被重建（清空）→ 失效工作集缓存（同一 sid 在 TTL 内
+            // 重复运行时，旁路清空会留下残旧缓存；下一次 ensure 从库重建）。
+            self.working_sets.remove(&sid).await;
         }
     }
 
@@ -271,6 +278,9 @@ impl TaskHandler for ScheduledAgentTaskHandler {
 pub struct ScheduledAgentTaskManager {
     agent_lock: Arc<RwLock<Arc<dyn AgentCoordinator>>>,
     session_manager: Arc<dyn SessionManager>,
+    /// 会话工作集注册表（ADR-035 §3：任务会话重建（清空消息）后须失效缓存——
+    /// 同一 sid 在 TTL 内重复运行时，旁路清空会留下残旧缓存）。
+    working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
     file_path: PathBuf,
     tasks: Arc<RwLock<HashMap<String, ScheduledAgentTask>>>,
     /// 任务注册接口（装配层注入；不持有 scheduler——分层）。
@@ -284,10 +294,12 @@ impl ScheduledAgentTaskManager {
         session_manager: Arc<dyn SessionManager>,
         data_dir: &Path,
         registrar: Arc<dyn TaskRegistrar>,
+        working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
     ) -> Self {
         Self {
             agent_lock,
             session_manager,
+            working_sets,
             file_path: data_dir.join("scheduled_agent_tasks.json"),
             tasks: Arc::new(RwLock::new(HashMap::new())),
             registrar,
@@ -428,6 +440,7 @@ impl ScheduledAgentTaskManager {
         let handler = Arc::new(ScheduledAgentTaskHandler::new(
             self.agent_lock.clone(),
             self.session_manager.clone(),
+            self.working_sets.clone(),
             task.id.clone(),
             task.workspace.clone(),
             task.prompt.clone(),

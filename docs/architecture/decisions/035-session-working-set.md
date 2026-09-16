@@ -142,9 +142,14 @@ pub struct WorkingSetRegistry {
   `AgentWakeForwarder` 的入口水位判定（改为 `ensure_loop_running` 幂等，§4）。
   **T1-24 因此机制性消失**：没有「投递」动作，就没有「重启后把历史通知再追加
   一遍」这条路径——历史通知只在段里出现一次。
-- **收口方式**：`SessionManager` 的写方法**降级为工作集的内部依赖**——agent 层与
-  server 层的写调用点全部改走工作集（阶段二完成时，`load_and_build_state` 与
-  直接 `add_structured_message` / `rewrite_messages` 调用点清零）。
+- **收口方式（已实施 2026-09-16）**：`SessionManager` 的写方法**降级为工作集的内部依赖**——
+  server 侧活跃写路径（`delete_message` / `redo_message` / `delete_session` / `update_title` /
+  `update_workspace`）全部改走工作集（`persist_messages` / `persist_meta` /
+  `persist_working_directory` / `ws.delete + registry.remove`）；演化会话清理与定时任务
+  会话重建路径改走 `ws.delete` / `registry.remove`。**`ensure` 的 `MAX(seq)` 校验从
+  “正确性机制”降级为“架构违规探测器”**（正常不应触发；触发即 warn 告警——其已知
+  局限：`rewrite` 到相同长度、窗口内相互抵消、仅 header 变化均检测不到，故不得用它
+  替代收口）。未收口且无缓存风险：`chat/services` 的会话**创建**路径（新 uuid 无缓存）。
 
 ### 4. seq 一等公民 + 续跑判定（取代通知投递水位）
 
@@ -521,13 +526,25 @@ loop {
 3. 唤醒排队（`try_lock` 改走 `lock`）→ `test_try_lock_is_idempotent` 红（带 500ms 超时保护，不挂起）。
 4. 快照按位置编号命名（`{index}.json`）→ `test_snapshot_key_is_message_id_not_position` 红。
 
+**写侧收口补记（2026-09-16，回应"多写入口 + 弱校验"审查）**：
+
+- 原计划把 server 写侧收口留给阶段二并跳过（理由："正确性已由 ensure 新鲜度校验
+  保证"）——**该判断被推翻**：`MAX(seq)` 是弱信号，`rewrite` 到相同长度 / 窗口内
+  相互抵消 / 仅 header 变化均检测不到，属"靠巧合工作"。已改为**单一写入口**：
+- 实施：`SessionWorkingSet` 补 `rewrite` / `update_header`（仅快照实际变化才同步
+  内存前缀）/ `delete` + header 镜像；`AppState.working_sets` 与 Agent 共享同一
+  Arc（热重载复用，状态不分裂）；`SessionsService` 五个活跃写路径全部经工作集；
+  演化会话清理、定时任务会话重建两处旁路补上（`ws.delete` / `registry.remove`）；
+  `ensure_fresh` 降级为**违规探测器**（warn + 重建兜底，注释显式记录局限）。
+- 端到端测试：`delete_message` 经工作集后缓存与库同步推进（未经重建路径）。
+
 **本阶段未做（属阶段二/三，或需单独批次）**：
 
 - **快照索引显式化**：**已由「快照键统一到消息 ID」方案取代**（键不再用位置，
   无需显式位置/`total_len`）；见上表。段化因此不再有快照阻塞点。
 - **段化**（只物化压缩点后）：剩下的是工作集内部段结构（`start_seq` + 重建从压缩点读）
   + 其余 `len()` 消费点审查。
-- **server 写路径收口**：`delete_message` / `redo_message` / `update_title` 等仍直写库，靠 `ensure` 新鲜度自愈兜住（一致但会多一次重建）；待阶段二收口。
+- **server 写路径收口**：✅ 已完成（见上"写侧收口补记"）。
 - **前端分段加载 / `ChatMessage.seq` / 订阅快照最近 N 条 / `turn_state`**：阶段二、三（§8/§9）。
 
 ---
