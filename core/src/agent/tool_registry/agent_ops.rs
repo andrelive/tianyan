@@ -472,20 +472,25 @@ impl ToolRegistry {
         // （共享标志）经镜像任务（10ms 轮询，子代理结束即 abort）传播到本地，
         // 停止语义不变。
         let shared_cancel = self.delegation_cancel.lock().await.get(session_id).cloned();
+        // T1-3：任务级取消标志（task_cancel 置位）——与"用户停止"共享标志
+        // 一起经镜像任务传播到子代理本地标志
+        let task_cancel = self.background_tasks.register_cancel_flag(task_id).await;
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_mirror = {
             let shared = shared_cancel.clone();
+            let task_flag = task_cancel.clone();
             let local = cancel.clone();
             tokio::spawn(async move {
                 loop {
                     if local.load(Ordering::Relaxed) {
-                        break; // 本地已置位（超时）→ 镜像使命结束
+                        break; // 本地已置位（超时/取消）→ 镜像使命结束
                     }
-                    if shared
+                    let stop = shared
                         .as_ref()
                         .map(|c| c.load(Ordering::Relaxed))
                         .unwrap_or(false)
-                    {
+                        || task_flag.load(Ordering::Relaxed);
+                    if stop {
                         local.store(true, Ordering::Relaxed);
                         break;
                     }
@@ -888,6 +893,7 @@ impl ToolRegistry {
         // panic 也转 fail + 通知，任务不悬死。watcher 协程挂起不占线程，
         // 主调用链 spawn 后立即返回。
         let task_id_for_loop = run_task_id.clone();
+        let task_id_for_abort = run_task_id.clone();
         let handle = tokio::spawn(async move {
             // 许可在任务运行期间持有（作用域结束释放）
             let _permits = (queue_permit, run_permit);
@@ -895,10 +901,21 @@ impl ToolRegistry {
                 .run_subagent_loop(&run_params, &run_session_id, &task_id_for_loop)
                 .await
         });
+        // T1-3：登记 abort 句柄——task_cancel 需要能**真正终止执行**
+        // （挂起的 LLM 流不会经过协作检查点，只能硬中断）
+        manager
+            .register_abort_handle(&task_id_for_abort, handle.abort_handle())
+            .await;
         tokio::spawn(async move {
             match handle.await {
                 Ok(Ok(v)) => mgr.complete(&run_task_id, format!("{v}")).await,
                 Ok(Err(e)) => mgr.fail(&run_task_id, e.to_string()).await,
+                Err(join_err) if join_err.is_cancelled() => {
+                    // T1-3：任务被 abort（task_cancel 路径）——状态已由 cancel()
+                    // 置为 Cancelled；此处幂等兜底（未置位时补取消），不标 fail。
+                    tracing::info!(task_id = %run_task_id, "后台委托任务被取消（abort）");
+                    let _ = mgr.cancel(&run_task_id).await;
+                }
                 Err(join_err) => {
                     tracing::error!(
                         task_id = %run_task_id,

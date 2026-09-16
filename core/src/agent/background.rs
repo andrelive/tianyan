@@ -285,6 +285,14 @@ pub struct BackgroundTaskManager {
     results_dir: Option<PathBuf>,
     /// 持久化加载只执行一次（惰性：首次 register/snapshot 前）。
     reloaded: Arc<AtomicBool>,
+    /// 任务级取消标志（T1-3）：task_id → 标志。runner 注册、`cancel` 置位、
+    /// 终态清理。协作检查点（子循环轮顶/工具边界）观测它优雅退出；
+    /// 挂起的 LLM 流不经过检查点，由同组 abort 句柄兜底立即终止。
+    cancels: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// 任务级中止句柄（T1-3）：task_id → 执行任务 JoinHandle 的 AbortHandle。
+    /// `task_cancel` 必须**真正终止执行**——旧实现只把状态改成 Cancelled，
+    /// 子代理继续烧 token / 写文件 / 占运行许可（面板却显示"已取消"）。
+    aborts: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
 }
 
 impl BackgroundTaskManager {
@@ -315,6 +323,8 @@ impl BackgroundTaskManager {
             results_dir: None,
             next_seq: Arc::new(AtomicU64::new(0)),
             reloaded: Arc::new(AtomicBool::new(false)),
+            cancels: Arc::new(Mutex::new(HashMap::new())),
+            aborts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -612,6 +622,10 @@ impl BackgroundTaskManager {
     }
 
     /// 取消任务并触发通知。
+    ///
+    /// T1-3：**真正终止执行**——置位协作标志（检查点优雅退出）+ abort 兜底
+    /// （挂起的 LLM 流不经过检查点，只能硬中断）。旧实现只把状态改成
+    /// Cancelled：子代理继续烧 token / 写文件 / 占运行许可。
     pub async fn cancel(&self, id: &str) -> Result<()> {
         self.ensure_reloaded().await;
         // 内存未终态任务可取消；终态（内存已移除/落库）为幂等空操作
@@ -625,11 +639,39 @@ impl BackgroundTaskManager {
         if terminal {
             return Ok(());
         }
+        // 协作标志：循环在检查点（轮顶/工具边界）观测到后优雅退出
+        if let Some(flag) = self.cancel_flag(id).await {
+            flag.store(true, AtomicOrdering::SeqCst);
+        }
+        // abort 兜底：立即中断（挂起等 LLM 流的循环不会到达检查点）
+        if let Some(abort) = self.aborts.lock().await.get(id).cloned() {
+            abort.abort();
+        }
         if self.tasks.lock().await.contains_key(id) {
             self.finish(id, TaskStatus::Cancelled, None, None, None)
                 .await;
         }
         Ok(())
+    }
+
+    /// 注册任务级取消标志（runner 在 spawn 前调用；返回标志供循环观测）。
+    pub async fn register_cancel_flag(&self, id: &str) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        self.cancels
+            .lock()
+            .await
+            .insert(id.to_string(), flag.clone());
+        flag
+    }
+
+    /// 取任务级取消标志（未注册/已清理时为 None）。
+    pub async fn cancel_flag(&self, id: &str) -> Option<Arc<AtomicBool>> {
+        self.cancels.lock().await.get(id).cloned()
+    }
+
+    /// 注册任务级中止句柄（runner 在 spawn 后调用）。
+    pub async fn register_abort_handle(&self, id: &str, handle: tokio::task::AbortHandle) {
+        self.aborts.lock().await.insert(id.to_string(), handle);
     }
 
     /// 获取任务快照（内存未命中时查 SQLite——终态任务已落库）。
@@ -669,6 +711,10 @@ impl BackgroundTaskManager {
         error: Option<String>,
         result_path: Option<String>,
     ) {
+        // T1-3：终态清理取消标志/中止句柄（即使任务已不在内存也清理，
+        // 防注册表随任务数长期增长）
+        self.cancels.lock().await.remove(id);
+        self.aborts.lock().await.remove(id);
         let (session_id, remaining, task) = {
             let mut tasks = self.tasks.lock().await;
             let Some(t) = tasks.get_mut(id) else {
@@ -1859,6 +1905,49 @@ mod tests {
         let tasks = manager2.snapshot().await;
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().any(|t| t.id == new_id && t.seq > 0));
+    }
+
+    /// T1-3（主回归）：`cancel` 必须**真正终止执行**（置位协作标志 + abort）。
+    ///
+    /// 判别力：旧实现只把状态改成 Cancelled——执行任务（挂起等 LLM 流/
+    /// 长工具）继续跑，继续烧 token / 占运行许可，面板却显示"已取消"。
+    #[tokio::test]
+    async fn test_cancel_sets_flag_and_aborts_registered_handle() {
+        let manager = BackgroundTaskManager::new();
+        let id = manager
+            .register(
+                TaskKind::Delegate,
+                "长任务".to_string(),
+                "s1".to_string(),
+                0,
+                None,
+            )
+            .await;
+        let flag = manager.register_cancel_flag(&id).await;
+        // 模拟委托执行体：长睡任务 + 注册 abort 句柄
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        manager
+            .register_abort_handle(&id, handle.abort_handle())
+            .await;
+
+        manager.cancel(&id).await.unwrap();
+
+        assert!(
+            flag.load(AtomicOrdering::SeqCst),
+            "取消必须置位协作标志（子循环检查点据此退出）"
+        );
+        // abort 立即生效：JoinHandle 很快以 Cancelled 结束
+        let err = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("abort 后执行任务必须立即结束（T1-3：旧实现只改状态）")
+            .unwrap_err();
+        assert!(err.is_cancelled(), "结束原因应为取消，实际: {err}");
+        assert_eq!(
+            manager.get(&id).await.unwrap().status,
+            TaskStatus::Cancelled
+        );
     }
 
     #[tokio::test]
