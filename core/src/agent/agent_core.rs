@@ -208,6 +208,11 @@ impl Agent {
     /// 任务再调用本方法）——唤醒轮期间事件实时流出；若先 await 本方法再
     /// 消费，输出会积压到轮结束（超过通道缓冲还会死锁：发送端等消费、
     /// 消费方等轮结束）。
+    /// 是否仍有未投递的后台事件通知（T1-23：唤醒入口水位失效判定）。
+    pub(crate) async fn has_pending_notices(&self, session_id: &str) -> bool {
+        self.agent_loop.has_pending_notices(session_id).await
+    }
+
     pub(crate) async fn process_wake(&self, session_id: &str, sender: StreamEventSender) {
         let _turn = self.turn_guard(session_id).await;
 
@@ -216,6 +221,8 @@ impl Agent {
             if attempt > 0 {
                 tokio::time::sleep(WAKE_RETRY_DELAY).await;
             }
+            // T1-23：记录水位上界（本轮组装读到的历史不超过它）
+            let assembled_upto = self.agent_loop.store_last_seq(session_id).await;
             let state = match self.load_and_build_state(session_id).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -225,6 +232,13 @@ impl Agent {
                 }
             };
             let messages = self.prepare_wake_context(&state, session_id).await;
+            // T1-23：本轮已读到截至 assembled_upto 的全部通知 → 推进水位
+            // （之后新落库的仍 pending，由下一 turn / 轮收尾兜住）
+            if let Some(seq) = assembled_upto {
+                self.agent_loop
+                    .mark_notices_delivered(session_id, seq)
+                    .await;
+            }
             let parent_id = {
                 let s = state.read().await;
                 s.structured_messages.last().map(|m| m.id.clone())
@@ -1050,6 +1064,19 @@ impl TaskWaker for AgentWakeForwarder {
             tracing::debug!("唤醒被丢弃：Agent 已销毁");
             return;
         };
+        // T1-23：水位失效——本条唤醒对应的通知若已被活动轮消化（轮边界投递
+        // 或更早的唤醒轮已读到），不再重复跑一轮。实测：主轮收尾后 9 轮唤醒
+        // 各自重读同一批历史通知、反复汇报；此判定把它们收敛为 0~1 轮。
+        //
+        // 假设：当前唤醒源都是后台事件通知（ADR-013 表）；未来其它唤醒源
+        // （如主动提醒）需在 wake 签名携带原因后再区分。
+        if !agent.has_pending_notices(session_id).await {
+            tracing::debug!(
+                session = %session_id,
+                "唤醒跳过：无未投递通知（已被活动轮消化）"
+            );
+            return;
+        }
         let mapper = self.mapper.clone();
         let deliver = self.deliver.clone();
         let session_id = session_id.to_string();

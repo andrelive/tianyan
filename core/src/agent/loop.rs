@@ -182,6 +182,12 @@ struct StreamAccum {
     cancelled: bool,
 }
 
+/// 通知投递水位初值（T1-23）。
+///
+/// 会话消息 seq 从 **0** 起（`COALESCE(MAX(seq), -1) + 1`），故"尚未投递
+/// 任何消息"必须用 `-1`——用 0 会跳过首条（seq=0）通知。
+const NOTICE_WATERMARK_INIT: i64 = -1;
+
 /// Agent 迭代循环。
 #[derive(Clone)]
 pub struct AgentLoop {
@@ -199,6 +205,12 @@ pub struct AgentLoop {
     provider_by_model: HashMap<String, String>,
     /// 单轮演进策略（ADR-030：主 agent 默认；子代理委托策略）。
     turn_policy: TurnPolicy,
+    /// 事件通知投递水位（T1-23）：session_id → 已投递给模型上下文的会话 seq。
+    ///
+    /// 轮边界增量投递据此只投递"新落库且尚未被任何轮读到"的后台事件通知；
+    /// 投递与水位推进在同一临界区内完成 → 每个通知**恰好投递一次**（会话轮
+    /// 由 turn_guard 互斥，轮内检查点与唤醒组装不会并发投递）。
+    notice_delivered: Arc<tokio::sync::Mutex<HashMap<String, i64>>>,
 }
 
 impl AgentLoop {
@@ -219,6 +231,7 @@ impl AgentLoop {
             usage_log: None,
             provider_by_model: HashMap::new(),
             turn_policy: TurnPolicy::default(),
+            notice_delivered: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -256,6 +269,168 @@ impl AgentLoop {
     /// 获取工具注册表引用。
     pub fn tool_registry(&self) -> &ToolRegistry {
         &self.tool_registry
+    }
+
+    /// 轮边界增量投递（T1-23）：把"已落库但尚未投递给模型"的后台事件通知
+    /// 追加到本轮上下文尾部。
+    ///
+    /// 为什么需要：上下文在本轮启动时组装一次，turn 之间不重读历史——活动轮
+    /// 期间落库的就绪/完成/失败通知此前只能等"下一个 loop"才被读到：期间
+    /// 用户已在面板看到任务终态而模型毫不知情（"右侧完成了、主会话没反应"），
+    /// 且积压的唤醒请求会让同一批历史被反复重读、反复汇报（实测主轮收尾后
+    /// 连跑 9 轮）。轮边界投递让活动轮自行消化通知，唤醒只留给"没有后续
+    /// turn 能读到"的场景（轮收尾检查）。
+    ///
+    /// 恰好一次：只取 `delivered_seq` 之后的**事件通知**；投递与水位推进同一
+    /// 临界区完成（会话轮互斥 → 无并发投递）。
+    pub(crate) async fn deliver_pending_notices(
+        &self,
+        messages: &mut Vec<Message>,
+        session_id: &str,
+    ) {
+        let Some(store) = &self.tool_registry.session_store else {
+            return; // 未装配会话存储（测试桩）：无投递来源
+        };
+        let last = match store.last_seq(session_id).await {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let delivered = {
+            self.notice_delivered
+                .lock()
+                .await
+                .get(session_id)
+                .copied()
+                .unwrap_or(NOTICE_WATERMARK_INIT)
+        };
+        if last <= delivered {
+            return;
+        }
+        let rows = match store.load_after(session_id, delivered).await {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let mut appended = 0usize;
+        for (_seq, msg) in &rows {
+            if !crate::agent::background::is_event_notice(msg) {
+                continue;
+            }
+            messages.push(Message::system(crate::agent::background::message_text(msg)));
+            appended += 1;
+        }
+        // 水位推进（含被跳过的非通知消息：它们无需投递，但已"处理到"）
+        self.notice_delivered
+            .lock()
+            .await
+            .insert(session_id.to_string(), last);
+        if appended > 0 {
+            tracing::info!(
+                session = %session_id,
+                appended,
+                "轮边界投递后台事件通知（T1-23）"
+            );
+        }
+    }
+
+    /// 推进通知投递水位到指定 seq（T1-23）。
+    ///
+    /// 唤醒轮组装会读取**全量历史**（含已落库通知）——组装**前**记录水位
+    /// （组装读到的上界）并在组装后调用本方法推进到该值，表示"这批通知本轮
+    /// 已读到"；组装与推进之间新落库的通知（水位之后）仍保持 pending，
+    /// 由下一个 turn 或轮收尾检查兜住（不丢、不重复）。
+    pub(crate) async fn mark_notices_delivered(&self, session_id: &str, seq: i64) {
+        self.notice_delivered
+            .lock()
+            .await
+            .insert(session_id.to_string(), seq);
+    }
+
+    /// 读当前会话末尾 seq（T1-23：唤醒轮组装前记录水位上界）。
+    pub(crate) async fn store_last_seq(&self, session_id: &str) -> Option<i64> {
+        let store = self.tool_registry.session_store.as_ref()?;
+        store.last_seq(session_id).await.ok()
+    }
+
+    /// 是否仍有"已落库但未被任何轮读到"的事件通知（T1-23）。
+    ///
+    /// 轮收尾检查（补唤醒）与唤醒入口（水位失效跳过）共用同一判定。
+    pub(crate) async fn has_pending_notices(&self, session_id: &str) -> bool {
+        let Some(store) = &self.tool_registry.session_store else {
+            // 无存储（测试桩）：保持旧行为（视为有，不跳过唤醒）
+            return true;
+        };
+        let last = match store.last_seq(session_id).await {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let delivered = {
+            self.notice_delivered
+                .lock()
+                .await
+                .get(session_id)
+                .copied()
+                .unwrap_or(NOTICE_WATERMARK_INIT)
+        };
+        if last <= delivered {
+            return false;
+        }
+        match store.load_after(session_id, delivered).await {
+            Ok(rows) => rows
+                .iter()
+                .any(|(_, m)| crate::agent::background::is_event_notice(m)),
+            Err(_) => false,
+        }
+    }
+
+    /// 轮收尾补唤醒（T1-23）：若仍有未投递事件通知 → 请求一轮唤醒。
+    ///
+    /// 这就是"唤醒的条件"：只有当**没有后续 turn 能读到**通知时才醒
+    /// （主轮循环中的通知由下一个 turn 投递消化，不唤醒）。
+    pub(crate) async fn wake_if_pending_notices(&self, session_id: &str) {
+        if self.has_pending_notices(session_id).await {
+            self.tool_registry
+                .background_tasks
+                .request_wake(session_id)
+                .await;
+        }
+    }
+
+    /// `run_turns` 的收尾包装（T1-23）：轮结束后检查是否有未投递事件通知
+    /// （有 → 补一轮唤醒；由 `AgentWakeForwarder` 再判水位失效）。
+    #[allow(clippy::too_many_arguments)]
+    async fn run_turns_with_notice_check<F>(
+        &self,
+        messages: &mut Vec<Message>,
+        stream_sender: Option<&StreamEventSender>,
+        session_id: &str,
+        initial_parent_id: Option<&str>,
+        model: &str,
+        cancel: Option<&AtomicBool>,
+        step: F,
+    ) -> Result<AgentLoopResult, TianyanError>
+    where
+        F: for<'a> FnMut(
+            &'a AgentLoop,
+            &'a str,
+            Option<&'a StreamEventSender>,
+            Vec<Message>,
+            Option<&'a AtomicBool>,
+            Option<(String, usize)>,
+        ) -> TurnStep<'a>,
+    {
+        let result = self
+            .run_turns(
+                messages,
+                stream_sender,
+                session_id,
+                initial_parent_id,
+                model,
+                cancel,
+                step,
+            )
+            .await;
+        self.wake_if_pending_notices(session_id).await;
+        result
     }
 
     /// 取消标志检查（None 视为未取消）。
@@ -337,7 +512,7 @@ impl AgentLoop {
         cancel: Option<&AtomicBool>,
         thinking_effort: Option<String>,
     ) -> Result<AgentLoopResult, TianyanError> {
-        self.run_turns(
+        self.run_turns_with_notice_check(
             messages,
             None,
             session_id,
@@ -406,7 +581,7 @@ impl AgentLoop {
         cancel: Option<&AtomicBool>,
         thinking_effort: Option<String>,
     ) -> Result<AgentLoopResult, TianyanError> {
-        self.run_turns(
+        self.run_turns_with_notice_check(
             messages,
             Some(&stream_sender),
             session_id,
@@ -748,6 +923,9 @@ impl AgentLoop {
             }
 
             // G6 结构化 Trace：设置当前轮次（工具 span 归属本轮）
+            // T1-23：轮边界增量投递——把活动轮期间落库的事件通知追加到本轮
+            // 上下文尾部（前缀不变，仅尾部追加 → 缓存友好；恰好一次由水位保证）
+            self.deliver_pending_notices(messages, session_id).await;
             let turn_start = std::time::Instant::now();
             if let Some(ref trace) = self.trace {
                 trace.set_current_turn(session_id, turn as i64);

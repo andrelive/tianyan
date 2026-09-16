@@ -654,6 +654,16 @@ impl BackgroundTaskManager {
         Ok(())
     }
 
+    /// 请求一次会话唤醒（T1-23：轮收尾发现"仍有未投递通知"时补一轮）。
+    ///
+    /// 未注入 waker（测试桩/未装配）时静默 no-op；唤醒是否真正执行由
+    /// waker 侧判定（`AgentWakeForwarder` 会跳过"通知已被活动轮消化"的请求）。
+    pub async fn request_wake(&self, session_id: &str) {
+        if let Some(waker) = &*self.waker.lock().await {
+            waker.wake(session_id).await;
+        }
+    }
+
     /// 注册任务级取消标志（runner 在 spawn 前调用；返回标志供循环观测）。
     pub async fn register_cancel_flag(&self, id: &str) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
@@ -1018,6 +1028,39 @@ impl Default for BackgroundTaskManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 事件通知文本前缀（T1-23 **单一事实来源**）：通知生成（本模块 notifier）
+/// 与轮边界增量投递的识别口径共用——避免"哪些 system 消息是事件通知"
+/// 靠分散的字符串匹配判断。
+pub const EVENT_NOTICE_PREFIXES: [&str; 3] = ["[后台任务", "[后台命令", "[后台服务"];
+
+/// 取结构化消息的正文文本（纯文本 part 拼接；供通知识别与轮边界投递共用）。
+pub(crate) fn message_text(msg: &StructuredMessage) -> String {
+    let mut text = String::new();
+    for part in &msg.parts {
+        if let crate::common::types::Part::Text { text: t, .. } = part {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(t);
+        }
+    }
+    text
+}
+
+/// 是否为后台事件通知消息（T1-23：轮边界增量投递的识别口径）。
+///
+/// 判据：system 角色 + 正文以 [`EVENT_NOTICE_PREFIXES`] 任一前缀开头
+/// （前缀由本模块 notifier 生成，生成与识别同源）。
+pub fn is_event_notice(msg: &StructuredMessage) -> bool {
+    if msg.role != crate::common::types::MessageRole::System {
+        return false;
+    }
+    let text = message_text(msg);
+    EVENT_NOTICE_PREFIXES
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
 }
 
 /// 默认通知器：把完成通知作为 System 消息持久化到父会话。

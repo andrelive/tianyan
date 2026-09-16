@@ -1715,3 +1715,138 @@ async fn test_run_recovery_scoped_after_last_compression_point() {
         .unwrap();
     assert!(matches!(result, AgentLoopResult::Answer { .. }));
 }
+
+// ── T1-23：通知投递事务化（轮边界增量投递 + 投递水位 + 条件唤醒）──────────
+
+/// 事件通知识别口径（生成与识别同源，T1-23）。
+#[test]
+fn test_event_notice_detection_uses_shared_prefixes() {
+    use crate::agent::background::is_event_notice;
+    let notice = StructuredMessage::system(
+        "s1".to_string(),
+        "[后台命令失败] mvn test（cmd_1）".to_string(),
+    );
+    assert!(is_event_notice(&notice), "后台事件通知必须被识别");
+    let plain = StructuredMessage::system("s1".to_string(), "普通系统提示".to_string());
+    assert!(
+        !is_event_notice(&plain),
+        "非事件通知的 system 消息不得被投递"
+    );
+    let user = StructuredMessage::user("s1".to_string(), "[后台命令失败] 引用".to_string());
+    assert!(!is_event_notice(&user), "非 system 角色不得被投递");
+}
+
+/// 测试用计数唤醒器（条件唤醒断言）。
+struct CountingWaker(Arc<AtomicUsize>);
+
+#[async_trait]
+impl crate::agent::background::TaskWaker for CountingWaker {
+    async fn wake(&self, _session_id: &str) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// 构造带真实 SessionStore 的 AgentLoop（投递路径需要 last_seq / load_after）。
+async fn make_loop_with_store() -> (AgentLoop, Arc<crate::session::store::SessionStore>) {
+    let db = crate::db::Database::open_in_memory().unwrap();
+    db.init_schemas().await.unwrap();
+    let store = crate::session::store::SessionStore::new(db).unwrap();
+    store
+        .create("s1", &crate::session::types::SessionHeader::default())
+        .await
+        .unwrap();
+    let registry = ToolRegistry::new(SecurityPolicy::default()).with_session_store(store.clone());
+    let agent_loop = AgentLoop::new(
+        Arc::new(MockChatService::new()),
+        registry,
+        Arc::new(MockSessionManager {
+            last_usage: Arc::new(std::sync::Mutex::new(None)),
+            messages: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }),
+        AgentLoopConfig::default(),
+    );
+    (agent_loop, store)
+}
+
+/// 落库一条 system 消息（模拟 notifier 的通知落库）。
+async fn append_system(store: &crate::session::store::SessionStore, text: &str) {
+    let msg = StructuredMessage::system("s1".to_string(), text.to_string());
+    store.append_message("s1", &msg).await.unwrap();
+}
+
+/// T1-23（主回归）：活动轮的通知必须在**轮边界**投递进上下文，且恰好一次。
+#[tokio::test]
+async fn test_turn_boundary_delivers_event_notice_once() {
+    let (agent_loop, store) = make_loop_with_store().await;
+    append_system(&store, "[后台命令完成] mvn test（cmd_1） | 日志：x").await;
+
+    let mut messages: Vec<Message> = vec![Message::user("继续")];
+    agent_loop
+        .deliver_pending_notices(&mut messages, "s1")
+        .await;
+    assert_eq!(
+        messages.len(),
+        2,
+        "轮边界必须把事件通知追加到上下文（T1-23：旧行为要等下一个 loop）"
+    );
+    assert!(messages[1].content.contains("[后台命令完成]"));
+
+    // 恰好一次：水位推进后不再重复投递
+    agent_loop
+        .deliver_pending_notices(&mut messages, "s1")
+        .await;
+    assert_eq!(messages.len(), 2, "同一通知不得重复投递");
+}
+
+/// T1-23：非事件通知不投递；水位不掩盖后续新通知。
+#[tokio::test]
+async fn test_delivery_skips_non_notice_and_picks_up_new_notice() {
+    let (agent_loop, store) = make_loop_with_store().await;
+    append_system(&store, "普通系统提示").await;
+    let mut messages: Vec<Message> = Vec::new();
+    agent_loop
+        .deliver_pending_notices(&mut messages, "s1")
+        .await;
+    assert!(messages.is_empty(), "非事件通知的 system 消息不投递");
+
+    append_system(&store, "[后台服务就绪] 端口 8080 已监听").await;
+    agent_loop
+        .deliver_pending_notices(&mut messages, "s1")
+        .await;
+    assert_eq!(messages.len(), 1, "水位不得掩盖后续新通知");
+    assert!(messages[0].content.contains("[后台服务就绪]"));
+}
+
+/// T1-23（条件唤醒）：只有"有未投递通知"时才补唤醒（轮收尾检查）。
+#[tokio::test]
+async fn test_wake_only_when_notice_pending() {
+    let (agent_loop, store) = make_loop_with_store().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    agent_loop
+        .tool_registry
+        .background_tasks
+        .set_waker(Arc::new(CountingWaker(calls.clone())))
+        .await;
+
+    // 无未投递通知 → 不唤醒（9 轮风暴的直接来源之一）
+    agent_loop.wake_if_pending_notices("s1").await;
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // 新通知落库（未投递）→ 补一轮唤醒
+    append_system(&store, "[后台任务完成] 审查（bt_1）").await;
+    agent_loop.wake_if_pending_notices("s1").await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // 已投递（水位覆盖）→ 不再唤醒
+    let mut messages: Vec<Message> = Vec::new();
+    agent_loop
+        .deliver_pending_notices(&mut messages, "s1")
+        .await;
+    assert_eq!(messages.len(), 1);
+    agent_loop.wake_if_pending_notices("s1").await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "通知已投递后不得重复唤醒（T1-23：排队的唤醒应失效）"
+    );
+}
