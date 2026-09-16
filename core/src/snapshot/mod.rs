@@ -84,8 +84,8 @@ pub struct GcStats {
 pub struct DiffResult {
     /// 会话 ID。
     pub session_id: String,
-    /// 快照索引。
-    pub index: usize,
+    /// 快照键（消息 ID）。
+    pub key: String,
     /// 文件级差异（按路径排序）。
     pub files: Vec<FileDiff>,
 }
@@ -160,7 +160,12 @@ impl SnapshotManager {
     ///
     /// 遍历工作目录生成 `{path → sha256}` 树并持久化；内容寻址对象缺失时复制原文。
     /// 已存在对象（内容未变）不重复复制。
-    pub async fn capture(&self, session_id: &str, index: usize) -> Result<()> {
+    ///
+    /// `anchor_message_id` 是快照的**键**（`trees/{key}.json`）：取本次处理的用户
+    /// 消息 ID——回退时按消息 ID 定位该消息处理**前**的工作区状态。用消息 ID
+    /// 而非数字位置，是因为位置会因删除/回退重排（`store.rewrite` 重编号），
+    /// 而消息 ID 稳定（与 `redo/` 同一取舍，见 `redo.rs` 的设计说明）。
+    pub async fn capture(&self, session_id: &str, anchor_message_id: &str) -> Result<()> {
         self.validate_session_id(session_id)?;
         if !self.workdir.exists() {
             return Ok(());
@@ -170,41 +175,36 @@ impl SnapshotManager {
         fs::create_dir_all(&trees_dir)
             .await
             .map_err(|e| TianyanError::Custom(format!("snapshot: 创建快照树目录失败: {e}")))?;
-        let tree_path = trees_dir.join(format!("{}.json", index));
-        let cache_path = trees_dir.join(format!("{}.cache.json", index));
-
-        // 复用上一轮的 mtime/size 缓存,避免未变化文件全量读取
-        let prev_cache = if index > 0 {
-            self.load_cache(&trees_dir.join(format!("{}.cache.json", index - 1)))
-                .await?
-        } else {
-            None
-        };
+        let tree_path = trees_dir.join(format!("{}.json", sanitize_key(anchor_message_id)));
+        // 缓存复用：单一 latest 指针（键不再是递增编号，无法靠"上一号"定位上一轮
+        // 缓存）。放在 trees/ 之外，避免 GC 的树收集把它当作快照树解析。
+        let cache_path = self.latest_cache_path(session_id);
+        let prev_cache = self.load_cache(&cache_path).await?;
 
         self.capture_tree_to(&self.workdir, &tree_path, &cache_path, prev_cache.as_ref())
             .await
     }
 
-    /// 恢复到指定消息索引的快照（回退调用）。
+    /// 恢复到指定消息 ID 的快照（回退调用）。
     ///
     /// 增量恢复：对比当前工作区与目标树，恢复内容差异的文件、删除目标树中不存在的文件。
     /// 返回恢复/删除的文件数。
-    pub async fn restore(&self, session_id: &str, index: usize) -> Result<usize> {
+    pub async fn restore(&self, session_id: &str, anchor_message_id: &str) -> Result<usize> {
         self.validate_session_id(session_id)?;
 
-        let tree = self.load_tree(session_id, index).await?;
+        let tree = self.load_tree(session_id, anchor_message_id).await?;
         self.restore_tree(tree, &self.workdir).await
     }
 
-    /// 对比当前工作区与 `(session_id, index)` 快照，返回结构化差异（前端展示 / 模型理解用）。
+    /// 对比当前工作区与 `(session_id, key)` 快照，返回结构化差异（前端展示 / 模型理解用）。
     ///
     /// 快照树中的文件按内容哈希比较：哈希相同 → 跳过（unchanged）；工作区缺失 → `removed`；
     /// 内容不同 → 读取双方字节，二进制（NUL 字节或控制字符占比 >30%）→ `binary`，
     /// 否则生成 hunks + unified diff → `modified`。当前工作区新增文件 → `added`。
     /// 结果按路径排序，输出确定。
-    pub async fn diff(&self, session_id: &str, index: usize) -> Result<DiffResult> {
+    pub async fn diff(&self, session_id: &str, key: &str) -> Result<DiffResult> {
         self.validate_session_id(session_id)?;
-        let tree = self.load_tree(session_id, index).await?;
+        let tree = self.load_tree(session_id, key).await?;
 
         let mut current: SnapshotTree = HashMap::new();
         if self.workdir.exists() {
@@ -313,7 +313,7 @@ impl SnapshotManager {
         files.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(DiffResult {
             session_id: session_id.to_string(),
-            index,
+            key: key.to_string(),
             files,
         })
     }
@@ -560,10 +560,12 @@ impl SnapshotManager {
         Ok(restored)
     }
 
-    async fn load_tree(&self, session_id: &str, index: usize) -> Result<SnapshotTree> {
-        let tree_path = self.trees_dir(session_id).join(format!("{}.json", index));
+    async fn load_tree(&self, session_id: &str, key: &str) -> Result<SnapshotTree> {
+        let tree_path = self
+            .trees_dir(session_id)
+            .join(format!("{}.json", sanitize_key(key)));
         let content = fs::read_to_string(&tree_path).await.map_err(|e| {
-            TianyanError::not_found(format!("快照不存在（会话 {session_id} 索引 {index}）: {e}"))
+            TianyanError::not_found(format!("快照不存在（会话 {session_id} 键 {key}）: {e}"))
         })?;
         serde_json::from_str(&content)
             .map_err(|e| TianyanError::Custom(format!("snapshot: 解析快照树失败: {e}")))
@@ -790,6 +792,13 @@ impl SnapshotManager {
     fn trees_dir(&self, session_id: &str) -> PathBuf {
         self.root.join(session_id).join("trees")
     }
+    /// 快照缓存指针路径（`{root}/{session_id}/latest.cache.json`）。
+    ///
+    /// 放在 `trees/` 之外：GC 的树收集会遍历 `trees/` 下所有 `*.json` 并尝试
+    /// 解析为快照树，缓存文件（另一种结构）会被误当树解析。
+    fn latest_cache_path(&self, session_id: &str) -> PathBuf {
+        self.root.join(session_id).join(LATEST_CACHE_FILE)
+    }
 
     fn object_path(&self, hash: &str) -> PathBuf {
         self.root
@@ -859,6 +868,30 @@ fn hex_sha256(bytes: &[u8]) -> String {
 
 /// gzip 魔数（前 2 字节）,用于区分压缩对象与 legacy 未压缩对象。
 const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+/// 快照缓存指针文件名（每会话一份，供下一次捕获复用 mtime/size 缓存）。
+const LATEST_CACHE_FILE: &str = "latest.cache.json";
+
+/// 快照键消毒（消息 ID → 安全文件名）。
+///
+/// 消息 ID 由服务端生成（`msg_{epoch_ms}_{seq}`），但文件名安全是底线——
+/// 剔除路径分隔符与危险片段（与 `redo/` 的键处理同一策略）。
+pub(crate) fn sanitize_key(key: &str) -> String {
+    let cleaned: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "_".to_string()
+    } else {
+        cleaned
+    }
+}
 
 /// 将内容压缩为 gzip 流（对象写路径,默认压缩级别）。
 fn gzip_compress(bytes: &[u8]) -> Result<Vec<u8>> {
@@ -977,11 +1010,11 @@ mod tests {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "原始内容");
 
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
         write(&mgr.workdir, "a.txt", "被修改的内容");
-        mgr.capture("s1", 1).await.unwrap();
+        mgr.capture("s1", "1").await.unwrap();
 
-        let restored = mgr.restore("s1", 0).await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap();
         assert_eq!(restored, 1);
         assert_eq!(read(&mgr.workdir, "a.txt"), "原始内容");
     }
@@ -990,12 +1023,12 @@ mod tests {
     async fn test_restore_deletes_added_files() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "原始内容");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
 
         write(&mgr.workdir, "new.txt", "新增文件");
-        mgr.capture("s1", 1).await.unwrap();
+        mgr.capture("s1", "1").await.unwrap();
 
-        let restored = mgr.restore("s1", 0).await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap();
         assert_eq!(restored, 1);
         assert!(!mgr.workdir.join("new.txt").exists());
     }
@@ -1005,12 +1038,12 @@ mod tests {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "keep.txt", "保留");
         write(&mgr.workdir, "gone.txt", "将被删除");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
 
         std::fs::remove_file(mgr.workdir.join("gone.txt")).unwrap();
-        mgr.capture("s1", 1).await.unwrap();
+        mgr.capture("s1", "1").await.unwrap();
 
-        let restored = mgr.restore("s1", 0).await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap();
         assert_eq!(restored, 1);
         assert_eq!(read(&mgr.workdir, "gone.txt"), "将被删除");
     }
@@ -1022,8 +1055,8 @@ mod tests {
         write(&mgr.workdir, "node_modules/pkg/index.js", "ignored");
         write(&mgr.workdir, "target/debug/app", "ignored");
 
-        mgr.capture("s1", 0).await.unwrap();
-        let tree = mgr.load_tree("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap();
         assert!(tree.contains_key("src/main.rs"));
         assert!(!tree.contains_key("node_modules/pkg/index.js"));
         assert!(!tree.contains_key("target/debug/app"));
@@ -1036,8 +1069,8 @@ mod tests {
         let big = vec![b'x'; (MAX_FILE_BYTES + 1) as usize];
         std::fs::write(mgr.workdir.join("big.bin"), big).unwrap();
 
-        mgr.capture("s1", 0).await.unwrap();
-        let tree = mgr.load_tree("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap();
         assert!(tree.contains_key("small.txt"));
         assert!(!tree.contains_key("big.bin"));
     }
@@ -1046,11 +1079,11 @@ mod tests {
     async fn test_capture_after_no_changes_is_cheap() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "内容");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
 
         // 无变化时再次捕获,对象库不应新增对象
         let objects_before = count_files(&mgr.root.join("objects"));
-        mgr.capture("s1", 1).await.unwrap();
+        mgr.capture("s1", "1").await.unwrap();
         let objects_after = count_files(&mgr.root.join("objects"));
         assert_eq!(objects_before, objects_after);
     }
@@ -1059,16 +1092,16 @@ mod tests {
     async fn test_redo_roundtrip() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "原始");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
 
         // 模拟消息0修改文件
         write(&mgr.workdir, "a.txt", "v1");
-        mgr.capture("s1", 1).await.unwrap();
+        mgr.capture("s1", "1").await.unwrap();
 
         // 回退:保存 redo(当前=v1) + 恢复快照0(原始)
         mgr.save_redo("s1", "msg_1", &[]).await.unwrap();
         assert!(mgr.has_redo("s1", "msg_1").await);
-        mgr.restore("s1", 0).await.unwrap();
+        mgr.restore("s1", "0").await.unwrap();
         assert_eq!(read(&mgr.workdir, "a.txt"), "原始");
 
         // 重做:恢复 v1 + 取回消息
@@ -1109,8 +1142,8 @@ mod tests {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "原始内容");
 
-        mgr.capture("s1", 0).await.unwrap();
-        let tree = mgr.load_tree("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap();
         let hash = tree.get("a.txt").unwrap();
 
         // 对象文件必须是 gzip 流（魔数 0x1f 0x8b）
@@ -1119,7 +1152,7 @@ mod tests {
 
         // 删除工作区文件后恢复 → 逐字节一致
         std::fs::remove_file(mgr.workdir.join("a.txt")).unwrap();
-        let restored = mgr.restore("s1", 0).await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap();
         assert_eq!(restored, 1);
         assert_eq!(read(&mgr.workdir, "a.txt"), "原始内容");
     }
@@ -1143,7 +1176,7 @@ mod tests {
         // 工作区写入不同内容,触发真实恢复路径
         write(&mgr.workdir, "legacy.txt", "不同内容");
 
-        let restored = mgr.restore("s1", 0).await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap();
         assert_eq!(restored, 1);
         assert_eq!(read(&mgr.workdir, "legacy.txt"), "遗留未压缩对象内容");
     }
@@ -1154,8 +1187,8 @@ mod tests {
         let content = "hello world\n".repeat(5000);
         std::fs::write(mgr.workdir.join("rep.txt"), &content).unwrap();
 
-        mgr.capture("s1", 0).await.unwrap();
-        let tree = mgr.load_tree("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap();
         let hash = tree.get("rep.txt").unwrap();
         let stored = object_bytes(&mgr, hash);
 
@@ -1171,8 +1204,8 @@ mod tests {
     async fn test_dedup_semantics_preserved() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "跨会话相同内容");
-        mgr.capture("s1", 0).await.unwrap();
-        mgr.capture("s2", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
+        mgr.capture("s2", "0").await.unwrap();
 
         // 跨会话全局去重:同内容只存一个对象（基于 raw 字节 sha256）
         assert_eq!(count_files(&mgr.root.join("objects")), 1);
@@ -1183,9 +1216,9 @@ mod tests {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "comp.txt", "压缩对象内容");
         write(&mgr.workdir, "raw.txt", "原始对象内容");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
 
-        let tree = mgr.load_tree("s1", 0).await.unwrap();
+        let tree = mgr.load_tree("s1", "0").await.unwrap();
         // 把 raw.txt 的对象替换为 legacy 未压缩字节 → 混合存储
         let raw_hash = tree.get("raw.txt").unwrap();
         write_object_raw(&mgr, raw_hash, "原始对象内容".as_bytes());
@@ -1193,7 +1226,7 @@ mod tests {
         write(&mgr.workdir, "comp.txt", "修改1");
         write(&mgr.workdir, "raw.txt", "修改2");
 
-        let restored = mgr.restore("s1", 0).await.unwrap();
+        let restored = mgr.restore("s1", "0").await.unwrap();
         assert_eq!(restored, 2);
         assert_eq!(read(&mgr.workdir, "comp.txt"), "压缩对象内容");
         assert_eq!(read(&mgr.workdir, "raw.txt"), "原始对象内容");
@@ -1220,9 +1253,9 @@ mod tests {
     async fn test_gc_removes_unreferenced_objects() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "keep.txt", "保留内容");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
         write(&mgr.workdir, "drop.txt", "将被丢弃的内容");
-        mgr.capture("s2", 0).await.unwrap();
+        mgr.capture("s2", "0").await.unwrap();
 
         // 模拟删除会话 s2:整个 trees 目录被移除
         std::fs::remove_dir_all(mgr.trees_dir("s2")).unwrap();
@@ -1238,8 +1271,8 @@ mod tests {
     async fn test_gc_keeps_shared_objects() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "same.txt", "跨会话共享内容");
-        mgr.capture("s1", 0).await.unwrap();
-        mgr.capture("s2", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
+        mgr.capture("s2", "0").await.unwrap();
 
         // 删除会话 s2 的树,但对象仍被 s1 引用（内容寻址全局共享）
         std::fs::remove_dir_all(mgr.trees_dir("s2")).unwrap();
@@ -1254,7 +1287,7 @@ mod tests {
     async fn test_gc_removes_orphaned_redo_cache() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "原始");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
 
         // 模拟泄漏:save_redo 写入 tree/cache/messages,load_redo 消费后遗留孤儿 cache
         mgr.save_redo("s1", "msg_0", &[]).await.unwrap();
@@ -1284,7 +1317,7 @@ mod tests {
     async fn test_gc_idempotent() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "内容");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
 
         mgr.gc().await.unwrap();
         let stats = mgr.gc().await.unwrap();
@@ -1296,11 +1329,11 @@ mod tests {
     async fn test_gc_keeps_all_live_trees() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "v0");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
         write(&mgr.workdir, "a.txt", "v1");
-        mgr.capture("s1", 1).await.unwrap();
+        mgr.capture("s1", "1").await.unwrap();
         write(&mgr.workdir, "a.txt", "v2");
-        mgr.capture("s1", 2).await.unwrap();
+        mgr.capture("s1", "2").await.unwrap();
         mgr.save_redo("s1", "msg_0", &[]).await.unwrap();
 
         let stats = mgr.gc().await.unwrap();
@@ -1335,22 +1368,22 @@ mod tests {
     async fn test_diff_unchanged_is_empty() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "内容");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
 
-        let result = mgr.diff("s1", 0).await.unwrap();
+        let result = mgr.diff("s1", "0").await.unwrap();
         assert_eq!(result.files.len(), 0);
         assert_eq!(result.session_id, "s1");
-        assert_eq!(result.index, 0);
+        assert_eq!(result.key, "0");
     }
 
     #[tokio::test]
     async fn test_diff_modified_file_hunks() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "a.txt", "a\nb\nc\nd\n");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
         write(&mgr.workdir, "a.txt", "a\nX\nc\nd\n");
 
-        let result = mgr.diff("s1", 0).await.unwrap();
+        let result = mgr.diff("s1", "0").await.unwrap();
         assert_eq!(result.files.len(), 1);
         let file = &result.files[0];
         assert_eq!(file.path, "a.txt");
@@ -1376,10 +1409,10 @@ mod tests {
     async fn test_diff_added_file() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "keep.txt", "保留");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
         write(&mgr.workdir, "new.txt", "新增内容");
 
-        let result = mgr.diff("s1", 0).await.unwrap();
+        let result = mgr.diff("s1", "0").await.unwrap();
         assert_eq!(result.files.len(), 1);
         let file = &result.files[0];
         assert_eq!(file.path, "new.txt");
@@ -1393,10 +1426,10 @@ mod tests {
     async fn test_diff_removed_file() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "gone.txt", "将被删除");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
         std::fs::remove_file(mgr.workdir.join("gone.txt")).unwrap();
 
-        let result = mgr.diff("s1", 0).await.unwrap();
+        let result = mgr.diff("s1", "0").await.unwrap();
         assert_eq!(result.files.len(), 1);
         let file = &result.files[0];
         assert_eq!(file.path, "gone.txt");
@@ -1410,10 +1443,10 @@ mod tests {
     async fn test_diff_binary_file() {
         let (_dir, mgr) = setup().await;
         write(&mgr.workdir, "bin.dat", "text content");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
         std::fs::write(mgr.workdir.join("bin.dat"), [0u8, 1, 2, 3, 0]).unwrap();
 
-        let result = mgr.diff("s1", 0).await.unwrap();
+        let result = mgr.diff("s1", "0").await.unwrap();
         assert_eq!(result.files.len(), 1);
         let file = &result.files[0];
         assert_eq!(file.path, "bin.dat");
@@ -1427,10 +1460,61 @@ mod tests {
     #[tokio::test]
     async fn test_diff_missing_snapshot_errors() {
         let (_dir, mgr) = setup().await;
-        let err = mgr.diff("s1", 0).await.unwrap_err();
+        let err = mgr.diff("s1", "0").await.unwrap_err();
         assert!(
             err.to_string().contains("快照"),
             "错误信息应包含「快照」: {err}"
+        );
+    }
+
+    /// 快照键 = 消息 ID（稳定），不是位置编号。
+    ///
+    /// 判别力：若实现退回"按位置编号命名"（`{index}.json`），`trees/` 下会出现
+    /// 数字文件名而非 `msg_*.json` → 本测试红。
+    #[tokio::test]
+    async fn test_snapshot_key_is_message_id_not_position() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "v1");
+        mgr.capture("s1", "msg_1758000000000_1").await.unwrap();
+
+        let trees = mgr.trees_dir("s1");
+        assert!(
+            trees.join("msg_1758000000000_1.json").exists(),
+            "快照文件应以消息 ID 命名"
+        );
+        assert!(
+            !trees.join("0.json").exists(),
+            "不得以位置编号命名（位置会因删除/回退重排）"
+        );
+
+        // 键原样可定位（回退按消息 ID 恢复该消息处理前的工作区）
+        write(&mgr.workdir, "a.txt", "v2");
+        let restored = mgr.restore("s1", "msg_1758000000000_1").await.unwrap();
+        assert_eq!(restored, 1);
+        assert_eq!(read(&mgr.workdir, "a.txt"), "v1");
+    }
+
+    /// 缓存复用改由单一 latest 指针承担（键不再是递增编号）。
+    #[tokio::test]
+    async fn test_latest_cache_pointer_supports_reuse() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "v1");
+        mgr.capture("s1", "msg_A").await.unwrap();
+        assert!(
+            mgr.latest_cache_path("s1").exists(),
+            "捕获后应写入 latest 缓存指针（下一次捕获复用 mtime/size）"
+        );
+
+        write(&mgr.workdir, "b.txt", "v2");
+        mgr.capture("s1", "msg_B").await.unwrap();
+        let tree = mgr.load_tree("s1", "msg_B").await.unwrap();
+        assert!(tree.contains_key("b.txt"), "第二次捕获的树应完整");
+        assert!(tree.contains_key("a.txt"));
+
+        // 缓存指针不在 trees/ 下（GC 的树收集会把它误当快照树解析）
+        assert!(
+            !mgr.trees_dir("s1").join("latest.cache.json").exists(),
+            "缓存指针不得落在 trees/ 目录内"
         );
     }
 }

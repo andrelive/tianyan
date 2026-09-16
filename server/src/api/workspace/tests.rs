@@ -411,11 +411,14 @@ async fn diff_snapshot_reports_modified_file() {
     std::fs::write(workdir.join("a.txt"), "v1\n").unwrap();
     let snap_root = dir.path().join("snaproot");
     let (service, manager) = service_with_snapshot(workdir.clone(), snap_root);
-    manager.capture("s1", 0).await.unwrap();
+    manager.capture("s1", "msg_1").await.unwrap();
 
     std::fs::write(workdir.join("a.txt"), "v1\nv2\n").unwrap();
 
-    let value: Value = service.diff_snapshot("s1", 0, Some("a.txt")).await.unwrap();
+    let value: Value = service
+        .diff_snapshot("s1", Some("msg_1"), None, Some("a.txt"))
+        .await
+        .unwrap();
     assert_eq!(value["path"], "a.txt");
     assert_eq!(value["status"], "modified");
     assert_eq!(value["old_lines"], 1);
@@ -434,10 +437,10 @@ async fn diff_snapshot_missing_index_returns_not_found() {
     std::fs::write(workdir.join("a.txt"), "v1\n").unwrap();
     let snap_root = dir.path().join("snaproot");
     let (service, manager) = service_with_snapshot(workdir, snap_root);
-    manager.capture("s1", 0).await.unwrap();
+    manager.capture("s1", "msg_1").await.unwrap();
 
     let err = service
-        .diff_snapshot("s1", 99, Some("a.txt"))
+        .diff_snapshot("s1", Some("msg_missing"), None, Some("a.txt"))
         .await
         .unwrap_err();
     assert!(matches!(err, ApiError::NotFound(_)), "err = {err:?}");
@@ -452,11 +455,14 @@ async fn diff_snapshot_without_path_returns_files_list() {
     std::fs::write(workdir.join("a.txt"), "v1\n").unwrap();
     let snap_root = dir.path().join("snaproot");
     let (service, manager) = service_with_snapshot(workdir.clone(), snap_root);
-    manager.capture("s1", 0).await.unwrap();
+    manager.capture("s1", "msg_1").await.unwrap();
 
     std::fs::write(workdir.join("a.txt"), "v1\nv2\n").unwrap();
 
-    let value: Value = service.diff_snapshot("s1", 0, None).await.unwrap();
+    let value: Value = service
+        .diff_snapshot("s1", Some("msg_1"), None, None)
+        .await
+        .unwrap();
     let files = value["files"].as_array().unwrap();
     assert_eq!(files.len(), 1, "仅修改的文件应出现在列表中: {value}");
     assert_eq!(files[0]["path"], "a.txt");

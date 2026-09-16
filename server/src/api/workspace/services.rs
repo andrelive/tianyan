@@ -140,14 +140,19 @@ impl WorkspaceService {
         Ok(value)
     }
 
-    /// 快照模式差异：`SnapshotManager::diff(session_id, index)`。
+    /// 快照模式差异：`SnapshotManager::diff(session_id, key)`。
     ///
     /// `path` 省略时返回整个 `{ "files": [...] }`；指定时返回单文件差异
     /// （快照中不存在该文件或内容未变 → `unchanged`）。
+    ///
+    /// **定位键**优先 `message_id`（快照键，稳定）；`index` 是兼容入口——
+    /// 按**当前会话链位置**映射为消息 ID（位置会因删除/回退重排，查看历史
+    /// 快照请优先用 `message_id`）。
     pub async fn diff_snapshot(
         &self,
         session_id: &str,
-        index: usize,
+        message_id: Option<&str>,
+        index: Option<usize>,
         path: Option<&str>,
     ) -> Result<Value, ApiError> {
         let manager = self
@@ -157,11 +162,29 @@ impl WorkspaceService {
         if let Some(rel) = path {
             validate_rel_path(rel)?;
         }
+        let key = match message_id {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => {
+                let idx = index.ok_or_else(|| {
+                    ApiError::BadRequest("快照模式缺少 message_id 或 index".to_string())
+                })?;
+                let session = self
+                    .session_manager
+                    .get_session(session_id)
+                    .await?
+                    .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {session_id}")))?;
+                session
+                    .messages
+                    .get(idx)
+                    .map(|m| m.id.clone())
+                    .ok_or_else(|| ApiError::NotFound(format!("快照位置超出会话链: {idx}")))?
+            }
+        };
         // 快照根取该会话生效的工作目录（会话级绑定优先，缺省全局配置）
         let workdir = self.resolve_workdir(Some(session_id)).await?;
         let result = manager
             .with_workdir(workdir)
-            .diff(session_id, index)
+            .diff(session_id, &key)
             .await
             .map_err(ApiError::from)?;
         match path {

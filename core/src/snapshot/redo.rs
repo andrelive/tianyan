@@ -26,7 +26,7 @@ impl SnapshotManager {
         messages: &[StructuredMessage],
     ) -> Result<()> {
         self.validate_session_id(session_id)?;
-        let key = sanitize_redo_key(message_id);
+        let key = super::sanitize_key(message_id);
 
         let redo_dir = self.redo_dir(session_id);
         fs::create_dir_all(&redo_dir)
@@ -63,7 +63,7 @@ impl SnapshotManager {
     ) -> Result<Option<(Vec<StructuredMessage>, usize)>> {
         self.validate_session_id(session_id)?;
 
-        let key = sanitize_redo_key(message_id);
+        let key = super::sanitize_key(message_id);
         let redo_dir = self.redo_dir(session_id);
         let messages_path = redo_dir.join(format!("messages-{key}.json"));
         if !messages_path.exists() {
@@ -104,32 +104,12 @@ impl SnapshotManager {
     /// 检查指定消息的重做状态是否存在。
     pub async fn has_redo(&self, session_id: &str, message_id: &str) -> bool {
         self.redo_dir(session_id)
-            .join(format!("messages-{}.json", sanitize_redo_key(message_id)))
+            .join(format!("messages-{}.json", super::sanitize_key(message_id)))
             .exists()
     }
 
     /// 重做数据目录（`{root}/{session_id}/redo/`）。
     pub(crate) fn redo_dir(&self, session_id: &str) -> PathBuf {
         self.root.join(session_id).join("redo")
-    }
-}
-
-/// 重做文件 key 消毒：消息 ID 仅作文件名，剔除路径分隔符与危险片段
-/// （消息 ID 由服务端生成，但文件名安全是底线）。
-fn sanitize_redo_key(message_id: &str) -> String {
-    let cleaned: String = message_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "_".to_string()
-    } else {
-        cleaned
     }
 }

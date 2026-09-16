@@ -119,9 +119,9 @@ mod tests {
     async fn test_snapshot_gc_execute_removes_orphan_objects() {
         let (_dir, mgr) = make_manager();
         write(mgr.workdir(), "keep.txt", "保留内容");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
         write(mgr.workdir(), "drop.txt", "将被丢弃的内容");
-        mgr.capture("s2", 0).await.unwrap();
+        mgr.capture("s2", "0").await.unwrap();
 
         // 模拟删除会话 s2：整个会话目录被移除 → drop.txt 的对象成为孤儿
         std::fs::remove_dir_all(mgr.root().join("s2")).unwrap();
@@ -138,7 +138,7 @@ mod tests {
     async fn test_snapshot_gc_execute_removes_orphaned_redo_cache() {
         let (_dir, mgr) = make_manager();
         write(mgr.workdir(), "a.txt", "原始");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
 
         // 模拟泄漏：save_redo 写入后 load_redo 消费，遗留孤儿 cache 文件
         mgr.save_redo("s1", "msg_0", &[]).await.unwrap();
@@ -159,7 +159,7 @@ mod tests {
     async fn test_snapshot_gc_execute_clean_workspace_succeeds() {
         let (_dir, mgr) = make_manager();
         write(mgr.workdir(), "a.txt", "内容");
-        mgr.capture("s1", 0).await.unwrap();
+        mgr.capture("s1", "0").await.unwrap();
 
         let task = SnapshotGcTask::new(mgr);
         let result = task.execute(&make_context(Arc::new(MockVfs::new()))).await;

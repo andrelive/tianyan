@@ -98,7 +98,9 @@ pub struct DiffQuery {
     pub base: Option<String>,
     /// 会话 ID（快照模式）。
     pub session_id: Option<String>,
-    /// 快照索引（快照模式）。
+    /// 快照键（消息 ID，快照模式首选——稳定）。
+    pub message_id: Option<String>,
+    /// 快照索引（快照模式兼容入口：按当前会话链位置映射为消息 ID）。
     pub index: Option<usize>,
     /// 文件间模式：左侧相对路径。
     pub path_a: Option<String>,

@@ -164,20 +164,20 @@ impl SessionService {
             };
             match sm
                 .with_workdir(workdir)
-                .restore(session_id, message_index)
+                .restore(session_id, &request.message_id)
                 .await
             {
                 Ok(n) => {
                     info!(
-                        "回退工作区: 会话={}, 索引={}, 恢复 {} 个文件",
-                        session_id, message_index, n
+                        "回退工作区: 会话={}, 锚点={}, 恢复 {} 个文件",
+                        session_id, request.message_id, n
                     );
                 }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
                         session = %session_id,
-                        index = message_index,
+                        anchor = %request.message_id,
                         "工作区快照恢复失败（会话已回退，文件未回退）"
                     );
                 }

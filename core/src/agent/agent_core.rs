@@ -445,19 +445,29 @@ impl Agent {
         self.default_working_directory.clone()
     }
 
-    /// 捕获工作区快照（消息处理前调用，索引 = 当前消息数）。
+    /// 捕获工作区快照（消息处理前调用，键 = 本条用户消息 ID）。
     ///
     /// 快照根取会话生效的工作目录（会话级绑定优先，缺省全局配置），
     /// 经 [`SnapshotManager::with_workdir`] 绑定后捕获。
-    pub(crate) async fn capture_workspace_snapshot(&self, session_id: &str, state: &SessionState) {
+    ///
+    /// 键用消息 ID 而非数字位置：位置会因删除/重排变化，而回退按钮挂在具体
+    /// 消息上（`message_id` 稳定）。调用方须在用户消息落库后调用（ID 已生成）。
+    pub(crate) async fn capture_workspace_snapshot(
+        &self,
+        session_id: &str,
+        anchor_message_id: &str,
+    ) {
         let Some(sm) = &self.snapshot_manager else {
             return;
         };
         let Some(workdir) = self.resolve_working_directory(session_id).await else {
             return;
         };
-        let index = state.structured_messages.len();
-        if let Err(e) = sm.with_workdir(workdir).capture(session_id, index).await {
+        if let Err(e) = sm
+            .with_workdir(workdir)
+            .capture(session_id, anchor_message_id)
+            .await
+        {
             tracing::warn!(error = %e, session = %session_id, "工作区快照捕获失败");
         }
     }
@@ -718,12 +728,6 @@ impl Agent {
         user_message_id: Option<&str>,
         options: TurnOptions,
     ) -> Result<AgentResponse> {
-        // 0. Capture workspace snapshot (before message processing, for session rollback)
-        if options.do_snapshot {
-            let s = state.read().await;
-            self.capture_workspace_snapshot(session_id, &s).await;
-        }
-
         // 1. Persist current user message
         // 流式路径：入库后立即发送确认事件（ADR-031：乐观渲染的 id 回显——
         // 携带前端 user_message_id 与落库后的真实 message_id，前端比对后
@@ -733,14 +737,26 @@ impl Agent {
         // 把上一轮输出合并进本轮占位而重复显示）。
         let persisted_user = self.persist_user_message(session_id, state, message).await;
         if let TurnMode::Stream { sender } = &options.mode {
-            if let Some(sm) = persisted_user {
+            if let Some(sm) = &persisted_user {
                 // ADR-031：乐观渲染的 id 回显（前端比对 user_message_id 后
                 // 把本地乐观消息替换为真实 id）——与消息边界并存（波次过渡：
                 // 前端乐观渲染落地后边界事件按 id 去重自动失效，波次 4 移除）。
                 if let Some(umid) = user_message_id {
                     sender.send_user_message_id(umid, &sm.id).await;
                 }
-                sender.send_message_boundary(sm).await;
+                sender.send_message_boundary(sm.clone()).await;
+            }
+        }
+
+        // 1.2 捕获工作区快照（回退锚点 = 本条用户消息）。
+        //
+        // 顺序说明（快照键改消息 ID 后必须如此）：快照键取本条用户消息的 ID，
+        // 而 ID 在 `persist_user_message` 落库时才生成——故捕获移到落库之后。
+        // 两步之间没有任何工作区文件操作（落库只写数据库），故「消息处理前的
+        // 工作区状态」语义不变。
+        if options.do_snapshot {
+            if let Some(sm) = &persisted_user {
+                self.capture_workspace_snapshot(session_id, &sm.id).await;
             }
         }
 

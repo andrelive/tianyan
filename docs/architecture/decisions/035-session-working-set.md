@@ -165,6 +165,11 @@ seq 由工作集承载，经 API 边界（`ChatMessage.seq`、事件 payload、�
 > 2. **前端「按 seq 落位」只适用于追加**：`rewrite` 后 seq 已重排，必须**整体替换
 >    窗口**（§3 ② 的 `MessagesRewritten{session_id, last_seq}`），不得按 seq 增量
 >    合并（否则旧 seq 的消息会归位到错位置）。
+> 3. **已实施（2026-09-16）——快照键统一为消息 ID**（`trees/{msg_id}.json`，与
+>    `redo/` 同策略）：“回退按钮挂在具体消息上”是天然稳定键；捕获时机随之后移到
+>    用户消息落库**之后**（ID 已生成；两步间无工作区操作，语义不变）；缓存复用改由
+>    单一 `latest.cache.json` 指针承担（键不再递增，无法靠“上一号”定位），“数字位置”
+>    彻底退出快照路径（不再需要显式位置/`total_len`）。
 
 **「读到哪了」= 上下文自身的上界**（不设独立水位）：
 
@@ -507,20 +512,21 @@ loop {
 | 唤醒幂等 | `AgentWakeForwarder::wake` → `try_lock` + `has_unconsumed`；`process_wake_locked`（调用方持锁，避免重入死锁） |
 | 落库收口（agent 层） | `Agent::persist_structured`（用户消息 / 助手消息 / 压缩摘要）；`AgentLoop::persist_turn_message` 经 `ws.append`；通知器 `persist_notification` 单点（任务 / 命令终态 / 就绪） |
 | 空闲卸载 | `sweep_idle`（**跳过持锁中的会话**）+ `ensure` 机会式节流（60s）触发，不引入常驻任务 |
+| 快照键统一到消息 ID | 独立一批（2026-09-16）：`capture/restore/diff/load_tree` 改 `key: &str`；`sanitize_key` 提取共用（redo 复用）；缓存指针 `latest.cache.json`（trees/ 之外）；捕获时机移到用户消息落库后；server `restore` 传 `message_id`；`DiffResult.index` → `key`；diff API 增 `message_id`（`index` 保留为位置映射兼容入口） |
 
 **判别力实证（注入旧行为 → 必红，均已复现后还原）**：
 
 1. 续跑判定缺失（`inject_pending_if_any` 恒 `false`）→ `test_turn_boundary_injects_new_message_once` 红（"有新消息应注入并返回 true"）。
 2. 重建水位归零（`last_consumed_seq.store(-1)`）→ `test_rebuild_marks_all_consumed` 红（-1 vs 2，即 T1-24 重放形态）。
 3. 唤醒排队（`try_lock` 改走 `lock`）→ `test_try_lock_is_idempotent` 红（带 500ms 超时保护，不挂起）。
+4. 快照按位置编号命名（`{index}.json`）→ `test_snapshot_key_is_message_id_not_position` 红。
 
 **本阶段未做（属阶段二/三，或需单独批次）**：
 
-- **快照索引显式化**（解耦段化的那处小改）：捕获端 `capture_workspace_snapshot`
-  仍用 `state.structured_messages.len()`（完整链下与全链位置恒等，行为不变）——
-  尚未改为显式位置；段化前需先做（见 §2 实施修订）。
-- **段化**（只物化压缩点后）：阻塞点 = 上面那处隐式表达；其余为工作集内部段结构
-  （`start_seq` + 重建从压缩点读）+ 其余 `len()` 消费点审查。
+- **快照索引显式化**：**已由「快照键统一到消息 ID」方案取代**（键不再用位置，
+  无需显式位置/`total_len`）；见上表。段化因此不再有快照阻塞点。
+- **段化**（只物化压缩点后）：剩下的是工作集内部段结构（`start_seq` + 重建从压缩点读）
+  + 其余 `len()` 消费点审查。
 - **server 写路径收口**：`delete_message` / `redo_message` / `update_title` 等仍直写库，靠 `ensure` 新鲜度自愈兜住（一致但会多一次重建）；待阶段二收口。
 - **前端分段加载 / `ChatMessage.seq` / 订阅快照最近 N 条 / `turn_state`**：阶段二、三（§8/§9）。
 

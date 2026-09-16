@@ -75,11 +75,13 @@ pub async fn diff_handler(
         let session_id = query
             .session_id
             .ok_or_else(|| ApiError::BadRequest("快照模式缺少 session_id".to_string()))?;
-        let index = query
-            .index
-            .ok_or_else(|| ApiError::BadRequest("快照模式缺少 index".to_string()))?;
         service
-            .diff_snapshot(&session_id, index, query.path.as_deref())
+            .diff_snapshot(
+                &session_id,
+                query.message_id.as_deref(),
+                query.index,
+                query.path.as_deref(),
+            )
             .await?
     } else if let (Some(path_a), Some(path_b)) = (query.path_a.as_deref(), query.path_b.as_deref())
     {
@@ -88,7 +90,7 @@ pub async fn diff_handler(
             .await?
     } else {
         return Err(ApiError::BadRequest(
-            "diff 需要 base=snapshot&session_id&index 或 path_a&path_b".to_string(),
+            "diff 需要 base=snapshot&session_id&(message_id|index) 或 path_a&path_b".to_string(),
         ));
     };
     Ok(Json(value))
