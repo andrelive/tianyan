@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.7] - 2026-09-16
+
+### Fixed
+- **后台任务唤醒风暴（T1-23，用户报告）**：主轮正常收尾后 3.5 分钟内连跑 **9 轮唤醒**、每轮重复汇报同一批失败（数据实证；模型自述"已在前两轮逐条汇报"）。根因：① 上下文只在轮启动时组装一次，turn 间**不重读历史** → 活动轮期间落库的通知只能等下一个 loop 才被读到（"右侧完成了、主会话没反应"）；② 事件各自 wake 被 turn_guard 排队，主轮结束后逐个重读同一批历史通知。现：**轮边界增量投递**（每 turn 前将新通知尾部追加进上下文，前缀不变）+ **投递水位**（恰好一次，投递与水位推进同一临界区）+ **条件唤醒**（轮收尾仅有未投递通知时补一轮；唤醒入口同判定 → 已消化的排队唤醒直接跳过）。逐条/就绪/通知带指令语义不变
+- **run_tests/verify_build 缺省 cwd（T1-1）**：缺省落进程目录（桌面=安装目录）→ 现缺省即会话工作目录，沙箱/审批/执行同一口径
+- **唤醒轮失败判定（T1-2）**：跨会话 + 吃 3 天历史终态 → 现限定本会话 + 1 小时时间窗
+- **task_cancel 不终止执行（T1-3）**：旧只改面板状态（继续烧 token/占许可）→ 现协作标志 + `AbortHandle` 兜底
+- **显式 namespace 检索被意图推断短路（T1-4）**：rules/memories 静默为空 → 现 namespace 直接下推 VFS 搜索
+- 回归保护：core **1275** 全绿（0.4.6 基线 1271 → +4）· server 157 · tauri 13 · 前端 406；每条均判别力实证；clippy 0 / fmt 干净
+
 ## [0.4.6] - 2026-09-15
 
 ### Fixed
