@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] - 2026-09-15
+
+### Fixed
+- **ask_user 追问跨会话串台（U7，用户报告）**：`pendingClarification` 是 store 单一全局字段（无会话维度）——A 会话追问在 B 会话也弹；在 B 回答会提交到 B，A 的 `ask_user` 永久挂起。现追问绑定来源会话（气泡/提交/滚动跟随均按会话判定）
+- **图片裂图（U8，用户报告）**：tauri CSP `default-src 'self'; ...` 无 `img-src` → `data:` URL 被 `default-src` 拦截（粘贴与消息展示同时“裂“）；现 CSP 增 `img-src 'self' data: blob:`
+- **新建工作目录分组闪断（U9，用户报告）**：ChatPanel 创建成功后立即清目录 + SessionList 立即撤占位 + `reload` 不返回 Promise（清理与刷新间空窗）；现清理改为数据就绪驱动
+- **配置保存段保全（T0-6）**：`save_to_file` 全量序列化覆盖清掉未建模键（自定义段/未来版本字段）；现保存前读取现有文件、未建模键递归合并
+- **事件订阅快照补工具结果（T0-7）**：快照（打开/重连的唯一历史路径）走轻量转换（`tool_calls: None`）→ 历史工具卡片永久“运行中”；现抽出完整转换（跨消息合并工具结果）供历史与快照同源使用
+- **委托深度守卫改按注册表层级（T0-8）**：旧为“在途计数”——并发兄弟委托被当嵌套层数，**第 4 个并列委托被误拒**；现子代理派生下一层注册表（父 + 1），并发互不累加
+- **工具执行历史不再内存累积（T0-9）**：无消费者内存 Vec 线性泄漏（含工具完整输出）且与 `ExecutionLog` 重复存储；现删缓冲与死 API，记录唯一副本走数据层
+- **子代理超时不再污染会话级取消标志（T0-10）**：超时置位的是父轮取消标志 → 父轮/后续委托被误取消；现子代理本地标志 + 镜像传播
+- **定时任务失败不再记为 success（T0-11）**：失败分支不可达（调度器统计永远成功）；现 `Result` 语义 + `TaskResult::failed`
+- **配置热重载重建快照管理器（T0-12）**：热重载沿用启动期实例 → 改工作目录后快照/回退仍在旧目录（或永久禁用）；现按新配置重建替换
+- **子会话级联递归 + 上限清理事务（T0-13）**：级联只删一层 → 嵌套委托孙会话成永久孤儿；候选把中间节点当主会话；非事务；现 `WITH RECURSIVE` + 根会话候选 + 单事务
+- **run_tests/verify_build 缺省 cwd 归属会话工作目录（T1-1）**：缺省落进程目录（桌面=安装目录）；现会话工作目录，沙箱/审批/执行同一口径
+- **唤醒轮失败判定限定本会话 + 时间窗（T1-2）**：跨会话 + 吃 3 天历史终态 → 指令与事实不符；现本会话 + 1 小时窗
+- **task_cancel 真正终止执行（T1-3）**：旧只改面板状态（继续烧 token/占许可）；现协作标志 + `AbortHandle` 兜底
+- **显式 namespace 检索绕开意图推断（T1-4）**：意图把范围限到别 namespace → rules/memories 静默为空；现 namespace 直接下推 VFS 搜索
+- 回归保护：core **1271** 全绿（0.4.5 基线 1256 → +15）· 前端 406 · tauri 13 · server 157 + 集成 21；**每条修复均判别力实证**（注入旧行为必红）；clippy 0 / fmt 干净
+
 ## [0.4.5] - 2026-09-15
 
 ### Fixed
