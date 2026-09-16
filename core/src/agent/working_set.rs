@@ -47,6 +47,9 @@ pub struct SessionWorkingSet {
     header: RwLock<crate::session::SessionHeader>,
     /// 库尾 seq（-1 = 无消息）。与 `state.structured_messages` 同源推进。
     last_seq: AtomicI64,
+    /// **段起点 seq**（ADR-035 §2：段 = 最近压缩点 → 现在；无压缩点时为 0）。
+    /// 不变式：`段内第 i 条的 seq = start_seq + i`（段 = 完整链的后缀）。
+    start_seq: AtomicI64,
     /// 最后一次被 loop 消费到的上界（ADR-035 §4：读取进度的推导值，
     /// 供「轮边界续跑判定」与「唤醒幂等」使用；非独立水位机制）。
     last_consumed_seq: AtomicI64,
@@ -63,6 +66,7 @@ impl SessionWorkingSet {
             state: Arc::new(RwLock::new(SessionState::new(session_id))),
             header: RwLock::new(crate::session::SessionHeader::default()),
             last_seq: AtomicI64::new(-1),
+            start_seq: AtomicI64::new(0),
             last_consumed_seq: AtomicI64::new(-1),
             last_activity: TokioMutex::new(Instant::now()),
         }
@@ -128,22 +132,29 @@ impl SessionWorkingSet {
     /// 「不重现」在这一层兑现）。
     async fn rebuild(&self) -> Result<()> {
         let loaded = self.store.load(&self.session_id).await?;
-        let (header, messages) = match loaded {
+        let (header, mut messages) = match loaded {
             Some((header, messages)) => (header, messages),
             None => (crate::session::SessionHeader::default(), Vec::new()),
         };
         let injectable = header.injectable_snapshot.clone().unwrap_or_default();
         let len = messages.len() as i64;
+        // ADR-035 §2 段化：只物化「最近压缩点 → 现在」（完整链的后缀）——
+        // 压缩点前的历史不驻留内存（需要时经库按需读：回退/导出/前端上滚）。
+        let start_seq = messages
+            .iter()
+            .rposition(|m| m.compression_marker)
+            .unwrap_or(0) as i64;
         {
             let mut st = self.state.write().await;
-            st.structured_messages = messages;
-            // 前缀快照随会话固化（ADR-012/030）：有快照则恢复，无快照留空待首轮填充
+            st.structured_messages = messages.split_off(start_seq as usize); // 全链按 seq 升序 → 索引 == seq
+                                                                             // 前缀快照随会话固化（ADR-012/030）：有快照则恢复，无快照留空待首轮填充
             if !injectable.soul.is_empty() || !injectable.rules_and_experiences.is_empty() {
                 st.injectable_context = injectable;
             }
             st.last_activity = Instant::now();
         }
         *self.header.write().await = header;
+        self.start_seq.store(start_seq, Ordering::SeqCst);
         self.last_seq.store(len - 1, Ordering::SeqCst);
         self.last_consumed_seq.store(len - 1, Ordering::SeqCst);
         Ok(())
@@ -186,32 +197,43 @@ impl SessionWorkingSet {
         let mut st = self.state.write().await;
         st.structured_messages.push(msg.clone());
         st.last_activity = Instant::now();
-        let seq = st.structured_messages.len() as i64 - 1;
         drop(st);
+        // 段化后不能数段内条数（段是完整链的后缀）——库尾 seq 由写收口保证
+        // 与段尾同步，直接推进（append 前 last_seq 即库尾，新条 seq = 库尾+1）。
+        let seq = self.last_seq() + 1;
         self.last_seq.store(seq, Ordering::SeqCst);
         Ok(seq)
     }
 
     /// 取「某个 seq 之后」的增量条目（轮边界续跑注入，ADR-035 §4）。
     ///
-    /// 调用方传入自己的 `last_consumed_seq`（即上下文上界）；返回空表示无新消息。
-    /// 传入值小于 0（尚无上下文）时返回全量——首次组装即覆盖完整链。
+    /// 传入值早于段起点（ctx 落后于一个压缩点）时返回**整段**（下一次组装
+    /// 本就以段为口径，不会重复）。
     pub async fn delta_since(&self, seq: i64) -> Vec<(i64, StructuredMessage)> {
         let st = self.state.read().await;
-        let start = (seq + 1).max(0) as usize;
-        if start >= st.structured_messages.len() {
+        let start_seq = self.start_seq();
+        // 段内索引 = seq + 1 - start_seq（clamp 到 0：seq 早于段起点 → 整段）
+        let start_idx = (seq + 1 - start_seq).max(0) as usize;
+        if start_idx >= st.structured_messages.len() {
             return Vec::new();
         }
-        st.structured_messages[start..]
+        st.structured_messages[start_idx..]
             .iter()
             .enumerate()
-            .map(|(i, m)| ((start + i) as i64, m.clone()))
+            .map(|(i, m)| ((start_seq + start_idx as i64 + i as i64), m.clone()))
             .collect()
     }
 
-    /// 消息总数（完整链长度——快照索引与压缩判定依赖）。
+    /// 段内消息条数（组装/压缩判定口径）。
+    ///
+    /// 注意：段化后**不是**完整链长度——全链长度用 `last_seq() + 1`。
     pub async fn message_count(&self) -> usize {
         self.state.read().await.structured_messages.len()
+    }
+
+    /// 段起点 seq（完整链上最近压缩点的位置；无压缩点为 0）。
+    pub fn start_seq(&self) -> i64 {
+        self.start_seq.load(Ordering::SeqCst)
     }
 
     /// 写入收口 ②（整表重写，ADR-035 §3）：删消息 / 回退 / 重做 / 编辑。
@@ -227,14 +249,43 @@ impl SessionWorkingSet {
             .rewrite(&self.session_id, &header, messages)
             .await?;
         let len = messages.len() as i64;
+        // 段化：与 rebuild 同规则（只保留最后一个压缩点之后；调用方传完整链）
+        let start_seq = messages
+            .iter()
+            .rposition(|m| m.compression_marker)
+            .unwrap_or(0) as i64;
         {
             let mut st = self.state.write().await;
-            st.structured_messages = messages.to_vec();
+            st.structured_messages = messages[start_seq as usize..].to_vec();
             st.last_activity = Instant::now();
         }
+        self.start_seq.store(start_seq, Ordering::SeqCst);
         self.last_seq.store(len - 1, Ordering::SeqCst);
         self.last_consumed_seq.store(len - 1, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// 压缩后**收缩段**（ADR-035 §2）：段起点前移到最后一个压缩点，
+    /// 丢弃其前的历史（压缩已把历史折叠为摘要消息，段内保留摘要及其后）。
+    ///
+    /// 调用点：`maybe_compress_and_persist` 追加摘要消息之后——压缩是段内
+    /// 唯一的收缩时机（否则段随会话无限增长，段化收益归零）。
+    pub async fn reshape_after_compression(&self) {
+        let mut st = self.state.write().await;
+        if let Some(pos) = st
+            .structured_messages
+            .iter()
+            .rposition(|m| m.compression_marker)
+        {
+            if pos > 0 {
+                st.structured_messages.drain(..pos);
+                let start = self.start_seq() + pos as i64;
+                self.start_seq.store(start, Ordering::SeqCst);
+            }
+        }
+        drop(st);
+        // 收缩后段即当前全量口径 → 消费水位推进到库尾（避免"段已含内容却判未消费"）
+        self.mark_consumed(self.last_seq());
     }
 
     /// 写入收口 ③（头部更新，ADR-035 §3）：title / working_directory / 前缀快照。
@@ -678,5 +729,128 @@ mod tests {
         assert!(!store.exists("s1").await.unwrap(), "库侧已删除");
         reg.remove("s1").await;
         assert!(reg.get("s1").await.is_none(), "注册表已移除");
+    }
+
+    /// ADR-035 §2 段化：重建只物化「最近压缩点 → 现在」（完整链的后缀）。
+    #[tokio::test]
+    async fn test_rebuild_materializes_segment_since_last_marker() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        store
+            .append_message("s1", &user_msg("s1", "旧历史0"))
+            .await
+            .unwrap();
+        store
+            .append_message("s1", &user_msg("s1", "旧历史1"))
+            .await
+            .unwrap();
+        // 压缩点（seq=2）
+        let mut marker = StructuredMessage::system("s1", "[对话摘要]……");
+        marker.compression_marker = true;
+        store.append_message("s1", &marker).await.unwrap();
+        store
+            .append_message("s1", &user_msg("s1", "压缩后消息"))
+            .await
+            .unwrap();
+
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        let ws = reg.ensure("s1").await.unwrap();
+        assert_eq!(ws.start_seq(), 2, "段起点 = 最后一个压缩点");
+        assert_eq!(
+            ws.message_count().await,
+            2,
+            "段内 = 压缩点 + 其后（不含更早历史）"
+        );
+        assert_eq!(ws.last_seq(), 3, "库尾不变（完整链坐标）");
+
+        // 段内首条是压缩点（组装/压缩判定依赖）
+        let st = ws.state();
+        let guard = st.read().await;
+        assert!(guard.structured_messages[0].compression_marker);
+        drop(guard);
+    }
+
+    /// 段化后 append 的 seq 仍正确（不能数段内条数——那是后缀长度）。
+    #[tokio::test]
+    async fn test_append_seq_after_segmentation() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        store
+            .append_message("s1", &user_msg("s1", "旧"))
+            .await
+            .unwrap();
+        let mut marker = StructuredMessage::system("s1", "[对话摘要]……");
+        marker.compression_marker = true;
+        store.append_message("s1", &marker).await.unwrap();
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        let ws = reg.ensure("s1").await.unwrap();
+        assert_eq!(ws.last_seq(), 1);
+
+        let seq = ws.append(&user_msg("s1", "新消息"), true).await.unwrap();
+        assert_eq!(seq, 2, "append 的 seq = 库尾 + 1（不是段内条数-1）");
+        // 库侧核对
+        let (_, stored) = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(stored.len(), 3);
+    }
+
+    /// delta_since 的段化边界：ctx 早于段起点 → 整段；段内 → 正确切片。
+    #[tokio::test]
+    async fn test_delta_since_segment_boundaries() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        for i in 0..3 {
+            store
+                .append_message("s1", &user_msg("s1", &format!("m{i}")))
+                .await
+                .unwrap();
+        }
+        let mut marker = StructuredMessage::system("s1", "[对话摘要]……");
+        marker.compression_marker = true;
+        store.append_message("s1", &marker).await.unwrap();
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        let ws = reg.ensure("s1").await.unwrap();
+        assert_eq!(ws.start_seq(), 3);
+
+        // ctx 在段起点之前（落后一个压缩点）→ 整段（2 条：marker + 无后续）
+        let all = ws.delta_since(0).await;
+        assert_eq!(all.len(), 1, "段内只有压缩点一条");
+        assert_eq!(all[0].0, 3, "返回值带真实链上 seq");
+
+        // 追加两条后：delta(3) → 只取其后
+        ws.append(&user_msg("s1", "a"), true).await.unwrap();
+        ws.append(&user_msg("s1", "b"), true).await.unwrap();
+        let delta = ws.delta_since(3).await;
+        assert_eq!(delta.len(), 2);
+        assert_eq!((delta[0].0, delta[1].0), (4, 5));
+        // 无新消息
+        assert!(ws.delta_since(5).await.is_empty());
+    }
+
+    /// 压缩后收缩段：段起点前移到新压缩点，段内丢弃其前历史。
+    #[tokio::test]
+    async fn test_reshape_after_compression_shrinks_segment() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        for i in 0..4 {
+            store
+                .append_message("s1", &user_msg("s1", &format!("m{i}")))
+                .await
+                .unwrap();
+        }
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        let ws = reg.ensure("s1").await.unwrap();
+        assert_eq!(ws.start_seq(), 0);
+        assert_eq!(ws.message_count().await, 4);
+
+        // 模拟压缩：摘要消息落库（seq=4）→ 收缩
+        let mut marker = StructuredMessage::system("s1", "[对话摘要]……");
+        marker.compression_marker = true;
+        ws.append(&marker, true).await.unwrap();
+        ws.reshape_after_compression().await;
+
+        assert_eq!(ws.start_seq(), 4, "段起点前移到新压缩点");
+        assert_eq!(ws.message_count().await, 1, "段内只剩压缩点");
+        assert_eq!(ws.last_seq(), 4, "库尾不变");
+        assert!(!ws.has_unconsumed(), "收缩后消费水位推进到库尾");
     }
 }

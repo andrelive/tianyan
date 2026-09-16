@@ -740,6 +740,11 @@ impl Agent {
             .await
         {
             tracing::warn!(error = %e, "持久化压缩摘要失败");
+            // ADR-035 §2 段化：压缩后**收缩段**（段起点前移到新压缩点，丢弃其前
+            // 历史）——压缩是段内唯一的收缩时机，否则段随会话无限增长。
+            if let Some(ws) = self.working_sets.get(session_id).await {
+                ws.reshape_after_compression().await;
+            }
         }
 
         // 会话转换点刷新（learned rules 缓存）
