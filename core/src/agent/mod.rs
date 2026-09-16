@@ -8,6 +8,7 @@ pub const DEFAULT_SOUL: &str = include_str!("default_soul.md");
 
 /// 会话状态管理。
 pub mod session_state;
+pub mod working_set;
 
 mod agent_core;
 /// 后台任务支持（fire-and-forget 委托 + 完成通知 + join 信号）。
@@ -54,3 +55,4 @@ pub use types::{
     AgentResponse, AgentState, AgentStreamChunk, SkillCallInfo, StreamChunkType, StreamEventSender,
     ToolCallEvent, ToolResultEvent,
 };
+pub use working_set::{SessionWorkingSet, WorkingSetRegistry, WORKING_SET_IDLE_TTL};

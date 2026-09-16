@@ -182,12 +182,6 @@ struct StreamAccum {
     cancelled: bool,
 }
 
-/// 通知投递水位初值（T1-23）。
-///
-/// 会话消息 seq 从 **0** 起（`COALESCE(MAX(seq), -1) + 1`），故"尚未投递
-/// 任何消息"必须用 `-1`——用 0 会跳过首条（seq=0）通知。
-const NOTICE_WATERMARK_INIT: i64 = -1;
-
 /// Agent 迭代循环。
 #[derive(Clone)]
 pub struct AgentLoop {
@@ -205,12 +199,6 @@ pub struct AgentLoop {
     provider_by_model: HashMap<String, String>,
     /// 单轮演进策略（ADR-030：主 agent 默认；子代理委托策略）。
     turn_policy: TurnPolicy,
-    /// 事件通知投递水位（T1-23）：session_id → 已投递给模型上下文的会话 seq。
-    ///
-    /// 轮边界增量投递据此只投递"新落库且尚未被任何轮读到"的后台事件通知；
-    /// 投递与水位推进在同一临界区内完成 → 每个通知**恰好投递一次**（会话轮
-    /// 由 turn_guard 互斥，轮内检查点与唤醒组装不会并发投递）。
-    notice_delivered: Arc<tokio::sync::Mutex<HashMap<String, i64>>>,
 }
 
 impl AgentLoop {
@@ -231,7 +219,6 @@ impl AgentLoop {
             usage_log: None,
             provider_by_model: HashMap::new(),
             turn_policy: TurnPolicy::default(),
-            notice_delivered: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -271,123 +258,63 @@ impl AgentLoop {
         &self.tool_registry
     }
 
-    /// 轮边界增量投递（T1-23）：把"已落库但尚未投递给模型"的后台事件通知
-    /// 追加到本轮上下文尾部。
+    /// 轮边界增量注入（ADR-035 §4，**取代 T1-23 的通知投递水位**）。
     ///
-    /// 为什么需要：上下文在本轮启动时组装一次，turn 之间不重读历史——活动轮
-    /// 期间落库的就绪/完成/失败通知此前只能等"下一个 loop"才被读到：期间
-    /// 用户已在面板看到任务终态而模型毫不知情（"右侧完成了、主会话没反应"），
-    /// 且积压的唤醒请求会让同一批历史被反复重读、反复汇报（实测主轮收尾后
-    /// 连跑 9 轮）。轮边界投递让活动轮自行消化通知，唤醒只留给"没有后续
-    /// turn 能读到"的场景（轮收尾检查）。
+    /// 判定「读到哪了」的唯一依据是**推导值**：`ws.last_seq() > ws.last_consumed_seq()`
+    /// ——轮内自己产生的消息（assistant / 工具结果）落库与上下文同步推进，不会
+    /// 误判；只有**异步写入**（后台任务通知）会让工作集段尾跑到消费水位前面。
+    /// 因此不需要旁路水位：`notice_delivered` / `NOTICE_WATERMARK_INIT` / 唤醒轮
+    /// 组装前后的水位配对全部删除（T1-24 的重放形态随之机制性消失）。
     ///
-    /// 恰好一次：只取 `delivered_seq` 之后的**事件通知**；投递与水位推进同一
-    /// 临界区完成（会话轮互斥 → 无并发投递）。
-    pub(crate) async fn deliver_pending_notices(
+    /// 返回 `true` = 已注入增量（调用方在收尾点应**再跑一轮**）；`false` = 无新
+    /// 消息（可收尾）。未装配工作集（测试桩）时恒为 `false`。
+    pub(crate) async fn inject_pending_if_any(
         &self,
         messages: &mut Vec<Message>,
         session_id: &str,
-    ) {
-        let Some(store) = &self.tool_registry.session_store else {
-            return; // 未装配会话存储（测试桩）：无投递来源
+    ) -> bool {
+        let Some(reg) = self.tool_registry.working_sets.as_ref() else {
+            return false; // 未装配工作集（测试桩）：无增量来源
         };
-        let last = match store.last_seq(session_id).await {
-            Ok(v) => v,
-            Err(_) => return,
+        let Some(ws) = reg.get(session_id).await else {
+            return false; // 该会话尚未经工作集加载
         };
-        let delivered = {
-            self.notice_delivered
-                .lock()
-                .await
-                .get(session_id)
-                .copied()
-                .unwrap_or(NOTICE_WATERMARK_INIT)
-        };
-        if last <= delivered {
-            return;
+        if !ws.has_unconsumed() {
+            return false;
         }
-        let rows = match store.load_after(session_id, delivered).await {
-            Ok(v) => v,
-            Err(_) => return,
-        };
+        let delta = ws.delta_since(ws.last_consumed_seq()).await;
         let mut appended = 0usize;
-        for (_seq, msg) in &rows {
-            if !crate::agent::background::is_event_notice(msg) {
-                continue;
+        for (seq, msg) in &delta {
+            if crate::agent::background::is_event_notice(msg) {
+                messages.push(Message::system(crate::agent::background::message_text(msg)));
+                appended += 1;
             }
-            messages.push(Message::system(crate::agent::background::message_text(msg)));
-            appended += 1;
+            // 非通知消息同样标记已消费（无需注入，但已处理到）
+            ws.mark_consumed(*seq);
         }
-        // 水位推进（含被跳过的非通知消息：它们无需投递，但已"处理到"）
-        self.notice_delivered
-            .lock()
-            .await
-            .insert(session_id.to_string(), last);
         if appended > 0 {
             tracing::info!(
                 session = %session_id,
                 appended,
-                "轮边界投递后台事件通知（T1-23）"
+                "轮边界注入新消息（ADR-035）"
             );
         }
+        appended > 0
     }
 
-    /// 推进通知投递水位到指定 seq（T1-23）。
-    ///
-    /// 唤醒轮组装会读取**全量历史**（含已落库通知）——组装**前**记录水位
-    /// （组装读到的上界）并在组装后调用本方法推进到该值，表示"这批通知本轮
-    /// 已读到"；组装与推进之间新落库的通知（水位之后）仍保持 pending，
-    /// 由下一个 turn 或轮收尾检查兜住（不丢、不重复）。
-    pub(crate) async fn mark_notices_delivered(&self, session_id: &str, seq: i64) {
-        self.notice_delivered
-            .lock()
-            .await
-            .insert(session_id.to_string(), seq);
-    }
-
-    /// 读当前会话末尾 seq（T1-23：唤醒轮组装前记录水位上界）。
-    pub(crate) async fn store_last_seq(&self, session_id: &str) -> Option<i64> {
-        let store = self.tool_registry.session_store.as_ref()?;
-        store.last_seq(session_id).await.ok()
-    }
-
-    /// 是否仍有"已落库但未被任何轮读到"的事件通知（T1-23）。
-    ///
-    /// 轮收尾检查（补唤醒）与唤醒入口（水位失效跳过）共用同一判定。
-    pub(crate) async fn has_pending_notices(&self, session_id: &str) -> bool {
-        let Some(store) = &self.tool_registry.session_store else {
-            // 无存储（测试桩）：保持旧行为（视为有，不跳过唤醒）
-            return true;
-        };
-        let last = match store.last_seq(session_id).await {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        let delivered = {
-            self.notice_delivered
-                .lock()
-                .await
-                .get(session_id)
-                .copied()
-                .unwrap_or(NOTICE_WATERMARK_INIT)
-        };
-        if last <= delivered {
-            return false;
-        }
-        match store.load_after(session_id, delivered).await {
-            Ok(rows) => rows
-                .iter()
-                .any(|(_, m)| crate::agent::background::is_event_notice(m)),
-            Err(_) => false,
-        }
-    }
-
-    /// 轮收尾补唤醒（T1-23）：若仍有未投递事件通知 → 请求一轮唤醒。
-    ///
-    /// 这就是"唤醒的条件"：只有当**没有后续 turn 能读到**通知时才醒
-    /// （主轮循环中的通知由下一个 turn 投递消化，不唤醒）。
+    /// 轮收尾补唤醒（ADR-035 §4）：若仍有未消费新消息（如 loop 因轮数上限退出时
+    /// 落库的通知）→ 请求一次唤醒。是否真的起一轮由幂等入口判定
+    /// （`AgentWakeForwarder` 的 `try_lock`）。
     pub(crate) async fn wake_if_pending_notices(&self, session_id: &str) {
-        if self.has_pending_notices(session_id).await {
+        let has_unconsumed = match self.tool_registry.working_sets.as_ref() {
+            Some(reg) => match reg.get(session_id).await {
+                Some(ws) => ws.has_unconsumed(),
+                None => false,
+            },
+            // 未装配工作集（测试桩）：保持旧行为（请求唤醒，不自行判定）
+            None => true,
+        };
+        if has_unconsumed {
             self.tool_registry
                 .background_tasks
                 .request_wake(session_id)
@@ -923,9 +850,10 @@ impl AgentLoop {
             }
 
             // G6 结构化 Trace：设置当前轮次（工具 span 归属本轮）
-            // T1-23：轮边界增量投递——把活动轮期间落库的事件通知追加到本轮
-            // 上下文尾部（前缀不变，仅尾部追加 → 缓存友好；恰好一次由水位保证）
-            self.deliver_pending_notices(messages, session_id).await;
+            // ADR-035 §4：轮边界增量注入——把活动轮期间落库的新消息（主要是
+            // 异步事件通知）追加到本轮上下文尾部（前缀不变，仅尾部追加 → 缓存
+            // 友好；「读到哪了」由工作集消费水位推导，无旁路记账）
+            self.inject_pending_if_any(messages, session_id).await;
             let turn_start = std::time::Instant::now();
             if let Some(ref trace) = self.trace {
                 trace.set_current_turn(session_id, turn as i64);
@@ -999,6 +927,12 @@ impl AgentLoop {
             {
                 // G6：终轮 span（含 token 消耗）
                 self.record_turn_span(session_id, model, turn_start, &total_tokens);
+                // ADR-035 §4：模型准备收尾时，若本轮期间有新消息（异步通知）落库
+                // → 增量注入并**再跑一轮**（取代 T1-23「条件唤醒 + 水位」组合：
+                // 不唤醒、不入队，由本 loop 自行消化）
+                if self.inject_pending_if_any(messages, session_id).await {
+                    continue;
+                }
                 return Ok(result);
             }
 
@@ -1374,17 +1308,36 @@ impl AgentLoop {
         let persisted = structured.clone();
         // ADR-030：按策略选择持久化路径——主 agent 索引 FTS；子代理不索引
         // （ADR-026：子会话不参与回忆检索）
-        let result = if self.turn_policy.persist_no_fts {
-            self.session_manager
-                .add_structured_message_no_fts(ctx.session_id, structured)
-                .await
-        } else {
-            self.session_manager
-                .add_structured_message(ctx.session_id, structured)
-                .await
+        let index_fts = !self.turn_policy.persist_no_fts;
+        // ADR-035 §3 收口 ①：装配工作集时经其 append（落库 + 物化段同步推进 +
+        // seq 语义）——这是「轮内消息先落库取号、再进上下文」的实施约束所在
+        // （否则轮边界续跑判定会把本轮的落后 seq 误判为新消息）。
+        let via_working_set = match self.tool_registry.working_sets.as_ref() {
+            Some(reg) => match reg.get(ctx.session_id).await {
+                Some(ws) => {
+                    if let Err(e) = ws.append(&structured, index_fts).await {
+                        tracing::warn!(error = %e, "持久化消息失败（工作集路径）");
+                    }
+                    true
+                }
+                None => false,
+            },
+            None => false,
         };
-        if let Err(e) = result {
-            tracing::warn!(error = %e, "持久化消息失败");
+        if !via_working_set {
+            // 回退路径（未装配工作集/会话未加载）：原 session_manager 直写
+            let result = if self.turn_policy.persist_no_fts {
+                self.session_manager
+                    .add_structured_message_no_fts(ctx.session_id, structured)
+                    .await
+            } else {
+                self.session_manager
+                    .add_structured_message(ctx.session_id, structured)
+                    .await
+            };
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "持久化消息失败");
+            }
         }
         persisted
     }

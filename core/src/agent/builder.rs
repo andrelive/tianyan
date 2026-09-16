@@ -448,9 +448,18 @@ impl AgentBuilder {
                 }
             }
         }
-        // 后台任务完成通知器：把通知持久化到父会话（主 LLM 下一轮看到并继续）
+        // 会话工作集（ADR-035：物化缓存 + 轮边界增量注入 + 落库收口）。
+        // 与 ToolRegistry/Agent/通知器共享**同一 Arc**（状态唯一）；未装配会话
+        // 存储时注册表仍在（锁与生命周期管理可用），`ensure` 会回退旧加载路径。
+        let working_sets =
+            crate::agent::working_set::WorkingSetRegistry::new(self.session_store.clone());
+        // 后台任务完成通知器：把通知持久化到父会话（主 LLM 下一轮看到并继续）。
+        // ADR-035：经工作集落库（物化段同步推进 → 活动轮的轮边界续跑判定可发现它）
         tool_registry = tool_registry.with_task_notifier(Arc::new(
-            crate::agent::background::SessionTaskNotifier::new(session_manager.clone()),
+            crate::agent::background::SessionTaskNotifier::new(
+                session_manager.clone(),
+                Some(working_sets.clone()),
+            ),
         ));
         // 子智能体消息流事件通道（ADR-026：面板实时流式显示）
         if let Some(sink) = self.task_event_sink {
@@ -458,7 +467,10 @@ impl AgentBuilder {
         }
         // 后台命令完成通知器（execute_command(background) 终态注入父会话）
         tool_registry = tool_registry.with_command_notifier(Arc::new(
-            crate::agent::background::SessionCommandNotifier::new(session_manager.clone()),
+            crate::agent::background::SessionCommandNotifier::new(
+                session_manager.clone(),
+                Some(working_sets.clone()),
+            ),
         ));
         // 后台任务系统通知通道（全部完成/失败时桌面通知）
         if let Some(ref sink) = self.notification_sink {
@@ -491,6 +503,7 @@ impl AgentBuilder {
         if let Some(ref store) = self.session_store {
             tool_registry = tool_registry.with_session_store(store.clone());
         }
+        tool_registry = tool_registry.with_working_sets(working_sets.clone());
         // 用户问题服务（ask_user 同步等待用户回答）
         if let Some(ref service) = self.user_questions {
             tool_registry = tool_registry.with_user_questions(service.clone());
@@ -552,6 +565,7 @@ impl AgentBuilder {
             session_manager,
             self.snapshot_manager,
             self.default_working_directory,
+            working_sets,
         ))
     }
 }

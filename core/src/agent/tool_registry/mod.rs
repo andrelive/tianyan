@@ -216,6 +216,9 @@ pub struct ToolRegistry {
     pub(crate) session_recall: Option<Arc<SessionRecall>>,
     /// 会话权威存储（ADR-018：vfs_read 读 tianyan://session/{id} 的兼容层依赖；None 时不可用）。
     pub(crate) session_store: Option<Arc<crate::session::store::SessionStore>>,
+    /// 会话工作集注册表（ADR-035：轮边界增量注入 / 消息落库收口依赖；
+    /// None 时 Loop 退化为「无增量注入 + session_manager 直写」的旧路径）。
+    pub(crate) working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
     /// 工具执行管线：pre-execute 监听器（fail-closed，按注册顺序；A1）。
     pre_execute_listeners: Vec<Arc<dyn ToolPreExecuteListener>>,
     /// 工具执行管线：单调守卫（只允许拒绝；A4）。
@@ -273,6 +276,7 @@ impl ToolRegistry {
             execution_log: None,
             session_recall: None,
             session_store: None,
+            working_sets: None,
             pre_execute_listeners: Vec::new(),
             guards: Vec::new(),
             post_execute_listeners: Vec::new(),
@@ -321,6 +325,15 @@ impl ToolRegistry {
     /// 设置会话权威存储（vfs_read 对 tianyan://session/{id} 的兼容读取）。
     pub fn with_session_store(mut self, store: Arc<crate::session::store::SessionStore>) -> Self {
         self.session_store = Some(store);
+        self
+    }
+
+    /// 设置会话工作集注册表（ADR-035：轮边界增量注入 + 落库收口）。
+    pub fn with_working_sets(
+        mut self,
+        registry: Arc<crate::agent::working_set::WorkingSetRegistry>,
+    ) -> Self {
+        self.working_sets = Some(registry);
         self
     }
 

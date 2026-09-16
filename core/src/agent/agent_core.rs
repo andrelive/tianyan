@@ -3,7 +3,6 @@
 //! 包含 Agent 结构体定义、构造函数和所有辅助方法。
 //! 将 Agent 与 AgentCoordinator trait 分离，消除循环依赖。
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -18,6 +17,7 @@ use crate::agent::session_state::SessionState;
 use crate::agent::stream_forward::{spawn_stream_forwarder, StreamEventDeliver, StreamEventMapper};
 use crate::agent::tool_registry::DynamicToolExecutor;
 use crate::agent::types::{AgentResponse, AgentState, StreamChunkType, StreamEventSender};
+use crate::agent::working_set::{SessionWorkingSet, WorkingSetRegistry};
 use crate::common::error::Result;
 use crate::common::types::{
     InjectableContext, Message, MessageRole, StructuredMessage, TokenUsage,
@@ -34,8 +34,6 @@ const MIN_MESSAGES_BEFORE_COMPRESSION: usize = 6;
 
 /// 唤醒轮重试次数（ADR-013：重试 2 次后降级为静默）。
 const WAKE_RETRY_LIMIT: usize = 3;
-/// 会话轮次锁表清理阈值（超过后清理无持有者条目，防长驻服务内存泄漏）。
-const TURN_LOCKS_PRUNE_THRESHOLD: usize = 256;
 /// 唤醒轮重试间隔。
 const WAKE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -105,9 +103,9 @@ pub struct Agent {
     /// 全局默认工作目录（[agent] working_directory 配置；会话级绑定缺省时
     /// 快照捕获以此为根）。
     pub(crate) default_working_directory: Option<PathBuf>,
-    /// 会话级轮次锁（ADR-013 串行化）：单会话同一时刻只有一个活动轮；
-    /// 唤醒轮与用户轮互斥——wake 排队等待当前轮结束，绝不抢占。
-    turn_locks: Arc<TokioMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// 会话工作集注册表（ADR-035）：物化上下文缓存 + per-session 锁的唯一持有者
+    /// （ADR-013 串行化的锁表已迁入，`turn_guard` 委托之）。
+    pub(crate) working_sets: Arc<WorkingSetRegistry>,
     /// 后台任务管理器（delegate_to_agent(background) 状态机）。
     ///
     /// 协调器/唤醒器直接持有（构造时从 ToolRegistry 提取**同一 Arc**，
@@ -137,6 +135,7 @@ impl Agent {
         session_manager: Arc<dyn SessionManager>,
         snapshot_manager: Option<Arc<SnapshotManager>>,
         default_working_directory: Option<PathBuf>,
+        working_sets: Arc<WorkingSetRegistry>,
     ) -> Self {
         // 从 AgentLoop 的 ToolRegistry 提取共享句柄（同一 Arc，非复制状态）：
         // 协调器对后台任务/审批的直接入口，避免逐调用三层穿透。
@@ -154,7 +153,7 @@ impl Agent {
             session_manager,
             snapshot_manager,
             default_working_directory,
-            turn_locks: Arc::new(TokioMutex::new(HashMap::new())),
+            working_sets,
             background_tasks,
             command_tasks,
             approval_workflow,
@@ -162,25 +161,20 @@ impl Agent {
         }
     }
 
-    /// 获取会话级轮次锁（ADR-013 串行化）。
+    /// 获取会话级轮次锁（ADR-013 串行化；锁表由工作集注册表承载，ADR-035 §6）。
     ///
-    /// 持锁期间该会话的任何其他轮次（用户消息 / 唤醒轮）排队等待；
-    /// 返回 OwnedMutexGuard（持有 Arc，不依赖 self 借用）。
-    ///
-    /// 锁表按会话增长且从不回收：条目数超过阈值时清理无持有者/无等待者
-    /// 的条目（`strong_count == 1` 表示仅 map 持有——无进行中轮次也无排队
-    /// 等待者，删除后新请求重建锁，串行化语义不变），防止长驻服务内存泄漏。
+    /// 持锁期间该会话的任何其他轮次（用户消息 / 唤醒轮）**排队等待**；
+    /// 通知唤醒走 [`Self::turn_try_lock`]（幂等，不排队）。
     pub(crate) async fn turn_guard(&self, session_id: &str) -> OwnedMutexGuard<()> {
-        let lock = {
-            let mut map = self.turn_locks.lock().await;
-            if map.len() > TURN_LOCKS_PRUNE_THRESHOLD {
-                map.retain(|_, lock| Arc::strong_count(lock) > 1);
-            }
-            map.entry(session_id.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        lock.lock_owned().await
+        self.working_sets.lock(session_id).await
+    }
+
+    /// 尝试获取会话级轮次锁（幂等，不排队）——通知唤醒入口（ADR-035 §4）。
+    ///
+    /// 拿不到 = 该会话已有 loop 在跑 → 无需再启一个（那个 loop 的轮边界
+    /// 续跑判定会消化新通知）。
+    pub(crate) async fn turn_try_lock(&self, session_id: &str) -> Option<OwnedMutexGuard<()>> {
+        self.working_sets.try_lock(session_id).await
     }
 
     /// 注册任务唤醒器（ADR-013：后台任务全部完成/失败 → 触发唤醒轮）。
@@ -207,22 +201,22 @@ impl Agent {
     /// 必须在调用**前**创建事件通道并**立即开始消费**（转发器先启动消费
     /// 任务再调用本方法）——唤醒轮期间事件实时流出；若先 await 本方法再
     /// 消费，输出会积压到轮结束（超过通道缓冲还会死锁：发送端等消费、
-    /// 消费方等轮结束）。
-    /// 是否仍有未投递的后台事件通知（T1-23：唤醒入口水位失效判定）。
-    pub(crate) async fn has_pending_notices(&self, session_id: &str) -> bool {
-        self.agent_loop.has_pending_notices(session_id).await
-    }
-
     pub(crate) async fn process_wake(&self, session_id: &str, sender: StreamEventSender) {
         let _turn = self.turn_guard(session_id).await;
+        self.process_wake_locked(session_id, sender).await;
+    }
 
+    /// 唤醒轮主体（ADR-035 §4：**调用方须已持有会话锁**）。
+    ///
+    /// 幂等入口 [`AgentWakeForwarder::wake`] 用 `try_lock` 取得锁后直接调用本方法
+    /// （避免重复取锁死锁）；持锁跨越整个唤醒轮 → "已有 loop 在跑"的判定与
+    /// loop 收尾处于同一临界区，无丢通知窗口。
+    pub(crate) async fn process_wake_locked(&self, session_id: &str, sender: StreamEventSender) {
         let mut last_err: Option<String> = None;
         for attempt in 0..WAKE_RETRY_LIMIT {
             if attempt > 0 {
                 tokio::time::sleep(WAKE_RETRY_DELAY).await;
             }
-            // T1-23：记录水位上界（本轮组装读到的历史不超过它）
-            let assembled_upto = self.agent_loop.store_last_seq(session_id).await;
             let state = match self.load_and_build_state(session_id).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -232,13 +226,6 @@ impl Agent {
                 }
             };
             let messages = self.prepare_wake_context(&state, session_id).await;
-            // T1-23：本轮已读到截至 assembled_upto 的全部通知 → 推进水位
-            // （之后新落库的仍 pending，由下一 turn / 轮收尾兜住）
-            if let Some(seq) = assembled_upto {
-                self.agent_loop
-                    .mark_notices_delivered(session_id, seq)
-                    .await;
-            }
             let parent_id = {
                 let s = state.read().await;
                 s.structured_messages.last().map(|m| m.id.clone())
@@ -476,10 +463,26 @@ impl Agent {
     }
 
     /// 从持久化存储加载会话并构建 SessionState。
+    ///
+    /// ADR-035：装配了会话存储（`working_sets` 可用）时经工作集加载——
+    /// 跨轮复用物化上下文 + seq 语义 + 廉价新鲜度自愈；未装配（测试桩）时
+    /// 回退全量加载路径（行为与 ADR-035 之前一致）。
     pub(crate) async fn load_and_build_state(
         &self,
         session_id: &str,
     ) -> Result<Arc<RwLock<SessionState>>> {
+        if self.working_sets.has_store() {
+            match self.working_sets.ensure(session_id).await {
+                Ok(ws) => return Ok(ws.state()),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        session = %session_id,
+                        "工作集加载失败，回退全量加载"
+                    );
+                }
+            }
+        }
         let session = self
             .session_manager
             .get_session(session_id)
@@ -497,6 +500,39 @@ impl Agent {
             }
         }
         Ok(state)
+    }
+
+    /// 取会话工作集（未装配会话存储时为 `None`）。
+    pub(crate) async fn working_set(&self, session_id: &str) -> Option<Arc<SessionWorkingSet>> {
+        self.working_sets.get(session_id).await
+    }
+
+    /// 写入收口 ①（ADR-035 §3）：经工作集追加（落库 + 更新物化段 + 推进 seq）。
+    ///
+    /// 未装配工作集时回退旧路径（内存态 + `session_manager` 落库），保证测试桩
+    /// 与未装配场景行为不变。调用方传入的 `state` 在有工作集时**就是**工作集的
+    /// 内存态（`load_and_build_state` 的返回源），故不重复写入。
+    pub(crate) async fn persist_structured(
+        &self,
+        state: &Arc<RwLock<SessionState>>,
+        session_id: &str,
+        msg: StructuredMessage,
+        index_fts: bool,
+    ) -> Result<()> {
+        if let Some(ws) = self.working_sets.get(session_id).await {
+            ws.append(&msg, index_fts).await?;
+            return Ok(());
+        }
+        state.write().await.add_structured_message(msg.clone());
+        if index_fts {
+            self.session_manager
+                .add_structured_message(session_id, msg)
+                .await
+        } else {
+            self.session_manager
+                .add_structured_message_no_fts(session_id, msg)
+                .await
+        }
     }
 
     /// 组装当前轮次的上下文消息（soul/rules/memories 前缀 + 会话历史 + 会话定位）。
@@ -520,13 +556,21 @@ impl Agent {
         let injectable = self.ensure_injectable(state, query).await;
 
         let s = state.read().await;
+        let sid = s.session_id.clone();
         let mut messages = ContextAssembler::assemble(&s.structured_messages, &injectable);
 
         // 注入会话定位信息：早期对话被压缩后，摘要字段可能不足以恢复细节，
         // 告知 LLM 当前会话 URI，使其可用 vfs_read 检索被压缩的原始记录。
         // 位置固定在 system 前缀（soul/rules）之后、历史消息之前，
         // 同会话内内容恒定，不影响 DeepSeek 前缀缓存。
-        insert_session_hint(&mut messages, &s.session_id);
+        insert_session_hint(&mut messages, &sid);
+        drop(s);
+
+        // ADR-035 §4：组装即「消费到库尾」——这是轮边界续跑判定与唤醒幂等
+        // 的唯一依据（读取进度为推导值，非独立水位）。
+        if let Some(ws) = self.working_sets.get(&sid).await {
+            ws.mark_consumed(ws.last_seq());
+        }
 
         messages
     }
@@ -636,16 +680,10 @@ impl Agent {
         let summary_sm = summary_sm.clone();
 
         if let Err(e) = self
-            .session_manager
-            .add_structured_message(session_id, summary_sm.clone())
+            .persist_structured(state, session_id, summary_sm.clone(), true)
             .await
         {
             tracing::warn!(error = %e, "持久化压缩摘要失败");
-        } else {
-            state
-                .write()
-                .await
-                .add_structured_message(summary_sm.clone());
         }
 
         // 会话转换点刷新（learned rules 缓存）
@@ -815,10 +853,9 @@ impl Agent {
                 // T4：模型 finish_reason 已由 loop 持久化到 StructuredMessage.finish，
                 // 流式完成事件复用该值（`persisted_message` 随后被 move 进 state）
                 let finish_reason = persisted_message.finish.clone();
-                state
-                    .write()
-                    .await
-                    .add_structured_message(*persisted_message);
+                // 消息已由 AgentLoop 落库（经工作集时其内存态同步已推进，
+                // 见 `persist_structured`）；此处幂等补写内存态，覆盖回退路径
+                push_message_if_absent(state, &persisted_message).await;
 
                 self.metrics.record_execution(true).await;
                 loop_tokens = Some(total_tokens.clone());
@@ -976,20 +1013,40 @@ impl Agent {
             None,
         );
         // 内存状态与入库同步写入（此前 prepare_context 会再建一份不同 id 的
-        // 消息，导致状态与库中消息链 id 分叉、assistant 的 parent 悬空）
-        state.write().await.add_structured_message(user_sm.clone());
+        // 消息，导致状态与库中消息链 id 分叉、assistant 的 parent 悬空）。
+        // ADR-035 §4 实施约束：经工作集时**先落库取号、再进上下文**——否则
+        // `last_seq` 落后于工作集，轮边界续跑判定会出现假阳性。
         match self
-            .session_manager
-            .add_structured_message(session_id, user_sm.clone())
+            .persist_structured(state, session_id, user_sm.clone(), true)
             .await
         {
             Ok(_) => Some(user_sm),
             Err(e) => {
                 tracing::warn!(error = %e, "持久化用户消息失败");
+                // 入库失败仍写内存（会话可继续；工作集路径下 append 未写内存）
+                push_message_if_absent(state, &user_sm).await;
                 None
             }
         }
     }
+}
+
+/// 幂等补写内存态（按消息 id 去重）。
+///
+/// 工作集路径下 `append` 已把消息写入**同一份**内存态（`load_and_build_state`
+/// 返回源），此处不得重复追加；回退路径（未装配工作集）依赖本函数补齐内存态。
+/// 只扫尾部若干条（链尾追加语义），避免长会话全表扫描。
+async fn push_message_if_absent(state: &Arc<RwLock<SessionState>>, msg: &StructuredMessage) {
+    let mut s = state.write().await;
+    let n = s.structured_messages.len();
+    let start = n.saturating_sub(8);
+    if s.structured_messages[start..]
+        .iter()
+        .any(|m| m.id == msg.id)
+    {
+        return;
+    }
+    s.add_structured_message(msg.clone());
 }
 
 /// 组装响应公共字段（token 用量 + 处理耗时）。
@@ -1064,23 +1121,34 @@ impl TaskWaker for AgentWakeForwarder {
             tracing::debug!("唤醒被丢弃：Agent 已销毁");
             return;
         };
-        // T1-23：水位失效——本条唤醒对应的通知若已被活动轮消化（轮边界投递
-        // 或更早的唤醒轮已读到），不再重复跑一轮。实测：主轮收尾后 9 轮唤醒
-        // 各自重读同一批历史通知、反复汇报；此判定把它们收敛为 0~1 轮。
-        //
-        // 假设：当前唤醒源都是后台事件通知（ADR-013 表）；未来其它唤醒源
-        // （如主动提醒）需在 wake 签名携带原因后再区分。
-        if !agent.has_pending_notices(session_id).await {
+        // ADR-035 §4：唤醒**幂等**（不是入队）——`try_lock` 拿不到即表示该会话
+        // 已有 loop 在跑，由其轮边界续跑判定消化新通知，不再另起一轮。
+        // 实测（0.4.7 之前）：N 条通知各自 spawn 一个任务排队，依次重读整段
+        // 历史、反复汇报（9 轮风暴）；幂等入口把「N 条通知 → 1 个 loop」。
+        let Some(guard) = agent.turn_try_lock(session_id).await else {
             tracing::debug!(
                 session = %session_id,
-                "唤醒跳过：无未投递通知（已被活动轮消化）"
+                "唤醒跳过：该会话已有 loop 在跑（轮边界续跑判定会消化新通知）"
             );
             return;
+        };
+        // 无未消费新消息 → 不启动（避免空转一轮）。重建已把消费水位推到库尾
+        // （ADR-035 §4），故重启/首次唤醒不会误判为「有新消息」。
+        if let Some(ws) = agent.working_set(session_id).await {
+            if !ws.has_unconsumed() {
+                tracing::debug!(
+                    session = %session_id,
+                    "唤醒跳过：无未消费新消息"
+                );
+                return;
+            }
         }
         let mapper = self.mapper.clone();
         let deliver = self.deliver.clone();
         let session_id = session_id.to_string();
         tokio::spawn(async move {
+            // 持锁跨越整个唤醒轮：与 loop 收尾判定同一临界区（无丢通知窗口）
+            let _guard = guard;
             // 统一转发器：通道在唤醒轮**开始前**创建并立即开始消费——
             // 唤醒轮期间事件实时流出（此前先 await 整个唤醒轮再取 rx：
             // 输出积压到轮结束才转发，超过通道缓冲还会死锁——1151680）。
@@ -1088,7 +1156,7 @@ impl TaskWaker for AgentWakeForwarder {
                 spawn_stream_forwarder(session_id.clone(), mapper, deliver);
             // 轮结束（sender 全部释放）→ 消费任务收尾：等待句柄确保
             // 尾部事件已送达（唤醒轮输出不丢最后一块）。
-            agent.process_wake(&session_id, sender).await;
+            agent.process_wake_locked(&session_id, sender).await;
             let _ = forward_handle.await;
         });
     }
@@ -1293,6 +1361,7 @@ mod tests {
             Arc::new(MockSessionManager),
             None,
             None,
+            WorkingSetRegistry::new(None),
         )
     }
 
@@ -1558,6 +1627,7 @@ mod tests {
             session_manager,
             None,
             None,
+            WorkingSetRegistry::new(None),
         )
     }
 

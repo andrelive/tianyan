@@ -1069,12 +1069,51 @@ pub fn is_event_notice(msg: &StructuredMessage) -> bool {
 /// 前端会话历史同样可见。对应业界"完成时注入消息 + 轮次边界投递"。
 pub struct SessionTaskNotifier {
     session_manager: Arc<dyn SessionManager>,
+    /// 会话工作集（ADR-035：通知落库收口 ①——物化段同步推进，使活动轮的
+    /// 轮边界续跑判定能发现新通知；None 时退化为直写 session_manager）。
+    working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
 }
 
 impl SessionTaskNotifier {
     /// 创建通知器。
-    pub fn new(session_manager: Arc<dyn SessionManager>) -> Self {
-        Self { session_manager }
+    pub fn new(
+        session_manager: Arc<dyn SessionManager>,
+        working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
+    ) -> Self {
+        Self {
+            session_manager,
+            working_sets,
+        }
+    }
+}
+
+/// 通知落库（ADR-035 §3 写入收口 ① 的单点）。
+///
+/// 装配工作集时经其 `append`（落库 + 物化段推进 + seq 语义）——这样通知
+/// 「落库」与「工作集知道它」是同一动作，活动轮的轮边界续跑判定才能发现它
+/// （`last_seq > last_consumed_seq`）。未装配或加载失败时回退 `session_manager`
+/// 直写（旧行为，下一轮组装仍可读到）。
+async fn persist_notification(
+    session_manager: &Arc<dyn SessionManager>,
+    working_sets: Option<&Arc<crate::agent::working_set::WorkingSetRegistry>>,
+    session_id: &str,
+    sm: StructuredMessage,
+) {
+    if let Some(reg) = working_sets {
+        // 未加载 → 先加载（保证物化段与库一致），再 append
+        let ws = match reg.get(session_id).await {
+            Some(ws) => Some(ws),
+            None => reg.ensure(session_id).await.ok(),
+        };
+        if let Some(ws) = ws {
+            if let Err(e) = ws.append(&sm, true).await {
+                tracing::warn!(error = %e, "通知持久化失败（工作集路径）");
+            }
+            return;
+        }
+    }
+    if let Err(e) = session_manager.add_structured_message(session_id, sm).await {
+        tracing::warn!(error = %e, "通知持久化失败");
     }
 }
 
@@ -1083,13 +1122,13 @@ impl TaskNotifier for SessionTaskNotifier {
     async fn on_task_terminal(&self, session_id: &str, task: &BackgroundTask, remaining: usize) {
         let text = build_notification_text(task, remaining);
         let sm = StructuredMessage::system(session_id.to_string(), text);
-        if let Err(e) = self
-            .session_manager
-            .add_structured_message(session_id, sm)
-            .await
-        {
-            tracing::warn!(task_id = %task.id, error = %e, "后台任务通知持久化失败");
-        }
+        persist_notification(
+            &self.session_manager,
+            self.working_sets.as_ref(),
+            session_id,
+            sm,
+        )
+        .await;
     }
 }
 
@@ -1140,14 +1179,20 @@ pub fn build_notification_text(task: &BackgroundTask, remaining: usize) -> Strin
 pub struct SessionCommandNotifier {
     session_manager: Arc<dyn SessionManager>,
     waker: Arc<Mutex<Option<Arc<dyn TaskWaker>>>>,
+    /// 会话工作集（ADR-035：通知落库收口 ①，同 [`SessionTaskNotifier`]）。
+    working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
 }
 
 impl SessionCommandNotifier {
     /// 创建通知器。
-    pub fn new(session_manager: Arc<dyn SessionManager>) -> Self {
+    pub fn new(
+        session_manager: Arc<dyn SessionManager>,
+        working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
+    ) -> Self {
         Self {
             session_manager,
             waker: Arc::new(Mutex::new(None)),
+            working_sets,
         }
     }
 
@@ -1162,13 +1207,13 @@ impl crate::executor::CommandNotifier for SessionCommandNotifier {
     async fn on_command_terminal(&self, session_id: &str, task: &CommandTask, remaining: usize) {
         let text = build_command_notification_text(task, remaining);
         let sm = StructuredMessage::system(session_id.to_string(), text);
-        if let Err(e) = self
-            .session_manager
-            .add_structured_message(session_id, sm)
-            .await
-        {
-            tracing::warn!(task_id = %task.id, error = %e, "后台命令通知持久化失败");
-        }
+        persist_notification(
+            &self.session_manager,
+            self.working_sets.as_ref(),
+            session_id,
+            sm,
+        )
+        .await;
     }
 
     async fn on_command_ready(&self, session_id: &str, task: &CommandTask, note: &str) {
@@ -1184,13 +1229,13 @@ impl crate::executor::CommandNotifier for SessionCommandNotifier {
             note
         );
         let sm = StructuredMessage::system(session_id.to_string(), text);
-        if let Err(e) = self
-            .session_manager
-            .add_structured_message(session_id, sm)
-            .await
-        {
-            tracing::warn!(task_id = %task.id, error = %e, "后台服务就绪通知持久化失败");
-        }
+        persist_notification(
+            &self.session_manager,
+            self.working_sets.as_ref(),
+            session_id,
+            sm,
+        )
+        .await;
     }
 }
 
@@ -1682,9 +1727,12 @@ mod tests {
         }
 
         let calls = Arc::new(AtomicUsize::new(0));
-        let notifier = SessionTaskNotifier::new(Arc::new(RecordingSessionManager {
-            calls: calls.clone(),
-        }));
+        let notifier = SessionTaskNotifier::new(
+            Arc::new(RecordingSessionManager {
+                calls: calls.clone(),
+            }),
+            None,
+        );
         let task = BackgroundTask {
             kind: TaskKind::Delegate,
             id: "bt_t".to_string(),

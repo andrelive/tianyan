@@ -1,7 +1,7 @@
 # ADR-035: 会话工作集——物化上下文缓存与读写收口
 
 **日期**: 2026-09-16
-**状态**: ✅ 已采纳（待分三阶段实施）
+**状态**: ✅ 已采纳（**阶段一已实施** 2026-09-16；阶段二/三待做）
 **影响范围**: 会话内存态（`core/src/agent/session_state.rs`）、会话工作集（新增
 `core/src/session/working_set.rs`）、Agent 协调器（`core/src/agent/agent_core.rs`、
 `coordinator.rs`）、Agent 循环与通知投递（`core/src/agent/loop.rs`）、会话存储
@@ -78,18 +78,19 @@
 ### 1. 结构与生命周期（`SessionWorkingSet` + `WorkingSetRegistry`）
 
 ```rust
-/// 单会话工作集（物化段 + 统一读写方法）。
+/// 单会话工作集（物化上下文 + 读取进度 + 活动时间）。
 pub struct SessionWorkingSet {
     session_id: String,
-    header: RwLock<SessionHeader>,        // 前缀快照 + 会话元数据（库的镜像）
-    entries: RwLock<Segment>,             // 压缩点起段：Vec<WorkingEntry { seq, msg }>
-    running: AtomicBool,                  // 本会话是否有 loop 在跑（唤醒幂等的依据，§4）
+    store: Arc<SessionStore>,
+    state: Arc<RwLock<SessionState>>,     // 完整链 + 前缀镜像（load_and_build_state 返回源）
+    last_seq: AtomicI64,                  // 库尾 seq（-1 = 无消息）
     last_consumed_seq: AtomicI64,         // 最后一次被 loop 消费到的上界（§4）
     last_activity: Mutex<Instant>,        // 空闲失效判定（§7）
 }
 
 /// 工作集注册表（生命周期 + 会话锁的唯一持有者）。
 pub struct WorkingSetRegistry {
+    store: Option<Arc<SessionStore>>,   // None（测试桩）时 ensure 不可用，锁仍可用
     sets: Mutex<HashMap<String, Arc<SessionWorkingSet>>>,
     locks: Mutex<HashMap<String, Arc<TokioMutex<()>>>>,  // 现有 turn_locks 迁入
 }
@@ -100,7 +101,14 @@ pub struct WorkingSetRegistry {
 - 生命周期：`ensure(session_id)`（命中复用 / 未命中从库重建）、`remove(session_id)`
   （删除会话）、`sweep_idle(ttl)`（空闲卸载）。
 
-### 2. 段边界：只物化「最近压缩点 → 现在」
+### 2. 段边界：只物化「最近压缩点 → 现在」（**实施修订：阶段一保留完整链**）
+
+> **实施修订（2026-09-16）**：本节的「只物化压缩点后」与 ADR-027「内存态不裁剪
+> （快照索引与回退依赖完整链长度）」直接冲突——`capture_workspace_snapshot` 用
+> `state.structured_messages.len()` 作快照索引（阶段一若只存段，回退快照会错位）。
+> **阶段一保留完整链**（与 ADR-027 一致），只引入 seq 语义与跨轮复用；「段化」
+> 需同时改造快照索引与回退路径，留待后续批次（见文末「实施记录」）。
+> 下文「段」在阶段一即指完整链，`start_seq = 0`。
 
 - `Segment` 的起点 = 最后一个 `compression_marker`；起点 = 末尾时退化为整段
   （无压缩点，与 ADR-027「无压缩点从头」一致）。
@@ -178,13 +186,16 @@ loop {
   「确保该会话有一个 loop 在跑」，而非「为本条通知排一个轮」。
 
   ```
-  ensure_loop_running(session_id):
-      持会话锁 {                                  // 与 loop 退出判定同一临界区
-          if ws.running { return }               // 已有 loop → no-op（它会消化新通知）
-          if ws.last_seq() <= ws.last_consumed_seq { return }  // 无未消费新消息 → no-op
-          ws.running = true; 启动 loop
-      }
+  AgentWakeForwarder::wake(session_id):        // 实际实现（实施修订）
+      guard = try_lock(session_id)              // 拿不到 → 已有 loop → no-op
+      if guard is None { return }
+      if ws.has_unconsumed() == false { return } // 无未消费新消息 → 不空转
+      spawn { 持 guard 跑完整轮（process_wake_locked） }   // 锁跨越整轮
   ```
+
+  > **实施修订（2026-09-16）**：实现用**锁的两种获取方式**表达幂等（`lock` 排队 =
+  > 用户消息；`try_lock` 幂等 = 通知唤醒），不再需要 `running` 字段——「是否已有
+  > loop 在跑」由锁自身表达（且持锁跨越整轮，天然与收尾判定同一临界区）。
 
   - **N 条通知 → 1 个 loop**：第一条拿到启动权，后续的看到 `running` → no-op——
     不需要队列、不需要去重集合（「是否已有 loop」本身就是那个状态）。
@@ -356,8 +367,9 @@ loop {
 
 **core**
 
-- 新增 `core/src/session/working_set.rs` — `SessionWorkingSet` + `WorkingSetRegistry`
-  + `WorkingEntry` + `WORKING_SET_IDLE_TTL`
+- 新增 `core/src/agent/working_set.rs` — `SessionWorkingSet` + `WorkingSetRegistry`
+  + `WORKING_SET_IDLE_TTL`（**实施修订**：放 agent 模块而非 session——工作集承载
+  `SessionState`，而 `agent` 已依赖 `session`，放 session 会形成模块循环依赖）
 - `core/src/session/types.rs` — 无新增字段（水位删除；如需段重建辅助信息，用现有
   `compression_marker`）
 - `core/src/session/store.rs` — `read_range(from, to)`（段外按需读；复用 seq 索引）
@@ -461,6 +473,37 @@ loop {
 
 快修只做**最小正确性修补**（不加新层）；阶段一/三落地后，快修的实现自然被
 工作集版本替换（不保留两套）。
+
+---
+
+## 实施记录（阶段一 · 2026-09-16）
+
+**已完成（core 1283 全绿、clippy 0、fmt 干净；server 157 / tauri 13 全绿）**：
+
+| 项 | 实现 |
+|----|------|
+| 工作集与注册表 | 新增 `core/src/agent/working_set.rs`：`SessionWorkingSet`（`store` + `state` + `last_seq` + `last_consumed_seq` + `last_activity`）、`WorkingSetRegistry`（`ensure` / `get` / `remove` / `lock` / `try_lock` / `sweep_idle` / `maybe_sweep`） |
+| per-session 锁迁入 | `Agent::turn_locks` 字段删除 → 注册表；`turn_guard` 委托 `registry.lock`，新增 `turn_try_lock` |
+| 入口经工作集 | `load_and_build_state` 有 store 时走 `ensure`（无 store 回退旧全量路径）；五个入口（`process_message` / `process_message_stream` / `process_wake` / `compress_session` / `rollback_session`）零改动自动受益 |
+| 新鲜度自愈 | `ensure` 每次一次 `MAX(seq)` 比较，库尾不符即重建——外部直写（server 会话 API）不破坏一致性 |
+| seq 与消费水位 | `mark_consumed`（单调 CAS）/ `has_unconsumed` / `delta_since`；重建与组装即消费到库尾 |
+| 水位三件套删除 | `notice_delivered` / `NOTICE_WATERMARK_INIT` / `mark_notices_delivered` / `store_last_seq` / `has_pending_notices` 全部删除；`deliver_pending_notices` → `inject_pending_if_any` |
+| 续跑判定 | `run_turns` 收尾处：有新消息 → 增量注入 + `continue`（自消化，不入队不唤醒） |
+| 唤醒幂等 | `AgentWakeForwarder::wake` → `try_lock` + `has_unconsumed`；`process_wake_locked`（调用方持锁，避免重入死锁） |
+| 落库收口（agent 层） | `Agent::persist_structured`（用户消息 / 助手消息 / 压缩摘要）；`AgentLoop::persist_turn_message` 经 `ws.append`；通知器 `persist_notification` 单点（任务 / 命令终态 / 就绪） |
+| 空闲卸载 | `sweep_idle`（**跳过持锁中的会话**）+ `ensure` 机会式节流（60s）触发，不引入常驻任务 |
+
+**判别力实证（注入旧行为 → 必红，均已复现后还原）**：
+
+1. 续跑判定缺失（`inject_pending_if_any` 恒 `false`）→ `test_turn_boundary_injects_new_message_once` 红（"有新消息应注入并返回 true"）。
+2. 重建水位归零（`last_consumed_seq.store(-1)`）→ `test_rebuild_marks_all_consumed` 红（-1 vs 2，即 T1-24 重放形态）。
+3. 唤醒排队（`try_lock` 改走 `lock`）→ `test_try_lock_is_idempotent` 红（带 500ms 超时保护，不挂起）。
+
+**本阶段未做（属阶段二/三，或需单独批次）**：
+
+- **段化**（只物化压缩点后）：与 ADR-027 冲突，需同批改造快照索引（`capture_workspace_snapshot` 用 `len()`）与回退路径，本次未动。
+- **server 写路径收口**：`delete_message` / `redo_message` / `update_title` 等仍直写库，靠 `ensure` 新鲜度自愈兜住（一致但会多一次重建）；待阶段二收口。
+- **前端分段加载 / `ChatMessage.seq` / 订阅快照最近 N 条 / `turn_state`**：阶段二、三（§8/§9）。
 
 ---
 
