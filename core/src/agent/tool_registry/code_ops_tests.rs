@@ -475,3 +475,47 @@ async fn test_verify_build_command_metacharacters_blocked() {
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("安全违规"), "应报安全违规: {msg}");
 }
+
+// ── T1-1：run_tests / verify_build 缺省 cwd 归属会话工作目录 ──────────────
+
+#[tokio::test]
+async fn test_tool_cwd_defaults_to_session_working_directory() {
+    // T1-1：run_tests/verify_build 缺省 cwd 必须是**会话工作目录**——旧实现
+    // 落进程 cwd（桌面应用 = 安装目录 → 项目探测与执行都在错误目录）。
+    let dir = tempfile::tempdir().unwrap();
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_session_manager(session_manager_with_cwd("s-cwd", dir.path()).await);
+
+    let default = registry.resolve_tool_cwd("s-cwd", None).await.unwrap();
+    assert_eq!(
+        std::path::Path::new(&default),
+        dir.path(),
+        "缺省 cwd 必须是会话工作目录（T1-1：旧实现落进程 cwd）"
+    );
+
+    // 显式相对 cwd 按会话工作目录解析（与 grep/glob/read_file 同一套规则）
+    let rel = registry
+        .resolve_tool_cwd("s-cwd", Some("sub"))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::path::Path::new(&rel),
+        dir.path().join("sub").as_path(),
+        "显式相对 cwd 必须按会话工作目录解析"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_cwd_follows_explicit_absolute_cwd() {
+    // 显式绝对 cwd 原样使用（不因缺省归属而被改写）。
+    let dir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let registry = ToolRegistry::new(default_strict_policy())
+        .with_session_manager(session_manager_with_cwd("s-abs-cwd", dir.path()).await);
+
+    let resolved = registry
+        .resolve_tool_cwd("s-abs-cwd", Some(&other.path().to_string_lossy()))
+        .await
+        .unwrap();
+    assert_eq!(std::path::Path::new(&resolved), other.path());
+}

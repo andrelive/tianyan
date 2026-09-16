@@ -39,7 +39,32 @@ impl ToolRegistry {
             .map_err(wrap_tool_error)
     }
 
+    /// 解析 run_tests / verify_build 的生效工作目录（T1-1）。
+    ///
+    /// 显式 `cwd` 相对路径按会话工作目录解析；**缺省即会话工作目录**——
+    /// 与 grep/glob/read_file 同一套归属规则（旧实现缺省落进程 cwd：桌面
+    /// 应用=安装目录，项目探测与执行都在错误目录，表现为"找不到项目"）。
+    /// 无会话绑定时回退进程 cwd 语义（[`Self::resolve_base_dir`]）。
+    pub(crate) async fn resolve_tool_cwd(
+        &self,
+        session_id: &str,
+        cwd: Option<&str>,
+    ) -> Result<String, TianyanError> {
+        match cwd {
+            Some(dir) => Ok(self.resolve_tool_path(session_id, dir).await),
+            None => Ok(self
+                .resolve_base_dir(session_id)
+                .await?
+                .to_string_lossy()
+                .into_owned()),
+        }
+    }
+
     /// 执行 run_tests 工具：运行测试命令（设计 D6 增强结果解析）。
+    ///
+    /// cwd 归属（T1-1）：显式 `cwd` 相对路径按会话工作目录解析；**缺省即
+    /// 会话工作目录**——与 grep/glob/read_file 同一套规则（旧实现缺省落
+    /// 进程 cwd：桌面应用=安装目录，项目探测与执行都在错误目录）。
     ///
     /// 命令解析（见 [`crate::executor::test_discovery::run_tests_action`]）：
     /// 显式 `command` 原样使用（向后兼容，LLM 有完全控制权）；
@@ -55,15 +80,17 @@ impl ToolRegistry {
         subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: RunTestsParams = parse_params(arguments)?;
-        // Path sandbox for working directory（与 execute_command 一致）
-        if let Some(ref cwd) = params.cwd {
-            safety_violation(self.security_policy.check_path(std::path::Path::new(cwd)))?;
-        }
+        // cwd 归属（T1-1）：显式值按会话工作目录解析、缺省用会话工作目录；
+        // 沙箱与审批/执行均用**解析后**的目录（门控与执行同一口径）
+        let cwd = self
+            .resolve_tool_cwd(session_id, params.cwd.as_deref())
+            .await?;
+        safety_violation(self.security_policy.check_path(std::path::Path::new(&cwd)))?;
         // 先解析出实际将执行的完整命令（显式 command 或 探测+模板拼接），
         // 再对其整体执行命令安全检查——filter/suite 拼接注入在此被拦截。
         let resolved = crate::executor::test_discovery::resolve_run_tests_command(
             params.command.as_deref(),
-            params.cwd.as_deref(),
+            Some(&cwd),
             params.framework.as_deref(),
             params.filter.as_deref(),
             params.suite.as_deref(),
@@ -76,7 +103,7 @@ impl ToolRegistry {
             subagent,
             &Action::RunTests {
                 command: resolved.clone(),
-                cwd: params.cwd.clone(),
+                cwd: Some(cwd.clone()),
                 timeout_secs: params.timeout_secs,
             },
         )
@@ -84,7 +111,7 @@ impl ToolRegistry {
         // 显式传入已解析命令（命令解析对同一输入幂等，门控与执行严格一致）
         crate::executor::test_discovery::run_tests_action(
             Some(&resolved),
-            params.cwd.as_deref(),
+            Some(&cwd),
             params.timeout_secs,
             None,
             None,
@@ -96,6 +123,9 @@ impl ToolRegistry {
 
     /// 执行 verify_build 工具：构建验证（语义验证或退出码回退）。
     ///
+    /// cwd 归属（T1-1）：与 run_tests 完全一致——显式值按会话工作目录解析、
+    /// 缺省用会话工作目录；沙箱与审批/执行均用解析后的目录。
+    ///
     /// 安全门控与 execute_command 对齐：cwd 路径沙箱 + 命令 check_command +
     /// 审批工作流。
     pub(crate) async fn execute_verify_build(
@@ -105,10 +135,11 @@ impl ToolRegistry {
         subagent: bool,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: VerifyBuildParams = parse_params(arguments)?;
-        // Path sandbox for working directory（与 execute_command 一致）
-        if let Some(ref cwd) = params.cwd {
-            safety_violation(self.security_policy.check_path(std::path::Path::new(cwd)))?;
-        }
+        // cwd 归属（T1-1）：与 run_tests 同一规则
+        let cwd = self
+            .resolve_tool_cwd(session_id, params.cwd.as_deref())
+            .await?;
+        safety_violation(self.security_policy.check_path(std::path::Path::new(&cwd)))?;
         safety_violation(self.security_policy.check_command(&params.command))?;
         // 审批门控（统一序列见 [`ToolRegistry::ensure_approved`]）
         self.ensure_approved(
@@ -116,7 +147,7 @@ impl ToolRegistry {
             subagent,
             &Action::VerifyBuild {
                 command: params.command.clone(),
-                cwd: params.cwd.clone(),
+                cwd: Some(cwd.clone()),
                 timeout_secs: params.timeout_secs,
             },
         )
@@ -125,18 +156,14 @@ impl ToolRegistry {
         // to exit code + pattern matching.
         if let Some(ref gate) = self.verification_gate {
             let result = gate
-                .verify_build(&params.command, params.cwd.as_deref(), params.timeout_secs)
+                .verify_build(&params.command, Some(&cwd), params.timeout_secs)
                 .await
                 .map_err(wrap_tool_error)?;
             Ok(serde_json::Value::from(result))
         } else {
-            crate::executor::execute_verify_build(
-                &params.command,
-                params.cwd.as_deref(),
-                params.timeout_secs,
-            )
-            .await
-            .map_err(wrap_tool_error)
+            crate::executor::execute_verify_build(&params.command, Some(&cwd), params.timeout_secs)
+                .await
+                .map_err(wrap_tool_error)
         }
     }
 }
