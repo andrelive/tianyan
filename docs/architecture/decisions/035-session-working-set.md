@@ -1,7 +1,8 @@
 # ADR-035: 会话工作集——物化上下文缓存与读写收口
 
 **日期**: 2026-09-16
-**状态**: ✅ 已采纳（**阶段一已实施** 2026-09-16；阶段二/三待做）
+**状态**: ✅ 已采纳（**阶段一 + 写侧收口 + 阶段二/三前端整批已实施** 2026-09-16；
+段化与"快照键之后的收尾"待做）
 **影响范围**: 会话内存态（`core/src/agent/session_state.rs`）、会话工作集（新增
 `core/src/session/working_set.rs`）、Agent 协调器（`core/src/agent/agent_core.rs`、
 `coordinator.rs`）、Agent 循环与通知投递（`core/src/agent/loop.rs`）、会话存储
@@ -518,6 +519,8 @@ loop {
 | 落库收口（agent 层） | `Agent::persist_structured`（用户消息 / 助手消息 / 压缩摘要）；`AgentLoop::persist_turn_message` 经 `ws.append`；通知器 `persist_notification` 单点（任务 / 命令终态 / 就绪） |
 | 空闲卸载 | `sweep_idle`（**跳过持锁中的会话**）+ `ensure` 机会式节流（60s）触发，不引入常驻任务 |
 | 快照键统一到消息 ID | 独立一批（2026-09-16）：`capture/restore/diff/load_tree` 改 `key: &str`；`sanitize_key` 提取共用（redo 复用）；缓存指针 `latest.cache.json`（trees/ 之外）；捕获时机移到用户消息落库后；server `restore` 传 `message_id`；`DiffResult.index` → `key`；diff API 增 `message_id`（`index` 保留为位置映射兼容入口） |
+| 分段加载（§8） | 后端：`ChatMessage.seq` + `load_before`（区间查询）+ `GET /sessions/{id}/messages?before_seq=&limit=` + 订阅快照改最近 100 条 + `has_more`/`next_before_seq`；前端：`sessionMessageMeta`/`prependSessionMessages`/`loadOlder` + 滚动近顶部触发（浏览器原生滚动锚定保持视口） |
+| 轮状态与停止（§9，U10） | 后端：`turn_state` 事件（用户轮/唤醒轮配对，`auto` 标志）+ **唤醒轮注册会话取消槽**（此前 `cancel: None`——"停止"对唤醒轮完全无效）+ `/chat/streams/{id}/cancel` 无用户流时经 `Agent::cancel_active_turn` 置位；前端：`turnState` store + 输入禁用/停止按钮联动（**B 方案**：auto 轮输入禁用、只留停止）+ 消息 `insertBySeq` 按位置插入（修复顺序倒置） |
 
 **判别力实证（注入旧行为 → 必红，均已复现后还原）**：
 
