@@ -436,6 +436,47 @@ async fn test_retrieve_loads_overview_or_detail_for_high_scores() {
     );
 }
 
+/// T1-4（主回归）：显式 namespace 检索不得被意图推断短路。
+///
+/// 判别力：旧实现先走 `retrieve()`（"search for documents" 的意图推断 →
+/// Knowledge 范围）再在结果上过滤 Memory——只搜了 Knowledge，过滤后必空；
+/// 修复后 namespace 直接下推 VFS 搜索，命中 Memory 条目。
+#[tokio::test]
+async fn test_retrieve_by_namespace_bypasses_intent_scope() {
+    let (retriever, storage) = create_test_retriever_with_data().await;
+    // 追加一条 Memory 条目（知识库数据之外）
+    let uri = TianyanUri::new(
+        ContextNamespace::Memory,
+        vec!["preferences".to_string(), "p1".to_string()],
+    );
+    let payload = crate::common::types::EntryMetadata::new(uri.clone(), "unknown")
+        .with_category("memory")
+        .with_importance(0.9);
+    let point = VectorPoint {
+        schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
+        id: "mem_p1".to_string(),
+        abstract_vector: Some(vec![0.1; 768]),
+        overview_vector: Some(vec![0.2; 768]),
+        visual_vector: None,
+        payload,
+    };
+    storage.upsert_point(&point).await.unwrap();
+
+    let results = retriever
+        .retrieve_by_namespace("search for documents", 5, ContextNamespace::Memory)
+        .await
+        .unwrap();
+    assert!(
+        !results.is_empty(),
+        "显式 Memory 检索不得为空（T1-4：旧行为被 Knowledge 意图短路后过滤为空）"
+    );
+    assert_eq!(
+        results[0].uri.namespace().to_string(),
+        "memory",
+        "结果必须来自 Memory 命名空间"
+    );
+}
+
 // ==================== Builder Removed ====================
 // DualLayerRetrieverBuilder removed — used only in these tests, never in production.
 // DualLayerRetriever::new() + with_*() methods provide the same functionality directly.

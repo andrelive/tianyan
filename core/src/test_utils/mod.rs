@@ -492,6 +492,14 @@ impl VectorStorage for InMemoryVectorStorage {
         let points = self.points.read().await;
         let mut results: Vec<VectorSearchResult> = Vec::new();
         for point in points.values() {
+            // category_filter 语义与真实后端（LanceDB）对齐：只返回
+            // payload.category 匹配的点（None = 全量）。测试基建此前忽略该
+            // 过滤，导致"按 namespace 搜索"的行为差异测不出来（T1-4）。
+            if let Some(ref filter) = query.category_filter {
+                if point.payload.category.as_deref() != Some(filter.as_str()) {
+                    continue;
+                }
+            }
             let pv = match query.vector_type {
                 VectorType::Abstract => &point.abstract_vector,
                 VectorType::Overview => &point.overview_vector,

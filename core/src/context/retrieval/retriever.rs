@@ -133,6 +133,20 @@ impl DualLayerRetriever {
         intent: &Intent,
     ) -> Result<Vec<RetrievalResult>> {
         let namespace = intent.target_scope.as_ref().map(|s| s.category_enum());
+        self.fused_search_in_namespace(query, top_k, namespace)
+            .await
+    }
+
+    /// 执行融合搜索（可显式指定 namespace）。
+    ///
+    /// `namespace = None` 时不施加过滤（VFS 全量检索）；显式 `Some(ns)` 时
+    /// **直接下推**到 VFS 搜索——显式 namespace 检索不经过意图推断（T1-4）。
+    async fn fused_search_in_namespace(
+        &self,
+        query: &str,
+        top_k: usize,
+        namespace: Option<crate::common::types::ContextNamespace>,
+    ) -> Result<Vec<RetrievalResult>> {
         let results = self.vfs.search(query, top_k, namespace).await?;
 
         let mut results: Vec<RetrievalResult> = results
@@ -199,40 +213,52 @@ impl DualLayerRetriever {
         Ok(loaded_results)
     }
 
-    /// 使用命名空间过滤器检索内容。
+    /// 按**显式** namespace 检索内容（不受意图推断影响）。
     ///
-    /// 先执行标准检索，然后过滤结果只保留满足条件的命名空间。
+    /// 与 [`Self::retrieve`] 的区别：namespace 直接**下推**到 VFS 搜索——
+    /// 显式指定检索范围时不得先经过意图分析再在结果上过滤（T1-4：意图可能
+    /// 把搜索范围限制到其它 namespace，随后过滤 → rules/memories 静默为空）。
     ///
     /// - `query` - 查询内容
     /// - `top_k` - 返回数量限制
-    /// - `filter` - 命名空间过滤函数
+    /// - `namespace` - 目标命名空间（下推 VFS category 过滤）
     pub async fn retrieve_by_namespace(
         &self,
         query: &str,
         top_k: usize,
         namespace: crate::common::types::ContextNamespace,
     ) -> Result<Vec<RetrievalResult>> {
-        self.retrieve_with_namespace_filter(query, top_k, |ns| ns == namespace)
-            .await
-    }
-
-    /// 使用命名空间过滤器检索内容。
-    pub async fn retrieve_with_namespace_filter<F>(
-        &self,
-        query: &str,
-        top_k: usize,
-        filter: F,
-    ) -> Result<Vec<RetrievalResult>>
-    where
-        F: Fn(crate::common::types::ContextNamespace) -> bool,
-    {
-        let results = self.retrieve(query, top_k * 2).await?;
-        let filtered: Vec<_> = results
-            .into_iter()
-            .filter(|r| filter(r.uri.namespace()))
-            .take(top_k)
-            .collect();
-        Ok(filtered)
+        let started = Instant::now();
+        // 直接按 namespace 搜索（不经意图分析）
+        let results = self
+            .fused_search_in_namespace(query, top_k, Some(namespace))
+            .await?;
+        // 使用统计（与 retrieve 路径同口径：doc 命中 / 查询 / 内容加载）
+        if let Some(ref stats) = self.usage_stats {
+            for result in &results {
+                stats.record_doc_hit(result.uri.as_str(), result.score);
+            }
+            let ns = results.first().map(|r| r.uri.namespace().to_string());
+            stats
+                .record_search_query(query, results.len(), ns.as_deref())
+                .await;
+        }
+        let results = self.load_content_for_results(results).await?;
+        if let Some(ref stats) = self.usage_stats {
+            for result in &results {
+                if result.has_content() {
+                    stats.record_doc_load(result.uri.as_str());
+                }
+            }
+        }
+        info!(
+            query = %query,
+            namespace = %namespace,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            result_count = results.len(),
+            "Namespace retrieval completed"
+        );
+        Ok(results)
     }
 }
 
