@@ -30,6 +30,13 @@ pub trait SessionManager: Send + Sync {
     /// 通过 ID 获取会话。
     async fn get_session(&self, id: &str) -> Result<Option<Session>>;
 
+    /// 会话是否存在（轻量：持久化实现走 `EXISTS` 查询，不全量加载消息）。
+    ///
+    /// 默认实现委托 [`Self::get_session`]（测试桩可用）。
+    async fn session_exists(&self, id: &str) -> Result<bool> {
+        Ok(self.get_session(id).await?.is_some())
+    }
+
     /// 更新会话。
     async fn update_session(&self, session: &Session) -> Result<()>;
 
@@ -58,6 +65,45 @@ pub trait SessionManager: Send + Sync {
         session_id: &str,
         messages: &[StructuredMessage],
     ) -> Result<()>;
+
+    /// 取 seq 严格小于 `before_seq` 的**最近** `limit` 条（升序，带 seq）。
+    ///
+    /// 供分段加载（ADR-035 §8：前端上滚取更早历史）：「最近一页」由调用方传
+    /// `before_seq = last_seq + 1` 表达。
+    ///
+    /// 默认实现走全量加载 + 切片（依赖 ADR-027 不变式：全量链按 seq 升序，
+    /// 故位置即 seq）；持久化实现覆盖为区间查询（只扫目标区间）。
+    async fn load_before(
+        &self,
+        session_id: &str,
+        before_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, StructuredMessage)>> {
+        let messages = self
+            .get_session(session_id)
+            .await?
+            .map(|s| s.messages)
+            .unwrap_or_default();
+        let end = (before_seq.max(0) as usize).min(messages.len());
+        let start = end.saturating_sub(limit);
+        Ok(messages[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, m)| ((start + i) as i64, m.clone()))
+            .collect())
+    }
+
+    /// 会话链尾 seq（无消息为 -1）。
+    ///
+    /// 默认实现走全量加载计数；持久化实现覆盖为 `MAX(seq)` 查询。
+    async fn last_seq(&self, session_id: &str) -> Result<i64> {
+        let count = self
+            .get_session(session_id)
+            .await?
+            .map(|s| s.messages.len())
+            .unwrap_or(0);
+        Ok(count as i64 - 1)
+    }
 
     /// 列出所有会话（轻量元数据，不加载消息；message_count 预填）。
     async fn list_sessions(&self) -> Result<Vec<Session>>;
@@ -190,6 +236,29 @@ impl SessionManager for PersistentSessionManager {
 
         self.store.rewrite(session_id, &header, messages).await?;
         Ok(())
+    }
+
+    /// 区间查询覆盖（只扫目标区间，不全量加载）。
+    async fn load_before(
+        &self,
+        session_id: &str,
+        before_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, StructuredMessage)>> {
+        Ok(self
+            .store
+            .load_before(session_id, before_seq, limit)
+            .await?)
+    }
+
+    /// `MAX(seq)` 覆盖（O(1)，不全量加载）。
+    async fn last_seq(&self, session_id: &str) -> Result<i64> {
+        Ok(self.store.last_seq(session_id).await?)
+    }
+
+    /// `EXISTS` 覆盖（不全量加载消息）。
+    async fn session_exists(&self, id: &str) -> Result<bool> {
+        Ok(self.store.exists(id).await?)
     }
 
     async fn list_sessions(&self) -> Result<Vec<Session>> {

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 use tracing::{error, info};
@@ -9,8 +9,8 @@ use tracing::{error, info};
 use crate::api::sessions::services::SessionService;
 use crate::api::sessions::types::{
     CompressSessionResponse, DeleteMessageRequest, DeleteSessionResponse, ListSessionsResponse,
-    RedoRequest, Session, SessionDetail, SessionMessagesResponse, UpdateTitleRequest,
-    UpdateWorkspaceRequest,
+    RedoRequest, Session, SessionDetail, SessionMessagesQuery, SessionMessagesResponse,
+    UpdateTitleRequest, UpdateWorkspaceRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
@@ -62,6 +62,7 @@ pub async fn get_session(
 pub async fn get_session_messages(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
+    Query(query): Query<SessionMessagesQuery>,
 ) -> Result<Json<SessionMessagesResponse>, ApiError> {
     if session_id.trim().is_empty() {
         return Err(ApiError::BadRequest("会话ID不能为空".to_string()));
@@ -75,9 +76,16 @@ pub async fn get_session_messages(
         state.agent_working_directory().await,
     );
 
-    service
-        .get_messages(&session_id)
-        .await
+    // 分段加载（ADR-035 §8）：带 `before_seq`/`limit` 时只取一页（带 seq 与
+    // 上滚游标）；无分页参数时保持全量语义（向后兼容，前端切换到上滚后再改默认）。
+    let result = if query.before_seq.is_some() || query.limit.is_some() {
+        service
+            .get_messages_page(&session_id, query.before_seq, query.limit)
+            .await
+    } else {
+        service.get_messages(&session_id).await
+    };
+    result
         .inspect_err(|e| error!("获取会话消息失败: {}", e))
         .map(Json)
 }

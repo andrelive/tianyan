@@ -26,6 +26,13 @@ pub struct ChatMessage {
     /// 错误/非流式响应为 None（序列化时跳过）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// 消息在会话链上的**位置**（ADR-035 §4：分段加载与事件流按 seq 对齐）。
+    ///
+    /// 语义是位置而非稳定 ID——`rewrite`（删除/回退）后重排。前端「按 seq 落位」
+    /// 只适用于**追加**；`rewrite` 由 `MessagesRewritten` 事件整体替换窗口。
+    /// 旧调用点（无链上位置上下文）为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<i64>,
     /// 消息角色
     pub role: MessageRole,
     /// 前端生成的用户消息临时 id（ADR-031 乐观渲染定位键）——**仅请求方向**
@@ -221,6 +228,7 @@ impl ChatMessage {
     pub(crate) fn from_structured_light(m: &tianyan::common::types::StructuredMessage) -> Self {
         let (_, thinking, images) = Self::extract_parts(&m.parts);
         Self {
+            seq: None,
             id: Some(m.id.clone()),
             role: m.role,
             user_message_id: None,
@@ -276,6 +284,21 @@ impl ChatMessage {
     pub(crate) fn messages_from_structured(
         messages: Vec<tianyan::common::types::StructuredMessage>,
     ) -> Vec<ChatMessage> {
+        // 无链上位置上下文（订阅快照即时转换等）：seq 留空。
+        Self::convert_messages(messages.into_iter().map(|m| (None, m)).collect())
+    }
+
+    /// 带链上位置的历史转换（ADR-035 §8：分段加载 / 订阅快照按 seq 对齐）。
+    pub(crate) fn messages_from_structured_with_seq(
+        messages: Vec<(i64, tianyan::common::types::StructuredMessage)>,
+    ) -> Vec<ChatMessage> {
+        Self::convert_messages(messages.into_iter().map(|(s, m)| (Some(s), m)).collect())
+    }
+
+    /// 转换核心（`Option<i64>` = 链上位置，None 表示无位置上下文）。
+    fn convert_messages(
+        messages: Vec<(Option<i64>, tianyan::common::types::StructuredMessage)>,
+    ) -> Vec<ChatMessage> {
         /// 工具执行结果元数据（跨消息合并用）。
         struct ToolResultMeta {
             content: String,
@@ -286,7 +309,7 @@ impl ChatMessage {
         // 先扫一遍收集结果：结果消息与调用消息的先后顺序不作假设。
         let mut result_map: std::collections::HashMap<String, ToolResultMeta> =
             std::collections::HashMap::new();
-        for m in &messages {
+        for (_, m) in &messages {
             for p in &m.parts {
                 if let tianyan::common::types::Part::ToolResult {
                     tool_call_id,
@@ -314,7 +337,7 @@ impl ChatMessage {
 
         messages
             .into_iter()
-            .filter_map(|m| {
+            .filter_map(|(seq, m)| {
                 let (content, thinking, images) = Self::extract_parts(&m.parts);
                 let mut tool_calls: Vec<ToolCallWithResult> = Vec::new();
                 for p in &m.parts {
@@ -392,6 +415,8 @@ impl ChatMessage {
                 Some(ChatMessage {
                     // 消息 ID：回退/重做的定位键（前端按 ID 调删除/恢复）
                     id: Some(m.id),
+                    // 链上位置（位置语义：rewrite 后重排）
+                    seq,
                     // Tool 角色在 API 层映射为 Assistant（与旧 core_bridge 转换
                     // 一致），工具结果已合并进 tool_calls.result，前端不消费 tool 角色。
                     role: match m.role {
@@ -440,6 +465,7 @@ impl ChatMessage {
     /// * `Self` - 新创建的系统消息
     pub fn system(content: &str) -> Self {
         Self {
+            seq: None,
             id: None,
             role: MessageRole::System,
             user_message_id: None,
@@ -470,6 +496,7 @@ impl ChatMessage {
     /// * `Self` - 新创建的用户消息
     pub fn user(content: &str) -> Self {
         Self {
+            seq: None,
             id: None,
             role: MessageRole::User,
             user_message_id: None,
@@ -497,6 +524,7 @@ impl ChatMessage {
     /// * `Self` - 新创建的助手消息
     pub fn assistant(content: &str) -> Self {
         Self {
+            seq: None,
             id: None,
             role: MessageRole::Assistant,
             user_message_id: None,

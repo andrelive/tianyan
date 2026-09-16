@@ -444,6 +444,43 @@ impl SessionStore {
         Ok(out)
     }
 
+    /// 取 seq 严格小于 `before_seq` 的**最近** `limit` 条（升序返回）。
+    ///
+    /// 供前端分段加载（上滚取更早历史，ADR-035 §8）：「最近一页」由调用方传
+    /// `before_seq = last_seq + 1` 表达。SQL 用 `ORDER BY seq DESC LIMIT n`
+    /// 只扫目标区间（不读全链），返回前反转为升序（与链序一致）。
+    ///
+    /// # Errors
+    /// * SQLite 查询失败或 content_parts 反序列化失败时返回 TianyanError。
+    pub async fn load_before(
+        &self,
+        session_id: &str,
+        before_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, StructuredMessage)>, TianyanError> {
+        let conn = self.db.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT seq, content_parts FROM session_messages WHERE session_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
+            )
+            .map_err(|e| sqlite_error("分页查询准备失败", e))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![session_id, before_seq, limit as i64],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+            )
+            .map_err(|e| sqlite_error("分页查询执行失败", e))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, json) = row.map_err(|e| sqlite_error("分页查询行读取失败", e))?;
+            let msg: StructuredMessage = serde_json::from_str(&json).map_err(|e| {
+                TianyanError::Custom(format!("session: session_store: 消息反序列化失败：{e}"))
+            })?;
+            out.push((seq, msg));
+        }
+        out.reverse(); // DESC 取页 → 反转为升序（与链序一致）
+        Ok(out)
+    }
     /// 删除会话（单事务：清 FTS + 消息 + 元数据）。
     ///
     /// ADR-026 A：级联删除——主会话删除时连带删除其所有子智能体会话

@@ -85,6 +85,22 @@ pub struct SessionMessagesResponse {
     pub session_id: String,
     /// 消息列表
     pub messages: Vec<ChatMessage>,
+    /// 上滚游标（ADR-035 §8）：还有更早历史时 = 本页最早一条的 seq；否则 None。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before_seq: Option<i64>,
+    /// 是否还有更早历史（等价于 `next_before_seq.is_some()`，便于前端直读）。
+    pub has_more: bool,
+    /// 会话链尾 seq（分段对齐基准；无消息为 -1）。
+    pub last_seq: i64,
+}
+
+/// 会话消息查询参数（ADR-035 §8 分段加载；省略则按全量/最近一页语义由服务决定）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionMessagesQuery {
+    /// 上滚游标：取 seq 严格小于该值的最近一页（省略 = 最近一页）。
+    pub before_seq: Option<i64>,
+    /// 单页条数（默认 50，上限 200）。
+    pub limit: Option<usize>,
 }
 
 /// 会话详情响应

@@ -9,6 +9,10 @@ export interface ChatMessage {
   /** 消息 ID（服务端 msg_xxx；null = 本地占位——流式期间无 id，
    * 服务端广播/边界事件到达后替换为真实 id）。 */
   id?: string | null;
+  /** 消息在会话链上的**位置**（ADR-035 §4）：前端按 seq 对齐落位。
+   * 位置语义而非稳定 ID——`rewrite`（删除/回退）后重排，故仅用于追加场景；
+   * `rewrite` 由 MessagesRewritten 事件整体替换窗口。 */
+  seq?: number | null;
   role: MessageRole;
   /** 乐观渲染定位键（ADR-031）：用户消息发送时前端生成的临时 id——服务端
    * 落库后经 UserMessageId 确认事件回显真实 id，比对后替换并删除本字段
@@ -196,6 +200,12 @@ export interface ListSessionsResponse {
 export interface SessionMessagesResponse {
   session_id: string;
   messages: ChatMessage[];
+  /** 上滚游标（ADR-035 §8）：还有更早历史时 = 本页最早一条的 seq。 */
+  next_before_seq?: number;
+  /** 是否还有更早历史。 */
+  has_more?: boolean;
+  /** 会话链尾 seq（分段对齐基准；无消息为 -1）。 */
+  last_seq?: number;
 }
 
 // ========== Skill Types ==========

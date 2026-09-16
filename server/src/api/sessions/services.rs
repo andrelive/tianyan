@@ -13,6 +13,10 @@ use crate::api::shared::error::ApiError;
 use crate::api::shared::types::ChatMessage;
 use tianyan::common::types::StructuredMessage;
 use tianyan::snapshot::SnapshotManager;
+/// 分段加载默认单页条数（ADR-035 §8）。
+const DEFAULT_MESSAGE_PAGE: usize = 50;
+/// 分段加载单页条数上限（防超大页拖垮前端渲染）。
+const MAX_MESSAGE_PAGE: usize = 200;
 
 /// 会话服务，管理对话会话
 pub struct SessionService {
@@ -69,7 +73,18 @@ impl SessionService {
         // 工具结果（result / duration_ms / error）、Tool→Assistant 映射、
         // 无展示内容的 tool 消息跳过。两条路径必须同源——否则订阅快照
         // 的 replace 会把富消息覆盖成贫消息（工具卡片永久"运行中"）。
-        let messages = ChatMessage::messages_from_structured(core_session.messages);
+        //
+        // 携带链上位置（ADR-035 §4）：全量链按 seq 升序，位置即 seq——
+        // 前端按 seq 对齐（rewrite 后的重排由 `MessagesRewritten` 事件
+        // 整体替换窗口处理）。
+        let messages = ChatMessage::messages_from_structured_with_seq(
+            core_session
+                .messages
+                .into_iter()
+                .enumerate()
+                .map(|(i, m)| (i as i64, m))
+                .collect(),
+        );
 
         Ok(SessionDetail {
             id: core_session.session_id,
@@ -93,9 +108,47 @@ impl SessionService {
 
         let detail = self.get_session_detail(session_id).await?;
 
+        let last_seq = detail.messages.len() as i64 - 1;
         Ok(SessionMessagesResponse {
             session_id: detail.id,
             messages: detail.messages,
+            next_before_seq: None,
+            has_more: false,
+            last_seq,
+        })
+    }
+
+    /// 分段加载（ADR-035 §8）：只查目标区间，不全量加载——长会话打开/上滚
+    /// 不付全链成本。
+    ///
+    /// `before_seq` 省略 = 最近一页；给出 = 该位置之前一页（上滚游标取上一页的
+    /// `next_before_seq`）。每条消息携带 `seq`（链上位置，前端按 seq 对齐）。
+    pub async fn get_messages_page(
+        &self,
+        session_id: &str,
+        before_seq: Option<i64>,
+        limit: Option<usize>,
+    ) -> Result<SessionMessagesResponse, ApiError> {
+        if !self.session_manager.session_exists(session_id).await? {
+            return Err(ApiError::NotFound(format!("会话未找到: {session_id}")));
+        }
+        let page_limit = limit
+            .unwrap_or(DEFAULT_MESSAGE_PAGE)
+            .clamp(1, MAX_MESSAGE_PAGE);
+        let last_seq = self.session_manager.last_seq(session_id).await?;
+        let before = before_seq.unwrap_or(last_seq + 1);
+        let rows = self
+            .session_manager
+            .load_before(session_id, before, page_limit)
+            .await?;
+        // 上滚游标 = 本页最早一条的 seq（=0 表示已到链首，无更早）
+        let next_before_seq = rows.first().map(|(seq, _)| *seq).filter(|seq| *seq > 0);
+        Ok(SessionMessagesResponse {
+            session_id: session_id.to_string(),
+            messages: ChatMessage::messages_from_structured_with_seq(rows),
+            next_before_seq,
+            has_more: next_before_seq.is_some(),
+            last_seq,
         })
     }
 
@@ -651,6 +704,81 @@ mod tests {
         assert!(
             detail.messages[0].content.is_none(),
             "空 assistant 消息：无纯文本字段"
+        );
+    }
+
+    /// 分段加载（ADR-035 §8）：游标逐页走完整链 → 拼接与全量一致（无缺、无重、
+    /// 顺序正确），且每页消息携带各自链上 seq。
+    #[tokio::test]
+    async fn test_get_messages_page_cursor_walks_full_chain() {
+        let mut session = Session::new("s1");
+        for i in 0..5 {
+            session.add_structured_message(StructuredMessage::user("s1", format!("m{i}")));
+        }
+        let service = SessionService::new(
+            Arc::new(MockSessionManager::with_sessions(vec![session])),
+            None,
+            None,
+        );
+
+        // 第一页（无游标 = 最近一页）：seq 3,4
+        let p1 = service
+            .get_messages_page("s1", None, Some(2))
+            .await
+            .expect("第一页");
+        assert_eq!(p1.last_seq, 4);
+        assert_eq!(p1.messages.len(), 2);
+        assert_eq!(p1.messages[0].seq, Some(3), "每条消息携带链上位置");
+        assert_eq!(p1.messages[1].seq, Some(4));
+        assert!(p1.has_more);
+        assert_eq!(p1.next_before_seq, Some(3), "游标 = 本页最早一条的 seq");
+
+        // 第二页：seq 1,2
+        let p2 = service
+            .get_messages_page("s1", p1.next_before_seq, Some(2))
+            .await
+            .expect("第二页");
+        assert_eq!(
+            p2.messages.iter().map(|m| m.seq).collect::<Vec<_>>(),
+            vec![Some(1), Some(2)]
+        );
+        assert_eq!(p2.next_before_seq, Some(1));
+
+        // 第三页：seq 0（到链首 → 无更早）
+        let p3 = service
+            .get_messages_page("s1", p2.next_before_seq, Some(2))
+            .await
+            .expect("第三页");
+        assert_eq!(p3.messages.len(), 1);
+        assert_eq!(p3.messages[0].seq, Some(0));
+        assert!(!p3.has_more, "到链首后无更早历史");
+        assert_eq!(p3.next_before_seq, None);
+
+        // 拼接（由早到晚）== 全量
+        let full = service.get_messages("s1").await.expect("全量");
+        let mut walked: Vec<Option<i64>> = Vec::new();
+        walked.extend(p3.messages.iter().map(|m| m.seq));
+        walked.extend(p2.messages.iter().map(|m| m.seq));
+        walked.extend(p1.messages.iter().map(|m| m.seq));
+        let full_seqs: Vec<Option<i64>> = full.messages.iter().map(|m| m.seq).collect();
+        assert_eq!(walked, full_seqs, "分页拼接应与全量一致（无缺无重）");
+    }
+
+    /// 分段加载：不存在的会话 → 404（与全量路径一致）。
+    #[tokio::test]
+    async fn test_get_messages_page_missing_session_not_found() {
+        let service = SessionService::new(
+            Arc::new(MockSessionManager::with_sessions(vec![])),
+            None,
+            None,
+        );
+        let err = service
+            .get_messages_page("ghost", None, Some(10))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::api::shared::error::ApiError::NotFound(_)),
+            "不存在的会话应 404: {err:?}"
         );
     }
 }
