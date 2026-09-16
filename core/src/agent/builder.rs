@@ -70,6 +70,9 @@ pub struct AgentBuilder {
     session_recall: Option<Arc<crate::session::search::SessionRecall>>,
     /// 会话权威存储（ADR-018：vfs_read 读 tianyan://session/{id} 兼容层；None 时不可用）。
     session_store: Option<Arc<crate::session::store::SessionStore>>,
+    /// 会话工作集注册表（外部注入优先：server 侧持有同一 Arc 做写侧收口，
+    /// ADR-035 §3；未注入时 build 内自建）。
+    working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
     usage_log: Option<Arc<crate::observability::usage_log::UsageLog>>,
     provider_by_model: std::collections::HashMap<String, String>,
     /// 聊天模型上下文规格（T5；注入 AgentLoop 并联动压缩窗口；None 时走默认窗口）。
@@ -107,6 +110,7 @@ impl AgentBuilder {
             execution_log: None,
             session_recall: None,
             session_store: None,
+            working_sets: None,
             usage_log: None,
             provider_by_model: std::collections::HashMap::new(),
             chat_model_spec: None,
@@ -282,6 +286,16 @@ impl AgentBuilder {
         self
     }
 
+    /// 注入会话工作集注册表（ADR-035：server 侧与 Agent 共享同一 Arc——
+    /// 写侧收口与读侧缓存必须操作同一份工作集状态）。
+    pub fn with_working_sets(
+        mut self,
+        registry: Arc<crate::agent::working_set::WorkingSetRegistry>,
+    ) -> Self {
+        self.working_sets = Some(registry);
+        self
+    }
+
     /// 设置 LLM 用量日志（token 统计：每轮调用落库；None 时不记录）。
     pub fn with_usage_log(mut self, log: Arc<crate::observability::usage_log::UsageLog>) -> Self {
         self.usage_log = Some(log);
@@ -449,10 +463,12 @@ impl AgentBuilder {
             }
         }
         // 会话工作集（ADR-035：物化缓存 + 轮边界增量注入 + 落库收口）。
-        // 与 ToolRegistry/Agent/通知器共享**同一 Arc**（状态唯一）；未装配会话
-        // 存储时注册表仍在（锁与生命周期管理可用），`ensure` 会回退旧加载路径。
-        let working_sets =
-            crate::agent::working_set::WorkingSetRegistry::new(self.session_store.clone());
+        // 与 ToolRegistry/Agent/通知器共享**同一 Arc**（状态唯一）；外部注入
+        // （server 侧写收口）优先，未注入时自建。未装配会话存储时注册表仍在
+        // （锁与生命周期管理可用），`ensure` 会回退旧加载路径。
+        let working_sets = self.working_sets.clone().unwrap_or_else(|| {
+            crate::agent::working_set::WorkingSetRegistry::new(self.session_store.clone())
+        });
         // 后台任务完成通知器：把通知持久化到父会话（主 LLM 下一轮看到并继续）。
         // ADR-035：经工作集落库（物化段同步推进 → 活动轮的轮边界续跑判定可发现它）
         tool_registry = tool_registry.with_task_notifier(Arc::new(

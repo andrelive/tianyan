@@ -93,6 +93,7 @@ impl AgentBuilderFactory {
         user_questions: Arc<tianyan::agent::user_questions::UserQuestionService>,
         task_event_sink: Arc<dyn tianyan::agent::background::TaskEventSink>,
         event_tx: tokio::sync::broadcast::Sender<String>,
+        working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
     ) -> TianyanResult<Arc<Agent>> {
         Self::validate_config(config)?;
 
@@ -141,7 +142,10 @@ impl AgentBuilderFactory {
             .with_session_store(session_store)
             .with_usage_log(usage_log)
             .with_provider_by_model(provider_by_model)
-            .with_user_questions(user_questions);
+            .with_user_questions(user_questions)
+            // 会话工作集（ADR-035）：外部注入（server AppState 持有同一 Arc——
+            // API 写路径与 Agent 读写必须操作同一份状态）
+            .with_working_sets(working_sets);
         let agent = match snapshot_manager {
             Some(sm) => agent.with_snapshot_manager(sm),
             None => agent,
@@ -220,6 +224,7 @@ impl AgentBuilderFactory {
         user_questions: Arc<tianyan::agent::user_questions::UserQuestionService>,
         task_event_sink: Arc<dyn tianyan::agent::background::TaskEventSink>,
         event_tx: tokio::sync::broadcast::Sender<String>,
+        working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
     ) -> TianyanResult<Arc<dyn AgentCoordinator>> {
         match Self::build_agent(
             config,
@@ -241,6 +246,7 @@ impl AgentBuilderFactory {
             user_questions,
             task_event_sink,
             event_tx,
+            working_sets,
         )
         .await
         {

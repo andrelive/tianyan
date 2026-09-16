@@ -251,6 +251,9 @@ pub struct AppState {
     session_recall: Arc<SessionRecall>,
     /// 会话权威存储（ADR-018：SQLite 表为唯一真相；vfs_read 兼容层依赖）
     session_store: Arc<tianyan::session::store::SessionStore>,
+    /// 会话工作集注册表（ADR-035：读侧缓存 + **写侧收口**——API 会话写路径
+    /// 唯一通道；与 Agent 共享同一 Arc）。
+    working_sets: Arc<tianyan::agent::working_set::WorkingSetRegistry>,
     usage_log: Arc<UsageLog>,
     /// 工作区快照管理器（配置了 working_directory 时启用）
     /// 工作区快照管理器（配置了 working_directory 时启用）。
@@ -336,6 +339,12 @@ impl AppState {
         let session_recall = SessionRecall::new(database.clone())?;
         // 初始化会话权威存储（ADR-018：SQLite 表为唯一真相，VFS 会话例外）
         let session_store = tianyan::session::store::SessionStore::new(database.clone())?;
+
+        // 会话工作集注册表（ADR-035：读侧缓存 + 写侧收口）——server 侧与 Agent
+        // 共享**同一 Arc**：API 写路径（删消息/重做/标题/删除会话）必须经它，
+        // 否则缓存与库分叉（一致性由单一写入口保证；`ensure` 校验仅作违规探测）。
+        let working_sets =
+            tianyan::agent::working_set::WorkingSetRegistry::new(Some(session_store.clone()));
 
         // 初始化 LLM 用量日志（token 统计；共享 SqliteDb 连接）
         let usage_log = UsageLog::new(database.clone())?;
@@ -424,6 +433,7 @@ impl AppState {
             user_questions.clone(),
             task_event_sink,
             task_event_tx.clone(),
+            working_sets.clone(),
         )
         .await?;
 
@@ -439,6 +449,7 @@ impl AppState {
             usage_stats,
             trace_collector,
             execution_log,
+            working_sets,
             session_recall,
             session_store,
             usage_log,
@@ -615,6 +626,9 @@ impl AppState {
                 tx: self.task_event_tx.clone(),
             }),
             self.task_event_tx.clone(),
+            // 热重载复用**同一**工作集（状态不能在 reload 时分裂：新 Agent
+            // 必须看到旧 Agent 已物化的会话缓存）
+            self.working_sets.clone(),
         )
         .await?;
 
@@ -642,6 +656,10 @@ impl AppState {
     /// 获取会话权威存储（ADR-028：断点对齐增量查询）。
     pub fn session_store(&self) -> Arc<tianyan::session::store::SessionStore> {
         self.session_store.clone()
+    }
+    /// 获取会话工作集注册表（ADR-035：API 写路径收口唯一通道）。
+    pub fn working_sets(&self) -> Arc<tianyan::agent::working_set::WorkingSetRegistry> {
+        self.working_sets.clone()
     }
 
     /// 获取虚拟文件系统

@@ -25,6 +25,7 @@ pub async fn list_sessions(
         state.session_manager(),
         state.snapshot_manager(),
         state.agent_working_directory().await,
+        Some(state.working_sets()),
     );
 
     service
@@ -49,6 +50,7 @@ pub async fn get_session(
         state.session_manager(),
         state.snapshot_manager(),
         state.agent_working_directory().await,
+        Some(state.working_sets()),
     );
 
     service
@@ -74,6 +76,7 @@ pub async fn get_session_messages(
         state.session_manager(),
         state.snapshot_manager(),
         state.agent_working_directory().await,
+        Some(state.working_sets()),
     );
 
     // 分段加载（ADR-035 §8）：带 `before_seq`/`limit` 时只取一页（带 seq 与
@@ -105,6 +108,7 @@ pub async fn delete_session(
         state.session_manager(),
         state.snapshot_manager(),
         state.agent_working_directory().await,
+        Some(state.working_sets()),
     );
 
     let response = service
@@ -142,6 +146,7 @@ pub async fn delete_message(
         state.session_manager(),
         state.snapshot_manager(),
         state.agent_working_directory().await,
+        Some(state.working_sets()),
     );
 
     // 回退前置编排：① 停止 LLM 输出（置位 cancel 标志，AgentLoop 在轮次
@@ -190,6 +195,7 @@ pub async fn redo_message(
         state.session_manager(),
         state.snapshot_manager(),
         state.agent_working_directory().await,
+        Some(state.working_sets()),
     );
 
     let resp = service.redo_message(&session_id, request).await?;
@@ -241,6 +247,7 @@ pub async fn update_session_title(
         state.session_manager(),
         state.snapshot_manager(),
         state.agent_working_directory().await,
+        Some(state.working_sets()),
     );
 
     service
@@ -269,6 +276,7 @@ pub async fn update_session_workspace(
         state.session_manager(),
         state.snapshot_manager(),
         state.agent_working_directory().await,
+        Some(state.working_sets()),
     );
 
     service

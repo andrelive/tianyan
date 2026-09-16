@@ -11,7 +11,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// 可注入的上下文内容，由 ContextPipeline 填充，由 ContextAssembler 组装使用。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// `PartialEq` 用于「前缀是否实际变化」判定（工作集写收口 ③：无关字段更新
+/// 不得导致前缀白失效、打掉 prompt 缓存）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct InjectableContext {
     /// 智能体核心人格（soul.md）。
     pub soul: String,

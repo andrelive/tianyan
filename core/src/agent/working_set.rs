@@ -42,6 +42,9 @@ pub struct SessionWorkingSet {
     store: Arc<SessionStore>,
     /// 会话内存态（完整链；`load_and_build_state` 的返回源）。
     state: Arc<RwLock<SessionState>>,
+    /// 会话头部镜像（title / working_directory / 前缀快照）——写入收口 ③ 的
+    /// 读改写基准（与库同步的唯一副本）。
+    header: RwLock<crate::session::SessionHeader>,
     /// 库尾 seq（-1 = 无消息）。与 `state.structured_messages` 同源推进。
     last_seq: AtomicI64,
     /// 最后一次被 loop 消费到的上界（ADR-035 §4：读取进度的推导值，
@@ -58,6 +61,7 @@ impl SessionWorkingSet {
             session_id: session_id.to_string(),
             store,
             state: Arc::new(RwLock::new(SessionState::new(session_id))),
+            header: RwLock::new(crate::session::SessionHeader::default()),
             last_seq: AtomicI64::new(-1),
             last_consumed_seq: AtomicI64::new(-1),
             last_activity: TokioMutex::new(Instant::now()),
@@ -124,10 +128,11 @@ impl SessionWorkingSet {
     /// 「不重现」在这一层兑现）。
     async fn rebuild(&self) -> Result<()> {
         let loaded = self.store.load(&self.session_id).await?;
-        let (messages, injectable) = match loaded {
-            Some((header, messages)) => (messages, header.injectable_snapshot.unwrap_or_default()),
-            None => (Vec::new(), crate::common::types::InjectableContext::new()),
+        let (header, messages) = match loaded {
+            Some((header, messages)) => (header, messages),
+            None => (crate::session::SessionHeader::default(), Vec::new()),
         };
+        let injectable = header.injectable_snapshot.clone().unwrap_or_default();
         let len = messages.len() as i64;
         {
             let mut st = self.state.write().await;
@@ -138,24 +143,29 @@ impl SessionWorkingSet {
             }
             st.last_activity = Instant::now();
         }
+        *self.header.write().await = header;
         self.last_seq.store(len - 1, Ordering::SeqCst);
         self.last_consumed_seq.store(len - 1, Ordering::SeqCst);
         Ok(())
     }
 
-    /// 新鲜度校验（廉价：一次 `MAX(seq)` 查询）：库尾与缓存不符 → 重建。
+    /// **违规检测器**（廉价：一次 `MAX(seq)` 查询）：库尾与缓存不符 → 重建 + 告警。
     ///
-    /// 这是「工作集不承担一致性责任」的落地：外部直接改库（如 server 侧
-    /// `rewrite_messages` 尚未收口到工作集的阶段）后，下一次 `ensure` 自动
-    /// 自愈，无需调用方感知。
+    /// 定位：写路径**全部**收口到工作集（§3 四类）后，一致性由「单一写入口」
+    /// 保证——本检查不再承担正确性，只是"有写路径绕过工作集"的**架构违规
+    /// 探测器**（warn 日志 + 重建兜底）。正常运行时不应触发。
+    ///
+    /// 已知局限（为何不能当正确性机制）：`MAX(seq)` 是弱信号——`rewrite` 到
+    /// **相同长度**、或两个写操作在窗口内相互抵消（delete+redo 复原长度）时
+    /// 检测不到；仅 header 变化也不在信号内。故**不得**用它替代写侧收口。
     async fn ensure_fresh(&self) -> Result<()> {
         let db_last = self.store.last_seq(&self.session_id).await?;
         if db_last != self.last_seq() {
-            tracing::debug!(
+            tracing::warn!(
                 session = %self.session_id,
                 cached = self.last_seq(),
                 db = db_last,
-                "工作集新鲜度不符，重建"
+                "工作集与库不一致（有写路径绕过工作集？ADR-035 写侧收口违规），已重建兜底"
             );
             self.rebuild().await?;
         }
@@ -202,6 +212,56 @@ impl SessionWorkingSet {
     /// 消息总数（完整链长度——快照索引与压缩判定依赖）。
     pub async fn message_count(&self) -> usize {
         self.state.read().await.structured_messages.len()
+    }
+
+    /// 写入收口 ②（整表重写，ADR-035 §3）：删消息 / 回退 / 重做 / 编辑。
+    ///
+    /// 语义：落库全量重写（header 保持不变）→ 段全量替换 → 消费水位重置到
+    /// 新库尾（下一次组装必读全量，视为已消费）。
+    ///
+    /// # Errors
+    /// * 库重写失败时返回错误（缓存不动，保持一致）。
+    pub async fn rewrite(&self, messages: &[StructuredMessage]) -> Result<()> {
+        let header = self.header.read().await.clone();
+        self.store
+            .rewrite(&self.session_id, &header, messages)
+            .await?;
+        let len = messages.len() as i64;
+        {
+            let mut st = self.state.write().await;
+            st.structured_messages = messages.to_vec();
+            st.last_activity = Instant::now();
+        }
+        self.last_seq.store(len - 1, Ordering::SeqCst);
+        self.last_consumed_seq.store(len - 1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// 写入收口 ③（头部更新，ADR-035 §3）：title / working_directory / 前缀快照。
+    ///
+    /// 语义：读改镜像 → 落库 → **仅当快照实际变化时**同步内存前缀（避免
+    /// 无关字段更新导致前缀白失效、打掉 prompt 缓存）。
+    pub async fn update_header(
+        &self,
+        f: impl FnOnce(&mut crate::session::SessionHeader),
+    ) -> Result<()> {
+        let mut h = self.header.write().await;
+        let old_snapshot = h.injectable_snapshot.clone();
+        f(&mut h);
+        self.store.update_header(&self.session_id, &h).await?;
+        if h.injectable_snapshot != old_snapshot {
+            let snapshot = h.injectable_snapshot.clone().unwrap_or_default();
+            self.state.write().await.injectable_context = snapshot;
+        }
+        Ok(())
+    }
+
+    /// 写入收口 ④（删除会话，ADR-035 §3）：落库删除（含级联子会话）。
+    ///
+    /// 调用方须同时从注册表移除本工作集（[`WorkingSetRegistry::remove`]）。
+    pub async fn delete(&self) -> Result<()> {
+        self.store.delete(&self.session_id).await?;
+        Ok(())
     }
 }
 
@@ -525,5 +585,98 @@ mod tests {
         // 锁仍可用（无 store 场景下串行化不退化）
         let guard = reg.lock("s1").await;
         drop(guard);
+    }
+
+    /// 写入收口 ②：rewrite 后缓存与库一致（缓存不残留旧消息）。
+    #[tokio::test]
+    async fn test_rewrite_keeps_cache_consistent() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        for i in 0..5 {
+            store
+                .append_message("s1", &user_msg("s1", &format!("m{i}")))
+                .await
+                .unwrap();
+        }
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        let ws = reg.ensure("s1").await.unwrap();
+        assert_eq!(ws.last_seq(), 4);
+
+        // 截断到 2 条（删消息 / 回退语义）
+        let kept: Vec<StructuredMessage> = vec![user_msg("s1", "m0"), user_msg("s1", "m1")];
+        ws.rewrite(&kept).await.unwrap();
+        assert_eq!(ws.last_seq(), 1, "重写后库尾 seq 前移");
+        assert_eq!(ws.message_count().await, 2, "缓存与库一致（无残留）");
+        assert!(
+            !ws.has_unconsumed(),
+            "重写后消费水位重置到新库尾（下一次组装必读全量）"
+        );
+
+        // 库侧核对（不是只看缓存）
+        let (_, stored) = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(stored.len(), 2);
+    }
+
+    /// 写入收口 ③：仅当快照实际变化时才同步内存前缀（无关字段更新不白失效）。
+    #[tokio::test]
+    async fn test_update_header_syncs_snapshot_only_on_change() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        let ws = reg.ensure("s1").await.unwrap();
+        // 预置：库 header 固化前缀（None → Some = 变化 → 同步内存）
+        ws.update_header(|h| {
+            h.injectable_snapshot = Some(crate::common::types::InjectableContext {
+                soul: "SOUL".to_string(),
+                ..Default::default()
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            ws.state.read().await.injectable_context.soul,
+            "SOUL",
+            "快照写入须同步内存镜像"
+        );
+
+        // 仅改 title：内存前缀不动（不白失效）
+        ws.update_header(|h| h.title = Some("新标题".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(
+            ws.state.read().await.injectable_context.soul,
+            "SOUL",
+            "无关字段更新不得清空前缀"
+        );
+
+        // 置空快照（压缩点失效语义）：内存前缀同步清空
+        ws.update_header(|h| h.injectable_snapshot = None)
+            .await
+            .unwrap();
+        assert!(
+            ws.state.read().await.injectable_context.soul.is_empty(),
+            "快照清空须同步内存镜像"
+        );
+
+        // 库侧核对
+        let header = store.header("s1").await.unwrap().unwrap();
+        assert_eq!(header.title.as_deref(), Some("新标题"));
+    }
+
+    /// 写入收口 ④：delete 落库（注册表移除由调用方；此处核对库侧已删）。
+    #[tokio::test]
+    async fn test_delete_removes_from_store() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        store
+            .append_message("s1", &user_msg("s1", "m"))
+            .await
+            .unwrap();
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        let ws = reg.ensure("s1").await.unwrap();
+        ws.delete().await.unwrap();
+        assert!(!store.exists("s1").await.unwrap(), "库侧已删除");
+        reg.remove("s1").await;
+        assert!(reg.get("s1").await.is_none(), "注册表已移除");
     }
 }
