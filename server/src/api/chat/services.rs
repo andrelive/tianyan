@@ -278,6 +278,8 @@ pub(crate) fn map_chunk_to_event(
         // ADR-031：用户消息落库确认（乐观渲染的 id 回显）
         user_message_id: chunk.user_message_id,
         message_id: chunk.message_id,
+        // ADR-035 §9：轮状态（前端联动输入框与停止按钮；U10）
+        turn_state: chunk.turn_state,
         usage: chunk.token_usage.map(|u| StreamUsage {
             prompt_tokens: u.prompt_tokens as u64,
             completion_tokens: u.completion_tokens as u64,

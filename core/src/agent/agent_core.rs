@@ -212,6 +212,9 @@ impl Agent {
     /// （避免重复取锁死锁）；持锁跨越整个唤醒轮 → "已有 loop 在跑"的判定与
     /// loop 收尾处于同一临界区，无丢通知窗口。
     pub(crate) async fn process_wake_locked(&self, session_id: &str, sender: StreamEventSender) {
+        // ADR-035 §9：轮状态 running（auto=true 唤醒轮——前端显示"停止"，
+        // 可中止；U10）。配对 idle 在两个出口（成功返回 / 放弃）发出。
+        sender.send_turn_state(true, true).await;
         let mut last_err: Option<String> = None;
         for attempt in 0..WAKE_RETRY_LIMIT {
             if attempt > 0 {
@@ -295,6 +298,7 @@ impl Agent {
             // 廉价（消息数/实测 token 读取），仅超阈值才真正压缩。
             self.maybe_compress_and_persist(&state, session_id, false)
                 .await;
+            sender.send_turn_state(false, true).await;
             return;
         }
         tracing::warn!(
@@ -307,6 +311,7 @@ impl Agent {
         sender
             .send_error(&format!("唤醒轮失败：{}", last_err.unwrap_or_default()))
             .await;
+        sender.send_turn_state(false, true).await;
     }
 
     /// 组装唤醒轮上下文（ADR-013）。

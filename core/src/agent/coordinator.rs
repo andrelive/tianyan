@@ -283,12 +283,16 @@ impl AgentCoordinator for Agent {
         // 加载状态，会拿到前一轮完成前的旧快照——上下文缺失前一轮消息，
         // 且状态与库分叉。非流式路径（process_message）已是锁内加载，此处对齐。
         let _turn_guard = self.turn_guard(session_id).await;
+        // ADR-035 §9：轮状态 running（auto=false 用户轮）——前端据此联动
+        // 输入框与停止按钮（U10）。配对 idle 在函数退出时发出。
+        sender.send_turn_state(true, false).await;
 
         // 状态加载失败：经流式通道下发错误事件（调用方映射为 error 事件 +
         // HTTP 错误，与锁外加载返回 Err 的语义一致）。
         let state = match self.load_and_build_state(session_id).await {
             Ok(s) => s,
             Err(e) => {
+                sender.send_turn_state(false, false).await;
                 sender.send_error(&format!("处理失败：{}", e)).await;
                 return Ok(());
             }
@@ -313,7 +317,9 @@ impl AgentCoordinator for Agent {
                 cancel.as_deref(),
                 user_message_id,
                 crate::agent::agent_core::TurnOptions {
-                    mode: crate::agent::agent_core::TurnMode::Stream { sender },
+                    mode: crate::agent::agent_core::TurnMode::Stream {
+                        sender: sender.clone(),
+                    },
                     do_snapshot: true,
                     do_compress: true,
                     do_toolset_check: true,
@@ -334,6 +340,8 @@ impl AgentCoordinator for Agent {
                 .set_delegation_cancel(session_id, None)
                 .await;
         }
+        // ADR-035 §9：轮状态 idle（与开头 running 配对）
+        sender.send_turn_state(false, false).await;
 
         Ok(())
     }

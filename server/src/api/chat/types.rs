@@ -169,6 +169,10 @@ pub struct ChatStreamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// 用户消息落库后的真实 id（user_message_id 确认事件携带）。
     pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 轮状态载荷（chunk_type=turn_state，ADR-035 §9）：前端联动输入框
+    /// 与停止按钮（auto 轮可中止；U10）。
+    pub turn_state: Option<tianyan::agent::TurnStateEvent>,
 }
 
 impl ChatStreamEvent {
@@ -177,6 +181,7 @@ impl ChatStreamEvent {
     /// 由前端按流归属会话处理。
     pub fn error(stream_id: &str, session_id: &str, delta: impl Into<String>) -> Self {
         Self {
+            turn_state: None,
             id: stream_id.to_string(),
             session_id: session_id.to_string(),
             message: None,
@@ -198,6 +203,7 @@ impl ChatStreamEvent {
     /// 不做两套形态的补丁同步。
     pub fn message_boundary(stream_id: &str, session_id: &str, message: ChatMessage) -> Self {
         Self {
+            turn_state: None,
             id: stream_id.to_string(),
             session_id: session_id.to_string(),
             message: Some(message),
@@ -273,6 +279,7 @@ mod tests {
     #[test]
     fn test_chat_stream_event_serialization() {
         let event = ChatStreamEvent {
+            turn_state: None,
             id: "chatcmpl-1".to_string(),
             session_id: "session-123".to_string(),
             message: None,

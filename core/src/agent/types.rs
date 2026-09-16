@@ -94,6 +94,9 @@ pub enum StreamChunkType {
     /// `user_message_id` 与落库后的真实 `message_id`，前端比对后把本地
     /// 乐观消息替换为真实 id；确认后 user_message_id 生命周期结束）。
     UserMessageId,
+    /// 轮状态（ADR-035 §9，U10 根治）：轮开始/结束时下发；前端据此联动
+    /// 输入框与停止按钮（auto 轮 = 唤醒轮/子代理轮，可中止）。
+    TurnState,
 }
 
 /// 流式响应块。
@@ -133,6 +136,22 @@ pub struct AgentStreamChunk {
     /// 用户消息落库后的真实 id（UserMessageId chunk 携带）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// 轮状态载荷（TurnState chunk 携带，ADR-035 §9）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_state: Option<TurnStateEvent>,
+}
+
+/// 轮状态事件（ADR-035 §9）。
+///
+/// 语义：`running` = 该会话有一个轮（用户轮或 auto 轮）开始执行；
+/// `idle` = 轮结束（正常/取消/失败均发）。前端用 `auto` 区分是否可中止的
+/// 自动轮（唤醒轮/子代理轮）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnStateEvent {
+    /// `"running"` | `"idle"`。
+    pub state: String,
+    /// 是否自动轮（唤醒轮/子代理轮；false = 用户轮）。
+    pub auto: bool,
 }
 
 /// 工具执行结果事件（Observation chunk 携带）。
@@ -345,6 +364,19 @@ impl StreamEventSender {
         })
         .await;
     }
+
+    /// 发送轮状态事件（ADR-035 §9，U10：轮开始/结束；前端联动输入框与停止按钮）。
+    pub async fn send_turn_state(&self, running: bool, auto: bool) {
+        self.try_send(AgentStreamChunk {
+            chunk_type: StreamChunkType::TurnState,
+            turn_state: Some(TurnStateEvent {
+                state: if running { "running" } else { "idle" }.to_string(),
+                auto,
+            }),
+            ..Default::default()
+        })
+        .await;
+    }
 }
 
 #[cfg(test)]
@@ -407,6 +439,7 @@ mod tests {
     #[test]
     fn agent_stream_chunk_creation_answer() {
         let chunk = AgentStreamChunk {
+            turn_state: None,
             delta: "你好".to_string(),
             is_complete: false,
             token_usage: None,
@@ -435,6 +468,7 @@ mod tests {
             error: None,
         }];
         let chunk = AgentStreamChunk {
+            turn_state: None,
             delta: "调用技能".to_string(),
             is_complete: true,
             token_usage: Some(TokenUsage::new(10, 20)),
@@ -457,6 +491,7 @@ mod tests {
     #[test]
     fn agent_stream_chunk_serde_roundtrip() {
         let chunk = AgentStreamChunk {
+            turn_state: None,
             delta: "思考中...".to_string(),
             is_complete: false,
             token_usage: None,
@@ -482,6 +517,7 @@ mod tests {
         // ADR-031：确认事件携带前端临时 id + 落库真实 id，序列化为
         // chunk_type=user_message_id（前端 reducer 按此分支处理）
         let chunk = AgentStreamChunk {
+            turn_state: None,
             delta: String::new(),
             is_complete: false,
             token_usage: None,
@@ -513,6 +549,7 @@ mod tests {
     #[test]
     fn agent_stream_chunk_serde_omits_skill_calls_when_none() {
         let chunk = AgentStreamChunk {
+            turn_state: None,
             delta: "no calls".to_string(),
             is_complete: false,
             token_usage: None,

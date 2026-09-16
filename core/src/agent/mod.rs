@@ -53,6 +53,6 @@ pub use tool_params::{
 pub use tool_registry::{DynamicToolExecutor, ToolRegistry};
 pub use types::{
     AgentResponse, AgentState, AgentStreamChunk, SkillCallInfo, StreamChunkType, StreamEventSender,
-    ToolCallEvent, ToolResultEvent,
+    ToolCallEvent, ToolResultEvent, TurnStateEvent,
 };
 pub use working_set::{SessionWorkingSet, WorkingSetRegistry, WORKING_SET_IDLE_TTL};
