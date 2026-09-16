@@ -92,6 +92,15 @@ use crate::common::types::Message;
 /// 智能体协调器 trait。
 #[async_trait]
 pub trait AgentCoordinator: Send + Sync {
+    /// 请求中止该会话**当前活动轮**（ADR-035 §9 / U10：「停止」端点用）。
+    ///
+    /// 语义：置位轮自己注册的会话取消槽（唤醒轮/后台轮场景——无用户请求级
+    /// 标志）；返回是否命中（false = 无活动轮可停）。默认实现 = 无操作
+    /// （向导模式/测试桩无需感知）。
+    async fn cancel_active_turn(&self, _session_id: &str) -> bool {
+        false
+    }
+
     /// 处理用户消息。
     /// - `message` — 完整消息（含可选的多模态图片片段，`content` 为纯文本）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
@@ -225,6 +234,11 @@ pub trait AgentCoordinator: Send + Sync {
 
 #[async_trait]
 impl AgentCoordinator for Agent {
+    async fn cancel_active_turn(&self, session_id: &str) -> bool {
+        // ADR-035 §9 / U10：「停止」端点经此置位唤醒轮/后台轮自己注册的取消槽
+        Agent::cancel_active_turn(self, session_id).await
+    }
+
     async fn process_message(
         &self,
         session_id: &str,

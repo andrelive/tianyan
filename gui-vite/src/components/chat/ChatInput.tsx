@@ -18,6 +18,10 @@ interface Props {
   onCompress: () => void;
   /** 压缩进行中（ContextRing 按钮禁用 + loading） */
   compressing?: boolean;
+  /** 会话有轮在运行（后端起 turn_state 驱动，ADR-035 §9 / U10）：
+   * auto 轮（唤醒轮/后台轮）运行中——输入禁用、发送按钮转为"停止"
+   * （B 方案：不出现"打了字发不出去"的困惑态）。 */
+  turnRunning?: boolean;
 }
 
 /** 单张图片大小上限（4MB，data URL base64 膨胀约 1.33 倍后约 5.3MB 文本） */
@@ -47,6 +51,7 @@ export default function ChatInput({
   sessionUsage,
   onCompress,
   compressing = false,
+  turnRunning = false,
 }: Props) {
   const [input, setInput] = useState('');
   const [images, setImages] = useState<string[]>([]);
@@ -224,7 +229,7 @@ export default function ChatInput({
             dragOver ? '松开鼠标添加图片' : '输入消息... (Shift+Enter 换行，可粘贴/拖拽图片)'
           }
           rows={2}
-          disabled={isStreaming || compressing}
+          disabled={isStreaming || compressing || turnRunning}
           aria-label="输入消息"
           className={cn(
             'w-full resize-none bg-transparent px-3.5 pt-3 pb-1',
@@ -239,7 +244,7 @@ export default function ChatInput({
         {/* 底部控件行：左 = 图片；右 = 模型 / 思考 / 上下文圆环 / 发送 */}
         <div className="flex items-center justify-between gap-2 flex-wrap px-2 pb-2 pt-1">
           <div className="flex items-center gap-0.5 min-w-0">
-            {!isStreaming && (
+            {!isStreaming && !turnRunning && (
               <>
                 <input
                   ref={fileInputRef}
@@ -269,11 +274,12 @@ export default function ChatInput({
             <ModelSelector ghost />
             <ThinkingSelect ghost />
             <ContextRing usage={usage} onCompress={onCompress} compressing={compressing} />
-            {isStreaming ? (
+            {isStreaming || turnRunning ? (
               <button
                 onClick={onStop}
                 className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-sm font-medium transition-colors"
                 aria-label="停止生成"
+                title={turnRunning && !isStreaming ? '停止自动轮（唤醒轮/后台轮）' : '停止生成'}
               >
                 <Square className="w-4 h-4 fill-current" />
                 停止

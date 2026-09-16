@@ -787,6 +787,21 @@ impl ToolRegistry {
         }
     }
 
+    /// 置位会话**当前活动轮**的取消标志（ADR-035 §9 / U10：「停止」端点在
+    /// 无用户请求上下文时用——唤醒轮自己注册标志，端点经此置位它）。
+    ///
+    /// 返回是否命中（`false` = 该会话当前无注册中的轮）。
+    pub(crate) async fn request_cancel(&self, session_id: &str) -> bool {
+        let map = self.delegation_cancel.lock().await;
+        match map.get(session_id) {
+            Some(flag) => {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// 同步版取消检查（ask_user 等待轮询用；try_lock 失败时保守返回 false）。
     pub(crate) fn delegation_cancelled_sync(&self, session_id: &str) -> bool {
         self.delegation_cancel

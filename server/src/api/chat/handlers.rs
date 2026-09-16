@@ -141,6 +141,15 @@ pub async fn chat_stream_cancel_handler(
             f.store(true, std::sync::atomic::Ordering::Relaxed);
             Json(serde_json::json!({ "status": "cancelling", "session_id": session_id }))
         }
-        None => Json(serde_json::json!({ "status": "no_active_stream", "session_id": session_id })),
+        None => {
+            // ADR-035 §9 / U10：无用户请求级标志——可能是**唤醒轮/后台轮**在跑
+            // （它们自己注册会话取消槽）。经 Agent 置位；命中即返回 cancelling。
+            let agent = state.agent().await;
+            if agent.cancel_active_turn(&session_id).await {
+                Json(serde_json::json!({ "status": "cancelling", "session_id": session_id }))
+            } else {
+                Json(serde_json::json!({ "status": "no_active_stream", "session_id": session_id }))
+            }
+        }
     }
 }

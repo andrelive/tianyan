@@ -10,7 +10,7 @@
  */
 
 import { useCallback, useEffect, useRef } from 'react';
-import { fetchSessionMessages } from '@/lib/api-client';
+import { fetchSessionMessages, fetchSessionMessagesPage } from '@/lib/api-client';
 import { useAppStore } from '@/lib/store';
 import { subscribeSession } from '@/hooks/use-unified-events';
 
@@ -43,5 +43,29 @@ export function useSessionHistory(urlSessionId: string | null | undefined) {
     }
   }, []);
 
-  return { reloadSession };
+  /**
+   * 上滚：加载更早一页（ADR-035 §8）。
+   *
+   * 分页元数据由快照帧（打开会话）或本函数（上滚）维护；到链首
+   * （hasMore=false 或 oldestSeq<=0）后不再请求。返回是否加载了数据。
+   */
+  const loadOlder = useCallback(async (sessionId: string): Promise<boolean> => {
+    const st = useAppStore.getState();
+    const meta = st.sessionMessageMeta[sessionId];
+    if (!meta || !meta.hasMore || meta.oldestSeq == null || meta.oldestSeq <= 0) {
+      return false;
+    }
+    try {
+      const data = await fetchSessionMessagesPage(sessionId, meta.oldestSeq, 50);
+      useAppStore.getState().prependSessionMessages(sessionId, data.messages, {
+        oldestSeq: data.next_before_seq ?? null,
+        hasMore: Boolean(data.has_more),
+      });
+      return data.messages.length > 0;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  return { reloadSession, loadOlder };
 }

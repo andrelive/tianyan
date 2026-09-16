@@ -80,6 +80,17 @@ export function handleChatStreamEvent(event: ChatStreamEvent): void {
     st.confirmUserMessageId(sid, event.user_message_id, event.message_id);
     return;
   }
+  // 轮状态（ADR-035 §9，U10）：**后端轮状态是权威**——驱动输入区联动
+  // （auto 轮显示"停止"、用户轮禁用发送）。与 streamStatus 独立：后者由
+  // 用户发消息置位，覆盖不了唤醒轮（U10 症状一的根因）。
+  if (event.chunk_type === 'turn_state' && event.turn_state && sid) {
+    st.setTurnState(sid, {
+      state: event.turn_state.state === 'running' ? 'running' : 'idle',
+      auto: event.turn_state.auto,
+    });
+    return;
+  }
+
 
   // 消息边界（统一结构）：流开始/结束携带完整 ChatMessage——本地消息
   // id/内容直接来自服务端结构（与历史加载同构），回退定位键天然正确

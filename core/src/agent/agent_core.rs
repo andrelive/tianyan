@@ -177,6 +177,17 @@ impl Agent {
         self.working_sets.try_lock(session_id).await
     }
 
+    /// 请求中止该会话**当前活动轮**（ADR-035 §9 / U10）。
+    ///
+    /// 「停止」端点在没有用户请求级取消标志时经此置位（唤醒轮/后台轮自己
+    /// 注册的会话取消槽）；返回是否命中（false = 无活动轮可停）。
+    pub async fn cancel_active_turn(&self, session_id: &str) -> bool {
+        self.agent_loop
+            .tool_registry()
+            .request_cancel(session_id)
+            .await
+    }
+
     /// 注册任务唤醒器（ADR-013：后台任务全部完成/失败 → 触发唤醒轮）。
     ///
     /// 由 server 装配层在 Agent 构建完成后调用（传入自引用转发器
@@ -215,6 +226,14 @@ impl Agent {
         // ADR-035 §9：轮状态 running（auto=true 唤醒轮——前端显示"停止"，
         // 可中止；U10）。配对 idle 在两个出口（成功返回 / 放弃）发出。
         sender.send_turn_state(true, true).await;
+        // ADR-035 §9 / U10：唤醒轮注册**会话取消标志**——「停止」端点经
+        // `request_cancel` 置位后，轮在 chunk 循环/轮顶/工具边界停止
+        // （此前唤醒轮传 `cancel: None`，前端"停止"对它完全无效——U10 症状一）。
+        let wake_cancel = Arc::new(AtomicBool::new(false));
+        self.agent_loop
+            .tool_registry()
+            .set_delegation_cancel(session_id, Some(wake_cancel.clone()))
+            .await;
         let mut last_err: Option<String> = None;
         for attempt in 0..WAKE_RETRY_LIMIT {
             if attempt > 0 {
@@ -244,7 +263,7 @@ impl Agent {
                     session_id,
                     parent_id.as_deref(),
                     &self.default_model,
-                    None,
+                    Some(&wake_cancel),
                     // 唤醒轮不携带会话思考选择，使用模型默认
                     None,
                 )
@@ -298,6 +317,14 @@ impl Agent {
             // 廉价（消息数/实测 token 读取），仅超阈值才真正压缩。
             self.maybe_compress_and_persist(&state, session_id, false)
                 .await;
+            // 收尾：仅未取消时清理槽（与用户轮一致——已取消时保留标志，
+            // 让转后台的委托子代理仍能看到并退出）
+            if !wake_cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                self.agent_loop
+                    .tool_registry()
+                    .set_delegation_cancel(session_id, None)
+                    .await;
+            }
             sender.send_turn_state(false, true).await;
             return;
         }
@@ -311,6 +338,12 @@ impl Agent {
         sender
             .send_error(&format!("唤醒轮失败：{}", last_err.unwrap_or_default()))
             .await;
+        if !wake_cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            self.agent_loop
+                .tool_registry()
+                .set_delegation_cancel(session_id, None)
+                .await;
+        }
         sender.send_turn_state(false, true).await;
     }
 

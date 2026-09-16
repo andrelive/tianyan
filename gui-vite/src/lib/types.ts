@@ -3,7 +3,21 @@
 export type MessageRole = 'system' | 'user' | 'assistant';
 
 export type StreamChunkType =
-  'answer' | 'thought' | 'tool_call' | 'observation' | 'error' | 'message' | 'user_message_id';
+  | 'answer'
+  | 'thought'
+  | 'tool_call'
+  | 'observation'
+  | 'error'
+  | 'message'
+  | 'user_message_id'
+  | 'turn_state';
+
+/** 轮状态载荷（chunk_type=turn_state，ADR-035 §9）：驱动输入框与停止按钮（U10）。 */
+export interface TurnStatePayload {
+  state: 'running' | 'idle';
+  /** 是否自动轮（唤醒轮/子代理轮；false = 用户轮）。 */
+  auto: boolean;
+}
 
 export interface ChatMessage {
   /** 消息 ID（服务端 msg_xxx；null = 本地占位——流式期间无 id，
@@ -105,6 +119,8 @@ export interface ChatStreamEvent {
   message_id?: string | null;
   /** 本轮 token 用量（完成 chunk 携带；上下文占用 / 缓存命中展示用） */
   usage?: StreamUsage | null;
+  /** 轮状态载荷（chunk_type=turn_state，ADR-035 §9） */
+  turn_state?: TurnStatePayload | null;
 }
 
 export interface SkillCallInfo {

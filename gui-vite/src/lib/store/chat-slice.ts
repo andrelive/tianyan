@@ -22,6 +22,21 @@ import type {
  * 返回 session_id 前暂存于此，首个流式 chunk 到达时经 setCurrentSession
  * 迁移到正式键。跨会话并行流式互不干扰。 */
 export const PENDING_SESSION_KEY = '__pending__';
+/** 会话消息分页元数据（ADR-035 §8）：上滚分段加载状态。 */
+export interface SessionMessageMeta {
+  /** 已加载窗口中最旧消息的 seq（null = 未知/未加载）。 */
+  oldestSeq: number | null;
+  /** 是否还有更早历史（服务端 has_more）。 */
+  hasMore: boolean;
+}
+
+/** 会话轮状态（ADR-035 §9，U10）：`auto` 轮可中止（前端显示"停止"）。 */
+export interface TurnState {
+  state: 'running' | 'idle';
+  /** 是否自动轮（唤醒轮/子代理轮；false = 用户轮）。 */
+  auto: boolean;
+}
+
 
 /** 待回答的追问（composer takeover 数据）：多问题分步（每个问题一个 tab +
  * 补充信息 tab），每个问题含选项（label + description；空 = 纯文本输入），
@@ -49,6 +64,20 @@ export interface ChatSlice {
   // 会话消息缓存：本地真相源（历史加载只做一次；流式按 session_id 归属写入，
   // 切走会话流继续跑，切回直接显示累积内容）。messages 是当前会话投影。
   sessionMessages: Record<string, ChatMessage[]>;
+  /** 分页元数据（按会话；上滚加载的状态）。 */
+  sessionMessageMeta: Record<string, SessionMessageMeta>;
+  /** 轮状态（按会话；驱动输入框与停止按钮，U10）。 */
+  turnState: Record<string, TurnState>;
+  /** 上滚：把更早的消息插到窗口头部 + 更新分页元数据（ADR-035 §8）。 */
+  prependSessionMessages: (
+    sessionId: string,
+    older: ChatMessage[],
+    meta: SessionMessageMeta,
+  ) => void;
+  /** 设置分页元数据（快照/历史加载后由调用方按服务端 has_more 更新）。 */
+  setSessionMessageMeta: (sessionId: string, meta: SessionMessageMeta) => void;
+  /** 设置会话轮状态（turn_state 事件驱动，ADR-035 §9）。 */
+  setTurnState: (sessionId: string, turn: TurnState) => void;
   messages: ChatMessage[];
   setMessages: (messages: ChatMessage[]) => void;
   /** 按会话设置消息（更新指定会话缓存；目标会话为当前会话时同步投影）。
@@ -147,6 +176,27 @@ function updateLastAssistant(
   return updated;
 }
 
+/**
+ * 按 seq 有序插入（ADR-035 §4：seq 是链上位置，落位按位置而非到达顺序）。
+ *
+ * 无 seq（本地乐观消息等）或找不到更大位置时追加（旧行为）。
+ */
+function insertBySeq(msgs: ChatMessage[], msg: ChatMessage): void {
+  if (msg.seq == null) {
+    msgs.push(msg);
+    return;
+  }
+  let insertAt = msgs.length;
+  for (let i = 0; i < msgs.length; i++) {
+    const s = msgs[i].seq;
+    if (s != null && s > msg.seq) {
+      insertAt = i;
+      break;
+    }
+  }
+  msgs.splice(insertAt, 0, msg);
+}
+
 export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set, get) => ({
   // Session
   currentSessionId: null,
@@ -234,11 +284,41 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
   setSessionMessages: (sessionId, messages) =>
     set((s) => {
       const isCurrent = sessionId === resolveSessionKey(s);
+      const oldestSeq = messages.find((m) => m.seq != null)?.seq ?? null;
       return {
         sessionMessages: { ...s.sessionMessages, [sessionId]: messages },
+        sessionMessageMeta: {
+          ...s.sessionMessageMeta,
+          [sessionId]: {
+            oldestSeq,
+            hasMore: s.sessionMessageMeta[sessionId]?.hasMore ?? false,
+          },
+        },
         ...(isCurrent ? { messages } : {}),
       };
     }),
+  sessionMessageMeta: {},
+  setSessionMessageMeta: (sessionId, meta) =>
+    set((s) => ({ sessionMessageMeta: { ...s.sessionMessageMeta, [sessionId]: meta } })),
+  prependSessionMessages: (sessionId, older, meta) =>
+    set((s) => {
+      const base = s.sessionMessages[sessionId] ?? [];
+      // 去重：以 seq 为准（服务端分页按 seq 切片，正常不重叠；防御性去重）
+      const existing = new Set(
+        base.map((m) => m.seq).filter((x): x is number => x != null),
+      );
+      const fresh = older.filter((m) => m.seq == null || !existing.has(m.seq));
+      const next = [...fresh, ...base];
+      const isCurrent = sessionId === resolveSessionKey(s);
+      return {
+        sessionMessages: { ...s.sessionMessages, [sessionId]: next },
+        sessionMessageMeta: { ...s.sessionMessageMeta, [sessionId]: meta },
+        ...(isCurrent ? { messages: next } : {}),
+      };
+    }),
+  turnState: {},
+  setTurnState: (sessionId, turn) =>
+    set((s) => ({ turnState: { ...s.turnState, [sessionId]: turn } })),
   applyServerMessage: (sessionId, msg) =>
     set((s) => {
       const key = sessionId ?? resolveSessionKey(s);
@@ -311,7 +391,9 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
           };
         }
       }
-      next.push(msg);
+      // ADR-035 §4：按 seq 落位（有序插入）——取代"纯到达顺序追加"，修复
+      // U10 症状三（乐观渲染/多通道并发下的消息顺序倒置）
+      insertBySeq(next, msg);
       const isCurrent = key === resolveSessionKey(s);
       return {
         sessionMessages: { ...s.sessionMessages, [key]: next },

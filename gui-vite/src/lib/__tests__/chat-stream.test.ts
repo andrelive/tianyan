@@ -285,4 +285,72 @@ describe('handleChatStreamEvent', () => {
     handleChatStreamEvent(ev({ delta: '回答', finish_reason: 'stop' }));
     expect(useAppStore.getState().streamStatus['s1'] ?? 'idle').toBe('idle');
   });
+
+  it('applies turn_state events with auto flag (ADR-035 §9 / U10)', () => {
+    handleChatStreamEvent(
+      ev({ chunk_type: 'turn_state', turn_state: { state: 'running', auto: true } }),
+    );
+    expect(useAppStore.getState().turnState['s1']).toEqual({ state: 'running', auto: true });
+    handleChatStreamEvent(
+      ev({ chunk_type: 'turn_state', turn_state: { state: 'idle', auto: true } }),
+    );
+    expect(useAppStore.getState().turnState['s1']).toEqual({ state: 'idle', auto: true });
+  });
+
+  it('places boundary messages by seq, not arrival order (ADR-035 §4)', () => {
+    // 乱序到达：seq=2 先到、seq=1 后到 → 仍按位置排序（U10 症状三回归保护）
+    handleChatStreamEvent(
+      ev({
+        message: {
+          id: 'm2',
+          role: 'system',
+          seq: 2,
+          segments: [{ type: 'text', text: '二' }],
+          timestamp: '',
+        },
+      }),
+    );
+    handleChatStreamEvent(
+      ev({
+        message: {
+          id: 'm1',
+          role: 'system',
+          seq: 1,
+          segments: [{ type: 'text', text: '一' }],
+          timestamp: '',
+        },
+      }),
+    );
+    const msgs = useAppStore.getState().sessionMessages['s1'];
+    expect(msgs.map((m) => m.seq)).toEqual([1, 2]);
+  });
+
+  it('prepends older messages and updates pagination meta (ADR-035 §8)', () => {
+    const st = useAppStore.getState();
+    st.setSessionMessages('s1', [
+      { id: 'm3', role: 'assistant', seq: 3, segments: [], timestamp: '' },
+    ]);
+    st.prependSessionMessages(
+      's1',
+      [
+        { id: 'm1', role: 'user', seq: 1, segments: [], timestamp: '' },
+        { id: 'm2', role: 'assistant', seq: 2, segments: [], timestamp: '' },
+      ],
+      { oldestSeq: 1, hasMore: false },
+    );
+    const msgs = useAppStore.getState().sessionMessages['s1'];
+    expect(msgs.map((m) => m.seq)).toEqual([1, 2, 3]);
+    expect(useAppStore.getState().sessionMessageMeta['s1']).toEqual({
+      oldestSeq: 1,
+      hasMore: false,
+    });
+
+    // 防御性去重：重复上滚同一页不产生重复条目
+    st.prependSessionMessages(
+      's1',
+      [{ id: 'm1', role: 'user', seq: 1, segments: [], timestamp: '' }],
+      { oldestSeq: 1, hasMore: false },
+    );
+    expect(useAppStore.getState().sessionMessages['s1']).toHaveLength(3);
+  });
 });

@@ -24,23 +24,36 @@ use crate::state::AppState;
 /// SSE 流式通道缓冲区大小（与 chat 流一致）。
 const SSE_CHANNEL_BUFFER: usize = 100;
 
-/// 构造订阅快照 payload（ADR-029）：完整历史（ChatMessage 展示格式）+ cursor。
+/// 订阅快照的最近消息条数上限（ADR-035 §8：快照不再推全量——更早历史由前端
+/// 上滚经 `GET /sessions/{id}/messages?before_seq=` 补齐）。
+const SNAPSHOT_PAGE: usize = 100;
+
+/// 构造订阅快照 payload（ADR-029 + ADR-035 §8）：**最近 N 条**（ChatMessage
+/// 展示格式，带 seq）+ cursor + `has_more`（更早历史是否可上滚）。
 ///
 /// 历史消息走**完整转换**（[`ChatMessage::messages_from_structured`]，与
 /// `SessionService::get_session_detail` 同源）——跨消息合并工具执行结果。
 /// 快照是前端打开/重连会话时的 **replace 权威兜底**：若此处走轻量转换
 /// （`from_structured_light`，`tool_calls: None`），历史工具卡片会丢结果
 /// 并被渲染成永久"运行中"转圈（T0-7）。
+///
+/// 体积约束（ADR-035 §8）：长会话全量快照会让"打开会话"付出全链推送 + 渲染
+/// 成本；改为最近 `SNAPSHOT_PAGE` 条 + `has_more`，前端据 `next_before_seq`
+/// 上滚。`seq` 随消息下发（前端按位置对齐）。
 pub(crate) fn build_snapshot_payload(
     session_id: &str,
-    messages: Vec<tianyan::common::types::StructuredMessage>,
+    messages: Vec<(i64, tianyan::common::types::StructuredMessage)>,
     cursor: i64,
+    has_more: bool,
 ) -> serde_json::Value {
-    let messages = ChatMessage::messages_from_structured(messages);
+    let next_before_seq = messages.first().map(|(seq, _)| *seq).filter(|seq| *seq > 0);
+    let messages = ChatMessage::messages_from_structured_with_seq(messages);
     serde_json::json!({
         "type": "snapshot",
         "session_id": session_id,
         "cursor": cursor,
+        "has_more": has_more,
+        "next_before_seq": next_before_seq,
         "messages": messages,
     })
 }
@@ -68,18 +81,27 @@ pub async fn subscribe_events(
     Json(request): Json<SubscribeRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let session_manager = state.session_manager();
-    let session = session_manager
-        .get_session(&request.session_id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("会话不存在：{}", request.session_id)))?;
+    if !session_manager.session_exists(&request.session_id).await? {
+        return Err(ApiError::NotFound(format!(
+            "会话不存在：{}",
+            request.session_id
+        )));
+    }
 
     // 快照：完整历史（ChatMessage 展示格式）+ cursor（最新持久化 seq）
-    let cursor = state
+    // ADR-035 §8：只推最近 SNAPSHOT_PAGE 条（带 seq）+ has_more——更早历史由
+    // 前端上滚经 /sessions/{id}/messages?before_seq= 补齐。
+    let last_seq = state
         .session_store()
         .last_seq(&request.session_id)
         .await
-        .unwrap_or(0);
-    let payload = build_snapshot_payload(&request.session_id, session.messages, cursor);
+        .unwrap_or(-1);
+    let page = session_manager
+        .load_before(&request.session_id, last_seq + 1, SNAPSHOT_PAGE)
+        .await
+        .unwrap_or_default();
+    let has_more = page.first().map(|(seq, _)| *seq > 0).unwrap_or(false);
+    let payload = build_snapshot_payload(&request.session_id, page, last_seq.max(0), has_more);
     if let Ok(json) = serde_json::to_string(&payload) {
         let _ = state.task_event_tx.send(json);
     }

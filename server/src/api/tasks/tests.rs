@@ -76,11 +76,15 @@ fn snapshot_payload_keeps_tool_call_results() {
     let payload = build_snapshot_payload(
         "s1",
         vec![
-            StructuredMessage::user("s1", "读一下 a.txt"),
-            assistant_with_tool_call("call_1", "read_file"),
-            tool_result_message("msg_tool_1", "call_1", "文件内容", None),
+            (0, StructuredMessage::user("s1", "读一下 a.txt")),
+            (1, assistant_with_tool_call("call_1", "read_file")),
+            (
+                2,
+                tool_result_message("msg_tool_1", "call_1", "文件内容", None),
+            ),
         ],
         7,
+        false,
     );
 
     assert_eq!(payload["type"], "snapshot");
@@ -110,10 +114,14 @@ fn snapshot_payload_surfaces_tool_error() {
     let payload = build_snapshot_payload(
         "s1",
         vec![
-            assistant_with_tool_call("call_1", "run_command"),
-            tool_result_message("msg_tool_1", "call_1", "", Some("命令失败：exit 1")),
+            (0, assistant_with_tool_call("call_1", "run_command")),
+            (
+                1,
+                tool_result_message("msg_tool_1", "call_1", "", Some("命令失败：exit 1")),
+            ),
         ],
         2,
+        false,
     );
 
     let calls = payload["messages"][0]["tool_calls"].as_array().unwrap();
@@ -127,13 +135,12 @@ fn snapshot_payload_surfaces_tool_error() {
 fn snapshot_payload_maps_orphan_tool_result_to_assistant() {
     let payload = build_snapshot_payload(
         "s1",
-        vec![tool_result_message(
-            "msg_tool_orphan",
-            "call_missing",
-            "孤立结果",
-            None,
+        vec![(
+            0,
+            tool_result_message("msg_tool_orphan", "call_missing", "孤立结果", None),
         )],
         3,
+        false,
     );
 
     let messages = payload["messages"].as_array().unwrap();

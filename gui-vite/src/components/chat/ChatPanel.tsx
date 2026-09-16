@@ -43,6 +43,12 @@ export default function ChatPanel() {
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   /** 当前会话流式状态（按会话归属：切到原会话的流继续，互不阻塞） */
   const streamStatus = streamStatusMap[currentSessionId ?? PENDING_SESSION_KEY] ?? 'idle';
+  /** 后端轮状态（ADR-035 §9 / U10）：唤醒轮/后台轮运行中——输入禁用 + 停止按钮
+   * （B 方案：不出现"打了字发不出去"的困惑态）。streamStatus 只反映用户发起的
+   * 流（覆盖不了唤醒轮），轮状态以 turn_state 事件为权威。 */
+  const turnStateMap = useAppStore((s) => s.turnState);
+  const turnRunning =
+    (turnStateMap[currentSessionId ?? PENDING_SESSION_KEY]?.state ?? 'idle') === 'running';
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
   const addMessage = useAppStore((s) => s.addMessage);
   const setStreamStatus = useAppStore((s) => s.setStreamStatus);
@@ -63,6 +69,8 @@ export default function ChatPanel() {
       向上滚动超过阈值立即脱离跟随（不再被拉回），滚回底部恢复。
       scroll 热路径用 ref 避免高频 setState（DSH atBottomRef 双轨模式）。 */
   const stickToBottomRef = useRef(true);
+  /** 上滚加载中（防重复触发；ADR-035 §8）。 */
+  const loadingOlderRef = useRef(false);
   /** 程序化滚动账本：每次写 scrollTop 同步记录，scroll 事件据此判定
       "用户滚动"（|scrollTop - observedTop| > 0.5）——程序化滚动/浏览器
       clamp 不改变跟随所有权（DSH observed-top ledger 模式）。 */
@@ -106,7 +114,7 @@ export default function ChatPanel() {
   }, [urlSessionId, currentSessionId, setCurrentSession, setPendingClarification]);
 
   // 历史加载（挂载恢复 + reloadSession）收敛在 use-session-history
-  const { reloadSession } = useSessionHistory(urlSessionId);
+  const { reloadSession, loadOlder } = useSessionHistory(urlSessionId);
 
   // ADR-028：统一事件订阅——后台通知/唤醒轮结果/任务状态经常驻 SSE 推送，
   // ADR-031：消息不再广播——流式增量 + 完成事件到前端；后台任务完成
@@ -150,6 +158,8 @@ export default function ChatPanel() {
 
   // ── 滚动跟随（DSH observed-top ledger + followSig 模式） ─────────
   const FOLLOW_THRESHOLD = 24;
+  /** 上滚加载更早历史的触发阈值（距顶部 px；ADR-035 §8）。 */
+  const TOP_LOAD_THRESHOLD = 80;
 
   /** 滚动到底：写 scrollTop 后同步记录账本（程序化滚动不改变跟随所有权）。 */
   const scrollToBottom = useCallback(() => {
@@ -164,6 +174,15 @@ export default function ChatPanel() {
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    // ADR-035 §8：接近顶部时上滚加载更早历史。视口位置由浏览器原生滚动锚定
+    // （Chromium/WebView2 默认 overflow-anchor: auto）自动保持——prepend 内容
+    // 不会把用户当前阅读位置顶走。加载中不重复触发；到链首后内部短路。
+    if (el.scrollTop <= TOP_LOAD_THRESHOLD && !loadingOlderRef.current && urlSessionId) {
+      loadingOlderRef.current = true;
+      void loadOlder(urlSessionId).finally(() => {
+        loadingOlderRef.current = false;
+      });
+    }
     const floor = Math.max(0, el.scrollHeight - el.clientHeight);
     const movedByReader = Math.abs(el.scrollTop - Math.min(observedTopRef.current, floor)) > 0.5;
     const isAtBottom = movedByReader
@@ -176,7 +195,7 @@ export default function ChatPanel() {
     }
     stickToBottomRef.current = isAtBottom;
     observedTopRef.current = el.scrollTop;
-  }, []);
+  }, [loadOlder, urlSessionId]);
 
   // 会话切换时重置跟随（切回预期看到最新内容）
   useEffect(() => {
@@ -597,6 +616,7 @@ export default function ChatPanel() {
             onSend={handleSend}
             onStop={handleStop}
             isStreaming={streamStatus === 'streaming'}
+            turnRunning={turnRunning}
             usage={lastUsage}
             sessionUsage={sessionUsage}
             onCompress={() => void handleCompress()}

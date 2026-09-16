@@ -150,10 +150,19 @@ export function __resetSubscriptions(): void {
  * 流式进行中不 replace（覆盖流式占位有害；增量由实时事件继续）。导出供
  * 测试驱动（测试环境无 EventSource，快照帧由测试直接调用模拟）。
  */
-export function applySnapshot(sessionId: string, messages: ChatMessage[]): void {
+export function applySnapshot(
+  sessionId: string,
+  messages: ChatMessage[],
+  meta?: { oldestSeq: number | null; hasMore: boolean },
+): void {
   const st = useAppStore.getState();
   if ((st.streamStatus[sessionId] ?? 'idle') !== 'streaming') {
     st.setSessionMessages(sessionId, messages);
+    // ADR-035 §8：快照只含最近 N 条——has_more/游标随快照帧下发，
+    // 前端据此启用上滚（loadOlder）。
+    if (meta) {
+      st.setSessionMessageMeta(sessionId, meta);
+    }
   }
 }
 
@@ -166,8 +175,16 @@ function startUnifiedEvents(): void {
     try {
       const ev = JSON.parse(e.data) as UnifiedEvent;
       if (ev.type === 'snapshot' && ev.session_id && Array.isArray(ev.messages)) {
-        // ADR-029：订阅快照（完整历史 + cursor）→ replace 窗口
-        applySnapshot(ev.session_id, ev.messages as ChatMessage[]);
+        // ADR-029：订阅快照 → replace 窗口；ADR-035 §8：快照为最近 N 条，
+        // 附带 has_more/next_before_seq（上滚游标）
+        const raw = ev as unknown as {
+          has_more?: boolean;
+          next_before_seq?: number | null;
+        };
+        applySnapshot(ev.session_id, ev.messages as ChatMessage[], {
+          oldestSeq: typeof raw.next_before_seq === 'number' ? raw.next_before_seq : null,
+          hasMore: Boolean(raw.has_more),
+        });
       }
       // ADR-031：message 广播已移除——消息经流式增量 + 完成事件
       // （user_message_id 确认 / pump 边界）到前端；快照（打开/重连）兜底。

@@ -302,6 +302,21 @@ export async function deleteRole(name: string): Promise<RoleActionResponse> {
 export async function fetchSessionMessages(sessionId: string): Promise<SessionMessagesResponse> {
   return apiGet<SessionMessagesResponse>(`/sessions/${encodeURIComponent(sessionId)}/messages`);
 }
+/** 分段加载会话消息（ADR-035 §8：上滚取更早历史；beforeSeq 省略 = 最近一页）。 */
+export async function fetchSessionMessagesPage(
+  sessionId: string,
+  beforeSeq?: number,
+  limit?: number,
+): Promise<SessionMessagesResponse> {
+  const params = new URLSearchParams();
+  if (beforeSeq !== undefined) params.set('before_seq', String(beforeSeq));
+  if (limit !== undefined) params.set('limit', String(limit));
+  const qs = params.toString();
+  return apiGet<SessionMessagesResponse>(
+    `/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`,
+  );
+}
+
 
 /** 删除会话（级联删除消息与工作区绑定）。 */
 export async function deleteSession(sessionId: string): Promise<void> {

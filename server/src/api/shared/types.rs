@@ -281,14 +281,10 @@ impl ChatMessage {
     /// 为什么必须同源：订阅快照是前端打开/重连会话时的 **replace 权威兜底**；
     /// 若快照走轻量转换（`tool_calls: None`），历史工具卡片丢结果，
     /// 前端按"无结果"渲染成永久"运行中"转圈（误导为仍在执行）。
-    pub(crate) fn messages_from_structured(
-        messages: Vec<tianyan::common::types::StructuredMessage>,
-    ) -> Vec<ChatMessage> {
-        // 无链上位置上下文（订阅快照即时转换等）：seq 留空。
-        Self::convert_messages(messages.into_iter().map(|m| (None, m)).collect())
-    }
-
     /// 带链上位置的历史转换（ADR-035 §8：分段加载 / 订阅快照按 seq 对齐）。
+    ///
+    /// 所有批量转换路径都经此入口（快照/历史/分页均携带 seq）——无 seq 的
+    /// 批量入口已删除（避免"两个入口"的语义漂移）。
     pub(crate) fn messages_from_structured_with_seq(
         messages: Vec<(i64, tianyan::common::types::StructuredMessage)>,
     ) -> Vec<ChatMessage> {
