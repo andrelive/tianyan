@@ -204,8 +204,16 @@ impl TraceCollector {
         if spans.is_empty() {
             return Ok(());
         }
-        // 落盘经 TraceRepo（SQL 收敛于 db 层）
-        self.repo.flush_spans(&spans).await?;
+        // 落盘经 TraceRepo（SQL 收敛于 db 层）。T1-11：失败必须把 span **放回缓冲**
+        // （旧的在前、flush 期间新记录的在后，保持记录顺序）——"取出即清空"会让
+        // 一次落盘失败永久丢掉这批 span。
+        if let Err(e) = self.repo.flush_spans(&spans).await {
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut restored = spans;
+            restored.append(&mut buffer);
+            *buffer = restored;
+            return Err(e);
+        }
         self.pending_writes.store(0, Ordering::Relaxed);
         Ok(())
     }
@@ -329,5 +337,27 @@ mod tests {
             "省略号前不应有半个 UTF-8 字符: {}",
             t.len()
         );
+    }
+
+    #[test]
+    fn test_flush_failure_keeps_buffer_for_retry() {
+        // T1-11：落盘失败不得丢 span——失败后缓冲保留，schema 就绪后重试应落库
+        let db = Database::open_in_memory().unwrap(); // 故意不 init schema
+        let c = TraceCollector::new(db.clone()).unwrap();
+        c.set_current_turn("s1", 0);
+        c.record_turn("s1", "gpt-test", 10, 100, true);
+        assert_eq!(c.pending_count(), 1);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert!(
+            rt.block_on(async { c.flush().await }).is_err(),
+            "未初始化 schema 时刷盘应失败"
+        );
+        assert_eq!(c.pending_count(), 1, "失败后 span 应仍在缓冲（不得丢弃）");
+
+        rt.block_on(async { db.init_schemas().await.unwrap() });
+        rt.block_on(async { c.flush().await.unwrap() });
+        let spans = rt.block_on(async { c.query(Some("s1"), None, 100).await.unwrap() });
+        assert_eq!(spans.len(), 1, "落盘失败不得丢 span");
     }
 }

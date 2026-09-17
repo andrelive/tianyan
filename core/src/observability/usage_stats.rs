@@ -117,44 +117,80 @@ impl UsageStats {
 
     /// 将内存计数器批量刷入 SQLite。
     ///
+    /// **顺序契约（T1-11）**：先读快照 → 落盘（单事务）成功 → 才扣减内存计数。
+    /// 落盘失败时内存计数保持原样（下次刷盘重试），不会"清零后丢失"；
+    /// 扣减用 `fetch_sub`（此前是 `swap(0)`），刷盘期间新增的写入保留在内存。
+    ///
     /// # Errors
     /// * SQLite 写入失败时返回 `TianyanError::Custom`（带 `observability` 前缀）。
     pub async fn flush(&self) -> Result<(), TianyanError> {
-        let skill_batch: Vec<_> = self
+        // 1) 读快照（不清零）
+        let skill_batch: Vec<(String, u64, u64, u64)> = self
             .skill_counters
             .iter()
             .filter_map(|e| {
                 let c = e.value();
-                let calls = c.calls.swap(0, Ordering::Relaxed);
-                let successes = c.successes.swap(0, Ordering::Relaxed);
-                let time = c.total_time_us.swap(0, Ordering::Relaxed);
-                (calls > 0).then(|| (e.key().clone(), calls, successes, time))
+                let calls = c.calls.load(Ordering::Relaxed);
+                if calls == 0 {
+                    return None;
+                }
+                Some((
+                    e.key().clone(),
+                    calls,
+                    c.successes.load(Ordering::Relaxed),
+                    c.total_time_us.load(Ordering::Relaxed),
+                ))
             })
             .collect();
 
-        let doc_batch: Vec<_> = self
+        // 文档批次保留 raw 总分（供成功后精确扣减）；落库侧仍用平均分
+        let doc_snapshot: Vec<(String, u64, u64)> = self
             .doc_counters
             .iter()
             .filter_map(|e| {
                 let c = e.value();
-                let hits = c.search_hits.swap(0, Ordering::Relaxed);
-                let score = c.total_score.swap(0, Ordering::Relaxed);
-                (hits > 0).then(|| {
-                    (
-                        e.key().clone(),
-                        hits,
-                        score as f64 / hits as f64 / 1_000_000.0,
-                    )
-                })
+                let hits = c.search_hits.load(Ordering::Relaxed);
+                if hits == 0 {
+                    return None;
+                }
+                Some((e.key().clone(), hits, c.total_score.load(Ordering::Relaxed)))
             })
             .collect();
 
-        if skill_batch.is_empty() && doc_batch.is_empty() {
+        if skill_batch.is_empty() && doc_snapshot.is_empty() {
             self.pending_writes.store(0, Ordering::Relaxed);
             return Ok(());
         }
-        // 落盘经 StatsRepo（单事务；SQL 收敛于 db 层）
+
+        let doc_batch: Vec<(String, u64, f64)> = doc_snapshot
+            .iter()
+            .map(|(uri, hits, total)| {
+                (
+                    uri.clone(),
+                    *hits,
+                    *total as f64 / *hits as f64 / 1_000_000.0,
+                )
+            })
+            .collect();
+
+        // 2) 落盘（单事务；失败即返回，内存计数不动）
         self.repo.flush_counts(&skill_batch, &doc_batch).await?;
+
+        // 3) 成功后才扣减已落盘量（fetch_sub：刷盘期间新增的写入保留）
+        for (key, calls, successes, time) in &skill_batch {
+            if let Some(c) = self.skill_counters.get(key) {
+                c.calls.fetch_sub(*calls, Ordering::Relaxed);
+                c.successes.fetch_sub(*successes, Ordering::Relaxed);
+                c.total_time_us.fetch_sub(*time, Ordering::Relaxed);
+            }
+        }
+        for (uri, hits, total) in &doc_snapshot {
+            if let Some(c) = self.doc_counters.get(uri) {
+                c.search_hits.fetch_sub(*hits, Ordering::Relaxed);
+                c.total_score.fetch_sub(*total, Ordering::Relaxed);
+            }
+        }
+        // 触发节流计数：只影响下次自动刷盘的时机，不影响数据（数据在内存计数器中）
         self.pending_writes.store(0, Ordering::Relaxed);
         Ok(())
     }
@@ -309,5 +345,23 @@ mod tests {
             ),
             other => panic!("flush 失败应映射为 TianyanError::Custom，实际: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_flush_failure_keeps_counters_for_retry() {
+        // T1-11：落盘失败不得丢计数——失败后内存计数保持，schema 就绪后重试应全部落库
+        let db = Database::open_in_memory().unwrap(); // 故意不 init schema
+        let stats = UsageStats::new(db.clone()).unwrap();
+        stats.record_skill_call("skill:planning", true, 5000);
+        assert!(stats.flush().await.is_err(), "未初始化 schema 时刷盘应失败");
+
+        db.init_schemas().await.unwrap();
+        stats.flush().await.unwrap(); // 重试
+        let top = stats.query_top_skills(10).await;
+        let p = top
+            .iter()
+            .find(|s| s.skill_id == "planning")
+            .expect("失败后重试应把先前的调用落库（不得清零丢失）");
+        assert_eq!(p.total_calls, 1, "落盘失败不得丢计数");
     }
 }
