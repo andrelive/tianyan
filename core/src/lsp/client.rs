@@ -175,6 +175,14 @@ impl LspClient {
         Ok(client)
     }
 
+    /// 读侧是否已关闭（服务器崩溃/退出：stdout EOF 或读错误）。
+    ///
+    /// 池化调用方据此逐出死客户端并重建——否则服务器崩溃一次，
+    /// 该项目根的所有后续 LSP 查询会永久失败（T1-7）。
+    pub fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::SeqCst)
+    }
+
     /// 发送 JSON-RPC 请求并等待响应（10s 超时）。
     pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
         if self.dead.load(Ordering::SeqCst) {

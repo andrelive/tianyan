@@ -1,6 +1,7 @@
 //! LSP 诊断存储测试：诊断读取排序 + 推送转换。
 
 use std::str::FromStr;
+use std::time::Duration;
 
 use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range, Uri};
 
@@ -78,4 +79,73 @@ async fn test_handle_publish_stores_converted_diagnostics() {
     assert_eq!(diagnostics[0].column, 3, "LSP 0 起始 → 1 起始");
     assert_eq!(diagnostics[0].level, "error");
     assert_eq!(diagnostics[0].code.as_deref(), Some("1"));
+}
+
+/// 等读循环置位 dead（有限轮询，避免测试卡死）。
+async fn wait_dead(client: &LspClient) {
+    for _ in 0..100 {
+        if client.is_dead() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// T1-7：池中的「死客户端」（服务器崩溃/退出）必须被逐出，不得复用。
+///
+/// 旧行为：`ensure_server` 命中池即返回，死客户端的 `Arc` 永远留在池里，
+/// 之后该项目根的所有 LSP 查询都快速失败（“连接已关闭”）——永不自愈。
+#[tokio::test]
+async fn test_take_live_server_evicts_dead_client() {
+    let manager = LspManager::new();
+    // 读流立即 EOF → 读循环置 dead（等价于服务器崩溃关闭 stdout）
+    let dead_client = Arc::new(LspClient::from_streams(
+        Box::new(tokio::io::empty()),
+        Box::new(tokio::io::sink()),
+        "fake-lsp",
+        "安装提示",
+        None,
+    ));
+    manager
+        .servers
+        .insert("C:\\proj".to_string(), dead_client.clone());
+    wait_dead(&dead_client).await;
+    assert!(dead_client.is_dead(), "读流 EOF 后客户端应标记为已死");
+
+    assert!(
+        manager.take_live_server("C:\\proj").is_none(),
+        "死客户端不得被复用（返回 None 触发重建）"
+    );
+    assert!(
+        !manager.servers.contains_key("C:\\proj"),
+        "死客户端应被逐出池"
+    );
+}
+
+/// T1-7 反向：存活客户端正常复用（逐出逻辑不得误伤）。
+#[tokio::test]
+async fn test_take_live_server_reuses_alive_client() {
+    let manager = LspManager::new();
+    let (read, _write) = tokio::io::duplex(64); // 写端保持打开 → 读侧不 EOF
+    let client = Arc::new(LspClient::from_streams(
+        Box::new(read),
+        Box::new(tokio::io::sink()),
+        "fake-lsp",
+        "安装提示",
+        None,
+    ));
+    manager
+        .servers
+        .insert("C:\\proj".to_string(), client.clone());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!client.is_dead());
+
+    let got = manager
+        .take_live_server("C:\\proj")
+        .expect("存活客户端应被复用");
+    assert!(Arc::ptr_eq(&got, &client), "复用应返回同一客户端实例");
+    assert!(
+        manager.servers.contains_key("C:\\proj"),
+        "存活客户端不应被逐出"
+    );
 }

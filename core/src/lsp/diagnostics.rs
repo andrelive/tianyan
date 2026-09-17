@@ -86,7 +86,9 @@ impl LspManager {
         let root = probe_project_root(path, spec)
             .unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf());
         let key = root.to_string_lossy().to_string();
-        if let Some(client) = self.servers.get(&key) {
+        // 池中命中即复用——但已死客户端（服务器崩溃/退出）必须先逐出，
+        // 否则一次崩溃会让该项目根的所有后续查询永久失败（T1-7）。
+        if let Some(client) = self.take_live_server(&key) {
             return Ok(client.clone());
         }
         // 诊断回调直接写入共享 store（Arc 捕获，避免自引用）
@@ -118,6 +120,23 @@ impl LspManager {
             .await?;
         self.servers.insert(key, client.clone());
         Ok(client)
+    }
+
+    /// 取池中**存活**客户端；死客户端就地逐出（返回 `None`，由调用方重建）。
+    ///
+    /// 服务器崩溃时读循环会置 `dead` 并失败所有挂起请求，但池里的 `Arc`
+    /// 仍然存在——若复用前不检查，重建永远不会发生（T1-7）。
+    fn take_live_server(&self, key: &str) -> Option<Arc<LspClient>> {
+        let dead = self
+            .servers
+            .get(key)
+            .map(|client| client.is_dead())
+            .unwrap_or(false);
+        if dead {
+            self.servers.remove(key);
+            return None;
+        }
+        self.servers.get(key).map(|client| client.clone())
     }
 
     /// 执行一次 LSP 查询（按操作分发到客户端方法）。
