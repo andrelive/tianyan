@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -981,6 +981,26 @@ async fn write_full_output_log(
     }
 }
 
+/// 命令等待结果（`Cancelled` 与 `TimedOut` 分开——取消不是超时）。
+enum CommandWaitOutcome {
+    Exited(std::process::ExitStatus),
+    Failed(String),
+    TimedOut,
+    Cancelled,
+}
+
+/// 等待取消标志置位（`None` 时永久 pending，不参与 `select!` 竞争）。
+async fn wait_cancel(cancel: Option<&Arc<AtomicBool>>) {
+    match cancel {
+        None => std::future::pending::<()>().await,
+        Some(flag) => {
+            while !flag.load(AtomicOrdering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
 /// 执行 ExecuteCommand 动作（无安全策略依赖，纯函数）。
 ///
 /// 跨平台：Unix (Linux/macOS) 用 `sh -c`，Windows 用 `powershell -NoProfile -NonInteractive -Command`。
@@ -998,6 +1018,20 @@ pub async fn execute_command_action(
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
     log_dir: Option<&Path>,
+) -> Result<Value> {
+    execute_command_action_cancellable(command, cwd, timeout_secs, log_dir, None).await
+}
+
+/// 同 [`execute_command_action`]，但支持**外部取消**（用户「停止」按钮）。
+///
+/// `cancel` 置位时：杀进程树 → 返回 `executor: 命令已取消`（**不**标 timeout——
+/// 取消不是超时）。取消检查粒度 50ms；正常退出路径仍是零延迟等待。
+pub async fn execute_command_action_cancellable(
+    command: &str,
+    cwd: Option<&str>,
+    timeout_secs: Option<u64>,
+    log_dir: Option<&Path>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<Value> {
     let timeout = timeout_secs.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS);
 
@@ -1025,10 +1059,21 @@ pub async fn execute_command_action(
         .take()
         .map(|reader| tokio::spawn(read_reader_to_vec(reader)));
 
-    let result = tokio::time::timeout(Duration::from_secs(timeout), child.wait()).await;
+    // 等待退出：正常退出 / 超时 / **用户取消** 三路竞争。
+    // 「停止」此前只在轮顶与 chunk 循环生效——长命令执行期间点停止毫无反应
+    // （用户实测：命令卡住时无法中断）；现在取消标志直达进程等待。
+    let outcome = tokio::select! {
+        biased;
+        _ = wait_cancel(cancel.as_ref()) => CommandWaitOutcome::Cancelled,
+        r = tokio::time::timeout(Duration::from_secs(timeout), child.wait()) => match r {
+            Ok(Ok(status)) => CommandWaitOutcome::Exited(status),
+            Ok(Err(e)) => CommandWaitOutcome::Failed(format!("{e}")),
+            Err(_) => CommandWaitOutcome::TimedOut,
+        },
+    };
 
-    match result {
-        Ok(Ok(status)) => {
+    match outcome {
+        CommandWaitOutcome::Exited(status) => {
             let stdout_bytes = if let Some(handle) = stdout_handle {
                 match handle.await {
                     Ok(bytes) => bytes,
@@ -1079,11 +1124,11 @@ pub async fn execute_command_action(
                 "exit_code": status.code().unwrap_or(-1),
             }))
         }
-        Ok(Err(e)) => Err(TianyanError::Custom(format!(
+        CommandWaitOutcome::Failed(e) => Err(TianyanError::Custom(format!(
             "executor: 命令执行失败：{}",
             e
         ))),
-        Err(_elapsed) => {
+        CommandWaitOutcome::TimedOut => {
             // 杀进程树（taskkill /T 或 kill -9 -pgid），再回收子进程
             if let Some(pid) = child.id() {
                 kill_process_tree(pid).await;
@@ -1092,6 +1137,18 @@ pub async fn execute_command_action(
                 tracing::warn!(error = %e, "等待超时子进程退出失败");
             }
             Err(TianyanError::timeout("executor: 执行超时"))
+        }
+        CommandWaitOutcome::Cancelled => {
+            // 同超时路径：先杀进程树再回收，避免派生进程残留为孤儿
+            if let Some(pid) = child.id() {
+                kill_process_tree(pid).await;
+            }
+            if let Err(e) = child.wait().await {
+                tracing::warn!(error = %e, "等待被取消命令退出失败");
+            }
+            Err(TianyanError::Custom(
+                "executor: 命令已取消（用户停止）".to_string(),
+            ))
         }
     }
 }
@@ -1115,6 +1172,36 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_cancelled_by_flag() {
+        // T1：工具执行期可中断——取消标志置位后命令应在轮询粒度内被杀死并返回取消错误
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            flag.store(true, AtomicOrdering::Relaxed);
+        });
+        let cmd = if cfg!(target_os = "windows") {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
+        let started = tokio::time::Instant::now();
+        let err = execute_command_action_cancellable(cmd, None, Some(60), None, Some(cancel))
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            err.to_string().contains("已取消"),
+            "取消应返回取消错误：{err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "取消应在 5s 内生效（实际 {elapsed:?}）"
+        );
+        assert!(!err.is_timeout(), "取消不应被分类为超时");
     }
 
     #[tokio::test]

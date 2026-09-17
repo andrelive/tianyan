@@ -790,6 +790,17 @@ impl ToolRegistry {
     /// 置位会话**当前活动轮**的取消标志（ADR-035 §9 / U10：「停止」端点在
     /// 无用户请求上下文时用——唤醒轮自己注册标志，端点经此置位它）。
     ///
+    /// 取会话的取消标志（工具执行层读它 → 执行期间也能被「停止」中断）。
+    pub(crate) async fn session_cancel_flag(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        self.delegation_cancel.lock().await.get(session_id).cloned()
+    }
+
+    /// 置位会话**当前活动轮**的取消标志（ADR-035 §9 / U10：「停止」端点在
+    /// 无用户请求上下文时用——唤醒轮自己注册标志，端点经此置位它）。
+    ///
     /// 返回是否命中（`false` = 该会话当前无注册中的轮）。
     pub(crate) async fn request_cancel(&self, session_id: &str) -> bool {
         let map = self.delegation_cancel.lock().await;

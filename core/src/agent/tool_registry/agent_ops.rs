@@ -240,11 +240,15 @@ impl ToolRegistry {
             }));
         }
 
-        crate::executor::execute_command_action(
+        // 会话级取消标志（「停止」置位它）：前台命令**执行期间**也响应中断——
+        // 此前工具执行不读取消，长命令跑着时点停止毫无反应（用户实测）。
+        let cancel = self.session_cancel_flag(session_id).await;
+        crate::executor::execute_command_action_cancellable(
             &params.command,
             cwd.as_deref(),
             params.timeout_secs,
             self.command_logs_dir.as_deref(),
+            cancel,
         )
         .await
         .map_err(wrap_tool_error)
