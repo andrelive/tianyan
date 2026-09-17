@@ -145,9 +145,13 @@ pub fn parse_patch(text: &str) -> Result<Vec<PatchFile>> {
                 new_count,
                 lines: Vec::new(),
             });
-        } else if line.trim().is_empty() {
-            // 文件级空行：一律忽略（补丁文本常以换行结尾，LLM 输出也可能
-            // 夹带空行分隔；空上下文行应以空格前缀书写，缺失时跳过即可）。
+        } else if line.is_empty() {
+            // **完全空行**：格式噪声（补丁文本尾换行 / LLM 夹带的分隔行）→ 忽略。
+            //
+            // ⚠️ 不得用 `line.trim().is_empty()`：「一个空格」是**显式空上下文
+            // 行**（patch 格式约定：上下文行以空格前缀书写，内容可为空）。把
+            // 它当空行丢掉，会让期望匹配窗口少一行、与文件不再精确匹配，继而
+            // 被模糊匹配"整体平移一行"命中——即静默改错位置（历史 bug）。
         } else if line.starts_with('\\') {
             // `\ No newline at end of file` 标记：忽略（保持简单）。
         } else {
@@ -360,10 +364,17 @@ fn locate_hunk(lines: &[String], hunk: &PatchHunk) -> Option<(usize, usize, usiz
     }
     // 3. 模糊匹配：similar 行级 ratio，取最佳达标窗口；
     //    同等 ratio 时优先提示位置附近的窗口（消歧重复/相似区域）。
+    //    另加**位置敏感守卫**（`positional_match_ratio`）：非空行须逐位置
+    //    对应且匹配率达标——"整体平移一行"（期望首行落到窗口第 2 位）几乎
+    //    全位置不匹配而被拒（防静默错位），"个别行抄写误差"只损失少量位置
+    //    仍可达标（保留模糊匹配的正当容错）。
     let mut best: Option<(f32, usize, usize)> = None;
     for start in 0..=last_start {
         let ratio = fuzzy_ratio(lines, start, win_len, &expected);
         if ratio < FUZZY_RATIO_THRESHOLD {
+            continue;
+        }
+        if positional_match_ratio(lines, start, win_len, &expected) < FUZZY_RATIO_THRESHOLD {
             continue;
         }
         let dist = if no_hint {
@@ -401,6 +412,40 @@ fn fuzzy_ratio(lines: &[String], start: usize, win_len: usize, expected: &[Strin
         .collect();
     let expected_s: Vec<&str> = expected.iter().map(|s| s.as_str()).collect();
     similar::TextDiff::from_slices(&expected_s, &window).ratio()
+}
+/// 逐位置**非空行**匹配率（0..=1）：窗口与期望的非空行按顺序一一比较。
+///
+/// 位置敏感是刻意的：
+/// - **整体平移一行**（期望首行落到窗口第 2 位）→ 几乎所有位置都不匹配 →
+///   被拒（该形态的 `fuzzy_ratio` 仍可能达标，故不能只靠 ratio）；
+/// - **个别行抄写误差**（LLM 上下文有 1 行不同）→ 只损失少量位置 → 仍可
+///   达标（模糊匹配的正当用途，保留）。
+///
+/// 非空行数不一致（结构不同）直接判 0；期望无非空行（纯空上下文）判 1。
+fn positional_match_ratio(
+    lines: &[String],
+    start: usize,
+    win_len: usize,
+    expected: &[String],
+) -> f32 {
+    let exp: Vec<&str> = expected
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if exp.is_empty() {
+        return 1.0;
+    }
+    let win: Vec<&str> = lines[start..start + win_len]
+        .iter()
+        .map(|s| norm_line(s))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if win.len() != exp.len() {
+        return 0.0;
+    }
+    let hit = exp.iter().zip(win.iter()).filter(|(e, w)| e == w).count();
+    hit as f32 / exp.len() as f32
 }
 
 // ── 应用 ─────────────────────────────────────────────────────────────────

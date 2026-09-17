@@ -440,21 +440,14 @@ fn fuzzy_threshold_constant_is_sane() {
     let _ = json!({});
 }
 
-/// 回归（BUG 待修，2026-09-17 排查）：块内含「空格前缀的空上下文行」时，
-/// expected 窗口必须保留该空行并与文件**精确匹配**，插入落在 `}` 之后
-/// （而非被模糊匹配上移一行、插到 `}` 之前）。
+/// 回归（2026-09-17 修复）：块内含「空格前缀的空上下文行」时，期望窗口必须
+/// 保留该空行并与文件**精确匹配**，插入落在 `}` 之后（而非被模糊匹配上移
+/// 一行、插到 `}` 之前）。
 ///
-/// 现状根因（两层）：
-/// ① 解析层 `patch.rs` 用 `line.trim().is_empty()` 忽略"文件级空行"——
-///    连「一个空格」的显式空上下文行也被丢弃（与注释声称的"空上下文行
-///    应以空格前缀书写"矛盾）→ expected 少一行、与文件不再精确匹配；
-/// ② 定位层模糊匹配在无位置提示时 `dist` 恒为 0（失去消歧），取"先扫描到
-///    的"窗口 → 整体上移一行 → **静默错位**（无任何告警）。
-///
-/// 修复（①保留空格前缀的空上下文行 ②模糊匹配加"非空行必须全命中"约束）
-/// 后移除 `#[ignore]`。
+/// 修复前：解析层 `line.trim().is_empty()` 连「一个空格」的显式空上下文行
+/// 也丢弃 → 期望窗口少一行 → 精确匹配失败 → 模糊匹配"整体平移一行"命中 →
+/// 静默错位（无告警）。修复：解析层只忽略**完全空行**（`line.is_empty()`）。
 #[test]
-#[ignore = "BUG: apply_patch 空上下文行被丢弃 + 模糊匹配偏移 → 静默错位"]
 fn apply_patch_blank_context_line_must_not_shift_insertion() {
     let content = "impl Foo {\n    async fn load_before(&self) -> Result<()> {\n        Ok(self\n            .store\n            .load_before(x)\n            .await?)\n    }\n\n    /// `MAX(seq)` 覆盖（O(1)，不全量加载）。\n    async fn last_seq(&self) {}\n}\n";
     // 块内显式空上下文行（一个空格前缀）+ 尾部上下文
@@ -467,5 +460,24 @@ fn apply_patch_blank_context_line_must_not_shift_insertion() {
         out,
         "impl Foo {\n    async fn load_before(&self) -> Result<()> {\n        Ok(self\n            .store\n            .load_before(x)\n            .await?)\n    }\n\n    /// new\n    async fn m(&self) {}\n\n    /// `MAX(seq)` 覆盖（O(1)，不全量加载）。\n    async fn last_seq(&self) {}\n}\n",
         "空上下文行必须参与匹配：插入应落在 `}}` 之后、`/// MAX` 之前"
+    );
+}
+
+/// 位置敏感守卫（2026-09-17 修复）：块内空行**未以空格前缀书写**（完全空行
+/// → 被忽略）时，期望窗口少一行、与文件错开；此时模糊匹配的 ratio 仍可能
+/// 达标（"整体平移一行"形态），必须**报"无法定位补丁块"**——宁可可见失败，
+/// 绝不静默改错位置。
+#[test]
+fn fuzzy_fallback_rejects_shifted_window() {
+    let content = "impl Foo {\n    async fn load_before(&self) -> Result<()> {\n        Ok(self\n            .store\n            .load_before(x)\n            .await?)\n    }\n\n    /// `MAX(seq)` 覆盖（O(1)，不全量加载）。\n    async fn last_seq(&self) {}\n}\n";
+    // 纯空行写法（无空格前缀）→ 空上下文行丢失 → 期望窗口与文件错开一行
+    let text = patch_for(
+        "@@\n         Ok(self\n             .store\n             .load_before(x)\n             .await?)\n     }\n\n+    /// new\n+    async fn m(&self) {}\n+\n     /// `MAX(seq)` 覆盖（O(1)，不全量加载）。\n",
+    );
+    let files = parse_patch(&text).unwrap();
+    let err = apply_patch_to_content(content, &files[0].hunks).unwrap_err();
+    assert!(
+        err.to_string().contains("无法定位补丁块"),
+        "整体平移的窗口必须被拒（可见失败），而不是静默错位: {err}"
     );
 }

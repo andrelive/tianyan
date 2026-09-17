@@ -87,7 +87,6 @@ arrow-schema = "58.4.0"
 
 # 文本相似度比较
 similar = { workspace = true }
-# unified diff 解析与应用（apply_patch 标准组件）
 scraper = "0.20"
 
 # 压缩 / 解压
