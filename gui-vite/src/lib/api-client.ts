@@ -317,7 +317,6 @@ export async function fetchSessionMessagesPage(
   );
 }
 
-
 /** 删除会话（级联删除消息与工作区绑定）。 */
 export async function deleteSession(sessionId: string): Promise<void> {
   return apiDelete<void>(`/sessions/${encodeURIComponent(sessionId)}`);

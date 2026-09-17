@@ -37,7 +37,6 @@ export interface TurnState {
   auto: boolean;
 }
 
-
 /** 待回答的追问（composer takeover 数据）：多问题分步（每个问题一个 tab +
  * 补充信息 tab），每个问题含选项（label + description；空 = 纯文本输入），
  * 对齐 DSH ask_user_question 的 questions 数组形态。 */
@@ -304,9 +303,7 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
     set((s) => {
       const base = s.sessionMessages[sessionId] ?? [];
       // 去重：以 seq 为准（服务端分页按 seq 切片，正常不重叠；防御性去重）
-      const existing = new Set(
-        base.map((m) => m.seq).filter((x): x is number => x != null),
-      );
+      const existing = new Set(base.map((m) => m.seq).filter((x): x is number => x != null));
       const fresh = older.filter((m) => m.seq == null || !existing.has(m.seq));
       const next = [...fresh, ...base];
       const isCurrent = sessionId === resolveSessionKey(s);

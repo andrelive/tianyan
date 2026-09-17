@@ -91,7 +91,6 @@ export function handleChatStreamEvent(event: ChatStreamEvent): void {
     return;
   }
 
-
   // 消息边界（统一结构）：流开始/结束携带完整 ChatMessage——本地消息
   // id/内容直接来自服务端结构（与历史加载同构），回退定位键天然正确
   if (event.message) {
