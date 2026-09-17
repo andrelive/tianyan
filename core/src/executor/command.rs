@@ -228,7 +228,7 @@ impl CommandManager {
         working_directory: Option<String>,
     ) -> Result<CommandTask> {
         // 并发许可：排队等待（防失控扇出；许可随 watcher 任务结束自动释放）
-        let _permit = self
+        let permit = self
             .semaphore
             .clone()
             .acquire_owned()
@@ -278,6 +278,7 @@ impl CommandManager {
             tail.clone(),
             file,
             id.clone(),
+            permit,
         );
         if let Some(spec) = ready {
             self.spawn_ready_probe(spec, tail, id);
@@ -424,7 +425,9 @@ impl CommandManager {
 
     /// 启动 watcher 任务：等进程退出 → 收输出泵 → 落终态 → 通知/唤醒。
     ///
-    /// 并发许可（`_permit`）持有于 `spawn_background` 作用域，随本任务结束释放。
+    /// 并发许可（`permit`）**移交本任务持有**，随任务结束（进程退出 → 收输出泵 →
+    /// 落终态 → 通知）释放。T1-5 修复：此前它是 `spawn_background` 的局部变量，
+    /// 函数返回即被提前释放——命令仍在运行但许可已归还，并发上限形同虚设。
     fn spawn_watcher(
         &self,
         mut child: tokio::process::Child,
@@ -433,9 +436,12 @@ impl CommandManager {
         tail: Arc<Mutex<String>>,
         file: Arc<Mutex<Option<tokio::fs::File>>>,
         id: String,
+        permit: tokio::sync::OwnedSemaphorePermit,
     ) {
         let manager = self.clone();
         tokio::spawn(async move {
+            // T1-5：许可随本任务存活——命令真正结束（进程退出并收尾）才释放
+            let _permit = permit;
             let wait_result = child.wait().await;
             if let Some(h) = out_reader {
                 let _ = h.await;
@@ -1315,6 +1321,48 @@ mod tests {
         assert_eq!(t.status, CommandTaskStatus::Cancelled);
         // 终态幂等：再次 kill 为 no-op 不报错
         manager.kill(&task.id).await.unwrap();
+    }
+
+    /// 回归测试（T1-5）：并发许可必须随命令生命周期持有，上限真正生效。
+    ///
+    /// 旧实现把许可留在 `spawn_background` 局部作用域——函数返回即 drop，
+    /// 命令仍在运行但许可已归还，第二个 spawn 直接穿过（上限形同虚设）。
+    /// 判别力：注入「提前释放」（许可不随 watcher 存活）时本测试必红。
+    #[tokio::test]
+    async fn test_max_concurrent_commands_gates_spawn() {
+        let manager = CommandManager::new(None).with_max_concurrent(1);
+        let long_cmd = if cfg!(target_os = "windows") {
+            "ping -n 5 127.0.0.1"
+        } else {
+            "sleep 4"
+        };
+        let first = manager
+            .spawn_background("sess-c", long_cmd, None, None, 0, None)
+            .await
+            .unwrap();
+
+        // 许可被 first 占着（进程仍在运行）→ 第二个 spawn 必须排队，不得立即返回
+        let queued = tokio::time::timeout(
+            Duration::from_millis(500),
+            manager.spawn_background("sess-c", "echo B", None, None, 0, None),
+        )
+        .await;
+        assert!(
+            queued.is_err(),
+            "并发上限=1 且首个命令仍在运行时，第二个命令应排队等待许可"
+        );
+
+        // first 结束 → 许可释放 → 第二个应能启动
+        wait_terminal(&manager, &first.id).await;
+        let second = tokio::time::timeout(
+            Duration::from_secs(10),
+            manager.spawn_background("sess-c", "echo B", None, None, 0, None),
+        )
+        .await
+        .expect("首个命令结束后许可应释放，第二个命令应可启动")
+        .unwrap();
+        let t = wait_terminal(&manager, &second.id).await;
+        assert_eq!(t.status, CommandTaskStatus::Completed);
     }
 
     #[tokio::test]
