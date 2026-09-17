@@ -320,7 +320,7 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     useAppStore.setState({
       currentSessionId: 'session-1',
-      lastRollbackMessageId: 'msg_deleted',
+      rollbackMessageBySession: { 'session-1': 'msg_deleted' },
       messages: [
         {
           role: 'user',
@@ -339,7 +339,18 @@ describe('ChatPanel', () => {
       expect(messages).toHaveLength(2);
       expect(messageText(messages[1])).toBe('你好！我是天演，有什么可以帮助你的？');
     });
-    expect(useAppStore.getState().lastRollbackMessageId).toBeNull();
+    expect(useAppStore.getState().rollbackMessageBySession['session-1']).toBeUndefined();
+  });
+
+  it('hides the rollback banner for a different session (cross-session isolation)', () => {
+    // 回退在会话 A 发生 → 切到会话 B 不得显示"撤销回退"横幅
+    useAppStore.setState({
+      currentSessionId: 'session-B',
+      rollbackMessageBySession: { 'session-A': 'msg_deleted' },
+      messages: [],
+    });
+    renderChatPanel();
+    expect(screen.queryByRole('button', { name: /撤销回退/ })).not.toBeInTheDocument();
   });
 
   it('show no clarification bubble for a different session (cross-session isolation)', () => {

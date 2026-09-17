@@ -124,8 +124,10 @@ export interface ChatSlice {
 
   // Rollback / redo（按消息 ID 定位：前端索引与服务端消息列表错位，
   // 数字索引会删过头——回退/重做都以被删除消息的 ID 为键）
-  lastRollbackMessageId: string | null;
-  setLastRollbackMessageId: (id: string | null) => void;
+  // **按会话维度存**：回退是会话内操作，切走会话不得残留横幅
+  //（U7 追问串台同款根因：全局单字段无会话维度）。
+  rollbackMessageBySession: Record<string, string>;
+  setRollbackMessage: (sessionId: string, messageId: string | null) => void;
 
   // Streaming（按会话归属：会话 A 流式时切到 B 可继续发消息，互不阻塞）
   streamStatus: Record<string, StreamStatus>;
@@ -607,8 +609,17 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
     ),
 
   // Rollback / redo
-  lastRollbackMessageId: null,
-  setLastRollbackMessageId: (id) => set({ lastRollbackMessageId: id }),
+  rollbackMessageBySession: {},
+  setRollbackMessage: (sessionId, messageId) =>
+    set((s) => {
+      const next = { ...s.rollbackMessageBySession };
+      if (messageId === null) {
+        delete next[sessionId];
+      } else {
+        next[sessionId] = messageId;
+      }
+      return { rollbackMessageBySession: next };
+    }),
 
   // Streaming（按会话归属：切走流继续跑，切回直接显示累积内容）
   streamStatus: {},

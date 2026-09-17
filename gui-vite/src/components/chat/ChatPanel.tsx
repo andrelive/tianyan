@@ -52,8 +52,10 @@ export default function ChatPanel() {
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
   const addMessage = useAppStore((s) => s.addMessage);
   const setStreamStatus = useAppStore((s) => s.setStreamStatus);
-  const lastRollbackMessageId = useAppStore((s) => s.lastRollbackMessageId);
-  const setLastRollbackMessageId = useAppStore((s) => s.setLastRollbackMessageId);
+  const lastRollbackMessageId = useAppStore((s) =>
+    s.currentSessionId ? (s.rollbackMessageBySession[s.currentSessionId] ?? null) : null,
+  );
+  const setRollbackMessage = useAppStore((s) => s.setRollbackMessage);
   const pendingClarification = useAppStore((s) => s.pendingClarification);
   const setPendingClarification = useAppStore((s) => s.setPendingClarification);
 
@@ -264,7 +266,7 @@ export default function ChatPanel() {
       if (!trimmed && images.length === 0) return;
 
       // 发起新轮：回撤已被新工作取代，清空撤销回退横幅（否则残留到输出底部）
-      setLastRollbackMessageId(null);
+      setRollbackMessage(activeKey, null);
       // 用户发送新消息：恢复底部跟随（此前可能向上回读）
       stickToBottomRef.current = true;
 
@@ -344,7 +346,7 @@ export default function ChatPanel() {
       // 的分组在刷新返回前失去依据闪断；失败路径也不应清，否则重试丢目录）。
       // 见 SessionList 的 currentSessionId 变更 effect。
     },
-    [addMessage, startStream, setLastRollbackMessageId],
+    [addMessage, startStream, setRollbackMessage],
   );
 
   const handleRollback = useCallback(
@@ -374,7 +376,7 @@ export default function ChatPanel() {
       try {
         const resp = await deleteSessionMessage(sessionId, target.id);
         st.setMessages(resp.messages);
-        st.setLastRollbackMessageId(target.id);
+        st.setRollbackMessage(sessionId, target.id);
       } catch (err: unknown) {
         st.showToast(`回退失败: ${toErrorMessage(err, '未知错误')}`, 'error');
         await reloadSession(sessionId);
@@ -394,13 +396,13 @@ export default function ChatPanel() {
     try {
       const resp = await redoSessionMessage(sessionId, lastRollbackMessageId);
       state.setMessages(resp.messages);
-      setLastRollbackMessageId(null);
+      setRollbackMessage(sessionId, null);
       state.showToast('已撤销回退', 'success');
     } catch (err: unknown) {
       state.showToast(`撤销回退失败: ${toErrorMessage(err, '未知错误')}`, 'error');
       await reloadSession(sessionId);
     }
-  }, [streamStatus, lastRollbackMessageId, setLastRollbackMessageId, reloadSession]);
+  }, [streamStatus, lastRollbackMessageId, setRollbackMessage, reloadSession]);
 
   // 提交对 Agent 追问的回答（同步工具语义，对齐 DSH）：回答提交到
   // /chat/answer 等待通道，ask_user 工具执行恢复，结果经**主对话流**返回
