@@ -12,7 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **apply_patch 静默错位（用户报告 + 工具实现排查）**：块内含空上下文行时，解析层 `line.trim().is_empty()` 把「一个空格」的显式空上下文行也丢弃（与注释语义矛盾）→ 期望窗口少一行 → 精确匹配失败 → 模糊匹配命中"整体平移一行"窗口 → **静默改错位置**（新内容插到函数闭合 `}` 之前，语法破坏且无报错）。现：① 只忽略**完全空行**（`line.is_empty()`），空格前缀（含「一个空格」）保留为 `Context("")`；② 新增**位置敏感守卫** `positional_match_ratio`（逐位置非空行匹配率须达标）——拒"整体平移一行"、保留"个别行抄写误差"容错；守卫不通过则报"无法定位补丁块"（可见失败）
 - **后台任务通知前端不实时显示（用户报告，0.5.0 写侧收口回归）**：ADR-028「落库即推送」挂在 `SessionManager` wrapper（只包装 `add_structured_message`），而 0.5.0 把所有写入改经 `ws.append`（工作集内直调 `SessionStore`）→ wrapper 不再是入口 → System 通知与压缩点落库后不广播（用户消息乐观渲染、assistant/工具结果流式推送，故只有通知暴露；0.3.12 的压缩点实时推送同源回归）。现把边界推送挂到 `ws.append`：`BoundaryPushSlot` 共享回调槽（支持后注入，对已加载与新建工作集均生效）+ 同一门控（`System || compression_marker`）；core 仍不感知通道（回调由 server 装配层注入，复用抽出的 `event_push::push_boundary_event`，两处共用避免映射漂移）
 - 依赖清理：移除僵尸 `diffy` 声明（core 早已移除、workspace 残留 + core 错位注释）
-- 回归保护：core **1297**（+3 回归）· server **164** · tauri 13 · mcp 16 · 前端 409；判别力实证（apply_patch 两处注入 → 恰好 2 测试红；页边界注入 → 2 测试红；边界推送注入 → core+server 各 1 红）；clippy 0 / fmt 干净
+- **后台命令并发上限失效（T1-5）**：`_permit` 是 `spawn_background` 局部变量，函数返回即 drop（提前释放）——命令仍在运行但许可已归还，ADR-026「16 并发」形同虚设；现 `OwnedSemaphorePermit` 移交 watcher 持有，随命令真正结束（进程退出 → 收输出泵 → 落终态 → 通知）释放
+- **LSP 池中死客户端永不复用（T1-7）**：服务器崩溃后读循环置 `dead`，但客户端仍留池中 → 该项目根所有后续查询永久失败（「连接已关闭」）且永不自愈；现复用前检查存活（`LspClient::is_dead` + `LspManager::take_live_server`），死客户端就地逐出并重建
+- **apply_patch 工具描述补「块内空行」约定**：完全空行按格式噪声忽略；原文空行作上下文须写成「一个空格」的单独一行（补齐输入侧约定，工具目录同步重生成）
+- **日志轮转接线**：`[logging].max_file_size` / `max_files` 此前为死配置（日志文件无限累积）；新增 `RotatingWriter`（按大小轮转、单条日志不跨文件）+ `prune_family`（按 mtime 保留最新 N 个含当前文件）；`core::init_logging` 接线 `[logging].file`；tauri 侧接入
+- 回归保护：core **1303**（+6 回归）· server **164** · tauri 13 · mcp 16 · 前端 **414**；判别力实证（apply_patch 两处注入 → 恰好 2 测试红；页边界注入 → 2 测试红；边界推送注入 → core+server 各 1 红；并发上限注入 → 1 红；LSP 注入 → 1 红；日志轮转注入 → 3 红）；clippy 0（workspace） / fmt 干净
 
 ## [0.5.0] - 2026-09-17
 
