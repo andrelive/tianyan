@@ -11,7 +11,7 @@ use crate::api::sessions::types::{
 };
 use crate::api::shared::error::ApiError;
 use crate::api::shared::types::ChatMessage;
-use tianyan::common::types::StructuredMessage;
+use tianyan::common::types::{MessageRole, StructuredMessage};
 use tianyan::snapshot::SnapshotManager;
 /// 分段加载默认单页条数（ADR-035 §8）。
 const DEFAULT_MESSAGE_PAGE: usize = 50;
@@ -212,6 +212,11 @@ impl SessionService {
     ///
     /// `before_seq` 省略 = 最近一页；给出 = 该位置之前一页（上滚游标取上一页的
     /// `next_before_seq`）。每条消息携带 `seq`（链上位置，前端按 seq 对齐）。
+    ///
+    /// **页边界对齐用户消息（ADR-035 §8 修订）**：以 50 条为基准取窗口后，页从
+    /// 「窗口内由远及近第一条 `user`」起；窗口内没有则直接向前找最近一条更早的
+    /// `user`（一次查询，不按批扩展）；到链头仍无则整段兜底。页首恒为用户消息
+    /// → 工具调用与其结果不会被分页切开（消除跨页"孤立结果卡 / 缺结果调用"）。
     pub async fn get_messages_page(
         &self,
         session_id: &str,
@@ -226,10 +231,36 @@ impl SessionService {
             .clamp(1, MAX_MESSAGE_PAGE);
         let last_seq = self.session_manager.last_seq(session_id).await?;
         let before = before_seq.unwrap_or(last_seq + 1);
-        let rows = self
+        // 基准窗口（最近 page_limit 条）
+        let window = self
             .session_manager
             .load_before(session_id, before, page_limit)
             .await?;
+        let head_seq = window.first().map(|(seq, _)| *seq);
+        // 窗口内由远及近第一条 user
+        let user_pos = window.iter().position(|(_, m)| m.role == MessageRole::User);
+        let rows = match (user_pos, head_seq) {
+            // 窗口内找到 user：页从它起（截取尾部，页长 ≤ 窗口）
+            (Some(pos), _) => window
+                .into_iter()
+                .skip(pos)
+                .collect::<Vec<(i64, StructuredMessage)>>(),
+            // 窗口内无 user：直接向前找最近一条更早的 user（一次查询，不按批
+            // 扩展）；到链头仍无 → 整段（链头..窗口尾）兜底。
+            (None, Some(head)) => {
+                let lo = self
+                    .session_manager
+                    .last_user_seq_before(session_id, head)
+                    .await?
+                    .unwrap_or(0);
+                let span = (before - lo).max(1) as usize;
+                self.session_manager
+                    .load_before(session_id, before, span)
+                    .await?
+            }
+            // 空窗口（无更早消息）
+            (None, None) => window,
+        };
         // 上滚游标 = 本页最早一条的 seq（=0 表示已到链首，无更早）
         let next_before_seq = rows.first().map(|(seq, _)| *seq).filter(|seq| *seq > 0);
         Ok(SessionMessagesResponse {
@@ -874,6 +905,160 @@ mod tests {
             matches!(err, crate::api::shared::error::ApiError::NotFound(_)),
             "不存在的会话应 404: {err:?}"
         );
+    }
+    /// 带工具调用的 assistant 消息（与 `tool_result_msg` 按 call_id 配对）。
+    fn assistant_with_call(sid: &str, call_id: &str, text: &str) -> StructuredMessage {
+        let mut msg = StructuredMessage::assistant(sid, text);
+        msg.parts.push(Part::ToolCall {
+            id: call_id.to_string(),
+            name: "read_file".to_string(),
+            arguments: "{}".to_string(),
+            time: PartTime::default(),
+        });
+        msg
+    }
+
+    /// 工具结果消息（role=tool + ToolResult part）。
+    fn tool_result_msg(sid: &str, call_id: &str, text: &str) -> StructuredMessage {
+        let mut msg = StructuredMessage::assistant(sid, "");
+        msg.role = MessageRole::Tool;
+        msg.parts = vec![Part::ToolResult {
+            tool_call_id: call_id.to_string(),
+            content: text.to_string(),
+            error: None,
+            time: PartTime::default(),
+        }];
+        msg
+    }
+
+    /// 分段加载 user 对齐（ADR-035 §8 修订）：页首恒为 user；"调用|结果"对
+    /// 不被分页切开（窗口内 / 跨窗口两条路径都覆盖）。
+    #[tokio::test]
+    async fn test_get_messages_page_aligns_to_user() {
+        use tianyan::session::store::SessionStore;
+        use tianyan::session::SessionHeader;
+        let db = tianyan::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = SessionStore::new(db).unwrap();
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        let chain = [
+            StructuredMessage::user("s1", "u0"),      // seq 0
+            assistant_with_call("s1", "c1", "a1"),    // seq 1
+            tool_result_msg("s1", "c1", "r1"),        // seq 2
+            StructuredMessage::assistant("s1", "a3"), // seq 3
+            StructuredMessage::user("s1", "u4"),      // seq 4
+            assistant_with_call("s1", "c2", "a5"),    // seq 5
+            tool_result_msg("s1", "c2", "r2"),        // seq 6
+            StructuredMessage::assistant("s1", "a7"), // seq 7
+        ];
+        for m in &chain {
+            store.append_message("s1", m).await.unwrap();
+        }
+        let manager: Arc<dyn SessionManager> = Arc::new(
+            tianyan::session::PersistentSessionManager::new(store.clone()),
+        );
+        let service = SessionService::new(manager, None, None, None);
+        // 页 1：窗口 [5,6,7] 无 user → 向前找最近 user = 4 → 页 [4..7]
+        let p1 = service
+            .get_messages_page("s1", None, Some(3))
+            .await
+            .unwrap();
+        let s1: Vec<i64> = p1.messages.iter().filter_map(|m| m.seq).collect();
+        assert_eq!(s1, vec![4, 5, 7], "页首 = user(4)；结果(6)并入调用卡");
+        let call2 = p1
+            .messages
+            .iter()
+            .find(|m| m.seq == Some(5))
+            .and_then(|m| m.tool_calls.as_deref())
+            .and_then(|calls| calls.first())
+            .expect("seq5 调用卡");
+        assert!(
+            call2.result.is_some(),
+            "调用与结果必须同页合并（不被切开的直接判据）"
+        );
+        assert_eq!(p1.next_before_seq, Some(4));
+        // 页 2：窗口 [1,2,3] 无 user → 向前找最近 user = 0 → 页 [0..3]
+        let p2 = service
+            .get_messages_page("s1", p1.next_before_seq, Some(3))
+            .await
+            .unwrap();
+        let s2: Vec<i64> = p2.messages.iter().filter_map(|m| m.seq).collect();
+        assert_eq!(s2, vec![0, 1, 3], "页首 = user(0)；结果(2)并入调用卡");
+        let call1 = p2
+            .messages
+            .iter()
+            .find(|m| m.seq == Some(1))
+            .and_then(|m| m.tool_calls.as_deref())
+            .and_then(|calls| calls.first())
+            .expect("seq1 调用卡");
+        assert!(call1.result.is_some(), "跨窗口查找路径同样不切开调用与结果");
+        assert_eq!(p2.next_before_seq, None, "页首 0 = 已到链首");
+        assert!(!p2.has_more);
+    }
+    /// 窗口内最早 user 恰在窗口头 → 页 = 整个窗口（不缩水）。
+    #[tokio::test]
+    async fn test_get_messages_page_user_at_window_head() {
+        use tianyan::session::store::SessionStore;
+        use tianyan::session::SessionHeader;
+        let db = tianyan::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = SessionStore::new(db).unwrap();
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        for m in [
+            StructuredMessage::user("s1", "u0"),      // seq 0
+            StructuredMessage::assistant("s1", "a1"), // seq 1
+            StructuredMessage::assistant("s1", "a2"), // seq 2
+            StructuredMessage::user("s1", "u3"),      // seq 3
+            StructuredMessage::assistant("s1", "a4"), // seq 4
+            StructuredMessage::assistant("s1", "a5"), // seq 5
+        ] {
+            store.append_message("s1", &m).await.unwrap();
+        }
+        let manager: Arc<dyn SessionManager> = Arc::new(
+            tianyan::session::PersistentSessionManager::new(store.clone()),
+        );
+        let service = SessionService::new(manager, None, None, None);
+        // 窗口 [3,4,5]，最早 user = 3（窗口头）→ 页保持 [3,4,5]
+        let p = service
+            .get_messages_page("s1", None, Some(3))
+            .await
+            .unwrap();
+        let seqs: Vec<i64> = p.messages.iter().filter_map(|m| m.seq).collect();
+        assert_eq!(seqs, vec![3, 4, 5]);
+        assert_eq!(p.next_before_seq, Some(3));
+    }
+    /// 全链无 user（无用户消息的会话）→ 整段兜底 + 到链首。
+    #[tokio::test]
+    async fn test_get_messages_page_no_user_chain_head_fallback() {
+        use tianyan::session::store::SessionStore;
+        use tianyan::session::SessionHeader;
+        let db = tianyan::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = SessionStore::new(db).unwrap();
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        for m in [
+            StructuredMessage::assistant("s1", "a0"),
+            StructuredMessage::assistant("s1", "a1"),
+            StructuredMessage::assistant("s1", "a2"),
+            StructuredMessage::assistant("s1", "a3"),
+            StructuredMessage::assistant("s1", "a4"),
+            StructuredMessage::assistant("s1", "a5"),
+        ] {
+            store.append_message("s1", &m).await.unwrap();
+        }
+        let manager: Arc<dyn SessionManager> = Arc::new(
+            tianyan::session::PersistentSessionManager::new(store.clone()),
+        );
+        let service = SessionService::new(manager, None, None, None);
+        // 窗口 [3,4,5] 无 user、更早亦无 user → 整段 [0..5] 兜底
+        let p = service
+            .get_messages_page("s1", None, Some(3))
+            .await
+            .unwrap();
+        let seqs: Vec<i64> = p.messages.iter().filter_map(|m| m.seq).collect();
+        assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(p.next_before_seq, None, "页首 0 = 已到链首");
+        assert!(!p.has_more);
     }
 
     /// 写侧收口端到端（ADR-035 §3）：API 写路径经工作集后，

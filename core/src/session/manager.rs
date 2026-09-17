@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::{Message, StructuredMessage};
+use crate::common::types::{Message, MessageRole, StructuredMessage};
 
 use super::store::SessionStore;
 use super::types::Session;
@@ -103,6 +103,25 @@ pub trait SessionManager: Send + Sync {
             .map(|s| s.messages.len())
             .unwrap_or(0);
         Ok(count as i64 - 1)
+    }
+
+    /// 取 `< before_seq` 的最近一条 `role=user` 消息 seq（`None` = 无更早用户消息）。
+    ///
+    /// 供分段加载的页边界对齐（user 对齐，ADR-035 §8 修订）：页从用户消息
+    /// 起——工具调用与其结果不会被分页切开。默认实现走全量加载（依赖
+    /// ADR-027 不变式：全量链按 seq 升序，位置即 seq）；持久化实现覆盖为
+    /// `MAX(seq)` + role 过滤查询。
+    async fn last_user_seq_before(&self, session_id: &str, before_seq: i64) -> Result<Option<i64>> {
+        let messages = self
+            .get_session(session_id)
+            .await?
+            .map(|s| s.messages)
+            .unwrap_or_default();
+        let end = (before_seq.max(0) as usize).min(messages.len());
+        Ok(messages[..end]
+            .iter()
+            .rposition(|m| m.role == MessageRole::User)
+            .map(|i| i as i64))
     }
 
     /// 列出所有会话（轻量元数据，不加载消息；message_count 预填）。
@@ -248,6 +267,14 @@ impl SessionManager for PersistentSessionManager {
         Ok(self
             .store
             .load_before(session_id, before_seq, limit)
+            .await?)
+    }
+
+    /// 最近用户消息 seq 覆盖（`MAX(seq)` + role 过滤，O(log n)，不全量加载）。
+    async fn last_user_seq_before(&self, session_id: &str, before_seq: i64) -> Result<Option<i64>> {
+        Ok(self
+            .store
+            .last_user_seq_before(session_id, before_seq)
             .await?)
     }
 

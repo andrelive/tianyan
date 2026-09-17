@@ -481,6 +481,29 @@ impl SessionStore {
         out.reverse(); // DESC 取页 → 反转为升序（与链序一致）
         Ok(out)
     }
+
+    /// 取 seq 严格小于 `before_seq` 的**最近一条** `role=user` 消息的 seq。
+    ///
+    /// 供分段加载的页边界对齐（user 对齐，ADR-035 §8 修订）：页从用户消息
+    /// 起——工具调用与其结果不会被分页切开（消除跨页"孤立结果卡/缺结果
+    /// 调用"渲染）。无更早用户消息返回 `None`。
+    ///
+    /// # Errors
+    /// * SQLite 查询失败时返回 TianyanError。
+    pub async fn last_user_seq_before(
+        &self,
+        session_id: &str,
+        before_seq: i64,
+    ) -> Result<Option<i64>, TianyanError> {
+        let conn = self.db.lock().await;
+        conn.query_row(
+            "SELECT MAX(seq) FROM session_messages WHERE session_id = ?1 AND role = 'user' AND seq < ?2",
+            rusqlite::params![session_id, before_seq],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .map_err(|e| sqlite_error("最近用户消息序号查询失败", e))
+    }
+
     /// 删除会话（单事务：清 FTS + 消息 + 元数据）。
     ///
     /// ADR-026 A：级联删除——主会话删除时连带删除其所有子智能体会话
@@ -683,6 +706,36 @@ mod tests {
         assert_eq!(messages[0].id, "m1");
         assert_eq!(messages[1].id, "m2");
         assert!(store.load("missing").await.unwrap().is_none());
+    }
+    #[tokio::test]
+    async fn test_last_user_seq_before() {
+        let store = make_store().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        // u0, a1, a2, u3, a4（user 位于 seq 0、3）
+        for (id, role) in [
+            ("m0", MessageRole::User),
+            ("m1", MessageRole::Assistant),
+            ("m2", MessageRole::Assistant),
+            ("m3", MessageRole::User),
+            ("m4", MessageRole::Assistant),
+        ] {
+            store
+                .append_message("s1", &msg(id, role, "x"))
+                .await
+                .unwrap();
+        }
+        assert_eq!(store.last_user_seq_before("s1", 5).await.unwrap(), Some(3));
+        assert_eq!(store.last_user_seq_before("s1", 4).await.unwrap(), Some(3));
+        assert_eq!(store.last_user_seq_before("s1", 3).await.unwrap(), Some(0));
+        assert_eq!(store.last_user_seq_before("s1", 1).await.unwrap(), Some(0));
+        assert_eq!(store.last_user_seq_before("s1", 0).await.unwrap(), None);
+        // 无 user 的会话
+        store.create("s2", &SessionHeader::default()).await.unwrap();
+        store
+            .append_message("s2", &msg("n0", MessageRole::Assistant, "x"))
+            .await
+            .unwrap();
+        assert_eq!(store.last_user_seq_before("s2", 10).await.unwrap(), None);
     }
 
     #[tokio::test]
