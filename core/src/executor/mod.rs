@@ -38,8 +38,8 @@ pub mod web;
 
 pub use actions::{
     execute_command_action, execute_command_action_cancellable, execute_read_file,
-    execute_verify_build, execute_write_file, CommandEventSink, CommandManager, CommandNotifier,
-    CommandTask, CommandTaskStatus, CommandWaker, SecurityPolicy,
+    execute_verify_build, execute_write_file, kill_all_running_children, CommandEventSink,
+    CommandManager, CommandNotifier, CommandTask, CommandTaskStatus, CommandWaker, SecurityPolicy,
 };
 pub use judge::LlmJudge;
 pub use security::DEFAULT_BLOCKED_COMMANDS;

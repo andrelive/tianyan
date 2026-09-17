@@ -855,6 +855,13 @@ impl AppState {
         if cancelled > 0 {
             tracing::info!(count = cancelled, "已请求中止运行中的轮");
         }
+        // 杀掉运行中的命令子进程（前台 + 后台统一；父进程退出不带走子进程——
+        // 用户实测退出后任务管理器仍残留 cargo 进程）。取消标志覆盖不到后台命令，
+        // 这里显式按进程树清理。
+        let killed = tianyan::executor::kill_all_running_children().await;
+        if killed > 0 {
+            tracing::info!(count = killed, "已终止运行中的命令子进程");
+        }
         // 断开所有 MCP 服务器连接（显式 shutdown，McpClient::drop 不会自动清理子进程）
         self.mcp_tools.shutdown().await;
         // 使用统计落盘（flush + PRAGMA optimize；失败不阻断关闭）

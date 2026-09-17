@@ -443,6 +443,8 @@ impl CommandManager {
         tokio::spawn(async move {
             // T1-5：许可随本任务存活——命令真正结束（进程退出并收尾）才释放
             let _permit = permit;
+            // 注册子进程（关停时统一清理；watcher 结束自动注销）
+            let _child_guard = ChildGuard::new(child.id());
             let wait_result = child.wait().await;
             if let Some(h) = out_reader {
                 let _ = h.await;
@@ -750,6 +752,61 @@ fn build_shell_command(command: &str) -> tokio::process::Command {
 
 /// 按 PID 杀进程树（Windows: taskkill /T /F；Unix: 进程组 kill -9 -pgid）。
 ///
+/// 运行中的命令子进程注册表（前台 + 后台统一）——服务关停时按进程树统一清理。
+///
+/// 为什么需要：父子进程无 Job Object 绑定，父进程退出不会带走子进程；用户实测
+/// 退出后任务管理器仍残留 cargo 等子进程。取消标志只能覆盖“读它的”前台命令，
+/// 后台命令（`spawn_background`）不被会话取消槽覆盖，必须显式杀。
+static RUNNING_CHILDREN: std::sync::OnceLock<dashmap::DashMap<u32, ()>> =
+    std::sync::OnceLock::new();
+
+/// 取全局子进程注册表（首次访问初始化）。
+fn running_children() -> &'static dashmap::DashMap<u32, ()> {
+    RUNNING_CHILDREN.get_or_init(dashmap::DashMap::new)
+}
+
+/// 注册子进程 pid。
+fn register_child(pid: u32) {
+    running_children().insert(pid, ());
+}
+
+/// 注销子进程 pid。
+fn unregister_child(pid: u32) {
+    running_children().remove(&pid);
+}
+
+/// 子进程注册守卫：持有期间 pid 在注册表中，drop 即注销。
+struct ChildGuard(Option<u32>);
+
+impl ChildGuard {
+    fn new(pid: Option<u32>) -> Self {
+        if let Some(pid) = pid {
+            register_child(pid);
+        }
+        Self(pid)
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            unregister_child(pid);
+        }
+    }
+}
+
+/// 杀掉**所有**运行中的命令子进程（按进程树）。返回处理的进程数。
+///
+/// 服务关停流程调用（`AppState::shutdown`）——退出不必等命令跑完，
+/// 也不把子进程留给用户手动清理。
+pub async fn kill_all_running_children() -> usize {
+    let pids: Vec<u32> = running_children().iter().map(|e| *e.key()).collect();
+    for pid in &pids {
+        kill_process_tree(*pid).await;
+    }
+    pids.len()
+}
+
 /// Unix 侧依赖 spawn 时 `process_group(0)`：子进程成为新进程组组长，
 /// 负 PID 信号作用于整个组——shell 派生的服务进程一并终止（对齐
 /// opencode #30868 教训：只杀 shell 会留孤儿服务进程）。
@@ -1059,6 +1116,9 @@ pub async fn execute_command_action_cancellable(
         .take()
         .map(|reader| tokio::spawn(read_reader_to_vec(reader)));
 
+    // 注册子进程（关停时按进程树统一清理；命令结束 drop 自动注销）
+    let _child_guard = ChildGuard::new(child.id());
+
     // 等待退出：正常退出 / 超时 / **用户取消** 三路竞争。
     // 「停止」此前只在轮顶与 chunk 循环生效——长命令执行期间点停止毫无反应
     // （用户实测：命令卡住时无法中断）；现在取消标志直达进程等待。
@@ -1202,6 +1262,69 @@ mod tests {
             "取消应在 5s 内生效（实际 {elapsed:?}）"
         );
         assert!(!err.is_timeout(), "取消不应被分类为超时");
+    }
+
+    #[tokio::test]
+    async fn test_running_child_registry_register_and_unregister() {
+        // T1：关停清理的基础——子进程运行期注册、结束后自动注销，且可定向终止。
+        // 不调用全局 kill_all：并行测试下它会误杀同批其他测试的子进程。
+        let before: std::collections::HashSet<u32> =
+            running_children().iter().map(|e| *e.key()).collect();
+        let cmd = if cfg!(target_os = "windows") {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
+        let handle = tokio::spawn(async move {
+            execute_command_action_cancellable(cmd, None, Some(60), None, None).await
+        });
+        // 等本测试的子进程注册（相对基线取差集，不受并发测试影响）
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut own: Vec<u32> = Vec::new();
+        while own.is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            own = running_children()
+                .iter()
+                .map(|e| *e.key())
+                .filter(|p| !before.contains(p))
+                .collect();
+        }
+        assert!(
+            !own.is_empty(),
+            "运行中的命令子进程应注册到注册表（差集非空）"
+        );
+
+        // 定向终止自己的子进程（按进程树）
+        for pid in &own {
+            kill_process_tree(*pid).await;
+        }
+        let _ = handle.await.expect("任务应正常结束");
+
+        // 注销：结束后自己的 pid 应移出注册表
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while own.iter().any(|p| running_children().contains_key(p))
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        for pid in &own {
+            assert!(
+                !running_children().contains_key(pid),
+                "命令结束后应自动注销 pid={pid}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_kill_all_running_children_counts_registered() {
+        // kill_all 的契约：把注册项计入处理数（真实杀进程行为由定向测试与
+        // 超时路径覆盖）。用不可能的假 pid 验证遍历/计数，避免误杀并行测试。
+        let fake: u32 = 999_999_999;
+        register_child(fake);
+        let killed = kill_all_running_children().await;
+        unregister_child(fake);
+        assert!(killed >= 1, "应把注册项计入处理数：{killed}");
+        assert!(!running_children().contains_key(&fake), "假 pid 应已注销");
     }
 
     #[tokio::test]

@@ -4,8 +4,9 @@ use crate::common::binary::sniff_binary;
 use crate::common::error::TianyanError;
 
 pub use crate::executor::command::{
-    execute_command_action, execute_command_action_cancellable, CommandEventSink, CommandManager,
-    CommandNotifier, CommandTask, CommandTaskStatus, CommandWaker,
+    execute_command_action, execute_command_action_cancellable, kill_all_running_children,
+    CommandEventSink, CommandManager, CommandNotifier, CommandTask, CommandTaskStatus,
+    CommandWaker,
 };
 pub use crate::executor::security::SecurityPolicy;
 
