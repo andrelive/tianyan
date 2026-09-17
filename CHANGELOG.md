@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-09-17
+
+### Added
+- **会话工作集（ADR-035，架构级）**：新增 `core/src/agent/working_set.rs`——`SessionWorkingSet`（会话的**物化上下文缓存**，键 = 会话 id）+ `WorkingSetRegistry`（`ensure` / `get` / `remove` / `lock` / `try_lock` / `sweep_idle`）。定位：**非第二权威**（权威仍是 SQLite，ADR-018/027 不变）、**非新存储**、不引入第二把锁；每轮不再全量重建（连续轮 / 唤醒轮复用同一份段）
+- **段（segment）**：工作集只物化「最近压缩点 → 现在」（`start_seq` = 段起点，不变式：段内第 i 条 `seq == start_seq + i`）；段外（压缩点之前）经库按需读；`append` 的 seq 改为**库尾推进**，`delta_since` 按段坐标切片。新增 `reshape_after_compression`（压缩后段起点前移 + 消费水位同一临界区推进）；重建点 = 最近压缩点
+- **续跑判定取代通知投递水位**：`ctx.last_seq`（本轮组装所见库尾）vs `ws.last_seq`（工作集所见库尾）——有新消息则**增量注入 + `continue` 自消化**（不入队、不唤醒）。`mark_consumed`（单调 CAS）/ `has_unconsumed` / `delta_since` 为唯一读进度来源，**水位三件套全删**（`notice_delivered` / `NOTICE_WATERMARK_INIT` / `has_pending_notices` / `store_last_seq` / `mark_notices_delivered`）
+- **唤醒幂等 `ensure_loop_running`**：同一会话 N 条并发通知**只产生 1 轮唤醒**（`try_lock` + `has_unconsumed`，与 loop 退出判定**同一临界区**，消除"收尾判定无新消息→退出"与"新通知到达"之间的丢通知窗口）；已有 loop 在跑时，通知落库即被该轮消化
+- **分段加载（展示层直查库，与工作集解耦）**：`ChatMessage.seq` + `SessionManager::load_before` + `GET /api/v1/sessions/{id}/messages?before_seq=&limit=`（默认 50 / 上限 200；无参保持全量）；前端上滚 `loadOlder`（顶到链首短路，依赖浏览器原生滚动锚定保持视口）
+- **`turn_state` 轮状态事件**：用户轮 / 唤醒轮开始-结束**配对**推送 + `auto` 标志（唤醒轮），SSE 透传；前端 `turnState` store 据此联动输入区
+- **唤醒轮可停止**：唤醒轮注册会话取消槽（此前 `cancel: None`——"停止"对唤醒轮完全无效）+ `/chat/streams/{id}/cancel` 无用户流时经 `Agent::cancel_active_turn` 置位
+
+### Changed
+- **写侧收口（单一写入口）**：四类写入（追加 / 整表重写 / 头部更新 / 删除）全部经工作集（内部先落库 → 再更缓存 → 再派发）；`SessionsService` 五个活跃写路径 + `agent` 层落库（`Agent::persist_structured` / `AgentLoop::persist_turn_message` / 通知器）全部收口；`AppState.working_sets` 与 `Agent` 共享同一 `Arc`（热重载不分裂）
+- **快照键统一到消息 ID（弃数字位置）**：`capture` / `restore` / `diff` / `load_tree` 的 `index: usize` → `key: &str`；缓存指针改 `latest.cache.json`；捕获时机挪到**用户消息落库后**；`diff` API 增 `message_id`（`index` 保留为位置映射兼容入口）。段化因此不再依赖"内存条数 == 位置"隐式等式
+- **消息按 seq 落位**：前端 `applyServerMessage` 改 `insertBySeq`（修复订阅快照 + 实时事件乱序到达导致的**顺序倒置**）；订阅快照裁剪为最近 100 条 + `has_more` + 游标
+- **输入区联动（U10-B 方案）**：唤醒轮（`auto`）运行中**输入禁用 + 发送按钮转停止**；用户轮现状保持不变
+
+### Fixed
+- **U10 唤醒轮三症状（用户报告）**：① 唤醒轮停不掉（取消槽缺失）；② 唤醒轮"发了没响应"（无轮状态事件，前端不知道在跑）；③ 消息顺序与库不一致（按到达顺序 append）。三条现由 `turn_state` + `insertBySeq` + 取消槽根治
+- **T1-24 重启重放历史通知（机制性消失）**：旧方案靠"投递水位"（水位是内存态，重启归零 → 历史通知全当未投递重投）；工作集落地后**无投递动作即无重放路径**——历史通知只在段里出现一次，无需水位
+- **会话 header 被旧值整体覆盖（竞态）**：旧 `update_session` 用 server 侧旧 header 覆盖 → 丢刚固化的 `injectable_snapshot`；现经工作集 `update_header`（仅快照实际变化才同步内存前缀）
+- **旁路写补漏**：演化会话清理、定时任务会话重建、`Agent::update_session_header` 三处绕过工作集的直写已收口；`ensure_fresh`（`MAX(seq)` 比较）降级为**架构违规探测器**（warn + 重建兜底，注释显式记录三条检测不到的情形：`rewrite` 等长 / 写操作相互抵消 / 仅 header 变化）
+- 回归保护：core **1293** 全绿（0.4.7 基线 1275 → +18）· server **160** · tauri 13 · mcp 16 · 前端 **409**；一致性回归清单 10 条逐条落测 + 段化专项 4 条；**判别力实证 6 处**（注入旧行为 → 必红后还原：续跑判定缺失 / 重建水位归零=T1-24 形态 / 唤醒改排队=9 轮形态 / 快照按位置命名 / `insertBySeq` 改回尾部 append / 段化保留全链）；clippy 0 / fmt 干净
+
 ## [0.4.7] - 2026-09-16
 
 ### Fixed
