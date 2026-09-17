@@ -24,7 +24,7 @@ use tokio::sync::{Mutex as TokioMutex, OwnedMutexGuard, RwLock};
 
 use crate::agent::session_state::SessionState;
 use crate::common::error::{Result, TianyanError};
-use crate::common::types::StructuredMessage;
+use crate::common::types::{MessageRole, StructuredMessage};
 use crate::session::store::SessionStore;
 
 /// 工作集空闲失效时长（ADR-035 §7）：超过此时长未活动 → 卸载（纯缓存语义）。
@@ -35,6 +35,35 @@ const LOCK_PRUNE_THRESHOLD: usize = 256;
 
 /// 机会式空闲清扫的最小间隔（避免每次 `ensure` 都遍历工作集表）。
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// 单会话工作集：物化上下文 + 读取进度 + 活动时间。
+/// 边界消息推送回调（System 通知 / 压缩点落库后触发；ADR-028「落库即推送」）。
+///
+/// core 不感知具体通道（ADR-028 原则）：实现由装配层注入（server 侧复用
+/// `event_push` 的映射与广播）。未注入 = 不推送（纯库场景 / 单测）。
+pub type BoundaryPushCallback = Arc<dyn Fn(&str, &StructuredMessage) + Send + Sync>;
+
+/// 回调槽：注册表与**所有**工作集共享同一实例——支持「先建工作集、后注入
+/// 回调」的装配顺序（server 侧 `working_sets` 早于事件通道创建），注入后
+/// 对已加载与后续新建的工作集一并生效。
+#[derive(Default)]
+pub struct BoundaryPushSlot {
+    cb: std::sync::RwLock<Option<BoundaryPushCallback>>,
+}
+
+impl BoundaryPushSlot {
+    /// 取当前回调（未注入返回 `None`）。
+    fn get(&self) -> Option<BoundaryPushCallback> {
+        self.cb.read().ok().and_then(|g| g.clone())
+    }
+
+    /// 注入/替换回调。
+    fn set(&self, cb: BoundaryPushCallback) {
+        if let Ok(mut g) = self.cb.write() {
+            *g = Some(cb);
+        }
+    }
+}
 
 /// 单会话工作集：物化上下文 + 读取进度 + 活动时间。
 pub struct SessionWorkingSet {
@@ -55,11 +84,17 @@ pub struct SessionWorkingSet {
     last_consumed_seq: AtomicI64,
     /// 最后活动时间（空闲卸载判定）。
     last_activity: TokioMutex<Instant>,
+    /// 边界消息推送回调槽（与注册表共享同一实例，见 [`BoundaryPushSlot`]）。
+    boundary_push: Arc<BoundaryPushSlot>,
 }
 
 impl SessionWorkingSet {
     /// 创建空工作集（内部使用；加载经 [`WorkingSetRegistry::ensure`]）。
-    fn new(session_id: &str, store: Arc<SessionStore>) -> Self {
+    fn new(
+        session_id: &str,
+        store: Arc<SessionStore>,
+        boundary_push: Arc<BoundaryPushSlot>,
+    ) -> Self {
         Self {
             session_id: session_id.to_string(),
             store,
@@ -69,6 +104,7 @@ impl SessionWorkingSet {
             start_seq: AtomicI64::new(0),
             last_consumed_seq: AtomicI64::new(-1),
             last_activity: TokioMutex::new(Instant::now()),
+            boundary_push,
         }
     }
 
@@ -202,6 +238,15 @@ impl SessionWorkingSet {
         // 与段尾同步，直接推进（append 前 last_seq 即库尾，新条 seq = 库尾+1）。
         let seq = self.last_seq() + 1;
         self.last_seq.store(seq, Ordering::SeqCst);
+        // ADR-028「落库即推送」（ADR-035 §3 补记）：写侧收口后所有写入经工作集，
+        // 边界消息（System 通知 / 压缩点）的推送改挂此处——与旧
+        // `BroadcastingSessionManager` 同门控、同映射（core 不感知通道，
+        // 回调由装配层注入；见 [`BoundaryPushSlot`]）。
+        if msg.role == MessageRole::System || msg.compression_marker {
+            if let Some(cb) = self.boundary_push.get() {
+                cb(&self.session_id, msg);
+            }
+        }
         Ok(seq)
     }
 
@@ -329,6 +374,8 @@ pub struct WorkingSetRegistry {
     locks: TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>,
     /// 上次机会式清扫时间（节流用）。
     last_sweep: TokioMutex<Instant>,
+    /// 边界消息推送回调槽（与所有工作集共享，支持后注入）。
+    boundary_push: Arc<BoundaryPushSlot>,
 }
 
 impl WorkingSetRegistry {
@@ -340,12 +387,21 @@ impl WorkingSetRegistry {
             sets: TokioMutex::new(HashMap::new()),
             locks: TokioMutex::new(HashMap::new()),
             last_sweep: TokioMutex::new(Instant::now()),
+            boundary_push: Arc::new(BoundaryPushSlot::default()),
         })
     }
 
     /// 是否已装配会话存储（工作集可用）。
     pub fn has_store(&self) -> bool {
         self.store.is_some()
+    }
+
+    /// 注入边界消息推送回调（System 通知 / 压缩点在 `append` 落库后触发）。
+    ///
+    /// 支持**后注入**（装配顺序：注册表先于事件通道创建）：共享
+    /// [`BoundaryPushSlot`] → 对已加载与后续新建的工作集一并生效。
+    pub fn set_boundary_push(&self, cb: BoundaryPushCallback) {
+        self.boundary_push.set(cb);
     }
 
     /// 取（或重建）会话工作集；同时做廉价新鲜度校验。
@@ -364,7 +420,11 @@ impl WorkingSetRegistry {
         let ws = match existing {
             Some(ws) => ws,
             None => {
-                let ws = Arc::new(SessionWorkingSet::new(session_id, store));
+                let ws = Arc::new(SessionWorkingSet::new(
+                    session_id,
+                    store,
+                    self.boundary_push.clone(),
+                ));
                 ws.rebuild().await?;
                 self.sets
                     .lock()
@@ -499,6 +559,48 @@ mod tests {
         let ws2 = reg.ensure("s1").await.unwrap();
         assert!(Arc::ptr_eq(&ws, &ws2), "命中缓存应返回同一实例");
         assert_eq!(reg.loaded_count().await, 1);
+    }
+
+    /// ADR-028「落库即推送」（ADR-035 §3 补记）：工作集 `append` 对**边界消息**
+    /// （System 通知 / 压缩点）触发推送回调，普通消息不触发；**后注入**对已加载
+    /// 与后续新建的工作集同样生效（共享回调槽——装配顺序：注册表先于事件通道）。
+    #[tokio::test]
+    async fn test_append_pushes_boundary_messages_only() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        create_session(&store, "s2").await;
+        let reg = WorkingSetRegistry::new(Some(store));
+        let ws = reg.ensure("s1").await.unwrap();
+        let hits = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        {
+            let hits = hits.clone();
+            reg.set_boundary_push(Arc::new(move |_sid: &str, msg: &StructuredMessage| {
+                let kind = if msg.compression_marker {
+                    "marker"
+                } else {
+                    "system"
+                };
+                hits.lock().unwrap().push(kind.to_string());
+            }));
+        }
+        ws.append(&user_msg("s1", "hi"), true).await.unwrap();
+        assert!(hits.lock().unwrap().is_empty(), "普通消息不触发边界推送");
+        ws.append(&StructuredMessage::system("s1", "[通知] 完成"), true)
+            .await
+            .unwrap();
+        let mut marker = user_msg("s1", "摘要");
+        marker.compression_marker = true;
+        ws.append(&marker, true).await.unwrap();
+        let ws2 = reg.ensure("s2").await.unwrap();
+        ws2.append(&StructuredMessage::system("s2", "[通知] s2"), true)
+            .await
+            .unwrap();
+        let seen = hits.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec!["system", "marker", "system"],
+            "边界消息各推送一次（含后注入生效）: {seen:?}"
+        );
     }
 
     #[tokio::test]

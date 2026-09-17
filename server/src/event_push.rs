@@ -113,26 +113,39 @@ impl SessionManager for BroadcastingSessionManager {
     }
 }
 
-impl BroadcastingSessionManager {
-    /// 把边界消息（System 通知 / 压缩点）转成 chat_stream 事件推入统一通道。
-    ///
-    /// 复用 `map_chunk_to_event`（Message chunk → ChatStreamEvent 同构转换），
-    /// 与主会话流式路径同一映射；无订阅者时静默丢弃（broadcast 语义）。
-    fn push_boundary_event(&self, session_id: &str, msg: &StructuredMessage) {
-        let chunk = tianyan::agent::AgentStreamChunk {
-            delta: String::new(),
-            chunk_type: tianyan::agent::StreamChunkType::Message,
-            message: Some(msg.clone()),
-            ..Default::default()
-        };
-        let event =
-            crate::api::chat::services::map_chunk_to_event(chunk, "system-notify", session_id, 0);
-        if let Ok(mut payload) = serde_json::to_value(&event) {
-            payload["type"] = serde_json::json!("chat_stream");
-            if let Ok(json) = serde_json::to_string(&payload) {
-                let _ = self.event_tx.send(json);
-            }
+/// 把边界消息（System 通知 / 压缩点）转成 chat_stream 事件推入统一通道。
+///
+/// 复用 `map_chunk_to_event`（Message chunk → ChatStreamEvent 同构转换），
+/// 与主会话流式路径同一映射；无订阅者时静默丢弃（broadcast 语义）。
+///
+/// 两个调用方：① **工作集注入的推送回调**（0.5.0 写侧收口后的主路径——所有
+/// 写入经 `ws.append`，`SessionManager` wrapper 不再是唯一入口，见 `state.rs`
+/// 装配）② `BroadcastingSessionManager`（保留以兼容其它装配路径）。
+pub fn push_boundary_event(
+    event_tx: &tokio::sync::broadcast::Sender<String>,
+    session_id: &str,
+    msg: &StructuredMessage,
+) {
+    let chunk = tianyan::agent::AgentStreamChunk {
+        delta: String::new(),
+        chunk_type: tianyan::agent::StreamChunkType::Message,
+        message: Some(msg.clone()),
+        ..Default::default()
+    };
+    let event =
+        crate::api::chat::services::map_chunk_to_event(chunk, "system-notify", session_id, 0);
+    if let Ok(mut payload) = serde_json::to_value(&event) {
+        payload["type"] = serde_json::json!("chat_stream");
+        if let Ok(json) = serde_json::to_string(&payload) {
+            let _ = event_tx.send(json);
         }
+    }
+}
+
+impl BroadcastingSessionManager {
+    /// 委托到 [`push_boundary_event`]（同一映射实现，避免两处漂移）。
+    fn push_boundary_event(&self, session_id: &str, msg: &StructuredMessage) {
+        push_boundary_event(&self.event_tx, session_id, msg);
     }
 }
 
@@ -144,6 +157,48 @@ mod tests {
     use tianyan::session::{Session, SessionManager};
 
     use super::*;
+
+    /// ADR-035 §3 补记：经**工作集注入回调**的推送路径——`ws.append` 落库
+    /// System 通知后，统一事件通道收到 `chat_stream` 事件（前端
+    /// `applyServerMessage` 按 id 查重追加显示）；普通消息不推送。
+    #[tokio::test]
+    async fn working_set_boundary_push_reaches_event_channel() {
+        use tianyan::agent::working_set::WorkingSetRegistry;
+        use tianyan::session::store::SessionStore;
+        use tianyan::session::SessionHeader;
+
+        let db = tianyan::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = SessionStore::new(db).unwrap();
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<String>(16);
+        let reg = WorkingSetRegistry::new(Some(store));
+        let tx2 = tx.clone();
+        reg.set_boundary_push(Arc::new(move |sid: &str, msg: &StructuredMessage| {
+            push_boundary_event(&tx2, sid, msg);
+        }));
+        let ws = reg.ensure("s1").await.unwrap();
+        ws.append(
+            &StructuredMessage::system("s1", "[后台命令完成] build"),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let payload = rx.try_recv().expect("应收到边界推送事件");
+        assert!(payload.contains("\"type\":\"chat_stream\""), "{payload}");
+        assert!(payload.contains("s1"), "事件带 session_id: {payload}");
+        assert!(
+            payload.contains("后台命令完成"),
+            "事件带通知正文: {payload}"
+        );
+
+        ws.append(&StructuredMessage::user("s1", "hi"), true)
+            .await
+            .unwrap();
+        assert!(rx.try_recv().is_err(), "普通消息不应推送");
+    }
 
     /// 记录落库调用的 mock 会话管理器。
     struct RecordingSessionManager {

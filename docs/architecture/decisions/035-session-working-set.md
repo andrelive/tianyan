@@ -585,6 +585,35 @@ loop {
 
 ---
 
+## 实施修订：边界消息推送挂到工作集（2026-09-17）
+
+**问题（用户报告）**：0.5.0 后**后台任务/命令完成通知前端不实时显示**（库里有、
+UI 没有）。
+
+**根因**：ADR-028 的「落库即推送」挂在 `SessionManager` 层 wrapper
+（`BroadcastingSessionManager`——只包装 `add_structured_message`，门控
+`role == System || compression_marker`）。0.5.0 写侧收口把**所有写入**改经
+`ws.append`（工作集内直调 `SessionStore`）——**wrapper 不再是入口** → 边界
+消息（System 通知、压缩点）落库后不再广播。
+
+> 为什么只有"通知"暴露：用户消息前端**乐观渲染**、assistant/工具结果走
+> **流式**推送——三者都不依赖 wrapper；唯二依赖「落库即推送」的是 System
+> 通知与压缩点。故压缩点的"实时推送"（0.3.12 特性）同样回归，一并修复。
+
+**修订**：
+
+- `SessionWorkingSet` 持**共享回调槽** `BoundaryPushSlot`（注册表与所有工作集
+  同一实例）——支持装配顺序「注册表先建、事件通道后就绪」的**后注入**；
+- `ws.append` 落库成功后按**同一门控**（`System || compression_marker`）调用
+  回调；**core 仍不感知通道**（回调由 server 装配层注入，复用
+  `event_push::push_boundary_event`）；
+- `BroadcastingSessionManager` 保留（兼容其它装配路径），其推送逻辑抽出为
+  `event_push::push_boundary_event` 供两处共用（避免映射漂移）。
+
+**测试**：core 门控单测（边界消息触发 / 普通消息不触发 / 后注入对已加载与
+新建工作集均生效）+ server 端到端（经工作集落库 System 通知 → 事件通道收到
+`chat_stream`）。
+
 ## 回滚
 
 回滚 = `git revert` 本 ADR 的代码变更，逐阶段可独立回滚（阶段一→二→三 无反向依赖）。

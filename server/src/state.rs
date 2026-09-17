@@ -413,6 +413,19 @@ impl AppState {
                 session_manager,
                 task_event_tx.clone(),
             ));
+        // ADR-035 §3 补记：写侧收口后所有写入经工作集（`ws.append`），不再经
+        // `SessionManager` wrapper——边界消息（System 通知 / 压缩点）的
+        // 「落库即推送」改挂在工作集 `append` 上（同一门控与映射；core 不感知
+        // 通道，回调由本装配层注入）。支持**后注入**：对已加载与后续新建的
+        // 工作集一并生效（共享回调槽）。
+        {
+            let tx = task_event_tx.clone();
+            working_sets.set_boundary_push(Arc::new(
+                move |sid: &str, msg: &tianyan::common::types::StructuredMessage| {
+                    crate::event_push::push_boundary_event(&tx, sid, msg);
+                },
+            ));
+        }
         let agent = AgentBuilderFactory::build_agent_or_wizard(
             &config,
             model_services.clone(),
