@@ -56,6 +56,7 @@ export default function ChatPanel() {
     s.currentSessionId ? (s.rollbackMessageBySession[s.currentSessionId] ?? null) : null,
   );
   const setRollbackMessage = useAppStore((s) => s.setRollbackMessage);
+  const eventsConnected = useAppStore((s) => s.eventsConnected);
   const pendingClarification = useAppStore((s) => s.pendingClarification);
   const setPendingClarification = useAppStore((s) => s.setPendingClarification);
 
@@ -574,6 +575,15 @@ export default function ChatPanel() {
                   </button>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* T1-8：事件连接断开提示（流状态由看门狗超时兜底复位） */}
+          {!eventsConnected && (
+            <div className="flex justify-center pb-1">
+              <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-amber-500/40 bg-amber-50/60 dark:bg-amber-950/20 text-amber-700 dark:text-amber-300">
+                实时连接断开，重连中…（回复可能延迟显示）
+              </div>
             </div>
           )}
 

@@ -132,6 +132,10 @@ export interface ChatSlice {
   // Streaming（按会话归属：会话 A 流式时切到 B 可继续发消息，互不阻塞）
   streamStatus: Record<string, StreamStatus>;
   setStreamStatus: (status: StreamStatus, sessionId?: string | null) => void;
+  /** 统一事件连接状态（GET /events）。T1-8：断线期间事件全丢，UI 据此提示，
+   *  流状态由 `stream-watchdog` 超时兜底复位。 */
+  eventsConnected: boolean;
+  setEventsConnected: (connected: boolean) => void;
 }
 
 /** 解析消息写入目标键：显式 sessionId（流式回调）> 当前会话 > 新会话占位键。 */
@@ -622,6 +626,8 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
     }),
 
   // Streaming（按会话归属：切走流继续跑，切回直接显示累积内容）
+  eventsConnected: true,
+  setEventsConnected: (connected) => set({ eventsConnected: connected }),
   streamStatus: {},
   setStreamStatus: (status, sessionId) =>
     set((s) => {

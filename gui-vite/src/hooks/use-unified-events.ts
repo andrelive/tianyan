@@ -32,6 +32,7 @@ import { useEffect, useRef } from 'react';
 import { getApiBase } from '@/lib/api-base';
 import { useAppStore } from '@/lib/store';
 import { handleChatStreamEvent } from '@/lib/chat-stream';
+import { startStreamWatchdog } from '@/lib/stream-watchdog';
 import type { ChatStreamEvent } from '@/lib/types';
 import type { ChatMessage } from '@/lib/types';
 
@@ -170,6 +171,9 @@ export function applySnapshot(
  * 断线自动重连 + onopen 重放订阅）。 */
 function startUnifiedEvents(): void {
   if (typeof EventSource === 'undefined') return; // 测试环境（jsdom）无 EventSource
+  // T1-8：流状态看门狗（应用级常驻，与事件连接同生命周期）——收尾事件
+  // 丢在通道/断线里时兜底复位 streaming/running，避免前端永久卡住。
+  startStreamWatchdog();
   es = new EventSource(getApiBase() + '/events');
   es.onmessage = (e) => {
     try {
@@ -203,6 +207,8 @@ function startUnifiedEvents(): void {
     // 连接就绪：唤醒等待中的订阅（快照帧推入广播通道时已有订阅者）
     esReady = true;
     for (const resolve of esReadyWaiters.splice(0)) resolve();
+    // T1-8：连接（重）建 → 标记已连接（UI 可提示断线态）
+    useAppStore.getState().setEventsConnected(true);
     // 重连成功（含首次连接）：重放订阅——服务端订阅状态随连接丢失，
     // 必须强制 POST（绕过幂等检查）；快照 replace 由 snapshot 帧处理
     // （流式会话自动跳过）。
@@ -212,5 +218,8 @@ function startUnifiedEvents(): void {
   };
   es.onerror = () => {
     // EventSource 自动重连；重连成功由 onopen 重放订阅。
+    // T1-8：断线期间收不到任何事件（含收尾事件）——标记断线态供 UI 提示；
+    // 不在此处立即复位流状态（轮可能仍在服务端跑），由看门狗超时兜底。
+    useAppStore.getState().setEventsConnected(false);
   };
 }

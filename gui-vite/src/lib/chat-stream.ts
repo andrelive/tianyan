@@ -13,6 +13,7 @@
  */
 
 import { useAppStore } from '@/lib/store';
+import { touchStreamActivity } from '@/lib/stream-watchdog';
 import type { ChatStreamEvent } from '@/lib/types';
 
 /* ─────── ask_user 问题解析（同步工具语义） ─────── */
@@ -64,6 +65,11 @@ export function parseAskUserQuestions(argumentsRaw: string): {
 export function handleChatStreamEvent(event: ChatStreamEvent): void {
   const st = useAppStore.getState();
   const sid = event.session_id || null;
+
+  // T1-8 看门狗：任何事件都算「流有进展」。收尾事件可能因通道 Lag 丢弃或
+  // SSE 断线而永久不到达——超时复位由 `stream-watchdog` 兜底，避免前端
+  // 永久卡在 streaming/running（用户观感"卡死"）。
+  touchStreamActivity(sid);
 
   // Server-side error（校验/处理失败）：清理空气泡、复位状态、Toast 提示
   if (event.chunk_type === 'error') {
