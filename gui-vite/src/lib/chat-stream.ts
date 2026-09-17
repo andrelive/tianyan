@@ -79,6 +79,14 @@ export function handleChatStreamEvent(event: ChatStreamEvent): void {
     return;
   }
 
+  // T1 重试可见性：上游失败/空响应重试期间的提示——**只提示、不进正文**
+  // （否则"响应为空，正在重试…"会混进回复内容）。同时已在上方喂狗
+  // （看门狗据此把"重试中"视为有进展，不误判卡死）。
+  if (event.chunk_type === 'retry') {
+    st.showToast(event.delta || '正在重试…', 'info');
+    return;
+  }
+
   // 用户消息落库确认（ADR-031）：比对 user_message_id 把本地乐观消息
   // 替换为服务端真实 id（回退/重做定位键）；user_message_id 生命周期
   // 到此结束（字段删除，不持久化）。

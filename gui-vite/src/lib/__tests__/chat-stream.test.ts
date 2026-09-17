@@ -94,6 +94,21 @@ describe('handleChatStreamEvent', () => {
     expect(useAppStore.getState().toasts[0]?.message).toBe('流式中断，已保留部分输出');
   });
 
+  it('T1 重试提示：只提示、不进正文（retry chunk）', () => {
+    useAppStore.getState().addMessage({
+      role: 'assistant',
+      segments: [{ type: 'text', text: '已有内容' }],
+      id: null,
+      timestamp: '',
+    });
+    handleChatStreamEvent(ev({ chunk_type: 'retry', delta: '响应为空，正在重试…' }));
+    const state = useAppStore.getState();
+    // 提示可见（用户不再看到"静默数百秒"）
+    expect(state.toasts[0]?.message).toBe('响应为空，正在重试…');
+    // 正文未被污染（提示文本不追加进消息内容）
+    expect(messageText(state.messages[0])).toBe('已有内容');
+  });
+
   it('marks truncation on finish_reason length and attaches usage', () => {
     useAppStore.getState().addMessage({ role: 'assistant', segments: [], id: null, timestamp: '' });
     handleChatStreamEvent(ev({ delta: '部分输出', finish_reason: 'length' }));

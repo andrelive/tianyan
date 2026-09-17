@@ -97,6 +97,10 @@ pub enum StreamChunkType {
     /// 轮状态（ADR-035 §9，U10 根治）：轮开始/结束时下发；前端据此联动
     /// 输入框与停止按钮（auto 轮 = 唤醒轮/子代理轮，可中止）。
     TurnState,
+    /// 重试提示（T1 重试可见性）：上游请求失败/空响应而重试时下发——
+    /// 前端据此显示"正在重试"（避免数百秒静默被当作卡死）。
+    /// 只作提示，**不进入消息正文**。
+    Retry,
 }
 
 /// 流式响应块。
@@ -373,6 +377,18 @@ impl StreamEventSender {
                 state: if running { "running" } else { "idle" }.to_string(),
                 auto,
             }),
+            ..Default::default()
+        })
+        .await;
+    }
+
+    /// 发送重试提示事件（T1 重试可见性）：上游失败/空响应重试时下发，
+    /// 前端显示"正在重试"——避免重试/退避期间数百秒静默被误判为卡死。
+    /// 仅作提示，不进入消息正文。
+    pub async fn send_retry(&self, note: &str) {
+        self.try_send(AgentStreamChunk {
+            delta: note.to_string(),
+            chunk_type: StreamChunkType::Retry,
             ..Default::default()
         })
         .await;

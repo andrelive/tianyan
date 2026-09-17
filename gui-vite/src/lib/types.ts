@@ -10,7 +10,9 @@ export type StreamChunkType =
   | 'error'
   | 'message'
   | 'user_message_id'
-  | 'turn_state';
+  | 'turn_state'
+  /** 重试提示（T1 重试可见性）：上游失败/空响应重试——只作提示，不进正文。 */
+  | 'retry';
 
 /** 轮状态载荷（chunk_type=turn_state，ADR-035 §9）：驱动输入框与停止按钮（U10）。 */
 export interface TurnStatePayload {

@@ -1044,6 +1044,11 @@ impl AgentLoop {
                 turn,
                 "LLM 返回空响应，重试一次"
             );
+            // T1 重试可见性：重试期间向前端下发提示（避免默认静默——上游
+            // 流中断/空响应叠加退避时，用户会看到数百秒"无反应"被误判卡死）。
+            if let Some(sender) = stream_sender {
+                sender.send_retry("响应为空，正在重试…").await;
+            }
             step_result = step(
                 self,
                 model,
