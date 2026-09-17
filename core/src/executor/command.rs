@@ -428,6 +428,7 @@ impl CommandManager {
     /// 并发许可（`permit`）**移交本任务持有**，随任务结束（进程退出 → 收输出泵 →
     /// 落终态 → 通知）释放。T1-5 修复：此前它是 `spawn_background` 的局部变量，
     /// 函数返回即被提前释放——命令仍在运行但许可已归还，并发上限形同虚设。
+    #[allow(clippy::too_many_arguments)]
     fn spawn_watcher(
         &self,
         mut child: tokio::process::Child,
