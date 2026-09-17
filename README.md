@@ -454,4 +454,10 @@ Tianyan 正在积极开发中。详见 [系统架构文档](./docs/system-archit
 ## 致谢
 
 - 灵感来源于 OpenViking 的统一文件系统范式
+- 工程实践参考（设计对标、格式对齐与教训吸收）：
+  - **openclaw** —— 定时任务（周期 AI 工作）与工具执行审批机制的对标
+  - **opencode** —— 模型请求重试策略、语义化编辑方案（`edit` / `apply_patch`）的参考
+  - **oh-my-openagent (omo)** —— `apply_patch` 信封格式（`*** Update File:`）、通知唤醒与
+    角色专门化设计的对标
+  - **deepseek-harness (DSH)** —— 重试策略、内容匹配编辑与任务面板优化的参考
 - 使用 Rust 和优秀的开源社区构建
