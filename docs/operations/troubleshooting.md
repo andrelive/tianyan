@@ -9,7 +9,7 @@
 
 | 取证对象 | 位置 | 说明 |
 | --- | --- | --- |
-| 应用文件日志（桌面端） | `%APPDATA%\com.tianyan.app\logs\tianyan_<YYYYMMDD_HHMMSS>.log` | 由 `tauri/src/lib.rs::init_logging` 创建 |
+| 应用文件日志（桌面端） | `%APPDATA%\com.tianyan.app\logs\tianyan_<YYYYMMDD_HHMMSS>.log`（轮转出 `….1.log` 等） | 由 `tauri/src/lib.rs::init_logging` 创建；按 `[logging].max_file_size` / `max_files` 轮转与清理 |
 | 启动失败提示里的“详细日志”路径 | 同上 | `fatal_startup_error` 弹窗中给出同一目录 |
 | SQLite 权威数据 | `<data_dir>\tianyan.db`（+ `-wal`/`-shm`） | 默认 `data_dir = %LOCALAPPDATA%\tianyan` |
 | 向量库 | `<data_dir>\lancedb\` | LanceDB，表名 = `storage.vector.collection_name` |
@@ -31,16 +31,19 @@ let log_dir = dirs::data_dir()                       // Windows = %APPDATA%（Ro
     .unwrap_or_else(std::env::temp_dir)
     .join("com.tianyan.app")
     .join("logs");
-let log_file = log_dir.join(format!(
-    "tianyan_{}.log",
-    chrono::Local::now().format("%Y%m%d_%H%M%S")
-));
+let stem = format!("tianyan_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+// RotatingWriter：写满 max_file_size(MB) 轮转出 tianyan_<ts>.<n>.log；
+// 打开/轮转时按 max_files 清理同族最旧文件（含上次启动遗留）。
 ```
 
 由此得出：
 
 - **日志目录 = `%APPDATA%\com.tianyan.app\logs\`**（典型 `C:\Users\<你>\AppData\Roaming\com.tianyan.app\logs\`）。
 - 每个进程启动生成一个文件：`tianyan_20260912_124231.log`（本地时间 `%Y%m%d_%H%M%S`）。
+- **同一次启动内按大小轮转**：写满 `[logging].max_file_size`（默认 10 MB）即开新文件
+  `tianyan_<时间戳>.1.log`、`.2.log`…（单条日志不被切断——写入前判断，故单文件 ≤ 上限）。
+- **保留上限**：`[logging].max_files`（默认 5）。每次打开/轮转时按 mtime 清理同族最旧文件
+  （含**上次启动遗留**），目录不会无限增长；当前正在写的文件永不删除。
 - 文件层固定 text 格式（`with_ansi(false)`），带 target / thread id / 行号 / 文件名。
 
 > ⚠️ **易踩坑 / 待对齐点**：`dirs::data_dir()` 在 Windows 上是 **Roaming**（`%APPDATA%`），
@@ -69,8 +72,11 @@ let log_file = log_dir.join(format!(
 
 独立启动（`cargo run -p tianyan-server`）走 `server/src/main.rs` → `tianyan::common::logging::init_logging`：
 
-- 该函数**只装配控制台 subscriber**，`config.logging.file` 字段当前**未被使用**（无文件 appender）。
-- 所以独立后端**没有内置文件日志**；仓库根目录的 `server.log` / `server.err.log` 是**手动重定向**的产物，不是应用自身写的。
+- 该函数装配控制台 subscriber；配置了 `[logging].file` 时**同时装配文件 layer**（0.5.x 接线，
+  此前该字段未被使用）——文件按同一套 `max_file_size`/`max_files` 轮转，文件族前缀 =
+  文件名主体（如 `tianyan.log` 与轮转出的 `tianyan.1.log` 同族）。
+- 未配置 `[logging].file` 时独立后端**没有文件日志**；仓库根目录的 `server.log` /
+  `server.err.log` 是**手动重定向**的产物，不是应用自身写的。
 
 ---
 

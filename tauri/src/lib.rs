@@ -517,20 +517,26 @@ fn init_logging(config: &tianyan::common::logging::LoggingConfig) {
         eprintln!("Failed to create log directory: {}", e);
     }
 
-    let log_file = log_dir.join(format!(
-        "tianyan_{}.log",
-        chrono::Local::now().format("%Y%m%d_%H%M%S")
-    ));
+    // 文件名主体：每次启动一个文件（`tianyan_<启动时间戳>.log`）；同一次启动内
+    // 按 `[logging].max_file_size`（MB）大小轮转出 `tianyan_<时间戳>.<n>.log`，
+    // 并按 `[logging].max_files` 清理同族旧文件（含上次启动遗留）——
+    // 这两个配置此前完全未接线（死配置），日志文件会无限累积。
+    let stem = format!("tianyan_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+    let log_file = log_dir.join(format!("{stem}.log"));
 
-    // 尝试创建文件日志
-    let file_appender = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_file)
-    {
-        Ok(file) => {
-            eprintln!("Logging to: {:?}", log_file);
-            Some(file)
+    // 尝试创建文件日志（大小轮转 + 保留上限）
+    let file_appender = match tianyan::common::logging::RotatingWriter::new(
+        log_dir.clone(),
+        stem,
+        "tianyan_".to_string(),
+        tianyan::common::logging::LogRotation::from_config(config),
+    ) {
+        Ok(writer) => {
+            eprintln!(
+                "Logging to: {:?} (rotate: {} MB, keep: {} files)",
+                log_file, config.max_file_size, config.max_files
+            );
+            Some(writer)
         }
         Err(e) => {
             eprintln!("Failed to create log file {:?}: {}", log_file, e);
@@ -568,10 +574,10 @@ fn init_logging(config: &tianyan::common::logging::LoggingConfig) {
             .boxed()
     };
 
-    if let Some(file) = file_appender {
+    if let Some(writer) = file_appender {
         // 文件 layer：固定 text 格式（ANSI off，可读性好）；级别恒为配置级别
         let fmt_layer_file = tracing_subscriber::fmt::layer()
-            .with_writer(Arc::new(file))
+            .with_writer(writer)
             .with_ansi(false)
             .with_target(true)
             .with_thread_ids(true)

@@ -156,6 +156,8 @@
       如需收紧可设为 `confirm` / `interactive`。
 - [ ] **文件日志**：`%APPDATA%\com.tianyan.app\logs\tianyan_<时间戳>.log` **非空**、
       内容随操作增长（0.3.15 修复 `file_filter` 后应稳定）。
+- [ ] **日志轮转/保留**：同目录文件数 ≤ `[logging].max_files`（默认 5，含当前文件）；
+      写满 `max_file_size`（默认 10 MB）时出现 `tianyan_<时间戳>.1.log` 等同族轮转文件。
 - [ ] **服务可达**：`http://127.0.0.1:3000/health`（端口被占用时以日志中的动态端口为准）返回 200。
 - [ ] **数据/配置就位**：`%LOCALAPPDATA%\tianyan\`（数据）、`~/.tianyan/tianyan.toml`（配置）存在。
 - [ ] （发布链）GitHub Release 含 `*.msi`、`*.sig`、`latest.json`；`latest.json.version` 与 tag 一致。
