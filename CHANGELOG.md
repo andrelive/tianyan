@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-09-17
+
+### Fixed
+- **分段加载跨页「调用|结果」分裂（用户实测发现）**：50 条硬切的分页边界约 **50%** 概率切在工具调用与其结果之间（全链 4633 条：92 个页界 46 命中）→ 含结果的页缺调用、含调用的页缺结果 → 结果渲染为孤立"工具结果"卡 + 调用卡 `result=null` 渲染"运行中"转圈（对已完成的历史工具）。现改为**页边界对齐用户消息**：50 条基准窗口 → 页从窗口内由远及近第一条 `user` 起；窗口内没有 → **一次反向查询**找最近一条更早的 `user`（不按批扩展、不设人为上限）；到链头整段兜底。全链模拟：跨页对 **46 → 0**、页首=user **56/56**、覆盖 **100%**
+- **apply_patch 静默错位（用户报告 + 工具实现排查）**：块内含空上下文行时，解析层 `line.trim().is_empty()` 把「一个空格」的显式空上下文行也丢弃（与注释语义矛盾）→ 期望窗口少一行 → 精确匹配失败 → 模糊匹配命中"整体平移一行"窗口 → **静默改错位置**（新内容插到函数闭合 `}` 之前，语法破坏且无报错）。现：① 只忽略**完全空行**（`line.is_empty()`），空格前缀（含「一个空格」）保留为 `Context("")`；② 新增**位置敏感守卫** `positional_match_ratio`（逐位置非空行匹配率须达标）——拒"整体平移一行"、保留"个别行抄写误差"容错；守卫不通过则报"无法定位补丁块"（可见失败）
+- 依赖清理：移除僵尸 `diffy` 声明（core 早已移除、workspace 残留 + core 错位注释）
+- 回归保护：core **1296**（+2 回归）· server 163 · tauri 13 · mcp 16 · 前端 409；判别力实证（apply_patch 两处注入 → 恰好 2 测试红；页边界注入 → 2 测试红）；clippy 0 / fmt 干净
+
 ## [0.5.0] - 2026-09-17
 
 ### Added

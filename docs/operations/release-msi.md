@@ -1,6 +1,6 @@
 # 天演 MSI 打包与发布（release-msi）
 
-> 适用版本：0.5.0（撰写基线 HEAD `a7b3c35`）
+> 适用版本：0.5.1（撰写基线 HEAD `19c6d2a`）
 > 覆盖：本地打包（Windows）、版本号落点、CI 发布链、已知坑、安装验收清单。
 > 全部结论取自脚本/配置/日志实读，未核实项标注 **待核实**。
 
@@ -10,19 +10,19 @@
 
 | 文件 | 当前值 | 是否决定 MSI 版本 | 说明 |
 | --- | --- | --- | --- |
-| `tauri/tauri.conf.json` → `version` | **`0.5.0`** | ✅ **是**（唯一权威） | **MSI 文件名与 ProductVersion 由它决定**（安装后在「应用和功能」可见） |
-| `Cargo.toml` → `[workspace.package] version` | `0.5.0` | ❌ 否（但决定 **exe 文件属性**） | 各 crate 版本 + 编译产物的 `FileVersion`/`ProductVersion`。**0.3.16 起与产品版本统一**：此前为 `0.1.0`，导致 exe 属性里显示旧版本（MSI 名不受影响） |
+| `tauri/tauri.conf.json` → `version` | **`0.5.1`** | ✅ **是**（唯一权威） | **MSI 文件名与 ProductVersion 由它决定**（安装后在「应用和功能」可见） |
+| `Cargo.toml` → `[workspace.package] version` | `0.5.1` | ❌ 否（但决定 **exe 文件属性**） | 各 crate 版本 + 编译产物的 `FileVersion`/`ProductVersion`。**0.3.16 起与产品版本统一**：此前为 `0.1.0`，导致 exe 属性里显示旧版本（MSI 名不受影响） |
 | `gui-vite/package.json` → `version` | `0.1.0` | ❌ 否 | 前端包版本（name `tianyan-gui`），不参与 MSI |
-| `docs/release/RELEASE_NOTES.md` | `0.5.0` | ❌ 否 | 发布说明（人工维护） |
-| `CHANGELOG.md` | `0.5.0` | ❌ 否 | 变更日志（人工维护） |
+| `docs/release/RELEASE_NOTES.md` | `0.5.1` | ❌ 否 | 发布说明（人工维护） |
+| `CHANGELOG.md` | `0.5.1` | ❌ 否 | 变更日志（人工维护） |
 
 **结论（务必记住）**
 
 - **MSI 文件名 = `Tianyan_<tauri.conf.json.version>_x64_<lang>.msi`**，
   即 `<productName>_<version>_x64_<language>.msi`。
 - 语言取 `tauri.conf.json.bundle.windows.wix.language = ["zh-CN","en-US"]` → **一次构建产出两个 MSI**：
-  - `target/release/bundle/msi/Tianyan_0.5.0_x64_zh-CN.msi`
-  - `target/release/bundle/msi/Tianyan_0.5.0_x64_en-US.msi`
+  - `target/release/bundle/msi/Tianyan_0.5.1_x64_zh-CN.msi`
+  - `target/release/bundle/msi/Tianyan_0.5.1_x64_en-US.msi`
 - **只改 `Cargo.toml` / `package.json` 的版本不会改变 MSI 名**——必须改 `tauri/tauri.conf.json`
   的 `version`。发布时四处（`tauri.conf.json` / `Cargo.toml`（workspace）/ CHANGELOG / RELEASE_NOTES）应保持一致。
 
@@ -150,7 +150,7 @@
 
 ### 5.2 装后（安装 MSI 后首次启动）
 
-- [ ] **版本号**：应用内“关于/更新检查”显示 `0.5.0`（与 MSI 版本一致）。
+- [ ] **版本号**：应用内“关于/更新检查”显示 `0.5.1`（与 MSI 版本一致）。
 - [ ] **思考语言**：新会话内部思考为**中文**（默认 soul「思考语言」约束；需重启应用生效）。
 - [ ] **审批默认自主**：默认 `approval_mode = autonomous`（黑名单外全放行、零打扰，ADR-033）；
       如需收紧可设为 `confirm` / `interactive`。
