@@ -188,6 +188,12 @@ impl Agent {
             .await
     }
 
+    /// 中止**所有**会话的当前活动轮（服务关停主动收尾用——退出不再干等）。
+    /// 返回置位的会话数。
+    pub async fn cancel_all_active_turns(&self) -> usize {
+        self.agent_loop.tool_registry().cancel_all_sessions().await
+    }
+
     /// 注册任务唤醒器（ADR-013：后台任务全部完成/失败 → 触发唤醒轮）。
     ///
     /// 由 server 装配层在 Agent 构建完成后调用（传入自引用转发器

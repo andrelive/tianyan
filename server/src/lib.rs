@@ -828,8 +828,13 @@ async fn start_server_inner(
     // 等待服务器任务完全结束：axum 优雅关停完成 → router/AppState drop →
     // SQLite/LanceDB 文件锁释放。数据目录搬迁依赖此顺序（Windows 上移动
     // 打开的文件会失败）；select 分支获胜时 JoinHandle 未被消费，此处可 await。
-    if let Err(e) = server_handle.await {
-        error!("服务器任务异常结束：{}", e);
+    // T1：加**超时兜底**——运行中的流/工具执行若未能及时收尾，不再无限等待
+    // （托盘退出卡死的另一半：此处此前无上限，主进程永不执行 app.exit）。
+    match tokio::time::timeout(tokio::time::Duration::from_secs(5), server_handle).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => error!("服务器任务异常结束：{}", e),
+        Ok(Err(e)) => error!("服务器任务异常结束：{}", e),
+        Err(_) => warn!("等待服务器关停超时（5s），继续退出流程"),
     }
 
     Ok(())

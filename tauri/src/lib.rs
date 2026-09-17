@@ -916,8 +916,15 @@ pub fn run() {
 
             // 监督循环在服务器任务结束后（检查退出标志后）退出
             if let Some(task) = supervisor_task.take() {
-                if let Err(e) = rt.block_on(task) {
-                    error!("服务器监督循环异常：{}", e);
+                // T1：超时兜底——服务器未能及时收尾（活跃流/长工具执行）时最多
+                // 等 10s 就强制退出，绝不无限挂住（用户实测：托盘退出后图标与
+                // 进程残留、只能去任务管理器杀）。
+                match rt
+                    .block_on(async { tokio::time::timeout(Duration::from_secs(10), task).await })
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => error!("服务器监督循环异常：{}", e),
+                    Err(_) => warn!("等待内嵌服务器关停超时（10s），强制退出"),
                 }
             }
             info!("内嵌服务器已优雅关闭，退出应用");

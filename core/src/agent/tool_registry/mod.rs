@@ -798,6 +798,16 @@ impl ToolRegistry {
         self.delegation_cancel.lock().await.get(session_id).cloned()
     }
 
+    /// 置位**所有**会话的取消标志（服务关停时主动中止运行中的轮——
+    /// 不让优雅关停被长请求/长工具执行拖住）。返回置位的会话数。
+    pub(crate) async fn cancel_all_sessions(&self) -> usize {
+        let map = self.delegation_cancel.lock().await;
+        for flag in map.values() {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        map.len()
+    }
+
     /// 置位会话**当前活动轮**的取消标志（ADR-035 §9 / U10：「停止」端点在
     /// 无用户请求上下文时用——唤醒轮自己注册标志，端点经此置位它）。
     ///

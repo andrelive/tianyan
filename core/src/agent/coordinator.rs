@@ -101,6 +101,11 @@ pub trait AgentCoordinator: Send + Sync {
         false
     }
 
+    /// 停止**所有**会话的当前活动轮（服务关停时主动收尾）。默认 = 无操作。
+    async fn cancel_all_active_turns(&self) -> usize {
+        0
+    }
+
     /// 处理用户消息。
     /// - `message` — 完整消息（含可选的多模态图片片段，`content` 为纯文本）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
@@ -237,6 +242,10 @@ impl AgentCoordinator for Agent {
     async fn cancel_active_turn(&self, session_id: &str) -> bool {
         // ADR-035 §9 / U10：「停止」端点经此置位唤醒轮/后台轮自己注册的取消槽
         Agent::cancel_active_turn(self, session_id).await
+    }
+
+    async fn cancel_all_active_turns(&self) -> usize {
+        Agent::cancel_all_active_turns(self).await
     }
 
     async fn process_message(

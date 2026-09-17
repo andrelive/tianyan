@@ -848,6 +848,13 @@ impl AppState {
     /// * 正常情况下不会返回错误
     pub async fn shutdown(&self) -> TianyanResult<()> {
         tracing::info!("开始关闭应用...");
+        // 主动中止运行中的轮（退出不再干等）：置位所有会话取消标志——AgentLoop
+        // 在轮顶/流式 chunk/工具执行边界立即收尾。否则活跃的 /chat/stream 连接
+        // 会拖住 axum 优雅关停（托盘退出卡死的根因：日志说"退出应用"但进程不退）。
+        let cancelled = self.agent().await.cancel_all_active_turns().await;
+        if cancelled > 0 {
+            tracing::info!(count = cancelled, "已请求中止运行中的轮");
+        }
         // 断开所有 MCP 服务器连接（显式 shutdown，McpClient::drop 不会自动清理子进程）
         self.mcp_tools.shutdown().await;
         // 使用统计落盘（flush + PRAGMA optimize；失败不阻断关闭）
