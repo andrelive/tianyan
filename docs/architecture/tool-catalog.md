@@ -9,10 +9,10 @@
 | 工具 | 展示意图 | 描述 |
 |------|---------|------|
 | `apply_edit` | diff | **仅用于能精确复现原文的极小改动**（单个唯一片段，如改一行）。在文件内容中查找 old_string（须唯一，多处出现需 replace_all）替换为 new_string。注意：old_string 必须**逐字节精确匹配**（含空行与缩进）——漏空行、抄错缩进都会失败；若修改区域含空行/上下文、或改动较大，请改用 apply_patch（上下文锚定，更稳）。 |
-| `apply_patch` | diff | 对一个或多个文件做修改的**主力编辑工具**。格式：`*** Update File: <路径>` 后直接跟 `-`（删除）/ `+`（新增）/ 空格（上下文）行，只写要改的行 + 少量上下文，不要复现整个文件。`@@` 块头**可省略**（工具按内容定位，无需行号）。`-`/上下文行须与当前文件内容一致。小改、大改、单文件、多文件均适用；编辑前建议先 read_file 目标区确认当前内容。 |
+| `apply_patch` | diff | 对一个或多个文件做修改的**主力编辑工具**。格式：`*** Update File: <路径>` 后直接跟 `-`（删除）/ `+`（新增）/ 空格（上下文）行，只写要改的行 + 少量上下文，不要复现整个文件。`@@` 块头**可省略**（工具按内容定位，无需行号）。`-`/上下文行须与当前文件内容一致。**块内空行**：整行无字符的空行按格式噪声忽略；若原文该行为空、需作为上下文行，须写成「一个空格」的单独一行（上下文行以空格前缀书写，内容可为空）——写成裸空行会让期望匹配窗口少一行。小改、大改、单文件、多文件均适用；编辑前建议先 read_file 目标区确认当前内容。 |
 | `ask_user` | generic | 当需要更多信息才能继续时，向用户提问。 |
 | `call_skill` | skill | 按 ID 读取 VFS 技能文档（方法论文档：L0 摘要 + L2 详情）。技能无执行语义——读到内容后参考方法论自行用基础工具执行。planning 为预置技能，GEPA 学习技能由进化引擎写入。 |
-| `delegate_to_agent` | delegate | 将子任务委托给隔离的子智能体（独立上下文）。可用 role（内置：researcher 研究 / editor 编辑 / reviewer 验证评审；其他自定义/学习角色用 suggest_role 按任务描述查询——experimental 角色不可调用）选择预设模型、系统提示、工具白名单、max_turns 与超时；用 model 显式覆盖子智能体模型。每次委托是一次性、干净上下文的子智能体（角色系统提示 + 仅此任务），不加载之前任务历史，跨任务上下文需自行在对话中携带。子智能体与主会话同构（ADR-030）：收尾统一"无工具调用"，任务完成时输出最终结果；可用 submit_result 把最终结果写入任务存储（可选结果落盘工具，返回 task_id）——调用后告知主智能体结果 ID，用 task_status 查询。委托一律异步（ADR-026）：立即返回 task_id，任务独立运行；后台任务默认无超时（跑完/取消/轮数耗尽为止）——仅需显式设置 timeout_secs 作为兜底守卫，真实工作用大值（>=3600）；子智能体工作通常较长（代码评审/研究/大重构常超 10 分钟），优先不设超时 + 超时用 task_cancel。完成通知（含结果摘要）自动注入本会话——不要轮询，继续工作直到被通知。用 task_status 查询、task_cancel 中止。 |
+| `delegate_to_agent` | delegate | 将子任务委托给隔离的子智能体（独立上下文）。可用 role（内置：researcher 研究 / editor 编辑 / reviewer 验证评审；其他自定义/学习角色用 suggest_role 按任务描述查询——experimental 角色不可调用）选择预设模型、系统提示、工具白名单、max_turns 与超时；用 model 显式覆盖子智能体模型。每次委托是一次性、干净上下文的子智能体（角色系统提示 + 仅此任务），不加载之前任务历史，跨任务上下文需自行在对话中携带。子智能体与主会话同构（ADR-030）：收尾统一"无工具调用"，任务完成时输出最终结果；可用 submit_result 把最终结果写入任务存储（可选结果落盘工具，返回 task_id）——调用后告知主智能体结果 ID，用 task_status 查询。委托一律异步（ADR-026）：立即返回 task_id，任务独立运行；后台任务默认无超时（跑完/取消/轮数耗尽为止）——仅需显式设置 timeout_secs 作为兜底守卫，真实工作用大值（>=3600）；子智能体工作通常较长（代码评审/研究/大重构常超 10 分钟），优先不设超时 + 超时用 task_cancel。**完成通知（含结果落盘位置与摘要）会自动注入本会话——不要轮询等待**：发起后继续其他工作或结束本轮，收到通知再处理（完整结果用 read_file 按通知中的路径读取）；task_cancel 中止。 |
 | `delegation_stats` | generic | 按角色查询子智能体委托统计（来自 delegate_to_agent 记录）：各角色次数与成功率。可选 since（RFC3339）。用于评估当前角色组织（agent_role 注册表）是否需要演进：拆分/合并/提升/退役。 |
 | `discover_tests` | search | 发现项目中的测试（cargo test -- --list / pytest --collect-only -q / vitest --list），返回结构化测试列表（suite/name/file/line）。不执行测试。 |
 | `execute_command` | terminal | 执行 shell 命令（可指定工作目录与超时）。后台命令用 background:true（长驻进程/开发服务器/服务/监视器）：立即返回 task_id 与 log_file，不等待退出。 常驻服务可设 ready（端口和/或日志模式）：系统探测（从 initial_delay_ms 指数退避，总超时 timeout_ms），端口监听或日志出现该模式时通知你。 用 task_status 查询进度或读取日志文件；用 task_cancel 终止。 同步命令输出超限（50KB / 2000 行）自动截断并仅保留尾部；完整输出自动落盘，结果中给出 log_file 与 stdout_total_bytes，可用 read_file 的 offset/limit 分页读取全文。 平台：Windows。Shell 是 PowerShell（5.1+），不是 cmd.exe——PowerShell cmdlet（Out-File、Select-String、Get-ChildItem）与管道可用，请用 PS 语法。 |
@@ -31,7 +31,7 @@
 | `suggest_role` | generic | 按任务描述与各角色摘要的语义相似度，推荐最匹配的子智能体角色。在 delegate_to_agent 前调用以决定用哪个角色：传入任务文本，返回排序角色（name/score/purpose，[experimental] 表示暂不可调用）。最终选择始终由你决定。 |
 | `symbol_outline` | code | 用 tree-sitter 提取源文件的结构大纲（函数/结构体/类/impl/接口/枚举）。支持 Rust、TypeScript/JavaScript、Python、Go。 |
 | `task_cancel` | generic | 按 task_id 取消运行中的后台任务。取消已结束任务是空操作。 |
-| `task_status` | generic | 查询后台任务（delegate bt_xxx 与 command cmd_xxx 统一）。带 task_id：返回该任务快照（状态/结果/退出/日志）。不带 task_id：列出全部任务，可选 kind 过滤（delegate\|command）。优先等待自动完成/就绪通知，不要反复轮询。 |
+| `task_status` | generic | 查询后台任务（delegate bt_xxx 与 command cmd_xxx 统一）。默认范围：**当前会话工作目录**下所有会话的任务（同目录跨会话的协调面）——其他工作目录的任务默认不查、不用、不提；仅当竞争问题确实跨目录时用 scope="global" 显式查全局（用完即回，其他目录信息不进入常规汇报）。带 task_id：返回该任务快照（仅限可见范围；状态/结果/退出/日志）。不带 task_id：列出可见任务，可选 kind 过滤（delegate\|command）。**任务完成会自动通知本会话——不要为等待而轮询**；仅当用户要求查看进度或需要任务列表时调用。 |
 | `verify_build` | terminal | 运行构建验证命令（如 cargo check）并返回结果。 |
 | `vfs_list` | generic | 按 tianyan:// URI 列出 VFS 目录下的条目。用于浏览知识库结构。 |
 | `vfs_read` | read | 按 tianyan:// URI 读取 VFS 条目的完整内容（abstract/overview/detail）。在 search_vfs 之后用于加载相关条目的详细内容。 |
