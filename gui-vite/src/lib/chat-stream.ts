@@ -75,6 +75,9 @@ export function handleChatStreamEvent(event: ChatStreamEvent): void {
   if (event.chunk_type === 'error') {
     st.removeEmptyAssistantMessage();
     finish(sid);
+    // 轮级失败（LLM 请求失败等）：横幅持久展示——纯前端内存态（不落库、
+    // 不污染 LLM 上下文、应用重启即清；发送新消息/手动关闭时消失）。
+    if (sid) st.setTurnError(sid, event.delta || '对话处理失败');
     st.showToast(event.delta || '对话处理失败', 'error');
     return;
   }

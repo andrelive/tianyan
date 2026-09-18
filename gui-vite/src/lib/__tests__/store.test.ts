@@ -247,6 +247,18 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().streamStatus).toEqual({ [PENDING_SESSION_KEY]: 'idle' });
   });
 
+  it('setTurnError sets and clears the per-session turn error (front-end only)', () => {
+    // 轮级失败横幅：纯前端内存态（不落库）——设置/清除/幂等
+    useAppStore.getState().setTurnError('session-A', 'LLM 请求失败（已重试）');
+    expect(useAppStore.getState().turnErrorBySession['session-A']).toBe('LLM 请求失败（已重试）');
+
+    useAppStore.getState().setTurnError('session-A', null);
+    expect(useAppStore.getState().turnErrorBySession['session-A']).toBeUndefined();
+    // 幂等：重复清除不报错
+    useAppStore.getState().setTurnError('session-A', null);
+    expect(useAppStore.getState().turnErrorBySession['session-A']).toBeUndefined();
+  });
+
   // ── Skill Calls ──
 
   it('appendSkillCalls sets skill_calls on the last assistant message', () => {

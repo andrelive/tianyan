@@ -24,7 +24,7 @@ import { useSessionHistory } from '@/hooks/use-session-history';
 import { useUnifiedEvents, subscribeSession } from '@/hooks/use-unified-events';
 import { toErrorMessage } from '@/lib/errors';
 import { lastMessageUsage, sumSessionUsage } from '@/lib/token-usage';
-import { MessageSquare, Loader2, RotateCcw, Undo2 } from 'lucide-react';
+import { MessageSquare, Loader2, RotateCcw, Undo2, X } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
 import MessageBubble from './MessageBubble';
@@ -94,6 +94,10 @@ export default function ChatPanel() {
   const liveWindowRef = useRef(0);
   /** 流式中途断线（网络错误）标志：显示「任务继续在后台运行」提示。 */
   const [streamError, setStreamError] = useState(false);
+  /** 会话级轮错误（LLM 请求失败等）：持久横幅（内存态，不落库，重启即清）。 */
+  const turnError = useAppStore(
+    (s) => s.turnErrorBySession[currentSessionId ?? PENDING_SESSION_KEY] ?? null,
+  );
 
   /** 当前会话自己的上下文占用（lib/token-usage 纯函数；切换会话随 messages 变化） */
   const lastUsage = useMemo(
@@ -322,6 +326,8 @@ export default function ChatPanel() {
       };
       // 清除上一次的断线标志
       setStreamError(false);
+      // 清除轮错误横幅（新消息发出即视为已恢复）
+      useAppStore.getState().setTurnError(state.currentSessionId ?? PENDING_SESSION_KEY, null);
       state.setStreamStatus('streaming');
       // ADR-028 第 3 步：启动请求立即返回 session_id；流式事件经统一事件
       // 通道（GET /events）到达——纯函数 handleChatStreamEvent 常驻处理
@@ -577,6 +583,25 @@ export default function ChatPanel() {
                   </button>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* 轮级失败提示（LLM 请求失败等）：纯前端内存态——不落库、
+                  不污染 LLM 上下文、应用重启即清；发送新消息或手动关闭后消失 */}
+          {turnError && streamStatus !== 'streaming' && (
+            <div className="flex items-center gap-2 py-2" role="alert">
+              <span className="text-xs text-[var(--color-error)]">上一轮中断：{turnError}</span>
+              <button
+                type="button"
+                onClick={() =>
+                  currentSessionId && useAppStore.getState().setTurnError(currentSessionId, null)
+                }
+                className="flex items-center gap-1 px-2.5 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+                aria-label="关闭中断提示"
+              >
+                <X size={12} />
+                关闭
+              </button>
             </div>
           )}
 

@@ -84,6 +84,8 @@ describe('handleChatStreamEvent', () => {
     expect(state.messages.filter((m) => m.role === 'assistant')).toHaveLength(0);
     expect(Object.values(state.streamStatus).every((s) => s === 'idle')).toBe(true);
     expect(state.toasts[0]?.message).toBe('请求校验失败');
+    // 轮级失败横幅（纯前端内存态）：error 事件 → 会话级 turnError 置位
+    expect(Object.values(state.turnErrorBySession)).toContain('请求校验失败');
   });
 
   it('marks interrupted on finish_reason interrupted and toasts once', () => {

@@ -130,6 +130,13 @@ export interface ChatSlice {
   rollbackMessageBySession: Record<string, string>;
   setRollbackMessage: (sessionId: string, messageId: string | null) => void;
 
+  /** 会话级「上一轮中断原因」（**纯前端内存态**：不落库、不污染 LLM
+   * 上下文，应用重启即清）——LLM 请求失败等轮级错误由 ChatPanel 持久
+   * 横幅展示；发送新消息或手动关闭时清除。 */
+  turnErrorBySession: Record<string, string>;
+  /** 设置/清除会话的轮错误（null = 清除；幂等）。 */
+  setTurnError: (sessionId: string, message: string | null) => void;
+
   // Streaming（按会话归属：会话 A 流式时切到 B 可继续发消息，互不阻塞）
   streamStatus: Record<string, StreamStatus>;
   setStreamStatus: (status: StreamStatus, sessionId?: string | null) => void;
@@ -618,6 +625,18 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
         next[sessionId] = messageId;
       }
       return { rollbackMessageBySession: next };
+    }),
+  /** 会话级轮错误（内存态；与 setRollbackMessage 同款会话维度模式）。 */
+  turnErrorBySession: {},
+  setTurnError: (sessionId, message) =>
+    set((s) => {
+      const next = { ...s.turnErrorBySession };
+      if (message === null) {
+        delete next[sessionId];
+      } else {
+        next[sessionId] = message;
+      }
+      return { turnErrorBySession: next };
     }),
 
   // Streaming（按会话归属：切走流继续跑，切回直接显示累积内容）
