@@ -10,9 +10,15 @@ name: Quality
 #   4. 工具目录 freshness（运行时注册 = schema 唯一真相源）
 #   5. 前端 lint（eslint + prettier）/ typecheck / vitest
 
+# 触发策略（2026-09-18 调整，用户要求"只有打 tag 才编译构建"）：
+# - master 推送**不再**触发质量门禁（每次推送都跑 clippy/test/前端检查，
+#   耗时长且噪声大；此前"每次推送都会构建"的来源）；
+# - 打 tag（v*）触发本门禁 + release.yml 发布构建（发布前的全量把关）；
+# - PR 触发供评审（不影响日常推送）。
 on:
   push:
-    branches: [master]
+    tags:
+      - 'v*'
   pull_request:
 
 jobs:
