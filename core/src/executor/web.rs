@@ -237,7 +237,8 @@ impl WebSearchClient {
         Ok(body)
     }
 
-    /// 流式读取响应，超过上限即中止。
+    /// 流式读取响应，超过上限即中止（字节上限可能切在多字节字符中间，
+    /// 解码由 [`decode_body`] 按字符边界容错——T1-22）。
     async fn read_limited(&self, response: reqwest::Response) -> Result<String> {
         use futures::StreamExt;
 
@@ -255,8 +256,7 @@ impl WebSearchClient {
             bytes.extend_from_slice(&chunk);
         }
 
-        String::from_utf8(bytes)
-            .map_err(|_| TianyanError::Custom("tool: 响应不是有效 UTF-8 文本".to_string()))
+        decode_body(bytes)
     }
 
     /// 缓存读取（TTL 过期视为未命中）。
@@ -471,6 +471,46 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 解码响应字节为文本（T1-22：字节上限可能把多字节字符切成两半）。
+///
+/// - 整体合法 UTF-8 → 直接返回；
+/// - **尾部不完整序列**（截断切在多字节字符中间）→ 回退到最后一个完整字符
+///   （旧行为直接报错，整个 fetch 失败）；
+/// - 中间存在非法序列（响应本身不是 UTF-8）→ lossy 降级保留可读部分；替换
+///   字符占比 > 20% 视为二进制响应（仍报错）。
+fn decode_body(bytes: Vec<u8>) -> Result<String> {
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(e) => {
+            let valid_up_to = e.utf8_error().valid_up_to();
+            let incomplete_tail = e.utf8_error().error_len().is_none();
+            let raw = e.into_bytes();
+            if incomplete_tail {
+                tracing::warn!(
+                    bytes = raw.len(),
+                    kept = valid_up_to,
+                    "响应截断落在多字节字符中间，已回退到字符边界"
+                );
+                return Ok(String::from_utf8_lossy(&raw[..valid_up_to]).into_owned());
+            }
+            let lossy = String::from_utf8_lossy(&raw);
+            let total = lossy.chars().count();
+            let bad = lossy.chars().filter(|c| *c == '\u{FFFD}').count();
+            if total > 0 && bad * 5 > total {
+                return Err(TianyanError::Custom(
+                    "tool: 响应不是有效 UTF-8 文本".to_string(),
+                ));
+            }
+            tracing::warn!(
+                bytes = raw.len(),
+                invalid = bad,
+                "响应含非 UTF-8 字节，已降级保留可读部分"
+            );
+            Ok(lossy.into_owned())
+        }
+    }
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -792,6 +832,42 @@ mod tests {
 
     // ── 正文提取 ──────────────────────────────────────────────────────
 
+    // ── 响应解码（T1-22） ─────────────────────────────────────────────
+
+    #[test]
+    fn test_decode_body_valid_utf8() {
+        assert_eq!(
+            decode_body("你好 world".as_bytes().to_vec()).unwrap(),
+            "你好 world"
+        );
+    }
+
+    #[test]
+    fn test_decode_body_truncated_multibyte_tail_keeps_prefix() {
+        // 字节上限切在多字节字符中间（尾部「文」只剩 2/3 字节）——不得报错
+        let full = "abc中文".as_bytes().to_vec();
+        let truncated = full[..full.len() - 1].to_vec();
+        let text = decode_body(truncated).unwrap_or_else(|e| panic!("截断不应报错: {e}"));
+        assert_eq!(text, "abc中", "应回退到最后一个完整字符");
+    }
+
+    #[test]
+    fn test_decode_body_few_invalid_bytes_degrades_lossily() {
+        // 文本中夹少量非法字节（如 latin-1 的 0xE9）→ 降级保留可读部分
+        let mut bytes = "hello ".as_bytes().to_vec();
+        bytes.push(0xE9);
+        bytes.extend_from_slice(" world".as_bytes());
+        let text = decode_body(bytes).expect("少量非法字节应降级而非报错");
+        assert!(text.contains("hello"));
+        assert!(text.contains("world"));
+    }
+
+    #[test]
+    fn test_decode_body_binary_rejected() {
+        // 高比例非法字节（二进制响应）→ 仍报错
+        assert!(decode_body(vec![0xFFu8; 64]).is_err());
+    }
+
     #[test]
     fn test_extract_readable_html() {
         let html = r#"<html><head><title>My Page</title></head>
@@ -872,6 +948,25 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    /// T1-22 端到端回归：响应超限被截断、且截断点落在多字节字符中间时，
+    /// 整个 fetch 不应失败（旧行为：`String::from_utf8` 直接报错）。
+    #[tokio::test]
+    async fn test_fetch_tolerates_truncation_mid_multibyte_char() {
+        // 6000 字节中文响应；上限 1024 → 1024 % 3 != 0（切在「中」的中间）
+        let body: &'static str = Box::leak("中".repeat(2000).into_boxed_str());
+        let endpoint = spawn_mock_searxng(body).await;
+
+        let mut config = test_config();
+        config.max_fetch_bytes = 1024;
+        let client = WebSearchClient::new(&config).unwrap();
+
+        let text = client
+            .fetch(&endpoint, None)
+            .await
+            .expect("截断落在多字节字符中间不应使 fetch 失败");
+        assert!(!text.is_empty(), "应保留截断前的可读内容");
     }
 
     #[tokio::test]
