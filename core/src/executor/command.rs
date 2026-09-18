@@ -815,23 +815,48 @@ pub async fn kill_all_running_children() -> usize {
 /// 负 PID 信号作用于整个组——shell 派生的服务进程一并终止（对齐
 /// opencode #30868 教训：只杀 shell 会留孤儿服务进程）。
 async fn kill_process_tree(pid: u32) {
-    let result = if cfg!(target_os = "windows") {
-        hide_console_window(tokio::process::Command::new("taskkill"))
+    if cfg!(target_os = "windows") {
+        match hide_console_window(tokio::process::Command::new("taskkill"))
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .await
-    } else {
-        tokio::process::Command::new("kill")
-            .args(["-9", &format!("-{pid}")])
+        {
+            Ok(s) if !s.success() => tracing::warn!(pid, "taskkill 未报告成功（进程可能已退出）"),
+            Err(e) => tracing::warn!(pid, error = %e, "终止进程树失败"),
+            Ok(_) => {}
+        }
+        return;
+    }
+    // Unix：三重保险（进程组 → 进程本身 → 直接子进程）。
+    // WSL/Linux 实测：`kill -9 -<pgid>` 可能返回成功但目标仍存活（该环境
+    // 进程组语义不可靠）——逐级补刀，任一命中即可；pkill 缺失时忽略其错误。
+    let mut killed = false;
+    for args in [
+        vec!["-9".to_string(), format!("-{pid}")],
+        vec!["-9".to_string(), pid.to_string()],
+    ] {
+        match tokio::process::Command::new("kill")
+            .args(&args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .await
-    };
-    if let Err(e) = result {
-        tracing::warn!(pid, error = %e, "终止进程树失败");
+        {
+            Ok(s) if s.success() => killed = true,
+            Ok(_) => {}
+            Err(e) => tracing::warn!(pid, error = %e, "kill 执行失败"),
+        }
+    }
+    let _ = tokio::process::Command::new("pkill")
+        .args(["-9", "-P", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    if !killed {
+        tracing::warn!(pid, "终止进程树：kill 未报告成功");
     }
 }
 
@@ -1050,18 +1075,6 @@ enum CommandWaitOutcome {
     Cancelled,
 }
 
-/// 等待取消标志置位（`None` 时永久 pending，不参与 `select!` 竞争）。
-async fn wait_cancel(cancel: Option<&Arc<AtomicBool>>) {
-    match cancel {
-        None => std::future::pending::<()>().await,
-        Some(flag) => {
-            while !flag.load(AtomicOrdering::Relaxed) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        }
-    }
-}
-
 /// 执行 ExecuteCommand 动作（无安全策略依赖，纯函数）。
 ///
 /// 跨平台：Unix (Linux/macOS) 用 `sh -c`，Windows 用 `powershell -NoProfile -NonInteractive -Command`。
@@ -1107,6 +1120,7 @@ pub async fn execute_command_action_cancellable(
         cmd.current_dir(dir);
     }
 
+    let started_at = tokio::time::Instant::now();
     let mut child = cmd
         .spawn()
         .map_err(|e| TianyanError::Custom(format!("executor: 命令执行失败：{}", e)))?;
@@ -1124,16 +1138,26 @@ pub async fn execute_command_action_cancellable(
     let _child_guard = ChildGuard::new(child.id());
 
     // 等待退出：正常退出 / 超时 / **用户取消** 三路竞争。
-    // 「停止」此前只在轮顶与 chunk 循环生效——长命令执行期间点停止毫无反应
-    // （用户实测：命令卡住时无法中断）；现在取消标志直达进程等待。
-    let outcome = tokio::select! {
-        biased;
-        _ = wait_cancel(cancel.as_ref()) => CommandWaitOutcome::Cancelled,
-        r = tokio::time::timeout(Duration::from_secs(timeout), child.wait()) => match r {
-            Ok(Ok(status)) => CommandWaitOutcome::Exited(status),
-            Ok(Err(e)) => CommandWaitOutcome::Failed(format!("{e}")),
-            Err(_) => CommandWaitOutcome::TimedOut,
-        },
+    // 「停止」此前只在轮顶与 chunk 循环生效——长命令执行期间点停止毫无反应。
+    //
+    // 实现用 **try_wait 轮询**而非 select!：Linux 上 select! + `child.wait()`
+    // 组合实测取消标志置位后仍等满命令时长（WSL/CI：30s 未中断，Windows 未复现），
+    // 轮询实现跨平台语义一致、不依赖 waker 语义（代价：正常结束最多多 20ms 观测延迟）。
+    let outcome = loop {
+        if let Some(flag) = cancel.as_ref() {
+            if flag.load(AtomicOrdering::Relaxed) {
+                break CommandWaitOutcome::Cancelled;
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break CommandWaitOutcome::Exited(status),
+            Ok(None) => {}
+            Err(e) => break CommandWaitOutcome::Failed(format!("{e}")),
+        }
+        if started_at.elapsed() >= Duration::from_secs(timeout) {
+            break CommandWaitOutcome::TimedOut;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     };
 
     match outcome {
@@ -1193,22 +1217,29 @@ pub async fn execute_command_action_cancellable(
             e
         ))),
         CommandWaitOutcome::TimedOut => {
-            // 杀进程树（taskkill /T 或 kill -9 -pgid），再回收子进程
+            // 杀进程树（taskkill /T 或 kill 逐级补刀），再回收子进程
             if let Some(pid) = child.id() {
                 kill_process_tree(pid).await;
             }
-            if let Err(e) = child.wait().await {
-                tracing::warn!(error = %e, "等待超时子进程退出失败");
+            // 回收加 2s 兜底：杀信号已发，但某些环境 wait 不返回
+            if tokio::time::timeout(Duration::from_secs(2), child.wait())
+                .await
+                .is_err()
+            {
+                tracing::warn!("等待超时子进程退出超时（2s），放弃回收");
             }
             Err(TianyanError::timeout("executor: 执行超时"))
         }
         CommandWaitOutcome::Cancelled => {
-            // 同超时路径：先杀进程树再回收，避免派生进程残留为孤儿
+            // 同超时路径：先杀进程树再回收（2s 兜底），避免派生进程残留为孤儿
             if let Some(pid) = child.id() {
                 kill_process_tree(pid).await;
             }
-            if let Err(e) = child.wait().await {
-                tracing::warn!(error = %e, "等待被取消命令退出失败");
+            if tokio::time::timeout(Duration::from_secs(2), child.wait())
+                .await
+                .is_err()
+            {
+                tracing::warn!("等待被取消命令退出超时（2s），放弃回收");
             }
             Err(TianyanError::Custom(
                 "executor: 命令已取消（用户停止）".to_string(),

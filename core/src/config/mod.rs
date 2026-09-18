@@ -408,7 +408,7 @@ mod tests {
             [security]
             trash_directory = "~/trash"
             allowed_directories = ['~/docs', 'C:\abs']
-            blocked_directories = ["~/etc", "/"]
+            blocked_directories = ["~/etc", "~/blocked"]
 
             [[models.providers]]
             name = "mock"
@@ -435,7 +435,7 @@ mod tests {
         assert_eq!(config.security.blocked_directories[0], home.join("etc"));
         assert_eq!(
             config.security.blocked_directories[1],
-            std::path::PathBuf::from("/")
+            home.join("blocked")
         );
     }
 

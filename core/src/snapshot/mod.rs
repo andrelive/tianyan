@@ -1328,11 +1328,15 @@ mod tests {
     #[tokio::test]
     async fn test_gc_keeps_all_live_trees() {
         let (_dir, mgr) = setup().await;
+        // 三次写入用**不同长度**的内容：快照缓存按 mtime+size 复用 hash
+        // （`walk_and_capture`），同毫秒内写入同长度内容会命中缓存 → 对象数偏少
+        // → 本测试在 Linux（mtime 毫秒截断）不稳定（CI 实测 left=2/right=3）。
+        // 本测试验证的是 GC 保留全部 live 对象，与缓存复用无关，用不同长度规避。
         write(&mgr.workdir, "a.txt", "v0");
         mgr.capture("s1", "0").await.unwrap();
-        write(&mgr.workdir, "a.txt", "v1");
+        write(&mgr.workdir, "a.txt", "v1-长一点");
         mgr.capture("s1", "1").await.unwrap();
-        write(&mgr.workdir, "a.txt", "v2");
+        write(&mgr.workdir, "a.txt", "v2-再长一点的内容");
         mgr.capture("s1", "2").await.unwrap();
         mgr.save_redo("s1", "msg_0", &[]).await.unwrap();
 
