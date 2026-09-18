@@ -722,6 +722,10 @@ impl CommandManager {
 ///
 /// Windows：隐藏子进程控制台窗口（CREATE_NO_WINDOW），避免执行命令时
 /// 弹出黑窗口一闪而过；Unix 无操作。
+///
+/// `mut` 仅 Windows 分支需要（`creation_flags` 取 `&mut self`）——Linux 上
+/// 该分支被裁掉，`unused_mut` 会撞 CI 的 `-D warnings`（2026-09-17 CI 实测）。
+#[cfg_attr(not(windows), allow(unused_mut))]
 pub(crate) fn hide_console_window(mut cmd: tokio::process::Command) -> tokio::process::Command {
     #[cfg(windows)]
     {
