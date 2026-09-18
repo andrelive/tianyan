@@ -139,17 +139,22 @@ impl ContextPipeline {
     ) -> Result<(InjectableContext, Option<String>)> {
         let injectable = self.load_injectable(query, None).await?;
         let outcome = self
-            .compress_if_needed(conversation, recent_input_tokens, false)
+            .compress_if_needed(conversation, recent_input_tokens, false, None)
             .await?;
         Ok((injectable, outcome.map(|o| o.summary)))
     }
 
     /// 如需压缩则执行压缩，返回摘要文本与压缩请求真实用量。
+    ///
+    /// `existing_summary`：**本会话**链上最后一个压缩点的纯摘要（增量合并
+    /// 用；`None` = 全量摘要）。由调用方提取（[`Self::extract_marker_summary`]），
+    /// 压缩器自身不再持有任何跨会话摘要状态（T1 修复）。
     pub async fn compress_if_needed(
         &self,
         conversation: &mut Vec<Message>,
         recent_input_tokens: usize,
         force: bool,
+        existing_summary: Option<&str>,
     ) -> Result<Option<CompressionOutcome>> {
         let mut compressor = self.compressor.lock().await;
         // 手动压缩（force=true）跳过阈值判定——用户主动点击即明确意图；
@@ -158,7 +163,9 @@ impl ContextPipeline {
             return Ok(None);
         }
 
-        let result = compressor.compress(conversation).await?;
+        let result = compressor
+            .compress_with_existing_summary(conversation, existing_summary)
+            .await?;
         if result.summary.is_empty() {
             // 空摘要（模型空响应，含单次重试后仍空）：本次压缩丢弃——
             // 不改写对话、不落库压缩点，链上保持原压缩点，下一轮阈值
@@ -188,17 +195,26 @@ impl ContextPipeline {
 
     /// 压缩对话并生成带 compression_marker 的摘要 StructuredMessage。
     /// 返回 None 如果不需要压缩或压缩结果为空。
+    ///
+    /// `existing_summary`：本会话已有摘要（链上最后一个压缩点，经
+    /// [`Self::extract_marker_summary`] 提取）；`None` = 全量摘要。
     pub async fn compress_for_session(
         &self,
         messages: &[Message],
         session_id: &str,
         recent_input_tokens: usize,
         force: bool,
+        existing_summary: Option<&str>,
     ) -> Option<StructuredMessage> {
         let mut conversation = messages.to_vec();
 
         let outcome = match self
-            .compress_if_needed(&mut conversation, recent_input_tokens, force)
+            .compress_if_needed(
+                &mut conversation,
+                recent_input_tokens,
+                force,
+                existing_summary,
+            )
             .await
         {
             Ok(Some(outcome)) => outcome,
@@ -253,6 +269,31 @@ impl ContextPipeline {
             finish: None,
             compression_marker: true,
         })
+    }
+
+    /// 从压缩点消息提取**纯摘要文本**（剥去展示包装；无有效内容返回 None）。
+    ///
+    /// 供压缩时恢复"本会话已有摘要"（T1：替代进程级 `cached_summary` 缓存——
+    /// 数据源是会话链上最后一个 `compression_marker` 消息，天然按会话隔离）。
+    pub fn extract_marker_summary(marker: &StructuredMessage) -> Option<String> {
+        let raw = marker.parts.iter().find_map(|p| match p {
+            Part::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })?;
+        // 剥壳：`[对话摘要] …<首行>\n<正文>\n[摘要结束]`；非该形态按原文处理
+        let mut s = raw.trim();
+        if let Some(rest) = s.strip_prefix("[对话摘要]") {
+            s = rest.split_once('\n').map(|(_, r)| r).unwrap_or(rest);
+        }
+        if let Some(rest) = s.strip_suffix("[摘要结束]") {
+            s = rest;
+        }
+        let s = s.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
     }
 
     /// 使用 retriever 渐进式检索与当前 query 最相关的 learned rules。
@@ -722,14 +763,14 @@ mod tests {
         // 非强制：100 token << 50 万阈值 → 不压缩
         let conv_auto = conv.clone();
         let summary_auto = pipeline
-            .compress_for_session(&conv_auto, "s1", 100, false)
+            .compress_for_session(&conv_auto, "s1", 100, false, None)
             .await;
         assert!(summary_auto.is_none(), "自动压缩低于阈值不应触发");
 
         // 强制（手动）：跳过阈值 → 压缩
         let conv_manual = conv.clone();
         let summary_manual = pipeline
-            .compress_for_session(&conv_manual, "s1", 100, true)
+            .compress_for_session(&conv_manual, "s1", 100, true, None)
             .await;
         assert!(summary_manual.is_some(), "手动压缩（force）应跳过窗口阈值");
     }
@@ -773,7 +814,7 @@ mod tests {
             Message::assistant("F"),
         ];
         let sm = pipeline
-            .compress_for_session(&conv, "s1", 100, true)
+            .compress_for_session(&conv, "s1", 100, true, None)
             .await
             .expect("手动压缩应触发");
 
@@ -823,7 +864,7 @@ mod tests {
         let before = conversation.clone();
 
         let outcome = pipeline
-            .compress_if_needed(&mut conversation, 100, true)
+            .compress_if_needed(&mut conversation, 100, true, None)
             .await
             .unwrap();
 

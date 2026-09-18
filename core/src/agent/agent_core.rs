@@ -702,14 +702,18 @@ impl Agent {
         session_id: &str,
         force: bool,
     ) -> Option<StructuredMessage> {
-        let messages_since_marker: Vec<StructuredMessage> = {
+        let (messages_since_marker, existing_summary): (Vec<StructuredMessage>, Option<String>) = {
             let s = state.read().await;
             let marker_pos = s
                 .structured_messages
                 .iter()
                 .rposition(|m| m.compression_marker);
             let start_idx = marker_pos.unwrap_or(0);
-            s.structured_messages[start_idx..].to_vec()
+            // 本会话已有摘要 = 链上最后一个压缩点（T1：数据源单一、天然按会话——
+            // 此前用压缩器的进程级 cached_summary，跨会话串号；见 compression/mod.rs）
+            let existing = marker_pos
+                .and_then(|i| ContextPipeline::extract_marker_summary(&s.structured_messages[i]));
+            (s.structured_messages[start_idx..].to_vec(), existing)
         };
 
         if messages_since_marker.len() < MIN_MESSAGES_BEFORE_COMPRESSION {
@@ -737,7 +741,13 @@ impl Agent {
 
         let summary_sm = self
             .context_pipeline
-            .compress_for_session(&conversation, session_id, recent_input_tokens, force)
+            .compress_for_session(
+                &conversation,
+                session_id,
+                recent_input_tokens,
+                force,
+                existing_summary.as_deref(),
+            )
             .await?;
         let summary_sm = summary_sm.clone();
 

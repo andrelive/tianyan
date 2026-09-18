@@ -174,10 +174,6 @@ pub struct ContextCompressor {
     model_service: Arc<dyn ChatService>,
     estimator: TokenEstimator,
     config: CompressionConfig,
-    /// 缓存的上次摘要，用于增量压缩。仅有效（非空）摘要会更新缓存——
-    /// 空摘要（模型空响应，重试后仍空）置空，下次压缩走全量摘要
-    /// （消息头部含上次摘要 marker，信息不丢失）。
-    cached_summary: Option<String>,
 }
 
 impl ContextCompressor {
@@ -189,7 +185,6 @@ impl ContextCompressor {
             model_service,
             estimator,
             config,
-            cached_summary: None,
         }
     }
 
@@ -206,10 +201,30 @@ impl ContextCompressor {
         recent_input_tokens > threshold
     }
 
-    /// 压缩消息列表。
+    /// 压缩消息列表（**无会话上下文入口**：恒走全量摘要）。
+    ///
+    /// "已有摘要"必须由调用方经 [`Self::compress_with_existing_summary`] 显式
+    /// 传入——来源为**当前会话链上最后一个压缩点**（T1 修复：此前进程级
+    /// `cached_summary` 不按会话隔离，会话 A 的摘要会被会话 B 的压缩合并 →
+    /// 跨会话串号，B 的历史里混入 A 的记录）。
     ///
     /// - `messages` - 原始消息列表
     pub async fn compress(&mut self, messages: &[Message]) -> Result<CompressionResult> {
+        self.compress_with_existing_summary(messages, None).await
+    }
+
+    /// 压缩消息列表（可携带**本会话**已有摘要 → 增量合并；否则全量摘要）。
+    ///
+    /// `existing_summary` 的数据源必须**单一**：当前会话链最后一个
+    /// `compression_marker` 消息的纯摘要文本
+    /// （`ContextPipeline::extract_marker_summary`）——天然按会话隔离；
+    /// 空摘要（模型空响应）由上层丢弃、不落库压缩点，因此不会成为
+    /// 下一次的"已有摘要"。
+    pub async fn compress_with_existing_summary(
+        &mut self,
+        messages: &[Message],
+        existing_summary: Option<&str>,
+    ) -> Result<CompressionResult> {
         if messages.is_empty() {
             let zero = self.estimator.estimate_messages(messages);
             return Ok(CompressionResult {
@@ -226,7 +241,9 @@ impl ContextCompressor {
 
         let (compressed_messages, summary, summary_usage) = match self.config.strategy {
             CompressionStrategy::Summarize => {
-                let (msgs, s, u) = self.compress_by_summarization(messages).await?;
+                let (msgs, s, u) = self
+                    .compress_by_summarization(messages, existing_summary)
+                    .await?;
                 (msgs, s, u)
             }
             CompressionStrategy::Select => {
@@ -234,7 +251,7 @@ impl ContextCompressor {
                 (msgs, s, TokenUsage::default())
             }
             CompressionStrategy::Hybrid => {
-                let (msgs, s, u) = self.compress_hybrid(messages).await?;
+                let (msgs, s, u) = self.compress_hybrid(messages, existing_summary).await?;
                 (msgs, s, u)
             }
         };
@@ -253,15 +270,15 @@ impl ContextCompressor {
     async fn compress_by_summarization(
         &mut self,
         messages: &[Message],
+        existing_summary: Option<&str>,
     ) -> Result<(Vec<Message>, String, TokenUsage)> {
-        // 如果有缓存摘要，使用增量摘要；否则全量摘要
-        let (summary, usage) = if let Some(ref cached) = self.cached_summary {
-            self.incremental_summarize(cached, messages).await?
-        } else {
-            self.summarize(messages).await?
+        // 本会话已有摘要（来自会话链最后一个压缩点）→ 增量合并；否则全量摘要
+        let (summary, usage) = match existing_summary {
+            Some(existing) if !existing.trim().is_empty() => {
+                self.incremental_summarize(existing, messages).await?
+            }
+            _ => self.summarize(messages).await?,
         };
-
-        self.cached_summary = Self::cacheable_summary(&summary);
 
         let summary_message = Message::system(format!(
             "[对话摘要] 以下是对早期对话的摘要：\n{}\n[摘要结束]",
@@ -348,18 +365,6 @@ impl ContextCompressor {
         Ok((text.trim().to_string(), response.usage))
     }
 
-    /// 摘要缓存更新策略：仅非空摘要进入缓存（"缓存 = 最近一次有效摘要"）。
-    /// 空摘要（模型空响应，重试后仍空）不保留——否则下次压缩会把空串当
-    /// "已有摘要"走增量路径，且与链上未落库压缩点的事实不一致；置空后
-    /// 下次走全量摘要（消息头部含上次摘要 marker，信息不丢失）。
-    fn cacheable_summary(summary: &str) -> Option<String> {
-        if summary.is_empty() {
-            None
-        } else {
-            Some(summary.to_string())
-        }
-    }
-
     /// 通过选择压缩（保留重要消息）。
     async fn compress_by_selection(&self, messages: &[Message]) -> Result<(Vec<Message>, String)> {
         // 简单策略：保留用户消息和包含关键信息的消息
@@ -396,18 +401,18 @@ impl ContextCompressor {
     async fn compress_hybrid(
         &mut self,
         messages: &[Message],
+        existing_summary: Option<&str>,
     ) -> Result<(Vec<Message>, String, TokenUsage)> {
         // 全量摘要：所有消息进一条摘要，不保留原样。
         // 前缀缓存考量：保留原样会让请求前缀随轮次增长且压缩后缓存失效；
         // 全量摘要 + 稳定前缀（soul/rules/摘要）跨请求不变，命中率最高。
         // 用户意图与进度由摘要提示词专门承载（见 DEFAULT_SUMMARY_PROMPT）。
-        let (summary, usage) = if let Some(ref cached) = self.cached_summary {
-            self.incremental_summarize(cached, messages).await?
-        } else {
-            self.summarize(messages).await?
+        let (summary, usage) = match existing_summary {
+            Some(existing) if !existing.trim().is_empty() => {
+                self.incremental_summarize(existing, messages).await?
+            }
+            _ => self.summarize(messages).await?,
         };
-
-        self.cached_summary = Self::cacheable_summary(&summary);
         let summary_message = Message::system(format!(
             "[对话摘要] 以下是对早期对话的摘要：
 {}
@@ -737,9 +742,9 @@ mod tests {
         assert_eq!(usage.completion_tokens, 60, "两笔输出消耗合并（0+60）");
     }
 
-    /// 空摘要不进入增量摘要缓存：缓存语义保持"最近一次有效摘要"。
-    /// 判别力：修复前 cached_summary 被写入 Some("")（下次会以空串为
-    /// "已有摘要"走增量路径），先红后绿。
+    /// 空摘要不可作为"已有摘要"（T1 语义不变，实现换源）：模型恒空 →
+    /// 结果摘要为空——上层丢弃、不落库压缩点，"已有摘要"（链上压缩点）
+    /// 不会被空摘要覆盖；即便调用方误传旧摘要，空结果也不会污染链。
     #[tokio::test]
     async fn test_empty_summary_not_cached_for_incremental() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -776,13 +781,88 @@ mod tests {
             msg_user("问题三"),
         ];
 
-        let result = compressor.compress(&msgs).await.unwrap();
+        // 携带旧摘要压缩：模型恒空 → 结果仍为空摘要（上层丢弃）
+        let result = compressor
+            .compress_with_existing_summary(&msgs, Some("OLD-SUMMARY"))
+            .await
+            .unwrap();
 
         assert!(result.summary.is_empty(), "模型恒空 → 摘要为空");
         assert_eq!(calls.load(Ordering::SeqCst), 2, "空摘要重试一次后仍空");
+    }
+
+    /// T1 回归（跨会话摘要串号）：压缩器的"已有摘要"此前是进程级
+    /// `cached_summary`——不按会话隔离。会话 A 压缩后，会话 B 的压缩会把
+    /// A 的摘要当"已有摘要"走增量合并 → B 的摘要里混进 A 的历史。
+    ///
+    /// 修复后：`compress`（无会话上下文入口）恒走全量摘要；"已有摘要"只能
+    /// 由调用方显式传入（来源 = 当前会话链最后一个压缩点）。
+    /// 判别力：修复前 B 的请求 prompt 含 A 摘要标识（先红后绿）。
+    #[tokio::test]
+    async fn test_cross_session_compress_does_not_reuse_previous_summary() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let prompts_in = prompts.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_in = calls.clone();
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(move |req| {
+            let prompt = req
+                .messages
+                .first()
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            prompts_in.lock().unwrap().push(prompt);
+            let n = calls_in.fetch_add(1, Ordering::SeqCst);
+            let text = if n == 0 {
+                "SUMMARY-ALPHA"
+            } else {
+                "SUMMARY-BETA"
+            };
+            Ok(ChatCompletionResponse {
+                id: "mock".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant(text.to_string()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Default::default(),
+            })
+        });
+        let config = CompressionConfig {
+            summary_model: "mock".to_string(),
+            ..CompressionConfig::default()
+        };
+        let mut compressor = ContextCompressor::new(Arc::new(mock), config);
+
+        // 会话 A：压缩一次（对话含唯一标识串）
+        let a_msgs = vec![
+            msg_user("ALPHA-ONLY-MARKER：会话 A 的任务"),
+            msg_assistant("A 的回答"),
+        ];
+        let _ = compressor.compress(&a_msgs).await.unwrap();
+
+        // 会话 B：完全不同对话，压缩一次
+        let b_msgs = vec![
+            msg_user("BETA-ONLY-MARKER：会话 B 的任务"),
+            msg_assistant("B 的回答"),
+        ];
+        let _ = compressor.compress(&b_msgs).await.unwrap();
+
+        let seen = prompts.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "两会话各一次摘要请求");
         assert!(
-            compressor.cached_summary.is_none(),
-            "空摘要不得进入增量缓存（否则下次以空串为已有摘要）"
+            seen[1].contains("BETA-ONLY-MARKER"),
+            "B 的压缩应基于自身对话"
+        );
+        assert!(
+            !seen[1].contains("SUMMARY-ALPHA"),
+            "跨会话摘要串号：B 的压缩请求继承了 A 的摘要（进程级缓存未按会话隔离）"
         );
     }
 

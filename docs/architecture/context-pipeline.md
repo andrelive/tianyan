@@ -167,6 +167,13 @@ self.tokens.input.max(self.tokens.cache.read)
 
 ### 4.5 压缩请求用量随摘要消息持久化
 
+> **已有摘要的数据源（T1 修复）**：增量合并的 `existing_summary` 从**当前会话链
+> 最后一个 `compression_marker` 消息**提取（`ContextPipeline::extract_marker_summary`，
+> 剥去展示包装），随调用链显式传入（`compress_for_session → compress_if_needed →
+> compress_with_existing_summary`）——压缩器不持有任何跨会话状态。此前用进程级
+> `cached_summary` 缓存（不按会话隔离），会话 A 的摘要会被会话 B 的压缩合并 →
+> **跨会话摘要串号**（B 的历史里混入 A 的记录）。
+
 - 压缩**不走 AgentLoop**（没有 assistant 消息承载该次请求的 input/output/cache）。
   若摘要消息的 `tokens` 保持全零，压缩消耗会从会话统计（`sumSessionUsage` / `UsageStats`）中丢失。
 - 因此 `CompressionResult.summary_usage`（`mod.rs:80-82`）随摘要消息持久化
