@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use tianyan::session::SessionManager;
 
@@ -433,6 +433,16 @@ impl SessionService {
             self.session_manager.delete_session(session_id).await?;
         }
 
+        // T1-12：快照目录无会话级生命周期——删会话必须清 `snapshots/{id}`
+        // （trees/redo/latest 缓存），否则该会话引用的对象被 GC 视为可达、
+        // 磁盘单调增长。对象库全局共享，由 GC 回收。
+        // 清理失败不阻断删除（权威存储已移除），但必须可见（残留长期占盘）。
+        if let Some(sm) = &self.snapshot_manager {
+            if let Err(e) = sm.remove_session(session_id).await {
+                warn!(session = %session_id, error = %e, "会话快照清理失败");
+            }
+        }
+
         Ok(DeleteSessionResponse {
             success: true,
             message: format!("会话 {} 删除成功", session_id),
@@ -580,6 +590,39 @@ mod tests {
     #[test]
     fn test_session_service_creation() {
         // 编译时测试
+    }
+
+    /// T1-12：删除会话必须清理其快照目录（此前残留 → GC 视为可达 → 磁盘单调增长）。
+    #[tokio::test]
+    async fn test_delete_session_removes_snapshot_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("work");
+        let snap_root = dir.path().join("snapshots");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let manager = Arc::new(tianyan::snapshot::SnapshotManager::new(
+            snap_root.clone(),
+            workdir.clone(),
+        ));
+        std::fs::write(workdir.join("a.txt"), "内容").unwrap();
+        manager.capture("session-del", "0").await.unwrap();
+        assert!(
+            snap_root.join("session-del").is_dir(),
+            "前置：快照目录已产生"
+        );
+
+        let service = SessionService::new(
+            Arc::new(MockSessionManager::with_sessions(vec![Session::new(
+                "session-del",
+            )])),
+            Some(manager),
+            None,
+            None,
+        );
+        service.delete_session("session-del").await.unwrap();
+        assert!(
+            !snap_root.join("session-del").exists(),
+            "删会话应清理快照目录（T1-12）"
+        );
     }
 
     /// 回归：历史消息结构化转换 —— 工具调用/结果独立字段输出，

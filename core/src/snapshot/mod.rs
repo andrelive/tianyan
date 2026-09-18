@@ -77,6 +77,8 @@ pub struct GcStats {
     pub cache_files_removed: usize,
     /// 扫描时的对象总数。
     pub total_objects: usize,
+    /// 删除的空会话目录数（既无树文件也无重做数据的残留目录，T1-12）。
+    pub session_dirs_removed: usize,
 }
 
 /// 工作区与快照的差异结果（前端展示 / 模型理解用）。
@@ -318,6 +320,29 @@ impl SnapshotManager {
         })
     }
 
+    /// 删除指定会话的全部快照数据（删会话时调用，T1-12）。
+    ///
+    /// 删除 `{root}/{session_id}/`（`trees/` + `redo/` + `latest.cache.json`）。
+    /// **对象库不在此删**：`objects/` 为内容寻址、跨会话全局共享——移除引用
+    /// 后，孤儿对象由 [`Self::gc`] 标记-清扫回收。
+    ///
+    /// 幂等：目录不存在（从未产生快照 / 已清理）返回成功。
+    ///
+    /// # Errors
+    /// * 会话 ID 非法或目录删除失败时返回 TianyanError（调用方决定是否阻断）。
+    pub async fn remove_session(&self, session_id: &str) -> Result<()> {
+        self.validate_session_id(session_id)?;
+        let dir = self.root.join(session_id);
+        if !dir.exists() {
+            return Ok(());
+        }
+        fs::remove_dir_all(&dir).await.map_err(|e| {
+            TianyanError::Custom(format!("snapshot: 清理会话快照失败（{session_id}）: {e}"))
+        })?;
+        tracing::info!(session = %session_id, "已清理会话快照数据（trees/redo/缓存）");
+        Ok(())
+    }
+
     /// 垃圾回收：删除所有会话不再引用的对象与孤儿重做缓存文件。
     ///
     /// 标记阶段收集所有会话 `trees/{index}.json` 与 `redo/tree-{index}.json`
@@ -334,6 +359,7 @@ impl SnapshotManager {
                 objects_retained: 0,
                 cache_files_removed: 0,
                 total_objects: 0,
+                session_dirs_removed: 0,
             });
         }
 
@@ -455,11 +481,30 @@ impl SnapshotManager {
             }
         }
 
+        // ── 空会话目录清理（T1-12 卫生）──────────────────────────
+        // 既无树文件也无重做数据的会话目录不再引用任何对象 → 直接移除
+        // （会话已删但目录残留、capture 失败留下的空壳）。
+        let mut session_dirs_removed = 0usize;
+        for session_dir in &session_dirs {
+            let has_trees = has_json_file(&session_dir.join("trees")).await;
+            let has_redo = has_json_file(&session_dir.join("redo")).await;
+            if has_trees || has_redo {
+                continue;
+            }
+            match fs::remove_dir_all(session_dir).await {
+                Ok(()) => session_dirs_removed += 1,
+                Err(e) => tracing::debug!(
+                    error = %e, ?session_dir, "snapshot: GC 清理空会话目录失败"
+                ),
+            }
+        }
+
         Ok(GcStats {
             objects_removed,
             objects_retained: total_objects.saturating_sub(objects_removed),
             cache_files_removed,
             total_objects,
+            session_dirs_removed,
         })
     }
 
@@ -819,6 +864,19 @@ impl SnapshotManager {
         }
         Ok(())
     }
+}
+
+/// 目录下是否存在任何 `*.json` 文件（GC 判定会话目录是否仍持有数据）。
+async fn has_json_file(dir: &Path) -> bool {
+    let Ok(mut entries) = fs::read_dir(dir).await else {
+        return false;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.file_name().to_string_lossy().ends_with(".json") {
+            return true;
+        }
+    }
+    false
 }
 
 /// 例如解析目录下形如 `{prefix}{key}.json` 的树文件,收集其引用的对象哈希（GC 标记阶段）。
@@ -1265,6 +1323,50 @@ mod tests {
         assert_eq!(stats.objects_retained, 1);
         assert_eq!(stats.total_objects, 2);
         assert_eq!(count_files(&mgr.root.join("objects")), 1);
+    }
+
+    /// T1-12：删会话必须清理 `snapshots/{id}`（此前目录残留、GC 视为可达
+    /// → 磁盘单调增长）；清理后该会话独占的对象可被 GC 回收。
+    #[tokio::test]
+    async fn test_remove_session_deletes_snapshot_dir_and_unblocks_gc() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "会话独占内容");
+        mgr.capture("s1", "0").await.unwrap();
+        assert!(mgr.root.join("s1").is_dir());
+
+        // 会话仍在：对象可达，不得回收
+        let before = mgr.gc().await.unwrap();
+        assert!(before.total_objects >= 1);
+        assert_eq!(before.objects_removed, 0, "有会话引用时不得回收");
+
+        mgr.remove_session("s1").await.unwrap();
+        assert!(!mgr.root.join("s1").exists(), "会话快照目录应被删除");
+
+        // 引用已移除 → GC 回收
+        let after = mgr.gc().await.unwrap();
+        assert!(after.objects_removed >= 1, "删会话后其对象应可回收");
+        assert_eq!(after.objects_removed, after.total_objects);
+    }
+
+    /// T1-12：清理幂等（重复删除 / 从未产生快照均成功）；非法 ID 仍拒绝。
+    #[tokio::test]
+    async fn test_remove_session_is_idempotent_and_validates_id() {
+        let (_dir, mgr) = setup().await;
+        mgr.remove_session("never").await.unwrap();
+        mgr.remove_session("never").await.unwrap();
+        assert!(mgr.remove_session("../escape").await.is_err());
+    }
+
+    /// T1-12 卫生：GC 清理既无树也无重做数据的空会话目录。
+    #[tokio::test]
+    async fn test_gc_removes_empty_session_dirs() {
+        let (_dir, mgr) = setup().await;
+        let empty_dir = mgr.root.join("ghost");
+        std::fs::create_dir_all(empty_dir.join("trees")).unwrap();
+
+        let stats = mgr.gc().await.unwrap();
+        assert_eq!(stats.session_dirs_removed, 1);
+        assert!(!empty_dir.exists(), "空会话目录应被清理");
     }
 
     #[tokio::test]
