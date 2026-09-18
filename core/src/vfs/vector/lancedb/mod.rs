@@ -16,7 +16,7 @@ use arrow_array::{RecordBatch, RecordBatchIterator};
 use arrow_schema::{DataType, Field, Schema};
 use async_trait::async_trait;
 use futures::TryStreamExt;
-use lancedb::query::ExecutableQuery;
+use lancedb::query::{ExecutableQuery, QueryBase};
 
 use crate::common::error::{Result, TianyanError};
 use crate::config::StorageConfig;
@@ -270,6 +270,8 @@ impl VectorStorage for LanceDbVectorStore {
             .query()
             .nearest_to(query.vector)
             .map_err(|e| TianyanError::Custom(format!("向量数据库错误：搜索失败: {e}")))?
+            // T1-14：显式 limit（默认 top-k=10 会把请求条数静默截断）
+            .limit(query.limit)
             .column(batch::vector_column_name(query.vector_type))
             .execute()
             .await
@@ -298,13 +300,24 @@ impl VectorStorage for LanceDbVectorStore {
 
     async fn get_point(&self, id: &str) -> Result<Option<VectorPoint>> {
         // 扫描全表找匹配 ID（适合桌面量级 <10K 条目）。
+        // T1-14：LanceDB 查询默认 top-k=10——必须显式 `limit` 到全表行数，
+        // 否则第 11 行之后的 ID 永远查不到（move/回填时向量点静默丢失）。
         // 注：LanceDB 0.31 的 Query builder 不支持 .filter()，升级到 0.40+ 后可迁移。
+        let rows = self
+            .table
+            .count_rows(None)
+            .await
+            .map_err(|e| TianyanError::Custom(format!("向量数据库错误：行数统计失败: {e}")))?;
+        if rows == 0 {
+            return Ok(None);
+        }
         let dummy = vec![0.0f32; self.embedding_dim];
         let stream = self
             .table
             .query()
             .nearest_to(dummy)
             .map_err(|e| TianyanError::Custom(format!("向量数据库错误：查询失败: {e}")))?
+            .limit(rows)
             .column("abstract_vec")
             .execute()
             .await
@@ -357,6 +370,9 @@ impl VectorStorage for LanceDbVectorStore {
                 .query()
                 .nearest_to(query_vector.clone())
                 .map_err(|e| TianyanError::Custom(format!("向量数据库错误：RRF 搜索失败: {e}")))?
+                // T1-14：每列取 top_k 参与 RRF 融合（默认 top-k=10 会让
+                // top_k>10 的请求静默退化）
+                .limit(top_k)
                 .column(column)
                 .execute()
                 .await

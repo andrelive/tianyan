@@ -56,6 +56,56 @@ async fn test_initialize() {
 
 // ─── 插入与获取 ───
 
+// ─── T1-14：显式 limit（LanceDB 默认 top-k=10 静默截断）───
+
+#[tokio::test]
+async fn test_get_point_beyond_default_topk_limit() {
+    // T1-14：LanceDB Query 默认 top-k=10——未显式 limit 时第 11 行之后的 ID
+    // 永远查不到（move/回填时向量点静默丢失）。
+    let (store, _dir) = create_store().await;
+    let mut last_id = String::new();
+    for i in 0..15 {
+        let point = make_point(
+            &format!("tianyan://knowledge/doc_{i:02}"),
+            Some(test_vec()),
+            None,
+        );
+        last_id = point.uri().to_point_id();
+        store.upsert_point(&point).await.unwrap();
+    }
+    let got = store.get_point(&last_id).await.unwrap();
+    assert!(got.is_some(), "第 15 个点应能查到（默认 top-k 截断修复）");
+}
+
+#[tokio::test]
+async fn test_search_returns_requested_limit_beyond_default_topk() {
+    // T1-14：search 同样受默认 top-k=10 限制——请求 15 条此前只得 10 条。
+    let (store, _dir) = create_store().await;
+    for i in 0..15 {
+        let point = make_point(
+            &format!("tianyan://knowledge/sdoc_{i:02}"),
+            Some(test_vec()),
+            None,
+        );
+        store.upsert_point(&point).await.unwrap();
+    }
+    let results = store
+        .search(VectorSearchQuery {
+            vector: test_vec(),
+            vector_type: VectorType::Abstract,
+            limit: 15,
+            category_filter: None,
+            min_score: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        15,
+        "请求 15 条应返回 15 条（此前被默认 top-k=10 截断）"
+    );
+}
+
 #[tokio::test]
 async fn test_upsert_and_get_point() {
     let (store, _dir) = create_store().await;
