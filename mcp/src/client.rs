@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use rust_mcp_sdk::mcp_client::client_runtime;
 use rust_mcp_sdk::mcp_client::{
@@ -133,7 +134,7 @@ impl McpClient {
 
         // Build the stdio transport that spawns the server subprocess.
         let transport_options = TransportOptions {
-            timeout: std::time::Duration::from_secs(30),
+            timeout: Duration::from_secs(30),
             ..Default::default()
         };
 
@@ -294,11 +295,39 @@ impl McpClient {
         self.connected.load(Ordering::Relaxed)
     }
 
+    /// 廉价存活判定：未显式断开 + SDK 连接已初始化 + 未 shutdown。
+    ///
+    /// 不做网络往返（**真探活**用 [`Self::probe`]）；用于高频路径
+    /// （工具列表/工具调用）的前置检查。
+    pub async fn is_alive(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+            && self.client.is_initialized()
+            && !self.client.is_shut_down().await
+    }
+
+    /// **真探活**：向服务器发 MCP `ping` 请求（带超时）。
+    ///
+    /// 与 [`Self::is_connected`]（仅本地标志）不同，本方法产生一次真实
+    /// 往返，能发现"对端子进程崩溃 / 远端断连"——服务器不可用时返回错误
+    /// （T1-9：注册在册 ≠ 可用）。
+    pub async fn probe(&self, timeout: Duration) -> McpResult<()> {
+        if !self.connected.load(Ordering::Relaxed) {
+            return Err(McpError::ConnectionFailed(
+                self.server_name.clone(),
+                "Client is not connected".to_string(),
+            ));
+        }
+        self.client.ping(None, Some(timeout)).await.map_err(|e| {
+            McpError::connection_failed(&self.server_name, format!("ping 探活失败：{e}"))
+        })?;
+        Ok(())
+    }
+
     /// Returns the cached list of available tools.
     ///
     /// To refresh the list from the server, use [`Self::refresh_tools`].
     pub async fn list_tools(&self) -> McpResult<Vec<ToolInfo>> {
-        if !self.is_connected() {
+        if !self.is_alive().await {
             return Err(McpError::ConnectionFailed(
                 self.server_name.clone(),
                 "Client is not connected".to_string(),
@@ -342,7 +371,7 @@ impl McpClient {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> McpResult<McpCallOutput> {
-        if !self.is_connected() {
+        if !self.is_alive().await {
             return Err(McpError::ConnectionFailed(
                 self.server_name.clone(),
                 "Client is not connected".to_string(),

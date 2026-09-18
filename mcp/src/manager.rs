@@ -6,12 +6,24 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::RwLock;
 
 use crate::client::McpClient;
 use crate::error::{McpError, McpResult};
 use crate::types::McpServerConfig;
+
+/// 探活超时（T1-9）：`ping` 往返上限——超过即视为不可用（触发重连）。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 可用性判定（T1-9）：**在册且探活存活**才算"已连接"。
+///
+/// 旧实现只判断在册（`contains_key`）——服务器崩溃后仍报"已连接"，死连接
+/// 被一直复用（工具看似在、调用必失败）。
+fn usable(registered: bool, alive: bool) -> bool {
+    registered && alive
+}
 
 /// Manages a collection of named MCP server connections.
 ///
@@ -61,7 +73,9 @@ impl McpClientManager {
     ///
     /// 同名已存在时先断开再替换；工具数量计入日志（连接成功的可见信号）。
     pub async fn connect_from_config(&self, config: &McpServerConfig) -> McpResult<()> {
-        if self.is_connected(&config.name).await {
+        // 替换路径必须按"在册"判断（不能用探活：死连接探活为 false 时
+        // 若跳过 disconnect，旧 client 会被直接覆盖 Drop——不 kill 子进程）
+        if self.is_registered(&config.name).await {
             self.disconnect_server(&config.name).await?;
         }
 
@@ -109,7 +123,9 @@ impl McpClientManager {
 
         // 连接新增/启用的服务器（已连接则保持，不做重复握手）
         for server in servers.iter().filter(|s| s.enabled) {
-            if self.is_connected(&server.name).await {
+            // 真探活（T1-9）：在册 ≠ 可用——服务器崩溃/远端断连后仅凭注册表
+            // 会一直复用死连接；ping 往返失败即走重连（断开旧的再连新的）。
+            if self.probe(&server.name, PROBE_TIMEOUT).await {
                 continue;
             }
             if let Err(e) = self.connect_from_config(server).await {
@@ -147,22 +163,51 @@ impl McpClientManager {
         guard.get(name).cloned()
     }
 
-    /// Check if a server is connected.
+    /// 注册表在册判定（**不做探活**）：连接替换路径专用。
+    pub async fn is_registered(&self, name: &str) -> bool {
+        self.clients.read().await.contains_key(name)
+    }
+
+    /// 服务器是否**可用**：在册 + 客户端存活（T1-9）。
+    ///
+    /// 廉价（无网络往返，读客户端本地状态）；真往返探活见 [`Self::probe`]。
     pub async fn is_connected(&self, name: &str) -> bool {
-        let guard = self.clients.read().await;
-        guard.contains_key(name)
+        match self.get_client(name).await {
+            Some(client) => usable(true, client.is_alive().await),
+            None => usable(false, false),
+        }
+    }
+
+    /// **真探活**：向已注册服务器发 MCP `ping`（带超时）。
+    ///
+    /// 未注册 / 已显式断开 / 超时 / 传输失败均返回 `false`。
+    pub async fn probe(&self, name: &str, timeout: Duration) -> bool {
+        match self.get_client(name).await {
+            Some(client) => client.probe(timeout).await.is_ok(),
+            None => false,
+        }
     }
 
     /// Returns the number of connected servers.
     pub async fn connected_count(&self) -> usize {
-        let guard = self.clients.read().await;
-        guard.len()
+        self.connected_servers().await.len()
     }
 
-    /// Returns a list of all connected server names.
+    /// 返回**可用**（存活）服务器名列表。
+    ///
+    /// T1-9：在册但已死的连接不列出——避免桥接层为其生成"调用必失败"的工具。
     pub async fn connected_servers(&self) -> Vec<String> {
-        let guard = self.clients.read().await;
-        guard.keys().cloned().collect()
+        let clients: Vec<(String, Arc<McpClient>)> = {
+            let guard = self.clients.read().await;
+            guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        let mut out = Vec::new();
+        for (name, client) in clients {
+            if client.is_alive().await {
+                out.push(name);
+            }
+        }
+        out
     }
 
     /// Disconnect all servers.
@@ -240,5 +285,23 @@ mod tests {
         let manager = McpClientManager::new();
         let servers = futures::executor::block_on(manager.connected_servers());
         assert!(servers.is_empty());
+    }
+
+    #[test]
+    fn test_usable_requires_alive() {
+        // T1-9：在册但客户端已死 ⇒ 不可用（旧实现只看注册表，会误报"已连接"）
+        assert!(!usable(true, false), "在册但不可用不应视为已连接");
+        assert!(usable(true, true));
+        assert!(!usable(false, true), "未在册不可用");
+        assert!(!usable(false, false));
+    }
+
+    #[test]
+    fn test_probe_and_registered_for_unknown() {
+        let manager = McpClientManager::new();
+        assert!(!futures::executor::block_on(manager.is_registered("ghost")));
+        assert!(!futures::executor::block_on(
+            manager.probe("ghost", Duration::from_millis(50))
+        ));
     }
 }
