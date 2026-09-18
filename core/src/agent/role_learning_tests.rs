@@ -7,8 +7,8 @@ use crate::common::types::{ContextNamespace, Message as ModelMessage, TianyanUri
 use crate::config::StorageConfig;
 use crate::model::types::{ChatChoice, ChatCompletionResponse};
 use crate::model::MockChatService;
+use crate::observability::ExecutionHistory;
 use crate::role_store::RoleStore;
-use crate::skills::learning::ExecutionHistory;
 use crate::vfs::backend::LocalFileBackend;
 use crate::vfs::{
     MockVectorStorage, VectorStorage, VfsCore, VirtualFileSystem, VirtualFileSystemImpl,

@@ -267,26 +267,23 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 
 **模块组织**：
 - `skills/manager.rs` — 技能管理器（VFS 发现 `list_available_skills` + 读取 `read_skill`）
-- `skills/learning/` — GEPA 进化引擎（mod.rs 核心引擎、types.rs 类型定义、generator.rs 技能生成逻辑）
+- `skills/manager.rs` — 技能发现/读取（L0 摘要 + L2 详情）
 - `skills/reviewer.rs` — 技能使用复审（基于会话证据打分，落 VFS `skill/_reviews/`）
+
+> **已删除（T2 清理）**：`skills/learning/`（GEPA 技能自学习引擎，~1100 行）已删除——
+> 全仓无生产消费方（ADR-017 已决策移除 LLM 生成路径），且其 `apply_evaluation` 的
+> Deprecate 分支用 `write_content` **覆盖写**（会把技能正文替换成弃用标记、销毁内容）。
+> 执行历史类型 `ExecutionHistory` / `ExecutionStep` 定义在 `observability`（不受影响）。
 
 **核心类型**：
 
 | 类型 | 说明 |
 |------|------|
 | `SkillManager` | 技能管理器，`list_available_skills()` 读取所有技能的 abstract，`read_skill()` 读取 L2 详情 |
-| `SkillLearningEngine` | GEPA 进化引擎，从执行历史中自动提取可复用技能 |
-| `ExecutionHistory` | 执行历史记录，用于 GEPA 引擎 |
-| `GeneratedSkill` | GEPA 引擎生成的技能 |
+| `ExecutionHistory` | 执行历史记录（定义在 `observability`；供角色学习与工具观测消费） |
 | `SkillReviewer` | 技能使用复审（会话证据 → 质量分） |
 
-**执行语义已移除**：技能没有 handler、没有执行器——文件/命令/网络等能力由 Agent 内置工具直接覆盖，`call_skill` 工具读 VFS 技能文档返回，由 LLM 参考后自行用工具执行。planning 为预置技能（bootstrap 写入 VFS），与 GEPA 学习技能同构。
-
-**GEPA 进化引擎**：
-- **G**enerate：分析执行历史中的成功模式
-- **E**volve：生成 GeneratedSkill { id, name, description }
-- **P**erfect：通过多次使用优化参数模板
-- **A**dapt：根据上下文自动调整技能执行策略
+**执行语义已移除**：技能没有 handler、没有执行器——文件/命令/网络等能力由 Agent 内置工具直接覆盖，`call_skill` 工具读 VFS 技能文档返回，由 LLM 参考后自行用工具执行。planning 为预置技能（bootstrap 写入 VFS）；外部导入的技能同构。
 
 ### 1.10 observability 子模块
 

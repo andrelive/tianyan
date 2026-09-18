@@ -17,8 +17,8 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::llm_judge::parse_llm_json;
 use crate::common::types::{ContextNamespace, Message, TianyanUri};
 use crate::model::ChatService;
+use crate::observability::ExecutionHistory;
 use crate::role_store::RoleStore;
-use crate::skills::learning::ExecutionHistory;
 use crate::vfs::VirtualFileSystem;
 
 /// 角色候选验证提示词（G2b 门，对齐技能引擎 `CANDIDATE_VERIFICATION_PROMPT`）。

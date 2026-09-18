@@ -216,9 +216,6 @@ Agent::process_message()                  [core/src/agent/coordinator.rs]
     │
     ├─ SessionState::cleanup()（防止无限增长）
     │
-    ├─ 后台异步（不阻塞响应）:
-    │     └─ SkillLearningEngine::learn_from_history()（GEPA 进化）
-    │
     └─ AgentStreamChunk 通过 mpsc 通道逐块输出
           │ 每个 chunk 含 chunk_type (Thought/ToolCall/Observation/Answer/Error/Clarification/Message)
           │
