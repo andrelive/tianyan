@@ -63,6 +63,19 @@
 
 委托排队模型：双信号量（`run_sem` 运行许可 + `queue_sem` 排队槽位）——`queue_sem.try_acquire_owned()` 失败即拒绝（排队已满）；`run_sem.acquire_owned().await` 阻塞排队。排队中的任务 = Pending（"等待中"），面板可见。`spawn_background_delegate` 顺序：先拿 queue 槽位 → register（Pending）→ 等 run 许可 → mark_running → spawn。终端命令保持现有排队模型，上限可配置。
 
+### 7. 长驻服务的「就绪即完成」语义（2026-09-18，B 方案）
+
+**问题（用户实测）**：`remaining`（会话内未终态任务数）把"还在跑"与"还没干完"混为一谈——长驻服务（dev server 等）进程不退，**`allComplete` 永不达成、唤醒永久停滞**，必须人工停服破局（场景：后端服务 + 两个验证任务，验证完成后无法收尾）。
+
+**决策**：**配了 `ready` 探测的任务 = service 语义，「就绪 = 完成」**：
+
+- 就绪（或探测超时 = 等待结束）后该任务**移出 `remaining` 计数**（`CommandTask.counted=false`）——服务进程照跑；若其余任务均已完成，**就绪事件本身触发唤醒**（主 agent 可收尾）；
+- 就绪后的服务仍受 watcher 监视：**失败/异常退出照常出终态通知与失败唤醒**；
+- 短任务（无 ready）语义不变：进程退出 = 完成 = 终态唤醒；
+- 终态收尾**只对 `counted=true` 的任务递减计数**（幂等，防重复/负数）。
+
+**边界**：探测超时同样释放计数（"等待结束"），服务继续跑（不杀进程）——避免探测失败的任务永久占住 remaining。委托任务（`BackgroundTaskManager`）无 ready 概念，语义不变。
+
 ## 后果
 
 - 子智能体过程对用户可见（面板展开 = 迷你对话流），掌控感提升。

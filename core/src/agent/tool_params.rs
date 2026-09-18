@@ -49,8 +49,12 @@ pub struct ExecuteCommandParams {
     /// 后台运行（true 时立即返回 task_id/log_file，进程独立运行，不等待退出）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<bool>,
-    /// 后台就绪探测（仅 background=true 生效）：端口监听或日志关键词匹配后
-    /// 自动通知主 agent「服务已就绪」；不探测则只有进程退出才通知。
+    /// 后台就绪探测（仅 background=true 生效；**长驻服务必须配**）：端口监听
+    /// 或日志关键词匹配后自动通知主 agent「服务已就绪」。**就绪 = 该任务的
+    /// 「完成」**（长驻服务进程不退，"进程退出"不是它的完成信号）：就绪后
+    /// 不再计入「等待全部完成」的阻塞（其余任务完成后即可唤醒收尾），服务
+    /// 继续运行、异常退出仍会通知。不配探测则按普通任务语义（进程退出才出
+    /// 终态通知）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready: Option<ReadyProbeParams>,
 }
@@ -67,7 +71,8 @@ pub struct ReadyProbeParams {
     /// 首次探测等待（毫秒；指数退避起点；缺省 500）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_delay_ms: Option<u64>,
-    /// 就绪探测总超时（毫秒；超时未就绪 → 通知主 agent 失败；缺省 300000）。
+    /// 就绪探测总超时（毫秒；超时未就绪 → 通知主 agent「等待结束」并解除
+    /// 完成阻塞（服务继续运行、不杀进程）；缺省 300000）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 }

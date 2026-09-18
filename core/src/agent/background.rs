@@ -1312,6 +1312,7 @@ mod tests {
             working_directory: None,
             ready: false,
             ready_note: None,
+            counted: true,
         };
         let b = BackgroundTask::from_command_task(t);
         assert_eq!(b.id, "cmd_7");
@@ -1344,6 +1345,7 @@ mod tests {
                     working_directory: None,
                     ready: false,
                     ready_note: None,
+                    counted: true,
                 }
             };
             BackgroundTask::from_command_task(t)
@@ -1387,6 +1389,7 @@ mod tests {
                 working_directory: None,
                 ready: false,
                 ready_note: None,
+                counted: true,
             }
         };
         let b = BackgroundTask::from_command_task(long);

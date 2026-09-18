@@ -124,6 +124,13 @@ pub struct CommandTask {
     pub ready: bool,
     /// 就绪/超时说明（如 "端口 3000 已监听" / "就绪探测超时"）。
     pub ready_note: Option<String>,
+    /// 是否仍在会话「待完成」计数中（session_counts）。
+    ///
+    /// 就绪（或探测超时）后置 false——**长驻服务的「完成」= 就绪**（B 方案）：
+    /// "服务可用 / 等待结束"即任务目标达成、不再计入 remaining；否则服务
+    /// 续跑会让 allComplete 永不达成，唤醒永久停滞（需人工停服破局）。
+    /// 终态时仅对 counted=true 的任务递减（幂等，防重复/负数）。
+    pub counted: bool,
 }
 
 /// 后台命令就绪探测规格（execute_command(background).ready 解析）。
@@ -271,6 +278,7 @@ impl CommandManager {
             working_directory,
             ready: false,
             ready_note: None,
+            counted: true,
         };
         self.register_spawned_task(&task, session_id, command, pid, now)
             .await;
@@ -516,11 +524,13 @@ impl CommandManager {
         let session_id = task.parent_session_id.clone();
         let remaining = {
             let mut counts = self.session_counts.lock().await;
-            let n = counts
-                .get(&session_id)
-                .copied()
-                .unwrap_or(0)
-                .saturating_sub(1);
+            // counted=false 的任务（就绪/超时已释放）不再递减——防重复/负数。
+            let cur = counts.get(&session_id).copied().unwrap_or(0);
+            let n = if task.counted {
+                cur.saturating_sub(1)
+            } else {
+                cur
+            };
             counts.insert(session_id.clone(), n);
             n
         };
@@ -569,6 +579,7 @@ impl CommandManager {
                     ProbeOutcome::NotReady => {}
                     ProbeOutcome::Ready(note) => {
                         Self::mark_ready(&manager, &task_id, Some(note.clone())).await;
+                        Self::release_wait_count(&manager, &task_id).await;
                         Self::notify_ready(&manager, &task_id, &note).await;
                         break;
                     }
@@ -577,6 +588,9 @@ impl CommandManager {
                 if now_ms() - start >= timeout_ms as i64 {
                     let note = format!("就绪探测超时（{} ms）", timeout_ms);
                     Self::mark_ready(&manager, &task_id, Some(note.clone())).await;
+                    // 超时同样"等待结束"：释放计数（避免探测失败的服务
+                    // 永久占住 remaining 造成唤醒停滞）；服务本体继续跑。
+                    Self::release_wait_count(&manager, &task_id).await;
                     Self::notify_ready(&manager, &task_id, &note).await;
                     break;
                 }
@@ -655,6 +669,41 @@ impl CommandManager {
         }
         if let Some(waker) = manager.waker.lock().await.clone() {
             waker.wake(&session_id).await;
+        }
+    }
+
+    /// 就绪/超时后：把任务移出会话「待完成」计数（幂等）。
+    ///
+    /// **B 方案（长驻服务的「完成」= 就绪）**：就绪（或探测超时=等待结束）
+    /// 后该任务不再计入 `session_counts`——服务进程照跑，但"全部完成"
+    /// 不再被它挡住；若其余任务均已完成，立即触发唤醒（主 agent 可收尾）。
+    /// 就绪后的服务仍受 watcher 监视：失败/退出照常出终态通知（失败唤醒）。
+    async fn release_wait_count(manager: &CommandManager, task_id: &str) {
+        let session_id = {
+            let mut tasks = manager.tasks.lock().await;
+            let Some(entry) = tasks.get_mut(task_id) else {
+                return;
+            };
+            if !entry.task.counted {
+                return; // 幂等：已释放
+            }
+            entry.task.counted = false;
+            entry.task.parent_session_id.clone()
+        };
+        let remaining = {
+            let mut counts = manager.session_counts.lock().await;
+            let n = counts
+                .get(&session_id)
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(1);
+            counts.insert(session_id.clone(), n);
+            n
+        };
+        if remaining == 0 {
+            if let Some(waker) = manager.waker.lock().await.clone() {
+                waker.wake(&session_id).await;
+            }
         }
     }
 
@@ -1724,6 +1773,84 @@ mod tests {
             wakes.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "全部完成后应唤醒恰好一次"
+        );
+    }
+
+    /// B 方案判别力（长驻服务「就绪」= 完成）：就绪释放「待完成」计数后，
+    /// 其余任务均已完成 → 立即唤醒；重复释放幂等。
+    /// 修复前：就绪不释放计数 → 服务续跑占住 remaining → 永不唤醒
+    /// （allComplete 停滞，需人工停服破局）——本断言固化新语义。
+    #[tokio::test]
+    async fn test_ready_release_unblocks_wake_and_is_idempotent() {
+        #[derive(Clone)]
+        struct CountingWaker {
+            wakes: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl CommandWaker for CountingWaker {
+            async fn wake(&self, _session_id: &str) {
+                self.wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let manager = CommandManager::new(None);
+        manager
+            .set_waker(Arc::new(CountingWaker {
+                wakes: wakes.clone(),
+            }))
+            .await;
+
+        // 构造一个"运行中的长驻服务"任务（counted=true；会话 s1 计数=1）
+        let svc = CommandTask {
+            id: "cmd_r1".to_string(),
+            command: "dev server".to_string(),
+            cwd: None,
+            parent_session_id: "s1".to_string(),
+            status: CommandTaskStatus::Running,
+            exit_code: None,
+            pid: Some(1),
+            log_file: None,
+            output_tail: String::new(),
+            created_at: 0,
+            completed_at: None,
+            seq: 0,
+            anchor_seq: 0,
+            working_directory: None,
+            ready: false,
+            ready_note: None,
+            counted: true,
+        };
+        manager.tasks.lock().await.insert(
+            svc.id.clone(),
+            TaskEntry {
+                task: svc,
+                cancelled: false,
+            },
+        );
+        manager
+            .session_counts
+            .lock()
+            .await
+            .insert("s1".to_string(), 1);
+
+        // 就绪：释放计数 → remaining 归零 → 唤醒（B：就绪即"完成"）
+        CommandManager::release_wait_count(&manager, "cmd_r1").await;
+        assert_eq!(
+            wakes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "就绪释放后 remaining=0 应唤醒（修复前：不释放、不唤醒）"
+        );
+        assert!(
+            !manager.get("cmd_r1").await.unwrap().counted,
+            "就绪后 counted 应置 false（不再占住待完成计数）"
+        );
+
+        // 幂等：重复释放不重复唤醒、不重复递减
+        CommandManager::release_wait_count(&manager, "cmd_r1").await;
+        assert_eq!(
+            wakes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "重复释放应幂等（不重复唤醒）"
         );
     }
 
