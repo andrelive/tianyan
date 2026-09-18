@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-09-17
+
+### Fixed
+- **退出卡死（用户报告）**：点托盘退出后图标与进程残留（任务管理器剩 webview + cargo 子进程），只能强杀；此前"后台任务跑着时退出"同款。根因三条链：① 关停只置位 `shutdown_flag`，而它的唯一消费者是 `/tasks/stream`——正在跑 agent 轮的 `/chat/stream` 不读它 → axum 优雅关停死等活跃连接；② `server_handle.await` 与 tauri `rt.block_on(supervisor)` 均无上限 → 监督循环不结束 → `app_handle.exit(0)` 根本不执行；③ Windows 无 Job Object 绑定时父进程退出不带走子进程。修法：关停先 `cancel_all_active_turns`（遍历会话取消槽全部置位，跑到一半的命令被杀）→ `kill_all_running_children`（前后台子进程按进程树统一清理，全局注册表 + `ChildGuard` 自动注销）→ server 侧 5s / tauri 侧 10s **超时兜底**，保证一定能退
+- **「停止」无法中断正在跑的命令（用户报告）**：取消检查点只在轮顶/chunk 循环，工具执行（`child.wait`）完全不读取消标志。修法：`execute_command_action_cancellable(..., cancel)` 三路竞争（正常退出 / 超时 / 取消），取消即杀进程树并返回「命令已取消」（与 timeout 分开）；工具层从会话取消槽取标志（`session_cancel_flag`）
+- **刷盘先清零后落盘（T1-11）**：`usage_stats::flush` 先 `swap(0)` 清空计数器再落库，失败即丢整批统计；`trace::flush` 同形态。改为「读快照 → 落盘成功 → 才扣减（`fetch_sub`）」；trace 失败把 span 放回缓冲
+- **CI（quality.yml）Linux 构建失败**：lance-encoding 的 build script 找不到 protoc（release.yml 有、quality.yml 漏配）→ 补 `arduino/setup-protoc@v3`
+
+### Changed
+- 回归保护：core **1308**（+5 回归）· server 164 · tauri 13 · mcp 16 · 前端 414；clippy 0（workspace 全目标）/ fmt 干净；判别力实证 4 处（取消注入 / 注册注入 / T1-11 两注入）
+
 ## [0.5.1] - 2026-09-17
 
 ### Fixed
