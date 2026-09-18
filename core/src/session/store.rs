@@ -68,6 +68,23 @@ fn sqlite_error(context: &str, e: rusqlite::Error) -> TianyanError {
     TianyanError::Custom(format!("session: session_store: {context}：{e}"))
 }
 
+/// 解析单行 `content_parts` JSON；损坏时记 warn 并返回 `None`（T1-17：
+/// 单行损坏不废整个会话——调用方据返回值决定占位或跳过）。
+fn parse_message_row(json: &str, session_id: &str, seq: i64) -> Option<StructuredMessage> {
+    match serde_json::from_str::<StructuredMessage>(json) {
+        Ok(msg) => Some(msg),
+        Err(e) => {
+            tracing::warn!(
+                session_id,
+                seq,
+                error = %e,
+                "session: session_store: 消息行损坏，已跳过"
+            );
+            None
+        }
+    }
+}
+
 impl SessionStore {
     /// 创建会话存储（共享 Database 单连接）。
     pub fn new(db: Arc<Database>) -> Result<Arc<Self>, TianyanError> {
@@ -189,8 +206,11 @@ impl SessionStore {
 
     /// 加载会话：元数据 + 全量消息（按 seq 升序）。
     ///
+    /// **逐行容错（T1-17）**：单行 `content_parts` 损坏不废整个会话——损坏行
+    /// 以占位 system 消息顶替（保持「位置即 seq」不变式，ADR-027），并记 warn。
+    ///
     /// # Errors
-    /// * SQLite 查询失败或 content_parts 反序列化失败时返回 TianyanError。
+    /// * SQLite 查询失败时返回 TianyanError（行级 JSON 损坏不返回错误）。
     pub async fn load(
         &self,
         session_id: &str,
@@ -211,19 +231,25 @@ impl SessionStore {
         let header: SessionHeader = serde_json::from_str(&header_json).unwrap_or_default();
         let mut stmt = conn
             .prepare(
-                "SELECT content_parts FROM session_messages WHERE session_id = ?1 ORDER BY seq",
+                "SELECT seq, content_parts FROM session_messages WHERE session_id = ?1 ORDER BY seq",
             )
             .map_err(|e| sqlite_error("消息查询准备失败", e))?;
         let rows = stmt
-            .query_map(rusqlite::params![session_id], |r| r.get::<_, String>(0))
+            .query_map(rusqlite::params![session_id], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
             .map_err(|e| sqlite_error("消息查询执行失败", e))?;
         let mut messages = Vec::new();
         for row in rows {
-            let json = row.map_err(|e| sqlite_error("消息行读取失败", e))?;
-            let msg: StructuredMessage = serde_json::from_str(&json).map_err(|e| {
-                TianyanError::Custom(format!("session: session_store: 消息反序列化失败：{e}"))
-            })?;
-            messages.push(msg);
+            let (seq, json) = row.map_err(|e| sqlite_error("消息行读取失败", e))?;
+            match parse_message_row(&json, session_id, seq) {
+                Some(msg) => messages.push(msg),
+                // 占位：保持「位置即 seq」不变式（ADR-027），损坏行不使链错位
+                None => messages.push(StructuredMessage::system(
+                    session_id,
+                    format!("[会话存储：第 {seq} 条消息损坏，已跳过]"),
+                )),
+            }
         }
         Ok(Some((header, messages)))
     }
@@ -415,8 +441,10 @@ impl SessionStore {
 
     /// 加载自 since_seq 之后的消息（含 seq，ADR-028 断点对齐增量）。
     ///
+    /// **逐行容错（T1-17）**：损坏行跳过并记 warn（带真实 seq，空洞无害）。
+    ///
     /// # Errors
-    /// * SQLite 查询失败或 content_parts 反序列化失败时返回 TianyanError。
+    /// * SQLite 查询失败时返回 TianyanError（行级 JSON 损坏不返回错误）。
     pub async fn load_after(
         &self,
         session_id: &str,
@@ -436,10 +464,9 @@ impl SessionStore {
         let mut out = Vec::new();
         for row in rows {
             let (seq, json) = row.map_err(|e| sqlite_error("增量查询行读取失败", e))?;
-            let msg: StructuredMessage = serde_json::from_str(&json).map_err(|e| {
-                TianyanError::Custom(format!("session: session_store: 消息反序列化失败：{e}"))
-            })?;
-            out.push((seq, msg));
+            if let Some(msg) = parse_message_row(&json, session_id, seq) {
+                out.push((seq, msg));
+            }
         }
         Ok(out)
     }
@@ -450,8 +477,10 @@ impl SessionStore {
     /// `before_seq = last_seq + 1` 表达。SQL 用 `ORDER BY seq DESC LIMIT n`
     /// 只扫目标区间（不读全链），返回前反转为升序（与链序一致）。
     ///
+    /// **逐行容错（T1-17）**：损坏行跳过并记 warn（带真实 seq，空洞无害）。
+    ///
     /// # Errors
-    /// * SQLite 查询失败或 content_parts 反序列化失败时返回 TianyanError。
+    /// * SQLite 查询失败时返回 TianyanError（行级 JSON 损坏不返回错误）。
     pub async fn load_before(
         &self,
         session_id: &str,
@@ -473,10 +502,9 @@ impl SessionStore {
         let mut out = Vec::new();
         for row in rows {
             let (seq, json) = row.map_err(|e| sqlite_error("分页查询行读取失败", e))?;
-            let msg: StructuredMessage = serde_json::from_str(&json).map_err(|e| {
-                TianyanError::Custom(format!("session: session_store: 消息反序列化失败：{e}"))
-            })?;
-            out.push((seq, msg));
+            if let Some(msg) = parse_message_row(&json, session_id, seq) {
+                out.push((seq, msg));
+            }
         }
         out.reverse(); // DESC 取页 → 反转为升序（与链序一致）
         Ok(out)
@@ -707,6 +735,47 @@ mod tests {
         assert_eq!(messages[1].id, "m2");
         assert!(store.load("missing").await.unwrap().is_none());
     }
+
+    #[tokio::test]
+    async fn test_load_tolerates_corrupt_row() {
+        let store = make_store().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        for (id, text) in [("m0", "第一"), ("m1", "第二"), ("m2", "第三")] {
+            store
+                .append_message("s1", &msg(id, MessageRole::User, text))
+                .await
+                .unwrap();
+        }
+        // 模拟落盘损坏：中间一行 content_parts 变成非法 JSON
+        {
+            let conn = store.db.lock().await;
+            conn.execute(
+                "UPDATE session_messages SET content_parts = '{oops' WHERE session_id = 's1' AND seq = 1",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 全量加载：不失败；损坏行以占位顶替，位置仍与 seq 对齐
+        let (_, messages) = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].id, "m0");
+        assert!(matches!(messages[1].role, MessageRole::System));
+        assert_eq!(messages[2].id, "m2");
+
+        // 区间查询：损坏行跳过（带真实 seq，空洞无害）
+        let after = store.load_after("s1", -1).await.unwrap();
+        assert_eq!(
+            after.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        let before = store.load_before("s1", 3, 10).await.unwrap();
+        assert_eq!(
+            before.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+    }
+
     #[tokio::test]
     async fn test_last_user_seq_before() {
         let store = make_store().await;
