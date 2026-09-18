@@ -91,6 +91,22 @@ fn truncate_tail_with_marker(text: &str, marker: &str) -> Truncated {
             spill_path: None,
         };
     }
+    if kept.is_empty() {
+        // 单行超长（唯一一行就超过字节上限）：按行保留会退化为“只有标记、零内容”
+        // （T2 修复）——退化为**尾部字节片段**（UTF-8 边界安全），保证至少保留可读信息。
+        let mut tail = text.to_string();
+        crate::common::truncate::truncate_keep_tail_bytes(&mut tail, MAX_BYTES);
+        let mut out = marker.to_string();
+        out.push_str(&tail);
+        return Truncated {
+            text: out,
+            truncated: true,
+            total_lines: lines.len(),
+            total_bytes: text.len(),
+            kept_lines: 1,
+            spill_path: None,
+        };
+    }
     kept.reverse();
     let mut out = marker.to_string();
     out.push_str(&kept.join("\n"));
@@ -157,6 +173,25 @@ fn truncate_head_with_marker(text: &str, marker: &str) -> Truncated {
             total_lines,
             total_bytes,
             kept_lines: total_lines,
+            spill_path: None,
+        };
+    }
+    if kept.is_empty() {
+        // 同尾部：单行超长时退化为**头部字节片段**（UTF-8 边界安全），
+        // 避免“只有标记、零内容”（T2 修复）。不追加省略号——截断由 marker
+        // 表达，保留行内只含原文字符（既有约定：CJK 单行测试据此断言）。
+        let mut end = MAX_BYTES.min(text.len());
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut out = String::from(&text[..end]);
+        out.push_str(marker);
+        return Truncated {
+            text: out,
+            truncated: true,
+            total_lines,
+            total_bytes,
+            kept_lines: 1,
             spill_path: None,
         };
     }

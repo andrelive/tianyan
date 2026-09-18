@@ -65,6 +65,28 @@ fn long_single_line_byte_cap_no_panic() {
     assert!(r.text.len() <= MAX_BYTES + 128);
 }
 
+/// T2 回归：单行超长时头部/尾部截断必须保留**片段内容**——
+/// 此前按行累加的首行即超限 → kept 为空 → 输出只剩截断标记（零内容）。
+#[test]
+fn single_huge_line_keeps_fragment_head_and_tail() {
+    let text = format!("HEAD{}TAIL", "x".repeat(70 * 1024));
+
+    let h = truncate_head(&text);
+    assert!(h.truncated);
+    assert!(
+        h.text.starts_with("HEAD"),
+        "头部截断应保留片段开头（而非零内容）"
+    );
+
+    let t = truncate_tail(&text);
+    assert!(t.truncated);
+    assert!(
+        t.text.contains("TAIL"),
+        "尾部截断应保留片段结尾（而非零内容）"
+    );
+    assert!(t.text.len() > 1000, "应保留可观内容：{} 字节", t.text.len());
+}
+
 /// CJK 多字节边界：30k 个"天"单行不 panic、不切分字符。
 #[test]
 fn cjk_single_line_never_panics_or_splits() {
