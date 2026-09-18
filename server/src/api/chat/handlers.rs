@@ -68,12 +68,13 @@ pub async fn chat_stream_handler(
     // 取消标志：服务关停时置位；客户端断开不置位（跑完再取——本地助手后台
     // 任务不应因 SSE 断线而中断），主动「停止」经 stream_cancels 端点显式触发。
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // 注册到流取消注册表（供显式「停止」端点触发）；agent 跑完后移除
+    // 注册到流取消注册表（供显式「停止」端点触发）；agent 跑完后移除。
+    //
+    // T1-10：**同会话并发保护**——同一会话已有活跃流时拒绝新流（409 Conflict）。
+    // 此前直接覆盖取消槽：旧流从此“取消不到”（「停止」按钮失效），且两轮流
+    // 并发写同一会话（消息交错）。检查与插入在同一把锁内完成（原子）。
     let cancels_registry = state.stream_cancels();
-    cancels_registry
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(session_id.clone(), cancel.clone());
+    state.try_register_stream(&session_id, cancel.clone())?;
     let session_id_for_cleanup = session_id.clone();
 
     // 统一事件通道（GET /events 广播源）
