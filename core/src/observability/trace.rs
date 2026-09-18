@@ -12,7 +12,7 @@
 //! "哪个会话/任务在什么顺序上做了什么"。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -45,6 +45,11 @@ impl SpanKind {
 /// 内存缓冲上限（超过后丢弃最旧，等待 flush 落库）。
 const MAX_BUFFER: usize = 5000;
 
+/// `trace_spans` 保留窗口（天）：超出则在刷盘后的节流清理中删除（T1-19）。
+const SPAN_RETENTION_DAYS: i64 = 30;
+/// 清理节流间隔（毫秒）：刷盘频繁（每轮/每工具），清理无需每次执行。
+const PRUNE_THROTTLE_MS: i64 = 10 * 60 * 1000;
+
 /// 结构化 Trace 收集器：热路径内存缓冲 + 批量落库 + 回放查询。
 pub struct TraceCollector {
     buffer: Mutex<Vec<TraceSpan>>,
@@ -54,6 +59,8 @@ pub struct TraceCollector {
     /// Trace 域仓储（SQL 收敛：落盘/查询经此，组件保留内存缓冲）。
     repo: TraceRepo,
     pending_writes: AtomicU64,
+    /// 上次清理时间戳（毫秒；节流用，T1-19）。
+    last_prune_ms: AtomicI64,
 }
 
 impl TraceCollector {
@@ -64,6 +71,7 @@ impl TraceCollector {
             repo: TraceRepo::new(db.clone()),
             current_turns: Mutex::new(HashMap::new()),
             pending_writes: AtomicU64::new(0),
+            last_prune_ms: AtomicI64::new(0),
         }))
     }
 
@@ -215,7 +223,25 @@ impl TraceCollector {
             return Err(e);
         }
         self.pending_writes.store(0, Ordering::Relaxed);
+        // T1-19：落盘后按节流窗口清理超出保留期的旧记录（此前只落盘不清理）
+        self.prune_if_due().await;
         Ok(())
+    }
+    /// 按节流窗口清理超出保留期的 span（T1-19）。
+    ///
+    /// 失败仅告警（维护动作，不影响刷盘成功语义）。
+    async fn prune_if_due(&self) {
+        let now = Utc::now().timestamp_millis();
+        let last = self.last_prune_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < PRUNE_THROTTLE_MS {
+            return;
+        }
+        self.last_prune_ms.store(now, Ordering::Relaxed);
+        match self.repo.prune_spans(SPAN_RETENTION_DAYS).await {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "trace: 已清理超出保留窗口的 span"),
+            Err(e) => tracing::warn!(error = %e, "trace: span 清理失败（下次刷盘重试）"),
+        }
     }
 
     /// 查询 trace span（按 `session_id` / `task_id` 过滤 + 条数上限）。
@@ -337,6 +363,44 @@ mod tests {
             "省略号前不应有半个 UTF-8 字符: {}",
             t.len()
         );
+    }
+
+    #[test]
+    fn test_flush_prunes_spans_beyond_retention() {
+        // T1-19：刷盘后应清理超出保留窗口的旧 span（此前只落盘不清理——
+        // 文档声称有保留窗口但实现没有，trace_spans 单调增长）。
+        let db = Database::open_in_memory().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { db.init_schemas().await.unwrap() });
+
+        let repo = TraceRepo::new(db.clone());
+        let old = TraceSpan {
+            id: 0,
+            session_id: "s-old".to_string(),
+            task_id: None,
+            turn_index: Some(0),
+            kind: "turn".to_string(),
+            name: "old".to_string(),
+            detail: String::new(),
+            duration_ms: 1,
+            tokens: 0,
+            success: true,
+            error: None,
+            recorded_at: "2000-01-01T00:00:00+00:00".to_string(),
+        };
+        rt.block_on(async { repo.flush_spans(&[old]).await.unwrap() });
+
+        let c = TraceCollector::new(db.clone()).unwrap();
+        c.set_current_turn("s1", 0);
+        c.record_turn("s1", "gpt-test", 10, 100, true);
+        rt.block_on(async { c.flush().await.unwrap() });
+
+        let spans = rt.block_on(async { c.query(None, None, 100).await.unwrap() });
+        assert!(
+            spans.iter().all(|s| s.session_id != "s-old"),
+            "保留窗口外的旧 span 应被清理（T1-19）"
+        );
+        assert!(spans.iter().any(|s| s.session_id == "s1"), "新 span 应保留");
     }
 
     #[test]

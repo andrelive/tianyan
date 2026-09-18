@@ -98,6 +98,21 @@ impl TraceRepo {
         out.reverse();
         Ok(out)
     }
+
+    /// 清理早于保留窗口的 span（T1-19：此前 flush 文档声称“清理超出保留窗口的旧
+    /// 记录”，实现却无清理 → `trace_spans` 单调增长）。
+    ///
+    /// `recorded_at` 为 RFC3339（同一 `to_rfc3339` 口径写入），字典序与时间序
+    /// 一致，可直接字符串比较。返回删除行数。
+    pub async fn prune_spans(&self, retain_days: i64) -> Result<usize, TianyanError> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retain_days.max(1))).to_rfc3339();
+        let conn = self.db.lock().await;
+        conn.execute(
+            "DELETE FROM trace_spans WHERE recorded_at < ?1",
+            rusqlite::params![cutoff],
+        )
+        .map_err(|e| TianyanError::Custom(format!("trace: 清理失败：{e}")))
+    }
 }
 
 /// 行映射：数据库行 → TraceSpan。
