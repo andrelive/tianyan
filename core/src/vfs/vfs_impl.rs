@@ -10,7 +10,9 @@ use crate::common::types::{
 };
 use crate::model::EmbeddingService;
 use crate::vfs::backend::StorageBackend;
-use crate::vfs::traits::{ContentMetadata, ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
+use crate::vfs::traits::{
+    ContentMetadata, ContentStore, VectorReconcileStats, VfsCore, VfsSearch, VirtualFileSystem,
+};
 use crate::vfs::types::{ContextEntry, VectorPoint};
 use crate::vfs::vector::VectorStorage;
 
@@ -619,6 +621,77 @@ impl VirtualFileSystem for VirtualFileSystemImpl {
         }
         tracing::info!(done, total, "向量库回填完成");
         Ok(done)
+    }
+
+    async fn reconcile_vector_index(&self) -> Result<VectorReconcileStats> {
+        // 1. 内容侧：收集全部可索引条目（排除 Session——ADR-018 会话不入向量库）
+        let mut content_uris: Vec<TianyanUri> = Vec::new();
+        for &category in ContextNamespace::ALL {
+            if category == ContextNamespace::Session {
+                continue;
+            }
+            let root = TianyanUri::new(category, vec![]);
+            collect_indexable_uris(self, &root, &mut content_uris).await;
+        }
+        let content_ids: std::collections::HashSet<String> =
+            content_uris.iter().map(|u| u.to_point_id()).collect();
+
+        // 2. 向量侧：枚举现有向量点
+        let vector_ids: std::collections::HashSet<String> = self
+            .vector_storage
+            .list_point_ids()
+            .await?
+            .into_iter()
+            .collect();
+
+        let mut stats = VectorReconcileStats::default();
+
+        // 3. 内容有、向量缺 → 重建索引（复用回填同一路径：读 L0/L1 摘要 → 嵌入）
+        for uri in &content_uris {
+            if vector_ids.contains(&uri.to_point_id()) {
+                continue;
+            }
+            let (Ok(abs), Ok(ov)) = (
+                self.read_abstract(uri).await,
+                self.read_content(uri, ContentLevel::Overview).await,
+            ) else {
+                continue;
+            };
+            if abs.trim().is_empty() || ov.trim().is_empty() {
+                continue;
+            }
+            match self.update_summary_vectors(uri, &abs, &ov).await {
+                Ok(()) => stats.reindexed += 1,
+                Err(e) => {
+                    stats.errors += 1;
+                    tracing::warn!(uri = %uri, error = %e, "对账：重建索引失败");
+                }
+            }
+        }
+
+        // 4. 向量有、内容无 → 删除孤儿点（delete 向量删除失败仅 warn 的补偿通道）
+        for id in &vector_ids {
+            if content_ids.contains(id) {
+                continue;
+            }
+            match self.vector_storage.delete_point(id).await {
+                Ok(()) => stats.orphans_removed += 1,
+                Err(e) => {
+                    stats.errors += 1;
+                    tracing::warn!(point_id = %id, error = %e, "对账：删除孤儿向量点失败");
+                }
+            }
+        }
+
+        if stats.reindexed > 0 || stats.orphans_removed > 0 || stats.errors > 0 {
+            tracing::info!(
+                reindexed = stats.reindexed,
+                orphans_removed = stats.orphans_removed,
+                errors = stats.errors,
+                "向量-内容对账完成"
+            );
+        }
+        Ok(stats)
     }
 }
 

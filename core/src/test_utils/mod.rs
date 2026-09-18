@@ -475,6 +475,11 @@ impl VectorStorage for InMemoryVectorStorage {
         Ok(())
     }
 
+    async fn list_point_ids(&self) -> Result<Vec<String>> {
+        // T1-18：内存后端直接枚举已存点 ID（对账测试用）
+        Ok(self.points.read().await.keys().cloned().collect())
+    }
+
     async fn upsert_point(&self, point: &VectorPoint) -> Result<()> {
         self.points
             .write()

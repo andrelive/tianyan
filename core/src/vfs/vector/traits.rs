@@ -25,6 +25,14 @@ pub trait VectorStorage: Send + Sync {
         Ok(0)
     }
 
+    /// 枚举向量表中所有点的 ID（T1-18 对账用：与内容条目做双向差集）。
+    ///
+    /// 默认实现返回空列表（测试桩）；真实后端必须实现——否则对账会把全部
+    /// 内容误判为“缺索引”并重复嵌入。
+    async fn list_point_ids(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// 初始化向量存储。
     async fn initialize(&self) -> Result<()>;
 

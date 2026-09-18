@@ -401,3 +401,90 @@ async fn test_move_entry_directory_with_children_conflict() {
     assert!(vfs.exists(&child).await.unwrap());
     assert!(!vfs.exists(&destination).await.unwrap());
 }
+
+// ── T1-18：向量-内容对账 ───────────────────────────────────────────────
+
+/// 对账：内容有、向量缺 → 重建索引；向量有、内容无 → 删除孤儿点。
+#[tokio::test]
+async fn test_reconcile_vector_index_rebuilds_missing_and_removes_orphans() {
+    use std::sync::Arc;
+
+    use crate::common::types::EntryMetadata;
+    use crate::config::StorageConfig;
+    use crate::db::Database;
+    use crate::test_utils::{InMemoryVectorStorage, MockEmbeddingService};
+    use crate::vfs::backend::SqliteBackend;
+    use crate::vfs::traits::VectorReconcileStats;
+    use crate::vfs::types::VectorPoint;
+    use crate::vfs::vector::VectorStorage;
+    use crate::vfs::{VirtualFileSystem, CURRENT_SCHEMA_VERSION};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        data_dir: dir.path().into(),
+        ..Default::default()
+    };
+    // 生产同构后端（SqliteBackend：条目 is_directory 由表字段决定）。
+    // LocalFileBackend 把条目映射为目录（内含 .meta/content.* 内部文件），
+    // 枚举语义与生产不一致（会把条目当成目录递归进去）。
+    let db = Database::open_in_memory().unwrap();
+    db.init_schemas().await.unwrap();
+    let backend = Arc::new(SqliteBackend::new(db));
+    backend.ensure_schema().await.unwrap();
+    let vector = Arc::new(InMemoryVectorStorage::new());
+    let vfs = VirtualFileSystemImpl::new(backend, vector.clone(), config)
+        .with_embedding_provider(Arc::new(MockEmbeddingService), "test-model");
+
+    let uri = TianyanUri::new(
+        ContextNamespace::Knowledge,
+        vec!["reconcile.md".to_string()],
+    );
+    vfs.create_file(&uri).await.unwrap();
+    vfs.write(&uri, ContentLevel::Abstract, "摘要文本")
+        .await
+        .unwrap();
+    vfs.write(&uri, ContentLevel::Overview, "概览文本")
+        .await
+        .unwrap();
+    vfs.update_summary_vectors(&uri, "摘要文本", "概览文本")
+        .await
+        .unwrap();
+    let point_id = uri.to_point_id();
+    assert!(
+        vector.get_point(&point_id).await.unwrap().is_some(),
+        "前置：索引已建立"
+    );
+
+    // 漂移 A：向量点丢失（删除失败 / 表被重建）
+    vector.delete_point(&point_id).await.unwrap();
+    // 漂移 B：孤儿点（内容已不存在，向量残留）
+    let ghost_uri = TianyanUri::new(ContextNamespace::Knowledge, vec!["ghost.md".to_string()]);
+    let orphan = VectorPoint {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        id: ghost_uri.to_point_id(),
+        abstract_vector: Some(vec![0.0; 8]),
+        overview_vector: Some(vec![0.0; 8]),
+        visual_vector: None,
+        payload: EntryMetadata::new(ghost_uri.clone(), "knowledge"),
+    };
+    vector.upsert_point(&orphan).await.unwrap();
+
+    let stats = vfs.reconcile_vector_index().await.unwrap();
+    assert_eq!(
+        (stats.reindexed, stats.orphans_removed, stats.errors),
+        (1, 1, 0),
+        "对账结果不符（实际 stats = {stats:?}）"
+    );
+    assert!(
+        vector.get_point(&point_id).await.unwrap().is_some(),
+        "重建后索引应存在"
+    );
+    assert!(
+        vector.get_point(&orphan.id).await.unwrap().is_none(),
+        "孤儿点应被清理"
+    );
+
+    // 幂等：再对账无待修复项
+    let again = vfs.reconcile_vector_index().await.unwrap();
+    assert_eq!(again, VectorReconcileStats::default());
+}

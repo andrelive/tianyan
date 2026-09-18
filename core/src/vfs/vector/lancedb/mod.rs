@@ -226,6 +226,42 @@ impl VectorStorage for LanceDbVectorStore {
         Ok(())
     }
 
+    async fn list_point_ids(&self) -> Result<Vec<String>> {
+        // T1-18：枚举全表 ID（对账用）
+        let rows = self
+            .table
+            .count_rows(None)
+            .await
+            .map_err(|e| TianyanError::Custom(format!("向量数据库错误：行数统计失败: {e}")))?;
+        if rows == 0 {
+            return Ok(Vec::new());
+        }
+        let dummy = vec![0.0f32; self.embedding_dim];
+        let stream = self
+            .table
+            .query()
+            .nearest_to(dummy)
+            .map_err(|e| TianyanError::Custom(format!("向量数据库错误：枚举点失败: {e}")))?
+            .limit(rows)
+            .column("abstract_vec")
+            .execute()
+            .await
+            .map_err(|e| TianyanError::Custom(format!("向量数据库错误：执行失败: {e}")))?;
+        let batches: Vec<RecordBatch> = stream
+            .try_collect()
+            .await
+            .map_err(|e| TianyanError::Custom(format!("向量数据库错误：收集失败: {e}")))?;
+        let mut ids = Vec::new();
+        for batch in &batches {
+            if let Some(col) = batch.column_by_name("id") {
+                for i in 0..batch.num_rows() {
+                    ids.push(col.as_string::<i32>().value(i).to_string());
+                }
+            }
+        }
+        Ok(ids)
+    }
+
     async fn count_rows(&self) -> Result<u64> {
         self.table
             .count_rows(None)

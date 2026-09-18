@@ -210,10 +210,35 @@ impl TaskHandler for GcTask {
         let rules_result = self.scan_learned_rules(ctx).await;
         let memory_result = self.scan_memory(ctx).await;
 
+        // T1-18：向量-内容对账（与记忆/规则 GC 同周期）——内容有、向量缺 → 重建
+        // 索引；向量有、内容无 → 删孤儿点。失败仅告警（不影响 GC 结果）。
+        let reconciled = match ctx.vfs.reconcile_vector_index().await {
+            Ok(stats) => {
+                if stats.reindexed > 0 || stats.orphans_removed > 0 {
+                    tracing::info!(
+                        reindexed = stats.reindexed,
+                        orphans_removed = stats.orphans_removed,
+                        errors = stats.errors,
+                        "GC：向量-内容对账完成"
+                    );
+                }
+                stats.reindexed + stats.orphans_removed
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "GC：向量-内容对账失败（跳过）");
+                0
+            }
+        };
+
         match (rules_result, memory_result) {
             (Ok(rules), Ok(mem)) => {
-                tracing::info!(stale_rules = rules, cleaned_memory = mem, "GC 扫描完成");
-                TaskResult::success(rules + mem)
+                tracing::info!(
+                    stale_rules = rules,
+                    cleaned_memory = mem,
+                    reconciled,
+                    "GC 扫描完成"
+                );
+                TaskResult::success(rules + mem + reconciled)
             }
             (Err(e), _) | (_, Err(e)) => {
                 tracing::warn!(error = %e, "GC 扫描失败");

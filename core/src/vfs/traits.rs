@@ -161,6 +161,26 @@ pub trait VirtualFileSystem: VfsCore + ContentStore + VfsSearch {
         let _ = self;
         Ok(0)
     }
+
+    /// 向量索引与内容对账（T1-18）：内容有、向量缺 → 重建索引；向量有、内容无
+    /// → 删除孤儿点。返回统计（尽力而为，单条失败计入 `errors` 不中断）。
+    ///
+    /// 触发：`GcTask` 周期任务（与记忆/规则 GC 同源）。默认 no-op（mock 后端
+    /// 不参与对账；生产实现见 `VirtualFileSystemImpl`）。
+    async fn reconcile_vector_index(&self) -> Result<VectorReconcileStats> {
+        Ok(VectorReconcileStats::default())
+    }
+}
+
+/// 向量-内容对账统计（T1-18）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VectorReconcileStats {
+    /// 内容存在但向量缺失 → 重建索引的条目数。
+    pub reindexed: usize,
+    /// 向量存在但内容不存在 → 删除的孤儿点数。
+    pub orphans_removed: usize,
+    /// 单条处理失败数（不中断整体对账）。
+    pub errors: usize,
 }
 
 #[cfg(test)]
