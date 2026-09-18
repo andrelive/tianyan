@@ -373,10 +373,11 @@ export default function ChatPanel() {
       }
 
       // 乐观更新：回退到该消息之前（删除该消息及其后）
-      st.deleteMessagesFrom(index);
+      st.deleteMessagesFrom(sessionId, index);
       try {
         const resp = await deleteSessionMessage(sessionId, target.id);
-        st.setMessages(resp.messages);
+        // 迟到响应写回发起会话（用户可能在请求期间切换会话——不得污染）
+        st.setSessionMessages(sessionId, resp.messages);
         st.setRollbackMessage(sessionId, target.id);
       } catch (err: unknown) {
         st.showToast(`回退失败: ${toErrorMessage(err, '未知错误')}`, 'error');
@@ -396,7 +397,8 @@ export default function ChatPanel() {
 
     try {
       const resp = await redoSessionMessage(sessionId, lastRollbackMessageId);
-      state.setMessages(resp.messages);
+      // 迟到响应写回发起会话（撤销回退同理按会话 id 寻址）
+      state.setSessionMessages(sessionId, resp.messages);
       setRollbackMessage(sessionId, null);
       state.showToast('已撤销回退', 'success');
     } catch (err: unknown) {

@@ -353,6 +353,102 @@ describe('ChatPanel', () => {
     expect(screen.queryByRole('button', { name: /撤销回退/ })).not.toBeInTheDocument();
   });
 
+  it('rollback result writes to the originating session even after switching away mid-flight', async () => {
+    // 竞态守卫（回退的跨会话写入寻址）：回退请求发出后（挂起模拟慢响应）
+    // 用户切到会话 B——迟到的回退结果必须写回发起的会话 A，不得写入 B
+    // （此前 setMessages 隐式写入"此刻的当前会话"）。
+    const user = userEvent.setup();
+    let releaseDelete: () => void = () => {};
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    server.use(
+      http.post('/api/v1/sessions/session-A/messages/delete', async () => {
+        await deleteGate;
+        // 服务端截断结果替身：带唯一标识（msg_rollback_srv）用于判定"迟到
+        // 响应写入了哪个会话"。真实语义下结果与乐观值幂等一致（本项目
+        // 已知"前端索引与服务端列表错位"——代码以消息 ID 定位），此处刻意
+        // 不同以放大可观察性（乐观 slice 不含该标识）。
+        return HttpResponse.json({
+          session_id: 'session-A',
+          messages: [
+            {
+              id: 'msg_rollback_srv',
+              role: 'system',
+              segments: [{ type: 'text', text: '回退完成' }],
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        });
+      }),
+    );
+
+    const aMessages: ChatMessage[] = [
+      {
+        id: 'msg_a0',
+        role: 'user',
+        segments: [{ type: 'text', text: 'A 的问题' }],
+        timestamp: new Date().toISOString(),
+      },
+      {
+        id: 'msg_a1',
+        role: 'assistant',
+        segments: [{ type: 'text', text: 'A 的回答' }],
+        timestamp: new Date().toISOString(),
+      },
+    ];
+    const bMessages: ChatMessage[] = [
+      {
+        id: 'msg_b0',
+        role: 'user',
+        segments: [{ type: 'text', text: 'B-ONLY-MARKER' }],
+        timestamp: new Date().toISOString(),
+      },
+    ];
+    useAppStore.setState({
+      currentSessionId: 'session-A',
+      messages: aMessages,
+      sessionMessages: { 'session-A': aMessages, 'session-B': bMessages },
+    });
+
+    // 路由不带 :sessionId 参数：模拟"通过左侧列表切换会话"（直接改 store
+    // 状态，不触发 URL→store 同步 effect 的弹回）
+    renderChatPanel('/chat');
+
+    // 发起回退（delete 请求 → 挂起）
+    await user.click(screen.getByRole('button', { name: /回退到此/ }));
+
+    // 请求挂起期间切到会话 B
+    await act(async () => {
+      useAppStore.getState().setCurrentSession('session-B');
+    });
+    expect(useAppStore.getState().currentSessionId).toBe('session-B');
+
+    // 放行回退响应（session-A 的结果）
+    await act(async () => {
+      releaseDelete();
+      await deleteGate;
+    });
+
+    // 等迟到响应被处理完（修复后写入 session-A；修复前被写入 session-B——痕迹必有其一）
+    await waitFor(() => {
+      const st = useAppStore.getState();
+      const hasSentinel = (sid: string) =>
+        st.sessionMessages[sid]?.some((m) => m.id === 'msg_rollback_srv') ?? false;
+      expect(hasSentinel('session-A') || hasSentinel('session-B')).toBe(true);
+    });
+
+    // ★ 回退结果必须写回发起会话，不得污染已切换到的会话（缓存与当前投影）
+    expect(
+      useAppStore.getState().sessionMessages['session-A']?.some((m) => m.id === 'msg_rollback_srv'),
+    ).toBe(true);
+    expect(
+      useAppStore.getState().sessionMessages['session-B']?.some((m) => m.id === 'msg_rollback_srv'),
+    ).toBe(false);
+    expect(useAppStore.getState().sessionMessages['session-B']?.[0]?.id).toBe('msg_b0');
+    expect(useAppStore.getState().messages[0]?.id).toBe('msg_b0');
+  });
+
   it('show no clarification bubble for a different session (cross-session isolation)', () => {
     useAppStore.setState({
       currentSessionId: 'session-B',

@@ -131,12 +131,39 @@ describe('useAppStore', () => {
 
   // ── Messages ──
 
-  it('setMessages replaces the messages array', () => {
+  it('setSessionMessages replaces the session cache and syncs the current projection', () => {
+    useAppStore.setState({ currentSessionId: 'session-1' });
     const msgs: ChatMessage[] = [{ role: 'user', segments: [{ type: 'text', text: 'first' }] }];
 
-    useAppStore.getState().setMessages(msgs);
+    useAppStore.getState().setSessionMessages('session-1', msgs);
+    expect(useAppStore.getState().sessionMessages['session-1']).toHaveLength(1);
     expect(useAppStore.getState().messages).toHaveLength(1);
     expect(messageText(useAppStore.getState().messages[0])).toBe('first');
+  });
+
+  it('setSessionMessages writes only the target session (no implicit current session)', () => {
+    // 显式寻址：目标非当前会话时只写字典，不污染当前投影
+    useAppStore.setState({ currentSessionId: 'session-A' });
+    const msgs: ChatMessage[] = [{ role: 'user', segments: [{ type: 'text', text: 'B' }] }];
+
+    useAppStore.getState().setSessionMessages('session-B', msgs);
+    expect(useAppStore.getState().sessionMessages['session-B']).toHaveLength(1);
+    expect(useAppStore.getState().messages).toHaveLength(0);
+  });
+
+  it('updateLastMessage never writes into a non-assistant trailing message (role guard)', () => {
+    // role 守卫：列表末条为 system（后台通知落尾）/user 时不得写入增量
+    useAppStore.setState({
+      messages: [
+        { role: 'assistant', segments: [{ type: 'text', text: '回答' }] },
+        { role: 'system', segments: [{ type: 'text', text: '[通知]' }] },
+      ],
+    });
+
+    useAppStore.getState().updateLastMessage('增量');
+    const msgs = useAppStore.getState().messages;
+    expect(messageText(msgs[0])).toBe('回答增量');
+    expect(messageText(msgs[1])).toBe('[通知]');
   });
 
   it('addMessage appends a message', () => {
@@ -214,7 +241,7 @@ describe('useAppStore', () => {
       streamStatus: { [PENDING_SESSION_KEY]: 'streaming' },
     });
 
-    useAppStore.getState().deleteMessagesFrom(1);
+    useAppStore.getState().deleteMessagesFrom(PENDING_SESSION_KEY, 1);
     expect(useAppStore.getState().messages).toHaveLength(1);
     expect(messageText(useAppStore.getState().messages[0])).toBe('a');
     expect(useAppStore.getState().streamStatus).toEqual({ [PENDING_SESSION_KEY]: 'idle' });

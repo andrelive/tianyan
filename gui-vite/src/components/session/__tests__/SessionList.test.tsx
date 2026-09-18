@@ -413,4 +413,86 @@ describe('SessionList', () => {
       expect(screen.getByText('新标题')).toBeInTheDocument();
     });
   });
+
+  it('slow history load does not leak into the session the user switched to (write addressing by session id)', async () => {
+    // 竞态守卫（跨会话写入寻址）：点 s1 触发历史加载（挂起模拟慢响应），
+    // 加载返回前切到 s2——迟到的 s1 响应必须写入 s1，不得污染 s2 的
+    // 缓存与当前投影（此前 setMessages 隐式写入"此刻的当前会话"）。
+    const user = userEvent.setup();
+    mockSessions([
+      makeSession({ id: 's1', title: '会话一' }),
+      makeSession({ id: 's2', title: '会话二' }),
+    ]);
+
+    let releaseS1: () => void = () => {};
+    const s1Gate = new Promise<void>((resolve) => {
+      releaseS1 = resolve;
+    });
+    server.use(
+      http.get('/api/v1/sessions/s1/messages', async () => {
+        await s1Gate;
+        return HttpResponse.json({
+          session_id: 's1',
+          messages: [
+            {
+              id: 'msg_s1',
+              seq: 1,
+              role: 'user',
+              segments: [{ type: 'text', text: 'S1-ONLY-MARKER' }],
+              timestamp: '2026-07-23T10:00:00Z',
+            },
+          ],
+        });
+      }),
+      http.get('/api/v1/sessions/s2/messages', () =>
+        HttpResponse.json({
+          session_id: 's2',
+          messages: [
+            {
+              id: 'msg_s2',
+              seq: 1,
+              role: 'user',
+              segments: [{ type: 'text', text: 'S2-ONLY-MARKER' }],
+              timestamp: '2026-07-23T10:00:00Z',
+            },
+          ],
+        }),
+      ),
+    );
+
+    renderSessionList();
+    await waitFor(() => {
+      expect(screen.getByText('会话一')).toBeInTheDocument();
+    });
+
+    // 点 s1（历史请求挂起）→ 加载返回前切到 s2
+    await user.click(screen.getByText('会话一'));
+    await user.click(screen.getByText('会话二'));
+
+    // s2 的历史正常写入
+    await waitFor(() => {
+      expect(useAppStore.getState().sessionMessages['s2']?.[0]?.id).toBe('msg_s2');
+    });
+
+    // 放行 s1 的迟到响应
+    await act(async () => {
+      releaseS1();
+      await s1Gate;
+    });
+
+    // 等迟到响应被处理完（修复后写入 s1；修复前被写入 s2——痕迹必有其一）
+    await waitFor(() => {
+      const st = useAppStore.getState();
+      expect(
+        st.sessionMessages['s1']?.[0]?.id === 'msg_s1' ||
+          st.sessionMessages['s2']?.[0]?.id === 'msg_s1',
+      ).toBe(true);
+    });
+
+    // ★ 迟到响应必须写入发起会话，不得污染已切换到的会话（缓存与当前投影）
+    expect(useAppStore.getState().sessionMessages['s1']?.[0]?.id).toBe('msg_s1');
+    expect(useAppStore.getState().currentSessionId).toBe('s2');
+    expect(useAppStore.getState().sessionMessages['s2']?.[0]?.id).toBe('msg_s2');
+    expect(useAppStore.getState().messages[0]?.id).toBe('msg_s2');
+  });
 });

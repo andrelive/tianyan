@@ -78,7 +78,6 @@ export interface ChatSlice {
   /** 设置会话轮状态（turn_state 事件驱动，ADR-035 §9）。 */
   setTurnState: (sessionId: string, turn: TurnState) => void;
   messages: ChatMessage[];
-  setMessages: (messages: ChatMessage[]) => void;
   /** 按会话设置消息（更新指定会话缓存；目标会话为当前会话时同步投影）。
    * 用于流结束/失败后从服务端同步真实消息 ID（回退定位键），或后台流
    * 归属非当前会话时的缓存更新。 */
@@ -113,7 +112,9 @@ export interface ChatSlice {
   /** 附加 token 用量到 assistant 消息（完成 chunk 携带；按会话独立取数） */
   attachLastMessageUsage: (usage: TokenUsage, sessionId?: string | null) => void;
   clearMessages: () => void;
-  deleteMessagesFrom: (index: number) => void;
+  /** 回退乐观更新：删除指定会话从 index 起及之后的本地消息（按会话 id
+   * 寻址——回退请求期间用户切换会话不得写错对象）。 */
+  deleteMessagesFrom: (sessionId: string, index: number) => void;
   /** 指定会话是否已有本地消息缓存（无 → 调用方应加载历史） */
   hasSessionMessages: (sessionId: string) => boolean;
 
@@ -278,14 +279,6 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
   // Messages
   sessionMessages: {},
   messages: [],
-  setMessages: (messages) =>
-    set((s) => {
-      const key = resolveSessionKey(s);
-      return {
-        sessionMessages: { ...s.sessionMessages, [key]: messages },
-        messages,
-      };
-    }),
   setSessionMessages: (sessionId, messages) =>
     set((s) => {
       const isCurrent = sessionId === resolveSessionKey(s);
@@ -426,8 +419,12 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
   updateLastMessage: (delta, sessionId) =>
     set((s) =>
       updateSessionMessages(s, sessionId, (msgs) => {
-        if (msgs.length === 0) return msgs;
-        const last = msgs[msgs.length - 1];
+        // role 守卫：只写最后一条 assistant（文档语义）。列表末条为
+        // user/system（如后台通知落尾/乱序到达）时不得写入——防止增量
+        // 文本污染非 assistant 消息（跨会话串扰的放大器）。
+        const idx = lastAssistantIndex(msgs);
+        if (idx < 0) return msgs;
+        const last = msgs[idx];
         const segments = last.segments ?? [];
         // 时间线：文本增量若末段已是 text 直接合并，避免逐 delta 建对象
         // （长回答 O(n^2) 段膨胀 → O(n)）
@@ -437,7 +434,7 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
             ? [...segments.slice(0, -1), { type: 'text' as const, text: lastSeg.text + delta }]
             : [...segments, { type: 'text' as const, text: delta }];
         const updated = [...msgs];
-        updated[updated.length - 1] = {
+        updated[idx] = {
           ...last,
           segments: nextSegments,
         };
@@ -578,16 +575,14 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
         messages: [],
       };
     }),
-  deleteMessagesFrom: (index) =>
-    set((s) => {
-      const key = s.currentSessionId ?? PENDING_SESSION_KEY;
-      const next = (s.sessionMessages[key] ?? s.messages).slice(0, index);
-      return {
-        sessionMessages: { ...s.sessionMessages, [key]: next },
-        messages: next,
-        streamStatus: { ...s.streamStatus, [key]: 'idle' },
-      };
-    }),
+  deleteMessagesFrom: (sessionId, index) =>
+    set((s) => ({
+      ...updateSessionMessages(s, sessionId, (msgs) => msgs.slice(0, index)),
+      streamStatus: {
+        ...s.streamStatus,
+        [resolveSessionKey(s, sessionId)]: 'idle',
+      },
+    })),
   hasSessionMessages: (sessionId) => !!get().sessionMessages[sessionId]?.length,
 
   // Clarification（追问）

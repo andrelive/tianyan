@@ -1,5 +1,5 @@
 /**
- * useSessionHistory —— 会话消息历史加载（挂载恢复 + 失败重载）的唯一入口。
+ * useSessionHistory / loadSessionHistory —— 会话消息历史加载的唯一入口。
  *
  * ChatPanel 此前在组件内联 3 段历史获取（挂载加载 / reloadSession / 唤醒轮询
  * 各自 fetch）——端点契约与缓存守卫知识散落。本 hook 收敛：
@@ -13,6 +13,30 @@ import { useCallback, useEffect, useRef } from 'react';
 import { fetchSessionMessages, fetchSessionMessagesPage } from '@/lib/api-client';
 import { useAppStore } from '@/lib/store';
 import { subscribeSession } from '@/hooks/use-unified-events';
+
+/**
+ * 懒加载会话历史（唯一入口，SessionList 与其它调用方共用）：按会话 id
+ * 寻址写入——迟到响应写入发起会话，不污染中途切换到的会话；请求期间
+ * 已被快照/流式写入（双重检查）或该会话流式中（与 `applySnapshot`
+ * 同规则）时丢弃迟到响应。
+ *
+ * 返回可用性：已有缓存 / 加载成功 → true；网络失败 → false（调用方
+ * 决定是否提示）。
+ */
+export async function loadSessionHistory(sessionId: string): Promise<boolean> {
+  const st = useAppStore.getState();
+  if (st.hasSessionMessages(sessionId)) return true;
+  try {
+    const data = await fetchSessionMessages(sessionId);
+    const cur = useAppStore.getState();
+    if (cur.hasSessionMessages(sessionId)) return true;
+    if ((cur.streamStatus[sessionId] ?? 'idle') === 'streaming') return true;
+    cur.setSessionMessages(sessionId, data.messages);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function useSessionHistory(urlSessionId: string | null | undefined) {
   const loadedOnMountRef = useRef(false);

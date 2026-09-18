@@ -2,12 +2,8 @@ import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useResource } from '@/hooks/use-resource';
 import { useAppStore } from '@/lib/store';
-import {
-  deleteSession,
-  fetchSessionMessages,
-  listSessions,
-  updateSessionTitle,
-} from '@/lib/api-client';
+import { deleteSession, listSessions, updateSessionTitle } from '@/lib/api-client';
+import { loadSessionHistory } from '@/hooks/use-session-history';
 import type { Session } from '@/lib/types';
 import { formatRelativeTime } from '@/lib/utils';
 import {
@@ -43,7 +39,6 @@ export default function SessionList() {
   const currentSessionId = useAppStore((s) => s.currentSessionId);
   const setCurrentSession = useAppStore((s) => s.setCurrentSession);
   const clearMessages = useAppStore((s) => s.clearMessages);
-  const setMessages = useAppStore((s) => s.setMessages);
   const setView = useAppStore((s) => s.setView);
   const showToast = useAppStore((s) => s.showToast);
   const newSessionWorkspace = useAppStore((s) => s.newSessionWorkspace);
@@ -169,16 +164,13 @@ export default function SessionList() {
       setCurrentSession(session.id);
       setView('chat');
       navigate(`/chat/${session.id}`);
-      // 本地已有缓存（流式累积/之前看过）→ 直接显示；无缓存才拉历史
-      if (useAppStore.getState().hasSessionMessages(session.id)) return;
-      try {
-        const data = await fetchSessionMessages(session.id);
-        setMessages(data.messages);
-      } catch {
-        showToast('加载会话消息失败', 'error');
-      }
+      // 本地已有缓存（流式累积/之前看过）→ 直接显示；无缓存才拉历史。
+      // 懒加载收口 loadSessionHistory（唯一入口）：按会话 id 寻址写入，
+      // 迟到响应不污染中途切换到的会话。
+      const ok = await loadSessionHistory(session.id);
+      if (!ok) showToast('加载会话消息失败', 'error');
     },
-    [navigate, setCurrentSession, setMessages, setView, showToast],
+    [navigate, setCurrentSession, setView, showToast],
   );
 
   const handleStartRename = (e: React.MouseEvent, session: Session) => {
