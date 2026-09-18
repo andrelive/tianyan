@@ -433,10 +433,7 @@ mod tests {
             std::path::PathBuf::from("C:\\abs")
         );
         assert_eq!(config.security.blocked_directories[0], home.join("etc"));
-        assert_eq!(
-            config.security.blocked_directories[1],
-            home.join("blocked")
-        );
+        assert_eq!(config.security.blocked_directories[1], home.join("blocked"));
     }
 
     #[test]
