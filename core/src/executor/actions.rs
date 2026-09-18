@@ -179,7 +179,8 @@ fn build_window(
 
 /// 执行文件写入操作。
 pub async fn execute_write_file(path: &str, content: &str) -> Result<Value, TianyanError> {
-    tokio::fs::write(path, content)
+    // T1-15：原子写（同目录临时文件 + rename）——避免“写一半”损坏用户源码
+    crate::executor::write_file_atomic(path, content)
         .await
         .map_err(|e| TianyanError::Custom(format!("executor: 文件操作失败：{}", e)))?;
     Ok(Value::String("写入成功".to_string()))

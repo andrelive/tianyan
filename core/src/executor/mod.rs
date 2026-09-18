@@ -45,3 +45,95 @@ pub use judge::LlmJudge;
 pub use security::DEFAULT_BLOCKED_COMMANDS;
 pub use types::Action;
 pub use verification::{VerificationGate, VerificationResult};
+
+/// 原子写文件（同目录临时文件 + rename 替换）——避免“写一半”留下损坏文件。
+///
+/// 用途：工具对**用户源码**的写入（`write_file` / `apply_edit` / `apply_patch`）。
+/// `fs::write` 是“截断原文件后写入”：中途崩溃 / 断电 / 磁盘满 → 文件残缺，
+/// 而内容是用户代码，代价高。临时文件与目标**同目录**（保证 rename 在同一
+/// 文件系统上原子）；rename 在 Windows 上覆盖已存在文件（Rust 用 MoveFileEx）。
+///
+/// 失败语义：任何一步失败都清理临时文件并返回错误，**原文件保持不变**。
+pub(crate) async fn write_file_atomic(
+    path: impl AsRef<std::path::Path>,
+    content: &str,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let path = path.as_ref();
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    let tmp = dir.join(format!(
+        ".{name}.tianyan-tmp-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+
+    let mut file = tokio::fs::File::create(&tmp).await?;
+    if let Err(e) = file.write_all(content.as_bytes()).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    let _ = file.flush().await;
+    drop(file);
+
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod atomic_tests {
+    use super::*;
+
+    async fn leftovers(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("tianyan-tmp"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_write_file_atomic_creates_and_replaces_without_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a.txt");
+
+        write_file_atomic(&target, "第一版").await.unwrap();
+        assert_eq!(tokio::fs::read_to_string(&target).await.unwrap(), "第一版");
+
+        write_file_atomic(&target, "第二版内容").await.unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(&target).await.unwrap(),
+            "第二版内容"
+        );
+        assert!(
+            leftovers(dir.path()).await.is_empty(),
+            "不应残留临时文件：{:?}",
+            leftovers(dir.path()).await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_file_atomic_failure_keeps_target_and_cleans_tmp() {
+        // 目标是**目录**：rename 必然失败 → 原目录不受影响 + 无临时文件残留
+        let dir = tempfile::tempdir().unwrap();
+        let target_dir = dir.path().join("sub");
+        std::fs::create_dir(&target_dir).unwrap();
+
+        assert!(write_file_atomic(&target_dir, "x").await.is_err());
+        assert!(target_dir.is_dir(), "失败时目标目录应保持不变");
+        assert!(
+            leftovers(dir.path()).await.is_empty(),
+            "失败后不应残留临时文件：{:?}",
+            leftovers(dir.path()).await
+        );
+    }
+}

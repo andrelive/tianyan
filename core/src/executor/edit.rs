@@ -217,7 +217,8 @@ pub async fn apply_edit_action(path: &str, edits: Vec<ContentEdit>) -> Result<Va
         .await
         .map_err(|e| TianyanError::Custom(format!("executor: apply_edit: 读取失败：{e}")))?;
     let new_content = apply_edits_to_content(&content, &edits)?;
-    tokio::fs::write(path, new_content)
+    // T1-15：原子写（同目录临时文件 + rename）——避免半截文件
+    crate::executor::write_file_atomic(path, &new_content)
         .await
         .map_err(|e| TianyanError::Custom(format!("executor: apply_edit: 写入失败：{e}")))?;
     Ok(json!({
