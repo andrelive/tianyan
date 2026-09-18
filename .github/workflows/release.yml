@@ -48,9 +48,17 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $version = $tag.TrimStart('v')
-          $msi = Get-ChildItem "target/release/bundle/msi/*.msi" | Select-Object -First 1
-          $sig = Get-ChildItem "target/release/bundle/msi/*.sig" | Select-Object -First 1
-          $signature = Get-Content $sig.FullName -Raw
+          # 固定取 en-US 一份（updater 用单一 URL；zh-CN/en-US 安装包内容同构，
+          # 二选一即可）——避免"任意 First 1"选到 zh 的 msi + en 的 sig 这类
+          # 不配对组合（url 与 signature 必须来自同一安装包）。
+          $msi = Get-ChildItem "target/release/bundle/msi/*_en-US.msi" | Select-Object -First 1
+          if (-not $msi) { throw "找不到 MSI 产物（target/release/bundle/msi/*_en-US.msi）" }
+          # .sig 与 msi 同 basename 配对（Tauri 签名产物命名 = <msi 全名>.sig）
+          $sigPath = "$($msi.FullName).sig"
+          if (-not (Test-Path $sigPath)) {
+            throw "找不到签名文件：$sigPath（检查 bundle.createUpdaterArtifacts=true 与 TAURI_SIGNING_PRIVATE_KEY secret）"
+          }
+          $signature = Get-Content $sigPath -Raw
           $url = "https://github.com/andrelive/tianyan/releases/download/$tag/$($msi.Name)"
           $json = @{
             version = $version

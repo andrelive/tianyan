@@ -35,7 +35,7 @@
   "bundle": {
     "active": true,
     "targets": ["msi"],
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

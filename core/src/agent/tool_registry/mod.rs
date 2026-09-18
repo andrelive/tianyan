@@ -28,6 +28,7 @@ use crate::vfs::VirtualFileSystem;
 mod agent_ops;
 /// 内置工具元数据单一事实源（H-C1：schema/展示意图/短路清单）。
 mod builtin_tools;
+pub use builtin_tools::{PLATFORM_HINT_UNIX, PLATFORM_HINT_WINDOWS};
 mod code_ops;
 /// 演化数据查询工具执行器（ADR-017 GEPA 数据层：execution_stats 等）。
 mod evolution_ops;

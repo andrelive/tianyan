@@ -126,7 +126,15 @@ function Build-Tauri {
 
     Push-Location "$PSScriptRoot\..\tauri"
     try {
-        $buildOutput = cargo tauri build 2>&1
+        # createUpdaterArtifacts=true 时 Tauri 要求签名密钥；本地未设密钥则
+        # 覆盖为 false（本地构建不需要 .sig——发布签名由 CI 承担，
+        # TAURI_SIGNING_PRIVATE_KEY 在 release.yml 的 secrets 注入）。
+        $tauriArgs = @('tauri', 'build')
+        if (-not $env:TAURI_SIGNING_PRIVATE_KEY -and -not $env:TAURI_SIGNING_PRIVATE_KEY_PATH) {
+            $tauriArgs += @('--config', '{"bundle":{"createUpdaterArtifacts":false}}')
+            Write-Info "未检测到签名密钥：本次构建不产出 updater 签名（.sig）"
+        }
+        $buildOutput = cargo @tauriArgs 2>&1
         $exitCode = $LASTEXITCODE
 
         $buildOutput | ForEach-Object { "  $_" }
