@@ -156,6 +156,43 @@ fn is_test_or_temp_path(path: &str) -> bool {
     })
 }
 
+/// 写目标路径的风险定级（`ApplyEdit` / `ApplyPatch` 用，T1-16）。
+///
+/// 关键路径（系统目录 / `.env` / `config.y*`）→ High：与 `WriteFile` 同口径
+/// （此前恒 Medium——同一次“改 `.env`”用 write_file 判 High、用 apply_edit/
+/// apply_patch 只判 Medium，风险定级可被工具选择绕过）。
+///
+/// **不做**测试/临时路径的 Low 降级（有意）：`WriteFile` 创建测试文件确实
+/// 低风险，而 `apply_edit`/`apply_patch` 修改的是**已存在文件**（可能含生产
+/// 代码）——降级会让“改 tests/ 下的文件”绕过确认门。保守留 Medium。
+fn write_target_risk(path: &str) -> RiskLevel {
+    if is_critical_write_path(path) {
+        RiskLevel::High
+    } else {
+        RiskLevel::Medium
+    }
+}
+
+/// 从补丁文本提取文件路径（`*** Update File:` / `*** Add File:` / `*** Delete File:`
+/// 信封头部）——多文件补丁逐个定级后取最严（T1-16）。
+fn patch_file_paths(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            for prefix in ["*** Update File:", "*** Add File:", "*** Delete File:"] {
+                if let Some(rest) = line.strip_prefix(prefix) {
+                    let path = rest.trim();
+                    if !path.is_empty() {
+                        return Some(path.to_string());
+                    }
+                }
+            }
+            None
+        })
+        .collect()
+}
+
 /// 技能名是否命中危险关键词（shell/exec/delete/remove）：按非字母数字
 /// 分词后精确匹配——`executive_summary` 不再误命中 "exec"，
 /// `delete_all_files` 仍命中 "delete"。
@@ -269,8 +306,14 @@ impl ApprovalWorkflow {
                     RiskLevel::Low
                 }
             }
-            Action::ApplyEdit { .. } => RiskLevel::Medium,
-            Action::ApplyPatch { .. } => RiskLevel::Medium,
+            // T1-16：与 WriteFile **同口径**（此前恒 Medium——同一次“改 `.env`”
+            // 用 write_file 判 High、用 apply_edit/apply_patch 只判 Medium，
+            // 风险定级可被工具选择绕过）。多文件补丁按涉及路径取最严。
+            Action::ApplyEdit { path, .. } => write_target_risk(path),
+            Action::ApplyPatch { path, patch } => std::iter::once(write_target_risk(path))
+                .chain(patch_file_paths(patch).iter().map(|p| write_target_risk(p)))
+                .max()
+                .unwrap_or(RiskLevel::Medium),
             // 测试/构建命令经 cmd /C、sh -c 执行任意 shell 命令（与
             // ExecuteCommand 同级），属 Medium 风险，需用户确认。
             Action::RunTests { .. } => RiskLevel::Medium,

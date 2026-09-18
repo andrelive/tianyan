@@ -50,6 +50,71 @@ fn test_risk_level_assessment() {
 }
 
 #[test]
+fn test_write_tool_risk_uses_same_caliber_as_write_file() {
+    // T1-16：写类工具风险定级统一口径——此前 ApplyEdit/ApplyPatch 恒 Medium，
+    // 同一次“改 `.env`”用 write_file 判 High、用 apply_edit/apply_patch 只判
+    // Medium，风险定级可被工具选择绕过。
+    let workflow = ApprovalWorkflow::new(ApprovalWorkflowConfig::default());
+
+    let edit_env = Action::ApplyEdit {
+        path: "/etc/passwd".to_string(),
+        edits: vec![],
+    };
+    assert_eq!(
+        workflow.assess_risk(&edit_env),
+        RiskLevel::High,
+        "apply_edit 写关键路径应与 write_file 同为 High"
+    );
+
+    let patch_env = Action::ApplyPatch {
+        path: "/etc/passwd".to_string(),
+        patch: "*** Update File: /etc/passwd\n@@\n-root\n+backdoor\n".to_string(),
+    };
+    assert_eq!(
+        workflow.assess_risk(&patch_env),
+        RiskLevel::High,
+        "apply_patch 写关键路径应与 write_file 同为 High"
+    );
+
+    // 测试路径**刻意不降级**（与 write_file 的 Low 差异是有意的）：apply_edit
+    // 改的是已存在文件（可能含生产代码），降级会让「改 tests/ 下文件」绕过确认门
+    let edit_test = Action::ApplyEdit {
+        path: "tests/foo_test.rs".to_string(),
+        edits: vec![],
+    };
+    assert_eq!(
+        workflow.assess_risk(&edit_test),
+        RiskLevel::Medium,
+        "编辑已存在文件不因 test 路径降级（保守）"
+    );
+
+    // 普通路径保持 Medium（原行为不变）
+    let edit_src = Action::ApplyEdit {
+        path: "src/lib.rs".to_string(),
+        edits: vec![],
+    };
+    assert_eq!(workflow.assess_risk(&edit_src), RiskLevel::Medium);
+}
+
+#[test]
+fn test_multi_file_patch_risk_takes_strictest_path() {
+    // T1-16：多文件补丁——仅**后续**文件命中关键路径时也必须提升定级
+    // （首路径普通，此前恒 Medium）。
+    let workflow = ApprovalWorkflow::new(ApprovalWorkflowConfig::default());
+    let patch =
+        "*** Update File: src/main.rs\n@@\n-a\n+b\n*** Update File: /etc/hosts\n@@\n-x\n+y\n";
+    let action = Action::ApplyPatch {
+        path: "src/main.rs".to_string(),
+        patch: patch.to_string(),
+    };
+    assert_eq!(
+        workflow.assess_risk(&action),
+        RiskLevel::High,
+        "补丁中任一关键路径应提升整次定级"
+    );
+}
+
+#[test]
 fn test_risk_assessment_takes_max_across_command_segments() {
     // T0-2：多段命令取最严段——修复前只按整条首词定级，
     // `git status && rm -rf /` 被低估为 Medium（危险命令确认门被绕过）。
