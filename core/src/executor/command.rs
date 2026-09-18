@@ -1278,8 +1278,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(300)).await;
             flag.store(true, AtomicOrdering::Relaxed);
         });
+        // 确定性慢命令（不依赖 ping 的网络行为/耗时）
         let cmd = if cfg!(target_os = "windows") {
-            "ping -n 30 127.0.0.1"
+            "Start-Sleep -Seconds 30"
         } else {
             "sleep 30"
         };
@@ -1305,13 +1306,18 @@ mod tests {
         // 不调用全局 kill_all：并行测试下它会误杀同批其他测试的子进程。
         let before: std::collections::HashSet<u32> =
             running_children().iter().map(|e| *e.key()).collect();
+        // 确定性慢命令 + **局部取消标志**结束自己（不调 kill_process_tree：
+        // 并行测试下按 pid 差集取到的可能是别人的进程，会误杀其他测试的命令）
+        let cancel = Arc::new(AtomicBool::new(false));
         let cmd = if cfg!(target_os = "windows") {
-            "ping -n 30 127.0.0.1"
+            "Start-Sleep -Seconds 30"
         } else {
             "sleep 30"
         };
+        let cancel_for_task = cancel.clone();
         let handle = tokio::spawn(async move {
-            execute_command_action_cancellable(cmd, None, Some(60), None, None).await
+            execute_command_action_cancellable(cmd, None, Some(60), None, Some(cancel_for_task))
+                .await
         });
         // 等本测试的子进程注册（相对基线取差集，不受并发测试影响）
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1329,10 +1335,8 @@ mod tests {
             "运行中的命令子进程应注册到注册表（差集非空）"
         );
 
-        // 定向终止自己的子进程（按进程树）
-        for pid in &own {
-            kill_process_tree(*pid).await;
-        }
+        // 用**局部**取消标志结束自己的命令（不碰全局进程状态）
+        cancel.store(true, AtomicOrdering::Relaxed);
         let _ = handle.await.expect("任务应正常结束");
 
         // 注销：结束后自己的 pid 应移出注册表
@@ -1449,8 +1453,9 @@ mod tests {
     #[tokio::test]
     async fn test_command_timeout_is_timeout_error() {
         // 子进程运行时长超过超时阈值：Windows 用 ping 计数（约 4s），Unix 用 sleep
+        // 确定性慢命令（不依赖 ping 的网络行为——CI/并发下 ping 可能快速失败）
         let cmd = if cfg!(target_os = "windows") {
-            "ping -n 5 127.0.0.1"
+            "Start-Sleep -Seconds 5"
         } else {
             "sleep 5"
         };
