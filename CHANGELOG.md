@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-09-18
+
+### Fixed
+- **跨会话压缩摘要串号（用户实测取证）**：会话 B 的压缩点摘要混入会话 A 的整段历史并落库，此后每轮被注入模型上下文。根因：`ContextCompressor.cached_summary` 是**进程级**可变状态、不按会话隔离——A 压缩后缓存其摘要，B 压缩把它当 `existing_summary` 增量合并。修法（数据源单一化）：删除 `cached_summary` / `cacheable_summary`（压缩器变为无会话状态），已有摘要改由调用方从**当前会话链最后一个 `compression_marker`** 提取（`ContextPipeline::extract_marker_summary`，剥展示包装）后显式传入；`compress()` 恒走全量摘要；空摘要语义保留（空结果不落库 → 天然不会成为「已有摘要」）。判别力实证：`test_cross_session_compress_does_not_reuse_previous_summary` 修复前红、修复后绿。同型「进程级共享可变状态」复核：`cached_soul` 全局单例（语义正确，无须按会话）、`injectable_context` / `injectable_snapshot` 已按会话（会话头持久化，ADR-012）、`pending_approval_fingerprints` 仅审批面板展示不进模型上下文。历史污染摘要按用户指示**保持原样**（未清理）
+- **T1 审计批次（系统性审查 13 项）**：
+  - **T1-6** `apply_patch` 模糊定位下静默删改 → 删除行内容校验（位置敏感守卫）
+  - **T1-9** MCP 连接健康检查「在册≠可用」→ 真探活 + 死连接自动重连
+  - **T1-10** `POST /chat/stream` 同会话并发未保护 → 重复发流返回 409（检查与插入同锁原子），不再覆盖取消槽（「停止」失效 + 两轮并发写同一会话）
+  - **T1-12** 删会话残留快照目录 → 清理 + GC 清理空会话目录
+  - **T1-13** `doc_load` 统计不落库 → 落库 + 刷盘扣减
+  - **T1-14** LanceDB 查询默认 top-k=10 静默截断 → 显式 `limit`
+  - **T1-15** 工具写入非原子（崩溃留半截文件）→ 临时文件 + rename 原子替换（`write_file` / `apply_edit` / `apply_patch` 三条路径）
+  - **T1-16** 写类工具风险定级可被工具选择绕过 → 统一关键路径 High
+  - **T1-17** 会话加载单行损坏废整个会话 → 逐行容错
+  - **T1-18** 向量与内容可能失配 → 对账通道（缺索引重建 + 孤儿点清理），接入 GcTask
+  - **T1-19** `trace_spans` 无界增长 → 按保留窗口清理
+  - **T1-21** 端口变化后前端事件流不重连 → 重建 EventSource
+  - **T1-22** web 响应 UTF-8 截断导致整个 fetch 失败 → 按字符边界容错
+- **T2**：web 结果缓存加上限（256 条，淘汰最旧）· 单行超长输出的头/尾截断不再退化为零内容
+- **CI（Linux / WSL 复刻门禁）**：修复 3 个只在 Linux 暴露的测试失败（`~` 展开落在测试黑名单、快照 hash 缓存撞同 mtime+size、`kill -9 -<pgid>` 返回成功但进程仍存活）→ `kill_process_tree` 三重保险（组 → 进程 → 子进程 pkill）+ 取消/超时 `child.wait()` 2s 兜底 + 等待改 `try_wait` 轮询；`hide_console_window` 的 `mut` 按平台裁剪（修 Linux clippy `unused_mut`）
+
+### Changed
+- **质量门禁改为 tag / PR 触发（用户要求「只有打 tag 才编译构建」）**：`quality.yml` 此前 `on.push.branches=[master]` 每推一次都跑 fmt/clippy/test/前端检查；现与 `release.yml` 一致改为 `push tags v*` + `pull_request`——**master 推送不再触发构建**
+- 删除 `skills/learning` 死代码（~1100 行）——无生产消费方，且弃用分支会覆盖写销毁技能
+- agent 契约漂移三处修正：`rollback_session` 文档分工 / 删死 API `has_pending_approval` / 删无效 `background` 参数
+- 回归保护：core **1321** · server **166**（1 ignored）· mcp **18**；clippy 0（workspace 全目标）/ fmt 干净；判别力实证 T1-10 / T1-15 注入后转红（见各提交说明）
+
 ## [0.5.2] - 2026-09-17
 
 ### Fixed
