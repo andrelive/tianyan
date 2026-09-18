@@ -70,6 +70,11 @@ struct CachedWeb {
     data: String,
 }
 
+/// Web 结果缓存条目上限（条数）——满员时淘汰**最旧**条目。
+///
+/// T2：此前缓存无上限，长驻进程内随访问条目单调增长（仅 TTL 过期才回收）。
+const MAX_CACHE_ENTRIES: usize = 256;
+
 /// Web 搜索与抓取客户端。
 ///
 /// 说明：`fetch` 不做 SSRF 检查——搜索引擎端点是可信配置；
@@ -271,6 +276,18 @@ impl WebSearchClient {
     }
 
     fn cache_put(&self, key: String, data: String) {
+        // 容量治理（T2）：满员时先淘汰最旧（按 inserted_at）再插入。
+        // 先收集键再 remove/insert——避免在 DashMap 迭代借用未释放时改表（会死锁）。
+        if self.cache.len() >= MAX_CACHE_ENTRIES {
+            let oldest = self
+                .cache
+                .iter()
+                .min_by_key(|e| e.value().inserted_at)
+                .map(|e| e.key().clone());
+            if let Some(k) = oldest {
+                self.cache.remove(&k);
+            }
+        }
         self.cache.insert(
             key,
             CachedWeb {
@@ -908,6 +925,25 @@ mod tests {
     }
 
     // ── 缓存 ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_cache_evicts_oldest_when_full() {
+        // T2：缓存此前无上限（长驻进程内随访问条目单调增长，仅 TTL 回收）。
+        let client = WebSearchClient::new(&test_config()).unwrap();
+        for i in 0..(MAX_CACHE_ENTRIES + 10) {
+            client.cache_put(format!("k{i}"), format!("v{i}"));
+        }
+        assert!(
+            client.cache.len() <= MAX_CACHE_ENTRIES,
+            "缓存应受上限约束（实际 {}）",
+            client.cache.len()
+        );
+        // 早期写入的键应已被淘汰（TTL 内本应命中）
+        assert!(
+            client.cache_get("k0").is_none() || client.cache_get("k1").is_none(),
+            "满员时应淘汰最旧条目"
+        );
+    }
 
     #[tokio::test]
     async fn test_cache_ttl_expiry() {
