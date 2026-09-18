@@ -519,9 +519,9 @@ impl ToolRegistry {
 
     /// 记录被审批拒绝、待用户确认的操作指纹。
     ///
-    /// 由"询问用户"降级链路调用：agent loop 通过 [`Self::has_pending_approval`]
-    /// 检测到审批拒绝后转为追问，用户回答后通过 [`Self::confirm_pending_approval`]
-    /// 决定是否放行。
+    /// 由“询问用户”降级链路调用（`ensure_approved` 拒绝分支）；消费方为
+    /// `Agent` 轮末读取 [`Self::pending_approval_fingerprints`] 生成追问；
+    /// 用户回答后经 [`Self::confirm_pending_approval`] 决定是否放行。
     pub async fn remember_pending_approval(&self, action: &Action) {
         let fp = ApprovalWorkflow::action_fingerprint(action);
         self.pending_approval_fingerprints.lock().await.push(fp);
@@ -585,15 +585,6 @@ impl ToolRegistry {
             tracing::info!(count = fingerprints.len(), "用户拒绝执行待审批操作");
         }
         true
-    }
-
-    /// 是否存在待用户确认的审批操作。
-    ///
-    /// 工具因审批门控被拒时会调用 [`Self::remember_pending_approval`] 入队；
-    /// Agent loop 据此判断"本轮工具执行是否发生了审批降级"，
-    /// 无需解析错误消息字符串。
-    pub async fn has_pending_approval(&self) -> bool {
-        !self.pending_approval_fingerprints.lock().await.is_empty()
     }
 
     /// 获取待用户确认的操作指纹快照。

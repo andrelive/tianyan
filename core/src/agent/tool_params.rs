@@ -264,10 +264,6 @@ pub struct DelegateToAgentParams {
     /// 委托整体超时（秒）。超时返回错误，子 Agent 循环被中断。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
-    /// 后台执行（默认 false）：true 时立即返回任务 ID，任务独立运行，
-    /// 完成时自动向父会话注入通知（含结果摘要与剩余任务计数）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub background: Option<bool>,
     /// 子 Agent 角色名（内置 researcher / editor / reviewer，或 tianyan.toml
     /// `[agent_roles]` 节自定义角色）。角色提供模型、系统提示、工具白名单、
     /// max_turns 与 timeout_secs；同名参数显式指定时优先于角色值。

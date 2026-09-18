@@ -1385,10 +1385,7 @@ async fn test_delegate_background_role_applies() {
         ));
 
     let result = registry
-        .execute_delegate_to_agent(
-            r#"{"task":"bg role job","background":true,"role":"researcher"}"#,
-            "session-1",
-        )
+        .execute_delegate_to_agent(r#"{"task":"bg role job","role":"researcher"}"#, "session-1")
         .await
         .unwrap();
     assert_eq!(result["status"].as_str(), Some("running"));
@@ -1423,10 +1420,7 @@ async fn test_delegate_background_starts_and_completes() {
     let registry = delegate_registry(mock);
 
     let result = registry
-        .execute_delegate_to_agent(
-            r#"{"task":"background job","background":true}"#,
-            "session-1",
-        )
+        .execute_delegate_to_agent(r#"{"task":"background job"}"#, "session-1")
         .await
         .unwrap();
     assert_eq!(result["status"].as_str(), Some("running"));
@@ -1733,11 +1727,11 @@ async fn test_background_assigns_correct_parent_session() {
 
     // 不同会话各自发起后台委托（模拟并发 turn 的交错调用）
     let r1 = registry
-        .execute_delegate_to_agent(r#"{"task":"bg-a","background":true}"#, "session-a")
+        .execute_delegate_to_agent(r#"{"task":"bg-a"}"#, "session-a")
         .await
         .unwrap();
     let r2 = registry
-        .execute_delegate_to_agent(r#"{"task":"bg-b","background":true}"#, "session-b")
+        .execute_delegate_to_agent(r#"{"task":"bg-b"}"#, "session-b")
         .await
         .unwrap();
 

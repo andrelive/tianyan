@@ -214,9 +214,13 @@ pub trait AgentCoordinator: Send + Sync {
     /// ① 等待进行中的轮收尾（调用方已置位 cancel 标志，AgentLoop 在轮次
     ///    边界停止；turn_guard 保证与轮互斥）；
     /// ② 取消时序锚点之后的所有任务（委托 cancel + 命令 kill），等待
-    ///    全部终态（取消通知入库，截断时一并丢弃）；
-    /// ③ 保存 redo 状态（被截断消息 + 工作区树）并恢复工作区到锚点快照；
-    /// ④ 完整链上截断到锚点之前，rewrite 写回（压缩点前历史保留）。
+    ///    全部终态（取消通知入库，截断时一并丢弃）。
+    ///
+    /// **③④ 不在本方法内**（契约分工，T2 修正——此前 doc 声明 4 步而实现只有
+    /// ①②）：保存 redo 状态（被截断消息 + 工作区树）并恢复工作区、完整链截断到
+    /// 锚点前，均由 server 编排的 `delete_message` 链路完成（`save_redo` → 快照
+    /// restore → `rewrite_messages`）——core 只做与轮/任务相关的 ①②，数据截断
+    /// 走会话 API 的既有 redo/快照链路（单一实现，不复制）。
     ///
     /// 默认空实现（无任务/快照装配的适配器/测试替身直接继承）。
     async fn rollback_session(&self, _session_id: &str, _message_id: &str) -> Result<()> {
