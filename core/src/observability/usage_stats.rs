@@ -143,17 +143,25 @@ impl UsageStats {
             })
             .collect();
 
-        // 文档批次保留 raw 总分（供成功后精确扣减）；落库侧仍用平均分
-        let doc_snapshot: Vec<(String, u64, u64)> = self
+        // 文档批次保留 raw 总分（供成功后精确扣减）；落库侧仍用平均分。
+        // T1-13：detail_loads 同为内存计数，必须一并采集——此前该计数
+        // 既不落库也不扣减（读取端 detail_loads 恒 0、内存里只增不减）。
+        let doc_snapshot: Vec<(String, u64, u64, u64)> = self
             .doc_counters
             .iter()
             .filter_map(|e| {
                 let c = e.value();
                 let hits = c.search_hits.load(Ordering::Relaxed);
-                if hits == 0 {
+                let loads = c.detail_loads.load(Ordering::Relaxed);
+                if hits == 0 && loads == 0 {
                     return None;
                 }
-                Some((e.key().clone(), hits, c.total_score.load(Ordering::Relaxed)))
+                Some((
+                    e.key().clone(),
+                    hits,
+                    loads,
+                    c.total_score.load(Ordering::Relaxed),
+                ))
             })
             .collect();
 
@@ -162,14 +170,16 @@ impl UsageStats {
             return Ok(());
         }
 
-        let doc_batch: Vec<(String, u64, f64)> = doc_snapshot
+        // 平均分按命中次数归一（只有加载、无命中时 avg 记 0）
+        let doc_batch: Vec<(String, u64, u64, f64)> = doc_snapshot
             .iter()
-            .map(|(uri, hits, total)| {
-                (
-                    uri.clone(),
-                    *hits,
-                    *total as f64 / *hits as f64 / 1_000_000.0,
-                )
+            .map(|(uri, hits, loads, total)| {
+                let avg = if *hits > 0 {
+                    *total as f64 / *hits as f64 / 1_000_000.0
+                } else {
+                    0.0
+                };
+                (uri.clone(), *hits, *loads, avg)
             })
             .collect();
 
@@ -184,9 +194,10 @@ impl UsageStats {
                 c.total_time_us.fetch_sub(*time, Ordering::Relaxed);
             }
         }
-        for (uri, hits, total) in &doc_snapshot {
+        for (uri, hits, loads, total) in &doc_snapshot {
             if let Some(c) = self.doc_counters.get(uri) {
                 c.search_hits.fetch_sub(*hits, Ordering::Relaxed);
+                c.detail_loads.fetch_sub(*loads, Ordering::Relaxed);
                 c.total_score.fetch_sub(*total, Ordering::Relaxed);
             }
         }
@@ -300,6 +311,38 @@ mod tests {
         stats.record_doc_hit("tianyan://knowledge/python.md", 0.45);
         stats.flush().await.unwrap();
         assert!(!stats.query_cold_documents(10).await.is_empty());
+    }
+
+    /// T1-13：详情加载计数必须落库（此前 `detail_loads` 读取端恒 0），且刷盘后
+    /// 扣减（此前只增不减、重复刷盘会重复计数）。
+    #[tokio::test]
+    async fn test_doc_load_persisted_and_decremented() {
+        let stats = setup().await;
+        stats.record_doc_hit("tianyan://knowledge/rust.md", 0.8);
+        stats.record_doc_load("tianyan://knowledge/rust.md");
+        stats.record_doc_load("tianyan://knowledge/only-load.md");
+        stats.flush().await.unwrap();
+
+        let docs = stats.query_cold_documents(10).await;
+        let rust = docs
+            .iter()
+            .find(|d| d.uri.ends_with("rust.md"))
+            .expect("rust.md 应有统计");
+        assert_eq!(rust.search_hits, 1, "命中次数");
+        assert_eq!(rust.detail_loads, 1, "详情加载应落库（此前恒 0）");
+        let only_load = docs
+            .iter()
+            .find(|d| d.uri.ends_with("only-load.md"))
+            .expect("只有加载的文档也应落库");
+        assert_eq!(only_load.search_hits, 0);
+        assert_eq!(only_load.detail_loads, 1);
+
+        // 重复刷盘不得重复计数（内存已扣减）
+        stats.flush().await.unwrap();
+        let docs = stats.query_cold_documents(10).await;
+        let rust = docs.iter().find(|d| d.uri.ends_with("rust.md")).unwrap();
+        assert_eq!(rust.detail_loads, 1, "重复刷盘不得重复计数");
+        assert_eq!(rust.search_hits, 1);
     }
 
     #[tokio::test]

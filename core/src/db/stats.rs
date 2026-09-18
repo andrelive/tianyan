@@ -60,10 +60,15 @@ impl StatsRepo {
     ///
     /// 行数由调用次数决定（每次调用一行），故逐行插入是语义要求；但语句
     /// **只 prepare 一次**（复用 statement），避免每次 execute 重复解析 SQL。
+    ///
+    /// 文档批次为 `(uri, 命中次数, 详情加载次数, 平均分)`：两种事件各按次数
+    /// 展开（`search_hit` 带平均分；`detail_load` 的 score 记 0——详情加载无
+    /// 相关性得分）。**detail_load 此前从不落库**（读取端 `detail_loads` 恒 0，
+    /// T1-13）。
     pub async fn flush_counts(
         &self,
         skill_batch: &[(String, u64, u64, u64)],
-        doc_batch: &[(String, u64, f64)],
+        doc_batch: &[(String, u64, u64, f64)],
     ) -> Result<(), TianyanError> {
         let conn = self.db.lock().await;
         let tx = conn
@@ -94,15 +99,27 @@ impl StatsRepo {
                         .map_err(|e| Self::sqlite_error("统计落盘", e))?;
                 }
             }
-            let mut stmt_doc = tx
+            let mut stmt_doc_hit = tx
                 .prepare(
                     "INSERT INTO doc_access (uri, event_type, score, recorded_at) VALUES (?1,'search_hit',?2,?3)",
                 )
                 .map_err(|e| Self::sqlite_error("统计落盘", e))?;
-            for (uri, _hits, avg_score) in doc_batch {
-                stmt_doc
-                    .execute(rusqlite::params![uri, avg_score, &now])
-                    .map_err(|e| Self::sqlite_error("统计落盘", e))?;
+            let mut stmt_doc_load = tx
+                .prepare(
+                    "INSERT INTO doc_access (uri, event_type, score, recorded_at) VALUES (?1,'detail_load',0,?2)",
+                )
+                .map_err(|e| Self::sqlite_error("统计落盘", e))?;
+            for (uri, hits, loads, avg_score) in doc_batch {
+                for _ in 0..*hits {
+                    stmt_doc_hit
+                        .execute(rusqlite::params![uri, avg_score, &now])
+                        .map_err(|e| Self::sqlite_error("统计落盘", e))?;
+                }
+                for _ in 0..*loads {
+                    stmt_doc_load
+                        .execute(rusqlite::params![uri, &now])
+                        .map_err(|e| Self::sqlite_error("统计落盘", e))?;
+                }
             }
         }
         tx.commit().map_err(|e| Self::sqlite_error("统计落盘", e))?;
@@ -183,7 +200,9 @@ impl StatsRepo {
                     uri: row.get(0)?,
                     search_hits: row.get::<_, i64>(1)? as u64,
                     detail_loads: row.get::<_, i64>(2)? as u64,
-                    avg_score: row.get(3)?,
+                    // 只有 detail_load（无 search_hit）的 URI：AVG 为 NULL——
+                    // 直接 `get::<f64>` 会报错并被 filter_map 静默丢弃该行（T1-13）
+                    avg_score: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
                     last_hit_at: row.get(4)?,
                 })
             })
