@@ -481,3 +481,18 @@ fn fuzzy_fallback_rejects_shifted_window() {
         "整体平移的窗口必须被拒（可见失败），而不是静默错位: {err}"
     );
 }
+#[test]
+fn remove_line_content_mismatch_is_rejected() {
+    // T1-6：模糊定位路径下窗口行与补丁 `-` 行不同时必须报错——此前无条件消费
+    // 窗口行（把文件里的 line3 删掉并写入补丁内容 = 静默删改）。
+    let content = "line1\nline2\nline3\nline4\nline5\n";
+    let text = patch_for("@@ -1,5 +1,5 @@\n line1\n line2\n-line3X\n+line3-new\n line4\n line5\n");
+    let files = parse_patch(&text).unwrap();
+    let err = apply_patch_to_content(content, &files[0].hunks)
+        .expect_err("删除行内容不符应报错（此前静默删改）");
+    assert!(
+        err.is_conflict(),
+        "应为 conflict（补丁与文件不同步）：{err}"
+    );
+    assert!(err.to_string().contains("删除行内容不符"), "{err}");
+}

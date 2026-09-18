@@ -520,7 +520,23 @@ fn apply_hunks(
                         file_idx += 1;
                     }
                 }
-                PatchLine::Remove(_) => {
+                PatchLine::Remove(expected) => {
+                    // T1-6：删除行**内容校验**——模糊定位路径下窗口行可能与补丁的
+                    // `-` 行不同（定位靠 ratio/位置守卫，非逐行相等），此前无条件
+                    // 消费窗口行 → 误配即静默删改（删掉的不是补丁想删的行）。
+                    // 非空删除行必须与文件实际行一致；空行容错（模糊漂移下空行
+                    // 对齐不稳，且删除空行语义弱）。
+                    if file_idx < e && !norm_line(expected).is_empty() {
+                        let actual = norm_line(&lines[file_idx]);
+                        if actual != norm_line(expected) {
+                            return Err(TianyanError::conflict(format!(
+                                "executor: apply_patch: 删除行内容不符（块 {}）：补丁为 `{}`，文件实际为 `{}`——补丁与文件不同步，已中止",
+                                i + 1,
+                                expected,
+                                lines[file_idx]
+                            )));
+                        }
+                    }
                     file_idx += 1;
                 }
                 PatchLine::Add(s) => replacement.push(s.clone()),
