@@ -531,7 +531,9 @@ impl AgentCoordinator for Agent {
     async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask> {
         let mut all = self.background_tasks.snapshot().await;
         // 合并后台终端命令（execute_command background）：与委托任务共用
-        // 同一面板视图与取消入口（此前命令任务仅 agent 内 task_status 可见）
+        // 同一面板视图与取消入口（此前命令任务仅 agent 内 task_status 可见）。
+        // 注意：命令条目来自进程内存（不落 SQL，ADR-026 §5 D 边界澄清）——
+        // 仅本次运行可见、重启即清空；委托任务走 SQL 快照（可跨重启恢复）。
         for t in self.command_tasks.list().await {
             all.push(crate::agent::background::BackgroundTask::from_command_task(
                 t,

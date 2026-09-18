@@ -41,6 +41,10 @@
 
 wake 正确性依赖 `remaining` 计数，而 `BackgroundTaskManager` 状态目前**纯内存**——进程重启后任务消失、计数归零，唤醒信号失真。前置改造：后台任务状态持久化到 SQLite（registered/running/completed/failed/cancelled + result/error + seq），重启可查询可恢复。这是"任务脱离调用栈成为独立实体"的一步，也是 wake 机制正确性的前提。
 
+> **边界澄清（2026-09-18）**：本前置仅覆盖**委托任务**（`BackgroundTaskManager`）。
+> **命令类任务（`CommandManager`）有意不持久化**（进程内保留、重启即清空，属预期行为）
+> ——理由见 [ADR-026](026-background-tasks-unified-panel.md) §5「D 边界澄清」。
+
 ## 后果
 
 ### 正面

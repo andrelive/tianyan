@@ -93,7 +93,10 @@ export default function AgentTasksPanel({ sessionId }: { sessionId: string | nul
     [poll],
   );
 
-  // 本会话任务，按创建时间排序（委托/命令两套注册表 seq 独立，统一按时间线）
+  // 本会话任务，按创建时间排序（委托/命令两套注册表 seq 独立，统一按时间线）。
+  // **会话级过滤 + 无任务整条隐藏是有意设计**（ADR-026 §4 澄清）：只显示当前
+  // 会话的任务、不做跨会话聚合（其它会话的任务不进入视野，避免争夺注意力）；
+  // `return null` 是"本会话无任务"的预期表现（切换会话时面板隐藏/恢复）。
   const mine = tasks
     .filter((t) => t.parent_session_id === sessionId)
     .sort((a, b) => a.created_at - b.created_at || a.seq - b.seq);

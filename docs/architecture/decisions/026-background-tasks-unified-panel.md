@@ -41,13 +41,16 @@
 ### 4. 右侧任务面板（会话级）
 
 右侧竖排面板（实现为 `w-72`≈288px，可折叠成 40px 竖条），替代底部 `SessionTasksPanel`（ADR-022 的停靠条位置）：活跃任务在上、完成沉底，可展开看过程/结果，可取消。流内 ToolCallCard 与 System 通知消息不动（通知注入是主 LLM 汇总机制，ADR-013）。
+**面板过滤语义澄清（2026-09-18，用户确认，防漂移）**：面板**只显示 `parent_session_id === 当前会话` 的任务**（切换会话 → 面板整条隐藏、切回恢复；本会话无任务时整条不渲染，`return null`）。**不做跨会话聚合**——其它会话的任务不进入视野，避免争夺注意力。这是**有意设计**，不是缺陷。
+
 
 ### 5. 清理策略
 
 - **A. 级联删除**：主会话删除时连带删除其所有子智能体会话（三表：messages/meta/FTS）。
 - **B. 上限保护**：子智能体会话总数超 300 时，删"最不活跃主会话"（`session_meta.updated_at` 最旧）的子会话，循环至 ≤ 300；惰性触发（创建子会话时检查）。
 - **C. FTS 不索引子会话**：`append_message` 加 `index_fts` 参数，子会话传 `false`——FTS 不膨胀，`session_recall` 天然搜不到子会话（无"人"提供的信息），查询逻辑零改动。
-- **D. 注册表 SQL 权威 + TTL**：`BackgroundTaskManager` 内存只保留未终态任务（Running ≤ 并发 + Pending 排队），终态落 SQLite；逐出 = `DELETE WHERE completed_at < now - 3d`。`CommandManager` 同样（活跃任务保留内存——进程句柄）。
+- **D. 注册表 SQL 权威 + TTL**：`BackgroundTaskManager` 内存只保留未终态任务（Running ≤ 并发 + Pending 排队），终态落 SQLite；逐出 = `DELETE WHERE completed_at < now - 3d`。
+- **D 边界澄清（2026-09-18，用户确认，防漂移）**：**命令类任务（`CommandManager`）有意不落 SQL**——注册表纯进程内存，含终态一并保留（`MAX_RETAINED_TASKS=100` 上限逐出最旧非 Running）。理由：**长会话会累积大量前后台命令；全部落库、长期可见会争夺用户注意力**。命令任务的"存活期" = 应用进程生命周期（**重启即清空，属预期行为**）；面板查询（`/tasks`）虽把两类任务合并为同一视图，但仅覆盖本次运行内的命令条目。**此为设计选择，不是遗漏——不要给 `CommandManager` 补持久化。**
 - **D 修订（实现时偏差）**：SQL 写失败**保持告警不阻塞状态机**（非初稿的"上抛"）——状态机是任务生命周期核心，写失败上抛会让 spawn 的异步任务丢失终态处理（complete/fail 直接失败）；桌面场景 SQLite 写失败极罕见，告警 + 终态流转保证任务不悬挂。
 
 ### 6. 并发配置（可配置）

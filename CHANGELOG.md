@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-09-18
+
+### Fixed
+- **多会话流式串扰（用户实测）**：store 的 `setMessages` / `deleteMessagesFrom` 把"写到哪里"隐式绑定到 `currentSessionId`——切会话加载历史 / 回退操作的 `await` 期间跨越用户切换时**写入错误会话**（实测症状：切进当前会话时刷出另一会话的流内容；数据库无污染，纯前端 store 层）。修复（写入寻址显式化）：删除 `setMessages`（唯一写入路径 = `setSessionMessages(sessionId, …)`）；`deleteMessagesFrom` 加会话 id 参数；懒加载收口 `loadSessionHistory(sessionId)`（唯一入口：双重检查 + 流式中不覆盖，与快照同规则）；回退/重做在发起时捕获会话 id 写回。`updateLastMessage` 加 role 守卫（只写最后一条 assistant——注释与实现漂移纠正）。判别力实证：3 条红测试（慢加载切换污染 / 回退中途切换写错 / 末条 system 增量污染）修复前全红、修复后全绿
+
+### Docs
+- **任务持久化边界澄清（防漂移）**：命令类任务（`CommandManager`）**有意不落 SQL**（进程内保留、重启即清空，属预期——长会话任务全部落库会争夺注意力）；任务面板**有意仅显示当前会话**、不做跨会话聚合。落点：ADR-026 §4/§5「D 边界澄清」、ADR-013 交叉引用、module-map、三处代码注释（command.rs / coordinator.rs / AgentTasksPanel.tsx）
+
 ## [0.5.3] - 2026-09-18
 
 ### Fixed
