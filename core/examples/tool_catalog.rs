@@ -97,10 +97,8 @@ mod tests {
     /// 否则跨平台 freshness 门禁恒红（CI 上的"目录偏移"实为平台差异）。
     #[test]
     fn platform_hint_normalization_erases_platform_difference() {
-        let windows_catalog =
-            format!("head\n{}\ntail", tianyan::agent::PLATFORM_HINT_WINDOWS);
-        let unix_catalog =
-            format!("head\n{}\ntail", tianyan::agent::PLATFORM_HINT_UNIX);
+        let windows_catalog = format!("head\n{}\ntail", tianyan::agent::PLATFORM_HINT_WINDOWS);
+        let unix_catalog = format!("head\n{}\ntail", tianyan::agent::PLATFORM_HINT_UNIX);
         assert_ne!(windows_catalog, unix_catalog, "原始文本应含平台差异");
         assert_eq!(
             normalize_platform_hints(&windows_catalog),
