@@ -87,6 +87,8 @@ export function useUnifiedEvents(handler?: EventHandler): void {
 const unifiedEventsListeners = new Set<React.MutableRefObject<EventHandler | null>>();
 let started = false;
 let es: EventSource | null = null;
+/** 当前连接使用的 API base（T1-21：端口变化检测用）。 */
+let esBase = '';
 /** 已订阅会话集合（ADR-029：resident——打开过保持订阅，切回零延迟）。 */
 const subscribedSessions = new Set<string>();
 /** EventSource 连接是否已建立（onopen 置位；订阅前必须等待——否则快照帧
@@ -145,6 +147,22 @@ export function __resetSubscriptions(): void {
   subscribedSessions.clear();
 }
 
+/** 测试辅助：启动统一事件连接（jsdom 无 EventSource，测试自行注入 mock）。 */
+export function __startUnifiedEventsForTest(): void {
+  startUnifiedEvents();
+}
+
+/** 测试辅助：关闭并清空连接与启动标志（模块级状态隔离）。 */
+export function __resetUnifiedEventsForTest(): void {
+  if (es) {
+    es.close();
+    es = null;
+  }
+  esBase = '';
+  esReady = false;
+  started = false;
+}
+
 /**
  * 处理订阅快照帧（ADR-029）：replace 窗口。
  *
@@ -171,10 +189,16 @@ export function applySnapshot(
  * 断线自动重连 + onopen 重放订阅）。 */
 function startUnifiedEvents(): void {
   if (typeof EventSource === 'undefined') return; // 测试环境（jsdom）无 EventSource
+  if (es) {
+    // 重建前关闭旧连接（T1-21 端口变化路径复用本函数）
+    es.close();
+    es = null;
+  }
   // T1-8：流状态看门狗（应用级常驻，与事件连接同生命周期）——收尾事件
   // 丢在通道/断线里时兜底复位 streaming/running，避免前端永久卡住。
   startStreamWatchdog();
-  es = new EventSource(getApiBase() + '/events');
+  esBase = getApiBase();
+  es = new EventSource(esBase + '/events');
   es.onmessage = (e) => {
     try {
       const ev = JSON.parse(e.data) as UnifiedEvent;
@@ -217,9 +241,17 @@ function startUnifiedEvents(): void {
     }
   };
   es.onerror = () => {
-    // EventSource 自动重连；重连成功由 onopen 重放订阅。
+    // EventSource 自动重连（同 URL）；重连成功由 onopen 重放订阅。
     // T1-8：断线期间收不到任何事件（含收尾事件）——标记断线态供 UI 提示；
     // 不在此处立即复位流状态（轮可能仍在服务端跑），由看门狗超时兜底。
     useAppStore.getState().setEventsConnected(false);
+    // T1-21：内嵌服务重启后端口可能变化（tauri 重新注入 __TIANYAN_API_BASE__），
+    // 而 EventSource 自动重连**永远复用旧 URL** → 实时流永久失联（注入的新
+    // 地址只对后续 fetch 生效，事件流不会自己迁移）。base 变化时用新地址重建
+    // 连接（订阅由 onopen 重放）；base 未变则交给浏览器自动重连（不打扰）。
+    if (getApiBase() !== esBase) {
+      esReady = false;
+      startUnifiedEvents();
+    }
   };
 }
