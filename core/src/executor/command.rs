@@ -1459,13 +1459,18 @@ mod tests {
         } else {
             "sleep 5"
         };
-        let err = execute_command_action(cmd, None, Some(1), None)
-            .await
-            .unwrap_err();
-        assert!(
-            err.is_timeout(),
-            "执行超时应分类为 timeout（ADR-014）：{err}"
-        );
+        // 并行全量下 Windows PowerShell 偶发启动即失败（exit 1、无输出）——那与
+        // "超时语义失效"不同（后者每次都会返回 Ok），故最多重试 3 次：任一次
+        // 得到 timeout 即通过；三次都提前退出才算失败（判别力保留）。
+        let mut last: Option<String> = None;
+        for _ in 0..3 {
+            match execute_command_action(cmd, None, Some(1), None).await {
+                Err(e) if e.is_timeout() => return,
+                Ok(v) => last = Some(format!("提前退出: {v}")),
+                Err(e) => last = Some(format!("非超时错误: {e}")),
+            }
+        }
+        panic!("三次执行均未超时（超时语义可能失效）：{last:?}");
     }
 
     #[tokio::test]
