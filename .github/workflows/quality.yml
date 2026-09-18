@@ -33,6 +33,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # protoc：lance-encoding（lancedb 依赖）构建脚本需要——release.yml 同款；
+      # 此前 quality.yml 缺失，Linux runner 上 cargo clippy/test 编译第一步即失败
+      # （"Could not find `protoc`"，2026-09-17 CI 实测）。
+      - name: Install protoc (lance-encoding build dependency)
+        uses: arduino/setup-protoc@v3
+
       - name: Rust fmt check
         run: cargo fmt --all -- --check
       - name: Rust clippy (deny warnings)
