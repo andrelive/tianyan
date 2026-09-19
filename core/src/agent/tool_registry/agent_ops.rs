@@ -1096,19 +1096,40 @@ impl ToolRegistry {
         Ok(out)
     }
 
-    /// 执行 task_cancel 工具：取消后台任务（终态任务为幂等空操作）。
+    /// 执行 task_cancel 工具：取消后台任务（委托/命令两套注册表统一路由；
+    /// 终态任务为幂等空操作；两表都不存在时明确报「未找到」）。
     pub(crate) async fn execute_task_cancel(
         &self,
         arguments: &str,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: TaskCancelParams = parse_params(arguments)?;
+        let id = params.task_id.as_str();
 
-        self.background_tasks.cancel(&params.task_id).await?;
+        // 委托任务（bt_）：核心取消（协作标志 + abort 兜底；终态幂等）。
+        if self.background_tasks.get(id).await.is_some() {
+            self.background_tasks.cancel(id).await?;
+            return Ok(serde_json::json!({
+                "task_id": id,
+                "status": "cancelled",
+                "message": "后台任务已取消",
+            }));
+        }
+
+        // 命令任务（cmd_）：杀进程树（终态幂等）。此前只查委托表——命令任务
+        // 被 BackgroundTaskManager 静默 no-op 却报「已取消」（假成功，用户实测：
+        // task_cancel 返回成功但进程仍在跑）。
+        if self.command_tasks.kill(id).await.is_ok() {
+            return Ok(serde_json::json!({
+                "task_id": id,
+                "status": "cancelled",
+                "message": "后台任务已取消",
+            }));
+        }
 
         Ok(serde_json::json!({
-            "task_id": params.task_id,
-            "status": "cancelled",
-            "message": "后台任务已取消",
+            "task_id": id,
+            "status": "not_found",
+            "message": "任务不存在（可能已过期或清理）",
         }))
     }
 

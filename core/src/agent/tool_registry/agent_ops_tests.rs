@@ -1488,6 +1488,55 @@ async fn test_task_cancel_via_tool() {
     assert_eq!(task.status, TaskStatus::Cancelled);
 }
 
+/// 命令任务取消（回归保护）：task_cancel 必须路由到 CommandManager——
+/// 此前只查委托表：命令任务被 BackgroundTaskManager 静默 no-op 却报「已取消」
+/// （假成功，用户实测：返回成功但进程仍在跑）。
+#[tokio::test]
+async fn test_task_cancel_via_tool_command_task() {
+    use crate::executor::CommandTaskStatus;
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    // 起一个真实的跨平台短命令（`sleep` 别名 Windows/Unix 通用；
+    // 30s 内必被 kill 或自然退出——测试失败时的残留也自愈）
+    let task = registry
+        .command_tasks
+        .spawn_background("s1", "sleep 30", None, None, 0, None)
+        .await
+        .expect("后台命令应启动成功");
+    assert_eq!(task.status, CommandTaskStatus::Running);
+
+    let result = registry
+        .execute_task_cancel(&format!(r#"{{"task_id":"{}"}}"#, task.id))
+        .await
+        .unwrap();
+    assert_eq!(result["status"].as_str(), Some("cancelled"));
+
+    // 关键回归：命令任务必须真正进入 Cancelled（旧实现只查委托表——
+    // 状态仍 Running、进程继续跑）
+    let after = registry.command_tasks.get(&task.id).await.unwrap();
+    assert_eq!(
+        after.status,
+        CommandTaskStatus::Cancelled,
+        "task_cancel 必须真正终止命令任务（旧实现：假成功、进程仍在跑）"
+    );
+}
+
+/// 不存在的任务：必须明确报「未找到」——不再假成功
+/// （旧实现：BackgroundTaskManager::cancel 对未知 id 静默 Ok → 报「已取消」）。
+#[tokio::test]
+async fn test_task_cancel_via_tool_unknown_id_not_found() {
+    let registry = ToolRegistry::new(default_strict_policy());
+    let result = registry
+        .execute_task_cancel(r#"{"task_id":"cmd_999999"}"#)
+        .await
+        .unwrap();
+    assert_eq!(
+        result["status"].as_str(),
+        Some("not_found"),
+        "未知 id 应明确报未找到: {result}"
+    );
+}
+
 #[tokio::test]
 async fn test_task_status_list_mode_without_task_id() {
     // 回归保护：task_status 支持列表模式（task_id 缺省）——schema 与行为一致
