@@ -5,6 +5,8 @@ pub mod command;
 mod output_parse;
 /// Executor 安全策略（`pub(crate)`：`check_path_rules` 供 skills 路径沙箱复用）。
 pub(crate) mod security;
+/// 命令执行底层（shell provider）：解析/探测/提示词（ADR-037）。
+pub mod shell;
 
 /// 审批工作流模块。
 pub mod approval;
@@ -43,6 +45,7 @@ pub use actions::{
 };
 pub use judge::LlmJudge;
 pub use security::DEFAULT_BLOCKED_COMMANDS;
+pub use shell::{ShellKind, ShellSpec};
 pub use types::Action;
 pub use verification::{VerificationGate, VerificationResult};
 

@@ -14,14 +14,26 @@ use tianyan::agent::ToolRegistry;
 use tianyan::executor::SecurityPolicy;
 use tianyan::model::types::ToolPresentation;
 
-/// 平台描述归一化（freshness 跨平台比较用）：`execute_command` 的描述含构建
-/// 平台信息（Windows/Unix shell 提示，见 builtin_tools::shell_platform_hint）——
-/// 生成产物按平台不同。门禁在 CI（Linux）对 Windows 生成的仓库文件比较时，
-/// 两边都把平台提示替换为占位（平台差异不算漂移；换行差异由调用方另行归一化）。
+/// 平台描述归一化（freshness 跨平台比较用）：`execute_command` 的描述含
+/// **动态 shell 事实**（`executor::shell::HINT_TEMPLATES`——随执行底层而变，
+/// ADR-037）——生成产物按环境不同。门禁在 CI（Linux）对 Windows 生成的仓库
+/// 文件比较时，两边都把**所有内置提示词模板**替换为占位（平台差异不算漂移；
+/// 换行差异由调用方另行归一化）。custom hint 不进仓库产物（产物按默认配置
+/// auto 生成），无需归一化。
 fn normalize_platform_hints(s: &str) -> String {
     const PLACEHOLDER: &str = "<平台提示>";
-    s.replace(tianyan::agent::PLATFORM_HINT_WINDOWS, PLACEHOLDER)
-        .replace(tianyan::agent::PLATFORM_HINT_UNIX, PLACEHOLDER)
+    let mut out = s.to_string();
+    for hint in tianyan::executor::shell::HINT_TEMPLATES {
+        out = out.replace(*hint, PLACEHOLDER);
+        // 产物表格把描述里的 `|` 转义为 `\|`——PS 系提示词含 `&& / ||`，
+        // 故仓库产物中的 hint 是**转义形态**。不用转义形态再替换一次，
+        // 跨平台门禁会误报漂移（同平台两侧同文本，Windows 上侥幸通过）。
+        let escaped = hint.replace('|', "\\|");
+        if escaped != *hint {
+            out = out.replace(&escaped, PLACEHOLDER);
+        }
+    }
+    out
 }
 
 fn main() {
@@ -93,17 +105,35 @@ fn main() {
 mod tests {
     use super::*;
 
-    /// 判别力：归一化必须抹平"Windows 提示 vs Unix 提示"的差异——
-    /// 否则跨平台 freshness 门禁恒红（CI 上的"目录偏移"实为平台差异）。
+    /// 判别力：归一化必须抹平"不同 shell 事实"的差异——否则跨平台/跨配置的
+    /// freshness 门禁恒红（CI 上的"目录偏移"实为平台差异）。
     #[test]
     fn platform_hint_normalization_erases_platform_difference() {
-        let windows_catalog = format!("head\n{}\ntail", tianyan::agent::PLATFORM_HINT_WINDOWS);
-        let unix_catalog = format!("head\n{}\ntail", tianyan::agent::PLATFORM_HINT_UNIX);
-        assert_ne!(windows_catalog, unix_catalog, "原始文本应含平台差异");
-        assert_eq!(
-            normalize_platform_hints(&windows_catalog),
-            normalize_platform_hints(&unix_catalog),
-            "归一化后应一致（跨平台不误报漂移）"
-        );
+        // 两种形态都要抹平：产物表格会把 `|` 转义为 `\|`（PS 系 hint 含
+        // `&& / ||`）——只处理未转义形态会让跨平台门禁恒红。
+        for (label, hint) in [
+            ("HINT_PWSH", tianyan::executor::shell::HINT_PWSH),
+            (
+                "HINT_WINDOWS_POWERSHELL",
+                tianyan::executor::shell::HINT_WINDOWS_POWERSHELL,
+            ),
+            ("HINT_CMD", tianyan::executor::shell::HINT_CMD),
+        ] {
+            let unix_catalog = format!("head\n{}\ntail", tianyan::executor::shell::HINT_BASH);
+            for raw in [hint, &hint.replace('|', "\\|")] {
+                let windows_catalog = format!("head\n{raw}\ntail");
+                if raw == hint {
+                    assert_ne!(
+                        windows_catalog, unix_catalog,
+                        "{label}: 原始文本应含平台差异"
+                    );
+                }
+                assert_eq!(
+                    normalize_platform_hints(&windows_catalog),
+                    normalize_platform_hints(&unix_catalog),
+                    "{label}: 归一化后应一致（形态：{raw}）"
+                );
+            }
+        }
     }
 }

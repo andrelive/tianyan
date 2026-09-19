@@ -201,6 +201,11 @@ impl ConfigService {
     /// 校验、持久化并热重载配置。
     async fn persist_and_reload(&self, config: TianyanConfig) -> Result<(), ApiError> {
         config.validate().map_err(ApiError::Config)?;
+        // 命令执行底层（ADR-037）：先解析验证（失败 → 拒绝保存，错误分类保真
+        // 含修复指引），保存/热重载成功后安装生效。切换的提示词后果（一次前缀
+        // 重建 + 一次主动压缩）由工具表指纹机制自动吸收——见 [executor] 注释。
+        let shell_spec =
+            tianyan::executor::shell::resolve(&config.executor).map_err(ApiError::from)?;
         self.persist_config(&config).await?;
         self.state
             .update_config(config)
@@ -208,6 +213,7 @@ impl ConfigService {
             // ? 传播：From<TianyanError> 语义谓词映射（热重载失败非 500 专属，
             // not_found/invalid_input 等保持原分类，ADR-014）
             ?;
+        tianyan::executor::shell::install(shell_spec);
         Ok(())
     }
 

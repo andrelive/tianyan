@@ -12,6 +12,7 @@ pub mod api_types;
 mod clipboard;
 mod events;
 mod evolution;
+mod executor;
 pub mod mcp;
 mod memory;
 pub mod migration;
@@ -30,6 +31,7 @@ pub use agent::AgentConfig;
 pub use clipboard::ClipboardConfig;
 pub use events::EventsConfig;
 pub use evolution::EvolutionConfig;
+pub use executor::ExecutorConfig;
 pub use mcp::{McpConfig, McpServerEntry};
 pub use memory::MemoryConfig;
 pub use model::{
@@ -94,6 +96,9 @@ pub struct TianyanConfig {
     /// 新名字新增角色）。
     #[serde(default)]
     pub agent_roles: AgentRolesConfig,
+    /// 执行器配置（命令执行底层 shell provider；ADR-037）。
+    #[serde(default)]
+    pub executor: ExecutorConfig,
 }
 
 impl TianyanConfig {

@@ -787,24 +787,11 @@ pub(crate) fn hide_console_window(mut cmd: tokio::process::Command) -> tokio::pr
     cmd
 }
 
-/// Windows 用 PowerShell（Win10/11 默认自带）：与工具描述、系统提示词的
-/// PowerShell 语义一致（管道/Out-File/Select-String 等 cmdlet 可用），
-/// 避免模型按 PowerShell 语法写命令却在 cmd.exe 下失败。
-/// `-NoProfile -NonInteractive` 跳过用户配置加载并禁止交互提示（后台/
-/// 自动化场景下防挂起）；`-Command` 直接执行整条命令串。
 fn build_shell_command(command: &str) -> tokio::process::Command {
-    if cfg!(target_os = "windows") {
-        let mut c = tokio::process::Command::new("powershell");
-        c.arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-Command")
-            .arg(command);
-        hide_console_window(c)
-    } else {
-        let mut c = tokio::process::Command::new("sh");
-        c.arg("-c").arg(command);
-        c
-    }
+    // 执行底层由 `crate::executor::shell` 的全局 spec 决定（auto 探测 /
+    // 用户配置——ADR-037）；输出编码注入（PS 系 UTF-8）与 Windows 黑窗抑制
+    // 在 `ShellSpec::build_command` 内统一处理。
+    crate::executor::shell::current().build_command(command)
 }
 
 /// 按 PID 杀进程树（Windows: taskkill /T /F；Unix: 进程组 kill -9 -pgid）。
@@ -1312,7 +1299,7 @@ mod tests {
     /// 导致取消类测试偶发走 Exited 分支（exit_code=-1）、落盘类测试命令跑不完
     /// （stderr 空 → 无分节）。凡启动真实子进程或操作注册表的测试都持锁串行，
     /// 其余测试保持并行。
-    static CHILD_REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    static CHILD_REGISTRY_LOCK: Mutex<()> = Mutex::const_new(());
 
     /// 有限轮询等待任务进入终态（避免测试卡死）。
     async fn wait_terminal(manager: &CommandManager, id: &str) -> CommandTask {

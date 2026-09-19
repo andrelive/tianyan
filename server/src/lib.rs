@@ -320,6 +320,16 @@ pub async fn create_app(
     // 在应用层初始化 VFS（单一实例，共享 SqliteDb）
     let vfs = initialize_vfs_for_app(&config, database.clone()).await?;
 
+    // 命令执行底层（shell provider，ADR-037）：解析（auto 探测 / 用户配置）→
+    // 安装全局 spec——失败即启动报错（含修复指引，不静默回退）。
+    let shell_spec = tianyan::executor::shell::resolve(&config.executor)?;
+    info!(
+        kind = %shell_spec.kind.as_str(),
+        executable = %shell_spec.executable.display(),
+        "命令执行底层已就绪"
+    );
+    tianyan::executor::shell::install(shell_spec);
+
     // Create shared application state（传入 VFS + 共享 SqliteDb）
     let state = AppState::new(config, vfs, database).await?;
 

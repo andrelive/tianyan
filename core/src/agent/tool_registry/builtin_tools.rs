@@ -18,25 +18,16 @@ use crate::agent::tool_params::{
 };
 use crate::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
 
-/// Windows 平台 shell 事实（注入 execute_command 工具描述，消除模型试错）。
+/// 当前 shell 事实（注入 execute_command 工具描述；ADR-037 单一事实源）。
 ///
-/// **跨平台 freshness 归一化依赖**：`examples/tool_catalog.rs` 的 `--check`
-/// 会把两个平台提示都替换为占位再比较——CI 在 Linux、仓库产物在 Windows
-/// 生成，不归一化则 `Tool catalog freshness` 门禁跨平台恒红。
-pub const PLATFORM_HINT_WINDOWS: &str =
-    "平台：Windows。Shell 是 PowerShell（5.1+），不是 cmd.exe——PowerShell cmdlet（Out-File、Select-String、Get-ChildItem）与管道可用，请用 PS 语法。";
-
-/// Unix 平台 shell 事实（同上；freshness 归一化依赖）。
-pub const PLATFORM_HINT_UNIX: &str =
-    "平台：Unix。Shell 是 sh -c（POSIX）；标准 Unix 管道与重定向可用。";
-
-/// 当前平台的 shell 事实（注入 execute_command 工具描述，消除模型试错）。
-fn shell_platform_hint() -> &'static str {
-    if cfg!(target_os = "windows") {
-        PLATFORM_HINT_WINDOWS
-    } else {
-        PLATFORM_HINT_UNIX
-    }
+/// 与执行侧 [`crate::executor::shell::ShellSpec`] **同源**——提示词随实际
+/// 执行底层（auto 探测 / 用户配置）联动，杜绝"配置了 A 提示还说 B"的漂移。
+///
+/// **跨平台 freshness 归一化依赖**：`tool_catalog --check` 遍历
+/// `executor::shell::HINT_TEMPLATES` 替换为占位再比较（CI 在 Linux、仓库
+/// 产物在 Windows 生成，不归一化则门禁跨平台恒红）。
+fn shell_platform_hint() -> String {
+    crate::executor::shell::current_hint()
 }
 
 /// 内置工具元数据。
