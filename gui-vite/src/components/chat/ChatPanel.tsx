@@ -98,6 +98,10 @@ export default function ChatPanel() {
   const turnError = useAppStore(
     (s) => s.turnErrorBySession[currentSessionId ?? PENDING_SESSION_KEY] ?? null,
   );
+  /** 会话级「正在停止」（点击停止 → 后端收尾完成之间；与 turnError 同款内存态）。 */
+  const stopping = useAppStore(
+    (s) => s.stoppingBySession[currentSessionId ?? PENDING_SESSION_KEY] ?? false,
+  );
 
   /** 当前会话自己的上下文占用（lib/token-usage 纯函数；切换会话随 messages 变化） */
   const lastUsage = useMemo(
@@ -461,8 +465,22 @@ export default function ChatPanel() {
   const handleStop = useCallback(() => {
     // 主动停止：显式调用取消端点（跑完再取语义下断线不取消，只有主动停止才取消）
     const sid = useAppStore.getState().currentSessionId;
+    // 「正在停止」态键：sessionId 未就绪时落在新会话占位键（补发取消后仍清它）
+    const stopKey = sid ?? PENDING_SESSION_KEY;
+    // 置位「正在停止」：后端收尾（turn_state idle 事件）到达时清除；端点
+    // 返回 no_active_stream（无活动轮）/请求失败时立即清除。
+    useAppStore.getState().setStopping(stopKey, true);
     const sendCancel = (id: string) => {
-      void cancelChatStream(id).catch(() => {});
+      const clearStopping = () => {
+        const store = useAppStore.getState();
+        store.setStopping(id, false);
+        store.setStopping(stopKey, false);
+      };
+      void cancelChatStream(id)
+        .then((r) => {
+          if (r.status === 'no_active_stream') clearStopping();
+        })
+        .catch(clearStopping);
     };
     if (sid) {
       sendCancel(sid);
@@ -477,6 +495,15 @@ export default function ChatPanel() {
     // 给当前流式消息打 interrupted 标记（与服务端 finish=interrupted 语义一致）
     useAppStore.getState().markLastMessageInterrupted(sid ?? undefined);
   }, [stopStream, setStreamStatus]);
+  // 「正在停止」兜底：事件丢失 / 端点异常时最长 20s 后自行清除，防横幅悬挂。
+  useEffect(() => {
+    if (!stopping) return;
+    const key = currentSessionId ?? PENDING_SESSION_KEY;
+    const timer = window.setTimeout(() => {
+      useAppStore.getState().setStopping(key, false);
+    }, 20_000);
+    return () => window.clearTimeout(timer);
+  }, [stopping, currentSessionId]);
 
   // 手动压缩当前会话上下文
   const handleCompress = useCallback(async () => {
@@ -588,6 +615,14 @@ export default function ChatPanel() {
 
           {/* 轮级失败提示（LLM 请求失败等）：纯前端内存态——不落库、
                   不污染 LLM 上下文、应用重启即清；发送新消息或手动关闭后消失 */}
+          {/* 「正在停止」过渡提示（纯前端内存态）：点击停止 → 后端收尾完成
+              （turn_state idle）之间——收尾窗口给出明确反馈（不再"按了没反应"）。 */}
+          {stopping && (
+            <div className="flex items-center gap-2 py-2" role="status">
+              <span className="text-xs text-[var(--color-text-secondary)]">正在停止…</span>
+            </div>
+          )}
+
           {turnError && streamStatus !== 'streaming' && (
             <div className="flex items-center gap-2 py-2" role="alert">
               <span className="text-xs text-[var(--color-error)]">上一轮中断：{turnError}</span>
@@ -656,6 +691,7 @@ export default function ChatPanel() {
             onStop={handleStop}
             isStreaming={streamStatus === 'streaming'}
             turnRunning={turnRunning}
+            stopping={stopping}
             usage={lastUsage}
             sessionUsage={sessionUsage}
             onCompress={() => void handleCompress()}

@@ -22,6 +22,8 @@ interface Props {
    * auto 轮（唤醒轮/后台轮）运行中——输入禁用、发送按钮转为"停止"
    * （B 方案：不出现"打了字发不出去"的困惑态）。 */
   turnRunning?: boolean;
+  /** 停止请求已发出、后端轮收尾中：按钮禁用并显示"正在停止…"。 */
+  stopping?: boolean;
 }
 
 /** 单张图片大小上限（4MB，data URL base64 膨胀约 1.33 倍后约 5.3MB 文本） */
@@ -52,6 +54,7 @@ export default function ChatInput({
   onCompress,
   compressing = false,
   turnRunning = false,
+  stopping = false,
 }: Props) {
   const [input, setInput] = useState('');
   const [images, setImages] = useState<string[]>([]);
@@ -277,12 +280,13 @@ export default function ChatInput({
             {isStreaming || turnRunning ? (
               <button
                 onClick={onStop}
-                className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-sm font-medium transition-colors"
-                aria-label="停止生成"
+                disabled={stopping}
+                className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-sm font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                aria-label={stopping ? '正在停止' : '停止生成'}
                 title={turnRunning && !isStreaming ? '停止自动轮（唤醒轮/后台轮）' : '停止生成'}
               >
                 <Square className="w-4 h-4 fill-current" />
-                停止
+                {stopping ? '正在停止…' : '停止'}
               </button>
             ) : (
               <button

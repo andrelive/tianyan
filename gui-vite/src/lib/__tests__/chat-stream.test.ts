@@ -313,6 +313,19 @@ describe('handleChatStreamEvent', () => {
     );
     expect(useAppStore.getState().turnState['s1']).toEqual({ state: 'idle', auto: true });
   });
+  it('clears per-session stopping when turn_state goes idle (stop transition)', () => {
+    // 「正在停止」过渡：点击停止置位 → 后端轮收尾完成（turn_state idle）清除；
+    // running 事件不误清（取消执行中，轮仍在收尾）。
+    useAppStore.getState().setStopping('s1', true);
+    handleChatStreamEvent(
+      ev({ chunk_type: 'turn_state', turn_state: { state: 'running', auto: false } }),
+    );
+    expect(useAppStore.getState().stoppingBySession['s1']).toBe(true);
+    handleChatStreamEvent(
+      ev({ chunk_type: 'turn_state', turn_state: { state: 'idle', auto: false } }),
+    );
+    expect(useAppStore.getState().stoppingBySession['s1']).toBeUndefined();
+  });
 
   it('places boundary messages by seq, not arrival order (ADR-035 §4)', () => {
     // 乱序到达：seq=2 先到、seq=1 后到 → 仍按位置排序（U10 症状三回归保护）

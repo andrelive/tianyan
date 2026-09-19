@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::agent::cancel::cancellable;
 use crate::agent::tool_registry::ToolRegistry;
 use crate::agent::types::{StreamEventSender, ToolCallEvent};
 use crate::common::error::TianyanError;
@@ -446,7 +447,7 @@ impl AgentLoop {
             initial_parent_id,
             model,
             cancel,
-            |this, model, _sender, msgs, _cancel, last_input_usage| {
+            |this, model, _sender, msgs, cancel, last_input_usage| {
                 // FnMut 闭包按值捕获 thinking_effort，每次调用 clone 供本轮使用
                 let thinking_effort = thinking_effort.clone();
                 Box::pin(async move {
@@ -454,13 +455,15 @@ impl AgentLoop {
                         .prepare_request(model, &msgs, false, thinking_effort, last_input_usage)
                         .await?;
 
-                    let response =
-                        this.model_service
-                            .chat_completion(request)
-                            .await
-                            .map_err(|e| {
-                                TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
-                            })?;
+                    // 请求阶段可取消（结构性取消）：非流式路径同样覆盖——
+                    // 取消先到 → `chat_completion` future 被 drop（在途 HTTP
+                    // 请求 / 退避重试终止）。
+                    let response = cancellable(cancel, this.model_service.chat_completion(request))
+                        .await
+                        .ok_or_else(|| TianyanError::Custom("agent_loop: 任务已取消".to_string()))?
+                        .map_err(|e| {
+                            TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
+                        })?;
 
                     // T6：记录本次实测输入，供下一轮动态 max_tokens 校准（随返回值更新）。
                     let updated_input = Some((model.to_string(), response.usage.prompt_tokens));
@@ -567,10 +570,11 @@ impl AgentLoop {
             .prepare_request(model, msgs, true, thinking_effort, last_input_usage.clone())
             .await?;
 
-        let mut rx = self
-            .model_service
-            .chat_completion_stream(request)
+        // 请求阶段可取消（结构性取消）：取消先到 → `chat_completion_stream`
+        // future 被 drop——在途 HTTP 请求 / 退避重试随之终止，不必等响应头。
+        let mut rx = cancellable(cancel, self.model_service.chat_completion_stream(request))
             .await
+            .ok_or_else(|| TianyanError::Custom("agent_loop: 任务已取消".to_string()))?
             .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e)))?;
 
         // Accumulators for streaming chunks
@@ -585,8 +589,14 @@ impl AgentLoop {
             cancelled: false,
         };
 
-        while let Some(chunk_result) = rx.recv().await {
-            // 客户端断开/服务关停：chunk 循环内及时中断（长响应时不必等流结束）。
+        loop {
+            // 等待间隙可取消（结构性取消）：recv 被 drop → 通道关闭 → model 层
+            // producer 检测到接收端消失后立即退出并断开连接（不等下一块数据）。
+            let Some(chunk_result) = cancellable(cancel, rx.recv()).await else {
+                accum.cancelled = true;
+                break;
+            };
+            // 客户端断开/服务关停：置位后到达的 chunk 不再分发（取消优先于分发）。
             // 已收累积标记 cancelled 后保留返回——取消收尾（仅留已交付前缀、
             // 丢弃 tool_calls）由 finalize_streamed_turn 统一处理。
             if AgentLoop::is_cancelled(cancel) {
@@ -594,7 +604,7 @@ impl AgentLoop {
                 break;
             }
             match chunk_result {
-                Ok(chunk) => {
+                Some(Ok(chunk)) => {
                     // OpenAI sends usage in the final chunk
                     if let Some(ref usage) = chunk.usage {
                         accum.usage = Some(usage.clone());
@@ -640,12 +650,13 @@ impl AgentLoop {
                         }
                     }
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     let err_msg = format!("流式接收中断: {}", e);
                     tracing::warn!(error = %e, "{}", err_msg);
                     accum.stream_error = Some(err_msg);
                     break;
                 }
+                None => break,
             }
         }
 

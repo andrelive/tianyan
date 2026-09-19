@@ -562,6 +562,79 @@ async fn test_run_stream_returns_cancelled_mid_chunk() {
     );
 }
 
+/// 取消等待间隔（recv 阻塞间隙）：流已建立且已交付一段，但随后长时间无
+/// 新 chunk——取消必须在等待间隔内生效（结构性取消；旧实现检查点在 recv
+/// 之后，无新数据时取消不生效——本测试在旧实现下超时失败）。
+#[tokio::test]
+async fn test_run_stream_cancel_during_recv_wait() {
+    use std::sync::atomic::Ordering;
+
+    // mock 流式响应：发送第一段后保持通道静默（tx 不 drop——流仍"开着"、
+    // 没有后续数据；模拟长思考 / 生成停顿期间的等待间隙）。
+    let mut mock = MockChatService::new();
+    mock.expect_chat_completion_stream().returning(|_| {
+        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            chunk_tx
+                .send(Ok(stream_chunk(Some("第一段"), None, None)))
+                .await
+                .ok();
+            // 静默保持：tx 存活但不发送（通道不关闭）——消费侧 recv 阻塞等待。
+            std::future::pending::<()>().await;
+        });
+        Ok(chunk_rx)
+    });
+    let (agent_loop, captured) = make_loop_with_capture(mock, 5);
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Result<AgentStreamChunk>>(8);
+    let sender = StreamEventSender::new(tx);
+
+    // 旁路：250ms 后置位取消（此时已处理完第一段、阻塞在等待下一块）。
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        cancel_clone.store(true, Ordering::Relaxed);
+    });
+
+    let mut messages = vec![Message::user("测试")];
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        agent_loop.run_stream(
+            &mut messages,
+            sender,
+            "session-1",
+            None,
+            "test-model",
+            Some(&cancel),
+            None,
+        ),
+    )
+    .await
+    .expect("取消应在等待间隔内生效（旧实现：recv 阻塞中取消不生效 → 超时）")
+    .unwrap();
+
+    assert!(
+        matches!(result, AgentLoopResult::Cancelled { .. }),
+        "流式等待间隙取消应返回 Cancelled，实际: {:?}",
+        result
+    );
+    // 已交付前缀以 interrupted 落库（与 mid_chunk 取消同一收尾语义）
+    let msgs = captured.lock().unwrap();
+    let persisted = msgs
+        .iter()
+        .find(|(sid, m)| sid.as_str() == "session-1" && m.finish.as_deref() == Some("interrupted"))
+        .map(|(_, m)| m)
+        .expect("取消应落库 finish=interrupted 的 assistant 消息");
+    assert!(
+        persisted
+            .parts
+            .iter()
+            .any(|p| matches!(p, Part::Text { text, .. } if text == "第一段")),
+        "落库内容应包含取消前已交付的正文前缀"
+    );
+}
+
 // ── 取消收尾（finalize_streamed_turn 单元测试，DSH 对齐） ─────────
 
 /// 取消收尾：已收正文/推理保留（已交付前缀），tool_calls 全部丢弃

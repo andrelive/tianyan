@@ -12,6 +12,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::{OwnedMutexGuard, RwLock};
 
 use crate::agent::background::{BackgroundTaskManager, TaskWaker};
+use crate::agent::cancel::cancellable;
 use crate::agent::r#loop::{AgentLoop, AgentLoopResult};
 use crate::agent::session_state::SessionState;
 use crate::agent::stream_forward::{spawn_stream_forwarder, StreamEventDeliver, StreamEventMapper};
@@ -853,13 +854,33 @@ impl Agent {
             if changed {
                 tracing::info!(session_id, "工具表已变化：主动压缩以重建前缀");
                 // force=true：主动重建（消息不足时由压缩门槛自然拒绝）
-                self.maybe_compress_and_persist(state, session_id, true)
-                    .await;
+                //
+                // 压缩阶段可取消（结构性取消）：取消先到 → 摘要未生成/未落库
+                //（下次自动压缩重算，幂等）；轮尚未启动 → 终止本轮。
+                let compressed = cancellable(
+                    cancel,
+                    self.maybe_compress_and_persist(state, session_id, true),
+                )
+                .await;
+                if compressed.is_none() {
+                    return self
+                        .finish_cancelled_early(session_id, state, start, &options.mode)
+                        .await;
+                }
             }
         }
 
         // 2. Prepare context（用户消息已由 persist_user_message 写入 state）
-        let messages = self.assemble_context(state, &message.content).await;
+        //
+        // 组装阶段可取消（结构性取消）：检索/加载在途操作随 future drop 终止
+        //（纯读路径，无残留副作用）；取消 → 轮未启动，走早期取消收尾。
+        let Some(messages) =
+            cancellable(cancel, self.assemble_context(state, &message.content)).await
+        else {
+            return self
+                .finish_cancelled_early(session_id, state, start, &options.mode)
+                .await;
+        };
 
         // 3. Run agent loop (internal persistence in AgentLoop)
         let parent_id = {
@@ -906,11 +927,42 @@ impl Agent {
             .await;
 
         // 6. Compression check and persist (optional per path semantics)
+        //
+        // 压缩阶段可取消（结构性取消）：取消先到 → 跳过压缩（摘要下轮重算，
+        // 幂等）；轮结果（回答）已交付/已落库，不受影响。
         if options.do_compress {
-            self.maybe_compress_and_persist(state, session_id, false)
-                .await;
+            let _ = cancellable(
+                cancel,
+                self.maybe_compress_and_persist(state, session_id, false),
+            )
+            .await;
         }
 
+        Ok(response)
+    }
+
+    /// 轮前置阶段（组装 / 轮前压缩）取消的提前收尾。
+    ///
+    /// 构造取消等价结果复用 [`Self::apply_loop_result`] 的取消分支——与
+    /// AgentLoop 内取消完全同一收尾（"任务已取消"事件 + 指标 + response），
+    /// 不引入第二套取消语义。
+    async fn finish_cancelled_early(
+        &self,
+        session_id: &str,
+        state: &Arc<RwLock<SessionState>>,
+        start: Instant,
+        mode: &TurnMode,
+    ) -> Result<AgentResponse> {
+        let loop_result = Ok(AgentLoopResult::Cancelled {
+            total_tokens: TokenUsage::default(),
+            last_turn_usage: None,
+            turns: 0,
+        });
+        let (response, loop_tokens) = self
+            .apply_loop_result(state, loop_result, start, mode)
+            .await;
+        self.update_agent_metrics(session_id, loop_tokens.as_ref(), loop_tokens.is_some())
+            .await;
         Ok(response)
     }
 
@@ -1913,6 +1965,87 @@ mod tests {
             summary.is_none(),
             "压缩点自身 usage（8000）不应计入占用；其后无带 usage 消息 → 不压缩"
         );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_at_turn_end_skips_compression() {
+        // 取消粒度（红→绿）：轮完成后、轮末压缩检查前取消置位 → 压缩必须
+        // 被跳过（结构性取消快速路径）；旧实现轮末压缩不检查取消——超阈值
+        // 场景仍会发起压缩 LLM 调用（本测试在旧实现下必红：压缩 mock
+        // `times(0)` 被违反）。
+        //
+        // 场景模拟：回答生成完成瞬间用户点了停止——回答正常交付（轮结果
+        // 不受影响），但不再做压缩等收尾工作。
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        // 主 mock：被调用时置位取消（模拟"输出完成瞬间用户停止"）。
+        let cancel_for_mock = cancel.clone();
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(move |_| {
+            cancel_for_mock.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(response_with(Message::assistant("完成")))
+        });
+
+        // 压缩 mock：明确不得被调用（被调即测试失败）。
+        let mut compress_mock = MockChatService::new();
+        compress_mock.expect_chat_completion().times(0);
+
+        let agent = make_agent_full(
+            mock,
+            compress_mock,
+            CompressionConfig {
+                context_window: 2_000,
+                compression_threshold: 1.0,
+                ..CompressionConfig::default()
+            },
+        );
+
+        // 预置可压缩状态：≥ MIN_MESSAGES_BEFORE_COMPRESSION 条消息 + 超阈值
+        // 实测占用——若不检查取消，轮末必然触发压缩。
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        for i in 0..7 {
+            let mut sm = ContextAssembler::message_to_structured(
+                &Message::user(format!("消息 {i}")),
+                "session-1",
+                None,
+                None,
+            );
+            if i == 6 {
+                sm.tokens.input = 3_000;
+            }
+            state.write().await.add_structured_message(sm);
+        }
+
+        let resp = agent
+            .run_agent_turn(
+                &state,
+                "session-1",
+                &Message::user("触发轮末压缩的场景"),
+                "test-model",
+                Instant::now(),
+                Some(&cancel),
+                None,
+                TurnOptions {
+                    mode: TurnMode::Plain,
+                    do_snapshot: false,
+                    do_compress: true,
+                    do_toolset_check: false,
+                    thinking_effort: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // 轮结果正常交付（回答完成）——取消只影响收尾，不回改结果。
+        assert_eq!(resp.content, "完成");
+        // 压缩未发生：无压缩点落库。
+        let has_marker = state
+            .read()
+            .await
+            .structured_messages
+            .iter()
+            .any(|m| m.compression_marker);
+        assert!(!has_marker, "轮末取消后不得落库压缩点");
     }
 
     #[tokio::test]

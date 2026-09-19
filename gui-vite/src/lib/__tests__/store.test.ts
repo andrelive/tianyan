@@ -258,6 +258,17 @@ describe('useAppStore', () => {
     useAppStore.getState().setTurnError('session-A', null);
     expect(useAppStore.getState().turnErrorBySession['session-A']).toBeUndefined();
   });
+  it('setStopping sets and clears the per-session stopping flag (front-end only)', () => {
+    // 「正在停止」过渡态：纯前端内存态（不落库）——设置/清除/幂等
+    useAppStore.getState().setStopping('session-A', true);
+    expect(useAppStore.getState().stoppingBySession['session-A']).toBe(true);
+
+    useAppStore.getState().setStopping('session-A', false);
+    expect(useAppStore.getState().stoppingBySession['session-A']).toBeUndefined();
+    // 幂等：重复清除不报错
+    useAppStore.getState().setStopping('session-A', false);
+    expect(useAppStore.getState().stoppingBySession['session-A']).toBeUndefined();
+  });
 
   // ── Skill Calls ──
 

@@ -14,6 +14,8 @@ mod agent_core;
 /// 后台任务支持（fire-and-forget 委托 + 完成通知 + join 信号）。
 pub mod background;
 mod builder;
+/// 取消等待原语（结构性取消：await 阻塞点与取消信号竞争）。
+mod cancel;
 mod coordinator;
 mod r#loop;
 /// 角色学习引擎（ADR-016：自演化分工的角色侧）。

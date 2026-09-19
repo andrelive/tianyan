@@ -136,6 +136,11 @@ export interface ChatSlice {
   turnErrorBySession: Record<string, string>;
   /** 设置/清除会话的轮错误（null = 清除；幂等）。 */
   setTurnError: (sessionId: string, message: string | null) => void;
+  /** 会话级「正在停止」（**纯前端内存态**：点击停止 → 后端轮收尾完成
+   * （turn_state idle）或端点返回 no_active_stream 之间；不落库）。 */
+  stoppingBySession: Record<string, boolean>;
+  /** 设置/清除会话的"正在停止"（false = 清除；幂等）。 */
+  setStopping: (sessionId: string, stopping: boolean) => void;
 
   // Streaming（按会话归属：会话 A 流式时切到 B 可继续发消息，互不阻塞）
   streamStatus: Record<string, StreamStatus>;
@@ -637,6 +642,18 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
         next[sessionId] = message;
       }
       return { turnErrorBySession: next };
+    }),
+  /** 会话级「正在停止」（内存态；与 setTurnError 同款会话维度模式）。 */
+  stoppingBySession: {},
+  setStopping: (sessionId, stopping) =>
+    set((s) => {
+      const next = { ...s.stoppingBySession };
+      if (stopping) {
+        next[sessionId] = true;
+      } else {
+        delete next[sessionId];
+      }
+      return { stoppingBySession: next };
     }),
 
   // Streaming（按会话归属：切走流继续跑，切回直接显示累积内容）

@@ -105,6 +105,10 @@ export function handleChatStreamEvent(event: ChatStreamEvent): void {
       state: event.turn_state.state === 'running' ? 'running' : 'idle',
       auto: event.turn_state.auto,
     });
+    // 「正在停止」收尾：后端轮进入 idle = 取消收尾完成（停止按钮等待窗口关闭）。
+    if (event.turn_state.state !== 'running') {
+      st.setStopping(sid, false);
+    }
     return;
   }
 

@@ -308,18 +308,25 @@ impl AsyncOpenAIClient {
             loop {
                 // 空闲超时：相邻两块之间静默超过 provider timeout 即报错——
                 // 活跃流（持续吐块）总时长不受限；纯传输层 read_timeout
-                // 对停滞 body 不可靠，必须在此显式保证
-                let next = match tokio::time::timeout(read_idle, byte_stream.next()).await {
-                    Ok(item) => item,
-                    Err(_) => {
-                        let _ = tx
-                            .send(Err(TianyanError::Custom(format!(
-                                "模型服务错误：流式读取空闲超时（{}s 无数据）",
-                                read_idle.as_secs()
-                            ))))
-                            .await;
-                        return;
-                    }
+                // 对停滞 body 不可靠，必须在此显式保证。
+                //
+                // 取消传导（结构性取消的最后一环）：接收端 drop（用户停止 /
+                // 消费者取消）→ `tx.closed()` 立即就绪 → 退出读取并断开连接，
+                // 不等下一块数据或空闲超时。
+                let next = tokio::select! {
+                    r = tokio::time::timeout(read_idle, byte_stream.next()) => match r {
+                        Ok(item) => item,
+                        Err(_) => {
+                            let _ = tx
+                                .send(Err(TianyanError::Custom(format!(
+                                    "模型服务错误：流式读取空闲超时（{}s 无数据）",
+                                    read_idle.as_secs()
+                                ))))
+                                .await;
+                            return;
+                        }
+                    },
+                    _ = tx.closed() => return,
                 };
                 match next {
                     Some(Ok(bytes)) => {
@@ -1179,6 +1186,63 @@ mod stream_robustness_tests {
         assert!(
             rx.recv().await.is_none(),
             "仅 cost 块时流应正常结束（无输出、无错误）"
+        );
+    }
+
+    /// 取消传导（结构性取消最后一环）：接收端 drop 后，producer 必须立即
+    /// 退出并断开连接——不等下一块数据或空闲超时（旧实现：producer 挂在
+    /// `timeout(read_idle)` 上，静默流要等 read_idle 才退出）。
+    #[tokio::test]
+    async fn test_raw_stream_producer_disconnects_on_receiver_drop() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let disconnected_srv = disconnected.clone();
+        // mock 服务器：发一块数据后保持静默；随后阻塞在 read——客户端断开
+        // （FIN）时 read 返回，置位 disconnected。
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            // Content-Length 大于实际发送量：模拟"流未结束"（客户端不知道
+            // 后续还有没有数据——旧实现将挂到空闲超时）。
+            let chunk = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n";
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+                chunk.len() + 100
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(chunk.as_bytes()).unwrap();
+            stream.flush().unwrap();
+            let mut buf2 = [0u8; 64];
+            let _ = stream.read(&mut buf2);
+            disconnected_srv.store(true, Ordering::SeqCst);
+        });
+
+        // read_idle 放大到 30s：确保"旧实现等待空闲超时"的场景在测试窗口
+        // （2s）内不会自然退出（本测试在旧实现下必红）。
+        let client = AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 30).unwrap();
+        let mut rx = client
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .await
+            .unwrap();
+
+        // 收到第一块后模拟消费者取消：drop 接收端（结构性取消）。
+        let first = rx.recv().await.expect("应收到第一块");
+        assert!(first.is_ok());
+        drop(rx);
+
+        // 断言：连接在 ~1s 内断开（producer 退出 → response drop → 连接关闭）。
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !disconnected.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            disconnected.load(Ordering::SeqCst),
+            "接收端 drop 后 producer 应立即退出并断开连接（旧实现挂在 read_idle=30s）"
         );
     }
 
