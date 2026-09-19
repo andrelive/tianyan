@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-09-19
+
+### Fixed
+- **取消粒度（用户实测「停止按钮有时按了没反应」，ADR-036）**：取消置位链路此前已统一，但响应侧只有同步检查点（3 处），三处 await 阻塞盲区不可取消——A. LLM 请求在飞（等响应头；长思考模型 10–30s+）；B. 上下文组装/压缩（检索/压缩 LLM 调用无取消传导，15s 延迟实证）；C. 流式 recv 间隙（检查点在 `rx.recv()` **返回之后**——无新 chunk 时取消永不生效）。修法（统一语义「drop 即取消」）：新增 `agent::cancel` 等待原语（`wait_cancelled` 50ms 粒度 + `cancellable` 竞争，**预置位快速路径不启动新工作**），五处等待点统一套用（流式请求发送 / 流式 recv / 组装 / 压缩轮前+轮末 / 非流式请求）；model producer 补 `tx.closed()` select（接收端 drop → 立即退出并断连，旧实现挂到下一块数据或 read_idle）；**收尾语义零新增**（interrupted 前缀落库 / `Cancelled` / 跳过压缩，不回改已完成轮结果）。判别力实证：recv 等待间隙取消（旧实现挂死）· producer 断连（旧实现等 read_idle=30s）· 轮末取消跳过压缩（旧实现必红）——修复前全红、修复后全绿
+- **长驻服务卡唤醒（用户报告「启动后端服务+两个测试，因服务存续导致永远不唤醒收尾」）**：就绪即完成（B 方案）——`CommandTask.counted` 新字段 + `release_wait_count`（就绪/探测超时释放待完成计数、幂等、触发唤醒）；终态递减只对 counted 任务。长驻服务不再算「待完成」，唤醒正常收尾
+- **轮级失败持久横幅（LLM 请求失败不再「莫名中断」）**：error 事件置位会话级 `turnErrorBySession`（纯前端内存态），输入区上方持久横幅「上一轮中断：{原因}」+ 手动关闭 + 发送新消息自动清除
+
+### Added
+- **前端「正在停止…」过渡反馈**：点击停止 → 后端收尾完成（`turn_state idle`）或端点返回 `no_active_stream` 之间，横幅 + 停止按钮禁用态（`stoppingBySession` 纯内存态 + 20s 兜底）
+
+### Docs
+- ADR-036 结构性取消（决策固化）+ REJECTED #21（否决「取消 = abort 整个轮 future」——丢失收尾语义）+ AGENTS.md 导航更新
+
+### 回归保护
+- core **1332**（+10：cancel 原语 7 + recv 等待取消 + producer 断连 + 轮末跳过压缩）· 前端 **423**（+2）· fmt / clippy / tsc / prettier 干净
+
 ## [0.5.4] - 2026-09-18
 
 ### Fixed
