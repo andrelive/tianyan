@@ -1305,6 +1305,14 @@ pub async fn execute_command_action_cancellable(
 mod tests {
     use super::*;
     use std::time::Duration;
+    /// 全局子进程注册表测试互斥。
+    ///
+    /// 背景（2026-09-19 WSL/CI 实测）：`kill_all_running_children` 按注册表杀
+    /// **全部**子进程（生产语义 = 关停清理）——并行测试下会误杀兄弟测试的命令，
+    /// 导致取消类测试偶发走 Exited 分支（exit_code=-1）、落盘类测试命令跑不完
+    /// （stderr 空 → 无分节）。凡启动真实子进程或操作注册表的测试都持锁串行，
+    /// 其余测试保持并行。
+    static CHILD_REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// 有限轮询等待任务进入终态（避免测试卡死）。
     async fn wait_terminal(manager: &CommandManager, id: &str) -> CommandTask {
@@ -1325,6 +1333,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_command_cancelled_by_flag() {
         // T1：工具执行期可中断——取消标志置位后命令应在轮询粒度内被杀死并返回取消错误
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = cancel.clone();
         tokio::spawn(async move {
@@ -1357,6 +1366,7 @@ mod tests {
     async fn test_running_child_registry_register_and_unregister() {
         // T1：关停清理的基础——子进程运行期注册、结束后自动注销，且可定向终止。
         // 不调用全局 kill_all：并行测试下它会误杀同批其他测试的子进程。
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let before: std::collections::HashSet<u32> =
             running_children().iter().map(|e| *e.key()).collect();
         // 确定性慢命令 + **局部取消标志**结束自己（不调 kill_process_tree：
@@ -1411,6 +1421,7 @@ mod tests {
     async fn test_kill_all_running_children_counts_registered() {
         // kill_all 的契约：把注册项计入处理数（真实杀进程行为由定向测试与
         // 超时路径覆盖）。用不可能的假 pid 验证遍历/计数，避免误杀并行测试。
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 持锁期间注册表内没有兄弟测试的进程
         let fake: u32 = 999_999_999;
         register_child(fake);
         let killed = kill_all_running_children().await;
@@ -1421,6 +1432,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command() {
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let result = execute_command_action("echo Hello", None, Some(5), None).await;
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -1431,6 +1443,7 @@ mod tests {
     async fn test_execute_command_output_truncated() {
         // 输出体量治理：超限输出按尾部截断（统一截断标记 + 显式标志）。
         // Windows 走 powershell、Unix 走 sh——各自构造产生 >50KB 输出的命令。
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let cmd = if cfg!(target_os = "windows") {
             "1..3000 | ForEach-Object { 'A' * 30 }"
         } else {
@@ -1467,6 +1480,7 @@ mod tests {
     async fn test_execute_command_spills_full_output_when_dir_configured() {
         // 截断 + 落盘闭环：大输出尾部截断后，完整输出（含被截掉的头部）在
         // 落盘文件中可回读（read_file 分页）；截断标记指引路径。
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let dir = tempfile::tempdir().unwrap();
         let cmd = if cfg!(target_os = "windows") {
             "1..3000 | ForEach-Object { $p = if ($_ -le 1500) { 'HEADER' } else { 'TAIL' }; \"$p-\" + ('x' * 40) + \"-$_\" }; [Console]::Error.WriteLine('ERR-MARKER-42')"
@@ -1507,6 +1521,7 @@ mod tests {
     async fn test_command_timeout_is_timeout_error() {
         // 子进程运行时长超过超时阈值：Windows 用 ping 计数（约 4s），Unix 用 sleep
         // 确定性慢命令（不依赖 ping 的网络行为——CI/并发下 ping 可能快速失败）
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let cmd = if cfg!(target_os = "windows") {
             "Start-Sleep -Seconds 5"
         } else {
@@ -1529,6 +1544,7 @@ mod tests {
     #[tokio::test]
     async fn test_ready_probe_pattern_marks_ready() {
         // 日志关键词就绪探测：进程输出匹配 pattern 后任务标记 ready 并通知。
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let dir = tempfile::tempdir().unwrap();
         let manager = CommandManager::new(Some(dir.path().to_path_buf()));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
@@ -1587,6 +1603,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_background_echo_completes() {
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let dir = tempfile::tempdir().unwrap();
         let manager = CommandManager::new(Some(dir.path().to_path_buf()));
         let task = manager
@@ -1614,6 +1631,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_background_kill_marks_cancelled() {
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let manager = CommandManager::new(None);
         let cmd = if cfg!(target_os = "windows") {
             "ping -n 20 127.0.0.1"
@@ -1639,6 +1657,7 @@ mod tests {
     /// 判别力：注入「提前释放」（许可不随 watcher 存活）时本测试必红。
     #[tokio::test]
     async fn test_max_concurrent_commands_gates_spawn() {
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let manager = CommandManager::new(None).with_max_concurrent(1);
         let long_cmd = if cfg!(target_os = "windows") {
             "ping -n 5 127.0.0.1"
@@ -1676,6 +1695,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_background_list_and_unknown() {
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         let manager = CommandManager::new(None);
         let task = manager
             .spawn_background("sess-1", "echo A", None, None, 0, None)
@@ -1692,6 +1712,7 @@ mod tests {
     #[tokio::test]
     async fn test_background_completion_notifies_with_remaining() {
         // 完成通知：终态触发 on_command_terminal，remaining 计数随任务数递减
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         #[derive(Clone)]
         struct CountingNotifier {
             calls: Arc<Mutex<Vec<(String, String, usize)>>>,
@@ -1738,6 +1759,7 @@ mod tests {
     #[tokio::test]
     async fn test_background_completion_wakes_on_all_done() {
         // 唤醒：会话内全部命令完成后触发 waker（ADR-013：remaining == 0）
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         #[derive(Clone)]
         struct CountingWaker {
             wakes: Arc<std::sync::atomic::AtomicUsize>,
@@ -1782,6 +1804,7 @@ mod tests {
     /// （allComplete 停滞，需人工停服破局）——本断言固化新语义。
     #[tokio::test]
     async fn test_ready_release_unblocks_wake_and_is_idempotent() {
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         #[derive(Clone)]
         struct CountingWaker {
             wakes: Arc<std::sync::atomic::AtomicUsize>,
