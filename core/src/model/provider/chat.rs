@@ -302,7 +302,7 @@ impl AsyncOpenAIClient {
         let response = crate::model::retry::with_retry(
             &self.retry_policy,
             |e: &RetryableFailure| e.retryable,
-            || self.send_chat_request(&url, &body),
+            || self.send_chat_request(&url, &body, "模型服务错误"),
         )
         .await
         .map_err(|e| TianyanError::Custom(e.message))?;
@@ -364,11 +364,16 @@ impl AsyncOpenAIClient {
         Ok(rx)
     }
 
-    /// 发送一次流式补全请求并检查状态（供重试循环调用；每次调用重建请求）。
-    async fn send_chat_request(
+    /// 发送一次 chat completions 请求并检查状态（供重试循环调用；每次调用重建请求）。
+    ///
+    /// 流式（SSE）与非流式（VLM 等 JSON 响应）**共用**：本函数只负责「发送 +
+    /// 状态码判定 + 语义分类」，不关心响应体形态。`err_prefix` 是调用方场景前缀
+    /// （`模型服务错误` / `VLM 服务错误`），使错误消息归属正确。
+    pub(super) async fn send_chat_request(
         &self,
         url: &str,
         body: &Value,
+        err_prefix: &str,
     ) -> std::result::Result<reqwest::Response, RetryableFailure> {
         let mut req = self.http.post(url).json(body);
         for (k, v) in &self.headers {
@@ -379,7 +384,7 @@ impl AsyncOpenAIClient {
         }
         let response = req.send().await.map_err(|e| {
             let retryable = crate::model::retry::should_retry_transport(&e);
-            let raw = format!("模型服务错误：流式请求失败：{e}");
+            let raw = format!("{err_prefix}：请求失败：{e}");
             let message = if e.is_timeout() {
                 TianyanError::timeout(raw).to_string()
             } else {
@@ -392,7 +397,7 @@ impl AsyncOpenAIClient {
             let detail = response.text().await.unwrap_or_default();
             let detail: String = detail.chars().take(300).collect();
             let retryable = crate::model::retry::should_retry_http(status);
-            let raw = format!("模型服务错误：流式请求被拒绝（HTTP {status}）：{detail}");
+            let raw = format!("{err_prefix}：请求被拒绝（HTTP {status}）：{detail}");
             return Err(RetryableFailure {
                 retryable,
                 message: classify_http_status(status, &raw),
