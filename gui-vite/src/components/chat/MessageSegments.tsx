@@ -79,7 +79,12 @@ export const MarkdownContent = memo(function MarkdownContent({
         // 文本结构化内容（画线框图）与用户输入的多行文本换行丢失；pre-wrap 保留
         // 换行与连续空格（ASCII art 对齐），且仍允许长行自动换行（区别于 pre）。
         '[&_p]:whitespace-pre-wrap',
-        '[&_li]:whitespace-pre-wrap',
+        // 列表项仅在「不含块级子元素」时应用：hast 会给含块级子元素的 li 在
+        // 首尾插入 \n 文本节点（loose 列表的 <p> 前后、嵌套列表的文本与 <ul>
+        // 之间），pre-wrap 会把这些 \n 渲染成整行空行——loose 列表的前导 \n
+        // 还会让 marker（1. / 2.）与正文分成两行、列表高度成倍膨胀。
+        // 含块级子元素时，其内部段落的软换行仍由 [&_p] 保证。
+        '[&_li:not(:has(p,ul,ol,pre,blockquote,table,hr))]:whitespace-pre-wrap',
         '[&_p]:mb-2 [&_p:last-child]:mb-0',
         '[&_ul]:mb-2 [&_ol]:mb-2',
         '[&_ul]:pl-5 [&_ol]:pl-5',
