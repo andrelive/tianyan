@@ -46,9 +46,9 @@ cargo fmt --all                             # 自动格式化
 cargo clippy --workspace                    # Clippy
 cargo test -p tianyan-core --lib            # 单元测试
 cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模块
-.\scripts\test.ps1 lint                     # fmt + clippy
-.\scripts\test.ps1 unit                     # 单元测试
-.\scripts\test.ps1 all                      # lint + unit + integration + e2e + bench
+.\scripts\test.ps1 lint                     # fmt + clippy(--all-targets) + 工具目录 freshness + 前端 lint/typecheck
+.\scripts\test.ps1 unit                     # Rust 单测 + 前端 vitest
+.\scripts\test.ps1 all                      # lint + unit + integration + e2e + gui-build + gui-e2e + bench
 ```
 
 ## 工作区结构
@@ -175,3 +175,4 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 - 配置热更新 API（`PUT /api/v1/config`）会持久化写入 `tianyan.toml`——QA/测试改动配置后必须恢复，别留污染
 - **PowerShell + cargo 陷阱（会伪造"编译失败"）**：PowerShell 5.1 下 `cargo ... 2>&1 | Select-String` / `Out-String` 会把 cargo 写到 **stderr** 的内容（warning 列表、`Blocking waiting for file lock`）当作错误抛出（`NativeCommandError`，exit 1）——即使编译实际成功。判据是输出里是否出现 `Finished` / `test result:`。脚本内用 `$ErrorActionPreference="Continue"`，交互排查可用 `cmd /c "cargo ..."`
 - 事件总线为**有界通道**（4096）：订阅者（事件处理器/SSE）积压时丢弃事件并计数（`EventBus::dropped_events()`）——实时通知尽力而为，权威数据在 SQLite/日志文件；不要把"事件必达"当作完整性契约
+- **改了工具描述 / 参数 schema 必须重生成工具目录**：`core/src/agent/tool_registry/builtin_tools.rs` 的 `def_*` 描述或 `*Params` schema 一变，`docs/architecture/tool-catalog.md` 即漂移——tag 推送时 Quality 的 `Tool catalog freshness` 门禁必红，而本地只有 `scripts/test.ps1 lint` 覆盖它（手工跑 `cargo fmt` / `clippy` 不会，极易漏到发布阶段，0.5.7 实发事故）。改完跑 `.\scripts\gen-tool-catalog.ps1` 重生成，并以 **`.\scripts\test.ps1 lint` 作为验收入口**（本地统一门禁，勿用手工命令替代）

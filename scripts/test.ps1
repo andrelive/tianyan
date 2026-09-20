@@ -25,8 +25,8 @@ function Test-Lint {
     cargo fmt --check
     if ($LASTEXITCODE -ne 0) { throw "fmt 检查失败" }
 
-    Write-Host "  - Rust Clippy 检查..."
-    cargo clippy --workspace -- -D warnings
+    Write-Host "  - Rust Clippy 检查（--all-targets：与 CI 同范围，避免「本地绿 / CI 红」）..."
+    cargo clippy --workspace --all-targets -- -D warnings
     if ($LASTEXITCODE -ne 0) { throw "clippy 检查失败" }
 
     Write-Host "  - 工具目录 freshness 校验 (A3)..."
