@@ -380,7 +380,7 @@ Server 是天演的 HTTP API 层，基于 Axum 框架，提供 REST API、SSE �
 | 端点 | 方法 | 功能 | 前端状态 |
 |------|------|------|:---:|
 | `/chat` | POST | 非流式聊天 | ⚠️ 已定义未使用 |
-| `/chat/stream` | POST | 流式聊天 (SSE，含 chunk_type) | ✅ |
+| `/chat/stream` | POST | 对话启动（ADR-028 收敛为开关：校验 + 启动 AgentLoop 立即返回；流式增量经 `GET /events`） | ✅ |
 | `/chat/regenerate` | POST | 重新生成回复 | ✅ |
 | `/chat/edit` | POST | 编辑消息后重新生成 | ✅ |
 

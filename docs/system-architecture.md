@@ -258,7 +258,7 @@ Agent :: process_message(session_id, msg) / process_message_stream（多模态 +
 
 ```
 用户输入 (React Frontend)
-         ↓ HTTP POST /api/v1/chat/stream (SSE)
+         ↓ HTTP POST /api/v1/chat/stream（开关：立即返回；流式增量经 GET /events）
 Axum Server → AppState.agent().process_message()
          ↓
 SessionState: structured_messages（单一真相源）
