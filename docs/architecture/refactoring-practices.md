@@ -53,7 +53,7 @@
 
 | 问题 | 位置 | 说明 |
 |------|------|------|
-| `--host/--port` 无效 | `server/main.rs` | 独立启动总是默认 `127.0.0.1:3000`，QA 直接测 3000 |
+| `--host/--port` 无效 | `server/main.rs` | 独立启动默认 `127.0.0.1:3000`（`TIANYAN_PORT` 可覆盖），QA 直接测 3000 |
 | bench 参数 bug | `scripts/test.ps1:37` | `-- --verbose` 被 bench harness 拒绝；直接跑 `cargo bench -p tianyan-server` |
 | `rusqlite::Error` 泄漏 | `core/src/vfs/backend/sqlite_db.rs:22,45,69` | 公共 API 泄漏外部错误类型（ADR-014 记录为债务，3 个调用点，未修） |
 | 文档漂移 | `docs/module-descriptions.md` 等 | 声称 LocalFileBackend 已删除，实际为生产默认（ADR-005 部分落地） |

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **独立 server 端口可配（`TIANYAN_PORT`）**：`server/src/main.rs` 由 `ServerConfig::default()` 改为 `ServerConfig::from_env()`——不设该变量时行为完全不变（默认 `127.0.0.1:3000`），设了则覆盖端口（非法值警告并回退默认）。动机：本地 3000 常被运行中的桌面应用占用，GUI e2e 需要一个不与之冲突的端口；顺带让独立 `tianyan-server` 的用户可换端口。解析抽为纯函数 `from_port_str` 并附判别力测试（合法 / 带空白 / 非法 / 空串 / 越界 / 缺失）
+
+### Changed
+- **GUI e2e 后端不再使用 3000**（`gui-vite/playwright.config.ts` 的 `E2E_PORT`，默认 3099，`TIANYAN_E2E_PORT` 可覆盖）：此前 e2e 与桌面应用抢同一端口，而后端条目 `reuseExistingServer: false` 会因端口冲突失败——等于「想跑 e2e 就得关掉自己的应用」（并掐断正在进行的会话）。vite 经 `TIANYAN_API_TARGET` 代理到 e2e 端口；`scripts/test.ps1` 的端口预检同源读取，避免两处默认值漂移
+
+### Fixed
+- **三处 e2e 断言失效（既有漂移；CI 不跑 e2e，故长期未被察觉）**：① `chat.spec.ts` 把 `POST /chat/stream` mock 成 SSE body，而该端点自 ADR-028 已收敛为「开关」（返回 JSON）、前端用 `response.json()` 解析 → 助手回复断言**恒红**（改走历史消息路径；流式端到端归 `real-chat.spec.ts`）；② `real-workspace-session.spec.ts` 同样按 SSE 文本解析响应取 `session_id`（改为按 JSON 解析）；③ `session-page.spec.ts` 仍断言「暂无会话」空态，而该空态已随工作区分组引入被移除（改为断言「默认」分组可见 + 该文案计数为 0）。判别力：旧写法临时探针 1 failed；修复后完整套件 36 passed
+- **vite dev 的 `/health` 代理此前从未生效**：该条目被误嵌在 `/api` 的配置对象**内部**，而 http-proxy 只识别 proxy 的**顶层**键——关于页版本展示 / 连接测试在 dev 模式下因此不达后端
+- **文档漂移**：`/chat/stream` 仍被描述为「流式聊天 (SSE，含 chunk_type)」（`module-descriptions`、`system-architecture` 数据流图），与其「开关」语义矛盾；「独立 server 固定 3000 / 不支持改端口」的强断言同步为「默认 3000，`TIANYAN_PORT` 可覆盖」（AGENTS.md、README、troubleshooting、refactoring-practices、module-descriptions）
+
 ## [0.5.7] - 2026-09-20
 
 ### Fixed

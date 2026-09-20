@@ -18,8 +18,8 @@ scripts/e2e/
 | 端口 | 进程 | 说明 |
 |------|------|------|
 | 8765 | mock-llm.mjs | OpenAI 兼容 mock（`MOCK_LLM_PORT` 可改） |
-| 3000 | tianyan-server | Axum 后端（固定 127.0.0.1:3000，不支持改端口） |
-| 5100 | vite dev | 前端开发服务器（`npm run dev`） |
+| 3099 | tianyan-server | Axum 后端（**e2e 专用端口，刻意避开 3000**；`TIANYAN_E2E_PORT` 可改） |
+| 5100 | vite dev | 前端开发服务器（`npm run dev`，代理 `/api` → e2e 后端端口） |
 
 ## mock-llm.mjs：提供什么
 
@@ -86,10 +86,11 @@ $mock = Start-Process node -ArgumentList "scripts/e2e/mock-llm.mjs" -PassThru
 # 2. 后端（工作目录必须是 gui-vite/，见下文 working_directory 说明）
 $env:TIANYAN_CONFIG  = "<仓库根>\scripts\e2e\tianyan.e2e.toml"
 $env:TIANYAN_DATA_DIR = "$env:TEMP\tianyan-e2e-data"
+$env:TIANYAN_PORT     = "3099"   # e2e 专用端口（刻意避开 3000，见端口地图）
 $backend = Start-Process cargo -ArgumentList "run","-p","tianyan-server" `
   -WorkingDirectory "<仓库根>\gui-vite" -PassThru
 # 等待健康检查通过（最多 ~8 分钟含首次编译）：
-do { Start-Sleep 2 } until (curl.exe -s http://127.0.0.1:3000/health)
+do { Start-Sleep 2 } until (curl.exe -s http://127.0.0.1:3099/health)
 
 # 3. 前端
 # cd gui-vite; npm run dev   # http://localhost:5100

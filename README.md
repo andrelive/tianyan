@@ -58,7 +58,7 @@ tianyan/
 │   ├── Cargo.toml          # 库名: tianyan-server
 │   └── src/
 │       ├── lib.rs          # start_server() + bootstrap_app_vfs()
-│       ├── main.rs         # 独立运行入口（固定监听 127.0.0.1:3000，不解析 CLI 参数）
+│       ├── main.rs         # 独立运行入口（默认 127.0.0.1:3000，TIANYAN_PORT 可覆盖；不解析 CLI 参数）
 │       ├── state.rs        # 共享 AppState（热重载、组件装配、剪贴板桥接）
 │       ├── agent_builder.rs  # Agent 组装（动态工具注入）
 │       ├── mcp_bridge.rs     # MCP 桥接（浏览器截图等产物落盘 mcp_images/）
@@ -271,7 +271,7 @@ embedding = { provider = "openai", model = "text-embedding-3-small" }
 ### 独立 API 服务
 
 ```bash
-# 启动 HTTP API 服务（固定监听 127.0.0.1:3000，不解析 --host/--port 参数）
+# 启动 HTTP API 服务（默认监听 127.0.0.1:3000；TIANYAN_PORT 可覆盖端口；不解析 --host/--port 参数）
 cargo run -p tianyan-server
 
 # 发布版本同样无需任何命令行参数

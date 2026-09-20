@@ -346,10 +346,12 @@ FROM background_tasks ORDER BY seq DESC LIMIT 20;
 
 - **测试命令**：统一走 `.\scripts\test.ps1 [lint|unit|integration|e2e|gui-build|gui-e2e|bench|all]`；
   纯 Rust 单测可直接 `cargo test -p tianyan-core --lib`（见 `AGENTS.md`）。
-- **3000 端口约定**：`server/src/main.rs` **不解析 `--host/--port`**——独立启动**总是监听
-  `127.0.0.1:3000`**（`ServerConfig::default()` = `host 127.0.0.1`, `port 3000`）；QA 时**直接测 3000**。
+- **端口约定**：`server/src/main.rs` **不解析 `--host/--port`**——独立启动**默认监听
+  `127.0.0.1:3000`**（`ServerConfig::default()` = `host 127.0.0.1`, `port 3000`；`TIANYAN_PORT`
+  可覆盖，走 `ServerConfig::from_env`）；QA 时**直接测 3000**。
   桌面端则首选 3000，被占用时**动态递增**（`find_available_port`），并把实际端口经
-  `window.__TIANYAN_API_BASE__` 注入前端。
+  `window.__TIANYAN_API_BASE__` 注入前端。**GUI e2e 后端不用 3000**（默认 3099，
+  `gui-vite/playwright.config.ts`）——避免与运行中的桌面应用互斥。
 - **配置热更新会落盘**：`PUT /api/v1/config`（`config/services.rs::persist_and_reload`）
   = 校验 → `save_to_file` 写回 `~/.tianyan/tianyan.toml` → 热重载。
   **QA/测试改过配置后必须恢复**，否则污染本机配置。

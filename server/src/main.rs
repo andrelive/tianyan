@@ -23,7 +23,10 @@ async fn main() -> tianyan::common::error::Result<()> {
             tianyan::config::TianyanConfig::default()
         });
 
-        match start_server(tianyan_server::ServerConfig::default(), config.clone()).await {
+        // 端口来源单点：from_env 读 TIANYAN_PORT（未设 → 默认 127.0.0.1:3000）。
+        // e2e 借此用备用端口启动，避免与运行中的桌面应用抢占 3000。
+        let server_config = tianyan_server::ServerConfig::from_env();
+        match start_server(server_config, config.clone()).await {
             Ok(()) => {
                 // 服务器正常关停：检查是否有待处理的数据目录搬迁
                 if tianyan_server::migration::handle_pending_migration(&config)

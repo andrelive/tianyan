@@ -13,15 +13,15 @@ export async function assertE2eBackend(request: APIRequestContext): Promise<void
   const tree = await request.get('/api/v1/workspace/tree?depth=1');
   if (!tree.ok()) {
     throw new Error(
-      `e2e 身份守卫失败：/workspace/tree 返回 HTTP ${tree.status()}——3000 端口可能不是 e2e 后端。` +
-        '请确认没有开发中的后端占用 3000（playwright 配置的后端条目已禁用复用，会响亮失败）。',
+      `e2e 身份守卫失败：/workspace/tree 返回 HTTP ${tree.status()}——e2e 端口上可能不是 e2e 后端。` +
+        '请确认 e2e 端口（默认 3099，TIANYAN_E2E_PORT 可改）未被其他后端占用。',
     );
   }
   const body = (await tree.json()) as { entries?: Array<{ name: string }> };
   const hasFixture = (body.entries ?? []).some((e) => e.name === 'hello.txt');
   if (!hasFixture) {
     throw new Error(
-      'e2e 身份守卫失败：workspace tree 不含夹具 hello.txt——3000 端口不是 e2e 实例（开发后端？）。' +
+      'e2e 身份守卫失败：workspace tree 不含夹具 hello.txt——e2e 端口上不是 e2e 实例（开发后端？）。' +
         '真实 spec 会写入共享数据，已中止以防数据污染。',
     );
   }

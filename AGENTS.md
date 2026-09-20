@@ -171,7 +171,8 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
   层/不跨任务重试——请求层的自我保护默认全局生效，不做每 provider 前置配置
 - 工具不做自主多轮决策，决策权在 LLM
 - 已有链路不叠加抽象（不额外封装 Manager/Coordinator）
-- `server/main.rs` 不解析 `--host/--port` 命令行参数——独立启动总是监听默认 `127.0.0.1:3000`，QA 时直接测 3000
+- `server/main.rs` 不解析 `--host/--port` 命令行参数——独立启动默认监听 `127.0.0.1:3000`（`TIANYAN_PORT` 可覆盖，走 `ServerConfig::from_env`），QA 时直接测 3000
+- **GUI e2e 后端刻意不用 3000**：`gui-vite/playwright.config.ts` 的 `E2E_PORT`（默认 3099，`TIANYAN_E2E_PORT` 可覆盖），vite 经 `TIANYAN_API_TARGET` 代理到该端口——本地 3000 常被运行中的桌面应用（tianyan-tauri）占用，若共用则「跑 e2e」与「用应用」互斥（后端条目 `reuseExistingServer: false` 会因端口冲突响亮失败）
 - 配置热更新 API（`PUT /api/v1/config`）会持久化写入 `tianyan.toml`——QA/测试改动配置后必须恢复，别留污染
 - **PowerShell + cargo 陷阱（会伪造"编译失败"）**：PowerShell 5.1 下 `cargo ... 2>&1 | Select-String` / `Out-String` 会把 cargo 写到 **stderr** 的内容（warning 列表、`Blocking waiting for file lock`）当作错误抛出（`NativeCommandError`，exit 1）——即使编译实际成功。判据是输出里是否出现 `Finished` / `test result:`。脚本内用 `$ErrorActionPreference="Continue"`，交互排查可用 `cmd /c "cargo ..."`
 - 事件总线为**有界通道**（4096）：订阅者（事件处理器/SSE）积压时丢弃事件并计数（`EventBus::dropped_events()`）——实时通知尽力而为，权威数据在 SQLite/日志文件；不要把"事件必达"当作完整性契约

@@ -102,8 +102,13 @@ function Test-GuiE2E {
     cargo build -p tianyan-server
     if ($LASTEXITCODE -ne 0) { throw "后端预编译失败" }
 
-    # 端口占用预检：8765 (mock-llm) / 3000 (后端) / 5100 (vite)
-    foreach ($port in 8765, 3000, 5100) {
+    # e2e 后端端口：**刻意避开 3000**——本地 3000 常被运行中的桌面应用占用，
+    # 强占会掐断用户会话（见 gui-vite/playwright.config.ts）。此处与配置同源读取，
+    # 避免两处默认值漂移；需要时用 TIANYAN_E2E_PORT 覆盖。
+    $e2ePort = if ($env:TIANYAN_E2E_PORT) { [int]$env:TIANYAN_E2E_PORT } else { 3099 }
+    $env:TIANYAN_E2E_PORT = "$e2ePort"
+    # 端口占用预检：8765 (mock-llm) / e2e 后端 / 5100 (vite)
+    foreach ($port in 8765, $e2ePort, 5100) {
         if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) {
             throw "端口 $port 已被占用。请先停止占用该端口的进程（如开发中的 tianyan server / vite dev / mock-llm）再运行 GUI E2E。"
         }
@@ -117,6 +122,7 @@ function Test-GuiE2E {
         if ($LASTEXITCODE -ne 0) { throw "GUI E2E 测试失败" }
     } finally {
         Remove-Item Env:CI -ErrorAction SilentlyContinue
+        Remove-Item Env:TIANYAN_E2E_PORT -ErrorAction SilentlyContinue
         Pop-Location
     }
     Write-Host "GUI E2E 测试通过" -ForegroundColor Green

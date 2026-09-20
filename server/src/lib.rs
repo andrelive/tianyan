@@ -80,6 +80,36 @@ impl ServerConfig {
             port,
         }
     }
+
+    /// 从环境变量构造：`TIANYAN_PORT` 可覆盖端口（未设 / 非法 → 默认 3000）。
+    ///
+    /// 用途：e2e 用**备用端口**启动后端，刻意避开 3000——本地 3000 常被运行中的
+    /// 桌面应用（`tianyan-tauri`）占用，强占端口会掐断用户正在进行的会话。
+    /// 独立 `tianyan-server` 的用户也可借此换端口（不设该变量时行为完全不变）。
+    pub fn from_env() -> Self {
+        let raw = std::env::var("TIANYAN_PORT").ok();
+        let config = Self::from_port_str(raw.as_deref());
+        match raw.as_deref() {
+            Some(value) if value.trim().parse::<u16>().is_err() => {
+                tracing::warn!(
+                    "TIANYAN_PORT 非法（{}），回退默认端口 {}",
+                    value,
+                    config.port
+                );
+            }
+            Some(_) => tracing::info!("服务器端口经 TIANYAN_PORT 覆盖为 {}", config.port),
+            None => {}
+        }
+        config
+    }
+
+    /// 端口字符串 → 配置（纯函数，便于判别力测试）：`None` / 非法值回退默认端口。
+    fn from_port_str(port: Option<&str>) -> Self {
+        match port.and_then(|value| value.trim().parse::<u16>().ok()) {
+            Some(port) => Self::with_port(port),
+            None => Self::default(),
+        }
+    }
 }
 
 /// Health check response
@@ -934,6 +964,20 @@ mod tests {
         let config = ServerConfig::new("0.0.0.0", 9000);
         assert_eq!(config.port, 9000);
         assert_eq!(config.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn test_server_config_from_port_str() {
+        // 合法值：覆盖端口（容忍前后空白）
+        assert_eq!(ServerConfig::from_port_str(Some("4321")).port, 4321);
+        assert_eq!(ServerConfig::from_port_str(Some(" 4321 ")).port, 4321);
+        // 非法 / 空串 / 越界 / 缺失：回退默认端口（不 panic，不静默改 host）
+        assert_eq!(ServerConfig::from_port_str(Some("abc")).port, 3000);
+        assert_eq!(ServerConfig::from_port_str(Some("")).port, 3000);
+        assert_eq!(ServerConfig::from_port_str(Some("70000")).port, 3000);
+        assert_eq!(ServerConfig::from_port_str(None).port, 3000);
+        // 端口可配不改变暴露面：host 恒为回环
+        assert_eq!(ServerConfig::from_port_str(Some("4321")).host, "127.0.0.1");
     }
 
     #[tokio::test]
