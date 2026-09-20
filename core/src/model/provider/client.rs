@@ -2,7 +2,7 @@ use async_openai::types::chat::FinishReason;
 use async_openai::{config::OpenAIConfig, Client};
 
 use crate::common::error::{Result, TianyanError};
-use crate::config::{ProviderConfig, ThinkingField};
+use crate::config::{ProviderConfig, ProviderDialect, ThinkingParam};
 use crate::model::retry::RetryPolicy;
 
 /// 基于 async-openai 的模型服务客户端。
@@ -28,12 +28,19 @@ pub struct AsyncOpenAIClient {
     /// 语义为"空闲"而非"总时长"——长思维链生成可持续数分钟，总时长
     /// 限制会把活跃长流在中途掐断（0.2.3 会话静默中断根因之一）。
     pub(crate) read_idle: std::time::Duration,
-    /// 传输层思考方言：历史 assistant 消息的思考内容用哪个 wire 字段名。
+    /// provider wire 方言（差异判定**单点**）：思考字段名 / 缓存命中字段 /
+    /// 思考参数形态 / 嵌入 usage 形状。
     ///
-    /// 构造时按「显式配置 > endpoint/名称嗅探 > 默认」解析一次并缓存；
-    /// 请求路径上不再重复判断。字段名不匹配时服务端静默丢弃思考内容，
-    /// 请求仍成功——发错不会报错，只会静默损失上下文。
-    pub(crate) thinking_field: ThinkingField,
+    /// 构造时按「显式配置 > 预设 > endpoint/名称嗅探 > 默认」解析**一次**并
+    /// 缓存；请求 / 响应路径上不再做任何判定（避免同一差异散落多处嗅探）。
+    /// 其中字段名类差异发错时服务端静默丢弃（请求仍成功、只静默损失上下文），
+    /// 故必须单点可配。
+    pub(crate) dialect: ProviderDialect,
+    /// 模型级思考参数形态覆盖（来自 `ModelEntry.thinking_param`）。
+    ///
+    /// 该差异是**模型级**的（同一 provider 下 Qwen 思考族与其它模型的参数形态
+    /// 不同），无法只在 provider 级方言里表达；构造时收集一次，请求路径零判定。
+    pub(crate) model_thinking_params: std::collections::HashMap<String, ThinkingParam>,
 }
 
 impl AsyncOpenAIClient {
@@ -64,6 +71,13 @@ impl AsyncOpenAIClient {
 
         let client = Client::with_config(oa_config).with_http_client(http_client.clone());
 
+        // 模型级覆盖表：仅收集显式声明项（缺省走模型名嗅探，不占表）。
+        let model_thinking_params = config
+            .models
+            .iter()
+            .filter_map(|m| m.thinking_param.map(|p| (m.name.clone(), p)))
+            .collect();
+
         Ok(Self {
             service_name: config.name.clone(),
             client,
@@ -73,8 +87,17 @@ impl AsyncOpenAIClient {
             headers: config.headers.clone(),
             retry_policy: RetryPolicy::default(),
             read_idle: std::time::Duration::from_secs(config.timeout),
-            thinking_field: config.resolve_thinking_field(),
+            dialect: config.resolve_dialect(),
+            model_thinking_params,
         })
+    }
+
+    /// 思考参数形态解析（**单点**）：模型级显式 > provider 方言（显式 > 模型名嗅探）。
+    pub(crate) fn thinking_param_for(&self, model: &str) -> ThinkingParam {
+        self.model_thinking_params
+            .get(model)
+            .copied()
+            .unwrap_or_else(|| self.dialect.thinking_param_for(model))
     }
 
     /// 从基本参数创建新客户端（便捷方法）。
@@ -93,6 +116,7 @@ impl AsyncOpenAIClient {
             enabled: true,
             headers: std::collections::HashMap::new(),
             thinking_field: None,
+            dialect: None,
         };
         Self::from_provider(&provider)
     }
@@ -116,7 +140,7 @@ impl AsyncOpenAIClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ProviderConfig;
+    use crate::config::{ModelEntry, ProviderConfig, ThinkingField, ThinkingParam};
 
     fn provider(name: &str, endpoint: &str, api_key: Option<&str>) -> ProviderConfig {
         ProviderConfig {
@@ -128,6 +152,7 @@ mod tests {
             enabled: true,
             headers: std::collections::HashMap::new(),
             thinking_field: None,
+            dialect: None,
         }
     }
 
@@ -154,6 +179,7 @@ mod tests {
         assert_eq!(
             AsyncOpenAIClient::from_provider(&ollama_cloud)
                 .unwrap()
+                .dialect
                 .thinking_field,
             ThinkingField::Ollama
         );
@@ -162,6 +188,7 @@ mod tests {
         assert_eq!(
             AsyncOpenAIClient::from_provider(&local)
                 .unwrap()
+                .dialect
                 .thinking_field,
             ThinkingField::Ollama
         );
@@ -170,6 +197,7 @@ mod tests {
         assert_eq!(
             AsyncOpenAIClient::from_provider(&deepseek)
                 .unwrap()
+                .dialect
                 .thinking_field,
             ThinkingField::ReasoningContent
         );
@@ -184,6 +212,7 @@ mod tests {
         assert_eq!(
             AsyncOpenAIClient::from_provider(&custom)
                 .unwrap()
+                .dialect
                 .thinking_field,
             ThinkingField::Ollama
         );
@@ -194,6 +223,7 @@ mod tests {
         assert_eq!(
             AsyncOpenAIClient::from_provider(&ollama)
                 .unwrap()
+                .dialect
                 .thinking_field,
             ThinkingField::ReasoningContent
         );
@@ -238,6 +268,69 @@ mod tests {
         assert_eq!(
             AsyncOpenAIClient::finish_reason_str(&FinishReason::FunctionCall),
             "function_call"
+        );
+    }
+
+    #[test]
+    fn test_thinking_param_precedence() {
+        // 模型级显式 > provider 方言 > 模型名嗅探
+        let mut config = provider(
+            "dashscope",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            Some("k"),
+        );
+        config.models = vec![
+            ModelEntry {
+                name: "qwen3-max".to_string(),
+                thinking_param: Some(ThinkingParam::ReasoningEffort),
+                ..Default::default()
+            },
+            ModelEntry {
+                name: "plain-model".to_string(),
+                ..Default::default()
+            },
+        ];
+        let client = AsyncOpenAIClient::from_provider(&config).unwrap();
+
+        // 模型级显式：模型名含 qwen 但声明用 reasoning_effort → 以声明为准
+        assert_eq!(
+            client.thinking_param_for("qwen3-max"),
+            ThinkingParam::ReasoningEffort
+        );
+        // 未声明 → 回落模型名嗅探
+        assert_eq!(
+            client.thinking_param_for("plain-model"),
+            ThinkingParam::ReasoningEffort
+        );
+        assert_eq!(
+            client.thinking_param_for("qwen3-vl"),
+            ThinkingParam::ThinkingBudget
+        );
+    }
+
+    #[test]
+    fn test_explicit_dialect_preset_overrides_sniff() {
+        // 显式 dialect 优先于端点 / 名称嗅探（自建中转的逃生门）
+        let mut config = provider("my-gateway", "https://gw.corp.example/v1", Some("k"));
+        assert_eq!(
+            AsyncOpenAIClient::from_provider(&config)
+                .unwrap()
+                .dialect
+                .embedding_usage,
+            crate::config::EmbeddingUsageShape::PromptAndTotal,
+            "未显式声明时回落默认方言"
+        );
+
+        config.dialect = Some(crate::config::DialectPreset::DashScope);
+        let client = AsyncOpenAIClient::from_provider(&config).unwrap();
+        assert_eq!(
+            client.dialect.embedding_usage,
+            crate::config::EmbeddingUsageShape::TotalOnly,
+            "显式 preset 必须生效"
+        );
+        assert_eq!(
+            client.dialect.cache_field,
+            crate::config::CacheField::DashScopeTop
         );
     }
 }

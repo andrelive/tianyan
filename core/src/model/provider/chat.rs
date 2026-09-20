@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{Message, MessageRole, TokenUsage};
-use crate::config::ThinkingField;
+use crate::config::{ProviderDialect, ThinkingField, ThinkingParam};
 use crate::model::traits::ChatService;
 use crate::model::types::{
     ChatChoice, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ToolCall,
@@ -63,10 +63,14 @@ impl ChatService for AsyncOpenAIClient {
                     retryable: false,
                     message: format!("序列化请求失败：{}", e),
                 })?;
-                inject_reasoning_content(&mut body, &request.messages, self.thinking_field);
+                inject_reasoning_content(&mut body, &request.messages, self.dialect.thinking_field);
                 if let Some(effort) = request.thinking_effort.as_deref() {
                     if effort != "off" {
-                        apply_thinking_params(&mut body, effort, &request.model);
+                        apply_thinking_params(
+                            &mut body,
+                            effort,
+                            self.thinking_param_for(&request.model),
+                        );
                     }
                 }
                 let attempted: std::result::Result<CreateChatCompletionResponse, OpenAIError> =
@@ -179,10 +183,10 @@ impl ChatService for AsyncOpenAIClient {
             .map_err(|e| TianyanError::Custom(format!("模型服务错误：序列化请求失败: {}", e)))?;
         // 回传历史思考内容（DeepSeek 思考模型要求：携带 tools 的请求必须
         // 完整回传 reasoning_content，即使该轮未实际进行工具调用）。
-        inject_reasoning_content(&mut body, &request.messages, self.thinking_field);
+        inject_reasoning_content(&mut body, &request.messages, self.dialect.thinking_field);
         if let Some(effort) = request.thinking_effort.as_deref() {
             if effort != "off" {
-                apply_thinking_params(&mut body, effort, &request.model);
+                apply_thinking_params(&mut body, effort, self.thinking_param_for(&request.model));
             }
         }
         self.create_raw_stream(body).await
@@ -194,36 +198,40 @@ impl ChatService for AsyncOpenAIClient {
 /// - 其余 OpenAI 兼容族：`enable_thinking: true` + `reasoning_effort`（OpenAI 标准强度参数，
 ///   DeepSeek 等已实测容忍附加参数）
 ///
-/// 关闭（Off）时调用方不进入本函数，不附加任何参数（模型默认行为）。
-/// 把思考强度档位原样映射为请求体参数（档位值为模型自己声明的，不做本地翻译）：
-/// - Qwen 思考族（模型名含 qwen）：`enable_thinking: true` + `thinking_budget`（DashScope 原生强度参数；
-///   已知档位映射预算，未知档位用默认预算 4096）
-/// - 其余 OpenAI 兼容族：`enable_thinking: true` + `reasoning_effort: <原档位值>`（原样透传，
-///   DeepSeek 等已实测容忍附加参数）
+/// 把思考强度档位映射为请求体参数（**形态由参数决定**，档位值不做本地翻译）：
+/// - [`ThinkingParam::ThinkingBudget`]（DashScope Qwen 思考族）：`enable_thinking: true` +
+///   `thinking_budget`（已知档位映射预算，未知档位用默认预算 4096）
+/// - [`ThinkingParam::ReasoningEffort`]（其余 OpenAI 兼容族）：`enable_thinking: true` +
+///   `reasoning_effort: <原档位值>`（原样透传，DeepSeek 等已实测容忍附加参数）
+///
+/// 形态解析在调用方**单点**完成（[`AsyncOpenAIClient::thinking_param_for`]：
+/// 模型级显式 > provider 方言 > 模型名嗅探）；本函数只负责按形态写参数。
 ///
 /// 档位为 "off" 时调用方不进入本函数，不附加任何参数（模型默认行为）。
-fn apply_thinking_params(body: &mut Value, effort: &str, model: &str) {
+fn apply_thinking_params(body: &mut Value, effort: &str, param: ThinkingParam) {
     body["enable_thinking"] = Value::Bool(true);
-    let lower = model.to_lowercase();
-    if lower.contains("qwen") {
-        let budget = match effort {
-            "low" => 1024,
-            "medium" => 4096,
-            "high" => 16384,
-            _ => 4096,
-        };
-        body["thinking_budget"] = Value::Number(budget.into());
-    } else {
-        body["reasoning_effort"] = Value::String(effort.to_string());
+    match param {
+        ThinkingParam::ThinkingBudget => {
+            let budget = match effort {
+                "low" => 1024,
+                "medium" => 4096,
+                "high" => 16384,
+                _ => 4096,
+            };
+            body["thinking_budget"] = Value::Number(budget.into());
+        }
+        ThinkingParam::ReasoningEffort => {
+            body["reasoning_effort"] = Value::String(effort.to_string());
+        }
     }
 }
 
 /// 请求发送阶段的失败（携带是否可重试的类别标记）；重试是请求层自我保护。
 #[derive(Debug)]
-struct RetryableFailure {
+pub(super) struct RetryableFailure {
     /// 是否属于可重试的临时失败（HTTP 429 / 5xx / 网络 / 超时）。
-    retryable: bool,
-    message: String,
+    pub(super) retryable: bool,
+    pub(super) message: String,
 }
 
 /// 上游 OpenAI 兼容错误的语义分类（ADR-014：分类契约单点）。
@@ -260,7 +268,7 @@ fn classify_upstream_error(e: &OpenAIError) -> String {
 /// HTTP 状态码 → 语义分类（ADR-014：分类契约单点；流式请求的显式状态码）。
 ///
 /// 401/403 → permission、404 → not_found、408/504 → timeout；其余返回原文。
-fn classify_http_status(status: reqwest::StatusCode, raw: &str) -> String {
+pub(super) fn classify_http_status(status: reqwest::StatusCode, raw: &str) -> String {
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         return TianyanError::permission(raw).to_string();
     }
@@ -302,6 +310,8 @@ impl AsyncOpenAIClient {
         let mut byte_stream = response.bytes_stream();
         let (tx, rx) = mpsc::channel(100);
         let read_idle = self.read_idle;
+        // 方言在 spawn 前取出（与 read_idle 同款：闭包内不再触达 self）
+        let dialect = self.dialect;
 
         tokio::spawn(async move {
             let mut buf: Vec<u8> = Vec::new();
@@ -331,7 +341,7 @@ impl AsyncOpenAIClient {
                 match next {
                     Some(Ok(bytes)) => {
                         buf.extend_from_slice(&bytes);
-                        drain_sse_lines(&mut buf, &tx).await;
+                        drain_sse_lines(&mut buf, &tx, dialect).await;
                     }
                     Some(Err(e)) => {
                         let _ = tx
@@ -344,7 +354,7 @@ impl AsyncOpenAIClient {
                     }
                     None => {
                         // 流结束：处理残留缓冲（无换行的最后一个 data 行）
-                        drain_sse_lines(&mut buf, &tx).await;
+                        drain_sse_lines(&mut buf, &tx, dialect).await;
                         return;
                     }
                 }
@@ -456,7 +466,11 @@ impl AsyncOpenAIClient {
 ///   "cost":"..."}`）：结构化识别后静默跳过（非错误）；
 /// - 真正的错误对象（带 `error` 字段）：照常上报并终止；
 /// - 其它无法解析的行：debug 级记录后跳过（兼容未知扩展字段）。
-async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatCompletionChunk>>) {
+async fn drain_sse_lines(
+    buf: &mut Vec<u8>,
+    tx: &mpsc::Sender<Result<ChatCompletionChunk>>,
+    dialect: ProviderDialect,
+) {
     loop {
         let Some(nl) = buf.iter().position(|&b| b == b'\n') else {
             return;
@@ -492,7 +506,7 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
                 }
                 if let (Some(usage_value), Some(usage)) = (value.get("usage"), chunk.usage.as_mut())
                 {
-                    extract_cache_tokens(usage_value, usage);
+                    extract_cache_tokens(usage_value, usage, dialect);
                 }
                 if tx.send(Ok(chunk)).await.is_err() {
                     return;
@@ -545,7 +559,7 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
                             if let (Some(usage_value), Some(usage_slot)) =
                                 (value.get("usage"), tail.usage.as_mut())
                             {
-                                extract_cache_tokens(usage_value, usage_slot);
+                                extract_cache_tokens(usage_value, usage_slot, dialect);
                             }
                             tracing::debug!(
                                 usage = ?tail.usage,
@@ -584,14 +598,9 @@ async fn drain_sse_lines(buf: &mut Vec<u8>, tx: &mpsc::Sender<Result<ChatComplet
     }
 }
 
-/// 从提供商原始 usage JSON 提取缓存命中 token 数（各提供商标识不同）：
-/// - DeepSeek：顶层 `prompt_cache_hit_tokens`
-/// - DashScope（阿里云百炼 OpenAI 兼容）：顶层 `input_cache_hit_tokens`
-/// - OpenAI 标准：`prompt_tokens_details.cached_tokens`
-///
-/// 命中任一即填充 `cache_read`；`cache_write` 提供商一般不下发，保持 0。
-fn extract_cache_tokens(usage_value: &Value, usage: &mut TokenUsage) {
-    let hit = usage_value
+/// 缓存命中字段的全字段探测链（方言声明未命中时的兜底；顺序与历史行为一致）。
+fn probe_cache_tokens(usage_value: &Value) -> Option<u64> {
+    usage_value
         .get("prompt_cache_hit_tokens")
         .or_else(|| usage_value.get("input_cache_hit_tokens"))
         .and_then(Value::as_u64)
@@ -600,8 +609,29 @@ fn extract_cache_tokens(usage_value: &Value, usage: &mut TokenUsage) {
                 .get("prompt_tokens_details")
                 .and_then(|d| d.get("cached_tokens"))
                 .and_then(Value::as_u64)
-        });
-    if let Some(hit) = hit {
+        })
+}
+
+/// 从提供商原始 usage JSON 提取缓存命中 token 数。
+///
+/// **声明优先 + 探测兜底**：先按 provider 方言声明的字段路径取
+/// （`dialect.cache_field`；各家标识不同：DeepSeek `prompt_cache_hit_tokens`、
+/// DashScope `input_cache_hit_tokens`、OpenAI `prompt_tokens_details.cached_tokens`），
+/// 未命中时回落全字段探测链 [`probe_cache_tokens`]。
+///
+/// 保留兜底是刻意的：该差异失败性质为「可见」（探不到即 0、语义无歧义），兜底
+/// 不引入静默错误，却消除了「用户配错 dialect 就静默丢缓存统计」这一新失败模式
+/// （声明只负责更精确，不负责唯一）。
+///
+/// `cache_write` 提供商一般不下发，保持 0。
+fn extract_cache_tokens(usage_value: &Value, usage: &mut TokenUsage, dialect: ProviderDialect) {
+    let declared = dialect
+        .cache_field
+        .wire_path()
+        .iter()
+        .try_fold(usage_value, |node, key| node.get(*key))
+        .and_then(Value::as_u64);
+    if let Some(hit) = declared.or_else(|| probe_cache_tokens(usage_value)) {
         usage.cache_read = hit as usize;
     }
 }
@@ -1017,6 +1047,145 @@ mod convert_tests {
             serde_json::json!(true),
             "流式请求必须显式请求 usage"
         );
+    }
+}
+
+/// 阶段0 基线：方言相关纯函数的现状行为锁定（D2 缓存字段探测 / D3 思考参数映射）。
+///
+/// 这些测试是「方言单点化」重构的**行为等价基线**：重构只改变判定的来源
+/// （散落的模型名嗅探 → [`ProviderDialect`] 单点），不改变任何一条已实测的
+/// wire 行为。重构后这些断言必须原样通过，否则即为行为漂移。
+#[cfg(test)]
+mod dialect_baseline_tests {
+    use super::*;
+    use crate::config::DialectPreset;
+
+    /// 预设 → 方言（测试便捷入口）。
+    fn dialect(preset: DialectPreset) -> ProviderDialect {
+        ProviderDialect::for_preset(preset)
+    }
+
+    // ── D2：缓存命中的三种提供商标识（声明优先 + 探测兜底）──
+
+    #[test]
+    fn test_extract_cache_tokens_deepseek_shape() {
+        let usage = serde_json::json!({
+            "prompt_tokens": 100,
+            "prompt_cache_hit_tokens": 30,
+            "total_tokens": 100
+        });
+        let mut out = TokenUsage::default();
+        extract_cache_tokens(&usage, &mut out, dialect(DialectPreset::DeepSeek));
+        assert_eq!(out.cache_read, 30, "DeepSeek：顶层 prompt_cache_hit_tokens");
+    }
+
+    #[test]
+    fn test_extract_cache_tokens_dashscope_shape() {
+        let usage = serde_json::json!({
+            "prompt_tokens": 100,
+            "input_cache_hit_tokens": 40,
+            "total_tokens": 100
+        });
+        let mut out = TokenUsage::default();
+        extract_cache_tokens(&usage, &mut out, dialect(DialectPreset::DashScope));
+        assert_eq!(out.cache_read, 40, "DashScope：顶层 input_cache_hit_tokens");
+    }
+
+    #[test]
+    fn test_extract_cache_tokens_openai_shape() {
+        let usage = serde_json::json!({
+            "prompt_tokens": 100,
+            "total_tokens": 100,
+            "prompt_tokens_details": { "cached_tokens": 50 }
+        });
+        let mut out = TokenUsage::default();
+        extract_cache_tokens(&usage, &mut out, dialect(DialectPreset::OpenAiCompatible));
+        assert_eq!(
+            out.cache_read, 50,
+            "OpenAI 标准：prompt_tokens_details.cached_tokens"
+        );
+    }
+
+    #[test]
+    fn test_extract_cache_tokens_absent_stays_zero() {
+        // 无任何缓存字段（多数网关）→ 保持 0，不得误填
+        let usage = serde_json::json!({ "prompt_tokens": 10, "total_tokens": 10 });
+        let mut out = TokenUsage::default();
+        extract_cache_tokens(&usage, &mut out, dialect(DialectPreset::OpenAiCompatible));
+        assert_eq!(out.cache_read, 0);
+    }
+
+    // ── D3：思考强度的两种参数方言（模型名嗅探）──
+
+    #[test]
+    fn test_apply_thinking_params_qwen_uses_thinking_budget() {
+        let mut body = serde_json::json!({});
+        apply_thinking_params(
+            &mut body,
+            "high",
+            ThinkingParam::sniff("qwen3-thinking-max"),
+        );
+        assert_eq!(body["enable_thinking"], serde_json::json!(true));
+        assert_eq!(body["thinking_budget"], serde_json::json!(16384));
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "Qwen 族不应附 reasoning_effort"
+        );
+    }
+
+    #[test]
+    fn test_apply_thinking_params_default_uses_reasoning_effort() {
+        let mut body = serde_json::json!({});
+        apply_thinking_params(&mut body, "high", ThinkingParam::sniff("deepseek-v4-flash"));
+        assert_eq!(body["reasoning_effort"], serde_json::json!("high"));
+        assert!(
+            body.get("thinking_budget").is_none(),
+            "非 Qwen 族不应附 thinking_budget"
+        );
+    }
+
+    #[test]
+    fn test_apply_thinking_params_qwen_unknown_effort_falls_back() {
+        // 未知档位 → 默认预算 4096（档位值由模型自己声明，可能超出已知映射）
+        let mut body = serde_json::json!({});
+        apply_thinking_params(&mut body, "extra-max", ThinkingParam::sniff("qwen3-max"));
+        assert_eq!(body["thinking_budget"], serde_json::json!(4096));
+    }
+
+    #[test]
+    fn test_apply_thinking_params_model_detection_case_insensitive() {
+        for model in ["Qwen3-Max", "QWEN3-MAX", "qwen3-max"] {
+            let mut body = serde_json::json!({});
+            apply_thinking_params(&mut body, "low", ThinkingParam::sniff(model));
+            assert_eq!(
+                body["thinking_budget"],
+                serde_json::json!(1024),
+                "模型名大小写不敏感：{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cache_tokens_declared_miss_falls_back_to_probe() {
+        // 声明优先但非唯一：方言指向 OpenAI 字段，响应却是 DeepSeek 形状
+        // → 必须回落探测链命中（消除「配错 dialect 就静默丢统计」的新失败模式）
+        let usage = serde_json::json!({
+            "prompt_cache_hit_tokens": 30,
+            "total_tokens": 100
+        });
+        let mut out = TokenUsage::default();
+        extract_cache_tokens(&usage, &mut out, dialect(DialectPreset::OpenAiCompatible));
+        assert_eq!(out.cache_read, 30, "声明未命中 → 探测链兜底");
+    }
+
+    #[test]
+    fn test_apply_thinking_params_respects_resolved_param() {
+        // 形态由调用方单点解析后传入（client.thinking_param_for）：显式 ThinkingBudget
+        // 时即使模型名不含 qwen 也走预算分支——本函数不再自行嗅探。
+        let mut body = serde_json::json!({});
+        apply_thinking_params(&mut body, "medium", ThinkingParam::ThinkingBudget);
+        assert_eq!(body["thinking_budget"], serde_json::json!(4096));
+        assert!(body.get("reasoning_effort").is_none());
     }
 }
 

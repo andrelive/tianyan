@@ -343,6 +343,7 @@ impl ConfigService {
                         enabled: true,
                         headers: Default::default(),
                         thinking_field: None,
+                        dialect: None,
                     });
                 config
                     .models
@@ -403,6 +404,7 @@ mod tests {
             enabled: true,
             headers: Default::default(),
             thinking_field: None,
+            dialect: None,
         }
     }
 

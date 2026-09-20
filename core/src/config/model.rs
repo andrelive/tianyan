@@ -104,6 +104,195 @@ impl ThinkingField {
     }
 }
 
+// ─── Wire 方言（各「OpenAI 兼容」实现的细节差异，单点描述）───
+
+/// 缓存命中 token 的 wire 字段来源。
+///
+/// 各 OpenAI 兼容实现的标识不统一：DeepSeek 官方用顶层 `prompt_cache_hit_tokens`、
+/// DashScope 用顶层 `input_cache_hit_tokens`、OpenAI 标准用
+/// `prompt_tokens_details.cached_tokens`。
+///
+/// 失败性质为**可见**（探不到即 0、无歧义），因此消费侧保留全字段探测链兜底：
+/// 本枚举只决定**首选**字段（更精确），未命中时仍回落探测（更鲁棒）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CacheField {
+    /// OpenAI 标准：`prompt_tokens_details.cached_tokens`。
+    #[default]
+    #[serde(rename = "prompt_tokens_details.cached_tokens")]
+    OpenAiDetails,
+    /// DeepSeek 官方：顶层 `prompt_cache_hit_tokens`。
+    #[serde(rename = "prompt_cache_hit_tokens")]
+    DeepSeekTop,
+    /// DashScope（阿里云百炼）：顶层 `input_cache_hit_tokens`。
+    #[serde(rename = "input_cache_hit_tokens")]
+    DashScopeTop,
+}
+
+impl CacheField {
+    /// wire 字段路径（顶层字段为单元素，嵌套字段按层级展开）。
+    pub fn wire_path(self) -> &'static [&'static str] {
+        match self {
+            Self::OpenAiDetails => &["prompt_tokens_details", "cached_tokens"],
+            Self::DeepSeekTop => &["prompt_cache_hit_tokens"],
+            Self::DashScopeTop => &["input_cache_hit_tokens"],
+        }
+    }
+}
+
+/// 思考强度参数的 wire 形态。
+///
+/// 失败性质为**静默**（服务端忽略不认识的参数，请求仍成功但思考过程不受控），
+/// 因此缺省只能靠模型名嗅探，且必须可显式覆盖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThinkingParam {
+    /// OpenAI 标准：`reasoning_effort`（档位值原样透传）。
+    #[serde(rename = "reasoning_effort")]
+    ReasoningEffort,
+    /// DashScope Qwen 思考族原生：`thinking_budget`（档位 → 预算映射）。
+    #[serde(rename = "thinking_budget")]
+    ThinkingBudget,
+}
+
+impl ThinkingParam {
+    /// 缺省嗅探：Qwen 思考族（模型名含 `qwen`，大小写不敏感）用 DashScope 原生
+    /// `thinking_budget`，其余 OpenAI 兼容族用 `reasoning_effort`。
+    ///
+    /// 该差异是**模型级**而非 provider 级（同一 DashScope 下 Qwen 与其它模型不同），
+    /// 故嗅探输入是模型名。
+    pub fn sniff(model: &str) -> Self {
+        if model.to_lowercase().contains("qwen") {
+            Self::ThinkingBudget
+        } else {
+            Self::ReasoningEffort
+        }
+    }
+}
+
+/// 嵌入响应 usage 的字段形状。
+///
+/// 失败性质为**可见**（缺必填字段直接反序列化失败并上抛），消费侧一律宽容解析：
+/// 缺 `prompt_tokens` 时以 `total_tokens` 兜底（嵌入请求没有 completion 侧，
+/// 二者语义重合）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EmbeddingUsageShape {
+    /// 标准：`prompt_tokens` + `total_tokens`。
+    #[default]
+    #[serde(rename = "prompt_and_total")]
+    PromptAndTotal,
+    /// 仅 `total_tokens`（DashScope `text-embedding-v4` 实测）。
+    #[serde(rename = "total_only")]
+    TotalOnly,
+}
+
+/// provider 方言预设名。
+///
+/// 新增服务商的**数据接入面**：命中已知预设 = 加一行映射，不改代码；
+/// 长尾 / 自建网关用 [`DialectPreset::Custom`] + 字段级覆盖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DialectPreset {
+    /// OpenAI 官方与行为一致的自建网关（全字段默认）。缺省值。
+    #[default]
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible,
+    /// DeepSeek 官方。
+    #[serde(rename = "deepseek")]
+    DeepSeek,
+    /// DashScope（阿里云百炼）兼容模式。
+    #[serde(rename = "dashscope")]
+    DashScope,
+    /// ollama（含其 OpenAI 兼容层）。
+    #[serde(rename = "ollama")]
+    Ollama,
+    /// 自定义：不猜任何方言，全部由字段级覆盖决定。
+    #[serde(rename = "custom")]
+    Custom,
+}
+
+impl DialectPreset {
+    /// 按端点 / 提供商名称嗅探预设（只认高置信特征）。
+    ///
+    /// 沿用 `ThinkingField::sniff` 的既有纪律：**刻意不猜测自建域名 / 代理**——
+    /// 猜错时用户可显式指定 `dialect` 覆盖，而不是让嗅探去赌。
+    pub fn sniff(endpoint: &str, provider_name: &str) -> Self {
+        let ep = endpoint.to_ascii_lowercase();
+        let name = provider_name.to_ascii_lowercase();
+        if ep.contains("ollama") || ep.contains(":11434") || name.contains("ollama") {
+            Self::Ollama
+        } else if ep.contains("dashscope")
+            || ep.contains("aliyuncs")
+            || name.contains("dashscope")
+            || name.contains("bailian")
+        {
+            Self::DashScope
+        } else if ep.contains("deepseek") || name.contains("deepseek") {
+            Self::DeepSeek
+        } else {
+            Self::OpenAiCompatible
+        }
+    }
+}
+
+/// provider wire 方言：各「OpenAI 兼容」实现细节差异的**单点描述**。
+///
+/// 构造时由 [`ProviderConfig::resolve_dialect`] 解析一次并缓存在客户端，
+/// 请求 / 响应路径上不再做任何判定（与 [`ThinkingField`] 既有形态同构）。
+///
+/// **设计边界**：只描述**声明式 wire 差异**（字段名 / 参数名 / 字段存在性）。
+/// 语义推断类差异（上游错误文本分类、流式空响应识别）**不入本表**——它们是
+/// 启发式推断，数据化会退化为「让用户描述错误文本格式」。
+///
+/// **协议级差异另论**：非 OpenAI 协议（Anthropic Messages / Gemini 等）的差异
+/// 不可由本表吸收，应按 `model/provider/mod.rs` 既有约定拆分子目录独立实现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderDialect {
+    /// 历史思考内容的 wire 字段（静默失败 → 必须显式可配）。
+    pub thinking_field: ThinkingField,
+    /// 缓存命中 token 的首选字段（可见失败 → 允许探测兜底）。
+    pub cache_field: CacheField,
+    /// 思考参数形态；`None` = 按模型名嗅探（见 [`ThinkingParam::sniff`]）。
+    pub thinking_param: Option<ThinkingParam>,
+    /// 嵌入响应 usage 形状（可见失败 → 宽容解析）。
+    pub embedding_usage: EmbeddingUsageShape,
+}
+
+impl ProviderDialect {
+    /// 预设 → 方言参数表（新增服务商在此加一行即可）。
+    pub fn for_preset(preset: DialectPreset) -> Self {
+        match preset {
+            DialectPreset::OpenAiCompatible | DialectPreset::Custom => Self {
+                thinking_field: ThinkingField::ReasoningContent,
+                cache_field: CacheField::OpenAiDetails,
+                thinking_param: None,
+                embedding_usage: EmbeddingUsageShape::PromptAndTotal,
+            },
+            DialectPreset::DeepSeek => Self {
+                thinking_field: ThinkingField::ReasoningContent,
+                cache_field: CacheField::DeepSeekTop,
+                thinking_param: None,
+                embedding_usage: EmbeddingUsageShape::PromptAndTotal,
+            },
+            DialectPreset::DashScope => Self {
+                thinking_field: ThinkingField::ReasoningContent,
+                cache_field: CacheField::DashScopeTop,
+                thinking_param: None,
+                embedding_usage: EmbeddingUsageShape::TotalOnly,
+            },
+            DialectPreset::Ollama => Self {
+                thinking_field: ThinkingField::Ollama,
+                cache_field: CacheField::OpenAiDetails,
+                thinking_param: None,
+                embedding_usage: EmbeddingUsageShape::PromptAndTotal,
+            },
+        }
+    }
+
+    /// 思考参数方言：显式声明 > 模型名嗅探（模型级差异，输入是模型名）。
+    pub fn thinking_param_for(self, model: &str) -> ThinkingParam {
+        self.thinking_param
+            .unwrap_or_else(|| ThinkingParam::sniff(model))
+    }
+}
+
 // ─── 模型提供商 ───
 
 /// 模型提供商配置。
@@ -137,15 +326,40 @@ pub struct ProviderConfig {
     /// 到 `reasoning_content`。自建代理或嗅探不到的网关用此字段显式指定。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub thinking_field: Option<ThinkingField>,
+    /// wire 方言预设（可选）。
+    ///
+    /// 缺省按 endpoint / 名称嗅探（[`DialectPreset::sniff`]）；显式指定用于
+    /// 嗅探不到的网关（自定义域名 / 中转）——**这是新增服务商的主接入面**：
+    /// 命中已知预设即在 preset 表加一行映射，长尾显式指定或走各自的字段覆盖，
+    /// 二者都不改请求路径代码。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub dialect: Option<DialectPreset>,
 }
 
 impl ProviderConfig {
-    /// 解析传输层思考方言：显式配置 > 嗅探 > 默认。
+    /// 解析传输层思考字段名：显式配置 > 方言单点（预设 / 嗅探）。
     ///
-    /// 在客户端构造时调用一次并缓存，请求路径上不再重复判断。
+    /// 保留本方法作为单字段便捷入口（字段名是静默失败项，历史上先落地）；
+    /// 其余方言项一律经 [`ProviderConfig::resolve_dialect`] 取用。
     pub fn resolve_thinking_field(&self) -> ThinkingField {
-        self.thinking_field
-            .unwrap_or_else(|| ThinkingField::sniff(&self.endpoint, &self.name))
+        self.resolve_dialect().thinking_field
+    }
+
+    /// 解析该提供商的 wire 方言（差异判定**单点**）：显式配置 > 预设 > 嗅探 > 默认。
+    ///
+    /// 在客户端构造时调用一次并缓存，请求 / 响应路径上不再做判定。
+    /// 只覆盖声明式 wire 差异；语义推断类差异（错误分类等）不在此列。
+    pub fn resolve_dialect(&self) -> ProviderDialect {
+        let preset = self
+            .dialect
+            .unwrap_or_else(|| DialectPreset::sniff(&self.endpoint, &self.name));
+        let mut dialect = ProviderDialect::for_preset(preset);
+        // 显式字段级覆盖优先于预设 / 嗅探：`thinking_field` 是既有配置面
+        // （字段名发错即静默丢上下文），单点化不得让它失效。
+        if let Some(field) = self.thinking_field {
+            dialect.thinking_field = field;
+        }
+        dialect
     }
     /// 解析 API 密钥（支持 `${ENV_VAR}` 格式）。
     pub fn resolve_api_key(&self) -> String {
@@ -245,6 +459,13 @@ pub struct ModelEntry {
     /// "off" 为内置语义：不附加思考参数。
     #[serde(default)]
     pub reasoning_efforts: Option<Vec<String>>,
+    /// 思考强度**参数形态**覆盖（可选）。
+    ///
+    /// 该差异是**模型级**的（同一 provider 下 Qwen 族与其它模型不同），缺省按
+    /// 模型名嗅探（[`ThinkingParam::sniff`]）。参数发错会被服务端**静默忽略**
+    /// （请求仍成功、但思考强度不受控），故提供显式覆盖逃生门。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub thinking_param: Option<ThinkingParam>,
 }
 
 // ─── 模型偏好 ───
@@ -460,6 +681,7 @@ mod tests {
         let sniffed = ProviderConfig {
             endpoint: "https://ollama.com/v1".to_string(),
             thinking_field: None,
+            dialect: None,
             ..base.clone()
         };
         assert_eq!(sniffed.resolve_thinking_field(), ThinkingField::Ollama);
@@ -468,12 +690,190 @@ mod tests {
         let fallback = ProviderConfig {
             endpoint: "https://api.deepseek.com/v1".to_string(),
             thinking_field: None,
+            dialect: None,
             ..base
         };
         assert_eq!(
             fallback.resolve_thinking_field(),
             ThinkingField::ReasoningContent
         );
+    }
+
+    #[test]
+    fn test_dialect_preset_sniff() {
+        // 高置信特征命中；自建网关 / 代理刻意不猜（回落 openai_compatible）
+        for (ep, name, expect) in [
+            ("https://ollama.com/v1", "x", DialectPreset::Ollama),
+            ("http://127.0.0.1:11434/v1", "local", DialectPreset::Ollama),
+            (
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "x",
+                DialectPreset::DashScope,
+            ),
+            (
+                "https://relay.example.com/v1",
+                "bailian",
+                DialectPreset::DashScope,
+            ),
+            (
+                "https://api.deepseek.com/v1",
+                "deepseek",
+                DialectPreset::DeepSeek,
+            ),
+            (
+                "https://api.openai.com/v1",
+                "openai",
+                DialectPreset::OpenAiCompatible,
+            ),
+            (
+                "https://gateway.corp.example/v1",
+                "my-gateway",
+                DialectPreset::OpenAiCompatible,
+            ),
+        ] {
+            assert_eq!(DialectPreset::sniff(ep, name), expect, "{ep} / {name}");
+        }
+    }
+
+    #[test]
+    fn test_dialect_params_table() {
+        let dashscope = ProviderDialect::for_preset(DialectPreset::DashScope);
+        assert_eq!(dashscope.cache_field, CacheField::DashScopeTop);
+        assert_eq!(
+            dashscope.embedding_usage,
+            EmbeddingUsageShape::TotalOnly,
+            "DashScope 嵌入只回 total_tokens（事故方言项）"
+        );
+        assert_eq!(dashscope.thinking_field, ThinkingField::ReasoningContent);
+
+        let deepseek = ProviderDialect::for_preset(DialectPreset::DeepSeek);
+        assert_eq!(deepseek.cache_field, CacheField::DeepSeekTop);
+        assert_eq!(
+            deepseek.embedding_usage,
+            EmbeddingUsageShape::PromptAndTotal
+        );
+
+        let ollama = ProviderDialect::for_preset(DialectPreset::Ollama);
+        assert_eq!(ollama.thinking_field, ThinkingField::Ollama);
+
+        let default = ProviderDialect::for_preset(DialectPreset::OpenAiCompatible);
+        assert_eq!(default.cache_field, CacheField::OpenAiDetails);
+        assert_eq!(default.thinking_param, None, "缺省按模型名嗅探");
+    }
+
+    #[test]
+    fn test_cache_field_wire_paths() {
+        assert_eq!(
+            CacheField::OpenAiDetails.wire_path().join("."),
+            "prompt_tokens_details.cached_tokens"
+        );
+        assert_eq!(
+            CacheField::DeepSeekTop.wire_path().join("."),
+            "prompt_cache_hit_tokens"
+        );
+        assert_eq!(
+            CacheField::DashScopeTop.wire_path().join("."),
+            "input_cache_hit_tokens"
+        );
+    }
+
+    #[test]
+    fn test_thinking_param_sniff() {
+        assert_eq!(
+            ThinkingParam::sniff("qwen3-max"),
+            ThinkingParam::ThinkingBudget
+        );
+        assert_eq!(
+            ThinkingParam::sniff("Qwen3-Max"),
+            ThinkingParam::ThinkingBudget
+        );
+        assert_eq!(
+            ThinkingParam::sniff("deepseek-v4-flash"),
+            ThinkingParam::ReasoningEffort
+        );
+    }
+
+    #[test]
+    fn test_resolve_dialect_from_endpoint() {
+        let base = make_provider(make_model("m", vec![ModelCapability::Chat]));
+
+        let dashscope = ProviderConfig {
+            endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            ..base.clone()
+        };
+        assert_eq!(
+            dashscope.resolve_dialect().embedding_usage,
+            EmbeddingUsageShape::TotalOnly
+        );
+        assert_eq!(
+            dashscope.resolve_dialect().cache_field,
+            CacheField::DashScopeTop
+        );
+
+        // 回归等价：思考字段名的既有解析路径不漂移（显式 > 方言单点）
+        let ollama = ProviderConfig {
+            endpoint: "https://ollama.com/v1".to_string(),
+            thinking_field: None,
+            dialect: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            ollama.resolve_dialect().thinking_field,
+            ThinkingField::Ollama
+        );
+        assert_eq!(ollama.resolve_thinking_field(), ThinkingField::Ollama);
+
+        let explicit = ProviderConfig {
+            endpoint: "https://ollama.com/v1".to_string(),
+            thinking_field: Some(ThinkingField::ReasoningContent),
+            ..base
+        };
+        assert_eq!(
+            explicit.resolve_thinking_field(),
+            ThinkingField::ReasoningContent,
+            "显式配置必须优先于方言单点"
+        );
+    }
+
+    #[test]
+    fn test_dialect_and_model_thinking_param_toml_roundtrip() {
+        // 配置面：provider 级 `dialect` 预设 + 模型级 `thinking_param` 覆盖
+        let p: ProviderConfig = toml::from_str(
+            r#"
+            name = "my-gateway"
+            endpoint = "https://gw.corp.example/v1"
+            dialect = "dashscope"
+
+            [[models]]
+            name = "qwen3-max"
+            capabilities = ["chat"]
+            thinking_param = "reasoning_effort"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(p.dialect, Some(DialectPreset::DashScope));
+        assert_eq!(
+            p.models[0].thinking_param,
+            Some(ThinkingParam::ReasoningEffort)
+        );
+        // 显式 preset 生效（该端点本嗅探不到 dashscope）
+        assert_eq!(
+            p.resolve_dialect().embedding_usage,
+            EmbeddingUsageShape::TotalOnly
+        );
+        assert_eq!(p.resolve_dialect().cache_field, CacheField::DashScopeTop);
+    }
+
+    #[test]
+    fn test_dialect_defaults_are_not_serialized() {
+        // 缺省项不写回配置（避免污染用户文件）
+        let json = serde_json::to_string(&base_provider()).unwrap();
+        assert!(!json.contains("dialect"), "{json}");
+
+        let entry = make_model("m", vec![ModelCapability::Chat]);
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("thinking_param"), "{json}");
     }
 
     #[test]
@@ -509,6 +909,7 @@ mod tests {
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
+            dialect: None,
         }
     }
 
@@ -530,6 +931,7 @@ mod tests {
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
+            dialect: None,
         }
     }
 
@@ -544,6 +946,7 @@ mod tests {
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
+            dialect: None,
         };
         assert!(p.validate().is_ok());
     }
@@ -559,6 +962,7 @@ mod tests {
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
+            dialect: None,
         };
         assert!(p.validate().is_err());
     }
@@ -574,6 +978,7 @@ mod tests {
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
+            dialect: None,
         };
         assert!(p.validate().is_err());
     }
@@ -589,6 +994,7 @@ mod tests {
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
+            dialect: None,
         };
         assert!(p.validate().is_err());
     }
@@ -605,6 +1011,7 @@ mod tests {
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
+            dialect: None,
         };
         assert_eq!(p.resolve_api_key(), "env-key-value");
         std::env::remove_var("TIANYAN_TEST_KEY2");
@@ -621,6 +1028,7 @@ mod tests {
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
+            dialect: None,
         };
         assert_eq!(p.resolve_api_key(), "sk-plain");
     }
@@ -637,6 +1045,7 @@ mod tests {
                     enabled: true,
                     headers: HashMap::new(),
                     thinking_field: None,
+                    dialect: None,
                     models: vec![
                         make_model("gpt-4", vec![ModelCapability::Chat]),
                         make_model(
@@ -653,6 +1062,7 @@ mod tests {
                     enabled: true,
                     headers: HashMap::new(),
                     thinking_field: None,
+                    dialect: None,
                     models: vec![make_model("deepseek-chat", vec![ModelCapability::Chat])],
                 },
             ],
@@ -689,6 +1099,7 @@ mod tests {
                 enabled: true,
                 headers: HashMap::new(),
                 thinking_field: None,
+                dialect: None,
                 models: vec![
                     make_model(
                         "gpt-4",
@@ -725,6 +1136,7 @@ mod tests {
                 enabled: true,
                 headers: HashMap::new(),
                 thinking_field: None,
+                dialect: None,
                 models: vec![make_model(
                     "te3",
                     vec![

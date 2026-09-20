@@ -123,6 +123,7 @@ mod tests {
                 enabled: true,
                 headers: std::collections::HashMap::new(),
                 thinking_field: None,
+                dialect: None,
             }],
             preferences: ModelPreferences {
                 chat: Some(ModelRef {

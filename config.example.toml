@@ -106,6 +106,20 @@ capabilities = ["text-embedding", "multimodal-embedding"]
 #   自建代理/嗅探不到的网关用此项显式指定，例如：
 #   thinking_field = "reasoning"
 #
+# wire 方言预设（可选，dialect）：
+#   一次性声明该 provider 的整套 wire 方言（思考字段名 / 缓存命中字段 / 嵌入 usage 形状）。
+#   取值："openai_compatible"（默认）| "deepseek" | "dashscope" | "ollama" | "custom"。
+#   不配置时按 endpoint/名称嗅探（高置信特征：ollama / :11434 / dashscope / aliyuncs /
+#   deepseek）；刻意不猜自建域名与中转——嗅探不到的网关用此项显式指定，例如：
+#   dialect = "dashscope"
+#
+# 模型级思考参数形态（可选，thinking_param，写在 [[models.providers.models]] 下）：
+#   思考强度写到哪个请求参数： "reasoning_effort"（OpenAI 标准，档位值原样透传）
+#   | "thinking_budget"（DashScope Qwen 思考族原生，档位映射预算）。
+#   不配置时按模型名嗅探（含 qwen → thinking_budget，其余 → reasoning_effort）。
+#   参数发错不会报错（服务端忽略未知参数），但思考强度会静默失控——自建网关上的
+#   Qwen 变体等嗅探不到的场景用此项显式指定。
+#
 # 本地 chat 模型示例（128K 上下文，输出上限 32K）：
 # [[models.providers.models]]
 # name = "qwen2.5-72b-instruct"

@@ -189,6 +189,7 @@ fn test_config(data_dir: &Path) -> TianyanConfig {
             enabled: true,
             headers: std::collections::HashMap::new(),
             thinking_field: None,
+            dialect: None,
         }],
         preferences: ModelPreferences {
             chat: Some(ModelRef {
