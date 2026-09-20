@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-09-20
+
+### Fixed
+- **嵌入服务非标准 usage 形状导致语义检索全线失败（用户实测 `search_vfs` 报错）**：DashScope `text-embedding-v4` 兼容端点只回 `usage.total_tokens`，而 async-openai 0.34 的 `EmbeddingUsage.prompt_tokens` 是**必填**字段（无 `#[serde(default)]`）→ 类型化反序列化在**库内部**失败（`missing field 'prompt_tokens'`；报错列号落在 JSON 解析终点，故「向量看着完全正常」的假象）→ 向量被整次丢弃。影响面：`search_vfs` 语义检索、知识库导入向量化、L0/L1 摘要向量、`DualLayerRetriever` 检索、记忆写入向量化。修法：embedding 绕开库类型化（手写 `POST /embeddings`；复用同一 http client / headers / `RetryPolicy` / `classify_http_status` 单点，**不新增请求封装层**）+ usage 宽容解析（缺 `prompt_tokens` 以 `total_tokens` 兜底）。附**成因锁定测试**（断言库类型化路径在该形状上必失败——上游修复后该测试转红，提示可回归类型化）
+- **Markdown 列表渲染凭空多空行（用户报告：二级无序列表 / 有序列表）**：hast 会给含块级子元素的 `li` 在首尾插入 `\n` 文本节点（嵌套列表的「文本 → `<ul>`」之间、loose 列表的 `<p>` **前后**），而 U4 的 `[&_li]:whitespace-pre-wrap` 把这些 `\n` 渲染成**整行空行**——嵌套列表块高翻倍；loose 有序列表的前导 `\n` 更让 marker（`1.`/`2.`）与正文分成两行。修法：pre-wrap 只落在**不含块级子元素**的 li（`li:not(:has(p,ul,ol,pre,blockquote,table,hr))`）；含块级子元素时其段落软换行仍由 `[&_p]` 保证。浏览器实测：嵌套列表 248→121px、loose 有序列表 345→124px（每项 marker 行 47px→0）
+
+### Added
+- **provider wire 方言单点（ADR-038）**：各「OpenAI 兼容」实现的字段级差异收敛为**单一描述符** `ProviderDialect`（思考字段名 / 缓存命中字段 / 思考参数形态 / 嵌入 usage 形状），构造时 `resolve_dialect()` 解析一次并缓存、请求路径零判定；`DialectPreset` 预设表（`openai_compatible` / `deepseek` / `dashscope` / `ollama` / `custom`）——**新增服务商 = 加配置不改代码**（OCP 判别测试：假想 provider 零 Rust 改动接入）。粒度两级：provider preset + `ModelEntry.thinking_param` 模型级覆盖（Qwen 思考族差异是模型级，provider 级表达不了）。分层纪律：**静默失败项**（`thinking_field` / `thinking_param`）必须显式可配；**可见失败项**（`cache_field` / `embedding_usage`）声明首选 + 容错兜底（避免把「可见失败」改造成「配错就静默丢数据」）
+
+### Changed
+- **apply_patch 路径口径统一（ADR-009 补记）**：绝对路径按字面归一后使用（**不再拒绝**，与 `apply_edit` / `read_file` / `write_file` 一致）；安全检查与落盘**同源**——registry 与 executor 共用唯一定点 `patch_targets`（同一 `parse_patch` + 同一 `resolve_patch_path`），删除第二套路径提取 `collect_patch_paths`（其一致性此前只能靠人工维持，**那才是「拒绝绝对路径」想收窄却收窄不了的分歧面**）。`..` 仍在解析处直接拒绝（比白名单判定更早的深度防御，覆盖未经 `check_path` 的调用方）。顺带修正：LSP 诊断改传归一后的绝对路径（store 按绝对路径索引，此前传补丁原文的相对路径永远命中不到）
+
+### Docs
+- ADR-038 provider wire 方言（新建）+ ADR-009 补「路径口径统一」+ module-map / AGENTS.md 导航 / `config.example.toml` 方言与 `thinking_param` 示例
+
+### 回归保护
+- core **1374**（+27）· 前端 **424** · `cargo check --workspace --all-targets` / fmt / clippy（`--all-targets`）干净 · 判别力：方言基线等价（阶段 0 锁定后原样通过）· 嵌入成因锁定 · OCP 零代码接入 · 检查产物 == 写入位置
+
 ## [0.5.6] - 2026-09-20
 
 ### Fixed
