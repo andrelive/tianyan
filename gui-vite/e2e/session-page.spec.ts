@@ -125,7 +125,12 @@ test.describe('session page empty state', () => {
     await page.goto('/');
   });
 
-  test('empty state shows 暂无会话', async ({ page }) => {
-    await expect(page.getByText('暂无会话')).toBeVisible({ timeout: 5000 });
+  test('empty list still shows the 默认 group (no 暂无会话 empty state)', async ({ page }) => {
+    // 语义漂移修复：引入工作区分组后默认组恒存在（sessionGroups 恒含 ''），
+    // 「暂无会话」空态已被移除（见 SessionList.tsx 注释）——空列表下左栏仍显示
+    // 「默认」分组（可 hover「＋」新建会话）。前端单测 SessionList.test.tsx 已同步为
+    // queryByText('暂无会话') 不存在，本 e2e 此前仍断言该文案可见 → 恒红。
+    await expect(page.getByRole('button', { name: '分组 默认' })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText('暂无会话')).toHaveCount(0);
   });
 });
