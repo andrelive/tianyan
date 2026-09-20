@@ -443,6 +443,34 @@ async fn patch_targets_match_written_files() {
 }
 
 #[test]
+fn ensure_patch_within_base_rejects_outside_absolute_target() {
+    // 边界自证（项 2）：绝对路径越界必须被拒（permission → server 403）。
+    // 判别力：core 现在按字面接受绝对路径（对齐 apply_edit / read_file）——
+    // 不做本校验，未经 ToolRegistry 沙箱的调用方就会越界写入。
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir
+        .path()
+        .parent()
+        .expect("tempdir 应有父目录")
+        .join("outside-target.txt");
+
+    // 区内（相对路径）→ 放行
+    let ok_patch = "*** Update File: in.txt\n@@ -0,0 +1,1 @@\n+x\n";
+    assert!(ensure_patch_within_base(ok_patch, dir.path()).is_ok());
+
+    // 区外（绝对路径且不含 `..` → 不被非法路径拦截，只由本校验兜住）→ permission
+    let bad_patch = format!(
+        "*** Update File: {}\n@@ -0,0 +1,1 @@\n+x\n",
+        outside.to_string_lossy()
+    );
+    let err = ensure_patch_within_base(&bad_patch, dir.path()).unwrap_err();
+    assert!(
+        err.is_permission(),
+        "越界应报 permission（映射 403），实际：{err}"
+    );
+}
+
+#[test]
 fn leading_blank_context_line_does_not_misalign_apply() {
     // 防御性回归：直接构造含前导空 Context 的块（parse_patch 会跳过空格
     // 前缀空行，但 PatchLine 是公开类型，外部构造可能带入）——apply 阶段

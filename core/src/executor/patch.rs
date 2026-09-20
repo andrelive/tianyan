@@ -619,6 +619,28 @@ pub(crate) fn patch_targets(patch_text: &str, base_dir: &Path) -> Result<Vec<Pat
         .collect()
 }
 
+/// 校验补丁的**全部**目标文件都落在 `base_dir` 内。
+///
+/// 供**不经 ToolRegistry 沙箱**的调用方自证边界（如 server workspace 的
+/// apply-patch 端点）。背景：[`resolve_patch_path`] 现在接受绝对路径（与
+/// apply_edit / read_file / write_file 同一口径，见 ADR-009 补记），因此边界
+/// 责任回到调用方——本函数把它收敛为一处可复用的显式检查，避免各调用方
+/// 自行写路径前缀比较（组件级比较，天然拒绝前缀兄弟目录）。
+///
+/// 越界用 `permission` 构造（消费端映射 403）。
+pub fn ensure_patch_within_base(patch_text: &str, base_dir: &Path) -> Result<()> {
+    let base = crate::executor::security::lexical_normalize(base_dir);
+    for target in patch_targets(patch_text, base_dir)? {
+        if !target.resolved.starts_with(&base) {
+            return Err(TianyanError::permission(format!(
+                "executor: apply_patch: 补丁目标在工作目录之外：{}",
+                target.resolved.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// 提取补丁的首个 `*** Update File:` 路径（供审批展示；无则空串）。
 pub fn first_patch_path(patch_text: &str) -> String {
     patch_text

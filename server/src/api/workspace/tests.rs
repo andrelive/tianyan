@@ -736,6 +736,40 @@ async fn apply_patch_endpoint_rejects_dotdot_path() {
     assert!(body["error"].as_str().unwrap().contains("非法路径"));
 }
 
+/// apply-patch 拒绝**工作目录外**的绝对路径目标 → 403。
+///
+/// core 解析接受绝对路径（对齐 apply_edit / read_file，ADR-009 补记）——边界
+/// 因此由本 API 显式校验（`ensure_patch_within_base`）；本测试锁定该防线。
+#[tokio::test]
+async fn apply_patch_endpoint_rejects_absolute_outside_workdir() {
+    let dir = tempdir().unwrap();
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, "safe\n").unwrap();
+    let config = test_config(dir.path(), Some(&workdir));
+    let (app, _state) = crate::create_app(config).await.unwrap();
+
+    let patch = format!(
+        "*** Update File: {}\n@@ -1,1 +1,1 @@\n-safe\n+pwned\n",
+        outside.to_string_lossy()
+    );
+    let response = app
+        .oneshot(post_json(
+            "/api/v1/workspace/apply-patch",
+            json!({ "patch": patch }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        "safe\n",
+        "越界目标不得被改写"
+    );
+}
+
 /// apply-edit 成功路径：内容匹配定位 + 落盘 + 响应 edits_applied=1。
 #[tokio::test]
 async fn apply_edit_endpoint_applies_content_edit() {

@@ -277,9 +277,13 @@ impl WorkspaceService {
     /// 应用 unified diff 补丁（委托 core executor 原子多文件落盘）。
     ///
     /// 接受 git 风格（jsdiff `createTwoFilesPatch` 产物）与 codex 风格两种补丁，
-    /// git 风格先归一化为 codex 信封（见 [`normalize_patch`]）。补丁内路径由
-    /// core 内部沙箱校验（拒绝 `..` 组件与绝对路径，相对 `working_directory`
-    /// 解析），此处不重复校验。未配置工作目录 → 400。
+    /// git 风格先归一化为 codex 信封（见 [`normalize_patch`]）。`..` 组件仍由
+    /// core 解析层直接拒绝。
+    ///
+    /// **边界**：core 解析接受绝对路径（与 apply_edit / read_file 同一口径，
+    /// 见 ADR-009 补记）——边界责任因此在本调用方：此处显式校验**全部目标落在
+    /// 工作目录内**（越界 → 403）。该端点只服务「在工作区里保存文件」。
+    /// 未配置工作目录 → 400。
     pub async fn apply_patch(
         &self,
         patch_text: &str,
@@ -287,6 +291,8 @@ impl WorkspaceService {
     ) -> Result<ApplyPatchResponse, ApiError> {
         let working_dir = self.resolve_workdir(session_id).await?;
         let normalized = normalize_patch(patch_text)?;
+        tianyan::executor::patch::ensure_patch_within_base(&normalized, &working_dir)
+            .map_err(ApiError::from)?;
         let value = tianyan::executor::patch::apply_patch_action(&normalized, &working_dir)
             .await
             .map_err(ApiError::from)?;
