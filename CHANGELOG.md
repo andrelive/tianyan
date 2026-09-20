@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 - ADR-038 provider wire 方言（新建）+ ADR-009 补「路径口径统一」+ module-map / AGENTS.md 导航 / `config.example.toml` 方言与 `thinking_param` 示例
+- **CI 产物同步**：`apply_patch` 工具描述补路径口径后重新生成 `docs/architecture/tool-catalog.md`——freshness 门禁在 tag 阶段抓到（本地手工跑 `cargo fmt` / `clippy` 不覆盖该检查）。已在 AGENTS.md「常见陷阱」标注该纪律，并把 `.\scripts\test.ps1 lint` 定为验收入口
+- `scripts/test.ps1` 的 clippy 补 `--all-targets`（与 CI 同范围，消除「本地绿 / CI 红」——此前 `f67b642` 即该差异所致）
 
 ### 回归保护
 - core **1374**（+27）· 前端 **424** · `cargo check --workspace --all-targets` / fmt / clippy（`--all-targets`）干净 · 判别力：方言基线等价（阶段 0 锁定后原样通过）· 嵌入成因锁定 · OCP 零代码接入 · 检查产物 == 写入位置
