@@ -25,7 +25,7 @@ test.describe('real backend session workspace grouping', () => {
     request,
   }) => {
     // 1. 首条消息携带 working_directory → 后端为新会话固化工作区归属
-    //    非流式 /chat 已移除（GUI 仅用 SSE），改用 /chat/stream 并解析首事件。
+    //    经启动端点 /chat/stream 创建（ADR-028 后该端点收敛为开关，返回 JSON）。
     const message = '会话工作区绑定测试';
     const chat = await createSession(request, message, FIXTURE_WORKSPACE);
     expect(chat.session_id).toBeTruthy();
@@ -102,10 +102,12 @@ test.describe('real backend session workspace grouping', () => {
 });
 
 /**
- * 通过流式端点创建会话并返回 { session_id }。
+ * 经启动端点创建会话并返回 { session_id }。
  *
- * 非流式 POST /chat 已随"GUI 仅用 SSE"决策移除（4a5b3c8d）；流式端点
- * 返回 SSE 流，首事件（chunk_type=message）携带后端生成的 session_id。
+ * `POST /chat/stream` 已收敛为「开关」（ADR-028 第 3 步）：校验 + 启动
+ * AgentLoop 后**立即返回 JSON** `{ status: 'started', session_id }`，
+ * **不再承载 SSE 响应流**（流式输出经 `GET /events` 常驻通道下发）。
+ * 旧实现按 SSE 文本解析首事件（`data: ` 行）——随该收敛失效（本文件修复项）。
  */
 async function createSession(
   request: APIRequestContext,
@@ -121,25 +123,7 @@ async function createSession(
     },
   });
   expect(res.ok(), await res.text()).toBeTruthy();
-  const body = await res.text();
-  // SSE：data: {json} 行；[DONE] 后流结束。取首个携带 session_id 的事件。
-  const sessionId = extractFirstSessionId(body);
-  expect(sessionId, `SSE 响应应包含 session_id:\n${body.slice(0, 500)}`).toBeTruthy();
-  return { session_id: sessionId };
-}
-
-/** 从 SSE 文本中提取首个非空 session_id（跳过 [DONE] 与心跳行）。 */
-function extractFirstSessionId(sseBody: string): string {
-  for (const line of sseBody.split('\n')) {
-    if (!line.startsWith('data: ')) continue;
-    const payload = line.slice('data: '.length);
-    if (payload === '[DONE]') continue;
-    try {
-      const event = JSON.parse(payload) as { session_id?: string };
-      if (event.session_id) return event.session_id;
-    } catch {
-      // 心跳/非 JSON 行跳过
-    }
-  }
-  return '';
+  const body = (await res.json()) as { status?: string; session_id?: string };
+  expect(body.session_id, `启动端点应返回 session_id：${JSON.stringify(body)}`).toBeTruthy();
+  return { session_id: body.session_id as string };
 }
