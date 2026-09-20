@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-09-20
+
+### Fixed
+- **任务取消「假成功」（用户实测 0.5.5 安装后）**：`task_cancel` 只路由到委托任务表，对**命令任务**（后台命令/长驻服务）静默 no-op 却返回成功——面板任务卡片卡在「运行中」不消失（取消了个寂寞）。修法：**双表路由**（先委托表，否则命令表并 kill 进程树；两表都无 → 明确 `not_found`，不再假成功）。新增 2 测试（命令任务真进 Cancelled / 未知 id 报未找到）
+- **工具目录跨平台 freshness 假红（CI 必红项）**：`tool_catalog --check` 的平台归一化用**未转义**提示词模板替换，而产物表格把描述里的 `|` 转义为 `\|`（PS 系提示含 `&& / ||`）→ Linux（CI）比较时误报漂移（Windows 同平台两侧同文本而侥幸通过）。修法：归一化同时替换 `\|` 转义形态 + 判别力测试覆盖两种形态
+- **Linux/CI 测试互斥（Quality 恒红根因）**：`kill_all_running_children` 按全局注册表杀全部子进程（生产语义正确），并行测试下误杀兄弟测试的命令 → Linux 上 2 条测试失败（Windows 侥幸绿）。修法：15 个「启动真实子进程/操作注册表」测试加互斥锁（串行，其余保持并行）→ Linux 复刻全绿
+
+### Added
+- **命令执行底层可配（ADR-037 `[executor].shell`）**：shell provider 单一事实源（`ShellSpec`：执行信息与提示词同源，杜绝「配置了 A 提示还说 B」的漂移）——`auto` 探测（Windows pwsh→powershell / Unix bash→sh，命中记绝对路径）+ 显式枚举（`pwsh`/`powershell`/`cmd`/`bash`/`sh`）+ `custom` 逃生舱（`shell_program`/`shell_args`/`shell_hint`）。找不到可执行**明确报错不静默回退**（静默回退会让用户以为在用 A 实际在用 B）；提示词随配置动态化（PS 5.1 明确标注不支持 `&&`/`||`）；**PS 系输出编码注入**（`[Console]::OutputEncoding=UTF8`——修 git/rg/cargo 中文输出乱码）；切换代价（一次前缀缓存 miss + 一次主动压缩）在配置注释中明示
+- **`write_file` 目录语义**：新增 `create_dirs` 参数（默认 `false`）——父目录不存在时**默认报错**并回喂修法指引（"如确需新建目录，请重新调用并传 `create_dirs=true`"），**不自动创建**（防路径写错时静默「凭空多出一棵树」）；显式 `true` 时创建父目录后写入。`apply_edit`/`apply_patch` 不暴露该开关（语义上文件/工程结构已存在）
+
+### Docs
+- ADR-037 shell provider（决策固化）+ ADR-009 补「写入目录语义」+ AGENTS.md 导航更新
+- `scripts/wsl-core-test.sh`：Linux 复刻脚本改**按模块分批**（本机 WSL 一次性跑全量会让实例崩溃 `Wsl/Service/E_UNEXPECTED`；分批稳定且覆盖全量 1347）
+
+### 回归保护
+- core **1347**（+3）· Linux 复刻分批 **1347** 全绿 · `tool_catalog --check` 两侧一致 · fmt / clippy 干净
+
 ## [0.5.5] - 2026-09-19
 
 ### Fixed
