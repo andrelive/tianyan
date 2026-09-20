@@ -919,7 +919,8 @@ async fn test_apply_patch_rejects_missing_patch() {
 
 #[tokio::test]
 async fn test_apply_patch_rejects_path_traversal() {
-    // 补丁首个文件路径逃逸白名单目录 → registry check_path 拒绝。
+    // 补丁路径含 `..`：在 `resolve_patch_path` 即被拒绝（早于白名单判定）——
+    // 深度防御：未经 `check_path` 的调用方（如 server workspace 入口）同样被拦。
     let dir = tempfile::tempdir().unwrap();
     let allowed = dir.path().join("allowed");
     std::fs::create_dir_all(&allowed).unwrap();
@@ -934,7 +935,29 @@ async fn test_apply_patch_rejects_path_traversal() {
         .execute_apply_patch(&apply_patch_args(&patch), "test-session", false)
         .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("安全违规"));
+    // 拒绝点前移（`..` 检查先于白名单判定）→ 错误类别为"非法路径"；逃逸同样未发生
+    assert!(result.unwrap_err().to_string().contains("非法路径"));
+}
+
+#[tokio::test]
+async fn test_apply_patch_allows_absolute_path_inside_allowlist() {
+    // 路径口径统一后：白名单内**绝对路径**应放行——此前 executor 层无条件拒绝
+    // 绝对路径，形成"检查通过但执行失败"的分裂（apply_edit / read_file 均接受）。
+    let dir = tempfile::tempdir().unwrap();
+    let allowed = dir.path().join("allowed");
+    std::fs::create_dir_all(&allowed).unwrap();
+    let target = allowed.join("a.txt");
+    std::fs::write(&target, "old\n").unwrap();
+    let patch = format!(
+        "*** Update File: {}\n@@ -1,1 +1,1 @@\n-old\n+NEW\n",
+        target.to_string_lossy()
+    );
+    let registry = ToolRegistry::new(file_policy(vec![allowed.to_path_buf()], vec![]));
+    let result = registry
+        .execute_apply_patch(&apply_patch_args(&patch), "test-session", false)
+        .await;
+    assert!(result.is_ok(), "白名单内绝对路径应放行: {result:?}");
+    assert_eq!(tokio::fs::read_to_string(&target).await.unwrap(), "NEW\n");
 }
 
 #[tokio::test]
@@ -1094,10 +1117,11 @@ async fn test_apply_edit_with_lsp_manager_appends_diagnostics() {
 #[tokio::test]
 async fn test_apply_patch_with_lsp_manager_appends_diagnostics() {
     let dir = cwd_scoped_dir("lsp");
-    let rel = ".apply_patch_test_lsp/code.rs";
     std::fs::write(dir.join("code.rs"), "fn main() {}\n").unwrap();
+    // 诊断按**绝对路径**索引（生产链路：LSP file:// URI → 本地绝对路径），
+    // 故 mock 也以绝对路径预置——与 patch 解析产出的 resolved 形态一致。
     let registry = ToolRegistry::new(default_strict_policy())
-        .with_lsp_manager(seeded_manager(std::path::Path::new(rel)));
+        .with_lsp_manager(seeded_manager(&dir.join("code.rs")));
     let patch = "\
 *** Update File: .apply_patch_test_lsp/code.rs
 @@ -1,1 +1,1 @@

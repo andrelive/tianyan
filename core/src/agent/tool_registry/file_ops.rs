@@ -130,22 +130,20 @@ impl ToolRegistry {
     ) -> Result<serde_json::Value, TianyanError> {
         let params: ApplyPatchParams = parse_params(arguments)?;
         safety_violation(self.security_policy.check_file_write())?;
-        // 补丁的**全部**目标文件逐一参与路径安全检查（旧实现只检查首个文件
-        // 路径，多文件补丁的后续文件可借此绕过沙箱写入白名单外路径）。
-        // 相对路径按测试/执行进程 CWD 解析，与 executor 层 base_dir 一致；
-        // 绝对路径按字面检查（executor 层随后统一拒绝绝对路径）。
-        let patch_paths = crate::executor::patch::collect_patch_paths(&params.patch);
-        let first_path = patch_paths.first().cloned().unwrap_or_default();
         // 补丁基准目录：会话绑定的工作目录优先，缺省回退进程 cwd
         // （与 read_file/write_file 同一套归属规则；统一 resolve_base_dir）
         let base_dir = self.resolve_base_dir(session_id).await?;
-        for path in &patch_paths {
-            let resolved = if std::path::Path::new(path).is_absolute() {
-                std::path::PathBuf::from(path)
-            } else {
-                base_dir.join(path)
-            };
-            safety_violation(self.security_policy.check_path(&resolved))?;
+        // 补丁的**全部**目标文件逐一参与路径安全检查（旧实现只检查首个文件
+        // 路径，多文件补丁的后续文件可借此绕过沙箱写入白名单外路径）。
+        //
+        // 检查对象与 executor 落盘对象**同源**：二者都经 `patch_targets`
+        // （同一 `parse_patch` + 同一 `resolve_patch_path`）——绝对路径按字面、
+        // 相对路径按 `base_dir`，检查口径与写入口径不可能分歧。
+        let targets = crate::executor::patch::patch_targets(&params.patch, &base_dir)
+            .map_err(wrap_tool_error)?;
+        let first_path = targets.first().map(|t| t.raw.clone()).unwrap_or_default();
+        for target in &targets {
+            safety_violation(self.security_policy.check_path(&target.resolved))?;
         }
         // 审批门控（统一序列见 [`ToolRegistry::ensure_approved`]）
         self.ensure_approved(
@@ -161,8 +159,9 @@ impl ToolRegistry {
             .await
             .map_err(wrap_tool_error)
             .map(|mut result| {
-                if !first_path.is_empty() {
-                    self.attach_lsp_diagnostics(&first_path, &mut result);
+                // LSP 诊断按绝对路径索引（store 键），故传归一后的 resolved
+                if let Some(first) = targets.first() {
+                    self.attach_lsp_diagnostics(&first.resolved.to_string_lossy(), &mut result);
                 }
                 result
             })

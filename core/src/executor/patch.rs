@@ -561,12 +561,17 @@ fn apply_hunks(
 
 // ── 异步动作（原子多文件） ───────────────────────────────────────────────
 
-/// 解析并校验补丁内单文件路径。
+/// 解析并校验补丁内单文件路径（**检查与写入共用的唯一定点**）。
 ///
-/// - 拒绝 `..` 组件（正反斜杠统一检测），防目录逃逸。
-/// - 拒绝绝对路径：补丁路径必须相对 `base_dir` 解析——多文件补丁的后续文件
-///   若允许绝对路径，可绕过 registry 层基于"当前目录"的逐文件路径安全检查
-///   （check_path 对相对路径按 CWD 解析，对绝对路径按字面使用，二者基准不同）。
+/// - 拒绝 `..` 组件（正反斜杠统一检测），防目录逃逸；
+/// - 绝对路径**按字面归一后使用**——与 `ToolRegistry::resolve_tool_path`
+///   （apply_edit / read_file / write_file 的路径单点）语义一致；相对路径按
+///   `base_dir`（会话工作目录优先，缺省进程 cwd）解析。
+///
+/// 安全边界由**调用方**的逐文件路径检查承担：registry 层对 [`patch_targets`]
+/// 产出的每个 `resolved` 调 `SecurityPolicy::check_path` 后才落盘。此处不再用
+/// "拒绝绝对路径"间接防护——检查口径与写入口径必须来自**同一产物**，靠拒绝
+/// 只是掩盖两套路径提取的分歧面，且与 apply_edit 语义不一致（同为编辑原语）。
 fn resolve_patch_path(patch_path: &str, base_dir: &Path) -> Result<PathBuf> {
     let normalized = patch_path.replace('\\', "/");
     let p = Path::new(&normalized);
@@ -578,26 +583,38 @@ fn resolve_patch_path(patch_path: &str, base_dir: &Path) -> Result<PathBuf> {
         )));
     }
     if p.is_absolute() {
-        return Err(TianyanError::invalid_input(format!(
-            "executor: apply_patch: 不支持绝对路径：{patch_path}"
-        )));
+        return Ok(crate::executor::security::lexical_normalize(p));
     }
-    Ok(base_dir.join(p))
+    // 相对路径同样归一（折叠 `.`、统一分隔符）——与 `ToolRegistry::resolve_tool_path`
+    // 的输出形态保持一致，按路径**字符串**索引的消费方（如 LSP 诊断 store）才能命中。
+    Ok(crate::executor::security::lexical_normalize(
+        &base_dir.join(p),
+    ))
+}
+/// 补丁目标文件（解析产物）。
+pub(crate) struct PatchTarget {
+    /// 补丁头部原文（审批展示用；可能是相对路径）。
+    pub raw: String,
+    /// 归一后的绝对路径（**安全检查与落盘共用同一产物**）。
+    pub resolved: PathBuf,
 }
 
-/// 提取补丁中全部 `*** Update File:` 文件路径（按出现顺序，去空白）。
+/// 解析补丁并产出全部目标文件（**检查与写入同源**）。
 ///
-/// 与 [`parse_patch`] 的头部识别规则一致（轻量行扫描，不做完整解析）；
-/// 供 registry 层在审批门控与落盘之前对每个目标文件逐一执行路径安全检查。
-pub(crate) fn collect_patch_paths(patch: &str) -> Vec<String> {
-    patch
-        .lines()
-        .filter_map(|l| {
-            l.trim_end_matches('\r')
-                .strip_prefix("*** Update File: ")
-                .map(str::trim)
-                .filter(|p| !p.is_empty())
-                .map(str::to_string)
+/// 与 [`apply_patch_action`] 使用**同一个** [`parse_patch`] 与
+/// [`resolve_patch_path`]，因此调用方检查的路径集合必然等于 executor 层写入的
+/// 路径集合。旧实现有**两套**路径提取（`collect_patch_paths` 轻量行扫描 +
+/// `parse_patch` 完整解析），其一致性只能靠人工维持——这正是"拒绝绝对路径"
+/// 想收窄、却收窄不了的分歧面。
+pub(crate) fn patch_targets(patch_text: &str, base_dir: &Path) -> Result<Vec<PatchTarget>> {
+    let files = parse_patch(patch_text)?;
+    files
+        .iter()
+        .map(|pf| {
+            Ok(PatchTarget {
+                raw: pf.path.clone(),
+                resolved: resolve_patch_path(&pf.path, base_dir)?,
+            })
         })
         .collect()
 }

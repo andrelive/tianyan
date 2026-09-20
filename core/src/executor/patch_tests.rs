@@ -395,9 +395,10 @@ async fn executor_creates_new_file_from_patch() {
 }
 
 #[tokio::test]
-async fn executor_rejects_absolute_path() {
-    // 绝对路径一律拒绝：补丁路径必须相对 base_dir（防多文件补丁以绝对路径
-    // 绕过 registry 的逐文件路径安全检查）。
+async fn executor_accepts_absolute_path_target() {
+    // 路径口径统一（对齐 apply_edit / read_file / write_file）：绝对路径按字面
+    // 归一后使用，不再无条件拒绝——安全边界由调用方的逐文件 `check_path` 承担
+    // （白名单越界仍被拦截，见 file_ops_tests 的多文件绝对路径回归）。
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("abs.txt");
     tokio::fs::write(&target, "old\n").await.unwrap();
@@ -405,10 +406,40 @@ async fn executor_rejects_absolute_path() {
         "*** Update File: {}\n@@ -1,1 +1,1 @@\n-old\n+NEW\n",
         target.to_string_lossy()
     );
-    let err = apply_patch_action(&patch, dir.path()).await.unwrap_err();
-    assert!(err.to_string().contains("不支持绝对路径"), "{err}");
-    // 目标文件未被改写（拒绝在落盘之前）
-    assert_eq!(tokio::fs::read_to_string(&target).await.unwrap(), "old\n");
+    let result = apply_patch_action(&patch, dir.path()).await.unwrap();
+    assert_eq!(result["total_files"].as_u64(), Some(1));
+    assert_eq!(tokio::fs::read_to_string(&target).await.unwrap(), "NEW\n");
+}
+
+#[tokio::test]
+async fn patch_targets_match_written_files() {
+    // 单一事实源判别：调用方检查用产物（`patch_targets` 的 resolved）必须**正是**
+    // 实际写入位置。判别力：旧实现有两套路径提取（`collect_patch_paths` 轻量行
+    // 扫描 vs `parse_patch` 完整解析），二者一旦分歧即"检查的路径 ≠ 写入的路径"。
+    let dir = tempfile::tempdir().unwrap();
+    let abs_target = dir.path().join("abs.txt");
+    tokio::fs::write(&abs_target, "old\n").await.unwrap();
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: rel.txt\n@@ -0,0 +1,1 @@\n+created\n*** Update File: {}\n@@ -1,1 +1,1 @@\n-old\n+NEW\n*** End Patch\n",
+        abs_target.to_string_lossy()
+    );
+
+    let targets = patch_targets(&patch, dir.path()).unwrap();
+    let resolved: Vec<PathBuf> = targets.iter().map(|t| t.resolved.clone()).collect();
+    assert_eq!(
+        resolved,
+        vec![dir.path().join("rel.txt"), abs_target.clone()],
+        "相对路径按 base_dir、绝对路径按字面"
+    );
+
+    apply_patch_action(&patch, dir.path()).await.unwrap();
+    for path in &resolved {
+        assert!(path.exists(), "检查产物路径必须正是写入位置：{path:?}");
+    }
+    assert_eq!(
+        tokio::fs::read_to_string(&abs_target).await.unwrap(),
+        "NEW\n"
+    );
 }
 
 #[test]

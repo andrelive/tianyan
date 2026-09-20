@@ -34,6 +34,8 @@
 5. **配套能力**：`executor/truncate.rs` 统一截断层（`MAX_LINES = 2000` / `MAX_BYTES = 50KB`，保头/保尾/落盘 spill）；`executor/fs.rs` 文件浏览（`execute_glob` / `execute_list_dir`，`MAX_GLOB_RESULTS = 200`）；read_file 增强（offset/limit、截断消息、二进制嗅探、目录模式）。
 6. **写入目录语义**（2026-09 补）：`write_file` 新增 `create_dirs` 参数（默认 `false`）——父目录不存在时**默认报错**并回喂修法指引（"如确需新建目录，请重新调用并传 `create_dirs=true`"），**不自动创建**；显式 `true` 时在 `write_file_atomic` 内 `create_dir_all`。理由：路径写错（本该写已有目录却拼了新目录名）时宁可失败，也不静默"凭空多出一棵树"——目录创建是**调用方的显式声明**，不是隐式副作用。`apply_edit`（语义要求文件已存在）与 `apply_patch`（目标位于既有工程结构内）不暴露该开关，一律传 `false`。
 
+7. **路径口径统一**（2026-09 补）：双原语的路径语义收敛为同一条——绝对路径按字面归一后使用、相对路径按会话工作目录解析（`ToolRegistry::resolve_base_dir`，缺省进程 cwd）；`apply_patch` 不再无条件拒绝绝对路径（此前与 `apply_edit` / `read_file` / `write_file` 分裂：检查通过却执行失败）。安全边界由调用方的逐文件 `check_path` 承担，且**检查对象与落盘对象同源**：registry 与 executor 共用唯一定点 `patch_targets`（同一 `parse_patch` + 同一 `resolve_patch_path`）；旧的两套路径提取（`collect_patch_paths` 轻量行扫描 vs `parse_patch` 完整解析，一致性只能靠人工维持）已删除——那才是"拒绝绝对路径"想收窄却收窄不了的分歧面。`..` 仍在解析处直接拒绝（比白名单判定更早的深度防御，覆盖未经 `check_path` 的调用方，如 server workspace 入口）。顺带修正：LSP 诊断改传归一后的**绝对路径**（store 按绝对路径索引，此前传补丁原文的相对路径永远命中不到）。
+
 diff 库选型（D2）：引入 `similar`（3.1.2，零依赖）用于 unified diff 生成与 patch 模糊定位；patch 解析/应用为自研薄层（`parse_patch`，参考 codex apply-patch 模式）。
 
 ## 后果
