@@ -48,6 +48,23 @@ impl ToolRegistry {
             self.security_policy
                 .check_file_size(params.content.len() as u64),
         )?;
+        // 目录语义：**默认不自动创建父目录**——路径写错（本该写已有目录却拼了
+        // 新目录名）时宁可报错，也不静默新建目录（避免"凭空多出一棵树"）。
+        // 确需新建由调用方显式声明 create_dirs；指引随报错回喂，模型可自纠。
+        let create_dirs = params.create_dirs.unwrap_or(false);
+        if !create_dirs {
+            if let Some(parent) = std::path::Path::new(&params.path)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+            {
+                if !parent.exists() {
+                    return Err(TianyanError::not_found(format!(
+                        "write_file: 父目录不存在：{}——write_file 默认不自动创建目录（防止路径写错时误建新目录）；若确实要新建该目录，请重新调用并传 create_dirs=true",
+                        parent.display()
+                    )));
+                }
+            }
+        }
         // 审批门控（自动放行安全路径/拒绝关键路径/请求人类确认，
         // 统一序列见 [`ToolRegistry::ensure_approved`]）
         self.ensure_approved(
@@ -59,7 +76,7 @@ impl ToolRegistry {
             },
         )
         .await?;
-        crate::executor::execute_write_file(&params.path, &params.content)
+        crate::executor::execute_write_file(&params.path, &params.content, create_dirs)
             .await
             .map_err(wrap_tool_error)
     }

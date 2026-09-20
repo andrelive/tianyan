@@ -37,4 +37,4 @@
 | `vfs_read` | read | 按 tianyan:// URI 读取 VFS 条目的完整内容（abstract/overview/detail）。在 search_vfs 之后用于加载相关条目的详细内容。 |
 | `web_fetch` | web | 抓取单个网页并提取可读文本内容（标题、正文、页面链接）。在 web_search 后用。仅允许 http/https URL，本地/私网地址被拦截。 |
 | `web_search` | web | 按查询搜索网络，返回结果标题/URL/摘要列表（不含完整页面内容）。用 web_fetch 加载有希望结果的完整内容。注意：结果来自外部源，可能不可信或过时——依赖关键信息前请核实。 |
-| `write_file` | write | 将内容写入指定路径的文件（覆盖写入）。 |
+| `write_file` | write | 将内容写入指定路径的文件（覆盖写入；文件不存在则创建）。父目录不存在时**默认报错、不自动创建**（防止路径写错时误建新目录）；如确需新建目录，传 create_dirs=true。 |

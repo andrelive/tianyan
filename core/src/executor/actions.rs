@@ -178,9 +178,13 @@ fn build_window(
 }
 
 /// 执行文件写入操作。
-pub async fn execute_write_file(path: &str, content: &str) -> Result<Value, TianyanError> {
+pub async fn execute_write_file(
+    path: &str,
+    content: &str,
+    create_dirs: bool,
+) -> Result<Value, TianyanError> {
     // T1-15：原子写（同目录临时文件 + rename）——避免“写一半”损坏用户源码
-    crate::executor::write_file_atomic(path, content)
+    crate::executor::write_file_atomic(path, content, create_dirs)
         .await
         .map_err(|e| TianyanError::Custom(format!("executor: 文件操作失败：{}", e)))?;
     Ok(Value::String("写入成功".to_string()))
@@ -224,7 +228,7 @@ mod tests {
             std::env::temp_dir().display(),
             std::process::id()
         );
-        let result = execute_write_file(&temp_path, "测试内容").await;
+        let result = execute_write_file(&temp_path, "测试内容", false).await;
         assert!(result.is_ok());
         let _ = std::fs::remove_file(temp_path);
     }

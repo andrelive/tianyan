@@ -559,6 +559,43 @@ async fn test_write_file_rejects_missing_arguments() {
 }
 
 #[tokio::test]
+async fn test_write_file_default_does_not_create_missing_parent_dir() {
+    // 默认不建目录：路径写错（父目录不存在）→ 报错 + 指引；不得静默建目录
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing").join("out.txt");
+    let registry = ToolRegistry::new(default_strict_policy());
+    let args = json!({ "path": path.to_string_lossy(), "content": "x" }).to_string();
+
+    let err = registry
+        .execute_write_file(&args, "test-session", false)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("父目录不存在"), "{err}");
+    assert!(err.contains("create_dirs=true"), "应给出修法指引：{err}");
+    assert!(!path.parent().unwrap().exists(), "默认不应创建父目录");
+}
+
+#[tokio::test]
+async fn test_write_file_create_dirs_true_creates_parents() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a").join("b").join("out.txt");
+    let registry = ToolRegistry::new(default_strict_policy());
+    let args = json!({
+        "path": path.to_string_lossy(),
+        "content": "内容",
+        "create_dirs": true
+    })
+    .to_string();
+
+    registry
+        .execute_write_file(&args, "test-session", false)
+        .await
+        .unwrap_or_else(|e| panic!("create_dirs=true 应创建父目录并写入：{e}"));
+    assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "内容");
+}
+
+#[tokio::test]
 async fn test_write_file_rejects_blocked_directory() {
     let dir = tempfile::tempdir().unwrap();
     let blocked = dir.path().join("blocked");

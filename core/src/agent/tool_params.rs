@@ -24,6 +24,12 @@ pub struct WriteFileParams {
     pub path: String,
     /// 文件内容。
     pub content: String,
+    /// 是否自动创建缺失的父目录（默认 false）。
+    ///
+    /// 默认**不创建**：父目录不存在即报错（防止路径写错时静默新建目录）；
+    /// 确需新建目录时显式传 true。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_dirs: Option<bool>,
 }
 
 /// 应用编辑参数（内容匹配编辑，1..=20 条）。

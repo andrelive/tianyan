@@ -32,6 +32,7 @@
 3. **批量原子**：`apply_edits_to_content` 纯函数自底向上应用（bottom-up，行号从大到小，避免前序编辑破坏后续行号），全部校验通过才写盘；`apply_patch_action` 多文件批量，任一文件失败整体回滚。
 4. **审批门控**：`Action` 新增 `ApplyEdit` / `ApplyPatch` 变体（`executor/types.rs`），风险分级 Medium，走既有 `ApprovalWorkflow`。
 5. **配套能力**：`executor/truncate.rs` 统一截断层（`MAX_LINES = 2000` / `MAX_BYTES = 50KB`，保头/保尾/落盘 spill）；`executor/fs.rs` 文件浏览（`execute_glob` / `execute_list_dir`，`MAX_GLOB_RESULTS = 200`）；read_file 增强（offset/limit、截断消息、二进制嗅探、目录模式）。
+6. **写入目录语义**（2026-09 补）：`write_file` 新增 `create_dirs` 参数（默认 `false`）——父目录不存在时**默认报错**并回喂修法指引（"如确需新建目录，请重新调用并传 `create_dirs=true`"），**不自动创建**；显式 `true` 时在 `write_file_atomic` 内 `create_dir_all`。理由：路径写错（本该写已有目录却拼了新目录名）时宁可失败，也不静默"凭空多出一棵树"——目录创建是**调用方的显式声明**，不是隐式副作用。`apply_edit`（语义要求文件已存在）与 `apply_patch`（目标位于既有工程结构内）不暴露该开关，一律传 `false`。
 
 diff 库选型（D2）：引入 `similar`（3.1.2，零依赖）用于 unified diff 生成与 patch 模糊定位；patch 解析/应用为自研薄层（`parse_patch`，参考 codex apply-patch 模式）。
 
@@ -55,6 +56,8 @@ diff 库选型（D2）：引入 `similar`（3.1.2，零依赖）用于 unified d
 ## 关键文件
 
 - `core/src/executor/truncate.rs` — `truncate_head` / `truncate_tail` / `truncate_spill`、`Truncated`
+- `core/src/executor/mod.rs` — `write_file_atomic`（原子写 + `create_dirs`：缺目录默认不建）
+- `core/src/agent/tool_registry/file_ops.rs` — 工具层目录校验（缺目录 → `not_found` + 修法指引）
 - `core/src/executor/edit.rs` — `ContentEdit` / `apply_edits_to_content` / `apply_edit_action` / `detect_eol`（CRLF 保留）
 - `core/src/executor/patch.rs` — `parse_patch` / `apply_patch_to_content` / `apply_patch_action`、`FUZZY_RATIO_THRESHOLD`
 - `core/src/executor/fs.rs` — `execute_glob` / `execute_list_dir`

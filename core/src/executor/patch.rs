@@ -660,7 +660,7 @@ pub async fn apply_patch_action(patch_text: &str, base_dir: &Path) -> Result<Val
     let mut files_json: Vec<Value> = Vec::with_capacity(planned.len());
     for write in planned {
         // T1-15：原子写（同目录临时文件 + rename）——避免半截文件
-        crate::executor::write_file_atomic(&write.full, &write.content)
+        crate::executor::write_file_atomic(&write.full, &write.content, false)
             .await
             .map_err(|e| TianyanError::Custom(format!("executor: apply_patch: 写入失败: {e}")))?;
         files_json.push(json!({

@@ -57,9 +57,14 @@ pub use verification::{VerificationGate, VerificationResult};
 /// 文件系统上原子）；rename 在 Windows 上覆盖已存在文件（Rust 用 MoveFileEx）。
 ///
 /// 失败语义：任何一步失败都清理临时文件并返回错误，**原文件保持不变**。
+///
+/// `create_dirs`：父目录缺失时是否自动创建。`write_file` 默认 `false`——
+/// 路径写错（本该写已有目录却拼了新目录名）时宁可报错，也不静默新建目录；
+/// 「缺目录报错 + 修法指引」由工具层（`file_ops::execute_write_file`）给出。
 pub(crate) async fn write_file_atomic(
     path: impl AsRef<std::path::Path>,
     content: &str,
+    create_dirs: bool,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
 
@@ -68,6 +73,9 @@ pub(crate) async fn write_file_atomic(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
+    if create_dirs {
+        tokio::fs::create_dir_all(dir).await?;
+    }
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -109,10 +117,12 @@ mod atomic_tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("a.txt");
 
-        write_file_atomic(&target, "第一版").await.unwrap();
+        write_file_atomic(&target, "第一版", false).await.unwrap();
         assert_eq!(tokio::fs::read_to_string(&target).await.unwrap(), "第一版");
 
-        write_file_atomic(&target, "第二版内容").await.unwrap();
+        write_file_atomic(&target, "第二版内容", false)
+            .await
+            .unwrap();
         assert_eq!(
             tokio::fs::read_to_string(&target).await.unwrap(),
             "第二版内容"
@@ -131,12 +141,29 @@ mod atomic_tests {
         let target_dir = dir.path().join("sub");
         std::fs::create_dir(&target_dir).unwrap();
 
-        assert!(write_file_atomic(&target_dir, "x").await.is_err());
+        assert!(write_file_atomic(&target_dir, "x", false).await.is_err());
         assert!(target_dir.is_dir(), "失败时目标目录应保持不变");
         assert!(
             leftovers(dir.path()).await.is_empty(),
             "失败后不应残留临时文件：{:?}",
             leftovers(dir.path()).await
         );
+    }
+
+    #[tokio::test]
+    async fn test_write_file_atomic_create_dirs_flag() {
+        // 默认（false）：父目录缺失 → 报错，不静默建目录
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nested").join("deep").join("a.txt");
+        assert!(
+            write_file_atomic(&target, "x", false).await.is_err(),
+            "默认不应创建缺失的父目录"
+        );
+        assert!(!target.parent().unwrap().exists(), "失败后不应留下目录");
+
+        // 显式 true：创建父目录并写入
+        write_file_atomic(&target, "内容", true).await.unwrap();
+        assert_eq!(tokio::fs::read_to_string(&target).await.unwrap(), "内容");
+        assert!(target.parent().unwrap().is_dir());
     }
 }

@@ -61,7 +61,7 @@ fn def_read_file(name: &'static str) -> ToolDefinition {
 fn def_write_file(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<WriteFileParams>(
         name,
-        "将内容写入指定路径的文件（覆盖写入）。",
+        "将内容写入指定路径的文件（覆盖写入；文件不存在则创建）。父目录不存在时**默认报错、不自动创建**（防止路径写错时误建新目录）；如确需新建目录，传 create_dirs=true。",
     ))
 }
 
