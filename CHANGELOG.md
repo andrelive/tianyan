@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **GUI e2e 后端不再使用 3000**（`gui-vite/playwright.config.ts` 的 `E2E_PORT`，默认 3099，`TIANYAN_E2E_PORT` 可覆盖）：此前 e2e 与桌面应用抢同一端口，而后端条目 `reuseExistingServer: false` 会因端口冲突失败——等于「想跑 e2e 就得关掉自己的应用」（并掐断正在进行的会话）。vite 经 `TIANYAN_API_TARGET` 代理到 e2e 端口；`scripts/test.ps1` 的端口预检同源读取，避免两处默认值漂移
+- **会话临时文件纪律（`default_soul.md` + `write_file` / `execute_command` 工具描述）**：中间产物（提交信息文件、一次性脚本、审计报告/截图、请求体 JSON 等）明确要求写入**系统临时目录的会话区**（`%TEMP%\tianyan-scratch\`），并显式点名两个「看起来可用、实则私有」的位置——**应用数据目录根**（含 `tianyan.db` / `lancedb` / `snapshots` 的那一层）与**安装目录**。动机：**每次** `execute_command` 的结果都回显数据目录路径（`log_file`），而代码与提示里此前**没有任何「临时文件该放哪」的约定** → 模型把数据目录当临时区，跨会话累积出 20+ 个 `*-msg.txt`（commit message 文件）、一次性脚本与审计产物。纪律文本同时点明该误导源，以阻断推断链。任务交付物（源码/测试/文档）不受此约束
 
 ### Fixed
 - **三处 e2e 断言失效（既有漂移；CI 不跑 e2e，故长期未被察觉）**：① `chat.spec.ts` 把 `POST /chat/stream` mock 成 SSE body，而该端点自 ADR-028 已收敛为「开关」（返回 JSON）、前端用 `response.json()` 解析 → 助手回复断言**恒红**（改走历史消息路径；流式端到端归 `real-chat.spec.ts`）；② `real-workspace-session.spec.ts` 同样按 SSE 文本解析响应取 `session_id`（改为按 JSON 解析）；③ `session-page.spec.ts` 仍断言「暂无会话」空态，而该空态已随工作区分组引入被移除（改为断言「默认」分组可见 + 该文案计数为 0）。判别力：旧写法临时探针 1 failed；修复后完整套件 36 passed
