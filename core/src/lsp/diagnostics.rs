@@ -17,6 +17,7 @@ use dashmap::DashMap;
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, NumberOrString, Position, PublishDiagnosticsParams,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::common::error::{Result, TianyanError};
@@ -25,15 +26,90 @@ use crate::executor::verification::StructuredDiagnostic;
 use super::client::{LspClient, PublishDiagnosticsCallback};
 use super::registry::{probe_project_root, spec_for_extension};
 
-/// LSP 查询支持的操作集合（单一来源：工具层校验与 `query` 分发共用）。
-pub(crate) const LSP_OPERATIONS: &[&str] = &[
-    "goToDefinition",
-    "findReferences",
-    "hover",
-    "documentSymbol",
-    "workspaceSymbol",
-    "goToImplementation",
-];
+/// LSP 查询操作（工具参数 `operation` 的类型化形态）。
+///
+/// 工具 schema 由本类型直接生成（枚举约束），未知操作在**参数解析期**即被
+/// 拒绝，不再依赖运行期字符串白名单。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum LspOperation {
+    /// 跳转到定义。
+    GoToDefinition,
+    /// 查找全部引用。
+    FindReferences,
+    /// 悬停信息（类型/文档）。
+    Hover,
+    /// 当前文档的符号列表。
+    DocumentSymbol,
+    /// 工作区符号搜索（按关键字）。
+    WorkspaceSymbol,
+    /// 跳转到实现。
+    GoToImplementation,
+}
+
+impl LspOperation {
+    /// 全部操作（遍历用：schema/wire 名一致性校验与测试）。
+    pub const ALL: [LspOperation; 6] = [
+        LspOperation::GoToDefinition,
+        LspOperation::FindReferences,
+        LspOperation::Hover,
+        LspOperation::DocumentSymbol,
+        LspOperation::WorkspaceSymbol,
+        LspOperation::GoToImplementation,
+    ];
+
+    /// wire 名称（camelCase，与 serde 序列化一致；供错误消息使用）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GoToDefinition => "goToDefinition",
+            Self::FindReferences => "findReferences",
+            Self::Hover => "hover",
+            Self::DocumentSymbol => "documentSymbol",
+            Self::WorkspaceSymbol => "workspaceSymbol",
+            Self::GoToImplementation => "goToImplementation",
+        }
+    }
+}
+
+/// LSP 查询请求：操作与其所需参数**一一绑定**——"操作与参数不匹配"的非法态
+/// 无法构造（工具参数是扁平 JSON，由工具层转换时做唯一一次匹配校验）。
+pub enum LspQuery {
+    /// 跳转到定义（目标位置，0 起始）。
+    GoToDefinition {
+        /// 目标行。
+        line: usize,
+        /// 目标列。
+        character: usize,
+    },
+    /// 查找全部引用（目标位置，0 起始）。
+    FindReferences {
+        /// 目标行。
+        line: usize,
+        /// 目标列。
+        character: usize,
+    },
+    /// 悬停信息（目标位置，0 起始）。
+    Hover {
+        /// 目标行。
+        line: usize,
+        /// 目标列。
+        character: usize,
+    },
+    /// 跳转到实现（目标位置，0 起始）。
+    GoToImplementation {
+        /// 目标行。
+        line: usize,
+        /// 目标列。
+        character: usize,
+    },
+    /// 当前文档的符号列表。
+    DocumentSymbol,
+    /// 工作区符号搜索。
+    WorkspaceSymbol {
+        /// 查询关键字。
+        query: String,
+    },
+}
 
 /// LSP 管理器：服务池 + 推送诊断存储。
 pub struct LspManager {
@@ -139,38 +215,34 @@ impl LspManager {
         self.servers.get(key).map(|client| client.clone())
     }
 
-    /// 执行一次 LSP 查询（按操作分发到客户端方法）。
+    /// 执行一次 LSP 查询（按请求形态分发到客户端方法）。
     ///
-    /// 未知操作返回 `tool: 参数无效`（与工具层错误前缀一致）。
-    pub async fn query(
-        &self,
-        file_path: &str,
-        operation: &str,
-        line: Option<usize>,
-        character: Option<usize>,
-        workspace_query: Option<&str>,
-    ) -> Result<Value> {
+    /// [`LspQuery`] 已把"操作—参数"绑定为合法态，分派是穷尽 match：
+    /// 不存在未知操作分支，也不再有 `line.unwrap_or(0)` 式的静默兜底。
+    pub async fn query(&self, file_path: &str, request: LspQuery) -> Result<Value> {
         let client = self.ensure_server(file_path).await?;
         let uri = file_uri(Path::new(file_path))?;
-        let pos = position(line.unwrap_or(0), character.unwrap_or(0))?;
-        match operation {
-            "hover" => client.hover(&uri, pos.line, pos.character).await,
-            "goToDefinition" => client.goto_definition(&uri, pos.line, pos.character).await,
-            "findReferences" => client.references(&uri, pos.line, pos.character, true).await,
-            "documentSymbol" => client.document_symbols(&uri).await,
-            "workspaceSymbol" => {
-                client
-                    .workspace_symbols(workspace_query.unwrap_or_default())
-                    .await
+        match request {
+            LspQuery::GoToDefinition { line, character } => {
+                let pos = position(line, character)?;
+                client.goto_definition(&uri, pos.line, pos.character).await
             }
-            "goToImplementation" => {
+            LspQuery::FindReferences { line, character } => {
+                let pos = position(line, character)?;
+                client.references(&uri, pos.line, pos.character, true).await
+            }
+            LspQuery::Hover { line, character } => {
+                let pos = position(line, character)?;
+                client.hover(&uri, pos.line, pos.character).await
+            }
+            LspQuery::GoToImplementation { line, character } => {
+                let pos = position(line, character)?;
                 client
                     .goto_implementation(&uri, pos.line, pos.character)
                     .await
             }
-            other => Err(TianyanError::Custom(format!(
-                "tool: 参数无效：未知操作：{other}"
-            ))),
+            LspQuery::DocumentSymbol => client.document_symbols(&uri).await,
+            LspQuery::WorkspaceSymbol { query } => client.workspace_symbols(&query).await,
         }
     }
 }

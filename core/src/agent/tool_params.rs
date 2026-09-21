@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::executor::edit::ContentEdit;
+use crate::lsp::diagnostics::LspOperation;
 
 /// 读取文件参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -442,17 +443,17 @@ pub struct DiscoverTestsParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LspParams {
     /// 操作类型。
-    pub operation: String,
-    /// 目标文件路径（workspaceSymbol 也用它选择项目服务器；全操作必需）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_path: Option<String>,
-    /// 目标行（0 起始；workspaceSymbol 可省略）。
+    pub operation: LspOperation,
+    /// 目标文件路径（六种操作均必填；workspaceSymbol 用它选择项目服务器）。
+    pub file_path: String,
+    /// 目标行（0 起始）。位置类操作（goToDefinition / findReferences / hover /
+    /// goToImplementation）必填；documentSymbol / workspaceSymbol 须省略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<usize>,
-    /// 目标列（0 起始；workspaceSymbol 可省略）。
+    /// 目标列（0 起始）。必填性同 line。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character: Option<usize>,
-    /// workspaceSymbol 查询关键字。
+    /// 查询关键字（仅 workspaceSymbol 需要，其余操作须省略）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
 }

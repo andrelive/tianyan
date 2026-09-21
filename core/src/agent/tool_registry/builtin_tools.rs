@@ -272,7 +272,7 @@ fn def_symbol_outline(name: &'static str) -> ToolDefinition {
 fn def_lsp(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<LspParams>(
         name,
-        "查询指定文件的语言服务器：goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation。返回结构化结果。",
+        "查询语言服务器（LSP）。operation 取值决定其余参数：位置类 goToDefinition / findReferences / hover / goToImplementation 需 file_path + line + character（行列均 0 起始）；documentSymbol 只需 file_path；workspaceSymbol 需 file_path（用于选择项目服务器）+ query。返回结构化结果。",
     ))
 }
 
