@@ -10,9 +10,9 @@
 use crate::agent::tool_params::{
     ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
     DelegationStatsParams, DiscoverTestsParams, ExecuteCommandParams, ExecutionDetailParams,
-    ExecutionStatsParams, GlobParams, KnowledgeIngestParams, ListDirParams, LspParams,
-    ReadFileParams, RunProjectTestsParams, RunTestsParams, SearchCodeParams, SearchVfsParams,
-    SelfCheckParams, SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
+    ExecutionStatsParams, GlobParams, KnowledgeIngestParams, ListDirParams, ReadFileParams,
+    RunProjectTestsParams, RunTestsParams, SearchCodeParams, SearchVfsParams, SelfCheckParams,
+    SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
     TaskStatusParams, VerifyBuildParams, VfsListParams, VfsReadParams, WebFetchParams,
     WebSearchParams, WriteFileParams,
 };
@@ -269,13 +269,6 @@ fn def_symbol_outline(name: &'static str) -> ToolDefinition {
     ))
 }
 
-fn def_lsp(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<LspParams>(
-        name,
-        "查询语言服务器（LSP）。operation 取值决定其余参数：位置类 goToDefinition / findReferences / hover / goToImplementation 需 file_path + line + character（行列均 0 起始）；documentSymbol 只需 file_path；workspaceSymbol 需 file_path（用于选择项目服务器）+ query。返回结构化结果。",
-    ))
-}
-
 /// 内置工具元数据表（单一事实源；顺序即注册顺序）。
 pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
     tool("read_file", def_read_file, ToolPresentation::Read),
@@ -344,5 +337,4 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
     tool("glob", def_glob, ToolPresentation::Search),
     tool("list_dir", def_list_dir, ToolPresentation::Search),
     tool("symbol_outline", def_symbol_outline, ToolPresentation::Code),
-    tool("lsp", def_lsp, ToolPresentation::Code),
 ];

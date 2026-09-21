@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use crate::executor::edit::ContentEdit;
 use crate::executor::search::OutputMode;
-use crate::lsp::diagnostics::LspOperation;
 
 /// 读取文件参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -441,25 +440,6 @@ pub struct DiscoverTestsParams {
     pub path: String,
 }
 
-/// LSP 查询参数（lsp 工具：goToDefinition / findReferences / hover /
-/// documentSymbol / workspaceSymbol / goToImplementation）。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct LspParams {
-    /// 操作类型。
-    pub operation: LspOperation,
-    /// 目标文件路径（六种操作均必填；workspaceSymbol 用它选择项目服务器）。
-    pub file_path: String,
-    /// 目标行（0 起始）。位置类操作（goToDefinition / findReferences / hover /
-    /// goToImplementation）必填；documentSymbol / workspaceSymbol 须省略。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub line: Option<usize>,
-    /// 目标列（0 起始）。必填性同 line。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub character: Option<usize>,
-    /// 查询关键字（仅 workspaceSymbol 需要，其余操作须省略）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub query: Option<String>,
-}
 /// 执行统计查询参数（execution_stats；GEPA 数据层，ADR-017）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ExecutionStatsParams {

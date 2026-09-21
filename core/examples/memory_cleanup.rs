@@ -282,7 +282,7 @@ fn merge_specs() -> Vec<MergeSpec> {
         MergeSpec {
             target: uri_of(ContextNamespace::User, &["entities", "tianyan-project"]),
             content: "\
-天演项目档案：基于 LLM 的本地智能代理系统（AI 自身源码），Rust workspace 含 core / server / tauri / mcp 四个 crate + gui-vite（React+TS），约 69K 行。技术栈：Tokio、Axum 0.8、reqwest、serde、async-openai、LanceDB（嵌入式向量）、tree-sitter、Tauri 2.2。内置约 29 个工具（文件读写、补丁应用、命令执行、代码搜索、LSP、网页搜索、知识库、委托、后台任务、审批等）。",
+天演项目档案：基于 LLM 的本地智能代理系统（AI 自身源码），Rust workspace 含 core / server / tauri / mcp 四个 crate + gui-vite（React+TS），约 69K 行。技术栈：Tokio、Axum 0.8、reqwest、serde、async-openai、LanceDB（嵌入式向量）、tree-sitter、Tauri 2.2。内置约 33 个工具（文件读写、补丁应用、命令执行、代码搜索、符号大纲、网页搜索、知识库、委托、后台任务、审批等）。",
             sources: vec![
                 uri_of(ContextNamespace::User, &["entities", "1786854838"]),
                 uri_of(ContextNamespace::User, &["entities", "1786860111"]),

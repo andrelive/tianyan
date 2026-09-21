@@ -43,7 +43,6 @@
 | `db` | `core/src/db/` | **统一写入门面**（ADR-020）：`Database` 门面（单连接 + schema 集中）+ `SqliteDb`（ADR-005 连接）+ 业务域 Repository（stats/trace/execution/usage）；**只依赖 `common`**（纯底层，无领域依赖） | `mod.rs`, `sqlite_db.rs`, `stats.rs`, `trace.rs`, `execution.rs`, `usage.rs` |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 管线 + 组装） | `pipeline.rs`, `assembler.rs`, `retrieval/`, `compression/` |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、测试发现）+ Web 工具（搜索/抓取）；统一截断层含单行截断（`truncate.rs`：`truncate_line`/`MAX_LINE_CHARS`） | `actions.rs`, `security.rs`, `command.rs`, `output_parse.rs`, `approval/`, `verification.rs`, `judge.rs`, `truncate.rs`, `edit.rs`, `patch.rs`, `fs.rs`, `search.rs`, `symbols.rs`, `project.rs`, `test_discovery.rs`, `web.rs` |
-| `lsp` | `core/src/lsp/` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储） | `registry.rs`, `client.rs`, `diagnostics.rs` |
 | `knowledge` | `core/src/knowledge/` | 知识库导入（解析、图像、注入管道） | `ingestor/`, `parser.rs`, `image/` |
 | `memory` | `core/src/memory/` | 长期记忆提取 | `extractor.rs` |
 | `model` | `core/src/model/` | 模型服务容器（`ModelServices`）+ provider 实现（**wire 方言单点**：`ProviderDialect` 收敛各「OpenAI 兼容」实现差异——思考字段名 / 缓存字段 / 思考参数 / 嵌入 usage 形状，见 [ADR-038](decisions/038-provider-wire-dialect.md)） | `traits.rs`, `services.rs`, `provider/` |

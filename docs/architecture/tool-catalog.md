@@ -4,7 +4,7 @@
 > 手工修改将被覆盖；freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁。
 > 生成原则（DSH gen-tool-catalog 吸收）：运行时注册是 schema 唯一真相源。
 
-共 34 个工具。
+共 33 个工具。
 
 | 工具 | 展示意图 | 描述 |
 |------|---------|------|
@@ -23,7 +23,6 @@
 | `grep` | search | 用正则搜索文件内容（类似 ripgrep）。默认只列命中文件名（output_mode=files_with_matches）；要**看匹配行**须传 output_mode=content（可配 context 显示匹配行前后各 N 行；行号恒输出）。支持 glob/type 过滤、忽略大小写（ignore_case）、多行匹配（multiline）、分页（head_limit/offset）。 |
 | `knowledge_ingest` | knowledge | 将文件或目录导入知识库：解析、摘要（L0 摘要 + L1 概览）、建立语义索引。接受文件或目录路径，可选指定分类。 |
 | `list_dir` | search | 列出单层目录下的条目。目录带尾部 '/'。支持 offset/limit 分页。 |
-| `lsp` | code | 查询语言服务器（LSP）。operation 取值决定其余参数：位置类 goToDefinition / findReferences / hover / goToImplementation 需 file_path + line + character（行列均 0 起始）；documentSymbol 只需 file_path；workspaceSymbol 需 file_path（用于选择项目服务器）+ query。返回结构化结果。 |
 | `read_file` | read | 读取文本文件内容（纯内容，无行号/哈希前缀）。默认返回前 2000 行（单次输出上限约 50KB，超出部分截断并附「使用 offset 继续」提示）。大文件请**按需读取**：用 offset/limit 指定行范围（1 起始行号），建议先用 grep/symbol_outline 定位目标区域再按范围精读；结果含 total_lines/total_bytes 与实际窗口（showing）。内容匹配编辑（apply_edit）直接按内容定位，无需行号。 |
 | `run_project_tests` | terminal | 按**项目类型探测**并运行测试（无需指定命令）：Cargo → `cargo test`、Python → `pytest`、TypeScript → `vitest run`；`framework` 可覆盖探测结果，`suite`/`filter` 缩小范围。返回与 run_tests 相同的结构化结果。项目类型无法识别时，改用 run_tests 显式给命令。 |
 | `run_tests` | terminal | 运行**指定的**测试命令并返回结构化结果（passed/failed + 失败详情分组）。命令原样执行（经安全检查）——如 `cargo test --lib`、`pytest -k smoke`、`vitest run tests/`。要按项目类型自动构造命令，用 run_project_tests。 |

@@ -115,10 +115,6 @@ impl ToolRegistry {
         crate::executor::edit::apply_edit_action(&params.path, params.edits)
             .await
             .map_err(wrap_tool_error)
-            .map(|mut result| {
-                self.attach_lsp_diagnostics(&params.path, &mut result);
-                result
-            })
     }
 
     /// 执行 apply_patch 工具：统一 diff 补丁应用（含审批工作流门控）。
@@ -158,32 +154,6 @@ impl ToolRegistry {
         crate::executor::patch::apply_patch_action(&params.patch, &base_dir)
             .await
             .map_err(wrap_tool_error)
-            .map(|mut result| {
-                // LSP 诊断按绝对路径索引（store 键），故传归一后的 resolved
-                if let Some(first) = targets.first() {
-                    self.attach_lsp_diagnostics(&first.resolved.to_string_lossy(), &mut result);
-                }
-                result
-            })
-    }
-
-    /// 编辑成功后附加 LSP 推送诊断（"LSP errors detected, please fix" 模式）。
-    ///
-    /// 仅在注入 [`LspManager`] 时生效且尽力而为：诊断来自服务器
-    /// `textDocument/publishDiagnostics` 推送（需先有服务器被启动并打开该文档）；
-    /// 无记录时附加空数组，绝不阻断编辑结果。
-    fn attach_lsp_diagnostics(&self, path: &str, result: &mut serde_json::Value) {
-        let Some(manager) = &self.lsp_manager else {
-            return;
-        };
-        let diagnostics = manager.diagnostics_for(path);
-        if let serde_json::Value::Object(map) = result {
-            map.insert(
-                "diagnostics".to_string(),
-                serde_json::to_value(diagnostics)
-                    .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
-            );
-        }
     }
 
     /// 执行 vfs_read 工具：读取 VFS 条目的三层内容。

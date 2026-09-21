@@ -60,8 +60,6 @@ pub mod executor;
 /// 目标管理（长期目标 + 进度跟踪；与待办联动）。
 pub mod goals;
 pub mod knowledge;
-/// LSP 集成：语言服务器注册表 + 自实现 JSON-RPC 客户端 + 推送诊断。
-pub mod lsp;
 pub mod memory;
 pub mod model;
 pub mod notification;

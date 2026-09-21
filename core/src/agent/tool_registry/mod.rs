@@ -13,7 +13,6 @@ use crate::executor::Action;
 use crate::executor::SecurityPolicy;
 use crate::executor::VerificationGate;
 use crate::knowledge::KnowledgeIngestor;
-use crate::lsp::diagnostics::LspManager;
 use crate::model::types::{ToolCall, ToolDefinition, ToolPresentation};
 use crate::model::ChatService;
 use crate::observability::execution_log::ExecutionLog;
@@ -36,8 +35,6 @@ mod file_ops;
 /// 文件系统浏览工具执行器（glob / list_dir）。
 mod fs_ops;
 mod knowledge_ops;
-/// LSP 工具执行器（execute_lsp）。
-mod lsp_ops;
 /// 内置可观测性后置监听器（A1：统计/Trace/GEPA/规则学习迁移为管线消费者）。
 mod observability;
 /// 工具执行管线：pre-execute 监听器 / 单调守卫 / post-execute 监听器（A1/A4）。
@@ -189,8 +186,6 @@ pub struct ToolRegistry {
     pub(crate) pending_approval_fingerprints: Arc<Mutex<Vec<String>>>,
     /// 语义验证门控（verify_build 工具的 LLM-as-Judge 支持）。
     pub(crate) verification_gate: Option<Arc<VerificationGate>>,
-    /// LSP 管理器（lsp 工具与编辑后诊断附加依赖；None 表示未启用 LSP）。
-    pub(crate) lsp_manager: Option<Arc<LspManager>>,
     /// 内置可观测性后置监听器（统计 / Trace / GEPA 历史 / 失败规则学习；
     /// A1 迁移：原 execute_single 尾部观测逻辑）。
     pub(crate) observability: observability::ToolObservabilityListener,
@@ -263,7 +258,6 @@ impl ToolRegistry {
             approval_workflow: None,
             pending_approval_fingerprints: Arc::new(Mutex::new(Vec::new())),
             verification_gate: None,
-            lsp_manager: None,
             observability: observability::ToolObservabilityListener::default(),
             web_client: None,
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
@@ -601,12 +595,6 @@ impl ToolRegistry {
     /// 设置语义验证门控（verify_build 工具的 LLM-as-Judge 支持）。
     pub fn with_verification_gate(mut self, gate: Arc<VerificationGate>) -> Self {
         self.verification_gate = Some(gate);
-        self
-    }
-
-    /// 设置 LSP 管理器（execute_lsp 工具与编辑后诊断附加依赖）。
-    pub fn with_lsp_manager(mut self, manager: Arc<LspManager>) -> Self {
-        self.lsp_manager = Some(manager);
         self
     }
 
@@ -989,7 +977,6 @@ impl ToolRegistry {
             "glob" => self.execute_glob(arguments, session_id).await,
             "list_dir" => self.execute_list_dir(arguments, session_id).await,
             "symbol_outline" => self.execute_symbol_outline(arguments).await,
-            "lsp" => self.execute_lsp(arguments).await,
             name => match self
                 .dynamic_tools
                 .lock()

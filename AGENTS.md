@@ -142,7 +142,6 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `scheduler` | `core/src/scheduler/` | 定时任务（SummaryTask、EvolutionTask、GcTask、SnapshotGcTask、ReminderTask、UsageStatsFlushTask） | 定时任务产物写入 VFS |
 | `observability` | `core/src/observability/` | `AgentMetrics`/`UsageStats`/`TraceCollector`/`ExecutionLog`/`UsageLog`/`RuleRecorder`；SQL 经 db Repository 收敛 | — |
 | `executor` | `core/src/executor/` | 工具执行支撑（Action、审批、LLM-as-Judge、验证门控）+ 语义化编辑（内容匹配 edit / patch）、文件浏览（fs/search）、代码智能（symbols/project/test_discovery） | — |
-| `lsp` | `core/src/lsp/` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储；lsp 工具：诊断/跳转/符号） | — |
 | `snapshot` | `core/src/snapshot/` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | ⚠️ **ADR-006 例外**：独立文件存储于 `{data_dir}/snapshots/`，不经 VFS |
 | `events` | `core/src/events/` | 事件驱动触发（T1 路线：文件监听 + webhook → 事件总线 → 规则动作） | — |
 | `goals` | `core/src/goals/` | 长期目标 + 进度跟踪（与待办联动；运行期 `goals.json` 持久化） | ⚠️ 例外：运行期结构化产物 |

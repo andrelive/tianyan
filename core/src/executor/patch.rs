@@ -586,7 +586,7 @@ fn resolve_patch_path(patch_path: &str, base_dir: &Path) -> Result<PathBuf> {
         return Ok(crate::executor::security::lexical_normalize(p));
     }
     // 相对路径同样归一（折叠 `.`、统一分隔符）——与 `ToolRegistry::resolve_tool_path`
-    // 的输出形态保持一致，按路径**字符串**索引的消费方（如 LSP 诊断 store）才能命中。
+    // 的输出形态保持一致（判定与写入口径同源，杜绝"检查过的路径 != 写入的路径"）。
     Ok(crate::executor::security::lexical_normalize(
         &base_dir.join(p),
     ))

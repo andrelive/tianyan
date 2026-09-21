@@ -29,7 +29,6 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
 | `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
 | `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、测试发现） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
-| `lsp` | LSP 客户端（服务器注册表 + 自研 JSON-RPC 传输 + 诊断存储） | registry.rs, client.rs, diagnostics.rs | ✅ 已集成 |
 | `snapshot` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | mod.rs | ✅ 正常使用 |
 | `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image/, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
 | `memory` | 长期记忆提取 | extractor.rs | ✅ 已集成 |
@@ -148,7 +147,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 
 ### 1.5 executor 子模块
 
-**职责**：独立的工具执行函数（`execute_read_file`、`execute_write_file`、`execute_command_action`、`execute_verify_build`）+ 编程助手执行原语（apply_edit / apply_patch / glob / list_dir / discover_tests / symbol_outline / lsp），供 `ToolRegistry` 调用。`Action`、`ExecutorError`、`ApprovalWorkflow`、`LlmJudge`、`VerificationGate` 类型被 `agent/build.rs` 和 `agent/tool_registry.rs` 使用。
+**职责**：独立的工具执行函数（`execute_read_file`、`execute_write_file`、`execute_command_action`、`execute_verify_build`）+ 编程助手执行原语（apply_edit / apply_patch / glob / list_dir / discover_tests / symbol_outline），供 `ToolRegistry` 调用。`Action`、`ExecutorError`、`ApprovalWorkflow`、`LlmJudge`、`VerificationGate` 类型被 `agent/build.rs` 和 `agent/tool_registry.rs` 使用。
 
 > `Executor` trait 壳、`Step`、`StepResult`、`FailureHandling`、`ExecutorTrait` 等旧 Planner-Executor 架构类型已移除。
 
@@ -185,24 +184,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `ContentEdit` | 内容匹配编辑规格（old_string / new_string / replace_all） |
 | `Truncated` | 截断结果（text / truncated / total_lines / total_bytes / spill_path） |
 
-### 1.6 lsp 子模块
-
-**职责**：语言服务器协议（LSP）客户端，提供诊断、跳转、符号等代码智能能力，供 `lsp` 工具调用（goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation）。诊断 = 内环快信号，`verify_build` = 最终权威门控（见 gap-analysis D4）。
-
-**模块组织**：
-- `lsp/registry.rs` — 服务器注册表：`ServerSpec { language_id, extensions, root_markers, spawn_command, args, auto_install_hint }`；`BUILTIN_SERVERS` 内置 rust-analyzer / typescript-language-server / pyright-langserver / gopls；`spec_for_extension` 按扩展名路由、`probe_project_root` 按 root marker 探测项目根
-- `lsp/client.rs` — 自研 JSON-RPC 2.0 客户端：Content-Length 帧、tokio 进程管道、DashMap + oneshot 请求/响应关联、10s 超时；服务器不可用时优雅降级（"不可用" + 安装提示）
-- `lsp/diagnostics.rs` — `LspManager`：按绝对路径键控的 push 诊断存储、按项目根键控的服务器池、`diagnostics_for` 排序输出、`ensure_server` 惰性拉起、`query` 统一入口
-
-**核心类型**：
-
-| 类型 | 说明 |
-|------|------|
-| `ServerSpec` | LSP 服务器规格（语言 ID、扩展名、root 标记、spawn 命令、自动安装提示） |
-| `LspClient` | JSON-RPC 2.0 LSP 客户端（initialize / hover / goto_definition / references / document_symbols / workspace_symbols / goto_implementation） |
-| `LspManager` | 诊断存储 + 服务器池管理（handle_publish / diagnostics_for / ensure_server / query） |
-
-### 1.7 snapshot 子模块
+### 1.6 snapshot 子模块
 
 **职责**：工作区快照（会话回退/撤销回退），ADR-006 定义的 VFS 例外（独立文件存储于 `{data_dir}/snapshots/`，不经 VFS）。编程助手落地（ADR-008）新增三项能力：gzip 压缩、GC、similar diff。
 
@@ -337,7 +319,6 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 | memory | ✅ 已集成 | `MemoryExtractor` 提取结构化记忆 |
 | observability | ✅ 已集成 | AgentMetrics 提供可观测性存储和自省接口 |
 | executor | ✅ 正常使用 | 独立执行函数、审批工作流、验证门控均被 agent 模块使用 |
-| lsp | ✅ 已集成 | 自研 LSP 客户端（注册表 + JSON-RPC 传输 + 诊断存储），通过 lsp 工具接入 |
 | snapshot | ✅ 已集成 | gzip 压缩 + GC + similar diff（ADR-006 例外，ADR-008 升级） |
 | knowledge | ✅ 已集成 | KnowledgeIngestor 已通过 knowledge_ingest 工具集成到 Agent 流程，Server 层通过 KnowledgeIngestor 真实处理导入与检索 |
 

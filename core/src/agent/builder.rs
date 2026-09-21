@@ -20,7 +20,6 @@ use crate::executor::approval::{
 use crate::executor::SecurityPolicy;
 use crate::executor::{LlmJudge, VerificationGate};
 use crate::knowledge::KnowledgeIngestor;
-use crate::lsp::diagnostics::LspManager;
 use crate::model::spec::ModelSpec;
 use crate::model::ChatService;
 use crate::observability::execution_log::ExecutionLog;
@@ -415,7 +414,6 @@ impl AgentBuilder {
             .with_approval_workflow(approval)
             .with_verification_gate(verification)
             .with_rule_recorder(rule_recorder)
-            .with_lsp_manager(Arc::new(LspManager::new()))
             .with_session_manager(session_manager.clone());
         // 后台命令日志目录（execute_command(background) 日志落盘）
         if let Some(dir) = self.command_logs_dir {

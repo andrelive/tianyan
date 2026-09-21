@@ -17,10 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **组件工具 schema 单一事实源 + 纳入工具目录**：`todo`/`goal`/`schedule_task` 的 schema 从**手写 `json!{}`** 改为 `from_schema::<T>`（schemars 派生）——字段/枚举/必填随 struct 自动同步（手写版无编译期保证：`todo` 的单条形态与 `goal` 的 `status` 一词两用正是从这种土壤里长出来的）。为不丢枚举约束，`TodoStatus`/`TodoPriority`/`GoalStatus` 补 `JsonSchema` 派生；`todo`/`goal` 的参数改**类型化枚举**（非法值在参数解析阶段即被拒，不再靠运行时字符串解析）。顺带消除 `goal` 的 `status` 一词两用（update 设置 / list 筛选 → 现只表示 update 的设置值，list 返回全部）。**工具目录权威生成器迁至 server 侧**（`server/examples/tool_catalog.rs`；渲染逻辑抽为 `core::agent::tool_catalog`，`core/examples/tool_catalog.rs` 删除）——此前生成器在 core，故这三个组件工具**不在目录内**（既无文档覆盖、也无 freshness 门禁）；现目录覆盖全部 **33 个工具**，门禁同步覆盖
 - **`run_tests` 拆分（破坏性变更）——「显式命令」与「项目探测」不再是一个参数的两种写法**：此前 `RunTestsParams` 六个字段**全可选**，`command`（显式命令）与 `framework`/`suite`/`filter`（探测构造）表达**同一意图**，靠「command 优先、缺省才探测」的隐式优先级共存。现按单一职责拆为两个工具：`run_tests`（**`command` 必填**，跑给定命令）与 **`run_project_tests`**（探测项目类型 → 构造命令；零必填，最常用场景零参数）。顺带清理同类残骸：`run_tests_action` 内嵌的「显式/探测」二选一（拆分后其探测分支已无人使用）→ 只接受命令字符串；`resolve_run_tests_command` → `resolve_project_test_command`（去掉 `command` 分支）。目录 33 → **34 个工具**；测试同步（缺 command 现为参数无效 / 未知项目类型明确报错 / `filter` 注入拦截归 `run_project_tests`）
 
+- **移除 LSP 集成（破坏性变更）**：`lsp` 工具与其整个 `core/src/lsp/` 模块（服务器注册表 + 自研 JSON-RPC 客户端 + 诊断存储，7 文件）、`lsp-types` 依赖、编辑后诊断附加链路一并删除；工具数 **34 → 33**。依据为真实调用数据：17,599 次工具调用中 `lsp` 仅 **2 次且两次全部失败**（`rust-analyzer 不可用`）；2,312 次编辑结果附带的 `diagnostics` 字段 **100% 是空数组**（服务器只在 `lsp` 工具路径启动，编辑/验证路径永不触发）；服务器池无空闲回收（仅 `LspClient::drop` 杀子进程，而池持 `Arc` 永不 drop）⇒ 一旦调用成功即常驻占 CPU，与「通用助手」定位不符。决策依据与替代路线（按需 `repo_map`）见 `docs/architecture/code-intelligence-routes.md`；两个内置角色白名单中的 `lsp` 条目同步移除（白名单过滤对不存在的工具名本就静默忽略）
+- **`grep` 参数收敛（12 可选 → 9）+ `output_mode` 类型化**：删 `line_number`（默认 true，且实测每次调用都被显式传 true——零信息量）、`before_context`/`after_context`（与 `context`（`-C`）语义重叠，实测从未使用）；`output_mode` 由字符串改类型化枚举（非法值解析期即拒，取代执行器运行期的「输出模式无效」）。顺带清除搜索实现残骸 `before_buf`（贯穿三处从未使用）
+
 ### Fixed
 - **三处 e2e 断言失效（既有漂移；CI 不跑 e2e，故长期未被察觉）**：① `chat.spec.ts` 把 `POST /chat/stream` mock 成 SSE body，而该端点自 ADR-028 已收敛为「开关」（返回 JSON）、前端用 `response.json()` 解析 → 助手回复断言**恒红**（改走历史消息路径；流式端到端归 `real-chat.spec.ts`）；② `real-workspace-session.spec.ts` 同样按 SSE 文本解析响应取 `session_id`（改为按 JSON 解析）；③ `session-page.spec.ts` 仍断言「暂无会话」空态，而该空态已随工作区分组引入被移除（改为断言「默认」分组可见 + 该文案计数为 0）。判别力：旧写法临时探针 1 failed；修复后完整套件 36 passed
 - **vite dev 的 `/health` 代理此前从未生效**：该条目被误嵌在 `/api` 的配置对象**内部**，而 http-proxy 只识别 proxy 的**顶层**键——关于页版本展示 / 连接测试在 dev 模式下因此不达后端
 - **文档漂移**：`/chat/stream` 仍被描述为「流式聊天 (SSE，含 chunk_type)」（`module-descriptions`、`system-architecture` 数据流图），与其「开关」语义矛盾；「独立 server 固定 3000 / 不支持改端口」的强断言同步为「默认 3000，`TIANYAN_PORT` 可覆盖」（AGENTS.md、README、troubleshooting、refactoring-practices、module-descriptions）
+
+- **`execute_command` 就绪探测配置不再静默降级**：`ready` 配了但未给 `background:true` 时**旧行为静默忽略**（同步路径不读 `ready`，长驻服务一路阻塞到命令超时）；`ready:{}`（`port`/`pattern` 皆缺，含 `pattern` 空串）**旧行为探测永不满足**，静默等满超时（默认 300s）才报「就绪探测超时」。现由 `build_ready_spec` 单点校验（置于审批与执行之前）：缺 `background`、或缺 `port` 与 `pattern` → `参数无效`；探测总超时默认 **300s → 60s**（`DEFAULT_READY_TIMEOUT_MS` 单点）
 
 ## [0.5.7] - 2026-09-20
 

@@ -40,7 +40,6 @@ tianyan/
 │       ├── executor/       # 工具执行支撑（安全策略、审批、LLM-as-Judge 验证门控）
 │       ├── goals/          # 会话目标
 │       ├── knowledge/      # 知识库导入管道
-│       ├── lsp/            # LSP 客户端（诊断/跳转/符号）
 │       ├── memory/         # 记忆提取
 │       ├── model/          # 模型服务容器（Chat/Embedding/Vision）
 │       ├── notification/   # 消息通知与唤醒原语
