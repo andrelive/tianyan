@@ -137,16 +137,14 @@ async fn test_run_tests_success() {
 }
 
 #[tokio::test]
-async fn test_run_tests_missing_command_unknown_project_errors() {
-    // 缺省 command + 无项目探测（空目录）→ 提示提供 command
+async fn test_run_tests_requires_command() {
+    // command 现为必填（探测路径已拆到 run_project_tests）——缺 command 即参数无效
     let registry = ToolRegistry::new(default_strict_policy());
-    let dir = tempfile::tempdir().unwrap();
-    let cwd = serde_json::to_string(&dir.path().to_string_lossy().into_owned()).unwrap();
     let result = registry
-        .execute_run_tests(&format!(r#"{{"cwd":{cwd}}}"#), "test-session", false)
+        .execute_run_tests(r#"{"cwd":"."}"#, "test-session", false)
         .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("command"));
+    assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
 
 #[tokio::test]
@@ -160,18 +158,18 @@ async fn test_run_tests_rejects_malformed_arguments() {
 }
 
 #[tokio::test]
-async fn test_run_tests_framework_suite_filter_backward_compat_command_wins() {
-    // 显式 command 优先于 framework/suite/filter（向后兼容，LLM 完全控制）
+async fn test_run_project_tests_unknown_project_errors() {
+    // 探测路径（run_project_tests）：项目类型无法识别 → 明确报错
+    // （此前该场景由 run_tests 的探测回落处理；拆分后归属本工具）
     let registry = ToolRegistry::new(default_strict_policy());
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = serde_json::to_string(&dir.path().to_string_lossy().into_owned()).unwrap();
     let result = registry
-        .execute_run_tests(
-            r#"{"command":"echo hi","framework":"cargo","suite":"x","filter":"y"}"#,
-            "test-session",
-            false,
-        )
-        .await
-        .unwrap();
-    assert_eq!(result["success"].as_bool(), Some(true));
+        .execute_run_project_tests(&format!(r#"{{"cwd":{cwd}}}"#), "test-session", false)
+        .await;
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("无法识别项目类型"), "{msg}");
 }
 
 /// 全自主审批工作流：黑名单外全放行（与 file_ops_tests 同款；ADR-033）。
@@ -353,7 +351,7 @@ async fn test_run_tests_filter_metacharacters_blocked() {
     })
     .to_string();
     let result = registry
-        .execute_run_tests(&args, "test-session", false)
+        .execute_run_project_tests(&args, "test-session", false)
         .await;
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("安全违规"), "应报安全违规: {msg}");

@@ -4,7 +4,7 @@
 > 手工修改将被覆盖；freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁。
 > 生成原则（DSH gen-tool-catalog 吸收）：运行时注册是 schema 唯一真相源。
 
-共 33 个工具。
+共 34 个工具。
 
 | 工具 | 展示意图 | 描述 |
 |------|---------|------|
@@ -25,7 +25,8 @@
 | `list_dir` | search | 列出单层目录下的条目。目录带尾部 '/'。支持 offset/limit 分页。 |
 | `lsp` | code | 查询指定文件的语言服务器：goToDefinition / findReferences / hover / documentSymbol / workspaceSymbol / goToImplementation。返回结构化结果。 |
 | `read_file` | read | 读取文本文件内容（纯内容，无行号/哈希前缀）。默认返回前 2000 行（单次输出上限约 50KB，超出部分截断并附「使用 offset 继续」提示）。大文件请**按需读取**：用 offset/limit 指定行范围（1 起始行号），建议先用 grep/symbol_outline 定位目标区域再按范围精读；结果含 total_lines/total_bytes 与实际窗口（showing）。内容匹配编辑（apply_edit）直接按内容定位，无需行号。 |
-| `run_tests` | terminal | 运行测试命令（如 cargo test）并返回结果。 |
+| `run_project_tests` | terminal | 按**项目类型探测**并运行测试（无需指定命令）：Cargo → `cargo test`、Python → `pytest`、TypeScript → `vitest run`；`framework` 可覆盖探测结果，`suite`/`filter` 缩小范围。返回与 run_tests 相同的结构化结果。项目类型无法识别时，改用 run_tests 显式给命令。 |
+| `run_tests` | terminal | 运行**指定的**测试命令并返回结构化结果（passed/failed + 失败详情分组）。命令原样执行（经安全检查）——如 `cargo test --lib`、`pytest -k smoke`、`vitest run tests/`。要按项目类型自动构造命令，用 run_project_tests。 |
 | `schedule_task` | generic | 创建一个后台定时任务：按执行间隔周期调用智能体在指定工作目录完成给定指令。用于用户要求定时/周期执行某项工作（如每 30 分钟检查一次、每天总结一次）。间隔制（ADR-024）：距上次执行达到间隔即触发，服务未运行期间超期的任务会在重启后自动补跑一次。 |
 | `search_vfs` | search | 语义化搜索整个 VFS（所有命名空间：文档/记忆/规则/技能），向量 RRF 融合。返回每条结果的 abstract + overview + URI。需要完整详情时用 vfs_read 加载。发现可用技能、检索相关规则/记忆也用本工具。 |
 | `self_check` | generic | 查询自身运行指标：执行次数、成功率、token 消耗、管线失败、规则有效性。当用户质疑你的表现时用于自我反思。 |

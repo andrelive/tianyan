@@ -277,11 +277,11 @@ fn test_apply_framework_override() {
     assert_eq!(info.format, ProjectFormat::Cargo);
 }
 
-// ── run_tests_action（显式命令集成路径，无真实测试框架）─────────────────────
+// ── run_tests_action（给定命令集成路径，无真实测试框架）─────────────────────
 
 #[tokio::test]
 async fn test_run_tests_action_explicit_command() {
-    let value = run_tests_action(Some("echo hello"), None, Some(10), None, None, None)
+    let value = run_tests_action("echo hello", None, Some(10))
         .await
         .unwrap();
     assert_eq!(value["success"].as_bool(), Some(true));
@@ -294,14 +294,14 @@ async fn test_run_tests_action_explicit_command() {
     assert!(value["grouped_by_file"].is_array());
 }
 
-#[tokio::test]
-async fn test_run_tests_action_missing_command_unknown_project_errors() {
+#[test]
+fn test_resolve_project_test_command_unknown_project_errors() {
+    // 探测路径：未知项目类型 → 明确报错（原先由 run_tests_action 的
+    // 「缺 command 回落探测」覆盖；双形态拆分后归属本函数）
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().to_str().unwrap();
-    let err = run_tests_action(None, Some(cwd), Some(5), None, None, None)
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("command"));
+    let err = resolve_project_test_command(Some(cwd), None, None, None).unwrap_err();
+    assert!(err.to_string().contains("无法识别项目类型"), "{err}");
 }
 
 // ── discover_tests（未知项目错误路径；真实 cargo 路径见下方守卫测试）─────────

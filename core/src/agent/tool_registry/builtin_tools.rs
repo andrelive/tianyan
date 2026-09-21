@@ -11,8 +11,8 @@ use crate::agent::tool_params::{
     ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
     DelegationStatsParams, DiscoverTestsParams, ExecuteCommandParams, ExecutionDetailParams,
     ExecutionStatsParams, GlobParams, KnowledgeIngestParams, ListDirParams, LspParams,
-    ReadFileParams, RunTestsParams, SearchCodeParams, SearchVfsParams, SelfCheckParams,
-    SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
+    ReadFileParams, RunProjectTestsParams, RunTestsParams, SearchCodeParams, SearchVfsParams,
+    SelfCheckParams, SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
     TaskStatusParams, VerifyBuildParams, VfsListParams, VfsReadParams, WebFetchParams,
     WebSearchParams, WriteFileParams,
 };
@@ -132,7 +132,14 @@ fn def_call_skill(name: &'static str) -> ToolDefinition {
 fn def_run_tests(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<RunTestsParams>(
         name,
-        "运行测试命令（如 cargo test）并返回结果。",
+        "运行**指定的**测试命令并返回结构化结果（passed/failed + 失败详情分组）。命令原样执行（经安全检查）——如 `cargo test --lib`、`pytest -k smoke`、`vitest run tests/`。要按项目类型自动构造命令，用 run_project_tests。",
+    ))
+}
+
+fn def_run_project_tests(name: &'static str) -> ToolDefinition {
+    ToolDefinition::function(FunctionDefinition::from_schema::<RunProjectTestsParams>(
+        name,
+        "按**项目类型探测**并运行测试（无需指定命令）：Cargo → `cargo test`、Python → `pytest`、TypeScript → `vitest run`；`framework` 可覆盖探测结果，`suite`/`filter` 缩小范围。返回与 run_tests 相同的结构化结果。项目类型无法识别时，改用 run_tests 显式给命令。",
     ))
 }
 
@@ -286,6 +293,11 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
     tool("vfs_list", def_vfs_list, ToolPresentation::Generic),
     tool("call_skill", def_call_skill, ToolPresentation::Skill),
     tool("run_tests", def_run_tests, ToolPresentation::Terminal),
+    tool(
+        "run_project_tests",
+        def_run_project_tests,
+        ToolPresentation::Terminal,
+    ),
     tool(
         "discover_tests",
         def_discover_tests,

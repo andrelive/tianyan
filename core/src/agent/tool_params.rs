@@ -151,22 +151,38 @@ pub struct CallSkillParams {
     pub parameters: HashMap<String, serde_json::Value>,
 }
 
-/// 运行测试参数。
+/// 运行测试参数（**显式命令**）。
 ///
-/// `command` 为显式命令（向后兼容旧必填契约，缺省时按 `framework`/`suite`/`filter`
-/// 由项目探测（[`crate::executor::project::probe_project`]）解析默认命令模板）。
+/// 与 [`RunProjectTestsParams`] 是**单一职责分离**的两个工具：本工具跑
+/// **你给的命令**（完全控制），那个按项目类型探测构造命令。此前两者挤在同一
+/// 工具里（`command` 优先、缺省才探测）——同一意图两种写法，模型每次都要选
+/// （形态分叉 = 参数生成抖动源），故拆开。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RunTestsParams {
-    /// 显式测试命令（向后兼容旧必填字段；缺省时由 framework 解析默认命令）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
+    /// 测试命令（原样执行，经安全检查）：如 `cargo test --lib`、`pytest -k smoke`。
+    pub command: String,
     /// 工作目录。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     /// 超时秒数。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
-    /// 框架："auto"（默认，按项目探测）| "cargo" | "pytest" | "vitest"。
+}
+
+/// 运行项目测试参数（**探测版**：不指定命令，按项目类型构造）。
+///
+/// 探测 `cwd`（缺省为会话工作目录）的项目格式：Cargo → `cargo test`、
+/// Python → `pytest`、TypeScript → `vitest run`；`framework` 可覆盖探测结果，
+/// `suite`/`filter` 缩小范围。项目类型无法识别时明确报错并指引用 `run_tests`。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RunProjectTestsParams {
+    /// 工作目录（项目探测起点；缺省为会话工作目录）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// 超时秒数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// 框架覆盖："auto"（默认，按项目探测）| "cargo" | "pytest" | "vitest"。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub framework: Option<String>,
     /// 测试过滤（cargo test <filter> / pytest -k <filter>）。

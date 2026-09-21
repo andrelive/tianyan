@@ -963,6 +963,10 @@ impl ToolRegistry {
                 self.execute_run_tests(arguments, session_id, subagent)
                     .await
             }
+            "run_project_tests" => {
+                self.execute_run_project_tests(arguments, session_id, subagent)
+                    .await
+            }
             "discover_tests" => self.execute_discover_tests(arguments).await,
             "verify_build" => {
                 self.execute_verify_build(arguments, session_id, subagent)

@@ -1,6 +1,8 @@
 //! 代码类工具执行器：grep / run_tests / verify_build。
 
-use crate::agent::tool_params::{RunTestsParams, SearchCodeParams, VerifyBuildParams};
+use crate::agent::tool_params::{
+    RunProjectTestsParams, RunTestsParams, SearchCodeParams, VerifyBuildParams,
+};
 use crate::common::error::TianyanError;
 use crate::executor::search::{execute_search_code as execute_search, SearchOptions};
 use crate::executor::Action;
@@ -60,19 +62,18 @@ impl ToolRegistry {
         }
     }
 
-    /// 执行 run_tests 工具：运行测试命令（设计 D6 增强结果解析）。
+    /// 执行 run_tests 工具：运行**显式测试命令**（设计 D6 增强结果解析）。
     ///
     /// cwd 归属（T1-1）：显式 `cwd` 相对路径按会话工作目录解析；**缺省即
     /// 会话工作目录**——与 grep/glob/read_file 同一套规则（旧实现缺省落
     /// 进程 cwd：桌面应用=安装目录，项目探测与执行都在错误目录）。
     ///
-    /// 命令解析（见 [`crate::executor::test_discovery::run_tests_action`]）：
-    /// 显式 `command` 原样使用（向后兼容，LLM 有完全控制权）；
-    /// 缺省时按 `cwd` 项目探测（Cargo → `cargo test`、Python → `pytest`、
-    /// TypeScript → `vitest run`）结合 `framework`/`suite`/`filter` 构建默认命令。
+    /// 命令原样使用（LLM 完全控制权）；「按项目探测构造命令」是另一个工具
+    /// [`Self::execute_run_project_tests`] 的职责——此前两者挤在同一工具里
+    /// （`command` 优先、缺省才探测）= 同一意图两种写法，故按单一职责拆开。
     ///
-    /// 安全门控与 execute_command 对齐：cwd 路径沙箱 + 解析后的完整命令
-    /// check_command（拦截注入元字符/黑名单命令）+ 审批工作流。
+    /// 安全门控与 execute_command 对齐：cwd 路径沙箱 + 命令 check_command
+    /// （拦截注入元字符/黑名单命令）+ 审批工作流。
     pub(crate) async fn execute_run_tests(
         &self,
         arguments: &str,
@@ -86,10 +87,50 @@ impl ToolRegistry {
             .resolve_tool_cwd(session_id, params.cwd.as_deref())
             .await?;
         safety_violation(self.security_policy.check_path(std::path::Path::new(&cwd)))?;
-        // 先解析出实际将执行的完整命令（显式 command 或 探测+模板拼接），
+        let command = params.command.trim().to_string();
+        if command.is_empty() {
+            return Err(TianyanError::invalid_input(
+                "tool: run_tests 的 command 不能为空（要按项目探测跑测试，用 run_project_tests）",
+            ));
+        }
+        safety_violation(self.security_policy.check_command(&command))?;
+        // 审批门控（统一序列见 [`ToolRegistry::ensure_approved`]）
+        self.ensure_approved(
+            session_id,
+            subagent,
+            &Action::RunTests {
+                command: command.clone(),
+                cwd: Some(cwd.clone()),
+                timeout_secs: params.timeout_secs,
+            },
+        )
+        .await?;
+        crate::executor::test_discovery::run_tests_action(&command, Some(&cwd), params.timeout_secs)
+            .await
+            .map_err(wrap_tool_error)
+    }
+
+    /// 执行 run_project_tests 工具：探测项目类型 → 构造命令 → 运行。
+    ///
+    /// cwd 归属与 run_tests 一致；`framework` 覆盖探测结果、`suite`/`filter`
+    /// 缩小范围。**先解析出完整命令再整体 check_command**——`filter`/`suite`
+    /// 的拼接注入在此被拦截（门控与执行严格同一命令）。
+    ///
+    /// 安全门控与 execute_command 对齐。
+    pub(crate) async fn execute_run_project_tests(
+        &self,
+        arguments: &str,
+        session_id: &str,
+        subagent: bool,
+    ) -> Result<serde_json::Value, TianyanError> {
+        let params: RunProjectTestsParams = parse_params(arguments)?;
+        let cwd = self
+            .resolve_tool_cwd(session_id, params.cwd.as_deref())
+            .await?;
+        safety_violation(self.security_policy.check_path(std::path::Path::new(&cwd)))?;
+        // 先解析出实际将执行的完整命令（探测 + 模板拼接），
         // 再对其整体执行命令安全检查——filter/suite 拼接注入在此被拦截。
-        let resolved = crate::executor::test_discovery::resolve_run_tests_command(
-            params.command.as_deref(),
+        let resolved = crate::executor::test_discovery::resolve_project_test_command(
             Some(&cwd),
             params.framework.as_deref(),
             params.filter.as_deref(),
@@ -97,7 +138,6 @@ impl ToolRegistry {
         )
         .map_err(wrap_tool_error)?;
         safety_violation(self.security_policy.check_command(&resolved))?;
-        // 审批门控（统一序列见 [`ToolRegistry::ensure_approved`]）
         self.ensure_approved(
             session_id,
             subagent,
@@ -108,14 +148,10 @@ impl ToolRegistry {
             },
         )
         .await?;
-        // 显式传入已解析命令（命令解析对同一输入幂等，门控与执行严格一致）
         crate::executor::test_discovery::run_tests_action(
-            Some(&resolved),
+            &resolved,
             Some(&cwd),
             params.timeout_secs,
-            None,
-            None,
-            None,
         )
         .await
         .map_err(wrap_tool_error)

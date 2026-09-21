@@ -5,8 +5,9 @@
 //!   `vitest --list` 输出 → 结构化测试条目，上限 [`MAX_TESTS`] 条。
 //! - **结果解析**（纯函数）：[`parse_test_output`] 从 stdout/stderr 提取
 //!   passed/failed/ignored、失败详情（消息 + 文件行号 + 回溯头尾）与按文件分组。
-//! - **执行入口**（async）：[`discover_tests`] 与 [`run_tests_action`]，
-//!   前者只读列出测试，后者解析默认命令模板并运行。
+//! - **执行入口**（async）：[`discover_tests`]（只读列出测试）与
+//!   [`run_tests_action`]（执行给定命令 + 结构化解析；命令由调用方给出，
+//!   或经 [`resolve_project_test_command`] 按项目探测构造）。
 
 use std::path::Path;
 
@@ -629,48 +630,41 @@ pub async fn discover_tests(path: &str) -> Result<Value, TianyanError> {
     }))
 }
 
-/// 解析 run_tests 实际执行的命令字符串（显式 `command` 优先原样使用；缺省时
-/// 探测 `cwd`（默认当前目录）项目格式，按 [`resolve_test_command`] 构建默认
-/// 命令模板，`framework` 可覆盖探测结果）。
+/// 解析「按项目探测」的测试命令：探测 `cwd`（默认当前目录）项目格式，按
+/// [`resolve_test_command`] 构建命令模板，`framework` 可覆盖探测结果。
 ///
-/// 供 registry 层（code_ops）在安全门控（check_command）之前复用同一解析逻辑，
-/// 保证"门控的命令"与"实际执行的命令"完全一致。
-pub(crate) fn resolve_run_tests_command(
-    command: Option<&str>,
+/// 供 registry 层（code_ops 的 `execute_run_project_tests`）在安全门控
+/// （check_command）之前复用同一解析逻辑，保证"门控的命令"与"实际执行的命令"
+/// 完全一致。（`run_tests` 跑显式命令，不经此函数——两种写法曾挤在同一工具里，
+/// 按单一职责拆分后本函数只服务探测路径。）
+pub(crate) fn resolve_project_test_command(
     cwd: Option<&str>,
     framework: Option<&str>,
     filter: Option<&str>,
     suite: Option<&str>,
 ) -> Result<String, TianyanError> {
-    match command {
-        Some(cmd) if !cmd.trim().is_empty() => Ok(cmd.trim().to_string()),
-        _ => {
-            let mut info = probe_project(Path::new(cwd.unwrap_or(".")))?;
-            apply_framework_override(&mut info, framework);
-            resolve_test_command(&info, filter, suite).map(|parts| parts.join(" "))
-        }
-    }
+    let mut info = probe_project(Path::new(cwd.unwrap_or(".")))?;
+    apply_framework_override(&mut info, framework);
+    resolve_test_command(&info, filter, suite).map(|parts| parts.join(" "))
 }
 
 /// 运行测试：解析命令 → 执行 → 解析结果（设计 D6 增强）。
 ///
-/// 命令解析规则（`command` 缺省时，向后兼容：显式 `command` 优先原样使用）：
-/// 探测 `cwd`（默认当前目录）项目格式，按 [`resolve_test_command`] 构建命令；
-/// `framework` 可覆盖探测结果（"auto" 默认 / "cargo" / "pytest" / "vitest"）。
+/// **执行给定命令**并解析结果（设计 D6 增强）。
+///
+/// 命令由调用方负责解析：`execute_run_tests` 用**显式命令**，
+/// `execute_run_project_tests` 先经 [`resolve_project_test_command`] **探测构造**。
+/// 本函数只做执行 + 结构化解析——不在内部再做「显式/探测」二选一
+/// （那是双形态残骸：此前 `command` 可缺省并在此回落到探测）。
 ///
 /// 返回 `{ success, passed, failed, ignored, failures: [{name, file, line, message,
 /// backtrace_head, backtrace_tail}], grouped_by_file, stdout, stderr, exit_code }`。
 pub async fn run_tests_action(
-    command: Option<&str>,
+    command: &str,
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
-    framework: Option<&str>,
-    filter: Option<&str>,
-    suite: Option<&str>,
 ) -> Result<Value, TianyanError> {
-    let resolved = resolve_run_tests_command(command, cwd, framework, filter, suite)?;
-
-    let output = execute_command_action(&resolved, cwd, timeout_secs, None).await?;
+    let output = execute_command_action(command, cwd, timeout_secs, None).await?;
     let stdout = output["stdout"].as_str().unwrap_or("").to_string();
     let stderr = output["stderr"].as_str().unwrap_or("").to_string();
     let exit_code = output["exit_code"].as_i64().unwrap_or(-1);
