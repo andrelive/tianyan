@@ -153,7 +153,7 @@ fn def_verify_build(name: &'static str) -> ToolDefinition {
 fn def_ask_user(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<AskUserParams>(
         name,
-        "当需要更多信息才能继续时，向用户提问。",
+        "当需要更多信息才能继续时，向用户提问。只提供 `questions` 数组（单个问题也放进数组，长度 1）——每个问题一个 tab 分步展示；问题可带 `options`（候选选项，用户也可自行输入）。",
     ))
 }
 

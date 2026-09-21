@@ -21,9 +21,10 @@ import type { ChatStreamEvent } from '@/lib/types';
 /**
  * 从 ask_user 工具调用参数（arguments JSON）解析问题列表。
  *
- * 参数形态（对齐后端 AskUserParams）：`questions` 数组优先（多问题分步），
- * 缺省回落单问题 `question` + `options`。解析失败返回空数组（不接管输入框，
- * 工具卡片仍正常渲染——模型可自行处理失败）。
+ * **形态唯一**（对齐后端 AskUserParams / DSH ask_user_question）：只有
+ * `questions` 数组，单个问题即长度 1 的数组——不再回落到「单问题快捷形态」
+ * （形态分叉是模型生成参数时的主要抖动源）。解析失败返回空数组（不接管
+ * 输入框，工具卡片仍正常渲染——模型可自行处理失败）。
  */
 export function parseAskUserQuestions(argumentsRaw: string): {
   question: string;
@@ -32,20 +33,15 @@ export function parseAskUserQuestions(argumentsRaw: string): {
   try {
     const parsed = JSON.parse(argumentsRaw) as {
       questions?: {
-        question: string;
+        question?: string;
         options?: { label: string; description?: string | null }[];
       }[];
-      question?: string;
-      options?: { label: string; description?: string | null }[];
     };
-    if (Array.isArray(parsed.questions) && parsed.questions.length > 0) {
-      return parsed.questions.map((q) => ({
-        question: q.question ?? '',
-        options: q.options ?? [],
-      }));
-    }
-    if (parsed.question) {
-      return [{ question: parsed.question, options: parsed.options ?? [] }];
+    if (Array.isArray(parsed.questions)) {
+      return parsed.questions.flatMap((q) => {
+        const text = typeof q?.question === 'string' ? q.question : '';
+        return text ? [{ question: text, options: q.options ?? [] }] : [];
+      });
     }
   } catch {
     // 参数解析失败：不接管（工具卡片正常渲染）

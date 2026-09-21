@@ -211,17 +211,17 @@ pub struct AskUserQuestion {
 }
 
 /// 追问用户参数。
+///
+/// **单一形态**（对齐 DSH `ask_user_question`）：只有 `questions` 数组——
+/// 单问题即长度为 1 的数组。此前曾并行提供「单问题快捷形态」（顶层
+/// `question` + `options`），于是同一意图存在两种写法，还带出「必填却被
+/// 忽略」的字段（`questions` 提供时忽略 `question`）——**形态分叉是模型生成
+/// 参数时的主要抖动源**（同一份意图要在两套 schema 间做选择），故收敛为一种。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AskUserParams {
-    /// 问题内容（单问题快捷形式；`questions` 提供时忽略）。
-    pub question: String,
-    /// 候选选项（单问题快捷形式；`questions` 提供时忽略）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options: Option<Vec<AskUserOption>>,
-    /// 多问题列表（可选；提供时按每个问题一个 tab 分步追问，
-    /// 并附带一个"补充信息" tab 供用户补充其他内容）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub questions: Option<Vec<AskUserQuestion>>,
+    /// 问题列表（必填；每个问题一个 tab 分步追问，末尾附「补充信息」tab）。
+    /// 单个问题也放入数组（长度 1）。
+    pub questions: Vec<AskUserQuestion>,
 }
 
 /// 子代理提交结果参数（委托循环显式完成信号）。
@@ -357,14 +357,23 @@ mod tests {
     }
 
     #[test]
-    fn test_ask_user_params_serialization() {
-        let params = AskUserParams {
-            question: "What is your name?".to_string(),
-            options: None,
-            questions: None,
-        };
+    fn test_ask_user_params_single_shape() {
+        // 单一形态：questions 数组（单问题 = 长度 1）
+        let params: AskUserParams = serde_json::from_str(
+            r#"{"questions":[{"question":"确认吗？","options":[{"label":"是","description":"继续"},{"label":"否"}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(params.questions.len(), 1);
+        assert_eq!(params.questions[0].question, "确认吗？");
+        assert_eq!(params.questions[0].options.as_ref().map(Vec::len), Some(2));
+
+        // 判别力：旧「单问题快捷形态」（顶层 question）现在必须失败——
+        // 该字段已移除，而 questions 为必填
+        assert!(serde_json::from_str::<AskUserParams>(r#"{"question":"旧形态"}"#).is_err());
+
+        // 序列化只产出 questions
         let json = serde_json::to_string(&params).unwrap();
-        assert!(json.contains("What is your name?"));
+        assert!(json.starts_with(r#"{"questions":["#), "{json}");
     }
 }
 

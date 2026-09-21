@@ -145,10 +145,14 @@ function handleChatCompletions(req, res, body) {
                     function: {
                       name: 'ask_user',
                       arguments: JSON.stringify({
-                        question: ASK_QUESTION,
-                        options: [
-                          { label: '蓝色', description: '冷静的色调' },
-                          { label: '绿色', description: '自然的色调' },
+                        questions: [
+                          {
+                            question: ASK_QUESTION,
+                            options: [
+                              { label: '蓝色', description: '冷静的色调' },
+                              { label: '绿色', description: '自然的色调' },
+                            ],
+                          },
                         ],
                       }),
                     },
@@ -192,10 +196,14 @@ function handleChatCompletions(req, res, body) {
             function: {
               name: 'ask_user',
               arguments: JSON.stringify({
-                question: ASK_QUESTION,
-                options: [
-                  { label: '蓝色', description: '冷静的色调' },
-                  { label: '绿色', description: '自然的色调' },
+                questions: [
+                  {
+                    question: ASK_QUESTION,
+                    options: [
+                      { label: '蓝色', description: '冷静的色调' },
+                      { label: '绿色', description: '自然的色调' },
+                    ],
+                  },
                 ],
               }),
             },

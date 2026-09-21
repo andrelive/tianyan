@@ -325,7 +325,7 @@ impl ToolRegistry {
         if subagent {
             return Ok(serde_json::json!({
                 "status": "delegated_agent_cannot_ask",
-                "question": params.question,
+                "questions": params.questions,
                 "hint": "子代理无法向用户追问。请基于已有上下文与工具结果尽量回答该问题；若确需用户输入，请给出当前可交付的最佳结果。",
             }));
         }

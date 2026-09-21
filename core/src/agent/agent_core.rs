@@ -1450,7 +1450,8 @@ mod tests {
                 call_type: ToolCallType::Function,
                 function: FunctionCall {
                     name: "ask_user".to_string(),
-                    arguments: format!(r#"{{"question": "{}"}}"#, question),
+                    // 单一形态：questions 数组（单个问题也放进数组）
+                    arguments: format!(r#"{{"questions":[{{"question": "{}"}}]}}"#, question),
                 },
             }],
         )

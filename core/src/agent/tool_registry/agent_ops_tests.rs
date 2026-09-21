@@ -437,12 +437,16 @@ async fn test_call_skill_missing_skill_errors() {
 async fn test_ask_user_returns_clarification() {
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
-        .execute_ask_user(r#"{"question":"Which file do you mean?"}"#, "s1", true)
+        .execute_ask_user(
+            r#"{"questions":[{"question":"Which file do you mean?"}]}"#,
+            "s1",
+            true,
+        )
         .await;
     // 子代理上下文：返回指导性结果（携带原问题），而非错误字符串
     let value = result.expect("子代理 ask_user 应返回指导性结果");
     assert_eq!(value["status"], "delegated_agent_cannot_ask");
-    assert_eq!(value["question"], "Which file do you mean?");
+    assert_eq!(value["questions"][0]["question"], "Which file do you mean?");
     assert!(
         value["hint"].as_str().unwrap().contains("无法向用户追问"),
         "应包含无法追问的提示"

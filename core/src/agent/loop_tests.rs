@@ -239,7 +239,8 @@ async fn test_run_ask_user_executes_as_sync_tool() {
                     call_type: ToolCallType::Function,
                     function: FunctionCall {
                         name: "ask_user".to_string(),
-                        arguments: r#"{"question": "你希望我怎么处理？"}"#.to_string(),
+                        arguments: r#"{"questions": [{"question": "你希望我怎么处理？"}]}"#
+                            .to_string(),
                     },
                 }],
             )))
