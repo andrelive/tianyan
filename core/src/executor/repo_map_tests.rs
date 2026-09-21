@@ -260,6 +260,18 @@ fn test_render_filters_shared_names() {
         name: "SessionStore".to_string(),
     });
     references.insert("SessionStore".to_string(), 6);
+    // 边界判别力（2026-09-21 阈值校准 6→8 的回归锚点）：定义次数恰好
+    // MAX_SHARED_DEFINITIONS − 1 的**模块**必须保留——`config` / `uri` / `error`
+    // 正是「7 处定义、被引用上千次」的核心模块，阈值 6 时曾被误剔。
+    for i in 1..MAX_SHARED_DEFINITIONS {
+        definitions.push(Definition {
+            path: format!("src/feature_{i}.rs"),
+            line: 1,
+            kind: SymbolKind::Module,
+            name: "config".to_string(),
+        });
+    }
+    references.insert("config".to_string(), 200);
     let outcome = ScanOutcome {
         files: 2,
         skipped: 0,
@@ -270,12 +282,20 @@ fn test_render_filters_shared_names() {
     let (map, entries, _) = render(&outcome, &RenderOptions::default());
     assert!(
         !map.contains("Function name"),
-        "定义 6 次的通用名应被过滤：{map}"
+        "定义达到阈值的通用名应被过滤：{map}"
     );
-    assert_eq!(entries, 1, "只应剩具体名：{map}");
+    assert_eq!(
+        entries,
+        1 + (MAX_SHARED_DEFINITIONS - 1),
+        "应剩具体名 + 阈值内的同名模块（每个定义各占一行）：{map}"
+    );
     assert!(
         map.contains("SessionStore(5)"),
         "使用次数 = 6 次出现 − 1 次定义 = 5：{map}"
+    );
+    assert!(
+        map.contains("Module config(193)"),
+        "定义次数 < 阈值的同名模块应保留（使用次数 = 200 − 7）：{map}"
     );
 }
 
