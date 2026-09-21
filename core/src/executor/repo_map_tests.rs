@@ -160,20 +160,21 @@ fn test_scan_counts_skipped_source_files_only() {
 
 #[test]
 fn test_render_sorts_by_external_references() {
+    // 夹具用「含下划线」的具体名：短名会被通用方法名规则过滤（见该规则）
     let mut outcome = outcome_of(&[
-        ("a.rs", 1, SymbolKind::Function, "hot"),
-        ("b.rs", 2, SymbolKind::Function, "cold"),
+        ("a.rs", 1, SymbolKind::Function, "hot_topic"),
+        ("b.rs", 2, SymbolKind::Function, "cold_topic"),
     ]);
-    // hot 被引用 5 次（含定义 → 输出 4），cold 只定义（输出 0）
-    outcome.references.insert("hot".to_string(), 6);
+    // hot_topic 被引用 5 次（含定义 → 输出 5），cold_topic 只定义（输出 0）
+    outcome.references.insert("hot_topic".to_string(), 6);
 
     let (map, entries, truncated) = render(&outcome, &RenderOptions::default());
     assert_eq!(entries, 2);
     assert!(!truncated);
     let lines: Vec<&str> = map.lines().collect();
-    assert!(lines[0].contains("hot"), "高引用应排最前：{map}");
+    assert!(lines[0].contains("hot_topic"), "高引用应排最前：{map}");
     assert!(lines[0].contains("(5)"), "外部引用数应为 6-1=5：{map}");
-    assert!(lines[1].contains("cold"));
+    assert!(lines[1].contains("cold_topic"));
     assert!(
         !lines[1].contains('('),
         "零引用不显示括号（省 token）：{map}"
@@ -204,10 +205,25 @@ fn test_render_focus_prioritizes_matching_symbols() {
 
 #[test]
 fn test_render_truncates_at_budget_and_marks() {
-    let entries: Vec<(&str, usize, SymbolKind, &str)> = (0..200)
-        .map(|i| ("very/long/path/file.rs", i + 1, SymbolKind::Function, "sym"))
-        .collect();
-    let outcome = outcome_of(&entries);
+    // 名字必须互不相同：同名会被「通用名过滤」剔除（见 MAX_SHARED_DEFINITIONS）
+    let mut definitions = Vec::new();
+    let mut references = HashMap::new();
+    for i in 0..200 {
+        let name = format!("filler_symbol_{i}");
+        definitions.push(Definition {
+            path: "very/long/path/file.rs".to_string(),
+            line: i + 1,
+            kind: SymbolKind::Function,
+            name: name.clone(),
+        });
+        references.insert(name, 1);
+    }
+    let outcome = ScanOutcome {
+        files: 1,
+        skipped: 0,
+        definitions,
+        references,
+    };
 
     let (map, rendered, truncated) = render(
         &outcome,
@@ -220,6 +236,144 @@ fn test_render_truncates_at_budget_and_marks() {
     assert!(rendered < 200, "已渲染条目应少于总数：{rendered}");
     assert!(map.contains("地图已截断"), "应含截断标记：{map}");
     assert!(map.len() < 1024, "标记后总量仍应接近预算：{}", map.len());
+}
+#[test]
+fn test_render_filters_shared_names() {
+    // 判别力：通用名（定义次数 ≥ MAX_SHARED_DEFINITIONS）被剔除。
+    // 实测依据：本仓库 `name` 出现 1099 次 / `path` 1102 次，曾把地图前 20 行
+    // 全部占满（全是互不相关的同名 getter/trait 方法）。
+    let mut definitions = Vec::new();
+    let mut references = HashMap::new();
+    for i in 1..=MAX_SHARED_DEFINITIONS {
+        definitions.push(Definition {
+            path: format!("src/mod_{i}.rs"),
+            line: 1,
+            kind: SymbolKind::Function,
+            name: "name".to_string(),
+        });
+    }
+    references.insert("name".to_string(), 999);
+    definitions.push(Definition {
+        path: "src/core.rs".to_string(),
+        line: 9,
+        kind: SymbolKind::Struct,
+        name: "SessionStore".to_string(),
+    });
+    references.insert("SessionStore".to_string(), 6);
+    let outcome = ScanOutcome {
+        files: 2,
+        skipped: 0,
+        definitions,
+        references,
+    };
+
+    let (map, entries, _) = render(&outcome, &RenderOptions::default());
+    assert!(
+        !map.contains("Function name"),
+        "定义 6 次的通用名应被过滤：{map}"
+    );
+    assert_eq!(entries, 1, "只应剩具体名：{map}");
+    assert!(
+        map.contains("SessionStore(5)"),
+        "使用次数 = 6 次出现 − 1 次定义 = 5：{map}"
+    );
+}
+
+#[test]
+fn test_render_prefers_types_over_functions() {
+    // 同使用次数下，类型/模块（架构构件）优先于函数——「摸清架构」关心构件。
+    let mut outcome = outcome_of(&[
+        ("a.rs", 1, SymbolKind::Function, "fn_symbol"),
+        ("b.rs", 2, SymbolKind::Struct, "struct_symbol"),
+    ]);
+    outcome.references.insert("fn_symbol".to_string(), 6);
+    outcome.references.insert("struct_symbol".to_string(), 6);
+
+    let (map, _, _) = render(&outcome, &RenderOptions::default());
+    let lines: Vec<&str> = map.lines().collect();
+    assert!(lines[0].contains("struct_symbol"), "类型应优先：{map}");
+}
+#[test]
+fn test_render_excludes_methods() {
+    // 判别力：impl 内方法（SymbolKind::Method）不进地图——地图回答「仓库由哪些
+    // 构件组成」，构件是模块/类型/trait，不是 getter。实测：session_id(963) /
+    // len(664) / text(584) / entry(540) / is_empty(474) 全是 impl 内方法，
+    // 却因调用量大占据前排。
+    let mut outcome = outcome_of(&[
+        ("a.rs", 3, SymbolKind::Method, "session_id"),
+        ("b.rs", 7, SymbolKind::Struct, "SessionStore"),
+    ]);
+    outcome.references.insert("session_id".to_string(), 964);
+    outcome.references.insert("SessionStore".to_string(), 6);
+
+    let (map, entries, _) = render(&outcome, &RenderOptions::default());
+    assert!(!map.contains("session_id"), "方法不应进地图：{map}");
+    assert_eq!(entries, 1, "只应剩构件：{map}");
+    assert!(map.contains("SessionStore"), "{map}");
+}
+
+#[test]
+fn test_render_filters_generic_method_names() {
+    // 判别力（第二级过滤）：`path` 类高频方法名——短、全小写、无下划线、多处定义
+    // （引用多来自标准库/依赖的方法调用）——被过滤；短名但属模块/类型的保留，
+    // 长名或含下划线的函数同样保留。
+    let mut definitions = Vec::new();
+    let mut references = HashMap::new();
+    for i in 1..=2 {
+        definitions.push(Definition {
+            path: format!("src/a{i}.rs"),
+            line: 1,
+            kind: SymbolKind::Function,
+            name: "path".to_string(),
+        });
+    }
+    references.insert("path".to_string(), 1100);
+    // 唯一但被标准库同名 API 刷分的短名顶层函数（`HashMap::entry`）
+    definitions.push(Definition {
+        path: "src/d.rs".to_string(),
+        line: 11,
+        kind: SymbolKind::Function,
+        name: "entry".to_string(),
+    });
+    references.insert("entry".to_string(), 540);
+    definitions.push(Definition {
+        path: "src/b.rs".to_string(),
+        line: 3,
+        kind: SymbolKind::Module,
+        name: "vfs".to_string(),
+    });
+    references.insert("vfs".to_string(), 700);
+    definitions.push(Definition {
+        path: "src/c.rs".to_string(),
+        line: 5,
+        kind: SymbolKind::Function,
+        name: "session_manager".to_string(),
+    });
+    references.insert("session_manager".to_string(), 150);
+    let outcome = ScanOutcome {
+        files: 3,
+        skipped: 0,
+        definitions,
+        references,
+    };
+
+    let (map, _, _) = render(&outcome, &RenderOptions::default());
+    assert!(
+        !map.contains("Function path"),
+        "高频通用方法名应被过滤：{map}"
+    );
+    assert!(
+        !map.contains("Function entry"),
+        "短名顶层函数（引用来自标准库同名 API）也应被过滤：{map}"
+    );
+    assert!(
+        map.contains("Module vfs"),
+        "短名但属模块：应保留（不受此规则影响）：{map}"
+    );
+    assert!(
+        map.contains("session_manager"),
+        "含下划线的长名：应保留：{map}"
+    );
 }
 
 #[test]

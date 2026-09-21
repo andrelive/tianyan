@@ -116,6 +116,8 @@ tree-sitter 基础设施**（`core/src/executor/symbols.rs` 已支持 Rust/TS(.t
 
 ## 7. `repo_map` 落地方案（已实施，工具数 33 → 34）
 
+> **实测（2026-09-21，本仓库）**：416 文件 / 5753 符号 / 冷扫描 ~2.7s、缓存命中 114ms、默认预算 4096 字节 → 80 条。首版排序被「通用名」淹没（前 20 行全是 `path(1100)` / `name(1099)` 这类 getter/trait 方法）；经三层修正（方法不进地图 / 通用名过滤 / 通用方法名过滤 + kind 权重 + 扣除定义处计数）后，顶层为 `Module content(787)` / `Module vfs(711)` / `Enum TianyanError(254)` / `Struct TianyanUri(233)` 等真实构件——即「按需 + 零常驻」路线确实能产出可用的架构地图。
+
 **工具形态**（待评审）：
 
 ```jsonc

@@ -17,6 +17,24 @@
 //!
 //! `{ root, files, symbols, truncated, cached, map }`——`map` 为骨架文本，
 //! 每行 `相对路径:行 种类 名称(外部引用数)`（引用数为 0 时省略括号）。
+//!
+//! ## 排序规则
+//!
+//! `kind 权重 × 真实使用次数`，其中使用次数 = 全局出现次数 − 定义次数；
+//! 类型与模块（Struct / Class / Trait / Interface / Enum / Module）权重 ×2，
+//! 函数与方法 ×1——「摸清架构」关心的是构件而非 getter。
+//! **通用名过滤**：定义次数 ≥ [`MAX_SHARED_DEFINITIONS`] 的名字从地图剔除
+//! （`name` / `path` / `new` / `impl` 回退名等）——它们是多个互不相关的同名
+//! 方法，不是「一个被频繁引用的符号」。
+//!
+//! 第二级过滤针对**高频方法名**（[`is_generic_method_name`]）：`path` / `len` /
+//! `text` / `state` 这类「短、全小写、无下划线、多处定义」的方法名，其引用大多
+//! 来自标准库/依赖类型的方法调用（`.path()` / `.len()`），不代表本仓库构件。
+//!
+//! **方法不进地图**：`impl` 块内的函数（[`SymbolKind::Method`]）一律排除——
+//! 地图回答「仓库由哪些构件组成」，构件是模块 / 类型 / trait，不是 getter。
+//! （依据实测：`session_id` / `len` / `text` / `entry` / `is_empty` 全是 impl
+//! 内方法，却因调用量大而占据前排。）
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -37,6 +55,17 @@ pub const MAX_FILES: usize = 2000;
 pub const MAX_FILE_BYTES: u64 = 512 * 1024;
 /// 输出条目上限（预算之外的二道保护）。
 pub const MAX_ENTRIES: usize = 600;
+/// 重名度阈值：一个名字的定义次数达到该值即视为**通用名**并从地图中过滤
+/// （`name` / `path` / `new` / `impl` 回退名等）。
+///
+/// 依据实测：本仓库 5751 个符号里 `name` 出现 1099 次、`path` 1102 次——
+/// 它们不是「被频繁引用的符号」，而是十几个互不相关的同名 getter/trait 方法；
+/// 不剔除会把地图顶层完全淹没（前 20 行全是 `path` / `name`）。
+pub const MAX_SHARED_DEFINITIONS: usize = 6;
+/// focus 命中权重（远大于任何真实使用次数，保证聚焦符号排到最前）。
+const FOCUS_BONUS: usize = 10_000;
+/// 通用方法名的最大字符数（配合全小写、无下划线判定）。
+const GENERIC_NAME_MAX_LEN: usize = 6;
 /// 缓存可容纳的仓库根数量（LRU 逐出）。
 const MAX_CACHED_ROOTS: usize = 4;
 
@@ -51,6 +80,22 @@ pub struct Definition {
     pub kind: SymbolKind,
     /// 符号名。
     pub name: String,
+}
+/// 「通用方法名」判定（第二级过滤，针对逃过重名阈值的高频方法名）。
+///
+/// 特征：**短**（≤ [`GENERIC_NAME_MAX_LEN`]）、**全小写 ASCII**、**无下划线**
+/// 的函数/方法名——这些名字的引用大多来自标准库或依赖类型的方法调用
+/// （`.path()` / `.len()` / `.entry()`），不代表本仓库的结构构件。
+///
+/// 依据实测：`path` 在本仓库仅定义 3 次却「被引用」1100 次；`len` 663 次 /
+/// `text` 584 次 / `entry` 540 次同源。类型与模块名不受此规则影响
+/// （`vfs`、`db`、`model` 这类短名只要是 Module/Struct/Enum 即保留）；
+/// 含下划线的具体命名（`session_manager`）与驼峰类型名同样保留。
+fn is_generic_method_name(kind: SymbolKind, name: &str) -> bool {
+    matches!(kind, SymbolKind::Function | SymbolKind::Method)
+        && name.len() <= GENERIC_NAME_MAX_LEN
+        && !name.contains('_')
+        && name.chars().all(|c| c.is_ascii_lowercase())
 }
 
 /// 一次扫描的产物（可缓存）。
@@ -169,40 +214,51 @@ pub fn render(outcome: &ScanOutcome, options: &RenderOptions) -> (String, usize,
         .filter(|f| !f.is_empty())
         .map(str::to_lowercase);
 
-    let mut scored: Vec<(usize, &Definition)> = outcome
+    // 名字 → 定义次数（重名度）：识别「通用名」，见 [`MAX_SHARED_DEFINITIONS`]。
+    let mut def_counts: HashMap<&str, usize> = HashMap::new();
+    for definition in &outcome.definitions {
+        *def_counts.entry(definition.name.as_str()).or_insert(0) += 1;
+    }
+
+    let mut scored: Vec<(usize, usize, &Definition)> = outcome
         .definitions
         .iter()
+        // 方法不是构件：地图只保留模块 / 类型 / trait / 顶层函数。
+        .filter(|definition| !matches!(definition.kind, SymbolKind::Method))
+        .filter(|definition| def_counts[definition.name.as_str()] < MAX_SHARED_DEFINITIONS)
+        .filter(|definition| !is_generic_method_name(definition.kind, &definition.name))
         .map(|definition| {
-            // 外部引用数：定义处自身出现一次，扣掉它更贴近「被使用次数」。
-            let refs = outcome
+            let def_count = def_counts[definition.name.as_str()];
+            // 真实「被使用次数」= 全局出现次数 − 所有定义处出现次数。
+            let uses = outcome
                 .references
                 .get(&definition.name)
                 .copied()
                 .unwrap_or(0)
-                .saturating_sub(1);
+                .saturating_sub(def_count);
             let focused = focus
                 .as_deref()
                 .map(|f| definition.name.to_lowercase().contains(f))
                 .unwrap_or(false);
-            // focus 命中权重远大于引用度：让「我要改 X 相关」的子图排到最前。
-            (refs + if focused { 1_000 } else { 0 }, definition)
+            let score = kind_weight(definition.kind) * uses + if focused { FOCUS_BONUS } else { 0 };
+            (score, uses, definition)
         })
         .collect();
     scored.sort_by(|a, b| {
         b.0.cmp(&a.0)
-            .then_with(|| a.1.path.cmp(&b.1.path))
-            .then_with(|| a.1.line.cmp(&b.1.line))
+            .then_with(|| a.2.path.cmp(&b.2.path))
+            .then_with(|| a.2.line.cmp(&b.2.line))
     });
 
     let mut text = String::new();
     let mut rendered = 0usize;
     let mut truncated = false;
-    for (_, definition) in scored {
+    for (_, uses, definition) in scored {
         if rendered >= MAX_ENTRIES {
             truncated = true;
             break;
         }
-        let line = format_line(definition, outcome);
+        let line = format_line(definition, uses);
         if text.len() + line.len() > budget {
             truncated = true;
             break;
@@ -223,15 +279,22 @@ pub fn render(outcome: &ScanOutcome, options: &RenderOptions) -> (String, usize,
     (text, rendered, truncated)
 }
 
-/// 单行骨架格式：`路径:行 种类 名称(外部引用数)`（引用数 0 时省略括号）。
-fn format_line(definition: &Definition, outcome: &ScanOutcome) -> String {
-    let refs = outcome
-        .references
-        .get(&definition.name)
-        .copied()
-        .unwrap_or(0)
-        .saturating_sub(1);
-    if refs == 0 {
+/// 符号种类权重：类型与模块（架构构件）×2，函数与方法 ×1。
+fn kind_weight(kind: SymbolKind) -> usize {
+    match kind {
+        SymbolKind::Module
+        | SymbolKind::Struct
+        | SymbolKind::Class
+        | SymbolKind::Trait
+        | SymbolKind::Interface
+        | SymbolKind::Enum => 2,
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Impl => 1,
+    }
+}
+
+/// 单行骨架格式：`路径:行 种类 名称(使用次数)`（使用次数 0 时省略括号）。
+fn format_line(definition: &Definition, uses: usize) -> String {
+    if uses == 0 {
         format!(
             "{}:{} {:?} {}",
             definition.path, definition.line, definition.kind, definition.name
@@ -239,7 +302,7 @@ fn format_line(definition: &Definition, outcome: &ScanOutcome) -> String {
     } else {
         format!(
             "{}:{} {:?} {}({})",
-            definition.path, definition.line, definition.kind, definition.name, refs
+            definition.path, definition.line, definition.kind, definition.name, uses
         )
     }
 }

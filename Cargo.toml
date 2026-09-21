@@ -134,6 +134,12 @@ opt-level = 3
 [profile.dev]
 opt-level = 0
 debug = 1
+# 关闭增量编译：`target/debug/incremental` 会随**每次编译会话**新增一个目录，
+# 且旧会话目录 cargo 永不回收——2026-09-21 实测累积 **1203 个会话目录 / 179 GB**，
+# 其中 74% 是 3 天前的死数据（曾导致 F: 盘写满、编译报 os error 112）。
+# 本项目工作流以「频繁全量编译 + 测试」为主（agent/CI 场景），增量收益小、
+# 磁盘膨胀大。需要增量调试时用环境变量临时覆盖：`$env:CARGO_INCREMENTAL = "1"`。
+incremental = false
 
 [profile.test]
 opt-level = 2

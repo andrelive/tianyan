@@ -8,7 +8,7 @@
 //!
 //! | 语言 | 节点类型 → 符号类型 |
 //! |------|---------------------|
-//! | rust | `function_item`→Function、`struct_item`→Struct、`enum_item`→Enum、`impl_item`→Impl、`trait_item`→Trait、`mod_item`→Module |
+//! | rust | `function_item`→Function（**位于 `impl` 块内→Method**）、`struct_item`→Struct、`enum_item`→Enum、`impl_item`→Impl、`trait_item`→Trait、`mod_item`→Module |
 //! | typescript / typescript-tsx | `function_declaration`→Function、`class_declaration`→Class、`interface_declaration`→Interface、`method_definition`→Method、`enum_declaration`→Enum |
 //! | javascript | `function_declaration`→Function、`class_declaration`→Class、`method_definition`→Method |
 //! | python | `class_definition`→Class、`function_definition`→Function（父节点为 `class_definition` 时→Method） |
@@ -34,7 +34,8 @@ use crate::common::error::TianyanError;
 pub enum SymbolKind {
     /// 函数（rust `function_item`、ts/js `function_declaration`、py `function_definition`、go `function_declaration`）。
     Function,
-    /// 类方法（ts/js `method_definition`；py `function_definition` 且父节点为 `class_definition`）。
+    /// 方法（ts/js `method_definition`；py `function_definition` 且父节点为
+    /// `class_definition`；rust `function_item` 且祖先链含 `impl_item`）。
     Method,
     /// 结构体（rust `struct_item`；go `struct_type` 的 `type_spec`）。
     Struct,
@@ -240,8 +241,14 @@ fn collect_symbols(node: tree_sitter::Node, source: &str, language: &str, out: &
 /// 按语言将节点类型映射为符号；不匹配的节点返回 `None`。
 fn classify(node: tree_sitter::Node, source: &str, language: &str) -> Option<Symbol> {
     let (kind, name) = match (language, node.kind()) {
+        // impl 块内的函数是**方法**（与 Python 的 class_definition 判定同型）：
+        // `repo_map` 据此把方法排除出架构地图（构件 ≠ 方法）。
         ("rust", "function_item") => (
-            SymbolKind::Function,
+            if has_ancestor_kind(node, "impl_item") {
+                SymbolKind::Method
+            } else {
+                SymbolKind::Function
+            },
             symbol_name(node, source, "<anonymous>"),
         ),
         ("rust", "struct_item") => (SymbolKind::Struct, symbol_name(node, source, "<anonymous>")),
