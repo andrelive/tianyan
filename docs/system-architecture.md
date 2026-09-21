@@ -180,7 +180,7 @@ pub struct StructuredMessage {
 
 知识库查询、技能调用等能力封装为 OpenAI function calling 兼容的工具，由 LLM 通过 `tool_call` 自主调用。
 
-当前 `ToolRegistry` 注册 33 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](architecture/tool-catalog.md)）：`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_vfs`、`call_skill`、`run_tests`、`discover_tests`、`ask_user`、`self_check`、`knowledge_ingest`、`web_search`、`web_fetch`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`task_status`、`task_cancel` 等。其中 `call_skill` 读 VFS 技能文档（方法论文档，无执行语义）；`delegate_to_agent` 走统一循环框架（ADR-030：子代理 = AgentLoop 实例 + `TurnPolicy` 委托策略，流式路径 + 消息落库即广播）；`web_search`/`web_fetch` 提供网页感知（后端 + SSRF 防护 + 缓存）。
+当前 `ToolRegistry` 注册 34 个内置工具（完整清单见自动生成的 [`tool-catalog.md`](architecture/tool-catalog.md)）：`read_file`、`write_file`、`apply_edit`、`apply_patch`、`execute_command`、`search_vfs`、`call_skill`、`run_tests`、`discover_tests`、`ask_user`、`self_check`、`knowledge_ingest`、`web_search`、`web_fetch`、`delegate_to_agent`、`glob`、`list_dir`、`symbol_outline`、`repo_map`、`task_status`、`task_cancel` 等。其中 `call_skill` 读 VFS 技能文档（方法论文档，无执行语义）；`delegate_to_agent` 走统一循环框架（ADR-030：子代理 = AgentLoop 实例 + `TurnPolicy` 委托策略，流式路径 + 消息落库即广播）；`web_search`/`web_fetch` 提供网页感知（后端 + SSRF 防护 + 缓存）。
 
 ### 3.4 决策 4: 上下文组装前缀匹配原则
 

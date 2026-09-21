@@ -23,6 +23,8 @@
 //! 仍返回已提取的符号并置 `errors: true`，不失败。符号超过 [`MAX_SYMBOLS`]
 //! 时截断并置 `truncated: true`。
 
+use std::collections::HashMap;
+
 use serde::Serialize;
 
 use crate::common::error::TianyanError;
@@ -116,6 +118,59 @@ pub fn language_from_extension(path: &str) -> Result<String, TianyanError> {
 /// - 解析完全失败 → 错误；语法错误 → 符号照常返回且 `errors: true`
 /// - 符号数超过 [`MAX_SYMBOLS`] → 截断且 `truncated: true`
 pub fn symbol_outline(source: &str, language: &str) -> Result<SymbolOutline, TianyanError> {
+    let tree = parse_tree(source, language)?;
+    let root = tree.root_node();
+    let mut symbols = Vec::new();
+    collect_symbols(root, source, language, &mut symbols);
+    let truncated = symbols.len() > MAX_SYMBOLS;
+    symbols.truncate(MAX_SYMBOLS);
+    Ok(SymbolOutline {
+        language: language.to_string(),
+        symbols,
+        truncated,
+        errors: root.has_error(),
+    })
+}
+
+/// 符号索引：一次解析同时产出**符号定义**与**标识符出现计数**。
+///
+/// 与 [`symbol_outline`] 共用同一解析与符号收集路径（单一解析器实现）；
+/// 额外统计标识符（`kind` 以 `identifier` 结尾且为叶节点，跳过注释与字符串
+/// 子树）——供 `repo_map` 的「引用度排序」使用。**注意这是文本级近似**：
+/// 不做名称解析（宏展开、重导出、动态分发不可见），故只用于排序权重，
+/// 不可当作精确引用关系。
+#[derive(Debug, Clone)]
+pub struct SymbolIndex {
+    /// 符号定义（可能被 [`MAX_SYMBOLS`] 截断）。
+    pub symbols: Vec<Symbol>,
+    /// 标识符 → 出现次数（跨文件聚合由调用方完成）。
+    pub identifiers: HashMap<String, usize>,
+    /// 是否因超过 [`MAX_SYMBOLS`] 截断符号定义。
+    pub truncated: bool,
+    /// 源码是否存在语法错误。
+    pub errors: bool,
+}
+
+/// 提取符号索引（定义 + 标识符计数），见 [`SymbolIndex`]。
+pub fn symbol_index(source: &str, language: &str) -> Result<SymbolIndex, TianyanError> {
+    let tree = parse_tree(source, language)?;
+    let root = tree.root_node();
+    let mut symbols = Vec::new();
+    collect_symbols(root, source, language, &mut symbols);
+    let truncated = symbols.len() > MAX_SYMBOLS;
+    symbols.truncate(MAX_SYMBOLS);
+    let mut identifiers = HashMap::new();
+    collect_identifiers(root, source, &mut identifiers);
+    Ok(SymbolIndex {
+        symbols,
+        identifiers,
+        truncated,
+        errors: root.has_error(),
+    })
+}
+
+/// 按语言标识取得 tree-sitter grammar（语言分派单点）。
+fn grammar_for(language: &str) -> Result<tree_sitter::Language, TianyanError> {
     let grammar: tree_sitter::Language = match language {
         "rust" => tree_sitter_rust::LANGUAGE.into(),
         "typescript" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -129,24 +184,46 @@ pub fn symbol_outline(source: &str, language: &str) -> Result<SymbolOutline, Tia
             )));
         }
     };
+    Ok(grammar)
+}
+
+/// 解析源码为语法树（解析器初始化单点）。
+fn parse_tree(source: &str, language: &str) -> Result<tree_sitter::Tree, TianyanError> {
+    let grammar = grammar_for(language)?;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&grammar).map_err(|e| {
         TianyanError::Custom(format!("executor: symbol_outline: 解析器初始化失败: {e}"))
     })?;
-    let tree = parser
+    parser
         .parse(source, None)
-        .ok_or_else(|| TianyanError::Custom("executor: symbol_outline: 解析失败".to_string()))?;
-    let root = tree.root_node();
-    let mut symbols = Vec::new();
-    collect_symbols(root, source, language, &mut symbols);
-    let truncated = symbols.len() > MAX_SYMBOLS;
-    symbols.truncate(MAX_SYMBOLS);
-    Ok(SymbolOutline {
-        language: language.to_string(),
-        symbols,
-        truncated,
-        errors: root.has_error(),
-    })
+        .ok_or_else(|| TianyanError::Custom("executor: symbol_outline: 解析失败".to_string()))
+}
+
+/// 递归统计标识符出现次数。
+///
+/// 跳过 `comment` / `string` 子树（注释与字符串里的同名内容不是引用，
+/// 计进去会污染排序）；只取**叶**标识符节点（`kind` 以 `identifier` 结尾
+/// 且无子节点）——`scoped_identifier`（如 Rust 的 `a::b`）含子节点，
+/// 整体文本不是单个标识符，交由子节点分别计数。
+fn collect_identifiers(node: tree_sitter::Node, source: &str, out: &mut HashMap<String, usize>) {
+    let kind = node.kind();
+    if kind.contains("comment") || kind.contains("string") {
+        return;
+    }
+    if kind.ends_with("identifier") {
+        if node.child_count() == 0 {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
+                if !text.is_empty() {
+                    *out.entry(text.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_identifiers(child, source, out);
+    }
 }
 
 /// 递归遍历所有节点，收集匹配的符号（含嵌套，如 mod 内的 struct）。

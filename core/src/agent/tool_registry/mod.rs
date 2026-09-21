@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
 use crate::executor::approval::{ApprovalDecision, ApprovalWorkflow};
+use crate::executor::repo_map::RepoMapCache;
 use crate::executor::web::WebSearchClient;
 use crate::executor::Action;
 use crate::executor::SecurityPolicy;
@@ -39,6 +40,8 @@ mod knowledge_ops;
 mod observability;
 /// 工具执行管线：pre-execute 监听器 / 单调守卫 / post-execute 监听器（A1/A4）。
 mod pipeline;
+/// 仓库结构地图工具执行器（repo_map）。
+mod repo_map_ops;
 /// 符号大纲工具执行器（symbol_outline）。
 mod symbol_ops;
 /// 测试发现工具执行器（discover_tests）。
@@ -191,6 +194,8 @@ pub struct ToolRegistry {
     pub(crate) observability: observability::ToolObservabilityListener,
     /// Web 搜索/抓取客户端（web_search / web_fetch 工具依赖）。
     pub(crate) web_client: Option<Arc<WebSearchClient>>,
+    /// 仓库结构地图缓存（repo_map 工具：按仓库根缓存扫描产物，内存 LRU）。
+    pub(crate) repo_map_cache: Arc<RepoMapCache>,
     /// 后台任务管理器（delegate_to_agent(background) / task_status / task_cancel）。
     pub(crate) background_tasks: Arc<crate::agent::background::BackgroundTaskManager>,
     /// 后台命令管理器（execute_command(background)；查询/终止经统一 task_status / task_cancel）。
@@ -260,6 +265,7 @@ impl ToolRegistry {
             verification_gate: None,
             observability: observability::ToolObservabilityListener::default(),
             web_client: None,
+            repo_map_cache: Arc::new(RepoMapCache::new()),
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
             command_tasks: Arc::new(crate::executor::CommandManager::new(None)),
             command_logs_dir: None,
@@ -977,6 +983,7 @@ impl ToolRegistry {
             "glob" => self.execute_glob(arguments, session_id).await,
             "list_dir" => self.execute_list_dir(arguments, session_id).await,
             "symbol_outline" => self.execute_symbol_outline(arguments).await,
+            "repo_map" => self.execute_repo_map(arguments, session_id).await,
             name => match self
                 .dynamic_tools
                 .lock()

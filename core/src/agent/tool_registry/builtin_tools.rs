@@ -11,8 +11,8 @@ use crate::agent::tool_params::{
     ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
     DelegationStatsParams, DiscoverTestsParams, ExecuteCommandParams, ExecutionDetailParams,
     ExecutionStatsParams, GlobParams, KnowledgeIngestParams, ListDirParams, ReadFileParams,
-    RunProjectTestsParams, RunTestsParams, SearchCodeParams, SearchVfsParams, SelfCheckParams,
-    SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
+    RepoMapParams, RunProjectTestsParams, RunTestsParams, SearchCodeParams, SearchVfsParams,
+    SelfCheckParams, SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
     TaskStatusParams, VerifyBuildParams, VfsListParams, VfsReadParams, WebFetchParams,
     WebSearchParams, WriteFileParams,
 };
@@ -268,6 +268,12 @@ fn def_symbol_outline(name: &'static str) -> ToolDefinition {
         "用 tree-sitter 提取源文件的结构大纲（函数/结构体/类/impl/接口/枚举）。支持 Rust、TypeScript/JavaScript、Python、Go。",
     ))
 }
+fn def_repo_map(name: &'static str) -> ToolDefinition {
+    ToolDefinition::function(FunctionDefinition::from_schema::<RepoMapParams>(
+        name,
+        "生成仓库结构地图：跨文件符号骨架，按「被引用次数」排序——一次调用替代多轮 grep 试探。用途：摸清代码布局与模块划分、定位某功能实现位置、重构前侦察影响面与耦合热点。每行 `路径:行 种类 名称(外部引用数)`；用 focus 聚焦关键字相关子图，用 path 限定子树。**引用度是文本级近似**（不做名称解析：宏展开/重导出/动态分发不可见）——要精确影响面，改完跑 verify_build（编译器给精确清单）。",
+    ))
+}
 
 /// 内置工具元数据表（单一事实源；顺序即注册顺序）。
 pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
@@ -337,4 +343,5 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
     tool("glob", def_glob, ToolPresentation::Search),
     tool("list_dir", def_list_dir, ToolPresentation::Search),
     tool("symbol_outline", def_symbol_outline, ToolPresentation::Code),
+    tool("repo_map", def_repo_map, ToolPresentation::Code),
 ];

@@ -25,6 +25,8 @@ pub mod fs;
 pub mod patch;
 /// 项目格式探测注册表（verify_build / discover_tests 共享）。
 pub mod project;
+/// 仓库结构地图（跨文件符号骨架 + 引用度排序，按需调用）。
+pub mod repo_map;
 /// 代码搜索执行器（内嵌引擎：输出守卫 + 分页语义）。
 pub mod search;
 /// 内嵌搜索引擎实现（ignore 遍历 + regex 匹配，替代外部 ripgrep）。

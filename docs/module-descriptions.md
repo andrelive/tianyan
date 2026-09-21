@@ -28,7 +28,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 | `common` | 通用类型（按领域拆分）、错误处理、日志配置、token 估算 | error.rs, logging.rs, token_estimator.rs, types/ | ✅ 已集成 |
 | `config` | 配置管理（TOML + 环境变量 + 向导） | mod.rs, wizard.rs, validation.rs, agent.rs, model.rs | ✅ 已集成 |
 | `context` | 上下文工程（检索 + 压缩 + 管线 + 组装） | pipeline.rs, retrieval/, compression/, assembler.rs | ✅ 已集成 |
-| `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、测试发现） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
+| `executor` | 工具执行支撑（Action、审批工作流、LLM-as-Judge、验证门控）+ 编程助手执行原语（内容匹配编辑、patch、文件浏览、搜索、符号、仓库地图、测试发现） | actions.rs, security.rs, command.rs, output_parse.rs, approval/, types.rs, judge.rs, verification.rs, truncate.rs, edit.rs, patch.rs, fs.rs, search.rs, symbols.rs, project.rs, test_discovery.rs | ✅ 正常使用 |
 | `snapshot` | 工作区快照（回退/撤销回退；gzip 压缩 + GC + similar diff） | mod.rs | ✅ 正常使用 |
 | `knowledge` | 知识库管理（解析、图像、导入） | parser.rs, image/, types.rs, ingestor/ | ✅ 已集成（Server 层通过 KnowledgeIngestor 真实处理导入与检索） |
 | `memory` | 长期记忆提取 | extractor.rs | ✅ 已集成 |
@@ -165,7 +165,8 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `executor/patch.rs` — unified diff（`parse_patch` 解析 `*** Update File:` 信封 / `apply_patch_to_content` similar fuzzy seek / `apply_patch_action` 多文件原子，`FUZZY_RATIO_THRESHOLD = 0.75`）
 - `executor/fs.rs` — 文件浏览（`execute_glob` rg --files + 回退 walk、mtime 排序；`execute_list_dir` 目录优先 + 分页；`MAX_GLOB_RESULTS = 200`）
 - `executor/search.rs` — ripgrep 封装（`SearchOptions` / `OutputMode`（files_with_matches 默认）/ `execute_search_code`；64KB 记录拒绝、100 submatch 上限、2000 字符行截断、`.git` 排除、offset/head_limit 分页、无效正则报"正则无效"）
-- `executor/symbols.rs` — tree-sitter 多语言符号大纲（`symbol_outline` / `SymbolKind` / `language_from_extension`，rust/ts/tsx/js/py/go，`MAX_SYMBOLS = 500`，解析错误置 errors 标志）
+- `executor/symbols.rs` — tree-sitter 多语言符号大纲（`symbol_outline` / `symbol_index`（定义 + 标识符计数，供 repo_map 复用）/ `SymbolKind` / `language_from_extension`，rust/ts/tsx/js/py/go，`MAX_SYMBOLS = 500`，解析错误置 errors 标志）
+- `executor/repo_map.rs` — 仓库结构地图（`scan` 跨文件符号采集 + `render` 引用度排序/`focus` 加权/预算截断 + `RepoMapCache` 内存 LRU 指纹缓存；引用度为文本级近似，注释与字符串不计入；遍历规则与 grep 同口径，`MAX_FILES = 2000` / `MAX_FILE_BYTES = 512KB`）
 - `executor/project.rs` — 项目探测（`probe_project` walk-up 标记检测：Cargo.toml > pyproject.toml > tsconfig.json；`ProjectFormat` / `verification_command`）
 - `executor/test_discovery.rs` — 测试发现与结果解析（`discover_tests` 解析 cargo/pytest/vitest 列表，上限 500；`parse_test_output` 失败 ≤20 + 回溯头 30/尾 20 行、按文件分组；`resolve_test_command` / `run_tests_action`）
 - `executor/web.rs` — Web 工具执行器（`WebSearchClient`：web_search 结构化结果 + web_fetch 可读正文提取；DuckDuckGo HTML / SearXNG JSON 双后端；SSRF 防护 `validate_public_url`（与 http_request 同策略）+ 响应大小上限 + TTL 缓存）

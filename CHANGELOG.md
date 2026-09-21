@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **新增 `repo_map` 工具——仓库结构地图（引用度排序；工具数 33 → 34）**：跨文件 tree-sitter 符号骨架，按「被引用次数」排序，**一次调用替代多轮 grep 试探**（模型按需自取，与 `symbol_outline` 同型）。每行 `路径:行 种类 名称(外部引用数)`；`focus` 聚焦关键字子图、`path` 限定子树、`max_tokens` 控预算（缺省 1000，硬上限 4000）、`include_tests` 缺省排除测试文件。**零外部依赖、零常驻进程**（与已移除的 LSP 路线相反）。**引用度是文本级近似**（不做名称解析：宏展开/重导出/动态分发不可见；注释与字符串不计入——靠 tree-sitter 语法节点过滤），工具描述已显式声明「精确影响面请改完跑 `verify_build`」。实现：`executor/repo_map.rs`（扫描 + 聚合 + 渲染 + 内存 LRU 指纹缓存）+ `symbols::symbol_index`（一次解析同时产出定义与标识符计数，避免重复解析）；缓存按仓库根 + `(路径, mtime 毫秒, size)` 集合哈希失效，只缓内存（运行时结构缓存，不落盘、不进 VFS）。测试 20 个（判别力覆盖：注释/字符串不计引用、测试文件默认排除、focus 压过引用度、预算截断、缓存命中与三类失效、沙箱拒绝、缺省归属会话工作目录）
 - **独立 server 端口可配（`TIANYAN_PORT`）**：`server/src/main.rs` 由 `ServerConfig::default()` 改为 `ServerConfig::from_env()`——不设该变量时行为完全不变（默认 `127.0.0.1:3000`），设了则覆盖端口（非法值警告并回退默认）。动机：本地 3000 常被运行中的桌面应用占用，GUI e2e 需要一个不与之冲突的端口；顺带让独立 `tianyan-server` 的用户可换端口。解析抽为纯函数 `from_port_str` 并附判别力测试（合法 / 带空白 / 非法 / 空串 / 越界 / 缺失）
 
 ### Changed

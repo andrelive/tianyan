@@ -432,6 +432,25 @@ pub struct SymbolOutlineParams {
     /// 源码文件路径。
     pub path: String,
 }
+/// 仓库结构地图参数（repo_map 工具）。
+///
+/// 引用度为**文本级近似**（不做名称解析：宏展开、重导出、动态分发不可见），
+/// 仅用于排序权重；精确影响面靠编译器（改完跑 `verify_build`）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RepoMapParams {
+    /// 扫描根目录（相对路径按会话工作目录解析；缺省会话工作目录）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// 关键字：名称命中的符号优先排序（如 "session"——聚焦某模块的子图）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
+    /// 骨架 token 预算（缺省 1000，上限 4000；约 4 字符/token）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+    /// 是否包含测试文件（缺省 false：测试代码不进地图）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_tests: Option<bool>,
+}
 
 /// 发现测试参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
