@@ -9374,6 +9374,7 @@ dependencies = [
  "criterion",
  "dirs 6.0.0",
  "reqwest 0.12.28",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "similar",

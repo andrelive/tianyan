@@ -17,7 +17,12 @@ use tianyan::model::types::{FunctionDefinition, ToolDefinition};
 use tianyan::TianyanError;
 
 /// goal 工具参数。
-#[derive(Debug, Deserialize)]
+///
+/// 单一形态：`status` **只表示 update 的设置值**。此前它兼作 list 过滤
+/// （同一字段两义：update 设置 / list 筛选）——已去掉 list 的过滤分支以消除
+/// 歧义（目标数量少，模型可直接从返回列表里筛）。类型化后非法状态由 serde
+/// 直接拒绝（不再靠运行时字符串解析）。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GoalArgs {
     /// 操作：create | update | list | delete。
     pub operation: String,
@@ -27,8 +32,8 @@ pub struct GoalArgs {
     pub title: Option<String>,
     /// 详细描述（可选）。
     pub description: Option<String>,
-    /// 状态（update 可选：active | completed | archived）。
-    pub status: Option<String>,
+    /// 新状态（update 可选）。
+    pub status: Option<GoalStatus>,
 }
 
 /// goal 动态工具（ADR-003 组件工具化：server 层适配 core 动态工具 trait）。
@@ -50,20 +55,10 @@ impl DynamicToolExecutor for GoalTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::function(FunctionDefinition::new(
+        // schema 由 struct 派生（from_schema）——单一事实源
+        ToolDefinition::function(FunctionDefinition::from_schema::<GoalArgs>(
             "goal",
-            "管理当前会话的长期目标（会话绑定，仅本会话可见）：创建/更新/列出/删除目标。目标进度按关联待办完成比例自动计算。operation: create（title 必填）/ update（id + 可选字段）/ list（可选 status 过滤）/ delete（id）。",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "operation": { "type": "string", "enum": ["create", "update", "list", "delete"], "description": "操作类型" },
-                    "id": { "type": "string", "description": "目标 ID（update/delete 必填）" },
-                    "title": { "type": "string", "description": "标题（create 必填）" },
-                    "description": { "type": "string", "description": "详细描述" },
-                    "status": { "type": "string", "enum": ["active", "completed", "archived"], "description": "状态（update 可选）" }
-                },
-                "required": ["operation"]
-            }),
+            "管理当前会话的长期目标（会话绑定，仅本会话可见）：创建/更新/列出/删除目标。目标进度按关联待办完成比例自动计算。operation: create（title 必填）/ update（id + 可选字段，status 为设置的新状态）/ list（列出本会话全部目标）/ delete（id）。",
         ))
     }
 
@@ -92,12 +87,8 @@ impl DynamicToolExecutor for GoalTool {
                     .ok_or_else(|| TianyanError::invalid_input("tool: goal update 需要 id"))?;
                 // 归属校验：只允许操作本会话的目标
                 self.owned_goal(session_id, &id).await?;
-                let status = match args.status.as_deref() {
-                    Some(s) => Some(GoalStatus::parse(s).ok_or_else(|| {
-                        TianyanError::invalid_input(format!("tool: goal 状态无效：{s}"))
-                    })?),
-                    None => None,
-                };
+                // 已是 Option<GoalStatus>（serde 校验；非法值在参数解析阶段被拒）
+                let status = args.status;
                 let updated = self
                     .store
                     .update(&id, args.title, args.description, status, None)
@@ -113,14 +104,11 @@ impl DynamicToolExecutor for GoalTool {
                 }
             }
             "list" => {
-                // 只列出本会话的目标（会话绑定数据源）
+                // 只列出本会话的目标（会话绑定数据源）；`status` 不再兼作过滤
+                // （一词两用已消除：它只表示 update 的设置值）
                 let goals = self.store.list_by_session(session_id).await;
                 let filtered: Vec<_> = goals
                     .into_iter()
-                    .filter(|g| match args.status.as_deref() {
-                        Some(s) => format!("{:?}", g.status).to_lowercase() == s,
-                        None => true,
-                    })
                     .map(|g| {
                         serde_json::json!({
                             "id": g.id,
@@ -166,5 +154,65 @@ impl GoalTool {
                 "tool: goal 不存在或不属于当前会话：{id}"
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool() -> (GoalTool, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        (GoalTool::new(Arc::new(GoalStore::new(dir.path()))), dir)
+    }
+
+    #[tokio::test]
+    async fn test_list_no_longer_filters_by_status() {
+        // status 一词两用已消除：它只表示 update 的设置值，list 不再按其过滤
+        let (t, _dir) = tool();
+        t.execute("s-1", "{ \"operation\": \"create\", \"title\": \"目标A\" }")
+            .await
+            .unwrap();
+        let listed = t
+            .execute(
+                "s-1",
+                "{ \"operation\": \"list\", \"status\": \"completed\" }",
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed["count"], 1, "list 不再按 status 过滤");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_status_rejected_by_serde() {
+        // 类型化（GoalStatus）后非法状态在参数解析阶段就被拒（不再靠运行时解析）
+        let (t, _dir) = tool();
+        let err = t
+            .execute(
+                "s-1",
+                "{ \"operation\": \"update\", \"id\": \"x\", \"status\": \"done\" }",
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("参数无效"), "{err}");
+    }
+
+    #[test]
+    fn test_definition_schema_derives_from_struct() {
+        // schema 由 struct 派生（from_schema → schemars::schema_for!）：
+        // 顶层结构 + 嵌套类型的 definitions。
+        let (t, _dir) = tool();
+        let def = t.definition();
+        let params = &def.function.parameters;
+        assert_eq!(params["type"], "object");
+        assert_eq!(params["required"], serde_json::json!(["operation"]));
+        // status 的枚举取值（active/completed/archived）来自 GoalStatus 的
+        // JsonSchema 派生——schemars 把嵌套类型放进 definitions、属性用 $ref 引用
+        let all = params.to_string();
+        assert!(all.contains("GoalStatus"), "{all}");
+        assert!(
+            all.contains("active") && all.contains("archived"),
+            "枚举取值应来自 GoalStatus 派生：{all}"
+        );
     }
 }

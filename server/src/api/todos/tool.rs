@@ -27,7 +27,7 @@ use tianyan::todos::{TodoDraft, TodoItem, TodoPatch, TodoPriority, TodoStatus, T
 use tianyan::TianyanError;
 
 /// 批量创建的单条输入。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TodoDraftArgs {
     /// 标题（必填，非空）。
     pub title: String,
@@ -36,10 +36,10 @@ pub struct TodoDraftArgs {
     pub description: Option<String>,
     /// 初始状态（缺省 pending）。
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<TodoStatus>,
     /// 优先级（缺省 medium）。
     #[serde(default)]
-    pub priority: Option<String>,
+    pub priority: Option<TodoPriority>,
     /// 关联目标 id。
     #[serde(default)]
     pub goal_id: Option<String>,
@@ -49,7 +49,7 @@ pub struct TodoDraftArgs {
 }
 
 /// 批量更新的单条输入。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TodoUpdateArgs {
     /// 目标待办 id（必填）。
     pub id: String,
@@ -61,10 +61,10 @@ pub struct TodoUpdateArgs {
     pub description: Option<String>,
     /// 新状态（pending | in_progress | completed）。
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<TodoStatus>,
     /// 新优先级。
     #[serde(default)]
-    pub priority: Option<String>,
+    pub priority: Option<TodoPriority>,
     /// 新关联目标 id（空串清除）。
     #[serde(default)]
     pub goal_id: Option<String>,
@@ -79,7 +79,7 @@ pub struct TodoUpdateArgs {
 /// （长度 1）。此前 update/delete 另有「单条快捷形态」（顶层 `id` + 各字段），
 /// 与数组形态表达同一意图 → 同一份意图两套 schema，是模型参数生成的抖动源
 /// （与已收敛的 `ask_user` 同型问题）。create 早已收敛（只接受 `todos`）。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TodoArgs {
     /// 操作：create | update | list | delete | close。
     pub operation: String,
@@ -94,7 +94,7 @@ pub struct TodoArgs {
     pub ids: Option<Vec<String>>,
     /// list 过滤：只返回该状态的条目（可选）。
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<TodoStatus>,
     /// list 过滤：只返回关联到该目标的条目（可选）。
     #[serde(default)]
     pub goal_id: Option<String>,
@@ -109,16 +109,6 @@ impl TodoTool {
     /// 绑定待办存储。
     pub fn new(store: Arc<TodoStore>) -> Self {
         Self { store }
-    }
-
-    fn parse_status(s: &str) -> Result<TodoStatus> {
-        TodoStatus::parse(s)
-            .ok_or_else(|| TianyanError::invalid_input(format!("tool: todo 状态无效：{s}")))
-    }
-
-    fn parse_priority(s: &str) -> Result<TodoPriority> {
-        TodoPriority::parse(s)
-            .ok_or_else(|| TianyanError::invalid_input(format!("tool: todo 优先级无效：{s}")))
     }
 
     fn todo_json(i: &TodoItem) -> serde_json::Value {
@@ -142,56 +132,12 @@ impl DynamicToolExecutor for TodoTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::function(FunctionDefinition::new(
+        // schema 由 struct 派生（from_schema）——单一事实源：字段/枚举/必填随
+        // TodoArgs 自动同步。手写 json! 曾与 struct 漂移（schema 把 status/goal_id
+        // 描述为「update 单条形态」而实现里它们是 list 过滤——功能被藏）。
+        ToolDefinition::function(FunctionDefinition::from_schema::<TodoArgs>(
             "todo",
             "管理当前会话的待办清单（会话绑定，仅本会话可见；同一时期只保留一批同源待办）。**每种操作只有一种写法**——要改/删单条也放进数组（长度 1）：create 传 `todos` 数组 = 当前完整计划（**整表替换**——未包含的旧条目（含未完成项）即被移除；想保留的条目必须包含在新列表中）；update 传 `updates` 数组（按 id 批量合并状态）；delete 传 `ids` 数组；list 查看当前清单（可用 status / goal_id 过滤）；close 清空当前批全部待办（用户目标变更、现有待办不再反映当前意图时使用，即使有未完成项）。开始多步工作先写入整份清单；推进/完成用 update（比全量重发省）；计划增删改时重发完整列表。子任务挂靠：先创建任务，再用 update 的 parent_id 挂靠（整表替换中 parent_id 不可用）。完成项默认划线保留展示，是否清理由你自行决定。",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "operation": { "type": "string", "enum": ["create", "update", "list", "delete", "close"], "description": "操作类型" },
-                    "todos": {
-                        "type": "array",
-                        "description": "整表替换：当前完整计划（未包含的旧条目即被移除）",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "title": { "type": "string", "description": "标题（必填）" },
-                                "description": { "type": "string", "description": "详细描述" },
-                                "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "初始状态（缺省 pending）" },
-                                "priority": { "type": "string", "enum": ["low", "medium", "high"], "description": "优先级（缺省 medium）" },
-                                "goal_id": { "type": "string", "description": "关联目标 id" },
-                                "parent_id": { "type": "string", "description": "父待办 id（整表替换下不可用；建后经 update 挂靠）" }
-                            },
-                            "required": ["title"]
-                        }
-                    },
-                    "updates": {
-                        "type": "array",
-                        "description": "更新列表（update 必填；单条更新也放进数组，长度 1）",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": { "type": "string", "description": "待办 ID（必填）" },
-                                "title": { "type": "string", "description": "新标题" },
-                                "description": { "type": "string", "description": "新描述" },
-                                "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "新状态" },
-                                "priority": { "type": "string", "enum": ["low", "medium", "high"], "description": "新优先级" },
-                                "goal_id": { "type": "string", "description": "新关联目标 id（空串清除）" },
-                                "parent_id": { "type": "string", "description": "新父待办 id（空串清除）" }
-                            },
-                            "required": ["id"]
-                        }
-                    },
-                    "ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "删除列表（delete 必填；单条删除也放进数组，长度 1）"
-                    },
-                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "list 过滤：只返回该状态的条目（可选）" },
-                    "goal_id": { "type": "string", "description": "list 过滤：只返回关联到该目标的条目（可选）" }
-                },
-                "required": ["operation"]
-            }),
         ))
     }
 
@@ -224,19 +170,11 @@ impl TodoTool {
         };
         let mut drafts_parsed = Vec::with_capacity(drafts.len());
         for d in drafts {
-            let status = match d.status.as_deref() {
-                Some(s) => Some(Self::parse_status(s)?),
-                None => None,
-            };
-            let priority = match d.priority.as_deref() {
-                Some(p) => Some(Self::parse_priority(p)?),
-                None => None,
-            };
             drafts_parsed.push(TodoDraft {
                 title: d.title,
                 description: d.description,
-                status,
-                priority,
+                status: d.status,
+                priority: d.priority,
                 goal_id: d.goal_id,
                 parent_id: d.parent_id,
             });
@@ -299,20 +237,12 @@ impl TodoTool {
         }
         let mut patches = Vec::with_capacity(updates.len());
         for u in updates {
-            let status = match u.status.as_deref() {
-                Some(s) => Some(Self::parse_status(s)?),
-                None => None,
-            };
-            let priority = match u.priority.as_deref() {
-                Some(p) => Some(Self::parse_priority(p)?),
-                None => None,
-            };
             patches.push(TodoPatch {
                 id: u.id,
                 title: u.title,
                 description: u.description,
-                status,
-                priority,
+                status: u.status,
+                priority: u.priority,
                 goal_id: u.goal_id,
                 parent_id: u.parent_id,
                 due_at: None,
@@ -332,8 +262,8 @@ impl TodoTool {
         let filtered: Vec<_> = items
             .into_iter()
             .filter(|i| {
-                let status_ok = match args.status.as_deref() {
-                    Some(s) => TodoStatus::parse(s) == Some(i.status),
+                let status_ok = match args.status {
+                    Some(s) => s == i.status,
                     None => true,
                 };
                 let goal_ok = match args.goal_id.as_deref() {
@@ -706,5 +636,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(all["count"], 2, "无过滤应返回全部");
+    }
+
+    #[test]
+    fn test_definition_schema_derives_from_struct() {
+        // schema 由 struct 派生（from_schema → schemars::schema_for!）：顶层
+        // required 只有 operation；嵌套类型（TodoDraftArgs/TodoUpdateArgs、
+        // TodoStatus/TodoPriority）经 definitions + $ref 表达——不再手写 json!
+        let (tool, _dir) = tool();
+        let def = tool.definition();
+        let params = &def.function.parameters;
+        assert_eq!(params["required"], serde_json::json!(["operation"]));
+        let all = params.to_string();
+        for needle in [
+            "TodoDraftArgs",
+            "TodoUpdateArgs",
+            "TodoStatus",
+            "TodoPriority",
+        ] {
+            assert!(all.contains(needle), "schema 缺少 {needle}：{all}");
+        }
+        // 已删的单条快捷字段不得再出现在 schema 里（形态唯一）
+        assert!(
+            params["properties"].get("id").is_none(),
+            "旧单条字段 id 不应存在：{all}"
+        );
+        assert!(
+            params["properties"].get("priority").is_none(),
+            "旧单条字段 priority 不应存在：{all}"
+        );
     }
 }

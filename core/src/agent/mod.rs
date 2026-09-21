@@ -8,6 +8,8 @@ pub const DEFAULT_SOUL: &str = include_str!("default_soul.md");
 
 /// 会话状态管理。
 pub mod session_state;
+/// 工具目录渲染与 freshness 校验（生成式文档单点）。
+pub mod tool_catalog;
 pub mod working_set;
 
 mod agent_core;

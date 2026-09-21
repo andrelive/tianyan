@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 use crate::common::error::{Result, TianyanError};
 
 /// 待办状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     /// 未开始。
@@ -41,7 +41,7 @@ impl TodoStatus {
 }
 
 /// 优先级。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TodoPriority {
     /// 低。

@@ -21,7 +21,9 @@ $catalogPath = Join-Path $repoRoot "docs\architecture\tool-catalog.md"
 
 if ($Check) {
     Write-Host ">>>>> 工具目录 freshness 校验..."
-    cargo run -q -p tianyan-core --example tool_catalog -- --check
+    # 权威生成器在 server 侧：只有它能同时装配 core 内置工具与组件工具
+    # （todo/goal/schedule_task）——生成范围覆盖全部对模型可见的工具。
+    cargo run -q -p tianyan-server --example tool_catalog -- --check
     if ($LASTEXITCODE -ne 0) {
         Write-Host "工具目录已漂移！请运行 .\scripts\gen-tool-catalog.ps1 重新生成" -ForegroundColor Red
         exit 1
@@ -32,7 +34,7 @@ if ($Check) {
     # 写入必须 UTF-8 **无 BOM**：PowerShell 5.1 的 `Set-Content -Encoding UTF8`
     # 会写 BOM，与 example 输出（无 BOM）不一致 → `-Check` 恒报漂移
     # （0.3.15 排查）；行尾保持 LF（example 比较时会归一化 CRLF）。
-    $generated = cargo run -q -p tianyan-core --example tool_catalog
+    $generated = cargo run -q -p tianyan-server --example tool_catalog
     if ($LASTEXITCODE -ne 0) { exit 1 }
     $text = ($generated -join "`n") + "`n"
     [System.IO.File]::WriteAllText(

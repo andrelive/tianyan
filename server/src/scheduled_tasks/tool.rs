@@ -22,7 +22,7 @@ use tianyan::TianyanError;
 use crate::scheduled_tasks::types::{CreateScheduledTaskRequest, ScheduledAgentTask};
 
 /// schedule_task 工具参数。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ScheduleTaskArgs {
     /// 任务显示名称。
     pub name: String,
@@ -66,19 +66,10 @@ impl DynamicToolExecutor for ScheduleTaskTool {
     }
 
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::function(FunctionDefinition::new(
+        // schema 由 struct 派生（from_schema）——单一事实源
+        ToolDefinition::function(FunctionDefinition::from_schema::<ScheduleTaskArgs>(
             "schedule_task",
             "创建一个后台定时任务：按执行间隔周期调用智能体在指定工作目录完成给定指令。用于用户要求定时/周期执行某项工作（如每 30 分钟检查一次、每天总结一次）。间隔制（ADR-024）：距上次执行达到间隔即触发，服务未运行期间超期的任务会在重启后自动补跑一次。",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "任务显示名称" },
-                    "interval_secs": { "type": "integer", "description": "执行间隔秒数，如 1800（每30分钟）、86400（每天）、604800（每周）" },
-                    "workspace": { "type": "string", "description": "工作目录绝对路径" },
-                    "prompt": { "type": "string", "description": "到点后让智能体在该工作区完成的工作指令" }
-                },
-                "required": ["name", "interval_secs", "workspace", "prompt"]
-            }),
         ))
     }
 
