@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-09-21
+
 ### Added
 - **新增 `repo_map` 工具——仓库结构地图（引用度排序；工具数 33 → 34）**：跨文件 tree-sitter 符号骨架，按「被引用次数」排序，**一次调用替代多轮 grep 试探**（模型按需自取，与 `symbol_outline` 同型）。每行 `路径:行 种类 名称(外部引用数)`；`focus` 聚焦关键字子图、`path` 限定子树、`max_tokens` 控预算（缺省 1000，硬上限 4000）、`include_tests` 缺省排除测试文件。**零外部依赖、零常驻进程**（与已移除的 LSP 路线相反）。**引用度是文本级近似**（不做名称解析：宏展开/重导出/动态分发不可见；注释与字符串不计入——靠 tree-sitter 语法节点过滤），工具描述已显式声明「精确影响面请改完跑 `verify_build`」。实现：`executor/repo_map.rs`（扫描 + 聚合 + 渲染 + 内存 LRU 指纹缓存）+ `symbols::symbol_index`（一次解析同时产出定义与标识符计数，避免重复解析）；缓存按仓库根 + `(路径, mtime 毫秒, size)` 集合哈希失效，只缓内存（运行时结构缓存，不落盘、不进 VFS）。测试 20 个（判别力覆盖：注释/字符串不计引用、测试文件默认排除、focus 压过引用度、预算截断、缓存命中与三类失效、沙箱拒绝、缺省归属会话工作目录）
 - **独立 server 端口可配（`TIANYAN_PORT`）**：`server/src/main.rs` 由 `ServerConfig::default()` 改为 `ServerConfig::from_env()`——不设该变量时行为完全不变（默认 `127.0.0.1:3000`），设了则覆盖端口（非法值警告并回退默认）。动机：本地 3000 常被运行中的桌面应用占用，GUI e2e 需要一个不与之冲突的端口；顺带让独立 `tianyan-server` 的用户可换端口。解析抽为纯函数 `from_port_str` 并附判别力测试（合法 / 带空白 / 非法 / 空串 / 越界 / 缺失）
@@ -23,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`repo_map` 排序质量修正（真实仓库实测驱动）**：首次在本仓库实测（416 文件 / 5753 符号 / 冷扫描 ~2.7s / 缓存命中 114ms）发现地图顶层被「通用名」淹没——前 20 行全是 `path(1100)` / `name(1099)` 这类 getter 与 trait 方法。三层修正：① **方法不进地图**（`symbols` 把 Rust `impl` 块内 `function_item` 正确标记为 `SymbolKind::Method`，与既有的 Python `class_definition` 判定同型）——地图回答「仓库由哪些构件组成」，构件是模块 / 类型 / trait，而不是 getter；② **通用名过滤**（定义次数 ≥ 6 剔除：`name` / `impl` 回退名等，它们是多个互不相关的同名方法）；③ **通用方法名过滤**（短 + 全小写 + 无下划线的函数名——其引用多来自标准库/依赖的同名 API：`.path()` / `.len()` / `.entry()`）。另：引用数改为 `全局出现次数 − 定义次数`（真实使用次数），并加 **kind 权重**（类型与模块 ×2）。修正后顶层为 `Module content(787)` / `Module vfs(711)` / `Enum TianyanError(254)` / `Struct TianyanUri(233)` 等真实构件。测试 24 个（+4：通用名过滤、通用方法名过滤、方法排除、类型优先）
 - **构建配置：关闭增量编译（`[profile.dev] incremental = false`）**：`target/debug/incremental` 随每次编译会话新增目录且旧目录永不回收——2026-09-21 实测累积 **1203 个会话目录 / 179 GB**（74% 为 3 天前死数据），曾致 F: 盘写满、编译报 `os error 112`；清理后释放 155.9 GB。本项目工作流以「频繁全量编译 + 测试」为主（agent/CI），增量收益小、膨胀大；需要增量调试时用 `CARGO_INCREMENTAL=1` 临时覆盖。（`[profile.dev] debug = 1` 已为现状，未改动——再降会牺牲 panic 回溯行号。）
+
+- **`repo_map` 重名度阈值校准（6 → 8）+「精确语义」路线复评否决**：首次用评估探针在真实仓库量化排序阈值（`core/examples/repo_map_probe.rs`，8 段诊断：定义次数分布 / 阈值敏感度 / 误伤候选 / 预算覆盖度 / 地图全文，可在任意仓库复跑）。发现 `config`（定义 7 次 / 被引用 **1028** 次）、`uri`（7 / **925**）、`error`（7 / **472**）三个核心模块被阈值 6 误判为「通用名」剔除——它们的 7 次定义是「`mod` 声明 + 模块文件」结构的必然结果，而非该阈值要挡的「互不相关的同名方法」（对照 `name` 1099 次 / `path` 1102 次定义）。阈值 8 / 10 / 12 / 20 的 top-10 实测完全一致（已收敛）⇒ **8 是拐点**。同步加边界判别力测试（定义 `MAX−1` 次的核心模块保留、`MAX` 次被剔除）。**另复评「精确语义」路线（`ra_ap_*`）：实测否决**——依赖 **+181 个包**、三轮构建全部失败（`unicode-ident` 版本冲突 → `salsa 0.28.4` 移除 `plumbing::HashEqLike::hash` → `salsa-macros` 生成代码不匹配）、MSRV 1.98 超本机 1.97.1、且仅覆盖 Rust（天演 5 语言）；对症的「限定名」中间路线记为备选（未实施，待真实使用数据）。详见 `docs/architecture/code-intelligence-routes.md` §10
+
+### Docs
+- `config.example.toml` 删除已下线的 `[agent] shortlist_tools` 残留（工具短路选择 G1 回滚后遗留）——顺带对示例配置做**全键漂移扫描**（`tomllib` 解析 56 个键逐一比对源码：0 漂移）；清理 `target/debug/incremental` 30 个历史目录（释放 3.3 GB）
+- `docs/architecture/code-intelligence-routes.md` §10 二次评估（阈值校准数据 + `ra_ap_*` 实测否决 + 限定名备选 + 探针用法）
 
 ### Fixed
 - **三处 e2e 断言失效（既有漂移；CI 不跑 e2e，故长期未被察觉）**：① `chat.spec.ts` 把 `POST /chat/stream` mock 成 SSE body，而该端点自 ADR-028 已收敛为「开关」（返回 JSON）、前端用 `response.json()` 解析 → 助手回复断言**恒红**（改走历史消息路径；流式端到端归 `real-chat.spec.ts`）；② `real-workspace-session.spec.ts` 同样按 SSE 文本解析响应取 `session_id`（改为按 JSON 解析）；③ `session-page.spec.ts` 仍断言「暂无会话」空态，而该空态已随工作区分组引入被移除（改为断言「默认」分组可见 + 该文案计数为 0）。判别力：旧写法临时探针 1 failed；修复后完整套件 36 passed
