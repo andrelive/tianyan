@@ -73,42 +73,31 @@ pub struct TodoUpdateArgs {
     pub parent_id: Option<String>,
 }
 
-/// todo 工具参数（批量数组与单条快捷形态二选一）。
+/// todo 工具参数。
+///
+/// **形态唯一**：每种 operation 只有一种写法——要改/删**单条也放进数组**
+/// （长度 1）。此前 update/delete 另有「单条快捷形态」（顶层 `id` + 各字段），
+/// 与数组形态表达同一意图 → 同一份意图两套 schema，是模型参数生成的抖动源
+/// （与已收敛的 `ask_user` 同型问题）。create 早已收敛（只接受 `todos`）。
 #[derive(Debug, Deserialize)]
 pub struct TodoArgs {
-    /// 操作：create | update | list | delete。
+    /// 操作：create | update | list | delete | close。
     pub operation: String,
     /// 整表替换（create 必填）：当前完整计划——未包含的旧条目即被移除。
     #[serde(default)]
     pub todos: Option<Vec<TodoDraftArgs>>,
-    /// 批量更新（推荐）：一次合并多条状态变更。
+    /// 更新列表（update 必填；单条更新也放进数组，长度 1）。
     #[serde(default)]
     pub updates: Option<Vec<TodoUpdateArgs>>,
-    /// 批量删除的待办 id 列表。
+    /// 删除列表（delete 必填；单条删除也放进数组，长度 1）。
     #[serde(default)]
     pub ids: Option<Vec<String>>,
-    // —— 单条快捷形态（update/delete 用；create 为整表替换，不提供单条）——
-    /// 待办 ID（update/delete 单条形态必填）。
-    #[serde(default)]
-    pub id: Option<String>,
-    /// 新标题（update 单条形态）。
-    #[serde(default)]
-    pub title: Option<String>,
-    /// 详细描述。
-    #[serde(default)]
-    pub description: Option<String>,
-    /// 状态。
+    /// list 过滤：只返回该状态的条目（可选）。
     #[serde(default)]
     pub status: Option<String>,
-    /// 优先级。
-    #[serde(default)]
-    pub priority: Option<String>,
-    /// 关联目标 id。
+    /// list 过滤：只返回关联到该目标的条目（可选）。
     #[serde(default)]
     pub goal_id: Option<String>,
-    /// 父待办 id。
-    #[serde(default)]
-    pub parent_id: Option<String>,
 }
 
 /// todo 动态工具（ADR-003 组件工具化：server 层适配 core 动态工具 trait）。
@@ -155,7 +144,7 @@ impl DynamicToolExecutor for TodoTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(FunctionDefinition::new(
             "todo",
-            "管理当前会话的待办清单（会话绑定，仅本会话可见；同一时期只保留一批同源待办）。支持批量，避免逐条调用。create 为整表替换：传 todos 数组 = 当前完整计划，整体替换旧清单——未包含的旧条目（含未完成项）即被移除；想保留的条目（包括已完成的）必须包含在新列表中。开始多步工作先写入整份清单；推进/完成用 update（updates 数组按 id 批量合并状态，比全量重发省）；计划增删改时重发完整列表。子任务挂靠：先创建任务，再用 update 的 parent_id 挂靠（整表替换中 parent_id 不可用）。operation=list 查看当前清单（含 id 与状态）。operation=delete 传 ids 数组删除指定项——完成项默认划线保留展示，是否清理由你自行决定。operation=close 清空当前批全部待办——当用户目标变更、现有待办不再反映当前意图时使用（即使有未完成项）。",
+            "管理当前会话的待办清单（会话绑定，仅本会话可见；同一时期只保留一批同源待办）。**每种操作只有一种写法**——要改/删单条也放进数组（长度 1）：create 传 `todos` 数组 = 当前完整计划（**整表替换**——未包含的旧条目（含未完成项）即被移除；想保留的条目必须包含在新列表中）；update 传 `updates` 数组（按 id 批量合并状态）；delete 传 `ids` 数组；list 查看当前清单（可用 status / goal_id 过滤）；close 清空当前批全部待办（用户目标变更、现有待办不再反映当前意图时使用，即使有未完成项）。开始多步工作先写入整份清单；推进/完成用 update（比全量重发省）；计划增删改时重发完整列表。子任务挂靠：先创建任务，再用 update 的 parent_id 挂靠（整表替换中 parent_id 不可用）。完成项默认划线保留展示，是否清理由你自行决定。",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -178,7 +167,7 @@ impl DynamicToolExecutor for TodoTool {
                     },
                     "updates": {
                         "type": "array",
-                        "description": "批量更新（推荐）：一次合并多条状态变更",
+                        "description": "更新列表（update 必填；单条更新也放进数组，长度 1）",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -196,15 +185,10 @@ impl DynamicToolExecutor for TodoTool {
                     "ids": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "批量删除的待办 id 列表"
+                        "description": "删除列表（delete 必填；单条删除也放进数组，长度 1）"
                     },
-                    "id": { "type": "string", "description": "待办 ID（update/delete 单条形态）" },
-                    "title": { "type": "string", "description": "新标题（update 单条形态）" },
-                    "description": { "type": "string", "description": "新描述（update 单条形态）" },
-                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "新状态（update 单条形态）" },
-                    "priority": { "type": "string", "enum": ["low", "medium", "high"], "description": "新优先级（update 单条形态）" },
-                    "goal_id": { "type": "string", "description": "新关联目标 id（update 单条形态）" },
-                    "parent_id": { "type": "string", "description": "新父待办 id（update 单条形态；空串清除）" }
+                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "list 过滤：只返回该状态的条目（可选）" },
+                    "goal_id": { "type": "string", "description": "list 过滤：只返回关联到该目标的条目（可选）" }
                 },
                 "required": ["operation"]
             }),
@@ -272,21 +256,15 @@ impl TodoTool {
         Ok(serde_json::json!({ "status": "closed", "removed": removed }))
     }
 
-    // —— update：批量数组优先，回落单条形态；原子归属校验 ——
+    // —— update：只接受 updates 数组（单条更新也放进数组）；原子归属校验 ——
     async fn update(&self, session_id: &str, args: TodoArgs) -> Result<serde_json::Value> {
         let updates: Vec<TodoUpdateArgs> = match args.updates {
             Some(list) if !list.is_empty() => list,
-            _ => vec![TodoUpdateArgs {
-                id: args.id.ok_or_else(|| {
-                    TianyanError::invalid_input("tool: todo update 需要 id 或 updates 数组")
-                })?,
-                title: args.title,
-                description: args.description,
-                status: args.status,
-                priority: args.priority,
-                goal_id: args.goal_id,
-                parent_id: args.parent_id,
-            }],
+            _ => {
+                return Err(TianyanError::invalid_input(
+                    "tool: todo update 需要非空 updates 数组（单条更新也放进数组，长度 1）",
+                ))
+            }
         };
         // 归属校验（原子）：任一 id 不属于当前会话则整体拒绝
         let owned: Vec<String> = self
@@ -370,13 +348,15 @@ impl TodoTool {
         Ok(serde_json::json!({ "todos": filtered, "count": count }))
     }
 
-    // —— delete：批量数组优先，回落单条形态 ——
+    // —— delete：只接受 ids 数组（单条删除也放进数组） ——
     async fn delete(&self, session_id: &str, args: TodoArgs) -> Result<serde_json::Value> {
         let ids: Vec<String> = match args.ids {
             Some(list) if !list.is_empty() => list,
-            _ => vec![args.id.ok_or_else(|| {
-                TianyanError::invalid_input("tool: todo delete 需要 id 或 ids 数组")
-            })?],
+            _ => {
+                return Err(TianyanError::invalid_input(
+                    "tool: todo delete 需要非空 ids 数组（单条删除也放进数组，长度 1）",
+                ))
+            }
         };
         // 归属校验（原子）
         let owned: Vec<String> = self
@@ -642,5 +622,89 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(other["count"], 1, "close 不应影响其他会话");
+    }
+
+    #[tokio::test]
+    async fn test_single_item_shapes_are_rejected() {
+        // 形态唯一（与已收敛的 ask_user 同型）：update/delete 只有数组写法——
+        // 旧「单条快捷形态」（顶层 id + 字段）必须被拒并给出改法提示。
+        let (tool, _dir) = tool();
+        let created = tool
+            .execute(
+                "s-1",
+                "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"A\" } ] }",
+            )
+            .await
+            .unwrap();
+        let id = created["todos"][0]["id"].as_str().unwrap().to_string();
+
+        // update 单条形态 → 拒绝（invalid_input）
+        let err = tool
+            .execute(
+                "s-1",
+                &format!(
+                    "{{ \"operation\": \"update\", \"id\": \"{id}\", \"status\": \"completed\" }}"
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.is_invalid_input(), "{err}");
+
+        // delete 单条形态 → 拒绝
+        let err = tool
+            .execute(
+                "s-1",
+                &format!("{{ \"operation\": \"delete\", \"id\": \"{id}\" }}"),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.is_invalid_input(), "{err}");
+
+        // 数组写法（长度 1）→ 接受
+        let updated = tool
+            .execute(
+                "s-1",
+                &format!(
+                    "{{ \"operation\": \"update\", \"updates\": [ {{ \"id\": \"{id}\", \"status\": \"completed\" }} ] }}"
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated["count"], 1);
+        let deleted = tool
+            .execute(
+                "s-1",
+                &format!("{{ \"operation\": \"delete\", \"ids\": [\"{id}\"] }}"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(deleted["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_list_filters_by_status() {
+        // list 的 status 过滤此前只存在于实现里（schema 描述写的是"update 单条形态"，
+        // 功能被藏且无覆盖）——语义单一化后补上覆盖。
+        let (tool, _dir) = tool();
+        tool.execute(
+            "s-1",
+            "{ \"operation\": \"create\", \"todos\": [ { \"title\": \"待办1\", \"status\": \"completed\" }, { \"title\": \"待办2\" } ] }",
+        )
+        .await
+        .unwrap();
+        let done = tool
+            .execute(
+                "s-1",
+                "{ \"operation\": \"list\", \"status\": \"completed\" }",
+            )
+            .await
+            .unwrap();
+        assert_eq!(done["count"], 1);
+        assert_eq!(done["todos"][0]["title"], "待办1");
+        let all = tool
+            .execute("s-1", "{ \"operation\": \"list\" }")
+            .await
+            .unwrap();
+        assert_eq!(all["count"], 2, "无过滤应返回全部");
     }
 }
