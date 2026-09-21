@@ -33,7 +33,7 @@ pub fn execute_embedded_search(
     pattern: &str,
     options: &SearchOptions,
 ) -> Result<Value, TianyanError> {
-    let mode = OutputMode::parse(options.output_mode.as_deref())?;
+    let mode = options.output_mode.unwrap_or_default();
     let head_limit = options
         .head_limit
         .unwrap_or(super::search::DEFAULT_HEAD_LIMIT)
@@ -89,7 +89,6 @@ pub fn execute_embedded_search(
     }
 
     let mut records: Vec<Value> = Vec::new();
-    let mut before_buf: Vec<String> = Vec::new();
 
     for entry in walk.build() {
         if records.len() >= MAX_TOTAL_MATCHES {
@@ -106,14 +105,7 @@ pub fn execute_embedded_search(
 
         // 多行模式：以整个文件为单个匹配单元
         if options.multiline {
-            scan_multiline(
-                &re,
-                entry.path(),
-                &content,
-                mode,
-                &mut records,
-                &mut before_buf,
-            );
+            scan_multiline(&re, entry.path(), &content, mode, &mut records);
             continue;
         }
 
@@ -153,7 +145,6 @@ pub fn execute_embedded_search(
                     &matches_in_file,
                     options,
                     &mut records,
-                    &mut before_buf,
                 );
             }
         }
@@ -207,7 +198,6 @@ fn split_lines(content: &[u8]) -> Vec<&[u8]> {
 }
 
 /// content 模式：逐匹配行生成记录（含上下文与 submatch 偏移）。
-#[allow(clippy::too_many_arguments)]
 fn scan_content(
     re: &regex::bytes::Regex,
     path: &Path,
@@ -215,11 +205,8 @@ fn scan_content(
     matches_in_file: &[(usize, &[u8])],
     options: &SearchOptions,
     records: &mut Vec<Value>,
-    before_buf: &mut Vec<String>,
 ) {
-    let before_ctx = options.before_context.or(options.context).unwrap_or(0);
-    let after_ctx = options.after_context.or(options.context).unwrap_or(0);
-    let show_line_number = options.line_number.unwrap_or(true);
+    let ctx = options.context.unwrap_or(0);
 
     for &(line_no, line) in matches_in_file {
         if records.len() >= MAX_TOTAL_MATCHES {
@@ -227,14 +214,14 @@ fn scan_content(
         }
         // 上下文行（before：匹配行之前；after：匹配行之后）
         let mut before: Vec<String> = Vec::new();
-        let b_start = line_no.saturating_sub(before_ctx + 1);
+        let b_start = line_no.saturating_sub(ctx + 1);
         for i in b_start..line_no.saturating_sub(1) {
             if let Some(l) = lines.get(i) {
                 before.push(String::from_utf8_lossy(l).into_owned());
             }
         }
         let mut after: Vec<String> = Vec::new();
-        for i in line_no..(line_no + after_ctx) {
+        for i in line_no..(line_no + ctx) {
             if let Some(l) = lines.get(i) {
                 after.push(String::from_utf8_lossy(l).into_owned());
             }
@@ -269,28 +256,23 @@ fn scan_content(
             .filter(|&&(_, end)| end <= kept_bytes)
             .map(|&(s, e)| json!({ "start": s + prefix_bytes, "end": e + prefix_bytes }))
             .collect();
-        let mut record = json!({
+        let record = json!({
             "path": path.to_string_lossy(),
+            "line_number": line_no,
             "text": text,
             "matches": matches,
         });
-        if show_line_number {
-            record["line_number"] = json!(line_no);
-        }
         records.push(record);
-        let _ = before_buf; // 保留签名一致（多行模式复用）
     }
 }
 
 /// 多行模式：整个文件为一个匹配单元，命中即产生一条记录。
-#[allow(clippy::too_many_arguments)]
 fn scan_multiline(
     re: &regex::bytes::Regex,
     path: &Path,
     content: &[u8],
     mode: OutputMode,
     records: &mut Vec<Value>,
-    _before_buf: &mut Vec<String>,
 ) {
     if !re.is_match(content) {
         return;

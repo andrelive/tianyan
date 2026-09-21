@@ -19,7 +19,7 @@ fn fixture() -> TempDir {
 fn content_opts(dir: &TempDir) -> SearchOptions {
     SearchOptions {
         path: Some(dir.path().to_string_lossy().into_owned()),
-        output_mode: Some("content".to_string()),
+        output_mode: Some(OutputMode::Content),
         ..Default::default()
     }
 }

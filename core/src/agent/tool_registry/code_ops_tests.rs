@@ -115,6 +115,64 @@ async fn test_search_code_serde_alias_old_payload() {
     assert_eq!(result["count"].as_u64(), Some(1));
 }
 
+#[tokio::test]
+async fn test_search_code_invalid_output_mode_rejected_at_parse() {
+    // output_mode 现为类型化枚举：非法值在**参数解析期**即被拒（旧形态由执行器
+    // 运行期字符串解析报「输出模式无效」），错误消息列出合法取值。
+    let err = ToolRegistry::new(default_strict_policy())
+        .execute_search_code(r#"{"pattern":"foo","output_mode":"lines"}"#, "test-session")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("参数无效"), "{err}");
+    assert!(err.to_string().contains("content"), "{err}");
+}
+
+#[tokio::test]
+async fn test_search_code_content_mode_always_reports_line_number() {
+    // 形态收敛：line_number 字段已删（默认 true，且每次调用都被显式传 true——
+    // 零信息量）。content 模式**恒**输出行号；旧字段被忽略且不改变行为。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn foo() {}\n").unwrap();
+    let path = serde_json::to_string(&dir.path().to_string_lossy().into_owned()).unwrap();
+    let result = ToolRegistry::new(default_strict_policy())
+        .execute_search_code(
+            &format!(
+                r#"{{"pattern":"foo","path":{path},"output_mode":"content","line_number":false}}"#
+            ),
+            "test-session",
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["output_mode"].as_str(), Some("content"));
+    assert_eq!(result["results"][0]["line_number"].as_u64(), Some(1));
+}
+
+#[tokio::test]
+async fn test_grep_schema_drops_context_aliases_and_types_output_mode() {
+    // 判别力：三个字段必须已不在 schema（旧形态都在）；output_mode 必须是枚举
+    // （退回 String 即失败——schema 里不会出现这三个取值）。
+    let defs = ToolRegistry::new(default_strict_policy())
+        .definitions()
+        .await;
+    let grep = defs
+        .iter()
+        .find(|d| d.function.name == "grep")
+        .expect("grep 工具已注册");
+    let schema = grep.function.parameters.to_string();
+    for dropped in ["line_number", "before_context", "after_context"] {
+        assert!(
+            !schema.contains(&format!("\"{dropped}\"")),
+            "{dropped} 不应出现在 schema：{schema}"
+        );
+    }
+    for mode in ["files_with_matches", "content", "count"] {
+        assert!(
+            schema.contains(&format!("\"{mode}\"")),
+            "output_mode 缺取值 {mode}：{schema}"
+        );
+    }
+}
+
 // ── run_tests ────────────────────────────────────────────────────────────
 
 #[tokio::test]

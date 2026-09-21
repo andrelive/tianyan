@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::executor::edit::ContentEdit;
+use crate::executor::search::OutputMode;
 use crate::lsp::diagnostics::LspOperation;
 
 /// 读取文件参数。
@@ -98,6 +99,11 @@ pub struct SuggestRoleParams {
 ///
 /// 字段命名对齐 ripgrep 参数：`pattern` 为正式字段名（serde alias 兼容旧载荷的
 /// `query`），`path` 兼容旧 `scope`；其余为可选的 ripgrep 高级参数。
+///
+/// 形态收敛（依真实调用分布）：删 `line_number`（content 模式恒输出行号，
+/// 该字段默认 true 且每次调用都被显式传 true——零信息量）；`before_context` /
+/// `after_context` 并入 `context`（`-C` 本就同时管前后，实测从未使用）；
+/// `output_mode` 类型化（非法值解析期即拒，见 [`OutputMode`]）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchCodeParams {
     /// 搜索模式（正则；兼容旧字段名 `query`）。
@@ -110,27 +116,19 @@ pub struct SearchCodeParams {
     /// glob 过滤器（如 `*.rs`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glob: Option<String>,
-    /// 输出模式："files_with_matches"（默认）| "content" | "count"。
+    /// 输出模式（缺省 files_with_matches，即只列命中文件名）；
+    /// 要看匹配行必须显式传 content。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_mode: Option<String>,
+    pub output_mode: Option<OutputMode>,
     /// 文件类型过滤器（rg --type，如 "rust"）。
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
     pub type_: Option<String>,
     /// 忽略大小写（-i）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ignore_case: Option<bool>,
-    /// 显示行号（-n，content 模式默认 true）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub line_number: Option<bool>,
-    /// 上下文行数（-C）。
+    /// 匹配行前后各显示的行数（-C；仅 content 模式；缺省 0）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<usize>,
-    /// 前文行数（-B）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub before_context: Option<usize>,
-    /// 后文行数（-A）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after_context: Option<usize>,
     /// 结果条数上限（默认 200）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_limit: Option<usize>,

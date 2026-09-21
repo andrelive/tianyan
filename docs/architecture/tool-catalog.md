@@ -20,7 +20,7 @@
 | `execution_stats` | generic | 查询工具执行统计（GEPA 数据层）：按类计数、成功率、平均耗时。可选 since（RFC3339）过滤该时间之后的执行；可选 category 过滤一类操作（file_operation/code_operation/search_operation/test_operation/deploy_operation/analysis_operation/general_operation）。用于发现重复/失败的操作模式，再决定是否提炼新技能或规则。 |
 | `glob` | search | 在目录下按 glob 模式找文件（如 **/*.rs），按修改时间倒序。遵循 .gitignore。 |
 | `goal` | generic | 管理当前会话的长期目标（会话绑定，仅本会话可见）：创建/更新/列出/删除目标。目标进度按关联待办完成比例自动计算。operation: create（title 必填）/ update（id + 可选字段，status 为设置的新状态）/ list（列出本会话全部目标）/ delete（id）。 |
-| `grep` | search | 用正则搜索文件内容（类似 ripgrep）。返回匹配文件/行及行号、匹配偏移。支持 glob 过滤（include）、语言类型（type）、上下文行、忽略大小写与分页。 |
+| `grep` | search | 用正则搜索文件内容（类似 ripgrep）。默认只列命中文件名（output_mode=files_with_matches）；要**看匹配行**须传 output_mode=content（可配 context 显示匹配行前后各 N 行；行号恒输出）。支持 glob/type 过滤、忽略大小写（ignore_case）、多行匹配（multiline）、分页（head_limit/offset）。 |
 | `knowledge_ingest` | knowledge | 将文件或目录导入知识库：解析、摘要（L0 摘要 + L1 概览）、建立语义索引。接受文件或目录路径，可选指定分类。 |
 | `list_dir` | search | 列出单层目录下的条目。目录带尾部 '/'。支持 offset/limit 分页。 |
 | `lsp` | code | 查询语言服务器（LSP）。operation 取值决定其余参数：位置类 goToDefinition / findReferences / hover / goToImplementation 需 file_path + line + character（行列均 0 起始）；documentSymbol 只需 file_path；workspaceSymbol 需 file_path（用于选择项目服务器）+ query。返回结构化结果。 |

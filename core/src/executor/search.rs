@@ -12,6 +12,7 @@
 //! 执行委托给 [`super::search_engine`]（`ignore` 遍历 + `regex` 匹配，
 //! 语义与 ripgrep 对齐）；本模块保留参数模型与输出契约定义。
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::common::error::TianyanError;
@@ -19,10 +20,14 @@ use crate::common::error::TianyanError;
 /// 分页默认条数（search_engine 引用）。
 pub const DEFAULT_HEAD_LIMIT: usize = 200;
 
-/// 输出模式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 输出模式（工具参数与执行器共用同一类型；非法值在参数解析期即被拒绝）。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum OutputMode {
     /// 仅列出命中的文件名（默认）。
+    #[default]
     FilesWithMatches,
     /// 匹配行 + 行号 + submatch 偏移。
     Content,
@@ -39,18 +44,6 @@ impl OutputMode {
             OutputMode::Count => "count",
         }
     }
-
-    /// 解析输出模式字符串；`None` 取默认 [`OutputMode::FilesWithMatches`]。
-    pub(crate) fn parse(mode: Option<&str>) -> Result<Self, TianyanError> {
-        match mode {
-            None | Some("files_with_matches") => Ok(OutputMode::FilesWithMatches),
-            Some("content") => Ok(OutputMode::Content),
-            Some("count") => Ok(OutputMode::Count),
-            Some(other) => Err(TianyanError::Custom(format!(
-                "executor: 搜索失败：输出模式无效：{other}"
-            ))),
-        }
-    }
 }
 
 /// 搜索选项（与工具参数一一对应；`None`/`false` 取默认行为）。
@@ -60,20 +53,14 @@ pub struct SearchOptions {
     pub path: Option<String>,
     /// glob 过滤器（如 `*.rs`）。
     pub glob: Option<String>,
-    /// 输出模式字符串（见 [`OutputMode::parse`]）。
-    pub output_mode: Option<String>,
+    /// 输出模式（`None` 取默认 [`OutputMode::FilesWithMatches`]）。
+    pub output_mode: Option<OutputMode>,
     /// 文件类型过滤器（rg `--type`，如 "rust"）。
     pub type_: Option<String>,
     /// 忽略大小写（`-i`）。
     pub ignore_case: bool,
-    /// 是否显示行号（content 模式默认 true）。
-    pub line_number: Option<bool>,
-    /// 上下文行数（`-C`）。
+    /// 匹配行前后各显示的行数（`-C`；content 模式恒输出行号）。
     pub context: Option<usize>,
-    /// 前文行数（`-B`）。
-    pub before_context: Option<usize>,
-    /// 后文行数（`-A`）。
-    pub after_context: Option<usize>,
     /// 结果条数上限（默认 [`DEFAULT_HEAD_LIMIT`]）。
     pub head_limit: Option<usize>,
     /// 分页偏移（0 起始）。
