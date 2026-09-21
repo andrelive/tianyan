@@ -20,6 +20,9 @@ use crate::agent::tool_params::{
 use crate::agent::types::{AgentStreamChunk, StreamChunkType, StreamEventSender};
 use crate::common::error::TianyanError;
 use crate::common::types::{ContentLevel, ContextNamespace, Message, TianyanUri};
+use crate::executor::command::{
+    ReadySpec, DEFAULT_READY_INITIAL_DELAY_MS, DEFAULT_READY_TIMEOUT_MS,
+};
 use crate::executor::Action;
 use crate::model::types::{FunctionDefinition, ToolCall, ToolDefinition};
 
@@ -119,6 +122,45 @@ struct DelegateLoopParams {
     role_name: Option<String>,
 }
 
+/// 由工具参数构造就绪探测规格（"探测配置可用"校验的**单点**）。
+///
+/// 把两处**静默降级**改成明确错误（失败可见）：
+/// - `ready` 配了但 `background` 不是 `true`：旧行为是**静默忽略**——同步路径
+///   根本不读 `ready`，长驻服务（dev server 等）会一路阻塞到命令超时；
+/// - `ready` 既无 `port` 也无 `pattern`（含空串/纯空白）：旧行为是探测永远
+///   不满足，静默等到总超时才通知「就绪探测超时」。
+///
+/// `port` 与 `pattern` 可同时给（任一命中即就绪，双保险）；`pattern` 先 trim
+/// 判空但按原文匹配。
+fn build_ready_spec(params: &ExecuteCommandParams) -> Result<Option<ReadySpec>, TianyanError> {
+    let Some(ready) = params.ready.as_ref() else {
+        return Ok(None);
+    };
+    if params.background != Some(true) {
+        return Err(TianyanError::invalid_input(
+            "tool: 参数无效：ready 仅在 background=true 时有效（长驻服务的就绪探测）",
+        ));
+    }
+    let pattern = ready
+        .pattern
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .map(str::to_string);
+    if ready.port.is_none() && pattern.is_none() {
+        return Err(TianyanError::invalid_input(
+            "tool: 参数无效：ready 需要 port 或 pattern（至少一个，否则探测永远不会就绪）",
+        ));
+    }
+    Ok(Some(ReadySpec {
+        port: ready.port,
+        pattern,
+        initial_delay_ms: ready
+            .initial_delay_ms
+            .unwrap_or(DEFAULT_READY_INITIAL_DELAY_MS),
+        timeout_ms: ready.timeout_ms.unwrap_or(DEFAULT_READY_TIMEOUT_MS),
+    }))
+}
+
 impl ToolRegistry {
     /// 执行 execute_command 工具：运行 shell 命令（含安全策略 + 审批门控）。
     ///
@@ -171,6 +213,10 @@ impl ToolRegistry {
             safety_violation(self.security_policy.check_path(std::path::Path::new(cwd)))?;
         }
 
+        // 就绪探测规格（可选）：校验在**审批与执行之前**完成——无效配置不会
+        // 消耗审批、也不会拉起进程（见 build_ready_spec）。
+        let ready_spec = build_ready_spec(&params)?;
+
         // 审批门控（自动放行安全命令/拒绝关键命令/请求人类确认，
         // 统一序列见 [`ToolRegistry::ensure_approved`]；子任务非交互拒绝，
         // 错误携带"需要主任务授权"标记，由主 agent 在主对话确认后重新委托）
@@ -187,17 +233,6 @@ impl ToolRegistry {
         // 后台模式：立即返回任务快照（task_id/log_file/pid），进程独立运行。
         // 观测：task_status 查询（输出尾部）/ 日志文件 read_file；终止：task_cancel。
         if params.background == Some(true) {
-            // 就绪探测规格（可选）：端口/日志关键词就绪后自动通知主 agent；
-            // 长驻服务（server/dev server 等）必须配置，否则只能等进程退出通知。
-            let ready_spec = params
-                .ready
-                .as_ref()
-                .map(|r| crate::executor::command::ReadySpec {
-                    port: r.port,
-                    pattern: r.pattern.clone(),
-                    initial_delay_ms: r.initial_delay_ms.unwrap_or(500),
-                    timeout_ms: r.timeout_ms.unwrap_or(300_000),
-                });
             // U5：任务归属工作目录快照（task_status 默认视野按它过滤）——
             // 与 cwd 解耦（cwd 是命令运行目录，可能被模型显式指定）。
             let task_working_directory = self

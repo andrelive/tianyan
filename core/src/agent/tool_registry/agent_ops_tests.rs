@@ -318,6 +318,87 @@ async fn test_execute_command_rejects_missing_arguments() {
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
 
+// ── execute_command.ready 配置校验（静默降级 → 明确报错）────────────────
+
+/// 由 JSON 构造 execute_command 参数。
+fn command_params(json: &str) -> ExecuteCommandParams {
+    serde_json::from_str(json).expect("参数应可解析")
+}
+
+#[test]
+fn test_ready_spec_requires_background() {
+    // 判别力：旧行为**静默忽略** ready——同步执行长驻服务会一路阻塞到命令超时
+    let params = command_params(r#"{"command":"npm run dev","ready":{"port":3000}}"#);
+    let err = build_ready_spec(&params).unwrap_err();
+    assert!(err.is_invalid_input(), "{err}");
+    assert!(err.to_string().contains("background"), "{err}");
+}
+
+#[test]
+fn test_ready_spec_requires_port_or_pattern() {
+    // 判别力：旧行为探测永远不满足，静默等到总超时（默认 5 分钟）才报未就绪
+    for json in [
+        r#"{"command":"npm run dev","background":true,"ready":{}}"#,
+        r#"{"command":"npm run dev","background":true,"ready":{"pattern":"  "}}"#,
+        r#"{"command":"npm run dev","background":true,"ready":{"port":null,"pattern":""}}"#,
+    ] {
+        let params = command_params(json);
+        let err = build_ready_spec(&params).unwrap_err();
+        assert!(err.is_invalid_input(), "{json} → {err}");
+        assert!(
+            err.to_string().contains("port 或 pattern"),
+            "{json} → {err}"
+        );
+    }
+}
+
+#[test]
+fn test_ready_spec_defaults_pattern_and_timeout() {
+    let params = command_params(
+        r#"{"command":"npm run dev","background":true,"ready":{"pattern":"Listening on"}}"#,
+    );
+    let spec = build_ready_spec(&params).unwrap().expect("应构造规格");
+    assert_eq!(spec.pattern.as_deref(), Some("Listening on"));
+    assert_eq!(spec.port, None);
+    assert_eq!(spec.initial_delay_ms, 500);
+    assert_eq!(
+        spec.timeout_ms, 60_000,
+        "缺省超时应为 60s（旧值 300s 让失败场景沉默 5 分钟）"
+    );
+
+    // 未配 ready → 不产生探测
+    assert!(
+        build_ready_spec(&command_params(r#"{"command":"echo hi"}"#))
+            .unwrap()
+            .is_none()
+    );
+
+    // port 与 pattern 可同时给（任一命中即就绪，双保险）；显式 timeout_ms 生效
+    let params = command_params(
+        r#"{"command":"npm run dev","background":true,"ready":{"port":5173,"pattern":"ready","timeout_ms":9000}}"#,
+    );
+    let spec = build_ready_spec(&params).unwrap().unwrap();
+    assert_eq!(spec.port, Some(5173));
+    assert_eq!(spec.pattern.as_deref(), Some("ready"));
+    assert_eq!(spec.timeout_ms, 9_000);
+}
+
+#[tokio::test]
+async fn test_execute_command_rejects_ready_without_background() {
+    // 工具层端到端：校验在审批/执行之前完成——命令不得被拉起。
+    let registry = ToolRegistry::new(default_strict_policy());
+    let err = registry
+        .execute_execute_command(
+            r#"{"command":"echo hi","ready":{"port":3000}}"#,
+            "test-session",
+            false,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.is_invalid_input(), "{err}");
+    assert!(err.to_string().contains("background"), "{err}");
+}
+
 #[tokio::test]
 async fn test_subagent_command_denied_without_hang() {
     // 回归保护：子任务（subagent=true）审批不交互——即使交互模式

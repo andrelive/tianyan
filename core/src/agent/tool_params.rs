@@ -57,17 +57,22 @@ pub struct ExecuteCommandParams {
     /// 后台运行（true 时立即返回 task_id/log_file，进程独立运行，不等待退出）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<bool>,
-    /// 后台就绪探测（仅 background=true 生效；**长驻服务必须配**）：端口监听
-    /// 或日志关键词匹配后自动通知主 agent「服务已就绪」。**就绪 = 该任务的
-    /// 「完成」**（长驻服务进程不退，"进程退出"不是它的完成信号）：就绪后
-    /// 不再计入「等待全部完成」的阻塞（其余任务完成后即可唤醒收尾），服务
-    /// 继续运行、异常退出仍会通知。不配探测则按普通任务语义（进程退出才出
-    /// 终态通知）。
+    /// 后台就绪探测（**长驻服务应配**）：端口监听或日志关键词匹配后自动通知
+    /// 主 agent「服务已就绪」。**必须同时给 `background:true`**——在同步命令上
+    /// 配置就绪探测没有意义（会被参数校验直接拒绝，而不是静默忽略）。
+    /// **就绪 = 该任务的「完成」**（长驻服务进程不退，"进程退出"不是它的完成
+    /// 信号）：就绪后不再计入「等待全部完成」的阻塞（其余任务完成后即可唤醒
+    /// 收尾），服务继续运行、异常退出仍会通知。不配探测则按普通任务语义
+    /// （进程退出才出终态通知）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready: Option<ReadyProbeParams>,
 }
 
 /// 后台命令就绪探测参数。
+///
+/// `port` 与 `pattern` **至少给一个**（可同时给：任一命中即就绪，双保险）；
+/// 两者都缺——含 `pattern` 为空串/纯空白——会被参数校验拒绝：否则探测永远
+/// 不满足，只能静默等到总超时。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReadyProbeParams {
     /// 就绪判定端口：TCP 连接成功即就绪（如 3000）。
@@ -79,8 +84,8 @@ pub struct ReadyProbeParams {
     /// 首次探测等待（毫秒；指数退避起点；缺省 500）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_delay_ms: Option<u64>,
-    /// 就绪探测总超时（毫秒；超时未就绪 → 通知主 agent「等待结束」并解除
-    /// 完成阻塞（服务继续运行、不杀进程）；缺省 300000）。
+    /// 就绪探测总超时（毫秒；缺省 60000）：超时未就绪 → 通知主 agent「等待
+    /// 结束」并解除完成阻塞（服务继续运行、不杀进程）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 }

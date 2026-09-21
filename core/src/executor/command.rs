@@ -140,11 +140,18 @@ pub struct ReadySpec {
     pub port: Option<u16>,
     /// 就绪判定日志关键词（日志尾部出现即就绪）。
     pub pattern: Option<String>,
-    /// 首次探测等待（指数退避起点，毫秒；缺省 500）。
+    /// 首次探测等待（指数退避起点，毫秒；缺省 [`DEFAULT_READY_INITIAL_DELAY_MS`]）。
     pub initial_delay_ms: u64,
-    /// 探测总超时（毫秒；缺省 300000）。
+    /// 探测总超时（毫秒；缺省 [`DEFAULT_READY_TIMEOUT_MS`]）。
     pub timeout_ms: u64,
 }
+
+/// 就绪探测默认首次等待（毫秒）。
+pub const DEFAULT_READY_INITIAL_DELAY_MS: u64 = 500;
+
+/// 就绪探测默认总超时（毫秒）——60s：超时仅表示"探测没等到信号"（服务继续跑），
+/// 让主 agent 尽快知情比长时间干等有用（旧值 300s 使失败场景沉默 5 分钟）。
+pub const DEFAULT_READY_TIMEOUT_MS: u64 = 60_000;
 
 /// 注册表内条目（保留 + 内部标志）。
 struct TaskEntry {
