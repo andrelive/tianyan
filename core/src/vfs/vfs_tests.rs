@@ -276,6 +276,44 @@ async fn test_update_summary_vectors_delegates_to_index_entry() {
     let _ = VectorType::Abstract;
 }
 
+/// P1-36 回归：move_entry 入口校验 URI（此前不校验，非法 URI 直达后端）。
+#[tokio::test]
+async fn test_move_entry_validates_uri() {
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    use crate::config::StorageConfig;
+    use crate::test_utils::{InMemoryVectorStorage, MockEmbeddingService};
+    use crate::vfs::backend::LocalFileBackend;
+    use crate::vfs::vector::VectorStorage;
+
+    let dir = tempdir().unwrap();
+    let config = StorageConfig {
+        data_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let storage = Arc::new(LocalFileBackend::new(config.clone()));
+    let vector_storage: Arc<dyn VectorStorage> = Arc::new(InMemoryVectorStorage::new());
+    let vfs = VirtualFileSystemImpl::new(storage, vector_storage, config)
+        .with_embedding_provider(Arc::new(MockEmbeddingService), "test-embedding");
+    vfs.initialize().await.unwrap();
+
+    let source = TianyanUri::new(ContextNamespace::User, vec!["src".to_string()]);
+    let bad = TianyanUri::new(ContextNamespace::User, vec!["..".to_string()]);
+
+    let err = vfs
+        .move_entry(&source, &bad)
+        .await
+        .expect_err("非法目标 URI 应被入口校验拒绝");
+    assert!(err.to_string().contains("无效 URI 路径"), "错误信息: {err}");
+
+    let err = vfs
+        .move_entry(&bad, &source)
+        .await
+        .expect_err("非法源 URI 应被入口校验拒绝");
+    assert!(err.to_string().contains("无效 URI 路径"), "错误信息: {err}");
+}
+
 #[tokio::test]
 async fn test_move_entry_preserves_vector_point() {
     // 回归防护：move_entry 必须保留源向量点（abstract/overview/visual 向量与 payload 元数据），

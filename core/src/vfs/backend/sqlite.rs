@@ -81,7 +81,8 @@ impl StorageBackend for SqliteBackend {
                 rusqlite::params![uri.to_string()],
                 |r| r.get(0),
             )
-            .unwrap_or(0);
+            // SQL 故障不得折叠为"不存在"（上层会据此误判条目缺失并跳过/重建）
+            .map_err(|e| TianyanError::Custom(format!("存储后端错误：存在性查询失败: {e}")))?;
         Ok(count > 0)
     }
 
@@ -242,7 +243,24 @@ impl StorageBackend for SqliteBackend {
             })
             .map_err(|e| TianyanError::Custom(format!("存储后端错误：遍历目录失败: {e}")))?;
 
-        Ok(rows.filter_map(|r| r.ok().flatten()).collect())
+        // 行级损坏不阻断整体遍历，但**不得静默**：记录跳过数（此前
+        // `r.ok().flatten()` 让坏行彻底隐身——条目"凭空消失"无任何线索）
+        let mut skipped = 0usize;
+        let mut out = Vec::new();
+        for row in rows {
+            match row {
+                Ok(Some(entry)) => out.push(entry),
+                Ok(None) => {}
+                Err(e) => {
+                    skipped += 1;
+                    tracing::warn!(error = %e, uri = %uri, "存储后端：目录遍历跳过损坏行");
+                }
+            }
+        }
+        if skipped > 0 {
+            tracing::warn!(skipped, uri = %uri, "存储后端：目录遍历存在被跳过的损坏行");
+        }
+        Ok(out)
     }
 
     /// 读取指定 URI 的某一层级内容（L0/L1/L2）。

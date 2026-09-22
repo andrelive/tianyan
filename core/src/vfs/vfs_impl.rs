@@ -247,6 +247,9 @@ impl VfsCore for VirtualFileSystemImpl {
     }
 
     async fn move_entry(&self, source: &TianyanUri, destination: &TianyanUri) -> Result<()> {
+        // 入口校验：与 list/delete 同口径（此前 move 不校验，非法 URI 直达后端）
+        Self::validate_uri(source)?;
+        Self::validate_uri(destination)?;
         // 子条目守卫：move 仅迁移顶层条目，不支持移动目录。
         // 复用 delete 的子 URI 收集模式（collect_uris_recursive）的底层原语
         // list_directory 直接探测一级子条目——LocalFileBackend 下文件与目录同为
@@ -264,10 +267,16 @@ impl VfsCore for VirtualFileSystemImpl {
             ContentLevel::Overview,
             ContentLevel::Detail,
         ] {
-            if let Ok(content) = self.storage.read_content(source, *level).await {
-                self.storage
-                    .write_content(destination, *level, &content)
-                    .await?;
+            match self.storage.read_content(source, *level).await {
+                Ok(content) => {
+                    self.storage
+                        .write_content(destination, *level, &content)
+                        .await?;
+                }
+                // 该层从未写入（not_found）= 合法状态：跳过
+                Err(e) if e.is_not_found() => {}
+                // 其他读错误（存储故障）不得静默吞：目标会缺层且无任何线索
+                Err(e) => return Err(e),
             }
         }
         let src_entry = self.storage.read_entry(source).await?;
