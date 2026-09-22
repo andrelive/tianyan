@@ -318,6 +318,9 @@ pub struct TaskStatusParams {
     /// 任务（同目录跨会话的协调面）；global = 全局（跨目录协调专用）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// 列表模式返回条数上限（默认 20，最大 100；仅列表模式生效）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// 后台任务取消参数。

@@ -34,7 +34,7 @@
 | `suggest_role` | generic | 按任务描述与各角色摘要的语义相似度，推荐最匹配的子智能体角色。在 delegate_to_agent 前调用以决定用哪个角色：传入任务文本，返回排序角色（name/score/purpose，[experimental] 表示暂不可调用）。最终选择始终由你决定。 |
 | `symbol_outline` | code | 用 tree-sitter 提取源文件的结构大纲（函数/结构体/类/impl/接口/枚举）。支持 Rust、TypeScript/JavaScript、Python、Go。 |
 | `task_cancel` | generic | 按 task_id 取消运行中的后台任务。取消已结束任务是空操作。 |
-| `task_status` | generic | 查询后台任务（delegate bt_xxx 与 command cmd_xxx 统一）。默认范围：**当前会话工作目录**下所有会话的任务（同目录跨会话的协调面）——其他工作目录的任务默认不查、不用、不提；仅当竞争问题确实跨目录时用 scope="global" 显式查全局（用完即回，其他目录信息不进入常规汇报）。带 task_id：返回该任务快照（仅限可见范围；状态/结果/退出/日志）。不带 task_id：列出可见任务，可选 kind 过滤（delegate\|command）。**任务完成会自动通知本会话——不要为等待而轮询**；仅当用户要求查看进度或需要任务列表时调用。 |
+| `task_status` | generic | 查询后台任务（delegate bt_xxx 与 command cmd_xxx 统一）。默认范围：**当前会话工作目录**下所有会话的任务（同目录跨会话的协调面）——其他工作目录的任务默认不查、不用、不提；仅当竞争问题确实跨目录时用 scope="global" 显式查全局（用完即回，其他目录信息不进入常规汇报）。带 task_id：返回该任务**完整快照**（含结果/输出尾部/日志路径；仅限可见范围）。不带 task_id：列出可见任务（**默认最近 20 条**，`limit` 可调、上限 100；条目为定位用精简字段——id/kind/status/描述截断/时间，完整内容按 task_id 查询），可选 kind 过滤（delegate\|command）。**任务完成会自动通知本会话——不要为等待而轮询**；仅当用户要求查看进度或需要任务列表时调用。 |
 | `todo` | generic | 管理当前会话的待办清单（会话绑定，仅本会话可见；同一时期只保留一批同源待办）。**每种操作只有一种写法**——要改/删单条也放进数组（长度 1）：create 传 `todos` 数组 = 当前完整计划（**整表替换**——未包含的旧条目（含未完成项）即被移除；想保留的条目必须包含在新列表中）；update 传 `updates` 数组（按 id 批量合并状态）；delete 传 `ids` 数组；list 查看当前清单（可用 status / goal_id 过滤）；close 清空当前批全部待办（用户目标变更、现有待办不再反映当前意图时使用，即使有未完成项）。开始多步工作先写入整份清单；推进/完成用 update（比全量重发省）；计划增删改时重发完整列表。子任务挂靠：先创建任务，再用 update 的 parent_id 挂靠（整表替换中 parent_id 不可用）。完成项默认划线保留展示，是否清理由你自行决定。 |
 | `verify_build` | terminal | 运行构建验证命令（如 cargo check）并返回结果。 |
 | `vfs_list` | generic | 按 tianyan:// URI 列出 VFS 目录下的条目。用于浏览知识库结构。 |

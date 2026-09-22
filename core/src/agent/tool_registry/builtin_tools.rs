@@ -188,7 +188,7 @@ fn def_delegate_to_agent(name: &'static str) -> ToolDefinition {
 fn def_task_status(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<TaskStatusParams>(
         name,
-        "查询后台任务（delegate bt_xxx 与 command cmd_xxx 统一）。默认范围：**当前会话工作目录**下所有会话的任务（同目录跨会话的协调面）——其他工作目录的任务默认不查、不用、不提；仅当竞争问题确实跨目录时用 scope=\"global\" 显式查全局（用完即回，其他目录信息不进入常规汇报）。带 task_id：返回该任务快照（仅限可见范围；状态/结果/退出/日志）。不带 task_id：列出可见任务，可选 kind 过滤（delegate|command）。**任务完成会自动通知本会话——不要为等待而轮询**；仅当用户要求查看进度或需要任务列表时调用。",
+        "查询后台任务（delegate bt_xxx 与 command cmd_xxx 统一）。默认范围：**当前会话工作目录**下所有会话的任务（同目录跨会话的协调面）——其他工作目录的任务默认不查、不用、不提；仅当竞争问题确实跨目录时用 scope=\"global\" 显式查全局（用完即回，其他目录信息不进入常规汇报）。带 task_id：返回该任务**完整快照**（含结果/输出尾部/日志路径；仅限可见范围）。不带 task_id：列出可见任务（**默认最近 20 条**，`limit` 可调、上限 100；条目为定位用精简字段——id/kind/status/描述截断/时间，完整内容按 task_id 查询），可选 kind 过滤（delegate|command）。**任务完成会自动通知本会话——不要为等待而轮询**；仅当用户要求查看进度或需要任务列表时调用。",
     ))
 }
 

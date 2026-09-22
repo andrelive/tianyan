@@ -1852,6 +1852,220 @@ async fn test_task_status_invalid_scope_rejected() {
     );
 }
 
+// ── task_status 列表瘦身（370KB 级全量 dump 治理） ─────────────────────
+
+/// 列表模式只返回定位用精简字段：完整字段（result / output_tail /
+/// log_file / result_path 等）只在单任务详情返回；超长描述与失败
+/// error 截断（UTF-8 安全 + 省略号）。
+///
+/// 判别力：注入旧口径（`serde_json::to_value(t)` 全量序列化）→ 本测试必红。
+#[tokio::test]
+async fn test_task_status_list_is_compact() {
+    use crate::agent::background::TaskKind;
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    let long_desc = "委托描述".repeat(200); // 2400 字节，远超列表截断阈值
+    let id = registry
+        .background_tasks
+        .register(TaskKind::Delegate, long_desc, "s1".to_string(), 0, None)
+        .await;
+    registry
+        .background_tasks
+        .complete(&id, "完整结果".repeat(500))
+        .await;
+
+    let fail_id = registry
+        .background_tasks
+        .register(
+            TaskKind::Delegate,
+            "失败任务".to_string(),
+            "s1".to_string(),
+            0,
+            None,
+        )
+        .await;
+    registry
+        .background_tasks
+        .fail(&fail_id, "错误详情".repeat(500))
+        .await;
+
+    let v = registry.execute_task_status("{}", "s1").await.unwrap();
+    let tasks = v["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 2);
+
+    for t in tasks {
+        // 定位字段必须在
+        assert!(t["id"].is_string(), "缺 id: {t}");
+        assert!(t["kind"].is_string(), "缺 kind: {t}");
+        assert!(t["status"].is_string(), "缺 status: {t}");
+        assert!(t["created_at"].is_i64(), "缺 created_at: {t}");
+        // 重字段必须不在（列表只做定位；完整字段走 task_id 查询）
+        for heavy in [
+            "result",
+            "output_tail",
+            "log_file",
+            "result_path",
+            "parent_session_id",
+            "anchor_seq",
+            "seq",
+            "working_directory",
+        ] {
+            assert!(
+                t.get(heavy).is_none(),
+                "列表条目不得携带重字段 {heavy}: {t}"
+            );
+        }
+    }
+
+    // 描述不超列表阈值：存储层（register 的 truncate_output 200）已限长，
+    // 列表保证"不超阈值"（若某来源存储值仍超阈值，则截断附省略号的路径
+    // 由下方 error 断言覆盖——同一截断代码）。
+    let done = tasks
+        .iter()
+        .find(|t| t["id"].as_str() == Some(id.as_str()))
+        .unwrap();
+    let desc = done["description"].as_str().unwrap();
+    assert!(desc.len() <= 360 + '…'.len_utf8(), "截断后应不超过阈值");
+    assert!(done.get("error").is_none(), "完成任务不应有 error: {done}");
+
+    // 失败任务的 error 保留且截断（识别失败原因）
+    let failed = tasks
+        .iter()
+        .find(|t| t["id"].as_str() == Some(fail_id.as_str()))
+        .unwrap();
+    let err = failed["error"].as_str().unwrap();
+    assert!(err.ends_with('…'), "超长 error 应截断附省略号");
+    assert!(err.len() <= 360 + '…'.len_utf8());
+}
+
+/// 列表里的命令任务条目：command / ready 保留；output_tail / log_file /
+/// pid 等重字段只在详情。
+#[tokio::test]
+async fn test_task_status_list_command_entry_is_compact() {
+    let registry = ToolRegistry::new(default_strict_policy());
+    // 真实跨平台短命令（与既有 cancel 测试同模式：30s 内自愈）
+    let task = registry
+        .command_tasks
+        .spawn_background("s1", "sleep 30", None, None, 0, None)
+        .await
+        .expect("后台命令应启动成功");
+
+    let v = registry.execute_task_status("{}", "s1").await.unwrap();
+    let tasks = v["tasks"].as_array().unwrap();
+    let cmd = tasks
+        .iter()
+        .find(|t| t["id"].as_str() == Some(task.id.as_str()))
+        .expect("列表应包含命令任务");
+    assert_eq!(cmd["kind"].as_str(), Some("command"));
+    assert_eq!(cmd["status"].as_str(), Some("running"));
+    assert!(cmd["command"].is_string(), "命令任务应有 command: {cmd}");
+    assert!(cmd["ready"].is_boolean(), "命令任务应保留 ready: {cmd}");
+    for heavy in ["output_tail", "log_file", "pid", "cwd", "exit_code"] {
+        assert!(
+            cmd.get(heavy).is_none(),
+            "命令列表条目不得携带重字段 {heavy}: {cmd}"
+        );
+    }
+
+    // 清理（失败时不清理，进程 30s 内自然退出——与既有模式一致）
+    let _ = registry
+        .execute_task_cancel(&format!(r#"{{"task_id":"{}"}}"#, task.id))
+        .await;
+}
+
+/// 列表规模治理：默认最近 20 条；limit 可调（下界 1）；最近优先；
+/// 超出部分附截断提示。
+///
+/// 判别力：注入旧口径（无 limit、全量返回）→ len==20 / len==5 断言必红。
+#[tokio::test]
+async fn test_task_status_list_limit_recent_first_and_hint() {
+    use crate::agent::background::TaskKind;
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    for i in 0..25 {
+        registry
+            .background_tasks
+            .register(
+                TaskKind::Delegate,
+                format!("task-{i:02}"),
+                "s1".to_string(),
+                0,
+                None,
+            )
+            .await;
+    }
+
+    let v = registry.execute_task_status("{}", "s1").await.unwrap();
+    let tasks = v["tasks"].as_array().unwrap();
+    assert_eq!(v["total"].as_u64(), Some(25), "total 应为可见总数");
+    assert_eq!(tasks.len(), 20, "默认仅返回最近 20 条");
+    assert_eq!(
+        tasks[0]["description"].as_str(),
+        Some("task-24"),
+        "最近注册的应在前（created_at 同毫秒时按注册序号降序）"
+    );
+    assert!(
+        v["note"].as_str().is_some_and(|n| n.contains("25")),
+        "超出默认条数应附截断提示: {v}"
+    );
+
+    let v = registry
+        .execute_task_status(r#"{"limit":5}"#, "s1")
+        .await
+        .unwrap();
+    assert_eq!(v["tasks"].as_array().unwrap().len(), 5);
+    assert_eq!(v["tasks"][0]["description"].as_str(), Some("task-24"));
+
+    // 下界 clamp：limit=0 → 至少 1 条（不返回空列表）
+    let v = registry
+        .execute_task_status(r#"{"limit":0}"#, "s1")
+        .await
+        .unwrap();
+    assert_eq!(
+        v["tasks"].as_array().unwrap().len(),
+        1,
+        "limit 下界应钳制为 1"
+    );
+}
+
+/// 详情模式（task_id）保持全量快照：result 等完整字段在此返回。
+#[tokio::test]
+async fn test_task_status_detail_keeps_full_snapshot() {
+    use crate::agent::background::TaskKind;
+
+    let registry = ToolRegistry::new(default_strict_policy());
+    let id = registry
+        .background_tasks
+        .register(
+            TaskKind::Delegate,
+            "任务".to_string(),
+            "s1".to_string(),
+            0,
+            None,
+        )
+        .await;
+    registry
+        .background_tasks
+        .complete(&id, "完整结果文本".to_string())
+        .await;
+
+    let v = registry
+        .execute_task_status(&format!(r#"{{"task_id":"{id}"}}"#), "s1")
+        .await
+        .unwrap();
+    assert_eq!(v["status"].as_str(), Some("completed"));
+    assert!(
+        v["result"]
+            .as_str()
+            .is_some_and(|r| r.contains("完整结果文本")),
+        "详情应保留完整 result 字段: {v}"
+    );
+    assert!(
+        v["parent_session_id"].is_string(),
+        "详情应保留归属字段: {v}"
+    );
+}
+
 #[tokio::test]
 async fn test_background_assigns_correct_parent_session() {
     // 回归保护：后台任务归属由调用链显式传递的 session_id 决定（非共享可变

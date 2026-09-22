@@ -19,6 +19,7 @@ use crate::agent::tool_params::{
 };
 use crate::agent::types::{AgentStreamChunk, StreamChunkType, StreamEventSender};
 use crate::common::error::TianyanError;
+use crate::common::truncate::truncate_utf8_boundary;
 use crate::common::types::{ContentLevel, ContextNamespace, Message, TianyanUri};
 use crate::executor::command::{
     ReadySpec, DEFAULT_READY_INITIAL_DELAY_MS, DEFAULT_READY_TIMEOUT_MS,
@@ -43,6 +44,14 @@ pub(crate) const PROTOCOL_TOOLS: &[&str] = &[SUBMIT_RESULT_TOOL];
 pub(crate) fn is_protocol_tool(name: &str) -> bool {
     PROTOCOL_TOOLS.contains(&name)
 }
+
+/// task_status 列表模式的默认返回条数（最近优先）。
+const LIST_DEFAULT_LIMIT: usize = 20;
+/// task_status 列表模式的条数上限（防单次调用 dump 过多条目）。
+const LIST_MAX_LIMIT: usize = 100;
+/// 列表条目中文本字段（description / command / error）的截断阈值——
+/// 360 字节（UTF-8 边界安全，约 120 汉字）。
+const LIST_ITEM_TEXT_MAX_BYTES: usize = 360;
 
 /// 目录归属键（U5：task_status 视野比较用）——统一分隔符、去尾斜杠；
 /// Windows 大小写不敏感（与文件系统语义一致）。
@@ -1094,38 +1103,87 @@ impl ToolRegistry {
         }
 
         // 列表：委托任务 + 命令任务（kind 过滤 + U5 视野过滤）。
-        let mut entries: Vec<serde_json::Value> = Vec::new();
+        //
+        // 输出为**定位用精简条目**（id / kind / status / 描述截断 / 时间；
+        // 失败任务附截断 error）——完整字段（result / output_tail / log_file
+        // 等）只在单任务详情返回。治理动因：全量序列化曾在真实使用中产生
+        // 370KB 级结果（数十任务 × 每个任务的重字段）挤占模型上下文。
         let kind_filter = params.kind.as_deref().unwrap_or("");
+        let limit = params
+            .limit
+            .unwrap_or(LIST_DEFAULT_LIMIT)
+            .clamp(1, LIST_MAX_LIMIT);
+        // (created_at, seq, item)：跨两表统一排序（最近优先）
+        let mut entries: Vec<(i64, u64, serde_json::Value)> = Vec::new();
         if kind_filter.is_empty() || kind_filter == "delegate" {
             for t in self.background_tasks.snapshot().await {
-                if visible(t.working_directory.as_deref()) {
-                    if let Ok(v) = serde_json::to_value(t) {
-                        entries.push(v);
-                    }
+                if !visible(t.working_directory.as_deref()) {
+                    continue;
                 }
+                let mut item = serde_json::json!({
+                    "id": t.id,
+                    "kind": "delegate",
+                    "status": t.status,
+                    "description": truncate_utf8_boundary(&t.description, LIST_ITEM_TEXT_MAX_BYTES),
+                    "created_at": t.created_at,
+                    "completed_at": t.completed_at,
+                });
+                if let Some(err) = &t.error {
+                    item["error"] =
+                        serde_json::json!(truncate_utf8_boundary(err, LIST_ITEM_TEXT_MAX_BYTES));
+                }
+                entries.push((t.created_at, t.seq, item));
             }
         }
         if kind_filter.is_empty() || kind_filter == "command" {
             for t in self.command_tasks.list().await {
-                if visible(t.working_directory.as_deref()) {
-                    if let Ok(v) = serde_json::to_value(t) {
-                        entries.push(v);
-                    }
+                if !visible(t.working_directory.as_deref()) {
+                    continue;
                 }
+                let mut item = serde_json::json!({
+                    "id": t.id,
+                    "kind": "command",
+                    "status": t.status,
+                    "command": truncate_utf8_boundary(&t.command, LIST_ITEM_TEXT_MAX_BYTES),
+                    "created_at": t.created_at,
+                    "completed_at": t.completed_at,
+                    "ready": t.ready,
+                });
+                if let Some(code) = t.exit_code {
+                    item["exit_code"] = serde_json::json!(code);
+                }
+                entries.push((t.created_at, t.seq, item));
             }
         }
+        let total = entries.len();
+        // 最近优先：created_at 降序；同毫秒按注册序号降序（seq 单调递增）
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        let shown: Vec<serde_json::Value> = entries
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, item)| item)
+            .collect();
+        let shown_len = shown.len();
+
         // scope 回显：让模型明确当前视野（global 用于跨目录协调后"用完即回"）。
         let mut out = serde_json::json!({
-            "tasks": entries,
-            "total": entries.len(),
+            "tasks": shown,
+            "total": total,
             "scope": if scope_global { "global" } else { "workspace" },
         });
+        // note 合成：视野降级提示 + 列表截断提示（两者可同时出现）
+        let mut notes: Vec<String> = Vec::new();
         if scope_degraded {
+            notes.push("无法解析当前会话工作目录，已列出全部任务".to_string());
+        }
+        if total > shown_len {
+            notes.push(format!(
+                "共 {total} 条可见任务，已返回最近 {shown_len} 条；用 task_id 查详情（limit 可调，上限 {LIST_MAX_LIMIT}）"
+            ));
+        }
+        if !notes.is_empty() {
             if let Some(obj) = out.as_object_mut() {
-                obj.insert(
-                    "note".to_string(),
-                    serde_json::json!("无法解析当前会话工作目录，已列出全部任务"),
-                );
+                obj.insert("note".to_string(), serde_json::json!(notes.join("；")));
             }
         }
         Ok(out)
