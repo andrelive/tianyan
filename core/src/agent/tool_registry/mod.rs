@@ -887,13 +887,18 @@ impl ToolRegistry {
                 )
             });
         }
-        let mut results = Vec::new();
+        let mut by_id: HashMap<String, ToolExecutionOutcome> = HashMap::new();
         while let Some(res) = set.join_next().await {
             if let Ok((id, outcome)) = res {
-                results.push((id, outcome));
+                by_id.insert(id, outcome);
             }
         }
-        results
+        // 按 `calls` 原序回填：并行完成顺序不确定，而落库/上下文/流式推送顺序
+        // 必须稳定——否则下一轮请求前缀变化（打掉前缀缓存），历史顺序也随机。
+        calls
+            .iter()
+            .filter_map(|c| by_id.remove(&c.id).map(|o| (c.id.clone(), o)))
+            .collect()
     }
 
     async fn execute_single(

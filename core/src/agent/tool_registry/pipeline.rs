@@ -212,6 +212,48 @@ mod tests {
         }
     }
 
+    /// P1-31 回归：并行工具结果按 `calls` 原序返回（完成顺序不确定，
+    /// 但落库/上下文/推送顺序必须稳定——否则打掉前缀缓存）。
+    #[tokio::test]
+    async fn test_execute_parallel_preserves_call_order() {
+        struct SlowFirstGuard;
+        #[async_trait]
+        impl ToolPreExecuteListener for SlowFirstGuard {
+            async fn on_pre_execute(
+                &self,
+                call: &ToolCall,
+                _session_id: &str,
+                _subagent: bool,
+            ) -> PreDecision {
+                // 首个调用（id=slow）延迟 300ms → 并行完成顺序变成 fast 先完成
+                if call.id == "slow" {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+                PreDecision::Allow
+            }
+        }
+
+        let mut registry = ToolRegistry::new(SecurityPolicy::default());
+        registry.register_pre_execute_listener(Arc::new(SlowFirstGuard));
+        let make = |id: &str| ToolCall {
+            id: id.into(),
+            call_type: ToolCallType::Function,
+            function: FunctionCall {
+                name: "read_file".into(),
+                arguments: r#"{"path":"/nonexistent/order-test"}"#.into(),
+            },
+        };
+        let results = registry
+            .execute_parallel(&[make("slow"), make("fast")], "s", false)
+            .await;
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].0, "slow",
+            "结果必须按 calls 原序（不得按完成顺序）"
+        );
+        assert_eq!(results[1].0, "fast");
+    }
+
     /// A1：pre-execute 监听器拒绝时，工具不执行、post-execute 不触发（fail-closed）。
     #[tokio::test]
     async fn test_pre_execute_deny_aborts_pipeline() {

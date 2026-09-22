@@ -126,7 +126,7 @@ impl SessionStore {
         &self,
         session_id: &str,
         msg: &StructuredMessage,
-    ) -> Result<(), TianyanError> {
+    ) -> Result<i64, TianyanError> {
         self.append_message_inner(session_id, msg, true).await
     }
 
@@ -136,7 +136,7 @@ impl SessionStore {
         &self,
         session_id: &str,
         msg: &StructuredMessage,
-    ) -> Result<(), TianyanError> {
+    ) -> Result<i64, TianyanError> {
         self.append_message_inner(session_id, msg, false).await
     }
 
@@ -146,7 +146,7 @@ impl SessionStore {
         session_id: &str,
         msg: &StructuredMessage,
         index_fts: bool,
-    ) -> Result<(), TianyanError> {
+    ) -> Result<i64, TianyanError> {
         let (text, tool_text) = extract_parts(msg);
         let content_parts = serde_json::to_string(msg).map_err(|e| {
             TianyanError::Custom(format!("session: session_store: 序列化错误：{e}"))
@@ -212,7 +212,7 @@ impl SessionStore {
         .map_err(|e| sqlite_error("会话活跃时间刷新失败", e))?;
         tx.commit()
             .map_err(|e| sqlite_error("追加事务提交失败", e))?;
-        Ok(())
+        Ok(seq)
     }
 
     /// 加载会话：元数据 + 全量消息（按 seq 升序）。

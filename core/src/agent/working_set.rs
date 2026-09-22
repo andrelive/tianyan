@@ -223,20 +223,19 @@ impl SessionWorkingSet {
     ///
     /// `index_fts = false` 用于子智能体会话（ADR-026：不索引 FTS）。
     pub async fn append(&self, msg: &StructuredMessage, index_fts: bool) -> Result<i64> {
-        if index_fts {
-            self.store.append_message(&self.session_id, msg).await?;
+        let seq = if index_fts {
+            self.store.append_message(&self.session_id, msg).await?
         } else {
             self.store
                 .append_message_no_fts(&self.session_id, msg)
-                .await?;
-        }
+                .await?
+        };
         let mut st = self.state.write().await;
         st.structured_messages.push(msg.clone());
         st.last_activity = Instant::now();
         drop(st);
-        // 段化后不能数段内条数（段是完整链的后缀）——库尾 seq 由写收口保证
-        // 与段尾同步，直接推进（append 前 last_seq 即库尾，新条 seq = 库尾+1）。
-        let seq = self.last_seq() + 1;
+        // 按**库返回的**真实 seq 落位（此前自推 `last_seq()+1`：绕过工作集的
+        // 直写/并发写会让自推值与库实际分配值错位）
         self.last_seq.store(seq, Ordering::SeqCst);
         // ADR-028「落库即推送」（ADR-035 §3 补记）：写侧收口后所有写入经工作集，
         // 边界消息（System 通知 / 压缩点）的推送改挂此处——与旧
@@ -994,5 +993,26 @@ mod tests {
         // 释放引用且空闲（TTL=0）→ 卸载
         let unloaded = reg.sweep_idle(Duration::from_secs(0)).await;
         assert_eq!(unloaded, 1, "无引用且空闲应卸载");
+    }
+
+    /// P1-34 回归：绕过工作集的直写后，工作集 append 必须按库真实 seq 落位
+    /// （自推 `last_seq()+1` 会与库分配值错位）。
+    #[tokio::test]
+    async fn test_append_uses_db_allocated_seq_when_bypassed() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        let ws = reg.ensure("s1").await.unwrap();
+
+        // 绕过工作集直写库（模拟 API 层写入 / 其它写路径）
+        store
+            .append_message("s1", &user_msg("s1", "绕过写入"))
+            .await
+            .unwrap();
+        let db_last = store.last_seq("s1").await.unwrap();
+
+        let seq = ws.append(&user_msg("s1", "经工作集"), true).await.unwrap();
+        assert_eq!(seq, db_last + 1, "应按库真实 seq 落位");
+        assert_eq!(ws.last_seq(), seq, "工作集水位与库一致");
     }
 }
