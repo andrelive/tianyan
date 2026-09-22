@@ -381,15 +381,28 @@ impl SnapshotManager {
             }
         }
 
+        let mut scan_ok = true;
         for session_dir in &session_dirs {
             let trees_dir = session_dir.join("trees");
-            if trees_dir.is_dir() {
-                collect_tree_hashes(&trees_dir, "", &mut reachable).await;
+            if trees_dir.is_dir() && !collect_tree_hashes(&trees_dir, "", &mut reachable).await {
+                scan_ok = false;
             }
             let redo_dir = session_dir.join("redo");
-            if redo_dir.is_dir() {
-                collect_tree_hashes(&redo_dir, "tree-", &mut reachable).await;
+            if redo_dir.is_dir() && !collect_tree_hashes(&redo_dir, "tree-", &mut reachable).await {
+                scan_ok = false;
             }
+        }
+        if !scan_ok {
+            // 损坏/不可读树文件的引用无法收集，照常清扫会把活对象判为孤儿删除
+            // （数据丢失）——安全优先：本轮不做任何删除，待树文件修复后下轮再清。
+            tracing::warn!("snapshot: 存在无法解析/读取的树文件，跳过本轮 GC 清扫（防误删活对象）");
+            return Ok(GcStats {
+                objects_removed: 0,
+                objects_retained: 0,
+                cache_files_removed: 0,
+                total_objects: 0,
+                session_dirs_removed: 0,
+            });
         }
 
         // ── 清扫阶段：删除不可达对象并清理空子目录 ──────────────────
@@ -532,16 +545,12 @@ impl SnapshotManager {
         }
         let json = serde_json::to_string(&tree)
             .map_err(|e| TianyanError::Custom(format!("snapshot: 序列化快照树失败: {e}")))?;
-        fs::write(tree_path, json)
-            .await
-            .map_err(|e| TianyanError::Custom(format!("snapshot: 写入快照树失败: {e}")))?;
+        write_atomic(tree_path, &json).await?;
 
         // 写入本轮缓存,供下一轮复用
         let cache_json = serde_json::to_string(&cache)
             .map_err(|e| TianyanError::Custom(format!("snapshot: 序列化缓存失败: {e}")))?;
-        fs::write(cache_path, cache_json)
-            .await
-            .map_err(|e| TianyanError::Custom(format!("snapshot: 写入缓存失败: {e}")))?;
+        write_atomic(cache_path, &cache_json).await?;
 
         tracing::debug!(files = tree.len(), "已捕获工作区快照");
         Ok(())
@@ -559,6 +568,18 @@ impl SnapshotManager {
         // 1. 收集当前工作区状态
         let mut current: SnapshotTree = HashMap::new();
         self.walk_current(workdir, "", &mut current).await?;
+
+        // 1'. 预校验：需要写入的对象必须全部存在——先全量校验再动手，
+        // 避免写到一半才发现对象缺失、留下半恢复的工作区（非原子恢复的
+        // 主要失败来源）。缺失即中止（工作区未改动）。
+        for (rel_path, hash) in &tree {
+            let need_write = !matches!(current.get(rel_path), Some(cur) if cur == hash);
+            if need_write && fs::metadata(self.object_path(hash)).await.is_err() {
+                return Err(TianyanError::Custom(format!(
+                    "snapshot: 快照对象缺失（{rel_path} → {hash}），已中止恢复（工作区未改动）"
+                )));
+            }
+        }
 
         let mut restored = 0usize;
 
@@ -883,14 +904,23 @@ async fn has_json_file(dir: &Path) -> bool {
 ///
 /// `trees/` 传空前缀匹配 `0.json`（消息处理前快照，数字索引）；
 /// `redo/` 传 `tree-` 匹配 `tree-{message_id}.json`（重做树，消息 ID 键）。
-/// `.cache.json` 等缓存文件不匹配命名规则,直接忽略；格式损坏的树文件以
-/// warn 日志跳过（不影响其余文件的回收）。
-async fn collect_tree_hashes(dir: &Path, prefix: &str, reachable: &mut HashSet<String>) {
+/// `.cache.json` 等缓存文件不匹配命名规则,直接忽略。
+///
+/// 返回 `false` = 存在无法读取/解析的树文件（引用不完整）——调用方必须
+/// **放弃本轮清扫**：照常清扫会把该树引用的活对象判为孤儿并删除。
+async fn collect_tree_hashes(dir: &Path, prefix: &str, reachable: &mut HashSet<String>) -> bool {
     let Ok(mut entries) = fs::read_dir(dir).await else {
-        return;
+        tracing::warn!(?dir, "snapshot: GC 无法读取树目录（本轮清扫跳过）");
+        return false;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name().to_string_lossy().into_owned();
+        // 缓存文件（`{index}.cache.json`）不是树文件——必须显式排除：其结构与
+        // 树不同，被当作树解析必然失败（旧行为仅 warn 噪音；保守清扫下会
+        // 让 GC 永久跳过）
+        if name.ends_with(".cache.json") {
+            continue;
+        }
         let Some(index_part) = name.strip_suffix(".json") else {
             continue;
         };
@@ -904,14 +934,32 @@ async fn collect_tree_hashes(dir: &Path, prefix: &str, reachable: &mut HashSet<S
             Ok(content) => match serde_json::from_str::<SnapshotTree>(&content) {
                 Ok(tree) => reachable.extend(tree.values().cloned()),
                 Err(e) => {
-                    tracing::warn!(path = %name, error = %e, "snapshot: GC 跳过无法解析的树文件");
+                    tracing::warn!(path = %name, error = %e, "snapshot: 树文件无法解析（本轮清扫跳过，防误删活对象）");
+                    return false;
                 }
             },
             Err(e) => {
-                tracing::warn!(path = %name, error = %e, "snapshot: GC 读取树文件失败");
+                tracing::warn!(path = %name, error = %e, "snapshot: 树文件读取失败（本轮清扫跳过）");
+                return false;
             }
         }
     }
+    true
+}
+
+/// 原子写（temp + rename 同目录替换）。
+///
+/// 半写的快照树/缓存会被后续读取判为损坏（GC 因此跳过本轮清扫）——
+/// 直接 `fs::write` 在断电/崩溃下会留下截断文件。
+async fn write_atomic(path: &Path, content: &str) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, content)
+        .await
+        .map_err(|e| TianyanError::Custom(format!("snapshot: 写入临时文件失败: {e}")))?;
+    fs::rename(&tmp, path)
+        .await
+        .map_err(|e| TianyanError::Custom(format!("snapshot: 原子替换失败: {e}")))?;
+    Ok(())
 }
 
 /// 计算内容的 SHA256 十六进制摘要。
@@ -1305,6 +1353,84 @@ mod tests {
         assert_eq!(stats.objects_retained, 0);
         assert_eq!(stats.cache_files_removed, 0);
         assert_eq!(stats.total_objects, 0);
+    }
+
+    /// P1-14 回归：树文件损坏时跳过本轮 GC 清扫（防误删活对象）。
+    #[tokio::test]
+    async fn test_gc_skips_sweep_when_tree_corrupt() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "活内容");
+        mgr.capture("s1", "0").await.unwrap();
+        let objects_before = count_files(&mgr.root.join("objects"));
+        assert!(objects_before > 0, "前置：应有对象");
+
+        // 破坏树文件（模拟断电半写 / 磁盘损坏）
+        let tree_path = mgr.trees_dir("s1").join("0.json");
+        std::fs::write(&tree_path, "{ 损坏的 JSON").unwrap();
+
+        let stats = mgr.gc().await.unwrap();
+        assert_eq!(stats.objects_removed, 0, "损坏树时应跳过清扫");
+        assert_eq!(
+            count_files(&mgr.root.join("objects")),
+            objects_before,
+            "活对象不得被误删"
+        );
+    }
+
+    /// P1-14 回归：对象缺失时先校验后动手（不得半恢复工作区）。
+    #[tokio::test]
+    async fn test_restore_aborts_before_writing_when_object_missing() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "旧内容");
+        mgr.capture("s1", "0").await.unwrap();
+
+        // 目标树：a.txt（对象存在）+ ghost.txt（对象不存在）
+        let a_hash = {
+            let tree = mgr.load_tree("s1", "0").await.unwrap();
+            tree.get("a.txt").cloned().unwrap()
+        };
+        let mut target: SnapshotTree = HashMap::new();
+        target.insert("a.txt".to_string(), a_hash);
+        target.insert("ghost.txt".to_string(), "0".repeat(64));
+
+        // 改动工作区 a.txt（使恢复必须写 a.txt）
+        write(&mgr.workdir, "a.txt", "新内容");
+
+        let err = mgr
+            .restore_tree(target, &mgr.workdir)
+            .await
+            .expect_err("对象缺失应中止恢复");
+        assert!(err.to_string().contains("对象缺失"), "错误信息: {err}");
+        assert_eq!(
+            read(&mgr.workdir, "a.txt"),
+            "新内容",
+            "中止发生在任何写入之前（工作区未被改动）"
+        );
+    }
+
+    /// P1-14：快照树/缓存原子写（不留 .tmp 残留，落盘可解析）。
+    #[tokio::test]
+    async fn test_capture_tree_uses_atomic_write() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "内容");
+        mgr.capture("s1", "0").await.unwrap();
+
+        let trees = mgr.trees_dir("s1");
+        let mut names: Vec<String> = std::fs::read_dir(&trees)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert!(
+            !names.iter().any(|n| n.ends_with(".tmp")),
+            "不应残留临时文件: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "0.json"),
+            "树文件应落盘: {names:?}"
+        );
+        let raw = std::fs::read_to_string(trees.join("0.json")).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&raw).is_ok());
     }
 
     #[tokio::test]
