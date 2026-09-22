@@ -426,10 +426,12 @@ impl WorkingSetRegistry {
                     self.boundary_push.clone(),
                 ));
                 ws.rebuild().await?;
-                self.sets
-                    .lock()
-                    .await
-                    .insert(session_id.to_string(), ws.clone());
+                // 竞态收口：检查—重建—插入之间无锁（rebuild 是 await 点），并发
+                // ensure 可能各建一个实例 → 同一会话两份工作集（缓存/写收口分叉）。
+                // 以**先入者**为准：后到者丢弃自建实例，返回注册表中的那一个。
+                let mut sets = self.sets.lock().await;
+                let ws = sets.entry(session_id.to_string()).or_insert(ws).clone();
+                drop(sets);
                 return Ok(ws);
             }
         };
@@ -499,11 +501,15 @@ impl WorkingSetRegistry {
             let locks = self.locks.lock().await;
             let mut out = Vec::new();
             for (sid, ws) in sets.iter() {
-                let in_use = locks
+                // 使用中判定双保险：① 会话锁被持有（有 loop 在跑）；
+                // ② 工作集实例被外部引用（有人 get 到 Arc 但未持锁）——
+                // 卸载会使其后续写入绕过注册表（缓存与库分叉）
+                let lock_held = locks
                     .get(sid)
                     .map(|l| Arc::strong_count(l) > 1)
                     .unwrap_or(false);
-                if !in_use && ws.is_idle(ttl).await {
+                let ws_shared = Arc::strong_count(ws) > 1;
+                if !lock_held && !ws_shared && ws.is_idle(ttl).await {
                     out.push(sid.clone());
                 }
             }
@@ -954,5 +960,39 @@ mod tests {
         assert_eq!(ws.message_count().await, 1, "段内只剩压缩点");
         assert_eq!(ws.last_seq(), 4, "库尾不变");
         assert!(!ws.has_unconsumed(), "收缩后消费水位推进到库尾");
+    }
+
+    /// P1-32 回归：并发 ensure 只注册一个实例（以先入者为准，防双实例分叉）。
+    #[tokio::test]
+    async fn test_concurrent_ensure_yields_single_instance() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        let reg = WorkingSetRegistry::new(Some(store));
+
+        let (a, b) = tokio::join!(reg.ensure("s1"), reg.ensure("s1"));
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "并发 ensure 必须返回同一实例（不得双实例）"
+        );
+        assert_eq!(reg.loaded_count().await, 1);
+    }
+
+    /// P1-32 回归：外部持有工作集引用（未持锁）时不得被空闲卸载。
+    #[tokio::test]
+    async fn test_sweep_keeps_externally_referenced_set() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        let reg = WorkingSetRegistry::new(Some(store));
+        let ws = reg.ensure("s1").await.unwrap();
+
+        let unloaded = reg.sweep_idle(Duration::from_secs(0)).await;
+        assert_eq!(unloaded, 0, "被外部引用的工作集不得卸载");
+        assert!(reg.get("s1").await.is_some());
+        drop(ws);
+
+        // 释放引用且空闲（TTL=0）→ 卸载
+        let unloaded = reg.sweep_idle(Duration::from_secs(0)).await;
+        assert_eq!(unloaded, 1, "无引用且空闲应卸载");
     }
 }

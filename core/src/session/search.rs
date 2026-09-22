@@ -243,10 +243,13 @@ mod tests {
     async fn make_pair() -> (Arc<SessionStore>, Arc<SessionRecall>) {
         let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
-        (
-            SessionStore::new(db.clone()).unwrap(),
-            SessionRecall::new(db).unwrap(),
-        )
+        let store = SessionStore::new(db.clone()).unwrap();
+        // 会话权威存储要求显式 create（append 不再隐式重建幽灵会话）
+        store
+            .create("s1", &crate::session::SessionHeader::default())
+            .await
+            .unwrap();
+        (store, SessionRecall::new(db).unwrap())
     }
 
     #[tokio::test]

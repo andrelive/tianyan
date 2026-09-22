@@ -155,13 +155,24 @@ impl SessionStore {
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| sqlite_error("追加事务开启失败", e))?;
-        // 确保会话元数据存在（append 即隐式创建，与旧 JSONL append 语义一致；
-        // created_at 缺省 0，由后续 update_header/create 固化）
-        tx.execute(
-            "INSERT OR IGNORE INTO session_meta (session_id, header_json) VALUES (?1, '{}')",
-            rusqlite::params![session_id],
-        )
-        .map_err(|e| sqlite_error("会话元数据初始化失败", e))?;
+        // 会话必须已存在（显式 create）：此前 append 隐式重建 session_meta——
+        // 向**已删除**会话的写入（级联删除后仍在跑的子代理 / 流式收尾 / 唤醒轮）
+        // 会静默重建幽灵根会话（丢 parent、进主列表，且消息进 FTS 可被回忆）。
+        // 拒绝写入并返回 not_found（调用方按"会话已消失"处理）。
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM session_meta WHERE session_id = ?1",
+                rusqlite::params![session_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| sqlite_error("会话元数据查询失败", e))?
+            .is_some();
+        if !exists {
+            return Err(TianyanError::not_found(format!(
+                "session: session_store: 会话不存在（拒绝向已删除会话写入）：{session_id}"
+            )));
+        }
         // 原子取号：同一事务/同一连接内串行，并发追加不会撞号
         let seq: i64 = tx
             .query_row(
@@ -819,14 +830,24 @@ mod tests {
         }
         let (_, messages) = store.load("s1").await.unwrap().unwrap();
         assert_eq!(messages.len(), 5);
-        // 消息行独立于 meta：追加到不存在的会话仍成功（meta 由 create 负责）
-        store
+        // P1-33：追加到不存在的会话被拒（不再隐式重建幽灵会话；meta 由 create 负责）
+        let err = store
             .append_message("ghost", &msg("g1", MessageRole::User, "y"))
             .await
+            .expect_err("向不存在的会话写入应被拒");
+        assert!(err.is_not_found(), "应为 not_found 语义：{err}");
+        assert!(
+            store.load("ghost").await.unwrap().is_none(),
+            "不得凭空建会话"
+        );
+        // 不同会话序号独立（各 1 条 vs s1 的 5 条）
+        store.create("s2", &SessionHeader::default()).await.unwrap();
+        store
+            .append_message("s2", &msg("g2", MessageRole::User, "y"))
+            .await
             .unwrap();
-        let (_, messages) = store.load("ghost").await.unwrap().unwrap();
+        let (_, messages) = store.load("s2").await.unwrap().unwrap();
         assert_eq!(messages.len(), 1);
-        // 不同会话序号独立（ghost 有 1 条，s1 有 5 条）
         let (_, messages) = store.load("s1").await.unwrap().unwrap();
         assert_eq!(messages.len(), 5);
     }
@@ -979,6 +1000,28 @@ mod tests {
             })
             .unwrap();
         assert_eq!(fts, 0, "FTS 索引不得残留被删会话的消息");
+    }
+
+    /// P1-33 回归：向已删除会话写入必须被拒（此前 `INSERT OR IGNORE` 静默
+    /// 重建幽灵根会话——丢 parent、进主列表，且消息进 FTS 可被回忆）。
+    #[tokio::test]
+    async fn test_append_to_deleted_session_is_not_found() {
+        let store = make_store().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        store.delete("s1").await.unwrap();
+
+        let err = store
+            .append_message("s1", &msg("m1", MessageRole::User, "幽灵写入"))
+            .await
+            .expect_err("向已删除会话写入应失败");
+        assert!(err.is_not_found(), "应为 not_found 语义：{err}");
+
+        // 幽灵会话不得被重建（会话可见性由 session_meta 决定）
+        let metas = store.list_meta().await.unwrap();
+        assert!(
+            !metas.iter().any(|m| m.session_id == "s1"),
+            "不得重建幽灵会话"
+        );
     }
 
     /// T0-13：上限清理从**根会话**递归删整棵树（不留孤儿）。

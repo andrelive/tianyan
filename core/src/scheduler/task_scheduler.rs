@@ -197,6 +197,12 @@ struct PersistedTaskState {
 /// 扫描间隔默认值（秒）。
 pub const DEFAULT_TICK_SECS: u64 = 60;
 
+/// 单任务执行超时（秒）——串行扫描下防止单任务 hang 拖死全部定时任务。
+///
+/// 取值依据：最重的任务是演化综述（一次 LLM 轮 + 工具调用，实测数分钟）；
+/// 30 分钟是「远大于正常、远小于永久挂死」的兜底。
+pub const TASK_TIMEOUT_SECS: u64 = 1800;
+
 /// 统一任务调度器：单扫描循环 + 顺序执行（ADR-024）。
 pub struct TaskScheduler {
     /// 已注册任务（注册顺序 = 扫描顺序；量级 <10，Vec 足够）。
@@ -209,6 +215,8 @@ pub struct TaskScheduler {
     state_path: Option<PathBuf>,
     /// 扫描间隔（秒）。
     tick_secs: u64,
+    /// 单任务执行超时（秒；默认 [`TASK_TIMEOUT_SECS`]，测试/运维可覆盖）。
+    task_timeout_secs: u64,
     /// 当前正在执行的任务 ID（顺序执行，至多一个；None = 空闲）。
     executing: RwLock<Option<String>>,
 }
@@ -268,6 +276,7 @@ impl TaskScheduler {
             handle: RwLock::new(None),
             state_path: None,
             tick_secs: DEFAULT_TICK_SECS,
+            task_timeout_secs: TASK_TIMEOUT_SECS,
             executing: RwLock::new(None),
         }
     }
@@ -275,6 +284,12 @@ impl TaskScheduler {
     /// 设置扫描间隔（秒）。
     pub fn with_tick_secs(mut self, tick_secs: u64) -> Self {
         self.tick_secs = tick_secs.max(1);
+        self
+    }
+
+    /// 设置单任务执行超时（秒）——默认 [`TASK_TIMEOUT_SECS`]。
+    pub fn with_task_timeout_secs(mut self, secs: u64) -> Self {
+        self.task_timeout_secs = secs.max(1);
         self
     }
 
@@ -293,7 +308,14 @@ impl TaskScheduler {
             return; // 文件缺失 = 首次运行
         };
         let Ok(map) = serde_json::from_str::<HashMap<String, PersistedTaskState>>(&content) else {
-            tracing::warn!(path = %path.display(), "调度器状态文件损坏（忽略，任务按从未执行处理）");
+            // 损坏证据另存（.corrupt）：保留诊断样本，避免被下次成功写覆盖
+            let corrupt = path.with_extension("json.corrupt");
+            let _ = tokio::fs::rename(path, &corrupt).await;
+            tracing::warn!(
+                path = %path.display(),
+                corrupt = %corrupt.display(),
+                "调度器状态文件损坏（已另存 .corrupt；任务按从未执行处理 → 下轮补跑）"
+            );
             return;
         };
         let mut tasks = self.tasks.write().await;
@@ -335,8 +357,16 @@ impl TaskScheduler {
                 if let Some(parent) = path.parent() {
                     let _ = tokio::fs::create_dir_all(parent).await;
                 }
-                if let Err(e) = tokio::fs::write(path, json).await {
-                    tracing::error!(error = %e, path = %path.display(), "调度器状态持久化失败");
+                // 原子写（temp + rename）：半写状态文件（断电/崩溃）会被 load_state
+                // 判为损坏 → 全部任务视为从未执行 → 同时补跑；rename 到同目录为
+                // 原子替换（Windows 亦为 MoveFileEx 替换语义）
+                let tmp = path.with_extension("json.tmp");
+                if let Err(e) = tokio::fs::write(&tmp, &json).await {
+                    tracing::error!(error = %e, path = %tmp.display(), "调度器状态持久化失败（临时文件）");
+                    return;
+                }
+                if let Err(e) = tokio::fs::rename(&tmp, path).await {
+                    tracing::error!(error = %e, path = %path.display(), "调度器状态原子替换失败");
                 }
             }
             Err(e) => tracing::error!(error = %e, "调度器状态序列化失败"),
@@ -567,7 +597,27 @@ impl TaskScheduler {
 
         // 标记执行中（顺序执行语义下至多一个；供状态查询展示"执行中"）
         *self.executing.write().await = Some(task_id.to_string());
-        let result = handler.execute(ctx).await;
+        // 任务级超时：单任务 hang（LLM 请求无响应等）此前会拖死整个扫描循环
+        // （串行执行 ⇒ 后续所有定时任务停摆）——超时即中断该任务并记失败
+        let timeout_secs = self.task_timeout_secs;
+        let result = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(timeout_secs),
+            handler.execute(ctx),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::error!(
+                    task = %task_id,
+                    timeout_secs,
+                    "任务执行超时（已中断，继续后续任务）"
+                );
+                TaskResult::failed(TianyanError::timeout(format!(
+                    "scheduler: 任务 {task_id} 超过 {timeout_secs}s 未完成（已中断）"
+                )))
+            }
+        };
         *self.executing.write().await = None;
 
         // 执行完成后补记运行统计 + last_run + last_error（重新获取写锁，短临界区）。
@@ -830,6 +880,87 @@ mod tests {
         let runs = log.lock().unwrap().len();
         assert_eq!(runs, 1, "超期任务应恰好补跑一次，实际 {runs}");
         assert_eq!(snapshot[0].run_count, 6, "run_count 跨重启延续（5+1）");
+    }
+
+    /// P1-11 回归：单任务超时被中断并记失败（此前 hang 任务拖死整个扫描循环）。
+    #[tokio::test]
+    async fn test_execute_task_times_out_and_records_failure() {
+        struct HangTask;
+        #[async_trait::async_trait]
+        impl TaskHandler for HangTask {
+            async fn execute(&self, _ctx: &TaskContext) -> TaskResult {
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                TaskResult::success(0)
+            }
+            fn name(&self) -> &str {
+                "hang"
+            }
+        }
+
+        let scheduler = TaskScheduler::new().with_task_timeout_secs(1);
+        scheduler
+            .register_task(TaskDefinition::new(
+                "hang",
+                "挂起任务",
+                60,
+                Arc::new(HangTask),
+            ))
+            .await
+            .unwrap();
+        let ctx = make_context();
+
+        let started = std::time::Instant::now();
+        let result = scheduler.execute_task("hang", &ctx).await.unwrap();
+        assert!(!result.success, "超时任务应记为失败");
+        assert!(
+            result
+                .error
+                .as_ref()
+                .map(|e| e.is_timeout())
+                .unwrap_or(false),
+            "错误应为 timeout 语义: {:?}",
+            result.error
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "应在超时值附近返回（实际 {:?}）",
+            started.elapsed()
+        );
+
+        // last_error 可追溯（洞察页此前只显示次数）
+        let statuses = scheduler.snapshot().await;
+        let st = statuses.iter().find(|s| s.id == "hang").unwrap();
+        assert!(
+            st.last_error.as_deref().unwrap_or("").contains("超时"),
+            "last_error 应记录超时: {:?}",
+            st.last_error
+        );
+    }
+
+    /// P1-15 回归：损坏的状态文件被另存 .corrupt（保留证据），原子写不留 .tmp。
+    #[tokio::test]
+    async fn test_state_file_corrupt_quarantined_and_atomic_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scheduler_state.json");
+        tokio::fs::write(&path, "{ 截断的 JSON").await.unwrap();
+
+        let scheduler = TaskScheduler::new().with_state_path(path.clone());
+        scheduler.load_state().await;
+        assert!(!path.exists(), "损坏文件应被移走（另存 .corrupt）");
+        assert!(
+            dir.path().join("scheduler_state.json.corrupt").exists(),
+            "损坏证据应保留"
+        );
+
+        // 原子写：落盘可解析、无 .tmp 残留
+        scheduler.persist_state().await;
+        assert!(path.exists(), "持久化应重建状态文件");
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&raw).is_ok());
+        assert!(
+            !dir.path().join("scheduler_state.json.tmp").exists(),
+            "不应残留临时文件"
+        );
     }
 
     #[tokio::test]
