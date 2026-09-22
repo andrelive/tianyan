@@ -477,6 +477,55 @@ async fn test_retrieve_by_namespace_bypasses_intent_scope() {
     );
 }
 
+/// P0-7 回归：系统/运维路径（归档/评审）不得作为检索结果。
+///
+/// 存量污染形态：历史索引里残留归档规则向量点（新内容已由摘要与索引采集
+/// 侧拦截，此处兜底过滤）。
+#[tokio::test]
+async fn test_retrieve_filters_system_paths() {
+    let (retriever, storage) = create_test_retriever_with_data().await;
+
+    let live = TianyanUri::new(
+        ContextNamespace::Agent,
+        vec!["learned".to_string(), "live-rule".to_string()],
+    );
+    let archived = TianyanUri::new(
+        ContextNamespace::Agent,
+        vec![
+            "learned".to_string(),
+            "archive".to_string(),
+            "stale-rule".to_string(),
+        ],
+    );
+    for uri in [&live, &archived] {
+        let payload =
+            crate::common::types::EntryMetadata::new(uri.clone(), "unknown").with_category("agent");
+        let point = VectorPoint {
+            schema_version: crate::vfs::CURRENT_SCHEMA_VERSION,
+            id: uri.to_point_id(),
+            abstract_vector: Some(vec![0.1; 768]),
+            overview_vector: Some(vec![0.2; 768]),
+            visual_vector: None,
+            payload,
+        };
+        storage.upsert_point(&point).await.unwrap();
+    }
+
+    let results = retriever
+        .retrieve_by_namespace("rule", 20, ContextNamespace::Agent)
+        .await
+        .unwrap();
+    let uris: Vec<&str> = results.iter().map(|r| r.uri.as_str()).collect();
+    assert!(
+        uris.iter().any(|u| u.contains("live-rule")),
+        "活跃规则应可检索: {uris:?}"
+    );
+    assert!(
+        !uris.iter().any(|u| u.contains("archive")),
+        "归档路径不得作为检索结果: {uris:?}"
+    );
+}
+
 // ==================== Builder Removed ====================
 // DualLayerRetrieverBuilder removed — used only in these tests, never in production.
 // DualLayerRetriever::new() + with_*() methods provide the same functionality directly.

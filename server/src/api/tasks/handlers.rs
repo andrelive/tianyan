@@ -91,15 +91,12 @@ pub async fn subscribe_events(
     // 快照：完整历史（ChatMessage 展示格式）+ cursor（最新持久化 seq）
     // ADR-035 §8：只推最近 SNAPSHOT_PAGE 条（带 seq）+ has_more——更早历史由
     // 前端上滚经 /sessions/{id}/messages?before_seq= 补齐。
-    let last_seq = state
-        .session_store()
-        .last_seq(&request.session_id)
-        .await
-        .unwrap_or(-1);
+    // 读取失败不得折叠为空快照：前端 applySnapshot 是 replace 语义，推空快照
+    // 会静默清空界面消息（无提示）；读错误照常上抛（映射 500，快照不推）
+    let last_seq = state.session_store().last_seq(&request.session_id).await?;
     let page = session_manager
         .load_before(&request.session_id, last_seq + 1, SNAPSHOT_PAGE)
-        .await
-        .unwrap_or_default();
+        .await?;
     let has_more = page.first().map(|(seq, _)| *seq > 0).unwrap_or(false);
     let payload = build_snapshot_payload(&request.session_id, page, last_seq.max(0), has_more);
     if let Ok(json) = serde_json::to_string(&payload) {

@@ -262,20 +262,6 @@ impl IntentAnalyzer {
         );
 
         map.insert(
-            ContextNamespace::Session,
-            vec![
-                "对话".to_string(),
-                "聊天".to_string(),
-                "刚才".to_string(),
-                "之前".to_string(),
-                "上次".to_string(),
-                "session".to_string(),
-                "summary".to_string(),
-                "摘要".to_string(),
-            ],
-        );
-
-        map.insert(
             ContextNamespace::Skill,
             vec![
                 "技能".to_string(),
@@ -357,13 +343,16 @@ impl IntentAnalyzer {
         let lower = query.to_lowercase();
 
         // 按确定性顺序检查类别
-        // 优先级：User > Memory > Knowledge > Agent > Session > Skill
+        // 优先级：User > Memory > Knowledge > Agent > Skill
+        //
+        // Session 不在候选中：会话内容不入向量库（ADR-018），把它作为检索目标
+        // 只会得到恒空结果（曾使"对话/上次/摘要"类 query 静默检索为空，且无
+        // 日志线索）；会话回忆统一走 FTS5 关键词回忆（`session_recall`）。
         let ordered_categories = [
             ContextNamespace::User,
             ContextNamespace::Memory,
             ContextNamespace::Knowledge,
             ContextNamespace::Agent,
-            ContextNamespace::Session,
             ContextNamespace::Skill,
         ];
 
@@ -476,6 +465,26 @@ mod tests {
         assert!(scope.is_some());
         let scope = scope.unwrap();
         assert_eq!(scope.category_enum(), ContextNamespace::Memory);
+    }
+
+    #[test]
+    fn test_scope_inference_never_targets_session() {
+        // 回归（P0-8）：Session 不入向量库——把会话类关键词映射到 Session 会让
+        // "上次/对话/摘要"类 query 静默检索为空（无日志线索）。
+        let analyzer = IntentAnalyzer::new();
+        for q in [
+            "上次我们讨论的方案",
+            "看一下对话摘要",
+            "session notes",
+            "聊天记录",
+        ] {
+            let scope = analyzer.infer_target_scope(q);
+            assert_ne!(
+                scope.as_ref().map(|s| s.category_enum()),
+                Some(ContextNamespace::Session),
+                "query={q} 不得映射到 Session"
+            );
+        }
     }
 
     #[tokio::test]

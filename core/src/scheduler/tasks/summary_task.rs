@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::common::token_estimator::estimate_tokens;
-use crate::common::types::memory_paths;
+use crate::common::types::system_paths;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
 use crate::vfs::{ContextEntry, ABSTRACT_TOKEN_LIMIT};
@@ -85,9 +85,9 @@ impl SummaryTask {
         let entries = ctx.vfs.list(uri).await?;
 
         for entry in entries {
-            // 运维数据子域（extraction_state/evolution_reports/task_states/archive）
-            // 不参与摘要：非记忆内容，不生成 L0/L1 与向量
-            if memory_paths::is_operational_path(entry.uri()) {
+            // 系统/运维路径（记忆运维子域 + 各命名空间归档/评审）不参与摘要：
+            // 系统状态与已退役内容不得生成 L0/L1 与向量（ADR-034 判定单点）
+            if system_paths::is_system_path(entry.uri()) {
                 continue;
             }
             if entry.is_directory() {
@@ -649,6 +649,52 @@ mod tests {
         assert!(
             !has_abstract && !has_overview,
             "向量失败时摘要不得落盘（否则下次扫描判已完成，向量永不重建）"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_missing_summaries_skips_system_paths() {
+        // 回归（P0-7）：归档/评审等系统路径不得被扫入摘要——此前只有 memory
+        // 运维子域被过滤，agent 归档与 skill 评审会被重新摘要 + 向量化
+        // （已退役规则/技能由此可被检索注入）。
+        let vfs = Arc::new(MockVfs::new());
+        let agent = TianyanUri::new(ContextNamespace::Agent, vec![]);
+        let learned = agent.append("learned");
+        let archive = learned.append("archive");
+        let live = learned.append("rule-1");
+        let archived = archive.append("old-rule");
+        let skill = TianyanUri::new(ContextNamespace::Skill, vec![]);
+        let reviews = skill.append("_reviews");
+        let review = reviews.append("s1.jsonl");
+
+        vfs.add_directory(&agent, &learned);
+        vfs.add_directory(&learned, &archive);
+        vfs.add_entry(&learned, &live);
+        vfs.add_entry(&archive, &archived);
+        vfs.add_directory(&skill, &reviews);
+        vfs.add_entry(&reviews, &review);
+        for uri in [&live, &archived, &review] {
+            vfs.set_content(uri, ContentLevel::Detail, "内容");
+            vfs.add_content_metadata(uri, ContentLevel::Detail);
+        }
+
+        let ctx = make_context(vfs, MockChatService::new());
+        let missing = SummaryTask::new()
+            .scan_missing_summaries(&ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            missing.iter().any(|u| u.as_str().ends_with("rule-1")),
+            "活跃规则应待摘要: {missing:?}"
+        );
+        assert!(
+            !missing.iter().any(|u| u.as_str().contains("archive")),
+            "归档规则不得被扫入摘要: {missing:?}"
+        );
+        assert!(
+            !missing.iter().any(|u| u.as_str().contains("_reviews")),
+            "评审记录不得被扫入摘要: {missing:?}"
         );
     }
 }

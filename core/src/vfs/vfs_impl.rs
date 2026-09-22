@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::common::error::{Result, TianyanError};
 use crate::common::types::{
-    ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
+    system_paths, ContentLevel, ContextNamespace, EntryMetadata, SearchResult, TianyanUri,
 };
 use crate::model::EmbeddingService;
 use crate::vfs::backend::StorageBackend;
@@ -695,7 +695,10 @@ impl VirtualFileSystem for VirtualFileSystemImpl {
     }
 }
 
-/// 递归收集命名空间下全部文件条目 URI（目录读取失败静默跳过——回填尽力而为）。
+/// 递归收集命名空间下**可索引**文件条目 URI（目录读取失败静默跳过——回填尽力而为）。
+///
+/// 系统/运维路径（记忆运维子域 + 各命名空间归档/评审）跳过：不建向量——
+/// 已退役内容与系统日志不得进入语义检索（ADR-034 判定单点）。
 async fn collect_indexable_uris(
     vfs: &dyn VirtualFileSystem,
     uri: &TianyanUri,
@@ -706,6 +709,9 @@ async fn collect_indexable_uris(
         Err(_) => return,
     };
     for entry in entries {
+        if system_paths::is_system_path(entry.uri()) {
+            continue;
+        }
         if entry.is_directory() {
             Box::pin(collect_indexable_uris(vfs, entry.uri(), out)).await;
         } else {

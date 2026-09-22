@@ -12,7 +12,7 @@ use crate::observability::usage_stats::UsageStats;
 
 use super::types::RetrievalResult;
 use crate::common::error::Result;
-use crate::common::types::ContentLevel;
+use crate::common::types::{system_paths, ContentLevel};
 use crate::context::compression::estimate_tokens;
 use crate::vfs::VirtualFileSystem;
 
@@ -149,8 +149,11 @@ impl DualLayerRetriever {
     ) -> Result<Vec<RetrievalResult>> {
         let results = self.vfs.search(query, top_k, namespace).await?;
 
+        // 系统/运维路径不作为检索结果：归档/评审/运维子域不得复活注入上下文
+        // （存量向量兜底过滤——新增由摘要与索引采集侧拦截）
         let mut results: Vec<RetrievalResult> = results
             .into_iter()
+            .filter(|sr| !system_paths::is_system_path(&sr.uri))
             .map(|sr| RetrievalResult::new(sr.uri, sr.score))
             .collect();
 

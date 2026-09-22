@@ -45,6 +45,13 @@ impl AgentPath {
     }
 }
 
+/// 路径是否以给定子路径前缀开头（长度 ≥ 且逐段相等）。
+///
+/// 系统/运维路径判定的共用原语——禁止各处重复实现前缀匹配。
+fn path_starts_with(path: &[&str], prefix: &[&str]) -> bool {
+    path.len() >= prefix.len() && path.iter().zip(prefix.iter()).all(|(a, b)| a == b)
+}
+
 /// Memory 命名空间的固定子路径段（uri_mapper 等共用，禁止散落字面量）。
 pub mod memory_paths {
     /// 会话快照段（tianyan://memory/sessions/）。
@@ -76,7 +83,48 @@ pub mod memory_paths {
         let path: Vec<&str> = uri.path().iter().map(|s| s.as_str()).collect();
         OPERATIONAL_SUBDIRS
             .iter()
-            .any(|sub| path.len() >= sub.len() && path.iter().zip(sub.iter()).all(|(a, b)| a == b))
+            .any(|sub| super::path_starts_with(&path, sub))
+    }
+}
+
+/// 全命名空间的系统/运维路径判定（单一事实源）。
+///
+/// 系统路径 = 系统状态 / 日志 / 归档 / 评审记录——**不参与摘要生成与向量
+/// 索引，也不作为检索结果**（已退役内容不得复活注入上下文）。判定 =
+/// 记忆运维子域（[`memory_paths::is_operational_path`]）∪ 各命名空间的
+/// 归档与评审目录。
+pub mod system_paths {
+    /// Agent 命名空间的系统子路径。
+    ///
+    /// - `_archive/`：规则软删除归档（`agent/_archive/learned/<id>`）；
+    /// - `roles/_archive/`：角色软删除归档（`agent/roles/_archive/<id>`）；
+    /// - `learned/archive/`：规则 GC 归档（`AgentPath::learned_archive()`）。
+    const AGENT_SUBDIRS: &[&[&str]] = &[
+        &["_archive"],
+        &["roles", "_archive"],
+        &["learned", "archive"],
+    ];
+
+    /// Skill 命名空间的系统子路径。
+    ///
+    /// - `_archive/`：技能软删除归档（`skill/_archive/<id>`）；
+    /// - `_reviews/`：技能使用评审记录（`skill/_reviews/<id>.jsonl`）。
+    const SKILL_SUBDIRS: &[&[&str]] = &[&["_archive"], &["_reviews"]];
+
+    /// 判断 URI 是否为系统/运维路径（不参与摘要与向量索引，不作检索结果）。
+    pub fn is_system_path(uri: &super::TianyanUri) -> bool {
+        if super::memory_paths::is_operational_path(uri) {
+            return true;
+        }
+        let subdirs: &[&[&str]] = match uri.namespace() {
+            super::ContextNamespace::Agent => AGENT_SUBDIRS,
+            super::ContextNamespace::Skill => SKILL_SUBDIRS,
+            _ => return false,
+        };
+        let path: Vec<&str> = uri.path().iter().map(|s| s.as_str()).collect();
+        subdirs
+            .iter()
+            .any(|sub| super::path_starts_with(&path, sub))
     }
 }
 
@@ -386,6 +434,44 @@ mod tests {
             let uri = TianyanUri::parse(uri_str).unwrap();
             assert_eq!(
                 memory_paths::is_operational_path(&uri),
+                expected,
+                "uri={uri_str}"
+            );
+        }
+    }
+
+    // ── system_paths::is_system_path ────────────────────────────────
+
+    #[test]
+    fn test_is_system_path_covers_archives_and_reviews() {
+        let cases = [
+            // 记忆运维子域（沿用 is_operational_path 判定）
+            ("tianyan://memory/archive/old-entry", true),
+            ("tianyan://memory/events/evolution_reports/r.md", true),
+            // Agent：规则软删除 / 角色软删除 / 规则 GC 归档
+            ("tianyan://agent/_archive/learned/old-rule", true),
+            ("tianyan://agent/roles/_archive/retired-role", true),
+            ("tianyan://agent/learned/archive/stale-rule", true),
+            // Skill：技能软删除 / 评审记录
+            ("tianyan://skill/_archive/old-skill", true),
+            ("tianyan://skill/_reviews/tianyan-release-build.jsonl", true),
+            // 活跃内容：不得命中
+            ("tianyan://agent/learned/rule-1", false),
+            ("tianyan://agent/roles/reviewer", false),
+            ("tianyan://skill/learned/tianyan-release-build", false),
+            ("tianyan://memory/facts/evo-1789280062", false),
+            ("tianyan://user/profile", false),
+            ("tianyan://knowledge/docs/api.md", false),
+            // 相似前缀 / 同级命名：防前缀误伤
+            ("tianyan://agent/roles/_archive_notes/x", false),
+            ("tianyan://skill/_reviews_notes/x", false),
+            ("tianyan://skill/_archive_notes/x", false),
+            ("tianyan://agent/learned/archive_notes/x", false),
+        ];
+        for (uri_str, expected) in cases {
+            let uri = TianyanUri::parse(uri_str).unwrap();
+            assert_eq!(
+                system_paths::is_system_path(&uri),
                 expected,
                 "uri={uri_str}"
             );

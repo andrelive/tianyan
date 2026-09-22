@@ -488,3 +488,77 @@ async fn test_reconcile_vector_index_rebuilds_missing_and_removes_orphans() {
     let again = vfs.reconcile_vector_index().await.unwrap();
     assert_eq!(again, VectorReconcileStats::default());
 }
+
+/// P0-7 回归：系统/运维路径不参与向量对账重建（归档/评审不得建向量）。
+#[tokio::test]
+async fn test_reconcile_skips_system_paths() {
+    use std::sync::Arc;
+
+    use crate::config::StorageConfig;
+    use crate::db::Database;
+    use crate::test_utils::{InMemoryVectorStorage, MockEmbeddingService};
+    use crate::vfs::backend::SqliteBackend;
+    use crate::vfs::vector::VectorStorage;
+    use crate::vfs::{VfsCore, VirtualFileSystem};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig {
+        data_dir: dir.path().into(),
+        ..Default::default()
+    };
+    let db = Database::open_in_memory().unwrap();
+    db.init_schemas().await.unwrap();
+    let backend = Arc::new(SqliteBackend::new(db));
+    backend.ensure_schema().await.unwrap();
+    let vector = Arc::new(InMemoryVectorStorage::new());
+    let vfs = VirtualFileSystemImpl::new(backend, vector.clone(), config)
+        .with_embedding_provider(Arc::new(MockEmbeddingService), "test-model");
+
+    let learned = TianyanUri::new(ContextNamespace::Agent, vec!["learned".to_string()]);
+    let archive = learned.append("archive");
+    let reviews = TianyanUri::new(ContextNamespace::Skill, vec!["_reviews".to_string()]);
+    vfs.create_directory(&learned).await.unwrap();
+    vfs.create_directory(&archive).await.unwrap();
+    vfs.create_directory(&reviews).await.unwrap();
+
+    // 活跃规则（应重建）+ 归档规则 / 评审记录（系统路径，不得建向量）
+    let live = learned.append("rule-1");
+    let archived = archive.append("old-rule");
+    let review = reviews.append("s1.jsonl");
+    for uri in [&live, &archived, &review] {
+        vfs.create_file(uri).await.unwrap();
+        vfs.write(uri, ContentLevel::Abstract, "摘要文本")
+            .await
+            .unwrap();
+        vfs.write(uri, ContentLevel::Overview, "概览文本")
+            .await
+            .unwrap();
+    }
+
+    let stats = vfs.reconcile_vector_index().await.unwrap();
+    assert_eq!(stats.errors, 0, "对账不应报错（stats = {stats:?}）");
+    assert!(
+        vector
+            .get_point(&live.to_point_id())
+            .await
+            .unwrap()
+            .is_some(),
+        "活跃条目应重建索引"
+    );
+    assert!(
+        vector
+            .get_point(&archived.to_point_id())
+            .await
+            .unwrap()
+            .is_none(),
+        "归档路径不得建向量（reconcile 应跳过）"
+    );
+    assert!(
+        vector
+            .get_point(&review.to_point_id())
+            .await
+            .unwrap()
+            .is_none(),
+        "评审记录不得建向量（reconcile 应跳过）"
+    );
+}
