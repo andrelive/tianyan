@@ -60,7 +60,6 @@ core/src/
 ├── db/          (统一写入门面：Database 门面 + SqliteDb + stats/trace/execution/usage Repository；只依赖 common)
 ├── executor/    (工具执行：Action、审批、LLM-as-Judge、验证门控)
 ├── knowledge/   (parser, image/, ingestor/, types)
-├── memory/      (extractor.rs)
 ├── model/       (traits, services.rs, provider/)
 ├── observability/ (AgentMetrics, usage_stats/trace/execution_log/usage_log/rule_recorder；SQL 经 db 收敛)
 ├── roles/       (角色基础类型：AgentRole/RoleSource/RoleStatus 等，纯类型层)

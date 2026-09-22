@@ -5,8 +5,11 @@
 //!
 //! 判定优先级：结构化诊断（cargo JSON 输出）→ LLM 语义判断 → 模式匹配回退。
 
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
 use crate::common::error::TianyanError;
-use crate::executor::actions::execute_command_action;
+use crate::executor::actions::execute_command_action_cancellable;
 use crate::executor::judge::LlmJudge;
 use crate::executor::output_parse::extract_build_errors;
 use cargo_metadata::diagnostic::DiagnosticLevel;
@@ -152,9 +155,11 @@ impl VerificationGate {
         command: &str,
         cwd: Option<&str>,
         timeout_secs: Option<u64>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<VerificationResult, TianyanError> {
-        // Execute the command
-        let output = execute_command_action(command, cwd, timeout_secs, None).await?;
+        // Execute the command（取消感知：ADR-036 补盲区——长构建期间「停止」生效）
+        let output =
+            execute_command_action_cancellable(command, cwd, timeout_secs, None, cancel).await?;
         let stdout = output["stdout"].as_str().unwrap_or("");
         let stderr = output["stderr"].as_str().unwrap_or("");
         let exit_code = output["exit_code"].as_i64().unwrap_or(-1) as i32;
@@ -339,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn test_verify_build_without_judge() {
         let gate = VerificationGate::new(None);
-        let result = gate.verify_build("echo Hello", None, Some(5)).await;
+        let result = gate.verify_build("echo Hello", None, Some(5), None).await;
         assert!(result.is_ok());
         let r = result.unwrap();
         assert!(r.passed);
@@ -425,7 +430,7 @@ mod tests {
         let cwd = dir.path().to_string_lossy().into_owned();
         let gate = VerificationGate::new(None);
         let result = gate
-            .verify_build(cat_command(), Some(&cwd), Some(10))
+            .verify_build(cat_command(), Some(&cwd), Some(10), None)
             .await
             .unwrap();
         assert_eq!(result.judge_method, "json_diagnostics");
@@ -446,7 +451,7 @@ mod tests {
         let cwd = dir.path().to_string_lossy().into_owned();
         let gate = VerificationGate::new(None);
         let result = gate
-            .verify_build(cat_command(), Some(&cwd), Some(10))
+            .verify_build(cat_command(), Some(&cwd), Some(10), None)
             .await
             .unwrap();
         assert_eq!(result.judge_method, "json_diagnostics");
@@ -454,10 +459,52 @@ mod tests {
         assert_eq!(result.structured_diagnostics[0].level, "warning");
     }
 
+    /// 取消语义（ADR-036 补盲区）：verify_build 执行期间置位取消标志 → 秒级返回。
+    ///
+    /// 判别力：修复前走不可取消的 `execute_command_action`，置位后仍等满 60s。
+    #[tokio::test]
+    async fn test_verify_build_interruptible_on_cancel() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        // 与 kill_all 类测试互斥（持真实子进程；见 executor::test_support 文档）
+        let _g = crate::executor::test_support::CHILD_REGISTRY_LOCK
+            .lock()
+            .await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            flag.store(true, Ordering::Relaxed);
+        });
+        let cmd = if cfg!(target_os = "windows") {
+            "Start-Sleep -Seconds 30"
+        } else {
+            "sleep 30"
+        };
+        let gate = VerificationGate::new(None);
+        let started = std::time::Instant::now();
+        let err = gate
+            .verify_build(cmd, None, Some(60), Some(cancel))
+            .await
+            .expect_err("置位取消后应返回取消错误");
+        let elapsed = started.elapsed();
+        assert!(
+            err.to_string().contains("已取消"),
+            "取消应返回取消错误：{err}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "取消应在 5s 内生效（实际 {elapsed:?}）"
+        );
+    }
+
     #[tokio::test]
     async fn test_verify_build_fallback_pattern_on_nonzero_exit() {
         let gate = VerificationGate::new(None);
-        let result = gate.verify_build("exit 1", None, Some(10)).await.unwrap();
+        let result = gate
+            .verify_build("exit 1", None, Some(10), None)
+            .await
+            .unwrap();
         assert_eq!(result.judge_method, "pattern");
         assert!(!result.passed);
         assert_eq!(result.exit_code, 1);
@@ -476,7 +523,7 @@ mod tests {
         let gate = VerificationGate::new(Some(judge));
         // 退出码非 0 且 stdout 非空 → 绕过 LLM 快速路径，实际调用 mock → 失败 → 回退退出码判断。
         let result = gate
-            .verify_build("echo oops && exit 1", None, Some(10))
+            .verify_build("echo oops && exit 1", None, Some(10), None)
             .await
             .unwrap();
         assert_eq!(result.judge_method, "llm");

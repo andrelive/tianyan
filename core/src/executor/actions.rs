@@ -200,9 +200,10 @@ pub async fn execute_verify_build(
     command: &str,
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<Value, TianyanError> {
     let result = crate::executor::verification::VerificationGate::new(None)
-        .verify_build(command, cwd, timeout_secs)
+        .verify_build(command, cwd, timeout_secs, cancel)
         .await?;
     Ok(Value::from(result))
 }

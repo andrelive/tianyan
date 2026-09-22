@@ -24,8 +24,8 @@
 //! - [`context`][]: 上下文工程（检索 + 压缩 + 组装）
 //! - [`session`][]: 会话权威存储（ADR-018）+ 回忆检索
 //! - [`model`][]: 模型服务容器；[`scheduler`][]: 定时任务
-//! - [`knowledge`][]: 知识库导入；[`memory`][]: 长期记忆提取；[`skills`][]: 技能（VFS 方法论文档）
-//! - [`executor`][]: 工具执行支撑 + 语义化编辑/浏览/代码智能；[`lsp`][]: LSP 集成
+//! - [`knowledge`][]: 知识库导入；[`skills`][]: 技能（VFS 方法论文档）
+//! - [`executor`][]: 工具执行支撑 + 语义化编辑/浏览/代码智能
 //! - [`observability`][]: 指标/Trace/统计；[`snapshot`][]: 工作区快照（ADR-006 例外）
 //! - [`events`][]: 事件驱动触发；[`goals`][]/[`todos`][]: 目标与待办；[`notification`][]: 通知通道
 //!
@@ -60,7 +60,6 @@ pub mod executor;
 /// 目标管理（长期目标 + 进度跟踪；与待办联动）。
 pub mod goals;
 pub mod knowledge;
-pub mod memory;
 pub mod model;
 pub mod notification;
 pub mod observability;

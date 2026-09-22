@@ -504,4 +504,7 @@ pub struct SessionRecallParams {
     /// 每个命中附近的窗口半径（前后各 N 条消息，默认 5）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<i64>,
+    /// 只看最近 N 天的消息（缺省不限；用于"最近/这几天"类回忆）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_days: Option<u32>,
 }

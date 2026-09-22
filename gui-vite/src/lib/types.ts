@@ -765,13 +765,8 @@ export interface ConfigState {
   clipboard_auto_capture: boolean;
   clipboard_prompt_confirm: boolean;
 
-  // -- Memory config (memory.*) --
-  max_session_memory: number;
-  max_long_term_memory: number;
-  importance_threshold: number;
+  // -- Memory config (memory.*；写入通道 = 演化任务，仅保留巩固开关) --
   auto_consolidation: boolean;
-  consolidation_interval: number;
-  decay_rate: number;
 
   // -- Retrieval config (retrieval.*) --
   retrieval_top_k: number;

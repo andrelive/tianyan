@@ -20,6 +20,9 @@ on:
     tags:
       - 'v*'
   pull_request:
+  # 可复用工作流：release.yml 的 build 依赖本工作流（`needs: quality`）——
+  # 门禁红则不出包（"门禁必红但 MSI 已发布"事故的机制性修复）。
+  workflow_call:
 
 jobs:
   quality:
@@ -53,6 +56,12 @@ jobs:
 
       - name: Rust unit tests (core/server/mcp)
         run: cargo test --workspace --exclude tianyan-tauri --lib
+
+      # 集成测试（core/tests + server/tests，含 HTTP 级 e2e）——此前只在本地
+      # `test.ps1 integration` 跑，CI 从未覆盖；0.5.8 记录"三处 e2e 断言失效
+      # 长期未被察觉"即该缺口所致。
+      - name: Rust integration tests (incl. e2e)
+        run: cargo test --workspace --exclude tianyan-tauri --test "*"
 
       - name: Tool catalog freshness
         run: cargo run -q -p tianyan-core --example tool_catalog -- --check

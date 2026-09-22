@@ -283,7 +283,8 @@ impl ApprovalWorkflow {
                 let risk = crate::executor::security::split_command_segments(command)
                     .iter()
                     .map(|seg| {
-                        let name = crate::executor::command::extract_command_base(seg);
+                        // 取词口径与黑名单一致：剥壳后的内层命令（`sudo dd …` → `dd`）
+                        let name = crate::executor::command::judged_command_name(seg);
                         crate::executor::security::classify_command_risk(&name)
                     })
                     .max_by_key(|r| match r {
@@ -663,11 +664,13 @@ impl ApprovalWorkflow {
         let Action::ExecuteCommand { command, .. } = action else {
             return false;
         };
-        let cmd = command.split_whitespace().next().unwrap_or(command);
+        // 取词口径与黑名单/风险分级一致（剥壳后的内层命令）：否则 `sudo git push`
+        // 这类包装形态会绕过"总是询问"（`prompt_commands = ["git"]`）。
+        let cmd = crate::executor::command::judged_command_name(command);
         self.config
             .prompt_commands
             .iter()
-            .any(|p| cmd == p || cmd.ends_with(&format!(".{}", p)))
+            .any(|p| cmd == *p || cmd.ends_with(&format!(".{}", p)))
     }
 
     /// 检查操作是否匹配模式。

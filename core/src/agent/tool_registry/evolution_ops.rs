@@ -10,9 +10,15 @@ use crate::agent::tool_params::{
     DelegationStatsParams, ExecutionDetailParams, ExecutionStatsParams, SessionRecallParams,
 };
 use crate::common::error::TianyanError;
+use crate::common::llm_judge::truncate_output;
 use crate::observability::execution_log::ExecutionLog;
 
 use super::{parse_params, wrap_tool_error, ToolRegistry};
+
+/// 回忆窗口单条消息文本上限（控制工具输出体积——超长对话单条可达数十 KB）。
+const RECALL_WINDOW_TEXT_CHARS: usize = 800;
+/// 回忆窗口单条工具文本上限。
+const RECALL_WINDOW_TOOL_CHARS: usize = 400;
 
 /// 解析 RFC3339 since 参数为 epoch 秒。
 ///
@@ -113,16 +119,20 @@ impl ToolRegistry {
             .unwrap_or(crate::session::types::DEFAULT_WINDOW_RADIUS)
             .max(0);
         let hits = recall
-            .search(&params.query, limit)
+            .search(&params.query, limit, params.since_days)
             .await
             .map_err(wrap_tool_error)?;
-        // 每个命中附带附近窗口
+        // 每个命中附带附近窗口；窗口消息截断（text/tool_text 上限）
         let mut results = Vec::new();
         for hit in &hits {
-            let window = recall
+            let mut window = recall
                 .window(&hit.session_id, hit.seq, radius)
                 .await
                 .map_err(wrap_tool_error)?;
+            for msg in &mut window {
+                msg.text = truncate_output(&msg.text, RECALL_WINDOW_TEXT_CHARS);
+                msg.tool_text = truncate_output(&msg.tool_text, RECALL_WINDOW_TOOL_CHARS);
+            }
             results.push(serde_json::json!({
                 "hit": hit,
                 "window": window,

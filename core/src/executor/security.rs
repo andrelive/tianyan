@@ -493,6 +493,16 @@ impl SecurityPolicy {
             }
             let seg_word = seg.split_whitespace().next().unwrap_or(seg);
             let seg_name = extract_command_base(seg);
+            // 黑名单/白名单取词口径：**剥壳后的内层命令**（`sudo rm -rf /` → `rm`、
+            // `bash -c "rm -rf /"` → `rm`）——解释器检查仍用原始首词（`bash` 的
+            // 拦截语义不变）；剥不出内层（`bash script.sh`）时回退原始段。
+            let judged_name = crate::executor::command::judged_command_name(seg);
+            let judged_segment = crate::executor::command::unwrap_command_wrapper(seg);
+            let judged_segment = if judged_segment.trim().is_empty() {
+                seg.to_string()
+            } else {
+                judged_segment
+            };
 
             if self.block_interpreters {
                 let interpreters = ["cmd", "powershell", "pwsh", "bash", "sh", "wsl", "wsl.exe"];
@@ -511,9 +521,9 @@ impl SecurityPolicy {
                 // 单段命令与既有整条前缀语义等价；多段命令由此覆盖后续段
                 // （T0-2：`git status && rm -rf /` 的第二段必须命中）。
                 let hit = if blocked_lower.contains(' ') {
-                    seg.to_lowercase().starts_with(&blocked_lower)
+                    judged_segment.to_lowercase().starts_with(&blocked_lower)
                 } else {
-                    seg_name == blocked_lower
+                    judged_name == blocked_lower
                 };
                 if hit {
                     return Err(TianyanError::Custom(format!(
@@ -523,7 +533,7 @@ impl SecurityPolicy {
                 }
             }
             if let Some(allowed) = &self.allowed_commands {
-                let is_allowed = allowed.iter().any(|a| a.to_lowercase() == seg_name);
+                let is_allowed = allowed.iter().any(|a| a.to_lowercase() == judged_name);
                 if !is_allowed {
                     return Err(TianyanError::Custom(format!(
                         "executor: 安全策略违规：命令不在白名单中：{}",
@@ -1093,5 +1103,60 @@ mod tests {
         assert!(p.transform_command("rm -rf /tmp/x").is_none());
         // 非危险命令不转换
         assert!(p.transform_command("ls -la").is_none());
+    }
+
+    /// 包装前缀不得使黑名单失效（ADR-033：全自主后黑名单是唯一硬护栏）。
+    ///
+    /// 修复前判定只看**段首词**——`sudo rm -rf /` 的首词是 `sudo`，黑名单失配、
+    /// 审批层被判 Low 并自动放行。本测试锁定"剥壳后取内层命令"的口径。
+    #[test]
+    fn test_wrapper_prefix_commands_hit_blocklist() {
+        let policy = SecurityPolicy::default();
+        for cmd in [
+            "sudo rm -rf /",
+            "env FOO=1 rm -rf /",
+            "nohup rm -rf /",
+            "nice -n 5 rm -rf /",
+            "xargs rm -rf /",
+            "sh -c \"rm -rf /\"",
+            "bash -c 'rm -rf /'",
+            "\"rm\" -rf /",
+            "& rm -rf /",
+        ] {
+            assert!(
+                policy.check_command(cmd).is_err(),
+                "包装形态应被黑名单拦截：{cmd}"
+            );
+        }
+    }
+
+    /// 剥壳取词不得造成误拦：脚本调用（无内联标志）回退原始口径。
+    #[test]
+    fn test_wrapper_unwrap_does_not_overblock() {
+        let policy = SecurityPolicy::default();
+        for cmd in ["cargo test", "git status", "bash scripts/wsl-ci-parity.sh"] {
+            assert!(policy.check_command(cmd).is_ok(), "不应被拦截：{cmd}");
+        }
+    }
+
+    /// 取词口径单点（黑名单 / 风险分级 / 白名单 / prompt_commands 共用）。
+    #[test]
+    fn test_judged_command_name_unwraps_wrappers() {
+        use crate::executor::command::judged_command_name;
+        assert_eq!(judged_command_name("sudo rm -rf /"), "rm");
+        assert_eq!(judged_command_name("env FOO=1 rm -rf /"), "rm");
+        assert_eq!(judged_command_name("xargs rm -rf /"), "rm");
+        assert_eq!(judged_command_name("bash -c \"rm -rf /\""), "rm");
+        assert_eq!(judged_command_name("sh -c 'rm -rf /'"), "rm");
+        assert_eq!(judged_command_name("\"rm\" -rf /"), "rm");
+        assert_eq!(judged_command_name("& rm -rf /"), "rm");
+        assert_eq!(judged_command_name("dd if=/dev/zero of=/dev/sda"), "dd");
+        // 无内联标志的解释器调用：脚本内容不可静态判定 → 回退原始首词（不误拦）
+        assert_eq!(judged_command_name("bash scripts/test.sh"), "bash");
+        // 风险分级联动：包装前缀不再把危险命令降级为 Low
+        assert_eq!(
+            classify_command_risk(&judged_command_name("sudo dd if=/dev/zero of=/dev/sda")),
+            CommandRisk::Dangerous
+        );
     }
 }

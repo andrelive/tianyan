@@ -13,7 +13,7 @@
 | ❌ 禁止 | 原因 | ✅ 正确做法 |
 |---------|------|------------|
 | 为知识库建立独立的向量数据库 + RAG 管道 | VFS 已统一管理。L0/L1 双层摘要自然替代 chunk-based RAG | 文档 → `KnowledgeIngestor` → VFS L2 → `SummaryEngine` 生成 L0/L1 → `DualLayerRetriever` 检索 |
-| 为记忆建立独立的存储模块（SQLite、单独文件等） | VFS `tianyan://memory/` 是唯一存储 | `MemoryExtractor` 提取 → VFS write → `ContextPipeline` 从 VFS 加载 |
+| 为记忆建立独立的存储模块（SQLite、单独文件等） | VFS `tianyan://memory/` 是唯一存储 | 演化任务（自演化综述，ADR-017）写入 → VFS write → `ContextPipeline` 从 VFS 加载 |
 | 为技能建立独立的文件系统加载（全量读 skill.md） | 技能通过 VFS 命名空间管理，渐进式披露 | L0 Abstract 发现 → L2 Detail 按需加载；`SkillManager::list_available_skills()` 读 abstract |
 | 在 VFS 之外引入新的存储抽象（新 trait、新 Manager） | 已有链路不叠加抽象 | 直接使用 `VfsCore` / `ContentStore` / `VfsSearch` trait |
 | 对内容做 chunk 分块 | `Chunker` 已移除。VFS 双层检索替代 | 完整内容写入 L2，由 `SummaryEngine` 生成结构化摘要 |
@@ -135,7 +135,6 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 | `agent` | `core/src/agent/` | Agent 协调器 + AgentLoop + ToolRegistry + 后台任务（ADR-026：委托只支持异步、双信号量排队 20+40、SQL 权威 + 3 天 TTL）；**统一循环框架（ADR-030）**：主 agent 与子代理同构（`TurnPolicy` 配置——工具执行器 Global/RoleFiltered、持久化 FTS 开关、max_turns 策略、请求工具集），收尾统一"无工具调用"（submit_result 降级为可选结果落盘工具，主 agent 用 task_status 查询）；子智能体会话消息落库不索引 FTS（`add_structured_message_no_fts`）+ 流式事件同一通道（ADR-031：消息不再广播，chat_stream 带 session_id=task_id 路由）；**流式转发统一（ADR-032）**：`stream_forward.rs` 单点（建通道即消费防死锁 + 字段注入），用户轮/唤醒轮/子代理共用，映射器与送达目标可插拔；**结构性取消（ADR-036）**：`cancel.rs` 等待原语（`wait_cancelled`/`cancellable`）覆盖请求在飞/流式 recv/组装/压缩等待盲区；工具执行走可插拔管线（`tool_registry/pipeline.rs`：pre-execute 监听器 / 单调守卫 / post-execute 监听器，DSH 吸收）+ 内置可观测性监听器（统计/Trace/GEPA/规则学习） | 所有工具操作通过 VFS |
 | `context` | `core/src/context/` | 上下文工程（检索 + 压缩 + 组装） | 检索仅通过 `DualLayerRetriever` |
 | `knowledge` | `core/src/knowledge/` | 知识库导入管道 | ❌ **不建独立检索管道**，导入→VFS→SummaryEngine |
-| `memory` | `core/src/memory/` | `MemoryExtractor` 长期记忆提取 | ❌ **不建独立存储**，提取→VFS write |
 | `skills` | `core/src/skills/` | 技能 = VFS 方法论文档（发现/读取 + GEPA 进化引擎 + 使用复审；无执行语义） | ❌ **不全量加载**，L0 发现→L2 按需 |
 | `session` | `core/src/session/` | `SessionStore`（SQLite 权威存储，ADR-018；SQL 收敛本模块，经 db 单连接）+ `PersistentSessionManager` + `SessionRecall`（FTS 回忆） | ⚠️ 例外：会话内容不经 VFS（ADR-018）；`tianyan://session/{id}` 仅作逻辑标识 |
 | `model` | `core/src/model/` | `ModelServices` 容器（不路由、不重试） | — |
@@ -154,7 +153,7 @@ Harness 工程 → [`docs/harness核心思路/harness-engineering-overview.md`](
 > `scheduled_agent_tasks.json`/`scheduler_state.json`（调度器状态）为**运行期状态文件**
 > （非知识/记忆/技能内容），不经 VFS——与快照、MCP 图片同类的结构性例外。
 
-已删除组件：`planner/`、`ModelRouter`、`TokenBudget`、`Chunker`、`AgentHarness` wrapper、`AgentSkills` wrapper、`eval/`（回答质量离线评测，判断归入演化智能体）。
+已删除组件：`planner/`、`ModelRouter`、`TokenBudget`、`Chunker`、`AgentHarness` wrapper、`AgentSkills` wrapper、`eval/`（回答质量离线评测，判断归入演化智能体）、`memory/`（MemoryExtractor 提取器——ADR-017 收敛后残骸清理）。
 
 ## 常见陷阱
 

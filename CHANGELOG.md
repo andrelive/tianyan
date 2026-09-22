@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **planning 技能提示词残留已删除工具 `lsp`（并漏补新增 `repo_map`）**：v0.5.8 移除 LSP 后提示词未同步——规划阶段会引导模型调用不存在的工具（白跑一轮 + 用户可见失败）。同批清理同类残留：`core/src/lib.rs` 悬空 `[lsp]` doc link、`model/types/tool.rs` 注释、`scripts/wsl-ci-parity.sh` 的 `lsp::` 测试过滤。
+- **工具面一致性门禁（防清单漂移，单一事实源 `builtin_tool_names()`）**：新增两条跨 crate 校验测试——① server：`planning` 技能提示词的工具清单必须全部落在内置工具表内（自动解析清单段逐个断言；`lsp` 残留即被本测试捕获——修复前必红）；② core：内置角色工具白名单必须全部已注册（白名单是过滤清单，含未注册名会被**静默忽略**、表现为"角色某项能力凭空消失"）。
+- **`run_tests`/`run_project_tests`/`verify_build`/`discover_tests` 接入取消（ADR-036 补盲区）**：此前只有 `execute_command` 走可取消路径，这四条最耗时的工具路径走不可取消的 `execute_command_action`——`cargo test` / `cargo check` 跑 1–10 分钟期间点「停止」无效（"取消无盲区"的声明在工具执行这一处不成立）。修法：执行层 `run_tests_action` / `discover_tests`（3 处探测命令）/ `VerificationGate::verify_build` / `execute_verify_build` 增加 `cancel: Option<Arc<AtomicBool>>` 参数并改调 `execute_command_action_cancellable`；工具层四处从 `session_cancel_flag(session_id)` 取会话取消标志透传（`discover_tests` 顺带补 `session_id` 参数，分发处同步）。测试锁单点化：`CHILD_REGISTRY_LOCK` 从 command.rs 测试私有提升为 `executor::test_support`（共享给新取消测试，防 kill_all 类测试误杀兄弟子进程）。判别力测试：`test_run_tests_interruptible_on_cancel` / `test_verify_build_interruptible_on_cancel`（注入"忽略 cancel"→ 必红：等满命令时长/超时，实测两条均红）
+- **段化收缩被误写在持久化失败分支（ADR-035 §2 段化在生产失效）**：`maybe_compress_and_persist` 把 `ws.reshape_after_compression()` 放在 `persist_structured` 的 `Err` 分支内——成功路径（绝大多数）永不收缩，`start_seq` 恒为 0（段退化为完整链、段化收益归零）；失败路径反而推进消费水位，把尚未注入的异步通知误标为已消费。现移入 `Ok` 分支（失败仅告警）。判别力测试：`test_compression_shrinks_working_set_segment_on_success`（注入"不收缩"→ 必红）+ 反向 `test_no_compression_does_not_shrink_segment`
+- **审批黑名单/风险分级可被命令包装前缀绕过（ADR-033"黑名单是唯一硬护栏"失效）**：取词只看段首词——`sudo rm -rf /`、`env FOO=1 rm -rf /`、`xargs rm`、`nice dd …`、`bash -c "rm -rf /"`、`"rm" -rf /`、`& rm -rf /` 在 confirm/interactive 下被判 Low 自动放行（默认 relaxed 跳过解释器/元字符检查）。新增取词单点 `executor::command::judged_command_name`（剥 `sudo/env/nohup/nice/time/xargs/xx -c` 等包装与内联解释器，含引号与 PS 调用运算符归一；**剥不出内层时回退原始首词**——`bash script.sh` 这类脚本调用不误拦），黑名单/白名单/风险分级/`prompt_commands` 四处统一走该单点。判别力测试：`test_wrapper_prefix_commands_hit_blocklist`（注入"不剥壳"→ 必红）+ `test_judged_command_name_unwraps_wrappers` + `test_wrapper_unwrap_does_not_overblock`
+
+### Changed
+- **发布门禁联动：release 依赖 quality（门禁红不再出包）**：`release.yml` 新增 `quality` job（复用 `quality.yml`，后者加 `on: workflow_call`）且 `build: needs: quality`——此前两工作流各自由 tag 触发、互不阻塞，"tag 推送时门禁必红但 MSI 已构建上传"即 0.5.7 实发事故形态。quality 门禁同步补入**集成测试层**（`cargo test --workspace --exclude tianyan-tauri --test "*"`，含 HTTP 级 e2e）——此前只在本地 `test.ps1 integration` 覆盖，0.5.8 记录的"三处 e2e 断言失效长期未被察觉"即该缺口所致。
+
+- **记忆提取与技能复审残骸清理（ADR-017 收敛补完）**：ADR-017 早已决策"不再有记忆提取任务"，但提取器组件与接线残留：`core/src/memory/`（`MemoryExtractor`/`ExtractionConfig`/`DEFAULT_EXTRACTION_PROMPT`，零生产调用）、`TaskContext.memory_extractor`、`SessionState.pending_memories` 空转字段、`AppState::create_memory_extractor`。同类：`TaskContext.skill_reviewer` 亦为字段级零消费（无任何任务读取；`SkillReviewer` 组件本身在 `/api/v1/skills` 复审端点在用——只删字段与传参，保留组件）。两者现全部删除；`format_memory_as_markdown`（记忆写入格式化，唯一消费方 EvolutionTask）迁入 `evolution_task.rs`。**记忆写入唯一通道 = 演化任务**（AGENTS.md / module-descriptions / module-map / module-relationships / system-architecture 同步）；`TaskContext` 新增 `session_recall` 字段（增量采集装配）
+- **`[memory]` 六个零实现配置键清理**：`max_session_memory` / `max_long_term_memory` / `importance_threshold` / `consolidation_interval` / `decay_rate` / `verify_preferences` 删除（零实现；`auto_consolidation` 有实现并保留——`MemoryConfig` 收敛为单字段）；示例配置与 GUI（MemoryTab / config-transform / types / 契约 fixture / mock）同步。旧配置文件残留键由保存路径"段保全"原样保留，不破坏兼容
+
 ## [0.5.8] - 2026-09-21
 
 ### Added

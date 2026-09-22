@@ -50,7 +50,7 @@ async fn test_config_save_and_reload_roundtrip() {
 async fn test_config_defaults_are_reasonable() {
     let config = make_test_config();
     assert_eq!(config.agent.default_top_k, 5);
-    assert_eq!(config.memory.consolidation_interval, 3600);
+    assert!(config.memory.auto_consolidation, "默认开启自动巩固");
     assert_eq!(config.retrieval.default_top_k, 10);
 }
 

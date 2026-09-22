@@ -54,7 +54,7 @@ pub use tool_params::{
     RunTestsParams, SearchCodeParams, SearchVfsParams, SelfCheckParams, VerifyBuildParams,
     VfsListParams, VfsReadParams, WriteFileParams,
 };
-pub use tool_registry::{DynamicToolExecutor, ToolRegistry};
+pub use tool_registry::{builtin_tool_names, DynamicToolExecutor, ToolRegistry};
 pub use types::{
     AgentResponse, AgentState, AgentStreamChunk, SkillCallInfo, StreamChunkType, StreamEventSender,
     ToolCallEvent, ToolResultEvent, TurnStateEvent,

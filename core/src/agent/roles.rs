@@ -157,7 +157,8 @@ impl RoleRegistry {
                      你的职责是完成一次自我演化综述：\n\
                      1. 用 execution_stats / execution_detail / delegation_stats 查看自上次运行以来的\n\
                      工具执行统计与委托统计，识别高频/低成功率的操作类别与组织模式；\n\
-                     2. 用 session_recall 回忆近期会话内容，识别用户偏好、事实与重复的工作模式；\n\
+                     2. 优先阅读输入包中的【近期会话增量】识别用户偏好、事实与重复的工作模式；\n\
+                     需要细节时再用 session_recall 按关键词深挖（勿重复通读旧会话）；\n\
                      3. 用 vfs_read / vfs_list 查看现有注册表：记忆（memory/）、技能（skill/learned/）、\
                      规则（agent/learned/）、角色（agent_role/）；\n\
                      4. 对照现状决定增删改：写新技能前先查现有技能（语义重复则完善而非新建）；\

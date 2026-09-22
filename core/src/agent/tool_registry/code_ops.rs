@@ -105,9 +105,17 @@ impl ToolRegistry {
             },
         )
         .await?;
-        crate::executor::test_discovery::run_tests_action(&command, Some(&cwd), params.timeout_secs)
-            .await
-            .map_err(wrap_tool_error)
+        // 取消感知（ADR-036 补盲区）：从会话取消标志取——长测试期间「停止」
+        // 立即杀进程树返回（此前这条路径不可取消）。
+        let cancel = self.session_cancel_flag(session_id).await;
+        crate::executor::test_discovery::run_tests_action(
+            &command,
+            Some(&cwd),
+            params.timeout_secs,
+            cancel,
+        )
+        .await
+        .map_err(wrap_tool_error)
     }
 
     /// 执行 run_project_tests 工具：探测项目类型 → 构造命令 → 运行。
@@ -148,10 +156,13 @@ impl ToolRegistry {
             },
         )
         .await?;
+        // 取消感知（ADR-036 补盲区）：与 run_tests 同一模式
+        let cancel = self.session_cancel_flag(session_id).await;
         crate::executor::test_discovery::run_tests_action(
             &resolved,
             Some(&cwd),
             params.timeout_secs,
+            cancel,
         )
         .await
         .map_err(wrap_tool_error)
@@ -190,16 +201,23 @@ impl ToolRegistry {
         .await?;
         // Use semantic verification if available, otherwise fall back
         // to exit code + pattern matching.
+        // 取消感知（ADR-036 补盲区）：与 run_tests 同一模式
+        let cancel = self.session_cancel_flag(session_id).await;
         if let Some(ref gate) = self.verification_gate {
             let result = gate
-                .verify_build(&params.command, Some(&cwd), params.timeout_secs)
+                .verify_build(&params.command, Some(&cwd), params.timeout_secs, cancel)
                 .await
                 .map_err(wrap_tool_error)?;
             Ok(serde_json::Value::from(result))
         } else {
-            crate::executor::execute_verify_build(&params.command, Some(&cwd), params.timeout_secs)
-                .await
-                .map_err(wrap_tool_error)
+            crate::executor::execute_verify_build(
+                &params.command,
+                Some(&cwd),
+                params.timeout_secs,
+                cancel,
+            )
+            .await
+            .map_err(wrap_tool_error)
         }
     }
 }

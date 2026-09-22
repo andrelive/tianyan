@@ -752,15 +752,22 @@ impl Agent {
             .await?;
         let summary_sm = summary_sm.clone();
 
-        if let Err(e) = self
+        // ADR-035 §2 段化：压缩后**收缩段**（段起点前移到新压缩点，丢弃其前
+        // 历史）——压缩是段内唯一的收缩时机，否则段随会话无限增长。
+        // **仅在摘要落库成功后收缩**：失败时收缩会推进消费水位
+        // （`reshape_after_compression` 内部 `mark_consumed`）——把尚未注入的
+        // 异步通知误标为已消费，且段起点会前移到库中并不存在的压缩点。
+        match self
             .persist_structured(state, session_id, summary_sm.clone(), true)
             .await
         {
-            tracing::warn!(error = %e, "持久化压缩摘要失败");
-            // ADR-035 §2 段化：压缩后**收缩段**（段起点前移到新压缩点，丢弃其前
-            // 历史）——压缩是段内唯一的收缩时机，否则段随会话无限增长。
-            if let Some(ws) = self.working_sets.get(session_id).await {
-                ws.reshape_after_compression().await;
+            Ok(()) => {
+                if let Some(ws) = self.working_sets.get(session_id).await {
+                    ws.reshape_after_compression().await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "持久化压缩摘要失败");
             }
         }
 
@@ -2088,6 +2095,155 @@ mod tests {
             .await;
         let summary = summary.expect("真实占用 5100 > 触发线 5000：应发生压缩");
         assert!(summary.compression_marker, "压缩摘要消息应带压缩标记");
+    }
+
+    /// 构造带**真实会话存储 + 工作集**的 Agent（ADR-035 段化回归测试专用）。
+    ///
+    /// 与 `make_agent_full` 的唯一差异：`working_sets` 装配 `Some(store)`——
+    /// 由此 `load_and_build_state` 走工作集路径（返回工作集内存态），
+    /// `persist_structured` 走 `ws.append`（段随压缩点推进）。
+    fn make_agent_with_working_sets(
+        store: Arc<crate::session::store::SessionStore>,
+        mock: MockChatService,
+        compression_mock: MockChatService,
+        compression_config: CompressionConfig,
+    ) -> Agent {
+        let vfs = Arc::new(MockVfs::new());
+        let retriever = Arc::new(DualLayerRetriever::new(
+            vfs.clone() as Arc<dyn VirtualFileSystem>
+        ));
+        let compressor = Arc::new(TokioMutex::new(ContextCompressor::new(
+            Arc::new(compression_mock),
+            compression_config,
+        )));
+        let context_pipeline = ContextPipeline::new(
+            vfs.clone() as Arc<dyn VirtualFileSystem>,
+            retriever,
+            compressor,
+            10,
+            5,
+        );
+        let agent_loop = AgentLoop::new(
+            Arc::new(mock),
+            ToolRegistry::new(SecurityPolicy::default()),
+            Arc::new(MockSessionManager),
+            AgentLoopConfig { max_turns: 5 },
+        );
+        Agent::new(
+            "test-model".to_string(),
+            context_pipeline,
+            AgentMetrics::new(),
+            agent_loop,
+            Arc::new(MockSessionManager),
+            None,
+            None,
+            WorkingSetRegistry::new(Some(store)),
+        )
+    }
+
+    /// ADR-035 §2 段化（P0 回归）：压缩**成功**后段必须收缩到压缩点。
+    ///
+    /// 修复前 `reshape_after_compression` 被误写在 `persist_structured` 的
+    /// `Err` 分支内——成功路径永不收缩（`start_seq` 恒为 0，段随会话无限增长、
+    /// 段化收益归零），失败路径反而把尚未注入的通知标为已消费。本测试锁定
+    /// "成功 ⇒ 收缩"这一方向（修复前必红：`start_seq == 0`）。
+    #[tokio::test]
+    async fn test_compression_shrinks_working_set_segment_on_success() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        store
+            .create("session-1", &crate::session::SessionHeader::default())
+            .await
+            .unwrap();
+        // 7 条超阈值消息（窗口 2000 × 阈值 1.0 → 触发线 2000；实测 3000）
+        for i in 0..7 {
+            let mut sm = ContextAssembler::message_to_structured(
+                &Message::user(format!("历史消息 {i}")),
+                "session-1",
+                None,
+                None,
+            );
+            sm.tokens.input = 3_000;
+            store.append_message("session-1", &sm).await.unwrap();
+        }
+
+        let mut compress_mock = MockChatService::new();
+        compress_mock
+            .expect_chat_completion()
+            .returning(|_| Ok(response_with(Message::assistant("这是压缩摘要"))));
+        let agent = make_agent_with_working_sets(
+            store.clone(),
+            MockChatService::new(),
+            compress_mock,
+            CompressionConfig {
+                context_window: 2_000,
+                compression_threshold: 1.0,
+                ..CompressionConfig::default()
+            },
+        );
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        let ws = agent
+            .working_sets
+            .get("session-1")
+            .await
+            .expect("装配 store 后 load_and_build_state 应经工作集加载");
+        assert_eq!(ws.start_seq(), 0, "压缩前无压缩点，段起点为 0");
+        assert_eq!(ws.message_count().await, 7);
+
+        let summary = agent
+            .maybe_compress_and_persist(&state, "session-1", false)
+            .await;
+        assert!(summary.is_some(), "token 超阈值且消息数足够时应发生压缩");
+
+        // 7 条消息 seq=0..6，压缩摘要 seq=7 → 收缩后段起点 7、段内只剩摘要
+        assert_eq!(
+            ws.start_seq(),
+            7,
+            "压缩成功后段起点应前移到压缩点（修复前恒为 0 → 段化失效）"
+        );
+        assert_eq!(
+            ws.message_count().await,
+            1,
+            "收缩后段内只应剩压缩点摘要消息"
+        );
+    }
+
+    /// 反向保护：压缩**未触发**（消息数不足）时不得收缩段。
+    #[tokio::test]
+    async fn test_no_compression_does_not_shrink_segment() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        store
+            .create("session-1", &crate::session::SessionHeader::default())
+            .await
+            .unwrap();
+        for i in 0..3 {
+            let sm = ContextAssembler::message_to_structured(
+                &Message::user(format!("短会话 {i}")),
+                "session-1",
+                None,
+                None,
+            );
+            store.append_message("session-1", &sm).await.unwrap();
+        }
+        let agent = make_agent_with_working_sets(
+            store.clone(),
+            MockChatService::new(),
+            MockChatService::new(),
+            CompressionConfig::default(),
+        );
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        let ws = agent.working_sets.get("session-1").await.unwrap();
+        let summary = agent
+            .maybe_compress_and_persist(&state, "session-1", false)
+            .await;
+        assert!(summary.is_none(), "消息数不足不应压缩");
+        assert_eq!(ws.start_seq(), 0, "未压缩不得收缩段");
+        assert_eq!(ws.message_count().await, 3, "未压缩段内容应保持原样");
     }
 
     // ── ADR-013：唤醒轮（process_wake） ─────────────────────────

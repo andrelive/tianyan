@@ -194,7 +194,6 @@ impl TaskHandler for ReminderTask {
 mod tests {
     use super::*;
     use crate::common::types::{Message, MessageRole, Part};
-    use crate::memory::MemoryExtractor;
     use crate::model::MockChatService;
     use crate::session::Session;
     use crate::test_utils::MockVfs;
@@ -267,16 +266,7 @@ mod tests {
         config.reminder.enabled = true;
         let model_mock = Arc::new(MockChatService::new());
         let engine = Arc::new(crate::vfs::SummaryEngine::new(model_mock.clone(), "test"));
-        let skill_reviewer = Arc::new(crate::skills::SkillReviewer::new(
-            model_mock.clone(),
-            vfs.clone(),
-            "test-model".to_string(),
-        ));
-        let extractor = Arc::new(MemoryExtractor::new(
-            model_mock,
-            crate::memory::ExtractionConfig::default(),
-        ));
-        TaskContext::new(vfs, engine, extractor, skill_reviewer, Arc::new(config))
+        TaskContext::new(vfs, engine, None, Arc::new(config))
     }
     async fn seed_memory(vfs: &MockVfs) {
         let root = TianyanUri::new(ContextNamespace::Memory, vec![]);

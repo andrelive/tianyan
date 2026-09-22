@@ -35,7 +35,7 @@ step "core-lib-executor" cargo test -p tianyan-core --lib -- executor::
 step "core-lib-agent" cargo test -p tianyan-core --lib -- agent::
 step "core-lib-storage" cargo test -p tianyan-core --lib -- vfs:: session:: db::
 step "core-lib-context" cargo test -p tianyan-core --lib -- context:: memory:: skills:: knowledge::
-step "core-lib-infra" cargo test -p tianyan-core --lib -- config:: observability:: scheduler:: snapshot:: events:: goals:: todos:: lsp:: common:: roles:: notification
+step "core-lib-infra" cargo test -p tianyan-core --lib -- config:: observability:: scheduler:: snapshot:: events:: goals:: todos:: common:: roles:: notification
 step "core-lib-model" cargo test -p tianyan-core --lib -- model:: role_store:: test_utils:: tests::test_version tests::test_name
 step "server-mcp-lib" cargo test -p tianyan-server -p tianyan-mcp --lib
 step "catalog-check" cargo run -q -p tianyan-core --example tool_catalog -- --check

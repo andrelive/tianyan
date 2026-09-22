@@ -19,10 +19,23 @@ use crate::common::types::{
     memory_paths, AgentPath, ContentLevel, ContextNamespace, MemoryCategory, MemoryEntry,
     TianyanUri,
 };
-use crate::memory::format_memory_as_markdown;
 use crate::role_store::RoleStore;
 use crate::roles::{AgentRole, RoleSource, RoleStatus};
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
+use crate::session::types::RecallMessage;
+
+/// 近期会话增量材料：候选拉取上限（跨会话、最近优先；SQL 层）。
+const DIGEST_CANDIDATE_LIMIT: usize = 2000;
+/// 近期会话增量材料：最多展示的会话数（最近活跃优先）。
+const DIGEST_MAX_SESSIONS: usize = 5;
+/// 近期会话增量材料：单会话最多展示的消息条数（取最近）。
+const DIGEST_MAX_MSGS_PER_SESSION: usize = 6;
+/// 近期会话增量材料：单条消息文本的字符上限。
+const DIGEST_MAX_MSG_CHARS: usize = 300;
+/// 近期会话增量材料：总字符预算（超出预算的会话整体省略并注明）。
+const DIGEST_MAX_TOTAL_CHARS: usize = 9000;
+/// 无水位线（首次运行）时的增量回看窗口（小时）。
+const DIGEST_INITIAL_WINDOW_HOURS: i64 = 72;
 
 /// 演化综述执行器（server 提供实现：委托 evolution_reviewer 角色 / 唤醒主 agent）。
 #[async_trait]
@@ -145,11 +158,12 @@ impl EvolutionTask {
     async fn run_evolution(&self, ctx: &TaskContext) -> Result<usize> {
         tracing::info!("开始执行自演化任务（ADR-017）");
 
-        // 阶段 0：采集（水位线 + 注册表清单）
+        // 阶段 0：采集（水位线 + 注册表清单 + 近期会话增量）
         let (last_run_at, last_run_summary) = self.read_watermark(ctx).await;
         let inventory = self.collect_inventory(ctx).await?;
         let consolidate = ctx.config.memory.auto_consolidation;
-        let input = self.build_review_input(&last_run_at, &inventory, consolidate);
+        let digest = self.collect_recent_digest(ctx, &last_run_at).await;
+        let input = self.build_review_input(&last_run_at, &inventory, consolidate, &digest);
 
         // 阶段 1：综述（智能体产出 diff 计划）
         let plan_text = self
@@ -220,6 +234,30 @@ impl EvolutionTask {
         }
     }
 
+    /// 采集近期会话增量材料（水位线之后的新消息）。
+    ///
+    /// 防重复通读（ADR-017 收敛后的材料修正）：综述的历史会话材料若只依赖
+    /// session_recall（关键词回忆、无时间过滤），旧片段会跨运行反复进入输入并
+    /// 挤占新内容。本材料按水位线取"自上次运行以来"的新消息（逐会话限量 +
+    /// 统一截断），与 session_recall 的按需深挖互补。
+    async fn collect_recent_digest(
+        &self,
+        ctx: &TaskContext,
+        last_run_at: &Option<String>,
+    ) -> String {
+        let Some(recall) = ctx.session_recall.as_ref() else {
+            return "（会话增量材料不可用：session_recall 未装配）".to_string();
+        };
+        let (since_ms, label) = digest_since(last_run_at);
+        match recall.recent_since(since_ms, DIGEST_CANDIDATE_LIMIT).await {
+            Ok(msgs) => render_recent_digest(&msgs, &label),
+            Err(e) => {
+                tracing::warn!(error = %e, "演化：近期会话增量采集失败");
+                format!("（增量采集失败：{e}；如需回忆请用 session_recall）")
+            }
+        }
+    }
+
     /// 采集当前注册表清单（记忆/技能/规则/角色 + 各自 L0 摘要首行）。
     ///
     /// memory 为嵌套结构（cases/events/facts 子目录）——递归收集叶子条目；
@@ -268,7 +306,7 @@ impl EvolutionTask {
 }
 
 impl EvolutionTask {
-    /// 组装综述输入包（上次运行时间 + 注册表清单 + 综述指令）。
+    /// 组装综述输入包（上次运行时间 + 近期会话增量 + 注册表清单 + 综述指令）。
     ///
     /// `consolidate` 对应 `[memory] auto_consolidation`：启用时综述包含
     /// 记忆巩固职责（查重 / 合并归纳），关闭时保持最简写入原则。
@@ -277,6 +315,7 @@ impl EvolutionTask {
         last_run_at: &Option<String>,
         inventory: &str,
         consolidate: bool,
+        digest: &str,
     ) -> String {
         let last = last_run_at.as_deref().unwrap_or("从未运行（首次演化综述）");
         let consolidation_principle = if consolidate {
@@ -295,40 +334,41 @@ impl EvolutionTask {
 【上次演化运行时间】
 {last}
 
+【近期会话增量】
+{digest}
+
 【当前注册表清单】（L0 摘要首行；如需详情用 vfs_read 查看）
 {inventory}
 
 【本次任务】
-4. 自行决定输出哪些内容作为新的记忆 / 技能 / 规则 / 组织形态，以及哪些应更新、合并或删除。
-2. 用 session_recall 回忆近期会话内容，识别用户偏好、事实与重复工作模式；
+1. 阅读【近期会话增量】，识别用户偏好、事实与重复工作模式——这是本期新内容的主要来源；
+2. 需要特定细节时用 session_recall 按关键词深挖（更早会话已被前几轮处理，勿重复通读）；
 3. 对照上面清单，自行决定查看哪些历史记忆、经验、组织形态；
-4. 自行决定输出哪些内容作为新的记忆 / 技能 / 规则 / 组织形态，以及哪些应更新或删除。
-  "memories": [
-    {{"action": "add", "category": "preference|decision|fact|entity|pattern|successful_case|failed_case", "content": "...", "importance": 0.8, "id": "可选"}}{merge_example}
-  ],
+4. 产出演化计划：新增 / 更新 / 合并 / 删除（记忆、技能、规则、组织形态）。
 【输出格式】只输出以下 JSON（不要输出其他内容）。
 不要使用任何工具（如 clipboard_write）输出综述结果——最终回复文本必须直接就是 JSON：
 {{
-  "memories": [{{"action": "add", "category": "preference|decision|fact|entity|pattern|successful_case|failed_case", "content": "...", "importance": 0.8, "id": "可选"}}],
+  "memories": [{{"action": "add", "category": "preference|decision|fact|entity|pattern|successful_case|failed_case", "content": "...", "importance": 0.8, "id": "可选"}}{merge_example}],
   "skills": [{{"action": "add|update", "id": "kebab-case", "name": "...", "description": "...", "content": "使用说明（Markdown）", "applicable_scenarios": ["..."]}}],
   "rules": [{{"action": "add", "abstract": "规则摘要", "content": "规则详情"}}],
   "roles": [{{"action": "create|retire", "id": "role-name", "system_prompt": "...", "tools": ["..."]}}],
   "deletions": [{{"kind": "memory|skill|rule", "id": "...", "reason": "删除证据"}}],
-{consolidation_principle}- 只把稳定、跨会话可复用的偏好 / 事实 / 教训 / 决策写入记忆；临时性、一次性内容
-  与过程记录（版本发布、功能完成、例行里程碑）不写记忆——它们在演化报告与项目文档中留痕；
-- 删除必须有证据（被取代 / 已过时 / 低分评审）——过时、被证伪、重复的条目（含记忆）
-  应主动列入 deletions；
+  "summary": "一句话总结本期变更"
+}}
 
 【写前原则】
+- 只把稳定、跨会话可复用的偏好 / 事实 / 教训 / 决策写入记忆与画像；临时性、一次性内容
+  与过程记录（版本发布、功能完成、例行里程碑）不写记忆——它们在演化报告与项目文档中留痕；
 - 写新技能前先查现有技能（语义重复则完善而非新建）；
-- 只把稳定、跨会话可复用的偏好写入画像（临时性、一次性的不写）；
-            consolidation_principle = consolidation_principle,
-- 删除必须有证据（被取代 / 已过时 / 低分评审）；
+{consolidation_principle}- 删除必须有证据（被取代 / 已过时 / 低分评审）——过时、被证伪、重复的条目（含记忆）
+  应主动列入 deletions；
 - 不确定的内容宁可少写，不要污染注册表。
 "#,
             last = last,
             inventory = inventory,
+            digest = digest,
             merge_example = merge_example,
+            consolidation_principle = consolidation_principle,
         )
     }
 
@@ -718,6 +758,160 @@ fn first_line_truncated(text: &str) -> String {
     out
 }
 
+/// 解析水位线 →（since_ms，展示标签）。
+///
+/// 水位线缺失（首次运行）或不可解析时回退 `DIGEST_INITIAL_WINDOW_HOURS`
+/// 小时回看窗口（保守覆盖近期内容；更早历史仍可经 session_recall 深挖）。
+fn digest_since(last_run_at: &Option<String>) -> (i64, String) {
+    if let Some(ts) = last_run_at {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+            return (dt.timestamp_millis(), format!("自 {ts} 以来"));
+        }
+    }
+    let fallback = chrono::Utc::now() - chrono::Duration::hours(DIGEST_INITIAL_WINDOW_HOURS);
+    (
+        fallback.timestamp_millis(),
+        format!(
+            "最近 {} 小时（无水位线，按首次运行处理）",
+            DIGEST_INITIAL_WINDOW_HOURS
+        ),
+    )
+}
+
+/// 渲染近期会话增量材料（纯函数：分组 + 逐会话限量 + 单条截断 + 总预算）。
+///
+/// 输入按时间降序（最近优先）；输出逐会话分块（组内按时间升序），
+/// 会话按最近活跃排序；超预算的会话整体省略并注明。
+fn render_recent_digest(msgs: &[RecallMessage], since_label: &str) -> String {
+    if msgs.is_empty() {
+        return format!("（{since_label}无新增会话内容）");
+    }
+    // 按会话分组（保持首见顺序 = 最近活跃优先）
+    let mut groups: Vec<(String, Vec<&RecallMessage>)> = Vec::new();
+    for m in msgs {
+        match groups
+            .iter_mut()
+            .find(|(sid, _)| sid.as_str() == m.session_id.as_str())
+        {
+            Some((_, list)) => list.push(m),
+            None => groups.push((m.session_id.clone(), vec![m])),
+        }
+    }
+    let mut out = format!(
+        "（{since_label}；{} 个会话有 {} 条新消息）\n",
+        groups.len(),
+        msgs.len()
+    );
+    let mut used = out.chars().count();
+    let mut omitted_note = String::new();
+    for (i, (sid, list)) in groups.iter().enumerate() {
+        if i >= DIGEST_MAX_SESSIONS {
+            omitted_note = format!("（其余 {} 个会话超出展示上限省略）\n", groups.len() - i);
+            break;
+        }
+        // 每会话取最近 N 条（输入最近优先），再按时间升序展示
+        let mut block = format!(
+            "── 会话 {sid} ──（最近活动 {}）\n",
+            format_ts_ms(list.first().map(|m| m.ts).unwrap_or(0))
+        );
+        let lines: Vec<String> = list
+            .iter()
+            .take(DIGEST_MAX_MSGS_PER_SESSION)
+            .rev()
+            .map(|m| {
+                format!(
+                    "[{}] {}",
+                    m.role,
+                    truncate_msg(&m.text, DIGEST_MAX_MSG_CHARS)
+                )
+            })
+            .collect();
+        block.push_str(&lines.join("\n"));
+        block.push('\n');
+        let block_len = block.chars().count();
+        if used + block_len > DIGEST_MAX_TOTAL_CHARS {
+            omitted_note = format!("（其余 {} 个会话因长度预算省略）\n", groups.len() - i);
+            break;
+        }
+        out.push_str(&block);
+        used += block_len;
+    }
+    if !omitted_note.is_empty() {
+        out.push_str(&omitted_note);
+    }
+    out
+}
+
+/// 单条消息截断（压平换行 + 保留开头 + 省略号；UTF-8 安全）。
+fn truncate_msg(s: &str, max_chars: usize) -> String {
+    let flattened = s.replace('\n', " ");
+    if flattened.chars().count() <= max_chars {
+        return flattened;
+    }
+    let mut out: String = flattened.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
+/// epoch 毫秒 → "MM-DD HH:MM"（UTC；不可解析时退化为原始毫秒文本）。
+fn format_ts_ms(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|dt| dt.format("%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| ms.to_string())
+}
+
+/// 将记忆格式化为 Markdown（写入 VFS 前的统一序列化）。
+///
+/// 迁移自 `memory::extractor`（ADR-017 收敛后提取器删除，写入通道保留）。
+fn format_memory_as_markdown(memory: &MemoryEntry) -> String {
+    let mut md = String::new();
+
+    md.push_str(&format!("# 记忆: {}\n\n", memory.id));
+    md.push_str(&format!("- **类别**: {}\n", memory.category));
+    md.push_str(&format!("- **重要性**: {:.2}\n", memory.importance));
+    md.push_str(&format!("- **访问次数**: {}\n", memory.access_count));
+    md.push_str(&format!(
+        "- **创建时间**: {}\n",
+        memory.created_at.to_rfc3339()
+    ));
+    md.push_str(&format!(
+        "- **更新时间**: {}\n",
+        memory.updated_at.to_rfc3339()
+    ));
+
+    if let Some(ref last_accessed) = memory.last_accessed {
+        md.push_str(&format!("- **最后访问**: {}\n", last_accessed.to_rfc3339()));
+    }
+
+    if let Some(ref session_id) = memory.source_session {
+        md.push_str(&format!("- **来源会话**: {}\n", session_id));
+    }
+
+    if !memory.source_message_ids.is_empty() {
+        md.push_str(&format!(
+            "- **来源消息**: {}\n",
+            memory.source_message_ids.join(", ")
+        ));
+    }
+
+    if !memory.tags.is_empty() {
+        md.push_str(&format!("- **标签**: {}\n", memory.tags.join(", ")));
+    }
+
+    if !memory.related_memories.is_empty() {
+        md.push_str(&format!(
+            "- **相关记忆**: {}\n",
+            memory.related_memories.join(", ")
+        ));
+    }
+
+    md.push_str("\n## 内容\n\n");
+    md.push_str(&memory.content);
+    md.push('\n');
+
+    md
+}
+
 /// 解析记忆类别。
 fn parse_category(category: &str) -> Result<MemoryCategory> {
     match category.to_lowercase().as_str() {
@@ -872,23 +1066,8 @@ mod tests {
         let chat: Arc<dyn crate::model::ChatService> =
             Arc::new(crate::test_utils::MockChatService::new());
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
-        let memory_extractor = Arc::new(crate::memory::MemoryExtractor::new(
-            chat.clone(),
-            crate::memory::ExtractionConfig::default(),
-        ));
-        let skill_reviewer = Arc::new(crate::skills::SkillReviewer::new(
-            chat,
-            vfs.clone(),
-            "test-model".to_string(),
-        ));
         let config = Arc::new(config);
-        TaskContext::new(
-            vfs,
-            summary_engine,
-            memory_extractor,
-            skill_reviewer,
-            config,
-        )
+        TaskContext::new(vfs, summary_engine, None, config)
     }
     // ── 真实后端（SqliteBackend）集成验证 ────────────────────────────
     // find_entry 缺陷的教训：旧测试以"目录形态"Mock 条目掩盖了与生产
@@ -1343,13 +1522,15 @@ mod tests {
             }),
             10,
         );
-        let on = task.build_review_input(&None, "memory/x: y", true);
+        let on = task.build_review_input(&None, "memory/x: y", true, "（示例增量）");
         assert!(on.contains("merge_from"), "启用巩固时输出格式含 merge 示例");
         assert!(on.contains("记忆治理（巩固）"));
         assert!(on.contains("过程记录"), "写前原则含过程记录约束");
-        let off = task.build_review_input(&None, "memory/x: y", false);
+        assert!(on.contains("（示例增量）"), "输入包含近期会话增量材料");
+        let off = task.build_review_input(&None, "memory/x: y", false, "（示例增量）");
         assert!(!off.contains("merge_from"), "关闭巩固时不含 merge 指导");
         assert!(!off.contains("记忆治理（巩固）"));
+        assert!(off.contains("（示例增量）"), "增量材料与巩固开关无关");
     }
 
     #[tokio::test]
@@ -1409,5 +1590,158 @@ mod tests {
         assert_eq!(first_line_truncated(&long).chars().count(), 121);
         assert!(first_line_truncated(&long).ends_with('…'));
         assert_eq!(first_line_truncated(""), "");
+    }
+
+    #[test]
+    fn test_build_review_input_structure_clean() {
+        // 回归（2026-09 编辑事故）：文本曾出现编号乱序（4,2,3,4）、重复指令、
+        // 错位 JSON 片段与内联垃圾行（`consolidation_principle = ...`）。
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let input = task.build_review_input(&None, "memory/x: y", true, "（近况材料）");
+        assert!(
+            !input.contains("consolidation_principle ="),
+            "不得含内联垃圾行"
+        );
+        assert!(
+            input.contains("1. 阅读【近期会话增量】"),
+            "任务编号从 1 开始且引用增量材料"
+        );
+        assert!(input.contains("4. 产出演化计划"), "任务编号连续到 4");
+        assert!(
+            input.contains("【近期会话增量】\n（近况材料）"),
+            "增量材料独立成节"
+        );
+        assert_eq!(input.matches("【本次任务】").count(), 1, "任务节不重复");
+        assert_eq!(
+            input.matches("\"memories\"").count(),
+            1,
+            "memories 示例不重复"
+        );
+    }
+
+    /// 构造增量材料测试消息（RecallMessage）。
+    fn recall_msg(session_id: &str, seq: i64, role: &str, text: &str, ts: i64) -> RecallMessage {
+        RecallMessage {
+            session_id: session_id.to_string(),
+            seq,
+            message_id: format!("{session_id}-{seq}"),
+            role: role.to_string(),
+            text: text.to_string(),
+            tool_text: String::new(),
+            ts,
+        }
+    }
+
+    #[test]
+    fn test_digest_since_parses_watermark_and_falls_back() {
+        let ts = "2026-09-20T00:00:00+00:00";
+        let (ms, label) = digest_since(&Some(ts.to_string()));
+        let expect = chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(ms, expect, "可解析水位线应精确转为 epoch 毫秒");
+        assert!(label.contains(ts));
+        // 不可解析 → 回退窗口
+        let (ms_bad, label_bad) = digest_since(&Some("不是时间".to_string()));
+        assert!(ms_bad > 0);
+        assert!(label_bad.contains("72 小时"));
+        // 缺失（首次运行）→ 同样回退
+        let (ms_none, label_none) = digest_since(&None);
+        assert!(ms_none > 0);
+        assert!(label_none.contains("72 小时"));
+    }
+
+    #[test]
+    fn test_render_recent_digest_groups_limits_and_truncates() {
+        // 两个会话；s2 较新（先出现）。s1 有 7 条（应只展示最近 6 条 = seq 2..7）。
+        let long = "长".repeat(400);
+        let msgs = vec![
+            recall_msg("s2", 1, "assistant", "s2-内容", 20_000),
+            recall_msg("s1", 7, "assistant", &long, 19_000),
+            recall_msg("s1", 6, "user", "s1-6", 18_000),
+            recall_msg("s1", 5, "assistant", "s1-5", 17_000),
+            recall_msg("s1", 4, "user", "s1-4", 16_000),
+            recall_msg("s1", 3, "assistant", "s1-3", 15_000),
+            recall_msg("s1", 2, "user", "s1-2", 14_000),
+            recall_msg("s1", 1, "user", "s1-1", 13_000),
+        ];
+        let out = render_recent_digest(&msgs, "自 T 以来");
+        assert!(out.contains("2 个会话有 8 条新消息"));
+        let s2_pos = out.find("会话 s2").unwrap();
+        let s1_pos = out.find("会话 s1").unwrap();
+        assert!(s2_pos < s1_pos, "最近活跃会话应排前");
+        assert!(!out.contains("s1-1"), "超出单会话限量的最旧消息应省略");
+        assert!(out.contains("[user] s1-2"));
+        let p2 = out.find("s1-2").unwrap();
+        let p7 = out.find("[assistant] 长").unwrap();
+        assert!(p2 < p7, "组内按时间升序展示");
+        assert!(
+            out.contains(&format!("[assistant] {}…", "长".repeat(300))),
+            "超长消息应截断到 300 字 + 省略号"
+        );
+    }
+
+    #[test]
+    fn test_render_recent_digest_empty_and_caps() {
+        let empty = render_recent_digest(&[], "自 T 以来");
+        assert!(empty.contains("无新增会话内容"));
+        // 会话数上限：10 个会话只展示 5 个 + 省略提示
+        let msgs: Vec<RecallMessage> = (0..10)
+            .map(|i| recall_msg(&format!("s{i:02}"), 1, "user", "短内容", 30_000 - i))
+            .collect();
+        let out = render_recent_digest(&msgs, "自 T 以来");
+        assert_eq!(out.matches("── 会话").count(), 5);
+        assert!(
+            out.contains("超出展示上限省略"),
+            "应有展示上限省略提示: {out}"
+        );
+        // 长度预算：5 个大会话（每块约 1.9k 字，展示 4 块即超 9k 预算）→ 预算省略提示
+        let big: Vec<RecallMessage> = (0..5)
+            .flat_map(|i| {
+                (0..6).map(move |j| {
+                    recall_msg(
+                        &format!("b{i}"),
+                        j,
+                        "user",
+                        &"内".repeat(300),
+                        30_000 - (i * 10 + j),
+                    )
+                })
+            })
+            .collect();
+        let out2 = render_recent_digest(&big, "自 T 以来");
+        assert!(
+            out2.contains("因长度预算省略"),
+            "应有长度预算省略提示: {out2}"
+        );
+    }
+
+    #[test]
+    fn test_format_memory_as_markdown() {
+        let memory = MemoryEntry::new("test-1", "这是一个测试记忆", MemoryCategory::Preference)
+            .with_importance(0.8)
+            .with_tags(vec!["test".to_string(), "preference".to_string()]);
+
+        let md = format_memory_as_markdown(&memory);
+        assert!(md.contains("# 记忆: test-1"));
+        assert!(md.contains("**类别**: preference"));
+        assert!(md.contains("**重要性**: 0.80"));
+        assert!(md.contains("这是一个测试记忆"));
+    }
+
+    #[test]
+    fn test_format_memory_with_source_message_ids() {
+        let memory = MemoryEntry::new("test-2", "内容", MemoryCategory::Fact)
+            .with_source_session("session-1")
+            .with_source_message_ids(vec!["msg-1".to_string(), "msg-2".to_string()]);
+
+        let md = format_memory_as_markdown(&memory);
+        assert!(md.contains("**来源会话**: session-1"));
+        assert!(md.contains("**来源消息**: msg-1, msg-2"));
     }
 }

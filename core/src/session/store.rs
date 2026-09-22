@@ -847,9 +847,9 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].id, "m2");
         let recall = crate::session::search::SessionRecall::new(store.db.clone()).unwrap();
-        let hits = recall.search("正文内容", 10).await.unwrap();
+        let hits = recall.search("正文内容", 10, None).await.unwrap();
         assert_eq!(hits.len(), 1);
-        let hits = recall.search("不存在的词", 10).await.unwrap();
+        let hits = recall.search("不存在的词", 10, None).await.unwrap();
         assert_eq!(hits.len(), 0);
     }
 
@@ -895,7 +895,7 @@ mod tests {
         assert_eq!(store.list_meta().await.unwrap().len(), 1);
         // 删除后回忆也查不到
         let recall = crate::session::search::SessionRecall::new(store.db.clone()).unwrap();
-        assert!(recall.search("x", 10).await.unwrap().is_empty());
+        assert!(recall.search("x", 10, None).await.unwrap().is_empty());
     }
 
     #[tokio::test]

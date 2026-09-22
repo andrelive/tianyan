@@ -420,7 +420,9 @@ async fn test_run_tests_filter_metacharacters_blocked() {
 #[tokio::test]
 async fn test_discover_tests_rejects_missing_path() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_discover_tests(r#"{}"#).await;
+    let result = registry
+        .execute_discover_tests(r#"{}"#, "test-session")
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -428,7 +430,9 @@ async fn test_discover_tests_rejects_missing_path() {
 #[tokio::test]
 async fn test_discover_tests_rejects_empty_path() {
     let registry = ToolRegistry::new(default_strict_policy());
-    let result = registry.execute_discover_tests(r#"{"path":"  "}"#).await;
+    let result = registry
+        .execute_discover_tests(r#"{"path":"  "}"#, "test-session")
+        .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("参数无效"));
 }
@@ -439,7 +443,7 @@ async fn test_discover_tests_unknown_project_errors() {
     let dir = tempfile::tempdir().unwrap();
     let path = serde_json::to_string(&dir.path().to_string_lossy().into_owned()).unwrap();
     let result = registry
-        .execute_discover_tests(&format!(r#"{{"path":{path}}}"#))
+        .execute_discover_tests(&format!(r#"{{"path":{path}}}"#), "test-session")
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("无法识别项目类型"));

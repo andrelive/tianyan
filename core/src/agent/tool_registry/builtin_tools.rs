@@ -230,7 +230,7 @@ fn def_delegation_stats(name: &'static str) -> ToolDefinition {
 fn def_session_recall(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<SessionRecallParams>(
         name,
-        "按关键词回忆过去对话内容（FTS5 倒排索引，中文子串匹配不分词）。返回顶部命中及附近用户/助手消息窗口（不含工具调用与结果）。当用户提到之前说过的话（刚才/之前/上次）或需要检查历史会话讨论过什么时使用。",
+        "按关键词回忆过去对话内容（FTS5 倒排索引，中文子串匹配不分词）。返回顶部命中及附近用户/助手消息窗口（不含工具调用与结果）。当用户提到之前说过的话（刚才/之前/上次）或需要检查历史会话讨论过什么时使用。可传 since_days 只看最近 N 天（用于'最近/这几天'类限定）。",
     ))
 }
 
@@ -345,3 +345,12 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
     tool("symbol_outline", def_symbol_outline, ToolPresentation::Code),
     tool("repo_map", def_repo_map, ToolPresentation::Code),
 ];
+
+/// 内置工具名清单（公开只读；跨 crate 一致性门禁的单一事实源）。
+///
+/// 消费方：server 侧 planning 技能提示词的"只读工具清单"门禁、内置角色
+/// 白名单校验——工具面变更（新增/删除）时，这些手工清单最容易悄然漂移
+/// （残留已删除工具名会引导模型调用不存在的工具），由测试统一拦截。
+pub fn builtin_tool_names() -> Vec<&'static str> {
+    BUILTIN_TOOLS.iter().map(|t| t.name).collect()
+}

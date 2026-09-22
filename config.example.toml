@@ -169,17 +169,10 @@ max_file_size = 104857600
 audit_logging = true
 
 # ==================== 记忆配置 ====================
+# 记忆的写入通道 = 演化任务（ADR-017：自演化综述统一负责记忆/技能/规则治理）
 [memory]
-max_session_memory = 8000
-max_long_term_memory = 10000
-importance_threshold = 0.5
+# 自动记忆巩固：启用时综述包含查重 / 合并归纳职责（ADR-034）
 auto_consolidation = true
-consolidation_interval = 3600
-decay_rate = 0.01
-# 偏好类记忆写前校验（G3，默认关闭 opt-in）：开启后 MemoryTask 对
-# preferences 类别记忆先经 LLM 校验（是否稳定长期偏好）再持久化，
-# 未通过/校验失败的记忆被丢弃。每提取周期仅对偏好类记忆多一次小调用。
-# verify_preferences = false
 
 # ==================== 检索配置 ====================
 [retrieval]

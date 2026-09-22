@@ -1073,6 +1073,140 @@ pub(super) fn extract_command_base(cmd: &str) -> String {
         .unwrap_or(file_name);
     pure.to_lowercase()
 }
+/// 命令包装器前缀：自身不改变"实际执行什么"，剥离后判定内层命令。
+///
+/// 动机（安全护栏）：黑名单与风险定级此前只看**段首词**——`sudo rm -rf /`
+/// 的首词是 `sudo`，于是黑名单失配、审批被判 Low 并自动放行；而 ADR-033 明确
+/// "全自主后黑名单成为唯一硬护栏"，护栏必须看**真正被执行的命令**。
+const COMMAND_WRAPPERS: &[&str] = &[
+    "sudo", "doas", "env", "nohup", "nice", "ionice", "time", "setsid", "stdbuf", "command",
+    "builtin", "exec", "xargs",
+];
+
+/// 内联执行解释器（`X -c "<cmd>"` / `X /c "<cmd>"` / `X -Command "<cmd>"`）。
+const INLINE_INTERPRETERS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "cmd",
+    "powershell",
+    "pwsh",
+];
+
+/// 内联脚本标志（小写比较）。
+const INLINE_FLAGS: &[&str] = &["-c", "/c", "-command", "--command"];
+
+/// 包装器最大剥离层数（防病态输入下的重复扫描）。
+const WRAPPER_UNWRAP_DEPTH: usize = 8;
+
+/// 归一命令段：去 PowerShell 调用运算符（`& rm …`）与首词的包裹引号（`"rm" -rf …`）。
+fn normalize_segment(segment: &str) -> String {
+    let t = segment.trim().trim_start_matches('&').trim();
+    if let Some(quote @ ('"' | '\'')) = t.chars().next() {
+        if let Some(end) = t[1..].find(quote) {
+            let mut out = String::with_capacity(t.len());
+            out.push_str(&t[1..1 + end]);
+            out.push_str(&t[1 + end + 1..]);
+            return out.trim().to_string();
+        }
+    }
+    t.to_string()
+}
+
+/// 取整段包裹的引号（`"rm -rf /"` → `rm -rf /`）；内部含同种引号时不动。
+fn strip_wrapping_quotes(s: &str) -> String {
+    let t = s.trim();
+    for q in ['"', '\''] {
+        if t.len() >= 2 && t.starts_with(q) && t.ends_with(q) && !t[1..t.len() - 1].contains(q) {
+            return t[1..t.len() - 1].trim().to_string();
+        }
+    }
+    t.to_string()
+}
+
+/// 取解释器的内联脚本内容（标志之后的剩余子串，保留内部空格，去整段包裹引号）。
+///
+/// 用**子串偏移**而非 `split_whitespace` 取脚本：脚本内容含空格时按词取会截断
+/// （`bash -c "rm -rf /"` 的脚本是 `rm -rf /`，不是一个词）。
+fn inline_script(rest: &str) -> Option<String> {
+    let mut offset = 0usize;
+    let mut script_start = None;
+    for tok in rest.split_whitespace() {
+        let pos = rest[offset..].find(tok)? + offset;
+        offset = pos + tok.len();
+        if INLINE_FLAGS.contains(&tok.to_lowercase().as_str()) {
+            script_start = Some(offset);
+            break;
+        }
+    }
+    let script = rest[script_start?..].trim();
+    if script.is_empty() {
+        return None;
+    }
+    Some(strip_wrapping_quotes(script))
+}
+
+/// 剥离命令包装前缀，返回内层命令段（保留参数与空格）；剥不出内层时返回空串。
+///
+/// 覆盖两类：包装器（[`COMMAND_WRAPPERS`]，连同其选项与 `VAR=VAL` 赋值）与
+/// 内联解释器（[`INLINE_INTERPRETERS`] + [`INLINE_FLAGS`]）。解释器**无内联
+/// 标志**（`bash script.sh`）时返回空串——脚本内容无法静态判定。
+///
+/// 判定语义入口见 [`judged_command_name`]（本函数只做"剥壳"）。
+pub(crate) fn unwrap_command_wrapper(segment: &str) -> String {
+    let mut rest = normalize_segment(segment);
+    for _ in 0..WRAPPER_UNWRAP_DEPTH {
+        let Some(first) = rest.split_whitespace().next() else {
+            return String::new();
+        };
+        let name = extract_command_base(first);
+        if COMMAND_WRAPPERS.contains(&name.as_str()) {
+            // 跳过包装器名 + 其选项/赋值/纯数字参数（`sudo -u root`、`env FOO=1`、`nice 5`）
+            let tokens: Vec<&str> = rest.split_whitespace().collect();
+            let mut i = 1;
+            while i < tokens.len() {
+                let w = tokens[i];
+                if w.starts_with('-') || w.contains('=') || w.parse::<i64>().is_ok() {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            if i >= tokens.len() {
+                return String::new();
+            }
+            rest = normalize_segment(&tokens[i..].join(" "));
+            continue;
+        }
+        if INLINE_INTERPRETERS.contains(&name.as_str()) {
+            match inline_script(&rest) {
+                Some(script) => {
+                    rest = normalize_segment(&script);
+                    continue;
+                }
+                None => return String::new(),
+            }
+        }
+        return rest;
+    }
+    rest
+}
+
+/// 判定用命令名（黑名单 / 风险分级 / 白名单的**唯一**取词口径）。
+///
+/// 优先取剥壳后的内层命令（`sudo rm -rf /` → `rm`）；剥不出内层
+/// （`bash script.sh` 这类脚本调用）时**回退原始段首词**——回退而非 fail-closed
+/// 的理由：脚本内容无法静态判定，判 Blocked 会误拦大量正常用法（含天演自身的
+/// `bash scripts/*.sh`），原始口径至少保持既有行为不变。
+pub(crate) fn judged_command_name(segment: &str) -> String {
+    let inner = unwrap_command_wrapper(segment);
+    if inner.trim().is_empty() {
+        return extract_command_base(segment);
+    }
+    extract_command_base(&inner)
+}
 
 /// 完整命令输出落盘（best effort）：`{log_dir}/exec-{uuid8}.log`。
 ///
@@ -1298,15 +1432,10 @@ pub async fn execute_command_action_cancellable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 全局子进程注册表测试互斥——定义已提升到 `executor::test_support`
+    /// （供 test_discovery / verification 等模块的取消测试复用；背景见该模块文档）。
+    use crate::executor::test_support::CHILD_REGISTRY_LOCK;
     use std::time::Duration;
-    /// 全局子进程注册表测试互斥。
-    ///
-    /// 背景（2026-09-19 WSL/CI 实测）：`kill_all_running_children` 按注册表杀
-    /// **全部**子进程（生产语义 = 关停清理）——并行测试下会误杀兄弟测试的命令，
-    /// 导致取消类测试偶发走 Exited 分支（exit_code=-1）、落盘类测试命令跑不完
-    /// （stderr 空 → 无分节）。凡启动真实子进程或操作注册表的测试都持锁串行，
-    /// 其余测试保持并行。
-    static CHILD_REGISTRY_LOCK: Mutex<()> = Mutex::const_new(());
 
     /// 有限轮询等待任务进入终态（避免测试卡死）。
     async fn wait_terminal(manager: &CommandManager, id: &str) -> CommandTask {

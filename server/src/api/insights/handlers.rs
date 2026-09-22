@@ -1,7 +1,7 @@
 //! 内部状态视图处理器。
 //!
 //! 记忆浏览直接读取 VFS memory 命名空间（不经 SummaryEngine——内容已由
-//! MemoryExtractor 写入，此处仅提供读路径）；统计摘要读取 UsageStats。
+//! 演化任务（ADR-017 自演化综述）写入，此处仅提供读路径）；统计摘要读取 UsageStats。
 
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use crate::state::AppState;
 
 /// 列出记忆命名空间全部条目（含 L0/L1/L2 内容）。
 ///
-/// 记忆由 MemoryTask（每 10 分钟 cron）经 MemoryExtractor 写入
+/// 记忆由演化任务（ADR-017 自演化综述）写入
 /// `tianyan://memory/*`；此前无任何读路径，本端点补齐浏览能力。
 ///
 /// 浏览语义：递归展开子目录，仅返回叶子条目——目录仅作导航中间节点，

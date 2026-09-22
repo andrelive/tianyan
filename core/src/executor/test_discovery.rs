@@ -10,12 +10,14 @@
 //!   或经 [`resolve_project_test_command`] 按项目探测构造）。
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::common::error::TianyanError;
-use crate::executor::execute_command_action;
+use crate::executor::execute_command_action_cancellable;
 use crate::executor::project::{probe_project, ProjectFormat, ProjectInfo};
 use crate::executor::truncate;
 
@@ -568,17 +570,21 @@ fn apply_framework_override(info: &mut ProjectInfo, framework: Option<&str>) {
 ///
 /// 返回 `{ framework, root, tests: [{suite, name, file, line}], count, truncated }`，
 /// 列表超过 [`MAX_TESTS`] 条时截断并标记 `truncated`。只读命令，无安全策略依赖。
-pub async fn discover_tests(path: &str) -> Result<Value, TianyanError> {
+pub async fn discover_tests(
+    path: &str,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<Value, TianyanError> {
     let info = probe_project(Path::new(path))?;
     let root = info.root.to_string_lossy().into_owned();
 
     let (framework, tests) = match info.format {
         ProjectFormat::Cargo => {
-            let output = execute_command_action(
+            let output = execute_command_action_cancellable(
                 "cargo test -- --list",
                 Some(&root),
                 Some(DISCOVER_TIMEOUT_SECS),
                 None,
+                cancel.clone(),
             )
             .await?;
             let stdout = output["stdout"].as_str().unwrap_or("");
@@ -590,22 +596,24 @@ pub async fn discover_tests(path: &str) -> Result<Value, TianyanError> {
             ("cargo", parse_cargo_list(stdout, &suite))
         }
         ProjectFormat::Python => {
-            let output = execute_command_action(
+            let output = execute_command_action_cancellable(
                 "pytest --collect-only -q",
                 Some(&root),
                 Some(DISCOVER_TIMEOUT_SECS),
                 None,
+                cancel.clone(),
             )
             .await?;
             let stdout = output["stdout"].as_str().unwrap_or("");
             ("pytest", parse_pytest_list(stdout))
         }
         ProjectFormat::TypeScript => {
-            let output = execute_command_action(
+            let output = execute_command_action_cancellable(
                 "vitest --list",
                 Some(&root),
                 Some(DISCOVER_TIMEOUT_SECS),
                 None,
+                cancel.clone(),
             )
             .await?;
             let stdout = output["stdout"].as_str().unwrap_or("");
@@ -663,8 +671,12 @@ pub async fn run_tests_action(
     command: &str,
     cwd: Option<&str>,
     timeout_secs: Option<u64>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<Value, TianyanError> {
-    let output = execute_command_action(command, cwd, timeout_secs, None).await?;
+    // 取消感知（ADR-036 补盲区）：长测试/构建期间「停止」立即杀进程树并返回
+    // 取消错误——此前本路径走不可取消的 execute_command_action，点停止无效。
+    let output =
+        execute_command_action_cancellable(command, cwd, timeout_secs, None, cancel).await?;
     let stdout = output["stdout"].as_str().unwrap_or("").to_string();
     let stderr = output["stderr"].as_str().unwrap_or("").to_string();
     let exit_code = output["exit_code"].as_i64().unwrap_or(-1);

@@ -33,7 +33,7 @@ pub enum ToolPresentation {
     Knowledge,
     /// 子代理委托（delegate_to_agent）。
     Delegate,
-    /// LSP/符号（lsp / symbol_outline）。
+    /// 符号（symbol_outline / repo_map）。
     Code,
 }
 

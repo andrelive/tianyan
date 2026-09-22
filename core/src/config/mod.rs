@@ -204,7 +204,6 @@ impl TianyanConfig {
         self.models.validate()?;
         self.logging.validate()?;
         self.security.validate()?;
-        self.memory.validate()?;
         self.evolution.validate()?;
         self.retrieval.validate()?;
         self.mcp.validate().map_err(|e| e.to_string())?;
@@ -533,7 +532,6 @@ mod tests {
         assert!(config.storage.validate().is_ok());
         assert!(config.logging.validate().is_ok());
         assert!(config.security.validate().is_ok());
-        assert!(config.memory.validate().is_ok());
         assert!(config.retrieval.validate().is_ok());
     }
 

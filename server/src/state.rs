@@ -16,7 +16,6 @@ use tianyan::config::{ModelEntry, TianyanConfig};
 use tianyan::db::Database;
 use tianyan::goals::GoalStore;
 use tianyan::knowledge::{IngestorConfig, KnowledgeIngestor};
-use tianyan::memory::{ExtractionConfig, MemoryExtractor};
 use tianyan::model::spec::ModelSpec;
 use tianyan::observability::execution_log::ExecutionLog;
 use tianyan::observability::usage_log::UsageLog;
@@ -810,25 +809,6 @@ impl AppState {
         let summary_engine = SummaryEngine::new(model_services.chat, &chat_model);
 
         Ok(Arc::new(summary_engine))
-    }
-
-    /// 创建记忆提取器（复用共享模型服务）。
-    ///
-    /// # Returns
-    /// * `TianyanResult<Arc<MemoryExtractor>>` - 记忆提取器实例
-    pub async fn create_memory_extractor(&self) -> TianyanResult<Arc<MemoryExtractor>> {
-        let config = self.config.read().await.clone();
-        let model_services = self.shared_model_services().await?;
-        let chat_model = resolve_chat_model(&config);
-
-        let extractor = MemoryExtractor::new(
-            model_services.chat,
-            ExtractionConfig {
-                model: chat_model,
-                ..ExtractionConfig::default()
-            },
-        );
-        Ok(Arc::new(extractor))
     }
 
     /// 创建技能使用评审器（记忆提取同周期复审；chat + vfs + 聊天模型）。

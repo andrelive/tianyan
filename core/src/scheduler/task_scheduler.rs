@@ -22,9 +22,8 @@ use tokio::sync::RwLock;
 
 use crate::common::error::TianyanError;
 use crate::config::TianyanConfig;
-use crate::memory::MemoryExtractor;
 use crate::scheduler::TaskStateStore;
-use crate::skills::SkillReviewer;
+use crate::session::search::SessionRecall;
 use crate::vfs::{SummaryService, VirtualFileSystem};
 
 /// 任务上下文。
@@ -36,10 +35,8 @@ pub struct TaskContext {
     pub vfs: Arc<dyn VirtualFileSystem>,
     /// 摘要服务（测试可注入 MockSummaryEngine）。
     pub summary_engine: Arc<dyn SummaryService>,
-    /// 记忆提取器。
-    pub memory_extractor: Arc<MemoryExtractor>,
-    /// 技能使用评审器（记忆提取同周期顺路复审技能使用效果）。
-    pub skill_reviewer: Arc<SkillReviewer>,
+    /// 会话回忆服务（演化任务：近期会话增量采集；None 时增量材料不可用）。
+    pub session_recall: Option<Arc<SessionRecall>>,
     /// 配置。
     pub config: Arc<TianyanConfig>,
     /// 任务作用域状态存储（G5：定时任务跨运行状态——读写自己的持久状态）。
@@ -51,16 +48,14 @@ impl TaskContext {
     pub fn new(
         vfs: Arc<dyn VirtualFileSystem>,
         summary_engine: Arc<dyn SummaryService>,
-        memory_extractor: Arc<MemoryExtractor>,
-        skill_reviewer: Arc<SkillReviewer>,
+        session_recall: Option<Arc<SessionRecall>>,
         config: Arc<TianyanConfig>,
     ) -> Self {
         let task_state = Arc::new(TaskStateStore::new(vfs.clone()));
         Self {
             vfs,
             summary_engine,
-            memory_extractor,
-            skill_reviewer,
+            session_recall,
             config,
             task_state,
         }
@@ -630,7 +625,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use crate::memory::ExtractionConfig;
     use crate::model::ChatService;
     use crate::test_utils::{MockChatService, MockVfs};
     use crate::vfs::SummaryEngine;
@@ -640,23 +634,8 @@ mod tests {
         let vfs: Arc<MockVfs> = Arc::new(MockVfs::new());
         let chat: Arc<dyn ChatService> = Arc::new(MockChatService::new());
         let summary_engine = Arc::new(SummaryEngine::new(chat.clone(), "test-model"));
-        let memory_extractor = Arc::new(MemoryExtractor::new(
-            chat.clone(),
-            ExtractionConfig::default(),
-        ));
-        let skill_reviewer = Arc::new(SkillReviewer::new(
-            chat,
-            vfs.clone(),
-            "test-model".to_string(),
-        ));
         let config = Arc::new(TianyanConfig::default());
-        TaskContext::new(
-            vfs,
-            summary_engine,
-            memory_extractor,
-            skill_reviewer,
-            config,
-        )
+        TaskContext::new(vfs, summary_engine, None, config)
     }
 
     struct TestTask {

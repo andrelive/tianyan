@@ -298,7 +298,6 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 | `roles` | `AgentRole`, `RoleSource`, `RoleStatus`, `RoleUsage`, `DelegationRecord` | 角色基础类型（ADR-016 纯类型层）：config/agent/scheduler 共用，不依赖领域模块——打破 `config↔agent`、`scheduler↔agent` 环 |
 | `role_store` | `RoleStore` | 角色 VFS 存储（独立存储层，依赖 vfs + roles）：保存/加载/删除角色，维护配置签名；scheduler 演化任务与 agent 共用（ADR-021 分层） |
 | `session` | `Session`, `SessionManager` (trait), `PersistentSessionManager`, `SessionStore`, `SessionRecall` | 会话管理，⚠️ ADR-018 VFS 例外：`SessionStore`（SQLite 权威存储，`session_messages` 完整消息 + `session_meta` 会话级状态，单事务原子取号 `MAX(seq)+1`，失败上抛；**SQL 收敛于本模块**——会话专属存储经 `db::Database` 单连接直接实现，不依赖 db 层通用仓储）；`PersistentSessionManager::load_session_from_store()` 返回**完整时序链**（ADR-027：存储层不截断，压缩点截断只发生在组装层视图）；`session_meta.header_json` 承载注入上下文快照（ADR-012）+ 会话元数据（created_at/title/ended_at，重启恢复；`list_sessions` 轻量元数据 + message_count，无幽灵会话） |
-| `memory` | `MemoryExtractor`, `ExtractionConfig` | 从会话文本中提取结构化记忆的纯功能，与调度/持久化解耦 |
 | `knowledge` | `KnowledgeIngestor`, `KnowledgeIngestorBuilder`, `CompositeParser`, `ImageProcessor` | 知识库导入（已通过 `knowledge_ingest` 工具集成到 Agent 流程）。ingestor/ 拆分为 mod + builder；`image/` 拆分为 types/processor/analyzer |
 | `scheduler` | `TaskScheduler`, `TaskHandler` (trait), `TaskContext`, `EvolutionTask`, `GcTask`, `SummaryTask`, `ReminderTask`, `SnapshotGcTask`, `UsageStatsFlushTask` | 定时任务调度框架 + 任务实现，位于 `scheduler/tasks/`（memory_task/rule_task/rule_suggester 已删除——ADR-017 后演化统一由 EvolutionTask 承担）；`TaskResult.error: Option<TianyanError>`（结构化错误）；GcTask 职责为规则归档 + 记忆 TTL 清理；UsageStatsFlushTask 定期把使用统计内存计数器刷入 SQLite（构造器注入，同 SnapshotGcTask 模式） |
 
@@ -317,13 +316,12 @@ soul → rules+memories → history(from compression_marker，含当前用户输
 | config | ✅ 完整集成 | 配置加载器和验证器 |
 | common | ✅ 完整集成 | 错误类型和通用工具 |
 | session | ✅ 已集成 | `PersistentSessionManager` 基于 `SessionStore`（SQLite 权威存储，ADR-018）；回忆检索 `SessionRecall`（FTS5） |
-| memory | ✅ 已集成 | `MemoryExtractor` 提取结构化记忆 |
 | observability | ✅ 已集成 | AgentMetrics 提供可观测性存储和自省接口 |
 | executor | ✅ 正常使用 | 独立执行函数、审批工作流、验证门控均被 agent 模块使用 |
 | snapshot | ✅ 已集成 | gzip 压缩 + GC + similar diff（ADR-006 例外，ADR-008 升级） |
 | knowledge | ✅ 已集成 | KnowledgeIngestor 已通过 knowledge_ingest 工具集成到 Agent 流程，Server 层通过 KnowledgeIngestor 真实处理导入与检索 |
 
-**已删除模块**：`planner/`（Planner-Executor 架构已废弃，仅保留 `ClarificationQuestion` 类型在 agent 中导出）、`eval/`（回答质量离线评测，判断归入演化智能体 ADR-017）
+**已删除模块**：`planner/`（Planner-Executor 架构已废弃，仅保留 `ClarificationQuestion` 类型在 agent 中导出）、`eval/`（回答质量离线评测，判断归入演化智能体 ADR-017）、`memory/`（MemoryExtractor 提取器——ADR-017 收敛后残骸清理）
 **已删除类型**：`ModelRouter`、`TokenBudget`、`DocumentChunker`、`ChunkingConfig`、`ConversationSummarizer`、`VisionEncoder`、`AgentHarness`（wrapper struct）、`AgentSkills`（wrapper struct）、`MemoryExtractionTrait`、`ContextRetriever` (trait)
 **已拆分/下沉文件**（公开 API 路径不变）：`agent/tool_registry/executors.rs` → `file_ops.rs`/`code_ops.rs`/`knowledge_ops.rs`/`agent_ops.rs`；`observability/sqlite_db.rs` → `vfs/backend/sqlite_db.rs`；`config/logging.rs` → `common/logging.rs`；`context/compression/estimator.rs` → `common/token_estimator.rs`；`context/retrieval/types.rs` 的 RetrievalTrace → `common/types/retrieval_trace.rs`；`executor/actions.rs` 拆分出 `security.rs`/`command.rs`/`output_parse.rs`（详见 ADR-007）
 

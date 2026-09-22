@@ -447,12 +447,7 @@ export const mockTianyanConfig = {
     blocked_commands: [],
   },
   memory: {
-    max_session_memory: 8000,
-    max_long_term_memory: 10000,
-    importance_threshold: 0.5,
     auto_consolidation: true,
-    consolidation_interval: 3600,
-    decay_rate: 0.01,
   },
   retrieval: {
     default_top_k: 10,

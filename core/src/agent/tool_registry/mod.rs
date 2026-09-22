@@ -47,6 +47,7 @@ mod symbol_ops;
 /// 测试发现工具执行器（discover_tests）。
 mod test_ops;
 
+pub use builtin_tools::builtin_tool_names;
 pub use pipeline::{ToolGuard, ToolPostExecuteListener, ToolPreExecuteListener};
 
 use builtin_tools::BUILTIN_TOOLS;
@@ -961,7 +962,7 @@ impl ToolRegistry {
                 self.execute_run_project_tests(arguments, session_id, subagent)
                     .await
             }
-            "discover_tests" => self.execute_discover_tests(arguments).await,
+            "discover_tests" => self.execute_discover_tests(arguments, session_id).await,
             "verify_build" => {
                 self.execute_verify_build(arguments, session_id, subagent)
                     .await
@@ -1267,6 +1268,34 @@ mod tests {
             ToolRegistry::default_presentation("no_such_tool"),
             ToolPresentation::Generic
         );
+    }
+
+    /// H-C1 扩展：内置角色的工具白名单必须全部落在注册表内。
+    ///
+    /// 白名单是**过滤清单**——含未注册名时会被静默忽略（过滤为空集），表现
+    /// 为"该角色某项能力凭空消失"而无任何报错。本测试把这类漂移（如工具被
+    /// 删除后白名单未同步清理）变成可拦错误。
+    #[test]
+    fn test_builtin_role_tool_whitelists_are_registered() {
+        let names: std::collections::HashSet<&str> = builtin_tool_names().into_iter().collect();
+        let roles = RoleRegistry::builtin();
+        let mut checked = 0usize;
+        for role_name in roles.names() {
+            let Some(role) = roles.get(&role_name) else {
+                continue;
+            };
+            let Some(tools) = &role.tools else {
+                continue;
+            };
+            for tool in tools {
+                checked += 1;
+                assert!(
+                    names.contains(tool.as_str()),
+                    "角色 {role_name} 的白名单含未注册工具：{tool}（删除工具时需同步清理白名单）"
+                );
+            }
+        }
+        assert!(checked > 0, "应至少检查到一个角色白名单条目");
     }
     /// 具名测试动态工具（顺序/去重测试用）。
     struct NamedDynamicTool(&'static str);

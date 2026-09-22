@@ -13,8 +13,6 @@ pub struct SessionState {
     pub injectable_context: InjectableContext,
     /// 最后活动时间。
     pub last_activity: Instant,
-    /// 待持久化记忆。
-    pub pending_memories: Vec<crate::common::types::MemoryEntry>,
     /// 会话工具表指纹（**内存态**；真用户轮检测工具集变化用）。
     ///
     /// 语义：`None` = 尚未对齐（新会话/重启后首轮只记录基线）；`Some(prev)`
@@ -31,7 +29,6 @@ impl SessionState {
             structured_messages: Vec::new(),
             injectable_context: InjectableContext::new(),
             last_activity: Instant::now(),
-            pending_memories: Vec::new(),
             toolset_fingerprint: None,
         }
     }

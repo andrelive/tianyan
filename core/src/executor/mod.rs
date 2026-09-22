@@ -50,6 +50,19 @@ pub use security::DEFAULT_BLOCKED_COMMANDS;
 pub use shell::{ShellKind, ShellSpec};
 pub use types::Action;
 pub use verification::{VerificationGate, VerificationResult};
+/// 测试共享设施（`#[cfg(test)]` 单点）。
+///
+/// **子进程类测试互斥**：`kill_all_running_children` 按注册表杀**全部**子进程
+/// （生产语义 = 关停清理）——并行测试下会误杀兄弟测试的命令（实测：取消类/
+/// 落盘类测试偶发走 Exited 分支）。凡启动真实子进程或操作注册表的测试一律
+/// 持本锁串行（command.rs 诸测试 + test_discovery 的取消测试）。
+#[cfg(test)]
+pub(crate) mod test_support {
+    use tokio::sync::Mutex;
+
+    /// 全局子进程注册表测试互斥（见模块文档）。
+    pub(crate) static CHILD_REGISTRY_LOCK: Mutex<()> = Mutex::const_new(());
+}
 
 /// 原子写文件（同目录临时文件 + rename 替换）——避免“写一半”留下损坏文件。
 ///

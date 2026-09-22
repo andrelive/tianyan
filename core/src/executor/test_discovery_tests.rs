@@ -281,7 +281,7 @@ fn test_apply_framework_override() {
 
 #[tokio::test]
 async fn test_run_tests_action_explicit_command() {
-    let value = run_tests_action("echo hello", None, Some(10))
+    let value = run_tests_action("echo hello", None, Some(10), None)
         .await
         .unwrap();
     assert_eq!(value["success"].as_bool(), Some(true));
@@ -310,7 +310,7 @@ fn test_resolve_project_test_command_unknown_project_errors() {
 async fn test_discover_tests_unknown_project_errors() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_string_lossy().into_owned();
-    let err = discover_tests(&path).await.unwrap_err();
+    let err = discover_tests(&path, None).await.unwrap_err();
     assert!(err.to_string().contains("无法识别项目类型"));
 }
 
@@ -329,8 +329,11 @@ async fn test_discover_tests_cargo_happy_path_real_cargo() {
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
     std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
     let path = dir.path().to_string_lossy().into_owned();
-    let result =
-        tokio::time::timeout(std::time::Duration::from_secs(120), discover_tests(&path)).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        discover_tests(&path, None),
+    )
+    .await;
     let Ok(Ok(value)) = result else {
         // cargo 不可用或首次编译过慢：跳过
         return;
@@ -340,4 +343,45 @@ async fn test_discover_tests_cargo_happy_path_real_cargo() {
     assert!(value["tests"].is_array());
     assert_eq!(value["count"].as_u64(), Some(0));
     assert_eq!(value["truncated"].as_bool(), Some(false));
+}
+
+// ── 取消（ADR-036 补盲区：工具执行期间的「停止」）──────────────────────────
+
+/// run_tests 执行期间置位会话取消标志 → 秒级返回取消错误（不再等满 timeout）。
+///
+/// 判别力：修复前 `run_tests_action` 走不可取消的 `execute_command_action`，
+/// 置位取消后仍会等满 60s（本测试超时红）。
+#[tokio::test]
+async fn test_run_tests_interruptible_on_cancel() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    // 与 kill_all 类测试互斥（持真实子进程；见 executor::test_support 文档）
+    let _g = crate::executor::test_support::CHILD_REGISTRY_LOCK
+        .lock()
+        .await;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        flag.store(true, Ordering::Relaxed);
+    });
+    let cmd = if cfg!(target_os = "windows") {
+        "Start-Sleep -Seconds 30"
+    } else {
+        "sleep 30"
+    };
+    let started = std::time::Instant::now();
+    let err = run_tests_action(cmd, None, Some(60), Some(cancel))
+        .await
+        .expect_err("置位取消后应返回取消错误");
+    let elapsed = started.elapsed();
+    assert!(
+        err.to_string().contains("已取消"),
+        "取消应返回取消错误：{err}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "取消应在 5s 内生效（实际 {elapsed:?}）"
+    );
+    assert!(!err.is_timeout(), "取消不应被分类为超时");
 }

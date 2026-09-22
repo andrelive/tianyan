@@ -14,6 +14,7 @@ impl ToolRegistry {
     pub(crate) async fn execute_discover_tests(
         &self,
         arguments: &str,
+        session_id: &str,
     ) -> Result<serde_json::Value, TianyanError> {
         let params: DiscoverTestsParams = parse_params(arguments)?;
         if params.path.trim().is_empty() {
@@ -21,7 +22,10 @@ impl ToolRegistry {
                 "tool: 参数无效：path 不能为空".to_string(),
             ));
         }
-        crate::executor::test_discovery::discover_tests(&params.path)
+        // 取消感知（ADR-036 补盲区）：`cargo test -- --list` 首次可能触发全量
+        // 编译（分钟级）——「停止」应能中断等待。
+        let cancel = self.session_cancel_flag(session_id).await;
+        crate::executor::test_discovery::discover_tests(&params.path, cancel)
             .await
             .map_err(wrap_tool_error)
     }

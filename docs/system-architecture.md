@@ -76,7 +76,6 @@ tianyan/
 │   ├── context/    # 上下文工程（assembler、pipeline、retrieval/、compression/）
 │   ├── executor/   # [已废弃] 独立执行函数 + 审批工作流 + 验证门控
 │   ├── knowledge/  # 知识库导入和解析（parser、image、ingestor/）
-│   ├── memory/     # 记忆提取（MemoryExtractor）
 │   ├── model/      # 模型服务容器 + provider/
 │   │   ├── traits.rs    # ChatService/EmbeddingService/VlmService trait
 │   │   ├── services.rs  # ModelServices（替代 ModelRouter 的容器）

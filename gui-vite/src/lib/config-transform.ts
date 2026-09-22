@@ -99,12 +99,7 @@ export function emptyConfigState(): ConfigState {
     clipboard_enabled: false,
     clipboard_auto_capture: false,
     clipboard_prompt_confirm: true,
-    max_session_memory: 8000,
-    max_long_term_memory: 10000,
-    importance_threshold: 0.5,
     auto_consolidation: true,
-    consolidation_interval: 3600,
-    decay_rate: 0.01,
     retrieval_top_k: 10,
     min_score: 0.5,
     two_stage_retrieval: true,
@@ -216,12 +211,7 @@ interface BackendClipboardConfig {
 }
 
 interface BackendMemoryConfig {
-  max_session_memory: number;
-  max_long_term_memory: number;
-  importance_threshold: number;
   auto_consolidation: boolean;
-  consolidation_interval: number;
-  decay_rate: number;
 }
 
 interface BackendRetrievalConfig {
@@ -373,12 +363,7 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
         prompt_confirm: cs.clipboard_prompt_confirm,
       },
       memory: {
-        max_session_memory: cs.max_session_memory,
-        max_long_term_memory: cs.max_long_term_memory,
-        importance_threshold: cs.importance_threshold,
         auto_consolidation: cs.auto_consolidation,
-        consolidation_interval: cs.consolidation_interval,
-        decay_rate: cs.decay_rate,
       },
       retrieval: {
         default_top_k: cs.retrieval_top_k,
@@ -498,12 +483,7 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     clipboard_prompt_confirm: c.clipboard?.prompt_confirm ?? defaults.clipboard_prompt_confirm,
 
     // Memory
-    max_session_memory: memory.max_session_memory ?? defaults.max_session_memory,
-    max_long_term_memory: memory.max_long_term_memory ?? defaults.max_long_term_memory,
-    importance_threshold: memory.importance_threshold ?? defaults.importance_threshold,
     auto_consolidation: memory.auto_consolidation ?? defaults.auto_consolidation,
-    consolidation_interval: memory.consolidation_interval ?? defaults.consolidation_interval,
-    decay_rate: memory.decay_rate ?? defaults.decay_rate,
 
     // Retrieval
     retrieval_top_k: retrieval.default_top_k ?? defaults.retrieval_top_k,

@@ -305,7 +305,7 @@ const PLANNING_SKILL_CONTENT: &str = "\
 
 你已进入计划阶段（用户要求先规划再执行）。遵守以下约束：
 
-1. **只读研究**：只使用只读工具收集信息（read_file / grep / search_vfs /\n   vfs_read / vfs_list / glob / list_dir / symbol_outline / lsp / web_search / web_fetch /\n   discover_tests）。不得调用 write_file / apply_edit / apply_patch / execute_command /\n   run_tests / verify_build / knowledge_ingest / delegate_to_agent（后台任务）。
+1. **只读研究**：只使用只读工具收集信息（read_file / grep / search_vfs /\n   vfs_read / vfs_list / glob / list_dir / symbol_outline / repo_map / web_search / web_fetch /\n   discover_tests）。不得调用 write_file / apply_edit / apply_patch / execute_command /\n   run_tests / verify_build / knowledge_ingest / delegate_to_agent（后台任务）。
 2. **输出结构化计划**：按以下格式输出——\n   - 目标：一句话明确要完成什么\n   - 步骤：编号列表，每步注明涉及的文件/命令/风险\n   - 风险与验证：潜在副作用 + 每步完成后的验证方式（测试/检查命令，仅描述不执行）\n3. **结束询问**：计划输出完毕后，询问用户是否开始执行——用户确认前不执行任何写操作。\n4. 用户确认执行后，恢复正常（执行）行为。";
 
 /// 允许的 CORS 来源（编译期常量，避免运行时 parse panic）。
@@ -480,14 +480,12 @@ async fn start_server_inner(
         // 创建任务上下文
         let vfs = state.vfs();
         let summary_engine = state.create_summary_engine().await?;
-        let memory_extractor = state.create_memory_extractor().await?;
-        let skill_reviewer = state.create_skill_reviewer().await?;
+        let session_recall = state.session_recall();
 
         let task_ctx = Arc::new(TaskContext::new(
             vfs.clone(),
             summary_engine,
-            memory_extractor,
-            skill_reviewer,
+            Some(session_recall),
             app_config.clone(),
         ));
 
@@ -984,5 +982,33 @@ mod tests {
     async fn test_health_check() {
         let response = health_check().await;
         assert_eq!(response.0.status, "ok");
+    }
+
+    /// planning 技能提示词的工具清单不得漂移。
+    ///
+    /// 残留已删除工具名（如 v0.5.8 移除的 `lsp`）或在新增工具后漏补，都会
+    /// 引导模型调用不存在的工具（白跑一轮 + 用户可见失败）。解析方式：从
+    /// 清单起始（`read_file`）到右括号之间的 token（斜杠/空白分隔），逐个
+    /// 断言存在于内置工具表（`builtin_tool_names` 跨 crate 单一事实源）。
+    #[test]
+    fn test_planning_skill_tool_mentions_are_registered() {
+        let content = PLANNING_SKILL_CONTENT;
+        let start = content
+            .find("read_file")
+            .expect("planning 只读清单应以 read_file 开头");
+        let tail = &content[start..];
+        let end = tail.find('）').unwrap_or(tail.len());
+        let mentions: Vec<&str> = tail[..end]
+            .split(|c: char| c == '/' || c.is_whitespace())
+            .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+            .collect();
+        assert!(!mentions.is_empty(), "应能从 planning 提示词解析出工具清单");
+        let registered = tianyan::agent::builtin_tool_names();
+        for m in &mentions {
+            assert!(
+                registered.contains(m),
+                "planning 技能提示词含未注册工具：{m}（工具删除/改名后需同步提示词）"
+            );
+        }
     }
 }
