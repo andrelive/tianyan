@@ -30,6 +30,7 @@
 - **P0 九条**：段化收缩位置修正 / 审批黑名单包装前缀绕过 / 工具执行可取消 / 工具面漂移门禁 / 发布门禁联动 / 记忆提取残骸清理 / 系统路径判定泛化 / intent 移除 Session / 快照读错误不再折叠
 - **P1 九条**：调度任务超时 / 状态文件原子写 / 工作集双实例 / 幽灵会话（写入不存在会话不再静默重建）/ 快照三缺陷 / 并行工具结果保序 / 工作集按库 seq 落位 / `move_entry` 校验 / sqlite 后端吞错
 - 另有：自演化综述材料增量机制化（跨会话水位）、`[memory]` 六个零实现配置键清理、`skill_reviewer` 残骸清理
+- **发布链路：工具目录门禁命令漂移修复（tag 推送后不出包的根因）**：0.5.8 生成器迁至 server 侧时，CI 里内联的 `-p tianyan-core` 命令未同步 → 0.5.9 tag 的 Quality 门禁必红 → `release.yml` 的 build（`needs: quality`）被跳过、**不出包**。现命令单一来源 = 仓库 `.cargo/config.toml` 的 alias（`cargo catalog-check` / `catalog-gen`），CI 步骤 / `gen-tool-catalog.ps1` / `wsl-ci-parity.sh` / 文档一律调别名（换生成器位置只改一处）；并修 Linux pwsh 下的路径拼接
 
 ## 0.5.8 工具审查收敛 + repo_map（代码智能落地）+ LSP 移除
 

@@ -102,7 +102,10 @@
 
 ### 3.2 `quality.yml`（0.3.15 新增的质量门禁）
 
-触发：`push` 到 `master` + 所有 `pull_request`。Job `quality`（`ubuntu-latest`）。
+触发：`push` tag（`v*`，与 `release.yml` 同批）+ 所有 `pull_request`，
+并作为可复用工作流被 `release.yml` 的 `build` 依赖（`needs: quality`——
+门禁红则不出包）。`master` 推送**不再**触发（2026-09-18 起，降噪）。
+Job `quality`（`ubuntu-latest`）。
 
 门禁项（实读）：
 
@@ -111,7 +114,7 @@
 | Rust fmt | `cargo fmt --all -- --check` |
 | Rust clippy（deny warnings） | `cargo clippy --workspace --exclude tianyan-tauri --all-targets -- -D warnings` |
 | Rust 单测 | `cargo test --workspace --exclude tianyan-tauri --lib` |
-| 工具目录 freshness | `cargo run -q -p tianyan-core --example tool_catalog -- --check` |
+| 工具目录 freshness | `cargo catalog-check`（alias 定义在 `.cargo/config.toml`——**命令单一来源**，CI / `gen-tool-catalog.ps1` / WSL 复刻脚本共用；勿在任一处内联 cargo 命令行） |
 | 前端依赖 | `cd gui-vite && npm ci` |
 | 前端 lint | `cd gui-vite && npm run lint`（eslint + prettier） |
 | 前端 typecheck | `cd gui-vite && npm run typecheck` |

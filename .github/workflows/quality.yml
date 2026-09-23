@@ -63,8 +63,15 @@ jobs:
       - name: Rust integration tests (incl. e2e)
         run: cargo test --workspace --exclude tianyan-tauri --test "*"
 
+      # 工具目录 freshness：命令来自仓库 `.cargo/config.toml` 的 alias
+      # （`catalog-check`）——**命令单一来源**，CI 不再内联 cargo 命令行，
+      # 杜绝"生成器换包/换位置后 CI 未同步"的漂移。0.5.9 实发事故：生成器
+      # 由 core 迁到 server 侧（组件工具也要进目录），本地脚本已改而 CI 里
+      # 内联的 `-p tianyan-core` 未同步 → `no example target named
+      # tool_catalog` → 门禁必红 → release 的 build 因 `needs: quality`
+      # 被跳过（tag 推送后不出包）。换生成器位置现在只改 `.cargo/config.toml`。
       - name: Tool catalog freshness
-        run: cargo run -q -p tianyan-core --example tool_catalog -- --check
+        run: cargo catalog-check
 
       - name: Frontend deps
         run: cd gui-vite && npm ci

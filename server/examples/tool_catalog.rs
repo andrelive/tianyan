@@ -1,10 +1,13 @@
 //! 工具目录生成器（**权威生成器**：覆盖 core 内置 + server 组件工具）。
 //!
-//! 用法（经 `scripts/gen-tool-catalog.ps1` 调用）：
+//! 用法：**一律经 `.cargo/config.toml` 的 alias 调用**（命令单一来源——
+//! CI 步骤、`scripts/gen-tool-catalog.ps1`、`scripts/wsl-ci-parity.sh`
+//! 共用；0.5.9 实发事故：生成器由 core 迁来此处时 CI 内联的旧命令未同步，
+//! tag 推送后门禁红、不出包）：
 //!
 //! ```text
-//! cargo run -q -p tianyan-server --example tool_catalog             # 生成
-//! cargo run -q -p tianyan-server --example tool_catalog -- --check  # freshness 门禁
+//! cargo catalog-gen     # 生成目录内容到 stdout
+//! cargo catalog-check   # freshness 门禁（漂移 → 退出码 1）
 //! ```
 //!
 //! **为什么在 server 侧**：只有这里能同时装配 core 内置工具与组件工具

@@ -5,7 +5,8 @@
 **影响范围**: 执行器（新增 `core/src/executor/shell.rs`）、命令执行
 （`core/src/executor/command.rs`）、工具描述（`core/src/agent/tool_registry/builtin_tools.rs`）、
 配置（新增 `core/src/config/executor.rs`）、server 装配（`server/src/lib.rs`、
-`server/src/api/config/services.rs`）、工具目录（`core/examples/tool_catalog.rs`）
+`server/src/api/config/services.rs`）、工具目录（`core/examples/tool_catalog.rs`，
+0.5.8 起生成器迁至 `server/examples/tool_catalog.rs`——组件工具也要进目录）
 
 ---
 

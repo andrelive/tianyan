@@ -38,7 +38,9 @@ step "core-lib-context" cargo test -p tianyan-core --lib -- context:: memory:: s
 step "core-lib-infra" cargo test -p tianyan-core --lib -- config:: observability:: scheduler:: snapshot:: events:: goals:: todos:: common:: roles:: notification
 step "core-lib-model" cargo test -p tianyan-core --lib -- model:: role_store:: test_utils:: tests::test_version tests::test_name
 step "server-mcp-lib" cargo test -p tianyan-server -p tianyan-mcp --lib
-step "catalog-check" cargo run -q -p tianyan-core --example tool_catalog -- --check
+# 工具目录 freshness：调仓库 `.cargo/config.toml` 的 alias（命令单一来源，
+# 与 CI 步骤、scripts/gen-tool-catalog.ps1 共用——换生成器位置只改 config）。
+step "catalog-check" cargo catalog-check
 
 if [ "$FAILED" -eq 0 ]; then
   echo "CI_PARITY_OK"

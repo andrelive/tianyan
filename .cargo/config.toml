@@ -1,0 +1,22 @@
+# 仓库级 cargo 配置（随仓库分发：本地 / CI / WSL 共用）。
+#
+# ## [alias] —— 工具目录门禁的**命令单一来源**
+#
+# 工具目录的权威生成器曾在 core 侧（`core/examples/tool_catalog.rs`），0.5.8
+# 迁到 server 侧（`server/examples/tool_catalog.rs`——只有它能同时装配 core
+# 内置工具与组件工具 `todo`/`goal`/`schedule_task`）。迁移当时只改了
+# `scripts/gen-tool-catalog.ps1`，而 CI（`.github/workflows/quality.yml`）
+# **内联的旧命令**未同步 → `no example target named tool_catalog in
+# tianyan-core` → Quality 门禁在 tag 阶段必红 → `release.yml` 的 build 因
+# `needs: quality` 被跳过（0.5.9 实发事故：tag 推送后不出包）。
+#
+# 教训不是"再记住同步一处"，而是**命令不该有多份**。此后生成/校验命令只
+# 存在于本文件：CI 步骤、`scripts/gen-tool-catalog.ps1`、
+# `scripts/wsl-ci-parity.sh`、文档一律调用别名——换包/换路径只改这里。
+#
+# 用法：
+#   cargo catalog-check   # freshness 校验（漂移 → 退出码 1）
+#   cargo catalog-gen     # 生成目录内容到 stdout（Windows 侧由 ps1 落盘为 UTF-8 无 BOM）
+[alias]
+catalog-check = "run -q -p tianyan-server --example tool_catalog -- --check"
+catalog-gen = "run -q -p tianyan-server --example tool_catalog"
