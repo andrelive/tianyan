@@ -1112,7 +1112,7 @@ impl ToolRegistry {
         let limit = params
             .limit
             .unwrap_or(LIST_DEFAULT_LIMIT)
-            .clamp(1, LIST_MAX_LIMIT);
+            .min(LIST_MAX_LIMIT);
         // (created_at, seq, item)：跨两表统一排序（最近优先）
         let mut entries: Vec<(i64, u64, serde_json::Value)> = Vec::new();
         if kind_filter.is_empty() || kind_filter == "delegate" {
@@ -1177,9 +1177,7 @@ impl ToolRegistry {
             notes.push("无法解析当前会话工作目录，已列出全部任务".to_string());
         }
         if total > shown_len {
-            notes.push(format!(
-                "共 {total} 条可见任务，已返回最近 {shown_len} 条；用 task_id 查详情（limit 可调，上限 {LIST_MAX_LIMIT}）"
-            ));
+            notes.push(format!("仅显示最近 {shown_len} 条（共 {total} 条）"));
         }
         if !notes.is_empty() {
             if let Some(obj) = out.as_object_mut() {

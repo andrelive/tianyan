@@ -1973,7 +1973,7 @@ async fn test_task_status_list_command_entry_is_compact() {
         .await;
 }
 
-/// 列表规模治理：默认最近 20 条；limit 可调（下界 1）；最近优先；
+/// 列表规模治理：默认最近 20 条；limit 可调；最近优先；
 /// 超出部分附截断提示。
 ///
 /// 判别力：注入旧口径（无 limit、全量返回）→ len==20 / len==5 断言必红。
@@ -2015,17 +2015,6 @@ async fn test_task_status_list_limit_recent_first_and_hint() {
         .unwrap();
     assert_eq!(v["tasks"].as_array().unwrap().len(), 5);
     assert_eq!(v["tasks"][0]["description"].as_str(), Some("task-24"));
-
-    // 下界 clamp：limit=0 → 至少 1 条（不返回空列表）
-    let v = registry
-        .execute_task_status(r#"{"limit":0}"#, "s1")
-        .await
-        .unwrap();
-    assert_eq!(
-        v["tasks"].as_array().unwrap().len(),
-        1,
-        "limit 下界应钳制为 1"
-    );
 }
 
 /// 详情模式（task_id）保持全量快照：result 等完整字段在此返回。
