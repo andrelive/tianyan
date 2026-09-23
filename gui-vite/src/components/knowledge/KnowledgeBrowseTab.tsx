@@ -8,6 +8,7 @@ import {
 import { useResource } from '@/hooks/use-resource';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { toErrorMessage } from '@/lib/errors';
+import { renderIndexOrText } from '@/lib/vfs-index';
 import { ChevronRight, Folder, File, Trash2, Loader2, AlertCircle } from 'lucide-react';
 
 /** 知识库浏览（目录导航 + 层级查看 + 二次确认删除）。 */
@@ -165,7 +166,7 @@ export default function KnowledgeBrowseTab({ active = true }: { active?: boolean
             onClick={() => setBrowseLevel(lvl)}
             className={`px-2 py-0.5 text-xs rounded border ${browseLevel === lvl ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'border-[var(--color-border)] text-[var(--color-text-secondary)]'}`}
           >
-            {lvl === 'abstract' ? 'L0 摘要' : lvl === 'overview' ? 'L1 概览' : 'L2 详情'}
+            {lvl === 'abstract' ? '简介' : lvl === 'overview' ? '目录' : '正文'}
           </button>
         ))}
         <button
@@ -261,7 +262,7 @@ export default function KnowledgeBrowseTab({ active = true }: { active?: boolean
             </div>
           ) : (
             <pre className="max-h-[300px] overflow-y-auto p-4 rounded-lg bg-[var(--color-bg-secondary)] text-sm text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono leading-relaxed border border-[var(--color-border)]">
-              {browseContent || '(空内容)'}
+              {renderIndexOrText(browseContent) || '(空内容)'}
             </pre>
           )}
         </div>

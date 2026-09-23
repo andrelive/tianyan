@@ -63,25 +63,84 @@ describe('MemoryPanel', () => {
 
     // 点击三层齐全的条目 → 默认 L2 详情
     await user.click(screen.getByText('response_style'));
-    expect(screen.getByRole('tab', { name: 'L2 详情' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: '正文' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByText(/技术问答时/)).toBeInTheDocument();
 
     // 切到 L0 摘要
-    await user.click(screen.getByRole('tab', { name: 'L0 摘要' }));
+    await user.click(screen.getByRole('tab', { name: '简介' }));
     expect(
       screen.getByText('用户偏好简洁直接的回复风格，代码示例优先使用 Rust。'),
     ).toBeInTheDocument();
 
     // 切到 L1 概览
-    await user.click(screen.getByRole('tab', { name: 'L1 概览' }));
+    await user.click(screen.getByRole('tab', { name: '目录' }));
     expect(screen.getByText(/用户希望回复简洁直接/)).toBeInTheDocument();
 
     // 点击只有 abstract 的条目 → 回退 L0，L1/L2 禁用
     await user.click(screen.getByText('user_name'));
-    expect(screen.getByRole('tab', { name: 'L0 摘要' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: '简介' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByText(/用户昵称为「小天」/)).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'L1 概览' })).toBeDisabled();
-    expect(screen.getByRole('tab', { name: 'L2 详情' })).toBeDisabled();
+    expect(screen.getByRole('tab', { name: '目录' })).toBeDisabled();
+    expect(screen.getByRole('tab', { name: '正文' })).toBeDisabled();
+  });
+
+  it('renders structured index (L1) as readable list', async () => {
+    // L1 = 目录（结构化 JSON）→ 渲染为可读列表（与后端 render_doc_index 对齐）；
+    // 非目录（旧概览/全文直用）原样展示。
+    const indexJson = JSON.stringify({
+      kind: 'index',
+      sections: [{ title: '安装', summary: '如何安装', start_line: 3, end_line: 10 }],
+    });
+    server.use(
+      http.get('/api/v1/memory', () =>
+        HttpResponse.json({
+          memories: [
+            {
+              uri: 'tianyan://memory/facts/indexed',
+              is_directory: false,
+              name: 'indexed',
+              relative_path: 'facts/indexed',
+              metadata: {
+                uri: {
+                  uri: 'tianyan://memory/facts/indexed',
+                  namespace: 'memory',
+                  path: ['facts', 'indexed'],
+                },
+                is_directory: false,
+                content_type: 'text/plain',
+                category: 'fact',
+                source: 'MemoryTask',
+                original_name: 'indexed.md',
+                file_size: 100,
+                importance: 0.5,
+                tags: [],
+                created_at: '2026-07-22T11:00:00Z',
+                updated_at: '2026-07-22T11:00:00Z',
+                custom: {},
+              },
+              abstract: '目录条目简介',
+              overview: indexJson,
+              detail: '正文内容',
+            },
+          ],
+          total: 1,
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderMemoryPanel();
+
+    await waitFor(() => {
+      expect(screen.getByText('indexed')).toBeInTheDocument();
+    });
+    await user.click(screen.getByText('indexed'));
+    // 默认层级 = 正文（detail）
+    expect(screen.getByText('正文内容')).toBeInTheDocument();
+    // 切到目录：JSON 渲染为可读列表（而非原始 JSON）
+    await user.click(screen.getByRole('tab', { name: '目录' }));
+    expect(screen.getByText('- 安装（行 3-10）：如何安装')).toBeInTheDocument();
+    expect(screen.queryByText(/"sections"/)).not.toBeInTheDocument();
   });
 
   it('collapses and expands directory nodes', async () => {

@@ -7,12 +7,13 @@ import { buildMemoryTree, countLeaves, type MemoryTreeNode } from '@/lib/memory-
 import { MemoryStick, Folder, Star, RefreshCw, ChevronRight, ChevronDown } from 'lucide-react';
 import { Spinner } from '@/components/ui/Spinner';
 import { ErrorBanner } from '@/components/ui/ErrorBanner';
+import { renderIndexOrText } from '@/lib/vfs-index';
 
-/** 内容层级（L0 摘要 / L1 概览 / L2 详情）。 */
+/** 内容层级（简介 / 目录 / 正文；ADR-001 修订：L1 语义 = 目录）。 */
 const LEVELS = [
-  { key: 'L0', label: 'L0 摘要', pick: (e: MemoryEntry) => e.abstract },
-  { key: 'L1', label: 'L1 概览', pick: (e: MemoryEntry) => e.overview },
-  { key: 'L2', label: 'L2 详情', pick: (e: MemoryEntry) => e.detail },
+  { key: 'L0', label: '简介', pick: (e: MemoryEntry) => e.abstract },
+  { key: 'L1', label: '目录', pick: (e: MemoryEntry) => e.overview },
+  { key: 'L2', label: '正文', pick: (e: MemoryEntry) => e.detail },
 ] as const;
 type LevelKey = (typeof LEVELS)[number]['key'];
 
@@ -24,7 +25,7 @@ function defaultLevel(entry: MemoryEntry): LevelKey | null {
   return null;
 }
 
-/** 记忆面板：左侧分类树 + 右侧详情（L0/L1/L2 层级可切换）。 */
+/** 记忆面板：左侧分类树 + 右侧详情（简介/目录/正文 层级可切换）。 */
 export default function MemoryPanel() {
   const [selected, setSelected] = useState<MemoryEntry | null>(null);
   const [level, setLevel] = useState<LevelKey | null>(null);
@@ -150,7 +151,7 @@ export default function MemoryPanel() {
               </div>
               {activeContent !== null ? (
                 <pre className="overflow-y-auto p-4 rounded-lg bg-[var(--color-bg-secondary)] text-sm text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono leading-relaxed border border-[var(--color-border)]">
-                  {activeContent || '(空内容)'}
+                  {renderIndexOrText(activeContent) || '(空内容)'}
                 </pre>
               ) : (
                 <p className="text-sm text-[var(--color-text-tertiary)] py-8 text-center">
