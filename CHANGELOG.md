@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.9] - 2026-09-23
 
 ### Fixed
 - **`move_entry` 不校验 URI、吞读错误（目标静默缺层）（P1-36）**：与 `list`/`delete` 不同，`move_entry` 入口无 `validate_uri`（非法 URI 直达后端）；且三层内容用 `if let Ok(content)` 读——**非 not_found 的读错误（存储故障）被静默吞**，目标条目缺层且无任何线索。修法：入口补 `validate_uri`（源与目标）；分层读区分 `is_not_found()`（合法缺层，跳过）与其他错误（**上抛**）。判别力：`test_move_entry_validates_uri`（注入"不校验"→ 必红：错误变成后端的"目录不存在"而非入口校验信息）
