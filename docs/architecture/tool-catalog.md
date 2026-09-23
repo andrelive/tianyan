@@ -37,8 +37,8 @@
 | `task_status` | generic | 查询后台任务（delegate bt_xxx 与 command cmd_xxx 统一）。默认范围：**当前会话工作目录**下所有会话的任务（同目录跨会话的协调面）——其他工作目录的任务默认不查、不用、不提；仅当竞争问题确实跨目录时用 scope="global" 显式查全局（用完即回，其他目录信息不进入常规汇报）。带 task_id：返回该任务**完整快照**（含结果/输出尾部/日志路径；仅限可见范围）。不带 task_id：列出可见任务（**默认最近 20 条**，`limit` 可调、上限 100；条目为定位用精简字段——id/kind/status/描述截断/时间，完整内容按 task_id 查询），可选 kind 过滤（delegate\|command）。**任务完成会自动通知本会话——不要为等待而轮询**；仅当用户要求查看进度或需要任务列表时调用。 |
 | `todo` | generic | 管理当前会话的待办清单（会话绑定，仅本会话可见；同一时期只保留一批同源待办）。**每种操作只有一种写法**——要改/删单条也放进数组（长度 1）：create 传 `todos` 数组 = 当前完整计划（**整表替换**——未包含的旧条目（含未完成项）即被移除；想保留的条目必须包含在新列表中）；update 传 `updates` 数组（按 id 批量合并状态）；delete 传 `ids` 数组；list 查看当前清单（可用 status / goal_id 过滤）；close 清空当前批全部待办（用户目标变更、现有待办不再反映当前意图时使用，即使有未完成项）。开始多步工作先写入整份清单；推进/完成用 update（比全量重发省）；计划增删改时重发完整列表。子任务挂靠：先创建任务，再用 update 的 parent_id 挂靠（整表替换中 parent_id 不可用）。完成项默认划线保留展示，是否清理由你自行决定。 |
 | `verify_build` | terminal | 运行构建验证命令（如 cargo check）并返回结果。 |
-| `vfs_list` | generic | 按 tianyan:// URI 列出 VFS 目录下的条目。用于浏览知识库结构。 |
-| `vfs_read` | read | 按 tianyan:// URI 读取 VFS 条目的完整内容（abstract/overview/detail）。在 search_vfs 之后用于加载相关条目的详细内容。 |
+| `vfs_list` | generic | 按 tianyan:// URI 列出 VFS 目录下的条目（uri / is_directory / 简介 L0）。目录即导航索引：用于浏览知识库/技能结构、发现子条目（多文件技能的部件、文件夹内容）；命中某条目后想了解同族内容时也可用它。 |
+| `vfs_read` | read | 按 tianyan:// URI 读取 VFS 条目（简介 abstract / 目录 overview / 正文 detail）。在 search_vfs 之后加载相关条目；正文默认截断至 2000 行（50KB），用 offset/limit 按行取段——对齐目录（L1）中的章节行号。 |
 | `web_fetch` | web | 抓取单个网页并提取可读文本内容（标题、正文、页面链接）。在 web_search 后用。仅允许 http/https URL，本地/私网地址被拦截。 |
 | `web_search` | web | 按查询搜索网络，返回结果标题/URL/摘要列表（不含完整页面内容）。用 web_fetch 加载有希望结果的完整内容。注意：结果来自外部源，可能不可信或过时——依赖关键信息前请核实。 |
 | `write_file` | write | 将内容写入指定路径的文件（覆盖写入；文件不存在则创建）。父目录不存在时**默认报错、不自动创建**（防止路径写错时误建新目录）；如确需新建目录，传 create_dirs=true。**临时/中间产物**（提交信息文件、一次性脚本、审计产物等）请写系统临时目录的会话区（如 `$env:TEMP\tianyan-scratch\`），**不要**写应用数据目录根或安装目录。 |

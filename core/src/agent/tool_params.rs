@@ -268,6 +268,12 @@ pub struct SearchVfsParams {
 pub struct VfsReadParams {
     /// VFS URI（如 tianyan://knowledge/doc.md）。
     pub uri: String,
+    /// 正文起始行号（1 起始，默认 1）——配合目录（L1）中的章节行号定位取段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
+    /// 正文返回行数上限（默认 2000，单窗口钳制至 2000）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// 列出 VFS 目录参数。

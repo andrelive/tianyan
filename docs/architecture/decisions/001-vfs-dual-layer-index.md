@@ -1,7 +1,7 @@
 # ADR-001: VFS 双层摘要索引 —— 基础机制
 
 **日期**: 2026-06  
-**状态**: ✅ 已采纳  
+**状态**: ✅ 已采纳（2026-09-22 修订：L1 语义重定义 —— 概览 → 目录）
 **影响范围**: 全局基础 — 所有其他设计必须妥协于此
 
 ---
@@ -16,11 +16,11 @@
 
 | 层级 | 名称 | Token | 向量 | 用途 |
 |------|------|-------|------|------|
-| L0 | Abstract | ~100 | `abstract_vector` | 向量搜索、快速过滤 |
-| L1 | Overview | ~2K | `overview_vector` | 内容导航、重排序 |
-| L2 | Detail | 无限制 | — | 完整内容，按需加载 |
+| L0 | 简介（Abstract） | ~100 | `abstract_vector` | 向量搜索、快速过滤（**这是什么**） |
+| L1 | 目录（Overview） | 按章节数（结构化） | `overview_vector` | 内容导航（**下面有什么**）：叶节点 = 章节目录（标题 + 摘要 + 行号 range）；目录节点 = **不生成**（消费时 `vfs_list` 现遍历） |
+| L2 | 正文（Detail） | 无限制 | — | 完整内容，**按章节 range 按需取段**（不自动加载） |
 
-检索流程：查询文本 → embed → LanceDB RRF 融合搜索 `abstract_vector` + `overview_vector` → `ContentLoadStrategy::from_score()` 按分数分层加载（>0.85→L2, >0.6→L1, 其他→L0）。
+检索流程：查询文本 → embed → LanceDB RRF 融合搜索 `abstract_vector` + `overview_vector` → 命中**叶节点**（目录节点无内容、无向量，天然不参与命中）→ `ContentLoadStrategy` 返回 **简介 + 目录**（>0.6）/ **仅简介**（≤0.6）→ 模型读目录完成章节定位 → 按需取段（L2 range 读）。**L2 不再自动加载**（短内容下 L1"直用"= 全文，行为等价于旧制）。
 
 ## 后果
 
@@ -31,7 +31,7 @@
 
 ### 对子系统的约束
 - **知识库不做 chunk**：完整文档直接写入 L2，双层检索替代 chunk-based RAG。`Chunker` 已移除。
-- **技能渐进式披露**：L0 Abstract 用于快速发现（`SkillManager::list_available_skills()`），L2 Detail 按需加载。
+- **技能渐进式披露**：L0 简介用于快速发现（`SkillManager::list_available_skills()`），L1 目录用于章节/部件定位，L2 正文按需取段；**多文件技能 = VFS 目录节点**（成员目录消费时现遍历，零生成、零向量）。
 - **图像双通道**：VLM 生成文本描述 → 文本 embedding（L0/L1），同时 `embed_image()` → `visual_vector` 用于视觉相似度搜索。
 
 ## 禁止模式清单
@@ -48,6 +48,7 @@
 | **独立命名空间** | 为某个模块创建独立 URI scheme | 所有内容在 `tianyan://` 下统一管理 |
 | **在 VFS 外做检索** | 模块内部实现独立的搜索/过滤逻辑 | `VfsSearch::search()` 是唯一检索入口 |
 | **绕过 ContentLoadStrategy** | 硬编码加载策略（总是加载 L2） | `ContentLoadStrategy::from_score()` 是唯一加载决策 |
+| **章节作为存储/检索单位** | 把文档按章节切块存储、各自索引 | 章节是**读取视图**（目录条目 + 行号 range），L2 保持单一完整文本——分块存储即 chunk 回归（见 REJECTED #4 边界澄清） |
 
 ## 关键文件
 

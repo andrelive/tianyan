@@ -563,6 +563,8 @@ mod tests {
         let vfs = Arc::new(
             MockVfs::builder()
                 .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                // L1（短内容"直用"= 全文）：ADR-001 修订后命中即加载 L1（L2 不自动加载）
+                .with_content(&rule_uri, ContentLevel::Overview, "Always be concise.")
                 .with_content(&rule_uri, ContentLevel::Detail, "Always be concise.")
                 .with_search_results(vec![make_search_result(&rule_uri, 0.9)])
                 .build(),
@@ -640,6 +642,8 @@ mod tests {
         let vfs = Arc::new(
             MockVfs::builder()
                 .with_content(&soul_uri, ContentLevel::Detail, "soul")
+                // L1（短内容"直用"= 全文）：ADR-001 修订后命中即加载 L1（L2 不自动加载）
+                .with_content(&mem_uri, ContentLevel::Overview, "User prefers dark mode.")
                 .with_content(&mem_uri, ContentLevel::Detail, "User prefers dark mode.")
                 .with_search_results(vec![make_search_result(&mem_uri, 0.9)])
                 .build(),

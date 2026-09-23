@@ -64,7 +64,7 @@ pub trait VectorStorage: Send + Sync {
     ///
     /// RRF 融合决定跨列排序；返回结果的 `score` 为各列中最高的相似度
     /// （1.0 - distance，与单列 `search()` 同尺度），供上层绝对阈值
-    /// （如 `ContentLoadStrategy` 的 0.6/0.85）判断加载深度。
+    /// （如 `ContentLoadStrategy` 的 0.6）判断加载深度。
     async fn search_abstract_and_overview(
         &self,
         query_vector: Vec<f32>,

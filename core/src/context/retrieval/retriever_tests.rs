@@ -418,10 +418,11 @@ async fn test_retrieve_with_data() {
     }
 }
 
-/// 回归测试：高相似度结果必须能加载 Overview/Detail 层级内容。
+/// 回归测试：高相似度结果必须能加载 Overview 层级内容（ADR-001 修订后
+/// **L2 不再自动加载**——命中即 L1：简介 + 目录）。
 ///
 /// 曾因融合搜索暴露排名倒数分数（RRF，≈0.016）而 `ContentLoadStrategy`
-/// 阈值按余弦相似度标定（0.6/0.85），导致所有结果永远停留在 Abstract。
+/// 阈值按余弦相似度标定（0.6），导致所有结果永远停留在 Abstract。
 #[tokio::test]
 async fn test_retrieve_loads_overview_or_detail_for_high_scores() {
     let (retriever, _) = create_test_retriever_with_data().await;

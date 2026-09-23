@@ -7,10 +7,16 @@ use crate::agent::tool_params::{
     WriteFileParams,
 };
 use crate::common::error::TianyanError;
+use crate::common::truncate::truncate_utf8_boundary;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
+use crate::executor::truncate::truncate_head;
 use crate::executor::Action;
 
 use super::{parse_params, safety_violation, vfs_content_field, wrap_tool_error, ToolRegistry};
+
+/// vfs_list 条目中 L0 简介的截断上限（字节，UTF-8 边界安全）——目录的"含义"
+/// 不需要超长简介（L0 契约约 100 token；此为防御生成失败回退路径的长文本）。
+const LIST_ABSTRACT_MAX_BYTES: usize = 480;
 
 impl ToolRegistry {
     /// 执行 read_file 工具：读取文件内容。
@@ -203,11 +209,18 @@ impl ToolRegistry {
             vfs.read_content(&parsed, ContentLevel::Overview),
             vfs.read_content(&parsed, ContentLevel::Detail),
         );
+        // 正文（detail）窗口：ADR-001 修订后正文按章节取段——未指定 offset/limit
+        // 时头部截断至 2000 行/50KB（附"使用 offset 继续"，正文不再无上限倾泻）；
+        // 指定时按行取段（对齐目录 L1 中的章节行号）。
+        let window = detail_window(&l2.unwrap_or_default(), params.offset, params.limit)?;
         Ok(serde_json::json!({
             "uri": params.uri,
             "abstract": vfs_content_field(l0),
             "overview": vfs_content_field(l1),
-            "detail": vfs_content_field(l2),
+            "detail": window.text,
+            "offset": window.start_line,
+            "total_lines": window.total_lines,
+            "truncated": window.truncated,
         }))
     }
 
@@ -226,13 +239,23 @@ impl ToolRegistry {
             None => TianyanUri::new(ContextNamespace::Knowledge, vec![]),
         };
         let entries = vfs.list(&target_uri).await.map_err(wrap_tool_error)?;
+        // 目录条目（"书的目录"）= uri + 类型 + **子条目 L0 简介**：含义即简介，
+        // 随 list 一并返回（本地无新增查询）；目录节点/未生成时省略该字段。
         let items: Vec<serde_json::Value> = entries
             .iter()
             .map(|e| {
-                serde_json::json!({
+                let mut item = serde_json::json!({
                     "uri": e.uri().to_string(),
                     "is_directory": e.is_directory(),
-                })
+                });
+                let abstract_text = e.abstract_content.as_deref().unwrap_or("").trim();
+                if !abstract_text.is_empty() {
+                    item["abstract"] = serde_json::json!(truncate_utf8_boundary(
+                        abstract_text,
+                        LIST_ABSTRACT_MAX_BYTES
+                    ));
+                }
+                item
             })
             .collect();
         Ok(serde_json::json!({
@@ -241,6 +264,61 @@ impl ToolRegistry {
             "entries": items,
         }))
     }
+}
+
+/// 正文行窗口结果。
+struct DetailWindow {
+    text: String,
+    start_line: usize,
+    total_lines: usize,
+    truncated: bool,
+}
+
+/// 正文（detail）行窗口（与 `read_file` 的 offset/limit 语义对齐：offset 1 起始、
+/// limit 默认 2000、单窗口钳制 2000）：
+/// - 未指定 offset/limit：头部截断至 2000 行 / 50KB（[`truncate_head`]，附
+///   "使用 offset 继续"标记）——正文不再无上限倾泻；
+/// - 指定 offset/limit：取窗口行并附续读提示；offset 超出总行数报错（对齐 read_file）。
+fn detail_window(
+    detail: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<DetailWindow, TianyanError> {
+    if offset.is_none() && limit.is_none() {
+        let t = truncate_head(detail);
+        return Ok(DetailWindow {
+            text: t.text,
+            start_line: 1,
+            total_lines: t.total_lines,
+            truncated: t.truncated,
+        });
+    }
+    let lines: Vec<&str> = detail.lines().collect();
+    let total_lines = lines.len();
+    let start = offset.unwrap_or(1).max(1) - 1; // 1 起始；offset 0 视为 1
+    if total_lines > 0 && start >= total_lines {
+        return Err(TianyanError::Custom(format!(
+            "tool: 参数无效：offset {} 超出正文总行数 {}",
+            start + 1,
+            total_lines
+        )));
+    }
+    let limit = limit.unwrap_or(2000).clamp(1, 2000);
+    let end = (start + limit).min(total_lines);
+    let truncated = end < total_lines;
+    let mut text = lines[start.min(total_lines)..end].join("\n");
+    if truncated {
+        text.push_str(&format!(
+            "\n... (输出已截断，共 {total_lines} 行，使用 offset {} 继续)",
+            end + 1
+        ));
+    }
+    Ok(DetailWindow {
+        text,
+        start_line: start + 1,
+        total_lines,
+        truncated,
+    })
 }
 
 /// 测试模块（拆分至独立文件，保持主文件聚焦生产逻辑）。

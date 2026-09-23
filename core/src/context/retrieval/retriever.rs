@@ -12,7 +12,7 @@ use crate::observability::usage_stats::UsageStats;
 
 use super::types::RetrievalResult;
 use crate::common::error::Result;
-use crate::common::types::{system_paths, ContentLevel};
+use crate::common::types::{system_paths, ContentLevel, TianyanUri};
 use crate::context::compression::estimate_tokens;
 use crate::vfs::VirtualFileSystem;
 
@@ -180,6 +180,11 @@ impl DualLayerRetriever {
     }
 
     /// 为结果加载内容。
+    ///
+    /// ADR-001 修订（2026-09-22）：命中即"简介（+目录）"——`Overview` 策略加载
+    /// L1，若其为结构化目录（`parse_doc_index`）则前置 L0 简介并渲染目录
+    /// （模型可据此定位章节、按需取段）；非目录（全文直用/旧概览）原样返回。
+    /// **L2 不自动加载**（见 `ContentLoadStrategy`）。
     async fn load_content_for_results(
         &self,
         results: Vec<RetrievalResult>,
@@ -192,9 +197,14 @@ impl DualLayerRetriever {
 
             match self.vfs.read(&result.uri, level).await {
                 Ok(content) => {
-                    result.content = Some(content.clone());
-                    result.content_level = level;
+                    let content = if level == ContentLevel::Overview {
+                        self.compose_overview(&result.uri, &content).await
+                    } else {
+                        content
+                    };
                     result.token_count = estimate_tokens(&content);
+                    result.content = Some(content);
+                    result.content_level = level;
                 }
                 Err(e) => {
                     tracing::warn!(uri = %result.uri, error = %e, "加载内容失败");
@@ -214,6 +224,20 @@ impl DualLayerRetriever {
         }
 
         Ok(loaded_results)
+    }
+    /// 组装 L1 的消费形态：结构化目录 → "L0 简介 + 渲染目录"；非目录（全文
+    /// 直用/旧概览）→ 原样返回（不加 L0，避免前缀膨胀——全文已含内容）。
+    async fn compose_overview(&self, uri: &TianyanUri, l1: &str) -> String {
+        // 非目录：直接返回（不读 L0——避免无谓读取）
+        if crate::vfs::parse_doc_index(l1).is_none() {
+            return l1.to_string();
+        }
+        let abstract_text = self
+            .vfs
+            .read(uri, ContentLevel::Abstract)
+            .await
+            .unwrap_or_default();
+        super::loader::compose_overview_parts(&abstract_text, l1)
     }
 
     /// 按**显式** namespace 检索内容（不受意图推断影响）。

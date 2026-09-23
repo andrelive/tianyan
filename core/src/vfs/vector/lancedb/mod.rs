@@ -395,7 +395,7 @@ impl VectorStorage for LanceDbVectorStore {
         // point_id → (fused_rrf_score, best_similarity, best_result)
         // RRF 分数（1/(rank+k)）仅用于跨列排序；暴露给调用方的 score 取各列中
         // 最高的相似度（1.0 - distance，与单列 search() 同尺度），
-        // 供 ContentLoadStrategy 的绝对阈值（0.6/0.85）使用。
+        // 供 ContentLoadStrategy 的绝对阈值（0.6）使用。
         let mut merged: HashMap<String, (f32, f32, VectorSearchResult)> = HashMap::new();
 
         for &vec_type in vector_types {

@@ -111,14 +111,14 @@ fn def_search_vfs(name: &'static str) -> ToolDefinition {
 fn def_vfs_read(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<VfsReadParams>(
         name,
-        "按 tianyan:// URI 读取 VFS 条目的完整内容（abstract/overview/detail）。在 search_vfs 之后用于加载相关条目的详细内容。",
+        "按 tianyan:// URI 读取 VFS 条目（简介 abstract / 目录 overview / 正文 detail）。在 search_vfs 之后加载相关条目；正文默认截断至 2000 行（50KB），用 offset/limit 按行取段——对齐目录（L1）中的章节行号。",
     ))
 }
 
 fn def_vfs_list(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<VfsListParams>(
         name,
-        "按 tianyan:// URI 列出 VFS 目录下的条目。用于浏览知识库结构。",
+        "按 tianyan:// URI 列出 VFS 目录下的条目（uri / is_directory / 简介 L0）。目录即导航索引：用于浏览知识库/技能结构、发现子条目（多文件技能的部件、文件夹内容）；命中某条目后想了解同族内容时也可用它。",
     ))
 }
 

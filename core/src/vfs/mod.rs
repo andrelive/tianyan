@@ -46,7 +46,8 @@ pub use backend::{LocalFileBackend, SqliteBackend, StorageBackend};
 #[cfg(test)]
 pub use summary::MockSummaryEngine;
 pub use summary::{
-    SummaryEngine, SummaryLevel, SummaryService, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
+    parse_doc_index, render_doc_index, DocIndex, IndexSection, SummaryEngine, SummaryLevel,
+    SummaryService, ABSTRACT_TOKEN_LIMIT, OVERVIEW_TOKEN_LIMIT,
 };
 pub use traits::{ContentMetadata, ContentStore, VfsCore, VfsSearch, VirtualFileSystem};
 pub use types::{
