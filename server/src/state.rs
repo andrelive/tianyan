@@ -291,10 +291,9 @@ pub struct AppState {
     user_questions: Arc<tianyan::agent::user_questions::UserQuestionService>,
     /// 子智能体消息流事件广播（ADR-026：GET /tasks/stream SSE 订阅源）。
     pub(crate) task_event_tx: tokio::sync::broadcast::Sender<String>,
-    /// 活跃 SSE 对话流的取消句柄：session_id → cancel 标志（供显式取消端点触发）。
-    /// 跑完再取：客户端断开不再取消 agent，主动「停止」经此端点显式取消。
-    stream_cancels:
-        Arc<Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    /// 会话租约注册表（ADR-041）：控制面互斥（Stream / DestructiveOp）+ 命令幂等。
+    /// `Stream` 携带取消标志（「停止」端点经此置位）；`DestructiveOp` 期间挡住新流。
+    session_leases: Arc<crate::session_leases::SessionLeases>,
     /// 服务器优雅关停信号发送端（数据目录搬迁等 API 触发重启用；
     /// start_server 装配，未装配时为 None）。
     shutdown_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
@@ -476,7 +475,7 @@ impl AppState {
             clipboard_outbox,
             clipboard_pending: Arc::new(RwLock::new(None)),
             user_questions,
-            stream_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_leases: crate::session_leases::SessionLeases::new(),
             shutdown_tx: Arc::new(Mutex::new(None)),
         })
     }
@@ -513,28 +512,23 @@ impl AppState {
         }
     }
 
-    /// 获取活跃对话流取消注册表（session_id → cancel 标志）。
-    pub fn stream_cancels(
-        &self,
-    ) -> Arc<Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> {
-        self.stream_cancels.clone()
+    /// 获取会话租约注册表（ADR-041）。
+    pub fn session_leases(&self) -> Arc<crate::session_leases::SessionLeases> {
+        self.session_leases.clone()
     }
 
-    /// 尝试为会话注册流取消标志（T1-10 同会话并发保护）。
+    /// 为会话注册流（用户轮 / 唤醒轮）：返回租约令牌（释放时校验 owner）。
     ///
-    /// 同一会话已有活跃流时返回 `Err(ApiError::Conflict)`——此前直接覆盖取消槽，
-    /// 旧流从此取消不到（「停止」失效）且两轮流并发写同一会话。检查与插入在
-    /// 同一把锁内完成（原子）。
-    pub fn try_register_stream(
+    /// 同会话已有任何租约 → `409`（结构化 `reason`）：既有流（T1-10 并发保护），
+    /// 或进行中的控制面命令（前端应等它完成，不得插队写会话）。
+    pub fn acquire_stream(
         &self,
         session_id: &str,
         cancel: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<(), crate::api::shared::error::ApiError> {
-        let mut registry = self
-            .stream_cancels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        register_stream_slot(&mut registry, session_id, cancel)
+    ) -> Result<crate::session_leases::LeaseToken, crate::api::shared::error::ApiError> {
+        self.session_leases
+            .acquire_stream(session_id, cancel)
+            .map_err(crate::api::shared::error::ApiError::Busy)
     }
 
     /// 服务关停标志（Ctrl+C / SIGTERM / 桌面端退出时置位）。
@@ -870,24 +864,6 @@ impl AppState {
     }
 }
 
-/// 注册流取消槽（T1-10 同会话并发保护核心逻辑；纯函数便于单测）。
-///
-/// 已存在同会话槽 → `Err(Conflict)`（**不覆盖**；覆盖会让旧流「停止」失效）；
-/// 否则插入并 `Ok`。
-pub(crate) fn register_stream_slot(
-    registry: &mut std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
-    session_id: &str,
-    cancel: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<(), crate::api::shared::error::ApiError> {
-    if registry.contains_key(session_id) {
-        return Err(crate::api::shared::error::ApiError::Conflict(format!(
-            "会话 {session_id} 已有进行中的对话流，请等待完成或先停止"
-        )));
-    }
-    registry.insert(session_id.to_string(), cancel);
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,42 +871,6 @@ mod tests {
         find_provider, ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig,
         ProviderConfig,
     };
-
-    #[test]
-    fn test_register_stream_slot_rejects_duplicate_session() {
-        // T1-10：同会话第二次注册必须 409（不覆盖旧槽——覆盖会让旧流「停止」失效）
-        let mut registry = std::collections::HashMap::new();
-        let first = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        assert!(register_stream_slot(&mut registry, "s1", first.clone()).is_ok());
-
-        let second = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let err = register_stream_slot(&mut registry, "s1", second.clone()).unwrap_err();
-        assert!(
-            matches!(err, crate::api::shared::error::ApiError::Conflict(_)),
-            "同会话重复流应为 409 冲突：{err:?}"
-        );
-        // 旧槽未被覆盖：置位它仍作用于**旧**流（「停止」不失效）
-        assert!(
-            registry
-                .get("s1")
-                .map(|c| Arc::ptr_eq(c, &first))
-                .unwrap_or(false),
-            "注册冲突时不得覆盖既有取消槽"
-        );
-        // 不同会话互不影响
-        assert!(register_stream_slot(&mut registry, "s2", second).is_ok());
-        // 流结束移除后可再次注册（与 handlers 的 cleanup 对应）
-        registry.remove("s1");
-        assert!(
-            register_stream_slot(
-                &mut registry,
-                "s1",
-                Arc::new(std::sync::atomic::AtomicBool::new(false))
-            )
-            .is_ok(),
-            "流结束（槽移除）后应可重新注册"
-        );
-    }
 
     fn provider_with(models: Vec<ModelEntry>) -> ProviderConfig {
         ProviderConfig {

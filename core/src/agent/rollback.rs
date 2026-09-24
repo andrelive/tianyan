@@ -33,7 +33,7 @@ const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 回退结果（ADR-040 §2）：前端据此给出准确反馈——尤其
 /// [`Self::workdir`] = `None`（文件未回退）必须明示，否则用户以为文件也回退了。
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RollbackOutcome {
     /// 被截断（丢弃）的消息数。
     pub truncated: usize,
@@ -48,7 +48,7 @@ pub struct RollbackOutcome {
 }
 
 /// 重做结果：被回退的消息与工作区文件已恢复。
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RedoOutcome {
     /// 恢复的消息数。
     pub restored_messages: usize,

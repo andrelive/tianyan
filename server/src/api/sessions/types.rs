@@ -174,6 +174,10 @@ impl UpdateWorkspaceRequest {
 pub struct DeleteMessageRequest {
     /// 要删除的消息 ID（该消息及其后的消息都会被删除）。
     pub message_id: String,
+    /// 客户端生成的幂等键（ADR-041）：双击 / 网络重试携带同一 `operation_id`
+    /// 时只执行一次（重放既有结果）；缺省 = 非幂等（向后兼容旧前端）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 /// 重做请求 —— 恢复被回退的消息与工作区文件。
@@ -181,6 +185,9 @@ pub struct DeleteMessageRequest {
 pub struct RedoRequest {
     /// 回退时被删除的消息 ID（重做数据的定位键）。
     pub message_id: String,
+    /// 客户端生成的幂等键（ADR-041）：语义同 `DeleteMessageRequest.operation_id`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 /// 回退（删除消息）响应：剩余消息 + 回退结果（ADR-040）。

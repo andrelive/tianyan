@@ -32,6 +32,9 @@ pub enum ApiError {
     GatewayTimeout(String),
     /// 内容冲突（文件已被外部修改、锚点/补丁定位不匹配）
     Conflict(String),
+    /// 会话忙（控制面互斥 / 幂等等待，ADR-041）：409 + 结构化 `reason`，
+    /// 前端据此分流文案（不再一律提示「连接断开」）。
+    Busy(crate::session_leases::BusyReason),
 }
 
 impl fmt::Display for ApiError {
@@ -45,6 +48,7 @@ impl fmt::Display for ApiError {
             ApiError::Forbidden(msg) => write!(f, "禁止访问：{}", msg),
             ApiError::GatewayTimeout(msg) => write!(f, "网关超时：{}", msg),
             ApiError::Conflict(msg) => write!(f, "冲突：{}", msg),
+            ApiError::Busy(reason) => write!(f, "会话忙：{}", reason.message()),
         }
     }
 }
@@ -53,20 +57,26 @@ impl std::error::Error for ApiError {}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, error_message) = match &self {
-            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-            ApiError::Config(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
-            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
-            ApiError::GatewayTimeout(msg) => (StatusCode::GATEWAY_TIMEOUT, msg.clone()),
-            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
+        let (status, error_message, reason) = match &self {
+            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone(), None),
+            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone(), None),
+            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone(), None),
+            ApiError::Config(msg) => (StatusCode::BAD_REQUEST, msg.clone(), None),
+            ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone(), None),
+            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone(), None),
+            ApiError::GatewayTimeout(msg) => (StatusCode::GATEWAY_TIMEOUT, msg.clone(), None),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone(), None),
+            ApiError::Busy(reason) => (
+                StatusCode::CONFLICT,
+                reason.message().to_string(),
+                Some(reason.as_str().to_string()),
+            ),
         };
 
         let body = Json(ErrorResponse {
             success: false,
             error: error_message,
+            reason,
         });
 
         (status, body).into_response()
@@ -131,6 +141,10 @@ pub struct ErrorResponse {
     pub success: bool,
     /// 错误信息
     pub error: String,
+    /// 结构化原因（忙语义等；ADR-041）：`stream_in_progress` /
+    /// `destructive_op_in_progress` / `same_operation_in_flight`。缺省不序列化。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl ErrorResponse {
@@ -145,6 +159,7 @@ impl ErrorResponse {
         Self {
             success: false,
             error: error.into(),
+            reason: None,
         }
     }
 }

@@ -123,6 +123,63 @@ pub async fn delete_session(
     Ok(Json(response))
 }
 
+/// 接管流后等待「会话静默」的上限（超时即放弃命令：避免与仍在写会话的旧轮竞态）。
+const OP_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// 同 opId 命令的幂等等待上限（超时 → 409 `same_operation_in_flight`）。
+const OP_INFLIGHT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 控制面命令统一门（ADR-041）：幂等（`opId`）+ 互斥（会话租约）。
+enum OpGate {
+    /// 首次执行：执行完 `finish_op`；失败 `abort_op`。
+    Execute {
+        token: crate::session_leases::LeaseToken,
+    },
+    /// 幂等重放：既有结果（不重复执行）。
+    Replay(serde_json::Value),
+}
+
+/// 接入控制面命令：忙 → 409（结构化 reason）；接管流 → 等静默后再执行；
+/// 同 `opId` 重复 → 重放既有结果（等待进行中的完成后返回）。
+async fn gate_control_op(
+    state: &Arc<AppState>,
+    session_id: &str,
+    operation_id: Option<&str>,
+) -> Result<OpGate, ApiError> {
+    use crate::session_leases::{BusyReason, OpAccess};
+    let leases = state.session_leases();
+    match leases
+        .acquire_op(session_id, operation_id)
+        .map_err(ApiError::Busy)?
+    {
+        OpAccess::Replay { outcome } => Ok(OpGate::Replay(outcome)),
+        OpAccess::InFlight { quiet } => {
+            let op_id = operation_id.ok_or(ApiError::Busy(BusyReason::SameOperationInFlight))?;
+            if !leases
+                .wait_inflight(session_id, op_id, quiet, OP_INFLIGHT_WAIT)
+                .await
+            {
+                return Err(ApiError::Busy(BusyReason::SameOperationInFlight));
+            }
+            let outcome = leases
+                .op_outcome(session_id, op_id)
+                .ok_or(ApiError::Busy(BusyReason::SameOperationInFlight))?;
+            Ok(OpGate::Replay(outcome))
+        }
+        OpAccess::Owned { token, drain } => {
+            if let Some(quiet) = drain {
+                // 接管了正在跑的流（取消标志已置位）：等它**真正退出**再动手——
+                // 回退/重做事务与轮写入互斥；超时放弃（宁可 409，也不与仍在写
+                // 会话的旧轮竞态）。
+                if !leases.wait_quiet(session_id, quiet, OP_DRAIN_TIMEOUT).await {
+                    leases.abort_op(session_id, token);
+                    return Err(ApiError::Busy(BusyReason::StreamInProgress));
+                }
+            }
+            Ok(OpGate::Execute { token })
+        }
+    }
+}
+
 /// 删除消息（该消息及其后的所有消息）——回退（ADR-040）。
 ///
 /// handler 是薄壳：置位取消标志 → 调用 core 的完整回退事务（取消轮与任务 →
@@ -143,23 +200,40 @@ pub async fn delete_message(
         session_id, request.message_id
     );
 
-    // ① 停止 LLM 输出：置位该会话的流取消标志（与「停止」按钮同语义，
-    //    AgentLoop 在轮次边界停止；core 等该轮退出后进入回退事务）
-    if let Some(flag) = state
-        .stream_cancels()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&session_id)
-        .cloned()
-    {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
+    // 控制面门（ADR-041）：opId 幂等（双击/重试不二次截断）+ 会话租约互斥
+    // （有流在跑 → 接管：置位其取消标志、挡住新流、等旧轮真正退出再执行）。
+    let token = match gate_control_op(&state, &session_id, request.operation_id.as_deref()).await? {
+        OpGate::Replay(outcome) => {
+            // 同 opId 的重复请求：重放既有回退结果（不重复执行）
+            let rollback: tianyan::agent::RollbackOutcome =
+                serde_json::from_value(outcome).unwrap_or_default();
+            let service = SessionService::new(
+                state.session_manager(),
+                state.snapshot_manager(),
+                Some(state.working_sets()),
+            );
+            let messages = service.get_messages(&session_id).await?;
+            return Ok(Json(DeleteMessageResponse { messages, rollback }));
+        }
+        OpGate::Execute { token } => token,
+    };
 
-    // ② 完整回退事务（core）：文件先、链后——失败即整体中止（全或无）
+    // 完整回退事务（core，ADR-040）：文件先、链后——失败即整体中止（全或无）
     let agent = state.agent().await;
-    let rollback = agent.rollback_to(&session_id, &request.message_id).await?;
+    let rollback = match agent.rollback_to(&session_id, &request.message_id).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            state.session_leases().abort_op(&session_id, token);
+            return Err(e.into());
+        }
+    };
+    // 幂等台账：记录结果（同 opId 重试直接重放）
+    state.session_leases().finish_op(
+        &session_id,
+        token,
+        serde_json::to_value(&rollback).unwrap_or(serde_json::Value::Null),
+    );
 
-    // ③ 响应 = 剩余消息（前端直接替换本地状态）+ 回退结果
     let service = SessionService::new(
         state.session_manager(),
         state.snapshot_manager(),
@@ -184,8 +258,35 @@ pub async fn redo_message(
         session_id, request.message_id
     );
 
+    // 控制面门（ADR-041）：与回退/压缩互斥 + opId 幂等（重试不重复恢复文件）
+    let token = match gate_control_op(&state, &session_id, request.operation_id.as_deref()).await? {
+        OpGate::Replay(outcome) => {
+            let redo: tianyan::agent::RedoOutcome =
+                serde_json::from_value(outcome).unwrap_or_default();
+            let service = SessionService::new(
+                state.session_manager(),
+                state.snapshot_manager(),
+                Some(state.working_sets()),
+            );
+            let messages = service.get_messages(&session_id).await?;
+            return Ok(Json(RedoResponse { messages, redo }));
+        }
+        OpGate::Execute { token } => token,
+    };
+
     let agent = state.agent().await;
-    let redo = agent.redo_to(&session_id, &request.message_id).await?;
+    let redo = match agent.redo_to(&session_id, &request.message_id).await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            state.session_leases().abort_op(&session_id, token);
+            return Err(e.into());
+        }
+    };
+    state.session_leases().finish_op(
+        &session_id,
+        token,
+        serde_json::to_value(&redo).unwrap_or(serde_json::Value::Null),
+    );
 
     let service = SessionService::new(
         state.session_manager(),
@@ -210,16 +311,33 @@ pub async fn compress_session(
 
     info!("手动压缩会话: {}", session_id);
 
+    // 控制面门（ADR-041）：压缩与回退/重做互斥（接管流后等静默再执行）；
+    // 无 opId（无请求体）→ 保持非幂等。
+    let OpGate::Execute { token } = gate_control_op(&state, &session_id, None).await? else {
+        unreachable!("无 opId 不会重放");
+    };
     let agent = state.agent().await;
     // ? 传播：会话不存在时由 core 返回 not_found 语义（404），不吞成 Internal
-    let summary = agent.compress_session(&session_id).await?;
+    let summary = match agent.compress_session(&session_id).await {
+        Ok(summary) => summary,
+        Err(e) => {
+            state.session_leases().abort_op(&session_id, token);
+            return Err(e.into());
+        }
+    };
     let message = summary
         .as_ref()
         .map(crate::api::shared::types::ChatMessage::from_structured_light);
-    Ok(Json(CompressSessionResponse {
+    let response = CompressSessionResponse {
         compressed: message.is_some(),
         message,
-    }))
+    };
+    state.session_leases().finish_op(
+        &session_id,
+        token,
+        serde_json::to_value(&response).unwrap_or(serde_json::Value::Null),
+    );
+    Ok(Json(response))
 }
 
 /// 更新会话标题

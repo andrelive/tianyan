@@ -1,7 +1,7 @@
 # ADR-041: 控制面命令化与租约——Command + Idempotency + Lease
 
 **日期**: 2026-09-24
-**状态**: 📝 草案（待评审）
+**状态**: 🚧 波次 3（服务端）已落地；波次 4（前端状态机 + OCC）待做
 **修订**: ADR-028/029/031（事件与订阅）之补充——控制面（非数据流）的互斥与幂等
 **影响范围**: 服务端状态（`server/src/state.rs`）、对话与会话 API
 （`server/src/api/{chat,sessions}/`）、前端（`gui-vite/src/components/chat/`、

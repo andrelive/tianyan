@@ -66,16 +66,16 @@ pub async fn chat_stream_handler(
     let context_window = crate::state::resolve_chat_model_spec(&config_guard).context_length as u64;
     drop(config_guard);
     // 取消标志：服务关停时置位；客户端断开不置位（跑完再取——本地助手后台
-    // 任务不应因 SSE 断线而中断），主动「停止」经 stream_cancels 端点显式触发。
+    // 任务不应因 SSE 断线而中断），主动「停止」经会话租约端点显式触发。
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // 注册到流取消注册表（供显式「停止」端点触发）；agent 跑完后移除。
+    // 注册会话租约（供显式「停止」端点触发）；agent 跑完后释放。
     //
-    // T1-10：**同会话并发保护**——同一会话已有活跃流时拒绝新流（409 Conflict）。
-    // 此前直接覆盖取消槽：旧流从此“取消不到”（「停止」按钮失效），且两轮流
-    // 并发写同一会话（消息交错）。检查与插入在同一把锁内完成（原子）。
-    let cancels_registry = state.stream_cancels();
+    // ADR-041：同会话已有租约（活跃流 / 控制面命令）→ 409（结构化 reason）。
+    // 返回的令牌用于释放时校验 owner——流被控制面接管后，本流退出**不得**
+    // 移除接管方的租约（否则回退事务会失去互斥保护）。
+    let leases = state.session_leases();
     let working_sets = state.working_sets();
-    state.try_register_stream(&session_id, cancel.clone())?;
+    let stream_token = state.acquire_stream(&session_id, cancel.clone())?;
     let session_id_for_cleanup = session_id.clone();
 
     // 统一事件通道（GET /events 广播源）
@@ -113,11 +113,9 @@ pub async fn chat_stream_handler(
                 }
             }
         }
-        // 循环结束：从取消注册表移除（无论正常完成 / 显式取消 / 错误）
-        cancels_registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&session_id_for_cleanup);
+        // 循环结束：释放流租约（无论正常完成 / 显式取消 / 错误；令牌校验 owner——
+        // 被控制面接管时只清「静默」标记、不移除接管方租约）
+        leases.release_stream(&session_id_for_cleanup, stream_token);
     });
 
     Ok(JsonResponse(serde_json::json!({
@@ -132,26 +130,16 @@ pub async fn chat_stream_cancel_handler(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let flag = state
-        .stream_cancels()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&session_id)
-        .cloned();
-    match flag {
-        Some(f) => {
-            f.store(true, std::sync::atomic::Ordering::Relaxed);
-            Json(serde_json::json!({ "status": "cancelling", "session_id": session_id }))
-        }
-        None => {
-            // ADR-035 §9 / U10：无用户请求级标志——可能是**唤醒轮/后台轮**在跑
-            // （它们自己注册会话取消槽）。经 Agent 置位；命中即返回 cancelling。
-            let agent = state.agent().await;
-            if agent.cancel_active_turn(&session_id).await {
-                Json(serde_json::json!({ "status": "cancelling", "session_id": session_id }))
-            } else {
-                Json(serde_json::json!({ "status": "no_active_stream", "session_id": session_id }))
-            }
-        }
+    // 命中流租约：置位其取消标志（ADR-041：控制面命令期间不命中——命令是原子的）
+    if state.session_leases().cancel_active_stream(&session_id) {
+        return Json(serde_json::json!({ "status": "cancelling", "session_id": session_id }));
+    }
+    // ADR-035 §9 / U10：无用户请求级标志——可能是**唤醒轮/后台轮**在跑
+    // （它们自己注册会话取消槽）。经 Agent 置位；命中即返回 cancelling。
+    let agent = state.agent().await;
+    if agent.cancel_active_turn(&session_id).await {
+        Json(serde_json::json!({ "status": "cancelling", "session_id": session_id }))
+    } else {
+        Json(serde_json::json!({ "status": "no_active_stream", "session_id": session_id }))
     }
 }

@@ -41,6 +41,7 @@ pub mod mcp_bridge;
 pub mod migration;
 pub mod notification;
 pub mod scheduled_tasks;
+pub mod session_leases;
 pub mod state;
 
 use api::create_api_router;
