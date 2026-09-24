@@ -26,13 +26,19 @@ pub struct HttpClientSpec {
     pub redirect_policy: Option<reqwest::redirect::Policy>,
 }
 
-/// 构建 HTTP 客户端（统一连接池策略：每主机空闲连接 5、空闲超时 90s）。
+/// 构建 HTTP 客户端（统一连接池策略：每主机空闲连接 5、空闲超时 45s）。
+///
+/// 空闲超时取 45s：实证（2026-09-24 排障）云端前置（Google Frontend）会在约
+/// 60s 空闲后关闭 keep-alive 连接——客户端若把已被对端关闭的连接从池里取出来
+/// 复用，发送阶段就会失败（reqwest 表现为 `error sending request for url`，
+/// 即 `is_request()` 类错误）。45s 留出安全余量；与之配套的重试判定见
+/// [`crate::model::retry::should_retry_transport`]。
 pub fn build_http_client(spec: HttpClientSpec) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .read_timeout(spec.timeout)
         .connect_timeout(spec.connect_timeout)
         .pool_max_idle_per_host(5)
-        .pool_idle_timeout(Duration::from_secs(90));
+        .pool_idle_timeout(Duration::from_secs(45));
     if let Some(ua) = &spec.user_agent {
         builder = builder.user_agent(ua);
     }

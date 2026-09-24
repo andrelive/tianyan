@@ -92,10 +92,45 @@ pub fn should_retry_http(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
-/// reqwest 传输层错误是否可重试：超时 / 连接失败。
-/// 取消（客户端 abort）不重试——调用方应透传用户主动取消。
+/// reqwest 传输层错误的可重试判定（纯逻辑：布尔输入，便于穷举单测）。
+///
+/// 判据：**临时性传输失败可重试**——超时 / 连接失败 / **请求发送阶段失败**。
+///
+/// 后者的实证（2026-09-24 排障，ollama cloud 长会话）：反复出现
+/// `error sending request for url (…/chat/completions)`（数小时内 15 次，其中 12 次
+/// 直接升级为用户可见的轮失败）——reqwest 把「连接复用失效 / 传输中断」归类为
+/// **request 级错误**（`is_connect() == false && is_timeout() == false`），旧判定
+/// 因此把它当「不可重试」，一次网络抖动就击穿全部 5 次退避重试。
+///
+/// 不重试的两类：① 构建错误（代码/配置问题，重试无意义）；
+/// ② 响应体 / 解码中断（流式已交付部分输出，重试会造成重复——由上层
+/// 「未交付任何内容时的空响应重试」另行覆盖）。
+///
+/// 用户主动取消（abort）不属于任何上述类别 → 自然不重试（调用方透传取消）。
+pub fn transport_retryable_flags(
+    is_builder: bool,
+    is_body: bool,
+    is_decode: bool,
+    is_timeout: bool,
+    is_connect: bool,
+    is_request: bool,
+) -> bool {
+    if is_builder || is_body || is_decode {
+        return false;
+    }
+    is_timeout || is_connect || is_request
+}
+
+/// reqwest 传输层错误是否可重试（判据见 [`transport_retryable_flags`]）。
 pub fn should_retry_transport(e: &reqwest::Error) -> bool {
-    e.is_timeout() || e.is_connect()
+    transport_retryable_flags(
+        e.is_builder(),
+        e.is_body(),
+        e.is_decode(),
+        e.is_timeout(),
+        e.is_connect(),
+        e.is_request(),
+    )
 }
 
 /// 按策略执行可重试调用：失败且可重试时退避后重试，直到成功、耗尽次数或不可重试。
@@ -130,6 +165,62 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 判别力基座（本次事故回归）：传输层可重试判定必须覆盖
+    /// 「请求发送阶段失败」（`error sending request`）——旧实现只认
+    /// 超时/连接失败，把它当不可重试 → 一次抖动击穿全部退避重试。
+    #[test]
+    fn test_transport_retryable_flags_exhaustive() {
+        // 临时性传输失败 → 重试
+        assert!(
+            transport_retryable_flags(false, false, false, true, false, false),
+            "超时可重试"
+        );
+        assert!(
+            transport_retryable_flags(false, false, false, false, true, false),
+            "连接失败可重试"
+        );
+        assert!(
+            transport_retryable_flags(false, false, false, false, false, true),
+            "请求发送阶段失败（error sending request）必须可重试——旧判定在此漏判"
+        );
+        // 非临时 / 部分结果可能已交付 → 不重试
+        assert!(
+            !transport_retryable_flags(true, false, false, false, false, false),
+            "构建错误不重试"
+        );
+        assert!(
+            !transport_retryable_flags(false, true, false, false, false, false),
+            "响应体错误不重试"
+        );
+        assert!(
+            !transport_retryable_flags(false, false, true, false, false, false),
+            "解码错误不重试"
+        );
+        // 组合：非重试类优先（避免流式中断被误判为可重试而重复交付）
+        assert!(
+            !transport_retryable_flags(false, true, false, true, true, true),
+            "混合标志时以非重试类优先"
+        );
+    }
+
+    /// 端到端：真实传输失败（保留端口无监听 → 连接拒绝/超时）判定为可重试。
+    #[tokio::test]
+    async fn test_should_retry_transport_connect_failure_is_retryable() {
+        let client = crate::common::http::build_http_client(crate::common::http::HttpClientSpec {
+            timeout: std::time::Duration::from_secs(5),
+            connect_timeout: std::time::Duration::from_secs(2),
+            user_agent: None,
+            redirect_policy: None,
+        })
+        .unwrap();
+        let err = client
+            .get("http://127.0.0.1:9/")
+            .send()
+            .await
+            .expect_err("保留端口（无监听）应连接失败");
+        assert!(should_retry_transport(&err), "连接失败应可重试：{err}");
+    }
 
     #[test]
     fn test_default_policy_values() {
