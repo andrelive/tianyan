@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::api::shared::types::ChatMessage;
+use tianyan::agent::{RedoOutcome, RollbackOutcome};
 
 /// 会话压缩响应。
 #[derive(Debug, Serialize)]
@@ -180,6 +181,29 @@ pub struct DeleteMessageRequest {
 pub struct RedoRequest {
     /// 回退时被删除的消息 ID（重做数据的定位键）。
     pub message_id: String,
+}
+
+/// 回退（删除消息）响应：剩余消息 + 回退结果（ADR-040）。
+///
+/// `#[serde(flatten)]` 保持与旧响应**线格式兼容**——`SessionMessagesResponse` 的
+/// 字段仍平铺在同一层（前端未声明 `rollback` 时按结构化类型忽略，零行为变化）。
+#[derive(Debug, Serialize)]
+pub struct DeleteMessageResponse {
+    /// 剩余消息（前端直接替换本地状态）
+    #[serde(flatten)]
+    pub messages: SessionMessagesResponse,
+    /// 回退结果：被截断消息数 / 恢复文件数 / 工作目录（`None` = 文件未回退）
+    pub rollback: RollbackOutcome,
+}
+
+/// 重做响应：恢复后的消息 + 重做结果。
+#[derive(Debug, Serialize)]
+pub struct RedoResponse {
+    /// 恢复后的消息
+    #[serde(flatten)]
+    pub messages: SessionMessagesResponse,
+    /// 重做结果：恢复消息数 / 恢复文件数
+    pub redo: RedoOutcome,
 }
 
 #[cfg(test)]

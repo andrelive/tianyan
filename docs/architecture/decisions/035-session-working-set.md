@@ -156,6 +156,13 @@ pub struct WorkingSetRegistry {
   局限：`rewrite` 到相同长度、窗口内相互抵消、仅 header 变化均检测不到，故不得用它
   替代收口）。未收口且无缓存风险：`chat/services` 的会话**创建**路径（新 uuid 无缓存）。
 
+> **更新（ADR-039 / ADR-040，2026-09-24）**：写侧收口已从「调用点自觉」升级为
+> **编译期机制**——`SessionManager` 不再暴露任何破坏性写（ADR-039）；回退 / 重做 /
+> 压缩内聚为 core 的**排他写事务**（`WorkingSetRegistry::with_session_exclusive`，
+> ADR-040），server 的 `delete_message` / `redo_message` 退化为薄壳（`persist_messages`
+> / `resolve_workdir` / `default_working_dir` 已删除）。此后「读链 → 改 → 写链」
+> 不再存在任何**锁外组合**——轮持同一把锁，事务持同一把锁。
+
 ### 4. seq 一等公民 + 续跑判定（取代通知投递水位）
 
 **seq 一等公民**：工作集内部 `WorkingEntry { seq: i64, msg: StructuredMessage }`。

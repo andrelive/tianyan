@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracing::{info, warn};
@@ -6,8 +5,8 @@ use tracing::{info, warn};
 use tianyan::session::SessionManager;
 
 use crate::api::sessions::types::{
-    DeleteMessageRequest, DeleteSessionResponse, ListSessionsResponse, RedoRequest, Session,
-    SessionDetail, SessionMessagesResponse, UpdateTitleRequest,
+    DeleteSessionResponse, ListSessionsResponse, Session, SessionDetail, SessionMessagesResponse,
+    UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::api::shared::types::ChatMessage;
@@ -23,8 +22,6 @@ pub struct SessionService {
     session_manager: Arc<dyn SessionManager>,
     /// 工作区快照管理器（配置了 working_directory 时启用）。
     snapshot_manager: Option<Arc<SnapshotManager>>,
-    /// 全局默认工作目录（[agent] working_directory；会话级绑定缺省时的快照根）。
-    default_working_dir: Option<PathBuf>,
     /// 会话工作集注册表（ADR-035 §3：写侧收口唯一通道；测试桩为 None 时回退直写）。
     working_sets: Option<Arc<tianyan::agent::working_set::WorkingSetRegistry>>,
 }
@@ -34,30 +31,13 @@ impl SessionService {
     pub fn new(
         session_manager: Arc<dyn SessionManager>,
         snapshot_manager: Option<Arc<SnapshotManager>>,
-        default_working_dir: Option<PathBuf>,
         working_sets: Option<Arc<tianyan::agent::working_set::WorkingSetRegistry>>,
     ) -> Self {
         Self {
             session_manager,
             snapshot_manager,
-            default_working_dir,
             working_sets,
         }
-    }
-
-    /// 写入收口 ②（ADR-035 §3）：消息全量重写经工作集（缓存与库同步推进）；
-    /// 未装配工作集（测试桩）时回退 `session_manager` 直写。
-    async fn persist_messages(
-        &self,
-        session_id: &str,
-        messages: &[StructuredMessage],
-    ) -> Result<(), ApiError> {
-        // ADR-039 §4：唯一写入口（未装配 = 装配缺陷 → 显式报错，不再回退直写）
-        let reg = self.working_sets.as_ref().ok_or_else(|| {
-            ApiError::Internal("会话服务：未装配会话工作集（ADR-039 写侧收口缺失）".to_string())
-        })?;
-        reg.ensure(session_id).await?.rewrite(messages).await?;
-        Ok(())
     }
 
     /// 写入收口 ③（ADR-035 §3）：会话头部元数据经工作集读改镜像后落库。
@@ -103,11 +83,6 @@ impl SessionService {
             .update_header(|h| h.working_directory = working_directory.clone())
             .await?;
         Ok(())
-    }
-
-    /// 解析会话生效的工作目录（会话级绑定优先，缺省回退全局配置）。
-    fn resolve_workdir(&self, session: &tianyan::session::Session) -> Option<PathBuf> {
-        session.working_directory(self.default_working_dir.as_deref())
     }
 
     /// 列出所有会话
@@ -245,137 +220,6 @@ impl SessionService {
             has_more: next_before_seq.is_some(),
             last_seq,
         })
-    }
-
-    /// 删除消息及其后的所有消息（与编辑/重新生成一致的截断语义）。
-    ///
-    /// 按消息 ID 定位原始索引后截断——前端展示列表经合并/过滤（tool/system
-    /// 消息）后索引与服务端消息列表错位，数字索引会删过头；ID 是稳定定位键。
-    pub async fn delete_message(
-        &self,
-        session_id: &str,
-        request: DeleteMessageRequest,
-    ) -> Result<SessionMessagesResponse, ApiError> {
-        let mut session = self
-            .session_manager
-            .get_session(session_id)
-            .await?
-            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
-
-        // 消息 ID → 服务端原始列表索引（快照/截断仍按索引，恢复语义不变）
-        let message_index = session
-            .messages
-            .iter()
-            .position(|m| m.id == request.message_id)
-            .ok_or_else(|| ApiError::NotFound(format!("消息不存在: {}", request.message_id)))?;
-        info!(
-            "删除消息: 会话={}, 消息={}, 索引={}",
-            session_id, request.message_id, message_index
-        );
-
-        // 保存重做状态：当前工作区 + 被截断的消息（按消息 ID 组织；
-        // 配置了 working_directory 时快照根取会话生效的工作目录）
-        if let Some(sm) = &self.snapshot_manager {
-            let truncated: Vec<StructuredMessage> = session.messages[message_index..].to_vec();
-            if let Some(workdir) = self.resolve_workdir(&session) {
-                if let Err(e) = sm
-                    .with_workdir(workdir)
-                    .save_redo(session_id, &request.message_id, &truncated)
-                    .await
-                {
-                    tracing::warn!(error = %e, "保存重做状态失败");
-                }
-            }
-        }
-
-        // 截断到该消息之前（不含）
-        session.messages.truncate(message_index);
-
-        // 写侧收口（ADR-035 §3）：经工作集（②整表重写 + ③头部）——
-        // 单一写入口，缓存与库同步推进
-        self.persist_meta(&session).await?;
-        self.persist_messages(session_id, &session.messages).await?;
-
-        // 回退工作区文件到该消息处理前的快照（配置了 working_directory 时生效；
-        // 快照根取会话生效的工作目录）
-        if let Some(sm) = &self.snapshot_manager {
-            let Some(workdir) = self.resolve_workdir(&session) else {
-                return self.get_messages(session_id).await;
-            };
-            match sm
-                .with_workdir(workdir)
-                .restore(session_id, &request.message_id)
-                .await
-            {
-                Ok(n) => {
-                    info!(
-                        "回退工作区: 会话={}, 锚点={}, 恢复 {} 个文件",
-                        session_id, request.message_id, n
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        session = %session_id,
-                        anchor = %request.message_id,
-                        "工作区快照恢复失败（会话已回退，文件未回退）"
-                    );
-                }
-            }
-        }
-
-        // 返回剩余消息，前端可直接替换本地状态
-        self.get_messages(session_id).await
-    }
-
-    /// 重做：恢复被回退的消息与工作区文件。
-    pub async fn redo_message(
-        &self,
-        session_id: &str,
-        request: RedoRequest,
-    ) -> Result<SessionMessagesResponse, ApiError> {
-        info!("重做消息: 会话={}, 消息={}", session_id, request.message_id);
-
-        // 0. 存在性检查：不存在的会话 → 404（优先于重做状态检查）；
-        //    同时解析当前会话生效的工作目录（快照根，会话级绑定优先）
-        let session = self
-            .session_manager
-            .get_session(session_id)
-            .await?
-            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
-        let workdir = self
-            .resolve_workdir(&session)
-            .ok_or_else(|| ApiError::BadRequest("未启用工作区快照，无法重做".to_string()))?;
-
-        // 1. 恢复工作区文件 + 取出被截断的消息（快照管理器一次性语义，
-        //    重做数据按被回退消息的 ID 组织）
-        let Some((messages, restored)) = self
-            .snapshot_manager
-            .as_ref()
-            .ok_or_else(|| ApiError::BadRequest("未启用工作区快照，无法重做".to_string()))?
-            .with_workdir(workdir)
-            .load_redo(session_id, &request.message_id)
-            .await?
-        else {
-            return Err(ApiError::BadRequest("没有可重做的状态".to_string()));
-        };
-
-        // 2. 恢复会话消息
-        let mut session = self
-            .session_manager
-            .get_session(session_id)
-            .await?
-            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
-
-        for msg in messages {
-            session.add_structured_message(msg);
-        }
-        // 写侧收口（ADR-035 §3）：经工作集（②整表重写 + ③头部）
-        self.persist_meta(&session).await?;
-        self.persist_messages(session_id, &session.messages).await?;
-
-        tracing::info!(session = %session_id, restored, "重做完成");
-        self.get_messages(session_id).await
     }
 
     /// 删除会话
@@ -566,7 +410,6 @@ mod tests {
                 "session-del",
             )])),
             Some(manager),
-            None,
             Some(tianyan::agent::working_set::WorkingSetRegistry::new(Some(
                 store,
             ))),
@@ -616,7 +459,6 @@ mod tests {
 
         let service = SessionService::new(
             Arc::new(MockSessionManager::with_sessions(vec![session])),
-            None,
             None,
             None,
         );
@@ -671,7 +513,6 @@ mod tests {
 
         let service = SessionService::new(
             Arc::new(MockSessionManager::with_sessions(vec![session])),
-            None,
             None,
             None,
         );
@@ -744,7 +585,6 @@ mod tests {
             Arc::new(MockSessionManager::with_sessions(vec![session])),
             None,
             None,
-            None,
         );
         let detail = service
             .get_session_detail("session-test")
@@ -807,7 +647,6 @@ mod tests {
             Arc::new(MockSessionManager::with_sessions(vec![session])),
             None,
             None,
-            None,
         );
         let detail = service
             .get_session_detail("session-test")
@@ -836,7 +675,6 @@ mod tests {
         }
         let service = SessionService::new(
             Arc::new(MockSessionManager::with_sessions(vec![session])),
-            None,
             None,
             None,
         );
@@ -889,7 +727,6 @@ mod tests {
     async fn test_get_messages_page_missing_session_not_found() {
         let service = SessionService::new(
             Arc::new(MockSessionManager::with_sessions(vec![])),
-            None,
             None,
             None,
         );
@@ -953,7 +790,7 @@ mod tests {
         let manager: Arc<dyn SessionManager> = Arc::new(
             tianyan::session::PersistentSessionManager::new(store.clone()),
         );
-        let service = SessionService::new(manager, None, None, None);
+        let service = SessionService::new(manager, None, None);
         // 页 1：窗口 [5,6,7] 无 user → 向前找最近 user = 4 → 页 [4..7]
         let p1 = service
             .get_messages_page("s1", None, Some(3))
@@ -1013,7 +850,7 @@ mod tests {
         let manager: Arc<dyn SessionManager> = Arc::new(
             tianyan::session::PersistentSessionManager::new(store.clone()),
         );
-        let service = SessionService::new(manager, None, None, None);
+        let service = SessionService::new(manager, None, None);
         // 窗口 [3,4,5]，最早 user = 3（窗口头）→ 页保持 [3,4,5]
         let p = service
             .get_messages_page("s1", None, Some(3))
@@ -1045,7 +882,7 @@ mod tests {
         let manager: Arc<dyn SessionManager> = Arc::new(
             tianyan::session::PersistentSessionManager::new(store.clone()),
         );
-        let service = SessionService::new(manager, None, None, None);
+        let service = SessionService::new(manager, None, None);
         // 窗口 [3,4,5] 无 user、更早亦无 user → 整段 [0..5] 兜底
         let p = service
             .get_messages_page("s1", None, Some(3))
@@ -1055,52 +892,5 @@ mod tests {
         assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5]);
         assert_eq!(p.next_before_seq, None, "页首 0 = 已到链首");
         assert!(!p.has_more);
-    }
-
-    /// 写侧收口端到端（ADR-035 §3）：API 写路径经工作集后，
-    /// **缓存与库同步推进**（不再依赖 ensure 校验兜底）。
-    #[tokio::test]
-    async fn test_delete_message_via_working_set_keeps_cache_consistent() {
-        use tianyan::agent::working_set::WorkingSetRegistry;
-        use tianyan::session::store::SessionStore;
-        use tianyan::session::SessionHeader;
-
-        let db = tianyan::db::Database::open_in_memory().unwrap();
-        db.init_schemas().await.unwrap();
-        let store = SessionStore::new(db).unwrap();
-        store.create("s1", &SessionHeader::default()).await.unwrap();
-        for i in 0..3 {
-            store
-                .append_message("s1", &StructuredMessage::user("s1", format!("m{i}")))
-                .await
-                .unwrap();
-        }
-        let manager: Arc<dyn SessionManager> = Arc::new(
-            tianyan::session::PersistentSessionManager::new(store.clone()),
-        );
-        let registry = WorkingSetRegistry::new(Some(store.clone()));
-        // 预加载（模拟会话正在被使用）；先缓存一条"脏"状态以验证收口会同步推进
-        let ws = registry.ensure("s1").await.unwrap();
-        assert_eq!(ws.last_seq(), 2);
-
-        let service = SessionService::new(manager, None, None, Some(registry.clone()));
-        // 删除第 2 条消息（seq=1）→ 截断到它之前，剩 1 条
-        let (_, before) = store.load("s1").await.unwrap().unwrap();
-        let target_id = before[1].id.clone();
-        service
-            .delete_message(
-                "s1",
-                crate::api::sessions::types::DeleteMessageRequest {
-                    message_id: target_id,
-                },
-            )
-            .await
-            .expect("删除消息");
-
-        // 缓存与库一致（同一工作集实例，未经重建路径）
-        assert_eq!(ws.last_seq(), 0, "工作集库尾同步前移");
-        assert_eq!(ws.message_count().await, 1, "工作集缓存不残留被截断消息");
-        let (_, stored) = store.load("s1").await.unwrap().unwrap();
-        assert_eq!(stored.len(), 1, "库侧一致");
     }
 }

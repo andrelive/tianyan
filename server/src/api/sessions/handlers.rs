@@ -8,9 +8,9 @@ use tracing::{error, info};
 
 use crate::api::sessions::services::SessionService;
 use crate::api::sessions::types::{
-    CompressSessionResponse, DeleteMessageRequest, DeleteSessionResponse, ListSessionsResponse,
-    RedoRequest, Session, SessionDetail, SessionMessagesQuery, SessionMessagesResponse,
-    UpdateTitleRequest, UpdateWorkspaceRequest,
+    CompressSessionResponse, DeleteMessageRequest, DeleteMessageResponse, DeleteSessionResponse,
+    ListSessionsResponse, RedoRequest, RedoResponse, Session, SessionDetail, SessionMessagesQuery,
+    SessionMessagesResponse, UpdateTitleRequest, UpdateWorkspaceRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
@@ -24,7 +24,6 @@ pub async fn list_sessions(
     let service = SessionService::new(
         state.session_manager(),
         state.snapshot_manager(),
-        state.agent_working_directory().await,
         Some(state.working_sets()),
     );
 
@@ -49,7 +48,6 @@ pub async fn get_session(
     let service = SessionService::new(
         state.session_manager(),
         state.snapshot_manager(),
-        state.agent_working_directory().await,
         Some(state.working_sets()),
     );
 
@@ -75,7 +73,6 @@ pub async fn get_session_messages(
     let service = SessionService::new(
         state.session_manager(),
         state.snapshot_manager(),
-        state.agent_working_directory().await,
         Some(state.working_sets()),
     );
 
@@ -107,7 +104,6 @@ pub async fn delete_session(
     let service = SessionService::new(
         state.session_manager(),
         state.snapshot_manager(),
-        state.agent_working_directory().await,
         Some(state.working_sets()),
     );
 
@@ -127,12 +123,17 @@ pub async fn delete_session(
     Ok(Json(response))
 }
 
-/// 删除消息（该消息及其后的所有消息）
+/// 删除消息（该消息及其后的所有消息）——回退（ADR-040）。
+///
+/// handler 是薄壳：置位取消标志 → 调用 core 的完整回退事务（取消轮与任务 →
+/// 保存重做数据 → 恢复工作区文件 → 截断时序链，一把会话锁内完成）→ 映射响应。
+/// 数据截断**不再**由本层编排：此前「读链 → 改链 → 写链」在锁外分三段执行，
+/// 窗口内新轮落库的消息会被整表重写覆盖（库为权威 → 不可自愈）。
 pub async fn delete_message(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Json(request): Json<DeleteMessageRequest>,
-) -> Result<Json<SessionMessagesResponse>, ApiError> {
+) -> Result<Json<DeleteMessageResponse>, ApiError> {
     if session_id.trim().is_empty() {
         return Err(ApiError::BadRequest("会话ID不能为空".to_string()));
     }
@@ -142,18 +143,8 @@ pub async fn delete_message(
         session_id, request.message_id
     );
 
-    let service = SessionService::new(
-        state.session_manager(),
-        state.snapshot_manager(),
-        state.agent_working_directory().await,
-        Some(state.working_sets()),
-    );
-
-    // 回退前置编排：① 停止 LLM 输出（置位 cancel 标志，AgentLoop 在轮次
-    // 边界停止）→ ② 取消时序锚点之后的任务（委托 cancel + 命令 kill）。
-    // ③ 回退文件到快照 + ④ 链截断丢弃由 delete_message 完成（基于完整链，
-    // 压缩点前历史保留）。四种状态（有无输出/有无任务）统一覆盖，每步幂等。
-    // ① 停止 LLM 输出：置位该会话的流取消标志（与「停止」按钮同语义）
+    // ① 停止 LLM 输出：置位该会话的流取消标志（与「停止」按钮同语义，
+    //    AgentLoop 在轮次边界停止；core 等该轮退出后进入回退事务）
     if let Some(flag) = state
         .stream_cancels()
         .lock()
@@ -163,25 +154,27 @@ pub async fn delete_message(
     {
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let agent = state.agent().await;
-    if let Err(e) = agent
-        .rollback_session(&session_id, &request.message_id)
-        .await
-    {
-        // 回退编排失败（如消息不存在）：透传错误，不执行截断
-        return Err(e.into());
-    }
 
-    let resp = service.delete_message(&session_id, request).await?;
-    Ok(Json(resp))
+    // ② 完整回退事务（core）：文件先、链后——失败即整体中止（全或无）
+    let agent = state.agent().await;
+    let rollback = agent.rollback_to(&session_id, &request.message_id).await?;
+
+    // ③ 响应 = 剩余消息（前端直接替换本地状态）+ 回退结果
+    let service = SessionService::new(
+        state.session_manager(),
+        state.snapshot_manager(),
+        Some(state.working_sets()),
+    );
+    let messages = service.get_messages(&session_id).await?;
+    Ok(Json(DeleteMessageResponse { messages, rollback }))
 }
 
-/// 重做被回退的消息与工作区文件
+/// 重做被回退的消息与工作区文件（与回退同一排他事务入口，ADR-040）。
 pub async fn redo_message(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Json(request): Json<RedoRequest>,
-) -> Result<Json<SessionMessagesResponse>, ApiError> {
+) -> Result<Json<RedoResponse>, ApiError> {
     if session_id.trim().is_empty() {
         return Err(ApiError::BadRequest("会话ID不能为空".to_string()));
     }
@@ -191,15 +184,16 @@ pub async fn redo_message(
         session_id, request.message_id
     );
 
+    let agent = state.agent().await;
+    let redo = agent.redo_to(&session_id, &request.message_id).await?;
+
     let service = SessionService::new(
         state.session_manager(),
         state.snapshot_manager(),
-        state.agent_working_directory().await,
         Some(state.working_sets()),
     );
-
-    let resp = service.redo_message(&session_id, request).await?;
-    Ok(Json(resp))
+    let messages = service.get_messages(&session_id).await?;
+    Ok(Json(RedoResponse { messages, redo }))
 }
 
 /// 手动压缩会话（与自动压缩共用处理逻辑）。
@@ -246,7 +240,6 @@ pub async fn update_session_title(
     let service = SessionService::new(
         state.session_manager(),
         state.snapshot_manager(),
-        state.agent_working_directory().await,
         Some(state.working_sets()),
     );
 
@@ -275,7 +268,6 @@ pub async fn update_session_workspace(
     let service = SessionService::new(
         state.session_manager(),
         state.snapshot_manager(),
-        state.agent_working_directory().await,
         Some(state.working_sets()),
     );
 

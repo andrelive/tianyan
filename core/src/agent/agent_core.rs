@@ -2454,4 +2454,336 @@ mod tests {
         turn.await.ok();
         let _ = forward_handle.await;
     }
+
+    // ── ADR-040：回退 / 重做的排他写事务 ─────────────────────────────
+
+    /// 构造带**真实会话存储 + 工作集 + 工作区快照**的 Agent（ADR-040 测试专用）。
+    ///
+    /// 与 `make_agent_with_working_sets` 的两点差异：①`session_manager` 是真实
+    /// 持久化管理器（回退阶段 A 需读链定位锚点）；②装配 `snapshot_manager` 与
+    /// 全局工作目录（文件回退）。
+    fn make_agent_for_rollback(
+        store: Arc<crate::session::store::SessionStore>,
+        workdir: Option<PathBuf>,
+        snapshot_root: Option<PathBuf>,
+    ) -> Agent {
+        let snapshot_manager = match (workdir.clone(), snapshot_root) {
+            (Some(wd), Some(root)) => Some(Arc::new(SnapshotManager::new(root, wd))),
+            _ => None,
+        };
+        let vfs = Arc::new(MockVfs::new());
+        let retriever = Arc::new(DualLayerRetriever::new(
+            vfs.clone() as Arc<dyn VirtualFileSystem>
+        ));
+        let compressor = Arc::new(TokioMutex::new(ContextCompressor::new(
+            Arc::new(MockChatService::new()),
+            CompressionConfig::default(),
+        )));
+        let context_pipeline = ContextPipeline::new(
+            vfs.clone() as Arc<dyn VirtualFileSystem>,
+            retriever,
+            compressor,
+            10,
+            5,
+        );
+        let session_manager: Arc<dyn SessionManager> =
+            Arc::new(crate::session::PersistentSessionManager::new(store.clone()));
+        let agent_loop = AgentLoop::new(
+            Arc::new(MockChatService::new()),
+            ToolRegistry::new(SecurityPolicy::default()),
+            session_manager.clone(),
+            AgentLoopConfig { max_turns: 5 },
+        );
+        Agent::new(
+            "test-model".to_string(),
+            context_pipeline,
+            AgentMetrics::new(),
+            agent_loop,
+            session_manager,
+            snapshot_manager,
+            workdir,
+            WorkingSetRegistry::new(Some(store)),
+        )
+    }
+
+    /// 建链 [u0, a1, u2, a3]（返回各消息 ID，索引即链上位置）。
+    async fn seed_rollback_chain(store: &crate::session::store::SessionStore) -> Vec<String> {
+        store
+            .create("s1", &crate::session::SessionHeader::default())
+            .await
+            .unwrap();
+        let msgs = [
+            StructuredMessage::user("s1", "问题 0"),
+            StructuredMessage::assistant("s1", "回答 1"),
+            StructuredMessage::user("s1", "问题 2"),
+            StructuredMessage::assistant("s1", "回答 3"),
+        ];
+        let mut ids = Vec::new();
+        for m in msgs {
+            ids.push(m.id.clone());
+            store.append_message("s1", &m).await.unwrap();
+        }
+        ids
+    }
+
+    /// 删除对象库中的全部内容寻址对象（模拟"快照树在、对象缺失"的损坏）。
+    fn remove_all_objects(root: &std::path::Path) {
+        let objects = root.join("objects");
+        let Ok(entries) = std::fs::read_dir(&objects) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                if let Ok(inner) = std::fs::read_dir(&path) {
+                    for f in inner.flatten() {
+                        std::fs::remove_file(f.path()).unwrap();
+                    }
+                }
+            } else {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    /// ADR-040：回退 = 一把锁内「**先恢复文件、后截断链**」，结果完整回报
+    /// （截断数 / 恢复文件数 / 工作目录 / 可撤销），缓存与库同步推进。
+    #[tokio::test]
+    async fn test_rollback_restores_files_then_truncates_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("work");
+        let snap_root = dir.path().join("snapshots");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        let agent = make_agent_for_rollback(store.clone(), Some(workdir.clone()), Some(snap_root));
+
+        let ids = seed_rollback_chain(&store).await;
+        // 锚点（问题 2）处理**前**的工作区 v1 → 处理中变 v2（回退后应回到 v1）
+        std::fs::write(workdir.join("a.txt"), "v1").unwrap();
+        agent
+            .snapshot_manager
+            .as_ref()
+            .unwrap()
+            .capture("s1", &ids[2])
+            .await
+            .unwrap();
+        std::fs::write(workdir.join("a.txt"), "v2").unwrap();
+
+        let outcome = agent.rollback_to("s1", &ids[2]).await.unwrap();
+        assert_eq!(outcome.truncated, 2, "锚点及其后的 2 条被截断");
+        assert_eq!(outcome.workdir, Some(workdir.display().to_string()));
+        assert!(outcome.redo_available, "重做数据已保存（可撤销回退）");
+        assert_eq!(outcome.restored_files, 1, "a.txt 回到锚点快照内容");
+        // 文件已回退（先文件）
+        assert_eq!(
+            std::fs::read_to_string(workdir.join("a.txt")).unwrap(),
+            "v1"
+        );
+        // 链已截断（后链）+ 缓存与库一致
+        let (_, chain) = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(chain.len(), 2);
+        let ws = agent.working_sets.get("s1").await.unwrap();
+        assert_eq!(ws.last_seq(), 1, "工作集库尾随截断前移");
+        assert_eq!(ws.message_count().await, 2, "缓存不残留被截断消息");
+    }
+
+    /// ADR-040 全或无：文件恢复失败（快照对象缺失）→ **链不截断**，
+    /// 「消息回退了、文件没回退」的半成品在结构上不可能出现。
+    #[tokio::test]
+    async fn test_rollback_all_or_nothing_when_snapshot_object_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("work");
+        let snap_root = dir.path().join("snapshots");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        let agent = make_agent_for_rollback(
+            store.clone(),
+            Some(workdir.clone()),
+            Some(snap_root.clone()),
+        );
+
+        let ids = seed_rollback_chain(&store).await;
+        std::fs::write(workdir.join("a.txt"), "v1").unwrap();
+        agent
+            .snapshot_manager
+            .as_ref()
+            .unwrap()
+            .capture("s1", &ids[2])
+            .await
+            .unwrap();
+        std::fs::write(workdir.join("a.txt"), "v2").unwrap();
+        // 破坏对象库：快照树仍在，但它引用的对象已缺失
+        remove_all_objects(&snap_root);
+
+        let err = agent
+            .rollback_to("s1", &ids[2])
+            .await
+            .expect_err("对象缺失应中止回退");
+        assert!(err.to_string().contains("对象缺失"), "{err}");
+        let (_, chain) = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(chain.len(), 4, "文件恢复失败 → 链保持不动（全或无）");
+        assert_eq!(
+            agent.working_sets.get("s1").await.unwrap().last_seq(),
+            3,
+            "缓存也不动"
+        );
+    }
+
+    /// ADR-040：未绑定工作区 → 仅回退消息，结果明确回报「文件未回退」。
+    #[tokio::test]
+    async fn test_rollback_without_workdir_only_truncates_messages() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        let agent = make_agent_for_rollback(store.clone(), None, None);
+
+        let ids = seed_rollback_chain(&store).await;
+        let outcome = agent.rollback_to("s1", &ids[2]).await.unwrap();
+        assert_eq!(outcome.truncated, 2);
+        assert_eq!(outcome.workdir, None, "未绑定工作区：文件未回退（须明示）");
+        assert_eq!(outcome.restored_files, 0);
+        assert!(!outcome.redo_available, "无快照根 → 无重做数据");
+        assert_eq!(store.load("s1").await.unwrap().unwrap().1.len(), 2);
+    }
+
+    /// ADR-040：重做走同一排他事务入口——恢复被回退的消息与工作区文件，
+    /// 且重做数据一次性（再重做 → `invalid_input`）。
+    #[tokio::test]
+    async fn test_redo_restores_messages_and_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("work");
+        let snap_root = dir.path().join("snapshots");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        let agent = make_agent_for_rollback(store.clone(), Some(workdir.clone()), Some(snap_root));
+
+        let ids = seed_rollback_chain(&store).await;
+        std::fs::write(workdir.join("a.txt"), "v1").unwrap();
+        agent
+            .snapshot_manager
+            .as_ref()
+            .unwrap()
+            .capture("s1", &ids[2])
+            .await
+            .unwrap();
+        std::fs::write(workdir.join("a.txt"), "v2").unwrap();
+        agent.rollback_to("s1", &ids[2]).await.unwrap();
+        // 回退后又改了文件（重做应恢复到「回退前」的 v2）
+        std::fs::write(workdir.join("a.txt"), "v3").unwrap();
+
+        let redo = agent.redo_to("s1", &ids[2]).await.unwrap();
+        assert_eq!(redo.restored_messages, 2);
+        assert_eq!(redo.restored_files, 1);
+        let (_, chain) = store.load("s1").await.unwrap().unwrap();
+        assert_eq!(chain.len(), 4, "被回退的消息恢复（追加到链尾）");
+        assert_eq!(
+            std::fs::read_to_string(workdir.join("a.txt")).unwrap(),
+            "v2"
+        );
+        // 一次性语义：重做数据读取即消费
+        let err = agent
+            .redo_to("s1", &ids[2])
+            .await
+            .expect_err("重做数据已消费");
+        assert!(err.is_invalid_input(), "{err}");
+    }
+
+    /// ADR-040：锚点消息不存在 → `not_found`（映射 404）且**不截断**。
+    #[tokio::test]
+    async fn test_rollback_unknown_message_not_found_keeps_chain() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        let agent = make_agent_for_rollback(store.clone(), None, None);
+
+        seed_rollback_chain(&store).await;
+        let err = agent
+            .rollback_to("s1", "ghost")
+            .await
+            .expect_err("消息不存在");
+        assert!(err.is_not_found(), "{err}");
+        assert_eq!(store.load("s1").await.unwrap().unwrap().1.len(), 4);
+    }
+
+    /// ADR-040 判别力：回退**全程**持会话锁——旧实现只在「等轮 + 取消任务」
+    /// 期间持锁，截断在锁外执行，窗口内新轮落库的消息被整表重写覆盖。
+    /// 本测试放大事务耗时（数百文件）后持续尝试取锁：事务期间（起始阶段 A
+    /// 的取消查询之外）不得取到 → 旧实现必红。
+    #[tokio::test]
+    async fn test_rollback_holds_session_lock_until_truncation_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().join("work");
+        let snap_root = dir.path().join("snapshots");
+        std::fs::create_dir_all(&workdir).unwrap();
+        // 放大事务耗时：capture 全树哈希 + restore 差异都需要时间
+        for i in 0..400 {
+            std::fs::write(workdir.join(format!("f{i}.txt")), format!("内容 {i}")).unwrap();
+        }
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        let agent = Arc::new(make_agent_for_rollback(
+            store.clone(),
+            Some(workdir.clone()),
+            Some(snap_root),
+        ));
+
+        let ids = seed_rollback_chain(&store).await;
+        agent
+            .snapshot_manager
+            .as_ref()
+            .unwrap()
+            .capture("s1", &ids[2])
+            .await
+            .unwrap();
+        std::fs::write(workdir.join("f0.txt"), "改动").unwrap();
+
+        let reg = agent.working_sets.clone();
+        let runner = agent.clone();
+        let anchor = ids[2].clone();
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let r = runner.rollback_to("s1", &anchor).await;
+            let _ = done_tx.send(());
+            r
+        });
+
+        let start = Instant::now();
+        // 阶段 A（锁外的锚点定位与任务取消查询）不持锁——给足裕度后开始判定
+        const LOCK_FREE_WINDOW: Duration = Duration::from_millis(100);
+        let mut violations = 0usize;
+        loop {
+            tokio::select! {
+                _ = &mut done_rx => break,
+                _ = tokio::time::sleep(Duration::from_millis(2)) => {
+                    if let Some(guard) = reg.try_lock("s1").await {
+                        drop(guard);
+                        if start.elapsed() < LOCK_FREE_WINDOW {
+                            continue;
+                        }
+                        // 可能是「回退刚结束、完成信号未到」——给它一个短暂窗口再判定
+                        if tokio::time::timeout(Duration::from_millis(200), &mut done_rx)
+                            .await
+                            .is_err()
+                        {
+                            violations += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        handle.await.unwrap().unwrap();
+        assert_eq!(
+            violations, 0,
+            "回退事务期间会话锁不得释放（截断必须与文件恢复同锁——旧实现窗口在此）"
+        );
+    }
 }

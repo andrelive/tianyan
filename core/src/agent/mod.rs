@@ -26,6 +26,8 @@ pub mod role_learning;
 pub mod role_router;
 /// 角色化子 Agent 委托（delegate_to_agent role 参数）。
 pub mod roles;
+/// 会话回退 / 重做（ADR-040：排他写事务内的完整编排）。
+pub mod rollback;
 /// 流式事件统一转发（ADR-032：三处接线收敛——建通道即消费 + 字段注入单点）。
 pub mod stream_forward;
 mod tool_params;
@@ -44,6 +46,7 @@ pub use role_learning::{
 };
 pub use role_router::{RoleMatch, RoleRouter};
 pub use roles::{AgentRole, RoleRegistry, RoleSource, RoleStatus};
+pub use rollback::{RedoOutcome, RollbackOutcome};
 pub use session_state::SessionState;
 pub use stream_forward::{
     inject_stream_event_fields, spawn_null_forwarder, spawn_stream_forwarder, BroadcastJsonDeliver,

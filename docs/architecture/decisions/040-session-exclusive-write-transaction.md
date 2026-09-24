@@ -126,3 +126,24 @@ DestructiveOp 与流之间的互斥由 **ADR-041 的租约**承担（门禁式�
 - 半成品防护：快照对象缺失时 → 断言链**未被截断**（全或无）；
 - 锁内视图：在 `with_session_exclusive` 外并发 append → 断言事务看到的链包含该 append；
 - 现有回退/重做 e2e 与单测全绿。
+
+---
+
+## 实施记录（2026-09-24 波次 2 落地）
+
+| 部件 | 落地 |
+|------|------|
+| 排他事务入口 | `WorkingSetRegistry::with_session_exclusive`（`core/src/agent/working_set.rs`）：取锁 → `ensure` → **锁内强制 `rebuild`**（`ensure_fresh` 的 `MAX(seq)` 是弱信号，等长重写检测不到）→ 闭包 → 出锁；`SessionWorkingSet::full_chain()` 提供事务内的**全链**读基准（段只物化压缩点之后） |
+| 回退内聚 | 新模块 `core/src/agent/rollback.rs`：`Agent::rollback_to` → `RollbackOutcome`；trait `AgentCoordinator::rollback_session` 更名 `rollback_to`（返回 outcome） |
+| 顺序反转 | 保存重做数据 → **先恢复文件** → **后截断链**（经 `ws.rewrite`）。文件恢复失败即整体中止（链不动）；锚点**无快照树**（`is_not_found`：未捕获 / 已 GC）不阻断——与「未绑定工作区」同类，`outcome.workdir` / `redo_available` 明确回报 |
+| 锁外先行 | 阶段 A（锚点粗定位 + 取消锚点后任务，**不等**终态）在锁外缩短持锁；阶段 B（锁内）再取消一次（覆盖「等轮退出期间」新起的任务）+ 等命令终态——取消通知先入库，随截断一并丢弃 |
+| 重做同入口 | `Agent::redo_to` → `RedoOutcome`（锁内 `load_redo` → 追加链尾 → `rewrite`）；trait 新增 `redo_to` |
+| 压缩同入口 | `AgentCoordinator::compress_session` 改走 `with_session_exclusive`（此前 `turn_guard` + 锁外 `load_and_build_state`）；「编辑消息」在前端 = 删除 + 重发，自然经同一入口 |
+| server 薄壳 | `handlers::{delete_message, redo_message}` = 置位取消标志 → 调 core → 映射响应；`SessionService::{delete_message, redo_message, persist_messages, resolve_workdir}` 与 `default_working_dir` 字段删除 |
+| 响应契约 | `DeleteMessageResponse { #[serde(flatten)] messages, rollback }` / `RedoResponse { …, redo }` —— 线格式向后兼容（前端未声明时按结构化类型忽略）；前端 `api-client` 增可选 `rollback` / `redo` 类型 |
+| 判别力测试 | 「事务锁内视图为最新链 / 两事务串行化 / 事务持锁阻塞轮锁」3 条（`working_set.rs`）；「文件先链后 + 缓存一致 / 对象缺失全或无 / 未绑定工作区 / 重做一次性 / 锚点不存在 / 回退全程持锁（旧实现窗口必红）」6 条（`agent_core.rs`） |
+
+**验收**：`cargo check --workspace --all-targets` 零警告；`cargo test -p tianyan-core --lib`
+1426 passed；`cargo test -p tianyan-server` 全绿；`.\scripts\test.ps1 lint` 全绿。
+
+**未纳入本波**：租约与幂等（ADR-041）、前端状态机（波次 4）、操作日志 + CoW/CDC（ADR-042）。

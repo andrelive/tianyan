@@ -280,6 +280,20 @@ impl SessionWorkingSet {
         self.start_seq.load(Ordering::SeqCst)
     }
 
+    /// 读**完整链**（不受段化影响）：段只物化「最近压缩点 → 现在」，而回退 /
+    /// 重做这类全链操作需要完整历史（含压缩点之前）。
+    ///
+    /// 供排他事务 [`WorkingSetRegistry::with_session_exclusive`] 内的读基准使用——
+    /// 调用方须已持会话锁，否则读到的是库的瞬时状态、与后续写入不成事务。
+    pub async fn full_chain(&self) -> Result<Vec<StructuredMessage>> {
+        Ok(self
+            .store
+            .load(&self.session_id)
+            .await?
+            .map(|(_header, messages)| messages)
+            .unwrap_or_default())
+    }
+
     /// 写入收口 ②（整表重写，ADR-035 §3）：删消息 / 回退 / 重做 / 编辑。
     ///
     /// 语义：落库全量重写（header 保持不变）→ 段全量替换 → 消费水位重置到
@@ -470,6 +484,38 @@ impl WorkingSetRegistry {
     pub async fn lock(&self, session_id: &str) -> OwnedMutexGuard<()> {
         let lock = self.session_lock(session_id).await;
         lock.lock_owned().await
+    }
+
+    /// **排他写事务**（ADR-040 §1）：会话单写者的 read-modify-write 唯一入口。
+    ///
+    /// 语义：取会话锁 → `ensure` → **锁内重读最新链**（`rebuild`；`ensure_fresh`
+    /// 只比对库尾 seq，等长重写检测不到——事务的读基准必须是库的最新全链）→
+    /// 执行闭包 → 出锁。回退 / 重做 / 压缩 / 删除消息这类「读链 → 改 → 写链」
+    /// 必须整体在此闭包内完成。
+    ///
+    /// 与轮的关系：用户轮 / 唤醒轮持**同一把锁**（[`Self::lock`]），故事务与轮
+    /// 不可能并发。此前回退在锁外分三段做（读链 / 改链 / 写链各自无锁），窗口内
+    /// 新轮落库的消息被整表重写覆盖（库为权威，不可自愈）。
+    ///
+    /// # 纪律
+    /// * 闭包内**不得**再取本会话锁（不可重入，会自锁死）；
+    /// * 闭包内写入经工作集方法（`append` / `rewrite` / `update_header` / `delete`）；
+    /// * 闭包内避免长时间 `await`（持锁阻塞同会话新轮）——可等待的前置步骤
+    ///   （如取消任务）宜在闭包外先行。
+    ///
+    /// # Errors
+    /// 未装配会话存储、库读失败、闭包自身返回错误时透传。闭包内失败**不自动
+    /// 回滚**：多步写操作的「全或无」由闭包自行编排（见 `Agent::rollback_to`
+    /// 的「文件先、链后」顺序）。
+    pub async fn with_session_exclusive<T, F, Fut>(&self, session_id: &str, f: F) -> Result<T>
+    where
+        F: FnOnce(Arc<SessionWorkingSet>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let _guard = self.lock(session_id).await;
+        let ws = self.ensure(session_id).await?;
+        ws.rebuild().await?;
+        f(ws).await
     }
 
     /// 尝试获取会话锁（幂等，不排队）。用于通知唤醒（ADR-035 §4）：
@@ -1014,5 +1060,105 @@ mod tests {
         let seq = ws.append(&user_msg("s1", "经工作集"), true).await.unwrap();
         assert_eq!(seq, db_last + 1, "应按库真实 seq 落位");
         assert_eq!(ws.last_seq(), seq, "工作集水位与库一致");
+    }
+
+    /// ADR-040：事务的读基准是**库的最新全链**——锁外写入（绕过工作集的直写 /
+    /// 外部写者）对事务可见（`ensure_fresh` 的 `MAX(seq)` 是弱信号，故事务内强制重读）。
+    #[tokio::test]
+    async fn test_exclusive_transaction_sees_latest_chain() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        let ws = reg.ensure("s1").await.unwrap();
+        ws.append(&user_msg("s1", "第一条"), true).await.unwrap();
+
+        // 绕过工作集的直写（库尾推进，注册表缓存仍是旧视图）
+        store
+            .append_message("s1", &user_msg("s1", "外部写入"))
+            .await
+            .unwrap();
+
+        let seen = reg
+            .with_session_exclusive("s1", |ws| async move { ws.full_chain().await })
+            .await
+            .unwrap();
+        assert_eq!(seen.len(), 2, "事务内读基准应为库的最新全链");
+        assert!(
+            serde_json::to_string(&seen[1])
+                .unwrap()
+                .contains("外部写入"),
+            "事务内应看到锁外写入的消息"
+        );
+    }
+
+    /// ADR-040：两个排他事务互不交错（单写者）——后者必须看到前者的写入。
+    #[tokio::test]
+    async fn test_exclusive_transactions_are_serialized() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        reg.ensure("s1").await.unwrap();
+
+        // 事务 A：持锁写入后短暂挂起（模拟事务内的慢操作）
+        let reg_a = reg.clone();
+        let a = tokio::spawn(async move {
+            reg_a
+                .with_session_exclusive("s1", |ws| async move {
+                    ws.append(&user_msg("s1", "事务 A 写入"), true).await?;
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        // 事务 B：与 A 并发发起 → 排队在 A 之后，读基准含 A 的写入
+        let reg_b = reg.clone();
+        let b = tokio::spawn(async move {
+            reg_b
+                .with_session_exclusive("s1", |ws| async move { ws.full_chain().await })
+                .await
+                .unwrap()
+        });
+        a.await.unwrap();
+        let seen = b.await.unwrap();
+        assert_eq!(seen.len(), 1, "事务 B 应在 A 之后执行（A 的写入已落库）");
+        assert!(
+            serde_json::to_string(&seen[0])
+                .unwrap()
+                .contains("事务 A 写入"),
+            "后到事务必须看到先到事务的写入（不基于陈旧视图改写）"
+        );
+    }
+
+    /// ADR-040：事务持锁期间**轮拿不到锁**（回退/重做与用户轮、唤醒轮互斥）。
+    #[tokio::test]
+    async fn test_exclusive_transaction_blocks_turn_lock() {
+        let store = test_store().await;
+        create_session(&store, "s1").await;
+        let reg = WorkingSetRegistry::new(Some(store.clone()));
+        reg.ensure("s1").await.unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let reg_tx = reg.clone();
+        let holder = tokio::spawn(async move {
+            reg_tx
+                .with_session_exclusive("s1", |_ws| async move {
+                    let _ = tx.send(());
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        rx.await.unwrap();
+        assert!(
+            reg.try_lock("s1").await.is_none(),
+            "事务持锁期间轮不得进入（单写者）"
+        );
+        holder.await.unwrap();
+        assert!(
+            reg.try_lock("s1").await.is_some(),
+            "事务结束后锁应释放（轮可进入）"
+        );
     }
 }

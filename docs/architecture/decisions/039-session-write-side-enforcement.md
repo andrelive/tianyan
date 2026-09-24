@@ -119,3 +119,23 @@ ADR-035 §3 声称"写侧收口：消息全量重写经工作集"，但收口**�
 - `.\scripts\test.ps1 lint` + 定向单测全绿；
 - `scheduled_tasks` 清空路径不再需要 `working_sets.remove()`；
 - `SessionState` 不再有 `add_structured_message` 同名单（改名完成）。
+
+---
+
+## 实施记录（2026-09-24 波次 1 落地，commit `e87e60c`）
+
+| 项 | 结果 |
+|----|------|
+| trait 收窄 | `SessionManager` 移除 5 个破坏性写，只留读 + 创建（`create_session` / `get_session` / `session_exists` / `load_before` / `list_sessions`） |
+| 调用点迁移 | core 5 处 + server 13 处全部改走工作集；**`BroadcastingSessionManager` 装饰器整体删除**（写方法移除后退化为空壳，ADR-028 的「落库即推送」改挂工作集 `append` 的边界消息回调） |
+| 系统消息落库 | 收敛为单点 `persist_system_message` |
+| 兜底删除 | `scheduled_tasks` 的手动 `working_sets.remove()`、各 fallback 直写分支全部删除（未装配 = 装配缺陷 → 显式报错） |
+| 测试迁移 | 测试桩改为「真实 store + 工作集」（有意：测试必须覆盖真实写路径） |
+| 规模 | 净删除 722 行（+426 / −1148） |
+
+**验收**：`cargo check --workspace` 零警告；core 1415 passed / server 171 passed；
+`.\scripts\test.ps1 lint` 全绿。
+
+**遗留收尾（未做）**：
+- `SessionStore` 的破坏性写方法降 `pub(crate)`（当前仍 `pub`——crate 外不可达，但缺编译期约束）；
+- `SessionState::add_structured_message` → `push_message` 改名（内存态/落库同名混淆仍在）。

@@ -326,14 +326,37 @@ export interface DeleteMessageRequest {
   message_id: string;
 }
 
+/** 回退结果（ADR-040：核心回退事务的结构化回报）。 */
+export interface RollbackOutcome {
+  /** 被截断（丢弃）的消息数。 */
+  truncated: number;
+  /** 恢复 / 删除的工作区文件数。 */
+  restored_files: number;
+  /** 会话生效的工作目录；null = 未绑定工作区（**文件未回退**，须明示）。 */
+  workdir: string | null;
+  /** 可撤销回退（重做数据已保存）。 */
+  redo_available: boolean;
+  /** 被取消的时序锚点后任务数（委托 + 命令）。 */
+  cancelled_tasks: number;
+}
+
+/** 重做结果（ADR-040）。 */
+export interface RedoOutcome {
+  /** 恢复的消息数。 */
+  restored_messages: number;
+  /** 恢复的工作区文件数。 */
+  restored_files: number;
+}
+
 /** 删除指定消息及其后的所有消息（按消息 ID 定位，返回剩余消息）。
  * 前端展示列表经合并/过滤后索引与服务端错位，数字索引会删过头；
- * 消息 ID 是两端共享的稳定键。 */
+ * 消息 ID 是两端共享的稳定键。
+ * 响应附带 `rollback`（ADR-040）：`workdir === null` 表示文件未回退。 */
 export async function deleteSessionMessage(
   sessionId: string,
   messageId: string,
-): Promise<SessionMessagesResponse> {
-  return apiPost<SessionMessagesResponse>(
+): Promise<SessionMessagesResponse & { rollback?: RollbackOutcome }> {
+  return apiPost<SessionMessagesResponse & { rollback?: RollbackOutcome }>(
     `/sessions/${encodeURIComponent(sessionId)}/messages/delete`,
     { message_id: messageId } satisfies DeleteMessageRequest,
   );
@@ -343,12 +366,12 @@ export interface RedoRequest {
   message_id: string;
 }
 
-/** 重做被删除的消息与工作区文件，返回恢复后的消息。 */
+/** 重做被删除的消息与工作区文件，返回恢复后的消息（+ 重做结果 `redo`）。 */
 export async function redoSessionMessage(
   sessionId: string,
   messageId: string,
-): Promise<SessionMessagesResponse> {
-  return apiPost<SessionMessagesResponse>(
+): Promise<SessionMessagesResponse & { redo?: RedoOutcome }> {
+  return apiPost<SessionMessagesResponse & { redo?: RedoOutcome }>(
     `/sessions/${encodeURIComponent(sessionId)}/messages/redo`,
     { message_id: messageId } satisfies RedoRequest,
   );

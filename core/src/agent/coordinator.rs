@@ -208,23 +208,31 @@ pub trait AgentCoordinator: Send + Sync {
         session_id: &str,
     ) -> Result<Option<crate::common::types::StructuredMessage>>;
 
-    /// 回退会话到指定用户输入之前（完整回退编排）。
+    /// 回退会话到指定消息之前（完整回退事务，ADR-040）。
     ///
-    /// 流程（四种状态统一覆盖，每步对"不存在"的情况幂等）：
-    /// ① 等待进行中的轮收尾（调用方已置位 cancel 标志，AgentLoop 在轮次
-    ///    边界停止；turn_guard 保证与轮互斥）；
-    /// ② 取消时序锚点之后的所有任务（委托 cancel + 命令 kill），等待
-    ///    全部终态（取消通知入库，截断时一并丢弃）。
+    /// 全过程内聚在 core（`Agent::rollback_to`），一把会话锁覆盖「取消轮与任务 →
+    /// 保存重做数据 → 恢复工作区文件 → 截断时序链」：调用方（server handler）只
+    /// 负责置位取消标志、调用与响应映射，不再自己编排截断（此前截断在锁外执行，
+    /// 窗口内新轮落库的消息会被整表重写覆盖）。
     ///
-    /// **③④ 不在本方法内**（契约分工，T2 修正——此前 doc 声明 4 步而实现只有
-    /// ①②）：保存 redo 状态（被截断消息 + 工作区树）并恢复工作区、完整链截断到
-    /// 锚点前，均由 server 编排的 `delete_message` 链路完成（`save_redo` → 快照
-    /// restore → `rewrite_messages`）——core 只做与轮/任务相关的 ①②，数据截断
-    /// 走会话 API 的既有 redo/快照链路（单一实现，不复制）。
+    /// 默认实现返回空结果（无快照/任务装配的适配器与测试替身直接继承）。
+    async fn rollback_to(
+        &self,
+        _session_id: &str,
+        _message_id: &str,
+    ) -> Result<crate::agent::rollback::RollbackOutcome> {
+        Ok(crate::agent::rollback::RollbackOutcome::default())
+    }
+
+    /// 重做被回退的消息与工作区文件（与回退同一排他事务入口，ADR-040）。
     ///
-    /// 默认空实现（无任务/快照装配的适配器/测试替身直接继承）。
-    async fn rollback_session(&self, _session_id: &str, _message_id: &str) -> Result<()> {
-        Ok(())
+    /// 默认实现返回空结果（无快照装配的适配器与测试替身直接继承）。
+    async fn redo_to(
+        &self,
+        _session_id: &str,
+        _message_id: &str,
+    ) -> Result<crate::agent::rollback::RedoOutcome> {
+        Ok(crate::agent::rollback::RedoOutcome::default())
     }
 
     /// 唤醒指定会话的主 agent（T1 事件驱动：外部事件触发一轮系统消息处理）。
@@ -377,88 +385,34 @@ impl AgentCoordinator for Agent {
         &self,
         session_id: &str,
     ) -> Result<Option<crate::common::types::StructuredMessage>> {
-        // 与进行中的轮互斥：压缩读取会话状态并写入摘要，若与轮并发会基于
-        // 轮中未完成的消息生成摘要（且轮内状态与库分叉）。
-        let _turn_guard = self.turn_guard(session_id).await;
-        let state = self.load_and_build_state(session_id).await?;
-        // force=true：手动压缩跳过窗口阈值——用户主动点击即明确意图
-        let summary = self
-            .maybe_compress_and_persist(&state, session_id, true)
-            .await;
-        Ok(summary)
+        // ADR-040 §1：压缩是「读链 → 生成摘要 → 写链」的 read-modify-write，
+        // 必须与回退 / 轮同处一把锁的排他事务内（顺带保证读基准是最新链：
+        // 与轮并发会基于轮中未完成的消息生成摘要，且轮内状态与库分叉）。
+        // force=true：手动压缩跳过窗口阈值——用户主动点击即明确意图。
+        self.working_sets
+            .with_session_exclusive(session_id, |ws| async move {
+                let state = ws.state();
+                Ok(self
+                    .maybe_compress_and_persist(&state, session_id, true)
+                    .await)
+            })
+            .await
     }
 
-    async fn rollback_session(&self, session_id: &str, message_id: &str) -> Result<()> {
-        // ① 与进行中的轮互斥：回退读取完整链并截断，若与轮并发会基于轮中
-        // 未完成的消息截断（且轮内状态与库分叉）。
-        let _turn_guard = self.turn_guard(session_id).await;
+    async fn rollback_to(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<crate::agent::rollback::RollbackOutcome> {
+        Agent::rollback_to(self, session_id, message_id).await
+    }
 
-        // ② 取消时序锚点之后的所有任务（委托 cancel + 命令 kill）。
-        // 锚点 = 被回退消息的索引（完整链上定位）。
-        let anchor = {
-            let session = self
-                .session_manager
-                .get_session(session_id)
-                .await?
-                .ok_or_else(|| {
-                    crate::TianyanError::not_found(format!(
-                        "会话存储错误：会话未找到：{session_id}"
-                    ))
-                })?;
-            session
-                .messages
-                .iter()
-                .position(|m| m.id == message_id)
-                .ok_or_else(|| {
-                    crate::TianyanError::not_found(format!("消息不存在：{message_id}"))
-                })?
-        };
-
-        // 委托任务：锚点 > 回退点 → 取消
-        let bg_tasks = self.background_tasks.snapshot().await;
-        for t in bg_tasks
-            .iter()
-            .filter(|t| t.parent_session_id == session_id && t.anchor_seq > anchor as i64)
-        {
-            if !t.status.is_terminal() {
-                self.background_tasks.cancel(&t.id).await?;
-            }
-        }
-        // 命令任务：锚点 > 回退点 → kill（杀进程树）
-        let cmd_tasks = self.command_tasks.list().await;
-        let mut killed: Vec<String> = Vec::new();
-        for t in cmd_tasks
-            .iter()
-            .filter(|t| t.parent_session_id == session_id && t.anchor_seq > anchor as i64)
-        {
-            if t.status == crate::executor::CommandTaskStatus::Running
-                && self.command_tasks.kill(&t.id).await.is_ok()
-            {
-                killed.push(t.id.clone());
-            }
-        }
-        // 等待被 kill 的命令任务进入终态（watcher 收尾异步：杀进程后
-        // child.wait() 返回 → on_command_terminal 入库取消通知）。
-        // 必须等通知入库再截断——否则取消通知追加到新链尾污染。
-        if !killed.is_empty() {
-            let deadline = Instant::now() + std::time::Duration::from_secs(10);
-            loop {
-                let tasks = self.command_tasks.list().await;
-                let all_terminal = killed.iter().all(|id| {
-                    tasks
-                        .iter()
-                        .find(|t| &t.id == id)
-                        .map(|t| t.status != crate::executor::CommandTaskStatus::Running)
-                        .unwrap_or(true)
-                });
-                if all_terminal || Instant::now() >= deadline {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-
-        Ok(())
+    async fn redo_to(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<crate::agent::rollback::RedoOutcome> {
+        Agent::redo_to(self, session_id, message_id).await
     }
 
     async fn wake_session(&self, session_id: &str) {
