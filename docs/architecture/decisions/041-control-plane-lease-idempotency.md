@@ -1,7 +1,7 @@
 # ADR-041: 控制面命令化与租约——Command + Idempotency + Lease
 
 **日期**: 2026-09-24
-**状态**: 🚧 波次 3（服务端）已落地；波次 4（前端状态机 + OCC）待做
+**状态**: ✅ 已落地（波次 3 服务端 + 波次 4 前端，2026-09-24）
 **修订**: ADR-028/029/031（事件与订阅）之补充——控制面（非数据流）的互斥与幂等
 **影响范围**: 服务端状态（`server/src/state.rs`）、对话与会话 API
 （`server/src/api/{chat,sessions}/`）、前端（`gui-vite/src/components/chat/`、
@@ -124,3 +124,35 @@ pendingOpBySession: Record<string, {
   "回退处理中"（不显示"连接断开"）；
 - 回退请求**迟到返回** → 断言本地消息列表未被覆盖（version 更低被丢弃）；
 - 旧行为注入（无 owner 校验 / 无 opId）→ 对应测试变红。
+
+---
+
+## 实施记录（2026-09-24）
+
+### 波次 3（服务端，commit `934db54`）
+
+- `session_leases`（**原地升级** `stream_cancels`，不新增第二张表）：`Stream` /
+  `DestructiveOp` 互斥 + owner 令牌 + `opId` 台账 + 忙语义（409 + 结构化 reason）；
+- **接管语义**（对草案的细化）：控制面命令到达时若有流在跑，不返回 409，而是
+  「置位旧流取消标志 + 就地改写为 `DestructiveOp`（挡住新流）+ 等会话静默」——
+  保留用户「点回退即停轮」的既有体验，同时杜绝「新轮插进回退事务」与
+  「回退误取消用户刚发起的新轮」（旧实现无条件置位**当前**流的 flag）。
+  静默超时（10s）放弃 → 409（宁可拒绝，也不与仍在写会话的旧轮竞态）；
+- `delete/redo/compress` 统一控制面门 `gate_control_op`；请求可携 `operation_id`
+  （缺省保持非幂等——向后兼容）；`ApiError::Busy` + `ErrorResponse.reason`；
+- 7 条判别力单测（接管 / 接管后静默观测 / 幂等两态 / 控制面互斥 / 停止范围 /
+  会话隔离 / 等静默超时）。
+
+### 波次 4（前端）
+
+- `controlBusy`（rollback/redo）+ **每会话操作序号**（迟到响应守卫）落地：
+  进行中反馈、重复发起拒绝、迟到响应丢弃；`ChatInput.busy` 输入禁用；
+- **与草案的有意偏差**：不做全量 `version` 单调合并，而用「in-flight 期间输入禁用
+  （服务端互斥 + 前端 busy）+ 操作序号守卫」达到同一目标（旧响应不许回退 UI）。
+  理由：消息级 version 需贯穿 store 的所有写入路径（`applyServerMessage` /
+  `confirmUserMessageId` / 流式 upsert…），改动面与回归风险远大于收益；当前方案
+  已覆盖实际窗口（控制面操作是唯一会「旧响应覆盖新状态」的来源，且被禁用与序号
+  双重挡住）。**重新评估触发条件**：出现非控制面来源的迟到整体替换时，升级为
+  version 方案；
+- 忙文案分流（reason → 三类可读提示）；横幅去掉 `streamStatus` 依赖（消除被
+  流状态压住的延迟）。

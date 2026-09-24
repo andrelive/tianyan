@@ -81,12 +81,16 @@ export class ApiError extends Error {
   code?: string;
   /** 语义错误类别（ADR-014；消费端用谓词判断，勿直接匹配）。 */
   readonly kind: ApiErrorKind;
-  constructor(message: string, status?: number | string) {
+  /** 结构化原因（ADR-041 忙语义等）：`stream_in_progress` /
+   * `destructive_op_in_progress` / `same_operation_in_flight`。 */
+  readonly reason?: string;
+  constructor(message: string, status?: number | string, reason?: string) {
     super(message);
     this.name = 'ApiError';
     const num = typeof status === 'number' ? status : Number(status);
     this.code = num ? String(num) : undefined;
     this.kind = num ? kindFromStatus(num) : 'unknown';
+    this.reason = reason;
   }
 }
 
@@ -145,13 +149,15 @@ async function request<T>(
     if (!response.ok) {
       const text = await response.text();
       let message = `HTTP ${response.status}: ${text}`;
+      let reason: string | undefined;
       try {
         const err = JSON.parse(text);
         message = err.error || err.message || message;
+        reason = typeof err.reason === 'string' ? err.reason : undefined;
       } catch {
         /* use raw text */
       }
-      throw new ApiError(message, response.status);
+      throw new ApiError(message, response.status, reason);
     }
 
     return await response.json();
@@ -324,6 +330,8 @@ export async function deleteSession(sessionId: string): Promise<void> {
 
 export interface DeleteMessageRequest {
   message_id: string;
+  /** 客户端生成的幂等键（ADR-041）：双击/重试同一 opId 只执行一次。 */
+  operation_id?: string;
 }
 
 /** 回退结果（ADR-040：核心回退事务的结构化回报）。 */
@@ -355,25 +363,35 @@ export interface RedoOutcome {
 export async function deleteSessionMessage(
   sessionId: string,
   messageId: string,
+  operationId?: string,
 ): Promise<SessionMessagesResponse & { rollback?: RollbackOutcome }> {
   return apiPost<SessionMessagesResponse & { rollback?: RollbackOutcome }>(
     `/sessions/${encodeURIComponent(sessionId)}/messages/delete`,
-    { message_id: messageId } satisfies DeleteMessageRequest,
+    {
+      message_id: messageId,
+      ...(operationId ? { operation_id: operationId } : {}),
+    } satisfies DeleteMessageRequest,
   );
 }
 
 export interface RedoRequest {
   message_id: string;
+  /** 客户端生成的幂等键（ADR-041）：语义同 DeleteMessageRequest。 */
+  operation_id?: string;
 }
 
 /** 重做被删除的消息与工作区文件，返回恢复后的消息（+ 重做结果 `redo`）。 */
 export async function redoSessionMessage(
   sessionId: string,
   messageId: string,
+  operationId?: string,
 ): Promise<SessionMessagesResponse & { redo?: RedoOutcome }> {
   return apiPost<SessionMessagesResponse & { redo?: RedoOutcome }>(
     `/sessions/${encodeURIComponent(sessionId)}/messages/redo`,
-    { message_id: messageId } satisfies RedoRequest,
+    {
+      message_id: messageId,
+      ...(operationId ? { operation_id: operationId } : {}),
+    } satisfies RedoRequest,
   );
 }
 

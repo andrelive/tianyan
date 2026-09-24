@@ -353,6 +353,50 @@ describe('ChatPanel', () => {
     expect(screen.queryByRole('button', { name: /撤销回退/ })).not.toBeInTheDocument();
   });
 
+  it('shows an in-flight indicator and disables input while rollback is pending', async () => {
+    // ADR-041 波次 4：控制面操作进行中必须有明确反馈（消除「点了没反应 /
+    // 重复点击」）；输入同步禁用（会话级操作是原子的，期间新消息会被服务端拒绝）。
+    const user = userEvent.setup();
+    let releaseDelete: () => void = () => {};
+    const deleteGate = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
+    server.use(
+      http.post('/api/v1/sessions/session-1/messages/delete', async () => {
+        await deleteGate;
+        return HttpResponse.json({
+          session_id: 'session-1',
+          messages: [],
+          last_seq: -1,
+        });
+      }),
+    );
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      streamStatus: {},
+      messages: [
+        {
+          id: 'msg_user_1',
+          role: 'user',
+          segments: [{ type: 'text', text: '你好' }],
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    });
+    renderChatPanel();
+
+    await user.click(screen.getByRole('button', { name: /回退到此/ }));
+
+    // 请求挂起期间：进行中反馈可见 + 输入框禁用 + 横幅按钮禁用
+    expect(await screen.findByText('回退处理中…')).toBeInTheDocument();
+    expect(screen.getByLabelText('输入消息')).toBeDisabled();
+
+    releaseDelete();
+    await waitFor(() => {
+      expect(screen.queryByText('回退处理中…')).not.toBeInTheDocument();
+    });
+  });
+
   it('rollback result writes to the originating session even after switching away mid-flight', async () => {
     // 竞态守卫（回退的跨会话写入寻址）：回退请求发出后（挂起模拟慢响应）
     // 用户切到会话 B——迟到的回退结果必须写回发起的会话 A，不得写入 B

@@ -2,6 +2,7 @@ import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
 import {
+  ApiError,
   answerChat,
   cancelChatStream,
   compressSession,
@@ -33,6 +34,23 @@ import ApprovalBanner from './ApprovalBanner';
 import AgentTasksPanel from './AgentTasksPanel';
 import SessionTodoPanel from './SessionTodoPanel';
 import { PENDING_SESSION_KEY } from '@/lib/store';
+
+/** 控制面操作错误文案（ADR-041）：忙语义按结构化 reason 分流，其余走通用。 */
+function controlOpErrorMessage(err: unknown): string {
+  if (err instanceof ApiError && err.reason) {
+    switch (err.reason) {
+      case 'stream_in_progress':
+        return '该会话正在生成回复，已请求停止，请稍后再试';
+      case 'destructive_op_in_progress':
+        return '该会话有正在处理的会话操作（回退/重做/压缩），请稍候';
+      case 'same_operation_in_flight':
+        return '同一次操作仍在处理中，请稍候';
+      default:
+        break;
+    }
+  }
+  return toErrorMessage(err, '未知错误');
+}
 
 export default function ChatPanel() {
   const { sessionId: urlSessionId } = useParams<{ sessionId: string }>();
@@ -360,6 +378,24 @@ export default function ChatPanel() {
     [addMessage, startStream, setRollbackMessage],
   );
 
+  // ── 控制面操作（ADR-041 波次 4）──
+  // 回退/重做进行中：输入禁用 + 拒绝重复发起（服务端已有 opId 幂等 + 租约互斥，
+  // 前端这层是 UX 与迟到响应守卫）。busy 用 ref 守卫（不破坏回调身份稳定性）、
+  // state 供渲染。
+  const [controlBusy, setControlBusy] = useState<'rollback' | 'redo' | null>(null);
+  const controlBusyRef = useRef(false);
+  /** 每会话单调递增的操作序号：迟到响应若已被更新的操作取代 → 丢弃。 */
+  const controlOpSeqRef = useRef<Record<string, number>>({});
+  const beginControlOp = useCallback((sessionId: string) => {
+    const next = (controlOpSeqRef.current[sessionId] ?? 0) + 1;
+    controlOpSeqRef.current[sessionId] = next;
+    return next;
+  }, []);
+  const isCurrentControlOp = useCallback(
+    (sessionId: string, seq: number) => controlOpSeqRef.current[sessionId] === seq,
+    [],
+  );
+
   const handleRollback = useCallback(
     async (index: number) => {
       // 读 store 最新值而非渲染闭包：回调身份稳定（不依赖 messages/streamStatus），
@@ -368,6 +404,7 @@ export default function ChatPanel() {
       const st = useAppStore.getState();
       const activeKey = st.currentSessionId ?? PENDING_SESSION_KEY;
       if ((st.streamStatus[activeKey] ?? 'idle') === 'streaming') return;
+      if (controlBusyRef.current) return; // 控制面操作进行中：拒绝重复发起
       const sessionId = st.currentSessionId;
       if (!sessionId) {
         st.showToast('请先发送一条消息以创建会话', 'error');
@@ -383,39 +420,64 @@ export default function ChatPanel() {
       }
 
       // 乐观更新：回退到该消息之前（删除该消息及其后）
+      const seq = beginControlOp(sessionId);
+      const opId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      controlBusyRef.current = true;
+      setControlBusy('rollback');
       st.deleteMessagesFrom(sessionId, index);
       try {
-        const resp = await deleteSessionMessage(sessionId, target.id);
+        const resp = await deleteSessionMessage(sessionId, target.id, opId);
+        // 迟到响应守卫（ADR-041 §4）：已被更新操作取代 → 丢弃（不覆盖本地）
+        if (!isCurrentControlOp(sessionId, seq)) return;
         // 迟到响应写回发起会话（用户可能在请求期间切换会话——不得污染）
         st.setSessionMessages(sessionId, resp.messages);
         st.setRollbackMessage(sessionId, target.id);
       } catch (err: unknown) {
-        st.showToast(`回退失败: ${toErrorMessage(err, '未知错误')}`, 'error');
+        st.showToast(`回退失败: ${controlOpErrorMessage(err)}`, 'error');
         await reloadSession(sessionId);
+      } finally {
+        controlBusyRef.current = false;
+        setControlBusy(null);
       }
     },
-    [reloadSession],
+    [reloadSession, beginControlOp, isCurrentControlOp],
   );
 
   // 撤销回滚：恢复被删除的消息与工作区文件
   const handleRedo = useCallback(async () => {
     if (streamStatus === 'streaming' || lastRollbackMessageId === null) return;
+    if (controlBusyRef.current) return;
 
     const state = useAppStore.getState();
     const sessionId = state.currentSessionId;
     if (!sessionId) return;
 
+    const seq = beginControlOp(sessionId);
+    const opId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    controlBusyRef.current = true;
+    setControlBusy('redo');
     try {
-      const resp = await redoSessionMessage(sessionId, lastRollbackMessageId);
+      const resp = await redoSessionMessage(sessionId, lastRollbackMessageId, opId);
+      if (!isCurrentControlOp(sessionId, seq)) return;
       // 迟到响应写回发起会话（撤销回退同理按会话 id 寻址）
       state.setSessionMessages(sessionId, resp.messages);
       setRollbackMessage(sessionId, null);
       state.showToast('已撤销回退', 'success');
     } catch (err: unknown) {
-      state.showToast(`撤销回退失败: ${toErrorMessage(err, '未知错误')}`, 'error');
+      state.showToast(`撤销回退失败: ${controlOpErrorMessage(err)}`, 'error');
       await reloadSession(sessionId);
+    } finally {
+      controlBusyRef.current = false;
+      setControlBusy(null);
     }
-  }, [streamStatus, lastRollbackMessageId, setRollbackMessage, reloadSession]);
+  }, [
+    streamStatus,
+    lastRollbackMessageId,
+    setRollbackMessage,
+    reloadSession,
+    beginControlOp,
+    isCurrentControlOp,
+  ]);
 
   // 提交对 Agent 追问的回答（同步工具语义，对齐 DSH）：回答提交到
   // /chat/answer 等待通道，ask_user 工具执行恢复，结果经**主对话流**返回
@@ -623,6 +685,17 @@ export default function ChatPanel() {
             </div>
           )}
 
+          {/* 控制面操作进行中（ADR-041）：回退/重做期间输入禁用 + 明确的进行中反馈
+             （消除「点了没反应 / 重复点击」）。 */}
+          {controlBusy !== null && (
+            <div className="flex items-center gap-2 py-2" role="status">
+              <Loader2 className="w-4 h-4 animate-spin text-[var(--color-text-secondary)]" />
+              <span className="text-xs text-[var(--color-text-secondary)]">
+                {controlBusy === 'rollback' ? '回退处理中…' : '撤销回退处理中…'}
+              </span>
+            </div>
+          )}
+
           {turnError && streamStatus !== 'streaming' && (
             <div className="flex items-center gap-2 py-2" role="alert">
               <span className="text-xs text-[var(--color-error)]">上一轮中断：{turnError}</span>
@@ -649,16 +722,19 @@ export default function ChatPanel() {
             </div>
           )}
 
-          {/* Redo banner: 回退后可撤销 */}
-          {lastRollbackMessageId !== null && streamStatus !== 'streaming' && (
+          {/* Redo banner: 回退后可撤销。
+             ADR-041：不再依赖 streamStatus——旧条件在流状态未复位时把横幅压住
+             （「回退后横幅延迟出现」的症状来源之一）。 */}
+          {lastRollbackMessageId !== null && (
             <div className="flex justify-center pb-1">
               <button
                 onClick={handleRedo}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+                disabled={controlBusy !== null}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 aria-label="撤销回退"
               >
                 <Undo2 className="w-3.5 h-3.5" />
-                已回退 — 撤销回退
+                {controlBusy === 'redo' ? '撤销中…' : '已回退 — 撤销回退'}
               </button>
             </div>
           )}
@@ -690,6 +766,7 @@ export default function ChatPanel() {
             onSend={handleSend}
             onStop={handleStop}
             isStreaming={streamStatus === 'streaming'}
+            busy={controlBusy !== null}
             turnRunning={turnRunning}
             stopping={stopping}
             usage={lastUsage}
