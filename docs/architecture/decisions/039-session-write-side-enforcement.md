@@ -136,6 +136,9 @@ ADR-035 §3 声称"写侧收口：消息全量重写经工作集"，但收口**�
 **验收**：`cargo check --workspace` 零警告；core 1415 passed / server 171 passed；
 `.\scripts\test.ps1 lint` 全绿。
 
-**遗留收尾（未做）**：
-- `SessionStore` 的破坏性写方法降 `pub(crate)`（当前仍 `pub`——crate 外不可达，但缺编译期约束）；
-- `SessionState::add_structured_message` → `push_message` 改名（内存态/落库同名混淆仍在）。
+**收尾项（2026-09-24 完成）**：
+- `SessionStore` 的破坏性写方法已降 `pub(crate)`（`append_message` / `append_message_no_fts`
+  / `rewrite` / `update_header` / `delete`）——写路径唯一入口 = 工作集，成为**编译期**
+  约束（server 测试夹具相应迁移到 `ws.append`）；
+- `SessionState::add_structured_message` → `push_message`（`Session` 的同名方法一并改名），
+  「内存态 vs 落库」的命名混淆消除——落库方法已不在任何 trait 上。

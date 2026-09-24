@@ -148,7 +148,7 @@ impl Session {
     }
 
     /// 向会话添加结构化消息。
-    pub fn add_structured_message(&mut self, msg: StructuredMessage) {
+    pub fn push_message(&mut self, msg: StructuredMessage) {
         self.messages.push(msg);
     }
 
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn test_session_messages() {
         let mut session = Session::new("test-session");
-        session.add_structured_message(StructuredMessage {
+        session.push_message(StructuredMessage {
             id: "msg_1".to_string(),
             parent_id: None,
             role: MessageRole::User,

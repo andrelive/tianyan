@@ -136,7 +136,7 @@ impl PersistentSessionManager {
         session.header = header;
         session.message_count = Some(messages.len());
         for msg in messages {
-            session.add_structured_message(msg);
+            session.push_message(msg);
         }
 
         Ok(Some(session))
@@ -149,7 +149,7 @@ impl SessionManager for PersistentSessionManager {
         // 全保真转换（StructuredMessage::from_message：图片等非文本内容不丢失）
         let sm = StructuredMessage::from_message(&message, id, None, None);
         let mut session = Session::new(id);
-        session.add_structured_message(sm.clone());
+        session.push_message(sm.clone());
 
         // 先检查会话是否已存在，避免重复创建
         if self.store.exists(id).await? {
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_add_structured_message_persists() {
+    async fn test_push_message_persists() {
         let mgr = make_manager().await;
         let id = "test-2";
 

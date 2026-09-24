@@ -122,7 +122,7 @@ impl SessionStore {
     ///
     /// # Errors
     /// * SQLite 写入失败时返回 TianyanError（显式上抛，不吞错）。
-    pub async fn append_message(
+    pub(crate) async fn append_message(
         &self,
         session_id: &str,
         msg: &StructuredMessage,
@@ -132,7 +132,7 @@ impl SessionStore {
 
     /// 追加消息但不写 FTS（ADR-026：子智能体会话——无"人"提供的信息，
     /// 不进回忆检索；FTS 索引不膨胀，session_recall 天然搜不到）。
-    pub async fn append_message_no_fts(
+    pub(crate) async fn append_message_no_fts(
         &self,
         session_id: &str,
         msg: &StructuredMessage,
@@ -270,7 +270,7 @@ impl SessionStore {
     ///
     /// # Errors
     /// * SQLite 写入失败时返回 TianyanError。
-    pub async fn rewrite(
+    pub(crate) async fn rewrite(
         &self,
         session_id: &str,
         header: &SessionHeader,
@@ -355,7 +355,7 @@ impl SessionStore {
     ///
     /// # Errors
     /// * 会话不存在或 SQLite 写入失败时返回 TianyanError。
-    pub async fn update_header(
+    pub(crate) async fn update_header(
         &self,
         session_id: &str,
         header: &SessionHeader,
@@ -550,7 +550,7 @@ impl SessionStore {
     ///
     /// # Errors
     /// * SQLite 写入失败时返回 TianyanError。
-    pub async fn delete(&self, session_id: &str) -> Result<(), TianyanError> {
+    pub(crate) async fn delete(&self, session_id: &str) -> Result<(), TianyanError> {
         let conn = self.db.lock().await;
         let tx = conn
             .unchecked_transaction()

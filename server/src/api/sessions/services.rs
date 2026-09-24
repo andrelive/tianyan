@@ -671,7 +671,7 @@ mod tests {
     async fn test_get_messages_page_cursor_walks_full_chain() {
         let mut session = Session::new("s1");
         for i in 0..5 {
-            session.add_structured_message(StructuredMessage::user("s1", format!("m{i}")));
+            session.push_message(StructuredMessage::user("s1", format!("m{i}")));
         }
         let service = SessionService::new(
             Arc::new(MockSessionManager::with_sessions(vec![session])),
@@ -774,6 +774,9 @@ mod tests {
         db.init_schemas().await.unwrap();
         let store = SessionStore::new(db).unwrap();
         store.create("s1", &SessionHeader::default()).await.unwrap();
+        // ADR-039/040：写路径唯一入口 = 工作集（SessionStore 破坏性写已降 pub(crate)）
+        let registry = tianyan::agent::working_set::WorkingSetRegistry::new(Some(store.clone()));
+        let ws = registry.ensure("s1").await.unwrap();
         let chain = [
             StructuredMessage::user("s1", "u0"),      // seq 0
             assistant_with_call("s1", "c1", "a1"),    // seq 1
@@ -785,7 +788,7 @@ mod tests {
             StructuredMessage::assistant("s1", "a7"), // seq 7
         ];
         for m in &chain {
-            store.append_message("s1", m).await.unwrap();
+            ws.append(m, true).await.unwrap();
         }
         let manager: Arc<dyn SessionManager> = Arc::new(
             tianyan::session::PersistentSessionManager::new(store.clone()),
@@ -837,6 +840,9 @@ mod tests {
         db.init_schemas().await.unwrap();
         let store = SessionStore::new(db).unwrap();
         store.create("s1", &SessionHeader::default()).await.unwrap();
+        // ADR-039/040：写路径唯一入口 = 工作集（SessionStore 破坏性写已降 pub(crate)）
+        let registry = tianyan::agent::working_set::WorkingSetRegistry::new(Some(store.clone()));
+        let ws = registry.ensure("s1").await.unwrap();
         for m in [
             StructuredMessage::user("s1", "u0"),      // seq 0
             StructuredMessage::assistant("s1", "a1"), // seq 1
@@ -845,7 +851,7 @@ mod tests {
             StructuredMessage::assistant("s1", "a4"), // seq 4
             StructuredMessage::assistant("s1", "a5"), // seq 5
         ] {
-            store.append_message("s1", &m).await.unwrap();
+            ws.append(&m, true).await.unwrap();
         }
         let manager: Arc<dyn SessionManager> = Arc::new(
             tianyan::session::PersistentSessionManager::new(store.clone()),
@@ -869,6 +875,9 @@ mod tests {
         db.init_schemas().await.unwrap();
         let store = SessionStore::new(db).unwrap();
         store.create("s1", &SessionHeader::default()).await.unwrap();
+        // ADR-039/040：写路径唯一入口 = 工作集（SessionStore 破坏性写已降 pub(crate)）
+        let registry = tianyan::agent::working_set::WorkingSetRegistry::new(Some(store.clone()));
+        let ws = registry.ensure("s1").await.unwrap();
         for m in [
             StructuredMessage::assistant("s1", "a0"),
             StructuredMessage::assistant("s1", "a1"),
@@ -877,7 +886,7 @@ mod tests {
             StructuredMessage::assistant("s1", "a4"),
             StructuredMessage::assistant("s1", "a5"),
         ] {
-            store.append_message("s1", &m).await.unwrap();
+            ws.append(&m, true).await.unwrap();
         }
         let manager: Arc<dyn SessionManager> = Arc::new(
             tianyan::session::PersistentSessionManager::new(store.clone()),

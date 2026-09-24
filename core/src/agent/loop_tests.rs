@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use std::sync::atomic::AtomicUsize;
 
 struct MockSessionManager {
-    /// 最近一次 add_structured_message 的实测输入（模拟 SQLite 持久化：
+    /// 最近一次 push_message 的实测输入（模拟 SQLite 持久化：
     /// run_turns 从会话恢复实测输入的数据源；None = 无 usage，走估算）。
     last_usage: Arc<std::sync::Mutex<Option<usize>>>,
 }

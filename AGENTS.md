@@ -112,6 +112,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-038: provider wire 方言单点](docs/architecture/decisions/038-provider-wire-dialect.md) — 方言即数据（`ProviderDialect` + `DialectPreset` 预设表，构造时解析一次、请求路径零判定）；三分法判据（协议级→拆子目录独立实现 / 字段级→方言数据 / 推断类→留启发式）；可观测性分层（静默失败必须显式可配、可见失败声明首选+容错兜底）；两级粒度（provider preset + `ModelEntry` 模型级覆盖）；embedding 手写请求复用请求层单点（不新增封装层）
 - [ADR-039: 会话写侧收口强制化](docs/architecture/decisions/039-session-write-side-enforcement.md) — 写权限面收窄：`SessionManager` trait 移除 5 个破坏性写（只留读 + 创建），写路径唯一入口 = 工作集；`BroadcastingSessionManager` 装饰器删除；fallback 直写删除（未装配 = 装配缺陷）；净删除 722 行
 - [ADR-040: 会话排他写事务](docs/architecture/decisions/040-session-exclusive-write-transaction.md) — 会话单写者：`WorkingSetRegistry::with_session_exclusive`（取锁 → 锁内 `rebuild` 最新链 → 闭包）+ 回退/重做/压缩内聚 core（`Agent::rollback_to`/`redo_to`，`RollbackOutcome`）；回退「先恢复文件、后截断链」（全或无）；取消/等待移出锁外先行；server handler 退化为薄壳
+- [ADR-043: 组装层工具对连续性规范化](docs/architecture/decisions/043-tool-pair-continuity.md) — 请求视图单点规范化（`ContextAssembler::normalize_tool_pairs`）：已存在结果提前 / 悬空调用移除并补合成结果 / 孤立结果丢弃；根治「孤立 tool_calls 链 → 会话持续 400」（全库实测 89 处插队 + 11 处悬空）；库不动、无迁移、幂等、前缀缓存不受影响
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 

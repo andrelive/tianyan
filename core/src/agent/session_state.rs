@@ -60,7 +60,7 @@ impl SessionState {
     ///
     /// 上下文预算由压缩机制（token 阈值 + 摘要替换）控制；组装层从
     /// 最后一个压缩点开始组装，内存态保留完整链供回退/重做/快照索引。
-    pub fn add_structured_message(&mut self, msg: StructuredMessage) {
+    pub fn push_message(&mut self, msg: StructuredMessage) {
         self.structured_messages.push(msg);
         self.last_activity = Instant::now();
     }

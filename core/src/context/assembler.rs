@@ -5,9 +5,10 @@
 
 use crate::common::types::InjectableContext;
 use crate::common::types::{
-    FunctionCall, Message, MessageRole, Part, StructuredMessage, TokenUsage,
+    FunctionCall, Message, MessageRole, Part, PartTime, StructuredMessage, TokenUsage,
     ToolCall as CoreToolCall, ToolCallType,
 };
+use std::borrow::Cow;
 
 /// 上下文组装器——纯函数，无副作用。
 pub struct ContextAssembler;
@@ -61,8 +62,12 @@ impl ContextAssembler {
             .iter()
             .rposition(|m| m.compression_marker)
             .unwrap_or(0);
-        for sm in &structured_messages[start_idx..] {
-            messages.extend(Self::structured_to_messages(sm));
+        // 工具对连续性规范化（见 `normalize_tool_pairs`）：插队的通知/用户消息
+        // 重排到结果之后、悬空调用补合成结果、孤立结果丢弃。上游要求
+        // `assistant(tool_calls)` 后必须**紧跟**对应 tool 消息，否则整条会话
+        // 此后每次请求都被拒（错误链常驻）。
+        for sm in Self::normalize_tool_pairs(&structured_messages[start_idx..]) {
+            messages.extend(Self::structured_to_messages(sm.as_ref()));
         }
 
         messages
@@ -191,6 +196,98 @@ impl ContextAssembler {
         messages
     }
 
+    /// **工具对连续性规范化**（组装视图，ADR-043）。
+    ///
+    /// 上游（OpenAI 兼容协议）要求：assistant 消息带 `tool_calls` 时，其**紧随**
+    /// 的消息必须是对应的 tool 结果。天演的链上有两种断裂（2026-09-24 全库实测：
+    /// 3.7 万条消息中 89 处顺序断裂 + 11 处调用悬空）：
+    ///
+    /// 1. **插队**：长工具执行期间（实测数十秒）异步通知（system）或用户消息落库，
+    ///    插在 `assistant(tool_calls)` 与 tool 结果之间；
+    /// 2. **中断残留**：工具被中断（用户停止 / 进程中断）→ 结果永不落库，调用悬空。
+    ///
+    /// 两者都会让请求被拒（`An assistant message with 'tool_calls' must be followed
+    /// by tool messages`），且**错误链常驻**——该会话此后每次请求都失败。
+    ///
+    /// 规范化只作用于**请求组装视图**：库与缓存不动，结果确定（同一链每次得到
+    /// 同一视图）→ 前缀缓存不受影响、可反复调用：
+    /// - 已存在的 tool 结果**提前**到其调用之后（其余消息相对顺序不变）；
+    /// - 悬空调用**丢弃**（该 assistant 消息的其余内容照常保留），并**补一条合成
+    ///   结果**（"调用被中断"）——让模型看到已发生的事实，而不是凭空消失的调用；
+    /// - 无任何调用认领的**孤立 tool 结果**丢弃（同样会触发上游 400）。
+    pub(crate) fn normalize_tool_pairs(
+        chain: &[StructuredMessage],
+    ) -> Vec<Cow<'_, StructuredMessage>> {
+        use std::collections::{HashMap, HashSet};
+
+        // Pass 1：为每个 assistant(tool_calls) 的调用认领链上第一个未被认领的结果位置
+        let mut claimed: HashSet<usize> = HashSet::new();
+        let mut plan: HashMap<usize, Vec<(String, Option<usize>)>> = HashMap::new();
+        for (i, sm) in chain.iter().enumerate() {
+            if sm.role != MessageRole::Assistant {
+                continue;
+            }
+            let calls: Vec<String> = sm
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    Part::ToolCall { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            if calls.is_empty() {
+                continue;
+            }
+            let mut entries = Vec::with_capacity(calls.len());
+            for call_id in calls {
+                let pos = (i + 1..chain.len())
+                    .find(|&j| !claimed.contains(&j) && is_tool_result_of(&chain[j], &call_id));
+                if let Some(j) = pos {
+                    claimed.insert(j);
+                }
+                entries.push((call_id, pos));
+            }
+            plan.insert(i, entries);
+        }
+
+        // Pass 2：输出（结果提前 → 悬空调用补合成结果 → 孤立结果丢弃）
+        let mut out: Vec<Cow<'_, StructuredMessage>> = Vec::with_capacity(chain.len());
+        for (i, sm) in chain.iter().enumerate() {
+            if claimed.contains(&i) {
+                continue; // 已被提前到其调用之后
+            }
+            match plan.get(&i) {
+                Some(entries) => {
+                    let dangling: Vec<&str> = entries
+                        .iter()
+                        .filter(|(_, pos)| pos.is_none())
+                        .map(|(id, _)| id.as_str())
+                        .collect();
+                    if dangling.is_empty() {
+                        out.push(Cow::Borrowed(sm));
+                    } else {
+                        out.push(Cow::Owned(without_tool_calls(sm, &dangling)));
+                    }
+                    for (_, pos) in entries.iter() {
+                        if let Some(j) = pos {
+                            out.push(Cow::Borrowed(&chain[*j]));
+                        }
+                    }
+                    for call_id in dangling {
+                        out.push(Cow::Owned(synthetic_interrupted_result(sm, call_id)));
+                    }
+                }
+                None => {
+                    // 孤立工具结果（无任何调用认领）→ 丢弃；其余消息原样保留
+                    if !has_tool_result(sm) {
+                        out.push(Cow::Borrowed(sm));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// 将 LLM 返回的传输层 Message 转回 StructuredMessage（用于持久化）。
     ///
     /// 角色从 `msg.role` 直接派生。对于 Tool 消息，生成 `Part::ToolResult`；
@@ -207,6 +304,47 @@ impl ContextAssembler {
     ) -> StructuredMessage {
         StructuredMessage::from_message(msg, session_id, parent_id, token_usage)
     }
+}
+
+/// 该消息是否承载指定调用的工具结果。
+fn is_tool_result_of(sm: &StructuredMessage, call_id: &str) -> bool {
+    sm.parts
+        .iter()
+        .any(|p| matches!(p, Part::ToolResult { tool_call_id, .. } if tool_call_id == call_id))
+}
+
+/// 该消息是否承载工具结果（不判 role——容忍旧数据的 role 漂移）。
+fn has_tool_result(sm: &StructuredMessage) -> bool {
+    sm.parts
+        .iter()
+        .any(|p| matches!(p, Part::ToolResult { .. }))
+}
+
+/// 复制一条消息并去掉指定 `tool_calls`（其余 parts 顺序不变）。
+fn without_tool_calls(sm: &StructuredMessage, drop_ids: &[&str]) -> StructuredMessage {
+    let mut out = sm.clone();
+    out.parts.retain(|p| match p {
+        Part::ToolCall { id, .. } => !drop_ids.contains(&id.as_str()),
+        _ => true,
+    });
+    out
+}
+
+/// 合成「调用被中断」的工具结果（**仅请求视图**，不落库）。
+///
+/// 让模型看到「该调用发生过、被中断无结果」这一事实——比静默丢弃调用更接近真实
+/// 语义（也避免模型凭空重试同一动作）。
+fn synthetic_interrupted_result(sm: &StructuredMessage, call_id: &str) -> StructuredMessage {
+    let mut out = StructuredMessage::system(sm.session_id.clone(), "");
+    out.id = format!("synth-{call_id}");
+    out.role = MessageRole::Tool;
+    out.parts = vec![Part::ToolResult {
+        tool_call_id: call_id.to_string(),
+        content: "[结果] 工具调用被中断，未产生结果".to_string(),
+        error: Some("调用被中断".to_string()),
+        time: PartTime::default(),
+    }];
+    out
 }
 
 #[cfg(test)]
@@ -597,5 +735,198 @@ mod tests {
             !sm.parts.iter().any(|p| matches!(p, Part::Image { .. })),
             "纯文本消息不应产生 Image part"
         );
+    }
+
+    // ── ADR-043：工具对连续性规范化（组装视图）───────────────────────
+
+    /// 带工具调用的 assistant 消息。
+    fn assistant_with_call(sid: &str, call_id: &str, text: &str) -> StructuredMessage {
+        let mut sm = StructuredMessage::assistant(sid, text);
+        sm.parts.push(Part::ToolCall {
+            id: call_id.to_string(),
+            name: "execute_command".to_string(),
+            arguments: "{}".to_string(),
+            time: PartTime::default(),
+        });
+        sm
+    }
+
+    /// role = Tool 的工具结果消息。
+    fn tool_result(sid: &str, call_id: &str, text: &str) -> StructuredMessage {
+        let mut sm = StructuredMessage::user(sid, "");
+        sm.role = MessageRole::Tool;
+        sm.parts = vec![Part::ToolResult {
+            tool_call_id: call_id.to_string(),
+            content: text.to_string(),
+            error: None,
+            time: PartTime::default(),
+        }];
+        sm
+    }
+
+    fn normalize(chain: &[StructuredMessage]) -> Vec<StructuredMessage> {
+        ContextAssembler::normalize_tool_pairs(chain)
+            .into_iter()
+            .map(|sm| sm.into_owned())
+            .collect()
+    }
+
+    /// 规范化后的**传输层**序列必须满足：assistant(tool_calls) 后紧邻 Tool 消息。
+    fn assert_pairs_wellformed(chain: &[StructuredMessage]) {
+        let msgs: Vec<Message> = ContextAssembler::normalize_tool_pairs(chain)
+            .iter()
+            .flat_map(|sm| ContextAssembler::structured_to_messages(sm.as_ref()))
+            .collect();
+        for (i, m) in msgs.iter().enumerate() {
+            if m.role == MessageRole::Assistant
+                && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+            {
+                let next = msgs.get(i + 1).expect("tool_calls 之后必须有消息");
+                assert_eq!(
+                    next.role,
+                    MessageRole::Tool,
+                    "assistant(tool_calls) 后必须紧跟 tool 消息（上游硬要求）：{msgs:?}"
+                );
+            }
+        }
+    }
+
+    /// 形态 A：通知（system）插在调用与结果之间 → 结果提前，通知后移。
+    #[test]
+    fn test_normalize_moves_inserted_notice_after_result() {
+        let chain = vec![
+            assistant_with_call("s1", "c1", "跑命令"),
+            StructuredMessage::system("s1", "[后台服务就绪] node ..."),
+            tool_result("s1", "c1", "exit_code=0"),
+        ];
+        assert_pairs_wellformed(&chain);
+        let out = normalize(&chain);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].role, MessageRole::Assistant);
+        assert_eq!(out[1].role, MessageRole::Tool, "结果提前到调用之后");
+        assert_eq!(out[2].role, MessageRole::System, "插队的通知后移到结果之后");
+        assert!(
+            is_tool_result_of(&out[1], "c1"),
+            "提前的必须是同一次调用的结果"
+        );
+    }
+
+    /// 形态 B：中断残留（调用悬空）→ 丢弃调用 + 补合成结果（模型可见事实）。
+    #[test]
+    fn test_normalize_synthesizes_result_for_dangling_call() {
+        let chain = vec![
+            assistant_with_call("s1", "c1", "跑命令"),
+            StructuredMessage::user("s1", "怎么中断了？继续"),
+        ];
+        assert_pairs_wellformed(&chain);
+        let out = normalize(&chain);
+        assert_eq!(out.len(), 3, "补一条合成结果");
+        assert_eq!(out[0].role, MessageRole::Assistant);
+        assert!(
+            !out[0]
+                .parts
+                .iter()
+                .any(|p| matches!(p, Part::ToolCall { .. })),
+            "悬空调用应从 assistant 上移除"
+        );
+        assert!(out[0]
+            .parts
+            .iter()
+            .any(|p| matches!(p, Part::Text { text, .. } if text.contains("跑命令"))));
+        assert_eq!(out[1].role, MessageRole::Tool);
+        assert!(is_tool_result_of(&out[1], "c1"));
+        assert_eq!(out[2].role, MessageRole::User, "用户消息顺序不变");
+    }
+
+    /// 孤立工具结果（无任何调用认领）→ 丢弃（否则同样触发上游 400）。
+    #[test]
+    fn test_normalize_drops_orphan_tool_result() {
+        let chain = vec![
+            tool_result("s1", "c1", "孤儿结果"),
+            StructuredMessage::user("s1", "继续"),
+        ];
+        assert_pairs_wellformed(&chain);
+        let out = normalize(&chain);
+        assert_eq!(out.len(), 1, "孤立结果被丢弃");
+        assert_eq!(out[0].role, MessageRole::User);
+    }
+
+    /// 一次调用多个工具、部分有结果 → 有结果的保留并提前，悬空的补合成结果。
+    #[test]
+    fn test_normalize_partial_calls() {
+        let mut assistant = assistant_with_call("s1", "c1", "并行两个");
+        assistant.parts.push(Part::ToolCall {
+            id: "c2".to_string(),
+            name: "read_file".to_string(),
+            arguments: "{}".to_string(),
+            time: PartTime::default(),
+        });
+        let chain = vec![
+            assistant,
+            tool_result("s1", "c1", "第一个结果"),
+            StructuredMessage::user("s1", "接着来"),
+        ];
+        assert_pairs_wellformed(&chain);
+        let out = normalize(&chain);
+        assert_eq!(out.len(), 4, "assistant + 已有结果 + 合成结果 + 用户消息");
+        let calls = match &out[0]
+            .parts
+            .iter()
+            .find(|p| matches!(p, Part::ToolCall { .. }))
+        {
+            Some(Part::ToolCall { id, .. }) => id.clone(),
+            _ => panic!("应保留有结果的调用"),
+        };
+        assert_eq!(calls, "c1", "只保留有结果的调用");
+        assert!(is_tool_result_of(&out[1], "c1"));
+        assert!(is_tool_result_of(&out[2], "c2"), "悬空调用补合成结果");
+        assert_eq!(out[3].role, MessageRole::User);
+    }
+
+    /// 规范链不受影响（幂等：对规范化结果再跑一次结果相同）。
+    #[test]
+    fn test_normalize_keeps_wellformed_chain_and_is_idempotent() {
+        let chain = vec![
+            StructuredMessage::user("s1", "问题"),
+            assistant_with_call("s1", "c1", "跑命令"),
+            tool_result("s1", "c1", "ok"),
+            StructuredMessage::system("s1", "通知"),
+        ];
+        let out = normalize(&chain);
+        assert_eq!(out.len(), chain.len(), "规范链不被增删");
+        for (a, b) in out.iter().zip(chain.iter()) {
+            assert_eq!(a.role, b.role);
+            assert_eq!(a.id, b.id, "原链消息顺序不变");
+        }
+        let again = normalize(&out);
+        assert_eq!(again.len(), out.len());
+        for (a, b) in again.iter().zip(out.iter()) {
+            assert_eq!(a.id, b.id, "二次规范化结果一致（幂等）");
+        }
+    }
+
+    /// 端到端：`assemble` 产出的序列在任意断裂链下都满足工具对连续性。
+    #[test]
+    fn test_assemble_never_breaks_tool_pairs() {
+        let chain = vec![
+            StructuredMessage::user("s1", "u0"),
+            assistant_with_call("s1", "c1", "a1"),
+            StructuredMessage::system("s1", "[后台服务就绪] 插队通知"),
+            tool_result("s1", "c1", "r1"),
+            assistant_with_call("s1", "c2", "a2"),
+            StructuredMessage::user("s1", "u3（中断后新消息）"),
+        ];
+        let msgs = ContextAssembler::assemble(&chain, &InjectableContext::default());
+        for (i, m) in msgs.iter().enumerate() {
+            if m.role == MessageRole::Assistant
+                && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+            {
+                assert_eq!(
+                    msgs[i + 1].role,
+                    MessageRole::Tool,
+                    "assemble 输出必须满足上游工具对要求：{msgs:?}"
+                );
+            }
+        }
     }
 }

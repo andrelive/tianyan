@@ -551,7 +551,7 @@ impl Agent {
             // 保证旧会话前缀稳定，prompt 缓存不失效；无快照时为空，首次加载填充）
             s.injectable_context = session.header.injectable_snapshot.unwrap_or_default();
             for sm in &session.messages {
-                s.add_structured_message(sm.clone());
+                s.push_message(sm.clone());
             }
         }
         Ok(state)
@@ -709,10 +709,13 @@ impl Agent {
             return None;
         }
 
-        let conversation: Vec<Message> = messages_since_marker
-            .iter()
-            .flat_map(ContextAssembler::structured_to_messages)
-            .collect();
+        // 与请求组装同一套工具对规范化（ADR-043）：压缩摘要请求也走同一个上游，
+        // 同样不能带断裂的 tool_calls 链（否则压缩本身 400、会话卡死）。
+        let conversation: Vec<Message> =
+            ContextAssembler::normalize_tool_pairs(&messages_since_marker)
+                .iter()
+                .flat_map(|sm| ContextAssembler::structured_to_messages(sm.as_ref()))
+                .collect();
 
         // 真实上下文占用：最近一次请求的 prompt 侧 token（取数口径单点见
         // `StructuredMessage::prompt_side_tokens`——`tokens.input` 是**完整
@@ -1176,7 +1179,7 @@ async fn push_message_if_absent(state: &Arc<RwLock<SessionState>>, msg: &Structu
     {
         return;
     }
-    s.add_structured_message(msg.clone());
+    s.push_message(msg.clone());
 }
 
 /// 组装响应公共字段（token 用量 + 处理耗时）。
@@ -1603,7 +1606,7 @@ mod tests {
         // 只注入内存状态一次（单一创建点语义），组装结果不得出现重复回答。
         let mut state = SessionState::new("session-1");
         state.add_user_message("原始问题");
-        state.add_structured_message(ContextAssembler::message_to_structured(
+        state.push_message(ContextAssembler::message_to_structured(
             &Message::assistant("为了继续，需要确认：是否允许执行操作？"),
             "session-1",
             None,
@@ -1657,7 +1660,7 @@ mod tests {
                 None,
             );
             sm.tokens.input = 3_000;
-            state.write().await.add_structured_message(sm);
+            state.write().await.push_message(sm);
         }
 
         let summary = agent
@@ -1761,7 +1764,7 @@ mod tests {
                 None,
                 None,
             );
-            state.write().await.add_structured_message(sm);
+            state.write().await.push_message(sm);
         }
 
         let summary = agent
@@ -1806,7 +1809,7 @@ mod tests {
                 sm.tokens.input = 4_800;
                 sm.tokens.cache.read = 4_700;
             }
-            state.write().await.add_structured_message(sm);
+            state.write().await.push_message(sm);
         }
 
         let summary = agent
@@ -1849,7 +1852,7 @@ mod tests {
         );
         marker.compression_marker = true;
         marker.tokens.input = 8_000;
-        state.write().await.add_structured_message(marker);
+        state.write().await.push_message(marker);
         // 压缩点之后累积 ≥ MIN_MESSAGES_BEFORE_COMPRESSION 条普通消息（均无 usage）
         for i in 0..6 {
             let sm = ContextAssembler::message_to_structured(
@@ -1858,7 +1861,7 @@ mod tests {
                 None,
                 None,
             );
-            state.write().await.add_structured_message(sm);
+            state.write().await.push_message(sm);
         }
 
         let summary = agent
@@ -1916,7 +1919,7 @@ mod tests {
             if i == 6 {
                 sm.tokens.input = 3_000;
             }
-            state.write().await.add_structured_message(sm);
+            state.write().await.push_message(sm);
         }
 
         let resp = agent
@@ -1982,7 +1985,7 @@ mod tests {
                 sm.tokens.input = 5_100;
                 sm.tokens.cache.read = 5_000;
             }
-            state.write().await.add_structured_message(sm);
+            state.write().await.push_message(sm);
         }
 
         let summary = agent
