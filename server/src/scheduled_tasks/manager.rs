@@ -196,22 +196,22 @@ impl ScheduledAgentTaskHandler {
         {
             return;
         }
-        if let Ok(mut session) = self
+        if self
             .session_manager
             .create_session(&sid, Message::user(&self.prompt))
             .await
+            .is_ok()
         {
-            if Path::new(&self.workspace).is_dir() {
-                session.header.working_directory = Some(self.workspace.clone());
-                let _ = self.session_manager.update_session(&session).await;
+            // ADR-039 收口 ③②：工作目录绑定与清空预写消息均经工作集（唯一写入口；
+            // 缓存同步推进 → 不再需要手动 remove 兜缓存分叉）
+            if let Ok(ws) = self.working_sets.ensure(&sid).await {
+                if Path::new(&self.workspace).is_dir() {
+                    let _ = ws
+                        .update_header(|h| h.working_directory = Some(self.workspace.clone()))
+                        .await;
+                }
+                let _ = ws.rewrite(&[]).await;
             }
-            // 清空 create_session 预写消息（对齐 resolve_or_create_session）：
-            // 会话历史统一由 agent.process_message 追加，避免同一条用户消息重复
-            session.messages.clear();
-            let _ = self.session_manager.rewrite_messages(&sid, &[]).await;
-            // ADR-035 §3：库被重建（清空）→ 失效工作集缓存（同一 sid 在 TTL 内
-            // 重复运行时，旁路清空会留下残旧缓存；下一次 ensure 从库重建）。
-            self.working_sets.remove(&sid).await;
         }
     }
 

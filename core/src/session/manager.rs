@@ -37,34 +37,11 @@ pub trait SessionManager: Send + Sync {
         Ok(self.get_session(id).await?.is_some())
     }
 
-    /// 更新会话。
-    async fn update_session(&self, session: &Session) -> Result<()>;
-
-    /// 直接持久化 StructuredMessage（不经过 Message 转换）。
-    async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()>;
-
-    /// 直接持久化 StructuredMessage（**不索引 FTS**——子智能体会话，ADR-026：
-    /// 无"人"提供的信息不参与回忆检索）。
-    ///
-    /// 默认实现委托 [`Self::add_structured_message`]（索引 FTS）；需要不索引
-    /// 语义的实现（`PersistentSessionManager` / `BroadcastingSessionManager`）
-    /// 覆盖为 `store.append_message_no_fts`。
-    async fn add_structured_message_no_fts(
-        &self,
-        session_id: &str,
-        msg: StructuredMessage,
-    ) -> Result<()> {
-        self.add_structured_message(session_id, msg).await
-    }
-
-    /// 全量重写会话消息（用于编辑/截断后持久化）。
-    ///
-    /// 会话必须已存在。传入空切片将清空会话历史。
-    async fn rewrite_messages(
-        &self,
-        session_id: &str,
-        messages: &[StructuredMessage],
-    ) -> Result<()>;
+    // ADR-039：破坏性写（`update_session` / `add_structured_message*` /
+    // `rewrite_messages` / `delete_session`）**已从本 trait 移除**——写路径唯一入口
+    // 是会话工作集（`SessionWorkingSet`：append / rewrite / update_header / delete），
+    // 由 `WorkingSetRegistry` 持有 per-session 锁。trait 只保留读 + 创建，
+    // 使「绕过工作集写库」在 **crate 外编译不过**（server 是独立 crate）。
 
     /// 取 seq 严格小于 `before_seq` 的**最近** `limit` 条（升序，带 seq）。
     ///
@@ -126,9 +103,6 @@ pub trait SessionManager: Send + Sync {
 
     /// 列出所有会话（轻量元数据，不加载消息；message_count 预填）。
     async fn list_sessions(&self) -> Result<Vec<Session>>;
-
-    /// 删除会话。
-    async fn delete_session(&self, id: &str) -> Result<()>;
 }
 
 /// 基于会话权威存储（SQLite）的持久化会话管理器。
@@ -200,62 +174,8 @@ impl SessionManager for PersistentSessionManager {
         self.load_session_from_store(id).await
     }
 
-    async fn update_session(&self, session: &Session) -> Result<()> {
-        // 检查会话是否存在
-        if !self.store.exists(&session.session_id).await? {
-            return Err(TianyanError::not_found(format!(
-                "会话存储错误：会话未找到：{}",
-                session.session_id
-            )));
-        }
-
-        // 同步会话级元数据（title/ended_at 用户可见，唯一持久化 home；
-        // created_at 新会话由 create_session 固化，旧会话首次更新时冻结当前值）
-        let mut header = session.header.clone();
-        header.created_at = Some(session.created_at);
-        header.title = session.title.clone();
-        header.ended_at = session.ended_at;
-        self.store
-            .update_header(&session.session_id, &header)
-            .await?;
-
-        Ok(())
-    }
-
-    async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()> {
-        self.store.append_message(session_id, &msg).await?;
-        Ok(())
-    }
-
-    async fn add_structured_message_no_fts(
-        &self,
-        session_id: &str,
-        msg: StructuredMessage,
-    ) -> Result<()> {
-        // ADR-026：子智能体会话不索引 FTS（无"人"提供的信息不参与回忆检索）
-        self.store.append_message_no_fts(session_id, &msg).await?;
-        Ok(())
-    }
-
-    async fn rewrite_messages(
-        &self,
-        session_id: &str,
-        messages: &[StructuredMessage],
-    ) -> Result<()> {
-        // 会话必须已存在
-        if !self.store.exists(session_id).await? {
-            return Err(TianyanError::not_found(format!(
-                "会话存储错误：会话未找到：{}",
-                session_id
-            )));
-        }
-
-        // 保留现有会话头部（injectable 快照等会话级状态）
-        let header = self.store.header(session_id).await?.unwrap_or_default();
-
-        self.store.rewrite(session_id, &header, messages).await?;
-        Ok(())
-    }
+    // ADR-039：破坏性写已移除（写路径唯一入口 = 会话工作集）；
+    // `PersistentSessionManager` 只负责读 + 创建。
 
     /// 区间查询覆盖（只扫目标区间，不全量加载）。
     async fn load_before(
@@ -305,17 +225,6 @@ impl SessionManager for PersistentSessionManager {
         }
         Ok(sessions)
     }
-
-    async fn delete_session(&self, id: &str) -> Result<()> {
-        if !self.store.exists(id).await? {
-            return Err(TianyanError::not_found(format!(
-                "会话存储错误：会话未找到：{}",
-                id
-            )));
-        }
-        self.store.delete(id).await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -327,6 +236,36 @@ mod tests {
     };
     use crate::db::Database;
     use chrono::Utc;
+
+    /// ADR-039：破坏性写已不在 `SessionManager` trait 与 `PersistentSessionManager`
+    /// 上（写路径唯一入口 = 会话工作集）。测试需要构造/清理会话状态时，直接经
+    /// **权威存储**（`store` 为同模块私有字段，测试可见）。
+    impl PersistentSessionManager {
+        async fn test_append(&self, id: &str, msg: StructuredMessage) -> Result<()> {
+            self.store.append_message(id, &msg).await?;
+            Ok(())
+        }
+        async fn test_rewrite(&self, id: &str, messages: &[StructuredMessage]) -> Result<()> {
+            let header = self.store.header(id).await?.unwrap_or_default();
+            self.store.rewrite(id, &header, messages).await?;
+            Ok(())
+        }
+        async fn test_update(&self, session: &Session) -> Result<()> {
+            // 对齐旧 `update_session` 的字段映射（title/ended_at/created_at → header）
+            let mut header = session.header.clone();
+            header.created_at = Some(session.created_at);
+            header.title = session.title.clone();
+            header.ended_at = session.ended_at;
+            self.store
+                .update_header(&session.session_id, &header)
+                .await?;
+            Ok(())
+        }
+        async fn test_delete(&self, id: &str) -> Result<()> {
+            self.store.delete(id).await?;
+            Ok(())
+        }
+    }
 
     /// Helper：内存库 + 会话管理器。
     async fn make_manager() -> Arc<PersistentSessionManager> {
@@ -434,7 +373,7 @@ mod tests {
             "Hello there!",
             false,
         );
-        mgr.add_structured_message(id, sm).await.unwrap();
+        mgr.test_append(id, sm).await.unwrap();
 
         let session = mgr.get_session(id).await.unwrap().unwrap();
         assert_eq!(
@@ -452,25 +391,25 @@ mod tests {
 
         // 构造：marker 前 2 条 + marker + 后 2 条
         mgr.create_session(id, Message::user("m0")).await.unwrap();
-        mgr.add_structured_message(
+        mgr.test_append(
             id,
             make_msg("m1", id, MessageRole::User, "old msg 1", false),
         )
         .await
         .unwrap();
-        mgr.add_structured_message(
+        mgr.test_append(
             id,
             make_msg("m2", id, MessageRole::Assistant, "old reply 1", false),
         )
         .await
         .unwrap();
-        mgr.add_structured_message(id, make_msg("cmp", id, MessageRole::User, "summary", true))
+        mgr.test_append(id, make_msg("cmp", id, MessageRole::User, "summary", true))
             .await
             .unwrap();
-        mgr.add_structured_message(id, make_msg("m3", id, MessageRole::User, "recent 1", false))
+        mgr.test_append(id, make_msg("m3", id, MessageRole::User, "recent 1", false))
             .await
             .unwrap();
-        mgr.add_structured_message(
+        mgr.test_append(
             id,
             make_msg("m4", id, MessageRole::Assistant, "recent reply", false),
         )
@@ -507,7 +446,7 @@ mod tests {
                 .unwrap();
         }
         // s-b 追加一条，验证 message_count
-        mgr.add_structured_message(
+        mgr.test_append(
             "s-b",
             make_msg("m2", "s-b", MessageRole::Assistant, "reply", false),
         )
@@ -528,7 +467,7 @@ mod tests {
 
         mgr.create_session(id, Message::user("bye")).await.unwrap();
 
-        mgr.delete_session(id).await.unwrap();
+        mgr.test_delete(id).await.unwrap();
         let result = mgr.get_session(id).await.unwrap();
         assert!(result.is_none(), "session should be gone after delete");
     }
@@ -554,7 +493,7 @@ mod tests {
             rules_and_experiences: vec!["先读后写".to_string()],
             ..Default::default()
         });
-        mgr.update_session(&session).await.unwrap();
+        mgr.test_update(&session).await.unwrap();
 
         // 模拟重启：重新加载
         let loaded = mgr.get_session(id).await.unwrap().unwrap();
@@ -580,11 +519,11 @@ mod tests {
             soul: "快照人格".to_string(),
             ..Default::default()
         });
-        mgr.update_session(&session).await.unwrap();
+        mgr.test_update(&session).await.unwrap();
 
         // 全量重写消息
         let new_msgs = vec![make_msg("n1", id, MessageRole::User, "新的消息", false)];
-        mgr.rewrite_messages(id, &new_msgs).await.unwrap();
+        mgr.test_rewrite(id, &new_msgs).await.unwrap();
 
         let loaded = mgr.get_session(id).await.unwrap().unwrap();
         assert_eq!(
@@ -611,7 +550,7 @@ mod tests {
         let mut session = mgr.get_session(id).await.unwrap().unwrap();
         session.title = Some("我的标题".to_string());
         session.end();
-        mgr.update_session(&session).await.unwrap();
+        mgr.test_update(&session).await.unwrap();
 
         // 模拟重启：重新加载
         let loaded = mgr.get_session(id).await.unwrap().unwrap();
@@ -647,25 +586,13 @@ mod tests {
         let mgr = make_manager().await;
         let session = Session::new("no-such");
 
-        let err = mgr.update_session(&session).await.unwrap_err();
+        let err = mgr.test_update(&session).await.unwrap_err();
         assert!(err.is_not_found(), "更新缺失会话应分类为未找到：{err}");
     }
 
-    #[tokio::test]
-    async fn test_delete_missing_session_is_not_found() {
-        let mgr = make_manager().await;
-
-        let err = mgr.delete_session("no-such").await.unwrap_err();
-        assert!(err.is_not_found(), "删除缺失会话应分类为未找到：{err}");
-    }
-
-    #[tokio::test]
-    async fn test_rewrite_messages_missing_session_is_not_found() {
-        let mgr = make_manager().await;
-
-        let err = mgr.rewrite_messages("no-such", &[]).await.unwrap_err();
-        assert!(err.is_not_found(), "重写缺失会话应分类为未找到：{err}");
-    }
+    // ADR-039：`delete_session` / `rewrite_messages` 已不在管理器上（写路径唯一
+    // 入口 = 会话工作集），其「缺失会话 → not_found」断言随之迁移：
+    // 存在性检查在调用方（如 `SessionService::delete_session` 的存在性前置）完成。
 
     #[tokio::test]
     async fn test_empty_message_persists_and_loads() {
@@ -677,7 +604,7 @@ mod tests {
             .await
             .unwrap();
         let empty = make_msg("empty-1", id, MessageRole::User, "", false);
-        mgr.add_structured_message(id, empty).await.unwrap();
+        mgr.test_append(id, empty).await.unwrap();
 
         let loaded = mgr.get_session(id).await.unwrap().unwrap();
         assert_eq!(loaded.messages.len(), 2);

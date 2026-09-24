@@ -1328,32 +1328,20 @@ impl AgentLoop {
         // ADR-035 §3 收口 ①：装配工作集时经其 append（落库 + 物化段同步推进 +
         // seq 语义）——这是「轮内消息先落库取号、再进上下文」的实施约束所在
         // （否则轮边界续跑判定会把本轮的落后 seq 误判为新消息）。
-        let via_working_set = match self.tool_registry.working_sets.as_ref() {
-            Some(reg) => match reg.get(ctx.session_id).await {
-                Some(ws) => {
+        // ADR-039 收口 ①：唯一写入口（`ensure` 兼作加载；不再回退直写）
+        match self.tool_registry.working_sets.as_ref() {
+            Some(reg) => match reg.ensure(ctx.session_id).await {
+                Ok(ws) => {
                     if let Err(e) = ws.append(&structured, index_fts).await {
                         tracing::warn!(error = %e, "持久化消息失败（工作集路径）");
                     }
-                    true
                 }
-                None => false,
+                Err(e) => tracing::warn!(error = %e, "持久化消息失败（工作集加载失败）"),
             },
-            None => false,
-        };
-        if !via_working_set {
-            // 回退路径（未装配工作集/会话未加载）：原 session_manager 直写
-            let result = if self.turn_policy.persist_no_fts {
-                self.session_manager
-                    .add_structured_message_no_fts(ctx.session_id, structured)
-                    .await
-            } else {
-                self.session_manager
-                    .add_structured_message(ctx.session_id, structured)
-                    .await
-            };
-            if let Err(e) = result {
-                tracing::warn!(error = %e, "持久化消息失败");
-            }
+            None => tracing::warn!(
+                session = %ctx.session_id,
+                "持久化消息失败：未装配会话工作集（ADR-039：写必须经工作集）"
+            ),
         }
         persisted
     }

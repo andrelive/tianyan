@@ -293,28 +293,9 @@ mod tests {
         async fn get_session(&self, _id: &str) -> tianyan::Result<Option<Session>> {
             Ok(None)
         }
-        async fn update_session(&self, _session: &Session) -> tianyan::Result<()> {
-            Ok(())
-        }
-        async fn add_structured_message(
-            &self,
-            _session_id: &str,
-            _msg: StructuredMessage,
-        ) -> tianyan::Result<()> {
-            Ok(())
-        }
-        async fn rewrite_messages(
-            &self,
-            _session_id: &str,
-            _messages: &[StructuredMessage],
-        ) -> tianyan::Result<()> {
-            Ok(())
-        }
+        // ADR-039：破坏性写不在 trait 上（写路径唯一入口 = 会话工作集）
         async fn list_sessions(&self) -> tianyan::Result<Vec<Session>> {
             Ok(self.sessions.clone())
-        }
-        async fn delete_session(&self, _id: &str) -> tianyan::Result<()> {
-            Ok(())
         }
     }
 

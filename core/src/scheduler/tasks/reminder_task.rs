@@ -3,7 +3,7 @@
 //! 定时评估记忆与规则：命中"当前值得告知用户"的内容时，经
 //! [`NotificationSink`] 推送系统通知，并可注入最新会话（ADR-013 消息通路）。
 //! 评估失败静默（下一次调度自然重试，不重试、不堆积）。
-use crate::common::types::{ContentLevel, ContextNamespace, StructuredMessage, TianyanUri};
+use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::model::ChatService;
 use crate::notification::SharedNotificationSink;
 use crate::scheduler::{TaskContext, TaskHandler, TaskResult};
@@ -34,8 +34,10 @@ pub struct ReminderTask {
     model_name: String,
     /// 系统通知通道（未装配时静默）。
     notification: SharedNotificationSink,
-    /// 会话管理器（提醒注入最新会话）。
+    /// 会话管理器（提醒注入最新会话；读路径：选最新会话）。
     session_manager: Arc<dyn SessionManager>,
+    /// 会话工作集（ADR-039：提醒注入的唯一写入口；未装配 = 不注入，仅告警）。
+    working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
     /// 每次运行最多提醒条数。
     max_per_run: usize,
     /// 是否注入到最新会话。
@@ -56,9 +58,19 @@ impl ReminderTask {
             model_name: model_name.into(),
             notification,
             session_manager,
+            working_sets: None,
             max_per_run: max_per_run.max(1),
             inject_to_session,
         }
+    }
+
+    /// 注入会话工作集（ADR-039：写路径装配；未装配时提醒不落库，由单点告警）。
+    pub fn with_working_sets(
+        mut self,
+        working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
+    ) -> Self {
+        self.working_sets = working_sets;
+        self
     }
     /// 采样最近记忆（memory 命名空间，深度 2：类别目录 → 条目）。
     async fn sample_memories(&self, ctx: &TaskContext) -> Vec<String> {
@@ -141,15 +153,13 @@ impl ReminderTask {
         let Some(latest) = sessions.into_iter().max_by_key(|s| s.created_at) else {
             return;
         };
-        let sm =
-            StructuredMessage::system(latest.session_id.clone(), format!("[主动提醒]\n{}", text));
-        if let Err(e) = self
-            .session_manager
-            .add_structured_message(&latest.session_id, sm)
-            .await
-        {
-            tracing::warn!(error = %e, "主动提醒注入会话失败");
-        }
+        // ADR-039 收口 ①：唯一写入口（未装配 = 不注入，由单点告警）
+        crate::agent::background::persist_system_message(
+            self.working_sets.as_ref(),
+            &latest.session_id,
+            format!("[主动提醒]\n{}", text),
+        )
+        .await;
     }
 }
 #[async_trait]
@@ -193,7 +203,7 @@ impl TaskHandler for ReminderTask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::types::{Message, MessageRole, Part};
+    use crate::common::types::Message;
     use crate::model::MockChatService;
     use crate::session::Session;
     use crate::test_utils::MockVfs;
@@ -210,28 +220,12 @@ mod tests {
     }
     /// 记录注入次数的会话管理器 mock。
     struct RecordingSessionManager {
-        injected: Arc<AtomicUsize>,
         sessions: Vec<Session>,
     }
     #[async_trait]
     impl SessionManager for RecordingSessionManager {
-        async fn add_structured_message(
-            &self,
-            _session_id: &str,
-            msg: StructuredMessage,
-        ) -> Result<(), crate::common::error::TianyanError> {
-            assert_eq!(msg.role, MessageRole::System, "提醒应为 System 消息");
-            assert!(msg.parts.iter().any(|p| matches!(p, Part::Text { .. })));
-            self.injected.fetch_add(1, AtomicOrdering::SeqCst);
-            Ok(())
-        }
-        async fn rewrite_messages(
-            &self,
-            _id: &str,
-            _msgs: &[StructuredMessage],
-        ) -> Result<(), crate::common::error::TianyanError> {
-            Ok(())
-        }
+        // ADR-039：破坏性写不在 trait 上（写路径唯一入口 = 会话工作集）；
+        // `injected` 保留为「不得经 SessionManager 直写」的反向断言载体。
         async fn create_session(
             &self,
             _id: &str,
@@ -245,20 +239,8 @@ mod tests {
         ) -> Result<Option<Session>, crate::common::error::TianyanError> {
             Ok(self.sessions.iter().find(|s| s.session_id == _id).cloned())
         }
-        async fn update_session(
-            &self,
-            _s: &Session,
-        ) -> Result<(), crate::common::error::TianyanError> {
-            Ok(())
-        }
         async fn list_sessions(&self) -> Result<Vec<Session>, crate::common::error::TianyanError> {
             Ok(self.sessions.clone())
-        }
-        async fn delete_session(
-            &self,
-            _id: &str,
-        ) -> Result<(), crate::common::error::TianyanError> {
-            Ok(())
         }
     }
     fn make_ctx(vfs: Arc<dyn VirtualFileSystem>) -> TaskContext {
@@ -285,15 +267,23 @@ mod tests {
         vfs.add_directory(&root, &dir);
         vfs.add_entry(&dir, &uri);
     }
-    fn task(notification: SharedNotificationSink, sessions: Arc<AtomicUsize>) -> ReminderTask {
+    /// 内存 store + 会话的工作集注册表（ADR-039：写路径唯一入口的测试装配）。
+    async fn test_registry(session_id: &str) -> Arc<crate::agent::working_set::WorkingSetRegistry> {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        store
+            .create(session_id, &crate::session::SessionHeader::default())
+            .await
+            .unwrap();
+        crate::agent::working_set::WorkingSetRegistry::new(Some(store))
+    }
+    fn task(notification: SharedNotificationSink, _sessions: Arc<AtomicUsize>) -> ReminderTask {
         ReminderTask::new(
             Arc::new(MockChatService::new()),
             "test".to_string(),
             notification,
-            Arc::new(RecordingSessionManager {
-                injected: sessions.clone(),
-                sessions: vec![],
-            }),
+            Arc::new(RecordingSessionManager { sessions: vec![] }),
             3,
             true,
         )
@@ -303,7 +293,6 @@ mod tests {
         let vfs = Arc::new(MockVfs::new());
         seed_memory(&vfs).await;
         let calls = Arc::new(AtomicUsize::new(0));
-        let injected = Arc::new(AtomicUsize::new(0));
         let mut mock = MockChatService::new();
         mock.expect_chat_completion().times(1).returning(|_| {
             Ok(crate::model::types::ChatCompletionResponse {
@@ -319,30 +308,31 @@ mod tests {
                 usage: crate::common::types::TokenUsage::default(),
             })
         });
+        let reg = test_registry("s1").await;
         let t = ReminderTask::new(
             Arc::new(mock),
             "test".to_string(),
             Arc::new(RecordingSink {
                 calls: calls.clone(),
             }),
-            Arc::new(RecordingSessionManager {
-                injected: injected.clone(),
-                sessions: vec![],
-            }),
+            Arc::new(RecordingSessionManager { sessions: vec![] }),
             3,
             true,
-        );
+        )
+        .with_working_sets(Some(reg.clone()));
         let result = t.execute(&make_ctx(vfs)).await;
         assert!(result.success, "EMPTY 应正常结束");
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 0, "无提醒不通知");
-        assert_eq!(injected.load(AtomicOrdering::SeqCst), 0, "无提醒不注入");
+        assert!(
+            reg.get("s1").await.is_none(),
+            "无提醒不应经工作集落库（ADR-039 唯一写入口）"
+        );
     }
     #[tokio::test]
     async fn test_reminder_notifies_and_injects() {
         let vfs = Arc::new(MockVfs::new());
         seed_memory(&vfs).await;
         let calls = Arc::new(AtomicUsize::new(0));
-        let injected = Arc::new(AtomicUsize::new(0));
         let mut mock = MockChatService::new();
         mock.expect_chat_completion().times(1).returning(|_| {
             Ok(crate::model::types::ChatCompletionResponse {
@@ -358,6 +348,7 @@ mod tests {
                 usage: crate::common::types::TokenUsage::default(),
             })
         });
+        let reg = test_registry("s1").await;
         let t = ReminderTask::new(
             Arc::new(mock),
             "test".to_string(),
@@ -365,46 +356,45 @@ mod tests {
                 calls: calls.clone(),
             }),
             Arc::new(RecordingSessionManager {
-                injected: injected.clone(),
                 sessions: vec![Session::new("s1")],
             }),
             3,
             true,
-        );
+        )
+        .with_working_sets(Some(reg.clone()));
         let result = t.execute(&make_ctx(vfs)).await;
         assert!(result.success);
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "命中应通知一次");
-        assert_eq!(injected.load(AtomicOrdering::SeqCst), 1, "命中应注入会话");
+        let ws = reg.get("s1").await.expect("命中应经工作集落库");
+        assert_eq!(ws.message_count().await, 1, "命中应注入一条提醒消息");
     }
     #[tokio::test]
     async fn test_evaluation_failure_silent() {
         let vfs = Arc::new(MockVfs::new());
         seed_memory(&vfs).await;
         let calls = Arc::new(AtomicUsize::new(0));
-        let injected = Arc::new(AtomicUsize::new(0));
         let mut mock = MockChatService::new();
         mock.expect_chat_completion().times(1).returning(|_| {
             Err(crate::common::error::TianyanError::Custom(
                 "mock 失败".into(),
             ))
         });
+        let reg = test_registry("s1").await;
         let t = ReminderTask::new(
             Arc::new(mock),
             "test".to_string(),
             Arc::new(RecordingSink {
                 calls: calls.clone(),
             }),
-            Arc::new(RecordingSessionManager {
-                injected: injected.clone(),
-                sessions: vec![],
-            }),
+            Arc::new(RecordingSessionManager { sessions: vec![] }),
             3,
             true,
-        );
+        )
+        .with_working_sets(Some(reg.clone()));
         let result = t.execute(&make_ctx(vfs)).await;
         assert!(!result.success, "评估失败返回失败（调度器记录，不重试）");
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 0, "失败不通知");
-        assert_eq!(injected.load(AtomicOrdering::SeqCst), 0, "失败不注入");
+        assert!(reg.get("s1").await.is_none(), "失败不落库");
     }
     #[tokio::test]
     async fn test_disabled_config_skips() {

@@ -564,30 +564,23 @@ impl Agent {
 
     /// 写入收口 ①（ADR-035 §3）：经工作集追加（落库 + 更新物化段 + 推进 seq）。
     ///
-    /// 未装配工作集时回退旧路径（内存态 + `session_manager` 落库），保证测试桩
-    /// 与未装配场景行为不变。调用方传入的 `state` 在有工作集时**就是**工作集的
-    /// 内存态（`load_and_build_state` 的返回源），故不重复写入。
+    /// ADR-039：唯一写入口 = 工作集（`ensure` 兼作加载），**无直写回退**；调用方
+    /// 传入的 `state` 在有工作集时**就是**工作集的内存态（`load_and_build_state`
+    /// 的返回源），故不重复写入。
     pub(crate) async fn persist_structured(
         &self,
-        state: &Arc<RwLock<SessionState>>,
+        _state: &Arc<RwLock<SessionState>>,
         session_id: &str,
         msg: StructuredMessage,
         index_fts: bool,
     ) -> Result<()> {
-        if let Some(ws) = self.working_sets.get(session_id).await {
-            ws.append(&msg, index_fts).await?;
-            return Ok(());
-        }
-        state.write().await.add_structured_message(msg.clone());
-        if index_fts {
-            self.session_manager
-                .add_structured_message(session_id, msg)
-                .await
-        } else {
-            self.session_manager
-                .add_structured_message_no_fts(session_id, msg)
-                .await
-        }
+        // ADR-039 收口 ①：唯一写入口（落库 + 物化段同步推进 + seq 语义）
+        self.working_sets
+            .ensure(session_id)
+            .await?
+            .append(&msg, index_fts)
+            .await?;
+        Ok(())
     }
 
     /// 组装当前轮次的上下文消息（soul/rules/memories 前缀 + 会话历史 + 会话定位）。
@@ -669,19 +662,14 @@ impl Agent {
         what: &str,
         f: impl FnOnce(&mut crate::session::SessionHeader),
     ) {
-        // ADR-035 §3 收口 ③：经工作集镜像读改落库（快照变化时同步内存前缀）——
-        // 三个调用点（注入快照固化 / 待处理追问 / 快照失效）统一走单一写入口。
-        if let Some(ws) = self.working_sets.get(session_id).await {
-            if let Err(e) = ws.update_header(f).await {
-                tracing::warn!(error = %e, session = %session_id, "更新会话头部失败（{what}）");
-            }
-            return;
-        }
-        let Ok(Some(mut session)) = self.session_manager.get_session(session_id).await else {
-            return;
+        // ADR-039 收口 ③：经工作集镜像读改落库（快照变化时同步内存前缀）——
+        // 三个调用点（注入快照固化 / 待处理追问 / 快照失效）统一走唯一写入口；
+        // `ensure` 兼作加载，不再回退 `SessionManager` 直写。
+        let result = match self.working_sets.ensure(session_id).await {
+            Ok(ws) => ws.update_header(f).await,
+            Err(e) => Err(e),
         };
-        f(&mut session.header);
-        if let Err(e) = self.session_manager.update_session(&session).await {
+        if let Err(e) = result {
             tracing::warn!(error = %e, session = %session_id, "更新会话头部失败（{what}）");
         }
     }
@@ -1342,34 +1330,15 @@ mod tests {
     struct MockSessionManager;
     #[async_trait]
     impl SessionManager for MockSessionManager {
-        async fn add_structured_message(
-            &self,
-            _session_id: &str,
-            _msg: StructuredMessage,
-        ) -> Result<()> {
-            Ok(())
-        }
-        async fn rewrite_messages(
-            &self,
-            _session_id: &str,
-            _messages: &[StructuredMessage],
-        ) -> Result<()> {
-            Ok(())
-        }
+        // ADR-039：破坏性写不在 trait 上（写路径唯一入口 = 会话工作集）
         async fn create_session(&self, _id: &str, _message: Message) -> Result<Session> {
             Ok(Session::new(_id))
         }
         async fn get_session(&self, _id: &str) -> Result<Option<Session>> {
             Ok(None)
         }
-        async fn update_session(&self, _session: &Session) -> Result<()> {
-            Ok(())
-        }
         async fn list_sessions(&self) -> Result<Vec<Session>> {
             Ok(vec![])
-        }
-        async fn delete_session(&self, _id: &str) -> Result<()> {
-            Ok(())
         }
     }
 
@@ -1589,7 +1558,23 @@ mod tests {
         // 重建第二份（此前状态与库中消息链 id 分叉，assistant 的 parent
         // 指向库中不存在的消息）。
         let mock = MockChatService::new();
-        let agent = make_agent(mock);
+        // ADR-039：写路径唯一入口 = 工作集 → 装配真实 store（替代 mock 直写）
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        store
+            .create(
+                "session-1",
+                &crate::session::types::SessionHeader::default(),
+            )
+            .await
+            .unwrap();
+        let agent = make_agent_with_working_sets(
+            store,
+            mock,
+            MockChatService::new(),
+            CompressionConfig::default(),
+        );
 
         let state = agent.load_and_build_state("session-1").await.unwrap();
         let query_msg = Message::user("你好");
@@ -1685,102 +1670,23 @@ mod tests {
         );
     }
 
-    /// 内存态会话管理器（C1 唤醒轮压缩测试专用）：get_session 返回真实
-    /// 消息链、add_structured_message 追加、update_session 写回——支撑
-    /// "唤醒轮结束 → 压缩点落库"的端到端断言。
-    struct InMemorySessionManager {
-        session: TokioMutex<Session>,
-    }
-    #[async_trait]
-    impl SessionManager for InMemorySessionManager {
-        async fn add_structured_message(
-            &self,
-            session_id: &str,
-            msg: StructuredMessage,
-        ) -> Result<()> {
-            let mut s = self.session.lock().await;
-            if s.session_id == session_id {
-                s.messages.push(msg);
-            }
-            Ok(())
-        }
-        async fn rewrite_messages(
-            &self,
-            _session_id: &str,
-            _messages: &[StructuredMessage],
-        ) -> Result<()> {
-            Ok(())
-        }
-        async fn create_session(&self, id: &str, _message: Message) -> Result<Session> {
-            Ok(Session::new(id))
-        }
-        async fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
-            let s = self.session.lock().await;
-            if s.session_id == session_id {
-                Ok(Some(s.clone()))
-            } else {
-                Ok(None)
-            }
-        }
-        async fn update_session(&self, session: &Session) -> Result<()> {
-            *self.session.lock().await = session.clone();
-            Ok(())
-        }
-        async fn list_sessions(&self) -> Result<Vec<Session>> {
-            Ok(vec![])
-        }
-        async fn delete_session(&self, _id: &str) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    /// 构造带自定义会话管理器的 Agent（C1 唤醒轮压缩测试专用）。
-    fn make_agent_with_sessions(
-        session_manager: Arc<dyn SessionManager>,
-        mock: MockChatService,
-        compression_mock: MockChatService,
-        compression_config: CompressionConfig,
-    ) -> Agent {
-        let vfs = Arc::new(MockVfs::new());
-        let retriever = Arc::new(DualLayerRetriever::new(
-            vfs.clone() as Arc<dyn VirtualFileSystem>
-        ));
-        let compressor = Arc::new(TokioMutex::new(ContextCompressor::new(
-            Arc::new(compression_mock),
-            compression_config,
-        )));
-        let context_pipeline = ContextPipeline::new(
-            vfs.clone() as Arc<dyn VirtualFileSystem>,
-            retriever,
-            compressor,
-            10,
-            5,
-        );
-        let agent_loop = AgentLoop::new(
-            Arc::new(mock),
-            ToolRegistry::new(SecurityPolicy::default()),
-            session_manager.clone(),
-            AgentLoopConfig { max_turns: 5 },
-        );
-        Agent::new(
-            "test-model".to_string(),
-            context_pipeline,
-            AgentMetrics::new(),
-            agent_loop,
-            session_manager,
-            None,
-            None,
-            WorkingSetRegistry::new(None),
-        )
-    }
-
     #[tokio::test]
     async fn test_process_wake_triggers_compression_check() {
         // C1 回归：唤醒轮同样执行轮末压缩检查——高负载区间若主要由唤醒轮
         // 推进（等子代理报告/后台通知），此前无检查使上下文持续增长而压缩
         // 被无限推迟（实测：60.8%→81.7% 区间零压缩）。修复后唤醒轮结束即
         // 检查：超阈值场景应落库压缩点。
-        let mut session = Session::new("session-1");
+        // ADR-039：写路径唯一入口 = 工作集 → 真实 store 装配（替代内存 mock 直写）
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        store
+            .create(
+                "session-1",
+                &crate::session::types::SessionHeader::default(),
+            )
+            .await
+            .unwrap();
         // 7 条超阈值消息（窗口 2000 × 阈值 1.0 → 触发线 2000；实测值 3000）
         for _ in 0..7 {
             let mut sm = ContextAssembler::message_to_structured(
@@ -1790,18 +1696,15 @@ mod tests {
                 None,
             );
             sm.tokens.input = 3_000;
-            session.add_structured_message(sm);
+            store.append_message("session-1", &sm).await.unwrap();
         }
-        let session_manager = Arc::new(InMemorySessionManager {
-            session: TokioMutex::new(session),
-        });
 
         let mut compress_mock = MockChatService::new();
         compress_mock
             .expect_chat_completion()
             .returning(|_| Ok(response_with(Message::assistant("唤醒轮压缩摘要"))));
-        let agent = make_agent_with_sessions(
-            session_manager.clone(),
+        let agent = make_agent_with_working_sets(
+            store.clone(),
             stream_mock(vec![stream_chunk_finish("已汇总")]),
             compress_mock,
             CompressionConfig {
@@ -1818,18 +1721,10 @@ mod tests {
             .await;
         let _ = drain.await;
 
-        let saved = session_manager.session.lock().await;
-        let markers = saved
-            .messages
-            .iter()
-            .filter(|m| m.compression_marker)
-            .count();
+        let (_header, saved) = store.load("session-1").await.unwrap().expect("会话应存在");
+        let markers = saved.iter().filter(|m| m.compression_marker).count();
         assert_eq!(markers, 1, "唤醒轮结束应执行压缩检查并落库压缩点");
-        let marker = saved
-            .messages
-            .iter()
-            .find(|m| m.compression_marker)
-            .unwrap();
+        let marker = saved.iter().find(|m| m.compression_marker).unwrap();
         let text = marker
             .parts
             .iter()

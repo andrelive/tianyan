@@ -405,13 +405,10 @@ impl AppState {
             Arc::new(crate::agent_builder::TaskEventBroadcaster {
                 tx: task_event_tx.clone(),
             });
-        // ADR-028/031：会话管理器包装（消息不再广播——流式增量 + 完成事件
-        // 到前端；任务状态/命令输出事件仍经统一通道）
-        let session_manager: Arc<dyn SessionManager> =
-            Arc::new(crate::event_push::BroadcastingSessionManager::new(
-                session_manager,
-                task_event_tx.clone(),
-            ));
+        // ADR-039：`BroadcastingSessionManager` 装饰器已删除（写方法从
+        // `SessionManager` trait 移除后 wrapper 退化为空壳）——边界消息推送经
+        // 工作集 `append` 的回调（`event_push::push_boundary_event`）承担。
+        let session_manager: Arc<dyn SessionManager> = session_manager;
         // ADR-035 §3 补记：写侧收口后所有写入经工作集（`ws.append`），不再经
         // `SessionManager` wrapper——边界消息（System 通知 / 压缩点）的
         // 「落库即推送」改挂在工作集 `append` 上（同一门控与映射；core 不感知

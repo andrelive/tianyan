@@ -386,7 +386,14 @@ impl AgentBuilder {
                 enabled: true,
             });
         }
-        let mut approval_notifier = SessionApprovalNotifier::new(session_manager.clone());
+        // 会话工作集（ADR-039：物化缓存 + 轮边界增量注入 + **写侧唯一入口**）。
+        // 与 ToolRegistry/Agent/通知器共享**同一 Arc**（状态唯一）；外部注入
+        // （server 侧）优先，未注入时自建。未装配会话存储时注册表仍在
+        // （锁与生命周期管理可用），写路径 `ensure` 失败即告警（无直写回退）。
+        let working_sets = self.working_sets.clone().unwrap_or_else(|| {
+            crate::agent::working_set::WorkingSetRegistry::new(self.session_store.clone())
+        });
+        let mut approval_notifier = SessionApprovalNotifier::new(working_sets.clone());
         if let Some(ref sink) = self.notification_sink {
             approval_notifier = approval_notifier.with_notification_sink(sink.clone());
         }
@@ -460,20 +467,10 @@ impl AgentBuilder {
                 }
             }
         }
-        // 会话工作集（ADR-035：物化缓存 + 轮边界增量注入 + 落库收口）。
-        // 与 ToolRegistry/Agent/通知器共享**同一 Arc**（状态唯一）；外部注入
-        // （server 侧写收口）优先，未注入时自建。未装配会话存储时注册表仍在
-        // （锁与生命周期管理可用），`ensure` 会回退旧加载路径。
-        let working_sets = self.working_sets.clone().unwrap_or_else(|| {
-            crate::agent::working_set::WorkingSetRegistry::new(self.session_store.clone())
-        });
         // 后台任务完成通知器：把通知持久化到父会话（主 LLM 下一轮看到并继续）。
         // ADR-035：经工作集落库（物化段同步推进 → 活动轮的轮边界续跑判定可发现它）
         tool_registry = tool_registry.with_task_notifier(Arc::new(
-            crate::agent::background::SessionTaskNotifier::new(
-                session_manager.clone(),
-                Some(working_sets.clone()),
-            ),
+            crate::agent::background::SessionTaskNotifier::new(Some(working_sets.clone())),
         ));
         // 子智能体消息流事件通道（ADR-026：面板实时流式显示）
         if let Some(sink) = self.task_event_sink {
@@ -481,10 +478,7 @@ impl AgentBuilder {
         }
         // 后台命令完成通知器（execute_command(background) 终态注入父会话）
         tool_registry = tool_registry.with_command_notifier(Arc::new(
-            crate::agent::background::SessionCommandNotifier::new(
-                session_manager.clone(),
-                Some(working_sets.clone()),
-            ),
+            crate::agent::background::SessionCommandNotifier::new(Some(working_sets.clone())),
         ));
         // 后台任务系统通知通道（全部完成/失败时桌面通知）
         if let Some(ref sink) = self.notification_sink {
@@ -594,7 +588,7 @@ impl Default for AgentBuilder {
 mod tests {
     use super::*;
 
-    use crate::common::types::{Message, StructuredMessage};
+    use crate::common::types::Message;
     use crate::context::DualLayerRetriever;
     use crate::model::spec::ModelSpec;
     use crate::model::MockChatService;
@@ -606,34 +600,15 @@ mod tests {
     struct MockSessionManager;
     #[async_trait]
     impl SessionManager for MockSessionManager {
-        async fn add_structured_message(
-            &self,
-            _session_id: &str,
-            _msg: StructuredMessage,
-        ) -> Result<()> {
-            Ok(())
-        }
-        async fn rewrite_messages(
-            &self,
-            _session_id: &str,
-            _messages: &[StructuredMessage],
-        ) -> Result<()> {
-            Ok(())
-        }
+        // ADR-039：破坏性写不在 trait 上（写路径唯一入口 = 会话工作集）
         async fn create_session(&self, _id: &str, _message: Message) -> Result<Session> {
             Ok(Session::new(_id))
         }
         async fn get_session(&self, _id: &str) -> Result<Option<Session>> {
             Ok(None)
         }
-        async fn update_session(&self, _session: &Session) -> Result<()> {
-            Ok(())
-        }
         async fn list_sessions(&self) -> Result<Vec<Session>> {
             Ok(vec![])
-        }
-        async fn delete_session(&self, _id: &str) -> Result<()> {
-            Ok(())
         }
     }
 

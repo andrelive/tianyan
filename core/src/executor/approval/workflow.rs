@@ -10,11 +10,9 @@ use std::time::Duration;
 use tokio::sync::{oneshot, RwLock};
 
 use super::types::*;
-use crate::common::types::StructuredMessage;
 use crate::config::ApprovalMode;
 use crate::executor::Action;
 use crate::notification::SharedNotificationSink;
-use crate::session::SessionManager;
 
 /// 审批挂起通知器。
 ///
@@ -33,15 +31,16 @@ pub trait ApprovalPendingNotifier: Send + Sync {
 /// 到审批面板批准/拒绝后任务经 oneshot 通道恢复继续。
 /// 可选注入系统通知通道：挂起时同时发出桌面通知（无人值守场景即时提醒）。
 pub struct SessionApprovalNotifier {
-    session_manager: Arc<dyn SessionManager>,
+    /// 会话工作集（ADR-039：审批挂起通知落库的唯一写入口）。
+    working_sets: Arc<crate::agent::working_set::WorkingSetRegistry>,
     notification: Option<SharedNotificationSink>,
 }
 
 impl SessionApprovalNotifier {
     /// 创建通知器。
-    pub fn new(session_manager: Arc<dyn SessionManager>) -> Self {
+    pub fn new(working_sets: Arc<crate::agent::working_set::WorkingSetRegistry>) -> Self {
         Self {
-            session_manager,
+            working_sets,
             notification: None,
         }
     }
@@ -64,21 +63,13 @@ pub fn build_approval_pending_text(request: &ApprovalRequest) -> String {
 #[async_trait::async_trait]
 impl ApprovalPendingNotifier for SessionApprovalNotifier {
     async fn on_approval_pending(&self, request: &ApprovalRequest) {
-        let sm = StructuredMessage::system(
-            request.session_id.clone(),
+        // ADR-039 收口 ①：单点落库（唯一写入口；未装配/加载失败由单点告警）
+        crate::agent::background::persist_system_message(
+            Some(&self.working_sets),
+            &request.session_id,
             build_approval_pending_text(request),
-        );
-        if let Err(e) = self
-            .session_manager
-            .add_structured_message(&request.session_id, sm)
-            .await
-        {
-            tracing::warn!(
-                request_id = %request.request_id,
-                error = %e,
-                "审批挂起通知持久化失败"
-            );
-        }
+        )
+        .await;
 
         // 桌面系统通知：审批挂起时即时提醒用户（非阻塞；未注入时静默）
         if let Some(sink) = &self.notification {

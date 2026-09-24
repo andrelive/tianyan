@@ -52,20 +52,11 @@ impl SessionService {
         session_id: &str,
         messages: &[StructuredMessage],
     ) -> Result<(), ApiError> {
-        if let Some(reg) = self.working_sets.as_ref() {
-            match reg.ensure(session_id).await {
-                Ok(ws) => {
-                    ws.rewrite(messages).await?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, session = %session_id, "工作集加载失败，回退直写重写");
-                }
-            }
-        }
-        self.session_manager
-            .rewrite_messages(session_id, messages)
-            .await?;
+        // ADR-039 §4：唯一写入口（未装配 = 装配缺陷 → 显式报错，不再回退直写）
+        let reg = self.working_sets.as_ref().ok_or_else(|| {
+            ApiError::Internal("会话服务：未装配会话工作集（ADR-039 写侧收口缺失）".to_string())
+        })?;
+        reg.ensure(session_id).await?.rewrite(messages).await?;
         Ok(())
     }
 
@@ -75,26 +66,21 @@ impl SessionService {
     /// 镜像**，不会用 server 侧读到的旧 header 覆盖并发写入的字段
     /// （如 Agent 刚固化的 `injectable_snapshot`）。
     async fn persist_meta(&self, session: &tianyan::session::Session) -> Result<(), ApiError> {
-        if let Some(reg) = self.working_sets.as_ref() {
-            match reg.ensure(&session.session_id).await {
-                Ok(ws) => {
-                    let title = session.title.clone();
-                    let ended_at = session.ended_at;
-                    let created_at = session.created_at;
-                    ws.update_header(|h| {
-                        h.title = title;
-                        h.ended_at = ended_at;
-                        h.created_at = Some(created_at);
-                    })
-                    .await?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, session = %session.session_id, "工作集加载失败，回退直写头部");
-                }
-            }
-        }
-        self.session_manager.update_session(session).await?;
+        // ADR-039 §4：唯一写入口（未装配 = 装配缺陷 → 显式报错，不再回退直写）
+        let reg = self.working_sets.as_ref().ok_or_else(|| {
+            ApiError::Internal("会话服务：未装配会话工作集（ADR-039 写侧收口缺失）".to_string())
+        })?;
+        let title = session.title.clone();
+        let ended_at = session.ended_at;
+        let created_at = session.created_at;
+        reg.ensure(&session.session_id)
+            .await?
+            .update_header(|h| {
+                h.title = title;
+                h.ended_at = ended_at;
+                h.created_at = Some(created_at);
+            })
+            .await?;
         Ok(())
     }
 
@@ -104,29 +90,18 @@ impl SessionService {
         session_id: &str,
         working_directory: Option<String>,
     ) -> Result<(), ApiError> {
-        if let Some(reg) = self.working_sets.as_ref() {
-            match reg.ensure(session_id).await {
-                Ok(ws) => {
-                    ws.update_header(|h| h.working_directory = working_directory.clone())
-                        .await?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        session = %session_id,
-                        "工作集加载失败，回退直写工作目录"
-                    );
-                }
-            }
+        // ADR-039 §4：唯一写入口（未装配 = 装配缺陷 → 显式报错，不再回退直写）
+        let reg = self.working_sets.as_ref().ok_or_else(|| {
+            ApiError::Internal("会话服务：未装配会话工作集（ADR-039 写侧收口缺失）".to_string())
+        })?;
+        // 存在性检查保持 404 语义（写路径不再经 `get_session` 读改）
+        if !self.session_manager.session_exists(session_id).await? {
+            return Err(ApiError::NotFound(format!("会话未找到: {session_id}")));
         }
-        let mut session = self
-            .session_manager
-            .get_session(session_id)
+        reg.ensure(session_id)
             .await?
-            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {session_id}")))?;
-        session.header.working_directory = working_directory;
-        self.session_manager.update_session(&session).await?;
+            .update_header(|h| h.working_directory = working_directory.clone())
+            .await?;
         Ok(())
     }
 
@@ -420,18 +395,14 @@ impl SessionService {
             return Err(ApiError::NotFound(format!("会话未找到: {}", session_id)));
         }
 
-        // 写侧收口 ④（ADR-035 §3）：经工作集删除 + 注册表移除（缓存不残留）。
-        let mut deleted_via_ws = false;
-        if let Some(reg) = self.working_sets.as_ref() {
-            if let Ok(ws) = reg.ensure(session_id).await {
-                ws.delete().await?;
-                reg.remove(session_id).await;
-                deleted_via_ws = true;
-            }
-        }
-        if !deleted_via_ws {
-            self.session_manager.delete_session(session_id).await?;
-        }
+        // 写侧收口 ④（ADR-039 §4）：唯一写入口——未装配 = 装配缺陷（显式报错，
+        // 不回退直写）；缓存随删除一并移除（不残留）
+        let reg = self.working_sets.as_ref().ok_or_else(|| {
+            ApiError::Internal("会话服务：未装配会话工作集（ADR-039 写侧收口缺失）".to_string())
+        })?;
+        let ws = reg.ensure(session_id).await?;
+        ws.delete().await?;
+        reg.remove(session_id).await;
 
         // T1-12：快照目录无会话级生命周期——删会话必须清 `snapshots/{id}`
         // （trees/redo/latest 缓存），否则该会话引用的对象被 GC 视为可达、
@@ -553,37 +524,9 @@ mod tests {
             Ok(self.sessions.lock().unwrap().get(id).cloned())
         }
 
-        async fn update_session(&self, session: &Session) -> tianyan::Result<()> {
-            self.sessions
-                .lock()
-                .unwrap()
-                .insert(session.session_id.clone(), session.clone());
-            Ok(())
-        }
-
-        async fn add_structured_message(
-            &self,
-            _session_id: &str,
-            _msg: StructuredMessage,
-        ) -> tianyan::Result<()> {
-            Ok(())
-        }
-
-        async fn rewrite_messages(
-            &self,
-            _session_id: &str,
-            _messages: &[StructuredMessage],
-        ) -> tianyan::Result<()> {
-            Ok(())
-        }
-
+        // ADR-039：破坏性写不在 trait 上（写路径唯一入口 = 会话工作集）
         async fn list_sessions(&self) -> tianyan::Result<Vec<Session>> {
             Ok(self.sessions.lock().unwrap().values().cloned().collect())
-        }
-
-        async fn delete_session(&self, id: &str) -> tianyan::Result<()> {
-            self.sessions.lock().unwrap().remove(id);
-            Ok(())
         }
     }
 
@@ -610,13 +553,23 @@ mod tests {
             "前置：快照目录已产生"
         );
 
+        // ADR-039：删除经工作集（唯一写入口）→ 测试注入内存 store 的工作集
+        let db = tianyan::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = tianyan::session::store::SessionStore::new(db).unwrap();
+        store
+            .create("session-del", &tianyan::session::SessionHeader::default())
+            .await
+            .unwrap();
         let service = SessionService::new(
             Arc::new(MockSessionManager::with_sessions(vec![Session::new(
                 "session-del",
             )])),
             Some(manager),
             None,
-            None,
+            Some(tianyan::agent::working_set::WorkingSetRegistry::new(Some(
+                store,
+            ))),
         );
         service.delete_session("session-del").await.unwrap();
         assert!(

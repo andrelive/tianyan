@@ -44,7 +44,6 @@ use crate::common::types::StructuredMessage;
 use crate::db::Database;
 use crate::executor::{CommandTask, CommandTaskStatus};
 use crate::notification::SharedNotificationSink;
-use crate::session::SessionManager;
 
 /// 默认最大并发后台任务数（ADR-026：同时运行上限）。
 pub const DEFAULT_MAX_BACKGROUND_TASKS: usize = 20;
@@ -1068,65 +1067,57 @@ pub fn is_event_notice(msg: &StructuredMessage) -> bool {
 /// 持久化后，通知随会话历史进入下一次上下文组装（主 LLM 下一轮看到）；
 /// 前端会话历史同样可见。对应业界"完成时注入消息 + 轮次边界投递"。
 pub struct SessionTaskNotifier {
-    session_manager: Arc<dyn SessionManager>,
-    /// 会话工作集（ADR-035：通知落库收口 ①——物化段同步推进，使活动轮的
-    /// 轮边界续跑判定能发现新通知；None 时退化为直写 session_manager）。
+    /// 会话工作集（ADR-039：通知落库的唯一写入口——物化段同步推进，使活动轮的
+    /// 轮边界续跑判定能发现新通知；未装配 = 无写路径，仅告警）。
     working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
 }
 
 impl SessionTaskNotifier {
     /// 创建通知器。
-    pub fn new(
-        session_manager: Arc<dyn SessionManager>,
-        working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
-    ) -> Self {
-        Self {
-            session_manager,
-            working_sets,
-        }
+    pub fn new(working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>) -> Self {
+        Self { working_sets }
     }
 }
 
-/// 通知落库（ADR-035 §3 写入收口 ① 的单点）。
+/// 系统消息落库（ADR-039 §2 写入收口 ① 的单点）。
 ///
-/// 装配工作集时经其 `append`（落库 + 物化段推进 + seq 语义）——这样通知
-/// 「落库」与「工作集知道它」是同一动作，活动轮的轮边界续跑判定才能发现它
-/// （`last_seq > last_consumed_seq`）。未装配或加载失败时回退 `session_manager`
-/// 直写（旧行为，下一轮组装仍可读到）。
-async fn persist_notification(
-    session_manager: &Arc<dyn SessionManager>,
+/// 三个调用方共用（后台任务/命令终态通知、审批挂起通知、主动提醒注入）：
+/// 经工作集 `append`（落库 + 物化段推进 + seq 语义）——「落库」与「工作集
+/// 知道它」是同一动作，活动轮的轮边界续跑判定才能发现它
+/// （`last_seq > last_consumed_seq`）。
+///
+/// **唯一写入口**（ADR-039 §4）：未装配工作集 = 无写路径，仅告警，不再回退
+/// `SessionManager` 直写（那会绕过单写者，正是缓存分叉的来源）。
+pub(crate) async fn persist_system_message(
     working_sets: Option<&Arc<crate::agent::working_set::WorkingSetRegistry>>,
     session_id: &str,
-    sm: StructuredMessage,
+    text: String,
 ) {
-    if let Some(reg) = working_sets {
-        // 未加载 → 先加载（保证物化段与库一致），再 append
-        let ws = match reg.get(session_id).await {
-            Some(ws) => Some(ws),
-            None => reg.ensure(session_id).await.ok(),
-        };
-        if let Some(ws) = ws {
+    let Some(reg) = working_sets else {
+        tracing::warn!(session = %session_id, "系统消息未持久化：未装配会话工作集");
+        return;
+    };
+    // `ensure`（而非 `get`）：未加载时先加载，保证物化段与库一致再 append
+    match reg.ensure(session_id).await {
+        Ok(ws) => {
+            let sm = StructuredMessage::system(session_id.to_string(), text);
             if let Err(e) = ws.append(&sm, true).await {
-                tracing::warn!(error = %e, "通知持久化失败（工作集路径）");
+                tracing::warn!(error = %e, session = %session_id, "系统消息持久化失败");
             }
-            return;
         }
-    }
-    if let Err(e) = session_manager.add_structured_message(session_id, sm).await {
-        tracing::warn!(error = %e, "通知持久化失败");
+        Err(e) => {
+            tracing::warn!(error = %e, session = %session_id, "系统消息持久化失败（工作集加载失败）")
+        }
     }
 }
 
 #[async_trait]
 impl TaskNotifier for SessionTaskNotifier {
     async fn on_task_terminal(&self, session_id: &str, task: &BackgroundTask, remaining: usize) {
-        let text = build_notification_text(task, remaining);
-        let sm = StructuredMessage::system(session_id.to_string(), text);
-        persist_notification(
-            &self.session_manager,
+        persist_system_message(
             self.working_sets.as_ref(),
             session_id,
-            sm,
+            build_notification_text(task, remaining),
         )
         .await;
     }
@@ -1177,20 +1168,15 @@ pub fn build_notification_text(task: &BackgroundTask, remaining: usize) -> Strin
 /// 上下文组装（主 LLM 下一轮看到）；`waker` 槽由 Agent 构建完成后注入
 /// （[`AgentWakeForwarder`] 经 `CommandWaker` 适配转发）。
 pub struct SessionCommandNotifier {
-    session_manager: Arc<dyn SessionManager>,
     waker: Arc<Mutex<Option<Arc<dyn TaskWaker>>>>,
-    /// 会话工作集（ADR-035：通知落库收口 ①，同 [`SessionTaskNotifier`]）。
+    /// 会话工作集（ADR-039：通知落库的唯一写入口，同 [`SessionTaskNotifier`]）。
     working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
 }
 
 impl SessionCommandNotifier {
     /// 创建通知器。
-    pub fn new(
-        session_manager: Arc<dyn SessionManager>,
-        working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
-    ) -> Self {
+    pub fn new(working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>) -> Self {
         Self {
-            session_manager,
             waker: Arc::new(Mutex::new(None)),
             working_sets,
         }
@@ -1205,13 +1191,10 @@ impl SessionCommandNotifier {
 #[async_trait]
 impl crate::executor::CommandNotifier for SessionCommandNotifier {
     async fn on_command_terminal(&self, session_id: &str, task: &CommandTask, remaining: usize) {
-        let text = build_command_notification_text(task, remaining);
-        let sm = StructuredMessage::system(session_id.to_string(), text);
-        persist_notification(
-            &self.session_manager,
+        persist_system_message(
             self.working_sets.as_ref(),
             session_id,
-            sm,
+            build_command_notification_text(task, remaining),
         )
         .await;
     }
@@ -1228,14 +1211,7 @@ impl crate::executor::CommandNotifier for SessionCommandNotifier {
             task.id,
             note
         );
-        let sm = StructuredMessage::system(session_id.to_string(), text);
-        persist_notification(
-            &self.session_manager,
-            self.working_sets.as_ref(),
-            session_id,
-            sm,
-        )
-        .await;
+        persist_system_message(self.working_sets.as_ref(), session_id, text).await;
     }
 }
 
@@ -1679,63 +1655,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_notifier_persists_system_message() {
-        use crate::session::SessionManager;
-        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-
-        // 手写 mock：记录 add_structured_message 调用
-        struct RecordingSessionManager {
-            calls: Arc<AtomicUsize>,
-        }
-        #[async_trait]
-        impl SessionManager for RecordingSessionManager {
-            async fn create_session(
-                &self,
-                _id: &str,
-                _message: crate::common::types::Message,
-            ) -> Result<crate::session::Session> {
-                unreachable!()
-            }
-            async fn get_session(&self, _id: &str) -> Result<Option<crate::session::Session>> {
-                Ok(None)
-            }
-            async fn update_session(&self, _session: &crate::session::Session) -> Result<()> {
-                Ok(())
-            }
-            async fn add_structured_message(
-                &self,
-                _session_id: &str,
-                msg: StructuredMessage,
-            ) -> Result<()> {
-                assert_eq!(msg.role, MessageRole::System, "通知应为 System 消息");
-                assert!(
-                    msg.parts.iter().any(|p| matches!(p, Part::Text { .. })),
-                    "通知应含文本 part"
-                );
-                self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-                Ok(())
-            }
-            async fn rewrite_messages(
-                &self,
-                _session_id: &str,
-                _messages: &[StructuredMessage],
-            ) -> Result<()> {
-                Ok(())
-            }
-            async fn list_sessions(&self) -> Result<Vec<crate::session::Session>> {
-                Ok(Vec::new())
-            }
-            async fn delete_session(&self, _id: &str) -> Result<()> {
-                Ok(())
-            }
-        }
-
-        let calls = Arc::new(AtomicUsize::new(0));
-        let notifier = SessionTaskNotifier::new(
-            Arc::new(RecordingSessionManager {
-                calls: calls.clone(),
-            }),
-            None,
-        );
+        // ADR-039：通知落库经工作集（唯一写入口）——断言「落库 + System 角色 + 文本 part」
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = crate::session::store::SessionStore::new(db).unwrap();
+        store
+            .create("s1", &crate::session::SessionHeader::default())
+            .await
+            .unwrap();
+        let reg = crate::agent::working_set::WorkingSetRegistry::new(Some(store));
+        let notifier = SessionTaskNotifier::new(Some(reg.clone()));
         let task = BackgroundTask {
             kind: TaskKind::Delegate,
             id: "bt_t".to_string(),
@@ -1754,7 +1683,17 @@ mod tests {
             working_directory: None,
         };
         notifier.on_task_terminal("s1", &task, 0).await;
-        assert_eq!(calls.load(AtomicOrdering::SeqCst), 1, "应持久化一条通知");
+
+        let ws = reg.get("s1").await.expect("通知落库后工作集应已加载");
+        assert_eq!(ws.message_count().await, 1, "应持久化一条通知");
+        let state = ws.state();
+        let st = state.read().await;
+        let msg = st.structured_messages.last().expect("通知消息");
+        assert_eq!(msg.role, MessageRole::System, "通知应为 System 消息");
+        assert!(
+            msg.parts.iter().any(|p| matches!(p, Part::Text { .. })),
+            "通知应含文本 part"
+        );
     }
 
     // ── ADR-013：唤醒语义 + 持久化 ─────────────────────────────

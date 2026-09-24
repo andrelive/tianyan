@@ -70,37 +70,9 @@ impl tianyan::session::SessionManager for MockSessionManager {
         Ok(self.sessions.lock().unwrap().get(id).cloned())
     }
 
-    async fn update_session(&self, session: &tianyan::session::Session) -> tianyan::Result<()> {
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(session.session_id.clone(), session.clone());
-        Ok(())
-    }
-
-    async fn add_structured_message(
-        &self,
-        _session_id: &str,
-        _msg: tianyan::common::types::StructuredMessage,
-    ) -> tianyan::Result<()> {
-        Ok(())
-    }
-
-    async fn rewrite_messages(
-        &self,
-        _session_id: &str,
-        _messages: &[tianyan::common::types::StructuredMessage],
-    ) -> tianyan::Result<()> {
-        Ok(())
-    }
-
+    // ADR-039：破坏性写不在 trait 上（写路径唯一入口 = 会话工作集）
     async fn list_sessions(&self) -> tianyan::Result<Vec<tianyan::session::Session>> {
         Ok(self.sessions.lock().unwrap().values().cloned().collect())
-    }
-
-    async fn delete_session(&self, id: &str) -> tianyan::Result<()> {
-        self.sessions.lock().unwrap().remove(id);
-        Ok(())
     }
 }
 

@@ -370,7 +370,8 @@ async fn test_e2e_unified_event_push_message() {
         .expect("订阅 /events 失败");
     assert_eq!(resp.status(), 200, "/events 应 200");
 
-    // 经会话管理器落库一条消息（触发 wrapper 广播）
+    // ADR-039：经工作集落库（唯一写入口）——边界消息（System）落库后由工作集
+    // 推送回调补发 chat_stream 边界事件（不再经 SessionManager 直写）
     let session_id = "session-evt-1";
     state
         .session_manager()
@@ -378,13 +379,16 @@ async fn test_e2e_unified_event_push_message() {
         .await
         .expect("创建会话失败");
     state
-        .session_manager()
-        .add_structured_message(
-            session_id,
-            tianyan::common::types::StructuredMessage::system(
+        .working_sets()
+        .ensure(session_id)
+        .await
+        .expect("工作集加载失败")
+        .append(
+            &tianyan::common::types::StructuredMessage::system(
                 session_id.to_string(),
                 "[后台命令完成] ping（cmd_0）".to_string(),
             ),
+            true,
         )
         .await
         .expect("落库失败");

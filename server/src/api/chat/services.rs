@@ -7,6 +7,7 @@ use tianyan::agent::stream_forward::{
     inject_stream_event_fields, spawn_stream_forwarder, BroadcastJsonDeliver, StreamEventDeliver,
     StreamEventMapper,
 };
+use tianyan::agent::working_set::WorkingSetRegistry;
 use tianyan::agent::AgentCoordinator;
 use tianyan::common::types::StructuredMessage;
 use tianyan::session::SessionManager;
@@ -33,6 +34,9 @@ fn to_core_message(msg: &ChatMessage) -> CoreMessage {
 pub struct ChatService {
     agent: Arc<dyn AgentCoordinator>,
     session_manager: Arc<dyn SessionManager>,
+    /// 会话头部写入通道（ADR-039）——写路径**唯一入口**：
+    /// 新建会话的工作目录/标题与清空预写消息均经工作集（不再直写 SessionManager）。
+    working_sets: Arc<WorkingSetRegistry>,
     /// 角色注册表同步句柄（ADR-016）：新会话创建时刷新学习角色。
     role_sync: Option<RoleSync>,
     /// 当前聊天模型上下文窗口（token），随流式 usage 事件下发供前端计算占用百分比。
@@ -41,10 +45,15 @@ pub struct ChatService {
 
 impl ChatService {
     /// 创建新的对话服务
-    pub fn new(agent: Arc<dyn AgentCoordinator>, session_manager: Arc<dyn SessionManager>) -> Self {
+    pub fn new(
+        agent: Arc<dyn AgentCoordinator>,
+        session_manager: Arc<dyn SessionManager>,
+        working_sets: Arc<WorkingSetRegistry>,
+    ) -> Self {
         Self {
             agent,
             session_manager,
+            working_sets,
             role_sync: None,
             context_window: tianyan::model::spec::ModelSpec::default().context_length as u64,
         }
@@ -94,6 +103,7 @@ impl ChatService {
 
         let (session_id, is_new) = resolve_or_create_session(
             self.session_manager.as_ref(),
+            &self.working_sets,
             request.session_id.as_deref(),
             &last_text,
             request.working_directory.as_deref(),
@@ -321,6 +331,7 @@ fn convert_skill_calls(calls: Vec<tianyan::agent::SkillCallInfo>) -> Vec<SkillCa
 ///   携带 `working_directory` 时绑定为新会话的工作目录（工作区归属）。
 async fn resolve_or_create_session(
     session_manager: &dyn SessionManager,
+    working_sets: &Arc<WorkingSetRegistry>,
     session_id: Option<&str>,
     initial_message: &str,
     working_directory: Option<&str>,
@@ -339,15 +350,16 @@ async fn resolve_or_create_session(
         .unwrap_or_else(|| format!("session-{}", short_uuid()));
     let msg = CoreMessage::new(CoreMessageRole::User, initial_message);
     // ? 传播：保留 core 错误语义（不吞成 Internal）
-    let mut session = session_manager.create_session(&new_id, msg).await?;
+    session_manager.create_session(&new_id, msg).await?;
 
+    // ADR-039：会话头部与消息写入**唯一入口** = 工作集（缓存与库同步推进）。
+    // 工作目录/标题经收口 ③（局部字段写，不覆盖并发写入的字段）；清空经收口 ②。
+    let ws = working_sets.ensure(&new_id).await?;
     // 新会话绑定工作目录（工作区归属）：目录必须存在，坏值仅告警不阻断对话
     if let Some(wd) = working_directory.map(str::trim).filter(|w| !w.is_empty()) {
         if std::path::Path::new(wd).is_dir() {
-            session.header.working_directory = Some(wd.to_string());
-            if let Err(e) = session_manager.update_session(&session).await {
-                tracing::warn!(error = %e, working_directory = %wd, "会话工作目录绑定持久化失败");
-            }
+            ws.update_header(|h| h.working_directory = Some(wd.to_string()))
+                .await?;
         } else {
             tracing::warn!(working_directory = %wd, "新会话工作目录不存在，忽略绑定");
         }
@@ -356,18 +368,12 @@ async fn resolve_or_create_session(
     // 用第一条用户消息生成标题（取第一行或前 30 个字符）
     let title = generate_session_title(initial_message);
     if !title.is_empty() {
-        session.title = Some(title);
-        if let Err(e) = session_manager.update_session(&session).await {
-            tracing::warn!(error = %e, "会话标题更新失败");
-        }
+        ws.update_header(|h| h.title = Some(title)).await?;
     }
 
     // 清空 create_session 预写的消息：会话历史统一由 agent.process_message 追加，
     // 避免同一条用户消息在历史中重复
-    session.messages.clear();
-    if let Err(e) = session_manager.rewrite_messages(&new_id, &[]).await {
-        tracing::warn!(error = %e, "清空会话预写消息失败");
-    }
+    ws.rewrite(&[]).await?;
 
     Ok((new_id, true))
 }

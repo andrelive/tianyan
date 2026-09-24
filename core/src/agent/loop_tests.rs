@@ -9,32 +9,11 @@ struct MockSessionManager {
     /// 最近一次 add_structured_message 的实测输入（模拟 SQLite 持久化：
     /// run_turns 从会话恢复实测输入的数据源；None = 无 usage，走估算）。
     last_usage: Arc<std::sync::Mutex<Option<usize>>>,
-    /// 全部落库消息捕获 `(session_id, msg)`（取消收尾等落库行为断言用）。
-    messages: Arc<std::sync::Mutex<Vec<(String, StructuredMessage)>>>,
 }
 #[async_trait]
 impl SessionManager for MockSessionManager {
-    async fn add_structured_message(&self, session_id: &str, msg: StructuredMessage) -> Result<()> {
-        // 模拟持久化：记录消息携带的实测输入（重启后 run_turns 可恢复）。
-        // 取数口径与生产一致（prompt 侧 input，max 兜底；input 已含 cache.read）。
-        if msg.tokens.input > 0 || msg.tokens.cache.read > 0 {
-            if let Ok(mut guard) = self.last_usage.lock() {
-                *guard = Some(msg.tokens.input.max(msg.tokens.cache.read));
-            }
-        }
-        // 捕获落库消息（取消收尾等落库行为断言用）
-        if let Ok(mut guard) = self.messages.lock() {
-            guard.push((session_id.to_string(), msg));
-        }
-        Ok(())
-    }
-    async fn rewrite_messages(
-        &self,
-        _session_id: &str,
-        _messages: &[StructuredMessage],
-    ) -> Result<()> {
-        Ok(())
-    }
+    // ADR-039：破坏性写不在 trait 上（写路径唯一入口 = 会话工作集）；
+    // `get_session` 仍以 `last_usage` 模拟「从会话恢复实测输入」的数据源。
     async fn create_session(&self, _id: &str, _message: Message) -> Result<Session> {
         Ok(Session::new(_id))
     }
@@ -57,14 +36,8 @@ impl SessionManager for MockSessionManager {
         }
         Ok(None)
     }
-    async fn update_session(&self, _session: &Session) -> Result<()> {
-        Ok(())
-    }
     async fn list_sessions(&self) -> Result<Vec<Session>> {
         Ok(vec![])
-    }
-    async fn delete_session(&self, _id: &str) -> Result<()> {
-        Ok(())
     }
 }
 
@@ -75,7 +48,6 @@ fn test_agent_loop_config_default() {
     // Touch the mock to keep it "constructed" (dead-code lint).
     let _mgr = MockSessionManager {
         last_usage: Arc::new(std::sync::Mutex::new(None)),
-        messages: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
 }
 
@@ -161,31 +133,51 @@ fn make_loop(mock: MockChatService, max_turns: usize) -> AgentLoop {
         registry,
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(None)),
-            messages: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
         AgentLoopConfig { max_turns },
     )
 }
-/// 落库消息捕获容器：(seq, message) 列表（取消收尾等落库行为断言用）。
-type CapturedMessages = Arc<std::sync::Mutex<Vec<(String, StructuredMessage)>>>;
-
-/// 构造带落库消息捕获的 AgentLoop（取消收尾等落库行为断言用）。
-fn make_loop_with_capture(
+/// 构造带**真实 SessionStore + 工作集**的 AgentLoop（ADR-039：写路径经工作集，
+/// 读路径经 store——落库断言与 usage 校准的数据源都是真实存储）。
+///
+/// 取代旧的「mock SessionManager 记录落库」辅助：直写路径已下线，落库观测必须
+/// 走真实存储（否则测试永远观测不到消息，判别力归零）。
+async fn make_loop_with_store_and_mock(
     mock: MockChatService,
     max_turns: usize,
-) -> (AgentLoop, CapturedMessages) {
-    let registry = ToolRegistry::new(SecurityPolicy::default());
-    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    session_id: &str,
+) -> (AgentLoop, Arc<crate::session::store::SessionStore>) {
+    let db = crate::db::Database::open_in_memory().unwrap();
+    db.init_schemas().await.unwrap();
+    let store = crate::session::store::SessionStore::new(db).unwrap();
+    store
+        .create(session_id, &crate::session::types::SessionHeader::default())
+        .await
+        .unwrap();
+    let working_sets = crate::agent::working_set::WorkingSetRegistry::new(Some(store.clone()));
+    let registry = ToolRegistry::new(SecurityPolicy::default())
+        .with_session_store(store.clone())
+        .with_working_sets(working_sets);
     let agent_loop = AgentLoop::new(
         Arc::new(mock),
         registry,
-        Arc::new(MockSessionManager {
-            last_usage: Arc::new(std::sync::Mutex::new(None)),
-            messages: captured.clone(),
-        }),
+        Arc::new(crate::session::PersistentSessionManager::new(store.clone())),
         AgentLoopConfig { max_turns },
     );
-    (agent_loop, captured)
+    (agent_loop, store)
+}
+
+/// 读取会话落库消息（断言数据源：真实存储）。
+async fn load_persisted(
+    store: &Arc<crate::session::store::SessionStore>,
+    session_id: &str,
+) -> Vec<StructuredMessage> {
+    store
+        .load(session_id)
+        .await
+        .unwrap()
+        .map(|(_, msgs)| msgs)
+        .unwrap_or_default()
 }
 
 #[tokio::test]
@@ -255,7 +247,6 @@ async fn test_run_ask_user_executes_as_sync_tool() {
         registry,
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(None)),
-            messages: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
         AgentLoopConfig { max_turns: 5 },
     );
@@ -334,7 +325,6 @@ async fn test_run_approval_denied_returns_tool_error() {
         registry,
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(None)),
-            messages: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
         AgentLoopConfig { max_turns: 5 },
     );
@@ -499,7 +489,7 @@ async fn test_run_stream_returns_cancelled_mid_chunk() {
         });
         Ok(chunk_rx)
     });
-    let (agent_loop, captured) = make_loop_with_capture(mock, 5);
+    let (agent_loop, store) = make_loop_with_store_and_mock(mock, 5, "session-1").await;
 
     let cancel = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<AgentStreamChunk>>(8);
@@ -540,11 +530,10 @@ async fn test_run_stream_returns_cancelled_mid_chunk() {
     );
     // 取消收尾（DSH“中断先于分发”对齐）：已收“第一段”以 interrupted 落库、
     // tool_calls 全丢（本测试无工具调用；工具调用丢弃见 finalize 单元测试）。
-    let msgs = captured.lock().unwrap();
+    let msgs = load_persisted(&store, "session-1").await;
     let persisted = msgs
         .iter()
-        .find(|(sid, m)| sid.as_str() == "session-1" && m.finish.as_deref() == Some("interrupted"))
-        .map(|(_, m)| m)
+        .find(|m| m.finish.as_deref() == Some("interrupted"))
         .expect("取消应落库 finish=interrupted 的 assistant 消息");
     assert_eq!(persisted.role, MessageRole::Assistant);
     assert!(
@@ -585,7 +574,7 @@ async fn test_run_stream_cancel_during_recv_wait() {
         });
         Ok(chunk_rx)
     });
-    let (agent_loop, captured) = make_loop_with_capture(mock, 5);
+    let (agent_loop, store) = make_loop_with_store_and_mock(mock, 5, "session-1").await;
 
     let cancel = Arc::new(AtomicBool::new(false));
     let (tx, _rx) = tokio::sync::mpsc::channel::<Result<AgentStreamChunk>>(8);
@@ -621,11 +610,10 @@ async fn test_run_stream_cancel_during_recv_wait() {
         result
     );
     // 已交付前缀以 interrupted 落库（与 mid_chunk 取消同一收尾语义）
-    let msgs = captured.lock().unwrap();
+    let msgs = load_persisted(&store, "session-1").await;
     let persisted = msgs
         .iter()
-        .find(|(sid, m)| sid.as_str() == "session-1" && m.finish.as_deref() == Some("interrupted"))
-        .map(|(_, m)| m)
+        .find(|m| m.finish.as_deref() == Some("interrupted"))
         .expect("取消应落库 finish=interrupted 的 assistant 消息");
     assert!(
         persisted
@@ -1503,7 +1491,9 @@ async fn test_run_calibrates_max_tokens_from_prior_usage() {
                 }
             },
         );
-    let agent_loop = make_loop(mock, 5).with_chat_spec(Some(spec_128k_16k()));
+    // ADR-039：写路径经工作集 + 读路径经真实 store（usage 校准的数据源）
+    let (agent_loop, _store) = make_loop_with_store_and_mock(mock, 5, "session-1").await;
+    let agent_loop = agent_loop.with_chat_spec(Some(spec_128k_16k()));
 
     let mut messages = vec![Message::user("帮我做点事")];
     let r1 = agent_loop
@@ -1618,7 +1608,6 @@ async fn test_run_errors_when_budget_below_min() {
         registry,
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(Some(128_000 - 1137))),
-            messages: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
         AgentLoopConfig { max_turns: 5 },
     )
@@ -1661,20 +1650,7 @@ struct FixedSessionManager {
 
 #[async_trait]
 impl SessionManager for FixedSessionManager {
-    async fn add_structured_message(
-        &self,
-        _session_id: &str,
-        _msg: StructuredMessage,
-    ) -> Result<()> {
-        Ok(())
-    }
-    async fn rewrite_messages(
-        &self,
-        _session_id: &str,
-        _messages: &[StructuredMessage],
-    ) -> Result<()> {
-        Ok(())
-    }
+    // ADR-039：破坏性写不在 trait 上（写路径唯一入口 = 会话工作集）
     async fn create_session(&self, id: &str, _message: Message) -> Result<Session> {
         Ok(Session::new(id))
     }
@@ -1683,14 +1659,8 @@ impl SessionManager for FixedSessionManager {
         session.messages = self.messages.clone();
         Ok(Some(session))
     }
-    async fn update_session(&self, _session: &Session) -> Result<()> {
-        Ok(())
-    }
     async fn list_sessions(&self) -> Result<Vec<Session>> {
         Ok(vec![])
-    }
-    async fn delete_session(&self, _id: &str) -> Result<()> {
-        Ok(())
     }
 }
 
@@ -1842,7 +1812,6 @@ async fn make_loop_with_store() -> (
         registry,
         Arc::new(MockSessionManager {
             last_usage: Arc::new(std::sync::Mutex::new(None)),
-            messages: Arc::new(std::sync::Mutex::new(Vec::new())),
         }),
         AgentLoopConfig::default(),
     );

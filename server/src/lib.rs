@@ -518,7 +518,6 @@ async fn start_server_inner(
             if cfg.evolution.enabled {
                 let executor = Arc::new(AgentEvolutionExecutor::new(
                     state.agent_lock(),
-                    state.session_manager(),
                     state.working_sets(),
                     state::resolve_chat_model(&cfg),
                     cfg.evolution.review_role.clone(),
@@ -597,14 +596,17 @@ async fn start_server_inner(
                         "reminder",
                         "主动提醒",
                         interval_min * 60,
-                        Arc::new(tianyan::scheduler::tasks::ReminderTask::new(
-                            model_services.chat,
-                            model_name,
-                            notification::global_notification_sink(),
-                            state.session_manager(),
-                            cfg.reminder.max_per_run,
-                            cfg.reminder.inject_to_session,
-                        )),
+                        Arc::new(
+                            tianyan::scheduler::tasks::ReminderTask::new(
+                                model_services.chat,
+                                model_name,
+                                notification::global_notification_sink(),
+                                state.session_manager(),
+                                cfg.reminder.max_per_run,
+                                cfg.reminder.inject_to_session,
+                            )
+                            .with_working_sets(Some(state.working_sets())),
+                        ),
                     ))
                     .await?;
             }

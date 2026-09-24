@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::agent::{AgentRole, RoleRegistry};
-use crate::common::types::{FunctionCall, StructuredMessage, TokenUsage, ToolCallType};
+use crate::common::types::{FunctionCall, TokenUsage, ToolCallType};
 use crate::config::AgentRolesConfig;
 use crate::config::{ApprovalMode, SafetyMode};
 use crate::executor::approval::{ApprovalWorkflow, ApprovalWorkflowConfig};
@@ -190,20 +190,7 @@ fn tool_delta(id: &str, name: &str, args: &str) -> ToolCallDelta {
 struct MockSessionManager;
 #[async_trait]
 impl crate::session::SessionManager for MockSessionManager {
-    async fn add_structured_message(
-        &self,
-        _session_id: &str,
-        _msg: StructuredMessage,
-    ) -> crate::common::error::Result<()> {
-        Ok(())
-    }
-    async fn rewrite_messages(
-        &self,
-        _session_id: &str,
-        _messages: &[StructuredMessage],
-    ) -> crate::common::error::Result<()> {
-        Ok(())
-    }
+    // ADR-039：破坏性写不在 trait 上（写路径唯一入口 = 会话工作集）
     async fn create_session(
         &self,
         _id: &str,
@@ -217,17 +204,8 @@ impl crate::session::SessionManager for MockSessionManager {
     ) -> crate::common::error::Result<Option<crate::session::Session>> {
         Ok(None)
     }
-    async fn update_session(
-        &self,
-        _session: &crate::session::Session,
-    ) -> crate::common::error::Result<()> {
-        Ok(())
-    }
     async fn list_sessions(&self) -> crate::common::error::Result<Vec<crate::session::Session>> {
         Ok(vec![])
-    }
-    async fn delete_session(&self, _id: &str) -> crate::common::error::Result<()> {
-        Ok(())
     }
 }
 

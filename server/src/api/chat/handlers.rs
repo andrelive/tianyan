@@ -74,6 +74,7 @@ pub async fn chat_stream_handler(
     // 此前直接覆盖取消槽：旧流从此“取消不到”（「停止」按钮失效），且两轮流
     // 并发写同一会话（消息交错）。检查与插入在同一把锁内完成（原子）。
     let cancels_registry = state.stream_cancels();
+    let working_sets = state.working_sets();
     state.try_register_stream(&session_id, cancel.clone())?;
     let session_id_for_cleanup = session_id.clone();
 
@@ -82,7 +83,7 @@ pub async fn chat_stream_handler(
     let task_event_tx = state.task_event_tx.clone();
 
     tokio::spawn(async move {
-        let service = ChatService::new(agent, session_manager)
+        let service = ChatService::new(agent, session_manager, working_sets)
             .with_role_sync(role_sync)
             .with_context_window(context_window);
 
