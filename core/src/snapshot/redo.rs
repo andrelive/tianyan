@@ -33,11 +33,21 @@ impl SnapshotManager {
             .await
             .map_err(|e| TianyanError::Custom(format!("snapshot: 创建重做目录失败: {e}")))?;
 
-        // 1. 捕获当前工作区树（对象库全局去重,内容已存在则不重复存储）
+        // 1. 捕获当前工作区树（对象库全局去重，内容已存在则不重复存储）。
+        //
+        // **增量捕获**：复用 `latest.cache.json`（最近一次轮内捕获的 mtime/size
+        // 缓存）短路未变更文件——大工作区（实测数千~数万文件）全树哈希是
+        // 「回退处理中」延迟的主要来源；缓存缺失/损坏退化为全量（不阻断回退）。
+        // 缓存**写回**仍用 redo 自己的 cache_path：不污染 latest 指针（后者语义
+        // 是「最近一次轮内捕获」，供下一轮 capture 复用）。
         if self.workdir.exists() {
             let tree_path = redo_dir.join(format!("tree-{key}.json"));
             let cache_path = redo_dir.join(format!("tree-{key}.cache.json"));
-            self.capture_tree_to(&self.workdir, &tree_path, &cache_path, None)
+            let prev_cache = self
+                .load_cache(&self.latest_cache_path(session_id))
+                .await
+                .unwrap_or(None);
+            self.capture_tree_to(&self.workdir, &tree_path, &cache_path, prev_cache.as_ref())
                 .await?;
         }
 
@@ -79,7 +89,14 @@ impl SnapshotManager {
                 .map_err(|e| TianyanError::Custom(format!("snapshot: 读取重做树失败: {e}")))?;
             let tree: SnapshotTree = serde_json::from_str(&content)
                 .map_err(|e| TianyanError::Custom(format!("snapshot: 解析重做树失败: {e}")))?;
-            restored = self.restore_tree(tree, &self.workdir).await?;
+            // 增量：复用 latest 缓存短路未变更文件（同 save_redo 的加速路径）
+            let prev_cache = self
+                .load_cache(&self.latest_cache_path(session_id))
+                .await
+                .unwrap_or(None);
+            restored = self
+                .restore_tree(tree, &self.workdir, prev_cache.as_ref())
+                .await?;
         }
 
         // 2. 读取被截断的消息

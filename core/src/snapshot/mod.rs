@@ -195,7 +195,13 @@ impl SnapshotManager {
         self.validate_session_id(session_id)?;
 
         let tree = self.load_tree(session_id, anchor_message_id).await?;
-        self.restore_tree(tree, &self.workdir).await
+        // 增量：复用 latest 缓存短路未变更文件（缓存缺失/损坏 → 全量，不阻断）
+        let prev_cache = self
+            .load_cache(&self.latest_cache_path(session_id))
+            .await
+            .unwrap_or(None);
+        self.restore_tree(tree, &self.workdir, prev_cache.as_ref())
+            .await
     }
 
     /// 对比当前工作区与 `(session_id, key)` 快照，返回结构化差异（前端展示 / 模型理解用）。
@@ -210,7 +216,8 @@ impl SnapshotManager {
 
         let mut current: SnapshotTree = HashMap::new();
         if self.workdir.exists() {
-            self.walk_current(&self.workdir, "", &mut current).await?;
+            self.walk_current(&self.workdir, "", &mut current, None)
+                .await?;
         }
 
         let mut files: Vec<FileDiff> = Vec::new();
@@ -560,14 +567,22 @@ impl SnapshotManager {
     ///
     /// 增量恢复：对比当前工作区与目标树，恢复内容差异的文件、删除目标树中不存在的文件。
     /// 返回恢复/删除的文件数。
-    pub(crate) async fn restore_tree(&self, tree: SnapshotTree, workdir: &Path) -> Result<usize> {
+    /// `prev_cache` 提供时增量收集当前工作区（mtime/size 短路——大工作区
+    /// 恢复路径的加速点；判据见 [`Self::walk_current`]）。
+    pub(crate) async fn restore_tree(
+        &self,
+        tree: SnapshotTree,
+        workdir: &Path,
+        prev_cache: Option<&FileCache>,
+    ) -> Result<usize> {
         if !workdir.exists() {
             return Ok(0);
         }
 
         // 1. 收集当前工作区状态
         let mut current: SnapshotTree = HashMap::new();
-        self.walk_current(workdir, "", &mut current).await?;
+        self.walk_current(workdir, "", &mut current, prev_cache)
+            .await?;
 
         // 1'. 预校验：需要写入的对象必须全部存在——先全量校验再动手，
         // 避免写到一半才发现对象缺失、留下半恢复的工作区（非原子恢复的
@@ -761,8 +776,18 @@ impl SnapshotManager {
         Ok(Some(hash))
     }
 
-    /// 遍历当前工作区,收集 {path → sha256}（与 capture 相同的排除规则）。
-    async fn walk_current(&self, dir: &Path, prefix: &str, tree: &mut SnapshotTree) -> Result<()> {
+    /// 遍历当前工作区，收集 `{path → sha256}`（与 capture 相同的排除规则）。
+    ///
+    /// `prev_cache` 提供时按 **mtime + size** 短路（未变更文件复用缓存哈希、
+    /// 不读内容）——大工作区恢复路径（回退 / 重做）的主要加速点，判据与
+    /// `walk_and_capture` 完全一致（文件系统级事实：mtime+size 未变 ⇒ 内容未变）。
+    async fn walk_current(
+        &self,
+        dir: &Path,
+        prefix: &str,
+        tree: &mut SnapshotTree,
+        prev_cache: Option<&FileCache>,
+    ) -> Result<()> {
         let mut entries = fs::read_dir(dir).await.map_err(|e| {
             TianyanError::Custom(format!("snapshot: 读取目录失败 {}: {e}", dir.display()))
         })?;
@@ -786,7 +811,7 @@ impl SnapshotManager {
                 .map_err(|e| TianyanError::Custom(format!("snapshot: 读取文件类型失败: {e}")))?;
 
             if file_type.is_dir() {
-                Box::pin(self.walk_current(&entry.path(), &rel, tree)).await?;
+                Box::pin(self.walk_current(&entry.path(), &rel, tree, prev_cache)).await?;
             } else if file_type.is_file() {
                 let meta = entry
                     .metadata()
@@ -794,6 +819,19 @@ impl SnapshotManager {
                     .map_err(|e| TianyanError::Custom(format!("snapshot: 读取元数据失败: {e}")))?;
                 if meta.len() > MAX_FILE_BYTES {
                     continue;
+                }
+                let mtime_ms = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                // 命中缓存：同 mtime + 同 size → 复用哈希，不读内容
+                if let Some(prev) = prev_cache.and_then(|c| c.get(&rel)) {
+                    if prev.mtime_ms == mtime_ms && prev.size == meta.len() {
+                        tree.insert(rel, prev.hash.clone());
+                        continue;
+                    }
                 }
                 if let Ok(bytes) = fs::read(entry.path()).await {
                     tree.insert(rel, hex_sha256(&bytes));
@@ -1397,7 +1435,7 @@ mod tests {
         write(&mgr.workdir, "a.txt", "新内容");
 
         let err = mgr
-            .restore_tree(target, &mgr.workdir)
+            .restore_tree(target, &mgr.workdir, None)
             .await
             .expect_err("对象缺失应中止恢复");
         assert!(err.to_string().contains("对象缺失"), "错误信息: {err}");
@@ -1406,6 +1444,26 @@ mod tests {
             "新内容",
             "中止发生在任何写入之前（工作区未被改动）"
         );
+    }
+
+    /// 增量缓存（回退 / 重做加速）：恢复路径按 mtime/size 复用缓存哈希，但
+    /// **内容变更必须被检测**（缓存陈旧不得导致漏恢复）。
+    #[tokio::test]
+    async fn test_restore_with_incremental_cache_still_detects_change() {
+        let (_dir, mgr) = setup().await;
+        write(&mgr.workdir, "a.txt", "v1");
+        mgr.capture("s1", "0").await.unwrap(); // 建立 latest 缓存
+
+        // 修改（mtime/size 变化）→ 恢复必须检测到差异并写回 v1，不得因缓存漏掉
+        write(&mgr.workdir, "a.txt", "v2-longer");
+        let restored = mgr.restore("s1", "0").await.unwrap();
+        assert!(restored >= 1, "内容变更应被检测并恢复");
+        assert_eq!(read(&mgr.workdir, "a.txt"), "v1");
+
+        // 再次恢复（当前内容 == 目标树）：无差异 → 不应写文件、内容不变
+        let restored_again = mgr.restore("s1", "0").await.unwrap();
+        assert_eq!(read(&mgr.workdir, "a.txt"), "v1");
+        assert_eq!(restored_again, 0, "无差异时不应写文件");
     }
 
     /// P1-14：快照树/缓存原子写（不留 .tmp 残留，落盘可解析）。
