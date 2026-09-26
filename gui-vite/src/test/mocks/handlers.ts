@@ -383,8 +383,12 @@ export const mockModelsResponse: ModelsResponse = {
   },
 };
 
-/** 记录的模型切换调用（{ model, capability }），测试断言用。 */
-export const mockSwitchModelCalls: { model: string; capability: string }[] = [];
+/** 记录的模型切换调用（{ model, capability, provider? }），测试断言用。 */
+export const mockSwitchModelCalls: {
+  model: string;
+  capability: string;
+  provider?: string;
+}[] = [];
 
 /** 恢复模型切换 mock 到初始状态。 */
 export function resetModelSwitchMocks() {
@@ -1273,11 +1277,19 @@ export const handlers = [
     return HttpResponse.json(mockModelsResponse);
   }),
 
-  // Model switch（后端为 POST /config/models/switch，body: { model, capability }）
+  // Model switch（后端为 POST /config/models/switch，body: { model, capability, provider? }）
   // 记录调用并返回成功 fixture；测试失败场景用 server.use 覆盖。
   http.post(`${API_BASE}/config/models/switch`, async ({ request }) => {
-    const body = (await request.json()) as { model?: string; capability?: string };
-    mockSwitchModelCalls.push({ model: body.model ?? '', capability: body.capability ?? 'chat' });
+    const body = (await request.json()) as {
+      model?: string;
+      capability?: string;
+      provider?: string;
+    };
+    mockSwitchModelCalls.push({
+      model: body.model ?? '',
+      capability: body.capability ?? 'chat',
+      provider: body.provider,
+    });
     return HttpResponse.json({ success: true, message: '已切换' });
   }),
 

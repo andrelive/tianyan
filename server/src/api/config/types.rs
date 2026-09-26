@@ -96,13 +96,32 @@ mod tests {
         let req = SwitchModelRequest {
             model: "gpt-4".to_string(),
             capability: None,
+            provider: None,
         };
         assert!(req.validate().is_ok());
 
         let req = SwitchModelRequest {
             model: "".to_string(),
             capability: None,
+            provider: None,
         };
         assert!(req.validate().is_err());
+    }
+
+    #[test]
+    fn test_switch_model_request_provider_optional() {
+        // 旧客户端载荷（无 provider）：serde default 保证继续可解析
+        let req: SwitchModelRequest =
+            serde_json::from_str(r#"{"model":"glm-5.3-flash","capability":"chat"}"#)
+                .expect("无 provider 载荷必须可解析");
+        assert_eq!(req.model, "glm-5.3-flash");
+        assert_eq!(req.provider, None);
+
+        // 新载荷带 provider：同名模型跨提供商消歧的输入
+        let req: SwitchModelRequest = serde_json::from_str(
+            r#"{"model":"glm-5.3-flash","capability":"chat","provider":"ollama"}"#,
+        )
+        .expect("带 provider 载荷必须可解析");
+        assert_eq!(req.provider.as_deref(), Some("ollama"));
     }
 }

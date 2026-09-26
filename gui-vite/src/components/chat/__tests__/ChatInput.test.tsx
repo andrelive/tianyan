@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
@@ -78,6 +78,33 @@ describe('ChatInput', () => {
 
     fireEvent.keyDown(textarea, { key: 'Enter' });
     expect(props.onSend).toHaveBeenCalledWith('第一行', []);
+  });
+
+  it('keeps the unsent draft after unmount and restores it on remount (page switch)', () => {
+    const { unmount } = renderChatInput();
+    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: '未发送的草稿' } });
+    expect(screen.getByLabelText('输入消息')).toHaveValue('未发送的草稿');
+
+    // 模拟切走页面（组件卸载）再切回：草稿从 store 恢复
+    unmount();
+    renderChatInput();
+    expect(screen.getByLabelText('输入消息')).toHaveValue('未发送的草稿');
+  });
+
+  it('isolates drafts per session and restores each on session switch', () => {
+    useAppStore.setState({ currentSessionId: 'session-a' });
+    renderChatInput();
+    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: 'A 的草稿' } });
+
+    // 切到会话 B：显示 B 自己的草稿（空）——A 的草稿不串台
+    act(() => useAppStore.setState({ currentSessionId: 'session-b' }));
+    expect(screen.getByLabelText('输入消息')).toHaveValue('');
+
+    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: 'B 的草稿' } });
+
+    // 切回会话 A：恢复 A 的草稿
+    act(() => useAppStore.setState({ currentSessionId: 'session-a' }));
+    expect(screen.getByLabelText('输入消息')).toHaveValue('A 的草稿');
   });
 
   it('switches to stop button while streaming', async () => {

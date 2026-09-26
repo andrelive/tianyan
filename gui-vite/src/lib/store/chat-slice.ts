@@ -47,6 +47,16 @@ export interface PendingClarification {
   questions: { question: string; options: { label: string; description?: string | null }[] }[];
 }
 
+/** 输入草稿（未发送内容）：文字 + 待发图片（data URL）。
+ * 按会话键缓存在 store——路由切换（组件卸载）不丢失，发送后清空。 */
+export interface InputDraft {
+  text: string;
+  images: string[];
+}
+
+/** 缺省空草稿（读取缺省单例；函数式更新基于它合成新对象，不修改本常量）。 */
+const EMPTY_INPUT_DRAFT: InputDraft = { text: '', images: [] };
+
 export interface ChatSlice {
   // Session
   currentSessionId: string | null;
@@ -58,6 +68,12 @@ export interface ChatSlice {
   /** 新建对话绑定的工作目录（工作区归属；首条消息时随 ChatRequest 提交） */
   newSessionWorkspace: string | null;
   setNewSessionWorkspace: (dir: string | null) => void;
+  /** 每会话输入草稿（键 = currentSessionId ?? PENDING_SESSION_KEY；未创建
+   *  会话的草稿归入 PENDING 槽，创建后随当前会话键切换读取）。 */
+  inputDrafts: Record<string, InputDraft>;
+  /** 写入/更新草稿（支持函数式更新——异步读图回调基于最新状态合成，
+   *  不覆盖等待期间输入的文字）；空草稿删除键（不残留空条目）。 */
+  setInputDraft: (key: string, updater: InputDraft | ((prev: InputDraft) => InputDraft)) => void;
 
   // Messages
   // 会话消息缓存：本地真相源（历史加载只做一次；流式按 session_id 归属写入，
@@ -270,6 +286,19 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
   addSession: (session) => set((s) => ({ sessions: [...s.sessions, session] })),
   newSessionWorkspace: null,
   setNewSessionWorkspace: (dir) => set({ newSessionWorkspace: dir }),
+  inputDrafts: {},
+  setInputDraft: (key, updater) =>
+    set((s) => {
+      const prev = s.inputDrafts[key] ?? EMPTY_INPUT_DRAFT;
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      const inputDrafts = { ...s.inputDrafts };
+      if (!next.text && next.images.length === 0) {
+        delete inputDrafts[key];
+      } else {
+        inputDrafts[key] = next;
+      }
+      return { inputDrafts };
+    }),
   removeSession: (id) =>
     set((s) => {
       const sessions = s.sessions.filter((x) => x.id !== id);

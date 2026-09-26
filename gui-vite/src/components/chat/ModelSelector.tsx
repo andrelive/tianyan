@@ -5,6 +5,7 @@ import { ChevronDown, Loader2 } from 'lucide-react';
 import { getModels, switchModel } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { toErrorMessage } from '@/lib/errors';
+import type { SelectedModel } from '@/lib/store';
 
 /** ghost：一体式输入卡片内的无边框变体（外框由父组件统一提供）。 */
 export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
@@ -26,9 +27,9 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
       if (chat.length > 0 && !selectedModel) {
         const preferred = data.preferences.chat;
         if (preferred) {
-          setModel(preferred.model);
+          setModel({ provider: preferred.provider, model: preferred.model });
         } else {
-          setModel(chat[0].name);
+          setModel({ provider: chat[0].provider, model: chat[0].name });
         }
       }
       return data;
@@ -55,7 +56,15 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
   }, []);
 
   const displayModels = useAppStore((s) => s.chatModels);
-  const currentModel = selectedModel || displayModels[0]?.name || '选择模型';
+  /** 当前选中（未选中时回退列表首项展示——与后端默认解析一致）。
+      provider+model 复合匹配：同名模型跨 provider 时不误标、不误切。 */
+  const current: SelectedModel | null =
+    selectedModel ??
+    (displayModels[0]
+      ? { provider: displayModels[0].provider, model: displayModels[0].name }
+      : null);
+  const isCurrent = (m: { provider: string; name: string }) =>
+    current !== null && current.provider === m.provider && current.model === m.name;
 
   return (
     <div ref={ref} className="relative">
@@ -66,6 +75,7 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-label="选择模型"
+        title={current ? `${current.provider} / ${current.model}` : undefined}
         className={cn(
           'flex items-center gap-2 px-2.5 py-1.5 text-sm rounded-lg transition-colors disabled:opacity-50',
           ghost
@@ -73,7 +83,18 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
             : 'border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]',
         )}
       >
-        {loading ? <Loader2 size={14} className="animate-spin" /> : <span>{currentModel}</span>}
+        {loading ? (
+          <Loader2 size={14} className="animate-spin" />
+        ) : (
+          <>
+            <span className="max-w-[12rem] truncate">{current?.model ?? '选择模型'}</span>
+            {current && (
+              <span className="text-xs text-[var(--color-text-tertiary)] shrink-0">
+                {current.provider}
+              </span>
+            )}
+          </>
+        )}
         <ChevronDown className="w-4 h-4 text-[var(--color-text-tertiary)]" />
       </button>
 
@@ -81,30 +102,34 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
         <div
           role="listbox"
           aria-label="模型列表"
-          className="absolute right-0 bottom-full mb-1 w-56 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg shadow-lg z-50 py-1"
+          className="absolute right-0 bottom-full mb-1 w-64 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg shadow-lg z-50 py-1"
         >
           {displayModels.map((model) => (
             <button
-              key={model.name}
+              key={`${model.provider}/${model.name}`}
               role="option"
-              aria-selected={model.name === currentModel}
+              aria-selected={isCurrent(model)}
               onClick={() => {
-                setModel(model.name);
+                setModel({ provider: model.provider, model: model.name });
                 setOpen(false);
-                // 本地状态先行（UI 不依赖网络），后端持久化失败不阻塞交互
-                switchModel(model.name, 'chat').catch((err: unknown) => {
+                // 本地状态先行（UI 不依赖网络），后端持久化失败不阻塞交互；
+                // 携带 provider：同名模型跨提供商时精确切换（不再落到第一个命中的）
+                switchModel(model.name, 'chat', model.provider).catch((err: unknown) => {
                   const message = toErrorMessage(err, '未知错误');
                   useAppStore.getState().showToast('切换模型失败: ' + message, 'error');
                 });
               }}
-              className={
-                'w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)] transition-colors ' +
-                (model.name === currentModel
+              className={cn(
+                'w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)] transition-colors flex items-center justify-between gap-3',
+                isCurrent(model)
                   ? 'text-blue-600 dark:text-blue-400 font-medium'
-                  : 'text-[var(--color-text-primary)]')
-              }
+                  : 'text-[var(--color-text-primary)]',
+              )}
             >
-              {model.name}
+              <span className="truncate">{model.name}</span>
+              <span className="text-xs text-[var(--color-text-tertiary)] shrink-0">
+                {model.provider}
+              </span>
             </button>
           ))}
         </div>

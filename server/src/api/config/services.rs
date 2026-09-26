@@ -152,28 +152,59 @@ impl ConfigService {
         })
     }
 
-    /// 切换默认聊天模型
-    pub async fn switch_model(&self, model: &str) -> Result<UpdateConfigResponse, ApiError> {
+    /// 切换默认聊天模型。
+    ///
+    /// `provider` 指定时精确匹配该提供商下的模型（同名模型跨提供商消歧）；
+    /// 缺省保持历史语义：第一个拥有该模型的已启用提供商。
+    pub async fn switch_model(
+        &self,
+        model: &str,
+        provider: Option<&str>,
+    ) -> Result<UpdateConfigResponse, ApiError> {
         let mut config = self.state.config().read().await.clone();
 
-        // 查找哪个 provider 拥有此模型
-        let model_ref = config
-            .models
-            .providers
-            .iter()
-            .filter(|p| p.enabled)
-            .find_map(|p| {
-                p.models
+        let model_ref = match provider.map(str::trim).filter(|p| !p.is_empty()) {
+            // 指定提供商：精确匹配（提供商须已启用且包含该模型）
+            Some(provider_name) => {
+                let p = config
+                    .models
+                    .providers
                     .iter()
-                    .find(|m| m.name == model)
-                    .map(|_m| tianyan::config::ModelRef {
-                        provider: p.name.clone(),
-                        model: model.to_string(),
+                    .find(|p| {
+                        p.name == provider_name
+                            && p.enabled
+                            && p.models.iter().any(|m| m.name == model)
                     })
-            })
-            .ok_or_else(|| {
-                ApiError::BadRequest(format!("模型 '{}' 未在任何已启用的提供商中注册", model))
-            })?;
+                    .ok_or_else(|| {
+                        ApiError::BadRequest(format!(
+                            "提供商 '{}' 中未找到模型 '{}'（或提供商未启用）",
+                            provider_name, model
+                        ))
+                    })?;
+                tianyan::config::ModelRef {
+                    provider: p.name.clone(),
+                    model: model.to_string(),
+                }
+            }
+            // 未指定提供商：第一个拥有此模型的已启用提供商
+            None => config
+                .models
+                .providers
+                .iter()
+                .filter(|p| p.enabled)
+                .find_map(|p| {
+                    p.models
+                        .iter()
+                        .find(|m| m.name == model)
+                        .map(|_m| tianyan::config::ModelRef {
+                            provider: p.name.clone(),
+                            model: model.to_string(),
+                        })
+                })
+                .ok_or_else(|| {
+                    ApiError::BadRequest(format!("模型 '{}' 未在任何已启用的提供商中注册", model))
+                })?,
+        };
 
         config.models.preferences.chat = Some(model_ref);
 

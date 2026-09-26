@@ -8,10 +8,16 @@
 import type { StateCreator } from 'zustand';
 import type { ModelInfo } from '@/lib/types';
 
+/** 当前选中的聊天模型（provider+model 复合引用；同名模型跨 provider 的唯一标识）。 */
+export interface SelectedModel {
+  provider: string;
+  model: string;
+}
+
 export interface ModelSlice {
   // Model
-  selectedModel: string | null;
-  setModel: (model: string | null) => void;
+  selectedModel: SelectedModel | null;
+  setModel: (model: SelectedModel | null) => void;
 
   // 会话级思考强度档位（对话时选择，随每次请求下发；值为当前模型声明的档位）
   thinkingEffort: string;

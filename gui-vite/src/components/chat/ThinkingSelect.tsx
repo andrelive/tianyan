@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '@/lib/store';
-import { Brain, ChevronDown, Check } from 'lucide-react';
+import { ChevronDown, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 /** 内置"关闭"档位（不附加思考参数；不属于模型声明，恒提供）。 */
@@ -21,8 +21,14 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
 
   // 当前模型声明的档位值（每个模型自己的；缺省 = 不支持思考 → 隐藏）
+  // provider+model 复合匹配：同名模型跨 provider 时取真正选中项的声明
   const declared: string[] | undefined =
-    chatModels.find((m) => m.name === selectedModel)?.reasoning_efforts ?? undefined;
+    (selectedModel
+      ? chatModels.find(
+          (m) => m.provider === selectedModel.provider && m.name === selectedModel.model,
+        )
+      : undefined
+    )?.reasoning_efforts ?? undefined;
   const supportsThinking =
     !!declared && declared.length > 0 && !(declared.length === 1 && declared[0] === OFF_EFFORT);
 
@@ -56,7 +62,6 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
   if (!supportsThinking) return null;
 
   const current = thinkingEffort;
-  const active = current !== OFF_EFFORT;
 
   return (
     <div ref={ref} className="relative">
@@ -74,7 +79,6 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
             : 'border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]',
         )}
       >
-        <Brain size={14} className={cn(active ? '' : 'opacity-60')} />
         <span>{'思考 ' + current}</span>
         <ChevronDown className={cn('w-3.5 h-3.5 transition-transform', open && 'rotate-180')} />
       </button>

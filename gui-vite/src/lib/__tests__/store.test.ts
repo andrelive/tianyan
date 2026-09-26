@@ -457,11 +457,31 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().currentSessionId).toBeNull();
   });
 
+  // ── Input drafts（每会话输入草稿；ChatInput 页面/会话切换恢复）──
+
+  it('setInputDraft stores per-session drafts, supports functional updates and drops empty ones', () => {
+    useAppStore.getState().setInputDraft('s1', { text: '草稿一', images: [] });
+    expect(useAppStore.getState().inputDrafts['s1']).toEqual({ text: '草稿一', images: [] });
+
+    // 函数式更新：基于最新状态合并（异步回调场景不覆盖并发输入）
+    useAppStore
+      .getState()
+      .setInputDraft('s1', (prev) => ({ ...prev, images: ['data:image/png;base64,x'] }));
+    expect(useAppStore.getState().inputDrafts['s1']).toEqual({
+      text: '草稿一',
+      images: ['data:image/png;base64,x'],
+    });
+
+    // 空草稿删除键（发送后清空——不残留空条目）
+    useAppStore.getState().setInputDraft('s1', { text: '', images: [] });
+    expect('s1' in useAppStore.getState().inputDrafts).toBe(false);
+  });
+
   // ── Model ──
 
   it('setModel updates selectedModel', () => {
-    useAppStore.getState().setModel('gpt-4');
-    expect(useAppStore.getState().selectedModel).toBe('gpt-4');
+    useAppStore.getState().setModel({ provider: 'x', model: 'gpt-4' });
+    expect(useAppStore.getState().selectedModel).toEqual({ provider: 'x', model: 'gpt-4' });
 
     useAppStore.getState().setModel(null);
     expect(useAppStore.getState().selectedModel).toBeNull();

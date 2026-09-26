@@ -18,6 +18,7 @@ import type {
   ChatMessage,
   ToolCallEvent,
 } from '@/lib/types';
+import { messageText } from '@/lib/types';
 import { useChatStream } from '@/hooks/useChatStream';
 import { cancelWhenSessionIdReady } from '@/lib/cancel-pending';
 import { usePolling } from '@/hooks/use-polling';
@@ -126,7 +127,9 @@ export default function ChatPanel() {
     () =>
       lastMessageUsage(
         messages,
-        chatModels.find((m) => m.name === selectedModel)?.context_length ?? liveWindowRef.current,
+        chatModels.find(
+          (m) => m.provider === selectedModel?.provider && m.name === selectedModel?.model,
+        )?.context_length ?? liveWindowRef.current,
       ),
     [messages, chatModels, selectedModel],
   );
@@ -340,7 +343,7 @@ export default function ChatPanel() {
         stream: true,
         temperature: 0.7,
         max_tokens: 2048,
-        model: state.selectedModel,
+        model: state.selectedModel?.model,
         // 会话级思考强度（对话时选择；off 不附加思考参数，仅对支持思考的模型生效）
         thinking: state.thinkingEffort === 'off' ? undefined : state.thinkingEffort,
         // 新会话绑定工作区（工作区 = 会话的父级分组；服务端固化到会话头部）
@@ -432,6 +435,13 @@ export default function ChatPanel() {
         // 迟到响应写回发起会话（用户可能在请求期间切换会话——不得污染）
         st.setSessionMessages(sessionId, resp.messages);
         st.setRollbackMessage(sessionId, target.id);
+        // 回退点用户消息回填该会话草稿（编辑重发语义）：文本 + 图片（data
+        // URL）随回退带出，输入框直接可编辑重发；两者皆空时 setInputDraft
+        // 自动删键（不产生空草稿）
+        st.setInputDraft(sessionId, {
+          text: messageText(target),
+          images: target.images ?? [],
+        });
       } catch (err: unknown) {
         st.showToast(`回退失败: ${controlOpErrorMessage(err)}`, 'error');
         await reloadSession(sessionId);

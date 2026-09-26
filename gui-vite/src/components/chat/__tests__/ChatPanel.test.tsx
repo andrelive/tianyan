@@ -312,8 +312,46 @@ describe('ChatPanel', () => {
       expect(messages).toHaveLength(0);
     });
 
+    // 回退点用户消息回填该会话草稿（编辑重发）：输入框出现被回退的内容
+    await waitFor(() => {
+      expect(useAppStore.getState().inputDrafts['session-1']).toEqual({
+        text: '你好',
+        images: [],
+      });
+    });
+    expect(screen.getByLabelText('输入消息')).toHaveValue('你好');
+
     // 回退后可撤销回退
     expect(screen.getByRole('button', { name: /撤销回退/ })).toBeInTheDocument();
+  });
+
+  it('fills the input draft with the rolled-back message text and images', async () => {
+    // 带图片的用户消息：回退后草稿同时带出文本与 data URL 图片（可编辑重发）
+    const user = userEvent.setup();
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      messages: [
+        {
+          id: 'msg_img',
+          role: 'user',
+          segments: [{ type: 'text', text: '请看这张图' }],
+          images: ['data:image/png;base64,dGVzdA=='],
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    });
+
+    renderChatPanel();
+    await user.click(screen.getByRole('button', { name: /回退到此/ }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().inputDrafts['session-1']).toEqual({
+        text: '请看这张图',
+        images: ['data:image/png;base64,dGVzdA=='],
+      });
+    });
+    // 图片预览随草稿出现在输入区（待发送图片 1）
+    expect(await screen.findByAltText('待发送图片 1')).toBeInTheDocument();
   });
 
   it('undoes a rollback via backend (redo)', async () => {

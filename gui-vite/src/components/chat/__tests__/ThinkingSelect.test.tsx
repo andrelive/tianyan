@@ -10,7 +10,7 @@ beforeEach(() => {
 describe('ThinkingSelect', () => {
   it('renders nothing when the current model declares no reasoning efforts', () => {
     useAppStore.setState({
-      selectedModel: 'plain-model',
+      selectedModel: { provider: 'x', model: 'plain-model' },
       chatModels: [{ name: 'plain-model', provider: 'x', capabilities: ['chat'] }],
     });
     const { container } = render(<ThinkingSelect />);
@@ -19,7 +19,7 @@ describe('ThinkingSelect', () => {
 
   it('lists 关闭 plus declared efforts and applies the selection to the store', () => {
     useAppStore.setState({
-      selectedModel: 'thinking-model',
+      selectedModel: { provider: 'x', model: 'thinking-model' },
       chatModels: [
         {
           name: 'thinking-model',
@@ -41,7 +41,7 @@ describe('ThinkingSelect', () => {
 
   it('resets to 关闭 when the selected effort is not in the new model set', () => {
     useAppStore.setState({
-      selectedModel: 'model-a',
+      selectedModel: { provider: 'x', model: 'model-a' },
       thinkingEffort: 'max',
       chatModels: [
         { name: 'model-a', provider: 'x', capabilities: ['chat'], reasoning_efforts: ['low'] },

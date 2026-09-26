@@ -8,15 +8,20 @@
 
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { createChatSlice, PENDING_SESSION_KEY, type ChatSlice } from './chat-slice';
+import {
+  createChatSlice,
+  PENDING_SESSION_KEY,
+  type ChatSlice,
+  type InputDraft,
+} from './chat-slice';
 import { createUiSlice, type UiSlice } from './ui-slice';
-import { createModelSlice, type ModelSlice } from './model-slice';
+import { createModelSlice, type ModelSlice, type SelectedModel } from './model-slice';
 
 export type AppState = ChatSlice & UiSlice & ModelSlice;
 
 /** 待创建会话的本地消息键（见 chat-slice；保持旧导入面）。 */
 export { PENDING_SESSION_KEY };
-export type { ChatSlice, UiSlice, ModelSlice };
+export type { ChatSlice, UiSlice, ModelSlice, SelectedModel, InputDraft };
 
 export const useAppStore = create<AppState>()(
   persist(

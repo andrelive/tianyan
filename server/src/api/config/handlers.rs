@@ -237,7 +237,7 @@ pub async fn switch_model(
     let service = ConfigService::new(state);
 
     service
-        .switch_model(&request.model)
+        .switch_model(&request.model, request.provider.as_deref())
         .await
         .inspect_err(|e| error!("切换模型失败: {}", e))
         .map(Json)

@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { Send, Square, ImagePlus, X } from 'lucide-react';
 import { cn, formatNumber } from '@/lib/utils';
 import type { StreamUsage } from '@/lib/types';
+import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
 import ModelSelector from './ModelSelector';
 import ThinkingSelect from './ThinkingSelect';
 import ContextRing from './ContextRing';
@@ -34,6 +35,9 @@ const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 /** 单次最多图片数 */
 const MAX_IMAGES = 4;
 
+/** 空图片数组常量（草稿缺省值；引用稳定，避免每次渲染新建数组）。 */
+const EMPTY_IMAGES: string[] = [];
+
 /** 读取 File → data URL；超过大小限制返回 null 并提示 */
 function fileToDataUrl(file: File): Promise<string | null> {
   return new Promise((resolve) => {
@@ -60,8 +64,14 @@ export default function ChatInput({
   stopping = false,
   busy = false,
 }: Props) {
-  const [input, setInput] = useState('');
-  const [images, setImages] = useState<string[]>([]);
+  // 输入草稿按会话缓存在 store（键 = 当前会话 ?? PENDING）：组件卸载
+  // （路由切换）与切换会话都不丢；发送后清空（见 handleSend）。
+  const currentSessionId = useAppStore((s) => s.currentSessionId);
+  const draftKey = currentSessionId ?? PENDING_SESSION_KEY;
+  const draft = useAppStore((s) => s.inputDrafts[draftKey]);
+  const setInputDraft = useAppStore((s) => s.setInputDraft);
+  const input = draft?.text ?? '';
+  const images = draft?.images ?? EMPTY_IMAGES;
   const [rejected, setRejected] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -88,47 +98,51 @@ export default function ChatInput({
   const canSend =
     !isStreaming && !compressing && !busy && (input.trim().length > 0 || images.length > 0);
 
-  const addImages = useCallback(async (files: FileList | File[]) => {
-    const list = Array.from(files).filter((f) => f.type.startsWith('image/'));
-    if (list.length === 0) return;
-    setRejected(null);
+  const addImages = useCallback(
+    async (files: FileList | File[]) => {
+      const list = Array.from(files).filter((f) => f.type.startsWith('image/'));
+      if (list.length === 0) return;
+      setRejected(null);
 
-    // 读取在 setState 之外完成：updater 保持纯函数（StrictMode 双调用安全）
-    const urls: string[] = [];
-    const tooLarge: string[] = [];
-    for (const file of list) {
-      const url = await fileToDataUrl(file);
-      if (url) {
-        urls.push(url);
-      } else {
-        tooLarge.push(file.name);
+      // 读图（IO）在草稿更新之外完成；写入合成见下方函数式更新
+      const urls: string[] = [];
+      const tooLarge: string[] = [];
+      for (const file of list) {
+        const url = await fileToDataUrl(file);
+        if (url) {
+          urls.push(url);
+        } else {
+          tooLarge.push(file.name);
+        }
       }
-    }
-    if (tooLarge.length > 0) {
-      setRejected('图片过大（超过 4MB）：' + tooLarge.join('、'));
-    }
+      if (tooLarge.length > 0) {
+        setRejected('图片过大（超过 4MB）：' + tooLarge.join('、'));
+      }
 
-    setImages((prev) => {
-      const room = MAX_IMAGES - prev.length;
-      if (urls.length > room) {
-        setRejected('最多上传 ' + MAX_IMAGES + ' 张图片');
-      }
-      return [...prev, ...urls.slice(0, Math.max(room, 0))];
-    });
-  }, []);
+      // 函数式更新：读图是异步的，基于最新草稿追加（不覆盖等待期间输入的文字）
+      setInputDraft(draftKey, (prev) => {
+        const room = MAX_IMAGES - prev.images.length;
+        if (urls.length > room) {
+          setRejected('最多上传 ' + MAX_IMAGES + ' 张图片');
+        }
+        return { ...prev, images: [...prev.images, ...urls.slice(0, Math.max(room, 0))] };
+      });
+    },
+    [draftKey, setInputDraft],
+  );
 
   const handleSend = useCallback(() => {
     if (isStreaming || compressing || busy || (input.trim().length === 0 && images.length === 0)) {
       return;
     }
     onSend(input, images);
-    setInput('');
-    setImages([]);
+    // 清空该会话草稿（键删除；已发送内容不再随页面/会话切换恢复）
+    setInputDraft(draftKey, { text: '', images: [] });
     setRejected(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [input, images, isStreaming, compressing, busy, onSend]);
+  }, [input, images, isStreaming, compressing, busy, onSend, draftKey, setInputDraft]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -179,9 +193,15 @@ export default function ChatInput({
     [addImages],
   );
 
-  const removeImage = useCallback((idx: number) => {
-    setImages((prev) => prev.filter((_, i) => i !== idx));
-  }, []);
+  const removeImage = useCallback(
+    (idx: number) => {
+      setInputDraft(draftKey, (prev) => ({
+        ...prev,
+        images: prev.images.filter((_, i) => i !== idx),
+      }));
+    },
+    [draftKey, setInputDraft],
+  );
 
   // 一体式输入卡片（DSH 布局）：字段、模型、思考、图片、圆环、发送都在同一个圆角矩形外框内，
   // 各组件不再独立戴框。
@@ -233,7 +253,7 @@ export default function ChatInput({
         <textarea
           ref={textareaRef}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => setInputDraft(draftKey, (prev) => ({ ...prev, text: e.target.value }))}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder={

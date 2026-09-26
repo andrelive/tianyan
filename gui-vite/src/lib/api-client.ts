@@ -452,6 +452,8 @@ export interface SwitchModelRequest {
   model: string;
   /** 能力类型（默认 'chat'，持久化到 models.preferences.chat）。 */
   capability: 'chat';
+  /** 目标提供商（同名模型跨提供商消歧；缺省后端按名匹配第一个已启用提供商）。 */
+  provider?: string;
 }
 
 export interface SwitchModelResponse {
@@ -463,10 +465,12 @@ export interface SwitchModelResponse {
 export async function switchModel(
   model: string,
   capability: 'chat' = 'chat',
+  provider?: string,
 ): Promise<SwitchModelResponse> {
   return apiPost<SwitchModelResponse>('/config/models/switch', {
     model,
     capability,
+    ...(provider && provider.trim() ? { provider } : {}),
   } satisfies SwitchModelRequest);
 }
 

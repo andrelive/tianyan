@@ -88,6 +88,13 @@ pub struct SwitchModelRequest {
     /// 能力类型。
     #[serde(default)]
     pub capability: Option<ModelCapability>,
+    /// 目标提供商名称（可选）。
+    ///
+    /// 同一模型名注册在多个已启用提供商时（如两个网关都挂载
+    /// `glm-5.3-flash`）用于精确消歧；缺省保持历史语义：
+    /// 第一个拥有该模型的已启用提供商。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 impl SwitchModelRequest {
