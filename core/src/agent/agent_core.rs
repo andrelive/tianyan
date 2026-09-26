@@ -189,6 +189,15 @@ impl Agent {
             .await
     }
 
+    /// 该会话当前是否有活动轮（权威查询——纯通知状态模型的快照校正来源；
+    /// 语义与 [`Self::cancel_active_turn`] 的命中判定一致，只读不置位）。
+    pub async fn has_active_turn(&self, session_id: &str) -> bool {
+        self.agent_loop
+            .tool_registry()
+            .has_active_turn(session_id)
+            .await
+    }
+
     /// 中止**所有**会话的当前活动轮（服务关停主动收尾用——退出不再干等）。
     /// 返回置位的会话数。
     pub async fn cancel_all_active_turns(&self) -> usize {

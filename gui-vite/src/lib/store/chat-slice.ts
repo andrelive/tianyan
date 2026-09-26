@@ -146,7 +146,7 @@ export interface ChatSlice {
   streamStatus: Record<string, StreamStatus>;
   setStreamStatus: (status: StreamStatus, sessionId?: string | null) => void;
   /** 统一事件连接状态（GET /events）。T1-8：断线期间事件全丢，UI 据此提示，
-   *  流状态由 `stream-watchdog` 超时兜底复位。 */
+   *  残留状态由订阅快照的轮状态权威值校正（纯通知模型，无超时推断）。 */
   eventsConnected: boolean;
   setEventsConnected: (connected: boolean) => void;
 }

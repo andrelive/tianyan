@@ -40,11 +40,14 @@ const SNAPSHOT_PAGE: usize = 100;
 /// 体积约束（ADR-035 §8）：长会话全量快照会让"打开会话"付出全链推送 + 渲染
 /// 成本；改为最近 `SNAPSHOT_PAGE` 条 + `has_more`，前端据 `next_before_seq`
 /// 上滚。`seq` 随消息下发（前端按位置对齐）。
+/// `turn` 为该会话的**轮状态权威值**（纯通知状态模型的快照校正来源）：
+/// `{{"state":"running"|"idle","auto":bool}}`。
 pub(crate) fn build_snapshot_payload(
     session_id: &str,
     messages: Vec<(i64, tianyan::common::types::StructuredMessage)>,
     cursor: i64,
     has_more: bool,
+    turn: serde_json::Value,
 ) -> serde_json::Value {
     let next_before_seq = messages.first().map(|(seq, _)| *seq).filter(|seq| *seq > 0);
     let messages = ChatMessage::messages_from_structured_with_seq(messages);
@@ -55,6 +58,7 @@ pub(crate) fn build_snapshot_payload(
         "has_more": has_more,
         "next_before_seq": next_before_seq,
         "messages": messages,
+        "turn": turn,
     })
 }
 
@@ -98,7 +102,27 @@ pub async fn subscribe_events(
         .load_before(&request.session_id, last_seq + 1, SNAPSHOT_PAGE)
         .await?;
     let has_more = page.first().map(|(seq, _)| *seq > 0).unwrap_or(false);
-    let payload = build_snapshot_payload(&request.session_id, page, last_seq.max(0), has_more);
+    // 轮状态权威（快照校正，纯通知模型）：用户轮 = Stream 租约在跑；自动轮
+    // （唤醒轮/后台轮）= Agent 活动轮槽（不经过用户轮租约）。二者互斥（轮锁）。
+    let user_turn = state.session_leases().stream_active(&request.session_id);
+    let auto_turn = if user_turn {
+        false
+    } else {
+        state
+            .agent()
+            .await
+            .has_active_turn(&request.session_id)
+            .await
+    };
+    let turn = if user_turn {
+        serde_json::json!({ "state": "running", "auto": false })
+    } else if auto_turn {
+        serde_json::json!({ "state": "running", "auto": true })
+    } else {
+        serde_json::json!({ "state": "idle", "auto": false })
+    };
+    let payload =
+        build_snapshot_payload(&request.session_id, page, last_seq.max(0), has_more, turn);
     if let Ok(json) = serde_json::to_string(&payload) {
         let _ = state.task_event_tx.send(json);
     }

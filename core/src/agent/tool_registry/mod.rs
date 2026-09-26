@@ -784,6 +784,12 @@ impl ToolRegistry {
         self.delegation_cancel.lock().await.get(session_id).cloned()
     }
 
+    /// 该会话当前是否有注册中的轮（用户轮 / 唤醒轮 / 后台轮）——**权威查询**
+    /// （纯通知状态模型的快照校正来源；与 [`Self::request_cancel`] 同源，只读不置位）。
+    pub async fn has_active_turn(&self, session_id: &str) -> bool {
+        self.delegation_cancel.lock().await.contains_key(session_id)
+    }
+
     /// 置位**所有**会话的取消标志（服务关停时主动中止运行中的轮——
     /// 不让优雅关停被长请求/长工具执行拖住）。返回置位的会话数。
     pub(crate) async fn cancel_all_sessions(&self) -> usize {

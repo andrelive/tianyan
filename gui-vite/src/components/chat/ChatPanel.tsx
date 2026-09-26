@@ -713,7 +713,7 @@ export default function ChatPanel() {
             </div>
           )}
 
-          {/* T1-8：事件连接断开提示（流状态由看门狗超时兜底复位） */}
+          {/* T1-8：事件连接断开提示（状态由订阅快照的轮状态权威值校正） */}
           {!eventsConnected && (
             <div className="flex justify-center pb-1">
               <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full border border-amber-500/40 bg-amber-50/60 dark:bg-amber-950/20 text-amber-700 dark:text-amber-300">

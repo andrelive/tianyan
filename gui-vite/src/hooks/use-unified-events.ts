@@ -32,7 +32,6 @@ import { useEffect, useRef } from 'react';
 import { getApiBase } from '@/lib/api-base';
 import { useAppStore } from '@/lib/store';
 import { handleChatStreamEvent } from '@/lib/chat-stream';
-import { startStreamWatchdog } from '@/lib/stream-watchdog';
 import type { ChatStreamEvent } from '@/lib/types';
 import type { ChatMessage } from '@/lib/types';
 
@@ -172,7 +171,12 @@ export function __resetUnifiedEventsForTest(): void {
 export function applySnapshot(
   sessionId: string,
   messages: ChatMessage[],
-  meta?: { oldestSeq: number | null; hasMore: boolean },
+  meta?: {
+    oldestSeq: number | null;
+    hasMore: boolean;
+    /** 轮状态权威值（随快照帧下发）：纯通知模型的快照校正来源。 */
+    turn?: { state: 'running' | 'idle'; auto: boolean };
+  },
 ): void {
   const st = useAppStore.getState();
   if ((st.streamStatus[sessionId] ?? 'idle') !== 'streaming') {
@@ -180,7 +184,10 @@ export function applySnapshot(
     // ADR-035 §8：快照只含最近 N 条——has_more/游标随快照帧下发，
     // 前端据此启用上滚（loadOlder）。
     if (meta) {
-      st.setSessionMessageMeta(sessionId, meta);
+      st.setSessionMessageMeta(sessionId, {
+        oldestSeq: meta.oldestSeq,
+        hasMore: meta.hasMore,
+      });
     }
   }
 }
@@ -194,9 +201,9 @@ function startUnifiedEvents(): void {
     es.close();
     es = null;
   }
-  // T1-8：流状态看门狗（应用级常驻，与事件连接同生命周期）——收尾事件
-  // 丢在通道/断线里时兜底复位 streaming/running，避免前端永久卡住。
-  startStreamWatchdog();
+  // 纯通知模型（看门狗已移除）：轮状态只由事件驱动 + **快照校正**——事件
+  // 丢在通道/断线里时，任何一次重连（onopen 重放订阅 → 快照帧携带轮状态
+  // 权威值）都会校正，无需超时推断（本地同进程场景没有"后端失联"故障）。
   esBase = getApiBase();
   es = new EventSource(esBase + '/events');
   es.onmessage = (e) => {
@@ -208,10 +215,12 @@ function startUnifiedEvents(): void {
         const raw = ev as unknown as {
           has_more?: boolean;
           next_before_seq?: number | null;
+          turn?: { state: 'running' | 'idle'; auto: boolean };
         };
         applySnapshot(ev.session_id, ev.messages as ChatMessage[], {
           oldestSeq: typeof raw.next_before_seq === 'number' ? raw.next_before_seq : null,
           hasMore: Boolean(raw.has_more),
+          turn: raw.turn,
         });
       }
       // ADR-031：message 广播已移除——消息经流式增量 + 完成事件

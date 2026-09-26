@@ -106,6 +106,12 @@ pub trait AgentCoordinator: Send + Sync {
         0
     }
 
+    /// 该会话当前是否有活动轮（权威查询；纯通知状态模型的快照校正来源）。
+    /// 默认实现返回 false（向导模式/测试桩无需感知）。
+    async fn has_active_turn(&self, _session_id: &str) -> bool {
+        false
+    }
+
     /// 处理用户消息。
     /// - `message` — 完整消息（含可选的多模态图片片段，`content` 为纯文本）。
     /// - `model` — 可选指定模型，None 时使用默认配置。
@@ -258,6 +264,10 @@ impl AgentCoordinator for Agent {
 
     async fn cancel_all_active_turns(&self) -> usize {
         Agent::cancel_all_active_turns(self).await
+    }
+
+    async fn has_active_turn(&self, session_id: &str) -> bool {
+        Agent::has_active_turn(self, session_id).await
     }
 
     async fn process_message(
