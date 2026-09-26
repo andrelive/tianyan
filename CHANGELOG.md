@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.10] - 2026-09-26
+
+### Fixed
+- **`error sending request` 击穿重试（一次网络抖动即用户可见失败）**：`should_retry_transport` 只认超时/连接失败——reqwest 把「连接复用失效 / 传输中断」归类为 request 级错误（两者皆 false）被判「不可重试」，内置 5 次退避形同虚设（ollama cloud 实测 15 次、12 次升级为用户可见轮失败）。修法：重试判定补齐「请求发送阶段失败」（可重试 = 超时/连接失败/发送阶段失败；不可重试 = 构建错误 / 响应体解码中断）+ 连接池空闲超时 90s → 45s（云端前置约 60s 关连接）；穷举判别力单测 + 端到端连接失败用例
+- **回退「吞消息」根因——截断在锁外（ADR-040）**：`delete_message` 的「读链 → save_redo → truncate → 整表重写」在会话锁外分三段——窗口内新轮落库的消息被重写覆盖（库为权威 → 不可自愈）。修法：`WorkingSetRegistry::with_session_exclusive`（取锁 → 锁内 rebuild 最新链 → 闭包）+ 回退/重做/压缩内聚 core（`Agent::rollback_to` / `redo_to`）；**顺序反转「先恢复文件、后截断链」**（失败即整体中止，半成品结构上不可能）；server handler 退化为薄壳
+- **孤立 `tool_calls` 链 → 会话持续 400（ADR-043）**：全库实测 89 处「通知/用户消息插队」+ 11 处「调用悬空」——上游硬要求 `tool_calls` 后紧跟 tool 消息，断裂即 400 且错误链常驻（该会话此后每次请求都失败）。修法：`ContextAssembler::normalize_tool_pairs`（组装视图单点、幂等）：已存在结果提前 / 悬空调用移除并补合成结果 / 孤立结果丢弃；库不动、无迁移
+- **弱网 / 大上下文「首字符一直回不来」（ADR-044 流式双预算）**：`timeout` 一个值同时承担四处职责（reqwest read_timeout + 首字节 + 块间），大上下文预填充 >60s 被当「空闲」误杀 → 重试再被杀。修法：新增 `first_token_timeout`（默认 300s）与块间空闲分离；流式循环分两段判定（首字节前用首包预算、之后切空闲）；传输层 read_timeout 取 `max` 兜底；错误消息区分「首 token 超时」与「流式空闲超时」
+- **回退/重做耗时久（全树哈希 ×2）**：`save_redo` / `restore` 对整棵工作区树逐文件读内容算 SHA256（实测单树 209KB~1.66MB ≈ 数千~数万文件条目）。修法：两处接 `latest.cache.json` 增量缓存（mtime+size 短路——未变更文件不读内容），缓存缺失/损坏自动退化为全量；新增「缓存陈旧不得漏恢复」判别测试
+- **长命令被「显式中断」（看门狗误判）**：流看门狗以「180s 无 chat_stream 事件」判异常，而工具执行期间事件流静默（工具开始/结果之间数分钟无事件）→ 正常运行被复位 + 消息被标记中断 + toast「长时间无响应」。修法：**移除看门狗（ADR-045 纯通知模型）**——轮状态只由事件驱动 + 快照帧携带权威值 `turn:{state,auto}`（用户轮 = Stream 租约 / 自动轮 = Agent 活动轮槽，只读查询）校正
+
+### Added
+- **会话租约（ADR-041）：控制面互斥 + opId 幂等 + 忙语义**：`session_leases` 原地升级 `stream_cancels`——有流在跑时控制面命令**接管**（置位旧流取消标志 + 挡住新流 + 等会话静默）；owner 令牌校验（修掉「任何后到者都能清槽」）；`opId` 台账（双击/重试不二次执行）；409 + 结构化 reason（前端分流文案）
+- **前端控制面状态（ADR-041 波次 4）**：「回退处理中…」进行中反馈 + 输入/按钮禁用 + opId 幂等键 + 忙文案分流 + 回退横幅不再依赖 `streamStatus`（消除被流状态压住的延迟）
+- **快照携带轮状态权威值**（`turn` 字段，ADR-045）：重连/切回会话即校正前端状态
+
+### Changed
+- **写侧收口升级为编译期机制（ADR-039）**：`SessionManager` 移除 5 个破坏性写（写路径唯一入口 = 工作集）；`SessionStore` 破坏性写降 `pub(crate)`；`BroadcastingSessionManager` 删除；`SessionState::add_structured_message` → `push_message`
+- **压缩/重做同入口**：`compress_session` 改走排他事务；server `SessionService::{delete_message, redo_message, persist_messages, resolve_workdir}` 删除
 ## [0.5.9] - 2026-09-23
 
 ### Fixed
