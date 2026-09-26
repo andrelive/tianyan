@@ -312,8 +312,19 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub models: Vec<ModelEntry>,
     /// 请求超时时间（秒），默认 60。
+    ///
+    /// 语义 = **块间空闲超时**：相邻数据块之间允许的最长无数据间隔
+    /// （**非总时长**——流式长输出不受限；见 `common::http` 的读空闲语义）。
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    /// 首 token 预算（秒），默认 300。
+    ///
+    /// 语义 = 「请求发出 → 首个字节 / 事件」的最长等待：覆盖**大上下文
+    /// 预填充**（上游在算 prompt，长时间无任何输出是正常的）与弱网首包。
+    /// 与块间空闲（`timeout`）**独立**——长预填充不等于 provider 挂死；
+    /// 旧实现两者共用一个预算，长预填充被当空闲误杀（首字符一直回不来）。
+    #[serde(default = "default_first_token_timeout")]
+    pub first_token_timeout: u64,
     /// 是否启用此提供商，默认 true。
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -427,6 +438,12 @@ impl ProviderConfig {
         }
         if self.timeout > 3600 {
             return Err("超时时间不能超过 3600 秒".to_string());
+        }
+        if self.first_token_timeout == 0 {
+            return Err("首 token 预算必须大于 0".to_string());
+        }
+        if self.first_token_timeout > 3600 {
+            return Err("首 token 预算不能超过 3600 秒".to_string());
         }
         Ok(())
     }
@@ -600,6 +617,10 @@ pub fn find_provider<'a>(
 
 fn default_timeout() -> u64 {
     60
+}
+
+fn default_first_token_timeout() -> u64 {
+    300
 }
 
 fn default_true() -> bool {
@@ -906,6 +927,7 @@ mod tests {
             api_key: None,
             models: vec![],
             timeout: 60,
+            first_token_timeout: 300,
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
@@ -928,6 +950,7 @@ mod tests {
             api_key: None,
             models: vec![entry],
             timeout: 60,
+            first_token_timeout: 300,
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
@@ -943,6 +966,7 @@ mod tests {
             api_key: Some("sk-test".to_string()),
             models: vec![make_model("gpt-4", vec![ModelCapability::Chat])],
             timeout: 60,
+            first_token_timeout: 300,
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
@@ -959,6 +983,7 @@ mod tests {
             api_key: None,
             models: vec![make_model("gpt-4", vec![ModelCapability::Chat])],
             timeout: 60,
+            first_token_timeout: 300,
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
@@ -975,6 +1000,7 @@ mod tests {
             api_key: None,
             models: vec![],
             timeout: 60,
+            first_token_timeout: 300,
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
@@ -991,6 +1017,7 @@ mod tests {
             api_key: None,
             models: vec![make_model("gpt-4", vec![ModelCapability::Chat])],
             timeout: 60,
+            first_token_timeout: 300,
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
@@ -1008,6 +1035,7 @@ mod tests {
             api_key: Some("${TIANYAN_TEST_KEY2}".to_string()),
             models: vec![],
             timeout: 60,
+            first_token_timeout: 300,
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
@@ -1025,6 +1053,7 @@ mod tests {
             api_key: Some("sk-plain".to_string()),
             models: vec![],
             timeout: 60,
+            first_token_timeout: 300,
             enabled: true,
             headers: HashMap::new(),
             thinking_field: None,
@@ -1042,6 +1071,7 @@ mod tests {
                     endpoint: "https://api.openai.com/v1".to_string(),
                     api_key: Some("sk-o".to_string()),
                     timeout: 60,
+                    first_token_timeout: 300,
                     enabled: true,
                     headers: HashMap::new(),
                     thinking_field: None,
@@ -1059,6 +1089,7 @@ mod tests {
                     endpoint: "https://api.deepseek.com/v1".to_string(),
                     api_key: Some("sk-d".to_string()),
                     timeout: 60,
+                    first_token_timeout: 300,
                     enabled: true,
                     headers: HashMap::new(),
                     thinking_field: None,
@@ -1096,6 +1127,7 @@ mod tests {
                 endpoint: "https://api.openai.com/v1".to_string(),
                 api_key: Some("sk-o".to_string()),
                 timeout: 60,
+                first_token_timeout: 300,
                 enabled: true,
                 headers: HashMap::new(),
                 thinking_field: None,
@@ -1133,6 +1165,7 @@ mod tests {
                 endpoint: "https://x.com".to_string(),
                 api_key: Some("k".to_string()),
                 timeout: 60,
+                first_token_timeout: 300,
                 enabled: true,
                 headers: HashMap::new(),
                 thinking_field: None,

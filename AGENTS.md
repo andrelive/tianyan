@@ -113,6 +113,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-039: 会话写侧收口强制化](docs/architecture/decisions/039-session-write-side-enforcement.md) — 写权限面收窄：`SessionManager` trait 移除 5 个破坏性写（只留读 + 创建），写路径唯一入口 = 工作集；`BroadcastingSessionManager` 装饰器删除；fallback 直写删除（未装配 = 装配缺陷）；净删除 722 行
 - [ADR-040: 会话排他写事务](docs/architecture/decisions/040-session-exclusive-write-transaction.md) — 会话单写者：`WorkingSetRegistry::with_session_exclusive`（取锁 → 锁内 `rebuild` 最新链 → 闭包）+ 回退/重做/压缩内聚 core（`Agent::rollback_to`/`redo_to`，`RollbackOutcome`）；回退「先恢复文件、后截断链」（全或无）；取消/等待移出锁外先行；server handler 退化为薄壳
 - [ADR-043: 组装层工具对连续性规范化](docs/architecture/decisions/043-tool-pair-continuity.md) — 请求视图单点规范化（`ContextAssembler::normalize_tool_pairs`）：已存在结果提前 / 悬空调用移除并补合成结果 / 孤立结果丢弃；根治「孤立 tool_calls 链 → 会话持续 400」（全库实测 89 处插队 + 11 处悬空）；库不动、无迁移、幂等、前缀缓存不受影响
+- [ADR-044: 流式双预算](docs/architecture/decisions/044-stream-dual-budget.md) — 首 token 预算（`first_token_timeout`，默认 300s）与块间空闲（`timeout`）分离：首字节前用首包预算（覆盖大上下文预填充/弱网首包）、之后切空闲（心跳重置）；传输层 `read_timeout` 取 `max` 作兜底（否则先于显式判定掐断长预填充）；错误消息区分「首 token 超时」与「流式空闲超时」
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 

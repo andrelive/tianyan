@@ -241,6 +241,7 @@ mod tests {
             api_key: Some("k".to_string()),
             models: vec![],
             timeout: 5,
+            first_token_timeout: 300,
             enabled: true,
             headers: std::collections::HashMap::new(),
             thinking_field: None,
@@ -399,6 +400,7 @@ mod tests {
                 ..Default::default()
             }],
             timeout: 5,
+            first_token_timeout: 300,
             enabled: true,
             headers: std::collections::HashMap::new(),
             thinking_field: None,

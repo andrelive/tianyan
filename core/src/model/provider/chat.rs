@@ -310,11 +310,13 @@ impl AsyncOpenAIClient {
         let mut byte_stream = response.bytes_stream();
         let (tx, rx) = mpsc::channel(100);
         let read_idle = self.read_idle;
+        let first_token = self.first_token;
         // 方言在 spawn 前取出（与 read_idle 同款：闭包内不再触达 self）
         let dialect = self.dialect;
 
         tokio::spawn(async move {
             let mut buf: Vec<u8> = Vec::new();
+            let mut first_byte_seen = false;
             loop {
                 // 空闲超时：相邻两块之间静默超过 provider timeout 即报错——
                 // 活跃流（持续吐块）总时长不受限；纯传输层 read_timeout
@@ -323,16 +325,31 @@ impl AsyncOpenAIClient {
                 // 取消传导（结构性取消的最后一环）：接收端 drop（用户停止 /
                 // 消费者取消）→ `tx.closed()` 立即就绪 → 退出读取并断开连接，
                 // 不等下一块数据或空闲超时。
+                // 双预算（ADR-044）：首字节前用**首 token 预算**（覆盖大上下文
+                // 预填充——上游在算 prompt，长时间无输出是正常的）；首字节后切
+                // **块间空闲**（增量/心跳会重置）。旧实现共用一个预算：长预填充
+                // 被当空闲误杀 → 重试再被杀（「首字符一直回不来」）。
+                let budget = if first_byte_seen {
+                    read_idle
+                } else {
+                    first_token
+                };
                 let next = tokio::select! {
-                    r = tokio::time::timeout(read_idle, byte_stream.next()) => match r {
+                    r = tokio::time::timeout(budget, byte_stream.next()) => match r {
                         Ok(item) => item,
                         Err(_) => {
-                            let _ = tx
-                                .send(Err(TianyanError::Custom(format!(
+                            let message = if first_byte_seen {
+                                format!(
                                     "模型服务错误：流式读取空闲超时（{}s 无数据）",
                                     read_idle.as_secs()
-                                ))))
-                                .await;
+                                )
+                            } else {
+                                format!(
+                                    "模型服务错误：首 token 超时（{}s 内无任何输出——预填充超预算或服务不可达）",
+                                    first_token.as_secs()
+                                )
+                            };
+                            let _ = tx.send(Err(TianyanError::Custom(message))).await;
                             return;
                         }
                     },
@@ -340,6 +357,7 @@ impl AsyncOpenAIClient {
                 };
                 match next {
                     Some(Ok(bytes)) => {
+                        first_byte_seen = true;
                         buf.extend_from_slice(&bytes);
                         drain_sse_lines(&mut buf, &tx, dialect).await;
                     }
@@ -1261,7 +1279,8 @@ mod stream_robustness_tests {
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"network_error\"}]}\n\n".to_string(),
             false,
         );
-        let client = AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1).unwrap();
+        let client =
+            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
 
         let mut rx = client
             .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
@@ -1288,7 +1307,8 @@ mod stream_robustness_tests {
             chunk.len() + 200
         );
         let addr = spawn_mock_sse_with_body(listener, header, chunk, true);
-        let client = AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1).unwrap();
+        let client =
+            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
 
         let started = std::time::Instant::now();
         let mut rx = client
@@ -1308,6 +1328,90 @@ mod stream_robustness_tests {
         );
     }
 
+    /// 双预算（ADR-044）：**首包预算**独立于块间空闲——大上下文预填充 / 弱网下
+    /// 首个字节可能远晚于 read_idle 到达，那是正常计算而非挂死。
+    /// 判别力：本测试在旧实现（统一预算）下必红——首块 1.5s > read_idle 1s。
+    #[tokio::test]
+    async fn test_first_token_budget_tolerates_slow_prefill() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let chunk: String = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n".to_string();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+            chunk.len()
+        );
+        let body = chunk.clone();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // 先收请求（读一次）——不读就写响应会让客户端在发送阶段失败
+            // （reqwest `error sending request`，重试 31s 后才暴露）
+            let mut req_buf = [0u8; 8192];
+            let _ = stream.read(&mut req_buf);
+            // 模拟预填充：1.5s 后才有首个字节（> read_idle=1s，< first_token=4s）
+            std::thread::sleep(Duration::from_millis(1500));
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+            let mut buf = [0u8; 64];
+            let _ = stream.read(&mut buf);
+            std::thread::sleep(Duration::from_secs(3));
+        });
+        // read_idle = 1s（旧实现必杀）；首包预算 = 4s
+        let client =
+            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 4).unwrap();
+        let mut rx = client
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .await
+            .unwrap();
+
+        let first = rx.recv().await.expect("首块应在首包预算内送达");
+        let chunk = first.expect("首块应解析成功");
+        assert_eq!(chunk.choices.len(), 1, "预填充后的首块内容应完整");
+    }
+
+    /// 首包预算超时：错误消息必须明确指向「首 token 超时」——区别于块间空闲
+    /// （让用户能分辨「预填充超预算/不可达」与「流中途挂死」）。
+    #[tokio::test]
+    async fn test_first_token_timeout_message_distinct_from_idle() {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // 先收请求（读一次）——不读就写响应会让客户端在发送阶段失败
+            let mut req_buf = [0u8; 8192];
+            let _ = stream.read(&mut req_buf);
+            // 返回响应头后**永不发送任何字节**（模拟服务端挂死 / 不可达）
+            let header =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 100\r\n\r\n";
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.flush();
+            std::thread::sleep(Duration::from_secs(5));
+        });
+        // read_idle = 30s（若误用空闲预算，测试会明显变慢）；首包预算 = 1s
+        let client =
+            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 30, 1).unwrap();
+
+        let started = std::time::Instant::now();
+        let mut rx = client
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .await
+            .unwrap();
+
+        let item = rx.recv().await.expect("应有错误项");
+        let err = item.expect_err("首包超时应报错");
+        assert!(
+            err.to_string().contains("首 token 超时"),
+            "错误消息应指向首 token 预算: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(2500),
+            "应在首包预算（1s）附近失败，而非空闲预算（30s）：{:?}",
+            started.elapsed()
+        );
+    }
+
     /// include_usage=true 的流尾：`{"choices":[],"usage":{...}}` 块（OpenAI 规范
     /// 附加在 [DONE] 之前）——usage 必须保留下发（上下文占用/校准依赖它），
     /// 不能被当作"正常流尾"静默丢弃（曾导致 ollama 等规范网关流式 usage 永远丢失）。
@@ -1316,7 +1420,8 @@ mod stream_robustness_tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let body = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":123,\"completion_tokens\":45,\"total_tokens\":168}}\n\ndata: [DONE]\n\n".to_string();
         let addr = spawn_mock_sse(listener, body, false);
-        let client = AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1).unwrap();
+        let client =
+            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
 
         let mut rx = client
             .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
@@ -1349,7 +1454,8 @@ mod stream_robustness_tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let body = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[],\"cost\":\"0.001\"}\n\ndata: [DONE]\n\n".to_string();
         let addr = spawn_mock_sse(listener, body, false);
-        let client = AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1).unwrap();
+        let client =
+            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
 
         let mut rx = client
             .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
@@ -1398,7 +1504,8 @@ mod stream_robustness_tests {
 
         // read_idle 放大到 30s：确保"旧实现等待空闲超时"的场景在测试窗口
         // （2s）内不会自然退出（本测试在旧实现下必红）。
-        let client = AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 30).unwrap();
+        let client =
+            AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 30, 300).unwrap();
         let mut rx = client
             .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
             .await

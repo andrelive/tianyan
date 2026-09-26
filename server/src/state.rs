@@ -879,6 +879,7 @@ mod tests {
             api_key: Some("sk-test".to_string()),
             models,
             timeout: 60,
+            first_token_timeout: 300,
             enabled: true,
             headers: std::collections::HashMap::new(),
             thinking_field: None,

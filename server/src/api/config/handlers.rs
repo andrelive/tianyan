@@ -128,8 +128,9 @@ async fn test_model_connection(
     api_key: &str,
     model: &str,
 ) -> Result<Vec<String>, String> {
-    let client = tianyan::model::AsyncOpenAIClient::new("test-connection", endpoint, api_key, 30)
-        .map_err(|e| format!("创建客户端失败: {}", e))?;
+    let client =
+        tianyan::model::AsyncOpenAIClient::new("test-connection", endpoint, api_key, 30, 300)
+            .map_err(|e| format!("创建客户端失败: {}", e))?;
 
     let request = tianyan::model::types::ChatCompletionRequest::new(
         model.to_string(),

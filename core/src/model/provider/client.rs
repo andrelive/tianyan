@@ -28,6 +28,9 @@ pub struct AsyncOpenAIClient {
     /// 语义为"空闲"而非"总时长"——长思维链生成可持续数分钟，总时长
     /// 限制会把活跃长流在中途掐断（0.2.3 会话静默中断根因之一）。
     pub(crate) read_idle: std::time::Duration,
+    /// 首 token 预算（ADR-044）：请求发出 → 首个字节的最长等待——覆盖大
+    /// 上下文预填充与弱网首包；与 `read_idle`（块间空闲）独立。
+    pub(crate) first_token: std::time::Duration,
     /// provider wire 方言（差异判定**单点**）：思考字段名 / 缓存命中字段 /
     /// 思考参数形态 / 嵌入 usage 形状。
     ///
@@ -57,12 +60,16 @@ impl AsyncOpenAIClient {
             oa_config = oa_config.with_api_key(&api_key);
         }
 
+        // 双预算（ADR-044）：块间空闲（`timeout`）与首 token 预算
+        // （`first_token_timeout`）**分开**；传输层 read_timeout 取两者中
+        // 更宽的作兜底——reqwest 的读超时同时约束「等响应头」与「字节间」，
+        // 若取小值会在我们的显式判定（分两段）之前先掐断长预填充。
+        // （读空闲语义：非总请求时长——流式长输出不受限，见 ADR-023 修正。）
+        let read_idle = std::time::Duration::from_secs(config.timeout);
+        let first_token = std::time::Duration::from_secs(config.first_token_timeout);
         let http_client =
             crate::common::http::build_http_client(crate::common::http::HttpClientSpec {
-                // 读空闲超时（字节间无数据的最长间隔）——非总请求时长：
-                // 流式思维链+长正文可持续数分钟，总时长限制会把长生成
-                // 在中途掐断（0.2.3 会话静默中断的根因，见 ADR-023 后续排查）
-                timeout: std::time::Duration::from_secs(config.timeout),
+                timeout: first_token.max(read_idle),
                 connect_timeout: std::time::Duration::from_secs(30),
                 user_agent: None,
                 // 模型 API 端点来自用户配置（可信），保持默认重定向跟随
@@ -86,7 +93,8 @@ impl AsyncOpenAIClient {
             api_key,
             headers: config.headers.clone(),
             retry_policy: RetryPolicy::default(),
-            read_idle: std::time::Duration::from_secs(config.timeout),
+            read_idle,
+            first_token,
             dialect: config.resolve_dialect(),
             model_thinking_params,
         })
@@ -106,6 +114,7 @@ impl AsyncOpenAIClient {
         endpoint: impl Into<String>,
         api_key: impl Into<String>,
         timeout_secs: u64,
+        first_token_timeout_secs: u64,
     ) -> Result<Self> {
         let provider = ProviderConfig {
             name: name.into(),
@@ -113,6 +122,7 @@ impl AsyncOpenAIClient {
             api_key: Some(api_key.into()),
             models: vec![],
             timeout: timeout_secs,
+            first_token_timeout: first_token_timeout_secs,
             enabled: true,
             headers: std::collections::HashMap::new(),
             thinking_field: None,
@@ -149,6 +159,7 @@ mod tests {
             api_key: api_key.map(|s| s.to_string()),
             models: vec![],
             timeout: 30,
+            first_token_timeout: 300,
             enabled: true,
             headers: std::collections::HashMap::new(),
             thinking_field: None,

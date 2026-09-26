@@ -42,6 +42,7 @@ pub fn test_provider(name: &str) -> ProviderConfig {
             },
         ],
         timeout: 30,
+        first_token_timeout: 300,
         enabled: true,
         headers: std::collections::HashMap::new(),
         thinking_field: None,
