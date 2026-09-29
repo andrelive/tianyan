@@ -205,6 +205,7 @@ export default function ModelsTab({
           resolvedSpecs={config.resolvedSpecs}
           modelCatalog={config.modelCatalog}
           resolvedEndpoints={config.resolvedEndpoints}
+          providerPresets={config.providerPresets}
           onUpdateProvider={(field, value) => onUpdateProvider(pi, field, value)}
           onRemoveProvider={() => onRemoveProvider(pi)}
           onTestConnection={() => onTestConnection(pi)}

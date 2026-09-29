@@ -68,6 +68,35 @@ fn resolve_all_endpoints(models: &ModelsConfig) -> HashMap<String, String> {
         .collect()
 }
 
+/// 解析配置中全部 provider 的预置命中信息（ADR-046，advisory：只读展示
+/// "内置预置生效"）；未命中的 provider 不出现。动态头以实际生效集合为准
+/// （显式覆盖后的结果）。
+fn resolve_all_preset_hits(
+    models: &ModelsConfig,
+) -> HashMap<String, crate::api::config::types::ProviderPresetHit> {
+    models
+        .providers
+        .iter()
+        .filter_map(|p| {
+            p.matched_preset().map(|preset| {
+                (
+                    p.name.clone(),
+                    crate::api::config::types::ProviderPresetHit {
+                        preset_id: preset.id.to_string(),
+                        display_name: preset.display_name.to_string(),
+                        dynamic_headers: p
+                            .resolve_dynamic_headers()
+                            .iter()
+                            .map(|binding| binding.name.clone())
+                            .collect(),
+                        endpoint_from_preset: p.endpoint.trim().is_empty(),
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
 /// 配置服务，管理应用配置的读取、保存与热重载
 pub struct ConfigService {
     state: Arc<AppState>,
@@ -86,6 +115,7 @@ impl ConfigService {
             model_specs: Some(resolve_all_model_specs(&config.models)),
             model_catalog: Some(resolve_all_model_catalogs(&config.models)),
             resolved_endpoints: Some(resolve_all_endpoints(&config.models)),
+            provider_presets: Some(resolve_all_preset_hits(&config.models)),
             config,
         })
     }

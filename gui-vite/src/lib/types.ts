@@ -749,6 +749,8 @@ export interface ConfigState {
   modelCatalog: Record<string, ModelCatalogInfo>;
   /** 后端解析出的提供商生效端点（ADR-046：显式 > 预置），key = provider name。旧后端无该字段时为空对象。 */
   resolvedEndpoints: Record<string, string>;
+  /** 后端解析出的预置命中信息（ADR-046，advisory），key = provider name。旧后端无该字段时为空对象。 */
+  providerPresets: Record<string, ProviderPresetHit>;
 
   // -- Agent config (agent.*) --
   default_top_k: number;
@@ -1118,6 +1120,18 @@ export interface ProviderPresetInfo {
 
 export interface ProviderPresetsResponse {
   presets: ProviderPresetInfo[];
+}
+
+/** 单个 provider 的预置命中信息（ADR-046；advisory 只读展示"内置预置生效"）。 */
+export interface ProviderPresetHit {
+  /** 命中的预置 id（如 "opencode-go"）。 */
+  preset_id: string;
+  /** 预置显示名（如 "OpenCode Go"）。 */
+  display_name: string;
+  /** 实际生效的动态请求头名（如 ["x-opencode-session"]）。 */
+  dynamic_headers: string[];
+  /** 端点是否来自预置（endpoint 留空时）。 */
+  endpoint_from_preset: boolean;
 }
 
 export interface McpServerEntry {

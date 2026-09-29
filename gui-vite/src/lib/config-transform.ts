@@ -21,6 +21,7 @@ import type {
   ModelPreferencesState,
   ModelRef,
   ResolvedModelSpec,
+  ProviderPresetHit,
 } from '@/lib/types';
 
 /* ─────── Default values ─────── */
@@ -65,6 +66,7 @@ export function emptyConfigState(): ConfigState {
     resolvedSpecs: {},
     modelCatalog: {},
     resolvedEndpoints: {},
+    providerPresets: {},
     mcpServers: [],
     web_enabled: true,
     search_backend: 'duckduckgo',
@@ -287,6 +289,8 @@ export interface BackendConfigResponse {
   model_catalog?: Record<string, ModelCatalogInfo>;
   /** 后端解析出的提供商生效端点（显式 > 预置），key = provider name。旧后端可能缺省。 */
   resolved_endpoints?: Record<string, string>;
+  /** 后端解析出的预置命中信息（ADR-046，advisory），key = provider name。旧后端可能缺省。 */
+  provider_presets?: Record<string, ProviderPresetHit>;
 }
 
 /* ─────── Form → Backend (ConfigState → { config: TianyanConfig }) ─────── */
@@ -463,6 +467,7 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     resolvedSpecs: response.model_specs ?? {},
     modelCatalog: response.model_catalog ?? {},
     resolvedEndpoints: response.resolved_endpoints ?? {},
+    providerPresets: response.provider_presets ?? {},
     preferences: {
       chat: models.preferences?.chat ?? null,
       embedding: models.preferences?.embedding ?? null,

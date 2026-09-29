@@ -28,6 +28,24 @@ pub struct ConfigResponse {
     /// 以兼容旧客户端）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_endpoints: Option<HashMap<String, String>>,
+    /// 各 provider 的预置命中信息（advisory：只读展示"内置预置生效"；
+    /// key = provider name；未命中的 provider 不出现；缺省时省略该字段
+    /// 以兼容旧客户端）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_presets: Option<HashMap<String, ProviderPresetHit>>,
+}
+
+/// 单个 provider 的预置命中信息（ADR-046，advisory）。
+#[derive(Debug, Serialize)]
+pub struct ProviderPresetHit {
+    /// 命中的预置 id（如 "opencode-go"）。
+    pub preset_id: String,
+    /// 预置显示名（如 "OpenCode Go"）。
+    pub display_name: String,
+    /// 实际生效的动态请求头名（如 ["x-opencode-session"]；含显式覆盖后的结果）。
+    pub dynamic_headers: Vec<String>,
+    /// 端点是否来自预置（用户配置 endpoint 留空时为 true）。
+    pub endpoint_from_preset: bool,
 }
 
 /// 更新配置请求 — 接受完整的 TianyanConfig
@@ -61,6 +79,7 @@ mod tests {
             model_specs: None,
             model_catalog: None,
             resolved_endpoints: None,
+            provider_presets: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("agent"));
@@ -84,6 +103,7 @@ mod tests {
             model_specs: Some(specs),
             model_catalog: None,
             resolved_endpoints: None,
+            provider_presets: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"model_specs\""));
@@ -94,6 +114,7 @@ mod tests {
             model_specs: None,
             model_catalog: None,
             resolved_endpoints: None,
+            provider_presets: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(!json.contains("model_specs"));
@@ -113,6 +134,7 @@ mod tests {
             model_specs: None,
             model_catalog: None,
             resolved_endpoints: Some(endpoints),
+            provider_presets: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"resolved_endpoints\""));
@@ -124,9 +146,46 @@ mod tests {
             model_specs: None,
             model_catalog: None,
             resolved_endpoints: None,
+            provider_presets: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(!json.contains("resolved_endpoints"));
+    }
+    #[test]
+    fn test_config_response_provider_presets_field() {
+        let config = TianyanConfig::default();
+        // 填充时序列化含 provider_presets（key = provider name；advisory 命中信息）
+        let mut hits = HashMap::new();
+        hits.insert(
+            "opencode-go".to_string(),
+            ProviderPresetHit {
+                preset_id: "opencode-go".to_string(),
+                display_name: "OpenCode Go".to_string(),
+                dynamic_headers: vec!["x-opencode-session".to_string()],
+                endpoint_from_preset: false,
+            },
+        );
+        let response = ConfigResponse {
+            config: config.clone(),
+            model_specs: None,
+            model_catalog: None,
+            resolved_endpoints: None,
+            provider_presets: Some(hits),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"provider_presets\""));
+        assert!(json.contains("x-opencode-session"));
+
+        // 缺省时省略该字段（旧客户端兼容）
+        let response = ConfigResponse {
+            config,
+            model_specs: None,
+            model_catalog: None,
+            resolved_endpoints: None,
+            provider_presets: None,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(!json.contains("provider_presets"));
     }
 
     #[test]

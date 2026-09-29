@@ -89,6 +89,10 @@ endpoint 可留空（配置文件更简洁、端点跟随预置更新）；**未
 可见性由 `GET /api/v1/config` 下发的 `resolved_endpoints`（key = provider name）保证：
 UI 在端点输入框留空时只读展示"留空 = 使用预置端点：xxx"，扫描 / 测试连接均改用生效端点。
 
+同一响应还下发 `provider_presets`（预置命中信息：预置显示名 / 实际生效的动态头 /
+端点来源）——UI 在 provider 卡片渲染「⚡ 内置预置：xxx」徽章。**预置在运行时静默
+生效，但在 UI 上绝不隐形**（回答"用户怎么知道这是内置的"的可见性问题）。
+
 ## 影响
 
 - **非流式路径统一手写 JSON 层**（对齐流式 `create_raw_stream`）：

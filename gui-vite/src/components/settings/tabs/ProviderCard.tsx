@@ -9,6 +9,7 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronRight,
+  Zap,
 } from 'lucide-react';
 import { Toggle, FieldRow, INPUT_CLASS } from './shared';
 import type {
@@ -19,6 +20,7 @@ import type {
   DiscoveredModelInfo,
   ProviderProtocol,
   ResolvedModelSpec,
+  ProviderPresetHit,
   ThinkingField,
 } from '@/lib/types';
 import { MODEL_CAPABILITIES, MODEL_CAPABILITY_LABELS } from '@/lib/types';
@@ -447,6 +449,8 @@ export interface ProviderCardProps {
   modelCatalog: Record<string, ModelCatalogInfo>;
   /** 后端解析出的生效端点（ADR-046：显式 > 预置），key = provider name。 */
   resolvedEndpoints: Record<string, string>;
+  /** 后端解析出的预置命中信息（ADR-046，advisory），key = provider name。 */
+  providerPresets: Record<string, ProviderPresetHit>;
   onUpdateProvider: (field: keyof ProviderConfigState, value: unknown) => void;
   onRemoveProvider: () => void;
   onTestConnection: () => void;
@@ -469,6 +473,7 @@ export default function ProviderCard({
   resolvedSpecs,
   modelCatalog,
   resolvedEndpoints,
+  providerPresets,
   onUpdateProvider,
   onRemoveProvider,
   onTestConnection,
@@ -481,6 +486,7 @@ export default function ProviderCard({
   onUpdateModel,
   onToggleModelCapability,
 }: ProviderCardProps) {
+  const presetHit = providerPresets[p.name];
   return (
     <div className="border border-[var(--color-border)] rounded-lg p-4 mb-3 space-y-3">
       <div className="grid grid-cols-[1fr_1fr_auto_auto] gap-3 items-end">
@@ -492,6 +498,18 @@ export default function ProviderCard({
             className={INPUT_CLASS}
             placeholder="openai"
           />
+          {presetHit && (
+            <div className="flex items-center gap-1 text-xs text-accent mt-1">
+              <Zap size={12} className="shrink-0" />
+              <span>
+                内置预置：{presetHit.display_name}
+                {presetHit.dynamic_headers.length > 0
+                  ? ` · 自动注入 ${presetHit.dynamic_headers.join('、')}`
+                  : ''}
+                {presetHit.endpoint_from_preset ? ' · 端点来自预置' : ''}
+              </span>
+            </div>
+          )}
         </FieldRow>
         <FieldRow label="端点 URL">
           <input

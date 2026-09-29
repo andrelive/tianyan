@@ -234,6 +234,26 @@ describe('fromBackendConfig edge cases', () => {
     expect(state2.resolvedEndpoints).toEqual({});
   });
 
+  it('passes through provider_presets from backend (ADR-046)', () => {
+    const state = fromBackendConfig({
+      config: { models: { providers: [], preferences: {} } },
+      provider_presets: {
+        'opencode-go': {
+          preset_id: 'opencode-go',
+          display_name: 'OpenCode Go',
+          dynamic_headers: ['x-opencode-session'],
+          endpoint_from_preset: false,
+        },
+      },
+    } as unknown as BackendConfigResponse);
+    expect(state.providerPresets['opencode-go'].display_name).toBe('OpenCode Go');
+    expect(state.providerPresets['opencode-go'].dynamic_headers).toEqual(['x-opencode-session']);
+
+    // 旧后端缺省 → 空对象（不破坏）
+    const state2 = fromBackendConfig(makeResponse({ models: { providers: [], preferences: {} } }));
+    expect(state2.providerPresets).toEqual({});
+  });
+
   it('keeps model_specs and model_catalog passthrough', () => {
     const state = fromBackendConfig({
       config: { models: { providers: [], preferences: {} } },
