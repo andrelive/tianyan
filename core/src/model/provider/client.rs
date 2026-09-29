@@ -45,7 +45,8 @@ pub struct AsyncOpenAIClient {
     /// 不同），无法只在 provider 级方言里表达；构造时收集一次，请求路径零判定。
     pub(crate) model_thinking_params: std::collections::HashMap<String, ThinkingParam>,
     /// 动态请求头绑定（ADR-046）：构造时解析一次（header 名 → `HeaderName` +
-    /// 受控变量源），请求路径零判定；变量无值（非会话请求）→ 跳过该头，不失败。
+    /// 受控变量源），请求路径零判定；变量无值（非会话请求）→ 注入点用
+    /// `HeaderSource::NON_SESSION_FALLBACK` 兜底（网关可能要求该头必须存在）。
     pub(crate) dynamic_headers: Vec<(reqwest::header::HeaderName, crate::config::HeaderSource)>,
 }
 

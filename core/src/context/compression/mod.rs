@@ -210,7 +210,8 @@ impl ContextCompressor {
     ///
     /// - `messages` - 原始消息列表
     pub async fn compress(&mut self, messages: &[Message]) -> Result<CompressionResult> {
-        self.compress_with_existing_summary(messages, None).await
+        self.compress_with_existing_summary(messages, None, None)
+            .await
     }
 
     /// 压缩消息列表（可携带**本会话**已有摘要 → 增量合并；否则全量摘要）。
@@ -220,10 +221,15 @@ impl ContextCompressor {
     /// （`ContextPipeline::extract_marker_summary`）——天然按会话隔离；
     /// 空摘要（模型空响应）由上层丢弃、不落库压缩点，因此不会成为
     /// 下一次的"已有摘要"。
+    ///
+    /// `session_id`：摘要请求的动态头求值输入（ADR-046——如 opencode 的
+    /// `x-opencode-session`，缺失会被网关 400 拒收）；`None` = 无会话上下文
+    /// （由发送单点的稳定兜底值兜住）。
     pub async fn compress_with_existing_summary(
         &mut self,
         messages: &[Message],
         existing_summary: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<CompressionResult> {
         if messages.is_empty() {
             let zero = self.estimator.estimate_messages(messages);
@@ -242,7 +248,7 @@ impl ContextCompressor {
         let (compressed_messages, summary, summary_usage) = match self.config.strategy {
             CompressionStrategy::Summarize => {
                 let (msgs, s, u) = self
-                    .compress_by_summarization(messages, existing_summary)
+                    .compress_by_summarization(messages, existing_summary, session_id)
                     .await?;
                 (msgs, s, u)
             }
@@ -251,7 +257,9 @@ impl ContextCompressor {
                 (msgs, s, TokenUsage::default())
             }
             CompressionStrategy::Hybrid => {
-                let (msgs, s, u) = self.compress_hybrid(messages, existing_summary).await?;
+                let (msgs, s, u) = self
+                    .compress_hybrid(messages, existing_summary, session_id)
+                    .await?;
                 (msgs, s, u)
             }
         };
@@ -271,13 +279,15 @@ impl ContextCompressor {
         &mut self,
         messages: &[Message],
         existing_summary: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<(Vec<Message>, String, TokenUsage)> {
         // 本会话已有摘要（来自会话链最后一个压缩点）→ 增量合并；否则全量摘要
         let (summary, usage) = match existing_summary {
             Some(existing) if !existing.trim().is_empty() => {
-                self.incremental_summarize(existing, messages).await?
+                self.incremental_summarize(existing, messages, session_id)
+                    .await?
             }
-            _ => self.summarize(messages).await?,
+            _ => self.summarize(messages, session_id).await?,
         };
 
         let summary_message = Message::system(format!(
@@ -288,7 +298,11 @@ impl ContextCompressor {
         Ok((vec![summary_message], summary, usage))
     }
 
-    async fn summarize(&self, messages: &[Message]) -> Result<(String, TokenUsage)> {
+    async fn summarize(
+        &self,
+        messages: &[Message],
+        session_id: Option<&str>,
+    ) -> Result<(String, TokenUsage)> {
         if messages.is_empty() {
             return Ok((String::new(), TokenUsage::default()));
         }
@@ -303,7 +317,7 @@ impl ContextCompressor {
             .replace("{conversation}", &conversation)
             .replace("{max_tokens}", &self.config.max_summary_tokens.to_string());
 
-        self.complete_summary(prompt).await
+        self.complete_summary(prompt, session_id).await
     }
 
     /// LLM 增量摘要。
@@ -311,6 +325,7 @@ impl ContextCompressor {
         &self,
         existing_summary: &str,
         new_messages: &[Message],
+        session_id: Option<&str>,
     ) -> Result<(String, TokenUsage)> {
         if new_messages.is_empty() {
             return Ok((existing_summary.to_string(), TokenUsage::default()));
@@ -326,7 +341,7 @@ impl ContextCompressor {
             .replace("{existing_summary}", existing_summary)
             .replace("{new_conversation}", &new_conversation)
             .replace("{max_tokens}", &self.config.max_summary_tokens.to_string());
-        self.complete_summary(prompt).await
+        self.complete_summary(prompt, session_id).await
     }
 
     /// 摘要补全：空响应时重试一次（与 AgentLoop 空响应重试同构——
@@ -334,14 +349,20 @@ impl ContextCompressor {
     /// 落库、上下文继续增长，直到下一次轮末重试）。重试仍空则返回
     /// 空摘要，由上层丢弃并告警。两次请求的真实用量合并返回——
     /// 压缩消耗不因重试而丢失入账。
-    async fn complete_summary(&self, prompt: String) -> Result<(String, TokenUsage)> {
-        let (text, first_usage) = self.complete_summary_once(prompt.clone()).await?;
+    async fn complete_summary(
+        &self,
+        prompt: String,
+        session_id: Option<&str>,
+    ) -> Result<(String, TokenUsage)> {
+        let (text, first_usage) = self
+            .complete_summary_once(prompt.clone(), session_id)
+            .await?;
         if !text.is_empty() {
             return Ok((text, first_usage));
         }
 
         tracing::warn!("压缩摘要返回空响应，重试一次");
-        let (retry_text, retry_usage) = self.complete_summary_once(prompt).await?;
+        let (retry_text, retry_usage) = self.complete_summary_once(prompt, session_id).await?;
         let mut usage = first_usage;
         usage.accumulate(&retry_usage);
         Ok((retry_text, usage))
@@ -349,14 +370,21 @@ impl ContextCompressor {
 
     /// 单次摘要补全请求（取第一个候选的文本；`chat()` 便捷方法丢弃
     /// usage——压缩消耗需随摘要消息入账，故走完整响应）。
-    async fn complete_summary_once(&self, prompt: String) -> Result<(String, TokenUsage)> {
-        let response = self
-            .model_service
-            .chat_completion(ChatCompletionRequest::new(
-                &self.config.summary_model,
-                vec![Message::user(prompt)],
-            ))
-            .await?;
+    async fn complete_summary_once(
+        &self,
+        prompt: String,
+        session_id: Option<&str>,
+    ) -> Result<(String, TokenUsage)> {
+        // 压缩请求不属于 AgentLoop 对话链，但同样要满足 provider 的会话要求
+        // （ADR-046 动态头：如 opencode 的 `x-opencode-session`——缺失会被
+        // 400 拒收，压缩静默失败）。透传本会话 id；无会话上下文时为 None，
+        // 由发送单点的稳定兜底值兜住。
+        let mut request =
+            ChatCompletionRequest::new(&self.config.summary_model, vec![Message::user(prompt)]);
+        if let Some(sid) = session_id {
+            request = request.with_session_id(sid);
+        }
+        let response = self.model_service.chat_completion(request).await?;
         let text = response
             .choices
             .first()
@@ -402,6 +430,7 @@ impl ContextCompressor {
         &mut self,
         messages: &[Message],
         existing_summary: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<(Vec<Message>, String, TokenUsage)> {
         // 全量摘要：所有消息进一条摘要，不保留原样。
         // 前缀缓存考量：保留原样会让请求前缀随轮次增长且压缩后缓存失效；
@@ -409,9 +438,10 @@ impl ContextCompressor {
         // 用户意图与进度由摘要提示词专门承载（见 DEFAULT_SUMMARY_PROMPT）。
         let (summary, usage) = match existing_summary {
             Some(existing) if !existing.trim().is_empty() => {
-                self.incremental_summarize(existing, messages).await?
+                self.incremental_summarize(existing, messages, session_id)
+                    .await?
             }
-            _ => self.summarize(messages).await?,
+            _ => self.summarize(messages, session_id).await?,
         };
         let summary_message = Message::system(format!(
             "[对话摘要] 以下是对早期对话的摘要：
@@ -734,7 +764,7 @@ mod tests {
         let compressor = ContextCompressor::new(Arc::new(mock), config);
         let msgs = vec![msg_user("问题"), msg_assistant("回答")];
 
-        let (summary, usage) = compressor.summarize(&msgs).await.unwrap();
+        let (summary, usage) = compressor.summarize(&msgs, None).await.unwrap();
 
         assert_eq!(calls.load(Ordering::SeqCst), 2, "空摘要应触发一次重试");
         assert_eq!(summary, "## 用户意图\n修复 C2", "重试输出作为摘要");
@@ -783,7 +813,7 @@ mod tests {
 
         // 携带旧摘要压缩：模型恒空 → 结果仍为空摘要（上层丢弃）
         let result = compressor
-            .compress_with_existing_summary(&msgs, Some("OLD-SUMMARY"))
+            .compress_with_existing_summary(&msgs, Some("OLD-SUMMARY"), None)
             .await
             .unwrap();
 
@@ -900,7 +930,7 @@ mod tests {
         let compressor = ContextCompressor::new(Arc::new(mock), config);
         let msgs = vec![msg_user("问题"), msg_assistant("回答")];
 
-        let _ = compressor.summarize(&msgs).await.unwrap();
+        let _ = compressor.summarize(&msgs, None).await.unwrap();
 
         let prompt = seen.lock().unwrap().clone();
         assert!(
@@ -909,5 +939,50 @@ mod tests {
         );
         assert!(prompt.contains("4000"), "替换为配置的 max_summary_tokens");
         assert!(prompt.contains("问题"), "对话内容已嵌入提示词");
+    }
+
+    /// 摘要请求必须携带会话标识（ADR-046 动态头求值输入）：opencode 系网关
+    /// 要求 `x-opencode-session` 头，缺失时压缩请求被 400 拒收（MissingSessionID）
+    /// → 整类压缩静默失败（历史事故：上下文超阈值但一直不压缩）。
+    /// 判别力：修复前请求 session_id 恒为 None（先红后绿）。
+    #[tokio::test]
+    async fn test_summarize_carries_session_id() {
+        use std::sync::Mutex;
+
+        let seen = Arc::new(Mutex::new(None::<Option<String>>));
+        let seen_in = seen.clone();
+        let mut mock = MockChatService::new();
+        mock.expect_chat_completion().returning(move |req| {
+            *seen_in.lock().unwrap() = Some(req.session_id.clone());
+            Ok(ChatCompletionResponse {
+                id: "mock".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock".to_string(),
+                choices: vec![ChatChoice {
+                    index: 0,
+                    message: Message::assistant("摘要".to_string()),
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Default::default(),
+            })
+        });
+        let config = CompressionConfig {
+            summary_model: "mock".to_string(),
+            ..CompressionConfig::default()
+        };
+        let compressor = ContextCompressor::new(Arc::new(mock), config);
+        let msgs = vec![msg_user("问题"), msg_assistant("回答")];
+
+        let _ = compressor
+            .summarize(&msgs, Some("session-265f5896"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some(Some("session-265f5896".to_string())),
+            "摘要请求应携带会话标识（x-opencode-session 求值输入）"
+        );
     }
 }

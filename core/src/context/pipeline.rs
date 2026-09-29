@@ -139,7 +139,7 @@ impl ContextPipeline {
     ) -> Result<(InjectableContext, Option<String>)> {
         let injectable = self.load_injectable(query, None).await?;
         let outcome = self
-            .compress_if_needed(conversation, recent_input_tokens, false, None)
+            .compress_if_needed(conversation, recent_input_tokens, false, None, None)
             .await?;
         Ok((injectable, outcome.map(|o| o.summary)))
     }
@@ -149,12 +149,16 @@ impl ContextPipeline {
     /// `existing_summary`：**本会话**链上最后一个压缩点的纯摘要（增量合并
     /// 用；`None` = 全量摘要）。由调用方提取（[`Self::extract_marker_summary`]），
     /// 压缩器自身不再持有任何跨会话摘要状态（T1 修复）。
+    ///
+    /// `session_id`：本会话 id（摘要请求的动态头求值输入，ADR-046——如
+    /// opencode 的 `x-opencode-session`；`None` = 无会话上下文）。
     pub async fn compress_if_needed(
         &self,
         conversation: &mut Vec<Message>,
         recent_input_tokens: usize,
         force: bool,
         existing_summary: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<Option<CompressionOutcome>> {
         let mut compressor = self.compressor.lock().await;
         // 手动压缩（force=true）跳过阈值判定——用户主动点击即明确意图；
@@ -164,7 +168,7 @@ impl ContextPipeline {
         }
 
         let result = compressor
-            .compress_with_existing_summary(conversation, existing_summary)
+            .compress_with_existing_summary(conversation, existing_summary, session_id)
             .await?;
         if result.summary.is_empty() {
             // 空摘要（模型空响应，含单次重试后仍空）：本次压缩丢弃——
@@ -214,6 +218,7 @@ impl ContextPipeline {
                 recent_input_tokens,
                 force,
                 existing_summary,
+                Some(session_id),
             )
             .await
         {
@@ -868,7 +873,7 @@ mod tests {
         let before = conversation.clone();
 
         let outcome = pipeline
-            .compress_if_needed(&mut conversation, 100, true, None)
+            .compress_if_needed(&mut conversation, 100, true, None, None)
             .await
             .unwrap();
 

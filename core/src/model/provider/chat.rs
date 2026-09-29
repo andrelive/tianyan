@@ -263,7 +263,8 @@ impl AsyncOpenAIClient {
     /// async-openai 直接解析原始 SSE，保留推理过程增量；非思考模型不携带
     /// 该字段，解析结果与原有 async-openai 路径一致。
     ///
-    /// `session_id`：动态请求头求值输入（ADR-046；None = 非会话请求，跳过相关头）。
+    /// `session_id`：动态请求头求值输入（ADR-046；None = 非会话请求，
+    /// 注入点走稳定兜底值）。
     async fn create_raw_stream(
         &self,
         body: Value,
@@ -361,7 +362,8 @@ impl AsyncOpenAIClient {
     /// 流式（SSE）、非流式与 VLM（JSON 响应）**共用**：本函数只负责「发送 +
     /// 静态 / 动态请求头 + 状态码判定 + 语义分类」，不关心响应体形态。
     /// `err_prefix` 是调用方场景前缀（`模型服务错误` / `VLM 服务错误`），
-    /// 使错误消息归属正确；`session_id` 是动态请求头求值输入（ADR-046）。
+    /// 使错误消息归属正确；`session_id` 是动态请求头求值输入（ADR-046；
+    /// None = 非会话请求 → 稳定兜底值）。
     pub(super) async fn send_chat_request(
         &self,
         url: &str,
@@ -374,15 +376,17 @@ impl AsyncOpenAIClient {
             req = req.header(k.as_str(), v.as_str());
         }
         // 动态请求头（ADR-046）：静态之后应用（后写覆盖）；变量无值（非会话
-        // 请求）→ 跳过该头，不失败；值非法 → warn + 跳过（头是附属信息，
-        // 不得拖死请求本体）。
+        // 请求）→ 用稳定兜底标识注入——网关可能要求该头必须存在，缺失会 400
+        // （如 opencode 的 `MissingSessionID`，会静默杀死压缩 / 摘要等整类非
+        // 对话请求）；值非法 → warn + 跳过（头是附属信息，不得拖死请求本体）。
         for (name, source) in &self.dynamic_headers {
-            if let Some(value) = source.resolve(session_id) {
-                match reqwest::header::HeaderValue::from_str(&value) {
-                    Ok(parsed) => req = req.header(name.clone(), parsed),
-                    Err(e) => {
-                        tracing::warn!(header = %name, error = %e, "动态请求头值非法，跳过");
-                    }
+            let value = source
+                .resolve(session_id)
+                .unwrap_or_else(|| crate::config::HeaderSource::NON_SESSION_FALLBACK.to_string());
+            match reqwest::header::HeaderValue::from_str(&value) {
+                Ok(parsed) => req = req.header(name.clone(), parsed),
+                Err(e) => {
+                    tracing::warn!(header = %name, error = %e, "动态请求头值非法，跳过");
                 }
             }
         }
@@ -1630,9 +1634,13 @@ mod stream_robustness_tests {
         );
     }
 
-    /// ADR-046：非会话请求（session_id = None）跳过动态头，不失败。
+    /// ADR-046：非会话请求（session_id = None）使用稳定兜底值，不失败。
+    ///
+    /// 回归保护：网关（opencode）对缺失该头的请求直接 400（MissingSessionID）——
+    /// 「跳过」策略会让压缩 / judge / 后台摘要等整类非对话请求静默失败
+    /// （历史事故：上下文超阈值但压缩一直不生效）。
     #[tokio::test]
-    async fn test_dynamic_session_header_absent_without_session() {
+    async fn test_dynamic_session_header_fallback_without_session() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let chunk: String = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n".to_string();
         let header = format!(
@@ -1657,8 +1665,8 @@ mod stream_robustness_tests {
 
         let text = captured.lock().unwrap().clone().to_ascii_lowercase();
         assert!(
-            !text.contains("x-opencode-session"),
-            "无 session_id 时不得注入会话头: {text}"
+            text.contains("x-opencode-session: tianyan-background"),
+            "无 session_id 时应注入稳定兜底值: {text}"
         );
     }
 

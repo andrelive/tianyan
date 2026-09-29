@@ -305,13 +305,22 @@ impl ProviderDialect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeaderSource {
     /// 当前请求所属会话 ID（AgentLoop 填充；非会话请求（压缩 / judge 等）
-    /// 无值 → 跳过该头，不失败）。
+    /// 无值 → 注入点使用 [`HeaderSource::NON_SESSION_FALLBACK`] 兜底）。
     #[serde(rename = "session_id")]
     SessionId,
 }
 
 impl HeaderSource {
-    /// 按来源求值（`None` = 本次请求无该变量 → 跳过该头）。
+    /// 非会话请求（压缩 / judge / 后台摘要 / 测试连接等）的稳定兜底值。
+    ///
+    /// 部分网关（opencode）对缺失绑定头的请求直接 400（`MissingSessionID`）：
+    /// 「跳过」策略会让整类非对话请求静默失败（历史事故：上下文超阈值但压缩
+    /// 一直不生效）。稳定值保证所有出站请求均满足网关要求，且网关侧可将其
+    /// 识别为天演后台流量。
+    pub const NON_SESSION_FALLBACK: &'static str = "tianyan-background";
+
+    /// 按来源求值（`None` = 本次请求无该变量 → 注入点使用
+    /// [`HeaderSource::NON_SESSION_FALLBACK`] 兜底，不跳过该头）。
     ///
     /// **扩展点**：新变量源在此加一行；发送单点不感知来源种类。
     pub fn resolve(self, session_id: Option<&str>) -> Option<String> {
