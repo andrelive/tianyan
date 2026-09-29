@@ -194,25 +194,26 @@ impl ChatService for AsyncOpenAIClient {
     }
 }
 
-/// 把思考强度映射为请求体参数（按模型族区分，档位为模型自己声明的集合）：
-/// - Qwen 思考族（模型名含 qwen）：`enable_thinking: true` + `thinking_budget`（DashScope 原生强度参数）
-/// - 其余 OpenAI 兼容族：`enable_thinking: true` + `reasoning_effort`（OpenAI 标准强度参数，
-///   DeepSeek 等已实测容忍附加参数）
-///
 /// 把思考强度档位映射为请求体参数（**形态由参数决定**，档位值不做本地翻译）：
 /// - [`ThinkingParam::ThinkingBudget`]（DashScope Qwen 思考族）：`enable_thinking: true` +
 ///   `thinking_budget`（已知档位映射预算，未知档位用默认预算 4096）
-/// - [`ThinkingParam::ReasoningEffort`]（其余 OpenAI 兼容族）：`enable_thinking: true` +
-///   `reasoning_effort: <原档位值>`（原样透传，DeepSeek 等已实测容忍附加参数）
+/// - [`ThinkingParam::ReasoningEffort`]（其余 OpenAI 兼容族）：仅 `reasoning_effort: <原档位值>`
+///   （原样透传，OpenAI 标准强度参数）
+///
+/// **`enable_thinking` 只属于 DashScope 方言，不得无条件附加**：其余族不带该字段时
+/// 思考照常输出（2026-09-29 实测 deepseek / ollama / glm 各渠道），而严格校验的上游会
+/// 拒绝整个请求——opencode zen 的 `glm-5.3-flash` 对 `enable_thinking` 返回 400
+/// （`Upstream request failed: ... unknown field "enable_thinking"`），曾致会话轮中断
+/// （此前实现依赖「DeepSeek 等实测容忍附加参数」，在多上游网关下不成立）。
 ///
 /// 形态解析在调用方**单点**完成（[`AsyncOpenAIClient::thinking_param_for`]：
 /// 模型级显式 > provider 方言 > 模型名嗅探）；本函数只负责按形态写参数。
 ///
 /// 档位为 "off" 时调用方不进入本函数，不附加任何参数（模型默认行为）。
 fn apply_thinking_params(body: &mut Value, effort: &str, param: ThinkingParam) {
-    body["enable_thinking"] = Value::Bool(true);
     match param {
         ThinkingParam::ThinkingBudget => {
+            body["enable_thinking"] = Value::Bool(true);
             let budget = match effort {
                 "low" => 1024,
                 "medium" => 4096,
@@ -1066,6 +1067,9 @@ mod convert_tests {
 /// 这些测试是「方言单点化」重构的**行为等价基线**：重构只改变判定的来源
 /// （散落的模型名嗅探 → [`ProviderDialect`] 单点），不改变任何一条已实测的
 /// wire 行为。重构后这些断言必须原样通过，否则即为行为漂移。
+///
+/// 注（2026-09-29）：`apply_thinking_params_*` 中关于 `enable_thinking` 的断言是
+/// **有意行为修复**（发送面收窄至 DashScope 方言；opencode glm 400 事故），非重构漂移。
 #[cfg(test)]
 mod dialect_baseline_tests {
     use super::*;
@@ -1152,6 +1156,24 @@ mod dialect_baseline_tests {
         assert!(
             body.get("thinking_budget").is_none(),
             "非 Qwen 族不应附 thinking_budget"
+        );
+        assert!(
+            body.get("enable_thinking").is_none(),
+            "非 Qwen 族不应附 enable_thinking（2026-09-29 修复：严格上游会 400 拒绝）"
+        );
+    }
+
+    #[test]
+    fn test_apply_thinking_params_reasoning_effort_has_no_enable_thinking() {
+        // 回归（2026-09-29 opencode glm 400 事故）：`enable_thinking` 仅属 DashScope 方言；
+        // OpenAI 兼容族（DeepSeek / GLM / MiMo…）只发标准 `reasoning_effort`。
+        // 判别力：旧实现无条件写入 `enable_thinking` —— 本测试必红。
+        let mut body = serde_json::json!({});
+        apply_thinking_params(&mut body, "max", ThinkingParam::ReasoningEffort);
+        assert_eq!(body["reasoning_effort"], serde_json::json!("max"));
+        assert!(
+            body.get("enable_thinking").is_none(),
+            "ReasoningEffort 族不得携带 enable_thinking（opencode glm 上游会拒绝整个请求）"
         );
     }
 

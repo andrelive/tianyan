@@ -46,7 +46,7 @@
 | 流式缓存命中 | **顶层** `prompt_cache_hit_tokens` **或** `prompt_tokens_details.cached_tokens` | `prompt_tokens_details.cached_tokens` | `extract_cache_tokens`（`chat.rs:581-599`） |
 | usage（流式） | 完整（含 `completion_tokens_details.reasoning_tokens`） | **默认不返回**，须请求 `stream_options.include_usage` | `chat.rs:163-170`；缺 usage 时 TokenEstimator 兜底（`core/src/agent/loop.rs:576-604`） |
 | tools | 支持（天演 agent **总是**携带 tools） | 支持 | `chat.rs:47-49` |
-| 强度参数 | `reasoning_effort` | `reasoning_effort` | `apply_thinking_params`（`chat.rs:205-222`） |
+| 强度参数 | `reasoning_effort` | `reasoning_effort` | `apply_thinking_params`（`chat.rs:213-229`） |
 
 ### 1.4 上下文窗口来源（`ModelSpec.context_length`）
 
@@ -120,15 +120,17 @@
 
 ### 3.1 强度参数映射（代码事实）
 
-`apply_thinking_params(body, effort, model)`（`core/src/model/provider/chat.rs:205-222`）：
+`apply_thinking_params(body, effort, model)`（`core/src/model/provider/chat.rs:213-229`）：
 
 | 模型族 | 附加参数 | 值 |
 |---|---|---|
 | `effort == "off"` | **不进入本函数**，不附加任何参数（模型默认行为） | — |
 | 模型名含 `qwen` | `enable_thinking: true` + `thinking_budget` | `low=1024 / medium=4096 / high=16384 / 其他（含 max）=4096` |
-| 其余 OpenAI 兼容族（DeepSeek 等） | `enable_thinking: true` + `reasoning_effort` | **原档位值原样透传** |
+| 其余 OpenAI 兼容族（DeepSeek 等） | **仅 `reasoning_effort`**（2026-09-29 起收窄：`enable_thinking` 只属 DashScope 方言——opencode glm 上游对多余字段 400） | **原档位值原样透传** |
 
-档位为模型自己声明的集合（`core/src/config/model.rs:245-247`），不做本地翻译；未知档位在 qwen 族用默认 `4096`。DeepSeek 等已实测容忍附加 `reasoning_effort`（`chat.rs:196-203` 注释）。
+档位为模型自己声明的集合（`core/src/config/model.rs:245-247`），不做本地翻译；未知档位在 qwen 族用默认 `4096`。
+
+**修订（2026-09-29）**：`enable_thinking: true` 曾对全族无条件附加（依赖"DeepSeek 等实测容忍"）；实测 opencode zen 的 `glm-5.3-flash` 会 400 拒绝该字段（`Upstream request failed: ... unknown field "enable_thinking"`——曾致会话轮中断），且各渠道去掉该字段后推理照常输出，故收窄为**仅 DashScope 方言携带**（见 `core/src/model/provider/chat.rs` 的 `apply_thinking_params` 注释与回归测试）。
 
 ### 3.2 tokenizer 前提：中文比英文省 token
 
