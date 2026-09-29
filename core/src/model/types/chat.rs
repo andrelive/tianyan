@@ -47,6 +47,13 @@ pub struct ChatCompletionRequest {
     /// 工具调用选择策略。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
+    /// 请求所属会话 ID（内部元数据，ADR-046：动态请求头求值输入）。
+    ///
+    /// **不上 wire**：请求体由 `oa_request` 序列化 / 手写 JSON 构造，均不含
+    /// 本字段；AgentLoop 填充；非会话请求（压缩 / judge 等）为 None →
+    /// 相关动态头跳过（不失败）。
+    #[serde(skip)]
+    pub session_id: Option<String>,
 }
 
 impl ChatCompletionRequest {
@@ -67,6 +74,7 @@ impl ChatCompletionRequest {
             thinking_effort: None,
             tools: None,
             tool_choice: None,
+            session_id: None,
         }
     }
 
@@ -108,6 +116,12 @@ impl ChatCompletionRequest {
     /// 设置工具调用策略。
     pub fn with_tool_choice(mut self, tool_choice: ToolChoice) -> Self {
         self.tool_choice = Some(tool_choice);
+        self
+    }
+
+    /// 设置请求所属会话 ID（动态请求头求值输入，ADR-046）。
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
         self
     }
 }

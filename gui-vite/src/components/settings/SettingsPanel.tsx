@@ -105,11 +105,12 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
 
   /* ── Provider (model service) helpers ── */
 
-  const addProvider = useCallback(() => {
+  const addProvider = useCallback((draft?: Partial<ProviderConfigState>) => {
     setConfig((prev) => {
       if (!prev) return prev;
       const p = emptyProvider();
-      p.name = `provider-${prev.providers.length + 1}`;
+      if (draft) Object.assign(p, draft);
+      if (!p.name) p.name = `provider-${prev.providers.length + 1}`;
       return { ...prev, providers: [...prev.providers, p] };
     });
   }, []);

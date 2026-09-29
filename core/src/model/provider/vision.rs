@@ -49,7 +49,7 @@ impl VlmService for AsyncOpenAIClient {
         let response = crate::model::retry::with_retry(
             &self.retry_policy,
             |e: &RetryableFailure| e.retryable,
-            || self.send_chat_request(&url, &body, "VLM 服务错误"),
+            || self.send_chat_request(&url, &body, "VLM 服务错误", None),
         )
         .await
         .map_err(|e| TianyanError::Custom(e.message))?;
@@ -312,6 +312,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         AsyncOpenAIClient::from_provider(&provider).unwrap()
     }

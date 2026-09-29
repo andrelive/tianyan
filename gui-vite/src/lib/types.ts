@@ -676,10 +676,41 @@ export interface ProviderConfigState {
    * 自建代理/嗅探不到的网关用此项显式指定。
    */
   thinking_field?: ThinkingField;
+  /**
+   * wire 方言预设（后端 `dialect`）：`undefined` = 后端按 endpoint/名称嗅探。
+   * 显式指定用于嗅探不到的网关（自定义域名/中转）。
+   */
+  dialect?: DialectPreset;
+  /**
+   * 首 token 预算（秒；后端 `first_token_timeout`，默认 300）。
+   * `undefined` = 用后端默认值。
+   */
+  first_token_timeout?: number;
+  /**
+   * 专属 User-Agent（后端 `user_agent`，ADR-046）。
+   * `undefined` = 后端解析链（预置 > 全局默认 `tianyan/{VERSION}`）。
+   */
+  user_agent?: string;
+  /**
+   * 动态请求头绑定（后端 `dynamic_headers`，ADR-046）。
+   * `undefined` = 取预置（如 opencode 的会话头）；`[]` = 显式清空。
+   */
+  dynamic_headers?: DynamicHeaderBinding[];
 }
 
 /** 传输层思考方言（与后端 `ThinkingField` 对应，serde snake_case 字符串）。 */
 export type ThinkingField = 'reasoning_content' | 'reasoning';
+
+/** wire 方言预设（与后端 `DialectPreset` 对应，serde snake_case 字符串）。 */
+export type DialectPreset = 'openai_compatible' | 'deepseek' | 'dashscope' | 'ollama' | 'custom';
+
+/** 动态请求头绑定（与后端 `HeaderBinding` 对应；受控变量源，非模板）。 */
+export interface DynamicHeaderBinding {
+  /** header 名（如 `x-opencode-session`）。 */
+  name: string;
+  /** 值来源（当前仅 `session_id`：注入当前会话 ID）。 */
+  source: 'session_id';
+}
 
 // ── Model Reference & Preferences (matches backend ModelRef / ModelPreferences) ──
 
@@ -1063,6 +1094,28 @@ export interface ProviderTestResponse {
   success: boolean;
   version?: string;
   error?: string;
+}
+
+/** 单个 Provider 预置的动态请求头信息（GET /config/provider-presets；ADR-046）。 */
+export interface ProviderPresetHeaderInfo {
+  name: string;
+  source: string;
+}
+
+/** 内置 Provider 预置（ADR-046；预置选择器一键填草稿）。 */
+export interface ProviderPresetInfo {
+  /** 预置 id（配置 name / preset 匹配键）。 */
+  id: string;
+  display_name: string;
+  endpoint: string;
+  description: string;
+  requires_api_key: boolean;
+  api_key_env_hint?: string;
+  dynamic_headers: ProviderPresetHeaderInfo[];
+}
+
+export interface ProviderPresetsResponse {
+  presets: ProviderPresetInfo[];
 }
 
 export interface McpServerEntry {

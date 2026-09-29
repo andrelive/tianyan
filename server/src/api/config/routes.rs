@@ -6,7 +6,7 @@ use axum::{
 };
 
 use crate::api::config::discovery_handlers::{
-    add_provider_model, scan_provider_models, test_provider_connection,
+    add_provider_model, list_provider_presets, scan_provider_models, test_provider_connection,
 };
 use crate::api::config::handlers::{
     get_config, get_config_section, get_config_status, get_models, migrate_data_dir, switch_model,
@@ -47,6 +47,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/config/mcp/servers/{name}/test", post(test_mcp_server))
         // Provider 发现与引导
+        .route("/config/providers/presets", get(list_provider_presets))
         .route("/config/providers/test", post(test_provider_connection))
         .route("/config/providers/scan", post(scan_provider_models))
         .route("/config/providers/add-model", post(add_provider_model))

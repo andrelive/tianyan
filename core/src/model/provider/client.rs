@@ -44,6 +44,9 @@ pub struct AsyncOpenAIClient {
     /// 该差异是**模型级**的（同一 provider 下 Qwen 思考族与其它模型的参数形态
     /// 不同），无法只在 provider 级方言里表达；构造时收集一次，请求路径零判定。
     pub(crate) model_thinking_params: std::collections::HashMap<String, ThinkingParam>,
+    /// 动态请求头绑定（ADR-046）：构造时解析一次（header 名 → `HeaderName` +
+    /// 受控变量源），请求路径零判定；变量无值（非会话请求）→ 跳过该头，不失败。
+    pub(crate) dynamic_headers: Vec<(reqwest::header::HeaderName, crate::config::HeaderSource)>,
 }
 
 impl AsyncOpenAIClient {
@@ -71,7 +74,9 @@ impl AsyncOpenAIClient {
             crate::common::http::build_http_client(crate::common::http::HttpClientSpec {
                 timeout: first_token.max(read_idle),
                 connect_timeout: std::time::Duration::from_secs(30),
-                user_agent: None,
+                // UA 单点（ADR-046）：字段 > headers 手工项 > 预置 > tianyan/{VERSION}；
+                // 设到 client 级 → 流式 / 非流式 / embedding / vision 全路径生效。
+                user_agent: Some(config.resolve_user_agent()),
                 // 模型 API 端点来自用户配置（可信），保持默认重定向跟随
                 redirect_policy: None,
             })?;
@@ -85,6 +90,24 @@ impl AsyncOpenAIClient {
             .filter_map(|m| m.thinking_param.map(|p| (m.name.clone(), p)))
             .collect();
 
+        // 动态请求头（ADR-046）：构造时解析一次（名 → HeaderName 校验 + 缓存），
+        // 请求路径零判定；非法名在此 fail fast。
+        let dynamic_headers: Vec<(reqwest::header::HeaderName, crate::config::HeaderSource)> =
+            config
+                .resolve_dynamic_headers()
+                .into_iter()
+                .map(|binding| {
+                    let name = reqwest::header::HeaderName::from_bytes(binding.name.as_bytes())
+                        .map_err(|e| {
+                            TianyanError::config(format!(
+                                "提供商 '{}' 的动态请求头名 '{}' 非法：{}",
+                                config.name, binding.name, e
+                            ))
+                        })?;
+                    Ok((name, binding.source))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
         Ok(Self {
             service_name: config.name.clone(),
             client,
@@ -97,6 +120,7 @@ impl AsyncOpenAIClient {
             first_token,
             dialect: config.resolve_dialect(),
             model_thinking_params,
+            dynamic_headers,
         })
     }
 
@@ -127,6 +151,7 @@ impl AsyncOpenAIClient {
             headers: std::collections::HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         Self::from_provider(&provider)
     }
@@ -164,6 +189,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         }
     }
 

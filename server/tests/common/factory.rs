@@ -47,6 +47,7 @@ pub fn test_provider(name: &str) -> ProviderConfig {
         headers: std::collections::HashMap::new(),
         thinking_field: None,
         dialect: None,
+        ..Default::default()
     }
 }
 

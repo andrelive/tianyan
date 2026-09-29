@@ -17,6 +17,7 @@ pub mod mcp;
 mod memory;
 pub mod migration;
 mod model;
+mod presets;
 mod reminder;
 mod retrieval;
 mod roles;
@@ -35,10 +36,11 @@ pub use executor::ExecutorConfig;
 pub use mcp::{McpConfig, McpServerEntry};
 pub use memory::MemoryConfig;
 pub use model::{
-    find_provider, CacheField, DialectPreset, EmbeddingUsageShape, ModelCapability, ModelEntry,
-    ModelPreferences, ModelRef, ModelsConfig, ProviderConfig, ProviderDialect, ThinkingField,
-    ThinkingParam,
+    find_provider, CacheField, DialectPreset, EmbeddingUsageShape, HeaderBinding, HeaderSource,
+    ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig, ProviderConfig,
+    ProviderDialect, ThinkingField, ThinkingParam,
 };
+pub use presets::{find_preset, ProviderPreset, PROVIDER_PRESETS};
 pub use reminder::ReminderConfig;
 pub use retrieval::RetrievalConfig;
 pub use roles::AgentRolesConfig;

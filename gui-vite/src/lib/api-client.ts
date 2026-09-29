@@ -16,6 +16,7 @@ import type {
   McpTestResponse,
   MemoryListResponse,
   ModelsResponse,
+  ProviderPresetsResponse,
   ProviderProtocol,
   ProviderScanResponse,
   RoleActionResponse,
@@ -444,6 +445,11 @@ export async function scanProviderModels(
     protocol,
     ...(provider && provider.trim() ? { provider } : {}),
   });
+}
+
+/** 内置 Provider 预置列表（ADR-046；预置选择器一键填草稿）。 */
+export async function fetchProviderPresets(): Promise<ProviderPresetsResponse> {
+  return apiGet<ProviderPresetsResponse>('/config/provider-presets');
 }
 
 // ========== Model switch API ==========

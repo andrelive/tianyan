@@ -36,6 +36,10 @@ export function emptyProvider(): ProviderConfigState {
     is_local: false,
     headers: {},
     thinking_field: undefined,
+    dialect: undefined,
+    first_token_timeout: undefined,
+    user_agent: undefined,
+    dynamic_headers: undefined,
   };
 }
 
@@ -146,6 +150,17 @@ interface BackendProviderConfig {
    * 回落 `reasoning_content`。**必须透传**：漏掉会在「保存设置」时被静默丢弃。
    */
   thinking_field?: 'reasoning_content' | 'reasoning';
+  /** wire 方言预设（可选；**必须透传**——漏掉会在保存时被静默丢弃）。 */
+  dialect?: string;
+  /** 首 token 预算（秒；**必须透传**——漏掉会在保存时被重置为默认 300）。 */
+  first_token_timeout?: number;
+  /** 专属 UA（可选，ADR-046；透传保留）。 */
+  user_agent?: string;
+  /**
+   * 动态请求头绑定（ADR-046；透传保留）。
+   * 数组语义：undefined = 取预置；`[]` = 显式清空（退出预置行为）——不得省略空数组。
+   */
+  dynamic_headers?: { name: string; source: string }[];
 }
 
 interface BackendModelRef {
@@ -318,6 +333,13 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
           headers: p.headers || {},
           // 显式配置才写入（缺省不序列化，避免污染用户配置文件）
           ...(p.thinking_field ? { thinking_field: p.thinking_field } : {}),
+          ...(p.dialect ? { dialect: p.dialect } : {}),
+          ...(p.first_token_timeout !== undefined
+            ? { first_token_timeout: p.first_token_timeout }
+            : {}),
+          ...(p.user_agent ? { user_agent: p.user_agent } : {}),
+          // 空数组 = 显式清空（语义不同于"未配置"），不得省略
+          ...(p.dynamic_headers !== undefined ? { dynamic_headers: p.dynamic_headers } : {}),
         })),
         preferences: {
           chat: toModelRef(cs.preferences.chat),
@@ -430,6 +452,10 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
       is_local: p.is_local ?? false,
       headers: p.headers ?? {},
       thinking_field: p.thinking_field ?? undefined,
+      dialect: p.dialect as ProviderConfigState['dialect'],
+      first_token_timeout: p.first_token_timeout ?? undefined,
+      user_agent: p.user_agent ?? undefined,
+      dynamic_headers: p.dynamic_headers as ProviderConfigState['dynamic_headers'],
     })),
     resolvedSpecs: response.model_specs ?? {},
     modelCatalog: response.model_catalog ?? {},

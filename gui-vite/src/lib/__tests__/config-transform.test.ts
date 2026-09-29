@@ -169,6 +169,59 @@ describe('fromBackendConfig edge cases', () => {
     expect('thinking_field' in emitted[2]).toBe(false);
   });
 
+  it('keeps dialect / first_token_timeout / user_agent / dynamic_headers through from→to', () => {
+    // 回归锁定（ADR-046）：dialect / first_token_timeout 此前会在「保存设置」时
+    // 被静默丢弃（PUT 全量替换）；dynamic_headers 空数组 = 显式清空语义
+    //（退出预置行为），不得被省略为"未配置"。
+    const state = fromBackendConfig(
+      makeResponse({
+        models: {
+          providers: [
+            {
+              name: 'opencode',
+              endpoint: 'https://opencode.ai/zen/go/v1',
+              dialect: 'openai_compatible',
+              first_token_timeout: 240,
+              user_agent: 'tianyan-test/1.0',
+              dynamic_headers: [{ name: 'x-opencode-session', source: 'session_id' }],
+            },
+            {
+              name: 'plain',
+              endpoint: 'https://api.example.com/v1',
+              dynamic_headers: [],
+            },
+            { name: 'auto', endpoint: 'https://ollama.com/v1' },
+          ],
+          preferences: {},
+        },
+      }),
+    );
+    expect(state.providers[0].dialect).toBe('openai_compatible');
+    expect(state.providers[0].first_token_timeout).toBe(240);
+    expect(state.providers[0].user_agent).toBe('tianyan-test/1.0');
+    expect(state.providers[0].dynamic_headers).toEqual([
+      { name: 'x-opencode-session', source: 'session_id' },
+    ]);
+    // 显式空数组保留（语义 = 退出预置，不得省略）
+    expect(state.providers[1].dynamic_headers).toEqual([]);
+    expect(state.providers[2].dialect).toBeUndefined();
+
+    const req = toBackendConfig(state) as BackendUpdateRequest;
+    const emitted = req.config.models.providers;
+    expect(emitted[0].dialect).toBe('openai_compatible');
+    expect(emitted[0].first_token_timeout).toBe(240);
+    expect(emitted[0].user_agent).toBe('tianyan-test/1.0');
+    expect(emitted[0].dynamic_headers).toEqual([
+      { name: 'x-opencode-session', source: 'session_id' },
+    ]);
+    expect(emitted[1].dynamic_headers).toEqual([]);
+    // 缺省不序列化（不污染用户配置文件）
+    expect('dialect' in emitted[2]).toBe(false);
+    expect('first_token_timeout' in emitted[2]).toBe(false);
+    expect('user_agent' in emitted[2]).toBe(false);
+    expect('dynamic_headers' in emitted[2]).toBe(false);
+  });
+
   it('keeps model_specs and model_catalog passthrough', () => {
     const state = fromBackendConfig({
       config: { models: { providers: [], preferences: {} } },

@@ -19,6 +19,7 @@ import type {
   UsageStatsSummary,
   McpServerEntry,
   McpTestResponse,
+  ProviderPresetsResponse,
   ProviderScanResponse,
   WorkspaceEntry,
   WorkspaceTreeResponse,
@@ -499,6 +500,28 @@ export const mockProviderScanResult: ProviderScanResponse = {
       name: 'nomic-embed-text',
       size: '274 MB',
       capabilities: ['text-embedding'],
+    },
+  ],
+};
+
+export const mockProviderPresetsResponse: ProviderPresetsResponse = {
+  presets: [
+    {
+      id: 'opencode',
+      display_name: 'OpenCode Zen',
+      endpoint: 'https://opencode.ai/zen/v1',
+      description: 'OpenCode Zen 模型网关（自动注入会话头，优化路由与提示词缓存）',
+      requires_api_key: true,
+      api_key_env_hint: 'OPENCODE_API_KEY',
+      dynamic_headers: [{ name: 'x-opencode-session', source: 'session_id' }],
+    },
+    {
+      id: 'ollama',
+      display_name: 'Ollama（本地）',
+      endpoint: 'http://localhost:11434/v1',
+      description: '本地 Ollama 服务（OpenAI 兼容层）',
+      requires_api_key: false,
+      dynamic_headers: [],
     },
   ],
 };
@@ -1253,6 +1276,10 @@ export const handlers = [
   // Provider discovery（后端为 POST /config/providers/scan）
   http.post(`${API_BASE}/config/providers/scan`, () => {
     return HttpResponse.json(mockProviderScanResult);
+  }),
+  // Provider presets（后端为 GET /config/provider-presets；ADR-046）
+  http.get(`${API_BASE}/config/provider-presets`, () => {
+    return HttpResponse.json(mockProviderPresetsResponse);
   }),
 
   // Soul（后端为 GET/PUT /config/soul，GET /config/soul/default）

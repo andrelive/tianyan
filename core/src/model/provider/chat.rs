@@ -1,4 +1,3 @@
-use async_openai::error::OpenAIError;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
@@ -37,8 +36,10 @@ impl ChatService for AsyncOpenAIClient {
         // 请求构建与调用在下方重试闭包内完成（每次重试重建请求）。
 
         // 非流式调用内置指数退避重试（全局默认策略，对齐 opencode/dsh-llm-retry）：
-        // 网络/传输/超时类错误自动退避重试；async-openai API 错误不暴露 HTTP 状态码、
-        // 无法区分 429/5xx 与 4xx，归类不可重试以避免重复计费与误伤。
+        // 与流式路径同构（ADR-046）：统一走发送单点 `send_chat_request`——
+        // 自定义请求头（UA / 动态会话头）与状态码语义分类（429/5xx 重试判定）
+        // 全路径生效；不再经 async-openai 的 create_byot（其不支持 per-request 头）。
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let response = crate::model::retry::with_retry(
             &self.retry_policy,
             |e: &RetryableFailure| e.retryable,
@@ -73,16 +74,15 @@ impl ChatService for AsyncOpenAIClient {
                         );
                     }
                 }
-                let attempted: std::result::Result<CreateChatCompletionResponse, OpenAIError> =
-                    self.client.chat().create_byot(body).await;
-                attempted.map_err(|e| RetryableFailure {
-                    retryable: match &e {
-                        OpenAIError::Reqwest(r) => crate::model::retry::should_retry_transport(r),
-                        _ => false,
-                    },
-                    // ADR-014：语义分类单点（KIND 前缀可被消费端谓词判定）
-                    message: classify_upstream_error(&e),
-                })
+                let resp = self
+                    .send_chat_request(&url, &body, "模型服务错误", request.session_id.as_deref())
+                    .await?;
+                resp.json::<CreateChatCompletionResponse>()
+                    .await
+                    .map_err(|e| RetryableFailure {
+                        retryable: false,
+                        message: format!("模型服务错误：解析响应失败：{}", e),
+                    })
             },
         )
         .await
@@ -189,7 +189,8 @@ impl ChatService for AsyncOpenAIClient {
                 apply_thinking_params(&mut body, effort, self.thinking_param_for(&request.model));
             }
         }
-        self.create_raw_stream(body).await
+        self.create_raw_stream(body, request.session_id.as_deref())
+            .await
     }
 }
 
@@ -234,37 +235,6 @@ pub(super) struct RetryableFailure {
     pub(super) message: String,
 }
 
-/// 上游 OpenAI 兼容错误的语义分类（ADR-014：分类契约单点）。
-///
-/// 上游网关（官方 / ollama / 自建）错误形态差异大：用错误文本中的
-/// **语义关键词**判定（不再依赖裸状态码数字，避免误判）；命中返回
-/// **带语义 KIND 前缀**的显示文本（消费端用 `is_permission` /
-/// `is_not_found` / `is_timeout` 谓词判定），未命中返回原文（Custom 语义）。
-/// 前缀保持既有显示契约（"模型服务错误：聊天补全失败：…"）。
-fn classify_upstream_error(e: &OpenAIError) -> String {
-    let raw = format!("模型服务错误：聊天补全失败：{e}");
-    let probe = format!("{e}").to_lowercase();
-    if probe.contains("invalid_api_key")
-        || probe.contains("invalid api key")
-        || probe.contains("unauthorized")
-        || probe.contains("authentication")
-    {
-        return TianyanError::permission(raw).to_string();
-    }
-    if probe.contains("model_not_found")
-        || probe.contains("model not found")
-        || probe.contains("does not exist")
-    {
-        return TianyanError::not_found(raw).to_string();
-    }
-    if let OpenAIError::Reqwest(r) = e {
-        if r.is_timeout() {
-            return TianyanError::timeout(raw).to_string();
-        }
-    }
-    raw
-}
-
 /// HTTP 状态码 → 语义分类（ADR-014：分类契约单点；流式请求的显式状态码）。
 ///
 /// 401/403 → permission、404 → not_found、408/504 → timeout；其余返回原文。
@@ -291,9 +261,12 @@ impl AsyncOpenAIClient {
     /// reasoning_content 增量字段（其 chunk 结构体无此字段），本方法绕开
     /// async-openai 直接解析原始 SSE，保留推理过程增量；非思考模型不携带
     /// 该字段，解析结果与原有 async-openai 路径一致。
+    ///
+    /// `session_id`：动态请求头求值输入（ADR-046；None = 非会话请求，跳过相关头）。
     async fn create_raw_stream(
         &self,
         body: Value,
+        session_id: Option<&str>,
     ) -> Result<mpsc::Receiver<Result<ChatCompletionChunk>>> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
@@ -302,7 +275,7 @@ impl AsyncOpenAIClient {
         let response = crate::model::retry::with_retry(
             &self.retry_policy,
             |e: &RetryableFailure| e.retryable,
-            || self.send_chat_request(&url, &body, "模型服务错误"),
+            || self.send_chat_request(&url, &body, "模型服务错误", session_id),
         )
         .await
         .map_err(|e| TianyanError::Custom(e.message))?;
@@ -384,18 +357,33 @@ impl AsyncOpenAIClient {
 
     /// 发送一次 chat completions 请求并检查状态（供重试循环调用；每次调用重建请求）。
     ///
-    /// 流式（SSE）与非流式（VLM 等 JSON 响应）**共用**：本函数只负责「发送 +
-    /// 状态码判定 + 语义分类」，不关心响应体形态。`err_prefix` 是调用方场景前缀
-    /// （`模型服务错误` / `VLM 服务错误`），使错误消息归属正确。
+    /// 流式（SSE）、非流式与 VLM（JSON 响应）**共用**：本函数只负责「发送 +
+    /// 静态 / 动态请求头 + 状态码判定 + 语义分类」，不关心响应体形态。
+    /// `err_prefix` 是调用方场景前缀（`模型服务错误` / `VLM 服务错误`），
+    /// 使错误消息归属正确；`session_id` 是动态请求头求值输入（ADR-046）。
     pub(super) async fn send_chat_request(
         &self,
         url: &str,
         body: &Value,
         err_prefix: &str,
+        session_id: Option<&str>,
     ) -> std::result::Result<reqwest::Response, RetryableFailure> {
         let mut req = self.http.post(url).json(body);
         for (k, v) in &self.headers {
             req = req.header(k.as_str(), v.as_str());
+        }
+        // 动态请求头（ADR-046）：静态之后应用（后写覆盖）；变量无值（非会话
+        // 请求）→ 跳过该头，不失败；值非法 → warn + 跳过（头是附属信息，
+        // 不得拖死请求本体）。
+        for (name, source) in &self.dynamic_headers {
+            if let Some(value) = source.resolve(session_id) {
+                match reqwest::header::HeaderValue::from_str(&value) {
+                    Ok(parsed) => req = req.header(name.clone(), parsed),
+                    Err(e) => {
+                        tracing::warn!(header = %name, error = %e, "动态请求头值非法，跳过");
+                    }
+                }
+            }
         }
         if !self.api_key.is_empty() && !self.headers.contains_key("Authorization") {
             req = req.bearer_auth(&self.api_key);
@@ -1283,7 +1271,7 @@ mod stream_robustness_tests {
             AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
 
         let mut rx = client
-            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
             .await
             .unwrap();
 
@@ -1312,7 +1300,7 @@ mod stream_robustness_tests {
 
         let started = std::time::Instant::now();
         let mut rx = client
-            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
             .await
             .unwrap();
 
@@ -1361,7 +1349,7 @@ mod stream_robustness_tests {
         let client =
             AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 4).unwrap();
         let mut rx = client
-            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
             .await
             .unwrap();
 
@@ -1395,7 +1383,7 @@ mod stream_robustness_tests {
 
         let started = std::time::Instant::now();
         let mut rx = client
-            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
             .await
             .unwrap();
 
@@ -1424,7 +1412,7 @@ mod stream_robustness_tests {
             AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
 
         let mut rx = client
-            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
             .await
             .unwrap();
 
@@ -1458,7 +1446,7 @@ mod stream_robustness_tests {
             AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 1, 300).unwrap();
 
         let mut rx = client
-            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
             .await
             .unwrap();
 
@@ -1507,7 +1495,7 @@ mod stream_robustness_tests {
         let client =
             AsyncOpenAIClient::new("mock", format!("http://{}/v1", addr), "", 30, 300).unwrap();
         let mut rx = client
-            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}))
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
             .await
             .unwrap();
 
@@ -1529,9 +1517,8 @@ mod stream_robustness_tests {
 
     /// 错误语义分类测试（ADR-014：KIND 前缀可被消费端谓词判定）。
     ///
-    /// `classify_upstream_error` 的输入需构造上游错误对象（依赖 async-openai
-    /// 内部结构，测试稳定性差），其关键词逻辑由集成路径覆盖；此处锁定
-    /// HTTP 状态 → KIND 的映射契约（消费端谓词判定的根基）。
+    /// 锁定 HTTP 状态 → KIND 的映射契约（消费端谓词判定的根基；
+    /// ADR-046 后流式 / 非流式 / VLM 三路径共用此单点）。
     #[test]
     fn test_classify_http_status_maps_semantic_kinds() {
         let raw = "模型服务错误：流式请求被拒绝（HTTP 401）：invalid api key";
@@ -1551,5 +1538,136 @@ mod stream_robustness_tests {
         // 其它状态：原文返回（Custom 语义，不改写分类）
         let s = classify_http_status(reqwest::StatusCode::BAD_REQUEST, raw);
         assert_eq!(s, raw);
+    }
+
+    /// 捕获请求报文的 mock：读取首个请求报文写入 captured，再返回给定响应
+    /// （用于断言请求头——UA / 动态会话头，ADR-046）。
+    fn spawn_mock_capture(
+        listener: std::net::TcpListener,
+        response_header: String,
+        body: String,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::Mutex<String>>,
+    ) {
+        let addr = listener.local_addr().unwrap();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_srv = std::sync::Arc::clone(&captured);
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            if let Ok(mut guard) = captured_srv.lock() {
+                *guard = String::from_utf8_lossy(&buf[..n]).to_string();
+            }
+            let _ = stream.write_all(response_header.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+        });
+        (addr, captured)
+    }
+
+    /// ADR-046：预置命中的 provider（opencode）注入 `x-opencode-session`
+    /// （值 = session_id）与专属 UA（tianyan/{VERSION}，非 reqwest 默认）。
+    #[tokio::test]
+    async fn test_dynamic_session_header_and_user_agent_injected() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let chunk: String = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n".to_string();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+            chunk.len()
+        );
+        let (addr, captured) = spawn_mock_capture(listener, header, chunk);
+
+        let provider = crate::config::ProviderConfig {
+            name: "opencode".to_string(),
+            endpoint: format!("http://{addr}/v1"),
+            api_key: Some("k".to_string()),
+            ..Default::default()
+        };
+        let client = AsyncOpenAIClient::from_provider(&provider).unwrap();
+
+        let mut rx = client
+            .create_raw_stream(
+                serde_json::json!({"model": "m", "stream": true}),
+                Some("session-abc-123"),
+            )
+            .await
+            .unwrap();
+        while let Some(_item) = rx.recv().await {}
+
+        let text = captured.lock().unwrap().clone();
+        assert!(
+            text.to_ascii_lowercase()
+                .contains("x-opencode-session: session-abc-123"),
+            "请求应携带会话头（值 = session_id）: {text}"
+        );
+        assert!(
+            text.contains(&format!("tianyan/{}", crate::VERSION)),
+            "请求应携带专属 UA（非 reqwest 默认）: {text}"
+        );
+    }
+
+    /// ADR-046：非会话请求（session_id = None）跳过动态头，不失败。
+    #[tokio::test]
+    async fn test_dynamic_session_header_absent_without_session() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let chunk: String = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n".to_string();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+            chunk.len()
+        );
+        let (addr, captured) = spawn_mock_capture(listener, header, chunk);
+
+        let provider = crate::config::ProviderConfig {
+            name: "opencode".to_string(),
+            endpoint: format!("http://{addr}/v1"),
+            api_key: Some("k".to_string()),
+            ..Default::default()
+        };
+        let client = AsyncOpenAIClient::from_provider(&provider).unwrap();
+
+        let mut rx = client
+            .create_raw_stream(serde_json::json!({"model": "m", "stream": true}), None)
+            .await
+            .unwrap();
+        while let Some(_item) = rx.recv().await {}
+
+        let text = captured.lock().unwrap().clone().to_ascii_lowercase();
+        assert!(
+            !text.contains("x-opencode-session"),
+            "无 session_id 时不得注入会话头: {text}"
+        );
+    }
+
+    /// ADR-046：非流式路径与流式同构——同样携带动态会话头（发送单点）。
+    #[tokio::test]
+    async fn test_non_streaming_path_carries_session_header() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let body = r#"{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#.to_string();
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let (addr, captured) = spawn_mock_capture(listener, header, body);
+
+        let provider = crate::config::ProviderConfig {
+            name: "opencode".to_string(),
+            endpoint: format!("http://{addr}/v1"),
+            api_key: Some("k".to_string()),
+            ..Default::default()
+        };
+        let client = AsyncOpenAIClient::from_provider(&provider).unwrap();
+
+        let request = ChatCompletionRequest::new("m", vec![Message::user("hi")])
+            .with_session_id("session-nonstream-1");
+        let resp = client.chat_completion(request).await.unwrap();
+        assert_eq!(resp.choices[0].message.content, "hi");
+
+        let text = captured.lock().unwrap().clone().to_ascii_lowercase();
+        assert!(
+            text.contains("x-opencode-session: session-nonstream-1"),
+            "非流式路径应携带会话头（统一发送单点）: {text}"
+        );
     }
 }

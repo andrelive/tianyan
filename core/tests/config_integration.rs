@@ -22,6 +22,7 @@ fn make_test_config() -> TianyanConfig {
         headers: std::collections::HashMap::new(),
         thinking_field: None,
         dialect: None,
+        ..Default::default()
     }];
     config.models.preferences.chat = Some(ModelRef {
         provider: "test".to_string(),

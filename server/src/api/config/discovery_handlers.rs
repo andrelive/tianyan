@@ -210,10 +210,15 @@ pub async fn test_provider_connection(
         format!("{endpoint}/models")
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(http_client_error)?;
+    // HTTP 工厂单点（含专属 UA，ADR-046）：网关（如 opencode）拒绝通用
+    // HTTP 库默认 UA；简单 GET 场景 read_timeout 与总超时等价。
+    let client = tianyan::common::http::build_http_client(tianyan::common::http::HttpClientSpec {
+        timeout: std::time::Duration::from_secs(10),
+        connect_timeout: std::time::Duration::from_secs(10),
+        user_agent: Some(format!("tianyan/{}", tianyan::VERSION)),
+        redirect_policy: None,
+    })
+    .map_err(http_client_error)?;
 
     let mut req = client.get(&url);
     if protocol == "openai" {
@@ -312,10 +317,14 @@ pub async fn scan_provider_models(
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(http_client_error)?;
+    // HTTP 工厂单点（含专属 UA，ADR-046；15s 读空闲对扫描 GET 与总超时等价）。
+    let client = tianyan::common::http::build_http_client(tianyan::common::http::HttpClientSpec {
+        timeout: std::time::Duration::from_secs(15),
+        connect_timeout: std::time::Duration::from_secs(10),
+        user_agent: Some(format!("tianyan/{}", tianyan::VERSION)),
+        redirect_policy: None,
+    })
+    .map_err(http_client_error)?;
 
     let mut req = client.get(&url);
     if protocol == "openai" {
@@ -457,4 +466,67 @@ pub async fn add_provider_model(
             );
             e
         })
+}
+
+/// 单个动态请求头信息（UI 展示：自动注入的会话头等）。
+#[derive(Debug, Serialize)]
+pub struct ProviderPresetHeaderInfo {
+    /// header 名（如 `x-opencode-session`）。
+    pub name: String,
+    /// 值来源（受控变量源 wire 名，当前仅 `session_id`）。
+    pub source: String,
+}
+
+/// 单个预置条目（UI 预置选择器：一键填草稿）。
+#[derive(Debug, Serialize)]
+pub struct ProviderPresetInfo {
+    /// 预置 id（配置 `name` / `preset` 匹配键）。
+    pub id: String,
+    /// 显示名。
+    pub display_name: String,
+    /// 默认端点（预填草稿用）。
+    pub endpoint: String,
+    /// 一句话描述。
+    pub description: String,
+    /// 是否需要 API key。
+    pub requires_api_key: bool,
+    /// API key 环境变量提示。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env_hint: Option<String>,
+    /// 自动注入的动态请求头（如 opencode 的会话头；UI 提示用）。
+    pub dynamic_headers: Vec<ProviderPresetHeaderInfo>,
+}
+
+/// 预置列表响应。
+#[derive(Debug, Serialize)]
+pub struct ProviderPresetsResponse {
+    /// 内置预置列表（ADR-046）。
+    pub presets: Vec<ProviderPresetInfo>,
+}
+
+/// GET /api/v1/config/provider-presets — 内置 Provider 预置列表（ADR-046）。
+///
+/// 纯静态数据下发（来源 `tianyan::config::PROVIDER_PRESETS` 单一事实源），
+/// 供前端预置选择器一键填草稿（endpoint / 描述 / key 提示 / 动态头说明）。
+pub async fn list_provider_presets() -> Json<ProviderPresetsResponse> {
+    let presets = tianyan::config::PROVIDER_PRESETS
+        .iter()
+        .map(|p| ProviderPresetInfo {
+            id: p.id.to_string(),
+            display_name: p.display_name.to_string(),
+            endpoint: p.endpoint.to_string(),
+            description: p.description.to_string(),
+            requires_api_key: p.requires_api_key,
+            api_key_env_hint: p.api_key_env_hint.map(str::to_string),
+            dynamic_headers: p
+                .dynamic_headers
+                .iter()
+                .map(|(name, source)| ProviderPresetHeaderInfo {
+                    name: (*name).to_string(),
+                    source: source.wire_name().to_string(),
+                })
+                .collect(),
+        })
+        .collect();
+    Json(ProviderPresetsResponse { presets })
 }

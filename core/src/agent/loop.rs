@@ -368,7 +368,9 @@ impl AgentLoop {
 
     /// 构造本轮 LLM 请求（`run` / `run_stream` 共用，消除两条路径的重复）。
     ///
-    /// 统一处理：T6 动态 max_tokens → 思考强度 → 流式开关。
+    /// 统一处理：T6 动态 max_tokens → 思考强度 → 流式开关 → 会话填充
+    /// （ADR-046：`session_id` 作动态请求头求值输入，如 opencode 的
+    /// `x-opencode-session`）。
     /// 动态 max_tokens：优先上次请求实测输入（usage.prompt_tokens，由
     /// `run_turns` 从会话消息恢复并逐轮更新——重启后不退回估算），
     /// 无实测时退化为 TokenEstimator 估算；预算不足 1024 时提前报错
@@ -380,6 +382,7 @@ impl AgentLoop {
         stream: bool,
         thinking_effort: Option<String>,
         last_input_usage: Option<(String, usize)>,
+        session_id: &str,
     ) -> Result<ChatCompletionRequest, TianyanError> {
         // ADR-030：工具集按策略——主 agent 全局注册表；子代理过滤集
         // （角色白名单 + submit_result）
@@ -407,7 +410,9 @@ impl AgentLoop {
             max
         });
 
-        let mut request = ChatCompletionRequest::new(model, msgs.to_vec()).with_tools(tools);
+        let mut request = ChatCompletionRequest::new(model, msgs.to_vec())
+            .with_tools(tools)
+            .with_session_id(session_id);
         if stream {
             request = request.with_stream(true);
         }
@@ -450,9 +455,17 @@ impl AgentLoop {
             |this, model, _sender, msgs, cancel, last_input_usage| {
                 // FnMut 闭包按值捕获 thinking_effort，每次调用 clone 供本轮使用
                 let thinking_effort = thinking_effort.clone();
+                let session_id = session_id.to_string();
                 Box::pin(async move {
                     let request = this
-                        .prepare_request(model, &msgs, false, thinking_effort, last_input_usage)
+                        .prepare_request(
+                            model,
+                            &msgs,
+                            false,
+                            thinking_effort,
+                            last_input_usage,
+                            &session_id,
+                        )
                         .await?;
 
                     // 请求阶段可取消（结构性取消）：非流式路径同样覆盖——
@@ -521,6 +534,7 @@ impl AgentLoop {
             |this, model, sender, msgs, cancel, last_input_usage| {
                 // FnMut 闭包按值捕获 thinking_effort，每次调用 clone 供本轮使用
                 let thinking_effort = thinking_effort.clone();
+                let session_id = session_id.to_string();
                 Box::pin(async move {
                     let sender = sender.ok_or_else(|| {
                         TianyanError::Custom("agent_loop: 流式路径缺少 stream_sender".to_string())
@@ -534,6 +548,7 @@ impl AgentLoop {
                             cancel,
                             thinking_effort,
                             &last_input_usage,
+                            &session_id,
                         )
                         .await?;
                     AgentLoop::finalize_streamed_turn(
@@ -557,6 +572,7 @@ impl AgentLoop {
     ///
     /// 不变量：累积顺序与发送顺序一致（reasoning 先于 content）；
     /// 网关缺失 usage 时此处不兜底（由 [`Self::finalize_streamed_turn`] 估算）。
+    #[allow(clippy::too_many_arguments)]
     async fn collect_streamed_turn(
         &self,
         model: &str,
@@ -565,9 +581,17 @@ impl AgentLoop {
         cancel: Option<&AtomicBool>,
         thinking_effort: Option<String>,
         last_input_usage: &Option<(String, usize)>,
+        session_id: &str,
     ) -> Result<StreamAccum, TianyanError> {
         let request = self
-            .prepare_request(model, msgs, true, thinking_effort, last_input_usage.clone())
+            .prepare_request(
+                model,
+                msgs,
+                true,
+                thinking_effort,
+                last_input_usage.clone(),
+                session_id,
+            )
             .await?;
 
         // 请求阶段可取消（结构性取消）：取消先到 → `chat_completion_stream`

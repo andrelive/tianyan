@@ -246,6 +246,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         AsyncOpenAIClient::from_provider(&provider).unwrap()
     }
@@ -405,6 +406,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             thinking_field: None,
             dialect: Some(DialectPreset::DashScope),
+            ..Default::default()
         };
         let client = AsyncOpenAIClient::from_provider(&provider).unwrap();
 

@@ -50,6 +50,7 @@ fn test_config(data_dir: &Path) -> TianyanConfig {
             headers: std::collections::HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         }],
         preferences: ModelPreferences {
             chat: Some(ModelRef {

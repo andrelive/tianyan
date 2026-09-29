@@ -139,6 +139,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         assert!(validate_provider(&provider).is_ok());
     }
@@ -156,6 +157,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         assert!(validate_provider(&provider).is_err());
     }
@@ -173,6 +175,7 @@ mod tests {
             headers: std::collections::HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         assert!(validate_provider(&provider).is_err());
     }

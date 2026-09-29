@@ -189,4 +189,25 @@ describe('SettingsPanel', () => {
       });
     });
   });
+
+  it('adds a provider from preset via the preset dropdown (ADR-046)', async () => {
+    const user = userEvent.setup();
+    renderSettingsPanel();
+    await waitFor(() => {
+      expect(screen.getByText('默认模型偏好')).toBeInTheDocument();
+    });
+
+    // 打开预置选择菜单（懒加载；msw mock：OpenCode Zen + Ollama 本地）
+    await user.click(screen.getByRole('button', { name: /添加提供商/ }));
+    await waitFor(() => {
+      expect(screen.getByRole('menuitem', { name: /OpenCode Zen/ })).toBeInTheDocument();
+    });
+
+    // 选择预置 → 草稿（name + endpoint）填入新 provider 卡
+    await user.click(screen.getByRole('menuitem', { name: /OpenCode Zen/ }));
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('opencode')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('https://opencode.ai/zen/v1')).toBeInTheDocument();
+    });
+  });
 });

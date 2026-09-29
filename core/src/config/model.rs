@@ -28,6 +28,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::presets::{self, ProviderPreset};
+
 // ─── 模型能力标签 ───
 
 /// 模型能力标签。
@@ -293,6 +295,58 @@ impl ProviderDialect {
     }
 }
 
+// ─── 请求头修饰（ADR-046）───
+
+/// 动态请求头的受控变量源。
+///
+/// 变量源是**编译期枚举**：新来源 = 加一个变体 + [`HeaderSource::resolve`] 一行。
+/// **刻意不引入 `${...}` 模板字符串**——模板把声明式变半编程（转义 / 注入 /
+/// 未知变量 / 错误语义都是新失败模式）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HeaderSource {
+    /// 当前请求所属会话 ID（AgentLoop 填充；非会话请求（压缩 / judge 等）
+    /// 无值 → 跳过该头，不失败）。
+    #[serde(rename = "session_id")]
+    SessionId,
+}
+
+impl HeaderSource {
+    /// 按来源求值（`None` = 本次请求无该变量 → 跳过该头）。
+    ///
+    /// **扩展点**：新变量源在此加一行；发送单点不感知来源种类。
+    pub fn resolve(self, session_id: Option<&str>) -> Option<String> {
+        match self {
+            Self::SessionId => session_id.map(str::to_string),
+        }
+    }
+
+    /// 配置 / UI 展示名（与 serde 形态一致：`session_id`）。
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::SessionId => "session_id",
+        }
+    }
+}
+
+/// 动态请求头绑定：header 名 → 受控变量源（ADR-046）。
+///
+/// 序列化形态（TOML）：
+///
+/// ```toml
+/// [[models.providers.dynamic_headers]]
+/// name = "x-opencode-session"
+/// source = "session_id"
+/// ```
+///
+/// `ProviderConfig.dynamic_headers`：`None` = 取预置；`Some([])` = 显式清空。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeaderBinding {
+    /// header 名（如 `x-opencode-session`）。
+    pub name: String,
+    /// 值来源（受控枚举，非模板）。
+    pub source: HeaderSource,
+}
+
 // ─── 模型提供商 ───
 
 /// 模型提供商配置。
@@ -345,6 +399,24 @@ pub struct ProviderConfig {
     /// 二者都不改请求路径代码。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub dialect: Option<DialectPreset>,
+    /// 请求 User-Agent 覆盖（可选，ADR-046）。
+    ///
+    /// 解析链：本字段 > `headers` 手工项 > 预置表 > `tianyan/{VERSION}`
+    /// （见 [`ProviderConfig::resolve_user_agent`]）。专属 UA 是网关通行要求
+    /// （opencode 明确拒绝通用 SDK / HTTP 库名；风控网关亦拦截）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub user_agent: Option<String>,
+    /// 动态请求头绑定表（可选，ADR-046）。
+    ///
+    /// `None` = 取预置（如 opencode 系的 `x-opencode-session` 会话头）；
+    /// `Some([])` = 显式清空（退出预置行为）。变量源是受控枚举
+    /// （[`HeaderSource`]），**不引入模板字符串**。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub dynamic_headers: Option<Vec<HeaderBinding>>,
+    /// 预置引用（可选）：显式指定预置 id（缺省按 [`ProviderConfig::name`]
+    /// 匹配，均大小写不敏感）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub preset: Option<String>,
 }
 
 impl ProviderConfig {
@@ -372,6 +444,68 @@ impl ProviderConfig {
         }
         dialect
     }
+
+    /// 匹配的预置条目（ADR-046）：显式 `preset` 字段 > `name` 精确匹配
+    /// （均大小写不敏感）。
+    pub fn matched_preset(&self) -> Option<&'static ProviderPreset> {
+        if let Some(id) = self
+            .preset
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(p) = presets::find_preset(id) {
+                return Some(p);
+            }
+            tracing::warn!(provider = %self.name, preset = %id, "预置 id 未命中，回落按名称匹配");
+        }
+        presets::find_preset(&self.name)
+    }
+
+    /// 解析动态请求头绑定（ADR-046）：显式 > 预置 > 空（整体替换，不逐条合并）。
+    pub fn resolve_dynamic_headers(&self) -> Vec<HeaderBinding> {
+        match &self.dynamic_headers {
+            Some(list) => list.clone(),
+            None => self
+                .matched_preset()
+                .map(|preset| {
+                    preset
+                        .dynamic_headers
+                        .iter()
+                        .map(|(name, source)| HeaderBinding {
+                            name: (*name).to_string(),
+                            source: *source,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// 解析 User-Agent（ADR-046）：
+    /// 字段 > `headers` 手工项 > 预置 > `tianyan/{VERSION}`。
+    pub fn resolve_user_agent(&self) -> String {
+        if let Some(ua) = self
+            .user_agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return ua.to_string();
+        }
+        for (key, value) in &self.headers {
+            if key.eq_ignore_ascii_case("user-agent") && !value.trim().is_empty() {
+                return value.clone();
+            }
+        }
+        if let Some(preset) = self.matched_preset() {
+            if let Some(ua) = preset.user_agent {
+                return ua.to_string();
+            }
+        }
+        format!("tianyan/{}", crate::VERSION)
+    }
+
     /// 解析 API 密钥（支持 `${ENV_VAR}` 格式）。
     pub fn resolve_api_key(&self) -> String {
         let raw = self.api_key.as_deref().unwrap_or("");
@@ -445,7 +579,60 @@ impl ProviderConfig {
         if self.first_token_timeout > 3600 {
             return Err("首 token 预算不能超过 3600 秒".to_string());
         }
+        self.validate_dynamic_headers()?;
         Ok(())
+    }
+
+    /// 动态请求头校验（ADR-046）：名合法（`HeaderName` 解析）+ 无重名
+    /// （大小写不敏感；静态 `headers` ∪ 动态列表合并视图；预置绑定参与校验）。
+    fn validate_dynamic_headers(&self) -> Result<(), String> {
+        let mut seen: Vec<String> = self
+            .headers
+            .keys()
+            .map(|key| key.to_ascii_lowercase())
+            .collect();
+        for binding in self.resolve_dynamic_headers() {
+            if reqwest::header::HeaderName::from_bytes(binding.name.as_bytes()).is_err() {
+                return Err(format!(
+                    "提供商 '{}' 的动态请求头名 '{}' 非法",
+                    self.name, binding.name
+                ));
+            }
+            let lower = binding.name.to_ascii_lowercase();
+            if seen.contains(&lower) {
+                return Err(format!(
+                    "提供商 '{}' 的动态请求头 '{}' 与已有请求头重名",
+                    self.name, binding.name
+                ));
+            }
+            seen.push(lower);
+        }
+        Ok(())
+    }
+}
+
+impl Default for ProviderConfig {
+    /// 与 serde 默认对齐（timeout 60 / first_token_timeout 300 / enabled true）。
+    ///
+    /// 供结构体更新语法 `..Default::default()` 补新增字段（构造点不重复列举
+    /// 全量字段的"默认值噪音"）；**不要**直接 `ProviderConfig::default()` 构造
+    /// （name / endpoint 为空，validate 必拒）。
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            endpoint: String::new(),
+            api_key: None,
+            models: Vec::new(),
+            timeout: default_timeout(),
+            first_token_timeout: default_first_token_timeout(),
+            enabled: default_true(),
+            headers: HashMap::new(),
+            thinking_field: None,
+            dialect: None,
+            user_agent: None,
+            dynamic_headers: None,
+            preset: None,
+        }
     }
 }
 
@@ -932,6 +1119,7 @@ mod tests {
             headers: HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         }
     }
 
@@ -955,6 +1143,7 @@ mod tests {
             headers: HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         }
     }
 
@@ -971,6 +1160,7 @@ mod tests {
             headers: HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         assert!(p.validate().is_ok());
     }
@@ -988,6 +1178,7 @@ mod tests {
             headers: HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         assert!(p.validate().is_err());
     }
@@ -1005,6 +1196,7 @@ mod tests {
             headers: HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         assert!(p.validate().is_err());
     }
@@ -1022,6 +1214,7 @@ mod tests {
             headers: HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         assert!(p.validate().is_err());
     }
@@ -1040,6 +1233,7 @@ mod tests {
             headers: HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         assert_eq!(p.resolve_api_key(), "env-key-value");
         std::env::remove_var("TIANYAN_TEST_KEY2");
@@ -1058,6 +1252,7 @@ mod tests {
             headers: HashMap::new(),
             thinking_field: None,
             dialect: None,
+            ..Default::default()
         };
         assert_eq!(p.resolve_api_key(), "sk-plain");
     }
@@ -1083,6 +1278,7 @@ mod tests {
                             vec![ModelCapability::TextEmbedding],
                         ),
                     ],
+                    ..Default::default()
                 },
                 ProviderConfig {
                     name: "deepseek".to_string(),
@@ -1095,6 +1291,7 @@ mod tests {
                     thinking_field: None,
                     dialect: None,
                     models: vec![make_model("deepseek-chat", vec![ModelCapability::Chat])],
+                    ..Default::default()
                 },
             ],
             preferences: ModelPreferences {
@@ -1142,6 +1339,7 @@ mod tests {
                         vec![ModelCapability::TextEmbedding],
                     ),
                 ],
+                ..Default::default()
             }],
             preferences: ModelPreferences::default(),
         };
@@ -1177,6 +1375,7 @@ mod tests {
                         ModelCapability::MultimodalEmbedding,
                     ],
                 )],
+                ..Default::default()
             }],
             preferences: ModelPreferences {
                 embedding: Some(ModelRef {
@@ -1299,5 +1498,217 @@ max_input_tokens = 8000
         entry.max_input_tokens = Some(0);
         let err = make_provider(entry).validate().unwrap_err();
         assert!(err.contains("max_input_tokens"), "err: {err}");
+    }
+
+    #[test]
+    fn test_header_source_serde() {
+        // 配置写法（snake_case）必须能解析；未知来源拒绝
+        let s: HeaderSource = serde_json::from_str("\"session_id\"").unwrap();
+        assert_eq!(s, HeaderSource::SessionId);
+        assert!(serde_json::from_str::<HeaderSource>("\"unknown\"").is_err());
+        assert_eq!(
+            serde_json::to_string(&HeaderSource::SessionId).unwrap(),
+            "\"session_id\""
+        );
+
+        // toml 形态（绑定表单项）
+        let b: HeaderBinding =
+            toml::from_str("name = \"x-opencode-session\"\nsource = \"session_id\"").unwrap();
+        assert_eq!(b.name, "x-opencode-session");
+        assert_eq!(b.source, HeaderSource::SessionId);
+    }
+
+    #[test]
+    fn test_header_source_resolve() {
+        assert_eq!(
+            HeaderSource::SessionId.resolve(Some("session-abc")),
+            Some("session-abc".to_string())
+        );
+        // 非会话请求（无 session_id）→ None → 调用方跳过该头
+        assert_eq!(HeaderSource::SessionId.resolve(None), None);
+    }
+
+    #[test]
+    fn test_resolve_dynamic_headers_precedence() {
+        // 1) 未配置 → 取预置（opencode 携带会话头绑定）
+        let mut p = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        p.name = "opencode".to_string();
+        let bindings = p.resolve_dynamic_headers();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].name, "x-opencode-session");
+        assert_eq!(bindings[0].source, HeaderSource::SessionId);
+
+        // 2) 显式空 → 清空（退出预置行为）
+        p.dynamic_headers = Some(vec![]);
+        assert!(p.resolve_dynamic_headers().is_empty());
+
+        // 3) 显式列表 → 整体替换（不逐条合并）
+        p.dynamic_headers = Some(vec![HeaderBinding {
+            name: "x-custom-session".to_string(),
+            source: HeaderSource::SessionId,
+        }]);
+        let bindings = p.resolve_dynamic_headers();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].name, "x-custom-session");
+
+        // 4) 未命中预置 + 未配置 → 空
+        let mut q = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        q.name = "unknown-provider".to_string();
+        assert!(q.resolve_dynamic_headers().is_empty());
+    }
+
+    #[test]
+    fn test_matched_preset_explicit_field_wins() {
+        let mut p = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        p.name = "my-gateway".to_string();
+        assert!(p.matched_preset().is_none());
+
+        // 显式 preset 字段引用（与 name 无关）
+        p.preset = Some("opencode-go".to_string());
+        assert_eq!(p.matched_preset().unwrap().id, "opencode-go");
+
+        // name 匹配大小写不敏感
+        p.preset = None;
+        p.name = "OpenCode".to_string();
+        assert_eq!(p.matched_preset().unwrap().id, "opencode");
+    }
+
+    #[test]
+    fn test_resolve_user_agent_precedence() {
+        let default_ua = format!("tianyan/{}", crate::VERSION);
+
+        // 默认：tianyan/{VERSION}
+        let p = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        assert_eq!(p.resolve_user_agent(), default_ua);
+
+        // 预置命中但预置未配 UA（opencode）→ 仍回落全局默认
+        let mut preset_hit = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        preset_hit.name = "opencode".to_string();
+        assert_eq!(preset_hit.resolve_user_agent(), default_ua);
+
+        // headers 手工项优先于全局默认
+        let mut manual = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        manual.name = "opencode".to_string();
+        manual
+            .headers
+            .insert("user-agent".to_string(), "my-manual/1.0".to_string());
+        assert_eq!(manual.resolve_user_agent(), "my-manual/1.0");
+
+        // user_agent 字段优先于 headers 手工项
+        manual.user_agent = Some("my-field/2.0".to_string());
+        assert_eq!(manual.resolve_user_agent(), "my-field/2.0");
+    }
+
+    #[test]
+    fn test_validate_dynamic_headers_rejects_invalid_name() {
+        let mut p = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        p.name = "unknown-provider".to_string();
+        p.dynamic_headers = Some(vec![HeaderBinding {
+            name: "bad header!".to_string(),
+            source: HeaderSource::SessionId,
+        }]);
+        let err = p.validate().unwrap_err();
+        assert!(err.contains("非法"), "err: {err}");
+    }
+
+    #[test]
+    fn test_validate_dynamic_headers_rejects_duplicate() {
+        // 动态内部重名（大小写不敏感）
+        let mut p = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        p.name = "unknown-provider".to_string();
+        p.dynamic_headers = Some(vec![
+            HeaderBinding {
+                name: "x-a".to_string(),
+                source: HeaderSource::SessionId,
+            },
+            HeaderBinding {
+                name: "X-A".to_string(),
+                source: HeaderSource::SessionId,
+            },
+        ]);
+        assert!(p.validate().is_err());
+
+        // 与静态 headers 重名
+        let mut q = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        q.name = "unknown-provider".to_string();
+        q.headers
+            .insert("x-opencode-session".to_string(), "static".to_string());
+        q.dynamic_headers = Some(vec![HeaderBinding {
+            name: "x-opencode-session".to_string(),
+            source: HeaderSource::SessionId,
+        }]);
+        assert!(q.validate().is_err());
+
+        // 预置绑定与静态冲突（opencode 预置 + 手写同名静态头）
+        let mut r = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        r.name = "opencode".to_string();
+        r.headers
+            .insert("X-Opencode-Session".to_string(), "x".to_string());
+        assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_dynamic_headers_ok_with_preset() {
+        // opencode 预置绑定（x-opencode-session）不与任何静态冲突 → 通过
+        let mut p = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        p.name = "opencode".to_string();
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn test_provider_new_fields_roundtrip() {
+        let toml_str = r#"
+name = "my-gateway"
+endpoint = "https://gw.example.com/v1"
+user_agent = "my-agent/1.0"
+preset = "opencode-go"
+
+[[models]]
+name = "m"
+capabilities = ["chat"]
+
+[[dynamic_headers]]
+name = "x-opencode-session"
+source = "session_id"
+"#;
+        let p: ProviderConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(p.user_agent.as_deref(), Some("my-agent/1.0"));
+        assert_eq!(p.preset.as_deref(), Some("opencode-go"));
+        let bindings = p.resolve_dynamic_headers();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].name, "x-opencode-session");
+
+        // 序列化往返（单形态）
+        let back: ProviderConfig = toml::from_str(&toml::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.user_agent.as_deref(), Some("my-agent/1.0"));
+        assert_eq!(back.resolve_dynamic_headers()[0].name, "x-opencode-session");
+    }
+
+    #[test]
+    fn test_provider_old_config_compat_without_new_fields() {
+        // 旧配置（无新字段）→ None，行为不变
+        let toml_str = r#"
+name = "legacy"
+endpoint = "https://legacy.example.com/v1"
+
+[[models]]
+name = "m"
+capabilities = ["chat"]
+"#;
+        let p: ProviderConfig = toml::from_str(toml_str).unwrap();
+        assert!(p.user_agent.is_none());
+        assert!(p.dynamic_headers.is_none());
+        assert!(p.preset.is_none());
+        // 未命中预置 → 空绑定、默认 UA
+        assert!(p.resolve_dynamic_headers().is_empty());
+        assert_eq!(
+            p.resolve_user_agent(),
+            format!("tianyan/{}", crate::VERSION)
+        );
+        // 缺省项不序列化（不污染配置文件）
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("user_agent"));
+        assert!(!json.contains("dynamic_headers"));
+        assert!(!json.contains("preset"));
     }
 }
