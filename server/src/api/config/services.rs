@@ -55,6 +55,19 @@ fn resolve_all_model_catalogs(models: &ModelsConfig) -> HashMap<String, ModelCat
         .collect()
 }
 
+/// 解析配置中全部 provider 的生效端点（ADR-046：显式 > 预置），供响应展示；
+/// 无法解析（未配置且未命中预置）的 provider 不出现。
+fn resolve_all_endpoints(models: &ModelsConfig) -> HashMap<String, String> {
+    models
+        .providers
+        .iter()
+        .filter_map(|p| {
+            p.resolve_endpoint()
+                .map(|endpoint| (p.name.clone(), endpoint))
+        })
+        .collect()
+}
+
 /// 配置服务，管理应用配置的读取、保存与热重载
 pub struct ConfigService {
     state: Arc<AppState>,
@@ -72,6 +85,7 @@ impl ConfigService {
         Ok(ConfigResponse {
             model_specs: Some(resolve_all_model_specs(&config.models)),
             model_catalog: Some(resolve_all_model_catalogs(&config.models)),
+            resolved_endpoints: Some(resolve_all_endpoints(&config.models)),
             config,
         })
     }

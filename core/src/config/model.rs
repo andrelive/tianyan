@@ -357,7 +357,7 @@ pub struct HeaderBinding {
 pub struct ProviderConfig {
     /// 提供商名称（如 "openai"、"deepseek"）。
     pub name: String,
-    /// API 端点 URL。
+    /// API 端点 URL（可留空：命中预置时由预置补齐 — ADR-046；未命中且为空则校验失败）。
     pub endpoint: String,
     /// API 密钥（支持 `${ENV_VAR}` 格式引用环境变量）。
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -506,6 +506,19 @@ impl ProviderConfig {
         format!("tianyan/{}", crate::VERSION)
     }
 
+    /// 解析有效端点（ADR-046）：显式配置 > 预置 > `None`（未配置且未命中预置）。
+    ///
+    /// 命中预置（`name` / `preset` 匹配）时 endpoint 可留空——运行时与方言 /
+    /// UA / 动态头同链解析；显式配置（非空字符串）永远优先。
+    pub fn resolve_endpoint(&self) -> Option<String> {
+        let explicit = self.endpoint.trim();
+        if !explicit.is_empty() {
+            return Some(explicit.to_string());
+        }
+        self.matched_preset()
+            .map(|preset| preset.endpoint.to_string())
+    }
+
     /// 解析 API 密钥（支持 `${ENV_VAR}` 格式）。
     pub fn resolve_api_key(&self) -> String {
         let raw = self.api_key.as_deref().unwrap_or("");
@@ -517,18 +530,21 @@ impl ProviderConfig {
         }
     }
 
-    /// 获取有效的 API 端点 URL。
+    /// 获取有效的 API 端点 URL（ADR-046：显式配置 > 预置）。
+    ///
+    /// 命中预置（`name` / `preset` 匹配）时 endpoint 可留空——由预置补齐；
+    /// 未配置且未命中预置时报错。
     pub fn get_endpoint(&self) -> Result<String, String> {
-        if self.endpoint.is_empty() {
-            Err("API 端点 URL 不能为空".to_string())
-        } else if !self.endpoint.starts_with("http://") && !self.endpoint.starts_with("https://") {
-            Err(format!(
+        let endpoint = self
+            .resolve_endpoint()
+            .ok_or_else(|| "API 端点 URL 不能为空（未配置且未命中预置）".to_string())?;
+        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+            return Err(format!(
                 "API 端点 URL 格式无效：{}，必须以 http:// 或 https:// 开头",
-                self.endpoint
-            ))
-        } else {
-            Ok(self.endpoint.clone())
+                endpoint
+            ));
         }
+        Ok(endpoint)
     }
 
     /// 验证提供商配置是否有效。
@@ -1597,6 +1613,50 @@ max_input_tokens = 8000
         // user_agent 字段优先于 headers 手工项
         manual.user_agent = Some("my-field/2.0".to_string());
         assert_eq!(manual.resolve_user_agent(), "my-field/2.0");
+    }
+
+    #[test]
+    fn test_resolve_endpoint_preset_fallback() {
+        // 未配置 → 命中预置（opencode → zen 端点）
+        let mut p = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        p.name = "opencode".to_string();
+        p.endpoint = String::new();
+        assert_eq!(p.resolve_endpoint().unwrap(), "https://opencode.ai/zen/v1");
+
+        // 显式 endpoint 覆盖预置
+        p.endpoint = "https://my-relay.example.com/v1".to_string();
+        assert_eq!(
+            p.resolve_endpoint().unwrap(),
+            "https://my-relay.example.com/v1"
+        );
+
+        // 未命中预置且未配置 → None
+        let mut q = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        q.name = "unknown-provider".to_string();
+        q.endpoint = String::new();
+        assert!(q.resolve_endpoint().is_none());
+
+        // get_endpoint：命中预置时留空可解析（go 变体）；未命中时报错
+        assert!(q.get_endpoint().is_err());
+        let mut r = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        r.name = "opencode-go".to_string();
+        r.endpoint = String::new();
+        assert_eq!(r.get_endpoint().unwrap(), "https://opencode.ai/zen/go/v1");
+    }
+
+    #[test]
+    fn test_validate_allows_empty_endpoint_with_preset() {
+        // ADR-046：命中预置时 endpoint 可留空（validate 通过）
+        let mut p = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        p.name = "opencode".to_string();
+        p.endpoint = String::new();
+        assert!(p.validate().is_ok());
+
+        // 未命中预置 + 空 endpoint → 校验失败
+        let mut q = make_provider(make_model("m", vec![ModelCapability::Chat]));
+        q.name = "unknown-provider".to_string();
+        q.endpoint = String::new();
+        assert!(q.validate().is_err());
     }
 
     #[test]

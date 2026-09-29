@@ -445,6 +445,8 @@ export interface ProviderCardProps {
   scanState: ProviderScanState;
   resolvedSpecs: Record<string, ResolvedModelSpec>;
   modelCatalog: Record<string, ModelCatalogInfo>;
+  /** 后端解析出的生效端点（ADR-046：显式 > 预置），key = provider name。 */
+  resolvedEndpoints: Record<string, string>;
   onUpdateProvider: (field: keyof ProviderConfigState, value: unknown) => void;
   onRemoveProvider: () => void;
   onTestConnection: () => void;
@@ -466,6 +468,7 @@ export default function ProviderCard({
   scanState,
   resolvedSpecs,
   modelCatalog,
+  resolvedEndpoints,
   onUpdateProvider,
   onRemoveProvider,
   onTestConnection,
@@ -496,8 +499,15 @@ export default function ProviderCard({
             value={p.endpoint}
             onChange={(e) => onUpdateProvider('endpoint', e.target.value)}
             className={INPUT_CLASS}
-            placeholder="https://api.openai.com/v1"
+            placeholder={
+              resolvedEndpoints[p.name] ? '留空 = 使用预置端点' : 'https://api.openai.com/v1'
+            }
           />
+          {p.endpoint.trim() === '' && resolvedEndpoints[p.name] && (
+            <div className="text-xs text-[var(--color-text-tertiary)] mt-1">
+              留空 = 使用预置端点：{resolvedEndpoints[p.name]}
+            </div>
+          )}
         </FieldRow>
         <div className="flex items-center gap-2 pb-1">
           <Toggle
@@ -572,7 +582,7 @@ export default function ProviderCard({
       {/* ── Provider discovery (scan models) + 模型列表折叠开关 ── */}
       <ScanSection
         providerName={p.name}
-        endpoint={p.endpoint}
+        endpoint={p.endpoint || resolvedEndpoints[p.name] || ''}
         modelCount={p.models.length}
         collapsed={isCollapsed}
         onToggleCollapsed={onToggleCollapsed}

@@ -64,6 +64,7 @@ export function emptyConfigState(): ConfigState {
     preferences: emptyPreferences(),
     resolvedSpecs: {},
     modelCatalog: {},
+    resolvedEndpoints: {},
     mcpServers: [],
     web_enabled: true,
     search_backend: 'duckduckgo',
@@ -284,6 +285,8 @@ export interface BackendConfigResponse {
   model_specs?: Record<string, ResolvedModelSpec>;
   /** 后端解析出的内置目录命中（advisory），key = "{provider}/{model}"。旧后端可能缺省。 */
   model_catalog?: Record<string, ModelCatalogInfo>;
+  /** 后端解析出的提供商生效端点（显式 > 预置），key = provider name。旧后端可能缺省。 */
+  resolved_endpoints?: Record<string, string>;
 }
 
 /* ─────── Form → Backend (ConfigState → { config: TianyanConfig }) ─────── */
@@ -459,6 +462,7 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     })),
     resolvedSpecs: response.model_specs ?? {},
     modelCatalog: response.model_catalog ?? {},
+    resolvedEndpoints: response.resolved_endpoints ?? {},
     preferences: {
       chat: models.preferences?.chat ?? null,
       embedding: models.preferences?.embedding ?? null,

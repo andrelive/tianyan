@@ -43,7 +43,7 @@ agent（`loop.rs` session_id 贯通）、server（预置 API + discovery UA）�
 | 层 | 目标 | 落地 |
 |---|---|---|
 | L1 配置 schema | `ProviderConfig`（+ 前端 / 预置表共用） | 增补 `user_agent: Option<String>`、`dynamic_headers: Option<Vec<HeaderBinding>>`、`preset: Option<String>` |
-| L2 解析 | 构造时解析一次、请求路径零判定 | `resolve_dynamic_headers()` / `resolve_user_agent()`（与 `resolve_dialect` 并列） |
+| L2 解析 | 构造时解析一次、请求路径零判定 | `resolve_dynamic_headers()` / `resolve_user_agent()` / `resolve_endpoint()`（与 `resolve_dialect` 并列） |
 | L3 应用 | 发送单点 | `send_chat_request` 内：静态 headers → 动态头（请求级覆盖 client 级） |
 
 ### 3. 动态头 = 受控绑定表（B 方案）
@@ -79,6 +79,15 @@ pub enum HeaderSource {
   不吸收，按 038 既有约定拆子目录；语义推断类留启发式（038 三分法不变）。
 - 会话头覆盖范围 = **对话流量**：主 agent 与子代理（流式 + 非流式，`session_id`
   来自 AgentLoop）；压缩 / judge / reminder 首期不带（非对话，偶发单次请求）。
+
+### 6. endpoint 隐式补全（2026-09-29 追加）
+
+`endpoint` 与其他修饰字段同链：**显式配置 > 预置 > 报错**。命中预置的 provider
+endpoint 可留空（配置文件更简洁、端点跟随预置更新）；**未命中预置且留空 = 校验失败**
+（不引入隐式默认端点——避免"配置指向未知服务"）。
+
+可见性由 `GET /api/v1/config` 下发的 `resolved_endpoints`（key = provider name）保证：
+UI 在端点输入框留空时只读展示"留空 = 使用预置端点：xxx"，扫描 / 测试连接均改用生效端点。
 
 ## 影响
 

@@ -222,6 +222,18 @@ describe('fromBackendConfig edge cases', () => {
     expect('dynamic_headers' in emitted[2]).toBe(false);
   });
 
+  it('passes through resolved_endpoints from backend (ADR-046)', () => {
+    const state = fromBackendConfig({
+      config: { models: { providers: [], preferences: {} } },
+      resolved_endpoints: { opencode: 'https://opencode.ai/zen/v1' },
+    } as unknown as BackendConfigResponse);
+    expect(state.resolvedEndpoints.opencode).toBe('https://opencode.ai/zen/v1');
+
+    // 旧后端缺省 → 空对象（不破坏）
+    const state2 = fromBackendConfig(makeResponse({ models: { providers: [], preferences: {} } }));
+    expect(state2.resolvedEndpoints).toEqual({});
+  });
+
   it('keeps model_specs and model_catalog passthrough', () => {
     const state = fromBackendConfig({
       config: { models: { providers: [], preferences: {} } },

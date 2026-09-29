@@ -747,6 +747,8 @@ export interface ConfigState {
   resolvedSpecs: Record<string, ResolvedModelSpec>;
   /** 后端解析出的内置目录命中（advisory），key = "{provider}/{model}"。旧后端无该字段时为空对象。 */
   modelCatalog: Record<string, ModelCatalogInfo>;
+  /** 后端解析出的提供商生效端点（ADR-046：显式 > 预置），key = provider name。旧后端无该字段时为空对象。 */
+  resolvedEndpoints: Record<string, string>;
 
   // -- Agent config (agent.*) --
   default_top_k: number;

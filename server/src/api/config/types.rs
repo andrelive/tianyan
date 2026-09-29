@@ -23,6 +23,11 @@ pub struct ConfigResponse {
     /// key = "{provider}/{model}"；缺省时省略该字段以兼容旧客户端）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_catalog: Option<HashMap<String, ModelCatalogInfo>>,
+    /// 各提供商解析后的生效端点（ADR-046：显式 > 预置；key = provider name；
+    /// 无法解析（未配置且未命中预置）的 provider 不出现；缺省时省略该字段
+    /// 以兼容旧客户端）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_endpoints: Option<HashMap<String, String>>,
 }
 
 /// 更新配置请求 — 接受完整的 TianyanConfig
@@ -55,6 +60,7 @@ mod tests {
             config,
             model_specs: None,
             model_catalog: None,
+            resolved_endpoints: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("agent"));
@@ -77,6 +83,7 @@ mod tests {
             config: config.clone(),
             model_specs: Some(specs),
             model_catalog: None,
+            resolved_endpoints: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"model_specs\""));
@@ -86,9 +93,40 @@ mod tests {
             config,
             model_specs: None,
             model_catalog: None,
+            resolved_endpoints: None,
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(!json.contains("model_specs"));
+    }
+
+    #[test]
+    fn test_config_response_resolved_endpoints_field() {
+        let config = TianyanConfig::default();
+        // 填充时序列化含 resolved_endpoints（key = provider name）
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "opencode".to_string(),
+            "https://opencode.ai/zen/v1".to_string(),
+        );
+        let response = ConfigResponse {
+            config: config.clone(),
+            model_specs: None,
+            model_catalog: None,
+            resolved_endpoints: Some(endpoints),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"resolved_endpoints\""));
+        assert!(json.contains("https://opencode.ai/zen/v1"));
+
+        // 缺省时省略该字段（旧客户端兼容）
+        let response = ConfigResponse {
+            config,
+            model_specs: None,
+            model_catalog: None,
+            resolved_endpoints: None,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(!json.contains("resolved_endpoints"));
     }
 
     #[test]

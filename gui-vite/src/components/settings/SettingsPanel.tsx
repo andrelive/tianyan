@@ -256,7 +256,9 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
     async (index: number) => {
       const p = config.providers[index];
       if (!p) return;
-      if (!p.endpoint || !p.api_key) {
+      // 生效端点（ADR-046）：留空时用预置解析值
+      const endpoint = p.endpoint || config.resolvedEndpoints[p.name] || '';
+      if (!endpoint || !p.api_key) {
         setTestStatus((prev) => ({ ...prev, [index]: 'error' }));
         showToast('请填写 Endpoint 和 API Key', 'error');
         return;
@@ -265,7 +267,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
       const modelName = p.models[0]?.name || 'test-model';
       setTestStatus((prev) => ({ ...prev, [index]: 'testing' }));
       try {
-        const resp = await testProviderConnection(p.endpoint, p.api_key, modelName);
+        const resp = await testProviderConnection(endpoint, p.api_key, modelName);
         if (resp.success) {
           setTestStatus((prev) => ({ ...prev, [index]: 'success' }));
           showToast(`${p.name} 连接成功`, 'success');
@@ -279,7 +281,7 @@ function SettingsPanelContent({ config: cfg }: { config: ConfigState }) {
         showToast(`${p.name} 连接失败: ${msg}`, 'error');
       }
     },
-    [config.providers, showToast],
+    [config.providers, config.resolvedEndpoints, showToast],
   );
 
   /* Save config */
