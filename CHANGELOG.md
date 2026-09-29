@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.12] - 2026-09-29
+
+### Fixed
+- **设置页「预置服务商」整块不可用（路由路径不一致）**：0.5.11 前端请求 `/config/provider-presets`，后端注册为 `/config/providers/presets`——被通配路由 `/config/{section}` 吞成 `200 + null`（不报错、静默失效：设置页预置入口与首次配置向导入口整块不可用）。修法：路径对齐 + 新增真实 router 断言 e2e（`test_e2e_config_misc_endpoints`）防回归
+
+### Added
+- **预置命中可见性**：提供商卡片显示「⚡ 内置预置：<显示名>」——一眼区分内置预置与自定义提供商（`GET /config` 下发命中预置的显示名 / 生效动态头 / 端点来源）
+
+### Changed
+- **「添加提供商」入口上移**：从页面最底部移到描述段之后——下拉自页面上部展开，不再拉长页面、底部不再难以点击
+- **界面不暴露底层实现细节**：菜单移除「自动注入会话头」说明、卡片徽章不再展开会话头与端点来源、预置说明改为用户视角一句话
+
 ## [0.5.11] - 2026-09-29
 
 ### Added
