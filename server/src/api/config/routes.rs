@@ -47,7 +47,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/config/mcp/servers/{name}/test", post(test_mcp_server))
         // Provider 发现与引导
-        .route("/config/providers/presets", get(list_provider_presets))
+        .route("/config/provider-presets", get(list_provider_presets))
         .route("/config/providers/test", post(test_provider_connection))
         .route("/config/providers/scan", post(scan_provider_models))
         .route("/config/providers/add-model", post(add_provider_model))

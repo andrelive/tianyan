@@ -299,6 +299,22 @@ async fn test_e2e_config_misc_endpoints() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body.is_null(), "未知配置节应返回 null: {body}");
 
+    // Provider 预置列表（ADR-046）→ 200 + 非空列表；路径须与前端一致
+    // （前端调用 /config/provider-presets；路径写错会被 /config/{section} 吞成 null）
+    let resp = server.get("/api/v1/config/provider-presets").await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        !body.is_null(),
+        "预置列表不得为 null（路径被 /config/{{section}} 吞掉的症状）: {body}"
+    );
+    let presets = body["presets"].as_array().expect("响应应含 presets 数组");
+    assert!(!presets.is_empty(), "内置预置表不得为空: {body}");
+    assert!(
+        presets.iter().any(|p| p["id"] == "opencode-go"),
+        "预置列表应含 opencode-go: {body}"
+    );
+
     server.shutdown();
 }
 
