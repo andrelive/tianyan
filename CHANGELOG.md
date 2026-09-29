@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.11] - 2026-09-29
+
+### Added
+- **Provider 预置表与请求修饰单点（ADR-046）**：常用服务商内置预置（`ollama` / `ollama-cloud` / `opencode` / `opencode-go` / `deepseek`）——配置 `name` 命中预置（或显式 `preset = "<id>"`）即自动携带默认值（端点 / 方言 / UA / 动态头），语义为「内置预置 = 出厂默认配置，用户配置 = 覆盖」（显式 > 预置 > 默认；`dynamic_headers = []` = 显式清空）。新增 `HeaderBinding` / `HeaderSource`（受控变量源枚举——**非模板字符串**，新变量源 = 加一个变体 + 求值一行）与 `user_agent` / `dynamic_headers` / `preset` 配置字段；GUI 设置页与首次配置向导均提供「预置服务商」一键填草稿（懒加载、失败静默降级手工填写）
+- **OpenCode 网关合规（专属 UA + 会话头）**：所有 provider 请求 UA 由 reqwest 默认（通用 HTTP 库名）改为 `tianyan/{VERSION}`（opencode 明确要求专属标识；风控网关亦拦截通用库名）；opencode 系预置自动注入 `x-opencode-session` = 当前会话 ID（网关用于路由与提示词缓存优化；官方将「缺会话支持」客户端列为问题客户端）。覆盖对话流量（主 agent + 子代理、流式 + 非流式）；非会话请求（压缩 / judge / reminder）自动跳过该头
+- **endpoint 隐式补全**：命中预置的 provider 端点可留空（运行时由预置补齐；显式配置永远优先；未命中预置且留空 = 校验失败——不引入隐式默认端点）；`GET /config` 下发 `resolved_endpoints`（旧客户端兼容），UI 只读展示「留空 = 使用预置端点：xxx」，扫描 / 测试连接自动改用生效端点
+
+### Fixed
+- **非流式请求不携带自定义请求头（`ProviderConfig.headers` 静默失效）**：非流式路径走 async-openai `create_byot`（不支持 per-request 头）——用户配置的自定义头（含 UA）只对流式 + vision 生效。修法：非流式改手写 JSON 层（对齐流式、复用发送单点 `send_chat_request`）——自定义头 / 动态会话头 / 状态码语义分类三路径统一；`classify_upstream_error`（文本关键词判定）删除，分类单点收敛为 `classify_http_status`
+- **前端保存设置丢 `dialect` / `first_token_timeout`**：`config-transform` 白名单未透传这两个字段——toml 手配后经 UI 保存被静默重置（PUT 全量替换）。现全部透传（含新字段 `user_agent` / `dynamic_headers`；动态头空数组 = 显式清空语义不省略）
+
 ## [0.5.10] - 2026-09-26
 
 ### Fixed
