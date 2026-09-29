@@ -501,13 +501,7 @@ export default function ProviderCard({
           {presetHit && (
             <div className="flex items-center gap-1 text-xs text-accent mt-1">
               <Zap size={12} className="shrink-0" />
-              <span>
-                内置预置：{presetHit.display_name}
-                {presetHit.dynamic_headers.length > 0
-                  ? ` · 自动注入 ${presetHit.dynamic_headers.join('、')}`
-                  : ''}
-                {presetHit.endpoint_from_preset ? ' · 端点来自预置' : ''}
-              </span>
+              <span>内置预置：{presetHit.display_name}</span>
             </div>
           )}
         </FieldRow>

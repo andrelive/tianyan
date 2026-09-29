@@ -52,36 +52,23 @@ function renderCard(presets: Record<string, ProviderPresetHit>, provider = makeP
 }
 
 describe('ProviderCard preset badge (ADR-046)', () => {
-  it('shows 内置预置 badge with auto-injected headers when preset is hit', () => {
+  it('shows a concise 内置预置 badge without low-level details when preset is hit', () => {
     renderCard({
       'opencode-go': {
         preset_id: 'opencode-go',
         display_name: 'OpenCode Go',
         dynamic_headers: ['x-opencode-session'],
-        endpoint_from_preset: false,
+        endpoint_from_preset: true,
       },
     });
     expect(screen.getByText(/内置预置：OpenCode Go/)).toBeInTheDocument();
-    expect(screen.getByText(/自动注入 x-opencode-session/)).toBeInTheDocument();
+    // 不暴露底层实现细节（会话头注入 / 端点来源）
+    expect(screen.queryByText(/x-opencode-session/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/端点来自预置/)).not.toBeInTheDocument();
   });
 
   it('shows no badge for a plain custom provider', () => {
     renderCard({}, makeProvider({ name: 'my-gateway' }));
     expect(screen.queryByText(/内置预置/)).not.toBeInTheDocument();
-  });
-
-  it('annotates endpoint-from-preset when configured endpoint is empty', () => {
-    renderCard(
-      {
-        'opencode-go': {
-          preset_id: 'opencode-go',
-          display_name: 'OpenCode Go',
-          dynamic_headers: [],
-          endpoint_from_preset: true,
-        },
-      },
-      makeProvider({ endpoint: '' }),
-    );
-    expect(screen.getByText(/端点来自预置/)).toBeInTheDocument();
   });
 });

@@ -202,6 +202,8 @@ describe('SettingsPanel', () => {
     await waitFor(() => {
       expect(screen.getByRole('menuitem', { name: /OpenCode Zen/ })).toBeInTheDocument();
     });
+    // 菜单不暴露底层实现细节（会话头注入等）
+    expect(screen.queryByText(/x-opencode-session/)).not.toBeInTheDocument();
 
     // 选择预置 → 草稿（name + endpoint）填入新 provider 卡
     await user.click(screen.getByRole('menuitem', { name: /OpenCode Zen/ }));

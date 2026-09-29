@@ -44,7 +44,7 @@ pub static PROVIDER_PRESETS: &[ProviderPreset] = &[
         dynamic_headers: &[],
         requires_api_key: false,
         api_key_env_hint: None,
-        description: "本地 Ollama 服务（OpenAI 兼容层）",
+        description: "本地运行，无需 API Key",
     },
     ProviderPreset {
         id: "ollama-cloud",
@@ -55,7 +55,7 @@ pub static PROVIDER_PRESETS: &[ProviderPreset] = &[
         dynamic_headers: &[],
         requires_api_key: true,
         api_key_env_hint: Some("OLLAMA_API_KEY"),
-        description: "Ollama 官方云端（ollama.com）",
+        description: "Ollama 官方云端",
     },
     ProviderPreset {
         id: "opencode",
@@ -66,7 +66,7 @@ pub static PROVIDER_PRESETS: &[ProviderPreset] = &[
         dynamic_headers: &[("x-opencode-session", HeaderSource::SessionId)],
         requires_api_key: true,
         api_key_env_hint: Some("OPENCODE_API_KEY"),
-        description: "OpenCode Zen 模型网关（自动注入会话头，优化路由与提示词缓存）",
+        description: "OpenCode 官方模型网关",
     },
     ProviderPreset {
         id: "opencode-go",
@@ -77,7 +77,7 @@ pub static PROVIDER_PRESETS: &[ProviderPreset] = &[
         dynamic_headers: &[("x-opencode-session", HeaderSource::SessionId)],
         requires_api_key: true,
         api_key_env_hint: Some("OPENCODE_API_KEY"),
-        description: "OpenCode Go 订阅网关（开源编码模型，自动注入会话头）",
+        description: "OpenCode 订阅（开源编码模型）",
     },
     ProviderPreset {
         id: "deepseek",
