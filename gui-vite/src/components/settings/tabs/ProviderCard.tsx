@@ -491,19 +491,34 @@ export default function ProviderCard({
     <div className="border border-[var(--color-border)] rounded-lg p-4 mb-3 space-y-3">
       <div className="grid grid-cols-[1fr_1fr_auto_auto] gap-3 items-end">
         <FieldRow label="名称">
-          <input
-            type="text"
-            value={p.name}
-            onChange={(e) => onUpdateProvider('name', e.target.value)}
-            className={INPUT_CLASS}
-            placeholder="openai"
-          />
-          {presetHit && (
-            <div className="flex items-center gap-1 text-xs text-accent mt-1">
-              <Zap size={12} className="shrink-0" />
-              <span>内置预置：{presetHit.display_name}</span>
-            </div>
-          )}
+          <div className="relative">
+            <input
+              type="text"
+              value={p.name}
+              onChange={(e) => onUpdateProvider('name', e.target.value)}
+              className={`${INPUT_CLASS}${presetHit ? ' pl-8' : ''}`}
+              placeholder="openai"
+            />
+            {presetHit && (
+              <>
+                {/* 内嵌徽标（与输入框融合，左侧）；悬浮经 peer-hover 显示下方提示 */}
+                <span
+                  role="img"
+                  aria-label={`内置预置：${presetHit.display_name}`}
+                  className="peer/badge absolute left-2 top-1/2 -translate-y-1/2 flex items-center text-accent cursor-help"
+                  onMouseDown={(e) => e.preventDefault()}
+                >
+                  <Zap size={14} />
+                </span>
+                <span
+                  role="tooltip"
+                  className="pointer-events-none absolute left-0 top-full mt-1 z-30 hidden whitespace-nowrap rounded-md border border-[var(--color-border)] bg-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-primary)] shadow-lg peer-hover/badge:block"
+                >
+                  内置预置：{presetHit.display_name}
+                </span>
+              </>
+            )}
+          </div>
         </FieldRow>
         <FieldRow label="端点 URL">
           <input
