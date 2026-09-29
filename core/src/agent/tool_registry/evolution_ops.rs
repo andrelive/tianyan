@@ -19,6 +19,15 @@ use super::{parse_params, wrap_tool_error, ToolRegistry};
 const RECALL_WINDOW_TEXT_CHARS: usize = 800;
 /// 回忆窗口单条工具文本上限。
 const RECALL_WINDOW_TOOL_CHARS: usize = 400;
+/// 命中数默认值（输出治理，2026-09-29 从 5 收紧为 3）。
+const RECALL_DEFAULT_LIMIT: usize = 3;
+/// 命中数硬上限（clamp：模型只能往下调）。
+const RECALL_MAX_LIMIT: usize = 10;
+/// 窗口半径硬上限（clamp；默认值见 `session::types::DEFAULT_WINDOW_RADIUS`）。
+const RECALL_MAX_RADIUS: i64 = 5;
+/// 单次输出的总字符预算：按"命中"粒度累计，放不下的命中整条停加；
+/// 首个命中始终保留（单条自身已有窗口/单条截断封顶，避免"检索到却零返回"）。
+const RECALL_TOTAL_BUDGET_CHARS: usize = 12_000;
 
 /// 解析 RFC3339 since 参数为 epoch 秒。
 ///
@@ -103,6 +112,10 @@ impl ToolRegistry {
     ///
     /// 返回命中列表，每个命中附带附近窗口（user/assistant 文本；
     /// 工具调用/结果被过滤——只进 tool_text 列，不进 FTS 索引）。
+    ///
+    /// 输出治理（2026-09-29）：命中数默认 3/上限 10、窗口半径默认 2/上限 5；
+    /// 单次总预算 [`RECALL_TOTAL_BUDGET_CHARS`]——放不下的命中整条停加，
+    /// 附 `truncated` + `message` 续查指引（命中按相关度排序，前 N 个完整保留）。
     pub(crate) async fn execute_session_recall(
         &self,
         arguments: &str,
@@ -113,18 +126,24 @@ impl ToolRegistry {
                 "tool: 执行失败：会话回忆服务未装配（FTS5 索引不可用）".to_string(),
             )
         })?;
-        let limit = params.limit.unwrap_or(5).min(20);
+        let limit = params
+            .limit
+            .unwrap_or(RECALL_DEFAULT_LIMIT)
+            .clamp(1, RECALL_MAX_LIMIT);
         let radius = params
             .radius
             .unwrap_or(crate::session::types::DEFAULT_WINDOW_RADIUS)
-            .max(0);
+            .clamp(0, RECALL_MAX_RADIUS);
         let hits = recall
             .search(&params.query, limit, params.since_days)
             .await
             .map_err(wrap_tool_error)?;
-        // 每个命中附带附近窗口；窗口消息截断（text/tool_text 上限）
+        let hits_total = hits.len();
+        // 每个命中附带附近窗口；窗口消息截断（text/tool_text 上限）；
+        // 按命中粒度累计总预算——放不下的整条停加（首个命中始终保留）。
         let mut results = Vec::new();
-        for hit in &hits {
+        let mut used_chars = 0usize;
+        for (i, hit) in hits.iter().enumerate() {
             let mut window = recall
                 .window(&hit.session_id, hit.seq, radius)
                 .await
@@ -133,15 +152,36 @@ impl ToolRegistry {
                 msg.text = truncate_output(&msg.text, RECALL_WINDOW_TEXT_CHARS);
                 msg.tool_text = truncate_output(&msg.tool_text, RECALL_WINDOW_TOOL_CHARS);
             }
-            results.push(serde_json::json!({
+            let item = serde_json::json!({
                 "hit": hit,
                 "window": window,
-            }));
+            });
+            let item_chars = serde_json::to_string(&item)
+                .map(|s| s.chars().count())
+                .unwrap_or(0);
+            if i > 0 && used_chars + item_chars > RECALL_TOTAL_BUDGET_CHARS {
+                break;
+            }
+            used_chars += item_chars;
+            results.push(item);
         }
-        Ok(serde_json::json!({
+        let kept = results.len();
+        let mut out = serde_json::json!({
             "query": params.query,
-            "count": results.len(),
+            "count": kept,
             "results": results,
-        }))
+        });
+        if kept < hits_total {
+            out["truncated"] = serde_json::json!(true);
+            out["message"] = serde_json::json!(format!(
+                "回忆输出已截断：返回前 {kept} 个命中（共 {hits_total} 个）。可缩小 radius/limit，或用更精确的关键词再查。"
+            ));
+        }
+        Ok(out)
     }
 }
+
+/// 测试模块（拆分至独立文件，保持主文件聚焦生产逻辑）。
+#[cfg(test)]
+#[path = "evolution_ops_tests.rs"]
+mod tests;

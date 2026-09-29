@@ -332,7 +332,10 @@ mod tests {
 }
 
 /// 回忆窗口默认半径（命中前后各 N 条）。
-pub const DEFAULT_WINDOW_RADIUS: i64 = 5;
+///
+/// 2026-09-29 输出治理：从 5 收紧为 2（默认窗口 11 条 → 5 条；工具层另有
+/// 半径上限 5，见 `agent::tool_registry::evolution_ops`）。
+pub const DEFAULT_WINDOW_RADIUS: i64 = 2;
 
 /// 回忆命中（全文检索结果）。
 #[derive(Debug, Clone, serde::Serialize)]

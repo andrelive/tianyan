@@ -502,14 +502,17 @@ pub struct DelegationStatsParams {
 }
 
 /// 会话回忆查询参数（session_recall；FTS5 倒排索引，ADR-017 决策 6）。
+///
+/// 输出治理（2026-09-29）：命中数默认 3/上限 10、窗口半径默认 2/上限 5，
+/// 单次输出另有总预算截断（超出附续查指引）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionRecallParams {
     /// 回忆关键词（中文子串匹配，无需分词；至少 3 个字符）。
     pub query: String,
-    /// 最大命中数（默认 5，上限 20）。
+    /// 最大命中数（默认 3，上限 10）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
-    /// 每个命中附近的窗口半径（前后各 N 条消息，默认 5）。
+    /// 每个命中附近的窗口半径（前后各 N 条消息，默认 2，上限 5）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<i64>,
     /// 只看最近 N 天的消息（缺省不限；用于"最近/这几天"类回忆）。

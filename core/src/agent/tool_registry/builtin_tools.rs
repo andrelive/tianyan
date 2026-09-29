@@ -230,7 +230,7 @@ fn def_delegation_stats(name: &'static str) -> ToolDefinition {
 fn def_session_recall(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<SessionRecallParams>(
         name,
-        "按关键词回忆过去对话内容（FTS5 倒排索引，中文子串匹配不分词）。返回顶部命中及附近用户/助手消息窗口（不含工具调用与结果）。当用户提到之前说过的话（刚才/之前/上次）或需要检查历史会话讨论过什么时使用。可传 since_days 只看最近 N 天（用于'最近/这几天'类限定）。",
+        "按关键词回忆过去对话内容（FTS5 倒排索引，中文子串匹配不分词）。返回命中及附近用户/助手消息窗口（不含工具调用与结果）；命中数默认 3（上限 10）、窗口半径默认 2（上限 5），单次输出有总预算截断（超出附续查指引）。当用户提到之前说过的话（刚才/之前/上次）或需要检查历史会话讨论过什么时使用。query 写具体词、一次一个概念；需要更宽语境时用更精确的关键词再查（或经 vfs_read 读会话原文）。可传 since_days 只看最近 N 天（用于'最近/这几天'类限定）。",
     ))
 }
 
