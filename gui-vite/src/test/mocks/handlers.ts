@@ -391,6 +391,19 @@ export const mockSwitchModelCalls: {
   provider?: string;
 }[] = [];
 
+/** 记录的会话级模型选择调用（{ sessionId, provider, model, thinking? }），测试断言用。 */
+export const mockSetSessionModelCalls: {
+  sessionId: string;
+  provider: string;
+  model: string;
+  thinking?: string;
+}[] = [];
+
+/** 恢复会话级模型选择 mock 到初始状态。 */
+export function resetSessionModelMocks() {
+  mockSetSessionModelCalls.length = 0;
+}
+
 /** 恢复模型切换 mock 到初始状态。 */
 export function resetModelSwitchMocks() {
   mockSwitchModelCalls.length = 0;
@@ -1328,6 +1341,32 @@ export const handlers = [
       provider: body.provider,
     });
     return HttpResponse.json({ success: true, message: '已切换' });
+  }),
+
+  // 会话级模型选择（GET/PUT /sessions/{id}/model；对齐 DSH Session-local selection）
+  // GET 默认无记录（视图回落全局默认）；PUT 记录调用并返回规范化结果。
+  http.get(`${API_BASE}/sessions/:id/model`, () => {
+    return HttpResponse.json({});
+  }),
+  http.put(`${API_BASE}/sessions/:id/model`, async ({ request, params }) => {
+    const body = (await request.json()) as {
+      provider?: string;
+      model?: string;
+      thinking?: string;
+    };
+    mockSetSessionModelCalls.push({
+      sessionId: String(params.id ?? ''),
+      provider: body.provider ?? '',
+      model: body.model ?? '',
+      thinking: body.thinking,
+    });
+    return HttpResponse.json({
+      selection: {
+        provider: body.provider ?? '',
+        model: body.model ?? '',
+        ...(body.thinking ? { thinking: body.thinking } : {}),
+      },
+    });
   }),
 
   // Clipboard（后端为 GET /clipboard/pending、POST /clipboard/respond）

@@ -230,6 +230,7 @@ mod tests {
             _message: &Message,
             _model: Option<&str>,
             _thinking_effort: Option<String>,
+            _provider: Option<&str>,
         ) -> tianyan::Result<AgentResponse> {
             Err(tianyan::TianyanError::Custom("测试桩".to_string()))
         }
@@ -242,6 +243,7 @@ mod tests {
             _thinking_effort: Option<String>,
             _user_message_id: Option<&str>,
             _sender: tianyan::agent::StreamEventSender,
+            _provider: Option<&str>,
         ) -> tianyan::Result<()> {
             Err(tianyan::TianyanError::Custom("测试桩".to_string()))
         }

@@ -46,7 +46,9 @@ impl tianyan::agent::background::TaskEventSink for TaskEventBroadcaster {
     }
 }
 
-use crate::state::{build_knowledge_ingestor, resolve_chat_model, resolve_chat_model_spec};
+use crate::state::{
+    build_knowledge_ingestor, resolve_chat_model, resolve_chat_model_spec, resolve_chat_provider,
+};
 
 /// 根据配置创建模型服务。
 pub async fn create_model_services(config: &TianyanConfig) -> TianyanResult<ModelServices> {
@@ -103,13 +105,28 @@ impl AgentBuilderFactory {
         // （resolve_chat_model / resolve_chat_model_spec / build_knowledge_ingestor）
         let chat_model = resolve_chat_model(config);
         let chat_model_spec = resolve_chat_model_spec(config);
+        // 会话级模型选择的默认路由 provider（preferences.chat；会话未选择时使用）
+        let chat_provider = resolve_chat_provider(config);
 
-        // 用量日志的 provider 维度：从配置构建 model → provider 映射
-        // （模型名可能不含 provider 前缀，如 deepseek-v4-flash → opencode）。
+        // 用量日志的 provider 维度：**偏好（真实默认路由）优先、其余不覆盖**——
+        // 同名模型跨 provider 时"后写覆盖"会记错 provider（2026-09-29 修复：
+        // deepseek-v4.1-flash 同时挂在 opencode/ollama 时曾被记成 ollama）。
         let mut provider_by_model = std::collections::HashMap::new();
+        for pref in [
+            config.models.preferences.chat.as_ref(),
+            config.models.preferences.embedding.as_ref(),
+            config.models.preferences.vision.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            provider_by_model.insert(pref.model.clone(), pref.provider.clone());
+        }
         for provider in &config.models.providers {
             for model in &provider.models {
-                provider_by_model.insert(model.name.clone(), provider.name.clone());
+                provider_by_model
+                    .entry(model.name.clone())
+                    .or_insert_with(|| provider.name.clone());
             }
         }
         let knowledge_ingestor = build_knowledge_ingestor(
@@ -117,6 +134,9 @@ impl AgentBuilderFactory {
             &model_services,
             vfs.clone() as Arc<dyn tianyan::vfs::VirtualFileSystem>,
         );
+
+        // 会话级模型选择路由：每 provider 聊天客户端池（构造 AgentLoop 时注入）
+        let chat_clients = model_services.chat_clients();
 
         let agent = AgentBuilder::new()
             .with_config(config.agent.clone())
@@ -142,6 +162,8 @@ impl AgentBuilderFactory {
             .with_session_store(session_store)
             .with_usage_log(usage_log)
             .with_provider_by_model(provider_by_model)
+            .with_default_chat_provider(chat_provider)
+            .with_chat_clients(chat_clients)
             .with_user_questions(user_questions)
             // 会话工作集（ADR-035）：外部注入（server AppState 持有同一 Arc——
             // API 写路径与 Agent 读写必须操作同一份状态）
@@ -325,6 +347,7 @@ impl AgentCoordinator for WizardModeAgent {
         _message: &tianyan::Message,
         _model: Option<&str>,
         _thinking_effort: Option<String>,
+        _provider: Option<&str>,
     ) -> TianyanResult<AgentResponse> {
         Err(TianyanError::Custom(
             "模型服务错误：应用未配置。请先完成配置向导。".to_string(),
@@ -340,6 +363,7 @@ impl AgentCoordinator for WizardModeAgent {
         _thinking_effort: Option<String>,
         _user_message_id: Option<&str>,
         _sender: tianyan::agent::StreamEventSender,
+        _provider: Option<&str>,
     ) -> TianyanResult<()> {
         Err(TianyanError::Custom(
             "模型服务错误：应用未配置。请先完成配置向导。".to_string(),

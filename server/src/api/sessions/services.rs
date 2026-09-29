@@ -6,7 +6,7 @@ use tianyan::session::SessionManager;
 
 use crate::api::sessions::types::{
     DeleteSessionResponse, ListSessionsResponse, Session, SessionDetail, SessionMessagesResponse,
-    UpdateTitleRequest,
+    UpdateSessionModelRequest, UpdateTitleRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::api::shared::types::ChatMessage;
@@ -319,6 +319,87 @@ impl SessionService {
         .await?;
 
         Ok(Session::from_core(&session))
+    }
+
+    /// 读取会话级模型选择（None = 使用全局默认）。
+    pub async fn get_model_selection(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<tianyan::session::types::SessionModelSelection>, ApiError> {
+        let session = self
+            .session_manager
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| ApiError::NotFound(format!("会话未找到: {}", session_id)))?;
+        Ok(session.header.model_selection)
+    }
+
+    /// 设置会话级模型选择（对齐 DSH 的 Session-local model selection）。
+    ///
+    /// 校验：provider 已启用且包含该模型；`thinking` 非空时须在该模型声明的
+    /// 档位集合内（否则 400）。写入经工作集（ADR-039 写侧收口唯一通道）。
+    pub async fn update_model_selection(
+        &self,
+        session_id: &str,
+        request: UpdateSessionModelRequest,
+        config: &tianyan::config::TianyanConfig,
+    ) -> Result<tianyan::session::types::SessionModelSelection, ApiError> {
+        let provider_name = request.provider.trim();
+        let model_name = request.model.trim();
+        if provider_name.is_empty() || model_name.is_empty() {
+            return Err(ApiError::BadRequest("provider/model 不能为空".to_string()));
+        }
+        // 校验 provider + model（跨 provider 同名模型精确匹配）
+        let provider = config
+            .models
+            .providers
+            .iter()
+            .find(|p| p.name == provider_name && p.enabled)
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!("提供商不存在或未启用：{provider_name}"))
+            })?;
+        let entry = provider
+            .models
+            .iter()
+            .find(|m| m.name == model_name)
+            .ok_or_else(|| {
+                ApiError::BadRequest(format!(
+                    "提供商 '{}' 中未找到模型 '{}'",
+                    provider_name, model_name
+                ))
+            })?;
+        // 思考档位归一：None/空/"off" = 关闭（None）；非空必须在该模型档位集合内
+        let thinking = request
+            .thinking
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && *t != "off")
+            .map(str::to_string);
+        if let Some(t) = &thinking {
+            let declared = entry.reasoning_efforts.as_deref().unwrap_or(&[]);
+            if !declared.iter().any(|e| e == t) {
+                return Err(ApiError::BadRequest(format!(
+                    "模型 '{model_name}' 不支持思考档位 '{t}'（声明：{declared:?}）"
+                )));
+            }
+        }
+        let selection = tianyan::session::types::SessionModelSelection {
+            provider: provider_name.to_string(),
+            model: model_name.to_string(),
+            thinking,
+        };
+        // 写侧收口 ③（ADR-035 §3）：model_selection 属头部字段（经工作集镜像）
+        let reg = self.working_sets.as_ref().ok_or_else(|| {
+            ApiError::Internal("会话服务：未装配会话工作集（ADR-039 写侧收口缺失）".to_string())
+        })?;
+        if !self.session_manager.session_exists(session_id).await? {
+            return Err(ApiError::NotFound(format!("会话未找到: {session_id}")));
+        }
+        reg.ensure(session_id)
+            .await?
+            .update_header(|h| h.model_selection = Some(selection.clone()))
+            .await?;
+        Ok(selection)
     }
 }
 
@@ -901,5 +982,127 @@ mod tests {
         assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5]);
         assert_eq!(p.next_before_seq, None, "页首 0 = 已到链首");
         assert!(!p.has_more);
+    }
+
+    /// 会话级模型选择：校验（provider/model/thinking）+ 经工作集写入会话头部。
+    #[tokio::test]
+    async fn test_update_model_selection_validates_and_persists() {
+        use crate::api::sessions::types::UpdateSessionModelRequest;
+        use tianyan::session::store::SessionStore;
+        use tianyan::session::SessionHeader;
+        let db = tianyan::db::Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let store = SessionStore::new(db).unwrap();
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        let registry = tianyan::agent::working_set::WorkingSetRegistry::new(Some(store.clone()));
+        let manager: Arc<dyn SessionManager> = Arc::new(
+            tianyan::session::PersistentSessionManager::new(store.clone()),
+        );
+        let service = SessionService::new(manager.clone(), None, Some(registry));
+
+        // mock 配置：一个 provider（含支持思考档位的 chat 模型）
+        let mut config = tianyan::config::TianyanConfig::default();
+        config.models = tianyan::config::ModelsConfig {
+            providers: vec![tianyan::config::ProviderConfig {
+                name: "mock".to_string(),
+                endpoint: "http://localhost:11434/v1".to_string(),
+                api_key: Some("test-key".to_string()),
+                enabled: true,
+                models: vec![tianyan::config::ModelEntry {
+                    name: "glm-x".to_string(),
+                    capabilities: vec![tianyan::config::ModelCapability::Chat],
+                    reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // 正常路径：写会话头部（读回可见）
+        let selection = service
+            .update_model_selection(
+                "s1",
+                UpdateSessionModelRequest {
+                    provider: "mock".to_string(),
+                    model: "glm-x".to_string(),
+                    thinking: Some("high".to_string()),
+                },
+                &config,
+            )
+            .await
+            .unwrap();
+        assert_eq!(selection.provider, "mock");
+        assert_eq!(selection.thinking.as_deref(), Some("high"));
+        let session = manager.get_session("s1").await.unwrap().unwrap();
+        assert_eq!(
+            session
+                .header
+                .model_selection
+                .as_ref()
+                .map(|s| s.model.as_str()),
+            Some("glm-x"),
+            "选择应持久化到会话头部"
+        );
+        let read_back = service.get_model_selection("s1").await.unwrap();
+        assert_eq!(
+            read_back,
+            Some(selection.clone()),
+            "读取接口应返回写入的选择"
+        );
+
+        // 未知 provider → 400
+        let err = service
+            .update_model_selection(
+                "s1",
+                UpdateSessionModelRequest {
+                    provider: "ghost".to_string(),
+                    model: "glm-x".to_string(),
+                    thinking: None,
+                },
+                &config,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::api::shared::error::ApiError::BadRequest(_)),
+            "未知 provider 应 400: {err:?}"
+        );
+
+        // 未知思考档位 → 400
+        let err = service
+            .update_model_selection(
+                "s1",
+                UpdateSessionModelRequest {
+                    provider: "mock".to_string(),
+                    model: "glm-x".to_string(),
+                    thinking: Some("medium".to_string()),
+                },
+                &config,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::api::shared::error::ApiError::BadRequest(_)),
+            "未声明档位应 400: {err:?}"
+        );
+
+        // 不存在会话 → 404
+        let err = service
+            .update_model_selection(
+                "ghost-session",
+                UpdateSessionModelRequest {
+                    provider: "mock".to_string(),
+                    model: "glm-x".to_string(),
+                    thinking: None,
+                },
+                &config,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::api::shared::error::ApiError::NotFound(_)),
+            "不存在会话应 404: {err:?}"
+        );
     }
 }

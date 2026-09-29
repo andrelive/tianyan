@@ -180,6 +180,79 @@ async fn load_persisted(
         .unwrap_or_default()
 }
 
+/// 会话级模型选择的路由与用量归属回归（2026-09-29）：
+/// - `provider` 命中的 per-provider 客户端池必须被使用（默认客户端零调用）；
+/// - `usage_logs.provider` 记**本轮实际路由的 provider**（修复同名模型记错）。
+#[tokio::test]
+async fn test_loop_routes_chat_clients_and_usage_records_actual_provider() {
+    let db = crate::db::Database::open_in_memory().unwrap();
+    db.init_schemas().await.unwrap();
+    let store = crate::session::store::SessionStore::new(db.clone()).unwrap();
+    store
+        .create("s-route", &crate::session::types::SessionHeader::default())
+        .await
+        .unwrap();
+    let working_sets = crate::agent::working_set::WorkingSetRegistry::new(Some(store.clone()));
+    let registry = ToolRegistry::new(SecurityPolicy::default())
+        .with_session_store(store.clone())
+        .with_working_sets(working_sets);
+    let usage_log = UsageLog::new(db.clone()).unwrap();
+
+    // 默认 mock 不可被调用（路由未命中即红）；provider "px" 的 mock 恰被调用一次
+    let mut default_mock = MockChatService::new();
+    default_mock.expect_chat_completion().times(0);
+    let mut px_mock = MockChatService::new();
+    px_mock
+        .expect_chat_completion()
+        .times(1)
+        .returning(|_| Ok(response_with(Message::assistant("来自 px"))));
+
+    let mut clients: HashMap<String, SharedChatService> = HashMap::new();
+    let px_service: SharedChatService = Arc::new(px_mock);
+    clients.insert("px".to_string(), px_service);
+
+    let agent_loop = AgentLoop::new(
+        Arc::new(default_mock),
+        registry,
+        Arc::new(crate::session::PersistentSessionManager::new(store.clone())),
+        AgentLoopConfig { max_turns: 3 },
+    )
+    .with_usage_log(usage_log.clone())
+    .with_default_chat_provider(Some("p0".to_string()))
+    .with_chat_clients(clients);
+
+    let mut messages = vec![Message::user("走 px")];
+    let result = agent_loop
+        .run(
+            &mut messages,
+            "s-route",
+            None,
+            "test-model",
+            None,
+            None,
+            Some("px".to_string()),
+        )
+        .await
+        .unwrap();
+    match result {
+        AgentLoopResult::Answer { content, .. } => assert_eq!(content, "来自 px"),
+        other => panic!("期望 Answer，得到 {:?}", other),
+    }
+
+    // usage_logs：provider 归属 = 本轮路由的 provider（问题 2 回归）
+    let conn = db.lock().await;
+    let mut stmt = conn
+        .prepare("SELECT provider, model FROM usage_logs ORDER BY id DESC LIMIT 1")
+        .unwrap();
+    let (provider, model): (String, String) =
+        stmt.query_row([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(
+        provider, "px",
+        "usage 应记实际路由 provider（而非映射猜测）"
+    );
+    assert_eq!(model, "test-model");
+}
+
 #[tokio::test]
 async fn test_run_completes_tool_loop() {
     let mut mock = MockChatService::new();
@@ -196,7 +269,15 @@ async fn test_run_completes_tool_loop() {
 
     let mut messages = vec![Message::user("帮我做点事")];
     let result = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -254,7 +335,15 @@ async fn test_run_ask_user_executes_as_sync_tool() {
     let mut messages = vec![Message::user("帮我决定一下")];
     let run_handle = tokio::spawn(async move {
         agent_loop
-            .run(&mut messages, "session-1", None, "test-model", None, None)
+            .run(
+                &mut messages,
+                "session-1",
+                None,
+                "test-model",
+                None,
+                None,
+                None,
+            )
             .await
     });
     // 等 ask_user 工具执行注册等待通道，然后提交用户回答
@@ -331,7 +420,15 @@ async fn test_run_approval_denied_returns_tool_error() {
 
     let mut messages = vec![Message::user("请帮我写入文件")];
     let result = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -360,7 +457,15 @@ async fn test_run_empty_response_retries_then_completes() {
 
     let mut messages = vec![Message::user("你好")];
     let result = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     match result {
@@ -385,7 +490,15 @@ async fn test_run_empty_response_wake_turn_retries_once() {
 
     let mut messages = vec![Message::user("你好")];
     let result = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     match result {
@@ -408,7 +521,15 @@ async fn test_run_max_turns_exceeded() {
 
     let mut messages = vec![Message::user("循环测试")];
     let err = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("最大轮数"));
@@ -423,7 +544,15 @@ async fn test_run_llm_error_propagates() {
 
     let mut messages = vec![Message::user("测试")];
     let err = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("LLM 调用失败"));
@@ -446,6 +575,7 @@ async fn test_run_returns_cancelled_when_flag_pre_set() {
             None,
             "test-model",
             Some(&cancel),
+            None,
             None,
         )
         .await
@@ -517,6 +647,7 @@ async fn test_run_stream_returns_cancelled_mid_chunk() {
             None,
             "test-model",
             Some(&cancel),
+            None,
             None,
         )
         .await
@@ -597,6 +728,7 @@ async fn test_run_stream_cancel_during_recv_wait() {
             None,
             "test-model",
             Some(&cancel),
+            None,
             None,
         ),
     )
@@ -840,6 +972,7 @@ async fn test_run_stream_accumulates_multi_chunk_content() {
             "test-model",
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -887,6 +1020,7 @@ async fn test_run_stream_accumulates_reasoning_and_emits_thought() {
             "session-1",
             None,
             "test-model",
+            None,
             None,
             None,
         )
@@ -965,6 +1099,7 @@ async fn test_run_stream_reasoning_before_content_in_same_chunk() {
             "session-1",
             None,
             "test-model",
+            None,
             None,
             None,
         )
@@ -1061,6 +1196,7 @@ async fn test_run_stream_accumulates_tool_call_deltas() {
             "test-model",
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1144,6 +1280,7 @@ async fn test_run_stream_emits_usage_per_tool_turn() {
             "test-model",
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1203,6 +1340,7 @@ async fn test_run_stream_mid_stream_error_keeps_partial() {
             "test-model",
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1239,6 +1377,7 @@ async fn test_run_stream_immediate_error_returns_custom() {
             "test-model",
             None,
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1268,6 +1407,7 @@ async fn test_run_stream_usage_from_final_chunk() {
             "session-1",
             None,
             "test-model",
+            None,
             None,
             None,
         )
@@ -1308,6 +1448,7 @@ async fn test_run_stream_answer_delta_order_preserved() {
             "test-model",
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1332,7 +1473,15 @@ async fn test_run_persists_finish_reason() {
 
     let mut messages = vec![Message::user("测试")];
     let result = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -1366,6 +1515,7 @@ async fn test_run_stream_persists_finish_reason() {
             "session-1",
             None,
             "test-model",
+            None,
             None,
             None,
         )
@@ -1402,6 +1552,7 @@ async fn test_run_stream_no_finish_reason_keeps_none() {
             "session-1",
             None,
             "test-model",
+            None,
             None,
             None,
         )
@@ -1454,7 +1605,15 @@ async fn test_run_sets_dynamic_max_tokens_with_spec() {
 
     let mut messages = vec![Message::user("帮我做点事")];
     let result = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(matches!(result, AgentLoopResult::Answer { .. }));
@@ -1497,11 +1656,27 @@ async fn test_run_calibrates_max_tokens_from_prior_usage() {
 
     let mut messages = vec![Message::user("帮我做点事")];
     let r1 = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     let r2 = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(matches!(r1, AgentLoopResult::Answer { .. }));
@@ -1545,11 +1720,27 @@ async fn test_run_prior_usage_invalidated_on_model_switch() {
 
     let mut messages = vec![Message::user("帮我做点事")];
     let r1 = agent_loop
-        .run(&mut messages, "session-1", None, "model-a", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "model-a",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     let r2 = agent_loop
-        .run(&mut messages, "session-1", None, "model-b", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "model-b",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(matches!(r1, AgentLoopResult::Answer { .. }));
@@ -1588,6 +1779,7 @@ async fn test_run_stream_sets_dynamic_max_tokens_with_spec() {
             "test-model",
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1615,7 +1807,15 @@ async fn test_run_errors_when_budget_below_min() {
 
     let mut messages = vec![Message::user("测试")];
     let err = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -1636,7 +1836,15 @@ async fn test_run_without_spec_skips_max_tokens() {
 
     let mut messages = vec![Message::user("测试")];
     let result = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(matches!(result, AgentLoopResult::Answer { .. }));
@@ -1701,7 +1909,15 @@ async fn test_run_recovery_does_not_double_count_cached_input() {
 
     let mut messages = vec![Message::user("继续")];
     let result = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(matches!(result, AgentLoopResult::Answer { .. }));
@@ -1754,7 +1970,15 @@ async fn test_run_recovery_scoped_after_last_compression_point() {
 
     let mut messages = vec![Message::user("继续")];
     let result = agent_loop
-        .run(&mut messages, "session-1", None, "test-model", None, None)
+        .run(
+            &mut messages,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(matches!(result, AgentLoopResult::Answer { .. }));

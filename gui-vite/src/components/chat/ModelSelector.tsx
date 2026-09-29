@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
-import { useAppStore } from '@/lib/store';
+import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
 import { useResource } from '@/hooks/use-resource';
 import { ChevronDown, Loader2 } from 'lucide-react';
-import { getModels, switchModel } from '@/lib/api-client';
+import { getModels, setSessionModel } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { toErrorMessage } from '@/lib/errors';
 import type { SelectedModel } from '@/lib/store';
@@ -10,12 +10,12 @@ import type { SelectedModel } from '@/lib/store';
 /** ghost：一体式输入卡片内的无边框变体（外框由父组件统一提供）。 */
 export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
   const selectedModel = useAppStore((s) => s.selectedModel);
-  const setModel = useAppStore((s) => s.setModel);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   // 模型列表加载（useResource：加载/竞态收敛；副作用留在 fetcher 内：
-  // 过滤 chat 能力 + 写入 store + 首次自动选中；失败静默——按钮禁用态解除即可）
+  // 过滤 chat 能力 + 写入 store + 记录全局默认（视图回落统一走 syncModelView）；
+  // 失败静默——按钮禁用态解除即可）
   const setChatModelsStore = useAppStore((s) => s.setChatModels);
   const { loading } = useResource(
     async () => {
@@ -23,15 +23,17 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
       // Filter models with "chat" capability；保留完整信息（含每模型思考档位）
       const chat = data.models.filter((m) => m.capabilities.includes('chat'));
       setChatModelsStore(chat);
-      // Auto-select first model if none selected
-      if (chat.length > 0 && !selectedModel) {
-        const preferred = data.preferences.chat;
-        if (preferred) {
-          setModel({ provider: preferred.provider, model: preferred.model });
-        } else {
-          setModel({ provider: chat[0].provider, model: chat[0].name });
-        }
-      }
+      // 全局默认（preferences.chat；缺省回落列表首项）——新会话 / 无记录会话
+      // 的视图回落来源；当前会话若已有选择则由 syncModelView 优先使用之。
+      const preferred = data.preferences.chat;
+      const fallback: SelectedModel | null = preferred
+        ? { provider: preferred.provider, model: preferred.model }
+        : chat[0]
+          ? { provider: chat[0].provider, model: chat[0].name }
+          : null;
+      const st = useAppStore.getState();
+      st.setDefaultModelSelection(fallback);
+      st.syncModelView(st.currentSessionId ?? PENDING_SESSION_KEY);
       return data;
     },
     [],
@@ -65,6 +67,34 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
       : null);
   const isCurrent = (m: { provider: string; name: string }) =>
     current !== null && current.provider === m.provider && current.model === m.name;
+
+  /** 选择模型：写**当前会话**的模型选择（会话本地；不改全局默认）。
+      - 已创建会话 → 同步后端（PUT /sessions/{id}/model，写会话头部）；
+      - 未创建会话 → 存 PENDING 槽，首条消息创建会话后固化（见 ChatPanel）。 */
+  const selectModel = (m: {
+    provider: string;
+    name: string;
+    reasoning_efforts?: string[] | null;
+  }) => {
+    const st = useAppStore.getState();
+    const key = st.currentSessionId ?? PENDING_SESSION_KEY;
+    // 思考档位跟随：新模型档位集不含当前档位 → 回落 off（不发 thinking）
+    const declared = m.reasoning_efforts ?? [];
+    const keepThinking = st.thinkingEffort !== 'off' && declared.includes(st.thinkingEffort);
+    const selection = {
+      provider: m.provider,
+      model: m.name,
+      ...(keepThinking ? { thinking: st.thinkingEffort } : {}),
+    };
+    st.setSessionSelection(key, selection);
+    st.syncModelView(key);
+    if (st.currentSessionId) {
+      setSessionModel(st.currentSessionId, selection).catch((err: unknown) => {
+        const message = toErrorMessage(err, '未知错误');
+        useAppStore.getState().showToast('设置会话模型失败: ' + message, 'error');
+      });
+    }
+  };
 
   return (
     <div ref={ref} className="relative">
@@ -110,14 +140,8 @@ export default function ModelSelector({ ghost = false }: { ghost?: boolean }) {
               role="option"
               aria-selected={isCurrent(model)}
               onClick={() => {
-                setModel({ provider: model.provider, model: model.name });
+                selectModel(model);
                 setOpen(false);
-                // 本地状态先行（UI 不依赖网络），后端持久化失败不阻塞交互；
-                // 携带 provider：同名模型跨提供商时精确切换（不再落到第一个命中的）
-                switchModel(model.name, 'chat', model.provider).catch((err: unknown) => {
-                  const message = toErrorMessage(err, '未知错误');
-                  useAppStore.getState().showToast('切换模型失败: ' + message, 'error');
-                });
               }}
               className={cn(
                 'w-full text-left px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)] transition-colors flex items-center justify-between gap-3',

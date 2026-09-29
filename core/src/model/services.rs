@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::common::error::{Result, TianyanError};
-use crate::config::{find_provider, ModelCapability, ModelRef, ModelsConfig};
+use crate::config::{find_provider, ModelCapability, ModelsConfig};
 use crate::model::traits::{ChatService, EmbeddingService, VlmService};
 use crate::model::types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, EmbeddingRequest,
@@ -17,6 +17,7 @@ use super::provider::middleware::{
     LoggedVlmService,
 };
 use super::provider::AsyncOpenAIClient;
+use super::SharedChatService;
 
 /// 一组已构建的模型服务。
 ///
@@ -38,6 +39,10 @@ pub struct ModelServices {
     pub vision_model: Option<String>,
     /// 嵌入用量上报槽位（装配层后置注入；见 [`ModelServices::set_embedding_usage_sink`]）。
     embedding_usage_sink: EmbeddingUsageHandle,
+    /// 每 provider 的聊天客户端池（会话级模型选择的路由面；key = provider name）。
+    ///
+    /// 未命中的 provider 在路由时回落默认聊天服务（`chat`）。
+    chat_clients: HashMap<String, SharedChatService>,
 }
 
 /// 缓存的 provider 客户端映射。
@@ -66,22 +71,23 @@ impl ModelServices {
         // 按需创建客户端（同一 provider 复用）
         let mut clients = ClientPool::new();
 
-        let get_or_create_client =
-            |clients: &mut ClientPool, r: &ModelRef| -> Result<AsyncOpenAIClient> {
-                if let Some(c) = clients.get(&r.provider) {
-                    return Ok(c.clone());
-                }
-                let provider = find_provider(&config.providers, &r.provider).ok_or_else(|| {
-                    TianyanError::config(format!("提供商 '{}' 未找到或未启用", r.provider))
-                })?;
-                let client = AsyncOpenAIClient::from_provider(provider)?;
-                clients.insert(r.provider.clone(), client.clone());
-                Ok(client)
-            };
+        let get_or_create_client = |clients: &mut ClientPool,
+                                    provider_name: &str|
+         -> Result<AsyncOpenAIClient> {
+            if let Some(c) = clients.get(provider_name) {
+                return Ok(c.clone());
+            }
+            let provider = find_provider(&config.providers, provider_name).ok_or_else(|| {
+                TianyanError::config(format!("提供商 '{}' 未找到或未启用", provider_name))
+            })?;
+            let client = AsyncOpenAIClient::from_provider(provider)?;
+            clients.insert(provider_name.to_string(), client.clone());
+            Ok(client)
+        };
 
         let (chat, chat_model) = match &chat_ref {
             Some(r) => {
-                let client = get_or_create_client(&mut clients, r)?;
+                let client = get_or_create_client(&mut clients, &r.provider)?;
                 (
                     Arc::new(LoggedService(client)) as Arc<dyn ChatService>,
                     r.model.clone(),
@@ -94,7 +100,7 @@ impl ModelServices {
         };
         let (embedding, embedding_model) = match &embedding_ref {
             Some(r) => {
-                let client = get_or_create_client(&mut clients, r)?;
+                let client = get_or_create_client(&mut clients, &r.provider)?;
                 (
                     Arc::new(LoggedEmbeddingService::new(
                         client,
@@ -110,7 +116,7 @@ impl ModelServices {
         };
         let (vision, vision_model) = match &vision_ref {
             Some(r) => {
-                let client = get_or_create_client(&mut clients, r)?;
+                let client = get_or_create_client(&mut clients, &r.provider)?;
                 (
                     Arc::new(LoggedVlmService(client)) as Arc<dyn VlmService>,
                     Some(r.model.clone()),
@@ -121,6 +127,33 @@ impl ModelServices {
                 None,
             ),
         };
+
+        // 每 provider 的聊天客户端池（会话级模型选择路由）：对全部"声明了 Chat
+        // 能力模型"的已启用 provider 预建（数量少、构建便宜）；单个失败跳过并
+        // 告警，路由时未命中的 provider 回落默认聊天服务。
+        let mut chat_clients: HashMap<String, SharedChatService> = HashMap::new();
+        for provider in &config.providers {
+            if !provider.enabled
+                || !provider
+                    .models
+                    .iter()
+                    .any(|m| m.capabilities.contains(&ModelCapability::Chat))
+            {
+                continue;
+            }
+            match get_or_create_client(&mut clients, &provider.name) {
+                Ok(client) => {
+                    chat_clients.insert(provider.name.clone(), Arc::new(LoggedService(client)));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        provider = %provider.name,
+                        error = %e,
+                        "聊天客户端构建失败（该 provider 的会话级模型选择将回落默认）"
+                    );
+                }
+            }
+        }
 
         if chat_ref.is_none() || embedding_ref.is_none() || vision_ref.is_none() {
             tracing::warn!(
@@ -139,6 +172,7 @@ impl ModelServices {
             embedding_model,
             vision_model,
             embedding_usage_sink,
+            chat_clients,
         })
     }
 
@@ -151,6 +185,22 @@ impl ModelServices {
             .embedding_usage_sink
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = Some(sink);
+    }
+
+    /// 每 provider 的聊天客户端池（装配层注入 AgentLoop 的会话级路由面）。
+    pub fn chat_clients(&self) -> HashMap<String, SharedChatService> {
+        self.chat_clients.clone()
+    }
+
+    /// 按提供商选择聊天服务（**会话级模型选择的路由单点**）。
+    ///
+    /// `None` 或未命中（该 provider 未构建成功 / 未声明 Chat 能力）→ 回落默认
+    /// 聊天服务（`preferences.chat` 的客户端）。
+    pub fn chat_for(&self, provider: Option<&str>) -> SharedChatService {
+        provider
+            .and_then(|p| self.chat_clients.get(p))
+            .cloned()
+            .unwrap_or_else(|| self.chat.clone())
     }
 }
 

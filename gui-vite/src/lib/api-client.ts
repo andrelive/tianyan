@@ -480,6 +480,46 @@ export async function switchModel(
   } satisfies SwitchModelRequest);
 }
 
+// ========== 会话级模型选择 API（对齐 DSH 的 Session-local model selection） ==========
+
+export interface SessionModelSelectionValue {
+  provider: string;
+  model: string;
+  /** 思考强度档位（缺省 = off）。 */
+  thinking?: string;
+}
+
+export interface SessionModelResponse {
+  /** 当前会话级模型选择（缺省 = 使用全局默认）。 */
+  selection?: SessionModelSelectionValue;
+}
+
+/** 读取会话级模型选择（null = 使用全局默认）。 */
+export async function getSessionModel(
+  sessionId: string,
+): Promise<SessionModelSelectionValue | null> {
+  const res = await apiGet<SessionModelResponse>(
+    `/sessions/${encodeURIComponent(sessionId)}/model`,
+  );
+  return res.selection ?? null;
+}
+
+/** 设置会话级模型选择（会话本地生效；不改全局默认）。 */
+export async function setSessionModel(
+  sessionId: string,
+  selection: SessionModelSelectionValue,
+): Promise<SessionModelSelectionValue> {
+  const res = await apiPut<SessionModelResponse>(
+    `/sessions/${encodeURIComponent(sessionId)}/model`,
+    {
+      provider: selection.provider,
+      model: selection.model,
+      ...(selection.thinking ? { thinking: selection.thinking } : {}),
+    },
+  );
+  return res.selection ?? selection;
+}
+
 // ========== MCP API ==========
 
 export async function listMcpServers(): Promise<McpServerEntry[]> {

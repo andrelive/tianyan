@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
-import { useAppStore } from '@/lib/store';
+import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
 import { ChevronDown, Check } from 'lucide-react';
+import { setSessionModel } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
+import { toErrorMessage } from '@/lib/errors';
 
 /** 内置"关闭"档位（不附加思考参数；不属于模型声明，恒提供）。 */
 const OFF_EFFORT = 'off';
@@ -10,6 +12,10 @@ const OFF_EFFORT = 'off';
  * 会话级思考强度选择：档位集来自**当前模型自己声明的值**（后端 /config/models
  * 返回 reasoning_efforts，显式配置 > 内置模型表），**原样展示不做本地翻译**
  * （厂商档位可能为 low/high/max 等任意值）；模型不支持思考时隐藏。
+ *
+ * 选择写入**当前会话**（与模型选择同一个会话级对象；对齐 DSH 的
+ * Session-local model selection）：已创建会话同步后端（会话头部），
+ * 未创建会话存 PENDING 槽（首条消息创建会话后固化）。
  */
 /** ghost：一体式输入卡片内的无边框变体。 */
 export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
@@ -37,7 +43,8 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
     ? [OFF_EFFORT, ...declared!.filter((v) => v !== OFF_EFFORT)]
     : [];
 
-  // 模型切换后若已选档位不在新模型档位集内 → 重置为关闭
+  // 模型切换后若已选档位不在新模型档位集内 → 重置为关闭（视图兜底；
+  // 会话记录在下次切会话 syncModelView 时自愈）
   useEffect(() => {
     if (supportsThinking && !options.includes(thinkingEffort)) {
       setThinkingEffort(OFF_EFFORT);
@@ -62,6 +69,27 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
   if (!supportsThinking) return null;
 
   const current = thinkingEffort;
+
+  /** 选择档位：写当前会话的模型选择（thinking 缺省 = off）。 */
+  const selectEffort = (opt: string) => {
+    const st = useAppStore.getState();
+    const base = st.selectedModel;
+    if (!base) return;
+    const key = st.currentSessionId ?? PENDING_SESSION_KEY;
+    const selection = {
+      provider: base.provider,
+      model: base.model,
+      ...(opt === OFF_EFFORT ? {} : { thinking: opt }),
+    };
+    st.setSessionSelection(key, selection);
+    st.syncModelView(key);
+    if (st.currentSessionId) {
+      setSessionModel(st.currentSessionId, selection).catch((err: unknown) => {
+        const message = toErrorMessage(err, '未知错误');
+        useAppStore.getState().showToast('设置思考强度失败: ' + message, 'error');
+      });
+    }
+  };
 
   return (
     <div ref={ref} className="relative">
@@ -95,7 +123,7 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
               role="option"
               aria-selected={opt === current}
               onClick={() => {
-                setThinkingEffort(opt);
+                selectEffort(opt);
                 setOpen(false);
               }}
               className={cn(

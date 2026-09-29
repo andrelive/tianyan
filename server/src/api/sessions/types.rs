@@ -70,6 +70,26 @@ pub struct SessionMetadata {
     pub tags: Option<Vec<String>>,
 }
 
+/// 会话级模型选择响应（GET/PUT /sessions/{id}/model）。
+#[derive(Debug, Serialize)]
+pub struct SessionModelResponse {
+    /// 当前会话级模型选择（None = 使用全局默认）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<tianyan::session::types::SessionModelSelection>,
+}
+
+/// 设置会话级模型选择请求。
+#[derive(Debug, Deserialize)]
+pub struct UpdateSessionModelRequest {
+    /// 提供商名（须已启用且包含该模型）。
+    pub provider: String,
+    /// 模型名。
+    pub model: String,
+    /// 思考强度档位（None/缺省 = off；非空时须在该模型声明的档位集合内）。
+    #[serde(default)]
+    pub thinking: Option<String>,
+}
+
 /// 列出会话响应
 #[derive(Debug, Serialize)]
 pub struct ListSessionsResponse {

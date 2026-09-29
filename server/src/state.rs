@@ -71,6 +71,14 @@ pub(crate) fn resolve_chat_model(config: &TianyanConfig) -> String {
         .unwrap_or_default()
 }
 
+/// 解析 Chat 能力提供商名（未配置时 None；会话级模型选择的默认路由兜底）。
+pub(crate) fn resolve_chat_provider(config: &TianyanConfig) -> Option<String> {
+    config
+        .models
+        .resolve(tianyan::config::ModelCapability::Chat)
+        .map(|r| r.provider)
+}
+
 /// 解析 Chat 能力模型的上下文规格（显式 > 内置表 > 默认）。
 ///
 /// 从已解析的 Chat [`tianyan::config::ModelRef`] 回查 provider 下的

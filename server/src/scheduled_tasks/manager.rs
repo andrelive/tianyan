@@ -226,7 +226,7 @@ impl ScheduledAgentTaskHandler {
         let sid = format!("sched-task-{}", self.task_id);
         let msg = Message::user(&self.prompt);
         let agent = self.agent_lock.read().await.clone();
-        match agent.process_message(&sid, &msg, None, None).await {
+        match agent.process_message(&sid, &msg, None, None, None).await {
             Ok(resp) => {
                 let content = resp.content.trim();
                 Ok(if content.is_empty() {

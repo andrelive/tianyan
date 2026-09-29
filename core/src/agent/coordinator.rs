@@ -114,26 +114,31 @@ pub trait AgentCoordinator: Send + Sync {
 
     /// 处理用户消息。
     /// - `message` — 完整消息（含可选的多模态图片片段，`content` 为纯文本）。
-    /// - `model` — 可选指定模型，None 时使用默认配置。
-    /// - `thinking_effort` — 本会话思考强度（会话时选择；None 时使用模型默认）。
+    /// - `model` — 可选指定模型（None 时回落会话选择 / 默认配置）。
+    /// - `thinking_effort` — 本会话思考强度（None 时回落会话选择 / 模型默认）。
+    /// - `provider` — 可选指定提供商（跨 provider 同名模型的精确路由；
+    ///   None 时回落会话选择 / 全局默认）。
     async fn process_message(
         &self,
         session_id: &str,
         message: &Message,
         model: Option<&str>,
         thinking_effort: Option<String>,
+        provider: Option<&str>,
     ) -> Result<AgentResponse>;
 
     /// 处理用户消息（流式响应）。
     /// - `message` — 完整消息（含可选的多模态图片片段）。
-    /// - `model` — 可选指定模型，None 时使用默认配置。
+    /// - `model` — 可选指定模型（None 时回落会话选择 / 默认配置）。
     /// - `cancel` — 取消标志（客户端断开/服务关停时置位）；`None` 表示不可取消。
-    /// - `thinking_effort` — 本会话思考强度（会话时选择；None 时使用模型默认）。
+    /// - `thinking_effort` — 本会话思考强度（None 时回落会话选择 / 模型默认）。
     /// - `user_message_id` — 前端生成的用户消息临时 id（ADR-031 乐观渲染
     ///   定位键；落库后经 UserMessageId 确认事件回显真实 id，此后弃用）。
     /// - `sender` — 流式事件出口（ADR-032：由调用方经
     ///   [`crate::agent::spawn_stream_forwarder`] 创建并**先于本调用**开始
     ///   消费——通道所有权归调用方，与唤醒轮 / 子代理路径完全同构）。
+    /// - `provider` — 可选指定提供商（跨 provider 同名模型的精确路由；
+    ///   None 时回落会话选择 / 全局默认）。
     ///
     /// 本方法**等待整轮结束**（不内部 spawn）；需要非阻塞语义的调用方
     /// 自行 spawn（server 侧在请求协程内 spawn 后立即返回 HTTP 响应）。
@@ -147,6 +152,7 @@ pub trait AgentCoordinator: Send + Sync {
         thinking_effort: Option<String>,
         user_message_id: Option<&str>,
         sender: StreamEventSender,
+        provider: Option<&str>,
     ) -> Result<()>;
 
     /// 初始化智能体。
@@ -276,14 +282,22 @@ impl AgentCoordinator for Agent {
         message: &Message,
         model: Option<&str>,
         thinking_effort: Option<String>,
+        provider: Option<&str>,
     ) -> Result<AgentResponse> {
         let start = Instant::now();
 
         // ADR-013 串行化：单会话同一时刻只有一个活动轮（用户轮 / 唤醒轮互斥）
         let _turn_guard = self.turn_guard(session_id).await;
 
-        // Resolve model: caller-specified > Agent default config
-        let model = model.unwrap_or(&self.default_model);
+        // 模型选择解析：请求参数 > 会话级选择 > Agent 默认配置（session.rs 单点合并）
+        let header_selection = self.session_model_selection(session_id).await;
+        let resolved = crate::session::types::resolve_model_selection(
+            provider,
+            model,
+            thinking_effort,
+            header_selection.as_ref(),
+            &self.default_model,
+        );
 
         // 1. Load session and build state
         let state = self.load_and_build_state(session_id).await?;
@@ -295,7 +309,7 @@ impl AgentCoordinator for Agent {
                 &state,
                 session_id,
                 message,
-                model,
+                &resolved.model,
                 start,
                 None,
                 None, // 非流式路径无乐观渲染确认（响应直接携带消息 id）
@@ -304,7 +318,8 @@ impl AgentCoordinator for Agent {
                     do_snapshot: true,
                     do_compress: true,
                     do_toolset_check: true,
-                    thinking_effort,
+                    thinking_effort: resolved.thinking,
+                    provider: resolved.provider,
                 },
             )
             .await?;
@@ -321,13 +336,23 @@ impl AgentCoordinator for Agent {
         thinking_effort: Option<String>,
         user_message_id: Option<&str>,
         sender: StreamEventSender,
+        provider: Option<&str>,
     ) -> Result<()> {
-        let model = model.unwrap_or(&self.default_model).to_string();
         // ADR-013 串行化：单会话同一时刻只有一个活动轮（用户轮 / 唤醒轮互斥）。
         // 锁必须先于状态加载：并发轮（如唤醒轮进行中又来用户消息）若在锁外
         // 加载状态，会拿到前一轮完成前的旧快照——上下文缺失前一轮消息，
         // 且状态与库分叉。非流式路径（process_message）已是锁内加载，此处对齐。
         let _turn_guard = self.turn_guard(session_id).await;
+
+        // 模型选择解析：请求参数 > 会话级选择 > Agent 默认配置（session.rs 单点合并）
+        let header_selection = self.session_model_selection(session_id).await;
+        let resolved = crate::session::types::resolve_model_selection(
+            provider,
+            model,
+            thinking_effort,
+            header_selection.as_ref(),
+            &self.default_model,
+        );
         // ADR-035 §9：轮状态 running（auto=false 用户轮）——前端据此联动
         // 输入框与停止按钮（U10）。配对 idle 在函数退出时发出。
         sender.send_turn_state(true, false).await;
@@ -357,7 +382,7 @@ impl AgentCoordinator for Agent {
                 &state,
                 session_id,
                 message,
-                &model,
+                &resolved.model,
                 start,
                 cancel.as_deref(),
                 user_message_id,
@@ -368,7 +393,8 @@ impl AgentCoordinator for Agent {
                     do_snapshot: true,
                     do_compress: true,
                     do_toolset_check: true,
-                    thinking_effort,
+                    thinking_effort: resolved.thinking,
+                    provider: resolved.provider,
                 },
             )
             .await;

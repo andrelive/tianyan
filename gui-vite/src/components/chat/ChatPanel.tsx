@@ -9,8 +9,10 @@ import {
   deleteSessionMessage,
   fetchApprovalStatus,
   getApiBase,
+  getSessionModel,
   redoSessionMessage,
   respondApproval,
+  setSessionModel,
 } from '@/lib/api-client';
 import type {
   ApprovalDecision,
@@ -144,6 +146,28 @@ export default function ChatPanel() {
       setPendingClarification(null);
     }
   }, [urlSessionId, currentSessionId, setCurrentSession, setPendingClarification]);
+
+  // 会话级模型选择：切会话同步视图（有缓存用缓存 / 无记录回落全局默认）；
+  // 缓存缺失时拉取（按会话寻址写入——迟到响应只更新目标会话，不污染已切走的）
+  useEffect(() => {
+    const key = currentSessionId ?? PENDING_SESSION_KEY;
+    const st = useAppStore.getState();
+    st.syncModelView(key);
+    if (currentSessionId && !st.sessionModelSelections[currentSessionId]) {
+      const sid = currentSessionId;
+      void getSessionModel(sid)
+        .then((selection) => {
+          if (!selection) return;
+          const cur = useAppStore.getState();
+          cur.setSessionSelection(sid, selection);
+          // 仅当仍是当前会话时同步视图（迟到响应不污染）
+          if (cur.currentSessionId === sid) cur.syncModelView(sid);
+        })
+        .catch(() => {
+          /* 读取失败：保持默认视图（不阻塞） */
+        });
+    }
+  }, [currentSessionId]);
 
   // 历史加载（挂载恢复 + reloadSession）收敛在 use-session-history
   const { reloadSession, loadOlder } = useSessionHistory(urlSessionId);
@@ -344,6 +368,8 @@ export default function ChatPanel() {
         temperature: 0.7,
         max_tokens: 2048,
         model: state.selectedModel?.model,
+        // 会话级模型选择的路由提供商（跨 provider 同名模型消歧）
+        provider: state.selectedModel?.provider,
         // 会话级思考强度（对话时选择；off 不附加思考参数，仅对支持思考的模型生效）
         thinking: state.thinkingEffort === 'off' ? undefined : state.thinkingEffort,
         // 新会话绑定工作区（工作区 = 会话的父级分组；服务端固化到会话头部）
@@ -367,6 +393,18 @@ export default function ChatPanel() {
         // 事件可能因通道 Lag 丢失，PENDING 滞留会断链）
         if (isNewSession) {
           useAppStore.getState().setCurrentSession(confirmedSessionId);
+          // 会话级模型选择：PENDING 槽（用户在新会话里显式选过）迁移并固化——
+          // 未选过则保持"无记录"语义（跟随全局默认）
+          const st = useAppStore.getState();
+          const pendingSelection = st.sessionModelSelections[PENDING_SESSION_KEY];
+          if (pendingSelection) {
+            st.setSessionSelection(confirmedSessionId, pendingSelection);
+            st.setSessionSelection(PENDING_SESSION_KEY, null);
+            st.syncModelView(confirmedSessionId);
+            void setSessionModel(confirmedSessionId, pendingSelection).catch(() => {
+              /* 固化失败：本会话保持"无记录"（跟随默认），不阻塞 */
+            });
+          }
         }
       } else {
         // 启动失败：复位流状态 + 清理占位（事件不会到达）

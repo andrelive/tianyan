@@ -743,6 +743,7 @@ impl ToolRegistry {
                     model,
                     Some(cancel.as_ref()),
                     None,
+                    None,
                 );
                 match tokio::time::timeout(std::time::Duration::from_secs(secs), run).await {
                     Ok(inner) => inner,
@@ -765,6 +766,7 @@ impl ToolRegistry {
                         None,
                         model,
                         Some(cancel.as_ref()),
+                        None,
                         None,
                     )
                     .await

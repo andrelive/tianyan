@@ -3,10 +3,10 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
-import { useAppStore } from '@/lib/store';
+import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
 import {
-  resetModelSwitchMocks,
-  mockSwitchModelCalls,
+  resetSessionModelMocks,
+  mockSetSessionModelCalls,
   mockModelsResponse,
 } from '@/test/mocks/handlers';
 import type { ModelsResponse } from '@/lib/types';
@@ -50,11 +50,13 @@ function renderModelSelector(response: ModelsResponse = twoChatModelsResponse) {
 
 beforeEach(() => {
   useAppStore.setState(useAppStore.getInitialState());
-  resetModelSwitchMocks();
+  resetSessionModelMocks();
+  // 会话级模型选择：默认模拟"已创建会话"（PENDING 场景另有专门用例）
+  useAppStore.setState({ currentSessionId: 'session-1' });
 });
 
 describe('ModelSelector', () => {
-  it('renders models from GET /config/models; clicking an option POSTs to /config/models/switch and updates the store', async () => {
+  it('renders models; clicking an option PUTs the session-level selection and updates the store', async () => {
     const user = userEvent.setup();
     renderModelSelector();
 
@@ -69,15 +71,20 @@ describe('ModelSelector', () => {
     expect(options[1]).toHaveTextContent('gpt-4o-mini');
     expect(options[0]).toHaveTextContent('openai');
 
-    // 点击第二个模型：本地状态先更新，再向后端发起 switch 请求（携带 provider）
+    // 点击第二个模型：本地状态先更新，再写会话级选择（PUT /sessions/{id}/model）
     await user.click(options[1]);
 
     await waitFor(() => {
-      expect(mockSwitchModelCalls).toEqual([
-        { model: 'gpt-4o-mini', capability: 'chat', provider: 'openai' },
+      expect(mockSetSessionModelCalls).toEqual([
+        { sessionId: 'session-1', provider: 'openai', model: 'gpt-4o-mini', thinking: undefined },
       ]);
     });
     expect(useAppStore.getState().selectedModel).toEqual({
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+    });
+    // 会话记录已写入（切回会话时据此恢复；不再改写全局默认）
+    expect(useAppStore.getState().sessionModelSelections['session-1']).toEqual({
       provider: 'openai',
       model: 'gpt-4o-mini',
     });
@@ -100,11 +107,11 @@ describe('ModelSelector', () => {
     expect(options[0]).toHaveAttribute('aria-selected', 'true');
     expect(options[1]).toHaveAttribute('aria-selected', 'false');
 
-    // 点击 ollama 项：切换请求必须携带 provider=ollama（精确消歧，而非第一个命中的 opencode）
+    // 点击 ollama 项：会话选择必须携带 provider=ollama（精确消歧，而非第一个命中的 opencode）
     await user.click(options[1]);
     await waitFor(() => {
-      expect(mockSwitchModelCalls).toEqual([
-        { model: 'glm-5.3-flash', capability: 'chat', provider: 'ollama' },
+      expect(mockSetSessionModelCalls).toEqual([
+        { sessionId: 'session-1', provider: 'ollama', model: 'glm-5.3-flash', thinking: undefined },
       ]);
     });
     expect(useAppStore.getState().selectedModel).toEqual({
@@ -119,10 +126,10 @@ describe('ModelSelector', () => {
     expect(reopened[1]).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('keeps the local selection and surfaces an error toast when the switch endpoint fails (500)', async () => {
+  it('keeps the local selection and surfaces an error toast when the session model endpoint fails (500)', async () => {
     const user = userEvent.setup();
     server.use(
-      http.post('/api/v1/config/models/switch', () => new HttpResponse(null, { status: 500 })),
+      http.put('/api/v1/sessions/:id/model', () => new HttpResponse(null, { status: 500 })),
     );
     renderModelSelector();
 
@@ -145,7 +152,28 @@ describe('ModelSelector', () => {
       const toast = useAppStore.getState().toasts[0];
       expect(toast).toBeDefined();
       expect(toast?.type).toBe('error');
-      expect(toast?.message).toContain('切换模型失败');
+      expect(toast?.message).toContain('设置会话模型失败');
     });
+  });
+
+  it('stores the selection in the PENDING slot without calling the backend when no session exists', async () => {
+    useAppStore.setState({ currentSessionId: null });
+    const user = userEvent.setup();
+    renderModelSelector();
+
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: '选择模型' })).not.toBeDisabled();
+    });
+    await user.click(screen.getByRole('combobox', { name: '选择模型' }));
+    await user.click(screen.getAllByRole('option')[1]);
+
+    // 未创建会话：只写 PENDING 槽（首条消息创建会话后由 ChatPanel 固化）
+    await waitFor(() => {
+      expect(useAppStore.getState().sessionModelSelections[PENDING_SESSION_KEY]).toEqual({
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+      });
+    });
+    expect(mockSetSessionModelCalls).toHaveLength(0);
   });
 });

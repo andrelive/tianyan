@@ -53,6 +53,9 @@ pub struct SessionHeader {
     /// 子智能体角色名（ADR-026：delegate 会话的角色；None = 主会话）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// 会话级模型选择（None = 使用全局默认；见 [`SessionModelSelection`]）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<SessionModelSelection>,
 }
 
 impl Default for SessionHeader {
@@ -67,6 +70,7 @@ impl Default for SessionHeader {
             parent_session_id: None,
             kind: None,
             role: None,
+            model_selection: None,
         }
     }
 }
@@ -85,6 +89,119 @@ impl SessionHeader {
     /// 是否为空头部（无任何快照载荷）。
     pub fn is_empty(&self) -> bool {
         self.injectable_snapshot.is_none()
+    }
+}
+
+/// 会话级模型选择（会话元数据的一部分；仅覆盖本会话的默认路由）。
+///
+/// 语义（对齐 DSH 的 Session-local model selection）：
+/// - `provider` + `model` 必须成对给出（跨 provider 同名模型的精确引用）；
+/// - `thinking` 为思考强度档位（`None` = off/未设置——"关闭"是一等状态）；
+/// - 未设置（`None`）的会话回落到全局默认（`models.preferences.chat`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionModelSelection {
+    /// 提供商名（须为已启用且包含该模型）。
+    pub provider: String,
+    /// 模型名。
+    pub model: String,
+    /// 思考强度档位（None = off/未设置）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+}
+
+/// 解析后的本轮模型选择（请求参数 / 会话选择 / 调用方默认三者合并的结果）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModelSelection {
+    /// 实际路由的提供商（None = 未指定，由 AgentLoop 用全局默认提供商兜底）。
+    pub provider: Option<String>,
+    /// 实际使用的模型名（默认兜底后必有值）。
+    pub model: String,
+    /// 思考强度档位（None = off/未设置）。
+    pub thinking: Option<String>,
+}
+
+/// 合并解析本轮模型选择（**优先级：请求参数 > 会话选择 > 调用方默认**）。
+///
+/// 逐字段合并：请求给了的字段用请求的，未给的回落到会话选择，仍缺再回落默认。
+/// `provider` 保持 `None` 表示"未指定"——由下层（AgentLoop）用全局默认提供商兜底。
+pub fn resolve_model_selection(
+    request_provider: Option<&str>,
+    request_model: Option<&str>,
+    request_thinking: Option<String>,
+    session_selection: Option<&SessionModelSelection>,
+    default_model: &str,
+) -> ResolvedModelSelection {
+    let provider = request_provider
+        .map(str::to_string)
+        .or_else(|| session_selection.map(|s| s.provider.clone()));
+    let model = request_model
+        .map(str::to_string)
+        .or_else(|| session_selection.map(|s| s.model.clone()))
+        .unwrap_or_else(|| default_model.to_string());
+    let thinking = request_thinking.or_else(|| session_selection.and_then(|s| s.thinking.clone()));
+    ResolvedModelSelection {
+        provider,
+        model,
+        thinking,
+    }
+}
+
+#[cfg(test)]
+mod model_selection_tests {
+    use super::*;
+
+    fn sel(provider: &str, model: &str, thinking: Option<&str>) -> SessionModelSelection {
+        SessionModelSelection {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            thinking: thinking.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn request_params_win_over_session_and_default() {
+        let session = sel("ollama", "glm-session", Some("low"));
+        let r = resolve_model_selection(
+            Some("opencode"),
+            Some("deepseek-req"),
+            Some("high".to_string()),
+            Some(&session),
+            "default-model",
+        );
+        assert_eq!(r.provider.as_deref(), Some("opencode"));
+        assert_eq!(r.model, "deepseek-req");
+        assert_eq!(r.thinking.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn session_selection_fills_missing_request_fields() {
+        // 请求只给 model（旧客户端）：provider/thinking 回落会话选择
+        let session = sel("ollama", "glm-session", Some("max"));
+        let r = resolve_model_selection(None, Some("glm"), None, Some(&session), "default-model");
+        assert_eq!(r.provider.as_deref(), Some("ollama"));
+        assert_eq!(r.model, "glm");
+        assert_eq!(r.thinking.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn falls_back_to_default_model_without_any_selection() {
+        let r = resolve_model_selection(None, None, None, None, "default-model");
+        assert_eq!(
+            r.provider, None,
+            "无来源时 provider 保持 None（由下层兜底）"
+        );
+        assert_eq!(r.model, "default-model");
+        assert_eq!(r.thinking, None);
+    }
+
+    #[test]
+    fn session_thinking_off_is_respected() {
+        // 会话思考为 off（None）时不得凭空产生档位
+        let session = sel("opencode", "m", None);
+        let r = resolve_model_selection(None, None, None, Some(&session), "default-model");
+        assert_eq!(r.provider.as_deref(), Some("opencode"));
+        assert_eq!(r.model, "m");
+        assert_eq!(r.thinking, None);
     }
 }
 

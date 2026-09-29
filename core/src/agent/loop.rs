@@ -14,6 +14,7 @@ use crate::context::ContextAssembler;
 use crate::model::spec::ModelSpec;
 use crate::model::types::ChatCompletionRequest;
 use crate::model::ChatService;
+use crate::model::SharedChatService;
 use crate::observability::trace::TraceCollector;
 use crate::observability::usage_log::UsageLog;
 use crate::session::SessionManager;
@@ -198,6 +199,10 @@ pub struct AgentLoop {
     usage_log: Option<Arc<UsageLog>>,
     /// model → provider 映射（配置注入；用量日志的 provider 维度）。
     provider_by_model: HashMap<String, String>,
+    /// 全局默认聊天提供商（会话未选择时实际路由的 provider；用量日志兜底）。
+    default_chat_provider: Option<String>,
+    /// 每 provider 的聊天客户端（会话级模型选择路由；空 = 全部走 `model_service`）。
+    chat_clients: HashMap<String, SharedChatService>,
     /// 单轮演进策略（ADR-030：主 agent 默认；子代理委托策略）。
     turn_policy: TurnPolicy,
 }
@@ -219,6 +224,8 @@ impl AgentLoop {
             chat_spec: None,
             usage_log: None,
             provider_by_model: HashMap::new(),
+            default_chat_provider: None,
+            chat_clients: HashMap::new(),
             turn_policy: TurnPolicy::default(),
         }
     }
@@ -251,6 +258,18 @@ impl AgentLoop {
     /// 空表时回落 model 名前缀推导）。
     pub fn with_provider_by_model(mut self, map: HashMap<String, String>) -> Self {
         self.provider_by_model = map;
+        self
+    }
+
+    /// 设置全局默认聊天提供商（用量日志 provider 维度兜底；会话未选择时使用）。
+    pub fn with_default_chat_provider(mut self, provider: Option<String>) -> Self {
+        self.default_chat_provider = provider;
+        self
+    }
+
+    /// 设置每 provider 的聊天客户端（会话级模型选择路由；空 = 禁用路由）。
+    pub fn with_chat_clients(mut self, clients: HashMap<String, SharedChatService>) -> Self {
+        self.chat_clients = clients;
         self
     }
 
@@ -334,6 +353,7 @@ impl AgentLoop {
         initial_parent_id: Option<&str>,
         model: &str,
         cancel: Option<&AtomicBool>,
+        provider: Option<String>,
         step: F,
     ) -> Result<AgentLoopResult, TianyanError>
     where
@@ -354,6 +374,7 @@ impl AgentLoop {
                 initial_parent_id,
                 model,
                 cancel,
+                provider,
                 step,
             )
             .await;
@@ -434,6 +455,8 @@ impl AgentLoop {
     ///
     /// `cancel` 为 `Some` 时，每轮开始前检查取消标志；被取消返回
     /// [`AgentLoopResult::Cancelled`]（而非错误），调用方可区分"用户取消"与"失败"。
+    /// `provider` 为本轮模型选择的路由提供商（`None` = 默认客户端）；
+    /// 未装配对应客户端时回落默认服务。
     /// 流式事件（思考/工具卡片）由 [`Self::run_stream`] 承担，本路径不携带 sender。
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
@@ -444,6 +467,7 @@ impl AgentLoop {
         model: &str,
         cancel: Option<&AtomicBool>,
         thinking_effort: Option<String>,
+        provider: Option<String>,
     ) -> Result<AgentLoopResult, TianyanError> {
         self.run_turns_with_notice_check(
             messages,
@@ -452,9 +476,11 @@ impl AgentLoop {
             initial_parent_id,
             model,
             cancel,
+            provider.clone(),
             |this, model, _sender, msgs, cancel, last_input_usage| {
-                // FnMut 闭包按值捕获 thinking_effort，每次调用 clone 供本轮使用
+                // FnMut 闭包按值捕获 thinking_effort/provider，每次调用 clone 供本轮使用
                 let thinking_effort = thinking_effort.clone();
+                let provider = provider.clone();
                 let session_id = session_id.to_string();
                 Box::pin(async move {
                     let request = this
@@ -470,13 +496,18 @@ impl AgentLoop {
 
                     // 请求阶段可取消（结构性取消）：非流式路径同样覆盖——
                     // 取消先到 → `chat_completion` future 被 drop（在途 HTTP
-                    // 请求 / 退避重试终止）。
-                    let response = cancellable(cancel, this.model_service.chat_completion(request))
-                        .await
-                        .ok_or_else(|| TianyanError::Custom("agent_loop: 任务已取消".to_string()))?
-                        .map_err(|e| {
-                            TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
-                        })?;
+                    // 请求 / 退避重试终止）。服务按会话级模型选择路由（未选择
+                    // 时回落默认客户端）。
+                    let response = cancellable(
+                        cancel,
+                        this.service_for(provider.as_deref())
+                            .chat_completion(request),
+                    )
+                    .await
+                    .ok_or_else(|| TianyanError::Custom("agent_loop: 任务已取消".to_string()))?
+                    .map_err(|e| {
+                        TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e))
+                    })?;
 
                     // T6：记录本次实测输入，供下一轮动态 max_tokens 校准（随返回值更新）。
                     let updated_input = Some((model.to_string(), response.usage.prompt_tokens));
@@ -513,6 +544,7 @@ impl AgentLoop {
     /// 文本 delta 通过 `stream_sender` 逐 token 发送，实现打字机效果。
     /// tool call 检测和执行仍为非流式（在完整消息累积后处理）。
     /// `cancel` 为 `Some` 时，chunk 接收循环与轮次边界都会检查取消标志。
+    /// `provider` 为本轮模型选择的路由提供商（`None` = 默认客户端）。
     #[allow(clippy::too_many_arguments)]
     pub async fn run_stream(
         &self,
@@ -523,6 +555,7 @@ impl AgentLoop {
         model: &str,
         cancel: Option<&AtomicBool>,
         thinking_effort: Option<String>,
+        provider: Option<String>,
     ) -> Result<AgentLoopResult, TianyanError> {
         self.run_turns_with_notice_check(
             messages,
@@ -531,9 +564,11 @@ impl AgentLoop {
             initial_parent_id,
             model,
             cancel,
+            provider.clone(),
             |this, model, sender, msgs, cancel, last_input_usage| {
-                // FnMut 闭包按值捕获 thinking_effort，每次调用 clone 供本轮使用
+                // FnMut 闭包按值捕获 thinking_effort/provider，每次调用 clone 供本轮使用
                 let thinking_effort = thinking_effort.clone();
+                let provider = provider.clone();
                 let session_id = session_id.to_string();
                 Box::pin(async move {
                     let sender = sender.ok_or_else(|| {
@@ -549,6 +584,7 @@ impl AgentLoop {
                             thinking_effort,
                             &last_input_usage,
                             &session_id,
+                            provider.as_deref(),
                         )
                         .await?;
                     AgentLoop::finalize_streamed_turn(
@@ -582,6 +618,7 @@ impl AgentLoop {
         thinking_effort: Option<String>,
         last_input_usage: &Option<(String, usize)>,
         session_id: &str,
+        provider: Option<&str>,
     ) -> Result<StreamAccum, TianyanError> {
         let request = self
             .prepare_request(
@@ -596,7 +633,9 @@ impl AgentLoop {
 
         // 请求阶段可取消（结构性取消）：取消先到 → `chat_completion_stream`
         // future 被 drop——在途 HTTP 请求 / 退避重试随之终止，不必等响应头。
-        let mut rx = cancellable(cancel, self.model_service.chat_completion_stream(request))
+        // 服务按会话级模型选择路由（未选择时回落默认客户端）。
+        let service = self.service_for(provider);
+        let mut rx = cancellable(cancel, service.chat_completion_stream(request))
             .await
             .ok_or_else(|| TianyanError::Custom("agent_loop: 任务已取消".to_string()))?
             .map_err(|e| TianyanError::Custom(format!("agent_loop: LLM 调用失败：{}", e)))?;
@@ -857,6 +896,7 @@ impl AgentLoop {
         initial_parent_id: Option<&str>,
         model: &str,
         cancel: Option<&AtomicBool>,
+        provider: Option<String>,
         mut step: F,
     ) -> Result<AgentLoopResult, TianyanError>
     where
@@ -930,7 +970,8 @@ impl AgentLoop {
             }
 
             // LLM 用量日志：每轮一次（聊天/子代理/演化任务统一记录）。
-            self.record_usage_log(session_id, model, &turn_usage).await;
+            self.record_usage_log(session_id, model, provider.as_deref(), &turn_usage)
+                .await;
 
             let mut ctx = TurnContext {
                 session_id,
@@ -1098,22 +1139,36 @@ impl AgentLoop {
         Ok(step_result)
     }
 
+    /// 选择本轮聊天服务（**会话级模型选择的路由单点**）：按 provider 命中
+    /// per-provider 客户端池；未命中（未装配 / 构建失败）回落默认服务。
+    fn service_for(&self, provider: Option<&str>) -> SharedChatService {
+        provider
+            .and_then(|p| self.chat_clients.get(p))
+            .cloned()
+            .unwrap_or_else(|| self.model_service.clone())
+    }
+
     /// 记录单轮 LLM 用量日志（聊天/子代理/演化任务统一记录）。
     ///
-    /// provider 优先查配置映射（模型名可能不含前缀），未命中时按 model 名前缀
-    /// 推导（provider/model 命名）。无 usage_log 或无用量时静默跳过。
+    /// provider 归属链：本轮实际路由 provider（会话选择/请求解析）> 全局默认
+    /// 聊天 provider > 配置映射（偏好优先）> 模型名前缀推导。无 usage_log 或
+    /// 无用量时静默跳过。
     async fn record_usage_log(
         &self,
         session_id: &str,
         model: &str,
+        provider: Option<&str>,
         turn_usage: &Option<TokenUsage>,
     ) {
         if let Some(ref usage_log) = self.usage_log {
             if let Some(usage) = turn_usage {
-                let provider = self
-                    .provider_by_model
-                    .get(model)
-                    .cloned()
+                // provider 归属（修复"同名模型记错 provider"）：本轮实际路由的
+                // provider（会话选择/请求参数解析）> 全局默认聊天 provider >
+                // 配置映射 > 模型名前缀兜底。
+                let provider = provider
+                    .map(str::to_string)
+                    .or_else(|| self.default_chat_provider.clone())
+                    .or_else(|| self.provider_by_model.get(model).cloned())
                     .unwrap_or_else(|| model.split("/").next().unwrap_or("unknown").to_string());
                 usage_log.record(session_id, &provider, model, usage).await;
             }

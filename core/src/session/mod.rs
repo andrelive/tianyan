@@ -34,7 +34,7 @@ pub mod store;
 pub mod types;
 
 // 重新导出类型
-pub use types::{parse_message_lines, Session, SessionHeader};
+pub use types::{parse_message_lines, Session, SessionHeader, SessionModelSelection};
 
 // 重新导出管理层
 pub use manager::{PersistentSessionManager, SessionManager};

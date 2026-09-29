@@ -87,6 +87,8 @@ pub(crate) struct TurnOptions {
     pub do_toolset_check: bool,
     /// 本会话思考强度档位（会话时选择；None 时使用模型默认）。
     pub thinking_effort: Option<String>,
+    /// 本轮模型选择的路由提供商（会话时选择；None 时用全局默认客户端）。
+    pub provider: Option<String>,
 }
 
 /// 智能体协调器的默认实现。
@@ -177,6 +179,21 @@ impl Agent {
     pub(crate) async fn turn_try_lock(&self, session_id: &str) -> Option<OwnedMutexGuard<()>> {
         self.working_sets.try_lock(session_id).await
     }
+    /// 读取会话级模型选择（None = 未设置 / 会话不存在）。
+    ///
+    /// 会话级模型选择（对齐 DSH 的 Session-local model selection）：
+    /// 合并解析见 [`crate::session::types::resolve_model_selection`]。
+    pub(crate) async fn session_model_selection(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::session::types::SessionModelSelection> {
+        self.session_manager
+            .get_session(session_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.header.model_selection)
+    }
 
     /// 请求中止该会话**当前活动轮**（ADR-035 §9 / U10）。
     ///
@@ -250,6 +267,15 @@ impl Agent {
             .tool_registry()
             .set_delegation_cancel(session_id, Some(wake_cancel.clone()))
             .await;
+        // 会话级模型选择（唤醒轮与用户轮同源）：会话选择 > 全局默认。
+        let wake_selection = self.session_model_selection(session_id).await;
+        let wake_resolved = crate::session::types::resolve_model_selection(
+            None,
+            None,
+            None,
+            wake_selection.as_ref(),
+            &self.default_model,
+        );
         let mut last_err: Option<String> = None;
         for attempt in 0..WAKE_RETRY_LIMIT {
             if attempt > 0 {
@@ -278,10 +304,11 @@ impl Agent {
                     sender.clone(),
                     session_id,
                     parent_id.as_deref(),
-                    &self.default_model,
+                    &wake_resolved.model,
                     Some(&wake_cancel),
-                    // 唤醒轮不携带会话思考选择，使用模型默认
-                    None,
+                    // 唤醒轮与用户轮同源：会话选择 > 全局默认
+                    wake_resolved.thinking.clone(),
+                    wake_resolved.provider.clone(),
                 )
                 .await;
 
@@ -894,6 +921,8 @@ impl Agent {
             let s = state.read().await;
             s.structured_messages.last().map(|m| m.id.clone())
         };
+        // 会话级模型选择的路由提供商（每臂取用；两条路径互斥）
+        let route_provider = options.provider.clone();
         let loop_result = match &options.mode {
             TurnMode::Plain => {
                 self.agent_loop
@@ -905,6 +934,7 @@ impl Agent {
                         model,
                         cancel,
                         options.thinking_effort,
+                        route_provider,
                     )
                     .await
             }
@@ -919,6 +949,7 @@ impl Agent {
                         model,
                         cancel,
                         options.thinking_effort,
+                        route_provider,
                     )
                     .await
             }
@@ -1509,7 +1540,7 @@ mod tests {
         let agent = make_agent(mock);
 
         let resp = agent
-            .process_message("session-1", &Message::user("帮我处理"), None, None)
+            .process_message("session-1", &Message::user("帮我处理"), None, None, None)
             .await
             .unwrap();
 
@@ -1946,6 +1977,7 @@ mod tests {
                     do_compress: true,
                     do_toolset_check: false,
                     thinking_effort: None,
+                    provider: None,
                 },
             )
             .await

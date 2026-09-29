@@ -24,6 +24,10 @@ pub struct ChatRequest {
     /// 指定使用的模型。未提供时使用配置中的默认模型。
     #[serde(default)]
     pub model: Option<String>,
+    /// 指定提供商（跨 provider 同名模型的精确路由；与 `model` 成对使用；
+    /// None 时回落会话选择 / 全局默认）。
+    #[serde(default)]
+    pub provider: Option<String>,
     /// 本会话思考强度档位（会话时选择；None 时使用模型默认）。
     /// 值为当前模型声明的档位（如 "low"/"high"/"max"），"off" 表示关闭；
     /// 仅对支持思考的模型生效，与全局配置无关。
@@ -307,6 +311,7 @@ mod tests {
             temperature: 0.7,
             max_tokens: 100,
             model: None,
+            provider: None,
             thinking: None,
             working_directory: None,
         }

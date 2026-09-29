@@ -74,6 +74,10 @@ pub struct AgentBuilder {
     working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
     usage_log: Option<Arc<crate::observability::usage_log::UsageLog>>,
     provider_by_model: std::collections::HashMap<String, String>,
+    /// 全局默认聊天提供商（会话未选择时的路由兜底；None 时不注入）。
+    default_chat_provider: Option<String>,
+    /// 每 provider 的聊天客户端（会话级模型选择路由；空时不注入）。
+    chat_clients: std::collections::HashMap<String, crate::model::SharedChatService>,
     /// 聊天模型上下文规格（T5；注入 AgentLoop 并联动压缩窗口；None 时走默认窗口）。
     chat_model_spec: Option<ModelSpec>,
     /// 后台命令日志目录（execute_command(background) 日志落盘；None 时仅内存尾部）。
@@ -112,6 +116,8 @@ impl AgentBuilder {
             working_sets: None,
             usage_log: None,
             provider_by_model: std::collections::HashMap::new(),
+            default_chat_provider: None,
+            chat_clients: std::collections::HashMap::new(),
             chat_model_spec: None,
             command_logs_dir: None,
             task_results_dir: None,
@@ -307,6 +313,21 @@ impl AgentBuilder {
         map: std::collections::HashMap<String, String>,
     ) -> Self {
         self.provider_by_model = map;
+        self
+    }
+
+    /// 设置全局默认聊天提供商（用量日志 provider 维度兜底；会话未选择时使用）。
+    pub fn with_default_chat_provider(mut self, provider: Option<String>) -> Self {
+        self.default_chat_provider = provider;
+        self
+    }
+
+    /// 设置每 provider 的聊天客户端（会话级模型选择路由；空 = 禁用路由）。
+    pub fn with_chat_clients(
+        mut self,
+        clients: std::collections::HashMap<String, crate::model::SharedChatService>,
+    ) -> Self {
+        self.chat_clients = clients;
         self
     }
 
@@ -535,6 +556,12 @@ impl AgentBuilder {
         }
         if !self.provider_by_model.is_empty() {
             agent_loop = agent_loop.with_provider_by_model(self.provider_by_model.clone());
+        }
+        if self.default_chat_provider.is_some() {
+            agent_loop = agent_loop.with_default_chat_provider(self.default_chat_provider.clone());
+        }
+        if !self.chat_clients.is_empty() {
+            agent_loop = agent_loop.with_chat_clients(self.chat_clients.clone());
         }
         // 聊天模型上下文规格注入（T5）：None 时 AgentLoop 内部走默认窗口
         agent_loop = agent_loop.with_chat_spec(self.chat_model_spec);

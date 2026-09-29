@@ -10,7 +10,8 @@ use crate::api::sessions::services::SessionService;
 use crate::api::sessions::types::{
     CompressSessionResponse, DeleteMessageRequest, DeleteMessageResponse, DeleteSessionResponse,
     ListSessionsResponse, RedoRequest, RedoResponse, Session, SessionDetail, SessionMessagesQuery,
-    SessionMessagesResponse, UpdateTitleRequest, UpdateWorkspaceRequest,
+    SessionMessagesResponse, SessionModelResponse, UpdateSessionModelRequest, UpdateTitleRequest,
+    UpdateWorkspaceRequest,
 };
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
@@ -394,4 +395,57 @@ pub async fn update_session_workspace(
         .await
         .inspect_err(|e| error!("更新会话工作目录失败: {}", e))
         .map(Json)
+}
+
+/// 读取会话级模型选择（None = 使用全局默认）。
+pub async fn get_session_model(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<SessionModelResponse>, ApiError> {
+    if session_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("会话ID不能为空".to_string()));
+    }
+
+    let service = SessionService::new(
+        state.session_manager(),
+        state.snapshot_manager(),
+        Some(state.working_sets()),
+    );
+
+    let selection = service
+        .get_model_selection(&session_id)
+        .await
+        .inspect_err(|e| error!("读取会话模型选择失败: {}", e))?;
+    Ok(Json(SessionModelResponse { selection }))
+}
+
+/// 设置会话级模型选择（会话本地生效，不改全局默认）。
+pub async fn update_session_model(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(request): Json<UpdateSessionModelRequest>,
+) -> Result<Json<SessionModelResponse>, ApiError> {
+    if session_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("会话ID不能为空".to_string()));
+    }
+
+    info!(
+        "设置会话模型选择: {} -> {}/{}",
+        session_id, request.provider, request.model
+    );
+
+    let service = SessionService::new(
+        state.session_manager(),
+        state.snapshot_manager(),
+        Some(state.working_sets()),
+    );
+    let config = state.config().read().await.clone();
+
+    let selection = service
+        .update_model_selection(&session_id, request, &config)
+        .await
+        .inspect_err(|e| error!("设置会话模型选择失败: {}", e))?;
+    Ok(Json(SessionModelResponse {
+        selection: Some(selection),
+    }))
 }

@@ -147,6 +147,9 @@ impl ChatService {
                 // ADR-031：乐观渲染定位键（落库后经 UserMessageId 确认事件回显）
                 request.message.user_message_id.as_deref(),
                 sender,
+                // 会话级模型选择的路由提供商（跨 provider 同名模型消歧；
+                // None 时由会话选择 / 全局默认兜底）
+                request.provider.as_deref(),
             )
             .await;
 

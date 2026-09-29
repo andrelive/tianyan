@@ -61,7 +61,7 @@ impl EvolutionReviewExecutor for AgentEvolutionExecutor {
         let msg = Message::user(text);
         let agent = self.agent.read().await.clone();
         let resp = agent
-            .process_message(&session_id, &msg, Some(&self.model), None)
+            .process_message(&session_id, &msg, Some(&self.model), None, None)
             .await;
 
         // 清理专用会话（避免进入会话列表与记忆提取）——成功/失败都清理：
