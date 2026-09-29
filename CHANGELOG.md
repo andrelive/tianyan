@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-29
+
+### Fixed
+- **opencode glm 上游 400（会话轮中断）**：思考档位开启时无条件发送的 `enable_thinking` 被 opencode zen 的 glm-5.3-flash 严格上游拒绝（`unknown field "enable_thinking"`，必现）——收窄为仅 DashScope/Qwen 方言携带（其余族只发标准 `reasoning_effort`；实测各渠道去该字段后推理照常输出）
+
+### Changed
+- **grep 输出治理**：content 恒为单行预览（行号 + 匹配行，超长截断），移除 `context` 参数（需要上下文改用 `read_file`）；结果条数默认 100 / 上限 200（超出钳制）；截断附收窄与 offset 续查指引；描述补齐使用纪律（勿用 shell 搜索、探索走 repo_map/子代理）
+- **session_recall 输出治理**：命中数默认 3（上限 10）、窗口半径默认 2（上限 5）；单次输出总预算 12K 字符（超出整条停加并附续查指引）
+
 ## [0.5.12] - 2026-09-29
 
 ### Fixed
