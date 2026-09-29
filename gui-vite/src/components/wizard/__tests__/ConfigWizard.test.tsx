@@ -70,14 +70,14 @@ describe('ConfigWizard', () => {
 
     await user.click(screen.getByRole('button', { name: '下一步' })); // 欢迎 → 模型
 
-    // 预置懒加载（msw mock：OpenCode Zen + Ollama 本地）
+    // 预置懒加载（msw mock：OpenCode Go / Ollama Cloud / DeepSeek）
     await waitFor(() => {
-      expect(screen.getByRole('option', { name: 'OpenCode Zen' })).toBeInTheDocument();
+      expect(screen.getByRole('option', { name: 'OpenCode Go' })).toBeInTheDocument();
     });
 
-    await user.selectOptions(screen.getByLabelText('预置服务商'), 'opencode');
-    expect(screen.getByLabelText('提供商名称')).toHaveValue('opencode');
-    expect(screen.getByLabelText('端点 URL')).toHaveValue('https://opencode.ai/zen/v1');
+    await user.selectOptions(screen.getByLabelText('预置服务商'), 'opencode-go');
+    expect(screen.getByLabelText('提供商名称')).toHaveValue('opencode-go');
+    expect(screen.getByLabelText('端点 URL')).toHaveValue('https://opencode.ai/zen/go/v1');
   });
 
   it('blocks advancing while required model fields are missing', async () => {

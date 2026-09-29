@@ -127,9 +127,10 @@ capabilities = ["text-embedding", "multimodal-embedding"]
 # max_output_tokens = 32768
 
 # 预置提供商与请求修饰（ADR-046）：
-#   常用服务商已内置预置：ollama（本地）/ ollama-cloud / opencode（Zen）/
-#   opencode-go / deepseek。配置 name 命中预置（或显式 preset = "<id>"）即自动
-#   携带该服务商的默认值（方言 / 会话头等）；GUI「添加提供商」可从预置一键填草稿。
+#   常用服务商已内置预置：ollama-cloud / opencode-go / deepseek。配置 name 命中
+#   预置（或显式 preset = "<id>"）即自动携带该服务商的默认值（方言 / 会话头等）；
+#   简称别名同样命中（name = "ollama" → ollama-cloud、name = "opencode" →
+#   opencode-go）。GUI「添加提供商」可从预置一键填草稿。
 #
 #   专属 User-Agent（可选，user_agent）——缺省解析链：本字段 > headers 手工项 >
 #   预置 > tianyan/{版本}。多数网关无要求；opencode 明确拒绝通用 SDK/HTTP 库名

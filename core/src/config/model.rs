@@ -1583,10 +1583,10 @@ max_input_tokens = 8000
         p.preset = Some("opencode-go".to_string());
         assert_eq!(p.matched_preset().unwrap().id, "opencode-go");
 
-        // name 匹配大小写不敏感
+        // name 匹配大小写不敏感（`opencode` 为 OpenCode Go 的简称别名）
         p.preset = None;
         p.name = "OpenCode".to_string();
-        assert_eq!(p.matched_preset().unwrap().id, "opencode");
+        assert_eq!(p.matched_preset().unwrap().id, "opencode-go");
     }
 
     #[test]
@@ -1617,11 +1617,14 @@ max_input_tokens = 8000
 
     #[test]
     fn test_resolve_endpoint_preset_fallback() {
-        // 未配置 → 命中预置（opencode → zen 端点）
+        // 未配置 → 命中预置（opencode 简称别名 → Go 端点）
         let mut p = make_provider(make_model("m", vec![ModelCapability::Chat]));
         p.name = "opencode".to_string();
         p.endpoint = String::new();
-        assert_eq!(p.resolve_endpoint().unwrap(), "https://opencode.ai/zen/v1");
+        assert_eq!(
+            p.resolve_endpoint().unwrap(),
+            "https://opencode.ai/zen/go/v1"
+        );
 
         // 显式 endpoint 覆盖预置
         p.endpoint = "https://my-relay.example.com/v1".to_string();
@@ -1636,7 +1639,7 @@ max_input_tokens = 8000
         q.endpoint = String::new();
         assert!(q.resolve_endpoint().is_none());
 
-        // get_endpoint：命中预置时留空可解析（go 变体）；未命中时报错
+        // get_endpoint：命中预置时留空可解析（opencode-go 直名）；未命中时报错
         assert!(q.get_endpoint().is_err());
         let mut r = make_provider(make_model("m", vec![ModelCapability::Chat]));
         r.name = "opencode-go".to_string();

@@ -4,8 +4,8 @@
 //! 环境变量提示 / 描述）。与 [`super::model::ProviderConfig`] 同构——
 //! "内置预置 = 出厂默认配置，用户配置 = 覆盖"（合并语义：显式 > 预置 > 默认）。
 //!
-//! 匹配：显式 `preset` 字段 > `name` 精确匹配（均大小写不敏感）。
-//! **新增服务商 = 表里加一行**（不改请求路径代码）。
+//! 匹配：显式 `preset` 字段 > `name` 精确匹配 > 简称别名（[`PRESET_ALIASES`]，
+//! 均大小写不敏感）。**新增服务商 = 表里加一行**（不改请求路径代码）。
 
 use super::model::{DialectPreset, HeaderSource};
 
@@ -33,19 +33,12 @@ pub struct ProviderPreset {
     pub description: &'static str,
 }
 
-/// 内置预置表（ADR-046 首批：ollama / opencode / deepseek）。
+/// 内置预置表（ADR-046：ollama-cloud / opencode-go / deepseek）。
+///
+/// 修订（2026-09-29）：原 `ollama`（本地）与 `opencode`（Zen）条目移出——
+/// Zen 与 Go 连接参数一致（仅模型标识不同）；本地 Ollama 无连接修饰需求，
+/// 直接手写 name / endpoint 即可。两个简称保留为命中别名（[`PRESET_ALIASES`]）。
 pub static PROVIDER_PRESETS: &[ProviderPreset] = &[
-    ProviderPreset {
-        id: "ollama",
-        display_name: "Ollama（本地）",
-        endpoint: "http://localhost:11434/v1",
-        dialect: DialectPreset::Ollama,
-        user_agent: None,
-        dynamic_headers: &[],
-        requires_api_key: false,
-        api_key_env_hint: None,
-        description: "本地运行，无需 API Key",
-    },
     ProviderPreset {
         id: "ollama-cloud",
         display_name: "Ollama Cloud",
@@ -56,17 +49,6 @@ pub static PROVIDER_PRESETS: &[ProviderPreset] = &[
         requires_api_key: true,
         api_key_env_hint: Some("OLLAMA_API_KEY"),
         description: "Ollama 官方云端",
-    },
-    ProviderPreset {
-        id: "opencode",
-        display_name: "OpenCode Zen",
-        endpoint: "https://opencode.ai/zen/v1",
-        dialect: DialectPreset::OpenAiCompatible,
-        user_agent: None,
-        dynamic_headers: &[("x-opencode-session", HeaderSource::SessionId)],
-        requires_api_key: true,
-        api_key_env_hint: Some("OPENCODE_API_KEY"),
-        description: "OpenCode 官方模型网关",
     },
     ProviderPreset {
         id: "opencode-go",
@@ -92,15 +74,35 @@ pub static PROVIDER_PRESETS: &[ProviderPreset] = &[
     },
 ];
 
-/// 按 id / 名称查找预置（大小写不敏感，精确匹配；空白输入 / 未命中返回 None）。
+/// `name` / `preset` 命中别名：服务商简称 → 预置 id。
+///
+/// 别名不新增预置条目（不出现在预置选择器、无独立默认值），仅参与命中——
+/// 用户惯用简称与预置 id 对齐：
+/// - `opencode` → `opencode-go`（Zen 与 Go 连接参数一致，仅模型标识不同）；
+/// - `ollama` → `ollama-cloud`（本地 Ollama 无连接修饰需求，不再内置）。
+pub const PRESET_ALIASES: &[(&str, &str)] =
+    &[("opencode", "opencode-go"), ("ollama", "ollama-cloud")];
+
+/// 按 id 精确查找（大小写不敏感）。
+fn find_by_id(id: &str) -> Option<&'static ProviderPreset> {
+    PROVIDER_PRESETS
+        .iter()
+        .find(|p| p.id.eq_ignore_ascii_case(id))
+}
+
+/// 按 id / 名称 / 别名查找预置（大小写不敏感；空白输入 / 未命中返回 None）。
 pub fn find_preset(key: &str) -> Option<&'static ProviderPreset> {
     let key = key.trim();
     if key.is_empty() {
         return None;
     }
-    PROVIDER_PRESETS
+    if let Some(p) = find_by_id(key) {
+        return Some(p);
+    }
+    PRESET_ALIASES
         .iter()
-        .find(|p| p.id.eq_ignore_ascii_case(key))
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(key))
+        .and_then(|(_, id)| find_by_id(id))
 }
 
 #[cfg(test)]
@@ -109,40 +111,55 @@ mod tests {
 
     #[test]
     fn test_find_preset_case_insensitive() {
-        assert!(find_preset("opencode").is_some());
-        assert!(find_preset("OpenCode").is_some());
+        assert!(find_preset("opencode-go").is_some());
         assert!(find_preset("OPENCODE-GO").is_some());
+        assert!(find_preset("ollama-cloud").is_some());
         assert!(find_preset("  deepseek  ").is_some());
         assert!(find_preset("unknown-provider").is_none());
         assert!(find_preset("").is_none());
     }
 
     #[test]
+    fn test_aliases_resolve_to_expected_presets() {
+        // 用户惯用简称 → 预置（opencode → Go；ollama → Cloud）
+        assert_eq!(find_preset("opencode").unwrap().id, "opencode-go");
+        assert_eq!(find_preset("OpenCode").unwrap().id, "opencode-go");
+        assert_eq!(find_preset("ollama").unwrap().id, "ollama-cloud");
+        // 别名目标必须真实存在，且别名不得遮蔽同名真实 id
+        for (alias, id) in PRESET_ALIASES {
+            let p = find_preset(alias).unwrap_or_else(|| panic!("别名 {alias} 应可解析"));
+            assert_eq!(p.id, *id, "别名 {alias} 目标");
+            assert!(find_by_id(id).is_some(), "别名目标 {id} 必须存在");
+        }
+    }
+
+    #[test]
     fn test_opencode_presets_carry_session_binding() {
-        // opencode 系（zen / go）均携带 x-opencode-session 会话头绑定（ADR-046）
-        for id in ["opencode", "opencode-go"] {
-            let preset = find_preset(id).expect("预置存在");
+        // OpenCode 网关（go；含简称别名 opencode）携带 x-opencode-session 会话头绑定（ADR-046）
+        for key in ["opencode-go", "opencode"] {
+            let preset = find_preset(key).expect("预置存在");
             assert_eq!(
                 preset.dynamic_headers,
                 &[("x-opencode-session", HeaderSource::SessionId)],
-                "{id} 应携带会话头绑定"
+                "{key} 应携带会话头绑定"
             );
         }
     }
 
     #[test]
-    fn test_ollama_presets_dialect() {
-        for id in ["ollama", "ollama-cloud"] {
-            let preset = find_preset(id).expect("预置存在");
-            assert_eq!(preset.dialect, DialectPreset::Ollama, "{id} 方言");
+    fn test_ollama_cloud_preset_dialect_and_local_removed() {
+        // ollama-cloud（含简称别名 ollama）：Ollama 方言 + 云端端点
+        for key in ["ollama-cloud", "ollama"] {
+            let preset = find_preset(key).expect("预置存在");
+            assert_eq!(preset.dialect, DialectPreset::Ollama, "{key} 方言");
+            assert_eq!(preset.endpoint, "https://ollama.com/v1", "{key} 端点");
         }
-        assert_eq!(
-            find_preset("ollama").unwrap().endpoint,
-            "http://localhost:11434/v1"
-        );
-        assert_eq!(
-            find_preset("ollama-cloud").unwrap().endpoint,
-            "https://ollama.com/v1"
+        // 本地 Ollama 不再内置（无连接修饰需求；需要时手写 name / endpoint）
+        assert!(
+            PROVIDER_PRESETS
+                .iter()
+                .all(|p| !p.endpoint.contains("11434")),
+            "不应再内置本地 Ollama 端点"
         );
     }
 

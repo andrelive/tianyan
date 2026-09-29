@@ -126,8 +126,8 @@ mod tests {
         // 填充时序列化含 resolved_endpoints（key = provider name）
         let mut endpoints = HashMap::new();
         endpoints.insert(
-            "opencode".to_string(),
-            "https://opencode.ai/zen/v1".to_string(),
+            "opencode-go".to_string(),
+            "https://opencode.ai/zen/go/v1".to_string(),
         );
         let response = ConfigResponse {
             config: config.clone(),
@@ -138,7 +138,7 @@ mod tests {
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"resolved_endpoints\""));
-        assert!(json.contains("https://opencode.ai/zen/v1"));
+        assert!(json.contains("https://opencode.ai/zen/go/v1"));
 
         // 缺省时省略该字段（旧客户端兼容）
         let response = ConfigResponse {

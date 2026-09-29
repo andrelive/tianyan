@@ -197,19 +197,19 @@ describe('SettingsPanel', () => {
       expect(screen.getByText('默认模型偏好')).toBeInTheDocument();
     });
 
-    // 打开预置选择菜单（懒加载；msw mock：OpenCode Zen + Ollama 本地）
+    // 打开预置选择菜单（懒加载；msw mock：OpenCode Go / Ollama Cloud / DeepSeek）
     await user.click(screen.getByRole('button', { name: /添加提供商/ }));
     await waitFor(() => {
-      expect(screen.getByRole('menuitem', { name: /OpenCode Zen/ })).toBeInTheDocument();
+      expect(screen.getByRole('menuitem', { name: /OpenCode Go/ })).toBeInTheDocument();
     });
     // 菜单不暴露底层实现细节（会话头注入等）
     expect(screen.queryByText(/x-opencode-session/)).not.toBeInTheDocument();
 
     // 选择预置 → 草稿（name + endpoint）填入新 provider 卡
-    await user.click(screen.getByRole('menuitem', { name: /OpenCode Zen/ }));
+    await user.click(screen.getByRole('menuitem', { name: /OpenCode Go/ }));
     await waitFor(() => {
-      expect(screen.getByDisplayValue('opencode')).toBeInTheDocument();
-      expect(screen.getByDisplayValue('https://opencode.ai/zen/v1')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('opencode-go')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('https://opencode.ai/zen/go/v1')).toBeInTheDocument();
     });
   });
 });

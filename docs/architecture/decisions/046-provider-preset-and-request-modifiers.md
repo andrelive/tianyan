@@ -34,9 +34,13 @@ agent（`loop.rs` session_id 贯通）、server（预置 API + discovery UA）�
 （endpoint / dialect / UA / 动态头 / 是否需 key / 环境变量提示 / 描述），
 **与 ProviderConfig 同构**——"内置预置＝出厂默认配置，用户配置＝覆盖"。
 
-匹配：显式 `preset` 字段 > `name` 精确匹配（`eq_ignore_ascii_case`）。
-首批条目：`ollama`（本地）/ `ollama-cloud` / `opencode` / `opencode-go` /
-`opencode-zen` / `deepseek`。
+匹配：显式 `preset` 字段 > `name` 精确匹配（`eq_ignore_ascii_case`）> 简称别名
+（`PRESET_ALIASES`）。首批条目：`ollama-cloud` / `opencode-go` / `deepseek`。
+
+修订（2026-09-29 晚）：原 `ollama`（本地）与 `opencode`（Zen）条目移出——
+Zen 与 Go 连接参数一致（仅模型标识不同）、本地 Ollama 无连接修饰需求；
+简称 `ollama` / `opencode` 保留为别名参与命中（`name = "ollama"` → ollama-cloud、
+`name = "opencode"` → opencode-go）。预置选择器只展示三个条目。
 
 ### 2. 请求修饰三层单点（与 ADR-038 同构）
 
@@ -108,7 +112,7 @@ UI 在端点输入框留空时只读展示"留空 = 使用预置端点：xxx"，
 | 层 | 文件 | 内容 |
 |---|---|---|
 | 配置 | `core/src/config/model.rs` | `HeaderBinding` / `HeaderSource`（受控枚举 + `resolve` / `wire_name`）；`ProviderConfig` 增 `user_agent` / `dynamic_headers` / `preset`；`matched_preset` / `resolve_dynamic_headers` / `resolve_user_agent`（显式 > 预置 > 默认）；`validate_dynamic_headers`（名合法 + 重名，fail fast）；`Default`（对齐 serde 默认，供构造点 `..Default::default()`） |
-| 配置 | `core/src/config/presets.rs`（新） | `ProviderPreset` 表（ollama / ollama-cloud / opencode / opencode-go / deepseek）+ `find_preset`（大小写不敏感）；opencode 系携带 `x-opencode-session → session_id` 绑定 |
+| 配置 | `core/src/config/presets.rs`（新） | `ProviderPreset` 表（ollama-cloud / opencode-go / deepseek；简称别名 `ollama` / `opencode` 见 `PRESET_ALIASES`）+ `find_preset`（id / 别名，大小写不敏感）；opencode 系携带 `x-opencode-session → session_id` 绑定 |
 | 请求 | `core/src/model/provider/client.rs` | UA 解析并设到 reqwest client（流式 / 非流式 / embedding / vision 全路径）；`dynamic_headers` 构造时解析一次（`HeaderName` 校验 fail fast） |
 | 请求 | `core/src/model/provider/chat.rs` | `send_chat_request` 增 `session_id` 参数并在静态头之后注入动态头（无值跳过 / 值非法 warn 跳过）；**非流式改手写 JSON 层**（对齐流式、复用发送单点）；`classify_upstream_error` 删除（分类单点统一为 `classify_http_status`） |
 | 请求 | `core/src/model/types/chat.rs` | `ChatCompletionRequest.session_id`（`#[serde(skip)]`，内部元数据、不上 wire） |
