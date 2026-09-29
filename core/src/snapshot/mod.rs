@@ -55,8 +55,14 @@ pub(crate) type SnapshotTree = HashMap<String, String>;
 /// 缓存文件条目（mtime + size 未变时复用 hash,避免全量读取）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CachedFile {
-    /// 修改时间（毫秒时间戳）。
-    mtime_ms: u128,
+    /// 修改时间（纳秒时间戳）。
+    ///
+    /// 精度即正确性上限：毫秒截断下「同一毫秒内改写同长度内容」会被误判未
+    /// 变更（CI 实测事故：Linux runner 上 restore 漏检，0.5.12/0.6.0 构建
+    /// 均红）。纳秒级下碰撞窗口缩至系统时钟粒度（两次写间隔 ≥ 微秒级），
+    /// 实际不可触发。旧缓存 JSON 无此字段 → 解析失败 → 视为无缓存全量重扫
+    /// （缓存是纯优化，失效不阻断）。
+    mtime_ns: u128,
     /// 文件大小。
     size: u64,
     /// 内容 sha256。
@@ -696,21 +702,21 @@ impl SnapshotManager {
                 if meta.len() > MAX_FILE_BYTES {
                     continue;
                 }
-                let mtime_ms = meta
+                let mtime_ns = meta
                     .modified()
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis())
+                    .map(|d| d.as_nanos())
                     .unwrap_or(0);
 
-                // 命中缓存:同 mtime + 同 size → 复用 hash,不读内容
+                // 命中缓存:同 mtime(纳秒) + 同 size → 复用 hash,不读内容
                 if let Some(prev) = prev_cache.and_then(|c| c.get(&rel)) {
-                    if prev.mtime_ms == mtime_ms && prev.size == meta.len() {
+                    if prev.mtime_ns == mtime_ns && prev.size == meta.len() {
                         tree.insert(rel.clone(), prev.hash.clone());
                         cache.insert(
                             rel,
                             CachedFile {
-                                mtime_ms,
+                                mtime_ns,
                                 size: meta.len(),
                                 hash: prev.hash.clone(),
                             },
@@ -725,7 +731,7 @@ impl SnapshotManager {
                         cache.insert(
                             rel,
                             CachedFile {
-                                mtime_ms,
+                                mtime_ns,
                                 size: meta.len(),
                                 hash,
                             },
@@ -780,7 +786,8 @@ impl SnapshotManager {
     ///
     /// `prev_cache` 提供时按 **mtime + size** 短路（未变更文件复用缓存哈希、
     /// 不读内容）——大工作区恢复路径（回退 / 重做）的主要加速点，判据与
-    /// `walk_and_capture` 完全一致（文件系统级事实：mtime+size 未变 ⇒ 内容未变）。
+    /// `walk_and_capture` 完全一致（文件系统级事实：mtime 纳秒级 + size 未变
+    /// ⇒ 内容未变；毫秒截断曾致同毫秒改写漏检，见 [`CachedFile`] 文档）。
     async fn walk_current(
         &self,
         dir: &Path,
@@ -820,15 +827,15 @@ impl SnapshotManager {
                 if meta.len() > MAX_FILE_BYTES {
                     continue;
                 }
-                let mtime_ms = meta
+                let mtime_ns = meta
                     .modified()
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis())
+                    .map(|d| d.as_nanos())
                     .unwrap_or(0);
-                // 命中缓存：同 mtime + 同 size → 复用哈希，不读内容
+                // 命中缓存：同 mtime(纳秒) + 同 size → 复用哈希，不读内容
                 if let Some(prev) = prev_cache.and_then(|c| c.get(&rel)) {
-                    if prev.mtime_ms == mtime_ms && prev.size == meta.len() {
+                    if prev.mtime_ns == mtime_ns && prev.size == meta.len() {
                         tree.insert(rel, prev.hash.clone());
                         continue;
                     }
@@ -1778,7 +1785,11 @@ mod tests {
         );
 
         // 键原样可定位（回退按消息 ID 恢复该消息处理前的工作区）
-        write(&mgr.workdir, "a.txt", "v2");
+        // 注意：改写用**不同长度**内容——快照缓存按 mtime+size 复用 hash，
+        // 同长度改写会依赖"mtime 变化"（CI/Linux 毫秒截断下同毫秒即误判，
+        // 与"键 = 消息 ID"的本测试意图无关；同 `test_gc_keeps_all_live_trees`
+        // 的规避手法）。
+        write(&mgr.workdir, "a.txt", "v2-changed");
         let restored = mgr.restore("s1", "msg_1758000000000_1").await.unwrap();
         assert_eq!(restored, 1);
         assert_eq!(read(&mgr.workdir, "a.txt"), "v1");
