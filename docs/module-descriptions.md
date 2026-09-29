@@ -164,7 +164,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `executor/edit.rs` — 语义化编辑（`ContentEdit` / `apply_edits_to_content` 内容匹配唯一定位 + bottom-up 原子应用 / `apply_edit_action` / `detect_eol` CRLF 保留）
 - `executor/patch.rs` — unified diff（`parse_patch` 解析 `*** Update File:` 信封 / `apply_patch_to_content` similar fuzzy seek / `apply_patch_action` 多文件原子，`FUZZY_RATIO_THRESHOLD = 0.75`）
 - `executor/fs.rs` — 文件浏览（`execute_glob` rg --files + 回退 walk、mtime 排序；`execute_list_dir` 目录优先 + 分页；`MAX_GLOB_RESULTS = 200`）
-- `executor/search.rs` — ripgrep 封装（`SearchOptions` / `OutputMode`（files_with_matches 默认）/ `execute_search_code`；64KB 记录拒绝、100 submatch 上限、2000 字符行截断、`.git` 排除、offset/head_limit 分页、无效正则报"正则无效"）
+- `executor/search.rs` — 内嵌搜索引擎（`SearchOptions` / `OutputMode`（files_with_matches 默认；content 恒单行预览、不含上下文——需要上下文用 read_file 读匹配处附近窗口）/ `execute_search_code`；64KB 记录拒绝、100 submatch 上限、2000 字符行截断、`.git` 排除、条数默认 100/上限 200（clamp）、offset 分页、截断附收窄/续查 message、无效正则本地化报错）
 - `executor/symbols.rs` — tree-sitter 多语言符号大纲（`symbol_outline` / `symbol_index`（定义 + 标识符计数，供 repo_map 复用）/ `SymbolKind` / `language_from_extension`，rust/ts/tsx/js/py/go，`MAX_SYMBOLS = 500`，解析错误置 errors 标志）
 - `executor/repo_map.rs` — 仓库结构地图（`scan` 跨文件符号采集 + `render` 引用度排序/`focus` 加权/预算截断 + `RepoMapCache` 内存 LRU 指纹缓存；引用度为文本级近似，注释与字符串不计入；遍历规则与 grep 同口径，`MAX_FILES = 2000` / `MAX_FILE_BYTES = 512KB`）
 - `executor/project.rs` — 项目探测（`probe_project` walk-up 标记检测：Cargo.toml > pyproject.toml > tsconfig.json；`ProjectFormat` / `verification_command`）

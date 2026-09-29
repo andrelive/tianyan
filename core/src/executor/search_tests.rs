@@ -81,18 +81,19 @@ async fn ignore_case_matches_lowercase() {
 }
 
 #[tokio::test]
-async fn context_includes_neighbor_lines() {
+async fn content_preview_is_single_line_without_context() {
+    // 回归（2026-09-29 输出治理）：content 恒为单行预览——不再携带上下文行。
+    // 判别力：旧实现（默认窗口或 -C）下 text 会含第 1、3 行——本测试必红。
     let dir = fixture();
-    let mut opts = content_opts(&dir);
-    opts.context = Some(1);
-    // "comment" 仅命中 a.rs 第 2 行：-C 1 应携带第 1、3 行。
+    let opts = content_opts(&dir);
+    // "comment" 仅命中 a.rs 第 2 行。
     let out = execute_search_code("comment", &opts).await.unwrap();
     let results = out["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
     let text = results[0]["text"].as_str().unwrap();
-    assert!(text.contains("fn foo() {"), "应含前一行: {text}");
-    assert!(text.contains("let x = 1;"), "应含后一行: {text}");
-    assert!(text.contains("// comment foo"), "应含匹配行: {text}");
+    assert_eq!(text, "    // comment foo", "应为匹配行原文（单行）");
+    assert!(!text.contains("fn foo()"), "不得携带前一行: {text}");
+    assert!(!text.contains("let x = 1;"), "不得携带后一行: {text}");
 }
 
 #[tokio::test]
@@ -182,6 +183,42 @@ async fn pagination_applies_offset_and_head_limit() {
         .map(|r| r["line_number"].as_u64().unwrap())
         .collect();
     assert_eq!(line_numbers, vec![3, 4]); // 第 3、4 条匹配
+}
+
+#[tokio::test]
+async fn default_head_limit_is_100_with_guidance_message() {
+    // 默认条数 100；截断时输出附 message（收窄/分页续查指引）。
+    let dir = tempfile::tempdir().unwrap();
+    let lines: Vec<String> = (1..=150).map(|i| format!("hit {i}")).collect();
+    std::fs::write(dir.path().join("many.rs"), lines.join("\n") + "\n").unwrap();
+    let opts = content_opts(&dir);
+    let out = execute_search_code("hit", &opts).await.unwrap();
+    assert_eq!(out["count"].as_u64(), Some(100), "默认条数应为 100");
+    assert_eq!(out["total"].as_u64(), Some(150));
+    assert_eq!(out["truncated"].as_bool(), Some(true));
+    let msg = out["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("offset=100"), "应含分页续查指引: {msg}");
+}
+
+#[tokio::test]
+async fn head_limit_is_clamped_to_max_200() {
+    // 请求 500 → 钳制到硬上限 200（预算决定权上收：模型只能往下调）。
+    let dir = tempfile::tempdir().unwrap();
+    let lines: Vec<String> = (1..=300).map(|i| format!("clamp {i}")).collect();
+    std::fs::write(dir.path().join("many.rs"), lines.join("\n") + "\n").unwrap();
+    let mut opts = content_opts(&dir);
+    opts.head_limit = Some(500);
+    let out = execute_search_code("clamp", &opts).await.unwrap();
+    assert_eq!(out["count"].as_u64(), Some(200), "应钳制到上限 200");
+    assert_eq!(out["total"].as_u64(), Some(300));
+}
+
+#[tokio::test]
+async fn no_message_field_when_not_truncated() {
+    let dir = fixture();
+    let opts = content_opts(&dir);
+    let out = execute_search_code("foo", &opts).await.unwrap();
+    assert!(out.get("message").is_none(), "未截断不应附 message");
 }
 
 // ── 输出守卫 ───────────────────────────────────────────────────────────

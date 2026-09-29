@@ -230,7 +230,6 @@ fn search_options(params: &SearchCodeParams) -> SearchOptions {
         output_mode: params.output_mode,
         type_: params.type_.clone(),
         ignore_case: params.ignore_case.unwrap_or(false),
-        context: params.context,
         head_limit: params.head_limit,
         offset: params.offset.unwrap_or(0),
         multiline: params.multiline.unwrap_or(false),

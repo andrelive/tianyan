@@ -3,11 +3,17 @@
 //! 输出契约（JSON，LLM 可见）：
 //! ```json
 //! { "pattern": "...", "path": "...", "results": [...], "count": N, "total": N,
-//!   "truncated": bool, "exhausted": bool, "output_mode": "content" }
+//!   "truncated": bool, "exhausted": bool, "output_mode": "content",
+//!   "message": "..." }
 //! ```
+//! `message` 仅在截断时出现：收窄 pattern/范围与 offset 分页续查的指引。
 //!
 //! 守卫：单条记录文本 > 64KB 丢弃；单条记录 submatch 上限 100；单行显示截断
-//! 2000 字符并追加 `…<truncated>`；`.git` 目录始终排除；总记录硬上限 5000。
+//! 2000 字符并追加 `…<truncated>`；`.git` 目录始终排除；总记录硬上限 5000；
+//! 条数默认 [`DEFAULT_HEAD_LIMIT`] / 硬上限 [`MAX_HEAD_LIMIT`]（clamp）。
+//!
+//! content 模式恒为**匹配行单行预览**（行号 + 匹配行，不含上下文——需要上下文
+//! 用 `read_file` 读匹配处附近窗口；`context` 参数 2026-09-29 因输出治理移除）。
 //!
 //! 执行委托给 [`super::search_engine`]（`ignore` 遍历 + `regex` 匹配，
 //! 语义与 ripgrep 对齐）；本模块保留参数模型与输出契约定义。
@@ -18,7 +24,11 @@ use serde_json::Value;
 use crate::common::error::TianyanError;
 
 /// 分页默认条数（search_engine 引用）。
-pub const DEFAULT_HEAD_LIMIT: usize = 200;
+pub const DEFAULT_HEAD_LIMIT: usize = 100;
+
+/// 分页硬上限（search_engine clamp 用）：模型请求更大值会被钳制——
+/// 2026-09-29 输出治理（单次工具结果的体量与上下文成本直接挂钩）。
+pub const MAX_HEAD_LIMIT: usize = 200;
 
 /// 输出模式（工具参数与执行器共用同一类型；非法值在参数解析期即被拒绝）。
 #[derive(
@@ -59,8 +69,6 @@ pub struct SearchOptions {
     pub type_: Option<String>,
     /// 忽略大小写（`-i`）。
     pub ignore_case: bool,
-    /// 匹配行前后各显示的行数（`-C`；content 模式恒输出行号）。
-    pub context: Option<usize>,
     /// 结果条数上限（默认 [`DEFAULT_HEAD_LIMIT`]）。
     pub head_limit: Option<usize>,
     /// 分页偏移（0 起始）。
@@ -75,7 +83,8 @@ pub struct SearchOptions {
 /// `ignore` 遍历 + `regex` 匹配，语义与 ripgrep 对齐）。
 ///
 /// - `total` = 收集到的记录总数（含守卫丢弃前的上限 5000）。
-/// - `truncated` = `offset + head_limit < total`（还有更多结果可翻页）。
+/// - `truncated` = `offset + head_limit < total`（还有更多结果可翻页；
+///   截断时输出附 `message` 收窄/续查指引）。
 /// - `exhausted` = `offset >= total`（已无更多结果）。
 pub async fn execute_search_code(
     pattern: &str,

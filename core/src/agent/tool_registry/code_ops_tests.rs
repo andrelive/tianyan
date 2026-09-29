@@ -148,8 +148,27 @@ async fn test_search_code_content_mode_always_reports_line_number() {
 }
 
 #[tokio::test]
-async fn test_grep_schema_drops_context_aliases_and_types_output_mode() {
-    // 判别力：三个字段必须已不在 schema（旧形态都在）；output_mode 必须是枚举
+async fn test_search_code_context_param_is_ignored() {
+    // 输出治理（2026-09-29）：context 已删——旧载荷传入被忽略且不改变行为：
+    // content 恒为单行预览（不含上下文行）。判别力：旧实现下 text 会含第 2 行。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "fn foo() {\n    let x = 1;\n}\n").unwrap();
+    let path = serde_json::to_string(&dir.path().to_string_lossy().into_owned()).unwrap();
+    let result = ToolRegistry::new(default_strict_policy())
+        .execute_search_code(
+            &format!(r#"{{"pattern":"foo","path":{path},"output_mode":"content","context":5}}"#),
+            "test-session",
+        )
+        .await
+        .unwrap();
+    let text = result["results"][0]["text"].as_str().unwrap();
+    assert_eq!(text, "fn foo() {", "应为单行预览（context 被忽略）");
+    assert!(!text.contains("let x = 1;"), "不得携带上下文行: {text}");
+}
+
+#[tokio::test]
+async fn test_grep_schema_drops_legacy_fields_and_types_output_mode() {
+    // 判别力：四个历史字段必须不在 schema（旧形态都在）；output_mode 必须是枚举
     // （退回 String 即失败——schema 里不会出现这三个取值）。
     let defs = ToolRegistry::new(default_strict_policy())
         .definitions()
@@ -159,7 +178,7 @@ async fn test_grep_schema_drops_context_aliases_and_types_output_mode() {
         .find(|d| d.function.name == "grep")
         .expect("grep 工具已注册");
     let schema = grep.function.parameters.to_string();
-    for dropped in ["line_number", "before_context", "after_context"] {
+    for dropped in ["line_number", "before_context", "after_context", "context"] {
         assert!(
             !schema.contains(&format!("\"{dropped}\"")),
             "{dropped} 不应出现在 schema：{schema}"

@@ -6,6 +6,9 @@
 //! - 匹配用 regex::bytes::Regex，支持 (?s) 多行模式与 submatch 偏移；
 //! - 输出契约与 executor::search 完全一致（三种模式 + 守卫 + 分页），
 //!   LLM 侧无感知。
+//! - content 模式恒为**匹配行单行预览**（行号 + 匹配行、超长截断；不含上下文）——
+//!   2026-09-29 输出治理：带上下文的多行块实测让单次结果放大 7~13 倍，上下文需求
+//!   改由 read_file 读匹配处附近窗口承担。
 //!
 //! 优势：无外部二进制依赖（Windows/Linux 开箱即用），错误消息可本地化
 //! （正则无效等直接给出中文原因，不再透传 rg 的英文 stderr）。
@@ -21,7 +24,7 @@ use crate::executor::truncate::truncate_line;
 
 use super::search::{OutputMode, SearchOptions};
 
-/// 单条记录（含上下文行）最大字节数：超出则丢弃整条记录。
+/// 单条记录最大字节数：超出则丢弃整条记录。
 const MAX_RECORD_BYTES: usize = 64 * 1024;
 /// 单条记录 submatch 上限。
 const MAX_SUBMATCHES: usize = 100;
@@ -37,7 +40,7 @@ pub fn execute_embedded_search(
     let head_limit = options
         .head_limit
         .unwrap_or(super::search::DEFAULT_HEAD_LIMIT)
-        .max(1);
+        .clamp(1, super::search::MAX_HEAD_LIMIT);
     let offset = options.offset;
 
     // 编译正则：语法错误 → 本地化错误（rg 的 regex parse error 语义）
@@ -138,14 +141,7 @@ pub fn execute_embedded_search(
                 }));
             }
             OutputMode::Content => {
-                scan_content(
-                    &re,
-                    entry.path(),
-                    &lines,
-                    &matches_in_file,
-                    options,
-                    &mut records,
-                );
+                scan_content(&re, entry.path(), &matches_in_file, &mut records);
             }
         }
     }
@@ -158,17 +154,28 @@ pub fn execute_embedded_search(
         Vec::new()
     };
 
+    let truncated = offset.saturating_add(head_limit) < total;
+    let shown = results.len();
     let mut out = json!({
         "pattern": pattern,
         "results": results,
-        "count": results.len(),
+        "count": shown,
         "total": total,
-        "truncated": offset.saturating_add(head_limit) < total,
+        "truncated": truncated,
         "exhausted": offset > 0 && offset >= total,
         "output_mode": mode.as_str(),
     });
     if let Some(dir) = &options.path {
         out["path"] = json!(dir);
+    }
+    if truncated {
+        // 截断指引：让模型知道下一条路径（收窄或分页续查），而不是反复重搜。
+        out["message"] = json!(format!(
+            "结果已截断：本页返回 {shown} 条（第 {}–{} 条，共 {total} 条）。可收窄 pattern/glob/path 减少命中，或用 offset={} 分页续查。",
+            offset + 1,
+            offset + shown,
+            offset + head_limit
+        ));
     }
     Ok(out)
 }
@@ -197,34 +204,19 @@ fn split_lines(content: &[u8]) -> Vec<&[u8]> {
     lines
 }
 
-/// content 模式：逐匹配行生成记录（含上下文与 submatch 偏移）。
+/// content 模式：逐匹配行生成**单行预览**记录（行号 + 匹配行 + submatch 偏移）。
+///
+/// 恒不含上下文行（2026-09-29 输出治理）：需要上下文时由模型改用 `read_file`
+/// 读匹配处附近窗口——grep 输出保持"小且可预测"。
 fn scan_content(
     re: &regex::bytes::Regex,
     path: &Path,
-    lines: &[&[u8]],
     matches_in_file: &[(usize, &[u8])],
-    options: &SearchOptions,
     records: &mut Vec<Value>,
 ) {
-    let ctx = options.context.unwrap_or(0);
-
     for &(line_no, line) in matches_in_file {
         if records.len() >= MAX_TOTAL_MATCHES {
             break;
-        }
-        // 上下文行（before：匹配行之前；after：匹配行之后）
-        let mut before: Vec<String> = Vec::new();
-        let b_start = line_no.saturating_sub(ctx + 1);
-        for i in b_start..line_no.saturating_sub(1) {
-            if let Some(l) = lines.get(i) {
-                before.push(String::from_utf8_lossy(l).into_owned());
-            }
-        }
-        let mut after: Vec<String> = Vec::new();
-        for i in line_no..(line_no + ctx) {
-            if let Some(l) = lines.get(i) {
-                after.push(String::from_utf8_lossy(l).into_owned());
-            }
         }
         // submatch 偏移（相对行首字节）
         let submatches: Vec<(usize, usize)> = re
@@ -233,33 +225,17 @@ fn scan_content(
             .map(|m| (m.start(), m.end()))
             .collect();
 
-        // 组装（与 search.rs finalize_record 同语义）
+        // 单行预览（超长截断；kept_bytes 用于过滤落在截断之外的 submatch）
         let (match_line, kept_bytes) = truncate_line(&String::from_utf8_lossy(line));
-        let mut text = String::new();
-        let mut prefix_bytes = 0usize;
-        for l in &before {
-            let (shown, _) = truncate_line(l);
-            prefix_bytes += shown.len() + 1;
-            text.push_str(&shown);
-            text.push('\n');
-        }
-        text.push_str(&match_line);
-        for l in &after {
-            text.push('\n');
-            text.push_str(&truncate_line(l).0);
-        }
-        if text.len() > MAX_RECORD_BYTES {
-            continue;
-        }
         let matches: Vec<Value> = submatches
             .iter()
             .filter(|&&(_, end)| end <= kept_bytes)
-            .map(|&(s, e)| json!({ "start": s + prefix_bytes, "end": e + prefix_bytes }))
+            .map(|&(s, e)| json!({ "start": s, "end": e }))
             .collect();
         let record = json!({
             "path": path.to_string_lossy(),
             "line_number": line_no,
-            "text": text,
+            "text": match_line,
             "matches": matches,
         });
         records.push(record);

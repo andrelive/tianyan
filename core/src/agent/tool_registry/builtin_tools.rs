@@ -97,7 +97,7 @@ fn def_execute_command(name: &'static str) -> ToolDefinition {
 fn def_grep(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<SearchCodeParams>(
         name,
-        "用正则搜索文件内容（类似 ripgrep）。默认只列命中文件名（output_mode=files_with_matches）；要**看匹配行**须传 output_mode=content（可配 context 显示匹配行前后各 N 行；行号恒输出）。支持 glob/type 过滤、忽略大小写（ignore_case）、多行匹配（multiline）、分页（head_limit/offset）。",
+        "用正则搜索文件内容（类似 ripgrep），用于定位。默认只列命中文件名（output_mode=files_with_matches）；要看匹配行传 output_mode=content（返回**匹配行单行预览**：行号 + 匹配行、超长截断；**不含上下文**——需要上下文时用 read_file 读匹配处附近窗口）；统计各文件命中数用 output_mode=count。结果条数默认 100、上限 200，超出即截断并附收窄/续查指引；支持 glob/type 过滤、ignore_case、multiline、offset 分页续查。搜索文件内容统一用本工具（勿用 execute_command 跑 shell 的 grep/rg/findstr）；开放式探索（摸代码布局、重构前侦察）优先用 repo_map 或子代理。",
     ))
 }
 

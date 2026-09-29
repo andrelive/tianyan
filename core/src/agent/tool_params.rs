@@ -104,10 +104,12 @@ pub struct SuggestRoleParams {
 /// 字段命名对齐 ripgrep 参数：`pattern` 为正式字段名（serde alias 兼容旧载荷的
 /// `query`），`path` 兼容旧 `scope`；其余为可选的 ripgrep 高级参数。
 ///
-/// 形态收敛（依真实调用分布）：删 `line_number`（content 模式恒输出行号，
+/// 形态收敛（依真实调用分布与输出治理）：删 `line_number`（content 模式恒输出行号，
 /// 该字段默认 true 且每次调用都被显式传 true——零信息量）；`before_context` /
-/// `after_context` 并入 `context`（`-C` 本就同时管前后，实测从未使用）；
-/// `output_mode` 类型化（非法值解析期即拒，见 [`OutputMode`]）。
+/// `after_context` 曾并入 `context`（`-C` 本就同时管前后），后于 2026-09-29
+/// **随输出治理整体移除**——content 恒为单行预览（带上下文的窗口行实测把单次结果
+/// 放大 7~13 倍），需要上下文改用 read_file 读匹配处附近窗口；`output_mode`
+/// 类型化（非法值解析期即拒，见 [`OutputMode`]）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchCodeParams {
     /// 搜索模式（正则；兼容旧字段名 `query`）。
@@ -130,10 +132,7 @@ pub struct SearchCodeParams {
     /// 忽略大小写（-i）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ignore_case: Option<bool>,
-    /// 匹配行前后各显示的行数（-C；仅 content 模式；缺省 0）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<usize>,
-    /// 结果条数上限（默认 200）。
+    /// 结果条数上限（默认 100，上限 200；超出被钳制）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_limit: Option<usize>,
     /// 分页偏移（0 起始）。

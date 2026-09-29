@@ -20,7 +20,7 @@
 | `execution_stats` | generic | 查询工具执行统计（GEPA 数据层）：按类计数、成功率、平均耗时。可选 since（RFC3339）过滤该时间之后的执行；可选 category 过滤一类操作（file_operation/code_operation/search_operation/test_operation/deploy_operation/analysis_operation/general_operation）。用于发现重复/失败的操作模式，再决定是否提炼新技能或规则。 |
 | `glob` | search | 在目录下按 glob 模式找文件（如 **/*.rs），按修改时间倒序。遵循 .gitignore。 |
 | `goal` | generic | 管理当前会话的长期目标（会话绑定，仅本会话可见）：创建/更新/列出/删除目标。目标进度按关联待办完成比例自动计算。operation: create（title 必填）/ update（id + 可选字段，status 为设置的新状态）/ list（列出本会话全部目标）/ delete（id）。 |
-| `grep` | search | 用正则搜索文件内容（类似 ripgrep）。默认只列命中文件名（output_mode=files_with_matches）；要**看匹配行**须传 output_mode=content（可配 context 显示匹配行前后各 N 行；行号恒输出）。支持 glob/type 过滤、忽略大小写（ignore_case）、多行匹配（multiline）、分页（head_limit/offset）。 |
+| `grep` | search | 用正则搜索文件内容（类似 ripgrep），用于定位。默认只列命中文件名（output_mode=files_with_matches）；要看匹配行传 output_mode=content（返回**匹配行单行预览**：行号 + 匹配行、超长截断；**不含上下文**——需要上下文时用 read_file 读匹配处附近窗口）；统计各文件命中数用 output_mode=count。结果条数默认 100、上限 200，超出即截断并附收窄/续查指引；支持 glob/type 过滤、ignore_case、multiline、offset 分页续查。搜索文件内容统一用本工具（勿用 execute_command 跑 shell 的 grep/rg/findstr）；开放式探索（摸代码布局、重构前侦察）优先用 repo_map 或子代理。 |
 | `knowledge_ingest` | knowledge | 将文件或目录导入知识库：解析、摘要（L0 摘要 + L1 概览）、建立语义索引。接受文件或目录路径，可选指定分类。 |
 | `list_dir` | search | 列出单层目录下的条目。目录带尾部 '/'。支持 offset/limit 分页。 |
 | `read_file` | read | 读取文本文件内容（纯内容，无行号/哈希前缀）。默认返回前 2000 行（单次输出上限约 50KB，超出部分截断并附「使用 offset 继续」提示）。大文件请**按需读取**：用 offset/limit 指定行范围（1 起始行号），建议先用 grep/symbol_outline 定位目标区域再按范围精读；结果含 total_lines/total_bytes 与实际窗口（showing）。内容匹配编辑（apply_edit）直接按内容定位，无需行号。 |
