@@ -64,6 +64,22 @@ describe('ConfigWizard', () => {
     expect(screen.getByText('1 / 6')).toBeInTheDocument();
   });
 
+  it('fills provider draft from the preset dropdown (ADR-046)', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+
+    await user.click(screen.getByRole('button', { name: '下一步' })); // 欢迎 → 模型
+
+    // 预置懒加载（msw mock：OpenCode Zen + Ollama 本地）
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: 'OpenCode Zen' })).toBeInTheDocument();
+    });
+
+    await user.selectOptions(screen.getByLabelText('预置服务商'), 'opencode');
+    expect(screen.getByLabelText('提供商名称')).toHaveValue('opencode');
+    expect(screen.getByLabelText('端点 URL')).toHaveValue('https://opencode.ai/zen/v1');
+  });
+
   it('blocks advancing while required model fields are missing', async () => {
     const user = userEvent.setup();
     renderWizard();
