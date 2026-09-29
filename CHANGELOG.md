@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-09-29
+
+### Fixed
+- **快照缓存毫秒截断漏检（CI 门禁红）**：快照「未变更短路」按 mtime+size 复用哈希，Linux（毫秒截断）下同一毫秒内改写同长度文件被误判未变更——回退时漏恢复、CI 单测红（0.5.12/0.6.0 tag 构建均失败的根因）。mtime 升级为纳秒级（碰撞窗口缩至系统时钟粒度），相关测试改用不同长度内容消除对时钟的依赖
+- **opencode 压缩静默失败（MissingSessionID）**：opencode 网关要求 `x-opencode-session` 请求头，压缩摘要等非对话请求未携带 → 400 被拒 → 压缩被静默降级（表现为「上下文超阈值但一直不压缩」；切到 ollama 正常，因其不要求该头）。动态头求值增加稳定兜底（覆盖全部非对话请求），压缩请求透传真实会话标识
+
+### Added
+- **会话级模型选择（DSH 对齐）**：模型与思考强度随会话变化——新会话走全局默认，会话内切换持久化到会话元数据、切回自动恢复（`GET/PUT /api/v1/sessions/{id}/model`）；压缩/唤醒轮同源读取；usage 记账改进为本轮实际路由 provider（顺带根治 opencode 调用错记 ollama）
+
 ## [0.6.0] - 2026-09-29
 
 ### Fixed
