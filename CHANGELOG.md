@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-09-30
+
+### Added
+- **超大工具输出自动落盘（ADR-047）**：单次工具结果超过 2000 行 / 50 KiB 时，完整内容写入 `{data_dir}/tool_output/`，会话里只保留「预览 + 路径 + 总字节/行数」——避免全库 grep / 读大文件这类超大输出长期占满每轮上下文预算；细节可用 `read_file` 分页回读或委托子代理处理。`read_file` / `vfs_read` / `list_dir` / `glob`（可重取）与 `execute_command`（已有自身日志落盘）不受影响；落盘失败保持原结果（best effort）。配置见 `[tool_output]` 节（默认启用，阈值可调）
+- **图片点击放大**：输入框待发图片预览与会话内图片缩略图可点击 → 全屏查看（自适应视口；点击遮罩 / Escape / × 关闭；缩略图为按钮，键盘可达）
+- **会话列表：后台任务角标 + 运行中标识**：后台任务数按 `parent_session_id` 归到**所属会话**（原先只在一级导航给全局总数，无法定位是哪个会话）；正在运行的会话标题左侧显示脉冲圆点 + 强调色（`turn_state` 驱动）
+
+### Changed
+- **一级导会话图标不再显示后台任务总数**（角标下沉到会话项）；审批图标角标（待审批数）不变
+
 ## [0.6.2] - 2026-09-30
 
 ### Fixed
