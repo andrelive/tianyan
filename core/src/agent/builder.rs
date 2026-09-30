@@ -585,6 +585,20 @@ impl AgentBuilder {
         // 聊天模型上下文规格注入（T5）：None 时 AgentLoop 内部走默认窗口
         agent_loop = agent_loop.with_chat_spec(self.chat_model_spec);
 
+        // 会话内 prune 配置（ADR-048）：`[tool_output]` 的 prune_* 字段 → 引擎参数
+        // （配置→引擎的映射点在组装层；context 模块不依赖 config）。
+        // 未配置 tool_output 时用默认值（对齐 opencode 的三个常量）。
+        let prune_config = self
+            .tool_output
+            .as_ref()
+            .map(|(_, cfg)| crate::context::PruneConfig {
+                enabled: cfg.prune_enabled,
+                protect_tokens: cfg.prune_protect_tokens,
+                min_tokens: cfg.prune_min_tokens,
+                max_chars: cfg.prune_max_chars,
+            })
+            .unwrap_or_default();
+
         // 构建上下文管线
         let context_pipeline = ContextPipeline::new(
             vfs.clone(),
@@ -605,7 +619,8 @@ impl AgentBuilder {
             ))),
             self.config.default_top_k,
             self.config.learned_rules_top_k,
-        );
+        )
+        .with_prune_config(prune_config);
 
         // ADR-017：会话末 GEPA 引擎移除——技能/角色演化统一由每日演化任务
         // （EvolutionTask + 演化智能体综述）驱动；执行轨迹持久化在

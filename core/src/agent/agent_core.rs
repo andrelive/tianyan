@@ -641,7 +641,15 @@ impl Agent {
 
         let s = state.read().await;
         let sid = s.session_id.clone();
-        let mut messages = ContextAssembler::assemble(&s.structured_messages, &injectable);
+        // ADR-048：会话内 prune（组装视图变换，先于工具对规范化）——老工具输出
+        // 降级为"保留头部 + 裁剪标记"，避免其长期占用每轮请求预算。原文仍在
+        // 存储（与 ADR-047 的落盘文件）里，需要时重新调用工具即可。
+        // 无需改动时 `prune_or_borrow` 返回借用（零克隆、零改写）。
+        let chain = crate::context::prune_or_borrow(
+            &s.structured_messages,
+            self.context_pipeline.prune_config(),
+        );
+        let mut messages = ContextAssembler::assemble(chain.as_ref(), &injectable);
 
         // 注入会话定位信息：早期对话被压缩后，摘要字段可能不足以恢复细节，
         // 告知 LLM 当前会话 URI，使其可用 vfs_read 检索被压缩的原始记录。
