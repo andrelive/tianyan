@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
 import { usePolling } from '@/hooks/use-polling';
-import { fetchApprovalStatus, fetchTasks } from '@/lib/api-client';
+import { fetchApprovalStatus } from '@/lib/api-client';
 import {
   FileText,
   MessageSquare,
@@ -20,7 +20,9 @@ import {
 /**
  * 全局一级导航侧边栏（图标 rail）：恒为 64px 图标栏，hover 显示名字（title）。
  * 不做展开/收起——一级菜单只保留图标更简洁；会话列表在会话页左栏（SessionList）。
- * 审批/会话图标带动态角标（待审批数 / 全局运行中后台任务数），低频轮询（5s）。
+ * 审批图标带动态角标（待审批数，低频轮询 5s）。**后台任务角标已下沉到会话列表项**
+ * （SessionList 按 `parent_session_id` 归属到具体会话）——一级栏目只给全局总数，
+ * 无法回答"是哪个会话在跑"。
  *
  * 任务语义分层（0.2 修复）：内置调度任务在「洞察」展示；定时智能体任务
  * 独立一级栏目；后台任务（委托/终端）会话绑定，在会话页内展示——不再设
@@ -46,7 +48,6 @@ export default function Sidebar() {
   const location = useLocation();
   const setView = useAppStore((s) => s.setView);
   const [pendingApprovals, setPendingApprovals] = useState(0);
-  const [runningTasks, setRunningTasks] = useState(0);
 
   // 角标轮询（低频；失败静默保留旧值）
   usePolling(
@@ -54,14 +55,6 @@ export default function Sidebar() {
       try {
         const status = await fetchApprovalStatus();
         setPendingApprovals(status.pending_approvals?.length ?? 0);
-      } catch {
-        /* 静默 */
-      }
-      try {
-        const tasks = await fetchTasks();
-        setRunningTasks(
-          tasks.filter((t) => t.status === 'pending' || t.status === 'running').length,
-        );
       } catch {
         /* 静默 */
       }
@@ -94,8 +87,7 @@ export default function Sidebar() {
           天
         </div>
         {NAV_ITEMS.map((item) => {
-          const badge =
-            item.id === 'approval' ? pendingApprovals : item.id === 'chat' ? runningTasks : 0;
+          const badge = item.id === 'approval' ? pendingApprovals : 0;
           return (
             <button
               key={item.id}

@@ -5,7 +5,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import { useAppStore } from '@/lib/store';
 import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
-import type { Session } from '@/lib/types';
+import type { BackgroundTask, Session } from '@/lib/types';
 import SessionList from '../SessionList';
 
 // ---------------------------------------------------------------------------
@@ -33,6 +33,30 @@ function mockSessions(sessions: Session[]) {
       return HttpResponse.json({ sessions, total: sessions.length });
     }),
   );
+}
+/** 覆盖 GET /tasks 返回指定后台任务（角标归属断言用）。 */
+function mockTasks(tasks: BackgroundTask[]) {
+  server.use(
+    http.get('/api/v1/tasks', () => {
+      return HttpResponse.json(tasks);
+    }),
+  );
+}
+
+/** 后台任务 fixture（默认 running/委托/无归属）。 */
+function makeTask(overrides: Partial<BackgroundTask> & { id: string }): BackgroundTask {
+  return {
+    description: '测试任务',
+    status: 'running',
+    kind: 'delegate',
+    parent_session_id: null,
+    result: null,
+    error: null,
+    created_at: Date.now(),
+    completed_at: null,
+    seq: 1,
+    ...overrides,
+  };
 }
 
 /** 会话 fixture（可带工作目录绑定）。 */
@@ -494,5 +518,54 @@ describe('SessionList', () => {
     expect(useAppStore.getState().currentSessionId).toBe('s2');
     expect(useAppStore.getState().sessionMessages['s2']?.[0]?.id).toBe('msg_s2');
     expect(useAppStore.getState().messages[0]?.id).toBe('msg_s2');
+  });
+
+  // ── 后台任务角标下沉 + 运行中标识 ────────────────────────────────────
+
+  it('shows the background-task badge only on the owning session', async () => {
+    mockSessions([
+      makeSession({ id: 's1', title: '会话一' }),
+      makeSession({ id: 's2', title: '会话二' }),
+    ]);
+    mockTasks([
+      makeTask({ id: 't1', parent_session_id: 's1' }),
+      makeTask({ id: 't2', parent_session_id: 's1', status: 'pending' }),
+      // s2 的任务已完成 → 不计入（角标只算 pending/running）
+      makeTask({ id: 't3', parent_session_id: 's2', status: 'completed' }),
+    ]);
+    renderSessionList();
+
+    // 角标按 parent_session_id 归到所属会话（一级栏目原先只给全局总数）
+    await waitFor(() => {
+      expect(screen.getByTestId('session-tasks-s1')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('session-tasks-s1')).toHaveTextContent('2');
+    expect(screen.queryByTestId('session-tasks-s2')).not.toBeInTheDocument();
+  });
+
+  it('ignores unowned background tasks (no badge without session binding)', async () => {
+    mockSessions([makeSession({ id: 's1', title: '会话一' })]);
+    mockTasks([makeTask({ id: 't1', parent_session_id: null })]);
+    renderSessionList();
+
+    await waitFor(() => {
+      expect(screen.getByText('会话一')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('session-tasks-s1')).not.toBeInTheDocument();
+  });
+
+  it('shows a running indicator only for sessions whose turn is running', async () => {
+    mockSessions([
+      makeSession({ id: 's1', title: '运行中会话' }),
+      makeSession({ id: 's2', title: '空闲会话' }),
+    ]);
+    // 轮状态来自 turn_state 事件（ADR-035 §9）
+    useAppStore.setState({ turnState: { s1: { state: 'running', auto: false } } });
+    renderSessionList();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-running-s1')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('session-running-s2')).not.toBeInTheDocument();
   });
 });

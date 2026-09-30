@@ -1,10 +1,11 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useResource } from '@/hooks/use-resource';
+import { usePolling } from '@/hooks/use-polling';
 import { useAppStore } from '@/lib/store';
-import { deleteSession, listSessions, updateSessionTitle } from '@/lib/api-client';
+import { deleteSession, fetchTasks, listSessions, updateSessionTitle } from '@/lib/api-client';
 import { loadSessionHistory } from '@/hooks/use-session-history';
-import type { Session } from '@/lib/types';
+import type { BackgroundTask, Session } from '@/lib/types';
 import { formatRelativeTime } from '@/lib/utils';
 import {
   ChevronDown,
@@ -43,8 +44,12 @@ export default function SessionList() {
   const showToast = useAppStore((s) => s.showToast);
   const newSessionWorkspace = useAppStore((s) => s.newSessionWorkspace);
   const setNewSessionWorkspace = useAppStore((s) => s.setNewSessionWorkspace);
+  /** 会话轮状态（turn_state 事件驱动，ADR-035 §9 / ADR-045）：驱动「运行中」标识。 */
+  const turnState = useAppStore((s) => s.turnState);
 
   const [hoveredSession, setHoveredSession] = useState<string | null>(null);
+  /** 全量后台任务（轮询）：按归属会话聚合出角标——见下。 */
+  const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [hoveredGroup, setHoveredGroup] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
@@ -54,6 +59,22 @@ export default function SessionList() {
   const [newChatStarted, setNewChatStarted] = useState(false);
   const sessionListRef = useRef<HTMLDivElement>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
+
+  // 后台任务角标下沉到**会话项**（原一级栏目只给全局总数，无法定位是哪个会话在跑）：
+  // 低频轮询，失败静默保留旧值（usePolling 默认策略）。
+  usePolling(async () => setTasks(await fetchTasks()), 5000);
+
+  /** 运行中后台任务数按归属会话聚合（pending/running 计；未归属会话的忽略）。 */
+  const runningTasksBySession = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const t of tasks) {
+      if (t.status !== 'pending' && t.status !== 'running') continue;
+      const sid = t.parent_session_id;
+      if (!sid) continue;
+      map.set(sid, (map.get(sid) ?? 0) + 1);
+    }
+    return map;
+  }, [tasks]);
 
   // 会话列表加载：隐藏在本组件内（useResource 收敛加载/竞态）；
   // 数据写入 store（sessions 分组渲染的真相源）
@@ -365,6 +386,8 @@ export default function SessionList() {
                 {/* 会话子项（二级） */}
                 {!collapsed &&
                   groupSessions.map((session) => {
+                    const isRunning = turnState[session.id]?.state === 'running';
+                    const taskCount = runningTasksBySession.get(session.id) ?? 0;
                     return (
                       <div
                         key={session.id}
@@ -384,36 +407,60 @@ export default function SessionList() {
                         }`}
                       >
                         <div className="flex-1 min-w-0">
-                          {editingSessionId === session.id ? (
-                            <input
-                              ref={editInputRef}
-                              value={editingTitle}
-                              onChange={(e) => setEditingTitle(e.target.value)}
-                              onBlur={handleRenameSubmit}
-                              onKeyDown={(e) => {
-                                e.stopPropagation();
-                                if (e.key === 'Enter') {
-                                  handleRenameSubmit();
-                                } else if (e.key === 'Escape') {
-                                  setEditingSessionId(null);
-                                }
-                              }}
-                              className="w-full px-1 py-0.5 text-sm rounded border border-blue-500 bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] outline-none"
-                              aria-label="编辑会话标题"
-                            />
-                          ) : (
-                            <p
-                              onDoubleClick={(e) => handleStartRename(e, session)}
-                              title="双击重命名"
-                              className={`truncate ${
-                                currentSessionId === session.id
-                                  ? 'text-blue-700 dark:text-blue-300 font-medium'
-                                  : 'text-[var(--color-text-primary)]'
-                              }`}
-                            >
-                              {session.title || '新对话'}
-                            </p>
-                          )}
+                          {/* 标题行：「运行中」脉冲点（turn_state 驱动）+ 标题 +
+                              后台任务角标（按 parent_session_id 归到所属会话） */}
+                          <div className="flex items-center gap-1.5">
+                            {isRunning && (
+                              <span
+                                className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0"
+                                title="运行中"
+                                aria-label="运行中"
+                                data-testid={`session-running-${session.id}`}
+                              />
+                            )}
+                            {editingSessionId === session.id ? (
+                              <input
+                                ref={editInputRef}
+                                value={editingTitle}
+                                onChange={(e) => setEditingTitle(e.target.value)}
+                                onBlur={handleRenameSubmit}
+                                onKeyDown={(e) => {
+                                  e.stopPropagation();
+                                  if (e.key === 'Enter') {
+                                    handleRenameSubmit();
+                                  } else if (e.key === 'Escape') {
+                                    setEditingSessionId(null);
+                                  }
+                                }}
+                                className="flex-1 min-w-0 px-1 py-0.5 text-sm rounded border border-blue-500 bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] outline-none"
+                                aria-label="编辑会话标题"
+                              />
+                            ) : (
+                              <p
+                                onDoubleClick={(e) => handleStartRename(e, session)}
+                                title="双击重命名"
+                                className={`truncate ${
+                                  currentSessionId === session.id
+                                    ? 'text-blue-700 dark:text-blue-300 font-medium'
+                                    : isRunning
+                                      ? 'text-emerald-700 dark:text-emerald-400'
+                                      : 'text-[var(--color-text-primary)]'
+                                }`}
+                              >
+                                {session.title || '新对话'}
+                              </p>
+                            )}
+                            {taskCount > 0 && (
+                              <span
+                                className="ml-auto shrink-0 min-w-[16px] h-[16px] px-1 inline-flex items-center justify-center rounded-full bg-red-500 text-white text-[9px] font-bold leading-none"
+                                title={`${taskCount} 个后台任务运行中`}
+                                aria-label={`${taskCount} 个后台任务运行中`}
+                                data-testid={`session-tasks-${session.id}`}
+                              >
+                                {taskCount > 99 ? '99+' : taskCount}
+                              </span>
+                            )}
+                          </div>
                           <p className="text-[11px] text-[var(--color-text-tertiary)] opacity-70 mt-0.5">
                             {formatRelativeTime(session.updated_at)}
                           </p>
