@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-09-30
+
+### Fixed
+- **消息内链接外部跳转白屏（autolink 吞定界符）**：GFM autolink literal 会把紧跟 URL 的 `**`/全角标点一并吞入 URL（`**http://localhost:5180**（91 视图` 渲染出的 href 含 `**（91`）——星号字面泄露且 href 被污染；更严重的是点击这类链接时 Tauri 对「URL 解析失败的导航」静默放行（`tauri-runtime-wry` 的 `unwrap_or(true)`），WebView 自行导航失败即白屏、无回退入口只能重启。新增 remark 插件 `remark-autolink-fix`：AST 后处理截断 URL、还原 `**` 配对、尾巴还原为文本（保守规则只处理 authority 粘连，带 path 的中文 URL 不动）
+- **消息内链接点击兜底**：桌面壳内点击消息内 http(s) 链接一律交给系统默认浏览器（`openExternal`，动态加载 `tauri-plugin-opener`）并 `preventDefault` 阻止 WebView 自行导航——即使 href 异常也不会白屏；非 Tauri 环境（浏览器 / E2E）不接管，行为不变。capabilities 增 `opener:allow-open-url` + `opener:allow-default-urls`（scope 限 http/https/mailto/tel）
+
+### Changed
+- **思考强度 off 档位展示统一为 default**：`off` 的真实语义是“默认/不指定”（不附加思考参数），UI 如实展示为「default」而非「关闭」（新增 `effortLabel()`，下拉与按钮文案统一，悬停提示如实说明）；档位值仍为 `'off'`，请求下发不变
+- **会话列表工作区分组层次强化**：分组标签降为 11px semibold + 字距拉开（区段标签），组间留白加大；会话时间 11px + 70% 透明；会话标题（14px/主色）保持内容主角地位——滚动查找时工作区与会话一眼可辨
+
 ## [0.6.1] - 2026-09-29
 
 ### Fixed
