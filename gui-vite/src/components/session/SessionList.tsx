@@ -294,7 +294,10 @@ export default function SessionList() {
             const collapsed = collapsedGroups.has(workdir);
             const label = groupLabel(workdir);
             return (
-              <div key={workdir || '__default_ws__'} className="flex flex-col gap-0.5">
+              <div
+                key={workdir || '__default_ws__'}
+                className="flex flex-col gap-0.5 mt-2.5 first:mt-0"
+              >
                 {/* 分组行：折叠/展开 + hover「＋」新建该目录会话 */}
                 <div
                   role="button"
@@ -313,20 +316,21 @@ export default function SessionList() {
                 >
                   {collapsed ? (
                     <ChevronRight
-                      size={12}
+                      size={11}
                       className="shrink-0 text-[var(--color-text-tertiary)]"
                     />
                   ) : (
-                    <ChevronDown size={12} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                    <ChevronDown size={11} className="shrink-0 text-[var(--color-text-tertiary)]" />
                   )}
-                  <FolderOpen size={13} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                  <FolderOpen size={12} className="shrink-0 text-[var(--color-text-tertiary)]" />
+                  {/* 分组标签：比会话标题小一级 + 字距拉开，形成"区段标签 vs 内容"层次 */}
                   <span
-                    className="text-xs font-medium text-[var(--color-text-secondary)] truncate"
+                    className="text-[11px] font-semibold tracking-wide text-[var(--color-text-secondary)] truncate"
                     title={workdir || undefined}
                   >
                     {label}
                   </span>
-                  <span className="text-[10px] text-[var(--color-text-tertiary)] shrink-0">
+                  <span className="text-[10px] tabular-nums text-[var(--color-text-tertiary)] opacity-80 shrink-0">
                     {groupSessions.length}
                   </span>
                   {hoveredGroup === workdir && (
@@ -410,7 +414,7 @@ export default function SessionList() {
                               {session.title || '新对话'}
                             </p>
                           )}
-                          <p className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+                          <p className="text-[11px] text-[var(--color-text-tertiary)] opacity-70 mt-0.5">
                             {formatRelativeTime(session.updated_at)}
                           </p>
                         </div>
