@@ -23,6 +23,7 @@ mod retrieval;
 mod roles;
 mod security;
 mod storage;
+mod tool_output;
 pub mod validation;
 pub mod web;
 pub mod wizard;
@@ -46,6 +47,7 @@ pub use retrieval::RetrievalConfig;
 pub use roles::AgentRolesConfig;
 pub use security::{ApprovalMode, SafetyMode, SecurityConfig};
 pub use storage::{StorageBackendType, StorageConfig, VectorStorageConfig};
+pub use tool_output::ToolOutputConfig;
 pub use validation::{
     validate_agent_config, validate_models_config, validate_provider, validate_storage_config,
     validation_errors_to_strings, ValidationResult,
@@ -102,6 +104,9 @@ pub struct TianyanConfig {
     /// 执行器配置（命令执行底层 shell provider；ADR-037）。
     #[serde(default)]
     pub executor: ExecutorConfig,
+    /// 工具输出落盘配置（超预算结果落盘，会话只保留预览 + 路径；ADR-047）。
+    #[serde(default)]
+    pub tool_output: ToolOutputConfig,
 }
 
 impl TianyanConfig {

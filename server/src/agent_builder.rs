@@ -156,6 +156,10 @@ impl AgentBuilderFactory {
             )
             .with_command_logs_dir(config.storage.data_dir.join("command_logs"))
             .with_task_results_dir(config.storage.data_dir.join("task_results"))
+            .with_tool_output(
+                config.storage.data_dir.join("tool_output"),
+                config.tool_output.clone(),
+            )
             .with_session_manager(session_manager)
             .with_execution_log(execution_log)
             .with_session_recall(session_recall)

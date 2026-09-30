@@ -116,6 +116,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 - [ADR-044: 流式双预算](docs/architecture/decisions/044-stream-dual-budget.md) — 首 token 预算（`first_token_timeout`，默认 300s）与块间空闲（`timeout`）分离：首字节前用首包预算（覆盖大上下文预填充/弱网首包）、之后切空闲（心跳重置）；传输层 `read_timeout` 取 `max` 作兜底（否则先于显式判定掐断长预填充）；错误消息区分「首 token 超时」与「流式空闲超时」
 - [ADR-045: 纯通知轮状态](docs/architecture/decisions/045-notification-driven-turn-state.md) — 移除流看门狗（超时推断退场，长命令不再被误判中断）：前端轮状态只由事件驱动，快照帧携带权威值 `turn:{state,auto}`（用户轮 = Stream 租约 / 自动轮 = Agent 活动轮槽）——「能重取」替代「超时猜」；前提 = 同进程内嵌部署
 - [ADR-046: Provider 预置表与请求修饰单点](docs/architecture/decisions/046-provider-preset-and-request-modifiers.md) — 头差异数据化（预置表 + 动态会话头 + UA 全局默认）：预置与配置同构（显式 > 预置 > 默认，Option 语义支持显式清空）；动态头 = 受控绑定表（header 名 + 变量源枚举 `session_id`，非模板）；opencode 预置自动注入 `x-opencode-session` 覆盖对话流量（流式 + 非流式统一手写发送单点）；UA 全局默认 `tianyan/{VERSION}`；前端字段透传修复（`dialect` / `first_token_timeout` 不再丢）
+- [ADR-047: 工具输出统一 spill](docs/architecture/decisions/047-tool-output-spill.md) — 超预算工具结果落盘（会话只保留预览 + 路径）：落点为 post-execute 统一出口（单点，非逐工具补丁；注册在观测监听器之后——数据层须见原始结果）；`truncate_spill` 由死能力接线为活链路（阈值参数化，未超阈值不写文件）；`[tool_output]` 配置（`enabled` / `max_lines=2000` / `max_bytes=50KiB`，默认对齐 opencode）；白名单（`read_file`/`vfs_read`/`list_dir`/`glob` 等可重取、`execute_command` 已有 log_file）；落盘失败保持原结果（best effort）；目录 `{data_dir}/tool_output/`
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 

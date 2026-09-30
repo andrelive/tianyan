@@ -278,3 +278,18 @@ max_fetch_bytes = 2097152
 # tools = ["web_search", "web_fetch", "search_knowledge", "read_file"]
 # max_turns = 30
 # timeout_secs = 300
+
+# ==================== 工具输出落盘配置（ADR-047） ====================
+# 工具结果一旦返回就进入会话历史（之后每轮请求都重复携带，直到被压缩）。
+# 超预算的结果不再原样进入上下文：完整内容落盘，会话只保留「预览 + 路径」，
+# 需要细节时由模型用 read_file 的 offset/limit 分页读取（或委托子代理处理）。
+# 未超预算的结果零改写、零成本（绝大多数调用都远低于预算）。
+#
+# [tool_output]
+# enabled = true      # 总开关（false = 完全旁路，工具结果原样返回）
+# max_lines = 2000    # 单次结果行数上限
+# max_bytes = 51200   # 单次结果字节上限（50 KiB）
+#
+# 落盘目录：{storage.data_dir}/tool_output/（与 command_logs / task_results 同级）
+# 不落盘的工具：read_file / vfs_read / vfs_list / list_dir / glob（可随时重取）、
+#               execute_command（已有自身的 log_file 落盘机制）

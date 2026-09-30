@@ -127,11 +127,45 @@ pub async fn truncate_spill(
     spill_dir: &Path,
     tag: &str,
 ) -> Result<Truncated, TianyanError> {
+    truncate_spill_with(text, spill_dir, tag, MAX_LINES, MAX_BYTES).await
+}
+
+/// [`truncate_spill`] 的可配阈值版本（ADR-047：`[tool_output]` 配置驱动）。
+///
+/// 语义与默认版本一致，仅截断预算由调用方给定；**未超阈值时不写文件**
+/// （返回原样结果，零副作用）。
+pub async fn truncate_spill_with(
+    text: &str,
+    spill_dir: &Path,
+    tag: &str,
+    max_lines: usize,
+    max_bytes: usize,
+) -> Result<Truncated, TianyanError> {
+    let lines = text.lines().count();
+    let bytes = text.len();
+    // 未超阈值：不落盘。
+    if lines <= max_lines && bytes <= max_bytes {
+        return Ok(Truncated {
+            text: text.to_string(),
+            truncated: false,
+            total_lines: lines,
+            total_bytes: bytes,
+            kept_lines: lines,
+            spill_path: None,
+        });
+    }
     let unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let path = spill_dir.join(format!("{tag}-{unix_ms}.txt"));
+    // 目录不存在则创建（失败由调用方降级为「保持原结果」）。
+    tokio::fs::create_dir_all(spill_dir).await.map_err(|e| {
+        TianyanError::Custom(format!(
+            "executor: truncate_spill 创建溢出目录失败 {}: {e}",
+            spill_dir.display()
+        ))
+    })?;
+    let path = spill_dir.join(format!("{}-{unix_ms}.txt", sanitize_tag(tag)));
     tokio::fs::write(&path, text).await.map_err(|e| {
         TianyanError::Custom(format!(
             "executor: truncate_spill 写入溢出文件失败 {}: {e}",
@@ -145,13 +179,37 @@ pub async fn truncate_spill(
         "\n... (输出已截断，共 {total_lines} 行 {total_bytes} 字节，使用 offset 继续，全文已保存至 {})",
         path.display()
     );
-    let mut result = truncate_head_with_marker(text, &marker);
+    let mut result = truncate_head_with_marker_limited(text, &marker, max_lines, max_bytes);
     result.spill_path = Some(path.to_string_lossy().into_owned());
     Ok(result)
 }
 
+/// 落盘文件名标签净化：只保留 `[A-Za-z0-9_-]`，其余替换为 `_`（防路径穿越；
+/// 标签来自工具名，本已安全，此处为纵深防御）。
+fn sanitize_tag(tag: &str) -> String {
+    tag.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// [`truncate_head`] 与 [`truncate_spill`] 的公共实现：以给定标记行截断。
 fn truncate_head_with_marker(text: &str, marker: &str) -> Truncated {
+    truncate_head_with_marker_limited(text, marker, MAX_LINES, MAX_BYTES)
+}
+
+/// [`truncate_head_with_marker`] 的可配阈值版本（ADR-047）。
+fn truncate_head_with_marker_limited(
+    text: &str,
+    marker: &str,
+    max_lines: usize,
+    max_bytes: usize,
+) -> Truncated {
     let total_lines = text.lines().count();
     let total_bytes = text.len();
     let mut kept: Vec<&str> = Vec::new();
@@ -159,7 +217,7 @@ fn truncate_head_with_marker(text: &str, marker: &str) -> Truncated {
     let mut truncated = false;
     for line in text.lines() {
         let line_bytes = line.len() + 1; // 近似计入 '\n'
-        if kept.len() >= MAX_LINES || bytes + line_bytes > MAX_BYTES {
+        if kept.len() >= max_lines || bytes + line_bytes > max_bytes {
             truncated = true;
             break;
         }
@@ -180,7 +238,7 @@ fn truncate_head_with_marker(text: &str, marker: &str) -> Truncated {
         // 同尾部：单行超长时退化为**头部字节片段**（UTF-8 边界安全），
         // 避免“只有标记、零内容”（T2 修复）。不追加省略号——截断由 marker
         // 表达，保留行内只含原文字符（既有约定：CJK 单行测试据此断言）。
-        let mut end = MAX_BYTES.min(text.len());
+        let mut end = max_bytes.min(text.len());
         while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
         }

@@ -42,6 +42,8 @@ mod observability;
 mod pipeline;
 /// 仓库结构地图工具执行器（repo_map）。
 mod repo_map_ops;
+/// 工具输出 spill 后置监听器（ADR-047：超预算结果落盘，会话只留预览 + 路径）。
+mod spill;
 /// 符号大纲工具执行器（symbol_outline）。
 mod symbol_ops;
 /// 测试发现工具执行器（discover_tests）。
@@ -193,6 +195,8 @@ pub struct ToolRegistry {
     /// 内置可观测性后置监听器（统计 / Trace / GEPA 历史 / 失败规则学习；
     /// A1 迁移：原 execute_single 尾部观测逻辑）。
     pub(crate) observability: observability::ToolObservabilityListener,
+    /// 内置工具输出 spill 监听器（ADR-047：超预算结果落盘，会话只留预览 + 路径）。
+    pub(crate) tool_output_spill: spill::ToolOutputSpillListener,
     /// Web 搜索/抓取客户端（web_search / web_fetch 工具依赖）。
     pub(crate) web_client: Option<Arc<WebSearchClient>>,
     /// 仓库结构地图缓存（repo_map 工具：按仓库根缓存扫描产物，内存 LRU）。
@@ -265,6 +269,7 @@ impl ToolRegistry {
             pending_approval_fingerprints: Arc::new(Mutex::new(Vec::new())),
             verification_gate: None,
             observability: observability::ToolObservabilityListener::default(),
+            tool_output_spill: spill::ToolOutputSpillListener::default(),
             web_client: None,
             repo_map_cache: Arc::new(RepoMapCache::new()),
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
@@ -295,6 +300,11 @@ impl ToolRegistry {
         registry
             .post_execute_listeners
             .push(Arc::new(registry.observability.clone()));
+        // ADR-047：工具输出 spill 监听器——**必须**在观测监听器之后（观测要把
+        // 原始结果写进 Trace / GEPA 数据层，改写者排最后）。
+        registry
+            .post_execute_listeners
+            .push(Arc::new(registry.tool_output_spill.clone()));
         registry.register_builtin_tools();
         registry
     }
@@ -443,6 +453,15 @@ impl ToolRegistry {
     pub fn with_task_results_dir(mut self, dir: PathBuf) -> Self {
         self.task_results_dir = Some(dir.clone());
         self.background_tasks = Arc::new((*self.background_tasks).clone().with_results_dir(dir));
+        self
+    }
+
+    /// 设置工具输出落盘（ADR-047）：超预算工具结果的落盘目录 + 预算。
+    ///
+    /// 未调用 = 不落盘（与 `with_command_logs_dir` 同模式：未配置即完全旁路）。
+    /// 监听器在 `new()` 中已固定注册位置（观测监听器之后），此处只配置状态。
+    pub fn with_tool_output(self, dir: PathBuf, config: &crate::config::ToolOutputConfig) -> Self {
+        self.tool_output_spill.configure(dir, config);
         self
     }
 

@@ -117,5 +117,6 @@ pub fn test_tianyan_config_with_data_dir(data_dir: std::path::PathBuf) -> Tianya
         evolution: Default::default(),
         reminder: Default::default(),
         executor: Default::default(),
+        tool_output: Default::default(),
     }
 }
