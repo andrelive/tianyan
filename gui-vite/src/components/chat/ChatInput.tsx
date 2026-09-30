@@ -6,6 +6,7 @@ import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
 import ModelSelector from './ModelSelector';
 import ThinkingSelect from './ThinkingSelect';
 import ContextRing from './ContextRing';
+import ZoomableImage from '@/components/ui/ImageLightbox';
 
 interface Props {
   onSend: (content: string, images: string[]) => void;
@@ -221,12 +222,13 @@ export default function ChatInput({
         {images.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3 pt-3 pb-1">
             {images.map((src, i) => (
-              <div key={src.slice(0, 32) + '-' + i} className="relative group">
-                <img
-                  src={src}
-                  alt={'待发送图片 ' + (i + 1)}
-                  className="w-16 h-16 rounded-lg object-cover border border-[var(--color-border)]"
-                />
+              <ZoomableImage
+                key={src.slice(0, 32) + '-' + i}
+                src={src}
+                alt={'待发送图片 ' + (i + 1)}
+                wrapperClassName="group"
+                className="w-16 h-16 rounded-lg object-cover border border-[var(--color-border)]"
+              >
                 <button
                   onClick={() => removeImage(i)}
                   className="absolute -top-1.5 -right-1.5 p-0.5 rounded-full bg-black/70 text-white opacity-0 group-hover:opacity-100 transition-opacity"
@@ -234,7 +236,7 @@ export default function ChatInput({
                 >
                   <X className="w-3 h-3" />
                 </button>
-              </div>
+              </ZoomableImage>
             ))}
             {dragOver && (
               <div className="w-16 h-16 rounded-lg border-2 border-dashed border-blue-500/50 flex items-center justify-center text-xs text-blue-500">

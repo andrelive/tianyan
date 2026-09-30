@@ -4,6 +4,7 @@ import { messageText } from '@/lib/types';
 import type { ChatMessage } from '@/lib/types';
 import { cn, formatTime } from '@/lib/utils';
 import SkillCallCard from './SkillCallCard';
+import ZoomableImage from '@/components/ui/ImageLightbox';
 import { streamingIndicatorOwner } from './streaming-indicator';
 import { SegmentBlocks } from './MessageSegments';
 
@@ -60,11 +61,11 @@ function MessageBubble({ message, index, isStreaming, onRollback }: Props) {
               'flex-1 min-w-0 w-full text-[var(--color-text-primary)]',
         )}
       >
-        {/* 用户消息图片（data URL） */}
+        {/* 用户消息图片（data URL）：点击可放大查看 */}
         {message.images && message.images.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-2">
             {message.images.map((src, i) => (
-              <img
+              <ZoomableImage
                 key={`${src.slice(0, 40)}-${i}`}
                 src={src}
                 alt={`图片 ${i + 1}`}
