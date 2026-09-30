@@ -24,3 +24,20 @@ export async function pickDirectory(title = '选择目录'): Promise<string | nu
   });
   return typeof selected === 'string' && selected.length > 0 ? selected : null;
 }
+
+/**
+ * 用系统默认应用打开外部链接（Tauri 桌面壳；依赖 tauri-plugin-opener）。
+ *
+ * 返回值表示"是否已接管"：
+ * - `true`：桌面壳已把链接交给系统默认浏览器——调用方应 `preventDefault()`
+ *   阻止 WebView 自行导航（WebView 导航外部 URL 无回退入口，失败即白屏）；
+ * - `false`：非 Tauri 环境（浏览器 / E2E）未接管——调用方保持浏览器默认
+ *   行为，与改造前完全一致。
+ */
+export async function openExternal(url: string): Promise<boolean> {
+  if (!isTauri()) return false;
+  // 动态 import：浏览器构建不打包插件代码，桌面壳内才加载
+  const mod = await import('@tauri-apps/plugin-opener');
+  await mod.openUrl(url);
+  return true;
+}

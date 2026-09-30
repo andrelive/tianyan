@@ -1,7 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口默认能力：核心命令 + 原生目录选择对话框（设置页「数据搬迁」）",
+  "description": "主窗口默认能力：核心命令 + 原生目录选择对话框（设置页「数据搬迁」）+ 外部链接转交默认浏览器（消息内链接点击，scope 限 http/https/mailto/tel）",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
+  ]
 }

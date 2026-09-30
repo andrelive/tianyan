@@ -6,6 +6,8 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { MessageSegment, ToolCallWithResult } from '@/lib/types';
 import { cn } from '@/lib/utils';
+import remarkAutolinkFix from '@/lib/remark-autolink-fix';
+import { isTauri, openExternal } from '@/lib/tauri';
 import ToolCallCard from './ToolCallCard';
 
 /**
@@ -101,8 +103,26 @@ export const MarkdownContent = memo(function MarkdownContent({
     >
       <ReactMarkdown
         // singleTilde: false —— 中文语境 15~20 是数值范围，单波浪线不应渲染为删除线
-        remarkPlugins={[[remarkGfm, { singleTilde: false }]]}
+        remarkPlugins={[[remarkGfm, { singleTilde: false }], remarkAutolinkFix]}
         components={{
+          // 外部链接统一交给系统默认浏览器（同步判定 + preventDefault）：
+          // 绕开 Tauri 对「URL 解析失败导航」的静默放行盲区（否则 WebView 自行
+          // 导航外部 URL，失败即白屏且无回退入口）；非 Tauri 环境（浏览器 /
+          // E2E）不接管，保持浏览器默认行为。
+          a: ({ href, children, ...props }: React.ComponentPropsWithoutRef<'a'>) => (
+            <a
+              {...props}
+              href={href}
+              onClick={(e) => {
+                if (!href || !/^https?:\/\//i.test(href)) return;
+                if (!isTauri()) return;
+                e.preventDefault();
+                void openExternal(href);
+              }}
+            >
+              {children}
+            </a>
+          ),
           table: ({ children }) => (
             <div className="my-2 overflow-x-auto">
               <table className="min-w-full border-collapse text-lg">{children}</table>

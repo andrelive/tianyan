@@ -1,6 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from '@testing-library/react';
 import { MarkdownContent } from '@/components/chat/MessageSegments';
+
+/** 顶层 mock：@tauri-apps/plugin-opener 仅被 Tauri 分支动态加载。 */
+const { openUrl } = vi.hoisted(() => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl }));
 
 /**
  * 回归保护（U4）：文本结构化内容与用户输入的换行渲染。
@@ -119,5 +123,75 @@ describe('MarkdownContent 围栏代码块换行（U6）', () => {
     expect(container.textContent).toContain('ls -la');
     // 高亮器用 div 容器（PreTag="div"）——不重复包 <pre>
     expect(container.querySelector('pre')).toBeNull();
+  });
+});
+
+/**
+ * 回归保护（A+B）：消息内链接的渲染修复与点击兜底。
+ *
+ * A（渲染）：GFM autolink 会把紧跟 URL 的 `**` 一并吞掉（`**http://x**（91`），
+ * 导致星号字面泄露且 href 被污染（点坏地址 / 触发 WebView 异常导航后白屏）。
+ * remark-autolink-fix 在 AST 层截断并还原配对。
+ *
+ * B（点击）：桌面壳内点击 http(s) 链接一律交给系统默认浏览器（preventDefault
+ * 阻止 WebView 自行导航——Tauri 对「URL 解析失败的导航」静默放行，导航失败即
+ * 白屏且无回退入口）；非 Tauri 环境不接管，保持浏览器默认行为（E2E 零影响）。
+ *
+ * 判别力：A 断言对未接插件的代码必红（href 会是 `http://localhost:5180**（91`）；
+ * B 的 Tauri 分支对未加 onClick 的代码必红（openUrl 不会被调用）。
+ */
+describe('消息内链接：渲染修复 + 点击兜底（A+B）', () => {
+  beforeEach(() => {
+    openUrl.mockClear();
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+
+  /** 派发可取消的点击事件（便于断言 defaultPrevented）。 */
+  function clickLink(a: HTMLAnchorElement): MouseEvent {
+    const e = new MouseEvent('click', { bubbles: true, cancelable: true });
+    a.dispatchEvent(e);
+    return e;
+  }
+
+  it('A：被污染的链接渲染为干净 href，正文无 ** 残留', () => {
+    const { container } = render(
+      <MarkdownContent text={'- **http://localhost:5180**（91 视图'} isUser={false} />,
+    );
+    const a = container.querySelector('a');
+    expect(a).not.toBeNull();
+    expect(a!.getAttribute('href')).toBe('http://localhost:5180');
+    expect(container.textContent).not.toContain('**');
+    expect(container.querySelector('strong a')).not.toBeNull();
+  });
+
+  it('B：非 Tauri 环境（浏览器 / E2E）不接管，默认行为保留', () => {
+    const { container } = render(
+      <MarkdownContent text={'[示例](https://example.com)'} isUser={false} />,
+    );
+    const e = clickLink(container.querySelector('a')!);
+    expect(e.defaultPrevented).toBe(false);
+    expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  it('B：Tauri 环境点击 http(s) 链接 → preventDefault + 交给系统浏览器', async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const { container } = render(
+      <MarkdownContent text={'[示例](https://example.com)'} isUser={false} />,
+    );
+    const e = clickLink(container.querySelector('a')!);
+    expect(e.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(openUrl).toHaveBeenCalledWith('https://example.com'));
+  });
+
+  it('B：非 http 链接（页内锚点）不接管', () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const { container } = render(<MarkdownContent text={'[锚点](#section)'} isUser={false} />);
+    const e = clickLink(container.querySelector('a')!);
+    expect(e.defaultPrevented).toBe(false);
+    expect(openUrl).not.toHaveBeenCalled();
   });
 });
