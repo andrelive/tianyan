@@ -5,13 +5,23 @@ import { setSessionModel } from '@/lib/api-client';
 import { cn } from '@/lib/utils';
 import { toErrorMessage } from '@/lib/errors';
 
-/** 内置"关闭"档位（不附加思考参数；不属于模型声明，恒提供）。 */
+/**
+ * 内置「default」档位（**不附加思考参数，是否思考由模型自行决定**——思考模型
+ * 缺省仍会输出推理；不属于模型声明，恒提供）。值保持 `'off'`（会话选择 /
+ * 请求语义不变，仅展示名如实化）。
+ */
 const OFF_EFFORT = 'off';
+/** 档位展示名：`off` 值如实呈现为「default」（不附加参数，由模型决定）。 */
+function effortLabel(v: string): string {
+  return v === OFF_EFFORT ? 'default' : v;
+}
 
 /**
  * 会话级思考强度选择：档位集来自**当前模型自己声明的值**（后端 /config/models
  * 返回 reasoning_efforts，显式配置 > 内置模型表），**原样展示不做本地翻译**
  * （厂商档位可能为 low/high/max 等任意值）；模型不支持思考时隐藏。
+ * 内置「default」档（值 `off`）**如实展示为「default」**——不附加思考参数，
+ * 是否思考由模型自行决定（思考模型缺省仍会输出推理）。
  *
  * 选择写入**当前会话**（与模型选择同一个会话级对象；对齐 DSH 的
  * Session-local model selection）：已创建会话同步后端（会话头部），
@@ -38,12 +48,12 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
   const supportsThinking =
     !!declared && declared.length > 0 && !(declared.length === 1 && declared[0] === OFF_EFFORT);
 
-  // 选项：恒含"关闭"，外加模型声明的档位值（去重、原样显示）
+  // 选项：恒含「default」，外加模型声明的档位值（去重、原样显示）
   const options: string[] = supportsThinking
     ? [OFF_EFFORT, ...declared!.filter((v) => v !== OFF_EFFORT)]
     : [];
 
-  // 模型切换后若已选档位不在新模型档位集内 → 重置为关闭（视图兜底；
+  // 模型切换后若已选档位不在新模型档位集内 → 重置为default（视图兜底；
   // 会话记录在下次切会话 syncModelView 时自愈）
   useEffect(() => {
     if (supportsThinking && !options.includes(thinkingEffort)) {
@@ -99,7 +109,11 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
         aria-label="思考强度"
         aria-expanded={open}
         aria-haspopup="listbox"
-        title={'思考强度：' + current + '（当前模型声明的档位）'}
+        title={
+          current === OFF_EFFORT
+            ? '思考强度：default（不附加思考参数，是否思考由模型决定）'
+            : '思考强度：' + current + '（当前模型声明的档位）'
+        }
         className={cn(
           'flex items-center gap-1.5 px-2.5 py-1.5 text-sm rounded-lg transition-colors',
           ghost
@@ -107,7 +121,7 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
             : 'border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)]',
         )}
       >
-        <span>{'思考 ' + current}</span>
+        <span>{'思考 ' + effortLabel(current)}</span>
         <ChevronDown className={cn('w-3.5 h-3.5 transition-transform', open && 'rotate-180')} />
       </button>
 
@@ -133,7 +147,7 @@ export default function ThinkingSelect({ ghost = false }: { ghost?: boolean }) {
                   : 'text-[var(--color-text-primary)]',
               )}
             >
-              <span>{opt === OFF_EFFORT ? '关闭' : opt}</span>
+              <span>{effortLabel(opt)}</span>
               {opt === current && <Check size={14} className="shrink-0" />}
             </button>
           ))}

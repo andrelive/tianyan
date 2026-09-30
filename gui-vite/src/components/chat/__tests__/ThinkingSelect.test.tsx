@@ -17,7 +17,7 @@ describe('ThinkingSelect', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('lists 关闭 plus declared efforts and applies the selection to the store', () => {
+  it('lists default plus declared efforts and applies the selection to the store', () => {
     useAppStore.setState({
       selectedModel: { provider: 'x', model: 'thinking-model' },
       chatModels: [
@@ -31,7 +31,7 @@ describe('ThinkingSelect', () => {
     });
     render(<ThinkingSelect />);
     fireEvent.click(screen.getByRole('button', { name: /思考强度/ }));
-    expect(screen.getByRole('option', { name: '关闭' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'default' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'low' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'high' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'max' })).toBeInTheDocument();
@@ -39,7 +39,7 @@ describe('ThinkingSelect', () => {
     expect(useAppStore.getState().thinkingEffort).toBe('high');
   });
 
-  it('resets to 关闭 when the selected effort is not in the new model set', () => {
+  it('resets to default when the selected effort is not in the new model set', () => {
     useAppStore.setState({
       selectedModel: { provider: 'x', model: 'model-a' },
       thinkingEffort: 'max',
