@@ -290,15 +290,6 @@ max_fetch_bytes = 2097152
 # max_lines = 2000    # 单次结果行数上限
 # max_bytes = 51200   # 单次结果字节上限（50 KiB）
 #
-# 会话内 prune（ADR-048）：老工具输出在组装视图降级（保留最近 N token 的工具输出，
-# 更老的裁到 prune_max_chars 字符 + 裁剪标记）。零 LLM 成本，是压缩的廉价前置。
-# 收益不足（省下的 token < prune_min_tokens）时不动手——避免频繁换掉请求前缀、
-# 破坏前缀缓存。原文仍在会话存储里，需要细节时重新调用该工具即可。
-# prune_enabled = true            # 总开关
-# prune_protect_tokens = 40000    # 保留最近 N token 的工具输出完整
-# prune_min_tokens = 20000        # 收益阈值（少于则不裁剪）
-# prune_max_chars = 2000          # 单条被裁的老工具输出保留字符数
-#
 # 落盘目录：{storage.data_dir}/tool_output/（与 command_logs / task_results 同级）
 # 不落盘的工具：read_file / vfs_read / vfs_list / list_dir / glob（可随时重取）、
 #               execute_command（已有自身的 log_file 落盘机制）

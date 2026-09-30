@@ -5,7 +5,6 @@
 pub mod assembler;
 pub mod compression;
 pub mod pipeline;
-pub mod prune;
 pub mod retrieval;
 
 pub use pipeline::ContextPipeline;
@@ -15,5 +14,4 @@ pub use compression::{
     estimate_tokens, CompressionConfig, CompressionResult, CompressionStatus, CompressionStrategy,
     ContextCompressor, TokenEstimator,
 };
-pub use prune::{prune_or_borrow, prune_tool_outputs, PruneConfig};
 pub use retrieval::{DualLayerRetriever, Intent, IntentAnalyzer, RetrievalResult};

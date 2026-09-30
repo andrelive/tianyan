@@ -15,7 +15,6 @@ use crate::common::types::{
     MessageRole, MessageTime, Part, PartTime, StructuredMessage, TokenUsage,
 };
 use crate::context::compression::ContextCompressor;
-use crate::context::prune::PruneConfig;
 use crate::context::retrieval::DualLayerRetriever;
 use crate::vfs::VirtualFileSystem;
 
@@ -29,8 +28,6 @@ pub struct ContextPipeline {
     learned_rules_top_k: usize,
     /// 已缓存的 soul（首次加载后复用，避免每轮从 VFS 重复读取）
     cached_soul: Arc<TokioMutex<Option<String>>>,
-    /// 会话内 prune 配置（ADR-048：老工具输出在组装视图降级）。
-    prune: PruneConfig,
 }
 
 /// 压缩结果：摘要文本 + 生成摘要的 LLM 请求真实用量。
@@ -67,19 +64,7 @@ impl ContextPipeline {
             default_top_k,
             learned_rules_top_k,
             cached_soul: Arc::new(TokioMutex::new(None)),
-            prune: PruneConfig::default(),
         }
-    }
-
-    /// 设置会话内 prune 配置（ADR-048；由 `AgentBuilder` 从 `[tool_output]` 映射注入）。
-    pub fn with_prune_config(mut self, prune: PruneConfig) -> Self {
-        self.prune = prune;
-        self
-    }
-
-    /// 会话内 prune 配置（组装层读取：`agent_core::assemble_context`）。
-    pub fn prune_config(&self) -> &PruneConfig {
-        &self.prune
     }
 
     /// 压缩器引用（crate 内测试断言压缩配置用）。

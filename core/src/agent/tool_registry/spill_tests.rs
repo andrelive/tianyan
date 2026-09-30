@@ -41,7 +41,6 @@ fn listener(dir: &std::path::Path, max_lines: usize, max_bytes: usize) -> ToolOu
             enabled: true,
             max_lines,
             max_bytes,
-            ..ToolOutputConfig::default()
         },
     );
     l
@@ -169,7 +168,6 @@ async fn test_disabled_bypasses() {
             enabled: false,
             max_lines: 5,
             max_bytes: 100,
-            ..ToolOutputConfig::default()
         },
     );
     let original = make_result(50);
@@ -240,7 +238,6 @@ fn test_registry_registers_spill_listener_second() {
             enabled: true,
             max_lines: 7,
             max_bytes: 42,
-            ..ToolOutputConfig::default()
         },
     );
     let (enabled, dir, max_lines, max_bytes) = registry.tool_output_spill.snapshot();
@@ -260,7 +257,6 @@ fn test_zero_budget_clamped_to_one() {
             enabled: true,
             max_lines: 0,
             max_bytes: 0,
-            ..ToolOutputConfig::default()
         },
     );
     let (_, _, max_lines, max_bytes) = l.snapshot();
