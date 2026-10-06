@@ -112,7 +112,12 @@ impl SessionRecall {
 
     /// 跨会话增量：`since_ms`（epoch 毫秒）之后有正文的主会话消息（最近优先）。
     ///
-    /// - 只含 user/assistant 文本（纯工具/空正文消息不进材料）；
+    /// - 只含 **user 文本**——含压缩点摘要（压缩点以 user 角色锚定，文本以
+    ///   `[对话摘要]` 开头）；两者即"用户侧信号"：用户原话（态度/偏好/事实）
+    ///   + 历史摘要（该会话做了什么的二手概括）；
+    /// - **assistant 原文不进材料**：其中多为模型自身输出与过程叙述，若作为
+    ///   "用户偏好"证据会自我强化（模型偏见放大）；过程侧信息走 ExecutionLog
+    ///   （综述可用 execution_stats / execution_detail 工具查）；
     /// - 排除子智能体会话（`session_meta.parent_session_id` 非空，ADR-026）；
     /// - 供演化综述"近期会话增量"采集（ADR-017：防止跨运行重复通读旧会话）。
     ///
@@ -124,7 +129,7 @@ impl SessionRecall {
         limit: usize,
     ) -> Result<Vec<RecallMessage>, TianyanError> {
         let conn = self.db.lock().await;
-        let sql = "SELECT m.session_id, m.seq, m.message_id, m.role, m.text, m.tool_text, m.ts                    FROM session_messages m                    JOIN session_meta meta ON meta.session_id = m.session_id                    WHERE m.ts > ?1 AND m.text != '' AND m.role IN ('user','assistant')                      AND meta.parent_session_id IS NULL                    ORDER BY m.ts DESC LIMIT ?2";
+        let sql = "SELECT m.session_id, m.seq, m.message_id, m.role, m.text, m.tool_text, m.ts                    FROM session_messages m                    JOIN session_meta meta ON meta.session_id = m.session_id                    WHERE m.ts > ?1 AND m.text != '' AND m.role = 'user'                      AND meta.parent_session_id IS NULL                    ORDER BY m.ts DESC LIMIT ?2";
         let mut stmt = conn
             .prepare(sql)
             .map_err(|e| sqlite_error("增量查询准备失败", e))?;
@@ -411,10 +416,23 @@ mod tests {
             .append_message("s1", &msg_at("d1", MessageRole::User, "Day1 内容", day1))
             .await
             .unwrap();
+        // assistant 原文（Day2）：**不进材料**（模型自身输出；作为偏好证据会自我强化）
         store
             .append_message(
                 "s1",
-                &msg_at("d2", MessageRole::Assistant, "Day2 内容", day1 + day),
+                &msg_at(
+                    "d2a",
+                    MessageRole::Assistant,
+                    "Day2 助手原文",
+                    day1 + day - 1,
+                ),
+            )
+            .await
+            .unwrap();
+        store
+            .append_message(
+                "s1",
+                &msg_at("d2", MessageRole::User, "Day2 内容", day1 + day),
             )
             .await
             .unwrap();
@@ -426,16 +444,50 @@ mod tests {
             .await
             .unwrap();
 
-        // 下一次运行：水位线 = Day1 消息之后 → 只看到 Day2+Day3（Day1 不重复）
+        // 下一次运行：水位线 = Day1 消息之后 → Day2+Day3（Day1 不重复；assistant 排除）
         let got = recall.recent_since(day1, 100).await.unwrap();
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|m| m.ts > day1));
         assert!(!got.iter().any(|m| m.text.contains("Day1")));
+        assert!(
+            !got.iter().any(|m| m.text.contains("Day2 助手原文")),
+            "assistant 原文不得进材料: {got:?}"
+        );
+        assert!(
+            got.iter().all(|m| m.role == "user"),
+            "材料只含 user: {got:?}"
+        );
         assert!(got[0].ts >= got[1].ts, "最近优先（ts DESC）");
         // 再下一次：水位线 = Day2 消息之后 → 只剩 Day3（Day1/Day2 均不复现）
         let got2 = recall.recent_since(day1 + day, 100).await.unwrap();
         assert_eq!(got2.len(), 1);
         assert!(got2[0].text.contains("Day3"));
+    }
+
+    /// 压缩点（role=user + `[对话摘要]` 包装）**必须进材料**——它是"该会话做了
+    /// 什么"的高密度来源（ADR-017 材料构成：用户原话 + 历史摘要）。
+    #[tokio::test]
+    async fn test_recent_since_includes_compression_marker_as_user() {
+        let (store, recall) = make_pair().await;
+        let base = 1_800_000_000_000i64;
+        store
+            .append_message(
+                "s1",
+                &msg_at(
+                    "cmp",
+                    MessageRole::User,
+                    "[对话摘要] 以下是对历史对话的摘要：\n早期做了 X\n[摘要结束]",
+                    base + 1,
+                ),
+            )
+            .await
+            .unwrap();
+        let got = recall.recent_since(base, 100).await.unwrap();
+        assert_eq!(got.len(), 1, "压缩点（user 角色）应进材料: {got:?}");
+        assert!(
+            got[0].text.starts_with("[对话摘要]"),
+            "压缩点文本保留 `[对话摘要]` 包装（提示词按此前缀识别）"
+        );
     }
 
     #[tokio::test]

@@ -30,10 +30,21 @@ const DIGEST_CANDIDATE_LIMIT: usize = 2000;
 const DIGEST_MAX_SESSIONS: usize = 5;
 /// 近期会话增量材料：单会话最多展示的消息条数（取最近）。
 const DIGEST_MAX_MSGS_PER_SESSION: usize = 6;
-/// 近期会话增量材料：单条消息文本的字符上限。
+/// 压缩点摘要的文本前缀（`context::pipeline::compress_for_session` 的生产包装；
+/// `extract_marker_summary` 亦按此前缀剥壳——是既成契约，不是展示约定）。
+const SUMMARY_PREFIX: &str = "[对话摘要]";
+/// 近期会话增量材料：单条**用户原话**的字符上限。
 const DIGEST_MAX_MSG_CHARS: usize = 300;
+/// 近期会话增量材料：单条**历史摘要**（压缩点，`[对话摘要]` 开头）的字符上限。
+///
+/// 摘要信息密度远高于单条原话（一段覆盖整段会话），故给更宽的预算——
+/// 截到 300 字只剩开头，会失去"最大化获得会话信息"的意义。
+const DIGEST_MAX_SUMMARY_CHARS: usize = 1200;
 /// 近期会话增量材料：总字符预算（超出预算的会话整体省略并注明）。
-const DIGEST_MAX_TOTAL_CHARS: usize = 9000;
+///
+/// 2026-09-30 上调 9000 → 12000：材料改为"压缩点摘要 + 用户原话"后，摘要单条
+/// 1.2k 字符；若仍按 9k 预算，多会话场景会把后面的会话**连用户原话一起**省略。
+const DIGEST_MAX_TOTAL_CHARS: usize = 12000;
 /// 无水位线（首次运行）时的增量回看窗口（小时）。
 const DIGEST_INITIAL_WINDOW_HOURS: i64 = 72;
 
@@ -339,6 +350,12 @@ impl EvolutionTask {
 
 【当前注册表清单】（L0 摘要首行；如需详情用 vfs_read 查看）
 {inventory}
+
+【本期材料构成】（务必区分一手与二手信号）
+- `[对话摘要]` 开头的是**压缩点摘要**（二手）：对之前整段会话的概括，用来了解"做过什么"；
+  它由模型生成，**不得作为用户偏好或事实的证据**；
+- 其余条目是**用户原话**（一手）：用户的偏好、语气、沟通习惯、态度与事实**以这些为准**；
+  材料中不会有助手原文——不要把模型自己的输出当作用户偏好。
 
 【本次任务】
 1. 阅读【近期会话增量】，识别用户偏好、事实与重复工作模式——这是本期新内容的主要来源；
@@ -819,11 +836,17 @@ fn render_recent_digest(msgs: &[RecallMessage], since_label: &str) -> String {
             .take(DIGEST_MAX_MSGS_PER_SESSION)
             .rev()
             .map(|m| {
-                format!(
-                    "[{}] {}",
-                    m.role,
-                    truncate_msg(&m.text, DIGEST_MAX_MSG_CHARS)
-                )
+                // 压缩点摘要：不带 role 标签（其自身 `[对话摘要]` 前缀即标识，
+                // 提示词按此前缀区分"二手概括"与"用户原话"），且给更宽预算。
+                if m.text.starts_with(SUMMARY_PREFIX) {
+                    truncate_msg(&m.text, DIGEST_MAX_SUMMARY_CHARS)
+                } else {
+                    format!(
+                        "[{}] {}",
+                        m.role,
+                        truncate_msg(&m.text, DIGEST_MAX_MSG_CHARS)
+                    )
+                }
             })
             .collect();
         block.push_str(&lines.join("\n"));
@@ -1661,12 +1684,12 @@ mod tests {
         // 两个会话；s2 较新（先出现）。s1 有 7 条（应只展示最近 6 条 = seq 2..7）。
         let long = "长".repeat(400);
         let msgs = vec![
-            recall_msg("s2", 1, "assistant", "s2-内容", 20_000),
-            recall_msg("s1", 7, "assistant", &long, 19_000),
+            recall_msg("s2", 1, "user", "s2-内容", 20_000),
+            recall_msg("s1", 7, "user", &long, 19_000),
             recall_msg("s1", 6, "user", "s1-6", 18_000),
-            recall_msg("s1", 5, "assistant", "s1-5", 17_000),
+            recall_msg("s1", 5, "user", "s1-5", 17_000),
             recall_msg("s1", 4, "user", "s1-4", 16_000),
-            recall_msg("s1", 3, "assistant", "s1-3", 15_000),
+            recall_msg("s1", 3, "user", "s1-3", 15_000),
             recall_msg("s1", 2, "user", "s1-2", 14_000),
             recall_msg("s1", 1, "user", "s1-1", 13_000),
         ];
@@ -1678,11 +1701,47 @@ mod tests {
         assert!(!out.contains("s1-1"), "超出单会话限量的最旧消息应省略");
         assert!(out.contains("[user] s1-2"));
         let p2 = out.find("s1-2").unwrap();
-        let p7 = out.find("[assistant] 长").unwrap();
+        let p7 = out.find("[user] 长").unwrap();
         assert!(p2 < p7, "组内按时间升序展示");
         assert!(
-            out.contains(&format!("[assistant] {}…", "长".repeat(300))),
-            "超长消息应截断到 300 字 + 省略号"
+            out.contains(&format!("[user] {}…", "长".repeat(300))),
+            "超长用户原话应截断到 300 字 + 省略号"
+        );
+    }
+
+    /// 压缩点摘要：保留 `[对话摘要]` 前缀、**不带 role 标签**、走更宽预算（1200）；
+    /// 用户原话仍照旧 300 字——两类信号用不同预算（提示词按前缀区分一手/二手）。
+    #[test]
+    fn test_render_recent_digest_summary_wide_budget() {
+        // 单行摘要（真实摘要含换行，此处验证截断口径故取单行）
+        let summary = format!("[对话摘要] {}", "摘".repeat(2000));
+        let msgs = vec![recall_msg("s1", 1, "user", &summary, 20_000)];
+        let out = render_recent_digest(&msgs, "自 T 以来");
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("[对话摘要]"))
+            .expect("摘要行应以标记开头");
+        assert!(
+            !line.starts_with("[user]"),
+            "摘要不得带 role 标签（前缀即标识）: {line}"
+        );
+        assert!(
+            line.chars().count() > DIGEST_MAX_MSG_CHARS + 1,
+            "摘要应走更宽预算（>300 字）: {}",
+            line.chars().count()
+        );
+        assert!(
+            line.chars().count() <= DIGEST_MAX_SUMMARY_CHARS + 2,
+            "摘要截断到 1200 字以内: {}",
+            line.chars().count()
+        );
+
+        // 用户原话照旧 300 字
+        let plain = vec![recall_msg("s1", 2, "user", &"话".repeat(2000), 21_000)];
+        let out2 = render_recent_digest(&plain, "自 T 以来");
+        assert!(
+            out2.contains(&format!("[user] {}…", "话".repeat(300))),
+            "用户原话仍截断到 300 字"
         );
     }
 
@@ -1700,17 +1759,17 @@ mod tests {
             out.contains("超出展示上限省略"),
             "应有展示上限省略提示: {out}"
         );
-        // 长度预算：5 个大会话（每块约 1.9k 字，展示 4 块即超 9k 预算）→ 预算省略提示
+        // 长度预算：5 个会话 ×（1 条摘要 1.2k + 5 条原话 300）≈ 13.5k > 12k 预算
+        // → 预算省略提示（材料构成变更后的真实形态）
         let big: Vec<RecallMessage> = (0..5)
             .flat_map(|i| {
                 (0..6).map(move |j| {
-                    recall_msg(
-                        &format!("b{i}"),
-                        j,
-                        "user",
-                        &"内".repeat(300),
-                        30_000 - (i * 10 + j),
-                    )
+                    let text = if j == 0 {
+                        format!("[对话摘要] {}", "摘".repeat(1200))
+                    } else {
+                        "内".repeat(300)
+                    };
+                    recall_msg(&format!("b{i}"), j, "user", &text, 30_000 - (i * 10 + j))
                 })
             })
             .collect();
@@ -1718,6 +1777,12 @@ mod tests {
         assert!(
             out2.contains("因长度预算省略"),
             "应有长度预算省略提示: {out2}"
+        );
+        // 判别力：预算数值被锚住——12k 下应展示 4 个会话（若预算被改回 9k 则为 3，本断言变红）
+        assert_eq!(
+            out2.matches("── 会话").count(),
+            4,
+            "12k 预算下应展示 4 个会话（超出者整体省略）: {out2}"
         );
     }
 
