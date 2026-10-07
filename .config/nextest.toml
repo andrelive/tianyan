@@ -1,0 +1,19 @@
+# cargo-nextest 配置 —— CI 单测"卡死兜底"。
+#
+# 背景：0.6.3 tag（d421fd8）Quality 工作流的 "Rust unit tests" 步骤卡在
+# in_progress 达 70 分钟后被终止，后续步骤全部 pending、Release 不出包。
+# 本地无法复现（Windows 同命令全绿 16–26s；WSL 高 IO 复刻会自身崩溃
+# Wsl/Service/E_UNEXPECTED，多次崩溃位置随机）。
+#
+# 旧实现用 libtest 并行：**卡住的测试名不会出现在日志里**（它未完成就没有
+# 任何输出），这正是"看不到报错、只看到卡死"的盲区。
+#
+# nextest 对症：
+#   - status-level = "slow"：单个测试超过 period 仍未结束 → 立刻打印 SLOW
+#     （**含测试名**）——卡点主动现形；
+#   - terminate-after = 3：再拖 3 个 period 仍未结束 → 终止该测试并报失败，
+#     而不是无限等待（timeout-minutes 只是最后一道防线）。
+[profile.default]
+slow-timeout = { period = "120s", terminate-after = 3 }
+status-level = "slow"
+final-status-level = "slow"

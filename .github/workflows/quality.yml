@@ -20,6 +20,9 @@ on:
     tags:
       - 'v*'
   pull_request:
+  # 手动触发：可在不移动 tag（不连带触发 release 构建）的前提下单独重跑
+  # Quality，便于排查 unit tests 卡死等门禁问题。
+  workflow_dispatch:
   # 可复用工作流：release.yml 的 build 依赖本工作流（`needs: quality`）——
   # 门禁红则不出包（"门禁必红但 MSI 已发布"事故的机制性修复）。
   workflow_call:
@@ -54,8 +57,18 @@ jobs:
         run: cargo clippy --workspace --exclude tianyan-tauri --all-targets -- -D warnings
 
 
+      # cargo-nextest（替代 libtest）：解决"卡死时看不到卡点"的盲区——
+      # 0.6.3 tag（d421fd8）Quality 的 unit tests 步骤曾卡在 in_progress 达 70 分钟
+      # 被终止，后续步骤全 pending、Release 不出包；本地无法复现（Windows 全绿
+      # 16–26s；WSL 高 IO 复刻自身崩溃 E_UNEXPECTED）。旧 libtest 并行下**卡住的
+      # 测试名不会出现在日志**（未完成即无输出）；nextest 命中 slow-timeout 会立即
+      # 打印 SLOW + 测试名，terminate-after 再拖若干周期即终止该测试（阈值见
+      # .config/nextest.toml）；timeout-minutes 作最后防线。
+      - uses: taiki-e/install-action@nextest
+
       - name: Rust unit tests (core/server/mcp)
-        run: cargo test --workspace --exclude tianyan-tauri --lib
+        run: cargo nextest run --workspace --exclude tianyan-tauri --lib
+        timeout-minutes: 20
 
       # 集成测试（core/tests + server/tests，含 HTTP 级 e2e）——此前只在本地
       # `test.ps1 integration` 跑，CI 从未覆盖；0.5.8 记录"三处 e2e 断言失效
