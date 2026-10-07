@@ -2613,7 +2613,8 @@ mod tests {
             .capture("s1", &ids[2])
             .await
             .unwrap();
-        std::fs::write(workdir.join("a.txt"), "v2").unwrap();
+        // 与 v1 等长会撞上"mtime/size 短路"漏检（size 相同）→ 用不同长度加固测试前提
+        std::fs::write(workdir.join("a.txt"), "v2-changed").unwrap();
 
         let outcome = agent.rollback_to("s1", &ids[2]).await.unwrap();
         assert_eq!(outcome.truncated, 2, "锚点及其后的 2 条被截断");
@@ -2659,7 +2660,8 @@ mod tests {
             .capture("s1", &ids[2])
             .await
             .unwrap();
-        std::fs::write(workdir.join("a.txt"), "v2").unwrap();
+        // 与 v1 等长会撞上"mtime/size 短路"漏检 → 用不同长度加固测试前提
+        std::fs::write(workdir.join("a.txt"), "v2-changed").unwrap();
         // 破坏对象库：快照树仍在，但它引用的对象已缺失
         remove_all_objects(&snap_root);
 
@@ -2716,9 +2718,10 @@ mod tests {
             .capture("s1", &ids[2])
             .await
             .unwrap();
-        std::fs::write(workdir.join("a.txt"), "v2").unwrap();
+        // 与 v1 等长会撞上"mtime/size 短路"漏检 → 用不同长度加固测试前提
+        std::fs::write(workdir.join("a.txt"), "v2-changed").unwrap();
         agent.rollback_to("s1", &ids[2]).await.unwrap();
-        // 回退后又改了文件（重做应恢复到「回退前」的 v2）
+        // 回退后又改了文件（重做应恢复到「回退前」的 v2-changed）
         std::fs::write(workdir.join("a.txt"), "v3").unwrap();
 
         let redo = agent.redo_to("s1", &ids[2]).await.unwrap();
@@ -2728,7 +2731,7 @@ mod tests {
         assert_eq!(chain.len(), 4, "被回退的消息恢复（追加到链尾）");
         assert_eq!(
             std::fs::read_to_string(workdir.join("a.txt")).unwrap(),
-            "v2"
+            "v2-changed"
         );
         // 一次性语义：重做数据读取即消费
         let err = agent

@@ -33,6 +33,17 @@ use crate::common::error::{Result, TianyanError};
 /// 单文件最大纳入快照的字节数（2MB，与 opencode 一致）。
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
+/// "小文件"阈值：**小于等于**该值的文件不参与 mtime/size 短路（直接重算哈希）。
+///
+/// 短路前提"mtime 纳秒 + size 未变 ⇒ 内容未变"是**启发式**——同一文件被
+/// **等长改写**且 mtime 撞车（同纳秒，或 `modified()` 失败退化为 0）时会**漏检**：
+/// 回退/重做时误判"文件未变更" → 跳过恢复（`restored_files=0`），并连带跳过
+/// "快照对象缺失"的预校验（应报错却返回 Ok）。实机复现：WSL/CI 上
+/// `test_rollback_restores_files_then_truncates_chain` 偶发失败（Windows 不复现）。
+/// 小文件哈希成本可忽略（μs 级），不值得为省这点开销冒漏检风险；
+/// 大文件保留短路，以维持"大工作区增量恢复"的加速收益。
+const SMALL_FILE_BYTES: u64 = 64 * 1024;
+
 /// 默认排除的目录名（不区分大小写）。
 const DEFAULT_EXCLUDED_DIRS: [&str; 4] = [".git", "node_modules", "target", "snapshots"];
 
@@ -711,7 +722,11 @@ impl SnapshotManager {
 
                 // 命中缓存:同 mtime(纳秒) + 同 size → 复用 hash,不读内容
                 if let Some(prev) = prev_cache.and_then(|c| c.get(&rel)) {
-                    if prev.mtime_ns == mtime_ns && prev.size == meta.len() {
+                    // 小文件不走短路：等长改写 + mtime 撞车会漏检（见 SMALL_FILE_BYTES）
+                    if prev.mtime_ns == mtime_ns
+                        && prev.size == meta.len()
+                        && meta.len() > SMALL_FILE_BYTES
+                    {
                         tree.insert(rel.clone(), prev.hash.clone());
                         cache.insert(
                             rel,
@@ -835,7 +850,11 @@ impl SnapshotManager {
                     .unwrap_or(0);
                 // 命中缓存：同 mtime(纳秒) + 同 size → 复用哈希，不读内容
                 if let Some(prev) = prev_cache.and_then(|c| c.get(&rel)) {
-                    if prev.mtime_ns == mtime_ns && prev.size == meta.len() {
+                    // 小文件不走短路（与 walk_and_capture 同判据，见 SMALL_FILE_BYTES）
+                    if prev.mtime_ns == mtime_ns
+                        && prev.size == meta.len()
+                        && meta.len() > SMALL_FILE_BYTES
+                    {
                         tree.insert(rel, prev.hash.clone());
                         continue;
                     }
