@@ -135,6 +135,31 @@ jobs:
           path: diag.txt
           retention-days: 5
 
+      # ⭐ 隔离判别（2026-10）：**只跑 4/4 分片**，且刻意放在最前（早于任何预热步）。
+      #
+      # 上一轮判别结果：单线程全量 libtest **全过**（1683 ok / 44s），而 nextest
+      # 分片 1/4–3/4 过（13/8/7s）、**4/4 挂死** ⇒ 触发因素是"并发"，且随累计
+      # 跑量概率上升。本步用于区分：
+      #   - 挂 ⇒ 4/4 自身内容 + 并发即可复现（不需要"前 3 片累积"）
+      #   - 过 ⇒ 前 3 片的累积效应（进程/资源/状态残留）
+      - name: "Diagnostics (isolated shard 4/4, runs first)"
+        run: |
+          set +e
+          timeout 600 cargo nextest run -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --partition count:4/4 -j 2 > shard4.log 2>&1
+          echo "isolated-shard4 exit=$?" | tee -a diag.txt
+          grep -E 'Starting |Summary ' shard4.log | tee -a diag.txt
+          tail -25 shard4.log | tee -a diag.txt
+        timeout-minutes: 15
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-shard4-${{ github.run_id }}
+          path: |
+            diag.txt
+            shard4.log
+          retention-days: 5
+
       # ⭐ 判别实验（2026-10）：**单线程全量** libtest（`--test-threads=1`）。
       #
       # 要回答的问题：此前"全量一起跑必挂死（15–44 min，runner 失联）、按模块/分片
