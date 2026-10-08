@@ -559,40 +559,44 @@ async fn test_write_file_rejects_missing_arguments() {
 }
 
 #[tokio::test]
-async fn test_write_file_default_does_not_create_missing_parent_dir() {
-    // 默认不建目录：路径写错（父目录不存在）→ 报错 + 指引；不得静默建目录
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("missing").join("out.txt");
-    let registry = ToolRegistry::new(default_strict_policy());
-    let args = json!({ "path": path.to_string_lossy(), "content": "x" }).to_string();
-
-    let err = registry
-        .execute_write_file(&args, "test-session", false)
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("父目录不存在"), "{err}");
-    assert!(err.contains("create_dirs=true"), "应给出修法指引：{err}");
-    assert!(!path.parent().unwrap().exists(), "默认不应创建父目录");
-}
-
-#[tokio::test]
-async fn test_write_file_create_dirs_true_creates_parents() {
+async fn test_write_file_auto_creates_missing_parent_dirs() {
+    // 2026-10 修订：父目录缺失不再报错——**自动创建**，并把新建目录回显在结果里
+    //（替代原先「先失败一轮 + 让模型补 create_dirs=true」的防护；后者防不住拼错，
+    // 只会白多一轮往返）。
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("a").join("b").join("out.txt");
     let registry = ToolRegistry::new(default_strict_policy());
-    let args = json!({
-        "path": path.to_string_lossy(),
-        "content": "内容",
-        "create_dirs": true
-    })
-    .to_string();
+    let args = json!({ "path": path.to_string_lossy(), "content": "内容" }).to_string();
 
-    registry
+    let out = registry
         .execute_write_file(&args, "test-session", false)
         .await
-        .unwrap_or_else(|e| panic!("create_dirs=true 应创建父目录并写入：{e}"));
+        .unwrap_or_else(|e| panic!("父目录缺失应自动创建并写入：{e}"));
     assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "内容");
+    assert_eq!(
+        out["created_dirs"].as_array().map(|a| a.len()),
+        Some(2),
+        "两层缺失目录都应回显：{out}"
+    );
+}
+
+#[tokio::test]
+async fn test_write_file_reports_no_created_dirs_when_parent_exists() {
+    // 父目录已存在 → created_dirs 为空（不误报“新建”）
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.txt");
+    let registry = ToolRegistry::new(default_strict_policy());
+    let args = json!({ "path": path.to_string_lossy(), "content": "x" }).to_string();
+
+    let out = registry
+        .execute_write_file(&args, "test-session", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        out["created_dirs"].as_array().map(|a| a.len()),
+        Some(0),
+        "父目录已存在时不应报告新建目录：{out}"
+    );
 }
 
 #[tokio::test]

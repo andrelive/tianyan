@@ -73,9 +73,10 @@ pub(crate) mod test_support {
 ///
 /// 失败语义：任何一步失败都清理临时文件并返回错误，**原文件保持不变**。
 ///
-/// `create_dirs`：父目录缺失时是否自动创建。`write_file` 默认 `false`——
-/// 路径写错（本该写已有目录却拼了新目录名）时宁可报错，也不静默新建目录；
-/// 「缺目录报错 + 修法指引」由工具层（`file_ops::execute_write_file`）给出。
+/// `create_dirs`：父目录缺失时是否自动创建。**创建语义的调用方应传 `true`**
+/// （`write_file` 工具、`apply_patch` 的纯新建分支）——把「顺手建了目录」交给
+/// 结果回显承担可见性，而不是先报错一轮；`apply_edit` 传 `false`（编辑语义下
+/// 文件必须已存在，父目录必然存在，此处只是不引入创建副作用）。
 pub(crate) async fn write_file_atomic(
     path: impl AsRef<std::path::Path>,
     content: &str,

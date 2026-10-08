@@ -54,23 +54,14 @@ impl ToolRegistry {
             self.security_policy
                 .check_file_size(params.content.len() as u64),
         )?;
-        // 目录语义：**默认不自动创建父目录**——路径写错（本该写已有目录却拼了
-        // 新目录名）时宁可报错，也不静默新建目录（避免"凭空多出一棵树"）。
-        // 确需新建由调用方显式声明 create_dirs；指引随报错回喂，模型可自纠。
-        let create_dirs = params.create_dirs.unwrap_or(false);
-        if !create_dirs {
-            if let Some(parent) = std::path::Path::new(&params.path)
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-            {
-                if !parent.exists() {
-                    return Err(TianyanError::not_found(format!(
-                        "write_file: 父目录不存在：{}——write_file 默认不自动创建目录（防止路径写错时误建新目录）；若确实要新建该目录，请重新调用并传 create_dirs=true",
-                        parent.display()
-                    )));
-                }
-            }
-        }
+        // 目录语义（2026-10 修订）：**自动创建缺失的父目录**。
+        //
+        // 原设计「默认报错 + 指引模型传 create_dirs=true」的意图是防拼错，但实际
+        // 防不住——模型收到报错后多半直接补参数重试，拼错的目录照样被创建，只是
+        // 白多一轮往返（更差的情况是先花一轮 ls 去确认目录结构）。改为
+        // **自动创建 + 结果回显新建目录**：把防护从「先失败一次」换成「创建可见」
+        // （`created_dirs` 落在返回结果里，异常可被模型/用户即时发现）。
+        let created_dirs = Self::missing_parent_dirs(&params.path);
         // 审批门控（自动放行安全路径/拒绝关键路径/请求人类确认，
         // 统一序列见 [`ToolRegistry::ensure_approved`]）
         self.ensure_approved(
@@ -82,9 +73,37 @@ impl ToolRegistry {
             },
         )
         .await?;
-        crate::executor::execute_write_file(&params.path, &params.content, create_dirs)
+        crate::executor::execute_write_file(&params.path, &params.content, true)
             .await
-            .map_err(wrap_tool_error)
+            .map_err(wrap_tool_error)?;
+        Ok(serde_json::json!({
+            "path": params.path,
+            "message": "写入成功",
+            "bytes": params.content.len(),
+            "created_dirs": created_dirs,
+        }))
+    }
+
+    /// 收集「写入时将要新建」的父目录链（缺失的最深层 → 已存在的祖先之下），
+    /// 供结果回显 `created_dirs`。
+    fn missing_parent_dirs(path: &str) -> Vec<String> {
+        let mut missing: Vec<String> = Vec::new();
+        let Some(parent) = std::path::Path::new(path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        else {
+            return missing;
+        };
+        let mut cur = Some(parent);
+        while let Some(p) = cur {
+            if p.exists() {
+                break;
+            }
+            missing.push(p.display().to_string());
+            cur = p.parent().filter(|q| !q.as_os_str().is_empty());
+        }
+        missing.reverse(); // 自外层向内，便于阅读
+        missing
     }
 
     /// 执行 apply_edit 工具：哈希锚定行编辑（含审批工作流门控）。

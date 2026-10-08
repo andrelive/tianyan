@@ -698,8 +698,11 @@ pub async fn apply_patch_action(patch_text: &str, base_dir: &Path) -> Result<Val
     // 全部定位成功 → 统一落盘
     let mut files_json: Vec<Value> = Vec::with_capacity(planned.len());
     for write in planned {
-        // T1-15：原子写（同目录临时文件 + rename）——避免半截文件
-        crate::executor::write_file_atomic(&write.full, &write.content, false)
+        // T1-15：原子写（同目录临时文件 + rename）——避免半截文件。
+        // create_dirs=true：本分支只会是「纯新建」（有旧行的块已在上面按
+        // not_found 中止），此时父目录缺失应自动创建——与 write_file 的
+        // 「创建语义自动建目录」保持一致。已存在文件的情形下该参数无副作用。
+        crate::executor::write_file_atomic(&write.full, &write.content, true)
             .await
             .map_err(|e| TianyanError::Custom(format!("executor: apply_patch: 写入失败: {e}")))?;
         files_json.push(json!({
