@@ -72,13 +72,36 @@ jobs:
       # .config/nextest.toml）；timeout-minutes 作最后防线。
       - uses: taiki-e/install-action@nextest
 
-      - name: Rust unit tests (core/server/mcp)
-        run: cargo nextest run --workspace --exclude tianyan-tauri --lib
-        # 45 分钟：**必须覆盖冷编译**（无缓存时重型依赖约 21 分钟）——上一次误设
-        # 20 分钟，导致编译阶段即被砍、根本没跑到测试（日志停在
-        # `Compiling pdf-extract`）。真正的"测试卡死"由 nextest 的 slow-timeout
-        # 兜底（.config/nextest.toml），不依赖步骤超时。
+      # 单测拆两步：① 仅编译（冷编译 ~22 分钟，单独给 45 分钟）；② 分 4 片跑。
+      #
+      # 背景（0.6.3 tag b2d38de 实测）：编译 22m07s 成功后，nextest 一打印
+      # "Starting 1683 tests across 3 binaries" 就 lost communication —— runner
+      # 被进程/内存峰值拖死（官方文案：starves it for CPU/Memory / terminates
+      # the runner process）。nextest 一次拉起 core/server/mcp 三个测试二进制、
+      # 1683 个测试按核数并发，免费 runner 扛不住。
+      #
+      # 对策：编译独立成步（超时覆盖冷编译，不占用分片预算）；测试按 nextest
+      # 内置 partition（按测试名 hash 均分，无需改测试代码）分 4 片顺序执行，
+      # 并用 `-j 2` 限制并发——单次负载降到原来的几分之一。
+      - name: Build tests (compile only)
+        run: cargo nextest run --workspace --exclude tianyan-tauri --lib --no-run
         timeout-minutes: 45
+
+      - name: Rust unit tests 1/4
+        run: cargo nextest run --workspace --exclude tianyan-tauri --lib --partition count:1/4 -j 2
+        timeout-minutes: 15
+
+      - name: Rust unit tests 2/4
+        run: cargo nextest run --workspace --exclude tianyan-tauri --lib --partition count:2/4 -j 2
+        timeout-minutes: 15
+
+      - name: Rust unit tests 3/4
+        run: cargo nextest run --workspace --exclude tianyan-tauri --lib --partition count:3/4 -j 2
+        timeout-minutes: 15
+
+      - name: Rust unit tests 4/4
+        run: cargo nextest run --workspace --exclude tianyan-tauri --lib --partition count:4/4 -j 2
+        timeout-minutes: 15
 
       # 集成测试（core/tests + server/tests，含 HTTP 级 e2e）——此前只在本地
       # `test.ps1 integration` 跑，CI 从未覆盖；0.5.8 记录"三处 e2e 断言失效
