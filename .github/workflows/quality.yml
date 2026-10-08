@@ -125,36 +125,46 @@ jobs:
           } 2>&1 | tee -a diag.txt
         timeout-minutes: 40
 
-      # ⭐ 对照实验（0.6.3 CI 排查，2026-10）：同一份**已编译产物**换 libtest 再跑一遍。
+      # artifact 就地上传（**必须在会挂住的步骤之前**）：2026-10 实测把上传放在
+      # libtest 对照步之后 ⇒ 该步挂住 + runner 失联 ⇒ 上传根本没执行、artifact
+      # 为空，整轮诊断白跑。教训：诊断产物要"就近上传"，别指望挂住之后的步骤。
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-probe-${{ github.run_id }}
+          path: diag.txt
+          retention-days: 5
+
+      # ⭐ 模块二分（2026-10，替代先前的 libtest 对照步）。
       #
-      # 动机：nextest 在 `Starting N tests across M binaries` 之后**再无任何输出**
-      # （连一条 SLOW 都没有）；而上游 issue #2637（「tests hang indefinitely」）
-      # 的维护者判据恰恰是「底层 runner 报告测试已超 60 秒」= **有 SLOW 提示**。
-      # 我们连 SLOW 都没有 ⇒ 更像 nextest 自身卡在**启动/进程通信**阶段
-      # （另有 #2295：Linux 上 stderr 为管道/Null —— 即非 TTY 日志环境 —— 时挂住）。
-      # 另注：本机（Windows）从未装过 nextest，"本地全绿"一直是 libtest 的成绩，
-      # 所以本地/CI 不是同一执行引擎，这个对照必须在本跑。
-      #
-      # 判读：
-      #   libtest 通过  ⇒ 问题在 nextest 侧（换引擎即可恢复发布）
-      #   libtest 也挂  ⇒ 问题在测试代码/环境本身
-      # `timeout` 保证本步一定会结束（不会再把 runner 拖到失联）。
-      - name: "Diagnostics (libtest control run: same binaries)"
+      # 对照结论（8800e28 实测）：**同一份已编译产物换 libtest（cargo test）也挂住**
+      # ⇒ 问题**不在 nextest**，而在"某个测试在 Linux CI 上把 runner 拖死"
+      # （官方文案：starves it for CPU/Memory / terminates the runner process）。
+      # 旁证：本机 Windows 用 libtest 全量 1485 测试 22s 全绿；WSL 单线程跑到 767 个
+      # 后崩（环境性）——Linux 侧确实存在"跑到某处就出事"的点。
+      # 故转为**模块二分**：逐模块串行、每模块独立 `timeout 300`，结果同时写
+      # stdout 与 $GITHUB_STEP_SUMMARY（步骤级收集，比 job 日志更抗失联）。
+      - name: "Diagnostics (module bisect: serial, per-module timeout)"
         run: |
           set +e
-          timeout 900 cargo test -p tianyan-core -p tianyan-server -p tianyan-mcp --lib -- --test-threads=2 > libtest.log 2>&1
-          code=$?
-          echo "libtest-exit=$code" | tee -a diag.txt
-          grep -E '^test result:' libtest.log | tee -a diag.txt
-          echo "--- libtest.log tail 25 ---" | tee -a diag.txt
-          tail -25 libtest.log | tee -a diag.txt
-        timeout-minutes: 20
+          for m in agent common config context db events executor goals knowledge model observability roles scheduler session skills snapshot todos vfs; do
+            echo "=== MODULE $m ==="
+            timeout 300 cargo test -p tianyan-core --lib -- "${m}::" --test-threads=2 > "mod_$m.log" 2>&1
+            code=$?
+            line="MODULE $m exit=$code ok=$(grep -c ' \.\.\. ok$' mod_$m.log) $(grep -E '^test result:' mod_$m.log | tail -1)"
+            echo "$line"
+            echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "=== module bisect done ==="
+        timeout-minutes: 60
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ci-diag-${{ github.run_id }}
-          path: diag.txt
+          name: ci-bisect-${{ github.run_id }}
+          path: |
+            diag.txt
+            mod_*.log
           retention-days: 5
 
       # 分片：nextest 内置 partition（按测试名 hash 均分），4 片让单片测试量
