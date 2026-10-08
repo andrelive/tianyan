@@ -858,6 +858,23 @@ pub async fn kill_all_running_children() -> usize {
     pids.len()
 }
 
+/// 读取 Linux 进程的**进程组 ID**（`/proc/<pid>/stat` 第 5 字段 `pgrp`）。
+///
+/// 供 [`kill_process_tree`] 校验「该 pid 是否为我们自建的进程组组长」：只有
+/// `pgid == pid` 时才允许发负 PID 信号（否则负信号会命中无关进程组）。
+/// 非 Linux / 进程已退出 / 解析失败 → `None`（调用方退化为只杀正 PID）。
+fn linux_pgid_of(pid: u32) -> Option<u32> {
+    if cfg!(target_os = "windows") {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // 格式：`<pid> (<comm>) <state> <ppid> <pgrp> ...`；comm 可能含空格与右括号
+    // （如 `(my) prog)`），故以**最后一个 `)`** 切分，只取其后字段。
+    let rest = stat.rsplit_once(')')?.1;
+    // rest = " S <ppid> <pgrp> ..." → 索引 0=state, 1=ppid, 2=pgrp
+    rest.split_whitespace().nth(2)?.parse().ok()
+}
+
 /// Unix 侧依赖 spawn 时 `process_group(0)`：子进程成为新进程组组长，
 /// 负 PID 信号作用于整个组——shell 派生的服务进程一并终止（对齐
 /// opencode #30868 教训：只杀 shell 会留孤儿服务进程）。
@@ -879,11 +896,32 @@ async fn kill_process_tree(pid: u32) {
     // Unix：三重保险（进程组 → 进程本身 → 直接子进程）。
     // WSL/Linux 实测：`kill -9 -<pgid>` 可能返回成功但目标仍存活（该环境
     // 进程组语义不可靠）——逐级补刀，任一命中即可；pkill 缺失时忽略其错误。
+    //
+    // ⚠️ 负 PID 信号**必须先校验**（2026-10 修）：它作用于「整个进程组」，
+    // 前提是 pid 确为我们 spawn 时用 `process_group(0)` 建立的那个组长。
+    // 前提不成立时（pid 已被系统复用为别的进程/组长）会**误杀无关进程组**——
+    // 实发事故：CI runner 被整组 SIGKILL → 该步骤**无任何日志** +
+    // 「The hosted runner lost communication with the server」；WSL 侧表现为
+    // 服务崩溃（Wsl/Service/E_UNEXPECTED，本地 kill-wrapper trace 抓到
+    // `kill -9 -<pgid>` 之后立即崩）；Windows 走 `taskkill /PID`（无进程组
+    // 语义）故从不复现。校验不通过时跳过负信号，保留「正 PID + 子进程」两级。
+    let mut targets: Vec<Vec<String>> = Vec::new();
+    match linux_pgid_of(pid) {
+        Some(pgid) if pgid == pid => targets.push(vec!["-9".to_string(), format!("-{pid}")]),
+        Some(pgid) => tracing::debug!(
+            pid,
+            pgid,
+            "终止进程树：pid 非自建进程组组长，跳过负 PID 信号（防误杀无关组）"
+        ),
+        None => tracing::debug!(
+            pid,
+            "终止进程树：读不到 pgid（进程已退出或非 Linux），跳过负 PID 信号"
+        ),
+    }
+    targets.push(vec!["-9".to_string(), pid.to_string()]);
+
     let mut killed = false;
-    for args in [
-        vec!["-9".to_string(), format!("-{pid}")],
-        vec!["-9".to_string(), pid.to_string()],
-    ] {
+    for args in targets {
         match tokio::process::Command::new("kill")
             .args(&args)
             .stdout(std::process::Stdio::null())

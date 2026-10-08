@@ -87,20 +87,20 @@ jobs:
         run: cargo nextest run --workspace --exclude tianyan-tauri --lib --no-run
         timeout-minutes: 45
 
-      - name: Rust unit tests 1/4
-        run: cargo nextest run --workspace --exclude tianyan-tauri --lib --partition count:1/4 -j 2
+      # 按包拆分 + 分片：① 不让 core/server/mcp 三个重二进制**同时启动**
+      # （每个都要加载 lancedb/datafusion，瞬时内存峰值是 runner 失联的
+      # 嫌疑之一）；② 任一步失败时范围清晰（core 半片 / server+mcp）。
+      # 分片用 nextest 内置 partition（按测试名 hash 均分，1/2 + 1/2 = core 全部）。
+      - name: Rust unit tests (core 1/2)
+        run: cargo nextest run -p tianyan-core --lib --partition count:1/2 -j 2
         timeout-minutes: 15
 
-      - name: Rust unit tests 2/4
-        run: cargo nextest run --workspace --exclude tianyan-tauri --lib --partition count:2/4 -j 2
+      - name: Rust unit tests (core 2/2)
+        run: cargo nextest run -p tianyan-core --lib --partition count:2/2 -j 2
         timeout-minutes: 15
 
-      - name: Rust unit tests 3/4
-        run: cargo nextest run --workspace --exclude tianyan-tauri --lib --partition count:3/4 -j 2
-        timeout-minutes: 15
-
-      - name: Rust unit tests 4/4
-        run: cargo nextest run --workspace --exclude tianyan-tauri --lib --partition count:4/4 -j 2
+      - name: Rust unit tests (server + mcp)
+        run: cargo nextest run -p tianyan-server -p tianyan-mcp --lib -j 2
         timeout-minutes: 15
 
       # 集成测试（core/tests + server/tests，含 HTTP 级 e2e）——此前只在本地
