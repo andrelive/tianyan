@@ -135,6 +135,38 @@ jobs:
           path: diag.txt
           retention-days: 5
 
+      # ⭐ 判别实验（2026-10）：**单线程全量** libtest（`--test-threads=1`）。
+      #
+      # 要回答的问题：此前"全量一起跑必挂死（15–44 min，runner 失联）、按模块/分片
+      # 跑就正常"到底是什么性质？
+      #   - 本步**通过** ⇒ 与并发/资源竞争相关（候选：测试跨模块并发改
+      #     `std::env::set_var`；各模块的 env 锁彼此不互斥，glibc 的 setenv 与
+      #     分配器交互脆弱，而 Windows 的 `_putenv` 路径不同 ⇒ 解释"Linux 挂、
+      #     Windows 全绿"）；
+      #   - 本步**也挂** ⇒ 某个测试自身挂住，与并发无关 —— 单线程下 libtest 会
+      #     逐个打印 `test X ... ok`，日志最后一条 ok 的**下一个测试即挂点**。
+      # 位置刻意放在模块二分**之前**（无预热），否则"预热"假说会让结论失真。
+      # 包集合与分片一致（复用编译产物）；`stdbuf -oL` 行缓冲让进度即时可见。
+      - name: "Diagnostics (libtest SINGLE-THREAD full run)"
+        run: |
+          set +e
+          stdbuf -oL -eL timeout 900 cargo test -p tianyan-core -p tianyan-server -p tianyan-mcp --lib -- --test-threads=1 > st1.log 2>&1
+          code=$?
+          echo "single-thread exit=$code" | tee -a diag.txt
+          grep -E '^test result:' st1.log | tee -a diag.txt
+          echo "--- last 30 lines (the line after the last ok is the hung test) ---" | tee -a diag.txt
+          tail -30 st1.log | tee -a diag.txt
+        timeout-minutes: 25
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-singlethread-${{ github.run_id }}
+          path: |
+            diag.txt
+            st1.log
+          retention-days: 5
+
       # ⭐ 模块二分（2026-10，替代先前的 libtest 对照步）。
       #
       # 对照结论（8800e28 实测）：**同一份已编译产物换 libtest（cargo test）也挂住**
