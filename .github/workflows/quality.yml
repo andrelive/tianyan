@@ -62,6 +62,19 @@ jobs:
       - name: Rust clippy (deny warnings)
         run: cargo clippy --workspace --exclude tianyan-tauri --all-targets -- -D warnings
 
+      # CI 资源诊断（0.6.3 CI 排查）：runner 曾在测试步骤"失联"（job 失败、
+      # 日志 blob 根本不存在 → 看不到任何输出），需要区分「磁盘/内存耗尽」
+      # 与「测试真的挂住」。输出 tee 到 diag.txt 并由下一步立即上传 artifact
+      # —— artifact 在该步骤内就完成上传，即使后面的测试步骤把 runner 拖死
+      # 也拿得到这份数据。
+      - name: Diagnostics (disk/mem)
+        run: |
+          {
+            echo "=== disk before build ==="; df -h /
+            echo "=== mem ==="; free -m
+            echo "=== cpus ==="; nproc
+          } 2>&1 | tee diag.txt
+
 
       # cargo-nextest（替代 libtest）：解决"卡死时看不到卡点"的盲区——
       # 0.6.3 tag（d421fd8）Quality 的 unit tests 步骤曾卡在 in_progress 达 70 分钟
@@ -95,6 +108,29 @@ jobs:
       - name: Build tests (compile only)
         run: cargo nextest run -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --no-run
         timeout-minutes: 50
+
+      # 复用验证（关键诊断）：用与分片步骤**完全相同的参数**再跑一次
+      # `--no-run`。若 cargo 编译指纹一致，这条应秒级返回；若又花十几分钟，
+      # 说明「同参数」仍触发重编译——即分片步骤实际在编译而非跑测试，
+      # 那 12 分钟超时必然不够、且 job 总时长会被拖到触发 runner 失联。
+      - name: "Diagnostics (reuse probe: same cmd as shards)"
+        run: |
+          {
+            echo "=== disk after build ==="; df -h /
+            du -sh target 2>/dev/null || true
+            free -m
+            echo "=== timing: probe --no-run (expect <10s if reuse works) ==="
+            time cargo nextest run -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --no-run
+            echo "=== disk after probe ==="; df -h /
+          } 2>&1 | tee -a diag.txt
+        timeout-minutes: 40
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-diag-${{ github.run_id }}
+          path: diag.txt
+          retention-days: 5
 
       # 分片：nextest 内置 partition（按测试名 hash 均分），4 片让单片测试量
       # 降到 1/4；`-j 2` 限制同时运行的测试进程数（默认 = 核数），避免 1683

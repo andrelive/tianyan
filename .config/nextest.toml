@@ -13,7 +13,13 @@
 #     （**含测试名**）——卡点主动现形；
 #   - terminate-after = 3：再拖 3 个 period 仍未结束 → 终止该测试并报失败，
 #     而不是无限等待（timeout-minutes 只是最后一道防线）。
+# ⚠️ period 收紧到 60s / terminate-after 2（0.6.3 CI 排查）：原 120s×3 意味着
+# 单个挂住的测试最久可耗 ~8 分钟；若一片里有若干挂住测试，整步会被拖到
+# job 级异常（runner 失联 → 日志 blob 丢失 → 看不到任何测试名）。
+# 60s×2（单测试最多 ~3 分钟）让"挂住"尽快变成"明确失败 + SLOW 行带测试名"，
+# 代价是真实耗时 >60s 的慢测试会被误杀——CI 正常测试应远低于此（本地全量
+# core 1485 测试 22s）。
 [profile.default]
-slow-timeout = { period = "120s", terminate-after = 3 }
+slow-timeout = { period = "60s", terminate-after = 2 }
 status-level = "slow"
 final-status-level = "slow"
