@@ -120,7 +120,7 @@ cargo test -p tianyan-core vfs::backend::local -- --nocapture  # 指定测试模
 
 被否决的方向（避免重复讨论；触发条件满足时据此重新评估）→ [REJECTED.md](docs/architecture/decisions/REJECTED.md)
 
-专题文档（机制级）→ [`context-pipeline`](docs/architecture/context-pipeline.md)（上下文组装+压缩）· [`event-protocol`](docs/architecture/event-protocol.md)（事件/SSE 协议）· [`model-provider-notes`](docs/architecture/model-provider-notes.md)（reasoning 回传+缓存）· [`operations/`](docs/operations/)（troubleshooting / data-health-check / release-msi）
+专题文档（机制级）→ [`context-pipeline`](docs/architecture/context-pipeline.md)（上下文组装+压缩）· [`event-protocol`](docs/architecture/event-protocol.md)（事件/SSE 协议）· [`model-provider-notes`](docs/architecture/model-provider-notes.md)（reasoning 回传+缓存）· [`operations/`](docs/operations/)（troubleshooting / data-health-check / release-msi / **ci-pipeline**）
 
 模块索引 → [`docs/architecture/module-map.md`](docs/architecture/module-map.md)
 设计原则 → [`docs/architecture/principles.md`](docs/architecture/principles.md)
