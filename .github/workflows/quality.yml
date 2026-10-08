@@ -125,6 +125,31 @@ jobs:
           } 2>&1 | tee -a diag.txt
         timeout-minutes: 40
 
+      # ⭐ 对照实验（0.6.3 CI 排查，2026-10）：同一份**已编译产物**换 libtest 再跑一遍。
+      #
+      # 动机：nextest 在 `Starting N tests across M binaries` 之后**再无任何输出**
+      # （连一条 SLOW 都没有）；而上游 issue #2637（「tests hang indefinitely」）
+      # 的维护者判据恰恰是「底层 runner 报告测试已超 60 秒」= **有 SLOW 提示**。
+      # 我们连 SLOW 都没有 ⇒ 更像 nextest 自身卡在**启动/进程通信**阶段
+      # （另有 #2295：Linux 上 stderr 为管道/Null —— 即非 TTY 日志环境 —— 时挂住）。
+      # 另注：本机（Windows）从未装过 nextest，"本地全绿"一直是 libtest 的成绩，
+      # 所以本地/CI 不是同一执行引擎，这个对照必须在本跑。
+      #
+      # 判读：
+      #   libtest 通过  ⇒ 问题在 nextest 侧（换引擎即可恢复发布）
+      #   libtest 也挂  ⇒ 问题在测试代码/环境本身
+      # `timeout` 保证本步一定会结束（不会再把 runner 拖到失联）。
+      - name: "Diagnostics (libtest control run: same binaries)"
+        run: |
+          set +e
+          timeout 900 cargo test -p tianyan-core -p tianyan-server -p tianyan-mcp --lib -- --test-threads=2 > libtest.log 2>&1
+          code=$?
+          echo "libtest-exit=$code" | tee -a diag.txt
+          grep -E '^test result:' libtest.log | tee -a diag.txt
+          echo "--- libtest.log tail 25 ---" | tee -a diag.txt
+          tail -25 libtest.log | tee -a diag.txt
+        timeout-minutes: 20
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
