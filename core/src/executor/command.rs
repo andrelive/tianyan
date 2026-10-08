@@ -871,6 +871,7 @@ pub async fn kill_all_running_children() -> usize {
 ///   **唯一能区分「我们的组长」与「恰好同号的陌生组长」的廉价判据**。
 ///   复现条件也解释了「全量单测必崩、单测单跑不崩」：只有跑量足够大、pid
 ///   高速回收复用后才会命中。
+///
 /// 非 Linux / 进程已退出 / 解析失败 → `None`（调用方退化为只杀正 PID）。
 fn linux_proc_ids(pid: u32) -> Option<(u32, u32)> {
     if cfg!(target_os = "windows") {
