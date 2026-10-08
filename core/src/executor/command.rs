@@ -858,12 +858,21 @@ pub async fn kill_all_running_children() -> usize {
     pids.len()
 }
 
-/// 读取 Linux 进程的**进程组 ID**（`/proc/<pid>/stat` 第 5 字段 `pgrp`）。
+/// 读取 Linux 进程的 `(pgid, ppid)`（`/proc/<pid>/stat` 的 pgrp / ppid 字段）。
 ///
-/// 供 [`kill_process_tree`] 校验「该 pid 是否为我们自建的进程组组长」：只有
-/// `pgid == pid` 时才允许发负 PID 信号（否则负信号会命中无关进程组）。
+/// 供 [`kill_process_tree`] 判定「该 pid 是否**仍是**我们自建的那个进程组组长」：
+/// 只有 `pgid == pid` **且** `ppid == 本进程` 时才允许发负 PID 信号。
+///
+/// 两个条件缺一不可（2026-10 二次加固，全量单测实测教训）：
+/// - `pgid == pid` 单独**不够**——pid 被系统回收后复用给**另一个组的组长**时
+///   同样成立，`kill -9 -<pid>` 于是误杀无关进程组（表现为 CI runner 失联、
+///   WSL 服务崩溃 `E_UNEXPECTED`）；
+/// - `ppid == 本进程` 能排除「复用来的陌生进程」（它的父进程不是我们），是
+///   **唯一能区分「我们的组长」与「恰好同号的陌生组长」的廉价判据**。
+///   复现条件也解释了「全量单测必崩、单测单跑不崩」：只有跑量足够大、pid
+///   高速回收复用后才会命中。
 /// 非 Linux / 进程已退出 / 解析失败 → `None`（调用方退化为只杀正 PID）。
-fn linux_pgid_of(pid: u32) -> Option<u32> {
+fn linux_proc_ids(pid: u32) -> Option<(u32, u32)> {
     if cfg!(target_os = "windows") {
         return None;
     }
@@ -872,7 +881,11 @@ fn linux_pgid_of(pid: u32) -> Option<u32> {
     // （如 `(my) prog)`），故以**最后一个 `)`** 切分，只取其后字段。
     let rest = stat.rsplit_once(')')?.1;
     // rest = " S <ppid> <pgrp> ..." → 索引 0=state, 1=ppid, 2=pgrp
-    rest.split_whitespace().nth(2)?.parse().ok()
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    let ppid: u32 = fields.next()?.parse().ok()?;
+    let pgid: u32 = fields.next()?.parse().ok()?;
+    Some((pgid, ppid))
 }
 
 /// Unix 侧依赖 spawn 时 `process_group(0)`：子进程成为新进程组组长，
@@ -897,25 +910,36 @@ async fn kill_process_tree(pid: u32) {
     // WSL/Linux 实测：`kill -9 -<pgid>` 可能返回成功但目标仍存活（该环境
     // 进程组语义不可靠）——逐级补刀，任一命中即可；pkill 缺失时忽略其错误。
     //
-    // ⚠️ 负 PID 信号**必须先校验**（2026-10 修）：它作用于「整个进程组」，
-    // 前提是 pid 确为我们 spawn 时用 `process_group(0)` 建立的那个组长。
-    // 前提不成立时（pid 已被系统复用为别的进程/组长）会**误杀无关进程组**——
+    // ⚠️ 负 PID 信号**必须先校验**（2026-10 修，2026-10 二次加固）：它作用于
+    // 「整个进程组」，前提是 pid 确为我们 spawn 时用 `process_group(0)` 建立的
+    // **且至今未被回收复用的**那个组长。前提不成立时会**误杀无关进程组**——
     // 实发事故：CI runner 被整组 SIGKILL → 该步骤**无任何日志** +
     // 「The hosted runner lost communication with the server」；WSL 侧表现为
     // 服务崩溃（Wsl/Service/E_UNEXPECTED，本地 kill-wrapper trace 抓到
     // `kill -9 -<pgid>` 之后立即崩）；Windows 走 `taskkill /PID`（无进程组
-    // 语义）故从不复现。校验不通过时跳过负信号，保留「正 PID + 子进程」两级。
+    // 语义）故从不复现。
+    //
+    // 首版只看 `pgid == pid`，**不足以**排除 pid 复用：复用后的新进程若恰好是
+    // 另一个组的组长，判据同样成立 → 仍会误杀。全量单测（大量短命子进程 →
+    // pid 高速回收）因此必崩，而单测单跑（pid 空间干净）必过——这个「跑量依赖」
+    // 正是复用假设的实测指纹。故补上 `ppid == 本进程`。
+    // 校验不通过时跳过负信号，保留「正 PID + 子进程」两级（仍能终止直接子进程）。
     let mut targets: Vec<Vec<String>> = Vec::new();
-    match linux_pgid_of(pid) {
-        Some(pgid) if pgid == pid => targets.push(vec!["-9".to_string(), format!("-{pid}")]),
-        Some(pgid) => tracing::debug!(
+    let me = std::process::id();
+    match linux_proc_ids(pid) {
+        Some((pgid, ppid)) if pgid == pid && ppid == me => {
+            targets.push(vec!["-9".to_string(), format!("-{pid}")])
+        }
+        Some((pgid, ppid)) => tracing::debug!(
             pid,
             pgid,
-            "终止进程树：pid 非自建进程组组长，跳过负 PID 信号（防误杀无关组）"
+            ppid,
+            me,
+            "终止进程树：pid 非自建组长或已被系统复用，跳过负 PID 信号（防误杀无关组）"
         ),
         None => tracing::debug!(
             pid,
-            "终止进程树：读不到 pgid（进程已退出或非 Linux），跳过负 PID 信号"
+            "终止进程树：读不到 /proc/<pid>/stat（进程已退出或非 Linux），跳过负 PID 信号"
         ),
     }
     targets.push(vec!["-9".to_string(), pid.to_string()]);
