@@ -376,6 +376,38 @@ pub fn last_config_error() -> Option<&'static TianyanError> {
     CONFIG_LOAD_ERROR.get()
 }
 
+/// 测试共享设施（`#[cfg(test)]`）。
+///
+/// **进程环境变量测试的全局互斥**：`std::env::set_var/remove_var` 会改写进程级
+/// `environ`（glibc 上要 realloc 该数组，与分配器锁交互，多线程下素来脆弱）。
+/// 此前 `config` 下各测试模块**各持一把私有锁**（`ENV_CONFIG_LOCK` /
+/// `ENV_DATA_DIR_LOCK`），彼此不互斥 —— 全量并发跑时这些测试仍会与其它线程交错。
+/// 0.6.3 CI 实测的指纹：**全量 + 多线程挂死、单线程或按模块跑必过**（详见
+/// docs/operations/ci-pipeline.md §3）。收敛到这一把锁，"全量并发"才真正安全。
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// 跨模块共享的环境变量测试互斥锁。
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 持锁设置环境变量 → 执行 `f` → 恢复原值，返回 `f` 的结果。
+    ///
+    /// 锁中毒（前一个持锁测试 panic）时取回内部值继续，避免一个失败拖垮其余 env 测试。
+    pub(crate) fn with_env_var<T>(key: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let result = f();
+        match original {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,23 +666,12 @@ mod tests {
         assert!(result.is_err(), "非法 TOML 应加载失败");
     }
 
-    /// 串行化 TIANYAN_CONFIG 环境变量测试（进程级全局副作用，避免并行测试互相干扰）。
-    static ENV_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// 保存 / 恢复 TIANYAN_CONFIG 环境变量。
+    ///
+    /// 走**跨模块共享**的 env 锁（`test_support::ENV_LOCK`）——各模块私有锁彼此
+    /// 不互斥，全量并发跑时仍会互相干扰（见 `test_support` 模块文档）。
     fn with_tianyan_config_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let _guard = ENV_CONFIG_LOCK.lock().unwrap();
-        let original = std::env::var("TIANYAN_CONFIG").ok();
-        match value {
-            Some(v) => std::env::set_var("TIANYAN_CONFIG", v),
-            None => std::env::remove_var("TIANYAN_CONFIG"),
-        }
-        let result = f();
-        match original {
-            Some(v) => std::env::set_var("TIANYAN_CONFIG", v),
-            None => std::env::remove_var("TIANYAN_CONFIG"),
-        }
-        result
+        test_support::with_env_var("TIANYAN_CONFIG", value, f)
     }
 
     #[test]

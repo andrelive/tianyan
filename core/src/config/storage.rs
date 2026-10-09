@@ -123,6 +123,7 @@ impl StorageConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_support;
 
     #[test]
     fn test_default_storage_config() {
@@ -134,43 +135,28 @@ mod tests {
         assert_eq!(config.vector.vector_dimension, 1536);
     }
 
-    /// 串行化 TIANYAN_DATA_DIR 环境变量测试（进程级全局副作用）。
-    static ENV_DATA_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn test_default_data_dir_honors_tianyan_data_dir_env() {
         // README/.env.example 声明的 TIANYAN_DATA_DIR 覆盖：默认数据目录应取环境变量
-        let _guard = ENV_DATA_DIR_LOCK.lock().unwrap();
-        let original = std::env::var("TIANYAN_DATA_DIR").ok();
-        std::env::set_var("TIANYAN_DATA_DIR", "C:\\tianyan-e2e-data");
-
-        let config = StorageConfig::default();
-        let restored = || match &original {
-            Some(v) => std::env::set_var("TIANYAN_DATA_DIR", v),
-            None => std::env::remove_var("TIANYAN_DATA_DIR"),
-        };
-        assert_eq!(
-            config.data_dir,
-            PathBuf::from("C:\\tianyan-e2e-data"),
-            "TIANYAN_DATA_DIR 应覆盖默认数据目录"
-        );
-        restored();
+        // 走跨模块共享的 env 锁（见 config::test_support 的模块文档）。
+        test_support::with_env_var("TIANYAN_DATA_DIR", Some("C:\\tianyan-e2e-data"), || {
+            let config = StorageConfig::default();
+            assert_eq!(
+                config.data_dir,
+                PathBuf::from("C:\\tianyan-e2e-data"),
+                "TIANYAN_DATA_DIR 应覆盖默认数据目录"
+            );
+        });
     }
 
     #[test]
     fn test_default_data_dir_ignores_empty_env() {
-        let _guard = ENV_DATA_DIR_LOCK.lock().unwrap();
-        let original = std::env::var("TIANYAN_DATA_DIR").ok();
-        let normal = {
-            std::env::remove_var("TIANYAN_DATA_DIR");
+        let normal = test_support::with_env_var("TIANYAN_DATA_DIR", None, || {
             StorageConfig::default().data_dir.clone()
-        };
-        std::env::set_var("TIANYAN_DATA_DIR", "");
-        let with_empty = StorageConfig::default().data_dir.clone();
-        match &original {
-            Some(v) => std::env::set_var("TIANYAN_DATA_DIR", v),
-            None => std::env::remove_var("TIANYAN_DATA_DIR"),
-        }
+        });
+        let with_empty = test_support::with_env_var("TIANYAN_DATA_DIR", Some(""), || {
+            StorageConfig::default().data_dir.clone()
+        });
         assert_eq!(with_empty, normal, "空 TIANYAN_DATA_DIR 应回落到默认目录");
     }
 

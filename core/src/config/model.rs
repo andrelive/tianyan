@@ -844,6 +844,7 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_support;
 
     #[test]
     fn test_thinking_field_wire_names() {
@@ -1246,22 +1247,24 @@ mod tests {
 
     #[test]
     fn test_resolve_api_key_env_var() {
-        std::env::set_var("TIANYAN_TEST_KEY2", "env-key-value");
-        let p = ProviderConfig {
-            name: "test".to_string(),
-            endpoint: "https://api.example.com".to_string(),
-            api_key: Some("${TIANYAN_TEST_KEY2}".to_string()),
-            models: vec![],
-            timeout: 60,
-            first_token_timeout: 300,
-            enabled: true,
-            headers: HashMap::new(),
-            thinking_field: None,
-            dialect: None,
-            ..Default::default()
-        };
-        assert_eq!(p.resolve_api_key(), "env-key-value");
-        std::env::remove_var("TIANYAN_TEST_KEY2");
+        // 走跨模块共享的 env 锁（见 config::test_support 的模块文档）：此测试此前
+        // **完全没有加锁**，是全量并发下最可疑的干扰源之一。
+        test_support::with_env_var("TIANYAN_TEST_KEY2", Some("env-key-value"), || {
+            let p = ProviderConfig {
+                name: "test".to_string(),
+                endpoint: "https://api.example.com".to_string(),
+                api_key: Some("${TIANYAN_TEST_KEY2}".to_string()),
+                models: vec![],
+                timeout: 60,
+                first_token_timeout: 300,
+                enabled: true,
+                headers: HashMap::new(),
+                thinking_field: None,
+                dialect: None,
+                ..Default::default()
+            };
+            assert_eq!(p.resolve_api_key(), "env-key-value");
+        });
     }
 
     #[test]

@@ -91,6 +91,12 @@ jobs:
       - name: "Build tests (compile only: server + mcp)"
         run: cargo test -p tianyan-server -p tianyan-mcp --lib --no-run
         timeout-minutes: 20
+      # 第三条预编译：下面的"并发实验"用 3 包集合（与 E1 复现条件一致）。
+      # 本机实测两集合可互相复用（§1 STEP3），故不会额外重编译。
+      - name: "Build tests (compile only: 3-package set, for the concurrency experiment)"
+        run: cargo test -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --no-run
+        timeout-minutes: 45
+
 
       # 复用验证（防线，别删）：与下面测试步骤**逐字相同**的参数再各跑一次
       # --no-run。秒级返回 ⇒ 指纹一致、产物复用成立；又是十几分钟 ⇒ 有人改了
@@ -153,6 +159,37 @@ jobs:
       - name: "Rust unit tests (libtest: server + mcp)"
         run: cargo test -p tianyan-server -p tianyan-mcp --lib -- --test-threads=2
         timeout-minutes: 10
+      # ⭐ 并发实验（2026-10）：验证「全量 + 高并发」在 env 锁收敛**之后**是否还会挂。
+      #
+      # 背景：0.6.3 实测「全量 + 多线程」会挂死（run `37742472765`，46 分钟），
+      # 而「单线程全量」与「按模块」都稳过。最强候选是 `config` 下三处 env 测试
+      # （`set_var` / `remove_var`）的锁**模块私有、彼此不互斥**；本轮已把它们
+      # 收敛到 `config::test_support::ENV_LOCK` 这一把共享锁。
+      #
+      # 判读：
+      #   - 通过 ⇒ 干扰源确认（env 锁即关键），可考虑把正式门禁也改回"全量并发"（更快）；
+      #   - 仍挂 ⇒ 另有干扰源，需继续找（挂点时 libtest 会打印到最后一条 ok，
+      #     其"下一个测试"即嫌疑）。
+      # 放在正式门禁之后（不影响门禁结论）；结果连同 diag.txt 就近上传 artifact。
+      - name: "Experiment (full run, 4 threads; env-lock converged)"
+        run: |
+          set +e
+          stdbuf -oL -eL timeout 900 cargo test -p tianyan-core -p tianyan-server -p tianyan-mcp --lib -- --test-threads=4 > exp4.log 2>&1
+          echo "exp-full-4threads exit=$?" | tee -a diag.txt
+          grep -E '^test result:' exp4.log | tee -a diag.txt
+          echo "--- exp4.log tail 30 (line after the last ok is the hung test) ---" | tee -a diag.txt
+          tail -30 exp4.log | tee -a diag.txt
+        timeout-minutes: 20
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-exp4-${{ github.run_id }}
+          path: |
+            diag.txt
+            exp4.log
+          retention-days: 5
+
 
       # 集成测试（core/tests + server/tests，含 HTTP 级 e2e）——此前只在本地
       # `test.ps1 integration` 跑，CI 从未覆盖；0.5.8 记录"三处 e2e 断言失效
