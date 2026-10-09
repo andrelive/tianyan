@@ -1,8 +1,8 @@
 # CI 流水线排障手册（ci-pipeline）
 
-> 适用版本：0.6.3（撰写基线 HEAD `1506b8a`）
+> 适用版本：0.6.3（撰写基线 HEAD `87aa123`）
 > 覆盖：GitHub Actions 上 `quality.yml` / `release.yml` 的**挂死、日志丢失、假失败**类问题。
-> 结论全部来自 0.6.3 发布周期的真机实测（附 run id 便于复核）；未结案项显式标注。
+> 结论全部来自 0.6.3 发布周期的真机实测（附 run id / commit 便于复核）。
 > 相关文档：[`troubleshooting.md`](troubleshooting.md)（应用运行时）· [`release-msi.md`](release-msi.md)（打包发布）
 
 ---
@@ -12,11 +12,13 @@
 | 症状 | 根因 | 处置 |
 | --- | --- | --- |
 | 步骤挂死 15–44 分钟；job 结束后**该 job 的日志 blob 不存在**（UI 点开是空的） | **runner 失联**（CPU/内存饥饿 → GitHub 判定 lost communication，job 异常收尾，日志未 finalize） | §2：诊断产物**就近上传 artifact**，别指望"挂住之后"的步骤还能跑 |
+| `Install protoc` 步骤 **00:00 瞬时失败**、后续全 skipped | `arduino/setup-protoc@v3` 需从 GitHub Releases 下载，偶发抽风（0.6.3 期间命中 2 次，每次整轮白跑） | §7：已改 apt + 重试 |
 | 单测步骤耗时 15 分钟却**全程在 `Compiling`**（一个测试都没跑到就被 timeout 杀掉） | **包集合不一致** → cargo 编译指纹不同 → 前一步的编译产物整棵作废 | §1 |
-| `Starting N tests across M binaries` 之后**再无任何输出**（连一条 nextest SLOW 都没有），随后失联 | "全量挂 / 分模块不挂"现象，见 §3（0.6.3 未完全结案） | §3 判别实验 |
+| `Starting N tests across M binaries` 之后**再无任何输出**（连一条 nextest SLOW 都没有），随后失联 | nextest 的 **process-per-test 进程累积**把 runner 拖死 | §3（**已定位 + 已修复**） |
 | 本地 `cargo check` 全绿、CI `Rust clippy (deny warnings)` 红 | 本地用了比 CI 弱的检查（如漏跑 clippy） | §5：以 `.\scripts\test.ps1 lint` 为验收入口 |
 | 每轮 CI 都冷编译 ~30 分钟 | rust-cache 失败轮次不保存（`CACHE_ON_FAILURE: false`）；tag 推送默认不保存 | §6 |
 | `kill -9 -<pid>` 之后 runner 失联 / WSL 服务崩溃（`E_UNEXPECTED`） | 负 PID 信号**误杀无关进程组**（pid 已被系统复用） | §4 |
+| 本机脚本轮询 GitHub API 突然报错退出 | 匿名请求 **60 次/小时**被打满 | §7：取证通道一律带 token |
 
 ---
 
@@ -49,20 +51,23 @@ Rust unit tests (core 1/2)      15 分钟后被 timeout 杀掉
 | STEP2 | **完全相同命令**再跑 | **2.8s、0 条编译** ⇒ 复用成立 |
 | STEP3 | `cargo test --workspace --exclude tianyan-tauri --lib --no-run` | 2.7s、0 条编译（本机两集合恰好无差异；CI 上则出现过重编译，见 §0） |
 
-CI 侧另有直接证据（run `37730710190`）：`reuse probe` 步用**与分片逐字相同**的参数跑 `--no-run`，
-耗时 **1.58s**（另一轮 0.53s / 0.23s）—— 证明"同参数必复用"。
+CI 侧另有直接证据（run `37730710190`）：`reuse probe` 步用**与测试步骤逐字相同**的参数跑 `--no-run`，
+耗时 **1.58s**（另一轮 0.53s / 0.23s / 0.01s）—— 证明"同参数必复用"。
 
 ### 纪律（写 workflow 时必须遵守）
 
-**同一 workflow 内所有 cargo / nextest 步骤共用同一包集合**，允许的差异只有这几项（都不影响编译指纹）：
+**预编译步骤与使用它的测试步骤必须同包集合、逐字一致**，允许的差异只有这几项（都不影响编译指纹）：
 
-- `--partition count:i/n`（nextest 测试选择）
-- `-j N`（并发度 / test-threads）
 - `--no-run`（只编译不运行）
 - 测试过滤参数（libtest 的 filter）
+- `--test-threads N` / nextest 的 `-j N`（并发度）
+- nextest 的 `--partition count:i/n`（测试选择）
 
-> ⚠️ 0.6.3 排查期间我自己也踩过一次：诊断用的"模块二分"步写成 `-p tianyan-core`（单包），
-> 而其余步骤是 3 包 ⇒ 又白编译 ~15 分钟（`mod_agent.log` 开头整片 `Compiling`）。
+`quality.yml` 如今有**两组**集合（core 单独 / server+mcp），**各配一条预编译** —— 这比"强行统一成一组"
+更贴合"不把 3 个重二进制同时拉起"的初衷，代价是两条 Build tests 步骤。
+
+> ⚠️ 0.6.3 排查期间我自己也踩过：诊断用的"模块二分"步写成 `-p tianyan-core`（单包），
+> 而其余步骤是 3 包 ⇒ 白编译 ~15 分钟（`mod_agent.log` 开头整片 `Compiling`）。
 
 ---
 
@@ -79,10 +84,10 @@ CI 侧另有直接证据（run `37730710190`）：`reuse probe` 步用**与分�
 
 1. **诊断输出要写进 artifact，且 artifact 步要放在"可能挂住"的步骤之前**。
    （0.6.3 实测反例：把 `upload-artifact` 放在 libtest 对照步**之后** ⇒ 该步挂住 ⇒ 上传根本没执行 ⇒ 整轮诊断白跑。）
-2. 一步一产物（`ci-probe-<run_id>` / `ci-bisect-<run_id>` / `ci-singlethread-<run_id>`），别共用 name。
-3. 想让结论**抗失联**，可用 `$GITHUB_STEP_SUMMARY`（步骤级收集）作为第二通道。
-4. 要"挂住也要有结论"，就把大动作**拆成多个独立步骤**（每步带自己的 `timeout-minutes`），
-   前面已结束的步骤结论就不会被后面的挂死抹掉。
+2. 一步一产物（`ci-probe-<run_id>` 等），别共用 name。
+3. 想让结论**抗失联**，用 `$GITHUB_STEP_SUMMARY`（**步骤级**收集）作为第二通道 —— 0.6.3 实测：
+   19 个模块的汇总行在 runner 失联的 run 里依然在 UI 的 Job summary 中可见。
+4. 要"挂住也要有结论"，就把大动作**拆成多个独立步骤**（每步带自己的 `timeout-minutes`）。
 
 ### 取证命令（本机，需要 GitHub 凭据）
 
@@ -98,46 +103,57 @@ curl.exe -sSL --compressed -H "Authorization: Bearer $tok" `
 
 ---
 
-## 3. "全量挂 / 分模块不挂"（**0.6.3 未完全结案**）
+## 3. 单测把 runner 拖死（**已定位 + 已修复**）
 
-### 观察表（全部 CI 实测）
+### 现象
 
-| 跑法 | 引擎 | 范围 | 结果 |
-| --- | --- | --- | --- |
-| 3 包全量 libtest（run `37742472765`） | libtest | core+server+mcp | ❌ 挂死 46 分钟 |
-| 3 包 hash 1/4 分片（多轮） | nextest | 混合所有模块 | ❌ 挂死 15–44 分钟 |
-| 单包 × 每模块单独（run `37751282476`） | libtest | 19 个模块逐个 | ✅ 全过（步耗时 23:26，含编译） |
-| 3 包 hash 1/4 分片（同 run，**在模块二分之后**） | nextest | 混合所有模块 | ✅ **15/9/8/8 秒** |
-| 单包全量（WSL Ubuntu） | libtest | core | ❌ 767 个后 WSL 崩溃（环境性，见 §4） |
-| 单包全量（本机 Windows） | libtest | core | ✅ 1485 测试 22s |
-| 3 包 1/4 分片（本机 Windows） | nextest 0.9.148 | 3 包 | ✅ 422 passed / 39.8s |
+`Rust unit tests` 步骤 in_progress **15–44 分钟**直至 job 被判失败；**该 job 的日志 blob 不存在**
+（UI 点开是空的）。GitHub 的 Annotation 原文：
 
-**已排除的解释**（都做过对照，别再重复）：
+> The hosted runner lost communication with the server. Anything in your workflow that
+> terminates the runner process, starves it for CPU/Memory, or ...
 
-- ❌ **nextest 是根因 / nextest×Rust 1.99 冲突** —— 同一份产物换 libtest（`cargo test`）**同样挂死**（run `37742472765`）；
-  nextest 0.9.148 在本机同命令全绿 ⇒ 与引擎无关。
-- ❌ **重编译**（probe 0.2–6.5s 秒级复用）、**磁盘**（build 后仍余 74 GB）、**内存**（15.9 GB 仅用 1.5 GB）。
-- ❌ **pid 复用误杀**（见 §4；`ppid` 加固后仍复现）。
+### 判据：同一批 1683 个测试的实测对照
 
-**当前可复现的稳定配方**（0.6.3 发布即用此，run `37760821766` 全绿）：
-在分片步骤**之前**保留「模块二分」诊断步（逐模块串行 libtest）。**但这属于"靠一个步骤的副作用维持"**，
-根因未坐实 —— 属于**已知债务**，见下。
+| 跑法 | 引擎 | 结果 |
+| --- | --- | --- |
+| 单线程全量（run `37779645788`） | libtest | ✅ 1683 ok / 44s |
+| 按模块逐个（连续 3 轮，如 run `37751282476`） | libtest | ✅ 全过 |
+| 分 4 片（多轮，如 `bdddfe1` / `6a78aee`） | nextest | ❌ 挂死 15–44 分钟 |
+| **只跑 4/4 片、且放在最前**（run `37787101693`） | nextest | ✅ **7s** |
+| **同样的 4/4 片，接在 1/4+2/4+3/4 之后**（同 run） | nextest | ❌ **挂死** |
+| 3 包全量 + 多线程（run `37742472765`） | libtest | ❌ 挂死 46 分钟 |
+| 单包全量（WSL Ubuntu） | libtest | ❌ 767 个后 WSL 崩溃（环境性，见 §4） |
+| 单包全量（本机 Windows） | libtest | ✅ 1485 测试 22s |
 
-### 判别实验（下一步要做）
+**决定性的一条**：**同一个 4/4 分片，单独跑 7 秒通过、接在前三片之后跑就挂** ⇒ 不是
+"某个测试自身挂住"，而是**累积效应**。
 
-CI 上跑 **单线程全量** libtest（`--test-threads=1`，包集合与分片一致）：
+### 根因
 
-```bash
-stdbuf -oL -eL timeout 900 cargo test -p tianyan-core -p tianyan-server -p tianyan-mcp --lib -- --test-threads=1
-```
+**nextest 是 process-per-test（每个测试一个进程）**。在 4 核免费 runner 上，分片累计创建
+上千个测试进程（每个还要加载数百 MB 的测试二进制）之后，runner 会**失去与 GitHub 的通信**，
+且**整份丢掉 job 日志** —— 历史上所有"日志为空 / 点不开"都是这个，不是日志真的为空。
 
-- **通过** ⇒ 与**并发/资源竞争**相关。
-- **也挂** ⇒ 某个测试**自身**挂住，与并发无关；单线程下 libtest 逐个打印 `test X ... ok`，
-  **日志最后一条 ok 的"下一个测试"即挂点**。（`stdbuf -oL` 行缓冲保证进度可见；结果连 `st1.log` 一起传 artifact。）
+另：libtest 在 **3 包全量 + 多线程**下**也会挂**（run `37742472765`）⇒ 除进程累积外，还存在
+"**并发 × 测试量**"这一因素（见下节"仍未坐实"）。
 
-### 候选根因（待验证）
+**已排除的解释**（都做过对照，别再重复）：重编译（probe 0.01–6.5s 秒级复用）、磁盘
+（build 后仍余 74 GB）、内存（15.9 GB 仅用 1.5 GB）、pid 复用误杀（§4 加固后仍复现）。
 
-测试代码在**多个模块**里改进程环境变量，而**保护锁是模块私有的**：
+### 修复（`87aa123`，验证全绿：run `37868892911`）
+
+- 单测改用 **libtest**：`core` 单包逐模块（19 个，`::group::` 折叠 + `--test-threads=2`）
+  + `core` 全量兜底（覆盖新模块 / 无模块前缀的测试）+ `server`/`mcp` 两包全量；
+- 两组包集合（core 单独 / server+mcp）**各配一条预编译**（§1 纪律）；
+- 效果：单测步骤 **0:52**（19 模块全过），整条 quality **~13 分钟**（此前挂死 79 分钟）；
+- 已移除 `cargo-nextest` 的安装与使用（`.config/nextest.toml` 保留备查）；
+- **别改回 nextest** —— 原因就是上面那条"process-per-test 累积"。
+
+### 仍未坐实（已知债务）
+
+"并发 × 测试量"背后的**具体干扰源**尚未定位。最强候选：测试在**多个模块**里改进程环境变量，
+而保护锁是**模块私有**的（彼此不互斥）：
 
 | 位置 | 锁 |
 | --- | --- |
@@ -145,10 +161,19 @@ stdbuf -oL -eL timeout 900 cargo test -p tianyan-core -p tianyan-server -p tiany
 | `core/src/config/storage.rs` | `ENV_DATA_DIR_LOCK`（模块内 static） |
 | `core/src/config/model.rs` | **无锁** |
 
-这些锁**彼此不互斥**，全量并发跑时环境变量测试会与大量其它测试线程交错。
-glibc 的 `setenv` 会 realloc `environ` 数组（牵涉分配器），多线程下素来脆弱；
-而 **Windows 的 `_putenv` 路径完全不同** ⇒ 天然解释「**Linux 挂、Windows 全绿**」。
-（若坐实，修复方向：收敛到**一把全局共享锁**，或彻底改为不依赖进程环境变量。）
+全量并发跑时，环境变量测试会与大量其它测试线程交错；glibc 的 `setenv` 要 realloc `environ`
+数组（牵涉分配器），多线程下素来脆弱；而 **Windows 的 `_putenv` 路径完全不同** —— 这也解释
+了「**Linux 挂、Windows 全绿**」。
+
+**若日后要坐实**：把 `--test-threads` 提到 4 并跑全量，或给这些测试加统一的全局锁后对比。
+**根治方向**：收敛到**一把全局共享锁**，或彻底改为**不依赖进程环境变量**（配置以参数注入）。
+
+### 排查手法留档（可复用）
+
+- **单线程全量**（`--test-threads=1` + `stdbuf -oL`）：区分"并发相关" vs "测试自身挂"；
+  单线程下 libtest 逐个打印 `test X ... ok`，挂点即"最后一条 ok 的下一个测试"。
+- **隔离分片**（`--partition count:4/4` 单独跑、且放在最前）：区分"该片自身" vs "累积"。
+- **模块二分**（逐模块 `timeout 300`，结果同时写 stdout 与 `$GITHUB_STEP_SUMMARY`）。
 
 ---
 
@@ -167,7 +192,6 @@ glibc 的 `setenv` 会 realloc `environ` 数组（牵涉分配器），多线程
 2. **2026-10（`f0e8627`）**：再加 `ppid == std::process::id()`。
    因为 `pgid == pid` **不足以排除 pid 复用** —— 复用的新进程若恰好是另一个组的组长，判据同样成立。
    `ppid` 是唯一能区分「我们自建的组长」与「恰好同号的陌生组长」的廉价判据。
-   实测指纹：**全量单测必崩、该测试单跑必过**（跑量足够大才会命中 pid 复用）。
 
 > Windows 走 `taskkill /PID /T /F`（无进程组语义）⇒ **本地从不复现**这条路径的问题。
 
@@ -177,11 +201,14 @@ glibc 的 `setenv` 会 realloc `environ` 数组（牵涉分配器），多线程
 
 推送前跑 **`.\scripts\test.ps1 lint`**（= fmt + `clippy --all-targets -D warnings` + 工具目录 freshness + 前端 lint/typecheck）。
 
-**不要**用单条手工命令替代：0.6.3 排查期间我只跑了 `cargo check` 就推送，
+**不要**用单条手工命令替代：0.6.3 排查期间只跑了 `cargo check` 就推送，
 CI 的 clippy 立刻红（`doc_lazy_continuation`：doc 注释里列表项后紧跟无缩进段落）。
 
-另注：**本机从未装过 nextest** ⇒ "本地全绿"一直是 libtest 的成绩，与 CI 的 nextest 不是同一执行引擎，
-不能相互替代判据。
+改 workflow 文件时另需本地校验语法（YAML 里 `- name:` 含 `: ` 必须加引号，0.6.3 踩了两次）：
+
+```powershell
+python -c "import yaml; d=yaml.safe_load(open('.github/workflows/quality.yml',encoding='utf-8')); print('OK', len(d['jobs']['quality']['steps']))"
+```
 
 ---
 
@@ -190,16 +217,36 @@ CI 的 clippy 立刻红（`doc_lazy_continuation`：doc 注释里列表项后紧
 - **tag 推送**（`refs/tags/*`）既非默认分支也非 PR ⇒ rust-cache 默认**不保存**缓存；
   必须显式 `save-if: true`（已在 `quality.yml` 配置）。
 - **失败轮次不保存**（运行时 env 可见 `CACHE_ON_FAILURE: false`）⇒ 连续失败期间每轮都冷编译。
-- 一旦某轮 job **success**，缓存落盘 ⇒ 后续 `Build tests` 从 30 分钟降到 **4 分钟**（0.6.3 实测：`30:53 → 04:40`）。
+- 一旦某轮 job **success**，缓存落盘 ⇒ 后续 `Build tests` 从 30 分钟降到 **2–4 分钟**
+  （0.6.3 实测：`30:53 → 04:40 → 02:14`）。
 - rust-cache 的 **restore/prune 在 job 首尾**，不会在步骤之间清 target。
 
 ---
 
-## 7. 其它已知点
+## 7. 其它已知点与取证要点
 
-- **nextest 版本未 pin**：`taiki-e/install-action@nextest` 装的是 **latest**（0.6.3 期间恰好 0.9.148，
-  于排查当天发布）。版本漂移本身是风险源，建议后续 pin 一个版本（如 `0.9.146`）。
-- **`rust-toolchain.toml` 的 `channel = "stable"`** 同理有漂移风险（待定是否 pin）。
+### protoc 步骤（已加固）
+
+原先用 `arduino/setup-protoc@v3`（需从 GitHub Releases 下载），0.6.3 期间**命中 2 次
+00:00 瞬时失败**，每次整轮 skipped 白跑。现改为 **apt 安装 + 3 次重试**，并打印
+`protoc --version`（`quality.yml`）。`release.yml` 的 **windows build job** 仍用
+`arduino/setup-protoc@v3`（Windows 无 apt；该 job 频率低，暂不改）。
+
+### 取证通道（0.6.3 排查踩过）
+
+- **GitHub API 匿名请求 60 次/小时**，监控脚本轮询很快打满
+  （`API rate limit exceeded for <ip>` ⇒ 脚本异常退出、误判为"任务失败"）。**一律带 token**：
+  从 `git credential fill`（host=github.com）取，**不要内联进命令行**（会进 shell 历史/日志）。
+- **job 日志端点匿名 403**，必须带 token；artifact 同理。
+- **SSH 通道可能整体不通**（0.6.3 期间 `github.com:443` 与 `ssh.github.com:443` 同时
+  `Connection timed out`，重试 5 次全败）。此时改走 **HTTPS 推送**：
+  `git push https://github.com/andrelive/tianyan.git <ref>`（凭据由 GCM 提供）。
+- ⚠️ **push 失败不影响 `workflow_dispatch`** —— 有过一次"push 挂了但 dispatch 成功"，
+  结果触发的是**旧提交**，白跑一轮还污染 run 列表。**先校验远端 refs 再 dispatch**。
+
+### 其它
+
+- **`rust-toolchain.toml` 的 `channel = "stable"`** 有版本漂移风险（待定是否 pin 具体版本）。
 - **工具目录 freshness 门禁**：改了 `def_*` 描述或 `*Params` schema 必须
   `.\scripts\gen-tool-catalog.ps1` 重生成（命令单一来源在 `.cargo/config.toml` 的 alias）。
 
@@ -213,6 +260,9 @@ CI 的 clippy 立刻红（`doc_lazy_continuation`：doc 注释里列表项后紧
 | 诊断步（disk/mem + reuse probe） | `6a78aee` |
 | libtest 对照实验 | `8800e28` |
 | 模块二分 + artifact 就近上传 | `4e8d415` |
-| 单线程全量判别实验 | `1506b8a` |
-| `ppid` 加固 | `f0e8627` |
+| 单线程全量 + 隔离分片判别实验 | `1506b8a` / `3035fc7` |
+| 进程组 `ppid` 加固 | `f0e8627` |
+| **CI 手册 + 诊断沉淀** | `61310b0` |
+| **单测改 libtest + 按模块分片（最终修复）** | **`87aa123`** |
 | 0.6.3 发布（全绿） | Release run `37760821766` / Quality run `37760821879` |
+| 修复验证（全绿，单测 0:52） | Quality run `37868892911`（tag 仍指 `4e8d415`） |

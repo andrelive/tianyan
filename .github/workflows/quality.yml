@@ -54,11 +54,21 @@ jobs:
         with:
           save-if: true
 
-      # protoc：lance-encoding（lancedb 依赖）构建脚本需要——release.yml 同款；
-      # 此前 quality.yml 缺失，Linux runner 上 cargo clippy/test 编译第一步即失败
-      # （"Could not find `protoc`"，2026-09-17 CI 实测）。
+      # protoc：lance-encoding（lancedb 依赖）构建脚本需要；此前缺失时 Linux
+      # runner 上 cargo clippy/test 编译第一步即失败（"Could not find `protoc`"）。
+      #
+      # 改用 **apt** 安装（原先用 arduino/setup-protoc@v3，它要从 GitHub Releases
+      # 下载 → 已两次出现 **00:00 瞬时失败**，整轮诊断/门禁白跑，见
+      # docs/operations/ci-pipeline.md §0）。apt 走发行版镜像更稳，并加 3 次重试；
+      # 末尾打印版本，便于核对（lance-encoding 需要 protoc 3.x）。
       - name: Install protoc (lance-encoding build dependency)
-        uses: arduino/setup-protoc@v3
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler && break
+            echo "protoc install attempt $i failed; retrying..."
+            sleep 5
+          done
+          protoc --version
 
       - name: Rust fmt check
         run: cargo fmt --all -- --check
