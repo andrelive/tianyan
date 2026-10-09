@@ -159,19 +159,19 @@ jobs:
       - name: "Rust unit tests (libtest: server + mcp)"
         run: cargo test -p tianyan-server -p tianyan-mcp --lib -- --test-threads=2
         timeout-minutes: 10
-      # ⭐ 并发实验（2026-10）：验证「全量 + 高并发」在 env 锁收敛**之后**是否还会挂。
+      # ⭐ 并发回归哨兵（2026-10）：**保留，别删**。
       #
-      # 背景：0.6.3 实测「全量 + 多线程」会挂死（run `37742472765`，46 分钟），
-      # 而「单线程全量」与「按模块」都稳过。最强候选是 `config` 下三处 env 测试
-      # （`set_var` / `remove_var`）的锁**模块私有、彼此不互斥**；本轮已把它们
-      # 收敛到 `config::test_support::ENV_LOCK` 这一把共享锁。
+      # 它原本是排查用实验：0.6.3 实测「全量 + 多线程」会挂死（run `37742472765`，
+      # 46 分钟），而「单线程全量」与「按模块」都稳过。**结论已坐实**：干扰源是
+      # `config` 下三处 env 测试（`set_var` / `remove_var`）的保护锁**模块私有、
+      # 彼此不互斥**（其中 `config/model.rs` 那处完全没有锁）；把它们收敛到
+      # `config::test_support::ENV_LOCK` 这一把共享锁后（提交 `51ae9b3`），
+      # **本步 20 秒全过**（run `37876186817`）。
       #
-      # 判读：
-      #   - 通过 ⇒ 干扰源确认（env 锁即关键），可考虑把正式门禁也改回"全量并发"（更快）；
-      #   - 仍挂 ⇒ 另有干扰源，需继续找（挂点时 libtest 会打印到最后一条 ok，
-      #     其"下一个测试"即嫌疑）。
-      # 放在正式门禁之后（不影响门禁结论）；结果连同 diag.txt 就近上传 artifact。
-      - name: "Experiment (full run, 4 threads; env-lock converged)"
+      # 留着它的理由：能在 **20 秒内**发现"有人又往测试里裸加 env 操作"这类回归
+      # （那会让"全量并发"重新变脆），比等到某次打 tag 才炸便宜得多。
+      # 结果连同 diag.txt 就近上传 artifact（runner 失联时 job 日志会整体丢失）。
+      - name: "Concurrency sentinel (full run, 4 threads)"
         run: |
           set +e
           stdbuf -oL -eL timeout 900 cargo test -p tianyan-core -p tianyan-server -p tianyan-mcp --lib -- --test-threads=4 > exp4.log 2>&1

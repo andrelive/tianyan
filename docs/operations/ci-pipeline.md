@@ -150,23 +150,29 @@ curl.exe -sSL --compressed -H "Authorization: Bearer $tok" `
 - 已移除 `cargo-nextest` 的安装与使用（`.config/nextest.toml` 保留备查）；
 - **别改回 nextest** —— 原因就是上面那条"process-per-test 累积"。
 
-### 仍未坐实（已知债务）
+### 已坐实并修复：跨模块并发改进程环境变量（2026-10-09，run `37876186817`）
 
-"并发 × 测试量"背后的**具体干扰源**尚未定位。最强候选：测试在**多个模块**里改进程环境变量，
-而保护锁是**模块私有**的（彼此不互斥）：
+**结论**：干扰源就是「**多个测试模块并发改动进程环境变量**」。
 
-| 位置 | 锁 |
-| --- | --- |
-| `core/src/config/mod.rs`（`with_tianyan_config_env`） | `ENV_CONFIG_LOCK`（模块内 static） |
-| `core/src/config/storage.rs` | `ENV_DATA_DIR_LOCK`（模块内 static） |
-| `core/src/config/model.rs` | **无锁** |
+**依据链**（三步，缺一不可）：
+1. 「全量 + 多线程」挂死（run `37742472765`，46 分钟），而「单线程全量」与「按模块」都稳过
+   ⇒ 与"**并发 × 测试量**"相关；
+2. 代码侧核对：`config` 下三处 env 操作（`set_var` / `remove_var`）的保护锁**是模块私有**的、
+   彼此不互斥，其中 `config/model.rs::test_resolve_api_key_env_var` **完全没加锁**；
+3. **收敛到一把跨模块共享锁**（`config::test_support::ENV_LOCK` + `with_env_var` 辅助函数，
+   提交 `51ae9b3`）之后：**「全量 + 4 线程」一步 20 秒全过**（run `37876186817`）。
 
-全量并发跑时，环境变量测试会与大量其它测试线程交错；glibc 的 `setenv` 要 realloc `environ`
-数组（牵涉分配器），多线程下素来脆弱；而 **Windows 的 `_putenv` 路径完全不同** —— 这也解释
-了「**Linux 挂、Windows 全绿**」。
+**机制**：`std::env::set_var/remove_var` 会改写进程级 `environ`，glibc 上要 realloc 该数组
+并与分配器锁交互；多线程下这些操作与其它测试交错时极脆弱。**Windows 的 `_putenv` 路径不同**
+⇒ 这解释了长期存在的「**Linux 挂 / Windows 全绿**」。
 
-**若日后要坐实**：把 `--test-threads` 提到 4 并跑全量，或给这些测试加统一的全局锁后对比。
-**根治方向**：收敛到**一把全局共享锁**，或彻底改为**不依赖进程环境变量**（配置以参数注入）。
+**现状与纪律**：
+- 门禁保留「**按模块**分片」（最稳，0:53）；
+- 另保留一步「**全量 + 4 线程**」作为**并发回归哨兵**（20 秒）—— 若日后有人在测试里裸用
+  `set_var`，它会立刻暴露；
+- 新增/修改涉及进程环境变量的测试时，**一律走 `config::test_support::with_env_var`**
+  （或至少持 `ENV_LOCK`），不要自建私有锁。
+- 根治方向（如需进一步解耦）：彻底改为**不依赖进程环境变量**（配置以参数注入）。
 
 ### 排查手法留档（可复用）
 
@@ -266,3 +272,5 @@ python -c "import yaml; d=yaml.safe_load(open('.github/workflows/quality.yml',en
 | **单测改 libtest + 按模块分片（最终修复）** | **`87aa123`** |
 | 0.6.3 发布（全绿） | Release run `37760821766` / Quality run `37760821879` |
 | 修复验证（全绿，单测 0:52） | Quality run `37868892911`（tag 仍指 `4e8d415`） |
+| protoc 改 apt + 重试 | `e13d65c`（验证 run `37870943324`） |
+| **env 锁收敛（并发干扰源修复）** | **`51ae9b3`** ／ 验证 run **`37876186817`**（哨兵步 0:20 全过） |
