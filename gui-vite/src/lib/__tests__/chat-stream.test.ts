@@ -303,6 +303,80 @@ describe('handleChatStreamEvent', () => {
     expect(useAppStore.getState().streamStatus['s1'] ?? 'idle').toBe('idle');
   });
 
+  it('唤醒轮边界事件不得覆盖用户轮的流式占位（思考/工具整条消失的回归）', () => {
+    const st = useAppStore.getState();
+    // 1) 用户轮进行中：乐观 user 消息 + 无 id 的 assistant 占位（已累积思考 + 工具）
+    st.addMessage({
+      role: 'user',
+      segments: [{ type: 'text', text: '问题' }],
+      id: null,
+      user_message_id: 'umid-1',
+      timestamp: '',
+    });
+    handleChatStreamEvent(
+      ev({ chunk_type: 'turn_state', turn_state: { state: 'running', auto: false } }),
+    );
+    st.addMessage({ role: 'assistant', segments: [], id: null, timestamp: '' });
+    handleChatStreamEvent(ev({ thinking: '先读文件' }));
+    handleChatStreamEvent(
+      ev({ tool_call: { id: 't1', name: 'read_file', arguments: '{}', presentation: 'read' } }),
+    );
+    const placeholder = useAppStore
+      .getState()
+      .sessionMessages['s1'].find((m) => m.role === 'assistant');
+    expect(placeholder?.thinking).toBe('先读文件');
+    expect(placeholder?.tool_calls).toHaveLength(1);
+    // 关键：渲染走 segments（thinking 段 → 折叠块、tool 段 → 卡片）——
+    // 被覆盖的正是 segments（`{...占位, ...msg}` 中 msg.segments 存在且非空）
+    expect(placeholder?.segments?.some((s) => s.type === 'thinking')).toBe(true);
+    expect(placeholder?.segments?.some((s) => s.type === 'tool')).toBe(true);
+
+    // 2) 任务通知触发唤醒轮（auto=true）→ 携带完整 assistant 消息的边界事件
+    handleChatStreamEvent(
+      ev({ chunk_type: 'turn_state', turn_state: { state: 'running', auto: true } }),
+    );
+    handleChatStreamEvent(
+      ev({
+        message: {
+          role: 'assistant',
+          id: 'msg_wake_1',
+          segments: [{ type: 'text', text: '后台任务已完成' }],
+          timestamp: '2026-09-08T00:00:00Z',
+        },
+      }),
+    );
+
+    // 3) 用户轮占位的思考/工具必须**保持**（此前会被唤醒轮消息整条覆盖，
+    //    三者全空 → MessageBubble return null → 气泡连思考/工具一起消失）
+    const msgs = useAppStore.getState().sessionMessages['s1'];
+    const userTurn = msgs.find(
+      (m) => m.role === 'assistant' && m.segments?.some((s) => s.type === 'thinking'),
+    );
+    expect(userTurn, '用户轮占位的 segments（思考段）必须保留').toBeTruthy();
+    expect(userTurn?.segments?.some((s) => s.type === 'tool')).toBe(true);
+    expect(userTurn?.tool_calls).toHaveLength(1);
+    // 唤醒轮输出作为**独立消息**按 id 追加，而不是替换别人的占位
+    expect(msgs.some((m) => m.id === 'msg_wake_1')).toBe(true);
+  });
+
+  it('用户轮（auto=false）的边界事件仍替换占位并保留已累积内容（对照）', () => {
+    const st = useAppStore.getState();
+    handleChatStreamEvent(
+      ev({ chunk_type: 'turn_state', turn_state: { state: 'running', auto: false } }),
+    );
+    st.addMessage({ role: 'assistant', segments: [], id: null, timestamp: '' });
+    handleChatStreamEvent(ev({ thinking: '想一想' }));
+    // 用户轮结束：边界事件带服务端 id（无 segments —— 服务端该轮未产出正文）
+    handleChatStreamEvent(
+      ev({ message: { role: 'assistant', id: 'msg_user_turn', segments: [], timestamp: '' } }),
+    );
+    const msgs = useAppStore.getState().sessionMessages['s1'];
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('msg_user_turn');
+    // 占位替换语义：本地累积的 thinking 不因服务端消息缺字段而丢失
+    expect(msgs[0].thinking).toBe('想一想');
+  });
+
   it('applies turn_state events with auto flag (ADR-035 §9 / U10)', () => {
     handleChatStreamEvent(
       ev({ chunk_type: 'turn_state', turn_state: { state: 'running', auto: true } }),

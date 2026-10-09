@@ -390,11 +390,23 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       // findIndex 会错误替换中间轮占位（中间轮正文被覆盖丢失 + 最后
       // 一条内容重复）。ES2020 无 findLastIndex，手写反向循环。
       if (msg.role === 'assistant') {
+        // ⚠️ 轮次守卫（2026-10；用户报告：任务通知与运行中会话重叠后，
+        // 该会话的思考/工具整条消失）——
+        // **auto 轮（唤醒轮 / 后台轮）的边界事件不得替换"用户轮的流式占位"**：
+        // 两者是不同轮次、不同消息，按位置反查"最后一个无 id 的 assistant"
+        // 必然跨轮错配 —— 唤醒轮消息（有 id）会覆盖用户轮占位，把占位已累积的
+        // thinking / segments 一并抹掉；三者全空时渲染层 `MessageBubble` 直接
+        // `return null`，表现为"思考块与工具卡片整条不见"（而输出过程中能看见，
+        // 因为覆盖发生在轮结束时）。
+        // auto 轮改走下方"按 id 幂等追加/更新"路径（唤醒轮输出是独立新消息）。
+        const isAutoTurn = s.turnState[key]?.auto === true;
         let placeholder = -1;
-        for (let i = next.length - 1; i >= 0; i--) {
-          if (next[i].role === 'assistant' && !next[i].id) {
-            placeholder = i;
-            break;
+        if (!isAutoTurn) {
+          for (let i = next.length - 1; i >= 0; i--) {
+            if (next[i].role === 'assistant' && !next[i].id) {
+              placeholder = i;
+              break;
+            }
           }
         }
         if (placeholder >= 0) {
