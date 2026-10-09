@@ -9,6 +9,9 @@ name: Quality
 #   3. Rust 单元测试（core/server/mcp；tauri 需桌面依赖，排除）
 #   4. 工具目录 freshness（运行时注册 = schema 唯一真相源）
 #   5. 前端 lint（eslint + prettier）/ typecheck / vitest
+#
+# 排障手册：CI 自身的挂死 / 日志丢失 / 编译指纹类问题见
+# docs/operations/ci-pipeline.md（本文件多处注释即其结论来源）。
 
 # 触发策略（2026-09-18 调整，用户要求"只有打 tag 才编译构建"）：
 # - master 推送**不再**触发质量门禁（每次推送都跑 clippy/test/前端检查，
@@ -21,7 +24,7 @@ on:
       - 'v*'
   pull_request:
   # 手动触发：可在不移动 tag（不连带触发 release 构建）的前提下单独重跑
-  # Quality，便于排查 unit tests 卡死等门禁问题。
+  # Quality，便于排查门禁问题。
   workflow_dispatch:
   # 可复用工作流：release.yml 的 build 依赖本工作流（`needs: quality`）——
   # 门禁红则不出包（"门禁必红但 MSI 已发布"事故的机制性修复）。
@@ -45,8 +48,8 @@ jobs:
 
       # tag 推送（refs/tags/*）既非默认分支也非 PR，Swatinem/rust-cache 默认
       # **不保存**缓存 → 每次 tag CI 都冷编译重型依赖（lance / datafusion /
-      # pdf-extract，约 21 分钟），这也是"unit tests 步骤一编译就逼近超时"的
-      # 放大器。显式 save-if 让其保存，后续 run 才能复用缓存。
+      # pdf-extract，约 21 分钟）。显式 save-if 让其保存，后续 run 才能复用
+      # （0.6.3 实测：缓存生效后 Build tests 从 30:53 降到 04:40）。
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: true
@@ -62,72 +65,39 @@ jobs:
       - name: Rust clippy (deny warnings)
         run: cargo clippy --workspace --exclude tianyan-tauri --all-targets -- -D warnings
 
-      # CI 资源诊断（0.6.3 CI 排查）：runner 曾在测试步骤"失联"（job 失败、
-      # 日志 blob 根本不存在 → 看不到任何输出），需要区分「磁盘/内存耗尽」
-      # 与「测试真的挂住」。输出 tee 到 diag.txt 并由下一步立即上传 artifact
-      # —— artifact 在该步骤内就完成上传，即使后面的测试步骤把 runner 拖死
-      # 也拿得到这份数据。
-      - name: Diagnostics (disk/mem)
+      # ────────────────────────────────────────────────────────────────────
+      # ⚠️ 包集合纪律（0.6.3 实发事故）：cargo 的 feature 统一范围取决于
+      # 「本次命令选中的包集合」——`--workspace --exclude X` 与 `-p A` 编出的
+      # 产物**编译指纹不同**，前一步的编译会被整棵作废（实测：core 1/2 步骤
+      # 15 分钟全程 "Compiling"，一个测试都没跑到就被 timeout 杀掉）。
+      # 故：**预编译步骤与使用它的测试步骤必须同包集合、逐字一致**（差异只允许
+      # `--no-run` / 测试过滤 / `--test-threads`，它们不影响编译指纹）。
+      # 这里存在两组集合（core 单独 / server+mcp），各配一条预编译。
+      # ────────────────────────────────────────────────────────────────────
+      - name: "Build tests (compile only: core)"
+        run: cargo test -p tianyan-core --lib --no-run
+        timeout-minutes: 45
+
+      - name: "Build tests (compile only: server + mcp)"
+        run: cargo test -p tianyan-server -p tianyan-mcp --lib --no-run
+        timeout-minutes: 20
+
+      # 复用验证（防线，别删）：与下面测试步骤**逐字相同**的参数再各跑一次
+      # --no-run。秒级返回 ⇒ 指纹一致、产物复用成立；又是十几分钟 ⇒ 有人改了
+      # 上面的包集合，测试步骤将从头重编（正是 0.6.3 事故）。
+      # 输出 tee 到 diag.txt 并就近上传 artifact —— runner 失联时 job 日志会
+      # 整体丢失，artifact 是唯一可靠通道（见 ci-pipeline.md §2）。
+      - name: "Diagnostics (reuse probe + disk/mem)"
         run: |
+          set +e
           {
-            echo "=== disk before build ==="; df -h /
-            echo "=== mem ==="; free -m
-            echo "=== cpus ==="; nproc
+            echo "=== disk / mem ==="; df -h /; du -sh target 2>/dev/null || true; free -m
+            echo "=== timing: core --no-run (expect <10s) ==="
+            time cargo test -p tianyan-core --lib --no-run
+            echo "=== timing: server+mcp --no-run (expect <10s) ==="
+            time cargo test -p tianyan-server -p tianyan-mcp --lib --no-run
           } 2>&1 | tee diag.txt
 
-
-      # cargo-nextest（替代 libtest）：解决"卡死时看不到卡点"的盲区——
-      # 0.6.3 tag（d421fd8）Quality 的 unit tests 步骤曾卡在 in_progress 达 70 分钟
-      # 被终止，后续步骤全 pending、Release 不出包；本地无法复现（Windows 全绿
-      # 16–26s；WSL 高 IO 复刻自身崩溃 E_UNEXPECTED）。旧 libtest 并行下**卡住的
-      # 测试名不会出现在日志**（未完成即无输出）；nextest 命中 slow-timeout 会立即
-      # 打印 SLOW + 测试名，terminate-after 再拖若干周期即终止该测试（阈值见
-      # .config/nextest.toml）；timeout-minutes 作最后防线。
-      - uses: taiki-e/install-action@nextest
-
-      # 单测拆两步：① 仅编译（冷编译 ~22 分钟，单独给 50 分钟）；② 分 4 片跑。
-      #
-      # 背景（0.6.3 tag b2d38de 实测）：编译 22m07s 成功后，nextest 一打印
-      # "Starting 1683 tests across 3 binaries" 就 lost communication —— runner
-      # 被进程/内存峰值拖死（官方文案：starves it for CPU/Memory / terminates
-      # the runner process）。nextest 一次拉起 core/server/mcp 三个测试二进制、
-      # 1683 个测试按核数并发，免费 runner 扛不住。
-      #
-      # 对策：编译独立成步（超时覆盖冷编译，不占用分片预算）；测试按 nextest
-      # 内置 partition（按测试名 hash 均分，无需改测试代码）分 4 片顺序执行，
-      # 并用 `-j 2` 限制并发——单次负载降到原来的几分之一。
-      #
-      # ⚠️ 包集合必须与测试步骤**逐字一致**（0.6.3 tag 040ec2e 实测教训）：
-      # cargo 的 feature 统一范围取决于「本次选中的包集合」——`--workspace
-      # --exclude tianyan-tauri` 编出的产物与 `-p tianyan-core` 的指纹不同，
-      # 于是预编译白干、测试步骤从头重编整棵依赖树（datafusion/lance/arrow
-      # 全套）：CI 日志实测 core 1/2 步骤 15 分钟全程 "Compiling"，一个测试
-      # 都没跑到就被 timeout 杀掉（而 2 分钟前的上一步才刚报「编译完成」）。
-      # 故此处与下面的分片步骤使用**同一个 `-p` 集合**；除 `--partition`/`-j`
-      # （只影响测试选择，不影响编译指纹）外无任何参数差异。
-      - name: Build tests (compile only)
-        run: cargo nextest run -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --no-run
-        timeout-minutes: 50
-
-      # 复用验证（关键诊断）：用与分片步骤**完全相同的参数**再跑一次
-      # `--no-run`。若 cargo 编译指纹一致，这条应秒级返回；若又花十几分钟，
-      # 说明「同参数」仍触发重编译——即分片步骤实际在编译而非跑测试，
-      # 那 12 分钟超时必然不够、且 job 总时长会被拖到触发 runner 失联。
-      - name: "Diagnostics (reuse probe: same cmd as shards)"
-        run: |
-          {
-            echo "=== disk after build ==="; df -h /
-            du -sh target 2>/dev/null || true
-            free -m
-            echo "=== timing: probe --no-run (expect <10s if reuse works) ==="
-            time cargo nextest run -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --no-run
-            echo "=== disk after probe ==="; df -h /
-          } 2>&1 | tee -a diag.txt
-        timeout-minutes: 40
-
-      # artifact 就地上传（**必须在会挂住的步骤之前**）：2026-10 实测把上传放在
-      # libtest 对照步之后 ⇒ 该步挂住 + runner 失联 ⇒ 上传根本没执行、artifact
-      # 为空，整轮诊断白跑。教训：诊断产物要"就近上传"，别指望挂住之后的步骤。
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -135,113 +105,44 @@ jobs:
           path: diag.txt
           retention-days: 5
 
-      # ⭐ 隔离判别（2026-10）：**只跑 4/4 分片**，且刻意放在最前（早于任何预热步）。
+      # ────────────────────────────────────────────────────────────────────
+      # 单元测试：**libtest（线程模型）+ 按模块分片**。
       #
-      # 上一轮判别结果：单线程全量 libtest **全过**（1683 ok / 44s），而 nextest
-      # 分片 1/4–3/4 过（13/8/7s）、**4/4 挂死** ⇒ 触发因素是"并发"，且随累计
-      # 跑量概率上升。本步用于区分：
-      #   - 挂 ⇒ 4/4 自身内容 + 并发即可复现（不需要"前 3 片累积"）
-      #   - 过 ⇒ 前 3 片的累积效应（进程/资源/状态残留）
-      - name: "Diagnostics (isolated shard 4/4, runs first)"
-        run: |
-          set +e
-          timeout 600 cargo nextest run -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --partition count:4/4 -j 2 > shard4.log 2>&1
-          echo "isolated-shard4 exit=$?" | tee -a diag.txt
-          grep -E 'Starting |Summary ' shard4.log | tee -a diag.txt
-          tail -25 shard4.log | tee -a diag.txt
-        timeout-minutes: 15
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ci-shard4-${{ github.run_id }}
-          path: |
-            diag.txt
-            shard4.log
-          retention-days: 5
-
-      # ⭐ 判别实验（2026-10）：**单线程全量** libtest（`--test-threads=1`）。
+      # 为何弃用 cargo-nextest（0.6.3 全程排查的结论，别改回去）：
+      # nextest 是 process-per-test（每个测试一个进程）。在 4 核免费 runner 上
+      # 累积创建上千进程/负载后，runner 会**失去与 GitHub 的通信**并整份丢掉
+      # job 日志，Annotation 原文：
+      #   "The hosted runner lost communication with the server. Anything in your
+      #    workflow that terminates the runner process, starves it for CPU/Memory…"
+      # 同一批 1683 个测试的实测对照：
+      #   - libtest 单线程全量         ✅ 全过（1683 ok / 44s）
+      #   - libtest 按模块（2 线程）   ✅ 全过（连续 3 轮，19 个模块）
+      #   - nextest 分 4 片            ❌ 前 3 片过、第 4 片挂（进程/负载累积）
+      #   - nextest 只跑 4/4 片        ✅ 7s（⇒ 不是测试自身的问题，是累积）
+      # 另：本机（Windows）用 nextest 同命令全绿 ⇒ "本地绿 / CI 红"长期无解；
+      # libtest 下两端一致（本机 core 全量 1485 测试 22s）。
       #
-      # 要回答的问题：此前"全量一起跑必挂死（15–44 min，runner 失联）、按模块/分片
-      # 跑就正常"到底是什么性质？
-      #   - 本步**通过** ⇒ 与并发/资源竞争相关（候选：测试跨模块并发改
-      #     `std::env::set_var`；各模块的 env 锁彼此不互斥，glibc 的 setenv 与
-      #     分配器交互脆弱，而 Windows 的 `_putenv` 路径不同 ⇒ 解释"Linux 挂、
-      #     Windows 全绿"）；
-      #   - 本步**也挂** ⇒ 某个测试自身挂住，与并发无关 —— 单线程下 libtest 会
-      #     逐个打印 `test X ... ok`，日志最后一条 ok 的**下一个测试即挂点**。
-      # 位置刻意放在模块二分**之前**（无预热），否则"预热"假说会让结论失真。
-      # 包集合与分片一致（复用编译产物）；`stdbuf -oL` 行缓冲让进度即时可见。
-      - name: "Diagnostics (libtest SINGLE-THREAD full run)"
+      # 代价：放弃 nextest 的 SLOW 提示 + terminate-after，改为
+      # `--test-threads=2` 限并发 + 步骤级 timeout-minutes 兜底；
+      # `::group::` 让每个模块在 UI 里可折叠，失败时一眼看到是哪个模块。
+      # 末尾的 core 全量是**兜底**（新模块/无模块前缀的测试），代价约 +35s。
+      # ────────────────────────────────────────────────────────────────────
+      - name: "Rust unit tests (libtest: core by module)"
         run: |
-          set +e
-          stdbuf -oL -eL timeout 900 cargo test -p tianyan-core -p tianyan-server -p tianyan-mcp --lib -- --test-threads=1 > st1.log 2>&1
-          code=$?
-          echo "single-thread exit=$code" | tee -a diag.txt
-          grep -E '^test result:' st1.log | tee -a diag.txt
-          echo "--- last 30 lines (the line after the last ok is the hung test) ---" | tee -a diag.txt
-          tail -30 st1.log | tee -a diag.txt
-        timeout-minutes: 25
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ci-singlethread-${{ github.run_id }}
-          path: |
-            diag.txt
-            st1.log
-          retention-days: 5
-
-      # ⭐ 模块二分（2026-10，替代先前的 libtest 对照步）。
-      #
-      # 对照结论（8800e28 实测）：**同一份已编译产物换 libtest（cargo test）也挂住**
-      # ⇒ 问题**不在 nextest**，而在"某个测试在 Linux CI 上把 runner 拖死"
-      # （官方文案：starves it for CPU/Memory / terminates the runner process）。
-      # 旁证：本机 Windows 用 libtest 全量 1485 测试 22s 全绿；WSL 单线程跑到 767 个
-      # 后崩（环境性）——Linux 侧确实存在"跑到某处就出事"的点。
-      # 故转为**模块二分**：逐模块串行、每模块独立 `timeout 300`，结果同时写
-      # stdout 与 $GITHUB_STEP_SUMMARY（步骤级收集，比 job 日志更抗失联）。
-      - name: "Diagnostics (module bisect: serial, per-module timeout)"
-        run: |
-          set +e
-          for m in agent common config context db events executor goals knowledge model observability roles scheduler session skills snapshot todos vfs; do
-            echo "=== MODULE $m ==="
-            timeout 300 cargo test -p tianyan-core --lib -- "${m}::" --test-threads=2 > "mod_$m.log" 2>&1
-            code=$?
-            line="MODULE $m exit=$code ok=$(grep -c ' \.\.\. ok$' mod_$m.log) $(grep -E '^test result:' mod_$m.log | tail -1)"
-            echo "$line"
-            echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          for m in agent common config context db events executor goals knowledge model observability role_store roles scheduler session skills snapshot todos vfs; do
+            echo "::group::module $m"
+            cargo test -p tianyan-core --lib -- "${m}::" --test-threads=2
+            echo "::endgroup::"
           done
-          echo "=== module bisect done ==="
-        timeout-minutes: 60
+          echo "::group::core full (兜底：新增模块 / 无模块前缀的测试)"
+          cargo test -p tianyan-core --lib -- --test-threads=2
+          echo "::endgroup::"
+        timeout-minutes: 20
 
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ci-bisect-${{ github.run_id }}
-          path: |
-            diag.txt
-            mod_*.log
-          retention-days: 5
-
-      # 分片：nextest 内置 partition（按测试名 hash 均分），4 片让单片测试量
-      # 降到 1/4；`-j 2` 限制同时运行的测试进程数（默认 = 核数），避免 1683
-      # 全并发把 runner 拖死。任一片失败时范围清晰（hash 分片结果可复现）。
-      - name: Rust unit tests (1/4)
-        run: cargo nextest run -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --partition count:1/4 -j 2
-        timeout-minutes: 12
-
-      - name: Rust unit tests (2/4)
-        run: cargo nextest run -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --partition count:2/4 -j 2
-        timeout-minutes: 12
-
-      - name: Rust unit tests (3/4)
-        run: cargo nextest run -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --partition count:3/4 -j 2
-        timeout-minutes: 12
-
-      - name: Rust unit tests (4/4)
-        run: cargo nextest run -p tianyan-core -p tianyan-server -p tianyan-mcp --lib --partition count:4/4 -j 2
-        timeout-minutes: 12
+      - name: "Rust unit tests (libtest: server + mcp)"
+        run: cargo test -p tianyan-server -p tianyan-mcp --lib -- --test-threads=2
+        timeout-minutes: 10
 
       # 集成测试（core/tests + server/tests，含 HTTP 级 e2e）——此前只在本地
       # `test.ps1 integration` 跑，CI 从未覆盖；0.5.8 记录"三处 e2e 断言失效
