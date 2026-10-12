@@ -878,42 +878,30 @@ describe('ChatPanel', () => {
     expect(screen.getByText('先分析再想想')).toBeInTheDocument();
   });
 
-  it('binds ResizeObserver to the content column (regression: tool-card growth must trigger follow)', () => {
-    // 回归保护：ResizeObserver 曾观察滚动容器——容器 flex-1 高度固定，工具卡片
-    // 出现/流式增量等内容增高不触发回调 → 视图不跟随（工具调用出现时"不滚底"
-    // 的根因）。修复后必须把内容列（data-chat-flow）纳入观察（DSH 同款）。
-    const observed: Element[] = [];
-    class MockResizeObserver {
-      constructor(_cb: ResizeObserverCallback, _opts?: ResizeObserverOptions) {}
-      observe(target: Element): void {
-        observed.push(target);
-      }
-      unobserve(): void {}
-      disconnect(): void {}
-    }
-    vi.stubGlobal('ResizeObserver', MockResizeObserver);
+  it('renders messages through the virtualized list (Virtuoso wiring)', () => {
+    // 回归迁移（虚拟滚动）：滚动/跟随机制从"外层滚动容器 + 内容列
+    // ResizeObserver（data-chat-flow）"移交 react-virtuoso——followOutput
+    // 负责跟随粘底（含工具卡片增长等最后一项增高场景）、atBottomStateChange
+    // 维护跟随所有权、startReached 触发上滚加载。本测试锁接线：消息必须经
+    // Virtuoso.itemContent 渲染（jsdom 无布局，经 vitest alias 注入渲染全部
+    // 项的 mock；真实虚拟化/跟随行为由 e2e 与手工验证覆盖）。
+    const messages: ChatMessage[] = [
+      {
+        role: 'user',
+        segments: [{ type: 'text', text: '你好' }],
+        timestamp: new Date().toISOString(),
+      },
+      {
+        role: 'assistant',
+        segments: [{ type: 'text', text: '回复' }],
+        timestamp: new Date().toISOString(),
+      },
+    ];
+    useAppStore.setState({ messages, streamStatus: {} });
+    renderChatPanel();
 
-    try {
-      const messages: ChatMessage[] = [
-        {
-          role: 'user',
-          segments: [{ type: 'text', text: '你好' }],
-          timestamp: new Date().toISOString(),
-        },
-        {
-          role: 'assistant',
-          segments: [{ type: 'text', text: '回复' }],
-          timestamp: new Date().toISOString(),
-        },
-      ];
-      useAppStore.setState({ messages, streamStatus: {} });
-      renderChatPanel();
-
-      const column = document.querySelector('[data-chat-flow]');
-      expect(column).not.toBeNull();
-      expect(observed).toContain(column as Element);
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    expect(screen.getByTestId('virtuoso')).toBeInTheDocument();
+    expect(screen.getByText('你好')).toBeInTheDocument();
+    expect(screen.getByText('回复')).toBeInTheDocument();
   });
 });

@@ -77,15 +77,14 @@ pub async fn get_session_messages(
         Some(state.working_sets()),
     );
 
-    // 分段加载（ADR-035 §8）：带 `before_seq`/`limit` 时只取一页（带 seq 与
-    // 上滚游标）；无分页参数时保持全量语义（向后兼容，前端切换到上滚后再改默认）。
-    let result = if query.before_seq.is_some() || query.limit.is_some() {
-        service
-            .get_messages_page(&session_id, query.before_seq, query.limit)
-            .await
-    } else {
-        service.get_messages(&session_id).await
-    };
+    // 分段加载（ADR-035 §8）：默认（无参）= 最近一页（服务端默认 50 条、
+    // 上限 200）+ 上滚游标/元数据；更早历史由前端上滚经 `before_seq` 补齐。
+    // HTTP 端点不再返回全量（大会话全量可达数十 MB，实测 1650 条消息
+    // 25 MB，是会话切换卡顿的根源）；全量读取仅保留在服务内部
+    //（回退/重做响应等，`SessionService::get_messages`）。
+    let result = service
+        .get_messages_page(&session_id, query.before_seq, query.limit)
+        .await;
     result
         .inspect_err(|e| error!("获取会话消息失败: {}", e))
         .map(Json)

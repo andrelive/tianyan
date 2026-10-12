@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { useAppStore } from '@/lib/store';
 import {
   ApiError,
@@ -37,6 +38,9 @@ import ApprovalBanner from './ApprovalBanner';
 import AgentTasksPanel from './AgentTasksPanel';
 import SessionTodoPanel from './SessionTodoPanel';
 import { PENDING_SESSION_KEY } from '@/lib/store';
+
+/** 虚拟列表首项索引基数（远大于任何会话的消息条数；上滚前插时递减）。 */
+const FIRST_INDEX_BASE = 1_000_000;
 
 /** 控制面操作错误文案（ADR-041）：忙语义按结构化 reason 分流，其余走通用。 */
 function controlOpErrorMessage(err: unknown): string {
@@ -81,27 +85,21 @@ export default function ChatPanel() {
   const pendingClarification = useAppStore((s) => s.pendingClarification);
   const setPendingClarification = useAppStore((s) => s.setPendingClarification);
 
-  const scrollRef = useRef<HTMLDivElement>(null);
-  /** 内容列（消息流 wrapper，data-chat-flow）：ResizeObserver 的观察对象——
-      流式增量/工具披露/图片加载等内容增高发生在这一层；滚动容器（flex-1，
-      高度固定）不随内容变化，只观察它会漏掉"内容增高但无 scroll 事件"的
-      跟随（DSH 同款：观察 column 而非 scrollport）。 */
-  const columnRef = useRef<HTMLDivElement>(null);
+  /** 虚拟列表句柄（react-virtuoso）：程序化滚动到最新（替代 scrollTop 直写）。 */
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  /** 虚拟列表首项索引（prepend 锚定）：初始基数，上滚前插 N 条后 -=N——
+      Virtuoso 以 firstItemIndex+index 对账项键，前插保持视口不跳。 */
+  const [firstItemIndex, setFirstItemIndex] = useState(FIRST_INDEX_BASE);
   const [compressing, setCompressing] = useState(false);
   const [clarifySubmitting, setClarifySubmitting] = useState(false);
   /** 是否跟随底部（聊天经典模式）：用户在底部时自动跟随新输出；
       向上滚动超过阈值立即脱离跟随（不再被拉回），滚回底部恢复。
-      scroll 热路径用 ref 避免高频 setState（DSH atBottomRef 双轨模式）。 */
+      由 Virtuoso `atBottomStateChange` 维护（滚动管理内聚到虚拟列表）。 */
   const stickToBottomRef = useRef(true);
   /** 上滚加载中（防重复触发；ADR-035 §8）。 */
   const loadingOlderRef = useRef(false);
-  /** 程序化滚动账本：每次写 scrollTop 同步记录，scroll 事件据此判定
-      "用户滚动"（|scrollTop - observedTop| > 0.5）——程序化滚动/浏览器
-      clamp 不改变跟随所有权（DSH observed-top ledger 模式）。 */
-  const observedTopRef = useRef(0);
-  /** 内容跟随签名：仅当内容真正变化（消息数/流状态/会话切换）时触发
-      follow——滚动阈值翻转（setState → effect → scrollToBottom → scroll）
-      的循环不再发生（DSH followSig 模式）。 */
+  /** 内容跟随签名：消息数/流状态/会话切换变化时触发一次滚到最新
+      （scrollToIndex LAST）；同消息内容增高的粘底由 Virtuoso 内部处理。 */
   const followSigRef = useRef('');
   /** 当前会话待审批操作（应用层授权卡片；交互模式挂起时出现） */
   const [pendingApproval, setPendingApproval] = useState<
@@ -212,82 +210,43 @@ export default function ChatPanel() {
     }
   };
 
-  // ── 滚动跟随（DSH observed-top ledger + followSig 模式） ─────────
-  const FOLLOW_THRESHOLD = 24;
-  /** 上滚加载更早历史的触发阈值（距顶部 px；ADR-035 §8）。 */
-  const TOP_LOAD_THRESHOLD = 80;
+  // ── 虚拟列表滚动管理（react-virtuoso：滚动/跟随/前插锚定内聚） ─────
 
-  /** 滚动到底：写 scrollTop 后同步记录账本（程序化滚动不改变跟随所有权）。 */
-  const scrollToBottom = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    observedTopRef.current = el.scrollTop;
-  }, []);
-
-  /** 滚动监听：仅用户输入（wheel/touch/scrollbar/键盘）改变原始滚动几何
-      时更新跟随所有权；程序化滚动落在账本上，保持当前所有权。 */
-  const handleScroll = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    // ADR-035 §8：接近顶部时上滚加载更早历史。视口位置由浏览器原生滚动锚定
-    // （Chromium/WebView2 默认 overflow-anchor: auto）自动保持——prepend 内容
-    // 不会把用户当前阅读位置顶走。加载中不重复触发；到链首后内部短路。
-    if (el.scrollTop <= TOP_LOAD_THRESHOLD && !loadingOlderRef.current && urlSessionId) {
-      loadingOlderRef.current = true;
-      void loadOlder(urlSessionId).finally(() => {
+  /** 上滚到顶：加载更早一页（ADR-035 §8）。prepend 后同步递减首项索引——
+      Virtuoso 以 firstItemIndex+index 对账项键，前插不改变既有项键，
+      视口锚定由 Virtuoso 保持（替代浏览器原生 overflow-anchor）。 */
+  const handleStartReached = useCallback(() => {
+    if (loadingOlderRef.current || !urlSessionId) return;
+    loadingOlderRef.current = true;
+    void loadOlder(urlSessionId)
+      .then((loaded) => {
+        if (loaded > 0) setFirstItemIndex((v) => v - loaded);
+      })
+      .finally(() => {
         loadingOlderRef.current = false;
       });
-    }
-    const floor = Math.max(0, el.scrollHeight - el.clientHeight);
-    const movedByReader = Math.abs(el.scrollTop - Math.min(observedTopRef.current, floor)) > 0.5;
-    const isAtBottom = movedByReader
-      ? floor - el.scrollTop <= FOLLOW_THRESHOLD + 1
-      : stickToBottomRef.current;
-    if (!movedByReader && isAtBottom) {
-      // 程序化滚动落在账本上且已在底部：保持跟随（不重复滚动）
-      observedTopRef.current = el.scrollTop;
-      return;
-    }
-    stickToBottomRef.current = isAtBottom;
-    observedTopRef.current = el.scrollTop;
   }, [loadOlder, urlSessionId]);
 
-  // 会话切换时重置跟随（切回预期看到最新内容）
+  // 会话切换：重置跟随（切回预期看到最新内容）+ 重置首项索引基数
+  // （Virtuoso 经 key 重建，initialTopMostItemIndex 定位到最新）。
   useEffect(() => {
     stickToBottomRef.current = true;
+    setFirstItemIndex(FIRST_INDEX_BASE);
   }, [currentSessionId]);
 
-  // 内容跟随签名：消息数/流状态/会话切换变化时，若仍跟随则滚动到底。
-  // 滚动阈值翻转（setState → effect → scrollToBottom → scroll）不再触发
-  // follow——签名只在内容真正变化时更新（DSH followSig 模式）。
+  // 内容跟随签名：消息数/流状态/会话切换变化时，若仍跟随则滚到最新。
+  // 签名去重避免重复滚动；同消息内容增高（流式）的粘底由 Virtuoso 的
+  // followOutput 内部处理。
   const followSig = `${currentSessionId}:${messages.length}:${streamStatus}:${
     pendingClarification && pendingClarification.sessionId === currentSessionId ? 1 : 0
   }`;
   useEffect(() => {
     if (followSigRef.current === followSig) return;
     followSigRef.current = followSig;
-    if (stickToBottomRef.current) scrollToBottom();
-  }, [followSig, scrollToBottom]);
-
-  const hasMessages = messages.length > 0;
-
-  // ResizeObserver：内容列（流式增量/工具披露/图片/markdown/代码高亮等
-  // 高度变化）+ 滚动容器自身尺寸变化时，若仍跟随则滚动到底（替代
-  // setTimeout 兜底，DSH 同款）。必须观察内容列：滚动容器高度不随内容
-  // 变化——只观察容器会漏掉"工具卡片出现/输出增长但无 scroll 事件"的
-  // 跟随（曾致工具调用出现时视图不跟底）。
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const column = columnRef.current;
-    const observer = new ResizeObserver(() => {
-      if (stickToBottomRef.current) scrollToBottom();
-    });
-    observer.observe(el);
-    if (column) observer.observe(column);
-    return () => observer.disconnect();
-  }, [scrollToBottom, hasMessages]);
+    if (stickToBottomRef.current) {
+      virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' });
+    }
+  }, [followSig]);
 
   // ─── Custom streaming via fetch + ReadableStream ─────────────────
 
@@ -653,73 +612,88 @@ export default function ChatPanel() {
           <div className="flex items-center gap-2" />
         </div>
 
-        {/* Messages area */}
-        <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-4">
-          {messages.length === 0 && streamStatus === 'idle' && (
-            <div className="flex flex-col items-center justify-center h-full text-[var(--color-text-tertiary)] gap-3">
-              <MessageSquare className="w-12 h-12 opacity-30" />
-              <p className="text-sm">开始一段新的对话</p>
-              <p className="text-xs opacity-60">输入消息开始与 AI 助手交流</p>
-            </div>
-          )}
+        {/* Messages area（虚拟列表：仅渲染视口附近消息——渲染量与消息总数解耦） */}
+        {messages.length === 0 && streamStatus === 'idle' && (
+          <div className="flex-1 flex flex-col items-center justify-center text-[var(--color-text-tertiary)] gap-3">
+            <MessageSquare className="w-12 h-12 opacity-30" />
+            <p className="text-sm">开始一段新的对话</p>
+            <p className="text-xs opacity-60">输入消息开始与 AI 助手交流</p>
+          </div>
+        )}
 
-          {messages.length > 0 && (
-            <div ref={columnRef} data-chat-flow="" className="space-y-4 max-w-4xl mx-auto">
-              {messages.map((msg, i) => (
+        {messages.length > 0 && (
+          <Virtuoso
+            key={currentSessionId ?? PENDING_SESSION_KEY}
+            ref={virtuosoRef}
+            data={messages}
+            firstItemIndex={firstItemIndex}
+            initialTopMostItemIndex={{ index: 'LAST', align: 'end' }}
+            followOutput={(isAtBottom) => (isAtBottom ? 'auto' : false)}
+            atBottomStateChange={(atBottom) => {
+              stickToBottomRef.current = atBottom;
+            }}
+            atBottomThreshold={24}
+            startReached={handleStartReached}
+            className="flex-1 min-h-0 px-4 pt-4"
+            itemContent={(i, msg) => (
+              <div className="max-w-4xl mx-auto pb-4">
                 <MessageBubble
-                  key={msg.id || `msg-${i}`}
                   message={msg}
                   index={i}
                   isStreaming={i === streamingIndex && msg.role === 'assistant'}
                   onRollback={handleRollback}
                 />
-              ))}
+              </div>
+            )}
+          />
+        )}
 
-              {/* Loading indicator: streaming started but no content yet.
-                归属判定单点（streamingIndicatorOwner）：thinking 非空时由气泡内指示接管。 */}
-              {streamStatus === 'streaming' &&
-                messages.length > 0 &&
-                messages[messages.length - 1].role === 'assistant' &&
-                streamingIndicatorOwner(messages[messages.length - 1]) === 'list' && (
-                  <div
-                    className="flex items-center gap-2 text-[var(--color-text-tertiary)] py-2"
-                    aria-live="polite"
-                    aria-label="AI 正在思考中"
-                  >
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span className="text-sm">思考中...</span>
-                  </div>
-                )}
+        {/* 状态提示带（固定于消息区与输入区之间，不随列表滚动）：流式/压缩
+            进度、断线、停止、控制面与轮错误等即时状态。 */}
+        <div className="shrink-0 px-4">
+          {/* Loading indicator: streaming started but no content yet.
+            归属判定单点（streamingIndicatorOwner）：thinking 非空时由气泡内指示接管。 */}
+          {streamStatus === 'streaming' &&
+            messages.length > 0 &&
+            messages[messages.length - 1].role === 'assistant' &&
+            streamingIndicatorOwner(messages[messages.length - 1]) === 'list' && (
+              <div
+                className="flex items-center gap-2 text-[var(--color-text-tertiary)] py-2"
+                aria-live="polite"
+                aria-label="AI 正在思考中"
+              >
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span className="text-sm">思考中...</span>
+              </div>
+            )}
 
-              {/* 压缩中：底部进行中提示（与压缩按钮/输入框禁用同一状态源，
-                压缩完成/失败后消失）。 */}
-              {compressing && (
-                <div
-                  className="flex items-center justify-center gap-2 text-[var(--color-text-tertiary)] py-2"
-                  aria-live="polite"
-                  aria-label="正在压缩会话"
-                >
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-sm">压缩中...</span>
-                </div>
-              )}
+          {/* 压缩中：进行中提示（与压缩按钮/输入框禁用同一状态源，
+            压缩完成/失败后消失）。 */}
+          {compressing && (
+            <div
+              className="flex items-center justify-center gap-2 text-[var(--color-text-tertiary)] py-2"
+              aria-live="polite"
+              aria-label="正在压缩会话"
+            >
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span className="text-sm">压缩中...</span>
+            </div>
+          )}
 
-              {/* 断线提示：跑完再取——任务继续在后台运行，刷新获取最终结果 */}
-              {streamError && streamStatus === 'idle' && (
-                <div className="flex items-center gap-2 py-2" role="alert" aria-live="polite">
-                  <span className="text-xs text-amber-600 dark:text-amber-400">
-                    连接断开，任务继续在后台运行，完成后可刷新查看
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => currentSessionId && reloadSession(currentSessionId)}
-                    className="flex items-center gap-1 px-2.5 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
-                  >
-                    <RotateCcw size={12} />
-                    刷新结果
-                  </button>
-                </div>
-              )}
+          {/* 断线提示：跑完再取——任务继续在后台运行，刷新获取最终结果 */}
+          {streamError && streamStatus === 'idle' && (
+            <div className="flex items-center gap-2 py-2" role="alert" aria-live="polite">
+              <span className="text-xs text-amber-600 dark:text-amber-400">
+                连接断开，任务继续在后台运行，完成后可刷新查看
+              </span>
+              <button
+                type="button"
+                onClick={() => currentSessionId && reloadSession(currentSessionId)}
+                className="flex items-center gap-1 px-2.5 py-1 text-xs rounded border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]"
+              >
+                <RotateCcw size={12} />
+                刷新结果
+              </button>
             </div>
           )}
 

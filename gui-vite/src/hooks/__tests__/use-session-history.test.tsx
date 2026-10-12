@@ -4,7 +4,7 @@ import { StrictMode, type ReactNode } from 'react';
 import { http, HttpResponse } from 'msw';
 import { server } from '@/test/mocks/server';
 import { useAppStore } from '@/lib/store';
-import { useSessionHistory } from '../use-session-history';
+import { loadSessionHistory, useSessionHistory } from '../use-session-history';
 import { messageText } from '@/lib/types';
 import { applySnapshot, subscribeSession, __resetSubscriptions } from '../use-unified-events';
 
@@ -88,6 +88,69 @@ describe('useSessionHistory', () => {
     // 非当前会话：只写字典，不污染投影
     expect(useAppStore.getState().messages).toHaveLength(0);
     expect(useAppStore.getState().sessionMessages['session-1']).toHaveLength(2);
+  });
+
+  it('loadSessionHistory fetches only the latest page (limit=50) and records paging meta', async () => {
+    let capturedUrl = '';
+    server.use(
+      http.get(`${API_BASE}/sessions/session-1/messages`, ({ request }) => {
+        capturedUrl = request.url;
+        return HttpResponse.json({
+          session_id: 'session-1',
+          messages: historyMessages(),
+          next_before_seq: 12,
+          has_more: true,
+          last_seq: 20,
+        });
+      }),
+    );
+
+    const ok = await loadSessionHistory('session-1');
+
+    expect(ok).toBe(true);
+    expect(capturedUrl).toContain('limit=50');
+    expect(capturedUrl).not.toContain('before_seq');
+    const st = useAppStore.getState();
+    expect(st.sessionMessages['session-1']).toHaveLength(2);
+    expect(st.sessionMessageMeta['session-1']).toEqual({ oldestSeq: 12, hasMore: true });
+  });
+
+  it('loadOlder requests the older page via before_seq cursor and prepends it', async () => {
+    useAppStore.getState().setSessionMessages('session-1', historyMessages());
+    useAppStore.getState().setSessionMessageMeta('session-1', { oldestSeq: 12, hasMore: true });
+    let capturedUrl = '';
+    server.use(
+      http.get(`${API_BASE}/sessions/session-1/messages`, ({ request }) => {
+        capturedUrl = request.url;
+        return HttpResponse.json({
+          session_id: 'session-1',
+          messages: [
+            {
+              id: 'msg-0',
+              role: 'user',
+              segments: [{ type: 'text', text: '更早的消息' }],
+              timestamp: '',
+            },
+          ],
+          has_more: false,
+        });
+      }),
+    );
+
+    const { result } = renderHook(() => useSessionHistory('session-1'));
+    await act(async () => {
+      await result.current.loadOlder('session-1');
+    });
+
+    expect(capturedUrl).toContain('before_seq=12');
+    expect(capturedUrl).toContain('limit=50');
+    const msgs = useAppStore.getState().sessionMessages['session-1'] ?? [];
+    expect(msgs).toHaveLength(3);
+    expect(msgs[0]?.id).toBe('msg-0');
+    expect(useAppStore.getState().sessionMessageMeta['session-1']).toEqual({
+      oldestSeq: null,
+      hasMore: false,
+    });
   });
 
   it('reloadSession overwrites the target session cache and current projection', async () => {

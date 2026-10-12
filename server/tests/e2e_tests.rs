@@ -468,3 +468,84 @@ async fn test_e2e_unified_event_push_message() {
 
     server.shutdown();
 }
+
+/// 消息端点分页语义（ADR-035 §8 收尾）：**无参 = 最近一页 + 上滚游标**
+/// （不再返回全量——大会话全量可达数十 MB，实测 1650 条消息 25 MB，
+/// 是会话切换卡顿的根源）；带 `limit` 取显式页大小。
+#[tokio::test]
+async fn test_e2e_messages_default_is_latest_page() {
+    let dir = tempdir().expect("创建临时目录失败");
+    let config = test_tianyan_config_with_data_dir(dir.path().to_path_buf());
+    let (router, state) = tianyan_server::create_app(config)
+        .await
+        .expect("create_app 失败");
+    let server = TestServer::start(router).await.expect("启动测试服务器失败");
+
+    // 建会话并落 120 条消息（远超一页 50 条；user/assistant 交替）
+    let session_id = "session-page-1";
+    state
+        .session_manager()
+        .create_session(session_id, tianyan::common::types::Message::user("你好"))
+        .await
+        .expect("创建会话失败");
+    let ws = state
+        .working_sets()
+        .ensure(session_id)
+        .await
+        .expect("工作集加载失败");
+    for i in 0..120 {
+        let text = format!("消息 {i}");
+        let msg = if i % 2 == 0 {
+            tianyan::common::types::StructuredMessage::user(session_id.to_string(), text)
+        } else {
+            tianyan::common::types::StructuredMessage::assistant(session_id.to_string(), text)
+        };
+        ws.append(&msg, false).await.expect("落库失败");
+    }
+
+    // 无参：最近一页（≤50 条）+ has_more + 上滚游标——全量口子回归即失败
+    let resp = server
+        .get(&format!("/api/v1/sessions/{session_id}/messages"))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let msgs = body["messages"].as_array().expect("messages 应为数组");
+    assert!(
+        msgs.len() <= 50,
+        "无参应返回最近一页（≤50 条），实际 {} 条（全量口子回归？）: {body}",
+        msgs.len()
+    );
+    assert!(
+        !msgs.is_empty(),
+        "有 120 条消息的会话不应返回空页: {body}"
+    );
+    assert_eq!(
+        msgs.first().map(|m| m["role"].as_str().unwrap_or("")),
+        Some("user"),
+        "页首恒为 user（页边界对齐，工具对不跨页切断）: {body}"
+    );
+    assert_eq!(
+        body["has_more"].as_bool(),
+        Some(true),
+        "更早历史存在时 has_more 应为 true: {body}"
+    );
+    assert!(
+        body["next_before_seq"].as_i64().unwrap_or(0) > 0,
+        "分页应带上滚游标 next_before_seq: {body}"
+    );
+
+    // 显式 limit：按页大小取（页边界对齐 user，页长 ≤ limit）
+    let resp = server
+        .get(&format!("/api/v1/sessions/{session_id}/messages?limit=10"))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let msgs = body["messages"].as_array().expect("messages 应为数组");
+    assert!(
+        msgs.len() <= 10,
+        "limit=10 页长应 ≤10，实际 {}: {body}",
+        msgs.len()
+    );
+
+    server.shutdown();
+}
