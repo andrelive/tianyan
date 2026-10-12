@@ -1152,7 +1152,17 @@ pub fn build_notification_text(task: &BackgroundTask, remaining: usize) -> Strin
     if !detail.is_empty() {
         text.push_str(&format!("\n{detail}"));
     }
-    if remaining > 0 {
+    if task.status == TaskStatus::Cancelled {
+        // 取消不是失败、也不是待办：必须明确"勿重试"——否则模型把它读成
+        // "中断待续"，循环重新拉起任务（用户实测："取消后智能体又循环
+        // 想拉起来，得多点一次停止"）。同时不得出现"继续原有工作"召唤。
+        text.push_str(
+            "\n该任务已由用户主动停止（非失败）——不要自动重试或重新发起；等待用户进一步指示。",
+        );
+        if remaining > 0 {
+            text.push_str(&format!("\n该会话还有 {remaining} 个后台任务进行中。"));
+        }
+    } else if remaining > 0 {
         text.push_str(&format!(
             "\n该会话还有 {remaining} 个后台任务进行中，全部完成后请汇总各任务结果。"
         ));
@@ -1238,7 +1248,16 @@ pub fn build_command_notification_text(task: &CommandTask, remaining: usize) -> 
     if let Some(path) = &task.log_file {
         text.push_str(&format!("\n日志：{path}（输出尾部可用 task_status 查询）"));
     }
-    if remaining > 0 {
+    if task.status == CommandTaskStatus::Cancelled {
+        // 同委托通知：取消是用户主动停止，必须明确"勿重试"（防模型把
+        // 取消读成中断待续、循环重新拉起）；不得出现"继续原有工作"召唤。
+        text.push_str(
+            "\n该命令已由用户主动停止（非失败）——不要自动重试或重新发起；等待用户进一步指示。",
+        );
+        if remaining > 0 {
+            text.push_str(&format!("\n该会话还有 {remaining} 个后台命令进行中。"));
+        }
+    } else if remaining > 0 {
         text.push_str(&format!(
             "\n该会话还有 {remaining} 个后台命令进行中，全部完成后请汇总各任务结果。"
         ));
@@ -1432,6 +1451,67 @@ mod tests {
         let text = build_notification_text(&task, 0);
         assert!(text.contains("所有后台任务均已完成"));
         assert!(text.contains("汇总各任务结果并继续"));
+    }
+
+    #[test]
+    fn test_notification_text_cancelled_directive() {
+        // 回归：取消通知必须携带"不要重试"指令，且不得出现"继续原有工作"
+        // （修复前取消通知带"请汇总…继续原有工作"召唤——模型把用户主动
+        // 停止读成"中断待续"，循环重新拉起任务）。
+        let task = BackgroundTask {
+            kind: TaskKind::Delegate,
+            id: "bt_c1".to_string(),
+            description: "跑批量迁移".to_string(),
+            status: TaskStatus::Cancelled,
+            parent_session_id: "s1".to_string(),
+            result: None,
+            error: None,
+            output_tail: None,
+            log_file: None,
+            result_path: None,
+            created_at: 0,
+            completed_at: Some(1),
+            seq: 0,
+            anchor_seq: 0,
+            working_directory: None,
+        };
+        let text = build_notification_text(&task, 0);
+        assert!(text.contains("[后台任务已取消]"), "{text}");
+        assert!(text.contains("用户主动停止"), "{text}");
+        assert!(text.contains("不要自动重试"), "{text}");
+        assert!(
+            !text.contains("继续原有工作"),
+            "取消通知不得召唤继续: {text}"
+        );
+
+        // 命令版同款
+        let cmd = CommandTask {
+            id: "cmd_c2".to_string(),
+            command: "npm run build".to_string(),
+            cwd: None,
+            parent_session_id: "s1".to_string(),
+            status: CommandTaskStatus::Cancelled,
+            exit_code: None,
+            pid: None,
+            log_file: None,
+            output_tail: String::new(),
+            created_at: 0,
+            completed_at: Some(1),
+            seq: 0,
+            anchor_seq: 0,
+            working_directory: None,
+            ready: false,
+            ready_note: None,
+            counted: true,
+        };
+        let text = build_command_notification_text(&cmd, 0);
+        assert!(text.contains("[后台命令已取消]"), "{text}");
+        assert!(text.contains("用户主动停止"), "{text}");
+        assert!(text.contains("不要自动重试"), "{text}");
+        assert!(
+            !text.contains("继续原有工作"),
+            "取消通知不得召唤继续: {text}"
+        );
     }
 
     #[tokio::test]

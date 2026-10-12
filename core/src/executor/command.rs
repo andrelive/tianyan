@@ -561,7 +561,15 @@ impl CommandManager {
             )
             .await;
         }
-        if remaining == 0 || task.status == CommandTaskStatus::Failed {
+        // ADR-013 唤醒语义：should_wake = allComplete || failure。
+        // 例外：Cancelled（用户停止传播）不唤醒——与委托任务
+        // （`BackgroundTaskManager::finish`）同款：用户主动停止后不应自动
+        // 触发汇总轮；级联取消（用户"停止"引发的任务终止）若不豁免，
+        // 会形成"停止 → 取消 → 唤醒 → 又拉起一轮 → 再停"的打扰循环
+        // （用户实测："取消后智能体又循环想拉起来，得多点一次停止"）。
+        let should_wake = task.status != CommandTaskStatus::Cancelled
+            && (remaining == 0 || task.status == CommandTaskStatus::Failed);
+        if should_wake {
             if let Some(waker) = self.waker.lock().await.clone() {
                 waker.wake(&session_id).await;
             }
@@ -1896,7 +1904,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_background_cancelled_does_not_wake() {
+        // 回归：取消（用户主动停止）不得唤醒——与委托任务同款
+        // （BackgroundTaskManager::finish 的 Cancelled 豁免）。修复前
+        // `remaining == 0` 无条件唤醒：取消会话内最后一个任务/级联取消
+        // 都会拉起新一轮（用户实测的"循环拉起，得多停一次"）。
+        let _g = CHILD_REGISTRY_LOCK.lock().await; // 与其他进程类测试互斥（见常量注释）
+        #[derive(Clone)]
+        struct CountingWaker {
+            wakes: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl CommandWaker for CountingWaker {
+            async fn wake(&self, _session_id: &str) {
+                self.wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let manager = CommandManager::new(None);
+        manager
+            .set_waker(Arc::new(CountingWaker {
+                wakes: wakes.clone(),
+            }))
+            .await;
+        // 会话内最后一个任务被取消：remaining 归零（旧行为在此唤醒）
+        manager
+            .session_counts
+            .lock()
+            .await
+            .insert("s1".to_string(), 1);
+        let task = CommandTask {
+            id: "cmd_c1".to_string(),
+            command: "npm run dev".to_string(),
+            cwd: None,
+            parent_session_id: "s1".to_string(),
+            status: CommandTaskStatus::Cancelled,
+            exit_code: None,
+            pid: None,
+            log_file: None,
+            output_tail: String::new(),
+            created_at: 0,
+            completed_at: Some(1),
+            seq: 0,
+            anchor_seq: 0,
+            working_directory: None,
+            ready: false,
+            ready_note: None,
+            counted: true,
+        };
+        manager.notify_task_terminal(task).await;
+        assert_eq!(
+            wakes.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "取消（用户主动停止）不得唤醒（否则级联取消会形成打扰循环）"
+        );
+    }
+
+    #[tokio::test]
     async fn test_background_completion_notifies_with_remaining() {
+        // 完成通知：终态触发 on_command_terminal，remaining 计数随任务数递减
         // 完成通知：终态触发 on_command_terminal，remaining 计数随任务数递减
         let _g = CHILD_REGISTRY_LOCK.lock().await; // 与 kill_all 类测试互斥（见常量注释）
         #[derive(Clone)]
