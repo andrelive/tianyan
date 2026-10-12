@@ -515,10 +515,7 @@ async fn test_e2e_messages_default_is_latest_page() {
         "无参应返回最近一页（≤50 条），实际 {} 条（全量口子回归？）: {body}",
         msgs.len()
     );
-    assert!(
-        !msgs.is_empty(),
-        "有 120 条消息的会话不应返回空页: {body}"
-    );
+    assert!(!msgs.is_empty(), "有 120 条消息的会话不应返回空页: {body}");
     assert_eq!(
         msgs.first().map(|m| m["role"].as_str().unwrap_or("")),
         Some("user"),
