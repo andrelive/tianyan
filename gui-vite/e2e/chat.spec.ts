@@ -134,6 +134,49 @@ test.describe('chat', () => {
     expect(assistantBox!.y).toBeGreaterThan(userBox!.y);
   });
 
+  test('消息列表无横向溢出：Virtuoso scroller 不出现横向滚动条', async ({ page }) => {
+    // 判别力来源（历史回归，与消息内容无关）：Virtuoso scroller 上放水平
+    // padding 会使其 item 层（width:100% 相对 padding box）恒定向右溢出
+    // padding 宽度（16px）→ 消息区底部出现横滚条。此断言在回归引入时必红
+    // （delta=16）；修复后 delta=0（见 ChatPanel.tsx 注释）。
+    await page.route('**/api/v1/sessions/s1/messages*', async (route) => {
+      await route.fulfill({
+        json: {
+          session_id: 's1',
+          messages: [
+            {
+              id: 'm1',
+              seq: 1,
+              role: 'user',
+              segments: [{ type: 'text', text: '给我一段长代码' }],
+            },
+            {
+              id: 'm2',
+              seq: 2,
+              role: 'assistant',
+              // 超长无换行代码行：由代码块自身 overflow-x 吸收，不应外溢
+              segments: [{ type: 'text', text: '```\n' + 'const x = 1; '.repeat(60) + '\n```' }],
+            },
+          ],
+        },
+      });
+    });
+
+    await page
+      .getByRole('button', { name: new RegExp(SESSION_TITLE) })
+      .first()
+      .click();
+    await expect(page.getByText('给我一段长代码').first()).toBeVisible({ timeout: 10000 });
+
+    const delta = await page.evaluate(() => {
+      const sc = document.querySelector('div[data-virtuoso-scroller]');
+      if (!sc) return null;
+      return sc.scrollWidth - sc.clientWidth;
+    });
+    expect(delta).not.toBeNull();
+    expect(delta!).toBeLessThanOrEqual(0);
+  });
+
   test('send button is enabled when input has text', async ({ page }) => {
     const textarea = page.locator('textarea');
     const sendButton = page.locator('button', { hasText: '发送' });

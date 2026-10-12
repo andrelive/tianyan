@@ -612,7 +612,11 @@ export default function ChatPanel() {
           <div className="flex items-center gap-2" />
         </div>
 
-        {/* Messages area（虚拟列表：仅渲染视口附近消息——渲染量与消息总数解耦） */}
+        {/* Messages area（虚拟列表：仅渲染视口附近消息——渲染量与消息总数解耦）
+            水平留白由 item 内容层提供（下方 px-4）——不放 scroller：Virtuoso 的
+            item 层 width:100% 相对 scroller 的 padding box 计算、却自内容盒
+            左缘起布局，scroller 带水平 padding 时右侧恒定溢出 padding 宽度
+            （16px）→ 消息区底部出现横向滚动条（实测 delta=16px 恒定）。 */}
         {messages.length === 0 && streamStatus === 'idle' && (
           <div className="flex-1 flex flex-col items-center justify-center text-[var(--color-text-tertiary)] gap-3">
             <MessageSquare className="w-12 h-12 opacity-30" />
@@ -634,9 +638,9 @@ export default function ChatPanel() {
             }}
             atBottomThreshold={24}
             startReached={handleStartReached}
-            className="flex-1 min-h-0 px-4 pt-4"
+            className="flex-1 min-h-0 pt-4"
             itemContent={(i, msg) => (
-              <div className="max-w-4xl mx-auto pb-4">
+              <div className="max-w-4xl mx-auto pb-4 px-4">
                 <MessageBubble
                   message={msg}
                   index={i}
