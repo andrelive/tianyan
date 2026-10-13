@@ -213,8 +213,8 @@ cache_ttl = 300
 # web_search / web_fetch 工具（Agent 的网页感知能力）
 [web]
 enabled = true
-# 搜索后端：duckduckgo（默认，零配置）或 searxng（自托管/公共实例）
-search_backend = "duckduckgo"
+# 搜索后端：360（默认，国内可达）/ duckduckgo / bing / searxng（自托管/公共实例）
+search_backend = "360"
 # search_backend = "searxng" 时必填，如 "https://searx.be"
 # searxng_endpoint = "https://searx.be"
 # HTTP 超时（秒）

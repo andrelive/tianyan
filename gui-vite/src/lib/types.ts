@@ -817,7 +817,7 @@ export interface ConfigState {
 
   // -- Web config (web.*；web_search / web_fetch 工具) --
   web_enabled: boolean;
-  /** 搜索后端：duckduckgo（默认，零配置）/ bing（国内可达）/ searxng（自定义端点）。 */
+  /** 搜索后端：360（默认，国内可达）/ duckduckgo / bing / searxng（自定义端点）。 */
   search_backend: string;
   /** SearXNG 端点（search_backend = searxng 时必填）。 */
   searxng_endpoint: string;

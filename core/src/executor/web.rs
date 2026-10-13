@@ -3,7 +3,7 @@
 //! 业界定位（对标 Claude Code WebSearch/WebFetch、Codex web_search、
 //! fetch-mcp）：
 //! - `web_search` 返回结构化结果（标题/URL/摘要），不进全文——省 token；
-//!   搜索后端零配置走 DuckDuckGo HTML 端点，可切换 Bing RSS（国内可达）/ SearXNG 自托管端点。
+//!   搜索后端默认走 360（so.com，国内可达），可切换 DuckDuckGo HTML / Bing RSS / SearXNG 自托管端点。
 //! - `web_fetch` 抓取单 URL 并提取可读正文（标题 + 主文本 + 链接列表），
 //!   替代 http_request 的裸 HTML 输出。
 //! - 安全：仅 http/https；SSRF 防护（拒绝本地/内网地址，与 http_request
@@ -11,7 +11,7 @@
 //! - 防注入：工具描述提示 LLM 搜索结果来自外部、不可信（Codex cached
 //!   索引模式的本地等价——用"摘要优先 + 可信度提示"替代索引白名单）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,7 +42,11 @@ enum SearchBackend {
     /// SearXNG 自托管/公共实例（JSON API）。
     Searxng(String),
     /// Bing RSS 端点（`cn.bing.com` 国内可达；`format=rss` 结构稳定）。
+    /// 注意：Bing 对疑似自动化流量会返回**降级结果**（拆词匹配、质量低）
+    /// 且无法通过客户端特征规避——仅作备选（默认已改为 So360）。
     Bing,
+    /// 360 搜索（`so.com`，国内可达；结果页 `data-mdurl` 直出真实 URL，无需解重定向）。
+    So360,
 }
 
 impl SearchBackend {
@@ -50,6 +54,7 @@ impl SearchBackend {
         match config.search_backend.as_str() {
             "duckduckgo" => Ok(Self::DuckDuckGo),
             "bing" => Ok(Self::Bing),
+            "360" => Ok(Self::So360),
             "searxng" => {
                 let endpoint = config.searxng_endpoint.clone().ok_or_else(|| {
                     TianyanError::config("search_backend = \"searxng\" 需要配置 searxng_endpoint")
@@ -57,7 +62,7 @@ impl SearchBackend {
                 Ok(Self::Searxng(endpoint.trim_end_matches('/').to_string()))
             }
             other => Err(TianyanError::config(format!(
-                "未知的 search_backend: {other}（支持 duckduckgo / bing / searxng）"
+                "未知的 search_backend: {other}（支持 360 / duckduckgo / bing / searxng）"
             ))),
         }
     }
@@ -161,6 +166,12 @@ impl WebSearchClient {
                 let url = bing_search_url(query);
                 let body = self.http_get(&url).await?;
                 let results = parse_bing_rss(&body);
+                (url, results)
+            }
+            SearchBackend::So360 => {
+                let url = so360_search_url(query);
+                let html = self.http_get(&url).await?;
+                let results = parse_so360_html(&html);
                 (url, results)
             }
         };
@@ -359,6 +370,11 @@ fn bing_search_url(query: &str) -> String {
     )
 }
 
+/// 构造 360 搜索 URL（so.com；国内可达；结果页 `data-mdurl` 直出真实 URL）。
+fn so360_search_url(query: &str) -> String {
+    format!("https://www.so.com/s?q={}", urlencode(query))
+}
+
 /// 解析 Bing RSS 搜索结果（RSS 2.0：`channel > item`，item 含
 /// `title` / `link` / `description`）。
 ///
@@ -403,6 +419,63 @@ fn decode_xml_entities(s: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
+}
+
+/// 解析 360 搜索结果页（so.com）。
+///
+/// 结构（2026-10 实测）：`ul.result > li.res-list`；每条结果标题为
+/// `h3.res-title > a[data-mdurl]`（data-mdurl 直出真实 URL，无需解重定向；
+/// 标题文本含 `<em>` 高亮词，`text()` 自然拼接）；摘要统一取
+/// `[data-result-summary]` 文本（普通型位于 `p.res-desc` 内、富摘要型位于
+/// `span.res-list-summary` 内）。同 URL 去重——页面导航等位置也带
+/// data-mdurl，故限定在结果条目与标题链接内选取。
+fn parse_so360_html(html: &str) -> Vec<SearchResult> {
+    let document = Html::parse_document(html);
+    let item_sel = match Selector::parse("li.res-list") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let title_sel = match Selector::parse("h3.res-title > a") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let summary_sel = match Selector::parse("[data-result-summary]") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut results: Vec<SearchResult> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for item in document.select(&item_sel) {
+        let link = match item.select(&title_sel).next() {
+            Some(l) => l,
+            None => continue,
+        };
+        let url = link
+            .value()
+            .attr("data-mdurl")
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let title = link.text().collect::<String>().trim().to_string();
+        if title.is_empty() || url.is_empty() {
+            continue;
+        }
+        if !seen.insert(url.clone()) {
+            continue;
+        }
+        let snippet = item
+            .select(&summary_sel)
+            .next()
+            .map(|e| e.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+        results.push(SearchResult {
+            title,
+            url,
+            snippet,
+        });
+    }
+    results
 }
 
 /// URL 编码（查询参数安全）。
@@ -830,6 +903,51 @@ mod tests {
     #[test]
     fn test_parse_bing_rss_garbage() {
         assert!(parse_bing_rss("not xml at all").is_empty());
+    }
+
+    // ── 360 解析 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_so360_search_url() {
+        let url = so360_search_url("rust agent");
+        assert_eq!(url, "https://www.so.com/s?q=rust+agent");
+    }
+
+    #[test]
+    fn test_parse_so360_html() {
+        // 结构取自 2026-10 真实抓取（片段裁剪）：富摘要型 + 普通型 +
+        // 无 data-mdurl 条目（应过滤）。
+        let html = r#"<ul class="result">
+<li class="res-list" data-result-type="richsum" data-result-pos="1"><h3   class="res-title"><a href="https://www.so.com/link?m=x" data-mdurl="https://blog.csdn.net/a/1" rel="noopener" target="_blank">深入<em>Loom</em>模型：解密 C11 内存模型在 <em>Rust</em> 并发测试中的应用</a></h3><div class="res-comm-con"><p></p><span class="res-list-summary" data-result-summary><em>loom</em>::thread::yield_now(); 然后使用 <em>loom</em>::model 定义测试场景。</span></div></li>
+<li class="res-list" data-result-type="normal" data-result-pos="3"><h3 class="res-title "><a href="https://www.so.com/link?m=y" data-mdurl="https://blog.csdn.net/b/2" rel="noopener" target="_blank"><em>Rust</em> 异步运行时的正确性验证</a></h3><p class="res-desc"><span class="gray g-c-gray">2026年7月20日&nbsp;-&nbsp;</span><span data-result-summary>传统的压力测试几乎无法系统性暴露这类 Bug，而 loom 的模型检测通过穷举线程交错解决。</span></p></li>
+<li class="res-list" data-result-type="normal"><h3 class="res-title"><a href="https://www.so.com/link?m=z" target="_blank">没有 data-mdurl 的条目</a></h3></li>
+</ul>"#;
+        let results = parse_so360_html(html);
+        assert_eq!(results.len(), 2, "无 data-mdurl 的条目应被过滤");
+        assert_eq!(
+            results[0].title,
+            "深入Loom模型：解密 C11 内存模型在 Rust 并发测试中的应用"
+        );
+        assert_eq!(results[0].url, "https://blog.csdn.net/a/1");
+        assert!(results[0].snippet.contains("loom::thread::yield_now()"));
+        assert_eq!(results[1].url, "https://blog.csdn.net/b/2");
+        assert!(results[1].snippet.contains("传统的压力测试"));
+    }
+
+    #[test]
+    fn test_parse_so360_html_dedup() {
+        // 同 URL 重复出现 → 只保留一条
+        let html = r#"<ul class="result">
+<li class="res-list"><h3 class="res-title"><a data-mdurl="https://example.com/a" href="x">A</a></h3></li>
+<li class="res-list"><h3 class="res-title"><a data-mdurl="https://example.com/a" href="x">A 重复</a></h3></li>
+</ul>"#;
+        let results = parse_so360_html(html);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_so360_html_garbage() {
+        assert!(parse_so360_html("not html at all").is_empty());
     }
 
     // ── SearXNG 解析 ──────────────────────────────────────────────────

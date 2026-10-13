@@ -69,7 +69,7 @@ export function emptyConfigState(): ConfigState {
     providerPresets: {},
     mcpServers: [],
     web_enabled: true,
-    search_backend: 'duckduckgo',
+    search_backend: '360',
     searxng_endpoint: '',
     web_timeout_secs: 15,
     web_cache_ttl_secs: 600,

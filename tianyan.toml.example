@@ -151,7 +151,7 @@ servers = []
 
 [web]
 enabled = true
-search_backend = "duckduckgo"
+search_backend = "360"
 timeout_secs = 15
 cache_ttl_secs = 600
 max_fetch_bytes = 2097152

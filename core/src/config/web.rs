@@ -28,7 +28,7 @@ pub struct WebConfig {
     /// 是否启用 web_search / web_fetch 工具。
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 搜索后端：`duckduckgo`（默认，零配置）或 `searxng`（自定义端点）。
+    /// 搜索后端：`360`（默认，国内可达）/ `duckduckgo` / `bing` / `searxng`（自定义端点）。
     #[serde(default = "default_backend")]
     pub search_backend: String,
     /// SearXNG 端点（`search_backend = "searxng"` 时必填），如 `https://searx.be`。
@@ -45,9 +45,9 @@ pub struct WebConfig {
     pub max_fetch_bytes: usize,
 }
 
-/// 默认搜索后端。
+/// 默认搜索后端（360：国内可达，且无 Bing 式降级问题）。
 fn default_backend() -> String {
-    "duckduckgo".to_string()
+    "360".to_string()
 }
 
 impl Default for WebConfig {
@@ -71,7 +71,7 @@ mod tests {
     fn test_web_config_defaults() {
         let cfg = WebConfig::default();
         assert!(cfg.enabled);
-        assert_eq!(cfg.search_backend, "duckduckgo");
+        assert_eq!(cfg.search_backend, "360");
         assert_eq!(cfg.timeout_secs, 15);
         assert_eq!(cfg.cache_ttl_secs, 600);
         assert_eq!(cfg.max_fetch_bytes, 2 * 1024 * 1024);
@@ -81,7 +81,7 @@ mod tests {
     fn test_web_config_deserialize_minimal() {
         let cfg: WebConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.enabled, "空配置应使用默认值");
-        assert_eq!(cfg.search_backend, "duckduckgo");
+        assert_eq!(cfg.search_backend, "360");
     }
 
     #[test]

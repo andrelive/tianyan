@@ -8,8 +8,9 @@ interface WebTabProps {
 
 /** 搜索后端选项（与后端 SearchBackend::from_config 支持值对齐）。 */
 const BACKENDS = [
-  { value: 'duckduckgo', label: 'DuckDuckGo（默认，零配置）' },
-  { value: 'bing', label: 'Bing（国内可达）' },
+  { value: '360', label: '360 搜索（默认，国内可达）' },
+  { value: 'duckduckgo', label: 'DuckDuckGo（零配置）' },
+  { value: 'bing', label: 'Bing（可能返回降级结果）' },
   { value: 'searxng', label: 'SearXNG（自托管端点）' },
 ];
 
@@ -20,8 +21,8 @@ export default function WebTab({ config, onUpdateField }: WebTabProps) {
       <SectionTitle title="Web 搜索" />
       <div className="space-y-4">
         <p className="text-xs text-[var(--color-text-tertiary)]">
-          web_search / web_fetch 工具的网络配置。默认 DuckDuckGo 零配置可用； 国内网络不可达时可切换
-          Bing（cn.bing.com 可达）或自托管 SearXNG。
+          web_search / web_fetch 工具的网络配置。默认 360 搜索（国内可达）； 也可切换 DuckDuckGo /
+          Bing / SearXNG（自托管）。
         </p>
 
         <FieldRow label="启用 Web 工具" description="关闭后 web_search / web_fetch 不可用">
