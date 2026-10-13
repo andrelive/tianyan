@@ -35,6 +35,8 @@ export interface TurnState {
   state: 'running' | 'idle';
   /** 是否自动轮（唤醒轮/子代理轮；false = 用户轮）。 */
   auto: boolean;
+  /** 挂起中的 ask_user 提问（SessionList 问号标识）；仅轮边界事件重置。 */
+  pendingAsk?: boolean;
 }
 
 /** 待回答的追问（composer takeover 数据）：多问题分步（每个问题一个 tab +
@@ -135,8 +137,13 @@ export interface ChatSlice {
   hasSessionMessages: (sessionId: string) => boolean;
 
   // Clarification（追问）
-  pendingClarification: PendingClarification | null;
-  setPendingClarification: (question: PendingClarification | null) => void;
+  // 多会话并行提问互不覆盖：切到哪个会话，哪个会话的问题接管输入框；
+  // 回答/清除只作用于对应会话（跨会话不串）。
+  pendingClarifications: Record<string, PendingClarification>;
+  /** 写入（按 question.sessionId 归档）。 */
+  setPendingClarification: (question: PendingClarification) => void;
+  /** 清除单个会话的追问（回答提交成功后）。 */
+  clearPendingClarification: (sessionId: string) => void;
   removeEmptyAssistantMessage: (sessionId?: string | null) => void;
 
   // Rollback / redo（按消息 ID 定位：前端索引与服务端消息列表错位，
@@ -639,8 +646,17 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
   hasSessionMessages: (sessionId) => !!get().sessionMessages[sessionId]?.length,
 
   // Clarification（追问）
-  pendingClarification: null,
-  setPendingClarification: (question) => set({ pendingClarification: question }),
+  pendingClarifications: {},
+  setPendingClarification: (question) =>
+    set((s) => ({
+      pendingClarifications: { ...s.pendingClarifications, [question.sessionId]: question },
+    })),
+  clearPendingClarification: (sessionId) =>
+    set((s) => {
+      const next = { ...s.pendingClarifications };
+      delete next[sessionId];
+      return { pendingClarifications: next };
+    }),
   removeEmptyAssistantMessage: (sessionId) =>
     set((s) =>
       updateSessionMessages(s, sessionId, (msgs) => {

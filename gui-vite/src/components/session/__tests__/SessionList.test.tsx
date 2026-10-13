@@ -568,4 +568,25 @@ describe('SessionList', () => {
     });
     expect(screen.queryByTestId('session-running-s2')).not.toBeInTheDocument();
   });
+
+  it('shows a question icon instead of the running dot while an ask_user answer is pending', async () => {
+    mockSessions([
+      makeSession({ id: 's1', title: '等待回答会话' }),
+      makeSession({ id: 's2', title: '运行会话' }),
+    ]);
+    useAppStore.setState({
+      turnState: {
+        s1: { state: 'running', auto: false, pendingAsk: true },
+        s2: { state: 'running', auto: false },
+      },
+    });
+    renderSessionList();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-ask-s1')).toBeInTheDocument();
+    });
+    // 问号替代绿点（同一运行态的两种提示形态）；无 pendingAsk 的会话仍显示绿点
+    expect(screen.queryByTestId('session-running-s1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('session-running-s2')).toBeInTheDocument();
+  });
 });

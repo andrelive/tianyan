@@ -13,6 +13,7 @@ import {
   FileText,
   FolderOpen,
   FolderPlus,
+  HelpCircle,
   MessageSquare,
   Plus,
   Trash2,
@@ -387,6 +388,7 @@ export default function SessionList() {
                 {!collapsed &&
                   groupSessions.map((session) => {
                     const isRunning = turnState[session.id]?.state === 'running';
+                    const pendingAsk = isRunning && turnState[session.id]?.pendingAsk === true;
                     const taskCount = runningTasksBySession.get(session.id) ?? 0;
                     return (
                       <div
@@ -410,7 +412,17 @@ export default function SessionList() {
                           {/* 标题行：「运行中」脉冲点（turn_state 驱动）+ 标题 +
                               后台任务角标（按 parent_session_id 归到所属会话） */}
                           <div className="flex items-center gap-1.5">
-                            {isRunning && (
+                            {pendingAsk && (
+                              <span
+                                className="flex text-amber-600 dark:text-amber-400 animate-pulse shrink-0"
+                                title="等待你的回答"
+                                aria-label="等待你的回答"
+                                data-testid={`session-ask-${session.id}`}
+                              >
+                                <HelpCircle size={13} />
+                              </span>
+                            )}
+                            {isRunning && !pendingAsk && (
                               <span
                                 className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0"
                                 title="运行中"
@@ -443,7 +455,9 @@ export default function SessionList() {
                                   currentSessionId === session.id
                                     ? 'text-blue-700 dark:text-blue-300 font-medium'
                                     : isRunning
-                                      ? 'text-emerald-700 dark:text-emerald-400'
+                                      ? pendingAsk
+                                        ? 'text-amber-700 dark:text-amber-400'
+                                        : 'text-emerald-700 dark:text-emerald-400'
                                       : 'text-[var(--color-text-primary)]'
                                 }`}
                               >

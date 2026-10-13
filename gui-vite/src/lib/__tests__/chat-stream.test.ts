@@ -70,10 +70,12 @@ describe('handleChatStreamEvent', () => {
       }),
     );
 
-    const pending = useAppStore.getState().pendingClarification;
+    const pending = useAppStore.getState().pendingClarifications['session-A'];
     expect(pending?.questions[0]?.question).toBe('确认吗？');
-    // 修复前无 sessionId：追问是全局状态 → 在其他会话也会弹（并在该会话提交 → 原会话卡死）
-    expect(pending?.sessionId).toBe('session-A');
+    // per-session 归档：只落在来源会话（跨会话不串）
+    expect(Object.keys(useAppStore.getState().pendingClarifications)).toEqual(['session-A']);
+    // 会话列表问号标识（turnState per-session）：挂起置位、只作用于来源会话
+    expect(useAppStore.getState().turnState['session-A']?.pendingAsk).toBe(true);
   });
 
   it('handles error chunks: removes the empty bubble, resets status, shows toast', () => {

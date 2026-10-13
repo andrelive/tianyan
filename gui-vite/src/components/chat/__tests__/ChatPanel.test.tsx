@@ -534,9 +534,11 @@ describe('ChatPanel', () => {
   it('show no clarification bubble for a different session (cross-session isolation)', () => {
     useAppStore.setState({
       currentSessionId: 'session-B',
-      pendingClarification: {
-        sessionId: 'session-A',
-        questions: [{ question: '请确认是否删除该文件？', options: [] }],
+      pendingClarifications: {
+        'session-A': {
+          sessionId: 'session-A',
+          questions: [{ question: '请确认是否删除该文件？', options: [] }],
+        },
       },
     });
 
@@ -549,12 +551,47 @@ describe('ChatPanel', () => {
     expect(screen.getByRole('textbox')).toBeInTheDocument();
   });
 
+  it('keeps per-session clarifications independent (each session shows its own bubble)', () => {
+    useAppStore.setState({
+      currentSessionId: 'session-A',
+      pendingClarifications: {
+        'session-A': {
+          sessionId: 'session-A',
+          questions: [{ question: 'A 会话的问题？', options: [] }],
+        },
+        'session-B': {
+          sessionId: 'session-B',
+          questions: [{ question: 'B 会话的问题？', options: [] }],
+        },
+      },
+    });
+
+    renderChatPanel();
+    // 当前会话（A）显示自己的问题；B 的问题不串入
+    expect(screen.getByText('A 会话的问题？')).toBeInTheDocument();
+    expect(screen.queryByText('B 会话的问题？')).not.toBeInTheDocument();
+    // 两条目并存、互不覆盖（旧单槽实现：后到覆盖先到，此断言必红）
+    expect(Object.keys(useAppStore.getState().pendingClarifications).sort()).toEqual([
+      'session-A',
+      'session-B',
+    ]);
+
+    // 切到 B：B 的问题接管；A 的条目保留（切回可继续回答）
+    act(() => {
+      useAppStore.getState().setCurrentSession('session-B');
+    });
+    expect(screen.getByText('B 会话的问题？')).toBeInTheDocument();
+    expect(useAppStore.getState().pendingClarifications['session-A']).toBeDefined();
+  });
+
   it('shows the clarification bubble when a clarification is pending', () => {
     useAppStore.setState({
       currentSessionId: 'session-1',
-      pendingClarification: {
-        sessionId: 'session-1',
-        questions: [{ question: '请确认是否删除该文件？', options: [] }],
+      pendingClarifications: {
+        'session-1': {
+          sessionId: 'session-1',
+          questions: [{ question: '请确认是否删除该文件？', options: [] }],
+        },
       },
     });
 
@@ -571,9 +608,11 @@ describe('ChatPanel', () => {
     const user = userEvent.setup();
     useAppStore.setState({
       currentSessionId: 'session-1',
-      pendingClarification: {
-        sessionId: 'session-1',
-        questions: [{ question: '请确认是否删除该文件？', options: [] }],
+      pendingClarifications: {
+        'session-1': {
+          sessionId: 'session-1',
+          questions: [{ question: '请确认是否删除该文件？', options: [] }],
+        },
       },
     });
 
@@ -587,7 +626,7 @@ describe('ChatPanel', () => {
     // 同步工具语义：回答提交到 /chat/answer 等待通道（mock 返回 ok），
     // 提交成功后接管组件退出（工具结果经主对话流返回，此处不模拟）
     await waitFor(() => {
-      expect(useAppStore.getState().pendingClarification).toBeNull();
+      expect(useAppStore.getState().pendingClarifications['session-1']).toBeUndefined();
     });
     expect(screen.queryByText('请确认是否删除该文件？')).not.toBeInTheDocument();
   });
@@ -903,5 +942,61 @@ describe('ChatPanel', () => {
     expect(screen.getByTestId('virtuoso')).toBeInTheDocument();
     expect(screen.getByText('你好')).toBeInTheDocument();
     expect(screen.getByText('回复')).toBeInTheDocument();
+  });
+
+  it('loads older history only when scrolled to the very top (no mid-scroll trigger)', async () => {
+    // 分页端点：上滚一页（before_seq=5）返回更早一条 + has_more=false
+    const pagingCalls: string[] = [];
+    server.use(
+      http.get('/api/v1/sessions/session-1/messages', ({ request }) => {
+        const url = new URL(request.url);
+        pagingCalls.push(url.searchParams.get('before_seq') ?? 'latest');
+        return HttpResponse.json({
+          session_id: 'session-1',
+          messages: [
+            {
+              id: 'older-1',
+              role: 'user',
+              content: '更早的消息',
+              segments: [{ type: 'text', text: '更早的消息' }],
+              timestamp: '',
+            },
+          ],
+          next_before_seq: null,
+          has_more: false,
+        });
+      }),
+    );
+
+    // 预置当前会话首屏 + 分页元数据（还有更早历史）
+    const initial: ChatMessage[] = [
+      {
+        role: 'user',
+        segments: [{ type: 'text', text: '最近的消息' }],
+        timestamp: new Date().toISOString(),
+      },
+    ];
+    useAppStore.getState().setSessionMessages('session-1', initial);
+    useAppStore.getState().setSessionMessageMeta('session-1', { oldestSeq: 5, hasMore: true });
+    useAppStore.getState().setCurrentSession('session-1');
+    useAppStore.setState({ messages: initial });
+    renderChatPanel('/chat/session-1');
+
+    const scroller = screen.getByTestId('virtuoso');
+
+    // 中部滚动（未到顶）：不触发加载（旧 startReached overscan 语义下此处必触发）
+    scroller.scrollTop = 400;
+    fireEvent.scroll(scroller);
+    expect(pagingCalls).toHaveLength(0);
+
+    // 滚到顶（scrollTop≈0）：触发加载更早一页
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+    await waitFor(() => {
+      expect(pagingCalls).toEqual(['5']);
+    });
+    await waitFor(() => {
+      expect(useAppStore.getState().sessionMessages['session-1']).toHaveLength(2);
+    });
   });
 });

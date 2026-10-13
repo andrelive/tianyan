@@ -82,8 +82,10 @@ export default function ChatPanel() {
   );
   const setRollbackMessage = useAppStore((s) => s.setRollbackMessage);
   const eventsConnected = useAppStore((s) => s.eventsConnected);
-  const pendingClarification = useAppStore((s) => s.pendingClarification);
-  const setPendingClarification = useAppStore((s) => s.setPendingClarification);
+  /** 当前会话的待回答追问（per-session）：切到哪个会话，哪个会话的问题接管输入框。 */
+  const currentClarification = useAppStore(
+    (s) => s.pendingClarifications[s.currentSessionId ?? ''],
+  );
 
   /** 虚拟列表句柄（react-virtuoso）：程序化滚动到最新（替代 scrollTop 直写）。 */
   const virtuosoRef = useRef<VirtuosoHandle>(null);
@@ -138,12 +140,12 @@ export default function ChatPanel() {
   const sessionUsage = useMemo(() => sumSessionUsage(messages), [messages]);
 
   // Sync URL sessionId to store on mount / navigation
+  // （per-session 追问不随切换清除：各会话条目独立留存，切回即恢复接管）
   useEffect(() => {
     if (urlSessionId && urlSessionId !== currentSessionId) {
       setCurrentSession(urlSessionId);
-      setPendingClarification(null);
     }
-  }, [urlSessionId, currentSessionId, setCurrentSession, setPendingClarification]);
+  }, [urlSessionId, currentSessionId, setCurrentSession]);
 
   // 会话级模型选择：切会话同步视图（有缓存用缓存 / 无记录回落全局默认）；
   // 缓存缺失时拉取（按会话寻址写入——迟到响应只更新目标会话，不污染已切走的）
@@ -215,8 +217,10 @@ export default function ChatPanel() {
   /** 上滚到顶：加载更早一页（ADR-035 §8）。prepend 后同步递减首项索引——
       Virtuoso 以 firstItemIndex+index 对账项键，前插不改变既有项键，
       视口锚定由 Virtuoso 保持（替代浏览器原生 overflow-anchor）。 */
-  const handleStartReached = useCallback(() => {
+  const tryLoadOlder = useCallback(() => {
     if (loadingOlderRef.current || !urlSessionId) return;
+    const meta = useAppStore.getState().sessionMessageMeta[urlSessionId];
+    if (!meta?.hasMore) return;
     loadingOlderRef.current = true;
     void loadOlder(urlSessionId)
       .then((loaded) => {
@@ -226,6 +230,25 @@ export default function ChatPanel() {
         loadingOlderRef.current = false;
       });
   }, [loadOlder, urlSessionId]);
+
+  /** scroller 元素（"真到顶"判定用）：startReached 的 overscan 会在离顶
+      还有一大截（数千像素）时就触发——表现为"稍微滚动就加载"；改由原生
+      scroll 事件在 scrollTop≈0（滚到顶）时才取下一页。 */
+  const [scrollerEl, setScrollerEl] = useState<HTMLElement | null>(null);
+  const handleScrollerRef = useCallback((el: HTMLElement | Window | null) => {
+    setScrollerEl(el instanceof HTMLElement ? el : null);
+  }, []);
+
+  // 滚到顶才加载：单页加载且锚定完成后 scrollTop 变为插入内容高度（数千
+  // 像素），自然远离顶部——不会连发；用户继续上滚到底再取下一页。
+  useEffect(() => {
+    if (!scrollerEl) return;
+    const onScroll = () => {
+      if (scrollerEl.scrollTop <= 8) tryLoadOlder();
+    };
+    scrollerEl.addEventListener('scroll', onScroll, { passive: true });
+    return () => scrollerEl.removeEventListener('scroll', onScroll);
+  }, [scrollerEl, tryLoadOlder]);
 
   // 会话切换：重置跟随（切回预期看到最新内容）+ 重置首项索引基数
   // （Virtuoso 经 key 重建，initialTopMostItemIndex 定位到最新）。
@@ -238,7 +261,7 @@ export default function ChatPanel() {
   // 签名去重避免重复滚动；同消息内容增高（流式）的粘底由 Virtuoso 的
   // followOutput 内部处理。
   const followSig = `${currentSessionId}:${messages.length}:${streamStatus}:${
-    pendingClarification && pendingClarification.sessionId === currentSessionId ? 1 : 0
+    currentClarification ? 1 : 0
   }`;
   useEffect(() => {
     if (followSigRef.current === followSig) return;
@@ -496,12 +519,11 @@ export default function ChatPanel() {
       // （工具结果经原流返回）——提交回答不能因 streaming 被拦截，只防重复提交
       if (clarifySubmitting) return;
       const state = useAppStore.getState();
-      // U7：回答提交到**问题所属会话**（而非当前会话）——跨会话隔离下气泡
-      // 只在对应会话显示，但保险起见仍以问题绑定的会话为准（错投会让原
-      // 会话的 ask_user 永久挂起）。
-      const sessionId = state.pendingClarification?.sessionId ?? state.currentSessionId;
-      if (!sessionId) {
-        state.showToast('请先发送一条消息以创建会话', 'error');
+      // per-session：气泡按当前会话取用，回答提交回该会话
+      // （错投会让原会话的 ask_user 永久挂起）。
+      const sessionId = state.currentSessionId;
+      if (!sessionId || !state.pendingClarifications[sessionId]) {
+        if (!sessionId) state.showToast('请先发送一条消息以创建会话', 'error');
         return;
       }
       setClarifySubmitting(true);
@@ -521,7 +543,15 @@ export default function ChatPanel() {
             duration_ms: 0,
           });
         }
-        state.setPendingClarification(null);
+        // 回答已受理：清除会话列表问号标识（turn 仍 running，其余状态保留）
+        const answeredTurn = useAppStore.getState().turnState[sessionId];
+        if (answeredTurn) {
+          useAppStore.getState().setTurnState(sessionId, {
+            ...answeredTurn,
+            pendingAsk: false,
+          });
+        }
+        state.clearPendingClarification(sessionId);
       } catch (err: unknown) {
         state.showToast(`追问回答提交失败: ${toErrorMessage(err, '未知错误')}`, 'error');
       } finally {
@@ -637,7 +667,7 @@ export default function ChatPanel() {
               stickToBottomRef.current = atBottom;
             }}
             atBottomThreshold={24}
-            startReached={handleStartReached}
+            scrollerRef={handleScrollerRef}
             className="flex-1 min-h-0 pt-4"
             itemContent={(i, msg) => {
               // Virtuoso 的 itemContent 索引是「全局索引」= 数据数组下标 + firstItemIndex
@@ -794,9 +824,9 @@ export default function ChatPanel() {
           输入框区域被问题表单替代，回答提交后恢复。
           注意：同步工具语义下 ask_user 工具执行挂起时主对话流仍处于 streaming
           （工具结果经原流返回）——气泡渲染只看 pending，不再要求 idle。 */}
-        {pendingClarification && pendingClarification.sessionId === currentSessionId ? (
+        {currentClarification ? (
           <ClarificationBubble
-            questions={pendingClarification.questions}
+            questions={currentClarification.questions}
             submitting={clarifySubmitting}
             onSubmit={handleClarify}
           />

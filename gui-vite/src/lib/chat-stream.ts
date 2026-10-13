@@ -94,6 +94,7 @@ export function handleChatStreamEvent(event: ChatStreamEvent): void {
   // （auto 轮显示"停止"、用户轮禁用发送）。与 streamStatus 独立：后者由
   // 用户发消息置位，覆盖不了唤醒轮（U10 症状一的根因）。
   if (event.chunk_type === 'turn_state' && event.turn_state && sid) {
+    // 轮边界覆盖式重置 pendingAsk（问号只在当前轮的挂起提问窗口内存活）
     st.setTurnState(sid, {
       state: event.turn_state.state === 'running' ? 'running' : 'idle',
       auto: event.turn_state.auto,
@@ -150,7 +151,15 @@ export function handleChatStreamEvent(event: ChatStreamEvent): void {
       // U7：追问绑定来源会话（跨会话隔离）——气泡只在对应会话显示，
       // 回答也提交回该会话；无会话归属的事件不弹（保守）。
       if (questions.length > 0 && sid) {
+        // per-session 归档（多会话并行提问互不覆盖）
         st.setPendingClarification({ sessionId: sid, questions });
+        // 问号标识置位（turnState per-session 独立，多会话并行提问互不覆盖）
+        const curTurn = useAppStore.getState().turnState[sid];
+        st.setTurnState(sid, {
+          state: curTurn?.state ?? 'running',
+          auto: curTurn?.auto ?? false,
+          pendingAsk: true,
+        });
       }
     }
   }

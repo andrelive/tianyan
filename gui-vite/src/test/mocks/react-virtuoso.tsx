@@ -10,7 +10,7 @@
  * 注意：本文件只影响 vitest 运行时（alias）；`tsc --noEmit` 解析的是
  * node_modules 中的真实类型——业务代码的 API 用法始终按真实库校验。
  */
-import { forwardRef, Fragment, useImperativeHandle } from 'react';
+import { forwardRef, Fragment, useEffect, useImperativeHandle, useRef } from 'react';
 import type { ReactNode } from 'react';
 
 export interface MockVirtuosoProps {
@@ -21,6 +21,8 @@ export interface MockVirtuosoProps {
   firstItemIndex?: number;
   itemContent?: (index: number, item: unknown) => ReactNode;
   className?: string;
+  /** 真实库语义：挂载后回传滚动容器元素（供"滚到顶才加载"的原生 scroll 判定）。 */
+  scrollerRef?: (ref: HTMLElement | Window | null) => void;
 }
 
 /** no-op 滚动句柄（业务代码仅做 null 检查 + 方法调用）。 */
@@ -33,7 +35,7 @@ export interface VirtuosoHandle {
 }
 
 export const Virtuoso = forwardRef<VirtuosoHandle, MockVirtuosoProps>(function MockVirtuoso(
-  { data, firstItemIndex = 0, itemContent, className },
+  { data, firstItemIndex = 0, itemContent, className, scrollerRef },
   ref,
 ) {
   useImperativeHandle(
@@ -45,9 +47,16 @@ export const Virtuoso = forwardRef<VirtuosoHandle, MockVirtuosoProps>(function M
     }),
     [],
   );
+  const scrollerElRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (scrollerRef) scrollerRef(scrollerElRef.current);
+    return () => {
+      if (scrollerRef) scrollerRef(null);
+    };
+  }, [scrollerRef]);
   const items = data ?? [];
   return (
-    <div className={className} data-testid="virtuoso">
+    <div ref={scrollerElRef} className={className} data-testid="virtuoso">
       {items.map((item, i) => (
         <Fragment key={i}>{itemContent ? itemContent(i + firstItemIndex, item) : null}</Fragment>
       ))}
