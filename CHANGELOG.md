@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-10-13
+
+### Added
+- **大会话打开/切换卡顿治理**：消息列表改为**分页加载 + 虚拟滚动**（视口级渲染）——积累数千条消息的会话（实测 3534 / 7990 条）打开与互切从 3~4 秒降到近即时；上滚自动加载更早一页（阅读位置不跳），流式输出自动跟底、上滚不被拉回
+- **technical-writing 技能**：从社区技能库导入「技术写作」方法论（结构化写作 + 真实性核查，含风格/真实性附录），技能库共 48 项
+
+### Fixed
+- **消息列表恒定横向滚动条（虚拟滚动迁移回归）**：scroller 上的水平留白使其内部 item 层（width:100% 相对 padding box）向右恒定溢出 16px——横滚条与消息内容无关地常驻（“无超界元素却出现滚动条”的来源）。留白移至 item 内容层；e2e 回归锁（旧布局必红）
+- **回退报「缺少 ID，无法回退」+ 气泡内「思考中」消失**：Virtuoso itemContent 索引是「全局索引」（数组下标 + firstItemIndex 基数）被直用作数组下标——回退取到 undefined、流式判定恒 false。现换算回真实下标；状态提示带同时水平对齐消息列（此前「思考中」贴列表左缘）
+- **GLM 系列「思考/工具切回后消失」**：唤醒轮边界事件覆盖用户轮流式占位致 thinking / tool_calls / segments 清空——加轮次守卫（auto 轮边界不做占位替换、按 id 幂等更新）
+- **用户取消的任务不再唤醒智能体**：命令版缺「取消不唤醒」豁免 + 取消通知诱导重试——取消后台任务不再被循环拉起（点一次停止即止）
+
+### Changed
+- **状态提示带固定于输入区上方**：思考中 / 压缩中 / 断线 / 停止 / 控制面状态不再随消息滚动（滚上去也可见），并与消息列水平对齐
+
+### 工程
+- **CI 稳定性全链收口**：单测门禁 nextest → libtest + 按模块分片（修 runner 进程累积失联）、protoc 安装重试、跨模块 env 依赖测试收敛共享锁、新增 CI 流水线排障手册（docs/operations/ci-pipeline.md）
+
 ## [0.6.3] - 2026-09-30
 
 ### Added
