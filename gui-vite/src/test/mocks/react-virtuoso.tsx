@@ -15,6 +15,10 @@ import type { ReactNode } from 'react';
 
 export interface MockVirtuosoProps {
   data?: unknown[];
+  /** 真实库语义：itemContent 的 index = 数组下标 + firstItemIndex（全局索引），
+   * 与 react-virtuoso 源码一致（z(originalIndex + firstItemIndex, ...)）——
+   * 业务代码自行换算数组下标（ChatPanel itemContent）。 */
+  firstItemIndex?: number;
   itemContent?: (index: number, item: unknown) => ReactNode;
   className?: string;
 }
@@ -29,7 +33,7 @@ export interface VirtuosoHandle {
 }
 
 export const Virtuoso = forwardRef<VirtuosoHandle, MockVirtuosoProps>(function MockVirtuoso(
-  { data, itemContent, className },
+  { data, firstItemIndex = 0, itemContent, className },
   ref,
 ) {
   useImperativeHandle(
@@ -45,7 +49,7 @@ export const Virtuoso = forwardRef<VirtuosoHandle, MockVirtuosoProps>(function M
   return (
     <div className={className} data-testid="virtuoso">
       {items.map((item, i) => (
-        <Fragment key={i}>{itemContent ? itemContent(i, item) : null}</Fragment>
+        <Fragment key={i}>{itemContent ? itemContent(i + firstItemIndex, item) : null}</Fragment>
       ))}
     </div>
   );

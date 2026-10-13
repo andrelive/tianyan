@@ -639,22 +639,35 @@ export default function ChatPanel() {
             atBottomThreshold={24}
             startReached={handleStartReached}
             className="flex-1 min-h-0 pt-4"
-            itemContent={(i, msg) => (
-              <div className="max-w-4xl mx-auto pb-4 px-4">
-                <MessageBubble
-                  message={msg}
-                  index={i}
-                  isStreaming={i === streamingIndex && msg.role === 'assistant'}
-                  onRollback={handleRollback}
-                />
-              </div>
-            )}
+            itemContent={(i, msg) => {
+              // Virtuoso 的 itemContent 索引是「全局索引」= 数据数组下标 + firstItemIndex
+              // （1e6 基数）——回退定位（messages[index]）与流式判定（streamingIndex 为
+              // 数组下标）都必须用真实下标，故换算回数组下标再传入；直用全局索引会
+              // 使回退取到 undefined（报「缺少 ID」）、isStreaming 恒 false（气泡内
+              // 思考指示消失）。测试 mock 已同步此库语义（react-virtuoso.tsx）。
+              const index = i - firstItemIndex;
+              return (
+                <div className="max-w-4xl mx-auto pb-4 px-4">
+                  <MessageBubble
+                    message={msg}
+                    index={index}
+                    isStreaming={index === streamingIndex && msg.role === 'assistant'}
+                    onRollback={handleRollback}
+                  />
+                </div>
+              );
+            }}
           />
         )}
 
         {/* 状态提示带（固定于消息区与输入区之间，不随列表滚动）：流式/压缩
-            进度、断线、停止、控制面与轮错误等即时状态。 */}
-        <div className="shrink-0 px-4">
+            进度、断线、停止、控制面与轮错误等即时状态。
+            水平对齐与消息列同构（w-full + max-w-4xl mx-auto + px-4）——此前
+            无宽度约束时左对齐项贴列表左缘（「思考中」跑到最左边）。w-full
+            必要：flex item 带 auto margin（mx-auto）时不参与 stretch，无
+            显式宽度收缩为 fit-content（实测 32px），auto margin 无剩余空间
+            可分配、不会居中。 */}
+        <div className="shrink-0 w-full max-w-4xl mx-auto px-4">
           {/* Loading indicator: streaming started but no content yet.
             归属判定单点（streamingIndicatorOwner）：thinking 非空时由气泡内指示接管。 */}
           {streamStatus === 'streaming' &&

@@ -177,6 +177,56 @@ test.describe('chat', () => {
     expect(delta!).toBeLessThanOrEqual(0);
   });
 
+  test('回退按钮：点击后正常发起删除请求、不报「缺少 ID」', async ({ page }) => {
+    // 回归：虚拟列表 itemContent 收到的索引是「全局索引」（数组下标 +
+    // firstItemIndex，1e6 基数）。若直用会取到 undefined → 报「该消息缺少
+    // ID，无法回退」且不发请求——此测试在未换算时必红（5s 内无 delete 请求）。
+    await page.route('**/api/v1/sessions/s1/messages*', async (route) => {
+      await route.fulfill({
+        json: {
+          session_id: 's1',
+          messages: [
+            {
+              id: 'm1',
+              seq: 1,
+              role: 'user',
+              segments: [{ type: 'text', text: '需要回退的问题' }],
+            },
+            {
+              id: 'm2',
+              seq: 2,
+              role: 'assistant',
+              segments: [{ type: 'text', text: '收到，随后处理。' }],
+            },
+          ],
+        },
+      });
+    });
+    // 回退响应（服务端截断结果；回退到首条之前 → 列表空）
+    await page.route('**/api/v1/sessions/s1/messages/delete', async (route) => {
+      await route.fulfill({ json: { messages: [] } });
+    });
+
+    await page
+      .getByRole('button', { name: new RegExp(SESSION_TITLE) })
+      .first()
+      .click();
+    await expect(page.getByText('需要回退的问题').first()).toBeVisible({ timeout: 10000 });
+
+    // hover 用户消息 → 回退按钮 → 点击（请求须在点击后 5s 内发出）
+    await page.getByText('需要回退的问题').first().hover();
+    const deleteRequest = page.waitForRequest(
+      (r) => r.url().includes('/messages/delete') && r.method() === 'POST',
+      { timeout: 5000 },
+    );
+    await page.getByRole('button', { name: '回退到此' }).click();
+    await deleteRequest;
+
+    // 走通成功路径：撤销回退横幅出现；且不出现「缺少 ID」提示
+    await expect(page.getByRole('button', { name: /撤销回退/ })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText('该消息缺少 ID')).toHaveCount(0);
+  });
+
   test('send button is enabled when input has text', async ({ page }) => {
     const textarea = page.locator('textarea');
     const sendButton = page.locator('button', { hasText: '发送' });
