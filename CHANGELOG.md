@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-10-13
+
+### Added
+- **web_search 默认后端切换为 360（so.com）**：新增 `SearchBackend::So360`（结果页解析：真实 URL 直出 + 摘要提取 + 同 URL 去重）；默认后端 duckduckgo → 360（DuckDuckGo 国内不可达、Bing 风控对裸客户端不可绕过，降为备选）；设置页与向导提供选项；`config.example.toml` / `module-descriptions.md` 同步
+- **会话列表「等待回答」问号标识**：`ask_user` 挂起时该会话标题前显示琥珀色问号（脉冲）替代「运行中」绿点——`turnState.pendingAsk` 按会话独立（多会话并行互不干扰；轮边界事件重置 + 回答提交清除）
+
+### Changed
+- **`ask_user` 等待语义：无超时**（移除 600 秒上限）：等待直到回答提交或主动取消（200ms 取消轮询保留，ADR-036 语义不变）——多会话场景用户可稍后作答，不再因未见提问而超时失败
+- **追问接管 per-session 化**：`pendingClarification` 全局单槽 → `pendingClarifications: Record<sessionId, …>`——多会话并行提问互不覆盖；切走保留、切回即恢复接管；回答提交只清对应会话
+- **上滚加载触发收紧：「滚到顶部才加载」**：弃用 `startReached`（overscan 语义在离顶数千像素即触发，表现为"稍微滚动就加载"），改原生 `scroll` 事件判定（`scrollTop ≤ 8`）；配合 `firstItemIndex` 前插锚定，单页加载后自然离开顶部（不连发）
+
+### Fixed
+- **多会话追问覆盖丢失**：旧全局单槽下后到的提问覆盖先到——先提问会话的问题表单永久不可见（后端仍挂起等待）。per-session 归档后各会话独立可见
+- **上滚加载页面往返跳动**：触发过频 + 连续前插的视觉放大；现滚顶触发 + 单页锚定自然停（阅读位置不跳）
+
 ## [0.6.4] - 2026-10-13
 
 ### Added
