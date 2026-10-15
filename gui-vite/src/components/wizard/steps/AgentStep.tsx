@@ -23,7 +23,10 @@ export default function AgentStep({
           思考模式在会话输入区按对话选择（仅对支持思考的模型生效）。
         </p>
 
-        <FieldRow label="最大对话轮次" description="单次对话中 Agent 的最大推理步数">
+        <FieldRow
+          label="最大循环轮次"
+          description="单次请求内 Agent 循环（模型生成 → 工具执行）的轮次上限；一次模型调用计一轮，触顶后任务报错停止。"
+        >
           <input
             type="number"
             min={1}
@@ -31,7 +34,7 @@ export default function AgentStep({
             value={data.max_turns}
             onChange={(e) => onChange({ max_turns: parseInt(e.target.value) || 200 })}
             className="w-full max-w-xs px-2.5 py-1.5 text-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] focus:outline-none focus:ring-1 focus:ring-accent"
-            aria-label="最大对话轮次"
+            aria-label="最大循环轮次"
           />
         </FieldRow>
       </div>

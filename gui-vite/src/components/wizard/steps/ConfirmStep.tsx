@@ -93,7 +93,7 @@ export default function ConfirmStep({
           <div className="px-3 py-2 space-y-1 text-sm">
             <SummaryRow label="技能/记忆/流式" value="始终开启" />
             <SummaryRow label="思考模式" value="会话时选择" />
-            <SummaryRow label="最大轮次" value={String(data.max_turns)} />
+            <SummaryRow label="最大循环轮次" value={String(data.max_turns)} />
           </div>
         </div>
       </div>

@@ -26,7 +26,10 @@ export default function AgentTab({ config, onUpdateField }: AgentTabProps) {
               fallback={5}
             />
           </FieldRow>
-          <FieldRow label="最大对话轮次">
+          <FieldRow
+            label="最大循环轮次"
+            description="单次请求内 Agent 循环（模型生成 → 工具执行）的轮次上限；一次模型调用计一轮，触顶后任务报错停止。"
+          >
             <NumberInput
               value={config.max_turns}
               onChange={(v) => onUpdateField('max_turns', v)}
