@@ -534,11 +534,17 @@ impl AgentCoordinator for Agent {
 
     async fn cancel_background_task(&self, task_id: &str) -> Result<bool> {
         if self.background_tasks.get(task_id).await.is_some() {
-            self.background_tasks.cancel(task_id).await?;
+            self.background_tasks
+                .cancel(task_id, crate::executor::CancelSource::User)
+                .await?;
             return Ok(true);
         }
         // 后台终端命令（cmd_ 前缀）：kill 终态幂等；未知 id Err → 不存在
-        match self.command_tasks.kill(task_id).await {
+        match self
+            .command_tasks
+            .kill(task_id, crate::executor::CancelSource::User)
+            .await
+        {
             Ok(()) => Ok(true),
             Err(_) => Ok(false),
         }

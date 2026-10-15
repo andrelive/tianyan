@@ -959,7 +959,9 @@ impl ToolRegistry {
                     // T1-3：任务被 abort（task_cancel 路径）——状态已由 cancel()
                     // 置为 Cancelled；此处幂等兜底（未置位时补取消），不标 fail。
                     tracing::info!(task_id = %run_task_id, "后台委托任务被取消（abort）");
-                    let _ = mgr.cancel(&run_task_id).await;
+                    let _ = mgr
+                        .cancel(&run_task_id, crate::executor::CancelSource::Agent)
+                        .await;
                 }
                 Err(join_err) => {
                     tracing::error!(
@@ -1195,7 +1197,9 @@ impl ToolRegistry {
 
         // 委托任务（bt_）：核心取消（协作标志 + abort 兜底；终态幂等）。
         if self.background_tasks.get(id).await.is_some() {
-            self.background_tasks.cancel(id).await?;
+            self.background_tasks
+                .cancel(id, crate::executor::CancelSource::Agent)
+                .await?;
             return Ok(serde_json::json!({
                 "task_id": id,
                 "status": "cancelled",
@@ -1206,7 +1210,12 @@ impl ToolRegistry {
         // 命令任务（cmd_）：杀进程树（终态幂等）。此前只查委托表——命令任务
         // 被 BackgroundTaskManager 静默 no-op 却报「已取消」（假成功，用户实测：
         // task_cancel 返回成功但进程仍在跑）。
-        if self.command_tasks.kill(id).await.is_ok() {
+        if self
+            .command_tasks
+            .kill(id, crate::executor::CancelSource::Agent)
+            .await
+            .is_ok()
+        {
             return Ok(serde_json::json!({
                 "task_id": id,
                 "status": "cancelled",

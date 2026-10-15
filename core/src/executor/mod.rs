@@ -45,6 +45,7 @@ pub use actions::{
     execute_verify_build, execute_write_file, kill_all_running_children, CommandEventSink,
     CommandManager, CommandNotifier, CommandTask, CommandTaskStatus, CommandWaker, SecurityPolicy,
 };
+pub use command::CancelSource;
 pub use judge::LlmJudge;
 pub use security::DEFAULT_BLOCKED_COMMANDS;
 pub use shell::{ShellKind, ShellSpec};

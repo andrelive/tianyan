@@ -42,7 +42,7 @@ use crate::common::error::{Result, TianyanError};
 use crate::common::llm_judge::truncate_output;
 use crate::common::types::StructuredMessage;
 use crate::db::Database;
-use crate::executor::{CommandTask, CommandTaskStatus};
+use crate::executor::{CancelSource, CommandTask, CommandTaskStatus};
 use crate::notification::SharedNotificationSink;
 
 /// 默认最大并发后台任务数（ADR-026：同时运行上限）。
@@ -179,6 +179,9 @@ pub struct BackgroundTask {
     /// 回退到用户输入 U 时，锚点 > U.seq 的任务属于"回退点之后"，
     /// 应一并取消（方案 B：任务与链上时序点关联，精确取消）。
     pub anchor_seq: i64,
+    /// 取消来源（仅 Cancelled 时 Some；通知归因——用户/智能体/回退）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_source: Option<CancelSource>,
     /// 任务归属工作目录（创建会话的生效工作目录快照；U5：task_status 默认
     /// 视野按它过滤——同目录跨会话协调面。None = 归属未知（旧数据/解析
     /// 失败），不构成"其他目录"证据，workspace 范围下仍可见）。
@@ -220,6 +223,7 @@ impl BackgroundTask {
             completed_at: t.completed_at,
             seq: t.seq,
             anchor_seq: t.anchor_seq,
+            cancel_source: t.cancel_source,
             working_directory: t.working_directory,
         }
     }
@@ -445,6 +449,7 @@ impl BackgroundTaskManager {
             completed_at: None,
             seq,
             anchor_seq,
+            cancel_source: None,
             working_directory,
         };
         self.tasks.lock().await.insert(id.clone(), task.clone());
@@ -625,7 +630,7 @@ impl BackgroundTaskManager {
     /// T1-3：**真正终止执行**——置位协作标志（检查点优雅退出）+ abort 兜底
     /// （挂起的 LLM 流不经过检查点，只能硬中断）。旧实现只把状态改成
     /// Cancelled：子代理继续烧 token / 写文件 / 占运行许可。
-    pub async fn cancel(&self, id: &str) -> Result<()> {
+    pub async fn cancel(&self, id: &str, source: CancelSource) -> Result<()> {
         self.ensure_reloaded().await;
         // 内存未终态任务可取消；终态（内存已移除/落库）为幂等空操作
         let terminal = {
@@ -645,6 +650,13 @@ impl BackgroundTaskManager {
         // abort 兜底：立即中断（挂起等 LLM 流的循环不会到达检查点）
         if let Some(abort) = self.aborts.lock().await.get(id).cloned() {
             abort.abort();
+        }
+        // 取消来源归因（通知按来源区分文案；先写内存 task，finish 快照携带）
+        {
+            let mut tasks = self.tasks.lock().await;
+            if let Some(t) = tasks.get_mut(id) {
+                t.cancel_source = Some(source);
+            }
         }
         if self.tasks.lock().await.contains_key(id) {
             self.finish(id, TaskStatus::Cancelled, None, None, None)
@@ -878,6 +890,7 @@ impl BackgroundTaskManager {
                     completed_at: row.get(8)?,
                     seq: row.get(9)?,
                     anchor_seq: 0,
+                    cancel_source: None,
                     working_directory: row.get(10)?,
                 })
             })
@@ -1019,6 +1032,7 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackgroundTask> {
         completed_at: row.get(8)?,
         seq: row.get(9)?,
         anchor_seq: 0,
+        cancel_source: None,
         working_directory: row.get(10)?,
     })
 }
@@ -1156,9 +1170,13 @@ pub fn build_notification_text(task: &BackgroundTask, remaining: usize) -> Strin
         // 取消不是失败、也不是待办：必须明确"勿重试"——否则模型把它读成
         // "中断待续"，循环重新拉起任务（用户实测："取消后智能体又循环
         // 想拉起来，得多点一次停止"）。同时不得出现"继续原有工作"召唤。
-        text.push_str(
-            "\n该任务已由用户主动停止（非失败）——不要自动重试或重新发起；等待用户进一步指示。",
-        );
+        text.push_str(match task.cancel_source {
+            Some(CancelSource::Agent) => {
+                "\n该任务已由智能体主动取消（task_cancel，非失败）——勿自动重试。"
+            }
+            Some(CancelSource::Rollback) => "\n该任务已随会话回退取消（非失败）。",
+            _ => "\n该任务已由用户主动停止（非失败）——不要自动重试或重新发起；等待用户进一步指示。",
+        });
         if remaining > 0 {
             text.push_str(&format!("\n该会话还有 {remaining} 个后台任务进行中。"));
         }
@@ -1251,9 +1269,13 @@ pub fn build_command_notification_text(task: &CommandTask, remaining: usize) -> 
     if task.status == CommandTaskStatus::Cancelled {
         // 同委托通知：取消是用户主动停止，必须明确"勿重试"（防模型把
         // 取消读成中断待续、循环重新拉起）；不得出现"继续原有工作"召唤。
-        text.push_str(
-            "\n该命令已由用户主动停止（非失败）——不要自动重试或重新发起；等待用户进一步指示。",
-        );
+        text.push_str(match task.cancel_source {
+            Some(CancelSource::Agent) => {
+                "\n该命令已由智能体主动取消（task_cancel，非失败）——勿自动重试。"
+            }
+            Some(CancelSource::Rollback) => "\n该命令已随会话回退取消（非失败）。",
+            _ => "\n该命令已由用户主动停止（非失败）——不要自动重试或重新发起；等待用户进一步指示。",
+        });
         if remaining > 0 {
             text.push_str(&format!("\n该会话还有 {remaining} 个后台命令进行中。"));
         }
@@ -1304,6 +1326,7 @@ mod tests {
             completed_at: None,
             seq: 7,
             anchor_seq: 0,
+            cancel_source: None,
             working_directory: None,
             ready: false,
             ready_note: None,
@@ -1337,6 +1360,7 @@ mod tests {
                     completed_at: None,
                     seq: 0,
                     anchor_seq: 0,
+                    cancel_source: None,
                     working_directory: None,
                     ready: false,
                     ready_note: None,
@@ -1381,6 +1405,7 @@ mod tests {
                 completed_at: None,
                 seq: 0,
                 anchor_seq: 0,
+                cancel_source: None,
                 working_directory: None,
                 ready: false,
                 ready_note: None,
@@ -1420,6 +1445,7 @@ mod tests {
             completed_at: Some(1),
             seq: 0,
             anchor_seq: 0,
+            cancel_source: None,
             working_directory: None,
         };
         let text = build_notification_text(&task, 2);
@@ -1446,6 +1472,7 @@ mod tests {
             completed_at: Some(1),
             seq: 0,
             anchor_seq: 0,
+            cancel_source: None,
             working_directory: None,
         };
         let text = build_notification_text(&task, 0);
@@ -1473,6 +1500,7 @@ mod tests {
             completed_at: Some(1),
             seq: 0,
             anchor_seq: 0,
+            cancel_source: Some(CancelSource::User),
             working_directory: None,
         };
         let text = build_notification_text(&task, 0);
@@ -1499,6 +1527,7 @@ mod tests {
             completed_at: Some(1),
             seq: 0,
             anchor_seq: 0,
+            cancel_source: Some(CancelSource::User),
             working_directory: None,
             ready: false,
             ready_note: None,
@@ -1512,6 +1541,58 @@ mod tests {
             !text.contains("继续原有工作"),
             "取消通知不得召唤继续: {text}"
         );
+    }
+
+    /// 通知归因（2026-10-15 实测问题）：智能体自取消（task_cancel）不得
+    /// 被误写为"用户主动停止"（委托侧与命令侧同款）。
+    #[test]
+    fn test_cancel_notification_attributes_agent_source() {
+        let task = BackgroundTask {
+            kind: TaskKind::Delegate,
+            id: "bt_a1".to_string(),
+            description: "跑批量迁移".to_string(),
+            status: TaskStatus::Cancelled,
+            parent_session_id: "s1".to_string(),
+            result: None,
+            error: None,
+            output_tail: None,
+            log_file: None,
+            result_path: None,
+            created_at: 0,
+            completed_at: Some(1),
+            seq: 0,
+            anchor_seq: 0,
+            cancel_source: Some(CancelSource::Agent),
+            working_directory: None,
+        };
+        let text = build_notification_text(&task, 1);
+        assert!(text.contains("智能体主动取消"), "{text}");
+        assert!(!text.contains("用户主动停止"), "{text}");
+        assert!(!text.contains("等待用户进一步指示"), "{text}");
+
+        let cmd = CommandTask {
+            id: "cmd_a2".to_string(),
+            command: "python fetch.py".to_string(),
+            cwd: None,
+            parent_session_id: "s1".to_string(),
+            status: CommandTaskStatus::Cancelled,
+            exit_code: None,
+            pid: None,
+            log_file: None,
+            output_tail: String::new(),
+            created_at: 0,
+            completed_at: Some(1),
+            seq: 0,
+            anchor_seq: 0,
+            cancel_source: Some(CancelSource::Agent),
+            working_directory: None,
+            ready: false,
+            ready_note: None,
+            counted: true,
+        };
+        let text = build_command_notification_text(&cmd, 1);
+        assert!(text.contains("智能体主动取消"), "{text}");
+        assert!(!text.contains("用户主动停止"), "{text}");
     }
 
     #[tokio::test]
@@ -1619,7 +1700,7 @@ mod tests {
                 None,
             )
             .await;
-        manager.cancel(&id2).await.unwrap();
+        manager.cancel(&id2, CancelSource::User).await.unwrap();
         assert_eq!(
             manager.get(&id2).await.unwrap().status,
             TaskStatus::Cancelled
@@ -1760,6 +1841,7 @@ mod tests {
             completed_at: Some(1),
             seq: 0,
             anchor_seq: 0,
+            cancel_source: None,
             working_directory: None,
         };
         notifier.on_task_terminal("s1", &task, 0).await;
@@ -2045,7 +2127,7 @@ mod tests {
             .register_abort_handle(&id, handle.abort_handle())
             .await;
 
-        manager.cancel(&id).await.unwrap();
+        manager.cancel(&id, CancelSource::User).await.unwrap();
 
         assert!(
             flag.load(AtomicOrdering::SeqCst),

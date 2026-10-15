@@ -231,7 +231,9 @@ impl Agent {
             .filter(|t| t.parent_session_id == session_id && t.anchor_seq > anchor_seq)
         {
             if !t.status.is_terminal() {
-                self.background_tasks.cancel(&t.id).await?;
+                self.background_tasks
+                    .cancel(&t.id, crate::executor::CancelSource::Rollback)
+                    .await?;
                 cancelled += 1;
             }
         }
@@ -244,7 +246,11 @@ impl Agent {
             .filter(|t| t.parent_session_id == session_id && t.anchor_seq > anchor_seq)
         {
             if t.status == crate::executor::CommandTaskStatus::Running
-                && self.command_tasks.kill(&t.id).await.is_ok()
+                && self
+                    .command_tasks
+                    .kill(&t.id, crate::executor::CancelSource::Rollback)
+                    .await
+                    .is_ok()
             {
                 killed.push(t.id.clone());
                 cancelled += 1;

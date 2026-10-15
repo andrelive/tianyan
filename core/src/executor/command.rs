@@ -116,6 +116,8 @@ pub struct CommandTask {
     /// 回退到用户输入 U 时，锚点 > U.seq 的任务属于"回退点之后"，
     /// 应一并取消（方案 B：任务与链上时序点关联，精确取消）。
     pub anchor_seq: i64,
+    /// 取消来源（仅 Cancelled 时 Some；通知归因——用户/智能体/回退）。
+    pub cancel_source: Option<CancelSource>,
     /// 任务归属工作目录（创建会话的生效工作目录快照；U5：task_status 默认
     /// 视野按它过滤。命令的实际运行目录见 `cwd`——模型可显式指定，与归属
     /// 可能不同）。
@@ -131,6 +133,18 @@ pub struct CommandTask {
     /// 续跑会让 allComplete 永不达成，唤醒永久停滞（需人工停服破局）。
     /// 终态时仅对 counted=true 的任务递减（幂等，防重复/负数）。
     pub counted: bool,
+}
+
+/// 任务取消来源（通知归因——避免"智能体自取消"被误写为"用户主动停止"）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelSource {
+    /// 用户手动取消（任务面板 / 停止按钮 / HTTP 端点）。
+    User,
+    /// 智能体自行取消（task_cancel 工具——决策原因在对话上下文里）。
+    Agent,
+    /// 会话回退连带取消（cancel_tasks_after_anchor；通知正常随截断丢弃）。
+    Rollback,
 }
 
 /// 后台命令就绪探测规格（execute_command(background).ready 解析）。
@@ -282,6 +296,7 @@ impl CommandManager {
             completed_at: None,
             seq: self.seq.load(AtomicOrdering::SeqCst) - 1,
             anchor_seq,
+            cancel_source: None,
             working_directory,
             ready: false,
             ready_note: None,
@@ -736,7 +751,10 @@ impl CommandManager {
     }
 
     /// 终止运行中的后台命令（杀进程树）。终态任务为幂等空操作。
-    pub async fn kill(&self, task_id: &str) -> Result<()> {
+    ///
+    /// `source` 记录取消来源（用户 / 智能体 / 回退连带）——通知按来源
+    /// 归因，避免"智能体自取消"被误写为"用户主动停止"（2026-10-15 实测）。
+    pub async fn kill(&self, task_id: &str, source: CancelSource) -> Result<()> {
         let pid = {
             let mut tasks = self.tasks.lock().await;
             let entry = tasks
@@ -747,6 +765,7 @@ impl CommandManager {
             }
             entry.cancelled = true;
             entry.task.status = CommandTaskStatus::Cancelled;
+            entry.task.cancel_source = Some(source);
             entry.task.completed_at = Some(now_ms());
             entry.task.pid
         };
@@ -1780,7 +1799,7 @@ mod tests {
         );
 
         // 收尾：杀掉进程
-        manager.kill(&task.id).await.unwrap();
+        manager.kill(&task.id, CancelSource::User).await.unwrap();
     }
 
     /// 测试就绪通知器（channel 转发通知内容）。
@@ -1836,12 +1855,17 @@ mod tests {
             .spawn_background("sess-1", cmd, None, None, 0, None)
             .await
             .unwrap();
-        manager.kill(&task.id).await.unwrap();
+        manager.kill(&task.id, CancelSource::User).await.unwrap();
 
         let t = manager.get(&task.id).await.unwrap();
         assert_eq!(t.status, CommandTaskStatus::Cancelled);
+        assert_eq!(
+            t.cancel_source,
+            Some(CancelSource::User),
+            "取消来源应记录为用户（通知归因依据）"
+        );
         // 终态幂等：再次 kill 为 no-op 不报错
-        manager.kill(&task.id).await.unwrap();
+        manager.kill(&task.id, CancelSource::Agent).await.unwrap();
     }
 
     /// 回归测试（T1-5）：并发许可必须随命令生命周期持有，上限真正生效。
@@ -1947,6 +1971,7 @@ mod tests {
             completed_at: Some(1),
             seq: 0,
             anchor_seq: 0,
+            cancel_source: Some(CancelSource::User),
             working_directory: None,
             ready: false,
             ready_note: None,
@@ -2090,6 +2115,7 @@ mod tests {
             completed_at: None,
             seq: 0,
             anchor_seq: 0,
+            cancel_source: None,
             working_directory: None,
             ready: false,
             ready_note: None,
