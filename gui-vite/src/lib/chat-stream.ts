@@ -20,26 +20,32 @@ import type { ChatStreamEvent } from '@/lib/types';
 /**
  * 从 ask_user 工具调用参数（arguments JSON）解析问题列表。
  *
- * **形态唯一**（对齐后端 AskUserParams / DSH ask_user_question）：只有
- * `questions` 数组，单个问题即长度 1 的数组——不再回落到「单问题快捷形态」
- * （形态分叉是模型生成参数时的主要抖动源）。解析失败返回空数组（不接管
- * 输入框，工具卡片仍正常渲染——模型可自行处理失败）。
+ * **形态唯一**（对齐后端 AskUserParams）：只有 `questions` 数组，单个问题
+ * 即长度 1 的数组；`options` 为字符串数组（纯标签——富对象形态已随参数
+ * 漂移修复淘汰）。解析失败返回空数组（不接管输入框，工具卡片仍正常渲染
+ * ——模型可自行处理失败）。
  */
 export function parseAskUserQuestions(argumentsRaw: string): {
   question: string;
-  options: { label: string; description?: string | null }[];
+  options: string[];
 }[] {
   try {
     const parsed = JSON.parse(argumentsRaw) as {
       questions?: {
         question?: string;
-        options?: { label: string; description?: string | null }[];
+        options?: unknown;
       }[];
     };
     if (Array.isArray(parsed.questions)) {
       return parsed.questions.flatMap((q) => {
         const text = typeof q?.question === 'string' ? q.question : '';
-        return text ? [{ question: text, options: q.options ?? [] }] : [];
+        if (!text) return [];
+        // 非字符串元素过滤（防御历史/漂移形态；与后端 schema 严格一致——
+        // 不放宽超出后端接受度的输入，否则会出现「能点但提交无效」）
+        const options = Array.isArray(q.options)
+          ? q.options.filter((o): o is string => typeof o === 'string')
+          : [];
+        return [{ question: text, options }];
       });
     }
   } catch {

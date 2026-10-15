@@ -202,24 +202,20 @@ pub struct VerifyBuildParams {
     pub timeout_secs: Option<u64>,
 }
 
-/// 追问选项（对齐 DSH ask_user_question：N 个选项 + 1 个自定义输入）。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct AskUserOption {
-    /// 选项标签（用户选择后作为回答值）。
-    pub label: String,
-    /// 选项说明（可选；展示用，不参与回答值）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
 /// 单个追问问题（多问题分步：每个问题一个 tab，对齐 DSH questions 数组）。
+///
+/// `options` 为**纯字符串数组**（选项标签）：此前是 `[{label, description?}]`
+/// 富对象，但模型按惯例（问卷/CLI 的 options 普遍就是字符串数组）常生成
+/// 简化版被拒——实测案例：首次调用失败 → 模型自查源码 → 修正重调，白耗
+/// 三轮。简化后 schema 叶子直接可见（少一级 `$ref`）且与模型的默认直觉
+/// 一致；代价是选项说明文字（description）从 UI 消失。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AskUserQuestion {
     /// 问题内容。
     pub question: String,
-    /// 候选选项（可选；提供时前端渲染为选项列表 + 自定义输入）。
+    /// 候选选项（字符串数组，可选；提供时前端渲染为选项列表 + 自定义输入）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options: Option<Vec<AskUserOption>>,
+    pub options: Option<Vec<String>>,
 }
 
 /// 追问用户参数。
@@ -381,7 +377,7 @@ mod tests {
     fn test_ask_user_params_single_shape() {
         // 单一形态：questions 数组（单问题 = 长度 1）
         let params: AskUserParams = serde_json::from_str(
-            r#"{"questions":[{"question":"确认吗？","options":[{"label":"是","description":"继续"},{"label":"否"}]}]}"#,
+            r#"{"questions":[{"question":"确认吗？","options":["是","否"]}]}"#,
         )
         .unwrap();
         assert_eq!(params.questions.len(), 1);
@@ -391,6 +387,11 @@ mod tests {
         // 判别力：旧「单问题快捷形态」（顶层 question）现在必须失败——
         // 该字段已移除，而 questions 为必填
         assert!(serde_json::from_str::<AskUserParams>(r#"{"question":"旧形态"}"#).is_err());
+        // 判别力：旧富对象形态（[{label, description?}]）已淘汰——options 只收字符串
+        assert!(serde_json::from_str::<AskUserParams>(
+            r#"{"questions":[{"question":"确认吗？","options":[{"label":"是"}]}]}"#
+        )
+        .is_err());
 
         // 序列化只产出 questions
         let json = serde_json::to_string(&params).unwrap();

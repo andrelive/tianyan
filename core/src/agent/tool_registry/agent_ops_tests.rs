@@ -497,7 +497,7 @@ async fn test_ask_user_returns_clarification() {
     let registry = ToolRegistry::new(default_strict_policy());
     let result = registry
         .execute_ask_user(
-            r#"{"questions":[{"question":"Which file do you mean?"}]}"#,
+            r#"{"questions":[{"question":"Which file do you mean?","options":["a.rs","b.rs"]}]}"#,
             "s1",
             true,
         )
@@ -506,6 +506,7 @@ async fn test_ask_user_returns_clarification() {
     let value = result.expect("子代理 ask_user 应返回指导性结果");
     assert_eq!(value["status"], "delegated_agent_cannot_ask");
     assert_eq!(value["questions"][0]["question"], "Which file do you mean?");
+    assert_eq!(value["questions"][0]["options"][1], "b.rs");
     assert!(
         value["hint"].as_str().unwrap().contains("无法向用户追问"),
         "应包含无法追问的提示"

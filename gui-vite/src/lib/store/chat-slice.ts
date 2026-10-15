@@ -40,13 +40,13 @@ export interface TurnState {
 }
 
 /** 待回答的追问（composer takeover 数据）：多问题分步（每个问题一个 tab +
- * 补充信息 tab），每个问题含选项（label + description；空 = 纯文本输入），
+ * 补充信息 tab），每个问题含选项（字符串标签数组；空 = 纯文本输入），
  * 对齐 DSH ask_user_question 的 questions 数组形态。 */
 export interface PendingClarification {
   /** 问题所属会话（U7 跨会话隔离）：气泡只在对应会话显示；
    * 回答也提交回该会话（否则在别的会话回答会错投，原会话永久卡死）。 */
   sessionId: string;
-  questions: { question: string; options: { label: string; description?: string | null }[] }[];
+  questions: { question: string; options: string[] }[];
 }
 
 /** 输入草稿（未发送内容）：文字 + 待发图片（data URL）。

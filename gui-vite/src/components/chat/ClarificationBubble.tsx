@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils';
 
 interface QuestionItem {
   question: string;
-  options: { label: string; description?: string | null }[];
+  options: string[];
 }
 
 interface Props {
@@ -19,7 +19,7 @@ interface Props {
  * 追问接管组件（composer takeover，对齐 DSH ask_user_question）：
  * Agent 需要确认时，输入框区域被问题表单接管——多问题分步 tab（每个
  * 问题一个 tab）+ 补充信息 tab；每个问题渲染为可点选项行（序号 +
- * label + description）+ 自定义输入。提交后通过 /chat/clarify/stream
+ * 选项文字）+ 自定义输入。提交后通过 /chat/clarify/stream
  * 继续处理（流式），流结束后恢复普通输入框。
  */
 export default function ClarificationBubble({ questions, submitting, onSubmit }: Props) {
@@ -133,19 +133,19 @@ export default function ClarificationBubble({ questions, submitting, onSubmit }:
             {question.question}
           </p>
 
-          {/* 选项行（序号 + label + description，直接可点） */}
+          {/* 选项行（序号 + 选项文字，直接可点） */}
           {question.options.length > 0 && (
             <div role="radiogroup" aria-label="回答选项" className="flex flex-col gap-1.5 mb-2">
               {question.options.map((opt, oi) => {
-                const active = selected[tab] === opt.label;
+                const active = selected[tab] === opt;
                 return (
                   <button
-                    key={opt.label}
+                    key={opt}
                     type="button"
                     role="radio"
                     aria-checked={active}
                     onClick={() => {
-                      setSelected((prev) => prev.map((v, vi) => (vi === tab ? opt.label : v)));
+                      setSelected((prev) => prev.map((v, vi) => (vi === tab ? opt : v)));
                       setCustoms((prev) => prev.map((v, vi) => (vi === tab ? '' : v)));
                       // 单选自动进入下一 tab（问题 → 问题 → … → 补充信息），
                       // 无需手动切换；tab 可自由点回修改
@@ -153,7 +153,7 @@ export default function ClarificationBubble({ questions, submitting, onSubmit }:
                     }}
                     disabled={submitting}
                     className={cn(
-                      'flex items-start gap-2.5 px-3 py-2 rounded-xl border text-left transition-colors',
+                      'flex items-center gap-2.5 px-3 py-2 rounded-xl border text-left transition-colors',
                       active
                         ? 'border-amber-500 bg-amber-500/10'
                         : 'border-[var(--color-border)] hover:border-amber-500/50',
@@ -162,7 +162,7 @@ export default function ClarificationBubble({ questions, submitting, onSubmit }:
                   >
                     <span
                       className={cn(
-                        'mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs',
+                        'flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs',
                         active
                           ? 'border-amber-500 bg-amber-500 text-white'
                           : 'border-[var(--color-border)] text-[var(--color-text-tertiary)]',
@@ -170,14 +170,7 @@ export default function ClarificationBubble({ questions, submitting, onSubmit }:
                     >
                       {oi + 1}
                     </span>
-                    <span className="flex flex-col">
-                      <span className="text-sm text-[var(--color-text-primary)]">{opt.label}</span>
-                      {opt.description && (
-                        <span className="text-xs text-[var(--color-text-tertiary)]">
-                          {opt.description}
-                        </span>
-                      )}
-                    </span>
+                    <span className="text-sm text-[var(--color-text-primary)]">{opt}</span>
                   </button>
                 );
               })}

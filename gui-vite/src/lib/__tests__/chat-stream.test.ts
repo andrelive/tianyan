@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { handleChatStreamEvent } from '@/lib/chat-stream';
+import { handleChatStreamEvent, parseAskUserQuestions } from '@/lib/chat-stream';
 import { useAppStore } from '@/lib/store';
 import type { ChatStreamEvent } from '@/lib/types';
 import { messageText } from '@/lib/types';
@@ -64,7 +64,9 @@ describe('handleChatStreamEvent', () => {
         tool_call: {
           id: 't-ask',
           name: 'ask_user',
-          arguments: JSON.stringify({ questions: [{ question: '确认吗？', options: [] }] }),
+          arguments: JSON.stringify({
+            questions: [{ question: '确认吗？', options: ['确认', '取消'] }],
+          }),
           presentation: 'generic',
         },
       }),
@@ -72,10 +74,22 @@ describe('handleChatStreamEvent', () => {
 
     const pending = useAppStore.getState().pendingClarifications['session-A'];
     expect(pending?.questions[0]?.question).toBe('确认吗？');
+    expect(pending?.questions[0]?.options).toEqual(['确认', '取消']);
     // per-session 归档：只落在来源会话（跨会话不串）
     expect(Object.keys(useAppStore.getState().pendingClarifications)).toEqual(['session-A']);
     // 会话列表问号标识（turnState per-session）：挂起置位、只作用于来源会话
     expect(useAppStore.getState().turnState['session-A']?.pendingAsk).toBe(true);
+  });
+  it('parseAskUserQuestions：字符串 options 保留，非字符串元素过滤', () => {
+    const qs = parseAskUserQuestions(
+      JSON.stringify({
+        questions: [
+          { question: '问题一？', options: ['甲', 1, { label: '乙' }, null, '丙'] },
+          { question: '', options: ['丢弃（无问题文本）'] },
+        ],
+      }),
+    );
+    expect(qs).toEqual([{ question: '问题一？', options: ['甲', '丙'] }]);
   });
 
   it('handles error chunks: removes the empty bubble, resets status, shows toast', () => {

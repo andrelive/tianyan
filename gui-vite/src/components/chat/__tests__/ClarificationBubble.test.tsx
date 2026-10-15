@@ -6,21 +6,17 @@ import ClarificationBubble from '@/components/chat/ClarificationBubble';
 const QUESTIONS = [
   {
     question: '请确认是否删除该文件？',
-    options: [
-      { label: '删除', description: '永久移除该文件' },
-      { label: '保留', description: '不执行任何操作' },
-    ],
+    options: ['删除', '保留'],
   },
 ];
 
 describe('ClarificationBubble', () => {
-  it('renders the question, option rows (label + description) and the custom input', () => {
+  it('renders the question, option rows and the custom input', () => {
     render(<ClarificationBubble questions={QUESTIONS} submitting={false} onSubmit={() => {}} />);
     expect(screen.getByText('AI 需要确认')).toBeInTheDocument();
     expect(screen.getByText('请确认是否删除该文件？')).toBeInTheDocument();
-    // 选项行：label + description 同处可点行
+    // 选项行：序号 + 选项文字（纯字符串标签）
     expect(screen.getByRole('radio', { name: /删除/ })).toBeInTheDocument();
-    expect(screen.getByText('永久移除该文件')).toBeInTheDocument();
     expect(screen.getByRole('radio', { name: /保留/ })).toBeInTheDocument();
     expect(screen.getByLabelText('输入对追问的回答')).toBeInTheDocument();
   });
@@ -86,8 +82,8 @@ describe('ClarificationBubble', () => {
     const onSubmit = vi.fn();
     const user = userEvent.setup();
     const twoQuestions = [
-      { question: '问题 A？', options: [{ label: 'A1' }, { label: 'A2' }] },
-      { question: '问题 B？', options: [{ label: 'B1' }, { label: 'B2' }] },
+      { question: '问题 A？', options: ['A1', 'A2'] },
+      { question: '问题 B？', options: ['B1', 'B2'] },
     ];
     render(<ClarificationBubble questions={twoQuestions} submitting={false} onSubmit={onSubmit} />);
 
