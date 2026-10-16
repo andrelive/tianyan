@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6] - 2026-10-16
+
+### Added
+- **主区「最近会话」切换条**：会话标题行内轻量 tab 条——最近打开的 6 个会话（MRU 顺序）、当前高亮、复用运行中 / 等待回答 / 任务数状态标；已删除会话自动过滤；随 UI 偏好持久化（刷新 / 重启仍在）。打开会话收敛单入口（`useOpenSession`）、后台任务轮询提升至 store（侧栏与切换条共用单一轮询源）
+
+### Changed
+- **工作区两段式排序**：会话列表组序改为「24h 活跃段（组内按最近消息时间倒序，最多前 3）+ 其余字母序 + 默认组垫底」——活跃工作区自动浮前；活跃段动态、余段稳定（防列表乱飘）
+- **`ask_user` 选项简化为字符串数组**：`options` 由 `[{label, description?}]` 富对象改为 `Vec<String>`（删 `AskUserOption`）——模型按通行惯例写字符串数组不再被拒（实案：旧 schema 致模型失败后自查源码、白耗三轮）；工具描述加说明与内嵌示例（重生成工具目录）；前端解析归一 + 非字符串防御过滤。代价：选项附注文字从 UI 消失（拍板简化）
+
+### Fixed
+- **会话底部统计恢复全量口径**：0.6.4 分页加载后前端累加输入从全量消息变为最近 50 条（数字随加载量缩水、观感「只统计当前上下文」）。统计与分页解耦——`usage_logs` 按 session_id 全量聚合（`UsageRepo` / `UsageLog.stats` 加过滤；server `GET /usage/stats?session_id=`）；压缩消耗补账（`maybe_compress_and_persist` → `record_usage_log`，压缩不再漏计）；前端删本地累加改拉取汇总。语义变化：压缩计入、回退 / 重做后统计不再回退（真实消耗口径）
+- **上滚浏览页面跳动**（0.6.5 安装后仍可见）：虚拟列表默认以首条渲染项做全列表高度探针，消息高度差异达 36 倍（65~2337px）时未测区域估算失真、滚动位置修正回弹（实测 +1227px 顶回 4 条）。修复：`minOverscanItemCount={{ top: 5, bottom: 2 }}`（条目级预渲染缓冲，挂载 → 测量提前）+ `defaultItemHeight={375}`（跳过首条探针、统一初始估算）。对照实测 0 修正、视口内容稳定
+- **任务取消通知按来源归因**：智能体自取消（`task_cancel`）/ 回退取消的任务，通知不再误写「用户主动停止」——新增 `CancelSource { User / Agent / Rollback }`、5 处调用点归因、通知文案按来源区分（附测试）
+- **「最大对话轮次」改为「最大循环轮次」**：旧文案易误解为对话往返数；实为单次请求内 Agent 循环轮次（每轮 = 一次模型调用 + 其触发的工具执行，触顶报错停止）。设置页加说明小字，向导与确认页同步（AgentTab / AgentStep / ConfirmStep）
+
 ## [0.6.5] - 2026-10-13
 
 ### Added
