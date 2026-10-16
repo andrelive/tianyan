@@ -72,13 +72,16 @@ impl UsageRepo {
         }
     }
 
-    /// 聚合统计（since/until/provider/model 过滤；group_by：provider|model|none）。
+    /// 聚合统计（since/until/provider/model/session_id 过滤；group_by：
+    /// provider|model|none）。`session_id` 供会话级全量统计（底部统计条——
+    /// 与消息分页窗口无关）。
     pub async fn stats(
         &self,
         since_ts: Option<i64>,
         until_ts: Option<i64>,
         provider: Option<&str>,
         model: Option<&str>,
+        session_id: Option<&str>,
         group_by: &str,
     ) -> Vec<UsageStat> {
         // WHERE 子句**单点构造**：分组查询与总计查询共用同一份。
@@ -101,6 +104,10 @@ impl UsageRepo {
         if let Some(m) = model {
             conds.push("model = ?");
             params.push(Box::new(m.to_string()));
+        }
+        if let Some(s) = session_id {
+            conds.push("session_id = ?");
+            params.push(Box::new(s.to_string()));
         }
         let where_clause = if conds.is_empty() {
             String::new()
@@ -250,7 +257,7 @@ mod tests {
         repo.record("s2", "ollama", "qwen", 200, 0, 20, 220).await;
 
         // 无过滤总计
-        let total = repo.stats(None, None, None, None, "none").await;
+        let total = repo.stats(None, None, None, None, None, "none").await;
         assert_eq!(total.len(), 1);
         assert_eq!(total[0].calls, 3);
         assert_eq!(total[0].uncached_input, 350);
@@ -259,14 +266,16 @@ mod tests {
         assert_eq!(total[0].total_tokens, 440);
 
         // 单条件：provider
-        let ds = repo.stats(None, None, Some("deepseek"), None, "none").await;
+        let ds = repo
+            .stats(None, None, Some("deepseek"), None, None, "none")
+            .await;
         assert_eq!(ds.len(), 1);
         assert_eq!(ds[0].calls, 2);
         assert_eq!(ds[0].total_tokens, 220);
 
         // 双条件：provider + model（旧实现最易在此失配）
         let grouped = repo
-            .stats(None, None, Some("deepseek"), Some("v3"), "model")
+            .stats(None, None, Some("deepseek"), Some("v3"), None, "model")
             .await;
         assert_eq!(grouped.len(), 1);
         assert_eq!(grouped[0].group, "deepseek/v3");
@@ -274,7 +283,7 @@ mod tests {
         assert_eq!(grouped[0].total_tokens, 220);
 
         let single = repo
-            .stats(None, None, Some("deepseek"), Some("v3"), "none")
+            .stats(None, None, Some("deepseek"), Some("v3"), None, "none")
             .await;
         assert_eq!(single.len(), 1);
         assert_eq!(
@@ -283,9 +292,27 @@ mod tests {
         );
         assert_eq!(single[0].total_tokens, grouped[0].total_tokens);
 
+        // 按会话过滤（会话底部统计：usage_logs 聚合，与消息分页窗口无关）
+        let s1_only = repo.stats(None, None, None, None, Some("s1"), "none").await;
+        assert_eq!(s1_only.len(), 1);
+        assert_eq!(s1_only[0].calls, 2);
+        assert_eq!(s1_only[0].uncached_input, 150);
+        assert_eq!(s1_only[0].cached_input, 50);
+        assert_eq!(s1_only[0].completion_tokens, 20);
+
+        // 会话 + provider 组合（WHERE 单点构造下不得静默失配）
+        let s1_ds = repo
+            .stats(None, None, Some("deepseek"), None, Some("s1"), "none")
+            .await;
+        assert_eq!(s1_ds[0].calls, 2);
+        let s2_ds = repo
+            .stats(None, None, Some("deepseek"), None, Some("s2"), "none")
+            .await;
+        assert_eq!(s2_ds[0].calls, 0, "s2 无 deepseek 调用");
+
         // 时间下界在未来：无匹配（总计返回一条零值行）
         let future = repo
-            .stats(Some(i64::MAX - 1), None, None, None, "none")
+            .stats(Some(i64::MAX - 1), None, None, None, None, "none")
             .await;
         assert_eq!(future.len(), 1);
         assert_eq!(future[0].calls, 0);

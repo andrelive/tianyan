@@ -110,6 +110,9 @@ pub struct UsageStatsQuery {
     /// 按 model 过滤（可选）。
     #[serde(default)]
     pub model: Option<String>,
+    /// 按会话过滤（可选；会话底部统计用——与消息分页窗口无关的全量口径）。
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// 分组维度：provider | model（可选；缺省按 model）。
     #[serde(default)]
     pub group_by: Option<String>,
@@ -121,7 +124,8 @@ fn default_usage_days() -> i64 {
 
 /// 返回 LLM 用量统计（总计 + 按 provider/model 分组）。
 ///
-/// 覆盖聊天、子代理委托、演化任务等所有走 AgentLoop 的调用。
+/// 覆盖聊天、子代理委托、演化任务等所有走 AgentLoop 的调用，以及压缩补账
+/// （压缩消耗由 Agent 层补记）。
 pub async fn get_usage_stats_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<UsageStatsQuery>,
@@ -145,6 +149,7 @@ pub async fn get_usage_stats_handler(
             until_ts,
             query.provider.as_deref(),
             query.model.as_deref(),
+            query.session_id.as_deref(),
             "none",
         )
         .await;
@@ -154,6 +159,7 @@ pub async fn get_usage_stats_handler(
             until_ts,
             query.provider.as_deref(),
             query.model.as_deref(),
+            query.session_id.as_deref(),
             group_by,
         )
         .await;

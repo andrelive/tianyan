@@ -16,6 +16,7 @@ import type {
   MemoryListResponse,
   ApprovalStatusSnapshot,
   SchedulerStatus,
+  UsageStatsResponse,
   UsageStatsSummary,
   McpServerEntry,
   McpTestResponse,
@@ -862,6 +863,23 @@ export const mockUsageStats: UsageStatsSummary = {
   total_searches: 230,
 };
 
+/** 会话 token 汇总（GET /usage/stats?session_id=；底部统计条）。 */
+export const mockSessionUsageStats: UsageStatsResponse = {
+  days: 0,
+  start_ts: null,
+  end_ts: null,
+  total: {
+    group: '',
+    calls: 3,
+    uncached_input: 1200,
+    cached_input: 800,
+    completion_tokens: 500,
+    total_tokens: 2500,
+    cache_hit_rate: 0.4,
+  },
+  grouped: [],
+};
+
 // ========== Handler mapping ==========
 
 export const handlers = [
@@ -1159,6 +1177,10 @@ export const handlers = [
   // Usage stats（后端为 GET /stats）
   http.get(`${API_BASE}/stats`, () => {
     return HttpResponse.json(mockUsageStats);
+  }),
+  // 会话 token 汇总（后端为 GET /usage/stats；底部统计条——与消息分页窗口无关）
+  http.get(`${API_BASE}/usage/stats`, () => {
+    return HttpResponse.json(mockSessionUsageStats);
   }),
 
   // Workspace dirs（后端为 GET /workspace/dirs?path=；目录选择器）

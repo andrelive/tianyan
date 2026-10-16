@@ -93,6 +93,7 @@ mod tests {
                     None,
                     Some("bailian"),
                     Some("text-embedding-v4"),
+                    None,
                     "none",
                 )
                 .await;

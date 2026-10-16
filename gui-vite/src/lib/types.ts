@@ -1158,6 +1158,14 @@ export interface McpTestResponse {
   error?: string;
 }
 
+/** 会话 token 汇总（底部统计条：usage_logs 按会话全量聚合——与消息分页
+ * 窗口无关）。 */
+export interface SessionTokenUsage {
+  uncachedInput: number;
+  cachedInput: number;
+  completion: number;
+}
+
 /** 单条用量统计（总计或按 provider/model 分组；/usage/stats 响应）。 */
 export interface UsageStat {
   group: string;

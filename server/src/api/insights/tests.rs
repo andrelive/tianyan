@@ -9,6 +9,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tempfile::tempdir;
+use tianyan::common::types::TokenUsage;
 use tianyan::config::{
     ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig, ProviderConfig,
     TianyanConfig,
@@ -304,6 +305,44 @@ async fn usage_stats_returns_shape_on_empty_log() {
         .unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.is_object(), "usage/stats 应为对象: {body}");
+}
+
+/// GET /api/v1/usage/stats?session_id= → 按会话聚合（会话底部统计的接口面：
+/// 与消息分页窗口无关的全量口径——只聚合目标会话，不混入其它会话）。
+#[tokio::test]
+async fn usage_stats_filters_by_session_id() {
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path());
+    let (app, state) = create_app(config).await.unwrap();
+
+    let log = state.usage_log();
+    log.record("s1", "deepseek", "v3", &TokenUsage::new(100, 10))
+        .await;
+    log.record("s1", "deepseek", "v3", &TokenUsage::new(50, 5))
+        .await;
+    log.record("s2", "ollama", "qwen", &TokenUsage::new(200, 20))
+        .await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/usage/stats?session_id=s1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let total = &body["total"];
+    // s1 汇总：calls=2、uncached=100+50、completion=10+5（s2 的 200/20 不混入）
+    assert_eq!(total["calls"], 2, "只聚合目标会话: {body}");
+    assert_eq!(total["uncached_input"], 150);
+    assert_eq!(total["completion_tokens"], 15);
 }
 
 /// GET /api/v1/approval/status → 200 + 审批快照结构。

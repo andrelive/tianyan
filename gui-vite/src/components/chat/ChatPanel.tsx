@@ -28,7 +28,8 @@ import { usePolling } from '@/hooks/use-polling';
 import { useSessionHistory } from '@/hooks/use-session-history';
 import { useUnifiedEvents, subscribeSession } from '@/hooks/use-unified-events';
 import { toErrorMessage } from '@/lib/errors';
-import { lastMessageUsage, sumSessionUsage } from '@/lib/token-usage';
+import { lastMessageUsage } from '@/lib/token-usage';
+import { refreshSessionTokenUsage } from '@/lib/session-usage';
 import { MessageSquare, Loader2, RotateCcw, Undo2, X } from 'lucide-react';
 import ChatInput from './ChatInput';
 import ClarificationBubble from './ClarificationBubble';
@@ -136,8 +137,19 @@ export default function ChatPanel() {
     [messages, chatModels, selectedModel],
   );
 
-  /** 当前会话 token 消耗汇总（lib/token-usage 纯函数；DSH 风格小字展示） */
-  const sessionUsage = useMemo(() => sumSessionUsage(messages), [messages]);
+  /** 当前会话 token 消耗汇总（后端 usage_logs 全量聚合；打开/新消息后刷新） */
+  const sessionUsage = useAppStore((s) =>
+    s.currentSessionId ? (s.sessionTokenUsage[s.currentSessionId] ?? null) : null,
+  );
+
+  // 会话 token 汇总刷新（底部统计条）：打开/切换立即拉取（250ms 防抖，
+  // 与「消息数变化」共用同一 effect——新轮落库/压缩点插入也触发）。
+  // 数据源为后端全量聚合，与分页加载窗口无关。
+  useEffect(() => {
+    if (!currentSessionId) return;
+    const timer = setTimeout(() => void refreshSessionTokenUsage(currentSessionId), 250);
+    return () => clearTimeout(timer);
+  }, [currentSessionId, messages.length]);
 
   // Sync URL sessionId to store on mount / navigation
   // （per-session 追问不随切换清除：各会话条目独立留存，切回即恢复接管）

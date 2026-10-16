@@ -779,6 +779,22 @@ impl Agent {
             .await?;
         let summary_sm = summary_sm.clone();
 
+        // 压缩消耗补账：usage_logs 此前只由 AgentLoop 每轮写入，而压缩不走
+        // AgentLoop（无 assistant 消息承载该请求用量）。摘要消息的 tokens 即
+        // 压缩请求真实用量（pipeline 单点写入），此处转 TokenUsage 补记——
+        // 会话统计（按 usage_logs 聚合）与全局统计从此都覆盖压缩消耗。
+        let t = &summary_sm.tokens;
+        let compress_usage = TokenUsage {
+            prompt_tokens: t.input,
+            completion_tokens: t.output,
+            total_tokens: t.total,
+            cache_read: t.cache.read,
+            cache_write: t.cache.write,
+        };
+        self.agent_loop
+            .record_usage_log(session_id, &self.default_model, None, &Some(compress_usage))
+            .await;
+
         // ADR-035 §2 段化：压缩后**收缩段**（段起点前移到新压缩点，丢弃其前
         // 历史）——压缩是段内唯一的收缩时机，否则段随会话无限增长。
         // **仅在摘要落库成功后收缩**：失败时收缩会推进消费水位
@@ -1361,9 +1377,11 @@ mod tests {
     use crate::common::types::{FunctionCall, ToolCall, ToolCallType};
     use crate::context::compression::{CompressionConfig, ContextCompressor};
     use crate::context::retrieval::DualLayerRetriever;
+    use crate::db::Database;
     use crate::executor::SecurityPolicy;
     use crate::model::types::{ChatChoice, ChatCompletionResponse};
     use crate::model::MockChatService;
+    use crate::observability::usage_log::UsageLog;
     use crate::session::{Session, SessionManager};
     use crate::test_utils::MockVfs;
     use crate::vfs::VirtualFileSystem;
@@ -1477,7 +1495,12 @@ mod tests {
     }
 
     fn make_agent(mock: MockChatService) -> Agent {
-        make_agent_full(mock, MockChatService::new(), CompressionConfig::default())
+        make_agent_full(
+            mock,
+            MockChatService::new(),
+            CompressionConfig::default(),
+            None,
+        )
     }
 
     /// 构造带可配置压缩窗口的 Agent（压缩测试专用）。
@@ -1486,6 +1509,7 @@ mod tests {
         mock: MockChatService,
         compression_mock: MockChatService,
         compression_config: CompressionConfig,
+        usage_log: Option<Arc<UsageLog>>,
     ) -> Agent {
         let vfs = Arc::new(MockVfs::new());
         let retriever = Arc::new(DualLayerRetriever::new(
@@ -1508,6 +1532,10 @@ mod tests {
             Arc::new(MockSessionManager),
             AgentLoopConfig { max_turns: 5 },
         );
+        let agent_loop = match usage_log {
+            Some(log) => agent_loop.with_usage_log(log),
+            None => agent_loop,
+        };
         Agent::new(
             "test-model".to_string(),
             context_pipeline,
@@ -1602,7 +1630,7 @@ mod tests {
         // 指向库中不存在的消息）。
         let mock = MockChatService::new();
         // ADR-039：写路径唯一入口 = 工作集 → 装配真实 store（替代 mock 直写）
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         let store = crate::session::store::SessionStore::new(db).unwrap();
         store
@@ -1681,6 +1709,7 @@ mod tests {
                 compression_threshold: 1.0,
                 ..CompressionConfig::default()
             },
+            None,
         );
 
         let state = agent.load_and_build_state("session-1").await.unwrap();
@@ -1720,7 +1749,7 @@ mod tests {
         // 被无限推迟（实测：60.8%→81.7% 区间零压缩）。修复后唤醒轮结束即
         // 检查：超阈值场景应落库压缩点。
         // ADR-039：写路径唯一入口 = 工作集 → 真实 store 装配（替代内存 mock 直写）
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         let store = crate::session::store::SessionStore::new(db).unwrap();
         store
@@ -1790,6 +1819,7 @@ mod tests {
             MockChatService::new(),
             MockChatService::new(),
             CompressionConfig::default(),
+            None,
         );
 
         let state = agent.load_and_build_state("session-1").await.unwrap();
@@ -1835,6 +1865,7 @@ mod tests {
                 compression_threshold: 0.5,
                 ..CompressionConfig::default()
             },
+            None,
         );
 
         let state = agent.load_and_build_state("session-1").await.unwrap();
@@ -1880,6 +1911,7 @@ mod tests {
                 compression_threshold: 0.5,
                 ..CompressionConfig::default()
             },
+            None,
         );
 
         let state = agent.load_and_build_state("session-1").await.unwrap();
@@ -1944,6 +1976,7 @@ mod tests {
                 compression_threshold: 1.0,
                 ..CompressionConfig::default()
             },
+            None,
         );
 
         // 预置可压缩状态：≥ MIN_MESSAGES_BEFORE_COMPRESSION 条消息 + 超阈值
@@ -2012,6 +2045,7 @@ mod tests {
                 compression_threshold: 0.5,
                 ..CompressionConfig::default()
             },
+            None,
         );
 
         let state = agent.load_and_build_state("session-1").await.unwrap();
@@ -2034,6 +2068,69 @@ mod tests {
             .await;
         let summary = summary.expect("真实占用 5100 > 触发线 5000：应发生压缩");
         assert!(summary.compression_marker, "压缩摘要消息应带压缩标记");
+    }
+
+    #[tokio::test]
+    async fn test_compress_records_usage_to_usage_logs() {
+        // 压缩补账：压缩不走 AgentLoop，其消耗由 Agent 层补记一笔 usage_logs
+        // （会话统计与全局统计的口径来源）——摘要消息 tokens 即压缩请求真实用量。
+        let db = Database::open_in_memory().unwrap();
+        db.init_schemas().await.unwrap();
+        let usage_log = UsageLog::new(db).unwrap();
+
+        let mut compress_mock = MockChatService::new();
+        compress_mock.expect_chat_completion().returning(|_| {
+            let mut resp = response_with(Message::assistant("这是压缩摘要"));
+            resp.usage = TokenUsage {
+                prompt_tokens: 5_000,
+                completion_tokens: 800,
+                total_tokens: 5_800,
+                cache_read: 3_000,
+                cache_write: 0,
+            };
+            Ok(resp)
+        });
+
+        let agent = make_agent_full(
+            MockChatService::new(),
+            compress_mock,
+            CompressionConfig {
+                context_window: 10_000,
+                compression_threshold: 0.5,
+                ..CompressionConfig::default()
+            },
+            Some(usage_log.clone()),
+        );
+
+        let state = agent.load_and_build_state("session-1").await.unwrap();
+        for i in 0..7 {
+            let mut sm = ContextAssembler::message_to_structured(
+                &Message::user(format!("消息 {i}")),
+                "session-1",
+                None,
+                None,
+            );
+            if i == 6 {
+                sm.tokens.input = 5_100;
+                sm.tokens.cache.read = 5_000;
+            }
+            state.write().await.push_message(sm);
+        }
+
+        let summary = agent
+            .maybe_compress_and_persist(&state, "session-1", false)
+            .await;
+        assert!(summary.is_some(), "应触发压缩");
+
+        // 补账落库：uncached = 5000 - 3000 = 2000；cached = 3000；输出 800
+        let stats = usage_log
+            .stats(None, None, None, None, Some("session-1"), "none")
+            .await;
+        assert_eq!(stats.len(), 1, "压缩消耗应补记一笔");
+        assert_eq!(stats[0].calls, 1);
+        assert_eq!(stats[0].uncached_input, 2_000);
+        assert_eq!(stats[0].cached_input, 3_000);
+        assert_eq!(stats[0].completion_tokens, 800);
     }
 
     /// 构造带**真实会话存储 + 工作集**的 Agent（ADR-035 段化回归测试专用）。
@@ -2088,7 +2185,7 @@ mod tests {
     /// "成功 ⇒ 收缩"这一方向（修复前必红：`start_seq == 0`）。
     #[tokio::test]
     async fn test_compression_shrinks_working_set_segment_on_success() {
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         let store = crate::session::store::SessionStore::new(db).unwrap();
         store
@@ -2152,7 +2249,7 @@ mod tests {
     /// 反向保护：压缩**未触发**（消息数不足）时不得收缩段。
     #[tokio::test]
     async fn test_no_compression_does_not_shrink_segment() {
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         let store = crate::session::store::SessionStore::new(db).unwrap();
         store
@@ -2598,7 +2695,7 @@ mod tests {
         let workdir = dir.path().join("work");
         let snap_root = dir.path().join("snapshots");
         std::fs::create_dir_all(&workdir).unwrap();
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         let store = crate::session::store::SessionStore::new(db).unwrap();
         let agent = make_agent_for_rollback(store.clone(), Some(workdir.clone()), Some(snap_root));
@@ -2642,7 +2739,7 @@ mod tests {
         let workdir = dir.path().join("work");
         let snap_root = dir.path().join("snapshots");
         std::fs::create_dir_all(&workdir).unwrap();
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         let store = crate::session::store::SessionStore::new(db).unwrap();
         let agent = make_agent_for_rollback(
@@ -2682,7 +2779,7 @@ mod tests {
     /// ADR-040：未绑定工作区 → 仅回退消息，结果明确回报「文件未回退」。
     #[tokio::test]
     async fn test_rollback_without_workdir_only_truncates_messages() {
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         let store = crate::session::store::SessionStore::new(db).unwrap();
         let agent = make_agent_for_rollback(store.clone(), None, None);
@@ -2704,7 +2801,7 @@ mod tests {
         let workdir = dir.path().join("work");
         let snap_root = dir.path().join("snapshots");
         std::fs::create_dir_all(&workdir).unwrap();
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         let store = crate::session::store::SessionStore::new(db).unwrap();
         let agent = make_agent_for_rollback(store.clone(), Some(workdir.clone()), Some(snap_root));
@@ -2744,7 +2841,7 @@ mod tests {
     /// ADR-040：锚点消息不存在 → `not_found`（映射 404）且**不截断**。
     #[tokio::test]
     async fn test_rollback_unknown_message_not_found_keeps_chain() {
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         let store = crate::session::store::SessionStore::new(db).unwrap();
         let agent = make_agent_for_rollback(store.clone(), None, None);
@@ -2772,7 +2869,7 @@ mod tests {
         for i in 0..400 {
             std::fs::write(workdir.join(format!("f{i}.txt")), format!("内容 {i}")).unwrap();
         }
-        let db = crate::db::Database::open_in_memory().unwrap();
+        let db = Database::open_in_memory().unwrap();
         db.init_schemas().await.unwrap();
         let store = crate::session::store::SessionStore::new(db).unwrap();
         let agent = Arc::new(make_agent_for_rollback(

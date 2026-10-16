@@ -1,7 +1,8 @@
 //! LLM 用量日志（token 统计：缓存未命中输入 / 缓存命中输入 / 输出 / 推理）。
 //!
 //! 每次 LLM 调用一行（`usage_logs` 表），覆盖聊天、子代理委托、演化任务等
-//! 所有走 AgentLoop 的路径；统计面板按 provider / model / 时段聚合。
+//! 所有走 AgentLoop 的路径 + 压缩补账（压缩不走 AgentLoop，由 Agent 层补记
+//! 一笔）；统计面板按 provider / model / 时段 / 会话聚合。
 //!
 //! 口径：
 //! - `uncached_input` = prompt_tokens - cache_read（未命中输入，真金白银）
@@ -53,7 +54,8 @@ impl UsageLog {
     /// 聚合统计。
     ///
     /// - `since_ts`：None 表示全部；Some 为 epoch 秒下限。
-    /// - `provider` / `model`：非空时按精确值过滤。
+    /// - `provider` / `model` / `session_id`：非空时按精确值过滤
+    ///   （`session_id` 供会话级全量统计——与消息分页窗口无关）。
     /// - `group_by`：`provider` | `model` | `none`（总计）。
     pub async fn stats(
         &self,
@@ -61,10 +63,11 @@ impl UsageLog {
         until_ts: Option<i64>,
         provider: Option<&str>,
         model: Option<&str>,
+        session_id: Option<&str>,
         group_by: &str,
     ) -> Vec<UsageStat> {
         self.repo
-            .stats(since_ts, until_ts, provider, model, group_by)
+            .stats(since_ts, until_ts, provider, model, session_id, group_by)
             .await
     }
 }
@@ -109,7 +112,7 @@ mod tests {
         )
         .await;
 
-        let stats = log.stats(None, None, None, None, "none").await;
+        let stats = log.stats(None, None, None, None, None, "none").await;
         assert_eq!(stats.len(), 1);
         let s = &stats[0];
         assert_eq!(s.calls, 3);
@@ -135,7 +138,7 @@ mod tests {
         log.record("s1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400))
             .await;
 
-        let stats = log.stats(None, None, None, None, "model").await;
+        let stats = log.stats(None, None, None, None, None, "model").await;
         assert_eq!(stats.len(), 2);
         // 按 total 降序：bailian 2400 > opencode 1200
         assert_eq!(stats[0].group, "bailian/qwen3.7-plus");
@@ -158,7 +161,9 @@ mod tests {
             .await;
 
         // 按 provider 过滤
-        let stats = log.stats(None, None, Some("opencode"), None, "model").await;
+        let stats = log
+            .stats(None, None, Some("opencode"), None, None, "model")
+            .await;
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].group, "opencode/deepseek-v4-flash");
 
@@ -166,6 +171,7 @@ mod tests {
         let stats = log
             .stats(
                 Some(chrono::Utc::now().timestamp() + 100000),
+                None,
                 None,
                 None,
                 None,

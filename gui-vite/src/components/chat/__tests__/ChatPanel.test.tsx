@@ -631,6 +631,22 @@ describe('ChatPanel', () => {
     expect(screen.queryByText('请确认是否删除该文件？')).not.toBeInTheDocument();
   });
 
+  it('renders session token usage from the backend session summary', async () => {
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      pendingClarifications: {},
+    });
+    renderChatPanel();
+
+    // 底部统计来自 GET /usage/stats?session_id=（mock：未命中 1200 / 命中 800 /
+    // 输出 500）——后端 usage_logs 全量聚合，与消息分页窗口无关
+    await waitFor(() => {
+      expect(screen.getByText('未命中输入')).toBeInTheDocument();
+    });
+    expect(screen.getByText('1,200')).toBeInTheDocument();
+    expect(screen.getByText('缓存命中率')).toBeInTheDocument();
+  });
+
   it('shows no compress action in the ring popover without a session', () => {
     renderChatPanel();
 

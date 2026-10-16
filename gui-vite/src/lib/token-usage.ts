@@ -1,8 +1,12 @@
 /**
  * token 用量纯函数（从 ChatPanel 下沉——渲染层不再内联聚合逻辑）。
  *
- * 两个函数均为 messages → 摘要的纯映射，独立可测；
- * 组件侧只需 useMemo 包装（输入不变不重算）。
+ * `lastMessageUsage` 为 messages → 摘要的纯映射，独立可测；组件侧只需
+ * useMemo 包装（输入不变不重算）。
+ *
+ * 注：会话级「底部统计条」汇总不在此处——数据源为后端 usage_logs 按
+ * 会话全量聚合（分页加载后本地 messages 只剩最近一页，本地累加会随
+ * 加载量缩水）。
  */
 
 import type { ChatMessage, StreamUsage } from '@/lib/types';
@@ -54,26 +58,4 @@ export function lastMessageUsage(
     }
   }
   return null;
-}
-
-/** 会话 token 消耗汇总（跨全部消息 usage 累加；全零时返回 null）。 */
-export function sumSessionUsage(
-  messages: ChatMessage[],
-): { uncachedInput: number; cachedInput: number; completion: number } | null {
-  let uncachedInput = 0;
-  let cachedInput = 0;
-  let completion = 0;
-  for (const m of messages) {
-    // 压缩摘要消息自带压缩请求真实用量——与 assistant 消息同样累加
-    // （压缩不走 AgentLoop，其消耗须入账；prompt_tokens 是压缩前上下文
-    // 重发，按真实消耗计）
-    const u = m.usage;
-    if (!u || u.prompt_tokens <= 0) continue;
-    const cached = u.cache_read ?? 0;
-    cachedInput += cached;
-    uncachedInput += Math.max(0, u.prompt_tokens - cached);
-    completion += u.completion_tokens;
-  }
-  if (uncachedInput + cachedInput + completion === 0) return null;
-  return { uncachedInput, cachedInput, completion };
 }

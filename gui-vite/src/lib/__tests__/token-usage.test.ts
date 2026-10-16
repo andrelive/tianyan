@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lastMessageUsage, sumSessionUsage } from '@/lib/token-usage';
+import { lastMessageUsage } from '@/lib/token-usage';
 import type { ChatMessage } from '@/lib/types';
 
 function msg(overrides: Partial<ChatMessage>): ChatMessage {
@@ -91,58 +91,5 @@ describe('lastMessageUsage', () => {
     ];
     const r = lastMessageUsage(messages, 64000);
     expect(r?.prompt_tokens).toBe(2500);
-  });
-});
-
-describe('sumSessionUsage', () => {
-  it('returns null when nothing consumed', () => {
-    expect(sumSessionUsage([msg({ segments: [{ type: 'text', text: 'a' }] })])).toBeNull();
-    expect(
-      sumSessionUsage([
-        msg({ usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } }),
-      ]),
-    ).toBeNull();
-  });
-
-  it('accumulates across messages with cache split', () => {
-    const messages = [
-      msg({
-        usage: { prompt_tokens: 100, completion_tokens: 30, total_tokens: 130, cache_read: 40 },
-      }),
-      msg({
-        usage: { prompt_tokens: 200, completion_tokens: 70, total_tokens: 270, cache_read: 60 },
-      }),
-      msg({ segments: [{ type: 'text', text: 'no usage' }] }),
-    ];
-    expect(sumSessionUsage(messages)).toEqual({
-      uncachedInput: 200, // (100-40) + (200-60)
-      cachedInput: 100,
-      completion: 100,
-    });
-  });
-
-  it('includes compression request usage from marker message', () => {
-    const messages = [
-      msg({
-        usage: { prompt_tokens: 100, completion_tokens: 30, total_tokens: 130, cache_read: 40 },
-      }),
-      msg({
-        role: 'user',
-        compression_marker: true,
-        usage: {
-          prompt_tokens: 2000,
-          completion_tokens: 500,
-          total_tokens: 2500,
-          cache_read: 1500,
-        },
-      }),
-    ];
-    // 压缩请求消耗（2000 输入 / 500 输出 / 1500 缓存）计入会话累计：
-    // uncached = (100-40) + (2000-1500) = 560；cached = 40 + 1500 = 1540
-    expect(sumSessionUsage(messages)).toEqual({
-      uncachedInput: 560,
-      cachedInput: 1540,
-      completion: 530,
-    });
   });
 });

@@ -11,6 +11,7 @@ import type {
   ChatMessage,
   MessageSegment,
   Session,
+  SessionTokenUsage,
   SkillCallInfo,
   StreamStatus,
   TokenUsage,
@@ -145,6 +146,12 @@ export interface ChatSlice {
   /** 清除单个会话的追问（回答提交成功后）。 */
   clearPendingClarification: (sessionId: string) => void;
   removeEmptyAssistantMessage: (sessionId?: string | null) => void;
+
+  // 会话 token 汇总（底部统计条）
+  /** usage_logs 按会话全量聚合（与消息分页窗口无关）；打开/新消息后刷新。 */
+  sessionTokenUsage: Record<string, SessionTokenUsage>;
+  /** 写入会话汇总（按 sessionId 归档；迟到响应只更新目标会话）。 */
+  setSessionTokenUsage: (sessionId: string, usage: SessionTokenUsage) => void;
 
   // Rollback / redo（按消息 ID 定位：前端索引与服务端消息列表错位，
   // 数字索引会删过头——回退/重做都以被删除消息的 ID 为键）
@@ -657,6 +664,14 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       delete next[sessionId];
       return { pendingClarifications: next };
     }),
+
+  // 会话 token 汇总（底部统计条）：usage_logs 按会话全量聚合
+  sessionTokenUsage: {},
+  setSessionTokenUsage: (sessionId, usage) =>
+    set((s) => ({
+      sessionTokenUsage: { ...s.sessionTokenUsage, [sessionId]: usage },
+    })),
+
   removeEmptyAssistantMessage: (sessionId) =>
     set((s) =>
       updateSessionMessages(s, sessionId, (msgs) => {

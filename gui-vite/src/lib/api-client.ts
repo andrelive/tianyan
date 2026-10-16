@@ -25,6 +25,7 @@ import type {
   SchedulerStatus,
   SearchSuggestionsResponse,
   Session,
+  SessionTokenUsage,
   SkillDetail,
   SkillListResponse,
   SkillsStatsResponse,
@@ -253,6 +254,21 @@ export async function testProviderConnection(
 /** 使用统计（按时间范围查询；range 形如 days=N 或 start_ts=..&end_ts=..）。 */
 export async function fetchUsageStatsRange(range: string): Promise<UsageStatsResponse> {
   return apiGet<UsageStatsResponse>(`/usage/stats?${range}`);
+}
+
+/** 会话 token 消耗汇总（后端按 session_id 聚合 usage_logs；days=0 = 全时段
+ * ——与消息分页窗口无关的会话全量口径；全零返回 null，不显示统计条）。 */
+export async function fetchSessionTokenUsage(sessionId: string): Promise<SessionTokenUsage | null> {
+  const res = await apiGet<UsageStatsResponse>(
+    `/usage/stats?days=0&session_id=${encodeURIComponent(sessionId)}`,
+  );
+  const t = res.total;
+  if (!t || t.uncached_input + t.cached_input + t.completion_tokens === 0) return null;
+  return {
+    uncachedInput: t.uncached_input,
+    cachedInput: t.cached_input,
+    completion: t.completion_tokens,
+  };
 }
 
 // ========== Data Migration API ==========

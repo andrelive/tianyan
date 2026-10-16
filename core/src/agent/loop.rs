@@ -1148,12 +1148,13 @@ impl AgentLoop {
             .unwrap_or_else(|| self.model_service.clone())
     }
 
-    /// 记录单轮 LLM 用量日志（聊天/子代理/演化任务统一记录）。
+    /// 记录单轮 LLM 用量日志（聊天/子代理/演化任务统一记录；压缩补账经
+    /// Agent 层调用同一入口——provider 归属链单一）。
     ///
     /// provider 归属链：本轮实际路由 provider（会话选择/请求解析）> 全局默认
     /// 聊天 provider > 配置映射（偏好优先）> 模型名前缀推导。无 usage_log 或
     /// 无用量时静默跳过。
-    async fn record_usage_log(
+    pub(crate) async fn record_usage_log(
         &self,
         session_id: &str,
         model: &str,
