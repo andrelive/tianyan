@@ -4,8 +4,8 @@ import { useResource } from '@/hooks/use-resource';
 import { usePolling } from '@/hooks/use-polling';
 import { useAppStore } from '@/lib/store';
 import { deleteSession, fetchTasks, listSessions, updateSessionTitle } from '@/lib/api-client';
-import { loadSessionHistory } from '@/hooks/use-session-history';
-import type { BackgroundTask, Session } from '@/lib/types';
+import { useOpenSession } from '@/hooks/use-open-session';
+import type { Session } from '@/lib/types';
 import { formatRelativeTime } from '@/lib/utils';
 import {
   ChevronDown,
@@ -29,6 +29,35 @@ function groupLabel(workdir: string): string {
   return base || workdir;
 }
 
+/** 「最近活跃」段窗口（24h）与条数上限（活跃段最多前 3 个组）。 */
+const ACTIVE_GROUP_WINDOW_MS = 24 * 60 * 60 * 1000;
+const ACTIVE_GROUP_LIMIT = 3;
+
+/** 组内最近活动时间（取组内会话 updated_at 最大值；解析失败回退 0）。 */
+function groupLastActivity(list: Session[]): number {
+  return list.reduce((max, s) => Math.max(max, Date.parse(s.updated_at) || 0), 0);
+}
+
+/**
+ * 工作区分组排序（两段式，防列表乱飘）：
+ * 1.「最近活跃」段：24h 内有活动的组，按组内最近消息时间倒序（最多前 3）；
+ * 2.「其余」段：路径字母序（稳定段，位置不随使用变化）；
+ * 3. 默认组（''）始终垫底。
+ */
+function sortGroups(entries: [string, Session[]][]): [string, Session[]][] {
+  const now = Date.now();
+  const active = entries
+    .filter(([k, list]) => k !== '' && groupLastActivity(list) >= now - ACTIVE_GROUP_WINDOW_MS)
+    .sort((a, b) => groupLastActivity(b[1]) - groupLastActivity(a[1]))
+    .slice(0, ACTIVE_GROUP_LIMIT);
+  const activeKeys = new Set(active.map(([k]) => k));
+  const rest = entries
+    .filter(([k]) => k !== '' && !activeKeys.has(k))
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  const fallback = entries.filter(([k]) => k === '');
+  return [...active, ...rest, ...fallback];
+}
+
 /**
  * 会话页左栏（二级列表，对齐 deepseek harness 布局）：
  * 工作区分组（目录名）+ 会话子项；组行 hover「＋」在该目录新建会话（零弹窗），
@@ -47,10 +76,12 @@ export default function SessionList() {
   const setNewSessionWorkspace = useAppStore((s) => s.setNewSessionWorkspace);
   /** 会话轮状态（turn_state 事件驱动，ADR-035 §9 / ADR-045）：驱动「运行中」标识。 */
   const turnState = useAppStore((s) => s.turnState);
+  /** 打开会话（切换 + 导航 + 历史加载；与「最近会话条」共用同一入口）。 */
+  const openSession = useOpenSession();
 
   const [hoveredSession, setHoveredSession] = useState<string | null>(null);
-  /** 全量后台任务（轮询）：按归属会话聚合出角标——见下。 */
-  const [tasks, setTasks] = useState<BackgroundTask[]>([]);
+  /** 全量后台任务（store：轮询写入，侧栏角标与最近会话条共用）。 */
+  const tasks = useAppStore((s) => s.backgroundTasks);
   const [hoveredGroup, setHoveredGroup] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
@@ -62,8 +93,9 @@ export default function SessionList() {
   const editInputRef = useRef<HTMLInputElement>(null);
 
   // 后台任务角标下沉到**会话项**（原一级栏目只给全局总数，无法定位是哪个会话在跑）：
-  // 低频轮询，失败静默保留旧值（usePolling 默认策略）。
-  usePolling(async () => setTasks(await fetchTasks()), 5000);
+  // 低频轮询，失败静默保留旧值（usePolling 默认策略）；结果写入 store——
+  // 侧栏角标与主区「最近会话条」共用同一份轮询。
+  usePolling(async () => useAppStore.getState().setBackgroundTasks(await fetchTasks()), 5000);
 
   /** 运行中后台任务数按归属会话聚合（pending/running 计；未归属会话的忽略）。 */
   const runningTasksBySession = useMemo(() => {
@@ -131,11 +163,7 @@ export default function SessionList() {
     if (!map.has('')) {
       map.set('', []);
     }
-    return [...map.entries()].sort((a, b) => {
-      if (a[0] === '') return 1;
-      if (b[0] === '') return -1;
-      return a[0].localeCompare(b[0]);
-    });
+    return sortGroups([...map.entries()]);
   }, [sessions]);
   const flatSessions = useMemo(() => sessionGroups.flatMap(([, list]) => list), [sessionGroups]);
 
@@ -151,12 +179,7 @@ export default function SessionList() {
     if (has) return sessionGroups;
     const merged: [string, Session[]][] = [...sessionGroups];
     merged.push([pendingGroupKey, []]);
-    merged.sort((a, b) => {
-      if (a[0] === '') return 1;
-      if (b[0] === '') return -1;
-      return a[0].localeCompare(b[0]);
-    });
-    return merged;
+    return sortGroups(merged);
   })();
 
   /** 开启新会话：绑定到指定目录（空串 = 默认组），零弹窗。 */
@@ -182,17 +205,10 @@ export default function SessionList() {
   );
 
   const handleSelectSession = useCallback(
-    async (session: Session) => {
-      setCurrentSession(session.id);
-      setView('chat');
-      navigate(`/chat/${session.id}`);
-      // 本地已有缓存（流式累积/之前看过）→ 直接显示；无缓存才拉历史。
-      // 懒加载收口 loadSessionHistory（唯一入口）：按会话 id 寻址写入，
-      // 迟到响应不污染中途切换到的会话。
-      const ok = await loadSessionHistory(session.id);
-      if (!ok) showToast('加载会话消息失败', 'error');
+    (session: Session) => {
+      openSession(session.id);
     },
-    [navigate, setCurrentSession, setView, showToast],
+    [openSession],
   );
 
   const handleStartRename = (e: React.MouseEvent, session: Session) => {

@@ -40,8 +40,9 @@ test.describe('real backend chat', () => {
     await textarea.fill(uniqueMessage);
     await textarea.press('Enter');
 
-    // 用户消息立即渲染
-    await expect(page.getByText(uniqueMessage)).toBeVisible();
+    // 用户消息立即渲染（scope 消息区：同一文本还出现在侧栏标题与「最近会话」
+    // 条上——直接 getByText 会被 strict mode 判多元素冲突）
+    await expect(page.getByTestId('virtuoso-item-list').getByText(uniqueMessage)).toBeVisible();
 
     // 后端 agent loop 首轮往返：mock 回复流式到达（SSE 3 块 + 终止块）。
     // .first()：流式期间 sr-only live region 会复制正文文本，避免 strict 冲突

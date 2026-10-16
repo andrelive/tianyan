@@ -84,8 +84,11 @@ test.describe('chat', () => {
     await textarea.press('Enter');
 
     // 乐观渲染（ADR-031）：用户消息本地立即插入，不依赖任何流式事件。
-    // exact: true —— 默认子串匹配会同时命中助手回复文本
-    await expect(page.getByText('你好', { exact: true })).toBeVisible();
+    // scope 消息区 + exact:true——同一文本会出现在侧栏标题 /「最近会话」条上
+    // （strict mode 冲突），且默认子串匹配会命中助手回复。
+    await expect(
+      page.getByTestId('virtuoso-item-list').getByText('你好', { exact: true }),
+    ).toBeVisible();
   });
 
   test('assistant message renders when a session history is loaded', async ({ page }) => {

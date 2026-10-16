@@ -9,6 +9,7 @@ describe('useAppStore', () => {
     useAppStore.setState({
       currentView: 'chat',
       currentSessionId: null,
+      recentSessionIds: [],
       sessions: [],
       messages: [],
       sessionMessages: {},
@@ -19,6 +20,7 @@ describe('useAppStore', () => {
       toasts: [],
       selectedModel: null,
       configured: null,
+      backgroundTasks: [],
     });
   });
 
@@ -455,6 +457,21 @@ describe('useAppStore', () => {
 
     useAppStore.getState().setCurrentSession(null);
     expect(useAppStore.getState().currentSessionId).toBeNull();
+  });
+  it('setCurrentSession 记录最近打开会话（MRU 去重置顶 + 上限 6）', () => {
+    for (let i = 1; i <= 7; i += 1) useAppStore.getState().setCurrentSession(`s${i}`);
+    // 上限 6：s1 被挤出；最新在前
+    expect(useAppStore.getState().recentSessionIds).toEqual(['s7', 's6', 's5', 's4', 's3', 's2']);
+    // 去重置顶：重新打开 s3 → 移到最前（不重复）
+    useAppStore.getState().setCurrentSession('s3');
+    expect(useAppStore.getState().recentSessionIds).toEqual(['s3', 's7', 's6', 's5', 's4', 's2']);
+  });
+
+  it('removeSession 清理最近打开记录', () => {
+    useAppStore.getState().setCurrentSession('a');
+    useAppStore.getState().setCurrentSession('b');
+    useAppStore.getState().removeSession('a');
+    expect(useAppStore.getState().recentSessionIds).toEqual(['b']);
   });
 
   // ── Input drafts（每会话输入草稿；ChatInput 页面/会话切换恢复）──

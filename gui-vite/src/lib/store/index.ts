@@ -38,6 +38,8 @@ export const useAppStore = create<AppState>()(
         theme: state.theme,
         fontSize: state.fontSize,
         thinkingEffort: state.thinkingEffort,
+        // 最近打开会话条（MRU）——界面状态（非会话数据），随偏好持久化
+        recentSessionIds: state.recentSessionIds,
       }),
     },
   ),

@@ -95,6 +95,42 @@ describe('SessionList', () => {
     });
     expect(screen.queryByText('暂无会话')).not.toBeInTheDocument();
   });
+  it('工作区两段式排序：24h 活跃段在前（活跃倒序），其余字母序，默认组垫底', async () => {
+    const now = Date.now();
+    mockSessions([
+      // zeta：1 分钟前（活跃段第 1；字母序上本应排 alpha 后）
+      makeSession({
+        id: 's-zeta',
+        title: 'T-zeta',
+        working_directory: 'F:\\zeta',
+        updated_at: new Date(now - 60_000).toISOString(),
+      }),
+      // alpha：2 小时前（活跃段第 2）
+      makeSession({
+        id: 's-alpha',
+        title: 'T-alpha',
+        working_directory: 'F:\\alpha',
+        updated_at: new Date(now - 2 * 3600_000).toISOString(),
+      }),
+      // beta：3 天前（非活跃 → 字母序段）
+      makeSession({
+        id: 's-beta',
+        title: 'T-beta',
+        working_directory: 'F:\\beta',
+        updated_at: new Date(now - 3 * 86400_000).toISOString(),
+      }),
+    ]);
+    renderSessionList();
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '分组 zeta' })).toBeInTheDocument();
+    });
+    const labels = screen
+      .getAllByRole('button', { name: /^分组 / })
+      .map((g) => g.getAttribute('aria-label'));
+    // 活跃段（zeta 最新在前）→ 字母序段（beta）→ 默认组
+    expect(labels).toEqual(['分组 zeta', '分组 alpha', '分组 beta', '分组 默认']);
+  });
 
   it('shows sessions grouped by working directory (default group for unbound)', async () => {
     mockSessions([

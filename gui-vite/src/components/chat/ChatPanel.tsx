@@ -38,6 +38,7 @@ import { streamingIndicatorOwner } from './streaming-indicator';
 import ApprovalBanner from './ApprovalBanner';
 import AgentTasksPanel from './AgentTasksPanel';
 import SessionTodoPanel from './SessionTodoPanel';
+import SessionTabBar from './SessionTabBar';
 import { PENDING_SESSION_KEY } from '@/lib/store';
 
 /** 虚拟列表首项索引基数（远大于任何会话的消息条数；上滚前插时递减）。 */
@@ -648,10 +649,11 @@ export default function ChatPanel() {
     <div className="flex h-full bg-[var(--color-bg-primary)]">
       {/* 左列：对话主区 */}
       <div className="flex flex-col flex-1 min-w-0">
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--color-border)] shrink-0">
-          <h1 className="text-lg font-semibold text-[var(--color-text-primary)]">会话</h1>
-          <div className="flex items-center gap-2" />
+        {/* Header：「会话」标题 + 最近会话切换条（MRU，点击即切）*/}
+        <div className="flex items-center gap-3 px-4 py-2 border-b border-[var(--color-border)] shrink-0">
+          <h1 className="text-lg font-semibold text-[var(--color-text-primary)] shrink-0">会话</h1>
+          <SessionTabBar />
+          <div className="flex items-center gap-2 shrink-0" />
         </div>
 
         {/* Messages area（虚拟列表：仅渲染视口附近消息——渲染量与消息总数解耦）

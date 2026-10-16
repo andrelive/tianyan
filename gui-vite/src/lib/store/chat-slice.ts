@@ -8,6 +8,7 @@
 
 import type { StateCreator } from 'zustand';
 import type {
+  BackgroundTask,
   ChatMessage,
   MessageSegment,
   Session,
@@ -60,10 +61,20 @@ export interface InputDraft {
 /** 缺省空草稿（读取缺省单例；函数式更新基于它合成新对象，不修改本常量）。 */
 const EMPTY_INPUT_DRAFT: InputDraft = { text: '', images: [] };
 
+/** 最近打开会话条容量（MRU 上限）。 */
+const RECENT_SESSIONS_LIMIT = 6;
+
+/** MRU 更新：去重置顶 + 截断（「最近会话条」数据源）。 */
+function pushRecentSession(ids: string[], id: string): string[] {
+  return [id, ...ids.filter((x) => x !== id)].slice(0, RECENT_SESSIONS_LIMIT);
+}
+
 export interface ChatSlice {
   // Session
   currentSessionId: string | null;
   setCurrentSession: (id: string | null) => void;
+  /** 最近打开的会话（MRU 切换条；随 UI 偏好持久化，上限 RECENT_SESSIONS_LIMIT）。 */
+  recentSessionIds: string[];
   sessions: Session[];
   setSessions: (sessions: Session[]) => void;
   addSession: (session: Session) => void;
@@ -77,6 +88,10 @@ export interface ChatSlice {
   /** 写入/更新草稿（支持函数式更新——异步读图回调基于最新状态合成，
    *  不覆盖等待期间输入的文字）；空草稿删除键（不残留空条目）。 */
   setInputDraft: (key: string, updater: InputDraft | ((prev: InputDraft) => InputDraft)) => void;
+
+  // 后台任务（侧栏角标 / 最近会话条共用；列表轮询写入，不持久化）
+  backgroundTasks: BackgroundTask[];
+  setBackgroundTasks: (tasks: BackgroundTask[]) => void;
 
   // Messages
   // 会话消息缓存：本地真相源（历史加载只做一次；流式按 session_id 归属写入，
@@ -248,6 +263,7 @@ function insertBySeq(msgs: ChatMessage[], msg: ChatMessage): void {
 export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set, get) => ({
   // Session
   currentSessionId: null,
+  recentSessionIds: [],
   setCurrentSession: (id) =>
     set((s) => {
       if (id === s.currentSessionId) return {};
@@ -288,8 +304,11 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
           })()
         : s.streamStatus;
       const key = id ?? PENDING_SESSION_KEY;
+      // 最近打开记录（MRU）：仅真实会话；PENDING 迁移由 id 出现触发
+      const recentSessionIds = id ? pushRecentSession(s.recentSessionIds, id) : s.recentSessionIds;
       return {
         currentSessionId: id,
+        recentSessionIds,
         sessionMessages,
         messages: sessionMessages[key] ?? [],
         streamStatus,
@@ -313,6 +332,9 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       }
       return { inputDrafts };
     }),
+  // 后台任务（侧栏角标 / 最近会话条共用；列表轮询写入，不持久化）
+  backgroundTasks: [],
+  setBackgroundTasks: (tasks) => set({ backgroundTasks: tasks }),
   removeSession: (id) =>
     set((s) => {
       const sessions = s.sessions.filter((x) => x.id !== id);
@@ -323,6 +345,7 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       const key = currentSessionId ?? PENDING_SESSION_KEY;
       return {
         sessions,
+        recentSessionIds: s.recentSessionIds.filter((x) => x !== id),
         currentSessionId,
         sessionMessages,
         // 删除当前会话 → 清投影；删除非当前会话 → 保留投影
