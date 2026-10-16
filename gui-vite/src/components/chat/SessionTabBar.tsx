@@ -85,7 +85,7 @@ export default function SessionTabBar() {
             }}
             className={cn(
               'group flex items-center gap-1.5 py-1 rounded-full border text-xs whitespace-nowrap shrink-0 max-w-[180px] cursor-pointer transition-colors',
-              items.length > 1 ? 'pl-2.5 pr-1' : 'px-2.5',
+              items.length > 1 ? 'pl-2.5 pr-2' : 'px-2.5',
               active
                 ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300'
                 : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]',
@@ -117,7 +117,7 @@ export default function SessionTabBar() {
                 title="关闭标签页"
                 aria-label={`关闭 ${session.title || '新对话'}`}
                 className={cn(
-                  'shrink-0 -mr-0.5 p-0.5 rounded-full text-current transition-opacity',
+                  'shrink-0 p-0.5 rounded-full text-current transition-opacity',
                   'group-hover:opacity-100 focus-visible:opacity-100 hover:bg-black/10 dark:hover:bg-white/15',
                   active ? 'opacity-60' : 'opacity-0',
                 )}
