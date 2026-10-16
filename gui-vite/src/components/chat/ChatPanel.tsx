@@ -674,6 +674,18 @@ export default function ChatPanel() {
             data={messages}
             firstItemIndex={firstItemIndex}
             initialTopMostItemIndex={{ index: 'LAST', align: 'end' }}
+            // 预渲染缓冲（条目式）：视口外前后各多渲染若干条，让「挂载 →
+            // 高度测量」发生在进入视口之前——消息高度差异极大（短消息几十
+            // 像素、长报告数千像素），无缓冲时每滚过一条都会「渲染即测量
+            // 即位置修正」，上滚过程持续可见跳动/回弹。条目式（而非像素式
+            // increaseViewportBy）对超高消息同样有效（库内说明：dynamic or
+            // very tall content 推荐 minOverscanItemCount）。
+            minOverscanItemCount={{ top: 5, bottom: 2 }}
+            // 跳过「首条探针」并统一初始估算高度：默认行为用**第一个渲染
+            // 项**做探针，遇 outlier（本场景实测 65~2337px）时全列表估算
+            // 失真——滚动/跳变到未测区域时 Virtuoso 位置修正回弹可达
+            // 1200px+（实测把视口内容顶回 4 条消息）。375 ≈ 实测均值。
+            defaultItemHeight={375}
             followOutput={(isAtBottom) => (isAtBottom ? 'auto' : false)}
             atBottomStateChange={(atBottom) => {
               stickToBottomRef.current = atBottom;
