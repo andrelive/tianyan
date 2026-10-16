@@ -23,6 +23,16 @@ export type AppState = ChatSlice & UiSlice & ModelSlice;
 export { PENDING_SESSION_KEY };
 export type { ChatSlice, UiSlice, ModelSlice, SelectedModel, InputDraft };
 
+/** 持久化的 UI 偏好子集（partialize 与 migrate 共用；类型由本函数推导）。 */
+const partializePreferences = (state: AppState) => ({
+  theme: state.theme,
+  fontSize: state.fontSize,
+  thinkingEffort: state.thinkingEffort,
+  // 打开的会话（按打开顺序）——界面状态（非会话数据），随偏好持久化
+  openSessionIds: state.openSessionIds,
+});
+type PersistedPreferences = ReturnType<typeof partializePreferences>;
+
 export const useAppStore = create<AppState>()(
   persist(
     (set, get, api) => ({
@@ -32,15 +42,23 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: 'tianyan-ui-preferences',
-      // 只持久化 UI 偏好（theme/fontSize/thinkingEffort）——会话/消息/任务
+      // 持久化格式版本：v0 = recentSessionIds（MRU 最近会话条）；v1 = openSessionIds
+      //（浏览器式打开顺序 tab 条）。migrate 把 v0 数据平移（旧 MRU 顺序即初始打开顺序）。
+      version: 1,
+      migrate: (persisted, fromVersion) => {
+        const state = { ...((persisted ?? {}) as Record<string, unknown>) };
+        if (fromVersion < 1) {
+          const legacy = state['recentSessionIds'];
+          if (Array.isArray(legacy) && !Array.isArray(state['openSessionIds'])) {
+            state['openSessionIds'] = legacy;
+          }
+          delete state['recentSessionIds'];
+        }
+        return state as unknown as PersistedPreferences;
+      },
+      // 只持久化 UI 偏好（theme/fontSize/thinkingEffort/openSessionIds）——会话/消息/任务
       // 数据不入 localStorage（ADR-018：会话权威在 SQLite）。
-      partialize: (state) => ({
-        theme: state.theme,
-        fontSize: state.fontSize,
-        thinkingEffort: state.thinkingEffort,
-        // 最近打开会话条（MRU）——界面状态（非会话数据），随偏好持久化
-        recentSessionIds: state.recentSessionIds,
-      }),
+      partialize: partializePreferences,
     },
   ),
 );

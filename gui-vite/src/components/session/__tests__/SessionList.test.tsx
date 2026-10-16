@@ -625,4 +625,63 @@ describe('SessionList', () => {
     expect(screen.queryByTestId('session-running-s1')).not.toBeInTheDocument();
     expect(screen.getByTestId('session-running-s2')).toBeInTheDocument();
   });
+
+  // ── 组内会话折叠（查看更多） ─────────────────────────────────────────
+
+  it('组内折叠：初始只展示最近 3 条，「查看更多 (N)」每次 +10，加载完隐藏', async () => {
+    const user = userEvent.setup();
+    const many = Array.from({ length: 14 }, (_, i) =>
+      makeSession({
+        id: `s${String(i).padStart(2, '0')}`,
+        title: `会话${String(i).padStart(2, '0')}`,
+        working_directory: 'C:/proj/a',
+        updated_at: new Date(Date.now() - i * 60_000).toISOString(),
+      }),
+    );
+    mockSessions(many);
+    renderSessionList();
+
+    await waitFor(() => {
+      expect(screen.getByText('会话00')).toBeInTheDocument();
+    });
+    // 初始：最近 3 条可见，其余折叠；按钮展示被隐藏数
+    expect(screen.getByText('会话01')).toBeInTheDocument();
+    expect(screen.getByText('会话02')).toBeInTheDocument();
+    expect(screen.queryByText('会话03')).not.toBeInTheDocument();
+    const more = screen.getByRole('button', { name: /查看更多/ });
+    expect(more).toHaveTextContent('查看更多 (11)');
+
+    // 第一次点击：+10 → 可见 13 条，余 1
+    await user.click(more);
+    expect(screen.getByText('会话12')).toBeInTheDocument();
+    expect(screen.queryByText('会话13')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /查看更多/ })).toHaveTextContent('查看更多 (1)');
+
+    // 再点击：全部展开 → 按钮消失
+    await user.click(screen.getByRole('button', { name: /查看更多/ }));
+    expect(screen.getByText('会话13')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /查看更多/ })).not.toBeInTheDocument();
+  });
+
+  it('组内折叠不隐藏当前会话（组内深处的会话自动可见）', async () => {
+    const many = Array.from({ length: 6 }, (_, i) =>
+      makeSession({
+        id: `s${i}`,
+        title: `会话${i}`,
+        working_directory: 'C:/proj/a',
+        updated_at: new Date(Date.now() - i * 60_000).toISOString(),
+      }),
+    );
+    mockSessions(many);
+    useAppStore.setState({ currentSessionId: 's4' });
+    renderSessionList();
+
+    await waitFor(() => {
+      expect(screen.getByText('会话0')).toBeInTheDocument();
+    });
+    // s4（组内第 5 条）自动可见；s5 仍折叠；按钮计 1
+    expect(screen.getByText('会话4')).toBeInTheDocument();
+    expect(screen.queryByText('会话5')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /查看更多/ })).toHaveTextContent('查看更多 (1)');
+  });
 });

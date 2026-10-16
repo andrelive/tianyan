@@ -649,7 +649,7 @@ export default function ChatPanel() {
     <div className="flex h-full bg-[var(--color-bg-primary)]">
       {/* 左列：对话主区 */}
       <div className="flex flex-col flex-1 min-w-0">
-        {/* Header：「会话」标题 + 最近会话切换条（MRU，点击即切）*/}
+        {/* Header：「会话」标题 + 打开的会话 tab 条（浏览器式：打开顺序 / 可关闭）*/}
         <div className="flex items-center gap-3 px-4 py-2 border-b border-[var(--color-border)] shrink-0">
           <h1 className="text-lg font-semibold text-[var(--color-text-primary)] shrink-0">会话</h1>
           <SessionTabBar />

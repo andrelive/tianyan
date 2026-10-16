@@ -9,7 +9,7 @@ describe('useAppStore', () => {
     useAppStore.setState({
       currentView: 'chat',
       currentSessionId: null,
-      recentSessionIds: [],
+      openSessionIds: [],
       sessions: [],
       messages: [],
       sessionMessages: {},
@@ -458,20 +458,47 @@ describe('useAppStore', () => {
     useAppStore.getState().setCurrentSession(null);
     expect(useAppStore.getState().currentSessionId).toBeNull();
   });
-  it('setCurrentSession 记录最近打开会话（MRU 去重置顶 + 上限 6）', () => {
+  it('setCurrentSession 记录打开顺序（append-only：已在列表保持原位，不重排）', () => {
     for (let i = 1; i <= 7; i += 1) useAppStore.getState().setCurrentSession(`s${i}`);
-    // 上限 6：s1 被挤出；最新在前
-    expect(useAppStore.getState().recentSessionIds).toEqual(['s7', 's6', 's5', 's4', 's3', 's2']);
-    // 去重置顶：重新打开 s3 → 移到最前（不重复）
+    // 打开顺序追加（无上限；末尾 = 最新打开）
+    expect(useAppStore.getState().openSessionIds).toEqual([
+      's1',
+      's2',
+      's3',
+      's4',
+      's5',
+      's6',
+      's7',
+    ]);
+    // 重新打开 s3 → 保持原位（浏览器 tab 语义：切换不重排）
     useAppStore.getState().setCurrentSession('s3');
-    expect(useAppStore.getState().recentSessionIds).toEqual(['s3', 's7', 's6', 's5', 's4', 's2']);
+    expect(useAppStore.getState().openSessionIds).toEqual([
+      's1',
+      's2',
+      's3',
+      's4',
+      's5',
+      's6',
+      's7',
+    ]);
+  });
+
+  it('closeSessionTab 仅从 tab 条移除（幂等）', () => {
+    useAppStore.getState().setCurrentSession('a');
+    useAppStore.getState().setCurrentSession('b');
+    useAppStore.getState().setCurrentSession('c');
+    useAppStore.getState().closeSessionTab('b');
+    expect(useAppStore.getState().openSessionIds).toEqual(['a', 'c']);
+    // 幂等：重复关闭不改动
+    useAppStore.getState().closeSessionTab('b');
+    expect(useAppStore.getState().openSessionIds).toEqual(['a', 'c']);
   });
 
   it('removeSession 清理最近打开记录', () => {
     useAppStore.getState().setCurrentSession('a');
     useAppStore.getState().setCurrentSession('b');
     useAppStore.getState().removeSession('a');
-    expect(useAppStore.getState().recentSessionIds).toEqual(['b']);
+    expect(useAppStore.getState().openSessionIds).toEqual(['b']);
   });
 
   // ── Input drafts（每会话输入草稿；ChatInput 页面/会话切换恢复）──

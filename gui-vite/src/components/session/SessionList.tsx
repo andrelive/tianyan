@@ -33,6 +33,10 @@ function groupLabel(workdir: string): string {
 const ACTIVE_GROUP_WINDOW_MS = 24 * 60 * 60 * 1000;
 const ACTIVE_GROUP_LIMIT = 3;
 
+/** 组内会话折叠：初始展示「最近」条数 + 「查看更多」单次加载步长。 */
+const SESSIONS_INITIAL_VISIBLE = 3;
+const SESSIONS_LOAD_STEP = 10;
+
 /** 组内最近活动时间（取组内会话 updated_at 最大值；解析失败回退 0）。 */
 function groupLastActivity(list: Session[]): number {
   return list.reduce((max, s) => Math.max(max, Date.parse(s.updated_at) || 0), 0);
@@ -76,16 +80,18 @@ export default function SessionList() {
   const setNewSessionWorkspace = useAppStore((s) => s.setNewSessionWorkspace);
   /** 会话轮状态（turn_state 事件驱动，ADR-035 §9 / ADR-045）：驱动「运行中」标识。 */
   const turnState = useAppStore((s) => s.turnState);
-  /** 打开会话（切换 + 导航 + 历史加载；与「最近会话条」共用同一入口）。 */
+  /** 打开会话（切换 + 导航 + 历史加载；与「打开的会话 tab 条」共用同一入口）。 */
   const openSession = useOpenSession();
 
   const [hoveredSession, setHoveredSession] = useState<string | null>(null);
-  /** 全量后台任务（store：轮询写入，侧栏角标与最近会话条共用）。 */
+  /** 全量后台任务（store：轮询写入，侧栏角标与打开的会话 tab 条共用）。 */
   const tasks = useAppStore((s) => s.backgroundTasks);
   const [hoveredGroup, setHoveredGroup] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  /** 组内折叠展开量（按工作区键；初始 SESSIONS_INITIAL_VISIBLE 条，点「查看更多」+10）。 */
+  const [expandedCounts, setExpandedCounts] = useState<Record<string, number>>({});
   const [pickerOpen, setPickerOpen] = useState(false);
   /** 用户是否已发起新会话（点击「＋ 新建会话」/分组「＋」/「新目录」后为 true）。 */
   const [newChatStarted, setNewChatStarted] = useState(false);
@@ -94,7 +100,7 @@ export default function SessionList() {
 
   // 后台任务角标下沉到**会话项**（原一级栏目只给全局总数，无法定位是哪个会话在跑）：
   // 低频轮询，失败静默保留旧值（usePolling 默认策略）；结果写入 store——
-  // 侧栏角标与主区「最近会话条」共用同一份轮询。
+  // 侧栏角标与主区「打开的会话 tab 条」共用同一份轮询。
   usePolling(async () => useAppStore.getState().setBackgroundTasks(await fetchTasks()), 5000);
 
   /** 运行中后台任务数按归属会话聚合（pending/running 计；未归属会话的忽略）。 */
@@ -331,6 +337,13 @@ export default function SessionList() {
           {groupsToRender.map(([workdir, groupSessions]) => {
             const collapsed = collapsedGroups.has(workdir);
             const label = groupLabel(workdir);
+            // 折叠：初始只展示最近 SESSIONS_INITIAL_VISIBLE 条；当前会话始终可见
+            //（从 tab 条切到组内深处的会话时自动展开到它——折叠不隐藏当前会话）
+            const baseVisible = SESSIONS_INITIAL_VISIBLE + (expandedCounts[workdir] ?? 0);
+            const activeIndex = groupSessions.findIndex((s) => s.id === currentSessionId);
+            const visibleCount = activeIndex >= baseVisible ? activeIndex + 1 : baseVisible;
+            const visibleSessions = groupSessions.slice(0, visibleCount);
+            const hiddenCount = groupSessions.length - visibleSessions.length;
             return (
               <div
                 key={workdir || '__default_ws__'}
@@ -400,9 +413,9 @@ export default function SessionList() {
                   </div>
                 )}
 
-                {/* 会话子项（二级） */}
+                {/* 会话子项（二级；折叠：初始最近 N 条 + 「查看更多」逐次加载） */}
                 {!collapsed &&
-                  groupSessions.map((session) => {
+                  visibleSessions.map((session) => {
                     const isRunning = turnState[session.id]?.state === 'running';
                     const pendingAsk = isRunning && turnState[session.id]?.pendingAsk === true;
                     const taskCount = runningTasksBySession.get(session.id) ?? 0;
@@ -508,6 +521,25 @@ export default function SessionList() {
                       </div>
                     );
                   })}
+
+                {/* 「查看更多」：展示被折叠的会话数；每次点击加载 SESSIONS_LOAD_STEP 条 */}
+                {!collapsed && hiddenCount > 0 && (
+                  <button
+                    type="button"
+                    role="button"
+                    onClick={() =>
+                      setExpandedCounts((prev) => ({
+                        ...prev,
+                        [workdir]: (prev[workdir] ?? 0) + SESSIONS_LOAD_STEP,
+                      }))
+                    }
+                    title={`展开 ${Math.min(SESSIONS_LOAD_STEP, hiddenCount)} 个会话`}
+                    className="flex items-center gap-1.5 pl-7 pr-2 py-1 rounded-md text-xs text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] transition-colors"
+                  >
+                    <ChevronDown size={11} className="shrink-0 opacity-70" />
+                    查看更多 ({hiddenCount})
+                  </button>
+                )}
               </div>
             );
           })}
