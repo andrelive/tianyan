@@ -26,7 +26,7 @@
 | `/api/v1/knowledge/entries` | GET | 知识条目列表 |
 | `/api/v1/knowledge/entries/read` | GET | 读取知识条目内容 |
 | `/api/v1/knowledge/entries/delete` | POST | 删除知识条目（递归子条目 + 同步清理向量索引） |
-| `/api/v1/memory` | GET | 记忆列表（VFS memory 命名空间浏览） |
+| `/api/v1/memory` | GET | 记忆列表（三源聚合：`memory/` + `user/` + `agent/patterns`，系统子路径排除） |
 | `/api/v1/stats` | GET | 使用统计摘要（技能调用 / 文档访问 / 搜索热度） |
 | `/api/v1/usage/stats` | GET | 用量统计（模型调用 token 消耗等） |
 | `/api/v1/traces` | GET | 结构化轨迹查询（Trace 回放查询） |

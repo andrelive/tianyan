@@ -69,6 +69,6 @@ L0（摘要）保持原语义（<100 token 短路径 + LLM 简洁摘要）。本
 ## 后续候选（未实施，按需触发）
 
 - `decay_rate` / 访问追踪（access_count 从未维护）——衰减机制需要访问计数基础设施，暂缓；
-- 记忆面板覆盖 user/agent 命名空间（`Preference → user/preferences`、`Pattern → agent/patterns` 当前不在面板显示）——面板口径议题；
-- 同 id 多条记忆（`evo-{ts}` 时间戳一次运行多条共享 id）下 merge/delete 按 id 查找的歧义——当前按"首个命中"处理；
+- ✅ 记忆面板覆盖 user/agent 命名空间（`Preference → user/preferences`、`Pattern → agent/patterns`）——**已实施（2026-10-17）**：`GET /api/v1/memory` 改多根聚合（memory + user + agent/patterns），系统子路径统一经 `system_paths::is_system_path` 排除（并补齐 `user/archive` 判定缺口——此前 user 归档仍参与检索）；前端分类树自动适配。
+- ✅ 同 id 多条记忆（`evo-{ts}` 时间戳一次运行多条共享 id）下 merge/delete 按 id 查找的歧义——**已实施（2026-10-17）**：新 id 以运行内序号消歧（`evo-{ts}-{seq}`）；add/merge/delete 全部 id 入口补 `normalize_entry_id` 归一化（防路径式 id 再产生畸形条目）。**存量修复（24 条，`core/examples/memory_path_repair.rs`）另揭示一个隐蔽形态**：畸形条目的中间目录从未创建 → `list_directory`「一级子」语义下遍历链断裂，成为**任何遍历通道（面板/find_entry/删除）都不可达的孤儿**，只能按 uri 精确寻址（`WHERE uri = ?1`）修复。
 - 规则自动提炼通道（rule_recorder）的产出质量复审。

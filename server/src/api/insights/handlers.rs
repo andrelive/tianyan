@@ -10,49 +10,59 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::info;
 
-use tianyan::common::types::{memory_paths, ContentLevel, ContextNamespace, TianyanUri};
+use tianyan::common::types::{system_paths, ContentLevel, ContextNamespace, TianyanUri};
 use tianyan::vfs::{ContentStore, VfsCore};
 
 use crate::api::shared::error::ApiError;
 use crate::state::AppState;
 
-/// 列出记忆命名空间全部条目（含 L0/L1/L2 内容）。
+/// 列出全部记忆条目（含 L0/L1/L2 内容）。
 ///
-/// 记忆由演化任务（ADR-017 自演化综述）写入
-/// `tianyan://memory/*`；此前无任何读路径，本端点补齐浏览能力。
+/// 记忆由演化任务（ADR-017 自演化综述）按类别写入 3 个命名空间
+/// （`MemoryCategory::default_uri`）：`memory/`（fact/decision/案例）+
+/// `user/`（preference/entity）+ `agent/patterns`（pattern）。本端点按
+/// 「记忆」语义聚合三个来源同列（2026-10-17 审计：此前仅遍历 `memory/`，
+/// 画像与模式两类在界面上不可见）。
 ///
 /// 浏览语义：递归展开子目录，仅返回叶子条目——目录仅作导航中间节点，
 /// 内容为空且 importance 为默认 0.5，直接展示只会误导。按 updated_at
 /// 倒序（最近记忆在前）。`relative_path` 供前端区分跨目录同名条目。
-/// 运维数据子域（`extraction_state`/`evolution_reports`/`task_states`/`archive`）
-/// 不属记忆内容，统一排除（判定单一真相源：`memory_paths::is_operational_path`）。
+/// 系统/运维子路径（记忆运维子域 + 各命名空间归档/评审）不属记忆内容，
+/// 统一排除（判定单一真相源：`system_paths::is_system_path`）。
 pub async fn list_memories_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let vfs = state.vfs();
-    let memory_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
+    // 遍历根：记忆 7 类按类别分散在 3 个命名空间（见上）
+    let roots = [
+        TianyanUri::new(ContextNamespace::Memory, vec![]),
+        TianyanUri::new(ContextNamespace::User, vec![]),
+        TianyanUri::new(ContextNamespace::Agent, vec!["patterns".to_string()]),
+    ];
     // VFS list 为单层语义：逐级下钻收集叶子条目。
     // 深度上限防御异常嵌套；单目录失败不阻塞整体浏览。
     const MAX_DEPTH: usize = 8;
     let mut leaves = Vec::new();
-    let mut stack = vec![(memory_root, 0usize)];
-    while let Some((dir, depth)) = stack.pop() {
-        if depth > MAX_DEPTH {
-            continue;
-        }
-        let entries = match vfs.list(&dir).await {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries {
-            // 运维数据子域（状态/日志/归档）不作为「记忆」展示
-            if memory_paths::is_operational_path(&entry.metadata.uri) {
+    for root in roots {
+        let mut stack = vec![(root, 0usize)];
+        while let Some((dir, depth)) = stack.pop() {
+            if depth > MAX_DEPTH {
                 continue;
             }
-            if entry.is_directory() {
-                stack.push((entry.metadata.uri.clone(), depth + 1));
-            } else {
-                leaves.push(entry);
+            let entries = match vfs.list(&dir).await {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries {
+                // 系统/运维子路径（状态/日志/归档）不作为「记忆」展示
+                if system_paths::is_system_path(&entry.metadata.uri) {
+                    continue;
+                }
+                if entry.is_directory() {
+                    stack.push((entry.metadata.uri.clone(), depth + 1));
+                } else {
+                    leaves.push(entry);
+                }
             }
         }
     }

@@ -231,6 +231,81 @@ async fn list_memories_excludes_operational_subdirs() {
     );
 }
 
+/// GET /api/v1/memory → 多根聚合：user（偏好/实体）与 agent/patterns（模式）
+/// 的记忆同列返回；系统子路径（user/archive 等）排除（2026-10-17 审计修复）。
+#[tokio::test]
+async fn list_memories_aggregates_user_and_pattern_namespaces() {
+    use tianyan::common::types::{ContentLevel, ContextNamespace, TianyanUri};
+    use tianyan::vfs::ContentStore;
+
+    let dir = tempdir().unwrap();
+    let config = test_config(dir.path());
+    let (app, state) = create_app(config).await.unwrap();
+
+    let vfs = state.vfs();
+    let uris = [
+        // memory 空间：事实
+        TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["facts".to_string(), "f1".to_string()],
+        ),
+        // user 空间：偏好 + 实体（画像类，此前在界面不可见）
+        TianyanUri::new(
+            ContextNamespace::User,
+            vec!["preferences".to_string(), "p1".to_string()],
+        ),
+        TianyanUri::new(
+            ContextNamespace::User,
+            vec!["entities".to_string(), "e1".to_string()],
+        ),
+        // agent/patterns：模式（此前同样不可见）
+        TianyanUri::new(
+            ContextNamespace::Agent,
+            vec!["patterns".to_string(), "m1".to_string()],
+        ),
+        // user/archive：系统子路径（必须排除）
+        TianyanUri::new(
+            ContextNamespace::User,
+            vec!["archive".to_string(), "a1".to_string()],
+        ),
+        // agent/learned：规则（不在 patterns 根下，不得出现）
+        TianyanUri::new(
+            ContextNamespace::Agent,
+            vec!["learned".to_string(), "r1".to_string()],
+        ),
+    ];
+    for uri in &uris {
+        vfs.write(uri, ContentLevel::Detail, "内容").await.unwrap();
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/memory")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+    let memories = body["memories"].as_array().unwrap();
+    let mut paths: Vec<&str> = memories
+        .iter()
+        .map(|m| m["relative_path"].as_str().unwrap())
+        .collect();
+    paths.sort_unstable();
+    assert_eq!(
+        paths,
+        vec!["entities/e1", "facts/f1", "patterns/m1", "preferences/p1"],
+        "应聚合 memory/user/patterns 三源、排除归档与规则: {memories:?}"
+    );
+}
+
 /// GET /api/v1/stats → 200 + 统计摘要结构（技能调用/文档访问/搜索热度）。
 #[tokio::test]
 async fn get_stats_returns_summary_shape() {

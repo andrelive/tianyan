@@ -111,6 +111,15 @@ pub mod system_paths {
     /// - `_reviews/`：技能使用评审记录（`skill/_reviews/<id>.jsonl`）。
     const SKILL_SUBDIRS: &[&[&str]] = &[&["_archive"], &["_reviews"]];
 
+    /// User 命名空间的系统子路径。
+    ///
+    /// - `archive/`：画像/实体软删除归档（`user/archive/<id>`）。
+    ///
+    /// 历史缺口（2026-10-17 审计）：user 归档此前不在判定内——归档条目
+    /// 仍被索引/检索命中（「已退役内容不得复活」失效）。补入后，user 的
+    /// 归档与其它命名空间同口径退场（摘要/索引/检索三消费面统一过滤）。
+    const USER_SUBDIRS: &[&[&str]] = &[&["archive"]];
+
     /// 判断 URI 是否为系统/运维路径（不参与摘要与向量索引，不作检索结果）。
     pub fn is_system_path(uri: &super::TianyanUri) -> bool {
         if super::memory_paths::is_operational_path(uri) {
@@ -119,6 +128,7 @@ pub mod system_paths {
         let subdirs: &[&[&str]] = match uri.namespace() {
             super::ContextNamespace::Agent => AGENT_SUBDIRS,
             super::ContextNamespace::Skill => SKILL_SUBDIRS,
+            super::ContextNamespace::User => USER_SUBDIRS,
             _ => return false,
         };
         let path: Vec<&str> = uri.path().iter().map(|s| s.as_str()).collect();
@@ -455,18 +465,24 @@ mod tests {
             // Skill：技能软删除 / 评审记录
             ("tianyan://skill/_archive/old-skill", true),
             ("tianyan://skill/_reviews/tianyan-release-build.jsonl", true),
+            // User：画像/实体软删除归档
+            ("tianyan://user/archive/1786779936", true),
+            ("tianyan://user/archive/evo-1789280062", true),
             // 活跃内容：不得命中
             ("tianyan://agent/learned/rule-1", false),
             ("tianyan://agent/roles/reviewer", false),
             ("tianyan://skill/learned/tianyan-release-build", false),
             ("tianyan://memory/facts/evo-1789280062", false),
             ("tianyan://user/profile", false),
+            ("tianyan://user/preferences/evo-x", false),
+            ("tianyan://user/entities/project-digital-brain", false),
             ("tianyan://knowledge/docs/api.md", false),
             // 相似前缀 / 同级命名：防前缀误伤
             ("tianyan://agent/roles/_archive_notes/x", false),
             ("tianyan://skill/_reviews_notes/x", false),
             ("tianyan://skill/_archive_notes/x", false),
             ("tianyan://agent/learned/archive_notes/x", false),
+            ("tianyan://user/archive_notes/x", false),
         ];
         for (uri_str, expected) in cases {
             let uri = TianyanUri::parse(uri_str).unwrap();

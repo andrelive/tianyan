@@ -393,9 +393,9 @@ impl EvolutionTask {
     async fn apply_plan(&self, ctx: &TaskContext, plan: &EvolutionPlan) -> Result<usize> {
         let mut applied = 0usize;
         let consolidate = ctx.config.memory.auto_consolidation;
-        for m in &plan.memories {
+        for (seq, m) in plan.memories.iter().enumerate() {
             match m.action.as_str() {
-                "add" => match self.apply_memory(ctx, m).await {
+                "add" => match self.apply_memory(ctx, m, seq).await {
                     Ok(()) => applied += 1,
                     Err(e) => tracing::warn!(content = %m.content, error = %e, "记忆应用失败"),
                 },
@@ -443,11 +443,17 @@ impl EvolutionTask {
     }
 
     /// 应用记忆新增（写入 VFS memory 命名空间 + L0 摘要）。
-    async fn apply_memory(&self, ctx: &TaskContext, m: &MemoryPlan) -> Result<()> {
+    ///
+    /// `seq`：本次演化运行内的记忆序号（0 起）。同一次运行的多条记忆在同一
+    /// 秒内生成，纯时间戳 id 会相互重复（跨类别引用歧义，2026-10-17 审计
+    /// 实证 3 条同 id），以序号消歧。
+    async fn apply_memory(&self, ctx: &TaskContext, m: &MemoryPlan, seq: usize) -> Result<()> {
         let category = parse_category(&m.category)?;
         let id =
-            m.id.clone()
-                .unwrap_or_else(|| format!("evo-{}", chrono::Utc::now().timestamp()));
+            m.id.as_deref()
+                .map(normalize_entry_id)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("evo-{}-{}", chrono::Utc::now().timestamp(), seq));
         let mut entry = MemoryEntry::new(&id, &m.content, category);
         entry.importance = m.importance.clamp(0.0, 1.0);
         entry.source_session = Some("evolution".to_string());
@@ -477,7 +483,11 @@ impl EvolutionTask {
     /// - `merge_from` 列出的其它条目：走软删除通道归档到 `memory/archive/`
     ///   （摘要标注"已被合并到 {目标}"），从活跃记忆移除。
     async fn apply_memory_merge(&self, ctx: &TaskContext, m: &MemoryPlan) -> Result<()> {
-        let Some(target_id) = m.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        let Some(target_id) =
+            m.id.as_deref()
+                .map(normalize_entry_id)
+                .filter(|s| !s.is_empty())
+        else {
             return Err(TianyanError::invalid_input(
                 "evolution: merge 记忆缺少目标 id",
             ));
@@ -486,10 +496,10 @@ impl EvolutionTask {
         let memory_root = TianyanUri::new(ContextNamespace::Memory, vec![]);
 
         // 目标条目：全树查找；未命中降级为新建（保持与 apply_memory 相同的写路径）
-        let target_uri = match find_entry(ctx, &memory_root, target_id, 0).await? {
+        let target_uri = match find_entry(ctx, &memory_root, &target_id, 0).await? {
             Some(uri) => uri,
             None => {
-                let uri = category.default_uri(target_id);
+                let uri = category.default_uri(&target_id);
                 if let Some(parent) = uri.parent() {
                     if !ctx.vfs.exists(&parent).await? {
                         ctx.vfs.create_directory(&parent).await?;
@@ -499,7 +509,7 @@ impl EvolutionTask {
             }
         };
 
-        let mut entry = MemoryEntry::new(target_id, &m.content, category);
+        let mut entry = MemoryEntry::new(&target_id, &m.content, category);
         entry.importance = m.importance.clamp(0.0, 1.0);
         entry.source_session = Some("evolution".to_string());
         let content = format_memory_as_markdown(&entry);
@@ -519,7 +529,7 @@ impl EvolutionTask {
 
         // 归档被合并条目（复用软删除通道；防自吞与空 id）
         for from_id in &m.merge_from {
-            let from_id = from_id.trim();
+            let from_id = normalize_entry_id(from_id);
             if from_id.is_empty() || from_id == target_id {
                 continue;
             }
@@ -539,7 +549,8 @@ impl EvolutionTask {
 
     /// 应用技能新增/更新（写入 skill/{id} content + abstract）。
     async fn apply_skill(&self, ctx: &TaskContext, s: &SkillPlan) -> Result<()> {
-        let uri = TianyanUri::new(ContextNamespace::Skill, vec![s.id.clone()]);
+        let id = normalize_entry_id(&s.id);
+        let uri = TianyanUri::new(ContextNamespace::Skill, vec![id.clone()]);
         if let Some(parent) = uri.parent() {
             if !ctx.vfs.exists(&parent).await? {
                 ctx.vfs.create_directory(&parent).await?;
@@ -547,7 +558,7 @@ impl EvolutionTask {
         }
         let mut md = String::new();
         md.push_str(&format!("# {}\n\n", s.name));
-        md.push_str(&format!("**ID**: {}\n\n", s.id));
+        md.push_str(&format!("**ID**: {}\n\n", id));
         md.push_str(&format!("**描述**: {}\n\n", s.description));
         md.push_str("**状态**: 正式（演化综述产物）\n\n");
         if !s.applicable_scenarios.is_empty() {
@@ -567,7 +578,7 @@ impl EvolutionTask {
             s.applicable_scenarios.join(", ")
         );
         ctx.vfs.write_abstract(&uri, &abstract_content).await?;
-        tracing::info!(skill_id = %s.id, "技能已写入/更新");
+        tracing::info!(skill_id = %id, "技能已写入/更新");
         Ok(())
     }
 }
@@ -669,13 +680,20 @@ impl EvolutionTask {
             }
         };
 
-        let Some(original) = find_entry(ctx, &root, &d.id, 0).await? else {
-            tracing::debug!(id = %d.id, "删除目标不存在，跳过");
+        // id 归一化（防路径式引用；与写入通道同口径，2026-10-17 审计）
+        let id = normalize_entry_id(&d.id);
+        if id.is_empty() {
+            tracing::warn!(raw = %d.id, "删除 id 归一化后为空，跳过");
+            return Ok(());
+        }
+
+        let Some(original) = find_entry(ctx, &root, &id, 0).await? else {
+            tracing::debug!(id = %id, "删除目标不存在，跳过");
             return Ok(());
         };
 
         // 归档副本（保留可回退）
-        let archive = archive_root.append(&d.id);
+        let archive = archive_root.append(&id);
         if let Some(parent) = archive.parent() {
             if !ctx.vfs.exists(&parent).await? {
                 ctx.vfs.create_directory(&parent).await?;
@@ -935,6 +953,26 @@ fn format_memory_as_markdown(memory: &MemoryEntry) -> String {
     md
 }
 
+/// 归一化条目 id：剥离可能的 URI / 路径前缀，只取 slug 末段。
+///
+/// 背景（2026-10-17 数据审计）：演化综述的 LLM 有时把「路径式引用」当作
+/// id 回传（如 `memory/facts/evo-x`、`tianyan://user/preferences/evo-x`）。
+/// 此前 id 被原样拼进 `MemoryCategory::default_uri` 与归档路径，产生
+/// `memory/facts/memory/facts/evo-x` 一类畸形条目（23 条存量）；同因
+/// `find_entry` 按名字精确匹配，路径式 id 必然查不中目标——「更新/删除」
+/// 静默退化为「另写一份畸形副本」或「跳过」。归一化在全部写路径收口。
+fn normalize_entry_id(raw: &str) -> String {
+    let s = raw.trim().trim_end_matches('/');
+    // 剥离完整 URI 前缀（tianyan://memory/facts/evo-x → memory/facts/evo-x）
+    let s = s.rsplit("://").next().unwrap_or(s);
+    // 取最右非空路径段（memory/facts/evo-x → evo-x）；纯 slug 原样返回
+    s.rsplit('/')
+        .find(|seg| !seg.is_empty())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 /// 解析记忆类别。
 fn parse_category(category: &str) -> Result<MemoryCategory> {
     match category.to_lowercase().as_str() {
@@ -1158,6 +1196,188 @@ mod tests {
         assert_eq!(archived, "旧案例内容", "归档副本应保留内容（真实后端）");
     }
 
+    // ── id 归一化与消歧（2026-10-17 数据审计：23 条畸形路径的防复发）─────
+
+    #[test]
+    fn test_normalize_entry_id_strips_prefixes() {
+        let cases = [
+            ("evo-123", "evo-123"),
+            ("  evo-123  ", "evo-123"),
+            ("project-digital-brain", "project-digital-brain"),
+            ("memory/facts/evo-123", "evo-123"),
+            ("user/preferences/evo-123", "evo-123"),
+            ("tianyan://memory/facts/evo-123", "evo-123"),
+            ("tianyan://user/entities/project-x", "project-x"),
+            ("memory/facts/memory/facts/evo-123", "evo-123"),
+            ("evo-123/", "evo-123"),
+            ("", ""),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(normalize_entry_id(raw), expected, "raw={raw:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_memory_normalizes_path_style_id() {
+        // 路径式 id（LLM 回传 vfs_read 结果）必须落到归一化路径，不得产生畸形副本
+        let vfs = real_vfs().await;
+        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let plan = MemoryPlan {
+            action: "add".to_string(),
+            category: "fact".to_string(),
+            content: "路径式 id 应归一化".to_string(),
+            importance: 0.8,
+            id: Some("memory/facts/dup-id".to_string()),
+            merge_from: Vec::new(),
+        };
+        task.apply_memory(&ctx, &plan, 0).await.unwrap();
+
+        let expected = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["facts".to_string(), "dup-id".to_string()],
+        );
+        assert!(
+            vfs.exists(&expected).await.unwrap(),
+            "应写入归一化路径 facts/dup-id"
+        );
+        let malformed = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec![
+                "facts".to_string(),
+                "memory".to_string(),
+                "facts".to_string(),
+                "dup-id".to_string(),
+            ],
+        );
+        assert!(
+            !vfs.exists(&malformed).await.unwrap(),
+            "不得产生 facts/memory/facts/dup-id 畸形路径"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_same_run_memories_get_distinct_ids() {
+        // 同一次运行（同一秒）的多条无 id 记忆必须消歧（时间戳 + 序号）
+        let vfs = real_vfs().await;
+        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        for seq in 0..3 {
+            let plan = MemoryPlan {
+                action: "add".to_string(),
+                category: "fact".to_string(),
+                content: format!("同运行第 {seq} 条"),
+                importance: 0.5,
+                id: None,
+                merge_from: Vec::new(),
+            };
+            task.apply_memory(&ctx, &plan, seq).await.unwrap();
+        }
+        let facts = TianyanUri::new(ContextNamespace::Memory, vec!["facts".to_string()]);
+        let entries = vfs.list(&facts).await.unwrap();
+        let names: Vec<String> = entries
+            .iter()
+            .map(|e| e.uri().path().last().cloned().unwrap_or_default())
+            .collect();
+        assert_eq!(names.len(), 3, "三条记忆均写入: {names:?}");
+        let unique: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(unique.len(), 3, "同运行内 id 必须消歧: {names:?}");
+    }
+
+    #[tokio::test]
+    async fn test_merge_normalizes_path_style_target_id() {
+        // merge 的 target_id 为路径式/URI 式时须命中既有条目并原地重写
+        let vfs = real_vfs().await;
+        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let existing = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["facts".to_string(), "topic-x".to_string()],
+        );
+        vfs.write_content(&existing, "旧内容").await.unwrap();
+        vfs.write_abstract(&existing, "旧摘要").await.unwrap();
+
+        let plan = MemoryPlan {
+            action: "merge".to_string(),
+            category: "fact".to_string(),
+            content: "归纳后的新内容".to_string(),
+            importance: 0.9,
+            id: Some("tianyan://memory/facts/topic-x".to_string()),
+            merge_from: Vec::new(),
+        };
+        task.apply_memory_merge(&ctx, &plan).await.unwrap();
+
+        let detail = vfs
+            .read_content(&existing, ContentLevel::Detail)
+            .await
+            .unwrap();
+        assert!(
+            detail.contains("归纳后的新内容"),
+            "既有条目应被原地重写: {detail}"
+        );
+        let facts = TianyanUri::new(ContextNamespace::Memory, vec!["facts".to_string()]);
+        let entries = vfs.list(&facts).await.unwrap();
+        assert_eq!(entries.len(), 1, "不得产生重复副本: {entries:?}");
+    }
+
+    #[tokio::test]
+    async fn test_deletion_normalizes_path_style_id() {
+        // 删除通道：路径式 id 必须命中并归档（不得静默跳过）
+        let vfs = real_vfs().await;
+        let ctx = make_context_with_config(vfs.clone(), crate::config::TianyanConfig::default());
+        let task = EvolutionTask::new(
+            Arc::new(FakeExecutor {
+                response: "{}".to_string(),
+            }),
+            10,
+        );
+        let victim = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec![
+                "cases".to_string(),
+                "failed_tasks".to_string(),
+                "victim".to_string(),
+            ],
+        );
+        vfs.write_content(&victim, "受害条目").await.unwrap();
+        vfs.write_abstract(&victim, "受害摘要").await.unwrap();
+
+        let d = DeletionPlan {
+            kind: "memory".to_string(),
+            id: "memory/cases/failed_tasks/victim".to_string(),
+            reason: "测试".to_string(),
+        };
+        task.apply_deletion(&ctx, &d).await.unwrap();
+
+        assert!(
+            !vfs.exists(&victim).await.unwrap(),
+            "路径式 id 亦应命中删除"
+        );
+        let archive = TianyanUri::new(
+            ContextNamespace::Memory,
+            vec!["archive".to_string(), "victim".to_string()],
+        );
+        assert!(
+            vfs.exists(&archive).await.unwrap(),
+            "应归档到 memory/archive/victim"
+        );
+    }
+
     #[tokio::test]
     async fn test_apply_memory_merge_real_backend() {
         // 真实后端：目标原地重写 + 源归档删除（全链路）
@@ -1279,7 +1499,7 @@ mod tests {
             id: Some("evo-test-fact".to_string()),
             merge_from: Vec::new(),
         };
-        task.apply_memory(&ctx, &m).await.unwrap();
+        task.apply_memory(&ctx, &m, 0).await.unwrap();
         let uri = MemoryCategory::Fact.default_uri("evo-test-fact");
         let content = ctx
             .vfs
