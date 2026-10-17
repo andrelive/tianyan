@@ -297,4 +297,4 @@ python -c "import yaml; d=yaml.safe_load(open('.github/workflows/quality.yml',en
 | 修复验证（全绿，单测 0:52） | Quality run `37868892911`（tag 仍指 `4e8d415`） |
 | protoc 改 apt + 重试 | `e13d65c`（验证 run `37870943324`） |
 | **env 锁收敛（并发干扰源修复）** | **`51ae9b3`** ／ 验证 run **`37876186817`**（哨兵步 0:20 全过） |
-| **rustc 缓存失效案例（v0.6.6，冷编译超时）** | tag `5fe1862`；Quality run `39017424668`（→ rerun 命中新缓存）／ Release run `39017424632`；修复：`quality.yml` `server + mcp` timeout 20→45 |
+| **rustc 缓存失效案例（v0.6.6，冷编译超时）** | tag `5fe1862`；Quality run `39017424668`（attempt 2 转绿）／ Release run `39017424632`（build 33 分钟出包）／ 修复验证 dispatch `39021421327`（冷编译 58 分钟全绿）；修复：`quality.yml` `server + mcp` timeout 20→45 |
