@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.6] - 2026-10-16
+## [0.6.6] - 2026-10-17
 
 ### Added
 - **主区会话 tab 条（浏览器式）**：会话标题行内轻量 tab 条——按打开先后排序（append-only，切换不重排、消除跳跃感）、当前高亮、复用运行中 / 等待回答 / 任务数状态标；每个 tab 带 × 关闭（关当前 tab 激活邻位——优先右侧、其次左侧；仅剩一个时隐藏）；已删除会话自动过滤；随 UI 偏好持久化（旧「最近会话」MRU 记录自动迁移为初始打开顺序）。打开会话收敛单入口（`useOpenSession`）、后台任务轮询提升至 store（侧栏与 tab 条共用单一轮询源）
@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **上滚浏览页面跳动**（0.6.5 安装后仍可见）：虚拟列表默认以首条渲染项做全列表高度探针，消息高度差异达 36 倍（65~2337px）时未测区域估算失真、滚动位置修正回弹（实测 +1227px 顶回 4 条）。修复：`minOverscanItemCount={{ top: 5, bottom: 2 }}`（条目级预渲染缓冲，挂载 → 测量提前）+ `defaultItemHeight={375}`（跳过首条探针、统一初始估算）。对照实测 0 修正、视口内容稳定
 - **任务取消通知按来源归因**：智能体自取消（`task_cancel`）/ 回退取消的任务，通知不再误写「用户主动停止」——新增 `CancelSource { User / Agent / Rollback }`、5 处调用点归因、通知文案按来源区分（附测试）
 - **「最大对话轮次」改为「最大循环轮次」**：旧文案易误解为对话往返数；实为单次请求内 Agent 循环轮次（每轮 = 一次模型调用 + 其触发的工具执行，触顶报错停止）。设置页加说明小字，向导与确认页同步（AgentTab / AgentStep / ConfirmStep）
+- **压缩后占用估算修正（圆环，长会话高估）**：压缩点的估算此前取「窗口内第一条 assistant 的输入 ≈ 系统前缀」——仅当窗口含会话开头近似成立；长会话分页窗口会取到会话中段消息（实测取到 35.7 万 → 显示 36%），明显高估压缩后占用。现改用**会话基线**（会话列表新增 `first_request_tokens` = 会话首条请求输入；静态值、与加载窗口无关），压缩完成即显示 ≈2%（与新请求到达后的真实测量一致）；基线缺失时回退原行为
+- **会话 tab 关闭按钮贴边留白**：× 距右缘 4px → 10px（与左侧文字留白对称，消除挤压观感）
 
 ## [0.6.5] - 2026-10-13
 
