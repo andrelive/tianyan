@@ -88,9 +88,14 @@ jobs:
         run: cargo test -p tianyan-core --lib --no-run
         timeout-minutes: 45
 
+      # timeout 与 core 对齐（45）：冷编译实测该步 1080–1212s，且 runner 间
+      # 性能波动可达 ±25%（0.6.6 实发：同批两台 runner，快者 1080s 压线通过、
+      # 慢者 1212s 被 20 分钟上限杀掉）。冷编译必然复发——rustc 小版本更新会
+      # 让 rust-cache 的 key 变化、缓存全量失效（见 ci-pipeline.md §6），
+      # timeout 必须以冷编译为基准，不能按缓存命中时的 2–4 分钟来定。
       - name: "Build tests (compile only: server + mcp)"
         run: cargo test -p tianyan-server -p tianyan-mcp --lib --no-run
-        timeout-minutes: 20
+        timeout-minutes: 45
       # 第三条预编译：下面的"并发实验"用 3 包集合（与 E1 复现条件一致）。
       # 本机实测两集合可互相复用（§1 STEP3），故不会额外重编译。
       - name: "Build tests (compile only: 3-package set, for the concurrency experiment)"

@@ -17,6 +17,7 @@
 | `Starting N tests across M binaries` 之后**再无任何输出**（连一条 nextest SLOW 都没有），随后失联 | nextest 的 **process-per-test 进程累积**把 runner 拖死 | §3（**已定位 + 已修复**） |
 | 本地 `cargo check` 全绿、CI `Rust clippy (deny warnings)` 红 | 本地用了比 CI 弱的检查（如漏跑 clippy） | §5：以 `.\scripts\test.ps1 lint` 为验收入口 |
 | 每轮 CI 都冷编译 ~30 分钟 | rust-cache 失败轮次不保存（`CACHE_ON_FAILURE: false`）；tag 推送默认不保存 | §6 |
+| `Build tests` 步骤被 timeout 杀掉，但**同批另一半 job 的同步骤**却通过 | **rustc 小版本更新** → rust-cache key 变化 → 全量冷编译；按缓存命中定的 timeout 撑不住冷编译 | §6：timeout 以冷编译为基准 |
 | `kill -9 -<pid>` 之后 runner 失联 / WSL 服务崩溃（`E_UNEXPECTED`） | 负 PID 信号**误杀无关进程组**（pid 已被系统复用） | §4 |
 | 本机脚本轮询 GitHub API 突然报错退出 | 匿名请求 **60 次/小时**被打满 | §7：取证通道一律带 token |
 
@@ -227,6 +228,28 @@ python -c "import yaml; d=yaml.safe_load(open('.github/workflows/quality.yml',en
   （0.6.3 实测：`30:53 → 04:40 → 02:14`）。
 - rust-cache 的 **restore/prune 在 job 首尾**，不会在步骤之间清 target。
 
+### rustc 小版本更新 ⇒ 缓存全量失效（2026-10-17 实发）
+
+- **key 结构**（job 日志 "Cache Configuration" 段）：`Restore Key:
+  v0-rust-quality-Linux-x64-{rustc_hash}`，`Cache Key: …-{rustc_hash}-{env_hash}`；
+  **restore 只按 Restore Key 前缀匹配** —— rustc 哈希段一变，旧缓存全部不可见
+  （连部分恢复都没有，日志直接 `No cache found.`）。
+- Rust stable **每次小版本发布**都会击中（`1.99.0 → 1.99.1`，发布于 2026-10-13）：
+
+  | 轮次 | rustc | 结果 |
+  | --- | --- | --- |
+  | v0.6.5（10-13） | 1.99.0（`c7b3ef7d`） | cache hit（2.9GB，~100s 恢复） |
+  | v0.6.6（10-17） | **1.99.1（`01b81e85`）** | **No cache found → 全量冷编译** |
+
+- **冷编译画像**（Linux runner）：clippy 222–271s → `Build tests (core)`
+  **1226–1621s** → `Build tests (server + mcp)` **1080–1212s** → 3-pkg 集 ~125s →
+  catalog ~388s。**runner 间性能波动可达 ±25%**。
+- **纪律**：① **timeout 以冷编译为基准**——0.6.6 实发：同批两台 runner 一台
+  1080s 压线过、一台 1212s 被 20 分钟上限杀掉（`server + mcp` 已改 45 分钟）；
+  ② 修复路径 = **先让一轮 success 落缓存**（失败轮不保存），此后 rerun / 后续
+  run 即恢复 2–4 分钟常速；③ 取证信号：`Run Swatinem/rust-cache` 步骤耗时
+  （命中 ~100s / miss ~5s）+ 日志 `Cache hit for:` / `No cache found.`。
+
 ---
 
 ## 7. 其它已知点与取证要点
@@ -274,3 +297,4 @@ python -c "import yaml; d=yaml.safe_load(open('.github/workflows/quality.yml',en
 | 修复验证（全绿，单测 0:52） | Quality run `37868892911`（tag 仍指 `4e8d415`） |
 | protoc 改 apt + 重试 | `e13d65c`（验证 run `37870943324`） |
 | **env 锁收敛（并发干扰源修复）** | **`51ae9b3`** ／ 验证 run **`37876186817`**（哨兵步 0:20 全过） |
+| **rustc 缓存失效案例（v0.6.6，冷编译超时）** | tag `5fe1862`；Quality run `39017424668`（→ rerun 命中新缓存）／ Release run `39017424632`；修复：`quality.yml` `server + mcp` timeout 20→45 |
