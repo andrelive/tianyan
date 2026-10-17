@@ -28,12 +28,20 @@ pub struct WebConfig {
     /// 是否启用 web_search / web_fetch 工具。
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// 搜索后端：`360`（默认，国内可达）/ `duckduckgo` / `bing` / `searxng`（自定义端点）。
+    /// 搜索后端：`360`（默认，国内可达）/ `duckduckgo` / `searxng`（自定义
+    /// 端点）/ `deepseek`（官方搜索接口 `/v1/tools/search`，需 API Key，按次计费）。
     #[serde(default = "default_backend")]
     pub search_backend: String,
     /// SearXNG 端点（`search_backend = "searxng"` 时必填），如 `https://searx.be`。
     #[serde(default)]
     pub searxng_endpoint: Option<String>,
+    /// DeepSeek API Key（`search_backend = "deepseek"` 时必填；官方搜索接口
+    /// 按请求次数计费——仅返回非空结果时计费）。
+    #[serde(default)]
+    pub deepseek_api_key: Option<String>,
+    /// DeepSeek 端点覆盖（可选；默认官方 `https://api.deepseek.com`，可指向兼容网关）。
+    #[serde(default)]
+    pub deepseek_endpoint: Option<String>,
     /// HTTP 请求超时（秒）。
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
@@ -56,6 +64,8 @@ impl Default for WebConfig {
             enabled: true,
             search_backend: default_backend(),
             searxng_endpoint: None,
+            deepseek_api_key: None,
+            deepseek_endpoint: None,
             timeout_secs: default_timeout(),
             cache_ttl_secs: default_cache_ttl(),
             max_fetch_bytes: default_max_fetch_bytes(),
@@ -72,6 +82,8 @@ mod tests {
         let cfg = WebConfig::default();
         assert!(cfg.enabled);
         assert_eq!(cfg.search_backend, "360");
+        assert!(cfg.deepseek_api_key.is_none());
+        assert!(cfg.deepseek_endpoint.is_none());
         assert_eq!(cfg.timeout_secs, 15);
         assert_eq!(cfg.cache_ttl_secs, 600);
         assert_eq!(cfg.max_fetch_bytes, 2 * 1024 * 1024);

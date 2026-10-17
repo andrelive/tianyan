@@ -213,10 +213,15 @@ cache_ttl = 300
 # web_search / web_fetch 工具（Agent 的网页感知能力）
 [web]
 enabled = true
-# 搜索后端：360（默认，国内可达）/ duckduckgo / bing / searxng（自托管/公共实例）
+# 搜索后端：360（默认，国内可达）/ duckduckgo / searxng（自托管/公共实例）
+#           / deepseek（官方搜索接口 /v1/tools/search，按次计费）
 search_backend = "360"
 # search_backend = "searxng" 时必填，如 "https://searx.be"
 # searxng_endpoint = "https://searx.be"
+# search_backend = "deepseek" 时必填（DeepSeek 开放平台 API Key）
+# deepseek_api_key = "sk-..."
+# 可选：DeepSeek 端点覆盖（默认官方 https://api.deepseek.com；可指向兼容网关）
+# deepseek_endpoint = "https://api.deepseek.com"
 # HTTP 超时（秒）
 timeout_secs = 15
 # 搜索/抓取结果缓存 TTL（秒）

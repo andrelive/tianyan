@@ -3,7 +3,8 @@
 //! 业界定位（对标 Claude Code WebSearch/WebFetch、Codex web_search、
 //! fetch-mcp）：
 //! - `web_search` 返回结构化结果（标题/URL/摘要），不进全文——省 token；
-//!   搜索后端默认走 360（so.com，国内可达），可切换 DuckDuckGo HTML / Bing RSS / SearXNG 自托管端点。
+//!   搜索后端默认走 360（so.com，国内可达），可切换 DuckDuckGo HTML / SearXNG
+//!   自托管端点 / DeepSeek 官方搜索（`/v1/tools/search`，需 API Key）。
 //! - `web_fetch` 抓取单 URL 并提取可读正文（标题 + 主文本 + 链接列表），
 //!   替代 http_request 的裸 HTML 输出。
 //! - 安全：仅 http/https；SSRF 防护（拒绝本地/内网地址，与 http_request
@@ -41,19 +42,25 @@ enum SearchBackend {
     DuckDuckGo,
     /// SearXNG 自托管/公共实例（JSON API）。
     Searxng(String),
-    /// Bing RSS 端点（`cn.bing.com` 国内可达；`format=rss` 结构稳定）。
-    /// 注意：Bing 对疑似自动化流量会返回**降级结果**（拆词匹配、质量低）
-    /// 且无法通过客户端特征规避——仅作备选（默认已改为 So360）。
-    Bing,
     /// 360 搜索（`so.com`，国内可达；结果页 `data-mdurl` 直出真实 URL，无需解重定向）。
     So360,
+    /// DeepSeek 官方搜索接口（`/v1/tools/search`；自研引擎 + 结构化 JSON
+    ///（含成段 `summary` 摘要）；需 `deepseek_api_key`，按次计费）。
+    Deepseek {
+        /// API Key（Bearer 鉴权）。
+        api_key: String,
+        /// 搜索接口基地址（无尾部 `/`；默认官方，可指向兼容网关）。
+        endpoint: String,
+    },
 }
+
+/// DeepSeek 官方搜索接口基地址（`deepseek_endpoint` 未配置时的默认值）。
+const DEEPSEEK_SEARCH_BASE: &str = "https://api.deepseek.com";
 
 impl SearchBackend {
     fn from_config(config: &WebConfig) -> Result<Self> {
         match config.search_backend.as_str() {
             "duckduckgo" => Ok(Self::DuckDuckGo),
-            "bing" => Ok(Self::Bing),
             "360" => Ok(Self::So360),
             "searxng" => {
                 let endpoint = config.searxng_endpoint.clone().ok_or_else(|| {
@@ -61,8 +68,32 @@ impl SearchBackend {
                 })?;
                 Ok(Self::Searxng(endpoint.trim_end_matches('/').to_string()))
             }
+            "deepseek" => {
+                let api_key = config
+                    .deepseek_api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        TianyanError::config(
+                            "search_backend = \"deepseek\" 需要配置 deepseek_api_key",
+                        )
+                    })?;
+                let endpoint = config
+                    .deepseek_endpoint
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|e| !e.is_empty())
+                    .map(|e| e.trim_end_matches('/').to_string())
+                    .unwrap_or_else(|| DEEPSEEK_SEARCH_BASE.to_string());
+                Ok(Self::Deepseek { api_key, endpoint })
+            }
+            "bing" => Err(TianyanError::config(
+                "search_backend = \"bing\" 已移除（Bing 对自动化流量返回降级结果）——请改用 360 / duckduckgo / searxng / deepseek",
+            )),
             other => Err(TianyanError::config(format!(
-                "未知的 search_backend: {other}（支持 360 / duckduckgo / bing / searxng）"
+                "未知的 search_backend: {other}（支持 360 / duckduckgo / searxng / deepseek）"
             ))),
         }
     }
@@ -162,10 +193,9 @@ impl WebSearchClient {
                 let results = parse_searxng_json(&body);
                 (url, results)
             }
-            SearchBackend::Bing => {
-                let url = bing_search_url(query);
-                let body = self.http_get(&url).await?;
-                let results = parse_bing_rss(&body);
+            SearchBackend::Deepseek { api_key, endpoint } => {
+                let url = format!("{endpoint}/v1/tools/search");
+                let results = self.deepseek_search(api_key, &url, query, limit).await?;
                 (url, results)
             }
             SearchBackend::So360 => {
@@ -185,6 +215,51 @@ impl WebSearchClient {
             .map_err(|e| TianyanError::Custom(format!("tool: 结果序列化失败: {e}")))?;
         self.cache_put(cache_key, json);
         Ok(results)
+    }
+
+    /// DeepSeek 官方搜索接口（POST JSON；Bearer 鉴权）。
+    ///
+    /// 契约见 <https://api-docs.deepseek.com/zh-cn/guides/search>：请求
+    /// `{query, count, need_content}`（count 1~50）；结果只需标题/URL/摘要，
+    /// `need_content = false`（不拉正文）。计费按请求次数（仅非空结果计费）；
+    /// 错误体为 OpenAI 兼容格式（`error.message`）。
+    async fn deepseek_search(
+        &self,
+        api_key: &str,
+        url: &str,
+        query: &str,
+        count: usize,
+    ) -> Result<Vec<SearchResult>> {
+        #[derive(serde::Serialize)]
+        struct RequestBody<'a> {
+            query: &'a str,
+            count: usize,
+            need_content: bool,
+        }
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(api_key)
+            .json(&RequestBody {
+                query,
+                count,
+                need_content: false,
+            })
+            .send()
+            .await
+            .map_err(|e| TianyanError::Custom(format!("tool: 网络请求失败: {e}")))?;
+        let status = response.status();
+        let body = self.read_limited(response).await?;
+        if !status.is_success() {
+            let message = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+                .unwrap_or_else(|| body.chars().take(200).collect());
+            return Err(TianyanError::Custom(format!(
+                "tool: DeepSeek 搜索失败 HTTP {status}：{message}"
+            )));
+        }
+        Ok(parse_deepseek_json(&body))
     }
 
     /// 抓取 URL 并提取可读文本（缓存命中直接返回）。
@@ -361,64 +436,53 @@ fn ddg_search_url(query: &str) -> String {
     format!("https://html.duckduckgo.com/html/?q={}", urlencode(query))
 }
 
-/// 构造 Bing RSS 搜索 URL（`cn.bing.com` 国内可达；RSS 输出结构稳定，
-/// 标题/链接/摘要语义明确，解析不易碎）。
-fn bing_search_url(query: &str) -> String {
-    format!(
-        "https://cn.bing.com/search?q={}&format=rss",
-        urlencode(query)
-    )
-}
-
 /// 构造 360 搜索 URL（so.com；国内可达；结果页 `data-mdurl` 直出真实 URL）。
 fn so360_search_url(query: &str) -> String {
     format!("https://www.so.com/s?q={}", urlencode(query))
 }
 
-/// 解析 Bing RSS 搜索结果（RSS 2.0：`channel > item`，item 含
-/// `title` / `link` / `description`）。
+/// 解析 DeepSeek 搜索接口响应（`{results:[{title,url,snippet,summary,...}]}`）。
 ///
-/// 手动字符串解析而非 scraper：Bing RSS 的 `<link>` 标签会被 HTML5
-/// 解析器当作 void 元素吞掉内容，字符串提取对固定结构的 RSS 更可靠。
-fn parse_bing_rss(xml: &str) -> Vec<SearchResult> {
-    let mut results: Vec<SearchResult> = Vec::new();
-    for item in xml.split("<item>").skip(1) {
-        let item = item.split("</item>").next().unwrap_or("");
-        let title = extract_rss_tag(item, "title");
-        let url = extract_rss_tag(item, "link");
-        let snippet = extract_rss_tag(item, "description");
-        if title.is_empty() || url.is_empty() {
-            continue;
-        }
-        results.push(SearchResult {
-            title,
-            url,
-            snippet,
-        });
+/// 摘要取 `summary`（成段摘要，信息更完整），为空回退 `snippet`；标题 /
+/// URL 为空的条目过滤（与其它后端一致）。
+fn parse_deepseek_json(body: &str) -> Vec<SearchResult> {
+    #[derive(serde::Deserialize)]
+    struct DeepseekResponse {
+        #[serde(default)]
+        results: Vec<DeepseekItem>,
     }
-    results
-}
+    #[derive(serde::Deserialize)]
+    struct DeepseekItem {
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        snippet: String,
+        #[serde(default)]
+        summary: String,
+    }
 
-/// 提取 RSS item 内指定标签的文本并解码 XML 实体。
-fn extract_rss_tag(xml: &str, tag: &str) -> String {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    xml.find(&open)
-        .and_then(|s| {
-            let rest = &xml[s + open.len()..];
-            rest.find(&close).map(|e| &rest[..e])
+    serde_json::from_str::<DeepseekResponse>(body)
+        .map(|resp| {
+            resp.results
+                .into_iter()
+                .filter(|r| !r.title.is_empty() && !r.url.is_empty())
+                .map(|r| {
+                    let snippet = if r.summary.trim().is_empty() {
+                        r.snippet
+                    } else {
+                        r.summary
+                    };
+                    SearchResult {
+                        title: r.title,
+                        url: r.url,
+                        snippet,
+                    }
+                })
+                .collect()
         })
-        .map(|s| decode_xml_entities(s.trim()))
         .unwrap_or_default()
-}
-
-/// 解码常见 XML 实体（&amp; &lt; &gt; &quot; &#39;）。
-fn decode_xml_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
 }
 
 /// 解析 360 搜索结果页（so.com）。
@@ -879,30 +943,44 @@ mod tests {
         assert_eq!(url, "https://html.duckduckgo.com/html/?q=rust+agent");
     }
 
-    // ── Bing RSS 解析 ────────────────────────────────────────────────
+    // ── DeepSeek 解析 ────────────────────────────────────────────────
 
     #[test]
-    fn test_bing_search_url() {
-        let url = bing_search_url("rust agent");
-        assert_eq!(url, "https://cn.bing.com/search?q=rust+agent&format=rss");
+    fn test_parse_deepseek_json() {
+        // 真实响应结构（docs 示例口径）：含 summary / snippet 双摘要字段
+        let body = r#"{
+          "results": [
+            {
+              "rerank_score": 2.4,
+              "title": "DeepSeek V4 模型发布",
+              "url": "https://example.com/deepseek-v4",
+              "snippet": "DeepSeek V4 已上线。",
+              "summary": "DeepSeek 发布了 V4 模型，改进了工具调用与长上下文能力。",
+              "site_name": "Example News",
+              "authority": 3
+            },
+            {
+              "title": "仅 snippet 条目",
+              "url": "https://example.com/b",
+              "snippet": "只有片段",
+              "summary": ""
+            },
+            { "title": "", "url": "https://example.com/c", "snippet": "空标题应被过滤" }
+          ]
+        }"#;
+        let results = parse_deepseek_json(body);
+        assert_eq!(results.len(), 2, "空标题条目应被过滤");
+        assert_eq!(results[0].title, "DeepSeek V4 模型发布");
+        assert!(
+            results[0].snippet.contains("发布了 V4"),
+            "应优先取成段 summary"
+        );
+        assert_eq!(results[1].snippet, "只有片段", "summary 为空回退 snippet");
     }
 
     #[test]
-    fn test_parse_bing_rss() {
-        // 真实 Bing RSS 响应结构（2026-08 抓取）
-        let xml = r#"<?xml version="1.0" encoding="utf-8" ?><rss version="2.0"><channel><title>必应：rust agent</title><item><title>Example &amp; Title</title><link>https://example.com/page?a=1&amp;b=2</link><description>snippet about example</description><pubDate>周四, 20 8月 2026 13:08:00 GMT</pubDate></item><item><title>Second</title><link>https://other.com/x</link><description></description></item><item><title></title><link>https://empty.com</link><description>x</description></item></channel></rss>"#;
-        let results = parse_bing_rss(xml);
-        assert_eq!(results.len(), 2, "空标题应被过滤");
-        assert_eq!(results[0].title, "Example & Title", "XML 实体应解码");
-        assert_eq!(results[0].url, "https://example.com/page?a=1&b=2");
-        assert_eq!(results[0].snippet, "snippet about example");
-        assert_eq!(results[1].title, "Second");
-        assert_eq!(results[1].url, "https://other.com/x");
-    }
-
-    #[test]
-    fn test_parse_bing_rss_garbage() {
-        assert!(parse_bing_rss("not xml at all").is_empty());
+    fn test_parse_deepseek_json_garbage() {
+        assert!(parse_deepseek_json("not json").is_empty());
     }
 
     // ── 360 解析 ─────────────────────────────────────────────────────
@@ -1144,6 +1222,29 @@ mod tests {
         assert_eq!(again[0].title, "Rust Book");
     }
 
+    /// DeepSeek 后端端到端（mock 端点）：POST JSON → 解析 → 缓存。
+    #[tokio::test]
+    async fn test_search_via_deepseek_backend() {
+        let endpoint = spawn_mock_searxng(
+            r#"{"results":[{"title":"DeepSeek 搜索","url":"https://example.com/a","snippet":"片段","summary":"官方摘要"}]}"#,
+        )
+        .await;
+        let mut config = test_config();
+        config.search_backend = "deepseek".to_string();
+        config.deepseek_api_key = Some("test-key".to_string());
+        config.deepseek_endpoint = Some(endpoint);
+
+        let client = WebSearchClient::new(&config).unwrap();
+        let results = client.search("deepseek", 5).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "DeepSeek 搜索");
+        assert_eq!(results[0].snippet, "官方摘要");
+
+        // 缓存命中：第二次搜索走缓存
+        let again = client.search("deepseek", 5).await.unwrap();
+        assert_eq!(again[0].title, "DeepSeek 搜索");
+    }
+
     #[tokio::test]
     async fn test_fetch_via_mock_server() {
         let html = r#"<html><head><title>Mock Page</title></head><body><article><p>Hello from mock server.</p></article></body></html>"#;
@@ -1172,6 +1273,23 @@ mod tests {
         config.search_backend = "google".to_string();
         let err = WebSearchClient::new(&config).unwrap_err();
         assert!(err.to_string().contains("未知的 search_backend"));
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_backend_requires_key() {
+        let mut config = test_config();
+        config.search_backend = "deepseek".to_string();
+        let err = WebSearchClient::new(&config).unwrap_err();
+        assert!(err.to_string().contains("deepseek_api_key"), "{err}");
+    }
+
+    /// Bing 后端已移除（对自动化流量返回降级结果）：配置残留时给出明确迁移提示。
+    #[tokio::test]
+    async fn test_bing_backend_removed() {
+        let mut config = test_config();
+        config.search_backend = "bing".to_string();
+        let err = WebSearchClient::new(&config).unwrap_err();
+        assert!(err.to_string().contains("已移除"), "{err}");
     }
 
     // ── T0-3：重定向目标的 SSRF 校验 ────────────────────────────────

@@ -71,6 +71,8 @@ export function emptyConfigState(): ConfigState {
     web_enabled: true,
     search_backend: '360',
     searxng_endpoint: '',
+    deepseek_api_key: '',
+    deepseek_endpoint: '',
     web_timeout_secs: 15,
     web_cache_ttl_secs: 600,
     web_max_fetch_bytes: 2 * 1024 * 1024,
@@ -263,6 +265,8 @@ interface BackendWebConfig {
   enabled: boolean;
   search_backend: string;
   searxng_endpoint: string | null;
+  deepseek_api_key: string | null;
+  deepseek_endpoint: string | null;
   timeout_secs: number;
   cache_ttl_secs: number;
   max_fetch_bytes: number;
@@ -417,6 +421,8 @@ export function toBackendConfig(cs: ConfigState): BackendUpdateRequest {
         enabled: cs.web_enabled,
         search_backend: cs.search_backend,
         searxng_endpoint: cs.searxng_endpoint || null,
+        deepseek_api_key: cs.deepseek_api_key || null,
+        deepseek_endpoint: cs.deepseek_endpoint || null,
         timeout_secs: cs.web_timeout_secs,
         cache_ttl_secs: cs.web_cache_ttl_secs,
         max_fetch_bytes: cs.web_max_fetch_bytes,
@@ -543,6 +549,8 @@ export function fromBackendConfig(response: BackendConfigResponse): ConfigState 
     web_enabled: c.web?.enabled ?? defaults.web_enabled,
     search_backend: c.web?.search_backend ?? defaults.search_backend,
     searxng_endpoint: c.web?.searxng_endpoint ?? defaults.searxng_endpoint,
+    deepseek_api_key: c.web?.deepseek_api_key ?? defaults.deepseek_api_key,
+    deepseek_endpoint: c.web?.deepseek_endpoint ?? defaults.deepseek_endpoint,
     web_timeout_secs: c.web?.timeout_secs ?? defaults.web_timeout_secs,
     web_cache_ttl_secs: c.web?.cache_ttl_secs ?? defaults.web_cache_ttl_secs,
     web_max_fetch_bytes: c.web?.max_fetch_bytes ?? defaults.web_max_fetch_bytes,

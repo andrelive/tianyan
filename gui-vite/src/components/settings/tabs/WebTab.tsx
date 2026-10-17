@@ -10,19 +10,20 @@ interface WebTabProps {
 const BACKENDS = [
   { value: '360', label: '360 搜索（默认，国内可达）' },
   { value: 'duckduckgo', label: 'DuckDuckGo（零配置）' },
-  { value: 'bing', label: 'Bing（可能返回降级结果）' },
   { value: 'searxng', label: 'SearXNG（自托管端点）' },
+  { value: 'deepseek', label: 'DeepSeek 官方搜索（需 API Key）' },
 ];
 
 export default function WebTab({ config, onUpdateField }: WebTabProps) {
   const isSearxng = config.search_backend === 'searxng';
+  const isDeepseek = config.search_backend === 'deepseek';
   return (
     <div>
       <SectionTitle title="Web 搜索" />
       <div className="space-y-4">
         <p className="text-xs text-[var(--color-text-tertiary)]">
           web_search / web_fetch 工具的网络配置。默认 360 搜索（国内可达）； 也可切换 DuckDuckGo /
-          Bing / SearXNG（自托管）。
+          SearXNG（自托管）或 DeepSeek 官方搜索（按次计费，需 API Key）。
         </p>
 
         <FieldRow label="启用 Web 工具" description="关闭后 web_search / web_fetch 不可用">
@@ -60,6 +61,31 @@ export default function WebTab({ config, onUpdateField }: WebTabProps) {
               ariaLabel="SearXNG 端点"
             />
           </FieldRow>
+        )}
+
+        {isDeepseek && (
+          <>
+            <FieldRow
+              label="DeepSeek API Key"
+              description="必填（DeepSeek 开放平台；搜索按次计费，仅非空结果计费）"
+            >
+              <TextInput
+                value={config.deepseek_api_key}
+                onChange={(v) => onUpdateField('deepseek_api_key', v)}
+                placeholder="sk-..."
+                ariaLabel="DeepSeek API Key"
+                type="password"
+              />
+            </FieldRow>
+            <FieldRow label="DeepSeek 端点（可选）" description="默认官方 https://api.deepseek.com">
+              <TextInput
+                value={config.deepseek_endpoint}
+                onChange={(v) => onUpdateField('deepseek_endpoint', v)}
+                placeholder="https://api.deepseek.com"
+                ariaLabel="DeepSeek 端点"
+              />
+            </FieldRow>
+          </>
         )}
 
         <div className="grid grid-cols-2 gap-4 pt-2">

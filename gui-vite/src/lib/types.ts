@@ -819,10 +819,14 @@ export interface ConfigState {
 
   // -- Web config (web.*；web_search / web_fetch 工具) --
   web_enabled: boolean;
-  /** 搜索后端：360（默认，国内可达）/ duckduckgo / bing / searxng（自定义端点）。 */
+  /** 搜索后端：360（默认，国内可达）/ duckduckgo / searxng / deepseek（官方，需 Key）。 */
   search_backend: string;
   /** SearXNG 端点（search_backend = searxng 时必填）。 */
   searxng_endpoint: string;
+  /** DeepSeek API Key（search_backend = deepseek 时必填）。 */
+  deepseek_api_key: string;
+  /** DeepSeek 端点覆盖（可选；默认官方 https://api.deepseek.com）。 */
+  deepseek_endpoint: string;
   /** HTTP 请求超时（秒）。 */
   web_timeout_secs: number;
   /** 搜索/抓取结果缓存 TTL（秒）。 */

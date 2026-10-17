@@ -169,7 +169,7 @@ Core 是天演的核心库，提供 AI Agent 的全部基础能力。4 crate wor
 - `executor/repo_map.rs` — 仓库结构地图（`scan` 跨文件符号采集 + `render` 引用度排序/`focus` 加权/预算截断 + `RepoMapCache` 内存 LRU 指纹缓存；引用度为文本级近似，注释与字符串不计入；遍历规则与 grep 同口径，`MAX_FILES = 2000` / `MAX_FILE_BYTES = 512KB`）
 - `executor/project.rs` — 项目探测（`probe_project` walk-up 标记检测：Cargo.toml > pyproject.toml > tsconfig.json；`ProjectFormat` / `verification_command`）
 - `executor/test_discovery.rs` — 测试发现与结果解析（`discover_tests` 解析 cargo/pytest/vitest 列表，上限 500；`parse_test_output` 失败 ≤20 + 回溯头 30/尾 20 行、按文件分组；`resolve_test_command` / `run_tests_action`）
-- `executor/web.rs` — Web 工具执行器（`WebSearchClient`：web_search 结构化结果 + web_fetch 可读正文提取；360（默认，国内可达）/ DuckDuckGo HTML / Bing RSS / SearXNG JSON 多后端；SSRF 防护 `validate_public_url`（与 http_request 同策略）+ 响应大小上限 + TTL 缓存）
+- `executor/web.rs` — Web 工具执行器（`WebSearchClient`：web_search 结构化结果 + web_fetch 可读正文提取；360（默认，国内可达）/ DuckDuckGo HTML / SearXNG JSON / DeepSeek 官方搜索（`/v1/tools/search`，需 Key）多后端；SSRF 防护 `validate_public_url`（与 http_request 同策略）+ 响应大小上限 + TTL 缓存）
 
 **核心类型**：
 
