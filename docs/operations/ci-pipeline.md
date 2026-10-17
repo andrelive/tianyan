@@ -1,6 +1,6 @@
 # CI 流水线排障手册（ci-pipeline）
 
-> 适用版本：0.6.3（撰写基线 HEAD `87aa123`）
+> 适用版本：0.6.7（撰写基线 0.6.3 HEAD `87aa123`；0.6.6 周期增补 §6 rustc 小版本更新案例）
 > 覆盖：GitHub Actions 上 `quality.yml` / `release.yml` 的**挂死、日志丢失、假失败**类问题。
 > 结论全部来自 0.6.3 发布周期的真机实测（附 run id / commit 便于复核）。
 > 相关文档：[`troubleshooting.md`](troubleshooting.md)（应用运行时）· [`release-msi.md`](release-msi.md)（打包发布）

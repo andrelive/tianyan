@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.7] - 2026-10-17
+
+### Added
+- **web_search 接入 DeepSeek 官方搜索接口**：新增 `search_backend = "deepseek"`——官方 `POST /v1/tools/search`（Bearer 鉴权；`count` 1~50；摘要优先取成段 `summary`、回退 `snippet`；错误体解析 OpenAI 兼容 `error.message`，含 HTTP 状态）；新配置 `[web] deepseek_api_key`（选择该后端时必填）与 `deepseek_endpoint`（可选，可指向兼容网关）；设置页 WebTab 与向导 WebStep 同步、config-transform 双向映射补齐防保存丢字段；**移除 Bing 后端**（旧配置给明确迁移提示，不静默失效）
+- **记忆面板三源聚合**：`GET /api/v1/memory` 从只遍历 `memory/` 改为聚合三源——`memory/`（事实/决策/案例）+ `user/`（偏好/实体）+ `agent/patterns`（模式）。用户画像（偏好/实体）与学习模式此前写入正常但**在界面上不可见**（ADR-034 遗留议题）；分类树自动适配，系统子路径统一过滤（判定源 `system_paths::is_system_path`）
+
+### Fixed
+- **演化记忆 id 归一化与消歧（畸形路径防复发 + 存量修复）**：LLM 把路径式引用当 id 回传时（如 `memory/facts/evo-x`、`tianyan://user/preferences/evo-x`），此前原样拼接产生 `memory/facts/memory/facts/evo-x` 一类畸形条目——「更新」静默退化为「另写一份副本」。add/merge/delete/skill 全部写路径以 `normalize_entry_id` 归一化收口；新记忆 id 以运行内序号消歧（`evo-{ts}-{seq}`，同一次运行多条不再共享时间戳）。存量 24 条修复：精确可达性审计（BFS 模拟 `list_directory` 语义）发现它们**全部是遍历不可达的孤儿**（中间目录缺失 → 遍历链断裂——记忆面板与演化删除通道都够不着，只能按 uri 精确寻址）；一次性工具 `core/examples/memory_path_repair.rs` 完成修复（覆盖 17 / 去重 6 / 迁移 1，修复后不可达归零、活跃条目 855 → 832）
+- **user 空间归档条目退出检索/索引/摘要**：`system_paths` 判定补 `user/archive/`——此前 user 归档仍参与语义检索与摘要扫描（「已退役内容不得复活」缺口，归档会被搜索命中）
+- **CI 冷编译加固**：quality 的 `server + mcp` 预编译 timeout 20 → 45 分钟（与 core 对齐）——Rust 1.99.1 更新致 rust-cache 全量失效（key 含 rustc 哈希段、restore 无法降级匹配），全量冷编译实测 1080–1212s 打穿原上限（同批 runner 快慢差 ±25%）；排障手册 `ci-pipeline.md` §6 增补 rust-cache key 结构 / 冷编译画像 / 两条纪律
+
 ## [0.6.6] - 2026-10-17
 
 ### Added
