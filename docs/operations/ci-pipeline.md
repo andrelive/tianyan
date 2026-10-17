@@ -234,7 +234,7 @@ python -c "import yaml; d=yaml.safe_load(open('.github/workflows/quality.yml',en
   v0-rust-quality-Linux-x64-{rustc_hash}`，`Cache Key: …-{rustc_hash}-{env_hash}`；
   **restore 只按 Restore Key 前缀匹配** —— rustc 哈希段一变，旧缓存全部不可见
   （连部分恢复都没有，日志直接 `No cache found.`）。
-- Rust stable **每次小版本发布**都会击中（`1.99.0 → 1.99.1`，发布于 2026-10-13）：
+- Rust stable **每次小版本发布**都会击中（`1.99.0 → 1.99.1`，2026-10-15 发布、10-13 构建）：
 
   | 轮次 | rustc | 结果 |
   | --- | --- | --- |
