@@ -246,6 +246,9 @@ pub struct Session {
     /// 消息数（轻量列表时预填；None = 未加载消息，按需经 get_session 获取）。
     #[serde(default)]
     pub message_count: Option<usize>,
+    /// 会话首条请求的输入 token（轻量列表时预填；≈ 系统前缀基线，压缩后占用估算用）。
+    #[serde(default)]
+    pub first_request_tokens: Option<u64>,
 }
 
 impl Session {
@@ -261,6 +264,7 @@ impl Session {
             title: None,
             header: SessionHeader::default(),
             message_count: None,
+            first_request_tokens: None,
         }
     }
 
@@ -503,4 +507,7 @@ pub struct SessionMeta {
     pub last_message_at: Option<i64>,
     /// 消息数（走 (session_id, seq) 索引计数，O(1)）。
     pub message_count: usize,
+    /// 会话首条请求的输入 token（`tokens.input`；≈ 系统前缀基线——前端「压缩后
+    /// 上下文」估算的取数点，与分页加载窗口无关）。None = 无带用量消息。
+    pub first_request_tokens: Option<u64>,
 }

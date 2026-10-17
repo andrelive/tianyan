@@ -27,6 +27,9 @@ pub struct Session {
     /// 消息数量
     pub message_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// 会话首条请求的输入 token（≈ 系统前缀基线；前端「压缩后上下文」估算的取数点）
+    pub first_request_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     /// 会话绑定的工作目录（工作区归属；None = 使用全局配置兜底）
     pub working_directory: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,6 +53,7 @@ impl Session {
                 .unwrap_or(s.created_at)
                 .to_rfc3339(),
             message_count: s.message_count.unwrap_or(s.messages.len()) as u32,
+            first_request_tokens: s.first_request_tokens,
             working_directory: s.header.working_directory.clone(),
             metadata: Some(SessionMetadata {
                 model: None,
@@ -245,11 +249,14 @@ mod tests {
             created_at: "2026-02-20T10:00:00Z".to_string(),
             updated_at: "2026-02-20T10:30:00Z".to_string(),
             message_count: 5,
+            first_request_tokens: Some(15091),
             working_directory: None,
             metadata: None,
         };
         let json = serde_json::to_string(&session).unwrap();
         assert!(json.contains("test-123"));
         assert!(json.contains("测试会话"));
+        // 首条请求基线随列表下发（前端「压缩后占用」估算的取数点）
+        assert!(json.contains("\"first_request_tokens\":15091"));
     }
 }

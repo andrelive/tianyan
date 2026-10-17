@@ -206,6 +206,8 @@ export interface Session {
   created_at: string;
   updated_at: string;
   message_count: number;
+  /** 会话首条请求的输入 token（≈ 系统前缀基线；压缩后上下文估算用） */
+  first_request_tokens?: number;
   /** 会话绑定的工作目录（工作区归属；None = 全局配置兜底） */
   working_directory?: string | null;
 }

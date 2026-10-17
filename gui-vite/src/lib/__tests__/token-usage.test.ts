@@ -92,4 +92,33 @@ describe('lastMessageUsage', () => {
     const r = lastMessageUsage(messages, 64000);
     expect(r?.prompt_tokens).toBe(2500);
   });
+
+  it('uses session baseline as system prefix for compression marker (window-independent)', () => {
+    const messages = [
+      // 窗口内第一条 assistant：会话中段消息（输入 357086）——不是系统前缀
+      msg({ usage: { prompt_tokens: 357086, completion_tokens: 100, total_tokens: 357186 } }),
+      msg({
+        role: 'user',
+        compression_marker: true,
+        usage: { prompt_tokens: 243221, completion_tokens: 5434, total_tokens: 248655 },
+      }),
+    ];
+    // 后端下发的会话基线（15091）优先：压缩后占用 ≈ 15091 + 5434，而非 357086 + 5434
+    const r = lastMessageUsage(messages, 1_000_000, 15091);
+    expect(r?.prompt_tokens).toBe(15091 + 5434);
+  });
+
+  it('falls back to window first assistant when baseline is absent or zero', () => {
+    const messages = [
+      msg({ usage: { prompt_tokens: 1000, completion_tokens: 200, total_tokens: 1200 } }),
+      msg({
+        role: 'user',
+        compression_marker: true,
+        usage: { prompt_tokens: 50000, completion_tokens: 800, total_tokens: 50800 },
+      }),
+    ];
+    expect(lastMessageUsage(messages, 64000)?.prompt_tokens).toBe(1800);
+    expect(lastMessageUsage(messages, 64000, null)?.prompt_tokens).toBe(1800);
+    expect(lastMessageUsage(messages, 64000, 0)?.prompt_tokens).toBe(1800);
+  });
 });

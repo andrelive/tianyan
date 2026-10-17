@@ -126,6 +126,11 @@ export default function ChatPanel() {
     (s) => s.stoppingBySession[currentSessionId ?? PENDING_SESSION_KEY] ?? false,
   );
 
+  /** 当前会话的系统前缀基线（后端列表下发 `first_request_tokens`；压缩后占用估算的取数点） */
+  const sessionBaselineTokens = useAppStore(
+    (s) => s.sessions.find((x) => x.id === s.currentSessionId)?.first_request_tokens,
+  );
+
   /** 当前会话自己的上下文占用（lib/token-usage 纯函数；切换会话随 messages 变化） */
   const lastUsage = useMemo(
     () =>
@@ -134,8 +139,9 @@ export default function ChatPanel() {
         chatModels.find(
           (m) => m.provider === selectedModel?.provider && m.name === selectedModel?.model,
         )?.context_length ?? liveWindowRef.current,
+        sessionBaselineTokens,
       ),
-    [messages, chatModels, selectedModel],
+    [messages, chatModels, selectedModel, sessionBaselineTokens],
   );
 
   /** 当前会话 token 消耗汇总（后端 usage_logs 全量聚合；打开/新消息后刷新） */

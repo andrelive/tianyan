@@ -387,9 +387,23 @@ impl SessionStore {
     /// * SQLite 查询失败时返回 TianyanError。
     pub async fn list_meta(&self) -> Result<Vec<SessionMeta>, TianyanError> {
         let conn = self.db.lock().await;
+        // 第 6 列：会话首条请求的输入 token（`first_request_tokens`）——取 seq 最小的
+        // 「带用量 assistant 消息」的 `tokens.input`（与 DTO 的 prompt_tokens 同口径）；
+        // `json_valid` 守卫损坏行（json_extract 对畸形 JSON 会报错，不能炸掉整个列表）；
+        // 无带用量消息 → NULL。走 (session_id, seq) 索引前缀早退，代价 O(首条 assistant)。
         let mut stmt = conn
             .prepare(
-                "SELECT sm.session_id, sm.header_json, sm.created_at,                    (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = sm.session_id),                    (SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id)                    FROM session_meta sm WHERE sm.parent_session_id IS NULL                    AND sm.session_id NOT LIKE 'evolution-%'                    ORDER BY COALESCE((SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id), sm.created_at) DESC",
+                "SELECT sm.session_id, sm.header_json, sm.created_at, \
+                 (SELECT COUNT(*) FROM session_messages m WHERE m.session_id = sm.session_id), \
+                 (SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id), \
+                 (SELECT CASE WHEN json_valid(m.content_parts) THEN json_extract(m.content_parts, '$.tokens.input') END \
+                    FROM session_messages m \
+                   WHERE m.session_id = sm.session_id AND m.role = 'assistant' \
+                     AND (CASE WHEN json_valid(m.content_parts) THEN json_extract(m.content_parts, '$.tokens.input') END) > 0 \
+                   ORDER BY m.seq ASC LIMIT 1) \
+                 FROM session_meta sm WHERE sm.parent_session_id IS NULL \
+                 AND sm.session_id NOT LIKE 'evolution-%' \
+                 ORDER BY COALESCE((SELECT MAX(m.ts) FROM session_messages m WHERE m.session_id = sm.session_id), sm.created_at) DESC",
             )
             .map_err(|e| sqlite_error("会话列表查询准备失败", e))?;
         let rows = stmt
@@ -402,19 +416,28 @@ impl SessionStore {
                     r.get::<_, Option<i64>>(2)?.unwrap_or(0),
                     r.get::<_, i64>(3)?,
                     r.get::<_, Option<i64>>(4)?,
+                    // first_request_tokens：NULL = 无带用量消息（旧数据 / 空会话）
+                    r.get::<_, Option<i64>>(5)?,
                 ))
             })
             .map_err(|e| sqlite_error("会话列表查询执行失败", e))?;
         let mut out = Vec::new();
         for row in rows {
-            let (session_id, header_json, created_at, message_count, last_message_at) =
-                row.map_err(|e| sqlite_error("会话列表行读取失败", e))?;
+            let (
+                session_id,
+                header_json,
+                created_at,
+                message_count,
+                last_message_at,
+                first_request_tokens,
+            ) = row.map_err(|e| sqlite_error("会话列表行读取失败", e))?;
             out.push(SessionMeta {
                 session_id,
                 header: serde_json::from_str(&header_json).unwrap_or_default(),
                 created_at,
                 last_message_at,
                 message_count: message_count as usize,
+                first_request_tokens: first_request_tokens.map(|v| v.max(0) as u64),
             });
         }
         Ok(out)
@@ -917,6 +940,38 @@ mod tests {
         // 删除后回忆也查不到
         let recall = crate::session::search::SessionRecall::new(store.db.clone()).unwrap();
         assert!(recall.search("x", 10, None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_meta_first_request_tokens() {
+        // 首条请求基线 = seq 最小的「带用量 assistant」的 tokens.input（与加载窗口无关）
+        let store = make_store().await;
+        store.create("s1", &SessionHeader::default()).await.unwrap();
+        store
+            .append_message("s1", &msg("m0", MessageRole::User, "你好"))
+            .await
+            .unwrap();
+        let mut first = StructuredMessage::assistant("s1", "回复一");
+        first.tokens.input = 1234;
+        first.tokens.output = 56;
+        first.tokens.total = 1290;
+        store.append_message("s1", &first).await.unwrap();
+        let mut later = StructuredMessage::assistant("s1", "回复二");
+        later.tokens.input = 99999;
+        later.tokens.total = 99999;
+        store.append_message("s1", &later).await.unwrap();
+
+        // 无带用量消息的会话 → None
+        store.create("s2", &SessionHeader::default()).await.unwrap();
+        store
+            .append_message("s2", &msg("m1", MessageRole::User, "无用量会话"))
+            .await
+            .unwrap();
+
+        let metas = store.list_meta().await.unwrap();
+        let by_id = |id: &str| metas.iter().find(|m| m.session_id == id).unwrap();
+        assert_eq!(by_id("s1").first_request_tokens, Some(1234));
+        assert_eq!(by_id("s2").first_request_tokens, None);
     }
 
     #[tokio::test]

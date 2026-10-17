@@ -13,30 +13,43 @@ import type { ChatMessage, StreamUsage } from '@/lib/types';
 
 /**
  * 最近一轮完成的上下文占用：从末尾向前找第一条带 usage 的消息。
+ *
  * 压缩摘要消息（compression_marker）特殊处理——其 prompt_tokens 是压缩
- * 请求的输入（≈ 压缩前上下文），不能直接作占用；改用「第一条 assistant
- * 的 prompt_tokens（≈系统前缀）+ 摘要输出」估算压缩后上下文。
- * 无则 null（调用方决定展示与否）。
+ * 请求的输入（≈ 压缩前上下文），不能直接作占用；改用「系统前缀基线 +
+ * 摘要输出」估算压缩后上下文。
+ *
+ * 系统前缀基线优先取后端下发的 `sessionBaselineTokens`（= 会话首条请求
+ * 的 `tokens.input`，见会话列表 `first_request_tokens`；静态值、与分页
+ * 加载窗口无关）。缺失（旧接口 / 无带用量消息）时回退「窗口内第一条
+ * assistant 的 prompt_tokens」——该回退仅在窗口恰好包含会话开头时近似
+ * 成立，长会话的分页窗口会明显高估，故仅为兜底。
+ *
+ * 新请求完成后新 assistant 消息优先命中，摘要不再被取到。
  *
  * @param fallbackWindow 模型声明的上下文窗口（无真实窗口记录时兜底）
+ * @param sessionBaselineTokens 会话首条请求输入 token（系统前缀基线；可选）
  */
 export function lastMessageUsage(
   messages: ChatMessage[],
   fallbackWindow: number,
+  sessionBaselineTokens?: number | null,
 ): StreamUsage | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const u = messages[i].usage;
     if (u && u.prompt_tokens > 0) {
       // 压缩摘要消息：其 prompt_tokens 是压缩请求输入（≈ 压缩前上下文），
-      // 不能直接作占用——压缩后上下文 ≈ 系统前缀（第一条 assistant 输入）
-      // + 摘要输出（真实压缩请求 completion）。压缩后未产生新请求时，
-      // 这是唯一能立即反映压缩后占用的来源；新请求完成后新 assistant
-      // 消息优先命中，摘要不再被取到。
+      // 不能直接作占用——压缩后上下文 ≈ 系统前缀基线 + 摘要输出（真实
+      // 压缩请求 completion）。压缩后未产生新请求时，这是唯一能立即反映
+      // 压缩后占用的来源；新请求完成后新 assistant 消息优先命中，摘要
+      // 不再被取到。
       if (messages[i].compression_marker) {
         const firstAssistant = messages.find(
           (m) => m.role === 'assistant' && (m.usage?.prompt_tokens ?? 0) > 0,
         );
-        const systemPrefix = firstAssistant?.usage?.prompt_tokens ?? 0;
+        const systemPrefix =
+          sessionBaselineTokens && sessionBaselineTokens > 0
+            ? sessionBaselineTokens
+            : (firstAssistant?.usage?.prompt_tokens ?? 0);
         const completion = u.completion_tokens ?? 0;
         return {
           prompt_tokens: systemPrefix + completion,
