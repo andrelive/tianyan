@@ -101,6 +101,10 @@ pub enum StreamChunkType {
     /// 前端据此显示"正在重试"（避免数百秒静默被当作卡死）。
     /// 只作提示，**不进入消息正文**。
     Retry,
+    /// 请求性能（TTFT / 总耗时 / 输出 token）：每轮 LLM 调用结束时下发，
+    /// 底部统计条展示「最近一次请求」。独立类型——不复用 `Answer`，
+    /// 避免空 delta 污染正文流断言（前端按字段独立处理）。
+    RequestPerf,
 }
 
 /// 流式响应块。
@@ -143,6 +147,25 @@ pub struct AgentStreamChunk {
     /// 轮状态载荷（TurnState chunk 携带，ADR-035 §9）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_state: Option<TurnStateEvent>,
+    /// 首 token 时间（毫秒；RequestPerf chunk 携带——最近一次请求的 TTFT）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+    /// 请求总耗时（毫秒；RequestPerf chunk 携带）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// 该轮输出 token（RequestPerf chunk 携带；前端算生成速度用——与
+    /// `token_usage` 分离，避免触发用量归约副作用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perf_completion_tokens: Option<u64>,
+}
+
+/// 单轮模型调用的性能指标（不随消息落库；经 RequestPerf 事件与 usage_logs 双通道）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RequestPerf {
+    /// 首 token 时间（毫秒；None = 未收到任何内容 token，如纯工具调用轮）。
+    pub ttft_ms: Option<u64>,
+    /// 请求总耗时（毫秒；请求发出 → 流结束）。
+    pub duration_ms: u64,
 }
 
 /// 轮状态事件（ADR-035 §9）。
@@ -325,6 +348,25 @@ impl StreamEventSender {
         .await;
     }
 
+    /// 发送单轮请求性能事件（TTFT / 总耗时 / 输出 token）。
+    ///
+    /// 每轮 LLM 调用结束时下发一次（工具轮也发，前端只保留最近一次 → 底部
+    /// 统计条显示「最近一次请求」的 TTFT 与生成速度）。delta 为空、
+    /// `is_complete = false`，前端只消费性能字段（不产生正文/消息副作用）。
+    /// `token_usage` 有意留空：用量已由 [`send_turn_usage`] / [`send_complete`]
+    /// 归约，重复携带会让会话消耗汇总双计。
+    pub async fn send_request_perf(&self, perf: RequestPerf, completion_tokens: u64) {
+        self.try_send(AgentStreamChunk {
+            delta: String::new(),
+            chunk_type: StreamChunkType::RequestPerf,
+            ttft_ms: perf.ttft_ms,
+            duration_ms: Some(perf.duration_ms),
+            perf_completion_tokens: Some(completion_tokens),
+            ..Default::default()
+        })
+        .await;
+    }
+
     /// 发送消息边界事件（入库完成后的完整结构化消息）。
     ///
     /// 由持久化侧（run_agent_turn）在用户消息入库后立即发送，保证边界
@@ -467,6 +509,9 @@ mod tests {
             message: None,
             user_message_id: None,
             message_id: None,
+            ttft_ms: None,
+            duration_ms: None,
+            perf_completion_tokens: None,
         };
         assert_eq!(chunk.delta, "你好");
         assert!(!chunk.is_complete);
@@ -496,6 +541,9 @@ mod tests {
             message: None,
             user_message_id: None,
             message_id: None,
+            ttft_ms: None,
+            duration_ms: None,
+            perf_completion_tokens: None,
         };
         assert_eq!(chunk.delta, "调用技能");
         assert!(chunk.is_complete);
@@ -519,6 +567,9 @@ mod tests {
             message: None,
             user_message_id: None,
             message_id: None,
+            ttft_ms: None,
+            duration_ms: None,
+            perf_completion_tokens: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         let deserialized: AgentStreamChunk = serde_json::from_str(&json).unwrap();
@@ -545,6 +596,9 @@ mod tests {
             message: None,
             user_message_id: Some("umid-abc".to_string()),
             message_id: Some("msg_123".to_string()),
+            ttft_ms: None,
+            duration_ms: None,
+            perf_completion_tokens: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(
@@ -577,6 +631,9 @@ mod tests {
             message: None,
             user_message_id: None,
             message_id: None,
+            ttft_ms: None,
+            duration_ms: None,
+            perf_completion_tokens: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         // skill_calls 为 None 时不应出现在 JSON 中

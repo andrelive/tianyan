@@ -38,7 +38,7 @@ impl EmbeddingUsageSink for UsageLogEmbeddingSink {
         let usage = usage.clone();
         // 非阻塞：本方法在检索热路径上被调用，不得等待 SQLite I/O
         tokio::spawn(async move {
-            log.record("", &provider, &model, &usage).await;
+            log.record("", &provider, &model, &usage, None).await;
         });
     }
 }

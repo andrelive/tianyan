@@ -153,12 +153,14 @@ type TurnStep<'a> = Pin<Box<dyn Future<Output = Result<TurnResult, TianyanError>
 /// （`(model, prompt_tokens)`，供下一轮动态 max_tokens 校准）；
 /// 第五元素为取消收尾标记（true = 流式接收中检测到取消：tool_calls 已丢弃、
 /// 消息需落库后终止轮次——见 [`AgentLoop::finalize_streamed_turn`]）。
+/// 第六元素为请求性能（TTFT/总耗时；非流式路径为 None——无首 token 语义）。
 type TurnResult = (
     Message,
     Option<TokenUsage>,
     Option<String>,
     Option<(String, usize)>,
     bool,
+    Option<crate::agent::types::RequestPerf>,
 );
 
 /// 流式单轮 chunk 累积结果（`run_stream` 路径内部用）。
@@ -182,6 +184,8 @@ struct StreamAccum {
     updated_input: Option<(String, usize)>,
     /// 取消收尾标记（chunk 循环内检测到取消置位；累积保留、tool_calls 丢弃）。
     cancelled: bool,
+    /// 请求性能（TTFT / 总耗时；请求发出时起算）。
+    perf: crate::agent::types::RequestPerf,
 }
 
 /// Agent 迭代循环。
@@ -531,6 +535,7 @@ impl AgentLoop {
                         finish_reason,
                         updated_input,
                         false,
+                        None,
                     ))
                 })
             },
@@ -620,6 +625,10 @@ impl AgentLoop {
         session_id: &str,
         provider: Option<&str>,
     ) -> Result<StreamAccum, TianyanError> {
+        // 请求性能计时（TTFT / 总耗时）：从准备请求前起算——覆盖上下文组装
+        // 之外的纯请求等待；TTFT = 首个内容 token（正文或思考，后者是用户
+        // 感知的"开始有反应"）。纯工具调用轮无内容 token → TTFT 为 None。
+        let started = std::time::Instant::now();
         let request = self
             .prepare_request(
                 model,
@@ -650,6 +659,7 @@ impl AgentLoop {
             finish_reason: None,
             updated_input: None,
             cancelled: false,
+            perf: crate::agent::types::RequestPerf::default(),
         };
 
         loop {
@@ -685,11 +695,18 @@ impl AgentLoop {
                         // "思考未结束正文已插入"的乱序。
                         if let Some(ref reasoning) = choice.delta.reasoning_content {
                             if !reasoning.is_empty() {
+                                // 首 token（思考也算：用户感知的"开始有反应"）
+                                if accum.perf.ttft_ms.is_none() {
+                                    accum.perf.ttft_ms = Some(started.elapsed().as_millis() as u64);
+                                }
                                 accum.reasoning.push_str(reasoning);
                                 sender.send_thought(reasoning).await;
                             }
                         }
                         if let Some(ref content) = choice.delta.content {
+                            if !content.is_empty() && accum.perf.ttft_ms.is_none() {
+                                accum.perf.ttft_ms = Some(started.elapsed().as_millis() as u64);
+                            }
                             accum.content.push_str(content);
                             sender.send_answer_delta(content).await;
                         }
@@ -723,6 +740,20 @@ impl AgentLoop {
             }
         }
 
+        // 收尾性能指标：总耗时 = 请求发出 → 流结束（含工具调用参数串流）。
+        accum.perf.duration_ms = started.elapsed().as_millis() as u64;
+        // 每轮下发一次（工具轮也发；前端只保留最近一次 → 底部统计条显示
+        // 「最近一次请求」的 TTFT 与生成速度）。输出 token 取本轮 usage。
+        sender
+            .send_request_perf(
+                accum.perf,
+                accum
+                    .usage
+                    .as_ref()
+                    .map(|u| u.completion_tokens as u64)
+                    .unwrap_or(0),
+            )
+            .await;
         Ok(accum)
     }
 
@@ -750,6 +781,7 @@ impl AgentLoop {
             mut finish_reason,
             updated_input,
             cancelled,
+            perf,
         } = accum;
         // 取消收尾（对齐 DSH“中断先于分发”）：只保留能安全收尾的前缀——
         // 非空白的正文/推理（即用户已看到的内容）；tool_calls 无论完整与否
@@ -872,6 +904,7 @@ impl AgentLoop {
             finish_reason,
             updated_input,
             cancelled_turn,
+            Some(perf),
         ))
     }
 
@@ -962,16 +995,28 @@ impl AgentLoop {
                 }
             };
 
-            let (assistant_msg, turn_usage, finish_reason, updated_input, cancelled_turn) =
-                step_result;
+            let (
+                assistant_msg,
+                turn_usage,
+                finish_reason,
+                updated_input,
+                cancelled_turn,
+                turn_perf,
+            ) = step_result;
             // 更新实测输入（供下一轮动态 max_tokens 校准；None = 本轮无实测，保持旧值）
             if let Some(ui) = updated_input {
                 last_input_usage = Some(ui);
             }
 
             // LLM 用量日志：每轮一次（聊天/子代理/演化任务统一记录）。
-            self.record_usage_log(session_id, model, provider.as_deref(), &turn_usage)
-                .await;
+            self.record_usage_log(
+                session_id,
+                model,
+                provider.as_deref(),
+                &turn_usage,
+                turn_perf,
+            )
+            .await;
 
             let mut ctx = TurnContext {
                 session_id,
@@ -1112,7 +1157,7 @@ impl AgentLoop {
         // 让已收推理丢失落库路径（且第二次调用在取消标志下会立即再取消）。
         let empty = matches!(
             &step_result,
-            (m, _, _, _, false) if m.content.is_empty() && m.tool_calls.is_none()
+            (m, _, _, _, false, _) if m.content.is_empty() && m.tool_calls.is_none()
         );
         if empty {
             tracing::warn!(
@@ -1160,6 +1205,7 @@ impl AgentLoop {
         model: &str,
         provider: Option<&str>,
         turn_usage: &Option<TokenUsage>,
+        perf: Option<crate::agent::types::RequestPerf>,
     ) {
         if let Some(ref usage_log) = self.usage_log {
             if let Some(usage) = turn_usage {
@@ -1171,7 +1217,10 @@ impl AgentLoop {
                     .or_else(|| self.default_chat_provider.clone())
                     .or_else(|| self.provider_by_model.get(model).cloned())
                     .unwrap_or_else(|| model.split("/").next().unwrap_or("unknown").to_string());
-                usage_log.record(session_id, &provider, model, usage).await;
+                let perf = perf.map(|p| (p.ttft_ms.unwrap_or(0), p.duration_ms));
+                usage_log
+                    .record(session_id, &provider, model, usage, perf)
+                    .await;
             }
         }
     }

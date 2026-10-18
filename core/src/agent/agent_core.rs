@@ -792,7 +792,13 @@ impl Agent {
             cache_write: t.cache.write,
         };
         self.agent_loop
-            .record_usage_log(session_id, &self.default_model, None, &Some(compress_usage))
+            .record_usage_log(
+                session_id,
+                &self.default_model,
+                None,
+                &Some(compress_usage),
+                None,
+            )
             .await;
 
         // ADR-035 §2 段化：压缩后**收缩段**（段起点前移到新压缩点，丢弃其前

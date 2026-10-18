@@ -22,10 +22,12 @@ import type {
   RoleActionResponse,
   RoleDetail,
   RolesStatsResponse,
+  RequestPerf,
   SchedulerStatus,
   SearchSuggestionsResponse,
   Session,
   SessionTokenUsage,
+  UsageRecentSample,
   SkillDetail,
   SkillListResponse,
   SkillsStatsResponse,
@@ -268,6 +270,25 @@ export async function fetchSessionTokenUsage(sessionId: string): Promise<Session
     uncachedInput: t.uncached_input,
     cachedInput: t.cached_input,
     completion: t.completion_tokens,
+  };
+}
+
+/**
+ * 最近一次请求的性能指标（打开会话时回填底部统计条；实时值由
+ * RequestPerf 流式事件推送）。
+ *
+ * 无样本 / 落库为 -1（历史行、非流式路径）→ null（不展示）。
+ */
+export async function fetchSessionRequestPerf(sessionId: string): Promise<RequestPerf | null> {
+  const res = await apiGet<{ samples: UsageRecentSample[] }>(
+    `/usage/recent?limit=1&session_id=${encodeURIComponent(sessionId)}`,
+  );
+  const s = res.samples?.[0];
+  if (!s || s.duration_ms < 0) return null;
+  return {
+    ttftMs: s.ttft_ms >= 0 ? s.ttft_ms : null,
+    durationMs: s.duration_ms,
+    completionTokens: s.completion_tokens,
   };
 }
 

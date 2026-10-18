@@ -43,6 +43,50 @@ describe('handleChatStreamEvent', () => {
     expect(assistant[0].tool_calls?.[0]).toMatchObject({ id: 't1', name: 'read_file' });
   });
 
+  it('records the latest request perf (TTFT / duration / tokens) for the session', () => {
+    // 每轮 LLM 调用一次 request_perf 事件；后到覆盖先到（只保留最近一次）
+    handleChatStreamEvent(
+      ev({
+        chunk_type: 'request_perf',
+        ttft_ms: 900,
+        duration_ms: 2000,
+        perf_completion_tokens: 50,
+      }),
+    );
+    expect(useAppStore.getState().requestPerf['s1']).toEqual({
+      ttftMs: 900,
+      durationMs: 2000,
+      completionTokens: 50,
+    });
+
+    handleChatStreamEvent(
+      ev({
+        chunk_type: 'request_perf',
+        ttft_ms: 1200,
+        duration_ms: 3400,
+        perf_completion_tokens: 110,
+      }),
+    );
+    expect(useAppStore.getState().requestPerf['s1']).toEqual({
+      ttftMs: 1200,
+      durationMs: 3400,
+      completionTokens: 110,
+    });
+    // 不触碰消息窗口（性能事件无正文副作用）
+    expect(useAppStore.getState().sessionMessages['s1'] ?? []).toHaveLength(0);
+  });
+
+  it('treats a pure tool-call perf event as TTFT only (no output token)', () => {
+    handleChatStreamEvent(
+      ev({ chunk_type: 'request_perf', duration_ms: 1500, perf_completion_tokens: 0 }),
+    );
+    expect(useAppStore.getState().requestPerf['s1']).toEqual({
+      ttftMs: null,
+      durationMs: 1500,
+      completionTokens: 0,
+    });
+  });
+
   it('applies tool results to the matching tool call', () => {
     useAppStore.getState().addMessage({ role: 'assistant', segments: [], id: null, timestamp: '' });
     handleChatStreamEvent(

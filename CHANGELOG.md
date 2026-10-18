@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **底部统计条：最近一次请求的 TTFT 与生成速度**（DSH 风格性能指标）：`usage_logs` 新增 `ttft_ms` / `duration_ms` 两列（幂等 `ALTER TABLE`，单行 +5~6 B、不重建表；-1 = 未知），AgentLoop 每轮 LLM 调用在 provider 层计时——**TTFT = 请求发出 → 首个内容 token**（thinking 也算，即用户感知的"开始有反应"），**生成速度 = completion_tokens / (总耗时 − TTFT)**（纯生成阶段，不含首包等待，两个指标保持正交）。新增 `RequestPerf` 流式事件（独立 `chunk_type`，每轮一次、后到覆盖先到）+ `GET /api/v1/usage/recent?session_id=&limit=`（打开会话回填，刷新/重开仍可见）。**只展示最近一次**（不做平均/最近 N 次分布，避免单次抖动被平均值掩盖长尾）；纯工具调用轮无内容 token → 只显示 TTFT、不显示 tok/s
+
 ### Fixed
 - **定时任务 / 后台会话历史看不到、也不能上滚（0.6.7 回归治理）**：唤醒轮/后台轮按 `session_id` 向**未打开的会话**写入流式消息（设计使然），但不写分页元数据；`loadSessionHistory` 见「缓存非空」即判定历史已加载而跳过拉取，且无 meta 使上滚开关恒关——同时同路由会话切换（`/chat/{A}` → `/chat/{B}` 不重挂载）因一次性 ref 守卫不再订阅，快照兜底也失效；再叠加「消息不足一屏时 `scrollTop` 恒 0、原生 scroll 事件永不触发」的死锁，历史永久补不回来（实测现场：库中 176 条完好，界面只剩 1 条 system 通知）。修复：① 判据改为「缓存 **且** 分页元数据」才算已加载，缺失时拉一页并**合并**（`mergeSessionMessages`：按 seq 去重升序、服务端页权威、无 seq 的流式占位保留尾部，不丢正在输出内容）；② 按会话切换订阅，历史未加载时 `subscribeSession(force)` 绕过 resident 幂等强制重发快照；③ 上滚自愈：内容未撑满视口且 `has_more` 时主动补页（连续上限 3 次、按会话重置）；④ 快照帧的轮状态权威值落地（`applySnapshot` 应用 `turn`——ADR-045 此前只声明未消费，`turn_state` 事件丢失后输入框会永久禁用）
 - **定时任务会话 ID 双前缀**：`sched-task-{task_id}` 在 task_id 本身已带前缀时再套一次（`sched-task-sched-task-…`），会话列表/tab 标题与任务 id 无法对应。生成改为幂等；存量旧 ID 会话沿用（不迁移数据、不割裂历史），新任务用规范 ID

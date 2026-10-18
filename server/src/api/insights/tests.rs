@@ -391,11 +391,11 @@ async fn usage_stats_filters_by_session_id() {
     let (app, state) = create_app(config).await.unwrap();
 
     let log = state.usage_log();
-    log.record("s1", "deepseek", "v3", &TokenUsage::new(100, 10))
+    log.record("s1", "deepseek", "v3", &TokenUsage::new(100, 10), None)
         .await;
-    log.record("s1", "deepseek", "v3", &TokenUsage::new(50, 5))
+    log.record("s1", "deepseek", "v3", &TokenUsage::new(50, 5), None)
         .await;
-    log.record("s2", "ollama", "qwen", &TokenUsage::new(200, 20))
+    log.record("s2", "ollama", "qwen", &TokenUsage::new(200, 20), None)
         .await;
 
     let response = app

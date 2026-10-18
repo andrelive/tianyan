@@ -224,4 +224,28 @@ describe('ChatInput', () => {
     // 800 / (1200+800) = 40%
     expect(screen.getByText('40%')).toBeInTheDocument();
   });
+
+  it('renders the latest request perf (TTFT + tok/s) next to token summary', () => {
+    // TTFT 1.2s、总耗时 3.2s、输出 100 token → 生成阶段 2.0s → 50 tok/s
+    renderChatInput({
+      sessionUsage: { uncachedInput: 1200, cachedInput: 800, completion: 500 },
+      requestPerf: { ttftMs: 1200, durationMs: 3200, completionTokens: 100 },
+    });
+
+    expect(screen.getByText('TTFT')).toBeInTheDocument();
+    expect(screen.getByText('1.2s')).toBeInTheDocument();
+    expect(screen.getByText('50')).toBeInTheDocument();
+    expect(screen.getByText('tok/s')).toBeInTheDocument();
+  });
+
+  it('renders ms TTFT and hides tok/s when there is no output token', () => {
+    // 纯工具调用轮：有 TTFT（ms 级）+ 无输出 token → 不展示 tok/s
+    renderChatInput({
+      sessionUsage: null,
+      requestPerf: { ttftMs: 820, durationMs: 2400, completionTokens: 0 },
+    });
+
+    expect(screen.getByText('820ms')).toBeInTheDocument();
+    expect(screen.queryByText('tok/s')).not.toBeInTheDocument();
+  });
 });

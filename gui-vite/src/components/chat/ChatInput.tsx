@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Send, Square, ImagePlus, X } from 'lucide-react';
 import { cn, formatNumber } from '@/lib/utils';
-import type { StreamUsage } from '@/lib/types';
+import type { RequestPerf, StreamUsage } from '@/lib/types';
 import { useAppStore, PENDING_SESSION_KEY } from '@/lib/store';
 import ModelSelector from './ModelSelector';
 import ThinkingSelect from './ThinkingSelect';
@@ -16,6 +16,8 @@ interface Props {
   usage: StreamUsage | null;
   /** 当前会话 token 消耗汇总（跨全部消息累加；底部小字展示） */
   sessionUsage: { uncachedInput: number; cachedInput: number; completion: number } | null;
+  /** 最近一次请求的性能指标（TTFT + 生成速度；无样本时不展示） */
+  requestPerf?: RequestPerf | null;
   /** 压缩当前会话（圆环详情面板内的快捷操作） */
   onCompress: () => void;
   /** 压缩进行中（ContextRing 按钮禁用 + loading） */
@@ -53,12 +55,30 @@ function fileToDataUrl(file: File): Promise<string | null> {
   });
 }
 
+/** 毫秒 → 简短展示（不足 1 秒用 ms，否则一位小数的 s）。 */
+function formatMs(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+/**
+ * 生成速度（token/s）= 输出 token / 纯生成时长。
+ *
+ * 分母扣掉 TTFT：首包等待不属于生成阶段（否则慢首包会把速度也拖低，
+ * 两个指标失去正交性）。无输出 / 时长非正 → null（不展示）。
+ */
+function perfTokensPerSec(perf: RequestPerf): number | null {
+  const genMs = perf.durationMs - (perf.ttftMs ?? 0);
+  if (perf.completionTokens <= 0 || genMs <= 0) return null;
+  return Math.round(perf.completionTokens / (genMs / 1000));
+}
+
 export default function ChatInput({
   onSend,
   onStop,
   isStreaming,
   usage,
   sessionUsage,
+  requestPerf,
   onCompress,
   compressing = false,
   turnRunning = false,
@@ -340,31 +360,60 @@ export default function ChatInput({
 
       {/* 会话 token 统计小字（DSH 风格，水平居中）：
          未命中输入 / 缓存命中输入 / 输出 / 缓存命中率 */}
-      {sessionUsage && (
+      {(sessionUsage || requestPerf) && (
         <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-0.5 px-4 pb-2 text-[11px] leading-relaxed text-[var(--color-text-tertiary)] select-none">
-          <span>
-            未命中输入 <span className="font-mono">{formatNumber(sessionUsage.uncachedInput)}</span>
-          </span>
-          <span className="opacity-40">·</span>
-          <span>
-            缓存命中输入 <span className="font-mono">{formatNumber(sessionUsage.cachedInput)}</span>
-          </span>
-          <span className="opacity-40">·</span>
-          <span>
-            输出 <span className="font-mono">{formatNumber(sessionUsage.completion)}</span>
-          </span>
-          <span className="opacity-40">·</span>
-          <span>
-            缓存命中率
-            <span className="font-mono">
+          {sessionUsage && (
+            <>
+              <span>
+                未命中输入{' '}
+                <span className="font-mono">{formatNumber(sessionUsage.uncachedInput)}</span>
+              </span>
+              <span className="opacity-40">·</span>
+              <span>
+                缓存命中输入{' '}
+                <span className="font-mono">{formatNumber(sessionUsage.cachedInput)}</span>
+              </span>
+              <span className="opacity-40">·</span>
+              <span>
+                输出 <span className="font-mono">{formatNumber(sessionUsage.completion)}</span>
+              </span>
+              <span className="opacity-40">·</span>
+              <span>
+                缓存命中率
+                <span className="font-mono">
+                  {(() => {
+                    const total = sessionUsage.uncachedInput + sessionUsage.cachedInput;
+                    return total > 0
+                      ? Math.round((sessionUsage.cachedInput / total) * 100) + '%'
+                      : '0%';
+                  })()}
+                </span>
+              </span>
+            </>
+          )}
+          {requestPerf && (
+            <>
+              {sessionUsage && <span className="opacity-40">·</span>}
+              <span title="最近一次请求：首 token 时间 / 生成速度">
+                TTFT{' '}
+                <span className="font-mono">
+                  {requestPerf.ttftMs != null ? formatMs(requestPerf.ttftMs) : '—'}
+                </span>
+              </span>
               {(() => {
-                const total = sessionUsage.uncachedInput + sessionUsage.cachedInput;
-                return total > 0
-                  ? Math.round((sessionUsage.cachedInput / total) * 100) + '%'
-                  : '0%';
+                const tps = perfTokensPerSec(requestPerf);
+                if (tps == null) return null;
+                return (
+                  <>
+                    <span className="opacity-40">·</span>
+                    <span>
+                      <span className="font-mono">{tps}</span> tok/s
+                    </span>
+                  </>
+                );
               })()}
-            </span>
-          </span>
+            </>
+          )}
         </div>
       )}
     </div>

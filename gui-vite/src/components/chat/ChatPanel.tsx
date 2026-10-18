@@ -9,6 +9,7 @@ import {
   compressSession,
   deleteSessionMessage,
   fetchApprovalStatus,
+  fetchSessionRequestPerf,
   getApiBase,
   getSessionModel,
   redoSessionMessage,
@@ -148,6 +149,28 @@ export default function ChatPanel() {
   const sessionUsage = useAppStore((s) =>
     s.currentSessionId ? (s.sessionTokenUsage[s.currentSessionId] ?? null) : null,
   );
+
+  /** 最近一次请求性能（底部统计条：TTFT + 生成速度；实时由 RequestPerf 事件推送） */
+  const requestPerf = useAppStore((s) =>
+    s.currentSessionId ? (s.requestPerf[s.currentSessionId] ?? null) : null,
+  );
+
+  // 打开/切换会话：回填最近一次请求性能（刷新/重开后仍可见）。
+  // 实时事件更权威——回填只在尚无值时写入（迟到响应不覆盖更新值）。
+  useEffect(() => {
+    if (!currentSessionId) return;
+    const sid = currentSessionId;
+    void fetchSessionRequestPerf(sid)
+      .then((perf) => {
+        if (!perf) return;
+        const st = useAppStore.getState();
+        if (st.requestPerf[sid]) return;
+        st.setRequestPerf(sid, perf);
+      })
+      .catch(() => {
+        /* 无样本/网络失败：不展示，不阻塞 */
+      });
+  }, [currentSessionId]);
 
   // 会话 token 汇总刷新（底部统计条）：打开/切换立即拉取（250ms 防抖，
   // 与「消息数变化」共用同一 effect——新轮落库/压缩点插入也触发）。
@@ -898,6 +921,7 @@ export default function ChatPanel() {
             stopping={stopping}
             usage={lastUsage}
             sessionUsage={sessionUsage}
+            requestPerf={requestPerf}
             onCompress={() => void handleCompress()}
             compressing={compressing}
           />

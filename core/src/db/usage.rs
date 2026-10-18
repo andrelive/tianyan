@@ -32,6 +32,23 @@ pub struct UsageRepo {
     db: Arc<Database>,
 }
 
+/// 单次请求的性能样本（最近一次请求指标用）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UsagePerfRow {
+    /// 实际路由的 provider。
+    pub provider: String,
+    /// 模型名。
+    pub model: String,
+    /// 首 token 时间（毫秒；-1 = 未知）。
+    pub ttft_ms: i64,
+    /// 请求总耗时（毫秒；-1 = 未知）。
+    pub duration_ms: i64,
+    /// 输出 token（算生成速度用）。
+    pub completion_tokens: u64,
+    /// epoch 秒。
+    pub ts: i64,
+}
+
 impl UsageRepo {
     /// 创建用量仓储（共享 `Database` 单连接）。
     pub fn new(db: Arc<Database>) -> Self {
@@ -52,11 +69,13 @@ impl UsageRepo {
         cached: u64,
         completion: u64,
         total: u64,
+        ttft_ms: i64,
+        duration_ms: i64,
     ) {
         // 写路径异步等待锁：try_lock 静默丢弃会让用量统计与演化输入失真。
         let conn = self.db.lock().await;
         if let Err(e) = conn.execute(
-            "INSERT INTO usage_logs (session_id, provider, model, uncached_input, cached_input, completion_tokens, total_tokens, ts) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            "INSERT INTO usage_logs (session_id, provider, model, uncached_input, cached_input, completion_tokens, total_tokens, ttft_ms, duration_ms, ts) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             rusqlite::params![
                 session_id,
                 provider,
@@ -65,10 +84,47 @@ impl UsageRepo {
                 cached as i64,
                 completion as i64,
                 total as i64,
+                ttft_ms,
+                duration_ms,
                 chrono::Utc::now().timestamp()
             ],
         ) {
             tracing::warn!(error = %e, "usage_log 写入失败");
+        }
+    }
+
+    /// 最近 N 次调用（按 id 倒序；`session_id` 非空时只取该会话）。
+    ///
+    /// 供底部统计条展示「最近一次请求」的 TTFT 与生成速度（刷新/重开会话后
+    /// 仍可见）。`limit` 上限由调用方钳制。
+    pub async fn recent(&self, session_id: Option<&str>, limit: usize) -> Vec<UsagePerfRow> {
+        let conn = self.db.lock().await;
+        let sql = "SELECT provider, model, ttft_ms, duration_ms, completion_tokens, ts \
+                   FROM usage_logs WHERE (?1 IS NULL OR session_id = ?1) \
+                   ORDER BY id DESC LIMIT ?2";
+        let mut stmt = match conn.prepare(sql) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "usage_log 最近样本查询准备失败");
+                return Vec::new();
+            }
+        };
+        let rows = stmt.query_map(rusqlite::params![session_id, limit as i64], |r| {
+            Ok(UsagePerfRow {
+                provider: r.get(0)?,
+                model: r.get(1)?,
+                ttft_ms: r.get(2)?,
+                duration_ms: r.get(3)?,
+                completion_tokens: r.get::<_, i64>(4)?.max(0) as u64,
+                ts: r.get(5)?,
+            })
+        });
+        match rows {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "usage_log 最近样本查询失败");
+                Vec::new()
+            }
         }
     }
 
@@ -252,9 +308,12 @@ mod tests {
     #[tokio::test]
     async fn test_stats_filters_shared_by_total_and_grouping() {
         let repo = setup().await;
-        repo.record("s1", "deepseek", "v3", 100, 0, 10, 110).await;
-        repo.record("s1", "deepseek", "v3", 50, 50, 10, 110).await;
-        repo.record("s2", "ollama", "qwen", 200, 0, 20, 220).await;
+        repo.record("s1", "deepseek", "v3", 100, 0, 10, 110, -1, -1)
+            .await;
+        repo.record("s1", "deepseek", "v3", 50, 50, 10, 110, -1, -1)
+            .await;
+        repo.record("s2", "ollama", "qwen", 200, 0, 20, 220, -1, -1)
+            .await;
 
         // 无过滤总计
         let total = repo.stats(None, None, None, None, None, "none").await;
@@ -317,5 +376,39 @@ mod tests {
         assert_eq!(future.len(), 1);
         assert_eq!(future[0].calls, 0);
         assert_eq!(future[0].total_tokens, 0);
+    }
+
+    /// 请求性能落库与读取：ttft_ms / duration_ms 原样持久化（-1 = 未知），
+    /// `recent` 按会话过滤、按 id 倒序取最近一条（底部统计条回填）。
+    #[tokio::test]
+    async fn test_record_and_recent_request_perf() {
+        let repo = setup().await;
+        // 历史行风格（未知性能）→ -1
+        repo.record("s1", "ollama", "deepseek-v4.1-flash", 10, 0, 5, 15, -1, -1)
+            .await;
+        // 新行：TTFT 900ms、总耗时 2000ms
+        repo.record("s1", "opencode", "glm-5.3-flash", 20, 0, 50, 70, 900, 2000)
+            .await;
+        repo.record("s2", "deepseek", "v3", 30, 0, 60, 90, 1200, 3400)
+            .await;
+
+        let latest = repo.recent(Some("s1"), 1).await;
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].provider, "opencode");
+        assert_eq!(latest[0].model, "glm-5.3-flash");
+        assert_eq!(latest[0].ttft_ms, 900);
+        assert_eq!(latest[0].duration_ms, 2000);
+        assert_eq!(latest[0].completion_tokens, 50);
+
+        // 全量最近（无会话过滤）：s2 的最后一条胜出
+        let global = repo.recent(None, 1).await;
+        assert_eq!(global[0].provider, "deepseek");
+        assert_eq!(global[0].ttft_ms, 1200);
+
+        // 取多条：s1 两条都在，倒序（新在前）
+        let s1_all = repo.recent(Some("s1"), 10).await;
+        assert_eq!(s1_all.len(), 2);
+        assert_eq!(s1_all[0].duration_ms, 2000);
+        assert_eq!(s1_all[1].duration_ms, -1, "历史行未知性能记 -1");
     }
 }

@@ -29,6 +29,7 @@
 | `/api/v1/memory` | GET | 记忆列表（三源聚合：`memory/` + `user/` + `agent/patterns`，系统子路径排除） |
 | `/api/v1/stats` | GET | 使用统计摘要（技能调用 / 文档访问 / 搜索热度） |
 | `/api/v1/usage/stats` | GET | 用量统计（模型调用 token 消耗等） |
+| `/api/v1/usage/recent` | GET | 最近 N 次调用的性能样本（TTFT / 总耗时 / 输出 token；底部统计条「最近一次请求」展示，`session_id` 可选、`limit` 默认 1） |
 | `/api/v1/traces` | GET | 结构化轨迹查询（Trace 回放查询） |
 | `/api/v1/scheduler/status` | GET | 定时任务状态（任务列表 / 执行次数 / 距上次执行） |
 | `/api/v1/events` | GET | 统一事件流（SSE 常驻，事件带 type 区分） |

@@ -176,6 +176,16 @@ export function handleChatStreamEvent(event: ChatStreamEvent): void {
     st.applyToolResult(event.tool_result, sid);
   }
 
+  // 请求性能（TTFT / 总耗时 / 输出 token）→ 底部统计条的「最近一次请求」。
+  // 每轮 LLM 调用结束下发一次（工具轮也发），后到覆盖先到——只保留最近一次。
+  if (event.duration_ms != null && sid) {
+    st.setRequestPerf(sid, {
+      ttftMs: event.ttft_ms ?? null,
+      durationMs: event.duration_ms,
+      completionTokens: event.perf_completion_tokens ?? 0,
+    });
+  }
+
   // 完成 chunk 携带 token 用量 → 附加到流归属会话的 assistant 消息
   // （上下文圆环经 lastMessageUsage 读取，跨会话独立）
   if (event.usage) {

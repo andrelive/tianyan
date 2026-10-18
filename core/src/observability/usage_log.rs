@@ -36,7 +36,22 @@ impl UsageLog {
     ///
     /// provider 由 model 名推导（约定 `provider/model` 前缀命名，
     /// 如 `opencode/deepseek-v4-flash`）。写失败仅告警，不影响主流程。
-    pub async fn record(&self, session_id: &str, provider: &str, model: &str, usage: &TokenUsage) {
+    ///
+    /// `perf`：`(ttft_ms, duration_ms)`——请求性能（底部统计条展示最近一次
+    /// 请求的 TTFT 与生成速度）。`None` = 未知（非流式路径 / 无 usage /
+    /// 压缩补账），落库为 -1，不参与展示。
+    pub async fn record(
+        &self,
+        session_id: &str,
+        provider: &str,
+        model: &str,
+        usage: &TokenUsage,
+        perf: Option<(u64, u64)>,
+    ) {
+        let (ttft_ms, duration_ms) = match perf {
+            Some((ttft, duration)) => (ttft as i64, duration as i64),
+            None => (-1, -1),
+        };
         // 落盘经 UsageRepo（SQL 收敛于 db 层）
         self.repo
             .record(
@@ -47,8 +62,19 @@ impl UsageLog {
                 usage.cache_read as u64,
                 usage.completion_tokens as u64,
                 usage.total_tokens as u64,
+                ttft_ms,
+                duration_ms,
             )
             .await;
+    }
+
+    /// 最近 N 次调用样本（`session_id` 非空时只取该会话）。
+    pub async fn recent(
+        &self,
+        session_id: Option<&str>,
+        limit: usize,
+    ) -> Vec<crate::db::usage::UsagePerfRow> {
+        self.repo.recent(session_id, limit).await
     }
 
     /// 聚合统计。
@@ -100,15 +126,23 @@ mod tests {
             "opencode",
             "deepseek-v4-flash",
             &usage(1000, 800, 200),
+            None,
         )
         .await;
-        log.record("s1", "opencode", "deepseek-v4-flash", &usage(500, 100, 300))
-            .await;
+        log.record(
+            "s1",
+            "opencode",
+            "deepseek-v4-flash",
+            &usage(500, 100, 300),
+            None,
+        )
+        .await;
         log.record(
             "evolution-1",
             "bailian",
             "qwen3.7-plus",
             &usage(2000, 0, 400),
+            None,
         )
         .await;
 
@@ -133,9 +167,10 @@ mod tests {
             "opencode",
             "deepseek-v4-flash",
             &usage(1000, 800, 200),
+            None,
         )
         .await;
-        log.record("s1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400))
+        log.record("s1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400), None)
             .await;
 
         let stats = log.stats(None, None, None, None, None, "model").await;
@@ -155,9 +190,10 @@ mod tests {
             "opencode",
             "deepseek-v4-flash",
             &usage(1000, 800, 200),
+            None,
         )
         .await;
-        log.record("s1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400))
+        log.record("s1", "bailian", "qwen3.7-plus", &usage(2000, 0, 400), None)
             .await;
 
         // 按 provider 过滤

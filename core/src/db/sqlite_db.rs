@@ -178,6 +178,38 @@ impl SqliteDb {
                 )?;
             }
         }
+        // 幂等迁移（0.6.8）：usage_logs 补请求性能列（TTFT / 总耗时，毫秒；
+        // -1 = 未知——历史行与非流式路径）。底部统计条展示最近一次请求的
+        // TTFT 与生成速度。同样必须在 SCHEMA_SQL 之前（CREATE TABLE 对已存在
+        // 表不生效）。ADD COLUMN 为元数据级操作（不重写表）；单行 +5~6 B。
+        let has_usage_table: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='usage_logs')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if has_usage_table {
+            let cols: Vec<String> = {
+                let mut stmt = conn.prepare("PRAGMA table_info(usage_logs)")?;
+                let collected = stmt
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                collected
+            };
+            if !cols.iter().any(|c| c == "ttft_ms") {
+                conn.execute(
+                    "ALTER TABLE usage_logs ADD COLUMN ttft_ms INTEGER NOT NULL DEFAULT -1",
+                    [],
+                )?;
+            }
+            if !cols.iter().any(|c| c == "duration_ms") {
+                conn.execute(
+                    "ALTER TABLE usage_logs ADD COLUMN duration_ms INTEGER NOT NULL DEFAULT -1",
+                    [],
+                )?;
+            }
+        }
         conn.execute_batch(SCHEMA_SQL)?;
         Ok(())
     }
@@ -326,6 +358,9 @@ const SCHEMA_SQL: &str = "
         cached_input      INTEGER NOT NULL DEFAULT 0,
         completion_tokens INTEGER NOT NULL DEFAULT 0,
         total_tokens      INTEGER NOT NULL DEFAULT 0,
+        -- 请求性能（毫秒；-1 = 未知——历史行 / 非流式路径 / 无 usage）
+        ttft_ms           INTEGER NOT NULL DEFAULT -1,
+        duration_ms       INTEGER NOT NULL DEFAULT -1,
         ts                INTEGER NOT NULL,
         recorded_at       TEXT    NOT NULL DEFAULT (datetime('now'))
     );

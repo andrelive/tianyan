@@ -293,6 +293,10 @@ pub(crate) fn map_chunk_to_event(
         message_id: chunk.message_id,
         // ADR-035 §9：轮状态（前端联动输入框与停止按钮；U10）
         turn_state: chunk.turn_state,
+        // 请求性能（chunk_type=request_perf）：底部统计条「最近一次请求」
+        ttft_ms: chunk.ttft_ms,
+        duration_ms: chunk.duration_ms,
+        perf_completion_tokens: chunk.perf_completion_tokens,
         usage: chunk.token_usage.map(|u| StreamUsage {
             prompt_tokens: u.prompt_tokens as u64,
             completion_tokens: u.completion_tokens as u64,
@@ -417,6 +421,27 @@ mod tests {
         // 无 finish_reason 时回退 "stop"（保持缺省线上行为）
         let fr = map_finish_reason(None);
         assert_eq!(fr.as_deref(), Some("stop"));
+    }
+
+    /// 请求性能字段必须原样透传到前端事件（否则底部统计条的
+    /// TTFT / 生成速度永不出现——静默降级，无报错可循）。
+    #[test]
+    fn test_map_chunk_to_event_passes_request_perf() {
+        let chunk = tianyan::agent::AgentStreamChunk {
+            chunk_type: tianyan::agent::StreamChunkType::RequestPerf,
+            ttft_ms: Some(1200),
+            duration_ms: Some(3400),
+            perf_completion_tokens: Some(110),
+            ..Default::default()
+        };
+
+        let event = map_chunk_to_event(chunk, "stream-1", "session-1", 32768);
+
+        assert_eq!(event.ttft_ms, Some(1200));
+        assert_eq!(event.duration_ms, Some(3400));
+        assert_eq!(event.perf_completion_tokens, Some(110));
+        // 性能事件不携带正文（避免污染消息流）
+        assert!(event.delta.is_empty());
     }
     /// 回归测试：**取消 / 失败轮不得把上一轮 assistant 结论当作本轮结果**。
     ///

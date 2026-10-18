@@ -1182,6 +1182,11 @@ export const handlers = [
   http.get(`${API_BASE}/usage/stats`, () => {
     return HttpResponse.json(mockSessionUsageStats);
   }),
+  // 最近一次请求性能（GET /usage/recent?session_id=；底部统计条 TTFT/tok/s）
+  // 默认无样本（返回空数组 = 不展示），个别用例可 server.use 覆盖。
+  http.get(`${API_BASE}/usage/recent`, () => {
+    return HttpResponse.json({ samples: [] });
+  }),
 
   // Workspace dirs（后端为 GET /workspace/dirs?path=；目录选择器）
   http.get(`${API_BASE}/workspace/dirs`, ({ request }) => {

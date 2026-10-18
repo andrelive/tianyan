@@ -128,6 +128,34 @@ pub struct UsageStatsQuery {
     pub group_by: Option<String>,
 }
 
+/// 最近调用性能样本查询参数。
+#[derive(Debug, Deserialize)]
+pub struct UsageRecentQuery {
+    /// 按会话过滤（可选；缺省取全局最近一次）。
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// 返回条数（缺省 1；上限 50）。
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// 最近 N 次 LLM 调用的性能样本（TTFT / 总耗时 / 输出 token）。
+///
+/// 底部统计条展示「最近一次请求」的 TTFT 与生成速度（打开会话时经此回填；
+/// 实时值由 RequestPerf 流式事件推送）。`ttft_ms` / `duration_ms` 为 -1
+/// 表示未知（历史行 / 非流式路径），前端据此不展示。
+pub async fn get_usage_recent_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<UsageRecentQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let limit = query.limit.unwrap_or(1).clamp(1, 50);
+    let samples = state
+        .usage_log()
+        .recent(query.session_id.as_deref(), limit)
+        .await;
+    Ok(Json(json!({ "samples": samples })))
+}
+
 fn default_usage_days() -> i64 {
     7
 }

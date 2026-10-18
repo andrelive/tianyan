@@ -779,8 +779,9 @@ fn test_finalize_cancelled_drops_tool_calls_keeps_delivered_prefix() {
         finish_reason: None,
         updated_input: None,
         cancelled: true,
+        perf: Default::default(),
     };
-    let (msg, _usage, finish, _input, cancelled_turn) =
+    let (msg, _usage, finish, _input, cancelled_turn, _perf) =
         AgentLoop::finalize_streamed_turn(accum, &[Message::user("测试")], "test-model", None)
             .unwrap();
     assert!(cancelled_turn, "取消收尾标记应为 true");
@@ -812,6 +813,7 @@ fn test_finalize_cancelled_without_content_is_cancel_error() {
         finish_reason: None,
         updated_input: None,
         cancelled: true,
+        perf: Default::default(),
     };
     let err =
         AgentLoop::finalize_streamed_turn(accum, &[Message::user("测试")], "test-model", None)
@@ -834,6 +836,7 @@ fn test_finalize_cancelled_blank_only_dropped() {
         finish_reason: None,
         updated_input: None,
         cancelled: true,
+        perf: Default::default(),
     };
     let err =
         AgentLoop::finalize_streamed_turn(accum, &[Message::user("测试")], "test-model", None)
@@ -853,8 +856,9 @@ fn test_finalize_cancelled_blank_reasoning_dropped() {
         finish_reason: None,
         updated_input: None,
         cancelled: true,
+        perf: Default::default(),
     };
-    let (msg, _usage, _finish, _input, cancelled_turn) =
+    let (msg, _usage, _finish, _input, cancelled_turn, _perf) =
         AgentLoop::finalize_streamed_turn(accum, &[Message::user("测试")], "test-model", None)
             .unwrap();
     assert!(cancelled_turn);
@@ -947,6 +951,65 @@ async fn collect_answer_deltas(
         }
     }
     deltas
+}
+
+/// 收集 stream_sender 上所有 RequestPerf 事件（TTFT / 总耗时）。
+async fn collect_request_perf(
+    mut rx: tokio::sync::mpsc::Receiver<Result<AgentStreamChunk>>,
+) -> Vec<AgentStreamChunk> {
+    let mut out = Vec::new();
+    while let Some(Ok(chunk)) = rx.recv().await {
+        if chunk.chunk_type == StreamChunkType::RequestPerf {
+            out.push(chunk);
+        }
+    }
+    out
+}
+
+/// 请求性能：每轮流式调用下发一次 RequestPerf（TTFT / 总耗时 / 输出 token）。
+///
+/// 底部统计条据此展示「最近一次请求」的 TTFT 与生成速度——缺失会导致
+/// 该展示永不出现（静默降级，无报错）。
+#[tokio::test]
+async fn test_run_stream_emits_request_perf() {
+    let chunks = vec![
+        stream_chunk(Some("你好"), None, None),
+        stream_chunk(Some("！"), None, None),
+    ];
+    let agent_loop = make_loop(stream_mock(chunks), 5);
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(16);
+    let sender = StreamEventSender::new(event_tx);
+
+    let mut messages = vec![Message::user("性能测试")];
+    let _ = agent_loop
+        .run_stream(
+            &mut messages,
+            sender,
+            "session-1",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let perfs = collect_request_perf(event_rx).await;
+    assert_eq!(perfs.len(), 1, "每轮流式调用应下发一次 RequestPerf");
+    let p = &perfs[0];
+    let ttft = p.ttft_ms.expect("有内容 token 时 TTFT 必须存在");
+    let duration = p.duration_ms.expect("总耗时必须存在");
+    assert!(
+        duration >= ttft,
+        "总耗时不得小于 TTFT（{duration} vs {ttft}）"
+    );
+    assert_eq!(
+        p.perf_completion_tokens,
+        Some(0),
+        "网关未返回 usage 时输出 token 记 0"
+    );
 }
 
 /// 流式路径：多 chunk 文本累积 —— 最终消息内容 = 各 chunk 拼接。

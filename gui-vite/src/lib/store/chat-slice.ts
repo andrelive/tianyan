@@ -11,6 +11,7 @@ import type {
   BackgroundTask,
   ChatMessage,
   MessageSegment,
+  RequestPerf,
   Session,
   SessionTokenUsage,
   SkillCallInfo,
@@ -98,6 +99,15 @@ export interface ChatSlice {
   sessionMessages: Record<string, ChatMessage[]>;
   /** 分页元数据（按会话；上滚加载的状态）。 */
   sessionMessageMeta: Record<string, SessionMessageMeta>;
+  /**
+   * 最近一次请求的性能指标（按会话；底部统计条展示 TTFT + 生成速度）。
+   *
+   * 实时值来自 RequestPerf 流式事件（每轮 LLM 调用一次，后者覆盖前者）；
+   * 打开会话时经 `GET /usage/recent` 回填（刷新/重开后仍可见）。
+   */
+  requestPerf: Record<string, RequestPerf | null>;
+  /** 写入指定会话的最近一次请求性能（null = 清空，如无样本）。 */
+  setRequestPerf: (sessionId: string, perf: RequestPerf | null) => void;
   /** 轮状态（按会话；驱动输入框与停止按钮，U10）。 */
   turnState: Record<string, TurnState>;
   /** 上滚：把更早的消息插到窗口头部 + 更新分页元数据（ADR-035 §8）。 */
@@ -389,6 +399,9 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       };
     }),
   sessionMessageMeta: {},
+  requestPerf: {},
+  setRequestPerf: (sessionId, perf) =>
+    set((s) => ({ requestPerf: { ...s.requestPerf, [sessionId]: perf } })),
   setSessionMessageMeta: (sessionId, meta) =>
     set((s) => ({ sessionMessageMeta: { ...s.sessionMessageMeta, [sessionId]: meta } })),
   prependSessionMessages: (sessionId, older, meta) =>

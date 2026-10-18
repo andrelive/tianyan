@@ -177,6 +177,15 @@ pub struct ChatStreamEvent {
     /// 轮状态载荷（chunk_type=turn_state，ADR-035 §9）：前端联动输入框
     /// 与停止按钮（auto 轮可中止；U10）。
     pub turn_state: Option<tianyan::agent::TurnStateEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 首 token 时间（毫秒；chunk_type=request_perf——底部统计条 TTFT）。
+    pub ttft_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 请求总耗时（毫秒；chunk_type=request_perf）。
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 该轮输出 token（chunk_type=request_perf；算生成速度用）。
+    pub perf_completion_tokens: Option<u64>,
 }
 
 impl ChatStreamEvent {
@@ -186,6 +195,9 @@ impl ChatStreamEvent {
     pub fn error(stream_id: &str, session_id: &str, delta: impl Into<String>) -> Self {
         Self {
             turn_state: None,
+            ttft_ms: None,
+            duration_ms: None,
+            perf_completion_tokens: None,
             id: stream_id.to_string(),
             session_id: session_id.to_string(),
             message: None,
@@ -208,6 +220,9 @@ impl ChatStreamEvent {
     pub fn message_boundary(stream_id: &str, session_id: &str, message: ChatMessage) -> Self {
         Self {
             turn_state: None,
+            ttft_ms: None,
+            duration_ms: None,
+            perf_completion_tokens: None,
             id: stream_id.to_string(),
             session_id: session_id.to_string(),
             message: Some(message),
@@ -297,6 +312,9 @@ mod tests {
             usage: None,
             user_message_id: None,
             message_id: None,
+            ttft_ms: None,
+            duration_ms: None,
+            perf_completion_tokens: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Hello"));

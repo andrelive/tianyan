@@ -12,7 +12,8 @@ export type StreamChunkType =
   | 'user_message_id'
   | 'turn_state'
   /** 重试提示（T1 重试可见性）：上游失败/空响应重试——只作提示，不进正文。 */
-  | 'retry';
+  | 'retry'
+  | 'request_perf';
 
 /** 轮状态载荷（chunk_type=turn_state，ADR-035 §9）：驱动输入框与停止按钮（U10）。 */
 export interface TurnStatePayload {
@@ -123,6 +124,38 @@ export interface ChatStreamEvent {
   usage?: StreamUsage | null;
   /** 轮状态载荷（chunk_type=turn_state，ADR-035 §9） */
   turn_state?: TurnStatePayload | null;
+  /** 首 token 时间（毫秒；RequestPerf 事件携带——最近一次请求的 TTFT） */
+  ttft_ms?: number | null;
+  /** 请求总耗时（毫秒；RequestPerf 事件携带） */
+  duration_ms?: number | null;
+  /** 该轮输出 token（RequestPerf 事件携带；算生成速度用） */
+  perf_completion_tokens?: number | null;
+}
+
+/**
+ * 最近一次请求的性能指标（底部统计条展示）。
+ *
+ * 口径：`ttftMs` = 请求发出 → 首个内容 token（thinking 也算）；
+ * 生成速度 = completionTokens / (durationMs − ttftMs)——纯生成阶段，
+ * 不含首包等待（否则慢首包会把速度也拖低，两个指标失去正交性）。
+ */
+export interface RequestPerf {
+  /** 首 token 时间（毫秒；null = 纯工具调用轮等无内容 token 场景） */
+  ttftMs: number | null;
+  /** 请求总耗时（毫秒） */
+  durationMs: number;
+  /** 该轮输出 token */
+  completionTokens: number;
+}
+
+/** `GET /usage/recent` 的样本行（落库口径；-1 = 未知）。 */
+export interface UsageRecentSample {
+  provider: string;
+  model: string;
+  ttft_ms: number;
+  duration_ms: number;
+  completion_tokens: number;
+  ts: number;
 }
 
 export interface SkillCallInfo {
