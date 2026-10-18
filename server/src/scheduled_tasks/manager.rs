@@ -183,9 +183,42 @@ impl ScheduledAgentTaskHandler {
         }
     }
 
-    /// 确保该任务有绑定工作区的专属会话（首次创建，之后复用）。
-    async fn ensure_session(&self) {
-        let sid = format!("sched-task-{}", self.task_id);
+    /// 任务专属会话 ID（**幂等**）：`sched-task-{task_id}`——task_id 本身已
+    /// 带前缀时不再叠加。
+    ///
+    /// 历史实现无条件套前缀，task_id 又是 `sched-task-…`，于是产出
+    /// `sched-task-sched-task-…` 双前缀（会话列表/tab 标题展示错乱，
+    /// 且与任务 id 无法直观对应）。
+    fn session_id_for(task_id: &str) -> String {
+        if task_id.starts_with("sched-task-") {
+            task_id.to_string()
+        } else {
+            format!("sched-task-{task_id}")
+        }
+    }
+
+    /// 生效会话 ID：**存量（历史双前缀）会话存在时沿用**——不迁移数据、
+    /// 不割裂历史（旧会话继续可见可读）；新任务用规范 ID。
+    async fn resolve_session_id(&self) -> String {
+        let canonical = Self::session_id_for(&self.task_id);
+        let legacy = format!("sched-task-{}", self.task_id);
+        if legacy != canonical
+            && self
+                .session_manager
+                .get_session(&legacy)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            return legacy;
+        }
+        canonical
+    }
+
+    /// 确保该任务有绑定工作区的专属会话（首次创建，之后复用；返回会话 ID）。
+    async fn ensure_session(&self) -> String {
+        let sid = self.resolve_session_id().await;
         if self
             .session_manager
             .get_session(&sid)
@@ -194,7 +227,7 @@ impl ScheduledAgentTaskHandler {
             .flatten()
             .is_some()
         {
-            return;
+            return sid;
         }
         if self
             .session_manager
@@ -213,6 +246,7 @@ impl ScheduledAgentTaskHandler {
                 let _ = ws.rewrite(&[]).await;
             }
         }
+        sid
     }
 
     /// 调用 agent 执行任务 prompt（绑定工作区），返回结果摘要。
@@ -222,8 +256,7 @@ impl ScheduledAgentTaskHandler {
     /// `execute()` 的失败分支不可达，调度器统计（run_count/last_error）
     /// 永远显示成功（T0-11：模型调用全挂时用户看不到失败信号）。
     async fn run_agent(&self) -> Result<String, String> {
-        self.ensure_session().await;
-        let sid = format!("sched-task-{}", self.task_id);
+        let sid = self.ensure_session().await;
         let msg = Message::user(&self.prompt);
         let agent = self.agent_lock.read().await.clone();
         match agent.process_message(&sid, &msg, None, None, None).await {
@@ -489,5 +522,19 @@ mod tests {
         assert_eq!(result.processed_count, 1);
         assert_eq!(text, "任务完成摘要");
         assert!(result.error.is_none());
+    }
+
+    /// 会话 ID 生成幂等：task_id 已带 `sched-task-` 前缀时不再叠加
+    /// （历史 bug：`sched-task-sched-task-…` 双前缀）。
+    #[test]
+    fn test_session_id_for_is_idempotent() {
+        assert_eq!(
+            ScheduledAgentTaskHandler::session_id_for("sched-task-abc"),
+            "sched-task-abc"
+        );
+        assert_eq!(
+            ScheduledAgentTaskHandler::session_id_for("abc"),
+            "sched-task-abc"
+        );
     }
 }

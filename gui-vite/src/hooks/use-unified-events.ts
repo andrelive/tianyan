@@ -134,9 +134,15 @@ async function doSubscribe(sessionId: string): Promise<void> {
  * replace 窗口——快照与后续实时事件同一条流，顺序由服务端保证，合并
  * 竞态（fetch 历史 + 广播事件两条路径）消失。失败时从集合移除（下次
  * 切换/重连重试）。
+ *
+ * `force`：绕过 resident 幂等强制重发一次快照——历史未加载的会话必需
+ * （流式残留的旧缓存会让幂等跳过把历史永久挡住，见 use-session-history）。
  */
-export async function subscribeSession(sessionId: string): Promise<void> {
-  if (subscribedSessions.has(sessionId)) return;
+export async function subscribeSession(
+  sessionId: string,
+  opts?: { force?: boolean },
+): Promise<void> {
+  if (!opts?.force && subscribedSessions.has(sessionId)) return;
   subscribedSessions.add(sessionId);
   await doSubscribe(sessionId);
 }
@@ -188,6 +194,12 @@ export function applySnapshot(
         oldestSeq: meta.oldestSeq,
         hasMore: meta.hasMore,
       });
+      // ADR-045：快照帧携带**轮状态权威值**——断线/事件丢失后据此校正
+      // （此前只声明未应用：turn_state 事件丢在通道里时 turnState 永久
+      // 残留 running → 输入框禁用 / 停止按钮常驻，且无任何超时兜底）。
+      if (meta.turn) {
+        st.setTurnState(sessionId, { state: meta.turn.state, auto: meta.turn.auto });
+      }
     }
   }
 }

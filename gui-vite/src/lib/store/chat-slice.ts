@@ -106,6 +106,20 @@ export interface ChatSlice {
     older: ChatMessage[],
     meta: SessionMessageMeta,
   ) => void;
+  /**
+   * 合并服务端页到已有缓存（历史补齐用，ADR-035 §8 修订）。
+   *
+   * 用于「缓存非空但历史未加载」的会话：流式事件（唤醒轮/后台轮）会向
+   * 未打开的会话写入本轮消息，却不写分页元数据——此时不能把缓存当成
+   * 历史（否则永久缺失，见 `loadSessionHistory`）。合并而非覆盖：
+   * 按 seq 去重升序（服务端页权威，同 seq 覆盖本地），无 seq 的流式占位
+   * 保持相对顺序置于尾部（不丢正在输出的内容）。
+   */
+  mergeSessionMessages: (
+    sessionId: string,
+    incoming: ChatMessage[],
+    meta: SessionMessageMeta,
+  ) => void;
   /** 设置分页元数据（快照/历史加载后由调用方按服务端 has_more 更新）。 */
   setSessionMessageMeta: (sessionId: string, meta: SessionMessageMeta) => void;
   /** 设置会话轮状态（turn_state 事件驱动，ADR-035 §9）。 */
@@ -384,6 +398,32 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       const existing = new Set(base.map((m) => m.seq).filter((x): x is number => x != null));
       const fresh = older.filter((m) => m.seq == null || !existing.has(m.seq));
       const next = [...fresh, ...base];
+      const isCurrent = sessionId === resolveSessionKey(s);
+      return {
+        sessionMessages: { ...s.sessionMessages, [sessionId]: next },
+        sessionMessageMeta: { ...s.sessionMessageMeta, [sessionId]: meta },
+        ...(isCurrent ? { messages: next } : {}),
+      };
+    }),
+  mergeSessionMessages: (sessionId, incoming, meta) =>
+    set((s) => {
+      const base = s.sessionMessages[sessionId] ?? [];
+      const bySeq = new Map<number, ChatMessage>();
+      const keylessBase: ChatMessage[] = [];
+      const keylessIncoming: ChatMessage[] = [];
+      const collect = (list: ChatMessage[], keyless: ChatMessage[]) => {
+        for (const m of list) {
+          if (m.seq != null) bySeq.set(m.seq, m);
+          else keyless.push(m);
+        }
+      };
+      collect(base, keylessBase);
+      collect(incoming, keylessIncoming); // 后写者胜：服务端页权威覆盖本地同 seq
+      const seqMsgs = [...bySeq.values()].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+      const seenIds = new Set(seqMsgs.map((m) => m.id).filter((x): x is string => Boolean(x)));
+      // 无 seq 的消息：服务端页（更早的历史）在前，本地流式占位（更新）在后
+      const tail = [...keylessIncoming, ...keylessBase].filter((m) => !(m.id && seenIds.has(m.id)));
+      const next = [...seqMsgs, ...tail];
       const isCurrent = sessionId === resolveSessionKey(s);
       return {
         sessionMessages: { ...s.sessionMessages, [sessionId]: next },

@@ -153,6 +153,38 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().messages).toHaveLength(0);
   });
 
+  it('mergeSessionMessages merges by seq (server wins) and keeps the keyless streaming tail', () => {
+    // 历史补齐场景：本地是流式残留（同 seq 的旧快照 + 无 seq 的占位）
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      sessionMessages: {
+        'session-1': [
+          { id: 'm-11-old', seq: 11, role: 'assistant', segments: [{ type: 'text', text: 'old' }] },
+          { id: 'live-1', role: 'assistant', segments: [{ type: 'text', text: '流式中' }] },
+        ],
+      },
+      sessionMessageMeta: {},
+    });
+    const incoming: ChatMessage[] = [
+      { id: 'm-10', seq: 10, role: 'user', segments: [{ type: 'text', text: 'q' }] },
+      { id: 'm-11', seq: 11, role: 'assistant', segments: [{ type: 'text', text: 'new' }] },
+      { id: 'm-12', seq: 12, role: 'assistant', segments: [{ type: 'text', text: 'a' }] },
+    ];
+
+    useAppStore.getState().mergeSessionMessages('session-1', incoming, {
+      oldestSeq: 10,
+      hasMore: true,
+    });
+
+    const st = useAppStore.getState();
+    const msgs = st.sessionMessages['session-1'] ?? [];
+    expect(msgs.map((m) => m.seq ?? null)).toEqual([10, 11, 12, null]); // seq 升序
+    expect(msgs[1]?.id).toBe('m-11'); // 同 seq 服务端覆盖本地
+    expect(msgs[3]?.id).toBe('live-1'); // 无 seq 的流式尾部保留在最后
+    expect(st.messages).toHaveLength(4); // 当前会话投影同步
+    expect(st.sessionMessageMeta['session-1']).toEqual({ oldestSeq: 10, hasMore: true });
+  });
+
   it('updateLastMessage never writes into a non-assistant trailing message (role guard)', () => {
     // role 守卫：列表末条为 system（后台通知落尾）/user 时不得写入增量
     useAppStore.setState({

@@ -3,8 +3,9 @@
  *
  * ChatPanel 此前在组件内联 3 段历史获取（挂载加载 / reloadSession / 唤醒轮询
  * 各自 fetch）——端点契约与缓存守卫知识散落。本 hook 收敛：
- * - 挂载时按 URL 会话订阅（ADR-029：subscribeSession——快照帧经统一事件
- *   通道到达，replace 窗口；已订阅（resident）幂等跳过，切回零延迟）；
+ * - 按会话切换订阅（ADR-029：subscribeSession——快照帧经统一事件通道到达，
+ *   replace 窗口；已订阅（resident）幂等跳过，切回零延迟；**历史未加载时
+ *   强制重发**，否则流式残留的旧缓存会把历史永久挡住）；
  * - reloadSession：从服务端权威结构覆盖指定会话缓存（失败回退空列表——
  *   与持久化状态保持一致）。
  */
@@ -32,17 +33,30 @@ const PAGE_SIZE = 50;
  */
 export async function loadSessionHistory(sessionId: string): Promise<boolean> {
   const st = useAppStore.getState();
-  if (st.hasSessionMessages(sessionId)) return true;
+  // ADR-035 §8 修订：**缓存非空 ≠ 历史已加载**——流式事件（唤醒轮/后台轮）
+  // 会按 session_id 向未打开的会话写入本轮消息（chat-stream.ts），却从不写
+  // 分页元数据。若把这种缓存当成"历史已加载"，点击打开时就会跳过历史拉取，
+  // 界面只剩流式残留的少量消息，且无 meta → 上滚开关恒关（用户报告：定时
+  // 任务会话只显示 1 条、看不到历史、不能上滚）。
+  // 判据改为「有缓存 **且** 有分页元数据」。
+  if (st.hasSessionMessages(sessionId) && st.sessionMessageMeta[sessionId] != null) return true;
   try {
     const data = await fetchSessionMessagesPage(sessionId, undefined, PAGE_SIZE);
     const cur = useAppStore.getState();
-    if (cur.hasSessionMessages(sessionId)) return true;
     if ((cur.streamStatus[sessionId] ?? 'idle') === 'streaming') return true;
-    cur.setSessionMessages(sessionId, data.messages);
-    cur.setSessionMessageMeta(sessionId, {
+    // 请求期间已有权威分页元数据（快照/其它路径先到）→ 丢弃迟到响应
+    if (cur.sessionMessageMeta[sessionId] != null) return true;
+    const meta = {
       oldestSeq: data.next_before_seq ?? null,
       hasMore: Boolean(data.has_more),
-    });
+    };
+    if (cur.hasSessionMessages(sessionId)) {
+      // 缓存里是流式残留（本轮新增）→ 合并（按 seq 去重升序），不覆盖
+      cur.mergeSessionMessages(sessionId, data.messages, meta);
+    } else {
+      cur.setSessionMessages(sessionId, data.messages);
+      cur.setSessionMessageMeta(sessionId, meta);
+    }
     return true;
   } catch {
     return false;
@@ -50,21 +64,23 @@ export async function loadSessionHistory(sessionId: string): Promise<boolean> {
 }
 
 export function useSessionHistory(urlSessionId: string | null | undefined) {
-  const loadedOnMountRef = useRef(false);
+  /** 已强制重订阅过的会话（StrictMode 双挂载/同会话重复渲染去重）。 */
+  const forcedRef = useRef(new Set<string>());
 
-  // 刷新/直达 URL（如 /chat/{id}）时恢复历史消息：仅在挂载时执行一次。
-  // 列表点击路径由 SessionList.handleSelectSession 负责加载（导航后
-  // currentSessionId 已一致，此处不会重复请求）。
-  // StrictMode 双跑安全：ref 守卫只允许一次。
+  // 会话切换即订阅（ADR-029）：快照帧（完整历史尾部 + has_more + 轮状态
+  // 权威值）经统一事件通道 replace 窗口，是历史的权威兜底。
+  //
+  // 修复（历史永远缺失）：此前用「仅挂载执行一次」的 ref 守卫——但
+  // `/chat/{A}` → `/chat/{B}` 同路由只变参数、组件不重挂载，守卫已消费
+  // → B 永不订阅（无快照），叠加"缓存非空即已加载"的误判，历史永久缺失。
+  // 现在按 `urlSessionId` 变化订阅；**历史未加载（无 meta）时强制重发**
+  // （resident 幂等会挡住正常重发，导致流式残留的旧缓存永远得不到快照）。
   useEffect(() => {
-    if (loadedOnMountRef.current) return;
-    loadedOnMountRef.current = true;
     if (!urlSessionId) return;
-    // ADR-029：订阅即快照恢复——快照帧（完整历史 + cursor）经统一事件
-    // 通道到达，useUnifiedEvents 按 sid replace 窗口。已订阅（resident）
-    // 幂等跳过；未订阅首次打开 → 快照加载。不再 fetch（快照与实时事件
-    // 同一条流，合并竞态消失）。
-    void subscribeSession(urlSessionId);
+    const hasHistory = useAppStore.getState().sessionMessageMeta[urlSessionId] != null;
+    const needForce = !hasHistory && !forcedRef.current.has(urlSessionId);
+    if (needForce) forcedRef.current.add(urlSessionId);
+    void subscribeSession(urlSessionId, { force: needForce });
   }, [urlSessionId]);
 
   // 从后端重新加载会话消息（失败回滚，恢复与持久化一致的状态）。

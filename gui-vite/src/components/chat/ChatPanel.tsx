@@ -269,6 +269,32 @@ export default function ChatPanel() {
     return () => scrollerEl.removeEventListener('scroll', onScroll);
   }, [scrollerEl, tryLoadOlder]);
 
+  /**
+   * 上滚**自愈**（ADR-035 §8 修订）：消息不足以撑出滚动条时，scroller 的
+   * scrollTop 恒为 0、原生 scroll 事件永不触发——「要上滚才加载、内容太少
+   * 又滚不动」形成死锁（用户报告：定时任务会话只显示 1 条、历史看不到且
+   * 不能上滚）。
+   *
+   * 内容未撑满视口且仍有更早历史 → 主动补一页；补到撑满或链首即停。
+   * 连续补齐上限 3 次（失败时不自陷重试风暴），按会话重置计数。
+   */
+  const autoFillRef = useRef<{ sid: string; count: number }>({ sid: '', count: 0 });
+  useEffect(() => {
+    if (!scrollerEl || !urlSessionId) return;
+    if (autoFillRef.current.sid !== urlSessionId) {
+      autoFillRef.current = { sid: urlSessionId, count: 0 };
+    }
+    const meta = useAppStore.getState().sessionMessageMeta[urlSessionId];
+    const canScroll = scrollerEl.scrollHeight > scrollerEl.clientHeight + 8;
+    if (!meta?.hasMore || canScroll) {
+      autoFillRef.current.count = 0;
+      return;
+    }
+    if (autoFillRef.current.count >= 3) return;
+    autoFillRef.current.count += 1;
+    tryLoadOlder();
+  }, [scrollerEl, messages.length, urlSessionId, tryLoadOlder]);
+
   // 会话切换：重置跟随（切回预期看到最新内容）+ 重置首项索引基数
   // （Virtuoso 经 key 重建，initialTopMostItemIndex 定位到最新）。
   useEffect(() => {

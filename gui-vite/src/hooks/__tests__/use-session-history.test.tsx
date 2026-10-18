@@ -55,9 +55,11 @@ describe('useSessionHistory', () => {
     expect(msgs[1]?.role).toBe('assistant');
   });
 
-  it('skips re-subscribe when already subscribed (resident)', async () => {
-    // 已订阅（resident）：再次挂载不重复请求
+  it('skips re-subscribe when already subscribed and history loaded (resident)', async () => {
+    // 已订阅（resident）+ 历史已加载（有分页元数据）：再次挂载不重复请求
+    // （历史未加载时强制重发，见下一条用例）
     await subscribeSession('session-1');
+    useAppStore.getState().setSessionMessageMeta('session-1', { oldestSeq: 12, hasMore: true });
     const subscribeCalls = vi.fn();
     server.use(
       http.post(`${API_BASE}/events/subscribe`, () => {
@@ -72,6 +74,25 @@ describe('useSessionHistory', () => {
     });
 
     expect(subscribeCalls).not.toHaveBeenCalled();
+  });
+
+  it('subscribeSession force bypasses the resident idempotence (history reload)', async () => {
+    // 流式事件写过缓存但历史从未加载（无 meta）→ 必须能强制重发快照
+    // （resident 幂等会把历史永久挡住）
+    const subscribeCalls = vi.fn();
+    server.use(
+      http.post(`${API_BASE}/events/subscribe`, () => {
+        subscribeCalls();
+        return HttpResponse.json({ status: 'ok' });
+      }),
+    );
+
+    await subscribeSession('session-1');
+    await subscribeSession('session-1'); // resident 幂等：不发
+    expect(subscribeCalls).toHaveBeenCalledTimes(1);
+
+    await subscribeSession('session-1', { force: true }); // 强制重发
+    expect(subscribeCalls).toHaveBeenCalledTimes(2);
   });
 
   it('snapshot for a non-current session does not pollute the current projection', async () => {
@@ -113,6 +134,65 @@ describe('useSessionHistory', () => {
     const st = useAppStore.getState();
     expect(st.sessionMessages['session-1']).toHaveLength(2);
     expect(st.sessionMessageMeta['session-1']).toEqual({ oldestSeq: 12, hasMore: true });
+  });
+
+  it('fetches and merges when cache is non-empty but paging meta is missing', async () => {
+    // 模拟流式事件残留（唤醒轮/后台轮按 session_id 写入，但不写分页元数据）：
+    // 缓存里只有本轮 1 条 system 通知，历史从未加载
+    useAppStore.setState({
+      sessionMessages: {
+        'session-1': [
+          {
+            id: 'live-1',
+            role: 'system',
+            segments: [{ type: 'text' as const, text: '[后台命令完成]' }],
+            timestamp: '',
+          },
+        ],
+      },
+      sessionMessageMeta: {},
+    });
+    let calls = 0;
+    server.use(
+      http.get(`${API_BASE}/sessions/session-1/messages`, () => {
+        calls += 1;
+        return HttpResponse.json({
+          session_id: 'session-1',
+          messages: historyMessages(),
+          next_before_seq: 12,
+          has_more: true,
+          last_seq: 20,
+        });
+      }),
+    );
+
+    const ok = await loadSessionHistory('session-1');
+
+    expect(ok).toBe(true);
+    expect(calls).toBe(1); // 不再因"缓存非空"跳过历史拉取
+    const st = useAppStore.getState();
+    const msgs = st.sessionMessages['session-1'] ?? [];
+    expect(msgs).toHaveLength(3); // 2 条历史 + 1 条流式残留
+    expect(msgs[msgs.length - 1]?.id).toBe('live-1'); // 流式尾部不被覆盖丢失
+    expect(st.sessionMessageMeta['session-1']).toEqual({ oldestSeq: 12, hasMore: true });
+  });
+
+  it('applies the snapshot turn authority to turnState (ADR-045)', () => {
+    // 残留 running（丢过 turn_state 事件）→ 快照权威值校正为 idle
+    useAppStore.getState().setTurnState('session-1', { state: 'running', auto: true });
+
+    act(() => {
+      applySnapshot('session-1', historyMessages(), {
+        oldestSeq: 12,
+        hasMore: true,
+        turn: { state: 'idle', auto: false },
+      });
+    });
+
+    expect(useAppStore.getState().turnState['session-1']).toEqual({
+      state: 'idle',
+      auto: false,
+    });
   });
 
   it('loadOlder requests the older page via before_seq cursor and prepends it', async () => {
@@ -187,7 +267,7 @@ describe('useSessionHistory', () => {
     expect(useAppStore.getState().sessionMessages['session-1']).toEqual([]);
   });
 
-  it('subscribes only once under StrictMode double-mount (ref guard)', async () => {
+  it('subscribes only once under StrictMode double-mount (forced-set guard)', async () => {
     const subscribeCalls = vi.fn();
     server.use(
       http.post(`${API_BASE}/events/subscribe`, () => {
