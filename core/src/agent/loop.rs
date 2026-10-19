@@ -592,12 +592,23 @@ impl AgentLoop {
                             provider.as_deref(),
                         )
                         .await?;
-                    AgentLoop::finalize_streamed_turn(
+                    // 请求性能（TTFT / 总耗时 / 输出 token）：**必须在 usage 兜底
+                    // 之后**发送——网关不返回流式 usage 时（opencode 等），
+                    // `accum.usage` 为 None，提前发送只能带上 0 输出 token，
+                    // 前端会判定「无生成速度」而只显示 TTFT（实测 bug）。
+                    let perf = accum.perf;
+                    let finalized = AgentLoop::finalize_streamed_turn(
                         accum,
                         &msgs,
                         model,
                         last_input_usage.as_ref(),
-                    )
+                    );
+                    if let Ok((_, Some(usage), _, _, _, _)) = &finalized {
+                        sender
+                            .send_request_perf(perf, usage.completion_tokens as u64)
+                            .await;
+                    }
+                    finalized
                 })
             },
         )
@@ -711,6 +722,13 @@ impl AgentLoop {
                             sender.send_answer_delta(content).await;
                         }
                         if let Some(ref tc_deltas) = choice.delta.tool_calls {
+                            // 首 token 判定包含 tool_calls：纯工具调用轮没有正文/
+                            // 思考增量，若不计入则 TTFT 恒为 None（界面显示
+                            // `TTFT —`）。语义与 provider 控制台一致——「模型
+                            // 开始输出任何内容」（思考/正文/工具调用）即首 token。
+                            if !tc_deltas.is_empty() && accum.perf.ttft_ms.is_none() {
+                                accum.perf.ttft_ms = Some(started.elapsed().as_millis() as u64);
+                            }
                             for tc in tc_deltas {
                                 let entry = accum.tool_calls.entry(tc.index).or_insert_with(|| {
                                     (String::new(), String::new(), String::new())
@@ -741,19 +759,12 @@ impl AgentLoop {
         }
 
         // 收尾性能指标：总耗时 = 请求发出 → 流结束（含工具调用参数串流）。
+        // **事件发送不在此处**：此时 `accum.usage` 可能为 None（网关不返回
+        // 流式 usage，如 opencode/ollama 兼容层）——若在此发事件，输出 token
+        // 只能传 0，前端据「输出为 0」判定无生成速度 → 底部统计条只剩 TTFT
+        // （实测 bug）。兜底估算在 `finalize_streamed_turn`，故 perf 事件由
+        // 调用方（run_stream 单轮闭包）在兜底**之后**发送。
         accum.perf.duration_ms = started.elapsed().as_millis() as u64;
-        // 每轮下发一次（工具轮也发；前端只保留最近一次 → 底部统计条显示
-        // 「最近一次请求」的 TTFT 与生成速度）。输出 token 取本轮 usage。
-        sender
-            .send_request_perf(
-                accum.perf,
-                accum
-                    .usage
-                    .as_ref()
-                    .map(|u| u.completion_tokens as u64)
-                    .unwrap_or(0),
-            )
-            .await;
         Ok(accum)
     }
 

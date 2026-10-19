@@ -970,6 +970,10 @@ async fn collect_request_perf(
 ///
 /// 底部统计条据此展示「最近一次请求」的 TTFT 与生成速度——缺失会导致
 /// 该展示永不出现（静默降级，无报错）。
+///
+/// **回归点（实测 bug）**：事件必须在 usage **兜底估算之后**发送。网关不返回
+/// 流式 usage 时（opencode / ollama 兼容层）`accum.usage` 为 None——若提前发送，
+/// 输出 token 只能是 0，前端据此判定"无生成速度"，界面只剩 `TTFT 4.9s`。
 #[tokio::test]
 async fn test_run_stream_emits_request_perf() {
     let chunks = vec![
@@ -1005,10 +1009,57 @@ async fn test_run_stream_emits_request_perf() {
         duration >= ttft,
         "总耗时不得小于 TTFT（{duration} vs {ttft}）"
     );
-    assert_eq!(
-        p.perf_completion_tokens,
-        Some(0),
-        "网关未返回 usage 时输出 token 记 0"
+    // 网关未返回 usage → 由 finalize_streamed_turn 的估算兜底；事件必须带
+    // 兜底**之后**的值（>0），否则前端不显示生成速度（本测试即该 bug 的回归）
+    let completion = p.perf_completion_tokens.unwrap_or(0);
+    assert!(
+        completion > 0,
+        "网关未返回 usage 时应带兜底估算的输出 token（提前发送会得 0 → 界面无 tok/s）"
+    );
+}
+
+/// 纯 tool_calls 轮的 TTFT：没有正文/思考增量，但首个 tool_call delta 就是
+/// 「模型开始输出」——必须计入首 token。漏计会让界面显示 `TTFT —`
+/// （实测 bug：工具轮 TTFT 恒 None，只有 tok/s 没有 TTFT）。
+#[tokio::test]
+async fn test_run_stream_tool_call_only_turn_records_ttft() {
+    let chunks = vec![stream_chunk(
+        None,
+        Some(vec![ToolCallDelta {
+            index: 0,
+            id: Some("call_1".to_string()),
+            call_type: Some("function".to_string()),
+            function: Some(ToolCallFunctionDelta {
+                name: Some("grep".to_string()),
+                arguments: Some(r#"{"pattern":"x"}"#.to_string()),
+            }),
+        }]),
+        None,
+    )];
+    // max_turns=1：一轮工具调用后达上限（不产生第二轮事件），聚焦本轮 perf
+    let agent_loop = make_loop(stream_mock(chunks), 1);
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(32);
+    let sender = StreamEventSender::new(event_tx);
+    let mut messages = vec![Message::user("工具轮性能")];
+    let _ = agent_loop
+        .run_stream(
+            &mut messages,
+            sender,
+            "session-tc",
+            None,
+            "test-model",
+            None,
+            None,
+            None,
+        )
+        .await;
+
+    let perfs = collect_request_perf(event_rx).await;
+    assert_eq!(perfs.len(), 1, "工具轮也应下发一次 RequestPerf");
+    assert!(
+        perfs[0].ttft_ms.is_some(),
+        "纯 tool_calls 轮必须记录 TTFT（首个 tool_call delta 即首 token；否则界面显示 TTFT —）"
     );
 }
 

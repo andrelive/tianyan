@@ -164,7 +164,11 @@ export default function ChatPanel() {
       .then((perf) => {
         if (!perf) return;
         const st = useAppStore.getState();
-        if (st.requestPerf[sid]) return;
+        // 已有**有效**样本（有输出 token）→ 不回填；实时样本输出为 0 时
+        // （网关不返回流式 usage 的历史轮）用库里的兜底估算值覆盖——
+        // 否则该会话永远只显示 TTFT、看不到生成速度。
+        const cur = st.requestPerf[sid];
+        if (cur && cur.completionTokens > 0) return;
         st.setRequestPerf(sid, perf);
       })
       .catch(() => {
