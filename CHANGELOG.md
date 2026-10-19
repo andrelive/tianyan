@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.8] - 2026-10-18
 
 ### Added
 - **底部统计条：最近一次请求的 TTFT 与生成速度**（DSH 风格性能指标）：`usage_logs` 新增 `ttft_ms` / `duration_ms` 两列（幂等 `ALTER TABLE`，单行 +5~6 B、不重建表；-1 = 未知），AgentLoop 每轮 LLM 调用在 provider 层计时——**TTFT = 请求发出 → 首个内容 token**（thinking 也算，即用户感知的"开始有反应"），**生成速度 = completion_tokens / (总耗时 − TTFT)**（纯生成阶段，不含首包等待，两个指标保持正交）。新增 `RequestPerf` 流式事件（独立 `chunk_type`，每轮一次、后到覆盖先到）+ `GET /api/v1/usage/recent?session_id=&limit=`（打开会话回填，刷新/重开仍可见）。**只展示最近一次**（不做平均/最近 N 次分布，避免单次抖动被平均值掩盖长尾）；纯工具调用轮无内容 token → 只显示 TTFT、不显示 tok/s
