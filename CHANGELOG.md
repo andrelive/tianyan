@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] - 2026-10-18
+## [0.7.0] - 2026-10-19
 
 ### Removed
 - **移除 4 个"命令行封装"工具：`run_tests` / `run_project_tests` / `verify_build` / `discover_tests`**（工具 34 → 30，描述税每轮约 −615 tokens，净删约 3,800 行含测试）。理由：四者底层都是 `execute_command` 的执行器 + 一层输出解析/项目探测（`test_discovery` 1027 行、`verification` 491、`project` 183、`judge.LlmJudge` 90、`output_parse` 95 行），而 `execute_command` 已能跑任意命令；专用工具的真实增量（结构化 passed/failed、cargo JSON 诊断）不足以承担"每轮进上下文的独立 schema + 模型的选择负担"。删除连带清理：`Action::RunTests`/`VerifyBuild` 审批变体、`ToolRegistry::verification_gate`、`LlmJudge`/`VerificationGate`、`output_parse`；**内置角色白名单同步迁移**（`editor` 删 3 条；`reviewer` 原本没有 `execute_command` → 删 3 条并补上，能力不丢）。历史会话里的旧工具调用不受影响（前端按 `tool_call_id` 关联结果；展示层未知工具名自动落 `Generic`）。间接验证改走 `execute_command`（`cargo check` / `cargo test` / `pytest` / `vitest`）
@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **定时任务 / 后台会话历史看不到、也不能上滚（0.6.7 回归治理）**：唤醒轮/后台轮按 `session_id` 向**未打开的会话**写入流式消息（设计使然），但不写分页元数据；`loadSessionHistory` 见「缓存非空」即判定历史已加载而跳过拉取，且无 meta 使上滚开关恒关——同时同路由会话切换（`/chat/{A}` → `/chat/{B}` 不重挂载）因一次性 ref 守卫不再订阅，快照兜底也失效；再叠加「消息不足一屏时 `scrollTop` 恒 0、原生 scroll 事件永不触发」的死锁，历史永久补不回来（实测现场：库中 176 条完好，界面只剩 1 条 system 通知）。修复：① 判据改为「缓存 **且** 分页元数据」才算已加载，缺失时拉一页并**合并**（`mergeSessionMessages`：按 seq 去重升序、服务端页权威、无 seq 的流式占位保留尾部，不丢正在输出内容）；② 按会话切换订阅，历史未加载时 `subscribeSession(force)` 绕过 resident 幂等强制重发快照；③ 上滚自愈：内容未撑满视口且 `has_more` 时主动补页（连续上限 3 次、按会话重置）；④ 快照帧的轮状态权威值落地（`applySnapshot` 应用 `turn`——ADR-045 此前只声明未消费，`turn_state` 事件丢失后输入框会永久禁用）
 - **定时任务会话 ID 双前缀**：`sched-task-{task_id}` 在 task_id 本身已带前缀时再套一次（`sched-task-sched-task-…`），会话列表/tab 标题与任务 id 无法对应。生成改为幂等；存量旧 ID 会话沿用（不迁移数据、不割裂历史），新任务用规范 ID
+- **TTFT / tok/s 显示缺项（0.7.0 自测发现）**：两个互相独立的缺陷——① `RequestPerf` 事件在 `collect_streamed_turn` 内发送，**早于** `finalize_streamed_turn` 的 usage 兜底，该轮流式 usage 缺失时输出 token 只能传 0，前端据「输出为 0」判定无生成速度（落库走兜底估算，表现为「库里对、界面缺」）；② TTFT 只把 `reasoning` / `content` 增量当首 token，**漏了 `tool_calls` 增量** —— 纯工具调用轮没有正文/思考增量 → TTFT 恒空（provider 控制台把首个 tool_call 记为 time to first token，口径应对齐）。修复：perf 事件后移到 usage 兜底之后、由 `run_stream` 的单轮闭包发送（取兜底后的 token 数）；`tool_calls` delta 计入首 token；前端回填守卫放宽（已有实时样本但 `completionTokens = 0` 时允许用库里兜底值覆盖，否则该会话永远只显示 TTFT）
+- **定时任务每次启动都被补跑**：`start_with_scheduler` 的 `load_state()` 在定时智能体任务注册**之前**执行（任务由 server 在调度器启动后才 `load_and_register`），注册时 `last_run = None` → 判定「从未执行 = 立即到期」（`due_task_ids` 的 `unwrap_or(true)`），每次重启都触发一次；且 `scheduler_state.json` 里没有该任务条目（persist 只在 tick 末尾/关停写，分钟级任务运行期间重启即丢），进一步固化「从未执行」。修复：新增 `register_task_with_last_run` / `register_dynamic_task_with_last_run`（注册时用任务自身持久化的 `last_run_at` 初始化）+ 注册后立即 `persist_state_merge`（读现有条目 → 更新 → 写回；全量覆盖会清掉其它任务状态 —— 新测试当场抓到该回归）+ `run_scanner` 每个任务执行后立即 persist。语义保持：从未执行过的任务仍立即首跑、超期（间隔已过）仍补跑（ADR-024）
+- **会话尾部重复显示「思考 + 工具卡片」**（上条历史修复引入的回归）：一轮带工具调用的回答结束后，尾部又重复一遍开头的思考过程与工具卡片（正文不重复；库里该会话仅 5 条、**无重复落库** → 纯前端展示问题）。根因：流式产生的消息 `seq = null`（边界事件 `from_structured_light` 不带 seq），与历史页里同内容（有 seq）无法按 seq 对齐，而「有缓存但无分页元数据」走 merge 时把无 seq 的本地残留当作「流式占位」保留在尾部 → 与历史并存。修复：历史页是权威窗口 —— 非运行态直接 `replace`（本地内容都已落库，历史页已含）；唯一例外是 auto 轮（唤醒轮/后台轮，不设 `streamStatus`）运行中 → 保留 merge 以免丢尚未落库的输出；`mergeSessionMessages` 增内容指纹去重（role + 正文 + tool_call ids），无 seq 本地副本与历史等价时丢弃
 
 ## [0.6.7] - 2026-10-17
 
