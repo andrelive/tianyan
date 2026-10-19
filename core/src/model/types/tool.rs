@@ -18,11 +18,11 @@ pub enum ToolPresentation {
     Read,
     /// 文件写入（write_file）：展示目标路径。
     Write,
-    /// 终端命令（execute_command / run_tests / verify_build）：等宽字体命令块。
+    /// 终端命令（execute_command）：等宽字体命令块。
     Terminal,
     /// 差异编辑（apply_edit / apply_patch）：展示 diff 意图。
     Diff,
-    /// 搜索（grep / search_vfs / glob / list_dir / discover_tests）：
+    /// 搜索（grep / search_vfs / glob / list_dir）：
     /// 结果列表。
     Search,
     /// Web（web_search / web_fetch）：链接卡片。

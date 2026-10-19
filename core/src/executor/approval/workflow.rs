@@ -306,10 +306,6 @@ impl ApprovalWorkflow {
                 .chain(patch_file_paths(patch).iter().map(|p| write_target_risk(p)))
                 .max()
                 .unwrap_or(RiskLevel::Medium),
-            // 测试/构建命令经 cmd /C、sh -c 执行任意 shell 命令（与
-            // ExecuteCommand 同级），属 Medium 风险，需用户确认。
-            Action::RunTests { .. } => RiskLevel::Medium,
-            Action::VerifyBuild { .. } => RiskLevel::Medium,
         }
     }
 

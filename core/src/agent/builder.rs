@@ -18,7 +18,6 @@ use crate::executor::approval::{
     AutoApprovalRule, SessionApprovalNotifier,
 };
 use crate::executor::SecurityPolicy;
-use crate::executor::{LlmJudge, VerificationGate};
 use crate::knowledge::KnowledgeIngestor;
 use crate::model::spec::ModelSpec;
 use crate::model::ChatService;
@@ -440,12 +439,6 @@ impl AgentBuilder {
 
         let chat_model = self.model.clone().unwrap_or_else(|| "default".to_string());
 
-        // 构建 LLM-as-Judge 语义验证（verify_build 质量门控）
-        let verification = Arc::new(VerificationGate::new(Some(LlmJudge::new(
-            model_service.clone(),
-            &chat_model,
-        ))));
-
         // 构建规则记录器（工具执行失败时自动学习，供 GEPA 和 RuleSuggester 消费）
         let rule_recorder = Arc::new(RuleRecorder::new(vfs.clone()));
 
@@ -455,7 +448,6 @@ impl AgentBuilder {
             .with_model(&chat_model)
             .with_metrics(metrics.clone())
             .with_approval_workflow(approval)
-            .with_verification_gate(verification)
             .with_rule_recorder(rule_recorder)
             .with_session_manager(session_manager.clone());
         // 后台命令日志目录（execute_command(background) 日志落盘）

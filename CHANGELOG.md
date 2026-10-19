@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.8] - 2026-10-18
+## [0.7.0] - 2026-10-18
+
+### Removed
+- **移除 4 个"命令行封装"工具：`run_tests` / `run_project_tests` / `verify_build` / `discover_tests`**（工具 34 → 30，描述税每轮约 −615 tokens，净删约 3,800 行含测试）。理由：四者底层都是 `execute_command` 的执行器 + 一层输出解析/项目探测（`test_discovery` 1027 行、`verification` 491、`project` 183、`judge.LlmJudge` 90、`output_parse` 95 行），而 `execute_command` 已能跑任意命令；专用工具的真实增量（结构化 passed/failed、cargo JSON 诊断）不足以承担"每轮进上下文的独立 schema + 模型的选择负担"。删除连带清理：`Action::RunTests`/`VerifyBuild` 审批变体、`ToolRegistry::verification_gate`、`LlmJudge`/`VerificationGate`、`output_parse`；**内置角色白名单同步迁移**（`editor` 删 3 条；`reviewer` 原本没有 `execute_command` → 删 3 条并补上，能力不丢）。历史会话里的旧工具调用不受影响（前端按 `tool_call_id` 关联结果；展示层未知工具名自动落 `Generic`）。间接验证改走 `execute_command`（`cargo check` / `cargo test` / `pytest` / `vitest`）
 
 ### Added
 - **底部统计条：最近一次请求的 TTFT 与生成速度**（DSH 风格性能指标）：`usage_logs` 新增 `ttft_ms` / `duration_ms` 两列（幂等 `ALTER TABLE`，单行 +5~6 B、不重建表；-1 = 未知），AgentLoop 每轮 LLM 调用在 provider 层计时——**TTFT = 请求发出 → 首个内容 token**（thinking 也算，即用户感知的"开始有反应"），**生成速度 = completion_tokens / (总耗时 − TTFT)**（纯生成阶段，不含首包等待，两个指标保持正交）。新增 `RequestPerf` 流式事件（独立 `chunk_type`，每轮一次、后到覆盖先到）+ `GET /api/v1/usage/recent?session_id=&limit=`（打开会话回填，刷新/重开仍可见）。**只展示最近一次**（不做平均/最近 N 次分布，避免单次抖动被平均值掩盖长尾）；纯工具调用轮无内容 token → 只显示 TTFT、不显示 tok/s

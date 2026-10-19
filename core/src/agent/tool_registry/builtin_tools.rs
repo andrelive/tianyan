@@ -9,12 +9,11 @@
 
 use crate::agent::tool_params::{
     ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
-    DelegationStatsParams, DiscoverTestsParams, ExecuteCommandParams, ExecutionDetailParams,
-    ExecutionStatsParams, GlobParams, KnowledgeIngestParams, ListDirParams, ReadFileParams,
-    RepoMapParams, RunProjectTestsParams, RunTestsParams, SearchCodeParams, SearchVfsParams,
-    SelfCheckParams, SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
-    TaskStatusParams, VerifyBuildParams, VfsListParams, VfsReadParams, WebFetchParams,
-    WebSearchParams, WriteFileParams,
+    DelegationStatsParams, ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams,
+    GlobParams, KnowledgeIngestParams, ListDirParams, ReadFileParams, RepoMapParams,
+    SearchCodeParams, SearchVfsParams, SelfCheckParams, SessionRecallParams, SuggestRoleParams,
+    SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VfsListParams, VfsReadParams,
+    WebFetchParams, WebSearchParams, WriteFileParams,
 };
 use crate::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
 
@@ -126,34 +125,6 @@ fn def_call_skill(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<CallSkillParams>(
         name,
         "按 ID 读取 VFS 技能文档（方法论文档：L0 摘要 + L2 详情）。技能无执行语义——读到内容后参考方法论自行用基础工具执行。planning 为预置技能，GEPA 学习技能由进化引擎写入。",
-    ))
-}
-
-fn def_run_tests(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<RunTestsParams>(
-        name,
-        "运行**指定的**测试命令并返回结构化结果（passed/failed + 失败详情分组）。命令原样执行（经安全检查）——如 `cargo test --lib`、`pytest -k smoke`、`vitest run tests/`。要按项目类型自动构造命令，用 run_project_tests。",
-    ))
-}
-
-fn def_run_project_tests(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<RunProjectTestsParams>(
-        name,
-        "按**项目类型探测**并运行测试（无需指定命令）：Cargo → `cargo test`、Python → `pytest`、TypeScript → `vitest run`；`framework` 可覆盖探测结果，`suite`/`filter` 缩小范围。返回与 run_tests 相同的结构化结果。项目类型无法识别时，改用 run_tests 显式给命令。",
-    ))
-}
-
-fn def_discover_tests(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<DiscoverTestsParams>(
-        name,
-        "发现项目中的测试（cargo test -- --list / pytest --collect-only -q / vitest --list），返回结构化测试列表（suite/name/file/line）。不执行测试。",
-    ))
-}
-
-fn def_verify_build(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<VerifyBuildParams>(
-        name,
-        "运行构建验证命令（如 cargo check）并返回结果。",
     ))
 }
 
@@ -271,7 +242,7 @@ fn def_symbol_outline(name: &'static str) -> ToolDefinition {
 fn def_repo_map(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<RepoMapParams>(
         name,
-        "生成仓库结构地图：跨文件符号骨架，按「被引用次数」排序——一次调用替代多轮 grep 试探。用途：摸清代码布局与模块划分、定位某功能实现位置、重构前侦察影响面与耦合热点。每行 `路径:行 种类 名称(外部引用数)`；用 focus 聚焦关键字相关子图，用 path 限定子树。**引用度是文本级近似**（不做名称解析：宏展开/重导出/动态分发不可见）——要精确影响面，改完跑 verify_build（编译器给精确清单）。",
+        "生成仓库结构地图：跨文件符号骨架，按「被引用次数」排序——一次调用替代多轮 grep 试探。用途：摸清代码布局与模块划分、定位某功能实现位置、重构前侦察影响面与耦合热点。每行 `路径:行 种类 名称(外部引用数)`；用 focus 聚焦关键字相关子图，用 path 限定子树。**引用度是文本级近似**（不做名称解析：宏展开/重导出/动态分发不可见）——要精确影响面，改完跑 `cargo check`（编译器给精确清单）。",
     ))
 }
 
@@ -291,18 +262,6 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
     tool("vfs_read", def_vfs_read, ToolPresentation::Read),
     tool("vfs_list", def_vfs_list, ToolPresentation::Generic),
     tool("call_skill", def_call_skill, ToolPresentation::Skill),
-    tool("run_tests", def_run_tests, ToolPresentation::Terminal),
-    tool(
-        "run_project_tests",
-        def_run_project_tests,
-        ToolPresentation::Terminal,
-    ),
-    tool(
-        "discover_tests",
-        def_discover_tests,
-        ToolPresentation::Search,
-    ),
-    tool("verify_build", def_verify_build, ToolPresentation::Terminal),
     tool("ask_user", def_ask_user, ToolPresentation::Generic),
     tool("self_check", def_self_check, ToolPresentation::Generic),
     tool(

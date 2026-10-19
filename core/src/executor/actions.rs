@@ -190,24 +190,6 @@ pub async fn execute_write_file(
     Ok(Value::String("写入成功".to_string()))
 }
 
-/// 执行构建验证操作。
-///
-/// 统一委托 [`VerificationGate::verify_build`]（无 LLM 门控时 `judge=None`）：
-/// 结构化诊断优先（json_diagnostics）→ pattern 回退，输出 JSON 形状与门控路径
-/// 完全一致（passed / exit_code / reason / suggestion / structured_diagnostics /
-/// stdout / stderr / judge_method）——判定规则不再有第二份实现。
-pub async fn execute_verify_build(
-    command: &str,
-    cwd: Option<&str>,
-    timeout_secs: Option<u64>,
-    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> Result<Value, TianyanError> {
-    let result = crate::executor::verification::VerificationGate::new(None)
-        .verify_build(command, cwd, timeout_secs, cancel)
-        .await?;
-    Ok(Value::from(result))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

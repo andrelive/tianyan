@@ -12,7 +12,6 @@ use crate::executor::repo_map::RepoMapCache;
 use crate::executor::web::WebSearchClient;
 use crate::executor::Action;
 use crate::executor::SecurityPolicy;
-use crate::executor::VerificationGate;
 use crate::knowledge::KnowledgeIngestor;
 use crate::model::types::{ToolCall, ToolDefinition, ToolPresentation};
 use crate::model::ChatService;
@@ -46,8 +45,6 @@ mod repo_map_ops;
 mod spill;
 /// 符号大纲工具执行器（symbol_outline）。
 mod symbol_ops;
-/// 测试发现工具执行器（discover_tests）。
-mod test_ops;
 
 pub use builtin_tools::builtin_tool_names;
 pub use pipeline::{ToolGuard, ToolPostExecuteListener, ToolPreExecuteListener};
@@ -185,13 +182,11 @@ pub struct ToolRegistry {
     /// 委托子 Agent 时使用的模型名称。
     pub(crate) model: String,
     pub(crate) metrics: Option<Arc<AgentMetrics>>,
-    /// 审批工作流（write_file / apply_edit / apply_patch / execute_command /
-    /// run_tests / verify_build 危险操作门控，统一经 [`Self::ensure_approved`]）。
+    /// 审批工作流（write_file / apply_edit / apply_patch / execute_command
+    /// 危险操作门控，统一经 [`Self::ensure_approved`]）。
     pub(crate) approval_workflow: Option<Arc<ApprovalWorkflow>>,
     /// 待用户确认的操作指纹（审批拒绝 → 询问用户 → 用户回答后确认/放弃）。
     pub(crate) pending_approval_fingerprints: Arc<Mutex<Vec<String>>>,
-    /// 语义验证门控（verify_build 工具的 LLM-as-Judge 支持）。
-    pub(crate) verification_gate: Option<Arc<VerificationGate>>,
     /// 内置可观测性后置监听器（统计 / Trace / GEPA 历史 / 失败规则学习；
     /// A1 迁移：原 execute_single 尾部观测逻辑）。
     pub(crate) observability: observability::ToolObservabilityListener,
@@ -267,7 +262,6 @@ impl ToolRegistry {
             metrics: None,
             approval_workflow: None,
             pending_approval_fingerprints: Arc::new(Mutex::new(Vec::new())),
-            verification_gate: None,
             observability: observability::ToolObservabilityListener::default(),
             tool_output_spill: spill::ToolOutputSpillListener::default(),
             web_client: None,
@@ -530,8 +524,8 @@ impl ToolRegistry {
         self
     }
 
-    /// 设置审批工作流（write_file / apply_edit / apply_patch / execute_command /
-    /// run_tests / verify_build 危险操作门控，统一经 [`Self::ensure_approved`]）。
+    /// 设置审批工作流（write_file / apply_edit / apply_patch / execute_command
+    /// 危险操作门控，统一经 [`Self::ensure_approved`]）。
     pub fn with_approval_workflow(mut self, workflow: Arc<ApprovalWorkflow>) -> Self {
         self.approval_workflow = Some(workflow);
         self
@@ -550,8 +544,8 @@ impl ToolRegistry {
 
     /// 审批门控：请求审批并处理拒绝降级。
     ///
-    /// 统一 6 个危险工具（write_file / apply_edit / apply_patch / execute_command /
-    /// run_tests / verify_build）的审批序列，消除各执行器内的逐字复制：
+    /// 统一 4 个危险工具（write_file / apply_edit / apply_patch / execute_command）
+    /// 的审批序列，消除各执行器内的逐字复制：
     /// 1. `approval_workflow` 未装配（None）时直接放行；
     /// 2. 子任务（subagent）非交互审批——未授权操作立即拒绝（ADR-011）；
     /// 3. 拒绝 → 记录待确认指纹（用户经"询问用户"链路批准后放行）并返回
@@ -612,16 +606,10 @@ impl ToolRegistry {
         self.pending_approval_fingerprints.lock().await.clone()
     }
 
-    /// 获取审批工作流（write_file / apply_edit / apply_patch / execute_command /
-    /// run_tests / verify_build 危险操作门控）。
+    /// 获取审批工作流（write_file / apply_edit / apply_patch / execute_command
+    /// 危险操作门控）。
     pub fn approval_workflow(&self) -> Option<Arc<ApprovalWorkflow>> {
         self.approval_workflow.clone()
-    }
-
-    /// 设置语义验证门控（verify_build 工具的 LLM-as-Judge 支持）。
-    pub fn with_verification_gate(mut self, gate: Arc<VerificationGate>) -> Self {
-        self.verification_gate = Some(gate);
-        self
     }
 
     /// 设置规则记录器（工具执行失败时自动学习规则；委托给内置可观测性监听器）。
@@ -984,19 +972,6 @@ impl ToolRegistry {
             "vfs_read" => self.execute_vfs_read(arguments).await,
             "vfs_list" => self.execute_vfs_list(arguments).await,
             "call_skill" => self.execute_call_skill(arguments).await,
-            "run_tests" => {
-                self.execute_run_tests(arguments, session_id, subagent)
-                    .await
-            }
-            "run_project_tests" => {
-                self.execute_run_project_tests(arguments, session_id, subagent)
-                    .await
-            }
-            "discover_tests" => self.execute_discover_tests(arguments, session_id).await,
-            "verify_build" => {
-                self.execute_verify_build(arguments, session_id, subagent)
-                    .await
-            }
             "ask_user" => self.execute_ask_user(arguments, session_id, subagent).await,
             "self_check" => self.execute_self_check().await,
             "knowledge_ingest" => self.execute_knowledge_ingest(arguments).await,

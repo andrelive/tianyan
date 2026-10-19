@@ -54,8 +54,8 @@ pub use stream_forward::{
 };
 pub use tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, ReadFileParams,
-    RunTestsParams, SearchCodeParams, SearchVfsParams, SelfCheckParams, VerifyBuildParams,
-    VfsListParams, VfsReadParams, WriteFileParams,
+    SearchCodeParams, SearchVfsParams, SelfCheckParams, VfsListParams, VfsReadParams,
+    WriteFileParams,
 };
 pub use tool_registry::{builtin_tool_names, DynamicToolExecutor, ToolRegistry};
 pub use types::{

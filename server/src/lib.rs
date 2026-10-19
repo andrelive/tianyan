@@ -306,7 +306,7 @@ const PLANNING_SKILL_CONTENT: &str = "\
 
 你已进入计划阶段（用户要求先规划再执行）。遵守以下约束：
 
-1. **只读研究**：只使用只读工具收集信息（read_file / grep / search_vfs /\n   vfs_read / vfs_list / glob / list_dir / symbol_outline / repo_map / web_search / web_fetch /\n   discover_tests）。不得调用 write_file / apply_edit / apply_patch / execute_command /\n   run_tests / verify_build / knowledge_ingest / delegate_to_agent（后台任务）。
+1. **只读研究**：只使用只读工具收集信息（read_file / grep / search_vfs /\n   vfs_read / vfs_list / glob / list_dir / symbol_outline / repo_map / web_search / web_fetch）。\n   不得调用 write_file / apply_edit / apply_patch / execute_command /\n   knowledge_ingest / delegate_to_agent（后台任务）。
 2. **输出结构化计划**：按以下格式输出——\n   - 目标：一句话明确要完成什么\n   - 步骤：编号列表，每步注明涉及的文件/命令/风险\n   - 风险与验证：潜在副作用 + 每步完成后的验证方式（测试/检查命令，仅描述不执行）\n3. **结束询问**：计划输出完毕后，询问用户是否开始执行——用户确认前不执行任何写操作。\n4. 用户确认执行后，恢复正常（执行）行为。";
 
 /// 允许的 CORS 来源（编译期常量，避免运行时 parse panic）。

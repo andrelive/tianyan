@@ -147,61 +147,6 @@ pub struct CallSkillParams {
     pub parameters: HashMap<String, serde_json::Value>,
 }
 
-/// 运行测试参数（**显式命令**）。
-///
-/// 与 [`RunProjectTestsParams`] 是**单一职责分离**的两个工具：本工具跑
-/// **你给的命令**（完全控制），那个按项目类型探测构造命令。此前两者挤在同一
-/// 工具里（`command` 优先、缺省才探测）——同一意图两种写法，模型每次都要选
-/// （形态分叉 = 参数生成抖动源），故拆开。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RunTestsParams {
-    /// 测试命令（原样执行，经安全检查）：如 `cargo test --lib`、`pytest -k smoke`。
-    pub command: String,
-    /// 工作目录。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    /// 超时秒数。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_secs: Option<u64>,
-}
-
-/// 运行项目测试参数（**探测版**：不指定命令，按项目类型构造）。
-///
-/// 探测 `cwd`（缺省为会话工作目录）的项目格式：Cargo → `cargo test`、
-/// Python → `pytest`、TypeScript → `vitest run`；`framework` 可覆盖探测结果，
-/// `suite`/`filter` 缩小范围。项目类型无法识别时明确报错并指引用 `run_tests`。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct RunProjectTestsParams {
-    /// 工作目录（项目探测起点；缺省为会话工作目录）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    /// 超时秒数。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_secs: Option<u64>,
-    /// 框架覆盖："auto"（默认，按项目探测）| "cargo" | "pytest" | "vitest"。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub framework: Option<String>,
-    /// 测试过滤（cargo test <filter> / pytest -k <filter>）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter: Option<String>,
-    /// 测试套件（cargo -p <suite> / pytest <suite-file>）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suite: Option<String>,
-}
-
-/// 验证构建参数。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct VerifyBuildParams {
-    /// 构建命令。
-    pub command: String,
-    /// 工作目录。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    /// 超时秒数。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout_secs: Option<u64>,
-}
-
 /// 单个追问问题（多问题分步：每个问题一个 tab，对齐 DSH questions 数组）。
 ///
 /// `options` 为**纯字符串数组**（选项标签）：此前是 `[{label, description?}]`
@@ -438,7 +383,7 @@ pub struct SymbolOutlineParams {
 /// 仓库结构地图参数（repo_map 工具）。
 ///
 /// 引用度为**文本级近似**（不做名称解析：宏展开、重导出、动态分发不可见），
-/// 仅用于排序权重；精确影响面靠编译器（改完跑 `verify_build`）。
+/// 仅用于排序权重；精确影响面靠编译器（改完跑 `cargo check`）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RepoMapParams {
     /// 扫描根目录（相对路径按会话工作目录解析；缺省会话工作目录）。
@@ -453,13 +398,6 @@ pub struct RepoMapParams {
     /// 是否包含测试文件（缺省 false：测试代码不进地图）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_tests: Option<bool>,
-}
-
-/// 发现测试参数。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct DiscoverTestsParams {
-    /// 项目根目录（或项目内任意目录，向上探测）。
-    pub path: String,
 }
 
 /// 执行统计查询参数（execution_stats；GEPA 数据层，ADR-017）。

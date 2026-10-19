@@ -4,7 +4,7 @@
 > 手工修改将被覆盖；freshness 由 `scripts/gen-tool-catalog.ps1 -Check` 门禁。
 > 生成原则（DSH gen-tool-catalog 吸收）：运行时注册是 schema 唯一真相源。
 
-共 34 个工具。
+共 30 个工具。
 
 | 工具 | 展示意图 | 描述 |
 |------|---------|------|
@@ -14,7 +14,6 @@
 | `call_skill` | skill | 按 ID 读取 VFS 技能文档（方法论文档：L0 摘要 + L2 详情）。技能无执行语义——读到内容后参考方法论自行用基础工具执行。planning 为预置技能，GEPA 学习技能由进化引擎写入。 |
 | `delegate_to_agent` | delegate | 将子任务委托给隔离的子智能体（独立上下文）。可用 role（内置：researcher 研究 / editor 编辑 / reviewer 验证评审；其他自定义/学习角色用 suggest_role 按任务描述查询——experimental 角色不可调用）选择预设模型、系统提示、工具白名单、max_turns 与超时；用 model 显式覆盖子智能体模型。每次委托是一次性、干净上下文的子智能体（角色系统提示 + 仅此任务），不加载之前任务历史，跨任务上下文需自行在对话中携带。子智能体与主会话同构（ADR-030）：收尾统一"无工具调用"，任务完成时输出最终结果；可用 submit_result 把最终结果写入任务存储（可选结果落盘工具，返回 task_id）——调用后告知主智能体结果 ID，用 task_status 查询。委托一律异步（ADR-026）：立即返回 task_id，任务独立运行；后台任务默认无超时（跑完/取消/轮数耗尽为止）——仅需显式设置 timeout_secs 作为兜底守卫，真实工作用大值（>=3600）；子智能体工作通常较长（代码评审/研究/大重构常超 10 分钟），优先不设超时 + 超时用 task_cancel。**完成通知（含结果落盘位置与摘要）会自动注入本会话——不要轮询等待**：发起后继续其他工作或结束本轮，收到通知再处理（完整结果用 read_file 按通知中的路径读取）；task_cancel 中止。 |
 | `delegation_stats` | generic | 按角色查询子智能体委托统计（来自 delegate_to_agent 记录）：各角色次数与成功率。可选 since（RFC3339）。用于评估当前角色组织（agent_role 注册表）是否需要演进：拆分/合并/提升/退役。 |
-| `discover_tests` | search | 发现项目中的测试（cargo test -- --list / pytest --collect-only -q / vitest --list），返回结构化测试列表（suite/name/file/line）。不执行测试。 |
 | `execute_command` | terminal | 执行 shell 命令（可指定工作目录与超时）。后台命令用 background:true（长驻进程/开发服务器/服务/监视器）：立即返回 task_id 与 log_file，不等待退出。 常驻服务应设 ready——**必须同时给 background:true**，且 port（端口监听）与 pattern（日志关键词）**至少给一个**（可同时给：任一命中即就绪）：系统从 initial_delay_ms 指数退避探测，总超时 timeout_ms（缺省 60s）内未就绪也会通知你（服务继续运行）。 用 task_status 查询进度或读取日志文件；用 task_cancel 终止。 同步命令输出超限（50KB / 2000 行）自动截断并仅保留尾部；完整输出自动落盘，结果中给出 log_file 与 stdout_total_bytes，可用 read_file 的 offset/limit 分页读取全文。 平台：Windows。Shell 是 PowerShell 7+（pwsh）——支持 && / \|\| 命令链接；cmdlet（Out-File、Select-String、Get-ChildItem）与管道可用。 临时/中间产物（提交信息文件、一次性脚本、审计产物等）请写入系统临时目录的会话区（如 `$env:TEMP\tianyan-scratch\`），**不要**写应用数据目录根或安装目录。 |
 | `execution_detail` | generic | 查询原始工具执行记录（GEPA 数据层）：近期执行含工具名、任务描述、结果、耗时、所用技能。可选 since/category/limit。用于查看某操作类的具体实例，判断是否提炼可复用技能。 |
 | `execution_stats` | generic | 查询工具执行统计（GEPA 数据层）：按类计数、成功率、平均耗时。可选 since（RFC3339）过滤该时间之后的执行；可选 category 过滤一类操作（file_operation/code_operation/search_operation/test_operation/deploy_operation/analysis_operation/general_operation）。用于发现重复/失败的操作模式，再决定是否提炼新技能或规则。 |
@@ -24,9 +23,7 @@
 | `knowledge_ingest` | knowledge | 将文件或目录导入知识库：解析、摘要（L0 摘要 + L1 概览）、建立语义索引。接受文件或目录路径，可选指定分类。 |
 | `list_dir` | search | 列出单层目录下的条目。目录带尾部 '/'。支持 offset/limit 分页。 |
 | `read_file` | read | 读取文本文件内容（纯内容，无行号/哈希前缀）。默认返回前 2000 行（单次输出上限约 50KB，超出部分截断并附「使用 offset 继续」提示）。大文件请**按需读取**：用 offset/limit 指定行范围（1 起始行号），建议先用 grep/symbol_outline 定位目标区域再按范围精读；结果含 total_lines/total_bytes 与实际窗口（showing）。内容匹配编辑（apply_edit）直接按内容定位，无需行号。 |
-| `repo_map` | code | 生成仓库结构地图：跨文件符号骨架，按「被引用次数」排序——一次调用替代多轮 grep 试探。用途：摸清代码布局与模块划分、定位某功能实现位置、重构前侦察影响面与耦合热点。每行 `路径:行 种类 名称(外部引用数)`；用 focus 聚焦关键字相关子图，用 path 限定子树。**引用度是文本级近似**（不做名称解析：宏展开/重导出/动态分发不可见）——要精确影响面，改完跑 verify_build（编译器给精确清单）。 |
-| `run_project_tests` | terminal | 按**项目类型探测**并运行测试（无需指定命令）：Cargo → `cargo test`、Python → `pytest`、TypeScript → `vitest run`；`framework` 可覆盖探测结果，`suite`/`filter` 缩小范围。返回与 run_tests 相同的结构化结果。项目类型无法识别时，改用 run_tests 显式给命令。 |
-| `run_tests` | terminal | 运行**指定的**测试命令并返回结构化结果（passed/failed + 失败详情分组）。命令原样执行（经安全检查）——如 `cargo test --lib`、`pytest -k smoke`、`vitest run tests/`。要按项目类型自动构造命令，用 run_project_tests。 |
+| `repo_map` | code | 生成仓库结构地图：跨文件符号骨架，按「被引用次数」排序——一次调用替代多轮 grep 试探。用途：摸清代码布局与模块划分、定位某功能实现位置、重构前侦察影响面与耦合热点。每行 `路径:行 种类 名称(外部引用数)`；用 focus 聚焦关键字相关子图，用 path 限定子树。**引用度是文本级近似**（不做名称解析：宏展开/重导出/动态分发不可见）——要精确影响面，改完跑 `cargo check`（编译器给精确清单）。 |
 | `schedule_task` | generic | 创建一个后台定时任务：按执行间隔周期调用智能体在指定工作目录完成给定指令。用于用户要求定时/周期执行某项工作（如每 30 分钟检查一次、每天总结一次）。间隔制（ADR-024）：距上次执行达到间隔即触发，服务未运行期间超期的任务会在重启后自动补跑一次。 |
 | `search_vfs` | search | 语义化搜索整个 VFS（所有命名空间：文档/记忆/规则/技能），向量 RRF 融合。返回每条结果的 abstract + overview + URI。需要完整详情时用 vfs_read 加载。发现可用技能、检索相关规则/记忆也用本工具。 |
 | `self_check` | generic | 查询自身运行指标：执行次数、成功率、token 消耗、管线失败、规则有效性。当用户质疑你的表现时用于自我反思。 |
@@ -36,7 +33,6 @@
 | `task_cancel` | generic | 按 task_id 取消运行中的后台任务。取消已结束任务是空操作。 |
 | `task_status` | generic | 查询后台任务（delegate bt_xxx 与 command cmd_xxx 统一）。默认范围：**当前会话工作目录**下所有会话的任务（同目录跨会话的协调面）——其他工作目录的任务默认不查、不用、不提；仅当竞争问题确实跨目录时用 scope="global" 显式查全局（用完即回，其他目录信息不进入常规汇报）。带 task_id：返回该任务**完整快照**（含结果/输出尾部/日志路径；仅限可见范围）。不带 task_id：列出可见任务（**默认最近 20 条**，`limit` 可调、上限 100；条目为定位用精简字段——id/kind/status/描述截断/时间，完整内容按 task_id 查询），可选 kind 过滤（delegate\|command）。**任务完成会自动通知本会话——不要为等待而轮询**；仅当用户要求查看进度或需要任务列表时调用。 |
 | `todo` | generic | 管理当前会话的待办清单（会话绑定，仅本会话可见；同一时期只保留一批同源待办）。**每种操作只有一种写法**——要改/删单条也放进数组（长度 1）：create 传 `todos` 数组 = 当前完整计划（**整表替换**——未包含的旧条目（含未完成项）即被移除；想保留的条目必须包含在新列表中）；update 传 `updates` 数组（按 id 批量合并状态）；delete 传 `ids` 数组；list 查看当前清单（可用 status / goal_id 过滤）；close 清空当前批全部待办（用户目标变更、现有待办不再反映当前意图时使用，即使有未完成项）。开始多步工作先写入整份清单；推进/完成用 update（比全量重发省）；计划增删改时重发完整列表。子任务挂靠：先创建任务，再用 update 的 parent_id 挂靠（整表替换中 parent_id 不可用）。完成项默认划线保留展示，是否清理由你自行决定。 |
-| `verify_build` | terminal | 运行构建验证命令（如 cargo check）并返回结果。 |
 | `vfs_list` | generic | 按 tianyan:// URI 列出 VFS 目录下的条目（uri / is_directory / 简介 L0）。目录即导航索引：用于浏览知识库/技能结构、发现子条目（多文件技能的部件、文件夹内容）；命中某条目后想了解同族内容时也可用它。 |
 | `vfs_read` | read | 按 tianyan:// URI 读取 VFS 条目（简介 abstract / 目录 overview / 正文 detail）。在 search_vfs 之后加载相关条目；正文默认截断至 2000 行（50KB），用 offset/limit 按行取段——对齐目录（L1）中的章节行号。 |
 | `web_fetch` | web | 抓取单个网页并提取可读文本内容（标题、正文、页面链接）。在 web_search 后用。仅允许 http/https URL，本地/私网地址被拦截。 |

@@ -452,7 +452,11 @@ pub fn categorize_task_by_keyword(description: &str) -> String {
     {
         return "code_edit".to_string();
     }
-    if lower.contains("run_tests") || lower.contains("verify_build") {
+    if lower.contains("cargo test")
+        || lower.contains("cargo check")
+        || lower.contains("pytest")
+        || lower.contains("vitest")
+    {
         return "verify".to_string();
     }
     if lower.contains("execute_command") {

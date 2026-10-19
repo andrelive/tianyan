@@ -188,6 +188,6 @@ async fn test_repo_map_tool_registered_with_approximation_note() {
         .find(|d| d.function.name == "repo_map")
         .expect("repo_map 应已注册");
     let description = &def.function.description;
-    assert!(description.contains("verify_build"), "应指明精确验证路径");
+    assert!(description.contains("cargo check"), "应指明精确验证路径");
     assert!(description.contains("近似"), "应显式声明引用度为近似");
 }

@@ -1,7 +1,7 @@
 //! LLM-as-Judge 语义验证模块。
 //!
 //! 对命令输出进行语义判断，而非仅依赖退出码和关键词匹配。
-//! 用于 `verify_build` 工具的深度质量门控，以及后台任务结果自审（G4）。
+//! 用于后台任务结果自审（G4）。
 
 use crate::common::llm_judge::truncate_output;
 use crate::model::types::ChatCompletionRequest;
@@ -37,95 +37,6 @@ pub struct Judgment {
     pub verdict: Verdict,
     /// 判断理由。
     pub reason: String,
-}
-
-/// LLM-as-Judge — 使用 LLM 对命令输出进行语义质量评估。
-///
-/// 与简单的退出码检查和关键词匹配不同，LlmJudge 能够理解：
-/// - 编译警告是否表明真正的回归
-/// - 测试失败是否有关系（例如 flaky test）
-/// - 输出是否符合预期的语义结构
-#[derive(Clone)]
-pub struct LlmJudge {
-    model_service: Arc<dyn ChatService>,
-    model: String,
-}
-
-impl LlmJudge {
-    /// 创建一个新的 LLM 判断器。
-    pub fn new(model_service: Arc<dyn ChatService>, model: impl Into<String>) -> Self {
-        Self {
-            model_service,
-            model: model.into(),
-        }
-    }
-
-    /// 对构建/验证命令输出进行语义判断。
-    ///
-    /// # 参数
-    /// - `command` — 被执行的命令（如 `cargo check`）
-    /// - `stdout` — 命令的标准输出
-    /// - `stderr` — 命令的标准错误输出
-    /// - `exit_code` — 命令的退出码
-    pub async fn judge_build_result(
-        &self,
-        command: &str,
-        stdout: &str,
-        stderr: &str,
-        exit_code: i32,
-    ) -> Judgment {
-        // Fast path: clean exit code 0 with empty stderr → Pass
-        if exit_code == 0 && stderr.trim().is_empty() {
-            return Judgment {
-                verdict: Verdict::Pass,
-                reason: "退出码 0，无错误输出".to_string(),
-            };
-        }
-
-        // Fast path: non-zero exit code and stdout is empty → Fail
-        if exit_code != 0 && stdout.trim().is_empty() && stderr.trim().is_empty() {
-            return Judgment {
-                verdict: Verdict::Fail,
-                reason: format!("命令失败，退出码 {}，无输出", exit_code),
-            };
-        }
-
-        // Truncate output to keep LLM call cheap
-        let stdout_trunc = truncate_output(stdout, 2000);
-        let stderr_trunc = truncate_output(stderr, 2000);
-
-        let prompt = build_judge_prompt(command, &stdout_trunc, &stderr_trunc, exit_code);
-        run_judge(&self.model_service, &self.model, prompt, exit_code, || {
-            fallback_judgment(exit_code)
-        })
-        .await
-    }
-}
-
-/// 构建 LLM 判断提示词。
-fn build_judge_prompt(command: &str, stdout: &str, stderr: &str, exit_code: i32) -> String {
-    format!(
-        r#"你是一个构建输出分析器。请判断以下命令的输出是否表明成功。
-
-命令: {}
-退出码: {}
-
-标准输出:
-{}
-标准错误:
-{}
-
-请用以下格式回复（只回复此格式，不要添加其他内容）:
-VERDICT: PASS|FAIL|NEEDS_CHANGES
-REASON: <一句话说明理由>
-SUGGESTION: <如果 NEEDS_CHANGES，给出修复建议；否则留空>
-
-判断指南:
-- PASS: 命令成功完成，没有实质性错误。警告不算失败。
-- FAIL: 命令明确失败，有编译错误或致命错误。
-- NEEDS_CHANGES: 命令有部分错误，需要修改但不算完全失败（例如：1个测试失败，其余通过）。"#,
-        command, exit_code, stdout, stderr,
-    )
 }
 
 /// 后台任务结果自审器（G4 循环内自审门）。
@@ -218,7 +129,7 @@ SUGGESTION: <如果 NEEDS_CHANGES，给出建议；否则留空>
 
 /// 共享 LLM 判断骨架：构造请求 → 调用 → 解析 → 失败/无内容回退。
 ///
-/// 两个判断流程（构建验证 / 任务自审）共用同一调用与回退语义，
+/// 任务自审的判断流程使用（历史上有构建验证流程，已随 verify_build 工具移除）。
 /// 仅 prompt 构造与兜底策略不同（调用方提供 fallback）。
 async fn run_judge(
     model_service: &Arc<dyn ChatService>,
@@ -287,21 +198,6 @@ fn parse_judgment(content: &str, exit_code: i32) -> Judgment {
     Judgment { verdict, reason }
 }
 
-/// 回退判断 — 仅基于退出码。
-fn fallback_judgment(exit_code: i32) -> Judgment {
-    if exit_code == 0 {
-        Judgment {
-            verdict: Verdict::Pass,
-            reason: "退出码 0（LLM 判断不可用，回退到退出码检查）".to_string(),
-        }
-    } else {
-        Judgment {
-            verdict: Verdict::Fail,
-            reason: format!("退出码 {}（LLM 判断不可用，回退到退出码检查）", exit_code),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,18 +214,6 @@ mod tests {
         let truncated = truncate_output(&long, 2000);
         assert!(truncated.len() <= 2500); // Allow some overhead for truncation message
         assert!(truncated.contains("[内容被截断"));
-    }
-
-    #[test]
-    fn test_fallback_judgment_pass() {
-        let j = fallback_judgment(0);
-        assert_eq!(j.verdict, Verdict::Pass);
-    }
-
-    #[test]
-    fn test_fallback_judgment_fail() {
-        let j = fallback_judgment(1);
-        assert_eq!(j.verdict, Verdict::Fail);
     }
 
     #[test]

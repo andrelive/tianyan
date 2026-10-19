@@ -54,24 +54,6 @@ pub enum Action {
         /// 技能参数。
         parameters: serde_json::Map<String, Value>,
     },
-    /// 运行测试。
-    RunTests {
-        /// 测试命令。
-        command: String,
-        /// 工作目录。
-        cwd: Option<String>,
-        /// 超时时间（秒）。
-        timeout_secs: Option<u64>,
-    },
-    /// 验证构建。
-    VerifyBuild {
-        /// 构建命令。
-        command: String,
-        /// 工作目录。
-        cwd: Option<String>,
-        /// 超时时间（秒）。
-        timeout_secs: Option<u64>,
-    },
 }
 
 #[cfg(test)]
