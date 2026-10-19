@@ -135,7 +135,9 @@ impl TaskRegistrar for SchedulerRegistrar {
             handler,
         );
         sched
-            .register_dynamic_task(definition, ctx)
+            // 传任务自身持久化的上次运行时间：调度器启动时该任务尚未注册
+            // （load_state 覆盖不到），不传会被判"从未执行"→ 每次重启立即补跑
+            .register_dynamic_task_with_last_run(definition, task.last_run_at, ctx)
             .await
             .map_err(|e| e.to_string())
     }

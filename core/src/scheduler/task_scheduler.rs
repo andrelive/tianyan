@@ -352,6 +352,43 @@ impl TaskScheduler {
                 })
                 .collect()
         };
+        Self::write_state_file(path, &map).await;
+    }
+
+    /// 持久化（**merge 语义**）：读现有条目 → 用当前任务的 last_run 覆盖 → 写回。
+    ///
+    /// 仅**注册路径**使用：注册发生在 `load_state` 之后，此刻 tasks 可能只含刚
+    /// 注册的少数任务——全量覆盖会把其它任务的持久化状态清空（实测：状态文件
+    /// 被写成 `{}` → 下次 `load_state` 丢失 run_count / last_run，补跑语义失效）。
+    async fn persist_state_merge(&self) {
+        let Some(path) = &self.state_path else {
+            return;
+        };
+        let mut map: HashMap<String, PersistedTaskState> =
+            match tokio::fs::read_to_string(path).await {
+                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                Err(_) => HashMap::new(),
+            };
+        {
+            let tasks = self.tasks.read().await;
+            for t in tasks.iter() {
+                if let Some(lr) = t.last_run {
+                    map.insert(
+                        t.definition.id.clone(),
+                        PersistedTaskState {
+                            last_run: lr,
+                            run_count: t.run_count,
+                            last_error: t.last_error.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        Self::write_state_file(path, &map).await;
+    }
+
+    /// 状态文件原子写（temp + rename）。
+    async fn write_state_file(path: &std::path::Path, map: &HashMap<String, PersistedTaskState>) {
         match serde_json::to_string(&map) {
             Ok(json) => {
                 if let Some(parent) = path.parent() {
@@ -402,6 +439,10 @@ impl TaskScheduler {
                 }
                 // 串行执行：一个任务跑完才检查下一个（避免资源争抢）
                 scheduler.execute_task(&id, &ctx).await;
+                // 执行后**立即**持久化：任务本体可能长时间运行（用户任务是
+                // 分钟级管线），若只在 tick 末尾写，进程在运行中被重启会丢失
+                // 本次 last_run → 下次启动重复补跑。
+                scheduler.persist_state().await;
             }
             scheduler.persist_state().await;
             tokio::time::sleep(tokio::time::Duration::from_secs(scheduler.tick_secs)).await;
@@ -456,6 +497,25 @@ impl TaskScheduler {
         &self,
         definition: TaskDefinition,
     ) -> crate::common::error::Result<()> {
+        self.register_task_with_last_run(definition, None).await
+    }
+
+    /// 注册任务并指定初始 last_run（**注册晚于调度器启动**的任务专用）。
+    ///
+    /// 背景（实测 bug）：`start_with_scheduler` 内部 `load_state()` 只按
+    /// **当时已注册**的任务回填 last_run。定时智能体任务由 server 在调度器
+    /// 启动**之后**才注册（`load_and_register`），因此拿不到持久化的
+    /// last_run → `None` → `due_task_ids` 判定"从未执行 = 立即到期" →
+    /// **每次重启/重装都立刻补跑一次**（用户可见"打开一次就启动一次"）。
+    ///
+    /// 调用方应传入任务自身持久化的上次运行时间（`last_run_at`）。注册后
+    /// **立即 persist_state**，使该条目写入 `scheduler_state.json`——
+    /// 即便后续启动顺序不变，也能在下次 `load_state` 时恢复。
+    pub async fn register_task_with_last_run(
+        &self,
+        definition: TaskDefinition,
+        initial_last_run: Option<i64>,
+    ) -> crate::common::error::Result<()> {
         let mut tasks = self.tasks.write().await;
         if tasks.iter().any(|t| t.definition.id == definition.id) {
             return Err(TianyanError::Custom(format!(
@@ -473,10 +533,14 @@ impl TaskScheduler {
 
         tasks.push(RegisteredTask {
             definition,
-            last_run: None,
+            last_run: initial_last_run,
             run_count: 0,
             last_error: None,
         });
+        drop(tasks);
+        // 立即落盘（merge）：让动态注册的任务进入 scheduler_state.json
+        // （下次启动可恢复），且**不得清空**其它任务已有的持久化状态
+        self.persist_state_merge().await;
         Ok(())
     }
 
@@ -487,6 +551,17 @@ impl TaskScheduler {
         _ctx: Arc<TaskContext>,
     ) -> crate::common::error::Result<()> {
         self.register_task(definition).await
+    }
+
+    /// 运行期动态注册任务（带初始 last_run；用于**启动后恢复**的用户任务，
+    /// 避免每次重启被误判"从未执行"而立即补跑）。
+    pub async fn register_dynamic_task_with_last_run(
+        self: &Arc<Self>,
+        definition: TaskDefinition,
+        last_run: Option<i64>,
+        _ctx: Arc<TaskContext>,
+    ) -> crate::common::error::Result<()> {
+        self.register_task_with_last_run(definition, last_run).await
     }
 
     /// 注销任务（幂等；持久化状态保留——同 id 重注册可延续）。
@@ -758,6 +833,55 @@ mod tests {
         let ctx = Arc::new(make_context());
         scheduler.execute_task("a", &ctx).await;
         assert!(scheduler.due_task_ids().await.is_empty());
+    }
+
+    /// **注册晚于调度器启动**的任务必须用自身的 last_run_at 初始化——否则
+    /// `load_state()`（启动时执行，此时任务尚未注册）覆盖不到，`last_run`
+    /// 为 None 会被判"从未执行 = 立即到期"，表现为**每次重启/重装都立刻
+    /// 补跑一次**（实测 bug：定时智能体任务）。
+    #[tokio::test]
+    async fn test_register_with_initial_last_run_defers_due_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("scheduler_state.json");
+        let scheduler = TaskScheduler::new().with_state_path(state_path.clone());
+
+        let now = Utc::now().timestamp();
+        scheduler
+            .register_task_with_last_run(
+                TaskDefinition::new("late", "启动后注册", 86400, make_handler()),
+                Some(now),
+            )
+            .await
+            .unwrap();
+
+        // 刚跑过（间隔 1 天）→ 不到期（修复前会是 [late]）
+        assert!(
+            scheduler.due_task_ids().await.is_empty(),
+            "带 last_run 注册的任务不应被判定立即到期"
+        );
+
+        // 注册即落盘：state 文件里已有该条目（下次启动 load_state 可恢复）
+        let raw = tokio::fs::read_to_string(&state_path).await.unwrap();
+        assert!(
+            raw.contains("late"),
+            "注册后应立即写入 scheduler_state.json，实际：{raw}"
+        );
+    }
+
+    /// 对照：不传 last_run（既有行为）→ 从未执行 → 立即到期（补跑语义）。
+    #[tokio::test]
+    async fn test_register_without_last_run_is_due_immediately() {
+        let scheduler = TaskScheduler::new();
+        scheduler
+            .register_task(TaskDefinition::new(
+                "fresh",
+                "新任务",
+                86400,
+                make_handler(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(scheduler.due_task_ids().await, vec!["fresh".to_string()]);
     }
 
     #[tokio::test]
