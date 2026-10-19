@@ -136,9 +136,11 @@ describe('useSessionHistory', () => {
     expect(st.sessionMessageMeta['session-1']).toEqual({ oldestSeq: 12, hasMore: true });
   });
 
-  it('fetches and merges when cache is non-empty but paging meta is missing', async () => {
-    // 模拟流式事件残留（唤醒轮/后台轮按 session_id 写入，但不写分页元数据）：
-    // 缓存里只有本轮 1 条 system 通知，历史从未加载
+  it('replaces stale streaming residue when cache is non-empty but paging meta is missing', async () => {
+    // 模拟流式事件残留（按 session_id 写入但不写分页元数据）：缓存里只有
+    // 1 条无 seq 的本地消息，历史从未加载。**非运行态**下本地内容都已落库
+    // （历史页已含），因此必须 replace——合并会把无 seq 残留与历史并存，
+    // 表现为「回答结束后尾部又重复一遍」（实测 bug）。
     useAppStore.setState({
       sessionMessages: {
         'session-1': [
@@ -172,9 +174,44 @@ describe('useSessionHistory', () => {
     expect(calls).toBe(1); // 不再因"缓存非空"跳过历史拉取
     const st = useAppStore.getState();
     const msgs = st.sessionMessages['session-1'] ?? [];
-    expect(msgs).toHaveLength(3); // 2 条历史 + 1 条流式残留
-    expect(msgs[msgs.length - 1]?.id).toBe('live-1'); // 流式尾部不被覆盖丢失
+    expect(msgs).toHaveLength(2); // 历史权威：本地无 seq 残留被覆盖
+    expect(msgs.some((m) => m.id === 'live-1')).toBe(false);
     expect(st.sessionMessageMeta['session-1']).toEqual({ oldestSeq: 12, hasMore: true });
+  });
+
+  it('merges (not replaces) while an auto turn is running — output not yet persisted', async () => {
+    // auto 轮（唤醒轮/后台轮）运行中：本地可能含尚未落库的输出 → 保留合并
+    useAppStore.setState({
+      sessionMessages: {
+        'session-1': [
+          {
+            id: 'live-1',
+            role: 'system',
+            segments: [{ type: 'text' as const, text: '运行中的增量' }],
+            timestamp: '',
+          },
+        ],
+      },
+      sessionMessageMeta: {},
+      turnState: { 'session-1': { state: 'running', auto: true } },
+    });
+    server.use(
+      http.get(`${API_BASE}/sessions/session-1/messages`, () =>
+        HttpResponse.json({
+          session_id: 'session-1',
+          messages: historyMessages(),
+          next_before_seq: 12,
+          has_more: true,
+          last_seq: 20,
+        }),
+      ),
+    );
+
+    await loadSessionHistory('session-1');
+
+    const msgs = useAppStore.getState().sessionMessages['session-1'] ?? [];
+    expect(msgs).toHaveLength(3); // 2 条历史 + 运行中增量（保留）
+    expect(msgs.some((m) => m.id === 'live-1')).toBe(true);
   });
 
   it('applies the snapshot turn authority to turnState (ADR-045)', () => {

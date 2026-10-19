@@ -153,6 +153,36 @@ describe('useAppStore', () => {
     expect(useAppStore.getState().messages).toHaveLength(0);
   });
 
+  it('mergeSessionMessages drops keyless local copies whose content equals incoming', () => {
+    // 实测 bug：回答结束后尾部又重复一遍「思考 + 工具卡片」——流式消息无 seq
+    // （服务端边界事件不带 seq），合并时与历史里同内容（有 seq）的消息并存。
+    // 内容指纹去重：本地无 seq 副本与 incoming 等价 → 丢弃。
+    const sameText = '没有历史讨论可参照，那我直接给判断。';
+    useAppStore.setState({
+      currentSessionId: 'session-1',
+      sessionMessages: {
+        'session-1': [
+          { id: 'local-copy', role: 'assistant', segments: [{ type: 'text', text: sameText }] },
+        ],
+      },
+      sessionMessageMeta: {},
+    });
+    const incoming: ChatMessage[] = [
+      { id: 'user-1', seq: 0, role: 'user', segments: [{ type: 'text', text: '问' }] },
+      { id: 'asst-1', seq: 1, role: 'assistant', segments: [{ type: 'text', text: sameText }] },
+    ];
+
+    useAppStore.getState().mergeSessionMessages('session-1', incoming, {
+      oldestSeq: 0,
+      hasMore: false,
+    });
+
+    const msgs = useAppStore.getState().sessionMessages['session-1'] ?? [];
+    expect(msgs).toHaveLength(2); // 本地同内容副本被丢弃，不重复
+    expect(msgs.some((m) => m.id === 'local-copy')).toBe(false);
+    expect(msgs[1]?.id).toBe('asst-1');
+  });
+
   it('mergeSessionMessages merges by seq (server wins) and keeps the keyless streaming tail', () => {
     // 历史补齐场景：本地是流式残留（同 seq 的旧快照 + 无 seq 的占位）
     useAppStore.setState({

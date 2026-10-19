@@ -50,8 +50,18 @@ export async function loadSessionHistory(sessionId: string): Promise<boolean> {
       oldestSeq: data.next_before_seq ?? null,
       hasMore: Boolean(data.has_more),
     };
-    if (cur.hasSessionMessages(sessionId)) {
-      // 缓存里是流式残留（本轮新增）→ 合并（按 seq 去重升序），不覆盖
+    // 历史页是**权威窗口**：非运行态直接用服务端页 replace。
+    //
+    // 修复（实测 bug：回答结束后尾部又重复一遍"思考 + 工具卡片"）：
+    // 流式产生的消息 `seq = null`（服务端边界事件不带 seq），若走合并，它们
+    // 会被当作"无 seq 的流式占位"保留在尾部——与历史页里**同一内容**（有
+    // seq）并存 → 重复展示。非运行态下本地内容都已落库（历史页已含），
+    // replace 才正确。
+    //
+    // 唯一例外：auto 轮（唤醒轮/后台轮）运行中**不设** streamStatus（上面的
+    // 守卫拦不到），本地可能含尚未落库的输出 → 保留合并语义，避免丢半截输出。
+    const turnRunning = (cur.turnState[sessionId]?.state ?? 'idle') === 'running';
+    if (cur.hasSessionMessages(sessionId) && turnRunning) {
       cur.mergeSessionMessages(sessionId, data.messages, meta);
     } else {
       cur.setSessionMessages(sessionId, data.messages);

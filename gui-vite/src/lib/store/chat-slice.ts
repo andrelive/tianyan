@@ -434,9 +434,28 @@ export const createChatSlice: StateCreator<ChatSlice, [], [], ChatSlice> = (set,
       collect(incoming, keylessIncoming); // 后写者胜：服务端页权威覆盖本地同 seq
       const seqMsgs = [...bySeq.values()].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
       const seenIds = new Set(seqMsgs.map((m) => m.id).filter((x): x is string => Boolean(x)));
-      // 无 seq 的消息：服务端页（更早的历史）在前，本地流式占位（更新）在后
-      const tail = [...keylessIncoming, ...keylessBase].filter((m) => !(m.id && seenIds.has(m.id)));
-      const next = [...seqMsgs, ...tail];
+      /**
+       * 内容指纹：流式产生的消息 `seq = null`（服务端边界事件不带 seq），
+       * 与历史页里**同一内容**（有 seq）无法按 seq 对齐——只按 id 去重不够
+       * （边界事件的消息 id 与历史 id 相同时能命中，但流式累积出的占位副本
+       * 往往 id 为空）。按 role + 正文 + 工具调用 id 做内容级去重，避免
+       * 「回答结束后尾部又重复一遍思考+工具卡片」（实测 bug）。
+       */
+      const fingerprint = (m: ChatMessage): string =>
+        [
+          m.role,
+          (m.segments ?? []).map((seg) => ('text' in seg ? (seg.text ?? '') : '')).join(''),
+          (m.tool_calls ?? []).map((t) => t.id ?? '').join(','),
+        ].join('|');
+      const seenFingerprints = new Set([...seqMsgs, ...keylessIncoming].map((m) => fingerprint(m)));
+      // 无 seq 的消息：服务端页（更早的历史）在前，本地流式占位（更新）在后；
+      // 与历史内容等价的本地副本（已落库）直接丢弃——不重复展示。
+      const tail = keylessBase.filter(
+        (m) =>
+          !(m.id && seenIds.has(m.id)) &&
+          !(seenFingerprints.has(fingerprint(m)) && (m.segments?.length ?? 0) > 0),
+      );
+      const next = [...seqMsgs, ...keylessIncoming, ...tail];
       const isCurrent = sessionId === resolveSessionKey(s);
       return {
         sessionMessages: { ...s.sessionMessages, [sessionId]: next },
