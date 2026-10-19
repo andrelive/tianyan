@@ -137,6 +137,7 @@ Job `quality`（`ubuntu-latest`）。
 | **本地缺 protoc** | `release.yml` 装了 protoc（`lance-encoding` 构建依赖），但 **`build.ps1` 没有**该步骤 | 本地首次打包前确保 `protoc` 在 PATH（或安装 `protoc`），否则 lancedb/lance 相关编译可能失败 |
 | **前端重复构建** | `build.ps1` 先 `npm run build`，`cargo tauri build` 的 `beforeBuildCommand` 又跑一次 | 可用 `-SkipGui` 依赖 `beforeBuildCommand`（注意 `beforeBuildCommand` 仍会执行） |
 | **PowerShell 5.1 stderr 陷阱** | `cargo ... 2>&1 \| ...` 会把 cargo 的 warning/Info 当错误抛出 | 见排障文档 §5；`$ErrorActionPreference="Continue"` + `$LASTEXITCODE` |
+| **本地构建以 exit 1 收尾（`no private key`）——非失败** | `createUpdaterArtifacts: true` 时 tauri 会做 updater 签名；本地未设 `TAURI_SIGNING_PRIVATE_KEY` → 打印 `Error A public key has been found, but no private key` 并以**退出码 1** 结束。**MSI 在报错前已产出**，`.sig` 与 `latest.json` 由 CI 发布链生成（0.6.1 起每次本地构建都是如此） | **判断本地构建成功与否看 MSI 是否产出（含时间戳/大小），不看退出码**；本地验收不需要 `.sig` |
 
 ---
 
