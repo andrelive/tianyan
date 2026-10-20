@@ -196,6 +196,33 @@ pub trait DynamicToolExecutor: Send + Sync {
 /// 也会让"新增工具"改变已有工具的排布。按名去重（重名注册被跳过）。
 type DynamicToolTable = Vec<(String, Arc<dyn DynamicToolExecutor>)>;
 
+/// 已迁至插件、但**渲染契约仍需稳定**的工具（工具名 → 展示意图）。
+///
+/// 前端按工具名渲染卡片，历史消息里仍存这些工具的调用记录。它们的 schema 与
+/// 实现在 `plugins/tools-fs`（ADR-049 期 1），但服务层在**无 registry 实例**时
+/// （历史消息转换）仍需给出正确展示意图，否则旧会话的卡片会退化为通用样式。
+///
+/// 这是**前端渲染约定**，与"工具实现在哪"无关；插件工具若要历史兼容，
+/// 在此补一行（与插件内的 `presentation()` 保持一致）。
+pub const MIGRATED_TOOL_PRESENTATIONS: &[(&str, ToolPresentation)] = &[
+    ("read_file", ToolPresentation::Read),
+    ("write_file", ToolPresentation::Write),
+    ("apply_edit", ToolPresentation::Diff),
+    ("apply_patch", ToolPresentation::Diff),
+    ("glob", ToolPresentation::Search),
+    ("list_dir", ToolPresentation::Search),
+];
+
+/// 已知工具名全集（内置 + 已迁插件），供跨 crate 一致性门禁校验。
+///
+/// 消费方：server 侧 planning 技能提示词的工具清单校验——清单里的工具可以是
+/// 内置工具，也可以是插件工具（core 侧无法枚举插件，只能靠"已迁"表）。
+pub fn known_tool_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = BUILTIN_TOOLS.iter().map(|t| t.name).collect();
+    names.extend(MIGRATED_TOOL_PRESENTATIONS.iter().map(|(n, _)| *n));
+    names
+}
+
 /// 工具注册表，维护工具定义并并行执行 tool_calls。
 #[derive(Clone)]
 pub struct ToolRegistry {
@@ -953,15 +980,21 @@ impl ToolRegistry {
             .collect();
     }
 
-    /// 查询内置工具默认展示意图（未知工具返回 Generic）。
+    /// 查询工具默认展示意图（未知工具返回 Generic）。
     ///
     /// 与 Self::presentation 的注册表默认一致；供无 ToolRegistry 实例的
     /// 调用方（如 server 历史消息转换）复用，避免维护第二份映射。
+    ///
+    /// 已迁插件的工具也在覆盖范围内（见 [`MIGRATED_TOOL_PRESENTATIONS`]）：
+    /// 历史消息里仍有它们的调用记录，渲染契约不能随"实现搬家"而丢。
     pub fn default_presentation(name: &str) -> ToolPresentation {
-        BUILTIN_TOOLS
+        if let Some(meta) = BUILTIN_TOOLS.iter().find(|t| t.name == name) {
+            return meta.presentation;
+        }
+        MIGRATED_TOOL_PRESENTATIONS
             .iter()
-            .find(|t| t.name == name)
-            .map(|t| t.presentation)
+            .find(|(n, _)| *n == name)
+            .map(|(_, p)| *p)
             .unwrap_or(ToolPresentation::Generic)
     }
 }

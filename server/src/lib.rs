@@ -23,12 +23,9 @@ use tianyan::vfs::VirtualFileSystem;
 
 use crate::agent_builder::create_model_services;
 use crate::api::events::processor as event_processor;
-use crate::api::goals::tool::GoalTool;
-use crate::api::todos::tool::TodoTool;
 use crate::embedding_usage::attach_embedding_usage_sink;
 use crate::evolution_executor::AgentEvolutionExecutor;
 use crate::scheduled_tasks::manager::{ScheduledAgentTaskManager, SchedulerRegistrar};
-use crate::scheduled_tasks::tool::{CreateTaskRequest, ScheduleTaskTool};
 
 // Import API module
 pub mod agent_builder;
@@ -750,41 +747,18 @@ async fn start_server_inner(
             registrar
                 .bind(Some(scheduler.clone()), Some(task_ctx.clone()))
                 .await;
-            state
-                .attach_scheduled_agent_tasks(Some(manager.clone()))
-                .await;
-            // 注入 schedule_task 动态工具（agent 构建后追加，LLM 可见可调用）。
-            // 解耦：工具只持创建请求通道（不依赖 manager 类型）；装配层在此创建
-            // 消费者（持 manager 的 Weak）监听通道处理请求。通道生命周期随工具
-            // 自动结束（agent drop → 工具 drop → sender drop → 通道关闭 → 消费者退出）。
-            let (create_task_tx, mut create_task_rx) =
-                tokio::sync::mpsc::channel::<CreateTaskRequest>(32);
-            let manager_weak = Arc::downgrade(&manager);
-            tokio::spawn(async move {
-                while let Some(request) = create_task_rx.recv().await {
-                    let result = match manager_weak.upgrade() {
-                        Some(m) => Ok(m.create(&request.req).await),
-                        None => Err("定时任务管理器不可用".to_string()),
-                    };
-                    let _ = request.resp_tx.send(result);
-                }
-            });
+            state.attach_agent_task_manager(Some(manager.clone())).await;
+            // 组件工具（`schedule_task` / `todo` / `goal`）注入：**唯一装配点**。
+            //
+            // 与 `reload_agent` 共用 `component_dynamic_tools()`——此前这里是两段
+            // 手写 `register_dynamic_tools`，热重载重建 agent 时不会重放，
+            // 三个工具静默消失（`tool: 未知工具：todo`）直到重启进程。
+            // 通道创建与消费者 spawn 已收口进 `attach_agent_task_manager`。
             state
                 .agent_lock()
                 .read()
                 .await
-                .register_dynamic_tools(vec![Arc::new(ScheduleTaskTool::new(create_task_tx))])
-                .await;
-            // 注入 todo/goal 动态工具（agent 可自主创建/跟踪/修复待办与目标——
-            // 计划面板数据同源，非纯 UI 功能）
-            state
-                .agent_lock()
-                .read()
-                .await
-                .register_dynamic_tools(vec![
-                    Arc::new(TodoTool::new(state.todo_store())),
-                    Arc::new(GoalTool::new(state.goal_store())),
-                ])
+                .register_dynamic_tools(state.component_dynamic_tools().await)
                 .await;
             // 恢复持久化任务（注册经 registrar 接口进调度器）
             manager.load_and_register().await;
@@ -1086,7 +1060,9 @@ mod tests {
             .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
             .collect();
         assert!(!mentions.is_empty(), "应能从 planning 提示词解析出工具清单");
-        let registered = tianyan::agent::builtin_tool_names();
+        // 已知工具全集（内置 + 已迁插件）：提示词清单里的工具可能来自插件
+        // （read_file / glob 等已迁至 plugins/tools-fs，core 侧无法枚举）。
+        let registered = tianyan::agent::known_tool_names();
         for m in &mentions {
             assert!(
                 registered.contains(m),

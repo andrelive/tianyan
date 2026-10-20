@@ -32,11 +32,36 @@ use tianyan::{Result as TianyanResult, TianyanError};
 use crate::agent_builder::{create_model_services, AgentBuilderFactory};
 use crate::api::clipboard::tool::ClipboardWriteTool;
 use crate::api::clipboard::types::PendingCapture;
+use crate::api::goals::tool::GoalTool;
+use crate::api::todos::tool::TodoTool;
 use crate::mcp_bridge::McpToolManager;
+use crate::scheduled_tasks::tool::{CreateTaskRequest, ScheduleTaskTool};
 
 /// 构造模型服务创建错误（统一错误前缀，避免调用点重复拼装）。
 fn model_services_error(e: impl std::fmt::Display) -> TianyanError {
     TianyanError::Custom(format!("模型服务错误：模型服务创建失败：{e}"))
+}
+
+/// 按配置派生工作区快照管理器（配置了 `working_directory` 时启用）。
+/// 构造组件工具清单（`schedule_task` / `todo` / `goal`）。
+///
+/// **顺序即注册顺序**，固定为 `schedule_task` → `todo` → `goal`（与历史注入顺序
+/// 一致）：工具定义是提示词前缀的一部分，顺序抖动会白掉前缀缓存。
+///
+/// 抽成纯函数便于单测——不依赖 `AppState` 的 DB / VFS / 模型服务，
+/// 回归测试可直接断言「三个工具名都在返回值里」（删掉任一注入即变红）。
+pub(crate) fn build_component_tools(
+    todo_store: Arc<TodoStore>,
+    goal_store: Arc<GoalStore>,
+    schedule_tx: Option<tokio::sync::mpsc::Sender<CreateTaskRequest>>,
+) -> Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>> {
+    let mut tools: Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>> = Vec::new();
+    if let Some(tx) = schedule_tx {
+        tools.push(Arc::new(ScheduleTaskTool::new(tx)));
+    }
+    tools.push(Arc::new(TodoTool::new(todo_store)));
+    tools.push(Arc::new(GoalTool::new(goal_store)));
+    tools
 }
 
 /// 按配置派生工作区快照管理器（配置了 `working_directory` 时启用）。
@@ -277,6 +302,12 @@ pub struct AppState {
     scheduler: Arc<RwLock<Option<Arc<TaskScheduler>>>>,
     /// 定时智能体任务管理器（start_server 创建后装配；无 Provider 时为 None）。
     scheduled_agent_tasks: Arc<RwLock<Option<Arc<ScheduledAgentTaskManager>>>>,
+    /// `schedule_task` 工具的创建请求通道发送端（**跨 agent 重建复用**）。
+    ///
+    /// 组件工具是逐次注入的：通道若随 agent 重建而丢，热重载后 `schedule_task`
+    /// 会静默消失（直到重启进程）。由 [`Self::attach_agent_task_manager`]
+    /// 创建一次，[`Self::component_dynamic_tools`] 每次装配时克隆同一发送端。
+    scheduled_task_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<CreateTaskRequest>>>>,
     /// 待办清单存储（todos.json；用户跟踪多步任务）。
     todo_store: Arc<TodoStore>,
     /// 目标存储（goals.json；长期目标 + 进度跟踪）。
@@ -474,6 +505,7 @@ impl AppState {
             mcp_tools,
             scheduler: Arc::new(RwLock::new(None)),
             scheduled_agent_tasks: Arc::new(RwLock::new(None)),
+            scheduled_task_tx: Arc::new(RwLock::new(None)),
             todo_store: Arc::new(TodoStore::new(&data_dir)),
             goal_store: Arc::new(GoalStore::new(&data_dir)),
             sqlite_db: database,
@@ -605,6 +637,13 @@ impl AppState {
         // 剪贴板写入工具随 agent 重建重新注入（复用同一 outbox 实例，
         // tauri 轮询路径不因热重载中断）
         dynamic_tools.push(Arc::new(ClipboardWriteTool::new(self.clipboard_outbox())));
+        // 组件工具（`todo` / `goal` / `schedule_task`）：**必须随新 agent 一起注入**。
+        //
+        // 历史 bug（本次修复）：这三个工具只在 `start_server_inner` 里逐次
+        // `register_dynamic_tools`，而 agent 会因配置热重载 / 模型切换 / MCP 变更
+        // 反复重建——重建后它们永久丢失（`tool: 未知工具：todo`），直到重启进程。
+        // 现由 `component_dynamic_tools()` 统一产出，两处装配共用同一清单。
+        dynamic_tools.extend(self.component_dynamic_tools().await);
         // 配置可能已变化（模型/API Key），重建共享模型服务
         let model_services = create_model_services(&config)
             .await
@@ -764,9 +803,50 @@ impl AppState {
         self.scheduler.read().await.clone()
     }
 
-    /// 装配定时智能体任务管理器（start_server 创建后调用）。
-    pub async fn attach_scheduled_agent_tasks(&self, m: Option<Arc<ScheduledAgentTaskManager>>) {
-        *self.scheduled_agent_tasks.write().await = m;
+    /// 装配定时智能体任务管理器（**组件工具的唯一装配点**）。
+    ///
+    /// 幂等：manager 每次覆盖（热重载可能换配置），但 `schedule_task` 的请求通道
+    /// 与消费者任务**只创建一次**——工具在每次 agent 重建时按同一发送端重新注入。
+    ///
+    /// 通道消费者持 manager 的 `Weak`：manager drop 后自然退出（通道生命周期随
+    /// 工具与 manager，无需显式清理）。
+    pub async fn attach_agent_task_manager(&self, m: Option<Arc<ScheduledAgentTaskManager>>) {
+        let Some(manager) = m else {
+            *self.scheduled_agent_tasks.write().await = None;
+            return;
+        };
+        *self.scheduled_agent_tasks.write().await = Some(manager.clone());
+
+        let mut slot = self.scheduled_task_tx.write().await;
+        if slot.is_some() {
+            return;
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<CreateTaskRequest>(32);
+        let weak = Arc::downgrade(&manager);
+        tokio::spawn(async move {
+            while let Some(request) = rx.recv().await {
+                let result = match weak.upgrade() {
+                    Some(m) => Ok(m.create(&request.req).await),
+                    None => Err("定时任务管理器不可用".to_string()),
+                };
+                let _ = request.resp_tx.send(result);
+            }
+        });
+        *slot = Some(tx);
+        tracing::info!("schedule_task 工具通道已就绪（跨 agent 重建复用）");
+    }
+
+    /// 组件工具清单（`schedule_task` / `todo` / `goal`）——**唯一装配点**。
+    ///
+    /// `AppState::new` 之后的首次注入与 `reload_agent` 的每次重建都经此产出。
+    /// 历史 bug：此前只在 `start_server_inner` 里逐次 `register_dynamic_tools`，
+    /// agent 因配置热重载 / 模型切换 / MCP 变更重建后，三个工具永久丢失
+    /// （`tool: 未知工具：todo`），直到重启进程。
+    pub async fn component_dynamic_tools(
+        &self,
+    ) -> Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>> {
+        let tx = self.scheduled_task_tx.read().await.clone();
+        build_component_tools(self.todo_store.clone(), self.goal_store.clone(), tx)
     }
 
     /// 获取定时智能体任务管理器（未装配时为 None）。
@@ -875,6 +955,41 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归（本次修复）：组件工具（`schedule_task` / `todo` / `goal`）必须由
+    /// **单一装配点** `build_component_tools` 产出，且顺序固定。
+    ///
+    /// 判别力：删掉任意一处注入 → 断言立即变红。历史 bug 是这三个工具只在
+    /// `start_server_inner` 里逐次注入，agent 重建（配置热重载 / 模型切换 /
+    /// MCP 变更）后永久丢失（`tool: 未知工具：todo`），直到重启进程。
+    #[tokio::test]
+    async fn test_component_tools_include_three_tools_in_stable_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let todo = Arc::new(TodoStore::new(dir.path()));
+        let goal = Arc::new(GoalStore::new(dir.path()));
+        let (tx, _rx) = tokio::sync::mpsc::channel::<CreateTaskRequest>(1);
+
+        let tools = build_component_tools(todo, goal, Some(tx));
+        let names: Vec<String> = tools.iter().map(|t| t.tool_name()).collect();
+        assert_eq!(
+            names,
+            vec!["schedule_task", "todo", "goal"],
+            "组件工具顺序即注册顺序（顺序抖动会白掉提示词前缀缓存）"
+        );
+    }
+
+    /// 无 Provider（manager 未装配）时：`schedule_task` 不出现，但 `todo` / `goal`
+    /// 仍在——这两个不依赖模型服务，配置热重载后必须继续可用。
+    #[tokio::test]
+    async fn test_component_tools_without_scheduler_keeps_todo_and_goal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let todo = Arc::new(TodoStore::new(dir.path()));
+        let goal = Arc::new(GoalStore::new(dir.path()));
+
+        let tools = build_component_tools(todo, goal, None);
+        let names: Vec<String> = tools.iter().map(|t| t.tool_name()).collect();
+        assert_eq!(names, vec!["todo", "goal"]);
+    }
     use tianyan::config::{
         find_provider, ModelCapability, ModelEntry, ModelPreferences, ModelRef, ModelsConfig,
         ProviderConfig,

@@ -97,7 +97,15 @@ async fn list_tools_returns_builtin_tools() {
     assert_eq!(body["total"].as_u64().unwrap() as usize, tools.len());
     // 关键内置工具必须存在（与 LLM 收到的 tools 列表同源）
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    for expected in ["read_file", "write_file", "execute_command", "search_vfs"] {
+    // 注：`read_file` / `write_file` / `glob` / `list_dir` / `apply_edit` /
+    // `apply_patch` 已迁至 `plugins/tools-fs`（ADR-049 期 1），不再属于内置表；
+    // 本测试构造的是 server 侧 registry 替身（不含插件），故断言仍内置的工具。
+    for expected in [
+        "symbol_outline",
+        "repo_map",
+        "execute_command",
+        "search_vfs",
+    ] {
         assert!(names.contains(&expected), "缺少内置工具 {expected}");
     }
 }

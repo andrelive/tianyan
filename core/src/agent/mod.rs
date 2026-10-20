@@ -61,8 +61,8 @@ pub use tool_params::{
     SearchVfsParams, SelfCheckParams, VfsListParams, VfsReadParams, WriteFileParams,
 };
 pub use tool_registry::{
-    builtin_tool_names, parse_params, safety_violation, wrap_tool_error, DynamicToolExecutor,
-    ToolRegistry,
+    builtin_tool_names, known_tool_names, parse_params, safety_violation, wrap_tool_error,
+    DynamicToolExecutor, ToolRegistry,
 };
 pub use types::{
     AgentResponse, AgentState, AgentStreamChunk, SkillCallInfo, StreamChunkType, StreamEventSender,
