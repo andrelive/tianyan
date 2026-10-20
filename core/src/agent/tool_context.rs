@@ -94,7 +94,7 @@ impl ToolContext {
     /// 与 execute_command 默认 cwd 同一套归属规则：模型在会话工作区内工作时，
     /// `read_file ".git/HEAD"`、`glob path="."` 等相对路径落在工作区而非
     /// 进程 cwd（如天演仓库根）。
-    pub(crate) async fn resolve_tool_path(&self, session_id: &str, path: &str) -> String {
+    pub async fn resolve_tool_path(&self, session_id: &str, path: &str) -> String {
         use crate::executor::security::lexical_normalize;
 
         let p = std::path::Path::new(path);
@@ -117,7 +117,7 @@ impl ToolContext {
     ///
     /// 与 [`Self::resolve_tool_path`] 同一套归属规则；供 apply_patch 基准目录、
     /// glob 搜索根等需要「目录本身」（而非拼接路径）的场景使用。
-    pub(crate) async fn resolve_base_dir(
+    pub async fn resolve_base_dir(
         &self,
         session_id: &str,
     ) -> Result<std::path::PathBuf, TianyanError> {
@@ -151,7 +151,7 @@ impl ToolContext {
     /// 2. 子任务（subagent）非交互审批——未授权操作立即拒绝（ADR-011）；
     /// 3. 拒绝 → 记录待确认指纹（用户经"询问用户"链路批准后放行）并返回
     ///    统一"操作需要用户确认"错误。
-    pub(crate) async fn ensure_approved(
+    pub async fn ensure_approved(
         &self,
         session_id: &str,
         subagent: bool,

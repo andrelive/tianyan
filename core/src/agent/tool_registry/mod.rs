@@ -67,7 +67,10 @@ fn vfs_content_field(result: crate::common::error::Result<String>) -> String {
 ///
 /// 所有工具的参数解析共用同一错误包装（"tool: 参数无效"），
 /// 提取为单点避免多份重复样板。
-fn parse_params<T: serde::de::DeserializeOwned>(arguments: &str) -> Result<T, TianyanError> {
+///
+/// **公开面**（ADR-049 期 1）：工具插件 crate 与内置工具共用同一套错误口径，
+/// 插件不得自造参数错误消息（否则前端按错误分类渲染时会分裂）。
+pub fn parse_params<T: serde::de::DeserializeOwned>(arguments: &str) -> Result<T, TianyanError> {
     serde_json::from_str(arguments)
         .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))
 }
@@ -78,7 +81,7 @@ fn parse_params<T: serde::de::DeserializeOwned>(arguments: &str) -> Result<T, Ti
 /// `permission` / `timeout` 构造器分类的错误，经此包装后谓词（`is_not_found` 等）
 /// 依然可命中——否则 `Custom("tool: 执行失败：...")` 前缀会掩盖分类，
 /// server 层只能映射为 500 而非 404/409。未分类错误保持原消息不变。
-fn wrap_tool_error(e: TianyanError) -> TianyanError {
+pub fn wrap_tool_error(e: TianyanError) -> TianyanError {
     let detail = format!("tool: 执行失败：{e}");
     if e.is_not_found() {
         TianyanError::not_found(detail)
@@ -96,7 +99,7 @@ fn wrap_tool_error(e: TianyanError) -> TianyanError {
 }
 
 /// 将安全策略检查错误包装为统一的安全违规工具错误。
-fn safety_violation<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, TianyanError> {
+pub fn safety_violation<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, TianyanError> {
     result.map_err(|e| TianyanError::Custom(format!("tool: 安全违规：{}", e)))
 }
 
@@ -242,6 +245,16 @@ impl std::ops::Deref for ToolRegistry {
     type Target = crate::agent::tool_context::ToolContext;
 
     fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
+}
+
+impl ToolRegistry {
+    /// 工具执行上下文（**插件构造用**：装配层注册插件前取一份共享句柄）。
+    ///
+    /// 字段全是 `Arc` 或策略值，克隆廉价且与注册表共享同一批依赖
+    /// （会话管理器 / VFS / 审批工作流等，不会二次实例化）。
+    pub fn context(&self) -> &crate::agent::tool_context::ToolContext {
         &self.ctx
     }
 }

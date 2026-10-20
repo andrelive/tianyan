@@ -56,11 +56,14 @@ pub use stream_forward::{
 };
 pub use tool_context::ToolContext;
 pub use tool_params::{
-    AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, ReadFileParams,
-    SearchCodeParams, SearchVfsParams, SelfCheckParams, VfsListParams, VfsReadParams,
-    WriteFileParams,
+    AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, GlobParams,
+    ListDirParams, ReadFileParams, SearchCodeParams, SearchVfsParams, SelfCheckParams,
+    VfsListParams, VfsReadParams, WriteFileParams,
 };
-pub use tool_registry::{builtin_tool_names, DynamicToolExecutor, ToolRegistry};
+pub use tool_registry::{
+    builtin_tool_names, parse_params, safety_violation, wrap_tool_error, DynamicToolExecutor,
+    ToolRegistry,
+};
 pub use types::{
     AgentResponse, AgentState, AgentStreamChunk, SkillCallInfo, StreamChunkType, StreamEventSender,
     ToolCallEvent, ToolResultEvent, TurnStateEvent,

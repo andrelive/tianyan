@@ -1,0 +1,22 @@
+[package]
+name = "tianyan-tools-fs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演工具插件：文件系统浏览（glob / list_dir）"
+
+[dependencies]
+# core 的 lib 名是 `tianyan`（package 名 tianyan-core），此处按 lib 名取别名
+tianyan = { path = "../../core", package = "tianyan-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

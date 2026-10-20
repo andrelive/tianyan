@@ -10,8 +10,8 @@
 #   .\scripts\measure-rebuild.ps1 -Command check -Targets core/src/executor/web.rs
 #
 # 判据（ADR-049）：
-#   现状基线 = core+server+mcp+tauri 全量（源码口径 56,541 行）
-#   闸门 A  = 改一行工具插件 ≤ 3,000 行源码（前提：装配器已二分）
+#   现状基线 = core+server+mcp+tauri 全量（源码口径 64,328 行，见 microkernel-baseline.md）
+#   闸门 A  = 改一行工具插件 ≤ 3,500 行源码（前提：插件独立 crate + 清单住 bin）
 
 param(
     [ValidateSet('check', 'build')][string]$Command = 'build',
@@ -55,10 +55,12 @@ function Get-SourceLines {
 }
 
 $crateLines = [ordered]@{
-    'tianyan-core'   = Get-SourceLines 'core'
-    'tianyan-server' = Get-SourceLines 'server'
-    'tianyan-mcp'    = Get-SourceLines 'mcp'
-    'tianyan-tauri'  = Get-SourceLines 'tauri'
+    'tianyan-core'      = Get-SourceLines 'core'
+    'tianyan-server'    = Get-SourceLines 'server'
+    'tianyan-mcp'       = Get-SourceLines 'mcp'
+    'tianyan-tauri'     = Get-SourceLines 'tauri'
+    # 插件 crate（ADR-049 期 1）：重编带度量的主角——改工具只应命中它（+ bin）
+    'tianyan-tools-fs'  = Get-SourceLines 'plugins/tools-fs'
 }
 $totalSrc = ($crateLines.Values | Measure-Object -Sum).Sum
 
@@ -76,7 +78,9 @@ if (-not $SkipWarm) {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $out = & cargo $Command --workspace 2>&1
         $sw.Stop()
-        $c = @($out | Select-String -Pattern '^\s+Compiling\s')
+        # cargo build 输出 Compiling，cargo check 输出 Checking——两者都要认，
+        # 否则 -Command check 的测量恒为 0（期 1 实测踩到）。
+        $c = @($out | Select-String -Pattern '^\s+(Compiling|Checking)\s')
         Write-Host ("  第 {0} 轮 {1:N1}s，Compiling 条目 {2}" -f $i, $sw.Elapsed.TotalSeconds, $c.Count)
         if ($c.Count -eq 0) { break }
     }
@@ -93,7 +97,7 @@ foreach ($t in $Targets) {
     $out = & cargo $Command --workspace 2>&1
     $sw.Stop()
 
-    $compiling = @($out | Select-String -Pattern '^\s+Compiling\s+(\S+)\s' | ForEach-Object { $_.Matches[0].Groups[1].Value })
+    $compiling = @($out | Select-String -Pattern '^\s+(Compiling|Checking)\s+(\S+)\s' | ForEach-Object { $_.Matches[0].Groups[2].Value })
     $rebuilt = @()
     $lines = 0
     foreach ($c in $crateLines.Keys) {

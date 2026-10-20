@@ -813,7 +813,12 @@ impl CommandManager {
 /// `mut` 仅 Windows 分支需要（`creation_flags` 取 `&mut self`）——Linux 上
 /// 该分支被裁掉，`unused_mut` 会撞 CI 的 `-D warnings`（2026-09-17 CI 实测）。
 #[cfg_attr(not(windows), allow(unused_mut))]
-pub(crate) fn hide_console_window(mut cmd: tokio::process::Command) -> tokio::process::Command {
+/// 隐藏子进程控制台窗口（Windows）。
+///
+/// **公开面**（ADR-049 期 1）：工具插件会自建子进程（如 `glob` 调用 `rg`），
+/// 与 core 内的命令执行共用同一套平台旗标，避免插件各自造轮子导致
+/// 「有的子进程闪黑框、有的不闪」。
+pub fn hide_console_window(mut cmd: tokio::process::Command) -> tokio::process::Command {
     #[cfg(windows)]
     {
         cmd.creation_flags(0x08000000);
