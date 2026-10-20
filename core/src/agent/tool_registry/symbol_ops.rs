@@ -9,9 +9,10 @@
 use crate::agent::tool_params::SymbolOutlineParams;
 use crate::common::error::TianyanError;
 
-use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
+use super::{parse_params, safety_violation, wrap_tool_error};
+use crate::agent::tool_context::ToolContext;
 
-impl ToolRegistry {
+impl ToolContext {
     /// 执行 symbol_outline 工具：提取源码文件的结构化符号大纲。
     pub(crate) async fn execute_symbol_outline(
         &self,

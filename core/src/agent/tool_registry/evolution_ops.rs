@@ -13,7 +13,8 @@ use crate::common::error::TianyanError;
 use crate::common::llm_judge::truncate_output;
 use crate::observability::execution_log::ExecutionLog;
 
-use super::{parse_params, wrap_tool_error, ToolRegistry};
+use super::{parse_params, wrap_tool_error};
+use crate::agent::tool_context::ToolContext;
 
 /// 回忆窗口单条消息文本上限（控制工具输出体积——超长对话单条可达数十 KB）。
 const RECALL_WINDOW_TEXT_CHARS: usize = 800;
@@ -46,7 +47,7 @@ fn parse_since(since: Option<&str>) -> Result<Option<i64>, TianyanError> {
     }
 }
 
-impl ToolRegistry {
+impl ToolContext {
     /// 获取执行记录日志（GEPA 数据层；未装配时工具不可用）。
     fn execution_log(&self) -> Result<Arc<ExecutionLog>, TianyanError> {
         self.execution_log.clone().ok_or_else(|| {

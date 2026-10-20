@@ -9,9 +9,10 @@ use crate::agent::tool_params::RepoMapParams;
 use crate::common::error::TianyanError;
 use crate::executor::repo_map::{self, RenderOptions, ScanOptions};
 
-use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
+use super::{parse_params, safety_violation, wrap_tool_error};
+use crate::agent::tool_context::ToolContext;
 
-impl ToolRegistry {
+impl ToolContext {
     /// 执行 repo_map 工具：生成跨文件符号骨架（按引用度排序）。
     ///
     /// 四步：参数解析 → 扫描根解析 → 路径安全检查 → 缓存扫描 + 按预算渲染。

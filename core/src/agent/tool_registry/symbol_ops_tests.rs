@@ -1,13 +1,12 @@
 //! symbol_outline 工具执行器测试：安全策略、参数校验、注册与分发链路。
 
+use crate::agent::ToolRegistry;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
 use crate::config::SafetyMode;
 use crate::executor::SecurityPolicy;
-
-use super::*;
 
 /// 默认严格策略：允许任意路径，但阻止常见破坏性命令。
 fn default_strict_policy() -> SecurityPolicy {

@@ -3,14 +3,13 @@
 //! 覆盖安全关键行为：白名单拒绝、缺失参数、目录不存在、注册可见性与
 //! `execute_single` 分发路由。仅依赖 tempfile，不访问网络或真实 LLM。
 
+use crate::agent::ToolRegistry;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
 use crate::config::SafetyMode;
 use crate::executor::SecurityPolicy;
-
-use super::*;
 
 /// 默认严格策略：允许任意路径，但阻止常见破坏性命令。
 fn default_strict_policy() -> SecurityPolicy {

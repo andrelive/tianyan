@@ -1,5 +1,6 @@
 //! 知识库类工具执行器测试：search_vfs / knowledge_ingest。
 
+use crate::agent::ToolRegistry;
 use std::sync::Arc;
 
 use crate::common::types::{ContextNamespace, TianyanUri};

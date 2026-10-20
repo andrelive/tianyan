@@ -8,9 +8,10 @@ use std::path::PathBuf;
 use crate::agent::tool_params::{GlobParams, ListDirParams};
 use crate::common::error::TianyanError;
 
-use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
+use super::{parse_params, safety_violation, wrap_tool_error};
+use crate::agent::tool_context::ToolContext;
 
-impl ToolRegistry {
+impl ToolContext {
     /// 执行 glob 工具：按 glob 模式查找文件。
     ///
     /// 搜索根：显式 path（相对路径按会话工作目录解析）或会话工作目录，

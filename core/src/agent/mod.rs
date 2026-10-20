@@ -10,6 +10,8 @@ pub const DEFAULT_SOUL: &str = include_str!("default_soul.md");
 pub mod session_state;
 /// 工具目录渲染与 freshness 校验（生成式文档单点）。
 pub mod tool_catalog;
+/// 工具执行上下文（ADR-049 期 0.5.3：工具依赖的显式载体，插件可跨 crate 持有）。
+pub mod tool_context;
 pub mod working_set;
 
 mod agent_core;
@@ -52,6 +54,7 @@ pub use stream_forward::{
     inject_stream_event_fields, spawn_null_forwarder, spawn_stream_forwarder, BroadcastJsonDeliver,
     NullDeliver, StreamEventDeliver, StreamEventMapper, TaskSinkDeliver, STREAM_FORWARD_BUFFER,
 };
+pub use tool_context::ToolContext;
 pub use tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, ExecuteCommandParams, ReadFileParams,
     SearchCodeParams, SearchVfsParams, SelfCheckParams, VfsListParams, VfsReadParams,

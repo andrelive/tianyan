@@ -2,12 +2,11 @@
 //!
 //! 装置：内存库 + 真实会话消息（走 FTS 索引）+ SessionRecall + ToolRegistry。
 
+use crate::agent::ToolRegistry;
 use crate::common::types::{MessageRole, StructuredMessage};
 use crate::config::SafetyMode;
 use crate::db::Database;
 use crate::executor::SecurityPolicy;
-
-use super::*;
 
 /// 默认严格策略（允许任意路径；回忆工具不涉路径规则）。
 fn default_strict_policy() -> SecurityPolicy {

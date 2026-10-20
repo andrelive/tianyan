@@ -5,9 +5,10 @@ use crate::common::error::TianyanError;
 use crate::common::types::{ContentLevel, ContentSource, SearchResult};
 use crate::knowledge::{IngestionRequest, KnowledgeCategory, KnowledgeIngestor};
 
-use super::{parse_params, vfs_content_field, wrap_tool_error, ToolRegistry};
+use super::{parse_params, vfs_content_field, wrap_tool_error};
+use crate::agent::tool_context::ToolContext;
 
-impl ToolRegistry {
+impl ToolContext {
     /// 执行 search_vfs 工具：语义搜索整个 VFS（文档/记忆/规则/技能）。
     pub(crate) async fn execute_search_vfs(
         &self,

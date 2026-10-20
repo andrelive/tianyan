@@ -12,13 +12,14 @@ use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::executor::truncate::truncate_head;
 use crate::executor::Action;
 
-use super::{parse_params, safety_violation, vfs_content_field, wrap_tool_error, ToolRegistry};
+use super::{parse_params, safety_violation, vfs_content_field, wrap_tool_error};
+use crate::agent::tool_context::ToolContext;
 
 /// vfs_list 条目中 L0 简介的截断上限（字节，UTF-8 边界安全）——目录的"含义"
 /// 不需要超长简介（L0 契约约 100 token；此为防御生成失败回退路径的长文本）。
 const LIST_ABSTRACT_MAX_BYTES: usize = 480;
 
-impl ToolRegistry {
+impl ToolContext {
     /// 执行 read_file 工具：读取文件内容。
     ///
     /// 相对路径按会话工作目录解析（[`Self::resolve_tool_path`]）。
@@ -63,7 +64,7 @@ impl ToolRegistry {
         // （`created_dirs` 落在返回结果里，异常可被模型/用户即时发现）。
         let created_dirs = Self::missing_parent_dirs(&params.path);
         // 审批门控（自动放行安全路径/拒绝关键路径/请求人类确认，
-        // 统一序列见 [`ToolRegistry::ensure_approved`]）
+        // 统一序列见 [`ToolContext::ensure_approved`]）
         self.ensure_approved(
             session_id,
             subagent,
@@ -120,7 +121,7 @@ impl ToolRegistry {
             self.security_policy
                 .check_path(std::path::Path::new(&params.path)),
         )?;
-        // 审批门控（统一序列见 [`ToolRegistry::ensure_approved`]；
+        // 审批门控（统一序列见 [`ToolContext::ensure_approved`]；
         // edits 序列化为审批动作负载，与 execute_apply_edit 行为一致）
         let edits: Vec<serde_json::Value> = params
             .edits
@@ -166,7 +167,7 @@ impl ToolRegistry {
         for target in &targets {
             safety_violation(self.security_policy.check_path(&target.resolved))?;
         }
-        // 审批门控（统一序列见 [`ToolRegistry::ensure_approved`]）
+        // 审批门控（统一序列见 [`ToolContext::ensure_approved`]）
         self.ensure_approved(
             session_id,
             subagent,

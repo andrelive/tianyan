@@ -1,5 +1,6 @@
 //! repo_map 工具执行器测试：路径归属 / 安全门控 / 缓存命中 / focus 与预算。
 
+use crate::agent::ToolRegistry;
 use std::sync::Arc;
 
 use serde_json::json;

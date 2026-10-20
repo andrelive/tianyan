@@ -3,6 +3,7 @@
 //! 覆盖安全关键行为：安全策略拒绝、VFS 检索、未配置依赖的错误路径、成功路径。
 //! 所有测试仅依赖 tempfile 与共享 Mock，不访问网络、真实 LLM 或真实 LanceDB。
 
+use crate::agent::ToolRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
 

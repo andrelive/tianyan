@@ -7,10 +7,8 @@ use tokio::sync::Mutex;
 
 use crate::agent::RoleRegistry;
 use crate::common::error::TianyanError;
-use crate::executor::approval::{ApprovalDecision, ApprovalWorkflow};
-use crate::executor::repo_map::RepoMapCache;
+use crate::executor::approval::ApprovalWorkflow;
 use crate::executor::web::WebSearchClient;
-use crate::executor::Action;
 use crate::executor::SecurityPolicy;
 use crate::knowledge::KnowledgeIngestor;
 use crate::model::types::{ToolCall, ToolDefinition, ToolPresentation};
@@ -175,18 +173,16 @@ type DynamicToolTable = Vec<(String, Arc<dyn DynamicToolExecutor>)>;
 /// 工具注册表，维护工具定义并并行执行 tool_calls。
 #[derive(Clone)]
 pub struct ToolRegistry {
-    pub(crate) security_policy: SecurityPolicy,
-    pub(crate) knowledge_ingestor: Option<Arc<KnowledgeIngestor>>,
-    pub(crate) vfs: Option<Arc<dyn VirtualFileSystem>>,
+    /// 工具执行上下文（ADR-049 期 0.5.3）：工具域依赖的**显式**载体。
+    ///
+    /// 注册表经 `Deref` 暴露它——既有调用点（`registry.security_policy` /
+    /// `registry.resolve_tool_path(..)`）无需改动；期 1 拆 crate 时工具域方法
+    /// 随 `ToolContext` 一起搬走，新家只依赖这个结构。
+    pub(crate) ctx: crate::agent::tool_context::ToolContext,
     pub(crate) model_service: Option<Arc<dyn ChatService>>,
     /// 委托子 Agent 时使用的模型名称。
     pub(crate) model: String,
     pub(crate) metrics: Option<Arc<AgentMetrics>>,
-    /// 审批工作流（write_file / apply_edit / apply_patch / execute_command
-    /// 危险操作门控，统一经 [`Self::ensure_approved`]）。
-    pub(crate) approval_workflow: Option<Arc<ApprovalWorkflow>>,
-    /// 待用户确认的操作指纹（审批拒绝 → 询问用户 → 用户回答后确认/放弃）。
-    pub(crate) pending_approval_fingerprints: Arc<Mutex<Vec<String>>>,
     /// 内置可观测性后置监听器（统计 / Trace / GEPA 历史 / 失败规则学习；
     /// A1 迁移：原 execute_single 尾部观测逻辑）。
     pub(crate) observability: observability::ToolObservabilityListener,
@@ -194,8 +190,6 @@ pub struct ToolRegistry {
     pub(crate) tool_output_spill: spill::ToolOutputSpillListener,
     /// Web 搜索/抓取客户端（web_search / web_fetch 工具依赖）。
     pub(crate) web_client: Option<Arc<WebSearchClient>>,
-    /// 仓库结构地图缓存（repo_map 工具：按仓库根缓存扫描产物，内存 LRU）。
-    pub(crate) repo_map_cache: Arc<RepoMapCache>,
     /// 后台任务管理器（delegate_to_agent(background) / task_status / task_cancel）。
     pub(crate) background_tasks: Arc<crate::agent::background::BackgroundTaskManager>,
     /// 后台命令管理器（execute_command(background)；查询/终止经统一 task_status / task_cancel）。
@@ -210,12 +204,6 @@ pub struct ToolRegistry {
     pub(crate) task_event_sink: Option<Arc<dyn crate::agent::background::TaskEventSink>>,
     /// 角色向量路由器（ADR-016 P3：suggest_role 工具依赖；None 时工具不可用）。
     pub(crate) role_router: Option<Arc<crate::agent::role_router::RoleRouter>>,
-    /// 执行记录日志（ADR-017 GEPA 数据层：execution_stats 等工具依赖；None 时工具不可用）。
-    pub(crate) execution_log: Option<Arc<ExecutionLog>>,
-    /// 会话回忆服务（ADR-017 决策 6：session_recall 工具依赖；None 时工具不可用）。
-    pub(crate) session_recall: Option<Arc<SessionRecall>>,
-    /// 会话权威存储（ADR-018：vfs_read 读 tianyan://session/{id} 的兼容层依赖；None 时不可用）。
-    pub(crate) session_store: Option<Arc<crate::session::store::SessionStore>>,
     /// 会话工作集注册表（ADR-035：轮边界增量注入 / 消息落库收口依赖；
     /// None 时 Loop 退化为「无增量注入 + session_manager 直写」的旧路径）。
     pub(crate) working_sets: Option<Arc<crate::agent::working_set::WorkingSetRegistry>>,
@@ -240,9 +228,6 @@ pub struct ToolRegistry {
     pub(crate) delegation_level: usize,
     /// 子 Agent 角色注册表（delegate_to_agent role 参数解析；默认内置角色）。
     pub(crate) role_registry: Arc<RoleRegistry>,
-    /// 会话管理器（execute_command 默认 cwd 解析：模型未指定时使用会话
-    /// 绑定的工作目录，而非进程当前目录）。
-    pub(crate) session_manager: Option<Arc<dyn crate::session::SessionManager>>,
     /// 主循环取消标志槽（按会话：coordinator 每请求注入/清理；
     /// 委托循环据此中断——同步委托期间用户点停止也能及时停）。
     delegation_cancel: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
@@ -250,22 +235,28 @@ pub struct ToolRegistry {
     pub(crate) user_questions: Option<Arc<crate::agent::user_questions::UserQuestionService>>,
 }
 
+/// `ToolRegistry` 经 `Deref` 暴露 [`ToolContext`]：注册表内部逻辑与既有调用点
+/// （`registry.security_policy` / `registry.resolve_tool_path(..)` / `ensure_approved`）
+/// 全部保持原写法，无需为迁移付出调用点改造成本。
+impl std::ops::Deref for ToolRegistry {
+    type Target = crate::agent::tool_context::ToolContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
+}
+
 impl ToolRegistry {
     /// 创建新的注册表并注册内置工具。
     pub fn new(security_policy: SecurityPolicy) -> Self {
         let mut registry = Self {
-            security_policy,
-            knowledge_ingestor: None,
-            vfs: None,
+            ctx: crate::agent::tool_context::ToolContext::new(security_policy),
             model_service: None,
             model: "default".to_string(),
             metrics: None,
-            approval_workflow: None,
-            pending_approval_fingerprints: Arc::new(Mutex::new(Vec::new())),
             observability: observability::ToolObservabilityListener::default(),
             tool_output_spill: spill::ToolOutputSpillListener::default(),
             web_client: None,
-            repo_map_cache: Arc::new(RepoMapCache::new()),
             background_tasks: Arc::new(crate::agent::background::BackgroundTaskManager::new()),
             command_tasks: Arc::new(crate::executor::CommandManager::new(None)),
             command_logs_dir: None,
@@ -273,9 +264,6 @@ impl ToolRegistry {
             command_concurrency: crate::executor::command::DEFAULT_MAX_CONCURRENT_COMMANDS,
             task_event_sink: None,
             role_router: None,
-            execution_log: None,
-            session_recall: None,
-            session_store: None,
             working_sets: None,
             pre_execute_listeners: Vec::new(),
             guards: Vec::new(),
@@ -285,7 +273,6 @@ impl ToolRegistry {
             dynamic_tools: Arc::new(Mutex::new(Vec::new())),
             delegation_level: 0,
             role_registry: Arc::new(RoleRegistry::builtin()),
-            session_manager: None,
             delegation_cancel: Arc::new(Mutex::new(HashMap::new())),
             user_questions: None,
         };
@@ -305,13 +292,13 @@ impl ToolRegistry {
 
     /// 设置知识导入器（knowledge_ingest 工具依赖）。
     pub fn with_knowledge_ingestor(mut self, ingestor: Arc<KnowledgeIngestor>) -> Self {
-        self.knowledge_ingestor = Some(ingestor);
+        self.ctx.knowledge_ingestor = Some(ingestor);
         self
     }
 
     /// 设置 VFS 引用（search_vfs 工具依赖）。
     pub fn with_vfs(mut self, vfs: Arc<dyn VirtualFileSystem>) -> Self {
-        self.vfs = Some(vfs);
+        self.ctx.vfs = Some(vfs);
         self
     }
 
@@ -323,13 +310,13 @@ impl ToolRegistry {
 
     /// 设置会话管理器（execute_command 默认 cwd 解析）。
     pub fn with_session_manager(mut self, sm: Arc<dyn crate::session::SessionManager>) -> Self {
-        self.session_manager = Some(sm);
+        self.ctx.session_manager = Some(sm);
         self
     }
 
     /// 设置会话权威存储（vfs_read 对 tianyan://session/{id} 的兼容读取）。
     pub fn with_session_store(mut self, store: Arc<crate::session::store::SessionStore>) -> Self {
-        self.session_store = Some(store);
+        self.ctx.session_store = Some(store);
         self
     }
 
@@ -361,51 +348,6 @@ impl ToolRegistry {
         let mut child = self.clone();
         child.delegation_level = level;
         child
-    }
-
-    /// 解析工具文件路径：相对路径（非绝对）基于**会话绑定的工作目录**解析
-    /// （缺省回退进程 cwd 语义，原样返回）；绝对路径原样解析。
-    ///
-    /// 输出统一做**词法归一化**（折叠 `.`/`..`）——判定（沙箱前缀匹配）
-    /// 与执行（OS 解析）使用同一形态的路径，`sub/../..` 与符号链接都无法
-    /// 制造两者口径差（T0-1）；对模型也更直观（`a/../b` 直接落 `b`）。
-    ///
-    /// 与 execute_command 默认 cwd 同一套归属规则：模型在会话工作区内工作时，
-    /// `read_file ".git/HEAD"`、`glob path="."` 等相对路径落在工作区而非
-    /// 进程 cwd（如天演仓库根）。
-    pub(crate) async fn resolve_tool_path(&self, session_id: &str, path: &str) -> String {
-        use crate::executor::security::lexical_normalize;
-
-        let p = std::path::Path::new(path);
-        if p.is_absolute() {
-            return lexical_normalize(p).to_string_lossy().into_owned();
-        }
-        if let Some(sm) = &self.session_manager {
-            if let Ok(Some(session)) = sm.get_session(session_id).await {
-                if let Some(wd) = session.working_directory(None) {
-                    let joined = wd.join(path);
-                    return lexical_normalize(&joined).to_string_lossy().into_owned();
-                }
-            }
-        }
-        // 无会话绑定：保留相对语义（进程 cwd），同样折叠 `.`/`..`
-        lexical_normalize(p).to_string_lossy().into_owned()
-    }
-
-    /// 解析会话生效的基准目录：会话绑定的工作目录优先，缺省回退进程 cwd。
-    ///
-    /// 与 [`Self::resolve_tool_path`] 同一套归属规则；供 apply_patch 基准目录、
-    /// glob 搜索根等需要「目录本身」（而非拼接路径）的场景使用。
-    pub(crate) async fn resolve_base_dir(&self, session_id: &str) -> Result<PathBuf, TianyanError> {
-        if let Some(sm) = &self.session_manager {
-            if let Ok(Some(session)) = sm.get_session(session_id).await {
-                if let Some(wd) = session.working_directory(None) {
-                    return Ok(wd);
-                }
-            }
-        }
-        std::env::current_dir()
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：无法获取工作目录: {e}")))
     }
 
     /// 设置委托子 Agent 使用的模型名称。
@@ -527,53 +469,8 @@ impl ToolRegistry {
     /// 设置审批工作流（write_file / apply_edit / apply_patch / execute_command
     /// 危险操作门控，统一经 [`Self::ensure_approved`]）。
     pub fn with_approval_workflow(mut self, workflow: Arc<ApprovalWorkflow>) -> Self {
-        self.approval_workflow = Some(workflow);
+        self.ctx.approval_workflow = Some(workflow);
         self
-    }
-
-    /// 记录被审批拒绝、待用户确认的操作指纹。
-    ///
-    /// 由“询问用户”降级链路调用（`ensure_approved` 拒绝分支）；消费方为
-    /// `Agent` 轮末读取 [`Self::pending_approval_fingerprints`] 生成追问；
-    /// 用户回答后经 [`Self::confirm_pending_approval`] 决定是否放行。
-    pub async fn remember_pending_approval(&self, action: &Action) {
-        let fp = ApprovalWorkflow::action_fingerprint(action);
-        self.pending_approval_fingerprints.lock().await.push(fp);
-        tracing::info!(action = ?action, "操作已进入待用户确认队列");
-    }
-
-    /// 审批门控：请求审批并处理拒绝降级。
-    ///
-    /// 统一 4 个危险工具（write_file / apply_edit / apply_patch / execute_command）
-    /// 的审批序列，消除各执行器内的逐字复制：
-    /// 1. `approval_workflow` 未装配（None）时直接放行；
-    /// 2. 子任务（subagent）非交互审批——未授权操作立即拒绝（ADR-011）；
-    /// 3. 拒绝 → 记录待确认指纹（用户经"询问用户"链路批准后放行）并返回
-    ///    统一"操作需要用户确认"错误。
-    pub(crate) async fn ensure_approved(
-        &self,
-        session_id: &str,
-        subagent: bool,
-        action: &Action,
-    ) -> Result<(), TianyanError> {
-        let Some(ref approval) = self.approval_workflow else {
-            return Ok(());
-        };
-        let approval_result = if subagent {
-            approval.request_approval_no_wait(session_id, action).await
-        } else {
-            approval.request_approval(session_id, action).await
-        };
-        let resp = approval_result
-            .map_err(|e| TianyanError::Custom(format!("tool: 执行失败：审批工作流错误: {}", e)))?;
-        if resp.decision != ApprovalDecision::Approve {
-            self.remember_pending_approval(action).await;
-            return Err(TianyanError::Custom(format!(
-                "tool: 安全违规：操作需要用户确认：{}",
-                resp.reason.unwrap_or_default()
-            )));
-        }
-        Ok(())
     }
 
     /// 处理用户对审批追问的回答。
@@ -601,11 +498,6 @@ impl ToolRegistry {
         true
     }
 
-    /// 获取待用户确认的操作指纹快照。
-    pub async fn pending_approval_fingerprints(&self) -> Vec<String> {
-        self.pending_approval_fingerprints.lock().await.clone()
-    }
-
     /// 获取审批工作流（write_file / apply_edit / apply_patch / execute_command
     /// 危险操作门控）。
     pub fn approval_workflow(&self) -> Option<Arc<ApprovalWorkflow>> {
@@ -627,14 +519,14 @@ impl ToolRegistry {
     /// 设置执行记录日志（ADR-017 GEPA 数据层：execution_stats / execution_detail /
     /// delegation_stats 工具与执行记录持久化依赖）。
     pub fn with_execution_log(mut self, log: Arc<ExecutionLog>) -> Self {
-        self.execution_log = Some(log.clone());
+        self.ctx.execution_log = Some(log.clone());
         self.observability.set_execution_log(log);
         self
     }
 
     /// 设置会话回忆服务（ADR-017 决策 6：session_recall 工具依赖）。
     pub fn with_session_recall(mut self, recall: Arc<SessionRecall>) -> Self {
-        self.session_recall = Some(recall);
+        self.ctx.session_recall = Some(recall);
         self
     }
 

@@ -1,11 +1,10 @@
 //! 代码类工具执行器测试：grep（内嵌搜索引擎）。
 
+use crate::agent::ToolRegistry;
 use std::sync::Arc;
 
 use crate::config::SafetyMode;
 use crate::executor::SecurityPolicy;
-
-use super::*;
 
 /// 默认严格策略：允许任意路径，但阻止常见破坏性命令。
 fn default_strict_policy() -> SecurityPolicy {

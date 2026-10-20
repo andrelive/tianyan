@@ -4,9 +4,10 @@ use crate::agent::tool_params::SearchCodeParams;
 use crate::common::error::TianyanError;
 use crate::executor::search::{execute_search_code as execute_search, SearchOptions};
 
-use super::{parse_params, safety_violation, wrap_tool_error, ToolRegistry};
+use super::{parse_params, safety_violation, wrap_tool_error};
+use crate::agent::tool_context::ToolContext;
 
-impl ToolRegistry {
+impl ToolContext {
     /// 执行 grep 工具：正则搜索文件内容（内嵌引擎，无外部 rg 依赖）。
     ///
     /// 四步：参数解析 → 搜索根解析（显式 `path` 相对路径按会话工作目录解析，
