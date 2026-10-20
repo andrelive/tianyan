@@ -162,14 +162,31 @@ SSE 推送策略、具体事件的业务处理、`PluginManager` 大对象、运
 期 0.5 的动作是**删掉 `execute_single` 里 30 分支的 `match`**（`mod.rs:952 → 993`），让内置工具实现既有 trait ——
 **净简化**。禁止新建 `PluginManager` / `PluginLifecycle` / `PluginContext` 四件套（抽象税会超过编译收益）。
 
+**实施记录（期 0.5 第一刀，2026-10-20）**：分派查表化已落地，但形态与设计稿有一处实质偏差，值得留档。
+
+设计稿写"内置工具实现 `DynamicToolExecutor`"，实测**不能**直接这么做：28 个 `execute_xxx` 方法要读
+`ToolRegistry` 的 30 个状态符号（`security_policy` 16 处 / `background_tasks` 7 处 / `vfs` /
+`command_tasks` / `session_manager` / `web_client` / `role_registry` …）。独立 struct 必须持有这些依赖；
+若持 `Arc<ToolRegistry>` 则形成**循环引用**（registry → 动态工具表 → 插件 → registry）永不释放。
+本期改为**函数指针表**：`BuiltinToolMeta.execute: fn(&ToolRegistry, sid, args, sub) -> ToolFuture`
+——无所有权、无循环，且保留「编译期插件化」（本 ADR 明示不做运行时 dylib/eval）。
+真正的「插件持依赖」形态留给期 1：那时 `*_ops.rs` + `executor` 实现一起搬进插件 crate，依赖经
+`ToolContext`（0.5.3 待办）显式传入，才谈得上"工具自己知道怎么执行"。
+
+查表化顺带暴露一个**结构事实**：`execute_single` 的 `match` 是第二份隐式执行清单。协议工具 `submit_result`
+（ADR-030 结果落盘，**不暴露给 LLM**）只存在于 `match` 分支、不在 `BUILTIN_TOOLS` 表里——改成查表后它立刻
+变成"未知工具"，9 个委托链测试当场失败。修复不是补分支，而是把这条结构显式化：`BUILTIN_TOOLS`
+（模型可见，27 项）与 `PROTOCOL_TOOLS`（协议工具，1 项，不进 definitions / 展示意图 / 角色白名单）**分表**，
+`agent_ops::is_protocol_tool` 由执行表派生——白名单豁免与"可执行"同源，不再有第三份名字清单。
+
 ---
 
 ## 分期与闸门
 
 | 期 | 目标 | 动作要点 | 闸门（硬数） |
 |---|---|---|---|
-| **0** | 地基与基线（零行为改动） | incremental 实验 + GC；`scripts/measure-rebuild.ps1`；`docs/architecture/contracts.md`（34 trait 分级）；common 二分清单 | 三场景基线齐全；`test.ps1 lint`/`unit` 绿；无行为改动 |
-| **0.5** | 工具契约与注册形状 + 装配器二分 | 内置工具实现 `DynamicToolExecutor`；`execute_single` 改查表；消除 agent→executor 40+ 实现级引用；`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness 绿；30 工具行为零变化；`cargo check` 基线 |
+| **0** | 地基与基线（零行为改动）✅ **已完成** | incremental 实验（**3× 加速 / 185MB 每会话**，建议开启 + GC 3 天/20GB）；`scripts/measure-rebuild.ps1`；`contracts.md`（34 trait 分级 + common 二分）；`microkernel-baseline.md` | 三场景基线齐全（**均 100% 全量重编**）；lint/unit 绿；无行为改动 ✅ |
+| **0.5** | 工具契约与注册形状 + 装配器二分（**分派查表化已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表；`execute_single` 28 分支 match → 一次查表（内核零工具名字面量）。待办：消除 agent→executor 40+ 实现级引用；`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿，含 9 个委托链回归）；`cargo check` 基线 ✅ |
 | **1** | 工具插件试点 | `tools-fs` / `tools-code` 成独立 crate；装配器注册；旧路径 `pub use` 保留一个版本周期 | **闸门 A（证伪）**：改一行工具 → 重编源码 ≤ 3.5K（当前 64.3K）；不达标即停 |
 | **2** | 适配器与任务插件 | `provider-llm` / `provider-embed` / `provider-search` / `storage-vector`（唯一 lancedb）/ `storage-sqlite` / 6 个 `task-*` | 各领域 ≤ 2K；全量 release 不劣化 >10% |
 | **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；`context`→`policy-context`；审批→`policy-approval`；`role_learning`→`policy-learning`；`judge`→`policy-review` | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
