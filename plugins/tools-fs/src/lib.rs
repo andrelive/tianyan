@@ -28,8 +28,8 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use tianyan::agent::{
-    parse_params, safety_violation, wrap_tool_error, DynamicToolExecutor, GlobParams,
-    ListDirParams, ReadFileParams, ToolContext, WriteFileParams,
+    parse_params, safety_violation, wrap_tool_error, ApplyEditParams, ApplyPatchParams,
+    DynamicToolExecutor, GlobParams, ListDirParams, ReadFileParams, ToolContext, WriteFileParams,
 };
 use tianyan::common::error::TianyanError;
 use tianyan::executor::fs::{execute_glob, execute_list_dir};
@@ -146,6 +146,8 @@ pub fn tools(ctx: &ToolContext) -> Vec<std::sync::Arc<dyn DynamicToolExecutor>> 
     vec![
         std::sync::Arc::new(ReadFileTool::new(ctx.clone())),
         std::sync::Arc::new(WriteFileTool::new(ctx.clone())),
+        std::sync::Arc::new(ApplyEditTool::new(ctx.clone())),
+        std::sync::Arc::new(ApplyPatchTool::new(ctx.clone())),
         std::sync::Arc::new(GlobTool::new(ctx.clone())),
         std::sync::Arc::new(ListDirTool::new(ctx.clone())),
     ]
@@ -238,6 +240,49 @@ impl WriteFileTool {
         missing.reverse(); // 自外层向内，便于阅读
         missing
     }
+
+    /// 写入实现（`subagent` 决定审批语义：ADR-011 子任务非交互审批）。
+    async fn write(
+        &self,
+        session_id: &str,
+        arguments: &str,
+        subagent: bool,
+    ) -> tianyan::common::error::Result<serde_json::Value> {
+        let mut params: WriteFileParams = parse_params(arguments)?;
+        params.path = self.ctx.resolve_tool_path(session_id, &params.path).await;
+        safety_violation(self.ctx.security_policy.check_file_write())?;
+        safety_violation(
+            self.ctx
+                .security_policy
+                .check_path(std::path::Path::new(&params.path)),
+        )?;
+        safety_violation(
+            self.ctx
+                .security_policy
+                .check_file_size(params.content.len() as u64),
+        )?;
+        // 目录语义（2026-10 修订）：自动创建缺失父目录 + 结果回显新建目录
+        let created_dirs = Self::missing_parent_dirs(&params.path);
+        self.ctx
+            .ensure_approved(
+                session_id,
+                subagent,
+                &tianyan::executor::Action::WriteFile {
+                    path: params.path.clone(),
+                    content: params.content.clone(),
+                },
+            )
+            .await?;
+        tianyan::executor::execute_write_file(&params.path, &params.content, true)
+            .await
+            .map_err(wrap_tool_error)?;
+        Ok(serde_json::json!({
+            "path": params.path,
+            "message": "写入成功",
+            "bytes": params.content.len(),
+            "created_dirs": created_dirs,
+        }))
+    }
 }
 
 #[async_trait]
@@ -262,7 +307,38 @@ impl DynamicToolExecutor for WriteFileTool {
         session_id: &str,
         arguments: &str,
     ) -> tianyan::common::error::Result<serde_json::Value> {
-        let mut params: WriteFileParams = parse_params(arguments)?;
+        self.write(session_id, arguments, false).await
+    }
+
+    async fn execute_with_scope(
+        &self,
+        session_id: &str,
+        arguments: &str,
+        subagent: bool,
+    ) -> tianyan::common::error::Result<serde_json::Value> {
+        self.write(session_id, arguments, subagent).await
+    }
+}
+
+/// `apply_edit` 工具：内容匹配编辑（`old_string`/`new_string` 唯一匹配，原子批量）。
+pub struct ApplyEditTool {
+    ctx: ToolContext,
+}
+
+impl ApplyEditTool {
+    /// 以工具上下文构造。
+    pub fn new(ctx: ToolContext) -> Self {
+        Self { ctx }
+    }
+
+    /// 编辑实现（`subagent` 决定审批语义：ADR-011 子任务非交互审批）。
+    async fn edit(
+        &self,
+        session_id: &str,
+        arguments: &str,
+        subagent: bool,
+    ) -> tianyan::common::error::Result<serde_json::Value> {
+        let mut params: ApplyEditParams = parse_params(arguments)?;
         params.path = self.ctx.resolve_tool_path(session_id, &params.path).await;
         safety_violation(self.ctx.security_policy.check_file_write())?;
         safety_violation(
@@ -270,31 +346,140 @@ impl DynamicToolExecutor for WriteFileTool {
                 .security_policy
                 .check_path(std::path::Path::new(&params.path)),
         )?;
-        safety_violation(
-            self.ctx
-                .security_policy
-                .check_file_size(params.content.len() as u64),
-        )?;
-        // 目录语义（2026-10 修订）：自动创建缺失父目录 + 结果回显新建目录
-        let created_dirs = Self::missing_parent_dirs(&params.path);
+        // 审批门控：edits 序列化为审批动作负载（与内置实现一致）
+        let edits: Vec<serde_json::Value> = params
+            .edits
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
         self.ctx
             .ensure_approved(
                 session_id,
-                false,
-                &tianyan::executor::Action::WriteFile {
+                subagent,
+                &tianyan::executor::Action::ApplyEdit {
                     path: params.path.clone(),
-                    content: params.content.clone(),
+                    edits,
                 },
             )
             .await?;
-        tianyan::executor::execute_write_file(&params.path, &params.content, true)
+        tianyan::executor::edit::apply_edit_action(&params.path, params.edits)
             .await
+            .map_err(wrap_tool_error)
+    }
+}
+
+#[async_trait]
+impl DynamicToolExecutor for ApplyEditTool {
+    fn tool_name(&self) -> String {
+        "apply_edit".to_string()
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::function(FunctionDefinition::from_schema::<ApplyEditParams>(
+            "apply_edit",
+            "**仅用于能精确复现原文的极小改动**（单个唯一片段，如改一行）。在文件内容中查找 old_string（须唯一，多处出现需 replace_all）替换为 new_string。注意：old_string 必须**逐字节精确匹配**（含空行与缩进）——漏空行、抄错缩进都会失败；若修改区域含空行/上下文、或改动较大，请改用 apply_patch（上下文锚定，更稳）。",
+        ))
+    }
+
+    fn presentation(&self) -> ToolPresentation {
+        ToolPresentation::Diff
+    }
+
+    async fn execute(
+        &self,
+        session_id: &str,
+        arguments: &str,
+    ) -> tianyan::common::error::Result<serde_json::Value> {
+        self.edit(session_id, arguments, false).await
+    }
+
+    async fn execute_with_scope(
+        &self,
+        session_id: &str,
+        arguments: &str,
+        subagent: bool,
+    ) -> tianyan::common::error::Result<serde_json::Value> {
+        self.edit(session_id, arguments, subagent).await
+    }
+}
+
+/// `apply_patch` 工具：统一 diff 补丁应用（多文件原子 + 全目标路径安全检查）。
+pub struct ApplyPatchTool {
+    ctx: ToolContext,
+}
+
+impl ApplyPatchTool {
+    /// 以工具上下文构造。
+    pub fn new(ctx: ToolContext) -> Self {
+        Self { ctx }
+    }
+
+    /// 补丁应用实现（`subagent` 决定审批语义：ADR-011 子任务非交互审批）。
+    async fn apply(
+        &self,
+        session_id: &str,
+        arguments: &str,
+        subagent: bool,
+    ) -> tianyan::common::error::Result<serde_json::Value> {
+        let params: ApplyPatchParams = parse_params(arguments)?;
+        safety_violation(self.ctx.security_policy.check_file_write())?;
+        // 补丁基准目录：会话绑定工作目录优先，缺省回退进程 cwd
+        let base_dir = self.ctx.resolve_base_dir(session_id).await?;
+        // 补丁的**全部**目标文件逐一参与安全检查（与落盘对象同源：都经 patch_targets）
+        let targets = tianyan::executor::patch::patch_targets(&params.patch, &base_dir)
             .map_err(wrap_tool_error)?;
-        Ok(serde_json::json!({
-            "path": params.path,
-            "message": "写入成功",
-            "bytes": params.content.len(),
-            "created_dirs": created_dirs,
-        }))
+        let first_path = targets.first().map(|t| t.raw.clone()).unwrap_or_default();
+        for target in &targets {
+            safety_violation(self.ctx.security_policy.check_path(&target.resolved))?;
+        }
+        self.ctx
+            .ensure_approved(
+                session_id,
+                subagent,
+                &tianyan::executor::Action::ApplyPatch {
+                    path: first_path.clone(),
+                    patch: params.patch.clone(),
+                },
+            )
+            .await?;
+        tianyan::executor::patch::apply_patch_action(&params.patch, &base_dir)
+            .await
+            .map_err(wrap_tool_error)
+    }
+}
+
+#[async_trait]
+impl DynamicToolExecutor for ApplyPatchTool {
+    fn tool_name(&self) -> String {
+        "apply_patch".to_string()
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::function(FunctionDefinition::from_schema::<ApplyPatchParams>(
+            "apply_patch",
+            "对一个或多个文件做修改的**主力编辑工具**。格式：`*** Update File: <路径>` 后直接跟 `-`（删除）/ `+`（新增）/ 空格（上下文）行，只写要改的行 + 少量上下文，不要复现整个文件。`<路径>` 可为相对会话工作目录的相对路径，或绝对路径（与 read_file / write_file 同一口径）。`@@` 块头**可省略**（工具按内容定位，无需行号）。`-`/上下文行须与当前文件内容一致。**块内空行**：整行无字符的空行按格式噪声忽略；若原文该行为空、需作为上下文行，须写成「一个空格」的单独一行（上下文行以空格前缀书写，内容可为空）——写成裸空行会让期望匹配窗口少一行。小改、大改、单文件、多文件均适用；编辑前建议先 read_file 目标区确认当前内容。",
+        ))
+    }
+
+    fn presentation(&self) -> ToolPresentation {
+        ToolPresentation::Diff
+    }
+
+    async fn execute(
+        &self,
+        session_id: &str,
+        arguments: &str,
+    ) -> tianyan::common::error::Result<serde_json::Value> {
+        self.apply(session_id, arguments, false).await
+    }
+
+    async fn execute_with_scope(
+        &self,
+        session_id: &str,
+        arguments: &str,
+        subagent: bool,
+    ) -> tianyan::common::error::Result<serde_json::Value> {
+        self.apply(session_id, arguments, subagent).await
     }
 }

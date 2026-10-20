@@ -170,6 +170,23 @@ pub trait DynamicToolExecutor: Send + Sync {
         session_id: &str,
         arguments: &str,
     ) -> crate::common::error::Result<serde_json::Value>;
+
+    /// 带**执行作用域**的工具调用（`subagent` 标记影响审批语义）。
+    ///
+    /// ADR-011：子任务是主 agent 意图的执行器，审批**不交互**——未授权操作立即
+    /// 拒绝并上报主 agent。需要审批门控的插件工具（write_file / apply_edit /
+    /// apply_patch）必须覆盖本方法，否则子代理会拿到交互式审批（卡住等待用户）。
+    ///
+    /// 默认实现忽略作用域、委托 [`Self::execute`]——MCP 桥接等既有实现无需改动。
+    async fn execute_with_scope(
+        &self,
+        session_id: &str,
+        arguments: &str,
+        subagent: bool,
+    ) -> crate::common::error::Result<serde_json::Value> {
+        let _ = subagent;
+        self.execute(session_id, arguments).await
+    }
 }
 
 /// 动态工具表：**有序**（注册顺序，新注册追加末尾）。
@@ -894,7 +911,11 @@ impl ToolRegistry {
                 .find(|(n, _)| n == &call.function.name)
                 .map(|(_, e)| e.clone())
             {
-                Some(executor) => executor.execute(session_id, arguments).await,
+                Some(executor) => {
+                    executor
+                        .execute_with_scope(session_id, arguments, subagent)
+                        .await
+                }
                 None => Err(TianyanError::Custom(format!(
                     "tool: 未知工具：{}",
                     call.function.name
@@ -996,7 +1017,6 @@ mod tests {
             registry.presentation("execute_command"),
             ToolPresentation::Terminal
         );
-        assert_eq!(registry.presentation("apply_edit"), ToolPresentation::Diff);
         assert_eq!(registry.presentation("grep"), ToolPresentation::Search);
         assert_eq!(registry.presentation("web_fetch"), ToolPresentation::Web);
         assert_eq!(registry.presentation("call_skill"), ToolPresentation::Skill);

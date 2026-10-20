@@ -24,7 +24,14 @@ async fn test_plugin_exposes_two_tools_in_stable_order() {
     let names: Vec<String> = list.iter().map(|t| t.tool_name()).collect();
     assert_eq!(
         names,
-        vec!["read_file", "write_file", "glob", "list_dir"],
+        vec![
+            "read_file",
+            "write_file",
+            "apply_edit",
+            "apply_patch",
+            "glob",
+            "list_dir",
+        ],
         "注册顺序即前缀顺序，必须稳定"
     );
     // schema 必须可用（LLM 可见）
@@ -92,5 +99,5 @@ async fn test_glob_and_list_dir_share_one_context_handle() {
     // 装配层语义：两个工具共享同一份 ToolContext（Arc 内部字段，克隆廉价）
     let ctx = test_ctx();
     let list: Vec<Arc<dyn DynamicToolExecutor>> = tools(&ctx);
-    assert_eq!(list.len(), 4);
+    assert_eq!(list.len(), 6);
 }

@@ -3,14 +3,13 @@
 //! `read_file` / `write_file` 已迁至 `plugins/tools-fs`（ADR-049 期 1）。
 //! 每个工具包含"安全检查 + 审批 + 执行"三步，顺序与行为与拆分前一致。
 
-use crate::agent::tool_params::{ApplyEditParams, ApplyPatchParams, VfsListParams, VfsReadParams};
+use crate::agent::tool_params::{VfsListParams, VfsReadParams};
 use crate::common::error::TianyanError;
 use crate::common::truncate::truncate_utf8_boundary;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
 use crate::executor::truncate::truncate_head;
-use crate::executor::Action;
 
-use super::{parse_params, safety_violation, vfs_content_field, wrap_tool_error};
+use super::{parse_params, vfs_content_field, wrap_tool_error};
 use crate::agent::tool_context::ToolContext;
 
 /// vfs_list 条目中 L0 简介的截断上限（字节，UTF-8 边界安全）——目录的"含义"
@@ -18,81 +17,6 @@ use crate::agent::tool_context::ToolContext;
 const LIST_ABSTRACT_MAX_BYTES: usize = 480;
 
 impl ToolContext {
-    /// 执行 apply_edit 工具：哈希锚定行编辑（含审批工作流门控）。
-    pub(crate) async fn execute_apply_edit(
-        &self,
-        arguments: &str,
-        session_id: &str,
-        subagent: bool,
-    ) -> Result<serde_json::Value, TianyanError> {
-        let mut params: ApplyEditParams = parse_params(arguments)?;
-        params.path = self.resolve_tool_path(session_id, &params.path).await;
-        safety_violation(self.security_policy.check_file_write())?;
-        safety_violation(
-            self.security_policy
-                .check_path(std::path::Path::new(&params.path)),
-        )?;
-        // 审批门控（统一序列见 [`ToolContext::ensure_approved`]；
-        // edits 序列化为审批动作负载，与 execute_apply_edit 行为一致）
-        let edits: Vec<serde_json::Value> = params
-            .edits
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| TianyanError::Custom(format!("tool: 参数无效：{}", e)))?;
-        self.ensure_approved(
-            session_id,
-            subagent,
-            &Action::ApplyEdit {
-                path: params.path.clone(),
-                edits,
-            },
-        )
-        .await?;
-        crate::executor::edit::apply_edit_action(&params.path, params.edits)
-            .await
-            .map_err(wrap_tool_error)
-    }
-
-    /// 执行 apply_patch 工具：统一 diff 补丁应用（含审批工作流门控）。
-    pub(crate) async fn execute_apply_patch(
-        &self,
-        arguments: &str,
-        session_id: &str,
-        subagent: bool,
-    ) -> Result<serde_json::Value, TianyanError> {
-        let params: ApplyPatchParams = parse_params(arguments)?;
-        safety_violation(self.security_policy.check_file_write())?;
-        // 补丁基准目录：会话绑定的工作目录优先，缺省回退进程 cwd
-        // （与 read_file/write_file 同一套归属规则；统一 resolve_base_dir）
-        let base_dir = self.resolve_base_dir(session_id).await?;
-        // 补丁的**全部**目标文件逐一参与路径安全检查（旧实现只检查首个文件
-        // 路径，多文件补丁的后续文件可借此绕过沙箱写入白名单外路径）。
-        //
-        // 检查对象与 executor 落盘对象**同源**：二者都经 `patch_targets`
-        // （同一 `parse_patch` + 同一 `resolve_patch_path`）——绝对路径按字面、
-        // 相对路径按 `base_dir`，检查口径与写入口径不可能分歧。
-        let targets = crate::executor::patch::patch_targets(&params.patch, &base_dir)
-            .map_err(wrap_tool_error)?;
-        let first_path = targets.first().map(|t| t.raw.clone()).unwrap_or_default();
-        for target in &targets {
-            safety_violation(self.security_policy.check_path(&target.resolved))?;
-        }
-        // 审批门控（统一序列见 [`ToolContext::ensure_approved`]）
-        self.ensure_approved(
-            session_id,
-            subagent,
-            &Action::ApplyPatch {
-                path: first_path.clone(),
-                patch: params.patch.clone(),
-            },
-        )
-        .await?;
-        crate::executor::patch::apply_patch_action(&params.patch, &base_dir)
-            .await
-            .map_err(wrap_tool_error)
-    }
-
     /// 执行 vfs_read 工具：读取 VFS 条目的三层内容。
     pub(crate) async fn execute_vfs_read(
         &self,

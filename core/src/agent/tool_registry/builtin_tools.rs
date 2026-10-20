@@ -17,11 +17,11 @@ use std::pin::Pin;
 
 use super::ToolRegistry;
 use crate::agent::tool_params::{
-    ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
-    DelegationStatsParams, ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams,
-    KnowledgeIngestParams, RepoMapParams, SearchCodeParams, SearchVfsParams, SelfCheckParams,
-    SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
-    TaskStatusParams, VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams,
+    AskUserParams, CallSkillParams, DelegateToAgentParams, DelegationStatsParams,
+    ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams, KnowledgeIngestParams,
+    RepoMapParams, SearchCodeParams, SearchVfsParams, SelfCheckParams, SessionRecallParams,
+    SuggestRoleParams, SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VfsListParams,
+    VfsReadParams, WebFetchParams, WebSearchParams,
 };
 use crate::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
 
@@ -100,8 +100,6 @@ macro_rules! builtin_adapter {
 }
 
 // ---- 各工具执行入口（与 BUILTIN_TOOLS 表逐行对应）----
-builtin_adapter!(exec_apply_edit, execute_apply_edit, args, session, sub);
-builtin_adapter!(exec_apply_patch, execute_apply_patch, args, session, sub);
 builtin_adapter!(
     exec_execute_command,
     execute_execute_command,
@@ -159,20 +157,6 @@ const fn tool(
         presentation,
         execute,
     }
-}
-
-fn def_apply_edit(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<ApplyEditParams>(
-        name,
-        "**仅用于能精确复现原文的极小改动**（单个唯一片段，如改一行）。在文件内容中查找 old_string（须唯一，多处出现需 replace_all）替换为 new_string。注意：old_string 必须**逐字节精确匹配**（含空行与缩进）——漏空行、抄错缩进都会失败；若修改区域含空行/上下文、或改动较大，请改用 apply_patch（上下文锚定，更稳）。",
-    ))
-}
-
-fn def_apply_patch(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<ApplyPatchParams>(
-        name,
-        "对一个或多个文件做修改的**主力编辑工具**。格式：`*** Update File: <路径>` 后直接跟 `-`（删除）/ `+`（新增）/ 空格（上下文）行，只写要改的行 + 少量上下文，不要复现整个文件。`<路径>` 可为相对会话工作目录的相对路径，或绝对路径（与 read_file / write_file 同一口径）。`@@` 块头**可省略**（工具按内容定位，无需行号）。`-`/上下文行须与当前文件内容一致。**块内空行**：整行无字符的空行按格式噪声忽略；若原文该行为空、需作为上下文行，须写成「一个空格」的单独一行（上下文行以空格前缀书写，内容可为空）——写成裸空行会让期望匹配窗口少一行。小改、大改、单文件、多文件均适用；编辑前建议先 read_file 目标区确认当前内容。",
-    ))
 }
 
 fn def_execute_command(name: &'static str) -> ToolDefinition {
@@ -331,18 +315,6 @@ fn def_repo_map(name: &'static str) -> ToolDefinition {
 
 /// 内置工具元数据表（单一事实源；顺序即注册顺序）。
 pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
-    tool(
-        "apply_edit",
-        def_apply_edit,
-        ToolPresentation::Diff,
-        exec_apply_edit,
-    ),
-    tool(
-        "apply_patch",
-        def_apply_patch,
-        ToolPresentation::Diff,
-        exec_apply_patch,
-    ),
     tool(
         "execute_command",
         def_execute_command,

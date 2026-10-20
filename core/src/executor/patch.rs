@@ -592,7 +592,10 @@ fn resolve_patch_path(patch_path: &str, base_dir: &Path) -> Result<PathBuf> {
     ))
 }
 /// 补丁目标文件（解析产物）。
-pub(crate) struct PatchTarget {
+///
+/// **公开面**（ADR-049 期 1）：插件在应用补丁前逐一校验全部目标路径，
+/// 必须能读取归一后的绝对路径（与落盘同一产物）。
+pub struct PatchTarget {
     /// 补丁头部原文（审批展示用；可能是相对路径）。
     pub raw: String,
     /// 归一后的绝对路径（**安全检查与落盘共用同一产物**）。
@@ -606,7 +609,12 @@ pub(crate) struct PatchTarget {
 /// 路径集合。旧实现有**两套**路径提取（`collect_patch_paths` 轻量行扫描 +
 /// `parse_patch` 完整解析），其一致性只能靠人工维持——这正是"拒绝绝对路径"
 /// 想收窄、却收窄不了的分歧面。
-pub(crate) fn patch_targets(patch_text: &str, base_dir: &Path) -> Result<Vec<PatchTarget>> {
+/// 补丁目标清单（`raw` 原文 / `resolved` 落盘绝对路径）。
+///
+/// **公开面**（ADR-049 期 1）：工具插件在应用补丁**之前**要做全目标路径安全
+/// 检查，且检查对象必须与落盘对象同源（同一份 `parse_patch` + 同一套路径解析）
+/// ——否则多文件补丁的后续文件可绕过沙箱。
+pub fn patch_targets(patch_text: &str, base_dir: &Path) -> Result<Vec<PatchTarget>> {
     let files = parse_patch(patch_text)?;
     files
         .iter()
