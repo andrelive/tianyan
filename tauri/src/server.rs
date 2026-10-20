@@ -58,7 +58,11 @@ pub async fn start_axum_server(
 
     // 插件清单（ADR-049 期 1）：桌面端与独立 bin 共用同一工厂——
     // 清单单一事实源在插件 crate（`plugin_factory()`），此处只接线。
-    let plugin_factory = Box::new(tianyan_tools_fs::plugin_factory());
+    let plugin_factory = Box::new(|ctx: &tianyan::agent::ToolContext| {
+        let mut tools = tianyan_tools_fs::tools(ctx);
+        tools.extend(tianyan_tools_code::tools(ctx));
+        tools
+    });
     if let Err(e) = start_server_with_shutdown_signal_and_plugins(
         listener,
         tianyan_config,

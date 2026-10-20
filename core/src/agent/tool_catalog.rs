@@ -135,10 +135,10 @@ mod tests {
         let registry = ToolRegistry::new(crate::executor::SecurityPolicy::default());
         let md = render(&registry).await;
         assert!(md.contains("个工具"), "{md}");
-        assert!(
-            md.contains("| `symbol_outline` | code |"),
-            "应含 symbol_outline 行"
-        );
+        // 注：`symbol_outline` / `repo_map` / `grep` 已迁至 `plugins/tools-code`
+        // （ADR-049 期 1），不再属于内置表；本测试用 core 自身 registry
+        // （不含插件），故断言仍内置的工具。
+        assert!(md.contains("| `web_search` | web |"), "应含 web_search 行");
         assert!(md.contains("| `execute_command` | terminal |"));
     }
 }

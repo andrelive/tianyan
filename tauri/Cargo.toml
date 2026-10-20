@@ -14,6 +14,8 @@ tianyan-core = { path = "../core" }
 tianyan-server = { path = "../server" }
 # 插件清单（ADR-049 期 1）：桌面端也在装配层，清单与独立 bin 同源
 tianyan-tools-fs = { path = "../plugins/tools-fs" }
+# 插件清单（ADR-049 期 1）：桌面端与独立 bin 同源
+tianyan-tools-code = { path = "../plugins/tools-code" }
 
 # Tauri framework
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }

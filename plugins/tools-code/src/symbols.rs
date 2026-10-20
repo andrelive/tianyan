@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::common::error::TianyanError;
+use tianyan::common::error::TianyanError;
 
 /// 符号类型（序列化为变体名字符串，如 `"Function"`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

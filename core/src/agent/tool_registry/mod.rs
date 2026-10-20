@@ -25,7 +25,6 @@ use crate::vfs::VirtualFileSystem;
 mod agent_ops;
 /// 内置工具元数据单一事实源（H-C1：schema/展示意图/短路清单）。
 mod builtin_tools;
-mod code_ops;
 /// 演化数据查询工具执行器（ADR-017 GEPA 数据层：execution_stats 等）。
 mod evolution_ops;
 /// 工具执行器实现（按工具域拆分，14 个 `execute_*` 方法）。
@@ -35,12 +34,8 @@ mod knowledge_ops;
 mod observability;
 /// 工具执行管线：pre-execute 监听器 / 单调守卫 / post-execute 监听器（A1/A4）。
 mod pipeline;
-/// 仓库结构地图工具执行器（repo_map）。
-mod repo_map_ops;
 /// 工具输出 spill 后置监听器（ADR-047：超预算结果落盘，会话只留预览 + 路径）。
 mod spill;
-/// 符号大纲工具执行器（symbol_outline）。
-mod symbol_ops;
 
 pub use builtin_tools::builtin_tool_names;
 pub use pipeline::{ToolGuard, ToolPostExecuteListener, ToolPreExecuteListener};
@@ -211,6 +206,9 @@ pub const MIGRATED_TOOL_PRESENTATIONS: &[(&str, ToolPresentation)] = &[
     ("apply_patch", ToolPresentation::Diff),
     ("glob", ToolPresentation::Search),
     ("list_dir", ToolPresentation::Search),
+    ("symbol_outline", ToolPresentation::Code),
+    ("repo_map", ToolPresentation::Code),
+    ("grep", ToolPresentation::Search),
 ];
 
 /// 已知工具名全集（内置 + 已迁插件），供跨 crate 一致性门禁校验。
@@ -1021,7 +1019,7 @@ mod tests {
         let registry = ToolRegistry::new(SecurityPolicy::default());
         let defs = registry.definitions().await;
         assert!(!defs.is_empty());
-        assert!(defs.iter().any(|d| d.function.name == "symbol_outline"));
+        assert!(defs.iter().any(|d| d.function.name == "web_search"));
     }
 
     #[tokio::test]
@@ -1042,21 +1040,32 @@ mod tests {
     fn test_builtin_presentations_registered() {
         let registry = ToolRegistry::new(SecurityPolicy::default());
         assert_eq!(
-            registry.presentation("symbol_outline"),
-            ToolPresentation::Code
-        );
-        assert_eq!(registry.presentation("repo_map"), ToolPresentation::Code);
-        assert_eq!(
             registry.presentation("execute_command"),
             ToolPresentation::Terminal
         );
-        assert_eq!(registry.presentation("grep"), ToolPresentation::Search);
         assert_eq!(registry.presentation("web_fetch"), ToolPresentation::Web);
         assert_eq!(registry.presentation("call_skill"), ToolPresentation::Skill);
         assert_eq!(
             registry.presentation("delegate_to_agent"),
             ToolPresentation::Delegate
         );
+        // 已迁插件的工具（ADR-049 期 1）：注册表（不含插件）返回 Generic，
+        // 但**渲染契约**由 `MIGRATED_TOOL_PRESENTATIONS` 兜底——历史消息的卡片
+        // 不能因为"实现搬家"而退化为通用样式。
+        for (name, expected) in [
+            ("read_file", ToolPresentation::Read),
+            ("apply_patch", ToolPresentation::Diff),
+            ("glob", ToolPresentation::Search),
+            ("symbol_outline", ToolPresentation::Code),
+            ("repo_map", ToolPresentation::Code),
+            ("grep", ToolPresentation::Search),
+        ] {
+            assert_eq!(
+                ToolRegistry::default_presentation(name),
+                expected,
+                "已迁工具的渲染契约丢失：{name}"
+            );
+        }
         // 未注册工具回退 Generic
         assert_eq!(
             registry.presentation("mcp_unknown"),

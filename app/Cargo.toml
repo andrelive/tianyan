@@ -17,6 +17,9 @@ tianyan-server = { path = "../server" }
 # 插件清单：**只在本包出现**——server 库因此不依赖插件 crate，
 # 改一行工具只重编插件 + 本 bin（闸门 A 前提）
 tianyan-tools-fs = { path = "../plugins/tools-fs" }
+# 插件清单：**只在本包出现**——server 库因此不依赖插件 crate，
+# 改一行工具只重编插件 + 本 bin（闸门 A 前提）
+tianyan-tools-code = { path = "../plugins/tools-code" }
 tokio.workspace = true
 
 [lints]

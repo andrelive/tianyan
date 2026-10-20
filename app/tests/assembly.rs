@@ -25,6 +25,9 @@ async fn full_registry() -> ToolRegistry {
     for tool in tianyan_tools_fs::tools(&ctx) {
         registry.register_dynamic_tool(tool).await;
     }
+    for tool in tianyan_tools_code::tools(&ctx) {
+        registry.register_dynamic_tool(tool).await;
+    }
     registry
 }
 
@@ -42,6 +45,9 @@ async fn test_plugin_tools_registered_with_presentation() {
         ("apply_patch", ToolPresentation::Diff),
         ("glob", ToolPresentation::Search),
         ("list_dir", ToolPresentation::Search),
+        ("symbol_outline", ToolPresentation::Code),
+        ("repo_map", ToolPresentation::Code),
+        ("grep", ToolPresentation::Search),
     ];
     for (name, presentation) in expected {
         assert!(names.contains(&name), "插件工具未注册：{name}");
@@ -93,7 +99,9 @@ async fn test_plugin_tools_do_not_shadow_builtin() {
         .collect();
 
     let ctx = builtin.context().clone();
-    for tool in tianyan_tools_fs::tools(&ctx) {
+    let mut plugin_tools = tianyan_tools_fs::tools(&ctx);
+    plugin_tools.extend(tianyan_tools_code::tools(&ctx));
+    for tool in plugin_tools {
         let name = tool.tool_name();
         assert!(
             !builtin_names.contains(&name),

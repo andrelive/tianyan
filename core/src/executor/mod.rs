@@ -19,14 +19,9 @@ pub mod edit;
 pub mod fs;
 /// 统一 diff 补丁解析与应用（apply_patch：codex 风格 `*** Update File` 信封）。
 pub mod patch;
-/// 仓库结构地图（跨文件符号骨架 + 引用度排序，按需调用）。
-pub mod repo_map;
-/// 代码搜索执行器（内嵌引擎：输出守卫 + 分页语义）。
-pub mod search;
-/// 内嵌搜索引擎实现（ignore 遍历 + regex 匹配，替代外部 ripgrep）。
-pub mod search_engine;
-/// 符号大纲提取引擎（tree-sitter）。
-pub mod symbols;
+/// 代码搜索的**参数契约**（`OutputMode` / `SearchOptions`）——实现迁插件后
+/// 仍由 core 定义参数与输出字段（参数类型是契约，不是实现；ADR-049 期 1）。
+pub mod search_types;
 /// 统一截断层（read/grep 与命令输出模式的 UTF-8 安全截断）。
 pub mod truncate;
 /// Web 工具执行器（web_search / web_fetch：搜索后端 + SSRF 防护 + 缓存）。

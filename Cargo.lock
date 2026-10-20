@@ -9258,6 +9258,7 @@ version = "0.7.0"
 dependencies = [
  "tianyan-core",
  "tianyan-server",
+ "tianyan-tools-code",
  "tianyan-tools-fs",
  "tokio",
 ]
@@ -9379,11 +9380,32 @@ dependencies = [
  "tauri-plugin-updater",
  "tianyan-core",
  "tianyan-server",
+ "tianyan-tools-code",
  "tianyan-tools-fs",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "tianyan-tools-code"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "ignore",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tianyan-core",
+ "tokio",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
 ]
 
 [[package]]

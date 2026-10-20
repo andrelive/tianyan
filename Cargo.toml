@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "server", "tauri", "mcp", "app", "plugins/tools-fs"]
+members = ["core", "server", "tauri", "mcp", "app", "plugins/tools-fs", "plugins/tools-code"]
 resolver = "2"
 
 [workspace.package]

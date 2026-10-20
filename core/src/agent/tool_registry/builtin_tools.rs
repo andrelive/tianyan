@@ -19,9 +19,8 @@ use super::ToolRegistry;
 use crate::agent::tool_params::{
     AskUserParams, CallSkillParams, DelegateToAgentParams, DelegationStatsParams,
     ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams, KnowledgeIngestParams,
-    RepoMapParams, SearchCodeParams, SearchVfsParams, SelfCheckParams, SessionRecallParams,
-    SuggestRoleParams, SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VfsListParams,
-    VfsReadParams, WebFetchParams, WebSearchParams,
+    SearchVfsParams, SelfCheckParams, SessionRecallParams, SuggestRoleParams, TaskCancelParams,
+    TaskStatusParams, VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams,
 };
 use crate::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
 
@@ -107,7 +106,6 @@ builtin_adapter!(
     session,
     sub
 );
-builtin_adapter!(exec_search_code, execute_search_code, args, session);
 builtin_adapter!(exec_search_vfs, execute_search_vfs, args);
 builtin_adapter!(exec_vfs_read, execute_vfs_read, args);
 builtin_adapter!(exec_vfs_list, execute_vfs_list, args);
@@ -131,8 +129,6 @@ builtin_adapter!(exec_delegation_stats, execute_delegation_stats, args);
 builtin_adapter!(exec_session_recall, execute_session_recall, args);
 builtin_adapter!(exec_web_search, execute_web_search, args);
 builtin_adapter!(exec_web_fetch, execute_web_fetch, args);
-builtin_adapter!(exec_symbol_outline, execute_symbol_outline, args);
-builtin_adapter!(exec_repo_map, execute_repo_map, args, session);
 
 /// 内置工具元数据。
 pub(crate) struct BuiltinToolMeta {
@@ -171,13 +167,6 @@ fn def_execute_command(name: &'static str) -> ToolDefinition {
             shell_platform_hint(),
             "临时/中间产物（提交信息文件、一次性脚本、审计产物等）请写入系统临时目录的会话区（如 `$env:TEMP\\tianyan-scratch\\`），**不要**写应用数据目录根或安装目录。",
         ),
-    ))
-}
-
-fn def_grep(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<SearchCodeParams>(
-        name,
-        "用正则搜索文件内容（类似 ripgrep），用于定位。默认只列命中文件名（output_mode=files_with_matches）；要看匹配行传 output_mode=content（返回**匹配行单行预览**：行号 + 匹配行、超长截断；**不含上下文**——需要上下文时用 read_file 读匹配处附近窗口）；统计各文件命中数用 output_mode=count。结果条数默认 100、上限 200，超出即截断并附收窄/续查指引；支持 glob/type 过滤、ignore_case、multiline、offset 分页续查。搜索文件内容统一用本工具（勿用 execute_command 跑 shell 的 grep/rg/findstr）；开放式探索（摸代码布局、重构前侦察）优先用 repo_map 或子代理。",
     ))
 }
 
@@ -300,20 +289,6 @@ fn def_web_fetch(name: &'static str) -> ToolDefinition {
     ))
 }
 
-fn def_symbol_outline(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<SymbolOutlineParams>(
-        name,
-        "用 tree-sitter 提取源文件的结构大纲（函数/结构体/类/impl/接口/枚举）。支持 Rust、TypeScript/JavaScript、Python、Go。",
-    ))
-}
-fn def_repo_map(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<RepoMapParams>(
-        name,
-        "生成仓库结构地图：跨文件符号骨架，按「被引用次数」排序——一次调用替代多轮 grep 试探。用途：摸清代码布局与模块划分、定位某功能实现位置、重构前侦察影响面与耦合热点。每行 `路径:行 种类 名称(外部引用数)`；用 focus 聚焦关键字相关子图，用 path 限定子树。**引用度是文本级近似**（不做名称解析：宏展开/重导出/动态分发不可见）——要精确影响面，改完跑 `cargo check`（编译器给精确清单）。",
-    ))
-}
-
-/// 内置工具元数据表（单一事实源；顺序即注册顺序）。
 pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
     tool(
         "execute_command",
@@ -321,7 +296,6 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
         ToolPresentation::Terminal,
         exec_execute_command,
     ),
-    tool("grep", def_grep, ToolPresentation::Search, exec_search_code),
     tool(
         "search_vfs",
         def_search_vfs,
@@ -423,18 +397,6 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
         def_web_fetch,
         ToolPresentation::Web,
         exec_web_fetch,
-    ),
-    tool(
-        "symbol_outline",
-        def_symbol_outline,
-        ToolPresentation::Code,
-        exec_symbol_outline,
-    ),
-    tool(
-        "repo_map",
-        def_repo_map,
-        ToolPresentation::Code,
-        exec_repo_map,
     ),
 ];
 

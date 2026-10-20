@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::executor::edit::ContentEdit;
-use crate::executor::search::OutputMode;
+use crate::executor::search_types::OutputMode;
 
 /// 读取文件参数。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

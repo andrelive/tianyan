@@ -37,6 +37,9 @@ async fn main() {
     for tool in tianyan_tools_fs::tools(&ctx) {
         registry.register_dynamic_tool(tool).await;
     }
+    for tool in tianyan_tools_code::tools(&ctx) {
+        registry.register_dynamic_tool(tool).await;
+    }
 
     // 组件工具：临时存储 + 一次性通道装配（只为取 definition，不执行任何操作）。
     let dir = std::env::temp_dir().join(format!("tianyan-tool-catalog-{}", std::process::id()));

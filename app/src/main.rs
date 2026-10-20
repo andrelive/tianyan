@@ -16,7 +16,12 @@ use tianyan_server::{start_server_with_plugins, ToolPluginFactory};
 /// 新增插件在此追加一行；插件内部顺序即注册顺序（追加到动态工具末尾，
 /// 内置工具顺序不受影响 —— 提示词前缀稳定性）。
 fn plugin_factory() -> ToolPluginFactory {
-    Box::new(tianyan_tools_fs::plugin_factory())
+    Box::new(|ctx| {
+        // 顺序即注册顺序（追加到动态工具末尾）：fs 域在前、code 域在后。
+        let mut tools = tianyan_tools_fs::tools(ctx);
+        tools.extend(tianyan_tools_code::tools(ctx));
+        tools
+    })
 }
 
 #[tokio::main]

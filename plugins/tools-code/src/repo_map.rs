@@ -42,8 +42,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::common::error::TianyanError;
-use crate::executor::symbols::{language_from_extension, symbol_index, SymbolKind};
+use crate::symbols::{language_from_extension, symbol_index, SymbolKind};
+use tianyan::common::error::TianyanError;
 
 /// 单次调用默认预算（字节；约 4 字符/token → ≈1000 token）。
 pub const DEFAULT_MAX_BYTES: usize = 4096;

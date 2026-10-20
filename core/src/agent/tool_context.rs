@@ -31,7 +31,6 @@ use tokio::sync::Mutex;
 
 use crate::common::error::TianyanError;
 use crate::executor::approval::{ApprovalDecision, ApprovalWorkflow};
-use crate::executor::repo_map::RepoMapCache;
 use crate::executor::{Action, SecurityPolicy};
 use crate::knowledge::KnowledgeIngestor;
 use crate::observability::execution_log::ExecutionLog;
@@ -52,8 +51,6 @@ pub struct ToolContext {
     pub session_manager: Option<Arc<dyn SessionManager>>,
     /// VFS（search_vfs / vfs_read / vfs_list / knowledge_ingest 依赖）。
     pub vfs: Option<Arc<dyn VirtualFileSystem>>,
-    /// 仓库结构地图缓存（repo_map：按仓库根缓存扫描产物，内存 LRU）。
-    pub repo_map_cache: Arc<RepoMapCache>,
     /// 知识导入器（knowledge_ingest 依赖）。
     pub knowledge_ingestor: Option<Arc<KnowledgeIngestor>>,
     /// 执行记录日志（ADR-017 GEPA 数据层）。
@@ -75,7 +72,6 @@ impl ToolContext {
             session_store: None,
             session_manager: None,
             vfs: None,
-            repo_map_cache: Arc::new(RepoMapCache::new()),
             knowledge_ingestor: None,
             execution_log: None,
             session_recall: None,

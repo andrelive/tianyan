@@ -18,11 +18,11 @@ use std::path::Path;
 use regex::bytes::RegexBuilder;
 use serde_json::{json, Value};
 
-use crate::common::error::TianyanError;
+use tianyan::common::error::TianyanError;
 
-use crate::executor::truncate::truncate_line;
+use tianyan::executor::truncate::truncate_line;
 
-use super::search::{OutputMode, SearchOptions};
+use tianyan::executor::search_types::{OutputMode, SearchOptions};
 
 /// 单条记录最大字节数：超出则丢弃整条记录。
 const MAX_RECORD_BYTES: usize = 64 * 1024;
@@ -39,8 +39,8 @@ pub fn execute_embedded_search(
     let mode = options.output_mode.unwrap_or_default();
     let head_limit = options
         .head_limit
-        .unwrap_or(super::search::DEFAULT_HEAD_LIMIT)
-        .clamp(1, super::search::MAX_HEAD_LIMIT);
+        .unwrap_or(tianyan::executor::search_types::DEFAULT_HEAD_LIMIT)
+        .clamp(1, tianyan::executor::search_types::MAX_HEAD_LIMIT);
     let offset = options.offset;
 
     // 编译正则：语法错误 → 本地化错误（rg 的 regex parse error 语义）
