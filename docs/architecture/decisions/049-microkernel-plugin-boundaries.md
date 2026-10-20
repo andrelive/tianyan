@@ -18,15 +18,20 @@
 
 | 改动位置 | 重编 crate | 重编源码行数 | 墙钟 |
 |---|---|---|---|
-| `executor/web.rs`（一个工具） | core + server + mcp + tauri | **56,541** | 97.5s |
-| `agent/loop.rs`（循环机制） | 同上 | **56,541** | 97.3s |
-| `common/types/uri.rs`（S 级契约） | 同上 | **56,541** | 61.9s |
+| `executor/web.rs`（一个工具） | core + server + mcp + tauri | **64,328** | 97.5s |
+| `agent/loop.rs`（循环机制） | 同上 | **64,328** | 97.3s |
+| `common/types/uri.rs`（S 级契约） | 同上 | **64,328** | 61.9s |
 
 **三种代价完全相同。** 这不是"某个模块太大"，而是**没有编译边界**：
 rustc 的编译单元是 crate，单 crate 内部的模块划分对编译成本零作用。
 
-口径说明：文件行数 98,953，其中 42,412 行（42.9%）是测试（只在 `cargo test` 编译）；
-真正参与 `cargo build` 的是 **56,541 行源码**（core 43,045 / server 11,843 / mcp 740 / tauri 913）。
+口径说明：文件行数 98,953；真正参与 `cargo build` 的是 **64,328 行源码**
+（core 49,057 / server 13,379 / mcp 867 / tauri 1,025），其余 34,625 行（35%）是测试
+（独立测试文件 + `#[cfg(test)] mod` 段，只在 `cargo test` 编译）。
+
+> 口径纪律：统计"测试行"必须只认 `#[cfg(test)] mod`（Rust 惯例：测试模块在文件末尾）。
+> 早期用"第一个 `#[cfg(test)]` 之后全算测试"会把仅修饰 helper 的标注当成测试块起点，
+> 高估测试、低估源码（曾得出 56,541 的错误分母）。度量脚本 `scripts/measure-rebuild.ps1` 已按精确口径实现。
 
 ### 2. 问题：演进耦合与装配散点
 
@@ -113,8 +118,12 @@ SSE 推送策略、具体事件的业务处理、`PluginManager` 大对象、运
 通道层（`server` 主体 / `tauri`）**只依赖 `kernel-api`**，通过 `Arc<dyn Trait>` 访问能力，
 **不认识任何插件 crate**；另设 `assembly-manifest`（约 500 行）作为唯一 `use` 具体插件 `register()` 的地方。
 
-**为什么（量化理由）**：拆插件只贡献 76% 降幅（56,541 → 13,400）；二分后到 **95%**（→ 约 3,000）。
-因为 `server` 有 11,843 行源码且 20 个字段是具体类型——它若不薄，改任一插件都要重编它。
+**为什么（量化理由）**：拆插件只贡献约 75% 降幅（64,328 → 约 16,000）；装配器二分后到 **95%**（→ 约 3,300）。
+因为 `server` 有 13,379 行源码且 20 个字段是具体类型——它若不薄，改任一插件都要重编它。
+
+**结构要求（关键细节）**：清单**不能住在 `tianyan-server` 库里**，否则"server 依赖 manifest、manifest 依赖插件"
+会让改插件照样重编 server。正确形态是：清单住在**最终 bin crate**（`tianyan-app`，约 600 行，只含 `main` + 装配清单），
+`tianyan-server` 保持为**只依赖 kernel-api 的 lib**。于是：改插件 → 重编「插件 + app bin」，server lib 不动。
 
 **真实成本（实测）**：20 个字段契约化 + 约 80–100 处 `state.<field>` 访问点适配（总 207 处 / 37 字段，
 其中 `working_sets` 16 / `snapshot_manager` 14 / `clipboard_*` 21 / `session_leases` 10 / `todo_store` 6 /
@@ -161,7 +170,7 @@ SSE 推送策略、具体事件的业务处理、`PluginManager` 大对象、运
 |---|---|---|---|
 | **0** | 地基与基线（零行为改动） | incremental 实验 + GC；`scripts/measure-rebuild.ps1`；`docs/architecture/contracts.md`（34 trait 分级）；common 二分清单 | 三场景基线齐全；`test.ps1 lint`/`unit` 绿；无行为改动 |
 | **0.5** | 工具契约与注册形状 + 装配器二分 | 内置工具实现 `DynamicToolExecutor`；`execute_single` 改查表；消除 agent→executor 40+ 实现级引用；`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness 绿；30 工具行为零变化；`cargo check` 基线 |
-| **1** | 工具插件试点 | `tools-fs` / `tools-code` 成独立 crate；装配器注册；旧路径 `pub use` 保留一个版本周期 | **闸门 A（证伪）**：改一行工具 → 重编源码 ≤ 3K（当前 56.5K）；不达标即停 |
+| **1** | 工具插件试点 | `tools-fs` / `tools-code` 成独立 crate；装配器注册；旧路径 `pub use` 保留一个版本周期 | **闸门 A（证伪）**：改一行工具 → 重编源码 ≤ 3.5K（当前 64.3K）；不达标即停 |
 | **2** | 适配器与任务插件 | `provider-llm` / `provider-embed` / `provider-search` / `storage-vector`（唯一 lancedb）/ `storage-sqlite` / 6 个 `task-*` | 各领域 ≤ 2K；全量 release 不劣化 >10% |
 | **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；`context`→`policy-context`；审批→`policy-approval`；`role_learning`→`policy-learning`；`judge`→`policy-review` | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
 | **4** | 清单收敛与发行版 | 清单完整化、跨插件顺序断言、desktop/headless/minimal 三份清单 | 装配清单 1 页可查；headless 可构建 |
@@ -175,7 +184,7 @@ SSE 推送策略、具体事件的业务处理、`PluginManager` 大对象、运
 
 ### 正面
 
-- 改工具插件：56,541 → **约 3,000 行**（降 95%）；改内核机制：插件零重编（11,500 行，降 80%）。
+- 改工具插件：64,328 → **约 3,300 行**（降 95%）；改内核机制：插件零重编（约 14,600 行，降 77%）。
 - 依赖面收窄：`lancedb → datafusion` 只进 `storage-vector`，`tree-sitter ×6` 只进 `tools-code`，
   工具/策略插件的编译链完全不碰这两条最重的链。
 - 装配可审计：一页清单回答"天演由什么组成"；缺件在启动期失败而非运行期。
@@ -192,7 +201,7 @@ SSE 推送策略、具体事件的业务处理、`PluginManager` 大对象、运
 
 | 风险 | 止损 |
 |---|---|
-| 基线/判据错误 → "达标"但无改善 | 期 0 强制先测真基线；判据用 56,541 而非 33K |
+| 基线/判据错误 → "达标"但无改善 | 期 0 强制先测真基线；判据用 **64,328**（源码口径）而非 33K/98,953（文件口径） |
 | incremental 磁盘膨胀复发（历史 179GB 事故） | GC 脚本 + 上限 20GB + CI 永不开启 |
 | 契约冻结过早（坏设计冻死） | 期 3 结束才冻结；此前用两类真实消费者压测 |
 | 注册顺序不稳定 → 前缀缓存击穿 | 清单强制有序 + 跨插件顺序断言 |
