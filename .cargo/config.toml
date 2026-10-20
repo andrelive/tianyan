@@ -18,5 +18,8 @@
 #   cargo catalog-check   # freshness 校验（漂移 → 退出码 1）
 #   cargo catalog-gen     # 生成目录内容到 stdout（Windows 侧由 ps1 落盘为 UTF-8 无 BOM）
 [alias]
-catalog-check = "run -q -p tianyan-server --example tool_catalog -- --check"
-catalog-gen = "run -q -p tianyan-server --example tool_catalog"
+# 生成器在 **app** 侧（ADR-049 期 1）：只有装配层能注册插件工具
+# （tianyan-tools-fs 的 glob / list_dir）——放 server 会让 server 依赖插件 crate，
+# 改一行工具重编 server（闸门 A 失效）。
+catalog-check = "run -q -p tianyan-app --example tool_catalog -- --check"
+catalog-gen = "run -q -p tianyan-app --example tool_catalog"

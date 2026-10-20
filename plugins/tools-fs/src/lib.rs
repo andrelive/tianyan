@@ -14,8 +14,13 @@
 //! - [`GlobParams`] / [`ListDirParams`]——参数 schema 单一事实源（core 侧定义）
 //! - `parse_params` / `safety_violation` / `wrap_tool_error`——工具错误口径单点
 //!
-//! 实现本体 [`browse`] 是自包含的（只依赖 std + serde + `TianyanError`），
-//! 从 `core/src/executor/fs.rs` 整体迁入——没有反向依赖 core 的其他工具代码。
+//! ## 实现归属（过渡形态，ADR-049 期 1 记录）
+//!
+//! 工具**定义 + 参数校验 + 安全门控 + 错误包装 + 结果序列化**全在本 crate
+//! （改一行工具行为 = 只重编插件）；底层遍历算法暂留 core `executor::fs`
+//! （`execute_glob` / `execute_list_dir`）——因为 core 的 `read_file` 目录模式
+//! 反向依赖 `execute_list_dir`（"唯一目录列举实现"），fs 域必须整域迁移才能
+//! 完全切断。期 1 收尾时随 read_file/write_file/edit/patch 一起搬。
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -27,14 +32,8 @@ use tianyan::agent::{
     ListDirParams, ToolContext,
 };
 use tianyan::common::error::TianyanError;
-use tianyan::model::types::{FunctionDefinition, ToolDefinition};
-
-pub mod browse;
-
-pub use browse::{
-    execute_glob, execute_list_dir, DirEntry, GlobOutput, ListDirOutput, EXCLUDED_DIRS,
-    MAX_GLOB_RESULTS,
-};
+use tianyan::executor::fs::{execute_glob, execute_list_dir};
+use tianyan::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
 
 /// `glob` 工具：按模式查找文件（遵循 `.gitignore`，按修改时间倒序）。
 pub struct GlobTool {
@@ -60,6 +59,12 @@ impl DynamicToolExecutor for GlobTool {
             "glob",
             "在目录下按 glob 模式找文件（如 **/*.rs），按修改时间倒序。遵循 .gitignore。",
         ))
+    }
+
+    /// 与迁移前内置表一致（`ToolPresentation::Search`）——展示意图丢失会让
+    /// 前端把文件搜索渲染成通用卡片。
+    fn presentation(&self) -> ToolPresentation {
+        ToolPresentation::Search
     }
 
     async fn execute(
@@ -106,6 +111,11 @@ impl DynamicToolExecutor for ListDirTool {
             "list_dir",
             "列出单层目录下的条目。目录带尾部 '/'。支持 offset/limit 分页。",
         ))
+    }
+
+    /// 与迁移前内置表一致（`ToolPresentation::Search`）。
+    fn presentation(&self) -> ToolPresentation {
+        ToolPresentation::Search
     }
 
     async fn execute(

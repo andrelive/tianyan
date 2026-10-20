@@ -1,20 +1,20 @@
-//! 工具目录生成器（**权威生成器**：覆盖 core 内置 + server 组件工具）。
+//! 工具目录生成器（**权威生成器**：覆盖 core 内置 + 插件工具 + server 组件工具）。
 //!
-//! 用法：**一律经 `.cargo/config.toml` 的 alias 调用**（命令单一来源——
-//! CI 步骤、`scripts/gen-tool-catalog.ps1`、`scripts/wsl-ci-parity.sh`
-//! 共用；0.5.9 实发事故：生成器由 core 迁来此处时 CI 内联的旧命令未同步，
-//! tag 推送后门禁红、不出包）：
+//! 用法：**一律经 `.cargo/config.toml` 的 alias 调用**（命令单一来源——CI 步骤、
+//! `scripts/gen-tool-catalog.ps1`、`scripts/wsl-ci-parity.sh` 共用）：
 //!
 //! ```text
 //! cargo catalog-gen     # 生成目录内容到 stdout
 //! cargo catalog-check   # freshness 门禁（漂移 → 退出码 1）
 //! ```
 //!
-//! **为什么在 server 侧**：只有这里能同时装配 core 内置工具与组件工具
-//! （`todo`/`goal`/`schedule_task`，ADR-003 组件工具化）。此前生成器在 core，
-//! 故这三个工具**不在目录内**——既没有文档覆盖、也不受 freshness 门禁保护，
-//! 而它们的 schema 又是手写的：两个保险都缺（`todo` 的「单条快捷形态」与
-//! `goal` 的 `status` 一词两用正是在这种土壤里长出来的）。
+//! **为什么在 app 侧**（ADR-049 期 1）：生成器必须能装配**插件工具**
+//! （`tianyan-tools-fs` 的 glob / list_dir），而插件依赖只允许出现在装配层。
+//! 此前生成器在 server 侧；若在那里注册插件，server 库就依赖插件 crate，
+//! 改一行工具会重编 server（13.4K）—— 闸门 A 直接失效。
+//!
+//! 组件工具（`todo` / `goal` / `schedule_task`）仍来自 server 包：它们由 server
+//! 侧的 API 模块定义（ADR-003 组件工具化），app 只做装配。
 
 use std::sync::Arc;
 
@@ -30,6 +30,13 @@ use tianyan_server::scheduled_tasks::tool::ScheduleTaskTool;
 async fn main() {
     let check = std::env::args().any(|a| a == "--check");
     let registry = ToolRegistry::new(SecurityPolicy::default());
+
+    // 插件工具（ADR-049 期 1）：与运行时装配同一工厂——目录与真实工具集一致，
+    // 否则插件工具既无文档覆盖、也不受 freshness 门禁保护。
+    let ctx = registry.context().clone();
+    for tool in tianyan_tools_fs::tools(&ctx) {
+        registry.register_dynamic_tool(tool).await;
+    }
 
     // 组件工具：临时存储 + 一次性通道装配（只为取 definition，不执行任何操作）。
     let dir = std::env::temp_dir().join(format!("tianyan-tool-catalog-{}", std::process::id()));

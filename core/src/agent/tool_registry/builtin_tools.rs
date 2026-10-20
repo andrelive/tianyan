@@ -19,10 +19,10 @@ use super::ToolRegistry;
 use crate::agent::tool_params::{
     ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
     DelegationStatsParams, ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams,
-    GlobParams, KnowledgeIngestParams, ListDirParams, ReadFileParams, RepoMapParams,
-    SearchCodeParams, SearchVfsParams, SelfCheckParams, SessionRecallParams, SuggestRoleParams,
-    SymbolOutlineParams, TaskCancelParams, TaskStatusParams, VfsListParams, VfsReadParams,
-    WebFetchParams, WebSearchParams, WriteFileParams,
+    KnowledgeIngestParams, ReadFileParams, RepoMapParams, SearchCodeParams, SearchVfsParams,
+    SelfCheckParams, SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
+    TaskStatusParams, VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams,
+    WriteFileParams,
 };
 use crate::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
 
@@ -136,8 +136,6 @@ builtin_adapter!(exec_delegation_stats, execute_delegation_stats, args);
 builtin_adapter!(exec_session_recall, execute_session_recall, args);
 builtin_adapter!(exec_web_search, execute_web_search, args);
 builtin_adapter!(exec_web_fetch, execute_web_fetch, args);
-builtin_adapter!(exec_glob, execute_glob, args, session);
-builtin_adapter!(exec_list_dir, execute_list_dir, args, session);
 builtin_adapter!(exec_symbol_outline, execute_symbol_outline, args);
 builtin_adapter!(exec_repo_map, execute_repo_map, args, session);
 
@@ -335,20 +333,6 @@ fn def_web_fetch(name: &'static str) -> ToolDefinition {
     ))
 }
 
-fn def_glob(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<GlobParams>(
-        name,
-        "在目录下按 glob 模式找文件（如 **/*.rs），按修改时间倒序。遵循 .gitignore。",
-    ))
-}
-
-fn def_list_dir(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<ListDirParams>(
-        name,
-        "列出单层目录下的条目。目录带尾部 '/'。支持 offset/limit 分页。",
-    ))
-}
-
 fn def_symbol_outline(name: &'static str) -> ToolDefinition {
     ToolDefinition::function(FunctionDefinition::from_schema::<SymbolOutlineParams>(
         name,
@@ -496,13 +480,6 @@ pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
         def_web_fetch,
         ToolPresentation::Web,
         exec_web_fetch,
-    ),
-    tool("glob", def_glob, ToolPresentation::Search, exec_glob),
-    tool(
-        "list_dir",
-        def_list_dir,
-        ToolPresentation::Search,
-        exec_list_dir,
     ),
     tool(
         "symbol_outline",

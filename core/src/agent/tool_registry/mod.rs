@@ -30,8 +30,6 @@ mod code_ops;
 mod evolution_ops;
 /// 工具执行器实现（按工具域拆分，14 个 `execute_*` 方法）。
 mod file_ops;
-/// 文件系统浏览工具执行器（glob / list_dir）。
-mod fs_ops;
 mod knowledge_ops;
 /// 内置可观测性后置监听器（A1：统计/Trace/GEPA/规则学习迁移为管线消费者）。
 mod observability;
@@ -155,6 +153,14 @@ pub trait DynamicToolExecutor: Send + Sync {
     /// 工具定义（OpenAI function calling schema）。
     fn definition(&self) -> ToolDefinition;
 
+    /// 工具 UI 展示意图（A2；只服务前端渲染，不进 LLM schema）。
+    ///
+    /// 默认 `Generic`：插件可按需覆盖（如文件系统浏览工具返回 `Search`），
+    /// 否则动态工具一律退化为通用卡片样式（与内置工具不一致）。
+    fn presentation(&self) -> ToolPresentation {
+        ToolPresentation::Generic
+    }
+
     /// 执行工具调用。
     ///
     /// `session_id` 随调用链显式传入（归属会话；会话绑定的动态工具如
@@ -217,7 +223,11 @@ pub struct ToolRegistry {
     /// 工具执行管线：post-execute 监听器（按注册顺序；首个为内置可观测性监听器）。
     post_execute_listeners: Vec<Arc<dyn ToolPostExecuteListener>>,
     /// 工具 UI 展示意图映射（A2；工具名 → card 类型，不进入 LLM schema）。
-    presentations: HashMap<String, ToolPresentation>,
+    ///
+    /// `RwLock`（同步、只瞬时持锁）：内置工具在构造期写入，**动态工具注册时**
+    /// 也要写入（`register_dynamic_tool` 是 `&self`）——否则插件工具只能退化为
+    /// `Generic`。读写均在同步块内完成，不跨 await 持锁。
+    presentations: Arc<std::sync::RwLock<HashMap<String, ToolPresentation>>>,
     definitions: Vec<ToolDefinition>,
     /// 外部注册的动态工具（如 MCP 工具桥接）。
     ///
@@ -281,7 +291,7 @@ impl ToolRegistry {
             pre_execute_listeners: Vec::new(),
             guards: Vec::new(),
             post_execute_listeners: Vec::new(),
-            presentations: HashMap::new(),
+            presentations: Arc::new(std::sync::RwLock::new(HashMap::new())),
             definitions: Vec::new(),
             dynamic_tools: Arc::new(Mutex::new(Vec::new())),
             delegation_level: 0,
@@ -548,14 +558,22 @@ impl ToolRegistry {
     /// 内置工具在 [`Self::new`] 中已按注册内置默认映射（与内置定义一一对应），
     /// 装配层可用此方法覆盖或补充动态工具的展示意图。映射不进入 LLM 可见的
     /// tool schema——只服务于前端渲染。
-    pub fn with_presentations(mut self, presentations: HashMap<String, ToolPresentation>) -> Self {
-        self.presentations.extend(presentations);
+    pub fn with_presentations(self, presentations: HashMap<String, ToolPresentation>) -> Self {
+        self.presentations
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(presentations);
         self
     }
 
     /// 查询工具的 UI 展示意图（A2；未知工具返回 Generic）。
     pub fn presentation(&self, name: &str) -> ToolPresentation {
-        self.presentations.get(name).copied().unwrap_or_default()
+        self.presentations
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// 注册工具执行前置监听器（A1 管线阶段 1，fail-closed）。
@@ -657,6 +675,13 @@ impl ToolRegistry {
             tracing::warn!(tool = %name, "动态工具注册被跳过：与内置工具重名");
             return;
         }
+        // 展示意图先登记（A2）：插件自带，避免动态工具一律退化为 Generic。
+        // 在拿动态工具表锁**之前**写入，避免两把锁嵌套。
+        let presentation = executor.presentation();
+        self.presentations
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.clone(), presentation);
         let mut tools = self.dynamic_tools.lock().await;
         if tools.iter().any(|(n, _)| n == &name) {
             tracing::warn!(tool = %name, "动态工具注册被跳过：已存在同名动态工具");
@@ -898,7 +923,10 @@ impl ToolRegistry {
             self.definitions.push(def);
         }
         // A2 展示契约：从单一事实源表派生（装配层可用 with_presentations 覆盖/补充）。
-        self.presentations = BUILTIN_TOOLS
+        *self
+            .presentations
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = BUILTIN_TOOLS
             .iter()
             .map(|t| (t.name.to_string(), t.presentation))
             .collect();
@@ -1149,33 +1177,10 @@ mod tests {
         );
     }
 
-    /// H-C1 扩展：内置角色的工具白名单必须全部落在注册表内。
-    ///
-    /// 白名单是**过滤清单**——含未注册名时会被静默忽略（过滤为空集），表现
-    /// 为"该角色某项能力凭空消失"而无任何报错。本测试把这类漂移（如工具被
-    /// 删除后白名单未同步清理）变成可拦错误。
-    #[test]
-    fn test_builtin_role_tool_whitelists_are_registered() {
-        let names: std::collections::HashSet<&str> = builtin_tool_names().into_iter().collect();
-        let roles = RoleRegistry::builtin();
-        let mut checked = 0usize;
-        for role_name in roles.names() {
-            let Some(role) = roles.get(&role_name) else {
-                continue;
-            };
-            let Some(tools) = &role.tools else {
-                continue;
-            };
-            for tool in tools {
-                checked += 1;
-                assert!(
-                    names.contains(tool.as_str()),
-                    "角色 {role_name} 的白名单含未注册工具：{tool}（删除工具时需同步清理白名单）"
-                );
-            }
-        }
-        assert!(checked > 0, "应至少检查到一个角色白名单条目");
-    }
+    // 角色白名单校验已迁至 `app/tests/assembly.rs`（ADR-049 期 1）：
+    // 工具集不再等于 `builtin_tool_names()`（插件的 glob/list_dir 在运行时注册），
+    // 静态表断言会误报。改在**装配层**用真实注册表校验（真值 = definitions），
+    // 保护等价且更正确。
     /// 具名测试动态工具（顺序/去重测试用）。
     struct NamedDynamicTool(&'static str);
 
