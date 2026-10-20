@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use tianyan::agent::{
     parse_params, safety_violation, wrap_tool_error, DynamicToolExecutor, GlobParams,
-    ListDirParams, ToolContext,
+    ListDirParams, ReadFileParams, ToolContext, WriteFileParams,
 };
 use tianyan::common::error::TianyanError;
 use tianyan::executor::fs::{execute_glob, execute_list_dir};
@@ -144,6 +144,8 @@ impl DynamicToolExecutor for ListDirTool {
 /// （前缀稳定性：工具定义是提示词前缀的一部分）。
 pub fn tools(ctx: &ToolContext) -> Vec<std::sync::Arc<dyn DynamicToolExecutor>> {
     vec![
+        std::sync::Arc::new(ReadFileTool::new(ctx.clone())),
+        std::sync::Arc::new(WriteFileTool::new(ctx.clone())),
         std::sync::Arc::new(GlobTool::new(ctx.clone())),
         std::sync::Arc::new(ListDirTool::new(ctx.clone())),
     ]
@@ -156,4 +158,143 @@ pub fn tools(ctx: &ToolContext) -> Vec<std::sync::Arc<dyn DynamicToolExecutor>> 
 pub fn plugin_factory() -> impl FnOnce(&ToolContext) -> Vec<std::sync::Arc<dyn DynamicToolExecutor>>
 {
     tools
+}
+
+/// `read_file` 工具：读取文件内容（大文件按 offset/limit 取窗口）。
+pub struct ReadFileTool {
+    ctx: ToolContext,
+}
+
+impl ReadFileTool {
+    /// 以工具上下文构造。
+    pub fn new(ctx: ToolContext) -> Self {
+        Self { ctx }
+    }
+}
+
+#[async_trait]
+impl DynamicToolExecutor for ReadFileTool {
+    fn tool_name(&self) -> String {
+        "read_file".to_string()
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::function(FunctionDefinition::from_schema::<ReadFileParams>(
+            "read_file",
+            "读取文本文件内容（纯内容，无行号/哈希前缀）。默认返回前 2000 行（单次输出上限约 50KB，超出部分截断并附「使用 offset 继续」提示）。大文件请**按需读取**：用 offset/limit 指定行范围（1 起始行号），建议先用 grep/symbol_outline 定位目标区域再按范围精读；结果含 total_lines/total_bytes 与实际窗口（showing）。内容匹配编辑（apply_edit）直接按内容定位，无需行号。",
+        ))
+    }
+
+    fn presentation(&self) -> ToolPresentation {
+        ToolPresentation::Read
+    }
+
+    async fn execute(
+        &self,
+        session_id: &str,
+        arguments: &str,
+    ) -> tianyan::common::error::Result<serde_json::Value> {
+        let params: ReadFileParams = parse_params(arguments)?;
+        let path = self.ctx.resolve_tool_path(session_id, &params.path).await;
+        safety_violation(
+            self.ctx
+                .security_policy
+                .check_path(std::path::Path::new(&path)),
+        )?;
+        tianyan::executor::execute_read_file(&path, params.offset, params.limit)
+            .await
+            .map_err(wrap_tool_error)
+    }
+}
+
+/// `write_file` 工具：写入文件内容（自动创建父目录 + 审批门控）。
+pub struct WriteFileTool {
+    ctx: ToolContext,
+}
+
+impl WriteFileTool {
+    /// 以工具上下文构造。
+    pub fn new(ctx: ToolContext) -> Self {
+        Self { ctx }
+    }
+
+    /// 收集「写入时将要新建」的父目录链（缺失的最深层 → 已存在的祖先之下）。
+    fn missing_parent_dirs(path: &str) -> Vec<String> {
+        let mut missing: Vec<String> = Vec::new();
+        let Some(parent) = std::path::Path::new(path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        else {
+            return missing;
+        };
+        let mut cur = Some(parent);
+        while let Some(p) = cur {
+            if p.exists() {
+                break;
+            }
+            missing.push(p.display().to_string());
+            cur = p.parent().filter(|q| !q.as_os_str().is_empty());
+        }
+        missing.reverse(); // 自外层向内，便于阅读
+        missing
+    }
+}
+
+#[async_trait]
+impl DynamicToolExecutor for WriteFileTool {
+    fn tool_name(&self) -> String {
+        "write_file".to_string()
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::function(FunctionDefinition::from_schema::<WriteFileParams>(
+            "write_file",
+            "将内容写入指定路径的文件（覆盖写入；文件不存在则创建；父目录不存在时**自动创建**——返回结果的 `created_dirs` 会列出本次新建的目录，若与预期不符请及时清理）。**临时/中间产物**（提交信息文件、一次性脚本、审计产物等）请写系统临时目录的会话区（如 `$env:TEMP\\\\tianyan-scratch\\\\`），**不要**写应用数据目录根或安装目录。",
+        ))
+    }
+
+    fn presentation(&self) -> ToolPresentation {
+        ToolPresentation::Write
+    }
+
+    async fn execute(
+        &self,
+        session_id: &str,
+        arguments: &str,
+    ) -> tianyan::common::error::Result<serde_json::Value> {
+        let mut params: WriteFileParams = parse_params(arguments)?;
+        params.path = self.ctx.resolve_tool_path(session_id, &params.path).await;
+        safety_violation(self.ctx.security_policy.check_file_write())?;
+        safety_violation(
+            self.ctx
+                .security_policy
+                .check_path(std::path::Path::new(&params.path)),
+        )?;
+        safety_violation(
+            self.ctx
+                .security_policy
+                .check_file_size(params.content.len() as u64),
+        )?;
+        // 目录语义（2026-10 修订）：自动创建缺失父目录 + 结果回显新建目录
+        let created_dirs = Self::missing_parent_dirs(&params.path);
+        self.ctx
+            .ensure_approved(
+                session_id,
+                false,
+                &tianyan::executor::Action::WriteFile {
+                    path: params.path.clone(),
+                    content: params.content.clone(),
+                },
+            )
+            .await?;
+        tianyan::executor::execute_write_file(&params.path, &params.content, true)
+            .await
+            .map_err(wrap_tool_error)?;
+        Ok(serde_json::json!({
+            "path": params.path,
+            "message": "写入成功",
+            "bytes": params.content.len(),
+            "created_dirs": created_dirs,
+        }))
+    }
 }

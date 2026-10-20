@@ -135,7 +135,10 @@ mod tests {
         let registry = ToolRegistry::new(crate::executor::SecurityPolicy::default());
         let md = render(&registry).await;
         assert!(md.contains("个工具"), "{md}");
-        assert!(md.contains("| `read_file` | read |"), "应含 read_file 行");
+        assert!(
+            md.contains("| `symbol_outline` | code |"),
+            "应含 symbol_outline 行"
+        );
         assert!(md.contains("| `execute_command` | terminal |"));
     }
 }

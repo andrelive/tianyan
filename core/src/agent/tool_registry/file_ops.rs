@@ -1,11 +1,9 @@
-//! 文件类工具执行器：read_file / write_file / vfs_read / vfs_list。
+//! 文件类工具执行器：vfs_read / vfs_list / apply_edit / apply_patch。
 //!
+//! `read_file` / `write_file` 已迁至 `plugins/tools-fs`（ADR-049 期 1）。
 //! 每个工具包含"安全检查 + 审批 + 执行"三步，顺序与行为与拆分前一致。
 
-use crate::agent::tool_params::{
-    ApplyEditParams, ApplyPatchParams, ReadFileParams, VfsListParams, VfsReadParams,
-    WriteFileParams,
-};
+use crate::agent::tool_params::{ApplyEditParams, ApplyPatchParams, VfsListParams, VfsReadParams};
 use crate::common::error::TianyanError;
 use crate::common::truncate::truncate_utf8_boundary;
 use crate::common::types::{ContentLevel, ContextNamespace, TianyanUri};
@@ -20,93 +18,6 @@ use crate::agent::tool_context::ToolContext;
 const LIST_ABSTRACT_MAX_BYTES: usize = 480;
 
 impl ToolContext {
-    /// 执行 read_file 工具：读取文件内容。
-    ///
-    /// 相对路径按会话工作目录解析（[`Self::resolve_tool_path`]）。
-    pub(crate) async fn execute_read_file(
-        &self,
-        arguments: &str,
-        session_id: &str,
-    ) -> Result<serde_json::Value, TianyanError> {
-        let params: ReadFileParams = parse_params(arguments)?;
-        let path = self.resolve_tool_path(session_id, &params.path).await;
-        safety_violation(self.security_policy.check_path(std::path::Path::new(&path)))?;
-        crate::executor::execute_read_file(&path, params.offset, params.limit)
-            .await
-            .map_err(wrap_tool_error)
-    }
-
-    /// 执行 write_file 工具：写入文件内容（含审批工作流门控）。
-    pub(crate) async fn execute_write_file(
-        &self,
-        arguments: &str,
-        session_id: &str,
-        subagent: bool,
-    ) -> Result<serde_json::Value, TianyanError> {
-        let mut params: WriteFileParams = parse_params(arguments)?;
-        // 相对路径按会话工作目录解析（与 read_file 同一套归属规则）
-        params.path = self.resolve_tool_path(session_id, &params.path).await;
-        safety_violation(self.security_policy.check_file_write())?;
-        safety_violation(
-            self.security_policy
-                .check_path(std::path::Path::new(&params.path)),
-        )?;
-        safety_violation(
-            self.security_policy
-                .check_file_size(params.content.len() as u64),
-        )?;
-        // 目录语义（2026-10 修订）：**自动创建缺失的父目录**。
-        //
-        // 原设计「默认报错 + 指引模型传 create_dirs=true」的意图是防拼错，但实际
-        // 防不住——模型收到报错后多半直接补参数重试，拼错的目录照样被创建，只是
-        // 白多一轮往返（更差的情况是先花一轮 ls 去确认目录结构）。改为
-        // **自动创建 + 结果回显新建目录**：把防护从「先失败一次」换成「创建可见」
-        // （`created_dirs` 落在返回结果里，异常可被模型/用户即时发现）。
-        let created_dirs = Self::missing_parent_dirs(&params.path);
-        // 审批门控（自动放行安全路径/拒绝关键路径/请求人类确认，
-        // 统一序列见 [`ToolContext::ensure_approved`]）
-        self.ensure_approved(
-            session_id,
-            subagent,
-            &Action::WriteFile {
-                path: params.path.clone(),
-                content: params.content.clone(),
-            },
-        )
-        .await?;
-        crate::executor::execute_write_file(&params.path, &params.content, true)
-            .await
-            .map_err(wrap_tool_error)?;
-        Ok(serde_json::json!({
-            "path": params.path,
-            "message": "写入成功",
-            "bytes": params.content.len(),
-            "created_dirs": created_dirs,
-        }))
-    }
-
-    /// 收集「写入时将要新建」的父目录链（缺失的最深层 → 已存在的祖先之下），
-    /// 供结果回显 `created_dirs`。
-    fn missing_parent_dirs(path: &str) -> Vec<String> {
-        let mut missing: Vec<String> = Vec::new();
-        let Some(parent) = std::path::Path::new(path)
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-        else {
-            return missing;
-        };
-        let mut cur = Some(parent);
-        while let Some(p) = cur {
-            if p.exists() {
-                break;
-            }
-            missing.push(p.display().to_string());
-            cur = p.parent().filter(|q| !q.as_os_str().is_empty());
-        }
-        missing.reverse(); // 自外层向内，便于阅读
-        missing
-    }
-
     /// 执行 apply_edit 工具：哈希锚定行编辑（含审批工作流门控）。
     pub(crate) async fn execute_apply_edit(
         &self,

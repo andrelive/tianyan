@@ -19,10 +19,9 @@ use super::ToolRegistry;
 use crate::agent::tool_params::{
     ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
     DelegationStatsParams, ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams,
-    KnowledgeIngestParams, ReadFileParams, RepoMapParams, SearchCodeParams, SearchVfsParams,
-    SelfCheckParams, SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
+    KnowledgeIngestParams, RepoMapParams, SearchCodeParams, SearchVfsParams, SelfCheckParams,
+    SessionRecallParams, SuggestRoleParams, SymbolOutlineParams, TaskCancelParams,
     TaskStatusParams, VfsListParams, VfsReadParams, WebFetchParams, WebSearchParams,
-    WriteFileParams,
 };
 use crate::model::types::{FunctionDefinition, ToolDefinition, ToolPresentation};
 
@@ -101,8 +100,6 @@ macro_rules! builtin_adapter {
 }
 
 // ---- 各工具执行入口（与 BUILTIN_TOOLS 表逐行对应）----
-builtin_adapter!(exec_read_file, execute_read_file, args, session);
-builtin_adapter!(exec_write_file, execute_write_file, args, session, sub);
 builtin_adapter!(exec_apply_edit, execute_apply_edit, args, session, sub);
 builtin_adapter!(exec_apply_patch, execute_apply_patch, args, session, sub);
 builtin_adapter!(
@@ -162,20 +159,6 @@ const fn tool(
         presentation,
         execute,
     }
-}
-
-fn def_read_file(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<ReadFileParams>(
-        name,
-        "读取文本文件内容（纯内容，无行号/哈希前缀）。默认返回前 2000 行（单次输出上限约 50KB，超出部分截断并附「使用 offset 继续」提示）。大文件请**按需读取**：用 offset/limit 指定行范围（1 起始行号），建议先用 grep/symbol_outline 定位目标区域再按范围精读；结果含 total_lines/total_bytes 与实际窗口（showing）。内容匹配编辑（apply_edit）直接按内容定位，无需行号。",
-    ))
-}
-
-fn def_write_file(name: &'static str) -> ToolDefinition {
-    ToolDefinition::function(FunctionDefinition::from_schema::<WriteFileParams>(
-        name,
-        "将内容写入指定路径的文件（覆盖写入；文件不存在则创建；父目录不存在时**自动创建**——返回结果的 `created_dirs` 会列出本次新建的目录，若与预期不符请及时清理）。**临时/中间产物**（提交信息文件、一次性脚本、审计产物等）请写系统临时目录的会话区（如 `$env:TEMP\\tianyan-scratch\\`），**不要**写应用数据目录根或安装目录。",
-    ))
 }
 
 fn def_apply_edit(name: &'static str) -> ToolDefinition {
@@ -348,18 +331,6 @@ fn def_repo_map(name: &'static str) -> ToolDefinition {
 
 /// 内置工具元数据表（单一事实源；顺序即注册顺序）。
 pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
-    tool(
-        "read_file",
-        def_read_file,
-        ToolPresentation::Read,
-        exec_read_file,
-    ),
-    tool(
-        "write_file",
-        def_write_file,
-        ToolPresentation::Write,
-        exec_write_file,
-    ),
     tool(
         "apply_edit",
         def_apply_edit,

@@ -967,7 +967,7 @@ mod tests {
         let registry = ToolRegistry::new(SecurityPolicy::default());
         let defs = registry.definitions().await;
         assert!(!defs.is_empty());
-        assert!(defs.iter().any(|d| d.function.name == "read_file"));
+        assert!(defs.iter().any(|d| d.function.name == "symbol_outline"));
     }
 
     #[tokio::test]
@@ -987,8 +987,11 @@ mod tests {
     #[test]
     fn test_builtin_presentations_registered() {
         let registry = ToolRegistry::new(SecurityPolicy::default());
-        assert_eq!(registry.presentation("read_file"), ToolPresentation::Read);
-        assert_eq!(registry.presentation("write_file"), ToolPresentation::Write);
+        assert_eq!(
+            registry.presentation("symbol_outline"),
+            ToolPresentation::Code
+        );
+        assert_eq!(registry.presentation("repo_map"), ToolPresentation::Code);
         assert_eq!(
             registry.presentation("execute_command"),
             ToolPresentation::Terminal
