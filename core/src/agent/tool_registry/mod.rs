@@ -948,58 +948,27 @@ impl ToolRegistry {
             }
         }
 
-        // 管线阶段 3：工具执行（动态工具与内置工具同一路径）。
-        let mut result = match call.function.name.as_str() {
-            "read_file" => self.execute_read_file(arguments, session_id).await,
-            "write_file" => {
-                self.execute_write_file(arguments, session_id, subagent)
-                    .await
-            }
-            "apply_edit" => {
-                self.execute_apply_edit(arguments, session_id, subagent)
-                    .await
-            }
-            "apply_patch" => {
-                self.execute_apply_patch(arguments, session_id, subagent)
-                    .await
-            }
-            "execute_command" => {
-                self.execute_execute_command(arguments, session_id, subagent)
-                    .await
-            }
-            "grep" => self.execute_search_code(arguments, session_id).await,
-            "search_vfs" => self.execute_search_vfs(arguments).await,
-            "vfs_read" => self.execute_vfs_read(arguments).await,
-            "vfs_list" => self.execute_vfs_list(arguments).await,
-            "call_skill" => self.execute_call_skill(arguments).await,
-            "ask_user" => self.execute_ask_user(arguments, session_id, subagent).await,
-            "self_check" => self.execute_self_check().await,
-            "knowledge_ingest" => self.execute_knowledge_ingest(arguments).await,
-            "web_search" => self.execute_web_search(arguments).await,
-            "web_fetch" => self.execute_web_fetch(arguments).await,
-            "delegate_to_agent" => self.execute_delegate_to_agent(arguments, session_id).await,
-            "submit_result" => self.execute_submit_result(arguments, session_id).await,
-            "task_status" => self.execute_task_status(arguments, session_id).await,
-            "task_cancel" => self.execute_task_cancel(arguments).await,
-            "suggest_role" => self.execute_suggest_role(arguments).await,
-            "execution_stats" => self.execute_execution_stats(arguments).await,
-            "execution_detail" => self.execute_execution_detail(arguments).await,
-            "delegation_stats" => self.execute_delegation_stats(arguments).await,
-            "session_recall" => self.execute_session_recall(arguments).await,
-            "glob" => self.execute_glob(arguments, session_id).await,
-            "list_dir" => self.execute_list_dir(arguments, session_id).await,
-            "symbol_outline" => self.execute_symbol_outline(arguments).await,
-            "repo_map" => self.execute_repo_map(arguments, session_id).await,
-            name => match self
+        // 管线阶段 3：工具执行 —— **查表分派**（ADR-049 期 0.5）。
+        //
+        // 内置工具（`BUILTIN_TOOLS` 表）与动态注册工具（MCP 桥接等）共享同一
+        // 条执行路径：工具名 → 执行入口。内核不再认识任何具体工具名——新增
+        // 内置工具只改 `builtin_tools.rs` 的表行（含执行入口），本函数无需新增
+        // 分支；这正是「插件可注册」的机制前提（旧形态是 `match` + 28 个分支）。
+        let mut result = match builtin_tools::find_dispatch(&call.function.name) {
+            Some(execute) => execute(self, session_id, arguments, subagent).await,
+            None => match self
                 .dynamic_tools
                 .lock()
                 .await
                 .iter()
-                .find(|(n, _)| n == name)
+                .find(|(n, _)| n == &call.function.name)
                 .map(|(_, e)| e.clone())
             {
-                Some(executor) => executor.execute(session_id, &call.function.arguments).await,
-                None => Err(TianyanError::Custom(format!("tool: 未知工具：{name}"))),
+                Some(executor) => executor.execute(session_id, arguments).await,
+                None => Err(TianyanError::Custom(format!(
+                    "tool: 未知工具：{}",
+                    call.function.name
+                ))),
             },
         };
 

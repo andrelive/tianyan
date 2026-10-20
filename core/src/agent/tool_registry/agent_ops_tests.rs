@@ -2114,7 +2114,7 @@ async fn test_protocol_tool_exempt_from_role_whitelist() {
     let registry = delegate_registry(MockChatService::default());
     let task_id = register_delegate_task(&registry, "协议工具豁免").await;
 
-    let protocol_call = tool_call("s1", PROTOCOL_TOOLS[0], r#"{"result":"done"}"#);
+    let protocol_call = tool_call("s1", SUBMIT_RESULT_TOOL, r#"{"result":"done"}"#);
     let normal_call = tool_call("w1", "write_file", r#"{"path":"a.txt","content":"x"}"#);
     let whitelist = vec!["read_file".to_string()]; // 白名单不含 submit_result / write_file
 

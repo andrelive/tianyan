@@ -1,12 +1,21 @@
 //! 内置工具元数据单一事实源（H-C1）。
 //!
-//! 每个内置工具一行：[`BUILTIN_TOOLS`] 表承载 schema 构造与展示意图（A2）——
-//! 此前散落在 register_builtin_tools、default_presentations 的平行清单
-//! 全部收敛于此，新增工具不再需要同步多处。
+//! 每个内置工具一行：[`BUILTIN_TOOLS`] 表承载 schema 构造、展示意图（A2）与
+//! **执行入口**——此前散落在 register_builtin_tools、default_presentations、
+//! `execute_single` 的 match 分支三处平行清单全部收敛于此。
 //!
-//! **新增内置工具** = 表加一行 + execute_single dispatch 加一个分支 +
-//! execute_xxx 方法实现（元数据一处定义，清单自动一致）。
+//! **新增内置工具** = 表加一行（名称 + schema + 展示意图 + 执行入口）+ 对应
+//! `execute_xxx` 方法实现。`ToolRegistry::execute_single` 只做一次查表分派，
+//! **不再认识任何具体工具名**（ADR-049 期 0.5：match → 查表）。
+//!
+//! 执行入口统一为 [`BuiltinToolExec`]（`&ToolRegistry` + session_id + 原始参数
+//! + subagent），各工具用一层薄适配（[`builtin_adapter!`] 生成）对齐签名——
+//! 适配层只搬运形参、不含逻辑，因此分派语义与改造前逐分支等价（行为零变化）。
 
+use std::future::Future;
+use std::pin::Pin;
+
+use super::ToolRegistry;
 use crate::agent::tool_params::{
     ApplyEditParams, ApplyPatchParams, AskUserParams, CallSkillParams, DelegateToAgentParams,
     DelegationStatsParams, ExecuteCommandParams, ExecutionDetailParams, ExecutionStatsParams,
@@ -29,6 +38,109 @@ fn shell_platform_hint() -> String {
     crate::executor::shell::current_hint()
 }
 
+/// 内置工具执行的返回 future（[`BuiltinToolExec`] 签名的一部分）。
+pub(crate) type ToolFuture<'a> =
+    Pin<Box<dyn Future<Output = crate::common::error::Result<serde_json::Value>> + Send + 'a>>;
+
+/// 内置工具执行入口（分派查表的单一事实源）。
+///
+/// 统一签名 = 注册表 + 会话 + 原始参数 + 子代理标记。各工具用一层薄适配
+/// （[`builtin_adapter!`] 生成）对齐——适配层只做形参搬运，不含任何逻辑。
+///
+/// **这是「查表分派」的机制前提**：表里有了执行入口，`execute_single` 就
+/// 退化成一个查表 + 管线（前处理 / 守卫 / 后处理），内核不再认识工具名。
+pub(crate) type BuiltinToolExec =
+    for<'a> fn(&'a ToolRegistry, &'a str, &'a str, bool) -> ToolFuture<'a>;
+
+/// 生成统一签名的执行适配器（**只搬运形参，不含逻辑**）。
+///
+/// 四种形参形态覆盖全部内置工具：无参 / 仅参数 / 参数+会话 / 参数+会话+子代理标记。
+/// 用宏而非 28 份手写样板：形态差异是本文件唯一的重复来源，收敛后新增工具只需
+/// 一行适配调用。
+macro_rules! builtin_adapter {
+    ($name:ident, $method:ident) => {
+        fn $name<'a>(
+            r: &'a ToolRegistry,
+            _sid: &'a str,
+            _args: &'a str,
+            _sub: bool,
+        ) -> ToolFuture<'a> {
+            Box::pin(r.$method())
+        }
+    };
+    ($name:ident, $method:ident, args) => {
+        fn $name<'a>(
+            r: &'a ToolRegistry,
+            _sid: &'a str,
+            args: &'a str,
+            _sub: bool,
+        ) -> ToolFuture<'a> {
+            Box::pin(r.$method(args))
+        }
+    };
+    ($name:ident, $method:ident, args, session) => {
+        fn $name<'a>(
+            r: &'a ToolRegistry,
+            sid: &'a str,
+            args: &'a str,
+            _sub: bool,
+        ) -> ToolFuture<'a> {
+            Box::pin(r.$method(args, sid))
+        }
+    };
+    ($name:ident, $method:ident, args, session, sub) => {
+        fn $name<'a>(
+            r: &'a ToolRegistry,
+            sid: &'a str,
+            args: &'a str,
+            sub: bool,
+        ) -> ToolFuture<'a> {
+            Box::pin(r.$method(args, sid, sub))
+        }
+    };
+}
+
+// ---- 各工具执行入口（与 BUILTIN_TOOLS 表逐行对应）----
+builtin_adapter!(exec_read_file, execute_read_file, args, session);
+builtin_adapter!(exec_write_file, execute_write_file, args, session, sub);
+builtin_adapter!(exec_apply_edit, execute_apply_edit, args, session, sub);
+builtin_adapter!(exec_apply_patch, execute_apply_patch, args, session, sub);
+builtin_adapter!(
+    exec_execute_command,
+    execute_execute_command,
+    args,
+    session,
+    sub
+);
+builtin_adapter!(exec_search_code, execute_search_code, args, session);
+builtin_adapter!(exec_search_vfs, execute_search_vfs, args);
+builtin_adapter!(exec_vfs_read, execute_vfs_read, args);
+builtin_adapter!(exec_vfs_list, execute_vfs_list, args);
+builtin_adapter!(exec_call_skill, execute_call_skill, args);
+builtin_adapter!(exec_ask_user, execute_ask_user, args, session, sub);
+builtin_adapter!(exec_self_check, execute_self_check);
+builtin_adapter!(exec_knowledge_ingest, execute_knowledge_ingest, args);
+builtin_adapter!(
+    exec_delegate_to_agent,
+    execute_delegate_to_agent,
+    args,
+    session
+);
+builtin_adapter!(exec_submit_result, execute_submit_result, args, session);
+builtin_adapter!(exec_task_status, execute_task_status, args, session);
+builtin_adapter!(exec_task_cancel, execute_task_cancel, args);
+builtin_adapter!(exec_suggest_role, execute_suggest_role, args);
+builtin_adapter!(exec_execution_stats, execute_execution_stats, args);
+builtin_adapter!(exec_execution_detail, execute_execution_detail, args);
+builtin_adapter!(exec_delegation_stats, execute_delegation_stats, args);
+builtin_adapter!(exec_session_recall, execute_session_recall, args);
+builtin_adapter!(exec_web_search, execute_web_search, args);
+builtin_adapter!(exec_web_fetch, execute_web_fetch, args);
+builtin_adapter!(exec_glob, execute_glob, args, session);
+builtin_adapter!(exec_list_dir, execute_list_dir, args, session);
+builtin_adapter!(exec_symbol_outline, execute_symbol_outline, args);
+builtin_adapter!(exec_repo_map, execute_repo_map, args, session);
+
 /// 内置工具元数据。
 pub(crate) struct BuiltinToolMeta {
     pub(crate) name: &'static str,
@@ -36,17 +148,21 @@ pub(crate) struct BuiltinToolMeta {
     pub(crate) definition: fn(&'static str) -> ToolDefinition,
     /// 展示意图（A2 装配契约）。
     pub(crate) presentation: ToolPresentation,
+    /// 执行入口（分派查表；与 `execute_xxx` 方法一一对应）。
+    pub(crate) execute: BuiltinToolExec,
 }
 
 const fn tool(
     name: &'static str,
     definition: fn(&'static str) -> ToolDefinition,
     presentation: ToolPresentation,
+    execute: BuiltinToolExec,
 ) -> BuiltinToolMeta {
     BuiltinToolMeta {
         name,
         definition,
         presentation,
+        execute,
     }
 }
 
@@ -248,62 +364,204 @@ fn def_repo_map(name: &'static str) -> ToolDefinition {
 
 /// 内置工具元数据表（单一事实源；顺序即注册顺序）。
 pub(crate) static BUILTIN_TOOLS: &[BuiltinToolMeta] = &[
-    tool("read_file", def_read_file, ToolPresentation::Read),
-    tool("write_file", def_write_file, ToolPresentation::Write),
-    tool("apply_edit", def_apply_edit, ToolPresentation::Diff),
-    tool("apply_patch", def_apply_patch, ToolPresentation::Diff),
+    tool(
+        "read_file",
+        def_read_file,
+        ToolPresentation::Read,
+        exec_read_file,
+    ),
+    tool(
+        "write_file",
+        def_write_file,
+        ToolPresentation::Write,
+        exec_write_file,
+    ),
+    tool(
+        "apply_edit",
+        def_apply_edit,
+        ToolPresentation::Diff,
+        exec_apply_edit,
+    ),
+    tool(
+        "apply_patch",
+        def_apply_patch,
+        ToolPresentation::Diff,
+        exec_apply_patch,
+    ),
     tool(
         "execute_command",
         def_execute_command,
         ToolPresentation::Terminal,
+        exec_execute_command,
     ),
-    tool("grep", def_grep, ToolPresentation::Search),
-    tool("search_vfs", def_search_vfs, ToolPresentation::Search),
-    tool("vfs_read", def_vfs_read, ToolPresentation::Read),
-    tool("vfs_list", def_vfs_list, ToolPresentation::Generic),
-    tool("call_skill", def_call_skill, ToolPresentation::Skill),
-    tool("ask_user", def_ask_user, ToolPresentation::Generic),
-    tool("self_check", def_self_check, ToolPresentation::Generic),
+    tool("grep", def_grep, ToolPresentation::Search, exec_search_code),
+    tool(
+        "search_vfs",
+        def_search_vfs,
+        ToolPresentation::Search,
+        exec_search_vfs,
+    ),
+    tool(
+        "vfs_read",
+        def_vfs_read,
+        ToolPresentation::Read,
+        exec_vfs_read,
+    ),
+    tool(
+        "vfs_list",
+        def_vfs_list,
+        ToolPresentation::Generic,
+        exec_vfs_list,
+    ),
+    tool(
+        "call_skill",
+        def_call_skill,
+        ToolPresentation::Skill,
+        exec_call_skill,
+    ),
+    tool(
+        "ask_user",
+        def_ask_user,
+        ToolPresentation::Generic,
+        exec_ask_user,
+    ),
+    tool(
+        "self_check",
+        def_self_check,
+        ToolPresentation::Generic,
+        exec_self_check,
+    ),
     tool(
         "knowledge_ingest",
         def_knowledge_ingest,
         ToolPresentation::Knowledge,
+        exec_knowledge_ingest,
     ),
     tool(
         "delegate_to_agent",
         def_delegate_to_agent,
         ToolPresentation::Delegate,
+        exec_delegate_to_agent,
     ),
-    tool("task_status", def_task_status, ToolPresentation::Generic),
-    tool("task_cancel", def_task_cancel, ToolPresentation::Generic),
-    tool("suggest_role", def_suggest_role, ToolPresentation::Generic),
+    tool(
+        "task_status",
+        def_task_status,
+        ToolPresentation::Generic,
+        exec_task_status,
+    ),
+    tool(
+        "task_cancel",
+        def_task_cancel,
+        ToolPresentation::Generic,
+        exec_task_cancel,
+    ),
+    tool(
+        "suggest_role",
+        def_suggest_role,
+        ToolPresentation::Generic,
+        exec_suggest_role,
+    ),
     tool(
         "execution_stats",
         def_execution_stats,
         ToolPresentation::Generic,
+        exec_execution_stats,
     ),
     tool(
         "execution_detail",
         def_execution_detail,
         ToolPresentation::Generic,
+        exec_execution_detail,
     ),
     tool(
         "delegation_stats",
         def_delegation_stats,
         ToolPresentation::Generic,
+        exec_delegation_stats,
     ),
     tool(
         "session_recall",
         def_session_recall,
         ToolPresentation::Generic,
+        exec_session_recall,
     ),
-    tool("web_search", def_web_search, ToolPresentation::Web),
-    tool("web_fetch", def_web_fetch, ToolPresentation::Web),
-    tool("glob", def_glob, ToolPresentation::Search),
-    tool("list_dir", def_list_dir, ToolPresentation::Search),
-    tool("symbol_outline", def_symbol_outline, ToolPresentation::Code),
-    tool("repo_map", def_repo_map, ToolPresentation::Code),
+    tool(
+        "web_search",
+        def_web_search,
+        ToolPresentation::Web,
+        exec_web_search,
+    ),
+    tool(
+        "web_fetch",
+        def_web_fetch,
+        ToolPresentation::Web,
+        exec_web_fetch,
+    ),
+    tool("glob", def_glob, ToolPresentation::Search, exec_glob),
+    tool(
+        "list_dir",
+        def_list_dir,
+        ToolPresentation::Search,
+        exec_list_dir,
+    ),
+    tool(
+        "symbol_outline",
+        def_symbol_outline,
+        ToolPresentation::Code,
+        exec_symbol_outline,
+    ),
+    tool(
+        "repo_map",
+        def_repo_map,
+        ToolPresentation::Code,
+        exec_repo_map,
+    ),
 ];
+
+/// 协议工具元数据（**不暴露给 LLM**）。
+///
+/// 协议工具是循环协议的一部分（如 `submit_result` 的结果落盘），不是模型
+/// 可见能力：它们**不进** `definitions`、展示意图与角色白名单，但**必须可执行**。
+///
+/// 与 [`BUILTIN_TOOLS`] **分表**而非共用一个 `hidden` 标记，是语义要求——
+/// 元数据表驱动的是「模型可见工具集」，掺入不可见项就会让 LLM 看到一个
+/// 不该调用的工具（行为变化）。
+pub(crate) struct ProtocolToolMeta {
+    /// 工具名（与 `execute` 入口一一对应）。
+    pub(crate) name: &'static str,
+    /// 执行入口。
+    pub(crate) execute: BuiltinToolExec,
+}
+
+/// 协议工具执行表（当前仅 `submit_result`：ADR-030 可选结果落盘）。
+///
+/// **单一事实源**：`agent_ops::is_protocol_tool`（角色白名单豁免判定）由此
+/// 派生，不再维护第二份名字清单。
+pub(crate) static PROTOCOL_TOOLS: &[ProtocolToolMeta] = &[ProtocolToolMeta {
+    name: super::agent_ops::SUBMIT_RESULT_TOOL,
+    execute: exec_submit_result,
+}];
+
+/// 是否为协议工具（角色白名单豁免判定的单点，名字清单来自执行表）。
+pub(crate) fn is_protocol_tool(name: &str) -> bool {
+    PROTOCOL_TOOLS.iter().any(|t| t.name == name)
+}
+
+/// 按名解析**内置 + 协议**统一执行入口（分派查表入口）。
+///
+/// `None` = 不是编译期注册的工具，交由动态工具表兜底（MCP 桥接 / 剪贴板等）。
+///
+/// 线性扫描：单次工具调用的开销相对于工具本身可忽略，换来的是
+/// **零额外分配 + 表序即注册序**（顺序是提示词前缀的稳定性前提）。
+pub(crate) fn find_dispatch(name: &str) -> Option<BuiltinToolExec> {
+    if let Some(meta) = BUILTIN_TOOLS.iter().find(|t| t.name == name) {
+        return Some(meta.execute);
+    }
+    PROTOCOL_TOOLS
+        .iter()
+        .find(|t| t.name == name)
+        .map(|t| t.execute)
+}
 
 /// 内置工具名清单（公开只读；跨 crate 一致性门禁的单一事实源）。
 ///

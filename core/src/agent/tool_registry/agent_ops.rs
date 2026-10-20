@@ -32,17 +32,18 @@ use super::{parse_params, safety_violation, wrap_tool_error, ToolExecutionOutcom
 /// `submit_result` 工具名（请求侧注入与执行侧豁免的**单点**）。
 pub(crate) const SUBMIT_RESULT_TOOL: &str = "submit_result";
 
-/// **协议工具**：循环协议的一部分，不是角色能力——请求侧恒注入、执行侧恒允许。
+/// 是否为协议工具（角色白名单豁免判定的单点）。
 ///
+/// **协议工具**是循环协议的一部分，不是角色能力——请求侧恒注入、执行侧恒允许。
 /// 历史 bug：`submit_result` 由 [`ToolRegistry::build_delegate_tools`] 恒注入请求
 /// 工具列表，但执行侧按角色白名单过滤时**没有豁免**它 → 模型看到工具、调用却被拒
 /// （"角色 X 不允许使用工具 submit_result"），子代理最终结果只能靠最后一条输出兜底，
 /// 且模型会浪费轮次重试。白名单表达的是"角色能力边界"，协议工具不应受其约束。
-pub(crate) const PROTOCOL_TOOLS: &[&str] = &[SUBMIT_RESULT_TOOL];
-
-/// 是否为协议工具（角色白名单豁免判定的单点）。
+///
+/// 名字清单来自 [`super::builtin_tools::PROTOCOL_TOOLS`]（执行表）——豁免判定与
+/// "可执行"必须同源，否则又会分裂成两份清单（本次改造前的 `match` 分支就是第二份）。
 pub(crate) fn is_protocol_tool(name: &str) -> bool {
-    PROTOCOL_TOOLS.contains(&name)
+    super::builtin_tools::is_protocol_tool(name)
 }
 
 /// task_status 列表模式的默认返回条数（最近优先）。
