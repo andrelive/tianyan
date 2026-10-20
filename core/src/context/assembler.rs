@@ -212,8 +212,11 @@ impl ContextAssembler {
     /// 规范化只作用于**请求组装视图**：库与缓存不动，结果确定（同一链每次得到
     /// 同一视图）→ 前缀缓存不受影响、可反复调用：
     /// - 已存在的 tool 结果**提前**到其调用之后（其余消息相对顺序不变）；
-    /// - 悬空调用**丢弃**（该 assistant 消息的其余内容照常保留），并**补一条合成
-    ///   结果**（"调用被中断"）——让模型看到已发生的事实，而不是凭空消失的调用；
+    /// - 悬空调用**保留**在 assistant 上（`tool_calls` 原样），并**补一条 id 对齐的
+    ///   合成结果**（"调用被中断"）——上游两个方向同时硬约束：**每个调用都要有
+    ///   结果**、**每条结果都要能找到调用**；删调用会让补出来的结果变成孤立 tool
+    ///   （严格上游报 `Messages with role 'tool' must be a response to a preceding
+    ///   message with 'tool_calls'`，见 ADR-043 修订）；
     /// - 无任何调用认领的**孤立 tool 结果**丢弃（同样会触发上游 400）。
     pub(crate) fn normalize_tool_pairs(
         chain: &[StructuredMessage],
@@ -263,11 +266,10 @@ impl ContextAssembler {
                         .filter(|(_, pos)| pos.is_none())
                         .map(|(id, _)| id.as_str())
                         .collect();
-                    if dangling.is_empty() {
-                        out.push(Cow::Borrowed(sm));
-                    } else {
-                        out.push(Cow::Owned(without_tool_calls(sm, &dangling)));
-                    }
+                    // 悬空调用**保留**（不删 `tool_calls`）：上游同时要求「每个调用都要
+                    // 有结果」与「每条结果都要能找到调用」，删调用会让下面补的合成结果
+                    // 变成没有宿主的孤立 tool → 400（ADR-043 修订）。
+                    out.push(Cow::Borrowed(sm));
                     for (_, pos) in entries.iter() {
                         if let Some(j) = pos {
                             out.push(Cow::Borrowed(&chain[*j]));
@@ -318,16 +320,6 @@ fn has_tool_result(sm: &StructuredMessage) -> bool {
     sm.parts
         .iter()
         .any(|p| matches!(p, Part::ToolResult { .. }))
-}
-
-/// 复制一条消息并去掉指定 `tool_calls`（其余 parts 顺序不变）。
-fn without_tool_calls(sm: &StructuredMessage, drop_ids: &[&str]) -> StructuredMessage {
-    let mut out = sm.clone();
-    out.parts.retain(|p| match p {
-        Part::ToolCall { id, .. } => !drop_ids.contains(&id.as_str()),
-        _ => true,
-    });
-    out
 }
 
 /// 合成「调用被中断」的工具结果（**仅请求视图**，不落库）。
@@ -771,12 +763,15 @@ mod tests {
             .collect()
     }
 
-    /// 规范化后的**传输层**序列必须满足：assistant(tool_calls) 后紧邻 Tool 消息。
-    fn assert_pairs_wellformed(chain: &[StructuredMessage]) {
-        let msgs: Vec<Message> = ContextAssembler::normalize_tool_pairs(chain)
-            .iter()
-            .flat_map(|sm| ContextAssembler::structured_to_messages(sm.as_ref()))
-            .collect();
+    /// 规范化后的**传输层**序列必须同时满足上游两个方向的硬约束：
+    /// 1. 前向：`assistant(tool_calls)` 后紧邻 Tool 消息；
+    /// 2. 反向：每条 Tool 的 `tool_call_id` 必须属于**紧邻其前**那条 assistant 的
+    ///    `tool_calls`（否则报 `Messages with role 'tool' must be a response to a
+    ///    preceding message with 'tool_calls'`）。
+    ///
+    /// 反向断言是 ADR-043 修订补的判别力：此前只查前向，于是「删掉悬空调用、
+    /// 补一条无人认领的合成结果」被测试当成期望固化下来，严格上游一路 400。
+    fn assert_messages_wellformed(msgs: &[Message]) {
         for (i, m) in msgs.iter().enumerate() {
             if m.role == MessageRole::Assistant
                 && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
@@ -789,6 +784,41 @@ mod tests {
                 );
             }
         }
+        for (i, m) in msgs.iter().enumerate() {
+            if m.role != MessageRole::Tool {
+                continue;
+            }
+            let call_id = m.tool_call_id.as_deref().unwrap_or_default();
+            // 同一次调用的多个结果连续排列，向前跳过同组 tool 消息找发起方
+            let owner = msgs[..i]
+                .iter()
+                .rev()
+                .find(|prev| prev.role != MessageRole::Tool)
+                .and_then(|prev| prev.tool_calls.as_ref())
+                .is_some_and(|calls| calls.iter().any(|c| c.id == call_id));
+            assert!(
+                owner,
+                "tool 消息的 tool_call_id 必须对应前置 assistant 的调用（上游硬要求）：{msgs:?}"
+            );
+        }
+    }
+
+    fn assert_pairs_wellformed(chain: &[StructuredMessage]) {
+        let msgs: Vec<Message> = ContextAssembler::normalize_tool_pairs(chain)
+            .iter()
+            .flat_map(|sm| ContextAssembler::structured_to_messages(sm.as_ref()))
+            .collect();
+        assert_messages_wellformed(&msgs);
+    }
+
+    /// 判别力自检：断言必须能抓住「孤立 tool」——否则测试会把错误形态当成期望。
+    #[test]
+    #[should_panic(expected = "tool 消息的 tool_call_id 必须对应前置 assistant 的调用")]
+    fn test_wellformed_assertion_rejects_orphan_tool() {
+        // 模拟旧行为：悬空调用被删（assistant 上已无 tool_calls），只剩合成结果
+        let assistant = Message::assistant("");
+        let orphan = Message::tool("c1", "[结果] 工具调用被中断，未产生结果");
+        assert_messages_wellformed(&[assistant, orphan]);
     }
 
     /// 形态 A：通知（system）插在调用与结果之间 → 结果提前，通知后移。
@@ -823,11 +853,11 @@ mod tests {
         assert_eq!(out.len(), 3, "补一条合成结果");
         assert_eq!(out[0].role, MessageRole::Assistant);
         assert!(
-            !out[0]
+            out[0]
                 .parts
                 .iter()
-                .any(|p| matches!(p, Part::ToolCall { .. })),
-            "悬空调用应从 assistant 上移除"
+                .any(|p| matches!(p, Part::ToolCall { id, .. } if id == "c1")),
+            "悬空调用必须保留（删掉会让合成结果变成没有宿主的孤立 tool）"
         );
         assert!(out[0]
             .parts
@@ -836,6 +866,44 @@ mod tests {
         assert_eq!(out[1].role, MessageRole::Tool);
         assert!(is_tool_result_of(&out[1], "c1"));
         assert_eq!(out[2].role, MessageRole::User, "用户消息顺序不变");
+    }
+
+    /// **回归（ADR-043 修订）**：悬空调用必须与合成结果成对保留——删调用会让合成
+    /// 结果变成孤立 tool，严格上游（opencode→DeepSeek 实测）报
+    /// `Messages with role 'tool' must be a response to a preceding message with
+    /// 'tool_calls'`，且该会话此后每次请求都 400。
+    #[test]
+    fn test_normalize_dangling_call_stays_paired_with_synthetic_result() {
+        let chain = vec![
+            StructuredMessage::user("s1", "u0"),
+            assistant_with_call("s1", "c1", "跑命令"),
+            StructuredMessage::user("s1", "中断了，继续"),
+        ];
+        let out = normalize(&chain);
+        let assistant = out
+            .iter()
+            .find(|sm| sm.role == MessageRole::Assistant)
+            .expect("assistant 应保留");
+        let calls: Vec<&str> = assistant
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::ToolCall { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec!["c1"], "悬空调用不得从 assistant 上删除");
+
+        let msgs: Vec<Message> = out
+            .iter()
+            .flat_map(ContextAssembler::structured_to_messages)
+            .collect();
+        assert_messages_wellformed(&msgs);
+        assert!(
+            msgs.iter()
+                .any(|m| m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some("c1")),
+            "合成结果必须带原调用的 tool_call_id"
+        );
     }
 
     /// 孤立工具结果（无任何调用认领）→ 丢弃（否则同样触发上游 400）。
@@ -869,15 +937,19 @@ mod tests {
         assert_pairs_wellformed(&chain);
         let out = normalize(&chain);
         assert_eq!(out.len(), 4, "assistant + 已有结果 + 合成结果 + 用户消息");
-        let calls = match &out[0]
+        let calls: Vec<String> = out[0]
             .parts
             .iter()
-            .find(|p| matches!(p, Part::ToolCall { .. }))
-        {
-            Some(Part::ToolCall { id, .. }) => id.clone(),
-            _ => panic!("应保留有结果的调用"),
-        };
-        assert_eq!(calls, "c1", "只保留有结果的调用");
+            .filter_map(|p| match p {
+                Part::ToolCall { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec!["c1", "c2"],
+            "悬空调用同样保留（只补结果、不删调用）"
+        );
         assert!(is_tool_result_of(&out[1], "c1"));
         assert!(is_tool_result_of(&out[2], "c2"), "悬空调用补合成结果");
         assert_eq!(out[3].role, MessageRole::User);
@@ -917,16 +989,6 @@ mod tests {
             StructuredMessage::user("s1", "u3（中断后新消息）"),
         ];
         let msgs = ContextAssembler::assemble(&chain, &InjectableContext::default());
-        for (i, m) in msgs.iter().enumerate() {
-            if m.role == MessageRole::Assistant
-                && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
-            {
-                assert_eq!(
-                    msgs[i + 1].role,
-                    MessageRole::Tool,
-                    "assemble 输出必须满足上游工具对要求：{msgs:?}"
-                );
-            }
-        }
+        assert_messages_wellformed(&msgs);
     }
 }

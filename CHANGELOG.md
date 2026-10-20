@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **会话持续 400：`tool` 消息找不到前置 `tool_calls`（ADR-043 修订）**：`normalize_tool_pairs` 处理「调用有、结果无」（中断 / 取消 / 并行丢结果）时，会**删掉** assistant 上的悬空调用、再补一条引用该调用的合成结果 —— 补出来的 `tool` 消息因此必然无人认领。opencode（zen/go → DeepSeek 官方上游）严格校验，报 `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`，且该会话此后每次请求（含压缩摘要请求，同一套规范化）都失败、彻底卡死；ollama.com 因兼容层不校验工具对而侥幸能跑（不是 provider 差异，是请求本身不合规）。修复：悬空调用**保留**在 assistant 上，只补 id 对齐的合成结果（上游两方向硬约束同时满足）；测试断言补**反向**校验（每条 `tool` 的 `tool_call_id` 必须属于紧邻其前 assistant 的 `tool_calls`）+ 判别力自检（孤立 tool 必 panic）。全库实测：库内孤立结果 0、悬空调用 12 处（6 会话），原实现下 4 个会话的请求视图违规、修复后归零；存量会话无需清洗（视图每次重算）
+
 ## [0.7.0] - 2026-10-19
 
 ### Removed
