@@ -179,6 +179,25 @@ SSE 推送策略、具体事件的业务处理、`PluginManager` 大对象、运
 （模型可见，27 项）与 `PROTOCOL_TOOLS`（协议工具，1 项，不进 definitions / 展示意图 / 角色白名单）**分表**，
 `agent_ops::is_protocol_tool` 由执行表派生——白名单豁免与"可执行"同源，不再有第三份名字清单。
 
+**实施记录（期 0.5 第二刀：工具依赖显式化，2026-10-20）**：新增 `agent/tool_context.rs`，把工具域
+依赖从注册表私有字段搬到显式结构。
+
+依赖边界是实测出来的，不是设计的：六个工具域（`file_ops` / `fs_ops` / `code_ops` / `symbol_ops` /
+`repo_map_ops` / `knowledge_ops` / `evolution_ops`）总共只用到 **10 个符号**——`security_policy`（16 处）、
+`resolve_tool_path`（7）、`ensure_approved`（4）、`resolve_base_dir`（3）、`vfs` / `session_store` /
+`knowledge_ingestor` / `execution_log` / `session_recall` / `repo_map_cache`；而 `agent_ops`（委托 / 任务面板）
+用到 **32 个**，其中 `execute_parallel` / `child_registry` / `definitions` / `spawn_background_delegate` /
+`build_delegate_tools` 是**内核能力**（子代理生命周期、工具集构造），不属于"工具干活需要的外部世界"。
+
+因此落地形态是：`ToolContext`（10 字段 + 5 个共用方法，`ToolRegistry` 持一份并 `Deref` 到它）承载七个工具域，
+`agent_ops` 留在 `impl ToolRegistry`。`Deref` 是刻意的过渡选择——注册表内部逻辑与全部既有调用点
+（`registry.resolve_tool_path(..)` / `registry.security_policy` / `ensure_approved`）**零改动**，
+重构成本集中在一处，行为风险最小。
+
+期 1 的输入因此变清晰：工具域只剩 **16 处** `crate::executor::` 引用（file 8 / fs 3 / symbol 3 / code 1 /
+repo_map 1），随插件整体搬走；内核侧的 executor 引用（coordinator 7 / agent_core 5 / background 5 /
+rollback 4 / builder 4）是机制级（`kill_all_running_children` / `Action` / `SecurityPolicy` 等），不属于工具耦合。
+
 ---
 
 ## 分期与闸门
@@ -186,7 +205,7 @@ SSE 推送策略、具体事件的业务处理、`PluginManager` 大对象、运
 | 期 | 目标 | 动作要点 | 闸门（硬数） |
 |---|---|---|---|
 | **0** | 地基与基线（零行为改动）✅ **已完成** | incremental 实验（**3× 加速 / 185MB 每会话**，建议开启 + GC 3 天/20GB）；`scripts/measure-rebuild.ps1`；`contracts.md`（34 trait 分级 + common 二分）；`microkernel-baseline.md` | 三场景基线齐全（**均 100% 全量重编**）；lint/unit 绿；无行为改动 ✅ |
-| **0.5** | 工具契约与注册形状 + 装配器二分（**分派查表化已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表；`execute_single` 28 分支 match → 一次查表（内核零工具名字面量）。待办：消除 agent→executor 40+ 实现级引用；`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿，含 9 个委托链回归）；`cargo check` 基线 ✅ |
+| **0.5** | 工具契约与注册形状 + 装配器二分（**工具侧已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表（28 分支 match → 一次查表，内核零工具名字面量）；✅ `ToolContext` 承载六个工具域（`impl ToolContext` + 注册表 `Deref`），依赖边界实测：工具域 executor 引用仅 16 处（随插件搬走）。待办：`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿）；clippy 零警告 ✅ |
 | **1** | 工具插件试点 | `tools-fs` / `tools-code` 成独立 crate；装配器注册；旧路径 `pub use` 保留一个版本周期 | **闸门 A（证伪）**：改一行工具 → 重编源码 ≤ 3.5K（当前 64.3K）；不达标即停 |
 | **2** | 适配器与任务插件 | `provider-llm` / `provider-embed` / `provider-search` / `storage-vector`（唯一 lancedb）/ `storage-sqlite` / 6 个 `task-*` | 各领域 ≤ 2K；全量 release 不劣化 >10% |
 | **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；`context`→`policy-context`；审批→`policy-approval`；`role_learning`→`policy-learning`；`judge`→`policy-review` | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
