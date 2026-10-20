@@ -198,6 +198,30 @@ SSE 推送策略、具体事件的业务处理、`PluginManager` 大对象、运
 repo_map 1），随插件整体搬走；内核侧的 executor 引用（coordinator 7 / agent_core 5 / background 5 /
 rollback 4 / builder 4）是机制级（`kill_all_running_children` / `Action` / `SecurityPolicy` 等），不属于工具耦合。
 
+**实施记录（期 1 首刀：装配器二分 + 插件骨架，2026-10-20）**：
+
+**装配器二分落地形态**：新建 `app` 包（`tianyan-app`，bin 名仍为 `tianyan-server`，产物名不变），
+作为**全仓唯一 `use` 具体插件类型的地方**。server 库经 `ToolPluginFactory`（类型擦除：
+`Box<dyn FnOnce(&ToolContext) -> Vec<Arc<dyn DynamicToolExecutor>>>`）接收清单，自身零插件依赖。
+启动链新增 `create_app_with_plugins` / `start_server_with_plugins` /
+`start_server_with_shutdown_signal_and_plugins`，旧签名全部保留（测试与嵌入式走旧路径，传 `None`）。
+桌面端（tauri）与独立 bin 共用插件 crate 的 `plugin_factory()` —— 清单单一事实源在插件内。
+
+**为什么 bin 必须独立成包**（本轮实测的硬约束）：Cargo 的依赖粒度是 **package**。若清单写在
+`tianyan-server` 包自己的 bin 里，整个 server 包就依赖插件 crate → 改一行工具重编 server 库
+（13.4K 源码），闸门 A 直接失效。把 bin 挪到独立包后，改插件只重编「插件 + bin（~90 行）」。
+
+**闸门 A 首测数据**（`cargo check --workspace`，touch `plugins/tools-fs/src/lib.rs`）：
+重编 crate = 仅 `tianyan-tools-fs`；重编源码 **512 行 / 0.8%**；墙钟 **3.38s**。
+对照期 0 基线（改一个工具 = 63,999 行 / 100% / 106.7s）：降 **125×**（行数）/ **31×**（墙钟）。
+判据 ≤3.5K 达标。
+
+**发现的域内交叉依赖**（决定了 fs 域不能切片迁移）：core 的 `read_file`（`executor/actions.rs`）在
+目录模式下委托 `executor::fs::execute_list_dir`（源码注释写明"唯一目录列举实现"）。因此把
+`executor::fs` 单独搬进插件会让 core 反向依赖插件——**fs 域必须整域迁移**（read_file / write_file /
+apply_edit / apply_patch / glob / list_dir 六个工具一起走），并在同一刀里拆分 `actions.rs`
+（read/write 与命令执行混在一个文件）。这是期 1 剩余工作的主体。
+
 ---
 
 ## 分期与闸门
@@ -206,7 +230,7 @@ rollback 4 / builder 4）是机制级（`kill_all_running_children` / `Action` /
 |---|---|---|---|
 | **0** | 地基与基线（零行为改动）✅ **已完成** | incremental 实验（**3× 加速 / 185MB 每会话**，建议开启 + GC 3 天/20GB）；`scripts/measure-rebuild.ps1`；`contracts.md`（34 trait 分级 + common 二分）；`microkernel-baseline.md` | 三场景基线齐全（**均 100% 全量重编**）；lint/unit 绿；无行为改动 ✅ |
 | **0.5** | 工具契约与注册形状 + 装配器二分（**工具侧已完成**） | ✅ 元数据表承载执行入口 + 协议工具独立成表（28 分支 match → 一次查表，内核零工具名字面量）；✅ `ToolContext` 承载六个工具域（`impl ToolContext` + 注册表 `Deref`），依赖边界实测：工具域 executor 引用仅 16 处（随插件搬走）。待办：`thin-channel` + `assembly-manifest`；`AppState` 20 字段契约化 | 工具目录 freshness ✅；工具行为零变化 ✅（1431 单测全绿）；clippy 零警告 ✅ |
-| **1** | 工具插件试点 | `tools-fs` / `tools-code` 成独立 crate；装配器注册；旧路径 `pub use` 保留一个版本周期 | **闸门 A（证伪）**：改一行工具 → 重编源码 ≤ 3.5K（当前 64.3K）；不达标即停 |
+| **1** | 工具插件试点（**装配器二分 + tools-fs 骨架已完成**） | ✅ `tianyan-app` bin 包（**清单住 bin**）+ `ToolPluginFactory` 类型擦除 + `create_app_with_plugins` / `start_server_with_plugins*`；✅ `plugins/tools-fs` 独立 crate（`executor::fs` 实现整体迁入）。待续：**整域迁移**——`read_file` 目录模式反向依赖 `executor::fs::execute_list_dir`，故 fs 域必须 6 工具一起搬（read/write/edit/patch/glob/list_dir）才能删 core 侧 | 闸门 A **首测 512 行 ✅**（判据 ≤3.5K）；core 侧暂留（双路径过渡，重名注册自动跳过） |
 | **2** | 适配器与任务插件 | `provider-llm` / `provider-embed` / `provider-search` / `storage-vector`（唯一 lancedb）/ `storage-sqlite` / 6 个 `task-*` | 各领域 ≤ 2K；全量 release 不劣化 >10% |
 | **3** | 策略分离（最难一刀） | 抽 `kernel-impl`（loop/cancel/rollback/stream_forward/working_set）；`context`→`policy-context`；审批→`policy-approval`；`role_learning`→`policy-learning`；`judge`→`policy-review` | **闸门 B**：api ≤ 6K && impl ≤ 15K（或配置外移后 16.1K）；改策略不重编内核；S 级零变更 |
 | **4** | 清单收敛与发行版 | 清单完整化、跨插件顺序断言、desktop/headless/minimal 三份清单 | 装配清单 1 页可查；headless 可构建 |
