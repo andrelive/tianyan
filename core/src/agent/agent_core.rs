@@ -515,6 +515,17 @@ impl Agent {
         }
     }
 
+    /// 工具执行上下文快照（**装配层构造插件工具用**；ADR-049 期 1）。
+    ///
+    /// 字段全是 `Arc` / 策略值，克隆廉价且与 Agent 内部注册表**共享同一批依赖**
+    /// （会话管理器 / VFS / 审批工作流），不是副本状态。
+    ///
+    /// 装配顺序因此成立：Agent 先就绪（内部注册表持有 ctx）→ 装配层取 ctx →
+    /// 构造插件工具 → `register_dynamic_tools` 注入（追加末尾，前缀稳定性保持）。
+    pub async fn tool_context(&self) -> crate::agent::tool_context::ToolContext {
+        self.agent_loop.tool_registry().context().clone()
+    }
+
     /// 解析会话生效的工作目录：会话级绑定（header.working_directory，目录必须
     /// 存在）优先，缺省回退构建时注入的全局默认（[agent] working_directory）。
     pub(crate) async fn resolve_working_directory(&self, session_id: &str) -> Option<PathBuf> {

@@ -2,7 +2,7 @@
 //!
 //! This module handles the Axum server lifecycle within the Tauri application.
 
-use tianyan_server::start_server_with_shutdown_signal;
+use tianyan_server::start_server_with_shutdown_signal_and_plugins;
 use tracing::{error, info};
 
 /// 服务器监听地址（仅本机回环，不对外暴露）。
@@ -56,8 +56,16 @@ pub async fn start_axum_server(
     };
     info!("Starting Axum server on {}:{}", SERVER_HOST, port);
 
-    if let Err(e) =
-        start_server_with_shutdown_signal(listener, tianyan_config, shutdown_signal).await
+    // 插件清单（ADR-049 期 1）：桌面端与独立 bin 共用同一工厂——
+    // 清单单一事实源在插件 crate（`plugin_factory()`），此处只接线。
+    let plugin_factory = Box::new(tianyan_tools_fs::plugin_factory());
+    if let Err(e) = start_server_with_shutdown_signal_and_plugins(
+        listener,
+        tianyan_config,
+        shutdown_signal,
+        plugin_factory,
+    )
+    .await
     {
         error!("Server error: {}", e);
     }

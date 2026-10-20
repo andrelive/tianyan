@@ -201,6 +201,14 @@ pub trait AgentCoordinator: Send + Sync {
     ) {
     }
 
+    /// 工具执行上下文快照（装配层构造插件工具用；ADR-049 期 1）。
+    ///
+    /// 默认 `None`：无工具装配能力的适配器 / 测试替身直接继承，装配层据此跳过
+    /// 插件注册（不报错——插件是可选增强，不是启动硬依赖）。
+    async fn tool_context(&self) -> Option<crate::agent::tool_context::ToolContext> {
+        None
+    }
+
     /// 获取后台任务列表快照（delegate_to_agent(background) 的任务）。
     async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask>;
 
@@ -516,6 +524,11 @@ impl AgentCoordinator for Agent {
 
     async fn register_dynamic_tools(&self, tools: Vec<Arc<dyn crate::agent::DynamicToolExecutor>>) {
         self.register_dynamic_tools(tools).await
+    }
+
+    async fn tool_context(&self) -> Option<crate::agent::tool_context::ToolContext> {
+        // 调 inherent 方法（同名时固有方法优先，不会递归到本 trait 方法）
+        Some(self.tool_context().await)
     }
 
     async fn background_tasks(&self) -> Vec<crate::agent::background::BackgroundTask> {

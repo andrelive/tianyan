@@ -50,7 +50,7 @@ export default defineConfig({
       timeout: 30000,
     },
     {
-      command: 'cargo run -p tianyan-server',
+      command: 'cargo run -p tianyan-app',
       url: `http://127.0.0.1:${E2E_PORT}/health`,
       // 后端条目无条件自启（不复用已有进程）：若备用端口也被占用，
       // 启动将因端口冲突而响亮失败——绝不静默复用并污染其他实例的数据。

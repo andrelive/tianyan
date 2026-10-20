@@ -42,9 +42,8 @@ path = "src/lib.rs"
 # 禁用 doctest：与 core 同步，避免改动后 doctest 目标全量重编（全量测试 378.8s → 约 2 分钟）
 doctest = false
 
-[[bin]]
-name = "tianyan-server"
-path = "src/main.rs"
+# bin（tianyan-server 可执行文件）已迁至 `tianyan-app` 包（ADR-049 期 1：
+# 装配清单必须住在依赖插件的包里，否则改一行工具会重编 server 库）。
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["blocking"] }

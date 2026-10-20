@@ -99,7 +99,7 @@ function Test-GuiBuild {
 function Test-GuiE2E {
     Write-Host ">>>>> 4. GUI E2E 测试 (Playwright, 真实后端)" -ForegroundColor Green
     # 预编译后端，避免 playwright webServer 首次编译超时
-    cargo build -p tianyan-server
+    cargo build -p tianyan-app
     if ($LASTEXITCODE -ne 0) { throw "后端预编译失败" }
 
     # e2e 后端端口：**刻意避开 3000**——本地 3000 常被运行中的桌面应用占用，

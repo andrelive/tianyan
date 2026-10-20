@@ -12,6 +12,8 @@ tauri-build = { version = "2.2", features = [] }
 [dependencies]
 tianyan-core = { path = "../core" }
 tianyan-server = { path = "../server" }
+# 插件清单（ADR-049 期 1）：桌面端也在装配层，清单与独立 bin 同源
+tianyan-tools-fs = { path = "../plugins/tools-fs" }
 
 # Tauri framework
 tauri = { version = "2.2", features = ["tray-icon", "devtools"] }

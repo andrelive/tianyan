@@ -1,6 +1,23 @@
-//! 服务器二进制入口。
+//! 天演装配器（服务器二进制入口）。
+//!
+//! ## 为什么单独成包（ADR-049 期 1）
+//!
+//! **装配清单住在 bin**。Cargo 的依赖粒度是 package，若清单写在
+//! `tianyan-server` 的 bin 里，整个 server 包就依赖插件 crate —— 改一行工具会
+//! 重编 server 库（13.4K 源码），闸门 A（≤3.5K）直接失效。
+//!
+//! 因此本包只做三件事：加载配置与日志、给出插件清单、启动 server。
+//! server 库通过 `ToolPluginFactory`（类型擦除）接收清单，**不认识任何插件类型**。
 
-use tianyan_server::start_server;
+use tianyan_server::{start_server_with_plugins, ToolPluginFactory};
+
+/// 插件清单（**全仓唯一 `use` 具体插件类型的地方**）。
+///
+/// 新增插件在此追加一行；插件内部顺序即注册顺序（追加到动态工具末尾，
+/// 内置工具顺序不受影响 —— 提示词前缀稳定性）。
+fn plugin_factory() -> ToolPluginFactory {
+    Box::new(tianyan_tools_fs::plugin_factory())
+}
 
 #[tokio::main]
 async fn main() -> tianyan::common::error::Result<()> {
@@ -26,7 +43,7 @@ async fn main() -> tianyan::common::error::Result<()> {
         // 端口来源单点：from_env 读 TIANYAN_PORT（未设 → 默认 127.0.0.1:3000）。
         // e2e 借此用备用端口启动，避免与运行中的桌面应用抢占 3000。
         let server_config = tianyan_server::ServerConfig::from_env();
-        match start_server(server_config, config.clone()).await {
+        match start_server_with_plugins(server_config, config.clone(), plugin_factory()).await {
             Ok(()) => {
                 // 服务器正常关停：检查是否有待处理的数据目录搬迁
                 if tianyan_server::migration::handle_pending_migration(&config)

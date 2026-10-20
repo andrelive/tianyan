@@ -9253,6 +9253,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tianyan-app"
+version = "0.7.0"
+dependencies = [
+ "tianyan-core",
+ "tianyan-server",
+ "tianyan-tools-fs",
+ "tokio",
+]
+
+[[package]]
 name = "tianyan-core"
 version = "0.7.0"
 dependencies = [
@@ -9369,6 +9379,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tianyan-core",
  "tianyan-server",
+ "tianyan-tools-fs",
  "tokio",
  "tracing",
  "tracing-subscriber",

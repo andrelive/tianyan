@@ -138,3 +138,12 @@ pub fn tools(ctx: &ToolContext) -> Vec<std::sync::Arc<dyn DynamicToolExecutor>> 
         std::sync::Arc::new(ListDirTool::new(ctx.clone())),
     ]
 }
+
+/// 插件清单工厂（`ToolPluginFactory` 的等价物；各 bin / 桌面端共用）。
+///
+/// **单一事实源**：装配端只写 `Box::new(tianyan_tools_fs::plugin_factory())`，
+/// 不各自列举工具——新增工具只改本 crate，装配端零改动。
+pub fn plugin_factory() -> impl FnOnce(&ToolContext) -> Vec<std::sync::Arc<dyn DynamicToolExecutor>>
+{
+    tools
+}

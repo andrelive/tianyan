@@ -328,6 +328,35 @@ const ALLOWED_ORIGINS: [HeaderValue; 6] = [
 pub async fn create_app(
     config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
+    create_app_inner(config, None).await
+}
+
+/// 插件工具工厂（ADR-049 期 1：**装配清单住在 bin**）。
+///
+/// server 库**不认识任何具体插件类型**——只认 core 的 `ToolContext` 契约与
+/// `DynamicToolExecutor` trait。类型擦除是刻意的：若 server 库 `use` 了插件
+/// crate，改一行工具就会重编 server 库（13.4K 源码），闸门 A 直接失效。
+pub type ToolPluginFactory = Box<
+    dyn FnOnce(&tianyan::agent::ToolContext) -> Vec<Arc<dyn tianyan::agent::DynamicToolExecutor>>
+        + Send,
+>;
+
+/// 带插件清单的应用构造（bin / 桌面端用；测试与嵌入式仍走 [`create_app`]）。
+///
+/// 装配顺序：Agent 先就绪（内部注册表持有 `ToolContext`）→ 取 ctx → 工厂构造
+/// 插件工具 → `register_dynamic_tools` 注入（追加到动态工具末尾，内置顺序不动）。
+pub async fn create_app_with_plugins(
+    config: tianyan::config::TianyanConfig,
+    plugin_factory: ToolPluginFactory,
+) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
+    create_app_inner(config, Some(plugin_factory)).await
+}
+
+/// 应用装配主体（`plugin_factory` 为 `Some` 时在 agent 就绪后注入插件工具）。
+async fn create_app_inner(
+    config: tianyan::config::TianyanConfig,
+    plugin_factory: Option<ToolPluginFactory>,
+) -> tianyan::common::error::Result<(Router, Arc<AppState>)> {
     // 创建全系统共享的 SqliteDb（ADR-005：单文件、单连接）
     // - backend = "sqlite" 时：VFS 内容存储（vfs_entries 表）
     // - 始终：UsageStats 统计（skill_calls / doc_access 等表）
@@ -363,6 +392,21 @@ pub async fn create_app(
 
     // Create shared application state（传入 VFS + 共享 SqliteDb）
     let state = AppState::new(config, vfs, database).await?;
+
+    // 插件工具注入（ADR-049 期 1）：agent 就绪 → 取 ctx → 工厂构造 → 注册。
+    // 失败语义：ctx 不可得时静默跳过（插件是可选增强，不是启动硬依赖）。
+    if let Some(factory) = plugin_factory {
+        let agent = state.agent().await;
+        if let Some(ctx) = agent.tool_context().await {
+            let tools = factory(&ctx);
+            if !tools.is_empty() {
+                info!(count = tools.len(), "插件工具已注册");
+                agent.register_dynamic_tools(tools).await;
+            }
+        } else {
+            info!("agent 未暴露工具上下文，插件工具跳过");
+        }
+    }
 
     info!("Application state initialized successfully");
     let state = Arc::new(state);
@@ -422,16 +466,35 @@ pub async fn start_server(
     config: ServerConfig,
     tianyan_config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<()> {
+    let listener = bind_listener(&config).await?;
+    start_server_with_listener(listener, tianyan_config).await
+}
+
+/// 带插件清单的启动（**bin / 桌面端用**；ADR-049 期 1：装配清单住 bin）。
+///
+/// 与 [`start_server`] 唯一区别是多一个插件工厂——server 库只依赖
+/// [`ToolPluginFactory`]（类型擦除），不认识任何具体插件 crate。
+pub async fn start_server_with_plugins(
+    config: ServerConfig,
+    tianyan_config: tianyan::config::TianyanConfig,
+    plugin_factory: ToolPluginFactory,
+) -> tianyan::common::error::Result<()> {
+    let listener = bind_listener(&config).await?;
+    start_server_inner(listener, tianyan_config, None, Some(plugin_factory)).await
+}
+
+/// 绑定监听 socket（各启动入口共用；错误文案单点）。
+async fn bind_listener(
+    config: &ServerConfig,
+) -> tianyan::common::error::Result<tokio::net::TcpListener> {
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
         .map_err(|e| tianyan::TianyanError::config(format!("无效地址: {}", e)))?;
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+    tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
         error!("Failed to bind to address {}: {}", addr, e);
         tianyan::TianyanError::Custom(format!("网络错误：Failed to bind to address: {}", e))
-    })?;
-
-    start_server_with_listener(listener, tianyan_config).await
+    })
 }
 
 /// 使用调用方已绑定的 listener 启动服务器。
@@ -443,7 +506,7 @@ pub async fn start_server_with_listener(
     listener: tokio::net::TcpListener,
     tianyan_config: tianyan::config::TianyanConfig,
 ) -> tianyan::common::error::Result<()> {
-    start_server_inner(listener, tianyan_config, None).await
+    start_server_inner(listener, tianyan_config, None, None).await
 }
 
 /// 使用调用方已绑定的 listener + 外部关闭信号启动服务器。
@@ -456,7 +519,23 @@ pub async fn start_server_with_shutdown_signal(
     tianyan_config: tianyan::config::TianyanConfig,
     shutdown_signal: watch::Receiver<bool>,
 ) -> tianyan::common::error::Result<()> {
-    start_server_inner(listener, tianyan_config, Some(shutdown_signal)).await
+    start_server_inner(listener, tianyan_config, Some(shutdown_signal), None).await
+}
+
+/// 桌面端：listener + 外部关闭信号 + 插件清单。
+pub async fn start_server_with_shutdown_signal_and_plugins(
+    listener: tokio::net::TcpListener,
+    tianyan_config: tianyan::config::TianyanConfig,
+    shutdown_signal: watch::Receiver<bool>,
+    plugin_factory: ToolPluginFactory,
+) -> tianyan::common::error::Result<()> {
+    start_server_inner(
+        listener,
+        tianyan_config,
+        Some(shutdown_signal),
+        Some(plugin_factory),
+    )
+    .await
 }
 
 /// 服务器主体：装配应用 → 监听 → 优雅关停。
@@ -467,9 +546,10 @@ async fn start_server_inner(
     listener: tokio::net::TcpListener,
     tianyan_config: tianyan::config::TianyanConfig,
     external_shutdown: Option<watch::Receiver<bool>>,
+    plugin_factory: Option<ToolPluginFactory>,
 ) -> tianyan::common::error::Result<()> {
     let has_providers = tianyan_config.models.providers.iter().any(|p| p.enabled);
-    let (app, state) = create_app(tianyan_config).await?;
+    let (app, state) = create_app_inner(tianyan_config, plugin_factory).await?;
     let task_scheduler: Option<Arc<TaskScheduler>> = if has_providers {
         // last_run 持久化（ADR-024）：宕机错过的事件任务重启后自动补跑
         let app_config = Arc::new(state.config().read().await.clone());

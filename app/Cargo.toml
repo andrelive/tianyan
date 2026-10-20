@@ -1,0 +1,23 @@
+[package]
+name = "tianyan-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "天演装配器（bin）：唯一 use 具体插件类型的地方（ADR-049 期 1）"
+
+[[bin]]
+name = "tianyan-server"
+path = "src/main.rs"
+
+[dependencies]
+tianyan = { path = "../core", package = "tianyan-core" }
+tianyan-server = { path = "../server" }
+# 插件清单：**只在本包出现**——server 库因此不依赖插件 crate，
+# 改一行工具只重编插件 + 本 bin（闸门 A 前提）
+tianyan-tools-fs = { path = "../plugins/tools-fs" }
+tokio.workspace = true
+
+[lints]
+workspace = true
