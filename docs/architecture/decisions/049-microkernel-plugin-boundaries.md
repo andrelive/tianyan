@@ -222,6 +222,25 @@ rollback 4 / builder 4）是机制级（`kill_all_running_children` / `Action` /
 apply_edit / apply_patch / glob / list_dir 六个工具一起走），并在同一刀里拆分 `actions.rs`
 （read/write 与命令执行混在一个文件）。这是期 1 剩余工作的主体。
 
+**实施记录（期 1 第三刀：实现搬移撞上的边界，2026-10-20）**：尝试把 `executor/fs.rs` 与
+`executor/actions.rs`（read/write 实现）整体搬进插件，**撞到一条真实边界并回退**（未留残留改动）。
+
+边界不是技术难度，而是**服务层复用**：`server/src/api/workspace/services.rs` 直接
+`use tianyan::executor::execute_read_file` 做工作区文件预览——读取实现是**工具与 HTTP 服务共用的
+设施**，不是工具专有；而 `read_file` 的目录模式又委托 `execute_list_dir`（唯一目录列举实现），
+于是 fs 域实现与 server 强绑定。
+
+**修正后的期 1 结论**：
+- **可搬（已完成）**：工具的定义、参数校验、安全门控、审批、错误包装、结果序列化 —— 全部在
+  `plugins/tools-fs`。改这些只重编插件（实测 512 行 / 3.38s）。
+- **本期不可搬**：`read`/`write` 与 `fs` 的**执行实现**——它们同时服务工具与 HTTP API，属"共享
+  设施"。要搬走必须先给 server 一条独立于工具实现的读取路径（新契约），那是期 3
+  （kernel-impl / 适配器分离）的活。
+
+因此闸门 A 的准确表述是「**改工具行为（定义/门控/包装）→ 只重编插件**」；改共享设施
+（读取 / 列举算法）仍全量。原判据"改一行工具 ≤3.5K"里的"一行工具"应落到前一类，后一类待期 3
+重新测量。
+
 ---
 
 ## 分期与闸门
